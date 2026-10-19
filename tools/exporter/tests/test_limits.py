@@ -81,7 +81,7 @@ class TestRequiredLimitsSelection:
         ]
 
     def test_it_refuses_a_negative_demand(self) -> None:
-        with pytest.raises(LimitsError, match="負"):
+        with pytest.raises(LimitsError, match="negative"):
             required_limits(-1)
 
 
@@ -236,7 +236,7 @@ class TestStateSlotDemand:
             "b": {"dtype": "f32", "shape": [1, "D", 8]},
         }
 
-        with pytest.raises(LimitsError, match="複数"):
+        with pytest.raises(LimitsError, match="several"):
             state_bindings(states, self._CONFIG, "where")
 
     def test_a_numeric_only_graph_needs_no_binding(self) -> None:

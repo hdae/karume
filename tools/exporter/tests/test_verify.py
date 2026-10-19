@@ -70,34 +70,34 @@ class TestFormatAndVersion:
 
     def test_unknown_top_level_key_is_rejected(self):
         """未リリースにつき前方互換チャネルは持たない — 未知キーは黙って無視しない。"""
-        with pytest.raises(IrError, match="未知のキー"):
+        with pytest.raises(IrError, match="unknown key"):
             parse(metadata={})
 
     def test_missing_top_level_key_is_rejected(self):
         graph = base_graph()
         del graph["symbols"]
 
-        with pytest.raises(IrError, match="必須キー"):
+        with pytest.raises(IrError, match="required key"):
             parse_ir_graph(json.dumps(graph))
 
 
 class TestRequiredOps:
     def test_undeclared_op_is_rejected(self):
-        with pytest.raises(IrError, match="宣言漏れ"):
+        with pytest.raises(IrError, match="undeclared"):
             parse(requires={"ops": []})
 
     def test_surplus_declaration_is_rejected(self):
-        with pytest.raises(IrError, match="余剰"):
+        with pytest.raises(IrError, match="surplus"):
             parse(requires={"ops": ["add", "mul"]})
 
     def test_duplicate_declaration_is_rejected(self):
-        with pytest.raises(IrError, match="重複"):
+        with pytest.raises(IrError, match="is duplicated"):
             parse(requires={"ops": ["add", "add"]})
 
 
 class TestSymbols:
     def test_symbol_absent_from_the_declaration_is_rejected(self):
-        with pytest.raises(IrError, match=re.escape("graph.symbols で宣言されていない")):
+        with pytest.raises(IrError, match=re.escape("is not declared in graph.symbols")):
             parse(
                 inputs=[{"name": "x", "dtype": "f32", "shape": ["U", 4]}],
                 values={
@@ -108,7 +108,7 @@ class TestSymbols:
 
     def test_symbol_never_appearing_in_an_input_is_rejected(self):
         """束縛は入力 shape の次元位置から取る — 値にしか現れない記号は束縛できない。"""
-        with pytest.raises(IrError, match="次元位置に現れない"):
+        with pytest.raises(IrError, match="appears in no dimension position"):
             parse(
                 inputs=[{"name": "x", "dtype": "f32", "shape": [8, 4]}],
                 values={
@@ -130,11 +130,11 @@ class TestSymbols:
         assert graph.symbols == ["T"]
 
     def test_symbol_name_outside_the_grammar_is_rejected(self):
-        with pytest.raises(IrError, match="シンボル名"):
+        with pytest.raises(IrError, match="symbol name"):
             parse(symbols=["2T"])
 
     def test_non_canonical_dim_spelling_is_rejected(self):
-        with pytest.raises(IrError, match="正準文法"):
+        with pytest.raises(IrError, match="canonical grammar"):
             parse(
                 inputs=[{"name": "x", "dtype": "f32", "shape": ["T", 4]}],
                 values={
@@ -144,7 +144,7 @@ class TestSymbols:
             )
 
     def test_negative_dimension_is_rejected(self):
-        with pytest.raises(IrError, match="非負整数でない"):
+        with pytest.raises(IrError, match="is not a non-negative integer"):
             parse(
                 values={
                     "w": {"dtype": "f32", "shape": [-4]},
@@ -155,7 +155,7 @@ class TestSymbols:
 
 class TestSsaAndTopologicalOrder:
     def test_double_definition_is_rejected(self):
-        with pytest.raises(IrError, match="SSA 単一代入違反"):
+        with pytest.raises(IrError, match="violates SSA single assignment"):
             parse(
                 nodes=[
                     {"op": "add", "ins": ["x", "w"], "outs": ["y"], "attrs": {}},
@@ -164,7 +164,7 @@ class TestSsaAndTopologicalOrder:
             )
 
     def test_forward_reference_is_rejected(self):
-        with pytest.raises(IrError, match="前方参照"):
+        with pytest.raises(IrError, match="forward reference"):
             parse(
                 outputs=["y", "z"],
                 values={
@@ -183,7 +183,7 @@ class TestSsaAndTopologicalOrder:
             parse(outputs=["ghost"])
 
     def test_duplicate_output_is_rejected(self):
-        with pytest.raises(IrError, match="重複"):
+        with pytest.raises(IrError, match="is duplicated"):
             parse(outputs=["y", "y"])
 
     def test_empty_outs_is_rejected_by_the_contract_layer(self):
@@ -198,13 +198,13 @@ class TestSsaAndTopologicalOrder:
             nodes=[{"op": "add", "ins": ["x", "w"], "outs": [], "attrs": {}}],
         )
 
-        with pytest.raises(OpContractError, match="出力数が 0"):
+        with pytest.raises(OpContractError, match="output count is 0"):
             assert_op_contracts(graph)
 
 
 class TestDeclarationCompleteness:
     def test_input_declared_again_in_values_is_rejected(self):
-        with pytest.raises(IrError, match="二重宣言"):
+        with pytest.raises(IrError, match="declared twice"):
             parse(
                 values={
                     "x": {"dtype": "f32", "shape": ["T", 4]},
@@ -214,7 +214,7 @@ class TestDeclarationCompleteness:
             )
 
     def test_orphan_declaration_is_rejected(self):
-        with pytest.raises(IrError, match="どのノードでも定義されない"):
+        with pytest.raises(IrError, match="a declaration no node defines"):
             parse(
                 values={
                     "w": {"dtype": "f32", "shape": [4]},
@@ -224,11 +224,11 @@ class TestDeclarationCompleteness:
             )
 
     def test_node_output_without_a_declaration_is_rejected(self):
-        with pytest.raises(IrError, match="ノード出力"):
+        with pytest.raises(IrError, match="node output"):
             parse(values={"w": {"dtype": "f32", "shape": [4]}})
 
     def test_initializer_without_a_declaration_is_rejected(self):
-        with pytest.raises(IrError, match="values に dtype/shape 宣言が無い"):
+        with pytest.raises(IrError, match="no dtype/shape declaration in values"):
             parse(
                 initializers={
                     "w": {"tensor": "enc.w", "storage": {"dtype": "f32"}},
@@ -278,11 +278,11 @@ class TestDeclarationCompleteness:
         if (semantic, storage) == ("f32", "f16"):
             assert build().initializers["w"].storage.dtype == "f16"
             return
-        with pytest.raises(IrError, match="は組めない"):
+        with pytest.raises(IrError, match="cannot pair with"):
             build()
 
     def test_bool_initializer_is_rejected(self):
-        with pytest.raises(IrError, match="語彙外"):
+        with pytest.raises(IrError, match="is outside the vocabulary"):
             parse(
                 requires={"ops": ["bitwise_not"]},
                 inputs=[{"name": "x", "dtype": "bool", "shape": ["T", 4]}],
@@ -297,7 +297,7 @@ class TestDeclarationCompleteness:
 
     def test_symbolic_initializer_shape_is_rejected(self):
         """束縛前に確定していない initializer は safetensors 側 shape と突合できない。"""
-        with pytest.raises(IrError, match="記号次元は使えない"):
+        with pytest.raises(IrError, match="cannot use a symbolic dimension"):
             parse(
                 values={
                     "w": {"dtype": "f32", "shape": ["T"]},
@@ -314,7 +314,7 @@ class TestEmptyDeclarationNames:
     """
 
     def test_an_empty_value_name_is_rejected(self):
-        with pytest.raises(IrError, match=r"graph\.values の値名"):
+        with pytest.raises(IrError, match=r"value name of graph\.values"):
             parse(
                 values={
                     "": {"dtype": "f32", "shape": [1]},
@@ -324,7 +324,7 @@ class TestEmptyDeclarationNames:
             )
 
     def test_an_empty_initializer_name_is_rejected(self):
-        with pytest.raises(IrError, match=r"graph\.initializers の initializer 名"):
+        with pytest.raises(IrError, match=r"initializer name of graph\.initializers"):
             parse(
                 initializers={
                     "w": {"tensor": "enc.w", "storage": {"dtype": "f32"}},
@@ -340,7 +340,7 @@ class TestEmptyDeclarationNames:
         参照されているので鳴らない — 空名の門が無いと、参照不能な実テンソル 1 本が
         `karume verify` 緑のまま配布形に居座る。
         """
-        with pytest.raises(IrError, match="空でない文字列でない"):
+        with pytest.raises(IrError, match="is not a non-empty string"):
             parse(
                 initializers={
                     "w": {"tensor": "enc.w", "storage": {"dtype": "f32"}},
@@ -356,7 +356,7 @@ class TestEmptyDeclarationNames:
 
 class TestStorageDescriptor:
     def test_scale_on_a_non_quantized_storage_is_rejected(self):
-        with pytest.raises(IrError, match="scale / group_size は付けられない"):
+        with pytest.raises(IrError, match="cannot have scale / group_size"):
             parse(
                 initializers={
                     "w": {"tensor": "enc.w", "storage": {"dtype": "f32", "scale": "enc.s"}}
@@ -364,7 +364,7 @@ class TestStorageDescriptor:
             )
 
     def test_group_size_on_a_non_quantized_storage_is_rejected(self):
-        with pytest.raises(IrError, match="scale / group_size は付けられない"):
+        with pytest.raises(IrError, match="cannot have scale / group_size"):
             parse(
                 initializers={
                     "w": {"tensor": "enc.w", "storage": {"dtype": "bf16", "group_size": 32}}
@@ -372,7 +372,7 @@ class TestStorageDescriptor:
             )
 
     def test_non_positive_group_size_is_rejected(self):
-        with pytest.raises(IrError, match="正整数でない"):
+        with pytest.raises(IrError, match="is not a positive integer"):
             parse(
                 initializers={
                     "w": {
@@ -384,7 +384,7 @@ class TestStorageDescriptor:
 
     def test_group_size_beyond_the_safe_integer_range_is_rejected(self):
         """TS 側は JSON の数値を JS の number として読むので 2^53 以上は整数で持てない。"""
-        with pytest.raises(IrError, match="安全整数"):
+        with pytest.raises(IrError, match="safe integer"):
             parse(
                 initializers={
                     "w": {
@@ -401,11 +401,11 @@ class TestStorageDescriptor:
         既定 1.0 で補完すると、書き忘れが「全チャネル 1.0 で dequant した重み」に化けて
         ロードも実行も通ってしまう（差は O(scale) なのにどこにも例外が出ない）。
         """
-        with pytest.raises(IrError, match="scale（scale テンソルのキー）が要る"):
+        with pytest.raises(IrError, match=r"requires scale \(the scale tensor's key\)"):
             parse(initializers={"w": {"tensor": "enc.w", "storage": {"dtype": "i8"}}})
 
     def test_unknown_storage_key_is_rejected(self):
-        with pytest.raises(IrError, match="未知のキー"):
+        with pytest.raises(IrError, match="unknown key"):
             parse(
                 initializers={
                     "w": {"tensor": "enc.w", "storage": {"dtype": "f32", "zero_point": 1}}
@@ -413,7 +413,7 @@ class TestStorageDescriptor:
             )
 
     def test_unknown_storage_dtype_is_rejected(self):
-        with pytest.raises(IrError, match="語彙外"):
+        with pytest.raises(IrError, match="is outside the vocabulary"):
             parse(initializers={"w": {"tensor": "enc.w", "storage": {"dtype": "i1"}}})
 
 
@@ -441,20 +441,20 @@ class TestGroupQuantizedStorage:
         assert graph.initializers["w"].storage.scale == "enc.s"
 
     def test_a_missing_group_size_is_rejected(self):
-        with pytest.raises(IrError, match="group_size が要る"):
+        with pytest.raises(IrError, match="requires group_size"):
             parse(**self._i4({"dtype": "i4", "scale": "enc.s"}))
 
     def test_a_missing_scale_is_rejected(self):
-        with pytest.raises(IrError, match="scale（scale テンソルのキー）が要る"):
+        with pytest.raises(IrError, match=r"requires scale \(the scale tensor's key\)"):
             parse(**self._i4({"dtype": "i4", "group_size": 32}))
 
     @pytest.mark.parametrize("group_size", [24, 8], ids=["not-a-power-of-two", "below-16"])
     def test_a_group_size_outside_the_accepted_set_is_rejected(self, group_size):
-        with pytest.raises(IrError, match="2 冪かつ 16 以上でない"):
+        with pytest.raises(IrError, match="is not a power of 2 that is 16 or more"):
             parse(**self._i4({"dtype": "i4", "scale": "enc.s", "group_size": group_size}))
 
     def test_a_quantization_axis_that_the_group_size_does_not_divide_is_rejected(self):
-        with pytest.raises(IrError, match="割り切れない"):
+        with pytest.raises(IrError, match="is not divisible"):
             parse(**self._i4({"dtype": "i4", "scale": "enc.s", "group_size": 32}, last_dim=48))
 
     def test_a_shared_declaration_is_accepted_without_a_group_size(self):
@@ -569,7 +569,9 @@ class TestStateSlots:
         誰も参照しないスロットは GenerationContext が確保だけして誰も読まない容量
         （KV なら数十 MiB 単位）が黙って残る。
         """
-        with pytest.raises(IrError, match=re.escape("graph.states['orphan']: どのノードからも")):
+        with pytest.raises(
+            IrError, match=re.escape("graph.states['orphan']: a declaration no node references")
+        ):
             parse(
                 **declared_states(
                     {
@@ -582,46 +584,49 @@ class TestStateSlots:
 
     def test_the_reserved_f16_storage_is_rejected_as_unsupported(self):
         """f16 は席の予約だけ（ADR 0066 追記 5）— 「語彙外」ではなく「未対応」で落とす。"""
-        with pytest.raises(IrError, match="は未対応"):
+        with pytest.raises(IrError, match="is not supported"):
             parse(states={"cache": {"dtype": "f16", "shape": [4]}})
 
     @pytest.mark.parametrize("dtype", ["i32", "bool", "bf16", "i8", "f64"])
     def test_other_dtypes_are_outside_the_vocabulary(self, dtype):
-        with pytest.raises(IrError, match=re.escape("は語彙外（f32）")):
+        with pytest.raises(IrError, match=re.escape("is outside the vocabulary (f32)")):
             parse(states={"cache": {"dtype": dtype, "shape": [4]}})
 
     @pytest.mark.parametrize("shape", [[1, 1, 1, 1, 1], []])
     def test_rank_outside_one_to_four_is_rejected(self, shape):
-        with pytest.raises(IrError, match=re.escape("は 1..4 の外")):
+        with pytest.raises(IrError, match=re.escape("is outside 1..4")):
             parse(states={"cache": {"dtype": "f32", "shape": shape}})
 
     def test_zero_capacity_is_rejected(self):
         """容量込みの具体形なので数値次元は正整数（`values` の非負とは違う）。"""
-        with pytest.raises(IrError, match="正整数でない"):
+        with pytest.raises(IrError, match="is not a positive integer"):
             parse(states={"cache": {"dtype": "f32", "shape": [1, 0, 4]}})
 
     def test_negative_dimension_is_rejected(self):
-        with pytest.raises(IrError, match="非負整数でない"):
+        with pytest.raises(IrError, match="is not a non-negative integer"):
             parse(states={"cache": {"dtype": "f32", "shape": [-4]}})
 
     def test_undeclared_symbol_is_rejected(self):
-        with pytest.raises(IrError, match=re.escape("graph.symbols で宣言されていない")):
+        with pytest.raises(IrError, match=re.escape("is not declared in graph.symbols")):
             parse(states={"cache": {"dtype": "f32", "shape": ["S", 4]}})
 
     def test_non_canonical_dim_spelling_is_rejected(self):
-        with pytest.raises(IrError, match="正準文法"):
+        with pytest.raises(IrError, match="canonical grammar"):
             parse(states={"cache": {"dtype": "f32", "shape": ["1T", 4]}})
 
     @pytest.mark.parametrize(
         ("states", "message"),
         [
-            ([], "graph.states: オブジェクトでない"),
-            ({"cache": 4}, "graph.states['cache']: オブジェクトでない"),
-            ({"cache": {"dtype": "f32", "shape": 4}}, "shape: 配列でない"),
-            ({"cache": {"shape": [4]}}, "必須キー 'dtype' が無い"),
-            ({"cache": {"dtype": "f32", "shape": [4], "window": 512}}, "未知のキー 'window'"),
+            ([], "graph.states: is not an object"),
+            ({"cache": 4}, "graph.states['cache']: is not an object"),
+            ({"cache": {"dtype": "f32", "shape": 4}}, "shape: is not an array"),
+            ({"cache": {"shape": [4]}}, "required key 'dtype' is missing"),
+            ({"cache": {"dtype": "f32", "shape": [4], "window": 512}}, "unknown key 'window'"),
             # 空のスロット名は参照側の欄（ADR 0067）が受理しない = 参照できない宣言になる。
-            ({"": {"dtype": "f32", "shape": [4]}}, "スロット名: 空でない文字列でない"),
+            (
+                {"": {"dtype": "f32", "shape": [4]}},
+                "slot name of graph.states: is not a non-empty string",
+            ),
         ],
     )
     def test_malformed_sections_are_rejected(self, states, message):
@@ -633,7 +638,9 @@ class TestStateSlots:
         """スロット名は値名前空間と別だが、同名は取り違えの検出線として拒否する
         （入力 / initializer / ノード出力の 3 役）。
         """
-        with pytest.raises(IrError, match=re.escape(f"graph.states['{name}']: 値名と同名")):
+        with pytest.raises(
+            IrError, match=re.escape(f"graph.states['{name}']: same name as a value")
+        ):
             parse(states={name: {"dtype": "f32", "shape": [4]}})
 
 
@@ -767,7 +774,9 @@ class TestNodeStates:
         nodes = [dict(node) for node in kv_graph()["nodes"]]
         nodes[0] = {**nodes[0], "states": {"k": "ghost", "v": "l0.v"}}
 
-        with pytest.raises(IrError, match=re.escape("state スロット 'ghost' が graph.states")):
+        with pytest.raises(
+            IrError, match=re.escape("state slot 'ghost' is not declared in graph.states")
+        ):
             parse_kv(nodes=nodes)
 
     def test_an_effect_op_with_outputs_is_rejected(self):
@@ -776,7 +785,7 @@ class TestNodeStates:
         nodes[1] = {**nodes[1], "outs": ["z"]}
         values = {**kv_graph()["values"], "z": {"dtype": "f32", "shape": [1, 2, 1, 16]}}
 
-        with pytest.raises(OpContractError, match="出力数が 1"):
+        with pytest.raises(OpContractError, match="output count is 1"):
             check_kv(nodes=nodes, values=values)
 
     def test_the_same_slot_in_two_fields_is_rejected(self):
@@ -784,7 +793,9 @@ class TestNodeStates:
         nodes = [dict(node) for node in kv_graph()["nodes"][:2]]
         nodes[0] = {**nodes[0], "states": {"k": "l0.k", "v": "l0.k"}}
 
-        with pytest.raises(OpContractError, match="複数の欄から参照している"):
+        with pytest.raises(
+            OpContractError, match=r"references the same slot 'l0\.k' from several fields"
+        ):
             check_kv(nodes=nodes, states={"l0.k": kv_graph()["states"]["l0.k"]})
 
     def test_a_states_form_attention_with_a_mask_is_rejected(self):
@@ -793,12 +804,12 @@ class TestNodeStates:
         nodes[0] = {**nodes[0], "ins": ["q", "k", "v", "m"]}
         inputs = [*kv_graph()["inputs"], {"name": "m", "dtype": "f32", "shape": [1, 1, 1, 64]}]
 
-        with pytest.raises(OpContractError, match="states 形は入力 3 本ちょうど"):
+        with pytest.raises(OpContractError, match="states form takes exactly 3 inputs"):
             check_kv(nodes=nodes, inputs=inputs)
 
     @pytest.mark.parametrize("window", [0, -1, 1.5, "64", True])
     def test_window_outside_the_value_range_is_rejected(self, window):
-        with pytest.raises(OpContractError, match="1 以上の整数でない"):
+        with pytest.raises(OpContractError, match="is not an integer of at least 1"):
             check_kv(nodes=kv_windows(window, window, window))
 
     @pytest.mark.parametrize("window", [8.0, 8e0, 64.0])
@@ -827,12 +838,12 @@ class TestNodeStates:
         非有限値は JSON 読み（`parse_graph_json` の非標準リテラル拒否）でも止まるので、ここは
         直接呼びで attrs 層そのものを踏む。
         """
-        with pytest.raises(OpContractError, match="1 以上の整数でない"):
+        with pytest.raises(OpContractError, match="is not an integer of at least 1"):
             state_window({"window": window}, "t")
 
     def test_window_on_a_plain_attention_is_rejected(self):
         """省略可能 attrs は states 形専用 — 従来形に書けると誰も読まない attr ができる。"""
-        with pytest.raises(OpContractError, match="states 欄を持つノードでのみ"):
+        with pytest.raises(OpContractError, match="only on a node with a states field"):
             assert_op_contracts(
                 parse_ir_graph(json.dumps(plain_attention_graph({"scale": 0.25, "window": 8})))
             )
@@ -848,14 +859,14 @@ class TestNodeStates:
         """append より後の読者は「今 step の k/v を過去として二重に読む」（決定 5b の②）。"""
         nodes = kv_graph()["nodes"]
 
-        with pytest.raises(IrError, match="より後に読者"):
+        with pytest.raises(IrError, match="is followed by reader"):
             check_kv(nodes=[nodes[1], nodes[2], nodes[0]])
 
     def test_two_appends_to_one_slot_are_rejected(self):
         """1 step に 2 回書くと ring の位置式が二重に進む（決定 5b の①）。"""
         nodes = kv_graph()["nodes"]
 
-        with pytest.raises(IrError, match=re.escape("state_append が 2 本")):
+        with pytest.raises(IrError, match=re.escape("state_append appears 2 times")):
             check_kv(nodes=[nodes[0], nodes[1], nodes[2], nodes[1]])
 
     @pytest.mark.parametrize(
@@ -868,7 +879,7 @@ class TestNodeStates:
     )
     def test_a_window_mismatch_on_one_slot_is_rejected(self, windows, why):
         """論理 col → 物理 row の写像は読み書き同式 MUST（決定 4）— 存在有無も値も一致する。"""
-        with pytest.raises(IrError, match=re.escape("attrs.window が食い違う")):
+        with pytest.raises(IrError, match=re.escape("attrs.window disagrees")):
             check_kv(nodes=kv_windows(*windows))
 
     def test_a_state_append_input_that_is_not_rank_four_is_rejected(self):
@@ -881,7 +892,7 @@ class TestNodeStates:
         nodes = [dict(node) for node in kv_graph()["nodes"]]
         nodes[1] = {**nodes[1], "ins": ["k5"]}
 
-        with pytest.raises(OpContractError, match=re.escape("[B,Hkv,M,D] の rank-4 のみ")):
+        with pytest.raises(OpContractError, match=re.escape("must be rank-4 [B,Hkv,M,D]")):
             check_kv(inputs=inputs, nodes=nodes)
 
     def test_a_zero_length_chunk_is_rejected(self):
@@ -892,26 +903,26 @@ class TestNodeStates:
             {"name": "v", "dtype": "f32", "shape": [1, 2, 0, 16]},
         ]
 
-        with pytest.raises(OpContractError, match="M が 0 の chunk"):
+        with pytest.raises(OpContractError, match="a chunk with M = 0"):
             check_kv(inputs=inputs, values={"o": {"dtype": "f32", "shape": [1, 8, 0, 16]}})
 
     def test_a_slot_that_is_not_rank_four_is_rejected(self):
         """スロットの物理形は `[B,Hkv,C,D]` 固定（ADR 0067 決定 4 の②）。"""
         slot = {"dtype": "f32", "shape": [1, 2, 64]}
 
-        with pytest.raises(OpContractError, match=re.escape("[B,Hkv,C,D] の rank-4 のみ")):
+        with pytest.raises(OpContractError, match=re.escape("must be rank-4 [B,Hkv,C,D]")):
             check_kv(states={"l0.k": slot, "l0.v": slot})
 
     def test_a_slot_whose_head_count_differs_from_the_input_is_rejected(self):
         """別の層のスロットを参照した形 — 容量が同じだと沈黙誤読になる。"""
         slot = {"dtype": "f32", "shape": [1, 4, 64, 16]}
 
-        with pytest.raises(OpContractError, match="B / Hkv / D が不一致"):
+        with pytest.raises(OpContractError, match="B / Hkv / D mismatch"):
             check_kv(states={"l0.k": slot, "l0.v": slot})
 
     def test_slots_of_different_capacity_for_k_and_v_are_rejected(self):
         """片方だけ先に wrap する ring は値が静かにずれる。"""
-        with pytest.raises(OpContractError, match="同形でない"):
+        with pytest.raises(OpContractError, match="differ in shape"):
             check_kv(
                 states={
                     "l0.k": {"dtype": "f32", "shape": [1, 2, 64, 16]},
@@ -921,7 +932,7 @@ class TestNodeStates:
 
     def test_a_window_larger_than_the_capacity_is_rejected(self):
         """ring 幅が容量を超えると、書いた行が同 step 中に自分で潰れる。"""
-        with pytest.raises(OpContractError, match="スロット容量 64 を超える"):
+        with pytest.raises(OpContractError, match="exceeds the slot capacity 64"):
             check_kv(nodes=kv_windows(65, 65, 65))
 
     def test_a_symbolic_capacity_defers_the_window_bound(self):
@@ -953,7 +964,9 @@ class TestNodeStates:
         """値 shape の解決に効くのは入力由来の束縛だけ — 現れると実行時に必ず束縛不能。"""
         slot = {"dtype": "f32", "shape": [1, 2, "C", 16]}
 
-        with pytest.raises(IrError, match=re.escape("states 専用記号 'C' が値 shape に現れる")):
+        with pytest.raises(
+            IrError, match=re.escape("states-only symbol 'C' appears in a value shape")
+        ):
             parse_kv(
                 symbols=["C"],
                 states={"l0.k": slot, "l0.v": slot},
@@ -962,16 +975,16 @@ class TestNodeStates:
 
     def test_a_symbol_bound_nowhere_is_still_rejected(self):
         """束縛点は「入力 shape ∪ states shape」— どちらにも無い記号は従来どおり落とす。"""
-        with pytest.raises(IrError, match="次元位置に現れない"):
+        with pytest.raises(IrError, match="appears in no dimension position"):
             parse_kv(symbols=["C"])
 
     @pytest.mark.parametrize(
         ("states", "message"),
         [
-            ([], "states: オブジェクトでない"),
-            ({"k": 4}, "states['k']: 空でない文字列でない"),
-            ({"k": ""}, "states['k']: 空でない文字列でない"),
-            ({"": "l0.k"}, "states のキー: 空でない文字列でない"),
+            ([], "states: is not an object"),
+            ({"k": 4}, "states['k']: is not a non-empty string"),
+            ({"k": ""}, "states['k']: is not a non-empty string"),
+            ({"": "l0.k"}, "key of graph.nodes[0].states: is not a non-empty string"),
         ],
     )
     def test_malformed_fields_are_rejected(self, states, message):
@@ -984,8 +997,11 @@ class TestNodeStates:
     @pytest.mark.parametrize(
         ("states", "message"),
         [
-            ({"k": "l0.k"}, "states 欄のキーが ['k']"),
-            ({"k": "l0.k", "v": "l0.v", "extra": "l0.k"}, "states 欄のキーが ['extra', 'k', 'v']"),
+            ({"k": "l0.k"}, "states field keys are ['k']"),
+            (
+                {"k": "l0.k", "v": "l0.v", "extra": "l0.k"},
+                "states field keys are ['extra', 'k', 'v']",
+            ),
         ],
     )
     def test_a_key_set_other_than_the_contract_is_rejected(self, states, message):
@@ -1001,7 +1017,7 @@ class TestNodeStates:
         nodes = [dict(node) for node in kv_graph()["nodes"]]
         del nodes[1]["states"]
 
-        with pytest.raises(OpContractError, match="states 欄が無い"):
+        with pytest.raises(OpContractError, match="states field is missing"):
             check_kv(nodes=nodes)
 
     def test_an_op_without_a_states_contract_is_rejected(self):
@@ -1012,7 +1028,7 @@ class TestNodeStates:
         ]
         values = {**kv_graph()["values"], "r": {"dtype": "f32", "shape": [1, 8, 1, 16]}}
 
-        with pytest.raises(OpContractError, match="states 欄を持たない"):
+        with pytest.raises(OpContractError, match="has no states field"):
             check_kv(nodes=nodes, values=values)
 
 
@@ -1056,7 +1072,7 @@ class TestIntegralFloatDimensions:
 
     @pytest.mark.parametrize("raw", ["1.5", "15e-1"])
     def test_non_integral_float_dims_are_rejected(self, raw):
-        with pytest.raises(IrError, match="数値でも文字列でもない"):
+        with pytest.raises(IrError, match="is neither a number nor a string"):
             self.parse_raw_dim(
                 raw,
                 values={
@@ -1064,12 +1080,12 @@ class TestIntegralFloatDimensions:
                     "y": {"dtype": "f32", "shape": ["T", 4]},
                 },
             )
-        with pytest.raises(IrError, match="数値でも文字列でもない"):
+        with pytest.raises(IrError, match="is neither a number nor a string"):
             self.parse_raw_dim(raw, states={"cache": {"dtype": "f32", "shape": [1, "__DIM__"]}})
 
     def test_integral_float_beyond_the_safe_range_is_rejected(self):
         """`Number.isSafeInteger` と同じ上限で落ちる（TS だけが読めない値を通さない）。"""
-        with pytest.raises(IrError, match="非負整数でない"):
+        with pytest.raises(IrError, match="is not a non-negative integer"):
             self.parse_raw_dim(
                 "1e300",
                 values={
@@ -1116,28 +1132,28 @@ class TestIntegralFloatGroupSize:
         assert isinstance(group_size, int)
 
     def test_a_non_integral_group_size_is_still_rejected(self):
-        with pytest.raises(IrError, match="正整数でない"):
+        with pytest.raises(IrError, match="is not a positive integer"):
             self.parse_raw_group_size("32.5")
 
     def test_an_integral_float_beyond_the_safe_range_is_still_rejected(self):
         """`Number.isSafeInteger` と同じ上限（TS だけが読めない値は通さない）。"""
-        with pytest.raises(IrError, match="安全整数"):
+        with pytest.raises(IrError, match="safe integer"):
             self.parse_raw_group_size("1e300")
 
 
 class TestJsonLiterals:
     @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
     def test_non_standard_literals_are_rejected(self, literal):
-        with pytest.raises(IrError, match="非標準リテラル"):
+        with pytest.raises(IrError, match="Non-standard literal"):
             parse_ir_graph('{"format":"karume-ir","version":' + literal + "}")
 
     def test_overflowing_exponent_is_rejected_at_the_value_level(self):
         """`1e999` は構文としては有効だが Infinity へ丸まる — 値で弾く。"""
-        with pytest.raises(IrError, match="有限でない"):
+        with pytest.raises(IrError, match="is not finite"):
             parse_ir_graph('{"format":"karume-ir","version":1e999}')
 
     def test_broken_json_is_reported_as_such(self):
-        with pytest.raises(IrError, match="解析できない"):
+        with pytest.raises(IrError, match="Cannot parse"):
             parse_ir_graph("{")
 
 
@@ -1172,7 +1188,7 @@ class TestRuntimeSupport:
             assert_runtime_support(graph)
 
         message = str(err.value)
-        assert "非対応 op" in message
+        assert "unsupported ops" in message
         assert "conv_transpose3d" in message and "conv_transpose2d" in message
 
     def test_an_unbatched_conv3d_graph_is_executable(self):
@@ -1232,14 +1248,14 @@ class TestRuntimeSupport:
         f32-as-f16）なので、「格納できる dtype」と「転送できる dtype」が別語彙であることは
         こちらからしか固定できない。
         """
-        with pytest.raises(IrError, match="意味論 dtype 'f16'"):
+        with pytest.raises(IrError, match="semantic dtype 'f16'"):
             parse(inputs=[{"name": "x", "dtype": "f16", "shape": ["T", 4]}])
 
     def test_an_op_that_does_not_accept_the_input_dtype_is_reported(self):
         """転送できても op が受理しない dtype はここで落ちる（軸が 2 本ある理由）。"""
         graph = parse(inputs=[{"name": "x", "dtype": "i32", "shape": ["T", 4]}])
 
-        with pytest.raises(ContainerError, match="非対応 意味論 dtype"):
+        with pytest.raises(ContainerError, match="unsupported semantic dtype"):
             assert_runtime_support(graph)
 
     def test_swapped_slots_of_a_per_slot_op_are_enumerated(self):
@@ -1265,8 +1281,8 @@ class TestRuntimeSupport:
             assert_runtime_support(graph)
 
         message = str(err.value)
-        assert "非対応 意味論 dtype (2)" in message
-        assert "値 'src': i32" in message and "値 'idx': f32" in message
+        assert "unsupported semantic dtypes (2)" in message
+        assert "value 'src': i32" in message and "value 'idx': f32" in message
 
     def test_the_output_of_a_per_slot_op_is_checked_against_the_value_slot(self):
         """出力はスロット 0（値の側）と同型 — 和で見ると gather の i32 出力が通ってしまう。"""
@@ -1281,7 +1297,7 @@ class TestRuntimeSupport:
             nodes=[{"op": "gather", "ins": ["src", "idx"], "outs": ["y"], "attrs": {}}],
         )
 
-        with pytest.raises(ContainerError, match="値 'y': i32"):
+        with pytest.raises(ContainerError, match="value 'y': i32"):
             assert_runtime_support(graph)
 
     def test_swapped_output_slots_of_a_multi_output_op_are_enumerated(self):
@@ -1307,8 +1323,8 @@ class TestRuntimeSupport:
             assert_runtime_support(graph)
 
         message = str(err.value)
-        assert "非対応 意味論 dtype (2)" in message
-        assert "値 'v': i32" in message and "値 'i': f32" in message
+        assert "unsupported semantic dtypes (2)" in message
+        assert "value 'v': i32" in message and "value 'i': f32" in message
 
     def test_bf16_storage_passes_the_capability_gate(self):
         """bf16 は f16 と同じ経路で実行できる（ADR 0131・TS 側 RUNTIME_SUPPORT.storage と同じ）。"""
@@ -1327,7 +1343,7 @@ class TestRuntimeSupport:
         )
         graph = parse(initializers={"w": {"tensor": "enc.w", "storage": {"dtype": "bf16"}}})
 
-        with pytest.raises(ContainerError, match="非対応 格納 dtype"):
+        with pytest.raises(ContainerError, match="unsupported storage dtype"):
             assert_runtime_support(graph)
 
     def test_group_size_on_a_storage_other_than_i4_is_reported(self):
@@ -1350,15 +1366,15 @@ class TestRuntimeSupport:
             assert_runtime_support(graph)
 
         message = str(err.value)
-        assert "非対応 group 量子化 (1): w" in message
-        assert "i4 のみ" in message
+        assert "unsupported group quantization (1): w" in message
+        assert "is i4 only" in message
 
     def test_unknown_attrs_on_a_known_op_are_reported(self):
         graph = parse(
             nodes=[{"op": "add", "ins": ["x", "w"], "outs": ["y"], "attrs": {"alpha": 2}}]
         )
 
-        with pytest.raises(ContainerError, match="未実装 attrs"):
+        with pytest.raises(ContainerError, match="unimplemented attrs"):
             assert_runtime_support(graph)
 
 
@@ -1366,7 +1382,7 @@ class TestOpContracts:
     def test_arity_violation_is_rejected(self):
         graph = parse(nodes=[{"op": "add", "ins": ["x"], "outs": ["y"], "attrs": {}}])
 
-        with pytest.raises(OpContractError, match="入力数が 1"):
+        with pytest.raises(OpContractError, match="input count is 1"):
             assert_op_contracts(graph)
 
     def test_multiple_outputs_are_rejected(self):
@@ -1380,7 +1396,7 @@ class TestOpContracts:
             nodes=[{"op": "add", "ins": ["x", "w"], "outs": ["y", "z"], "attrs": {}}],
         )
 
-        with pytest.raises(OpContractError, match="出力数が 2"):
+        with pytest.raises(OpContractError, match="output count is 2"):
             assert_op_contracts(graph)
 
     def _cast_graph(self, attrs: dict, out_dtype: str = "i32") -> dict:
@@ -1400,21 +1416,21 @@ class TestOpContracts:
         """宣言キーは全て必須（未知キーだけ見る検査ではここが素通りする — ADR 0012）。"""
         graph = parse(**self._cast_graph({}))
 
-        with pytest.raises(OpContractError, match="必須 attr 'to' が無い"):
+        with pytest.raises(OpContractError, match="required attr 'to' is missing"):
             assert_op_contracts(graph)
 
     @pytest.mark.parametrize("value", ["i64", "float32", 3, None])
     def test_attr_value_outside_the_contract_is_rejected(self, value):
         graph = parse(**self._cast_graph({"to": value}))
 
-        with pytest.raises(OpContractError, match="意味論 dtype でない"):
+        with pytest.raises(OpContractError, match="is not a semantic dtype"):
             assert_op_contracts(graph)
 
     def test_output_dtype_must_agree_with_the_contract(self):
         """attrs.to と values{} の宣言が食い違うグラフは受理しない。"""
         graph = parse(**self._cast_graph({"to": "bool"}, out_dtype="i32"))
 
-        with pytest.raises(OpContractError, match="契約の 'bool' と違う"):
+        with pytest.raises(OpContractError, match="differs from the contract's 'bool'"):
             assert_op_contracts(graph)
 
     def test_op_that_does_not_accept_the_input_dtype_is_rejected(self):
@@ -1425,7 +1441,7 @@ class TestOpContracts:
             nodes=[{"op": "bitwise_not", "ins": ["x"], "outs": ["y"], "attrs": {}}],
         )
 
-        with pytest.raises(OpContractError, match="'f32' を実行できない"):
+        with pytest.raises(OpContractError, match="cannot execute semantic dtype 'f32'"):
             assert_op_contracts(graph)
 
 
@@ -1463,7 +1479,7 @@ class TestSymPrefixSlice:
     def test_a_dim_outside_the_input_rank_is_rejected(self):
         graph = parse(**self._graph({"sym": "T", "slices": self._slices(0, 2)}))
 
-        with pytest.raises(IrError, match="入力 rank 2 の外"):
+        with pytest.raises(IrError, match="outside the input rank 2"):
             assert_op_contracts(graph)
 
     def test_a_symbolic_input_shape_is_rejected(self):
@@ -1488,13 +1504,13 @@ class TestSymPrefixSlice:
             ],
         )
 
-        with pytest.raises(IrError, match="記号次元がある"):
+        with pytest.raises(IrError, match="with a symbolic dimension"):
             assert_op_contracts(graph)
 
     def test_duplicate_dims_are_rejected(self):
         graph = parse(**self._graph({"sym": "T", "slices": self._slices(0, 0)}))
 
-        with pytest.raises(OpContractError, match="同じ dim が 2 度ある"):
+        with pytest.raises(OpContractError, match="has the same dim twice"):
             assert_op_contracts(graph)
 
     @pytest.mark.parametrize(
@@ -1541,7 +1557,7 @@ class TestSlotDtypes:
     def test_index_slot_rejects_f32(self):
         graph = parse(**self._gather_graph(index_dtype="f32"))
 
-        with pytest.raises(OpContractError, match="スロット 1 は"):
+        with pytest.raises(OpContractError, match="in slot 1"):
             assert_op_contracts(graph)
 
     def test_swapped_slots_are_rejected(self):
@@ -1557,13 +1573,13 @@ class TestSlotDtypes:
             nodes=[{"op": "gather", "ins": ["x", "i"], "outs": ["y"], "attrs": {}}],
         )
 
-        with pytest.raises(OpContractError, match="スロット 0 は"):
+        with pytest.raises(OpContractError, match="in slot 0"):
             assert_op_contracts(graph)
 
     def test_output_follows_the_value_slot(self):
         graph = parse(**self._gather_graph(out_dtype="i32"))
 
-        with pytest.raises(OpContractError, match="契約の 'f32' と違う"):
+        with pytest.raises(OpContractError, match="differs from the contract's 'f32'"):
             assert_op_contracts(graph)
 
     def test_uniform_ops_still_reject_mixed_dtypes(self):
@@ -1579,7 +1595,7 @@ class TestSlotDtypes:
             nodes=[{"op": "mul", "ins": ["x", "i"], "outs": ["y"], "attrs": {}}],
         )
 
-        with pytest.raises(OpContractError, match="入力 dtype が混在"):
+        with pytest.raises(OpContractError, match="input dtypes are mixed"):
             assert_op_contracts(graph)
 
 
@@ -1607,27 +1623,27 @@ class TestReaderIndexRange:
         """`[0,-1]` は積 0 でバイト長 0 と一致するので、積だけの検査では素通りする。"""
         header = {"t": {"dtype": "F32", "shape": [0, -1], "data_offsets": [0, 0]}}
 
-        with pytest.raises(ContainerError, match="非負整数"):
+        with pytest.raises(ContainerError, match="non-negative integer"):
             assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header))
 
     def test_a_dimension_beyond_the_safe_integer_range_is_rejected(self, tmp_path):
         header = {"t": {"dtype": "F32", "shape": [0, 2**53], "data_offsets": [0, 0]}}
 
-        with pytest.raises(ContainerError, match="非負整数"):
+        with pytest.raises(ContainerError, match="non-negative integer"):
             assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header))
 
     def test_an_element_count_beyond_the_safe_integer_range_is_rejected(self, tmp_path):
         """各次元は安全整数でも**積**が越える形（TS の elementCount と同じ段階で見る）。"""
         header = {"t": {"dtype": "F32", "shape": [2**27, 2**27], "data_offsets": [0, 0]}}
 
-        with pytest.raises(ContainerError, match="要素数が安全整数"):
+        with pytest.raises(ContainerError, match="element count exceeds the safe integer"):
             assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header))
 
     def test_a_data_offset_beyond_the_safe_integer_range_is_rejected(self, tmp_path):
         """サイズ不一致より前に添字の域で落ちる（TS は asIndex を先に通す）。"""
         header = {"t": {"dtype": "F32", "shape": [2], "data_offsets": [0, 2**53]}}
 
-        with pytest.raises(ContainerError, match="非負整数"):
+        with pytest.raises(ContainerError, match="non-negative integer"):
             assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header))
 
 
@@ -1646,11 +1662,11 @@ class TestReaderEntryStructure:
     @pytest.mark.parametrize(
         ("entry", "why"),
         [
-            ({"shape": [2], "data_offsets": [0, 8]}, r"\['dtype'\] が無い"),
-            ({"dtype": "F32", "data_offsets": [0, 8]}, r"\['shape'\] が無い"),
-            ({"dtype": "F32", "shape": [2]}, r"\['data_offsets'\] が無い"),
-            ("F32", "オブジェクトでない"),
-            ({"dtype": "F32", "shape": 2, "data_offsets": [0, 8]}, "shape が配列でない"),
+            ({"shape": [2], "data_offsets": [0, 8]}, r"is missing \['dtype'\]"),
+            ({"dtype": "F32", "data_offsets": [0, 8]}, r"is missing \['shape'\]"),
+            ({"dtype": "F32", "shape": [2]}, r"is missing \['data_offsets'\]"),
+            ("F32", "is not an object"),
+            ({"dtype": "F32", "shape": 2, "data_offsets": [0, 8]}, "shape is not an array"),
         ],
         ids=["no-dtype", "no-shape", "no-offsets", "not-an-object", "shape-not-a-list"],
     )
@@ -1674,7 +1690,7 @@ class TestReaderPackedFourBit:
         """資産の門は TS リーダと同じ dtype 集合 — 通すとブラウザで初めて落ちる資産が書ける。"""
         header = {"w": {"dtype": "I4", "shape": [3, 32], "data_offsets": [0, 48]}}
 
-        with pytest.raises(ContainerError, match="リーダが知らない dtype 'I4'"):
+        with pytest.raises(ContainerError, match="dtype 'I4' unknown to the reader"):
             assert_reader_layout(
                 write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 48)
             )
@@ -1691,7 +1707,7 @@ class TestReaderPackedFourBit:
         """bit 総量が byte 境界に乗らない形（末尾要素が半バイトだけ突き出す）。"""
         header = {"w": {"dtype": "I4", "shape": [3], "data_offsets": [0, 2]}}
 
-        with pytest.raises(ContainerError, match="byte 境界に乗らない"):
+        with pytest.raises(ContainerError, match="does not land on a byte boundary"):
             assert_reader_layout(
                 write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 2),
                 allow_legacy_dtypes=True,
@@ -1700,7 +1716,7 @@ class TestReaderPackedFourBit:
     def test_a_size_that_is_not_half_the_element_count_is_rejected(self, tmp_path):
         header = {"w": {"dtype": "I4", "shape": [3, 32], "data_offsets": [0, 96]}}
 
-        with pytest.raises(ContainerError, match="サイズ不一致"):
+        with pytest.raises(ContainerError, match="size mismatch"):
             assert_reader_layout(
                 write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 96),
                 allow_legacy_dtypes=True,
@@ -1713,7 +1729,7 @@ class TestReaderPackedFourBit:
             "w": {"dtype": "I4", "shape": [4], "data_offsets": [2, 4]},
         }
 
-        with pytest.raises(ContainerError, match="整列していない"):
+        with pytest.raises(ContainerError, match="is not aligned"):
             assert_reader_layout(
                 write_raw_container(tmp_path / "m.safetensors", header, b"\0" * 4),
                 allow_legacy_dtypes=True,
@@ -1734,14 +1750,14 @@ class TestHeaderLengthBound:
         path = tmp_path / "m.safetensors"
         path.write_bytes(header_length.to_bytes(8, "little") + b'{"__metadata__":{}}')
 
-        with pytest.raises(ContainerError, match="ファイル長"):
+        with pytest.raises(ContainerError, match="file length"):
             assert_reader_layout(path)
 
     def test_a_zero_header_length_is_rejected(self, tmp_path):
         path = tmp_path / "m.safetensors"
         path.write_bytes((0).to_bytes(8, "little"))
 
-        with pytest.raises(ContainerError, match="ファイル長"):
+        with pytest.raises(ContainerError, match="file length"):
             assert_reader_layout(path)
 
 
@@ -1774,7 +1790,7 @@ class TestStridedRank:
         assert_op_contracts(parse(**self._permute_graph(4)))
 
     def test_rank_beyond_the_limit_is_rejected(self):
-        with pytest.raises(OpContractError, match="strided カーネルの上限"):
+        with pytest.raises(OpContractError, match="the strided kernel limit"):
             assert_op_contracts(parse(**self._permute_graph(5)))
 
     def test_a_scalar_mask_is_rejected(self):
@@ -1792,7 +1808,7 @@ class TestStridedRank:
             ],
         )
 
-        with pytest.raises(OpContractError, match="strided カーネルの上限"):
+        with pytest.raises(OpContractError, match="the strided kernel limit"):
             assert_op_contracts(graph)
 
 
@@ -1816,5 +1832,5 @@ class TestIntegralFloatPermuteDims:
     @pytest.mark.parametrize("dims", [[0, 1.5], [True, 0], [0.0, 0]])
     def test_non_integral_bool_or_duplicate_dims_are_still_rejected(self, dims):
         """正規化は受理集合を広げない（`0.0` と `0` の重複も重複として落ちる）。"""
-        with pytest.raises(OpContractError, match="permute の dims"):
+        with pytest.raises(OpContractError, match="permute dims"):
             permute_dims({"dims": dims}, "t")

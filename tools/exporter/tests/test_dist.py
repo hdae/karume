@@ -186,7 +186,7 @@ class TestModelName:
 
     @pytest.mark.parametrize("name", ["../escape", "with space", ".hidden", "a/b", ""])
     def test_it_refuses_a_name_that_is_not_a_path_segment(self, name: str) -> None:
-        with pytest.raises(DistError, match="許可文字"):
+        with pytest.raises(DistError, match="allowed characters"):
             assert_model_name(name)
 
     def test_it_refuses_the_name_reserved_for_shared_files(self) -> None:
@@ -239,17 +239,17 @@ class TestQuantCompletion:
 
     def test_it_refuses_to_pick_a_dtype_when_the_weights_offer_a_choice(self) -> None:
         """埋めてよいのは選択肢が 1 つの席だけ — 既定を勝手に選ぶと別の格納形が黙って配られる。"""
-        with pytest.raises(DistError, match="複数あるのに指定が無い"):
+        with pytest.raises(DistError, match=r"has several dtypes .* but none is specified"):
             complete_quant_weights(self._weights, {"w8": {"weights": {}, "session": {}}})
 
     def test_it_refuses_an_unknown_weights_name(self) -> None:
-        with pytest.raises(DistError, match="未知の weights 'voice'"):
+        with pytest.raises(DistError, match="unknown weights 'voice'"):
             complete_quant_weights(
                 self._weights, {"w8": {"weights": {"voice": "i8"}, "session": {}}}
             )
 
     def test_it_refuses_a_dtype_the_weights_do_not_carry(self) -> None:
-        with pytest.raises(DistError, match="dtype 'bf16' が無い"):
+        with pytest.raises(DistError, match="has no dtype 'bf16'"):
             complete_quant_weights(
                 self._weights, {"w8": {"weights": {"front": "bf16"}, "session": {}}}
             )
@@ -298,7 +298,7 @@ class TestManifestLimits:
 
     def test_it_refuses_one_model_beyond_the_limit(self) -> None:
         models = {f"m{index}": self._model() for index in range(33)}
-        with pytest.raises(DistError, match="models が 33 件"):
+        with pytest.raises(DistError, match="models has 33 entries"):
             assert_manifest_limits(self._manifest(models))
 
     def test_it_refuses_a_pipeline_config_beyond_the_limit(self) -> None:
@@ -362,7 +362,7 @@ class TestPartDeclaration:
         out_dir, manifest = self._assemble(tmp_path)
         ref = manifest["models"]["A"]["weights"]["w"]["f16"]["container"]["parts"][0]
         self._rewrite_weights(out_dir, {"file": ref})
-        with pytest.raises(DistError, match=r"の欄が \['container'\] でない"):
+        with pytest.raises(DistError, match=r"fields are not \['container'\]"):
             verify_dist(out_dir)
 
     @pytest.mark.parametrize("parts", [[], "A/w/model.krm"])
@@ -377,7 +377,7 @@ class TestPartDeclaration:
         out_dir, manifest = self._assemble(tmp_path)
         entry = manifest["models"]["A"]["weights"]["w"]["f16"]["container"]
         self._rewrite_weights(out_dir, {"container": {**entry, "parts": parts}})
-        with pytest.raises(DistError, match="2 件以上の配列でない"):
+        with pytest.raises(DistError, match="is not an array of two or more entries"):
             verify_dist(out_dir)
 
 
@@ -457,16 +457,16 @@ class TestTheContainerEntryLimits:
     @pytest.mark.parametrize(
         ("mutate", "message"),
         [
-            ("_zero_length", "length が正整数でない"),
-            ("_oversized_descriptor", "が上限"),
-            ("_too_many_parts", "上限"),
-            ("_part0_size_off_by_one", "part 0 の size"),
-            ("_empty_part_with_a_wrong_digest", "size 0 の sha256"),
-            ("_oversized_part", "part 長の天井"),
-            ("_mixed_cross_repo", "越境参照が容器の中で混在"),
-            ("_missing_descriptor_length", "length が正整数でない"),
-            ("_missing_part_size", "size が非負整数でない"),
-            ("_part_ref_is_not_an_object", "オブジェクトでない"),
+            ("_zero_length", "length is not a positive integer"),
+            ("_oversized_descriptor", "is over the limit"),
+            ("_too_many_parts", "limit"),
+            ("_part0_size_off_by_one", r"size \d+ of part 0"),
+            ("_empty_part_with_a_wrong_digest", "the sha256 of size 0"),
+            ("_oversized_part", "the part length ceiling"),
+            ("_mixed_cross_repo", "cross-repository references are mixed within the container"),
+            ("_missing_descriptor_length", "length is not a positive integer"),
+            ("_missing_part_size", "size is not a non-negative integer"),
+            ("_part_ref_is_not_an_object", "is not an object"),
         ],
     )
     def test_a_rule_break_fails_loudly(self, tmp_path: Path, mutate: str, message: str) -> None:
@@ -533,12 +533,15 @@ class TestTheManifestFieldsVerifyDistReads:
     @pytest.mark.parametrize(
         ("mutate", "message"),
         [
-            ("_missing_quants", r"A\.quants がオブジェクトでない"),
-            ("_missing_weights", r"A\.weights がオブジェクトでない"),
-            ("_dtype_entry_is_a_string", r"A\.weights\.w\.f16 がオブジェクトでない"),
-            ("_missing_default_quant", r"A\.defaultQuant 'None' が quants"),
-            ("_missing_quant_weights", r"A\.quants\.f16\.weights がオブジェクトでない"),
-            ("_asset_without_a_path", r"models\.A\.assets\.tokenizer\.path が非空の文字列でない"),
+            ("_missing_quants", r"A\.quants is not an object"),
+            ("_missing_weights", r"A\.weights is not an object"),
+            ("_dtype_entry_is_a_string", r"A\.weights\.w\.f16 is not an object"),
+            ("_missing_default_quant", r"A\.defaultQuant 'None' is not in quants"),
+            ("_missing_quant_weights", r"A\.quants\.f16\.weights is not an object"),
+            (
+                "_asset_without_a_path",
+                r"models\.A\.assets\.tokenizer\.path is not a non-empty string",
+            ),
         ],
     )
     def test_a_missing_or_mistyped_field_fails_as_a_dist_error(
@@ -582,7 +585,7 @@ class TestDtypeLabelVocabulary:
         """席名を dtype ラベルへ持ち込む綴り（`w4`）は fail loudly — 許可語彙を文言に出す。"""
         out_dir = self._distribution(tmp_path, "w4")
 
-        with pytest.raises(DistError, match="dtype ラベル 'w4'") as error:
+        with pytest.raises(DistError, match="dtype label 'w4'") as error:
             verify_dist(out_dir)
         assert "'i4'" in str(error.value)
 
@@ -621,7 +624,7 @@ class TestPlanGates:
             for index in range(33)
         ]
         out_dir = tmp_path / "models" / "too-many"
-        with pytest.raises(DistError, match="models が 33 件"):
+        with pytest.raises(DistError, match="models has 33 entries"):
             assemble_family(plans, out_dir, "m0")
         assert not out_dir.exists()
 
@@ -640,7 +643,7 @@ class TestPlanGates:
         plans = [_synthetic_plan(tmp_path / "series", "A", "../../victim.bin", "w")]
         out_dir = tmp_path / "models" / "escape"
 
-        with pytest.raises(DistError, match="先頭ドットのセグメント"):
+        with pytest.raises(DistError, match="a segment with a leading dot"):
             assemble_family(plans, out_dir, "A")
 
         assert victim.read_bytes() == b"someone-elses-bytes"
@@ -651,7 +654,7 @@ class TestPlanGates:
         plans = [_synthetic_plan(tmp_path / "series", "../escape", "w/model.krm", "w")]
         out_dir = tmp_path / "models" / "bad-name"
 
-        with pytest.raises(DistError, match="許可文字"):
+        with pytest.raises(DistError, match="allowed characters"):
             assemble_family(plans, out_dir, "../escape")
         assert not out_dir.exists()
 
@@ -684,7 +687,7 @@ class TestPlanGates:
         )
         out_dir = tmp_path / "models" / "collided"
 
-        with pytest.raises(DistError, match="両方主張している"):
+        with pytest.raises(DistError, match="is claimed by both"):
             assemble_family([plan], out_dir, "A")
         assert not out_dir.exists()
 
@@ -745,7 +748,7 @@ class TestQuantPresentation:
         [("label", MAX_QUANT_LABEL_CHARS), ("description", MAX_QUANT_DESCRIPTION_CHARS)],
     )
     def test_it_refuses_one_character_beyond_the_limit(self, key: str, limit: int) -> None:
-        with pytest.raises(DistError, match=f"{limit} を超えた"):
+        with pytest.raises(DistError, match=f"over the limit of {limit}"):
             assert_quant_presentation("m.quants.f16", {key: "x" * (limit + 1)})
 
     def test_the_plan_gate_catches_it_before_writing_anything(self, tmp_path: Path) -> None:
@@ -779,7 +782,7 @@ class TestManifestJsonLiterals:
     @pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
     def test_it_refuses_a_non_finite_preprocessor_channel(self, bad: float) -> None:
         """`NaN` は `<= 0` が偽なので、正数検査だけでは `image_std` すらすり抜ける。"""
-        with pytest.raises(DistError, match="有限でない"):
+        with pytest.raises(DistError, match="non-finite"):
             preprocessor_channels(
                 {"image_std": [0.5, bad, 0.5]},
                 "image_std",
@@ -960,7 +963,7 @@ class TestFamilyAssembly:
             _synthetic_plan(tmp_path / "series", name, "w/model.krm", "same-bytes")
             for name in ("A", "B")
         ]
-        with pytest.raises(DistError, match="出所と食い違う"):
+        with pytest.raises(DistError, match="disagrees with the source"):
             assemble_family(plans, tmp_path / "models" / "family", "A")
 
     @pytest.mark.parametrize("names", [("A",), ("A", "B")], ids=["own-seat", "shared-seat"])
@@ -985,7 +988,10 @@ class TestFamilyAssembly:
         weights_part.write_bytes(bytes(raw))
         out_dir = tmp_path / "models" / "family"
 
-        with pytest.raises(DistError, match=rf"part {total - 1} の sha256 が descriptor の宣言と"):
+        with pytest.raises(
+            DistError,
+            match=rf"the sha256 of part {total - 1} disagrees with the descriptor's declaration",
+        ):
             assemble_family(plans, out_dir, "A")
 
         assert not out_dir.exists()
@@ -1019,7 +1025,7 @@ class TestRootFiles:
     ) -> None:
         """席は法的テキストの 2 つだけ — 直下は「宣言外ファイルの不在」の網が届かない場所。"""
         out_dir = tmp_path / "models" / "smuggled"
-        with pytest.raises(DistError, match="法的テキスト専用の席"):
+        with pytest.raises(DistError, match="entries for legal text only"):
             assemble_family(
                 [_synthetic_plan(tmp_path / "series", "A", "w/model.krm", "w")],
                 out_dir,
@@ -1152,7 +1158,7 @@ class TestAtomicReplacement:
         # 据え替え（`karume.publish`）まで巻き込むと被験体が組み立ての据え替えでなくなる。
         plans = self._versioned_plans(tmp_path / "series", "v2")
         self._fail_replace_at(monkeypatch, nth=2)
-        with pytest.raises(DistError, match="据え替え") as failure:
+        with pytest.raises(DistError, match=r"swap \(rename\) into") as failure:
             assemble_family(plans, out_dir, "A")
 
         # 原因（I/O 故障）は連鎖で残す — 据え替えの失敗と組み立ての失敗を取り違えない。
@@ -1171,7 +1177,7 @@ class TestAtomicReplacement:
 
         plans = self._versioned_plans(tmp_path / "series", "v2")
         self._fail_replace_at(monkeypatch, nth=1)
-        with pytest.raises(DistError, match="退避") as failure:
+        with pytest.raises(DistError, match=r"moving .* aside") as failure:
             assemble_family(plans, out_dir, "A")
 
         # 原因（I/O 故障）は連鎖で残す — 退避の失敗と組み立ての失敗を取り違えない。
@@ -1231,7 +1237,7 @@ class TestTheGraphNameMatchesTheWeightsKey:
         )
         out_dir = tmp_path / "models" / "named-after-the-directory"
 
-        with pytest.raises(DistError, match="容器のグラフ名"):
+        with pytest.raises(DistError, match="the container's graph names"):
             assemble_family([self._plan(series)], out_dir, "A")
         assert not out_dir.exists()
 
@@ -1262,7 +1268,9 @@ class TestTheGraphNameMatchesTheWeightsKey:
         )
         out_dir = tmp_path / "models" / "two-keys"
 
-        with pytest.raises(DistError, match=r"容器のグラフ名 \['w'\] が weights のキー 'v'"):
+        with pytest.raises(
+            DistError, match=r"the container's graph names \['w'\] differ from the weights key 'v'"
+        ):
             assemble_family([plan], out_dir, "A")
         assert not out_dir.exists()
 
@@ -1382,7 +1390,7 @@ class TestExternalComponents:
         self, tmp_path: Path, revision: str
     ) -> None:
         """ブランチ名やタグは pin にならない — 指し先が動けば size / sha256 と現物が食い違う。"""
-        with pytest.raises(DistError, match="40 桁の commit sha でない"):
+        with pytest.raises(DistError, match="is not a 40-digit commit sha"):
             self._components(tmp_path, revision=revision)
 
     def test_it_refuses_a_role_the_source_distribution_does_not_declare(
@@ -1399,7 +1407,9 @@ class TestExternalComponents:
         out_dir = tmp_path / "models" / "karume-borrower"
 
         # 綴りは展開後の part 役割（`<代表役割>#<番号>`）— 参照は part 1 本ごとに解決する。
-        with pytest.raises(DistError, match="役割 'text_encoder#1' のファイルが参照元"):
+        with pytest.raises(
+            DistError, match="The file of role 'text_encoder#1' is not in the referenced dist"
+        ):
             assemble_family(
                 [self._plan("borrower", tmp_path / "series")],
                 out_dir,
@@ -1445,7 +1455,7 @@ class TestExternalComponents:
         assemble_family([other], source, "source")
         out_dir = tmp_path / "models" / "karume-borrower"
 
-        with pytest.raises(DistError, match="自分で組むバイト列と違う"):
+        with pytest.raises(DistError, match="differs from the bytes this assembly builds"):
             assemble_family(
                 [self._plan("borrower", tmp_path / "series")],
                 out_dir,
@@ -1503,7 +1513,7 @@ class TestExternalComponents:
         series = tmp_path / "series"
         divergent = self._plan("B", series, shared="other-bytes!")
 
-        with pytest.raises(DistError, match="自分で組むバイト列と違う"):
+        with pytest.raises(DistError, match="differs from the bytes this assembly builds"):
             assemble_family(
                 [self._plan("A", series), divergent],
                 out_dir,
@@ -1568,7 +1578,9 @@ class TestExternalComponents:
             },
         )
 
-        with pytest.raises(DistError, match=r"指し先がモデル間で食い違う.*text_encoder.*'A'.*'B'"):
+        with pytest.raises(
+            DistError, match=r"reference targets disagree between models.*text_encoder.*'A'.*'B'"
+        ):
             assemble_family(
                 [self._plan("A", series), elsewhere],
                 out_dir,
@@ -1678,9 +1690,9 @@ class TestCli:
         MUST: 空欄で黙って通らない — 表を渡し忘れた呼び出しは、資産を 1 バイトも触る前に
         ここで落ちるのが唯一の検出点。
         """
-        with pytest.raises(DistError, match="--pipeline が要る") as error:
+        with pytest.raises(DistError, match="--pipeline is required") as error:
             main([])
-        assert "選択肢: " in str(error.value)
+        assert "choices: " in str(error.value)
         assert "tools/export-recipes/dist.py" in str(error.value)
 
     @pytest.mark.parametrize("name", ["siglip2", "anima", ""])
@@ -1712,12 +1724,12 @@ class TestCli:
 
     def test_it_refuses_to_assemble_without_a_series_root(self) -> None:
         """MUST: 渡されなければ落ちる — 黙って cwd 相対のどこかを系列として読まない。"""
-        with pytest.raises(DistError, match="--series が要る"):
+        with pytest.raises(DistError, match="--series is required"):
             main(["--pipeline", "solo"], pipelines=_CALLER_REGISTRY)
 
     def test_it_refuses_to_assemble_without_an_output_directory(self, tmp_path: Path) -> None:
         """`--out` の既定を作る hook を渡さない呼び出しは、資産を触る前にここで落ちる。"""
-        with pytest.raises(DistError, match="--out が要る"):
+        with pytest.raises(DistError, match="--out is required"):
             main(["--pipeline", "solo", "--series", str(tmp_path)], pipelines=_CALLER_REGISTRY)
 
     def test_a_caller_supplied_hook_decides_where_the_default_lands(self, tmp_path: Path) -> None:
@@ -1941,7 +1953,7 @@ class TestPartExpansion:
         plan = self._plan(series, ir_parts(3, mark="w"))
         (series / "model.krm").write_bytes(b"stale")
 
-        with pytest.raises(DistError, match="同居"):
+        with pytest.raises(DistError, match="exist side by side"):
             assemble_family([plan], tmp_path / "models" / "mixed", "A")
 
     def test_a_split_component_that_another_seat_also_names_fails_loudly(
@@ -1951,7 +1963,7 @@ class TestPartExpansion:
         plan = self._plan(tmp_path / "series", ir_parts(3, mark="w"))
         plan = replace(plan, assets={"table": "w"})
 
-        with pytest.raises(DistError, match="assets も指している"):
+        with pytest.raises(DistError, match="assets also point at"):
             assemble_family([plan], tmp_path / "models" / "aliased", "A")
 
 
@@ -2217,7 +2229,8 @@ class TestInputContainerVerification:
         # 落ちる層まで見る — 「ファイルが無い」ではなく**コンテナの構造検査**で落ちること
         # そのものが、この門が閉じている穴（現物は揃っているのに宣言が整合しない）の定義。
         with pytest.raises(
-            DistError, match=r"コンテナの規則を満たさない: graphDescriptor\.capabilities\.ops"
+            DistError,
+            match=r"does not satisfy the container rules: graphDescriptor\.capabilities\.ops",
         ):
             assemble_family([self._plan(tmp_path / "series")], out_dir, "A")
         assert not out_dir.exists()
@@ -2266,7 +2279,7 @@ class TestInputContainerVerification:
         """
         out_dir = tmp_path / "models" / "odd"
 
-        with pytest.raises(DistError, match="非対応 op"):
+        with pytest.raises(DistError, match="unsupported ops"):
             assemble_family([self._unknown_op_plan(tmp_path / "series")], out_dir, "A")
         assert not out_dir.exists()
 
@@ -2288,7 +2301,9 @@ class TestInputContainerVerification:
         `parts: [1 要素]` として宣言される（表・資産の役割名を weights へ渡す綴り誤りが
         全門緑で通り、利用者の `createSession` で初めて落ちる）。
         """
-        with pytest.raises(DistError, match=r"A\.weights: 役割 'w' が生成物（payload）を指す"):
+        with pytest.raises(
+            DistError, match=r"A\.weights: role 'w' points at a generated file \(payload\)"
+        ):
             ModelPlan(
                 name="A",
                 pipeline="anima/1",
@@ -2450,7 +2465,7 @@ class TestExternalPartitionedComponents:
         tampered.write_bytes(bytes(len(self._SHARDS[victim])))
         out_dir = tmp_path / "models" / "karume-borrower"
 
-        with pytest.raises(DistError, match="自分で組むバイト列と違う"):
+        with pytest.raises(DistError, match="differs from the bytes this assembly builds"):
             assemble_family(
                 [self._plan("borrower", series)],
                 out_dir,
@@ -2507,7 +2522,9 @@ class TestExternalPartitionedComponents:
             quants={"f16": {"weights": {"transformer": "f16"}, "session": {}}},
         )
 
-        with pytest.raises(DistError, match="越境参照は分割形のコンテナに掛けられない"):
+        with pytest.raises(
+            DistError, match="A cross-repository reference cannot apply to a split-form container"
+        ):
             assemble_family([borrower], out_dir, "borrower", external=self._components(source))
         assert not out_dir.exists()
 
@@ -2687,18 +2704,18 @@ class TestATrailingNewlineIsRefused:
             resolve_repo(_PER_MODEL_REPO_PIPELINE, ["m"], "owner/name\n")
 
     def test_a_model_name_with_a_trailing_newline_is_refused(self) -> None:
-        with pytest.raises(DistError, match="許可文字"):
+        with pytest.raises(DistError, match="allowed characters"):
             assert_model_name("name\n")
 
     def test_a_relative_path_with_a_trailing_newline_is_refused(self) -> None:
-        with pytest.raises(DistError, match="許可文字"):
+        with pytest.raises(DistError, match="allowed characters"):
             dist.assert_rel_path("a/b.json\n", "test")
 
     @pytest.mark.parametrize(
         ("field", "value", "message"),
         [
             ("repo", "owner/name\n", "<owner>/<name>"),
-            ("revision", "0" * 40 + "\n", "40 桁の commit sha"),
+            ("revision", "0" * 40 + "\n", "40-digit commit sha"),
         ],
     )
     def test_an_external_reference_with_a_trailing_newline_is_refused(

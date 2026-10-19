@@ -1,69 +1,80 @@
-"""配布ディレクトリの組み立て — 系列ディレクトリ群 → HF へそのまま上げられる 1 リポ形。
+"""Assembly of the distribution directory — series directories → one repository form that can be
+uploaded to HF as is.
 
-仕様の正本は、manifest `karume/5` の形が ADR 0109
-（`docs/decisions/0109-manifest-v5-container.md`）、リポ内レイアウトが ADR 0041
-（`docs/decisions/0041-manifest-v2.md`）。ここが作るのは 0041 §2 の形で
-並んだファイル群と、それを宣言する `karume.json`（`karume/5`）、そして manifest から機械導出
-したモデルカード `README.md`（ADR 0037 §3 の「そのまま HF リポとして上げられる形」）。
+The sources of truth are ADR 0109 (`docs/decisions/0109-manifest-v5-container.md`) for the shape
+of manifest `karume/5`, and ADR 0041 (`docs/decisions/0041-manifest-v2.md`) for the layout inside
+the repository. This module produces the files laid out in the shape of 0041 decision 2, the
+`karume.json` (`karume/5`) that declares them, and the model card `README.md` derived mechanically
+from the manifest (ADR 0037 §3's "a form that can be uploaded as an HF repository as is").
 
-**リポ内レイアウトは一律「モデル別サブツリー + `shared/` + 直下 `karume.json` / `README.md`」**
-（ADR 0041 §9）。単一モデルのリポも同じ規則で `<モデル名>/…` の下へ入る — 1 モデルだけ平置き
-という例外を作ると、2 個目のモデルを足した瞬間に既存 path が全部動く。
+**The layout inside the repository is uniformly "per-model subtrees + `shared/` + `karume.json` /
+`README.md` at the root"** (ADR 0041 decision 9). A single-model repository follows the same rule
+and goes under `<model name>/…` — making single-model repositories flat as an exception would move
+every existing path the moment a second model is added.
 
-**pipeline 別のディスパッチ**（`--pipeline`）と**モデル別の軸**（`--model`）。
-共有するのは「共有席を決める / 置く / sha256 を採る / 宣言と現物を突き合わせる」層だけで、
-どのファイルをどの名前で並べ何を宣言するかは pipeline ごとの表が持つ（{@link Pipeline}）。
+**Per-pipeline dispatch** (`--pipeline`) and **a per-model axis** (`--model`). What is shared is
+only the layer that "decides the shared entries / places / takes sha256 / reconciles declarations
+with files"; which files are laid out under which names and what is declared belongs to each
+pipeline's table ({@link Pipeline}).
 
-MUST: **受理集合は呼び出し側が渡す**（{@link main} の `pipelines`）— core が持つ
-{@link PIPELINES} は「core wheel だけで組める pipeline」であって全量ではない。リポ専用の
-recipe（`tools/export-recipes/<family>/`）は wheel の外にあるので、リポの dist ドライバ
-（`tools/export-recipes/dist.py`）が core の表へ合成して渡す。既定 pipeline を core が
-持たないのも同じ理由 — 表が呼び出し側で変わる以上、既定を焼くと「渡していない pipeline を
-既定で組む」形が生まれる（ADR 0065 決定 2）。
+MUST: **the accepted set is passed in by the caller** (`pipelines` of {@link main}) — core's
+{@link PIPELINES} is "the pipelines that can be built with the core wheel alone", not all of them.
+The repository-only recipes (`tools/export-recipes/<family>/`) are outside the wheel, so the
+repository's dist driver (`tools/export-recipes/dist.py`) merges them into core's table and passes
+the result. Core holds no default pipeline for the same reason — since the table changes with the
+caller, baking a default would create "building a pipeline that was not passed, by default" (ADR
+0065 decision 2).
 
-MUST: **置き場の既定も呼び出し側が渡す**（{@link main} の `default_out_dir` / `default_series`）
-— リポの `models/` や `outputs/series/` は repo topology であって汎用 exporter の知識ではない
-（ADR 0065 Consequences — 綴りは `tools/export-recipes/_shared/paths.py` が 1 箇所で持つ）。
-渡されなければ core 単体でも `--out` / `--series` を必須にして落とす（黙って cwd 相対の
-どこかへ組まない）。
+MUST: **the default locations are passed in by the caller too** (`default_out_dir` /
+`default_series` of {@link main}) — the repository's `models/` and `outputs/series/` are repo
+topology, not knowledge of a generic exporter (ADR 0065 Consequences — the spellings live in one
+place, `tools/export-recipes/_shared/paths.py`). When they are not passed, core alone requires
+`--out` / `--series` and fails without them (it does not silently build somewhere relative to the
+cwd).
 
-MUST: **manifest は手書きせず資産から導出する**（ADR 0038 Context を v2 でも維持）。`size` /
-`sha256` は組み立て後の実ファイルから streaming で採る — 数 GB を丸読みしないことと、「表と
-現物が食い違う」失敗様式を構造的に起こさないことの両方がここに掛かっている。
+MUST: **the manifest is not hand-written but derived from the assets** (ADR 0038 Context, kept in
+v2). `size` / `sha256` are taken by streaming from the actual files after assembly — both not
+reading several GB whole and making the failure mode "the table disagrees with the files"
+structurally impossible depend on this.
 
-MUST: 系列に散らばる `io.*.safetensors`（E2E の入出力フィクスチャ）は**配布に含めない**。
-出力へ入るのは pipeline ごとの出力 path 表に載ったファイルだけで、表に無いものは黙って
-混ざらない。
+MUST: the `io.*.safetensors` scattered in the series (E2E input / output fixtures) are **not part
+of the distribution**. Only files in the per-pipeline output path table go into the output; nothing
+outside the table silently mixes in.
 
-MUST: 検査（weights コンテナの全検証 / 格納 / rope 素表のバイト同一 / スタイル表・話者表の
-行数）は**配置の前**に**全モデルぶん**済ませる — 落ちるなら途中の配布形を 1 ファイルも
-残さない。組み立ては「計画（{@link ModelPlan} を組む = 検査と読み取りの全部）→ 実体化
-（{@link assemble_family}）」の 2 段で、前段は 1 バイトも書かない。
+MUST: the checks (full verification of the weights containers / storage / byte identity of the
+rope base table / row counts of the style and speaker tables) run **before placement**, **for every
+model** — if one fails, not a single file of a half-built distribution is left. Assembly has two
+steps, "plan (building {@link ModelPlan} = all checks and reads) → materialise
+({@link assemble_family})", and the first writes not a single byte.
 
-MUST: **入力コンテナは「過去に検証済み」と信頼しない** — weights が指すコンポーネントは
-{@link assert_weight_components_verified} が `karume.verify.verify_container` で丸ごと見る
-（読むのは 2 文書だけ）。組み立てが自前で読むのは格納と IR の一部（{@link ir_graph}）でしか
-ないので、ここを省くと descriptor / 束縛表の壊れた系列が family 固有の門をすり抜けて配布形に
-据わり、利用者の `createSession` で初めて落ちる。
+MUST: **input containers are not trusted as "verified in the past"** — the components weights
+point at are fully checked by {@link assert_weight_components_verified} with
+`karume.verify.verify_container` (it reads only the two documents). Assembly itself reads only the
+storage and part of the IR ({@link ir_graph}), so skipping this would let a series with a broken
+descriptor / binding table slip past the family-specific checks into the distribution, failing
+only in the user's `createSession`.
 
-配置は常に**独立したコピー**（ハードリンク禁止 — 2026-08-09 裁定・ADR 0041 追記）。系列の
-書き手は既存ファイルを truncate で上書きするため、リンク共有した配布形は系列の再 export で
-黙って中身が変わり、manifest の sha256 と現物が食い違う。配布形は系列から独立した
-自己完結スナップショットとして吐き出す。
+Placement is always **an independent copy** (no hard links — the ruling of 2026-08-09, ADR 0041
+addendum). The series writer overwrites existing files by truncating them, so a distribution
+sharing links would silently change content on a re-export of the series, and the manifest's
+sha256 would disagree with the files. The distribution is emitted as a self-contained snapshot
+independent of the series.
 
-受理集合が空の core 単体では 1 つも組めないので、使い方はリポの dist ドライバ側で綴る
-（`tools/export-recipes/dist.py` のモジュール doc）:
+Core alone, with an empty accepted set, cannot build anything, so usage is spelled out on the
+repository's dist driver side (the module doc of `tools/export-recipes/dist.py`):
 
-    uv run python dist.py --pipeline siglip2               # export-recipes ルートで
+    uv run python dist.py --pipeline siglip2               # at the export-recipes root
     uv run python dist.py --pipeline siglip2 --model so400m
     uv run python dist.py --pipeline birefnet --model lucida
 
-`--card-profile` はモデルカードの**帰属**（出所・ライセンス・引用）の選択で、選択肢が 2 つ
-以上ある pipeline では必須（{@link resolve_card_renderer}）。組み立てる資産には掛からない —
-同じ重みでも、どのファミリーとして配るかで帰属が変わる。
+`--card-profile` chooses the model card's **attribution** (provenance, licence, citation) and is
+required for pipelines with two or more choices ({@link resolve_card_renderer}). It does not
+affect the assembled assets — the same weights carry a different attribution depending on which
+family they are distributed as.
 
-`--repo` はカードの Usage 例に綴る HF リポ ID の明示の上書き口で、既定は pipeline の宣言
-（{@link resolve_repo}）。`--out` のディレクトリ名からは導かない。
+`--repo` explicitly overrides the HF repository ID spelled in the card's Usage example; the
+default is the pipeline's declaration ({@link resolve_repo}). It is not derived from the `--out`
+directory name.
 """
 
 from __future__ import annotations
@@ -87,9 +98,10 @@ from safetensors.numpy import save
 
 from karume.artifacts import ArtifactSwapError, staged_publication
 
-# 上限（part 件数・part 長の天井・descriptor 長）は import で引く — 書く側と宣言側
-# （manifest 検査）が同じ綴りを見るため。{@link verify_dist} は手元のどの配布形にも掛け
-# られる門なので、上限を知らない検査になっていると受理集合が 2 つに割れる。
+# The limits (part count, part length ceiling, descriptor length) are imported — so that the
+# writing side and the declaring side (the manifest check) see the same spelling.
+# {@link verify_dist} is a check that can be applied to any local distribution, so a check
+# unaware of the limits would split the accepted set in two.
 from karume.container import (
     HEADER_BYTES,
     MAX_DESCRIPTOR_BYTES,
@@ -106,49 +118,55 @@ from karume.limits import LimitsError, max_state_slot_bytes, required_limits
 from karume.modelcard import HF_OWNER, FileRefKey, file_ref_key
 from karume.verify import ContainerError, VerifiedContainer, assert_ir_accepted, verify_container
 
-# ---- ① 共有部: 置き場の綴り・共有席の決定・配置・ハッシュ・宣言と現物の突合 -------
+# ---- ① Shared part: location spellings, shared entries, placement, hashes, reconciliation -------
 
-#: manifest のファイル名（ADR 0041 §1 — リポジトリ直下の固定名）。
+#: File name of the manifest (ADR 0041 decision 1 — a fixed name at the repository root).
 MANIFEST_FILENAME = "karume.json"
 
-#: manifest の形式識別子（ADR 0109 決定 1 — hub は 1 形しか読まない）。`karume/5` は weights の
-#: dtype エントリが**コンテナの入口**（`{container: {descriptor, parts}}`）になった形で、
-#: `karume/4` の shard 列（`{shards, extras?}`）も `extras` の席も退役した（extras の実物 1 種
-#: `rope_base` はコンテナの資産へ移った — ADR 0109 決定 4）。
+#: Format identifier of the manifest (ADR 0109 decision 1 — the hub reads only one form).
+#: `karume/5` is the form in which the dtype entries of weights became **the container's entry
+#: point** (`{container: {descriptor, parts}}`); both the shard list of `karume/4`
+#: (`{shards, extras?}`) and the `extras` field were retired (the one kind of extras content,
+#: `rope_base`, moved into the container's assets — ADR 0109 decision 4).
 #:
-#: MUST: 旧 major は読まない（両読みは実装しない — ADR 0109 決定 1）。黙って読める形にせず
-#: major で断絶を宣言する。
+#: MUST: old majors are not read (no dual reading is implemented — ADR 0109 decision 1). Instead
+#: of quietly staying readable, the break is declared through the major.
 MANIFEST_FORMAT = "karume/5"
 
-#: モデルカードのファイル名（ADR 0037 §3 — HF が frontmatter を読む固定名）。
+#: File name of the model card (ADR 0037 §3 — the fixed name whose frontmatter HF reads).
 MODEL_CARD_FILENAME = "README.md"
 
-#: 複数モデルが**同じ相対 path・同じ sha256** で持つファイルを 1 回だけ置く席（ADR 0041 §5）。
-#: 専用の間接参照は持たず、各モデルの manifest エントリが同じ path を書くだけで共有になる。
+#: The place where a file several models hold with **the same relative path and the same sha256**
+#: is placed once (ADR 0041 decision 5). There is no dedicated indirection; sharing happens just by
+#: each model's manifest entry writing the same path.
 SHARED_DIRNAME = "shared"
 
-#: 配布形の**メタファイル**（配布形そのものの説明であって、manifest が宣言する資産ではない）。
-#: 宣言外ファイル検査はこの 2 つだけを例外にする — 例外を名前でなく相対 path で持つのは、
-#: 下位ディレクトリに紛れ込んだ同名ファイルまで見逃さないため。**在ることは要求しない**
-#: （{@link verify_dist} はモデルカードを書く**前**に走るので、無いまま通る必要がある）。
+#: **Meta files** of the distribution (a description of the distribution itself, not assets the
+#: manifest declares). The undeclared-file check exempts only these two — the exemptions are held
+#: as relative paths rather than names so that a same-named file slipped into a subdirectory is
+#: not overlooked. **Their presence is not required** ({@link verify_dist} runs **before** the
+#: model card is written, so it must pass without them).
 META_PATHS = frozenset({MANIFEST_FILENAME, MODEL_CARD_FILENAME})
 
-#: 改変告知の置き場（配布リポ直下）。容器の `provenance.notice` が指すのはこの **path 断片**で、
-#: 本文は容器に載らない（container-v1 §2.3）。
+#: Location of the modification notice (at the distribution repository's root). The container's
+#: `provenance.notice` points at this **path fragment**; the text is not in the container
+#: (container-v1 §2.3).
 NOTICE_FILENAME = "NOTICE.md"
 
-#: 上流ライセンス本文の置き場（同上）。
+#: Location of the upstream licence text (same as above).
 LICENSE_FILENAME = "LICENSE.md"
 
-#: 配布リポ直下へ置ける**法的テキスト**の席（{@link Pipeline.root_files}）。上流の重み
-#: ライセンスが再配布の条件として要求するファイル — ライセンス文そのもののコピーと、帰属 /
-#: 改変を告げる Notice の 2 つだけ。名前を集合で縛るのは、ここが「任意ファイルを直下へ
-#: 持ち込む口」ではないことを**検査で**示すため（型では法的テキストかどうかを言えない）。
-#: {@link META_PATHS} と同じく**在ることは要求しない**（要求する pipeline だけが渡す）。
+#: The **legal text** entries that may be placed at the distribution repository's root
+#: ({@link Pipeline.root_files}). Files the upstream weight licence requires as a condition of
+#: redistribution — only two: a copy of the licence text itself and a Notice stating attribution /
+#: modification. The names are restricted to a set to show **by a check** that this is not "a way
+#: to bring arbitrary files to the root" (a type cannot say whether something is legal text). Like
+#: {@link META_PATHS}, **their presence is not required** (only pipelines that need them pass
+#: them).
 LEGAL_PATHS = frozenset({LICENSE_FILENAME, NOTICE_FILENAME})
 
-#: 規模上限（ADR 0041 §7）。hub が同じ値で弾くので、**焼く側で先に落とす**
-#: （配布してから利用者の手元で初めて分かる形にしない）。
+#: Size limits (ADR 0041 decision 7). The hub rejects with the same values, so **the writing side
+#: fails first** (rather than the user finding out only after distribution).
 MAX_MODELS = 32
 MAX_WEIGHTS = 32
 MAX_ASSETS = 32
@@ -156,71 +174,83 @@ MAX_QUANTS = 32
 MAX_PIPELINE_CONFIG_BYTES = 256 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 
-#: weights の dtype ラベルの受理語彙 = runtime の**格納 dtype 語彙**。
+#: Accepted vocabulary of the dtype labels of weights = the runtime's **storage dtype vocabulary**.
 #:
-#: NOTE: 正本は codec 台帳の展開経路の語彙（TS `packages/runtime/src/format/container/codecs.ts`
-#: の `CodecLayout` 型・Python {@link karume.container.CodecEntry} の `layout`）だが、TS 側の layout
-#: の値は export された `CODEC_LEDGER` の各エントリが実行時の値として持つだけで、layout 語彙の
-#: 一覧定数も、op 契約表のような機械突合の正本ファイルも無い — ここは**人手の写し**。ただし
-#: 同じパッケージ内に IR 検証側の写し（{@link karume.verify.STORAGE_DTYPES}）があるので、
-#: そちらを包含することをテストで突き合わせる（`tests/test_dist.py` の
-#: `TestDtypeLabelVocabulary`）— 片方だけが古びる失敗様式は、その 1 本で機械化してある。
+#: NOTE: the source of truth is the decode-path vocabulary of the codec ledger (the `CodecLayout`
+#: type in TS `packages/runtime/src/format/container/codecs.ts`, `layout` of Python
+#: {@link karume.container.CodecEntry}), but on the TS side the layout values exist only as runtime
+#: values on each entry of the exported `CODEC_LEDGER`; there is neither a constant listing the
+#: layout vocabulary nor a source-of-truth file for mechanical reconciliation like the op contract
+#: table — this is **a hand-made copy**. However, the same package has the IR verifier's copy
+#: ({@link karume.verify.STORAGE_DTYPES}), and a test checks that this one contains it
+#: (`TestDtypeLabelVocabulary` in `tests/test_dist.py`) — the failure mode of only one side going
+#: stale is mechanised by that one test.
 #:
-#: 縛るのは、ラベルが「格納 dtype 語彙」であるという主張をカードが本文で述べるため
-#: （{@link karume.modelcard.quants}）。格納の正本は descriptor の `encoding.codec` で、
-#: ラベルは選択・表示の語彙（ADR 0071 決定 3）— その線引きをラベル側の受理集合で固定する。
+#: It is restricted because the card's body states that the labels are "the storage dtype
+#: vocabulary" ({@link karume.modelcard.quants}). The source of truth for storage is the
+#: descriptor's `encoding.codec`, and labels are a vocabulary for selection and display (ADR 0071
+#: decision 3) — the label's accepted set pins that line.
 STORAGE_DTYPE_LABELS = frozenset({"f32", "f16", "bf16", "i8", "i4", "i2", "i32"})
 
-#: quant の表示欄（ADR 0075 決定 1）の文字数上限。`label` は選択肢に出す短い表示名、
-#: `description` は 1 行の説明で、どちらも optional。hub は同じ値で境界検査するので
-#: （manifest は外部入力 — ADR 0075 決定 2）、他の上限と同じく**焼く側で先に落とす**。
+#: Character limits of a quant's display fields (ADR 0075 decision 1). `label` is a short display
+#: name for a choice, `description` a one-line explanation; both optional. The hub checks bounds
+#: with the same values (the manifest is external input — ADR 0075 decision 2), so like the other
+#: limits **the writing side fails first**.
 MAX_QUANT_LABEL_CHARS = 64
 MAX_QUANT_DESCRIPTION_CHARS = 200
 
-#: 表示欄の席と上限（{@link assert_quant_presentation} が引く 1 箇所）。
+#: Display fields and their limits (the one place {@link assert_quant_presentation} reads).
 QUANT_PRESENTATION_LIMITS: Mapping[str, int] = {
     "label": MAX_QUANT_LABEL_CHARS,
     "description": MAX_QUANT_DESCRIPTION_CHARS,
 }
 
-# 以下の綴りの正規表現は MUST: `.fullmatch` で引く — Python の `$` は末尾の改行の直前でも
-# 一致するので、`.match` だと `'owner/name\n'` を受理する。hub（JS の `$`）は拒否するので、
-# 受理集合が hub とずれて「組み立ては緑なのに hub が開けない」manifest になる。
+# The spelling regexes below MUST be applied with `.fullmatch` — Python's `$` also matches just
+# before a trailing newline, so `.match` would accept `'owner/name\n'`. The hub (JS `$`) rejects
+# it, so the accepted set would drift from the hub's, giving a manifest that "assembles green but
+# the hub cannot open".
 
-#: 越境コンポーネント参照（ADR 0038 §7 の optional `repo` / `revision` 席）の revision の綴り
-#: — HF の**完全な commit sha**（40 桁 hex 小文字）。ブランチ名やタグは指し先が動くので
-#: pin にならない（{@link ExternalComponents}）。
+#: Spelling of the revision of a cross-repository component reference (the optional `repo` /
+#: `revision` fields of ADR 0038 §7) — HF's **full commit sha** (40 lowercase hex digits). Branch
+#: names and tags move their target, so they are not a pin ({@link ExternalComponents}).
 REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 
-#: 同・参照先リポの綴り（`<owner>/<name>` — 各セグメントは hub の `REPO_SEGMENT_RE` と同じ
-#: 許可リスト）。MUST: 先頭ドットのセグメント（`.` / `..` を含む）を拒否する — hub は repo の
-#: `/` を percent-encode しないので traversal を拒否しており、通すと hub が開けない
-#: manifest になる。
+#: Likewise, the spelling of the target repository (`<owner>/<name>` — each segment has the same
+#: allow-list as the hub's `REPO_SEGMENT_RE`). MUST: segments with a leading dot (including `.` /
+#: `..`) are rejected — the hub does not percent-encode the `/` of a repo and therefore rejects
+#: traversal; letting it through would give a manifest the hub cannot open.
 REPO_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*/[A-Za-z0-9_-][A-Za-z0-9._-]*$")
 
-#: 越境参照のファイル参照が持つ欄（3 点セット + 出所 2 席）。
+#: Fields of the file reference of a cross-repository reference (the 3-field set + 2 source
+#: fields).
 EXTERNAL_REF_KEYS = frozenset({"repo", "revision", "path", "size", "sha256"})
 
-#: モデル名の許可文字。モデル名は manifest のキーであると同時に**リポ内のディレクトリ名**
-#: なので、hub の path セグメント検査（ADR 0041 §6）と同じ集合に縛る。
+#: Allowed characters of a model name. A model name is both a manifest key and **a directory name
+#: inside the repository**, so it is restricted to the same set as the hub's path segment check
+#: (ADR 0041 decision 6).
 MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")
 
-#: モデルサブツリー内の相対 path の 1 セグメント（hub の `SEGMENT_RE` の鏡像 — ADR 0041 §6）。
+#: One segment of a relative path inside a model subtree (the mirror of the hub's `SEGMENT_RE` —
+#: ADR 0041 decision 6).
 PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
-#: sha256 の読み出し単位。数 GB を丸読みしないための唯一の要件で、値自体は素の I/O 単位。
+#: Read unit for sha256. Its only requirement is not reading several GB whole; the value itself is
+#: a plain I/O unit.
 _CHUNK_BYTES = 1 << 20
 
 
 class DistError(ValueError):
-    """組み立ての前提が破れた（資産の欠落・rope 素表の不一致・manifest と現物の食い違い）。"""
+    """An assembly precondition was broken (missing assets, rope base table mismatch, manifest
+    disagreeing with the files)."""
 
 
 def component_parts(path: Path) -> tuple[Path, ...]:
-    """コンポーネントの代表 path → 実在する part 列（連番が無ければ代表 path 自身の 1 要素）。
+    """A component's representative path → the existing parts (without numbering, the single
+    element of the representative path itself).
 
-    連番規約（container-v1 §8）の失敗を組み立ての語彙へ翻訳するだけの薄い層。組み立て側の
-    入口はここ 1 箇所で、格納の門も IR の読みも計画の展開も同じ列を見る。
+    A thin layer that only translates failures of the numbering convention (container-v1 §8) into
+    assembly vocabulary. This is the one entry point on the assembly side; the storage check, the
+    IR read and the plan expansion all see the same list.
     """
     try:
         return container_parts(path)
@@ -229,39 +259,44 @@ def component_parts(path: Path) -> tuple[Path, ...]:
 
 
 def assert_component_present(path: Path) -> None:
-    """コンポーネントの現物（part 列）が在ることを落とす。
+    """Fail unless the component's files (its parts) exist.
 
-    綴りを 1 箇所に持つのは、不在の診断が「代表 path」で出続けるようにするため — 分割の
-    有無で診断のファイル名が変わると、系列を焼き直す側が何を探せばよいか分からなくなる。
+    The spelling lives in one place so that the diagnostic for absence keeps naming "the
+    representative path" — if the file name in the diagnostic changed with splitting, whoever
+    rebuilds the series would not know what to look for.
     """
     if not all(part.is_file() for part in component_parts(path)):
-        raise DistError(f"組み立ての入力が無い: {path}")
+        raise DistError(f"Assembly input is missing: {path}")
 
 
 def _container_of(path: Path) -> VerifiedContainer:
-    """コンポーネントを開いて合流まで通す（{@link karume.verify.verify_container} の薄い翻訳）。
+    """Open a component and take it through the merge (a thin translation of
+    {@link karume.verify.verify_container}).
 
-    NOTE: path 単位の覚書は**置かない** — 系列ディレクトリは据え替えで書き換わる可変な場所
-    （モジュール doc）なので、プロセス寿命の写しは「同じ path の別の現物」を黙って返す。
-    同じ需要計算の中で 2 度開いていた経路は、開いた結果を引き回す形で畳んである
-    （{@link component_demand_bytes}）。
+    NOTE: **no** per-path memo — series directories are mutable places rewritten by swaps (module
+    doc), so a process-lifetime copy would silently return "other files at the same path". The
+    path that opened a container twice within one demand computation was folded into passing the
+    opened result along ({@link component_demand_bytes}).
     """
     assert_component_present(path)
     try:
         return verify_container(component_parts(path))
     except (ContainerError, ContainerFormatError) as cause:
-        raise DistError(f"{path}: コンテナとして読めない: {cause}") from cause
+        raise DistError(f"{path}: cannot be read as a container: {cause}") from cause
 
 
 def storage_dtypes(path: Path) -> set[str]:
-    """コンポーネントが実際に使っている**格納の語彙**（codec の展開経路 — 束縛表の和）。
+    """**The storage vocabulary** a component actually uses (codec decode paths — the union over
+    the binding table).
 
-    語彙は codec 台帳の `layout`（`f32` / `f16` / `bf16` / `i32` / `i8` / `i4` / `i2`）で、
-    safetensors 方言の dtype 名（`F16` / `I4`）は退役した。和で見るのは、混成の資産は 1 本の
-    容器に複数の codec が同居するため（`i4` 系列の scale は f32・重みは i4）。
+    The vocabulary is the codec ledger's `layout` (`f32` / `f16` / `bf16` / `i32` / `i8` / `i4` /
+    `i2`); the safetensors-dialect dtype names (`F16` / `I4`) were retired. The union is taken
+    because mixed assets put several codecs in one container (in an `i4` series the scales are f32
+    and the weights i4).
 
-    MUST: 正本は**束縛表**（descriptor の `encoding.codec`）であって dtype ラベルではない
-    （ADR 0071 決定 3 の「ラベルは格納を主張しない」— ラベルは選択と表示の語彙）。
+    MUST: the source of truth is **the binding table** (the descriptor's `encoding.codec`), not
+    the dtype label (ADR 0071 decision 3's "a label does not claim the storage" — labels are a
+    vocabulary for selection and display).
     """
     verified = _container_of(path)
     found: set[str] = set()
@@ -270,18 +305,19 @@ def storage_dtypes(path: Path) -> set[str]:
             entry = codec_entry(supply.encoding.codec)
             found.add(entry.layout)
             if supply.scale is not None:
-                # companion scale は f32 固定（container-v1 §6.1）— 混成の資産が「f32 を含む」
-                # ことの根拠はここなので、束縛表から明示的に足す。
+                # companion scales are fixed to f32 (container-v1 §6.1) — this is the basis for
+                # mixed assets "containing f32", so it is added explicitly from the binding table.
                 found.add("f32")
     return found
 
 
 def assert_storage(role: str, path: Path, requirements: Mapping[str, str]) -> None:
-    """役割が要求する格納が束縛表に存在することを検査する（無関係な役割は素通し）。
+    """Check that the storage a role requires exists in the binding table (unrelated roles pass
+    through).
 
-    要求表を引数で受けるのは、役割名が pipeline 間で衝突するため（Anima の `text_encoder` は
-    f16 を要求し、SBV2 の `text_encoder` は i8 を要求する）。1 つの表に混ぜると、どちらかの
-    要求が黙って他方に掛かる。
+    The requirement table is an argument because role names collide across pipelines (Anima's
+    `text_encoder` requires f16, SBV2's `text_encoder` requires i8). Mixing them into one table
+    would silently apply one requirement to the other.
     """
     required = requirements.get(role)
     if required is None:
@@ -289,23 +325,28 @@ def assert_storage(role: str, path: Path, requirements: Mapping[str, str]) -> No
     found = storage_dtypes(path)
     if required not in found:
         raise DistError(
-            f"{role}: {path} の格納に {required} が無い（実際: {sorted(found)}）。"
-            "系列を焼いたときの --dtype を確認する（f16 系列は --dtype f16 の fake-quant が必要）"
+            f"{role}: storage of {path} has no {required} (actual: {sorted(found)})."
+            " Check the --dtype the series was built with (an f16 series needs the fake-quant of"
+            " --dtype f16)"
         )
 
 
 def assert_storage_absent(role: str, path: Path, forbidden: Mapping[str, tuple[str, ...]]) -> None:
-    """役割が**持ってはならない**格納が束縛表に無いことを検査する（無関係な役割は素通し）。
+    """Check that storage a role **must not have** is absent from the binding table (unrelated
+    roles pass through).
 
-    {@link assert_storage} の存在検査だけでは **f32 席に圧縮系列の資産を挿し込む取り違えが
-    素通りする** — 圧縮系列の容器は適格外の重み（bias / norm / グラフ定数・量子化の scale も）
-    を f32 で持つので、「f32 を含む」は f16 / i8 資産でも真になる。片方向の存在検査を両側から
-    挟んで初めて「系列 × 格納」が集合として一意に決まる（ADR 0027 / 0029 の検出限界 —
-    **系列 root の取り違えは数値網では原理的に検出できない**ので、ここが唯一の検出器）。
+    The presence check of {@link assert_storage} alone **lets through the mix-up of plugging a
+    compressed series' asset into an f32 entry** — the container of a compressed series holds its
+    ineligible weights (biases / norms / graph constants, quantization scales too) as f32, so
+    "contains f32" is true for f16 / i8 assets as well. Only by bracketing the one-way presence
+    check from both sides is "series × storage" determined uniquely as a set (the detection limit
+    of ADR 0027 / 0029 — **a mixed-up series root cannot in principle be detected by the numeric
+    checks**, so this is the only detector).
 
-    MUST: 禁止は**役割ごとに集合**で持つ（1 つだけだと圧縮系列が 2 本以上あるときに、名指し
-    しなかったほうが黙って素通りする）。逆向き（圧縮席に f32 資産）は {@link assert_storage}
-    が要求の不在で落とすので、禁止表は素の席にだけ要る。
+    MUST: the prohibition is held **as a set per role** (with just one, when there are two or more
+    compressed series, the one not named would silently pass through). The reverse (an f32 asset in
+    a compressed entry) fails in {@link assert_storage} through the missing requirement, so the
+    prohibition table is needed only for the plain entries.
     """
     banned = forbidden.get(role)
     if not banned:
@@ -314,15 +355,16 @@ def assert_storage_absent(role: str, path: Path, forbidden: Mapping[str, tuple[s
     intruders = [dtype for dtype in banned if dtype in found]
     if intruders:
         raise DistError(
-            f"{role}: {path} の格納に {' / '.join(intruders)} がある"
-            f"（実際: {sorted(found)}）。"
-            f"素の f32 系列を指すべき席に圧縮系列の資産が混ざっている"
-            "（系列 root の取り違え — 数値の門では検出できないのでここで落とす）"
+            f"{role}: storage of {path} has {' / '.join(intruders)}"
+            f" (actual: {sorted(found)})."
+            f" An asset of a compressed series is mixed into an entry that should point at the"
+            f" plain f32 series"
+            " (a mixed-up series root — the numeric checks cannot detect it, so it fails here)"
         )
 
 
 def sha256_file(path: Path) -> str:
-    """ファイルの sha256（小文字 hex 64 桁）を streaming で採る。"""
+    """Take a file's sha256 (64 lowercase hex digits) by streaming."""
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         while chunk := stream.read(_CHUNK_BYTES):
@@ -331,27 +373,30 @@ def sha256_file(path: Path) -> str:
 
 
 def place_file(source: Path, dest: Path) -> None:
-    """`source` を `dest` へ**独立したコピー**として置く。
+    """Place `source` at `dest` as **an independent copy**.
 
-    MUST: ハードリンクは使わない — 系列の書き手（`emit` の `open("wb")`）は既存ファイルを
-    truncate で上書きするため、リンクで置いた配布形は系列の再 export で黙って書き換わり、
-    manifest の sha256 と現物が食い違う（verify_dist は sha256 を採り直さないので沈黙する）。
+    MUST: no hard links — the series writer (`open("wb")` of `emit`) overwrites existing files by
+    truncating them, so a distribution placed by link would be silently rewritten by a re-export of
+    the series, and the manifest's sha256 would disagree with the files (verify_dist does not take
+    the sha256 again, so it stays silent).
     """
     if not source.is_file():
-        raise DistError(f"組み立ての入力が無い: {source}")
+        raise DistError(f"Assembly input is missing: {source}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, dest)
 
 
 @dataclass(frozen=True)
 class Artifact:
-    """配布形へ入る 1 ファイル。`rel_path` は**モデルサブツリー内**の相対 path。
+    """One file going into the distribution. `rel_path` is a relative path **inside the model
+    subtree**.
 
-    出所は 2 通りだけ: 系列からの**配置**（`source`）と、組み立てが作る**生成物**（`payload`
-    — `.npy` / ckpt から移した表など）。どちらか一方だけを持つ。生成物をバイト列で持つのは、
-    「置く前に中身が確定している」ことを共有判定（{@link assemble_family}）と同じ規律で
-    扱えるようにするため。生成物を据えられるのは `assets` の席だけで、weights が
-    指す役割は配置に限る（{@link ModelPlan.__post_init__}）。
+    There are only two origins: **placement** from the series (`source`) and a **generated file**
+    the assembly produces (`payload` — tables moved from `.npy` / ckpt and the like). Exactly one
+    of the two is held. A generated file is held as bytes so that "its content is fixed before
+    placement" can be handled with the same discipline as the sharing decision
+    ({@link assemble_family}). Generated files can only go into `assets` entries; roles weights
+    point at are limited to placement ({@link ModelPlan.__post_init__}).
     """
 
     rel_path: str
@@ -360,47 +405,51 @@ class Artifact:
 
     def __post_init__(self) -> None:
         if (self.source is None) == (self.payload is None):
-            raise DistError(f"{self.rel_path}: Artifact は source / payload のどちらか一方を持つ")
+            raise DistError(
+                f"{self.rel_path}: an Artifact must hold exactly one of source / payload"
+            )
 
 
 def materialize(artifact: Artifact, dest: Path) -> None:
-    """`Artifact` の実体を `dest` に作る（配置 or 書き出し）。"""
+    """Create the content of an `Artifact` at `dest` (placement or write)."""
     if artifact.source is not None:
         place_file(artifact.source, dest)
         return
-    assert artifact.payload is not None  # __post_init__ の不変条件
+    assert artifact.payload is not None  # invariant of __post_init__
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(artifact.payload)
 
 
 def table_payload(key: str, table: np.ndarray) -> bytes:
-    """1 テンソルだけの safetensors のバイト列（`.npy` / ckpt から移した表の配布形）。"""
+    """Bytes of a safetensors file with a single tensor (the distribution form of a table moved
+    from `.npy` / ckpt)."""
     return save({key: table})
 
 
 def ir_graph(path: Path, verified: VerifiedContainer | None = None) -> Mapping[str, Any]:
-    """コンテナのグラフ記述から **IR v2 のグラフ JSON** を読む（part 0 だけ読む）。
+    """Read **the IR v2 graph JSON** from a container's graph descriptor (reads only part 0).
 
-    `karume/5` の容器は 1 コンテナ 1 グラフ（ADR 0109 決定 2）なので、`graphs` の唯一の値を
-    返す。IR v1 との差は 4 点（docs/ir-v2.md）で、呼び手に効くのは **initializer 名が
-    テンソルキーへ改名されている**ことと `storage` が束縛表へ出ていることの 2 つ。
+    A `karume/5` container has one graph per container (ADR 0109 decision 2), so the only value of
+    `graphs` is returned. IR v2 differs from v1 in 4 points (docs/ir-v2.md); the two that matter to
+    callers are that **initializer names are renamed to tensor keys** and that `storage` moved out
+    to the binding table.
 
-    `verified` を渡すとその容器をそのまま使う（開き直さない）— 同じ需要計算の中で合流結果と
-    グラフ文書の両方を使う呼び手（{@link component_demand_bytes}）が 2 度開かないための席。
+    Passing `verified` uses that container as is (it is not reopened) — the option for callers
+    that use both the merge result and the graph document within one demand computation
+    ({@link component_demand_bytes}) so they do not open it twice.
     """
     graphs = (verified if verified is not None else _container_of(path)).read.graph.graphs
     if len(graphs) != 1:
-        raise DistError(
-            f"{path}: グラフが {len(graphs)} 本ある（`karume/5` は 1 コンテナ 1 グラフ）"
-        )
+        raise DistError(f"{path}: has {len(graphs)} graphs (`karume/5` is one graph per container)")
     return next(iter(graphs.values()))
 
 
 def graph_inputs(graph: Mapping[str, Any], path: Path) -> dict[str, list[Any]]:
-    """グラフ入力の `{名前: 形}`（並びの検査は呼び出し側 — ここは引くための表）。"""
+    """`{name: shape}` of the graph inputs (checking the order is the caller's job — this is a
+    lookup table)."""
     inputs = graph.get("inputs")
     if not isinstance(inputs, list):
-        raise DistError(f"{path}: IR メタデータに inputs が無い")
+        raise DistError(f"{path}: IR metadata has no inputs")
     return {
         item["name"]: item["shape"]
         for item in inputs
@@ -409,59 +458,65 @@ def graph_inputs(graph: Mapping[str, Any], path: Path) -> dict[str, list[Any]]:
 
 
 def preprocessor_int(raw: Mapping[str, Any], key: str, where: str) -> int:
-    """前処理 config の整数フィールド（寸法）を検査して読む。
+    """Check and read an integer field (a dimension) of a preprocessing config.
 
-    HF の `preprocessor_config.json` を読む recipe（SigLIP2 / Depth Anything V2）で共有する —
-    値域は TS 側の各 `config.ts` と同じで、独立に動く写しを増やすと片方だけ緩む。モデル固有の
-    知識を 1 つも持たない読み手なので core 側に置く（境界跨ぎに private 名を使わない）。
+    Shared by the recipes that read HF's `preprocessor_config.json` (SigLIP2 / Depth Anything V2)
+    — the value range matches each TS-side `config.ts`, and adding copies that move independently
+    would let one of them loosen. A reader with not a single piece of model-specific knowledge, so
+    it lives in core (no private names across the boundary).
     """
     value = raw.get(key)
-    # bool は int の派生。`"height": true` を 1 として通すと寸法の突合が緩む。
+    # bool is a subclass of int. Letting `"height": true` through as 1 would loosen the dimension
+    # reconciliation.
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise DistError(f"{where} の {key} が正の整数でない（{value!r}）")
+        raise DistError(f"{where}: {key} is not a positive integer ({value!r})")
     return value
 
 
 def preprocessor_channels(
     raw: Mapping[str, Any], key: str, where: str, *, channels: int, positive: bool
 ) -> list[float]:
-    """`image_mean` / `image_std` を検査して読む（TS 側 `config.ts` と同じ値域）。
+    """Check and read `image_mean` / `image_std` (the same value range as the TS-side
+    `config.ts`).
 
-    `std` に 0 を通さないのは、0 除算が例外を出さずに `±Infinity` の `pixel_values` を作るため。
-    チャネル数は**呼び出し側の recipe が持つ定数**を受ける（読み手だけを共有し、各 recipe の
-    宣言はそれぞれの席に残す）。
+    0 is not allowed in `std` because division by 0 would produce `pixel_values` of `±Infinity`
+    without raising. The channel count is **a constant held by the calling recipe** (only the
+    reader is shared; each recipe's declaration stays in its own place).
 
-    有限性を別に見るのは、この値が `pipelineConfig` 経由で `karume.json` に載るため。上流の
-    config を読むのは Python の `json.loads` で、これは `NaN` / `Infinity` を**既定で受理する**
-    — 素通しすると標準 JSON に無いリテラルが manifest に焼かれ、ブラウザの `JSON.parse` が
-    落ちる（{@link manifest_text} と対）。`NaN` は `<= 0` が偽なので正数検査もすり抜ける。
+    Finiteness is checked separately because this value goes into `karume.json` through
+    `pipelineConfig`. The upstream config is read with Python's `json.loads`, which **accepts
+    `NaN` / `Infinity` by default** — letting them through would bake literals that are not
+    standard JSON into the manifest, and the browser's `JSON.parse` would fail (the counterpart of
+    {@link manifest_text}). `NaN` also slips past the positivity check, since `<= 0` is false.
     """
     value = raw.get(key)
     if not isinstance(value, list) or len(value) != channels:
-        raise DistError(f"{where} の {key} が長さ {channels} の配列でない（{value!r}）")
+        raise DistError(f"{where}: {key} is not an array of length {channels} ({value!r})")
     channels_out: list[float] = []
     for entry in value:
         if not isinstance(entry, int | float) or isinstance(entry, bool):
-            raise DistError(f"{where} の {key} に数でない要素がある（{value!r}）")
+            raise DistError(f"{where}: {key} has a non-numeric element ({value!r})")
         if not math.isfinite(entry):
-            raise DistError(f"{where} の {key} に有限でない要素がある（{value!r}）")
+            raise DistError(f"{where}: {key} has a non-finite element ({value!r})")
         if positive and entry <= 0:
-            raise DistError(f"{where} の {key} に正でない要素がある（{value!r}）")
+            raise DistError(f"{where}: {key} has a non-positive element ({value!r})")
         channels_out.append(float(entry))
     return channels_out
 
 
 @dataclass(frozen=True)
 class WeightFiles:
-    """weights の 1 dtype ぶん（`karume/5` の `{container}`）。中身は**役割名**。
+    """One dtype of weights (`{container}` of `karume/5`). The content is **a role name**.
 
-    実 path は {@link Artifact} 側が持つ — 共有の畳み込みで path が `shared/…` へ動くので、
-    宣言側が path を直に握っていると 2 箇所が独立に動く。
+    The actual path belongs to {@link Artifact} — folding into `shared/` moves the path to
+    `shared/…`, so if the declaring side held the path directly, the two places would move
+    independently.
 
-    席が 1 つだけなのは、コンテナが**部品の役割 1 つ**に対応するため（ADR 0109 決定 2）。
-    `karume/4` の `extras` は退役し、実物 1 種（`rope_base`）はコンテナの資産へ移った
-    （ADR 0109 決定 4）。ここが指すのはコンテナの**代表 1 役**で、実際に何本の part として
-    宣言されるかは {@link expand_weight_parts} が組み立て時に現物から解決する。
+    There is only one field because a container corresponds to **one component role** (ADR 0109
+    decision 2). The `extras` of `karume/4` were retired, and their one kind of content
+    (`rope_base`) moved into the container's assets (ADR 0109 decision 4). This points at the
+    container's **one representative role**; how many parts are actually declared is resolved from
+    the files at assembly time by {@link expand_weight_parts}.
     """
 
     file: str
@@ -469,72 +524,84 @@ class WeightFiles:
 
 @dataclass(frozen=True)
 class ModelPlan:
-    """1 モデルぶんの組み立て計画 — **検査と読み取りを全部済ませた**、まだ 1 バイトも書いて
-    いない状態。ファミリー組み立てはこれを N 本受け取ってから初めて配置に入る。
+    """The assembly plan for one model — **every check and read done**, not a single byte written
+    yet. Family assembly starts placement only after receiving N of these.
     """
 
     name: str
-    #: パイプライン契約（`anima/1` — ADR 0041 §2 でモデル単位になった）。
+    #: Pipeline contract (`anima/1` — made per model by ADR 0041 decision 2).
     pipeline: str
-    #: 役割名 → 配布形へ入る 1 ファイル。
+    #: Role name → one file going into the distribution.
     artifacts: Mapping[str, Artifact]
-    #: weights 名 → dtype ラベル → ファイル群（役割名で指す）。
+    #: weights name → dtype label → files (pointed at by role name).
     weights: Mapping[str, Mapping[str, WeightFiles]]
-    #: assets 名 → 役割名（quant 選択に依存しない無条件ファイル）。
+    #: assets name → role name (unconditional files that do not depend on the quant choice).
     assets: Mapping[str, str]
     quants: Mapping[str, Any]
     default_quant: str
     pipeline_config: Mapping[str, Any]
 
     def __post_init__(self) -> None:
-        """weights の席が指す役割は**系列からの配置**（`source`）だけ MUST。
+        """Roles pointed at by weights entries MUST be **placements from the series** (`source`)
+        only.
 
-        生成物（`payload`）はコンテナではないので、weights に据わると
-        {@link expand_weight_parts} の part 解決も {@link bake_required_limits} の需要も
-        {@link assert_weight_components_verified} の全検証も掛からないまま
-        `parts: [1 要素]` として宣言される（表・sidecar の役割名を weights へ渡す綴り誤りが
-        全門緑で通り、利用者の `createSession` で初めて落ちる）。計画の受け口で落とす。
+        A generated file (`payload`) is not a container, so if it went into weights it would be
+        declared as `parts: [1 element]` without the part resolution of
+        {@link expand_weight_parts}, the demand of {@link bake_required_limits} or the full
+        verification of {@link assert_weight_components_verified} (a misspelling that passes the
+        role name of a table / sidecar to weights would pass every check green and fail only in
+        the user's `createSession`). It fails at the plan's entry point.
         """
         for labels in self.weights.values():
             for files in labels.values():
-                # 役割そのものの欠落は展開が役割名を綴って落とす（{@link expand_weight_parts}）。
+                # A missing role itself fails in the expansion, which spells out the role name
+                # ({@link expand_weight_parts}).
                 artifact = self.artifacts.get(files.file)
                 if artifact is not None and artifact.source is None:
                     raise DistError(
-                        f"{self.name}.weights: 役割 '{files.file}' が生成物（payload）を指す"
-                        f"（{artifact.rel_path}）— weights は系列からの配置（source）だけ"
+                        f"{self.name}.weights: role '{files.file}' points at a generated file"
+                        f" (payload) ({artifact.rel_path}) — weights take only placements from"
+                        " the series (source)"
                     )
 
 
 class PartitionedPlan(NamedTuple):
-    """{@link expand_weight_parts} の出力 — part 展開済みの計画と、その振り分け表。"""
+    """The output of {@link expand_weight_parts} — the plan with parts expanded, and the table
+    that assigns them."""
 
     plan: ModelPlan
-    #: weights の代表役割名 → **順序付き**の part 役割名（part 0 から。単一形なら 1 要素）。
+    #: Representative role name of weights → **ordered** part role names (from part 0; one element
+    #: for the single form).
     parts: Mapping[str, tuple[str, ...]]
 
 
-#: 展開で作る part 役割名の綴り（`<代表役割>#<1 始まりの番号>`）。役割名は manifest に出ない
-#: 内部キーなので、`#` は「recipe が書いた役割名」と衝突しないための区切りでしかない。
+#: Spelling of the part role names the expansion creates (`<representative role>#<1-based
+#: number>`). Role names are internal keys that do not appear in the manifest, so `#` is only a
+#: separator that cannot collide with "role names a recipe wrote".
 PART_ROLE_SEPARATOR = "#"
 
 
 def expand_weight_parts(plan: ModelPlan) -> PartitionedPlan:
-    """weights の役割が**分割形のコンテナ**を指しているとき、part ごとの役割へ展開する。
+    """When a weights role points at **a container in split form**, expand it into per-part
+    roles.
 
-    MUST: part の本数は**現物から**解決する（{@link component_parts}）— 何本に割れるかは
-    書いたバイト数で決まるので、pipeline の表にも recipe の定数にも書けない。表に書かせると
-    「再 export で本数が変わったのに宣言は前回のまま」という、形も型も合う沈黙誤宣言が作れる。
+    MUST: the number of parts is resolved **from the files** ({@link component_parts}) — how many
+    parts there are depends on the bytes written, so it cannot be written in a pipeline's table or
+    a recipe's constant. Having a table hold it would allow a silent wrong declaration with
+    matching shape and type: "a re-export changed the count but the declaration is the previous
+    one".
 
-    単一形（連番でない現物）は 1 要素の列として素通しする — `karume/5` の `container.parts` は
-    2 要素以上 MUST（ADR 0109 決定 3）なので、{@link _assert_manifest_shape} が名指しで落とす。
-    展開が起きた役割は代表役割を**artifacts から外し**、part 1 本ごとに `Artifact` を作る
-    （相対 path は代表 path へ同じ連番規則を掛けたもの — 系列側のファイル名と配布形の
-    ファイル名が同じ 1 本の綴りから出る）。
+    The single form (files without numbering) passes through as a one-element list — `karume/5`'s
+    `container.parts` MUST have two or more elements (ADR 0109 decision 3), so
+    {@link _assert_manifest_shape} fails it by name. For an expanded role, the representative role
+    is **removed from artifacts** and an `Artifact` is made per part (the relative path is the
+    representative path with the same numbering rule applied — the series-side file name and the
+    distribution's file name come from the same single spelling).
     """
     roles = sorted({files.file for labels in plan.weights.values() for files in labels.values()})
-    # weights 以外の席（assets）から**同じ役割**を指している綴りは、展開で役割名が消えると
-    # 宣言の側だけが行き場を失う。数は数本なので、集めて名指しで落とす。
+    # A spelling that points at **the same role** from an entry other than weights (assets) would
+    # leave just the declaring side stranded once the expansion removes the role name. There are
+    # only a few, so they are collected and failed by name.
     elsewhere = set(plan.assets.values())
     artifacts = dict(plan.artifacts)
     parts: dict[str, tuple[str, ...]] = {}
@@ -542,18 +609,18 @@ def expand_weight_parts(plan: ModelPlan) -> PartitionedPlan:
         artifact = plan.artifacts.get(role)
         if artifact is None:
             raise DistError(
-                f"{plan.name}: weights が役割 '{role}' を指しているが artifacts に無い"
-                f"（役割: {sorted(plan.artifacts)}）"
+                f"{plan.name}: weights point at role '{role}', which is not in artifacts"
+                f" (roles: {sorted(plan.artifacts)})"
             )
-        assert artifact.source is not None  # ModelPlan.__post_init__ の不変条件
+        assert artifact.source is not None  # invariant of ModelPlan.__post_init__
         sources = component_parts(artifact.source)
         if len(sources) == 1:
             parts[role] = (role,)
             continue
         if role in elsewhere:
             raise DistError(
-                f"{plan.name}: 分割形のコンテナの役割 '{role}' を assets も指している"
-                "（あちらの席は 1 ファイル参照なので、複数 part を宣言できない）"
+                f"{plan.name}: assets also point at role '{role}' of a split-form container"
+                " (that entry is a single file reference, so it cannot declare several parts)"
             )
         del artifacts[role]
         members: list[str] = []
@@ -562,8 +629,8 @@ def expand_weight_parts(plan: ModelPlan) -> PartitionedPlan:
             member = f"{role}{PART_ROLE_SEPARATOR}{index}"
             if member in artifacts:
                 raise DistError(
-                    f"{plan.name}: part 役割名 '{member}' が既存の役割と衝突する"
-                    f"（'{PART_ROLE_SEPARATOR}' を含む役割名は使えない）"
+                    f"{plan.name}: part role name '{member}' collides with an existing role"
+                    f" (role names containing '{PART_ROLE_SEPARATOR}' cannot be used)"
                 )
             artifacts[member] = Artifact(
                 numbered_name(artifact.rel_path, index, total), source=source
@@ -574,64 +641,71 @@ def expand_weight_parts(plan: ModelPlan) -> PartitionedPlan:
 
 
 def generator_tag() -> str:
-    """`generator` に焼く値（ADR 0041 §2 — 障害報告の照合用・実行意味論なし）。"""
+    """The value written into `generator` (ADR 0041 decision 2 — for matching bug reports, no
+    execution semantics)."""
     return f"karume/{importlib.metadata.version('karume')}"
 
 
 def assert_model_name(name: str) -> str:
-    """モデル名を検査して返す（manifest のキー兼リポ内ディレクトリ名）。"""
+    """Check and return a model name (a manifest key and a directory name in the repository)."""
     if not MODEL_NAME_RE.fullmatch(name):
         raise DistError(
-            f"モデル名 '{name}' は許可文字 [A-Za-z0-9._-]（先頭のドット不可）に一致しない"
-            " — モデル名はリポ内のディレクトリ名でもあるので hub の path 検査と同じ集合に縛る"
+            f"Model name '{name}' does not match the allowed characters [A-Za-z0-9._-] (no"
+            " leading dot) — a model name is also a directory name in the repository, so it is"
+            " restricted to the same set as the hub's path check"
         )
     if name == SHARED_DIRNAME:
-        raise DistError(f"モデル名に '{SHARED_DIRNAME}' は使えない（共有ファイルの席と衝突する）")
+        raise DistError(
+            f"Model name '{SHARED_DIRNAME}' cannot be used (it collides with the shared files'"
+            " location)"
+        )
     return name
 
 
 def assert_rel_path(rel_path: str, where: str) -> str:
-    """`Artifact.rel_path` がモデルサブツリーの中に収まることを検査して返す。
+    """Check and return that `Artifact.rel_path` stays inside the model subtree.
 
-    hub の `assertPath`（`packages/hub/src/manifest.ts`）と同じ**許可リスト**で見る。禁止列挙
-    （`..` を弾く）にしないのは hub と同じ理由 — 取得層はセグメントを percent-encode しても
-    ドットを透過するので、列挙の抜けがそのまま traversal になる。
+    Checked with the same **allow-list** as the hub's `assertPath` (`packages/hub/src/manifest.ts`).
+    It is not a deny-list (rejecting `..`) for the same reason as in the hub — the fetch layer
+    passes dots through even when it percent-encodes segments, so a gap in the list becomes
+    traversal as is.
 
-    組み立て側の実害は取得層より一段重い: 配置は `out_dir / f"{モデル名}/{rel_path}"` へ
-    書くので、`A/../../victim` のような形は **staging の外の既存ファイルを truncate で潰す**。
-    しかも manifest 側の root 検査（{@link _assert_manifest_shape}）は先頭セグメントしか見ず、
-    宣言外ファイル検査（{@link verify_dist}）は staging の中しか見ないので、
-    **書いた後の門は 1 つも鳴らない**。
+    The harm on the assembly side is a step worse than in the fetch layer: placement writes to
+    `out_dir / f"{model name}/{rel_path}"`, so a shape like `A/../../victim` **truncates an
+    existing file outside staging**. Moreover, the manifest-side root check
+    ({@link _assert_manifest_shape}) looks only at the first segment, and the undeclared-file check
+    ({@link verify_dist}) looks only inside staging, so **not a single check after writing fires**.
     """
     for segment in rel_path.split("/"):
         if not segment:
             raise DistError(
-                f"{where}: rel_path '{rel_path}' に空セグメントがある"
-                "（先頭 / 末尾 / 連続スラッシュ）"
+                f"{where}: rel_path '{rel_path}' has an empty segment"
+                " (leading / trailing / consecutive slashes)"
             )
         if segment.startswith("."):
             raise DistError(
-                f"{where}: rel_path '{rel_path}' に先頭ドットのセグメント '{segment}' がある"
+                f"{where}: rel_path '{rel_path}' has a segment with a leading dot '{segment}'"
             )
         if not PATH_SEGMENT_RE.fullmatch(segment):
             raise DistError(
-                f"{where}: rel_path '{rel_path}' のセグメント '{segment}' が"
-                "許可文字 [A-Za-z0-9._-] に一致しない"
+                f"{where}: rel_path '{rel_path}' has a segment '{segment}' that does not match"
+                " the allowed characters [A-Za-z0-9._-]"
             )
     return rel_path
 
 
 def assert_plan_paths(plans: Sequence[ModelPlan]) -> None:
-    """モデル名と `rel_path` の収まりを**配置の前**に落とす。
+    """Fail on model names and `rel_path`s that do not fit, **before placement**.
 
-    名前と path の検査だけが計画段の外に居たので、リポ内のプログラマ誤り（recipe の定数）が
-    そのまま staging 外への書き込みになりえた（{@link assert_rel_path}）。
+    Only the name and path checks were outside the planning step, so a programmer error in the
+    repository (a recipe's constant) could turn straight into a write outside staging
+    ({@link assert_rel_path}).
 
-    MUST: **1 つの相対 path が持てる席はモデル内でも 1 つだけ** — モデル**間**には
-    {@link _plan_shared} が同じ MUST を張っているのに、モデル**内**だけが素通しだった。
-    2 役が同じ path を主張すると後の役が先の役の実体を上書きし、manifest は両役を**後の
-    digest** で宣言する。現物と表は一致するので {@link verify_dist} は沈黙し、先の役の
-    セッションが別のグラフを読む配布形がそのまま出荷される。
+    MUST: **one relative path can hold only one entry, within a model too** — {@link _plan_shared}
+    enforces the same MUST **across** models, yet **within** a model it passed through. When two
+    roles claim the same path, the later role overwrites the earlier one's file, and the manifest
+    declares both roles with **the later digest**. Files and table agree, so {@link verify_dist}
+    stays silent, and a distribution whose earlier role's session reads another graph ships as is.
     """
     for plan in plans:
         assert_model_name(plan.name)
@@ -641,9 +715,10 @@ def assert_plan_paths(plans: Sequence[ModelPlan]) -> None:
             claimed = seats.setdefault(artifact.rel_path, role)
             if claimed != role:
                 raise DistError(
-                    f"{plan.name}: 相対 path '{artifact.rel_path}' を役割 '{claimed}' と"
-                    f" '{role}' が両方主張している（1 つの相対 path が持てる席は 1 つだけ —"
-                    "後勝ちで上書きされ、manifest は両役を後の digest で宣言する）"
+                    f"{plan.name}: relative path '{artifact.rel_path}' is claimed by both role"
+                    f" '{claimed}' and '{role}' (one relative path can hold only one entry —"
+                    " the later one overwrites, and the manifest declares both roles with the"
+                    " later digest)"
                 )
 
 
@@ -651,26 +726,30 @@ def complete_quant_weights(
     weights: Mapping[str, Mapping[str, WeightFiles]],
     quants: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """quant の `weights` 写像を**完全写像**へ埋める（hub の受理要件 — ADR 0041 §3）。
+    """Fill a quant's `weights` mapping into **a total mapping** (the hub's acceptance requirement
+    — ADR 0041 decision 3).
 
-    dtype ラベルが 1 つしかない weights は quant で選びようがないので表に書かせず、ここが
-    機械的に埋める（書かせると「選択肢の無い席」が quant の数だけ複製され、dtype を増やした
-    ときに一斉更新が要る = 導出可能な状態の二重化）。**2 つ以上あるものは表が名指ししていな
-    ければ落とす** — 既定を勝手に選ぶと、黙って別の格納形が配られる。
+    weights with only one dtype label cannot be chosen by a quant, so the table does not have to
+    write them and they are filled in mechanically here (making the table write them would
+    duplicate "an entry without a choice" once per quant and require a bulk update whenever a
+    dtype is added = duplicated derivable state). **Weights with two or more labels fail unless
+    the table names one** — picking a default on its own would silently distribute another storage
+    form.
     """
     completed: dict[str, Any] = {}
     for quant_name, quant in quants.items():
         declared = quant["weights"]
         for name in declared:
             if name not in weights:
-                raise DistError(f"quant '{quant_name}': 未知の weights '{name}'")
+                raise DistError(f"quant '{quant_name}': unknown weights '{name}'")
             if declared[name] not in weights[name]:
                 raise DistError(
-                    f"quant '{quant_name}': weights '{name}' に dtype '{declared[name]}' が無い"
-                    f"（利用可能: {sorted(weights[name])}）"
+                    f"quant '{quant_name}': weights '{name}' has no dtype '{declared[name]}'"
+                    f" (available: {sorted(weights[name])})"
                 )
-        # MUST: 並びは **weights の宣言順**（表が書いた順ではない）— 埋めた席だけが末尾に
-        # 溜まると、manifest の weights 節と quant 節で同じ役割が別の順に並ぶ。
+        # MUST: the order is **the declaration order of weights** (not the order the table
+        # wrote) — if only the filled entries piled up at the end, the same role would be ordered
+        # differently in the manifest's weights section and quant section.
         mapping: dict[str, str] = {}
         for name, labels in weights.items():
             if name in declared:
@@ -678,32 +757,34 @@ def complete_quant_weights(
                 continue
             if len(labels) != 1:
                 raise DistError(
-                    f"quant '{quant_name}': weights '{name}' の dtype が {sorted(labels)} の"
-                    "複数あるのに指定が無い — quant 表が名指しする"
+                    f"quant '{quant_name}': weights '{name}' has several dtypes {sorted(labels)}"
+                    " but none is specified — the quant table must name one"
                 )
             mapping[name] = next(iter(labels))
         completed[quant_name] = {**quant, "weights": mapping}
     return completed
 
 
-#: quant の optional 欄の綴り（ADR 0038 §7 — hub の `parseRequiredLimits` が読む）。
+#: Spelling of a quant's optional field (ADR 0038 §7 — read by the hub's `parseRequiredLimits`).
 REQUIRED_LIMITS_KEY = "requiredLimits"
 
 
 def component_demand_bytes(
     source: Path, pipeline_config: Mapping[str, Any], memo: dict[Path, int]
 ) -> int:
-    """コンポーネント 1 つの**常駐 1 バッファの最大バイト数**（重みテンソル / state スロット）。
+    """**The largest single resident buffer in bytes** of one component (weight tensor / state
+    slot).
 
-    読むのは **part 0 の 2 文書だけ**（重みの payload は 1 バイトも舐めない）。`memo` は代表
-    path 単位の覚え書き — 複数の quant が同じコンポーネントを選ぶ席（共有 text_encoder の
-    ような形）で、同じ descriptor を読み直さないため。
+    Reads **only the two documents of part 0** (not a single byte of weight payload). `memo` is a
+    memo per representative path — so that the same descriptor is not read again when several
+    quants choose the same component (a shared text_encoder and the like).
 
-    MUST: 需要は**合流した供給計画**（`bind_graphs`）から出す。piece 列に割れた重みは GPU 側で
-    親 1 本のバッファに戻る（container-v1 §5 の規則④）ので、piece ごとの最大を採ると
-    `requiredLimits` が過小に焼かれ、「宣言は満たすのに `createSession` で落ちる」という最も
-    損な形になる。companion scale は別バッファなので別に数える。const 領域（part 1）の
-    initializer も常駐するので同じ集合に入る。
+    MUST: the demand comes from **the merged supply plan** (`bind_graphs`). A weight split into
+    pieces goes back into one parent buffer on the GPU (rule ④ of container-v1 §5), so taking the
+    maximum per piece would bake an understated `requiredLimits`, the costliest shape: "the
+    declaration is met, yet `createSession` fails". companion scales are separate buffers and are
+    counted separately. Initializers in the const region (part 1) are resident too, so they are in
+    the same set.
     """
     remembered = memo.get(source)
     if remembered is not None:
@@ -727,16 +808,20 @@ def component_demand_bytes(
 
 
 def bake_required_limits(plan: ModelPlan) -> ModelPlan:
-    """quant ごとの `requiredLimits`（ADR 0038 §7）を**現物から**導いて焼いた計画を返す。
+    """Return the plan with each quant's `requiredLimits` (ADR 0038 §7) derived **from the files**
+    and baked in.
 
-    需要は quant が選ぶコンポーネントの ① 最大テンソルの格納 payload と ② 最大 state スロット
-    （容量を `pipelineConfig` で数値化した寸法）の最大で、保証既定を超える席だけが欄になる
-    （既定以内なら欄そのものが無い — 規則と理由の正本は {@link karume.limits}）。
+    The demand is the maximum over the components the quant chooses of ① the stored payload of the
+    largest tensor and ② the largest state slot (dimensions with the capacity made numeric through
+    `pipelineConfig`); only limits above the guaranteed defaults become fields (within the
+    defaults there is no field at all — the source of truth for the rules and reasons is
+    {@link karume.limits}).
 
-    MUST: **計画側が同じ欄を書いていたら fail loudly** — 導出できる値を recipe の quant 表にも
-    持たせると、格納形や容量を変えた回に「表だけが古い下限を名乗る」形が作れる（宣言と現物が
-    独立に動く二重管理）。読み手は宣言を信じて取得の前に拒否するので、古い下限は「宣言は
-    満たすのに動かない」配布物になる。
+    MUST: **fail loudly when the plan already writes the same field** — also giving a recipe's
+    quant table a derivable value would allow "only the table claims a stale lower bound" whenever
+    the storage form or the capacity changes (duplicated state where declaration and files move
+    independently). Readers trust the declaration and refuse before fetching, so a stale lower
+    bound gives a distribution that "meets the declaration yet does not run".
     """
     memo: dict[Path, int] = {}
     quants: dict[str, Any] = {}
@@ -744,21 +829,23 @@ def bake_required_limits(plan: ModelPlan) -> ModelPlan:
         where = f"{plan.name}.quants.{quant_name}"
         if REQUIRED_LIMITS_KEY in quant:
             raise DistError(
-                f"{where}.{REQUIRED_LIMITS_KEY} を計画が書いている — この欄は組み立てが配布に"
-                "入る現物（テンソル寸法と state スロット）から導く席で、表に書く席ではない"
+                f"{where}.{REQUIRED_LIMITS_KEY} is written by the plan — assembly derives this"
+                " field from the files that go into the distribution (tensor dimensions and state"
+                " slots); it is not a field for the table"
             )
         demand = 0
         for name, label in quant["weights"].items():
             labels = plan.weights.get(name)
             files = labels.get(label) if labels is not None else None
             if files is None:
-                raise DistError(f"{where}.weights: '{name}' に dtype '{label}' が無い")
+                raise DistError(f"{where}.weights: '{name}' has no dtype '{label}'")
             artifact = plan.artifacts.get(files.file)
             if artifact is None:
-                raise DistError(f"{where}.weights: 役割 '{files.file}' が artifacts に無い")
-            # assets は見ない — 表・tokenizer・sidecar が GPU の常駐バッファになるかは
-            # family 側の事情で、コンテナの宣言からは決まらない。
-            assert artifact.source is not None  # ModelPlan.__post_init__ の不変条件
+                raise DistError(f"{where}.weights: role '{files.file}' is not in artifacts")
+            # assets are not looked at — whether a table / tokenizer / sidecar becomes a resident
+            # GPU buffer is the family's business and is not decided by the container's
+            # declaration.
+            assert artifact.source is not None  # invariant of ModelPlan.__post_init__
             demand = max(
                 demand, component_demand_bytes(artifact.source, plan.pipeline_config, memo)
             )
@@ -768,7 +855,8 @@ def bake_required_limits(plan: ModelPlan) -> ModelPlan:
 
 
 def file_ref(out_dir: Path, rel_path: str, sha256: str) -> dict[str, Any]:
-    """ADR 0041 §2 の 3 点セット `{path, size, sha256}`（size は置いた現物から採る）。"""
+    """The 3-field set `{path, size, sha256}` of ADR 0041 decision 2 (size is taken from the placed
+    file)."""
     return {
         "path": rel_path,
         "size": (out_dir / rel_path).stat().st_size,
@@ -777,24 +865,27 @@ def file_ref(out_dir: Path, rel_path: str, sha256: str) -> dict[str, Any]:
 
 
 class _SharedSeat(NamedTuple):
-    """`shared/<rel_path>` へ **1 回だけ**置く席 — 代表の実体・出所の sha256・そこを指す座席群。"""
+    """An entry placed **once** at `shared/<rel_path>` — the representative file, the source's
+    sha256, and the entries that point at it."""
 
     rel_path: str
     artifact: Artifact
     digest: str
-    #: この席を指す `(モデル名, 役割名)`。各モデルの manifest エントリが同じ path を書く。
+    #: `(model name, role name)` pairs that point at this entry. Each model's manifest entry writes
+    #: the same path.
     members: tuple[tuple[str, str], ...]
 
 
 def _source_digest(artifact: Artifact, memo: dict[Path, str]) -> str:
-    """`Artifact` の**出所**の sha256（同じ実ファイルは 1 回しか読まない）。
+    """The sha256 of an `Artifact`'s **source** (the same actual file is read only once).
 
-    共有判定を**置く前**に済ませるための唯一の読み取りなので、memo のキーは resolve 済みの
-    実 path — 同じファイルを別綴りで指す複数モデルを 1 回に畳む。生成物（`payload`）は既に
-    メモリ上に中身があるので I/O は要らない。
+    This is the only read for settling the sharing decision **before placement**, so the memo key
+    is the resolved actual path — several models pointing at the same file under different
+    spellings fold into one read. A generated file (`payload`) already has its content in memory,
+    so no I/O is needed.
     """
     if artifact.source is None:
-        assert artifact.payload is not None  # __post_init__ の不変条件
+        assert artifact.payload is not None  # invariant of __post_init__
         return hashlib.sha256(artifact.payload).hexdigest()
     resolved = artifact.source.resolve()
     digest = memo.get(resolved)
@@ -804,39 +895,46 @@ def _source_digest(artifact: Artifact, memo: dict[Path, str]) -> str:
 
 
 def _artifact_size(artifact: Artifact) -> int:
-    """`Artifact` の実体のバイト数（**中身は読まない** — 出所は stat 1 回だけ）。
+    """The byte size of an `Artifact`'s content (**the content is not read** — one stat of the
+    source).
 
-    共有判定の前置フィルタ（{@link _plan_shared}）のためだけの寸法。sha256 と違って
-    「違えば中身も必ず違う」方向にしか使えないので、一致しても畳む根拠にはならない。
+    A size only for the pre-filter of the sharing decision ({@link _plan_shared}). Unlike sha256
+    it only works in the direction "if they differ, the content certainly differs", so a match is
+    no ground for folding.
     """
     if artifact.source is None:
-        assert artifact.payload is not None  # __post_init__ の不変条件
+        assert artifact.payload is not None  # invariant of __post_init__
         return len(artifact.payload)
     return artifact.source.stat().st_size
 
 
 def _plan_shared(plans: Sequence[ModelPlan]) -> list[_SharedSeat]:
-    """同じ相対 path・同じ sha256 のファイルを 2 モデル以上が持つ席を**配置の前**に決める。
+    """Decide, **before placement**, the entries where two or more models hold a file with the
+    same relative path and the same sha256.
 
-    MUST: 一致の条件は **モデルサブツリー内の相対 path と sha256 の両方**（ADR 0041 §5 の
-    「path の一致で共有」を、中身が同じであることまで確かめてから成立させる）。中身違いを
-    同じ席へ寄せると、どちらのモデルかで別の重みが黙って読まれる。
+    MUST: the match condition is **both the relative path inside the model subtree and the
+    sha256** (ADR 0041 decision 5's "sharing by matching paths" holds only after confirming the
+    content is the same). Gathering different content into one entry would silently make one of
+    the models read other weights.
 
-    MUST: **1 つの相対 path が持てる席は 1 つだけ**（`shared/<相対 path>` は path だけで決まる）
-    — 同じ path に畳める組が 2 つ以上あるときは、どの組も畳まない（各モデルのサブツリーに
-    独立コピーのまま残す）。畳むと後の組が先の組の実体を上書きし、先の組のモデルが**別の中身**
-    を指す manifest で配られる（{@link verify_dist} は sha256 を採り直さないので沈黙する）。
+    MUST: **one relative path can hold only one entry** (`shared/<relative path>` is determined by
+    the path alone) — when two or more groups could fold into the same path, none of them is
+    folded (each stays an independent copy in its model's subtree). Folding would make the later
+    group overwrite the earlier group's file, and the earlier group's models would ship with a
+    manifest pointing at **other content** ({@link verify_dist} does not take the sha256 again, so
+    it stays silent).
 
-    MUST: 判定は**席ごと**（`(モデル名, 役割名)`）で、相対 path ごとではない — 1 つの
-    相対 path に「畳める組」と「単独の中身違い」が同居するとき、畳むのは組だけで単独は
-    自分のサブツリーに残る。
+    MUST: the decision is made **per entry** (`(model name, role name)`), not per relative path —
+    when "a foldable group" and "a lone different content" share a relative path, only the group is
+    folded and the lone one stays in its own subtree.
 
-    出所を hash するのは **2 モデル以上が使う (相対 path, サイズ)** の席だけ — 相対 path が
-    1 モデルにしか使われていなければ畳みようがなく、サイズが違えば hash も必ず違うので、
-    どちらも読む理由が無い（sha256 は置いた現物から採る）。サイズは畳む根拠ではなく
-    **落とす根拠**にしか使わない: 同じサイズの席は従来どおり hash で弁別されるので、畳む席の
-    集合は前置の有無で完全に同じ（同じ相対 path に「畳める組」と「サイズ違いの単独」が
-    同居しても、落ちるのは単独の側だけ）。
+    Sources are hashed only for entries whose **(relative path, size) is used by two or more
+    models** — a relative path used by one model only cannot be folded, and a different size means
+    a different hash for certain, so there is no reason to read either (sha256 is taken from the
+    placed file). The size is used only as **a ground for excluding**, never for folding: entries
+    of the same size are still told apart by hash as before, so the set of folded entries is exactly
+    the same with or without the pre-filter (even when "a foldable group" and "a lone one of
+    another size" share a relative path, only the lone one drops out).
     """
     sizes: dict[tuple[str, str], int] = {}
     users: dict[tuple[str, int], set[str]] = {}
@@ -866,11 +964,13 @@ def _plan_shared(plans: Sequence[ModelPlan]) -> list[_SharedSeat]:
 
 
 def container_asset_bytes(source: Path) -> int:
-    """容器が宣言する資産の**論理長の和**（ADR 0109 決定 4 — PLE / `rope_base` が入った席）。
+    """**The sum of the logical lengths** of the assets a container declares (ADR 0109 decision 4
+    — where the PLE / `rope_base` went).
 
-    読むのは descriptor だけ（payload は 1 バイトも読まない）。モデルカードの「host 読みの
-    資産」の勘定がここを引く — 資産は part の中に入ったので、manifest の `assets`（= 独立した
-    ファイルの席）を数えるだけでは、容器へ移った表が内訳から黙って消える。
+    Reads only the descriptor (not a single byte of payload). The model card's count of "assets
+    read on the host" uses this — the assets moved inside the parts, so counting only the
+    manifest's `assets` (= the separate file entries) would silently drop the tables that moved into
+    the container from the breakdown.
     """
     model = _container_of(source).read.model
     return 0 if model is None else sum(record.length for record in model.assets.values())
@@ -883,18 +983,21 @@ def _model_entry(
     descriptors: Mapping[str, tuple[DocumentRef, DocumentRef]],
     host_assets: dict[FileRefKey, int],
 ) -> dict:
-    """1 モデルぶんの manifest エントリ（ADR 0109 決定 3）。`refs` は役割名 → 3 点セット。
+    """The manifest entry of one model (ADR 0109 decision 3). `refs` is role name → 3-field set.
 
-    `parts` は {@link expand_weight_parts} が現物から解決した振り分け表（代表役割 → 順序付き
-    part 役割）、`descriptors` は**置いた現物**の part 0 から採った 2 文書の期待値。
+    `parts` is the assignment table {@link expand_weight_parts} resolved from the files
+    (representative role → ordered part roles), and `descriptors` are the expectations of the two
+    documents taken from part 0 of **the placed files**.
 
-    `host_assets`（part 0 の同一性 {@link karume.modelcard.file_ref_key} →
-    {@link container_asset_bytes}）は**書き足し先**で、manifest には載らない（モデルカードの
-    内訳注記だけが読む派生値 — 宣言は容器が持つ）。
+    `host_assets` (part 0 identity {@link karume.modelcard.file_ref_key} →
+    {@link container_asset_bytes}) is **an output parameter** and does not go into the manifest (a
+    derived value only the model card's breakdown note reads — the declaration belongs to the
+    container).
 
-    MUST: 資産の勘定は **quant が選ぶ席だけ**を開く。どの quant も選ばない dtype 席まで開くと、
-    入力コンテナの門（{@link assert_weight_components_verified}）が唯一の検出器である穴に
-    2 つ目の検出点ができ、あちらの故障注入（門を外すと壊れた容器が据わる）が恒真化する。
+    MUST: the asset count opens **only the entries quants choose**. Opening dtype entries no quant
+    chooses would add a second detection point to a hole whose only detector is the input
+    container check ({@link assert_weight_components_verified}), and that check's fault injection
+    (removing the check puts a broken container in place) would become tautological.
     """
     selected = {
         (name, label)
@@ -906,9 +1009,9 @@ def _model_entry(
         entry: dict[str, Any] = {}
         for label, files in labels.items():
             graph_ref, model_ref = descriptors[files.file]
-            # `parts` は順序付きの列で、**先頭が part 0**（ヘッダ + 2 文書のファイル）。
-            # 並びは添字順 MUST — 添字が part の id なので、列を触った瞬間に識別子が壊れる
-            # （container-v1 §8 / ADR 0109 決定 3）。
+            # `parts` is an ordered list, **with part 0 first** (the file with the header + the two
+            # documents). The order MUST be by index — the index is the part's id, so touching the
+            # list breaks the identifiers (container-v1 §8 / ADR 0109 decision 3).
             members = parts[files.file]
             placed = [refs[role] for role in members]
             entry[label] = {
@@ -921,10 +1024,11 @@ def _model_entry(
                 }
             }
             if (name, label) in selected:
-                # 資産の宣言は**出所の容器**から採る（置いた現物と同じバイト列であることは
-                # {@link verify_dist} と越境の突合が別に見る）。
+                # The asset declaration is taken from **the source container** (that it is the
+                # same bytes as the placed file is checked separately by {@link verify_dist} and
+                # the cross-repository reconciliation).
                 head = plan.artifacts[members[0]].source
-                assert head is not None  # ModelPlan.__post_init__ の不変条件
+                assert head is not None  # invariant of ModelPlan.__post_init__
                 host_assets[file_ref_key(placed[0])] = container_asset_bytes(head)
         weights[name] = entry
     return {
@@ -938,23 +1042,25 @@ def _model_entry(
 
 
 def assert_quant_presentation(where: str, quant: Mapping[str, Any]) -> None:
-    """quant の表示欄（ADR 0075 決定 1 の `label` / `description`）の形と上限を落とす。
+    """Fail on the shape and limits of a quant's display fields (`label` / `description` of ADR
+    0075 decision 1).
 
-    受理集合は hub の manifest parser が正本（2026-10-11 裁定）: 欄が無いか、**上限以内の
-    文字列**（長さはコードポイント数 — Python の `len` と hub の数え方が一致する）。空文字・
-    空白だけ・改行を含む値も hub は受理するので、ここでも受理する（意味は解釈しない — 決定 2）。
-    MUST: `None` は「書いていない」と読み替えずに拒否する — JSON の `null` を hub は拒否する
-    ので、読み替えると「焼けたのに読めない manifest」になる。共有表
-    `packages/hub/tests/fixtures/quant-presentation.json` が両側の一致を縛る。
+    The hub's manifest parser defines the accepted set (ruling of 2026-10-11): the field is absent,
+    or **a string within the limit** (the length is in code points — Python's `len` counts the same
+    way as the hub). The hub accepts empty strings, whitespace-only values and values containing
+    newlines, so they are accepted here too (the meaning is not interpreted — decision 2).
+    MUST: `None` is rejected instead of being read as "not written" — the hub rejects JSON `null`,
+    so reading it that way would give "a manifest that was written but cannot be read". The shared
+    table `packages/hub/tests/fixtures/quant-presentation.json` binds the two sides together.
     """
     for key, limit in QUANT_PRESENTATION_LIMITS.items():
         if key not in quant:
             continue
         value = quant[key]
         if not isinstance(value, str):
-            raise DistError(f"{where}.{key} が文字列でない（{value!r}）")
+            raise DistError(f"{where}.{key} is not a string ({value!r})")
         if len(value) > limit:
-            raise DistError(f"{where}.{key} が {len(value)} 字で上限 {limit} を超えた")
+            raise DistError(f"{where}.{key} has {len(value)} characters, over the limit of {limit}")
 
 
 def _assert_model_scale(
@@ -965,10 +1071,12 @@ def _assert_model_scale(
     quants: Mapping[str, Any],
     pipeline_config: Mapping[str, Any],
 ) -> None:
-    """1 モデルぶんの規模上限（ADR 0041 §7）と quant の表示欄（ADR 0075 決定 1）。
+    """The size limits of one model (ADR 0041 decision 7) and a quant's display fields (ADR 0075
+    decision 1).
 
-    件数以外に `quants` の中身まで受けるのは表示欄の上限を見るため。同じ規則を計画
-    （{@link ModelPlan}）と manifest の両方から掛けるので、上限の綴りは 1 箇所に置く。
+    The content of `quants` is taken, not just the counts, to check the display field limits. The
+    same rules are applied from both the plan ({@link ModelPlan}) and the manifest, so the limits
+    are spelled in one place.
     """
     for key, count, limit in (
         ("weights", weights, MAX_WEIGHTS),
@@ -976,25 +1084,27 @@ def _assert_model_scale(
         ("quants", len(quants), MAX_QUANTS),
     ):
         if count > limit:
-            raise DistError(f"{name}.{key} が {count} 件で上限 {limit} を超えた")
+            raise DistError(f"{name}.{key} has {count} entries, over the limit of {limit}")
     for quant_name, quant in quants.items():
         assert_quant_presentation(f"{name}.quants.{quant_name}", quant)
     config_bytes = len(json.dumps(dict(pipeline_config), ensure_ascii=False).encode("utf-8"))
     if config_bytes > MAX_PIPELINE_CONFIG_BYTES:
         raise DistError(
-            f"{name}.pipelineConfig が {config_bytes} バイトで上限"
-            f" {MAX_PIPELINE_CONFIG_BYTES} を超えた"
+            f"{name}.pipelineConfig is {config_bytes} bytes, over the limit of"
+            f" {MAX_PIPELINE_CONFIG_BYTES}"
         )
 
 
 def assert_plan_limits(plans: Sequence[ModelPlan]) -> None:
-    """計画だけから決まる規模上限（ADR 0041 §7）を**配置の前**に落とす。
+    """Fail on the size limits decided by the plans alone (ADR 0041 decision 7), **before
+    placement**.
 
-    `MAX_MANIFEST_BYTES` はここに無い — manifest 全体の綴りは置いた現物の
-    `{path, size, sha256}` が決まるまで測れないので、{@link assert_manifest_limits} に残る。
+    `MAX_MANIFEST_BYTES` is not here — the spelling of the whole manifest cannot be measured until
+    the `{path, size, sha256}` of the placed files are known, so it stays in
+    {@link assert_manifest_limits}.
     """
     if len(plans) > MAX_MODELS:
-        raise DistError(f"models が {len(plans)} 件で上限 {MAX_MODELS} を超えた")
+        raise DistError(f"models has {len(plans)} entries, over the limit of {MAX_MODELS}")
     for plan in plans:
         _assert_model_scale(
             plan.name,
@@ -1006,31 +1116,35 @@ def assert_plan_limits(plans: Sequence[ModelPlan]) -> None:
 
 
 def assert_plan_sources(plans: Sequence[ModelPlan]) -> None:
-    """計画が指す入力ファイルが全部実在することを**配置の前**に落とす。
+    """Fail, **before placement**, unless every input file the plans point at exists.
 
-    格納 dtype の要求表（{@link assert_storage}）は要求の無い役割を素通しするので、tokenizer の
-    ような「dtype を要求しないファイル」の欠落だけが計画段をすり抜けて配置の**途中**で出ていた。
-    出所が生成物（`payload`）の {@link Artifact} は書く中身を既に持っているので対象外。
+    The storage dtype requirement table ({@link assert_storage}) passes roles without a
+    requirement through, so only missing "files that require no dtype", such as a tokenizer,
+    slipped past the planning step and surfaced **in the middle of** placement. An
+    {@link Artifact} whose source is a generated file (`payload`) already holds the content to
+    write and is not covered.
     """
     for plan in plans:
         for role, artifact in plan.artifacts.items():
             if artifact.source is not None and not artifact.source.is_file():
-                raise DistError(f"{plan.name}.{role}: 組み立ての入力が無い: {artifact.source}")
+                raise DistError(f"{plan.name}.{role}: assembly input is missing: {artifact.source}")
 
 
 def weight_components(partitioned: Sequence[PartitionedPlan]) -> list[tuple[tuple[Path, ...], str]]:
-    """weights が指す**ローカル**コンテナの part 列（添字順）と、その席の weights のキーを集める。
+    """Collect the parts (in index order) of the **local** containers weights point at, and the
+    weights key of each entry.
 
-    共有コンポーネント（複数モデルが同じ系列を指す席）は (part 列, キー) で dedupe する
-    — 同じバイト列を同じ名前で 2 度検証しても結論は変わらない。**キーまで含めて**畳むのは、
-    1 本のコンテナが 2 つの違うキーの席に据わっている形が {@link
-    assert_weight_components_verified} のグラフ名の門に掛かる欠陥そのものだから（1 本の
-    コンテナは 1 本のグラフしか持たないので、両方は成立しえない）。生成物（`payload`）の
-    役割は weights に現れない（{@link ModelPlan.__post_init__} が入口で落とす）ので、ここは
-    全役割を集める。
+    Shared components (entries where several models point at the same series) are deduplicated by
+    (parts, key) — verifying the same bytes under the same name twice does not change the result.
+    The key is **included** in the folding because one container sitting in entries with two
+    different keys is exactly the defect the graph-name check of {@link
+    assert_weight_components_verified} catches (one container holds only one graph, so both
+    cannot hold). Roles of generated files (`payload`) do not appear in weights
+    ({@link ModelPlan.__post_init__} rejects them at the entry point), so every role is collected
+    here.
 
-    NOTE: 見るのは weights だけ。`assets`（tokenizer・スタイル表などの table safetensors）は
-    コンテナではないので、コンテナの門を掛ける先ではない。
+    NOTE: only weights are looked at. `assets` (table safetensors such as tokenizers and style
+    tables) are not containers, so the container check does not apply to them.
     """
     components: list[tuple[tuple[Path, ...], str]] = []
     seen: set[tuple[tuple[Path, ...], str]] = set()
@@ -1046,7 +1160,7 @@ def weight_components(partitioned: Sequence[PartitionedPlan]) -> list[tuple[tupl
             sources: list[Path] = []
             for member in item.parts[role]:
                 source = item.plan.artifacts[member].source
-                assert source is not None  # ModelPlan.__post_init__ の不変条件
+                assert source is not None  # invariant of ModelPlan.__post_init__
                 sources.append(source)
             entry = (tuple(sources), component)
             if entry in seen:
@@ -1057,33 +1171,39 @@ def weight_components(partitioned: Sequence[PartitionedPlan]) -> list[tuple[tupl
 
 
 def assert_weight_components_verified(partitioned: Sequence[PartitionedPlan]) -> dict[Path, str]:
-    """weights の全コンテナを**宣言で決まる全規則**で検証する（配置の前）。
+    """Verify every weights container against **all the rules the declarations decide** (before
+    placement).
 
-    戻りは分割形の part k（k ≥ 1）の出所 path → descriptor が宣言する `parts[k-1].sha256`
-    — 置いた現物の sha256 との突き合わせ（{@link _materialize_family}）が使う。
+    Returns, for part k (k ≥ 1) of the split form, source path → the `parts[k-1].sha256` the
+    descriptor declares — used for the comparison with the sha256 of the placed files
+    ({@link _materialize_family}).
 
-    MUST: 組み立ては入力コンテナを「過去に検証済み」と信頼しない。系列ディレクトリは
-    据え替えで書き換わる可変な場所（モジュール doc）なので、**古いエクスポータで焼いた系列を
-    `--series` で指す**運用事故が現実にありうる。組み立てが自前で見るのは格納と IR の一部
-    （{@link ir_graph}）なので、descriptor / 束縛表の壊れは family 固有の門をすり抜けて配布形に
-    据わり、利用者の `createSession` で初めて落ちる。
+    MUST: assembly does not trust input containers as "verified in the past". Series directories
+    are mutable places rewritten by swaps (module doc), so the operational mistake of **pointing
+    `--series` at a series built by an old exporter** can really happen. Assembly itself only
+    looks at the storage and part of the IR ({@link ir_graph}), so a broken descriptor / binding
+    table would slip past the family-specific checks into the distribution and fail only in the
+    user's `createSession`.
 
-    掛かるのは読み手の構造検査（2 文書・block 目次・codec 台帳）と合流（`bind_graphs`）と、
-    **IR の受理規則**（op 語彙 / ランタイム支援 / op 契約 —
-    {@link karume.verify.assert_ir_accepted}）である。どれも**宣言だけ**を見るので、数 GB の
-    payload は 1 バイトも読まない（container-v1 §7 のハッシュ 3 分離）。part の中身は
-    publish が通したことを根拠に信頼しない — 配置が置いた現物の sha256（manifest へ焼くために
-    どのみち採る）を、ここが返す descriptor の `parts[].sha256` と突き合わせる（追加 I/O 0）。
+    What applies is the reader's structural checks (the two documents, the block index, the codec
+    ledger), the merge (`bind_graphs`) and **the IR acceptance rules** (op vocabulary / runtime
+    support / op contracts — {@link karume.verify.assert_ir_accepted}). All of them look **only at
+    declarations**, so not a single byte of the several GB of payload is read (container-v1 §7's
+    three separate hash roles). The content of the parts is not trusted on the grounds that
+    publish passed it — the sha256 of the files placed (taken anyway for the manifest) is compared
+    with the descriptor's `parts[].sha256` returned here (no additional I/O).
 
-    MUST: IR の受理規則をここで掛ける — 構造検査だけだと「語彙外の op / ランタイム未対応の
-    attrs / 契約違反の shape」を宣言した容器が配布形に据わり、利用者の `createSession` で
-    初めて落ちる（`karume.verify` のモジュール doc が掲げる目的の、組み立て側の半分）。
+    MUST: the IR acceptance rules are applied here — with structural checks alone, a container
+    declaring "ops outside the vocabulary / attrs the runtime does not support / shapes that break
+    a contract" would sit in the distribution and fail only in the user's `createSession` (the
+    assembly-side half of the purpose stated in `karume.verify`'s module doc).
 
-    MUST: **容器のグラフ名 == その席の weights のキー**もここで見る。ランタイムは
-    `prepareContainer(opened, <weights キー>)` で名前で引く（container-v1 §2.1）ので、綴りが
-    割れた容器は manifest ごと据わり、利用者の `createSession` で初めて「コンテナにグラフが
-    無い」になる。書き手側の綴りの門（各 recipe の定数と AST の突合）はソースしか見ないので、
-    **現物と宣言を突き合わせる唯一の門**がここである。
+    MUST: **the container's graph name == the weights key of its entry** is checked here too. The
+    runtime looks it up by name with `prepareContainer(opened, <weights key>)` (container-v1
+    §2.1), so a container whose spelling diverges would sit there along with the manifest and
+    first become "the container has no graph" in the user's `createSession`. The writer-side
+    spelling checks (each recipe's constant against the AST) look only at the source, so **this is
+    the only check that compares files with declarations**.
     """
     declared: dict[Path, str] = {}
     for parts, component in weight_components(partitioned):
@@ -1092,19 +1212,20 @@ def assert_weight_components_verified(partitioned: Sequence[PartitionedPlan]) ->
             assert_ir_accepted(verified.read)
         except (ContainerError, ContainerFormatError) as cause:
             raise DistError(
-                f"{parts[0]}: 組み立ての入力がコンテナの規則を満たさない: {cause}"
+                f"{parts[0]}: assembly input does not satisfy the container rules: {cause}"
             ) from cause
         graphs = set(verified.read.graph.graphs)
         if graphs != {component}:
             raise DistError(
-                f"{parts[0]}: 容器のグラフ名 {sorted(graphs)} が weights のキー"
-                f" '{component}' と違う — ランタイムはこのキーでグラフを引く"
-                "（container-v1 §2.1）ので、このまま配ると createSession で落ちる"
+                f"{parts[0]}: the container's graph names {sorted(graphs)} differ from the"
+                f" weights key '{component}' — the runtime looks the graph up by this key"
+                " (container-v1 §2.1), so distributing it as is would fail in createSession"
             )
         model = verified.read.model
-        # 単一形は part がファイルの一区間でしかないので、ファイルの sha256 とは比べられない
-        # （weights の席では {@link _assert_manifest_shape} が単一形そのものを落とす）。`krg` は
-        # parts を宣言しない（weights の席では配置の {@link _descriptor_refs} が落とす）。
+        # In the single form a part is only a range of the file, so it cannot be compared with
+        # the file's sha256 (in weights entries {@link _assert_manifest_shape} rejects the single
+        # form itself). A `krg` declares no parts (in weights entries placement's
+        # {@link _descriptor_refs} rejects it).
         if model is not None and len(parts) > 1:
             for part in model.parts:
                 declared[parts[part.index]] = part.sha256
@@ -1112,40 +1233,46 @@ def assert_weight_components_verified(partitioned: Sequence[PartitionedPlan]) ->
 
 
 def assert_root_files(root_files: Mapping[str, str]) -> None:
-    """配布リポ直下へ書く名前が法的テキストの席（{@link LEGAL_PATHS}）に収まることを落とす。
+    """Fail unless the names written at the distribution repository's root fit the legal text
+    entries ({@link LEGAL_PATHS}).
 
-    MUST: 未知の名前は fail loudly — 直下は manifest が宣言しない唯一の場所なので、ここを
-    素通しにすると「宣言外ファイルの不在」（{@link verify_dist}）の網が名前 1 つぶんずつ
-    緩む。席の意味（上流ライセンスが要求する再配布条件のファイル）は型では言えないので、
-    受理集合を検査で綴る。
+    MUST: unknown names fail loudly — the root is the only place the manifest does not declare, so
+    letting names through here would loosen the net of "no undeclared files" ({@link verify_dist})
+    by one name each time. The meaning of the entries (files with redistribution conditions the
+    upstream licence requires) cannot be stated in a type, so the accepted set is spelled out as a
+    check.
     """
     unknown = sorted(set(root_files) - LEGAL_PATHS)
     if unknown:
         raise DistError(
-            f"配布リポ直下へ書けるのは {sorted(LEGAL_PATHS)} だけ（法的テキスト専用の席）: "
-            + ", ".join(unknown)
+            f"Only {sorted(LEGAL_PATHS)} can be written at the distribution repository's root"
+            " (entries for legal text only): " + ", ".join(unknown)
         )
 
 
-#: 長さ 0 の実体（const が空の part 1）が名乗る sha256。実体は 1 通りしかないので値も 1 つに
-#: 決まる（ADR 0109 決定 3 — hub の `EMPTY_SHA256` と同値）。
+#: The sha256 that zero-length content (a part 1 with an empty const region) declares. There is
+#: only one such content, so the value is unique (ADR 0109 decision 3 — equal to the hub's
+#: `EMPTY_SHA256`).
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 
 def assert_container_limits(where: str, container: Mapping[str, Any]) -> None:
-    """コンテナの入口 1 件が `karume/5` の上限と規則に収まることを落とす（ADR 0109 決定 6）。
+    """Fail unless one container entry fits the limits and rules of `karume/5` (ADR 0109
+    decision 6).
 
-    MUST: 上限の綴りは**コンテナ側の定数**（`karume.container`）から引く — hub 側
-    （`packages/hub/src/manifest.ts`）も同じ値を持つので、写しを 3 つ目に増やさない。突合は
-    `tests/test_dist.py` の定数突合テストが機械で見る。
+    MUST: the limits are taken from **the container-side constants** (`karume.container`) — the
+    hub side (`packages/hub/src/manifest.ts`) holds the same values, so no third copy is added.
+    The constant reconciliation test of `tests/test_dist.py` checks them mechanically.
 
-    見るのは**宣言だけで閉じるもの**（件数・天井・`size: 0` の規則・part 0 の長さ・越境の
-    一様性・descriptor 長）。descriptor と parts の整合・block 目次・codec 台帳の突合は
-    `verify_container` が持つので、ここには置かない（検査点を 2 つにしない）。
+    Only **what closes over the declarations alone** is checked (counts, ceilings, the `size: 0`
+    rule, part 0's length, uniformity of cross-repository references, descriptor length).
+    Consistency of descriptor and parts, the block index and the codec ledger belong to
+    `verify_container` and are not placed here (no second check point).
 
-    MUST: 欄の欠落も `DistError` で落とす（素の添字で `KeyError` / `TypeError` を出さない）—
-    {@link verify_dist} は**外から来た `karume.json`**（手元のどの配布形でも）を受ける門なので、
-    組み立ての語彙から外れた例外が出ると「壊れた manifest」と「門の不具合」が区別できない。
+    MUST: missing fields fail with `DistError` too (no raw `KeyError` / `TypeError` from plain
+    indexing) — {@link verify_dist} is a check that receives **a `karume.json` from outside** (any
+    local distribution), so an exception outside assembly's vocabulary would make "a broken
+    manifest" and "a bug in the check" indistinguishable.
     """
     documents: list[int] = []
     descriptor = _dist_object(container.get("descriptor"), f"{where}.descriptor")
@@ -1153,76 +1280,85 @@ def assert_container_limits(where: str, container: Mapping[str, Any]) -> None:
         document = _dist_object(descriptor.get(key), f"{where}.descriptor.{key}")
         length = document.get("length")
         if not isinstance(length, int) or isinstance(length, bool) or length <= 0:
-            raise DistError(f"{where}.descriptor.{key}.length が正整数でない（{length!r}）")
+            raise DistError(
+                f"{where}.descriptor.{key}.length is not a positive integer ({length!r})"
+            )
         if length > MAX_DESCRIPTOR_BYTES:
             raise DistError(
-                f"{where}.descriptor.{key}.length {length} が上限 {MAX_DESCRIPTOR_BYTES} を超えた"
+                f"{where}.descriptor.{key}.length {length} is over the limit of"
+                f" {MAX_DESCRIPTOR_BYTES}"
             )
         documents.append(length)
     parts = container.get("parts")
     if not isinstance(parts, list) or len(parts) < 2:
-        found = f"{len(parts)} 件" if isinstance(parts, list) else repr(parts)
+        found = f"{len(parts)} entries" if isinstance(parts, list) else repr(parts)
         raise DistError(
-            f"{where}.parts が 2 件以上の配列でない（実際: {found}）"
-            " — part 0〈descriptor〉+ part 1〈const〉が要る（container-v1 §8）"
+            f"{where}.parts is not an array of two or more entries (actual: {found})"
+            " — part 0 (descriptor) + part 1 (const) are required (container-v1 §8)"
         )
     if len(parts) > MAX_PARTS:
-        raise DistError(f"{where}.parts が {len(parts)} 件で上限 {MAX_PARTS} を超えた")
+        raise DistError(f"{where}.parts has {len(parts)} entries, over the limit of {MAX_PARTS}")
     refs = [_dist_part_ref(part, f"{where}.parts[{index}]") for index, part in enumerate(parts)]
     part0 = HEADER_BYTES + documents[0] + documents[1]
     if refs[0]["size"] != part0:
         raise DistError(
-            f"{where}.parts[0]: part 0 の size {refs[0]['size']} が"
-            f" ヘッダ {HEADER_BYTES} + 2 文書 {documents[0]} + {documents[1]} = {part0} と違う"
+            f"{where}.parts[0]: size {refs[0]['size']} of part 0 differs from"
+            f" header {HEADER_BYTES} + 2 documents {documents[0]} + {documents[1]} = {part0}"
         )
     head = (refs[0].get("repo"), refs[0].get("revision"))
     for index, ref in enumerate(refs):
         if ref["size"] > PART_MAX_BYTES:
             raise DistError(
-                f"{where}.parts[{index}]: part '{ref['path']}' が {ref['size']} バイトで"
-                f" 上限 {PART_MAX_BYTES}（part 長の天井 — container-v1 §10）を超えた"
+                f"{where}.parts[{index}]: part '{ref['path']}' is {ref['size']} bytes,"
+                f" over the limit of {PART_MAX_BYTES} (the part length ceiling — container-v1 §10)"
             )
-        # 長さ 0 は「const が空の part 1」の形だけ。part 0 はここへ来るまでに
-        # 「ヘッダ + 2 文書」ちょうどであることが済んでいる（2 文書は正整数なので 0 に
-        # ならない）ので、残る規則は空列の sha256 だけ。
+        # Length 0 is only the shape "part 1 with an empty const region". Part 0 has already
+        # been checked to be exactly "header + 2 documents" by this point (the 2 documents are
+        # positive integers, so it cannot be 0), so the only rule left is the sha256 of the
+        # empty string.
         if ref["size"] == 0 and ref["sha256"] != EMPTY_SHA256:
             raise DistError(
-                f"{where}.parts[{index}]: size 0 の sha256 が空列の値 {EMPTY_SHA256} でない"
+                f"{where}.parts[{index}]: the sha256 of size 0 is not the empty string's value"
+                f" {EMPTY_SHA256}"
             )
-        # 越境参照は**容器単位**（ADR 0109 決定 3）— 片方だけ・混在は、残りの part を
-        # セッションの repo へ取りに行く形になり、そこには無いので取得の途中で初めて落ちる。
+        # Cross-repository references are **per container** (ADR 0109 decision 3) — one-sided or
+        # mixed references would fetch the remaining parts from the session's repo, where they
+        # are not, failing only in the middle of the fetch.
         if (ref.get("repo"), ref.get("revision")) != head:
             raise DistError(
-                f"{where}.parts[{index}]: 越境参照が容器の中で混在している"
-                f"（part 0 は {head[0] or '自リポ'} / この part は {ref.get('repo') or '自リポ'}）"
+                f"{where}.parts[{index}]: cross-repository references are mixed within the"
+                f" container (part 0 is {head[0] or 'this repo'} / this part is"
+                f" {ref.get('repo') or 'this repo'})"
             )
 
 
 def _dist_object(value: Any, where: str) -> Mapping[str, Any]:
-    """manifest の 1 節をオブジェクトとして受ける（欄の欠落を組み立ての語彙へ翻訳する）。"""
+    """Take one section of the manifest as an object (translates missing fields into assembly
+    vocabulary)."""
     if not isinstance(value, dict):
-        raise DistError(f"{where} がオブジェクトでない（実際: {value!r}）")
+        raise DistError(f"{where} is not an object (actual: {value!r})")
     return value
 
 
 def _dist_part_ref(value: Any, where: str) -> Mapping[str, Any]:
-    """part 1 件の 3 点セット（`path` / `size` / `sha256`）が揃っていることを落とす。"""
+    """Fail unless one part's 3-field set (`path` / `size` / `sha256`) is complete."""
     ref = _dist_object(value, where)
     if not isinstance(ref.get("path"), str) or not ref["path"]:
-        raise DistError(f"{where}.path が非空の文字列でない（実際: {ref.get('path')!r}）")
+        raise DistError(f"{where}.path is not a non-empty string (actual: {ref.get('path')!r})")
     size = ref.get("size")
     if not isinstance(size, int) or isinstance(size, bool) or size < 0:
-        raise DistError(f"{where}.size が非負整数でない（実際: {size!r}）")
+        raise DistError(f"{where}.size is not a non-negative integer (actual: {size!r})")
     if not isinstance(ref.get("sha256"), str) or not ref["sha256"]:
-        raise DistError(f"{where}.sha256 が非空の文字列でない（実際: {ref.get('sha256')!r}）")
+        raise DistError(f"{where}.sha256 is not a non-empty string (actual: {ref.get('sha256')!r})")
     return ref
 
 
 def assert_manifest_limits(manifest: Mapping[str, Any]) -> None:
-    """規模上限（ADR 0041 §7 + ADR 0109 決定 6）を焼く側で先に落とす。"""
+    """Fail on the size limits (ADR 0041 decision 7 + ADR 0109 decision 6) first, on the writing
+    side."""
     models = manifest["models"]
     if len(models) > MAX_MODELS:
-        raise DistError(f"models が {len(models)} 件で上限 {MAX_MODELS} を超えた")
+        raise DistError(f"models has {len(models)} entries, over the limit of {MAX_MODELS}")
     for name, model in models.items():
         _assert_model_scale(
             name,
@@ -1238,27 +1374,31 @@ def assert_manifest_limits(manifest: Mapping[str, Any]) -> None:
                 )
     total = len(manifest_text(manifest).encode("utf-8"))
     if total > MAX_MANIFEST_BYTES:
-        raise DistError(f"manifest が {total} バイトで上限 {MAX_MANIFEST_BYTES} を超えた")
+        raise DistError(f"manifest is {total} bytes, over the limit of {MAX_MANIFEST_BYTES}")
 
 
 def manifest_text(manifest: Mapping[str, Any]) -> str:
-    """`karume.json` に書く綴り（末尾改行つき — 上限検査もこの綴りで測る）。
+    """The spelling written into `karume.json` (with a trailing newline — the limit check measures
+    this spelling too).
 
-    allow_nan=False は必須（`karume.ir.IrGraph.to_json` と同文）— NaN / Infinity は JSON の
-    標準リテラルに無く、ブラウザの `JSON.parse`（hub の読み口）が落ちる。Python の
-    `json.dumps` は既定でこれらを綴り、`json.loads` は既定で読み返すので、{@link verify_dist}
-    まで含めて焼く側の門は 1 つも鳴らない — 受理集合をランタイム側に揃えるため、書き出しの
-    時点で失敗させる。
+    allow_nan=False is required (same text as `karume.ir.IrGraph.to_json`) — NaN / Infinity are
+    not standard JSON literals, and the browser's `JSON.parse` (the hub's reader) fails on them.
+    Python's `json.dumps` spells them by default and `json.loads` reads them back by default, so
+    not a single check on the writing side, {@link verify_dist} included, would fire — to match
+    the accepted set to the runtime side, writing fails at this point.
     """
     return json.dumps(manifest, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
 
 
 def _descriptor_refs(part0: Path) -> tuple[DocumentRef, DocumentRef]:
-    """part 0 のファイル → 2 文書の期待値（読み取りの失敗を組み立ての語彙へ翻訳する）。"""
+    """Part 0 file → the expectations of the two documents (translates read failures into
+    assembly vocabulary)."""
     try:
         return read_descriptor_refs(part0)
     except ContainerFormatError as cause:
-        raise DistError(f"{part0}: 2 文書の期待値を採れない: {cause}") from cause
+        raise DistError(
+            f"{part0}: cannot take the expectations of the two documents: {cause}"
+        ) from cause
 
 
 def _materialize_family(
@@ -1268,34 +1408,39 @@ def _materialize_family(
     external: Mapping[str, Mapping[str, Any]],
     declared_parts: Mapping[Path, str],
 ) -> tuple[dict[str, Any], dict[FileRefKey, int]]:
-    """検査済みの計画群を `out_dir` へ並べ、`karume.json` を書いて manifest を返す。
+    """Lay the checked plans out in `out_dir`, write `karume.json`, and return the manifest.
 
-    戻りの 2 本目はモデルカード用の派生値（part 0 の同一性
-    {@link karume.modelcard.file_ref_key} → {@link container_asset_bytes}）— manifest には
-    載らない（正本は容器の資産宣言）。
+    The second return value is a derived value for the model card (part 0 identity
+    {@link karume.modelcard.file_ref_key} → {@link container_asset_bytes}) — it does not go into
+    the manifest (the source of truth is the container's asset declaration).
 
-    ① 共有席を決める（{@link _plan_shared} — 出所の sha256 だけを見る）→ ② 共有席は
-    `shared/` へ 1 回だけ・残りは各モデルのサブツリーへ置く → ③ 現物から manifest。
+    ① decide the shared entries ({@link _plan_shared} — looks only at the sources' sha256) → ②
+    place the shared entries once under `shared/` and the rest in each model's subtree → ③ the
+    manifest from the files.
 
-    `external`（役割名 → 越境参照）に載った役割は**自リポへ置かない** — 参照にする意味が
-    「同じバイト列を 2 つのリポへ上げない」ことなので、置いた上で参照を書くと利得がゼロになる。
+    Roles listed in `external` (role name → cross-repository reference) are **not placed in this
+    repository** — the point of a reference is "not uploading the same bytes to two
+    repositories", so placing the file and also writing a reference would gain nothing.
 
-    MUST: 共有の判定は**置く前**に済ませる — 全モデルへ複製してから畳み直す形は、共有 1 本
-    （サイズ S・M モデル）につき「複製 M 回 + hash M 回 + 移動 1 回」で ~3MS の論理 I/O を
-    払う。決めてから置けば S の複製も hash も 1 回で済む（配布の大半は共有資産）。
+    MUST: the sharing decision is settled **before placement** — copying to every model and then
+    folding back costs ~3MS of logical I/O per shared file (size S, M models): "M copies + M hashes
+    + 1 move". Deciding first and then placing needs only one copy and one hash of S (most of a
+    distribution is shared assets).
 
-    書き先は呼び手（{@link assemble_family}）が用意する staging で、**空から作る**前提
-    （配布先を直接更新しないので、途中で落ちても捨てるだけで済む）。
+    The target is the staging directory the caller ({@link assemble_family}) prepares, assumed to
+    be **built from empty** (the distribution target is not updated directly, so a failure midway
+    only means discarding it).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     plans = [item.plan for item in partitioned]
     placed: dict[tuple[str, str], str] = {}
     digests: dict[str, str] = {}
     folded: dict[tuple[str, str], str] = {}
-    # MUST: 共有席の判定は**越境参照の役割を外した集合**で行う — 自リポへ置かない役割が
-    # `shared/` の席を取ると、どのモデルも宣言していない現物が 1 本残る（複数モデルが同じ
-    # バイト列を借りる形＝ADR 0087 の extra リポでちょうどこれが起きる）。下の配置ループが
-    # `external` を飛ばすのと同じ集合を見る。
+    # MUST: the shared entries are decided on **the set without the cross-repository roles** — if
+    # a role not placed in this repository took a `shared/` entry, one file no model declares
+    # would be left (several models borrowing the same bytes = exactly what happens with ADR
+    # 0087's extra repository). It sees the same set as the placement loop below, which skips
+    # `external`.
     shareable = [
         replace(
             plan,
@@ -1306,15 +1451,17 @@ def _materialize_family(
     for seat in _plan_shared(shareable):
         target = f"{SHARED_DIRNAME}/{seat.rel_path}"
         materialize(seat.artifact, out_dir / target)
-        # sha256 は**置いた現物**から採る（表と現物が食い違う失敗様式を構造的に消す）。
+        # sha256 is taken from **the placed file** (structurally removes the failure mode of
+        # table and files disagreeing).
         digests[target] = sha256_file(out_dir / target)
-        # MUST: 共有席だけは出所の sha256 とも突き合わせる — 1 本しか置かないので、コピーが
-        # 壊れれば**全モデルが揃って壊れた実体**を指す。宣言と現物は一致したままなので
-        # {@link verify_dist} は沈黙する（採り直さない）。
+        # MUST: only shared entries are also compared with the source's sha256 — only one copy
+        # is placed, so a broken copy would make **every model point at the same broken file**.
+        # Declaration and file still agree, so {@link verify_dist} stays silent (it does not take
+        # the sha256 again).
         if digests[target] != seat.digest:
             raise DistError(
-                f"{target}: 置いた現物の sha256 が出所と食い違う"
-                f"（出所 {seat.digest} / 現物 {digests[target]}）"
+                f"{target}: the sha256 of the placed file disagrees with the source"
+                f" (source {seat.digest} / placed {digests[target]})"
             )
         for member in seat.members:
             folded[member] = target
@@ -1330,11 +1477,13 @@ def _materialize_family(
             materialize(artifact, out_dir / rel_path)
             placed[(plan.name, role)] = rel_path
             digests[rel_path] = sha256_file(out_dir / rel_path)
-    # MUST: 置いた part の現物を descriptor の `parts[k-1].sha256` と突き合わせる（container-v1
-    # §7 の「公開・再梱包の突合用」）。manifest の sha256 は置いた現物から採るので、系列の part が
-    # 同じ長さのまま壊れていると宣言と現物は一致したまま据わり、HF 経由の取得は block の
-    # sha256 を掛けない（検証済みの取得元）— 公開後に気づく門が無い。越境参照の席は自リポに
-    # 置かないので対象外（参照先との同一性は {@link external_refs} が見る）。
+    # MUST: compare the placed part files with the descriptor's `parts[k-1].sha256` (container-v1
+    # §7's "for reconciliation at publication and repacking"). The manifest's sha256 is taken from
+    # the placed files, so a series part broken at the same length would be put in place with
+    # declaration and file agreeing, and fetching through HF does not apply the block sha256 (a
+    # verified source) — there would be no check to notice it after publication. Cross-repository
+    # entries are not placed in this repository and are not covered (identity with the target is
+    # checked by {@link external_refs}).
     for item in partitioned:
         for members in item.parts.values():
             for index, member in enumerate(members):
@@ -1345,8 +1494,8 @@ def _materialize_family(
                 target = placed[(item.plan.name, member)]
                 if digests[target] != expected:
                     raise DistError(
-                        f"{target}: part {index} の sha256 が descriptor の宣言と食い違う"
-                        f"（宣言 {expected} / 現物 {digests[target]}）"
+                        f"{target}: the sha256 of part {index} disagrees with the descriptor's"
+                        f" declaration (declared {expected} / placed {digests[target]})"
                     )
 
     models: dict[str, Any] = {}
@@ -1361,16 +1510,17 @@ def _materialize_family(
                 continue
             rel_path = placed[(plan.name, role)]
             refs[role] = file_ref(out_dir, rel_path, digests[rel_path])
-        # descriptor の期待値も**置いた現物**から採る（表と現物が食い違う失敗様式を構造的に
-        # 消す — モジュール doc の MUST）。越境参照の席は自リポに置かないので、代わりに
-        # 手元の出所から採る — {@link external_refs} が「参照先は自分で組むはずだったバイト列と
-        # 同一」まで確かめてあるので、同じ事実になる。
+        # The descriptor expectations are taken from **the placed files** too (structurally
+        # removes the failure mode of table and files disagreeing — the module doc's MUST).
+        # Cross-repository entries are not placed in this repository, so they are taken from the
+        # local source instead — {@link external_refs} has confirmed "the target is identical to
+        # the bytes this assembly would have built", so it is the same fact.
         descriptors: dict[str, tuple[DocumentRef, DocumentRef]] = {}
         for role, members in item.parts.items():
             head = members[0]
             if head in external:
                 source = plan.artifacts[head].source
-                assert source is not None  # ModelPlan.__post_init__ の不変条件
+                assert source is not None  # invariant of ModelPlan.__post_init__
                 descriptors[role] = _descriptor_refs(source)
             else:
                 descriptors[role] = _descriptor_refs(out_dir / placed[(plan.name, head)])
@@ -1394,65 +1544,80 @@ def assemble_family(
     root_files: Mapping[str, str] | None = None,
     external: ExternalComponents | None = None,
 ) -> dict[str, Any]:
-    """計画済みのモデル群を 1 リポへ組み立て、`out_dir` をその形へ**丸ごと差し替える**。
+    """Assemble the planned models into one repository and **replace `out_dir` wholesale** with
+    that form.
 
-    公開の規律（staging へ作る → 通ってから据える → 失敗は staging だけを消す → 前回の中断が
-    残した席の始末）は core の原語に預ける（{@link karume.artifacts.staged_publication}）—
-    ここが持つのは「席の中で何を作り、どの門を通すか」だけ（共有席の決定 → 配置 →
-    `karume.json` → {@link verify_dist} → `README.md`）。既存の `out_dir` は最後の rename まで
-    1 バイトも触らないので、途中で落ちれば配布形は前回のまま残る（in-place で更新していた頃の
-    「旧 manifest + 新旧混在ツリー」という失敗様式が構造的に無くなる）。
+    The publishing discipline (build in staging → put in place once it passes → on failure delete
+    only staging → clean up what an earlier interrupted run left behind) is delegated to the core
+    primitive ({@link karume.artifacts.staged_publication}) — this function only owns "what is
+    built inside the staging directory and which checks it passes" (shared-entry decision →
+    placement → `karume.json` → {@link verify_dist} → `README.md`). The existing `out_dir` is not
+    touched by a single byte until the final rename, so a failure midway leaves the previous
+    distribution as is (the failure mode of the in-place update days, "old manifest + a tree mixing
+    old and new", is structurally gone).
 
-    MUST: 差し替えは**丸ごと**で、`out_dir` の元の中身は 1 つも引き継がない — `A` + `B` で
-    組んだ出力へ `A` だけを組み直すと `B` は消える（全部コピーし終えてから宣言外ファイルとして
-    見つかるのではなく、そもそも残らない）。`README.md` も staging の中で描くので、据わった
-    配布形はカードまで揃っている（`render_card` は**検証を通った** manifest を受け取る）。
+    MUST: the replacement is **wholesale** and keeps nothing of `out_dir`'s original content —
+    rebuilding only `A` into an output built from `A` + `B` removes `B` (it is not found as an
+    undeclared file after copying everything; it simply does not remain). `README.md` is drawn in
+    staging too, so the distribution put in place comes complete with its card (`render_card`
+    receives **the verified** manifest).
 
-    `root_files`（ファイル名 → テキスト）は**リポ直下**へ UTF-8 で書かれる法的テキスト
-    （{@link LEGAL_PATHS}）— 上流の重みライセンスが再配布の条件として要求するもので、manifest が
-    宣言する資産ではない（どのモデルにも属さず、配布リポそのものに掛かる）。`karume.json` /
-    `README.md` と同じく {@link verify_dist} の宣言外ファイル検査の例外側に居る。
+    `root_files` (file name → text) are legal texts written in UTF-8 **at the repository root**
+    ({@link LEGAL_PATHS}) — files the upstream weight licence requires as a condition of
+    redistribution, not assets the manifest declares (they belong to no model; they apply to the
+    distribution repository itself). Like `karume.json` / `README.md`, they are on the exempt side
+    of {@link verify_dist}'s undeclared-file check.
 
-    `external`（{@link ExternalComponents}）を渡すと、指名された役割だけが**別リポの pin 済み
-    revision への参照**として宣言され、自リポには置かれない（ADR 0038 §7）。渡さない組み立ては
-    完全に自己完結で、1 バイトも変わらない。
+    Passing `external` ({@link ExternalComponents}) declares only the named roles as **references
+    to a pinned revision of another repository**, not placed in this repository (ADR 0038 §7). An
+    assembly without it is fully self-contained and does not change by a single byte.
 
-    MUST: `plans` 全体に掛かる検査は**最初の 1 バイトを書く前**に全部済ませる（staging すら
-    作らない）— 途中で落ちると数 GB を並べ直すことになる。越境参照の解決（参照元 manifest の
-    読み・現物の hash）も同じ理由でここに置く。
+    MUST: the checks over all of `plans` are all settled **before the first byte is written** (not
+    even staging is created) — a failure midway would mean laying out several GB again. Resolving
+    cross-repository references (reading the referenced manifest, hashing the files) is placed
+    here for the same reason.
     """
     if not plans:
-        raise DistError("組み立てるモデルが 1 つも無い")
-    # MUST: `requiredLimits` は組み立てが**現物から**導いて焼く（{@link bake_required_limits}）
-    # — 宣言の意味は「このバイト列を常駐させるのに要る device limit」なので、配布に入る現物
-    # 以外に正本は無い。展開より前に置くのは、導出の入口が**代表 path**（`component_parts` /
-    # `ir_graph` が受ける口）だから — 展開後の part 役割からは代表 path を引き直せない。
+        raise DistError("There is not a single model to assemble")
+    # MUST: `requiredLimits` is derived **from the files** and baked by assembly
+    # ({@link bake_required_limits}) — the declaration means "the device limit needed to keep these
+    # bytes resident", so there is no source of truth other than the files that go into the
+    # distribution. It comes before the expansion because the derivation's entry point is **the
+    # representative path** (what `component_parts` / `ir_graph` take) — the representative path
+    # cannot be recovered from the expanded part roles.
     plans = [bake_required_limits(plan) for plan in plans]
-    # MUST: 展開は**全ての門より前**（1 バイトも書く前）— 展開後の役割が持つ相対 path も
-    # 出所も、以降の検査（path の収まり・入力の実在・共有の畳み込み）に掛かる必要がある。
+    # MUST: the expansion comes **before every check** (before writing a single byte) — both the
+    # relative paths and the sources of the expanded roles must go through the later checks (path
+    # containment, input existence, shared folding).
     partitioned = [expand_weight_parts(plan) for plan in plans]
     plans = [item.plan for item in partitioned]
     names = [plan.name for plan in plans]
     if len(set(names)) != len(names):
-        raise DistError(f"モデル名が重複している: {names}")
+        raise DistError(f"Duplicate model names: {names}")
     if default_model not in names:
-        raise DistError(f"既定モデル '{default_model}' が組み立て対象 {names} に無い")
+        raise DistError(
+            f"Default model '{default_model}' is not among the models to assemble {names}"
+        )
     assert_plan_paths(plans)
     assert_plan_limits(plans)
     assert_plan_sources(plans)
     assert_root_files(root_files or {})
-    # 入力コンテナの全検証は**実在検査の後・1 バイトも書く前**（ヘッダしか読まないので、
-    # ここに置いても数 GB の再読みにはならない）。
+    # Full verification of the input containers comes **after the existence checks and before
+    # writing a single byte** (it reads only the headers, so placing it here does not mean
+    # rereading several GB).
     declared_parts = assert_weight_components_verified(partitioned)
-    # 越境参照は**複数モデルへ掛けてよい**。MUST: 指定役割の現物が全モデルで参照先とバイト
-    # 同一（plan ごとの {@link external_refs} の突合 + 全 plan の参照一致）でなければ落とす —
-    # 「同じ役割名が別バイトを指す」形が曖昧さの実体なので、モデル数で代理せずそれを直接
-    # 検査する（食い違えば役割名と両モデル名を綴って fail loudly）。
+    # Cross-repository references **may apply to several models**. MUST: fail unless the files
+    # of the named roles are byte-identical to the target in every model (the reconciliation of
+    # {@link external_refs} per plan + identical references across all plans) — "the same role
+    # name pointing at different bytes" is what the ambiguity actually is, so that is checked
+    # directly instead of using the number of models as a proxy (a mismatch fails loudly, naming
+    # the role and both models).
     #
-    # 分割形のコンテナも越境参照にできる — `container.parts` は**要素ごとに**従来の FileRef
-    # 検査を通る配列なので（ADR 0038 §7 / ADR 0109 決定 3）、part 1 本を参照 1 つで指せる。
-    # 展開（{@link expand_weight_parts}）が代表役割を part 役割へ割った後にここへ来るので、
-    # {@link external_refs} は part ごとに参照先の現物を引き当てる。
+    # Split-form containers can be cross-repository references too — `container.parts` is an
+    # array whose **every element** goes through the usual FileRef check (ADR 0038 §7 / ADR 0109
+    # decision 3), so one reference can point at one part. This point is reached after the
+    # expansion ({@link expand_weight_parts}) split the representative role into part roles, so
+    # {@link external_refs} matches the target's files part by part.
     references: dict[str, dict[str, Any]] = {}
     if external is not None:
         resolved = [(item.plan.name, external_refs(external, item)) for item in partitioned]
@@ -1465,9 +1630,10 @@ def assemble_family(
             )
             if differing:
                 raise DistError(
-                    f"越境参照の指し先がモデル間で食い違う: {differing}"
-                    f"（'{first_model}' と '{model_name}'）"
-                    " — 同じ役割名が別バイトを指す形は 1 つの参照では宣言できない"
+                    f"Cross-repository reference targets disagree between models: {differing}"
+                    f" ('{first_model}' and '{model_name}')"
+                    " — the same role name pointing at different bytes cannot be declared with"
+                    " one reference"
                 )
 
     try:
@@ -1475,8 +1641,9 @@ def assemble_family(
             manifest, host_assets = _materialize_family(
                 partitioned, staging, default_model, references, declared_parts
             )
-            # 法的テキストは検証の**前**に置く — 例外側に居ることを組み立てのたびに
-            # {@link verify_dist} で通しておかないと、例外が外れた回に据わってから気づく。
+            # Legal texts are placed **before** verification — unless their place on the exempt
+            # side is exercised through {@link verify_dist} on every assembly, a run where the
+            # exemption broke would be noticed only after it was put in place.
             for name, text in (root_files or {}).items():
                 (staging / name).write_text(text, encoding="utf-8")
             verify_dist(staging)
@@ -1484,21 +1651,23 @@ def assemble_family(
                 card = render_card(manifest, host_assets=host_assets)
                 (staging / MODEL_CARD_FILENAME).write_text(card, encoding="utf-8")
     except ArtifactSwapError as error:
-        # 据え替えの失敗を組み立ての失敗と取り違えない（原因の I/O 故障は連鎖に残る）。
+        # A swap failure is not mistaken for an assembly failure (the underlying I/O failure
+        # stays in the chain).
         raise DistError(str(error)) from error
     return manifest
 
 
-# ---- ② 宣言と現物の突合 ------------------------------------------------------
+# ---- ② Reconciling declarations with files ------------------------------------------
 
 
 def _declared_refs(manifest: Mapping[str, Any]) -> Iterator[tuple[str, Mapping[str, Any]]]:
-    """manifest が参照する全ファイルを `(場所, 3 点セット)` で流す（重複はそのまま流す）。
+    """Yield every file the manifest references as `(location, 3-field set)` (duplicates are
+    yielded as they are).
 
-    MUST: 欄の欠落・型違いは {@link _dist_object} / {@link _dist_part_ref} で `DistError` へ
-    翻訳する — {@link external_refs} は参照元の配布形の manifest を形の検査なしでここへ
-    渡すので、参照元が壊れているときに素の `KeyError` / `TypeError` を漏らさない
-    （{@link assert_container_limits} の MUST と同じ理由）。
+    MUST: missing fields and wrong types are translated into `DistError` by {@link _dist_object}
+    / {@link _dist_part_ref} — {@link external_refs} passes the referenced distribution's manifest
+    here without a shape check, so a broken referenced manifest must not leak a raw `KeyError` /
+    `TypeError` (the same reason as the MUST of {@link assert_container_limits}).
     """
     models = _dist_object(manifest.get("models"), "models")
     for model_name, model_value in models.items():
@@ -1513,7 +1682,7 @@ def _declared_refs(manifest: Mapping[str, Any]) -> Iterator[tuple[str, Mapping[s
                 container = _dist_object(entry.get("container"), where)
                 parts = container.get("parts")
                 if not isinstance(parts, list):
-                    raise DistError(f"{where}.parts が配列でない（実際: {parts!r}）")
+                    raise DistError(f"{where}.parts is not an array (actual: {parts!r})")
                 for index, ref in enumerate(parts):
                     yield f"{where}.parts[{index}]", _dist_part_ref(ref, f"{where}.parts[{index}]")
         assets = _dist_object(model.get("assets"), f"models.{model_name}.assets")
@@ -1523,32 +1692,36 @@ def _declared_refs(manifest: Mapping[str, Any]) -> Iterator[tuple[str, Mapping[s
 
 
 def is_external_ref(ref: Mapping[str, Any]) -> bool:
-    """別リポを指すファイル参照か（ADR 0038 §7 の `repo` / `revision` 席を持つ形）。
+    """Whether a file reference points at another repository (the form with the `repo` /
+    `revision` fields of ADR 0038 §7).
 
-    自リポの 3 点セットと**同じ場所に並ぶ別の形**なので、判別子は欄の有無で持つ
-    （{@link ExternalComponents}）。手元の現物と突き合わせる層は全部この判別で外す。
+    It is **another form sitting in the same place** as this repository's 3-field set, so the
+    discriminator is the presence of the field ({@link ExternalComponents}). Every layer that
+    compares with local files excludes it by this test.
     """
     return "repo" in ref
 
 
 def _assert_manifest_shape(manifest: Mapping[str, Any]) -> None:
-    """`karume/5` の構造整合（hub のパーサが受理する形かを焼いた側でも見る）。
+    """Structural consistency of `karume/5` (the writing side also checks whether it is a shape
+    the hub's parser accepts).
 
-    ここが見るのは**この配布形が自分で閉じているか**だけ — `defaultModel` / `defaultQuant` の
-    指し先、quant の weights 完全写像、weights のコンテナ入口、そしてレイアウト（ADR 0041 §9）。
-    hub の全検査を写経しても正本が 2 つになるだけなので、写すのは「組み立てが壊れたら真っ先に
-    破れる」規則に絞る（上限と part の規則は {@link assert_container_limits}）。
+    Only **whether this distribution is closed on its own** is checked here — the targets of
+    `defaultModel` / `defaultQuant`, quants' total mapping of weights, the container entry points
+    of weights, and the layout (ADR 0041 decision 9). Copying every hub check would only create a
+    second source of truth, so only the rules that "break first when assembly breaks" are copied
+    (the limits and part rules are in {@link assert_container_limits}).
     """
     if manifest.get("format") != MANIFEST_FORMAT:
-        raise DistError(f"format が '{MANIFEST_FORMAT}' でない: {manifest.get('format')!r}")
+        raise DistError(f"format is not '{MANIFEST_FORMAT}': {manifest.get('format')!r}")
     if not manifest.get("generator"):
-        raise DistError("generator が無い / 空")
+        raise DistError("generator is missing / empty")
     models = manifest.get("models")
     if not isinstance(models, dict) or not models:
-        raise DistError("models が非空のオブジェクトでない")
+        raise DistError("models is not a non-empty object")
     if manifest.get("defaultModel") not in models:
         raise DistError(
-            f"defaultModel '{manifest.get('defaultModel')}' が models {sorted(models)} に無い"
+            f"defaultModel '{manifest.get('defaultModel')}' is not in models {sorted(models)}"
         )
     for model_name, model_value in models.items():
         model = _dist_object(model_value, f"models.{model_name}")
@@ -1558,39 +1731,41 @@ def _assert_manifest_shape(manifest: Mapping[str, Any]) -> None:
             labels = _dist_object(labels_value, f"{model_name}.weights.{name}")
             for label, entry_value in labels.items():
                 entry = _dist_object(entry_value, f"{model_name}.weights.{name}.{label}")
-                # MUST: dtype ラベルは格納 dtype 語彙（{@link STORAGE_DTYPE_LABELS}）の内側。
+                # MUST: a dtype label is inside the storage dtype vocabulary
+                # ({@link STORAGE_DTYPE_LABELS}).
                 if label not in STORAGE_DTYPE_LABELS:
                     raise DistError(
-                        f"{model_name}.weights.{name} の dtype ラベル '{label}' が格納 dtype"
-                        f" 語彙 {sorted(STORAGE_DTYPE_LABELS)} に無い"
+                        f"{model_name}.weights.{name}: dtype label '{label}' is not in the storage"
+                        f" dtype vocabulary {sorted(STORAGE_DTYPE_LABELS)}"
                     )
-                # MUST: dtype エントリはコンテナの入口 1 つだけ（ADR 0109 決定 3）。`karume/4`
-                # の `{shards, extras?}` を持ったままの manifest もここで落ちる — 形式識別子
-                # だけ書き換えて中身が旧形の配布形は、hub が読めないのに焼く側では通ってしまう。
+                # MUST: a dtype entry is exactly one container entry point (ADR 0109 decision 3).
+                # A manifest still holding `karume/4`'s `{shards, extras?}` fails here too — a
+                # distribution with only the format identifier rewritten and old-form content
+                # would pass on the writing side although the hub cannot read it.
                 if set(entry) != {"container"}:
                     raise DistError(
-                        f"{model_name}.weights.{name}.{label} の欄が ['container'] でない"
-                        f"（実際: {sorted(entry)}）"
+                        f"{model_name}.weights.{name}.{label}: fields are not ['container']"
+                        f" (actual: {sorted(entry)})"
                     )
                 container = entry["container"]
                 if not isinstance(container, dict) or set(container) != {"descriptor", "parts"}:
                     found = sorted(container) if isinstance(container, dict) else repr(container)
                     raise DistError(
-                        f"{model_name}.weights.{name}.{label}.container の欄が"
-                        f" ['descriptor', 'parts'] でない（実際: {found}）"
+                        f"{model_name}.weights.{name}.{label}.container: fields are not"
+                        f" ['descriptor', 'parts'] (actual: {found})"
                     )
                 descriptor = container["descriptor"]
                 if not isinstance(descriptor, dict) or set(descriptor) != {"graph", "model"}:
                     found = sorted(descriptor) if isinstance(descriptor, dict) else repr(descriptor)
                     raise DistError(
-                        f"{model_name}.weights.{name}.{label}.container.descriptor の欄が"
-                        f" ['graph', 'model'] でない（実際: {found}）"
+                        f"{model_name}.weights.{name}.{label}.container.descriptor: fields are not"
+                        f" ['graph', 'model'] (actual: {found})"
                     )
                 assert_container_limits(f"{model_name}.weights.{name}.{label}.container", container)
         default_quant = model.get("defaultQuant")
         if not isinstance(default_quant, str) or default_quant not in quants:
             raise DistError(
-                f"{model_name}.defaultQuant '{default_quant}' が quants {sorted(quants)} に無い"
+                f"{model_name}.defaultQuant '{default_quant}' is not in quants {sorted(quants)}"
             )
         for quant_name, quant_value in quants.items():
             where = f"{model_name}.quants.{quant_name}"
@@ -1599,40 +1774,42 @@ def _assert_manifest_shape(manifest: Mapping[str, Any]) -> None:
             )
             if set(quant_weights) != set(weights):
                 raise DistError(
-                    f"{where}.weights が weights の完全写像でない"
-                    f"（宣言 {sorted(quant_weights)} / weights {sorted(weights)}）"
+                    f"{where}.weights is not a total mapping of weights"
+                    f" (declared {sorted(quant_weights)} / weights {sorted(weights)})"
                 )
             for name, label in quant_weights.items():
                 if not isinstance(label, str) or label not in weights[name]:
                     raise DistError(
-                        f"{where}.weights: '{name}' に dtype '{label}' が無い"
-                        f"（利用可能: {sorted(weights[name])}）"
+                        f"{where}.weights: '{name}' has no dtype '{label}'"
+                        f" (available: {sorted(weights[name])})"
                     )
     allowed_roots = set(models) | {SHARED_DIRNAME}
     for where, ref in _declared_refs(manifest):
         if is_external_ref(ref):
-            # 越境参照の path は**参照先リポのレイアウト**なので、こちらの root 集合には
-            # 収まらない（形だけを見る）。
+            # The path of a cross-repository reference is **in the target repository's layout**,
+            # so it does not fit this repository's root set (only the shape is checked).
             assert_external_ref(where, ref)
             continue
         root = ref["path"].split("/")[0]
         if root not in allowed_roots:
             raise DistError(
-                f"{where}: path '{ref['path']}' の先頭が {sorted(allowed_roots)} のどれでもない"
-                " — レイアウトはモデル別サブツリー + shared/（ADR 0041 §9）"
+                f"{where}: path '{ref['path']}' does not start with any of {sorted(allowed_roots)}"
+                " — the layout is per-model subtrees + shared/ (ADR 0041 decision 9)"
             )
 
 
 def _declared_sizes(manifest: Mapping[str, Any]) -> dict[str, int]:
-    """manifest が参照する**自リポの**全ファイルの `{path: size}`。重複 path は 3 点セットの
-    一致を要求する。
+    """`{path: size}` of every file **in this repository** the manifest references. Duplicate
+    paths must agree on the 3-field set.
 
-    同一 path の重複参照はモデル間の共有そのもの（ADR 0041 §5）なので合法だが、`{size, sha256}`
-    が食い違えば取得層のキャッシュが振動する — hub と同じ規則をここでも落とす。
+    A duplicate reference to the same path is exactly sharing between models (ADR 0041 decision 5)
+    and is legal, but if `{size, sha256}` disagree the fetch layer's cache oscillates — the same
+    rule as the hub's fails here too.
 
-    越境参照（{@link is_external_ref}）は**外す** — 手元に無いのが正しいファイルなので、
-    実在検査にも宣言外ファイル検査にも掛けない（path 空間も参照先リポのもので、こちらの
-    path とは別の名前空間）。
+    Cross-repository references ({@link is_external_ref}) are **excluded** — they are files that
+    are correctly absent locally, so neither the existence check nor the undeclared-file check
+    applies to them (their path space is the target repository's too, a namespace separate from
+    the paths here).
     """
     sizes: dict[str, int] = {}
     seen: dict[str, Mapping[str, Any]] = {}
@@ -1644,8 +1821,8 @@ def _declared_sizes(manifest: Mapping[str, Any]) -> dict[str, int]:
             previous["size"] != ref["size"] or previous["sha256"] != ref["sha256"]
         ):
             raise DistError(
-                f"{where}: 重複 path '{ref['path']}' の size / sha256 が食い違う"
-                f"（{previous['size']} / {previous['sha256']} と {ref['size']} / {ref['sha256']}）"
+                f"{where}: size / sha256 of duplicate path '{ref['path']}' disagree"
+                f" ({previous['size']} / {previous['sha256']} and {ref['size']} / {ref['sha256']})"
             )
         seen[ref["path"]] = ref
         sizes[ref["path"]] = ref["size"]
@@ -1653,21 +1830,25 @@ def _declared_sizes(manifest: Mapping[str, Any]) -> dict[str, int]:
 
 
 def verify_dist(out_dir: Path) -> dict[str, int]:
-    """`karume.json` と現物を突き合わせる（構造整合・実在・size 一致・宣言外ファイルの不在）。
+    """Reconcile `karume.json` with the files (structural consistency, existence, matching sizes,
+    no undeclared files).
 
-    sha256 は組み立て時に実ファイルから採っているので採り直さない（数 GB の再ハッシュは
-    ここでは新しい事実を生まない）。見るのは「表が自分で閉じていて、現物を覆っているか」だけ。
+    sha256 was taken from the actual files at assembly time and is not taken again (rehashing
+    several GB produces no new fact here). Only "whether the table is closed on its own and covers
+    the files" is checked.
 
-    宣言外ファイルの例外は {@link META_PATHS} の 2 つ（`karume.json` と `README.md`）と
-    {@link LEGAL_PATHS} の 2 つ（`LICENSE.md` / `NOTICE.md`）だけ — 前者は配布形そのものの説明、
-    後者は上流ライセンスが再配布の条件として要求する法的テキストで、どちらも manifest が
-    宣言する資産ではない。それ以外は従来どおり fail loudly（前回の組み立ての残骸や `io.*` の
-    混入を後段へ見せない）。例外を名前でなく相対 path で持つのは共通で、下位ディレクトリに
-    紛れ込んだ同名ファイルは従来どおり落ちる。
+    The only exemptions from the undeclared-file check are the two of {@link META_PATHS}
+    (`karume.json` and `README.md`) and the two of {@link LEGAL_PATHS} (`LICENSE.md` /
+    `NOTICE.md`) — the former describe the distribution itself, the latter are legal texts the
+    upstream licence requires as a condition of redistribution, and neither is an asset the
+    manifest declares. Everything else fails loudly as before (leftovers of a previous assembly
+    or stray `io.*` files are not shown to later stages). Both exemptions are held as relative
+    paths, not names, so a same-named file slipped into a subdirectory fails as before.
 
-    越境参照（{@link ExternalComponents}）のファイルは**このリポに無いのが正しい**ので
-    実在検査の対象にならない（{@link _declared_sizes} が外す）。形の検査だけは
-    {@link _assert_manifest_shape} が {@link assert_external_ref} で掛ける。
+    Files of cross-repository references ({@link ExternalComponents}) are **correctly absent from
+    this repository**, so they are not subject to the existence check ({@link _declared_sizes}
+    excludes them). Only their shape is checked, by {@link _assert_manifest_shape} through
+    {@link assert_external_ref}.
     """
     manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
     _assert_manifest_shape(manifest)
@@ -1675,10 +1856,12 @@ def verify_dist(out_dir: Path) -> dict[str, int]:
     for rel_path, size in sorted(declared.items()):
         path = out_dir / rel_path
         if not path.is_file():
-            raise DistError(f"manifest が参照するファイルが無い: {rel_path}")
+            raise DistError(f"A file the manifest references is missing: {rel_path}")
         actual = path.stat().st_size
         if actual != size:
-            raise DistError(f"{rel_path}: size が manifest と違う（宣言 {size} / 現物 {actual}）")
+            raise DistError(
+                f"{rel_path}: size differs from the manifest (declared {size} / actual {actual})"
+            )
     exempt = META_PATHS | LEGAL_PATHS
     present = {
         relative
@@ -1687,73 +1870,84 @@ def verify_dist(out_dir: Path) -> dict[str, int]:
     }
     extra = sorted(present - set(declared))
     if extra:
-        raise DistError(f"manifest が宣言していないファイルが混ざっている: {', '.join(extra)}")
+        raise DistError(f"Files the manifest does not declare are mixed in: {', '.join(extra)}")
     return declared
 
 
-# ---- ②' 越境コンポーネント参照（別リポの pin 済み revision を指す席） ----------
+# ---- ②' Cross-repository component references (entries pointing at a pinned revision) ----
 
 
 @dataclass(frozen=True)
 class ExternalComponents:
-    """指定した役割を、自リポへ格納する代わりに**別リポの pin 済み revision への参照**として
-    宣言する opt-in（ADR 0038 §7 の optional `repo` / `revision` 席）。
+    """An opt-in that declares the named roles as **references to a pinned revision of another
+    repository** instead of storing them in this repository (the optional `repo` / `revision`
+    fields of ADR 0038 §7).
 
-    用途は「同じバイト列を 2 つのリポへ二重に上げない」こと 1 つだけ — 例えば turbo リポの
-    text encoder は素版リポのものとバイト単位で同一なので、参照にすれば数 GB の再アップロード
-    が要らなくなる。**指定が無ければ配布形は完全に自己完結**（既定の組み立ては 1 バイトも
-    変わらない）。
+    It has exactly one use: "not uploading the same bytes twice to two repositories" — for
+    example, the text encoder of the turbo repository is byte-identical to the one in the plain
+    repository, so a reference saves re-uploading several GB. **Without it the distribution is
+    fully self-contained** (the default assembly does not change by a single byte).
 
-    MUST: `revision` は **40 桁の commit sha**（{@link REVISION_RE}）。ブランチ名やタグを許すと
-    指し先が後から動き、こちらが宣言した `size` / `sha256` と現物が食い違う — 参照の側は
-    「不変のバイト列を指す」ことが成立条件そのものなので、pin でない綴りは受理しない。
+    MUST: `revision` is **a 40-digit commit sha** ({@link REVISION_RE}). Allowing branch names or
+    tags would let the target move later, and the `size` / `sha256` declared here would disagree
+    with the files — "pointing at immutable bytes" is the very condition for a reference to hold,
+    so spellings that are not a pin are not accepted.
 
-    MUST: `size` / `sha256` は**ローカルの参照元 dist の実ファイル**から採る
-    （{@link external_refs}）— 参照元の `karume.json` の値を写すと、表と現物が食い違う失敗様式が
-    そのまま越境で復活する（manifest を導出物にした意味が消える）。
+    MUST: `size` / `sha256` are taken from **the actual files of the local referenced dist**
+    ({@link external_refs}) — copying the values of the referenced `karume.json` would bring back
+    the failure mode of table and files disagreeing, across repositories (voiding the reason the
+    manifest was made a derived artifact).
 
-    `dist` / `model` は参照元の配布形（既に組み上がっているもの）とその中のモデル名。参照先の
-    path はリポごとのレイアウト（モデル別サブツリー / `shared/`）で決まるので、こちら側の
-    相対 path からは導けない — 参照元の `karume.json` が宣言している path を引く。
+    `dist` / `model` are the referenced distribution (already assembled) and the model name in it.
+    The target's paths depend on each repository's layout (per-model subtree / `shared/`), so they
+    cannot be derived from the relative paths here — the paths the referenced `karume.json`
+    declares are looked up.
     """
 
-    #: 参照先の HF リポジトリ（`<owner>/<name>`）。
+    #: Target HF repository (`<owner>/<name>`).
     repo: str
-    #: 参照先の commit sha（40 桁 hex）。
+    #: Target commit sha (40 hex digits).
     revision: str
-    #: ローカルに組み上がっている参照元の配布形（`size` / `sha256` の出所）。
+    #: The referenced distribution assembled locally (the source of `size` / `sha256`).
     dist: Path
-    #: 参照元 dist の中のモデル名（同じ相対 path をどのモデルの席から採るか）。
+    #: Model name inside the referenced dist (which model's entry the same relative path is
+    #: taken from).
     model: str
-    #: 参照へ差し替える役割名。分割形のコンテナを指す役割は、part 1 本ごとの参照
-    #: （manifest の `container.parts` 配列の各要素）へ展開される（{@link external_refs}）。
+    #: Role names replaced by references. A role pointing at a split-form container expands into
+    #: one reference per part (each element of the manifest's `container.parts` array)
+    #: ({@link external_refs}).
     roles: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if not REPO_RE.fullmatch(self.repo):
-            raise DistError(f"越境参照の repo '{self.repo}' が '<owner>/<name>' の形でない")
+            raise DistError(
+                f"Cross-repository reference repo '{self.repo}' is not of the form '<owner>/<name>'"
+            )
         if not REVISION_RE.fullmatch(self.revision):
             raise DistError(
-                f"越境参照の revision '{self.revision}' が 40 桁の commit sha でない"
-                " — ブランチ名やタグは pin にならない（指し先が動くと宣言と現物が食い違う）"
+                f"Cross-repository reference revision '{self.revision}' is not a 40-digit"
+                " commit sha — branch names and tags are not a pin (if the target moves,"
+                " declaration and files disagree)"
             )
         assert_model_name(self.model)
         if not self.roles:
-            raise DistError("越境参照する役割が 1 つも無い")
+            raise DistError("There is not a single role to reference across repositories")
 
 
 def assert_external_ref(where: str, ref: Mapping[str, Any]) -> None:
-    """越境参照 1 つの形（欄の集合・repo の綴り・40 桁 hex の revision・path の収まり）。"""
+    """The shape of one cross-repository reference (set of fields, repo spelling, 40-hex-digit
+    revision, path containment)."""
     if set(ref) != set(EXTERNAL_REF_KEYS):
         raise DistError(
-            f"{where}: 越境参照の欄が {sorted(EXTERNAL_REF_KEYS)} でない（実際: {sorted(ref)}）"
+            f"{where}: cross-repository reference fields are not {sorted(EXTERNAL_REF_KEYS)}"
+            f" (actual: {sorted(ref)})"
         )
     if not REPO_RE.fullmatch(str(ref["repo"])):
-        raise DistError(f"{where}: repo '{ref['repo']}' が '<owner>/<name>' の形でない")
+        raise DistError(f"{where}: repo '{ref['repo']}' is not of the form '<owner>/<name>'")
     if not REVISION_RE.fullmatch(str(ref["revision"])):
         raise DistError(
-            f"{where}: revision '{ref['revision']}' が 40 桁の commit sha でない"
-            " — 参照は不変のバイト列を指すのが成立条件"
+            f"{where}: revision '{ref['revision']}' is not a 40-digit commit sha"
+            " — a reference holds only if it points at immutable bytes"
         )
     assert_rel_path(str(ref["path"]), where)
 
@@ -1767,12 +1961,12 @@ def _external_ref(
     *,
     part_seat: bool,
 ) -> dict[str, Any]:
-    """越境ファイル参照 1 つ（{@link external_refs} の 1 要素）。
+    """One cross-repository file reference (one element of {@link external_refs}).
 
-    `part_seat` は「この席が part 列を書けるか」— weights の dtype エントリだけが真で、
-    assets は偽（1 ファイル参照しか書けない席）。偽の席で参照先が分割形だったら
-    fail loudly: 黙って part 0 だけを指すと、残りのバイト列がどこからも取れない配布形が
-    出来上がる。
+    `part_seat` is "whether this entry can hold a list of parts" — true only for dtype entries of
+    weights, false for assets (entries that can hold only a single file reference). If the target
+    is in split form for a false entry, it fails loudly: silently pointing at part 0 alone would
+    produce a distribution whose remaining bytes cannot be fetched from anywhere.
     """
     seats = [
         f"{components.model}/{artifact.rel_path}",
@@ -1784,25 +1978,26 @@ def _external_ref(
             len(component_parts(components.dist / seat)) > 1 for seat in seats
         ):
             raise DistError(
-                f"越境参照は分割形のコンテナに掛けられない: ['{role}']"
-                "（1 役が複数 part へ割れているので 1 つの参照では指せない）"
-                " — assets の席は 1 ファイル参照しか書けない"
+                f"A cross-repository reference cannot apply to a split-form container: ['{role}']"
+                " (the role is split into several parts, so one reference cannot point at it)"
+                " — an assets entry can hold only a single file reference"
             )
         raise DistError(
-            f"役割 '{role}' のファイルが参照元 {components.dist} に無い"
-            f"（{MANIFEST_FILENAME} は {seats} のどちらも宣言していない）"
-            " — 参照先に無いものは参照できない"
+            f"The file of role '{role}' is not in the referenced dist {components.dist}"
+            f" ({MANIFEST_FILENAME} declares neither of {seats})"
+            " — what is not in the target cannot be referenced"
         )
     source = components.dist / found[0]
     if not source.is_file():
-        raise DistError(f"参照元が宣言するファイルの現物が無い: {source}")
+        raise DistError(f"The file the referenced dist declares is missing: {source}")
     digest = sha256_file(source)
     local = _source_digest(artifact, memo)
     if digest != local:
         raise DistError(
-            f"役割 '{role}' の参照先が自分で組むバイト列と違う: {source} は {digest}、"
-            f"{artifact.rel_path} の出所は {local}"
-            " — 中身の違う参照は「別のモデルの重み」を自分のものとして配る形になる"
+            f"The target of role '{role}' differs from the bytes this assembly builds: {source}"
+            f" is {digest}, the source of {artifact.rel_path} is {local}"
+            ' — a reference with different content would distribute "another model\'s weights"'
+            " as our own"
         )
     return {
         "repo": components.repo,
@@ -1816,45 +2011,52 @@ def _external_ref(
 def external_refs(
     components: ExternalComponents, partitioned: PartitionedPlan
 ) -> dict[str, dict[str, Any]]:
-    """役割名 → 越境ファイル参照 `{repo, revision, path, size, sha256}`。
+    """Role name → cross-repository file reference `{repo, revision, path, size, sha256}`.
 
-    参照先の path は**参照元 dist の `karume.json` が宣言している path**から引く（モデル別
-    サブツリーか `shared/` かは向こうの組み立てが決めた事実で、こちらからは導けない）。
-    宣言に無い役割は fail loudly — 参照先に無いものは参照できない。
+    The target path is looked up from **the paths the referenced dist's `karume.json` declares**
+    (per-model subtree or `shared/` is a fact decided by that assembly, not derivable from here).
+    A role not in the declaration fails loudly — what is not in the target cannot be referenced.
 
-    **分割形のコンテナは part 役割ごとに 1 つの参照**を返す（manifest の `container.parts`
-    配列の各要素が参照になる — ADR 0038 §7 / ADR 0109 決定 3）。`repo` / `revision` は全要素
-    同一 MUST（越境は容器単位）で、`path` / `size` / `sha256` は part ごとに別。並びは
-    {@link expand_weight_parts} が**現物から**解決した添字順そのままなので、先頭 = part 0 の
-    規約は参照でも変わらない。part のファイル名は連番と総数を綴りに持つ（`-NNNNN-of-NNNNN`）
-    ので、参照先の part 数がこちらと違えば「参照元に無い」で必ず落ちる（本数の食い違いは
-    黙って解決しない）。
+    **A split-form container gives one reference per part role** (each element of the manifest's
+    `container.parts` array becomes a reference — ADR 0038 §7 / ADR 0109 decision 3). `repo` /
+    `revision` MUST be the same for every element (cross-repository references are per
+    container), while `path` / `size` / `sha256` differ per part. The order is exactly the index
+    order {@link expand_weight_parts} resolved **from the files**, so the convention first = part 0
+    holds for references too. Part file names spell out the number and the total
+    (`-NNNNN-of-NNNNN`), so if the target's part count differs from ours it always fails as "not in
+    the referenced dist" (a count mismatch is never resolved silently).
 
-    MUST: 宣言と現物の突合を越境でも切らさない。`size` / `sha256` はローカルの実ファイルから
-    採り、さらに**自分で組むはずだったバイト列と一致すること**まで確かめる — 一致しない参照は
-    「別のモデルの重みを自分のものとして配る」形になり、shape も manifest も正しいまま沈黙する。
-    分割形の役割はこの突合を**part 列の全要素**へ掛ける。
+    MUST: the reconciliation of declarations with files is not broken across repositories either.
+    `size` / `sha256` are taken from the local actual files, and it is further confirmed that they
+    **match the bytes this assembly would have built** — a mismatching reference would
+    "distribute another model's weights as our own", staying silent with shape and manifest both
+    correct. For split-form roles this reconciliation applies to **every element of the part
+    list**.
 
-    NOTE: 参照元の参照（多段）は辿らない。{@link _declared_sizes} が越境参照を外すので、
-    参照元がさらに別リポを指している席はここで「宣言に無い」として落ちる。
+    NOTE: references of the referenced dist (multi-level) are not followed. {@link _declared_sizes}
+    excludes cross-repository references, so an entry where the referenced dist points at yet
+    another repository fails here as "not in the declaration".
     """
     manifest_path = components.dist / MANIFEST_FILENAME
     if not manifest_path.is_file():
-        raise DistError(f"越境参照の参照元に {MANIFEST_FILENAME} が無い: {manifest_path}")
+        raise DistError(
+            f"The referenced dist of a cross-repository reference has no {MANIFEST_FILENAME}:"
+            f" {manifest_path}"
+        )
     declared = set(_declared_sizes(json.loads(manifest_path.read_text(encoding="utf-8"))))
     plan = partitioned.plan
     memo: dict[Path, str] = {}
     refs: dict[str, dict[str, Any]] = {}
     for role in components.roles:
-        # weights の役割は振り分け表に載っている（分割形なら part 役割へ割れていて、代表役割は
-        # artifacts から消えている）。載っていない役割は assets の席なので代表役割のまま
-        # 1 ファイル参照を引く。
+        # weights roles are in the assignment table (in split form they are split into part
+        # roles and the representative role is gone from artifacts). A role not in it is an
+        # assets entry, so a single file reference is taken for the representative role as is.
         for member in partitioned.parts.get(role, (role,)):
             artifact = plan.artifacts.get(member)
             if artifact is None:
                 raise DistError(
-                    f"越境参照が知らない役割を指している: '{role}'"
-                    f"（このモデルの役割: {sorted(plan.artifacts)}）"
+                    f"A cross-repository reference points at an unknown role: '{role}'"
+                    f" (this model's roles: {sorted(plan.artifacts)})"
                 )
             refs[member] = _external_ref(
                 components,
@@ -1875,10 +2077,11 @@ def resolve_external_components(
     model: str | None,
     roles: Sequence[str] | None,
 ) -> ExternalComponents | None:
-    """CLI の 5 指定を {@link ExternalComponents} へ解決する（1 つも無ければ `None`）。
+    """Resolve the 5 CLI options into {@link ExternalComponents} (`None` when none is given).
 
-    MUST: **全部揃うか 1 つも無いか**の 2 通りだけ。部分指定を黙って無視すると、参照するつもり
-    の組み立てが自己完結の配布形として静かに出来上がる（数 GB を上げ直してから気づく）。
+    MUST: only two cases, **all or none**. Silently ignoring a partial set would quietly produce a
+    self-contained distribution from an assembly meant to reference (noticed only after uploading
+    several GB again).
     """
     given = {
         "--ref-repo": repo,
@@ -1892,109 +2095,123 @@ def resolve_external_components(
     missing = sorted(name for name, value in given.items() if value is None)
     if missing:
         raise DistError(
-            f"越境参照は 5 つの指定が揃って初めて成立する（足りない: {', '.join(missing)}）"
+            f"A cross-repository reference needs all 5 options (missing: {', '.join(missing)})"
         )
-    assert repo is not None and revision is not None  # missing が空 = 全部揃っている
+    assert repo is not None and revision is not None  # missing is empty = all are given
     assert dist is not None and model is not None and roles is not None
     return ExternalComponents(
         repo=repo, revision=revision, dist=dist, model=model, roles=tuple(roles)
     )
 
 
-# ---- ③ pipeline 別ディスパッチと CLI -----------------------------------------
+# ---- ③ Per-pipeline dispatch and the CLI ------------------------------------------
 
 
-#: モデルカードの描き手（manifest とリポ ID と「host 読みの資産」の勘定から本文 1 枚）。
+#: The model card renderer (one body from the manifest, the repository ID and the count of
+#: "assets read on the host").
 #:
-#: `host_assets`（part 0 の同一性 {@link karume.modelcard.file_ref_key} → 容器が宣言する資産の
-#: 論理長の和）は manifest から導けない**容器の事実**なので、組み立てが引いて渡す（ADR 0109
-#: 決定 4 で PLE / `rope_base` が容器の中へ入り、独立したファイルの席が消えた）。
+#: `host_assets` (part 0 identity {@link karume.modelcard.file_ref_key} → the sum of the logical
+#: lengths of the assets the container declares) is **a fact of the container** that cannot be
+#: derived from the manifest, so assembly takes it and passes it in (with ADR 0109 decision 4 the
+#: PLE / `rope_base` moved into the container and the separate file entries disappeared).
 CardRenderer = Callable[[Mapping[str, Any], str, Mapping[FileRefKey, int]], str]
 
 
 @dataclass(frozen=True)
 class Pipeline:
-    """pipeline ごとに違うものだけを持つディスパッチ表の 1 行。
+    """One row of the dispatch table, holding only what differs per pipeline.
 
-    共有部（配置・共有の畳み込み・sha256・宣言と現物の突合）は上の汎用関数が持つので、
-    ここに並ぶのは「既定のモデル名 / モデルが属する配布リポ名 / 系列とモデル名から計画を組む
-    手順 / モデルカードの描き手」の 4 つだけ。
+    The shared part (placement, shared folding, sha256, reconciling declarations with files)
+    belongs to the generic functions above, so only four things are listed here: "the default
+    model name / the distribution repository name a model belongs to / the procedure that builds a
+    plan from a series and a model name / the model card renderer".
     """
 
     default_model: str
-    #: モデル名 → そのモデルを収める配布リポ名（`HF_OWNER` 抜き）。カードの Usage 例に綴る
-    #: repo の正本（{@link resolve_repo}）で、呼び出し側の既定の出力先もここから綴る。
-    #: 組むモデル全部が同じ名前を返すときだけ 1 リポの名前として成立する。
+    #: Model name → the name of the distribution repository holding that model (without
+    #: `HF_OWNER`). The source of truth for the repo spelled in the card's Usage example
+    #: ({@link resolve_repo}); the caller's default output location is spelled from it too.
+    #: It holds as the name of one repository only when every model built returns the same name.
     repo_name: Callable[[str], str]
     plan: Callable[[Path, str], ModelPlan]
-    #: モデルカードの**帰属プロファイル**（名前 → 描き手）。テンプレートは pipeline 固有でも、
-    #: 帰属（出所・ライセンス・引用）は声のファミリーごとに別の事実になるため 1 対 1 ではない。
+    #: The model card's **attribution profiles** (name → renderer). Even when the template is
+    #: pipeline-specific, attribution (provenance, licence, citation) is a separate fact per voice
+    #: family, so the mapping is not one to one.
     card_profiles: Mapping[str, CardRenderer]
-    #: 配布リポ**直下**へ入れる法的テキスト（ファイル名 → 中身）。受理する名前は
-    #: {@link LEGAL_PATHS} だけ。上流の重みライセンスが再配布の条件としてライセンス文の
-    #: コピーや Attribution Notice を要求する pipeline だけが渡す（既定は空 = 何も置かない）。
+    #: Legal texts placed **at the root** of the distribution repository (file name → content). The
+    #: only accepted names are {@link LEGAL_PATHS}. Passed only by pipelines whose upstream weight
+    #: licence requires a copy of the licence text or an Attribution Notice as a condition of
+    #: redistribution (empty by default = nothing is placed).
     root_files: Mapping[str, str] = field(default_factory=dict)
 
 
 def resolve_card_renderer(pipeline: Pipeline, profile: str | None) -> CardRenderer:
-    """`--card-profile` を描き手へ解決する。
+    """Resolve `--card-profile` to a renderer.
 
-    MUST: 選択肢が 2 つ以上あるとき、省略は**選択肢を並べて落とす** — 既定を黙って選ぶと、
-    新しいファミリーのリポへ前のファミリーの帰属がそのまま描かれる。表も使い方も正しいまま
-    帰属だけが誤るので、配ってからでないと誰も気づけない。1 つしかない pipeline は選びようが
-    ないので省略で通す（2 つ目が生えた瞬間に、この規則が自動で明示を要求しはじめる）。
+    MUST: with two or more choices, omitting it **fails listing the choices** — silently picking a
+    default would draw the previous family's attribution onto a new family's repository as is.
+    Only the attribution would be wrong while tables and usage stay right, so nobody could notice
+    until after distribution. A pipeline with only one choice has nothing to choose, so omission
+    passes (the moment a second one appears, this rule starts requiring it explicitly on its own).
     """
     choices = ", ".join(sorted(pipeline.card_profiles))
     if profile is None:
         if len(pipeline.card_profiles) != 1:
             raise DistError(
-                f"--card-profile が要る（選択肢: {choices}）— モデルカードの帰属は"
-                "ファミリーごとに違う事実なので、既定を黙って選ばない"
+                f"--card-profile is required (choices: {choices}) — the model card's attribution"
+                " is a different fact per family, so no default is picked silently"
             )
         return next(iter(pipeline.card_profiles.values()))
     renderer = pipeline.card_profiles.get(profile)
     if renderer is None:
-        raise DistError(f"帰属プロファイル '{profile}' は無い（選択肢: {choices}）")
+        raise DistError(f"Attribution profile '{profile}' does not exist (choices: {choices})")
     return renderer
 
 
 def resolve_repo(pipeline: Pipeline, models: Sequence[str], repo: str | None) -> str:
-    """モデルカードの Usage 例に綴る HF リポ ID（`<owner>/<name>`）を決める。
+    """Decide the HF repository ID (`<owner>/<name>`) spelled in the model card's Usage example.
 
-    正本は pipeline の宣言（{@link Pipeline.repo_name}）で、`--repo` はそれを明示で上書きする口。
+    The source of truth is the pipeline's declaration ({@link Pipeline.repo_name}); `--repo`
+    overrides it explicitly.
 
-    MUST: 出力先のディレクトリ名からは導かない — 置き場はリポの事実ではないので、別名の
-    ディレクトリ（ステージング）で焼いた配布形のカードが、実在しないリポを指したまま公開される。
-    MUST: 組むモデルの宣言が 1 つに揃わないとき（モデル名をリポ名に含む pipeline で複数モデルを
-    1 リポへ束ねるとき）は推定せず `--repo` を求めて落とす — 束ねたリポの名前は命名の決定で
-    あって、モデル名の並びからは決まらない。
+    MUST: not derived from the output directory name — the location is not a fact of the
+    repository, so the card of a distribution built in a directory with another name (staging)
+    would be published still pointing at a repository that does not exist.
+    MUST: when the declarations of the models built do not agree on one name (a pipeline whose
+    repository name includes the model name, bundling several models into one repository), it is
+    not guessed; it fails asking for `--repo` — the name of a bundled repository is a naming
+    decision and does not follow from the list of model names.
     """
     if repo is not None:
         if not REPO_RE.fullmatch(repo):
-            raise DistError(f"--repo '{repo}' が '<owner>/<name>' の形でない")
+            raise DistError(f"--repo '{repo}' is not of the form '<owner>/<name>'")
         return repo
     names = sorted({pipeline.repo_name(model) for model in models})
     if len(names) != 1:
         raise DistError(
-            f"モデル {' / '.join(models)} が宣言するリポ名が 1 つに揃わない"
-            f"（{' / '.join(names)}）— 1 リポへ束ねる名前は --repo OWNER/NAME で明示する"
+            f"The repository names models {' / '.join(models)} declare do not agree"
+            f" ({' / '.join(names)}) — name the bundled repository explicitly with"
+            " --repo OWNER/NAME"
         )
     return f"{HF_OWNER}/{names[0]}"
 
 
-#: core wheel だけで組める pipeline（全量ではない — モジュール doc の MUST）。
+#: Pipelines that can be built with the core wheel alone (not all of them — the module doc's
+#: MUST).
 #:
-#: NOTE: **空**。family 別 recipe は 1 つ残らず wheel の外（`tools/export-recipes/<family>/`）
-#: へ出たので（ADR 0065 段 3+4 完了）、受理集合の正本はリポの dist ドライバ
-#: （`tools/export-recipes/dist.py`）の辞書だけになった。この席を残すのは、core が
-#: 「表を受け取る側」であって「表を持たない側」ではないことを型で示すため — 空 mapping の
-#: まま {@link main} を呼べば `--pipeline` が何を渡しても落ちる（core 単体では 1 つも組めない、
-#: が正しい振る舞い）。
+#: NOTE: **empty**. Every per-family recipe moved out of the wheel
+#: (`tools/export-recipes/<family>/`) (ADR 0065 stages 3 and 4, complete), so the only source of
+#: truth for the accepted set is the dictionary of the repository's dist driver
+#: (`tools/export-recipes/dist.py`). The constant stays to show in the type that core is "the
+#: side that receives the table", not "a side without a table" — calling {@link main} with the
+#: empty mapping fails whatever `--pipeline` is given (core alone building nothing is the correct
+#: behaviour).
 PIPELINES: Mapping[str, Pipeline] = {}
 
 
-#: `--out` 省略時の出力先を作る hook（{@link main} が受ける）。リポの `models/<リポ名>/` を
-#: 綴れるのは repo topology を知っている呼び出し側だけなので、core は形だけ持つ。
+#: The hook that builds the output location when `--out` is omitted (taken by {@link main}). Only
+#: the caller, which knows the repo topology, can spell the repository's `models/<repo name>/`, so
+#: core holds only the shape.
 DefaultOutDir = Callable[[Pipeline, Sequence[str]], Path]
 
 
@@ -2005,37 +2222,40 @@ def build_parser(
     default_series: Path | None = None,
     has_default_out_dir: bool = False,
 ) -> argparse.ArgumentParser:
-    """`--pipeline` の受理集合を**引数で**受ける（ドライバが recipe を足した表を渡す）。
+    """Take the accepted set of `--pipeline` **as an argument** (the driver passes the table with
+    the recipes added).
 
-    `default_pipeline` を渡さない呼び出し（= core 単体）は `--pipeline` を必須にする
-    （{@link main} が選択肢を並べて落とす）。`--series` / `--out` の既定も同じ扱いで、
-    置き場を渡されていなければ help でそう名乗り、{@link main} が落とす。
+    A call without `default_pipeline` (= core alone) makes `--pipeline` required ({@link main}
+    fails listing the choices). The defaults of `--series` / `--out` are treated the same way:
+    when no location is passed, the help says so and {@link main} fails.
     """
-    parser = argparse.ArgumentParser(description="配布ディレクトリ（HF アップ可能形）の組み立て")
-    default_note = "必須" if default_pipeline is None else f"既定: {default_pipeline}"
+    parser = argparse.ArgumentParser(
+        description="Assemble a distribution directory (a form that can be uploaded to HF)"
+    )
+    default_note = "required" if default_pipeline is None else f"default: {default_pipeline}"
     parser.add_argument(
         "--pipeline",
         choices=sorted(pipelines),
         default=default_pipeline,
-        help=f"組み立てるパイプライン（{default_note}）",
+        help=f"pipeline to assemble ({default_note})",
     )
     parser.add_argument(
         "--model",
         action="append",
         dest="models",
         metavar="NAME",
-        help="組み立てるモデル名（繰り返すと 1 リポへまとめて組む = ファミリー組み立て。"
-        "最初の 1 つが defaultModel。既定: "
+        help="model name to assemble (repeat to build them into one repository = family"
+        " assembly; the first one is defaultModel; default: "
         + " / ".join(f"{name}={spec.default_model}" for name, spec in pipelines.items())
-        + "）",
+        + ")",
     )
     parser.add_argument(
         "--card-profile",
         dest="card_profile",
         metavar="NAME",
         default=None,
-        help="モデルカードの帰属プロファイル（出所・ライセンス・引用）。選択肢が 2 つ以上ある"
-        " pipeline では必須: "
+        help="attribution profile of the model card (provenance, licence, citation); required"
+        " for pipelines with two or more choices: "
         + " / ".join(
             f"{name}={'|'.join(sorted(spec.card_profiles))}" for name, spec in pipelines.items()
         ),
@@ -2044,59 +2264,64 @@ def build_parser(
         "--series",
         type=Path,
         default=default_series,
-        help="系列ディレクトリ群の親（"
-        + (f"既定: {default_series}" if default_series is not None else "必須")
-        + "）",
+        help="parent of the series directories ("
+        + (f"default: {default_series}" if default_series is not None else "required")
+        + ")",
     )
     parser.add_argument(
         "--out",
         type=Path,
         default=None,
-        help="出力先 = 1 ディレクトリ 1 HF リポ（"
+        help="output location = one directory per HF repository ("
         + (
-            "省略時は呼び出し側の既定。複数モデルを組むときは必須"
+            "omitted: the caller's default; required when building several models"
             if has_default_out_dir
-            else "必須"
+            else "required"
         )
-        + "）",
+        + ")",
     )
     parser.add_argument(
         "--repo",
         metavar="OWNER/NAME",
         default=None,
-        help="モデルカードの Usage 例に綴る HF リポ ID（既定: pipeline が宣言するリポ名。"
-        "組むモデルの宣言が 1 つに揃わないときは必須）。--out のディレクトリ名とは独立で、"
-        "別名のディレクトリへ焼いてもカードはこの名前を指す。上書きするときは --out も明示する",
+        help="HF repository ID spelled in the model card's Usage example (default: the repository"
+        " name the pipeline declares; required when the declarations of the models built do not"
+        " agree). Independent of the --out directory name: the card points at this name even"
+        " when built into a directory with another name. When overriding, give --out explicitly"
+        " too",
     )
-    # 越境参照（ADR 0038 §7）— **5 つ揃って初めて成立する opt-in**（1 つも無ければ従来どおり
-    # 完全自己完結の配布形になる。部分指定は {@link resolve_external_components} が落とす）。
+    # Cross-repository references (ADR 0038 §7) — **an opt-in that holds only with all 5
+    # options** (with none, the distribution is fully self-contained as before; a partial set
+    # fails in {@link resolve_external_components}).
     parser.add_argument(
         "--ref-repo",
         dest="ref_repo",
         metavar="OWNER/NAME",
         default=None,
-        help="越境参照する HF リポジトリ（指名した役割を自リポへ格納せずここへ向ける）",
+        help="HF repository to reference across repositories (the named roles point here"
+        " instead of being stored in this repository)",
     )
     parser.add_argument(
         "--ref-revision",
         dest="ref_revision",
         metavar="SHA",
         default=None,
-        help="同・参照先の commit sha（40 桁 hex — ブランチ名やタグは pin にならないので不可）",
+        help="likewise, the target's commit sha (40 hex digits — branch names and tags are not"
+        " a pin and are rejected)",
     )
     parser.add_argument(
         "--ref-dist",
         dest="ref_dist",
         type=Path,
         default=None,
-        help="同・ローカルに組み上がっている参照元の配布形（size / sha256 の出所）",
+        help="likewise, the referenced distribution assembled locally (source of size / sha256)",
     )
     parser.add_argument(
         "--ref-model",
         dest="ref_model",
         metavar="NAME",
         default=None,
-        help="同・参照元 dist の中のモデル名",
+        help="likewise, the model name inside the referenced dist",
     )
     parser.add_argument(
         "--ref-role",
@@ -2104,7 +2329,7 @@ def build_parser(
         dest="ref_roles",
         metavar="ROLE",
         default=None,
-        help="同・参照へ差し替える役割名（繰り返し可）",
+        help="likewise, a role name to replace with a reference (repeatable)",
     )
     return parser
 
@@ -2124,29 +2349,38 @@ def main(
         has_default_out_dir=default_out_dir is not None,
     ).parse_args(argv)
     if args.pipeline is None:
-        # MUST: 既定を core に焼かない（モジュール doc の MUST）— 表が呼び出し側で変わる。
+        # MUST: no default is baked into core (the module doc's MUST) — the table changes with
+        # the caller.
         raise DistError(
-            f"--pipeline が要る（選択肢: {', '.join(sorted(pipelines))}）— "
-            "リポ専用 recipe まで含めた表は tools/export-recipes/dist.py が持つ"
+            f"--pipeline is required (choices: {', '.join(sorted(pipelines))}) — "
+            "the table including the repository-only recipes is in tools/export-recipes/dist.py"
         )
     if args.series is None:
-        # MUST: repo topology を core に焼かない（モジュール doc の MUST）。
-        raise DistError("--series が要る（系列ディレクトリ群の親）— 呼び出し側が既定を渡していない")
+        # MUST: no repo topology is baked into core (the module doc's MUST).
+        raise DistError(
+            "--series is required (parent of the series directories) — the caller passed no default"
+        )
     pipeline = pipelines[args.pipeline]
     models = args.models if args.models else [pipeline.default_model]
     if args.out is not None:
         out_dir = args.out
     elif args.repo is not None:
-        # 既定の出力先は pipeline の宣言から綴られるので、名前だけ上書きすると「あるリポの名前の
-        # ディレクトリに、別のリポを指すカード」が組み上がる。
-        raise DistError("--repo で上書きするときは --out も明示する（既定の出力先は宣言の名前）")
+        # The default output location is spelled from the pipeline's declaration, so overriding
+        # only the name would build "a card pointing at another repository, in a directory named
+        # after one repository".
+        raise DistError(
+            "When overriding with --repo, give --out explicitly too (the default output location"
+            " is the declared name)"
+        )
     elif default_out_dir is not None:
         out_dir = default_out_dir(pipeline, models)
     else:
-        raise DistError("--out が要る（配布形の出力先）— 呼び出し側が既定を渡していない")
-    # 帰属プロファイルとカードのリポ ID は**組み立ての前**に解決する — 誤った / 足りない指定で
-    # 数 GB を並べてから最後の 1 枚で落ちる形にしない。越境参照の指定も同じ理由でここで形だけ
-    # 確かめる。
+        raise DistError(
+            "--out is required (output location of the distribution) — the caller passed no default"
+        )
+    # The attribution profile and the card's repository ID are resolved **before assembly** — a
+    # wrong / missing option must not fail at the last file after laying out several GB. The
+    # cross-repository options are checked for shape here for the same reason.
     render_card = resolve_card_renderer(pipeline, args.card_profile)
     repo = resolve_repo(pipeline, models, args.repo)
     external = resolve_external_components(
@@ -2156,11 +2390,13 @@ def main(
         model=args.ref_model,
         roles=args.ref_roles,
     )
-    # MUST: 全モデルの計画（= 検査と読み取り）を配置の**前**に済ませる — 2 モデル目で落ちる
-    # 形でも、1 モデル目だけ入った配布形を後段に見せない。
+    # MUST: the plans of every model (= checks and reads) are settled **before** placement — even
+    # when the second model fails, a distribution holding only the first model is not shown to
+    # later stages.
     plans = [pipeline.plan(args.series, model) for model in models]
-    # モデルカードは組み立ての中（staging）で、**検証を通った manifest** から描く（表と現物が
-    # 食い違ったまま説明だけ生えることがない順序・カードごと 1 回で据わる）。
+    # The model card is drawn inside assembly (staging), from **the verified manifest** (an order
+    # in which a description never appears while table and files disagree; it is put in place in
+    # one go, card included).
     manifest = assemble_family(
         plans,
         out_dir,
@@ -2176,9 +2412,10 @@ def main(
         meta = out_dir / rel_path
         if meta.is_file():
             print(f"{meta.stat().st_size:>12}  {rel_path}")
-    # 越境参照は手元に現物が無いので `verify_dist` の一覧には出ない — 何を他リポへ預けたかが
-    # 組み立ての出力から読めるように、指し先ごと 1 行で並べる（同じ席を複数の dtype 席が
-    # 指すので、カードと同じ同一性〈出所と path の組〉で一意化する）。
+    # Cross-repository references have no local files, so they do not appear in `verify_dist`'s
+    # listing — so that what was left to other repositories can be read from the assembly output,
+    # one line per target is printed (several dtype entries point at the same entry, so they are
+    # made unique by the same identity as the card — the pair of source and path).
     borrowed = {
         file_ref_key(ref): ref["size"]
         for _, ref in _declared_refs(manifest)

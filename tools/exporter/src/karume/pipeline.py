@@ -1,11 +1,12 @@
-"""export → 正規化 → 変換 → 格納変換 → 公開の一本道。
+"""The single path export → normalize → convert → storage conversion → publish.
 
-エクスポート台本（モデルごとのスクリプト）が段の順序を各自で書くと、正規化の抜けや
-検証漏れが台本ごとに散る。順序はここ 1 箇所で決める。
+When each export script (one script per model) spells out the order of the steps itself, missed
+normalizations and skipped checks scatter across the scripts. The order is decided here, in one
+place.
 
-配布形は**コンテナ**（`krm` — container-v1）で、書き出しの 3 段（書く → 読み直して検証 →
-据え替え）は `karume.publish` が持つ。ここが足すのは「どの名前で・どの出所で・どの資産を
-同梱して据えるか」だけである。
+The distribution is a **container** (`krm` — container-v1), and the three write steps (write →
+read back and verify → swap into place) belong to `karume.publish`. All this module adds is "under
+which name, with which provenance and with which bundled assets it is put in place".
 """
 
 from __future__ import annotations
@@ -31,7 +32,8 @@ from karume.normalize import normalize_graph
 from karume.publish import publish_container
 from karume.verify import assert_op_contracts, assert_runtime_support
 
-#: コンテナ（モデル容器）の拡張子（container-v1 §1 — 種別は magic が持つが名前も分けておく）。
+#: Extension of a container (model container) (container-v1 §1 — the kind is carried by the magic,
+#: but the names are kept apart too).
 MODEL_SUFFIX = ".krm"
 
 
@@ -43,12 +45,12 @@ def export_module(
     symbol_names: Sequence[str] = ("T",),
     preserved: Sequence[str] = PRESERVED_OP_PREFIXES,
 ) -> tuple[IrGraph, dict[str, torch.Tensor]]:
-    """nn.Module を IR グラフ + 格納テンソルへ変換する。
+    """Convert an nn.Module to an IR graph + stored tensors.
 
-    `preserved` は分解を止める高位 op の接頭辞集合（既定は 11 op）。**ターゲット別**に
-    差し替えられるのは融合 attention（ADR 0023）のためで、SDPA 保存は
-    `PRESERVED_OP_PREFIXES_WITH_ATTENTION` を渡したターゲットだけが得る — 表をグローバルに
-    広げると mask 付き SDPA を持つグラフが `_h_attention` の fail loudly で export 不能になる。
+    `preserved` is the set of prefixes of high-level ops that stop decomposition (12 ops by
+    default). It can be replaced **per target** for fused attention (ADR 0023): only targets that
+    pass `PRESERVED_OP_PREFIXES_WITH_ATTENTION` keep SDPA — widening the table globally would make
+    graphs with a masked SDPA impossible to export through the fail-loudly of `_h_attention`.
     """
     ep = torch.export.export(module, args, dynamic_shapes=dynamic_shapes, strict=False)
     decomposed = ep.run_decompositions(curated_decompositions(preserved))
@@ -57,32 +59,35 @@ def export_module(
 
 
 def _assert_graph_name(graph_name: str) -> str:
-    """容器のグラフ名が語彙（`[A-Za-z0-9._-]{1,64}`）に収まることを落とす。
+    """Reject a container graph name outside the vocabulary (`[A-Za-z0-9._-]{1,64}`).
 
-    MUST: 既定を持たない（`provenance` と同じ扱い）— 呼び手は**作業席**（`<部品>.staging/`）へ
-    書くので、親ディレクトリ名を既定にすると全系列のグラフ名が `<部品>.staging` になる。
-    語彙には `.` が入るので fail loudly もせず、ランタイムが部品名で引いた時点で初めて
-    「コンテナにグラフが無い」になる。部品名（= `karume.json` の weights のキー）を知って
-    いるのは呼び手だけなので、呼び手が名乗る（container-v1 §2.1 — 移行 CLI が使う部品名と
-    同じ綴り MUST）。
+    MUST: no default (treated like `provenance`) — the caller writes into **the staging directory**
+    (`<component>.staging/`), so defaulting to the parent directory name would make the graph name
+    of every series `<component>.staging`. The vocabulary includes `.`, so this would not even fail
+    loudly; it would first surface as "the container has no graph" when the runtime looks the
+    component name up. Only the caller knows the component name (= the key of weights in
+    `karume.json`), so the caller names it (container-v1 §2.1 — it MUST be spelled like the
+    component name the migration CLI uses).
     """
     if GRAPH_NAME_PATTERN.fullmatch(graph_name) is None:
         raise ContainerFormatError(
-            f"グラフ名 '{graph_name}' がコンテナの語彙（{GRAPH_NAME_PATTERN.pattern}）から外れる"
+            f"Graph name '{graph_name}' is outside the container vocabulary"
+            f" ({GRAPH_NAME_PATTERN.pattern})"
         )
     return graph_name
 
 
 def _assert_model_path(path: str | Path) -> Path:
-    """出力 path が容器の拡張子（`.krm`）で終わることを落とす。
+    """Reject an output path that does not end in the container extension (`.krm`).
 
-    MUST: 他の拡張子を `.krm` へ黙って読み替えない — 配布形は `krm` の 1 つだけで
-    （container-v1 §8）、別の拡張子を渡す呼び手は退役した形を書くつもりでいる。
+    MUST: another extension is not silently read as `.krm` — `krm` is the only distribution form
+    (container-v1 §8), and a caller that passes another extension means to write a retired form.
     """
     final = Path(path)
     if final.suffix != MODEL_SUFFIX:
         raise ValueError(
-            f"出力 path '{final}' の拡張子が {MODEL_SUFFIX} ではない（配布形は krm だけ）"
+            f"The extension of output path '{final}' is not {MODEL_SUFFIX}"
+            " (krm is the only distribution form)"
         )
     return final
 
@@ -103,36 +108,43 @@ def publish_model(
     _part_bytes: int = DEFAULT_PART_BYTES,
     _block_bytes: int = BLOCK_MAX_BYTES,
 ) -> IrGraph:
-    """格納変換 → 公開の 3 段（変換済みのグラフを受ける入口）。
+    """Storage conversion → the three publish steps (the entry point that takes a converted graph).
 
-    MUST: 配布形を作る経路は**この 1 本**を通る。手術を挟む台本（decode 変種）が同じ段を各自で
-    綴っていた頃は、書き出し側の変更が写しの側で黙って壊れた。
+    MUST: every distribution goes through **this one path**. When scripts that insert a rewrite
+    (decode variants) spelled out the same steps themselves, changes on the writing side silently
+    broke the copies.
 
-    `provenance` は**必須**（既定値で出所を偽らない — `license` を落とした配布形を作らない）。
-    `graph_name` も**必須**で、綴りは**配布形の部品名 = `karume.json` の weights のキー**
-    MUST（container-v1 §2.1）— ランタイムは `prepareContainer(opened,
-    <weights キー>)` でグラフを名前で引き、移行 CLI も同じキーで焼く。**据え替え先の
-    ディレクトリ名とは一致しないことがある**（系列直下に容器を置く family は
-    `siglip2-so400m-patch14-384` のような系列名が、irodori は `caption-proj` のような
-    ハイフン綴りがディレクトリ名になる — キーはそれぞれ `vision` / `caption_proj`）ので、
-    **呼び手は部品名を定数で名乗る**（ディレクトリから導かない）。作業席の名前
-    （`<部品>.staging`）を拾わせない側の門は {@link _assert_graph_name}。
-    `assets`（資産名 → {@link karume.container.AssetInput}）は PLE 索引や `rope_base` のような
-    「重みではないが同じ容器で配るバイト列」の席で、重みの part の**後ろ**の専用 part に載る
-    （ADR 0109 決定 4）。
+    `provenance` is **required** (no default value that misstates the provenance — no distribution
+    that dropped `license`). `graph_name` is **required** too, and MUST be spelled as **the
+    distribution's component name = the key of weights in `karume.json`** (container-v1 §2.1) —
+    the runtime looks the graph up by name with `prepareContainer(opened,
+    <weights key>)`, and the migration CLI writes the same key. **It may differ from the name of
+    the target directory** (for families that put the container directly under the series, the
+    directory name is a series name like `siglip2-so400m-patch14-384`; for irodori it is a hyphen
+    spelling like `caption-proj` — the keys are `vision` / `caption_proj` respectively), so **the
+    caller names the component with a constant** (not derived from the directory). The check that
+    keeps the staging name (`<component>.staging`) from being picked up is
+    {@link _assert_graph_name}.
+    `assets` (asset name → {@link karume.container.AssetInput}) is the field for "bytes that are
+    not weights but ship in the same container", such as the PLE index or `rope_base`; they go into
+    a dedicated part **after** the weight parts (ADR 0109 decision 4).
 
-    `path` は `.krm` で終わる代表 path（他の拡張子は `ValueError` — {@link _assert_model_path}）。
-    既定の分割形では part 0 から `<stem>-NNNNN-of-NNNNN.krm` の連番になり、`path` 自身は
-    書かれない（HF の公式配布は分割形だけ — container-v1 §8）。`single=True` は手元用の単一形。
+    `path` is the representative path ending in `.krm` (another extension is a `ValueError` —
+    {@link _assert_model_path}). In the default split form the files are numbered
+    `<stem>-NNNNN-of-NNNNN.krm` from part 0, and `path` itself is not written (the official HF
+    distribution is split form only — container-v1 §8). `single=True` is the single form for local
+    use.
 
-    戻すのは**格納宣言を commit したグラフ**（実際に焼いた `storage` を持つビュー）。渡された
-    `graph` は 1 バイトも変えない。「書いたものが読めるか」は `karume.publish` の読み直し検証
-    （payload / 資産 / 2 文書の突合）が済ませている。
+    Returns **the graph with the storage declarations committed** (the view with the `storage`
+    actually written). The `graph` passed in is not changed by a single byte. "Can what was written
+    be read" is already settled by the read-back verification of `karume.publish` (payload /
+    assets / reconciliation of the two documents).
 
-    MUST: 書き出しの**前**に IR の受理規則（ランタイム支援 + op 契約）を掛ける — 台本は
-    `to_states_form` のようなグラフ手術を挟むので、変換段の検査だけでは「書けるがランタイムが
-    読めない」容器を止められない。掛ける相手は `stored_model` が commit したグラフ（実際に
-    焼く格納を持つビュー）で、落ちた回は **1 バイトも据わらない**。
+    MUST: the IR acceptance rules (runtime support + op contracts) are applied **before** writing
+    — scripts insert graph rewrites such as `to_states_form`, so the checks of the conversion step
+    alone cannot stop a container that "can be written but the runtime cannot read". They are
+    applied to the graph `stored_model` committed (the view with the storage actually written), and
+    a failed run puts **not a single byte** in place.
     """
     final = _assert_model_path(path)
     stored = stored_model(
@@ -175,20 +187,22 @@ def export_to_file(
     preserved: Sequence[str] = PRESERVED_OP_PREFIXES,
     assets: Mapping[str, AssetInput] = {},
 ) -> IrGraph:
-    """変換して `krm` として据え、格納宣言を commit したグラフを返す（export → 公開の一本道）。
+    """Convert, put in place as `krm`, and return the graph with the storage declarations
+    committed (the single path from export to publish).
 
-    `weight_dtype` が `"f16"` / `"bf16"` / `"i8"` / `"i4"` のとき適格な重みスロットだけが圧縮格納に
-    なる（ADR 0018 / 0131 / 0019 / 0069）。呼び出し側は**丸め（fake-quant）を参照・golden の
-    採取より前に済ませておく** MUST — 掛け忘れは `emit.stored_model` が fail loudly で落とす。
-    `weight_scales` は i8 / i4 の scale 台帳（`quantize.fake_quant_int8` / `fake_quant_int4` の
-    戻り — 混成では両者を合流して渡す）。`weight_dtype_overrides`（テンソルキー → dtype）は
-    1 本単位の明示指定で既定に優先する（混成格納 — 線引きは `emit._plan_weight_dtype`）。
+    When `weight_dtype` is `"f16"` / `"bf16"` / `"i8"` / `"i4"`, only eligible weight slots get the
+    compressed storage (ADR 0018 / 0131 / 0019 / 0069). The caller MUST **apply the rounding
+    (fake-quant) before taking the reference and the goldens** — a missed application fails loudly
+    in `emit.stored_model`. `weight_scales` is the i8 / i4 scale ledger (the return value of
+    `quantize.fake_quant_int8` / `fake_quant_int4` — for mixed storage, merge both and pass them).
+    `weight_dtype_overrides` (tensor key → dtype) is an explicit per-tensor choice that takes
+    precedence over the default (mixed storage — the line is drawn in `emit._plan_weight_dtype`).
 
-    `provenance` と `graph_name`（= 配布形の部品名 = `karume.json` の weights のキー）は
-    **必須** — 意味と理由は {@link publish_model}。書き出し以降（原子性・part 分割・後始末）も
-    向こうが持つ。
+    `provenance` and `graph_name` (= the distribution's component name = the key of weights in
+    `karume.json`) are **required** — meaning and reasons in {@link publish_model}. Everything from
+    writing on (atomicity, part splitting, clean-up) belongs there too.
     """
-    # 出力 path の拡張子は export の前に落とす（重い export を回してから拒否しない）。
+    # Reject the output path's extension before export (do not refuse after a heavy export).
     _assert_model_path(path)
     graph, tensors = export_module(
         module,

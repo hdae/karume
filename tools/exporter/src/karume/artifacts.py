@@ -1,20 +1,24 @@
-"""成果物の transactional な公開 — staging へ作り、通ってから final へ据える（ADR 0052）。
+"""Transactional publication of artifacts — build in staging, swap into final once it passes
+(ADR 0052).
 
-書き手（配布形の組み立て・系列ディレクトリの書き出し・単体 export）が違っても規律は 1 つ:
-**final は最後の rename まで 1 バイトも触らない**。書き込みの途中で落ちても、検証門が
-拒否しても、Ctrl-C でも、正規 path には前回の last-known-good がそのまま残り、「書けたが
-読めない」資産も「新旧が混ざった」資産も現れない。
+Whatever the writer (assembling a distribution, writing a series directory, a single export), the
+discipline is one: **final is not touched by a single byte until the last rename**. Whether the
+write fails midway, a verification check rejects it, or Ctrl-C hits, the canonical path keeps the
+previous last-known-good, and neither a "written but unreadable" asset nor a "mix of old and new"
+asset ever appears.
 
-面は 2 つだけ:
+There are only two surfaces:
 
-- {@link staged_publication} — 席の用意から据え替えまでの全体。`with` の本体が「書き込み +
-  検証門」で、例外なく抜けたときにだけ据わる。呼び手は席の綴りも後片付けも持たない。
-- {@link swap_into_place} — 据え替えだけ。既に埋まった席を持っている呼び手向け。
+- {@link staged_publication} — the whole thing, from preparing the staging path to the swap. The
+  body of `with` is "write + verification check", and the swap happens only when it exits without
+  an exception. The caller owns neither the path spelling nor the cleanup.
+- {@link swap_into_place} — the swap only. For callers that already hold a filled staging path.
 
-作業席（`<final の名前>.staging`）と退避席（同 `.old`）は**必ず final と同じ親**に作る —
-rename が原子的なのは同一ファイルシステム内だけで、`/tmp` などへ逃がすと据え替えが跨デバイス
-コピーへ落ちて原子性ごと消える。どちらも**固定名**で、中断が残した席は次の実行が黙って捨てる
-（一意名で撒くと、拾い直せない残骸が実行のたびに溜まる）。
+The staging path (`<final name>.staging`) and the superseded path (likewise `.old`) are **always**
+created in the same parent as final — rename is atomic only within one file system, and moving them
+to `/tmp` or the like turns the swap into a cross-device copy and loses atomicity altogether. Both
+have **fixed names**, and a path left behind by an interruption is silently discarded by the next
+run (scattering unique names would pile up debris that can never be picked up again, one per run).
 """
 
 from __future__ import annotations
@@ -25,25 +29,26 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-#: 組み立て中の成果物を置く席（final と同じ親・固定名）。
+#: The path that holds the artifact being assembled (same parent as final, fixed name).
 STAGING_SUFFIX = ".staging"
 
-#: 据え替えの直前まで last-known-good を残す席（同上）。
+#: The path that keeps the last-known-good until just before the swap (likewise).
 SUPERSEDED_SUFFIX = ".old"
 
 
 class ArtifactSwapError(OSError):
-    """据え替えの rename が失敗した（原因の OSError は `__cause__` に連鎖する）。
+    """The rename of a swap failed (the causing OSError is chained in `__cause__`).
 
-    OSError を継承するのは、呼び手にとってこれが I/O 故障そのものだから — 素の `os.replace`
-    を呼んでいた頃の `except OSError` が意味を変えずにそのまま効く。
+    It inherits OSError because, for the caller, this is the I/O failure itself — an `except
+    OSError` from the days of calling bare `os.replace` keeps working without changing meaning.
     """
 
 
 def _discard(path: Path) -> None:
-    """`path` を（在れば）丸ごと消す — 作業席・退避席の後始末。
+    """Remove `path` entirely (if present) — cleanup of the staging and superseded paths.
 
-    中断が残した席を踏み直すと、書き手が計画していないファイルが新しい成果物へ黙って混ざる。
+    Reusing a path left behind by an interruption would silently mix files the writer did not plan
+    into the new artifact.
     """
     if path.is_dir():
         shutil.rmtree(path)
@@ -52,11 +57,13 @@ def _discard(path: Path) -> None:
 
 
 def _reclaim_superseded(final: Path, superseded: Path) -> None:
-    """退避席を空にする — ただし last-known-good なら捨てずに final へ戻す。
+    """Empty the superseded path — but if it is the last-known-good, move it back to final.
 
-    退避席だけが在って final が無いのは、前回が rename 2 回の**間**で落ちた形。その退避席は
-    last-known-good そのものなので、捨てると「手元の成果物が完全消失した」状態から次の実行が
-    始まる（final が在るときの退避席は、据え替えを終えた実行が消し損ねたただの残骸）。
+    A superseded path present with no final is the shape of a previous run that failed
+    **between** the two renames. That superseded path is the last-known-good itself, so discarding
+    it would start the next run from a state where "the local artifact is completely gone" (a
+    superseded path next to an existing final is just debris a run that finished the swap failed
+    to remove).
     """
     if superseded.exists() and not final.exists():
         os.replace(superseded, final)
@@ -64,17 +71,20 @@ def _reclaim_superseded(final: Path, superseded: Path) -> None:
 
 
 def swap_into_place(staged: Path, final: Path) -> None:
-    """埋まった作業席 `staged` を `final` へ**丸ごと**据える（元の中身は 1 つも引き継がない）。
+    """Put the filled staging path `staged` in place of `final` **as a whole** (nothing of the old
+    content is carried over).
 
-    非空ディレクトリの上へは rename できないので、ディレクトリの据え替えは退避 → 昇格の 2 段に
-    なる。2 段の間で落ちると final は**不在**になるが、不在は読み手が確実に検出できる — 作って
-    はならないのは「静かに読めてしまう新旧混成」で、この手順はそれを構造的に作れない。昇格に
-    失敗したら退避席から戻すので、呼び手の手元は last-known-good のまま残る。
+    A rename cannot land on a non-empty directory, so swapping a directory takes two steps: move
+    aside, then promote. A failure between the two leaves final **absent**, but a reader detects
+    absence reliably — what must not be created is "a silently readable mix of old and new", and
+    this procedure cannot create it by construction. If the promotion fails, the superseded path is
+    moved back, so the caller keeps the last-known-good.
 
-    ファイル（と不在の final）は `os.replace` 1 回で据わる — 退避席を作らない分だけ強く、
-    final が不在になる瞬間そのものが無い。
+    A file (and an absent final) is put in place by one `os.replace` — stronger, since no
+    superseded path is created, and there is no moment at which final is absent.
 
-    作業席は消さない — 席の持ち主は呼び手（{@link staged_publication} 経由なら向こうが捨てる）。
+    The staging path is not removed — its owner is the caller (through
+    {@link staged_publication}, that side discards it).
     """
     superseded = final.with_name(final.name + SUPERSEDED_SUFFIX)
     _reclaim_superseded(final, superseded)
@@ -82,35 +92,38 @@ def swap_into_place(staged: Path, final: Path) -> None:
         try:
             os.replace(staged, final)
         except OSError as error:
-            raise ArtifactSwapError(f"{final} への据え替え（rename）に失敗した: {error}") from error
+            raise ArtifactSwapError(f"swap (rename) into {final} failed: {error}") from error
         return
     try:
         os.replace(final, superseded)
     except OSError as error:
-        # os.replace は原子的 — 失敗しても final は無傷のまま残る。
-        raise ArtifactSwapError(f"{final} の退避（rename）に失敗した: {error}") from error
+        # os.replace is atomic — final stays intact even on failure.
+        raise ArtifactSwapError(f"moving {final} aside (rename) failed: {error}") from error
     try:
         os.replace(staged, final)
     except OSError as error:
-        # 唯一の正常な成果物が退避席にしか無い状態で止めない。
+        # Do not stop in a state where the only valid artifact sits in the superseded path.
         os.replace(superseded, final)
-        raise ArtifactSwapError(f"{final} への据え替え（rename）に失敗した: {error}") from error
+        raise ArtifactSwapError(f"swap (rename) into {final} failed: {error}") from error
     _discard(superseded)
 
 
 @contextmanager
 def staged_publication(final: Path) -> Iterator[Path]:
-    """作業席を渡し、`with` を**例外なく**抜けたときにだけ `final` へ据える。
+    """Hand out the staging path, and put it in place of `final` only when `with` exits **without
+    an exception**.
 
-    本体が「書き込み + 検証門」の全部で、どこで落ちても（Ctrl-C でも）作業席だけが消えて
-    final は 1 バイトも変わらない。門を本体の中に置ける形なので、「書く → 検証する → その
-    検証を通った値から更に書き足す」順序も同じ席の中で組める。
+    The body is all of "write + verification check"; wherever it fails (Ctrl-C included), only the
+    staging path is removed and final does not change by a single byte. Since the check can sit
+    inside the body, the order "write → verify → write more from the values that passed that
+    verification" can also be built within the same staging path.
 
-    MUST: 席の外に掛かる検査（呼び手が用意する全体の前提）は `with` へ入る**前**に済ませる —
-    中で落とすと、捨てるだけとはいえ数 GB を並べ切ってからの破棄になる。
+    MUST: checks that apply outside the staging path (the overall preconditions the caller
+    prepares) are done **before** entering `with` — failing inside means discarding only after
+    laying out several GB, even if discarding is all it does.
 
-    作業席そのものは**作らない** — ディレクトリが要る書き手は自分で mkdir し、1 ファイルを
-    書く書き手はその path へ直接書く（どちらが要るかは書き手しか知らない）。
+    The staging path itself is **not created** — a writer that needs a directory runs mkdir itself,
+    and a writer of one file writes straight to that path (only the writer knows which it needs).
     """
     staging = final.with_name(final.name + STAGING_SUFFIX)
     superseded = final.with_name(final.name + SUPERSEDED_SUFFIX)

@@ -177,7 +177,7 @@ class TestTheDeclarationRules:
 
     def test_a_codec_outside_the_semantic_dtype_is_refused(self) -> None:
         """`i32` 宣言は生の int32 だけ — f16 のビット列として読む形を作らない。"""
-        with pytest.raises(ContainerFormatError, match="に codec 'f16' は組めない"):
+        with pytest.raises(ContainerFormatError, match="cannot pair with codec 'f16'"):
             bind(
                 [4, 32],
                 WeightSupply(BlockEncoding("f16"), block="w1"),
@@ -186,11 +186,13 @@ class TestTheDeclarationRules:
             )
 
     def test_a_block_longer_than_the_payload_plus_its_pad_is_refused(self) -> None:
-        with pytest.raises(ContainerFormatError, match="詰め物（4 未満）でない"):
+        with pytest.raises(
+            ContainerFormatError, match=r"is not payload \d+ bytes \+ padding \(less than 4\)"
+        ):
             bind([4, 32], WeightSupply(BlockEncoding("f32"), block="w1"), [("w1", 516, "weight")])
 
     def test_a_symbolic_shape_cannot_hold_an_entity(self) -> None:
-        with pytest.raises(ContainerFormatError, match="記号次元は使えない"):
+        with pytest.raises(ContainerFormatError, match="cannot use a symbolic dimension"):
             bind([4, "T"], WeightSupply(BlockEncoding("f32"), block="w1"), [("w1", 512, "weight")])
 
     def test_an_integral_float_dimension_is_read_as_the_integer(self) -> None:
@@ -206,7 +208,7 @@ class TestTheDeclarationRules:
         assert [(block.rows, block.payload_bytes) for block in supply.blocks] == [((0, 4), 512)]
 
     def test_a_fractional_dimension_is_still_refused(self) -> None:
-        with pytest.raises(ContainerFormatError, match=r"initializer の shape.*（4\.5）"):
+        with pytest.raises(ContainerFormatError, match=r"initializer's shape.*\(4\.5\)"):
             bind([4.5, 32], WeightSupply(BlockEncoding("f32"), block="w1"), [("w1", 512, "weight")])
 
     def test_an_initializer_without_a_value_declaration_is_refused(self) -> None:
@@ -224,11 +226,11 @@ class TestTheDeclarationRules:
             provenance=Provenance(license="mit"),
         )
 
-        with pytest.raises(ContainerFormatError, match="dtype / shape 宣言が無い"):
+        with pytest.raises(ContainerFormatError, match="no dtype / shape declaration"):
             bind_graphs(graph, model)
 
     def test_an_undeclared_block_is_refused(self) -> None:
-        with pytest.raises(ContainerFormatError, match="未宣言の block 'w9'"):
+        with pytest.raises(ContainerFormatError, match="undeclared block 'w9'"):
             bind([4, 32], WeightSupply(BlockEncoding("f32"), block="w9"), [("w1", 512, "weight")])
 
 
@@ -236,14 +238,17 @@ class TestThePieceRules:
     def test_the_last_piece_must_reach_the_declared_rows(self) -> None:
         supply = WeightSupply(BlockEncoding("f32"), pieces=(("w1", (0, 2)), ("w2", (2, 3))))
 
-        with pytest.raises(ContainerFormatError, match="宣言 shape の先頭次元 4 行と違う"):
+        with pytest.raises(
+            ContainerFormatError,
+            match="differs from the declared shape's leading dimension of 4 rows",
+        ):
             bind([4, 32], supply, [("w1", 256, "weight"), ("w2", 128, "weight")])
 
     def test_an_intermediate_piece_cannot_be_padded(self) -> None:
         """中間 piece の詰め物は次の piece の先頭を潰す（行範囲のバイト数ちょうど MUST）。"""
         supply = WeightSupply(BlockEncoding("f16"), pieces=(("w1", (0, 1)), ("w2", (1, 3))))
 
-        with pytest.raises(ContainerFormatError, match="詰め物不可"):
+        with pytest.raises(ContainerFormatError, match="no padding allowed"):
             # 1 行 = 7 要素 = 14 バイト。中間 piece を 16 バイトに膨らませる。
             bind([3, 7], supply, [("w1", 16, "weight"), ("w2", 28, "weight")])
 
@@ -252,7 +257,7 @@ class TestThePieceRules:
             quantized("int8-sym", 24, row_axis=1), pieces=(("w1", (0, 2)), ("w2", (2, 4)))
         )
 
-        with pytest.raises(ContainerFormatError, match="piece 分割できない"):
+        with pytest.raises(ContainerFormatError, match="cannot be split into pieces"):
             bind(
                 [4, 3, 8],
                 supply,
@@ -262,7 +267,7 @@ class TestThePieceRules:
 
 class TestTheQuantizedRules:
     def test_a_per_channel_group_size_is_the_row_length(self) -> None:
-        with pytest.raises(ContainerFormatError, match="groupSize は行長 32 に等しい"):
+        with pytest.raises(ContainerFormatError, match="groupSize MUST equal the row length 32"):
             bind(
                 [4, 32],
                 WeightSupply(quantized("int8-sym", 16), block="w1"),
@@ -270,7 +275,7 @@ class TestTheQuantizedRules:
             )
 
     def test_a_group_size_must_be_a_power_of_two_at_or_above_the_floor(self) -> None:
-        with pytest.raises(ContainerFormatError, match="2 冪かつ 16 以上でない"):
+        with pytest.raises(ContainerFormatError, match="is not a power of 2 that is 16 or more"):
             bind(
                 [4, 32],
                 WeightSupply(quantized("int4-sym-g", 8), block="w1"),
@@ -278,7 +283,7 @@ class TestTheQuantizedRules:
             )
 
     def test_a_group_size_must_divide_the_row_length(self) -> None:
-        with pytest.raises(ContainerFormatError, match="で割り切れない"):
+        with pytest.raises(ContainerFormatError, match="is not divisible by"):
             bind(
                 [4, 24],
                 WeightSupply(quantized("int4-sym-g", 32), block="w1"),
@@ -305,7 +310,9 @@ class TestTheQuantizedRules:
             )
 
     def test_an_i2_declaration_must_be_rank_2_with_a_16_multiple_row(self) -> None:
-        with pytest.raises(ContainerFormatError, match="正の rank 2・行長 16 の倍数"):
+        with pytest.raises(
+            ContainerFormatError, match="positive rank 2 with a row length that is a multiple of 16"
+        ):
             bind(
                 [4, 3, 8],
                 WeightSupply(quantized("int2-off", 24), block="w1"),
@@ -313,7 +320,7 @@ class TestTheQuantizedRules:
             )
 
     def test_a_quantized_encoding_without_its_three_fields_is_refused(self) -> None:
-        with pytest.raises(ContainerFormatError, match="rowAxis / groupSize / scale が要る"):
+        with pytest.raises(ContainerFormatError, match="rowAxis / groupSize / scale are required"):
             bind(
                 [4, 32],
                 WeightSupply(BlockEncoding("int8-sym"), block="w1"),
@@ -343,7 +350,7 @@ class TestTheContainerCli:
 
         assert "parts=1" in printed
         assert "graphs=synthetic" in printed
-        assert "assets=（無し）" in printed
+        assert "assets=(none)" in printed
 
     def test_a_flipped_block_byte_is_caught(self, tmp_path: Path) -> None:
         """block の sha256 まで見る（宣言が通るだけでは「検証した」と言わない）。"""
@@ -352,7 +359,9 @@ class TestTheContainerCli:
         raw[-1] ^= 0xFF
         copied.write_bytes(bytes(raw))
 
-        with pytest.raises(ContainerFormatError, match="sha256 が宣言と違う"):
+        with pytest.raises(
+            ContainerFormatError, match=r"sha256 of block .* differs from the declaration"
+        ):
             verify.main([str(copied)])
 
     def test_the_retired_flag_is_gone(self) -> None:
@@ -406,14 +415,14 @@ class TestTheIrAcceptanceGate:
         paths = self._written(tmp_path, ir_container(mark="gate"))
         read = verify_container(paths).read
 
-        with pytest.raises(verify.ContainerError, match="グラフ 'absent' が無い"):
+        with pytest.raises(verify.ContainerError, match="has no graph 'absent'"):
             verify.ir_graph_from_container(read, "absent")
 
     def test_a_container_declaring_an_unknown_op_is_rejected(self, tmp_path: Path) -> None:
         paths = self._written(tmp_path, with_an_unknown_op(ir_container(mark="gate")))
         read = verify_container(paths).read
 
-        with pytest.raises(verify.ContainerError, match="非対応 op"):
+        with pytest.raises(verify.ContainerError, match="unsupported ops"):
             verify.assert_ir_accepted(read)
 
     def test_the_same_container_without_the_unknown_op_is_accepted(self, tmp_path: Path) -> None:
@@ -426,7 +435,7 @@ class TestTheIrAcceptanceGate:
         """`karume verify` も組み立てと**同じ門**を通る（受け入れ側の半分）。"""
         paths = self._written(tmp_path, with_an_unknown_op(ir_container(mark="gate")))
 
-        with pytest.raises(verify.ContainerError, match="非対応 op"):
+        with pytest.raises(verify.ContainerError, match="unsupported ops"):
             verify.main([str(paths[0])])
 
     def test_a_graph_container_is_accepted(self, tmp_path: Path) -> None:
@@ -509,7 +518,7 @@ class TestTheTernaryPayload:
 
         with pytest.raises(
             ContainerFormatError,
-            match=r"initializer 'w': ternary の payload にコード 0.*（バイト 5）",
+            match=r"initializer 'w': the ternary payload has code 0.*\(byte 5\)",
         ):
             verify_container(paths, blocks=True)
 
@@ -533,5 +542,5 @@ class TestTheCodecRowAxes:
         # 対照: 同じ宣言の rowAxis 0 は合流まで通る（下の赤は軸の規則のもの）。
         bind([16, 16], replace(supply, encoding=quantized(codec, group_size)), blocks)
 
-        with pytest.raises(ContainerFormatError, match=f"codec '{codec}' の rowAxis は 0 だけ"):
+        with pytest.raises(ContainerFormatError, match=f"rowAxis of codec '{codec}' must be 0"):
             bind([16, 16], supply, blocks)

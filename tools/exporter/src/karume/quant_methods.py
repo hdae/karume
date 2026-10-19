@@ -1,25 +1,31 @@
-"""**測定専用**の重み丸め方式（FP4 / NF4 / MXFP4 / k-means codebook）— 格納経路は持たない。
+"""**Measurement-only** weight rounding methods (FP4 / NF4 / MXFP4 / k-means codebook) — they have
+no storage path.
 
-`quantize.py` に載る形（f16 / i8 / i4）は全て emit とランタイムの実装を持つ「**書ける格納
-形**」だが、ここに載るのは書けない方式で、狙いは「その方式なら品質がどこまで戻るか」を
-GPU コード 0 行で先に答えること（ADR 0069 決定 6 の Phase 0 sweep と同じ思想 — ADR 0058
-決定 5 の分担で言えば「品質 = 助言的数値」の数値側）。別モジュールに置くのは、`quantize.py`
-の「載っている形 = 出荷できる格納形」という読み方を壊さないため。
+Every form in `quantize.py` (f16 / i8 / i4) is a "**writable storage form**" with an emit and a
+runtime implementation; the methods here cannot be written, and their aim is to answer "how far
+does quality recover with this method" first, with zero lines of GPU code (the same idea as the
+Phase 0 sweep of ADR 0069 decision 6 — in the division of ADR 0058 decision 5, the numbers side
+of "quality = advisory numbers"). They live in a separate module so as not to break the reading
+of `quantize.py` that "what is in it = the storage forms that can ship".
 
-MUST: emit へ渡す口を作らない。戻り値は計数だけで scale / codebook の台帳を返さない
-（返すと「測定用の丸め」が格納経路へ流れる道ができる — 適格判定は消費 op で決まるので、
-emit 側は受け取った時点では正誤を判別できない）。丸めた重みそのものは in-place で
-書き換わるので、劣化の測定はそこから採る。
+MUST: no hook into emit is built. The return value is counts only, with no scale / codebook
+ledger (returning one would open a route for "measurement rounding" into the storage path —
+eligibility is decided by the consuming op, so the emit side cannot tell right from wrong at the
+point it receives it). The rounded weights themselves are rewritten in place, so degradation is
+measured from them.
 
-MUST: **同一入力 → ビット同一出力**。k-means の初期化まで決定的（分位点 + 固定反復）に
-してあるのは、乱数 seed 依存だと「方式の差」と「seed の差」が分離できなくなるため。
+MUST: **same input → bit-identical output**. Even the k-means initialisation is deterministic
+(quantiles + a fixed iteration count) because with a random seed "the difference between methods"
+and "the difference between seeds" could not be separated.
 
-MUST: 丸めは**参照・golden の採取より前**（`quantize` モジュール docstring と同文）。
+MUST: rounding happens **before the reference and the goldens are captured** (same text as the
+`quantize` module docstring).
 
-対象選択は `quantize.iter_quant_targets` の**共有**で、既定は {@link
-quantize.fake_quant_int4} と同じ linear 限定・`op_types` で i8 と同じ全種
-（`QUANT_MODULE_TYPES`）まで広げられる。
-写した別実装にしないのは、測った対象と出荷した対象が黙って割れるのを防ぐため。
+Target selection is **shared** with `quantize.iter_quant_targets`; the default is linear only, as
+for {@link quantize.fake_quant_int4}, and `op_types` can widen it up to every type of i8
+(`QUANT_MODULE_TYPES`).
+It is not a copied separate implementation, to keep the measured targets and the shipped targets
+from silently diverging.
 """
 
 from __future__ import annotations
@@ -41,9 +47,11 @@ from .quantize import (
     restore_channel_rows,
 )
 
-#: FP4 (e2m1) の値集合 — 符号 1 / 指数 2 / 仮数 1 bit（subnormal 込みで 0.5 刻みから 6.0 まで）。
-#: 16 符号のうち ±0 が同値なので**相異なる値は 15**（i4 の ±7 が 15 準位なのと同じ）。
-#: MUST: 昇順（丸めが隣接準位の中点による二分探索 — {@link round_to_levels}）。
+#: The FP4 (e2m1) value set — 1 sign / 2 exponent / 1 mantissa bit (subnormals included, from
+#: steps of 0.5 up to 6.0). Of the 16 codes ±0 are equal, so there are **15 distinct values** (as
+#: i4's ±7 has 15 levels).
+#: MUST: ascending (rounding is a binary search over the midpoints of adjacent levels —
+#: {@link round_to_levels}).
 FP4_E2M1_LEVELS: tuple[float, ...] = (
     -6.0,
     -4.0,
@@ -62,11 +70,12 @@ FP4_E2M1_LEVELS: tuple[float, ...] = (
     6.0,
 )
 
-#: NF4（4bit NormalFloat）の 16 準位。出典 = Dettmers et al., "QLoRA: Efficient Finetuning of
-#: Quantized LLMs"（arXiv:2305.14314）§3 の NF4 と、その実装 bitsandbytes の
-#: `create_normal_map()` が出す表。標準正規の分位点を ±1 へ正規化した非対称格子で、**0.0 と
-#: ±1.0 を厳密に含む**（0 が表に無いと疎な重みが復元できず、±1 が無いと group の amax 要素が
-#: 復元されない）。FP4 と違い正負で刻みが違う。
+#: The 16 levels of NF4 (4-bit NormalFloat). Source = NF4 in §3 of Dettmers et al., "QLoRA:
+#: Efficient Finetuning of Quantized LLMs" (arXiv:2305.14314), and the table produced by
+#: `create_normal_map()` of its implementation, bitsandbytes. An asymmetric grid of standard normal
+#: quantiles normalised to ±1, which **contains 0.0 and ±1.0 exactly** (without 0 in the table
+#: sparse weights cannot be restored, and without ±1 the group's amax element is not restored).
+#: Unlike FP4, the steps differ between the positive and negative sides.
 NF4_LEVELS: tuple[float, ...] = (
     -1.0,
     -0.6961928009986877,
@@ -86,20 +95,23 @@ NF4_LEVELS: tuple[float, ...] = (
     1.0,
 )
 
-#: MXFP4 の要素形式（= FP4 e2m1）の最大指数。OCP Microscaling Formats (MX) v1.0 の変換手順は
-#: block の共有 scale を `2^(floor(log2(amax)) − emax_elem)` の 2 のべきで採る。e2m1 の最大値
-#: 6.0 = 1.5×2² なので `emax_elem = 2`。
+#: Maximum exponent of the MXFP4 element format (= FP4 e2m1). The conversion procedure of OCP
+#: Microscaling Formats (MX) v1.0 takes the block's shared scale as the power of two
+#: `2^(floor(log2(amax)) − emax_elem)`. The largest e2m1 value is 6.0 = 1.5×2², so
+#: `emax_elem = 2`.
 MXFP4_ELEMENT_EMAX = 2
 
-#: k-means codebook の準位数（4bit = 16 centroid）。
+#: Number of k-means codebook levels (4 bit = 16 centroids).
 DEFAULT_CODEBOOK_LEVELS = 16
 
-#: Lloyd 反復の固定回数。**収束判定で止めない** — 判定の閾値が入力依存の任意性になるうえ、
-#: 「反復が足りない」と「方式が弱い」が混ざる。1 次元・16 centroid では十分に落ち着く回数。
+#: Fixed number of Lloyd iterations. **No convergence test stops it** — its threshold would be an
+#: input-dependent arbitrary choice, and "not enough iterations" would mix with "the method is
+#: weak". For 1-D with 16 centroids this count settles well enough.
 DEFAULT_CODEBOOK_ITERATIONS = 16
 
-#: k-means の表の粒度。`shared` は**層をまたいで 1 枚**の表を、group(g32) の absmax で
-#: 正規化した値空間に張る（表のコストが層数に比例しない代わりに scale が要る形）。
+#: Granularity of the k-means table. `shared` fits **one table across layers** in the value space
+#: normalised by the group (g32) absmax (the table cost does not grow with the layer count, at the
+#: price of needing a scale).
 KMeansGranularity = Literal["per_tensor", "per_channel", "shared"]
 
 KMEANS_GRANULARITIES: tuple[KMeansGranularity, ...] = ("per_tensor", "per_channel", "shared")
@@ -107,10 +119,11 @@ KMEANS_GRANULARITIES: tuple[KMeansGranularity, ...] = ("per_tensor", "per_channe
 
 @dataclass(frozen=True)
 class MethodReport:
-    """丸めた方式と本数・要素数（「方式を指定したのに 0 本」を沈黙させないための計数）。
+    """The rounding method and the number of tensors and elements (a count so that "a method was
+    requested but 0 tensors" is never silent).
 
-    scale / codebook の台帳を持たないのはモジュール docstring の MUST（emit へ渡す口を
-    作らない）。層に当たった表そのものは丸め済み重みの `torch.unique` から引ける。
+    It holds no scale / codebook ledger because of the module docstring's MUST (no hook into
+    emit). The table a layer received can be recovered from `torch.unique` of the rounded weights.
     """
 
     method: str
@@ -122,38 +135,45 @@ class MethodReport:
 
 
 def levels_tensor(levels: Sequence[float]) -> torch.Tensor:
-    """準位表を F32 テンソルにする（昇順であることの検査つき）。
+    """Make a level table into an F32 tensor (with a check that it is ascending).
 
-    表が昇順でないと {@link round_to_levels} の二分探索が黙って別の準位を返す（例外は
-    出ず、値だけが最近傍でなくなる）ので、表を作る側の 1 度だけここで確かめる。
+    If the table is not ascending, the binary search of {@link round_to_levels} silently returns
+    another level (no exception; only the values stop being the nearest), so it is checked here,
+    once, on the side that builds the table.
     """
     table = torch.tensor(levels, dtype=torch.float32)
     if table.dim() != 1 or table.numel() < 2:
         raise QuantizeError(
-            f"準位表は 2 個以上の 1 次元でなければならない（実測 {list(table.shape)}）"
+            f"the level table must be 1-D with 2 or more entries (actual {list(table.shape)})"
         )
     if not bool(torch.all(table[1:] > table[:-1])):
-        raise QuantizeError("準位表が昇順でない（最近傍丸めが二分探索なので昇順 MUST）")
+        raise QuantizeError(
+            "the level table is not ascending (nearest rounding is a binary search, so ascending"
+            " is a MUST)"
+        )
     return table
 
 
 def round_to_levels(values: torch.Tensor, levels: torch.Tensor) -> torch.Tensor:
-    """`values` の各要素を昇順の準位表 `levels` の**最近傍**へ丸める（形は保つ）。
+    """Round each element of `values` to the **nearest** entry of the ascending level table
+    `levels` (the shape is kept).
 
-    隣接準位の中点ちょうどは**下側**（−∞ 方向）へ落ちる（`torch.bucketize` の既定
-    `right=False` = `boundaries[i-1] < x ≤ boundaries[i]`）。偶数丸めでも 0 から遠ざける丸めでも
-    ないが、境界に厳密一致する値は実重みでは測度 0 に近く、方式間の比較で効く量ではない —
-    ここで向きを固定するのは決定性のため（実測: MXFP4 で `amax/scale = 5.0` がこの枝を踏む）。
+    An exact midpoint between adjacent levels falls to the **lower** side (toward −∞) (the default
+    `right=False` of `torch.bucketize` = `boundaries[i-1] < x ≤ boundaries[i]`). It is neither
+    round-half-to-even nor round-half-away-from-zero, but values exactly on a boundary are close to
+    measure zero in real weights and do not matter for comparing methods — the direction is fixed
+    here for determinism (observed: `amax/scale = 5.0` takes this branch in MXFP4).
     """
     midpoints = (levels[1:] + levels[:-1]) / 2
     return levels[torch.bucketize(values, midpoints)]
 
 
 def round_rows_to_codebook(values: torch.Tensor, codebook: torch.Tensor) -> torch.Tensor:
-    """行ごとに別の表を持つ版の {@link round_to_levels}（`values[R,N]` × `codebook[R,L]`）。
+    """The version of {@link round_to_levels} with a separate table per row (`values[R,N]` ×
+    `codebook[R,L]`).
 
-    per-channel の表を Python ループで当てると層あたり数千回の往復になるので、
-    `searchsorted` の batched 形（境界も行ごと）で 1 発にする。
+    Applying per-channel tables in a Python loop would take thousands of round trips per layer, so
+    the batched form of `searchsorted` (with per-row boundaries too) does it in one call.
     """
     midpoints = (codebook[:, 1:] + codebook[:, :-1]) / 2
     index = torch.searchsorted(midpoints.contiguous(), values.contiguous())
@@ -161,15 +181,17 @@ def round_rows_to_codebook(values: torch.Tensor, codebook: torch.Tensor) -> torc
 
 
 def group_absmax_scale(
-    rows: torch.Tensor, group_size: int, max_level: float, where: str = "重み"
+    rows: torch.Tensor, group_size: int, max_level: float, where: str = "weight"
 ) -> torch.Tensor:
-    """`scale = clamp(amax_group / max_level, f32 tiny)` を group 形 `[チャネル, group 数]` で返す。
+    """Return `scale = clamp(amax_group / max_level, f32 tiny)` in group shape
+    `[channel, group count]`.
 
-    `quantize.group_scale`（i4 の `amax/7`）の準位表版で、`max_level` は表の最大絶対値
-    （FP4 = 6.0 / NF4 = 1.0）。group の amax 要素が表の両端へ乗り、到達可能な scale
-    `s = fl(amax/max_level)` が `fl(fl(max_level·s)/max_level)` の不動点なので、`quantize`
-    側（`INT8_MAX` の論証）と同じ理由で丸めが冪等になる — amax 要素の厳密復元には頼らない。
-    下限 clamp は全ゼロ group（`amax == 0`）の 0 除算避け。
+    The level-table version of `quantize.group_scale` (i4's `amax/7`); `max_level` is the table's
+    largest magnitude (FP4 = 6.0 / NF4 = 1.0). The group's amax element lands on an end of the
+    table, and a reachable scale `s = fl(amax/max_level)` is a fixed point of
+    `fl(fl(max_level·s)/max_level)`, so rounding is idempotent for the same reason as on the
+    `quantize` side (the `INT8_MAX` argument) — exact restoration of the amax element is not relied
+    on. The lower clamp avoids division by zero for all-zero groups (`amax == 0`).
     """
     grouped = grouped_view(rows, group_size, where)
     amax = grouped.abs().amax(dim=-1)
@@ -177,17 +199,19 @@ def group_absmax_scale(
 
 
 def group_power_of_two_scale(
-    rows: torch.Tensor, group_size: int, where: str = "重み"
+    rows: torch.Tensor, group_size: int, where: str = "weight"
 ) -> torch.Tensor:
-    """OCP MX 流の**2 のべき**の group scale = `2^(floor(log2(amax)) − MXFP4_ELEMENT_EMAX)`。
+    """OCP MX-style **power-of-two** group scale = `2^(floor(log2(amax)) − MXFP4_ELEMENT_EMAX)`.
 
-    指数は `frexp`（`x = m·2^e`, `m ∈ [0.5,1)` なので `floor(log2 x) = e − 1`）から採る —
-    `log2` は 2 のべきちょうどで 1ulp 下振れしうるが、`frexp` は指数を厳密に返す。
+    The exponent is taken from `frexp` (`x = m·2^e` with `m ∈ [0.5,1)`, so
+    `floor(log2 x) = e − 1`) — `log2` can come out 1 ulp low at an exact power of two, but `frexp`
+    returns the exponent exactly.
 
-    2 のべきに切り下げるので `amax/scale ∈ [4, 8)` に入り、表の外側（6 < |x| < 8）は
-    {@link round_to_levels} が両端の 6.0 へ落とす（= MX の飽和）。absmax 版と違って amax 要素
-    そのものは復元されない代わりに、scale の乗除算が**厳密**になる（丸めは真に冪等）。
-    全ゼロ group は `frexp` が `e = 0` を返すので `scale = 2^-3` に落ち、値は 0 のまま。
+    Rounding down to a power of two puts `amax/scale` in `[4, 8)`, and {@link round_to_levels}
+    drops values outside the table (6 < |x| < 8) to the end value 6.0 (= MX saturation). Unlike the
+    absmax version the amax element itself is not restored, but in exchange the scale's
+    multiplication and division are **exact** (rounding is truly idempotent). For an all-zero group
+    `frexp` returns `e = 0`, so the scale falls to `2^-3` and the values stay 0.
     """
     grouped = grouped_view(rows, group_size, where)
     amax = grouped.abs().amax(dim=-1)
@@ -197,13 +221,15 @@ def group_power_of_two_scale(
 
 
 def round_groups_to_levels(
-    rows: torch.Tensor, levels: torch.Tensor, scale: torch.Tensor, where: str = "重み"
+    rows: torch.Tensor, levels: torch.Tensor, scale: torch.Tensor, where: str = "weight"
 ) -> torch.Tensor:
-    """group ごとに `scale` で正規化して `levels` の最近傍へ丸め、`scale` を掛け戻す。
+    """Normalise each group by `scale`, round to the nearest entry of `levels`, and multiply
+    `scale` back.
 
-    MUST: group 長の源は**渡された scale の形**だけにする（`quantize.group_size_of` —
-    別引数で受けると「丸めに使った group」と「scale を採った group」が独立に動ける。
-    ADR 0069 決定 3 と同じ穴）。
+    MUST: the group size comes **only from the shape of the scale passed in**
+    (`quantize.group_size_of` — taking it as a separate argument would let "the groups used for
+    rounding" and "the groups the scale was taken over" move independently; the same hole as ADR
+    0069 decision 3).
     """
     grouped = grouped_view(rows, group_size_of(rows, scale), where)
     rounded = round_to_levels(grouped / scale.unsqueeze(-1), levels)
@@ -217,14 +243,16 @@ def _round_model_in_place(
     op_types: tuple[type[nn.Module], ...],
     include: Callable[[str], bool] | None,
 ) -> MethodReport:
-    """全対象の重みを `round_rows(rows, where) -> rows` で丸めて in-place 書き戻す（共有の胴体）。
+    """Round every target weight with `round_rows(rows, where) -> rows` and write it back in place
+    (the shared body).
 
-    書き戻しを {@link quantize.restore_channel_rows} 経由にするのは `ConvTranspose1d` のため
-    — 平坦形が重みの view にならない（`movedim` で非連続 → `reshape` がコピー）ので、
-    平坦形へ書いても元の重みは 1 要素も変わらない。
+    Writing back goes through {@link quantize.restore_channel_rows} because of `ConvTranspose1d` —
+    its flat form is not a view of the weight (non-contiguous through `movedim` → `reshape`
+    copies), so writing into the flat form would not change a single element of the original
+    weight.
 
-    「対象 0 本」は fail loudly（`quantize` 側と同じ常設診断 — 方式を指定したのに実質 f32 の
-    ままだった、を沈黙させない）。
+    "0 targets" fails loudly (the same permanent diagnostic as on the `quantize` side — so that "a
+    method was requested but the weights effectively stayed f32" is never silent).
     """
     modules = 0
     elements = 0
@@ -236,8 +264,8 @@ def _round_model_in_place(
             elements += weight.numel()
     if not modules:
         raise QuantizeError(
-            f"{method}: 丸められる重みが 1 本も無い"
-            f"（対象の型: {', '.join(cls.__name__ for cls in op_types)}）"
+            f"{method}: there is no weight that can be rounded"
+            f" (target types: {', '.join(cls.__name__ for cls in op_types)})"
         )
     return MethodReport(method=method, modules=modules, elements=elements)
 
@@ -248,11 +276,12 @@ def fake_quant_fp4(
     include: Callable[[str], bool] | None = None,
     op_types: tuple[type[nn.Module], ...] = (nn.Linear,),
 ) -> MethodReport:
-    """FP4 (e2m1) の固定表 × group(既定 g32) absmax scale で丸める。
+    """Round with the fixed FP4 (e2m1) table × a group (default g32) absmax scale.
 
-    i4 との違いは**格子の疎密**だけ（同じ 15 準位・同じ group scale で、i4 は等間隔・FP4 は
-    指数的に疎）。0 付近が密なので、重み分布が正規に近いほど FP4 が有利になりうる、という
-    仮説を測るための列。
+    The only difference from i4 is **the density of the grid** (the same 15 levels and the same
+    group scale; i4 is evenly spaced, FP4 is exponentially sparse). It is dense near 0, so this
+    column measures the hypothesis that FP4 may gain the closer the weight distribution is to
+    normal.
     """
     table = levels_tensor(FP4_E2M1_LEVELS)
     top = float(table.abs().max())
@@ -271,12 +300,12 @@ def fake_quant_nf4(
     include: Callable[[str], bool] | None = None,
     op_types: tuple[type[nn.Module], ...] = (nn.Linear,),
 ) -> MethodReport:
-    """NF4 の固定表（{@link NF4_LEVELS}）× group(既定 g32) absmax scale で丸める。
+    """Round with the fixed NF4 table ({@link NF4_LEVELS}) × a group (default g32) absmax scale.
 
-    表が「正規分布の分位点」なので、group 内の重みが正規に近ければ準位の利用が均等になる
-    （= 情報理論的に最適に近い）という主張の測定列。非対称なのは**内側の準位だけ**で、
-    両端は ±1.0 を厳密に含む（{@link NF4_LEVELS}）ため group の amax 要素は正負とも
-    復元される。
+    The table is "quantiles of the normal distribution", so this column measures the claim that,
+    when the weights within a group are close to normal, the levels are used evenly (= close to
+    information-theoretically optimal). Only **the inner levels** are asymmetric; both ends contain
+    ±1.0 exactly ({@link NF4_LEVELS}), so the group's amax element is restored on both signs.
     """
     table = levels_tensor(NF4_LEVELS)
     top = float(table.abs().max())
@@ -295,12 +324,14 @@ def fake_quant_mxfp4(
     include: Callable[[str], bool] | None = None,
     op_types: tuple[type[nn.Module], ...] = (nn.Linear,),
 ) -> MethodReport:
-    """MXFP4（FP4 表 × block の**2 のべき** scale）で丸める — OCP Microscaling の流儀。
+    """Round with MXFP4 (the FP4 table × a **power-of-two** scale per block) — the OCP Microscaling
+    way.
 
-    absmax 版（{@link fake_quant_fp4}）との差は scale の表現だけで、scale が E8M0（指数 1
-    バイト）に載るぶん格納が軽い代わりに、group の amax が 2 のべきへ切り下げられて最大 1
-    段ぶんの余白が捨てられる。既定の block 長は本リポの既定 group（32）で、MX 仕様の
-    block = 32 と一致する。
+    The only difference from the absmax version ({@link fake_quant_fp4}) is how the scale is
+    represented: the scale fits in E8M0 (a 1-byte exponent), so storage is lighter, but in exchange
+    the group's amax is rounded down to a power of two and up to one step's worth of headroom is
+    thrown away. The default block length is this repository's default group (32), which matches
+    the MX specification's block = 32.
     """
     table = levels_tensor(FP4_E2M1_LEVELS)
 
@@ -313,23 +344,25 @@ def fake_quant_mxfp4(
 
 
 def fit_codebook(values: torch.Tensor, levels: int, iterations: int) -> torch.Tensor:
-    """1 次元 k-means（Lloyd 法）を行ごとに当て、昇順の centroid 表 `[R, levels]` を返す。
+    """Apply 1-D k-means (Lloyd's method) per row and return the ascending centroid table
+    `[R, levels]`.
 
-    MUST: **決定的**（同一入力 → ビット同一の表）。初期化は乱数播種ではなく**分位点**
-    （ソート済み値の `(i+0.5)/levels` 位置）で、空クラスタは centroid を据え置く
-    （再播種すると「どこへ播くか」が新しい任意性になる）。反復は固定回数
-    （{@link DEFAULT_CODEBOOK_ITERATIONS}）。
+    MUST: **deterministic** (same input → bit-identical table). Initialisation is not random
+    seeding but **quantiles** (the `(i+0.5)/levels` positions of the sorted values), and an empty
+    cluster keeps its centroid (reseeding would make "where to seed" a new arbitrary choice). The
+    iteration count is fixed ({@link DEFAULT_CODEBOOK_ITERATIONS}).
 
-    1 次元なので最近傍は「中点による二分探索」で厳密に求まる（centroid 総当たりの距離計算は
-    要らない）。centroid の更新和は **f64** で積む — f32 の逐次加算だと 1 クラスタが数百万
-    要素になる層で桁落ちが効き、平均が入力の並び順に依存しはじめる。
+    In 1-D the nearest centroid is found exactly by "binary search over the midpoints" (no
+    brute-force distance computation over centroids). The centroid update sums are accumulated in
+    **f64** — sequential f32 addition loses precision in layers where one cluster holds millions of
+    elements, and the mean starts to depend on the input order.
     """
     if values.dim() != 2:
-        raise QuantizeError(f"k-means の入力は `[R, N]` の 2 次元（実測 {list(values.shape)}）")
+        raise QuantizeError(f"k-means input must be 2-D `[R, N]` (actual {list(values.shape)})")
     if values.shape[1] < levels:
         raise QuantizeError(
-            f"k-means の準位数 {levels} に対して要素が {values.shape[1]} 個しか無い"
-            "（分位点初期化が同じ値の centroid を並べてしまう）"
+            f"k-means has {levels} levels but there are only {values.shape[1]} elements"
+            " (quantile initialisation would line up centroids with the same value)"
         )
     sorted_values, _ = torch.sort(values, dim=-1)
     count = sorted_values.shape[1]
@@ -345,8 +378,9 @@ def fit_codebook(values: torch.Tensor, levels: int, iterations: int) -> torch.Te
         counts = torch.zeros(centroids.shape, dtype=torch.float64).scatter_add_(1, index, ones)
         means = (totals / counts.clamp(min=1.0)).to(torch.float32)
         centroids = torch.where(counts.to(torch.float32) > 0, means, centroids)
-        # 空クラスタを据え置くと（据え置いた値が隣の平均を追い越して）順序が崩れうる。
-        # 崩れた表は二分探索の前提を壊すので、毎反復で並べ直す（16 要素なので安い）。
+        # Keeping an empty cluster in place can break the order (the kept value overtakes a
+        # neighbour's mean). A broken table breaks the binary search's premise, so it is sorted
+        # again on every iteration (cheap with 16 elements).
         centroids, _ = torch.sort(centroids, dim=-1)
     return centroids
 
@@ -361,35 +395,43 @@ def fake_quant_kmeans(
     iterations: int = DEFAULT_CODEBOOK_ITERATIONS,
     fit_stride: int = 1,
 ) -> MethodReport:
-    """16 centroid の k-means codebook で丸める（表の粒度 3 種）。
+    """Round with a 16-centroid k-means codebook (3 table granularities).
 
-    - `per_tensor` … 層ごとに 1 枚。表のコストは層あたり `levels` 個で、scale は要らない
-    - `per_channel` … 出力チャネル（{@link quantize.channel_rows} の行）ごとに 1 枚。
-      表のコストはチャネル数に比例するが、チャネル間のスケール差を表が吸収する
-    - `shared` … **層をまたいで 1 枚**。group(既定 g32) absmax で正規化した値空間に張るので、
-      スケール差は scale が、形は共有表が担う（= 表のコストがモデル全体で `levels` 個）
+    - `per_tensor` … one table per layer. The table costs `levels` entries per layer, and no
+      scale is needed
+    - `per_channel` … one table per output channel (a row of {@link quantize.channel_rows}). The
+      table cost grows with the channel count, but the table absorbs the scale differences
+      between channels
+    - `shared` … **one table across layers**. It is fitted in the value space normalised by the
+      group (default g32) absmax, so the scale carries the scale differences and the shared table
+      carries the shape (= the table costs `levels` entries for the whole model)
 
-    `group_size` が効くのは `shared` だけ（他の 2 つに scale は無い）。
+    `group_size` matters only for `shared` (the other two have no scale).
 
-    MUST: 同一入力 → ビット同一出力（{@link fit_codebook} が決定的・seed に依存しない）。
+    MUST: same input → bit-identical output ({@link fit_codebook} is deterministic and does not
+    depend on a seed).
 
-    NOTE: `shared` は表を当てる前に**全対象の正規化値を 1 本へ連結**するので、対象の重みと
-    同サイズの f32 一時領域（+ {@link fit_codebook} の f64 作業領域）が要り、1B 級では実
-    メモリを超える。`fit_stride` はその逃げ道 — **`shared` の表の fit だけ**を等間隔
-    `flat[::fit_stride]`（モジュールごと）の部分標本で採る（**適用は常に全量**）。乱数を
-    使わないので決定性 MUST はそのまま成り立つ。MUST: 使ったら測定側の出力へ明記する —
-    部分標本の表と全量の表は別物になりうるので、数値を読む側が区別できること。
+    NOTE: `shared` **concatenates the normalised values of every target into one tensor** before
+    fitting the table, so it needs an f32 temporary of the same size as the target weights (+ the
+    f64 working area of {@link fit_codebook}), which exceeds physical memory at the 1B class.
+    `fit_stride` is the way out — **only the fit of the `shared` table** uses an evenly spaced
+    subsample `flat[::fit_stride]` (per module) (**the table is always applied to everything**).
+    No randomness is used, so the determinism MUST still holds. MUST: when it is used, the
+    measuring side's output states it — a subsampled table and a full table can differ, so whoever
+    reads the numbers must be able to tell them apart.
     """
     if granularity not in KMEANS_GRANULARITIES:
         raise QuantizeError(
-            f"k-means の粒度 '{granularity}' は未対応（{', '.join(KMEANS_GRANULARITIES)}）"
+            f"k-means granularity '{granularity}' is not supported"
+            f" ({', '.join(KMEANS_GRANULARITIES)})"
         )
     if fit_stride < 1:
-        raise QuantizeError(f"fit_stride は 1 以上（実測 {fit_stride}）")
+        raise QuantizeError(f"fit_stride must be 1 or more (actual {fit_stride})")
     if fit_stride != 1 and granularity != "shared":
         raise QuantizeError(
-            f"fit_stride は shared 専用（'{granularity}' の fit は対象と同サイズの連結を"
-            "作らないので、標本化する理由が無い — 黙って無視もしない）"
+            f"fit_stride is for shared only (the fit of '{granularity}' does not build a"
+            " concatenation the size of the targets, so there is no reason to subsample — and it"
+            " is not silently ignored either)"
         )
     method = f"kmeans:{granularity}"
     if granularity != "shared":
@@ -402,8 +444,9 @@ def fake_quant_kmeans(
 
         return _round_model_in_place(model, method, rounder, op_types, include)
 
-    # `shared` は 2 パス — 1 パス目で全対象の正規化値を集めて表を 1 枚張り、2 パス目で当てる。
-    # 対象選択は両パスとも同じ `iter_quant_targets`（1 パス目だけ広い、が起きない形）。
+    # `shared` takes 2 passes — the first collects the normalised values of every target and fits
+    # one table, the second applies it. Both passes select targets with the same
+    # `iter_quant_targets` (so the first pass cannot end up wider).
     normalized: list[torch.Tensor] = []
     with torch.no_grad():
         for fqn, weight, axis in iter_quant_targets(model, op_types, include):
@@ -411,13 +454,14 @@ def fake_quant_kmeans(
             scale = group_absmax_scale(rows, group_size, 1.0, f"'{fqn}'")
             grouped = grouped_view(rows, group_size_of(rows, scale), f"'{fqn}'")
             flat = (grouped / scale.unsqueeze(-1)).reshape(-1)
-            # 標本のみ保持する場合は clone で母体を切り離す（view のままだと全量が生き残り、
-            # fit_stride の目的である一時領域の削減が黙って無効になる）。
+            # When only the sample is kept, clone detaches it from its base (as a view the whole
+            # tensor stays alive, and the reduction of temporary memory that fit_stride exists for
+            # is silently lost).
             normalized.append(flat[::fit_stride].clone() if fit_stride > 1 else flat)
     if not normalized:
         raise QuantizeError(
-            f"{method}: 丸められる重みが 1 本も無い"
-            f"（対象の型: {', '.join(cls.__name__ for cls in op_types)}）"
+            f"{method}: there is no weight that can be rounded"
+            f" (target types: {', '.join(cls.__name__ for cls in op_types)})"
         )
     codebook = fit_codebook(torch.cat(normalized).reshape(1, -1), levels, iterations)
     table = codebook.reshape(-1)

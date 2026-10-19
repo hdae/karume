@@ -131,16 +131,16 @@ class TestGridSpec:
         assert DEFAULT_GRID.group_size == 32
 
     def test_an_unknown_grid_fails_loudly(self):
-        with pytest.raises(QuantizeError, match="未対応"):
+        with pytest.raises(QuantizeError, match="is not supported"):
             GridSpec(kind="int3")  # type: ignore[arg-type]
 
     def test_a_stride_on_a_grid_without_a_fitted_table_fails_loudly(self):
         """`fit_stride` は表を fit する粒度専用（`quant_methods` と同じ流儀）。"""
-        with pytest.raises(QuantizeError, match="kmeans_shared 専用"):
+        with pytest.raises(QuantizeError, match="is for kmeans_shared only"):
             GridSpec(kind="rtn", fit_stride=2)
 
     def test_a_non_positive_stride_fails_loudly(self):
-        with pytest.raises(QuantizeError, match="1 以上"):
+        with pytest.raises(QuantizeError, match="must be 1 or more"):
             GridSpec(kind="kmeans_shared", fit_stride=0)
 
 
@@ -258,12 +258,12 @@ class TestGptqRows:
 
     def test_an_axis_the_group_size_does_not_divide_fails_loudly(self):
         """端数 group を作らない（`quantize.grouped_view` の共有 — ADR 0069 決定 2）。"""
-        with pytest.raises(QuantizeError, match="割り切れない"):
+        with pytest.raises(QuantizeError, match="is not divisible by group_size"):
             gptq_quantize_rows(weights(3, 20, seed=14), torch.eye(20, dtype=torch.float64), GRID)
 
     def test_a_hessian_that_never_saw_an_input_fails_loudly(self):
         """`H` が丸ごと 0 だと damping も 0 になり特異 — 黙って近似しない。"""
-        with pytest.raises(QuantizeError, match="対角平均"):
+        with pytest.raises(QuantizeError, match="diagonal mean"):
             gptq_quantize_rows(weights(3, 32, seed=15), torch.zeros(32, 32), GRID)
 
     def test_a_hessian_of_the_wrong_shape_fails_loudly(self):
@@ -390,7 +390,7 @@ class TestGptqOptions:
         """dynamic group で並べ替えると group 帰属が写し戻せない — 黙って近似しない。"""
         rows, hessian = self.fixture(seed=106)
 
-        with pytest.raises(QuantizeError, match="static_groups=True が前提"):
+        with pytest.raises(QuantizeError, match="requires static_groups=True"):
             gptq_quantize_rows(rows, hessian, GRID, act_order=True)
 
     def test_the_explicit_default_damping_matches_the_constant(self):
@@ -417,7 +417,7 @@ class TestGptqOptions:
         """`λ = 0` では対角 0 の入力チャネルが残って `H` が特異になりうる。"""
         rows, hessian = self.fixture(seed=110)
 
-        with pytest.raises(QuantizeError, match="damping は正の値"):
+        with pytest.raises(QuantizeError, match="damping must be positive"):
             gptq_quantize_rows(rows, hessian, GRID, damping=damping)
 
 
@@ -502,7 +502,8 @@ class TestAwqSearch:
         rows[0, 0] = float("nan")
 
         with pytest.raises(
-            QuantizeError, match=r"blocks\.0\.proj\.weight: .*全 α で非有限（出所: 重み）"
+            QuantizeError,
+            match=r"blocks\.0\.proj\.weight: .*non-finite for every α \(source: weight\)",
         ):
             awq_search_scale(
                 rows,
@@ -513,13 +514,13 @@ class TestAwqSearch:
             )
 
     def test_no_sample_fails_loudly(self):
-        with pytest.raises(QuantizeError, match="0 行"):
+        with pytest.raises(QuantizeError, match="have 0 rows"):
             awq_search_scale(
                 weights(6, 32, seed=28), torch.ones(32, dtype=torch.float64), torch.zeros(0, 32)
             )
 
     def test_an_axis_the_group_size_does_not_divide_fails_loudly(self):
-        with pytest.raises(QuantizeError, match="割り切れない"):
+        with pytest.raises(QuantizeError, match="is not divisible by group_size"):
             awq_search_scale(
                 weights(3, 20, seed=29),
                 torch.ones(20, dtype=torch.float64),
@@ -606,26 +607,26 @@ class TestCalibrateStages:
 
     def test_a_stage_without_a_target_fails_loudly(self):
         """「方式を指定したのに 0 本」を沈黙させない（`quantize` 側と同じ常設診断）。"""
-        with pytest.raises(QuantizeError, match="1 本も無い"):
+        with pytest.raises(QuantizeError, match=r"there is no target nn\.Linear"):
             calibrate_stages([("norm", nn.LayerNorm(32))], self.batch(), spec=GRID)
-        with pytest.raises(QuantizeError, match="1 本も無い"):
+        with pytest.raises(QuantizeError, match=r"there is no target nn\.Linear"):
             calibrate_stages(self.two_stages(), self.batch(), spec=GRID, include=lambda _fqn: False)
 
     def test_no_stage_fails_loudly(self):
-        with pytest.raises(QuantizeError, match="stage が 1 つも無い"):
+        with pytest.raises(QuantizeError, match="there are no stages"):
             calibrate_stages([], self.batch(), spec=GRID)
 
     def test_no_batch_fails_loudly(self):
-        with pytest.raises(QuantizeError, match="校正バッチが 1 つも無い"):
+        with pytest.raises(QuantizeError, match="there are no calibration batches"):
             calibrate_stages(self.two_stages(), [], spec=GRID)
 
     def test_an_unknown_method_fails_loudly(self):
-        with pytest.raises(QuantizeError, match="未対応"):
+        with pytest.raises(QuantizeError, match="is not supported"):
             calibrate_stages(self.two_stages(), self.batch(), method="smooth", spec=GRID)  # type: ignore[arg-type]
 
     def test_an_axis_the_group_size_does_not_divide_fails_loudly(self):
         torch.manual_seed(33)
-        with pytest.raises(QuantizeError, match="割り切れない"):
+        with pytest.raises(QuantizeError, match="is not divisible by group_size"):
             calibrate_stages(
                 [("odd", nn.Linear(20, 4))],
                 [((correlated_inputs(8, 20, seed=34),), {})],
@@ -645,7 +646,7 @@ class TestCalibrateStages:
                 return self.used(x)
 
         torch.manual_seed(35)
-        with pytest.raises(QuantizeError, match="1 行も流れていない"):
+        with pytest.raises(QuantizeError, match="no calibration input row flowed"):
             calibrate_stages([("d", Detour())], self.batch(), spec=GRID)
 
 
@@ -677,7 +678,7 @@ class TestCalibrateStagesDevice:
 
     def test_a_stage_without_parameters_fails_loudly(self):
         """デバイスの導出元が無い stage を黙って CPU 扱いにしない。"""
-        with pytest.raises(QuantizeError, match="パラメータを 1 つも持たない"):
+        with pytest.raises(QuantizeError, match="the stage has no parameters"):
             calibrate_stages([("act", nn.ReLU())], TestCalibrateStages.batch(), spec=GRID)
 
     def test_a_tuple_keyword_reaches_the_stage_without_a_copy(self):
@@ -823,7 +824,7 @@ class TestCalibrateStagesOptions:
         """`GridSpec.fit_stride` と同じ流儀 — 効かない軸を渡されて黙って無視しない。"""
         stage, inputs = self.stage_and_inputs()
 
-        with pytest.raises(QuantizeError, match="効かない"):
+        with pytest.raises(QuantizeError, match="have no effect"):
             calibrate_stages(
                 [("only", stage)],
                 [((inputs,), {})],
@@ -877,7 +878,7 @@ class TestStageHandoff:
         assert not torch.equal(default[1], overridden[1])
 
     def test_an_output_that_is_not_a_tensor_fails_loudly(self):
-        with pytest.raises(QuantizeError, match="選べない"):
+        with pytest.raises(QuantizeError, match="cannot choose"):
             first_tensor_output({"hidden": torch.zeros(2)})
 
     def test_a_tensor_output_passes_through(self):

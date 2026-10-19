@@ -1,64 +1,69 @@
-"""curated decomp 後の FX グラフ正規化 — IR 語彙を増やさない同値書き換え。
+"""FX graph normalization after the curated decomp — equivalence rewrites that add no IR vocabulary.
 
-convert() の前段で呼ぶ。各パスは `(graph, stats) -> None` の関数で、`_passes()` が並べた
-順に走る（順序に依存があるパスを足すときはここにコメントで理由を残すこと）。
+Called before convert(). Each pass is a `(graph, stats) -> None` function and runs in the order
+`_passes()` lists them (when adding a pass that depends on the order, leave the reason in a comment
+there).
 
-- `_drop_metadata_asserts`: `aten._assert_tensor_metadata` の削除。eliminate_dead_code は
-  これを impure と見なして残すため、置き換え済みの部分木が assert 経由で生き残る。
-- `_pow_neg_half_to_rsqrt`: `pow.Tensor_Scalar(x, -0.5)` → `rsqrt(x)`（定義域全体で同義 —
-  x>0 は同値・x=0 は両者 +inf・x<0 は両者 NaN）。transformers の Gemma4RMSNorm が
-  torch/JAX のコンパイラ差を理由に rsqrt でなく pow で書くため、`_fold_rms_norm` が拾う
-  rsqrt 形へ寄せる。rms_norm に畳まれず残った rsqrt は未対応 op の全件列挙に出る
-  （rsqrt は IR 語彙に無い — 黙って通らない）。
-- `_fold_rms_norm`: `mul(weight, mul(x, rsqrt(mean(x²)+eps)))` → `rms_norm` 1 ノード
-  （ADR 0016 / 0017。手書き RMSNorm は preserve では畳めない — FX パターンマッチが要る）。
-  weight 無し形 `mul(x, rsqrt(mean(x²)+eps))` も**weight 付きの畳み込み後に**拾う
-  （Gemma4 の `v_norm` = RMSNorm with_scale=False。ones 合成は `_h_rms_norm` 側）。
-- `_drop_safe_softmax_guard`: SDPA の safe-softmax ガード（`eq(-inf)` / `any.dim` /
-  `full_like` / `where`）を畳む。不活性を証明できたら**除去**（ADR 0016）、できなければ
-  `safe_softmax` へ**構成的に置換**する（ADR 0044）。
-- `_additive_attn_mask`: 保存した SDPA の bool `attn_mask` を加算型 f32（0 / −inf）へ
-  （ADR 0023 の mask 契約。torch 自身の bool → additive 変換と同じ op・同じ定数）。
-- `_lower_unit_expand`: GQA repeat_kv の `unsqueeze → expand → (clone) → view` を rank≤3 へ。
-- `_lower_split_unbind`: RoPE の「最終次元 split → 幅 1 slice → squeeze」を最終次元 slice へ
-  （消費者が揃わない形は書き換えずスキップ）。
-- `_lower_reshape_permute`: rank≥5 の `reshape → permute → reshape`（patchify / unpatchify）を
-  rank4 の隣接転置列へ分解する。
-- `_compose_permute_chains`: 恒等 `permute` の除去と、隣接する `permute` の合成（p∘q）。
-  中間の実体化コピーと dispatch がそのぶん消える。
-- `_pow2_to_mul`: `pow.Tensor_Scalar(x, 2)` → `mul(x, x)`。M0 語彙に pow は無いが、
-  同値な mul はある（数値も同一 — 乗算 1 回に落ちるだけ）。
-- `_drop_identity_repeat`: `repeat(x, [1,…,1])` → x（recon §4-1。実測 4 本が全てこの形）。
-- `_drop_identity_add`: `add(x, 0)` → x（recon §4-2。c2p / p2c 加算の初期値 2 本）。
-- `_promote_scalar_operands`: `add/sub/mul/div(tensor, スカラ)` → 二項 op + rank-1 定数
-  （recon §4-4。IR 語彙も attrs も増やさない唯一の道）。
-- `_eq_zero_to_not_bool`: `eq(x, 0)` → `bitwise_not(cast(x, bool))`（ADR 0015 の裁定。
-  cast 規約「x → bool は x != 0」からの帰結で、新 op を作らずに済む）。
-- `_select_to_squeeze`: `select.int(長さ 1 の軸, 添字 0)` → `squeeze`（汎用衛生）。静的な
-  長さ 2 以上の軸は `slice(幅 1) + squeeze` へ開く（Gemma4 の PLE 層別スライスが初出）。
-- `_split_to_slices`: `split_with_sizes` + `getitem` → `slice` の列（ADR 0014。IR に多出力 op が
-  無いので、分割は取り出し口ごとの slice に開く）。
+- `_drop_metadata_asserts`: removes `aten._assert_tensor_metadata`. eliminate_dead_code treats it
+  as impure and keeps it, so already-replaced subtrees would survive through the assert.
+- `_pow_neg_half_to_rsqrt`: `pow.Tensor_Scalar(x, -0.5)` → `rsqrt(x)` (equivalent over the whole
+  domain — equal for x>0, both +inf at x=0, both NaN for x<0). transformers' Gemma4RMSNorm writes
+  pow instead of rsqrt because of torch/JAX compiler differences, so it is brought into the rsqrt
+  form `_fold_rms_norm` picks up. An rsqrt left unfolded into rms_norm appears in the full list of
+  unsupported ops (rsqrt is not in the IR vocabulary — it does not pass silently).
+- `_fold_rms_norm`: `mul(weight, mul(x, rsqrt(mean(x²)+eps)))` → one `rms_norm` node
+  (ADR 0016 / 0017. A hand-written RMSNorm cannot be folded by preservation — it needs an FX
+  pattern match). The weightless form `mul(x, rsqrt(mean(x²)+eps))` is also picked up, **after
+  the weighted fold** (Gemma4's `v_norm` = RMSNorm with_scale=False. The ones synthesis is on the
+  `_h_rms_norm` side).
+- `_drop_safe_softmax_guard`: folds SDPA's safe-softmax guard (`eq(-inf)` / `any.dim` /
+  `full_like` / `where`). If it can be proven inactive it is **removed** (ADR 0016); otherwise it
+  is **constructively replaced** with `safe_softmax` (ADR 0044).
+- `_additive_attn_mask`: a preserved SDPA's bool `attn_mask` → additive f32 (0 / −inf)
+  (ADR 0023's mask contract. The same ops and constants as torch's own bool → additive
+  conversion).
+- `_lower_unit_expand`: GQA repeat_kv's `unsqueeze → expand → (clone) → view` → rank≤3.
+- `_lower_split_unbind`: RoPE's "last-dimension split → width-1 slice → squeeze" → a
+  last-dimension slice (forms whose consumers do not line up are skipped, not rewritten).
+- `_lower_reshape_permute`: decomposes a rank≥5 `reshape → permute → reshape` (patchify /
+  unpatchify) into a sequence of rank-4 adjacent transposes.
+- `_compose_permute_chains`: removes identity `permute`s and composes adjacent `permute`s (p∘q).
+  The intermediate materializing copies and dispatches go away accordingly.
+- `_pow2_to_mul`: `pow.Tensor_Scalar(x, 2)` → `mul(x, x)`. The M0 vocabulary has no pow, but it
+  has the equivalent mul (numerically identical too — it just becomes one multiplication).
+- `_drop_identity_repeat`: `repeat(x, [1,…,1])` → x (recon §4-1. All 4 observed are this form).
+- `_drop_identity_add`: `add(x, 0)` → x (recon §4-2. The 2 initial values of the c2p / p2c adds).
+- `_promote_scalar_operands`: `add/sub/mul/div(tensor, scalar)` → binary op + rank-1 constant
+  (recon §4-4. The only way that adds neither IR vocabulary nor attrs).
+- `_eq_zero_to_not_bool`: `eq(x, 0)` → `bitwise_not(cast(x, bool))` (ADR 0015's ruling. It
+  follows from the cast convention "x → bool is x != 0" and needs no new op).
+- `_select_to_squeeze`: `select.int(axis of length 1, index 0)` → `squeeze` (general hygiene). A
+  static axis of length 2 or more opens into `slice(width 1) + squeeze` (first seen in Gemma4's
+  per-layer PLE slice).
+- `_split_to_slices`: `split_with_sizes` + `getitem` → a sequence of `slice`s (ADR 0014. The IR
+  has no multi-output op, so a split opens into one slice per extraction point).
 
-MUST: `_fold_rms_norm` は `_pow2_to_mul` と `_promote_scalar_operands` の**両方より先**に
-走る（ADR 0016 の順序 MUST）。`pow(x,2)` が `mul(x,x)` に潰れてもパターン照合自体は
-`_is_square_of` が両形を見るので生き残るが、`add(mean, eps)` の eps が rank-1 定数へ昇格すると
-Python スカラの照合が外れて畳めなくなる。
+MUST: `_fold_rms_norm` runs **before both** `_pow2_to_mul` and `_promote_scalar_operands`
+(ADR 0016's order MUST). Even when `pow(x,2)` collapses into `mul(x,x)` the pattern match itself
+survives because `_is_square_of` looks at both forms, but once the eps of `add(mean, eps)` is
+promoted to a rank-1 constant the Python-scalar match misses and it can no longer be folded.
 
-MUST: `_pow_neg_half_to_rsqrt` は `_fold_rms_norm` より**先**に走る（matcher は rsqrt 形しか
-見ない — 後だと pow 形の RMSNorm が丸ごと未対応 op 列挙へ落ちる）。
+MUST: `_pow_neg_half_to_rsqrt` runs **before** `_fold_rms_norm` (the matcher sees only the rsqrt
+form — afterwards, a pow-form RMSNorm would fall wholesale into the unsupported-op list).
 
-MUST: 鎖 3 パス（rank 下げ）の発火は **rank > STRIDED_RANK の値を含む形に限る**（ADR 0016）。
-既存グラフ（SBV2 / DeBERTa は全て rank ≤ 4）へ誤爆させないための安全線で、新しい定数は
-作らない — 「strided カーネルが実行できない rank」が発火条件そのものだから。
+MUST: the 3 chain passes (rank lowering) fire **only on forms containing a value of rank >
+STRIDED_RANK** (ADR 0016). It is a safety line so they do not misfire on existing graphs (SBV2 /
+DeBERTa are all rank ≤ 4), and it creates no new constant — "a rank the strided kernel cannot run"
+is the firing condition itself.
 
-MUST: `_drop_identity_add` は `_promote_scalar_operands` より**先**に走る。逆順にすると
-`add(x, 0)` が `add(x, const 0)` になり、恒等除去の対象（Python スカラの 0）でなくなって
-無駄な定数と 1 dispatch が残る。
+MUST: `_drop_identity_add` runs **before** `_promote_scalar_operands`. In the reverse order
+`add(x, 0)` becomes `add(x, const 0)`, is no longer an identity-removal target (the Python scalar
+0), and a useless constant and one dispatch remain.
 
-MUST: ExportedProgram の graph_signature は更新しない。出力ノードを書き換えると
-`output_specs[].arg.name` は実在しないノード名のまま残るが、唯一の消費者である
-convert._user_outputs が specs と output 引数を「位置」で対応づけるため無害
-（名前を同期して持つのは派生状態の二重管理になる）。
+MUST: the ExportedProgram's graph_signature is not updated. Rewriting the output node leaves
+`output_specs[].arg.name` as names of nodes that no longer exist, but this is harmless because the
+only consumer, convert._user_outputs, matches specs and output arguments "by position" (keeping
+the names in sync would be duplicated management of derived state).
 """
 
 from __future__ import annotations
@@ -79,21 +84,23 @@ from karume.ops import STRIDED_RANK
 
 aten = torch.ops.aten
 
-#: safe-softmax ガードの反例を探す 2 評価点。通過だけでは全長の不活性を証明しないため、
-#: 記号依存マスクは別途検出して safe_softmax を維持する。
+#: The 2 evaluation points that look for counterexamples to the safe-softmax guard. Passing them
+#: does not prove inactivity over every length, so symbol-dependent masks are detected separately
+#: and keep safe_softmax.
 GUARD_PROBE_LENGTHS = (5, 9)
 
 NEG_INF = float("-inf")
 
-#: safe-softmax ガードを構成的に置換した softmax ノードに立てる旗（ADR 0044）。
+#: Flag set on a softmax node whose safe-softmax guard was constructively replaced (ADR 0044).
 #:
-#: FX グラフ層に "safe_softmax" という aten op は無いので、ガードを畳んだ事実は元の softmax
-#: ノードの meta で運び、`aten_handlers._h_softmax` が op 名の分岐に使う。**meta を消すパスを
-#: このパスより後ろに置かないこと** — 旗が落ちると素の softmax として焼かれ、全 -inf 行が
-#: 黙って NaN になる。
+#: The FX graph layer has no aten op called "safe_softmax", so the fact that the guard was folded
+#: travels in the meta of the original softmax node, and `aten_handlers._h_softmax` branches the op
+#: name on it. **Do not put a pass that clears meta after this pass** — if the flag drops, it is
+#: baked as a plain softmax and all-(-inf) rows silently become NaN.
 SAFE_SOFTMAX_META = "karume_safe_softmax"
 
-#: 論理的な要素順を変えない reshape 系（rank 下げパスが自由に括り直してよい形）。
+#: Reshape-like ops that keep the logical element order (forms the rank-lowering passes may
+#: regroup freely).
 _RESHAPE_OPS = (
     aten.view.default,
     aten.squeeze.dim,
@@ -105,7 +112,9 @@ _RESHAPE_OPS = (
 def _val(node: Node) -> torch.Tensor:
     val = node.meta.get("val")
     if not isinstance(val, torch.Tensor):
-        raise NotImplementedError(f"tensor 以外の値を rank 下げ対象にできない: {node.name}")
+        raise NotImplementedError(
+            f"a value that is not a tensor cannot be rank-lowered: {node.name}"
+        )
     return val
 
 
@@ -115,10 +124,11 @@ def _rank(node: Any) -> int:
 
 
 def _static_size(dim: Any) -> int | None:
-    """次元長の具体値（記号を含むなら None）。
+    """Concrete value of a dimension length (None if it contains a symbol).
 
-    MUST: SymInt を `int()` で採らない — export 時のヒント値へ黙って特殊化され、
-    「ヒント値 1 の記号次元」が squeeze に化けて実行時に無言の誤値になる。
+    MUST: do not take a SymInt with `int()` — it silently specializes to the export-time hint, and
+    "a symbolic dimension whose hint is 1" turns into a squeeze and a silent wrong value at run
+    time.
     """
     if isinstance(dim, torch.SymInt):
         return None if dim.node.expr.free_symbols else int(dim)
@@ -126,13 +136,14 @@ def _static_size(dim: Any) -> int | None:
 
 
 def _static_index(value: Any) -> int | None:
-    """添字・区間端の具体値（記号・FX Node・`None` なら None）。
+    """Concrete value of an index or range end (None for a symbol, an FX Node or `None`).
 
-    MUST: {@link _static_size} と同じ理由で SymInt を `int()` で採らない。加えて 2 つの表現を
-    明示的に None へ倒す — ①記号値が **FX Node** で渡る形（`_static_size` は `int(Node)` で
-    TypeError になるので、素通しすると診断でなく素のクラッシュになる）②`slice(start=None)` の
-    ように省略が実引数として来る形。`aten.select.int` の index も `aten.slice.Tensor` の
-    start / end もスキーマ上 SymInt なので、ヒント値で採ると実行時に無言の誤値になる。
+    MUST: for the same reason as {@link _static_size}, do not take a SymInt with `int()`. In
+    addition, 2 representations are explicitly mapped to None — ① a symbolic value passed as an
+    **FX Node** (`_static_size` hits a TypeError on `int(Node)`, so passing it through gives a bare
+    crash instead of a diagnostic) ② an omission that arrives as an actual argument, as in
+    `slice(start=None)`. `aten.select.int`'s index and `aten.slice.Tensor`'s start / end are SymInt
+    in the schema, so taking the hint gives a silent wrong value at run time.
     """
     if isinstance(value, Node) or value is None:
         return None
@@ -153,10 +164,10 @@ def _sole_user(node: Node) -> Node | None:
 
 
 def _insert(graph: Graph, anchor: Node, target: Any, args: tuple, ref: torch.Tensor, **kwargs: Any):
-    """`anchor` の直前にノードを挿し、meta["val"] を fake mode で合成する。
+    """Insert a node right before `anchor` and synthesize its meta["val"] in fake mode.
 
-    convert は全ノードの `meta["val"]`（FakeTensor）を要求するので、挿入ノードにも
-    宣言を持たせないと変換の出口（assert_graph_shapes）まで届かない。
+    convert requires `meta["val"]` (a FakeTensor) on every node, so an inserted node without a
+    declaration would not make it to the exit of conversion (assert_graph_shapes).
     """
     with graph.inserting_before(anchor):
         node = graph.call_function(target, args, kwargs)
@@ -167,11 +178,11 @@ def _insert(graph: Graph, anchor: Node, target: Any, args: tuple, ref: torch.Ten
 
 
 def _insert_contiguous(graph: Graph, anchor: Node, src: Node, ref: torch.Tensor) -> Node:
-    """permute / expand の直後に置く実体化コピー。
+    """Materializing copy placed right after a permute / expand.
 
-    IR 側では permute / expand が strided 実体化コピーなので意味論上は冗長（convert の
-    SKIP_OPS が恒等として吸収する）だが、これを挟まないと後続 view の meta 合成
-    （torch の view 規則）が通らない。
+    On the IR side permute / expand are strided materializing copies, so this is semantically
+    redundant (convert's SKIP_OPS absorbs it as an identity), but without it the meta synthesis of
+    the following view (torch's view rules) does not go through.
     """
     return _insert(
         graph, anchor, aten.clone.default, (src,), ref, memory_format=torch.contiguous_format
@@ -179,7 +190,7 @@ def _insert_contiguous(graph: Graph, anchor: Node, src: Node, ref: torch.Tensor)
 
 
 def _as_contiguous(graph: Graph, anchor: Node, src: Node, ref: torch.Tensor) -> Node:
-    """view を挟む前に非連続な値を実体化する（連続ならそのまま）。"""
+    """Materialize a non-contiguous value before a view (a contiguous one is returned as is)."""
     return src if _val(src).is_contiguous() else _insert_contiguous(graph, anchor, src, ref)
 
 
@@ -195,20 +206,22 @@ def _drop_metadata_asserts(graph: Graph, stats: Counter) -> None:
             stats["drop_metadata_assert"] += 1
 
 
-# ---- RMS 正規化パターンの畳み込み（ADR 0016 / 0017）------------------------
+# ---- Folding the RMS normalization pattern (ADR 0016 / 0017)------------------------
 
 
 def _pow_neg_half_to_rsqrt(graph: Graph, stats: Counter) -> None:
-    """`aten.pow(x, -0.5)` → `rsqrt(x)`（rms_norm パターンの前段正規化）。
+    """`aten.pow(x, -0.5)` → `rsqrt(x)` (normalization ahead of the rms_norm pattern).
 
-    transformers の Gemma4RMSNorm は torch/JAX のコンパイラ差を理由に `rsqrt` でなく
-    `pow(ms, -0.5)` を書く（modeling_gemma4.py の注記）。定義域全体で rsqrt と同義
-    （x>0 は同値・x=0 は両者 +inf・x<0 は両者 NaN — `_is_square_of` が pow/mul の両形を
-    同値と見るのと同じ扱い）。rms_norm に畳まれず残った rsqrt は IR 語彙に無いので
-    未対応 op の全件列挙に出る（黙って近似しない）。
+    transformers' Gemma4RMSNorm writes `pow(ms, -0.5)` instead of `rsqrt` because of torch/JAX
+    compiler differences (the note in modeling_gemma4.py). It is equivalent to rsqrt over the whole
+    domain (equal for x>0, both +inf at x=0, both NaN for x<0 — the same treatment as
+    `_is_square_of` regarding the pow/mul forms as equivalent). An rsqrt left unfolded into
+    rms_norm is not in the IR vocabulary, so it appears in the full list of unsupported ops (no
+    silent approximation).
 
-    MUST: dtype 不変を要求する（`_pow2_to_mul` と同文 — 昇格を伴う形は恒等な書き換えで
-    ない）。指数は float の -0.5 だけ（int に -0.5 は無いが、bool 遮断は流儀として揃える）。
+    MUST: the dtype must be unchanged (same wording as `_pow2_to_mul` — a form with promotion is
+    not an identity rewrite). The exponent is the float -0.5 only (there is no -0.5 for int, but
+    the bool exclusion is kept for consistency).
     """
     for node in list(graph.nodes):
         if node.op != "call_function" or node.target is not aten.pow.Tensor_Scalar:
@@ -229,7 +242,7 @@ def _pow_neg_half_to_rsqrt(graph: Graph, stats: Counter) -> None:
             continue
         with graph.inserting_before(node):
             replacement = graph.call_function(aten.rsqrt.default, (src,))
-        # convert は全ノードの meta["val"]（FakeTensor）を要求する。
+        # convert requires meta["val"] (a FakeTensor) on every node.
         replacement.meta.update(node.meta)
         node.replace_all_uses_with(replacement)
         graph.erase_node(node)
@@ -237,7 +250,7 @@ def _pow_neg_half_to_rsqrt(graph: Graph, stats: Counter) -> None:
 
 
 def _eps_operand(node: Any) -> float | None:
-    """`add(mean, eps)` の eps を返す（`add.Tensor` のスカラ形と `add.Scalar` の両方）。"""
+    """Return the eps of `add(mean, eps)` (the scalar form of `add.Tensor` and `add.Scalar`)."""
     if not isinstance(node, Node) or node.op != "call_function":
         return None
     if node.target not in (aten.add.Tensor, aten.add.Scalar):
@@ -251,7 +264,7 @@ def _eps_operand(node: Any) -> float | None:
 
 
 def _is_last_dim_mean(node: Any) -> bool:
-    """最終次元 1 本・keepdim の `mean.dim` か（rms_norm の縮約軸は最終次元のみ）。"""
+    """Whether this is a keepdim `mean.dim` over the last dimension only (rms_norm reduces it)."""
     if not isinstance(node, Node) or node.op != "call_function" or node.target is not aten.mean.dim:
         return False
     src = _val(node.args[0])
@@ -261,7 +274,7 @@ def _is_last_dim_mean(node: Any) -> bool:
 
 
 def _is_square_of(node: Any, x: Node) -> bool:
-    """x² を表すノードか。decomp の当たり方で `pow(x,2)` と `mul(x,x)` の両形が出る。"""
+    """Whether the node is x². Depending on the decomp, both `pow(x,2)` and `mul(x,x)` appear."""
     if not isinstance(node, Node) or node.op != "call_function":
         return False
     if node.target is aten.pow.Tensor_Scalar:
@@ -270,10 +283,10 @@ def _is_square_of(node: Any, x: Node) -> bool:
 
 
 def _rms_norm_operands(node: Node) -> tuple[Node, Node, float] | None:
-    """`mul(weight, mul(x, rsqrt(mean(x²)+eps)))` を (x, weight, eps) に分解する。
+    """Decompose `mul(weight, mul(x, rsqrt(mean(x²)+eps)))` into (x, weight, eps).
 
-    2 つの mul はどちらも可換なので、両方の並びを試す（実測は Qwen3 が
-    `mul(mul(x, rsqrt), weight)`、DiT の QK ノルムが逆順）。
+    Both muls are commutative, so both orders are tried (observed: Qwen3 has
+    `mul(mul(x, rsqrt), weight)`, DiT's QK norm the reverse).
     """
     if node.op != "call_function" or node.target is not aten.mul.Tensor:
         return None
@@ -298,12 +311,13 @@ def _rms_norm_operands(node: Node) -> tuple[Node, Node, float] | None:
 
 
 def _weightless_rms_norm_operands(node: Node) -> tuple[Node, float] | None:
-    """`mul(x, rsqrt(mean(x²)+eps))` を (x, eps) に分解する（weight 無し形）。
+    """Decompose `mul(x, rsqrt(mean(x²)+eps))` into (x, eps) (the weightless form).
 
-    Gemma4 の `v_norm`（RMSNorm with_scale=False）が初出。この形は weight 付き形の
-    **内側の mul と同形**なので、当て方は {@link _fold_rms_norm} の第 2 走査（weight 付きの
-    畳み込みで死んだノードを除いた後）に限る — 順序を崩すと weight 付き norm が
-    「weight 無し rms_norm + 裸の mul」に割れて weight の融合が消える。
+    First seen in Gemma4's `v_norm` (RMSNorm with_scale=False). This form is **the same shape as
+    the inner mul** of the weighted form, so it is applied only in the second walk of
+    {@link _fold_rms_norm} (after the nodes killed by the weighted fold are excluded) — breaking the
+    order would split a weighted norm into "weightless rms_norm + bare mul" and lose the weight
+    fusion.
     """
     if node.op != "call_function" or node.target is not aten.mul.Tensor:
         return None
@@ -323,18 +337,20 @@ def _weightless_rms_norm_operands(node: Node) -> tuple[Node, float] | None:
 
 
 def _fold_rms_norm(graph: Graph, stats: Counter) -> None:
-    """RMS 正規化の分解形を `aten.rms_norm` 1 ノードへ畳む（ADR 0017 の供給ルート②）。
+    """Fold the decomposed form of RMS normalization into one `aten.rms_norm` node.
 
-    手書き実装（Qwen3 / DiT）と diffusers `nn.RMSNorm` は core decomp で同じ
-    pow/mean/rsqrt 形に降りるので、供給元を問わず 1 パターンで拾える。weight 付きを
-    第 1 走査で畳み、weight 無し形（Gemma4 `v_norm`）は**第 2 走査**で拾う
-    （{@link _weightless_rms_norm_operands} — 順序の理由はそちらの docstring）。
+    This is supply route ② of ADR 0017. Hand-written implementations (Qwen3 / DiT) and diffusers'
+    `nn.RMSNorm` lower to the same pow/mean/rsqrt form under the core decomp, so one pattern picks
+    them up whatever the source. The weighted form is folded in the first walk, and the weightless
+    form (Gemma4 `v_norm`) is picked up in the **second walk** ({@link
+    _weightless_rms_norm_operands} — the reason for the order is in its docstring).
 
-    MUST: weight が**最終次元長の rank-1** でない形は畳まない。rms_norm の契約は
-    「正規化長の正本 = weight の長さ」（ADR 0017）で、broadcast 形の weight を畳むと
-    契約と別の意味論になる。畳まなければ mean/rsqrt が未対応 op として全件列挙に出る
-    （黙って近似しない）。
-    MUST: eps は有限の正数。非有限 eps は IR v1 が値レベルで拒否する。
+    MUST: a form whose weight is not **rank-1 of the last-dimension length** is not folded.
+    rms_norm's contract is "the source of truth for the normalized length = the weight's length"
+    (ADR 0017), and folding a broadcast-shaped weight would give semantics different from the
+    contract. Left unfolded, mean/rsqrt appear in the full list as unsupported ops (no silent
+    approximation).
+    MUST: eps is a finite positive number. IR v1 rejects a non-finite eps at the value level.
     """
     for node in list(graph.nodes):
         if node.op != "call_function":
@@ -350,13 +366,15 @@ def _fold_rms_norm(graph: Graph, stats: Counter) -> None:
         if not math.isfinite(eps) or eps <= 0:
             continue
         new = _insert(graph, node, aten.rms_norm.default, (x, [length], weight, eps), x_val)
-        # 出力は元の mul と同形・同 dtype（meta を正本として持ち越す）。
+        # The output has the original mul's shape and dtype (the meta carries over as the source
+        # of truth).
         new.meta.update(node.meta)
         _replace(graph, node, new)
         stats["rms_norm"] += 1
-    # weight 無し形の第 2 走査。weight 付きの畳み込みで内側の mul は users 0 の死体として
-    # 残る（DCE は normalize_graph の末尾）ので、生きているノードだけに当てる MUST —
-    # ここを見ないと畳み込み済み norm の内側を二重に拾って weight の融合を壊す。
+    # Second walk for the weightless form. The weighted fold leaves the inner mul as a dead node
+    # with 0 users (DCE is at the end of normalize_graph), so this MUST be applied only to live
+    # nodes — without that check the inside of an already folded norm is picked up twice and the
+    # weight fusion breaks.
     for node in list(graph.nodes):
         if node.op != "call_function" or not node.users:
             continue
@@ -370,26 +388,28 @@ def _fold_rms_norm(graph: Graph, stats: Counter) -> None:
             continue
         if not math.isfinite(eps) or eps <= 0:
             continue
-        # weight は None のまま渡す（アリティ 2 への ones 合成は `_h_rms_norm` の責務 —
-        # ADR 0017 の「×1 の厳密恒等」をここへ写して二重管理にしない）。
+        # The weight is passed as None (synthesizing ones up to arity 2 is `_h_rms_norm`'s job —
+        # ADR 0017's "×1 is an exact identity" is not copied here into a second place).
         new = _insert(graph, node, aten.rms_norm.default, (x, [length], None, eps), x_val)
         new.meta.update(node.meta)
         _replace(graph, node, new)
         stats["rms_norm_weightless"] += 1
 
 
-# ---- safe-softmax ガードの除去（ADR 0016）----------------------------------
+# ---- Removing the safe-softmax guard (ADR 0016)----------------------------------
 
 
 def _introduces_neg_inf(node: Node) -> bool:
-    """引数に**非有限**の float リテラル（f32 へ丸めた後の値で見る）を持つか。
+    """Whether an argument is a **non-finite** float literal (judged by its value rounded to f32).
 
-    `-inf` だけでなく `+inf` と NaN も源に数える — `+inf` は neg / sub / 負の mul で -inf に
-    化ける（`scores - mask * float("inf")`）ので、符号を追わずに保守側へ倒す。値は torch の
-    scalar → f32 変換と同じ丸めで見る（double では有限でも `-1e39` は f32 で -inf になる）。
+    Not only `-inf` but also `+inf` and NaN count as sources — `+inf` turns into -inf through neg /
+    sub / a negative mul (`scores - mask * float("inf")`), so the sign is not tracked and the test
+    falls on the conservative side. The value is judged with the same rounding as torch's scalar →
+    f32 conversion (`-1e39` is finite as a double but -inf in f32).
 
-    NOTE: 有限リテラルどうしの演算が f32 で溢れる形（`finfo.min + finfo.min`）は拾わない —
-    リテラル 1 本の値からは決まらず、演算の値域を追う判定になる。
+    NOTE: forms where operations between finite literals overflow in f32
+    (`finfo.min + finfo.min`) are not caught — that is not decided by one literal's value and would
+    need a test that tracks the range of the operation.
     """
 
     def holds(value: Any) -> bool:
@@ -402,9 +422,10 @@ def _introduces_neg_inf(node: Node) -> bool:
     return holds(node.args) or holds(tuple(node.kwargs.values()))
 
 
-#: 入力が -inf でも出力が有限（か NaN）になる op — -inf の伝播はここで止まる。
-#: softmax は「全要素 -inf の行」を NaN にするが -inf にはしない。NaN は `eq(-inf)` で
-#: 拾われないのでガードの発火条件には効かない（全行有限の証明は各段で個別に立てる）。
+#: Ops whose output is finite (or NaN) even when the input is -inf — propagation of -inf stops
+#: here. softmax turns "a row of all -inf" into NaN but not into -inf. NaN is not caught by
+#: `eq(-inf)`, so it does not affect the guard's firing condition (the proof that every row is
+#: finite is established separately at each step).
 _NEG_INF_SANITIZERS = (
     aten.softmax.int,
     aten._softmax.default,
@@ -413,27 +434,30 @@ _NEG_INF_SANITIZERS = (
     aten.exp.default,
 )
 
-#: 有限の入力から -inf を**生む** op — 引数に非有限リテラルを持たないので
-#: {@link _introduces_neg_inf} では源として数えられない。
+#: Ops that **produce** -inf from finite inputs — they hold no non-finite literal in their
+#: arguments, so {@link _introduces_neg_inf} does not count them as sources.
 #:
-#: `log(0)` / `log1p(-1)` は -inf が定義どおりの出力なので無条件に源。
-#: MUST: `rsqrt` / `pow(x, -0.5)` は入れない — `x == 0` は **+inf**・`x < 0` は NaN で
-#: -inf を作らない（`_pow_neg_half_to_rsqrt` の定義域の観察と同じ）。源をここへ広げると
-#: rms_norm に畳まれ残った rsqrt がスコア側の -inf 源に化け、全ての attention が
-#: `safe_softmax` への置換（分岐②）へ倒れる。
+#: `log(0)` / `log1p(-1)` give -inf as their defined output, so they are sources unconditionally.
+#: MUST: `rsqrt` / `pow(x, -0.5)` are not added — `x == 0` gives **+inf** and `x < 0` gives NaN;
+#: neither makes -inf (the same observation of the domain as in `_pow_neg_half_to_rsqrt`).
+#: Widening the sources here would turn an rsqrt left unfolded into rms_norm into a -inf source on
+#: the score side, and every attention would fall to the replacement with `safe_softmax` (branch
+#: ②).
 _NEG_INF_PRODUCERS = (aten.log.default, aten.log1p.default)
 
-#: 除数が 0 のときだけ ±inf を生む op（源かどうかは**除数**で決まる）。
+#: Ops that produce ±inf only when the divisor is 0 (whether they are a source is decided by the
+#: **divisor**).
 _NEG_INF_DIVISIONS = (aten.div.Tensor, aten.div.Scalar)
 
 
 def _produces_neg_inf(node: Node) -> bool:
-    """有限の入力から -inf を生みうる op か（-inf リテラルを持たない源）。
+    """Whether an op can produce -inf from finite inputs (a source without a -inf literal).
 
-    除算は「除数が 0 と示せない形」だけを源に数える。判定を op 名だけで下すと
-    attention の通常経路（`scores / sqrt(d)`）まで源になり、事実上すべてのガード地点が
-    分岐②へ倒れる — それは「分岐①を廃す」案そのもので、ここで採る話ではない。
-    非ゼロの数値リテラルは除数が 0 でないことの証明になるので源から外す。
+    A division counts as a source only in "forms where the divisor cannot be shown non-zero".
+    Deciding by op name alone would make even attention's normal path (`scores / sqrt(d)`) a
+    source, and practically every guard site would fall to branch ② — that is exactly the
+    "abolish branch ①" proposal, which is not what is taken here. A non-zero numeric literal proves
+    the divisor is not 0, so it is excluded from the sources.
     """
     if node.target in _NEG_INF_PRODUCERS:
         return True
@@ -441,23 +465,25 @@ def _produces_neg_inf(node: Node) -> bool:
         return False
     divisor = node.args[1] if len(node.args) > 1 else None
     if isinstance(divisor, bool) or not isinstance(divisor, (int, float)):
-        return True  # テンソル除数・読めない形は「0 かもしれない」に倒す（保守側）
+        return True  # tensor divisors and unreadable forms fall to "might be 0" (conservative)
     return divisor == 0
 
 
 class _Placeholders:
-    """placeholder の実値表（safe-softmax ガードの不活性証明が使う — ADR 0016）。
+    """Table of placeholder values (used by the safe-softmax guard's inactivity proof — ADR 0016).
 
-    torch.export は parameter / buffer / lifted 定数を**全て placeholder として持ち上げる**
-    ので、「placeholder は有限」と決め打つと `register_buffer` した -inf マスクが素通りする。
-    実値は ExportedProgram（`state_dict` / `constants`）から引ける。
+    torch.export **lifts all parameters / buffers / lifted constants as placeholders**, so assuming
+    "placeholders are finite" would let a `register_buffer`'d -inf mask through. The actual values
+    can be looked up in the ExportedProgram (`state_dict` / `constants`).
 
-    唯一の例外がユーザー実行時入力（`graph_signature.user_inputs`）で、こちらは値が実行時に
-    しか決まらないため**有限と仮定する**。グラフ入力に -inf を渡す形はランタイム契約の外で、
-    IR v1 の非有限値拒否は initializer にしか効かない。
+    The only exception is the user's run-time inputs (`graph_signature.user_inputs`): their values
+    are known only at run time, so they are **assumed finite**. Passing -inf as a graph input is
+    outside the runtime contract, and IR v1's rejection of non-finite values applies only to
+    initializers.
 
-    実値を引けない placeholder は「-inf 源かもしれない」に倒す（呼び出し側が fail loudly）。
-    有限判定は**遅延**する — 判定に触れない巨大な重みまで走査すると export が数秒遅くなる。
+    A placeholder whose value cannot be looked up falls to "might be a -inf source" (the caller
+    fails loudly). The finiteness test is **lazy** — scanning even huge weights the test never
+    touches would slow export down by seconds.
     """
 
     def __init__(self, ep: ExportedProgram) -> None:
@@ -482,11 +508,11 @@ class _Placeholders:
         self._finite: dict[str, bool] = {}
 
     def value(self, name: str) -> torch.Tensor | None:
-        """placeholder の実値（user 入力・実値不明なら None）。"""
+        """The placeholder's actual value (None for a user input or an unknown value)."""
         return self._values.get(name)
 
     def can_be_neg_inf(self, name: str) -> bool:
-        """この placeholder が非有限値を持ちうるか（user 入力は有限仮定で False）。"""
+        """Whether this placeholder can hold non-finite values (user inputs: assumed finite)."""
         if name in self._unknown:
             return True
         value = self._values.get(name)
@@ -500,15 +526,16 @@ class _Placeholders:
 
 
 def _can_be_neg_inf(node: Node, placeholders: _Placeholders) -> bool:
-    """node の値が -inf を取り得るかを依存を遡って判定する。
+    """Decide whether the node's value can be -inf by walking back through its dependencies.
 
-    多層 attention では下段の softmax 経由でマスクが上段の依存錐に入るため、「依存錐に
-    -inf 定数があるか」だけでは全段が偽陽性になる。値域が有限な op を伝播の壁として扱い、
-    実際に -inf になり得る経路だけを見る。源は非有限リテラル（f32 へ丸めた値）を持つノード
-    （{@link _introduces_neg_inf}）だけでなく、有限の入力から -inf を**生む** op
-    （{@link _produces_neg_inf}）も数える。持ち上げられた定数 / buffer / parameter は
-    {@link _Placeholders} が実値で判定し、それ以外の非 call_function ノードは
-    「-inf 源かもしれない」に倒す。
+    In multi-layer attention the mask enters the upper layers' dependency cone through the lower
+    layers' softmax, so "is there a -inf constant in the dependency cone" alone would flag every
+    layer falsely. Ops with a finite range are treated as walls to propagation, and only the paths
+    that can actually become -inf are looked at. Sources are not only nodes holding a non-finite
+    literal (value rounded to f32) ({@link _introduces_neg_inf}) but also ops that **produce** -inf
+    from finite inputs ({@link _produces_neg_inf}). Lifted constants / buffers / parameters are
+    judged by their actual values in {@link _Placeholders}; any other non-call_function node falls
+    to "might be a -inf source".
     """
     seen: set[str] = set()
     stack = [node]
@@ -542,20 +569,22 @@ def _subs_symint(value: Any, length: int) -> Any:
         return int(expr)
     symbols = list(expr.free_symbols)
     if len(symbols) != 1:
-        raise NotImplementedError(f"複数シンボルの式は評価できない: {expr}")
+        raise NotImplementedError(f"an expression with several symbols cannot be evaluated: {expr}")
     return int(expr.subs(symbols[0], length))
 
 
 def _eval_static(
     node: Node, length: int, cache: dict[str, Any], placeholders: _Placeholders
 ) -> Any:
-    """定数と shape シンボルだけに依存する部分木を、記号長 `length` で実評価する。
+    """Evaluate a subtree of only constants and shape symbols for real at symbolic length `length`.
 
-    持ち上げられた定数 / buffer / parameter は実値に解決する（`register_buffer` された
-    マスクは「入力値に依存する」形ではなく、export 時に値が確定している定数だから）。
+    Lifted constants / buffers / parameters resolve to their actual values (a `register_buffer`'d
+    mask is not a form that "depends on input values" but a constant whose value is fixed at
+    export time).
 
-    MUST: ユーザー入力の placeholder に触れた時点で失敗する。実行時入力に依存するマスクは
-    「不活性の証明」ができない形なので、黙って通さず呼び出し側が fail loudly する。
+    MUST: fail as soon as a user-input placeholder is touched. A mask depending on run-time inputs
+    is a form whose "inactivity" cannot be proven, so it is not let through silently; the caller
+    fails loudly.
     """
     cached = cache.get(node.name)
     if cached is not None:
@@ -563,10 +592,10 @@ def _eval_static(
     if node.op == "placeholder":
         value = placeholders.value(node.name)
         if value is None:
-            raise NotImplementedError(f"実値を持たない placeholder: {node.name}")
+            raise NotImplementedError(f"placeholder without an actual value: {node.name}")
         return value
     if node.op != "call_function":
-        raise NotImplementedError(f"定数部分木でないノード: {node.name} ({node.op})")
+        raise NotImplementedError(f"node that is not a constant subtree: {node.name} ({node.op})")
     val = node.meta.get("val")
     if isinstance(val, torch.SymInt):
         return _subs_symint(val, length)
@@ -586,10 +615,10 @@ def _eval_static(
 
 
 def _guard_parts(node: Node) -> tuple[Node, Node] | None:
-    """`where(logical_not(any(logical_not(eq(src,-inf)), -1)), full_like(sm,0), sm)` を照合する。
+    """Match `where(logical_not(any(logical_not(eq(src,-inf)), -1)), full_like(sm,0), sm)`.
 
-    一致したら (softmax ノード, softmax の入力) を返す。SDPA の safe-softmax ガード
-    （「全要素が -inf の行は 0 を返す」）そのもので、厳密照合以外は触らない。
+    On a match, returns (softmax node, softmax input). This is SDPA's safe-softmax guard itself
+    ("a row whose elements are all -inf returns 0"); anything but an exact match is left alone.
     """
     if node.op != "call_function" or node.target is not aten.where.self:
         return None
@@ -624,63 +653,69 @@ def _guard_parts(node: Node) -> tuple[Node, Node] | None:
 
 
 class _UnprovenGuardError(NotImplementedError):
-    """不活性の判定そのものが実評価の例外で立たなかった形（`safe_softmax` へ回す）。
+    """A form where the inactivity test itself did not stand because evaluation raised.
 
-    `NotImplementedError` の派生にしてあるので呼び出し側の受け口は 1 つのまま。統計だけ
-    分けるのは、**例外を黙って吸収する経路を作らない**ため（本物の実装バグがここへ紛れ込んだ
-    ときに件数として見える）。
+    It is routed to `safe_softmax`. Deriving from `NotImplementedError` keeps the caller's single
+    catch. Only the statistics are split, so as **not to create a path that silently absorbs
+    exceptions** (a real implementation bug slipping in here shows up as a count).
     """
 
 
 def _assert_guard_inactive(src: Node, placeholders: _Placeholders) -> str:
-    """ガードが発火し得ない（全要素 -inf の行が存在しない）ことを示し、根拠名を返す。
+    """Show that the guard cannot fire (no row whose elements are all -inf); return the reason.
 
-    ① softmax 入力の依存錐に -inf を持ち込むノードが無い → 有限値しか来ないので発火し得ない
-    ② -inf が「加算マスク 1 本」からのみ入る → そのマスクを 2 つの記号長で実評価し、各行に
-       有限要素が残ることを実測する。ただし記号依存なら全長での証明には使わない。
+    ① no node in the dependency cone of the softmax input brings in -inf → only finite values
+      arrive, so it cannot fire
+    ② -inf enters only through "one additive mask" → that mask is evaluated for real at 2 symbolic
+       lengths and each row is observed to keep a finite element. If it is symbol-dependent,
+       however, this is not used as a proof over every length.
 
-    MUST: それ以外は `NotImplementedError`。ガードを消すと NaN が下流に流れる形をここで
-    受理しない（呼び出し側が `safe_softmax` への構成的置換へ回す — ADR 0044。この関数が
-    返すのは**あくまで「消してよい」証明**で、判定を緩めてはならない）。
+    MUST: anything else is `NotImplementedError`. A form where removing the guard lets NaN flow
+    downstream is not accepted here (the caller routes it to the constructive replacement with
+    `safe_softmax` — ADR 0044. What this function returns is **strictly a proof that removal is
+    safe**, and the test must not be loosened).
     """
     if not _can_be_neg_inf(src, placeholders):
         return "no-neg-inf"
     if src.op != "call_function" or src.target is not aten.add.Tensor:
         raise NotImplementedError(
-            f"safe-softmax ガードの不活性を証明できない: {src.name} ({src.target})"
-            " — -inf が加算マスク以外の経路から入っている"
+            f"cannot prove the safe-softmax guard inactive: {src.name} ({src.target})"
+            " — -inf enters through a path other than an additive mask"
         )
     left, right = src.args[0], src.args[1]
     if not isinstance(left, Node) or not isinstance(right, Node):
-        raise NotImplementedError(f"safe-softmax ガードの加算がテンソル同士でない: {src.name}")
+        raise NotImplementedError(
+            f"the safe-softmax guard's addition is not between tensors: {src.name}"
+        )
     scores, mask = (left, right) if _can_be_neg_inf(right, placeholders) else (right, left)
     if _can_be_neg_inf(scores, placeholders):
         raise NotImplementedError(
-            f"safe-softmax ガード: スコア側にも -inf 源がある（{scores.name}）"
+            f"safe-softmax guard: the score side has a -inf source too ({scores.name})"
         )
     for length in GUARD_PROBE_LENGTHS:
         try:
             evaluated = _eval_static(mask, length, {}, placeholders)
             rows_have_finite = bool(torch.isfinite(evaluated).any(dim=-1).all())
         except NotImplementedError:
-            # 判定関数が構造で下した「証明できない」— そのまま呼び出し側へ返す。
+            # A structural "cannot prove" from the test functions — returned to the caller as is.
             raise
         except Exception as cause:
-            # 実評価は placeholder を**実値**へ解決する一方、記号は probe 長へ置換するので、
-            # 両者が同じ式で出会うと torch が例外を投げる（shape 不一致・非テンソル）。
-            # これは判定の失敗であってエクスポータの故障ではない — 例外の型名簿を呼び出し側へ
-            # 漏らさないよう、判定結果（`NotImplementedError`）へ正規化する MUST。
+            # Evaluation resolves placeholders to **actual values** while it substitutes symbols
+            # with the probe length, so when the two meet in one expression torch raises (shape
+            # mismatch, non-tensor). That is a failed test, not a broken exporter — it MUST be
+            # normalized to the test result (`NotImplementedError`) so the list of exception types
+            # does not leak to the caller.
             raise _UnprovenGuardError(
-                f"safe-softmax ガードの不活性を判定できない: マスク {mask.name} の記号長"
-                f" {length} での実評価が {type(cause).__name__} で落ちた"
+                f"cannot decide whether the safe-softmax guard is inactive: evaluating mask"
+                f" {mask.name} at symbolic length {length} failed with {type(cause).__name__}"
             ) from cause
         if not rows_have_finite:
             raise NotImplementedError(
-                f"safe-softmax ガードは不活性でない: マスク {mask.name} は記号長 {length} で"
-                " 全要素 -inf の行を持つ"
+                f"the safe-softmax guard is not inactive: mask {mask.name} has a row of all -inf"
+                f" at symbolic length {length}"
             )
-    # 2 点一致は未評価の長さを保証しない。記号依存マスクはガードを保ち、
-    # safe_softmax へ置換する（docs/decisions/0044-runtime-attention-mask.md）。
+    # A 2-point match does not cover the lengths not evaluated. A symbol-dependent mask keeps the
+    # guard and is replaced with safe_softmax (docs/decisions/0044-runtime-attention-mask.md).
     seen: set[str] = set()
     pending = [mask]
     while pending:
@@ -692,26 +727,27 @@ def _assert_guard_inactive(src: Node, placeholders: _Placeholders) -> str:
         dimensions = value.shape if isinstance(value, torch.Tensor) else (value,)
         if any(isinstance(dim, torch.SymInt) and dim.node.expr.free_symbols for dim in dimensions):
             raise NotImplementedError(
-                f"safe-softmax ガード: 記号依存マスク {mask.name} の全長での不活性は未証明"
+                f"safe-softmax guard: inactivity of symbol-dependent mask {mask.name} over every"
+                " length is unproven"
             )
         pending.extend(current.all_input_nodes)
     return "masked-rows-nonempty"
 
 
 def _drop_safe_softmax_guard(graph: Graph, stats: Counter, *, placeholders: _Placeholders) -> None:
-    """SDPA の safe-softmax ガードを畳む（ADR 0016 → ADR 0044 で 2 段化）。
+    """Fold SDPA's safe-softmax guard (ADR 0016 → made 2-step by ADR 0044).
 
-    ① 不活性を実値で証明できたらガードを**取り除く**（ADR 0016 の従来経路 — 既存資産の
-       出力バイト列はここで閉じたまま）。
-    ② 証明できない形（実行時マスク・スコア側の -inf 源・全 -inf 行が実在する静的マスク）は
-       fail loudly せず、ガード部分木ごと **safe_softmax 1 ノードへ書き換える**。
-       グラフ操作は ① と同じ「where → softmax」の置換で、違いは softmax に
-       {@link SAFE_SOFTMAX_META} を立てることだけ。
+    ① If inactivity is proven with actual values, the guard is **removed** (ADR 0016's original
+       path — the output bytes of existing assets stay closed here).
+    ② A form that cannot be proven (a run-time mask, a -inf source on the score side, a static
+       mask that really has all -inf rows) does not fail loudly; the whole guard subtree is
+       **rewritten into one safe_softmax node**. The graph operation is the same "where → softmax"
+       replacement as ①; the only difference is setting {@link SAFE_SOFTMAX_META} on the softmax.
 
-    ② が正しいのは、スコアが有限（非有限入力は契約外）の下で「全要素 -inf ⇔ 行 max = -inf」
-    であり、safe_softmax の契約（行 max が -inf の行は全 0）が torch のガードと**厳密に**
-    同じ意味論だから（ADR 0044 決定 2）。① を先に試すのは、証明が立つ形で語彙を増やさない
-    ため（既存 IR との差分ゼロ）。
+    ② is correct because, with finite scores (non-finite inputs are outside the contract), "all
+    elements -inf ⇔ row max = -inf", and safe_softmax's contract (a row whose max is -inf is all 0)
+    has **exactly** the same semantics as torch's guard (ADR 0044 decision 2). ① is tried first so
+    that forms with a proof add no vocabulary (zero difference from existing IR).
     """
     for node in list(graph.nodes):
         if node.op != "call_function":
@@ -723,8 +759,8 @@ def _drop_safe_softmax_guard(graph: Graph, stats: Counter, *, placeholders: _Pla
         try:
             reason = _assert_guard_inactive(src, placeholders)
         except _UnprovenGuardError:
-            # 判定が実評価の例外で立たなかった形（構造で「証明できない」と言われた形と
-            # 区別して数える）。置換そのものは同じ。
+            # A form where the test did not stand because evaluation raised (counted apart from
+            # forms structurally declared "cannot prove"). The replacement itself is the same.
             softmax.meta[SAFE_SOFTMAX_META] = True
             reason = "rewritten-unproven"
         except NotImplementedError:
@@ -735,22 +771,22 @@ def _drop_safe_softmax_guard(graph: Graph, stats: Counter, *, placeholders: _Pla
 
 
 def _additive_attn_mask(graph: Graph, stats: Counter) -> None:
-    """保存した SDPA の **bool** な `attn_mask` を加算型 f32（0 / −inf）へ置き換える。
+    """Replace a preserved SDPA's **bool** `attn_mask` with an additive f32 mask (0 / −inf).
 
-    融合 attention の mask 契約は加算型 f32 のみ（ADR 0023）。一方 transformers の
-    Gemma3 系は bool の帯マスクを SDPA に渡すので、保存すると ① `_h_attention` の dtype 門
-    ② bool 定数を initializer にできない門、の 2 つに当たる。
+    Fused attention's mask contract is additive f32 only (ADR 0023). transformers' Gemma3 family,
+    on the other hand, passes a bool band mask to SDPA, so preserving it runs into 2 guards: ① the
+    dtype guard of `_h_attention` ② the guard that refuses bool constants as initializers.
 
-    書き換えは `where(mask, scalar_tensor(0.0), scalar_tensor(-inf))` の 1 段で、これは
-    torch 自身の `_scaled_dot_product_attention_math` が bool マスクに対して**同じ op・
-    同じ定数**で行う変換そのもの（分解経路が実グラフに出す形と一致 — ADR 0023 の
-    ビット同一が保存経路でもそのまま成り立つ）。where / scalar_tensor はどちらも
-    `convert.FOLDABLE_OPS` にあるので、定数畳み込みで f32 の Tmax 定数 +
-    `sym_prefix_slice` に落ちる。
+    The rewrite is the single step `where(mask, scalar_tensor(0.0), scalar_tensor(-inf))`, which is
+    exactly the conversion torch's own `_scaled_dot_product_attention_math` applies to a bool mask
+    with **the same ops and the same constants** (it matches the form the decomposition path puts
+    into the real graph — ADR 0023's bit identity holds on the preserved path as it is). where /
+    scalar_tensor are both in `convert.FOLDABLE_OPS`, so constant folding turns them into an f32
+    Tmax constant + `sym_prefix_slice`.
 
-    MUST: 同じ bool マスクには**同じ 1 本**の加算マスクを配る。SDPA ごとに複製しても値は
-    同じ（CSE と定数の重複排除で最後は 1 本に畳まれる）が、畳み込み評価を無駄に層数ぶん
-    走らせることになる。
+    MUST: the same bool mask gets **the same single** additive mask. Duplicating it per SDPA gives
+    the same values (CSE and constant deduplication collapse them into one in the end), but runs the
+    folding evaluation needlessly once per layer.
     """
     additive: dict[str, Node] = {}
     for node in list(graph.nodes):
@@ -777,15 +813,16 @@ def _additive_attn_mask(graph: Graph, stats: Counter) -> None:
         stats["additive_attn_mask"] += 1
 
 
-# ---- rank 下げ 3 パス（発火は rank > STRIDED_RANK 限定 — ADR 0016）----------
+# ---- The 3 rank-lowering passes (fire only on rank > STRIDED_RANK — ADR 0016)----------
 
 
 def _lower_unit_expand(graph: Graph, stats: Counter) -> None:
-    """`unsqueeze → expand → (clone) → view` を rank≤3 の expand 列に落とす。
+    """Lower `unsqueeze → expand → (clone) → view` into an expand sequence of rank≤3.
 
-    GQA の kv 複製（`repeat_interleave(n, dim)` の分解形）が rank5 を作る唯一の形。
-    新しい軸の前後をまとめて `[P, n, Q]` に潰せば複製の意味論はそのまま rank3 になる。
-    `n == 1`（GQA 無し構成）は鎖まるごと恒等。
+    GQA's kv duplication (the decomposed form of `repeat_interleave(n, dim)`) is the only form that
+    creates rank 5. Collapsing what is before and after the new axis into `[P, n, Q]` keeps the
+    duplication semantics as they are at rank 3. `n == 1` (a configuration without GQA) makes the
+    whole chain an identity.
     """
     for expand in list(graph.nodes):
         if expand.op != "call_function" or expand.target is not aten.expand.default:
@@ -804,17 +841,20 @@ def _lower_unit_expand(graph: Graph, stats: Counter) -> None:
         axis = int(unsqueeze.args[1]) % _rank(unsqueeze)
         src_shape = list(_val(src).shape)
         expanded_shape = list(_val(expand).shape)
-        # MUST: shape の突合は `extent_keys`（sympy 式の構造等価）で見る。素の list `!=` は
-        # 要素ごとに `SymInt.__eq__` を呼んでヒント値で真偽を決めるうえ、その評価が
-        # export 済みの ShapeEnv へ後付けの guard 置換を積む（置換は `convert._dim` まで
-        # 届き、次元が黙って静的に焼かれる — extents.py 冒頭の MUST）。
+        # MUST: shapes are matched with `extent_keys` (structural equality of sympy expressions).
+        # A bare list `!=` calls `SymInt.__eq__` per element and decides by the hint values, and
+        # on top of that the evaluation stacks a late guard substitution onto the already exported
+        # ShapeEnv (the substitution reaches `convert._dim` and the dimension is silently baked
+        # as static — the MUST at the top of extents.py).
         if extent_keys(expanded_shape[:axis]) != extent_keys(src_shape[:axis]):
             continue
         if extent_keys(expanded_shape[axis + 1 :]) != extent_keys(src_shape[axis:]):
             continue
         count = _static_size(expanded_shape[axis])
         if count is None:
-            raise NotImplementedError(f"記号次元の複製は未対応: {expand.name}")
+            raise NotImplementedError(
+                f"duplication along a symbolic dimension is not supported: {expand.name}"
+            )
         out_shape = list(_val(sink).shape)
         if count == 1 and extent_keys(out_shape) == extent_keys(src_shape):
             _replace(graph, sink, src)
@@ -837,9 +877,10 @@ def _lower_unit_expand(graph: Graph, stats: Counter) -> None:
 
 
 def _unbind_consumers(view: Node, *, split_dim: int) -> list[tuple[Node, int, int]] | None:
-    """`view` の消費者が全て「分割軸の幅 1 slice → squeeze」なら `(squeeze, start, end)` の列。
+    """`(squeeze, start, end)` list if every consumer of `view` is "width-1 slice → squeeze".
 
-    1 件でも当てはまらなければ None（= この view は unbind ではない）。
+    The slice is along the split axis. If even one consumer does not fit, None (= this view is not
+    an unbind).
     """
     rank = _rank(view)
     rewritten: list[tuple[Node, int, int]] = []
@@ -848,8 +889,9 @@ def _unbind_consumers(view: Node, *, split_dim: int) -> list[tuple[Node, int, in
             return None
         if int(user.args[1]) % rank != split_dim:
             return None
-        # start / end はスキーマ上 `SymInt?` — 記号（生 SymInt / FX Node）と `None` 明示は
-        # ヒント値へ特殊化せず**この view には触れずスキップ**へ倒す（この関数の MUST）。
+        # start / end are `SymInt?` in the schema — a symbol (raw SymInt / FX Node) or an
+        # explicit `None` is not specialized to the hint but falls to **skipping without touching
+        # this view** (this function's MUST).
         start, end = _static_index(user.args[2]), _static_index(user.args[3])
         if start is None or end is None:
             return None
@@ -858,8 +900,9 @@ def _unbind_consumers(view: Node, *, split_dim: int) -> list[tuple[Node, int, in
             return None
         if squeeze.target not in (aten.squeeze.dim, aten.squeeze.dims) or len(squeeze.args) < 2:
             return None
-        # 落とすのが**分割軸ちょうど**であること — 別の長さ 1 軸（batch の軸 0 など）を落とす
-        # squeeze は unbind ではないので、この view には触れない（呼び手の MUST）。
+        # What is dropped must be **exactly the split axis** — a squeeze that drops another
+        # length-1 axis (batch axis 0, etc.) is not an unbind, so this view is left alone (the
+        # caller's MUST).
         dims = squeeze.args[1] if squeeze.target is aten.squeeze.dims else [squeeze.args[1]]
         if {int(dim) % rank for dim in dims} != {split_dim}:
             return None
@@ -868,16 +911,18 @@ def _unbind_consumers(view: Node, *, split_dim: int) -> list[tuple[Node, int, in
 
 
 def _lower_split_unbind(graph: Graph, stats: Counter) -> None:
-    """`view`（最終次元を (A,B) に分割）→ 幅 1 `slice` → `squeeze` を最終次元 slice に畳む。
+    """Fold `view` (last dim split into (A,B)) → width-1 `slice` → `squeeze` into a last-dim slice.
 
-    `apply_rotary_emb(use_real_unbind_dim=-2)` が作る形。分割は連続なので、添字 s の
-    1 枚は元テンソルの最終次元 `[s·B, (s+1)·B)` と厳密に同じ並びになる。
+    The form `apply_rotary_emb(use_real_unbind_dim=-2)` creates. The split is contiguous, so the
+    slice at index s has exactly the same order as `[s·B, (s+1)·B)` of the original tensor's last
+    dimension.
 
-    MUST: 消費者の照合は**全件そろってから**書き換える（分割の一部だけを書き換えると残りが
-    壊れた参照になる）。1 件でも想定外（幅 1 でない slice / squeeze 以外の消費者）なら
-    **その view には触れずスキップ**する — 掴んだ形は unbind とは限らず、ここで落とすと
-    別の形の rank5 が正規化の途中で殺される。本当に rank ≤ STRIDED_RANK へ落ちない形が
-    残れば convert 側の門（strided 族の rank 上限）が全件列挙で落とす。
+    MUST: rewrite only **after every consumer has matched** (rewriting only part of a split leaves
+    the rest as broken references). If even one is unexpected (a slice not of width 1 / a consumer
+    other than squeeze), **skip without touching that view** — the caught form is not necessarily
+    an unbind, and failing here would kill a rank 5 of a different form in the middle of
+    normalization. If a form that really does not drop to rank ≤ STRIDED_RANK remains, the guard on
+    the convert side (the strided family's rank cap) fails it in the full list.
     """
     for view in list(graph.nodes):
         if view.op != "call_function" or view.target is not aten.view.default:
@@ -914,7 +959,7 @@ def _lower_split_unbind(graph: Graph, stats: Counter) -> None:
 
 
 def _permute_order(node: Any) -> list[int] | None:
-    """`permute` の正規化済み軸順（負の添字を畳んだもの）。permute 以外なら None。"""
+    """Normalized axis order of a `permute` (negative indices folded). None for non-permutes."""
     if not isinstance(node, Node) or node.op != "call_function":
         return None
     if node.target is not aten.permute.default or len(node.args) != 2:
@@ -926,7 +971,7 @@ def _permute_order(node: Any) -> list[int] | None:
     raw = node.args[1]
     if not isinstance(raw, (list, tuple)) or len(raw) != rank:
         return None
-    # bool は int の部分型なので明示的に弾く（True が軸 1 に化ける）
+    # bool is a subtype of int, so it is rejected explicitly (True would turn into axis 1)
     if any(isinstance(axis, bool) or not isinstance(axis, int) for axis in raw):
         return None
     order = [axis % rank for axis in raw]
@@ -934,16 +979,17 @@ def _permute_order(node: Any) -> list[int] | None:
 
 
 def _compose_permute_chains(graph: Graph, stats: Counter) -> None:
-    """恒等 `permute` を除去し、隣接する `permute` を 1 回に合成する。
+    """Remove identity `permute`s and compose adjacent `permute`s into one.
 
-    IR の permute は strided な実体化コピーなので、鎖の各段が 1 dispatch と全要素の
-    読み書きを丸ごと 1 回ずつ増やす。`x.permute(p).permute(q)` は
-    `z.shape[i] = y.shape[q[i]] = x.shape[p[q[i]]]` なので、合成後の軸順は `p[q[i]]`。
+    The IR's permute is a strided materializing copy, so each link of a chain adds one dispatch and
+    one full read and write of every element. For `x.permute(p).permute(q)`,
+    `z.shape[i] = y.shape[q[i]] = x.shape[p[q[i]]]`, so the composed axis order is `p[q[i]]`.
 
-    **中間 permute の他の消費者は壊れない** — 書き換えるのは下流側の入力だけで、中間ノード
-    自体は（消費者が残っていれば）そのまま残る。誰も見なくなった中間だけが後段の DCE で
-    消える。グラフのノード列は位相順なので、3 段以上の鎖も上流から順に畳まれて 1 パスで
-    1 ノードに収束する。
+    **Other consumers of the intermediate permute do not break** — only the downstream input is
+    rewritten, and the intermediate node itself stays (as long as it has consumers). Only
+    intermediates nobody looks at any more disappear in the later DCE. The graph's node list is in
+    topological order, so chains of 3 or more links also fold from upstream in turn and converge to
+    one node in a single pass.
     """
     for permute in list(graph.nodes):
         outer = _permute_order(permute)
@@ -972,7 +1018,7 @@ def _compose_permute_chains(graph: Graph, stats: Counter) -> None:
 
 
 def _reshape_chain_back(node: Node) -> Node:
-    """reshape 系を遡って「要素順が同じ」最上流のテンソルを返す。"""
+    """Walk back through reshape-likes and return the most upstream tensor with the same order."""
     current = node
     while _is_reshape(current) and _sole_user(current) is not None:
         src = current.args[0]
@@ -983,7 +1029,7 @@ def _reshape_chain_back(node: Node) -> Node:
 
 
 def _reshape_chain_forward(node: Node) -> Node:
-    """clone / reshape 系を下って、要素順が同じままの最下流ノードを返す。"""
+    """Walk down clone / reshape-likes and return the most downstream node with the same order."""
     current = node
     while True:
         user = _sole_user(current)
@@ -993,14 +1039,16 @@ def _reshape_chain_forward(node: Node) -> Node:
 
 
 def _lower_reshape_permute(graph: Graph, stats: Counter) -> None:
-    """rank≥5 の `reshape → permute → reshape` を rank4 の隣接転置列へ書き換える。
+    """Rewrite a rank≥5 `reshape → permute → reshape` into a sequence of rank-4 adjacent transposes.
 
-    DiT の patchify / unpatchify（rank8 の 9 ノード）がこの形。任意の軸置換は隣接互換の積に
-    分解でき、隣接互換は「前後をまとめた rank4 の転置」で表せる — 途中の値は全て連続なので
-    view で自由に括り直せる（permute は実体化される）。長さ 1 の軸は線形添字に寄与しない
-    ので先に落とし、転置回数を減らす。
+    DiT's patchify / unpatchify (9 nodes of rank 8) has this form. Any axis permutation decomposes
+    into a product of adjacent transpositions, and an adjacent transposition can be expressed as "a
+    rank-4 transpose with what is before and after grouped" — every intermediate value is
+    contiguous, so views can regroup freely (permute is materialized). Length-1 axes do not
+    contribute to the linear index, so they are dropped first to reduce the number of transposes.
 
-    MUST: 端点（鎖の最上流・最下流）が rank ≤ STRIDED_RANK に収まらない形は fail loudly。
+    MUST: a form whose end points (the most upstream / downstream of the chain) do not fit in
+    rank ≤ STRIDED_RANK fails loudly.
     """
     for permute in list(graph.nodes):
         if permute.op != "call_function" or permute.target is not aten.permute.default:
@@ -1011,7 +1059,7 @@ def _lower_reshape_permute(graph: Graph, stats: Counter) -> None:
         sink = _reshape_chain_forward(permute)
         if _rank(base) > STRIDED_RANK or _rank(sink) > STRIDED_RANK:
             raise NotImplementedError(
-                f"rank ≤ {STRIDED_RANK} の端点が見つからない reshape/permute 連鎖: "
+                f"reshape/permute chain without end points of rank ≤ {STRIDED_RANK}: "
                 f"{base.name}(rank{_rank(base)}) → {permute.name} → "
                 f"{sink.name}(rank{_rank(sink)})"
             )
@@ -1022,7 +1070,9 @@ def _lower_reshape_permute(graph: Graph, stats: Counter) -> None:
         if numel != extent_key(_numel(list(_val(base).shape))) or numel != extent_key(
             _numel(out_shape)
         ):
-            raise NotImplementedError(f"要素数が食い違う reshape/permute 連鎖: {permute.name}")
+            raise NotImplementedError(
+                f"reshape/permute chain whose element counts disagree: {permute.name}"
+            )
 
         kept = [index for index, size in enumerate(shape) if _static_size(size) != 1]
         position = {axis: slot for slot, axis in enumerate(kept)}
@@ -1052,11 +1102,13 @@ def _lower_reshape_permute(graph: Graph, stats: Counter) -> None:
 
 
 def _collect_dead_code(graph: Graph, stats: Counter) -> None:
-    """パス群の途中で 1 度 DCE する（**位置に意味がある** — ADR 0016 の移植時の構造差）。
+    """DCE once in the middle of the passes (**the position matters**).
 
-    畳んだ元パターン（pow / mean / rsqrt・ガードの eq/any/logical_not）をここで消さないと、
-    後続のパス（`_pow2_to_mul` / `_promote_scalar_operands`）が**死んだ部分木を書き換えて
-    統計だけが膨らむ**。IR は変わらないので緑のまま気づけない類の劣化になる。
+    A structural difference introduced in the ADR 0016 port. Unless the folded original patterns
+    (pow / mean / rsqrt, the guard's eq/any/logical_not) are removed here, the following passes
+    (`_pow2_to_mul` / `_promote_scalar_operands`) **rewrite dead subtrees and only inflate the
+    statistics**. The IR does not change, so it is the kind of degradation that goes unnoticed
+    while everything stays green.
     """
     before = len(graph.nodes)
     graph.eliminate_dead_code()
@@ -1064,12 +1116,13 @@ def _collect_dead_code(graph: Graph, stats: Counter) -> None:
 
 
 def _pow2_to_mul(graph: Graph, stats: Counter) -> None:
-    """`aten.pow(x, 2)` → `mul(x, x)`（M0 語彙に pow は無いが同値な mul はある）。
+    """`aten.pow(x, 2)` → `mul(x, x)` (the M0 vocabulary has no pow but has the equivalent mul).
 
-    MUST: 指数は **bool でない整数の 2** だけ。`2.0` は `2.0 == 2` で素通りするが、整数
-    テンソルに当てると型昇格（i64 → f32）が起きて `mul(x, x)` とは別の値になる。
-    MUST: dtype 不変を要求する。昇格を伴う形は恒等な書き換えではないので、触らず未対応 op の
-    全件列挙に回す（黙って近似しない）。
+    MUST: the exponent is only **the integer 2, not a bool**. `2.0` would pass as `2.0 == 2`, but
+    applied to an integer tensor it promotes the type (i64 → f32) and gives a value different from
+    `mul(x, x)`.
+    MUST: the dtype must be unchanged. A form with promotion is not an identity rewrite, so it is
+    left alone and goes to the full list of unsupported ops (no silent approximation).
     """
     for node in list(graph.nodes):
         if node.op != "call_function" or node.target is not aten.pow.Tensor_Scalar:
@@ -1088,7 +1141,7 @@ def _pow2_to_mul(graph: Graph, stats: Counter) -> None:
             continue
         with graph.inserting_before(node):
             replacement = graph.call_function(aten.mul.Tensor, (src, src))
-        # convert は全ノードの meta["val"]（FakeTensor）を要求する。
+        # convert requires meta["val"] (a FakeTensor) on every node.
         replacement.meta.update(node.meta)
         node.replace_all_uses_with(replacement)
         graph.erase_node(node)
@@ -1096,12 +1149,13 @@ def _pow2_to_mul(graph: Graph, stats: Counter) -> None:
 
 
 def _drop_identity_repeat(graph: Graph, stats: Counter) -> None:
-    """`aten.repeat(x, [1, …, 1])` → x。
+    """`aten.repeat(x, [1, …, 1])` → x.
 
-    MUST: **引数が全て 1 かつ本数 = 入力 rank** のときだけ発火する（recon §6-4）。repeat は
-    先頭に軸を足せる（rank-2 に `[1,1,1]` を当てると rank-3 になる）ので、本数を見ないと
-    恒等化で shape が黙ってずれる。B > 1 の本物の repeat は IR 語彙に無いため、ここで
-    書き換えずに残せば未対応 op の全件列挙に出る（黙って近似しない）。
+    MUST: fires only when **every argument is 1 and their count = the input rank** (recon §6-4).
+    repeat can add leading axes (`[1,1,1]` on rank 2 gives rank 3), so without checking the count
+    the identity rewrite silently shifts the shape. A real repeat with B > 1 is not in the IR
+    vocabulary, so leaving it unrewritten here puts it in the full list of unsupported ops (no
+    silent approximation).
     """
     for node in list(graph.nodes):
         if node.op != "call_function" or node.target is not aten.repeat.default:
@@ -1110,7 +1164,8 @@ def _drop_identity_repeat(graph: Graph, stats: Counter) -> None:
         repeats = node.args[1]
         if not isinstance(src, Node) or not isinstance(repeats, (list, tuple)):
             continue
-        # SymInt の repeat 数はここで int と比較しない（guard を誘発する）。素の int だけ見る。
+        # A SymInt repeat count is not compared with an int here (it would trigger a guard).
+        # Only plain ints are looked at.
         if not all(isinstance(count, int) and not isinstance(count, bool) for count in repeats):
             continue
         if len(repeats) != src.meta["val"].dim() or any(count != 1 for count in repeats):
@@ -1121,16 +1176,17 @@ def _drop_identity_repeat(graph: Graph, stats: Counter) -> None:
 
 
 def _drop_identity_add(graph: Graph, stats: Counter) -> None:
-    """`aten.add(x, 0)` → x（**Python スカラの 0** のときだけ）。
+    """`aten.add(x, 0)` → x (only for **the Python scalar 0**).
 
-    NOTE: f32 では `x + 0.0` が x = −0.0 のときだけ +0.0 を返す（唯一の差）。IR 語彙には
-    **符号付きゼロを区別する op が実在する** — `div` と `sqrt` がそれで、x = −0.0 なら
-    `1 / (x + 0.0)` は torch で +∞、書き換え後の `1 / x` は −∞ になる（`sqrt(±0) = ±0` も
-    同じ向きの差）。実測 10 ファミリでは消える add の下流が div の分母 / sqrt の引数に
-    到達しないため、乖離の可能性を受容してこの書き換えを残している（docs/limitations.md）。
-    消費側で −0.0 が出うる形を足すときは、このパスの適用条件を先に見直すこと。
-    MUST: 型昇格を伴う形（`add(i64, 0.0)` → f32）は書き換えない。恒等ではなく cast なので、
-    畳み込みか未対応 op の列挙に回す。
+    NOTE: in f32, `x + 0.0` returns +0.0 only when x = −0.0 (the only difference). The IR
+    vocabulary **does have ops that distinguish signed zeros** — `div` and `sqrt`: for x = −0.0,
+    `1 / (x + 0.0)` is +∞ in torch while the rewritten `1 / x` is −∞ (`sqrt(±0) = ±0` differs in
+    the same direction). In the 10 observed families the downstream of a removed add never reaches
+    a div denominator / sqrt argument, so the possibility of divergence is accepted and this
+    rewrite stays (docs/limitations.md). When adding a form where −0.0 can arise on the consumer
+    side, review this pass's applicability first.
+    MUST: a form with type promotion (`add(i64, 0.0)` → f32) is not rewritten. It is a cast, not an
+    identity, so it goes to folding or to the list of unsupported ops.
     """
     for node in list(graph.nodes):
         if node.op != "call_function" or node.target not in (aten.add.Tensor, aten.add.Scalar):
@@ -1149,11 +1205,13 @@ def _drop_identity_add(graph: Graph, stats: Counter) -> None:
         stats["drop_identity_add"] += 1
 
 
-#: スカラ被演算子を持ちうる二項 op → (置き換え先, スカラが左辺か)。
+#: Binary ops that can have a scalar operand → (replacement, whether the scalar is the left
+#: operand).
 #:
-#: `rsub.Scalar(x, s)` だけは引数の並びと意味が逆（`s − x`）なので明示的に左辺へ回す。
-#: それ以外は「Node でない側がスカラ」で並びを判定する — 実測は `sub.Tensor(1, mask)` の
-#: ように **.Tensor overload に Python スカラが左で入る**形も出るため（recon の mask 経路）。
+#: Only `rsub.Scalar(x, s)` has its meaning reversed from its argument order (`s − x`), so it is
+#: sent to the left explicitly. For the rest the order is decided by "the non-Node side is the
+#: scalar" — because observed graphs also contain forms like `sub.Tensor(1, mask)` where **a Python
+#: scalar enters a .Tensor overload on the left** (recon's mask path).
 _SCALAR_BINARY: dict[Any, tuple[Any, bool]] = {
     aten.add.Tensor: (aten.add.Tensor, False),
     aten.add.Scalar: (aten.add.Tensor, False),
@@ -1168,17 +1226,18 @@ _SCALAR_BINARY: dict[Any, tuple[Any, bool]] = {
 
 
 def _promote_scalar_operands(graph: Graph, stats: Counter) -> None:
-    """`add/sub/mul/div(tensor, スカラ)` → 二項 op + **rank-1 定数**（broadcast で吸収）。
+    """`add/sub/mul/div(tensor, scalar)` → binary op + **rank-1 constant** (absorbed by broadcast).
 
-    定数は `aten.full.default([1], value, dtype=…)` として挿入する。convert の畳み込み
-    allowlist に載っている op なので、消費側が畳み込み対象なら定数ごと畳まれ、そうでなければ
-    initializer になる（i32 なら i32 initializer — ADR 0010）。
+    The constant is inserted as `aten.full.default([1], value, dtype=…)`. That op is on convert's
+    folding allowlist, so if the consumer is a folding target the constant is folded along with it,
+    and otherwise it becomes an initializer (an i32 initializer for i32 — ADR 0010).
 
-    MUST: 定数の dtype はテンソル側と揃え、**型昇格を伴う形は書き換えない**（`div(i64, 128)`
-    は f32 を返す = cast を含む）。揃えずに rank-1 定数へ落とすと、IR の二項 op が要求する
-    「入力 dtype は同型」を満たさないまま黙って別の値になる。
-    MUST: `alpha != 1` は触らない（IR 語彙に係数付き加算は無い — convert が落とす）。
-    MUST: 非有限のスカラは触らない（IR v1 は非有限値を値レベルで拒否する）。
+    MUST: the constant's dtype matches the tensor side, and **forms with type promotion are not
+    rewritten** (`div(i64, 128)` returns f32 = it contains a cast). Dropping to a rank-1 constant
+    without matching would silently give a different value without meeting the IR binary ops'
+    requirement "input dtypes are the same".
+    MUST: `alpha != 1` is left alone (the IR vocabulary has no scaled add — convert fails it).
+    MUST: non-finite scalars are left alone (IR v1 rejects non-finite values at the value level).
     """
     for node in list(graph.nodes):
         if node.op != "call_function":
@@ -1190,9 +1249,9 @@ def _promote_scalar_operands(graph: Graph, stats: Counter) -> None:
         if node.kwargs.get("alpha", 1) != 1 or set(node.kwargs) - {"alpha"}:
             continue
         left, right = node.args
-        # MUST: 定数を「元のスカラが居た側」に置く。sub / div は非可換で、実測には
-        # `sub.Tensor(1, mask)` のようにスカラが**左**に来る形がある（recon の mask 経路）—
-        # 並びを固定すると符号が黙って反転する。
+        # MUST: put the constant "on the side where the original scalar was". sub / div do not
+        # commute, and observed graphs have forms where the scalar comes on the **left**, like
+        # `sub.Tensor(1, mask)` (recon's mask path) — fixing the order flips the sign silently.
         if scalar_is_left:
             src, scalar, const_first = left, right, True
         elif isinstance(left, Node) and not isinstance(right, Node):
@@ -1211,9 +1270,10 @@ def _promote_scalar_operands(graph: Graph, stats: Counter) -> None:
             continue
         if src_val.dtype is not out_val.dtype:
             continue
-        # MUST: rank-0（スカラテンソル）は昇格させない。rank-1 定数との broadcast は
-        # `[] × [1] → [1]` で **rank が上がる** — meta は元の `[]` のままなので、宣言と実体が
-        # 食い違ったグラフが黙って出来る。rank ≥ 1 なら `[1]` は必ず吸収される。
+        # MUST: rank 0 (a scalar tensor) is not promoted. Broadcasting with a rank-1 constant is
+        # `[] × [1] → [1]` and **raises the rank** — the meta stays the original `[]`, so a graph
+        # whose declaration and contents disagree is silently produced. For rank ≥ 1, `[1]` is
+        # always absorbed.
         if src_val.dim() < 1:
             continue
         with graph.inserting_before(node):
@@ -1229,17 +1289,20 @@ def _promote_scalar_operands(graph: Graph, stats: Counter) -> None:
 
 
 def _eq_zero_to_not_bool(graph: Graph, stats: Counter) -> None:
-    """`aten.eq(x, 0)` → `bitwise_not(_to_copy(x, bool))`（ADR 0015）。
+    """`aten.eq(x, 0)` → `bitwise_not(_to_copy(x, bool))` (ADR 0015).
 
-    `scores.masked_fill(attn_mask == 0, -1e4)` の形（recon §2 の enc_p / flow 行）を、
-    新しい比較 op を足さずに既存語彙へ落とす。同値性は cast 規約「x → bool は x != 0」
-    からの帰結: `not (x != 0)` は `x == 0` そのもの（NaN でも符号付きゼロでも一致する —
-    `NaN != 0` は真なので否定して偽、`-0.0 != 0` は偽なので否定して真）。
+    Lowers the form `scores.masked_fill(attn_mask == 0, -1e4)` (the enc_p / flow rows of recon §2)
+    into the existing vocabulary without adding a new comparison op. The equivalence follows from
+    the cast convention "x → bool is x != 0": `not (x != 0)` is exactly `x == 0` (it matches for
+    NaN and for signed zeros too — `NaN != 0` is true, so negated it is false; `-0.0 != 0` is
+    false, so negated it is true).
 
-    MUST: 右辺が **0**（bool でない数値）のときだけ発火する。他の値には成り立たない書き換え
-    なので、触らずに未対応 op の全件列挙へ回す（黙って近似しない）。
-    MUST: 出力が bool であることを要求する。torch の eq は常に bool を返すが、meta が別の
-    dtype を持つ形（型昇格を伴う書き換え）を素通しにすると宣言と実体が食い違う。
+    MUST: fires only when the right-hand side is **0** (a number that is not a bool). The rewrite
+    does not hold for other values, so they are left alone and go to the full list of unsupported
+    ops (no silent approximation).
+    MUST: the output must be bool. torch's eq always returns bool, but letting through a form whose
+    meta carries another dtype (a rewrite with type promotion) makes declaration and contents
+    disagree.
     """
     for node in list(graph.nodes):
         if node.op != "call_function" or node.target not in (aten.eq.Scalar, aten.eq.Tensor):
@@ -1260,8 +1323,8 @@ def _eq_zero_to_not_bool(graph: Graph, stats: Counter) -> None:
         with graph.inserting_before(node):
             truthy = graph.call_function(aten._to_copy.default, (src,), {"dtype": torch.bool})
             replacement = graph.call_function(aten.bitwise_not.default, (truthy,))
-        # convert は全ノードの meta["val"]（FakeTensor）を要求する。cast の出力は
-        # 「x != 0」なので元テンソルと同形の bool。
+        # convert requires meta["val"] (a FakeTensor) on every node. The cast's output is
+        # "x != 0", so it is a bool of the same shape as the original tensor.
         truthy.meta.update(node.meta)
         replacement.meta.update(node.meta)
         node.replace_all_uses_with(replacement)
@@ -1270,19 +1333,22 @@ def _eq_zero_to_not_bool(graph: Graph, stats: Counter) -> None:
 
 
 def _select_to_squeeze(graph: Graph, stats: Counter) -> None:
-    """`select.int`（静的軸）→ `squeeze` / `slice + squeeze`（汎用衛生 — ADR 0016）。
+    """`select.int` (static axis) → `squeeze` / `slice + squeeze` (general hygiene — ADR 0016).
 
-    長さ 1 の軸・添字 0 は従来どおり `squeeze` 1 本（slice を挟まない — 既存モデルの
-    グラフをバイト不変に保つ）。それ以外の静的軸は `slice(幅 1) + squeeze` へ開く
-    （Gemma4 の PLE 層別スライス `per_layer_inputs[:, :, i, :]` が初出。slice は
-    `_h_slice` の静的軸・静的範囲、squeeze は既存の reshape 正規化がそのまま受ける）。
+    An axis of length 1 with index 0 is a single `squeeze` as before (no slice in between — keeps
+    existing models' graphs byte-identical). Other static axes open into `slice(width 1) + squeeze`
+    (first seen in Gemma4's per-layer PLE slice `per_layer_inputs[:, :, i, :]`. The slice is taken
+    by `_h_slice`'s static axis and static range, the squeeze by the existing reshape normalization
+    as is).
 
-    MUST: **記号次元の軸は fail loudly**。長さを export 時のヒント値で採ると「ヒント値 1 の
-    記号次元」が squeeze に化け、実行時（ヒント以外の束縛）で無言の誤値になる — 静かに
-    間違える形なので、ここで止める以外に検出器が無い。
-    MUST: **記号の添字も同じく fail loudly**。`aten.select.int(self, int dim, SymInt index)` の
-    index はスキーマ上 SymInt で、ヒント値で採ると `slice(hint, hint+1)` が焼かれる — 軸長側と
-    同じ沈黙誤値が添字の側から入る。
+    MUST: **an axis of symbolic dimension fails loudly**. Taking the length from the export-time
+    hint turns "a symbolic dimension whose hint is 1" into a squeeze and a silent wrong value at
+    run time (a binding other than the hint) — it is a form that goes wrong quietly, and there is no
+    detector other than stopping it here.
+    MUST: **a symbolic index likewise fails loudly**. The index of
+    `aten.select.int(self, int dim, SymInt index)` is SymInt in the schema, and taking the hint
+    bakes `slice(hint, hint+1)` — the same silent wrong value as on the axis-length side comes in
+    from the index side.
     """
     for node in list(graph.nodes):
         if node.op != "call_function" or node.target is not aten.select.int:
@@ -1299,14 +1365,16 @@ def _select_to_squeeze(graph: Graph, stats: Counter) -> None:
         index = _static_index(node.args[2])
         if index is None:
             raise NotImplementedError(
-                f"記号次元の添字で切る select は未対応: {node.name} dim={raw_dim}"
-                f" index={node.args[2]}（ヒント値で添字を採ると実行時に無言の誤値になる）"
+                f"select with a symbolic index is not supported: {node.name} dim={raw_dim}"
+                f" index={node.args[2]} (taking the index from the hint gives a silent wrong value"
+                " at run time)"
             )
         size = _static_size(src_val.shape[dim])
         if size is None:
             raise NotImplementedError(
-                f"記号次元の軸を切る select は未対応: {node.name} dim={raw_dim} index={index}"
-                "（ヒント値で長さを採ると実行時に無言の誤値になる）"
+                f"select on an axis of symbolic dimension is not supported: {node.name}"
+                f" dim={raw_dim} index={index}"
+                " (taking the length from the hint gives a silent wrong value at run time)"
             )
         if not -size <= index < size:
             continue
@@ -1317,7 +1385,7 @@ def _select_to_squeeze(graph: Graph, stats: Counter) -> None:
             _replace(graph, node, replacement)
             stats["select->squeeze"] += 1
             continue
-        # 負添字は torch の select 意味論（-size ≤ index < size）どおり正規化する。
+        # A negative index is normalized following torch's select semantics (-size ≤ index < size).
         start = index % size
         sliced = _insert(graph, node, aten.slice.Tensor, (src, dim, start, start + 1), src_val)
         with graph.inserting_before(node):
@@ -1328,22 +1396,26 @@ def _select_to_squeeze(graph: Graph, stats: Counter) -> None:
 
 
 def _split_to_slices(graph: Graph, stats: Counter) -> None:
-    """`split_with_sizes(x, sizes, dim)` + `getitem` → `slice` の列（ADR 0014）。
+    """`split_with_sizes(x, sizes, dim)` + `getitem` → a sequence of `slice`s (ADR 0014).
 
-    多出力 aten の getitem 結線は sampling の実需まで先送り（ADR 0068 追記）なので、分割は
-    取り出し口ごとの slice に開く。実測は ConvFlow / ResidualCoupling の
-    `torch.split(x, [half]*2, 1)`（recon §2）で、消費側は必ず `getitem` の定数添字。
+    getitem wiring of multi-output aten is deferred until sampling needs it (ADR 0068 addendum 2),
+    so a split opens into one slice per extraction point. Observed: ConvFlow / ResidualCoupling's
+    `torch.split(x, [half]*2, 1)` (recon §2), whose consumers are always `getitem` with a constant
+    index.
 
-    MUST: **消費者が getitem だけ**の形にしか発火しない。タプルそのものを他所へ渡す形は
-    書き換えが同値でないので、触らず未対応 op の全件列挙に回す（黙って近似しない）。
-    MUST: 分割軸は静的（記号長の分割は sizes の和と軸長の対応が宣言だけでは決められない）。
-    MUST: sizes の和が軸長ちょうどであることを見る。torch は端数を許さないが、ここを見ずに
-    slice へ開くと「最後の区間が足りない / はみ出す」形が黙って通る。
+    MUST: fires only on forms where **the consumers are getitem only**. Passing the tuple itself
+    elsewhere makes the rewrite non-equivalent, so it is left alone and goes to the full list of
+    unsupported ops (no silent approximation).
+    MUST: the split axis is static (for a split of symbolic length, the correspondence between the
+    sum of sizes and the axis length cannot be decided from the declaration alone).
+    MUST: check that the sizes sum to exactly the axis length. torch does not allow a remainder,
+    but opening into slices without this check would silently let through forms where "the last
+    interval falls short / runs over".
 
-    NOTE: 「消費者が getitem 以外」「分割軸が記号」「sizes の和が合わない」の 3 分岐は
-    torch.export の出力からは到達しない（FX は必ず getitem で開き、静的 sizes の分割は軸を
-    特殊化し、端数は torch 自身が拒否する）。防御として残すが、テストは書けない
-    （書ける形が無い）。
+    NOTE: the 3 branches "a consumer other than getitem", "symbolic split axis" and "sizes do not
+    sum up" are unreachable from torch.export output (FX always opens with getitem, a split with
+    static sizes specializes the axis, and torch itself rejects a remainder). They stay as a
+    defense, but no test can be written (there is no form to write one with).
     """
     for node in list(graph.nodes):
         if node.op != "call_function" or node.target is not aten.split_with_sizes.default:
@@ -1382,43 +1454,47 @@ def _split_to_slices(graph: Graph, stats: Counter) -> None:
                 sliced = graph.call_function(
                     aten.slice.Tensor, (src, dim, offsets[index], offsets[index + 1])
                 )
-            # convert は全ノードの meta["val"]（FakeTensor）を要求する。getitem の meta は
-            # 取り出した 1 本ぶんそのもの。
+            # convert requires meta["val"] (a FakeTensor) on every node. getitem's meta is
+            # exactly the one extracted piece.
             sliced.meta.update(user.meta)
             user.replace_all_uses_with(sliced)
             graph.erase_node(user)
             replaced += 1
         if replaced != len(users):
-            # 添字が読めない getitem が残った = 分割ノードを消せない（部分的な書き換えは
-            # 残った getitem が壊れた参照になるので、ここまでの slice ごと DCE に任せる）。
+            # A getitem with an unreadable index remains = the split node cannot be removed (a
+            # partial rewrite would leave the remaining getitems as broken references, so the
+            # slices made so far are left to DCE as well).
             continue
         graph.erase_node(node)
         stats["split_with_sizes->slice"] += replaced
 
 
 def _passes(placeholders: _Placeholders) -> tuple[Callable[[Graph, Counter], None], ...]:
-    """走らせるパスを順に並べる。
+    """List the passes to run, in order.
 
-    MUST: `_fold_rms_norm` → `_pow2_to_mul` / `_promote_scalar_operands` の順、
-    `_drop_identity_add` → `_promote_scalar_operands` の順（モジュール docstring 参照）。
-    `_eq_zero_to_not_bool` は後ろ — 先に走らせても結果は同じだが、スカラ昇格が
-    `eq(x, 0)` を二項 op として掴む形が将来入ったときに順序依存を作らないため。
+    MUST: `_fold_rms_norm` → `_pow2_to_mul` / `_promote_scalar_operands`, and
+    `_drop_identity_add` → `_promote_scalar_operands` (see the module docstring).
+    `_eq_zero_to_not_bool` comes late — running it earlier gives the same result, but this avoids
+    creating an order dependence if a form where scalar promotion grabs `eq(x, 0)` as a binary op
+    comes in later.
     """
     return (
         _drop_metadata_asserts,
-        # 高位パターンの畳み込み・除去（元パターンを他のパスが崩す前に走らせる）。
-        # MUST: pow(-0.5)→rsqrt は _fold_rms_norm より先（matcher は rsqrt 形しか見ない）。
+        # Folding / removal of high-level patterns (run before other passes break the original
+        # patterns).
+        # MUST: pow(-0.5)→rsqrt comes before _fold_rms_norm (the matcher sees only the rsqrt form).
         _pow_neg_half_to_rsqrt,
         _fold_rms_norm,
         partial(_drop_safe_softmax_guard, placeholders=placeholders),
         _additive_attn_mask,
-        # rank 下げ（発火は rank > STRIDED_RANK 限定）
+        # Rank lowering (fires only on rank > STRIDED_RANK)
         _lower_unit_expand,
         _lower_split_unbind,
         _lower_reshape_permute,
-        # rank 下げが挟む contiguous を跨がないので、位相順に 1 度掃くだけで鎖は畳み切れる
+        # Does not cross the contiguous copies rank lowering inserts, so one sweep in topological
+        # order folds the chains completely
         _compose_permute_chains,
-        # MUST: ここで 1 度 DCE する（位置に意味がある — _collect_dead_code の docstring）
+        # MUST: DCE once here (the position matters — _collect_dead_code's docstring)
         _collect_dead_code,
         _pow2_to_mul,
         _drop_identity_repeat,
@@ -1426,17 +1502,18 @@ def _passes(placeholders: _Placeholders) -> tuple[Callable[[Graph, Counter], Non
         _promote_scalar_operands,
         _eq_zero_to_not_bool,
         _select_to_squeeze,
-        # 順序自由（split の入出力は他のパスが触らない形）。末尾に置くのは、生成した slice を
-        # 他のパスが再訪しないと分かるようにするため。
+        # Order-free (split's inputs and outputs are forms no other pass touches). It is last so
+        # that it is clear no other pass revisits the slices it creates.
         _split_to_slices,
     )
 
 
 def normalize_graph(ep: ExportedProgram) -> dict[str, int]:
-    """FX グラフを in-place で正規化し、パスごとの発火回数を返す。
+    """Normalize the FX graph in place and return the firing count per pass.
 
-    MUST: 受け取るのは GraphModule ではなく **ExportedProgram**。safe-softmax ガードの
-    不活性証明は持ち上げられた定数 / buffer の**実値**を要る（{@link _Placeholders}）。
+    MUST: what it takes is an **ExportedProgram**, not a GraphModule. The safe-softmax guard's
+    inactivity proof needs the **actual values** of lifted constants / buffers
+    ({@link _Placeholders}).
     """
     gm = ep.graph_module
     graph = gm.graph

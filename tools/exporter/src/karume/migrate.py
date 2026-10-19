@@ -1,42 +1,49 @@
-"""旧配布形（safetensors の shard 列）→ コンテナ形式（`krm` / `krg`）へ移す（container-v1 §12）。
+"""Old distribution (safetensors shard sequences) → container format (`krm` / `krg`)
+(container-v1 §12).
 
-    # 部品 1 つ（段 1 の面）
+    # One component (the step 1 surface)
     karume migrate ../../models/karume-depth-anything-v2/small/depth/model.f32.safetensors \
         --out /tmp/migrated --license apache-2.0
-    # リポ丸ごと（段 2 の面 — `karume/5` の karume.json まで書く・ADR 0109 決定 8）
+    # Whole repository (the step 2 surface — writes up to the `karume/5` karume.json; ADR 0109
+    # decision 8)
     karume migrate --manifest ../../models/karume-irodori/karume.json \
         --out /tmp/karume-irodori --license apache-2.0
 
-**旧形式を読む処理はこの層にだけ置く**（§12）— 新しい読み手は `karume/5` と新コンテナしか読まず、
-両読みは実装しない。ここが動かすのは**容器と宣言の形**だけである:
+**Reading the old format lives only in this layer** (§12) — the new readers read only `karume/5`
+and the new container, and dual reading is not implemented. What this moves is only **the
+container and the shape of the declarations**:
 
-- **payload の生バイトは 1 バイトも変えない**。末尾の詰め物は
-  §4.1 のとおり**新たに焼かれる**ので、突き合わせるのは block 全体ではなく initializer ごとの
-  payload（旧 shard の実体の sha256 = 新 block の payload 部の sha256）。
-- **IR は v1 → v2 へ再 serialize する**（逐語同一は保たない）。改名と正準直列化は
-  {@link karume.container.ir_v2_document}。
-- **codec は台帳へ写す**（`i8 → int8-sym` / `i4 → int4-sym-g` / `i2 → int2-off`）。`ternary` へは
-  写さない — 値域が部分集合でも「三値である」という主張は量子化器の側がするもの。
-- **`rowAxis` は消費側 op から引く**（{@link karume.container.weight_channel_axes} —
-  `conv_transpose1d` だけ 1）。旧 keepdim 形の scale が**その軸の形ちょうど**であることを
-  現物の宣言で確かめてから焼く（バイト数だけ合わせると per-column の scale を per-channel として
-  宣言できてしまう）。
+- **Not one byte of the raw payload changes**. Tail padding is **baked anew** as §4.1 says, so
+  what is compared is not the whole block but the payload of each initializer (sha256 of the old
+  shard's bytes = sha256 of the payload part of the new block).
+- **The IR is re-serialized from v1 to v2** (verbatim identity is not kept). Renaming and canonical
+  serialization: {@link karume.container.ir_v2_document}.
+- **Codecs are mapped to the ledger** (`i8 → int8-sym` / `i4 → int4-sym-g` / `i2 → int2-off`).
+  Nothing is mapped to `ternary` — even when the value range is a subset, the claim "this is
+  ternary" is the quantizer's to make.
+- **`rowAxis` is taken from the consuming op** ({@link karume.container.weight_channel_axes} —
+  only `conv_transpose1d` is 1). The old keepdim-shaped scale is confirmed against the actual
+  declaration to be **exactly the shape of that axis** before writing (matching byte counts alone
+  would let a per-column scale be declared as per-channel).
 
-MUST: 自己検査（書いたものを読み直して initializer ごとに sha256 を突き合わせる）を**通してから
-据える** — 書き出しは一時 path（`.partial`）へ行い、検査が通った回だけ `os.replace` で本番名へ
-移す。**旧入力は読むだけ**で、消しも書き換えもしない。
+MUST: put in place **only after passing** the self-check (re-read what was written and compare
+sha256 per initializer) — writing goes to a temporary path (`.partial`), and only a run whose check
+passed is moved to the final name with `os.replace`. **Old inputs are only read**, never deleted
+or rewritten.
 
-リポ丸ごとモード（`--manifest`）が足すのは 4 つである（ADR 0109 決定 3 / 4 / 8）:
+Whole-repository mode (`--manifest`) adds four things (ADR 0109 decisions 3 / 4 / 8):
 
-- shard 列を**旧 manifest の宣言から**組む（代表 path からの復元はしない — ディレクトリを跨ぐ
-  列がこれで解ける）。同じ列を複数モデルが指すときは 1 度だけ変換する。
-- 旧 `extras`（実在は `rope_base` 1 種）と **PLE sidecar** を容器の資産へ畳む。PLE は索引
-  （`ple_index` — schema 3）と `values` / `scales` の block 列になり、manifest の `assets` からは
-  消える。
-- 越境参照（FileRef に `repo` / `revision`）の列は変換せず、`--cross-repo` が指す**変換済み
-  ディレクトリ**の `karume/5` から `container` を引き写して `repo` / `revision` を付ける。
-- 変換しなかった通常ファイル（README / LICENSE / tokenizer / …）をそのまま複写し、
-  `karume/5` の `karume.json` を書く。
+- Shard sequences are built **from the old manifest's declarations** (no reconstruction from a
+  representative path — this resolves sequences that cross directories). A sequence that several
+  models point at is converted only once.
+- The old `extras` (only `rope_base` exists) and the **PLE sidecar** are folded into container
+  assets. PLE becomes an index (`ple_index` — schema 3) and block sequences of `values` /
+  `scales`, and disappears from the manifest's `assets`.
+- Sequences of cross-repository references (`repo` / `revision` on the FileRef) are not
+  converted; `container` is copied from the `karume/5` of the **converted directory** that
+  `--cross-repo` points at, and `repo` / `revision` are added.
+- Ordinary files that were not converted (README / LICENSE / tokenizer / …) are copied as is, and
+  the `karume/5` `karume.json` is written.
 """
 
 from __future__ import annotations
@@ -97,63 +104,67 @@ from karume.ple import PLE_INDEX_ASSET, PLE_PACK_FACTOR, PleError, ple_assets, p
 from karume.publish import PublishError, PublishResult, publish_container
 from karume.verify import assert_reader_layout, parse_ir_graph
 
-#: 新コンテナの拡張子（§1 — 種別は magic が持つが、ファイル名も分けておく）。
+#: Extensions of the new container (§1 — the kind is carried by the magic, but the file names are
+#: kept apart too).
 MODEL_SUFFIX = ".krm"
 GRAPH_SUFFIX = ".krg"
 
-#: 読む旧 manifest の形式識別子（両読みはしない — ADR 0109 決定 1）。
+#: Format identifier of the old manifest that is read (no dual reading — ADR 0109 decision 1).
 LEGACY_MANIFEST_FORMAT = "karume/4"
 
-#: 書く manifest の形式識別子（ADR 0109 決定 1）。
+#: Format identifier of the manifest that is written (ADR 0109 decision 1).
 MANIFEST_FORMAT = "karume/5"
 
-#: manifest のファイル名（ADR 0041 §1 — リポジトリ直下の固定名）。
+#: File name of the manifest (ADR 0041 decision 1 — a fixed name at the repository root).
 MANIFEST_FILE = "karume.json"
 
-#: 旧 `extras` の名前 → 容器の `(資産名, 役割)`。実在は `rope_base` 1 種だけ（ADR 0109 決定 4）で、
-#: 知らない名前は**黙って落とさず** fail loudly にする。
+#: Old `extras` name → container `(asset name, role)`. Only `rope_base` exists (ADR 0109
+#: decision 4); an unknown name fails loudly instead of being **silently dropped**.
 EXTRA_ASSETS: Mapping[str, tuple[str, str]] = {"rope_base": ("rope_base", "rope-base")}
 
-#: PLE sidecar の持ち主（pipeline 名 → 畳み先の部品名 — ADR 0109 決定 4 / 0085）。
+#: Owner of the PLE sidecar (pipeline name → name of the component it folds into — ADR 0109
+#: decision 4 / 0085).
 PLE_OWNER: Mapping[str, str] = {"gemma4": "model", "gemma4-qat": "model"}
 
-#: 旧 PLE shard が持つメタデータのキー（索引との整合をここで突き合わせる）。
+#: Metadata key of the old PLE shard (its consistency with the index is cross-checked here).
 PLE_METADATA_KEY = "karume_ple"
 
-#: CLI の `--part-bytes` の単位（MiB — 選択集合がちょうど MiB の整数倍）。
+#: Unit of the CLI's `--part-bytes` (MiB — the choice set is exact integer multiples of MiB).
 _MIB = 1024 * 1024
 
 
 class MigrateError(ValueError):
-    """移行の前提が破れた（写し先の無い格納・宣言と現物の食い違い・出力先の残骸）。"""
+    """A migration precondition broke (storage with no mapping target, declaration and file
+    disagree, leftovers in the output directory)."""
 
 
 def _assert_part_length(part_bytes: int) -> None:
-    """part 長は**書き手の選択集合**の 1 つ MUST（container-v1 §4.2 / ADR 0108）。
+    """The part length MUST be one of **the writer's choice set** (container-v1 §4.2 / ADR 0108).
 
-    書き手（{@link karume.container.write_model_container}）が強制するのは天井だけなので、
-    集合の検査はここで持つ — 天井の内側の半端な値（300 MiB など）を黙って通すと、part 長を
-    比べるつもりの焼き直しが集合外の容器を配布物に混ぜる。
+    The writer ({@link karume.container.write_model_container}) enforces only the ceiling, so the
+    set check lives here — silently passing an odd value under the ceiling (300 MiB, say) would
+    let a rebuild meant to compare part lengths mix an out-of-set container into the distribution.
     """
     if part_bytes not in PART_LENGTH_CHOICES:
         choices = ", ".join(str(choice // _MIB) for choice in PART_LENGTH_CHOICES)
         raise MigrateError(
-            f"part 長 {part_bytes} バイトが書き手の選択集合 {{{choices}}} MiB の外"
+            f"Part length {part_bytes} bytes is outside the writer's choice set {{{choices}}} MiB"
             " — container-v1 §4.2 / ADR 0108"
         )
 
 
-#: 1 コンポーネントの移行結果（据えた part 列・2 文書・突き合わせた本数）。公開の 3 段は
-#: `karume.publish` と共有なので、結果の器も同じものを使う。
+#: Migration result of one component (the part sequence put in place, the 2 documents, the number
+#: of tensors compared). The 3 steps of publication are shared with `karume.publish`, so the
+#: result type is the same too.
 MigrationResult = PublishResult
 
 
 class _SourcePayloads(Mapping[str, bytes]):
-    """テンソルキー → 生バイトの遅延写像（**引かれた 1 本だけ**を読む）。
+    """Lazy mapping tensor key → raw bytes (reads **only the one tensor looked up**).
 
-    書き手（{@link karume.container.write_model_container}）は実体を 1 本ずつ引いて 1 本ずつ
-    手放すので、この口を遅延にしておけば全量はメモリに載らない（数十 GB の系列でもピークは
-    「最大のテンソル 1 本」）。
+    The writer ({@link karume.container.write_model_container}) looks up the bytes one tensor at
+    a time and releases them one at a time, so keeping this entry lazy keeps the whole from
+    landing in memory (even for a series of tens of GB the peak is "the largest single tensor").
     """
 
     def __init__(self, sources: Mapping[str, SourceTensor]) -> None:
@@ -170,10 +181,12 @@ class _SourcePayloads(Mapping[str, bytes]):
 
 
 def _concrete_shape(graph: IrGraph, name: str, where: str) -> list[int]:
-    """initializer の宣言 shape（{@link karume.container.concrete_shape} の翻訳層）。
+    """Declared shape of an initializer (a translation layer over
+    {@link karume.container.concrete_shape}).
 
-    本体は書き手と**同じ 1 本**で、ここが足すのは例外の語彙の翻訳だけ（{@link _bindings} と
-    同じ形）— 移行 CLI の呼び手は `MigrateError` だけを捕まえる。
+    The body is **the same single path** as the writer's; this adds only a translation of the
+    exception vocabulary (the same shape as {@link _bindings}) — callers of the migration CLI
+    catch only `MigrateError`.
     """
     try:
         return concrete_shape(graph, name, where)
@@ -182,11 +195,13 @@ def _concrete_shape(graph: IrGraph, name: str, where: str) -> list[int]:
 
 
 def _bindings(graph: IrGraph) -> dict[str, Encoding]:
-    """旧 IR の `storage` → コンテナの束縛。
+    """Old IR `storage` → container bindings.
 
-    MUST: 導出は書き手と**同じ 1 本**（{@link karume.container.container_bindings}）を通る。
-    移行側で別に綴ると、同じ資産から「旧形から移した容器」と「直接書いた容器」で別の束縛が
-    出る。ここが足すのは例外の語彙の翻訳だけ。
+    MUST: the derivation goes through **the same single path** as the writer's
+    ({@link karume.container.container_bindings}). Spelling it separately on the migration side
+    would give different bindings from the same asset for "a container migrated from the old
+    form" and "a container written directly". This adds only a translation of the exception
+    vocabulary.
     """
     try:
         return container_bindings(graph)
@@ -195,24 +210,26 @@ def _bindings(graph: IrGraph) -> dict[str, Encoding]:
 
 
 def _expected_scale_shape(shape: Sequence[int], encoding: Encoding) -> list[int]:
-    """旧配布形が持っているはずの scale の形（旧 IR v1 の受理形 — keepdim 形は IR v2 で退役し、
-    知っているのはこの移行 CLI だけ）。"""
+    """The scale shape the old distribution should have (the shape old IR v1 accepted — the
+    keepdim shape was retired in IR v2, and only this migration CLI knows it)."""
     assert encoding.group_size is not None and encoding.row_axis is not None
     if codec_entry(encoding.codec).grouping == "group":
-        # group 形は rank2 ちょうど（行数 = 先頭次元・最終次元 = 行長 / group 長）。
+        # The group shape is exactly rank 2 (rows = leading dimension, last dimension = row length
+        # / group length).
         return [shape[0], math.prod(shape[1:]) // encoding.group_size]
-    # per-channel は keepdim broadcast 形（`rowAxis` の軸だけが伸びる）。
+    # Per-channel is the keepdim broadcast shape (only the `rowAxis` axis is extended).
     return [dim if axis == encoding.row_axis else 1 for axis, dim in enumerate(shape)]
 
 
 def _assert_scale_layouts(
     graph: IrGraph, bindings: Mapping[str, Encoding], sources: Mapping[str, SourceTensor]
 ) -> None:
-    """旧 scale の**形**が新しい宣言（`rowAxis` / `groupSize`）と一致することを見る。
+    """Check that the **shape** of the old scale matches the new declaration (`rowAxis` /
+    `groupSize`).
 
-    MUST: バイト数の一致だけでは足りない（書き手はそこまでしか見ない）— 正方の重みでは
-    `[1, N]` の per-column scale が `rowAxis: 0` の per-channel として通り、チャネルの値が
-    黙って入れ替わる。現物の**宣言 shape**まで突き合わせてから焼く。
+    MUST: matching byte counts is not enough (the writer looks no further) — for a square weight a
+    `[1, N]` per-column scale passes as a per-channel scale with `rowAxis: 0`, and the channel
+    values are silently swapped. Compare down to the file's **declared shape** before writing.
     """
     for name, initializer in graph.initializers.items():
         if initializer.is_shared or initializer.tensor is None:
@@ -223,28 +240,30 @@ def _assert_scale_layouts(
         where = f"initializer '{name}'"
         source = sources.get(encoding.scale_key)
         if source is None:
-            raise MigrateError(f"{where}: scale テンソル '{encoding.scale_key}' がファイルに無い")
+            raise MigrateError(f"{where}: scale tensor '{encoding.scale_key}' is not in the file")
         if source.entry.dtype != LEGACY_SCALE_DTYPE:
             raise MigrateError(
-                f"{where}: scale '{encoding.scale_key}' の dtype {source.entry.dtype} が"
-                f" 旧書き手の scale の綴り {LEGACY_SCALE_DTYPE} と違う"
+                f"{where}: scale '{encoding.scale_key}' has dtype {source.entry.dtype}, which"
+                f" differs from the old writer's scale spelling {LEGACY_SCALE_DTYPE}"
             )
         shape = _concrete_shape(graph, name, where)
         expected = _expected_scale_shape(shape, encoding)
         if list(source.entry.shape) != expected:
             raise MigrateError(
-                f"{where}: scale '{encoding.scale_key}' の形 {list(source.entry.shape)} が"
-                f" codec '{encoding.codec}'・rowAxis {encoding.row_axis}・groupSize"
-                f" {encoding.group_size} の形 {expected} と違う"
+                f"{where}: scale '{encoding.scale_key}' has shape {list(source.entry.shape)},"
+                f" which differs from the shape for codec '{encoding.codec}', rowAxis"
+                f" {encoding.row_axis}, groupSize {encoding.group_size}: {expected}"
             )
 
 
 def _assert_stored_declarations(graph: IrGraph, sources: Mapping[str, SourceTensor]) -> None:
-    """旧テンソルの dtype / shape が IR の宣言（旧書き手の規則）と一致することを見る。
+    """Check that the dtype / shape of the old tensors match the IR declaration (the old writer's
+    rules).
 
-    MUST: バイト長の一致だけでは足りない（書き手の payload 検査はそこまでしか見ない）— 同じ
-    バイト長の別型・要素数だけ同じ別形が通る（{@link karume.legacy.LEGACY_STORED_DTYPE}）。
-    scale の dtype と形は {@link _assert_scale_layouts} が見る。
+    MUST: matching byte lengths is not enough (the writer's payload check looks no further) — a
+    different type of the same byte length, or a different shape with only the same element count,
+    would pass ({@link karume.legacy.LEGACY_STORED_DTYPE}). The scale's dtype and shape are checked
+    by {@link _assert_scale_layouts}.
     """
     for name, initializer in graph.initializers.items():
         if initializer.is_shared or initializer.tensor is None:
@@ -255,30 +274,33 @@ def _assert_stored_declarations(graph: IrGraph, sources: Mapping[str, SourceTens
         expected = LEGACY_STORED_DTYPE.get(storage)
         if expected is None:
             raise MigrateError(
-                f"{where}: 格納 '{storage}' は旧書き手が書かなかった dtype"
-                f"（{' / '.join(LEGACY_STORED_DTYPE)} のみ）— 旧配布形として読めない"
+                f"{where}: storage '{storage}' is a dtype the old writer did not write"
+                f" (only {' / '.join(LEGACY_STORED_DTYPE)}) — cannot be read as the old"
+                " distribution"
             )
         if entry.dtype != expected:
             raise MigrateError(
-                f"{where}: 旧テンソル '{initializer.tensor}' の dtype {entry.dtype} が"
-                f" 格納 '{storage}' の旧書き手の綴り {expected} と違う"
+                f"{where}: old tensor '{initializer.tensor}' has dtype {entry.dtype}, which"
+                f" differs from the old writer's spelling for storage '{storage}': {expected}"
             )
         shape = _concrete_shape(graph, name, where)
         if list(entry.shape) != shape:
             raise MigrateError(
-                f"{where}: 旧テンソル '{initializer.tensor}' の shape {list(entry.shape)} が"
-                f" 宣言 shape {shape} と違う（旧書き手は論理形のまま書く）"
+                f"{where}: old tensor '{initializer.tensor}' has shape {list(entry.shape)}, which"
+                f" differs from the declared shape {shape} (the old writer writes the logical"
+                " shape as is)"
             )
 
 
 def _assert_tensor_cover(
     bindings: Mapping[str, Encoding], sources: Mapping[str, SourceTensor]
 ) -> None:
-    """旧コンテナのテンソルが 1 本残らず移ることを**全件列挙で**確かめる。
+    """Confirm, **by enumerating every entry**, that every tensor of the old container moves.
 
-    MUST: 余剰も落とす（黙って置き去りにしない）— 束縛表は宣言から導くので、宣言に無い実体は
-    新しいコンテナに居場所が無い。旧配布形のほうが誤っている可能性があり、どちらであれ
-    「移したつもりでバイトが減った」を作らない。
+    MUST: surplus is rejected too (not silently left behind) — the binding table is derived from
+    the declarations, so bytes not in the declarations have no place in the new container. The old
+    distribution may be the one in error; either way, do not produce "bytes went missing in what
+    was meant to be a migration".
     """
     referenced = set(bindings) | {
         encoding.scale_key for encoding in bindings.values() if encoding.scale_key is not None
@@ -287,23 +309,26 @@ def _assert_tensor_cover(
     surplus = sorted(set(sources) - referenced)
     if missing or surplus:
         raise MigrateError(
-            "旧コンテナのテンソルと宣言が一致しない:"
-            f" 不足 [{', '.join(missing)}] / 余剰 [{', '.join(surplus)}]"
+            "The old container's tensors and the declarations do not match:"
+            f" missing [{', '.join(missing)}] / surplus [{', '.join(surplus)}]"
         )
 
 
 def _assert_no_leftovers(final: Path, graph_path: Path | None) -> None:
-    """出力先に前回の成果物が残っていない（**消さずに止まる** — どれを配るかが決まらない）。
+    """No artifact of a previous run remains in the output directory (**stops without deleting**
+    — which one to distribute would be undetermined).
 
-    MUST: 移行だけがこの門を持つ（export の再実行は前回の出力を据え替えてよいが、移行は
-    「旧入力は読むだけ・出力先は空から作る」が成立条件なので、残骸を黙って消さない）。
+    MUST: only migration has this check (re-running an export may swap out the previous output,
+    but migration holds only under "old inputs are only read, the output is built from empty", so
+    leftovers are not silently deleted).
     """
     existing = [str(path) for path in sequence_siblings(final)]
     if graph_path is not None and graph_path.is_file():
         existing.append(str(graph_path))
     if existing:
         raise MigrateError(
-            f"出力先に前回の成果物が残っている（消してからやり直す）: {', '.join(existing)}"
+            "Artifacts of a previous run remain in the output directory (delete them and retry):"
+            f" {', '.join(existing)}"
         )
 
 
@@ -319,30 +344,32 @@ def migrate_component(
     part_bytes: int = DEFAULT_PART_BYTES,
     _block_bytes: int = BLOCK_MAX_BYTES,
 ) -> MigrationResult:
-    """コンポーネント 1 つ（旧単一形 / 旧 shard 列）を `krm` へ移す。
+    """Migrate one component (old single form / old shard sequence) to `krm`.
 
-    `path` は代表 path でも手元の現物（`...-00001-of-00002.safetensors`）でもよい
-    （{@link karume.container.base_path} が畳む）。`graph_name` の既定は**親ディレクトリ名**
-    （配布形のコンポーネント名）で、コンテナの語彙（`[A-Za-z0-9._-]{1,64}`）から外れる場合は
-    明示する。
+    `path` may be the representative path or a local file (`...-00001-of-00002.safetensors`)
+    ({@link karume.container.base_path} folds it). `graph_name` defaults to **the parent directory
+    name** (the distribution's component name); pass it explicitly when that falls outside the
+    container vocabulary (`[A-Za-z0-9._-]{1,64}`).
 
-    `assets`（資産名 → {@link karume.container.AssetInput}）は旧 shard 列の**隣に散っている**
-    バイト列（PLE sidecar・`rope_base`）を同じ容器へ畳む席。リポ丸ごとモードは旧 manifest の
-    宣言から自分で組む（{@link _convert_unit}）ので、ここを使うのは manifest を持たない
-    置き場（系列ディレクトリ）を移す呼び手 — 畳み方（どのファイルがどの資産名か）は family を
-    知っている側にしか決められないので、core は受け取るだけにする（ADR 0065）。
+    `assets` (asset name → {@link karume.container.AssetInput}) is the field that folds byte
+    sequences **scattered next to** the old shard sequence (PLE sidecar, `rope_base`) into the
+    same container. Whole-repository mode builds them itself from the old manifest's declarations
+    ({@link _convert_unit}), so this is used by callers that migrate a location without a manifest
+    (a series directory) — how to fold (which file is which asset name) can only be decided by
+    the side that knows the family, so core only receives it (ADR 0065).
 
-    `part_bytes` は part 長（書き手の選択集合 {@link karume.container.PART_LENGTH_CHOICES} の
-    1 つ — 集合外は `MigrateError`）。`_block_bytes` は**テストからのみ触る**寸法の差し込み
-    （合成の小さな資産で piece 分割を踏むため）— 公開ノブではない。
+    `part_bytes` is the part length (one of the writer's choice set
+    {@link karume.container.PART_LENGTH_CHOICES} — outside the set is `MigrateError`).
+    `_block_bytes` is a size injection **touched only by tests** (to exercise piece splitting with
+    small synthetic assets) — not a public knob.
     """
     _assert_part_length(part_bytes)
     source = base_path(Path(path))
     name = graph_name if graph_name is not None else source.parent.name
     if GRAPH_NAME_PATTERN.fullmatch(name) is None:
         raise MigrateError(
-            f"グラフ名 '{name}' がコンテナの語彙（{GRAPH_NAME_PATTERN.pattern}）から外れる"
-            " — `--graph-name` で明示する"
+            f"Graph name '{name}' falls outside the container vocabulary"
+            f" ({GRAPH_NAME_PATTERN.pattern}) — pass it explicitly with `--graph-name`"
         )
     final = Path(out_dir) / f"{source.stem}{MODEL_SUFFIX}"
     return _migrate_shards(
@@ -370,14 +397,17 @@ def _migrate_shards(
     part_bytes: int = DEFAULT_PART_BYTES,
     block_bytes: int = BLOCK_MAX_BYTES,
 ) -> MigrationResult:
-    """**明示の shard 列**を 1 本の `krm` へ移す（部品単位モードとリポ丸ごとモードの共通経路）。
+    """Migrate an **explicit shard sequence** to one `krm` (the path shared by per-component mode
+    and whole-repository mode).
 
-    `shard_paths` は読む順（先頭がグラフ shard）。列を組むのは呼び手で、代表 path からの復元
-    （{@link karume.legacy.resolve_shards}）も旧 manifest の宣言もここへ来る前に済んでいる。
+    `shard_paths` is in read order (the graph shard first). The caller builds the sequence;
+    reconstruction from a representative path ({@link karume.legacy.resolve_shards}) or from the
+    old manifest's declarations is done before reaching here.
 
-    MUST: 書く → 読み直して検証 → 据え替えの 3 段は export の一本道と**同じ 1 本**
-    （{@link karume.publish.publish_container}）を通る。ここが足すのは旧形の読み取りと、
-    旧形にしか無い前提（scale の形・テンソルの過不足・出力先が空であること）の検査だけである。
+    MUST: the 3 steps write → re-read and verify → swap go through **the same single path** as the
+    export path ({@link karume.publish.publish_container}). What this adds is only reading the old
+    form and checking the assumptions that exist only in the old form (scale shape, missing /
+    surplus tensors, an empty output directory).
     """
     metadata, stored = read_component(shard_paths)
     graph = parse_ir_graph(metadata[IR_METADATA_KEY])
@@ -404,10 +434,11 @@ def _migrate_shards(
         raise MigrateError(str(cause)) from cause
 
 
-# ---- 旧 manifest（`karume/4`）の読み取り -----------------------------------
+# ---- Reading the old manifest (`karume/4`) -----------------------------------
 #
-# 旧形式を読むのはこの層だけ（§12）なので、hub の parse とは**別に**ここで全件検査する。
-# 未知のキーは fail loudly — 黙って落とすと「移したつもりで席が 1 つ消えた」になる。
+# Only this layer reads the old format (§12), so every entry is checked here, **separately** from
+# the hub's parse. Unknown keys fail loudly — silently dropping them would give "a field vanished
+# in what was meant to be a migration".
 
 
 def _require(condition: bool, message: str) -> None:
@@ -416,7 +447,7 @@ def _require(condition: bool, message: str) -> None:
 
 
 def _object(value: Any, where: str) -> dict[str, Any]:
-    _require(isinstance(value, dict), f"{where} がオブジェクトでない")
+    _require(isinstance(value, dict), f"{where} is not an object")
     return value
 
 
@@ -424,24 +455,25 @@ def _keys(
     obj: Mapping[str, Any], required: Sequence[str], optional: Sequence[str], where: str
 ) -> None:
     for key in required:
-        _require(key in obj, f"{where}.{key} が無い")
+        _require(key in obj, f"{where}.{key} is missing")
     known = {*required, *optional}
     for key in obj:
-        _require(key in known, f"{where}: 未知のキー '{key}'")
+        _require(key in known, f"{where}: unknown key '{key}'")
 
 
 def _text(value: Any, where: str) -> str:
-    _require(isinstance(value, str) and value != "", f"{where} が非空文字列でない")
+    _require(isinstance(value, str) and value != "", f"{where} is not a non-empty string")
     return value
 
 
 def _rel_path(value: Any, where: str) -> str:
-    """FileRef の path（hub の `assertPath` と同じ許可リスト —
-    {@link karume.dist.assert_rel_path}）。
+    """Path of a FileRef (the same allow-list as the hub's `assertPath` —
+    {@link karume.dist.assert_rel_path}).
 
-    MUST: 「空でない文字列」だけで通さない。書き先は旧 path の親ディレクトリをそのまま出力先へ
-    繋ぐ（{@link _output_location}）ので、`../` や絶対パスを通すと新しいコンテナが出力先の外に
-    書かれ、manifest にも hub が拒否する path が載る。
+    MUST: do not pass it on "a non-empty string" alone. The destination joins the old path's parent
+    directory onto the output directory as is ({@link _output_location}), so passing `../` or an
+    absolute path would write the new container outside the output directory and put a path the
+    hub rejects into the manifest.
     """
     try:
         return assert_rel_path(_text(value, where), where)
@@ -452,7 +484,7 @@ def _rel_path(value: Any, where: str) -> str:
 def _sha256(value: Any, where: str) -> str:
     _require(
         isinstance(value, str) and SHA256_HEX_PATTERN.fullmatch(value) is not None,
-        f"{where} が sha256（小文字 16 進 64 文字）でない: {value!r}",
+        f"{where} is not a sha256 (64 lowercase hex characters): {value!r}",
     )
     return value
 
@@ -460,14 +492,14 @@ def _sha256(value: Any, where: str) -> str:
 def _count(value: Any, where: str) -> int:
     _require(
         isinstance(value, int) and not isinstance(value, bool) and value >= 0,
-        f"{where} が非負整数でない: {value!r}",
+        f"{where} is not a non-negative integer: {value!r}",
     )
     return value
 
 
 @dataclass(frozen=True)
 class FileRef:
-    """ADR 0038 §2 の 3 点セット（+ 越境の `repo` / `revision`）。"""
+    """The triple of ADR 0038 §2 (+ the cross-repository `repo` / `revision`)."""
 
     path: str
     size: int
@@ -477,7 +509,8 @@ class FileRef:
 
     @property
     def cross(self) -> tuple[str, str] | None:
-        """越境参照なら `(repo, revision)`・自リポ参照なら `None`。"""
+        """`(repo, revision)` for a cross-repository reference, `None` for a same-repository
+        reference."""
         return None if self.repo is None else (self.repo, self.revision or "")
 
     def to_document(self) -> dict[str, Any]:
@@ -501,14 +534,15 @@ def _file_ref(value: Any, where: str) -> FileRef:
     )
     _require(
         (ref.repo is None) == (ref.revision is None),
-        f"{where}: 越境参照は `repo` と `revision` の対で書く（片方だけは指し先が決まらない）",
+        f"{where}: a cross-repository reference is written as the pair `repo` and `revision`"
+        " (one alone does not determine the target)",
     )
     return ref
 
 
 @dataclass(frozen=True)
 class WeightEntry:
-    """1 (部品, dtype) ぶんのファイル群（`karume/4` の `{shards, extras?}`）。"""
+    """The files of one (component, dtype) (`{shards, extras?}` of `karume/4`)."""
 
     shards: tuple[FileRef, ...]
     extras: tuple[tuple[str, FileRef], ...]
@@ -518,15 +552,16 @@ class WeightEntry:
         return (*self.shards, *(ref for _, ref in self.extras))
 
 
-#: `pipeline` の綴り `<name>/<major>`（hub の `parsePipeline` と同じ受理形 — 実物は文字列で、
-#: `{name, major}` のオブジェクトではない）。MUST: `.fullmatch` で引く — Python の `$` は末尾の
-#: 改行の直前でも一致するので、`.match` だと hub が拒否する `'name/1\n'` を受理する。
+#: Spelling of `pipeline`, `<name>/<major>` (the same accepted form as the hub's `parsePipeline` —
+#: the actual value is a string, not a `{name, major}` object). MUST: match with `.fullmatch` —
+#: Python's `$` also matches just before a trailing newline, so `.match` would accept
+#: `'name/1\n'`, which the hub rejects.
 PIPELINE_RE = re.compile(r"^([A-Za-z0-9_-]+)/(\d+)$")
 
 
 @dataclass(frozen=True)
 class LegacyModel:
-    #: `<name>/<major>` の文字列そのまま（karume/5 へもこの綴りで写す）。
+    #: The `<name>/<major>` string as is (copied to karume/5 with this spelling too).
     pipeline: str
     weights: Mapping[str, Mapping[str, WeightEntry]]
     assets: Mapping[str, FileRef]
@@ -542,31 +577,32 @@ class LegacyManifest:
 
 
 def _read_json(path: Path, where: str) -> Any:
-    _require(path.is_file(), f"{where} が無い: {path}")
+    _require(path.is_file(), f"{where} does not exist: {path}")
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as cause:
-        raise MigrateError(f"{where} が JSON として読めない: {path}") from cause
+        raise MigrateError(f"{where} cannot be read as JSON: {path}") from cause
 
 
 def read_legacy_manifest(path: Path) -> LegacyManifest:
-    """旧 `karume/4` の `karume.json` を読む（major が違えば fail loudly — 両読みはしない）。"""
+    """Read an old `karume/4` `karume.json` (a different major fails loudly — no dual reading)."""
     where = MANIFEST_FILE
     root = _object(_read_json(path, where), where)
-    # MUST: 版の判定を欄の検査より先に置く（別 major の manifest は「欄が違う」ではなく
-    # 「その版は読まない」と言うのが直す側にとって決定的）。
+    # MUST: put the version check before the field checks (for a manifest of another major,
+    # saying "that version is not read" rather than "the fields differ" is decisive for whoever
+    # fixes it).
     _require(
         root.get("format") == LEGACY_MANIFEST_FORMAT,
-        f"{where}.format が {root.get('format')!r} — 移行できるのは"
-        f" '{LEGACY_MANIFEST_FORMAT}' だけ（ADR 0109 決定 1）",
+        f"{where}.format is {root.get('format')!r} — only"
+        f" '{LEGACY_MANIFEST_FORMAT}' can be migrated (ADR 0109 decision 1)",
     )
     _keys(root, ["format", "generator", "defaultModel", "models"], [], where)
     models: dict[str, LegacyModel] = {}
     for name, raw in _object(root["models"], f"{where}.models").items():
         models[name] = _legacy_model(raw, f"{where}.models['{name}']")
-    _require(len(models) > 0, f"{where}.models が空")
+    _require(len(models) > 0, f"{where}.models is empty")
     default_model = _text(root["defaultModel"], f"{where}.defaultModel")
-    _require(default_model in models, f"{where}.defaultModel '{default_model}' が models に無い")
+    _require(default_model in models, f"{where}.defaultModel '{default_model}' is not in models")
     return LegacyManifest(default_model, models)
 
 
@@ -581,14 +617,14 @@ def _legacy_model(value: Any, where: str) -> LegacyModel:
     pipeline = _text(obj["pipeline"], f"{where}.pipeline")
     _require(
         PIPELINE_RE.fullmatch(pipeline) is not None,
-        f"{where}.pipeline が '<name>/<major>' の形でない: {pipeline!r}",
+        f"{where}.pipeline does not have the form '<name>/<major>': {pipeline!r}",
     )
     weights: dict[str, dict[str, WeightEntry]] = {}
     for component, labels in _object(obj["weights"], f"{where}.weights").items():
         entries: dict[str, WeightEntry] = {}
         for dtype, raw in _object(labels, f"{where}.weights['{component}']").items():
             entries[dtype] = _weight_entry(raw, f"{where}.weights['{component}']['{dtype}']")
-        _require(len(entries) > 0, f"{where}.weights['{component}'] が空")
+        _require(len(entries) > 0, f"{where}.weights['{component}'] is empty")
         weights[component] = entries
     assets = {
         name: _file_ref(raw, f"{where}.assets['{name}']")
@@ -596,7 +632,7 @@ def _legacy_model(value: Any, where: str) -> LegacyModel:
     }
     quants = _object(obj["quants"], f"{where}.quants")
     default_quant = _text(obj["defaultQuant"], f"{where}.defaultQuant")
-    _require(default_quant in quants, f"{where}.defaultQuant '{default_quant}' が quants に無い")
+    _require(default_quant in quants, f"{where}.defaultQuant '{default_quant}' is not in quants")
     return LegacyModel(
         pipeline,
         weights,
@@ -611,7 +647,9 @@ def _weight_entry(value: Any, where: str) -> WeightEntry:
     obj = _object(value, where)
     _keys(obj, ["shards"], ["extras"], where)
     raw_shards = obj["shards"]
-    _require(isinstance(raw_shards, list) and raw_shards, f"{where}.shards が非空の配列でない")
+    _require(
+        isinstance(raw_shards, list) and raw_shards, f"{where}.shards is not a non-empty array"
+    )
     extras = _object(obj.get("extras", {}), f"{where}.extras")
     return WeightEntry(
         tuple(_file_ref(raw, f"{where}.shards[{i}]") for i, raw in enumerate(raw_shards)),
@@ -621,12 +659,12 @@ def _weight_entry(value: Any, where: str) -> WeightEntry:
     )
 
 
-# ---- リポ丸ごとモード -------------------------------------------------------
+# ---- Whole-repository mode -------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class CrossRepo:
-    """`--cross-repo <owner/name>=<変換済みディレクトリ>@<40 桁 revision>` の 1 件。"""
+    """One `--cross-repo <owner/name>=<converted directory>@<40-digit revision>`."""
 
     repo: str
     directory: Path
@@ -634,29 +672,30 @@ class CrossRepo:
 
 
 def parse_cross_repo(spec: str) -> CrossRepo:
-    """`--cross-repo` の 1 語を読む（形が違えば fail loudly — 推測しない）。"""
-    shape = "<owner/name>=<変換済みディレクトリ>@<40 桁 revision>"
+    """Read one `--cross-repo` word (a different form fails loudly — no guessing)."""
+    shape = "<owner/name>=<converted directory>@<40-digit revision>"
     repo, sep, rest = spec.partition("=")
-    _require(bool(sep) and bool(rest), f"--cross-repo '{spec}' が {shape} の形でない")
+    _require(bool(sep) and bool(rest), f"--cross-repo '{spec}' does not have the form {shape}")
     directory, at, revision = rest.rpartition("@")
-    _require(bool(at) and bool(directory), f"--cross-repo '{spec}' が {shape} の形でない")
+    _require(bool(at) and bool(directory), f"--cross-repo '{spec}' does not have the form {shape}")
     _require(
-        REPO_RE.fullmatch(repo) is not None, f"--cross-repo '{spec}': repo が <owner>/<name> でない"
+        REPO_RE.fullmatch(repo) is not None, f"--cross-repo '{spec}': repo is not <owner>/<name>"
     )
     _require(
         REVISION_RE.fullmatch(revision) is not None,
-        f"--cross-repo '{spec}': revision が 40 桁 hex 小文字でない（pin は完全な commit sha）",
+        f"--cross-repo '{spec}': revision is not 40 lowercase hex digits (a pin is a full commit"
+        " sha)",
     )
     return CrossRepo(repo, Path(directory), revision)
 
 
 @dataclass(frozen=True)
 class Container:
-    """manifest `karume/5` の `container` 欄（ADR 0109 決定 3）。"""
+    """The `container` field of manifest `karume/5` (ADR 0109 decision 3)."""
 
-    #: 2 文書（グラフ記述 / モデル記述）の期待値。
+    #: Expected values of the 2 documents (graph descriptor / model descriptor).
     descriptor: tuple[DocumentRef, DocumentRef]
-    #: part 0 を含む全 part の FileRef（添字順）。
+    #: FileRefs of all parts including part 0 (in index order).
     parts: tuple[FileRef, ...]
 
     def to_document(self) -> dict[str, Any]:
@@ -669,7 +708,7 @@ class Container:
 
 @dataclass(frozen=True)
 class _Seat:
-    """manifest 上の 1 席（モデル, 部品, dtype ラベル）。"""
+    """One slot in the manifest (model, component, dtype label)."""
 
     model: str
     component: str
@@ -681,21 +720,24 @@ class _Seat:
 
 @dataclass(frozen=True)
 class _Unit:
-    """**1 度だけ**変換する単位。同じ内容を指す席（sbv2 の共有部品）はここで畳まれる。"""
+    """The unit converted **only once**. Slots pointing at the same content (sbv2's shared
+    components) are folded here."""
 
     component: str
     shards: tuple[FileRef, ...]
     extras: tuple[tuple[str, FileRef], ...]
-    #: PLE を畳む席だけが持つ（{@link _PleFold.refs} — 畳み方が違う席を同じ容器にしないための鍵）。
+    #: Only slots that fold PLE have it ({@link _PleFold.refs} — the key that keeps slots with
+    #: different folding out of the same container).
     ple: tuple[tuple[str, FileRef], ...]
 
 
 @dataclass(frozen=True)
 class _PleFold:
-    """1 モデルぶんの PLE の畳み先（部品名・容器へ移す assets の並び・読んだ旧索引）。
+    """Where one model's PLE is folded (component name, the assets moved into the container, the
+    old index that was read).
 
-    旧索引はここが**1 度だけ**読んだものを運ぶ（同じ事実を 2 度導くと、片方だけ検査が
-    足されたときにずれる）。
+    This carries the old index read **only once** here (deriving the same fact twice drifts when a
+    check is added to only one of them).
     """
 
     component: str
@@ -713,7 +755,7 @@ class _PleFold:
 
 @dataclass(frozen=True)
 class ConvertedContainer:
-    """変換した容器 1 本の報告（同じ容器を指す席が複数あっても 1 件）。"""
+    """Report for one converted container (one entry even when several slots point at it)."""
 
     rel_paths: tuple[str, ...]
     initializers: int
@@ -723,13 +765,13 @@ class ConvertedContainer:
 
 @dataclass(frozen=True)
 class RepositoryResult:
-    """リポ丸ごとモードの結果。"""
+    """Result of whole-repository mode."""
 
     manifest: Path
     converted: tuple[ConvertedContainer, ...]
-    #: 越境参照から引き写した席の数（変換していない）。
+    #: Number of slots copied from cross-repository references (not converted).
     crossed: int
-    #: そのまま複写した通常ファイルの本数。
+    #: Number of ordinary files copied as is.
     copied: int
 
 
@@ -742,19 +784,22 @@ def migrate_repository(
     part_bytes: int = DEFAULT_PART_BYTES,
     _block_bytes: int = BLOCK_MAX_BYTES,
 ) -> RepositoryResult:
-    """旧 `karume/4` のリポを丸ごと `karume/5` + `krm` へ移す（ADR 0109 決定 8）。
+    """Migrate a whole old `karume/4` repository to `karume/5` + `krm` (ADR 0109 decision 8).
 
-    旧リポは**読むだけ**で、成果物は全部 `out_dir` の下に出る。`part_bytes`（書き手の選択集合 —
-    集合外は `MigrateError`）と `_block_bytes`（テストからのみ触る寸法の差し込み）は部品単位
-    モードと同じ。
+    The old repository is **only read**, and every artifact goes under `out_dir`. `part_bytes`
+    (the writer's choice set — outside the set is `MigrateError`) and `_block_bytes` (a size
+    injection touched only by tests) are as in per-component mode.
 
-    MUST: 書くのは**分割形だけ**（単一形の席が無い）— `karume/5` の `container.parts` は
-    part 0 + part 1 の 2 要素以上 MUST で、単一形はその形を作れない（ADR 0109 決定 3）。
+    MUST: only the **split form** is written (there is no single-form option) — `container.parts`
+    of `karume/5` MUST have 2 or more elements, part 0 + part 1, and the single form cannot produce
+    that shape (ADR 0109 decision 3).
 
-    MUST: リポ全体を**作業席**で組み、全変換・通常ファイルの複写・manifest の検査が通った回
-    だけ `out_dir` へ据える（{@link karume.artifacts.staged_publication}）。部品を順に最終の
-    出力先へ置くと、途中で落ちた回に先の部品のコンテナだけが残り、同じ指定の再実行が
-    「前回の成果物が残っている」で止まる。出力先が空であることは開始時に 1 度だけ見る。
+    MUST: build the whole repository in a **staging path**, and put it in place at `out_dir` only
+    when every conversion, the copy of ordinary files and the manifest checks have passed
+    ({@link karume.artifacts.staged_publication}). Placing components one by one in the final
+    output directory would leave only the earlier components' containers behind on a run that
+    fails midway, and re-running the same command would stop at "artifacts of a previous run
+    remain". That the output directory is empty is checked once, at the start.
     """
     _assert_part_length(part_bytes)
     source = Path(manifest_path)
@@ -762,17 +807,19 @@ def migrate_repository(
     out = Path(out_dir).resolve()
     _require(
         repo != out and repo not in out.parents and out not in repo.parents,
-        f"出力先 {out} が入力リポ {repo} と入れ子になっている（旧入力は読むだけ MUST）",
+        f"Output directory {out} is nested with the input repository {repo} (old inputs MUST only"
+        " be read)",
     )
     _require(
         not out.exists() or (out.is_dir() and not any(out.iterdir())),
-        f"出力先 {out} に前回の成果物が残っている（消してからやり直す — 移行は空の出力先から作る）",
+        f"Artifacts of a previous run remain in the output directory {out} (delete them and retry"
+        " — migration builds from an empty output directory)",
     )
     legacy = read_legacy_manifest(source)
     crosses = {cross.repo: cross for cross in cross_repos}
     _require(
         len(crosses) == len(cross_repos),
-        "--cross-repo に同じ repo が 2 度出ている（どちらを引くかが決まらない）",
+        "--cross-repo names the same repo twice (which one to use is undetermined)",
     )
     seat_crosses = {seat: _entry_cross(entry, str(seat)) for seat, entry in _seats(legacy)}
     _assert_cross_repos_declared(seat_crosses, crosses)
@@ -817,18 +864,20 @@ def migrate_repository(
                 reports.append(report)
             containers[seat] = found
         for name, fold in folds.items():
-            # MUST: 畳み先が 1 つも無いまま assets から消すと PLE が黙って配布物から落ちる
-            # （持ち主の部品が丸ごと越境参照のときに起きる）。
+            # MUST: removing PLE from assets with no fold target at all would silently drop it
+            # from the distribution (this happens when the owning component is entirely a
+            # cross-repository reference).
             _require(
                 fold is None or name in folded,
-                f"models['{name}']: PLE の持ち主の部品 '{fold.component if fold else ''}' に"
-                "自リポで変換する席が 1 つも無い（畳み先が決まらない）",
+                f"models['{name}']: PLE owner component '{fold.component if fold else ''}' has"
+                " no slot converted in this repository (the fold target is undetermined)",
             )
 
         skip = {MANIFEST_FILE}
         for unit in converted:
             skip.update(ref.path for ref in unit.shards)
-            # MUST: 容器の資産になった extras も複写しない（宣言外の実体を配布物に残さない）。
+            # MUST: extras that became container assets are not copied either (no undeclared
+            # bytes are left in the distribution).
             skip.update(ref.path for _, ref in unit.extras)
         for fold in folds.values():
             if fold is not None:
@@ -837,18 +886,22 @@ def migrate_repository(
 
         manifest = _manifest_document(legacy, containers, folds)
         assert_manifest_limits(manifest)
-        # 作業席は空から組むので、旧 karume.json（複写から外している）と衝突する現物は無い。
+        # The staging path is built from empty, so no file collides with the old karume.json
+        # (which is excluded from the copy).
         (staging / MANIFEST_FILE).write_text(manifest_text(manifest), encoding="utf-8")
     return RepositoryResult(out / MANIFEST_FILE, tuple(reports), crossed, copied)
 
 
 def _assert_declared_files(repo: Path, legacy: LegacyManifest) -> None:
-    """旧 manifest が宣言する自リポのファイルを、現物の size（stat）と sha256 に突き合わせる。
+    """Check the same-repository files the old manifest declares against the actual size (stat)
+    and sha256.
 
-    MUST: 変換と複写より**前に**全部見る。移行の「生バイト同一」は手元のファイルとの比較なので、
-    手元のミラーが旧 revision と食い違っていると（途中まで更新・壊れたファイル）、その中身が
-    新しい sha256 で洗浄された `karume/5` になり、逐語で写す `assets` の FileRef は現物と違う
-    sha256 を名乗る。越境参照は手元に実体が無いので見ない（引き写す側の綴りは読み取りで見る）。
+    MUST: check all of them **before** converting and copying. The migration's "identical raw
+    bytes" is a comparison with the local files, so if the local mirror disagrees with the old
+    revision (partly updated, broken files), its contents become a `karume/5` laundered with new
+    sha256 values, and the `assets` FileRefs copied verbatim claim a sha256 that differs from the
+    file. Cross-repository references have no local bytes, so they are not checked (the spelling
+    of the side being copied is checked when it is read).
     """
     checked: set[FileRef] = set()
     for model_name, model in legacy.models.items():
@@ -858,26 +911,29 @@ def _assert_declared_files(repo: Path, legacy: LegacyManifest) -> None:
             if ref.cross is not None or ref in checked:
                 continue
             checked.add(ref)
-            where = f"models['{model_name}']: 旧 manifest が宣言する '{ref.path}'"
+            where = f"models['{model_name}']: '{ref.path}' declared by the old manifest"
             path = repo / ref.path
-            # path の文法は読み取りで済んでいる — 残るのは symlink で入力リポの外を指す形。
+            # The path grammar was checked while reading — what remains is a symlink pointing
+            # outside the input repository.
             _require(
                 path.resolve().is_relative_to(repo),
-                f"{where} が symlink で入力リポの外を指す（旧入力は {repo} の中だけを読む）",
+                f"{where} points outside the input repository through a symlink (old inputs are"
+                f" read only inside {repo})",
             )
-            _require(path.is_file(), f"{where} が手元に無い")
+            _require(path.is_file(), f"{where} is not present locally")
             size = path.stat().st_size
-            _require(size == ref.size, f"{where} の長さ {size} が宣言 {ref.size} と違う")
+            _require(size == ref.size, f"{where} has length {size}, not the declared {ref.size}")
             actual = sha256_file(path)
             _require(
                 actual == ref.sha256,
-                f"{where} の sha256 が宣言と違う（宣言 {ref.sha256} / 現物 {actual}）"
-                " — 手元のミラーが旧 revision と食い違っている",
+                f"{where} has a sha256 that differs from the declaration (declared {ref.sha256} /"
+                f" actual {actual}) — the local mirror disagrees with the old revision",
             )
 
 
 def _seats(legacy: LegacyManifest) -> Iterator[tuple[_Seat, WeightEntry]]:
-    """manifest 上の全席を宣言順に（席の走査はこの 1 本道だけを通る）。"""
+    """All slots in the manifest in declaration order (slot traversal goes only through this one
+    path)."""
     for model_name, model in legacy.models.items():
         for component, labels in model.weights.items():
             for dtype, entry in labels.items():
@@ -885,43 +941,50 @@ def _seats(legacy: LegacyManifest) -> Iterator[tuple[_Seat, WeightEntry]]:
 
 
 def _entry_cross(entry: WeightEntry, where: str) -> tuple[str, str] | None:
-    """1 席の越境参照（容器単位 MUST — 混在は fail loudly・ADR 0109 決定 3）。"""
+    """The cross-repository reference of one slot (MUST be per container — a mix fails loudly;
+    ADR 0109 decision 3)."""
     crosses = {ref.cross for ref in entry.refs}
     if len(crosses) != 1:
-        shown = ", ".join(sorted("自リポ" if c is None else f"{c[0]}@{c[1]}" for c in crosses))
-        raise MigrateError(f"{where}: 越境参照が混在している（容器単位 MUST）: {shown}")
+        shown = ", ".join(
+            sorted("this repository" if c is None else f"{c[0]}@{c[1]}" for c in crosses)
+        )
+        raise MigrateError(
+            f"{where}: cross-repository references are mixed (MUST be per container): {shown}"
+        )
     return crosses.pop()
 
 
 def _assert_cross_repos_declared(
     seat_crosses: Mapping[_Seat, tuple[str, str] | None], crosses: Mapping[str, CrossRepo]
 ) -> None:
-    """`--cross-repo` が足りない回は、**参照している repo と本数を全部列挙して**止まる。"""
+    """When `--cross-repo` is short, stop **listing every referenced repo and its count**."""
     missing: Counter[str] = Counter()
     for cross in seat_crosses.values():
         if cross is not None and cross[0] not in crosses:
             missing[cross[0]] += 1
     if missing:
-        shown = " / ".join(f"{repo}（{count} 席）" for repo, count in sorted(missing.items()))
+        shown = " / ".join(f"{repo} ({count} slots)" for repo, count in sorted(missing.items()))
         raise MigrateError(
-            f"越境参照の repo が --cross-repo で渡されていない: {shown}"
-            " — 先にその repo を同じモードで変換し、"
-            "`--cross-repo <owner/name>=<出力ディレクトリ>@<40 桁 revision>` で渡す"
+            f"Repos of cross-repository references are not passed with --cross-repo: {shown}"
+            " — convert that repo first in the same mode and pass it with"
+            " `--cross-repo <owner/name>=<output directory>@<40-digit revision>`"
         )
 
 
 def _crossed_container(cross: CrossRepo, entry: WeightEntry, seat: _Seat) -> Container:
-    """変換済みディレクトリの `karume/5` から、同じ**容器**の `container` を引き写す。
+    """Copy the `container` of the same **container** from the `karume/5` of a converted
+    directory.
 
-    探す鍵は席の名前（モデル, 部品, dtype）ではなく、**旧 shard 列から導いた part 0 の置き場**
-    である — 出力 path の規則は両リポで同じ（{@link _output_location}）一方、席の名前が貸し手と
-    借り手で揃っている保証は無い（借り手が別名のモデルから借りる形が実在する）。
+    The lookup key is not the slot name (model, component, dtype) but **the location of part 0
+    derived from the old shard sequence** — the output path rule is the same in both repositories
+    ({@link _output_location}), while nothing guarantees that slot names match between lender and
+    borrower (a borrower borrowing from a model of a different name does exist).
     """
-    where = f"{cross.repo} の {MANIFEST_FILE}"
+    where = f"{cross.repo}'s {MANIFEST_FILE}"
     root = _object(_read_json(cross.directory / MANIFEST_FILE, where), where)
     _require(
         root.get("format") == MANIFEST_FORMAT,
-        f"{where}.format が '{root.get('format')}' — 引き写せるのは '{MANIFEST_FORMAT}' だけ",
+        f"{where}.format is '{root.get('format')}' — only '{MANIFEST_FORMAT}' can be copied",
     )
     directory, stem = _output_location(entry.shards, str(seat))
     wanted = f"{directory}/{stem}{MODEL_SUFFIX}"
@@ -930,24 +993,26 @@ def _crossed_container(cross: CrossRepo, entry: WeightEntry, seat: _Seat) -> Con
     for label, raw in _crossed_entries(root, where):
         container = _object(raw, label)
         head = container.get("parts")
-        _require(isinstance(head, list) and head, f"{label}.parts が非空の配列でない")
+        _require(isinstance(head, list) and head, f"{label}.parts is not a non-empty array")
         key = base_path(Path(_file_ref(head[0], f"{label}.parts[0]").path)).as_posix()
         candidates.add(key)
         if key == wanted and found is None:
             found = (label, container)
     if found is None:
         raise MigrateError(
-            f"{where}: 引き写す容器 '{wanted}' が無い"
-            "（越境参照の引き写しは旧 shard 列から導いた part 0 の置き場で探す）"
-            f" — 参照先が持つのは {', '.join(sorted(candidates)) if candidates else '（無し）'}"
+            f"{where}: the container to copy, '{wanted}', does not exist"
+            " (copying a cross-repository reference looks it up by the location of part 0"
+            " derived from the old shard sequence)"
+            f" — the target has {', '.join(sorted(candidates)) if candidates else '(none)'}"
         )
     return _crossed_parse(found[1], found[0], cross)
 
 
 def _crossed_entries(root: Mapping[str, Any], where: str) -> Iterator[tuple[str, Any]]:
-    """参照先 `karume/5` の全 (モデル, 部品, dtype) の `container` 欄（位置の綴りつき）。"""
+    """The `container` field of every (model, component, dtype) of the target `karume/5` (with the
+    spelling of its position)."""
     for model_name, raw_model in _object(root.get("models"), f"{where}.models").items():
-        model_where = f"{where} の {model_name}"
+        model_where = f"{where}: {model_name}"
         weights = _object(_object(raw_model, model_where).get("weights"), f"{model_where}.weights")
         for component, labels in weights.items():
             for dtype, raw_entry in _object(labels, f"{model_where}.weights.{component}").items():
@@ -958,7 +1023,7 @@ def _crossed_entries(root: Mapping[str, Any], where: str) -> Iterator[tuple[str,
 
 
 def _crossed_parse(container: Mapping[str, Any], where: str, cross: CrossRepo) -> Container:
-    """引き写す `container` 欄 1 件を読む（欄の欠け・未知のキーは fail loudly）。"""
+    """Read one `container` field to copy (a missing field or an unknown key fails loudly)."""
     _keys(container, ["descriptor", "parts"], [], where)
     descriptor = _object(container["descriptor"], f"{where}.descriptor")
     _keys(descriptor, ["graph", "model"], [], f"{where}.descriptor")
@@ -977,7 +1042,8 @@ def _crossed_parse(container: Mapping[str, Any], where: str, cross: CrossRepo) -
         ref = _file_ref(raw, f"{where}.parts[{index}]")
         _require(
             ref.cross is None,
-            f"{where}.parts[{index}] が既に越境参照を持つ（2 段の引き写しは指し先が辿れない）",
+            f"{where}.parts[{index}] already has a cross-repository reference (a two-step copy"
+            " cannot be followed to its target)",
         )
         parts.append(replace(ref, repo=cross.repo, revision=cross.revision))
     return Container((documents[0], documents[1]), tuple(parts))
@@ -994,14 +1060,16 @@ def _convert_unit(
     part_bytes: int,
     block_bytes: int,
 ) -> tuple[Container, ConvertedContainer]:
-    """1 単位（部品 × dtype の shard 列）を `krm` へ変換し、manifest の `container` を組む。"""
+    """Convert one unit (the shard sequence of component × dtype) to `krm` and build the
+    manifest's `container`."""
     if GRAPH_NAME_PATTERN.fullmatch(unit.component) is None:
         raise MigrateError(
-            f"{where}: 部品名 '{unit.component}' がコンテナのグラフ名の語彙"
-            f"（{GRAPH_NAME_PATTERN.pattern}）から外れる"
+            f"{where}: component name '{unit.component}' falls outside the container's graph name"
+            f" vocabulary ({GRAPH_NAME_PATTERN.pattern})"
         )
     directory, stem = _output_location(unit.shards, where)
-    # 資産の並びがそのまま物理配置の順になる（PLE は token 順 — §4.2 の走査型取得元のため）。
+    # The order of the assets is the physical layout order as is (PLE is in token order — for
+    # the scan-type sources of §4.2).
     assets = _ple_assets(repo, fold, block_bytes, where)
     assets.update(_extra_assets(repo, unit.extras, where))
     result = _migrate_shards(
@@ -1023,55 +1091,65 @@ def _convert_unit(
 
 
 def _output_location(shards: Sequence[FileRef], where: str) -> tuple[str, str]:
-    """`(出力ディレクトリの相対 path, stem)` — 置き場は**重み shard の親**（推測しない）。"""
+    """`(relative path of the output directory, stem)` — the location is **the parent of the
+    weight shards** (no guessing)."""
     stems = set()
     for ref in shards:
         name = PurePosixPath(ref.path)
         _require(
             name.suffix == ".safetensors",
-            f"{where}: 旧 shard '{ref.path}' の拡張子が .safetensors でない",
+            f"{where}: the extension of old shard '{ref.path}' is not .safetensors",
         )
         stems.add(base_path(Path(name.name)).stem)
     _require(
-        len(stems) == 1, f"{where}: shard 列のファイル名の stem が揃っていない: {sorted(stems)}"
+        len(stems) == 1,
+        f"{where}: the file name stems of the shard sequence differ: {sorted(stems)}",
     )
-    # 列の 2 本目以降が重み shard。グラフ shard だけの列は先頭の親に置く。
+    # The second and later entries of the sequence are weight shards. A sequence of only the graph
+    # shard goes in the parent of the first.
     weights = shards[1:] or shards[:1]
     directories = {PurePosixPath(ref.path).parent.as_posix() for ref in weights}
     _require(
         len(directories) == 1,
-        f"{where}: 重み shard の親ディレクトリが揃っていない（{sorted(directories)}）"
-        " — 置き場を推測しない",
+        f"{where}: the parent directories of the weight shards differ ({sorted(directories)})"
+        " — the location is not guessed",
     )
     return directories.pop(), stems.pop()
 
 
 def _published_ref(out: Path, path: Path) -> FileRef:
-    """据えた part 1 本の FileRef（長さ 0 の part も `size: 0` で載せる — ADR 0109 決定 3）。"""
+    """FileRef of one part put in place (a part of length 0 is listed too, with `size: 0` — ADR
+    0109 decision 3)."""
     return FileRef(**file_ref(out, path.relative_to(out).as_posix(), sha256_file(path)))
 
 
 def _extra_assets(
     repo: Path, extras: Sequence[tuple[str, FileRef]], where: str
 ) -> dict[str, AssetInput]:
-    """旧 `extras` を容器の資産へ（実在は `rope_base` 1 種 — 知らない名前は fail loudly）。"""
+    """Old `extras` → container assets (only `rope_base` exists — an unknown name fails
+    loudly)."""
     assets: dict[str, AssetInput] = {}
     for name, ref in extras:
         mapped = EXTRA_ASSETS.get(name)
         if mapped is None:
             raise MigrateError(
-                f"{where}: extras '{name}' の写し先が無い"
-                f"（容器の資産へ移せるのは {' / '.join(sorted(EXTRA_ASSETS))} だけ）"
+                f"{where}: extras '{name}' has no mapping target"
+                f" (only {' / '.join(sorted(EXTRA_ASSETS))} can move to container assets)"
             )
-        _require(ref.cross is None, f"{where}: extras '{name}' が越境参照（容器へ畳めない）")
+        _require(
+            ref.cross is None,
+            f"{where}: extras '{name}' is a cross-repository reference (cannot be folded into"
+            " the container)",
+        )
         asset_name, role = mapped
-        # 論理長は旧宣言の `size`（現物とずれていれば書き手が落とす — 推測しない）。
+        # The logical length is the old declaration's `size` (if it disagrees with the file, the
+        # writer rejects it — no guessing).
         assets[asset_name] = AssetInput(role, ref.size, _file_reader(repo / ref.path))
     return assets
 
 
 def _file_reader(path: Path) -> Callable[[], bytes]:
-    """ファイル 1 本を丸ごと読む遅延の呼び出し（引かれるまで開かない）。"""
+    """A lazy call that reads one whole file (not opened until it is called)."""
 
     def read() -> bytes:
         return path.read_bytes()
@@ -1080,7 +1158,8 @@ def _file_reader(path: Path) -> Callable[[], bytes]:
 
 
 def _copy_plain_files(repo: Path, out: Path, skip: frozenset[str] | set[str]) -> int:
-    """変換しなかった通常ファイルをそのまま複写する（`.` で始まるディレクトリは入らない）。"""
+    """Copy the ordinary files that were not converted as is (directories starting with `.` are
+    not entered)."""
     copied = 0
     for source in sorted(repo.rglob("*")):
         rel = source.relative_to(repo)
@@ -1091,7 +1170,7 @@ def _copy_plain_files(repo: Path, out: Path, skip: frozenset[str] | set[str]) ->
         target = out / rel
         _require(
             not target.exists(),
-            f"出力先に {rel.as_posix()} が既に在る（消してからやり直す）",
+            f"{rel.as_posix()} already exists in the output directory (delete it and retry)",
         )
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
@@ -1104,7 +1183,8 @@ def _manifest_document(
     containers: Mapping[_Seat, Container],
     folds: Mapping[str, _PleFold | None],
 ) -> dict[str, Any]:
-    """`karume/5` の `karume.json`（旧値はそのまま・weights だけ `container` に置き換わる）。"""
+    """The `karume/5` `karume.json` (old values as is; only weights are replaced by
+    `container`)."""
     models: dict[str, Any] = {}
     for name, model in legacy.models.items():
         fold = folds[name]
@@ -1135,14 +1215,15 @@ def _manifest_document(
     }
 
 
-# ---- PLE sidecar → 容器の資産（索引 schema 3）-------------------------------
+# ---- PLE sidecar → container assets (index schema 3) -------------------------------
 
 
 def _plan_ple(repo: Path, model: LegacyModel, where: str) -> _PleFold | None:
-    """PLE の畳み先を決める（索引が無ければ `None`）。
+    """Decide where PLE is folded (`None` when there is no index).
 
-    MUST: `ple_index` が在るのに持ち主の表に無い pipeline なら fail loudly — どの部品の容器へ
-    畳むかが決まらないまま「assets から消えた」形を作らない。
+    MUST: a pipeline that has `ple_index` but is not in the owner table fails loudly — do not
+    produce "vanished from assets" while it is undetermined which component's container it folds
+    into.
     """
     index_ref = model.assets.get(PLE_INDEX_ASSET)
     if index_ref is None:
@@ -1151,40 +1232,53 @@ def _plan_ple(repo: Path, model: LegacyModel, where: str) -> _PleFold | None:
     component = PLE_OWNER.get(pipeline)
     if component is None:
         raise MigrateError(
-            f"{where}: assets に '{PLE_INDEX_ASSET}' が在るが pipeline '{pipeline}' は PLE の"
-            f"持ち主でない（表: {', '.join(f'{k} → {v}' for k, v in sorted(PLE_OWNER.items()))}）"
+            f"{where}: assets has '{PLE_INDEX_ASSET}' but pipeline '{pipeline}' is not a PLE"
+            f" owner (table: {', '.join(f'{k} → {v}' for k, v in sorted(PLE_OWNER.items()))})"
         )
     _require(
         component in model.weights,
-        f"{where}: PLE の持ち主の部品 '{component}' が weights に無い",
+        f"{where}: PLE owner component '{component}' is not in weights",
     )
-    _require(index_ref.cross is None, f"{where}: '{PLE_INDEX_ASSET}' が越境参照（容器へ畳めない）")
-    index = read_ple_index(repo / index_ref.path, f"{where} の {PLE_INDEX_ASSET}")
+    _require(
+        index_ref.cross is None,
+        f"{where}: '{PLE_INDEX_ASSET}' is a cross-repository reference (cannot be folded into the"
+        " container)",
+    )
+    index = read_ple_index(repo / index_ref.path, f"{where}: {PLE_INDEX_ASSET}")
     refs: list[tuple[str, FileRef]] = [(PLE_INDEX_ASSET, index_ref)]
     for entry in index["shards"]:
         name = str(entry["file"])
         ref = model.assets.get(name)
         if ref is None:
-            raise MigrateError(f"{where}: 索引が指す PLE shard '{name}' が assets に無い")
-        _require(ref.cross is None, f"{where}: PLE shard '{name}' が越境参照（容器へ畳めない）")
+            raise MigrateError(
+                f"{where}: PLE shard '{name}' that the index points at is not in assets"
+            )
+        _require(
+            ref.cross is None,
+            f"{where}: PLE shard '{name}' is a cross-repository reference (cannot be folded into"
+            " the container)",
+        )
         refs.append((name, ref))
     return _PleFold(component, tuple(refs), index)
 
 
 def read_ple_index(path: Path, where: str) -> dict[str, Any]:
-    """旧 PLE 索引（`ple.json`）を読む。
+    """Read an old PLE index (`ple.json`).
 
-    受理集合は `packages/models/src/gemma/ple-index.ts` の鏡像 — schema 1（I8・`storage` 欄なし。
-    karume-gemma4 の実資産）と schema 2（packed の `i2` / `i4`・ADR 0097）。戻りの `storage` は
-    schema 1 でも `"i8"` に正規化してある（新索引 schema 3 は格納を必ず綴る）。
+    The accepted set mirrors `packages/models/src/gemma/ple-index.ts` — schema 1 (I8, no `storage`
+    field; the real assets of karume-gemma4) and schema 2 (packed `i2` / `i4`, ADR 0097). The
+    returned `storage` is normalized to `"i8"` even for schema 1 (the new index schema 3 always
+    spells out the storage).
     """
     raw_root = _object(_read_json(path, where), where)
-    # MUST: 版の判定を欄の検査より先に置く（{@link read_legacy_manifest} と同じ理由 — 別の版は
-    # 「欄が欠けている」ではなく「その版は畳めない」と言うのが直す側にとって決定的）。
+    # MUST: put the version check before the field checks (the same reason as
+    # {@link read_legacy_manifest} — for another version, saying "that version cannot be folded"
+    # rather than "a field is missing" is decisive for whoever fixes it).
     schema = raw_root.get("schema")
     _require(
         schema in (1, 2),
-        f"{where}.schema が {schema!r} — 容器へ畳めるのは schema 1（i8）と 2（packed）だけ",
+        f"{where}.schema is {schema!r} — only schema 1 (i8) and 2 (packed) can be folded into the"
+        " container",
     )
     if schema == 1:
         _keys(raw_root, ["schema", "tokens", "layers", "dim", "embedScale", "shards"], [], where)
@@ -1199,18 +1293,18 @@ def read_ple_index(path: Path, where: str) -> dict[str, Any]:
         root = dict(raw_root)
     _require(
         root["storage"] in PLE_PACK_FACTOR,
-        f"{where}.storage が {root['storage']!r}"
-        f"（{' / '.join(sorted(PLE_PACK_FACTOR))} のいずれか）",
+        f"{where}.storage is {root['storage']!r}"
+        f" (must be one of {' / '.join(sorted(PLE_PACK_FACTOR))})",
     )
     for key in ("tokens", "layers", "dim"):
-        _require(_count(root[key], f"{where}.{key}") > 0, f"{where}.{key} が 1 以上でない")
+        _require(_count(root[key], f"{where}.{key}") > 0, f"{where}.{key} is not 1 or more")
     scale = root["embedScale"]
     _require(
         isinstance(scale, int | float) and not isinstance(scale, bool) and scale > 0,
-        f"{where}.embedScale が正の数でない: {scale!r}",
+        f"{where}.embedScale is not a positive number: {scale!r}",
     )
     shards = root["shards"]
-    _require(isinstance(shards, list) and shards, f"{where}.shards が非空の配列でない")
+    _require(isinstance(shards, list) and shards, f"{where}.shards is not a non-empty array")
     cursor = 0
     for index, raw in enumerate(shards):
         entry = _object(raw, f"{where}.shards[{index}]")
@@ -1220,17 +1314,19 @@ def read_ple_index(path: Path, where: str) -> dict[str, Any]:
         stop = _count(entry["stop"], f"{where}.shards[{index}].stop")
         _require(
             start == cursor and stop > start,
-            f"{where}.shards[{index}]: 範囲 [{start}, {stop}) が"
-            f" {cursor} から続く空でない区間でない",
+            f"{where}.shards[{index}]: range [{start}, {stop}) is not a non-empty range"
+            f" continuing from {cursor}",
         )
         cursor = stop
-    _require(cursor == root["tokens"], f"{where}: shard の合計 {cursor} 行が tokens と違う")
+    _require(
+        cursor == root["tokens"], f"{where}: the shard total of {cursor} rows differs from tokens"
+    )
     return root
 
 
 @dataclass(frozen=True)
 class _StoredEntry:
-    """旧 sidecar のテンソル 1 本（ヘッダだけから決まる事実）。"""
+    """One tensor of the old sidecar (the facts decided by the header alone)."""
 
     dtype: str
     shape: tuple[int, ...]
@@ -1243,11 +1339,13 @@ class _StoredEntry:
 
 
 def _read_sidecar_header(path: Path) -> tuple[dict[str, str], dict[str, _StoredEntry], int]:
-    """旧 sidecar の safetensors を**ヘッダだけ**読む（PLE shard は数百 MB になる）。
+    """Read **only the header** of the old sidecar's safetensors (a PLE shard runs to several
+    hundred MB).
 
-    MUST: 旧 shard の読み取り（{@link karume.legacy.read_component}）と同じ門を通す — レイアウト
-    （既知 dtype・宣言長の一致・隙間なし・整列）を先に見て、`__metadata__` は文字列 → 文字列の
-    マップとして**逐語**で受ける（型を強制変換すると壊れた sidecar が遠い場所の例外になる）。
+    MUST: go through the same checks as reading old shards ({@link karume.legacy.read_component})
+    — check the layout (known dtype, matching declared length, no gaps, alignment) first, and take
+    `__metadata__` **verbatim** as a string → string map (coercing types turns a broken sidecar
+    into an exception somewhere far away).
     """
     assert_reader_layout(path, allow_legacy_dtypes=True)
     header = safetensors_header(path)
@@ -1264,7 +1362,8 @@ def _read_sidecar_header(path: Path) -> tuple[dict[str, str], dict[str, _StoredE
 
 
 def _read_segments(segments: Sequence[tuple[Path, int, int]], begin: int, end: int) -> bytes:
-    """連結された区間列の `[begin, end)` を読む（PLE の行は shard 境界を跨ぐ）。"""
+    """Read `[begin, end)` of a concatenated sequence of ranges (PLE rows cross shard
+    boundaries)."""
     out = bytearray()
     cursor = 0
     for path, offset, length in segments:
@@ -1275,18 +1374,21 @@ def _read_segments(segments: Sequence[tuple[Path, int, int]], begin: int, end: i
                 handle.seek(offset + lower - cursor)
                 chunk = handle.read(upper - lower)
             if len(chunk) != upper - lower:
-                raise MigrateError(f"{path}: PLE の区間 [{lower}, {upper}) が途中で尽きた")
+                raise MigrateError(f"{path}: PLE range [{lower}, {upper}) ran out partway")
             out += chunk
         cursor = stop
     if len(out) != end - begin:
-        raise MigrateError(f"PLE の区間 [{begin}, {end}) が shard 列の長さ {cursor} に収まらない")
+        raise MigrateError(
+            f"PLE range [{begin}, {end}) does not fit in the shard sequence length {cursor}"
+        )
     return bytes(out)
 
 
 def _segment_reader(
     segments: tuple[tuple[Path, int, int], ...],
 ) -> Callable[[int, int], bytes]:
-    """連結した区間列に対する「バイト範囲を読む」呼び出し（{@link ple_assets} の受け口）。"""
+    """A "read a byte range" call over a concatenated sequence of ranges (what
+    {@link ple_assets} takes)."""
 
     def read(begin: int, end: int) -> bytes:
         return _read_segments(segments, begin, end)
@@ -1297,15 +1399,18 @@ def _segment_reader(
 def ple_sidecar_assets(
     index_path: Path, *, where: str | None = None, block_bytes: int = BLOCK_MAX_BYTES
 ) -> dict[str, AssetInput]:
-    """旧 PLE sidecar（`ple.json` + **同じディレクトリに並ぶ** shard 列）を容器の資産へ畳む。
+    """Fold an old PLE sidecar (`ple.json` + the shard sequence **in the same directory**) into
+    container assets.
 
-    manifest を持たない置き場（export 系列のディレクトリ）を移す呼び手の入口。畳み方は
-    リポ丸ごとモードと**同じ 1 本**（{@link _fold_ple}）で、違うのは shard の在処を
-    旧 manifest の `assets` から引くか索引が名乗るファイル名から引くかだけである。
+    The entry for callers that migrate a location without a manifest (an export series
+    directory). The folding is **the same single path** as whole-repository mode
+    ({@link _fold_ple}); the only difference is whether the shard locations come from the old
+    manifest's `assets` or from the file names the index states.
 
-    NOTE: この経路では畳み先の門のうち**並びと本数の 2 つは自明に真**（列を索引そのものから
-    組むので）— 効くのは旧 manifest から在処を引く側だけである。したがって「索引に載って
-    いない `ple-*.safetensors` が現物に在る」を見るのは**呼び手の責務**で、ここは通す。
+    NOTE: on this path, **two of the fold-target checks, order and count, are trivially true** (the
+    sequence is built from the index itself) — they only have effect on the side that takes
+    locations from the old manifest. Checking "a `ple-*.safetensors` not in the index exists on
+    disk" is therefore **the caller's responsibility**; this passes it.
     """
     at = str(index_path) if where is None else where
     index = read_ple_index(index_path, at)
@@ -1317,10 +1422,12 @@ def ple_sidecar_assets(
 def _ple_assets(
     repo: Path, fold: _PleFold | None, block_bytes: int, where: str
 ) -> dict[str, AssetInput]:
-    """旧 manifest が宣言した PLE sidecar を容器の資産へ畳む（在処は `assets` の FileRef）。"""
+    """Fold the PLE sidecar the old manifest declared into container assets (locations are the
+    `assets` FileRefs)."""
     if fold is None:
         return {}
-    # 先頭は索引そのもの（畳み先では新しい索引に置き換わる）ので落とす。
+    # The first entry is the index itself (replaced by the new index at the fold target), so drop
+    # it.
     shards = [(name, repo / ref.path) for name, ref in fold.refs[1:]]
     return _fold_ple(shards, fold.index, block_bytes, where)
 
@@ -1331,11 +1438,13 @@ def _fold_ple(
     block_bytes: int,
     where: str,
 ) -> dict[str, AssetInput]:
-    """PLE shard 列 → 容器の資産（組み立て自体は {@link ple_assets} の 1 本）。
+    """PLE shard sequence → container assets (the assembly itself is the single path of
+    {@link ple_assets}).
 
-    ここが持つのは**旧 sidecar の読み取り**だけ — 索引と現物の突合（行数・バイト長・shard の
-    並び・`karume_ple` メタデータ）を済ませ、token 順に連結した区間列を読み口として渡す。旧
-    shard の境界は意味を持たない（全 shard を token 順に連結して切り直す）。
+    This owns only **reading the old sidecar** — it cross-checks the index against the files (row
+    counts, byte lengths, shard order, `karume_ple` metadata) and hands over the sequence of ranges
+    concatenated in token order as the reader. The old shard boundaries carry no meaning (all
+    shards are concatenated in token order and cut anew).
     """
     tokens, layers, dim = index["tokens"], index["layers"], index["dim"]
     try:
@@ -1343,52 +1452,56 @@ def _fold_ple(
     except PleError as cause:
         raise MigrateError(f"{where}: {cause}") from cause
     segments: dict[str, list[tuple[Path, int, int]]] = {"values": [], "scales": []}
-    # 旧書き手の 1 行の宣言（dtype と先頭次元を除いた shape — `values` は論理形）。
+    # The old writer's declaration of one row (dtype, and the shape without the leading dimension
+    # — `values` is the logical shape).
     row_declarations: dict[str, tuple[str, tuple[int, ...]]] = {
         "values": (LEGACY_STORED_DTYPE[index["storage"]], (layers, dim)),
         "scales": (LEGACY_SCALE_DTYPE, (layers,)),
     }
     _require(
         len(shards) == len(index["shards"]),
-        f"{where}: PLE shard が {len(shards)} 本（索引は {len(index['shards'])} 本）",
+        f"{where}: {len(shards)} PLE shards (the index has {len(index['shards'])})",
     )
     for position, (name, path) in enumerate(shards):
         declared = index["shards"][position]
         _require(
             name == declared["file"],
-            f"{where}: PLE shard の並びが索引と違う（{position} 番目は '{declared['file']}'）",
+            f"{where}: the PLE shard order differs from the index (position {position} is"
+            f" '{declared['file']}')",
         )
         rows = declared["stop"] - declared["start"]
         metadata, entries, data_start = _read_sidecar_header(path)
-        _assert_ple_metadata(metadata, index, declared, f"{where} の '{name}'")
+        _assert_ple_metadata(metadata, index, declared, f"{where}: '{name}'")
         _require(
             set(entries) == set(row_bytes),
-            f"{where} の '{name}': テンソルが {sorted(entries)}"
-            f"（{' / '.join(sorted(row_bytes))} の 2 本 MUST）",
+            f"{where}: '{name}': the tensors are {sorted(entries)}"
+            f" (MUST be the two {' / '.join(sorted(row_bytes))})",
         )
         for key, expected in row_bytes.items():
             entry = entries[key]
             _require(
                 entry.shape[:1] == (rows,),
-                f"{where} の '{name}'.{key}: 先頭次元 {entry.shape[:1]} が索引の {rows} 行と違う",
+                f"{where}: '{name}'.{key}: leading dimension {entry.shape[:1]} differs from the"
+                f" index's {rows} rows",
             )
-            # 先頭次元とバイト長だけでは、要素数が同じ別形・同じバイト長の別型が通る —
-            # 旧書き手の綴り（dtype と全 shape）まで索引から導いて照合する。
+            # Leading dimension and byte length alone let through a different shape with the same
+            # element count or a different type of the same byte length — derive the old
+            # writer's spelling (dtype and the whole shape) from the index and compare.
             stored_dtype, stored_shape = row_declarations[key]
             _require(
                 entry.dtype == stored_dtype,
-                f"{where} の '{name}'.{key}: dtype {entry.dtype} が旧書き手の綴り"
-                f" {stored_dtype} と違う",
+                f"{where}: '{name}'.{key}: dtype {entry.dtype} differs from the old writer's"
+                f" spelling {stored_dtype}",
             )
             _require(
                 entry.shape == (rows, *stored_shape),
-                f"{where} の '{name}'.{key}: shape {list(entry.shape)} が"
-                f" {[rows, *stored_shape]} と違う",
+                f"{where}: '{name}'.{key}: shape {list(entry.shape)} differs from"
+                f" {[rows, *stored_shape]}",
             )
             _require(
                 entry.nbytes == rows * expected,
-                f"{where} の '{name}'.{key}: {entry.nbytes} バイトが"
-                f" {rows} 行 × {expected} バイトと違う",
+                f"{where}: '{name}'.{key}: {entry.nbytes} bytes differs from"
+                f" {rows} rows × {expected} bytes",
             )
             segments[key].append((path, data_start + entry.begin, entry.nbytes))
     try:
@@ -1412,23 +1525,24 @@ def _assert_ple_metadata(
     declared: Mapping[str, Any],
     where: str,
 ) -> None:
-    """shard の `karume_ple` が索引と食い違っていないこと（食い違いは沈黙誤値の種）。"""
+    """The shard's `karume_ple` does not disagree with the index (a disagreement is the seed of
+    silently wrong values)."""
     raw = metadata.get(PLE_METADATA_KEY)
     if raw is None:
-        raise MigrateError(f"{where}: __metadata__.{PLE_METADATA_KEY} が無い")
+        raise MigrateError(f"{where}: __metadata__.{PLE_METADATA_KEY} is missing")
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as cause:
-        raise MigrateError(f"{where}: {PLE_METADATA_KEY} が JSON として読めない") from cause
+        raise MigrateError(f"{where}: {PLE_METADATA_KEY} cannot be read as JSON") from cause
     found = _object(parsed, f"{where}.{PLE_METADATA_KEY}")
-    # schema 1 の shard メタデータは `storage` を持たない（索引側は i8 へ正規化済み）。
+    # Schema 1 shard metadata has no `storage` (the index side is already normalized to i8).
     keys = ("schema", "tokens", "layers", "dim") + (("storage",) if index["schema"] == 2 else ())
     expected = {key: index[key] for key in keys}
     expected.update({key: declared[key] for key in ("start", "stop")})
     for key, value in expected.items():
         _require(
             found.get(key) == value,
-            f"{where}.{PLE_METADATA_KEY}.{key} が {found.get(key)!r} — 索引は {value!r}",
+            f"{where}.{PLE_METADATA_KEY}.{key} is {found.get(key)!r} — the index has {value!r}",
         )
 
 
@@ -1437,73 +1551,82 @@ def _assert_ple_metadata(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="旧配布形（safetensors）をコンテナ形式（krm / krg）へ移す（入力は読むだけ）"
+        description="Migrate the old distribution (safetensors) to the container format"
+        " (krm / krg); inputs are only read"
     )
     parser.add_argument(
         "models",
         type=Path,
         nargs="*",
-        help="移行するコンポーネントの代表 path（`...-00001-of-00002` の現物を渡してもよい）",
+        help="representative path of a component to migrate (a `...-00001-of-00002` file may"
+        " be passed too)",
     )
     parser.add_argument(
         "--manifest",
         type=Path,
         default=None,
-        help="リポ丸ごとモード: 旧 karume/4 の karume.json（位置引数とは併用できない）",
+        help="whole-repository mode: the old karume/4 karume.json (cannot be combined with"
+        " positional arguments)",
     )
     parser.add_argument(
         "--cross-repo",
         action="append",
         default=[],
         metavar="OWNER/NAME=DIR@REVISION",
-        help="越境参照の引き写し元（同じモードで先に変換したディレクトリと新しい 40 桁 revision）",
+        help="source to copy cross-repository references from (a directory converted earlier"
+        " in the same mode and its new 40-digit revision)",
     )
-    parser.add_argument("--out", type=Path, required=True, help="書き出し先のディレクトリ")
+    parser.add_argument("--out", type=Path, required=True, help="output directory")
     parser.add_argument(
-        "--license", required=True, help="provenance.license（ライセンス識別子 — 本文は載せない）"
+        "--license",
+        required=True,
+        help="provenance.license (a license identifier — the text is not included)",
     )
-    parser.add_argument("--notice", default=None, help="provenance.notice（NOTICE への参照）")
+    parser.add_argument("--notice", default=None, help="provenance.notice (a reference to NOTICE)")
     parser.add_argument(
-        "--upstream-revision", default=None, help="provenance.upstreamRevision（上流の revision）"
+        "--upstream-revision", default=None, help="provenance.upstreamRevision (upstream revision)"
     )
     parser.add_argument(
         "--writer",
         default=None,
-        help="provenance.writer（既定: 書かない — 呼び手が明示したときだけ容器に載る）",
+        help="provenance.writer (default: not written — it goes into the container only when"
+        " the caller passes it explicitly)",
     )
     parser.add_argument(
         "--graph-name",
         default=None,
-        help="グラフ名（既定は親ディレクトリ名 — 複数指定のときは渡せない）",
+        help="graph name (default: the parent directory name — cannot be passed with several"
+        " components)",
     )
     parser.add_argument(
         "--single",
         action="store_true",
-        help="単一形の krm を書く（既定は分割形・部品単位モードだけ）",
+        help="write a single-form krm (default: split form; per-component mode only)",
     )
-    parser.add_argument("--graph", action="store_true", help="krg（グラフ容器）も書き出す")
+    parser.add_argument("--graph", action="store_true", help="also write a krg (graph container)")
     choices = [choice // _MIB for choice in PART_LENGTH_CHOICES]
     parser.add_argument(
         "--part-bytes",
         type=int,
         choices=choices,
         default=DEFAULT_PART_BYTES // _MIB,
-        help=f"part 長 — 書き手の選択集合 {{{','.join(map(str, choices))}}} MiB",
+        help=f"part length — the writer's choice set {{{','.join(map(str, choices))}}} MiB",
     )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """指定されたコンポーネント（またはリポ丸ごと）を移行する。
+    """Migrate the given components (or a whole repository).
 
-    MUST: 落ちたところで止める（残りを移して最後にまとめない）— 例外は破れた不変条件まで
-    綴ってあるので、そのまま送出するのが最も情報量が多い。
+    MUST: stop where it fails (do not migrate the rest and collect at the end) — the exception
+    spells out the broken invariant, so raising it as is carries the most information.
 
-    MUST: `provenance.writer` は**既定で書かない**。生成器タグを既定で埋めると、移行した容器と
-    recipe が直接 export した容器（`PROVENANCE` はどれも `writer` を綴らない）が永久に別バイト
-    になり、「ミラーを焼き直したらモデル記述だけが動く」形になる。ツールの版を持つ席は
-    `karume.json` の `generator` 欄 1 箇所で、容器側に写しを置く理由が無い（golden が
-    `writer` を書かない理由と同じ — {@link karume.goldens.GOLDEN_PROVENANCE}）。
+    MUST: `provenance.writer` is **not written by default**. Filling in the generator tag by
+    default would make migrated containers and containers a recipe exports directly (no
+    `PROVENANCE` spells `writer`) differ in bytes forever, giving "rebuilding the mirror moves only
+    the model descriptor". The one place that holds the tool version is the `generator` field of
+    `karume.json`, and there is no reason to put a copy on the container side (the same reason the
+    goldens do not write `writer` — {@link karume.goldens.GOLDEN_PROVENANCE}).
     """
     args = build_parser().parse_args(argv)
     provenance = Provenance(
@@ -1516,12 +1639,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         _run_repository(args, provenance)
         return
     if not args.models:
-        raise MigrateError("移行するコンポーネントの代表 path か --manifest のどちらかが要る")
+        raise MigrateError(
+            "Either the representative path of a component to migrate or --manifest is required"
+        )
     if args.cross_repo:
-        raise MigrateError("--cross-repo はリポ丸ごとモード（--manifest）でだけ使える")
+        raise MigrateError("--cross-repo can only be used in whole-repository mode (--manifest)")
     if args.graph_name is not None and len(args.models) > 1:
         raise MigrateError(
-            f"--graph-name は 1 コンポーネントにだけ渡せる（指定は {len(args.models)} 本）"
+            f"--graph-name can only be passed for one component ({len(args.models)} given)"
         )
     for path in args.models:
         result = migrate_component(
@@ -1541,23 +1666,25 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 
 def _run_repository(args: argparse.Namespace, provenance: Provenance) -> None:
-    """リポ丸ごとモードの入口（併用できない指定はここで全部落とす）。"""
+    """Entry of whole-repository mode (every option that cannot be combined is rejected here)."""
     if args.models:
         raise MigrateError(
-            f"--manifest と位置引数は併用できない（位置引数 {len(args.models)} 本）"
-            " — リポ丸ごとモードは shard 列を manifest の宣言から組む"
+            f"--manifest cannot be combined with positional arguments ({len(args.models)}"
+            " positional arguments) — whole-repository mode builds the shard sequences from the"
+            " manifest's declarations"
         )
     for name, value in (("--graph-name", args.graph_name), ("--graph", args.graph or None)):
         if value is not None:
             raise MigrateError(
-                f"{name} は部品単位モードの席（リポ丸ごとモードのグラフ名は manifest の"
-                " weights のキー・共有 krg は karume/5 に置かない — ADR 0109 決定 5）"
+                f"{name} is an option of per-component mode (in whole-repository mode the graph"
+                " name is the manifest's weights key, and a shared krg is not placed in karume/5"
+                " — ADR 0109 decision 5)"
             )
     if args.single:
         raise MigrateError(
-            "--single はリポ丸ごとモードでは使えない（karume/5 の container.parts は"
-            " part 0 + part 1 の 2 要素以上 MUST・HF の公式配布は分割形だけ"
-            " — ADR 0109 決定 3 / container-v1 §8）"
+            "--single cannot be used in whole-repository mode (container.parts of karume/5 MUST"
+            " have 2 or more elements, part 0 + part 1, and the official HF distribution is split"
+            " form only — ADR 0109 decision 3 / container-v1 §8)"
         )
     result = migrate_repository(
         args.manifest,

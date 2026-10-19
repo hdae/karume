@@ -894,7 +894,9 @@ class TestDropSafeSoftmaxGuard:
         )
         _, src = normalize._guard_parts(guard)
 
-        with pytest.raises(NotImplementedError, match="不活性を判定できない") as err:
+        with pytest.raises(
+            NotImplementedError, match="cannot decide whether the safe-softmax guard is inactive"
+        ) as err:
             normalize._assert_guard_inactive(src, normalize._Placeholders(decomposed))
 
         assert isinstance(err.value.__cause__, IndexError)
@@ -1266,7 +1268,7 @@ class TestRankLowering:
         args = (torch.randn(1, 2, 4, 3), torch.randn(3))
         decomposed = decompose(SymbolicRepeatKv(), args, dynamic_shapes=(None, {0: dyn_t}))
 
-        with pytest.raises(NotImplementedError, match="記号次元の複製"):
+        with pytest.raises(NotImplementedError, match="duplication along a symbolic dimension"):
             normalize_graph(decomposed)
 
     def test_a_symbolic_length_still_lowers_the_gqa_form(self, dyn_t):
@@ -1366,7 +1368,7 @@ class TestSelectToSqueeze:
             SelectSymbolic(), (torch.randn(4, 3),), dynamic_shapes=({0: dyn_t},), strict=False
         ).run_decompositions(curated_decompositions())
 
-        with pytest.raises(NotImplementedError, match="記号次元の軸を切る select"):
+        with pytest.raises(NotImplementedError, match="select on an axis of symbolic dimension"):
             normalize_graph(decomposed)
 
     def test_selecting_with_a_symbolic_index_is_rejected(self):
@@ -1389,5 +1391,5 @@ class TestSelectToSqueeze:
             strict=False,
         ).run_decompositions(curated_decompositions())
 
-        with pytest.raises(NotImplementedError, match="記号次元の添字で切る select"):
+        with pytest.raises(NotImplementedError, match="select with a symbolic index"):
             normalize_graph(decomposed)

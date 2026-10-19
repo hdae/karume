@@ -322,11 +322,11 @@ class TestTheRepositoryManifest:
         root.mkdir()
         (root / "karume.json").write_text('{"format":"karume/5"}\n', encoding="utf-8")
 
-        with pytest.raises(MigrateError, match="移行できるのは 'karume/4' だけ"):
+        with pytest.raises(MigrateError, match="only 'karume/4' can be migrated"):
             migrated(root, tmp_path / "out")
 
     def test_an_output_inside_the_input_fails_loudly(self, repo: Path) -> None:
-        with pytest.raises(MigrateError, match="入れ子"):
+        with pytest.raises(MigrateError, match="is nested with"):
             migrated(repo, repo / "out")
 
     def test_weight_shards_spread_over_directories_fail_loudly(self, tmp_path: Path) -> None:
@@ -348,7 +348,9 @@ class TestTheRepositoryManifest:
             "alpha",
         )
 
-        with pytest.raises(MigrateError, match="重み shard の親ディレクトリが揃っていない"):
+        with pytest.raises(
+            MigrateError, match="the parent directories of the weight shards differ"
+        ):
             migrated(root, tmp_path / "out")
 
     def test_a_shard_row_with_mixed_stems_fails_loudly(self, tmp_path: Path) -> None:
@@ -369,12 +371,12 @@ class TestTheRepositoryManifest:
             "alpha",
         )
 
-        with pytest.raises(MigrateError, match="stem が揃っていない"):
+        with pytest.raises(MigrateError, match="stems of the shard sequence differ"):
             migrated(root, tmp_path / "out")
 
     def test_the_single_form_is_refused(self, repo: Path, tmp_path: Path) -> None:
         """karume/5 の container.parts は 2 要素以上 MUST（ADR 0109 決定 3）。"""
-        with pytest.raises(MigrateError, match="--single はリポ丸ごとモードでは使えない"):
+        with pytest.raises(MigrateError, match="--single cannot be used in whole-repository mode"):
             migrate.main(
                 [
                     "--manifest",
@@ -432,7 +434,10 @@ class TestTheCopiedFiles:
         out = tmp_path / "out"
         migrated(repo, out)
 
-        with pytest.raises(MigrateError, match=r"既に在る|前回の成果物"):
+        with pytest.raises(
+            MigrateError,
+            match=r"already exists in the output directory|Artifacts of a previous run",
+        ):
             migrated(repo, out)
 
 
@@ -455,7 +460,11 @@ class TestTheDeclaredFiles:
         out = tmp_path / "out"
 
         with pytest.raises(
-            MigrateError, match=r"'alpha/decoder/model\.f32-00002-of-00002\.safetensors' の sha256"
+            MigrateError,
+            match=(
+                r"'alpha/decoder/model\.f32-00002-of-00002\.safetensors'"
+                r" declared by the old manifest has a sha256"
+            ),
         ):
             migrated(repo, out)
         assert not list(out.rglob("*.krm"))
@@ -466,7 +475,13 @@ class TestTheDeclaredFiles:
         (repo / "tokenizer.json").write_text('{"model":"changed"}\n', encoding="utf-8")
         out = tmp_path / "out"
 
-        with pytest.raises(MigrateError, match=r"'tokenizer\.json' の長さ \d+ が宣言 \d+ と違う"):
+        with pytest.raises(
+            MigrateError,
+            match=(
+                r"'tokenizer\.json' declared by the old manifest has length \d+,"
+                r" not the declared \d+"
+            ),
+        ):
             migrated(repo, out)
         assert not list(out.rglob("*.krm"))
 
@@ -478,7 +493,7 @@ class TestTheDeclaredFiles:
         manifest["models"]["alpha"]["assets"]["tokenizer"]["sha256"] = spelling
         (repo / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
 
-        with pytest.raises(MigrateError, match=r"assets\['tokenizer'\]\.sha256 が sha256"):
+        with pytest.raises(MigrateError, match=r"assets\['tokenizer'\]\.sha256 is not a sha256"):
             migrated(repo, tmp_path / "out")
 
     def test_a_crossed_descriptor_sha256_is_spelled_like_a_sha256(
@@ -492,7 +507,7 @@ class TestTheDeclaredFiles:
         container["descriptor"]["model"]["sha256"] = "a" * 63
         (lender_out / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
 
-        with pytest.raises(MigrateError, match=r"descriptor\.model\.sha256 が sha256"):
+        with pytest.raises(MigrateError, match=r"descriptor\.model\.sha256 is not a sha256"):
             migrated(
                 borrower,
                 tmp_path / "out",
@@ -522,7 +537,7 @@ class TestTheExtras:
         entry["extras"] = {"mystery": entry["extras"]["rope_base"]}
         (repo / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
 
-        with pytest.raises(MigrateError, match="extras 'mystery' の写し先が無い"):
+        with pytest.raises(MigrateError, match="extras 'mystery' has no mapping target"):
             migrated(repo, repo.parent / "out")
 
 
@@ -557,7 +572,7 @@ class TestTheCrossRepoReferences:
     def test_an_undeclared_repo_is_listed_with_its_count(
         self, borrower: Path, tmp_path: Path
     ) -> None:
-        with pytest.raises(MigrateError, match=r"hdae/lender（1 席）"):
+        with pytest.raises(MigrateError, match=r"hdae/lender \(1 slots\)"):
             migrated(borrower, tmp_path / "out")
 
     def test_the_container_is_copied_with_the_new_pin(
@@ -621,7 +636,10 @@ class TestTheCrossRepoReferences:
 
         with pytest.raises(
             MigrateError,
-            match=r"容器 .shared/encoder/model\.f32\.krm. が無い.*alpha/decoder/model\.f32\.krm",
+            match=(
+                r"container to copy, .shared/encoder/model\.f32\.krm., does not exist"
+                r".*alpha/decoder/model\.f32\.krm"
+            ),
         ):
             migrated(
                 borrower,
@@ -635,14 +653,14 @@ class TestTheCrossRepoReferences:
         shards[1] = {key: shards[1][key] for key in ("path", "size", "sha256")}
         (borrower / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
 
-        with pytest.raises(MigrateError, match="越境参照が混在"):
+        with pytest.raises(MigrateError, match="cross-repository references are mixed"):
             migrated(borrower, tmp_path / "out")
 
     def test_the_same_repo_twice_fails_loudly(self, borrower: Path, tmp_path: Path) -> None:
         """どちらの変換済みディレクトリから引くかが決まらない。"""
         spec = parse_cross_repo(f"hdae/lender={tmp_path / 'lender'}@{REVISION}")
 
-        with pytest.raises(MigrateError, match="同じ repo が 2 度"):
+        with pytest.raises(MigrateError, match="the same repo twice"):
             migrated(borrower, tmp_path / "out", cross_repos=[spec, spec])
 
     @pytest.mark.parametrize(
@@ -928,7 +946,7 @@ class TestThePleFold:
         manifest["models"]["e2b"]["pipeline"] = "synthetic/1"
         (gemma_repo / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
 
-        with pytest.raises(MigrateError, match="PLE の持ち主でない"):
+        with pytest.raises(MigrateError, match="is not a PLE owner"):
             migrated(gemma_repo, tmp_path / "out")
 
     def test_a_shard_whose_metadata_disagrees_with_the_index_fails_loudly(
@@ -955,14 +973,16 @@ class TestThePleFold:
         index["dim"] = PLE_DIM - 1
         redeclare_asset(gemma_repo, "e2b", "ple_index", json.dumps(index).encode("utf-8"))
 
-        with pytest.raises(MigrateError, match=r"dim 15 が格納 .i4. の詰め数 2 で割り切れない"):
+        with pytest.raises(
+            MigrateError, match=r"dim 15 is not divisible by the storage .i4. pack factor 2"
+        ):
             migrated(gemma_repo, tmp_path / "out")
 
     def test_a_row_that_is_not_a_multiple_of_four_bytes_fails_loudly(self, tmp_path: Path) -> None:
         """block は行の倍数で切る（行が 4 の倍数でなければ block 長の整列と両立しない）。"""
         root = stage_gemma_repo(tmp_path / "thin", layers=1, dim=4)  # values の 1 行 = 2 バイト
 
-        with pytest.raises(MigrateError, match=r"values の 1 行 2 バイトが 4 の倍数でない"):
+        with pytest.raises(MigrateError, match=r"one values row of 2 bytes is not a multiple of 4"):
             migrated(root, tmp_path / "out")
 
     @pytest.mark.parametrize(
@@ -970,7 +990,7 @@ class TestThePleFold:
         [
             (
                 lambda header: header["values"].update(dtype="X9"),
-                r"テンソル 'values': リーダが知らない dtype 'X9'",
+                r"Tensor 'values': dtype 'X9' unknown to the reader",
             ),
             (
                 # 行数とバイト長は合ったまま、行の中身の形だけが嘘をつく（旧来は行数とバイト長
@@ -978,7 +998,7 @@ class TestThePleFold:
                 lambda header: header["values"].update(
                     shape=[header["values"]["shape"][0], PLE_LAYERS, PLE_DIM * 2]
                 ),
-                r"テンソル 'values': サイズ不一致",
+                r"Tensor 'values': size mismatch",
             ),
         ],
         ids=["unknown-dtype", "shape-disagrees-with-length"],
@@ -998,7 +1018,7 @@ class TestThePleFold:
         """`__metadata__` は逐語で受ける（`str()` で強制変換して黙って通さない）。"""
         doctor_ple_shard(gemma_repo, 2, lambda header: header["__metadata__"].update(note=5))
 
-        with pytest.raises(LegacyFormatError, match="__metadata__ が文字列 → 文字列のマップでない"):
+        with pytest.raises(LegacyFormatError, match="__metadata__ is not a string → string map"):
             migrated(gemma_repo, tmp_path / "out")
 
     def test_a_doctored_but_well_formed_shard_still_migrates(
@@ -1040,7 +1060,7 @@ class TestThePleFold:
             "e2b",
         )
 
-        with pytest.raises(MigrateError, match="自リポで変換する席が 1 つも無い"):
+        with pytest.raises(MigrateError, match="has no slot converted in this repository"):
             migrated(
                 root,
                 tmp_path / "out",
@@ -1062,7 +1082,9 @@ class TestTheCli:
         assert "containers=2" in printed and "crossed=0" in printed
 
     def test_a_positional_path_cannot_be_combined_with_the_manifest(self, tmp_path: Path) -> None:
-        with pytest.raises(MigrateError, match="--manifest と位置引数は併用できない"):
+        with pytest.raises(
+            MigrateError, match="--manifest cannot be combined with positional arguments"
+        ):
             migrate.main(
                 [
                     "a/model.safetensors",
@@ -1077,7 +1099,7 @@ class TestTheCli:
 
     @pytest.mark.parametrize("extra", [["--graph-name", "x"], ["--graph"]])
     def test_the_component_only_options_are_refused(self, tmp_path: Path, extra: list[str]) -> None:
-        with pytest.raises(MigrateError, match="部品単位モードの席"):
+        with pytest.raises(MigrateError, match="is an option of per-component mode"):
             migrate.main(
                 [
                     "--manifest",
@@ -1091,7 +1113,9 @@ class TestTheCli:
             )
 
     def test_cross_repo_is_refused_in_component_mode(self, tmp_path: Path) -> None:
-        with pytest.raises(MigrateError, match="--cross-repo はリポ丸ごとモード"):
+        with pytest.raises(
+            MigrateError, match="--cross-repo can only be used in whole-repository mode"
+        ):
             migrate.main(
                 [
                     "a/model.safetensors",
@@ -1105,7 +1129,9 @@ class TestTheCli:
             )
 
     def test_it_requires_either_a_component_or_a_manifest(self, tmp_path: Path) -> None:
-        with pytest.raises(MigrateError, match="代表 path か --manifest"):
+        with pytest.raises(
+            MigrateError, match="representative path of a component to migrate or --manifest"
+        ):
             migrate.main(["--out", str(tmp_path), "--license", "mit"])
 
 
@@ -1170,7 +1196,10 @@ class TestThePartLength:
 
         with pytest.raises(
             MigrateError,
-            match=r"part 長 314572800 バイトが書き手の選択集合 \{256, 512, 768, 1024\} MiB の外",
+            match=(
+                r"Part length 314572800 bytes is outside the writer's choice set"
+                r" \{256, 512, 768, 1024\} MiB"
+            ),
         ):
             migrate_repository(
                 repo / "karume.json", out, provenance=PROVENANCE, part_bytes=300 * MIB
@@ -1196,7 +1225,10 @@ class TestThePathsInTheOldManifest:
 
     @pytest.mark.parametrize(
         ("spelling", "message"),
-        [("../outside/tokenizer.json", "先頭ドット"), ("/outside/tokenizer.json", "空セグメント")],
+        [
+            ("../outside/tokenizer.json", "leading dot"),
+            ("/outside/tokenizer.json", "empty segment"),
+        ],
         ids=["parent", "absolute"],
     )
     def test_a_path_outside_the_repository_is_refused_before_anything_is_written(
@@ -1220,7 +1252,7 @@ class TestThePathsInTheOldManifest:
         self._redeclare(repo, "linked/tokenizer.json")
         out = tmp_path / "out"
 
-        with pytest.raises(MigrateError, match="入力リポの外"):
+        with pytest.raises(MigrateError, match="outside the input repository"):
             migrated(repo, out)
         assert not out.exists()
 
@@ -1269,7 +1301,7 @@ class TestAFailedRepositoryMigrationLeavesNothing:
 
         monkeypatch.setattr(migrate, "_migrate_shards", never)
 
-        with pytest.raises(MigrateError, match="前回の成果物"):
+        with pytest.raises(MigrateError, match="Artifacts of a previous run"):
             migrated(repo, out)
         assert sorted(path.name for path in out.iterdir()) == ["stray.txt"]
 
@@ -1335,7 +1367,7 @@ class TestATrailingNewlineIsRefused:
         manifest["models"]["alpha"]["pipeline"] = "synthetic/1\n"
         (repo / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
 
-        with pytest.raises(MigrateError, match="'<name>/<major>' の形でない"):
+        with pytest.raises(MigrateError, match="does not have the form '<name>/<major>'"):
             migrated(repo, tmp_path / "out")
 
     def test_a_sha256_with_a_trailing_newline_fails_loudly(
@@ -1345,5 +1377,5 @@ class TestATrailingNewlineIsRefused:
         manifest["models"]["alpha"]["assets"]["tokenizer"]["sha256"] = "a" * 64 + "\n"
         (repo / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
 
-        with pytest.raises(MigrateError, match=r"assets\['tokenizer'\]\.sha256 が sha256"):
+        with pytest.raises(MigrateError, match=r"assets\['tokenizer'\]\.sha256 is not a sha256"):
             migrated(repo, tmp_path / "out")

@@ -121,7 +121,7 @@ class TestLevelTables:
 
     def test_a_table_that_is_not_ascending_fails_loudly(self):
         """昇順でない表は二分探索が黙って別の準位を返す（例外なしで最近傍でなくなる）。"""
-        with pytest.raises(QuantizeError, match="昇順"):
+        with pytest.raises(QuantizeError, match="is not ascending"):
             levels_tensor((0.0, 1.0, 0.5))
 
 
@@ -209,9 +209,9 @@ class TestFixedTableMethods:
     @pytest.mark.parametrize(("method", "levels", "power_of_two"), FIXED_TABLE_METHODS)
     def test_no_target_fails_loudly(self, method, levels, power_of_two):
         """「方式を指定したのに 0 本」を沈黙させない（`quantize` 側と同じ常設診断）。"""
-        with pytest.raises(QuantizeError, match="1 本も無い"):
+        with pytest.raises(QuantizeError, match="there is no weight"):
             method(nn.LayerNorm(3), group_size=GROUP)
-        with pytest.raises(QuantizeError, match="1 本も無い"):
+        with pytest.raises(QuantizeError, match="there is no weight"):
             method(layers(), group_size=GROUP, include=lambda fqn: False)
 
     @pytest.mark.parametrize(("method", "levels", "power_of_two"), FIXED_TABLE_METHODS)
@@ -219,7 +219,7 @@ class TestFixedTableMethods:
         self, method, levels, power_of_two
     ):
         """端数 group を作らない（`quantize.grouped_view` の共有 — ADR 0069 決定 2 と同じ流儀）。"""
-        with pytest.raises(QuantizeError, match="割り切れない"):
+        with pytest.raises(QuantizeError, match="is not divisible"):
             method(nn.Linear(20, 3), group_size=GROUP)
 
     @pytest.mark.parametrize(("method", "levels", "power_of_two"), FIXED_TABLE_METHODS)
@@ -320,9 +320,9 @@ class TestKMeansCodebook:
 
     @pytest.mark.parametrize("granularity", KMEANS_GRANULARITIES)
     def test_no_target_fails_loudly(self, granularity):
-        with pytest.raises(QuantizeError, match="1 本も無い"):
+        with pytest.raises(QuantizeError, match="there is no weight"):
             fake_quant_kmeans(nn.LayerNorm(3), granularity, group_size=GROUP)
-        with pytest.raises(QuantizeError, match="1 本も無い"):
+        with pytest.raises(QuantizeError, match="there is no weight"):
             fake_quant_kmeans(layers(), granularity, group_size=GROUP, include=lambda fqn: False)
 
     @pytest.mark.parametrize("granularity", KMEANS_GRANULARITIES)
@@ -337,7 +337,7 @@ class TestKMeansCodebook:
 
     def test_an_axis_the_group_size_does_not_divide_fails_loudly_for_the_shared_table(self):
         """group が効くのは `shared` だけ（表の粒度が group 正規化に乗る形）。"""
-        with pytest.raises(QuantizeError, match="割り切れない"):
+        with pytest.raises(QuantizeError, match="is not divisible"):
             fake_quant_kmeans(nn.Linear(20, 3), "shared", group_size=GROUP)
 
     def test_a_strided_fit_is_deterministic(self):
@@ -376,15 +376,15 @@ class TestKMeansCodebook:
 
     def test_a_stride_on_a_granularity_without_a_concat_fit_fails_loudly(self):
         """`fit_stride` は shared 専用 — 他粒度で黙って無視される形を作らない。"""
-        with pytest.raises(QuantizeError, match="shared 専用"):
+        with pytest.raises(QuantizeError, match="is for shared only"):
             fake_quant_kmeans(layers(), "per_tensor", group_size=GROUP, fit_stride=2)
 
     def test_a_non_positive_stride_fails_loudly(self):
-        with pytest.raises(QuantizeError, match="1 以上"):
+        with pytest.raises(QuantizeError, match="1 or more"):
             fake_quant_kmeans(layers(), "shared", group_size=GROUP, fit_stride=0)
 
     def test_an_unknown_granularity_fails_loudly(self):
-        with pytest.raises(QuantizeError, match="未対応"):
+        with pytest.raises(QuantizeError, match="is not supported"):
             fake_quant_kmeans(layers(), "per_group", group_size=GROUP)  # type: ignore[arg-type]
 
 
@@ -405,5 +405,5 @@ class TestFitCodebook:
         assert torch.equal(codebook, torch.tensor([[-3.0, 5.0]]))
 
     def test_fewer_elements_than_levels_fails_loudly(self):
-        with pytest.raises(QuantizeError, match="要素が"):
+        with pytest.raises(QuantizeError, match="elements"):
             fit_codebook(torch.randn(1, 8), levels=16, iterations=8)

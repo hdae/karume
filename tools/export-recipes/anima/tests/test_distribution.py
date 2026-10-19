@@ -471,7 +471,7 @@ class TestPlacementStrategy:
         sources = _build_series(tmp_path / "series")
         for part in container_parts(sources.base["f16"] / "vae_decoder" / "model.krm"):
             part.unlink()
-        with pytest.raises(DistError, match="組み立ての入力が無い"):
+        with pytest.raises(DistError, match="Assembly input is missing"):
             _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
 
 
@@ -911,7 +911,7 @@ class TestStorageGate:
             _weights_container("text-encoder", "f32", named="text_encoder"),
         )
         out_dir = tmp_path / "models" / ANIMA_TURBO_MODEL_NAME
-        with pytest.raises(DistError, match=r"text_encoder: .* f16 が無い"):
+        with pytest.raises(DistError, match=r"text_encoder: .* has no f16"):
             _assemble_anima(sources, out_dir)
         # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない（rope 不一致と同じ規律）。
         assert not out_dir.exists()
@@ -922,7 +922,7 @@ class TestStorageGate:
             sources.transformer["i8"] / "transformer" / "model.krm",
             _weights_container("transformer-i8", "f16", named="transformer", rope=_ROPE_BASE),
         )
-        with pytest.raises(DistError, match=r"transformer_i8: .* i8 が無い"):
+        with pytest.raises(DistError, match=r"transformer_i8: .* has no i8"):
             _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
 
     def test_it_stops_when_the_i4_transformer_lacks_i4_storage(self, tmp_path: Path) -> None:
@@ -936,7 +936,7 @@ class TestStorageGate:
             sources.transformer["i4"] / "transformer" / "model.krm",
             _weights_container("transformer-i4", "i8", named="transformer", rope=_ROPE_BASE),
         )
-        with pytest.raises(DistError, match=r"transformer_i4: .* i4 が無い"):
+        with pytest.raises(DistError, match=r"transformer_i4: .* has no i4"):
             _assemble_anima(sources, tmp_path / "models" / "i4-seat", spec=_i4_seat())
 
     def test_it_stops_when_the_i4_series_lands_in_the_i8_seat(self, tmp_path: Path) -> None:
@@ -954,7 +954,7 @@ class TestStorageGate:
             sources.transformer["i8"] / "transformer" / "model.krm",
             _weights_container("transformer-i4", "i4", named="transformer", rope=_ROPE_BASE),
         )
-        with pytest.raises(DistError, match=r"transformer_i8: .* i4 がある"):
+        with pytest.raises(DistError, match=r"transformer_i8: .* has i4"):
             _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
 
     def test_no_transformer_series_slips_into_another_series_seat(self) -> None:
@@ -1067,7 +1067,7 @@ class TestStorageGate:
     def test_it_stops_when_the_component_is_not_a_container(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
         replace_component(sources.base["f16"] / "vae_decoder" / "model.krm", b"not-a-container")
-        with pytest.raises(DistError, match="コンテナとして読めない"):
+        with pytest.raises(DistError, match="cannot be read as a container"):
             _assemble_anima(sources, tmp_path / "models" / ANIMA_TURBO_MODEL_NAME)
 
 
@@ -1085,7 +1085,7 @@ class TestPlanGates:
         sources = _build_series(tmp_path / "series")
         (sources.tokenizers / "qwen2-tokenizer.json").unlink()
         out_dir = tmp_path / "models" / ANIMA_TURBO_MODEL_NAME
-        with pytest.raises(DistError, match="組み立ての入力が無い"):
+        with pytest.raises(DistError, match="assembly input is missing"):
             _assemble_anima(sources, out_dir)
         assert not out_dir.exists()
 
@@ -1436,13 +1436,13 @@ class TestVerifyDist:
         target = container_parts(out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["vae_decoder"])[1]
         target.unlink()  # ハードリンクを外してから書く（源の系列を壊さない）
         target.write_bytes(b"shorter")
-        with pytest.raises(DistError, match="size が manifest と違う"):
+        with pytest.raises(DistError, match="size differs from the manifest"):
             verify_dist(out_dir)
 
     def test_it_catches_a_missing_file(self, assembled) -> None:
         out_dir, _ = assembled
         (out_dir / ANIMA_TURBO_MODEL_NAME / OUTPUT_PATHS["tokenizer"]).unlink()
-        with pytest.raises(DistError, match="参照するファイルが無い"):
+        with pytest.raises(DistError, match="file the manifest references is missing"):
             verify_dist(out_dir)
 
     def test_it_catches_an_undeclared_file(self, assembled) -> None:
@@ -1450,7 +1450,7 @@ class TestVerifyDist:
         (
             out_dir / ANIMA_TURBO_MODEL_NAME / "transformer" / "io.s01024t0699.safetensors"
         ).write_bytes(b"stale")
-        with pytest.raises(DistError, match="宣言していないファイル"):
+        with pytest.raises(DistError, match="Files the manifest does not declare"):
             verify_dist(out_dir)
 
     def test_it_admits_the_model_card_as_a_meta_file(self, assembled) -> None:
@@ -1465,7 +1465,7 @@ class TestVerifyDist:
         (out_dir / ANIMA_TURBO_MODEL_NAME / MODEL_CARD_FILENAME).write_text(
             "紛れ込み", encoding="utf-8"
         )
-        with pytest.raises(DistError, match="宣言していないファイル"):
+        with pytest.raises(DistError, match="Files the manifest does not declare"):
             verify_dist(out_dir)
 
 
@@ -1511,7 +1511,7 @@ class TestVerifyDistStructure:
             ]
 
         _rewrite(out_dir, unmap)
-        with pytest.raises(DistError, match="完全写像でない"):
+        with pytest.raises(DistError, match="is not a total mapping"):
             verify_dist(out_dir)
 
     def test_it_refuses_a_quant_that_names_a_dtype_the_weights_lack(self, assembled) -> None:
@@ -1523,7 +1523,7 @@ class TestVerifyDistStructure:
             ] = "i8"
 
         _rewrite(out_dir, retype)
-        with pytest.raises(DistError, match="dtype 'i8' が無い"):
+        with pytest.raises(DistError, match="has no dtype 'i8'"):
             verify_dist(out_dir)
 
     def test_it_refuses_a_path_outside_the_model_subtree_and_shared(self, assembled) -> None:
@@ -1535,7 +1535,7 @@ class TestVerifyDistStructure:
             ref["path"] = OUTPUT_PATHS["tokenizer"]
 
         _rewrite(out_dir, flatten)
-        with pytest.raises(DistError, match="レイアウトはモデル別サブツリー"):
+        with pytest.raises(DistError, match="the layout is per-model subtrees"):
             verify_dist(out_dir)
 
 
@@ -1673,7 +1673,7 @@ class TestFamilyAssembly:
             entry["container"]["parts"][-1]["size"] += 1
 
         _rewrite(out_dir, bend)
-        with pytest.raises(DistError, match="食い違う"):
+        with pytest.raises(DistError, match="disagree"):
             verify_dist(out_dir)
 
     def test_the_assembled_family_verifies(self, family) -> None:
@@ -1699,12 +1699,12 @@ class TestFamilyAssembly:
     def test_it_refuses_a_duplicated_model_name(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
         plan = anima_plan(sources, ANIMA_TURBO_MODEL_NAME)
-        with pytest.raises(DistError, match="モデル名が重複"):
+        with pytest.raises(DistError, match="Duplicate model names"):
             assemble_family([plan, plan], tmp_path / "out", ANIMA_TURBO_MODEL_NAME)
 
     def test_it_refuses_a_default_model_it_is_not_assembling(self, tmp_path: Path) -> None:
         sources = _build_series(tmp_path / "series")
-        with pytest.raises(DistError, match="既定モデル 'anima-lite'"):
+        with pytest.raises(DistError, match="Default model 'anima-lite'"):
             assemble_family(
                 [anima_plan(sources, ANIMA_TURBO_MODEL_NAME)], tmp_path / "out", "anima-lite"
             )

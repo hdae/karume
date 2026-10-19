@@ -936,7 +936,7 @@ class TestWeightDtypeSeries:
         )
         out = tmp_path / export_sbv2.TARGET_DP
 
-        with pytest.raises(EmitError, match="keepdim 形"):
+        with pytest.raises(EmitError, match="keepdim shape"):
             export_sbv2.export_dp(_speaker_dir(tmp_path), out, cases=_TINY_CASES, dtype="i4")
 
         # 門より前に final を作らない（`_staged_target` の MUST）。

@@ -262,7 +262,9 @@ class TestDepthAnythingLayout:
         （ADR 0027 / 0029）。
         """
         sources = _build_depth_anything_sources(tmp_path, storage=storage)
-        with pytest.raises(DistError, match=rf"{DEPTH_ANYTHING_ROLE}: .* {intruder} がある"):
+        with pytest.raises(
+            DistError, match=rf"{DEPTH_ANYTHING_ROLE}: storage of .* {intruder} \(actual:"
+        ):
             depth_anything_plan(sources)
 
     def test_the_plain_f32_series_passes_both_storage_gates(self, tmp_path: Path) -> None:
@@ -286,7 +288,7 @@ class TestDepthAnythingLayout:
         sources = _build_depth_anything_sources(tmp_path)
         replace_component(sources.series / "model.krm", i2_container(named=DEPTH_ANYTHING_ROLE))
 
-        with pytest.raises(DistError, match=rf"{DEPTH_ANYTHING_ROLE}: .* i2 がある"):
+        with pytest.raises(DistError, match=rf"{DEPTH_ANYTHING_ROLE}: storage of .* i2 \(actual:"):
             depth_anything_plan(sources)
 
 

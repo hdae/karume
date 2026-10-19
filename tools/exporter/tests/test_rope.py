@@ -59,7 +59,7 @@ class TestLiftRopeBuffers:
 
     def test_a_model_without_rope_buffers_is_rejected(self) -> None:
         """走査が空振りする形は落とす（恒真化の門 — 上流の属性名が変わると静かに壊れる）。"""
-        with pytest.raises(ValueError, match="1 本も見つからない"):
+        with pytest.raises(ValueError, match=r"no RoPE buffer .* was found"):
             rope.assert_rope_lifted(nn.Linear(2, 2), "テスト")
 
 
@@ -97,5 +97,5 @@ class TestAssertRopeLiftedIsIdempotent:
 
     def test_a_module_that_never_had_rope_buffers_is_still_rejected(self) -> None:
         """冪等化しても否定側は生きている（門が恒真化していないことの検出器）。"""
-        with pytest.raises(ValueError, match="1 本も見つからない"):
+        with pytest.raises(ValueError, match=r"no RoPE buffer .* was found"):
             rope.assert_rope_lifted(nn.Sequential(nn.Linear(2, 2)), "テスト")

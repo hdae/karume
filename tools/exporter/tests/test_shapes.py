@@ -44,11 +44,11 @@ class TestSymbolicDimensions:
 
     def test_different_symbolic_extents_are_not_silently_unified(self):
         # `T` と `2T` は束縛次第で一致しうるが、宣言だけでは同じ長さと言えない。
-        with pytest.raises(OpContractError, match="縮約次元"):
+        with pytest.raises(OpContractError, match="contraction dimension"):
             shape_of("matmul", [["T", "2T"], ["T", 4]])
 
     def test_a_symbolic_and_a_constant_extent_cannot_be_broadcast(self):
-        with pytest.raises(OpContractError, match="broadcast 可否"):
+        with pytest.raises(OpContractError, match="whether they broadcast"):
             shape_of("add", [["T", 4], [3, 4]])
 
     def test_a_symbolic_extent_broadcasts_against_length_one(self):
@@ -59,7 +59,7 @@ class TestSymbolicDimensions:
         assert shape_of("amax", [[3, "T"]], attrs={"dim": 1}) == [3]
 
     def test_a_constant_zero_reduction_axis_is_still_rejected(self):
-        with pytest.raises(OpContractError, match="長さ 0"):
+        with pytest.raises(OpContractError, match="length 0"):
             shape_of("amax", [[3, 0]], attrs={"dim": 1})
 
     def test_a_symbolic_axis_can_itself_be_the_reduced_one(self):
@@ -80,7 +80,7 @@ class TestReduceAxis:
             shape_of("sum", [[6, 10]])
 
     def test_an_out_of_rank_axis_is_rejected(self):
-        with pytest.raises(OpContractError, match="範囲外"):
+        with pytest.raises(OpContractError, match="out of range"):
             shape_of("sum", [[6, 10]], attrs={"dim": 2})
 
     def test_a_zero_length_axis_that_is_not_reduced_is_accepted(self):
@@ -134,7 +134,7 @@ class TestWhereAndCumsum:
         assert shape_of("cumsum", [[1, 3, "T"]], attrs={"dim": 2}) == [1, 3, "T"]
 
     def test_cumsum_rejects_a_non_final_axis(self):
-        with pytest.raises(OpContractError, match="最終次元"):
+        with pytest.raises(OpContractError, match="last dimension"):
             shape_of("cumsum", [[2, 5]], attrs={"dim": 0})
 
 
@@ -145,11 +145,11 @@ class TestReshapeElementCount:
         assert shape_of("reshape", [["2T+2"]], declared=[2, "T+1"]) == [2, "T+1"]
 
     def test_a_missing_symbolic_factor_is_rejected(self):
-        with pytest.raises(OpContractError, match="要素数"):
+        with pytest.raises(OpContractError, match="element count"):
             shape_of("reshape", [[1, "T", 1024]], declared=[1024])
 
     def test_a_different_coefficient_is_rejected(self):
-        with pytest.raises(OpContractError, match="要素数"):
+        with pytest.raises(OpContractError, match="element count"):
             shape_of("reshape", [["2T"]], declared=["T", 2, 2])
 
     def test_a_zero_extent_collapses_the_element_count_on_both_sides(self):
@@ -178,16 +178,16 @@ class TestSymbolicConv1d:
 
     def test_a_stride_that_does_not_divide_the_coefficient_fails_loudly(self):
         # floor((T + …) / 2) は 1 次元 1 シンボルの一次式にならない — 黙って近似しない。
-        with pytest.raises(OpContractError, match="一次式にならない"):
+        with pytest.raises(OpContractError, match="does not give a linear output length"):
             shape_of("conv1d", [[1, 4, "T"], [6, 4, 2], [6]], attrs={**_CONV, "stride": 2})
 
     def test_a_negative_offset_fails_loudly(self):
         # K が大きいと `T - 4` 形になり、非負オフセットの正準文法に載らない。
-        with pytest.raises(OpContractError, match="正準文法"):
+        with pytest.raises(OpContractError, match="canonical grammar"):
             shape_of("conv1d", [[1, 4, "T"], [6, 4, 6], [6]], attrs=_CONV)
 
     def test_a_symbolic_kernel_length_fails_loudly(self):
-        with pytest.raises(OpContractError, match="カーネル長"):
+        with pytest.raises(OpContractError, match="kernel length"):
             shape_of("conv1d", [[1, 4, 8], [6, 4, "T"], [6]], attrs=_CONV)
 
     def test_dilation_widens_the_kernel_span(self):
@@ -200,7 +200,7 @@ class TestSymbolicConv1d:
 
     def test_a_symbolic_channel_axis_fails_loudly(self):
         # groups の割り切りを判定できない（実測にチャネル記号は無い — 黙って通さない）。
-        with pytest.raises(OpContractError, match="記号"):
+        with pytest.raises(OpContractError, match="symbolic"):
             shape_of("conv1d", [[1, "T", 8], ["T", "T", 3], ["T"]], attrs=_CONV)
 
 
@@ -238,7 +238,7 @@ class TestSymbolicConvTranspose1d:
             )
 
     def test_a_symbolic_kernel_length_fails_loudly(self):
-        with pytest.raises(OpContractError, match="カーネル長"):
+        with pytest.raises(OpContractError, match="kernel length"):
             shape_of(
                 "conv_transpose1d",
                 [[1, 3, 8], [3, 2, "T"], [2]],
@@ -255,7 +255,7 @@ class TestSymPrefixSlice:
         """入力は Tmax で焼いた静的形（ADR 0010）— 記号入力は prefix の意味を壊す。"""
         attrs = {"sym": "T", "slices": [{"dim": 0, "coeff": 1, "offset": 0}]}
 
-        with pytest.raises(OpContractError, match="記号"):
+        with pytest.raises(OpContractError, match="symbolic"):
             shape_of("sym_prefix_slice", [["T", 4]], attrs=attrs)
 
 
@@ -301,7 +301,7 @@ class TestAttentionGqaBroadcast:
 
     def test_a_zero_kv_head_count_raises_the_contract_error_not_a_division_error(self):
         """MUST: 剰余より先に `Hkv == 0` を見る（ZeroDivisionError は契約エラーではない）。"""
-        with pytest.raises(OpContractError, match="正の整数倍"):
+        with pytest.raises(OpContractError, match="positive integer multiple"):
             self._shape_of(4, 0)
 
     @pytest.mark.parametrize(
@@ -315,13 +315,13 @@ class TestAttentionGqaBroadcast:
         ids=("zero-h", "zero-both", "indivisible", "reversed"),
     )
     def test_a_head_count_that_is_not_a_positive_multiple_is_rejected(self, heads, kv_heads, why):
-        with pytest.raises(OpContractError, match="正の整数倍"):
+        with pytest.raises(OpContractError, match="positive integer multiple"):
             self._shape_of(heads, kv_heads)
         assert why  # 失敗時に形の意図が読めるようにパラメータへ残す
 
     def test_a_kv_head_mismatch_between_k_and_v_is_rejected(self):
         """GQA でも k / v 間の Hkv は完全一致（緩めたのは q との関係だけ）。"""
-        with pytest.raises(OpContractError, match=r"Hkv（k / v の軸 1）"):
+        with pytest.raises(OpContractError, match=r"Hkv \(axis 1 of k / v\)"):
             self._shape_of(4, 2, value_heads=4)
 
     def test_a_symbolic_head_count_that_matches_structurally_is_accepted(self):
@@ -335,7 +335,7 @@ class TestAttentionGqaBroadcast:
     )
     def test_head_counts_that_need_a_binding_to_divide_are_rejected(self, heads, kv_heads):
         """束縛次第で整除しうる形は黙って通さない（broadcast 可否と同じ規律）。"""
-        with pytest.raises(OpContractError, match="宣言だけでは"):
+        with pytest.raises(OpContractError, match="the declaration alone"):
             self._shape_of(heads, kv_heads)
 
 
@@ -378,7 +378,7 @@ class TestLayoutAxisIsStatic:
         ]
 
     def test_a_symbolic_slice_axis_is_rejected(self):
-        with pytest.raises(OpContractError, match="記号次元"):
+        with pytest.raises(OpContractError, match="symbolic dimension"):
             shape_of("slice", [["T", 4]], attrs={"dim": 0, "start": 0, "end": 2})
 
     def test_a_static_axis_cat_keeps_the_other_symbolic_dimensions(self):
@@ -394,15 +394,15 @@ class TestLayoutAxisIsStatic:
 
     def test_mixing_different_symbols_on_the_cat_axis_is_rejected(self):
         """異シンボルの和は 1 次元 1 シンボルの次元言語に載らない（ADR 0046 の唯一の拒否）。"""
-        with pytest.raises(OpContractError, match="異なるシンボル"):
+        with pytest.raises(OpContractError, match="different symbols"):
             shape_of("cat", [["T", 4], ["U", 4]], attrs={"dim": 0})
 
     def test_a_mismatched_symbolic_dimension_off_the_cat_axis_is_rejected(self):
-        with pytest.raises(OpContractError, match="軸 2 で違う"):
+        with pytest.raises(OpContractError, match=r"differs from .* on axis 2"):
             shape_of("cat", [[1, 3, "T"], [1, 5, "2T"]], attrs={"dim": 1})
 
     def test_a_symbolic_flip_axis_is_rejected(self):
-        with pytest.raises(OpContractError, match="記号次元"):
+        with pytest.raises(OpContractError, match="symbolic dimension"):
             shape_of("flip", [[1, "T"]], attrs={"dim": 1})
 
     def test_pad_extends_a_symbolic_last_dimension(self):
@@ -458,7 +458,7 @@ class TestTopk:
             shapes_of("topk", [[3, 0]], attrs={"k": 1})
 
     def test_a_scalar_input_is_rejected(self):
-        with pytest.raises(OpContractError, match="rank 1 以上"):
+        with pytest.raises(OpContractError, match="rank 1 or more"):
             shapes_of("topk", [[]], attrs={"k": 1})
 
 
@@ -491,7 +491,7 @@ class TestMultiOutputGraphAgreement:
         graph = _topk_graph()
         graph.values["i"] = IrValue(dtype="i32", shape=["T", 2])
 
-        with pytest.raises(OpContractError, match="出力 'i' の計算 shape"):
+        with pytest.raises(OpContractError, match="output 'i' computed shape"):
             assert_graph_shapes(graph)
 
     def test_a_missing_output_slot_is_rejected(self):
@@ -502,7 +502,7 @@ class TestMultiOutputGraphAgreement:
         graph.nodes[0] = IrNode(op="topk", ins=["x"], outs=["v"], attrs={"k": 3})
         del graph.values["i"]
 
-        with pytest.raises(OpContractError, match="出力 shape の計算が 2 本"):
+        with pytest.raises(OpContractError, match="output shape computation gave 2"):
             assert_graph_shapes(graph)
 
 
@@ -516,19 +516,19 @@ class TestGraphAgreement:
         graph = _graph()
         graph.values["h"] = IrValue(dtype="f32", shape=["T", 4])
 
-        with pytest.raises(OpContractError, match="計算 shape"):
+        with pytest.raises(OpContractError, match="computed shape"):
             assert_graph_shapes(graph)
 
     def test_a_symbol_that_drops_out_of_the_declaration_is_rejected(self):
         graph = _graph()
         graph.values["y"] = IrValue(dtype="f32", shape=[6, 3])
 
-        with pytest.raises(OpContractError, match="計算 shape"):
+        with pytest.raises(OpContractError, match="computed shape"):
             assert_graph_shapes(graph)
 
     def test_an_undeclared_input_value_is_rejected(self):
         graph = _graph()
         del graph.values["w"]
 
-        with pytest.raises(OpContractError, match="宣言が無い"):
+        with pytest.raises(OpContractError, match="no dtype/shape declaration"):
             assert_graph_shapes(graph)

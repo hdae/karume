@@ -1,10 +1,11 @@
-"""次元言語: shape の記号次元を表す一次式 `coeff·sym+offset`（1 次元 1 シンボル）。
+"""Dimension language: the linear expression `coeff·sym+offset` for a symbolic dimension of a shape
+(one symbol per dimension).
 
-文法の正本は実装ではなく適合ケース表 `packages/runtime/tests/fixtures/dim-grammar.json`
-（リポジトリ直下）で、TS 実装（packages/runtime/src/format/dims.ts）と本モジュールは
-同じ表で検証する。片側だけ動かすと
-「エクスポータは書けるがランタイムが読めない」次元表記が生まれるため、
-文法を変えるときは表・TS・Python を同時に動かすこと。
+The source of truth for the grammar is not the implementation but the conformance table
+`packages/runtime/tests/fixtures/dim-grammar.json` (from the repository root); the TS implementation
+(packages/runtime/src/format/dims.ts) and this module are checked against the same table. Moving
+only one side creates dimension spellings that "the exporter can write but the runtime cannot
+read", so when the grammar changes, move the table, TS and Python together.
 """
 
 from __future__ import annotations
@@ -13,23 +14,25 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-# 受理側（TS）の数値は IEEE754 double なので、これを超える次元は往復で値が変わる。
+# Numbers on the accepting side (TS) are IEEE754 doubles, so a dimension above this changes value
+# in a round trip.
 MAX_SAFE_INT = 2**53 - 1
 
 _SYMBOL_PATTERN = r"[A-Za-z_][A-Za-z0-9_]*"
 _SYMBOL_RE = re.compile(_SYMBOL_PATTERN)
-# 数字は ASCII に限る（`\d` は Unicode の数字〈アラビア数字・全角〉も拾い、TS の `\d` と
-# 受理集合が割れる。`int()` も Unicode 数字を変換するので format との往復も崩れる）。
+# Digits are ASCII only (`\d` also matches Unicode digits — Arabic-Indic, full-width — and the
+# accepted set splits from TS's `\d`. `int()` converts Unicode digits too, so the round trip with
+# format would break as well).
 _DIM_RE = re.compile(rf"([0-9]+)?({_SYMBOL_PATTERN})(?:\+([0-9]+))?")
 
 
 class DimError(ValueError):
-    """次元式が正準文法に適合しない / 束縛できない。"""
+    """A dimension expression does not match the canonical grammar / cannot be bound."""
 
 
 @dataclass(frozen=True)
 class DimExpr:
-    """`coeff·sym + offset`。coeff >= 1・offset >= 0 の非負一次式のみ。"""
+    """`coeff·sym + offset`. Only non-negative linear expressions (coeff >= 1, offset >= 0)."""
 
     coeff: int
     sym: str
@@ -41,9 +44,11 @@ def is_symbol_name(name: str) -> bool:
 
 
 def _parse_part(text: str | None, minimum: int, omitted: int) -> int | None:
-    """省略可能部（coeff=1 / offset=0）の明示表記と先頭ゼロは非正準として拒否する。
+    """Rejects explicit spellings of the omissible parts (coeff=1 / offset=0) and leading zeros as
+    non-canonical.
 
-    同じ次元に 2 通り以上の表記を許すと、束縛表・shape 同一性判定が表記ゆれで割れる。
+    Allowing two or more spellings for the same dimension would split the binding table and the
+    shape identity check over spelling variants.
     """
     if text is None:
         return omitted
@@ -56,7 +61,8 @@ def _parse_part(text: str | None, minimum: int, omitted: int) -> int | None:
 
 
 def try_parse_dim(text: str) -> DimExpr | None:
-    """正準表記なら分解、非正準・非該当は None（判定と分解を兼ねる版）。"""
+    """Decomposes a canonical spelling; non-canonical or non-matching text gives None (the variant
+    that both checks and decomposes)."""
     matched = _DIM_RE.fullmatch(text)
     if matched is None:
         return None
@@ -70,32 +76,38 @@ def try_parse_dim(text: str) -> DimExpr | None:
 def parse_dim(text: str) -> DimExpr:
     expr = try_parse_dim(text)
     if expr is None:
-        raise DimError(f"次元式 '{text}' が正準文法 coeff·sym+offset に適合しない")
+        raise DimError(
+            f"Dimension expression '{text}' does not match the canonical grammar coeff·sym+offset"
+        )
     return expr
 
 
 def format_dim(expr: DimExpr) -> str:
-    """正準表記へ戻す。parse_dim との往復は文字列同一（適合ケース表で固定）。"""
+    """Back to the canonical spelling. A round trip with parse_dim is string-identical (pinned by
+    the conformance table)."""
     if not is_symbol_name(expr.sym):
-        raise DimError(f"シンボル名 '{expr.sym}' が不正")
+        raise DimError(f"Invalid symbol name '{expr.sym}'")
     if expr.coeff < 1 or expr.coeff > MAX_SAFE_INT:
-        raise DimError(f"係数 {expr.coeff} が不正")
+        raise DimError(f"Invalid coefficient {expr.coeff}")
     if expr.offset < 0 or expr.offset > MAX_SAFE_INT:
-        raise DimError(f"オフセット {expr.offset} が不正")
+        raise DimError(f"Invalid offset {expr.offset}")
     head = "" if expr.coeff == 1 else str(expr.coeff)
     tail = "" if expr.offset == 0 else f"+{expr.offset}"
     return f"{head}{expr.sym}{tail}"
 
 
 def eval_dim(expr: DimExpr, bindings: Mapping[str, int]) -> int:
-    """束縛表を当てて具体次元にする。未束縛・非整数束縛は既定値で進めず落とす。"""
+    """Applies the binding table to get a concrete dimension. An unbound symbol or a non-integer
+    binding fails instead of going on with a default."""
     if expr.sym not in bindings:
-        raise DimError(f"シンボル '{expr.sym}' が束縛されていない")
+        raise DimError(f"Symbol '{expr.sym}' is not bound")
     bound = bindings[expr.sym]
-    # bool は int の派生だが次元ではない（True が 1 として黙って通るのを塞ぐ）。
+    # bool derives from int but is not a dimension (this stops True from silently passing as 1).
     if isinstance(bound, bool) or not isinstance(bound, int) or bound < 0:
-        raise DimError(f"シンボル '{expr.sym}' の束縛 {bound!r} が非負整数でない")
+        raise DimError(
+            f"Symbol '{expr.sym}' is bound to {bound!r}, which is not a non-negative integer"
+        )
     size = expr.coeff * bound + expr.offset
     if size > MAX_SAFE_INT:
-        raise DimError(f"次元 {format_dim(expr)} の評価結果が安全整数を超える")
+        raise DimError(f"Value of dimension {format_dim(expr)} exceeds the safe integer range")
     return size

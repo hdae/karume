@@ -1,34 +1,43 @@
-"""配布形（`krm`）を据える 3 段 — 書く → 読み直して検証 → 据え替え。
+"""The three steps that put a distribution (`krm`) in place — write → read back and verify →
+swap into place.
 
-配布形を作る経路は**この 1 本**を通る（export の一本道 `karume.pipeline` も移行 CLI
-`karume.migrate` も）。3 段を呼び手が各自で綴っていた頃は、書き出し側の変更（分割数が変わる）が
-「一時 path をそのまま検証する」写しの側で黙って壊れた。原子性の規律も後始末もここに置く。
+Every distribution goes through **this one path** (both the export path `karume.pipeline` and the
+migration CLI `karume.migrate`). When callers spelled out the three steps themselves, a change on
+the writing side (a different number of parts) silently broke the copies that "verify the
+temporary path as is". The atomicity discipline and the clean-up live here too.
 
-MUST: 書き出しの直後に**読み直して**検証を通す — 「書けたが読めない」ファイルを配布物として
-残さないための門（ADR 0005 の fail loudly 規律）。検証は 5 つで、1〜3 は読み直した容器と
-呼び手が渡した材料の突合、4・5 は宣言の追加条件である:
+MUST: right after writing, the file is **read back** and verified — the check that keeps a file
+that "was written but cannot be read" out of the distribution (the fail-loudly discipline of
+ADR 0005). There are five verifications; 1–3 reconcile the re-read container with the material
+the caller passed, 4 and 5 are additional conditions on the declaration:
 
-1. **payload の一致**: initializer と companion scale の payload バイト列が、渡した実体と
-   sha256 で一致する。突き合わせるのは block 全体ではなく **payload 部** — 末尾の詰め物は
-   書き手が焼くバイトで、渡した側には相手が無い（container-v1 §4.1 / §12 の不変条件 5）。
-2. **資産の一致**: 役割・論理長・payload・末尾の詰め物が 0x00 であること。
-3. **2 文書**: グラフ記述 / モデル記述のバイト長と sha256（manifest `karume/5` の
-   `container.descriptor` が名乗る値と同じ事実 — ADR 0109 決定 3）。
-4. **`ternary` のコード**: payload の全 2 bit コードが `{1, 2, 3}`（container-v1 §6.3 —
-   `karume verify` と同じ検査。TS の読み手はロード時に落とすので、据える前に落とす）。
-5. **IR の受理規則**: 宣言した全グラフがグラフ全体の構造検査（重複出力・SSA・前方参照・記号の
-   束縛）と op 語彙・op 契約を通る（`karume verify` / `karume dist` と同じ
-   `verify.assert_ir_accepted`）。呼び手ごとの部分検査だけでは、グラフ手術を挟んだ IR の
-   「各ノードは正しいが全体として壊れた」形を公開できてしまう。
+1. **Payloads match**: the payload bytes of initializers and companion scales match the passed
+   data by sha256. What is compared is **the payload part**, not the whole block — the trailing
+   padding is bytes the writer adds and has no counterpart on the passing side (container-v1
+   §4.1 / invariant 5 of §12).
+2. **Assets match**: role, logical length, payload, and trailing padding of 0x00.
+3. **The two documents**: byte length and sha256 of the graph descriptor / model descriptor (the
+   same fact as the value `container.descriptor` of manifest `karume/5` declares — ADR 0109
+   decision 3).
+4. **`ternary` codes**: every 2-bit code of the payload is in `{1, 2, 3}` (container-v1 §6.3 —
+   the same check as `karume verify`. The TS reader fails at load time, so fail before putting it
+   in place).
+5. **The IR acceptance rules**: every declared graph passes the whole-graph structural checks
+   (duplicate outputs, SSA, forward references, symbol binding) and the op vocabulary and op
+   contracts (the same `verify.assert_ir_accepted` as `karume verify` / `karume dist`). Partial
+   checks per caller alone would let an IR with graph rewrites in the "every node is right but
+   the whole is broken" shape be published.
 
-MUST: 門を実効にするため、書き出しと検証は**同じディレクトリの一時ファイル**（`.partial`）に
-対して行い、通ってはじめて `os.replace` で本番名へ据える（同一ディレクトリなので置換は原子的）。
-据え替えの途中で落ちた回も**何も残さない** — 半分だけ公開された容器を残すと、次の実行が
-「前回の成果物が残っている」で止まる（container-v1 §12）。
+MUST: to make the check effective, writing and verification run on **a temporary file in the same
+directory** (`.partial`), and only once they pass is it put under its final name with
+`os.replace` (same directory, so the replacement is atomic). A run that fails in the middle of the
+swap **leaves nothing** either — a half-published container would stop the next run with "the
+previous run's artifacts are still there" (container-v1 §12).
 
-MUST: 据わった後に**前回の出力の残り**（part 数が変わった回の置き去り）を消す。据え替えは
-ファイル単位でしか原子的にならないので、消さないと「前回の形と今回の形が混ざった容器」が
-残り、`container_parts` の解決が fail loudly で止まる。
+MUST: once in place, **the leftovers of the previous output** (what a run with a different number
+of parts left behind) are deleted. The swap is atomic only per file, so without the deletion "a
+container mixing the previous and the current form" would remain, and resolving
+`container_parts` would stop with a fail-loudly.
 """
 
 from __future__ import annotations
@@ -64,24 +73,25 @@ from karume.verify import (
 
 
 class PublishError(ValueError):
-    """据える前提が破れた（読み直した容器が渡した材料と食い違う）。"""
+    """A precondition for putting in place was broken (the re-read container disagrees with the
+    material passed)."""
 
 
 @dataclass(frozen=True)
 class PublishResult:
-    """1 コンポーネントを据えた結果。"""
+    """The result of putting one component in place."""
 
-    #: 据えた `krm` の part 列（part 0 から。単一形なら 1 本）。
+    #: The `krm` parts put in place (from part 0; one for the single form).
     parts: tuple[Path, ...]
-    #: 一緒に書いた `krg`（書かなければ `None`）。
+    #: The `krg` written alongside (`None` when not written).
     graph: Path | None
-    #: 供給計画を組んだ initializer の本数。
+    #: Number of initializers a supply plan was built for.
     initializers: int
-    #: 渡した実体と sha256 を突き合わせた payload の本数（実体 + companion scale）。
+    #: Number of payloads compared by sha256 with the passed data (data + companion scales).
     payloads: int
-    #: 突き合わせた資産の本数。
+    #: Number of assets compared.
     assets: int
-    #: 2 文書（グラフ記述 / モデル記述）の `(バイト長, sha256)`。
+    #: `(byte length, sha256)` of the two documents (graph descriptor / model descriptor).
     descriptor: tuple[DocumentRef, DocumentRef]
 
 
@@ -95,10 +105,11 @@ def _assert_payloads_match(
     bindings: Mapping[str, Encoding],
     tensors: Mapping[str, Buffer],
 ) -> int:
-    """書いた容器の payload を、渡した実体と突き合わせる（モジュール doc の検証 1）。
+    """Compare the payloads of the written container with the passed data (verification 1 of the
+    module doc).
 
-    取り直しは {@link karume.container.ReadContainer.block} 越しなので、block ごとの sha256 も
-    同時に検証される。
+    The bytes are re-read through {@link karume.container.ReadContainer.block}, so the sha256 of
+    each block is verified at the same time.
     """
     checked = 0
     for name, supply in sorted(bound.supplies.items()):
@@ -108,19 +119,20 @@ def _assert_payloads_match(
         _assert_digest(f"initializer '{name}'", digest.hexdigest(), tensors, name)
         checked += 1
         scale_key = bindings[name].scale_key
-        # MUST: 片方だけが `None` の食い違いを素通ししない — 渡した束縛と読み直した容器の
-        # 束縛表がずれている形そのもので、通すと「宣言 i4 / 実体 i8」の相方（scale を
-        # 持つはずの席が scale 無しで据わる）が門を抜ける。
+        # MUST: a mismatch where only one side is `None` is not let through — it is exactly the
+        # shape of the passed bindings and the re-read container's binding table drifting apart,
+        # and letting it through would let the counterpart of "declared i4 / data i8" (a slot that
+        # should have a scale put in place without one) slip past the check.
         if (supply.scale is None) != (scale_key is None):
             raise PublishError(
-                f"initializer '{name}': 渡した束縛は scale"
-                f" {'を持つ' if scale_key is not None else 'を持たない'}のに、"
-                f"書いた容器の供給は scale {'を持つ' if supply.scale is not None else 'を持たない'}"
+                f"initializer '{name}': the passed binding"
+                f" {'has' if scale_key is not None else 'has no'} scale, but the written"
+                f" container's supply {'has' if supply.scale is not None else 'has no'} scale"
             )
         if supply.scale is not None and scale_key is not None:
             raw = read_back.block(supply.scale.id)[: supply.scale.payload_bytes]
             _assert_digest(
-                f"initializer '{name}' の scale '{scale_key}'",
+                f"initializer '{name}', scale '{scale_key}'",
                 hashlib.sha256(raw).hexdigest(),
                 tensors,
                 scale_key,
@@ -133,44 +145,45 @@ def _assert_digest(where: str, actual: str, tensors: Mapping[str, Buffer], key: 
     expected = _digest(tensors[key])
     if actual != expected:
         raise PublishError(
-            f"{where}: payload の sha256 が渡した実体と違う（渡した {expected} / 書いた {actual}）"
+            f"{where}: the payload sha256 differs from the passed data"
+            f" (passed {expected} / written {actual})"
         )
 
 
 def _assert_assets_match(read_back: ReadContainer, assets: Mapping[str, AssetInput]) -> int:
-    """書いた容器の資産を、渡した payload と突き合わせる（モジュール doc の検証 2）。
+    """Compare the assets of the written container with the passed payloads (verification 2 of
+    the module doc).
 
-    突き合わせるのは **payload 部**で、末尾の詰め物が 0x00 であることも見る（詰め物は §4.1 の
-    とおり書き手が焼くバイトなので、渡した側には相手が無い）。
+    What is compared is **the payload part**, and the trailing padding is checked to be 0x00 (per
+    §4.1 the padding is bytes the writer adds, so it has no counterpart on the passing side).
     """
     model = read_back.model
-    if model is None:  # pragma: no cover - krm を読み直した直後なので在る
-        raise PublishError("krg には資産を載せられない")
+    if model is None:  # pragma: no cover - present, a krm was just read back
+        raise PublishError("A krg cannot carry assets")
     for name in sorted(assets):
         asset = assets[name]
         binding = model.assets.get(name)
         if binding is None:
-            raise PublishError(f"資産 '{name}' が書いた容器の宣言に無い")
+            raise PublishError(f"Asset '{name}' is not in the written container's declaration")
         if binding.role != asset.role:
-            raise PublishError(
-                f"資産 '{name}': 役割が '{binding.role}'（渡したのは '{asset.role}'）"
-            )
+            raise PublishError(f"Asset '{name}': role is '{binding.role}' (passed '{asset.role}')")
         if binding.length != asset.length:
             raise PublishError(
-                f"資産 '{name}': 宣言の論理長が {binding.length}（渡したのは {asset.length}）"
+                f"Asset '{name}': declared logical length is {binding.length}"
+                f" (passed {asset.length})"
             )
         raw = memoryview(read_back.block(binding.block))
         payload = asset.payload
         expected = memoryview(payload() if callable(payload) else payload).cast("B")
         if expected.nbytes != asset.length:
             raise PublishError(
-                f"資産 '{name}': 引き直した実体が {expected.nbytes} バイト"
-                f"（宣言は {asset.length}）— 引かれるたびに同じバイト列を返す MUST"
+                f"Asset '{name}': the re-fetched data is {expected.nbytes} bytes"
+                f" (declared {asset.length}) — it MUST return the same bytes on every fetch"
             )
         if raw[: expected.nbytes] != expected:
-            raise PublishError(f"資産 '{name}': payload が渡したバイト列と違う")
+            raise PublishError(f"Asset '{name}': payload differs from the passed bytes")
         if bytes(raw[expected.nbytes :]) != b"\x00" * (raw.nbytes - expected.nbytes):
-            raise PublishError(f"資産 '{name}': 末尾の詰め物が 0x00 でない")
+            raise PublishError(f"Asset '{name}': trailing padding is not 0x00")
     return len(assets)
 
 
@@ -188,21 +201,25 @@ def publish_container(
     part_bytes: int = DEFAULT_PART_BYTES,
     block_bytes: int = BLOCK_MAX_BYTES,
 ) -> PublishResult:
-    """`krm` を書いて検証し、`final`（単一形）/ その連番（分割形）へ据える。
+    """Write and verify a `krm` and put it in place at `final` (single form) / its numbered
+    sequence (split form).
 
-    `tensors` は**テンソルキー → 生バイト**の口で、実体は 1 本ずつ引いて 1 本ずつ手放す
-    （`Mapping` を遅延にすれば全量はメモリに載らない）。実体は**複数回引かれる** — 分割形は
-    書き出し 1 回 + 読み直し検証 1 回、単一形は書き手が sha256 を採る走査と書き出しの走査で
-    2 回 + 読み直し検証 1 回 — ので、同じキーからは毎回同じバイト列が返る MUST。
+    `tensors` is a **tensor key → raw bytes** mapping; each tensor is fetched and released one at
+    a time (with a lazy `Mapping`, the whole set never sits in memory). Tensors are **fetched more
+    than once** — split form: one write + one read-back verification; single form: two passes by
+    the writer (one to take the sha256, one to write) + one read-back verification — so the same
+    key MUST return the same bytes every time.
 
-    `part_bytes` / `block_bytes` は寸法の差し込み（テストが小さな資産で part またぎと piece
-    分割を踏むための席）。既定値は、`part_bytes` が container-v1 §4.2 の既定（256 MiB）、
-    `block_bytes` が §4.1 / §10 の block 上限（32 MiB）である。
+    `part_bytes` / `block_bytes` inject sizes (the option that lets tests hit part crossings and
+    piece splitting with small assets). The defaults are container-v1 §4.2's default (256 MiB) for
+    `part_bytes` and the block limit of §4.1 / §10 (32 MiB) for `block_bytes`.
 
-    MUST: 呼び手は**作業席**（`karume.artifacts.staged_publication` の中）へ据える。据え替えの
-    途中で落ちた回は「据えかけた part を消して何も残さない」で閉じるので、`final` が
-    コミット済みの置き場（前回の成果物が在る場所）だと**前回の last-known-good が消える** —
-    そこへ原子的に据えたい呼び手は、作業席へ書いてディレクトリごと swap する側を使う。
+    MUST: the caller puts the result into **the staging directory** (inside
+    `karume.artifacts.staged_publication`). A run that fails in the middle of the swap closes by
+    "deleting the parts it was putting in place and leaving nothing", so when `final` is a
+    committed location (where the previous artifacts are) **the previous last-known-good is
+    deleted** — a caller that wants an atomic swap there writes into the staging directory and
+    uses the side that swaps the whole directory.
     """
     staged = final.with_name(f"{final.stem}.{uuid4().hex}.partial{final.suffix}")
     replaced: list[Path] = []
@@ -222,16 +239,21 @@ def publish_container(
             single=single,
         )
         read_back = read_container(written)
-        # MUST: グラフ全体の構造検査（重複出力・SSA・前方参照・記号の束縛）と IR の受理規則を
-        # 読み直した宣言に 1 回掛ける。export・グラフ手術・移行の全経路が公開の境界で同じ 1 本を
-        # 通る — 呼び手ごとの部分検査だけだと、runtime の parser が拒否する容器を公開できる。
+        # MUST: the whole-graph structural checks (duplicate outputs, SSA, forward references,
+        # symbol binding) and the IR acceptance rules are applied once to the re-read declaration.
+        # Every path — export, graph rewrites, migration — goes through the same one at the
+        # publish boundary — partial checks per caller alone could publish a container the
+        # runtime's parser rejects.
         try:
             assert_ir_accepted(read_back)
         except ContainerError as cause:
-            raise PublishError(f"読み直した容器が IR の受理規則を通らない: {cause}") from cause
+            raise PublishError(
+                f"The re-read container does not pass the IR acceptance rules: {cause}"
+            ) from cause
         bound = bind_graphs(read_back.graph, read_back.model)[graph_name]
         payloads = _assert_payloads_match(read_back, bound, bindings, tensors)
-        # 宣言の追加条件（モジュール doc の検証 4）— `karume verify` と同じ 1 本を通す。
+        # Additional condition on the declaration (verification 4 of the module doc) — goes
+        # through the same function as `karume verify`.
         _assert_ternary_payloads(read_back, {graph_name: bound})
         checked = _assert_assets_match(read_back, assets)
         documents = (
@@ -245,28 +267,32 @@ def publish_container(
             ),
         )
         published = [final] if single else list(container_paths(final, len(written)))
-        # MUST: `krg` は据え替えの**前**に抜く（読み手は一時 path の part を指している）。
-        # `krm` と同じ 3 段（一時名 → `os.replace`）を通す — 最終名へ直接書くと、途中で落ちた
-        # 回に**切り詰められた `krg`** が最終名に残る（プロセスが強制終了されれば例外経路の
-        # 後始末も走らない）。
+        # MUST: the `krg` is extracted **before** the swap (the reader points at the parts under
+        # the temporary path). It goes through the same steps as `krm` (temporary name →
+        # `os.replace`) — writing straight to the final name would leave **a truncated `krg`**
+        # under the final name in a run that fails midway (if the process is killed, the
+        # clean-up on the exception path does not run either).
         if graph_path is not None:
             staged_graph = graph_path.with_name(f"{graph_path.name}.{uuid4().hex}.partial")
             staged_graph.write_bytes(read_back.extract_graph())
             os.replace(staged_graph, graph_path)
-            # 据わった時点で一時名はもう無い（後始末の対象は「自分が書いた最終名」だけ）。
+            # Once in place, the temporary name is gone (the clean-up only covers "the final names
+            # this call wrote").
             staged_graph = None
             replaced.append(graph_path)
         for staged_part, target in zip(written, published, strict=True):
             os.replace(staged_part, target)
             replaced.append(target)
     except BaseException:
-        # 書き出しが途中で落ちた回は返り値が無いので、一時 path の**名前の形**から拾う。
+        # A write that failed midway has no return value, so the leftovers are found from **the
+        # name pattern** of the temporary path.
         for leftover in sequence_siblings(staged):
             leftover.unlink(missing_ok=True)
         if staged_graph is not None:
             staged_graph.unlink(missing_ok=True)
-        # MUST: 消すのは**この呼び出しが据えた**現物だけ（`replaced`）— `graph_path` を
-        # 無条件に消すと、書き出しが `krg` を抜く前に落ちた回に**前回の `krg`** が道連れになる。
+        # MUST: only the files **this call put in place** (`replaced`) are deleted — deleting
+        # `graph_path` unconditionally would take **the previous `krg`** down with it in a run
+        # that failed before the `krg` was extracted.
         for target in replaced:
             target.unlink(missing_ok=True)
         raise

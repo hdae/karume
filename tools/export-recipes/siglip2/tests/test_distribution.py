@@ -296,7 +296,7 @@ class TestSiglip2Layout:
         （ADR 0027 / 0029）。
         """
         sources = _build_siglip2_sources(tmp_path, storage=storage)
-        with pytest.raises(DistError, match=rf"{SIGLIP2_ROLE}: .* {intruder} がある"):
+        with pytest.raises(DistError, match=rf"{SIGLIP2_ROLE}: .* has .*{intruder} \(actual"):
             siglip2_plan(sources)
 
     def test_the_plain_f32_series_passes_both_storage_gates(self, tmp_path: Path) -> None:
@@ -320,7 +320,7 @@ class TestSiglip2Layout:
         sources = _build_siglip2_sources(tmp_path)
         replace_component(sources.series / "model.krm", i2_container(named=SIGLIP2_ROLE))
 
-        with pytest.raises(DistError, match=rf"{SIGLIP2_ROLE}: .* i2 がある"):
+        with pytest.raises(DistError, match=rf"{SIGLIP2_ROLE}: .* has .*i2 \(actual"):
             siglip2_plan(sources)
 
 

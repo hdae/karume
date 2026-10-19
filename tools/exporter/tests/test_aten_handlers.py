@@ -161,10 +161,10 @@ class TestRowReduce:
     @pytest.mark.parametrize(
         ("build", "why"),
         [
-            (lambda x: x.sum(dim=(0, 1)), "の sum は未対応（1 軸ずつ）"),
-            (lambda x: x.sum(dim=-1, keepdim=True), "keepdim=True の sum は未対応"),
-            (lambda x: x.amax(dim=(0, 1)), "の amax は未対応（1 軸ずつ）"),
-            (lambda x: x.amin(dim=-1, keepdim=True), "keepdim=True の amin は未対応"),
+            (lambda x: x.sum(dim=(0, 1)), r"are not supported for sum \(one axis at a time\)"),
+            (lambda x: x.sum(dim=-1, keepdim=True), "sum with keepdim=True is not supported"),
+            (lambda x: x.amax(dim=(0, 1)), r"are not supported for amax \(one axis at a time\)"),
+            (lambda x: x.amin(dim=-1, keepdim=True), "amin with keepdim=True is not supported"),
         ],
         ids=["sum-multi-axis", "sum-keepdim", "amax-multi-axis", "amin-keepdim"],
     )
@@ -214,9 +214,12 @@ class TestArgmax:
     @pytest.mark.parametrize(
         ("build", "why"),
         [
-            (lambda x: torch.argmax(x, dim=-1), "keepdim=False の argmax は未対応"),
-            (lambda x: torch.argmax(x), "全次元 argmax は未対応"),
-            (lambda x: torch.argmax(x, dim=0, keepdim=True), "最終次元以外（dim=0 / rank=2）"),
+            (lambda x: torch.argmax(x, dim=-1), "argmax with keepdim=False is not supported"),
+            (lambda x: torch.argmax(x), "argmax over all dimensions is not supported"),
+            (
+                lambda x: torch.argmax(x, dim=0, keepdim=True),
+                r"other than the last \(dim=0 / rank=2\)",
+            ),
         ],
         ids=["no-keepdim", "all-dims", "non-last-axis"],
     )
@@ -239,9 +242,11 @@ class TestArgmax:
 
         assert ATEN_HANDLERS[target](node) == ("argmax", 1, {}, ())
 
-        with pytest.raises(NotImplementedError, match="keepdim=False の argmax は未対応"):
+        with pytest.raises(NotImplementedError, match="argmax with keepdim=False is not supported"):
             ATEN_HANDLERS[target](_reduce_node(target, kwargs={"dim": -1}))
-        with pytest.raises(NotImplementedError, match="全次元 argmax は未対応"):
+        with pytest.raises(
+            NotImplementedError, match="argmax over all dimensions is not supported"
+        ):
             ATEN_HANDLERS[target](_reduce_node(target, kwargs={"keepdim": True}))
 
 
@@ -281,17 +286,33 @@ class TestReduceArgumentsInKwargs:
     @pytest.mark.parametrize(
         ("target", "kwargs", "why"),
         [
-            (torch.ops.aten.sum.dim_IntList, {"dim": None}, "全次元 sum は未対応"),
-            (torch.ops.aten.sum.dim_IntList, {"dim": [0, 1]}, r"複数軸 \[0, 1\] の sum は未対応"),
-            (torch.ops.aten.sum.dim_IntList, {"dim": [-1], "keepdim": True}, "keepdim=True の sum"),
+            (
+                torch.ops.aten.sum.dim_IntList,
+                {"dim": None},
+                "sum over all dimensions is not supported",
+            ),
+            (
+                torch.ops.aten.sum.dim_IntList,
+                {"dim": [0, 1]},
+                r"multiple axes \[0, 1\] are not supported for sum",
+            ),
+            (
+                torch.ops.aten.sum.dim_IntList,
+                {"dim": [-1], "keepdim": True},
+                "sum with keepdim=True",
+            ),
             (
                 torch.ops.aten.sum.dim_IntList,
                 {"dim": [-1], "dtype": torch.float32},
-                "dtype 指定付きの sum は未対応",
+                "sum with a dtype is not supported",
             ),
-            (torch.ops.aten.amax.default, {}, "全次元 amax は未対応"),
-            (torch.ops.aten.amax.default, {"dim": [0, 1]}, r"複数軸 \[0, 1\] の amax は未対応"),
-            (torch.ops.aten.amin.default, {"dim": [-1], "keepdim": True}, "keepdim=True の amin"),
+            (torch.ops.aten.amax.default, {}, "amax over all dimensions is not supported"),
+            (
+                torch.ops.aten.amax.default,
+                {"dim": [0, 1]},
+                r"multiple axes \[0, 1\] are not supported for amax",
+            ),
+            (torch.ops.aten.amin.default, {"dim": [-1], "keepdim": True}, "amin with keepdim=True"),
         ],
         ids=[
             "sum-all-dims",
@@ -354,7 +375,7 @@ class TestCastAndBitwiseNot:
             def forward(self, x):
                 return torch.bitwise_not(x)
 
-        with pytest.raises(NotImplementedError, match="bitwise_not は未対応"):
+        with pytest.raises(NotImplementedError, match=r"bitwise_not of dtype .* is not supported"):
             convert_module(InvertInts(), (torch.ones(3, 4, dtype=torch.int64),))
 
 
@@ -428,7 +449,7 @@ class TestBmmAndGather:
             def forward(self, src, index):
                 return torch.gather(src, 0, index)
 
-        with pytest.raises(NotImplementedError, match="最終次元以外"):
+        with pytest.raises(NotImplementedError, match="other than the last"):
             convert_module(
                 ByRow(),
                 (torch.randn(3, 3), torch.tensor([[0, 1, 2], [2, 1, 0], [1, 1, 1]])),
@@ -446,7 +467,7 @@ class TestBmmAndGather:
             def forward(self, src, index):
                 return torch.gather(src, -1, index)
 
-        with pytest.raises(NotImplementedError, match="先行次元"):
+        with pytest.raises(NotImplementedError, match="leading dimension"):
             convert_module(
                 Narrow(),
                 (torch.randn(4, 3), torch.tensor([[0, 1, 2], [2, 1, 0]])),
@@ -515,7 +536,7 @@ class TestMathOps:
             def forward(self, x):
                 return x >= 1
 
-        with pytest.raises(NotImplementedError, match="ge_scalar は未対応"):
+        with pytest.raises(NotImplementedError, match="is not supported for ge_scalar"):
             convert_module(IntGate(), (torch.ones(4, dtype=torch.int64),))
 
     def test_clamp_carries_both_bounds(self, convert_module):
@@ -550,7 +571,9 @@ class TestMathOps:
             def forward(self, x):
                 return torch.clamp(x, max=1.0)
 
-        with pytest.raises(NotImplementedError, match="上限だけの clamp は未対応"):
+        with pytest.raises(
+            NotImplementedError, match="clamp with only an upper bound is not supported"
+        ):
             convert_module(UpperBound(), (torch.randn(4),))
 
     def test_inverted_clamp_bounds_are_rejected(self, convert_module):
@@ -560,7 +583,7 @@ class TestMathOps:
             def forward(self, x):
                 return torch.clamp(x, 1.0, -1.0)
 
-        with pytest.raises(NotImplementedError, match="clamp は未対応"):
+        with pytest.raises(NotImplementedError, match=r"clamp with .* is not supported"):
             convert_module(Inverted(), (torch.randn(4),))
 
     def test_log1p_stays_a_single_node(self, convert_module):
@@ -610,7 +633,7 @@ class TestMathOps:
             def forward(self, x, y):
                 return x & y
 
-        with pytest.raises(NotImplementedError, match="bitwise_and は未対応"):
+        with pytest.raises(NotImplementedError, match=r"bitwise_and of dtype .* is not supported"):
             convert_module(
                 IntAnd(),
                 (torch.ones(4, dtype=torch.int64), torch.ones(4, dtype=torch.int64)),
@@ -652,7 +675,7 @@ class TestMathOps:
             def forward(self, x):
                 return torch.cumsum(x, dim=0)
 
-        with pytest.raises(NotImplementedError, match="cumsum は未対応"):
+        with pytest.raises(NotImplementedError, match=r"cumsum on .* is not supported"):
             convert_module(Wrong(), (torch.rand(4, 3),))
 
 
@@ -792,7 +815,7 @@ class TestFusedOps:
             def forward(self, x):
                 return nn.functional.layer_norm(x, [4], None, self.bias)
 
-        with pytest.raises(NotImplementedError, match="bias だけ"):
+        with pytest.raises(NotImplementedError, match="only a bias"):
             convert_module(BiasOnly(), (torch.randn(5, 4),))
 
     def test_multi_axis_layer_norm_is_rejected(self, convert_module):
@@ -825,7 +848,7 @@ class TestFusedOps:
             def forward(self, x):
                 return torch.softmax(x, dim=0)
 
-        with pytest.raises(NotImplementedError, match="最終次元以外"):
+        with pytest.raises(NotImplementedError, match="other than the last"):
             convert_module(ByColumn(), (torch.randn(5, 4),))
 
     def test_a_runtime_bool_mask_emits_safe_softmax(self, convert_module):
@@ -921,7 +944,7 @@ class TestFusedOps:
             def forward(self, index):
                 return self.table(index)
 
-        with pytest.raises(NotImplementedError, match="スカラ添字"):
+        with pytest.raises(NotImplementedError, match="scalar index"):
             convert_module(Scalar(), (torch.tensor(2),))
 
     def test_sparse_embedding_is_rejected(self, convert_module):
@@ -992,7 +1015,7 @@ class TestFusedOps:
             def forward(self, x, mask):
                 return x.masked_fill(mask.to(torch.bool), float("-inf"))
 
-        with pytest.raises(NotImplementedError, match="非有限"):
+        with pytest.raises(NotImplementedError, match="non-finite"):
             convert_module(Infinite(), (torch.randn(2, 4), torch.ones(2, 4, dtype=torch.int64)))
 
     def test_conv1d_carries_all_four_attrs(self, convert_module, dyn_t):
@@ -1200,7 +1223,7 @@ class TestLayoutOps:
             def forward(self, x):
                 return x.permute(0, 1, 2, 4, 3)
 
-        with pytest.raises(NotImplementedError, match="端点が見つからない reshape/permute 連鎖"):
+        with pytest.raises(NotImplementedError, match="reshape/permute chain without end points"):
             convert_module(Deep(), (torch.randn(2, 2, 2, 2, 2),))
 
     def test_expand_takes_its_target_from_the_declared_shape(self, convert_module, dyn_t):
@@ -1273,7 +1296,7 @@ class TestLayoutOps2:
             def forward(self, x):
                 return x[:2] * 2.0
 
-        with pytest.raises(NotImplementedError, match="記号次元"):
+        with pytest.raises(NotImplementedError, match="symbolic dimension"):
             convert_module(Head(), (torch.randn(6, 4),), ({0: dyn_t},))
 
     def test_cat_carries_every_operand_as_an_input(self, convert_module, dyn_t):
@@ -1323,7 +1346,7 @@ class TestLayoutOps2:
                 return torch.cat([a, b], 0)
 
         other = Dim("U", min=2, max=SYM_MAX)
-        with pytest.raises(NotImplementedError, match="異なるシンボル"):
+        with pytest.raises(NotImplementedError, match="different symbols"):
             convert_module(
                 JoinTime(),
                 (torch.randn(6, 4), torch.randn(5, 4)),
@@ -1370,7 +1393,7 @@ class TestLayoutOps2:
             def forward(self, x):
                 return nn.functional.pad(x, [1, 1], value=1.0)
 
-        with pytest.raises(NotImplementedError, match="定数 0"):
+        with pytest.raises(NotImplementedError, match="constant 0"):
             convert_module(Filled(), (torch.randn(2, 3),))
 
     def test_padding_more_than_the_last_dim_is_rejected(self, convert_module):
@@ -1378,7 +1401,7 @@ class TestLayoutOps2:
             def forward(self, x):
                 return nn.functional.pad(x, [1, 1, 2, 2])
 
-        with pytest.raises(NotImplementedError, match="最終次元"):
+        with pytest.raises(NotImplementedError, match="last dimension"):
             convert_module(Wide(), (torch.randn(2, 3),))
 
     def test_a_negative_pad_is_rejected(self, convert_module):
@@ -1388,7 +1411,7 @@ class TestLayoutOps2:
             def forward(self, x):
                 return nn.functional.pad(x, [-1, 0])
 
-        with pytest.raises(NotImplementedError, match="負の pad"):
+        with pytest.raises(NotImplementedError, match="negative pad"):
             convert_module(Cropped(), (torch.randn(2, 3),))
 
     def test_flip_on_a_static_axis_becomes_one_node(self, convert_module, dyn_t):
@@ -1409,7 +1432,7 @@ class TestLayoutOps2:
             def forward(self, x):
                 return torch.flip(x, [0, 1])
 
-        with pytest.raises(NotImplementedError, match="軸 1 本"):
+        with pytest.raises(NotImplementedError, match="one axis only"):
             convert_module(ReverseBoth(), (torch.randn(3, 4),))
 
 
@@ -1468,7 +1491,7 @@ class TestRmsNorm:
             def forward(self, x, weight):
                 return torch.rms_norm(x, [3, 4], weight)
 
-        with pytest.raises(NotImplementedError, match="最終次元 1 本"):
+        with pytest.raises(NotImplementedError, match="single last dimension"):
             convert_module(MultiAxis(), (torch.randn(5, 3, 4), torch.rand(3, 4)))
 
 
@@ -1650,7 +1673,7 @@ class TestConv3d:
             def forward(self, x):
                 return self.conv(x)
 
-        with pytest.raises(NotImplementedError, match="batched の rank 5"):
+        with pytest.raises(NotImplementedError, match="batched rank 5"):
             convert_module(Batched(), (torch.randn(1, 2, 3, 4, 4),))
 
 

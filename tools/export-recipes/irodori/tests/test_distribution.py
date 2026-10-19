@@ -779,7 +779,7 @@ class TestIrodoriGraphGate:
     def test_it_refuses_a_component_that_is_not_a_container(self, tmp_path: Path) -> None:
         sources = _build_irodori_sources(tmp_path)
         replace_component(sources.series / "dit" / "model.krm", b"not-a-container")
-        with pytest.raises(DistError, match="コンテナとして読めない"):
+        with pytest.raises(DistError, match="cannot be read as a container"):
             irodori_plan(sources)
 
 
@@ -799,7 +799,7 @@ class TestIrodoriStorageSeries:
             _irodori_input("f16", "dit"),
         )
 
-        with pytest.raises(DistError, match="f16 がある"):
+        with pytest.raises(DistError, match="has f16"):
             irodori_plan(sources)
 
     def test_it_refuses_an_f32_series_asset_in_the_f16_seat(self, tmp_path: Path) -> None:
@@ -810,7 +810,7 @@ class TestIrodoriStorageSeries:
             _irodori_input("f32", "dit"),
         )
 
-        with pytest.raises(DistError, match="f16 が無い"):
+        with pytest.raises(DistError, match="has no f16"):
             irodori_plan(sources)
 
     def test_it_refuses_an_i8_series_asset_in_the_f32_seat(self, tmp_path: Path) -> None:
@@ -825,7 +825,7 @@ class TestIrodoriStorageSeries:
             _irodori_input("i8", "dit"),
         )
 
-        with pytest.raises(DistError, match="i8 がある"):
+        with pytest.raises(DistError, match="has i8"):
             irodori_plan(sources)
 
     def test_it_refuses_an_f32_series_asset_in_the_i8_seat(self, tmp_path: Path) -> None:
@@ -836,7 +836,7 @@ class TestIrodoriStorageSeries:
             _irodori_input("f32", "dit"),
         )
 
-        with pytest.raises(DistError, match="i8 が無い"):
+        with pytest.raises(DistError, match="has no i8"):
             irodori_plan(sources)
 
     def test_it_refuses_an_i8_series_asset_in_the_f16_seat(self, tmp_path: Path) -> None:
@@ -847,7 +847,7 @@ class TestIrodoriStorageSeries:
             _irodori_input("i8", "dit"),
         )
 
-        with pytest.raises(DistError, match="f16 が無い"):
+        with pytest.raises(DistError, match="has no f16"):
             irodori_plan(sources)
 
     def test_it_refuses_an_f16_series_asset_in_the_i8_seat(self, tmp_path: Path) -> None:
@@ -857,7 +857,7 @@ class TestIrodoriStorageSeries:
             _irodori_input("f16", "dit"),
         )
 
-        with pytest.raises(DistError, match="i8 が無い"):
+        with pytest.raises(DistError, match="has no i8"):
             irodori_plan(sources)
 
     def test_it_refuses_an_i4_series_asset_in_the_i8_seat(self, tmp_path: Path) -> None:
@@ -875,7 +875,7 @@ class TestIrodoriStorageSeries:
             _irodori_input("i4", "dit"),
         )
 
-        with pytest.raises(DistError, match="i4 がある"):
+        with pytest.raises(DistError, match="has i4"):
             irodori_plan(sources)
 
     def test_it_refuses_an_i8_series_asset_in_the_i4_seat(self, tmp_path: Path) -> None:
@@ -886,7 +886,7 @@ class TestIrodoriStorageSeries:
             _irodori_input("i8", "dit"),
         )
 
-        with pytest.raises(DistError, match="i4 が無い"):
+        with pytest.raises(DistError, match="has no i4"):
             irodori_plan(sources)
 
     def test_it_refuses_an_i4_series_asset_in_the_f32_seat(self, tmp_path: Path) -> None:
@@ -897,7 +897,7 @@ class TestIrodoriStorageSeries:
             _irodori_input("i4", "dit"),
         )
 
-        with pytest.raises(DistError, match="i4 がある"):
+        with pytest.raises(DistError, match=r"has (?:i8 / )?i4"):
             irodori_plan(sources)
 
     def test_it_refuses_a_codec_series_mixup_too(self, tmp_path: Path) -> None:
@@ -908,7 +908,7 @@ class TestIrodoriStorageSeries:
             _irodori_input("f32", "codec_decoder"),
         )
 
-        with pytest.raises(DistError, match="f16 が無い"):
+        with pytest.raises(DistError, match="has no f16"):
             irodori_plan(sources)
 
     def test_every_graph_role_carries_every_seat_its_series_declares(self) -> None:

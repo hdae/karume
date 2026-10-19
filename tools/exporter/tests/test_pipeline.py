@@ -245,7 +245,7 @@ class TestTheIrAcceptanceGate:
     def test_an_op_outside_the_vocabulary_places_nothing(self, tmp_path: Path) -> None:
         graph, tensors = self._graph_with_an_unknown_op()
 
-        with pytest.raises(ContainerError, match="非対応 op"):
+        with pytest.raises(ContainerError, match="unsupported ops"):
             publish_model(
                 tmp_path / "model.krm",
                 graph,
@@ -302,14 +302,14 @@ class TestTheGraphNameIsNamedByTheCaller:
         assert sorted(bound) == ["dit"]
 
     def test_a_name_outside_the_vocabulary_fails_loudly(self, tmp_path: Path) -> None:
-        with pytest.raises(ContainerFormatError, match="語彙"):
+        with pytest.raises(ContainerFormatError, match="vocabulary"):
             published(Biased(), EXAMPLE, tmp_path / "model.krm", graph_name="dit/1")
 
         assert list(tmp_path.iterdir()) == []
 
     def test_a_name_with_a_trailing_newline_fails_loudly(self, tmp_path: Path) -> None:
         """Python の `$` は末尾の改行の直前でも一致する — `.match` だと通り TS が拒否する綴り。"""
-        with pytest.raises(ContainerFormatError, match="語彙"):
+        with pytest.raises(ContainerFormatError, match="vocabulary"):
             published(Biased(), EXAMPLE, tmp_path / "model.krm", graph_name="dit\n")
 
         assert list(tmp_path.iterdir()) == []
@@ -338,9 +338,9 @@ class TestTheGraphWideGate:
     @pytest.mark.parametrize(
         ("broken", "message"),
         [
-            ("_duplicate_output", "重複"),
-            ("_unbound_symbol", "束縛が取れない"),
-            ("_forward_reference", "が未定義（前方参照または未宣言）"),
+            ("_duplicate_output", "is duplicated"),
+            ("_unbound_symbol", "cannot be bound"),
+            ("_forward_reference", r"is undefined \(forward reference or undeclared\)"),
         ],
         ids=["duplicate-output", "unbound-symbol", "forward-reference"],
     )

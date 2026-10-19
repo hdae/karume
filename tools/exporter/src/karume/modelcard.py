@@ -1,50 +1,58 @@
-"""配布形モデルカード（`README.md`）の**汎用描画部品** — manifest から機械導出する純関数。
+"""**Generic rendering components** of the distribution's model card (`README.md`) — pure
+functions derived mechanically from the manifest.
 
-HF は `README.md` の YAML frontmatter をモデルの機械可読メタデータとして読む（ADR 0037 §3 の
-「そのまま HF リポとしてアップロードできる形」の最後の 1 枚）。ライセンスと由来は manifest に
-書かない決定なので（ADR 0038 §6）、その責務はカード側が持つ。
+HF reads the YAML frontmatter of `README.md` as the model's machine-readable metadata (the last
+piece of ADR 0037 §3's "a form that can be uploaded as an HF repository as is"). Licence and
+provenance are by decision not written into the manifest (ADR 0038 §6), so that responsibility
+belongs to the card.
 
-ここにあるのは「frontmatter を組む / モデル一覧を並べる / quant 表を並べる / 節を組み立てる」
-層だけで、**pipeline 別のテンプレートは 1 つも持たない** — 何を説明し
-何を使い方に綴るかは family 固有の事実なので、`tools/export-recipes/<family>/card.py` が持つ
-（ADR 0065 決定 1・2）。`karume.dist` と同じ層分け。
+This module holds only the layer that "builds the frontmatter / lists the models / lists the
+quant table / assembles the sections", and **holds not a single per-pipeline template** — what to
+explain and what to spell out in the usage section are family-specific facts, so they belong to
+`tools/export-recipes/<family>/card.py` (ADR 0065 decisions 1 and 2). The same layering as
+`karume.dist`.
 
-NOTE: 描画部品（{@link frontmatter} / {@link models} / {@link quants} /
+NOTE: the rendering components ({@link frontmatter} / {@link models} / {@link quants} /
 {@link model_sections} / {@link render} / {@link require_pipeline} / {@link default_model} /
-{@link knob} / {@link from_pretrained}）は **recipe 向けの公開面**（ADR 0065 段 6）。wheel の
-外にある `card.py` が名指しで呼ぶ以上、private 名のままにしておくと「private を跨いで呼ぶ」
-形が既定になる。`_` 始まりで残しているのはこのモジュールの中だけで閉じる部品
-（{@link _base_model} など）。
+{@link knob} / {@link from_pretrained}) are **the public surface for recipes** (ADR 0065 stage 6).
+Since `card.py`, outside the wheel, calls them by name, keeping private names would make "calling
+across private" the default. Only the components closed within this module keep a leading `_`
+({@link _base_model} and the like).
 
-**帰属はテンプレートと別の軸**（{@link sbv2.card.Sbv2CardProfile}）。同じテンプレートでも、
-どのファミリーの重みを配るかで出所・ライセンス・引用が丸ごと変わる pipeline があるので、
-そこだけをプロファイルに分けて**呼び出し側に明示させる**（選ばせる規則は
-{@link karume.dist.resolve_card_renderer}）。
+**Attribution is a separate axis from the template** ({@link sbv2.card.Sbv2CardProfile}). Some
+pipelines use the same template while provenance, licence and citation change entirely with the
+family whose weights are distributed, so only that part is split into a profile and **the caller
+states it explicitly** (the rule for choosing is {@link karume.dist.resolve_card_renderer}).
 
-manifest（現行は `karume/5` — ADR 0041 で複数モデル化し、ADR 0075 決定 1 で quant へ表示欄が
-付き、ADR 0109 決定 3 で weights の dtype エントリが**コンテナの入口**になった形）は
-**1 リポに複数モデル**を持てるので、カードも
-「リポ全体の説明 → モデル一覧 → 使い方 → モデルごとの節」の形にする。モデルごとの節が
-`## Model: <name>` で、その中に quant 表・（SBV2 は）スタイル表と話者表が並ぶ。
-単一モデルのリポでも同じ形で描く（配布形のレイアウトが一様なのと同じ理由 — 2 個目が増えた
-瞬間に構成が変わるカードは、読み手の目印も壊す）。
+The manifest (`karume/5` today — made multi-model by ADR 0041, given display fields on quants by
+ADR 0075 decision 1, and with the dtype entries of weights turned into **the container's entry
+point** by ADR 0109 decision 3) can hold **several models in one repository**, so the card takes
+the shape "description of the whole repository → model list → usage → a section per model". The
+per-model section is `## Model: <name>`, holding the quant table and (for SBV2) the style and
+speaker tables. A single-model repository is drawn in the same shape (for the same reason the
+distribution layout is uniform — a card whose structure changes the moment a second model is added
+breaks the reader's landmarks too).
 
-ファイル本数が多いので、**ファイル 1 本 1 行の表は廃止した**（2026-09-03 裁定 — 5 モデルの
-リポでカードの半分が表になり、読み手が知りたい「このプリセットで何 GiB 落ちるか」がその中に
-埋もれた）。per-file の `size` / `sha256` の正本は `karume.json` で、カードは quant ごとの
-合計（{@link quants} の Download 欄）だけを持つ。
+There are many files, so **the one-row-per-file table was dropped** (ruling of 2026-09-03 — in a
+five-model repository half the card was table, and what the reader wants to know, "how many GiB
+does this preset download", was buried in it). The source of truth for per-file `size` / `sha256`
+is `karume.json`; the card holds only the per-quant totals (the Download column of
+{@link quants}).
 
-MUST: **数値・ダウンロード量・quant 表・dtype ラベル・スタイル表・話者表は 1 つ残らず manifest
-から導出する**。手書きのサイズや dtype 名は資産と独立に動けてしまい、「表と現物が食い違う」
-失敗様式が manifest を導出物にした意味ごと消える（ADR 0038 Context）。テンプレート側が持って
-よい定数は manifest に**存在しない事実**（base model・ライセンス・焼き込んだ LoRA の出所）
-だけで、この MUST は recipe の `card.py` にもそのまま掛かる。リポ ID も manifest には無いので、
-組み立て先から引いた値を引数で受ける。
+MUST: **numbers, download sizes, the quant table, dtype labels, the style table and the speaker
+table are all derived from the manifest**, every one of them. Hand-written sizes or dtype names
+can drift independently of the assets, and the failure mode "the table disagrees with the files"
+would void the very reason the manifest was made a derived artifact (ADR 0038 Context). The only
+constants a template may hold are facts **that do not exist in the manifest** (base model, licence,
+the provenance of a baked-in LoRA), and this MUST applies as is to a recipe's `card.py`. The
+repository ID is not in the manifest either, so it is received as an argument taken from the
+assembly target.
 
-MUST: 描画は決定的 — 同一 manifest なら**バイト単位で同一**。時刻・環境・集合の反復順に
-依存するものを混ぜない（差分が出れば「資産が変わった」と読めることが再組み立ての前提）。
-JSON 由来の dict は挿入順が保たれるので、`models` / `quants` / `styles` / `speakers` は
-manifest に並んだ順のまま出す（並べ替えを挟むと「manifest の並び」という事実がカードから消える）。
+MUST: rendering is deterministic — the same manifest gives **byte-identical output**. Nothing that
+depends on time, environment or set iteration order is mixed in (that a diff can be read as "the
+assets changed" is the premise of reassembly). Dicts from JSON keep insertion order, so `models` /
+`quants` / `styles` / `speakers` are emitted in manifest order (re-sorting would erase the fact
+"the manifest's order" from the card).
 """
 
 from __future__ import annotations
@@ -54,17 +62,18 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-#: モデルごとの節を描く関数（モデルエントリ → 行の並び）。
+#: A function that draws a per-model section (model entry → sequence of lines).
 ModelSection = Callable[[Mapping[str, Any]], list[str]]
 
-#: HF の `library_name`（全 pipeline 共通 — 読み手はこのリポジトリの runtime 1 つだけ）。
+#: HF's `library_name` (common to every pipeline — the only reader is this repository's runtime).
 LIBRARY_NAME = "karume"
 
-#: 配布先の HF アカウント。リポ名は pipeline が宣言する（`karume.dist.resolve_repo` が
-#: `<HF_OWNER>/<宣言の名前>` を渡す）ので、ここが持つのは所有者だけ。
+#: The HF account distributions go to. The repository name is declared by the pipeline
+#: (`karume.dist.resolve_repo` passes `<HF_OWNER>/<declared name>`), so only the owner lives here.
 HF_OWNER = "hdae"
 
-#: 注記に出す commit sha の桁数（完全な値は karume.json が持つ — 注記は指し先の目安）。
+#: Number of digits of the commit sha shown in notes (karume.json holds the full value — the note
+#: is a guide to the target).
 _SHA_DIGITS = 16
 
 _UNITS = (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10))
@@ -72,42 +81,50 @@ _UNITS = (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10))
 
 @dataclass(frozen=True)
 class CardMetadata:
-    """frontmatter に載る **manifest に無い事実**（ADR 0038 §6 で manifest から外した領分）。
+    """**Facts not in the manifest** that go into the frontmatter (the area ADR 0038 §6 took out
+    of the manifest).
 
-    実地確認: https://huggingface.co/docs/hub/model-cards 。`base_model_relation` の語彙は
-    adapter / merge / quantized / finetune の 4 値で、f16 / i8 の配布形は「base の重みを別の
-    格納形へ落とし直したもの」なので `quantized` を採る。merge は **Hub 上の base_model を
-    2 つ以上並べる**形に紐づいた値で、Hub にない出所（Anima の LoRA）を正しく表現できない。
-    **格納形を変えない配布形は 4 値のどれでもない**ので席ごと空ける（同じ実地確認: 未指定なら
-    Hub が推論する）— 4 値の中から一番近いものを当てると、カードが事実でない主張を持つ。
+    Checked against: https://huggingface.co/docs/hub/model-cards . The vocabulary of
+    `base_model_relation` has 4 values, adapter / merge / quantized / finetune, and an f16 / i8
+    distribution is "the base weights re-encoded in another storage form", so `quantized` is used.
+    merge is tied to the form that **lists two or more base_models on the Hub**, and cannot
+    correctly express a provenance not on the Hub (Anima's LoRA). **A distribution that does not
+    change the storage form is none of the 4 values**, so the field is left out altogether (same
+    source: when unspecified, the Hub infers it) — assigning the closest of the 4 values would give
+    the card a claim that is not a fact.
 
-    `base_model` が並びなのは、**この配布形が再配布している上流を全部並べる**ため（重みの出所と
-    再配布する text encoder は別リポ）。並べても関係は `quantized` のまま — 重みを融合した
-    わけではなく、それぞれを格納形へ落とし直して 1 リポに同居させているだけ。
+    `base_model` is a sequence so that **every upstream this distribution redistributes is listed**
+    (the weights' origin and the redistributed text encoder are separate repositories). Listing
+    them keeps the relation `quantized` — the weights were not merged; each one was re-encoded into
+    a storage form and they merely live together in one repository.
     """
 
     pipeline_tag: str
     base_model: tuple[str, ...]
     license: str
     tags: tuple[str, ...]
-    #: 4 値のどれかが**事実として当たるとき**だけ書く（当たらなければ Hub の推論に任せる）。
+    #: Written only **when one of the 4 values is factually right** (otherwise left to the Hub's
+    #: inference).
     base_model_relation: str | None = None
-    #: `license: other` のときだけ HF が読む 2 席。SPDX 識別子を当てられた配布形は**持たない**
-    #: （空欄で並べると「名前の無い独自ライセンス」に読める）。
+    #: The 2 fields HF reads only with `license: other`. A distribution that has an SPDX
+    #: identifier **does not have them** (listing them empty reads as "an unnamed custom licence").
     license_name: str | None = None
     license_link: str | None = None
 
 
 def _download_size(size: int) -> str:
-    """ダウンロード量を有効 3 桁で綴る（`3.24 GiB` / `248 MiB` — 単位を跨いでも精度が揃う）。
+    """Spell a download size with 3 significant digits (`3.24 GiB` / `248 MiB` — the precision
+    stays the same across units).
 
-    生バイトは併記しない。ここで読み手が決めたいのは「この回線とこのディスクで現実的か」の
-    1 点で、per-file の正確な値は `karume.json` が持つ（その所在は表の注記が指す）。
+    Raw bytes are not shown alongside. What the reader wants to decide here is one thing, "is this
+    realistic for this connection and this disk", and the exact per-file values are in
+    `karume.json` (the table's notes point there).
 
-    MUST: 単位は**丸めた後**の値で選び直す。丸める前に選ぶと、繰り上がる帯（1023.5 MiB 以上
-    1 GiB 未満など）で `1024 MiB` という有効 3 桁でも単位でもない綴りが出る。繰り上がりの
-    閾値は 1000 ではなく **1 段上の単位のちょうど 1**（= 1024）— `1000 MiB` は MiB として
-    正しい綴りで、上げると「1 単位未満」の `0.977 GiB` になる。
+    MUST: the unit is chosen again from the value **after rounding**. Choosing before rounding
+    gives, in the carry band (from 1023.5 MiB up to below 1 GiB, for instance), `1024 MiB`, a
+    spelling that is neither 3 significant digits nor the right unit. The carry threshold is not
+    1000 but **exactly 1 of the next unit** (= 1024) — `1000 MiB` is a correct MiB spelling, and
+    moving it up would give `0.977 GiB`, "below 1 unit".
     """
     for index, (unit, scale) in enumerate(_UNITS):
         if size < scale:
@@ -121,46 +138,51 @@ def _download_size(size: int) -> str:
 
 
 def _significant(value: float) -> str:
-    """有効 3 桁の綴り（整数部が 3 桁を超える帯は小数を持たない）。"""
+    """Spelling with 3 significant digits (no decimals once the integer part exceeds 3 digits)."""
     return f"{value:.{max(0, 3 - len(str(int(value))))}f}"
 
 
-#: ファイル参照の同一性（出所の `repo` / `revision` と `path` の組 — 自リポは出所が `None`）。
+#: Identity of a file reference (the pair of the source `repo` / `revision` and `path` — for our
+#: own repository the source is `None`).
 FileRefKey = tuple[str | None, str | None, str]
 
 
 def file_ref_key(ref: Mapping[str, Any]) -> FileRefKey:
-    """hub の `fileRefKey` と同じ同一性（出所と path の組）。
+    """The same identity as the hub's `fileRefKey` (the pair of source and path).
 
-    MUST: path だけで一意化しない — 別リポ・同じリポの別 revision・自リポ対借用の同名 path は
-    hub が別ファイルとして取得する（ADR 0038 §7）。path だけで畳むと後から来た方が捨てられ、
-    ダウンロード量が過小に出て借用元の説明から片方が落ちる。
+    MUST: not made unique by path alone — the hub fetches same-named paths in another repository,
+    in another revision of the same repository, or our own versus borrowed, as separate files
+    (ADR 0038 §7, a superseded record; the hub's `fileRefKey` in `packages/hub/src/manifest.ts` is
+    the source of truth). Folding by path would drop whichever came later, understate the download
+    size, and lose one of them from the description of the borrowed source.
     """
     return (ref.get("repo"), ref.get("revision"), ref["path"])
 
 
 def _is_shared(ref: Mapping[str, Any]) -> bool:
-    """2 本目のモデルでは落とし直さない参照か（同リポの `shared/` か、別リポからの越境）。"""
+    """Whether the reference is not downloaded again for a second model (`shared/` in the same
+    repository, or a cross-repository reference)."""
     return ref["path"].startswith("shared/") or "repo" in ref
 
 
 def _collect(refs: dict[FileRefKey, Mapping[str, Any]], weight_files: Mapping[str, Any]) -> None:
-    """1 つの dtype エントリのファイル（コンテナの part 列）を **同一性で一意化**して足す
-    （{@link file_ref_key}）。
+    """Add the files of one dtype entry (the container's parts), **made unique by identity**
+    ({@link file_ref_key}).
 
-    一意化は 2 つの部品が同じコンテナを指す形（`shared/` に畳まれた席と同型）でバイトを
-    二重に数えないため。`karume/4` の `extras` は退役し、実物はコンテナの資産になった
-    （= part の中なので、足す先はこの 1 本だけ — ADR 0109 決定 4）。
+    Uniqueness keeps bytes from being counted twice when two components point at the same
+    container (the same shape as an entry folded into `shared/`). The `extras` of `karume/4` were
+    retired, and their content became container assets (= inside the parts, so this is the only
+    place to add them — ADR 0109 decision 4).
     """
     for ref in weight_files["container"]["parts"]:
         refs.setdefault(file_ref_key(ref), ref)
 
 
 def _quant_refs(model: Mapping[str, Any], quant: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    """その quant を選んだ読み手が実際に落とすファイル参照。
+    """The file references a reader who chose the quant actually downloads.
 
-    重みは quant が選んだ dtype のファイルだけ。assets は quant 選択に依存しない無条件
-    ファイル（ADR 0041 §3）なので全部入る。
+    For weights, only the files of the dtype the quant chose. assets are unconditional files that
+    do not depend on the quant choice (ADR 0041 decision 3), so all of them are included.
     """
     refs: dict[FileRefKey, Mapping[str, Any]] = {}
     for name, label in quant["weights"].items():
@@ -171,10 +193,11 @@ def _quant_refs(model: Mapping[str, Any], quant: Mapping[str, Any]) -> list[Mapp
 
 
 def _model_refs(model: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    """モデルが載せる全ファイル参照（dtype を跨いだ和 + assets）。
+    """Every file reference the model carries (the union across dtypes + assets).
 
-    注記は quant 表 1 つに 1 度出るので、条件も**モデル単位**で見る（選んだ quant 次第で
-    注記が現れたり消えたりすると、同じモデルの説明が席ごとに変わる）。
+    The notes appear once per quant table, so their conditions are checked **per model** too (if
+    a note appeared or vanished depending on the chosen quant, the description of the same model
+    would change per preset).
     """
     refs: dict[FileRefKey, Mapping[str, Any]] = {}
     for entry in model["weights"].values():
@@ -186,27 +209,29 @@ def _model_refs(model: Mapping[str, Any]) -> list[Mapping[str, Any]]:
 
 
 def _borrowed(refs: Sequence[Mapping[str, Any]]) -> list[tuple[str, str]]:
-    """越境参照の指し先（`(リポ, revision)` の重複なし・現れた順 — ADR 0038 §7）。"""
+    """Targets of cross-repository references (`(repo, revision)` without duplicates, in order of
+    appearance — ADR 0038 §7)."""
     return list(dict.fromkeys((ref["repo"], ref["revision"]) for ref in refs if "repo" in ref))
 
 
 def require_pipeline(manifest: Mapping[str, Any], supported: str) -> None:
-    """全モデルが本文の前提にしている pipeline 契約であることを確かめる（違えば描かない）。
+    """Check that every model has the pipeline contract the body assumes (otherwise nothing is
+    drawn).
 
-    テンプレートは pipeline 固有なので、別契約の manifest を食わせると「表は合っているのに
-    説明だけ別のモデルの話」というカードが黙って出る。ファミリーリポは別アーキを混ぜられる
-    （ADR 0041 §2）ので、1 つでも違えば描けない。
+    Templates are pipeline-specific, so feeding a manifest of another contract would silently
+    produce a card whose "tables are right but whose description is about another model". A family
+    repository may mix architectures (ADR 0041 decision 2), so a single mismatch means no card.
     """
     for name, model in manifest["models"].items():
         if model["pipeline"] != supported:
             raise ValueError(
-                f"モデルカードの本文は {supported} 固有 — "
-                f"モデル '{name}' の pipeline '{model['pipeline']}' のカードは書けない"
+                f"The model card body is specific to {supported} — "
+                f"cannot write a card for model '{name}' with pipeline '{model['pipeline']}'"
             )
 
 
 def _base_model(base_models: Sequence[str]) -> list[str]:
-    """`base_model`（1 本なら scalar・複数なら YAML の並び — HF はどちらも読む）。"""
+    """`base_model` (a scalar for one, a YAML sequence for several — HF reads both)."""
     if len(base_models) == 1:
         return [f"base_model: {base_models[0]}"]
     return ["base_model:", *(f"  - {model}" for model in base_models)]
@@ -233,7 +258,8 @@ def frontmatter(metadata: CardMetadata) -> list[str]:
 
 
 def models(manifest: Mapping[str, Any]) -> list[str]:
-    """リポが載せているモデルの一覧（v2 で初めて機械可読になった軸 — ADR 0041 §2）。"""
+    """The list of models the repository carries (the axis that first became machine-readable in
+    v2 — ADR 0041 decision 2)."""
     default = manifest["defaultModel"]
     lines = [
         "## Models",
@@ -256,13 +282,14 @@ def models(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _session(quant: Mapping[str, Any]) -> str:
-    """quant が宣言する実行設定を 1 セルに綴る。
+    """Spell the execution settings a quant declares in one cell.
 
-    MUST: 値は **JSON 表記**で出す。`render_card` が受け取るのは JSON へ書く前のメモリ上の
-    dict なので、素で埋めると boolean が Python の `True` / `False` で出て、manifest
-    （`true`）とも利用者がそのまま貼る TypeScript とも綴りが食い違う（`false` を書いたつもりの
-    セルが真値に読める形）。文字列だけは `json.dumps` の二重引用符を付けずに出す — 席の値は
-    `parallel` のような enum で、表の他の綴り（`` `i4` `` など）と揃える。
+    MUST: values are written **in JSON notation**. `render_card` receives the in-memory dict
+    before it is written as JSON, so filling it in raw would print booleans as Python's `True` /
+    `False`, a spelling that disagrees with both the manifest (`true`) and the TypeScript users
+    paste as is (a cell meant as `false` reads as truthy). Only strings are written without the
+    double quotes of `json.dumps` — the option values are enums such as `parallel`, matching the
+    table's other spellings (`` `i4` `` and the like).
     """
     session = quant["session"]
     features = quant.get("gpuFeatures", {})
@@ -275,15 +302,19 @@ def _session(quant: Mapping[str, Any]) -> str:
 
 
 def _presentation(quant: Mapping[str, Any]) -> str:
-    """quant の表示欄（ADR 0075 決定 1 の `label` / `description`）を 1 セルに綴る。
+    """Spell a quant's display fields (`label` / `description` of ADR 0075 decision 1) in one
+    cell.
 
-    どちらも optional なので 4 通りある。書いていない席は id をそのまま読ませる（`—`）—
-    ここで id を再掲すると、表の 1 列目と同じ文字列が 2 度並ぶだけになる。
+    Both are optional, so there are 4 cases. An unwritten field lets the reader read the id as is
+    (`—`) — repeating the id here would only print the same string as the table's first column
+    twice.
 
-    受理集合は hub の parser が正本で、空文字・空白だけ・改行を含む値も通る（2026-10-11 裁定）。
-    改行は表の 1 行を割るので、空白の連なり（改行を含む）を 1 つの空白に畳んで 1 セルに綴る。
-    空白しか無い欄は書いていない席と同じに扱う。`|` も受理集合に入り、そのままでは表の列を
-    割るので `\\|`（GFM の表で列の区切りにならない形）に逃がす。
+    The accepted set is defined by the hub's parser, and empty strings, whitespace-only values and
+    values with newlines pass too (ruling of 2026-10-11). A newline would split the table row, so
+    runs of whitespace (newlines included) are folded into one space and spelled in one cell. A
+    field with only whitespace is treated like an unwritten one. `|` is in the accepted set too and
+    would split the table's columns as is, so it is escaped as `\\|` (the form that does not
+    separate columns in a GFM table).
     """
     label = " ".join(quant.get("label", "").split()).replace("|", "\\|")
     description = " ".join(quant.get("description", "").split()).replace("|", "\\|")
@@ -297,16 +328,20 @@ def _presentation(quant: Mapping[str, Any]) -> str:
 def _download(
     model: Mapping[str, Any], quant: Mapping[str, Any], host_assets: Mapping[FileRefKey, int]
 ) -> str:
-    """quant 表の Download 欄 — この席を選んだときに落ちる合計と、合計と GPU 常駐量の差。
+    """The Download column of the quant table — the total downloaded when this preset is chosen,
+    and the difference between the total and what is resident on the GPU.
 
-    注記は 2 つ。`shared` は「2 本目のモデルではこの分を落とさない」量（{@link _is_shared}）で、
-    assets は**ホスト側で読むだけで GPU に載らない**分（gemma4 の PLE のように Download の
-    大半が assets という配布形がある）。後者は無視できない比率のときだけ添える — どのカードにも
-    書くと、数 MiB の tokenizer に読み手の目を向けさせるだけになる。
+    There are two notes. `shared` is the amount "not downloaded for a second model"
+    ({@link _is_shared}), and assets are the part **only read on the host, never uploaded to the
+    GPU** (some distributions, such as gemma4 with its PLE, are mostly assets by Download). The
+    latter is added only when its share is not negligible — writing it on every card would only
+    draw the reader's eye to a tokenizer of a few MiB.
 
-    MUST: assets の勘定は**独立したファイルの席**（manifest の `assets`）と**容器が宣言する
-    資産**（`host_assets` — ADR 0109 決定 4 で容器の中へ入った PLE / `rope_base`）の和で採る。
-    前者だけを数えると、資産を容器へ畳んだ配布形で内訳の説明だけが黙って消える。
+    MUST: the assets are counted as the sum of **the separate file fields** (`assets` of the
+    manifest) and **the assets the container declares** (`host_assets` — the PLE / `rope_base`
+    that moved into the container with ADR 0109 decision 4). Counting only the former would
+    silently drop just the breakdown note for distributions that folded their assets into the
+    container.
     """
     refs = _quant_refs(model, quant)
     asset_keys = {file_ref_key(ref) for ref in model["assets"].values()}
@@ -323,11 +358,13 @@ def _download(
 
 
 def _container_heads(model: Mapping[str, Any], quant: Mapping[str, Any]) -> set[FileRefKey]:
-    """その quant が選ぶコンテナの **part 0 の同一性**（`host_assets` の鍵 — 同じ容器は 1 度）。
+    """**The identity of part 0** of the containers the quant chooses (the keys of `host_assets`
+    — the same container once).
 
-    MUST: 鍵は path ではなく {@link file_ref_key} — 自リポの容器と、借用した容器（別リポ・
-    別 revision）の part 0 が同じ相対 path を持つと、path では 1 つに畳まれて片方の資産量が
-    落ちるか、借用した容器に自リポの資産量が足される。
+    MUST: the key is {@link file_ref_key}, not the path — when part 0 of our own container and of
+    a borrowed container (another repository / another revision) have the same relative path,
+    keying by path would fold them into one and either drop one side's asset bytes or add our own
+    asset bytes to the borrowed container.
     """
     return {
         file_ref_key(model["weights"][name][label]["container"]["parts"][0])
@@ -341,21 +378,26 @@ def quants(
     abbreviations: Mapping[str, str] | None = None,
     host_assets: Mapping[FileRefKey, int] = {},
 ) -> list[str]:
-    """quant 表（ADR 0074 の席名 + ADR 0075 の表示欄 + 席ごとのダウンロード量）。
+    """The quant table (ADR 0074 preset names + ADR 0075 display fields + the download size per
+    preset).
 
-    `abbreviations` は席名の部品上書きトークン（`i8+bert4` の `bert`）→ その weights 名。
-    **略称は recipe が定めるので、対応をカードに必ず出す**（ADR 0074 決定 4）— 表の 1 列目と
-    Weights 列の綴りが繋がるのはこの 1 行だけで、無いと `bert4` がどの部品の話か読めない。
-    略称を使っていない family は渡さない（トークンが weights 名そのものなら対応表は要らない）。
+    `abbreviations` maps the component-override token of a preset name (`bert` in `i8+bert4`) →
+    its weights name. **Abbreviations are set by the recipe, so the card always shows the mapping**
+    (ADR 0074 decision 4) — this one line is all that connects the table's first column with the
+    spellings of the Weights column; without it, which component `bert4` is about cannot be read.
+    Families that use no abbreviations do not pass it (when the token is the weights name itself,
+    no mapping is needed).
 
-    `host_assets`（part 0 の同一性 {@link file_ref_key} → 容器が宣言する資産の論理長の和）は
-    組み立てが {@link karume.dist.container_asset_bytes} から引いて渡す**容器の事実**で、
-    manifest からは導けない。渡さない呼び手（カードだけを組み直すテスト）では内訳注記が容器の
-    資産を数えない。
+    `host_assets` (part 0 identity {@link file_ref_key} → the sum of the logical lengths of the
+    assets the container declares) is **a fact of the container** that assembly takes from
+    {@link karume.dist.container_asset_bytes} and passes in; it cannot be derived from the
+    manifest. For callers that do not pass it (tests that only rebuild the card), the breakdown
+    note does not count the container's assets.
 
-    表の後ろの注記は、廃止したファイル表から**掛かるときだけ**引き継いだもの（sha256 の正本の
-    所在・dtype 語彙・`shared/`・越境参照）。掛からない配布形に載せると事実でない
-    主張になるので、条件は manifest から見る。
+    The notes after the table are what carried over from the dropped file table, **only when they
+    apply** (where the source of truth for sha256 is, the dtype vocabulary, `shared/`,
+    cross-repository references). Putting them on a distribution they do not apply to would be a
+    claim that is not a fact, so the conditions are read from the manifest.
     """
     default = model["defaultQuant"]
     lines = [
@@ -409,12 +451,14 @@ def quants(
     return lines
 
 
-#: `fromPretrained` の source 側に添える **revision を pin する手順**（全 family 共通の 1 組）。
+#: **The steps to pin a revision**, added to the source side of `fromPretrained` (one set shared
+#: by every family).
 #:
-#: 既定は `main` 追従で、そちらの方が「とりあえず動く」ので既定のまま書く。ただし配布リポは
-#: 上げ直す（ファイル名の変更・manifest の format 繰り上げ）ので、pin していない読み手は
-#: ある日突然壊れる — 既定の行の**すぐ隣**にコメントアウトで置き、外すだけで pin できる形に
-#: する（サンプルを 2 本に割ると、どちらが推奨か読めなくなる）。
+#: The default tracks `main`, which "just works", so the sample is written with the default. But
+#: the distribution repositories get re-uploaded (renamed files, a bumped manifest format), so a
+#: reader who did not pin breaks one day without warning — the pin is placed, commented out,
+#: **right next to** the default line, so removing the comment is all it takes (splitting the
+#: sample in two would make it unclear which one is recommended).
 REVISION_PIN_COMMENT: tuple[str, ...] = (
     "  // Pin a commit for reproducible builds — without it you track `main`, and a future",
     "  // repo update (renamed files, new manifest format) may break your app.",
@@ -430,15 +474,17 @@ def from_pretrained(
     *,
     disposable: str,
 ) -> list[str]:
-    """使い方スニペットの `fromPretrained` 呼び出し 1 つ（**object ref 形** + pin の席）。
+    """One `fromPretrained` call of the usage snippet (**object ref form** + the pin slot).
 
-    source を文字列 1 本ではなく `{ repo, revision? }` で綴るのは、revision を書く席がここ
-    以外に無いため（{@link REVISION_PIN_COMMENT}）。`options` は第 2 引数のオブジェクトへ
-    そのまま入る行の並び（family 固有のノブ — 2 スペース字下げ済みで渡す）。
+    The source is spelled as `{ repo, revision? }` rather than a single string because there is
+    no other place to write the revision ({@link REVISION_PIN_COMMENT}). `options` is the sequence
+    of lines that go into the second argument's object as is (family-specific knobs — passed
+    already indented by 2 spaces).
 
-    `disposable` は宣言の綴り（`using` / `await using`）— pipeline が同期 / 非同期どちらの
-    dispose を持つかは family 側の事実なので、ここでは選ばない（既定を持たない — 既定の綴りが
-    family の事実と違えば、カードの使い方がそのまま型エラーのコードになる）。
+    `disposable` is the declaration spelling (`using` / `await using`) — whether the pipeline has
+    a synchronous or an asynchronous dispose is a fact of the family, so it is not chosen here (no
+    default — a default spelling that disagrees with the family's fact would turn the card's usage
+    into code with a type error as is).
     """
     return [
         f"{disposable} pipeline = await {pipeline_class}.fromPretrained({{",
@@ -451,17 +497,19 @@ def from_pretrained(
 
 
 def default_model(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
-    """既定モデルのエントリ（リポ全体を 1 つ紹介するときの代表 — 使い方の既定でもある）。"""
+    """The default model's entry (the representative when introducing the repository as one — also
+    the default of the usage)."""
     return manifest["models"][manifest["defaultModel"]]
 
 
 def knob(value: Any) -> str:
-    """`defaults` の 1 値を綴る（文字列だけコード体 — 数値と名前を見分けられるように）。"""
+    """Spell one value of `defaults` (only strings in code font — so numbers and names can be told
+    apart)."""
     return f"`{value}`" if isinstance(value, str) else f"{value}"
 
 
 def render(sections: Sequence[Sequence[str]]) -> str:
-    """節の並びを 1 本の本文にする（末尾改行つき）。"""
+    """Join the sections into one body (with a trailing newline)."""
     return "\n".join(line for section in sections for line in section) + "\n"
 
 
@@ -469,10 +517,11 @@ def model_sections(
     manifest: Mapping[str, Any],
     per_model: Sequence[ModelSection],
 ) -> list[Sequence[str]]:
-    """モデルごとの節（`## Model: <name>`）を manifest の並びのまま組む。
+    """Assemble the per-model sections (`## Model: <name>`) in manifest order.
 
-    `per_model` は「モデルエントリを受けて節（行の並び）を返す」描き手の列 — pipeline 固有の
-    節（SBV2 のスタイル表など）をここへ差し込むための唯一の軸。
+    `per_model` is the list of renderers that "take a model entry and return a section (a
+    sequence of lines)" — the only axis for inserting pipeline-specific sections (SBV2's style
+    table and the like) here.
     """
     sections: list[Sequence[str]] = []
     for name, model in manifest["models"].items():

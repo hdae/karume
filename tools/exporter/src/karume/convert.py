@@ -1,40 +1,47 @@
-"""torch.export 済み ExportedProgram → IR v1 グラフ（docs/ir-v2.md）。
+"""torch.export'ed ExportedProgram → IR v1 graph (docs/ir-v2.md).
 
-入力はキュレーション済み decomp table を通した ExportedProgram（functionalize 済み・
-保存 op は高位のまま）。処理は 3 段:
+The input is an ExportedProgram run through the curated decomp table (functionalized, preserved
+ops still high-level). Processing has 3 steps:
 
-1. 定数畳み込み: 定数と shape シンボルだけに依存する部分木を、各シンボルの**最大値
-   （Tmax）で実評価**して initializer に焼き、実行時は記号 prefix スライス
-   （`sym_prefix_slice`）で先頭を切り出す（ADR 0010）。DeBERTa の相対位置バケット表
-   （log / ceil を含む）を export 時に焼き込むのが主目的 — バケット境界の 1ulp 差 →
-   gather 添字 1 ずれのバグクラスを構造的に排除する。
-2. aten → IR op 対応表による変換。未対応 aten op は **全件列挙して** fail loudly
-   （1 件ずつ落とすと語彙を埋める側が何本足りないのか分からない — ADR 0005 の診断規律）。
-   対応表そのもの（ハンドラ群）は {@link karume.aten_handlers} — ここはエンジン側。
-3. 純 op の CSE（同一 (op, ins, attrs, shape) を 1 本に畳む）。
+1. Constant folding: a subtree that depends only on constants and shape symbols is **evaluated
+   for real at each symbol's maximum (Tmax)** and baked into an initializer; at run time the
+   leading part is cut out with a symbolic prefix slice (`sym_prefix_slice`) (ADR 0010). The main
+   purpose is to bake DeBERTa's relative-position bucket table (which contains log / ceil) at
+   export time — it removes by construction the bug class "1 ulp difference at a bucket boundary →
+   gather index off by 1".
+2. Conversion through the aten → IR op table. Unsupported aten ops fail loudly **with all of them
+   listed** (failing one at a time leaves whoever fills in the vocabulary unable to tell how many
+   are missing — ADR 0005's diagnostic discipline). The table itself (the handlers) is
+   {@link karume.aten_handlers} — this is the engine side.
+3. CSE of pure ops (identical (op, ins, attrs, shape) collapse into one).
 
-MUST: 畳み込み allowlist（{@link FOLDABLE_OPS}）は「prefix スライスと可換な op」だけ —
-`f(T)[0:T,…] == f(Tmax)[0:T,…]` が成立しない op（次元縮約、T を値として使う正規化等）を
-入れてはならない。ただし**この不変条件は allowlist だけでは守れない**（allowlist 掲載 op と
-sym_size の合成で T が「値」として部分木に入りうる）ため、2 段で守る:
+MUST: the folding allowlist ({@link FOLDABLE_OPS}) holds only "ops that commute with a prefix
+slice" — an op for which `f(T)[0:T,…] == f(Tmax)[0:T,…]` does not hold (a dimension reduction, a
+normalization that uses T as a value, etc.) must not be added. However, **the allowlist alone
+cannot protect this invariant** (composing allowlisted ops with sym_size can bring T into a
+subtree as a "value"), so it is protected in 2 steps:
 
-1. シンボルの消費位置を見る — extent（長さ・形状）位置だけを {@link SYMBOL_EXTENT_ARGS} で
-   許し、値位置へ届いた部分木は foldable から外す（symbol-as-data の拒否）。外れた op は
-   通常の lowering へ落ち、語彙外なら未対応 op として export ごと拒否される。記号軸上の
-   位置を参照する形（記号軸を添字テンソルで引く index — 負かどうかは問わない・負の start の
-   slice・記号軸の cat / repeat / 縮約）と、bool / uint8 マスクの index も同じく構造で外す
-   （{@link _references_symbolic_position}）。マスクの index は沈黙誤値を塞ぐ除外ではなく、
-   従来も unbacked な出力長で明示的に落ちていた形を、語彙外の op として落ちる経路に揃える。
-2. 畳み込みのたびに Tmax と別の点で**2 点評価して prefix 一致を実測する**
-   （_check_prefix_commutes）。
+1. Look at where the symbol is consumed — only extent (length / shape) positions are allowed via
+   {@link SYMBOL_EXTENT_ARGS}, and a subtree reached at a value position is removed from foldable
+   (symbol-as-data is rejected). A removed op goes down the normal lowering, and if it is outside
+   the vocabulary the whole export is rejected as an unsupported op. Forms that reference a
+   position on a symbolic axis (an index that looks up a symbolic axis with an index tensor —
+   negative or not; a slice with a negative start; cat / repeat / reduction along a symbolic axis)
+   and index with a bool / uint8 mask are likewise removed by structure
+   ({@link _references_symbolic_position}). Excluding the mask index does not close a silent wrong
+   value; it routes a form that already failed explicitly on an unbacked output length onto the
+   path where it fails as an op outside the vocabulary.
+2. On every fold, **evaluate at 2 points, Tmax and another point, and check the prefix match by
+   observation** (_check_prefix_commutes).
 
-2 点評価は防波堤であって証明ではない — `(scalar_tensor(T)−Tmax)(scalar_tensor(T)−(Tmax−1))`
-のように 2 点で偶然一致する反例があり、単独では silent wrong value を通す。1 が本体。
+The 2-point evaluation is a breakwater, not a proof — there are counterexamples that agree at the
+2 points by accident, such as `(scalar_tensor(T)−Tmax)(scalar_tensor(T)−(Tmax−1))`, and on its own
+it lets a silent wrong value through. Step 1 is the main protection.
 
-シンボルは複数持てる。IR 上の名前は呼び出し側が symbol_names で与え、user 入力
-placeholder の出現順（= forward の引数順）で割り当てる — torch.export の内部シンボル名
-（`s97` 等）はグラフごとに変わるので IR に持ち込まない。1 つの次元に現れるシンボルは
-1 つだけ（`s20+s97` 形は fail loudly）。
+There can be several symbols. The caller gives the IR names through symbol_names, assigned in
+order of appearance of the user input placeholders (= forward's argument order) — torch.export's
+internal symbol names (`s97` etc.) change from graph to graph, so they are not carried into the
+IR. Only one symbol may appear in one dimension (the `s20+s97` form fails loudly).
 """
 
 from __future__ import annotations
@@ -51,8 +58,9 @@ from torch.export import ExportedProgram
 from torch.export.graph_signature import OutputKind
 from torch.fx import Node
 
-# 対応表側（{@link karume.aten_handlers}）へ出した共有物の束縛。import は convert →
-# aten_handlers の一方向のみ（逆辺を張ると対応表がエンジンへ食い込む）。
+# Bindings of the shared pieces moved out to the table side ({@link karume.aten_handlers}).
+# Imports go one way only, convert → aten_handlers (a reverse edge would pull the table into the
+# engine).
 from karume.aten_handlers import (
     ATEN_HANDLERS,
     DTYPE_NAMES,
@@ -74,27 +82,28 @@ from karume.ir import (
 from karume.ops import EMITTABLE_OPS, STRIDED_RANK
 from karume.shapes import assert_graph_shapes
 
-#: i32 の値域（境界正規化の検査に使う）。
+#: Value range of i32 (used by the boundary-normalization check).
 I32_MIN = -(2**31)
 I32_MAX = 2**31 - 1
 
-#: 焼いた定数の torch dtype → IR の格納 dtype（docs/ir-v2.md「値と型」）。
+#: torch dtype of a baked constant → IR storage dtype (docs/ir-v2.md "Values and types").
 #:
-#: f32 は「f32 値の符号化」語彙の素通し、`i32` は生の int32（ADR 0010 の明示的な例外）。
-#: i64 はここに来る前に normalize_boundary_tensor が i32 へ落とす。ここに無い dtype
-#: （bool 等）の定数は initializer の語彙が無いので fail loudly。
+#: f32 passes through the "encoding of f32 values" vocabulary; `i32` is raw int32 (ADR 0010's
+#: explicit exception). i64 is dropped to i32 by normalize_boundary_tensor before it gets here. A
+#: constant of a dtype not listed here (bool etc.) has no initializer vocabulary, so it fails
+#: loudly.
 _CONST_STORAGE = {torch.float32: "f32", torch.int32: "i32"}
 
 
 def normalize_boundary_tensor(tensor: torch.Tensor, where: str) -> torch.Tensor:
-    """境界テンソル（入出力の実データ）を IR v1 の意味論 dtype の実表現へ落とす。
+    """Drop a boundary tensor (input / output data) to the representation of IR v1's semantic dtype.
 
-    - i64 → i32（**値域外は fail loudly** — 黙って切り詰めると添字が静かにずれる）
-    - bool → u32 の 0 / 1（GPU 格納と同じ規約 — ADR 0009）
-    - f32 / i32 はそのまま
+    - i64 → i32 (**out of range fails loudly** — silent truncation shifts indices quietly)
+    - bool → u32 0 / 1 (the same convention as GPU storage — ADR 0009)
+    - f32 / i32 stay as they are
 
-    MUST: 変換点はここ 1 箇所。呼び出し側で `.to(torch.int32)` を書くと値域検査が
-    経路ごとに抜ける。
+    MUST: this is the single conversion point. Writing `.to(torch.int32)` at a call site drops the
+    range check on that path.
     """
     dtype = tensor.dtype
     if dtype is torch.float32 or dtype is torch.int32:
@@ -107,75 +116,83 @@ def normalize_boundary_tensor(tensor: torch.Tensor, where: str) -> torch.Tensor:
             high = int(tensor.max())
             if low < I32_MIN or high > I32_MAX:
                 raise ValueError(
-                    f"{where}: i64 の値域 [{low}, {high}] が i32 に収まらない"
-                    f"（[{I32_MIN}, {I32_MAX}]）— IR v1 は i64 を持たない（ADR 0009）"
+                    f"{where}: i64 value range [{low}, {high}] does not fit in i32"
+                    f" ([{I32_MIN}, {I32_MAX}]) — IR v1 has no i64 (ADR 0009)"
                 )
         return tensor.to(torch.int32).contiguous()
     raise NotImplementedError(
-        f"{where}: torch dtype {dtype} は IR v1 の意味論 dtype に落とせない"
-        f"（{', '.join(sorted(set(DTYPE_NAMES.values())))}）"
+        f"{where}: torch dtype {dtype} cannot be dropped to a semantic dtype of IR v1"
+        f" ({', '.join(sorted(set(DTYPE_NAMES.values())))})"
     )
 
 
 def _check_clone(node: Node) -> None:
-    """aten.clone → 恒等（IR に出さず入力の別名にする）。
+    """aten.clone → identity (not emitted to the IR; it becomes an alias of its input).
 
-    根拠: IR v1 の値は**常に連続**（permute / expand は strided コピーで連続化して出し、
-    reshape は要素順を変えない — ADR 0011）。連続な値の contiguous 化コピーは恒等なので、
-    実測 24 本（recon §2 の① permute 直後の材料化 ②③ dropout / functionalization 由来）は
-    まとめてここで吸収できる。
+    Grounds: IR v1 values are **always contiguous** (permute / expand are emitted as contiguous
+    strided copies, and reshape does not change the element order — ADR 0011). A contiguous copy of
+    a contiguous value is an identity, so the 24 observed (recon §2: ① materialization right after
+    a permute, ②③ from dropout / functionalization) are all absorbed here.
 
-    MUST: `memory_format` が連続以外の形は落とす。channels_last 等は「連続化」ではなく
-    別レイアウトへの並べ替えで、恒等に潰すと要素順が黙ってずれる。
+    MUST: forms whose `memory_format` is not contiguous are rejected. channels_last and the like
+    are not "making contiguous" but a reorder into another layout; collapsing them into an identity
+    shifts the element order silently.
     """
     extra = sorted(set(node.kwargs) - {"memory_format"})
-    _expect(not extra, node, f"kwargs {extra} を伴う clone は未対応")
+    _expect(not extra, node, f"clone with kwargs {extra} is not supported")
     memory_format = node.kwargs.get("memory_format", torch.contiguous_format)
     _expect(
         memory_format in (torch.contiguous_format, torch.preserve_format),
         node,
-        f"memory_format={memory_format} の clone は未対応（IR の値は常に連続 — ADR 0011）",
+        f"clone with memory_format={memory_format} is not supported"
+        " (IR values are always contiguous — ADR 0011)",
     )
 
 
-#: IR に出さない no-op（値は入力の別名になる）。値は「受理条件の検査関数」で、
-#: 無条件に別名化してよい op は None。
+#: No-ops not emitted to the IR (the value becomes an alias of the input). The value is "the check
+#: function of the acceptance condition"; an op that may be aliased unconditionally maps to None.
 SKIP_OPS: dict[Any, Callable[[Node], None] | None] = {
     aten.alias.default: None,
     aten._assert_tensor_metadata.default: None,
     aten.clone.default: _check_clone,
 }
 
-#: 畳み込みの 2 点評価点。MAX は全シンボルをその上限（Tmax）に、PROBE は全シンボルを
-#: **Tmax − 1** に置いた点。可換性の検査は両点を同時に切り替えて比べる。
+#: The 2 evaluation points of folding. MAX puts every symbol at its upper bound (Tmax), PROBE puts
+#: every symbol at **Tmax − 1**. The commutativity check switches both points together and
+#: compares.
 #:
-#: MUST: 第 2 点は Tmax と別の値で、かつ **2 以上**（torch.export の 0/1 特殊化は
-#: `Dim(min=2)` 運用の前提で、1 以下の点は「その長さでだけ成り立つ特殊形」を評価しうる）。
-#: 同一点になると 2 点評価が恒真化して検査が黙って無意味になる — _sym_range が門になる。
+#: MUST: the second point differs from Tmax and is **at least 2** (torch.export's 0/1
+#: specialization presupposes `Dim(min=2)`, and a point at 1 or below may evaluate "a special form
+#: that holds only at that length"). If the points coincide, the 2-point evaluation becomes
+#: tautological and the check silently means nothing — _sym_range is the guard.
 FOLD_POINT_MAX = "max"
 FOLD_POINT_PROBE = "probe"
 
-#: 2 点評価の第 2 点として許す最小値（0/1 特殊化の回避線）。
+#: Smallest value allowed as the second point of the 2-point evaluation (the line that avoids 0/1
+#: specialization).
 MIN_PROBE_VALUE = 2
 
-#: 定数畳み込みの allowlist。
+#: Allowlist of constant folding.
 #:
-#: 各 op が prefix スライスと可換な理由:
+#: Why each op commutes with a prefix slice:
 #:
-#: - `arange(T)` は `arange(Tmax)` の先頭 T 要素
-#: - elementwise / 比較 / 選択（where）は要素ごと（broadcast 込み — 対応次元が保たれる）
-#: - slice / squeeze / unsqueeze / permute は添字の付け替え。記号 view は
-#:   単位軸の追加・削除だけを許し、軸の分割・結合は実行時へ残す
-#: - `full` / `scalar_tensor` / `clone` / `_to_copy` は値そのものに触らない
+#: - `arange(T)` is the first T elements of `arange(Tmax)`
+#: - elementwise / comparison / selection (where) act per element (broadcast included — the
+#:   corresponding dimensions are kept)
+#: - slice / squeeze / unsqueeze / permute re-map indices. A symbolic view is allowed only to add or
+#:   remove unit axes; splitting or merging axes is left to run time
+#: - `full` / `scalar_tensor` / `clone` / `_to_copy` do not touch the values themselves
 #:
-#: 可換でない使われ方のうち「シンボルを値として消費する形」は {@link SYMBOL_EXTENT_ARGS} が
-#: foldable から外し、shape 依存 view と記号軸上の位置参照（{@link _references_symbolic_position}）
-#: は構造で除外する。_check_prefix_commutes の 2 点評価は
-#: 追加の反例検査であり、任意の op の可換性証明にはならない。ほかの除外理由は 3 つ:
-#: ① 実体化が爆発する op（expand。frontier で止める —
-#: ただし no-op expand だけは例外で `_classify_foldable` が通す）② 非決定な op（RNG）
-#: ③ 縮約・反転など prefix と可換でないことが自明な op。
-#: 語彙の増加は明示行為 — 表に無い op は畳まず、消費されれば未対応 op として落ちる。
+#: Of the non-commuting uses, "forms that consume a symbol as a value" are removed from foldable by
+#: {@link SYMBOL_EXTENT_ARGS}, and shape-dependent views and references to positions on a symbolic
+#: axis ({@link _references_symbolic_position}) are excluded by structure. The 2-point evaluation
+#: of _check_prefix_commutes is an additional counterexample check and does not prove
+#: commutativity for an arbitrary op. Three other reasons for exclusion:
+#: ① ops whose materialization explodes (expand; stopped at the frontier — except a no-op expand,
+#: which `_classify_foldable` lets through) ② non-deterministic ops (RNG)
+#: ③ ops that obviously do not commute with a prefix, such as reductions and flips.
+#: Growing the vocabulary is an explicit act — an op not in the table is not folded, and if it is
+#: consumed it fails as an unsupported op.
 FOLDABLE_OPS = {
     aten.arange.default,
     aten.arange.start_step,
@@ -199,8 +216,9 @@ FOLDABLE_OPS = {
     aten.squeeze.dims,
     aten.unsqueeze.default,
     aten.view.default,
-    # 相対位置バケット表（recon §2 の foldable 群 — ADR 0010）。いずれも要素ごとの写像で、
-    # 行 t / 列 j の値が T に依らないため prefix と可換。
+    # Relative-position bucket table (the foldable group of recon §2 — ADR 0010). All are
+    # per-element maps, and the value at row t / column j does not depend on T, so they commute
+    # with a prefix.
     aten.sign.default,
     aten.ceil.default,
     aten.clamp.default,
@@ -209,54 +227,63 @@ FOLDABLE_OPS = {
     aten.le.Scalar,
     aten.bitwise_and.Tensor,
     aten.where.self,
-    # RoPE と定数生成（ADR 0016 の FOLDABLE 拡張）。**実測で畳み frontier に現れた op だけ**を
-    # 足す（ADR の候補表のうち add.Scalar / mul.Scalar だけは正規化パスが先に潰すため
-    # frontier に現れず、足していない）。
+    # RoPE and constant generation (ADR 0016's FOLDABLE extension). **Only ops observed on the
+    # folding frontier** are added (of the ADR's candidate table, only add.Scalar / mul.Scalar are
+    # not added: a normalization pass collapses them first, so they never reach the frontier).
     #
-    # - `sin` / `cos` — RoPE の位置表そのもの。定数のうちに潰せば実行時の 1 dispatch が丸ごと
-    #   消えるので、`sin` が IR 語彙に入った後もここから外さない（`cos` は語彙に無いため、
-    #   畳めない = 落ちるのは従来どおり）。実行時値を取る `sin` だけが `_simple` へ落ちる
-    # - `reciprocal` / `pow.Scalar` — inv_freq の生成式（`1 / theta**(i/D)`）
-    # - `repeat` — DiT の rope 表を patch グリッドへ配る段（葉は定数のみ・出力は 1024×128 級）
-    # - `bmm` — conditioner / Qwen3 の `inv_freq[…] @ position_ids[…]`（[1,D/2,1] × [1,1,T]）
+    # - `sin` / `cos` — the RoPE position table itself. Collapsing it while it is still constant
+    #   removes one run-time dispatch outright, so `sin` stays here even after it entered the IR
+    #   vocabulary (`cos` is not in the vocabulary, so not folding = failing, as before). Only a
+    #   `sin` that takes a run-time value goes down to `_simple`
+    # - `reciprocal` / `pow.Scalar` — the inv_freq formula (`1 / theta**(i/D)`)
+    # - `repeat` — the step that spreads DiT's rope table over the patch grid (leaves are constants
+    #   only; output on the order of 1024×128)
+    # - `bmm` — `inv_freq[…] @ position_ids[…]` of the conditioner / Qwen3 ([1,D/2,1] × [1,1,T])
     aten.sin.default,
     aten.cos.default,
     aten.reciprocal.default,
     aten.pow.Scalar,
     aten.repeat.default,
     aten.bmm.default,
-    # 因果マスクの生成（transformers の `create_causal_mask` — 葉は arange と定数だけ）。
-    # ここを畳まないと i64 の添字計算がそのまま IR に残る（ADR 0009 の境界正規化の射程外）。
+    # Causal mask generation (transformers' `create_causal_mask` — leaves are arange and constants
+    # only). Without folding this, the i64 index arithmetic stays in the IR as is (out of reach of
+    # ADR 0009's boundary normalization).
     aten.cumsum.default,
     aten.index.Tensor,
     aten.eq.Tensor,
     aten.le.Tensor,
     aten.ne.Scalar,
-    # sliding-window と因果マスクの合成（Gemma3 の `create_masks_for_generate` — 2 本の
-    # 帯マスクを `|` で重ね、窓の外を `>` で判定する）。どちらも要素ごとの比較 / 論理和で、
-    # 行 t / 列 j の値が T に依らないため prefix と可換（2 点評価も通ることを実測）。
+    # Composition of the sliding-window and causal masks (Gemma3's `create_masks_for_generate` —
+    # overlays 2 band masks with `|` and tests outside the window with `>`). Both are per-element
+    # comparisons / logical ors, and the value at row t / column j does not depend on T, so they
+    # commute with a prefix (observed to pass the 2-point evaluation as well).
     aten.bitwise_or.Tensor,
     aten.gt.Tensor,
-    # 双方向（非因果）マスクの生成（transformers の `bidirectional_mask_function` は
-    # `q_idx >= 0` を全域 true の種として使う）。比較 1 本で、行 t / 列 j の値が T に
-    # 依らないため prefix と可換。
+    # Bidirectional (non-causal) mask generation (transformers' `bidirectional_mask_function`
+    # uses `q_idx >= 0` as an all-true seed). One comparison, and the value at row t / column j
+    # does not depend on T, so it commutes with a prefix.
     aten.ge.Scalar,
 }
 
-#: 畳み込み対象 op で **シンボルが現れてよい引数**（= extent = 長さ・形状）の名前。
+#: Names of the arguments of foldable ops **where a symbol may appear** (= extent = length /
+#: shape).
 #:
-#: MUST: ここに載らない引数へシンボルが届いたノードは、シンボルを**値**として消費した
-#: （テンソルデータへ昇格させた）ものとして foldable から外す。extent 位置なら T が動かすのは
-#: 焼いた定数の**長さ**だけで prefix 同型が保たれるが、値位置に入ると要素の**中身**が Tmax
-#: でしか正しくない定数になり、2 点評価は偶然一致しうる（`scalar_tensor(T)` から作る
-#: `(T−Tmax)(T−(Tmax−1))` が反例 — 焼けば T=Tmax, Tmax−1 以外で黙って値が変わる）。
+#: MUST: a node in which a symbol reaches an argument not listed here has consumed the symbol **as
+#: a value** (promoted it to tensor data) and is removed from foldable. At an extent position T
+#: moves only the **length** of the baked constant and prefix isomorphism holds; at a value
+#: position the element **contents** become a constant that is right only at Tmax, and the 2-point
+#: evaluation can agree by accident (`(T−Tmax)(T−(Tmax−1))` built from `scalar_tensor(T)` is a
+#: counterexample — once baked, the value changes silently for any T other than Tmax and Tmax−1).
 #:
-#: - `arange` — `end` だけ。値は start / step が決め、T は長さしか動かさない
-#: - `full` / `view` / `expand` / `repeat` — 形（size / repeats）は extent、`fill_value` は値
-#: - `slice` — `end` だけ（`start` が T 依存だと先頭以外を切り出す = prefix と可換でない）
+#: - `arange` — `end` only. start / step decide the values; T moves only the length
+#: - `full` / `view` / `expand` / `repeat` — the shape (size / repeats) is an extent, `fill_value`
+#:   is a value
+#: - `slice` — `end` only (a T-dependent `start` cuts out something other than the leading part =
+#:   does not commute with a prefix)
 #:
-#: 表に無い op（`scalar_tensor` / 二項 elementwise / スカラ比較 / 軸指定の dim 等）は extent
-#: 引数を持たない — シンボルが届いた時点で値としての消費。分類が不明な位置は除外側へ倒す。
+#: Ops not in the table (`scalar_tensor` / binary elementwise / scalar comparisons / an axis `dim`,
+#: etc.) have no extent argument — a symbol reaching them is consumption as a value. A position of
+#: unknown class falls on the excluded side.
 SYMBOL_EXTENT_ARGS: dict[Any, frozenset[str]] = {
     aten.arange.default: frozenset({"end"}),
     aten.arange.start_step: frozenset({"end"}),
@@ -267,29 +294,36 @@ SYMBOL_EXTENT_ARGS: dict[Any, frozenset[str]] = {
     aten.slice.Tensor: frozenset({"end"}),
 }
 
-#: 分解を止める（融合を保つ）高位 op = **ADR 0007 の 9 op**（ADR 0012 で gelu のみから拡張）。
+#: High-level ops whose decomposition is stopped (fusion kept) = **ADR 0007's 9 ops** (extended
+#: from gelu alone in ADR 0012).
 #:
-#: 分解させるとカーネル粒度と 1 対 1 でなくなるものだけを外す:
+#: Only ops that, once decomposed, no longer map 1:1 to a kernel are taken out:
 #:
-#: - `linear` — addmm + view に散る（実測 16 本 / 2 層）。融合カーネル 1 本が正。
-#: - `layer_norm` — native_layer_norm（**3 出力**）+ getitem になり、多出力 aten の getitem
-#:   結線は sampling の実需まで先送り（ADR 0068 追記）なので受けられない。ここは保存が事実上必須。
-#: - `softmax` — `aten._softmax` になるだけで得が無い。safe-softmax の 1 カーネルを保つ。
-#: - `gelu` — erf / tanh 近似の合成に散る（M0 から保存）。
-#: - `conv1d` / `conv2d` / `conv3d` / `conv_transpose1d` — 汎用 `aten.convolution` 形になる。
-#: - `embedding` — core 分解では元々分解されないが、保存リストに載せて意図を明示する。
-#: - `masked_fill` — where + scalar_tensor に散る。埋め値を attrs に載せる形を保つ。
-#: - `leaky_relu` — ADR 0015 で追加（9 op → 10 op）。分解形は `gt_scalar + mul + where` で
-#:   中間バッファが 1.5〜2 倍に膨らみ、dec のメモリ見積の前提が崩れる。
+#: - `linear` — scatters into addmm + view (16 observed / 2 layers). One fused kernel is right.
+#: - `layer_norm` — becomes native_layer_norm (**3 outputs**) + getitem, and getitem wiring of
+#:   multi-output aten is deferred until sampling needs it (ADR 0068 addendum 2), so it cannot be
+#:   accepted. Preserving it is effectively mandatory.
+#: - `softmax` — only becomes `aten._softmax`, nothing gained. Keeps the one safe-softmax kernel.
+#: - `gelu` — scatters into a composition of the erf / tanh approximation (preserved since M0).
+#: - `conv1d` / `conv2d` / `conv3d` / `conv_transpose1d` — become the generic `aten.convolution`
+#:   form.
+#: - `embedding` — not decomposed by the core decomposition anyway, but listed in the preserved
+#:   list to make the intent explicit.
+#: - `masked_fill` — scatters into where + scalar_tensor. Keeps the form with the fill value in
+#:   attrs.
+#: - `leaky_relu` — added in ADR 0015 (9 ops → 10 ops). The decomposed form is
+#:   `gt_scalar + mul + where`; intermediate buffers grow 1.5–2×, breaking the premise of dec's
+#:   memory estimate.
 #:
-#: - `rms_norm` — ADR 0017 で追加（10 op → 11 op）。diffusers `nn.RMSNorm` 由来の
-#:   `aten.rms_norm` を保存する経路で、手書き分解形（Qwen3 / DiT）は保存では畳めないので
-#:   `normalize._fold_rms_norm` が受け持つ（供給ルート 2 系統 — ADR 0017）。
+#: - `rms_norm` — added in ADR 0017 (10 ops → 11 ops). The path that preserves `aten.rms_norm`
+#:   from diffusers' `nn.RMSNorm`; hand-written decomposed forms (Qwen3 / DiT) cannot be folded by
+#:   preservation, so `normalize._fold_rms_norm` takes them (2 supply routes — ADR 0017).
 #:
-#: NOTE: conv_transpose1d は ADR 0015 で、conv2d は ADR 0017 でカーネル・契約表・ハンドラが
-#: 揃った（それぞれ dec の ups 5 本 / Anima VAE decoder の 37 本）。conv3d は ADR 0118 決定 1
-#: （拡張分子層・Core ATen 外 — 動画 VAE の causal conv）で、unbatched の `F.conv3d` は
-#: `aten.conv3d.default` のまま rank 4 入力で trace に残る（torch 2.13.0 で実測 — 正規化パス不要）。
+#: NOTE: conv_transpose1d got its kernel, contract table and handler in ADR 0015, conv2d in ADR
+#: 0017 (dec's 5 ups / Anima VAE decoder's 37, respectively). conv3d is ADR 0118 decision 1
+#: (extended composite layer, outside Core ATen — the causal conv of the video VAE); an unbatched
+#: `F.conv3d` stays in the trace as `aten.conv3d.default` with a rank-4 input (observed with torch
+#: 2.13.0 — no normalization pass needed).
 PRESERVED_OP_PREFIXES = (
     "aten.conv1d.",
     "aten.conv2d.",
@@ -305,37 +339,38 @@ PRESERVED_OP_PREFIXES = (
     "aten.softmax.",
 )
 
-#: 融合 attention（ADR 0023）を保存する接頭辞。
+#: Prefix that preserves fused attention (ADR 0023).
 #:
-#: MUST: 既定の {@link PRESERVED_OP_PREFIXES} には**入れない**。表はグローバルなので、足すと
-#: 契約外のマスク（bool のまま kwargs で渡る形・`[B,1,M,N]` 等）を持つ SDPA まで保存対象に
-#: なり、`_h_attention` の fail loudly で **export できなくなる**。有効化は
-#: `curated_decompositions(preserved=…)` を通した**ターゲット別**の選択で行う
-#: （ADR 0016 の safe-softmax ガード除去パスをそのまま効かせ続けるため）。
+#: MUST: **not** part of the default {@link PRESERVED_OP_PREFIXES}. The table is global, so adding
+#: it would also preserve SDPA with masks outside the contract (a bool mask passed through kwargs,
+#: `[B,1,M,N]`, etc.), and `_h_attention`'s fail-loudly **would make export impossible**. It is
+#: enabled by a **per-target** choice through `curated_decompositions(preserved=…)` (so that
+#: ADR 0016's safe-softmax guard removal pass keeps working as it is).
 ATTENTION_OP_PREFIX = "aten.scaled_dot_product_attention."
 
-#: SDPA を保存する preserved 集合（マスク無し、または加算型 `[1,1,M,N]` マスクだけを持つ
-#: ターゲット専用 — DiT / VAE decoder / EmbeddingGemma）。
+#: The preserved set that keeps SDPA (only for targets with no mask or only an additive
+#: `[1,1,M,N]` mask — DiT / VAE decoder / EmbeddingGemma).
 PRESERVED_OP_PREFIXES_WITH_ATTENTION = (*PRESERVED_OP_PREFIXES, ATTENTION_OP_PREFIX)
 
 
-#: 未対応 op の Core ATen 帰属。語彙へ足すときの ADR 要否はこの 1 判定で決まる
-#: （docs/op-vocabulary.md「op 追加の判定手順」— 入場券 = `torch.Tag.core in op.tags`）。
-#: `non_aten` は aten 名前空間の外（`operator.getitem`・カスタム op 等）で、判定の対象外。
+#: Core ATen membership of an unsupported op. Whether adding it to the vocabulary needs an ADR is
+#: decided by this one test (docs/op-vocabulary.md "Procedure for adding an op" — the entry test =
+#: `torch.Tag.core in op.tags`). `non_aten` is outside the aten namespace (`operator.getitem`,
+#: custom ops, etc.) and is not subject to the test.
 AtenCategory = Literal["core_aten", "non_core_aten", "non_aten"]
 
 _CATEGORY_LABELS: dict[AtenCategory, str] = {
     "core_aten": "Core ATen",
-    "non_core_aten": "Core ATen 外",
-    "non_aten": "aten 外",
+    "non_core_aten": "outside Core ATen",
+    "non_aten": "outside aten",
 }
 
 
 def aten_category(target: object) -> AtenCategory:
-    """FX ノードの target の Core ATen 帰属を、使っている torch 自身のタグから判定する。
+    """Decide the Core ATen membership of an FX node's target from the tags of the torch in use.
 
-    MUST: 手書きの名簿を持たない — Core ATen の集合は torch の版で動くので、名簿は黙って
-    古くなる。判定の正本は torch のスキーマに付いた `Tag.core`。
+    MUST: no hand-written list — the Core ATen set moves with the torch version, so a list goes
+    stale silently. The source of truth for the test is the `Tag.core` on torch's schema.
     """
     if isinstance(target, torch._ops.OpOverload) and target.namespace == "aten":
         return "core_aten" if torch.Tag.core in target.tags else "non_core_aten"
@@ -344,30 +379,31 @@ def aten_category(target: object) -> AtenCategory:
 
 @dataclass(frozen=True)
 class ModuleOrigin:
-    """未対応 op を出したモジュール（`nn_module_stack` の最内側のクラス単位）。
+    """The module that produced an unsupported op (per innermost class of `nn_module_stack`).
 
-    クラス単位でまとめるのは、同じ層を繰り返すモデル（ブロックの多段積み）でパスごとに
-    並べると行数が段数に比例して読めなくなるため。書き換える場所は「どのクラスか」で
-    決まり、パスは最初の 1 つで探し当てられる。
+    Grouping by class is because, in a model that repeats the same layer (stacked blocks), listing
+    by path makes the line count grow with the depth until it is unreadable. Where to rewrite is
+    decided by "which class", and the first path is enough to find it.
     """
 
-    #: クラスの完全修飾名（`nn_module_stack` の値そのまま）。
+    #: Fully qualified name of the class (the `nn_module_stack` value as is).
     module_type: str
-    #: そのクラスの最初のノードのモジュールパス（`""` = ルートの forward）。
+    #: Module path of the class's first node (`""` = the root's forward).
     first_path: str
     count: int
 
 
 @dataclass(frozen=True)
 class UnsupportedOpReport:
-    """未対応 op 1 種ぶんの判断材料（Core ATen 帰属・由来モジュール・出現数）。"""
+    """Decision material for one unsupported op (Core ATen membership, source modules, count)."""
 
     target: str
     category: AtenCategory
     nodes: tuple[str, ...]
-    #: 由来モジュール（最初に出た順）。
+    #: Source modules (in order of first appearance).
     origins: tuple[ModuleOrigin, ...]
-    #: `nn_module_stack` を持たないノードの数（normalize が作ったノード等 — 由来は捏造しない）。
+    #: Number of nodes without `nn_module_stack` (nodes created by normalize, etc. — no source is
+    #: made up).
     untracked: int
 
     @property
@@ -376,11 +412,11 @@ class UnsupportedOpReport:
 
 
 def _innermost_module(node: Node) -> tuple[str, str] | None:
-    """ノードを出した最内側のモジュールの (パス, クラス名)。スタックが無ければ None。"""
+    """(path, class name) of the innermost module that produced the node; None without a stack."""
     stack = node.meta.get("nn_module_stack")
     if not stack:
         return None
-    # torch.export はスタックを外側から内側の順の dict で積む（最後が最内側）。
+    # torch.export stacks the modules in a dict from outermost to innermost (the last is innermost).
     path, module_type = list(stack.values())[-1]
     return str(path), str(module_type)
 
@@ -415,19 +451,19 @@ def _describe(report: UnsupportedOpReport) -> str:
         for origin in report.origins
     ]
     if report.untracked:
-        sources.append(f"モジュール不明 ×{report.untracked}")
+        sources.append(f"unknown module ×{report.untracked}")
     return (
         f"  - {report.target} ×{report.count} [{_CATEGORY_LABELS[report.category]}]"
-        f" 由来: {', '.join(sources)} / nodes: {', '.join(report.nodes)}"
+        f" from: {', '.join(sources)} / nodes: {', '.join(report.nodes)}"
     )
 
 
 class UnsupportedAtenOpsError(NotImplementedError):
-    """IR 語彙に対応表を持たない aten op（全件列挙）。
+    """aten ops with no table entry in the IR vocabulary (all of them listed).
 
-    op ごとに Core ATen 帰属・由来モジュール・出現数を添える — 語彙へ足す（ADR の要否が
-    Core ATen 帰属で分かれる）か、recipe 側でモジュールを書き換えて避けるかを、エラー 1 回で
-    決められるようにするため。
+    Each op carries its Core ATen membership, source modules and count — so that a single error is
+    enough to decide whether to add it to the vocabulary (whether an ADR is needed depends on Core
+    ATen membership) or to avoid it by rewriting the module on the recipe side.
     """
 
     def __init__(self, nodes: Sequence[Node]) -> None:
@@ -438,20 +474,25 @@ class UnsupportedAtenOpsError(NotImplementedError):
         self.ops = {target: list(report.nodes) for target, report in self.reports.items()}
         listed = "\n".join(_describe(report) for report in self.reports.values())
         super().__init__(
-            f"未対応 aten op {len(self.reports)} 種:\n{listed}\n"
-            "分類: [Core ATen] = torch.Tag.core 付き（語彙へ足すなら台帳 NOTE のみ。"
-            "ただし単一出力等の実行モデルの不変条件を壊す追加は ADR 必須 — ADR 0064 軸 B）"
-            " / [Core ATen 外] = 語彙へ足すなら ADR 必須（先に分解か recipe 側の書き換えを検討）"
-            " / [aten 外] = operator.getitem・カスタム op 等（Core ATen の判定の対象外）。"
-            "判定の順序と例外は docs/op-vocabulary.md「op 追加の判定手順」"
+            f"unsupported aten ops ({len(self.reports)} kinds):\n{listed}\n"
+            "Classes: [Core ATen] = tagged torch.Tag.core (adding it to the vocabulary needs only"
+            " a ledger NOTE; but an addition that breaks an execution-model invariant such as"
+            " single output requires an ADR — ADR 0064 axis B)"
+            " / [outside Core ATen] = adding it to the vocabulary requires an ADR (consider a"
+            " decomposition or a rewrite on the recipe side first)"
+            " / [outside aten] = operator.getitem, custom ops, etc. (not subject to the Core ATen"
+            " test). "
+            'The order of the test and its exceptions: docs/op-vocabulary.md "Procedure for adding'
+            ' an op"'
         )
 
 
 def _carries_symbol(value: Any) -> bool:
-    """引数が **シンボルを値として運ぶ**か（SymInt そのもの / SymInt を運ぶノード）。
+    """Whether an argument **carries a symbol as a value** (a SymInt itself / a node carrying one).
 
-    テンソル引数は False — テンソル経由の伝播は「消費したノードを foldable から外す」形で
-    部分木単位に効くので、ここで見るのは記号が新たに入ってくる口だけ。
+    Tensor arguments are False — propagation through tensors works per subtree by "removing the
+    consuming node from foldable", so only the entry points where a symbol newly comes in are
+    looked at here.
     """
     if isinstance(value, Node):
         val = value.meta.get("val")
@@ -464,9 +505,10 @@ def _carries_symbol(value: Any) -> bool:
 
 
 def _uses_symbol_as_data(node: Node) -> bool:
-    """シンボルを extent 以外の引数位置（= 値）で消費するノードか（{@link SYMBOL_EXTENT_ARGS}）。
+    """Whether a node consumes a symbol at a non-extent argument position (= a value).
 
-    引数名は op のスキーマから引く — 位置引数と kwargs のどちらで来ても同じ判定にするため。
+    See {@link SYMBOL_EXTENT_ARGS}. Argument names are looked up in the op's schema — so the test
+    is the same whether the argument comes positionally or as a kwarg.
     """
     allowed = SYMBOL_EXTENT_ARGS.get(node.target, frozenset())
     names = [argument.name for argument in node.target._schema.arguments]
@@ -475,7 +517,7 @@ def _uses_symbol_as_data(node: Node) -> bool:
 
 
 def _schema_args(node: Node) -> dict[str, Any]:
-    """op スキーマの引数名 → 値（位置引数・kwargs・既定値のどれで来ても同じ表にする）。"""
+    """op schema argument name → value (one table whether positional, kwarg or default)."""
     arguments = node.target._schema.arguments
     bound = {
         argument.name: argument.default_value
@@ -487,7 +529,7 @@ def _schema_args(node: Node) -> dict[str, Any]:
     return bound
 
 
-#: {@link _references_symbolic_position} が形を検査する op（いずれも {@link FOLDABLE_OPS} の内）。
+#: Ops whose form {@link _references_symbolic_position} checks (all within {@link FOLDABLE_OPS}).
 _POSITION_SENSITIVE_OPS = frozenset(
     {
         aten.index.Tensor,
@@ -499,31 +541,38 @@ _POSITION_SENSITIVE_OPS = frozenset(
 )
 
 
-#: torch がマスクとして解釈する添字の dtype（uint8 は非推奨だが bool と同じくマスク扱い）。
+#: Index dtypes torch interprets as a mask (uint8 is deprecated but treated as a mask like bool).
 _MASK_INDEX_DTYPES = frozenset({torch.bool, torch.uint8})
 
 
 def _references_symbolic_position(node: Node) -> bool:
-    """記号軸上の**位置**を参照する形か（prefix と可換でないことが構造で決まる形）。
+    """Whether a form references a **position** on a symbolic axis (structurally not commuting).
 
-    MUST: 記号が値位置へ届かなくても（{@link _uses_symbol_as_data} を通っても）、記号長の
-    軸を「末尾から数える」「全長を畳む」形は長さ T を要素の値へ変える。`arange(T)[[-1]]` は
-    T−1、`arange(T)[-2:]` は `[T−2, T−1]` になり、後段の比較が Tmax と Tmax−1 の 2 点で
-    偶然一致すると 2 点評価をすり抜けて沈黙誤値になる。値の偶然に頼らないよう、次の形は
-    添字の値を見ずに畳み込みから外す（ADR 0010 の 2026-10-10 追記）:
+    MUST: even when the symbol does not reach a value position (it passes
+    {@link _uses_symbol_as_data}), a form that "counts from the end" or "reduces the whole length"
+    of a symbolic-length axis turns the length T into element values. `arange(T)[[-1]]` becomes
+    T−1 and `arange(T)[-2:]` becomes `[T−2, T−1]`; if a later comparison happens to agree at the 2
+    points Tmax and Tmax−1, it slips past the 2-point evaluation as a silent wrong value. So as not
+    to rely on the values by chance, the following forms are removed from folding without looking
+    at the index values (ADR 0010's addendum of 2026-10-10):
 
-    - `index` — 記号軸を添字テンソルで引く（負の添字は長さで折り返す。添字が非負かは値の
-      性質で、構造からは決まらない）。bool / uint8 のマスク添字は記号軸の有無を問わず外す —
-      rank 2 以上のマスクは複数の軸を占めるので「添字 k ↔ 入力の軸 k」の対応が崩れ、記号軸が
-      マスクの 2 軸目以降に隠れる（保守的な側に倒す）。ただしマスク添字の出力長はマスクの
-      値で決まる unbacked な記号になり、この除外が無くても焼いた結果の shape で明示的に
-      落ちていた（{@link Converter._sym_parts} の「入力 shape に現れないシンボル」）。
-      沈黙誤値を塞ぐ規則ではなく、失敗の出方を語彙外の op（未対応 op の全件列挙）へ揃える
-    - `slice` — 記号軸を負の start で切る（末尾から数える）。非負の start は先頭からの位置
-      なので prefix と可換のまま畳む
-    - `cat` — 記号軸に沿って連結する（後ろの入力の位置が前の入力の長さ T でずれる）
-    - `repeat` — 記号軸を 2 回以上繰り返す（cat と同じ — 2 周目の位置が T でずれる）
-    - `bmm` — 記号軸で縮約する（T 個ぶんの和で、全長に依存する）
+    - `index` — looks up a symbolic axis with an index tensor (a negative index wraps by the
+      length; whether an index is non-negative is a property of the values and is not decided by
+      structure). A bool / uint8 mask index is removed whether or not there is a symbolic axis — a
+      mask of rank 2 or more spans several axes, so the "index k ↔ input axis k" correspondence
+      breaks and a symbolic axis can hide behind the mask's second or later axis (falls on the
+      conservative side). The output length of a mask index is, however, an unbacked symbol decided
+      by the mask's values, and even without this exclusion it already failed explicitly on the
+      baked result's shape ({@link Converter._sym_parts}'s "symbol that does not appear in an input
+      shape"). This is not a rule that closes a silent wrong value; it aligns how the failure shows
+      up with an op outside the vocabulary (the full list of unsupported ops)
+    - `slice` — cuts a symbolic axis with a negative start (counting from the end). A non-negative
+      start is a position from the front, so it commutes with a prefix and is folded
+    - `cat` — concatenates along a symbolic axis (positions of later inputs shift by the length T
+      of earlier ones)
+    - `repeat` — repeats a symbolic axis 2 or more times (as with cat — positions of the second
+      round shift by T)
+    - `bmm` — contracts over a symbolic axis (a sum of T terms, depends on the whole length)
     """
     target = node.target
     if target not in _POSITION_SENSITIVE_OPS:
@@ -551,23 +600,24 @@ def _references_symbolic_position(node: Node) -> bool:
             and start < 0
         )
     if target is aten.repeat.default:
-        # repeats は右詰めで入力の軸に対応する（先頭の余りは新しい軸）。
+        # repeats map to the input axes right-aligned (the leading extras are new axes).
         counts = args["repeats"][len(args["repeats"]) - source.dim() :]
         return any(
             _has_free_symbols(extent) and not (isinstance(count, int) and count == 1)
             for extent, count in zip(source.shape, counts, strict=True)
         )
-    # bmm: [b, n, k] × [b, k, m] の縮約軸 k。
+    # bmm: contraction axis k of [b, n, k] × [b, k, m].
     return _has_free_symbols(source.shape[2])
 
 
 def _bitwise_equal(left: torch.Tensor, right: torch.Tensor) -> bool:
-    """2 つのテンソルを dtype / shape 込みで **ビット厳密**に比べる。
+    """Compare 2 tensors **bit-exactly**, dtype and shape included.
 
-    MUST: 畳み込みの 2 点比較を数値等価（`torch.equal`）でやると `-0.0 == 0.0` が真になり、
-    符号ビットだけ違う定数を焼く形が素通りする（initializer は signed zero をそのまま運ぶので、
-    実行時に符号が黙って変わる）。浮動小数は連続バイト列の整数 view で比べ、NaN も payload
-    まで一致した時だけ通す。
+    MUST: doing folding's 2-point comparison with numeric equality (`torch.equal`) makes
+    `-0.0 == 0.0` true and lets through a form that bakes a constant differing only in the sign bit
+    (initializers carry signed zero as is, so the sign changes silently at run time). Floats are
+    compared through an integer view of the contiguous bytes, and NaN passes only when the payload
+    matches too.
     """
     if left.dtype is not right.dtype or left.shape != right.shape:
         return False
@@ -590,11 +640,14 @@ class Converter:
         self.ep = ep
         self.symbol_names = tuple(symbol_names)
         if len(set(self.symbol_names)) != len(self.symbol_names):
-            raise ValueError(f"symbol_names に重複がある: {self.symbol_names}")
+            raise ValueError(f"symbol_names has duplicates: {self.symbol_names}")
         for name in self.symbol_names:
-            # 名前が次元表記の文法に載らないと、書けてもランタイムが読めない次元になる。
+            # A name outside the grammar of the dimension notation would give a dimension that can
+            # be written but not read by the runtime.
             if not is_symbol_name(name):
-                raise ValueError(f"IR シンボル名 {name!r} は次元表記の文法に載らない")
+                raise ValueError(
+                    f"IR symbol name {name!r} is not in the grammar of the dimension notation"
+                )
         self.gm = ep.graph_module
         signature = ep.graph_signature
         self.placeholder_fqn: dict[str, str] = {
@@ -611,50 +664,60 @@ class Converter:
         }
         self.graph = IrGraph()
         self.tensors: dict[str, torch.Tensor] = {}
-        # FX ノード名 → IR 値名
+        # FX node name → IR value name
         self.value_of: dict[str, str] = {}
-        # SKIP op の遅延エイリアス
+        # Deferred aliases of SKIP ops
         self.alias_of: dict[str, Node] = {}
-        # torch 内部シンボル名 → IR シンボル名
+        # torch internal symbol name → IR symbol name
         self.sym_names: dict[str, str] = {}
-        # IR シンボル名 → (下限, 上限)。上限が Tmax（畳み込みの第 1 評価点）。
+        # IR symbol name → (lower bound, upper bound). The upper bound is Tmax (folding's first
+        # evaluation point).
         #
-        # MUST: 出どころは ExportedProgram の range_constraints 1 箇所（= dynamic_shapes の
-        # `Dim(min=…, max=…)` が torch に登録した制約そのもの）。呼び出し側から Tmax を
-        # 別引数で受けると dynamic_shapes と二重管理になり、食い違ったときに「宣言より
-        # 短い定数を焼いて実行時に範囲外」が黙って通る。
+        # MUST: the single source is the ExportedProgram's range_constraints (= exactly the
+        # constraints that dynamic_shapes' `Dim(min=…, max=…)` registered with torch). Taking Tmax
+        # from the caller as a separate argument would duplicate dynamic_shapes, and when the two
+        # disagree "a constant baked shorter than declared, out of range at run time" passes
+        # silently.
         self.sym_ranges: dict[str, tuple[Any, Any]] = {}
-        # MUST: キーは**素のシンボル**だけを拾う。派生次元（`Dim("S") + 1519` を入力 shape に
-        # 宣言した形 — ADR 0046）を dynamic_shapes に書くと range_constraints に sympy の
-        # `Add`（`s27 + 1519`）がキーとして並び、`.name` を持たないので走査ごと落ちる。
-        # 派生次元の値域は素のシンボルの値域から決まる冗長情報なので、除いて失うものは無い。
+        # MUST: only **plain symbols** are picked up as keys. Writing a derived dimension (a
+        # `Dim("S") + 1519` declared in an input shape — ADR 0046) into dynamic_shapes puts a sympy
+        # `Add` (`s27 + 1519`) among the range_constraints keys, which has no `.name` and breaks
+        # the whole scan. A derived dimension's range is redundant information decided by the
+        # plain symbol's range, so nothing is lost by leaving it out.
         self._internal_ranges: dict[str, tuple[Any, Any]] = {
             symbol.name: (value_range.lower, value_range.upper)
             for symbol, value_range in ep.range_constraints.items()
-            # sympy を直接 import しない（torch の推移依存で、宣言依存には無い）— 素の
-            # シンボルであることは sympy 自身が全式に持たせる述語で見る。
+            # sympy is not imported directly (a transitive dependency of torch, not a declared
+            # dependency) — being a plain symbol is checked with the predicate sympy itself puts on
+            # every expression.
             if getattr(symbol, "is_Symbol", False)
         }
-        # 命名済みフラグ（_assign_input_symbols が立てる — 以後の新規命名は拒否）
+        # Naming-done flag (set by _assign_input_symbols — any later new naming is rejected)
         self.symbols_assigned = False
-        # 評価点 → (ノード名 → 評価結果)。2 点評価するので点ごとに分ける。
+        # Evaluation point → (node name → evaluation result). Split per point for the 2-point
+        # evaluation.
         self._fold_cache: dict[str, dict[str, Any]] = {}
         self._const_by_digest: dict[str, str] = {}
         self._cse: dict[str, str] = {}
 
-    # ---- シンボル -------------------------------------------------------
+    # ---- Symbols -------------------------------------------------------
 
     def _sym_parts(self, value: torch.SymInt) -> DimExpr:
-        """SymInt を一次式 coeff·sym+offset に分解する。
+        """Decompose a SymInt into the linear expression coeff·sym+offset.
 
-        受理は係数 >= 1・オフセット >= 0 の整数のみ。二次式と、1 つの次元に 2 つ以上の
-        シンボルが混ざる式（`s20+s97`）は正準文法に載らないので fail loudly。
+        Only integers with coefficient >= 1 and offset >= 0 are accepted. Quadratic expressions and
+        expressions that mix 2 or more symbols in one dimension (`s20+s97`) are not in the
+        canonical grammar, so they fail loudly.
         """
         expr = value.node.expr
         symbols = list(expr.free_symbols)
         if len(symbols) != 1:
-            reason = "1 次元に複数シンボルが混ざる" if len(symbols) > 1 else "解釈できない"
-            raise NotImplementedError(f"{reason} shape 式は IR v1 非対応: {expr}")
+            reason = (
+                "shape expression mixing several symbols in one dimension"
+                if len(symbols) > 1
+                else "uninterpretable shape expression"
+            )
+            raise NotImplementedError(f"{reason} is not supported by IR v1: {expr}")
         symbol = symbols[0]
         coeff = expr.coeff(symbol, 1)
         offset = expr.coeff(symbol, 0)
@@ -665,86 +728,95 @@ class Converter:
             or not 1 <= int(coeff) <= MAX_SAFE_INT
             or not 0 <= int(offset) <= MAX_SAFE_INT
         ):
-            raise NotImplementedError(f"shape 式は IR v1 非対応: {expr}")
+            raise NotImplementedError(f"shape expression is not supported by IR v1: {expr}")
         return DimExpr(coeff=int(coeff), sym=self._sym_name(symbol.name), offset=int(offset))
 
     def _sym_name(self, internal: str) -> str:
-        """torch 内部シンボルの IR 名を引く（命名は _assign_input_symbols だけが行う）。"""
+        """Look up the IR name of a torch internal symbol (only _assign_input_symbols names)."""
         name = self.sym_names.get(internal)
         if name is not None:
             return name
         if self.symbols_assigned:
-            # 入力 shape に現れないシンボルはランタイムが束縛できない（束縛は入力 shape の
-            # 次元位置からしか取らない — docs/ir-v2.md）。IR に載せれば実行不能になる。
+            # The runtime cannot bind a symbol that does not appear in an input shape (binding
+            # comes only from dimension positions of input shapes — docs/ir-v2.md). Putting it in
+            # the IR would make the graph unrunnable.
             raise NotImplementedError(
-                f"入力 shape に現れないシンボル {internal} が値に現れた"
-                f"（入力由来={self.sym_names}）— ランタイムが束縛できないため IR に載せられない"
+                f"symbol {internal}, which does not appear in an input shape, appeared in a value"
+                f" (from inputs={self.sym_names}) — the runtime cannot bind it, so it cannot be"
+                " put in the IR"
             )
         if len(self.sym_names) >= len(self.symbol_names):
             raise NotImplementedError(
-                f"IR シンボル名が足りない: 内部シンボル {internal} に割り当てる名前が無い"
-                f"（symbol_names={list(self.symbol_names)}、割り当て済み={self.sym_names}）"
-                " — convert(symbol_names=...) に名前を追加すること"
+                f"not enough IR symbol names: no name to assign to internal symbol {internal}"
+                f" (symbol_names={list(self.symbol_names)}, assigned={self.sym_names})"
+                " — add a name to convert(symbol_names=...)"
             )
         name = self.symbol_names[len(self.sym_names)]
         self.sym_names[internal] = name
-        # 上限は畳み込みの評価点でしか要らないので、ここでは登録だけして検査しない
-        # （記号依存の定数を持たないグラフは Dim(max=…) 無しでも export できる）。
+        # The upper bound is needed only at folding's evaluation points, so it is only registered
+        # here, not checked (a graph without symbol-dependent constants can be exported without
+        # Dim(max=…)).
         found = self._internal_ranges.get(internal)
         if found is not None:
             self.sym_ranges[name] = found
         return name
 
     def _sym_range(self, name: str) -> tuple[int, int]:
-        """シンボルの (下限, Tmax)。2 点評価に使えない範囲は fail loudly。
+        """(lower bound, Tmax) of a symbol. A range unusable for 2-point evaluation fails loudly.
 
-        MUST: Tmax は有限でなければならない（`Dim(max=…)` 未設定は `int_oo`）。無限のまま
-        既定値で進めると、焼く定数の長さを勝手に決めることになる。
-        MUST: 第 2 評価点 `Tmax − 1` が下限以上かつ {@link MIN_PROBE_VALUE} 以上であること。
-        満たさないと 2 点評価が同一点に潰れて可換性検査が恒真化する（= 検査が黙って消える）。
+        MUST: Tmax must be finite (an unset `Dim(max=…)` is `int_oo`). Going on with a default
+        while it is infinite would decide the length of the baked constant arbitrarily.
+        MUST: the second evaluation point `Tmax − 1` must be at least the lower bound and at least
+        {@link MIN_PROBE_VALUE}. Otherwise the 2-point evaluation collapses into one point and the
+        commutativity check becomes tautological (= the check disappears silently).
         """
         found = self.sym_ranges.get(name)
         if found is None:
             raise NotImplementedError(
-                f"シンボル {name} の値域が ExportedProgram の range_constraints に無い"
-                " — 記号依存の定数を畳むには dynamic_shapes の Dim に上限が要る"
+                f"the range of symbol {name} is not in the ExportedProgram's range_constraints"
+                " — folding symbol-dependent constants needs an upper bound on the dynamic_shapes"
+                " Dim"
             )
         raw_lower, raw_upper = found
-        # MUST: 有限性は float 経由で見る。`Dim(max=…)` 未設定の上限は torch の `int_oo` で、
-        # sympy の `is_finite` は True を返す一方 `int()` は内部で例外になる（型で判定できない）。
+        # MUST: finiteness is checked through float. The upper bound of an unset `Dim(max=…)` is
+        # torch's `int_oo`; sympy's `is_finite` returns True for it while `int()` raises
+        # internally (the type cannot tell).
         if not math.isfinite(float(raw_upper)):
             raise NotImplementedError(
-                f"シンボル {name} の上限が有限でない（{raw_upper}）— 記号依存の定数は Tmax で"
-                f" 焼く必要がある（dynamic_shapes を Dim('…', min=…, max=Tmax) で宣言すること）"
+                f"the upper bound of symbol {name} is not finite ({raw_upper}) — symbol-dependent"
+                f" constants must be baked at Tmax (declare dynamic_shapes with"
+                f" Dim('…', min=…, max=Tmax))"
             )
         upper = int(raw_upper)
         lower = max(int(raw_lower), 0)
         if upper - 1 < max(lower, MIN_PROBE_VALUE):
             raise ValueError(
-                f"シンボル {name} の値域 [{lower}, {upper}] では畳み込みの 2 点評価ができない"
-                f"（第 2 点 {upper - 1} が下限 {lower} / 0-1 特殊化の回避線 {MIN_PROBE_VALUE}"
-                " を下回り、可換性検査が恒真化する）"
+                f"symbol {name} with range [{lower}, {upper}] does not allow folding's 2-point"
+                f" evaluation (the second point {upper - 1} is below the lower bound {lower} /"
+                f" the line that avoids 0-1 specialization {MIN_PROBE_VALUE}, so the"
+                " commutativity check becomes tautological)"
             )
         return lower, upper
 
     def _point_value(self, name: str, point: str) -> int:
-        """評価点でのシンボル値。PROBE は Tmax − 1（多シンボルでは全部を同時に動かす）。"""
+        """Symbol value at an evaluation point. PROBE is Tmax − 1 (all symbols move together)."""
         _, upper = self._sym_range(name)
         return upper if point == FOLD_POINT_MAX else upper - 1
 
     def _sym_value(self, value: torch.SymInt, point: str) -> int:
-        """SymInt を評価点で具体値にする。"""
+        """Turn a SymInt into a concrete value at an evaluation point."""
         if not value.node.expr.free_symbols:
             return int(value)
         expr = self._sym_parts(value)
         return expr.coeff * self._point_value(expr.sym, point) + expr.offset
 
     def _assign_input_symbols(self) -> None:
-        """user 入力 placeholder の出現順で IR シンボル名を割り当てる（唯一の命名経路）。
+        """Assign IR symbol names in order of the user input placeholders (the only naming path).
 
-        命名を消費順（ノード走査）任せにすると、同じグラフでも中間ノードの並びで名前が
-        入れ替わりうる。入力 shape は forward の引数順で決まる決定的な列なので、変換前に
-        ここで固定する。走査後は封をして、入力に無いシンボルの後付け命名を拒否する。
+        Leaving naming to consumption order (the node walk) could swap names for the same graph
+        depending on the order of intermediate nodes. Input shapes are a deterministic sequence
+        fixed by forward's argument order, so the names are fixed here before conversion. After the
+        walk the naming is sealed, and late naming of a symbol not in the inputs is rejected.
         """
         for node in self.gm.graph.nodes:
             if node.op != "placeholder" or node.name not in self.user_inputs:
@@ -757,21 +829,23 @@ class Converter:
                     self._sym_parts(dim)
         self.symbols_assigned = True
 
-    # ---- 定数畳み込み ---------------------------------------------------
+    # ---- Constant folding ---------------------------------------------------
 
     def _classify_foldable(self) -> set[str]:
-        """定数と shape シンボルだけに依存する部分木のノード名集合（ADR 0010）。
+        """Set of node names of subtrees depending only on constants and shape symbols (ADR 0010).
 
-        葉として適格なのは lifted 定数（T 非依存）と SymInt を運ぶノード（sym_size /
-        SymInt 演算）だけ。パラメータ/バッファ経由の畳み込みは巨大定数を焼き込みうるので
-        不適格にする（重みは initializer のまま運ぶ）。
+        Eligible leaves are only lifted constants (independent of T) and nodes carrying SymInts
+        (sym_size / SymInt arithmetic). Folding through parameters / buffers could bake huge
+        constants, so it is ineligible (weights travel as initializers).
 
-        MUST: 記号依存を許すのは「Tmax で焼いて prefix スライスで切り出す」表現が入った
-        から（ADR 0010）。ただし記号を**値**として消費した部分木は焼いた定数が Tmax でしか
-        正しくないので、{@link SYMBOL_EXTENT_ARGS} の extent 位置以外に記号が届いたノードは
-        ここで落とす（下流は依存の連鎖で自然に外れる）。記号軸上の位置を参照する形
-        （{@link _references_symbolic_position}）も同じく構造で落とす。残る可換性は
-        _check_prefix_commutes の 2 点実測が受け止める。
+        MUST: symbol dependence is allowed because the "bake at Tmax, cut out with a prefix slice"
+        representation came in (ADR 0010). A subtree that consumed a symbol **as a value**,
+        however, bakes a constant that is right only at Tmax, so a node reached by a symbol at a
+        position other than an extent position of {@link SYMBOL_EXTENT_ARGS} is dropped here
+        (downstream nodes fall out naturally through the dependency chain). Forms that reference a
+        position on a symbolic axis ({@link _references_symbolic_position}) are likewise dropped
+        by structure. The remaining commutativity is caught by the 2-point observation of
+        _check_prefix_commutes.
         """
         foldable: set[str] = set()
         for node in self.gm.graph.nodes:
@@ -783,19 +857,20 @@ class Converter:
                 continue
             val = node.meta.get("val")
             if not isinstance(val, torch.Tensor):
-                # テンソルを運ばないノード（sym_size / SymInt 演算）は shape 情報だけに
-                # 依存する。記号を含んでも評価点ごとの置換で具体値になるので葉として適格。
+                # A node that carries no tensor (sym_size / SymInt arithmetic) depends only on
+                # shape information. Even with symbols it becomes concrete by substitution at each
+                # evaluation point, so it is eligible as a leaf.
                 if isinstance(val, torch.SymInt) or (
                     isinstance(val, int) and not isinstance(val, bool)
                 ):
                     foldable.add(node.name)
                 continue
             if node.target is aten.expand.default:
-                # expand は原則 frontier で止める（畳むと実体化が倍数で膨らむ）。ただし
-                # **出力 shape が入力と同一の no-op expand** は 1 要素も増やさないので、
-                # 畳み込みの連鎖を切る理由が無い（実測: RoPE の `inv_freq[None,:,None]
-                # .expand(batch, -1, 1)` が batch=1 でこの形になり、ここで止めると sin / cos が
-                # IR 語彙に必要になる — ADR 0016）。
+                # expand stops at the frontier as a rule (folding multiplies the materialization).
+                # A **no-op expand whose output shape equals its input**, however, adds not a
+                # single element, so there is no reason to cut the folding chain (observed: RoPE's
+                # `inv_freq[None,:,None].expand(batch, -1, 1)` takes this form at batch=1, and
+                # stopping here would require sin / cos in the IR vocabulary — ADR 0016).
                 if not same_extents(node.meta["val"], node.args[0].meta.get("val")):
                     continue
             elif node.target not in FOLDABLE_OPS:
@@ -803,27 +878,29 @@ class Converter:
             if node.target is aten.view.default:
                 source = node.args[0].meta.get("val")
                 if _has_free_symbols(source) or _has_free_symbols(val):
-                    # DECIDED: 動的 view は長さで行境界を変えうる。単位軸の増減だけを
-                    # 畳み、残りは prefix を切った後に runtime で並べ替える。
+                    # DECIDED: a dynamic view can move row boundaries with the length. Only
+                    # adding / removing unit axes is folded; the rest is reordered by the runtime
+                    # after the prefix is cut.
                     # [ADR 0010](../../../../docs/decisions/0010-symbolic-constant-folding.md)
                     source_axes = tuple(d for d in extent_keys(source.shape) if d != 1)
                     target_axes = tuple(d for d in extent_keys(val.shape) if d != 1)
                     if source_axes != target_axes:
                         continue
             if _uses_symbol_as_data(node):
-                # 記号がテンソルデータへ昇格した部分木（`scalar_tensor(T)` 等）。焼くと Tmax
-                # でだけ正しい定数になり、2 点評価は偶然一致しうる（module docstring の反例）。
+                # A subtree where a symbol was promoted to tensor data (`scalar_tensor(T)` etc.).
+                # Baked, it becomes a constant right only at Tmax, and the 2-point evaluation can
+                # agree by accident (the counterexample in the module docstring).
                 continue
             if _references_symbolic_position(node):
-                # 記号軸上の位置を参照する形とマスク添字の index（対象と理由は
-                # _references_symbolic_position）。
+                # Forms referencing a position on a symbolic axis and index with a mask index
+                # (targets and reasons in _references_symbolic_position).
                 continue
             if all(dep.name in foldable for dep in node.all_input_nodes):
                 foldable.add(node.name)
         return foldable
 
     def _fold_eval(self, node: Node, point: str) -> Any:
-        """適格部分木を、指定の評価点（全シンボル一斉置換）で実評価する。"""
+        """Evaluate an eligible subtree for real at the given point (all symbols substituted)."""
         cache = self._fold_cache.setdefault(point, {})
         cached = cache.get(node.name)
         if cached is not None:
@@ -832,7 +909,7 @@ class Converter:
             return self.state[self.placeholder_fqn[node.name]]
         val = node.meta.get("val")
         if not isinstance(val, torch.Tensor):
-            # テンソルを運ばないノードは式の置換で評価する（実行はしない）。
+            # A node that carries no tensor is evaluated by substituting the expression (not run).
             return self._sym_value(val, point) if isinstance(val, torch.SymInt) else int(val)
 
         def resolve(arg: Any) -> Any:
@@ -851,32 +928,35 @@ class Converter:
         return out
 
     def _add_const(self, tensor: torch.Tensor, where: str) -> str:
-        """定数テンソルを重複排除して initializer 化し、IR 値名を返す。
+        """Deduplicate a constant tensor into an initializer and return its IR value name.
 
-        意味論 dtype は f32 と **i32**（ADR 0010 — 相対位置バケット表の添字）。i64 は境界
-        正規化で i32 に落とす（値域外は fail loudly）。bool の initializer は語彙に無い。
+        Semantic dtypes are f32 and **i32** (ADR 0010 — indices of the relative-position bucket
+        table). i64 is dropped to i32 by boundary normalization (out of range fails loudly). There
+        is no bool initializer in the vocabulary.
         """
         data = tensor.detach().contiguous()
         if data.dtype is torch.int64:
-            # MUST: 変換点は normalize_boundary_tensor 1 箇所（値域検査つき — ADR 0009）。
+            # MUST: the single conversion point is normalize_boundary_tensor (with the range
+            # check — ADR 0009).
             data = normalize_boundary_tensor(data, where)
         storage = _CONST_STORAGE.get(data.dtype)
         if storage is None:
             raise NotImplementedError(
-                f"{where}: dtype {tensor.dtype} の定数は IR v1 の initializer にできない"
-                f"（{' / '.join(sorted(set(_CONST_STORAGE.values())))} のみ）"
+                f"{where}: a constant of dtype {tensor.dtype} cannot be an IR v1 initializer"
+                f" ({' / '.join(sorted(set(_CONST_STORAGE.values())))} only)"
             )
         dtype = DTYPE_NAMES[data.dtype]
-        # 逐次 update で食わせる（`tobytes()` の複製 + 連結の複製で定数 1 本ぶんの RAM を
-        # 2 度取らない）。食わせるバイト列は「宣言 JSON ‖ 生バイト」のまま**不変**なので
-        # digest は 1 ビットも変わらない。
+        # Fed through incremental updates (so that the `tobytes()` copy plus the concatenation copy
+        # do not take one constant's worth of RAM twice). The fed byte sequence stays "declaration
+        # JSON ‖ raw bytes" **unchanged**, so the digest does not change by a single bit.
         hasher = hashlib.sha256()
         hasher.update(json.dumps([str(data.dtype), list(data.shape)]).encode())
         hasher.update(memoryview(data.numpy()).cast("B"))
         digest = hasher.hexdigest()
-        # MUST: 同一性キーは **full hexdigest**。名前用に短縮した 16 hex（64bit）を突合に
-        # 使うと、衝突した 2 つの定数を実体比較なしで 1 本に畳む = 黙って別の値を共用した
-        # グラフが出る。名前だけは従来どおり短縮形（IR の可読性）。
+        # MUST: the identity key is the **full hexdigest**. Matching on the 16 hex (64 bit)
+        # shortened for the name would collapse 2 colliding constants into one without comparing
+        # contents = a graph that silently shares a different value. Only the name keeps the
+        # short form, as before (IR readability).
         existing = self._const_by_digest.get(digest)
         if existing is not None:
             return existing
@@ -884,10 +964,11 @@ class Converter:
         name = f"const_{short}"
         key = f"const.{short}"
         if name in self.graph.initializers or key in self.tensors:
-            # full が違うのに短縮形が一致した（= 名前衝突）。確率的に到達しないが、通せば
-            # 上書きで先の定数が消える沈黙誤グラフになるので落とす。
+            # The full digests differ but the short forms match (= a name collision).
+            # Probabilistically unreachable, but letting it through would give a silently wrong
+            # graph in which the overwrite erases the earlier constant, so it fails.
             raise AssertionError(
-                f"{where}: 定数名 '{name}' が別の定数と衝突した（digest {digest}）"
+                f"{where}: constant name '{name}' collided with another constant (digest {digest})"
             )
         self.tensors[key] = data
         self.graph.initializers[name] = IrInitializer(tensor=key, storage=IrStorage(dtype=storage))
@@ -896,12 +977,12 @@ class Converter:
         return name
 
     def _emit_folded(self, node: Node) -> str:
-        """畳み込み frontier のノードを「Tmax 定数 + sym_prefix_slice」として出す（ADR 0010）。
+        """Emit a folding-frontier node as "Tmax constant + sym_prefix_slice" (ADR 0010).
 
-        記号次元が 1 つも無ければ定数そのもの（従来どおり）。あれば、Tmax で焼いた定数の
-        prefix を実行時に切り出すノードを 1 本足す。
+        With no symbolic dimension it is the constant itself (as before). With one, a node is added
+        that cuts out the prefix of the constant baked at Tmax at run time.
         """
-        where = f"畳み込み定数 {node.name} ({node.target})"
+        where = f"folded constant {node.name} ({node.target})"
         folded = self._fold_eval(node, FOLD_POINT_MAX)
         val = self._meta_val(node)
         slices: list[dict[str, int]] = []
@@ -913,36 +994,41 @@ class Converter:
             symbols.add(expr.sym)
             slices.append({"dim": index, "coeff": expr.coeff, "offset": expr.offset})
         if len(symbols) > 1:
-            # sym_prefix_slice の sym はノード単位に 1 つ（IR v1 の attrs 契約）。複数
-            # シンボルにまたがる定数は表現を持たないので、黙って畳まず落とす。
+            # sym_prefix_slice has one sym per node (IR v1's attrs contract). A constant spanning
+            # several symbols has no representation, so it fails instead of being folded silently.
             raise NotImplementedError(
-                f"{where}: 複数シンボル {sorted(symbols)} にまたがる畳み込み定数は IR v1 非対応"
+                f"{where}: a folded constant spanning several symbols {sorted(symbols)} is not"
+                " supported by IR v1"
             )
         sym = next(iter(symbols)) if symbols else None
         self._check_prefix_commutes(node, folded, sym, slices)
         const_name = self._add_const(folded, where)
-        # MUST: 焼いた実テンソルの dtype / shape が meta の宣言と食い違っていないか見る。
-        # 食い違ったまま通すと、sym_prefix_slice の入出力が別物のバッファを指す。
+        # MUST: check that the dtype / shape of the baked tensor agree with the meta declaration.
+        # Letting a disagreement through makes sym_prefix_slice's input and output point at
+        # different buffers.
         declared = self.graph.values[const_name]
         expected_dtype = self._dtype(val, where)
         if declared.dtype != expected_dtype:
             raise AssertionError(
-                f"{where}: 焼いた定数の dtype {declared.dtype} が宣言 {expected_dtype} と違う"
+                f"{where}: dtype {declared.dtype} of the baked constant differs from the declared"
+                f" {expected_dtype}"
             )
         if not slices:
             if declared.shape != self._shape(val):
                 raise AssertionError(
-                    f"{where}: 焼いた定数の shape {declared.shape} が宣言 {self._shape(val)} と違う"
+                    f"{where}: shape {declared.shape} of the baked constant differs from the"
+                    f" declared {self._shape(val)}"
                 )
             return const_name
-        # MUST: prefix スライスは strided 実体化コピーで実行する（新カーネルは無い — ADR 0010）。
-        # rank 上限は記号次元が 1 本でもある時点で効くので、emit する前にここで落とす
-        # （slices が空 = 定数そのものの経路には dispatch が無いので上限も無い）。
+        # MUST: the prefix slice runs as a strided materializing copy (no new kernel — ADR 0010).
+        # The rank cap applies as soon as there is even one symbolic dimension, so it fails here
+        # before emitting (empty slices = the constant itself, which has no dispatch and so no
+        # cap).
         rank = len(val.shape)
         if not 1 <= rank <= STRIDED_RANK:
             raise NotImplementedError(
-                f"{where}: rank {rank} の記号 prefix スライスは strided カーネル"
-                f"（rank ≤ {STRIDED_RANK}）で実行できない"
+                f"{where}: a symbolic prefix slice of rank {rank} cannot run on the strided kernel"
+                f" (rank ≤ {STRIDED_RANK})"
             )
         return self._emit(
             "sym_prefix_slice", [const_name], node.name, val, {"sym": sym, "slices": slices}
@@ -951,18 +1037,21 @@ class Converter:
     def _check_prefix_commutes(
         self, node: Node, folded: Any, sym: str | None, slices: Sequence[Mapping[str, int]]
     ) -> None:
-        """畳み込み結果が prefix スライスと可換であることを **2 点評価で実測**する（ADR 0010）。
+        """**Observe by 2-point evaluation** that a fold commutes with a prefix slice (ADR 0010).
 
-        シンボルを「値」として使う部分木（`arange(T-1, -1, -1)` や `full([T], T)` 等）は
-        allowlist 掲載 op だけで構成できてしまい、Tmax で焼いた定数の先頭要素が実行時の
-        正しい値と別物になる — 例外も警告もなく数が変わるので、**宣言ではなく検査で止める**。
+        A subtree that uses a symbol as a "value" (`arange(T-1, -1, -1)`, `full([T], T)` etc.) can
+        be built from allowlisted ops alone, and the leading elements of the constant baked at Tmax
+        then differ from the right run-time values — the numbers change with no exception or
+        warning, so it is **stopped by a check, not by a declaration**.
 
-        prefix 長は `coeff·sym+offset` で評価する（係数は長さの線形写像なので可換性の意味は
-        そのまま）。多シンボルでは第 2 点で全シンボルを同時に動かす（1 つずつ動かすと他を
-        Tmax に固定した断面しか見ず、シンボル間の積の形を取り逃す）。
+        The prefix length is evaluated as `coeff·sym+offset` (the coefficient is a linear map of the
+        length, so commutativity means the same). With several symbols all of them move together at
+        the second point (moving one at a time only sees cross-sections with the others fixed at
+        Tmax and misses product forms between symbols).
 
-        NOTE: 比較は **ビット厳密**（{@link _bitwise_equal}）。数値等価だと `-0.0 == 0.0` が
-        素通りするので、符号ビットまで一致を要求する。NaN は payload まで一致した時だけ通る。
+        NOTE: the comparison is **bit-exact** ({@link _bitwise_equal}). Numeric equality lets
+        `-0.0 == 0.0` through, so a match down to the sign bit is required. NaN passes only when
+        the payload matches too.
         """
         probed = self._fold_eval(node, FOLD_POINT_PROBE)
         expected = folded
@@ -985,12 +1074,13 @@ class Converter:
             for name in self.sym_names.values()
         }
         raise NotImplementedError(
-            f"畳み込み部分木が prefix スライスと非可換（シンボルを値として使っている）: "
-            f"{node.name} ({node.target}) — Tmax で焼いた定数の prefix と第 2 評価点の"
-            f"評価結果が一致しない（シンボル: Tmax, 第 2 点 = {points}）"
+            f"folded subtree does not commute with a prefix slice (it uses a symbol as a value): "
+            f"{node.name} ({node.target}) — the prefix of the constant baked at Tmax and the"
+            f" result at the second evaluation point do not match"
+            f" (symbol: Tmax, second point = {points})"
         )
 
-    # ---- 変換本体 -------------------------------------------------------
+    # ---- Conversion -------------------------------------------------------
 
     def _dim(self, dim: Any) -> int | str:
         if isinstance(dim, torch.SymInt):
@@ -1006,20 +1096,20 @@ class Converter:
         name = DTYPE_NAMES.get(tensor.dtype)
         if name is None:
             raise NotImplementedError(
-                f"{where}: torch dtype {tensor.dtype} は IR v1 の意味論 dtype 語彙に無い"
-                f"（{', '.join(DTYPE_NAMES.values())}）"
+                f"{where}: torch dtype {tensor.dtype} is not in IR v1's semantic dtype vocabulary"
+                f" ({', '.join(DTYPE_NAMES.values())})"
             )
         return name
 
     def _meta_val(self, node: Node) -> torch.Tensor:
         val = node.meta.get("val")
         if not isinstance(val, torch.Tensor):
-            raise NotImplementedError(f"tensor 以外の値: {node.name} ({node.target})")
+            raise NotImplementedError(f"value that is not a tensor: {node.name} ({node.target})")
         return val
 
     def _register_value(self, name: str, val: torch.Tensor) -> None:
         self.graph.values[name] = IrValue(
-            dtype=self._dtype(val, f"値 '{name}'"), shape=self._shape(val)
+            dtype=self._dtype(val, f"value '{name}'"), shape=self._shape(val)
         )
 
     def _emit(
@@ -1030,14 +1120,15 @@ class Converter:
         val: torch.Tensor,
         attrs: Mapping[str, Any],
     ) -> str:
-        """CSE しつつノードを追加し、出力値名を返す。"""
+        """Add a node with CSE and return the output value name."""
         if op not in EMITTABLE_OPS:
-            raise AssertionError(f"EMITTABLE_OPS 未登録の IR op: {op}")
-        # MUST: CSE キーに attrs を含める。同じ (op, ins) でも attrs が違えば別の値
-        # （`cast(x, to=bool)` と `cast(x, to=f32)`）で、落とすと片方が黙って消える。
-        # MUST: 出力 shape も含める。reshape / expand は「出力の宣言 shape が目標形」で
-        # attrs を持たない（ADR 0011）ため、shape 抜きのキーでは同じ入力の別々の
-        # `reshape` が 1 本に畳まれ、片方の消費者が黙って別の形の値を読む。
+            raise AssertionError(f"IR op not registered in EMITTABLE_OPS: {op}")
+        # MUST: the CSE key includes attrs. The same (op, ins) with different attrs is a different
+        # value (`cast(x, to=bool)` vs `cast(x, to=f32)`); dropping attrs makes one silently vanish.
+        # MUST: the output shape is included too. reshape / expand have no attrs — "the declared
+        # output shape is the target shape" (ADR 0011) — so with a key without shape, separate
+        # `reshape`s of the same input collapse into one and one consumer silently reads a value of
+        # a different shape.
         shape = self._shape(val)
         key = json.dumps([op, ins, dict(attrs), shape], sort_keys=True)
         cached = self._cse.get(key)
@@ -1058,39 +1149,41 @@ class Converter:
                 self._handle_placeholder(node)
             elif node.op == "call_function":
                 if node.name in foldable:
-                    continue  # frontier の消費側から評価される（未消費なら自然に DCE）
+                    continue  # evaluated from the frontier's consumer (DCE'd naturally if unused)
                 self._handle_call(node, foldable)
             elif node.op == "output":
                 self.graph.outputs = [
                     self._in_name(out, foldable) for out in self._user_outputs(node)
                 ]
             else:
-                raise NotImplementedError(f"未対応ノード種: {node.op}")
-        # 宣言するのは実際に shape へ出たシンボルだけ（静的グラフは []）。使わないシンボルを
-        # 載せるとランタイムが「束縛する入力が無い」で落ちる。
+                raise NotImplementedError(f"unsupported node kind: {node.op}")
+        # Declare only the symbols that actually reached a shape (a static graph gets []). An
+        # unused symbol would make the runtime fail with "no input to bind it".
         self.graph.symbols = list(self.sym_names.values())
-        # MUST: 出力名は**集合**（docs/ir-v2.md の outputs 欄・受理側 `verify.parse_ir_graph` が
-        # 重複を拒否する）。重複は ①同じ値を 2 度返す forward ②構造同一の 2 出力を `_emit` の
-        # CSE が 1 本へ畳んだ形、の 2 経路で出る。書き出し（`publish.publish_container`）は
-        # `parse_ir_graph` を通らないので、「書けたが読めない」配布形が残る — 組み立ての出口で
-        # 落とす。
+        # MUST: output names are a **set** (the outputs field of docs/ir-v2.md; the reader
+        # `verify.parse_ir_graph` rejects duplicates). Duplicates arise on 2 paths: ① a forward
+        # that returns the same value twice ② `_emit`'s CSE collapsing 2 structurally identical
+        # outputs into one. Writing (`publish.publish_container`) does not go through
+        # `parse_ir_graph`, so a distribution that "could be written but not read" would remain —
+        # it fails at the exit of assembly.
         duplicated = sorted(
             {name for name in self.graph.outputs if self.graph.outputs.count(name) > 1}
         )
         if duplicated:
             raise NotImplementedError(
-                "同じ値を複数の出力へ割り当てる形は IR v1 非対応（出力名は集合）:"
-                f" 重複 {duplicated}"
+                "assigning the same value to several outputs is not supported by IR v1 (output"
+                f" names are a set): duplicates {duplicated}"
             )
-        # MUST: 変換の出口で全ノードの出力 shape を契約から計算し直して宣言と突き合わせる。
-        # 宣言は torch の meta 由来なので、契約の規則（gather の先行次元一致 / conv1d の
-        # 出力長 / reshape の要素数など）と食い違う形が「torch 的には合法」として素通りし、
-        # ランタイムの Session 構築で初めて落ちる — その差をここで潰す。
+        # MUST: at the exit of conversion, recompute every node's output shape from the contracts
+        # and match it against the declaration. The declaration comes from torch's meta, so a form
+        # that disagrees with a contract rule (gather's leading-dimension match / conv1d's output
+        # length / reshape's element count, etc.) passes as "legal for torch" and first fails when
+        # the runtime builds the Session — that gap is closed here.
         assert_graph_shapes(self.graph)
         return self.graph, self.tensors
 
     def _assert_all_ops_supported(self, foldable: set[str]) -> None:
-        """未対応 aten op を全件集めてから 1 度だけ落とす（部分近似はしない）。"""
+        """Collect every unsupported aten op, then fail once (no partial approximation)."""
         missing: list[Node] = []
         for node in self.gm.graph.nodes:
             if node.op != "call_function" or node.name in foldable:
@@ -1098,29 +1191,33 @@ class Converter:
             if node.target in SKIP_OPS or node.target in ATEN_HANDLERS:
                 continue
             if not isinstance(node.meta.get("val"), torch.Tensor):
-                # SymInt/int を運ぶだけの shape 機構（値として使われれば arity 検査が落とす）
+                # Shape machinery that only carries SymInt/int (the arity check fails it if it is
+                # used as a value)
                 continue
             missing.append(node)
         if missing:
             raise UnsupportedAtenOpsError(missing)
 
     def _user_outputs(self, out_node: Node) -> list[Node]:
-        """output ノードの引数のうち user 出力だけを返す。
+        """Return only the user outputs among the output node's arguments.
 
-        torch.export は USER_OUTPUT の前に BUFFER_MUTATION 等を並べるため、素通しすると
-        出力列がずれる。IR v1 は状態更新を表現できないので、黙って捨てず未対応として落とす。
-        specs と output 引数の対応は「位置」でのみ有効（normalize は graph_signature を
-        更新しないので `output_specs[].arg.name` は実在しないノード名のまま残りうる）。
+        torch.export puts BUFFER_MUTATION and the like before USER_OUTPUT, so passing them through
+        shifts the output list. IR v1 cannot express state updates, so they fail as unsupported
+        instead of being dropped silently. The correspondence between specs and output arguments
+        holds only "by position" (normalize does not update graph_signature, so
+        `output_specs[].arg.name` can remain a node name that no longer exists).
         """
         specs = self.ep.graph_signature.output_specs
         args = list(out_node.args[0])
         if len(specs) != len(args):
             raise AssertionError(
-                f"output_specs と output 引数の本数不一致: {len(specs)} vs {len(args)}"
+                f"output_specs and output arguments differ in count: {len(specs)} vs {len(args)}"
             )
         other = sorted({s.kind.name for s in specs if s.kind is not OutputKind.USER_OUTPUT})
         if other:
-            raise NotImplementedError(f"user 出力以外の出力種別は IR v1 非対応: {other}")
+            raise NotImplementedError(
+                f"output kinds other than user output are not supported by IR v1: {other}"
+            )
         return [
             arg
             for arg, spec in zip(args, specs, strict=True)
@@ -1130,20 +1227,22 @@ class Converter:
     def _handle_placeholder(self, node: Node) -> None:
         if node.name in self.user_inputs:
             val = self._meta_val(node)
-            # MUST: 入力は inputs[] だけで宣言する（values{} にも書くと IR v1 の
-            # 「宣言はちょうど 1 箇所」に反して二重宣言で拒否される — docs/ir-v2.md）。
+            # MUST: inputs are declared only in inputs[] (also writing them in values{} breaks IR
+            # v1's "exactly one declaration" and is rejected as a double declaration —
+            # docs/ir-v2.md).
             self.graph.inputs.append(
                 IrInput(
                     name=node.name,
-                    dtype=self._dtype(val, f"入力 '{node.name}'"),
+                    dtype=self._dtype(val, f"input '{node.name}'"),
                     shape=self._shape(val),
                 )
             )
             self.value_of[node.name] = node.name
             return
         if node.name not in self.placeholder_fqn:
-            raise NotImplementedError(f"素性不明の placeholder: {node.name}")
-        # パラメータ/バッファ/定数 — 実参照された時に _in_name が initializer 化する
+            raise NotImplementedError(f"placeholder of unknown origin: {node.name}")
+        # Parameter / buffer / constant — _in_name turns it into an initializer when it is
+        # actually referenced
 
     def _materialize_initializer(self, node: Node) -> None:
         fqn = self.placeholder_fqn[node.name]
@@ -1151,8 +1250,7 @@ class Converter:
         where = f"initializer '{node.name}' ({fqn})"
         if tensor.dtype is not torch.float32:
             raise NotImplementedError(
-                f"{where}: dtype {tensor.dtype} は IR v1 の initializer にできない"
-                "（意味論 f32 のみ）"
+                f"{where}: dtype {tensor.dtype} cannot be an IR v1 initializer (semantic f32 only)"
             )
         self.tensors[fqn] = tensor
         self.graph.initializers[node.name] = IrInitializer(
@@ -1168,26 +1266,27 @@ class Converter:
         if existing is not None:
             return existing
         if node.op == "placeholder":
-            # user 入力は placeholder 処理で登録済みなので、ここに来るのは initializer のみ
+            # User inputs were registered by placeholder handling, so only initializers get here
             self._materialize_initializer(node)
             return self.value_of[node.name]
         if node.name in foldable:
             name = self._emit_folded(node)
             self.value_of[node.name] = name
             return name
-        raise AssertionError(f"未解決の入力値: {node.name}（トポ順序の破れ）")
+        raise AssertionError(f"unresolved input value: {node.name} (topological order broken)")
 
     def _tensor_args(self, node: Node) -> list[Node]:
-        """位置引数のうちテンソル値の Node をテンソル入力として順に返す。
+        """Return the tensor-valued Nodes among the positional arguments, in order, as inputs.
 
-        all_input_nodes は内部 dict のキーで重複排除されるため使えない — `x*x` のように
-        同じ値を両オペランドに取る形は同じ値名が 2 回並ぶのが正しい。SymInt を運ぶだけの
-        ノードはテンソルではないので除外し、値として使われた形は入力数検査で落とす。
+        all_input_nodes cannot be used because it deduplicates by the keys of an internal dict — a
+        form like `x*x` that takes the same value as both operands correctly lists the same value
+        name twice. Nodes that only carry a SymInt are not tensors and are excluded; a form that
+        uses one as a value fails the input-count check.
 
-        MUST: **リスト引数を 1 段だけ平坦化する**（`aten.cat([a, b], dim)` の第 1 引数は
-        テンソルの**リスト**で、素通しするとテンソル入力 0 本になる）。ここで拾うのは
-        「Node かつ meta がテンソル」だけなので、int のリスト（permute の dims / view の
-        sizes）は従来どおり素通りする。
+        MUST: **flatten list arguments by exactly one level** (the first argument of
+        `aten.cat([a, b], dim)` is a **list** of tensors; passing it through gives 0 tensor
+        inputs). Only "a Node whose meta is a tensor" is picked up here, so int lists (permute's
+        dims / view's sizes) pass through as before.
         """
         out: list[Node] = []
         for arg in node.args:
@@ -1205,9 +1304,13 @@ class Converter:
             for arg in node.args
             if isinstance(arg, Node) and not isinstance(arg.meta.get("val"), torch.Tensor)
         ]
-        hint = f" — SymInt {symints} を値として使う形は IR v1 非対応" if symints else ""
+        hint = (
+            f" — a form that uses SymInt {symints} as a value is not supported by IR v1"
+            if symints
+            else ""
+        )
         raise NotImplementedError(
-            f"{node.target}: {spec.op} のテンソル入力は {spec.ins} 本のはずが {len(ins)} 本"
+            f"{node.target}: {spec.op} must have {spec.ins} tensor inputs, got {len(ins)}"
             f"{hint} (args={node.args}, kwargs={node.kwargs})"
         )
 
@@ -1219,25 +1322,28 @@ class Converter:
             self.alias_of[node.name] = node.all_input_nodes[0]
             return
         if not isinstance(node.meta.get("val"), torch.Tensor):
-            # SymInt/int を運ぶだけの shape 機構（sym_size / operator.mul 等）。IR 値は
-            # shape 式で表現済み — テンソル位置で消費されれば arity 検査が落とす。
+            # Shape machinery that only carries SymInt/int (sym_size / operator.mul etc.). The IR
+            # value is already expressed as a shape expression — the arity check fails it if it is
+            # consumed at a tensor position.
             return
-        handler = ATEN_HANDLERS[node.target]  # 未登録は _assert_all_ops_supported が既に落とす
+        handler = ATEN_HANDLERS[node.target]  # missing ones failed in _assert_all_ops_supported
         if any(_holds_node(v) for v in node.kwargs.values()):
             raise NotImplementedError(
-                f"{node.target}: テンソルを kwargs で受ける形は未対応 (kwargs={node.kwargs})"
+                f"{node.target}: a form that takes a tensor through kwargs is not supported"
+                f" (kwargs={node.kwargs})"
             )
         ins = [self._in_name(arg, foldable) for arg in self._tensor_args(node)]
         spec = handler(node)
         for value, length in spec.synth_consts:
-            # MUST: 宣言順に末尾へ足す（省略可能なスロットは常に末尾側 — bias / affine /
-            # weight）。合成先は _add_const なので、同じ (値, 長さ) の定数は digest で 1 本に
-            # 畳まれる（bias 無し linear が 698 本あっても initializer は長さごとに 1 つ）。
+            # MUST: appended at the end in declaration order (optional slots are always at the
+            # end — bias / affine / weight). They are synthesized through _add_const, so constants
+            # with the same (value, length) collapse into one by digest (698 bias-less linears
+            # still give one initializer per length).
             ins = [
                 *ins,
                 self._add_const(
                     torch.full((length,), value, dtype=torch.float32),
-                    f"{node.target} の定数スロット合成（{node.name}: {value} × {length}）",
+                    f"constant slot synthesis of {node.target} ({node.name}: {value} × {length})",
                 ),
             ]
         self._check_arity(node, spec, ins)
@@ -1249,27 +1355,27 @@ class Converter:
 def convert(
     ep: ExportedProgram, *, symbol_names: Sequence[str] = ("T",)
 ) -> tuple[IrGraph, dict[str, torch.Tensor]]:
-    """IR グラフと格納テンソル辞書を返す。
+    """Return the IR graph and the dict of stored tensors.
 
-    symbol_names は IR に載るシンボル名を user 入力 placeholder の出現順
-    （= forward の引数順）で与える。
+    symbol_names gives the symbol names that go into the IR, in order of appearance of the user
+    input placeholders (= forward's argument order).
     """
     return Converter(ep, symbol_names=symbol_names).convert()
 
 
 def curated_decompositions(preserved: Sequence[str] = PRESERVED_OP_PREFIXES):
-    """分解表から「保存する高位 op」を外して返す。
+    """Return the decomposition table with the "preserved high-level ops" taken out.
 
-    core 分解するとカーネル粒度と 1 対 1 でなくなる op を default_decompositions から
-    取り除く。既定は 11 op（PRESERVED_OP_PREFIXES — ADR 0007 の 9 op に ADR 0015 で
-    leaky_relu、ADR 0017 で rms_norm を追加）。
+    Removes from default_decompositions the ops that, once core-decomposed, no longer map 1:1 to
+    a kernel. The default is 12 ops (PRESERVED_OP_PREFIXES — ADR 0007's 9 ops plus leaky_relu in
+    ADR 0015, rms_norm in ADR 0017 and conv3d in ADR 0118 decision 1).
 
-    NOTE: `rms_norm` は保存だけでは足りない。`aten.rms_norm` を出すのは diffusers の
-    `nn.RMSNorm` 経由だけで、手書き分解形（Qwen3 / DiT）は normalize の `_fold_rms_norm` が
-    合成する（ADR 0016 / 0017 の供給 2 系統）。
+    NOTE: preserving `rms_norm` is not enough. Only diffusers' `nn.RMSNorm` emits `aten.rms_norm`;
+    hand-written decomposed forms (Qwen3 / DiT) are synthesized by normalize's `_fold_rms_norm`
+    (the 2 supply routes of ADR 0016 / 0017).
 
-    NOTE: SDPA（ADR 0023）は既定に**含めない** — 12 本目は
-    {@link PRESERVED_OP_PREFIXES_WITH_ATTENTION} を明示的に渡したターゲットだけが得る。
+    NOTE: SDPA (ADR 0023) is **not** in the default — the 13th is given only to targets that pass
+    {@link PRESERVED_OP_PREFIXES_WITH_ATTENTION} explicitly.
     """
     from torch.export import default_decompositions
 

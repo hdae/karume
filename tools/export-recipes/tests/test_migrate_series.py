@@ -346,7 +346,7 @@ class TestGatesThatFailLoudly:
     def test_a_second_run_refuses_to_overwrite(self, tmp_path: Path) -> None:
         place(tmp_path / "vowel-detector-fixture", mark="vowel")
         run(tmp_path)
-        with pytest.raises(MigrateError, match="残っている"):
+        with pytest.raises(MigrateError, match="remain"):
             run(tmp_path)
 
 

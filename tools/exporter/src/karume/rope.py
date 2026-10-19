@@ -1,41 +1,45 @@
-"""RoPE バッファの lifted 検査 — モデル非依存の export 検証。
+"""Lifted check of the RoPE buffers — model-independent export validation.
 
-RoPE の周波数種（`inv_freq`）はバッファのままだと定数畳み込みの葉にならず、sin / cos が
-IR 語彙に必要になる。素の属性（lifted tensor constant）へ降格して畳み込みの葉にするのが
-{@link lift_rope_buffers} で、走査が空振りしたまま export へ進まないための門が
-{@link assert_rope_lifted}。
+While the RoPE frequency seed (`inv_freq`) stays a buffer it is not a leaf of constant folding,
+and sin / cos become necessary in the IR vocabulary. {@link lift_rope_buffers} demotes it to a
+plain attribute (a lifted tensor constant) so that it becomes a folding leaf, and
+{@link assert_rope_lifted} is the check that keeps a scan that found nothing from going on to
+export.
 
-対象は transformers 系の RoPE バッファ命名（接尾一致）で**特定のモデル / ファミリに依存
-しない** — Anima の Qwen3 / EmbeddingGemma の Gemma3 / Irodori の text backbone が同じ形で
-使う（ADR 0065 段 2 で Anima の patch 層から回収）。
+The target is the transformers-style RoPE buffer naming (suffix match) and **does not depend on a
+particular model / family** — Anima's Qwen3, EmbeddingGemma's Gemma3 and Irodori's text backbone
+use the same form (recovered from Anima's patch layer in ADR 0065 stage 2).
 """
 
 from __future__ import annotations
 
 from torch import nn
 
-#: RoPE の周波数種の**バッファ名接尾辞**。バッファのままだと定数畳み込みの葉にならず、
-#: sin / cos が IR に残る。
+#: **Buffer-name suffixes** of the RoPE frequency seed. While it stays a buffer it is not a leaf
+#: of constant folding, and sin / cos remain in the IR.
 #:
-#: 完全一致ではなく接尾一致で見るのは、layer_type ごとに RoPE を分ける実装が接頭辞付きの
-#: 名前を使うため（transformers 5.14.1 の Gemma3 は `sliding_attention_inv_freq` /
-#: `full_attention_inv_freq` とその `original_*`）。既存の裸の名前は自身の接尾辞なので
-#: 受理集合は真に広がるだけで、従来のモデルでのヒット本数は変わらない。
+#: The match is by suffix rather than exact name because implementations that split RoPE per
+#: layer_type use prefixed names (Gemma3 in transformers 5.14.1 has `sliding_attention_inv_freq` /
+#: `full_attention_inv_freq` and their `original_*`). The existing bare names are their own
+#: suffixes, so the accepted set only grows, and the hit count on existing models does not change.
 ROPE_BUFFER_NAMES = ("inv_freq", "original_inv_freq")
 
 
 def lift_rope_buffers(root: nn.Module) -> int:
-    """RoPE の `inv_freq` バッファを素の属性（lifted tensor constant）へ降格する。
+    """Demote RoPE `inv_freq` buffers to plain attributes (lifted tensor constants).
 
-    畳み込みの葉をパラメータ/バッファへ広げないのは巨大定数の焼き込みを避けるためだが
-    （convert._classify_foldable）、`inv_freq` は head_dim/2 要素の位置表の種で、畳んだ結果
-    （cos/sin 表）も Tmax × head_dim に収まる。降格しないと sin / cos が IR 語彙に必要になる。
+    Folding leaves are not extended to parameters / buffers to avoid baking huge constants
+    (convert._classify_foldable), but `inv_freq` is the seed of a position table with head_dim/2
+    elements, and the folded result (the cos/sin table) also fits in Tmax × head_dim. Without the
+    demotion, sin / cos become necessary in the IR vocabulary.
 
-    MUST: 1 本も降格できなければ呼び出し側が落とす（属性名が上流で変われば走査は静かに
-    空振りし、以後どのモデルでも sin/cos が IR に残る — 恒真化の門は呼ぶ側に置く）。
+    MUST: when nothing can be demoted, the caller fails (if the attribute name changes upstream,
+    the scan silently finds nothing and from then on sin/cos remain in the IR for every model — the
+    check that keeps this from passing tautologically lives in the caller).
 
-    走査は {@link ROPE_BUFFER_NAMES} の**接尾一致**（layer_type 接頭辞付きの名前を持つ実装が
-    ある）。`_buffers` を走査中に書き換えるので名前は先に採り切る。
+    The scan is a **suffix match** on {@link ROPE_BUFFER_NAMES} (some implementations have names
+    with a layer_type prefix). `_buffers` is rewritten during the scan, so the names are collected
+    first.
     """
     lifted = 0
     for module in root.modules():
@@ -47,13 +51,14 @@ def lift_rope_buffers(root: nn.Module) -> int:
 
 
 def _rope_attribute_count(root: nn.Module) -> int:
-    """RoPE の周波数種が載っている席の本数（バッファ席 + 降格済みの素の属性）。
+    """Count of places holding the RoPE frequency seed (buffer entries + demoted plain attributes).
 
-    降格は `_buffers.pop` の破壊的操作なので、バッファ席だけを数えると**同じ module への
-    2 度目**が必ず 0 本になる。`lift_rope_buffers` は pop の**後**に `setattr` するので
-    `nn.Module.__setattr__` は buffer 席を見つけられず、降格済みの名前は素の `__dict__` に
-    入る — 両方を数えれば「走査が空振りしている（上流で属性名が変わった）」の検出力は
-    保ったまま冪等になる。判定規則は降格側と同じ接尾一致（{@link ROPE_BUFFER_NAMES}）。
+    The demotion is a destructive `_buffers.pop`, so counting only buffer entries makes **a second
+    pass over the same module** always count 0. `lift_rope_buffers` calls `setattr` **after** the
+    pop, so `nn.Module.__setattr__` finds no buffer entry and the demoted name goes into the plain
+    `__dict__` — counting both keeps the power to detect "the scan finds nothing (the attribute
+    name changed upstream)" while making the check idempotent. The rule is the same suffix match as
+    the demotion ({@link ROPE_BUFFER_NAMES}).
     """
     return sum(
         1
@@ -65,18 +70,20 @@ def _rope_attribute_count(root: nn.Module) -> int:
 
 
 def assert_rope_lifted(root: nn.Module, where: str) -> None:
-    """{@link lift_rope_buffers} を掛け、RoPE の周波数種が 1 本も無ければ落とす（恒真化の門）。
+    """Apply {@link lift_rope_buffers} and fail when no RoPE frequency seed exists (the check
+    against a tautological pass).
 
-    `where` は失敗したときにどのモデル / コンポーネントの話かを示す呼び出し側の文脈。
+    `where` is the caller's context that says which model / component a failure is about.
 
-    降格済みの module へ 2 度目を掛けても通る（数えるのは {@link _rope_attribute_count} =
-    バッファ席と素の属性の総数）。「降格の戻り本数」で見ると 2 度目が必ず 0 本になり、
-    事実と違う「上流で属性名が変わった」で export が止まる。
+    A second pass over an already demoted module passes (what is counted is
+    {@link _rope_attribute_count} = the total of buffer entries and plain attributes). Looking at
+    the count the demotion returns would always give 0 on the second pass, and export would stop
+    with a false "the attribute name changed upstream".
     """
     lift_rope_buffers(root)
     if _rope_attribute_count(root) == 0:
         raise ValueError(
-            f"{where}: RoPE バッファ {ROPE_BUFFER_NAMES} が 1 本も見つからない"
-            " — 降格の走査が空振りしている（上流で属性名が変わった可能性）。"
-            "このまま export すると sin / cos が IR に残る"
+            f"{where}: no RoPE buffer {ROPE_BUFFER_NAMES} was found"
+            " — the demotion scan finds nothing (the attribute name may have changed upstream). "
+            "Exporting as is leaves sin / cos in the IR"
         )

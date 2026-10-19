@@ -416,7 +416,7 @@ class TestFakeQuantI4:
             export_anima, "_i4_module_names", lambda model: frozenset({"attn", "patch_embed"})
         )
 
-        with pytest.raises(QuantizeError, match="割り切れない"):
+        with pytest.raises(QuantizeError, match="is not divisible"):
             self._quantize(_DitLike())
 
     def test_a_name_the_rounding_never_reaches_is_reported(self, monkeypatch):

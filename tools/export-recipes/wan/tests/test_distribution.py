@@ -620,7 +620,7 @@ class TestTheTextEncoderReference:
         umt5_dir = _assemble_umt5(tmp_path / "other", other)
         sources = _build_sources(tmp_path)
 
-        with pytest.raises(DistError, match="自分で組むバイト列と違う"):
+        with pytest.raises(DistError, match="differs from the bytes this assembly builds"):
             assemble_family(
                 [wan_plan(sources)],
                 tmp_path / "models" / WAN_REPO_NAME,
@@ -642,7 +642,7 @@ class TestTheStorageGates:
             tmp_path,
             containers={"vae_decoder_next": _graph_container("vae_decoder_next", storage=storage)},
         )
-        with pytest.raises(DistError, match=r"vae_decoder_next: .* f16 が無い"):
+        with pytest.raises(DistError, match=r"vae_decoder_next: .* has no f16"):
             wan_plan(sources)
 
     def test_it_refuses_the_i8_series_in_the_f16_transformer_seat(self, tmp_path: Path) -> None:
@@ -652,7 +652,7 @@ class TestTheStorageGates:
                 WAN_TRANSFORMER_F16_ROLE: _graph_container(WAN_TRANSFORMER_ROLE, storage="i8")
             },
         )
-        with pytest.raises(DistError, match=r"transformer_f16: .* f16 が無い"):
+        with pytest.raises(DistError, match=r"transformer_f16: .* has no f16"):
             wan_plan(sources)
 
     def test_it_refuses_the_f16_series_in_the_i8_transformer_seat(self, tmp_path: Path) -> None:
@@ -660,7 +660,7 @@ class TestTheStorageGates:
             tmp_path,
             containers={WAN_TRANSFORMER_I8_ROLE: _graph_container(WAN_TRANSFORMER_ROLE)},
         )
-        with pytest.raises(DistError, match=r"transformer_i8: .* i8 が無い"):
+        with pytest.raises(DistError, match=r"transformer_i8: .* has no i8"):
             wan_plan(sources)
 
     def test_it_refuses_a_mixed_i4_series_in_the_i8_transformer_seat(self, tmp_path: Path) -> None:
@@ -671,7 +671,7 @@ class TestTheStorageGates:
                 WAN_TRANSFORMER_I8_ROLE: _graph_container(WAN_TRANSFORMER_ROLE, storage="i4")
             },
         )
-        with pytest.raises(DistError, match=r"transformer_i8: .* i4 がある"):
+        with pytest.raises(DistError, match=r"transformer_i8: .* has i4"):
             wan_plan(sources)
 
     def test_it_refuses_an_f16_graph_in_the_text_encoder_seat(self, tmp_path: Path) -> None:
@@ -680,7 +680,7 @@ class TestTheStorageGates:
             tmp_path,
             containers={WAN_TEXT_ENCODER_ROLE: _graph_container(WAN_TEXT_ENCODER_ROLE)},
         )
-        with pytest.raises(DistError, match=r"text_encoder: .* i8 が無い"):
+        with pytest.raises(DistError, match=r"text_encoder: .* has no i8"):
             wan_plan(sources)
 
     def test_it_refuses_a_text_encoder_whose_tables_were_quantized(self, tmp_path: Path) -> None:
@@ -1749,7 +1749,7 @@ class TestTheWan22Gates:
             tmp_path,
             containers={WAN_TRANSFORMER_I8_ROLE: _graph_container(WAN_TRANSFORMER_ROLE)},
         )
-        with pytest.raises(DistError, match=r"transformer_i8: .* i8 が無い"):
+        with pytest.raises(DistError, match=r"transformer_i8: .* has no i8"):
             wan_plan(sources, generation=WAN22)
 
     def test_it_refuses_a_mixed_i4_series_in_the_int8_seat(
@@ -1762,7 +1762,7 @@ class TestTheWan22Gates:
                 WAN_TRANSFORMER_I8_ROLE: _graph_container(WAN_TRANSFORMER_ROLE, storage="i4")
             },
         )
-        with pytest.raises(DistError, match=r"transformer_i8: .* i4 がある"):
+        with pytest.raises(DistError, match=r"transformer_i8: .* has i4"):
             wan_plan(sources, generation=WAN22)
 
     def test_an_f16_transformer_beside_the_vae_is_never_carried(
@@ -1791,7 +1791,7 @@ class TestTheWan22Gates:
         sources = _build_sources22(
             tmp_path, containers={role: _graph_container(role, storage=storage)}
         )
-        with pytest.raises(DistError, match=rf"{role}: .* f16 が無い"):
+        with pytest.raises(DistError, match=rf"{role}: .* has no f16"):
             wan_plan(sources, generation=WAN22)
 
     @pytest.mark.parametrize("role", WAN_VAE_ENCODER_ROLES)
@@ -1804,7 +1804,7 @@ class TestTheWan22Gates:
         for part in missing.parent.iterdir():
             part.unlink()
         missing.parent.rmdir()
-        with pytest.raises(DistError, match=rf"組み立ての入力が無い: .*{role}"):
+        with pytest.raises(DistError, match=rf"Assembly input is missing: .*{role}"):
             wan_plan(sources, generation=WAN22)
 
     def test_it_refuses_a_wan21_model(self, tmp_path: Path, wan22_provenance) -> None:

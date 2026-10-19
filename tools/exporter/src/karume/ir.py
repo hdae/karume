@@ -1,9 +1,11 @@
-"""IR v1（docs/ir-v2.md）のグラフ表現と JSON 直列化 — exporter 内部の器。配布形へは
-`karume.container.ir_v2_document` が v2 の文書へ写して書く。
+"""Graph representation of IR v1 (docs/ir-v2.md) and its JSON serialization — the exporter's
+internal holder. For the distribution, `karume.container.ir_v2_document` maps it to a v2 document
+and writes that.
 
-TS 側の型は packages/runtime/src/format/ir.ts。ここは「エクスポータが組み立てる側」の器で、
-規則の検査は verify.py が受け持つ（組み立てと検査を同じ関数に混ぜると、
-検査を通らない中間状態を作れなくなってテストが書けなくなる）。
+The TS-side types are in packages/runtime/src/format/ir.ts. This is the holder on "the side the
+exporter builds"; checking the rules is verify.py's job (mixing building and checking in one
+function would make intermediate states that fail the checks impossible to build, and with them
+the tests).
 """
 
 from __future__ import annotations
@@ -14,23 +16,27 @@ from dataclasses import dataclass, field
 IR_FORMAT = "karume-ir"
 IR_VERSION = 1
 
-#: 非負整数、または `coeff·sym+offset` の正準表記（dims.py）。
+#: A non-negative integer, or the canonical `coeff·sym+offset` notation (dims.py).
 IrDim = int | str
 
-#: group 量子化格納（`i4`）の group 長の下限（受理集合は **2 冪かつこれ以上** — ADR 0069
-#: 決定 2・ORT と同制約）。ライタ（emit）と検証（verify）が同じ受理集合を見るための 1 本
-#: （TS 側の正本は `packages/runtime/src/format/container/codecs.ts` の `MIN_GROUP_SIZE`）。
+#: The minimum group length of group-quantized storage (`i4`) (the accepted set is **a power of
+#: two and at least this** — ADR 0069 decision 2, the same constraint as ORT). One constant so that
+#: the writer (emit) and the verifier (verify) see the same accepted set (the TS-side source of
+#: truth is `MIN_GROUP_SIZE` in `packages/runtime/src/format/container/codecs.ts`).
 MIN_GROUP_SIZE = 16
 
 
 @dataclass(frozen=True)
 class IrStorage:
-    """格納 dtype。実行経路があるのは f32 / f16 / i8 / i4 / i2 と、記号依存定数の i32。"""
+    """Storage dtype. Execution paths exist for f32 / f16 / i8 / i4 / i2 and for i32 of
+    symbol-dependent constants."""
 
     dtype: str
-    #: 量子化格納の scale テンソルの容器のテンソルキー（storage.dtype == "i8" / "i4" / "i2" のみ）。
+    #: Container tensor key of the scale tensor of quantized storage (only for storage.dtype ==
+    #: "i8" / "i4" / "i2").
     scale: str | None = None
-    #: group 量子化の group 長（storage.dtype == "i4" では必須 — ADR 0069 決定 2）。
+    #: Group length of group quantization (required when storage.dtype == "i4" — ADR 0069
+    #: decision 2).
     group_size: int | None = None
 
     def to_dict(self) -> dict:
@@ -44,10 +50,11 @@ class IrStorage:
 
 @dataclass(frozen=True)
 class IrShared:
-    """共有 initializer の指し先（ADR 0096 段 2 — 借り手グラフはバイトを持たない）。
+    """Target of a shared initializer (ADR 0096 stage 2 — the borrowing graph holds no bytes).
 
-    `tensor` は**貸し手コンテナのテンソルキー**（配布形の実キー）。借り手 Session はこの鍵で
-    貸し手グラフの initializer を引き、常駐済みの重みバッファをそのまま消費する。
+    `tensor` is **the tensor key in the lending container** (the actual key in the distribution).
+    The borrowing Session looks up the lending graph's initializer with this key and consumes the
+    already resident weight buffer as is.
     """
 
     tensor: str
@@ -58,23 +65,24 @@ class IrShared:
 
 @dataclass(frozen=True)
 class IrInitializer:
-    """initializer 1 本の宣言。
+    """Declaration of one initializer.
 
-    MUST: `tensor`（自前のバイト）と `shared`（貸し手のバイトを借りる）は**排他でどちらか
-    1 つ**。両方 / どちらも無い形は verify が落とす（組み立て層は検査を持たない —
-    モジュール docstring）。共有側は容器に 1 バイトも書かないので `storage.scale` を
-    持たない（scale は貸し手の常駐重みが持つ）。
+    MUST: `tensor` (own bytes) and `shared` (borrows the lender's bytes) are **exclusive — exactly
+    one of them**. verify rejects both / neither (the building layer has no checks — module
+    docstring). The shared side writes not a single byte into the container, so it has no
+    `storage.scale` (the scale belongs to the lender's resident weight).
     """
 
     storage: IrStorage
-    #: 容器のテンソルキー（自前バイトのとき）。
+    #: Container tensor key (with own bytes).
     tensor: str | None = None
-    #: 貸し手コンテナのテンソルキー参照（共有のとき）。
+    #: Reference to a tensor key of the lending container (when shared).
     shared: IrShared | None = None
 
     @property
     def is_shared(self) -> bool:
-        """バイトを持たない共有宣言か（走査の除外条件 — emit / verify）。"""
+        """Whether this is a shared declaration without bytes (the exclusion condition of the
+        walks — emit / verify)."""
         return self.shared is not None
 
     def to_dict(self) -> dict:
@@ -94,13 +102,15 @@ class IrValue:
 
 @dataclass(frozen=True)
 class IrState:
-    """名前付き state スロット（ADR 0066 決定 2）。
+    """A named state slot (ADR 0066 decision 2).
 
-    shape は容量込みの具体形（rank ≤ 4・数値次元は正整数）。値ではないので `values` に宣言を
-    持たず、ノードの `ins` / `outs` からも参照されない（参照の欄は ADR 0067 の担当）。
+    shape is the concrete shape including capacity (rank ≤ 4, numeric dimensions are positive
+    integers). It is not a value, so it has no declaration in `values` and is not referenced from
+    a node's `ins` / `outs` (the referencing field is ADR 0067's).
 
-    `external` は**実体を自分で確保しない**スロット（ADR 0096 段 2）— 借り手 context が貸し手の
-    同名スロットへ束ねる。`state_append` を持てず、読者は readonly attention だけ。
+    `external` is a slot that **does not allocate its own storage** (ADR 0096 stage 2) — the
+    borrowing context binds it to the lender's slot of the same name. It cannot have a
+    `state_append`; its only readers are readonly attentions.
     """
 
     dtype: str
@@ -108,8 +118,9 @@ class IrState:
     external: bool = False
 
     def to_dict(self) -> dict:
-        # MUST: `external: false` は**書かない**（欄の不存在がそのまま「自前スロット」の宣言 —
-        # 常に出すと既存モデルのグラフ JSON がバイト単位で変わり、配布物の sha 門が全部動く）。
+        # MUST: `external: false` is **not written** (the absence of the field is itself the
+        # declaration of "own slot" — always writing it would change the graph JSON of existing
+        # models byte for byte and move every sha256 regression check of the distributions).
         return {
             "dtype": self.dtype,
             "shape": list(self.shape),
@@ -133,9 +144,10 @@ class IrNode:
     ins: list[str]
     outs: list[str]
     attrs: dict
-    #: state スロットの名前参照（ADR 0067 決定 4 — `ins` / `outs` と**別の欄**）。キーは op 契約が
-    #: 固定する固定語（`attention` の `k` / `v`・`state_append` の `slot`）で、値は
-    #: `graph.states` で宣言済みのスロット名。欄を持たないノードは空表。
+    #: Named references to state slots (ADR 0067 decision 4 — **a separate field** from `ins` /
+    #: `outs`). The keys are fixed words set by the op contract (`k` / `v` of `attention`, `slot`
+    #: of `state_append`) and the values are slot names declared in `graph.states`. A node
+    #: without the field has an empty table.
     states: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -144,8 +156,9 @@ class IrNode:
             "ins": list(self.ins),
             "outs": list(self.outs),
             "attrs": dict(self.attrs),
-            # 空の states は書かない — v2 の正準直列化（`container.ir_v2_document`・docs/ir-v2.md
-            # 「正準直列化」）が空欄を書かない規則に揃える。v1 の JSON は配布物に載らない。
+            # An empty states is not written — matches the rule of v2's canonical serialization
+            # (`container.ir_v2_document`, docs/ir-v2.md "Canonical serialization") that does not
+            # write empty fields. The v1 JSON is not part of the distribution.
             **({"states": dict(self.states)} if self.states else {}),
         }
 
@@ -157,18 +170,19 @@ class IrGraph:
     outputs: list[str] = field(default_factory=list)
     initializers: dict[str, IrInitializer] = field(default_factory=dict)
     values: dict[str, IrValue] = field(default_factory=dict)
-    #: state スロット宣言（ADR 0066 決定 2）。これを出すのは export 後の手術
-    #: `karume.states.to_states_form`（ADR 0067）— `convert` は attention 形のまま出す。
+    #: State slot declarations (ADR 0066 decision 2). They are produced by the post-export
+    #: rewrite `karume.states.to_states_form` (ADR 0067) — `convert` emits the attention form as
+    #: is.
     states: dict[str, IrState] = field(default_factory=dict)
     nodes: list[IrNode] = field(default_factory=list)
 
     @property
     def required_ops(self) -> list[str]:
-        """nodes で実際に使われる op 集合。
+        """The set of ops actually used by nodes.
 
-        MUST: 独立フィールドとして持たない — requires.ops と nodes の一致は IR v1 の
-        検査規則（docs/ir-v2.md）であり、二重管理すると「宣言だけ更新して実体が古い」
-        グラフを作れてしまう。常に nodes から導出する。
+        MUST: not kept as an independent field — agreement of requires.ops with nodes is a check
+        rule of IR v1 (docs/ir-v2.md), and keeping it twice would allow a graph whose
+        "declaration was updated but whose content is stale". Always derived from nodes.
         """
         return sorted({node.op for node in self.nodes})
 
@@ -182,8 +196,9 @@ class IrGraph:
             "outputs": list(self.outputs),
             "initializers": {name: init.to_dict() for name, init in self.initializers.items()},
             "values": {name: value.to_dict() for name, value in self.values.items()},
-            # 空の states は書かない — v2 の正準直列化（`container.ir_v2_document`・docs/ir-v2.md
-            # 「正準直列化」）が空欄を書かない規則に揃える。v1 の JSON は配布物に載らない。
+            # An empty states is not written — matches the rule of v2's canonical serialization
+            # (`container.ir_v2_document`, docs/ir-v2.md "Canonical serialization") that does not
+            # write empty fields. The v1 JSON is not part of the distribution.
             **(
                 {"states": {name: slot.to_dict() for name, slot in self.states.items()}}
                 if self.states
@@ -193,10 +208,10 @@ class IrGraph:
         }
 
     def to_json(self) -> str:
-        """グラフ JSON 文字列。
+        """The graph JSON string.
 
-        allow_nan=False は必須（docs/ir-v2.md）— NaN / Infinity は JSON の標準リテラルに
-        無く、ブラウザの JSON.parse が落ちる。受理集合をランタイム側に揃えるため、
-        書き出しの時点で失敗させる。
+        allow_nan=False is required (docs/ir-v2.md) — NaN / Infinity are not standard JSON
+        literals and the browser's JSON.parse fails on them. To match the accepted set to the
+        runtime side, writing fails at this point.
         """
         return json.dumps(self.to_dict(), separators=(",", ":"), allow_nan=False)

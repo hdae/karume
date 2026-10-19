@@ -138,7 +138,7 @@ class TestExclusionReachesTheRounding:
         """恒真化の防止 — 除外しなければ core が端数 group で落ちる（上のテストが効く条件）。"""
         model = TinyDit()
 
-        with pytest.raises(Exception, match="割り切れない"):
+        with pytest.raises(Exception, match="is not divisible"):
             _method("rtn-i4-g32").apply(model, lambda _name: True, 1)
 
 

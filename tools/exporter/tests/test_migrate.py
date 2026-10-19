@@ -300,7 +300,7 @@ class TestTheMigratedContainer:
         shards = legacy_shards(mark="mig", storage="f32")
         path = stage_series(tmp_path / "text encoder", shards)
 
-        with pytest.raises(MigrateError, match="`--graph-name` で明示する"):
+        with pytest.raises(MigrateError, match="pass it explicitly with `--graph-name`"):
             migrate_component(path, tmp_path / "out", provenance=PROVENANCE)
 
     def test_the_split_form_is_named_like_a_shard_series(
@@ -355,7 +355,7 @@ class TestTheMigratedContainer:
         path, _, _ = component
         migrate_component(path, tmp_path / "out", provenance=PROVENANCE)
 
-        with pytest.raises(MigrateError, match="前回の成果物が残っている"):
+        with pytest.raises(MigrateError, match="Artifacts of a previous run remain"):
             migrate_component(path, tmp_path / "out", provenance=PROVENANCE)
 
     def test_a_failed_migration_leaves_nothing_behind(
@@ -446,11 +446,11 @@ class TestTheDerivedBindings:
             IrStorage(dtype="i4", scale="w_scale", group_size=16), [4, 3, 8], "conv_transpose1d"
         )
 
-        with pytest.raises(MigrateError, match="写せる形が無い"):
+        with pytest.raises(MigrateError, match="no shape to map to"):
             migrate._bindings(graph)
 
     def test_a_quantized_storage_without_a_scale_fails_loudly(self) -> None:
-        with pytest.raises(MigrateError, match="scale の宣言が無い"):
+        with pytest.raises(MigrateError, match="no scale is declared"):
             migrate._bindings(self._graph(IrStorage(dtype="i8"), [4, 32]))
 
 
@@ -483,7 +483,7 @@ class TestTheScaleLayoutGate:
         """正方の重みではバイト数が一致してしまう — 形まで見ないとチャネルが入れ替わる。"""
         graph = self._graph()
 
-        with pytest.raises(MigrateError, match=r"scale 'w_scale' の形 \[1, 8\]"):
+        with pytest.raises(MigrateError, match=r"scale 'w_scale' has shape \[1, 8\]"):
             migrate._assert_scale_layouts(
                 graph, migrate._bindings(graph), self._sources((8, 8), (1, 8))
             )
@@ -546,7 +546,7 @@ class TestTheCli:
         assert raised.value.code == 2
 
     def test_a_single_graph_name_cannot_cover_several_components(self, tmp_path: Path) -> None:
-        with pytest.raises(MigrateError, match="1 コンポーネントにだけ"):
+        with pytest.raises(MigrateError, match="can only be passed for one component"):
             migrate.main(
                 [
                     "a/model.safetensors",
@@ -600,7 +600,9 @@ class TestThePartLength:
         path, _, _ = component
         out = tmp_path / "out"
 
-        with pytest.raises(MigrateError, match=r"選択集合 \{256, 512, 768, 1024\} MiB の外"):
+        with pytest.raises(
+            MigrateError, match=r"outside the writer's choice set \{256, 512, 768, 1024\} MiB"
+        ):
             migrate_component(path, out, provenance=PROVENANCE, part_bytes=part_bytes)
 
         assert not out.exists()
@@ -645,7 +647,9 @@ class TestTheSelfCheck:
         monkeypatch.setattr(publish, "write_model_container", flip)
         out = tmp_path / "out"
 
-        with pytest.raises(ContainerFormatError, match="sha256 が宣言と違う"):
+        with pytest.raises(
+            ContainerFormatError, match=r"sha256 of .* differs from the declaration"
+        ):
             migrate_component(path, out, provenance=PROVENANCE)
 
         assert not out.exists() or list(out.iterdir()) == []
@@ -935,26 +939,28 @@ class TestTheTensorPieces:
     def test_two_pieces_of_one_parent_in_one_shard_fail_loudly(self, tmp_path: Path) -> None:
         first, second = piece_entries(self.WHOLE, [(0, 2), (2, 4)])
 
-        with pytest.raises(LegacyFormatError, match=r"shard\[1\] に同じ親の piece が 2 本ある"):
+        with pytest.raises(
+            LegacyFormatError, match=r"shard\[1\] holds two pieces of the same parent"
+        ):
             self._read(tmp_path, [[first, second]])
 
     def test_a_missing_piece_fails_loudly(self, tmp_path: Path) -> None:
         first, second, _ = piece_entries(self.WHOLE, [(0, 1), (1, 2), (2, 4)])
 
-        with pytest.raises(LegacyFormatError, match="piece が 2 本で宣言の総数 3 と合わない"):
+        with pytest.raises(LegacyFormatError, match="2 pieces do not match the declared total 3"):
             self._read(tmp_path, [[first], [second]])
 
     def test_pieces_that_disagree_on_the_total_fail_loudly(self, tmp_path: Path) -> None:
         first, second = piece_entries(self.WHOLE, [(0, 2), (2, 4)])
         second = replace(second, name="w#00002-of-00003")
 
-        with pytest.raises(LegacyFormatError, match="piece の総数が 2 と 3 で食い違っている"):
+        with pytest.raises(LegacyFormatError, match="the piece totals disagree, 2 and 3"):
             self._read(tmp_path, [[first], [second]])
 
     def test_pieces_out_of_shard_order_fail_loudly(self, tmp_path: Path) -> None:
         first, second = piece_entries(self.WHOLE, [(0, 2), (2, 4)])
 
-        with pytest.raises(LegacyFormatError, match="shard 順で 1 本目の piece が index 2"):
+        with pytest.raises(LegacyFormatError, match="piece 1 in shard order has index 2"):
             self._read(tmp_path, [[second], [first]])
 
     def test_pieces_in_non_consecutive_shards_fail_loudly(self, tmp_path: Path) -> None:
@@ -962,28 +968,31 @@ class TestTheTensorPieces:
         filler = Entry("filler", "F32", (1,), bytes(4))
 
         with pytest.raises(
-            LegacyFormatError, match=r"piece 2 が shard\[3\]・前の piece が shard\[1\]"
+            LegacyFormatError, match=r"piece 2 is in shard\[3\], the previous piece in shard\[1\]"
         ):
             self._read(tmp_path, [[first], [filler], [second]])
 
     def test_a_piece_with_another_dtype_fails_loudly(self, tmp_path: Path) -> None:
         first, second = piece_entries(self.WHOLE, [(0, 2), (2, 4)])
 
-        with pytest.raises(LegacyFormatError, match=r"piece 2 の dtype が I32（piece 1 は F32）"):
+        with pytest.raises(
+            LegacyFormatError, match=r"the dtype of piece 2 is I32 \(piece 1 is F32\)"
+        ):
             self._read(tmp_path, [[first], [replace(second, dtype="I32")]])
 
     def test_a_piece_with_other_trailing_dims_fails_loudly(self, tmp_path: Path) -> None:
         first, second = piece_entries(self.WHOLE, [(0, 2), (2, 4)])
 
         with pytest.raises(
-            LegacyFormatError, match=r"piece 2 の残り次元 \[4\] が piece 1 の \[8\] と違う"
+            LegacyFormatError,
+            match=r"piece 2 has remaining dimensions \[4\], which differ from piece 1's \[8\]",
         ):
             self._read(tmp_path, [[first], [replace(second, shape=(4, 4))]])
 
     def test_a_piece_without_rows_fails_loudly(self, tmp_path: Path) -> None:
         first, empty, last = piece_entries(self.WHOLE, [(0, 2), (2, 2), (2, 4)])
 
-        with pytest.raises(LegacyFormatError, match="piece 2 が 1 行未満"):
+        with pytest.raises(LegacyFormatError, match="piece 2 has fewer than 1 row"):
             self._read(tmp_path, [[first], [empty], [last]])
 
     def test_a_non_final_piece_that_is_not_a_multiple_of_4_bytes_fails_loudly(
@@ -992,14 +1001,14 @@ class TestTheTensorPieces:
         first, second = piece_entries(Entry("v", "I8", (4, 3), bytes(12)), [(0, 1), (1, 4)])
 
         with pytest.raises(
-            LegacyFormatError, match="末尾でない piece 1 が 3 バイトで 4 の倍数でない"
+            LegacyFormatError, match="non-final piece 1 is 3 bytes, not a multiple of 4"
         ):
             self._read(tmp_path, [[first], [second]])
 
     def test_a_parent_that_is_both_whole_and_split_fails_loudly(self, tmp_path: Path) -> None:
         first, second = piece_entries(self.WHOLE, [(0, 2), (2, 4)])
 
-        with pytest.raises(LegacyFormatError, match="丸ごとと piece の両方"):
+        with pytest.raises(LegacyFormatError, match="both whole and as pieces"):
             self._read(tmp_path, [[self.WHOLE, first], [second]])
 
 
@@ -1044,9 +1053,9 @@ class TestTheStoredDeclarationsMatchTheIr:
     @pytest.mark.parametrize(
         ("name", "override", "message"),
         [
-            ("x.karume_fixture_seed0", {"dtype": "I32"}, r"dtype I32 が.*F32"),
-            ("x.weight", {"shape": (8, 16)}, r"shape \[8, 16\] が.*\[4, 32\]"),
-            ("karume.scale.x.weight", {"dtype": "I32"}, r"dtype I32 が.*F32"),
+            ("x.karume_fixture_seed0", {"dtype": "I32"}, r"dtype I32, which differs from.*F32"),
+            ("x.weight", {"shape": (8, 16)}, r"shape \[8, 16\], which differs from.*\[4, 32\]"),
+            ("karume.scale.x.weight", {"dtype": "I32"}, r"dtype I32, which differs from.*F32"),
         ],
         ids=["same-bytes-other-dtype", "same-numel-other-shape", "integer-scale"],
     )
@@ -1067,7 +1076,7 @@ class TestTheStoredDeclarationsMatchTheIr:
         graph = TestTheDerivedBindings._graph(IrStorage(dtype="bf16"), [4, 32])
         sources = {"w": SourceTensor(StoredEntry("w", "BF16", (4, 32), 256), ())}
 
-        with pytest.raises(MigrateError, match="旧書き手が書かなかった dtype"):
+        with pytest.raises(MigrateError, match="a dtype the old writer did not write"):
             migrate._assert_stored_declarations(graph, sources)
 
     def test_the_undoctored_form_still_migrates(self, tmp_path: Path) -> None:

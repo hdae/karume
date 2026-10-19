@@ -1,18 +1,21 @@
-"""tiny golden fixtures の生成（後段の Deno E2E テストがこれを読む）。
+"""Generate the tiny golden fixtures (read downstream by the runtime's E2E test,
+`packages/runtime/tests/e2e_golden_test.ts`).
 
-固定 seed の小モデルを torch.export → コンテナ（`krm`）化し、torch CPU での期待出力を
-同じディレクトリに置く。契約表の全 op を全モデル合計で必ず被覆する（COVERAGE 検査）。
+Small fixed-seed models go through torch.export → container (`krm`), and the expected outputs on
+torch CPU are placed in the same directory. Every op of the contract table is always covered by
+the models combined (the COVERAGE check).
 
     uv run python -m karume.goldens --out ../../packages/runtime/tests/fixtures/golden
 
-置き場は**必ず引数で受ける**（`--out` 必須）— どのリポの `packages/runtime/tests/fixtures/`
-へ落とすかは repo topology で、汎用 exporter の知識ではない（ADR 0065 Consequences）。
-上の起動例は `tools/exporter/` から走らせたときの相対 path。
+The destination is **always taken as an argument** (`--out` is required) — which repository's
+`packages/runtime/tests/fixtures/` it lands in is repo topology, not knowledge of the generic
+exporter (ADR 0065 Consequences). The invocation above uses paths relative to `tools/exporter/`.
 
-レイアウトとテンソルキー命名は README.md「Golden layout」に明記。
+The layout and tensor key naming are documented in README.md "Golden layout".
 
-モデル定義（tiny な nn.Module 群）と重み初期化・入力生成ヘルパは
-{@link karume.golden_models} — ここは台帳（{@link GOLDEN_SPECS}）と生成ドライバ側。
+The model definitions (the tiny nn.Module classes) and the weight initialisation and input
+generation helpers are {@link karume.golden_models} — this module is the ledger
+({@link GOLDEN_SPECS}) and the generation driver.
 """
 
 from __future__ import annotations
@@ -36,8 +39,9 @@ from karume.convert import (
     normalize_boundary_tensor,
 )
 
-# fixture 側（{@link karume.golden_models}）へ出したモデルと入力生成ヘルパの束縛。
-# import は goldens → golden_models の一方向のみ（逆辺を張るとモデル定義が台帳へ食い込む）。
+# Bindings of the models and input generation helpers moved out to the fixture side
+# ({@link karume.golden_models}). The import goes one way only, goldens → golden_models (an edge
+# the other way would let model definitions creep into the ledger).
 from karume.golden_models import (
     Activations,
     ArgmaxPick,
@@ -87,20 +91,24 @@ from karume.quantize import fake_quant_int8
 MODEL_FILE = "model.krm"
 IO_FILE = "io.safetensors"
 
-#: golden の出所。`writer` は**書かない** — 生成器タグを焼くと、パッケージ版を上げただけで
-#: 全 golden のバイト列が動き、「資産が変わった」と読める再生成の前提が壊れる。
+#: Provenance of the goldens. `writer` is **not written** — baking in a generator tag would move
+#: the bytes of every golden on a mere package version bump, and break the premise that a
+#: regeneration that changes bytes reads as "the asset changed".
 GOLDEN_PROVENANCE = Provenance(license="mit")
-#: io.safetensors のキー規約。入力はグラフ入力名、出力は graph.outputs の位置で引く。
+#: Key convention of io.safetensors. Inputs are keyed by graph input name, outputs by position in
+#: graph.outputs.
 INPUT_PREFIX = "input."
 OUTPUT_PREFIX = "output."
 
-#: 乱数は全てここから引く（torch.Generator を明示 — グローバル seed に依存しない）。
+#: Every random number is drawn from here (an explicit torch.Generator — no dependence on the
+#: global seed).
 SEED = 20260802
-#: 記号次元 T の golden 実長。torch.export の 0/1 特殊化を避けるため 2 以上。
+#: The actual golden length of the symbolic dimension T. At least 2 to avoid torch.export's 0/1
+#: specialisation.
 GOLDEN_T = 6
 _DYNAMIC_T = Dim("T", min=2, max=64)
-#: Tmax 畳み込みを踏む golden 用の小さい上限（焼いた定数は Tmax² で膨らむ — fixture を
-#: 16KiB 未満に保つ）。T = GOLDEN_T はこれより十分小さく、prefix が本当に短くなる。
+#: A small upper bound for goldens that exercise Tmax folding (baked constants grow with Tmax² —
+#: keeps the fixture under 16KiB). T = GOLDEN_T is well below it, so the prefix really is shorter.
 _SMALL_DYNAMIC_T = Dim("T", min=2, max=24)
 
 
@@ -115,11 +123,12 @@ class GoldenSpec:
     example_inputs: Callable[[torch.Generator], tuple[torch.Tensor, ...]]
     dynamic_shapes: Any = None
     symbol_names: Sequence[str] = field(default=("T",))
-    #: 重みの格納 dtype。`"i8"` のとき `generate_golden` が **export と参照採取の前に**
-    #: fake-quant を掛ける（ADR 0006 / 0019）。
+    #: Storage dtype of the weights. With `"i8"`, `generate_golden` applies fake-quant **before
+    #: export and before capturing the reference** (ADR 0006 / 0019).
     weight_dtype: str = "f32"
-    #: 分解を止める高位 op の接頭辞集合（ADR 0023）。SDPA を保存して融合 `attention` を
-    #: 出す golden だけが既定を差し替える — 既定へ足すと mask 付き SDPA まで保存対象になる。
+    #: Set of prefixes of high-level ops whose decomposition is stopped (ADR 0023). Only the
+    #: golden that preserves SDPA to emit a fused `attention` replaces the default — adding it to
+    #: the default would make SDPA with a mask a preservation target too.
     preserved: Sequence[str] = field(default=PRESERVED_OP_PREFIXES)
 
 
@@ -155,7 +164,7 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="unary_chain",
         build=lambda _: UnaryChain(),
-        # sqrt / log の定義域を外さないよう、0 から離した正値だけを与える。
+        # Only positive values away from 0, to stay inside the domains of sqrt / log.
         example_inputs=lambda g: (_uniform(g, 3, 4, low=0.5, high=2.0),),
     ),
     GoldenSpec(
@@ -166,7 +175,7 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="broadcast_binary",
         build=BroadcastBinary,
-        # 除数 y は 0 を跨がせない（div の golden が発散しないように）。
+        # The divisor y does not straddle 0 (so the div golden does not diverge).
         example_inputs=lambda g: (
             _uniform(g, GOLDEN_T, 4, low=-1.0, high=1.0),
             _uniform(g, 4, low=0.5, high=1.5),
@@ -188,8 +197,10 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="argmax_pick",
         build=ArgmaxPick,
-        # x[1,T,HIDDEN] は位置軸だけ記号（decode 出口の実形）。tied は**同値タイを作る種**で、
-        # 行ごとに最大値の位置が変わる列にする（全行同じだと「別の行を読む」誤りが値に出ない）。
+        # x[1,T,HIDDEN] is symbolic only on the position axis (the real shape at the decode
+        # exit). tied is **the seed that creates equal-value ties**, with the position of the
+        # maximum changing per row (if every row were the same, a "reads another row" bug would
+        # not show in the values).
         example_inputs=lambda g: (
             _uniform(g, 1, GOLDEN_T, ArgmaxPick.HIDDEN, low=-1.5, high=1.5),
             torch.tensor([[0.5, 2.0, -1.0, 0.25], [1.0, -0.5, 3.0, 0.75], [4.0, 1.5, 0.0, -2.0]]),
@@ -199,8 +210,8 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="mask_chain",
         build=lambda _: MaskChain(),
-        # mask は torch 既定の i64（境界で i32 へ正規化される）。0 を必ず含めて
-        # bitwise_not / 真偽化の両方の分岐を踏む。
+        # mask is torch's default i64 (normalised to i32 at the boundary). It always contains 0
+        # so that both branches, bitwise_not and the conversion to truth values, are exercised.
         example_inputs=lambda g: (
             _mask(GOLDEN_T, 1, zero_at=2),
             _mask(1, GOLDEN_T, zero_at=5),
@@ -211,7 +222,8 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="int_cast",
         build=lambda _: IntCast(),
-        # 切り捨てが round / floor と区別できる値（±.5 / ±.7 を跨ぐ）を与える。
+        # Values on which truncation is distinguishable from round / floor (straddling ±.5 /
+        # ±.7).
         example_inputs=lambda g: (
             _uniform(g, GOLDEN_T, 3, low=-3.0, high=3.0),
             torch.arange(GOLDEN_T * 3, dtype=torch.int64).reshape(GOLDEN_T, 3) % 4 - 1,
@@ -226,8 +238,8 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     ),
     GoldenSpec(
         name="expand_mask",
-        # mask / index は torch 既定の i64（境界で i32 へ正規化される）。mask は 0 を必ず
-        # 含めて bitwise_not の両分岐を踏む。
+        # mask / index are torch's default i64 (normalised to i32 at the boundary). mask always
+        # contains 0 so that both branches of bitwise_not are exercised.
         example_inputs=lambda g: (
             _mask(GOLDEN_T, 1, zero_at=2),
             torch.arange(GOLDEN_T, dtype=torch.int64).reshape(1, GOLDEN_T) - 2,
@@ -239,7 +251,7 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="batch_matmul",
         build=lambda _: BatchMatmul(),
-        # B=2 / M=T / K=3 / N=5 — 全て違う長さ（軸の取り違えが数値に出る形）
+        # B=2 / M=T / K=3 / N=5 — all different lengths (so a swapped axis shows in the numbers)
         example_inputs=lambda g: (
             _uniform(g, 2, GOLDEN_T, 3, low=-1.0, high=1.0),
             _uniform(g, 2, 3, 5, low=-1.0, high=1.0),
@@ -249,8 +261,9 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="gather_last_dim",
         build=lambda _: GatherLastDim(),
-        # index は torch 既定の i64（境界で i32 へ正規化される）。3i mod 4 で src の
-        # 最終次元 4 を全部踏み、恒等でも単調でもない列にする（添字 1 ずれが必ず出る）。
+        # index is torch's default i64 (normalised to i32 at the boundary). 3i mod 4 visits all
+        # 4 entries of src's last dimension in a sequence that is neither the identity nor
+        # monotonic (an off-by-one index always shows).
         example_inputs=lambda g: (
             _uniform(g, 2, GOLDEN_T, 4, low=-2.0, high=2.0),
             (torch.arange(2 * GOLDEN_T * 3, dtype=torch.int64) * 3 % 4).reshape(2, GOLDEN_T, 3),
@@ -260,7 +273,8 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="attention_block",
         build=AttentionBlock,
-        # 2 本目の logits は素朴 softmax なら f32 で exp が 0 に潰れる領域（-205..-180）
+        # The second logits tensor lies where a naive softmax's exp collapses to 0 in f32
+        # (-205..-180)
         example_inputs=lambda g: (
             _uniform(g, 1, GOLDEN_T, AttentionBlock.HIDDEN, low=-1.0, high=1.0),
             _uniform(g, 3, 5, low=-205.0, high=-180.0),
@@ -271,15 +285,15 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
         name="fused_attention",
         build=lambda _: FusedAttention(),
         example_inputs=_fused_attention_inputs,
-        # SDPA を保存するのはこの golden だけ（既定の 11 op に足すと mask 付き SDPA を持つ
-        # グラフが export 不能になる — ADR 0023）。
+        # Only this golden preserves SDPA (adding it to the default 12 ops of
+        # `PRESERVED_OP_PREFIXES` would make graphs with masked SDPA unexportable — ADR 0023).
         preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
     ),
     GoldenSpec(
         name="embedding_lookup",
         build=EmbeddingLookup,
-        # 添字は torch 既定の i64（境界で i32 へ正規化される）。padding_idx=0 を必ず引く列で、
-        # 語彙 5 行を一巡する。
+        # Indices are torch's default i64 (normalised to i32 at the boundary). The sequence
+        # always looks up padding_idx=0 and cycles through the 5 vocabulary rows.
         example_inputs=lambda _: (
             (torch.arange(GOLDEN_T, dtype=torch.int64) % EmbeddingLookup.VOCAB).reshape(
                 1, GOLDEN_T
@@ -290,8 +304,9 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="masked_scores",
         build=lambda _: MaskedScores(),
-        # mask は torch 既定の i64（境界で bool へ cast される）。**1 行を全マスク**にして、
-        # 全要素が -3.4e38 になった行の softmax（一様分布）まで踏む。
+        # mask is torch's default i64 (cast to bool at the boundary). **One row is fully
+        # masked**, so the softmax of a row whose elements are all -3.4e38 (a uniform
+        # distribution) is exercised too.
         example_inputs=lambda g: (
             _uniform(g, 1, 2, GOLDEN_T, GOLDEN_T, low=-2.0, high=2.0),
             _band_mask(GOLDEN_T, blocked_row=2),
@@ -308,7 +323,7 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="runtime_masked_attention",
         build=lambda _: RuntimeMaskedAttention(),
-        # mask は **bool のグラフ入力**（i64 経由にしない — ADR 0044 決定 1 の IR 境界）。
+        # mask is **a bool graph input** (not via i64 — the IR boundary of ADR 0044 decision 1).
         example_inputs=_runtime_masked_attention_inputs,
     ),
     GoldenSpec(
@@ -330,8 +345,8 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="scalar_operands",
         build=lambda _: ScalarOperands(),
-        # mask は torch 既定の i64（境界で i32 へ正規化される）。0 を含めて `1 - mask` の
-        # 両方の値を踏む。
+        # mask is torch's default i64 (normalised to i32 at the boundary). It contains 0 so that
+        # both values of `1 - mask` are exercised.
         example_inputs=lambda g: (
             _uniform(g, GOLDEN_T, 4, low=-1.0, high=1.0),
             _mask(GOLDEN_T, 4, zero_at=7),
@@ -341,8 +356,8 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="spline_pieces",
         build=lambda _: SplinePieces(),
-        # ±TAIL（1.0）と clamp の両端（-0.75 / 0.5）をどちらも跨ぐ列。境界ちょうど（-1.0）も
-        # 1 点入れて ge と gt の分かれ目を踏む。
+        # A sequence that straddles both ±TAIL (1.0) and the two ends of the clamp (-0.75 / 0.5).
+        # One point exactly on the boundary (-1.0) exercises where ge and gt part.
         example_inputs=lambda g: (
             torch.tensor([-2.0, -1.0, -0.4, 0.3, 1.2, 2.0]),
             _uniform(g, GOLDEN_T, 4, low=0.2, high=0.8),
@@ -352,7 +367,8 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="coupling_split",
         build=lambda _: CouplingSplit(),
-        # x[1,6,T]（チャネル軸を静的に保ったまま T は記号）と attn[2,4]（最終次元を pad）
+        # x[1,6,T] (T symbolic while the channel axis stays static) and attn[2,4] (the last
+        # dimension is padded)
         example_inputs=lambda g: (
             _uniform(g, 1, 6, GOLDEN_T, low=-1.5, high=1.5),
             _uniform(g, 2, 4, low=-1.0, high=1.0),
@@ -387,7 +403,8 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="rms_norm_block",
         build=RmsNormBlock,
-        # 0 を跨ぐ値域（rms の分母は二乗和なので符号に依らないが、weight 掛けの符号は出る）
+        # A range that straddles 0 (rms's denominator is a sum of squares and ignores the sign,
+        # but the sign of the weight multiplication shows)
         example_inputs=lambda g: (
             _uniform(g, 1, GOLDEN_T, RmsNormBlock.HIDDEN, low=-1.5, high=1.5),
         ),
@@ -396,7 +413,8 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="conv2d_block",
         build=Conv2dBlock,
-        # x は H≠W（6×5）。channels は 1 点だけノルム 0 にして clamp_min の床を踏む。
+        # x has H≠W (6×5). channels has a norm of 0 at one point only, exercising the floor of
+        # clamp_min.
         example_inputs=lambda g: (
             _uniform(g, 1, 4, 6, 5, low=-1.5, high=1.5),
             _zeroed_column(g, 1, 4, 3, 5, at=(1, 2)),
@@ -405,14 +423,16 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="conv3d_block",
         build=Conv3dBlock,
-        # x は unbatched の [Cin, T, H, W] = [4, 5, 6, 5]（T≠H≠W — 軸の取り違えを値に出す）
+        # x is unbatched [Cin, T, H, W] = [4, 5, 6, 5] (T≠H≠W — a swapped axis shows in the
+        # values)
         example_inputs=lambda g: (_uniform(g, 4, 5, 6, 5, low=-1.5, high=1.5),),
     ),
     GoldenSpec(
         name="deform_conv2d_block",
         build=DeformConvBlock,
-        # x は H≠W（4×5）。offset は ±2.5 で入力平面の外まで振り、mask は BiRefNet と同じ
-        # [0, 2]。wide 分岐の出力空間は 4×4（H: 4+2−2 / W: 5+0−1）、point 分岐は 4×5。
+        # x has H≠W (4×5). offset swings ±2.5, out beyond the input plane, and mask is [0, 2] as
+        # in BiRefNet. The wide branch's output space is 4×4 (H: 4+2−2 / W: 5+0−1), the point
+        # branch's 4×5.
         example_inputs=lambda g: (
             _uniform(g, 1, DeformConvBlock.IN_CHANNELS, 4, 5, low=-1.5, high=1.5),
             _uniform(g, 1, 2 * 3 * 2, 4, 4, low=-2.5, high=2.5),
@@ -424,8 +444,9 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="gru_scan_block",
         build=GruScanBlock,
-        # x[T, N, IN] は時間軸だけ記号（この op の存在理由）。state は逆方向の初期状態で、
-        # 0 を含めない値域にする（`h0` を読み飛ばす実装が緑にならない形）。
+        # x[T, N, IN] is symbolic only on the time axis (the reason this op exists). state is the
+        # initial state of the reverse direction, in a range that excludes 0 (so an
+        # implementation that skips reading `h0` does not go green).
         example_inputs=lambda g: (
             _uniform(g, GOLDEN_T, 1, GruScanBlock.IN_FEATURES, low=-1.5, high=1.5),
             _uniform(g, 1, GruScanBlock.HIDDEN, low=0.2, high=0.9),
@@ -435,7 +456,7 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="bilinear_resize",
         build=lambda _: BilinearResize(),
-        # x は H≠W（4×5）。narrow は高さ 1（scale 0 の軸）で幅は縮小させる。
+        # x has H≠W (4×5). narrow has height 1 (the axis with scale 0) and shrinks the width.
         example_inputs=lambda g: (
             _uniform(g, 1, 3, 4, 5, low=-1.5, high=1.5),
             _uniform(g, 1, 2, 1, 6, low=-1.5, high=1.5),
@@ -444,8 +465,9 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
     GoldenSpec(
         name="i8_weights",
         build=Int8Weights,
-        # index は torch 既定の i64（境界で i32 へ正規化される）。**0 を必ず含める** —
-        # 全ゼロ行（scale の下限 clamp）を引くのはこのケースだけ。
+        # index is torch's default i64 (normalised to i32 at the boundary). **It always contains
+        # 0** — this is the only case that looks up the all-zero row (the lower clamp of the
+        # scale).
         example_inputs=lambda g: (
             torch.arange(GOLDEN_T, dtype=torch.int64) % Int8Weights.VOCAB,
             _uniform(g, 1, Int8Weights.SIGNAL_IN, GOLDEN_T, low=-1.5, high=1.5),
@@ -458,31 +480,36 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
 
 
 def _assert_not_trivial(where: str, tensor: torch.Tensor) -> None:
-    """golden の出力が**自明値でない**ことを生成時に固定する。
+    """Pin at generation time that a golden output is **not a trivial value**.
 
-    2 要素以上あるのに全要素が同じ値の出力は、演算の誤りが値に出ない恒真な期待値
-    （実例: mask ∈ {0,1} に対する `(1 - mask) * mask` は逆順 sub でも恒等 0）。突合が
-    緑でも何も検証していないので、fixture を書き出す前に落とす。
+    An output with 2 or more elements that are all the same value is a tautological expectation
+    on which a computation error does not show (real case: `(1 - mask) * mask` over mask ∈ {0,1}
+    is identically 0 even with the sub reversed). A green comparison would verify nothing, so it
+    fails before the fixture is written.
     """
     if tensor.numel() > 1 and tensor.unique().numel() == 1:
         raise AssertionError(
-            f"{where}: 全要素が同じ値（{tensor.flatten()[0].item()}）の自明な期待値 —"
-            " 演算の誤りが値に出ない golden になっている"
+            f"{where}: a trivial expectation with every element the same value"
+            f" ({tensor.flatten()[0].item()}) — the golden would not show a computation error"
         )
 
 
 def generate_golden(spec: GoldenSpec, root: Path) -> IrGraph:
-    """1 モデル分のコンテナ（`model.krm` の part 列）と io.safetensors を書き、グラフを返す。
+    """Write one model's container (the part list of `model.krm`) and io.safetensors, and return
+    the graph.
 
-    MUST: モデルと io の生成・検算は**作業席の中**で完結させ、通った回だけ置き場ごと据え替える
-    （{@link karume.artifacts.staged_publication}）。最終の置き場へ直接書くと、モデルを据えた
-    後の検算の失敗や part の据え替えの失敗で「新しいモデル + 古い io」が残る。
+    MUST: generating and verifying the model and io finish **inside a staging directory**, and the
+    destination is swapped in as a whole only on a passing run
+    ({@link karume.artifacts.staged_publication}). Writing to the final destination directly would
+    leave "a new model + an old io" behind when verification fails after the model is in place or
+    swapping in a part fails.
     """
     generator = _rng()
     module = spec.build(generator).eval()
     args = spec.example_inputs(generator)
-    # MUST: fake-quant は export と**下の参照採取の両方より前**（ADR 0006）。後ろへ動かすと
-    # 期待値だけが元の重みで計算され、E2E の差が量子化誤差と実装誤差の合成になる。
+    # MUST: fake-quant comes before **both export and the reference capture below** (ADR 0006).
+    # Moved after them, only the expected values would be computed with the original weights,
+    # and the E2E difference would be quantization error and implementation error combined.
     scales = fake_quant_int8(module).scales if spec.weight_dtype == "i8" else None
     with staged_publication(root / spec.name) as out_dir:
         out_dir.mkdir(parents=True)
@@ -491,8 +518,9 @@ def generate_golden(spec: GoldenSpec, root: Path) -> IrGraph:
             args,
             out_dir / MODEL_FILE,
             provenance=GOLDEN_PROVENANCE,
-            # グラフ名は**部品名**（= 置き場のディレクトリ名 = TS 側が引く名前）。既定は無い
-            # （`pipeline._assert_graph_name` の MUST）ので、ここで綴る。
+            # The graph name is **the component name** (= the destination directory name = the
+            # name the TS side looks up). There is no default (the MUST of
+            # `pipeline._assert_graph_name`), so it is spelled here.
             graph_name=spec.name,
             dynamic_shapes=spec.dynamic_shapes,
             symbol_names=spec.symbol_names,
@@ -506,37 +534,39 @@ def generate_golden(spec: GoldenSpec, root: Path) -> IrGraph:
         outputs = result if isinstance(result, tuple) else (result,)
         if len(outputs) != len(graph.outputs):
             raise AssertionError(
-                f"{spec.name}: torch 出力 {len(outputs)} 本 ≠ IR 出力 {len(graph.outputs)} 本"
+                f"{spec.name}: {len(outputs)} torch outputs ≠ {len(graph.outputs)} IR outputs"
             )
         for index, tensor in enumerate(outputs):
-            _assert_not_trivial(f"{spec.name} の出力 {index}", tensor)
-        # MUST: io も IR の意味論 dtype の実表現へ落とす（i64 → I32 / bool → U32 の 0/1）。
-        # ランタイムが受け取る形と揃っていないと、Deno 側 E2E が golden を読めない。
+            _assert_not_trivial(f"{spec.name} output {index}", tensor)
+        # MUST: io is lowered to the actual representation of the IR's semantic dtypes too (i64 →
+        # I32 / bool → U32 0/1). Unless it matches the form the runtime receives, the E2E on the TS
+        # side cannot read the golden.
         io_tensors = {
             f"{INPUT_PREFIX}{declared.name}": normalize_boundary_tensor(
-                tensor.detach(), f"{spec.name} の入力 '{declared.name}'"
+                tensor.detach(), f"{spec.name} input '{declared.name}'"
             )
             for declared, tensor in zip(graph.inputs, args, strict=True)
         }
         for index, tensor in enumerate(outputs):
             io_tensors[f"{OUTPUT_PREFIX}{index}"] = normalize_boundary_tensor(
-                tensor.detach(), f"{spec.name} の出力 {index}"
+                tensor.detach(), f"{spec.name} output {index}"
             )
         save_file(io_tensors, str(out_dir / IO_FILE))
     return graph
 
 
 def generate_all(root: Path) -> dict[str, IrGraph]:
-    """全 golden を生成し、契約表の op 被覆を検査する。
+    """Generate every golden and check the op coverage of the contract table.
 
-    被覆検査を生成側に置くのは、op を 1 個足すたびに golden を足す実装契約
-    （ADR 0005）を機械で担保するため — モデルを削って穴を空けた瞬間に落ちる。
+    The coverage check sits on the generator side to back mechanically the implementation
+    contract of adding a golden for every op added (ADR 0005) — it fails the moment a model is
+    trimmed and leaves a hole.
     """
     graphs = {spec.name: generate_golden(spec, root) for spec in GOLDEN_SPECS}
     covered = {op for graph in graphs.values() for op in graph.required_ops}
     uncovered = sorted(EMITTABLE_OPS - covered)
     if uncovered:
-        raise AssertionError(f"golden がカバーしない op: {uncovered}")
+        raise AssertionError(f"ops not covered by any golden: {uncovered}")
     return graphs
 
 
@@ -546,7 +576,7 @@ def main() -> None:
         "--out",
         type=Path,
         required=True,
-        help="生成先ディレクトリ（必須 — 例: ../../packages/runtime/tests/fixtures/golden）",
+        help="output directory (required — e.g. ../../packages/runtime/tests/fixtures/golden)",
     )
     args = parser.parse_args()
     for name, graph in generate_all(args.out).items():

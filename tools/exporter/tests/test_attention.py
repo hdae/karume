@@ -254,7 +254,7 @@ class TestUnsupportedFormsFailLoudly:
     def test_a_symbolic_depth_is_rejected(self):
         """D が記号次元だと `√scale_factor` を export 時に決められない（既定 scale の前提）。"""
         args = _args()
-        with pytest.raises(NotImplementedError, match="記号次元"):
+        with pytest.raises(NotImplementedError, match="symbolic dimension"):
             export_and_convert(
                 PlainAttention(),
                 args,
@@ -375,7 +375,7 @@ class TestNonContractMasksFailLoudly:
     )
     def test_a_leading_axis_other_than_one_is_rejected(self, shape, why):
         args = (*_args(), torch.zeros(shape))
-        with pytest.raises(NotImplementedError, match="先頭 2 軸"):
+        with pytest.raises(NotImplementedError, match="leading 2 axes"):
             _preserved_attention(MaskedAttention(), args)
         assert why  # 失敗時に形の意図が読めるようにパラメータへ残す
 
@@ -387,7 +387,7 @@ class TestNonContractMasksFailLoudly:
 
     def test_a_rank3_mask_is_rejected(self):
         args = (*_args(), torch.zeros(1, 5, 7))
-        with pytest.raises(NotImplementedError, match=r"rank 3 の attn_mask"):
+        with pytest.raises(NotImplementedError, match=r"attn_mask of rank 3"):
             _preserved_attention(MaskedAttention(), args)
 
     def test_a_bool_mask_is_rejected_by_the_handler_itself(self):

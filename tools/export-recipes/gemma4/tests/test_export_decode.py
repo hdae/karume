@@ -553,7 +553,7 @@ class TestAssertIrFormDecode:
         misrouted = StatesPlan(capacity_symbol=decode.CAPACITY_SYMBOL, attentions=tuple(specs))
 
         # 手術自身が「スロットへ書く値が読者ごとに違う」で落とす（実物の配線の実証）。
-        with pytest.raises(StatesFormError, match="読者ごとに違う"):
+        with pytest.raises(StatesFormError, match="differs between readers"):
             to_states_form(graph, misrouted)
 
     def test_a_materialized_kv_shape_is_rejected(self):
@@ -707,7 +707,7 @@ class TestAssertIrFormDecode:
             attentions=decode.states_plan(graph, TINY_IR_CONFIG).attentions,
         )
 
-        with pytest.raises(StatesFormError, match=r"graph\.symbols に既にある"):
+        with pytest.raises(StatesFormError, match=r"is already in graph\.symbols"):
             to_states_form(graph, colliding)
 
 

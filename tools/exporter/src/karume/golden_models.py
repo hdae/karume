@@ -1,7 +1,8 @@
-"""golden fixture の中身 — tiny な nn.Module 群と、その重み初期化・入力生成ヘルパ。
+"""The contents of the golden fixtures — the tiny nn.Module classes and their weight
+initialisation and input generation helpers.
 
-台帳（{@link karume.goldens.GOLDEN_SPECS}）と生成ドライバは {@link karume.goldens}。
-import は goldens → golden_models の一方向のみ。
+The ledger ({@link karume.goldens.GOLDEN_SPECS}) and the generation driver are in
+{@link karume.goldens}. The import goes one way only, goldens → golden_models.
 """
 
 from __future__ import annotations
@@ -18,18 +19,20 @@ def _uniform(generator: torch.Generator, *shape: int, low: float, high: float) -
 
 
 def _mask(*shape: int, zero_at: int) -> torch.Tensor:
-    """1 本だけ 0 を含む i64 の 0/1 マスク（torch 既定の整数 dtype = int64）。"""
+    """An i64 0/1 mask with exactly one 0 (torch's default integer dtype = int64)."""
     mask = torch.ones(shape, dtype=torch.int64).reshape(-1)
     mask[zero_at] = 0
     return mask.reshape(shape)
 
 
 def _band_mask(length: int, *, blocked_row: int) -> torch.Tensor:
-    """attention 用の i64 マスク `[1,1,T,T]`（1 = 残す / 0 = マスク）。
+    """An i64 mask `[1,1,T,T]` for attention (1 = keep / 0 = mask).
 
-    対角の近傍だけを残す帯マスクにしたうえで、`blocked_row` の行は**全て 0**（全マスク）に
-    する。全マスク行は masked_fill で全要素が -3.4e38 になり、safe-softmax なら一様分布、
-    素朴形なら NaN になる — limitations.md の「identity は ±F32_MAX」との相互作用を踏む形。
+    A band mask that keeps only the neighbourhood of the diagonal, with the row `blocked_row` set
+    **entirely to 0** (fully masked). In a fully masked row masked_fill makes every element
+    -3.4e38, which gives a uniform distribution under safe-softmax and NaN under the naive form —
+    a shape that exercises the interaction with "the identity is ±F32_MAX" in limitations.md
+    (section "Non-finite values (NaN / ±Infinity) are not checked").
     """
     rows = torch.arange(length).reshape(length, 1)
     cols = torch.arange(length).reshape(1, length)
@@ -39,7 +42,7 @@ def _band_mask(length: int, *, blocked_row: int) -> torch.Tensor:
 
 
 class UnaryChain(nn.Module):
-    """neg / abs / sqrt / log / exp（log と sqrt の定義域は入力生成側で保証する）。"""
+    """neg / abs / sqrt / log / exp (the input generator guarantees the domains of log and sqrt)."""
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         magnitude = torch.abs(torch.neg(x))
@@ -48,11 +51,13 @@ class UnaryChain(nn.Module):
 
 
 class Activations(nn.Module):
-    """tanh / sigmoid / relu / gelu / gelu_tanh / sin（gelu 2 種は分解を止めて 1 ノードで運ぶ）。
+    """tanh / sigmoid / relu / gelu / gelu_tanh / sin (the two gelu variants are kept from
+    decomposing and carried as one node).
 
-    `sin` は活性ではないが、**実行時値**を取る単項の f32 elementwise という点で同型なので
-    ここに相乗りする（定数入力の `sin` は FOLDABLE_OPS が畳んでノードを残さない — 発行経路を
-    踏ませるには placeholder 由来の値を通す必要がある）。
+    `sin` is not an activation, but it has the same shape as a unary f32 elementwise op on a
+    **run-time value**, so it rides along here (`sin` on a constant input is folded by
+    FOLDABLE_OPS and leaves no node — exercising the emit path needs a value that comes from a
+    placeholder).
     """
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, ...]:
@@ -67,10 +72,10 @@ class Activations(nn.Module):
 
 
 class BroadcastBinary(nn.Module):
-    """add / sub / mul / div を torch 右詰め broadcast で踏む（rank2 × rank1）。
+    """Exercise add / sub / mul / div with torch's right-aligned broadcast (rank 2 × rank 1).
 
-    `offset` は Parameter でも buffer でもない素の属性 — torch.export が lifted tensor
-    constant として持ち上げる経路（initializer 化）を通す。
+    `offset` is a plain attribute, neither a Parameter nor a buffer — it goes through the path where
+    torch.export lifts it as a lifted tensor constant (becoming an initializer).
     """
 
     def __init__(self, generator: torch.Generator) -> None:
@@ -82,7 +87,7 @@ class BroadcastBinary(nn.Module):
 
 
 class Mlp(nn.Module):
-    """rank-2 matmul の 2 層 MLP。重みは全て initializer 経由で運ぶ。"""
+    """A 2-layer MLP of rank-2 matmuls. Every weight is carried through initializers."""
 
     def __init__(self, generator: torch.Generator) -> None:
         super().__init__()
@@ -97,18 +102,19 @@ class Mlp(nn.Module):
 
 
 class RowReduce(nn.Module):
-    """最終次元の行 reduce（keepdim 無し）— sum / amax / amin。"""
+    """Row reduce over the last dimension (no keepdim) — sum / amax / amin."""
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, ...]:
         return x.sum(dim=-1), x.amax(dim=-1), x.amin(dim=-1)
 
 
 class MaskChain(nn.Module):
-    """DeBERTa front の mask 経路を縮めたもの（recon §3-8）。
+    """A shrunk version of the DeBERTa front's mask path (recon §3-8).
 
-    mask 外積 mul(i64) → 真偽化 cast → bitwise_not → 重み化 cast → f32 の重み掛け。
-    外積を unsqueeze 無しで踏むため、列/行の mask を [T,1] / [1,T] で受け取る。
-    bool 出力を 1 本持たせて非 f32 の readback 経路も golden に載せる。
+    mask outer product mul(i64) → cast to truth values → bitwise_not → cast to weights → f32
+    weight multiplication. To exercise the outer product without unsqueeze, the column / row
+    masks are taken as [T,1] / [1,T]. One bool output puts the non-f32 readback path into the
+    golden too.
     """
 
     def forward(
@@ -121,10 +127,10 @@ class MaskChain(nn.Module):
 
 
 class IntCast(nn.Module):
-    """f32 → 整数の切り捨て規約と i32 の sub / mul、および i32 出力の readback。
+    """The f32 → integer truncation convention, i32 sub / mul, and the readback of an i32 output.
 
-    `x.to(torch.int64)` は torch の truncate（0 方向切り捨て）。IR では i32 として
-    宣言される（境界正規化 — ADR 0009）。
+    `x.to(torch.int64)` is torch's truncate (rounding toward 0). In the IR it is declared as i32
+    (boundary normalisation — ADR 0009).
     """
 
     def forward(self, x: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -134,33 +140,34 @@ class IntCast(nn.Module):
 
 
 class LayoutChain(nn.Module):
-    """permute → clone → view → unsqueeze → squeeze の鎖（ADR 0011 / recon §2）。
+    """The chain permute → clone → view → unsqueeze → squeeze (ADR 0011 / recon §2).
 
-    実測の attention head 整形（permute [0,2,1,3] の直後に contiguous 化 clone → view）と
-    同じ並び。`reshape(3, -1)` が非連続な permute 結果に掛かるので torch は clone を挟む —
-    その clone は IR では恒等（値は常に連続）になる。
+    The same sequence as the observed attention head reshaping (a contiguous clone → view right
+    after permute [0,2,1,3]). `reshape(3, -1)` applies to a non-contiguous permute result, so
+    torch inserts a clone — that clone is the identity in the IR (values are always contiguous).
 
-    MUST: 並べ替えは**巡回長 3**（[1,2,0]）を使う。実測に出る形（[0,2,1,3] / [0,2,1]）は
-    全て対合で逆置換が自分自身になるため、stride 表を逆置換で組む誤りを torch 突合でも
-    検出できない（対合形そのものは packages/runtime/tests/gpu_ops_test.ts の op 単位ケースが持つ）。
+    MUST: the permutation is **a 3-cycle** ([1,2,0]). The forms seen in practice ([0,2,1,3] /
+    [0,2,1]) are all involutions whose inverse is themselves, so a stride table built from the
+    inverse permutation by mistake cannot be caught even by a torch comparison (the involution
+    forms themselves are covered by the per-op cases of packages/runtime/tests/gpu_ops_test.ts).
 
-    2 本目の出力は permute 出力の**別名の連鎖**そのもの（reshape 3 段）で、
-    「グラフ出力がエイリアスでも readback が正しい」を golden 側から踏む。
+    The second output is the **alias chain** of the permute output itself (3 reshape steps), which
+    exercises "readback is correct even when a graph output is an alias" from the golden side.
     """
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         heads = x.permute(1, 2, 0)  # [T,3,4] -> [3,4,T]
-        merged = heads.reshape(3, -1)  # -> [3,4T]（clone + view）
+        merged = heads.reshape(3, -1)  # -> [3,4T] (clone + view)
         wide = merged.unsqueeze(0)  # -> [1,3,4T]
         return heads, torch.squeeze(wide, dim=[0])
 
 
 class ExpandMask(nn.Module):
-    """bool マスクと i32 添字の expand（recon §2 の実測 5 本と同型）。
+    """expand of a bool mask and i32 indices (the same shape as the 5 observed cases of recon §2).
 
-    conv 経路の bool マスク `[1,T,1] → [1,T,C]` と、gather 添字の `[1,T,T] → [16,T,T]` を
-    縮めた形。expand の出力を i32 のまま 1 本読み戻して、非 f32 の strided コピーを
-    readback まで通す。
+    A shrunk form of the conv path's bool mask `[1,T,1] → [1,T,C]` and the gather indices
+    `[1,T,T] → [16,T,T]`. One expand output is read back as i32, taking a non-f32 strided copy
+    all the way to readback.
     """
 
     def forward(
@@ -168,20 +175,20 @@ class ExpandMask(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         keep = mask.to(torch.bool)  # bool[T,1]
         wide = keep.expand(-1, 3)  # bool[T,3]
-        spread = index.expand(3, -1)  # i64[3,T]（IR では i32）
+        spread = index.expand(3, -1)  # i64[3,T] (i32 in the IR)
         return scores * spread.to(torch.float32), torch.bitwise_not(wide), spread
 
 
 class BatchMatmul(nn.Module):
-    """rank-3 のバッチ matmul（recon §2 の実測 8 本と同型）。
+    """Rank-3 batched matmul (the same shape as the 8 observed cases of recon §2).
 
-    MUST: **B / M / K / N を全て違う長さ**にする（ACTIVE_DESIGN の Pitfalls）。バッチ stride を
-    隣の次元の積で組む誤り（M·K と K·N と M·N の取り違え）は、2 軸が同じ長さの形では
-    数値に出ない。ここは B=2 / M=T=6 / K=3 / N=5 で、行列 1 枚の要素数も 18 / 15 / 30 と
-    全て違う。
+    MUST: **B / M / K / N all have different lengths** (a pitfall once listed in ACTIVE_DESIGN). A
+    batch stride built from the product of the wrong neighbouring dimensions (confusing M·K, K·N
+    and M·N) does not show in the numbers for shapes where two axes have the same length. Here
+    B=2 / M=T=6 / K=3 / N=5, and the element counts of one matrix, 18 / 15 / 30, all differ too.
 
-    2 本目の出力は同じ被乗数を転置した相手と掛けたもので、K と N を入れ替えた読み方
-    （b の stride を n ではなく k で組む誤り）を別の形からも踏む。
+    The second output multiplies the same multiplicand by a transposed partner, exercising a read
+    with K and N swapped (building b's stride from k instead of n) from another shape too.
     """
 
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -189,14 +196,16 @@ class BatchMatmul(nn.Module):
 
 
 class GatherLastDim(nn.Module):
-    """最終次元の gather（実測は dim=-1 / src f32[16,T,512] / index i32[16,T,T]）。
+    """gather over the last dimension (observed: dim=-1 / src f32[16,T,512] / index
+    i32[16,T,T]).
 
-    index は **i32 のグラフ入力**として渡す（torch 既定の i64 が境界で i32 に正規化される —
-    ADR 0009）。i32 initializer は焼ける（{@link SymbolicTable} の gather 添字）が、この
-    golden は実行時に届く添字を踏ませるためにグラフ入力にする。
+    index is passed as **an i32 graph input** (torch's default i64 is normalised to i32 at the
+    boundary — ADR 0009). An i32 initializer can be baked (the gather indices of
+    {@link SymbolicTable}), but this golden makes it a graph input to exercise indices that arrive
+    at run time.
 
-    2 本目の出力は引いた値を使う下流演算で、gather の結果が値として正しく流れることを
-    golden に載せる。
+    The second output is a downstream operation that uses the looked-up values, putting into the
+    golden that the gather result flows on correctly as values.
     """
 
     def forward(self, src: torch.Tensor, index: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -205,25 +214,29 @@ class GatherLastDim(nn.Module):
 
 
 def _fill_param(generator: torch.Generator, tensor: torch.Tensor, scale: float) -> None:
-    """パラメータを固定 seed の生成器で上書きする。
+    """Overwrite a parameter from the fixed-seed generator.
 
-    MUST: `nn.Linear` / `nn.Conv1d` / `nn.Embedding` の既定初期化は**グローバル RNG**を使う。
-    上書きしないと golden がバイト単位で再現せず、再生成突合（TestDeterminism）が落ちる。
+    MUST: the default initialisation of `nn.Linear` / `nn.Conv1d` / `nn.Embedding` uses **the
+    global RNG**. Without the overwrite the golden does not reproduce byte for byte, and the
+    regeneration cross-check (TestDeterminism) fails.
     """
     with torch.no_grad():
         tensor.copy_(torch.randn(tensor.shape, generator=generator) * scale)
 
 
 class ArgmaxPick(nn.Module):
-    """greedy デコードの出口（ADR 0068 決定 2）— 最終次元 = 語彙軸の argmax・**rank 保存**。
+    """The exit of greedy decoding (ADR 0068 decision 2) — argmax over the last dimension = the
+    vocabulary axis, **rank preserved**.
 
-    1 本目は実形（`linear` = lm_head 相当の logits に argmax を掛ける・位置軸は記号 T）。
-    2 本目は **同値タイ**への argmax で、`cat([t, t], dim=-1)` が対称位置に必ず同値を作るので
-    「最小 index」が偶然ではなく**構造で**要求される — 最大 index を返す実装なら答えが
-    `argmax(t) + n` になり、golden 突合がその場で赤くなる（llama.cpp が GPU / CPU で
-    食い違っていた軸 — 調査 §2）。
+    The first output is the real shape (argmax over the logits of a `linear` = the lm_head
+    equivalent; the position axis is the symbol T). The second is argmax over **equal-value
+    ties**: `cat([t, t], dim=-1)` always creates equal values at symmetric positions, so "the
+    smallest index" is required **by construction**, not by chance — an implementation that returns
+    the largest index answers `argmax(t) + n`, and the golden comparison turns red on the spot (the
+    axis on which llama.cpp disagreed between GPU and CPU — survey §2).
 
-    MUST: タイの入力は**グラフ入力**から作る（定数だと FOLDABLE_OPS が畳んでノードが消える）。
+    MUST: the tie input is built from **a graph input** (as a constant, FOLDABLE_OPS would fold it
+    and the node would disappear).
     """
 
     HIDDEN = 5
@@ -245,15 +258,17 @@ class ArgmaxPick(nn.Module):
 
 
 class AttentionBlock(nn.Module):
-    """linear → bmm → softmax → bmm → linear → 残差 + layer_norm（recon §2 の並びの縮小形）。
+    """linear → bmm → softmax → bmm → linear → residual + layer_norm (a shrunk form of the
+    sequence of recon §2).
 
-    実測の attention と同じ順序で、head 分割の `view → permute[0,2,1,3] → reshape` まで含む。
-    融合 op の linear（bias 常時あり）/ softmax（dim=-1）/ layer_norm（[H] + affine）を
-    1 本のグラフで踏む。
+    The same order as the observed attention, including the head split
+    `view → permute[0,2,1,3] → reshape`. It exercises the fused ops linear (always with bias) /
+    softmax (dim=-1) / layer_norm ([H] + affine) in one graph.
 
-    2 本目の出力は **大きい負値の softmax**（素朴形なら f32 で `exp` が 0 に潰れて 0/0 = NaN
-    になる領域）。safe-softmax の amax 減算が外れた瞬間に golden 突合が赤くなる形を、golden
-    側に意図的に仕込んである（ADR 0012 の反例集）。
+    The second output is **softmax over large negative values** (where the naive form's `exp`
+    collapses to 0 in f32 and gives 0/0 = NaN). The golden side deliberately plants a shape on
+    which the golden comparison turns red the moment safe-softmax's amax subtraction is dropped
+    (ADR 0012's counterexamples).
     """
 
     HIDDEN = 8
@@ -266,7 +281,7 @@ class AttentionBlock(nn.Module):
         self.key = nn.Linear(self.HIDDEN, self.HIDDEN)
         self.value = nn.Linear(self.HIDDEN, self.HIDDEN)
         self.dense = nn.Linear(self.HIDDEN, self.HIDDEN)
-        # 実測の layer_norm_eps（1e-07）をそのまま使う
+        # Use the observed layer_norm_eps (1e-07) as is
         self.norm = nn.LayerNorm(self.HIDDEN, eps=1e-07)
         for projection in (self.query, self.key, self.value, self.dense):
             _fill_param(generator, projection.weight, 0.3)
@@ -297,12 +312,14 @@ class AttentionBlock(nn.Module):
 
 
 class FusedAttention(nn.Module):
-    """SDPA を保存して融合 `attention` 1 ノードにする golden（ADR 0023）。
+    """The golden that preserves SDPA and makes it one fused `attention` node (ADR 0023).
 
-    MUST: **B / H / M / N / D を全て違う長さ**にする。カーネルは B と H を 1 本のバッチ軸へ
-    畳むので、B=1（実測形）や B==H では取り違えが値に出ない（設計 recon §4.6 の検出限界 ①）。
-    NOTE: 形は**静的**。DiT / VAE の attention は解像度固定で記号次元を持たないので、実測に
-    無い形（記号 M / N）を golden で先取りしない。
+    MUST: **B / H / M / N / D all have different lengths**. The kernel folds B and H into one batch
+    axis, so with B=1 (the observed shape) or B==H a mix-up does not show in the values (detection
+    limit ① of the design recon §4.6).
+    NOTE: the shape is **static**. The attention of DiT / VAE has a fixed resolution and no
+    symbolic dimensions, so the golden does not anticipate shapes not seen in practice (symbolic
+    M / N).
     """
 
     BATCH = 2
@@ -316,20 +333,24 @@ class FusedAttention(nn.Module):
 
 
 def _fused_attention_inputs(generator: torch.Generator) -> tuple[torch.Tensor, ...]:
-    """`FusedAttention` の入力。**最後の query 行だけ logit を一様に −195 へ落とす**。
+    """Inputs of `FusedAttention`. **Only the last query row has its logits dropped uniformly to
+    −195**.
 
-    行統計（②）の amax 減算が外れると `exp(−195)` が f32 で 0 に潰れ、分母 0 → 0/0 = NaN に
-    なる領域を golden から必ず踏ませる（`masked_scores` / `attention_block` が softmax 単体で
-    やっているのと同じ仕掛けを、融合経路の内側に置く）。
+    It makes the golden always exercise the region where, if the amax subtraction of the row
+    statistics (②) is dropped, `exp(−195)` collapses to 0 in f32 and the denominator 0 gives
+    0/0 = NaN (the same device `masked_scores` / `attention_block` use for softmax alone, placed
+    inside the fused path).
 
-    MUST: その行の logit は **n によらず同一のビット列**にする（`q = [−c,0,0,0]` × `k[…,0]` が
-    n に依らない定数）。同一なら `S − amax` は厳密に 0 になり、重みは厳密に `1/N` へ落ちる。
-    **不揃いにすると golden が tolerance を超える** — |S| ≈ 190 の内積は f32 で ≈1e-5 の
-    絶対誤差を持ち、それが `exp(S − amax)` でそのまま**相対** 1e-5 の重み誤差になる
-    （実測: 行内の logit が 12.7 ばらつく形で maxAbs 4.7e-6 / maxRel 9.6e-4 — GOLDEN_TOLERANCE
-    の atol 1e-6 を超える）。これは融合の誤差ではなく**入力の条件数**で、分解経路でも同じ値に
-    なる（融合と分解のビット同一は packages/runtime/tests/gpu_attention_parity_test.ts が
-    別途固定している）。
+    MUST: that row's logits are **the same bits for every n** (`q = [−c,0,0,0]` × `k[…,0]` is a
+    constant independent of n). When they are identical, `S − amax` is exactly 0 and the weights
+    land exactly on `1/N`. **Uneven logits push the golden past the tolerance** — a dot product
+    with |S| ≈ 190 carries an absolute error of ≈1e-5 in f32, which `exp(S − amax)` turns
+    directly into a **relative** weight error of 1e-5 (observed: with logits spread by 12.7 within
+    the row, maxAbs 4.7e-6 / maxRel 9.6e-4 — beyond the atol 1e-6 of GOLDEN_TOLERANCE in
+    packages/runtime/tests/e2e_golden_test.ts). This is not an error of the fusion but **the
+    condition number of the input**, and the decomposed path gives the same values (bit identity
+    of fused and decomposed is pinned separately by
+    packages/runtime/tests/gpu_attention_parity_test.ts).
     """
     shape = FusedAttention
     query = _uniform(
@@ -339,8 +360,9 @@ def _fused_attention_inputs(generator: torch.Generator) -> tuple[torch.Tensor, .
     value = _uniform(
         generator, shape.BATCH, shape.HEADS, shape.KEYS, shape.DEPTH, low=-1.0, high=1.0
     )
-    # 第 0 チャネルだけ n に依らない定数にする。半スケール √(1/√D) の 2 乗 = 1/√D = 0.5 が
-    # 内積に掛かるので、q = [−60,0,0,0] の行は S = 0.5 · (−60 · 6.5) = −195（全 n で同値）。
+    # Only channel 0 is a constant independent of n. The square of the half scale √(1/√D) =
+    # 1/√D = 0.5 multiplies the dot product, so the row q = [−60,0,0,0] has
+    # S = 0.5 · (−60 · 6.5) = −195 (the same value for every n).
     key[:, :, :, 0] = 6.5
     query[:, :, -1, :] = 0.0
     query[:, :, -1, 0] = -60.0
@@ -348,12 +370,12 @@ def _fused_attention_inputs(generator: torch.Generator) -> tuple[torch.Tensor, .
 
 
 class EmbeddingLookup(nn.Module):
-    """embedding（行 gather）— weight f32[V,H] × 添字 i32[…]。
+    """embedding (row gather) — weight f32[V,H] × indices i32[…].
 
-    MUST: `padding_idx` の行を**非ゼロで上書きしてから** export する。`nn.Embedding` は
-    padding_idx の行を 0 で初期化するので、素のままだと「padding 行を 0 で潰す」誤実装と
-    torch の出力が一致してしまい、恒真な golden になる（ADR 0012 の「受理して不活性」を
-    実際に検証できない）。
+    MUST: the `padding_idx` row is **overwritten with non-zero values before** export.
+    `nn.Embedding` initialises the padding_idx row to 0, so left as is, a wrong implementation
+    that "zeroes the padding row" would agree with torch's output and the golden would be
+    tautological (ADR 0012's "accepted and inert" could not actually be verified).
     """
 
     VOCAB = 5
@@ -370,12 +392,15 @@ class EmbeddingLookup(nn.Module):
 
 
 class MaskedScores(nn.Module):
-    """masked_fill の実測 2 形（recon §2）— attention の -3.4e38 埋めと conv 経路の 0 埋め。
+    """The 2 observed forms of masked_fill (recon §2) — attention's -3.4e38 fill and the conv
+    path's 0 fill.
 
-    - `scores f32[1,2,T,T]` に `mask bool[1,1,T,T]` を**右詰め broadcast**で当てる。
-    - 埋め値は f32 の最小有限値（JSON 往復で ulp が動けばここが赤くなる）。
-    - 下流の softmax は、全要素がマスクされた行で一様分布になる（limitations.md の
-      「amax/amin の identity は ±F32_MAX」との相互作用を padded ケースで踏む）。
+    - `mask bool[1,1,T,T]` is applied to `scores f32[1,2,T,T]` with **right-aligned broadcast**.
+    - The fill value is the smallest finite f32 (if a JSON round trip moved it by an ulp, this
+      would turn red).
+    - The downstream softmax gives a uniform distribution on a row whose elements are all masked
+      (exercising, in the padded case, the interaction with "the identity of amax/amin is
+      ±F32_MAX" in limitations.md).
     """
 
     NEG_INF = -3.4028234663852886e38
@@ -393,19 +418,21 @@ class MaskedScores(nn.Module):
 
 
 class RuntimeMaskedAttention(nn.Module):
-    """実行時 bool マスク付き SDPA（ADR 0044）— ガードが `safe_softmax` として焼かれる形。
+    """SDPA with a run-time bool mask (ADR 0044) — the form in which the guard is baked as
+    `safe_softmax`.
 
-    ADR 0044 の連鎖を丸ごと踏む: **bool のグラフ入力**（ADR 0009 — u32 0/1 で IO 可）→
-    torch の SDPA 分解が出す `where(mask, 0, -inf)` → スコアへ `add` → `softmax` +
-    safe-softmax ガード → `_drop_safe_softmax_guard` の実値証明が実行時入力で立たないので
-    `safe_softmax` 1 ノードへ構成的置換。
+    It exercises ADR 0044's whole chain: **a bool graph input** (ADR 0009 — IO as u32 0/1) →
+    `where(mask, 0, -inf)` emitted by torch's SDPA decomposition → `add` onto the scores →
+    `softmax` + the safe-softmax guard → the value proof of `_drop_safe_softmax_guard` does not
+    hold for a run-time input, so a constructive replacement with one `safe_softmax` node.
 
-    MUST: マスクに**全 False の行**を含める（`_masked_row_mask`）。その行は加算後に全要素
-    -inf になり、torch は 0 を返す — safe_softmax が空行を 0 で書けなければ 0/0 = NaN に
-    なって突合が赤くなる。ここが本 golden の存在理由。
-    NOTE: SDPA は保存しない（既定の `PRESERVED_OP_PREFIXES` のまま）。融合 attention の
-    mask 契約は静的 `[1,1,M,N]` の加算型 f32 だけで、実行時マスクは分解経路で実行する
-    （ADR 0044 決定 1）。
+    MUST: the mask contains **an all-False row** (`_runtime_masked_attention_inputs`). After the
+    addition every element of that row is -inf and torch returns 0 — if safe_softmax could not
+    write an empty row as 0, it would give 0/0 = NaN and the comparison would turn red. This is
+    why the golden exists.
+    NOTE: SDPA is not preserved (the default `PRESERVED_OP_PREFIXES` as is). The mask contract of
+    fused attention is only a static additive f32 `[1,1,M,N]`; a run-time mask runs on the
+    decomposed path (ADR 0044 decision 1).
     """
 
     HEADS = 2
@@ -423,10 +450,10 @@ class RuntimeMaskedAttention(nn.Module):
 
 
 def _runtime_masked_attention_inputs(generator: torch.Generator) -> tuple[torch.Tensor, ...]:
-    """`RuntimeMaskedAttention` の入力（q / k / v と **bool のマスク**）。
+    """Inputs of `RuntimeMaskedAttention` (q / k / v and **a bool mask**).
 
-    マスクは `[1,1,M,M]` で True = 残す。残す側を市松にして「全 True の行」だけにならない
-    ようにし、行 2 は**全 False**（torch のガードが発火する行）にする。
+    The mask is `[1,1,M,M]` with True = keep. The kept side is a checkerboard so that the rows are
+    not only "all True", and row 2 is **all False** (the row on which torch's guard fires).
     """
     shape = RuntimeMaskedAttention
     length = shape.QUERIES
@@ -442,11 +469,12 @@ def _runtime_masked_attention_inputs(generator: torch.Generator) -> tuple[torch.
 
 
 class ConvBlock(nn.Module):
-    """conv1d の実測形（kernel 3 / stride 1 / padding 1 / groups 1 / dilation 1 / bias あり）。
+    """The observed form of conv1d (kernel 3 / stride 1 / padding 1 / groups 1 / dilation 1 / with
+    bias).
 
-    実測（recon §2）と同じく `[B,T,C] → permute → conv1d → permute` の往復を含める。
-    padding を 0 扱いにする誤りは、出力長ではなく**両端の値**に出る（出力長は attrs から
-    先に決まるため）。
+    As observed (recon §2), it includes the round trip `[B,T,C] → permute → conv1d → permute`. A
+    bug that treats padding as 0 shows not in the output length but in **the values at both ends**
+    (the output length is decided up front from attrs).
     """
 
     CHANNELS = 4
@@ -463,15 +491,17 @@ class ConvBlock(nn.Module):
 
 
 class SymbolicTable(nn.Module):
-    """記号長テーブル（ADR 0010）— T 依存の部分木を Tmax で焼き、sym_prefix_slice で運ぶ。
+    """Symbolic-length table (ADR 0010) — the T-dependent subtree is baked at Tmax and carried
+    through sym_prefix_slice.
 
-    - 相対位置 `arange(T)` の外積 → clamp → **gather 添字（i32 initializer）**。2 軸とも
-      記号なので slices が 2 本になる。
-    - `arange(T)` の f32 スケール（f32 の sym_prefix_slice、slices 1 本）。
+    - Outer product of the relative positions `arange(T)` → clamp → **gather indices (an i32
+      initializer)**. Both axes are symbolic, so there are 2 slices.
+    - f32 scaling of `arange(T)` (an f32 sym_prefix_slice, 1 slice).
 
-    焼いた定数は Tmax（= `_DYNAMIC_T` の上限）の全長で、golden の実長 T はそれより短い。
-    したがって **読み出し stride を束縛後の shape から組む誤りはここで値に出る**
-    （T = Tmax でしか一致しないため、実長の短い golden が検出器になる）。
+    The baked constants span the full Tmax (= the upper bound of `_SMALL_DYNAMIC_T` in
+    goldens.py), and the golden's actual length T is shorter. So **a bug that builds the read
+    stride from the bound shape shows in the values here** (it would agree only at T = Tmax, so a
+    golden with a short actual length is the detector).
     """
 
     BUCKETS = 5
@@ -487,13 +517,16 @@ class SymbolicTable(nn.Module):
 
 
 class ScalarOperands(nn.Module):
-    """スカラ被演算子の定数昇格（recon §4-4）— f32 の 4 形と、逆順スカラの i32 形。
+    """Constant promotion of scalar operands (recon §4-4) — 4 f32 forms and an i32 form with a
+    reversed scalar.
 
-    `1 - mask` は非可換な逆順形（実測の conv 経路と同じ）。定数を右に置く誤りは
-    `mask - 1` になって符号が反転し、下流の重み掛けで**値が変わる**。
+    `1 - mask` is the non-commutative reversed form (as in the observed conv path). A bug that
+    puts the constant on the right gives `mask - 1`, flips the sign, and **changes the values** in
+    the downstream weight multiplication.
 
-    MUST: `1 - mask` の結果を**値として下流に流す**（重みとして x に掛ける）。mask ∈ {0,1}
-    では `(1 - mask) * mask` が逆順でも恒等 0 で、誤りが値に出ない恒真な golden になる。
+    MUST: the result of `1 - mask` **flows downstream as a value** (multiplied into x as a
+    weight). With mask ∈ {0,1}, `(1 - mask) * mask` is identically 0 even reversed, a tautological
+    golden on which the bug does not show.
     """
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -502,15 +535,17 @@ class ScalarOperands(nn.Module):
 
 
 class SplinePieces(nn.Module):
-    """sdp の rational-quadratic spline の骨格（recon §2）を縮めたもの。
+    """A shrunk version of the skeleton of sdp's rational-quadratic spline (recon §2).
 
-    区間内判定 `(x >= -b) & (x <= b)`（ge_scalar / le_scalar / bitwise_and）→ 区間境界の
-    `cumsum` → searchsorted_free の `sum(x[…,None] >= bl, dim=-1)`（ge の Tensor 形と
-    **bool の行 sum → i32**）→ 区間外復帰の `where` と softplus 分解形の `log1p` まで、
-    波3 で足した数理 op をひと続きの経路で踏む。
+    From the in-interval test `(x >= -b) & (x <= b)` (ge_scalar / le_scalar / bitwise_and) →
+    `cumsum` of the interval boundaries → searchsorted_free's `sum(x[…,None] >= bl, dim=-1)` (the
+    Tensor form of ge and **a bool row sum → i32**) → the `where` that restores out-of-interval
+    values and the `log1p` of the decomposed softplus, it exercises the math ops added in phase 3
+    along one continuous path.
 
-    MUST: 入力は区間境界（±TAIL）と clamp の両端を跨ぐ値にする。全要素が区間内（または外）に
-    収まると where の分岐が片側しか踏まれず、取り違えが値に出ない。
+    MUST: the inputs straddle the interval boundaries (±TAIL) and both ends of the clamp. If every
+    element fell inside (or outside) the interval, only one side of the where would be exercised
+    and a mix-up would not show in the values.
     """
 
     TAIL = 1.0
@@ -520,7 +555,8 @@ class SplinePieces(nn.Module):
     def forward(self, inputs: torch.Tensor, widths: torch.Tensor) -> tuple[torch.Tensor, ...]:
         inside = (inputs >= -self.TAIL) & (inputs <= self.TAIL)
         cumwidths = torch.cumsum(widths, dim=-1)
-        # searchsorted_free: 各要素が何本の境界以上かを数える（bool の行 sum = i32 のカウント）
+        # searchsorted_free: count how many boundaries each element is at or above (a bool row
+        # sum = an i32 count)
         bins = torch.sum(inputs.unsqueeze(-1) >= cumwidths, dim=-1)
         clamped = torch.clamp(inputs, self.CLAMP_MIN, self.CLAMP_MAX)
         softplus = torch.log1p(torch.exp(clamped))
@@ -534,11 +570,12 @@ class SplinePieces(nn.Module):
 
 
 class DecoderTail(nn.Module):
-    """dec の最終段（recon §2）— leaky_relu の **slope 2 種**と f32 の expand。
+    """The final stage of dec (recon §2) — **2 leaky_relu slopes** and an f32 expand.
 
-    ups / ResBlock は `LRELU_SLOPE=0.1`、最終段は torch 既定の 0.01（位置引数ごと省略）。
-    attrs に slope を持たせないと片方が黙って誤る形（ADR 0015）を golden で固定する。
-    `gain` の expand は相対位置埋め込みの 4D 化（enc_p / flow）と同型の **f32 expand**。
+    ups / ResBlock use `LRELU_SLOPE=0.1`, the final stage torch's default 0.01 (the positional
+    argument omitted altogether). The golden pins the form in which one of them silently goes
+    wrong unless attrs carry the slope (ADR 0015). The expand of `gain` is **an f32 expand** of the
+    same shape as turning the relative position embedding 4-D (enc_p / flow).
     """
 
     CHANNELS = 4
@@ -554,26 +591,29 @@ class DecoderTail(nn.Module):
     def forward(self, x: torch.Tensor, gain: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         wide = gain.expand(-1, -1, x.shape[2])
         hidden = nn.functional.leaky_relu(x * wide, self.SLOPE)
-        # 位置引数を省略した形（torch 既定 0.01）— エクスポータが境界で attrs に明示化する
+        # The form with the positional argument omitted (torch default 0.01) — the exporter makes
+        # it explicit in attrs at the boundary
         return hidden, torch.tanh(nn.functional.leaky_relu(self.conv(hidden)))
 
 
 class CouplingSplit(nn.Module):
-    """coupling reverse の split → 変換 → cat → flip 経路（recon §2）を縮めたもの。
+    """A shrunk version of the coupling reverse's split → transform → cat → flip path (recon §2).
 
-    ① `torch.split(x, [half]*2, 1)` — normalize の split→slice パスで slice 2 本に開く
-    ② 片側だけを変換して `torch.cat([x0, x1], 1)` で戻す（**入力の順序が値に出る**形）
-    ③ 最後に `Flip`（チャネル軸の反転）
+    ① `torch.split(x, [half]*2, 1)` — opened into 2 slices by normalize's split→slice pass
+    ② Transform only one side and join back with `torch.cat([x0, x1], 1)` (a form where **the
+       input order shows in the values**)
+    ③ Finally `Flip` (reversal of the channel axis)
 
-    MUST: cat の 2 本を**別の値域**にする（片側が変換済み・片側が素）。同じ値域だと
-    書き出し位置の取り違えが値に出ない。
-    MUST: チャネル数は 6（= 3 + 3）にして flip の軸長を 3 以上にする。2ch の反転は
-    off-by-one が対称に消えるので検出器にならない（sdp の実測 2ch は
-    packages/runtime/tests/gpu_ops_test.ts の op 単位ケースが別途持つ）。
+    MUST: the 2 inputs of cat have **different value ranges** (one transformed, one plain). With
+    the same range, a mix-up of the write positions does not show in the values.
+    MUST: the channel count is 6 (= 3 + 3), so the flip axis has length 3 or more. Reversing 2
+    channels cancels an off-by-one symmetrically, so it is no detector (sdp's observed 2 channels
+    are covered separately by the per-op cases of packages/runtime/tests/gpu_ops_test.ts).
 
-    2 本目の出力は**最終次元の pad + slice**（相対位置注意の value 側 `F.pad(p_attn, [w,w])`
-    と、spline の `bin_locations[..., :-1]` の縮小形）。pad の埋め値が 0 でない誤りと、
-    slice の start ずれがそのまま値に出る。
+    The second output is **pad + slice of the last dimension** (a shrunk form of the value side of
+    relative-position attention, `F.pad(p_attn, [w,w])`, and the spline's
+    `bin_locations[..., :-1]`). A pad fill value other than 0 and an off-by-one slice start show
+    directly in the values.
     """
 
     WINDOW = 2
@@ -588,19 +628,22 @@ class CouplingSplit(nn.Module):
 
 
 class DilatedConvStack(nn.Module):
-    """conv1d の groups / dilation（ADR 0015）— sdp の DDSConv と dec の ResBlock1 の縮小形。
+    """conv1d groups / dilation (ADR 0015) — a shrunk form of sdp's DDSConv and dec's ResBlock1.
 
-    ① **depthwise dilated**（`groups = C`・k 5・dilation 1/3/9・padding = d·(k−1)/2）を 3 段。
-       実測は sdp の DDSConv（`dilation = kernel_size**i`）そのもの。groups を無視して
-       通常畳み込みで実行する誤りは、**別チャネルの値が混ざる**形で必ず値に出る。
-    ② **pointwise 1x1**（Cin 6 → Cout 4 の非対称）で DDSConv の `conv_1x1` を踏む。
-       k=1 は `d·(K−1) = 0` なので dilation 一般形が従来式と一致する境界でもある。
-    ③ **中間の groups**（1 < g < C: Cin 4 / Cout 6 / g 2）— 重みの第 2 軸が Cin/groups = 2 に
-       なる形。グループ帯の先頭オフセットを落とす誤りは depthwise では消えるので、
-       この段が検出器になる。
-    ④ **ResBlock1 の残差**（k 3・dilation 3 と 5・padding = d）— `x + conv(leaky_relu(x))`。
+    ① **depthwise dilated** (`groups = C`, k 5, dilation 1/3/9, padding = d·(k−1)/2) in 3 steps.
+       The observed form is exactly sdp's DDSConv (`dilation = kernel_size**i`). A bug that
+       ignores groups and runs a plain convolution always shows in the values, as **values of
+       other channels mixing in**.
+    ② **pointwise 1x1** (asymmetric Cin 6 → Cout 4) exercises DDSConv's `conv_1x1`. With k=1,
+       `d·(K−1) = 0`, so it is also the boundary where the general dilation form agrees with the
+       old formula.
+    ③ **intermediate groups** (1 < g < C: Cin 4 / Cout 6 / g 2) — the form where the weight's
+       second axis is Cin/groups = 2. A bug that drops the leading offset of the group band
+       vanishes under depthwise, so this step is the detector.
+    ④ **ResBlock1's residual** (k 3, dilation 3 and 5, padding = d) — `x + conv(leaky_relu(x))`.
 
-    MUST: 各段のチャネル数を揃えない。B/Cin/Cout/K が同じ長さだと添字の取り違えが値に出ない。
+    MUST: the steps do not share a channel count. If B/Cin/Cout/K had the same length, an index
+    mix-up would not show in the values.
     """
 
     DEPTH_CHANNELS = 6
@@ -660,15 +703,16 @@ class DilatedConvStack(nn.Module):
 
 
 class ConvTransposeStack(nn.Module):
-    """conv_transpose1d（ADR 0015）— dec の ups と bias 無し conv_post の縮小形。
+    """conv_transpose1d (ADR 0015) — a shrunk form of dec's ups and the bias-less conv_post.
 
-    - ups の実測は up_rates [8,8,2,2,2] / up_k [16,16,8,2,2]。ここは **up 2（k 2 / pad 0）**と
-      **up 8（k 16 / pad 4）**の 2 種を 1 本ずつ持つ（`2·pad == k − u` が両方で成立する形）。
-    - **チャネル数は全段で非対称**（5 → 3 → 2 → 1）。重み `[Cin, Cout, K]` を
-      `[Cout, Cin, K]` と読む取り違えは、Cin == Cout の形では要素数が合ってしまい
-      shape 検査も golden も素通りする（recon §4 / ADR 0015）。
-    - 最終段は **bias 無しの conv1d**（`Conv1d(2, 1, 7, padding=3, bias=False)` — 実測の
-      conv_post と同型）。エクスポータのゼロ bias 合成がここを貫通する。
+    - The observed ups are up_rates [8,8,2,2,2] / up_k [16,16,8,2,2]. Here there is one each of
+      **up 2 (k 2 / pad 0)** and **up 8 (k 16 / pad 4)** (forms where `2·pad == k − u` holds for
+      both).
+    - **The channel counts are asymmetric at every step** (5 → 3 → 2 → 1). Reading the weight
+      `[Cin, Cout, K]` as `[Cout, Cin, K]` by mistake matches the element count when
+      Cin == Cout, and passes both the shape check and the golden (recon §4 / ADR 0015).
+    - The final step is **a conv1d without bias** (`Conv1d(2, 1, 7, padding=3, bias=False)` — the
+      same shape as the observed conv_post). The exporter's zero-bias synthesis runs through here.
     """
 
     IN_CHANNELS = 5
@@ -679,7 +723,7 @@ class ConvTransposeStack(nn.Module):
 
     def __init__(self, generator: torch.Generator) -> None:
         super().__init__()
-        # (k, stride, padding) は 2·padding == k − stride を満たす実測の 2 形
+        # (k, stride, padding) are the 2 observed forms satisfying 2·padding == k − stride
         self.up_small = nn.ConvTranspose1d(
             self.IN_CHANNELS, self.MID_CHANNELS, kernel_size=2, stride=2, padding=0
         )
@@ -701,17 +745,22 @@ class ConvTransposeStack(nn.Module):
 
 
 class RmsNormBlock(nn.Module):
-    """RMSNorm の **供給ルート 2 系統**（ADR 0017）と、省略スロットの合成（ADR 0016）。
+    """RMSNorm's **2 supply routes** (ADR 0017) and synthesis of omitted slots (ADR 0016).
 
-    - **手書き分解形** `x · rsqrt(mean(x²)+eps) · weight` — `normalize._fold_rms_norm` が
-      1 ノードへ畳む経路（Qwen3 / DiT がこの形）。畳めないと mean / rsqrt が未対応 op で落ちる。
-    - **`nn.RMSNorm`** — `aten.rms_norm` を PRESERVED で残す経路（diffusers 由来）。
-      affine あり / 無しの両方を置き、無し側で **ones 合成**（アリティ 2 への正規化）を踏む。
-    - **bias 無し linear** と **affine 無し layer_norm** — ゼロ bias / ones・zeros 合成。
+    - **The hand-written decomposed form** `x · rsqrt(mean(x²)+eps) · weight` — the path that
+      `normalize._fold_rms_norm` folds into 1 node (Qwen3 / DiT use this form). Without folding,
+      mean / rsqrt would fail as unsupported ops.
+    - **`nn.RMSNorm`** — the path that keeps `aten.rms_norm` as PRESERVED (from diffusers). Both
+      with and without affine are present, and the side without exercises **ones synthesis**
+      (normalisation to arity 2).
+    - **linear without bias** and **layer_norm without affine** — zero bias / ones and zeros
+      synthesis.
 
-    MUST: eps を 3 本とも**別の値**にする。attrs に載せず既定へ落とす誤りは、全部同じ eps の
-    形では値に出ない（layer_norm の実測 1e-7 と rms の 1e-6 が同居する Anima の形と同型）。
-    MUST: weight は 1 から離した値にする（`ones` のままだと ones 合成の取り違えが値に出ない）。
+    MUST: all 3 eps are **different values**. A bug that drops eps from attrs and falls back to
+    the default does not show in the values when every eps is the same (the same shape as Anima,
+    where layer_norm's observed 1e-7 and rms's 1e-6 live together).
+    MUST: weight is away from 1 (left as `ones`, a mix-up in ones synthesis would not show in the
+    values).
     """
 
     HIDDEN = 8
@@ -737,20 +786,22 @@ class RmsNormBlock(nn.Module):
 
 
 class Conv2dBlock(nn.Module):
-    """conv2d（ADR 0017）と、チャネル L2 正規化の `clamp_min`。
+    """conv2d (ADR 0017) and the `clamp_min` of channel L2 normalisation.
 
-    MUST（ADR 0017 のテスト要件 — 重みレイアウト取り違えは要素数が合って shape 検査を素通り
-    する）: **Kh≠Kw / stride・padding の H/W 非対称 / Cin・Cout とも 2 以上で互いに異なる**を
-    全て踏む。加えて groups（1 < g < C）と dilation の非対称形、bias 無し（ゼロ bias 合成）も
-    1 本ずつ持つ。入力も H≠W にして高さと幅の取り違えを値に出す。
+    MUST (the test requirement of ADR 0017 — a weight layout mix-up matches the element count and
+    passes the shape check): exercises all of **Kh≠Kw / H/W-asymmetric stride and padding / Cin
+    and Cout both 2 or more and different from each other**. It also has one each of groups
+    (1 < g < C), an asymmetric dilation and no bias (zero-bias synthesis). The input has H≠W too,
+    so a height / width mix-up shows in the values.
 
-    MUST: L2 の入力に**ノルムがちょうど 0 になる位置**を作る（`example_inputs` が 1 点を
-    ゼロにする）。`clamp_min` の床が外れると 0/0 = NaN になり、golden 突合がそこで赤くなる —
-    床が効いていることを恒真でない形で固定できる唯一の点。
+    MUST: the L2 input has **a position whose norm is exactly 0** (`example_inputs` zeroes one
+    point). If the floor of `clamp_min` is dropped, it gives 0/0 = NaN and the golden comparison
+    turns red there — the only point that pins, non-tautologically, that the floor takes effect.
 
-    NOTE: チャネル L2 は `_shared.vae_rank4.l2_normalize`（`dim=1`）の鏡像で、**permute 無しの
-    軸 sum**（attrs `dim=1`）。実 GPU golden で**軸 reduce 変種**を torch 参照つきで踏む
-    唯一の経路でもある（他の golden の `sum` は全て最終次元 = 行カーネル）。
+    NOTE: the channel L2 mirrors `_shared.vae_rank4.l2_normalize` (`dim=1`) and is **an axis sum
+    without permute** (attrs `dim=1`). It is also the only path that exercises **the axis-reduce
+    variant** with a torch reference in a real-GPU golden (the `sum` of every other golden is over
+    the last dimension = the row kernel).
     """
 
     EPS = 1e-12
@@ -759,9 +810,9 @@ class Conv2dBlock(nn.Module):
         super().__init__()
         # Kh≠Kw / stride (1,2) / padding (1,0) / Cin 4 → Cout 6
         self.wide = nn.Conv2d(4, 6, kernel_size=(3, 1), stride=(1, 2), padding=(1, 0))
-        # groups 3（Cin/groups = 2）・bias 無し → ゼロ bias 合成
+        # groups 3 (Cin/groups = 2), no bias → zero-bias synthesis
         self.grouped = nn.Conv2d(6, 3, kernel_size=(1, 3), padding=(0, 1), groups=3, bias=False)
-        # dilation の H/W 非対称（(2,1)）と padding (2,1)
+        # H/W-asymmetric dilation ((2,1)) and padding (2,1)
         self.dilated = nn.Conv2d(3, 2, kernel_size=(2, 2), padding=(2, 1), dilation=(2, 1))
         for conv in (self.wide, self.dilated):
             _fill_param(generator, conv.weight, 0.4)
@@ -775,25 +826,28 @@ class Conv2dBlock(nn.Module):
 
 
 class Conv3dBlock(nn.Module):
-    """unbatched の conv3d（拡張分子層 — ADR 0118 決定 1）の torch 突合。
+    """torch comparison of unbatched conv3d (extended composite layer — ADR 0118 decision 1).
 
-    MUST（重みレイアウト取り違えは要素数が合って shape 検査を素通りする）: **Kt≠Kh≠Kw /
-    stride・padding・dilation の 3 軸非対称 / Cin・Cout とも 2 以上で互いに異なる**を全て踏む。
-    bias 無し（ゼロ bias 合成）も 1 本持つ。入力も T≠H≠W にして軸の取り違えを値に出す。
+    MUST (a weight layout mix-up matches the element count and passes the shape check):
+    exercises all of **Kt≠Kh≠Kw / stride, padding and dilation asymmetric on the 3 axes / Cin and
+    Cout both 2 or more and different from each other**. It also has one without bias (zero-bias
+    synthesis). The input has T≠H≠W too, so an axis mix-up shows in the values.
 
-    MUST: 入力は **unbatched の rank 4 `[Cin, T, H, W]`**（`nn.Conv3d` の unbatched 形 — trace に
-    `aten.conv3d.default` が rank 4 入力のまま残る）。batched の rank 5 は契約外。
-    MUST: groups は 1 だけ。golden は実 GPU で突合され、GPU の実装済み subset は groups == 1
-    （groups > 1 は計画時に fail loudly — 意味論の groups 一般は CPU 参照と適合表が持つ）。
+    MUST: the input is **unbatched rank 4 `[Cin, T, H, W]`** (the unbatched form of `nn.Conv3d` —
+    `aten.conv3d.default` stays in the trace with its rank-4 input). Batched rank 5 is outside the
+    contract.
+    MUST: groups is 1 only. The golden is compared on a real GPU, and the GPU's implemented subset
+    is groups == 1 (groups > 1 fails loudly at plan time — the general groups semantics are held by
+    the CPU reference and the conformance table).
     """
 
     def __init__(self, generator: torch.Generator) -> None:
         super().__init__()
         # Kt≠Kh≠Kw (3,2,1) / stride (1,2,1) / padding (0,1,0) / Cin 4 → Cout 6
         self.wide = nn.Conv3d(4, 6, kernel_size=(3, 2, 1), stride=(1, 2, 1), padding=(0, 1, 0))
-        # bias 無し → ゼロ bias 合成（W だけのカーネル 3・W だけの padding 1）
+        # No bias → zero-bias synthesis (kernel 3 on W only, padding 1 on W only)
         self.plain = nn.Conv3d(6, 3, kernel_size=(1, 1, 3), padding=(0, 0, 1), bias=False)
-        # dilation の 3 軸非対称 (1,2,1)・時間 stride 2・padding (1,2,1)
+        # Dilation asymmetric on the 3 axes (1,2,1), temporal stride 2, padding (1,2,1)
         self.dilated = nn.Conv3d(
             3, 2, kernel_size=(2, 2, 2), stride=(2, 1, 1), padding=(1, 2, 1), dilation=(1, 2, 1)
         )
@@ -807,23 +861,25 @@ class Conv3dBlock(nn.Module):
 
 
 class DeformConvBlock(nn.Module):
-    """deform_conv2d（DCNv2・第 1' 層 — ADR 0055）の torch 突合。
+    """torch comparison of deform_conv2d (DCNv2, extended atomic layer — ADR 0055).
 
-    新規原子には対になる既存経路が無いので、**torchvision 出力を焼いたこの golden が主門**に
-    なる（もう 1 本の門は「offset 全 0・mask 全 1 → conv2d とビット一致」で、そちらは実 GPU
-    テスト側が持つ）。踏むべき形:
+    A new atomic op has no existing path to pair with, so **this golden, with the torchvision
+    output baked in, is the main check** (the other check is "offset all 0, mask all 1 → bit
+    identical to conv2d", held by the real-GPU test side). The shapes to exercise:
 
-    MUST: **Kh ≠ Kw / Cin ≠ Cout / padding の H ≠ W**。offset のチャネル並び（偶数 = y /
-    奇数 = x）の取り違えは、正方カーネル・対称 padding では値が一致しうる。
-    MUST: **offset が入力平面の外を指す**範囲（±2.5）。ゼロ埋めの 2 段（中心が範囲外なら
-    タップ全体 0 / 内側でも範囲外の隅はその隅だけ 0）を両方踏ませる — border clamp 実装は
-    ここでしか赤くならない。
-    MUST: offset は**グラフ入力**にする（Parameter にすると initializer に落ちて「実行時値の
-    offset」という本 op の前提を踏まない）。
-    MUST: mask の値域は **[0, 2]**（BiRefNet の `2·sigmoid(...)`）。[0,1] に絞ると
-    「mask を掛け忘れても大差ない」形になりうるし、補間の**前**に掛ける誤りとも切り分かない。
-    NOTE: `point` 分岐は k=1（ASPP の `aspp1`）で **bias 無し** — torchvision の Python ラッパが
-    `aten.full([Cout], 0)` を挿し、第 0 層の定数畳み込みが initializer にする経路を踏む。
+    MUST: **Kh ≠ Kw / Cin ≠ Cout / padding with H ≠ W**. A mix-up of the offset channel order
+    (even = y / odd = x) can give matching values with a square kernel and symmetric padding.
+    MUST: a range where **the offset points outside the input plane** (±2.5). Both levels of zero
+    fill are exercised (if the centre is out of range the whole tap is 0; inside, an out-of-range
+    corner is 0 for that corner only) — a border-clamp implementation turns red only here.
+    MUST: offset is **a graph input** (as a Parameter it would fall into an initializer and miss
+    this op's premise of "an offset that is a run-time value").
+    MUST: the mask's range is **[0, 2]** (BiRefNet's `2·sigmoid(...)`). Narrowed to [0,1] it could
+    become a form where "forgetting to apply the mask makes little difference", and it would not
+    separate the bug of applying it **before** interpolation either.
+    NOTE: the `point` branch is k=1 (ASPP's `aspp1`) **without bias** — torchvision's Python
+    wrapper inserts `aten.full([Cout], 0)`, exercising the path where constant folding of the
+    export-eliminated layer turns it into an initializer.
     """
 
     IN_CHANNELS = 3
@@ -837,7 +893,7 @@ class DeformConvBlock(nn.Module):
             _uniform(generator, self.WIDE_CHANNELS, self.IN_CHANNELS, 3, 2, low=-1.0, high=1.0)
         )
         self.bias = nn.Parameter(_uniform(generator, self.WIDE_CHANNELS, low=-0.5, high=0.5))
-        # k=1 / padding 0 / bias 無し
+        # k=1 / padding 0 / no bias
         self.point = nn.Parameter(
             _uniform(generator, self.POINT_CHANNELS, self.IN_CHANNELS, 1, 1, low=-1.0, high=1.0)
         )
@@ -860,22 +916,26 @@ class DeformConvBlock(nn.Module):
 
 
 class GruScanBlock(nn.Module):
-    """gru_scan / gru_scan_reverse（第 2 層 — ADR 0056）の torch 突合。
+    """torch comparison of gru_scan / gru_scan_reverse (extended composite layer — ADR 0056).
 
-    入力側 GEMM は素の `nn.Linear`（= IR の `linear`）で、op が受け持つのは隠れ側の逐次だけ。
-    eager の期待値は `karume/custom_ops.py` の本体が出す（`nn.GRU` の単方向 1 層と
-    `torch.equal` でビット完全一致することは ADR 0056 決定 6 の実測）。踏むべき形:
+    The input-side GEMM is a plain `nn.Linear` (= the IR's `linear`); the op handles only the
+    hidden-side recurrence. The eager expected values come from the body in `karume/custom_ops.py`
+    (bit-exact agreement with a unidirectional 1-layer `nn.GRU` under `torch.equal` is the
+    observation of ADR 0056 decision 6). The shapes to exercise:
 
-    MUST: **時間軸を記号にする**。この op の存在理由が「T を記号のまま通す」ことなので、
-    静的 T の golden では分解形との差が出ない（`aten.gru.input` は T 回展開されて specialize
-    される）。
-    MUST: **2 方向を両方出す**。逆方向は「走査順だけが逆で、書き出しは順方向の時間順」で、
-    出力側 `flip` を挟む誤り形はここでしか赤くならない。
-    MUST: **h0 を 2 通り踏む** — 順方向は `torch.zeros`（第 0 層の定数畳み込みで initializer に
-    落ちる経路）、逆方向は**グラフ入力**（実行時値の初期状態）。ゼロ h0 だけだと「h0 を
-    読み飛ばすカーネル」が緑のまま通る。
-    MUST: 隠れ側の重みは小さめ（縮約 H 本ぶんでゲートが飽和すると、更新式の丸め差が値に
-    出ず突合が恒真化する）。
+    MUST: **the time axis is symbolic**. The reason this op exists is "passing T through as a
+    symbol", so a golden with static T shows no difference from the decomposed form
+    (`aten.gru.input` is unrolled T times and specialised).
+    MUST: **both directions are output**. The reverse direction is "only the scan order is
+    reversed; the writes follow the forward time order", and the bug of inserting an output-side
+    `flip` turns red only here.
+    MUST: **h0 is exercised two ways** — the forward direction uses `torch.zeros` (the path where
+    constant folding of the export-eliminated layer turns it into an initializer), the reverse
+    direction **a graph input** (an initial state that is a run-time value). With a zero h0 alone,
+    "a kernel that skips reading h0" stays green.
+    MUST: the hidden-side weights are smallish (if the gates saturated over the H-term
+    contraction, rounding differences of the update formula would not show in the values and the
+    comparison would become tautological).
     """
 
     IN_FEATURES = 4
@@ -901,19 +961,22 @@ class GruScanBlock(nn.Module):
 
 
 class BilinearResize(nn.Module):
-    """upsample_bilinear2d（第 1 層・align_corners=True 専業）の torch 突合。
+    """torch comparison of upsample_bilinear2d (Core ATen layer, align_corners=True only).
 
-    新規原子には対になる既存経路（分解形 / 別カーネル）が無いので、**torch 出力を焼いた
-    この golden が主門**になる。踏むべき形:
+    A new atomic op has no existing path to pair with (a decomposed form / another kernel), so
+    **this golden, with the torch output baked in, is the main check**. The shapes to exercise:
 
-    MUST: **非整数倍**（4×5 → 7×9 は scale 3/6 と 4/8 で、出力位置ごとに重みが違う）。
-    整数倍だけで固めると「重み表が周期 2 の決め打ち」でも通ってしまう。
-    MUST: **縮小**（4×5 → 2×3）。実測（BiRefNet の `forward_enc` / `cxt`）に 8 本ある形で、
-    拡大と同じ式・同じ 2 タップで通ることの固定。
-    MUST: **H ≠ W かつ Hout ≠ Wout**。正方形だと H と W の取り違えが値に出ない。
-    MUST: **入力の高さ 1**（`narrow`）。align_corners の scale は `(in−1)/(out−1)` なので
-    in = 1 の軸は scale 0 = 行の複製になる（末尾特例 `index1 = index0` が全出力で発火する
-    唯一の形）。同じテンソルの幅は縮小させて、2 軸で別の分岐を同時に踏ませる。
+    MUST: **a non-integer factor** (4×5 → 7×9 has scales 3/6 and 4/8, and the weights differ per
+    output position). Pinning only integer factors would let "a weight table hard-coded with
+    period 2" pass.
+    MUST: **downscaling** (4×5 → 2×3). A form with 8 occurrences in practice (BiRefNet's
+    `forward_enc` / `cxt`), pinning that it goes through the same formula and the same 2 taps as
+    upscaling.
+    MUST: **H ≠ W and Hout ≠ Wout**. With a square, an H / W mix-up does not show in the values.
+    MUST: **an input height of 1** (`narrow`). The align_corners scale is `(in−1)/(out−1)`, so an
+    axis with in = 1 has scale 0 = row duplication (the only form in which the tail special case
+    `index1 = index0` fires for every output). The width of the same tensor is downscaled, so the
+    2 axes exercise different branches at once.
     """
 
     def forward(self, x: torch.Tensor, narrow: torch.Tensor) -> tuple[torch.Tensor, ...]:
@@ -925,22 +988,24 @@ class BilinearResize(nn.Module):
 
 
 class Int8Weights(nn.Module):
-    """i8 格納（per-channel scale）で `WEIGHT_SLOTS` の 6 op のうち conv3d を除く 5 op を踏む golden
-    （ADR 0019・conv3d の i8 はランタイムの GPU テストが持つ）。
+    """The golden that exercises, with i8 storage (per-channel scale), 5 of the 6 ops of
+    `WEIGHT_SLOTS`, all but conv3d (ADR 0019; i8 conv3d is held by the runtime's GPU tests).
 
-    MUST: 重みの**行長も総要素数も 4 の倍数にしない**。i8 は 4 要素を 1 u32 へ詰めるので、
-    「語とレーンを行内相対添字から割り出す」誤りは**行長が 4 の倍数のときだけ偶然一致する**
-    （f16 の偶奇と同型の罠 — ADR 0019）。4 の倍数だけで固めると、この誤りが golden を素通り
-    する。実測形: embedding `[7,5]` / linear `[3,5]` / conv1d `[5,3,3]` /
-    conv_transpose1d `[5,2,3]` / conv2d `[3,2,3,1]` — 全て要素数も出力チャネルあたりの
-    ブロック長も 4 の倍数でない。
+    MUST: neither **the row length nor the total element count of a weight is a multiple of 4**.
+    i8 packs 4 elements into 1 u32, so the bug of "deriving word and lane from the index relative
+    to the row" **agrees by chance only when the row length is a multiple of 4** (the same trap
+    as f16's even / odd — ADR 0019). Pinning only multiples of 4 would let this bug pass the
+    golden. Actual shapes: embedding `[7,5]` / linear `[3,5]` / conv1d `[5,3,3]` /
+    conv_transpose1d `[5,2,3]` / conv2d `[3,2,3,1]` — neither the element count nor the block
+    length per output channel is a multiple of 4 in any of them.
 
-    MUST: embedding の 1 行を**全ゼロ**にする（`amax == 0` のチャネル）。scale の下限 clamp が
-    外れると `0/0 = NaN` になり、この 1 行だけが golden を赤くする — 下限が効いていることを
-    恒真でない形で固定できる唯一の点。
+    MUST: one embedding row is **all zero** (a channel with `amax == 0`). If the lower clamp of the
+    scale is dropped, it gives `0/0 = NaN`, and this one row alone turns the golden red — the only
+    point that pins, non-tautologically, that the lower bound takes effect.
 
-    MUST: conv_transpose1d を混ぜる（重みが `[Cin,Cout,K]` の転置レイアウトで per-channel 軸が
-    **1**）。軸表の取り違えは他 4 op では値に出ない。
+    MUST: conv_transpose1d is mixed in (its weight has the transposed layout `[Cin,Cout,K]` and
+    per-channel axis **1**). A mix-up of the axis table does not show in the values for the other
+    4 ops.
     """
 
     VOCAB = 7
@@ -958,7 +1023,8 @@ class Int8Weights(nn.Module):
         self.table = nn.Embedding(self.VOCAB, self.EMBED)
         self.dense = nn.Linear(self.EMBED, self.HIDDEN)
         self.conv = nn.Conv1d(self.SIGNAL_IN, self.SIGNAL_MID, kernel_size=3, padding=1)
-        # 2·padding == k − stride（ランタイムが受理する出力長 L·stride の形 — ADR 0015）
+        # 2·padding == k − stride (the form with output length L·stride that the runtime accepts
+        # — ADR 0015)
         self.up = nn.ConvTranspose1d(
             self.SIGNAL_MID, self.SIGNAL_OUT, kernel_size=self.UP_STRIDE, stride=self.UP_STRIDE
         )
@@ -981,14 +1047,16 @@ class Int8Weights(nn.Module):
 
 
 def _zeroed_column(generator: torch.Generator, *shape: int, at: tuple[int, int]) -> torch.Tensor:
-    """1 つの空間位置だけ全チャネル 0 の `[1,C,H,W]`（`clamp_min` の床を踏ませる）。"""
+    """`[1,C,H,W]` with every channel 0 at a single spatial position (exercises the floor of
+    `clamp_min`)."""
     tensor = _uniform(generator, *shape, low=-1.5, high=1.5)
     tensor[:, :, at[0], at[1]] = 0.0
     return tensor
 
 
 class StaticQuantizeBlock(nn.Module):
-    """保存される SRQ と scale=0 の恒等動作を通す tiny golden（ADR 0097）。"""
+    """A tiny golden that runs the preserved SRQ and the identity behaviour at scale=0 (ADR
+    0097)."""
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return (

@@ -347,7 +347,7 @@ class TestAssertIrFormDecode:
             attentions=decode.states_plan(graph, LAYERS).attentions,
         )
 
-        with pytest.raises(StatesFormError, match=r"graph\.symbols に既にある"):
+        with pytest.raises(StatesFormError, match=r"is already in graph\.symbols"):
             to_states_form(graph, colliding)
 
 

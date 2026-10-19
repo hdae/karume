@@ -264,7 +264,7 @@ class TestExport:
     def test_emit_without_the_override_fails_on_a_table(self, exported):
         message = exported[0]["emit_without_overrides"]
 
-        assert "per-channel scale が無い" in message
+        assert "has no per-channel scale" in message
         assert "relative_attention_bias" in message
 
     def test_golden_is_written_for_each_length(self, exported):

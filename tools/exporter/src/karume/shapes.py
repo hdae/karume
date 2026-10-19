@@ -1,31 +1,38 @@
-"""出力 shape 規則をエクスポータ側にも持つ層
-（TS 側 packages/runtime/src/ops.ts `computeOutputShape` と同義）。
+"""The layer that keeps the output shape rules on the exporter side too
+(equivalent to `computeOutputShape` in packages/runtime/src/ops/shapes.ts on the TS side).
 
-目的は「export は緑、Session 構築で初めて落ちる」を潰すこと。torch の meta が付けた宣言
-shape を鵜呑みにせず、**契約表の規則から独立に計算した shape** と全ノードで突き合わせ、
-食い違いは export の時点で fail loudly にする（ADR 0005 の診断規律）。
+Its purpose is to remove "export is green, and the first failure is at Session construction". It
+does not take the declared shapes that torch's meta attached at face value: it matches them, on
+every node, against **shapes computed independently from the rules of the contract table**, and a
+mismatch fails loudly at export time (the diagnostic discipline of ADR 0005).
 
-TS 側との違いは定義域だけ:
+The only difference from the TS side is the domain:
 
-- TS は**束縛解決後の数値 shape**を扱う（実行前に必ず具体値が決まる — ADR 0004）。
-- ここは**束縛前の宣言 shape**を扱うので、次元は整数か次元言語 `coeff·sym+offset`
-  （dims.py）。整数だけの入力に対しては TS と 1 対 1 で同じ結論を出す
-  （適合ケース表 packages/runtime/tests/fixtures/op-contracts.json の `shapes` 節が
-  両側を突き合わせる）。
+- TS handles **numeric shapes after binding resolution** (concrete values are always settled
+  before execution — ADR 0004).
+- This module handles **declared shapes before binding**, so a dimension is an integer or the
+  dimension language `coeff·sym+offset` (dims.py). For integer-only inputs it reaches the same
+  conclusion as TS one-to-one (the `shapes` section of the conformance table
+  packages/runtime/tests/fixtures/op-contracts.json matches both sides).
 
-MUST: 束縛が要る判定はここでやらない — 「記号次元なら黙って緩める」のではなく、
-**束縛後にしか決まらない規則はランタイム側の層が持つ**という分担にする。該当は 2 つだけ:
+MUST: decisions that need bindings are not made here — rather than "silently loosening for symbolic
+dimensions", the split is that **rules settled only after binding belong to the runtime-side
+layer**. There are only two:
 
-1. 長さ 0 の軸の縮約禁止（amax / amin / softmax）— 記号次元が 0 になるかは束縛次第。
-2. `sym_prefix_slice` の Tmax 超過（prefix 長 ≤ 定数次元）— 上限は IR に載らない。
+1. No reduction over an axis of length 0 (amax / amin / softmax) — whether a symbolic dimension
+   becomes 0 depends on the binding.
+2. `sym_prefix_slice` exceeding Tmax (prefix length ≤ constant dimension) — the upper bound is not
+   in the IR.
 
-どちらも TS 側（plan.ts → computeOutputShape）が実行前に必ず見るので、層として穴は無い。
+The TS side (plan.ts → computeOutputShape) always checks both before execution, so the layers
+leave no gap.
 
-逆向きの分担が 1 つある: **レイアウト第 2 群の対象軸の記号規則** — `slice` / `flip` は
-「静的軸のみ」（ADR 0014）、`cat` は「同一シンボルの一次和まで」（ADR 0046）— は、ここ
-（宣言 shape を見る層）でしか判定できない。TS 側は束縛解決後の数値 shape しか扱わないので、
-同じ規則を plan.ts の `validateGraphContracts`（宣言 shape を見る層）が持つ — 層は違うが
-受理集合は両側で同じ。
+There is one split in the opposite direction: **the symbol rules for the target axis of layout
+group 2** — `slice` / `flip` take "static axes only" (ADR 0014), `cat` takes "up to a linear
+sum of the same symbol" (ADR 0046) — can be decided only here (the layer that looks at declared
+shapes). The TS side handles only numeric shapes after binding resolution, so the same rules are
+held by `validateGraphContracts` in plan.ts (the layer that looks at declared shapes) — a different
+layer, but the accepted set is the same on both sides.
 """
 
 from __future__ import annotations
@@ -71,10 +78,11 @@ from karume.ops import (
 
 @dataclass(frozen=True)
 class Extent:
-    """1 次元の長さ。定数は `sym=None`（coeff は 0）、記号次元は `coeff·sym+offset`。
+    """The length of one dimension. A constant has `sym=None` (coeff 0); a symbolic dimension is
+    `coeff·sym+offset`.
 
-    等値は構造的（dataclass の既定）— 記号のまま「同じ長さか」を判定できる唯一の手段で、
-    `T` と `2T` を取り違えない。
+    Equality is structural (the dataclass default) — the only way to decide "same length" while
+    staying symbolic, and it does not confuse `T` with `2T`.
     """
 
     coeff: int
@@ -86,7 +94,8 @@ class Extent:
         return self.sym is None
 
     def is_value(self, value: int) -> bool:
-        """定数次元でちょうど `value` か（記号次元は常に False — 束縛次第なので断定しない）。"""
+        """Whether this is a constant dimension of exactly `value` (always False for a symbolic
+        dimension — it depends on the binding, so nothing is asserted)."""
         return self.sym is None and self.offset == value
 
     def to_dim(self) -> IrDim:
@@ -99,12 +108,14 @@ _ONE = Extent(coeff=0, sym=None, offset=1)
 
 
 def _extent(dim: Any, where: str) -> Extent:
-    # bool は int の派生だが次元ではない（True が 1 として黙って通るのを塞ぐ）。
+    # bool derives from int but is not a dimension (this stops True from silently passing as 1).
     if isinstance(dim, bool) or not isinstance(dim, (int, str)):
-        raise OpContractError(f"{where}: 次元 {dim!r} が整数でも次元式でもない")
+        raise OpContractError(
+            f"{where}: dimension {dim!r} is neither an integer nor a dimension expression"
+        )
     if isinstance(dim, int):
         if not 0 <= dim <= MAX_SAFE_INT:
-            raise OpContractError(f"{where}: 次元 {dim} が非負の安全整数でない")
+            raise OpContractError(f"{where}: dimension {dim} is not a non-negative safe integer")
         return Extent(coeff=0, sym=None, offset=dim)
     try:
         expr = parse_dim(dim)
@@ -114,8 +125,9 @@ def _extent(dim: Any, where: str) -> Extent:
 
 
 def extents(shape: Sequence[IrDim], where: str) -> list[Extent]:
-    """宣言 shape を長さの列へ落とす（比較・計算はこの表現の上でだけ行う）。"""
-    return [_extent(dim, f"{where} の次元 {index}") for index, dim in enumerate(shape)]
+    """Lowers a declared shape to a list of lengths (comparison and computation happen only on
+    this representation)."""
+    return [_extent(dim, f"{where} dimension {index}") for index, dim in enumerate(shape)]
 
 
 def _show(shape: Sequence[Extent]) -> str:
@@ -123,18 +135,19 @@ def _show(shape: Sequence[Extent]) -> str:
 
 
 def _at(shape: Sequence[Extent], index: int) -> Extent:
-    """右詰め broadcast の読み出し（範囲外は長さ 1）。
+    """A right-aligned broadcast read (out of range is length 1).
 
-    MUST: 負の添字を Python の巻き戻しに任せない — 末尾から拾ってしまい、rank の違う
-    被演算子の broadcast が黙って別の軸と揃う。
+    MUST: do not leave a negative index to Python's wrap-around — it would pick from the end, and
+    the broadcast of operands of different ranks would silently align with a different axis.
     """
     return shape[index] if index >= 0 else _ONE
 
 
 def broadcast_extents(a: Sequence[Extent], b: Sequence[Extent], where: str) -> list[Extent]:
-    """torch 準拠の右詰め broadcast（packages/runtime/src/ops.ts `broadcastShapes` と同義）。
+    """Right-aligned broadcast as in torch (equivalent to `broadcastShapes` in
+    packages/runtime/src/ops/shapes.ts).
 
-    MUST: 結果を max で決めない — 0 と 1 の組（max なら 1）が torch では 0 になる。
+    MUST: do not decide the result with max — the pair 0 and 1 (max gives 1) is 0 in torch.
     """
     rank = max(len(a), len(b))
     out: list[Extent] = []
@@ -147,28 +160,33 @@ def broadcast_extents(a: Sequence[Extent], b: Sequence[Extent], where: str) -> l
             out.append(db)
         elif da.is_const and db.is_const:
             raise OpContractError(
-                f"{where}: shape [{_show(a)}] と [{_show(b)}] は右詰め broadcast できない"
+                f"{where}: shapes [{_show(a)}] and [{_show(b)}] cannot be broadcast right-aligned"
             )
         else:
-            # 記号どうし（または記号と定数）が一致しない形。束縛次第では成立しうるが、
-            # 宣言だけでは判定できない — 黙って通すと「実行してみないと分からない IR」を
-            # エクスポータが書けてしまう。
+            # Two symbols (or a symbol and a constant) that do not match. It may hold depending
+            # on the binding, but the declaration alone cannot decide — letting it through silently
+            # would let the exporter write "IR you cannot judge without running it".
             raise OpContractError(
-                f"{where}: shape [{_show(a)}] と [{_show(b)}] の次元 {index}"
-                f"（{da.to_dim()} と {db.to_dim()}）が宣言だけでは broadcast 可否を決められない"
+                f"{where}: shapes [{_show(a)}] and [{_show(b)}] dimension {index}"
+                f" ({da.to_dim()} and {db.to_dim()}): the declaration alone cannot decide whether"
+                " they broadcast"
             )
     return out
 
 
 def _numel_key(shape: Sequence[Extent]) -> tuple[int, tuple[tuple[str, int, int], ...]]:
-    """要素数の同一性判定に使う鍵（reshape の要素数一致検査）。
+    """The key used for the identity check of element counts (the element-count check of
+    reshape).
 
-    要素数は一次式の積なので、記号のまま比較するには因数分解が要る。各次元を
-    「内容（係数とオフセットの gcd）× 原始一次式」に分け、内容は整数側へ、原始一次式は
-    多重集合へ積む — 一次式は多変数多項式環（UFD）で既約なので、この組が一致することと
-    多項式として等しいことは同値（`2T+2` と `2·(T+1)` を同じ鍵にする）。
+    An element count is a product of linear expressions, so comparing it symbolically needs a
+    factorisation. Each dimension is split into "content (gcd of coefficient and offset) × primitive
+    linear expression"; the content goes to the integer side and the primitive linear expression
+    into a multiset — a linear expression is irreducible in the multivariate polynomial ring (a
+    UFD), so this pair matching is equivalent to equality as polynomials (`2T+2` and `2·(T+1)` get
+    the same key).
 
-    MUST: 整数側が 0 なら鍵も 0 に潰す（数値 shape での `0 × 何か = 0` と結論を揃える）。
+    MUST: when the integer side is 0, collapse the key to 0 too (aligns the conclusion with
+    `0 × anything = 0` on numeric shapes).
     """
     scalar = 1
     factors: list[tuple[str, int, int]] = []
@@ -189,16 +207,18 @@ def _require_declared(
 ) -> list[Extent]:
     if declared is None:
         raise OpContractError(
-            f"{where}: op '{contract.name}' の出力 shape は宣言が目標形（declared が要る）"
+            f"{where}: op '{contract.name}' output shape is the declared target shape"
+            " (declared is required)"
         )
-    return extents(declared, f"{where} の宣言 shape")
+    return extents(declared, f"{where} declared shape")
 
 
 @dataclass(frozen=True)
 class _StateContext:
-    """ノードの `states` 欄と、それが指すスロットの宣言 shape（ADR 0067 決定 4）。
+    """The node's `states` field and the declared shapes of the slots it points at (ADR 0067
+    decision 4).
 
-    TS 側は ShapeContext の 2 フィールド（`states` / `stateShapes`）で同じものを運ぶ。
+    The TS side carries the same thing in two fields of ShapeContext (`states` / `stateShapes`).
     """
 
     states: Mapping[str, str]
@@ -206,26 +226,28 @@ class _StateContext:
 
     @property
     def referenced(self) -> bool:
-        """states 形か（欄の有無が形を判別する — ADR 0067 決定 4）。"""
+        """Whether this is the states form (the presence of the field decides the form — ADR 0067
+        decision 4)."""
         return bool(self.states)
 
     def slot(self, key: str, where: str) -> tuple[str, list[Extent]]:
-        """`states` 欄のキーが指すスロットの (名前, 宣言 shape)。
+        """(name, declared shape) of the slot a key of the `states` field points at.
 
-        MUST: 解決済み shape が無い経路は fail loudly。スロットの実体を確保するのは
-        GenerationContext（ADR 0066 決定 1）なので、これが無い経路 = 1-shot 実行では state
-        参照ノードを実行できない。
+        MUST: a path without resolved shapes fails loudly. The slots are allocated by the
+        GenerationContext (ADR 0066 decision 1), so a path without it = one-shot execution cannot
+        run state-referencing nodes.
         """
         name = self.states.get(key)
         if name is None:
-            raise OpContractError(f"{where}: states 欄に '{key}' が無い")
+            raise OpContractError(f"{where}: states field has no '{key}'")
         shape = self.shapes.get(name)
         if shape is None:
             raise OpContractError(
-                f"{where}: state スロット '{name}' の shape が解決されていない"
-                "（state 参照ノードの実行には GenerationContext が要る — ADR 0066 決定 1）"
+                f"{where}: state slot '{name}' shape is not resolved"
+                " (running a node that references state requires a GenerationContext"
+                " — ADR 0066 decision 1)"
             )
-        return name, extents(shape, f"{where} の state スロット '{name}'")
+        return name, extents(shape, f"{where} state slot '{name}'")
 
 
 def compute_output_shape(
@@ -238,29 +260,33 @@ def compute_output_shape(
     states: Mapping[str, str] | None = None,
     state_shapes: Mapping[str, Sequence[IrDim]] | None = None,
 ) -> list[list[IrDim]]:
-    """宣言 shape から**出力 slot 昇順の shape 列**を計算する
-    （packages/runtime/src/ops.ts `computeOutputShape` と同義 — ADR 0068 決定 1）。
+    """Computes the **list of shapes in output slot order** from the declared shapes
+    (equivalent to `computeOutputShape` in packages/runtime/src/ops/shapes.ts — ADR 0068
+    decision 1).
 
-    2 本を返すのは `topk`（値 + 添字 — ADR 0068 決定 3）だけ、**空列**は `state_append`
-    （値を定義しない effect op — ADR 0067 決定 5）だけで、他は全て 1 本。
-    `declared` は「出力の宣言 shape が目標形」の op（reshape / expand — ADR 0011）でだけ
-    必須。`attrs` は permute / layer_norm / softmax / conv1d / sym_prefix_slice / topk で必須。
+    Only `topk` returns 2 (values + indices — ADR 0068 decision 3), only `state_append` returns
+    **an empty list** (an effect op that defines no value — ADR 0067 decision 5), and everything
+    else returns 1. `declared` is required only for ops whose "output's declared shape is the
+    target shape" (reshape / expand — ADR 0011). `attrs` is required for permute / layer_norm /
+    softmax / conv1d / sym_prefix_slice / topk.
 
-    `states` はノードの `states` 欄（**非空であることが「states 形」の判別そのもの** —
-    ADR 0067 決定 4）、`state_shapes` は `graph.states` 由来のスロット shape（容量込み具体形）。
-    2 つは対で渡す MUST — states 参照ノードに解決済みスロット shape が無ければ fail loudly で、
-    黙って従来形として計算すると「過去 KV を読まない別の計算」になる。
+    `states` is the node's `states` field (**being non-empty is itself what identifies "the states
+    form"** — ADR 0067 decision 4), and `state_shapes` are the slot shapes from `graph.states`
+    (concrete shapes including the capacity). The two MUST be passed together — a
+    state-referencing node without resolved slot shapes fails loudly; computing it silently as the
+    previous form would be "a different computation that does not read the past KV".
     """
     node_attrs: Mapping[str, Any] = attrs if attrs is not None else {}
-    # readonly 形 attention（ADR 0096 段 2）は入力 q の 1 本ちょうど — 本数の門はアームの側が
-    # 持つ（契約表の arity は従来形の 3〜4 本で、こちらへ当てると正しいグラフが落ちる）。
+    # A readonly-form attention (ADR 0096 stage 2) has exactly one input, q — the input-count
+    # check is in the arm (the contract table's arity is the previous form's 3 to 4, and applying
+    # it here would reject correct graphs).
     readonly = contract.kind == "attention" and bool(states) and attention_readonly(node_attrs)
     if not readonly and not arity_fits(contract, len(input_shapes)):
         raise OpContractError(
-            f"{where}: op '{contract.name}' の入力 shape 数が {len(input_shapes)}"
-            f"（契約は {describe_arity(contract)}）"
+            f"{where}: op '{contract.name}' has {len(input_shapes)} input shapes"
+            f" (the contract is {describe_arity(contract)})"
         )
-    ins = [extents(shape, f"{where} の入力 {index}") for index, shape in enumerate(input_shapes)]
+    ins = [extents(shape, f"{where} input {index}") for index, shape in enumerate(input_shapes)]
     slots = _StateContext(states or {}, state_shapes or {})
     return [
         [extent.to_dim() for extent in slot]
@@ -269,7 +295,8 @@ def compute_output_shape(
 
 
 def _sole(shape: list[Extent]) -> list[list[Extent]]:
-    """単一出力 op のアーム（出力が 1 本であることをアームごとに明示する — ADR 0068 決定 1）。"""
+    """The arm of a single-output op (each arm states explicitly that there is one output — ADR
+    0068 decision 1)."""
     return [shape]
 
 
@@ -283,9 +310,10 @@ def _compute(
 ) -> list[list[Extent]]:
     kind = contract.kind
     if kind == "unary":
-        # MUST: スカラ attr の値域と**キーを跨ぐ不変条件**（clamp の min <= max）をここで見る。
-        # 全ノードが必ず通る共通経路はこの計算だけで、attrs スキーマはキー単位の検査しか
-        # 表せない（assert_graph_shapes が全ノードでここを呼ぶ）。
+        # MUST: check the ranges of the scalar attrs and **invariants that span keys** (clamp's
+        # min <= max) here. This computation is the only common path every node goes through, and
+        # the attrs schema can express only per-key checks (assert_graph_shapes calls this for
+        # every node).
         scalar_param_values(contract, attrs, where)
         return _sole(list(ins[0]))
     if kind == "cast":
@@ -293,7 +321,8 @@ def _compute(
     if kind == "binary":
         return _sole(broadcast_extents(ins[0], ins[1], f"{where} ({contract.name})"))
     if kind == "where":
-        # torch と同じく 3 者を右詰め broadcast する（条件も値と同じ規則で広がる）。
+        # As in torch, the three broadcast right-aligned (the condition widens by the same rule
+        # as the values).
         label = f"{where} ({contract.name})"
         return _sole(broadcast_extents(broadcast_extents(ins[0], ins[1], label), ins[2], label))
     if kind == "cumsum":
@@ -308,8 +337,8 @@ def _compute(
         return _sole(_row_reduce(contract, ins, where, attrs))
     if kind == "argmax":
         return _sole(_argmax(ins, where))
-    # 唯一の多出力アーム（値 + 添字 — ADR 0068 決定 3）。_sole を通らないことがそのまま
-    # 「出力が 2 本」の宣言になる。
+    # The only multi-output arm (values + indices — ADR 0068 decision 3). Not going through _sole
+    # is itself the declaration "two outputs".
     if kind == "topk":
         return _topk(ins, where, attrs)
     if kind == "reshape":
@@ -337,13 +366,15 @@ def _compute(
         return _sole(list(ins[0]))
     if kind == "rms_norm":
         return _sole(_rms_norm(ins, where, attrs))
-    # safe_softmax は shape 規則も attrs も softmax と同一（違いは空行の値だけ — ADR 0044）。
+    # safe_softmax has the same shape rule and attrs as softmax (only the empty-row values differ
+    # — ADR 0044).
     if kind in ("softmax", "safe_softmax"):
         return _sole(_softmax(ins, where, attrs, contract.name))
     if kind == "attention":
         return _sole(_attention(ins, where, attrs, slots))
-    # 値を定義しない effect op（ADR 0067 決定 5）。`_sole` を通らず**空列**を返すことが
-    # そのまま「出力 0 本」の宣言になる（多出力アームが列を組んで返すのと同じ流儀）。
+    # An effect op that defines no value (ADR 0067 decision 5). Returning **an empty list**
+    # without going through `_sole` is itself the declaration "0 outputs" (the same style as the
+    # multi-output arm building its list).
     if kind == "state_append":
         return _state_append(ins, where, attrs, slots)
     if kind == "embedding":
@@ -362,53 +393,61 @@ def _compute(
         return _sole(_deform_conv2d(ins, where, attrs))
     if kind == "upsample_bilinear2d":
         return _sole(_upsample_bilinear2d(ins, where, attrs))
-    # 走査方向は op 名が持つが、shape 規則は 2 方向で完全に同一（出力の時間順も変わらない）。
+    # The op name carries the scan direction, but the shape rule is identical for both
+    # directions (the time order of the output does not change either).
     if kind == "gru_scan":
         return _sole(_gru_scan(contract, ins, where))
-    raise OpContractError(f"{where}: op kind '{kind}' の shape 規則が無い")
+    raise OpContractError(f"{where}: op kind '{kind}' has no shape rule")
 
 
 def _matmul(ins: list[list[Extent]], where: str) -> list[Extent]:
     a, b = ins
     if len(a) != 2 or len(b) != 2:
         raise OpContractError(
-            f"{where}: matmul は rank-2 × rank-2 のみ（[{_show(a)}] × [{_show(b)}]）"
+            f"{where}: matmul accepts only rank-2 × rank-2 ([{_show(a)}] × [{_show(b)}])"
         )
     if a[1] != b[0]:
-        raise OpContractError(f"{where}: matmul の縮約次元が不一致 [{_show(a)}] × [{_show(b)}]")
+        raise OpContractError(
+            f"{where}: matmul contraction dimension mismatch [{_show(a)}] × [{_show(b)}]"
+        )
     return [a[0], b[1]]
 
 
 def _bmm(ins: list[list[Extent]], where: str) -> list[Extent]:
     a, b = ins
-    # MUST: rank-2 を通さない（matmul の担当）。兼用にするとバッチ軸を落とした形が同じ op 名で
-    # 通り、B の取り違えが shape 検査を素通りする。
+    # MUST: rank-2 does not pass (it is matmul's job). Sharing would let the form without the batch
+    # axis pass under the same op name, and a B mix-up would slip through the shape check.
     if len(a) != 3 or len(b) != 3:
         raise OpContractError(
-            f"{where}: bmm は rank-3 × rank-3 のみ（rank-2 は matmul）: [{_show(a)}] × [{_show(b)}]"
+            f"{where}: bmm accepts only rank-3 × rank-3 (rank-2 is matmul):"
+            f" [{_show(a)}] × [{_show(b)}]"
         )
     if a[0] != b[0]:
-        raise OpContractError(f"{where}: bmm のバッチ次元が不一致 [{_show(a)}] × [{_show(b)}]")
+        raise OpContractError(f"{where}: bmm batch dimension mismatch [{_show(a)}] × [{_show(b)}]")
     if a[2] != b[1]:
-        raise OpContractError(f"{where}: bmm の縮約次元が不一致 [{_show(a)}] × [{_show(b)}]")
+        raise OpContractError(
+            f"{where}: bmm contraction dimension mismatch [{_show(a)}] × [{_show(b)}]"
+        )
     return [a[0], a[1], b[2]]
 
 
 def _gather(ins: list[list[Extent]], where: str) -> list[Extent]:
     src, index = ins
-    # 契約は「最終次元固定」— 先行次元は src と index で完全一致し、最終次元だけが自由
-    # （torch の一般 gather より狭い）。
+    # The contract is "last dimension fixed" — the leading dimensions of src and index match
+    # exactly and only the last dimension is free (narrower than torch's general gather).
     if not src or len(index) != len(src):
         raise OpContractError(
-            f"{where}: gather は src と index が同じ rank（1 以上）:"
+            f"{where}: gather needs src and index of the same rank (1 or more):"
             f" [{_show(src)}] / [{_show(index)}]"
         )
     for axis in range(len(src) - 1):
         if src[axis] != index[axis]:
             raise OpContractError(
-                f"{where}: gather の先行次元 {axis} が不一致 [{_show(src)}] / [{_show(index)}]"
+                f"{where}: gather leading dimension {axis} mismatch"
+                f" [{_show(src)}] / [{_show(index)}]"
             )
-    # 出力は index と同形（値は src から引く）。添字の値域は実行時データ依存なので見ない。
+    # The output has index's shape (values are taken from src). The range of the indices
+    # depends on run-time data, so it is not checked.
     return list(index)
 
 
@@ -417,54 +456,68 @@ def _row_reduce(
 ) -> list[Extent]:
     shape = ins[0]
     if not shape:
-        raise OpContractError(f"{where}: reduce の入力は rank 1 以上（スカラは縮約できない）")
+        raise OpContractError(
+            f"{where}: reduce input must be rank 1 or more (a scalar cannot be reduced)"
+        )
     dim = reduce_dim(attrs, where)
-    # MUST: 負値・rank 外は fail loudly（負の軸表記の正規化はハンドラ側の責務で、ここで
-    # `% rank` を補うと「宣言と実 rank の食い違い」を黙って別の軸へ吸収してしまう）。
+    # MUST: negatives and out-of-rank values fail loudly (normalising negative axis notation is
+    # the handlers' responsibility; filling in `% rank` here would silently absorb "a mismatch
+    # between the declaration and the actual rank" into another axis).
     if dim >= len(shape):
         raise OpContractError(
-            f"{where}: op '{contract.name}' の attrs.dim={dim} が rank {len(shape)} の範囲外"
+            f"{where}: op '{contract.name}' attrs.dim={dim} is out of range for rank {len(shape)}"
         )
-    # 空軸の amax/amin は identity が定義できない（sum は 0）。記号次元が 0 になるかは
-    # 束縛次第なので、ここで決められるのは定数次元だけ（残りはランタイム側の層）。
+    # amax/amin over an empty axis has no definable identity (sum gives 0). Whether a symbolic
+    # dimension becomes 0 depends on the binding, so only constant dimensions can be decided here
+    # (the rest is the runtime-side layer).
     if shape[dim].is_value(0) and contract.name != "sum":
-        raise OpContractError(f"{where}: op '{contract.name}' は長さ 0 の軸を縮約できない")
+        raise OpContractError(f"{where}: op '{contract.name}' cannot reduce an axis of length 0")
     return shape[:dim] + shape[dim + 1 :]
 
 
 def _argmax(ins: list[list[Extent]], where: str) -> list[Extent]:
-    """argmax の出力 shape（ADR 0068 決定 2）— **最終次元を 1 に潰す rank 保存**。
+    """The output shape of argmax (ADR 0068 decision 2) — **rank-preserving, collapsing the last
+    dimension to 1**.
 
-    reduce 族と違い軸は attrs ではなく最終次元固定（欄の不存在が「他の軸は語彙に無い」の
-    宣言）で、`keepdim` の欄も無いので出力 rank は入力と同じ。
+    Unlike the reduce family, the axis is not in attrs but fixed to the last dimension (the absence
+    of the field declares "other axes are not in the vocabulary"), and there is no `keepdim` field
+    either, so the output rank equals the input's.
     """
     shape = ins[0]
     if not shape:
-        raise OpContractError(f"{where}: argmax の入力は rank 1 以上（スカラは縮約できない）")
-    # 長さ 0 の軸に「最大値の添字」は無い（torch も拒否）。記号次元が 0 になるかは束縛次第
-    # なので、ここで決められるのは定数次元だけ（残りはランタイム側の層 — amax と同じ分担）。
+        raise OpContractError(
+            f"{where}: argmax input must be rank 1 or more (a scalar cannot be reduced)"
+        )
+    # An axis of length 0 has no "index of the maximum" (torch rejects it too). Whether a symbolic
+    # dimension becomes 0 depends on the binding, so only constant dimensions can be decided here
+    # (the rest is the runtime-side layer — the same split as amax).
     if shape[-1].is_value(0):
-        raise OpContractError(f"{where}: argmax は長さ 0 の最終次元を縮約できない")
+        raise OpContractError(f"{where}: argmax cannot reduce a last dimension of length 0")
     return [*shape[:-1], _ONE]
 
 
 def _topk(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[list[Extent]]:
-    """topk の出力 shape 列（ADR 0068 決定 3）— **値と添字の 2 本**とも `[..., k]`。
+    """The output shapes of topk (ADR 0068 decision 3) — **both values and indices** are
+    `[..., k]`.
 
-    軸は最終次元固定（argmax と同じ絞り）で rank は保存される。受理領域は
-    `1 <= k <= 最終次元` で、下限は attrs スキーマ（TOPK_ATTRS）が、上限はここが見る。
+    The axis is fixed to the last dimension (the same narrowing as argmax) and the rank is
+    preserved. The accepted domain is `1 <= k <= last dimension`; the attrs schema (TOPK_ATTRS)
+    checks the lower bound and this function the upper bound.
     """
     shape = ins[0]
     if not shape:
-        raise OpContractError(f"{where}: topk の入力は rank 1 以上（スカラは縮約できない）")
+        raise OpContractError(
+            f"{where}: topk input must be rank 1 or more (a scalar cannot be reduced)"
+        )
     k = topk_k(attrs, where)
     last = shape[-1]
-    # 記号次元の最終次元では k との突合を**保留する**（束縛次第なので断定しない — 判定は
-    # ランタイム側の層。amax の長さ 0 判定と同じ分担）。長さ 0 は k >= 1 との突合で落ちる。
+    # For a symbolic last dimension the comparison with k is **deferred** (it depends on the
+    # binding, so nothing is asserted — the decision is in the runtime-side layer, the same split as
+    # amax's length-0 check). Length 0 fails against k >= 1.
     if last.is_const and k > last.offset:
         raise OpContractError(
-            f"{where}: topk の attrs.k={k} が最終次元 {last.offset} を超える"
-            f"（入力 [{_show(shape)}]）"
+            f"{where}: topk attrs.k={k} exceeds the last dimension {last.offset}"
+            f" (input [{_show(shape)}])"
         )
     out = [*shape[:-1], Extent(coeff=0, sym=None, offset=k)]
     return [out, list(out)]
@@ -475,27 +528,29 @@ def _reshape(
 ) -> list[Extent]:
     target = _require_declared(declared, contract, where)
     source = ins[0]
-    # 契約は要素数一致だけ（要素順は変えない）。ここを緩めると別名化した実バッファの
-    # 大きさと宣言 shape が食い違い、readback が範囲外まで読む。
+    # The contract is only that element counts match (element order unchanged). Loosening it
+    # would make the size of the aliased real buffer disagree with the declared shape, and readback
+    # would read out of range.
     if _numel_key(source) != _numel_key(target):
         raise OpContractError(
-            f"{where}: reshape の要素数が合わない [{_show(source)}] → [{_show(target)}]"
+            f"{where}: reshape element count mismatch [{_show(source)}] → [{_show(target)}]"
         )
     return target
 
 
 def _permute(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
     source = ins[0]
-    # 出力 rank は入力と同じ（並べ替えるだけ）なので入力側だけ見れば足りる。
-    assert_strided_rank(len(source), "permute の入力", where)
+    # The output rank equals the input's (it only reorders), so checking the input side is
+    # enough.
+    assert_strided_rank(len(source), "permute input", where)
     dims = permute_dims(attrs, where)
     if len(dims) != len(source):
-        raise OpContractError(f"{where}: permute の dims {dims} が入力 rank {len(source)} と違う")
+        raise OpContractError(f"{where}: permute dims {dims} do not match input rank {len(source)}")
     out: list[Extent] = []
     for dim in dims:
         if dim >= len(source):
             raise OpContractError(
-                f"{where}: permute の dims に入力 rank {len(source)} 外の軸 {dim} がある"
+                f"{where}: permute dims has an axis outside input rank {len(source)}: {dim}"
             )
         out.append(source[dim])
     return out
@@ -506,110 +561,119 @@ def _expand(
 ) -> list[Extent]:
     target = _require_declared(declared, contract, where)
     source = ins[0]
-    assert_strided_rank(len(source), "expand の入力", where)
-    assert_strided_rank(len(target), "expand の出力", where)
+    assert_strided_rank(len(source), "expand input", where)
+    assert_strided_rank(len(target), "expand output", where)
     if len(target) < len(source):
         raise OpContractError(
-            f"{where}: expand は rank を下げられない [{_show(source)}] → [{_show(target)}]"
+            f"{where}: expand cannot lower the rank [{_show(source)}] → [{_show(target)}]"
         )
-    # 右詰めで、入力の各次元は「目標と一致」か「長さ 1（stride 0 で複製）」のみ。
+    # Right-aligned; each input dimension either "matches the target" or "is length 1
+    # (replicated with stride 0)".
     offset = len(target) - len(source)
     for index, extent in enumerate(source):
         if not extent.is_value(1) and extent != target[offset + index]:
             raise OpContractError(
-                f"{where}: expand は長さ 1 でない次元 {index}（{extent.to_dim()}）を"
-                f" {target[offset + index].to_dim()} に拡張できない"
+                f"{where}: expand cannot expand dimension {index} ({extent.to_dim()}),"
+                f" which is not of length 1, to {target[offset + index].to_dim()}"
             )
     return target
 
 
 def _axis_extent(shape: list[Extent], dim: int, op: str, where: str) -> Extent:
-    """対象軸の長さを取り出す（rank の内側であることだけを見る）。"""
+    """Takes the length of the target axis (checks only that it is within the rank)."""
     if dim >= len(shape):
-        raise OpContractError(f"{where}: {op} の dim {dim} が入力 rank {len(shape)} の外")
+        raise OpContractError(f"{where}: {op} dim {dim} is outside input rank {len(shape)}")
     return shape[dim]
 
 
 def _static_axis(shape: list[Extent], dim: int, op: str, where: str) -> Extent:
-    """`slice` / `flip` の対象軸を取り出す（**静的軸のみ** — ADR 0014）。
+    """Takes the target axis of `slice` / `flip` (**static axes only** — ADR 0014).
 
-    MUST: 記号軸を拒否する。理由は op ごとに違うが結論は同じ:
-    - `slice` — 記号軸の切り出しは sym_prefix_slice の担当（重複させない）。加えて範囲検査
-      （end <= 軸長）が記号のままでは決められない。
-    - `flip` — 実測は全て静的軸（flow の 192ch / sdp の 2ch）。動的軸は要求実測が出るまで
-      広げない。
+    MUST: reject symbolic axes. The reason differs per op, but the conclusion is the same:
+    - `slice` — slicing a symbolic axis is sym_prefix_slice's job (no duplication). In addition,
+      the range check (end <= axis length) cannot be decided while symbolic.
+    - `flip` — every observed case is a static axis (flow's 192ch / sdp's 2ch). Dynamic axes are not
+      widened until an observed need appears.
 
-    `cat` の連結軸は ADR 0046 で「同一シンボルの一次和」まで緩めた（`_cat` を見よ）。
+    The concatenation axis of `cat` was loosened to "a linear sum of the same symbol" by ADR 0046
+    (see `_cat`).
 
-    NOTE: TS 側は**束縛解決後の数値 shape**しか見ないので、この判定は plan.ts
-    （宣言 shape を見る層）が持つ — 層は違うが受理集合は両側で同じ。
+    NOTE: the TS side looks only at **numeric shapes after binding resolution**, so this decision is
+    held by plan.ts (the layer that looks at declared shapes) — a different layer, but the accepted
+    set is the same on both sides.
     """
     extent = _axis_extent(shape, dim, op, where)
     if not extent.is_const:
         raise OpContractError(
-            f"{where}: {op} の軸 {dim} が記号次元 {extent.to_dim()}"
-            "（対象軸は静的でなければならない — 記号軸の切り出しは sym_prefix_slice）"
+            f"{where}: {op} axis {dim} is a symbolic dimension {extent.to_dim()}"
+            " (the target axis must be static — slicing a symbolic axis is sym_prefix_slice)"
         )
     return extent
 
 
 def _slice(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
     source = ins[0]
-    # 実行は strided 読みコピー族の流用（ADR 0014）なので rank 上限も同じ。
-    assert_strided_rank(len(source), "slice の入力", where)
+    # Executed by reusing the strided read copy family (ADR 0014), so the rank limit is the
+    # same.
+    assert_strided_rank(len(source), "slice input", where)
     dim, start, end = slice_attrs(attrs, where)
     extent = _static_axis(source, dim, "slice", where)
-    # MUST: 範囲外の切り出しを通さない（GPU では例外なしに隣の行を読む形になる）。
+    # MUST: out-of-range slices do not pass (on the GPU they would read the neighbouring row
+    # without an exception).
     if end > extent.offset:
-        raise OpContractError(
-            f"{where}: slice の end {end} が軸 {dim} の長さ {extent.offset} を超える"
-        )
-    # MUST: キーを跨ぐ不変条件（clamp の min <= max と同じ分担）。
+        raise OpContractError(f"{where}: slice end {end} exceeds axis {dim} length {extent.offset}")
+    # MUST: an invariant that spans keys (the same split as clamp's min <= max).
     if start > end:
-        raise OpContractError(f"{where}: slice の start {start} が end {end} を超える")
+        raise OpContractError(f"{where}: slice start {start} exceeds end {end}")
     out = list(source)
     out[dim] = Extent(coeff=0, sym=None, offset=end - start)
     return out
 
 
 def _cat(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
-    """連結軸は〈定数〉または〈**同一**シンボルの一次式〉（ADR 0046 が ADR 0014 を改訂）。
+    """The concatenation axis is a constant or a linear expression in **the same** symbol (ADR
+    0046 revises ADR 0014).
 
-    MUST: 異なるシンボルが混ざる連結は落とす — 総和が次元言語（1 次元 1 シンボルの一次式）に
-    載らない。同一シンボルなら `Σ(coeff_i·sym + offset_i)` がそのまま正準形になる。
+    MUST: reject a concatenation that mixes different symbols — the sum does not fit the dimension
+    language (a linear expression with one symbol per dimension). With the same symbol,
+    `Σ(coeff_i·sym + offset_i)` is the canonical form as is.
     """
     dim = axis_dim(attrs, where)
     first = ins[0]
-    assert_strided_rank(len(first), "cat の入力", where)
+    assert_strided_rank(len(first), "cat input", where)
     coeff = 0
     offset = 0
     sym: str | None = None
     for index, shape in enumerate(ins):
         if len(shape) != len(first):
             raise OpContractError(
-                f"{where}: cat の入力 {index} の rank {len(shape)} が 入力 0 の {len(first)} と違う"
+                f"{where}: cat input {index} rank {len(shape)} differs from"
+                f" input 0 rank {len(first)}"
             )
         extent = _axis_extent(shape, dim, "cat", where)
         if extent.sym is not None:
             if sym is not None and sym != extent.sym:
                 raise OpContractError(
-                    f"{where}: cat の連結軸 {dim} に異なるシンボル（{sym} と {extent.sym}）が"
-                    "混ざる — 和が次元言語 coeff·sym+offset に載らない"
+                    f"{where}: cat concatenation axis {dim} mixes different symbols"
+                    f" ({sym} and {extent.sym}) — the sum does not fit the dimension language"
+                    " coeff·sym+offset"
                 )
             sym = extent.sym
-        # MUST: 連結軸**以外**は全一致（torch と同じ）。緩めると出力の一部がどの入力にも
-        # 書かれないまま残り、full-write 不変条件が破れる。
+        # MUST: every axis **other than** the concatenation axis must match (as in torch).
+        # Loosening it would leave part of the output unwritten by any input, breaking the
+        # full-write invariant.
         for axis, other in enumerate(shape):
             if axis != dim and other != first[axis]:
                 raise OpContractError(
-                    f"{where}: cat の入力 {index} [{_show(shape)}] が"
-                    f" 入力 0 [{_show(first)}] と軸 {axis} で違う（連結軸は {dim}）"
+                    f"{where}: cat input {index} [{_show(shape)}] differs from"
+                    f" input 0 [{_show(first)}] on axis {axis} (the concatenation axis is {dim})"
                 )
         coeff += extent.coeff
         offset += extent.offset
     out = list(first)
-    # 出力の軸長 = 入力の軸長の総和。この規則そのものが「全入力で出力全域を覆う」
-    # （full-write — ADR 0014）の担保になっている。定数だけなら sym=None・coeff=0 に戻る。
+    # Output axis length = sum of the input axis lengths. This rule itself guarantees "all inputs
+    # together cover the whole output" (full-write — ADR 0014). With constants only it returns to
+    # sym=None, coeff=0.
     out[dim] = Extent(coeff=coeff, sym=sym, offset=offset)
     return out
 
@@ -617,11 +681,14 @@ def _cat(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[
 def _pad(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
     source = ins[0]
     if not source:
-        raise OpContractError(f"{where}: pad の入力は rank 1 以上（最終次元が要る）")
+        raise OpContractError(
+            f"{where}: pad input must be rank 1 or more (it needs a last dimension)"
+        )
     left, right = pad_attrs(attrs, where)
     last = source[-1]
     out = list(source)
-    # 記号長の最終次元も埋められる（実測の T+2w = T+8 — 次元言語のオフセット付き形）。
+    # A symbolic last dimension can be padded too (the observed T+2w = T+8 — the dimension
+    # language's form with an offset).
     out[-1] = Extent(coeff=last.coeff, sym=last.sym, offset=last.offset + left + right)
     return out
 
@@ -629,9 +696,11 @@ def _pad(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[
 def _flip(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
     source = ins[0]
     if not source:
-        raise OpContractError(f"{where}: flip の入力は rank 1 以上（反転する軸が要る）")
+        raise OpContractError(
+            f"{where}: flip input must be rank 1 or more (it needs an axis to reverse)"
+        )
     _static_axis(source, axis_dim(attrs, where), "flip", where)
-    # 反転は shape を変えない（恒等 shape 規則）。
+    # Reversal does not change the shape (identity shape rule).
     return list(source)
 
 
@@ -639,25 +708,25 @@ def _sym_prefix_slice(
     ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]
 ) -> list[Extent]:
     source = ins[0]
-    # 出力 rank は入力と同じ（各軸の先頭を切り出すだけ）。
-    assert_strided_rank(len(source), "sym_prefix_slice の入力", where)
+    # The output rank equals the input's (it only cuts the head of each axis).
+    assert_strided_rank(len(source), "sym_prefix_slice input", where)
     sym, slices = sym_prefix_slice_attrs(attrs, where)
     out = list(source)
     for entry in slices:
         dim = entry["dim"]
         if dim >= len(source):
             raise OpContractError(
-                f"{where}: sym_prefix_slice の dim {dim} が入力 rank {len(source)} の外"
+                f"{where}: sym_prefix_slice dim {dim} is outside input rank {len(source)}"
             )
-        # MUST: 入力は Tmax で焼いた静的形（ADR 0010）。記号次元の入力を許すと読み出し
-        # stride が実行ごとに変わり、prefix の意味が壊れる。
+        # MUST: the input is a static form baked at Tmax (ADR 0010). Allowing a symbolic input
+        # dimension would change the read stride per run and break the meaning of the prefix.
         if not source[dim].is_const:
             raise OpContractError(
-                f"{where}: sym_prefix_slice の入力 [{_show(source)}] の次元 {dim} が記号"
-                "（入力は Tmax で焼いた静的形でなければならない）"
+                f"{where}: sym_prefix_slice input [{_show(source)}] dimension {dim} is symbolic"
+                " (the input must be a static form baked at Tmax)"
             )
-        # prefix 長 coeff·sym+offset ≤ 定数次元（Tmax 超過）の検査は束縛が要るので
-        # ランタイム側の層が持つ — 上限は IR に載らない。
+        # The check prefix length coeff·sym+offset ≤ constant dimension (Tmax exceeded) needs
+        # the binding, so the runtime-side layer holds it — the upper bound is not in the IR.
         out[dim] = Extent(coeff=entry["coeff"], sym=sym, offset=entry["offset"])
     return out
 
@@ -666,18 +735,18 @@ def _linear(ins: list[list[Extent]], where: str) -> list[Extent]:
     x, weight, bias = ins
     if len(x) < 1 or len(weight) != 2 or len(bias) != 1:
         raise OpContractError(
-            f"{where}: linear は x[…,in] × W[out,in] + b[out]（rank ≥ 1 / 2 / 1）:"
+            f"{where}: linear expects x[…,in] × W[out,in] + b[out] (rank ≥ 1 / 2 / 1):"
             f" [{_show(x)}] / [{_show(weight)}] / [{_show(bias)}]"
         )
     out_features, in_features = weight
     if x[-1] != in_features:
         raise OpContractError(
-            f"{where}: linear の入力特徴数が不一致 [{_show(x)}] × [{_show(weight)}]"
+            f"{where}: linear input feature count mismatch [{_show(x)}] × [{_show(weight)}]"
         )
     if bias[0] != out_features:
         raise OpContractError(
-            f"{where}: linear の bias 長 {bias[0].to_dim()} が"
-            f" 出力特徴数 {out_features.to_dim()} と違う"
+            f"{where}: linear bias length {bias[0].to_dim()} differs from"
+            f" the output feature count {out_features.to_dim()}"
         )
     return [*x[:-1], out_features]
 
@@ -685,42 +754,47 @@ def _linear(ins: list[list[Extent]], where: str) -> list[Extent]:
 def _layer_norm(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
     x, weight, bias = ins
     normalized_shape, _ = layer_norm_attrs(attrs, where)
-    # 契約は「最終次元のみ」（attrs 検査済み）。ここでは実 shape の末尾との一致を見る。
+    # The contract is "last dimension only" (attrs already checked). Here the actual shape's
+    # tail is matched.
     normalized = Extent(coeff=0, sym=None, offset=normalized_shape[0])
     if len(x) < 1 or x[-1] != normalized:
         raise OpContractError(
-            f"{where}: layer_norm の normalized_shape {normalized_shape} が"
-            f" 入力 [{_show(x)}] の最終次元と違う"
+            f"{where}: layer_norm normalized_shape {normalized_shape} differs from"
+            f" the last dimension of input [{_show(x)}]"
         )
     for name, shape in (("weight", weight), ("bias", bias)):
         if len(shape) != 1 or shape[0] != normalized:
             raise OpContractError(
-                f"{where}: layer_norm の {name} [{_show(shape)}] が"
-                f" normalized_shape {normalized_shape} と違う"
+                f"{where}: layer_norm {name} [{_show(shape)}] differs from"
+                f" normalized_shape {normalized_shape}"
             )
     return list(x)
 
 
 def _rms_norm(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
-    """rms_norm の出力 shape（ADR 0017）。
+    """The output shape of rms_norm (ADR 0017).
 
-    MUST: 正規化長の正本は **weight の長さ**（attrs に normalized_shape の欄を作らない）。
-    layer_norm は attrs と weight で同じ事実を二重に持っていて、その一致をここで検査して
-    いる — rms_norm は事実を 1 つにして検査そのものを不要にする。
+    MUST: the source of truth for the normalised length is **the weight's length** (no
+    normalized_shape field in attrs). layer_norm holds the same fact twice, in attrs and in the
+    weight, and checks their agreement here — rms_norm keeps the fact in one place and makes the
+    check itself unnecessary.
     """
     x, weight = ins
-    # MUST: eps はここでも引く（値域を通る経路を 1 本に保つ — unary の scalar_param_values と
-    # 同じ役割）。
+    # MUST: eps is read here too (keeps a single path through the range check — the same role as
+    # unary's scalar_param_values).
     rms_norm_eps(attrs, where)
     if len(x) < 1:
-        raise OpContractError(f"{where}: rms_norm の入力は rank 1 以上（最終次元が要る）")
-    # 長さ 0 の軸は縮約できない（二乗和 0 / 要素数 0 で mean が 0/0 になる — softmax と同じ）。
+        raise OpContractError(
+            f"{where}: rms_norm input must be rank 1 or more (it needs a last dimension)"
+        )
+    # An axis of length 0 cannot be reduced (a sum of squares 0 / element count 0 makes the mean
+    # 0/0 — the same as softmax).
     if x[-1].is_value(0):
-        raise OpContractError(f"{where}: rms_norm は長さ 0 の軸を正規化できない")
+        raise OpContractError(f"{where}: rms_norm cannot normalise an axis of length 0")
     if len(weight) != 1 or weight[0] != x[-1]:
         raise OpContractError(
-            f"{where}: rms_norm の weight [{_show(weight)}] が"
-            f" 入力 [{_show(x)}] の最終次元長 {x[-1].to_dim()} の rank1 でない"
+            f"{where}: rms_norm weight [{_show(weight)}] does not match"
+            f" input [{_show(x)}]: expected rank-1 of the last dimension length {x[-1].to_dim()}"
         )
     return list(x)
 
@@ -730,14 +804,16 @@ def _softmax(
 ) -> list[Extent]:
     shape = ins[0]
     dim = softmax_dim(attrs, where)
-    # MUST: 一般 dim を「そのうち実装する」として受理しない。最終次元以外は行カーネルの
-    # 前提（縮約軸が連続）が崩れ、通せば黙って別の軸を畳む。
+    # MUST: a general dim is not accepted "to be implemented someday". Anything but the last
+    # dimension breaks the row kernel's premise (a contiguous reduced axis), and letting it through
+    # would silently fold a different axis.
     if len(shape) < 1 or dim != len(shape) - 1:
         raise OpContractError(
-            f"{where}: {name} は最終次元のみ（attrs.dim={dim} / 入力 [{_show(shape)}]）"
+            f"{where}: {name} accepts only the last dimension"
+            f" (attrs.dim={dim} / input [{_show(shape)}])"
         )
     if shape[-1].is_value(0):
-        raise OpContractError(f"{where}: {name} は長さ 0 の軸を縮約できない")
+        raise OpContractError(f"{where}: {name} cannot reduce an axis of length 0")
     return list(shape)
 
 
@@ -748,42 +824,47 @@ def _assert_state_slot_form(
     window: int | None,
     where: str,
 ) -> None:
-    """state スロットの物理形（ADR 0067 決定 4 の①②③・TS 側 assertStateSlotForm の鏡像）。
+    """The physical form of a state slot (①②③ of ADR 0067 decision 4; mirror of
+    assertStateSlotForm on the TS side).
 
-    スロットは **`[B, Hkv, C, D]` 固定**で、今 step の chunk（`ins`）と B / Hkv / D が一致し、
-    sliding（attrs `window`）では `window ≤ C` でなければならない。
+    A slot is **fixed at `[B, Hkv, C, D]`**, its B / Hkv / D match this step's chunk (`ins`), and
+    for sliding (attrs `window`) `window ≤ C` must hold.
 
-    MUST: 通常値だけを見る shape 検査の**state 延長**としてここで落とす。スロット取り違え
-    （別の層のスロットを参照した形）は容量が違えば OOB、同容量なら沈黙誤読になる。
-    NOTE: `window ≤ C` は **C が定数のときだけ**判定する（記号容量は
-    `createGenerationContext` の束縛次第 — 宣言だけでは決められないものを決めたことにしない）。
-    TS 側は束縛解決後の数値しか扱わないので常に判定できる = ここだけが片側で保留になる。
-    NOTE: full スロットの `pastLength + queryLength ≤ C` は実行時の論理長が要るので context 側
-    （ADR 0067 決定 4 の④）— ここでは見られない。
+    MUST: fail here, as the **state extension** of the shape check that otherwise looks only at
+    ordinary values. A slot mix-up (referencing another layer's slot) is an OOB access when the
+    capacity differs, and a silent misread when the capacity is the same.
+    NOTE: `window ≤ C` is decided **only when C is a constant** (a symbolic capacity depends on the
+    binding at `createGenerationContext` — what the declaration alone cannot decide is not treated
+    as decided). The TS side handles only numbers after binding resolution, so it can always
+    decide = only this side defers.
+    NOTE: `pastLength + queryLength ≤ C` for a full slot needs the logical lengths at run time, so
+    it is on the context side (④ of ADR 0067 decision 4) — it cannot be checked here.
     """
-    show = f"state スロット '{name}' [{_show(slot)}] / 入力 [{_show(ins)}]"
+    show = f"state slot '{name}' [{_show(slot)}] / input [{_show(ins)}]"
     if len(slot) != 4:
-        raise OpContractError(f"{where}: {show} — スロットは [B,Hkv,C,D] の rank-4 のみ")
+        raise OpContractError(f"{where}: {show} — the slot must be rank-4 [B,Hkv,C,D]")
     if slot[0] != ins[0] or slot[1] != ins[1] or slot[3] != ins[3]:
-        raise OpContractError(f"{where}: {show} — スロットと入力の B / Hkv / D が不一致")
+        raise OpContractError(f"{where}: {show} — slot and input B / Hkv / D mismatch")
     if window is not None and slot[2].is_const and window > slot[2].offset:
         raise OpContractError(
-            f"{where}: {show} — attrs.window {window} がスロット容量 {slot[2].offset} を超える"
+            f"{where}: {show} — attrs.window {window} exceeds the slot capacity {slot[2].offset}"
         )
 
 
 def _state_append(
     ins: list[list[Extent]], where: str, attrs: Mapping[str, Any], slots: _StateContext
 ) -> list[list[Extent]]:
-    """`state_append` の出力 shape 列 = **空列**（ADR 0067 決定 5 — 値を定義しない effect op）。
+    """The output shapes of `state_append` = **an empty list** (ADR 0067 decision 5 — an effect op
+    that defines no value).
 
-    入力は `[B,Hkv,M,D]` の rank-4 ちょうど（attention の ins と同じ物理 chunk 次元）で、
-    参照するスロットとの整合は読み側 attention と**同じ検出線**を課す（読み書き同式 MUST）。
+    The input is exactly rank-4 `[B,Hkv,M,D]` (the same physical chunk dimensions as attention's
+    ins), and its agreement with the referenced slot is held to **the same detection line** as the
+    reading attention (same formula for reads and writes, MUST).
     """
     x = ins[0]
     if len(x) != 4:
         raise OpContractError(
-            f"{where}: state_append の入力は [B,Hkv,M,D] の rank-4 のみ: [{_show(x)}]"
+            f"{where}: state_append input must be rank-4 [B,Hkv,M,D]: [{_show(x)}]"
         )
     window = state_window(attrs, where)
     name, slot = slots.slot("slot", where)
@@ -801,37 +882,40 @@ def _attention_states(
     slots: _StateContext,
     show: str,
 ) -> list[Extent]:
-    """states 形 attention の分岐（ADR 0067 決定 4 — `_attention` から head / D 検査の後に入る）。
+    """The states-form attention branch (ADR 0067 decision 4 — entered from `_attention` after the
+    head / D checks).
 
-    MUST: mask は取らない（causal 固定・述語計算 — mask tensor は実体化しない）。契約層でも
-    落ちるが、適合表からの直呼びはここを通る。
-    MUST: M は q / k / v で**完全一致**（今 step の chunk を共有する — 従来形の自由な N と違い、
-    ここがずれた形は「別の step の k/v を混ぜた」IR にほかならない）。
-    MUST: k / v スロットは**同形**（容量の違うスロットを組にすると、片方だけ先に wrap する
-    ring になって値が静かにずれる）。
+    MUST: no mask is taken (causal is fixed and computed by predicate — no mask tensor is
+    materialised). The contract layer rejects it too, but direct calls from the conformance table
+    come through here.
+    MUST: M **matches exactly** across q / k / v (they share this step's chunk — unlike the free N
+    of the previous form, a mismatch here is nothing but IR that "mixed in another step's k/v").
+    MUST: the k / v slots have **the same shape** (pairing slots with different capacities makes a
+    ring where one side wraps first, and the values silently drift).
     """
     if rest:
         raise OpContractError(
-            f"{where}: states 形の attention は mask を取らない（causal 固定 —"
-            f" ADR 0067 決定 4） {show} + mask [{_show(rest[0])}]"
+            f"{where}: states-form attention takes no mask (causal is fixed —"
+            f" ADR 0067 decision 4) {show} + mask [{_show(rest[0])}]"
         )
     if k[2] != q[2] or v[2] != q[2]:
         raise OpContractError(
-            f"{where}: states 形の attention は M（軸 2）が q / k / v で一致する {show}"
+            f"{where}: states-form attention needs the same M (axis 2) in q / k / v {show}"
         )
-    # 空軸の softmax は amax の identity が定義できない（従来形の N=0 拒否と同じ理由）。
-    # 記号次元が 0 になるかは束縛次第なので、ここで決められるのは定数次元だけ。
+    # softmax over an empty axis has no definable amax identity (the same reason as the previous
+    # form's N=0 rejection). Whether a symbolic dimension becomes 0 depends on the binding, so only
+    # constant dimensions can be decided here.
     if q[2].is_value(0):
         raise OpContractError(
-            f"{where}: states 形の attention は M が 0 の chunk を扱えない {show}"
+            f"{where}: states-form attention cannot handle a chunk with M = 0 {show}"
         )
     window = state_window(attrs, where)
     k_name, k_slot = slots.slot("k", where)
     v_name, v_slot = slots.slot("v", where)
     if k_slot != v_slot:
         raise OpContractError(
-            f"{where}: attention の k / v スロットが同形でない"
-            f"（'{k_name}' [{_show(k_slot)}] / '{v_name}' [{_show(v_slot)}]）"
+            f"{where}: attention k / v slots differ in shape"
+            f" ('{k_name}' [{_show(k_slot)}] / '{v_name}' [{_show(v_slot)}])"
         )
     _assert_state_slot_form(k_name, k_slot, k, window, where)
     _assert_state_slot_form(v_name, v_slot, v, window, where)
@@ -839,101 +923,116 @@ def _attention_states(
 
 
 def _assert_kv_head_broadcast(q_heads: Extent, kv_heads: Extent, where: str, show: str) -> None:
-    """`H` と `Hkv` の整除 broadcast（ADR 0067 決定 1 — GQA / MQA の唯一の受理形）。
+    """Divisible broadcast of `H` and `Hkv` (ADR 0067 decision 1 — the only accepted form for GQA
+    / MQA).
 
-    従来形 / states 形 / readonly 形の 3 形が同じ規則を課すので 1 本に閉じる（写すと片方だけ
-    緩む — スロットの Hkv は q と一致しないのが正規なので、緩みが値にしか出ない）。
+    The three forms — previous / states / readonly — impose the same rule, so it is kept in one
+    function (a copy would loosen on one side only — a slot's Hkv legitimately differs from q's, so
+    the loosening would show only in the values).
 
-    MUST: `Hkv ≥ 1` は等値短絡より**前**に見る — `(H,Hkv) = (0,0)` は構造等値なので整除枝に
-    落ちず、「head 軸を丸ごと落とした IR」が素通りする。`H = 0` 単独は `Hkv ≥ 1` とのペアに
-    なるので下の `H ≥ Hkv` 枝が落とす（TS 側 computeOutputShape と鏡像）。記号次元は
-    「宣言だけでは決められない」側（下の枝）に任せるので、定数の Hkv だけを見る。
-    MUST: `H ≥ Hkv` を整除と**別条件**で見る — `H = 0` は `0 % Hkv == 0` を満たすので、整除
-    だけだと「H を丸ごと落とした IR」が素通りする。broadcast の向きは常に kv → q。
-    MUST: `Hkv == 0` は上の `Hkv ≥ 1` 枝が剰余より**先**に落とす — Python の `%` は
-    ZeroDivisionError を投げるので、条件順が崩れると TS 側（`4 % 0` が NaN で条件が真になる）と
-    同じ契約エラーで落ちなくなる（ここで `%` を書けるのはその順序が保たれているから）。
+    MUST: `Hkv ≥ 1` is checked **before** the equality short-circuit — `(H,Hkv) = (0,0)` is
+    structurally equal, so it never reaches the divisibility branch and "IR that dropped the whole
+    head axis" slips through. `H = 0` alone pairs with `Hkv ≥ 1`, so the `H ≥ Hkv` branch below
+    rejects it (the mirror of computeOutputShape on the TS side). Symbolic dimensions are left to
+    the "the declaration alone cannot decide" side (the branch below), so only a constant Hkv is
+    checked.
+    MUST: check `H ≥ Hkv` as a **separate condition** from divisibility — `H = 0` satisfies
+    `0 % Hkv == 0`, so divisibility alone lets "IR that dropped H entirely" through. The broadcast
+    always goes kv → q.
+    MUST: `Hkv == 0` is rejected by the `Hkv ≥ 1` branch above **before** the remainder — Python's
+    `%` raises ZeroDivisionError, so if the condition order broke it would no longer fail with the
+    same contract error as the TS side (where `4 % 0` is NaN and the condition is true) (`%` can be
+    written here because that order is kept).
     """
     if kv_heads.is_const and kv_heads.offset < 1:
         raise OpContractError(
-            f"{where}: attention の Hkv {kv_heads.offset} が正でない（H は Hkv の正の整数倍 —"
-            f" GQA は H % Hkv == 0 かつ H ≥ Hkv ≥ 1・ADR 0067 決定 1）{show}"
+            f"{where}: attention Hkv {kv_heads.offset} is not positive (H must be a positive"
+            " integer multiple of Hkv — GQA needs H % Hkv == 0 and H ≥ Hkv ≥ 1;"
+            f" ADR 0067 decision 1) {show}"
         )
     if q_heads == kv_heads:
         return
-    # 記号次元は「宣言だけでは決められない」として落とす（broadcast_extents と同じ規律 —
-    # 黙って通すと実行してみないと分からない IR が書ける。head 数に記号の実測は無い）。
+    # Symbolic dimensions fail as "the declaration alone cannot decide" (the same discipline as
+    # broadcast_extents — letting them through silently would allow IR you cannot judge without
+    # running it. No symbolic head count has been observed).
     if not q_heads.is_const or not kv_heads.is_const:
         raise OpContractError(
-            f"{where}: attention の H {q_heads.to_dim()} と Hkv {kv_heads.to_dim()} は"
-            f"宣言だけでは整除 broadcast の可否を決められない {show}"
+            f"{where}: attention H {q_heads.to_dim()} and Hkv {kv_heads.to_dim()}:"
+            f" the declaration alone cannot decide whether they broadcast divisibly {show}"
         )
     if q_heads.offset < kv_heads.offset or q_heads.offset % kv_heads.offset != 0:
         raise OpContractError(
-            f"{where}: attention の H {q_heads.offset} が Hkv {kv_heads.offset} の正の整数倍でない"
-            f"（GQA は H % Hkv == 0 かつ H ≥ Hkv — ADR 0067 決定 1）{show}"
+            f"{where}: attention H {q_heads.offset} is not a positive integer multiple of"
+            f" Hkv {kv_heads.offset} (GQA needs H % Hkv == 0 and H ≥ Hkv — ADR 0067 decision 1)"
+            f" {show}"
         )
 
 
 def _assert_readonly_slot_form(
     name: str, slot: list[Extent], q: list[Extent], window: int | None, where: str
 ) -> None:
-    """readonly attention が読むスロットの物理形（ADR 0096 段 2 — 契約 §1.2）。
+    """The physical form of the slots a readonly attention reads (ADR 0096 stage 2 — contract
+    §1.2).
 
-    比べる相手が今 step の k / v ではなく **q** であることが states 形との唯一の差で、
-    見る軸は B（軸 0）と D（軸 3）+ head 軸の整除 broadcast + `window ≤ C`。
+    The only difference from the states form is that the counterpart compared against is **q**,
+    not this step's k / v; the axes checked are B (axis 0) and D (axis 3) + the divisible broadcast
+    of the head axis + `window ≤ C`.
 
-    MUST: 「今 step の k/v が無いから軸を見ない」にはしない — スロット取り違え（別層・別種別の
-    スロットを参照した形）は容量が違えば OOB、同容量なら沈黙誤読になるので、states 形と同じ
-    検出線を q 基準で張り直す。
+    MUST: do not turn this into "no k/v for this step, so no axes are checked" — a slot mix-up
+    (referencing a slot of another layer or another kind) is an OOB access when the capacity
+    differs and a silent misread when it is the same, so the same detection line as the states form
+    is redrawn against q.
     """
-    show = f"state スロット '{name}' [{_show(slot)}] / q [{_show(q)}]"
+    show = f"state slot '{name}' [{_show(slot)}] / q [{_show(q)}]"
     if len(slot) != 4:
-        raise OpContractError(f"{where}: {show} — スロットは [B,Hkv,C,D] の rank-4 のみ")
+        raise OpContractError(f"{where}: {show} — the slot must be rank-4 [B,Hkv,C,D]")
     if slot[0] != q[0] or slot[3] != q[3]:
-        raise OpContractError(f"{where}: {show} — スロットと q の B / D が不一致")
+        raise OpContractError(f"{where}: {show} — slot and q B / D mismatch")
     _assert_kv_head_broadcast(q[1], slot[1], where, show)
     if window is not None and slot[2].is_const and window > slot[2].offset:
         raise OpContractError(
-            f"{where}: {show} — attrs.window {window} がスロット容量 {slot[2].offset} を超える"
+            f"{where}: {show} — attrs.window {window} exceeds the slot capacity {slot[2].offset}"
         )
 
 
 def _attention_readonly(
     ins: list[list[Extent]], where: str, attrs: Mapping[str, Any], slots: _StateContext
 ) -> list[Extent]:
-    """readonly 形 attention の出力 shape（ADR 0096 段 2・契約 §1.2）。
+    """The output shape of a readonly-form attention (ADR 0096 stage 2; contract §1.2).
 
-    `q[B,H,1,D]` **だけ**を取り、過去の列は k / v スロットが持つ → `[B,H,1,D]`。
+    Takes **only** `q[B,H,1,D]`; the past columns are held by the k / v slots → `[B,H,1,D]`.
 
-    MUST: M（軸 2）は **1 ちょうど**。readonly は「論理位置 P−1 の 1 行が列 `[column_base, P)` を
-    読む」形しか意味を持たない（段 2 は ①′ 系のみ）ので、M > 1 を通すと「どの行がどの位置に
-    居るか」を誰も決められないまま実行される。
-    MUST: k / v スロットは**同形**（容量の違うスロットを組にすると、片方だけ先に wrap する
-    ring になって値が静かにずれる — states 形と同じ理由）。
+    MUST: M (axis 2) is **exactly 1**. The readonly form has meaning only as "the one row at logical
+    position P−1 reads the columns `[column_base, P)`" (stage 2 covers only the ①′ family), so
+    letting M > 1 through would run without anyone deciding "which row sits at which position".
+    MUST: the k / v slots have **the same shape** (pairing slots with different capacities makes a
+    ring where one side wraps first, and the values silently drift — the same reason as the states
+    form).
     """
-    # MUST: scale はここでも引く（`_attention` の共通経路と同じ役割）。
+    # MUST: scale is read here too (the same role as the common path of `_attention`).
     attention_scale(attrs, where)
     if len(ins) != 1:
         raise OpContractError(
-            f"{where}: readonly 形の attention は q の 1 本ちょうど（{len(ins)} 本 —"
-            " 今 step の k/v も mask も取らない・ADR 0096 段 2）"
+            f"{where}: readonly-form attention takes exactly one input, q ({len(ins)} given —"
+            " it takes neither this step's k/v nor a mask; ADR 0096 stage 2)"
         )
     q = ins[0]
     show = f"q [{_show(q)}]"
     if len(q) != 4:
         raise OpContractError(
-            f"{where}: readonly 形の attention は q[B,H,1,D] の rank-4 のみ: {show}"
+            f"{where}: readonly-form attention accepts only rank-4 q[B,H,1,D]: {show}"
         )
     if not q[2].is_value(1):
-        raise OpContractError(f"{where}: readonly 形の attention は M（軸 2）が 1 ちょうど {show}")
+        raise OpContractError(
+            f"{where}: readonly-form attention needs M (axis 2) of exactly 1 {show}"
+        )
     window = state_window(attrs, where)
     k_name, k_slot = slots.slot("k", where)
     v_name, v_slot = slots.slot("v", where)
     if k_slot != v_slot:
         raise OpContractError(
-            f"{where}: attention の k / v スロットが同形でない"
-            f"（'{k_name}' [{_show(k_slot)}] / '{v_name}' [{_show(v_slot)}]）"
+            f"{where}: attention k / v slots differ in shape"
+            f" ('{k_name}' [{_show(k_slot)}] / '{v_name}' [{_show(v_slot)}])"
         )
     _assert_readonly_slot_form(k_name, k_slot, q, window, where)
     _assert_readonly_slot_form(v_name, v_slot, q, window, where)
@@ -943,62 +1042,69 @@ def _attention_readonly(
 def _attention(
     ins: list[list[Extent]], where: str, attrs: Mapping[str, Any], slots: _StateContext
 ) -> list[Extent]:
-    """attention の出力 shape（ADR 0023 + 0067 決定 1 / 決定 4）。
+    """The output shape of attention (ADR 0023 + 0067 decision 1 / decision 4).
 
-    `q[B,H,M,D]` / `k[B,Hkv,N,D]` / `v[B,Hkv,N,D]` （+ 省略可能な `mask[1,1,M,N]`）→ `[B,H,M,D]`。
+    `q[B,H,M,D]` / `k[B,Hkv,N,D]` / `v[B,Hkv,N,D]` (+ an optional `mask[1,1,M,N]`) → `[B,H,M,D]`.
 
-    MUST: B は q / k / v で**完全一致**（積だけを見ると取り違えが素通りする）。
-    MUST: H と Hkv は**整除 broadcast**（`H % Hkv == 0` かつ `H ≥ Hkv ≥ 1` — ADR 0067 決定 1）。
-    `r = H / Hkv` は導出値で attrs 欄を作らない。Hkv=1 の MQA も同じ式で表す。k / v 間の
-    Hkv 一致・D 3 者同一・N=0 拒否は**取り違え検出線としてそのまま維持**する。
-    MUST: D は 3 者とも同じ（v 側だけ別の長さを許すと取り違えが要素数で捕まらない）。
-    MUST: mask の先頭 2 軸は**ちょうど 1**（B·H への broadcast 専業）。`[B,1,M,N]` を
-    通すと「B が合っている限り黙って通る」形が増え、契約の外の broadcast 規則を
-    カーネルが持たされる — 欄の不存在で拒否する（実行時マスクの需要が出た時に広げる）。
+    MUST: B **matches exactly** across q / k / v (looking only at the product lets a mix-up
+    through).
+    MUST: H and Hkv are a **divisible broadcast** (`H % Hkv == 0` and `H ≥ Hkv ≥ 1` — ADR 0067
+    decision 1). `r = H / Hkv` is a derived value with no attrs field. MQA with Hkv=1 uses the same
+    formula. The equal Hkv of k and v, the same D for all three and the N=0 rejection **stay as
+    detectors of mix-ups**.
+    MUST: D is the same for all three (allowing a different length on the v side alone would let a
+    mix-up escape the element count).
+    MUST: the first two mask axes are **exactly 1** (dedicated to broadcasting to B·H). Letting
+    `[B,1,M,N]` through would add forms that "pass silently as long as B matches" and make the
+    kernel carry broadcast rules outside the contract — rejected by the absence of a field (widened
+    when a need for run-time masks appears).
 
-    **states 形**（ADR 0067 決定 4）: `states` 欄があるノードは「過去分はスロット・今 step の
-    k/v は `ins`」を読む形になり、head / D 規則は 2 形で共通のまま**以降が分岐する** —
-    従来形は k/v の N（過去 + 現在の全長）を見るが、states 形の ins は今 step の chunk だけ
-    なので **M が 3 者一致**し、過去分はスロットの容量 C が持つ。
+    **The states form** (ADR 0067 decision 4): a node with a `states` field reads "the past from
+    the slots, this step's k/v from `ins`"; the head / D rules stay common to both forms and **they
+    branch from there** — the previous form looks at the N of k/v (the full length, past + present),
+    while the states form's ins are only this step's chunk, so **M agrees across the three** and
+    the past is held by the slot capacity C.
     """
-    # readonly 形（ADR 0096 段 2）は今 step の k / v を持たない = **入力が q の 1 本**なので、
-    # q/k/v の展開そのものが成立しない。分岐は展開より前に置く MUST。
+    # The readonly form (ADR 0096 stage 2) has no k / v for this step = **its only input is q**,
+    # so unpacking q/k/v itself does not work. The branch MUST come before the unpacking.
     if slots.referenced and attention_readonly(attrs):
         return _attention_readonly(ins, where, attrs, slots)
     q, k, v, *rest = ins
-    # MUST: scale はここでも引く（TS 側 computeOutputShape と同じ役割 — 全ノードが必ず通る
-    # 共通経路はこの計算だけで、attrs スキーマはキー単位の検査しか表せない）。
+    # MUST: scale is read here too (the same role as computeOutputShape on the TS side — this
+    # computation is the only common path every node goes through, and the attrs schema can express
+    # only per-key checks).
     attention_scale(attrs, where)
     show = f"[{_show(q)}] / [{_show(k)}] / [{_show(v)}]"
     if len(q) != 4 or len(k) != 4 or len(v) != 4:
         raise OpContractError(
-            f"{where}: attention は q[B,H,M,D] / k[B,Hkv,N,D] / v[B,Hkv,N,D] の rank-4 のみ: {show}"
+            f"{where}: attention accepts only rank-4"
+            f" q[B,H,M,D] / k[B,Hkv,N,D] / v[B,Hkv,N,D]: {show}"
         )
     if q[0] != k[0] or q[0] != v[0]:
-        raise OpContractError(f"{where}: attention の軸 0（B）が不一致 {show}")
-    # MUST: k / v の Hkv は**完全一致**（GQA で緩めるのは q との関係だけ — ADR 0067 決定 1）。
+        raise OpContractError(f"{where}: attention axis 0 (B) mismatch {show}")
+    # MUST: the Hkv of k / v **matches exactly** (GQA loosens only the relation to q — ADR 0067
+    # decision 1).
     if k[1] != v[1]:
-        raise OpContractError(f"{where}: attention の Hkv（k / v の軸 1）が不一致 {show}")
+        raise OpContractError(f"{where}: attention Hkv (axis 1 of k / v) mismatch {show}")
     _assert_kv_head_broadcast(q[1], k[1], where, show)
     if q[3] != k[3] or q[3] != v[3]:
-        raise OpContractError(f"{where}: attention の D（軸 3）が不一致 {show}")
+        raise OpContractError(f"{where}: attention D (axis 3) mismatch {show}")
     if slots.referenced:
         return _attention_states(q, k, v, rest, where, attrs, slots, show)
     if k[2] != v[2]:
-        raise OpContractError(f"{where}: attention の N（k / v の軸 2）が不一致 {show}")
-    # 空軸の softmax は amax の identity が定義できない。記号次元が 0 になるかは束縛次第なので、
-    # ここで決められるのは定数次元だけ（残りはランタイム側の層 — モジュール docstring）。
+        raise OpContractError(f"{where}: attention N (axis 2 of k / v) mismatch {show}")
+    # softmax over an empty axis has no definable amax identity. Whether a symbolic dimension
+    # becomes 0 depends on the binding, so only constant dimensions can be decided here (the rest is
+    # the runtime-side layer — module docstring).
     if k[2].is_value(0):
-        raise OpContractError(f"{where}: attention は長さ 0 の N を縮約できない {show}")
+        raise OpContractError(f"{where}: attention cannot reduce an N of length 0 {show}")
     if rest:
         mask = rest[0]
         if len(mask) != 4 or not mask[0].is_value(1) or not mask[1].is_value(1):
-            raise OpContractError(
-                f"{where}: attention の mask は [1,1,M,N] のみ（[{_show(mask)}]）"
-            )
+            raise OpContractError(f"{where}: attention mask must be [1,1,M,N] ([{_show(mask)}])")
         if mask[2] != q[2] or mask[3] != k[2]:
             raise OpContractError(
-                f"{where}: attention の mask [{_show(mask)}] の M / N が q / k と不一致 {show}"
+                f"{where}: attention mask [{_show(mask)}] M / N do not match q / k {show}"
             )
     return list(q)
 
@@ -1006,43 +1112,50 @@ def _attention(
 def _cumsum(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
     shape = ins[0]
     dim = cumsum_dim(attrs, where)
-    # MUST: 最終次元以外は受理しない（softmax と同じ理由 — 行カーネルは縮約軸が連続で
-    # あることを前提にしていて、通せば黙って別の軸を畳む）。
+    # MUST: nothing but the last dimension is accepted (the same reason as softmax — the row
+    # kernel assumes the reduced axis is contiguous, and letting it through would silently fold a
+    # different axis).
     if len(shape) < 1 or dim != len(shape) - 1:
         raise OpContractError(
-            f"{where}: cumsum は最終次元のみ（attrs.dim={dim} / 入力 [{_show(shape)}]）"
+            f"{where}: cumsum accepts only the last dimension"
+            f" (attrs.dim={dim} / input [{_show(shape)}])"
         )
-    # 長さ 0 の軸は素通し（前縁和の identity は 0 — amax / softmax と違って定義できる）。
+    # An axis of length 0 passes through (the identity of a prefix sum is 0 — unlike amax /
+    # softmax, it can be defined).
     return list(shape)
 
 
 def _embedding(ins: list[list[Extent]], where: str) -> list[Extent]:
     weight, index = ins
     if len(weight) != 2:
-        raise OpContractError(f"{where}: embedding の weight は rank-2 [V,H]: [{_show(weight)}]")
+        raise OpContractError(f"{where}: embedding weight must be rank-2 [V,H]: [{_show(weight)}]")
     if len(index) < 1:
-        raise OpContractError(f"{where}: embedding の index は rank 1 以上（スカラ添字は無い）")
-    # 添字の値域 0 <= index < V は実行時データ依存なので shape 契約では見ない。
+        raise OpContractError(
+            f"{where}: embedding index must be rank 1 or more (there is no scalar index)"
+        )
+    # The index range 0 <= index < V depends on run-time data, so the shape contract does not
+    # check it.
     return [*index, weight[1]]
 
 
 def _masked_fill(ins: list[list[Extent]], where: str) -> list[Extent]:
     x, mask = ins
-    assert_strided_rank(len(x), "masked_fill の x", where)
-    assert_strided_rank(len(mask), "masked_fill の mask", where)
-    # MUST: 出力は**常に x と同形**（mask 側は右詰め broadcast で読むだけ）。broadcast を
-    # そのまま使うと mask が x を広げる形まで通り、埋め値が本来無い要素へ漏れる。
+    assert_strided_rank(len(x), "masked_fill x", where)
+    assert_strided_rank(len(mask), "masked_fill mask", where)
+    # MUST: the output **always has x's shape** (the mask side is only read with right-aligned
+    # broadcast). Using broadcast as is would also let through forms where the mask widens x, and
+    # the fill value would leak into elements that do not exist.
     if len(mask) > len(x):
         raise OpContractError(
-            f"{where}: masked_fill の mask rank {len(mask)} が x rank {len(x)} を超える"
-            "（mask は右詰め broadcast のみ）"
+            f"{where}: masked_fill mask rank {len(mask)} exceeds x rank {len(x)}"
+            " (mask broadcasts right-aligned only)"
         )
     offset = len(x) - len(mask)
     for index, extent in enumerate(mask):
         if not extent.is_value(1) and extent != x[offset + index]:
             raise OpContractError(
-                f"{where}: masked_fill の mask [{_show(mask)}] が x [{_show(x)}] へ"
-                f" 右詰め broadcast できない（次元 {index}）"
+                f"{where}: masked_fill mask [{_show(mask)}] cannot be broadcast"
+                f" right-aligned to x [{_show(x)}] (dimension {index})"
             )
     return list(x)
 
@@ -1052,37 +1165,40 @@ def _conv1d(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> li
     stride, padding, dilation, groups = conv1d_attrs(attrs, where)
     if len(x) != 3 or len(weight) != 3 or len(bias) != 1:
         raise OpContractError(
-            f"{where}: conv1d は x[B,Cin,L] / W[Cout,Cin/groups,K] / b[Cout]（rank 3 / 3 / 1）:"
+            f"{where}: conv1d expects x[B,Cin,L] / W[Cout,Cin/groups,K] / b[Cout] (rank 3 / 3 / 1):"
             f" [{_show(x)}] / [{_show(weight)}] / [{_show(bias)}]"
         )
     channels_in = x[1]
     channels_out, weight_in, kernel = weight
-    # MUST: チャネル軸は静的（記号 Cin/Cout は実測に無く、groups の割り切りを判定できない）。
+    # MUST: the channel axes are static (symbolic Cin/Cout has not been observed, and whether groups
+    # divides them cannot be decided).
     if not channels_in.is_const or not channels_out.is_const:
         raise OpContractError(
-            f"{where}: conv1d のチャネル軸 {channels_in.to_dim()} / {channels_out.to_dim()} が"
-            " 記号（groups の割り切りを判定できない）"
+            f"{where}: conv1d channel axes {channels_in.to_dim()} / {channels_out.to_dim()} are"
+            " symbolic (cannot decide whether groups divides them)"
         )
-    # MUST: グループ分割は両側で割り切れることが契約（depthwise は groups = Cin = Cout）。
+    # MUST: the group split must divide on both sides; that is the contract (depthwise is
+    # groups = Cin = Cout).
     if channels_in.offset % groups != 0 or channels_out.offset % groups != 0:
         raise OpContractError(
-            f"{where}: conv1d の groups {groups} が Cin {channels_in.offset} /"
-            f" Cout {channels_out.offset} を割り切らない"
+            f"{where}: conv1d groups {groups} does not divide Cin {channels_in.offset} /"
+            f" Cout {channels_out.offset}"
         )
     if not weight_in.is_value(channels_in.offset // groups):
         raise OpContractError(
-            f"{where}: conv1d の重みは [Cout, Cin/groups, K]"
-            f"（Cin/groups = {channels_in.offset // groups}）のはずが [{_show(weight)}]"
-            f"（x は [{_show(x)}] / groups {groups}）"
+            f"{where}: conv1d weight should be [Cout, Cin/groups, K]"
+            f" (Cin/groups = {channels_in.offset // groups}) but is [{_show(weight)}]"
+            f" (x is [{_show(x)}] / groups {groups})"
         )
     if bias[0] != channels_out:
         raise OpContractError(
-            f"{where}: conv1d の bias 長 {bias[0].to_dim()} が"
-            f" 出力チャネル {channels_out.to_dim()} と違う"
+            f"{where}: conv1d bias length {bias[0].to_dim()} differs from"
+            f" the output channels {channels_out.to_dim()}"
         )
     if not kernel.is_const:
         raise OpContractError(
-            f"{where}: conv1d のカーネル長 {kernel.to_dim()} が記号（出力長を決められない）"
+            f"{where}: conv1d kernel length {kernel.to_dim()} is symbolic"
+            " (the output length cannot be determined)"
         )
     return [
         x[0],
@@ -1092,120 +1208,125 @@ def _conv1d(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> li
 
 
 def _conv2d(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
-    """conv2d の出力 shape（ADR 0017）。
+    """The output shape of conv2d (ADR 0017).
 
-    MUST: 重みは **[Cout, Cin/groups, Kh, Kw]** で、Kh と Kw の**順**も契約。要素数が合う
-    取り違え（Cout と Cin/groups の入れ替え / Kh と Kw の入れ替え）は対称な形では素通り
-    するので、適合表は Cin ≠ Cout・Kh ≠ Kw の非対称形を持つ（conv_transpose1d の教訓）。
-    MUST: 空間 2 軸は同じ一般形を**独立に**適用する（H と W をまとめて 1 本にしない）。
+    MUST: the weight is **[Cout, Cin/groups, Kh, Kw]**, and the **order** of Kh and Kw is part of
+    the contract. A mix-up with a matching element count (Cout and Cin/groups swapped / Kh and Kw
+    swapped) slips through on symmetric forms, so the conformance table has asymmetric forms with
+    Cin ≠ Cout and Kh ≠ Kw (the lesson of conv_transpose1d).
+    MUST: the two spatial axes apply the same general form **independently** (H and W are not
+    folded into one).
     """
     x, weight, bias = ins
     stride, padding, dilation, groups = conv2d_attrs(attrs, where)
     if len(x) != 4 or len(weight) != 4 or len(bias) != 1:
         raise OpContractError(
-            f"{where}: conv2d は x[B,Cin,H,W] / W[Cout,Cin/groups,Kh,Kw] / b[Cout]"
-            f"（rank 4 / 4 / 1）: [{_show(x)}] / [{_show(weight)}] / [{_show(bias)}]"
+            f"{where}: conv2d expects x[B,Cin,H,W] / W[Cout,Cin/groups,Kh,Kw] / b[Cout]"
+            f" (rank 4 / 4 / 1): [{_show(x)}] / [{_show(weight)}] / [{_show(bias)}]"
         )
     channels_in = x[1]
     channels_out, weight_in, kernel_h, kernel_w = weight
-    # MUST: チャネル軸は静的（記号 Cin/Cout は実測に無く、groups の割り切りを判定できない）。
+    # MUST: the channel axes are static (symbolic Cin/Cout has not been observed, and whether groups
+    # divides them cannot be decided).
     if not channels_in.is_const or not channels_out.is_const:
         raise OpContractError(
-            f"{where}: conv2d のチャネル軸 {channels_in.to_dim()} / {channels_out.to_dim()} が"
-            " 記号（groups の割り切りを判定できない）"
+            f"{where}: conv2d channel axes {channels_in.to_dim()} / {channels_out.to_dim()} are"
+            " symbolic (cannot decide whether groups divides them)"
         )
     if channels_in.offset % groups != 0 or channels_out.offset % groups != 0:
         raise OpContractError(
-            f"{where}: conv2d の groups {groups} が Cin {channels_in.offset} /"
-            f" Cout {channels_out.offset} を割り切らない"
+            f"{where}: conv2d groups {groups} does not divide Cin {channels_in.offset} /"
+            f" Cout {channels_out.offset}"
         )
     if not weight_in.is_value(channels_in.offset // groups):
         raise OpContractError(
-            f"{where}: conv2d の重みは [Cout, Cin/groups, Kh, Kw]"
-            f"（Cin/groups = {channels_in.offset // groups}）のはずが [{_show(weight)}]"
-            f"（x は [{_show(x)}] / groups {groups}）"
+            f"{where}: conv2d weight should be [Cout, Cin/groups, Kh, Kw]"
+            f" (Cin/groups = {channels_in.offset // groups}) but is [{_show(weight)}]"
+            f" (x is [{_show(x)}] / groups {groups})"
         )
     if bias[0] != channels_out:
         raise OpContractError(
-            f"{where}: conv2d の bias 長 {bias[0].to_dim()} が"
-            f" 出力チャネル {channels_out.to_dim()} と違う"
+            f"{where}: conv2d bias length {bias[0].to_dim()} differs from"
+            f" the output channels {channels_out.to_dim()}"
         )
     for name, kernel in (("Kh", kernel_h), ("Kw", kernel_w)):
         if not kernel.is_const:
             raise OpContractError(
-                f"{where}: conv2d のカーネル長 {name} {kernel.to_dim()} が記号"
-                "（出力長を決められない）"
+                f"{where}: conv2d kernel length {name} {kernel.to_dim()} is symbolic"
+                " (the output length cannot be determined)"
             )
     return [
         x[0],
         channels_out,
-        _conv_length(
-            "conv2d の H", x[2], kernel_h.offset, stride[0], padding[0], dilation[0], where
-        ),
-        _conv_length(
-            "conv2d の W", x[3], kernel_w.offset, stride[1], padding[1], dilation[1], where
-        ),
+        _conv_length("conv2d H", x[2], kernel_h.offset, stride[0], padding[0], dilation[0], where),
+        _conv_length("conv2d W", x[3], kernel_w.offset, stride[1], padding[1], dilation[1], where),
     ]
 
 
 def _conv3d(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
-    """conv3d の出力 shape（ADR 0118 決定 1 — **unbatched**）。
+    """The output shape of conv3d (ADR 0118 decision 1 — **unbatched**).
 
-    MUST: x は rank 4 の [Cin, T, H, W] だけ。batched の rank 5 を受けると先頭軸を Cin と読む
-    取り違えが要素数の合う形で素通りしうる（契約に batched 形は無い）。
-    MUST: 重みは **[Cout, Cin/groups, Kt, Kh, Kw]** で、Kt・Kh・Kw の**順**も契約。適合表は
-    Cin ≠ Cout・Kt ≠ Kh ≠ Kw の非対称形を持つ（取り違えると出力形が変わる形）。
-    MUST: カーネル長 0 は出力長式より前に落とす（`dilation·(K−1)` が負に転んで出力が入力より
-    長くなる — ランタイムの params 層は正整数として落とすので、ここが抜けると受理集合が割れる）。
-    MUST: 3 軸は同じ一般形を**独立に**適用する（{@link _conv_length} を軸ごとに呼ぶ）。
+    MUST: x is rank 4 [Cin, T, H, W] only. Accepting batched rank 5 could let a mix-up that reads
+    the leading axis as Cin slip through with a matching element count (the contract has no
+    batched form).
+    MUST: the weight is **[Cout, Cin/groups, Kt, Kh, Kw]**, and the **order** of Kt, Kh and Kw is
+    part of the contract. The conformance table has asymmetric forms with Cin ≠ Cout and
+    Kt ≠ Kh ≠ Kw (forms whose output shape changes under a mix-up).
+    MUST: a kernel length of 0 fails before the output length formula (`dilation·(K−1)` turns
+    negative and the output becomes longer than the input — the runtime's params layer rejects it
+    as a positive integer, so if this check were missing the accepted set would split).
+    MUST: the three axes apply the same general form **independently** ({@link _conv_length} is
+    called per axis).
     """
     x, weight, bias = ins
     stride, padding, dilation, groups = conv3d_attrs(attrs, where)
     if len(x) != 4 or len(weight) != 5 or len(bias) != 1:
         raise OpContractError(
-            f"{where}: conv3d は x[Cin,T,H,W] / W[Cout,Cin/groups,Kt,Kh,Kw] / b[Cout]"
-            f"（rank 4 / 5 / 1 — x は unbatched）:"
+            f"{where}: conv3d expects x[Cin,T,H,W] / W[Cout,Cin/groups,Kt,Kh,Kw] / b[Cout]"
+            f" (rank 4 / 5 / 1 — x is unbatched):"
             f" [{_show(x)}] / [{_show(weight)}] / [{_show(bias)}]"
         )
     channels_in = x[0]
     channels_out, weight_in, *kernels = weight
-    # MUST: チャネル軸は静的（記号 Cin/Cout は実測に無く、groups の割り切りを判定できない）。
+    # MUST: the channel axes are static (symbolic Cin/Cout has not been observed, and whether groups
+    # divides them cannot be decided).
     if not channels_in.is_const or not channels_out.is_const:
         raise OpContractError(
-            f"{where}: conv3d のチャネル軸 {channels_in.to_dim()} / {channels_out.to_dim()} が"
-            " 記号（groups の割り切りを判定できない）"
+            f"{where}: conv3d channel axes {channels_in.to_dim()} / {channels_out.to_dim()} are"
+            " symbolic (cannot decide whether groups divides them)"
         )
     if channels_in.offset % groups != 0 or channels_out.offset % groups != 0:
         raise OpContractError(
-            f"{where}: conv3d の groups {groups} が Cin {channels_in.offset} /"
-            f" Cout {channels_out.offset} を割り切らない"
+            f"{where}: conv3d groups {groups} does not divide Cin {channels_in.offset} /"
+            f" Cout {channels_out.offset}"
         )
     if not weight_in.is_value(channels_in.offset // groups):
         raise OpContractError(
-            f"{where}: conv3d の重みは [Cout, Cin/groups, Kt, Kh, Kw]"
-            f"（Cin/groups = {channels_in.offset // groups}）のはずが [{_show(weight)}]"
-            f"（x は [{_show(x)}] / groups {groups}）"
+            f"{where}: conv3d weight should be [Cout, Cin/groups, Kt, Kh, Kw]"
+            f" (Cin/groups = {channels_in.offset // groups}) but is [{_show(weight)}]"
+            f" (x is [{_show(x)}] / groups {groups})"
         )
     if bias[0] != channels_out:
         raise OpContractError(
-            f"{where}: conv3d の bias 長 {bias[0].to_dim()} が"
-            f" 出力チャネル {channels_out.to_dim()} と違う"
+            f"{where}: conv3d bias length {bias[0].to_dim()} differs from"
+            f" the output channels {channels_out.to_dim()}"
         )
     for name, kernel in zip(("Kt", "Kh", "Kw"), kernels, strict=True):
         if not kernel.is_const:
             raise OpContractError(
-                f"{where}: conv3d のカーネル長 {name} {kernel.to_dim()} が記号"
-                "（出力長を決められない）"
+                f"{where}: conv3d kernel length {name} {kernel.to_dim()} is symbolic"
+                " (the output length cannot be determined)"
             )
         if kernel.offset < 1:
             raise OpContractError(
-                f"{where}: conv3d のカーネル長 {name} は正整数（重み [{_show(weight)}]）"
+                f"{where}: conv3d kernel length {name} must be a positive integer"
+                f" (weight [{_show(weight)}])"
             )
     return [
         channels_out,
         *(
             _conv_length(
-                f"conv3d の {label}",
+                f"conv3d {label}",
                 x[1 + axis],
                 kernels[axis].offset,
                 stride[axis],
@@ -1227,33 +1348,37 @@ def _conv_length(
     dilation: int,
     where: str,
 ) -> Extent:
-    """出力長 `floor((L + 2P - D*(K-1) - 1) / S) + 1`（ADR 0015 の dilation 一般形）。
+    """The output length `floor((L + 2P - D*(K-1) - 1) / S) + 1` (the general form with dilation of
+    ADR 0015).
 
-    conv1d / conv2d / conv3d の各軸が**同じ規則**なので 1 本に共有する（`label` は診断の主語）。
-    記号長のときは一次式のまま割る: `L = c·s + o` で `c % S == 0` なら
-    `floor((c·s + o') / S) = (c/S)·s + floor(o'/S)` が厳密に成立する（c·s は S の倍数）。
-    割り切れない形は正準文法（1 次元 1 シンボルの一次式）に載らない — 黙って近似せず落とす
-    （torch 側も同じ理由で shape 式を作れないので、実際にはここへ来る前に落ちる）。
+    Every axis of conv1d / conv2d / conv3d follows **the same rule**, so one function is shared
+    (`label` is the subject of the diagnostic). For a symbolic length the division stays linear:
+    with `L = c·s + o` and `c % S == 0`, `floor((c·s + o') / S) = (c/S)·s + floor(o'/S)` holds
+    exactly (c·s is a multiple of S). A form that does not divide does not fit the canonical
+    grammar (a linear expression with one symbol per dimension) — it fails instead of being
+    silently approximated (torch cannot build the shape expression either, for the same reason, so
+    in practice it fails before reaching here).
     """
     span_end = dilation * (kernel - 1) + 1
     span = length.offset + 2 * padding - span_end
     if length.is_const:
         if span < 0:
             raise OpContractError(
-                f"{where}: {label} の入力長 {length.offset}（padding {padding}）が"
-                f" dilation {dilation} 込みのカーネル張り {span_end} に足りない"
+                f"{where}: {label} input length {length.offset} (padding {padding}) is shorter"
+                f" than the kernel span with dilation {dilation}: {span_end}"
             )
         return Extent(coeff=0, sym=None, offset=span // stride + 1)
     if length.coeff % stride != 0:
         raise OpContractError(
-            f"{where}: {label} の記号入力長 {length.to_dim()} と stride {stride} の組は"
-            " 出力長が一次式にならない（正準文法に載らない）"
+            f"{where}: {label} symbolic input length {length.to_dim()} with stride {stride}"
+            " does not give a linear output length (it does not fit the canonical grammar)"
         )
     offset = span // stride + 1
     if offset < 0:
         raise OpContractError(
-            f"{where}: {label} の出力長 {length.to_dim()}（K={kernel} / P={padding} /"
-            f" S={stride} / D={dilation}）のオフセット {offset} が負（正準文法に載らない）"
+            f"{where}: {label} output length for {length.to_dim()} (K={kernel} / P={padding} /"
+            f" S={stride} / D={dilation}) has a negative offset {offset} (it does not fit the"
+            " canonical grammar)"
         )
     return Extent(coeff=length.coeff // stride, sym=length.sym, offset=offset)
 
@@ -1261,45 +1386,48 @@ def _conv_length(
 def _conv_transpose1d(
     ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]
 ) -> list[Extent]:
-    """conv_transpose1d の出力 shape（ADR 0015）。
+    """The output shape of conv_transpose1d (ADR 0015).
 
-    MUST: 重みは **[Cin, Cout, K]**（conv1d と転置）。取り違えても要素数が合う形が作れて
-    shape 検査を素通りするため、テストは非対称チャネル数で固定する。
-    MUST: 受理するのは出力長がちょうど `L·stride` になる形（`2P == K - S`）だけ。一般形
-    `(L-1)·S - 2P + K` は見送り（実測 5 本が全てこの形 — 需要が出たら広げる）。
+    MUST: the weight is **[Cin, Cout, K]** (transposed relative to conv1d). A mix-up can produce a
+    form with a matching element count that slips through the shape check, so the tests pin
+    asymmetric channel counts.
+    MUST: only forms whose output length is exactly `L·stride` (`2P == K - S`) are accepted. The
+    general form `(L-1)·S - 2P + K` is deferred (all five observed cases have this form — widened
+    when there is demand).
     """
     x, weight, bias = ins
     stride, padding = conv_transpose1d_attrs(attrs, where)
     if len(x) != 3 or len(weight) != 3 or len(bias) != 1:
         raise OpContractError(
-            f"{where}: conv_transpose1d は x[B,Cin,L] / W[Cin,Cout,K] / b[Cout]"
-            f"（rank 3 / 3 / 1）: [{_show(x)}] / [{_show(weight)}] / [{_show(bias)}]"
+            f"{where}: conv_transpose1d expects x[B,Cin,L] / W[Cin,Cout,K] / b[Cout]"
+            f" (rank 3 / 3 / 1): [{_show(x)}] / [{_show(weight)}] / [{_show(bias)}]"
         )
     channels_in = x[1]
     weight_in, channels_out, kernel = weight
     if weight_in != channels_in:
         raise OpContractError(
-            f"{where}: conv_transpose1d の重みは [Cin, Cout, K]"
-            f"（Cin = {channels_in.to_dim()}）のはずが [{_show(weight)}]（x は [{_show(x)}]）"
+            f"{where}: conv_transpose1d weight should be [Cin, Cout, K]"
+            f" (Cin = {channels_in.to_dim()}) but is [{_show(weight)}] (x is [{_show(x)}])"
         )
     if bias[0] != channels_out:
         raise OpContractError(
-            f"{where}: conv_transpose1d の bias 長 {bias[0].to_dim()} が"
-            f" 出力チャネル {channels_out.to_dim()} と違う"
+            f"{where}: conv_transpose1d bias length {bias[0].to_dim()} differs from"
+            f" the output channels {channels_out.to_dim()}"
         )
     if not kernel.is_const:
         raise OpContractError(
-            f"{where}: conv_transpose1d のカーネル長 {kernel.to_dim()} が記号"
-            "（出力長を決められない）"
+            f"{where}: conv_transpose1d kernel length {kernel.to_dim()} is symbolic"
+            " (the output length cannot be determined)"
         )
     if 2 * padding != kernel.offset - stride:
         raise OpContractError(
-            f"{where}: conv_transpose1d は 2·padding == K - stride の形のみ受理"
-            f"（K {kernel.offset} / stride {stride} / padding {padding} —"
-            " 出力長が L·stride にならない）"
+            f"{where}: conv_transpose1d accepts only the form 2·padding == K - stride"
+            f" (K {kernel.offset} / stride {stride} / padding {padding} —"
+            " otherwise the output length is not L·stride)"
         )
     length = x[2]
-    # 出力長 = L·stride。記号長は係数もオフセットも stride 倍（一次式のまま正準文法に載る）。
+    # Output length = L·stride. For a symbolic length both the coefficient and the offset are
+    # multiplied by stride (it stays linear and fits the canonical grammar).
     if length.is_const:
         out_length = Extent(coeff=0, sym=None, offset=length.offset * stride)
     else:
@@ -1310,97 +1438,105 @@ def _conv_transpose1d(
 
 
 def _deform_conv2d(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
-    """deform_conv2d の出力 shape（第 1' 層・ADR 0055）。
+    """The output shape of deform_conv2d (extended atomic layer, the old layer 1'; ADR 0055).
 
-    MUST: 重みは **[Cout, Cin, Kh, Kw]**（groups の欄が無い = 1 固定なので第 2 軸は Cin
-    そのもの）。取り違えは要素数が合う形が作れるので、適合表は Cin != Cout・Kh != Kw の
-    非対称形を持つ（conv2d と同じ教訓）。
-    MUST: 出力空間は x + weight + padding から**導き**、offset / mask とは突き合わせるだけ。
-    offset 側から Hout を取ると「offset だけ形が違う IR」が素通りする。
+    MUST: the weight is **[Cout, Cin, Kh, Kw]** (no groups field = fixed at 1, so the second axis is
+    Cin itself). A mix-up can produce a form with a matching element count, so the conformance table
+    has asymmetric forms with Cin != Cout and Kh != Kw (the same lesson as conv2d).
+    MUST: the output spatial size is **derived** from x + weight + padding and only matched against
+    offset / mask. Taking Hout from the offset side would let "IR where only offset has a different
+    shape" slip through.
     """
     x, weight, offset, mask, bias = ins
     padding = deform_conv2d_attrs(attrs, where)
     if len(x) != 4 or len(weight) != 4 or len(offset) != 4 or len(mask) != 4 or len(bias) != 1:
         raise OpContractError(
-            f"{where}: deform_conv2d は x[B,Cin,H,W] / W[Cout,Cin,Kh,Kw] /"
+            f"{where}: deform_conv2d expects x[B,Cin,H,W] / W[Cout,Cin,Kh,Kw] /"
             " offset[B,2*Kh*Kw,Hout,Wout] / mask[B,Kh*Kw,Hout,Wout] / b[Cout]"
-            f"（rank 4/4/4/4/1）: [{_show(x)}] / [{_show(weight)}] / [{_show(offset)}] /"
+            f" (rank 4/4/4/4/1): [{_show(x)}] / [{_show(weight)}] / [{_show(offset)}] /"
             f" [{_show(mask)}] / [{_show(bias)}]"
         )
     channels_in = x[1]
     channels_out, weight_in, kernel_h, kernel_w = weight
     if weight_in != channels_in:
         raise OpContractError(
-            f"{where}: deform_conv2d の重みは [Cout, Cin, Kh, Kw]"
-            f"（Cin = {channels_in.to_dim()}）のはずが [{_show(weight)}]（x は [{_show(x)}]）"
+            f"{where}: deform_conv2d weight should be [Cout, Cin, Kh, Kw]"
+            f" (Cin = {channels_in.to_dim()}) but is [{_show(weight)}] (x is [{_show(x)}])"
         )
     if bias[0] != channels_out:
         raise OpContractError(
-            f"{where}: deform_conv2d の bias 長 {bias[0].to_dim()} が"
-            f" 出力チャネル {channels_out.to_dim()} と違う"
+            f"{where}: deform_conv2d bias length {bias[0].to_dim()} differs from"
+            f" the output channels {channels_out.to_dim()}"
         )
     for name, kernel in (("Kh", kernel_h), ("Kw", kernel_w)):
         if not kernel.is_const:
             raise OpContractError(
-                f"{where}: deform_conv2d のカーネル長 {name} {kernel.to_dim()} が記号"
-                "（出力長を決められない）"
+                f"{where}: deform_conv2d kernel length {name} {kernel.to_dim()} is symbolic"
+                " (the output length cannot be determined)"
             )
-    # stride / dilation の欄が無い = 1 固定なので、conv 族の一般形をその値で共有する。
-    height_out = _conv_length("deform_conv2d の H", x[2], kernel_h.offset, 1, padding[0], 1, where)
-    width_out = _conv_length("deform_conv2d の W", x[3], kernel_w.offset, 1, padding[1], 1, where)
+    # No stride / dilation field = fixed at 1, so the conv family's general form is shared with
+    # those values.
+    height_out = _conv_length("deform_conv2d H", x[2], kernel_h.offset, 1, padding[0], 1, where)
+    width_out = _conv_length("deform_conv2d W", x[3], kernel_w.offset, 1, padding[1], 1, where)
     taps = kernel_h.offset * kernel_w.offset
     for name, shape, channels in (("offset", offset, 2 * taps), ("mask", mask, taps)):
         expected = [x[0], Extent(coeff=0, sym=None, offset=channels), height_out, width_out]
         if shape != expected:
             raise OpContractError(
-                f"{where}: deform_conv2d の {name} は [{_show(expected)}]"
-                f"（offset_groups = 1）のはずが [{_show(shape)}]"
+                f"{where}: deform_conv2d {name} should be [{_show(expected)}]"
+                f" (offset_groups = 1) but is [{_show(shape)}]"
             )
     return [x[0], channels_out, height_out, width_out]
 
 
 def _gru_scan(contract: OpContract, ins: list[list[Extent]], where: str) -> list[Extent]:
-    """gru_scan / gru_scan_reverse の出力 shape（第 2 層・ADR 0056）。
+    """The output shape of gru_scan / gru_scan_reverse (extended composite layer, the old layer 2;
+    ADR 0056).
 
-    `gi[T,N,3H]` / `h0[N,H]` / `W_hh[3H,H]` / `b_hh[3H]` -> `y[T,N,H]`。**時間軸 T は記号の
-    まま素通りする**（この op の存在理由 — 分解形は T 回展開されて記号を失う）。
+    `gi[T,N,3H]` / `h0[N,H]` / `W_hh[3H,H]` / `b_hh[3H]` -> `y[T,N,H]`. **The time axis T passes
+    through as a symbol** (the reason this op exists — the decomposed form is unrolled T times and
+    loses the symbol).
 
-    MUST: 隠れ幅の正本は **h0 の最終次元 1 か所**。gi / W_hh / b_hh とは突き合わせるだけで、
-    同じ事実を 2 か所から取ると 3H と H の取り違えが素通りする形が作れる。
-    MUST: H は静的（記号だと 3·H を次元言語で組めない — conv 族のチャネル軸と同じ絞り）。
-    バッチ N と時間 T は記号でよい（構造等値で突き合わせるだけで算術が要らない）。
+    MUST: the single source of truth for the hidden width is **h0's last dimension**. gi / W_hh /
+    b_hh are only matched against it; taking the same fact from two places would allow a form where
+    a 3H / H mix-up slips through.
+    MUST: H is static (a symbolic H cannot build 3·H in the dimension language — the same narrowing
+    as the channel axes of the conv family). Batch N and time T may be symbolic (they are only
+    matched by structural equality and need no arithmetic).
     """
     gi, initial, weight, bias = ins
     if len(gi) != 3 or len(initial) != 2 or len(weight) != 2 or len(bias) != 1:
         raise OpContractError(
-            f"{where}: {contract.name} は gi[T,N,3H] / h0[N,H] / W_hh[3H,H] / b_hh[3H]"
-            f"（rank 3/2/2/1）: [{_show(gi)}] / [{_show(initial)}] / [{_show(weight)}] /"
+            f"{where}: {contract.name} expects gi[T,N,3H] / h0[N,H] / W_hh[3H,H] / b_hh[3H]"
+            f" (rank 3/2/2/1): [{_show(gi)}] / [{_show(initial)}] / [{_show(weight)}] /"
             f" [{_show(bias)}]"
         )
     hidden = initial[1]
     if not hidden.is_const:
         raise OpContractError(
-            f"{where}: {contract.name} の隠れ幅 {hidden.to_dim()} が記号（3·H を次元式で組めない）"
+            f"{where}: {contract.name} hidden width {hidden.to_dim()} is symbolic"
+            " (3·H cannot be built as a dimension expression)"
         )
     if gi[1] != initial[0]:
         raise OpContractError(
-            f"{where}: {contract.name} のバッチが gi [{_show(gi)}] と"
-            f" h0 [{_show(initial)}] で不一致"
+            f"{where}: {contract.name} batch differs between gi [{_show(gi)}] and"
+            f" h0 [{_show(initial)}]"
         )
     gates = Extent(coeff=0, sym=None, offset=3 * hidden.offset)
     if gi[2] != gates:
         raise OpContractError(
-            f"{where}: {contract.name} の gi の最終次元 {gi[2].to_dim()} が"
-            f" 3·H = {gates.offset} でない（ゲートは r / z / n の 3 本）"
+            f"{where}: {contract.name} gi last dimension {gi[2].to_dim()} is not"
+            f" 3·H = {gates.offset} (the gates are r / z / n, three in all)"
         )
     if weight != [gates, hidden]:
         raise OpContractError(
-            f"{where}: {contract.name} の W_hh は [{_show([gates, hidden])}] のはずが"
+            f"{where}: {contract.name} W_hh should be [{_show([gates, hidden])}] but is"
             f" [{_show(weight)}]"
         )
     if bias[0] != gates:
         raise OpContractError(
-            f"{where}: {contract.name} の b_hh 長 {bias[0].to_dim()} が 3·H = {gates.offset} と違う"
+            f"{where}: {contract.name} b_hh length {bias[0].to_dim()} differs from"
+            f" 3·H = {gates.offset}"
         )
     return [gi[0], gi[1], hidden]
 
@@ -1408,25 +1544,28 @@ def _gru_scan(contract: OpContract, ins: list[list[Extent]], where: str) -> list
 def _upsample_bilinear2d(
     ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]
 ) -> list[Extent]:
-    """upsample_bilinear2d の出力 shape（第 1 層・align_corners=True 専業）。
+    """The output shape of upsample_bilinear2d (Core ATen layer, the old layer 1;
+    align_corners=True only).
 
-    出力空間は attrs `output_size` がそのまま決める（入力の H/W は倍率の分母としてしか
-    効かない）ので、**入力の空間軸は記号でもよい**。B / C は素通り。
+    The output spatial size is set directly by attrs `output_size` (the input H/W only act as the
+    denominator of the scale factor), so **the input spatial axes may be symbolic**. B / C pass
+    through.
 
-    MUST: 長さ 0 の空間軸を通さない。scale は `(in - 1) / (out - 1)` なので in = 0 は負の
-    scale になり、読み出しが入力の外へ出る（記号長は束縛次第なので TS 側が実行前に見る）。
+    MUST: spatial axes of length 0 do not pass. The scale is `(in - 1) / (out - 1)`, so in = 0 gives
+    a negative scale and reads go outside the input (a symbolic length depends on the binding, so
+    the TS side checks it before execution).
     """
     x = ins[0]
     output_size = upsample_bilinear2d_attrs(attrs, where)
     if len(x) != 4:
         raise OpContractError(
-            f"{where}: upsample_bilinear2d は x[B,C,H,W]（rank 4）のみ: [{_show(x)}]"
+            f"{where}: upsample_bilinear2d accepts only x[B,C,H,W] (rank 4): [{_show(x)}]"
         )
     for name, axis in (("H", 2), ("W", 3)):
         if x[axis].is_value(0):
             raise OpContractError(
-                f"{where}: upsample_bilinear2d は長さ 0 の空間軸 {name} を補間できない"
-                f"（[{_show(x)}]）"
+                f"{where}: upsample_bilinear2d cannot interpolate a spatial axis {name} of"
+                f" length 0 ([{_show(x)}])"
             )
     return [
         x[0],
@@ -1436,38 +1575,42 @@ def _upsample_bilinear2d(
     ]
 
 
-# ---- グラフ全体の突合 ------------------------------------------------------
+# ---- Matching the whole graph ---------------------------------------------
 
 
 def declared_shape(graph: IrGraph, name: str) -> list[IrDim]:
-    """値名 → 宣言 shape（入力は inputs[]、それ以外は values{}）。"""
+    """Value name → declared shape (inputs from inputs[], everything else from values{})."""
     for spec in graph.inputs:
         if spec.name == name:
             return spec.shape
     value = graph.values.get(name)
     if value is None:
-        raise OpContractError(f"値 '{name}' の dtype/shape 宣言が無い")
+        raise OpContractError(f"Value '{name}' has no dtype/shape declaration")
     return value.shape
 
 
 def assert_graph_shapes(graph: IrGraph) -> None:
-    """全ノードの出力 shape を契約から計算し、宣言（torch の meta 由来）と突き合わせる。
+    """Computes the output shapes of every node from the contracts and matches them against the
+    declarations (from torch's meta).
 
-    MUST: 宣言を正としない。torch が付けた shape をそのまま信じると、契約の規則
-    （gather の先行次元一致・conv1d の出力長・reshape の要素数など）と食い違う IR が
-    「宣言どおり」に書き出され、ランタイムの Session 構築まで表面化しない。
+    MUST: do not treat the declaration as correct. Trusting the shapes torch attached as they are
+    would write out IR that disagrees with the contract rules (gather's matching leading
+    dimensions, conv1d's output length, reshape's element count and so on) "as declared", and it
+    would not surface until Session construction in the runtime.
     """
-    # スロットの容量込み具体形は宣言 1 箇所（graph.states）から配る — TS 側は
-    # GenerationContext が解決した shape を渡す層に当たる（ADR 0067 決定 4）。
+    # The concrete slot shapes including the capacity are handed out from the one declaration
+    # (graph.states) — on the TS side this is the layer that passes the shapes the
+    # GenerationContext resolved (ADR 0067 decision 4).
     state_shapes = {name: slot.shape for name, slot in graph.states.items()}
     for index, node in enumerate(graph.nodes):
         where = f"graph.nodes[{index}] ({node.op})"
         contract = resolve_op_contract(node.op)
         ins = [declared_shape(graph, name) for name in node.ins]
         declared_outputs = [declared_shape(graph, name) for name in node.outs]
-        # NOTE: 目標形を要求する 2 op（reshape / expand）は単一出力なので、`declared` は
-        # slot 0 だけを渡す（多出力 op の shape は入力と attrs から導く — TS 側 plan.ts と同じ）。
-        # 出力 0 本の effect op（ADR 0067 決定 5）には slot 0 が無いので None を渡す。
+        # NOTE: the two ops that require a target shape (reshape / expand) are single-output, so
+        # `declared` gets slot 0 only (multi-output op shapes are derived from the inputs and
+        # attrs — the same as plan.ts on the TS side). An effect op with zero outputs (ADR 0067
+        # decision 5) has no slot 0, so None is passed.
         computed = compute_output_shape(
             contract,
             ins,
@@ -1477,16 +1620,17 @@ def assert_graph_shapes(graph: IrGraph) -> None:
             states=node.states,
             state_shapes=state_shapes,
         )
-        # MUST: 列長の一致をここで見る（本数が割れると 2 本目の出力が誰にも突き合わされない）。
+        # MUST: check here that the list lengths match (if the counts split, the second output
+        # would never be matched against anything).
         if len(computed) != len(declared_outputs):
             raise OpContractError(
-                f"{where}: 出力 shape の計算が {len(computed)} 本"
-                f"（宣言は {len(declared_outputs)} 本）"
+                f"{where}: output shape computation gave {len(computed)}"
+                f" (declared {len(declared_outputs)})"
             )
         for slot, declared in enumerate(declared_outputs):
             if extents(computed[slot], where) != extents(declared, where):
                 raise OpContractError(
-                    f"{where}: 出力 '{node.outs[slot]}' の計算 shape"
-                    f" [{','.join(str(dim) for dim in computed[slot])}] が"
-                    f" 宣言 [{','.join(str(dim) for dim in declared)}] と一致しない"
+                    f"{where}: output '{node.outs[slot]}' computed shape"
+                    f" [{','.join(str(dim) for dim in computed[slot])}] does not match"
+                    f" declared [{','.join(str(dim) for dim in declared)}]"
                 )

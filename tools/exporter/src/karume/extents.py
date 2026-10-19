@@ -1,18 +1,22 @@
-"""次元長の同一性判定 — 記号次元（`SymInt`）を guard 無しで突き合わせる 1 箇所。
+"""Identity check of dimension lengths — the one place that matches symbolic dimensions
+(`SymInt`) without guards.
 
-MUST: SymInt を `==` で比べない（shape をリストごと `==` で比べるのも同じ）— torch は
-**ヒント値**で真偽を決めるので、①別のシンボル同士でもヒントが同じなら `True` が返り
-②評価そのものが guard を積んで export 済みの制約へ後付けの特殊化を混ぜる（torch 2.13 実測:
-`[s97] == [s52]` は `True` を返し、以後 `s97` は `s52` へ置換される）。sympy の式は構造的等価で
-比べられるので、記号のまま突き合わせる。同一と**証明できない**組は「違う」に倒す
-（受理範囲を広げない側の誤り）。
+MUST: do not compare SymInts with `==` (the same goes for comparing whole shape lists with `==`) —
+torch decides the truth value by the **hint value**, so ① two different symbols with the same hint
+return `True`, and ② the evaluation itself adds a guard and mixes an after-the-fact specialisation
+into the exported constraints (observed on torch 2.13: `[s97] == [s52]` returns `True`, and `s97`
+is replaced by `s52` from then on). sympy expressions can be compared by structural equality, so
+they are matched as symbols. A pair that **cannot be proven** identical counts as "different" (an
+error on the side that does not widen the accepted range).
 
-MUST: `int()` も同じ理由で記号を含む次元へ掛けない（具体値へ黙って特殊化する）。ここが
-`free_symbols` を見てから int 化しているのはそのため。
+MUST: for the same reason, do not apply `int()` to a dimension that contains a symbol either (it
+silently specialises to a concrete value). That is why this module converts to int only after
+looking at `free_symbols`.
 
-置き場が `karume.dims` でないのは、あちらが TS 側 `format/dims.ts` と対になる**次元表記の
-文法**のモジュールで torch を 1 つも import しないため（`karume verify` / `karume dist` は
-export 台本の重い import を 1 つも読まずに起動する — `cli.py` の MUST）。
+It does not live in `karume.dims` because that module is the **grammar of dimension spellings**,
+the counterpart of `format/dims.ts` on the TS side, and imports nothing from torch (`karume verify`
+/ `karume dist` start without reading any of the heavy imports of the export scripts — the MUST in
+`cli.py`).
 """
 
 from __future__ import annotations
@@ -24,7 +28,8 @@ import torch
 
 
 def extent_key(dim: Any) -> Any:
-    """次元の同一性判定に使う鍵（記号は式そのもの、具体値は int）。"""
+    """The key used for the identity check of a dimension (a symbol is the expression itself, a
+    concrete value is an int)."""
     if isinstance(dim, torch.SymInt):
         expr = dim.node.expr
         return expr if expr.free_symbols else int(dim)
@@ -32,15 +37,17 @@ def extent_key(dim: Any) -> Any:
 
 
 def extent_keys(dims: Sequence[Any]) -> tuple[Any, ...]:
-    """shape（またはその一部）を鍵の列へ。タプル同士の `==` が shape の同一性判定になる。"""
+    """A shape (or part of one) to a tuple of keys. `==` between the tuples is the shape identity
+    check."""
     return tuple(extent_key(dim) for dim in dims)
 
 
 def same_extents(out: Any, src: Any) -> bool:
-    """2 つの meta が同じ shape か（記号次元は式の構造で突き合わせる）。
+    """Whether two metas have the same shape (symbolic dimensions are matched by the structure of
+    the expression).
 
-    テンソルを運ばない meta（SymInt / None）は「違う」— shape を持たないものは同一性を
-    主張できない。
+    A meta that carries no tensor (SymInt / None) is "different" — something without a shape cannot
+    claim identity.
     """
     if not isinstance(out, torch.Tensor) or not isinstance(src, torch.Tensor):
         return False

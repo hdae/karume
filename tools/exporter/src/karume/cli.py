@@ -1,28 +1,30 @@
-"""`karume` コマンド — dist / migrate / verify のサブコマンド式ディスパッチ。
+"""The `karume` command — subcommand dispatch for dist / migrate / verify.
 
-    karume dist --pipeline siglip2   # 受理集合が空の core 単体では落ちる（下の NOTE）
+    karume dist --pipeline siglip2   # fails on core alone, whose accepted set is empty (NOTE below)
     karume verify ../../models/karume-irodori-v4.1-small/v4.1-small/dit/model.i8.krm
-    # <old-mirror> = 旧 karume/4 形（safetensors）のミラー（リポ外）
+    # <old-mirror> = a mirror of the old karume/4 form (safetensors), outside the repository
     karume migrate <old-mirror>/<series>/model.f16.safetensors --out /tmp/krm \
         --license apache-2.0 --graph-name vision
 
-MUST: CLI は**引数を解釈しない**。先頭の 1 語でディスパッチし、残りはそのまま対応する
-`main(argv)` へ渡す（`--help` も素通しするので、使い方は各本体の parser が出す）。ここに
-引数の写しを持つと、本体が持つ排他規則（**沈黙誤値の門**）が CLI 側の写しでは抜けたまま通る
-形が生まれ、しかも片方だけ古くなっても誰も落ちない。
+MUST: the CLI **does not interpret arguments**. It dispatches on the first word and passes the rest
+unchanged to the matching `main(argv)` (`--help` passes through too, so usage comes from each
+command's own parser). A copy of the arguments here would let the exclusivity rules the command
+owns (**the silent-wrong-value checks**) go missing in the CLI's copy, and nothing would fail when
+only one side goes stale.
 
-NOTE: `export-*` サブコマンドは**この名簿から全部降りた** — export 台本は 1 本残らず
-`tools/export-recipes/<family>/` へ出て、リポ直下にも wheel にも無い（ADR 0065 段 3+4）。
-起動は `uv run python -m <family>.export`（export-recipes ルートから）。台本をパス指定で
-読み込む機構（旧 `load_script`）も使い手が消えたので撤去した — 半端に残すと「wheel に無い
-ものを wheel の CLI が読む」逆流の足場が残る。
+NOTE: the `export-*` subcommands **have all left this roster** — every export script moved to
+`tools/export-recipes/<family>/` and is neither at the repository root nor in the wheel (ADR 0065
+stages 3 and 4). Run them with `uv run python -m <family>.export` (from the export-recipes root).
+The mechanism that loaded a script by path (formerly `load_script`) lost its users and was removed
+too — leaving half of it would keep a foothold for the backflow of "the wheel's CLI reading what is
+not in the wheel".
 
-NOTE: `karume dist` は core の受理集合（{@link karume.dist.PIPELINES} — 今は**空**）で走るので、
-family を組むには repo driver（`tools/export-recipes/dist.py`）を使う。この席を残すのは
-組み立てエンジン自体が core の責務だから（ADR 0065 決定 1）。
+NOTE: `karume dist` runs on core's accepted set ({@link karume.dist.PIPELINES} — **empty** today),
+so building a family uses the repo driver (`tools/export-recipes/dist.py`). The command stays
+because the assembly engine itself is core's responsibility (ADR 0065 decision 1).
 
-MUST: ディスパッチは遅延 import — `karume verify` を `karume.dist` の import 抜きで起動できる
-形に保つ（逆も同じ）。
+MUST: dispatch imports lazily — keep `karume verify` startable without importing `karume.dist` (and
+the other way round).
 """
 
 from __future__ import annotations
@@ -49,24 +51,27 @@ def run_verify(argv: Sequence[str]) -> None:
     return verify.main(argv)
 
 
-#: サブコマンド名 → （ハンドラ, 一覧に出す 1 行）。順序がそのまま `--help` の並び。
+#: Subcommand name → (handler, the one line shown in the listing). The order is the `--help` order.
 COMMANDS: Mapping[str, tuple[Callable[[Sequence[str]], None], str]] = {
-    "dist": (run_dist, "配布ディレクトリを組み立てて karume.json / README.md を書く"),
-    "migrate": (run_migrate, "旧配布形をコンテナ形式（krm / krg）へ移す（入力は読むだけ）"),
-    "verify": (run_verify, "コンテナ（krm / krg）を全規則で検証する"),
+    "dist": (run_dist, "assemble a distribution directory and write karume.json / README.md"),
+    "migrate": (
+        run_migrate,
+        "move an old distribution to containers (krm / krg); input is read-only",
+    ),
+    "verify": (run_verify, "verify a container (krm / krg) against every rule"),
 }
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="karume",
-        description="Karume exporter — torch.export 済みモデルを IR とコンテナ（krm）へ落とす",
+        description="Karume exporter — lowers a torch.export-ed model to IR and a krm container",
     )
     subcommands = parser.add_subparsers(
         dest="command", required=True, metavar=f"{{{','.join(COMMANDS)}}}"
     )
     for name, (_, summary) in COMMANDS.items():
-        # add_help=False: `karume <cmd> --help` を本体の parser へ素通しするため。
+        # add_help=False: so that `karume <cmd> --help` passes through to the command's own parser.
         subcommands.add_parser(name, help=summary, add_help=False)
     return parser
 

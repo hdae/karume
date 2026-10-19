@@ -110,7 +110,7 @@ class TestOverflow:
         with torch.no_grad():
             model.linear.weight[0, 0] = 1e6
 
-        with pytest.raises(QuantizeError, match="非有限へ飽和"):
+        with pytest.raises(QuantizeError, match=r"saturated .* to non-finite"):
             round_weights_to_f16(model)
 
     def test_already_infinite_values_are_not_reported_as_overflow(self):
@@ -133,7 +133,7 @@ class TestOverflow:
             model.linear.weight[0, 0] = float("inf")
             model.linear.weight[0, 1] = 1e6
 
-        with pytest.raises(QuantizeError, match="有限値 1 個が非有限へ飽和"):
+        with pytest.raises(QuantizeError, match="saturated 1 finite values to non-finite"):
             round_weights_to_f16(model)
 
 
@@ -230,7 +230,7 @@ class TestBf16Rounding:
         with torch.no_grad():
             model.linear.weight[0, 0] = torch.finfo(torch.float32).max
 
-        with pytest.raises(QuantizeError, match="有限値 1 個が非有限へ飽和"):
+        with pytest.raises(QuantizeError, match="saturated 1 finite values to non-finite"):
             round_weights_to_bf16(model)
 
     def test_already_infinite_values_are_not_reported_as_overflow(self):
@@ -767,12 +767,12 @@ class TestInt4InAxisPerOpType:
         """整除は**平坦化後の in 軸**で見る（conv の `Cin·K` が割り切れなければ落とす）。"""
         model = nn.Conv1d(3, 5, kernel_size=3)  # Cin·K = 9
 
-        with pytest.raises(QuantizeError, match="割り切れない"):
+        with pytest.raises(QuantizeError, match="is not divisible by"):
             fake_quant_int4(model, group_size=32, op_types=(nn.Conv1d,))
 
     def test_a_type_without_a_channel_axis_is_not_a_target(self) -> None:
         """軸を引けない型を渡しても対象にはならない（= 対象 0 本として fail loudly）。"""
-        with pytest.raises(QuantizeError, match="1 本も無い"):
+        with pytest.raises(QuantizeError, match="there is no weight"):
             fake_quant_int4(Weighted(), group_size=32, op_types=(nn.LayerNorm,))
 
 
@@ -838,19 +838,19 @@ class TestInt4GroupSize:
 
     def test_a_scale_with_the_same_rank_as_a_rank3_weight_fails_loudly(self):
         """「重みと同 rank」は rank2 の重みでしか成り立たない規則（rank3 は rank2 の scale）。"""
-        with pytest.raises(QuantizeError, match="group 形"):
+        with pytest.raises(QuantizeError, match="group shape"):
             group_size_of(torch.zeros(3, 2, 16), torch.zeros(3, 2, 1))
 
     def test_a_scale_with_a_different_rank_fails_loudly(self):
-        with pytest.raises(QuantizeError, match="group 形"):
+        with pytest.raises(QuantizeError, match="group shape"):
             group_size_of(torch.zeros(3, 64), torch.zeros(2))
 
     def test_a_scale_whose_leading_axes_differ_fails_loudly(self):
-        with pytest.raises(QuantizeError, match="group 形"):
+        with pytest.raises(QuantizeError, match="group shape"):
             group_size_of(torch.zeros(3, 64), torch.zeros(4, 2))
 
     def test_a_group_count_that_does_not_divide_the_axis_fails_loudly(self):
-        with pytest.raises(QuantizeError, match="割り切らない"):
+        with pytest.raises(QuantizeError, match="does not divide"):
             group_size_of(torch.zeros(3, 64), torch.zeros(3, 5))
 
 
@@ -859,7 +859,7 @@ class TestInt4FailsLoudly:
         """端数 group を作らない MUST（ADR 0069 決定 2）— 行境界が語境界からずれる。"""
         model = nn.Linear(48, 3)
 
-        with pytest.raises(QuantizeError, match="割り切れない"):
+        with pytest.raises(QuantizeError, match="is not divisible by"):
             fake_quant_int4(model, group_size=32)
 
     def test_a_model_without_linear_fails_loudly(self):
@@ -870,14 +870,14 @@ class TestInt4FailsLoudly:
                 super().__init__()
                 self.table = nn.Embedding(7, 32)
 
-        with pytest.raises(QuantizeError, match="1 本も無い"):
+        with pytest.raises(QuantizeError, match="there is no weight"):
             fake_quant_int4(NoLinear())
 
     def test_a_non_f32_weight_fails_loudly(self):
         model = nn.Linear(32, 3)
         model.weight = nn.Parameter(model.weight.to(torch.float16))
 
-        with pytest.raises(QuantizeError, match="量子化できない"):
+        with pytest.raises(QuantizeError, match="cannot be quantized"):
             fake_quant_int4(model)
 
 
@@ -890,14 +890,14 @@ class TestInt8FailsLoudly:
                 super().__init__()
                 self.norm = nn.LayerNorm(3)
 
-        with pytest.raises(QuantizeError, match="1 本も無い"):
+        with pytest.raises(QuantizeError, match="there is no weight"):
             fake_quant_int8(NoWeights())
 
     def test_a_non_f32_weight_fails_loudly(self):
         model = nn.Linear(4, 3)
         model.weight = nn.Parameter(model.weight.to(torch.float16))
 
-        with pytest.raises(QuantizeError, match="量子化できない"):
+        with pytest.raises(QuantizeError, match="cannot be quantized"):
             fake_quant_int8(model)
 
 
@@ -923,11 +923,11 @@ class TestIncludeFilter:
         assert torch.equal(model.wide.weight, before)
 
     def test_int8_still_fails_loudly_when_include_drops_everything(self):
-        with pytest.raises(QuantizeError, match="1 本も無い"):
+        with pytest.raises(QuantizeError, match="there is no weight"):
             fake_quant_int8(Weighted(), include=lambda fqn: False)
 
     def test_int4_still_fails_loudly_when_include_drops_everything(self):
-        with pytest.raises(QuantizeError, match="1 本も無い"):
+        with pytest.raises(QuantizeError, match="there is no weight"):
             fake_quant_int4(Grouped(), include=lambda fqn: False)
 
     def test_an_excluded_module_does_not_trip_the_type_ambiguity_check(self):
@@ -943,7 +943,7 @@ class TestIncludeFilter:
                 self.odd = odd
                 self.table = nn.Embedding(7, 5)
 
-        with pytest.raises(QuantizeError, match="1 つに決まらない"):
+        with pytest.raises(QuantizeError, match="is not unique"):
             fake_quant_int8(Holder())
         report = fake_quant_int8(Holder(), include=lambda fqn: fqn == "table")
 

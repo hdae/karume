@@ -180,7 +180,7 @@ class TestSwapIntoPlace:
         staging = _tree(tmp_path, "staging", {"model": "new"})
         self._fail_replace_from(monkeypatch, staging, "昇格に失敗")
 
-        with pytest.raises(ArtifactSwapError, match="据え替え") as failure:
+        with pytest.raises(ArtifactSwapError, match="swap") as failure:
             swap_into_place(staging, final)
 
         # 原因（I/O 故障）は連鎖で残す — 据え替えの失敗と書き出しの失敗を取り違えない。

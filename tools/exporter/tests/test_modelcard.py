@@ -463,7 +463,7 @@ class TestRequirePipeline:
         manifest = _manifest()
         manifest["models"]["alpha"]["pipeline"] = "other/1"
 
-        with pytest.raises(ValueError, match="'alpha' の pipeline 'other/1'"):
+        with pytest.raises(ValueError, match="'alpha' with pipeline 'other/1'"):
             require_pipeline(manifest, "fake/1")
 
     def test_it_accepts_a_manifest_where_every_model_matches(self) -> None:

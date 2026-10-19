@@ -631,7 +631,7 @@ class TestSbv2StorageGate:
             _sbv2_container("front_f16", storage="f32"),
         )
         out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
-        with pytest.raises(DistError, match=r"front_f16: .* f16 が無い"):
+        with pytest.raises(DistError, match=r"front_f16: .* has no f16"):
             _assemble_sbv2(sources, out_dir)
         # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
         assert not out_dir.exists()
@@ -642,7 +642,7 @@ class TestSbv2StorageGate:
             sources.series_i8 / "voice" / "model.krm",
             _sbv2_container("voice_i8", storage="f16"),
         )
-        with pytest.raises(DistError, match=r"voice_i8: .* i8 が無い"):
+        with pytest.raises(DistError, match=r"voice_i8: .* has no i8"):
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_the_text_encoder_is_not_i8(self, tmp_path: Path) -> None:
@@ -652,7 +652,7 @@ class TestSbv2StorageGate:
             sources.text_encoder / "model.krm",
             _sbv2_container("text_encoder", storage="f32"),
         )
-        with pytest.raises(DistError, match=r"text_encoder: .* i8 が無い"):
+        with pytest.raises(DistError, match=r"text_encoder: .* has no i8"):
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_the_i4_seat_holds_the_i8_series(self, tmp_path: Path) -> None:
@@ -663,7 +663,7 @@ class TestSbv2StorageGate:
         """
         sources = _build_sbv2_sources(tmp_path)
         replace_component(sources.text_encoder_i4 / "model.krm", _SBV2_PAYLOADS["text_encoder"])
-        with pytest.raises(DistError, match=r"text_encoder_i4: .* i4 が無い"):
+        with pytest.raises(DistError, match=r"text_encoder_i4: .* has no i4"):
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_a_voice_i4_seat_holds_the_i8_series(self, tmp_path: Path) -> None:
@@ -674,7 +674,7 @@ class TestSbv2StorageGate:
         """
         sources = _build_sbv2_sources(tmp_path)
         replace_component(sources.series_i4 / "voice" / "model.krm", _SBV2_PAYLOADS["voice_i8"])
-        with pytest.raises(DistError, match=r"voice_i4: .* i4 が無い"):
+        with pytest.raises(DistError, match=r"voice_i4: .* has no i4"):
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_the_i4_series_lands_in_the_voice_i8_seat(self, tmp_path: Path) -> None:
@@ -688,7 +688,7 @@ class TestSbv2StorageGate:
         sources = _build_sbv2_sources(tmp_path)
         replace_component(sources.series_i8 / "voice" / "model.krm", _SBV2_PAYLOADS["voice_i4"])
         out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
-        with pytest.raises(DistError, match=r"voice_i8: .* i4 がある"):
+        with pytest.raises(DistError, match=r"voice_i8: .* has i4"):
             _assemble_sbv2(sources, out_dir)
         # 検査は配置の前 — 途中の配布形を 1 ファイルも残さない。
         assert not out_dir.exists()
@@ -699,7 +699,7 @@ class TestSbv2StorageGate:
         """DeBERTa の i8 席も同じ — 2 本は同じ 22 層なので形の門は両方とも通る。"""
         sources = _build_sbv2_sources(tmp_path)
         replace_component(sources.text_encoder / "model.krm", _SBV2_PAYLOADS["text_encoder_i4"])
-        with pytest.raises(DistError, match=r"text_encoder: .* i4 がある"):
+        with pytest.raises(DistError, match=r"text_encoder: .* has i4"):
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_no_series_slips_into_another_seat_of_the_same_graph(self) -> None:
@@ -1207,7 +1207,7 @@ class TestSbv2VerifyDist:
     def test_it_catches_an_undeclared_file(self, sbv2_assembled) -> None:
         out_dir, _ = sbv2_assembled
         (out_dir / SBV2_DEFAULT_MODEL / "voice" / "io.p2.safetensors").write_bytes(b"stale")
-        with pytest.raises(DistError, match="宣言していないファイル"):
+        with pytest.raises(DistError, match="Files the manifest does not declare"):
             verify_dist(out_dir)
 
 
@@ -1545,7 +1545,7 @@ class TestSbv2CardProfile:
     @pytest.mark.parametrize(("pipeline", "other"), [(PIPELINE, "fn"), (FN_PIPELINE, "jvnv")])
     def test_it_refuses_the_other_familys_attribution(self, pipeline, other: str) -> None:
         """`--pipeline sbv2 --card-profile fn` は JVNV の声に FN の帰属を描く形 — 落とす。"""
-        with pytest.raises(DistError, match=f"'{other}' は無い"):
+        with pytest.raises(DistError, match=f"'{other}' does not exist"):
             resolve_card_renderer(pipeline, other)
 
     def test_the_two_families_render_different_cards(self) -> None:

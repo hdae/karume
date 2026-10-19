@@ -274,7 +274,9 @@ class TestVowelDetectorLayout:
         （ADR 0027 / 0029）。
         """
         sources = _build_vowel_detector_sources(tmp_path, storage=storage)
-        with pytest.raises(DistError, match=rf"{VOWEL_DETECTOR_GRAPH_ROLE}: .* {intruder} がある"):
+        with pytest.raises(
+            DistError, match=rf"{VOWEL_DETECTOR_GRAPH_ROLE}: .* has (?:i8 / )?{intruder}"
+        ):
             vowel_detector_plan(sources)
 
     def test_the_plain_f32_series_passes_both_storage_gates(self, tmp_path: Path) -> None:
@@ -421,7 +423,7 @@ class TestVowelDetectorGraphGate:
 
     def test_it_refuses_a_missing_graph(self, tmp_path: Path) -> None:
         sources = _build_vowel_detector_sources(tmp_path, omit_graph=True)
-        with pytest.raises(DistError, match="組み立ての入力が無い"):
+        with pytest.raises(DistError, match="Assembly input is missing"):
             vowel_detector_plan(sources)
 
 

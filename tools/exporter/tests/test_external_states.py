@@ -232,7 +232,7 @@ class TestTheSurgeryRejectsMiswiring:
             window=WINDOW,
         )
 
-        with pytest.raises(StatesFormError, match=r"k に指定した 'qf'"):
+        with pytest.raises(StatesFormError, match=r"k given as 'qf'"):
             to_external_states_form(source(), plan(spec))
 
     def test_swapping_k_and_v_is_rejected(self):
@@ -249,7 +249,7 @@ class TestTheSurgeryRejectsMiswiring:
             window=WINDOW,
         )
 
-        with pytest.raises(StatesFormError, match=r"k に指定した 'sliding_v'"):
+        with pytest.raises(StatesFormError, match=r"k given as 'sliding_v'"):
             to_external_states_form(source(), plan(spec))
 
     def test_naming_the_same_input_as_both_k_and_v_is_rejected(self):
@@ -266,14 +266,14 @@ class TestTheSurgeryRejectsMiswiring:
             window=WINDOW,
         )
 
-        with pytest.raises(StatesFormError, match=r"v に指定した 'sliding_k'"):
+        with pytest.raises(StatesFormError, match=r"v given as 'sliding_k'"):
             to_external_states_form(source(), plan(spec))
 
     def test_an_already_operated_node_is_rejected(self):
         """二重手術（すでに states 形）は従来の検出線がそのまま受ける。"""
         once = to_external_states_form(source(), plan(SLIDING_SPEC, FULL_SPEC))
 
-        with pytest.raises(StatesFormError, match="すでに states 形"):
+        with pytest.raises(StatesFormError, match="already in the states form"):
             to_external_states_form(once, plan(SLIDING_SPEC))
 
 
@@ -357,7 +357,7 @@ class TestTheGraphChecksAreEffective:
         ]
         graph["requires"] = {"ops": sorted({node["op"] for node in graph["nodes"]})}
 
-        with pytest.raises(IrError, match="readonly でない形で触れている"):
+        with pytest.raises(IrError, match="touches it in a form that is not readonly"):
             _parse_and_check(graph)
 
     def test_a_non_readonly_reader_of_an_external_slot_is_rejected(self):
@@ -372,7 +372,7 @@ class TestTheGraphChecksAreEffective:
             _input("sliding_v", KV_SLIDING),
         ]
 
-        with pytest.raises(IrError, match="readonly でない形で触れている"):
+        with pytest.raises(IrError, match="touches it in a form that is not readonly"):
             _parse_and_check(graph)
 
     def test_a_readonly_reader_of_an_owned_slot_is_rejected(self):
@@ -381,21 +381,21 @@ class TestTheGraphChecksAreEffective:
         for slot in graph["states"].values():
             slot.pop("external")
 
-        with pytest.raises(IrError, match="自前スロット"):
+        with pytest.raises(IrError, match="owned slot"):
             _parse_and_check(graph)
 
     def test_mixing_external_and_owned_slots_is_rejected(self):
         graph = _operated_json()
         graph["states"]["l13.k"].pop("external")
 
-        with pytest.raises(IrError, match="混在している"):
+        with pytest.raises(IrError, match="are mixed"):
             _parse_and_check(graph)
 
     def test_a_shared_initializer_with_a_tensor_key_is_rejected(self):
         graph = _operated_json()
         graph["initializers"]["target_embed"]["tensor"] = "drafter.embed"
 
-        with pytest.raises(IrError, match="未知のキー 'tensor'"):
+        with pytest.raises(IrError, match="unknown key 'tensor'"):
             _parse_and_check(graph)
 
     @pytest.mark.parametrize("key", ["scale", "group_size"])
@@ -406,7 +406,7 @@ class TestTheGraphChecksAreEffective:
             32 if key == "group_size" else "drafter.embed.scale"
         )
 
-        with pytest.raises(IrError, match="共有 initializer は"):
+        with pytest.raises(IrError, match="a shared initializer cannot declare"):
             _parse_and_check(graph)
 
     def test_a_readonly_node_with_three_inputs_is_rejected(self):
@@ -415,7 +415,7 @@ class TestTheGraphChecksAreEffective:
             if node.get("attrs", {}).get("readonly"):
                 node["ins"] = ["qs", "qs", "qs"]
 
-        with pytest.raises(OpContractError, match="readonly 形は入力 1 本ちょうど"):
+        with pytest.raises(OpContractError, match="readonly form takes exactly 1 input"):
             _parse_and_check(graph)
 
     def test_a_readonly_node_with_two_query_rows_is_rejected(self):
@@ -428,7 +428,7 @@ class TestTheGraphChecksAreEffective:
         graph["values"]["as"] = _value([1, 4, 2, 256])
         graph["values"]["o"] = _value([1, 4, 2, 256])
 
-        with pytest.raises(OpContractError, match="M（軸 2）が 1 ちょうど"):
+        with pytest.raises(OpContractError, match=r"M \(axis 2\) of exactly 1"):
             _parse_and_check(graph)
 
     def test_a_slot_whose_head_dim_disagrees_with_q_is_rejected(self):
@@ -437,7 +437,7 @@ class TestTheGraphChecksAreEffective:
         graph["states"]["l13.k"]["shape"] = [1, 1, SLIDING_CAPACITY, 512]
         graph["states"]["l13.v"]["shape"] = [1, 1, SLIDING_CAPACITY, 512]
 
-        with pytest.raises(OpContractError, match="スロットと q の B / D が不一致"):
+        with pytest.raises(OpContractError, match="slot and q B / D mismatch"):
             _parse_and_check(graph)
 
     def test_a_window_wider_than_the_slot_capacity_is_rejected(self):
@@ -445,7 +445,7 @@ class TestTheGraphChecksAreEffective:
         graph["states"]["l13.k"]["shape"] = [1, 1, 8, 256]
         graph["states"]["l13.v"]["shape"] = [1, 1, 8, 256]
 
-        with pytest.raises(OpContractError, match="スロット容量 8 を超える"):
+        with pytest.raises(OpContractError, match="exceeds the slot capacity 8"):
             _parse_and_check(graph)
 
 
@@ -508,7 +508,7 @@ class TestTheContainerExcludesSharedDeclarations:
         graph, tensors, scales = _shared_container_graph()
         tensors = {**tensors, "model.lm_head.weight": torch.zeros(16, 8)}
 
-        with pytest.raises(EmitError, match="余剰"):
+        with pytest.raises(EmitError, match="extra"):
             stored_model(graph, tensors, weight_dtype="i8", weight_scales=scales)
 
 

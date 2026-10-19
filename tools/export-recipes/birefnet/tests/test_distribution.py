@@ -331,7 +331,9 @@ class TestBirefnetLayout:
         sources = _build_birefnet_sources(
             tmp_path, checkpoint=BIREFNET_LUCIDA_CHECKPOINT, storage=storage
         )
-        with pytest.raises(DistError, match=rf"{birefnet_role('f32')}: .* {intruder} がある"):
+        with pytest.raises(
+            DistError, match=rf"{birefnet_role('f32')}: .* has (\S+ / )*{intruder} \(actual"
+        ):
             birefnet_plan(sources, BIREFNET_LUCIDA_CHECKPOINT)
 
     def test_the_plain_f32_series_passes_both_storage_gates(self, tmp_path: Path) -> None:
@@ -359,7 +361,9 @@ class TestBirefnetLayout:
             sources.series_by_dtype["f32"] / "model.krm", i2_container(named=BIREFNET_ROLE)
         )
 
-        with pytest.raises(DistError, match=rf"{birefnet_role('f32')}: .* i2 がある"):
+        with pytest.raises(
+            DistError, match=rf"{birefnet_role('f32')}: .* has (\S+ / )*i2 \(actual"
+        ):
             birefnet_plan(sources, BIREFNET_LUCIDA_CHECKPOINT)
 
 
@@ -945,7 +949,7 @@ class TestBirefnetWeightDtypes:
     def test_it_refuses_the_plain_series_in_the_f16_seat(self, tmp_path: Path) -> None:
         """f16 席に f32 系列（`--dtype f16` を付け忘れた書き出し）— 要求検査が落とす。"""
         sources = _build_birefnet_sources(tmp_path, f16_storage="f32")
-        with pytest.raises(DistError, match=rf"{birefnet_role('f16')}: .* f16 が無い"):
+        with pytest.raises(DistError, match=rf"{birefnet_role('f16')}: .* has no f16"):
             birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
 
     def test_it_refuses_when_the_f16_series_is_missing(self, tmp_path: Path) -> None:

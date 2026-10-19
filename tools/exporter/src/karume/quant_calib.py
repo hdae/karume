@@ -1,55 +1,66 @@
-"""**校正データを使う丸め**（GPTQ / AWQ）— `quantize` の格納グリッドに載る第 2 段。
+"""**Rounding that uses calibration data** (GPTQ / AWQ) — the second step on top of the storage
+grids of `quantize`.
 
-`quantize.fake_quant_int4` は各重みを単独で（= 入力の分布を見ずに）最近傍へ丸める。ここに
-載るのは「その層に実際に流れる活性」を校正データから見て、**同じ格納グリッドの中で**丸め先を
-選び直す方式で、格子そのものは 1 段目と 1 バイトも変えない。狙いは「格納形を変えずに品質を
-どこまで戻せるか」。
+`quantize.fake_quant_int4` rounds each weight to the nearest value on its own (= without looking at
+the input distribution). The methods here look at "the activations that actually flow into the
+layer" through calibration data and re-choose the rounding target **within the same storage
+grid**; the grid itself does not change by a single byte from the first step. The aim is "how far
+quality can be recovered without changing the storage form".
 
-- **GPTQ**（`method="gptq"`）… 列を 1 本ずつ丸め、丸め誤差を Hessian `H = Σ XᵀX` の逆行列で
-  **未処理の列へ配り直す**。格納グリッドが `rtn` のときは**出荷可能** — 格子は
-  {@link quantize.quantize_to_int4} と厳密に同じ（`scale = group amax / 7`・`q ∈ [−7,+7]`・
-  −8 不使用）で、scale 台帳は {@link quantize.Int4Report} の器でそのまま emit へ渡せる。
-- **AWQ**（`method="awq"`）… per-in-channel の等価倍率 `s` を活性の大きさから決め、
-  `W' = W·diag(s)` を丸めて `W_eff = Q(W')/s` を書き戻す **fake-quant**。fold の理想形の
-  上限を測るための列で、**そのままでは格納できない**（下の MUST）。
-- **併用**（`method="awq+gptq"`）… `s` を決めてから `W'` に GPTQ を掛ける。実効入力が `x/s` に
-  なるので Hessian も `H' = diag(1/s)·H·diag(1/s)` へ変換して使う。
+- **GPTQ** (`method="gptq"`) … rounds the columns one at a time and **redistributes the rounding
+  error onto the unprocessed columns** through the inverse of the Hessian `H = Σ XᵀX`. With the
+  storage grid `rtn` it is **shippable** — the grid is exactly that of
+  {@link quantize.quantize_to_int4} (`scale = group amax / 7`, `q ∈ [−7,+7]`, −8 unused), and the
+  scale ledger can be passed to emit as is in the {@link quantize.Int4Report} container.
+- **AWQ** (`method="awq"`) … a **fake-quant** that picks a per-in-channel equivalent factor `s`
+  from the activation magnitudes, rounds `W' = W·diag(s)` and writes back `W_eff = Q(W')/s`. A
+  column for measuring the upper bound of the ideal fold, and **it cannot be stored as is** (the
+  MUST below).
+- **Combined** (`method="awq+gptq"`) … picks `s`, then applies GPTQ to `W'`. The effective input
+  becomes `x/s`, so the Hessian is transformed to `H' = diag(1/s)·H·diag(1/s)` too.
 
-MUST: **emit へ流せるのは `method="gptq"` × `grid="rtn"` だけ**。これは意図的な設計で、
-他の組はレポートに scale 台帳を持たない:
+MUST: **only `method="gptq"` × `grid="rtn"` may flow into emit**. This is a deliberate design; the
+other combinations carry no scale ledger in their report:
 
-- `nf4` / `kmeans_shared` グリッドは `quant_methods` と同じ理由で台帳を返さない（格納経路と
-  ランタイム実装が無い方式へ「emit へ渡す口」を作らない — `quant_methods` モジュール
-  docstring）。
-- AWQ は `W_eff = Q(W')/s` を書き戻すが、格納したいのは `Q(W')` と `s` の組で、`W_eff` を
-  そのまま group absmax で量子化し直すと **`s` は group 内一定の定数として absmax scale と
-  相殺され、RTN と同値に戻る**（`s` が担っていた情報が消える）。出荷するには `s` を
-  隣接演算へ **fold** するか、`s` を **companion テンソル**として格納する実装が要る。
+- The `nf4` / `kmeans_shared` grids return no ledger for the same reason as `quant_methods` (no
+  "hook into emit" for methods without a storage path and a runtime implementation — the
+  `quant_methods` module docstring).
+- AWQ writes back `W_eff = Q(W')/s`, but what would need storing is the pair `Q(W')` and `s`;
+  requantizing `W_eff` as is with group absmax **cancels `s` against the absmax scale as a
+  constant within the group, and it returns to the equivalent of RTN** (the information `s`
+  carried is lost). Shipping it needs an implementation that **folds** `s` into an adjacent
+  operation or stores `s` as a **companion tensor**.
 
-MUST: **同一入力 → ビット同一出力**。乱数は 1 つも使わない。Hessian の蓄積と Cholesky
-solver は **f64**（`quant_methods.fit_codebook` の f64 精算と同じ理由 — 数百万要素の逐次和は
-f32 だと並び順に依存しはじめる）。一方で**グリッドの scale 決定と丸めそのものは f32** で
-行う — f64 で割ってから f32 へ落とすと二重丸めで `scale` が 1ulp 動きうるので、
-{@link quantize.fake_quant_int4} との**ビット同一**（下のオラクル）が成立しなくなる。
+MUST: **same input → bit-identical output**. Not a single random number is used. Hessian
+accumulation and the Cholesky solver are **f64** (the same reason as the f64 sums of
+`quant_methods.fit_codebook` — a sequential sum of millions of elements starts to depend on the
+order in f32). On the other hand, **choosing the grid scale and the rounding itself are done in
+f32** — dividing in f64 and dropping to f32 can move `scale` by 1 ulp through double rounding, and
+**bit identity** with {@link quantize.fake_quant_int4} (the oracle below) would no longer hold.
 
-MUST: 丸めは**参照・golden の採取より前**（`quantize` モジュール docstring と同文）。
+MUST: rounding happens **before the reference and the goldens are captured** (same text as the
+`quantize` module docstring).
 
-NOTE（オラクル）: `H` が対角（例 `λI`）のとき補償項 `U[j, j+1:]` が厳密に 0 になるので、
-`gptq` × `rtn` は {@link quantize.fake_quant_int4} と**ビット同一**になる。これは実装の性質
-ではなく数学的帰結で、`tests/test_quant_calib.py` が門として固定する。
+NOTE (oracle): when `H` is diagonal (e.g. `λI`) the compensation term `U[j, j+1:]` is exactly 0,
+so `gptq` × `rtn` is **bit-identical** to {@link quantize.fake_quant_int4}. This is a mathematical
+consequence, not a property of the implementation, and `tests/test_quant_calib.py` pins it as a
+check.
 
-NOTE（act-order / static-groups は **opt-in の実験軸**）: 参照実装の GPTQ は `diag(H)` の降順で
-in 軸を並べ替えてから丸める（act-order / desc_act）と品質が上がる。並べ替えが格納の group 整列を
-壊すのは **dynamic group（補償済みの現在値から scale を採る）前提のときだけ**で、
-`static_groups=True`（scale を丸める前の**元の連続列ブロック**から先に一括確定する）と併せれば、
-並べ替えは「補償ループの処理順」にしか及ばない — 格納は元の in 軸順・連続 `group_size` 列 =
-1 group のままなので、companion の permutation テンソルは要らず**ランタイム変更もゼロ**
-（upstream `IST-DASLab/gptq` の `--static-groups` × `--act-order` と同じ成立条件）。
+NOTE (act-order / static-groups are **opt-in experimental axes**): the reference implementation of
+GPTQ gains quality when it reorders the in axis by descending `diag(H)` before rounding (act-order
+/ desc_act). Reordering breaks the storage's group alignment **only under dynamic groups (scales
+taken from the compensated current values)**; combined with `static_groups=True` (all scales are
+settled up front from the **original contiguous column blocks** before rounding), the reordering
+affects only "the processing order of the compensation loop" — storage stays in the original
+in-axis order with contiguous `group_size` columns = 1 group, so no companion permutation tensor
+is needed and **the runtime changes not at all** (the same condition as `--static-groups` ×
+`--act-order` of upstream `IST-DASLab/gptq`).
 
-MUST: 両方とも**既定 `False`**。既定経路は現行の dynamic group と**ビット同一**で、既存の i4
-配布資産・golden の再現性はこのフラグを足しても 1bit も動かない（`tests/test_quant_calib.py` の
-A/B 突合が門）。`act_order=True` × `static_groups=False` は fail loudly（並べ替えた処理順の
-現在値から採った scale は、元の連続 group へ写し戻せない）。
+MUST: both **default to `False`**. The default path is **bit-identical** to the current dynamic
+groups, and adding these flags does not move the reproducibility of the existing i4 distribution
+assets and goldens by a single bit (the A/B cross-check in `tests/test_quant_calib.py` is the
+check). `act_order=True` × `static_groups=False` fails loudly (scales taken from the current values
+in the reordered processing order cannot be mapped back to the original contiguous groups).
 """
 
 from __future__ import annotations
@@ -86,64 +97,71 @@ from .quantize import (
     restore_channel_rows,
 )
 
-#: GPTQ の列ブロック長（既定）。ブロックは「補償をまとめて当てる遅延幅」でしかなく、
-#: 数学的な結果はブロック長に依らない（浮動小数の加算順だけが変わる）。
+#: GPTQ column block length (default). A block is only "the delay width over which compensation is
+#: applied in bulk"; the mathematical result does not depend on the block length (only the order of
+#: floating-point additions changes).
 DEFAULT_GPTQ_BLOCK = 128
 
-#: damping 係数の**既定値** — `λ = damping × mean(diag(H))` を対角へ加える。upstream
-#: `fasterquant(percdamp=.01)` と同値。呼び出し側が `damping=` で振れるのは**感度掃引のため
-#: だけ**で、既定を動かさない限り既存経路はビット同一（振った値は測定側の出力へ明記する MUST
-#: — 「方式の差」と「damping の差」が混ざった数字は読めない）。
+#: The **default** damping factor — `λ = damping × mean(diag(H))` is added to the diagonal.
+#: Equivalent to upstream `fasterquant(percdamp=.01)`. Callers may vary it with `damping=` **only
+#: for sensitivity sweeps**; as long as the default is not moved the existing path is
+#: bit-identical (a varied value MUST be stated in the measuring side's output — numbers that mix
+#: "the difference between methods" and "the difference in damping" cannot be read).
 GPTQ_DAMPING = 0.01
 
-#: AWQ の α 格子の分割数（`α ∈ {0, 1/16, …, 1}` の 17 点）。
+#: Number of divisions of the AWQ α grid (17 points, `α ∈ {0, 1/16, …, 1}`).
 AWQ_ALPHA_STEPS = 16
 
-#: AWQ の `act_amax` 下限。0 のチャネル（校正データで 1 度も動かなかった入力）を放置すると
-#: `s_j = 0` になり、幾何平均 1 への正規化が壊れる（`log 0`）。
+#: Lower bound of AWQ's `act_amax`. Leaving a zero channel (an input that never moved on the
+#: calibration data) gives `s_j = 0` and breaks the normalisation to geometric mean 1 (`log 0`).
 AWQ_ACT_EPS = 1e-5
 
-#: AWQ の目的関数に使う入力サンプルの最大行数（**先頭から**採る決定的な間引き）。
+#: Maximum number of input sample rows used by the AWQ objective (a deterministic thinning that
+#: takes rows **from the start**).
 DEFAULT_AWQ_SAMPLES = 1024
 
-#: 格納グリッドの種類。`rtn` だけが出荷経路を持つ（モジュール docstring の MUST）。
+#: Kinds of storage grid. Only `rtn` has a shipping path (the MUST of the module docstring).
 GridKind = Literal["rtn", "nf4", "kmeans_shared"]
 
 GRID_KINDS: tuple[GridKind, ...] = ("rtn", "nf4", "kmeans_shared")
 
-#: 校正付き丸めの方式。
+#: Methods of calibrated rounding.
 CalibMethod = Literal["gptq", "awq", "awq+gptq"]
 
 CALIB_METHODS: tuple[CalibMethod, ...] = ("gptq", "awq", "awq+gptq")
 
-#: 先頭 stage へ渡す 1 バッチ（位置引数と keyword 引数の組）。
+#: One batch passed to the first stage (a pair of positional and keyword arguments).
 StageBatch = tuple[tuple[object, ...], Mapping[str, object]]
 
-#: 実行順の stage 1 つ（**モデル内 FQN の接頭辞**とモジュールの組）。接頭辞を受けるのは、
-#: scale 台帳のキーを {@link quantize.Int4Report} と同じ**モデル内 FQN** の空間に揃えるため
-#: （stage 単体で `named_modules` を舐めると `0.weight` のような局所名しか採れない）。
+#: One stage in execution order (a pair of **the in-model FQN prefix** and the module). The prefix
+#: is taken so that the scale ledger keys live in the same **in-model FQN** space as
+#: {@link quantize.Int4Report} (walking `named_modules` on a stage alone yields only local names
+#: such as `0.weight`).
 StageSpec = tuple[str, nn.Module]
 
 
 @dataclass(frozen=True)
 class GridSpec:
-    """丸め先の格納グリッド（`quantize` / `quant_methods` の格子をそのまま指す指定）。
+    """The storage grid to round onto (a spec that points directly at the grids of `quantize` /
+    `quant_methods`).
 
-    - `rtn` … {@link quantize.quantize_to_int4} の格子（group amax / 7・`q ∈ [−7,+7]`）。
-      **唯一の出荷可能グリッド**で、scale 台帳を返す
-    - `nf4` … {@link quant_methods.NF4_LEVELS} の固定表 × group absmax scale
-    - `kmeans_shared` … **層ごとに 1 枚**の k-means 表 × group absmax scale。表は
-      {@link quant_methods.fit_codebook} を**元の重み**（丸め前）へ当てて fit する
+    - `rtn` … the grid of {@link quantize.quantize_to_int4} (group amax / 7, `q ∈ [−7,+7]`).
+      **The only shippable grid**; it returns a scale ledger
+    - `nf4` … the fixed table of {@link quant_methods.NF4_LEVELS} × a group absmax scale
+    - `kmeans_shared` … a k-means table **per layer** × a group absmax scale. The table is fitted
+      by applying {@link quant_methods.fit_codebook} to **the original weights** (before rounding)
 
-    NOTE: `kmeans_shared` の "shared" は {@link quant_methods.fake_quant_kmeans} の同名粒度と
-    同じ意味論（group absmax で正規化した値空間に 1 枚の表を張る）だが、表の**射程は層内**に
-    閉じている — GPTQ は stage を 1 つずつ進める形なので、全層を跨ぐ表を張るには量子化の前に
-    全対象を舐める別パスが要り、stage 逐次という設計の要（H を 1 stage 分しか持たない）と
-    噛み合わない。
+    NOTE: the "shared" of `kmeans_shared` has the same semantics as the granularity of the same
+    name in {@link quant_methods.fake_quant_kmeans} (one table fitted in the value space normalised
+    by group absmax), but the table's **reach is closed within the layer** — GPTQ advances one
+    stage at a time, so a table spanning every layer would need a separate pass over every target
+    before quantization, which does not fit the core of the stage-sequential design (holding H for
+    only one stage).
 
-    `fit_stride` は `kmeans_shared` の表を `flat[::fit_stride]` の部分標本から fit する逃げ道
-    （適用は常に全量・乱数を使わないので決定性 MUST は保つ）。MUST: 使ったら測定側の出力へ
-    明記する — {@link CalibReport.describe} が拾う。
+    `fit_stride` is the way out that fits the `kmeans_shared` table from the subsample
+    `flat[::fit_stride]` (it is always applied to everything and uses no randomness, so the
+    determinism MUST holds). MUST: when it is used, the measuring side's output states it —
+    {@link CalibReport.describe} picks it up.
     """
 
     kind: GridKind = "rtn"
@@ -154,53 +172,60 @@ class GridSpec:
 
     def __post_init__(self) -> None:
         if self.kind not in GRID_KINDS:
-            raise QuantizeError(f"格納グリッド '{self.kind}' は未対応（{', '.join(GRID_KINDS)}）")
+            raise QuantizeError(
+                f"storage grid '{self.kind}' is not supported ({', '.join(GRID_KINDS)})"
+            )
         if self.group_size < 1:
-            raise QuantizeError(f"group_size は 1 以上（実測 {self.group_size}）")
+            raise QuantizeError(f"group_size must be 1 or more (actual {self.group_size})")
         if self.levels < 2:
-            raise QuantizeError(f"levels は 2 以上（実測 {self.levels}）")
+            raise QuantizeError(f"levels must be 2 or more (actual {self.levels})")
         if self.iterations < 1:
-            raise QuantizeError(f"iterations は 1 以上（実測 {self.iterations}）")
+            raise QuantizeError(f"iterations must be 1 or more (actual {self.iterations})")
         if self.fit_stride < 1:
-            raise QuantizeError(f"fit_stride は 1 以上（実測 {self.fit_stride}）")
+            raise QuantizeError(f"fit_stride must be 1 or more (actual {self.fit_stride})")
         if self.fit_stride != 1 and self.kind != "kmeans_shared":
             raise QuantizeError(
-                f"fit_stride は kmeans_shared 専用（'{self.kind}' に fit する表は無い"
-                " — 黙って無視もしない）"
+                f"fit_stride is for kmeans_shared only ('{self.kind}' has no table to fit"
+                " — and it is not silently ignored either)"
             )
 
     @property
     def shippable(self) -> bool:
-        """このグリッドの scale 台帳を emit へ渡せるか（モジュール docstring の MUST）。"""
+        """Whether this grid's scale ledger may be passed to emit (the MUST of the module
+        docstring)."""
         return self.kind == "rtn"
 
 
-#: 既定のグリッド（i4 g32 の RTN 格子 = 唯一の出荷経路）。引数既定を**呼び出し式にしない**
-#: ために名前で持つ（毎回作っても同値な frozen dataclass なので共有して差し支えない）。
+#: The default grid (the RTN grid of i4 g32 = the only shipping path). Held by name so that the
+#: argument default is **not a call expression** (an equal frozen dataclass however often it is
+#: built, so sharing it is fine).
 DEFAULT_GRID = GridSpec()
 
 
 @dataclass(frozen=True)
 class _BoundGrid:
-    """1 つの層へ束ねたグリッド（`kmeans_shared` の表だけが層ごとに変わる）。
+    """A grid bound to one layer (only the `kmeans_shared` table changes per layer).
 
-    MUST: scale 決定も丸めも **f32** で閉じる（モジュール docstring — f64 経由の二重丸めで
-    `scale` が 1ulp 動くと `fake_quant_int4` とのビット同一が崩れる）。
+    MUST: choosing the scale and rounding both stay in **f32** (module docstring — if double
+    rounding through f64 moves `scale` by 1 ulp, bit identity with `fake_quant_int4` breaks).
     """
 
     spec: GridSpec
     where: str
-    #: 準位表（`rtn` は表を持たず {@link quantize.quantize_to_int4} の格子を直に使う）。
+    #: The level table (`rtn` has no table and uses the grid of {@link quantize.quantize_to_int4}
+    #: directly).
     table: torch.Tensor | None
-    #: 表の最大絶対値（group absmax 正規化の分母）。
+    #: The table's largest magnitude (the denominator of the group absmax normalisation).
     max_level: float
 
     def scale_of(self, block: torch.Tensor) -> torch.Tensor:
-        """1 group ぶんの列（`[チャネル, group_size]` F32）の**現在値**から scale を決める。
+        """Choose the scale from the **current values** of one group's columns
+        (`[channel, group_size]` F32).
 
-        GPTQ は列を進むたびに残りの列を書き換えるので、group scale は「その group の列に
-        **到達した時点**の値」から採る。丸める前の元の重みから採ると、補償で動いた値が
-        scale の担当範囲から外れうる。
+        GPTQ rewrites the remaining columns as it advances, so the group scale is taken from "the
+        values at the moment the group's columns are **reached**". Taken from the original weights
+        before rounding, values moved by compensation could fall outside the range the scale
+        covers.
         """
         if self.table is None:
             return group_scale(block, self.spec.group_size, self.where).squeeze(-1)
@@ -209,11 +234,12 @@ class _BoundGrid:
         )
 
     def round_column(self, values: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-        """1 列（`[チャネル]` F32）を `scale`（`[チャネル]` F32）のグリッドへ丸める。
+        """Round one column (`[channel]` F32) onto the grid of `scale` (`[channel]` F32).
 
-        `rtn` は {@link quantize.quantize_to_int4} / {@link quantize.dequantize_int4} を
-        **そのまま**通す（列を `[チャネル, 1]` の 1 要素 group とみなす形）— 格納の式と
-        丸めの式を別実装にしないための遠回りで、要素ごとの演算は層一括版と同一。
+        `rtn` goes **as is** through {@link quantize.quantize_to_int4} /
+        {@link quantize.dequantize_int4} (treating the column as 1-element groups `[channel, 1]`)
+        — a detour so that the storage formula and the rounding formula are not separate
+        implementations; the per-element operations are identical to the whole-layer version.
         """
         if self.table is None:
             column = values.unsqueeze(-1)
@@ -222,9 +248,9 @@ class _BoundGrid:
         return round_to_levels(values / scale, self.table) * scale
 
     def round_rows(self, rows: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """層全体を素で丸める（GPTQ を通さない fake-quant）— AWQ の α 探索が使う。
+        """Round the whole layer plainly (fake-quant without GPTQ) — used by AWQ's α search.
 
-        `rtn` の経路は {@link quantize.fake_quant_int4} の 1 層ぶんと**ビット同一**。
+        The `rtn` path is **bit-identical** to one layer of {@link quantize.fake_quant_int4}.
         """
         if self.table is None:
             scale = group_scale(rows, self.spec.group_size, self.where)
@@ -234,11 +260,13 @@ class _BoundGrid:
 
 
 def _bind_grid(spec: GridSpec, fit_source: torch.Tensor, where: str) -> _BoundGrid:
-    """グリッド指定を 1 層へ束ねる（`fit_source` は `kmeans_shared` の表を採る元の重み）。
+    """Bind a grid spec to one layer (`fit_source` is the weight the `kmeans_shared` table is taken
+    from).
 
-    GPTQ では `fit_source` に**丸める前**の重みを渡す — 列の補償で動いた値から表を採り直すと
-    表がブロックの進み方に依存してしまう。AWQ の α 探索では `W' = W·diag(s)` を渡す
-    （実際に丸められるのが `W'` なので、表もそこから採るのが素直な fake-quant）。
+    GPTQ passes the weights **before rounding** as `fit_source` — re-taking the table from values
+    moved by column compensation would make the table depend on how the blocks advance. AWQ's α
+    search passes `W' = W·diag(s)` (what actually gets rounded is `W'`, so taking the table from it
+    is the plain fake-quant).
     """
     if spec.kind == "rtn":
         return _BoundGrid(spec=spec, where=where, table=None, max_level=float(INT4_MAX))
@@ -253,50 +281,57 @@ def _bind_grid(spec: GridSpec, fit_source: torch.Tensor, where: str) -> _BoundGr
     return _BoundGrid(spec=spec, where=where, table=table, max_level=1.0)
 
 
-# ---- GPTQ（層単位）----------------------------------------------------------
+# ---- GPTQ (per layer) ----------------------------------------------------------
 
 
 def _inverse_cholesky(
     hessian: torch.Tensor, where: str, damping: float = GPTQ_DAMPING
 ) -> torch.Tensor:
-    """damping 済み `H` の逆行列の上三角 Cholesky 因子 `U`（`H⁻¹ = Uᵀ U`）を F64 で返す。
+    """Return the upper-triangular Cholesky factor `U` of the inverse of the damped `H`
+    (`H⁻¹ = Uᵀ U`) in F64.
 
-    `λ = damping × mean(diag(H))` を対角へ加えるので、校正データで 1 度も動かなかった
-    入力チャネル（対角 0）が混ざっていても正定値性は保たれる。**H が丸ごと 0** のときだけ
-    `λ = 0` で特異になるので fail loudly — 「校正 forward に載っていない層を量子化した」を
-    沈黙させない。`damping = 0` を明示で渡した場合も同じ理由で正定値性の保証が消えるので、
-    ここは受け取らない（掃引の下端は 0 ではなく小さい正の値で刻む）。
+    `λ = damping × mean(diag(H))` is added to the diagonal, so positive definiteness holds even
+    with input channels that never moved on the calibration data (diagonal 0). Only when **H is 0
+    altogether** is `λ = 0` and H singular, so that fails loudly — so that "a layer outside the
+    calibration forward was quantized" is never silent. An explicit `damping = 0` loses the
+    positive-definiteness guarantee for the same reason, so it is not accepted here (a sweep's low
+    end steps through small positive values, not 0).
     """
     if not damping > 0.0:
         raise QuantizeError(
-            f"{where}: damping は正の値（実測 {damping}）— λ = 0 では対角 0 の入力チャネルが"
-            "残って H が特異になりうる"
+            f"{where}: damping must be positive (actual {damping}) — with λ = 0 input channels with"
+            " a 0 diagonal can remain and H can be singular"
         )
     wide = hessian.to(torch.float64)
     average = float(torch.diagonal(wide).mean())
-    # NaN も落とすので `<= 0` ではなく `not > 0` で書く（NaN は全比較が偽になる）。
+    # Written as `not > 0` rather than `<= 0` so that NaN fails too (every comparison with NaN is
+    # false).
     if not average > 0.0:
         raise QuantizeError(
-            f"{where}: Hessian の対角平均が {average:.4g}（正でない）— 校正入力が 1 行も"
-            "流れていないか全ゼロで、damping λ = 0 では H が特異になる"
+            f"{where}: the Hessian's diagonal mean is {average:.4g} (not positive) — no calibration"
+            " input row flowed, or it was all zero, and with damping λ = 0 H is singular"
         )
     damped = wide.clone()
     damped.diagonal().add_(damping * average)
     try:
         factor = torch.linalg.cholesky(damped)
         return torch.linalg.cholesky(torch.cholesky_inverse(factor), upper=True)
-    except RuntimeError as error:  # torch の LinAlgError は RuntimeError の派生
-        raise QuantizeError(f"{where}: Hessian の Cholesky 分解に失敗した（{error}）") from error
+    except RuntimeError as error:  # torch's LinAlgError derives from RuntimeError
+        raise QuantizeError(
+            f"{where}: the Cholesky decomposition of the Hessian failed ({error})"
+        ) from error
 
 
 def _static_group_scales(
     grid: _BoundGrid, rows: torch.Tensor, group_size: int
 ) -> list[torch.Tensor]:
-    """**丸める前**の重みの連続列ブロックごとに group scale を先に確定する（static-groups）。
+    """Settle the group scales up front per contiguous column block of the weights **before
+    rounding** (static-groups).
 
-    dynamic group（{@link _BoundGrid.scale_of} の docstring）が「group に到達した時点の現在値」
-    から採るのに対し、こちらは補償を 1 度も見ない元の `rows` から採る。処理順を並べ替えても
-    group の帰属と scale が動かないので、act-order の前提になる。
+    Dynamic groups (the docstring of {@link _BoundGrid.scale_of}) take them from "the current
+    values at the moment the group is reached"; this takes them from the original `rows`, which
+    have never seen compensation. Reordering the processing order then moves neither group
+    membership nor scales, which is the premise of act-order.
     """
     source = rows.to(torch.float32)
     return [
@@ -306,9 +341,10 @@ def _static_group_scales(
 
 
 def _activation_order(hessian: torch.Tensor) -> torch.Tensor:
-    """`diag(H)` の降順に列の**処理順**を返す（act-order）。
+    """Return the column **processing order** by descending `diag(H)` (act-order).
 
-    同値は元の列順が先（`stable=True`）— 乱数も実装依存のタイブレークも挟まない決定性 MUST。
+    Ties keep the original column order (`stable=True`) — the determinism MUST, with neither
+    randomness nor an implementation-dependent tie-break.
     """
     return torch.argsort(torch.diagonal(hessian), descending=True, stable=True)
 
@@ -317,69 +353,81 @@ def gptq_quantize_rows(
     rows: torch.Tensor,
     hessian: torch.Tensor,
     spec: GridSpec = DEFAULT_GRID,
-    where: str = "重み",
+    where: str = "weight",
     block_size: int = DEFAULT_GPTQ_BLOCK,
     *,
     static_groups: bool = False,
     act_order: bool = False,
     damping: float = GPTQ_DAMPING,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """`[チャネル, in]` に畳んだ重みを GPTQ で丸め、`(丸め済み rows, scale 台帳)` を返す。
+    """Round a weight folded into `[channel, in]` with GPTQ and return `(rounded rows, scale
+    ledger)`.
 
-    `hessian` は `H = Σ XᵀX`（`X` = この層への入力 `[tokens, in]`）の `[in, in]`。台帳は
-    `spec.kind == "rtn"` のときだけ `[チャネル, group 数]` の F32 で、それ以外は `None`
-    （モジュール docstring の MUST）。
+    `hessian` is the `[in, in]` `H = Σ XᵀX` (`X` = this layer's input `[tokens, in]`). The ledger is
+    F32 `[channel, group count]` only when `spec.kind == "rtn"`, and `None` otherwise (the MUST of
+    the module docstring).
 
-    手順は標準の列ブロック法:
+    The procedure is the standard column-block method:
 
-    1. `U = cholesky(H⁻¹, upper)` を採る（`H` は damping 済み — {@link _inverse_cholesky}）
-    2. 列 `j` を**現在値**からグリッドへ丸め、`err = (w_j − dq_j) / U[j,j]` を作る
-    3. ブロック内の残り列を `W[:, j+1:] −= err ⊗ U[j, j+1:]` で補償する
-    4. ブロック終端で、ブロック外の残り全列を `Err @ U[block, 残り]` で一括更新する
+    1. Take `U = cholesky(H⁻¹, upper)` (`H` is damped — {@link _inverse_cholesky})
+    2. Round column `j` onto the grid from its **current value** and form
+       `err = (w_j − dq_j) / U[j,j]`
+    3. Compensate the remaining columns in the block with `W[:, j+1:] −= err ⊗ U[j, j+1:]`
+    4. At the end of the block, update all remaining columns outside the block at once with
+       `Err @ U[block, rest]`
 
-    MUST: 台帳は**量子化に使った scale をそのまま**返す（`quantize_to_int8` /
-    `quantize_to_int4` と同文の再計算禁止だが、GPTQ ではさらに強い意味を持つ）— RTN では
-    group の amax 要素が必ず `|q| = 7` に乗るので引き直しても同じ scale が出るが、GPTQ は
-    補償で amax 要素を押し下げうる。押し下がった group では `|q|` が 7 に届かず、丸め済みの
-    重みから引き直すと 1ulp どころか**別の scale** になって格納値が復元されなくなる
-    （実測: 全 group で起きるわけではないので、テストは条件を満たす group を含む模型で門を
-    張っている — `tests/test_quant_calib.py`）。
+    MUST: the ledger returns **the scales used for quantization as is** (the same no-recomputation
+    rule as `quantize_to_int8` / `quantize_to_int4`, but it carries more weight in GPTQ) — with RTN
+    the group's amax element always lands on `|q| = 7`, so re-deriving gives the same scale, but
+    GPTQ can push the amax element down through compensation. In a group pushed down `|q|` does not
+    reach 7, and re-deriving from the rounded weights gives not a 1 ulp drift but **a different
+    scale**, and the stored values are no longer restored (observed: it does not happen in every
+    group, so the test builds its check on a model that contains a group meeting the condition —
+    `tests/test_quant_calib.py`).
 
-    NOTE: `block_size` は `group_size` の倍数へ丸められる（group が 2 つのブロックへ跨ると
-    「group の列に到達した時点の現在値」が採れなくなるため）。結果は数学的にはブロック長に
-    依らない。
+    NOTE: `block_size` is rounded to a multiple of `group_size` (if a group straddled two blocks,
+    "the current values at the moment the group's columns are reached" could not be taken). The
+    result does not depend on the block length mathematically.
 
-    `static_groups` / `act_order` / `damping` は**掃引用の opt-in 軸**（モジュール docstring）:
+    `static_groups` / `act_order` / `damping` are **opt-in axes for sweeps** (module docstring):
 
-    - `static_groups=True` … scale を**丸める前**の `rows` の連続列ブロックから先に一括確定する
-      （{@link _static_group_scales}）。台帳の意味は変わらない（**使った scale そのもの**）
-    - `act_order=True` … `diag(H)` 降順で列を処理する。`H` と `W` を perm で並べ替えて解き、
-      group の帰属は**元の列添字**（`perm[位置] // group_size`）から引き、丸め結果は元の列へ
-      直接書き戻す（upstream の `Q = Q[:, invperm]` と同値）。**`static_groups=True` が前提**
-    - `damping` … `_inverse_cholesky` の `λ` 係数。既定値のままなら経路はビット同一
+    - `static_groups=True` … the scales are settled up front from the contiguous column blocks of
+      `rows` **before rounding** ({@link _static_group_scales}). The meaning of the ledger does not
+      change (**the scales actually used**)
+    - `act_order=True` … columns are processed by descending `diag(H)`. `H` and `W` are reordered
+      by perm and solved, group membership is looked up from **the original column index**
+      (`perm[position] // group_size`), and the rounded result is written straight back to the
+      original column (equivalent to upstream's `Q = Q[:, invperm]`). **Requires
+      `static_groups=True`**
+    - `damping` … the `λ` factor of `_inverse_cholesky`. Left at the default, the path is
+      bit-identical
 
-    MUST: 既定（両 `False` × `damping=GPTQ_DAMPING`）は現行経路と**ビット同一**。
+    MUST: the default (both `False` × `damping=GPTQ_DAMPING`) is **bit-identical** to the current
+    path.
     """
     if act_order and not static_groups:
         raise QuantizeError(
-            f"{where}: act_order は static_groups=True が前提"
-            "（dynamic group は並べ替えた処理順の現在値から scale を採ることになり、"
-            "元の連続 group へ写し戻せない）"
+            f"{where}: act_order requires static_groups=True"
+            " (dynamic groups would take scales from the current values in the reordered"
+            " processing order, which cannot be mapped back to the original contiguous groups)"
         )
     if rows.dim() != 2:
         raise QuantizeError(
-            f"{where}: GPTQ の入力は `[チャネル, in]` の 2 次元（実測 {list(rows.shape)}）"
+            f"{where}: GPTQ input must be 2-D `[channel, in]` (actual {list(rows.shape)})"
         )
     in_axis = int(rows.shape[1])
     if hessian.dim() != 2 or list(hessian.shape) != [in_axis, in_axis]:
         raise QuantizeError(
-            f"{where}: Hessian は `[in, in]` = [{in_axis}, {in_axis}]（実測 {list(hessian.shape)}）"
+            f"{where}: the Hessian must be `[in, in]` = [{in_axis}, {in_axis}]"
+            f" (actual {list(hessian.shape)})"
         )
-    # 端数 group の fail loudly は格納側と同じ 1 本（ADR 0069 決定 2）。
+    # Remainder groups fail loudly through the same single path as the storage side (ADR 0069
+    # decision 2).
     groups = int(grouped_view(rows, spec.group_size, where).shape[-2])
     grid = _bind_grid(spec, rows, where)
     static = _static_group_scales(grid, rows, spec.group_size) if static_groups else None
-    # 並べ替えは `H` と `W` の**両方**へ同じ perm を当てる（`U` の添字も処理順の空間になる）。
+    # Reordering applies the same perm to **both** `H` and `W` (the indices of `U` live in the
+    # processing-order space too).
     order = _activation_order(hessian) if act_order else None
     upper = _inverse_cholesky(
         hessian if order is None else hessian[order][:, order], where, damping
@@ -387,10 +435,12 @@ def gptq_quantize_rows(
     block = spec.group_size * max(1, block_size // spec.group_size)
 
     work = (rows if order is None else rows[:, order]).to(torch.float64)
-    # 処理順の位置 → 元の列添字。`None` は恒等（既定経路は写しも tolist も作らない）。
+    # Position in processing order → original column index. `None` is the identity (the default
+    # path makes neither a copy nor a tolist).
     columns = None if order is None else order.tolist()
-    # 受け皿は**入力と同じデバイス**に作る（既定の `torch.empty` は CPU 固定なので、GPU の重みを
-    # 渡された瞬間に列の書き込みでデバイス不一致になる）。全 CPU なら従来と同じ置き場。
+    # The destination is created **on the same device as the input** (the default `torch.empty`
+    # is always on the CPU, so the moment GPU weights are passed, the column writes hit a device
+    # mismatch). All on CPU, it lives where it always did.
     rounded = torch.empty(rows.shape, dtype=torch.float32, device=rows.device)
     ledger = (
         torch.empty((int(rows.shape[0]), groups), dtype=torch.float32, device=rows.device)
@@ -400,8 +450,9 @@ def gptq_quantize_rows(
     if ledger is not None and static is not None:
         for index, fixed in enumerate(static):
             ledger[:, index] = fixed
-    # `scale` は各ブロックの `offset == 0` で必ず束縛される（static は全列・dynamic は group 先頭
-    # で採るが、ブロック長は group_size の倍数なので offset 0 は常に group 先頭）。
+    # `scale` is always bound at `offset == 0` of each block (static takes it for every column,
+    # dynamic at the head of a group, and the block length is a multiple of group_size, so offset 0
+    # is always the head of a group).
     for start in range(0, in_axis, block):
         stop = min(start + block, in_axis)
         span = work[:, start:stop].clone()
@@ -412,7 +463,8 @@ def gptq_quantize_rows(
             if static is not None:
                 scale = static[column // spec.group_size]
             elif not offset % spec.group_size:
-                # dynamic group — group の先頭列に到達した時点の**現在値**から採る。
+                # dynamic group — taken from the **current values** at the moment the group's first
+                # column is reached.
                 scale = grid.scale_of(span[:, offset : offset + spec.group_size].to(torch.float32))
                 if ledger is not None:
                     ledger[:, position // spec.group_size] = scale
@@ -428,18 +480,18 @@ def gptq_quantize_rows(
     return rounded, ledger
 
 
-# ---- AWQ（層単位）----------------------------------------------------------
+# ---- AWQ (per layer) ----------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class AwqSearch:
-    """AWQ の α 探索の結果（層ごと）。"""
+    """The result of AWQ's α search (per layer)."""
 
-    #: 採用した α（`{0, 1/16, …, 1}` の 17 点から）。
+    #: The chosen α (from the 17 points `{0, 1/16, …, 1}`).
     alpha: float
-    #: その α での目的関数値 `‖X·W_effᵀ − X·Wᵀ‖²`（F64 で積んだ値）。
+    #: The objective value at that α, `‖X·W_effᵀ − X·Wᵀ‖²` (accumulated in F64).
     error: float
-    #: per-in-channel の等価倍率 `s`（幾何平均 1・`[in]` F64）。
+    #: The per-in-channel equivalent factor `s` (geometric mean 1, `[in]` F64).
     channel_scale: torch.Tensor
 
 
@@ -448,37 +500,44 @@ def awq_search_scale(
     act_amax: torch.Tensor,
     samples: torch.Tensor,
     spec: GridSpec = DEFAULT_GRID,
-    where: str = "重み",
+    where: str = "weight",
 ) -> AwqSearch:
-    """活性の大きさから per-in-channel の等価倍率 `s` を探す（AWQ の α 掃引）。
+    """Search the per-in-channel equivalent factor `s` from the activation magnitudes (AWQ's α
+    sweep).
 
-    `s_j = clamp(act_amax_j, AWQ_ACT_EPS)^α` を**幾何平均 1** へ正規化し、
-    `W' = W·diag(s)` を `spec` のグリッドで fake-quant して `W_eff = Q(W')/s` を作る。
-    目的関数は捕捉した入力サンプル `X` に対する `‖X·W_effᵀ − X·Wᵀ‖²`（F64）で、最小の α を
-    採る。同値は**小さい α** が勝つ（決定性 MUST — `<` の狭義比較）。
+    `s_j = clamp(act_amax_j, AWQ_ACT_EPS)^α` is normalised to **geometric mean 1**,
+    `W' = W·diag(s)` is fake-quantized on the grid of `spec`, and `W_eff = Q(W')/s` is formed. The
+    objective is `‖X·W_effᵀ − X·Wᵀ‖²` (F64) over the captured input samples `X`, and the α with the
+    smallest value is taken. Ties go to **the smaller α** (the determinism MUST — a strict `<`
+    comparison).
 
-    幾何平均 1 の正規化が要るのは、`s` 全体の定数倍が group absmax scale に吸収されて
-    目的関数に効かないから（正規化しないと α の意味が「向き」だけになる）。
+    The geometric-mean-1 normalisation is needed because a constant factor on the whole of `s` is
+    absorbed by the group absmax scale and has no effect on the objective (without normalisation
+    α would mean only "a direction").
 
-    MUST: 返る `s` は**格納の一部**であって、`W_eff` を単独で格納しても復元されない
-    （モジュール docstring — group 内一定の `s` は absmax scale と相殺して RTN と同値に戻る）。
+    MUST: the returned `s` is **part of the storage**; storing `W_eff` alone does not restore it
+    (module docstring — an `s` constant within a group cancels against the absmax scale and returns
+    to the equivalent of RTN).
     """
     if rows.dim() != 2:
         raise QuantizeError(
-            f"{where}: AWQ の入力は `[チャネル, in]` の 2 次元（実測 {list(rows.shape)}）"
+            f"{where}: AWQ input must be 2-D `[channel, in]` (actual {list(rows.shape)})"
         )
     in_axis = int(rows.shape[1])
     if act_amax.dim() != 1 or int(act_amax.shape[0]) != in_axis:
         raise QuantizeError(
-            f"{where}: act_amax は `[in]` = [{in_axis}]（実測 {list(act_amax.shape)}）"
+            f"{where}: act_amax must be `[in]` = [{in_axis}] (actual {list(act_amax.shape)})"
         )
     if samples.dim() != 2 or int(samples.shape[1]) != in_axis:
         raise QuantizeError(
-            f"{where}: 入力サンプルは `[tokens, in]`（in = {in_axis}・実測 {list(samples.shape)}）"
+            f"{where}: input samples must be `[tokens, in]`"
+            f" (in = {in_axis}; actual {list(samples.shape)})"
         )
     if not int(samples.shape[0]):
-        raise QuantizeError(f"{where}: 入力サンプルが 0 行 — α の目的関数が全て 0 になる")
-    grouped_view(rows, spec.group_size, where)  # 端数 group を α ループの前に落とす
+        raise QuantizeError(
+            f"{where}: input samples have 0 rows — the α objective would be 0 everywhere"
+        )
+    grouped_view(rows, spec.group_size, where)  # drop remainder groups before the α loop
 
     amax = torch.clamp(act_amax.to(torch.float64), min=AWQ_ACT_EPS)
     inputs = samples.to(torch.float64)
@@ -497,41 +556,54 @@ def awq_search_scale(
         error = float((inputs @ effective.to(torch.float64).T - reference).pow(2).sum())
         if error < best_error:
             best_alpha, best_error, best_channel = alpha, error, channel
-    # MUST: NaN は `<` で常に偽なので、全 α が非有限だと初期値（α=0・error=inf）が黙って
-    # 「最適」として残る。診断を数値に化けさせず、非有限の出所を名指しで落とす。
+    # MUST: NaN is always false under `<`, so when every α is non-finite the initial values (α=0,
+    # error=inf) silently remain as "the optimum". Rather than letting the diagnostic turn into a
+    # number, fail naming the source of the non-finite values.
     if not math.isfinite(best_error):
         sources = [
             name
-            for name, tensor in (("重み", rows), ("act_amax", act_amax), ("入力サンプル", samples))
+            for name, tensor in (
+                ("weight", rows),
+                ("act_amax", act_amax),
+                ("input samples", samples),
+            )
             if not bool(torch.isfinite(tensor).all())
         ]
-        origin = "・".join(sources) if sources else "入力は全て有限 — 途中の計算が溢れた"
-        raise QuantizeError(f"{where}: AWQ の目的関数が全 α で非有限（出所: {origin}）")
+        origin = (
+            ", ".join(sources)
+            if sources
+            else "every input is finite — an intermediate computation overflowed"
+        )
+        raise QuantizeError(
+            f"{where}: the AWQ objective is non-finite for every α (source: {origin})"
+        )
     return AwqSearch(alpha=best_alpha, error=best_error, channel_scale=best_channel)
 
 
-# ---- stage 逐次の駆動 -------------------------------------------------------
+# ---- Stage-sequential driver -------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class LayerCalibReport:
-    """1 層ぶんの校正結果（数値の読み手が層を特定できる粒度）。"""
+    """The calibration result of one layer (at a granularity that lets a reader of the numbers
+    identify the layer)."""
 
-    #: モデル内 FQN（`<module>.weight`）。
+    #: In-model FQN (`<module>.weight`).
     fqn: str
-    #: 何番目の stage で処理したか（0 始まり）。
+    #: Index of the stage that processed it (0-based).
     stage: int
-    #: この層の統計に積んだ入力の行数（tokens）。
+    #: Number of input rows (tokens) accumulated into this layer's statistics.
     tokens: int
-    #: AWQ が採った α（GPTQ 単独では `None`）。
+    #: The α AWQ chose (`None` for GPTQ alone).
     alpha: float | None
-    #: AWQ の目的関数値（GPTQ 単独では `None`）。
+    #: AWQ's objective value (`None` for GPTQ alone).
     error: float | None
 
 
 @dataclass(frozen=True)
 class CalibReport:
-    """校正付き丸めの計数と台帳（`Int8Report` / `Int4Report` と同じ流儀の器）。"""
+    """Counts and ledger of calibrated rounding (a container in the same style as `Int8Report` /
+    `Int4Report`)."""
 
     method: str
     grid: str
@@ -540,7 +612,7 @@ class CalibReport:
     elements: int
     fit_stride: int
     layers: tuple[LayerCalibReport, ...]
-    #: 出荷できる scale 台帳 — `method="gptq"` × `grid="rtn"` のときだけ非 `None`。
+    #: The shippable scale ledger — non-`None` only for `method="gptq"` × `grid="rtn"`.
     int4: Int4Report | None
 
     @property
@@ -553,21 +625,22 @@ class CalibReport:
             f" / {self.elements:,} elements / group {self.group_size}"
         )
         if self.fit_stride > 1:
-            text += f" / fit_stride {self.fit_stride}（表は部分標本で fit）"
+            text += f" / fit_stride {self.fit_stride} (table fitted on a subsample)"
         alphas = [layer.alpha for layer in self.layers if layer.alpha is not None]
         if alphas:
             text += f" / AWQ α {min(alphas):.4g}〜{max(alphas):.4g}"
         text += (
-            " / scale 台帳あり（emit へ渡せる）"
+            " / scale ledger present (can be passed to emit)"
             if self.int4 is not None
-            else " / scale 台帳なし（格納には fold か companion が要る）"
+            else " / no scale ledger (storage needs a fold or a companion)"
         )
         return text
 
 
 @dataclass
 class _LayerStats:
-    """1 層ぶんの校正統計（H は 1 stage 分しか同時に持たない — メモリ設計の要）。"""
+    """Calibration statistics of one layer (H is held for only one stage at a time — the core of
+    the memory design)."""
 
     in_features: int
     tokens: int = 0
@@ -578,54 +651,58 @@ class _LayerStats:
 
 
 def first_tensor_output(output: object) -> torch.Tensor:
-    """stage 出力から次 stage の入力を選ぶ既定（Tensor はそのまま・tuple / list は先頭）。
+    """The default choice of the next stage's input from a stage output (a Tensor as is; the first
+    element of a tuple / list).
 
-    transformer ブロックは `(hidden, present_kv, …)` の tuple を返すことが多いので既定を
-    先頭要素にする。別の位置を使う stage は `select_output` で差し替える。
+    Transformer blocks often return a tuple `(hidden, present_kv, …)`, so the default is the first
+    element. A stage that uses another position swaps it in with `select_output`.
     """
     if isinstance(output, torch.Tensor):
         return output
     if isinstance(output, tuple | list) and output and isinstance(output[0], torch.Tensor):
         return output[0]
     raise QuantizeError(
-        f"stage の出力（{type(output).__name__}）から次 stage の入力を選べない"
-        "（`select_output` で選び方を渡す）"
+        f"cannot choose the next stage's input from the stage output ({type(output).__name__})"
+        " (pass how to choose it with `select_output`)"
     )
 
 
 def _owner_name(fqn: str) -> str:
-    """`iter_quant_targets` の FQN（`<module>.weight`）から所有モジュール名を戻す。"""
+    """Recover the owning module name from an `iter_quant_targets` FQN (`<module>.weight`)."""
     return "" if fqn == "weight" else fqn[: -len(".weight")]
 
 
 def _qualify(prefix: str, local: str) -> str:
-    """stage 内の局所 FQN をモデル内 FQN へ持ち上げる。"""
+    """Lift a local FQN within a stage to an in-model FQN."""
     return f"{prefix}.{local}" if prefix else local
 
 
 def _stage_device(stage: nn.Module) -> torch.device:
-    """stage の計算デバイス（先頭パラメータの置き場）。
+    """The stage's compute device (where its first parameter lives).
 
-    デバイスを引数で受けずに **stage から導く**のは、丸める重みが載っている場所と観測 forward を
-    回す場所が構造的に同じであることを保つため（引数で受ける形にすると、片方だけを動かした
-    呼び出しが「CPU の重みへ GPU の活性で選んだ丸め先」を書き戻せてしまう）。
+    The device is **derived from the stage** rather than taken as an argument, to keep the place
+    the weights to round live and the place the observation forward runs structurally the same
+    (taken as an argument, a call that moved only one of them could write back "rounding targets
+    chosen with GPU activations onto CPU weights").
     """
     parameter = next(stage.parameters(), None)
     if parameter is None:
         raise QuantizeError(
-            "stage がパラメータを 1 つも持たない — 校正の計算デバイスを導けない"
-            "（校正対象を抱える nn.Module を stage として渡す）"
+            "the stage has no parameters — cannot derive the calibration compute device"
+            " (pass an nn.Module that holds the calibration targets as the stage)"
         )
     return parameter.device
 
 
 def _moved(value: object, device: torch.device) -> object:
-    """バッチの 1 要素を `device` へ移す（Tensor と**素の** tuple / list の中身だけ）。
+    """Move one element of a batch to `device` (only Tensors and the contents of **plain** tuples /
+    lists).
 
-    組の中まで見るのは、実モデルの stage が rope の `(cos, sin)` のような**組**を keyword で
-    受けるから — 素通しにすると、置き場を揃えたはずのバッチの一部だけが計算デバイスへ運ばれず、
-    stage の中でデバイス不一致になる。逆に tuple の**派生**（namedtuple 等）は素通しにする
-    （再構築でフィールドの顔ぶれが壊れる形があり、運べない組は torch 側が fail loudly する）。
+    It looks inside tuples because real-model stages take **tuples** such as rope's `(cos, sin)` as
+    keywords — passing them through untouched would leave part of a batch whose placement was
+    supposed to be aligned off the compute device, and the stage would hit a device mismatch.
+    Conversely, **subclasses** of tuple (namedtuple and the like) are passed through (rebuilding
+    can break their set of fields, and torch fails loudly on a tuple that cannot be moved).
     """
     if isinstance(value, torch.Tensor):
         return value.to(device)
@@ -637,12 +714,13 @@ def _moved(value: object, device: torch.device) -> object:
 
 
 def _batch_on(batch: StageBatch, device: torch.device) -> StageBatch:
-    """1 バッチ中の Tensor だけを stage のデバイスへ移した写しを返す。
+    """Return a copy of one batch with only its Tensors moved to the stage's device.
 
-    校正バッチの置き場は**呼び出し側が決めたまま**にして、stage を回す直前にだけ運ぶ
-    （JIT 移動）。バッチ全部を計算デバイスへ常駐させる形にすると、GPU 校正では重みと校正入力が
-    同じ VRAM を取り合う。`Tensor.to` は同一デバイスなら self を返す no-op なので、全 CPU の
-    既定経路は 1bit も動かない。
+    The calibration batches stay **where the caller put them** and are moved only right before
+    the stage runs (JIT moves). Keeping every batch resident on the compute device would make the
+    weights and the calibration inputs compete for the same VRAM in GPU calibration. `Tensor.to`
+    is a no-op returning self on the same device, so the all-CPU default path does not move by a
+    single bit.
     """
     args, kwargs = batch
     return (
@@ -657,17 +735,20 @@ def _advance_batch(
     device: torch.device,
     select_output: Callable[[object], torch.Tensor],
 ) -> torch.Tensor:
-    """丸め済みの stage へ 1 バッチを通し、次 stage の入力を**元のデバイスへ戻して**返す。
+    """Run one batch through the rounded stage and return the next stage's input **moved back to
+    its original device**.
 
-    戻すのは校正バッチの置き場を不変にするため — 次 stage の入力を計算デバイスに置いたままに
-    すると、バッチ数ぶんの活性が丸ごと常駐して {@link _batch_on} の JIT 移動が無意味になる。
-    往復は 1 バッチにつき 1 回で、stage 1 つぶんの forward と GPTQ 解に対して無視できる。
+    It is moved back to keep the placement of the calibration batches unchanged — leaving the
+    next stage's inputs on the compute device would keep the activations of every batch resident
+    and make the JIT moves of {@link _batch_on} pointless. The round trip is once per batch,
+    negligible against one stage's forward and GPTQ solve.
     """
     args = batch[0]
     if not args or not isinstance(args[0], torch.Tensor):
         raise QuantizeError(
-            "校正バッチの先頭位置引数が Tensor でない"
-            "（stage 間の受け渡しは唯一の位置引数 = Tensor という形に閉じている）"
+            "the first positional argument of the calibration batch is not a Tensor"
+            " (hand-off between stages is closed to the form: the only positional argument ="
+            " a Tensor)"
         )
     moved_args, moved_kwargs = _batch_on(batch, device)
     return select_output(stage(*moved_args, **moved_kwargs)).detach().to(args[0].device)
@@ -676,23 +757,25 @@ def _advance_batch(
 def _make_pre_hook(
     stats: _LayerStats, needs_hessian: bool, needs_act: bool, sample_limit: int
 ) -> Callable[[nn.Module, tuple[object, ...]], None]:
-    """入力を素通ししつつ `H` / 活性統計 / 入力サンプルを積む forward_pre_hook。
+    """A forward_pre_hook that passes the input through while accumulating `H` / activation
+    statistics / input samples.
 
-    活性を書き換えないのが `act_quant.attach_act_quant` との違い — こちらは観測だけで、
-    校正 forward が出す数は元のモデルと 1bit も変わらない。
+    Not rewriting the activations is the difference from `act_quant.attach_act_quant` — this one
+    only observes, and the numbers the calibration forward produces do not differ from the
+    original model by a single bit.
     """
 
     def pre(_module: nn.Module, args: tuple[object, ...]) -> None:
         if not args or not isinstance(args[0], torch.Tensor):
             raise QuantizeError(
-                "校正対象の linear が位置引数の Tensor で呼ばれていない"
-                "（入力を観測できないので H が採れない）"
+                "the linear being calibrated was not called with a positional Tensor"
+                " (the input cannot be observed, so H cannot be taken)"
             )
         given = args[0].detach()
         if int(given.shape[-1]) != stats.in_features:
             raise QuantizeError(
-                f"校正入力の最終次元 {int(given.shape[-1])} が in_features "
-                f"{stats.in_features} と違う"
+                f"the last dimension of the calibration input {int(given.shape[-1])} differs"
+                f" from in_features {stats.in_features}"
             )
         plain = given.reshape(-1, stats.in_features)
         wide = plain.to(torch.float64)
@@ -728,58 +811,68 @@ def calibrate_stages(
     act_order: bool = False,
     damping: float = GPTQ_DAMPING,
 ) -> CalibReport:
-    """stage を 1 つずつ進めながら校正付き丸めを当てる（**校正データを 2 周しない**駆動）。
+    """Apply calibrated rounding while advancing one stage at a time (a driver that **does not
+    pass over the calibration data twice**).
 
-    `stages` は実行順の `(モデル内 FQN 接頭辞, モジュール)` の列、`batches` は**先頭 stage**
-    への `(位置引数, keyword 引数)` の列。stage `i` について:
+    `stages` is a sequence of `(in-model FQN prefix, module)` in execution order, and `batches` a
+    sequence of `(positional arguments, keyword arguments)` for **the first stage**. For stage
+    `i`:
 
-    1. 対象 linear へ観測フックを掛け、全バッチを forward して `H` / 活性統計を積む
-    2. その stage の対象を量子化する（`H` はここで捨てる — **同時に 1 stage 分**しか持たない）
-    3. **量子化後の重みで** stage を forward し直し、次 stage の入力を作る
+    1. Attach observation hooks to the target linears, forward every batch, and accumulate `H` /
+       activation statistics
+    2. Quantize that stage's targets (`H` is dropped here — only **one stage's worth** is held at
+       a time)
+    3. Forward the stage again **with the quantized weights** to build the next stage's inputs
 
-    3 が誤差伝播込みの標準 GPTQ の形 — 前段の劣化を後段が見た状態で丸めることになる。
+    Step 3 is the standard GPTQ form with error propagation — later stages round while seeing the
+    degradation of earlier ones.
 
-    stage 間の受け渡しは「選んだ出力を次 stage の**唯一の位置引数**にする」形（出力の選び方は
-    `select_output`）。keyword 引数は stage 間で不変とみなすのが既定で、変える必要がある場合は
-    `advance_kwargs(次 stage の添字, いまの kwargs) -> kwargs` を渡す。
+    Hand-off between stages takes the form "the chosen output becomes the **only positional
+    argument** of the next stage" (how to choose the output is `select_output`). Keyword arguments
+    are treated as unchanged across stages by default; when they need to change, pass
+    `advance_kwargs(next stage index, current kwargs) -> kwargs`.
 
-    対象は `nn.Linear`（とその派生）限定 — `H = Σ XᵀX` が「入力の最終次元 = in 軸」という
-    linear の形に閉じている（conv は im2col が要る）。列挙は
-    {@link quantize.iter_quant_targets} の共有で、`include` は**モジュール FQN**（stage 内の
-    局所名）の述語。
+    Targets are limited to `nn.Linear` (and its subclasses) — `H = Σ XᵀX` is closed to the linear
+    form "the input's last dimension = the in axis" (conv would need im2col). Enumeration is
+    shared with {@link quantize.iter_quant_targets}, and `include` is a predicate on the **module
+    FQN** (the local name within the stage).
 
-    1 本も丸められなかった場合は fail loudly（`quantize` / `quant_methods` と同じ常設診断）。
+    When not a single weight could be rounded it fails loudly (the same permanent diagnostic as
+    `quantize` / `quant_methods`).
 
-    NOTE（メモリ）: 同時に生きるのは「現 stage の入力バッチ全部 + 次 stage の入力バッチ全部
-    + 現 stage の `H`（対象 linear ごとに `in²` の F64）」。`in = 4096` の linear なら
-    `H` 1 本で 128MiB なので、stage あたりの対象本数が効く。
+    NOTE (memory): what lives at once is "every input batch of the current stage + every input
+    batch of the next stage + the current stage's `H` (F64 `in²` per target linear)". For a
+    linear with `in = 4096` one `H` is 128MiB, so the number of targets per stage matters.
 
-    NOTE（デバイス）: 計算デバイスは **stage 自身（先頭パラメータの置き場）から導く** —
-    引数では受けない。バッチは呼び出し側が置いた場所（既定運用では CPU）に留め、観測・前進の
-    forward の直前にだけ stage のデバイスへ運ぶ（{@link _batch_on}）。前進の出力も元のデバイスへ
-    戻す（{@link _advance_batch}）ので、常駐するのは「重み + `H` + 1 バッチ」だけで、GPU 校正でも
-    バッチ本数がメモリに効かない。全 CPU では `Tensor.to` が self を返す no-op なので、既定経路の
-    値も演算順も 1bit も変わらない。
+    NOTE (device): the compute device is **derived from the stage itself (where its first
+    parameter lives)** — it is not taken as an argument. Batches stay where the caller put them
+    (the CPU in the default setup) and are moved to the stage's device only right before the
+    observation and advance forwards ({@link _batch_on}). The advance outputs are moved back to
+    the original device too ({@link _advance_batch}), so only "the weights + `H` + 1 batch" stay
+    resident, and the batch count does not affect memory even in GPU calibration. On an all-CPU
+    run `Tensor.to` is a no-op returning self, so neither the values nor the order of operations
+    of the default path change by a single bit.
 
-    `static_groups` / `act_order` / `damping` は {@link gptq_quantize_rows} の掃引軸をそのまま
-    素通しする（GPTQ を通す方式でだけ効く — AWQ 単独の経路には `H` が無い）。既定は現行経路と
-    ビット同一。
+    `static_groups` / `act_order` / `damping` pass the sweep axes of {@link gptq_quantize_rows}
+    through as is (they matter only for methods that go through GPTQ — the AWQ-only path has no
+    `H`). The default is bit-identical to the current path.
     """
     if method not in CALIB_METHODS:
-        raise QuantizeError(f"方式 '{method}' は未対応（{', '.join(CALIB_METHODS)}）")
+        raise QuantizeError(f"method '{method}' is not supported ({', '.join(CALIB_METHODS)})")
     if not stages:
-        raise QuantizeError("stage が 1 つも無い（実行順の stage 列を渡す）")
+        raise QuantizeError("there are no stages (pass the stage sequence in execution order)")
     if not batches:
-        raise QuantizeError("校正バッチが 1 つも無い")
+        raise QuantizeError("there are no calibration batches")
     if samples < 1:
-        raise QuantizeError(f"samples は 1 以上（実測 {samples}）")
+        raise QuantizeError(f"samples must be 1 or more (actual {samples})")
     needs_hessian = method in ("gptq", "awq+gptq")
     needs_act = method in ("awq", "awq+gptq")
     if not needs_hessian and (static_groups or act_order or damping != GPTQ_DAMPING):
-        # `GridSpec.fit_stride` と同じ流儀 — 効かない軸を渡されて黙って無視しない。
+        # The same style as `GridSpec.fit_stride` — an axis that has no effect is not silently
+        # ignored when passed.
         raise QuantizeError(
-            f"方式 '{method}' は GPTQ を通さないので static_groups / act_order / damping は"
-            "効かない（黙って無視もしない）"
+            f"method '{method}' does not go through GPTQ, so static_groups / act_order / damping"
+            " have no effect (and are not silently ignored either)"
         )
 
     current: list[StageBatch] = [(tuple(args), dict(kwargs)) for args, kwargs in batches]
@@ -823,8 +916,8 @@ def calibrate_stages(
 
     if not reports:
         raise QuantizeError(
-            "校正付き丸めを指定したが対象の nn.Linear が 1 本も無い"
-            "（stage の綴りか include を確かめる）"
+            "calibrated rounding was requested but there is no target nn.Linear"
+            " (check the spelling of the stages or include)"
         )
     return CalibReport(
         method=method,
@@ -852,7 +945,8 @@ def _observe_stage(
     needs_act: bool,
     sample_limit: int,
 ) -> dict[str, _LayerStats]:
-    """フックを掛けて全バッチを 1 周し、対象ごとの校正統計を採って**必ず外す**。"""
+    """Attach the hooks, pass over every batch once, take the calibration statistics per target,
+    and **always detach** the hooks."""
     device = _stage_device(stage)
     lookup = dict(stage.named_modules())
     stats: dict[str, _LayerStats] = {}
@@ -889,17 +983,17 @@ def _quantize_layer(
     act_order: bool = False,
     damping: float = GPTQ_DAMPING,
 ) -> tuple[LayerCalibReport, torch.Tensor | None]:
-    """1 層を丸めて in-place 書き戻し、`(層レポート, scale 台帳 or None)` を返す。
+    """Round one layer, write it back in place, and return `(layer report, scale ledger or None)`.
 
-    AWQ 系は `W' = W·diag(s)` を丸めてから `W_eff = Q(W')/s` を書き戻すので、返る台帳は
-    常に `None`（`W_eff` の group amax は `Q(W')` の scale と対応しない — モジュール
-    docstring の fold / companion）。`awq+gptq` は実効入力が `x/s` になるぶん Hessian も
-    `H' = diag(1/s)·H·diag(1/s)` へ変換して渡す。
+    The AWQ family rounds `W' = W·diag(s)` and then writes back `W_eff = Q(W')/s`, so the returned
+    ledger is always `None` (the group amax of `W_eff` does not correspond to the scale of
+    `Q(W')` — the fold / companion of the module docstring). `awq+gptq` transforms the Hessian to
+    `H' = diag(1/s)·H·diag(1/s)` too, since the effective input becomes `x/s`.
     """
     where = f"'{fqn}'"
     if not stats.tokens:
         raise QuantizeError(
-            f"{where}: 校正入力が 1 行も流れていない（stage {stage} の forward に載っていない）"
+            f"{where}: no calibration input row flowed (not in the forward of stage {stage})"
         )
     rows = channel_rows(weight, axis)
     alpha: float | None = None

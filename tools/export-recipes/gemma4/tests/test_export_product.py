@@ -124,7 +124,7 @@ class TestPleBlockRanges:
 
     def test_a_single_row_over_the_limit_fails_loudly(self):
         """分割の粒度がこれ以上細かくできない形（黙って上限を破らない）。"""
-        with pytest.raises(PleError, match="block 上限"):
+        with pytest.raises(PleError, match="block limit"):
             self._values(4, 1, 4096, 1024)
 
 

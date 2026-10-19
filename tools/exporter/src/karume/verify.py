@@ -1,20 +1,24 @@
-"""IR の受理規則を Python 側でも全部見る（docs/ir-v2.md）と、コンテナとの合流。
+"""Checking every IR acceptance rule on the Python side too (docs/ir-v2.md), and the merge with
+the container.
 
-TS 側の正本は packages/runtime/src/format/ir.ts（グラフ単体の規則 — `parseIrDeclarationValue`）・
-packages/runtime/src/format/container/*.ts（2 文書の構造・codec 台帳・合流）・
-packages/runtime/src/ops/support.ts（ランタイム対応表との突合 — `assertRuntimeSupport`）。
-エクスポータが「書けるがランタイムが読めない」ファイルを出さないよう、書き出し経路の最後で
-同じ規則を通す。
+The TS sources of truth are packages/runtime/src/format/ir.ts (the rules of a graph alone —
+`parseIrDeclarationValue`), packages/runtime/src/format/container/*.ts (the structure of the 2
+documents, the codec ledger, the merge) and packages/runtime/src/ops/support.ts (the cross-check
+against the runtime support table — `assertRuntimeSupport`). So that the exporter never emits a
+file that "can be written but the runtime cannot read", the same rules are applied at the end of
+the write path.
 
-MUST: ここは fail loudly の門であって近似の場ではない — 未知キーも非正準表記も
-黙って無視せず、必ず例外にする（未リリースにつき前方互換チャネルは持たない）。
+MUST: this is a fail-loudly check, not a place for approximation — neither unknown keys nor
+non-canonical notation are silently ignored; they always raise (unreleased, so there is no
+forward-compatibility channel).
 
     uv run karume verify ../../models/karume-irodori-v4.1-small/v4.1-small/dit/model.i8.krm
 
-`parse_ir_graph` は exporter 内部の器（IR v1 — `karume.ir`）の JSON を検証しつつ読む。使う経路は
-3 つ: 容器の 2 文書から起こし直した文書の検査（{@link ir_graph_from_container}）・移行 CLI が
-旧 shard の `__metadata__` を読む経路（container-v1 §12）・公開面（`karume.__all__`）。
-配布形の検証（CLI）はコンテナだけを受ける。
+`parse_ir_graph` reads, while validating, the JSON of the exporter's internal structure (IR v1 —
+`karume.ir`). It is used on 3 paths: checking the document rebuilt from the container's 2
+documents ({@link ir_graph_from_container}), the migration CLI's path that reads the
+`__metadata__` of old shards (container-v1 §12), and the public surface (`karume.__all__`).
+Verifying a distribution (CLI) accepts only containers.
 """
 
 from __future__ import annotations
@@ -77,16 +81,18 @@ from karume.shapes import assert_graph_shapes, declared_shape
 
 
 class IrError(ValueError):
-    """グラフ JSON 単体で決まる規則の違反。"""
+    """A violation of a rule decided by the graph JSON alone."""
 
 
 class ContainerError(ValueError):
-    """safetensors のレイアウト規則の違反・capability 不足・容器 → IR 文書の変換の不整合、
-    および IR 受理規則違反の包み（{@link assert_ir_accepted}）。
+    """A violation of the safetensors layout rules, a missing capability, an inconsistency in the
+    container → IR document conversion, and the wrapper of IR acceptance violations
+    ({@link assert_ir_accepted}).
 
-    safetensors のレイアウト規則は移行 CLI の入力（旧 shard）と資産に掛かる。合流規則
-    （2 文書 + 束縛表）の違反はこの型ではなく `karume.container.ContainerFormatError`
-    （TS 側と同名の型）で出る — 型で分岐する呼び手は両方を捕まえる。
+    The safetensors layout rules apply to the migration CLI's input (old shards) and to assets.
+    Violations of the merge rules (2 documents + binding table) are raised not as this type but as
+    `karume.container.ContainerFormatError` (the type of the same name as on the TS side) — callers
+    that branch on type catch both.
     """
 
 
@@ -102,51 +108,53 @@ TOP_LEVEL_KEYS = (
     "nodes",
 )
 
-#: 省略可能なトップレベル節。`states` を持たないグラフ（= 既存の全モデル）は無風
-#: （ADR 0066 決定 2 の「states を出す最初のモデルまで無風」）。
+#: Optional top-level sections. A graph without `states` (= every existing model) is unaffected
+#: (ADR 0066 decision 2, "the exporter is unaffected until the first model that emits `states`").
 OPTIONAL_TOP_LEVEL_KEYS = ("states",)
 
 SEMANTIC_DTYPES = ("f32", "i32", "bool")
 STORAGE_DTYPES = ("f32", "f16", "bf16", "i8", "i4", "i2", "i32")
 
-#: scale / group_size の記述子を持てる格納 dtype（量子化格納）。TS 側は codec 台帳
-#: （`packages/runtime/src/format/container/codecs.ts` の CODEC_LEDGER）で `scale: "required"` の
-#: codec の layout がこの 3 語に当たる。
+#: Storage dtypes that may carry a scale / group_size descriptor (quantized storage). On the TS
+#: side, these 3 words are the layouts of the codecs with `scale: "required"` in the codec ledger
+#: (CODEC_LEDGER in `packages/runtime/src/format/container/codecs.ts`).
 QUANTIZED_STORAGE_DTYPES = ("i8", "i4", "i2")
 
-#: state スロットの dtype 語彙。現状 f32 のみ（ADR 0066 決定 2）。
+#: dtype vocabulary of state slots. Only f32 for now (ADR 0066 decision 2).
 STATE_DTYPES = ("f32",)
-#: 席だけが予約されている state スロットの dtype（ADR 0066 追記 5）。f16 格納は数値契約が
-#: 変わるので ADR 0058 流儀の opt-in が要る — それが無いうちは「語彙外」ではなく**未対応**。
+#: State slot dtypes that are only reserved (ADR 0066 addendum of 2026-08-17, item 5). f16 storage
+#: changes the numeric contract, so it needs an opt-in in the ADR 0058 style — until that exists it
+#: is **unsupported**, not "outside the vocabulary".
 RESERVED_STATE_DTYPES = ("f16",)
-#: state スロットの rank 上限（ADR 0066 決定 2 の「固定 rank（rank ≤ 4）」）。strided カーネルの
-#: 上限（ops.STRIDED_RANK）と同じ数値だが理由が別なので定数を共有しない。
+#: Rank limit of state slots (ADR 0066 decision 2, "fixed rank (rank ≤ 4)"). The same number as the
+#: strided kernels' limit (ops.STRIDED_RANK), but for a different reason, so the constant is not
+#: shared.
 MAX_STATE_RANK = 4
 
-#: initializer の意味論 dtype → 許される格納 dtype（docs/ir-v2.md「値と型」）。
-#: MUST: 交差を許さない — `i32` 宣言の initializer が f16 のビット列として読まれる
-#: 沈黙誤値になる。bool の initializer は語彙に無い。
+#: Semantic dtype of an initializer → allowed storage dtypes (docs/ir-v2.md "Values and types").
+#: MUST: no crossing — an initializer declared `i32` would be read as an f16 bit pattern, giving
+#: silently wrong values. There is no bool initializer in the vocabulary.
 INITIALIZER_STORAGE = {"f32": ("f32", "f16", "bf16", "i8", "i4", "i2"), "i32": ("i32",)}
 
 
-# ---- JSON 層 --------------------------------------------------------------
+# ---- JSON layer --------------------------------------------------------------
 
 
 def parse_graph_json(text: str) -> Any:
-    """グラフ JSON を読む。非有限値を含むものは受理しない。
+    """Read a graph JSON. Anything containing non-finite values is not accepted.
 
-    Python の json は `Infinity` / `NaN` リテラルを既定で受理するが、ブラウザの
-    JSON.parse は落ちる。加えて `1e999` は構文として有効なまま Infinity へ丸まるので、
-    リテラル名だけでなく**値レベル**で弾く（docs/ir-v2.md）。
+    Python's json accepts `Infinity` / `NaN` literals by default, but the browser's JSON.parse
+    fails. In addition, `1e999` stays syntactically valid while rounding to Infinity, so it is
+    rejected at the **value level**, not only by literal name (docs/ir-v2.md).
     """
 
     def reject_constant(literal: str) -> float:
-        raise IrError(f"グラフ JSON に非標準リテラル: {literal}")
+        raise IrError(f"Non-standard literal in graph JSON: {literal}")
 
     def parse_float(raw: str) -> float:
         value = float(raw)
         if not math.isfinite(value):
-            raise IrError(f"グラフ JSON の数値 '{raw}' が有限でない")
+            raise IrError(f"Number '{raw}' in graph JSON is not finite")
         return value
 
     try:
@@ -154,32 +162,32 @@ def parse_graph_json(text: str) -> Any:
     except IrError:
         raise
     except ValueError as cause:
-        raise IrError(f"グラフ JSON を解析できない: {cause}") from cause
+        raise IrError(f"Cannot parse graph JSON: {cause}") from cause
 
 
-# ---- 構造ヘルパ -----------------------------------------------------------
+# ---- Structure helpers -----------------------------------------------------------
 
 
 def _as_object(value: Any, where: str) -> dict:
     if not isinstance(value, dict):
-        raise IrError(f"{where}: オブジェクトでない")
+        raise IrError(f"{where}: is not an object")
     return value
 
 
 def _as_array(value: Any, where: str) -> list:
     if not isinstance(value, list):
-        raise IrError(f"{where}: 配列でない")
+        raise IrError(f"{where}: is not an array")
     return value
 
 
 def _as_nonempty_str(value: Any, where: str) -> str:
     if not isinstance(value, str) or value == "":
-        raise IrError(f"{where}: 空でない文字列でない")
+        raise IrError(f"{where}: is not a non-empty string")
     return value
 
 
 def _as_unique_strings(value: Any, where: str) -> list[str]:
-    """重複を許さない文字列配列（集合として扱う欄）。"""
+    """A string array that allows no duplicates (a field treated as a set)."""
     items = [
         _as_nonempty_str(item, f"{where}[{index}]")
         for index, item in enumerate(_as_array(value, where))
@@ -187,7 +195,7 @@ def _as_unique_strings(value: Any, where: str) -> list[str]:
     seen: set[str] = set()
     for item in items:
         if item in seen:
-            raise IrError(f"{where}: '{item}' が重複している")
+            raise IrError(f"{where}: '{item}' is duplicated")
         seen.add(item)
     return items
 
@@ -197,23 +205,29 @@ def _check_keys(
 ) -> None:
     for key in required:
         if key not in obj:
-            raise IrError(f"{where}: 必須キー '{key}' が無い")
+            raise IrError(f"{where}: required key '{key}' is missing")
     for key in obj:
         if key not in required and key not in optional:
-            raise IrError(f"{where}: 未知のキー '{key}'")
+            raise IrError(f"{where}: unknown key '{key}'")
 
 
 def _as_semantic_dtype(value: Any, where: str) -> str:
     dtype = _as_nonempty_str(value, where)
     if dtype not in SEMANTIC_DTYPES:
-        raise IrError(f"{where}: 意味論 dtype '{dtype}' は語彙外（{' / '.join(SEMANTIC_DTYPES)}）")
+        raise IrError(
+            f"{where}: semantic dtype '{dtype}' is outside the vocabulary"
+            f" ({' / '.join(SEMANTIC_DTYPES)})"
+        )
     return dtype
 
 
 def _as_storage_dtype(value: Any, where: str) -> str:
     dtype = _as_nonempty_str(value, where)
     if dtype not in STORAGE_DTYPES:
-        raise IrError(f"{where}: 格納 dtype '{dtype}' は語彙外（{' / '.join(STORAGE_DTYPES)}）")
+        raise IrError(
+            f"{where}: storage dtype '{dtype}' is outside the vocabulary"
+            f" ({' / '.join(STORAGE_DTYPES)})"
+        )
     return dtype
 
 
@@ -221,24 +235,27 @@ def _parse_shape(value: Any, symbols: set[str], where: str) -> list[int | str]:
     shape: list[int | str] = []
     for index, dim in enumerate(_as_array(value, where)):
         at = f"{where}[{index}]"
-        # bool は int の派生だが次元ではない。
+        # bool derives from int but is not a dimension.
         if isinstance(dim, bool):
-            raise IrError(f"{at}: 次元が数値でも文字列でもない")
-        # safe range 超過は下の int 側の検査（`> MAX_SAFE_INT`）に載る = TS の
-        # `Number.isSafeInteger` と同じ受理集合になる。
+            raise IrError(f"{at}: dimension is neither a number nor a string")
+        # Exceeding the safe range is caught by the int-side check below (`> MAX_SAFE_INT`) = the
+        # same accepted set as TS `Number.isSafeInteger`.
         dim = integral_float_to_int(dim)
         if isinstance(dim, int):
             if dim < 0 or dim > MAX_SAFE_INT:
-                raise IrError(f"{at}: 次元 {dim} が非負整数でない")
+                raise IrError(f"{at}: dimension {dim} is not a non-negative integer")
             shape.append(dim)
             continue
         if not isinstance(dim, str):
-            raise IrError(f"{at}: 次元が数値でも文字列でもない")
+            raise IrError(f"{at}: dimension is neither a number nor a string")
         expr = try_parse_dim(dim)
         if expr is None:
-            raise IrError(f"{at}: 次元式 '{dim}' が正準文法 coeff·sym+offset に適合しない")
+            raise IrError(
+                f"{at}: dimension expression '{dim}' does not fit the canonical grammar"
+                " coeff·sym+offset"
+            )
         if expr.sym not in symbols:
-            raise IrError(f"{at}: シンボル '{expr.sym}' が graph.symbols で宣言されていない")
+            raise IrError(f"{at}: symbol '{expr.sym}' is not declared in graph.symbols")
         shape.append(dim)
     return shape
 
@@ -247,28 +264,31 @@ def _as_state_dtype(value: Any, where: str) -> str:
     dtype = _as_nonempty_str(value, where)
     if dtype in RESERVED_STATE_DTYPES:
         raise IrError(
-            f"{where}: state スロットの dtype '{dtype}' は未対応"
-            "（ADR 0066 追記 5 の席予約 — 数値契約の opt-in が要る）"
+            f"{where}: state slot dtype '{dtype}' is not supported"
+            " (reserved by ADR 0066 addendum item 5 — needs an opt-in of the numeric contract)"
         )
     if dtype not in STATE_DTYPES:
         raise IrError(
-            f"{where}: state スロットの dtype '{dtype}' は語彙外（{' / '.join(STATE_DTYPES)}）"
+            f"{where}: state slot dtype '{dtype}' is outside the vocabulary"
+            f" ({' / '.join(STATE_DTYPES)})"
         )
     return dtype
 
 
 def _parse_state(value: Any, symbols: set[str], where: str) -> IrState:
-    """state スロット 1 本の宣言（ADR 0066 決定 2・TS 側 parseStateSlot の鏡像）。
+    """Declaration of one state slot (ADR 0066 decision 2; mirrors parseStateSlot on the TS side).
 
-    MUST: shape は**容量込みの具体形**なので数値次元は正整数（`values` の非負とは違う — 容量 0 の
-    スロットは束縛できる実体を持たない）。rank は 1..MAX_STATE_RANK（容量軸を持たない rank 0 は
-    「容量込み」を満たせない）。記号次元は `symbols` 宣言済みならよく、**states の shape も
-    束縛点になる**（`createGenerationContext` が決める容量 — ADR 0066 追記 7。
-    _check_symbol_bindability）。
+    MUST: the shape is **a concrete shape including the capacity**, so numeric dimensions are
+    positive integers (unlike the non-negative ones of `values` — a slot of capacity 0 has no body
+    that can be bound). The rank is 1..MAX_STATE_RANK (rank 0, with no capacity axis, cannot
+    "include the capacity"). A symbolic dimension is fine if declared in `symbols`, and **the
+    states shape is a binding point too** (the capacity `createGenerationContext` decides — ADR
+    0066 addendum item 7; _check_symbol_bindability).
 
-    省略可能キー `external`（ADR 0096 段 2）は「実体を自分で確保しない = 借り先 context の
-    スロットを名前で引く」宣言。MUST: 受理するのは `true` だけ — `false` は欄の不存在と同義で、
-    同じ意味に 2 通りの綴りを作ると「どちらの規則で読むべきか」が宣言から決まらなくなる。
+    The optional key `external` (ADR 0096 stage 2) declares "do not allocate the body yourself =
+    look up the borrowed context's slot by name". MUST: only `true` is accepted — `false` means the
+    same as the field being absent, and two spellings for one meaning would leave "which rule to
+    read it by" undetermined by the declaration.
     """
     obj = _as_object(value, where)
     _check_keys(obj, ["dtype", "shape"], ["external"], where)
@@ -278,28 +298,34 @@ def _parse_state(value: Any, symbols: set[str], where: str) -> IrState:
     if "external" in obj:
         if obj["external"] is not True:
             raise IrError(
-                f"{where}.external: true のみ（{obj['external']!r} — false は欄の不存在と同義）"
+                f"{where}.external: only true ({obj['external']!r} — false means the same as the"
+                " field being absent)"
             )
         external = True
     if not 1 <= len(shape) <= MAX_STATE_RANK:
         raise IrError(
-            f"{where}.shape: rank {len(shape)} は 1..{MAX_STATE_RANK} の外"
-            "（固定 rank の容量込み具体形 MUST）"
+            f"{where}.shape: rank {len(shape)} is outside 1..{MAX_STATE_RANK}"
+            " (MUST be a concrete shape of fixed rank including the capacity)"
         )
     for index, dim in enumerate(shape):
         if isinstance(dim, int) and dim < 1:
-            raise IrError(f"{where}.shape[{index}]: 次元 {dim} が正整数でない（容量が取れない）")
+            raise IrError(
+                f"{where}.shape[{index}]: dimension {dim} is not a positive integer (no capacity"
+                " can be taken)"
+            )
     return IrState(dtype=dtype, shape=shape, external=external)
 
 
 def _parse_storage(value: Any, where: str, *, shared: bool = False) -> IrStorage:
-    """格納の記述子。
+    """The storage descriptor.
 
-    `shared`（ADR 0096 段 2 の共有 initializer）は **`dtype` の 1 キーだけ**を持つ: 借り手の
-    容器にはバイトが 1 つも無いので、付随実体を記述する欄（`scale`）も group の刻み
-    （`group_size`）も**貸し手側だけが持つ**。写すと同じ事実が 2 箇所に生え、どちらで dequant
-    するかが宣言から決まらない。i8 / i4 の「scale 必須」「i4 は group_size 必須」も
-    この側には掛からない（掛けると共有宣言が原理的に書けない）。
+    `shared` (the shared initializer of ADR 0096 stage 2) has **only the one key `dtype`**: the
+    borrower's container holds not a single byte, so both the field describing the companion bytes
+    (`scale`) and the group step (`group_size`) are **held only by the lender**. Copying them would
+    grow the same fact in two places, and which one to dequantize with would be undetermined by
+    the declaration. The i8 / i4 "scale required" and "i4 requires group_size" do not apply on
+    this side either (applying them would make a shared declaration impossible to write in
+    principle).
     """
     obj = _as_object(value, where)
     _check_keys(obj, ["dtype"], ["scale", "group_size"], where)
@@ -309,43 +335,49 @@ def _parse_storage(value: Any, where: str, *, shared: bool = False) -> IrStorage
     if shared and (has_scale or has_group_size):
         extra = sorted(key for key in ("scale", "group_size") if key in obj)
         raise IrError(
-            f"{where}: 共有 initializer は {extra} を宣言できない"
-            "（バイトを持たない側なので、付随実体と group の刻みは貸し手の常駐重みが正本）"
+            f"{where}: a shared initializer cannot declare {extra}"
+            " (it is the side without bytes, so the lender's resident weight is the source of"
+            " truth for the companion bytes and the group step)"
         )
-    # scale / group_size は量子化格納の記述子。非量子化 dtype に付いているのは
-    # エクスポータの取り違えなので受理しない（黙って無視すると格納の意味が二重化する）。
+    # scale / group_size describe quantized storage. On a non-quantized dtype they are an
+    # exporter mix-up, so they are not accepted (silently ignoring them would give the storage two
+    # meanings).
     if dtype not in QUANTIZED_STORAGE_DTYPES and (has_scale or has_group_size):
-        raise IrError(f"{where}: 格納 dtype '{dtype}' に scale / group_size は付けられない")
-    # MUST: i8 / i4 は scale を**明示宣言**する
-    # （ADR 0019 / 0069・TS 側は codec 台帳の `scale: "required"` と
-    # packages/runtime/src/format/container/descriptor.ts の parseEncoding の鏡像）。
-    # 既定 1.0 で補完すると、scale の書き忘れが「全チャネル 1.0 で dequant した重み」に化けて
-    # ロードも実行も通ってしまう（差が O(scale) で出るのに、どこにも例外が出ない）。
+        raise IrError(f"{where}: storage dtype '{dtype}' cannot have scale / group_size")
+    # MUST: i8 / i4 **declare** the scale explicitly
+    # (ADR 0019 / 0069; on the TS side this mirrors `scale: "required"` in the codec ledger and
+    # parseEncoding in packages/runtime/src/format/container/descriptor.ts).
+    # Filling in a default of 1.0 would turn a forgotten scale into "weights dequantized with 1.0
+    # on every channel", and both loading and running would pass (the difference shows up at
+    # O(scale), yet no exception is raised anywhere).
     if dtype in QUANTIZED_STORAGE_DTYPES and not has_scale and not shared:
-        raise IrError(f"{where}: 格納 dtype '{dtype}' には scale（scale テンソルのキー）が要る")
-    # MUST: i4 は group_size を**明示宣言**する（ADR 0069 決定 2）。group 長が決まらない
-    # 4bit 格納は scale の引き直し位置が決まらず、展開が黙って別の値を出す。
+        raise IrError(f"{where}: storage dtype '{dtype}' requires scale (the scale tensor's key)")
+    # MUST: i4 **declares** group_size explicitly (ADR 0069 decision 2). 4-bit storage without a
+    # decided group length has no decided position to look up the scale again, and the decode
+    # silently gives different values.
     if dtype == "i2" and has_group_size:
-        raise IrError(f"{where}: i2 は行ごとの scale のみ（group_size は付けられない）")
+        raise IrError(f"{where}: i2 has a per-row scale only (group_size cannot be given)")
     if dtype == "i4" and not has_group_size and not shared:
-        raise IrError(f"{where}: 格納 dtype 'i4' には group_size が要る（ADR 0069 決定 2）")
+        raise IrError(f"{where}: storage dtype 'i4' requires group_size (ADR 0069 decision 2)")
     scale = _as_nonempty_str(obj["scale"], f"{where}.scale") if has_scale else None
     group_size = None
     if has_group_size:
         raw = integral_float_to_int(obj["group_size"])
         if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
-            raise IrError(f"{where}.group_size: 正整数でない")
-        # TS 側は JSON の数値として読むので 2^53−1 を超える値は整数として持てない
-        # （packages/runtime/src/format/container/descriptor.ts の parseEncoding — `groupSize` は
-        # 安全整数のみ受理）。ここで受理するとランタイムだけが落ちる。
+            raise IrError(f"{where}.group_size: is not a positive integer")
+        # The TS side reads it as a JSON number, so a value beyond 2^53−1 cannot be held as an
+        # integer (parseEncoding in packages/runtime/src/format/container/descriptor.ts —
+        # `groupSize` accepts safe integers only). Accepting it here would make only the runtime
+        # fail.
         if raw > MAX_SAFE_INT:
-            raise IrError(f"{where}.group_size: {raw} が安全整数 2^53−1 を超える")
-        # MUST: i4 の group 長は 2 冪かつ 16 以上（ADR 0069 決定 2 — ORT と同制約）。この制約が
-        # 行境界・group 境界を常にバイト整列させ、末尾ゼロ詰め無しで u32 束縛が成立する。
+            raise IrError(f"{where}.group_size: {raw} exceeds the safe integer 2^53−1")
+        # MUST: the i4 group length is a power of 2 and 16 or more (ADR 0069 decision 2 — the same
+        # constraint as ORT). This constraint keeps row and group boundaries always byte-aligned,
+        # so the u32 binding holds without tail zero padding.
         if dtype == "i4" and (raw & (raw - 1) != 0 or raw < MIN_GROUP_SIZE):
             raise IrError(
-                f"{where}.group_size: {raw} が 2 冪かつ {MIN_GROUP_SIZE} 以上でない"
-                "（ADR 0069 決定 2）"
+                f"{where}.group_size: {raw} is not a power of 2 that is {MIN_GROUP_SIZE} or more"
+                " (ADR 0069 decision 2)"
             )
         group_size = raw
     return IrStorage(dtype=dtype, scale=scale, group_size=group_size)
@@ -354,52 +386,53 @@ def _parse_storage(value: Any, where: str, *, shared: bool = False) -> IrStorage
 def _parse_node_states(
     obj: Mapping[str, Any], slots: Mapping[str, IrState], where: str
 ) -> dict[str, str]:
-    """ノードの `states` 欄（ADR 0067 決定 4・TS 側 parseNodeStates の鏡像）。
+    """A node's `states` field (ADR 0067 decision 4; mirrors parseNodeStates on the TS side).
 
-    ここで見るのは**グラフ単体で決まる 3 点**だけ: plain object であること・キーと値が空でない
-    文字列であること・値が `graph.states` で宣言済みのスロット名であること。
+    This checks **only the 3 points decided by the graph alone**: that it is a plain object, that
+    keys and values are non-empty strings, and that each value is a slot name declared in
+    `graph.states`.
 
-    MUST: 未宣言スロットの参照は fail loudly。通すと「実体を持たない名前を読む」ノードが
-    Session 構築を抜け、確保も束縛もされないまま実行段で初めて落ちる（値側の前方参照拒否と
-    同じ層の規則）。
+    MUST: a reference to an undeclared slot fails loudly. Passing it would let a node that "reads
+    a name without a body" through Session construction, neither allocated nor bound, failing only
+    at the execution step (a rule of the same layer as rejecting forward references on the value
+    side).
 
-    NOTE: キー集合そのもの（`{k,v}` ちょうど / `{slot}` ちょうど）は op 契約の担当
-    （ops.assert_node_contract）— パーサは op 語彙を知らない。
+    NOTE: the key set itself (exactly `{k,v}` / exactly `{slot}`) belongs to the op contract
+    (ops.assert_node_contract) — the parser does not know the op vocabulary.
     """
     states: dict[str, str] = {}
     if "states" not in obj:
         return states
     for key, value in _as_object(obj["states"], f"{where}.states").items():
-        _as_nonempty_str(key, f"{where}.states のキー")
+        _as_nonempty_str(key, f"key of {where}.states")
         slot = _as_nonempty_str(value, f"{where}.states['{key}']")
         if slot not in slots:
             raise IrError(
-                f"{where}.states['{key}']: state スロット '{slot}' が graph.states で"
-                "宣言されていない"
+                f"{where}.states['{key}']: state slot '{slot}' is not declared in graph.states"
             )
         states[key] = slot
     return states
 
 
-# ---- グラフ単体の規則 -----------------------------------------------------
+# ---- Rules of a graph alone -----------------------------------------------------
 
 
 def parse_ir_graph(text: str) -> IrGraph:
-    """グラフ JSON（IR v1 の器）を検証しつつ読む。
+    """Read a graph JSON (the IR v1 structure) while validating it.
 
-    TS 側はグラフ単体の規則を packages/runtime/src/format/ir.ts の parseIrDeclarationValue、格納の
-    規則（scale 必須・groupSize など）を packages/runtime/src/format/container/descriptor.ts の
-    parseEncoding と packages/runtime/src/format/container/bind.ts の束縛（bindGraphs）が持つ
-    （それらを合わせたものと同義）。bind.ts の mergedGraph は合流の結果を IrGraph に写すだけで、
-    検査はしない。
+    On the TS side, the rules of a graph alone are held by parseIrDeclarationValue in
+    packages/runtime/src/format/ir.ts, and the storage rules (scale required, groupSize and so on)
+    by parseEncoding in packages/runtime/src/format/container/descriptor.ts and the binding
+    (bindGraphs) in packages/runtime/src/format/container/bind.ts (this equals those combined).
+    mergedGraph in bind.ts only copies the merged result into an IrGraph and checks nothing.
     """
     root = _as_object(parse_graph_json(text), "graph")
     _check_keys(root, TOP_LEVEL_KEYS, OPTIONAL_TOP_LEVEL_KEYS, "graph")
 
     if root["format"] != IR_FORMAT:
-        raise IrError(f"graph.format が '{IR_FORMAT}' でない: {root['format']!r}")
+        raise IrError(f"graph.format is not '{IR_FORMAT}': {root['format']!r}")
     if root["version"] != IR_VERSION or isinstance(root["version"], bool):
-        raise IrError(f"graph.version が {IR_VERSION} でない: {root['version']!r}")
+        raise IrError(f"graph.version is not {IR_VERSION}: {root['version']!r}")
 
     requires = _as_object(root["requires"], "graph.requires")
     _check_keys(requires, ["ops"], [], "graph.requires")
@@ -408,7 +441,7 @@ def parse_ir_graph(text: str) -> IrGraph:
     symbols = _as_unique_strings(root["symbols"], "graph.symbols")
     for symbol in symbols:
         if not is_symbol_name(symbol):
-            raise IrError(f"graph.symbols: シンボル名 '{symbol}' が不正")
+            raise IrError(f"graph.symbols: symbol name '{symbol}' is invalid")
     symbol_set = set(symbols)
 
     inputs: list[IrInput] = []
@@ -428,12 +461,14 @@ def parse_ir_graph(text: str) -> IrGraph:
 
     values: dict[str, IrValue] = {}
     for name, raw in _as_object(root["values"], "graph.values").items():
-        # 空の値名は拒否する（TS 側 packages/runtime/src/format/ir.ts の鏡像）— 参照側
-        # （入力名・ノードの入出力・グラフ出力）はどれも空でない文字列しか受理しないので、
-        # 通すと「宣言はできるが原理的に参照できない値」になる。空名の values と空名の
-        # initializers を**対で**書かれると孤立宣言の門が互いに満たされて発火しないため、
-        # ここを緩めると参照不能な実テンソルが配布形に居座る。
-        _as_nonempty_str(name, "graph.values の値名")
+        # An empty value name is rejected (mirrors packages/runtime/src/format/ir.ts on the TS
+        # side) — every referencing side (input names, node inputs / outputs, graph outputs)
+        # accepts only non-empty strings, so passing it would give "a value that can be declared
+        # but in principle never referenced". When empty-named values and empty-named
+        # initializers are written **as a pair**, they satisfy each other's orphan-declaration
+        # check and it does not fire, so loosening this would let an unreferenceable real tensor
+        # sit in the distribution.
+        _as_nonempty_str(name, "value name of graph.values")
         where = f"graph.values['{name}']"
         obj = _as_object(raw, where)
         _check_keys(obj, ["dtype", "shape"], [], where)
@@ -444,14 +479,15 @@ def parse_ir_graph(text: str) -> IrGraph:
 
     initializers: dict[str, IrInitializer] = {}
     for name, raw in _as_object(root["initializers"], "graph.initializers").items():
-        # 空の initializer 名も同じ理由で拒否する（上の values と対 — 片方だけ塞ぐと
-        # 「空名の対」がそのまま通る）。
-        _as_nonempty_str(name, "graph.initializers の initializer 名")
+        # An empty initializer name is rejected for the same reason (the counterpart of values
+        # above — blocking only one of them lets "the empty-named pair" through as is).
+        _as_nonempty_str(name, "initializer name of graph.initializers")
         where = f"graph.initializers['{name}']"
         obj = _as_object(raw, where)
-        # 共有 initializer（ADR 0096 段 2）は `tensor` の代わりに `shared` を持つ。**排他**で、
-        # 両方書かれた形は「バイトを持つのか借りるのか」が宣言から決まらない
-        # （`_check_keys` の必須キー集合を切り替えることが、そのまま排他の執行になる）。
+        # A shared initializer (ADR 0096 stage 2) has `shared` instead of `tensor`. They are
+        # **exclusive**; with both written, "does it hold bytes or borrow them" is undetermined by
+        # the declaration (switching the required key set of `_check_keys` is itself what
+        # enforces the exclusion).
         if "shared" in obj:
             _check_keys(obj, ["shared", "storage"], [], where)
             shared_obj = _as_object(obj["shared"], f"{where}.shared")
@@ -469,13 +505,14 @@ def parse_ir_graph(text: str) -> IrGraph:
             storage=_parse_storage(obj["storage"], f"{where}.storage"),
         )
 
-    # 省略は空スロット集合として扱う（節を持たないグラフが無風 — ADR 0066 決定 2）。
+    # Omission is treated as an empty slot set (a graph without the section is unaffected — ADR
+    # 0066 decision 2).
     states: dict[str, IrState] = {}
     for name, raw in _as_object(root.get("states", {}), "graph.states").items():
-        # 空のスロット名は拒否する — 参照側の欄（ADR 0067）は空でない文字列だけを受理するので、
-        # 通すと「宣言はできるが原理的に参照できないスロット」になる（values は孤立宣言検査が
-        # 同じ穴を塞いでいる）。
-        _as_nonempty_str(name, "graph.states のスロット名")
+        # An empty slot name is rejected — the referencing fields (ADR 0067) accept only non-empty
+        # strings, so passing it would give "a slot that can be declared but in principle never
+        # referenced" (for values the orphan-declaration check closes the same hole).
+        _as_nonempty_str(name, "slot name of graph.states")
         states[name] = _parse_state(raw, symbol_set, f"graph.states['{name}']")
 
     nodes: list[IrNode] = []
@@ -483,9 +520,10 @@ def parse_ir_graph(text: str) -> IrGraph:
         where = f"graph.nodes[{index}]"
         obj = _as_object(raw, where)
         _check_keys(obj, ["op", "ins", "outs", "attrs"], ["states"], where)
-        # NOTE: `outs` の本数はここでは見ない（0 本 = 値を定義しない effect op が語彙に入った —
-        # ADR 0067 決定 5）。「0 本を許すのは契約が effect を宣言する op だけ」の執行点は契約層
-        # （assert_node_contract の出力数突合）で、パーサは本数に意味を与えない。
+        # NOTE: the number of `outs` is not checked here (0 = an effect op that defines no value
+        # joined the vocabulary — ADR 0067 decision 5). "Only ops whose contract declares an
+        # effect may have 0" is enforced in the contract layer (the output count cross-check of
+        # assert_node_contract); the parser gives the count no meaning.
         nodes.append(
             IrNode(
                 op=_as_nonempty_str(obj["op"], f"{where}.op"),
@@ -520,7 +558,8 @@ def parse_ir_graph(text: str) -> IrGraph:
 
 
 def _symbols_in(shape: Sequence[IrDim]) -> set[str]:
-    """shape に現れるシンボル名（次元位置の出現のみ — 要素数からの逆算はしない）。"""
+    """Symbol names that appear in a shape (only occurrences in dimension positions — no
+    inference back from element counts)."""
     return {parse_dim(dim).sym for dim in shape if isinstance(dim, str)}
 
 
@@ -530,18 +569,21 @@ def _check_symbol_bindability(
     states: Mapping[str, IrState],
     values: Mapping[str, IrValue],
 ) -> None:
-    """宣言されたシンボルは**束縛点を持つ** MUST。束縛点は 2 つ（ADR 0066 追記 7）:
+    """A declared symbol MUST **have a binding point**. There are two binding points (ADR 0066
+    addendum item 7):
 
-    1. **入力 shape の次元位置**（run ごとの実寸から解く — TS 側 `runtime/plan.ts` の
-       `bindSymbols`）。派生形（`2T` / `T+8`）でもよい — 1 次元 1 シンボルの一次式は実寸から
-       解が一意に決まる（ADR 0057）。
-    2. **states の shape の次元位置**（`createGenerationContext(spec.bindings)` が決める KV 容量 —
-       context 生成時にユーザーが決める値なので、export 時定数に焼く形は ADR 0066 決定 3
-       〈静的物理格納〉と矛盾する）。
+    1. **A dimension position of an input shape** (solved from each run's actual sizes —
+       `bindSymbols` in `runtime/plan.ts` on the TS side). A derived form (`2T` / `T+8`) is fine
+       too — a linear expression of one symbol per dimension has a unique solution from the actual
+       size (ADR 0057).
+    2. **A dimension position of a states shape** (the KV capacity
+       `createGenerationContext(spec.bindings)` decides — a value the user decides when creating
+       the context, so baking it as an export-time constant contradicts ADR 0066 decision 3
+       "static physical storage").
 
-    MUST: **states 専用記号（states にしか現れない記号）は値 shape に現れてはならない**
-    （追記 7）。通常値 shape の解決に効くのは入力由来の束縛だけなので、現れると実行時に必ず
-    束縛不能になる — 宣言の時点で落とす。
+    MUST: **a states-only symbol (a symbol that appears only in states) must not appear in a value
+    shape** (addendum item 7). Only input-derived bindings resolve ordinary value shapes, so its
+    appearance would always be unbindable at run time — reject it at declaration time.
     """
     from_inputs: set[str] = set()
     for spec in inputs:
@@ -552,16 +594,16 @@ def _check_symbol_bindability(
     for symbol in symbols:
         if symbol not in from_inputs and symbol not in from_states:
             raise IrError(
-                f"graph.symbols: '{symbol}' が入力 shape / states shape の次元位置に現れない"
-                " — 束縛が取れない"
+                f"graph.symbols: '{symbol}' appears in no dimension position of an input shape /"
+                " states shape — it cannot be bound"
             )
     for name, value in values.items():
         for symbol in sorted(_symbols_in(value.shape)):
             if symbol not in from_states or symbol in from_inputs:
                 continue
             raise IrError(
-                f"graph.values['{name}']: states 専用記号 '{symbol}' が値 shape に現れる"
-                "（値 shape の解決に効くのは入力由来の束縛だけ — ADR 0066 追記 7）"
+                f"graph.values['{name}']: states-only symbol '{symbol}' appears in a value shape"
+                " (only input-derived bindings resolve value shapes — ADR 0066 addendum item 7)"
             )
 
 
@@ -571,12 +613,15 @@ def _check_definitions(
     nodes: Sequence[IrNode],
     outputs: Sequence[str],
 ) -> set[str]:
-    """SSA 単一代入 + トポロジカル順（前方参照拒否）+ outputs の定義済み検査。"""
+    """SSA single assignment + topological order (forward references rejected) + the check that
+    outputs are defined."""
     defined: set[str] = set()
 
     def define(name: str, where: str) -> None:
         if name in defined:
-            raise IrError(f"{where}: 値 '{name}' が二重に定義されている（SSA 単一代入違反）")
+            raise IrError(
+                f"{where}: value '{name}' is defined twice (violates SSA single assignment)"
+            )
         defined.add(name)
 
     for spec in inputs:
@@ -586,47 +631,56 @@ def _check_definitions(
     for index, node in enumerate(nodes):
         where = f"graph.nodes[{index}] ({node.op})"
         for ref in node.ins:
-            # nodes はトポロジカル順で格納される MUST — 前方参照を許すと実行順が
-            # 暗黙の依存解析任せになる。
+            # nodes MUST be stored in topological order — allowing forward references would leave
+            # the execution order to implicit dependency analysis.
             if ref not in defined:
-                raise IrError(f"{where}: 入力 '{ref}' が未定義（前方参照または未宣言）")
+                raise IrError(
+                    f"{where}: input '{ref}' is undefined (forward reference or undeclared)"
+                )
         for out in node.outs:
             define(out, where)
     for output in outputs:
         if output not in defined:
-            raise IrError(f"graph.outputs: '{output}' が未定義")
+            raise IrError(f"graph.outputs: '{output}' is undefined")
     return defined
 
 
 def _check_group_quantized_shape(name: str, initializer: IrInitializer, value: IrValue) -> None:
-    """group 量子化格納（i4）の宣言 shape と group 長の整合（ADR 0069 決定 2・
-    TS 側は合流層 packages/runtime/src/format/container/bind.ts の group の刻みの検査）。
+    """Consistency of the declared shape and the group length of group-quantized storage (i4)
+    (ADR 0069 decision 2; on the TS side, the group step check of the merge layer
+    packages/runtime/src/format/container/bind.ts).
 
-    量子化軸は**格納行**（先頭次元を除く残りの平坦化 — linear `[O,I]` の in 軸・embedding
-    `[V,D]` の D 軸・conv1d `[Cout,Cin,K]` の受容野 `Cin·K`）で、その行長が `group_size` で
-    割り切れることが MUST（rank2 の重みでは「最終次元」と同値 — ADR 0069 決定 3 の rank 非依存
-    規則）。端数 group を許すと最後の group だけ scale の担当範囲が短くなり、行境界が語境界から
-    ずれて平坦添字の展開が黙って別の値を出す（端数を作らない制約で整列問題そのものを消す設計）。
+    The quantized axis is **the storage row** (the flattening of everything but the leading
+    dimension — the in axis of linear `[O,I]`, the D axis of embedding `[V,D]`, the receptive
+    field `Cin·K` of conv1d `[Cout,Cin,K]`), and its row length MUST be divisible by `group_size`
+    (for a rank 2 weight this equals "the last dimension" — the rank-independent rule of ADR 0069
+    decision 3). Allowing a fractional group would shorten only the last group's scale range,
+    shift row boundaries off word boundaries, and make the decode of flat indices silently give
+    different values (a design that removes the alignment problem itself by never creating
+    fractions).
     """
-    # 値域（2 冪かつ 16 以上）は _parse_storage が保証済み。存在は型の上でだけ optional なので、
-    # 黙って読み飛ばさず言い直す（TS 側 checkGroupQuantizedShape と同じ流儀）。
+    # The value range (a power of 2 and 16 or more) is guaranteed by _parse_storage. Presence is
+    # optional only in the type, so restate it instead of silently skipping (the same style as
+    # checkGroupQuantizedShape on the TS side).
     group_size = initializer.storage.group_size
     if group_size is None:
-        raise IrError(f"graph.initializers['{name}']: 格納 i4 なのに group_size が無い")
+        raise IrError(f"graph.initializers['{name}']: storage i4 but no group_size")
     if len(value.shape) < 2:
         raise IrError(
-            f"graph.values['{name}']: 格納 i4 の initializer に量子化軸が無い"
-            f"（rank {len(value.shape)} — 行軸と量子化軸で rank 2 以上が要る）"
+            f"graph.values['{name}']: an initializer with storage i4 has no quantized axis"
+            f" (rank {len(value.shape)} — needs rank 2 or more, a row axis and a quantized axis)"
         )
     row_length = 1
     for dim in value.shape[1:]:
         if not isinstance(dim, int):
-            raise IrError(f"graph.values['{name}']: 格納 i4 の shape に記号次元は使えない")
+            raise IrError(
+                f"graph.values['{name}']: the shape of storage i4 cannot use a symbolic dimension"
+            )
         row_length *= dim
     if row_length % group_size != 0:
         raise IrError(
-            f"graph.values['{name}']: 格納 i4 の行長 {row_length} が"
-            f" group_size {group_size} で割り切れない（ADR 0069 決定 2）"
+            f"graph.values['{name}']: row length {row_length} of storage i4 is not divisible by"
+            f" group_size {group_size} (ADR 0069 decision 2)"
         )
 
 
@@ -637,47 +691,58 @@ def _check_declarations(
     nodes: Sequence[IrNode],
     defined: set[str],
 ) -> None:
-    """宣言の完全性: 入力は inputs[] が、initializer とノード出力は values{} が、
-    それぞれちょうど 1 回宣言する。孤立宣言（誰も定義しない values）も fail loudly。
+    """Completeness of declarations: inputs are declared by inputs[], initializers and node
+    outputs by values{}, each exactly once. An orphan declaration (values nobody defines) also
+    fails loudly.
     """
     input_names = {spec.name for spec in inputs}
     for name in values:
         if name in input_names:
-            raise IrError(f"graph.values['{name}']: 入力は inputs[] で宣言済み（二重宣言）")
+            raise IrError(
+                f"graph.values['{name}']: the input is already declared in inputs[] (declared"
+                " twice)"
+            )
         if name not in defined:
-            raise IrError(f"graph.values['{name}']: どのノードでも定義されない宣言")
+            raise IrError(f"graph.values['{name}']: a declaration no node defines")
     for name in initializers:
         if name not in values:
-            raise IrError(f"graph.initializers['{name}']: values に dtype/shape 宣言が無い")
-        # 意味論と格納の組は INITIALIZER_STORAGE だけが決める（格納 dtype の実行可否は
-        # 別層 — 対応表突合）。
+            raise IrError(f"graph.initializers['{name}']: no dtype/shape declaration in values")
+        # Only INITIALIZER_STORAGE decides the pairing of semantics and storage (whether a
+        # storage dtype can run is a separate layer — the support table cross-check).
         allowed = INITIALIZER_STORAGE.get(values[name].dtype)
         if allowed is None:
             raise IrError(
-                f"graph.values['{name}']: initializer の意味論 dtype '{values[name].dtype}' は"
-                " 語彙外（f32 / i32 のみ）"
+                f"graph.values['{name}']: the initializer's semantic dtype '{values[name].dtype}'"
+                " is outside the vocabulary (f32 / i32 only)"
             )
         storage_dtype = initializers[name].storage.dtype
         if storage_dtype not in allowed:
             raise IrError(
-                f"graph.initializers['{name}']: 意味論 dtype '{values[name].dtype}' に"
-                f" 格納 dtype '{storage_dtype}' は組めない（{' / '.join(allowed)} のみ）"
+                f"graph.initializers['{name}']: semantic dtype '{values[name].dtype}' cannot pair"
+                f" with storage dtype '{storage_dtype}' ({' / '.join(allowed)} only)"
             )
-        # initializer は束縛前に確定していなければ束縛表の block 長と突合できない。
+        # An initializer that is not fixed before binding cannot be checked against the block
+        # length of the binding table.
         if any(not isinstance(dim, int) for dim in values[name].shape):
-            raise IrError(f"graph.values['{name}']: initializer の shape に記号次元は使えない")
+            raise IrError(
+                f"graph.values['{name}']: an initializer's shape cannot use a symbolic dimension"
+            )
         if storage_dtype == "i2":
             shape = values[name].shape
             if len(shape) != 2 or any(dim <= 0 for dim in shape) or shape[1] % 16:
-                raise IrError(f"graph.values['{name}']: i2 は正の rank 2・行長は16の倍数が必要")
-        # 共有 initializer は group_size を宣言できない（_parse_storage）— group の刻みは
-        # 貸し手の常駐重みが正本で、貸し手の容器が合流層で見る（ADR 0096 段 2）。
+                raise IrError(
+                    f"graph.values['{name}']: i2 requires a positive rank 2 with a row length that"
+                    " is a multiple of 16"
+                )
+        # A shared initializer cannot declare group_size (_parse_storage) — the lender's
+        # resident weight is the source of truth for the group step, and the merge layer checks
+        # the lender's container (ADR 0096 stage 2).
         if storage_dtype == "i4" and not initializers[name].is_shared:
             _check_group_quantized_shape(name, initializers[name], values[name])
     for node in nodes:
         for out in node.outs:
             if out not in values:
-                raise IrError(f"graph.values: ノード出力 '{out}' の dtype/shape 宣言が無い")
+                raise IrError(f"graph.values: no dtype/shape declaration for node output '{out}'")
 
 
 def _check_state_slots(
@@ -686,46 +751,51 @@ def _check_state_slots(
     defined: set[str],
     nodes: Sequence[IrNode],
 ) -> None:
-    """state スロット名の検査（TS 側 checkStateSlots の鏡像）。
+    """Check state slot names (mirrors checkStateSlots on the TS side).
 
-    スロットは値ではない（`ins` / `outs` で参照されず、ノードからは別の欄で名前参照する —
-    ADR 0066 決定 1・0067 決定 4）ので**値名前空間とは別**だが、**同名は拒否する**: 別名前空間の
-    同名は「スロット名を書くべき欄に値名を書いた / その逆」を検出できなくするだけで、表現力を
-    何も足さない。scale テンソルのキーを他 initializer の実体と衝突させない規則（ADR 0019）と
-    同じ流儀。
+    A slot is not a value (it is not referenced in `ins` / `outs`; nodes reference it by name in a
+    separate field — ADR 0066 decision 1, 0067 decision 4), so it is **a namespace separate from
+    values**, but **a shared name is rejected**: the same name in separate namespaces only makes
+    "a value name written where a slot name belongs / or the reverse" undetectable, and adds no
+    expressive power. The same style as the rule that keeps scale tensor keys from colliding with
+    other initializers' bodies (ADR 0019).
 
-    **参照完全性**（ADR 0067 決定 4 / 5）: 宣言されたスロットは少なくとも 1 つのノードの
-    `states` 欄から参照される MUST。誰も参照しないスロットは values の孤立宣言と同じ穴で、
-    GenerationContext が確保だけして誰も読まない容量（KV なら数十 MiB 単位）が黙って残る。
+    **Reference completeness** (ADR 0067 decisions 4 / 5): a declared slot MUST be referenced from
+    the `states` field of at least one node. A slot nobody references is the same hole as an
+    orphan declaration in values: the GenerationContext silently keeps capacity it allocates but
+    nobody reads (tens of MiB for KV).
 
-    MUST: 衝突検査を**先**に置く（値名と同名のスロットは参照の有無に関わらず取り違えなので、
-    「参照されていない」という別の診断に化けさせない）。
+    MUST: put the collision check **first** (a slot with the same name as a value is a mix-up
+    whether or not it is referenced, so do not let it turn into the different diagnosis "not
+    referenced").
     """
     for name in states:
         if name in defined or name in values:
             raise IrError(
-                f"graph.states['{name}']: 値名と同名"
-                "（state スロットは値名前空間と別 — 取り違えを拒否する）"
+                f"graph.states['{name}']: same name as a value"
+                " (state slots are separate from the value namespace — the mix-up is rejected)"
             )
     referenced = {slot for node in nodes for slot in node.states.values()}
     for name in states:
         if name not in referenced:
-            raise IrError(f"graph.states['{name}']: どのノードからも参照されない宣言")
+            raise IrError(f"graph.states['{name}']: a declaration no node references")
 
 
 def _check_required_ops(required_ops: Sequence[str], nodes: Sequence[IrNode]) -> None:
-    """requires.ops ≡ nodes で実際に使われる op 集合（ランタイム突合の前提）。"""
+    """requires.ops ≡ the set of ops actually used in nodes (the precondition of the runtime
+    cross-check)."""
     used = {node.op for node in nodes}
     declared = set(required_ops)
     missing = sorted(used - declared)
     extra = sorted(declared - used)
     if missing or extra:
         raise IrError(
-            f"graph.requires.ops が使用 op 集合と一致しない: 宣言漏れ {missing} / 余剰 {extra}"
+            f"graph.requires.ops does not match the set of ops used: undeclared {missing} /"
+            f" surplus {extra}"
         )
 
 
-# ---- ランタイム対応表との突合 ---------------------------------------------
+# ---- Cross-check against the runtime support table ---------------------------------------------
 
 
 def _declared_dtype(graph: IrGraph, name: str) -> str:
@@ -736,143 +806,155 @@ def _declared_dtype(graph: IrGraph, name: str) -> str:
 
 
 def _assert_sym_prefix_slice(graph: IrGraph, node: IrNode, where: str) -> None:
-    """sym_prefix_slice の**グラフ文脈が要る**契約
-    （ADR 0010 / packages/runtime/src/runtime/plan.ts と同義）。
+    """The contract of sym_prefix_slice that **needs graph context** (ADR 0010 / the same as
+    packages/runtime/src/runtime/plan.ts).
 
-    1. `sym` が graph.symbols にある（無ければランタイムが束縛を取れず prefix 長が決まらない）
-    2. `dim` が入力 rank の内側
-    3. 入力の宣言 shape が**記号を含まない静的形**（= Tmax 形）
+    1. `sym` is in graph.symbols (otherwise the runtime cannot bind it and the prefix length is
+       undetermined)
+    2. `dim` is within the input rank
+    3. The input's declared shape is **a static shape without symbols** (= the Tmax shape)
 
-    MUST: 3 は束縛後の数値 shape からは見分けが付かない（T = Tmax の run では一致する）。
-    宣言の形を見られるここでしか検出できない。
+    MUST: 3 cannot be told apart from the numeric shape after binding (they agree on a run with T =
+    Tmax). It can only be detected here, where the declared shape is visible.
     """
     sym, slices = sym_prefix_slice_attrs(node.attrs, where)
     if sym not in graph.symbols:
         raise IrError(
-            f"{where}: sym_prefix_slice の sym '{sym}' が graph.symbols {graph.symbols} に無い"
+            f"{where}: sym '{sym}' of sym_prefix_slice is not in graph.symbols {graph.symbols}"
         )
     source = declared_shape(graph, node.ins[0])
     if any(not isinstance(dim, int) for dim in source):
         raise IrError(
-            f"{where}: sym_prefix_slice の入力 '{node.ins[0]}' の宣言 shape {source} に"
-            " 記号次元がある（入力は Tmax で焼いた静的形でなければならない）"
+            f"{where}: sym_prefix_slice input '{node.ins[0]}' has a declared shape {source} with"
+            " a symbolic dimension (the input must be a static shape baked at Tmax)"
         )
     for entry in slices:
         if entry["dim"] >= len(source):
             raise IrError(
-                f"{where}: sym_prefix_slice の dim {entry['dim']} が入力 rank {len(source)} の外"
+                f"{where}: dim {entry['dim']} of sym_prefix_slice is outside the input rank"
+                f" {len(source)}"
             )
 
 
 def _show_window(touch: tuple[int, str, int | None]) -> str:
-    """`_assert_state_order` の診断片（`(nodes 添字, op 名, window)` → 表示形）。"""
+    """A diagnostic fragment of `_assert_state_order` (`(nodes index, op name, window)` → display
+    form)."""
     index, op, window = touch
-    return f"nodes[{index}] ({op}) は {'宣言なし' if window is None else window}"
+    return f"nodes[{index}] ({op}) has {'no declaration' if window is None else window}"
 
 
 def _assert_state_order(graph: IrGraph) -> None:
-    """state effect の順序（ADR 0067 決定 5b の②・TS 側 `runtime/plan.ts` の assertStateOrder の
-    鏡像）。
+    """The order of state effects (item ② of ADR 0067 decision 5b; mirrors assertStateOrder in
+    `runtime/plan.ts` on the TS side).
 
-    state 参照は**テンソルのデータ辺を張らない**ため DAG のトポロジ順では順序が決まらず、
-    契約は `nodes` **配列順**そのもの。束縛に依存しないので、スロットごとに 3 点を見る:
+    State references **draw no tensor data edges**, so the DAG's topological order does not
+    decide their order; the contract is the `nodes` **array order** itself. It does not depend on
+    bindings, so 3 points are checked per slot:
 
-    1. `state_append` は 1 スロットにつき**1 本まで**（1 step に 2 回書く形は ring の位置式が
-       二重に進み、読者が見る過去が step の途中で変わる）
-    2. append が在るなら**そのスロットに触れる最後のノード**（append より後に読者が居ると、
-       その読者は「今 step の k/v を過去として二重に読む」）
-    3. 同一スロットに触れる全ノードの `window` は**存在有無も値も一致**（論理 col → 物理 row の
-       写像は読み書き同式 MUST — ADR 0067 決定 4。読み側だけ別式にすると沈黙誤読）
+    1. **At most one** `state_append` per slot (writing twice in one step advances the ring's
+       position formula twice, and the past a reader sees changes partway through the step)
+    2. If there is an append, it is **the last node that touches the slot** (a reader after the
+       append would "read this step's k/v twice, as the past")
+    3. The `window` of every node touching the same slot **agrees in presence and value** (the
+       mapping logical col → physical row MUST be the same formula for reads and writes — ADR
+       0067 decision 4; a different formula on the read side alone gives silent misreads)
 
-    external スロット（ADR 0096 段 2）には**さらに 3 点**が乗る（TS 側 `plan.ts` の
-    `validateGraphContracts` / `assertStateOrder` と同じ規律）:
+    External slots (ADR 0096 stage 2) carry **3 more points** (the same discipline as
+    `validateGraphContracts` / `assertStateOrder` in `plan.ts` on the TS side):
 
-    4. external と自前スロットの**混在は拒否**（external が 1 本でもあるグラフは全スロットが
-       external）。借り手 context は自前スロットを持たないので、混ざった宣言は「どちらの
-       確保規則で作るか」がグラフから決まらない
-    5. external への `state_append` は **0 本**（実体は貸し手のもの — 借り手が書くと、貸し手の
-       論理長を進めないまま物理 ring を汚す）
-    6. external の読者は **readonly attention だけ** / 逆に readonly が読むスロットは
-       **external だけ**。普通の states 形 attention が external を読む形は「今 step の k/v を
-       貸し手のスロットへ足したうえで読む」意味になり、5 と正面から食い違う
+    4. **A mix** of external and owned slots **is rejected** (in a graph with even one external
+       slot, every slot is external). A borrowing context has no owned slots, so with a mixed
+       declaration "which allocation rule creates it" is undetermined by the graph
+    5. **No** `state_append` to an external slot (the body is the lender's — a borrower writing to
+       it would dirty the physical ring without advancing the lender's logical length)
+    6. The readers of an external slot are **readonly attention only** / conversely, the slots
+       readonly reads are **external only**. An ordinary states-form attention reading an
+       external slot would mean "add this step's k/v to the lender's slot and then read", which
+       directly contradicts 5
 
-    MUST: fail loudly。3 点とも「順序 / 宣言の誤り」が例外ではなく**別の値**として出る種類の
-    破れなので、書き出しの時点でしか止められない。
+    MUST: fail loudly. In all 3 points, an "order / declaration error" is the kind of breakage that
+    shows up not as an exception but as **different values**, so it can only be stopped at write
+    time.
     """
     external = {name for name, slot in graph.states.items() if slot.external}
     if external and external != set(graph.states):
         owned = sorted(set(graph.states) - external)
         raise IrError(
-            f"state スロット: external {sorted(external)} と自前 {owned} が混在している"
-            "（external が 1 本でもあるグラフは全スロットが external MUST — ADR 0096 段 2）"
+            f"State slots: external {sorted(external)} and owned {owned} are mixed"
+            " (in a graph with even one external slot, every slot MUST be external — ADR 0096"
+            " stage 2)"
         )
     touches: dict[str, list[tuple[int, str, int | None]]] = {}
     for index, node in enumerate(graph.nodes):
         if not node.states:
             continue
         where = f"nodes[{index}] ({node.op})"
-        # attrs の値域検査は assert_node_contract が済ませている（ここは引き直すだけ）。
+        # assert_node_contract has already checked the value ranges of attrs (this only looks
+        # them up again).
         window = state_window(node.attrs, where)
         readonly = node.op == ATTENTION_OP and attention_readonly(node.attrs)
         for slot in node.states.values():
             touches.setdefault(slot, []).append((index, node.op, window))
             if slot in external and not readonly:
                 raise IrError(
-                    f"state スロット '{slot}' は external なのに {where} が readonly でない形で"
-                    "触れている（読者は readonly attention だけ・書き込みは 0 本 MUST —"
-                    " ADR 0096 段 2）"
+                    f"State slot '{slot}' is external but {where} touches it in a form that is"
+                    " not readonly (readers MUST be readonly attention only, with no writes —"
+                    " ADR 0096 stage 2)"
                 )
             if readonly and slot not in external:
                 raise IrError(
-                    f"{where}: readonly attention が自前スロット '{slot}' を読んでいる"
-                    "（readonly が読めるのは external スロットだけ — ADR 0096 段 2）"
+                    f"{where}: readonly attention reads owned slot '{slot}'"
+                    " (readonly can read external slots only — ADR 0096 stage 2)"
                 )
     for slot, touched in touches.items():
         appends = [entry for entry in touched if entry[1] == STATE_APPEND_OP]
         if len(appends) > 1:
             listed = ", ".join(f"nodes[{index}]" for index, _, _ in appends)
             raise IrError(
-                f"state スロット '{slot}': {STATE_APPEND_OP} が {len(appends)} 本（{listed}）"
-                " — 1 step に 1 回まで（ADR 0067 決定 5b）"
+                f"State slot '{slot}': {STATE_APPEND_OP} appears {len(appends)} times ({listed})"
+                " — at most once per step (ADR 0067 decision 5b)"
             )
         last = touched[-1]
         if len(appends) == 1 and last[1] != STATE_APPEND_OP:
             raise IrError(
-                f"state スロット '{slot}': {STATE_APPEND_OP}（nodes[{appends[0][0]}]）より後に"
-                f"読者 nodes[{last[0]}] ({last[1]}) が居る"
-                "（append は当該スロットに触れる最後のノード MUST — ADR 0067 決定 5b）"
+                f"State slot '{slot}': {STATE_APPEND_OP} (nodes[{appends[0][0]}]) is followed by"
+                f" reader nodes[{last[0]}] ({last[1]})"
+                " (the append MUST be the last node touching the slot — ADR 0067 decision 5b)"
             )
         first = touched[0]
         mismatch = next((entry for entry in touched if entry[2] != first[2]), None)
         if mismatch is not None:
             raise IrError(
-                f"state スロット '{slot}': attrs.window が食い違う"
-                f"（{_show_window(first)} / {_show_window(mismatch)}）"
-                " — 論理 col → 物理 row の写像は読み書き同式 MUST（ADR 0067 決定 4）"
+                f"State slot '{slot}': attrs.window disagrees"
+                f" ({_show_window(first)} / {_show_window(mismatch)})"
+                " — the mapping logical col → physical row MUST be the same formula for reads and"
+                " writes (ADR 0067 decision 4)"
             )
 
 
 def assert_runtime_support(graph: IrGraph) -> None:
-    """M0 ランタイムが実行できる形かを突合する（packages/runtime/src/ops/support.ts の
-    assertRuntimeSupport と同義）。
+    """Cross-check whether the M0 runtime can execute the graph (the same as assertRuntimeSupport
+    in packages/runtime/src/ops/support.ts).
 
-    MUST: op 名だけでなく**意味論 dtype と attrs まで**見る。名前だけの突合は
-    「対応表にはあるのに実行時に落ちる」を作る（ADR 0005）。非対応は**全件列挙**する。
+    MUST: check not only op names but **down to semantic dtypes and attrs**. A cross-check of names
+    alone produces "in the support table yet fails at run time" (ADR 0005). Unsupported items are
+    **listed in full**.
 
-    NOTE: 見る範囲は意味論の契約（OP_CONTRACTS）と capability 表（support.ts の鏡像）まで。
-    ランタイムの計画時の subset 門 — conv3d の `groups == 1`（ADR 0118 決定 1）・
-    `assertStaticLayoutAxis`・`assertCatAxis`（packages/runtime/src/runtime/plan.ts の
-    `validateGraphContracts`）— は写していない。support.ts 自身がそれらを持たないので、
-    鏡像を名乗る以上ここにも足さない。その形は verify を通り、Session 構築で runtime が
-    op と attrs を名指して fail loudly にする。
+    NOTE: the scope is the semantic contracts (OP_CONTRACTS) and the capability table (the mirror
+    of support.ts). The runtime's plan-time subset checks — conv3d's `groups == 1` (ADR 0118
+    decision 1), `assertStaticLayoutAxis`, `assertCatAxis` (`validateGraphContracts` in
+    packages/runtime/src/runtime/plan.ts) — are not copied. support.ts itself does not have them,
+    so as long as this claims to be its mirror, they are not added here either. Such a shape
+    passes verify, and at Session construction the runtime fails loudly naming the op and attrs.
     """
     missing_ops: set[str] = set()
-    # dtype 違反は宣言（値名）単位に重複除去する — 素朴に積むと件数が
-    # 「直すべき宣言の本数」より多く出て、列挙の指標としての意味が薄れる。
+    # dtype violations are deduplicated per declaration (value name) — piling them up naively
+    # would give more entries than "the number of declarations to fix", weakening the meaning of
+    # the listing as an indicator.
     bad_dtypes: dict[str, str] = {}
     bad_attrs: list[str] = []
-    # 転送層の軸。どのノードも消費しない入力にも制約が実在するので、ノード起点の突合とは
-    # 別に見る（宣言順 = inputs が先）。
+    # The transfer layer's axis. Constraints exist even for inputs no node consumes, so they are
+    # checked separately from the node-driven cross-check (declaration order = inputs first).
     for spec in graph.inputs:
         if spec.dtype not in IO_DTYPES:
             bad_dtypes[spec.name] = spec.dtype
@@ -882,35 +964,40 @@ def assert_runtime_support(graph: IrGraph) -> None:
             missing_ops.add(node.op)
             continue
         where = f"nodes[{index}] ({node.op})"
-        # MUST: 入力は**スロット別**の受理集合で見る。和だけで突き合わせると gather /
-        # embedding / masked_fill のスロット取り違え（値と添字を逆に渡した形）が
-        # 「どちらも和には入っている」として列挙門を素通りし、契約検査まで落ちて初めて
-        # 1 件ずつ止まる（「非対応は全件列挙」の意図が壊れる）。
+        # MUST: inputs are checked against **per-slot** accepted sets. Comparing against the union
+        # alone would let a slot mix-up of gather / embedding / masked_fill (value and index
+        # passed the other way round) slip through the listing check as "both are in the union",
+        # only to be stopped one at a time when it reaches the contract check (breaking the
+        # intent "list unsupported items in full").
         for slot, name in enumerate(node.ins):
-            # 契約よりも入力が多い形（アリティ違反）は契約検査の担当。ここは列挙門なので、
-            # 対応するスロットが無いぶんは和で見て 1 件でも多く拾う。
+            # More inputs than the contract (an arity violation) belong to the contract check.
+            # This is the listing check, so slots with no counterpart are checked against the
+            # union to pick up as many as possible.
             accept = contract.slot_accept(slot) if slot < contract.arity else contract.dtypes
             dtype = _declared_dtype(graph, name)
             if dtype not in accept:
                 bad_dtypes[name] = dtype
-        # MUST: 出力は契約表の**写像の値域**を**出力 slot 別に**見る（cast は attrs.to で
-        # 決まるので語彙全体）。入力側の受理集合で代用すると、比較（f32 → bool）や bool の
-        # sum（→ i32）のように dtype が変わる op で**正しいグラフが列挙門で落ちる**。
+        # MUST: outputs are checked against **the range of the contract table's mapping**, **per
+        # output slot** (cast is decided by attrs.to, so the whole vocabulary). Substituting the
+        # input-side accepted sets would make **a correct graph fail the listing check** for ops
+        # that change dtype, like comparisons (f32 → bool) or a bool sum (→ i32).
         out_accept: tuple[frozenset[str], ...] = (
             (frozenset(SEMANTIC_DTYPES),)
             if contract.kind == "cast"
             else tuple(frozenset(slot.values()) for slot in contract.output_dtypes)
         )
         for slot, name in enumerate(node.outs):
-            # 契約より出力が多い形（出力数違反）は入力側と同様に契約検査の担当。ここは列挙門
-            # なので、余ったぶんは全 slot の和で見て 1 件でも多く拾う。
+            # More outputs than the contract (an output count violation) belong to the contract
+            # check, as on the input side. This is the listing check, so the extra ones are
+            # checked against the union of all slots to pick up as many as possible.
             accept = out_accept[slot] if slot < len(out_accept) else frozenset().union(*out_accept)
             dtype = _declared_dtype(graph, name)
             if dtype not in accept:
                 bad_dtypes[name] = dtype
-        # MUST: 必須と省略可能の**和**で見る（ADR 0067 の `window`）。省略可能なぶんを落とすと、
-        # states 形の正しいグラフが「未実装 attrs」として capability 不足で拒否される
-        # （TS 側 RUNTIME_SUPPORT.attrKeys の和と同じ射影）。
+        # MUST: check against **the union** of required and optional (ADR 0067's `window`).
+        # Dropping the optional ones would reject a correct states-form graph for a missing
+        # capability, as "unimplemented attrs" (the same projection as the union of
+        # RUNTIME_SUPPORT.attrKeys on the TS side).
         unknown = sorted(
             key
             for key in node.attrs
@@ -920,13 +1007,14 @@ def assert_runtime_support(graph: IrGraph) -> None:
             bad_attrs.append(f"{where}: {', '.join(unknown)}")
 
     missing_storage: dict[str, list[str]] = {}
-    # group 量子化を受理する格納は **i4 だけ**（ADR 0069 決定 2）。他の格納 dtype に付いた
-    # group_size は実行経路が無く、黙って無視すると group ごとの scale を per-channel として
-    # 読む沈黙誤値になるので、capability 不足で落とす。TS 側は合流層（bind.ts）がこの形を拒む:
-    # codec 台帳の `grouping` が "channel" の codec では groupSize = 行長 MUST（group を持つ
-    # codec は int4-sym-g だけ）。容器から起こした
-    # 文書（{@link ir_graph_from_container}）は group codec にしか group_size を出さないので
-    # ここに届かず、届くのは v1 文書を直に渡す経路だけ。
+    # The only storage that accepts group quantization is **i4** (ADR 0069 decision 2). A
+    # group_size on another storage dtype has no execution path, and silently ignoring it would
+    # read per-group scales as per-channel, giving silently wrong values, so it fails as a missing
+    # capability. On the TS side the merge layer (bind.ts) rejects this shape: for a codec whose
+    # `grouping` in the codec ledger is "channel", groupSize MUST equal the row length (the only
+    # codec with groups is int4-sym-g). A document built from a container
+    # ({@link ir_graph_from_container}) gives group_size only for group codecs, so it never
+    # reaches here; only the path that passes a v1 document directly does.
     group_quantized: list[str] = []
     for name, initializer in graph.initializers.items():
         dtype = initializer.storage.dtype
@@ -940,31 +1028,36 @@ def assert_runtime_support(graph: IrGraph) -> None:
         return
     diagnostics: list[str] = []
     if missing_ops:
-        diagnostics.append(f"非対応 op ({len(missing_ops)}): {', '.join(sorted(missing_ops))}")
+        diagnostics.append(
+            f"unsupported ops ({len(missing_ops)}): {', '.join(sorted(missing_ops))}"
+        )
     if bad_dtypes:
-        listed = ", ".join(f"値 '{name}': {dtype}" for name, dtype in bad_dtypes.items())
-        diagnostics.append(f"非対応 意味論 dtype ({len(bad_dtypes)}): {listed}")
+        listed = ", ".join(f"value '{name}': {dtype}" for name, dtype in bad_dtypes.items())
+        diagnostics.append(f"unsupported semantic dtypes ({len(bad_dtypes)}): {listed}")
     if bad_attrs:
-        diagnostics.append(f"未実装 attrs ({len(bad_attrs)}): {'; '.join(bad_attrs)}")
+        diagnostics.append(f"unimplemented attrs ({len(bad_attrs)}): {'; '.join(bad_attrs)}")
     for dtype, users in sorted(missing_storage.items()):
         diagnostics.append(
-            f"非対応 格納 dtype '{dtype}' ({len(users)}): {', '.join(sorted(users))}"
+            f"unsupported storage dtype '{dtype}' ({len(users)}): {', '.join(sorted(users))}"
         )
     if group_quantized:
         diagnostics.append(
-            f"非対応 group 量子化 ({len(group_quantized)}): {', '.join(sorted(group_quantized))}"
-            "（group 量子化の格納は i4 のみ — ADR 0069）"
+            f"unsupported group quantization ({len(group_quantized)}):"
+            f" {', '.join(sorted(group_quantized))}"
+            " (group-quantized storage is i4 only — ADR 0069)"
         )
-    raise ContainerError(f"ランタイムの capability 不足 — {' / '.join(diagnostics)}")
+    raise ContainerError(f"Missing runtime capability — {' / '.join(diagnostics)}")
 
 
 def assert_op_contracts(graph: IrGraph) -> None:
-    """毎ノードの契約検査（アリティ / 宣言出力数 / attrs スキーマ / 入出力 dtype 規則 / shape）と、
-    ノード単体では決まらない規則（state effect の順序 — ADR 0067 決定 5b）。
+    """The contract check of every node (arity / declared output count / attrs schema / input and
+    output dtype rules / shape) and the rules not decided by a node alone (the order of state
+    effects — ADR 0067 decision 5b).
 
-    NOTE: attrs と dtype は assert_runtime_support も見るが層が違う — あちらは「モデル作者へ
-    capability 不足を一度に列挙する門」、こちらは「対応表に載っている op が契約どおりに
-    組まれているか」の検査。両者とも ops.py の契約表由来なので規則が割れることはない。
+    NOTE: assert_runtime_support also looks at attrs and dtypes, but at a different layer — that
+    one is "the check that lists missing capabilities to the model author at once", this one is
+    the check "is an op in the support table built according to its contract". Both derive from
+    the contract table in ops.py, so the rules never split.
     """
     for index, node in enumerate(graph.nodes):
         where = f"graph.nodes[{index}]"
@@ -976,32 +1069,37 @@ def assert_op_contracts(graph: IrGraph) -> None:
             [_declared_dtype(graph, name) for name in node.outs],
             where,
         )
-        # strided コピー族の rank 上限（束縛に依らず宣言 shape の長さだけで決まる）。
+        # Rank limit of the strided copy family (decided by the length of the declared shape
+        # alone, independent of bindings).
         if contract.name in STRIDED_RANK_OPS:
             for slot, name in enumerate(node.ins):
                 assert_strided_rank(
-                    len(declared_shape(graph, name)), f"入力 {slot} '{name}'", where
+                    len(declared_shape(graph, name)), f"input {slot} '{name}'", where
                 )
             out = node.outs[0]
-            assert_strided_rank(len(declared_shape(graph, out)), f"出力 '{out}'", where)
+            assert_strided_rank(len(declared_shape(graph, out)), f"output '{out}'", where)
         if contract.kind == "sym_prefix_slice":
             _assert_sym_prefix_slice(graph, node, where)
-    # state effect の順序は「ノード単体では決まらない」規則なので、全ノードの契約検査の後に
-    # 1 回だけ見る（TS 側 validateGraphContracts の並びと同じ）。
+    # The order of state effects is a rule "not decided by a node alone", so it is checked once,
+    # after the contract check of every node (the same order as validateGraphContracts on the TS
+    # side).
     _assert_state_order(graph)
-    # 出力 shape の突合は全ノードの宣言が揃ってから（shapes.py が契約の規則から独立に
-    # 計算し、torch の meta 由来の宣言と食い違えば落とす）。
+    # Output shapes are cross-checked once every node's declaration is in place (shapes.py
+    # computes them from the contract rules independently, and fails when they disagree with the
+    # declarations derived from torch's meta).
     assert_graph_shapes(graph)
 
 
-# ---- safetensors のレイアウト（旧 shard・資産）------------------------------
+# ---- safetensors layout (old shards, assets) ------------------------------
 
-#: safetensors dtype → 1 要素の **bit** 数（サイズ表）。バイト長は `numel × bits / 8` の
-#: 厳密一致で見る。TS 側 `packages/runtime/src/format/safetensors.ts` の DTYPE_BYTES の
-#: **上位集合**で、方言 dtype の `I4` / `I2` はこの表だけが持つ（TS の読み手は受理しない —
-#: 旧 shard を読む移行 CLI が要る）。受理は {@link _LEGACY_ONLY_DTYPES} が移行入力に限る。
-#: MUST: 整列表（READER_DTYPE_ALIGN）と分けて持つ（ADR 0069 決定 2 の 3 面分離）— `I4` は
-#: 1 バイトに 2 要素を詰めるので「要素サイズ = 整列」が成り立たない。
+#: safetensors dtype → **bit** count of one element (the size table). The byte length is checked
+#: by exact match with `numel × bits / 8`. A **superset** of DTYPE_BYTES in
+#: `packages/runtime/src/format/safetensors.ts` on the TS side; the dialect dtypes `I4` / `I2`
+#: exist only in this table (the TS reader does not accept them — the migration CLI that reads old
+#: shards needs them). {@link _LEGACY_ONLY_DTYPES} limits their acceptance to migration input.
+#: MUST: keep it separate from the alignment table (READER_DTYPE_ALIGN) (the three-way separation
+#: of ADR 0069 decision 2) — `I4` packs 2 elements per byte, so "element size = alignment" does not
+#: hold.
 READER_DTYPE_BITS = {
     "F32": 32,
     "F16": 16,
@@ -1016,8 +1114,9 @@ READER_DTYPE_BITS = {
     "BOOL": 8,
 }
 
-#: safetensors dtype → テンソル**先頭**に要求する byte 整列（整列表）。`I4` は要素整列の概念を
-#: 持たず、展開カーネルが `array<u32>` として束縛する都合で 4（ADR 0069 決定 2）。
+#: safetensors dtype → the byte alignment required at **the start** of a tensor (the alignment
+#: table). `I4` has no notion of element alignment and is 4 because the decode kernel binds it as
+#: `array<u32>` (ADR 0069 decision 2).
 READER_DTYPE_ALIGN = {
     "F32": 4,
     "F16": 2,
@@ -1032,56 +1131,63 @@ READER_DTYPE_ALIGN = {
     "BOOL": 1,
 }
 
-#: TS の読み手が拒否する方言 dtype（旧 shard の packed 4bit / 2bit）。`assert_reader_layout` は
-#: 移行 CLI の入力検査（`allow_legacy_dtypes=True`）でだけ受理する — 資産の門で受理すると
-#: 「Python の門は緑・ブラウザのリーダだけ落ちる」資産が書ける。
+#: Dialect dtypes the TS reader rejects (the packed 4-bit / 2-bit of old shards).
+#: `assert_reader_layout` accepts them only in the migration CLI's input check
+#: (`allow_legacy_dtypes=True`) — accepting them in the asset check would allow writing assets
+#: where "the Python check is green but only the browser's reader fails".
 _LEGACY_ONLY_DTYPES = frozenset({"I4", "I2"})
 
 _HEADER_LENGTH_BYTES = 8
 
 
 def _as_reader_index(value: Any, where: str, what: str) -> int:
-    """TS リーダの `asIndex`（`packages/runtime/src/format/safetensors.ts`）と同じ受理集合。
+    """The accepted set of the TS reader's `asIndex` (`packages/runtime/src/format/safetensors.ts`).
 
-    MUST: 非負であることだけでなく **2^53−1 以下**も見る。ヘッダ JSON の数値は TS 側では
-    JS の number として読まれるので、これを超える値は整数として持てず必ず拒否される —
-    Python 側が要素数の積だけを見て受理すると、「verify は緑・ブラウザのリーダだけ落ちる」
-    ファイルが配布形として残る。bool は int の派生だが添字ではない。
+    MUST: check not only non-negativity but also **at most 2^53−1**. The TS side reads header JSON
+    numbers as JS numbers, so a value beyond that cannot be held as an integer and is always
+    rejected — if the Python side accepted it by looking only at the product of element counts, a
+    file where "verify is green but only the browser's reader fails" would remain as a
+    distribution. bool derives from int but is not an index.
     """
     if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > MAX_SAFE_INT:
-        raise ContainerError(f"{where}: {what} {value!r} が非負整数（2^53−1 以下）でない")
+        raise ContainerError(
+            f"{where}: {what} {value!r} is not a non-negative integer (at most 2^53−1)"
+        )
     return value
 
 
-#: ヘッダ 1 項目が必ず持つキー（TS リーダが読む欄）。
+#: Keys a header entry always has (the fields the TS reader reads).
 _READER_ENTRY_KEYS = ("dtype", "shape", "data_offsets")
 
 
 def _as_reader_entry(value: Any, where: str) -> dict[str, Any]:
-    """ヘッダ 1 項目の構造を検査する（`_as_reader_index` と同じ流儀の受理集合）。
+    """Check the structure of one header entry (an accepted set in the same style as
+    `_as_reader_index`).
 
-    MUST: 素で添字しない。3 キーの欠落・項目がオブジェクトでない形・shape が配列でない形は
-    `KeyError` / `TypeError` として漏れ、門の診断が「不正なファイル」ではなく「エクスポータが
-    壊れた」に見える（ヘッダ長をファイル実長で拘束するのと同じ理由）。`karume migrate` は
-    外部で作られた旧 shard を食う公開 CLI なので、到達経路が実在する。
+    MUST: do not index it raw. A missing one of the 3 keys, an entry that is not an object, or a
+    shape that is not an array would leak as `KeyError` / `TypeError`, and the check's diagnosis
+    would look like "the exporter broke" instead of "an invalid file" (the same reason the header
+    length is bounded by the actual file length). `karume migrate` is a public CLI that consumes
+    old shards made elsewhere, so the path to here does exist.
     """
     if not isinstance(value, dict):
-        raise ContainerError(f"{where}: ヘッダ項目がオブジェクトでない: {value!r}")
+        raise ContainerError(f"{where}: header entry is not an object: {value!r}")
     missing = [key for key in _READER_ENTRY_KEYS if key not in value]
     if missing:
-        raise ContainerError(f"{where}: ヘッダ項目に {missing} が無い")
+        raise ContainerError(f"{where}: header entry is missing {missing}")
     if not isinstance(value["shape"], list):
-        raise ContainerError(f"{where}: shape が配列でない: {value['shape']!r}")
+        raise ContainerError(f"{where}: shape is not an array: {value['shape']!r}")
     return value
 
 
 def _read_header(path: str | Path) -> tuple[dict[str, Any], int, int]:
-    """ヘッダ JSON と `(データ節の絶対開始位置, データ節のバイト長)` を返す。
+    """Return the header JSON and `(absolute start of the data section, byte length of the data
+    section)`.
 
-    MUST: 宣言長を read へ渡す前にファイル実長で拘束する（`legacy.safetensors_header` と
-    同型の防御）。u64 をそのまま渡すと規則違反が ContainerError ではなく
-    OverflowError / MemoryError として漏れ、門の診断が「不正なファイル」ではなく
-    「エクスポータが壊れた」に見える。
+    MUST: bound the declared length by the actual file length before passing it to read (the same
+    defense as `legacy.safetensors_header`). Passing the u64 as is would leak a rule violation not
+    as a ContainerError but as an OverflowError / MemoryError, and the check's diagnosis would look
+    like "the exporter broke" instead of "an invalid file".
     """
     file = Path(path)
     file_size = file.stat().st_size
@@ -1089,12 +1195,12 @@ def _read_header(path: str | Path) -> tuple[dict[str, Any], int, int]:
         raw_length = handle.read(_HEADER_LENGTH_BYTES)
         if len(raw_length) != _HEADER_LENGTH_BYTES:
             raise ContainerError(
-                f"ファイルが短すぎる: {len(raw_length)} バイト（ヘッダ長すら無い）"
+                f"File is too short: {len(raw_length)} bytes (not even a header length)"
             )
         header_length = int.from_bytes(raw_length, "little")
         if header_length <= 0 or header_length > file_size - _HEADER_LENGTH_BYTES:
             raise ContainerError(
-                f"ヘッダ長 {header_length} がファイル長 {file_size} と矛盾している"
+                f"Header length {header_length} contradicts the file length {file_size}"
             )
         header_bytes = handle.read(header_length)
         data_start = _HEADER_LENGTH_BYTES + header_length
@@ -1102,25 +1208,28 @@ def _read_header(path: str | Path) -> tuple[dict[str, Any], int, int]:
     try:
         header = json.loads(header_bytes)
     except ValueError as cause:
-        raise ContainerError(f"safetensors ヘッダ JSON を解析できない: {cause}") from cause
+        raise ContainerError(f"Cannot parse the safetensors header JSON: {cause}") from cause
     if not isinstance(header, dict):
-        raise ContainerError("safetensors ヘッダが最上位オブジェクトでない")
+        raise ContainerError("The safetensors header is not a top-level object")
     return header, data_start, file_size - data_start
 
 
 def assert_reader_layout(path: str | Path, *, allow_legacy_dtypes: bool = False) -> None:
-    """safetensors のレイアウト規則を見る（TS 側 `format/safetensors.ts` と同じ規則）。
+    """Check the safetensors layout rules (the same rules as `format/safetensors.ts` on the TS
+    side).
 
-    HF の `safe_open` は読めるのに Karume が読めないファイルが作れる — リーダは
-    「データ節を隙間なく覆う」「各テンソルの**絶対** offset が dtype の整列単位に整列している」
-    を要求し、後者は要素数が奇数の F16（バイト長 ≡ 2 mod 4）の直後に F32 / I32 / I4 を置くと
-    破れる（docs/limitations.md）。使う経路は 2 つ: 移行 CLI が旧 shard を読む前の入力検査
-    （`karume.legacy`）と、資産の safetensors を書いた直後の門（recipe の資産の書き手）。
-    方言 dtype の `I4` / `I2` は `allow_legacy_dtypes=True`（移行 CLI の入力検査）のときだけ
-    受理する。既定は TS の読み手と同じ dtype 集合（資産の門）。
+    A file can be made that HF's `safe_open` reads but Karume cannot — the reader requires "the
+    data section is covered without gaps" and "each tensor's **absolute** offset is aligned to its
+    dtype's alignment unit", and the latter breaks when F32 / I32 / I4 is placed right after an F16
+    with an odd element count (byte length ≡ 2 mod 4) (docs/limitations.md). It is used on 2
+    paths: the input check before the migration CLI reads old shards (`karume.legacy`), and the
+    check right after writing an asset safetensors (the recipes' asset writers). The dialect dtypes
+    `I4` / `I2` are accepted only with `allow_legacy_dtypes=True` (the migration CLI's input
+    check). The default is the same dtype set as the TS reader (the asset check).
 
-    MUST: この検査は `safetensors` のリーダを通さない（通すと同じ規則の再実装ではなく
-    「別のリーダが読めた」だけの主張になる）。ヘッダ JSON を直に読んで規則を写す。
+    MUST: this check does not go through the `safetensors` reader (going through it would turn it
+    into the mere claim "another reader could read it" rather than a reimplementation of the same
+    rules). It reads the header JSON directly and mirrors the rules.
     """
     header, data_start, data_length = _read_header(path)
 
@@ -1128,40 +1237,44 @@ def assert_reader_layout(path: str | Path, *, allow_legacy_dtypes: bool = False)
     for name, entry in header.items():
         if name == "__metadata__":
             continue
-        where = f"テンソル '{name}'"
+        where = f"Tensor '{name}'"
         entry = _as_reader_entry(entry, where)
         dtype = entry["dtype"]
         if dtype not in READER_DTYPE_BITS:
-            raise ContainerError(f"{where}: リーダが知らない dtype '{dtype}'")
+            raise ContainerError(f"{where}: dtype '{dtype}' unknown to the reader")
         if dtype in _LEGACY_ONLY_DTYPES and not allow_legacy_dtypes:
             raise ContainerError(
-                f"{where}: リーダが知らない dtype '{dtype}'"
-                "（方言 dtype — 旧 shard の移行入力でだけ受理）"
+                f"{where}: dtype '{dtype}' unknown to the reader"
+                " (a dialect dtype — accepted only in migration input from old shards)"
             )
         offsets = entry["data_offsets"]
         if not isinstance(offsets, list) or len(offsets) != 2:
-            raise ContainerError(f"{where}: data_offsets が 2 要素の配列でない: {offsets!r}")
+            raise ContainerError(
+                f"{where}: data_offsets is not an array of 2 elements: {offsets!r}"
+            )
         begin = _as_reader_index(offsets[0], where, "data_offsets")
         end = _as_reader_index(offsets[1], where, "data_offsets")
         count = 1
         for axis, dim in enumerate(entry["shape"]):
-            count *= _as_reader_index(dim, where, f"shape[{axis}] の次元")
-            # TS 側は積を 1 段ごとに安全整数で見る（elementCount）。積だけを最後に見ると
-            # 途中で精度を失った要素数がバイト長と偶然一致する形を通してしまう。
+            count *= _as_reader_index(dim, where, f"dimension shape[{axis}]")
+            # The TS side checks the product against safe integers at every step
+            # (elementCount). Checking only the final product would pass an element count that
+            # lost precision midway and happens to match the byte length.
             if count > MAX_SAFE_INT:
-                raise ContainerError(f"{where}: 要素数が安全整数 2^53−1 を超える")
+                raise ContainerError(f"{where}: element count exceeds the safe integer 2^53−1")
         bits = count * READER_DTYPE_BITS[dtype]
-        # MUST: bit 総量が byte 境界に乗らない形（I4 の要素数が奇数）は fail loudly。末尾要素が
-        # 半バイトだけ突き出すので、テンソルの長さが宣言から一意に決まらない。
+        # MUST: a total bit count that does not land on a byte boundary (an odd I4 element count)
+        # fails loudly. The last element sticks out by half a byte, so the tensor's length is not
+        # uniquely decided by the declaration.
         if bits % 8 != 0:
             raise ContainerError(
-                f"{where}: {dtype}（1 要素 {READER_DTYPE_BITS[dtype]}bit）の要素数 {count} が"
-                " 奇数で byte 境界に乗らない"
+                f"{where}: {dtype} ({READER_DTYPE_BITS[dtype]} bits per element) element count"
+                f" {count} is odd and does not land on a byte boundary"
             )
         if end - begin != bits // 8:
             raise ContainerError(
-                f"{where}: サイズ不一致 offsets={end - begin} "
-                f"期待={bits // 8}（{dtype} {entry['shape']}）"
+                f"{where}: size mismatch offsets={end - begin} "
+                f"expected={bits // 8} ({dtype} {entry['shape']})"
             )
         declared.append((begin, end, name, dtype))
 
@@ -1169,67 +1282,76 @@ def assert_reader_layout(path: str | Path, *, allow_legacy_dtypes: bool = False)
     for begin, end, name, dtype in sorted(declared):
         if begin != cursor:
             raise ContainerError(
-                f"テンソル '{name}': データ節が隙間なく覆われていない"
-                f"（使用済み末尾={cursor} / このテンソルの開始={begin}）"
+                f"Tensor '{name}': the data section is not covered without gaps"
+                f" (used end={cursor} / start of this tensor={begin})"
             )
         align = READER_DTYPE_ALIGN[dtype]
         if (data_start + begin) % align != 0:
             raise ContainerError(
-                f"テンソル '{name}': 絶対 offset {data_start + begin} が {dtype} の"
-                f" 整列単位 {align} バイトに整列していない"
-                "（奇数要素の F16 より後ろに 4 バイト型を置いていないか — "
-                "並び順の規約は karume/emit.py）"
+                f"Tensor '{name}': absolute offset {data_start + begin} is not aligned to the"
+                f" {dtype} alignment unit of {align} bytes"
+                " (is a 4-byte type placed after an F16 with an odd element count? — "
+                "the ordering convention is in karume/emit.py)"
             )
         cursor = end
     if cursor != data_length:
-        raise ContainerError(f"データ節末尾に未使用領域が {data_length - cursor} バイトある")
+        raise ContainerError(
+            f"{data_length - cursor} bytes of unused area at the end of the data section"
+        )
 
 
-# ---- コンテナ形式（krm / krg）との突合 -------------------------------------
+# ---- Cross-check with the container format (krm / krg) -------------------------------------
 #
-# TS 側 `packages/runtime/src/format/container/bind.ts`（合流層）の鏡像。descriptor 単体で
-# 決まる規則（2 文書の構造・block の配置・束縛表の過不足）は読み手
-# （{@link karume.container.read_container}）が既に見ているので、ここが掛けるのは
-# **宣言 shape を要する規則だけ**である:
+# Mirrors `packages/runtime/src/format/container/bind.ts` (the merge layer) on the TS side. The
+# rules decided by the descriptor alone (structure of the 2 documents, block layout, missing /
+# surplus bindings) are already checked by the reader ({@link karume.container.read_container}),
+# so what this applies is **only the rules that need the declared shape**:
 #
-# - 意味論 dtype と codec の組（`f32` の符号化 / `i32` は生の int32 — 交差は fail loudly）
-# - payload 長 = 宣言 shape と packing から決まる値。block 長との差は詰め物（0 以上 4 未満）だけ
-# - piece 列の末尾 = `shape[0]`。中間 piece に詰め物は無い
-# - `rowAxis != 0` の initializer は piece 分割不可
-# - group の刻み（per-channel は行長 / group codec は 2 冪 ≥ 16 で行長を割る）と scale 長
-# - i2 経路（`int2-off` / `ternary`）の宣言 shape は正の rank 2 で行長が 16 の倍数
+# - the pairing of semantic dtype and codec (the encodings of `f32` / raw int32 for `i32` — a
+#   crossing fails loudly)
+# - payload length = the value decided by the declared shape and packing. The only difference
+#   from the block length is padding (0 or more, less than 4)
+# - the end of a piece sequence = `shape[0]`. Middle pieces have no padding
+# - an initializer with `rowAxis != 0` cannot be split into pieces
+# - the group step (per-channel: the row length / group codec: a power of 2 ≥ 16 that divides the
+#   row length) and the scale length
+# - the declared shape on the i2 path (`int2-off` / `ternary`) is a positive rank 2 with a row
+#   length that is a multiple of 16
 
 
 @dataclass(frozen=True)
 class SupplyBlock:
-    """実体 1 本ぶんの block（piece 列なら 1 piece）。"""
+    """The block of one body (one piece for a piece sequence)."""
 
     id: str
     part: int
     offset: int
     length: int
-    #: この block が運ぶ先頭次元の行範囲（丸ごと 1 本なら `[0, shape[0]]`・rank 0 は `[0, 1]`）。
+    #: The row range of the leading dimension this block carries (`[0, shape[0]]` for a whole
+    #: tensor, `[0, 1]` for rank 0).
     rows: tuple[int, int]
-    #: payload のバイト長（block 長から末尾の詰め物を除いたもの）。
+    #: Byte length of the payload (the block length without tail padding).
     payload_bytes: int
 
 
 @dataclass(frozen=True)
 class InitializerSupply:
-    """initializer 1 本の供給計画（実体をどの block から取るか）。"""
+    """The supply plan of one initializer (which blocks the body comes from)."""
 
     encoding: BlockEncoding
-    #: 実体の block 列（丸ごとなら 1 本）。
+    #: The body's block sequence (one for a whole tensor).
     blocks: tuple[SupplyBlock, ...]
-    #: 供給元。const 領域（part 1・グラフの所有）か重み側（モデル記述）か。
+    #: The supplier. The const region (part 1, owned by the graph) or the weight side (model
+    #: descriptor).
     origin: Literal["const", "model"]
-    #: companion scale の block（量子化 codec のみ）。
+    #: The block of the companion scale (quantized codecs only).
     scale: SupplyBlock | None = None
 
 
 @dataclass(frozen=True)
 class BoundGraph:
-    """グラフ 1 本の合流結果（宣言 + shared でない initializer 全部の供給計画）。"""
+    """The merge result of one graph (declaration + the supply plans of every non-shared
+    initializer)."""
 
     declaration: Mapping[str, Any]
     supplies: Mapping[str, InitializerSupply]
@@ -1238,7 +1360,8 @@ class BoundGraph:
 def _located_block(
     graph: GraphDescriptor, model: ModelDescriptor | None
 ) -> Callable[[str, str], SupplyBlock]:
-    """block id → 在処（const 目次は part 1・モデル目次は宣言の part）。"""
+    """block id → location (part 1 for the const table, the declared part for the model
+    table)."""
     const = {block.id: block for block in graph.const_blocks}
     data = {block.id: block for block in (model.blocks if model is not None else ())}
 
@@ -1248,9 +1371,10 @@ def _located_block(
         if found is None:
             record = data.get(block_id)
             if record is None:
-                raise ContainerFormatError(f"{where}: 未宣言の block '{block_id}'")
+                raise ContainerFormatError(f"{where}: undeclared block '{block_id}'")
             found, part = record, record.part
-        # rows / payload_bytes は呼び手（宣言 shape を知る側）が埋める。
+        # rows / payload_bytes are filled in by the caller (the side that knows the declared
+        # shape).
         return SupplyBlock(found.id, part, found.offset, found.length, (0, 0), 0)
 
     return locate
@@ -1259,41 +1383,44 @@ def _located_block(
 def _declared_tensor(
     declaration: Mapping[str, Any], name: str, where: str
 ) -> tuple[str, list[int]]:
-    """initializer の意味論 dtype と**具体 shape**（記号次元を持つ実体は在りえない）。"""
+    """An initializer's semantic dtype and **concrete shape** (bytes with a symbolic dimension
+    cannot exist)."""
     values = declaration.get("values")
     if not isinstance(values, dict) or not isinstance(values.get(name), dict):
-        raise ContainerFormatError(f"{where}: `values` に dtype / shape 宣言が無い")
+        raise ContainerFormatError(f"{where}: no dtype / shape declaration in `values`")
     value = values[name]
     dtype = value.get("dtype")
     if dtype not in SEMANTIC_DTYPES:
-        raise ContainerFormatError(f"{where}: 意味論 dtype が語彙外: {dtype!r}")
+        raise ContainerFormatError(f"{where}: semantic dtype is outside the vocabulary: {dtype!r}")
     raw = value.get("shape")
     if not isinstance(raw, list):
-        raise ContainerFormatError(f"{where}: `values` の shape が配列でない")
+        raise ContainerFormatError(f"{where}: the shape in `values` is not an array")
     shape: list[int] = []
     for raw_dim in raw:
-        # 容器の JSON 読みは float を int に変えない — graph の `_parse_shape` と同じ受理集合に
-        # 揃える（ランタイムは `4.0` を次元 4 として読む）。
+        # Reading container JSON does not turn floats into ints — align with the same accepted
+        # set as the graph's `_parse_shape` (the runtime reads `4.0` as dimension 4).
         dim = integral_float_to_int(raw_dim)
         if not isinstance(dim, int) or isinstance(dim, bool) or dim < 0:
             raise ContainerFormatError(
-                f"{where}: initializer の shape に記号次元は使えない（{dim!r}）"
+                f"{where}: an initializer's shape cannot use a symbolic dimension ({dim!r})"
             )
         shape.append(dim)
     return dtype, shape
 
 
 def _assert_padded(block: SupplyBlock, payload: int, where: str) -> None:
-    """block 長と payload 長の関係（container-v1 §4.1 — 詰め物は 0 以上 4 未満）。"""
+    """The relation of block length and payload length (container-v1 §4.1 — padding is 0 or more,
+    less than 4)."""
     if not 0 <= block.length - payload < BLOCK_TAIL_ALIGN:
         raise ContainerFormatError(
-            f"{where}: block '{block.id}' の長さ {block.length} が payload {payload} バイト +"
-            f" 詰め物（{BLOCK_TAIL_ALIGN} 未満）でない"
+            f"{where}: block '{block.id}' length {block.length} is not payload {payload} bytes +"
+            f" padding (less than {BLOCK_TAIL_ALIGN})"
         )
 
 
 def _is_i2_shape(shape: Sequence[int]) -> bool:
-    """i2 経路の論理形 `[rows, width]`（`packages/runtime/src/format/i2.ts` の鏡像）。"""
+    """The logical shape of the i2 path, `[rows, width]` (mirrors
+    `packages/runtime/src/format/i2.ts`)."""
     return len(shape) == 2 and all(dim > 0 for dim in shape) and shape[1] % 16 == 0
 
 
@@ -1305,21 +1432,23 @@ def _plan_pieces(
     pieces: Sequence[tuple[str, tuple[int, int]]],
     locate: Callable[[str, str], SupplyBlock],
 ) -> list[SupplyBlock]:
-    """piece 列の供給計画（行範囲 → バイト範囲）。並びと被覆は読み手が見た後の段。"""
+    """The supply plan of a piece sequence (row range → byte range). A step after the reader has
+    checked order and coverage."""
     if encoding.row_axis not in (None, 0):
         raise ContainerFormatError(
-            f"{where}: rowAxis {encoding.row_axis} の initializer は piece 分割できない（規則④）"
+            f"{where}: an initializer with rowAxis {encoding.row_axis} cannot be split into pieces"
+            " (rule ④)"
         )
     rows = shape[0] if shape else 1
     if not shape or rows == 0 or payload % rows != 0:
         raise ContainerFormatError(
-            f"{where}: payload {payload} バイトが先頭次元 {rows} 行で割り切れないので"
-            " piece 分割できない"
+            f"{where}: payload of {payload} bytes is not divisible by the leading dimension of"
+            f" {rows} rows, so it cannot be split into pieces"
         )
     if pieces[-1][1][1] != rows:
         raise ContainerFormatError(
-            f"{where}: piece 列の末尾 {pieces[-1][1][1]} 行が宣言 shape の先頭次元 {rows} 行と"
-            "違う（規則④）"
+            f"{where}: the end of the piece sequence, row {pieces[-1][1][1]}, differs from the"
+            f" declared shape's leading dimension of {rows} rows (rule ④)"
         )
     row_bytes = payload // rows
     planned: list[SupplyBlock] = []
@@ -1328,11 +1457,12 @@ def _plan_pieces(
         found = locate(block_id, by)
         piece_bytes = (end - begin) * row_bytes
         if index < len(pieces) - 1:
-            # 中間 piece に詰め物は掛けられない（次の piece の先頭を潰す）。
+            # Padding cannot be put on a middle piece (it would overwrite the start of the next
+            # piece).
             if found.length != piece_bytes:
                 raise ContainerFormatError(
-                    f"{by}: 中間 piece の block 長 {found.length} が行範囲のバイト数"
-                    f" {piece_bytes} と違う（詰め物不可）"
+                    f"{by}: middle piece block length {found.length} differs from the byte count"
+                    f" of the row range, {piece_bytes} (no padding allowed)"
                 )
         else:
             _assert_padded(found, piece_bytes, by)
@@ -1350,23 +1480,23 @@ def _plan_supply(
     locate: Callable[[str, str], SupplyBlock],
     origin: Literal["const", "model"],
 ) -> InitializerSupply:
-    """1 initializer ぶんの供給計画（宣言 shape × encoding × block 目次）。"""
+    """The supply plan of one initializer (declared shape × encoding × block table)."""
     entry = codec_entry(encoding.codec)
     if entry.layout not in INITIALIZER_STORAGE.get(dtype, ()):
         raise ContainerFormatError(
-            f"{where}: 意味論 dtype '{dtype}' に codec '{encoding.codec}' は組めない"
+            f"{where}: semantic dtype '{dtype}' cannot pair with codec '{encoding.codec}'"
         )
     if entry.layout == "i2" and not _is_i2_shape(shape):
         raise ContainerFormatError(
-            f"{where}: codec '{encoding.codec}' は正の rank 2・行長 16 の倍数の宣言 shape が要る"
-            f"（[{','.join(str(dim) for dim in shape)}]）"
+            f"{where}: codec '{encoding.codec}' requires a declared shape of positive rank 2 with a"
+            f" row length that is a multiple of 16 ([{','.join(str(dim) for dim in shape)}])"
         )
     numel = math.prod(shape)
     payload = payload_bytes(encoding.codec, numel, where)
     rows = shape[0] if shape else 1
     if pieces is None:
         if block is None:
-            raise ContainerFormatError(f"{where}: 供給形が `block` でも `pieces` でもない")
+            raise ContainerFormatError(f"{where}: the supply form is neither `block` nor `pieces`")
         found = locate(block, where)
         _assert_padded(found, payload, where)
         blocks = [replace(found, rows=(0, rows), payload_bytes=payload)]
@@ -1377,32 +1507,33 @@ def _plan_supply(
 
     if encoding.row_axis is None or encoding.group_size is None or encoding.scale_block is None:
         raise ContainerFormatError(
-            f"{where}: codec '{encoding.codec}' は量子化なので rowAxis / groupSize / scale が要る"
+            f"{where}: codec '{encoding.codec}' is quantized, so rowAxis / groupSize / scale are"
+            " required"
         )
     row_axis, group_size = encoding.row_axis, encoding.group_size
     assert_row_axis(encoding.codec, row_axis, where)
     if not shape or len(shape) <= row_axis:
         raise ContainerFormatError(
-            f"{where}: rowAxis {row_axis} に対して宣言 shape"
-            f" [{','.join(str(dim) for dim in shape)}] の rank が足りない"
+            f"{where}: for rowAxis {row_axis} the rank of the declared shape"
+            f" [{','.join(str(dim) for dim in shape)}] is too small"
         )
     row_count = shape[row_axis]
     row_length = numel // row_count if row_count else 0
     if entry.grouping == "channel" and group_size != per_channel_group_size(row_length):
         raise ContainerFormatError(
-            f"{where}: codec '{encoding.codec}' は per-channel なので groupSize は行長"
-            f" {per_channel_group_size(row_length)} に等しい MUST（宣言は {group_size}）"
+            f"{where}: codec '{encoding.codec}' is per-channel, so groupSize MUST equal the row"
+            f" length {per_channel_group_size(row_length)} (declared {group_size})"
         )
     if entry.grouping == "group":
         if group_size < MIN_GROUP_SIZE or group_size & (group_size - 1) != 0:
             raise ContainerFormatError(
-                f"{where}: groupSize {group_size} が 2 冪かつ {MIN_GROUP_SIZE} 以上でない"
-                "（ADR 0069 決定 2）"
+                f"{where}: groupSize {group_size} is not a power of 2 that is {MIN_GROUP_SIZE} or"
+                " more (ADR 0069 decision 2)"
             )
         if row_length % group_size != 0:
             raise ContainerFormatError(
-                f"{where}: 行長 {row_length}（= numel / shape[{row_axis}]）が groupSize"
-                f" {group_size} で割り切れない（ADR 0069 決定 2）"
+                f"{where}: row length {row_length} (= numel / shape[{row_axis}]) is not divisible"
+                f" by groupSize {group_size} (ADR 0069 decision 2)"
             )
     scale_bytes = row_count * group_count(row_length, group_size) * 4
     scale = locate(encoding.scale_block, f"{where} scale")
@@ -1416,10 +1547,11 @@ def _plan_supply(
 
 
 def bind_graphs(graph: GraphDescriptor, model: ModelDescriptor | None) -> dict[str, BoundGraph]:
-    """グラフ記述と束縛表を合流し、initializer ごとの供給計画を決める（TS `bindGraphs` の鏡像）。
+    """Merge the graph descriptor and the binding table and decide the supply plan of each
+    initializer (mirrors TS `bindGraphs`).
 
-    `model` が `None`（`krg`）のときは const 供給だけが埋まる — 重みが要る initializer は
-    供給を持たない宣言として残る（`krg` だけでは Session を組めない）。
+    When `model` is `None` (`krg`), only const supplies are filled — initializers that need weights
+    remain declarations without a supply (a `krg` alone cannot build a Session).
     """
     locate = _located_block(graph, model)
     constants = {(entry.graph, entry.initializer): entry for entry in graph.constants}
@@ -1427,7 +1559,7 @@ def bind_graphs(graph: GraphDescriptor, model: ModelDescriptor | None) -> dict[s
     for graph_name, declaration in graph.graphs.items():
         initializers = declaration.get("initializers")
         if not isinstance(initializers, dict):
-            raise ContainerFormatError(f"graph '{graph_name}': `initializers` 節が無い")
+            raise ContainerFormatError(f"graph '{graph_name}': no `initializers` section")
         supplies: dict[str, InitializerSupply] = {}
         for name, init in initializers.items():
             if isinstance(init, dict) and init.get("shared") is True:
@@ -1444,7 +1576,7 @@ def bind_graphs(graph: GraphDescriptor, model: ModelDescriptor | None) -> dict[s
             if supply is None:
                 if model is None:
                     continue
-                raise ContainerFormatError(f"{where}: 束縛表に供給が無い")
+                raise ContainerFormatError(f"{where}: no supply in the binding table")
             supplies[name] = _plan_supply(
                 where, dtype, shape, supply.encoding, supply.block, supply.pieces, locate, "model"
             )
@@ -1452,18 +1584,21 @@ def bind_graphs(graph: GraphDescriptor, model: ModelDescriptor | None) -> dict[s
     return bound
 
 
-#: 供給を持たない initializer の格納（意味論 dtype → 生の格納）。共有宣言（ADR 0096 段 2）と
-#: `krg`（束縛表そのものが無い）だけが該当する席で、どちらも**この容器に実体が無い**。
+#: Storage of an initializer without a supply (semantic dtype → raw storage). The only slots this
+#: applies to are shared declarations (ADR 0096 stage 2) and `krg` (no binding table at all), and
+#: in both **this container has no body**.
 _PLAIN_STORAGE_FOR: Mapping[str, str] = {"f32": "f32", "i32": "i32"}
 
 
 def _storage_document(encoding: BlockEncoding) -> dict[str, Any]:
-    """束縛表の `encoding` → IR v1 の `storage` 記述子（{@link karume.container.Encoding} の逆）。
+    """The binding table's `encoding` → the IR v1 `storage` descriptor (the inverse of
+    {@link karume.container.Encoding}).
 
-    `scale` は v1 では「scale テンソルのキー」だが、容器では scale は block なので **block id**
-    をそのまま綴る（診断が現物の名前を指す）。`group_size` を出すのは group codec だけ — 旧
-    per-channel の宣言は `group_size` を持たず、容器側の `groupSize`（= 行長）は台帳から導ける
-    写しなので、戻すと「i8 に group_size が付いた」形（ランタイム支援の門が落とす形）になる。
+    In v1 `scale` is "the key of the scale tensor", but in the container the scale is a block, so
+    the **block id** is spelled as is (diagnostics name the actual thing). Only group codecs emit
+    `group_size` — old per-channel declarations have no `group_size`, and the container's
+    `groupSize` (= the row length) is a copy derivable from the ledger, so putting it back would
+    give "i8 with a group_size" (the shape the runtime support check rejects).
     """
     entry = codec_entry(encoding.codec)
     document: dict[str, Any] = {"dtype": entry.layout}
@@ -1475,22 +1610,26 @@ def _storage_document(encoding: BlockEncoding) -> dict[str, Any]:
 
 
 def ir_graph_from_container(read: ReadContainer, graph_name: str) -> IrGraph:
-    """コンテナの 2 文書 → IR v1 の {@link IrGraph}（`parse_ir_graph` の検査群を全部通す）。
+    """The container's 2 documents → IR v1 {@link IrGraph} (passing every check of
+    `parse_ir_graph`).
 
-    グラフ記述が持つのは **IR v2 の文書**（docs/ir-v2.md — initializer 名がテンソルキーで、
-    格納は束縛表へ出ている）なので、v1 との差は `version` と `initializers` の 2 点だけである。
-    ここが戻すのは「その 2 点を埋めた v1 文書」を {@link parse_ir_graph} へ通した結果で、
-    宣言の完全性・SSA・前方参照・記号の束縛可能性・state スロットの規則は**同じ 1 本**が見る
-    （v2 用に検査を書き写すと、規則が動いた日に片方だけが古びる）。
+    The graph descriptor holds **an IR v2 document** (docs/ir-v2.md — the initializer name is the
+    tensor key, and storage has moved out to the binding table), so the difference from v1 is only
+    2 points: `version` and `initializers`. What this returns is "the v1 document with those 2
+    points filled in" passed through {@link parse_ir_graph}, so completeness of declarations, SSA,
+    forward references, symbol bindability and the state slot rules are checked by **the same
+    single path** (copying the checks for v2 would let only one of them go stale on the day a rule
+    moves).
 
-    格納の正本は**束縛表**（`encoding.codec`）で、供給を持たない席（共有宣言と `krg`）だけは
-    意味論 dtype の生の格納を置く — その席はこの容器に 1 バイトも持たないので、格納の主張は
-    貸し手の容器（と、その容器に掛かる同じ門）が持つ。
+    The source of truth for storage is **the binding table** (`encoding.codec`); only slots without
+    a supply (shared declarations and `krg`) get the raw storage of the semantic dtype — those
+    slots hold not a single byte in this container, so the storage claim belongs to the lender's
+    container (and the same checks applied to that container).
     """
     declaration = read.graph.graphs.get(graph_name)
     if declaration is None:
         raise ContainerError(
-            f"コンテナにグラフ '{graph_name}' が無い（宣言: {sorted(read.graph.graphs)}）"
+            f"The container has no graph '{graph_name}' (declared: {sorted(read.graph.graphs)})"
         )
     where = f"graph '{graph_name}'"
     supplies = bind_graphs(read.graph, read.model)[graph_name].supplies
@@ -1507,8 +1646,8 @@ def ir_graph_from_container(read: ReadContainer, graph_name: str) -> IrGraph:
         plain = _PLAIN_STORAGE_FOR.get(semantic) if isinstance(semantic, str) else None
         if plain is None:
             raise ContainerError(
-                f"{where} initializer '{name}': 供給が無いのに意味論 dtype が"
-                f" {semantic!r}（生の格納を持てない）"
+                f"{where} initializer '{name}': no supply, yet the semantic dtype is"
+                f" {semantic!r} (it cannot have raw storage)"
             )
         shared = _as_object(raw, f"{where}.initializers['{name}']").get("shared") is True
         borrowed = {"shared": {"tensor": name}} if shared else {"tensor": name}
@@ -1518,12 +1657,15 @@ def ir_graph_from_container(read: ReadContainer, graph_name: str) -> IrGraph:
 
 
 def assert_ir_accepted(read: ReadContainer) -> None:
-    """容器が宣言する全グラフに **IR の受理規則**を掛ける（op 語彙 / ランタイム支援 / op 契約）。
+    """Apply **the IR acceptance rules** (op vocabulary / runtime support / op contracts) to every
+    graph the container declares.
 
-    MUST: 配布形を作る経路と受け入れる経路の両方がここを通る（`karume dist` の入力検査と
-    `karume verify`）。構造検査（{@link verify_container}）は「容器として開けるか」しか見ない
-    ので、これが抜けると**語彙外の op を宣言した容器**が配布形に据わり、利用者の
-    `createSession` で初めて落ちる（モジュール doc が掲げる目的そのもの）。
+    MUST: both the path that builds a distribution and the path that accepts one go through here
+    (the input check of `karume dist`, and `karume verify`). The structural check
+    ({@link verify_container}) only looks at "can it be opened as a container", so without this
+    **a container declaring an op outside the vocabulary** would be put in place in a
+    distribution and fail only at the caller's `createSession` (the very purpose the module doc
+    states).
     """
     for name in sorted(read.graph.graphs):
         try:
@@ -1536,20 +1678,22 @@ def assert_ir_accepted(read: ReadContainer) -> None:
 
 @dataclass(frozen=True)
 class VerifiedContainer:
-    """{@link verify_container} の結果（開いた読み手と、合流で決まった供給計画）。"""
+    """The result of {@link verify_container} (the opened reader, and the supply plans decided by
+    the merge)."""
 
     read: ReadContainer
     graphs: dict[str, BoundGraph]
 
 
 def verify_container(paths: Sequence[str | Path], *, blocks: bool = False) -> VerifiedContainer:
-    """コンテナ（`krm` の part 列 / `krg` 1 本）を開き、合流まで通す。
+    """Open a container (the part sequence of a `krm` / one `krg`) and take it through the merge.
 
-    `paths` は単一形なら 1 本、分割形なら **part 0 から順に**並べた part 列。既定で掛かるのは
-    「宣言で決まる規則」全部（読み手の構造検査 + 上の合流層）で、**実バイトは読まない**
-    （§7 のハッシュ 3 分離）。`blocks=True` は全 block を取り直して sha256 まで突き合わせ、
-    `ternary` の payload のコード検査（§6.3）も掛ける — 「コンテナを検証する」経路はこの 1 本
-    だけ MUST（CLI もここを通る）。
+    `paths` is one file in single form, and in split form the part sequence **in order from part
+    0**. By default every "rule decided by declarations" applies (the reader's structural check +
+    the merge layer above), and **no actual bytes are read** (the three separate hash roles of
+    §7). `blocks=True` takes every block again and compares down to sha256, and also applies the
+    code check of `ternary` payloads (§6.3) — this MUST be the only path that "verifies a
+    container" (the CLI goes through here too).
     """
     read = read_container([Path(path) for path in paths])
     if blocks:
@@ -1560,17 +1704,19 @@ def verify_container(paths: Sequence[str | Path], *, blocks: bool = False) -> Ve
     return VerifiedContainer(read, bound)
 
 
-#: 2 bit コードのどれかが 0 のバイト（`ternary` の値域外 — container-v1 §6.3）。
+#: Bytes in which some 2-bit code is 0 (outside the `ternary` value range — container-v1 §6.3).
 _TERNARY_CODE_ZERO_BYTES = frozenset(
     byte for byte in range(256) if any((byte >> shift) & 3 == 0 for shift in (0, 2, 4, 6))
 )
 
 
 def _assert_ternary_payloads(read: ReadContainer, bound: Mapping[str, BoundGraph]) -> None:
-    """`ternary` 宣言の追加条件: payload の全 2 bit コードが `{1, 2, 3}`（container-v1 §6.3）。
+    """The extra condition of a `ternary` declaration: every 2-bit code of the payload is in
+    `{1, 2, 3}` (container-v1 §6.3).
 
-    TS `assertTernaryCodes`（ロード時に block を読むたびに掛かる）の鏡像。ここに無いと
-    「verify は緑・ロードで初めて落ちる」形になる。見るのは payload だけ（末尾の詰め物は除く）。
+    Mirrors TS `assertTernaryCodes` (applied every time a block is read at load). Without it here,
+    "verify is green but loading fails" would result. Only the payload is checked (tail padding
+    excluded).
     """
     for graph_name, graph in bound.items():
         for name, supply in graph.supplies.items():
@@ -1588,8 +1734,8 @@ def _assert_ternary_payloads(read: ReadContainer, bound: Mapping[str, BoundGraph
                 )
                 if offending is not None:
                     raise ContainerFormatError(
-                        f"graph '{graph_name}' initializer '{name}': ternary の payload に"
-                        f"コード 0（三値の値域外）がある（バイト {offending}）"
+                        f"graph '{graph_name}' initializer '{name}': the ternary payload has"
+                        f" code 0 (outside the ternary value range) (byte {offending})"
                     )
 
 
@@ -1598,31 +1744,34 @@ def _assert_ternary_payloads(read: ReadContainer, bound: Mapping[str, BoundGraph
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="コンテナ（krm / krg）を全規則で検証する（2 文書 + 合流 + 全 block の sha256）"
+        description="Verify containers (krm / krg) against every rule (2 documents + merge +"
+        " sha256 of every block)"
     )
     parser.add_argument(
         "models",
         type=Path,
         nargs="+",
-        help="検証するコンテナ（複数指定可。part 0 のファイル・単一形・代表 path のどれでもよい"
-        " — 分割形は連番の part 列としてまとめて検証する）",
+        help="containers to verify (several allowed; a part 0 file, a single-form file or a"
+        " representative path — a split form is verified together as its numbered part sequence)",
     )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    """指定されたコンテナを 1 本ずつ検証する。
+    """Verify the given containers one at a time.
 
-    引数は**コンテナの代表 path**（part 0 の現物を渡してもよい）で、分割されていれば連番の
-    part 列へ解決してからまとめて検証する（{@link karume.container.container_parts}）—
-    part 1 本だけを単体で検証しても「2 文書が無い」としか言えず、合流も block の sha256 も
-    見られない。
+    The arguments are **representative paths of containers** (a part 0 file may be passed too);
+    a split container is resolved to its numbered part sequence and verified together
+    ({@link karume.container.container_parts}) — verifying a single part alone could only say
+    "the 2 documents are missing" and could see neither the merge nor the block sha256.
 
-    掛かるのは 2 文書の構造検査・合流（`bind_graphs`）・**全 block を取り直した sha256 の
-    突合**と、IR の受理規則（{@link assert_ir_accepted} — 組み立て側の門と**同じ 1 本**）である。
+    What applies is the structural check of the 2 documents, the merge (`bind_graphs`), **the
+    sha256 cross-check of every block taken again**, and the IR acceptance rules
+    ({@link assert_ir_accepted} — **the same single path** as the assembly side's check).
 
-    MUST: 落ちたファイルで止める（残りを検証して最後にまとめない）— 例外は規則違反の
-    位置まで綴ってあるので、そのまま送出するのが最も情報量が多い。
+    MUST: stop at the file that fails (do not verify the rest and collect at the end) — the
+    exception spells out where the rule was broken, so raising it as is carries the most
+    information.
     """
     args = build_parser().parse_args(argv)
     for path in args.models:
@@ -1639,7 +1788,7 @@ def _verify_container_line(path: Path) -> str:
         f"{path}: parts={len(parts)} blocks={len(read.block_ids)}"
         f" graphs={','.join(sorted(bound))}"
         f" initializers={sum(len(graph.supplies) for graph in bound.values())}"
-        f" assets={','.join(assets) if assets else '（無し）'}"
+        f" assets={','.join(assets) if assets else '(none)'}"
     )
 
 

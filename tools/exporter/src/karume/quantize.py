@@ -1,17 +1,22 @@
-"""重みの fake-quant（格納 dtype で表現可能な値へ丸める）— ADR 0006 / 0018 / 0019 / 0069。
+"""Weight fake-quant (rounding to values representable in the storage dtype) — ADR 0006 / 0018 /
+0019 / 0069.
 
-意味論は「格納のみ量子化・計算は f32」。エクスポータが重みを**先に**丸めてから参照と
-golden を採ることで、GPU 側「圧縮格納 + f32 計算」と torch 側「丸め済み重みの f32 計算」が
-**同じ数**を計算する対応になり、量子化誤差と実装誤差が分離される。
+The semantics are "only the storage is quantized; compute is f32". The exporter rounds the weights
+**first** and then captures the reference and the goldens, so the GPU side ("compressed storage +
+f32 compute") and the torch side ("f32 compute on the rounded weights") compute **the same
+numbers**, which separates quantization error from implementation error.
 
-MUST: 丸めは**参照・golden の採取より前**に当てる（ADR 0006）。後に当てると参照だけが
-元の重みで計算され、E2E の差が「量子化誤差 + 実装誤差」の合成になって tolerance の意味が
-失われる（そして tolerance を緩める方向にしか作用しないので、緑のまま検出力だけが落ちる）。
+MUST: rounding is applied **before the reference and the goldens are captured** (ADR 0006). Applied
+after, only the reference would be computed with the original weights, the E2E difference would be
+"quantization error + implementation error" combined, and the tolerance would lose its meaning (and
+since that only ever pushes toward loosening the tolerance, the check stays green while it loses
+its power to detect).
 
-MUST: 丸めは**実効重み**に当てる — LoRA の焼き込み・weight_norm の除去・CausalConv3d の
-時間方向スライスのように重みを書き換える処理は丸めより前に済ませる。f16 では「合成後の値が
-f16 表現可能でなくなる」ため、i8 では**さらに strict** で、捨てられる要素が amax に効くと
-per-channel scale そのものがずれる（値は全要素で変わる）。
+MUST: rounding is applied to the **effective weights** — processing that rewrites weights, such as
+baking in LoRA, removing weight_norm or the temporal slice of CausalConv3d, is done before rounding.
+For f16 the reason is that "the composed value is no longer representable in f16"; for i8 it is
+**even stricter**: when a discarded element affects amax, the per-channel scale itself shifts (the
+values change in every element).
 """
 
 from __future__ import annotations
@@ -25,12 +30,14 @@ from torch import nn
 
 
 class QuantizeError(ValueError):
-    """丸めが表現可能値へ落とせなかった / 量子化対象の素性が想定と違う。"""
+    """Rounding could not land on representable values / a quantization target is not what was
+    expected."""
 
 
 @dataclass(frozen=True)
 class RoundReport:
-    """丸めた本数と要素数（「f16 指定なのに 0 本」を沈黙させないための計数）。"""
+    """Number of tensors and elements rounded (a count so that "f16 requested but 0 tensors" is
+    never silent)."""
 
     parameters: int
     buffers: int
@@ -41,35 +48,39 @@ class RoundReport:
 
 
 def round_weights_to_f16(model: torch.nn.Module) -> RoundReport:
-    """パラメータと f32 バッファを f16 表現可能値へ丸める（計算は f32 のまま）。
+    """Round parameters and f32 buffers to values representable in f16 (compute stays f32).
 
-    対象を「パラメータ + f32 バッファ」にするのは、格納 f16 になりうる initializer が
-    そこからしか来ないから（畳み込み定数と焼き込み定数はグラフ意味論の一部で、golden が
-    元値で計算されるため f32 のまま格納する — 適格判定は emit.py 側）。
+    The targets are "parameters + f32 buffers" because the initializers that can be stored as f16
+    come only from there (convolution constants and folded constants are part of the graph
+    semantics, and the golden is computed with their original values, so they are stored as f32
+    — the eligibility check is on the emit.py side).
 
-    MUST: 有限値が非有限へ飽和したら fail loudly。`Tensor.to(float16)` は f16 の値域
-    （|x| ≤ 65504）を超えた要素を静かに ±inf にするため、無検査だと「重みに inf が入った
-    モデル」と「同じ inf で計算した参照」が**一致してしまい**、E2E が緑のまま出力が壊れる。
+    MUST: fail loudly when a finite value saturates to non-finite. `Tensor.to(float16)` silently
+    turns elements beyond the f16 range (|x| ≤ 65504) into ±inf, so without the check "a model with
+    inf in its weights" and "a reference computed with the same inf" **agree**, and the output
+    breaks while E2E stays green.
     """
     counts = {"parameter": 0, "buffer": 0}
     elements = 0
     with torch.no_grad():
-        # named_parameters / named_buffers は既定で重複（重み共有）を 1 度しか出さない。
-        # f16 丸めは冪等なので 2 度当たっても値は変わらないが、計数は実体の本数で出す。
+        # named_parameters / named_buffers yield duplicates (shared weights) only once by default.
+        # f16 rounding is idempotent, so hitting one twice would not change the values, but the
+        # count is the number of actual tensors.
         targets = [("parameter", name, t) for name, t in model.named_parameters()]
         targets += [("buffer", name, t) for name, t in model.named_buffers()]
         for kind, name, tensor in targets:
             if tensor.dtype is not torch.float32:
                 continue
             rounded = tensor.to(torch.float16).to(torch.float32)
-            # 要素単位: 元から非有限の要素は丸めのせいではないので数えない。
+            # Per element: elements that were non-finite to begin with are not the rounding's
+            # fault, so they are not counted.
             saturated = torch.isfinite(tensor) & ~torch.isfinite(rounded)
             if saturated.any():
                 overflow = int(saturated.sum())
                 raise QuantizeError(
-                    f"'{name}': f16 への丸めで有限値 {overflow} 個が非有限へ飽和した"
-                    f"（f16 の値域は |x| ≤ 65504・実測 max |x| = "
-                    f"{float(tensor.abs().max()):.4g}）"
+                    f"'{name}': rounding to f16 saturated {overflow} finite values to non-finite"
+                    f" (the f16 range is |x| ≤ 65504; actual max |x| = "
+                    f"{float(tensor.abs().max()):.4g})"
                 )
             tensor.copy_(rounded)
             counts[kind] += 1
@@ -78,28 +89,32 @@ def round_weights_to_f16(model: torch.nn.Module) -> RoundReport:
 
 
 def round_weights_to_bf16(model: torch.nn.Module) -> RoundReport:
-    """パラメータと **checkpoint が運ぶ** f32 バッファを bf16 表現可能値へ丸める（計算は f32）。
+    """Round parameters and the f32 buffers **the checkpoint carries** to values representable in
+    bf16 (compute stays f32).
 
-    {@link round_weights_to_f16} と対（冪等性・計数は同じ）。丸めは `Tensor.to(bfloat16)` の
-    RNE（bf16 = f32 の上位 16 bit）。
+    The counterpart of {@link round_weights_to_f16} (same idempotence and counting). The rounding
+    is the RNE of `Tensor.to(bfloat16)` (bf16 = the upper 16 bits of f32).
 
-    MUST: 非永続バッファ（`persistent=False` — `state_dict()` に出ない）は丸めない。それは
-    checkpoint に無く初期化時に f32 で計算される値（RoPE の `inv_freq` など）で、上流の推論も
-    f32 のまま使う。bf16 の資産は「上流のビット列 + 上流と同じ f32 の計算定数」で、丸めると
-    上流が持っていない誤差を golden に入れる（実測: Anima の text_conditioner で 1.4e-4 —
-    ADR 0131 決定 2）。f16 版は既存の系列と golden を動かさないため従来どおり全バッファを丸める。
+    MUST: non-persistent buffers (`persistent=False` — absent from `state_dict()`) are not rounded.
+    They are not in the checkpoint but computed in f32 at init (such as the RoPE `inv_freq`), and
+    upstream inference uses them in f32 as well. A bf16 asset is "the upstream bits + the same f32
+    computed constants as upstream"; rounding them would put an error upstream does not have into
+    the golden (observed: 1.4e-4 in Anima's text_conditioner — ADR 0131 decision 2). The f16
+    version keeps rounding every buffer as before, so the existing series and goldens do not move.
 
-    MUST: 有限値が非有限へ飽和したら fail loudly。bf16 は f32 と指数域が同じでも仮数が 7 bit
-    なので最大有限値は (2 − 2⁻⁷)·2¹²⁷ ≈ 3.39e38 で、それを超える f32 の上端
-    （|x| ≥ (2 − 2⁻⁸)·2¹²⁷）は RNE で静かに ±inf へ繰り上がる — 無検査だと f16 版と同じく
-    「重みに inf が入ったモデル」と「同じ inf で計算した参照」が一致してしまう。
+    MUST: fail loudly when a finite value saturates to non-finite. bf16 has the same exponent range
+    as f32 but a 7-bit mantissa, so its largest finite value is (2 − 2⁻⁷)·2¹²⁷ ≈ 3.39e38, and the
+    top of the f32 range above it (|x| ≥ (2 − 2⁻⁸)·2¹²⁷) silently rounds up to ±inf under RNE —
+    without the check, as for f16, "a model with inf in its weights" and "a reference computed
+    with the same inf" agree.
     """
     counts = {"parameter": 0, "buffer": 0}
     elements = 0
     with torch.no_grad():
-        # named_parameters / named_buffers は既定で重複（重み共有）を 1 度しか出さない。
-        # bf16 丸めは冪等なので 2 度当たっても値は変わらないが、計数は実体の本数で出す。
-        # state_dict のキー = checkpoint が運ぶテンソル（非永続バッファは出ない）。
+        # named_parameters / named_buffers yield duplicates (shared weights) only once by default.
+        # bf16 rounding is idempotent, so hitting one twice would not change the values, but the
+        # count is the number of actual tensors.
+        # state_dict keys = the tensors the checkpoint carries (non-persistent buffers are absent).
         carried = model.state_dict().keys()
         targets = [("parameter", name, t) for name, t in model.named_parameters()]
         targets += [("buffer", name, t) for name, t in model.named_buffers() if name in carried]
@@ -107,14 +122,15 @@ def round_weights_to_bf16(model: torch.nn.Module) -> RoundReport:
             if tensor.dtype is not torch.float32:
                 continue
             rounded = tensor.to(torch.bfloat16).to(torch.float32)
-            # 要素単位: 元から非有限の要素は丸めのせいではないので数えない。
+            # Per element: elements that were non-finite to begin with are not the rounding's
+            # fault, so they are not counted.
             saturated = torch.isfinite(tensor) & ~torch.isfinite(rounded)
             if saturated.any():
                 overflow = int(saturated.sum())
                 raise QuantizeError(
-                    f"'{name}': bf16 への丸めで有限値 {overflow} 個が非有限へ飽和した"
-                    f"（bf16 の最大有限値は ≈3.39e38・実測 max |x| = "
-                    f"{float(tensor.abs().max()):.4g}）"
+                    f"'{name}': rounding to bf16 saturated {overflow} finite values to non-finite"
+                    f" (the largest finite bf16 value is ≈3.39e38; actual max |x| = "
+                    f"{float(tensor.abs().max()):.4g})"
                 )
             tensor.copy_(rounded)
             counts[kind] += 1
@@ -122,23 +138,27 @@ def round_weights_to_bf16(model: torch.nn.Module) -> RoundReport:
     return RoundReport(parameters=counts["parameter"], buffers=counts["buffer"], elements=elements)
 
 
-# ---- i8（per-channel symmetric）— ADR 0019 ---------------------------------
+# ---- i8 (per-channel symmetric) — ADR 0019 ---------------------------------
 
-#: 量子化幅の片側（**−128 は使わない**）。±127 に閉じると最大絶対値要素が `q = ±127` に
-#: 乗るので、丸め済みの重みから引き直す scale は `fl(fl(127·s)/127)` になる。到達可能な scale
-#: `s = fl(amax/127)` はこの写像の**不動点**なので、fake-quant が**冪等**になる（再適用でビット
-#: 不変 — `tests/test_quantize.py` が固定する）。理由: amax は `127·s` の最近接丸めで s に落ちる
-#: f32 なので、`fl(127·s)` は `127·s` へ amax 以上に近く、127 で割り戻すと s に落ちる。
-#: amax 要素そのものの厳密復元（`fl(127·s) == amax`）は f32 では 1ulp ずれうる — 冪等の根拠は
-#: そちらではない（ADR 0069 追記 3）。−128 を許すと scale だけが動く再量子化が起きる。
+#: One side of the quantization range (**−128 is not used**). Closing it at ±127 puts the
+#: largest-magnitude element on `q = ±127`, so the scale re-derived from the rounded weights is
+#: `fl(fl(127·s)/127)`. A reachable scale `s = fl(amax/127)` is a **fixed point** of this map, so
+#: fake-quant is **idempotent** (re-applying it is bit-identical — pinned by
+#: `tests/test_quantize.py`). Reason: amax is an f32 that rounds to s as the nearest value of
+#: `127·s`, so `fl(127·s)` is at least as close to `127·s` as amax is, and dividing back by 127
+#: lands on s. Exact restoration of the amax element itself (`fl(127·s) == amax`) can be off by
+#: 1 ulp in f32 — idempotence does not rest on it (ADR 0069 addendum 3). Allowing −128 causes
+#: requantization in which only the scale moves.
 INT8_MAX = 127
 
-#: per-channel scale の**チャネル軸**（モジュール型 → 重みテンソルの軸番号 — ADR 0019）。
-#: 出力チャネルの軸で、`ConvTranspose1d` だけ重みが `[Cin, Cout, K]` の転置レイアウトなので 1。
+#: The **channel axis** of the per-channel scale (module type → axis index of the weight tensor —
+#: ADR 0019). It is the output-channel axis; only `ConvTranspose1d` has the transposed weight
+#: layout `[Cin, Cout, K]`, so its axis is 1.
 #:
-#: MUST: `ops.WEIGHT_CHANNEL_AXES`（op 名で引く同じ表）と**同じ軸**を返す。片方だけ動かすと
-#: 「emit した scale の軸」と「カーネルが引く軸」が食い違い、値が黙って壊れる。対応は
-#: `tests/test_quantize.py` の突合テストが固定する（モジュール型 → op 名の対応表つき）。
+#: MUST: returns **the same axis** as `ops.WEIGHT_CHANNEL_AXES` (the same table keyed by op name).
+#: Moving only one of them makes "the axis of the emitted scale" and "the axis the kernel reads"
+#: disagree, and the values silently break. The correspondence is pinned by the cross-check test
+#: in `tests/test_quantize.py` (with a module type → op name table).
 QUANT_CHANNEL_AXES: Mapping[type[nn.Module], int] = MappingProxyType(
     {
         nn.Linear: 0,
@@ -150,23 +170,24 @@ QUANT_CHANNEL_AXES: Mapping[type[nn.Module], int] = MappingProxyType(
     }
 )
 
-#: 量子化対象にできるモジュール型の一覧（{@link QUANT_CHANNEL_AXES} の鍵から導出）。
-#: `op_types` へ「i8 と同じ 6 種」を渡すときの綴り — 表を写した別リストにはしない
-#: （独立に動くと「軸を引ける型」と「対象にできる型」が黙って割れる）。
+#: The module types that can be quantization targets (derived from the keys of
+#: {@link QUANT_CHANNEL_AXES}). The spelling for passing "the same 6 types as i8" to `op_types` —
+#: not a separate list copied from the table (if they moved independently, "the types whose axis
+#: can be looked up" and "the types that can be targets" would silently diverge).
 QUANT_MODULE_TYPES: tuple[type[nn.Module], ...] = tuple(QUANT_CHANNEL_AXES)
 
 
 @dataclass(frozen=True)
 class Int8Report:
-    """量子化した重みの scale 台帳と計数。
+    """The scale ledger and counts of the quantized weights.
 
-    `scales` のキーは**モデル内 FQN**（`<module>.weight`）で、`convert.py` が initializer の
-    `tensor`（コンテナの束縛表のキー）に使う FQN と同じ空間。`id(tensor)` で突き合わせない
-    （ADR 0006）— パラメータ同一性は正規化・焼き込みで簡単に崩れ、崩れても黙って
-    「対象 0 本」に落ちるだけだから。
+    The keys of `scales` are **in-model FQNs** (`<module>.weight`), the same space as the FQNs
+    `convert.py` uses for an initializer's `tensor` (the key of the container's binding table). No
+    matching by `id(tensor)` (ADR 0006) — parameter identity breaks easily under normalisation and
+    folding, and when it breaks it just silently drops to "0 targets".
     """
 
-    #: FQN → scale（重みと同 rank の keepdim 形・F32）。
+    #: FQN → scale (keepdim shape of the same rank as the weight, F32).
     scales: Mapping[str, torch.Tensor]
     modules: int
     elements: int
@@ -176,12 +197,13 @@ class Int8Report:
 
 
 def _channel_axis(module: nn.Module) -> int | None:
-    """モジュールの per-channel 軸（対象外なら None）。
+    """The module's per-channel axis (None when it is not a target).
 
-    完全一致を先に見てから isinstance へ落とす — 実モデルは `nn.Linear` の薄い派生を使う
-    ことがあり、型の完全一致だけだと**黙って対象から外れる**（emit 側の適格判定は消費 op で
-    決まるので、外れた重みは「適格なのに scale が無い」として fail loudly になるが、
-    ここで拾えるものは拾う）。2 つ以上に当たる型は軸が決まらないので落とす。
+    An exact match is checked first, then isinstance — real models sometimes use thin subclasses
+    of `nn.Linear`, and an exact type match alone would **silently drop them from the targets**
+    (eligibility on the emit side is decided by the consuming op, so a dropped weight fails loudly
+    as "eligible but has no scale", but whatever can be caught here is caught). A type that matches
+    two or more entries has no single axis, so it fails.
     """
     exact = QUANT_CHANNEL_AXES.get(type(module))
     if exact is not None:
@@ -189,16 +211,17 @@ def _channel_axis(module: nn.Module) -> int | None:
     axes = {axis for cls, axis in QUANT_CHANNEL_AXES.items() if isinstance(module, cls)}
     if len(axes) > 1:
         raise QuantizeError(
-            f"{type(module).__name__}: per-channel 軸が 1 つに決まらない（候補 {sorted(axes)}）"
+            f"{type(module).__name__}: the per-channel axis is not unique"
+            f" (candidates {sorted(axes)})"
         )
     return next(iter(axes), None)
 
 
 def channel_scale(weight: torch.Tensor, axis: int) -> torch.Tensor:
-    """`scale = clamp(amax / 127, f32 tiny)` を weight と同 rank の keepdim 形で返す。
+    """Return `scale = clamp(amax / 127, f32 tiny)` in the keepdim shape of the same rank as weight.
 
-    下限 clamp が要るのは全ゼロチャネル（`amax == 0`）— そのまま割ると NaN になる。
-    clamp 後は `q = 0` に落ちて `q·scale = 0` が厳密に元値へ戻る。
+    The lower clamp is needed for all-zero channels (`amax == 0`) — dividing as is gives NaN. After
+    the clamp they land on `q = 0`, and `q·scale = 0` restores the original value exactly.
     """
     reduced = [dim for dim in range(weight.dim()) if dim != axis]
     amax = weight.abs().amax(dim=reduced, keepdim=True) if reduced else weight.abs()
@@ -206,42 +229,48 @@ def channel_scale(weight: torch.Tensor, axis: int) -> torch.Tensor:
 
 
 def quantize_to_int8(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """`q = clamp(round(w / scale), ±127)` を int8 で返す（scale は**再計算しない**）。
+    """Return `q = clamp(round(w / scale), ±127)` as int8 (the scale is **not recomputed**).
 
-    MUST: 呼び出し側は fake-quant が使った scale を**そのまま**渡す。ここで amax から
-    引き直すと f32 の丸めで `scale` が 1ulp 動きうるので、格納値が golden を採ったときの
-    重みと一致しなくなる（ADR 0019）。
+    MUST: the caller passes the scale fake-quant used **as is**. Re-deriving it from amax here can
+    move `scale` by 1 ulp through f32 rounding, and the stored values would no longer match the
+    weights the golden was captured with (ADR 0019).
     """
     return torch.round(weight / scale).clamp_(-INT8_MAX, INT8_MAX).to(torch.int8)
 
 
 def fake_quant_int8(model: nn.Module, include: Callable[[str], bool] | None = None) -> Int8Report:
-    """重みスロットを持つモジュールの重みを per-channel symmetric int8 の表現可能値へ丸める。
+    """Round the weights of modules with a weight slot to values representable in per-channel
+    symmetric int8.
 
-    対象は {@link QUANT_CHANNEL_AXES} に載る型のモジュールの `weight` だけ — bias も norm 系
-    weight も**触らない**（bias は常に f32 が ADR 0006 の根治形で、量子化の対象に載せた瞬間に
-    プロトタイプの降格バグが再来する）。
+    The targets are only the `weight` of modules whose type is in {@link QUANT_CHANNEL_AXES} —
+    neither biases nor norm-style weights are **touched** (bias always being f32 is the root fix
+    of ADR 0006; the moment it became a quantization target, the prototype's demotion bug would
+    return).
 
-    `include` は**モジュール FQN**（`named_modules` の名前）の述語（None = 全対象）。混成格納
-    （例: embedding は i8・linear は i4）で対象を割るための口。MUST: 混成では i8 / i4 の対象を
-    **排他に**割る — tied 重み（lm_head = embed_tokens）を両方に通すと二重丸めになり、後に
-    走った側の丸めだけが値に残って先の scale 台帳が実値と食い違う。
-    既定（include=None）の対象には `nn.Conv3d` も入る（ADR 0118 決定 1）。Conv3d を conv3d
-    以外の op へ下ろすモデル（重みをホスト側で使う等）に i8 を掛けるときは、include で対象を
-    絞る — 絞らないと conv3d の重みスロットに来ない重みまで丸まる。
+    `include` is a predicate on the **module FQN** (the name from `named_modules`; None = every
+    target). It is the hook for splitting the targets in mixed storage (e.g. embedding in i8 and
+    linear in i4). MUST: in mixed storage the i8 / i4 targets are split **exclusively** — passing
+    a tied weight (lm_head = embed_tokens) through both rounds it twice, only the rounding of the
+    side that ran later stays in the values, and the earlier scale ledger disagrees with the actual
+    values.
+    The default targets (include=None) include `nn.Conv3d` (ADR 0118 decision 1). When applying
+    i8 to a model that lowers Conv3d to an op other than conv3d (using the weight on the host side,
+    for example), narrow the targets with include — otherwise weights that never reach a conv3d
+    weight slot are rounded too.
 
-    MUST: 呼ぶ順序は「実効重みが確定した後・参照/golden の採取より前」（モジュール docstring）。
+    MUST: the call order is "after the effective weights are settled, before the reference /
+    goldens are captured" (module docstring).
 
-    戻り値の scale 台帳は emit へそのまま渡す。1 本も量子化できなかった場合は fail loudly —
-    「`--dtype i8` を指定したのに実質 f32 で書けてしまった」を沈黙させないため（ADR 0006・
-    `include` が全対象を落とした場合も同じ）。
+    The returned scale ledger is passed to emit as is. When not a single weight could be quantized
+    it fails loudly — so that "`--dtype i8` was requested but it effectively wrote f32" is never
+    silent (ADR 0006; the same when `include` dropped every target).
     """
     scales: dict[str, torch.Tensor] = {}
     elements = 0
     with torch.no_grad():
         for name, module in model.named_modules():
-            # include の判定は _channel_axis より先 — 対象外モジュールの型曖昧性
-            # （複数型ヒット）で落とさない。
+            # include is checked before _channel_axis — so that type ambiguity (several type
+            # matches) of a non-target module does not fail.
             if include is not None and not include(name):
                 continue
             axis = _channel_axis(module)
@@ -253,11 +282,11 @@ def fake_quant_int8(model: nn.Module, include: Callable[[str], bool] | None = No
             fqn = f"{name}.weight" if name else "weight"
             if weight.dtype is not torch.float32:
                 raise QuantizeError(
-                    f"'{fqn}': dtype {weight.dtype} は量子化できない（意味論 f32 のみ）"
+                    f"'{fqn}': dtype {weight.dtype} cannot be quantized (f32 semantics only)"
                 )
             if axis >= weight.dim():
                 raise QuantizeError(
-                    f"'{fqn}': チャネル軸 {axis} が rank {weight.dim()} の重みに無い"
+                    f"'{fqn}': channel axis {axis} is not in a weight of rank {weight.dim()}"
                 )
             scale = channel_scale(weight, axis)
             weight.copy_(quantize_to_int8(weight, scale).to(torch.float32) * scale)
@@ -265,13 +294,13 @@ def fake_quant_int8(model: nn.Module, include: Callable[[str], bool] | None = No
             elements += weight.numel()
     if not scales:
         raise QuantizeError(
-            "格納 i8 を指定したが per-channel 量子化できる重みが 1 本も無い"
-            f"（対象の型: {', '.join(cls.__name__ for cls in QUANT_CHANNEL_AXES)}）"
+            "storage i8 was requested but there is no weight that can be quantized per channel"
+            f" (target types: {', '.join(cls.__name__ for cls in QUANT_CHANNEL_AXES)})"
         )
     return Int8Report(scales=scales, modules=len(scales), elements=elements)
 
 
-# ---- 対象選択と「in 軸」の一般化（丸め方式を問わない共有部）-----------------
+# ---- Target selection and the generalised "in axis" (shared by every rounding method) -------
 
 
 def iter_quant_targets(
@@ -279,19 +308,24 @@ def iter_quant_targets(
     op_types: tuple[type[nn.Module], ...] = (nn.Linear,),
     include: Callable[[str], bool] | None = None,
 ) -> Iterator[tuple[str, torch.Tensor, int]]:
-    """量子化対象の重みを `(FQN, weight, per-channel 軸)` で列挙する（丸め方は問わない）。
+    """Enumerate the weights to quantize as `(FQN, weight, per-channel axis)` (whatever the
+    rounding method).
 
-    対象選択の**正本** — group 量子化（{@link fake_quant_int4}）も測定専用の方式
-    （`quant_methods`）もここを通す。二重実装にすると「出荷する重みの対象」と「品質を
-    測った対象」が黙って割れ、測った劣化と出した資産が別物になる。
+    **The source of truth** for target selection — group quantization ({@link fake_quant_int4})
+    and the measurement-only methods (`quant_methods`) both go through here. With two
+    implementations, "the targets of the shipped weights" and "the targets whose quality was
+    measured" would silently diverge, and the measured degradation and the produced asset would be
+    different things.
 
-    `op_types` は `isinstance` で当てる（実モデルは `nn.Linear` の薄い派生を使う — 派生型を
-    直に渡すこともできる）。軸は {@link QUANT_CHANNEL_AXES} が正本で、**軸を引けない型は
-    素通り**する（`op_types` が丸ごと的外れだった場合は呼び出し側の「対象 0 本」診断で
-    出る — 文言は方式ごとに違うのでここでは判定しない）。
+    `op_types` is matched with `isinstance` (real models use thin subclasses of `nn.Linear` — a
+    subclass can also be passed directly). The axis comes from {@link QUANT_CHANNEL_AXES}, and
+    **types whose axis cannot be looked up are passed over** (if `op_types` misses entirely, the
+    caller's "0 targets" diagnostic reports it — its wording differs per method, so it is not
+    decided here).
 
-    `include` は**モジュール FQN** の述語（None = 全対象）。判定を型より先に置くのは
-    {@link fake_quant_int8} と同じ理由 — 対象外モジュールの型曖昧性で落とさないため。
+    `include` is a predicate on the **module FQN** (None = every target). It is checked before the
+    type for the same reason as in {@link fake_quant_int8} — so that type ambiguity of a non-target
+    module does not fail.
     """
     for name, module in model.named_modules():
         if include is not None and not include(name):
@@ -307,86 +341,97 @@ def iter_quant_targets(
         fqn = f"{name}.weight" if name else "weight"
         if weight.dtype is not torch.float32:
             raise QuantizeError(
-                f"'{fqn}': dtype {weight.dtype} は量子化できない（意味論 f32 のみ）"
+                f"'{fqn}': dtype {weight.dtype} cannot be quantized (f32 semantics only)"
             )
         if axis >= weight.dim():
-            raise QuantizeError(f"'{fqn}': チャネル軸 {axis} が rank {weight.dim()} の重みに無い")
+            raise QuantizeError(
+                f"'{fqn}': channel axis {axis} is not in a weight of rank {weight.dim()}"
+            )
         yield fqn, weight, axis
 
 
 def channel_rows(weight: torch.Tensor, axis: int) -> torch.Tensor:
-    """重みを `[チャネル, in]` の 2 次元へ畳む（group の軸 = 各 op の「in 軸」一般化）。
+    """Fold a weight into 2-D `[channel, in]` (the group axis = each op's generalised "in axis").
 
-    - linear `[O,I]` / embedding `[V,D]` … 恒等（既に `[チャネル, in]` の形）
-    - conv1d `[Cout,Cin,K]` / conv2d `[Cout,Cin,Kh,Kw]` … 出力チャネルごとに受容野を平坦化
-      （`Cin·K` / `Cin·Kh·Kw`）
-    - conv_transpose1d `[Cin,Cout,K]` … 転置レイアウトなので軸 1 を先頭へ回してから平坦化
-      （i8 の per-channel 軸と同じ向き — {@link QUANT_CHANNEL_AXES}）
+    - linear `[O,I]` / embedding `[V,D]` … identity (already in `[channel, in]` form)
+    - conv1d `[Cout,Cin,K]` / conv2d `[Cout,Cin,Kh,Kw]` … the receptive field is flattened per
+      output channel (`Cin·K` / `Cin·Kh·Kw`)
+    - conv_transpose1d `[Cin,Cout,K]` … transposed layout, so axis 1 is moved to the front before
+      flattening (the same orientation as the i8 per-channel axis — {@link QUANT_CHANNEL_AXES})
 
-    NOTE: 軸 0 の連続重みでは **view** が返る（コピーしない）が、`ConvTranspose1d` は
-    `movedim` で非連続になるため `reshape` が**コピー**を作る。書き戻しは必ず
-    {@link restore_channel_rows} を通す — 平坦形へ直接書いても元の重みには反映されない。
+    NOTE: for a contiguous weight with axis 0 a **view** is returned (no copy), but
+    `ConvTranspose1d` becomes non-contiguous through `movedim`, so `reshape` makes a **copy**.
+    Writing back always goes through {@link restore_channel_rows} — writing into the flat form
+    directly does not reach the original weight.
     """
     return weight.movedim(axis, 0).reshape(int(weight.shape[axis]), -1)
 
 
 def restore_channel_rows(rows: torch.Tensor, weight: torch.Tensor, axis: int) -> torch.Tensor:
-    """{@link channel_rows} の逆 — `[チャネル, in]` を `weight` の形へ戻す。"""
+    """The inverse of {@link channel_rows} — returns `[channel, in]` to the shape of `weight`."""
     moved = list(weight.shape)
     moved.insert(0, moved.pop(axis))
     return rows.reshape(moved).movedim(0, axis)
 
 
 def storage_rows(weight: torch.Tensor) -> torch.Tensor:
-    """格納形の rank2 畳み込み（**先頭次元 = 行・残りを平坦化**）= {@link channel_rows} の軸 0 版。
+    """Rank-2 fold of the storage form (**first dimension = row, the rest flattened**) = the axis-0
+    version of {@link channel_rows}.
 
-    group scale の形は rank に依らずこの畳み込みで決まる（ADR 0069 決定 3 の rank 非依存化）:
-    `[weight.shape[0], (numel / weight.shape[0]) / group_size]`。linear `[O,I]` と
-    embedding `[V,D]` では「重みと同 rank・最終次元だけ group 数」と**同じ形**で、
-    conv1d `[Cout,Cin,K]` → `[Cout, (Cin·K)/g]` が唯一の新形（波 J-5b の追補）。
+    The group scale shape is decided by this fold whatever the rank (the rank independence of ADR
+    0069 decision 3): `[weight.shape[0], (numel / weight.shape[0]) / group_size]`. For linear
+    `[O,I]` and embedding `[V,D]` it is **the same shape** as "the weight's rank with only the last
+    dimension replaced by the group count", and conv1d `[Cout,Cin,K]` → `[Cout, (Cin·K)/g]` is the
+    only new shape (the phase J-5b supplement — ADR 0069 addendum 7).
 
-    行の並びは**重みの連続メモリ順そのもの**（`[O,Cin,K]` の row-major = `[O, Cin·K]` の
-    平坦と同一バイト列）なので、pack のバイト列は rank に依らず 1 通りに決まる。
+    The row order is **exactly the weight's contiguous memory order** (the row-major bytes of
+    `[O,Cin,K]` = the flat `[O, Cin·K]`), so the packed bytes are decided one way whatever the
+    rank.
 
-    MUST: 行軸が先頭でない重み（`ConvTranspose1d` の `[Cin,Cout,K]`）をここへ通さない —
-    形は通るが行の並びがメモリ順と別物になる。i4 の適格集合（`emit.I4_WEIGHT_OPS`）が
-    conv_transpose1d を持たないことがその境界で、明示指定は emit が fail loudly で受ける。
+    MUST: a weight whose row axis is not first (`[Cin,Cout,K]` of `ConvTranspose1d`) is not passed
+    through here — the shape passes, but the row order differs from the memory order. The i4
+    eligible set (`emit.I4_WEIGHT_OPS`) not containing conv_transpose1d is that boundary, and emit
+    fails loudly on an explicit request.
     """
     return channel_rows(weight, 0)
 
 
-# ---- i4（K 方向 group symmetric）— ADR 0069 ---------------------------------
+# ---- i4 (group symmetric along K) — ADR 0069 ---------------------------------
 
-#: 量子化幅の片側（**−8 は使わない**）。±7 に閉じると group の amax 要素が `q = ±7` に乗り、
-#: 到達可能な scale `s = fl(amax/7)` が `fl(fl(7·s)/7)` の**不動点**なので、fake-quant が
-#: **冪等**になる（`INT8_MAX` の論証の 4bit 版 — ADR 0069 決定 3・追記 3）。amax 要素の厳密
-#: 復元は 1ulp ずれうるので根拠にしない。−8 を許すと scale だけが動く再量子化が起きる。
+#: One side of the quantization range (**−8 is not used**). Closing it at ±7 puts the group's
+#: amax element on `q = ±7`, and a reachable scale `s = fl(amax/7)` is a **fixed point** of
+#: `fl(fl(7·s)/7)`, so fake-quant is **idempotent** (the 4-bit version of the `INT8_MAX`
+#: argument — ADR 0069 decision 3, addendum 3). Exact restoration of the amax element can be off
+#: by 1 ulp, so it is not relied on. Allowing −8 causes requantization in which only the scale
+#: moves.
 INT4_MAX = 7
 
-#: 既定の group 長（ADR 0069 追記 = Phase 0 sweep の実測で確定した 32）。格納欄なので、
-#: サイズ優先の資産が 64 / 128 を選ぶことは妨げない（受理集合は 2 冪かつ 16 以上 — 値域の
-#: 検査は格納側の規則として `verify.py` が持つ）。
+#: Default group size (32, settled by the measurements of the Phase 0 sweep — ADR 0069 addendum
+#: 1). It is a storage field, so it does not stop a size-first asset from choosing 64 / 128 (the
+#: accepted set is a power of two and ≥ 16 — the range check is a storage-side rule held by
+#: `verify.py`).
 DEFAULT_GROUP_SIZE = 32
 
 
 @dataclass(frozen=True)
 class Int4Report:
-    """group 対称 int4 で丸めた重みの scale 台帳と計数（`Int8Report` と同じ器）。
+    """The scale ledger and counts of weights rounded to group-symmetric int4 (the same container
+    as `Int8Report`).
 
-    `scales` のキーは i8 と同じ**モデル内 FQN**（`<module>.weight`）。値は
-    {@link channel_rows} で畳んだ形の group scale = `[チャネル, group 数]` の F32。
+    The keys of `scales` are **in-model FQNs** (`<module>.weight`), as for i8. The values are
+    group scales of the shape folded by {@link channel_rows} = F32 `[channel, group count]`.
 
-    形は rank に依らず {@link storage_rows} の rank2 規則（ADR 0069 決定 3・i8 の keepdim
-    broadcast 形とは受理集合が交わらない別の形）:
+    The shape follows the rank-2 rule of {@link storage_rows} whatever the rank (ADR 0069 decision
+    3; a separate shape whose accepted set does not overlap the i8 keepdim broadcast shape):
 
     - linear `W[O,I]` → `[O, I/group_size]` / embedding `W[V,D]` → `[V, D/group_size]` …
-      「重みと同 rank・最終次元だけ group 数」と同値
-    - conv1d `W[Cout,Cin,K]` → `[Cout, (Cin·K)/group_size]` … 受容野を平坦化した rank2
-      （**出荷可能形** — 波 J-5b で emit の適格へ追補。`emit.I4_WEIGHT_OPS`）
-    - conv2d / conv_transpose1d … 同じ rank2 だが i4 の適格 op ではない（測定専用）
+      equivalent to "the weight's rank with only the last dimension replaced by the group count"
+    - conv1d `W[Cout,Cin,K]` → `[Cout, (Cin·K)/group_size]` … rank 2 with the receptive field
+      flattened (**shippable** — added to emit's eligible set in phase J-5b; `emit.I4_WEIGHT_OPS`)
+    - conv2d / conv_transpose1d … the same rank 2, but not i4-eligible ops (measurement only)
     """
 
-    #: FQN → scale（group 形 `[チャネル, group 数]`・F32）。
+    #: FQN → scale (group shape `[channel, group count]`, F32).
     scales: Mapping[str, torch.Tensor]
     group_size: int
     modules: int
@@ -397,57 +442,65 @@ class Int4Report:
 
 
 def grouped_view(weight: torch.Tensor, group_size: int, where: str) -> torch.Tensor:
-    """量子化軸（**最終次元 = in 軸**）を `[…, groups, group_size]` へ割る。
+    """Split the quantized axis (**last dimension = in axis**) into `[…, groups, group_size]`.
 
-    linear の重みはそのまま最終次元が in 軸で、他の op は {@link channel_rows} で
-    `[チャネル, in]` へ畳んでから渡す。
+    For linear weights the last dimension is the in axis as is; other ops are folded into
+    `[channel, in]` with {@link channel_rows} before being passed.
 
-    MUST: 割り切れない形は fail loudly（ADR 0069 決定 2）。端数 group を許すと最後の group
-    だけ scale の担当範囲が短くなり、行境界が語境界からずれて平坦添字の展開が黙って別の値を
-    出す — 端数を作らない制約で整列問題そのものを消すのが格納側の設計。
+    MUST: a shape that does not divide fails loudly (ADR 0069 decision 2). Allowing a remainder
+    group would make only the last group's scale cover a shorter range, row boundaries would drift
+    from word boundaries, and flat-index decoding would silently produce other values — the
+    storage design removes the alignment problem itself by the constraint of never making
+    remainders.
     """
     in_axis = int(weight.shape[-1])
     if in_axis % group_size:
         raise QuantizeError(
-            f"{where}: 量子化軸（最終次元）{in_axis} が group_size {group_size} で"
-            "割り切れない（i4 は端数 group を作らない MUST — ADR 0069 決定 2）"
+            f"{where}: the quantized axis (last dimension) {in_axis} is not divisible by"
+            f" group_size {group_size} (i4 makes no remainder group, MUST — ADR 0069 decision 2)"
         )
     return weight.reshape(*weight.shape[:-1], in_axis // group_size, group_size)
 
 
 def group_size_of(weight: torch.Tensor, scale: torch.Tensor) -> int:
-    """group 形の scale から group 長を引く（`[行, groups]` → `行長 / groups`）。
+    """Derive the group size from a group-shaped scale (`[row, groups]` → `row length / groups`).
 
-    形の規則は {@link storage_rows} の rank2 形（ADR 0069 決定 3）— rank2 の重み
-    （linear / embedding）では「同 rank・最終次元だけ group 数」と同値で、rank3 の conv1d
-    `[Cout,Cin,K]` は `[Cout, (Cin·K)/g]` を受ける。
+    The shape rule is the rank-2 form of {@link storage_rows} (ADR 0069 decision 3) — for rank-2
+    weights (linear / embedding) it is equivalent to "the same rank with only the last dimension
+    replaced by the group count", and a rank-3 conv1d `[Cout,Cin,K]` takes `[Cout, (Cin·K)/g]`.
 
-    MUST: group 長の源は**渡された scale** だけにする。別引数で受け取る形にすると
-    「fake-quant が使った scale」と「格納で宣言する group 長」が独立に動けてしまい、
-    食い違っても形と型は合うので沈黙誤値になる（ADR 0069 決定 3 の「scale 再計算禁止」と
-    同じ穴）。格納側の宣言もここから引く（`emit._plan_i4`）。
+    MUST: the group size comes **only from the scale passed in**. Taking it as a separate argument
+    would let "the scale fake-quant used" and "the group size declared in storage" move
+    independently, and a mismatch would be a silent wrong value because shape and type still agree
+    (the same hole as the "no scale recomputation" of ADR 0069 decision 3). The storage-side
+    declaration is derived from here too (`emit._plan_i4`).
     """
     if weight.dim() < 2 or scale.dim() != 2 or int(scale.shape[0]) != int(weight.shape[0]):
         raise QuantizeError(
-            f"scale {list(scale.shape)} が重み {list(weight.shape)} の group 形"
-            "（rank2・行数 = 重みの先頭次元・最終次元 = group 数）でない"
+            f"scale {list(scale.shape)} is not the group shape of weight {list(weight.shape)}"
+            " (rank 2, rows = the weight's first dimension, last dimension = group count)"
         )
     groups = int(scale.shape[1])
     row_length = weight.numel() // int(weight.shape[0])
     if groups < 1 or row_length % groups:
-        raise QuantizeError(f"scale の group 数 {groups} が重みの行長 {row_length} を割り切らない")
+        raise QuantizeError(
+            f"the scale's group count {groups} does not divide the weight's row length {row_length}"
+        )
     return row_length // groups
 
 
-def group_scale(weight: torch.Tensor, group_size: int, where: str = "重み") -> torch.Tensor:
-    """`scale = clamp(amax_group / 7, f32 tiny)` を group 形（`[行, 行長/group_size]`）で返す。
+def group_scale(weight: torch.Tensor, group_size: int, where: str = "weight") -> torch.Tensor:
+    """Return `scale = clamp(amax_group / 7, f32 tiny)` in group shape
+    (`[row, row length/group_size]`).
 
-    行は {@link storage_rows}（先頭次元を除く平坦化）— rank2 の重みでは最終次元そのもので、
-    rank3 の conv1d は受容野 `Cin·K` を 1 行に畳む。最終次元（K）で割ると受容野をまたぐ
-    group が別の scale で丸められる。
+    Rows are {@link storage_rows} (flattening all but the first dimension) — for rank-2 weights the
+    last dimension itself; a rank-3 conv1d folds the receptive field `Cin·K` into one row. Dividing
+    along the last dimension (K) would round groups that straddle receptive fields with different
+    scales.
 
-    下限 clamp が要るのは全ゼロ group（`amax == 0`）— そのまま割ると NaN になる。clamp 後は
-    `q = 0` に落ちて `q·scale = 0` が厳密に元値へ戻る（`channel_scale` と同文の 4bit 版）。
+    The lower clamp is needed for all-zero groups (`amax == 0`) — dividing as is gives NaN. After
+    the clamp they land on `q = 0`, and `q·scale = 0` restores the original value exactly (the
+    4-bit version of the same text in `channel_scale`).
     """
     grouped = grouped_view(storage_rows(weight), group_size, where)
     amax = grouped.abs().amax(dim=-1)
@@ -455,30 +508,34 @@ def group_scale(weight: torch.Tensor, group_size: int, where: str = "重み") ->
 
 
 def quantize_to_int4(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """`q = clamp(round(w / scale), ±7)` を int8 の器・重みと同じ論理形で返す。
+    """Return `q = clamp(round(w / scale), ±7)` in an int8 container, in the weight's logical
+    shape.
 
-    MUST: 呼び出し側は fake-quant が使った scale を**そのまま**渡す（`quantize_to_int8` と
-    同文 — ここで amax から引き直すと f32 の丸めで 1ulp 動きうる）。torch に 4bit の器は
-    無いので値は int8 に載せる。**1 バイトへ 2 要素を詰めるのは格納側**（`emit.pack_int4`）で、
-    ここは pack 順を知らない。
+    MUST: the caller passes the scale fake-quant used **as is** (same as `quantize_to_int8` —
+    re-deriving it from amax here can move it by 1 ulp through f32 rounding). torch has no 4-bit
+    container, so the values ride on int8. **Packing 2 elements into 1 byte is the storage side's
+    job** (`emit.pack_int4`); this function does not know the pack order.
 
-    rank3 以上（conv1d `[Cout,Cin,K]`）は {@link storage_rows} で行へ畳んでから group に割る
-    — 最終次元（K）で割ると受容野をまたぐ group が別の scale で丸められる。
+    Rank 3 and above (conv1d `[Cout,Cin,K]`) is folded into rows with {@link storage_rows} before
+    being split into groups — dividing along the last dimension (K) would round groups that
+    straddle receptive fields with different scales.
     """
     rows = storage_rows(weight)
-    grouped = grouped_view(rows, group_size_of(weight, scale), "重み")
+    grouped = grouped_view(rows, group_size_of(weight, scale), "weight")
     quantized = torch.round(grouped / scale.unsqueeze(-1)).clamp_(-INT4_MAX, INT4_MAX)
     return quantized.reshape(weight.shape).to(torch.int8)
 
 
 def dequantize_int4(quantized: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """`q·scale` を f32・重みと同じ論理形で返す（格納の逆変換）。
+    """Return `q·scale` as f32 in the weight's logical shape (the inverse of storage).
 
-    fake-quant（下）と emit の逆変換ビット一致門（ADR 0069 決定 4 ③）が**同じ経路**を通る
-    ための共通実装 — 別実装にすると「丸めに使った式」と「格納を検算する式」が独立に動く。
+    The shared implementation that makes fake-quant (below) and emit's round-trip bit-identity
+    check (ADR 0069 decision 4 ③) go through **the same path** — separate implementations would
+    let "the formula used for rounding" and "the formula that verifies the storage" move
+    independently.
     """
     rows = storage_rows(quantized.to(torch.float32))
-    grouped = grouped_view(rows, group_size_of(quantized, scale), "量子化値")
+    grouped = grouped_view(rows, group_size_of(quantized, scale), "quantized values")
     return (grouped * scale.unsqueeze(-1)).reshape(quantized.shape)
 
 
@@ -488,39 +545,44 @@ def fake_quant_int4(
     include: Callable[[str], bool] | None = None,
     op_types: tuple[type[nn.Module], ...] = (nn.Linear,),
 ) -> Int4Report:
-    """重みを「in 軸」方向の group symmetric int4 の表現可能値へ丸める（ADR 0069）。
+    """Round weights to values representable in group-symmetric int4 along the "in axis" (ADR
+    0069).
 
-    既定の対象が **`nn.Linear` の `weight` だけ**なのは、i4 の実行経路が linear の重み
-    スロット限定で始まるから（ADR 0069 決定 5）。`op_types` は**明示 opt-in の口**で、i8 の
-    {@link QUANT_MODULE_TYPES}（全 6 種）まで広げられる — ただし出荷で広げてよいのは
-    `emit.I4_WEIGHT_OPS`（linear / embedding / conv1d）まで（conv2d / conv3d / `ConvTranspose1d` は
-    品質測定専用）。bias も norm 系 weight も触らないのは全対象で同じ。
+    The default targets are **only the `weight` of `nn.Linear`** because the i4 execution path
+    started limited to linear weight slots (ADR 0069 decision 5). `op_types` is **the explicit
+    opt-in hook** and can be widened up to the i8 {@link QUANT_MODULE_TYPES} (all 6 types) — but
+    shipping may widen only up to `emit.I4_WEIGHT_OPS` (linear / embedding / conv1d) (conv2d /
+    conv3d / `ConvTranspose1d` are for quality measurement only). Biases and norm-style weights are
+    left alone for every target.
 
-    MUST: **emit へ渡せるのは `emit.I4_WEIGHT_OPS`（linear / embedding / conv1d）分の scale
-    だけ**（`emit._plan_i4` の適格は消費 op がそこに載ること）。scale の形は rank に依らず
-    {@link storage_rows} の rank2 規則で 1 通りに決まる（{@link Int4Report}）。conv2d と
-    `ConvTranspose1d` は i4 の実行経路が無いので渡しても emit が fail loudly する — 広げた
-    対象は「その方式ならどこまで戻るか」を測る側のためのもので、出荷経路ではない
-    （測定専用の方式群は `quant_methods`）。
+    MUST: **only scales for `emit.I4_WEIGHT_OPS` (linear / embedding / conv1d) may be passed to
+    emit** (eligibility in `emit._plan_i4` means the consuming op is in that set). The scale shape
+    is decided one way by the rank-2 rule of {@link storage_rows} whatever the rank
+    ({@link Int4Report}). conv2d and `ConvTranspose1d` have no i4 execution path, so emit fails
+    loudly when given them — the widened targets serve the side that measures "how far the method
+    recovers", not the shipping path (the measurement-only methods are in `quant_methods`).
 
-    MUST: conv1d の group の並びは**重みの連続メモリ順**（{@link storage_rows}）— 行軸が
-    先頭でない `ConvTranspose1d` は測定でしか使えない（格納すると pack 順と食い違う）。
+    MUST: the group order of conv1d is **the weight's contiguous memory order**
+    ({@link storage_rows}) — `ConvTranspose1d`, whose row axis is not first, can be used only for
+    measurement (stored, it would disagree with the pack order).
 
-    group の軸は各 op の「in 軸」を一般化する（{@link channel_rows}）— linear は in 軸、
-    conv は出力チャネルごとの受容野（`Cin·K` / `Cin·Kh·Kw`）、`ConvTranspose1d` は転置
-    レイアウトの軸 1 ごとに `Cin·K`、embedding は語彙エントリごとに D 軸。
+    The group axis generalises each op's "in axis" ({@link channel_rows}) — the in axis for
+    linear, the receptive field per output channel for conv (`Cin·K` / `Cin·Kh·Kw`), `Cin·K` per
+    axis 1 of the transposed layout for `ConvTranspose1d`, and the D axis per vocabulary entry for
+    embedding.
 
-    `include` は**モジュール FQN** の述語（None = 全対象）— 意味と排他 MUST は
-    {@link fake_quant_int8} と同文。tied lm_head（= embed_tokens で embedding 側も消費）は
-    linear / embedding のどちらも i4 の展開経路を持つので **i4 適格**（`emit.I4_WEIGHT_OPS` —
-    2026-08-20 の embedding 追補で「linear 限定ゆえ不適格」が反転した）。scale の形も
-    `[V, D/g]` で一致する。
+    `include` is a predicate on the **module FQN** (None = every target) — its meaning and the
+    exclusivity MUST are the same as in {@link fake_quant_int8}. A tied lm_head (= embed_tokens,
+    also consumed on the embedding side) is **i4-eligible** because both linear and embedding have
+    an i4 decode path (`emit.I4_WEIGHT_OPS` — the embedding supplement of 2026-08-20 reversed
+    "ineligible because linear only"). The scale shape agrees too, at `[V, D/g]`.
 
-    MUST: 呼ぶ順序は「実効重みが確定した後・参照/golden の採取より前」（モジュール docstring）。
+    MUST: the call order is "after the effective weights are settled, before the reference /
+    goldens are captured" (module docstring).
 
-    戻り値の scale 台帳は emit へそのまま渡す。1 本も量子化できなかった場合は fail loudly —
-    「`--dtype i4` を指定したのに実質 f32 で書けてしまった」を沈黙させないため（ADR 0006・
-    `include` が全対象を落とした場合も同じ）。
+    The returned scale ledger is passed to emit as is. When not a single weight could be quantized
+    it fails loudly — so that "`--dtype i4` was requested but it effectively wrote f32" is never
+    silent (ADR 0006; the same when `include` dropped every target).
     """
     scales: dict[str, torch.Tensor] = {}
     elements = 0
@@ -534,8 +596,8 @@ def fake_quant_int4(
             elements += weight.numel()
     if not scales:
         raise QuantizeError(
-            "格納 i4 を指定したが group 量子化できる重みが 1 本も無い"
-            f"（対象の型: {', '.join(cls.__name__ for cls in op_types)} — 既定は"
-            " nn.Linear のみ・ADR 0069 決定 5）"
+            "storage i4 was requested but there is no weight that can be group-quantized"
+            f" (target types: {', '.join(cls.__name__ for cls in op_types)} — the default is"
+            " nn.Linear only, ADR 0069 decision 5)"
         )
     return Int4Report(scales=scales, group_size=group_size, modules=len(scales), elements=elements)

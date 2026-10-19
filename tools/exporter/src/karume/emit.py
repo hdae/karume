@@ -1,65 +1,73 @@
-"""配布形の**格納変換**と、容器へ渡す材料（生バイト + 束縛表）の組み立て。
+"""**Storage conversion** of the distribution, and assembly of the material handed to the
+container (raw bytes + binding table).
 
-器そのもの（`krm` の物理形式・descriptor・block / part の配置）は `karume.container` が持ち、
-公開の 3 段（書く → 読み直して検証 → 据え替え）は `karume.publish` が持つ。ここが決めるのは
-**どの initializer をどの格納で焼くか**だけで、それが {@link stored_model} の 1 本道に閉じる
-（ここが枝分かれすると export は緑のまま実行だけ落ちる）。
+The container itself (the physical format of `krm`, descriptors, the placement of blocks /
+parts) belongs to `karume.container`, and the three publish steps (write → read back and verify
+→ swap into place) belong to `karume.publish`. All this module decides is **which initializer is
+written in which storage**, and that is closed inside the single path of {@link stored_model} (a
+branch here would leave export green while only execution fails).
 
-格納の分岐は **f16（ADR 0018）と i8（ADR 0019）と i4（ADR 0069）**、それに固定 packed の
-経路（{@link _plan_fixed_weights} — i2 はこの経路だけ・ADR 0097）。
+The storage branches are **f16 (ADR 0018), i8 (ADR 0019) and i4 (ADR 0069)**, plus the fixed
+packed path ({@link _plan_fixed_weights} — i2 only through this path, ADR 0097).
 
-## 適格判定（ADR 0018 / 0019 — f16 と i8 で**同じ規則**・i4 だけ狭い）
+## Eligibility (ADR 0018 / 0019 — **the same rule** for f16 and i8, narrower only for i4)
 
-`weight_dtype="f16"` / `"i8"` / `"i4"` で書くとき、圧縮のまま格納するのは**適格な
-initializer だけ**:
+When writing with `weight_dtype="f16"` / `"i8"` / `"i4"`, only **eligible initializers** are
+stored compressed:
 
-1. その initializer の消費が `ops.WEIGHT_SLOTS` の重みスロット**だけ**である
-   （ランタイム側 `packages/runtime/src/runtime/plan.ts` の
-   `eligibleCompressedInitializers` と同じ規則。
-   bias も norm 系 weight も混在消費も消費ゼロも適格外 — ADR 0006）。
-   **i4 はさらに狭く {@link I4_WEIGHT_OPS}（`linear` / `embedding` / `conv1d`）の重みスロット
-   限定**（ADR 0069 決定 5 と embedding / conv1d 追補 — i4 の展開経路を持つ op はこの 3 つ
-   だけで、conv1d はさらに `groups == 1` と格納行長の整除が要る）。一般適格でも conv2d /
-   conv_transpose1d の重みは f32 のまま残す — i8 の適格外と同じ受け皿で、ランタイム側の
-   eligible ∩ i4Eligible と対。
-2. **逆変換がビット一致**する（= fake-quant 済み）。f16 は `f32 → f16 → f32` の往復、
-   i8 は `q8.to(f32) · scale`、i4 は `dequant(unpack(pack(q4)))`（`scale` は fake-quant が
-   使った値を**そのまま**）。
+1. The initializer is consumed **only** at weight slots of `ops.WEIGHT_SLOTS`
+   (the same rule as `eligibleCompressedInitializers` in the runtime's
+   `packages/runtime/src/runtime/plan.ts`.
+   Biases, norm weights, mixed consumption and zero consumption are all ineligible — ADR 0006).
+   **i4 is narrower still: only weight slots of {@link I4_WEIGHT_OPS} (`linear` / `embedding` /
+   `conv1d`)** (ADR 0069 decision 5 and the embedding / conv1d addenda — these 3 are the only ops
+   with an i4 decode path, and conv1d further needs `groups == 1` and a stored row length that
+   divides). Even when generally eligible, conv2d / conv_transpose1d weights stay f32 — the same
+   fallback as i8's ineligible ones, the counterpart of the runtime's eligible ∩ i4Eligible.
+2. **The inverse conversion is bit-identical** (= fake-quant applied). For f16 the round trip
+   `f32 → f16 → f32`, for i8 `q8.to(f32) · scale`, for i4 `dequant(unpack(pack(q4)))` (`scale` is
+   **exactly** the value fake-quant used).
 
-2 を条件に入れるのは、丸めていない値を圧縮格納すると「golden は元値・実行は丸め値」に
-なって量子化誤差と実装誤差が混ざるから。適格なのに 2 を満たさない initializer は
-**fail loudly**（丸めの掛け忘れ・掛ける順序の誤り・畳み込み定数が重みスロットへ流れた、の
-いずれかで、どれも黙って通すと E2E の tolerance が意味を失う）。i4 の門だけ**格納した
-バイトから**辿るのは、pack / unpack を取り違えても形も型も合う沈黙誤値になるため
-（ADR 0069 決定 4 ③）。
+2 is a condition because storing unrounded values compressed gives "golden from the original
+values, execution on rounded values", mixing quantization error with implementation error. An
+eligible initializer that fails 2 **fails loudly** (a missed rounding, rounding in the wrong order,
+or a folded constant that flowed into a weight slot — any of them, let through silently, would make
+the E2E tolerance meaningless). Only the i4 check traces back **from the stored bytes**, because
+mixing up pack / unpack is a silent wrong value with matching shape and type (ADR 0069 decision 4
+③).
 
-## companion scale（ADR 0019 / 0069）
+## companion scale (ADR 0019 / 0069)
 
-scale は**独立したテンソルキー**として同じ容器に入り、IR 側は `storage.scale` で
-そのキーを明示宣言する。キーは `_scale_key`（`karume.scale.<重みキー>`）で機械的に作り、
-**実テンソルとの衝突**を書き出し前に検査する（衝突すると「別の重みを scale として読む」
-形になり、ロードは通って値だけが壊れる）。形は格納で 2 通り — i8 は per-channel の keepdim
-broadcast 形、i4 は **rank2（行数 = 重みの先頭次元・最終次元 = group 数）**の group 形で、
-後者は `storage.group_size` も宣言する（rank2 の重みでは「同 rank・最終次元だけ group 数」と
-同値で、conv1d `[Cout,Cin,K]` は `[Cout,(Cin·K)/g]` — `quantize.storage_rows`）。scale は
-fake-quant が使った値を `quantize.fake_quant_int8` / `quantize.fake_quant_int4` から
-受け取ってそのまま書く — ここで amax から引き直すと f32 の
-丸めで 1ulp 動きうるので、golden を採ったときの重みとの対応が壊れる。
+The scale goes into the same container as **an independent tensor key**, and the IR side declares
+that key explicitly with `storage.scale`. The key is built mechanically by `_scale_key`
+(`karume.scale.<weight key>`), and **collisions with real tensors** are checked before writing (a
+collision would mean "reading another weight as the scale": loading succeeds and only the values
+break). The shape takes two forms by storage — for i8 the per-channel keepdim broadcast shape, for
+i4 the group shape of **rank 2 (rows = the weight's first dimension, last dimension = the number of
+groups)**, and the latter also declares `storage.group_size` (for rank-2 weights this equals "same
+rank, only the last dimension is the number of groups"; for conv1d `[Cout,Cin,K]` it is
+`[Cout,(Cin·K)/g]` — `quantize.storage_rows`). The scale is the value fake-quant used, received from
+`quantize.fake_quant_int8` / `quantize.fake_quant_int4` and written as is — recomputing it from
+amax here could move it by 1 ulp through f32 rounding, which breaks the correspondence with the
+weights the golden was taken with.
 
-## 容器へ渡す 3 点（{@link StoredModel}）
+## The three items handed to the container ({@link StoredModel})
 
-配置（block の切り方・part の詰め方・並び順）は `karume.container` の責務なので、ここが渡すのは
-「格納宣言を commit したグラフ」「テンソルキー → **格納後の生バイト**」「テンソルキー →
-{@link karume.container.Encoding}」の 3 点だけである。
+Placement (how blocks are cut, how parts are packed, the order) is `karume.container`'s
+responsibility, so this module hands over only three items: "the graph with the storage
+declarations committed", "tensor key → **raw bytes after storage conversion**" and "tensor key →
+{@link karume.container.Encoding}".
 
-- 生バイトの口は**遅延**（{@link _StoredTensors}）— 引かれた 1 本だけを変換して返す。全件を
-  先に変換すると、呼び出し側が持つ f32 集合と同時に生きてピーク RAM が両者の和になる
-  （Irodori 規模で f32 3.44GB に f16 1.72GB / i8 0.87GB が重なる）。書き手は実体を**2 度引く**
-  （sha256 を採る走査と書き出しの走査 — container-v1 §4.1）ので、同じキーからは**毎回同じ
-  バイト列**が返る MUST。変換は決定的なのでこれは成立する。
-- 束縛表は {@link karume.container.container_bindings} の 1 本から出す（移行 CLI と**同じ関数**・
-  torch を要らない側に在る）。2 経路で導くと「宣言 i4 / 実体 i8」のような、形も型も合う
-  沈黙誤値が作れる。
+- The raw-bytes mapping is **lazy** ({@link _StoredTensors}) — only the one tensor fetched is
+  converted and returned. Converting everything up front would keep it alive together with the
+  caller's f32 set, and peak RAM would be the sum of both (at Irodori scale, f16 1.72GB / i8
+  0.87GB on top of f32 3.44GB). The writer **fetches the data twice** (the pass that takes the
+  sha256 and the pass that writes — container-v1 §4.1), so the same key MUST return **the same
+  bytes every time**. The conversion is deterministic, so this holds.
+- The binding table comes from the single function {@link karume.container.container_bindings}
+  (**the same function** as the migration CLI, on the side that needs no torch). Deriving it in two
+  paths would allow silent wrong values with matching shape and type, such as "declared i4 / data
+  i8".
 """
 
 from __future__ import annotations
@@ -93,71 +101,79 @@ from karume.quantize import (
     quantize_to_int8,
 )
 
-#: 書き出せる格納 dtype（重みスロット向け）。bf16 は f16 と同じ骨格（適格 = 往復がビット一致・
-#: 実行経路は ADR 0131）。
+#: Storage dtypes that can be written (for weight slots). bf16 has the same skeleton as f16
+#: (eligible = the round trip is bit-identical; the execution path is ADR 0131).
 WEIGHT_DTYPES = ("f32", "f16", "bf16", "i8", "i4")
 
-#: i4 の**実行経路を持つ** op（= i4 適格な重みスロットの消費先 — ADR 0069 決定 5 の linear と
-#: その embedding / conv1d 追補）。ランタイム側 `packages/runtime/src/runtime/plan.ts` の
-#: `I4_WEIGHT_OPS` の鏡像で、両者が割れると「export は緑・ロードで CPU 展開に落ちる（VRAM 削減が
-#: 黙って消える）」か、その逆に「宣言できない格納を要求して export だけが落ちる」形になる。
+#: Ops **with an i4 execution path** (= the consumers of i4-eligible weight slots — linear of ADR
+#: 0069 decision 5 and its embedding / conv1d addenda). The mirror of `I4_WEIGHT_OPS` in the
+#: runtime's `packages/runtime/src/runtime/plan.ts`; when the two diverge the result is either
+#: "export green, load falls back to CPU decode (the VRAM saving silently disappears)" or the
+#: reverse, "export alone fails by requesting a storage it cannot declare".
 #:
-#: MUST: conv2d / conv3d / conv_transpose1d を入れない。conv1d に付いた i4 は igemm 経路
-#: （`groups == 1` の変種）だけが展開でき、direct カーネル（`groups > 1`）と conv2d / conv3d /
-#: conv_transpose1d の生成入力へ i4 を渡すと不成立 WGSL になる
-#: （`packages/runtime/src/kernels/weight-storage.ts`）。`groups == 1` の絞り込みは
-#: {@link i4_eligible_initializers} が node の attrs から見る。
-#: MUST: conv_transpose1d は**重み `[Cin,Cout,K]` の行軸が先頭でない**ぶん、pack のバイト列が
-#: 行の並びと食い違う（`quantize.storage_rows`）— 展開経路を足すだけでは適格にできない
-#: （2026-08-20 ユーザー裁定: permuted pack は買わない）。
+#: MUST: conv2d / conv3d / conv_transpose1d are not included. i4 on conv1d can be decoded only by
+#: the igemm path (the `groups == 1` variant); passing i4 to the direct kernel (`groups > 1`) or to
+#: the generator inputs of conv2d / conv3d / conv_transpose1d produces invalid WGSL
+#: (`packages/runtime/src/kernels/weight-storage.ts`). The `groups == 1` narrowing is done by
+#: {@link i4_eligible_initializers} from the node's attrs.
+#: MUST: for conv_transpose1d, **the row axis of the weight `[Cin,Cout,K]` is not the first**, so
+#: the packed bytes disagree with the row order (`quantize.storage_rows`) — adding a decode path
+#: alone cannot make it eligible (the maintainer's ruling of 2026-08-20: no permuted pack).
 I4_WEIGHT_OPS: frozenset[str] = frozenset({LINEAR_OP, EMBEDDING_OP, CONV1D_OP})
 
-#: packed nibble の offset（格納値は `u = q + 8`・値域 [1,15] で 0 は未使用 = 15 準位）。
-#: 非対称化する日にはこの定数が「`storage.zero_point` 省略時の既定 = 8」へ読み替わるだけで、
-#: pack 形式・pack 順・値域は動かない（ADR 0069 決定 3 の予約 2）。
+#: Offset of a packed nibble (stored value `u = q + 8`, range [1,15], 0 unused = 15 levels).
+#: Should storage ever become asymmetric, this constant is merely reread as "the default = 8 when
+#: `storage.zero_point` is omitted"; the pack format, pack order and range do not move
+#: (reservation 2 of ADR 0069 decision 3).
 INT4_OFFSET = 8
 
 
 class EmitError(ValueError):
-    """宣言（グラフ JSON）と格納テンソルの集合が食い違っている / 格納の前提が崩れている。"""
+    """The declaration (graph JSON) and the set of stored tensors disagree / a storage
+    precondition is broken."""
 
 
 @dataclass(frozen=True)
 class StorageBreakdown:
-    """格納 dtype ごとの本数とバイト数（ADR 0006 の常設診断のエクスポータ側）。"""
+    """Tensor counts and bytes per storage dtype (the exporter side of ADR 0006's standing
+    diagnostic)."""
 
-    #: 圧縮のまま GPU 常駐する（= 適格な）initializer。
+    #: Initializers resident on the GPU in compressed form (= eligible).
     compressed_tensors: int
     compressed_bytes: int
-    #: f32 のまま格納する initializer（bias / norm 系 weight / 定数 / 適格外の重み）。
+    #: Initializers stored as f32 (biases / norm weights / constants / ineligible weights).
     plain_tensors: int
     plain_bytes: int
-    #: 量子化格納（i8 / i4）の companion scale（重み本体とは別テンソル）。ランタイムの
-    #: `residentCompressedBytes` も scale を足すので、診断の意味を両側で揃える。
+    #: companion scales of quantized storage (i8 / i4) (tensors separate from the weights). The
+    #: runtime's `residentCompressedBytes` adds the scales too, so the diagnostic means the same on
+    #: both sides.
     scale_bytes: int = 0
 
     def describe(self) -> str:
         scale = f", scale {self.scale_bytes:,} B" if self.scale_bytes else ""
         return (
-            f"適格 {self.compressed_tensors} 本 / {self.compressed_bytes:,} B{scale}, "
-            f"適格外 {self.plain_tensors} 本 / {self.plain_bytes:,} B"
+            f"eligible {self.compressed_tensors} tensors / {self.compressed_bytes:,} B{scale}, "
+            f"ineligible {self.plain_tensors} tensors / {self.plain_bytes:,} B"
         )
 
 
 def eligible_compressed_initializers(graph: IrGraph) -> set[str]:
-    """圧縮格納のまま GPU 常駐**できる** initializer
-    （`packages/runtime/src/runtime/plan.ts` の鏡像）。
+    """Initializers that **can** stay resident on the GPU in compressed storage
+    (the mirror of `packages/runtime/src/runtime/plan.ts`).
 
-    適格 = 「その initializer の消費が WEIGHT_SLOTS に載った op の重みスロットだけ」。
-    MUST: 消費が 1 つでも重みスロット以外にあれば適格外（そのカーネルは f32 として読むので、
-    圧縮のまま上げるとビット列の読み替えになる）。消費ゼロも適格外（実行に使われないバイトを
-    「GPU 常駐圧縮」と数えると診断が実態からずれる）。
-    MUST: `graph.outputs` に載った initializer も適格外（ランタイムの readback は semantic f32
-    の 4 バイト / 要素を仮定して重みバッファから写すので、圧縮のまま常駐させると validation で
-    落ちるか、極小サイズではビット列の読み替えが黙って返る）。
-    MUST: 共有 initializer（ADR 0096 段 2 — バイトを持たない宣言）は適格集合に載せない。
-    このコンテナに書くバイトが 1 つも無いので「圧縮格納する / しない」の判断対象ではなく、
-    載せると `_plan_weight_dtype` が存在しないテンソルキーを引きにいく。
+    Eligible = "the initializer is consumed only at weight slots of ops listed in WEIGHT_SLOTS".
+    MUST: a single consumption outside a weight slot makes it ineligible (that kernel reads it as
+    f32, so uploading it compressed reinterprets the bits). Zero consumption is ineligible too
+    (counting bytes that execution never uses as "GPU-resident compressed" would make the
+    diagnostic diverge from reality).
+    MUST: an initializer listed in `graph.outputs` is ineligible too (the runtime's readback
+    copies from the weight buffer assuming 4 bytes / element of semantic f32, so keeping it
+    resident compressed either fails validation or, at tiny sizes, silently returns reinterpreted
+    bits).
+    MUST: shared initializers (ADR 0096 stage 2 — declarations without bytes) are not put in the
+    eligible set. This container holds not a single byte of them, so "store compressed or not" is
+    not a question for them, and including them would make `_plan_weight_dtype` look up a tensor
+    key that does not exist.
     """
     initializers = bakeable_initializers(graph)
     eligible: set[str] = set()
@@ -175,14 +191,17 @@ def eligible_compressed_initializers(graph: IrGraph) -> set[str]:
 
 
 def _has_i4_kernel(node: IrNode) -> bool:
-    """このノードが重みスロットの i4 を**展開できる**か（{@link I4_WEIGHT_OPS} の絞り込み）。
+    """Whether this node **can decode** i4 at its weight slot (the narrowing of
+    {@link I4_WEIGHT_OPS}).
 
-    conv1d の i4 は igemm 変種（`groups == 1`）だけが展開でき、direct カーネル（`groups > 1`）は
-    i4 非対応のまま（ランタイム側 `plan.ts` の `i4Executable` の鏡像）。
+    For conv1d, only the igemm variant (`groups == 1`) can decode i4; the direct kernel
+    (`groups > 1`) stays without i4 support (the mirror of `i4Executable` in the runtime's
+    `plan.ts`).
 
-    MUST: `groups` は**既定値で補完しない**（ADR 0012）— 契約表の `ops.conv1d_attrs` を通して
-    欠落ごと落とす。ここで黙って 1 を仮定すると、depthwise の重みが i4 で常駐して direct
-    カーネルが packed バイトを f32 として読む（例外は出ない）。
+    MUST: `groups` is **not filled in with a default** (ADR 0012) — it goes through the contract
+    table's `ops.conv1d_attrs`, which rejects a missing one. Silently assuming 1 here would make a
+    depthwise weight resident as i4 and the direct kernel read the packed bytes as f32 (no
+    exception is raised).
     """
     if node.op not in I4_WEIGHT_OPS:
         return False
@@ -192,11 +211,12 @@ def _has_i4_kernel(node: IrNode) -> bool:
 
 
 def _storage_row_length(graph: IrGraph, name: str) -> int | None:
-    """initializer の**格納行長**（`quantize.storage_rows` の行長 = 先頭次元を除く積）。
+    """The **stored row length** of an initializer (the row length of `quantize.storage_rows` =
+    the product of all dimensions but the first).
 
-    group scale の形が rank に依らずこの行長で決まる（ADR 0069 決定 3）ので、i4 の適格判定も
-    ここを除数に見る。rank 1 以下・記号次元を含む形・宣言の無い名前は None（格納 i4 の形を
-    そもそも持てない）。
+    The group scale's shape is set by this row length regardless of rank (ADR 0069 decision 3), so
+    the i4 eligibility check uses it as the dividend. Rank 1 or below, shapes with symbolic
+    dimensions and undeclared names give None (they cannot have an i4 storage shape at all).
     """
     value = graph.values.get(name)
     if value is None or len(value.shape) < 2:
@@ -212,14 +232,16 @@ def _storage_row_length(graph: IrGraph, name: str) -> int | None:
 def _scale_group_size(
     graph: IrGraph, scales: Mapping[str, torch.Tensor], name: str, row_length: int
 ) -> int | None:
-    """その重み自身の group scale が宣言している group 長（引けなければ None）。
+    """The group length declared by the weight's own group scale (None when it cannot be found).
 
-    源は `quantize.group_size_of` と同じ「**渡された scale の形**だけ」（`[行, group 数]` →
-    行長 / group 数）。適格判定と格納宣言が別の源を持つと、fake-quant が使った g と判定に
-    使った g が独立に動ける — 食い違っても形も型も合うので沈黙する。
+    The source is the same as `quantize.group_size_of`: "**only the shape of the passed scale**"
+    (`[rows, groups]` → row length / groups). If the eligibility check and the storage declaration
+    had separate sources, the g fake-quant used and the g the check used could move independently —
+    and a mismatch would stay silent, because shape and type still match.
 
-    台帳に無い / group 形でない scale は None を返して呼び手の既定へ委ねる（「適格なのに
-    scale が無い」は `_plan_i4` が fail loudly で受けるので、ここで適格から外さない）。
+    A scale missing from the ledger / not in group form returns None and defers to the caller's
+    default ("eligible but no scale" fails loudly in `_plan_i4`, so it is not dropped from the
+    eligible set here).
     """
     scale = scales.get(graph.initializers[name].tensor)
     if scale is None or scale.dim() != 2:
@@ -235,27 +257,29 @@ def i4_eligible_initializers(
     group_size: int = DEFAULT_GROUP_SIZE,
     scales: Mapping[str, torch.Tensor] | None = None,
 ) -> set[str]:
-    """重みスロットでの消費が {@link I4_WEIGHT_OPS} **だけ**で、格納行長が group 長で
-    割り切れる initializer（i4 の適格集合 — ADR 0069 決定 5 とその追補）。
+    """Initializers consumed at weight slots **only** by {@link I4_WEIGHT_OPS} and whose stored
+    row length divides by the group length (the i4 eligible set — ADR 0069 decision 5 and its
+    addenda).
 
-    i4 の展開経路（`unpack4xU8` + group scale）を持つカーネルは linear / embedding / conv1d
-    （`groups == 1`）だけなので、それ以外の重みスロット（conv2d / conv3d / conv_transpose1d /
-    groups > 1 の conv1d）でも消費される initializer は i4 で格納できない — そのカーネルは
-    packed バイトを f32 として読む（例外は出ない）。`weight_channel_axes` と同じく**消費側の
-    op** から引く（重みの shape だけでは区別できない）。
+    The kernels with an i4 decode path (`unpack4xU8` + group scale) are only linear / embedding /
+    conv1d (`groups == 1`), so an initializer also consumed at any other weight slot (conv2d /
+    conv3d / conv_transpose1d / conv1d with groups > 1) cannot be stored as i4 — that kernel reads
+    the packed bytes as f32 (no exception is raised). Like `weight_channel_axes`, it is derived
+    from **the consuming op** (the weight's shape alone cannot tell them apart).
 
-    行長の門（{@link _storage_row_length} % group 長）が要るのは、端数 group を作らない
-    MUST（ADR 0069 決定 2）で丸められない重みを**適格から外して静かに f32 に残す**ため。
-    ここで拾ってしまうと「fake-quant が届いていない重み」として export 全体が落ちる
-    （linear + 割り切れない conv1d を持つ普通のグラフが i4 で書けなくなる — I4-ELIG-01 と
-    同型）。
+    The row-length check ({@link _storage_row_length} % group length) is needed so that weights
+    the no-partial-group MUST (ADR 0069 decision 2) cannot round are **dropped from the eligible
+    set and quietly left f32**. Picking them up here would fail the whole export with "a weight
+    fake-quant did not reach" (an ordinary graph with linear + a non-dividing conv1d could no
+    longer be written as i4 — the same shape as I4-ELIG-01).
 
-    MUST: 除数は **1 本ずつその重み自身の group scale から引く**（`scales` の台帳 →
-    {@link _scale_group_size}）。除数を出荷の既定 group 長（`quantize.DEFAULT_GROUP_SIZE`）に
-    固定すると、g16 で丸めた行長 48 の重みが `48 % 32 != 0` で適格から外れ、値は i4 グリッド
-    へ丸められたまま **f32 で格納**される — 品質劣化だけ乗ってサイズは 1 バイトも縮まず、
-    例外も診断も出ない（ADR 0006 が名指しした「圧縮指定なのに実質 f32」の沈黙）。
-    `group_size` は scale を引けない名前だけに掛かる後詰めの既定。
+    MUST: the divisor is taken **per weight from its own group scale** (the `scales` ledger →
+    {@link _scale_group_size}). Fixing the divisor to the shipped default group length
+    (`quantize.DEFAULT_GROUP_SIZE`) would drop a weight with row length 48 rounded at g16 from the
+    eligible set via `48 % 32 != 0`, and its values, still rounded to the i4 grid, would be **stored
+    as f32** — only the quality loss, not a single byte smaller, with no exception and no
+    diagnostic (the silence ADR 0006 names: "compression requested but effectively f32").
+    `group_size` is the fallback default that applies only to names whose scale cannot be found.
     """
     bakeable = bakeable_initializers(graph)
     executable: set[str] = set()
@@ -281,70 +305,78 @@ def i4_eligible_initializers(
 
 
 def _scale_key(tensor_key: str) -> str:
-    """companion scale のテンソルキー（重みキーから機械的に作る）。"""
+    """Tensor key of the companion scale (built mechanically from the weight key)."""
     return f"karume.scale.{tensor_key}"
 
 
 def pack_int2(quantized: torch.Tensor) -> torch.Tensor:
-    """固定整数 [-2,1] を下位2bitから詰める。量子化やscaleの変更は行わない。
+    """Pack fixed integers in [-2,1] starting from the low 2 bits. Does not quantize or change the
+    scale.
 
-    i2 のバイト順の正本（ADR 0097）: 平坦添字で連続する 4 要素が 1 バイトに入り、要素 `4i` が
-    最下位 2bit、格納値は offset 2 の `u = q + 2`。書き手（gemma4_qat recipe）は上流の packed
-    バイトをそのまま渡すので本体はこの関数を呼ばない。それでも順序を取り違えると形も型も合う
-    沈黙誤値にしかならないので、順序はここに置き、`tests/test_i2_storage.py` がバイト値で固定する。
+    The source of truth for the i2 byte order (ADR 0097): 4 elements consecutive in flat index go
+    into one byte, element `4i` in the lowest 2 bits, stored value `u = q + 2` with offset 2. The
+    writer (the gemma4_qat recipe) passes the upstream packed bytes as they are, so production code
+    does not call this function. Mixing up the order would still only be a silent wrong value with
+    matching shape and type, so the order lives here and `tests/test_i2_storage.py` pins it by byte
+    value.
     """
     if quantized.dtype != torch.int8:
-        raise EmitError("INT2 の整数列は int8 の器が必要")
+        raise EmitError("INT2 integers must be held in int8")
     flat = quantized.reshape(-1)
     if flat.numel() % 4:
-        raise EmitError("INT2 の要素数は4の倍数が必要")
+        raise EmitError("INT2 element count must be a multiple of 4")
     if bool(((flat < -2) | (flat > 1)).any()):
-        raise EmitError("INT2 の整数は [-2,1] が必要")
+        raise EmitError("INT2 integers must be in [-2,1]")
     u = (flat + 2).to(torch.uint8)
     return u[0::4] | (u[1::4] << 2) | (u[2::4] << 4) | (u[3::4] << 6)
 
 
 def unpack_int2(packed: torch.Tensor, shape: Sequence[int]) -> torch.Tensor:
-    """packed INT2 を固定整数へ戻す。論理形と全バイト数の一致を要求する。"""
+    """Unpack packed INT2 back to fixed integers. Requires the logical shape and the total byte
+    count to agree."""
     count = 1
     for dim in shape:
         if type(dim) is not int or dim < 0:
-            raise EmitError("INT2 の shape は非負整数が必要")
+            raise EmitError("INT2 shape must be non-negative integers")
         count *= dim
     if packed.dtype != torch.uint8 or packed.numel() * 4 != count:
-        raise EmitError("INT2 のバイト列と論理 shape が一致しない")
+        raise EmitError("INT2 bytes do not match the logical shape")
     flat = packed.reshape(-1)
     lanes = torch.stack(tuple((flat >> shift) & 3 for shift in (0, 2, 4, 6)), dim=-1)
     return (lanes.to(torch.int8) - 2).reshape(tuple(shape))
 
 
 def pack_int4(quantized: torch.Tensor) -> torch.Tensor:
-    """`q ∈ [−7,7]`（int8 の器・論理形）を packed 4bit（uint8 の 1 次元）へ詰める。
+    """Pack `q ∈ [−7,7]` (held in int8, logical shape) into packed 4-bit (1-D uint8).
 
-    MUST: **平坦添字で連続する 2 要素が 1 バイト**に入り、要素 `2i` が**下位** nibble・
-    `2i+1` が**上位** nibble（ADR 0069 決定 4 — `unpack4xU8` 2 発の展開順と対）。格納値は
-    offset 8 の unsigned nibble `u = q + 8`。llama.cpp Q4_0 の split-half 順と取り違えても
-    形も型も合う**沈黙誤値**にしかならないので、順序の正本はここで、`tests/test_emit.py` が
-    バイト値で固定する。
+    MUST: **2 elements consecutive in flat index go into one byte**, element `2i` in the **low**
+    nibble and `2i+1` in the **high** nibble (ADR 0069 decision 4 — the counterpart of the decode
+    order of two `unpack4xU8` calls). The stored value is the unsigned nibble `u = q + 8` with
+    offset 8. Mixing it up with llama.cpp Q4_0's split-half order would only be **a silent wrong
+    value** with matching shape and type, so the source of truth for the order is here and
+    `tests/test_emit.py` pins it by byte value.
 
-    MUST: 要素数が奇数の形は fail loudly（末尾要素が半バイトだけ突き出し、テンソル長が宣言
-    から一意に決まらない）— i4 の量子化軸は `group_size`（2 冪かつ 16 以上）で割り切れるので
-    到達しないが、ここは pack 順の正本なので前提を黙って仮定しない。
+    MUST: a shape with an odd element count fails loudly (the last element sticks out by half a
+    byte, and the tensor length is not determined uniquely by the declaration) — the i4
+    quantization axis divides by `group_size` (a power of two, at least 16), so this is not
+    reached, but this is the source of truth for the pack order, so the precondition is not
+    silently assumed.
     """
     flat = quantized.reshape(-1)
     if flat.numel() % 2:
         raise EmitError(
-            f"packed 4bit の要素数 {flat.numel()} が奇数（1 バイト 2 要素で詰められない）"
+            f"packed 4-bit element count {flat.numel()} is odd (cannot pack 2 elements per byte)"
         )
     nibbles = (flat + INT4_OFFSET).to(torch.uint8)
     return nibbles[0::2] | (nibbles[1::2] << 4)
 
 
 def unpack_int4(packed: torch.Tensor, shape: Sequence[int]) -> torch.Tensor:
-    """packed 4bit を `q ∈ [−7,7]`（int8 の器・`shape` の論理形）へ戻す（`pack_int4` の逆）。
+    """Unpack packed 4-bit back to `q ∈ [−7,7]` (held in int8, logical shape `shape`) (the inverse
+    of `pack_int4`).
 
-    ランタイム側の展開式（WGSL / CPU 展開）と同じ対応: 平坦添字 `i` の要素は
-    `packed[i / 2]` の `i % 2 == 0 ? 下位 : 上位` nibble から `u − 8` で戻る。
+    The same mapping as the runtime's decode (WGSL / CPU decode): the element at flat index `i`
+    comes back as `u − 8` from the `i % 2 == 0 ? low : high` nibble of `packed[i / 2]`.
     """
     low = (packed & 0x0F).to(torch.int16) - INT4_OFFSET
     high = (packed >> 4).to(torch.int16) - INT4_OFFSET
@@ -352,26 +384,27 @@ def unpack_int4(packed: torch.Tensor, shape: Sequence[int]) -> torch.Tensor:
 
 
 def _is_f16_exact(tensor: torch.Tensor) -> bool:
-    """f32 → f16 → f32 の往復がビット一致するか（= fake-quant 済みか）。"""
+    """Whether the round trip f32 → f16 → f32 is bit-identical (= fake-quant applied)."""
     return bool(torch.equal(tensor, tensor.to(torch.float16).to(torch.float32)))
 
 
 def _is_bf16_exact(tensor: torch.Tensor) -> bool:
-    """f32 → bf16 → f32 の往復がビット一致するか（= fake-quant 済みか）。"""
+    """Whether the round trip f32 → bf16 → f32 is bit-identical (= fake-quant applied)."""
     return bool(torch.equal(tensor, tensor.to(torch.bfloat16).to(torch.float32)))
 
 
 def _unrounded(name: str, tensor_key: str, detail: str) -> EmitError:
     return EmitError(
-        f"initializer '{name}' ({tensor_key}) は重みスロット適格なのに {detail} —"
-        " fake-quant が未適用か、参照採取より後に掛かっている"
-        "（ADR 0006: 丸めは参照・golden の採取より前 MUST）"
+        f"initializer '{name}' ({tensor_key}) is eligible for a weight slot but {detail} —"
+        " fake-quant was not applied, or was applied after the reference was taken"
+        " (ADR 0006: rounding MUST precede taking the reference and the golden)"
     )
 
 
 @dataclass(frozen=True)
 class FixedQuantizedWeight:
-    """固定整数の packed 実体と scale。論理形は対応する f32/meta Tensor が持つ。"""
+    """Packed data and scale of fixed integers. The logical shape is carried by the matching
+    f32/meta Tensor."""
 
     dtype: Literal["i2", "i4", "i8"]
     packed: torch.Tensor
@@ -380,10 +413,11 @@ class FixedQuantizedWeight:
 
 @dataclass(frozen=True)
 class _Conversion:
-    """格納の直前に 1 本ずつ掛ける圧縮変換（計画段では**掛けない**）。
+    """The compression conversion applied to one tensor right before storage (**not** applied at
+    the planning step).
 
-    `name` は診断メッセージ用の IR 値名、`scale` は i8 のときの per-channel scale
-    （fake-quant が使った値そのまま — ADR 0019）。
+    `name` is the IR value name for diagnostic messages, `scale` the per-channel scale for i8
+    (exactly the value fake-quant used — ADR 0019).
     """
 
     dtype: str
@@ -394,14 +428,15 @@ class _Conversion:
 
 @dataclass(frozen=True)
 class _StoragePlan:
-    """圧縮格納の計画。重み本体には 1 バイトも触らない。"""
+    """The plan for compressed storage. Does not touch a single byte of the weights."""
 
-    #: IR 値名 → 新しい initializer 宣言（全バイトを書き終えてから commit する）。
+    #: IR value name → new initializer declaration (committed after every byte is written).
     declarations: dict[str, IrInitializer]
-    #: 追加で格納する companion scale（容器のテンソルキー → テンソル）。scale は小さいので
-    #: 計画段で実体化してよい（重み本体と違って集合で持ってもピークに出ない）。
+    #: Additional companion scales to store (container tensor key → tensor). Scales are small, so
+    #: they may be materialised at the planning step (unlike the weights, holding them as a set
+    #: does not show up in the peak).
     scales: dict[str, torch.Tensor]
-    #: 容器のテンソルキー → 書き出し直前に掛ける変換。
+    #: Container tensor key → the conversion applied right before writing.
     conversions: dict[str, _Conversion]
 
 
@@ -413,38 +448,40 @@ def _plan_i8(
     scales: Mapping[str, torch.Tensor],
     axes: Mapping[str, int],
 ) -> tuple[str, torch.Tensor, IrInitializer]:
-    """i8 格納の計画（scale のキーとテンソル・新しい宣言）を返す — 重みには触らない。
+    """Return the i8 storage plan (the scale's key and tensor, the new declaration) — does not
+    touch the weight.
 
-    `reserved` は「既に埋まっている格納テンソルキー」（入力ぶん + 先行して計画した scale）。
-    量子化そのものと逆変換のビット一致検査は、実データを読む重い側なので
-    `_convert_for_storage`（書き出し直前）へ回す。
+    `reserved` is "the stored tensor keys already taken" (the inputs + the scales planned before).
+    The quantization itself and the bit-identity check of the inverse conversion are the heavy
+    side that reads real data, so they go to `_convert_for_storage` (right before writing).
     """
     initializer = graph.initializers[name]
     key = initializer.tensor
     scale = scales.get(key)
     if scale is None:
-        # 適格なのに scale が無い = fake-quant が届いていない重み（畳み込み定数が重み
-        # スロットへ流れた / 対象モジュール型の取りこぼし）。f32 のまま落とすと VRAM 削減が
-        # 黙って減るだけなので、i8 指定では受理しない。
-        raise _unrounded(name, key, "per-channel scale が無い")
+        # Eligible but no scale = a weight fake-quant did not reach (a folded constant flowed
+        # into a weight slot / a missed target module type). Falling back to f32 would only
+        # silently shrink the VRAM saving, so it is not accepted when i8 is requested.
+        raise _unrounded(name, key, "has no per-channel scale")
     if scale.dtype is not torch.float32:
-        # companion scale は F32 固定（ADR 0019 / docs/ir-v2.md）。writer は F16 もそのまま
-        # 直列化でき、逆変換の等値検査も「同じ f16 scale で fake-quant 済み」なら通ってしまう
-        # ので、計画段で落とす（診断が「書いた後の verify」から前倒しになる）。
+        # companion scales are fixed to F32 (ADR 0019 / docs/ir-v2.md). The writer can
+        # serialize F16 as is, and the equality check of the inverse conversion would pass for
+        # "fake-quant applied with the same f16 scale", so it fails at the planning step (the
+        # diagnostic moves forward from "verify after writing").
         raise EmitError(
-            f"initializer '{name}' ({key}): scale の dtype が {scale.dtype} — F32 のみ受理する"
+            f"initializer '{name}' ({key}): scale dtype is {scale.dtype} — only F32 is accepted"
         )
     axis = axes.get(name)
     expected = [dim if index == axis else 1 for index, dim in enumerate(tensor.shape)]
     if list(scale.shape) != expected:
         raise EmitError(
-            f"initializer '{name}' ({key}): scale {list(scale.shape)} が重み"
-            f" {list(tensor.shape)} の軸 {axis} の keepdim 形 {expected} でない"
+            f"initializer '{name}' ({key}): scale {list(scale.shape)} is not the keepdim shape"
+            f" of weight {list(tensor.shape)} along axis {axis} {expected}"
         )
     scale_key = _scale_key(key)
     if scale_key in reserved:
         raise EmitError(
-            f"initializer '{name}': scale テンソルのキー '{scale_key}' が実テンソルと衝突する"
+            f"initializer '{name}': scale tensor key '{scale_key}' collides with a real tensor"
         )
     return (
         scale_key,
@@ -461,50 +498,54 @@ def _plan_i4(
     scales: Mapping[str, torch.Tensor],
     i4_eligible: Set[str],
 ) -> tuple[str, torch.Tensor, IrInitializer]:
-    """i4 格納の計画（scale のキーとテンソル・新しい宣言）を返す — 重みには触らない。
+    """Return the i4 storage plan (the scale's key and tensor, the new declaration) — does not
+    touch the weight.
 
-    `_plan_i8` と同じ流儀（キー生成・衝突検査・scale の dtype 検査）で、違うのは 3 点:
-    適格が **{@link I4_WEIGHT_OPS} の重みスロット限定**（ADR 0069 決定 5）・scale が
-    **group 形**・宣言が `storage.group_size` を持つこと。group 長は**渡された scale の形から引く**
-    （`quantize.group_size_of` — 別引数で受けると fake-quant が使った group と別の値を宣言
-    できてしまい、形も型も合う沈黙誤値になる）。
+    The same approach as `_plan_i8` (key generation, collision check, scale dtype check) with
+    three differences: eligibility is **limited to weight slots of {@link I4_WEIGHT_OPS}** (ADR
+    0069 decision 5), the scale is **in group form**, and the declaration carries
+    `storage.group_size`. The group length is **taken from the shape of the passed scale**
+    (`quantize.group_size_of` — accepting it as a separate argument would allow declaring a value
+    other than the group fake-quant used, a silent wrong value with matching shape and type).
 
-    量子化・pack と逆変換のビット一致検査は、実データを読む重い側なので
-    `_convert_for_storage`（書き出し直前）へ回す。
+    Quantization, packing and the bit-identity check of the inverse conversion are the heavy side
+    that reads real data, so they go to `_convert_for_storage` (right before writing).
     """
     initializer = graph.initializers[name]
     key = initializer.tensor
     if name not in i4_eligible:
         raise EmitError(
-            f"initializer '{name}' ({key}): 格納 i4 は"
-            f" {' / '.join(sorted(I4_WEIGHT_OPS))} の重みスロットだけ"
-            "（ADR 0069 決定 5 とその追補 — conv1d は groups == 1 と格納行長が"
-            " group 長で割り切れることも要る）"
+            f"initializer '{name}' ({key}): i4 storage is only for weight slots of"
+            f" {' / '.join(sorted(I4_WEIGHT_OPS))}"
+            " (ADR 0069 decision 5 and its addenda — conv1d also needs groups == 1 and a stored"
+            " row length that divides by the group length)"
         )
     scale = scales.get(key)
     if scale is None:
-        # 適格なのに scale が無い = fake-quant が届いていない重み（`_plan_i8` と同じ理由）。
-        raise _unrounded(name, key, "group scale が無い")
+        # Eligible but no scale = a weight fake-quant did not reach (same reason as `_plan_i8`).
+        raise _unrounded(name, key, "has no group scale")
     if scale.dtype is not torch.float32:
         raise EmitError(
-            f"initializer '{name}' ({key}): scale の dtype が {scale.dtype} — F32 のみ受理する"
+            f"initializer '{name}' ({key}): scale dtype is {scale.dtype} — only F32 is accepted"
         )
     try:
         group_size = group_size_of(tensor, scale)
     except QuantizeError as cause:
         raise EmitError(f"initializer '{name}' ({key}): {cause}") from cause
-    # 受理集合（2 冪かつ 16 以上）は宣言層と同じ規則を**書く前に**張る（`_plan_i8` が scale の
-    # keepdim 形を verify と二段で見るのと同じ流儀）。書いた後の門は
-    # `verify.ir_graph_from_container`（据えた容器の束縛表から IR を起こし直す側）。
+    # The accepted set (a power of two, at least 16) — the same rule as the declaration layer —
+    # is enforced **before writing** (the same approach as `_plan_i8` checking the scale's keepdim
+    # shape in two stages with verify). The check after writing is
+    # `verify.ir_graph_from_container` (the side that rebuilds the IR from the binding table of
+    # the container put in place).
     if group_size & (group_size - 1) or group_size < MIN_GROUP_SIZE:
         raise EmitError(
-            f"initializer '{name}' ({key}): scale から引いた group_size {group_size} が"
-            f" 2 冪かつ {MIN_GROUP_SIZE} 以上でない（ADR 0069 決定 2）"
+            f"initializer '{name}' ({key}): group_size {group_size} taken from the scale is not"
+            f" a power of two of at least {MIN_GROUP_SIZE} (ADR 0069 decision 2)"
         )
     scale_key = _scale_key(key)
     if scale_key in reserved:
         raise EmitError(
-            f"initializer '{name}': scale テンソルのキー '{scale_key}' が実テンソルと衝突する"
+            f"initializer '{name}': scale tensor key '{scale_key}' collides with a real tensor"
         )
     return (
         scale_key,
@@ -521,14 +562,15 @@ def _plan_fixed_weights(
     tensors: Mapping[str, torch.Tensor],
     fixed_weights: Mapping[str, FixedQuantizedWeight],
 ) -> _StoragePlan:
-    """固定 bytes を唯一の値として扱い、再量子化・f32 実体化をしない（ADR 0097）。"""
+    """Treat the fixed bytes as the only value; no re-quantization and no f32 materialisation
+    (ADR 0097)."""
     bakeable = bakeable_initializers(graph)
     names = {graph.initializers[name].tensor: name for name in bakeable}
     if len(names) != len(bakeable):
-        raise EmitError("固定格納の initializer 名とテンソルキーが 1:1 でない")
+        raise EmitError("Initializer names and tensor keys of fixed storage are not 1:1")
     unknown = sorted(set(fixed_weights) - set(names))
     if unknown:
-        raise EmitError(f"fixed_weights の未知キー: {unknown}")
+        raise EmitError(f"Unknown fixed_weights keys: {unknown}")
     eligible = eligible_compressed_initializers(graph)
     plan = _StoragePlan(declarations={}, scales={}, conversions={})
     reserved = set(tensors)
@@ -545,14 +587,16 @@ def _plan_fixed_weights(
             or graph.values[name].shape != shape
             or graph.initializers[name].storage.dtype != "f32"
         ):
-            raise EmitError(f"fixed_weights['{key}']: 宣言と同形の正の rank2 f32/meta が必要")
+            raise EmitError(
+                f"fixed_weights['{key}']: must be a positive rank-2 f32/meta of the declared shape"
+            )
         consumers = [node for node in graph.nodes if name in node.ins]
         if name not in eligible or any(
             node.op not in (LINEAR_OP, EMBEDDING_OP) for node in consumers
         ):
-            raise EmitError(f"fixed_weights['{key}']: linear/embedding の重み専用")
+            raise EmitError(f"fixed_weights['{key}']: only for linear/embedding weights")
         if fixed.dtype not in ("i2", "i4", "i8"):
-            raise EmitError(f"fixed_weights['{key}']: dtype は i2/i4/i8 が必要")
+            raise EmitError(f"fixed_weights['{key}']: dtype must be i2/i4/i8")
         rows, width = shape
         factor = {"i2": 4, "i4": 2, "i8": 1}[fixed.dtype]
         packed_dtype = torch.int8 if fixed.dtype == "i8" else torch.uint8
@@ -564,7 +608,9 @@ def _plan_fixed_weights(
             or width % factor
             or list(packed.shape) != [rows, width // factor]
         ):
-            raise EmitError(f"fixed_weights['{key}']: packed の CPU dtype・形・連続配置が違う")
+            raise EmitError(
+                f"fixed_weights['{key}']: packed has the wrong CPU dtype, shape or contiguity"
+            )
         scale = fixed.scale
         if (
             scale.device.type != "cpu"
@@ -573,18 +619,24 @@ def _plan_fixed_weights(
             or scale.shape[0] != rows
             or scale.shape[1] <= 0
         ):
-            raise EmitError(f"fixed_weights['{key}']: scale は CPU F32 [rows,groups] が必要")
+            raise EmitError(f"fixed_weights['{key}']: scale must be CPU F32 [rows,groups]")
         group_size = None
         if fixed.dtype == "i4":
             groups = scale.shape[1]
             group_size = width // groups
             if width % groups or group_size < 16 or group_size & (group_size - 1):
-                raise EmitError(f"fixed_weights['{key}']: I4 group は行を割り切る2冪・16以上が必要")
+                raise EmitError(
+                    f"fixed_weights['{key}']: I4 group must divide the row, be a power of two"
+                    " and be at least 16"
+                )
         elif list(scale.shape) != [rows, 1] or (fixed.dtype == "i2" and width % 16):
-            raise EmitError(f"fixed_weights['{key}']: 行 scale [rows,1] と I2 の16要素整列が必要")
+            raise EmitError(
+                f"fixed_weights['{key}']: requires a row scale [rows,1] and I2 alignment to 16"
+                " elements"
+            )
         scale_key = _scale_key(key)
         if scale_key in reserved:
-            raise EmitError(f"fixed_weights['{key}']: scale キーが衝突する: {scale_key}")
+            raise EmitError(f"fixed_weights['{key}']: scale key collides: {scale_key}")
         scale = scale.detach().contiguous()
         reserved.add(scale_key)
         plan.scales[scale_key] = scale
@@ -604,51 +656,57 @@ def _plan_weight_dtype(
     weight_scales: Mapping[str, torch.Tensor],
     weight_dtype_overrides: Mapping[str, str],
 ) -> _StoragePlan:
-    """適格な重みの圧縮格納を**計画だけ**する（宣言も実体もまだ書き換えない）。
+    """**Only plan** the compressed storage of eligible weights (neither declarations nor data are
+    rewritten yet).
 
-    MUST: この段で圧縮テンソルを作らない。全件を先に変換すると、圧縮側の集合が呼び出し側の
-    f32 集合と**同時に**生きてピーク RAM が両者の和になる（Irodori 規模で f32 3.44GB に
-    f16 1.72GB / i8 0.87GB が重なる）。ここで済ませるのは実データを読まない検査だけ
-    （名前 ↔ テンソルキーの 1:1・格納 dtype の妥当性・適格判定・scale の有無と形
-    〈i8 = keepdim / i4 = group〉・scale キーの衝突・「適格 0 本」）で、実データを読む検査は
-    `_convert_for_storage` が書き出し直前に 1 本ずつ受け持つ。
+    MUST: no compressed tensors are created at this step. Converting everything up front would
+    keep the compressed set alive **together with** the caller's f32 set, and peak RAM would be
+    the sum of both (at Irodori scale, f16 1.72GB / i8 0.87GB on top of f32 3.44GB). Only checks
+    that do not read real data run here (name ↔ tensor key 1:1, validity of the storage dtype,
+    eligibility, presence and shape of the scale [i8 = keepdim / i4 = group], scale key
+    collisions, "zero eligible"); the checks that read real data are done per tensor by
+    `_convert_for_storage` right before writing.
 
-    `weight_dtype_overrides` は**テンソルキー（FQN）→ 格納 dtype** の明示指定（混成格納 —
-    LLM の「embedding は i8・linear は i4」が初出）。既定 `weight_dtype` が適格フィルタで
-    **静かに f32 へ残す**のに対し、明示指定は**満たせなければ fail loudly**（未知キー・
-    適格外・非 f32 実体・i4 × i4 適格外のどれも通さない）— 呼び出し側の意図が 1 本単位で
-    書かれている以上、黙って別の格納にする余地は無い。`"f32"` の明示は「圧縮既定からの
-    除外」として使える。
+    `weight_dtype_overrides` is an explicit **tensor key (FQN) → storage dtype** choice (mixed
+    storage — first used for an LLM's "embedding as i8, linear as i4"). While the default
+    `weight_dtype` is **quietly left f32** by the eligibility filter, an explicit choice **fails
+    loudly when it cannot be met** (none of: unknown key, ineligible, non-f32 data, i4 on an
+    i4-ineligible weight passes) — with the caller's intent written per tensor, there is no room to
+    silently use another storage. An explicit `"f32"` serves as "excluded from the compressed
+    default".
     """
-    # MUST: 走査は**実体を書く initializer だけ**（共有宣言は貸し手のバイトを借りるので、
-    # 格納 dtype の計画対象ではない — ADR 0096 段 2）。
+    # MUST: the walk covers **only initializers whose data is written** (shared declarations
+    # borrow the lender's bytes, so they are not subject to the storage dtype plan — ADR 0096
+    # stage 2).
     bakeable = bakeable_initializers(graph)
     initializer_by_key = {graph.initializers[name].tensor: name for name in bakeable}
     if len(initializer_by_key) != len(bakeable):
-        # MUST: initializer 名 ↔ テンソルキーは 1:1。潰れると適格検査は後勝ちで残った 1 名しか
-        # 見ないのに、計画ループは適格な**全ての**名前を回す — 実体は key 単位で packed に
-        # 変換され、適格外だった名前の宣言は f32 のまま残るので、形も型も合ったまま値だけが
-        # 壊れる。現行の convert 経路（torch.export の placeholder → FQN は単射・
-        # `Converter._add_const` は digest 一意）では到達しないが、その 1:1 は上流の実装挙動
-        # 1 点に乗っているだけでどこにも書かれていないので、ここを唯一の門にする。
+        # MUST: initializer name ↔ tensor key is 1:1. If it collapses, the eligibility check only
+        # sees the one name that won last, while the planning loop walks **every** eligible name —
+        # the data is converted to packed per key, and the declaration of a name that was
+        # ineligible stays f32, so only the values break while shape and type still match. The
+        # current convert path (torch.export placeholder → FQN is injective,
+        # `Converter._add_const` is unique by digest) does not reach this, but that 1:1 rests only
+        # on one point of upstream implementation behaviour and is written down nowhere, so this
+        # is the only check.
         names_by_key: dict[str, list[str]] = {}
         for name in sorted(bakeable):
             names_by_key.setdefault(graph.initializers[name].tensor, []).append(name)
         collided = {key: names for key, names in sorted(names_by_key.items()) if len(names) > 1}
         raise EmitError(
-            f"initializer 名とテンソルキーが 1:1 でない: {collided}"
-            "（宣言は名前単位・実体はキー単位なので、同じキーを指す名前の一部だけが圧縮格納に"
-            "なると宣言と実体がずれる）"
+            f"Initializer names and tensor keys are not 1:1: {collided}"
+            " (declarations are per name and data per key, so when only some of the names"
+            " pointing at the same key get compressed storage, declaration and data diverge)"
         )
     if weight_dtype not in WEIGHT_DTYPES:
         raise EmitError(
-            f"格納 dtype '{weight_dtype}' は書き出せない（{' / '.join(WEIGHT_DTYPES)}）"
+            f"Storage dtype '{weight_dtype}' cannot be written ({' / '.join(WEIGHT_DTYPES)})"
         )
     for key, dtype in weight_dtype_overrides.items():
         if dtype not in WEIGHT_DTYPES:
             raise EmitError(
-                f"weight_dtype_overrides['{key}'] の格納 dtype '{dtype}' は書き出せない"
-                f"（{' / '.join(WEIGHT_DTYPES)}）"
+                f"weight_dtype_overrides['{key}']: storage dtype '{dtype}' cannot be written"
+                f" ({' / '.join(WEIGHT_DTYPES)})"
             )
     plan = _StoragePlan(declarations={}, scales={}, conversions={})
     if weight_dtype == "f32" and not weight_dtype_overrides:
@@ -657,8 +715,9 @@ def _plan_weight_dtype(
     unknown = sorted(set(weight_dtype_overrides) - set(initializer_by_key))
     if unknown:
         raise EmitError(
-            f"weight_dtype_overrides のキー {unknown} がどの initializer のテンソルでもない"
-            "（FQN の綴りを確認する — 黙って無視すると指定した圧縮が静かに消える）"
+            f"weight_dtype_overrides keys {unknown} are not the tensor of any initializer"
+            " (check the FQN spelling — ignoring them silently would quietly drop the requested"
+            " compression)"
         )
     for key in sorted(weight_dtype_overrides):
         if weight_dtype_overrides[key] == "f32":
@@ -666,14 +725,15 @@ def _plan_weight_dtype(
         name = initializer_by_key[key]
         if name not in eligible:
             raise EmitError(
-                f"initializer '{name}' ({key}): 明示指定 '{weight_dtype_overrides[key]}' だが"
-                "適格でない（重みスロット以外の消費がある — 混ざった消費は ADR 0018/0019 の"
-                "適格集合の外）"
+                f"initializer '{name}' ({key}): explicitly requested"
+                f" '{weight_dtype_overrides[key]}' but not eligible (consumed outside a weight slot"
+                " — mixed consumption is outside the eligible set of ADR 0018/0019)"
             )
     requested = {weight_dtype, *weight_dtype_overrides.values()}
     axes = weight_channel_axes(graph) if "i8" in requested else {}
-    # 適格判定の除数は出荷の実 g（= `weight_scales` の形）から引く — `_plan_i4` が
-    # `group_size_of` で宣言する値と同じ源にしないと、g16 資産の一部が黙って f32 で残る。
+    # The divisor of the eligibility check is taken from the actual shipped g (= the shape of
+    # `weight_scales`) — unless it has the same source as the value `_plan_i4` declares through
+    # `group_size_of`, part of a g16 asset silently stays f32.
     i4_eligible = (
         i4_eligible_initializers(graph, scales=weight_scales) if "i4" in requested else set()
     )
@@ -685,21 +745,24 @@ def _plan_weight_dtype(
             continue
         tensor = tensors[key]
         if tensor.dtype is not torch.float32:
-            # i32 格納（記号依存定数 — ADR 0010）が重みスロットに来ることはないが、来たなら
-            # 意味論ごと違う話なので黙って圧縮格納にしない。明示指定なら fail loudly。
+            # i32 storage (symbol-dependent constants — ADR 0010) never reaches a weight slot,
+            # but if it did, the semantics would differ altogether, so it is not silently stored
+            # compressed. With an explicit choice it fails loudly.
             if key in weight_dtype_overrides:
                 raise EmitError(
-                    f"initializer '{name}' ({key}): 明示指定 '{dtype}' だが実体が"
-                    f" {tensor.dtype}（圧縮格納は f32 実体のみ）"
+                    f"initializer '{name}' ({key}): explicitly requested '{dtype}' but the data is"
+                    f" {tensor.dtype} (compressed storage is for f32 data only)"
                 )
             continue
-        # i4 の適格は **{@link I4_WEIGHT_OPS} の重みスロット限定**（ADR 0069 決定 5）— 既定 i4
-        # では適格外（conv2d / conv3d / conv_transpose1d / groups > 1 の conv1d / 格納行長が
-        # group 長で割り切れない重み）を f32 のまま静かに残す。i8 の適格外が f32 で残るのと
-        # 同じ設計で、ランタイム側（executor.ts の eligible ∩ i4Eligible）と対。ここで除外しないと、
-        # conv を混ぜたグラフが「conv の重みを i4 にできない」で export 不能になる
-        # （Codex 波 F 指摘 I4-ELIG-01）。明示指定の i4 × 適格外は `_plan_i4` 自身の門が
-        # fail loudly で受ける。
+        # i4 eligibility is **limited to weight slots of {@link I4_WEIGHT_OPS}** (ADR 0069
+        # decision 5) — with i4 as the default, ineligible weights (conv2d / conv3d /
+        # conv_transpose1d / conv1d with groups > 1 / weights whose stored row length does not
+        # divide by the group length) quietly stay f32. The same design as i8's ineligible
+        # weights staying f32, and the counterpart of the runtime side (eligible ∩ i4Eligible in
+        # `planWeightResidency` of weight-residency.ts). Without this exclusion, a graph mixing in
+        # convs could not be exported ("the conv weight cannot be i4") (Codex phase F finding
+        # I4-ELIG-01). An explicit i4 on an ineligible weight fails loudly at `_plan_i4`'s own
+        # check.
         if dtype == "i4" and key not in weight_dtype_overrides and name not in i4_eligible:
             continue
         if dtype in ("f16", "bf16"):
@@ -720,90 +783,103 @@ def _plan_weight_dtype(
         plan.conversions[key] = conversion
         plan.declarations[name] = declaration
     if weight_dtype != "f32" and not plan.declarations:
-        # ADR 0006 の「圧縮指定なのに適格 0MB を沈黙させない」をエクスポータ側でも張る。
-        # 見るのは「**圧縮格納が 1 本も計画されなかったか**」— 既定 dtype と同じ格納 dtype が
-        # 0 本でも、明示指定が適格な全件を別 dtype で覆っていれば意図は果たされている
-        # （混成格納を 1 本単位で書き切った形をここで落とさない）。
+        # ADR 0006's "do not stay silent about 0 MB eligible under a compression request" is
+        # enforced on the exporter side too. What is checked is "**whether not a single
+        # compressed storage was planned**" — even with zero tensors in the default dtype, the
+        # intent is met if explicit choices cover every eligible tensor with another dtype (a
+        # mixed storage written out per tensor is not rejected here).
         explicit = sorted({dtype for dtype in weight_dtype_overrides.values() if dtype != "f32"})
-        # 原因は 1 つに断定しない（i4 は「展開経路を持つ消費先が無い」と「格納行長が group 長で
-        # 割り切れない」の両方が同じ枝に落ちる）。
+        # The cause is not pinned to one (for i4, both "no consumer with a decode path" and
+        # "stored row length does not divide by the group length" land in the same branch).
         if weight_dtype == "i4":
             cause = (
-                "i4 の展開経路（linear / embedding / conv1d の groups==1）を持つ消費先が無いか、"
-                "格納行長が group 長で割り切れない可能性がある"
+                "there may be no consumer with an i4 decode path (linear / embedding / conv1d"
+                " with groups==1), or the stored row lengths may not divide by the group length"
             )
         else:
             cause = (
-                f"融合 op の重みスロットを持たないグラフに {weight_dtype} を"
-                "指定していないか確認する"
+                f"check whether {weight_dtype} was requested for a graph without"
+                " weight slots of fused ops"
             )
         raise EmitError(
-            f"圧縮格納が 1 本も計画されなかった（既定 {weight_dtype} / 明示指定"
-            f" {explicit or 'なし'}）— {cause}"
+            f"Not a single compressed storage was planned (default {weight_dtype} / explicit"
+            f" {explicit or 'none'}) — {cause}"
         )
     return plan
 
 
 def _convert_for_storage(key: str, tensor: torch.Tensor, conversion: _Conversion) -> torch.Tensor:
-    """圧縮格納への変換と、実データを読む適格性検査（重い側 — 1 本ぶんだけ生かす）。
+    """Conversion to compressed storage and the eligibility checks that read real data (the heavy
+    side — keeps only one tensor alive).
 
-    ここで落ちても最終名には 1 バイトも残らない — 書き出しは一時 path（`.partial`）へ行い、
-    据え替えは検証を通った回だけ（`karume.publish` のモジュール doc の 3 段）。
+    A failure here leaves not a single byte under the final name — writing goes to a temporary
+    path (`.partial`), and the swap happens only for a run that passed verification (the three
+    steps of `karume.publish`'s module doc).
     """
     if conversion.fixed_payload is not None:
         return conversion.fixed_payload
     if conversion.dtype == "f16":
         if not _is_f16_exact(tensor):
-            raise _unrounded(conversion.name, key, "f16 で表現できない値を含む")
+            raise _unrounded(conversion.name, key, "contains values f16 cannot represent")
         return tensor.to(torch.float16)
     if conversion.dtype == "bf16":
         if not _is_bf16_exact(tensor):
-            raise _unrounded(conversion.name, key, "bf16 で表現できない値を含む")
+            raise _unrounded(conversion.name, key, "contains values bf16 cannot represent")
         return tensor.to(torch.bfloat16)
     if conversion.dtype == "i8":
         quantized = quantize_to_int8(tensor, conversion.scale)
-        # MUST: scale は fake-quant が使った値**そのまま**で逆変換する（再計算禁止 — ADR 0019）。
-        # ここが一致しない = 格納値と golden を採ったときの重みが別物、という一点に集約される。
+        # MUST: the inverse conversion uses **exactly** the scale fake-quant used (no
+        # recomputation — ADR 0019). A mismatch here comes down to one thing: the stored values
+        # and the weights the golden was taken with are different.
         if not torch.equal(quantized.to(torch.float32) * conversion.scale, tensor):
             raise _unrounded(
-                conversion.name, key, "i8 × per-channel scale で逆変換してもビット一致しない"
+                conversion.name,
+                key,
+                "is not bit-identical after the inverse i8 × per-channel scale",
             )
         return quantized
     packed = pack_int4(quantize_to_int4(tensor, conversion.scale))
-    # MUST: 逆変換は**これから書くバイトから**辿る（ADR 0069 決定 4 ③）。量子化の戻り値と
-    # 突き合わせると pack / unpack の取り違え（沈黙誤値 — 形も型も合う）がこの門を素通りする。
+    # MUST: the inverse conversion traces back **from the bytes about to be written** (ADR 0069
+    # decision 4 ③). Comparing with the quantizer's return value would let a mixed-up pack /
+    # unpack (a silent wrong value — shape and type match) slip past this check.
     restored = dequantize_int4(unpack_int4(packed, tensor.shape), conversion.scale)
     if not torch.equal(restored, tensor):
-        raise _unrounded(conversion.name, key, "i4 × group scale で逆変換してもビット一致しない")
+        raise _unrounded(
+            conversion.name, key, "is not bit-identical after the inverse i4 × group scale"
+        )
     return packed
 
 
-#: 格納 dtype → 1 要素の **bit** 数（IR の宣言だけからバイト数を導出するための表）。
+#: Storage dtype → **bits** per element (the table that derives byte counts from the IR
+#: declaration alone).
 #:
-#: 語彙は verify の `STORAGE_DTYPES` に揃える（実行可否は `verify.assert_runtime_support` が
-#: 単独で持つ）— ここは**バイト数を数えるだけ**の
-#: 層なので、読めるグラフを数えられない状態を作らない。bit 単位なのは packed 4bit
-#: （1 バイトに 2 要素 — ADR 0069 決定 2）が要素バイト数で表せないため。
+#: The vocabulary follows verify's `STORAGE_DTYPES` (whether it can execute is owned by
+#: `verify.assert_runtime_support` alone) — this layer **only counts bytes**, so it must not be
+#: unable to count a readable graph. It is in bits because packed 4-bit (2 elements per byte —
+#: ADR 0069 decision 2) cannot be expressed in bytes per element.
 _STORAGE_BITS = {"f32": 32, "f16": 16, "bf16": 16, "i8": 8, "i4": 4, "i2": 2, "i32": 32}
-#: 圧縮に数えない格納 dtype（= 素の 4 バイト表現）。圧縮側を列挙すると格納 dtype を足すたびに
-#: 2 箇所直す形になるので、**否定形**で書く。
+#: Storage dtypes not counted as compressed (= the plain 4-byte representation). Listing the
+#: compressed side would mean fixing two places for every new storage dtype, so it is written **in
+#: the negative**.
 _PLAIN_STORAGE_DTYPES = ("f32", "i32")
-#: companion scale の要素バイト数（F32 固定 — ADR 0019）。
+#: Bytes per element of a companion scale (fixed to F32 — ADR 0019).
 _SCALE_BYTES = 4
 
 
 def storage_breakdown(graph: IrGraph) -> StorageBreakdown:
-    """格納宣言から内訳を数える（実テンソルを持ち回らず、毎回グラフから導出する）。
+    """Count the breakdown from the storage declarations (derived from the graph every time,
+    without carrying real tensors around).
 
-    initializer の shape は記号を含まない静的形であることが IR v1 の規則（verify.py）なので、
-    宣言 shape × 格納 dtype の bit 幅で実バイト数がそのまま出る。scale も同じく宣言から
-    導出する（実テンソルを見ない）— i8 は「チャネル軸長 × 4B」、i4 は「group 数 =
-    要素数 / group_size × 4B」。
+    An initializer's shape is a static shape without symbols by the rules of IR v1 (verify.py), so
+    declared shape × the storage dtype's bit width gives the actual byte count directly. The scale
+    is derived from the declaration too (real tensors are not looked at) — for i8 "channel axis
+    length × 4B", for i4 "number of groups = elements / group_size × 4B".
     """
     compressed_tensors = compressed_bytes = plain_tensors = plain_bytes = scale_bytes = 0
     axes = weight_channel_axes(graph)
-    # 数えるのは**この容器に書くバイト**だけ — 共有宣言は貸し手のバイトを借りるので除く
-    # （除外の規則は {@link bakeable_initializers} の 1 箇所）。
+    # Only **the bytes written into this container** are counted — shared declarations borrow
+    # the lender's bytes and are excluded (the exclusion rule lives in one place,
+    # {@link bakeable_initializers}).
     for name in sorted(bakeable_initializers(graph)):
         initializer = graph.initializers[name]
         shape = [int(dim) for dim in graph.values[name].shape]
@@ -820,12 +896,13 @@ def storage_breakdown(graph: IrGraph) -> StorageBreakdown:
             elif dtype == "i2":
                 scale_bytes += shape[0] * _SCALE_BYTES
             elif dtype == "i4":
-                # 整除は読めるグラフなら保証済み（verify の `_check_group_quantized_shape`）。
-                # 存在は型の上でだけ optional なので、既定で埋めず言い直す — 1 で埋めると
-                # 「scale が重みと同じ本数ある」という別のモデルの数字が黙って出る。
+                # Divisibility is guaranteed for a readable graph (verify's
+                # `_check_group_quantized_shape`). Presence is optional only in the type, so it is
+                # restated rather than filled with a default — filling in 1 would silently give the
+                # numbers of another model, "as many scales as weights".
                 group_size = initializer.storage.group_size
                 if group_size is None:
-                    raise EmitError(f"initializer '{name}': 格納 i4 なのに group_size が無い")
+                    raise EmitError(f"initializer '{name}': i4 storage without group_size")
                 scale_bytes += count // group_size * _SCALE_BYTES
         else:
             plain_tensors += 1
@@ -840,19 +917,21 @@ def storage_breakdown(graph: IrGraph) -> StorageBreakdown:
 
 
 # ---------------------------------------------------------------------------
-# 容器へ渡す材料
+# Material handed to the container
 # ---------------------------------------------------------------------------
 
 
 class _StoredTensors(Mapping[str, Buffer]):
-    """テンソルキー → **格納後の生バイト**の遅延写像（引かれた 1 本だけを変換する）。
+    """A lazy mapping tensor key → **raw bytes after storage conversion** (converts only the one
+    tensor fetched).
 
-    MUST: 同じキーからは**毎回同じバイト列**を返す（書き手は sha256 の走査と書き出しの走査で
-    2 度引く — container-v1 §4.1）。変換は決定的なので成立するが、ここに乱択やキャッシュ無効化
-    を入れた瞬間に「宣言した sha256 と実バイトが違う容器」が出る。
+    MUST: the same key returns **the same bytes every time** (the writer fetches twice, in the
+    sha256 pass and the write pass — container-v1 §4.1). The conversion is deterministic, so this
+    holds, but the moment randomness or cache invalidation enters here, "a container whose declared
+    sha256 differs from its actual bytes" appears.
 
-    MUST: 変換済みを持ち越さない（同時に生きる圧縮テンソルは 1 本 — 書き手側の
-    `container._Payloads` が 1 本だけ掴む）。
+    MUST: converted tensors are not carried over (one compressed tensor alive at a time — the
+    writer's `container._Payloads` holds just one).
     """
 
     def __init__(
@@ -869,13 +948,13 @@ class _StoredTensors(Mapping[str, Buffer]):
         if conversion is not None:
             tensor = _convert_for_storage(key, tensor, conversion)
         elif tensor.is_meta:
-            raise EmitError(f"テンソル '{key}': meta のまま格納しようとしている（実体が無い）")
-        # memoryview 経由で渡す（`tobytes()` は 1 本ぶんの複製を作る — DiT の重みは
-        # 1 テンソルで数百 MB あり、ピーク RAM をそのぶん押し上げる）。
+            raise EmitError(f"Tensor '{key}': attempting to store a meta tensor (no data)")
+        # Hand over through memoryview (`tobytes()` makes a copy of the tensor — a single DiT
+        # weight tensor is hundreds of MB, and peak RAM would rise by that much).
         stored = tensor.contiguous()
         if stored.dtype is torch.bfloat16:
-            # numpy は bfloat16 を持たない — 同じ 2 バイトの int16 へ読み替える（ビット列は不変・
-            # バイト列は bf16 のリトルエンディアン 2 バイト / 要素そのもの）。
+            # numpy has no bfloat16 — reinterpret as int16 of the same 2 bytes (the bits do not
+            # change; the bytes are exactly bf16's little-endian 2 bytes / element).
             stored = stored.view(torch.int16)
         return memoryview(stored.numpy()).cast("B")
 
@@ -888,13 +967,15 @@ class _StoredTensors(Mapping[str, Buffer]):
 
 @dataclass(frozen=True)
 class StoredModel:
-    """容器へ渡す 3 点（モジュール doc の「容器へ渡す 3 点」）。"""
+    """The three items handed to the container (the module doc's "The three items handed to the
+    container")."""
 
-    #: 格納宣言を commit したグラフ（渡された `graph` は 1 バイトも変えない）。
+    #: The graph with the storage declarations committed (the `graph` passed in is not changed by
+    #: a single byte).
     graph: IrGraph
-    #: テンソルキー → 格納後の生バイト（遅延・1 本ずつ）。
+    #: Tensor key → raw bytes after storage conversion (lazy, one at a time).
     tensors: Mapping[str, Buffer]
-    #: テンソルキー → 容器の格納宣言。
+    #: Tensor key → the container's storage declaration.
     bindings: Mapping[str, Encoding]
 
 
@@ -907,47 +988,54 @@ def stored_model(
     weight_dtype_overrides: Mapping[str, str] | None = None,
     fixed_weights: Mapping[str, FixedQuantizedWeight] | None = None,
 ) -> StoredModel:
-    """格納変換を計画し、容器へ渡す {@link StoredModel} を組む（1 バイトも書かない）。
+    """Plan the storage conversion and assemble the {@link StoredModel} handed to the container
+    (writes not a single byte).
 
-    `weight_dtype` が `"f16"` / `"i8"` / `"i4"` のとき、**適格な重みスロットだけ**が圧縮格納に
-    なる（宣言と実体が 1 経路で決まる — 別々に決めると「宣言 f16 / 実体 f32」の沈黙誤読が
-    作れる）。i4 の適格は {@link I4_WEIGHT_OPS}（linear / embedding / conv1d）の重みスロット
-    限定で、conv1d はさらに `groups == 1` と格納行長の整除が要る
-    （{@link i4_eligible_initializers} — ADR 0069 決定 5 とその追補）。
+    When `weight_dtype` is `"f16"` / `"i8"` / `"i4"`, **only eligible weight slots** get compressed
+    storage (declaration and data are decided on one path — deciding them separately would allow
+    the silent misreading "declared f16 / data f32"). i4 eligibility is limited to weight slots of
+    {@link I4_WEIGHT_OPS} (linear / embedding / conv1d), and conv1d further needs `groups == 1`
+    and a dividing stored row length ({@link i4_eligible_initializers} — ADR 0069 decision 5 and
+    its addenda).
 
-    `fixed_weights` は固定 packed 値を再量子化せず保存する入口（ADR 0097）。対応する `tensors`
-    は論理形だけの f32/meta とし、meta のキー集合と完全一致させる。linear / embedding の rank2
-    重みに限り、I2 / I4 / I8 の混成を保持する。実 f32 値との二重指定と、自動量子化の
-    dtype / scale / override 指定との混在は拒否する。
+    `fixed_weights` is the entry point that stores fixed packed values without re-quantizing them
+    (ADR 0097). The matching `tensors` are f32/meta carrying only the logical shape, and the set of
+    meta keys must match it exactly. Only for rank-2 linear / embedding weights; a mix of I2 / I4
+    / I8 is kept. Specifying a real f32 value as well, or mixing with the automatic quantization's
+    dtype / scale / override options, is rejected.
 
-    `weight_dtype_overrides`（テンソルキー → 格納 dtype）は 1 本単位の明示指定で、既定
-    `weight_dtype` に**優先**する（混成格納 — 意味と fail loudly の線引きは
-    `_plan_weight_dtype` の docstring）。scale が要る dtype を混ぜるときは `weight_scales` に
-    i8 / i4 の台帳を**合流して**渡す（キー空間が FQN で重ならないので 1 つの Mapping で足りる）。
+    `weight_dtype_overrides` (tensor key → storage dtype) is an explicit per-tensor choice that
+    **takes precedence** over the default `weight_dtype` (mixed storage — the meaning and where
+    fail-loudly applies are in `_plan_weight_dtype`'s docstring). When mixing dtypes that need a
+    scale, pass the i8 / i4 ledgers **merged** in `weight_scales` (the key spaces are FQNs and do
+    not overlap, so one Mapping is enough).
 
-    MUST: 計画段で圧縮テンソルを作らない（実データを読む検査は {@link _StoredTensors} が
-    引かれたときに 1 本ずつ受け持つ）。全件を先に変換すると、呼び出し側が持つ f32 集合と同時に
-    生きてピーク RAM が両者の和になる。
+    MUST: no compressed tensors are created at the planning step (the checks that read real data
+    are done per tensor by {@link _StoredTensors} when it is fetched). Converting everything up
+    front would keep it alive together with the caller's f32 set, and peak RAM would be the sum of
+    both.
 
-    MUST: commit は `dataclasses.replace` の**ビューの中だけ**に閉じ、渡された `graph` は
-    1 バイトも変えない。呼び出し側の宣言を書き換えると、同じ graph を使い回す経路
-    （別 dtype で書き直す / 内訳を数える）が前回の圧縮宣言を引きずる。
+    MUST: the commit stays **inside the view** of `dataclasses.replace`, and the `graph` passed in
+    is not changed by a single byte. Rewriting the caller's declarations would make paths that
+    reuse the same graph (rewrite with another dtype / count the breakdown) drag the previous
+    compression declarations along.
     """
-    # 共有 initializer（ADR 0096 段 2）はこの容器に実体を持たないので、宣言 / 格納の
-    # 完全一致からは外す（宣言の storage はそのまま焼く — 計画も変換も掛からない）。
+    # Shared initializers (ADR 0096 stage 2) have no data in this container, so they are left out
+    # of the exact declaration / storage match (the declaration's storage is written as is —
+    # neither plan nor conversion applies).
     declared = {graph.initializers[name].tensor for name in bakeable_initializers(graph)}
     stored = set(tensors)
     if declared != stored:
         raise EmitError(
-            "宣言テンソルと格納テンソルが一致しない: "
-            f"欠落 {sorted(declared - stored)} / 余剰 {sorted(stored - declared)}"
+            "Declared tensors and stored tensors do not match: "
+            f"missing {sorted(declared - stored)} / extra {sorted(stored - declared)}"
         )
     fixed = {} if fixed_weights is None else fixed_weights
     meta_keys = {key for key, value in tensors.items() if value.is_meta}
     if meta_keys != set(fixed):
-        raise EmitError("f32/meta の論理重みと fixed_weights のキー集合が一致しない")
+        raise EmitError("The key sets of f32/meta logical weights and fixed_weights do not match")
     if fixed and (weight_dtype != "f32" or weight_scales or weight_dtype_overrides):
-        raise EmitError("fixed_weights と自動量子化指定は同時に使えない")
+        raise EmitError("fixed_weights cannot be combined with automatic quantization options")
     contiguous = {key: value.detach().contiguous() for key, value in tensors.items()}
     plan = (
         _plan_fixed_weights(graph, contiguous, fixed)

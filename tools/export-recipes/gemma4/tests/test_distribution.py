@@ -648,7 +648,7 @@ class TestGemma4Sampler:
 class TestGemma4Storage:
     """系列 root の取り違え — 数値の門では原理的に検出できないので、ここが唯一の検出器。"""
 
-    @pytest.mark.parametrize(("storage", "message"), [("f32", "i4 が無い"), ("f16", "i4 が無い")])
+    @pytest.mark.parametrize(("storage", "message"), [("f32", "has no i4"), ("f16", "has no i4")])
     def test_it_refuses_a_container_without_the_packed_int4_weights(
         self, tmp_path: Path, storage: str, message: str
     ) -> None:
@@ -674,7 +674,7 @@ class TestGemma4Storage:
         """
         sources = _build(tmp_path, drafter_bytes=fixture.drafter_container(storage="i4"))
 
-        with pytest.raises(DistError, match="i4 がある"):
+        with pytest.raises(DistError, match=r"has (\S+ / )*i4 \(actual"):
             gemma4_plan(sources)
 
 

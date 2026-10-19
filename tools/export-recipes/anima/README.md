@@ -433,8 +433,8 @@ Breaking exactly one thing and then running `uv run pytest` and `python -m karum
 
 | Injection                                                         | Result                                                                                                                                          |
 | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| ① broken rounding order (fake-quant after the export)             | pytest **208 errors** / golden generation stops with `EmitError: … per-channel scale が無い`                                                    |
-| ② recomputing the scale (axis fixed to 0)                         | pytest **2 failed** / golden generation stops with `EmitError: … 逆変換してもビット一致しない` (the failure is `up.weight` = transposed axis 1) |
+| ① broken rounding order (fake-quant after the export)             | pytest **208 errors** / golden generation stops with `EmitError: … has no per-channel scale`                                                    |
+| ② recomputing the scale (axis fixed to 0)                         | pytest **2 failed** / golden generation stops with `EmitError: … is not bit-identical after the inverse i8 × per-channel scale` (the failure is `up.weight` = transposed axis 1) |
 | ③ recomputing the scale (**correct axis**)                        | pytest **2 failed** (the negative tests detect that the gate itself is gone). **The goldens regenerate byte-identically**                       |
 | ④ letting −128 in (`scale = amax/128`, −128 on the negative side) | pytest **5 failed** (±127 / idempotence / scale definition / golden determinism / scale fixed point)                                            |
 | ⑤ broken write order (I8 moved into the leading group)            | pytest **3 failed** / golden generation stops with `ContainerError: … 絶対 offset 4175 が F32 の要素サイズ 4 に整列していない`                  |

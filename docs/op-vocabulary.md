@@ -156,8 +156,8 @@ test = a measurement of `torch.Tag.core in op.tags`) **+ one exception** (an add
 execution-model invariant needs an ADR even in core — 0064 axis B). Atomic / composite is not an
 axis that splits doors but the type of proof inside the ADR (proof that it cannot be written /
 measured grounds for keeping it).
-`UnsupportedAtenOpsError` reports, for each op, this entry test (`[Core ATen]` / `[Core ATen 外]`
-(outside Core ATen) / `[aten 外]` (outside aten) — the labels as the exporter prints them today),
+`UnsupportedAtenOpsError` reports, for each op, this entry test (`[Core ATen]` / `[outside Core ATen]` /
+`[outside aten]` — the labels as the exporter prints them today),
 the originating module (the innermost class and the first path of `nn_module_stack`) and the
 occurrence count (the test is taken from the `Tag.core` of the torch in use; no list is kept).
 

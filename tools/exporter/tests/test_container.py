@@ -136,11 +136,11 @@ class TestCanonicalJson:
 
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
     def test_a_non_finite_number_is_refused(self, value: float) -> None:
-        with pytest.raises(ContainerFormatError, match="非有限数"):
+        with pytest.raises(ContainerFormatError, match="non-finite number"):
             canonical_json(value)
 
     def test_a_non_string_key_is_refused(self) -> None:
-        with pytest.raises(ContainerFormatError, match="キーが文字列でない"):
+        with pytest.raises(ContainerFormatError, match="key is not a string"):
             canonical_json({1: 2})
 
 
@@ -246,21 +246,21 @@ class TestIrV2Document:
         graph = _minimal_graph()
         graph.initializers["p_w"] = IrInitializer(tensor="y", storage=IrStorage(dtype="f32"))
 
-        with pytest.raises(ContainerFormatError, match="既存の値名"):
+        with pytest.raises(ContainerFormatError, match="existing value name"):
             ir_v2_document(graph)
 
     def test_two_initializers_that_rename_to_the_same_key_fail_loudly(self) -> None:
         graph = _minimal_graph()
         graph.initializers["p_w"] = IrInitializer(tensor="a.weight", storage=IrStorage(dtype="f32"))
 
-        with pytest.raises(ContainerFormatError, match="改名先"):
+        with pytest.raises(ContainerFormatError, match="rename target"):
             ir_v2_document(graph)
 
     def test_an_initializer_without_a_tensor_key_fails_loudly(self) -> None:
         graph = _minimal_graph()
         graph.initializers["p_w"] = IrInitializer(storage=IrStorage(dtype="f32"))
 
-        with pytest.raises(ContainerFormatError, match="IR v1 として不正"):
+        with pytest.raises(ContainerFormatError, match="invalid as IR v1"):
             ir_v2_document(graph)
 
 
@@ -457,14 +457,16 @@ class TestWriteAndReadBack:
         raw[offset] ^= 0xFF
         written[0].write_bytes(bytes(raw))
 
-        with pytest.raises(ContainerFormatError, match="sha256 が宣言と違う"):
+        with pytest.raises(
+            ContainerFormatError, match=r"sha256 of block .* differs from the declaration"
+        ):
             read_container(written).block(target.id)
 
     def test_a_truncated_part_is_caught_before_any_block_is_read(self, tmp_path: Path) -> None:
         written = write_synthetic(tmp_path, single=False)
         written[-1].write_bytes(written[-1].read_bytes()[:-4])
 
-        with pytest.raises(ContainerFormatError, match="が宣言"):
+        with pytest.raises(ContainerFormatError, match="differs from the declared"):
             read_container(written)
 
 
@@ -503,7 +505,7 @@ class TestTheGraphContainer:
         assert sorted(read.verify_blocks()) == sorted(read.block_ids)
 
     def test_a_weight_binding_is_refused_for_a_krg(self, tmp_path: Path) -> None:
-        with pytest.raises(ContainerFormatError, match="余剰"):
+        with pytest.raises(ContainerFormatError, match="surplus"):
             write_graph_container(
                 tmp_path / "synthetic.krg",
                 synthetic_graph(),
@@ -538,7 +540,7 @@ class TestTheWriterRefusesWhatItCannotRepresent:
         bindings = synthetic_bindings()
         del bindings["dec.weight"]
 
-        with pytest.raises(ContainerFormatError, match=r"不足 \[dec.weight\]"):
+        with pytest.raises(ContainerFormatError, match=r"missing \[dec.weight\]"):
             write_model_container(
                 tmp_path / "m.krm",
                 synthetic_graph(),
@@ -556,7 +558,7 @@ class TestTheWriterRefusesWhatItCannotRepresent:
         )
         graph.values["c"] = IrValue(dtype="f32", shape=[256])
 
-        with pytest.raises(ContainerFormatError, match="1 block に収める"):
+        with pytest.raises(ContainerFormatError, match="must fit in one block"):
             write_model_container(
                 tmp_path / "m.krm",
                 graph,
@@ -576,7 +578,7 @@ class TestTheWriterRefusesWhatItCannotRepresent:
             )
 
     def test_a_row_axis_1_initializer_cannot_be_split(self, tmp_path: Path) -> None:
-        with pytest.raises(ContainerFormatError, match="piece 分割できない"):
+        with pytest.raises(ContainerFormatError, match="cannot be split into pieces"):
             write_model_container(
                 tmp_path / "m.krm",
                 synthetic_graph(),
@@ -595,7 +597,9 @@ class TestTheWriterRefusesWhatItCannotRepresent:
         tensors = synthetic_tensors()
         tensors["dec.weight"] = pattern_bytes(40, 23)
 
-        with pytest.raises(ContainerFormatError, match="宣言から決まる 42 バイトと違う"):
+        with pytest.raises(
+            ContainerFormatError, match="differ from the 42 bytes decided by the declaration"
+        ):
             write_model_container(
                 tmp_path / "m.krm",
                 synthetic_graph(),
@@ -613,7 +617,7 @@ class TestTheWriterRefusesWhatItCannotRepresent:
             "int4-sym-g", group_size=24, row_axis=0, scale_key="enc.weight_scale"
         )
 
-        with pytest.raises(ContainerFormatError, match="2 冪"):
+        with pytest.raises(ContainerFormatError, match="power of 2"):
             write_model_container(
                 tmp_path / "m.krm",
                 synthetic_graph(),
@@ -643,7 +647,9 @@ class TestTheProvenanceReader:
             block_bytes=FIXTURE_BLOCK_BYTES,
         )
 
-        with pytest.raises(ContainerFormatError, match=r"provenance\.notice が非空文字列でない"):
+        with pytest.raises(
+            ContainerFormatError, match=r"provenance\.notice is not a non-empty string"
+        ):
             read_container(written)
 
     @pytest.mark.parametrize(
@@ -656,7 +662,9 @@ class TestTheProvenanceReader:
         written = write_synthetic(tmp_path, single=False)
         edit_model_document(written, lambda document: document["provenance"].update({key: value}))
 
-        with pytest.raises(ContainerFormatError, match=rf"provenance\.{key} が非空文字列でない"):
+        with pytest.raises(
+            ContainerFormatError, match=rf"provenance\.{key} is not a non-empty string"
+        ):
             read_container(written)
 
     def test_all_three_fields_as_non_empty_strings_read_back(self, tmp_path: Path) -> None:
@@ -773,38 +781,42 @@ class TestTheAssetIntake:
 
     def test_an_asset_that_exceeds_the_block_limit_fails_loudly(self, tmp_path: Path) -> None:
         """資産は piece 分割の機構を持たない（読み手は役割の索引で行を引く）。"""
-        with pytest.raises(ContainerFormatError, match="資産は 1 block に収める"):
+        with pytest.raises(ContainerFormatError, match="an asset must fit in one block"):
             self._write(
                 tmp_path, {"x": AssetInput("ple-values", 300, b"\x00" * 300)}, block_bytes=256
             )
 
     def test_an_empty_asset_fails_loudly(self, tmp_path: Path) -> None:
-        with pytest.raises(ContainerFormatError, match="長さ 0 の block は作らない"):
+        with pytest.raises(ContainerFormatError, match="a block of length 0 is not created"):
             self._write(tmp_path, {"x": AssetInput("ple-values", 0, b"")})
 
     def test_an_asset_name_that_collides_with_a_tensor_key_fails_loudly(
         self, tmp_path: Path
     ) -> None:
         """衝突を許すと block の実体が黙って入れ替わる。"""
-        with pytest.raises(ContainerFormatError, match="テンソルキーと衝突"):
+        with pytest.raises(ContainerFormatError, match="collide with tensor keys"):
             self._write(tmp_path, {"a.weight": AssetInput("ple-values", 8, b"\x01" * 8)})
 
     def test_a_payload_that_differs_between_pulls_fails_loudly(self, tmp_path: Path) -> None:
         """引かれるたびに同じバイト列を返す MUST（何度引く実装でも同じ結論になる形で見る）。"""
         pulls = count(8)
 
-        with pytest.raises(ContainerFormatError, match="宣言から決まる 8 バイトと違う"):
+        with pytest.raises(
+            ContainerFormatError, match="differ from the 8 bytes decided by the declaration"
+        ):
             self._write(tmp_path, {"x": AssetInput("ple-values", 8, lambda: b"\x01" * next(pulls))})
 
     def test_a_payload_that_disagrees_with_the_declared_length_fails_loudly(
         self, tmp_path: Path
     ) -> None:
         """宣言が先（配置は宣言で決まる）— 実体が違えば落とす。"""
-        with pytest.raises(ContainerFormatError, match="宣言から決まる 8 バイトと違う"):
+        with pytest.raises(
+            ContainerFormatError, match="differ from the 8 bytes decided by the declaration"
+        ):
             self._write(tmp_path, {"x": AssetInput("ple-values", 8, b"\x01" * 12)})
 
     def test_a_blank_role_fails_loudly(self, tmp_path: Path) -> None:
-        with pytest.raises(ContainerFormatError, match="役割が非空文字列でない"):
+        with pytest.raises(ContainerFormatError, match="role is not a non-empty string"):
             self._write(tmp_path, {"x": AssetInput("", 8, b"\x01" * 8)})
 
 
@@ -949,7 +961,7 @@ class TestTheDescriptorReadIsBounded:
             block_bytes=FIXTURE_BLOCK_BYTES,
         )
 
-        with pytest.raises(ContainerFormatError, match="krm でない"):
+        with pytest.raises(ContainerFormatError, match="not a krm"):
             read_descriptor_refs(path)
 
 
@@ -980,12 +992,16 @@ class TestTheReaderRefuses:
     @pytest.mark.parametrize(
         ("start", "raw", "message"),
         [
-            (0, b"XXXX", "未知の magic"),
-            (4, (2).to_bytes(4, "little"), "未対応のコンテナ版 2"),
-            (16, (0).to_bytes(8, "little"), "krm なのにモデル記述の長さが 0"),
-            (8, (0).to_bytes(8, "little"), "グラフ記述の長さが 0"),
-            (8, (MAX_DESCRIPTOR_BYTES + 1).to_bytes(8, "little"), "グラフ記述の長さ .* が上限"),
-            (0, b"KRGC", "krg なのにモデル記述の長さが"),
+            (0, b"XXXX", "Unknown magic"),
+            (4, (2).to_bytes(4, "little"), "Unsupported container version 2"),
+            (16, (0).to_bytes(8, "little"), "krm but the model descriptor length is 0"),
+            (8, (0).to_bytes(8, "little"), "graph descriptor length is 0"),
+            (
+                8,
+                (MAX_DESCRIPTOR_BYTES + 1).to_bytes(8, "little"),
+                "graph descriptor length .* exceeds the limit",
+            ),
+            (0, b"KRGC", "krg but the model descriptor length is"),
         ],
         ids=["magic", "version", "model-length-0", "graph-length-0", "over-limit", "krg-model"],
     )
@@ -1001,7 +1017,7 @@ class TestTheReaderRefuses:
         written = write_synthetic(tmp_path, single=False)
         written[0].write_bytes(written[0].read_bytes()[: HEADER_BYTES - 1])
 
-        with pytest.raises(ContainerFormatError, match="ヘッダに 24 バイト必要だが 23 バイト"):
+        with pytest.raises(ContainerFormatError, match="header needs 24 bytes but has only 23"):
             read_container(written)
 
     def test_a_document_that_is_not_utf8_is_refused(self, tmp_path: Path) -> None:
@@ -1009,7 +1025,7 @@ class TestTheReaderRefuses:
         graph = read_container(written).graph_descriptor_bytes
         rewrite_part0(written[0], graph=b"\xff" + graph[1:])
 
-        with pytest.raises(ContainerFormatError, match="graphDescriptor が UTF-8 として不正"):
+        with pytest.raises(ContainerFormatError, match="graphDescriptor is invalid as UTF-8"):
             read_container(written)
 
     def test_a_document_that_is_not_json_is_refused(self, tmp_path: Path) -> None:
@@ -1017,14 +1033,16 @@ class TestTheReaderRefuses:
         graph = read_container(written).graph_descriptor_bytes
         rewrite_part0(written[0], graph=graph[:-1])
 
-        with pytest.raises(ContainerFormatError, match="graphDescriptor が JSON として不正"):
+        with pytest.raises(ContainerFormatError, match="graphDescriptor is invalid as JSON"):
             read_container(written)
 
     def test_nesting_deeper_than_the_limit_is_refused(self, tmp_path: Path) -> None:
         written = write_synthetic(tmp_path, single=False)
         rewrite_part0(written[0], model=b"[" * (MAX_JSON_DEPTH + 2) + b"]" * (MAX_JSON_DEPTH + 2))
 
-        with pytest.raises(ContainerFormatError, match=f"深さ上限 {MAX_JSON_DEPTH} を超えた"):
+        with pytest.raises(
+            ContainerFormatError, match=f"exceeded the depth limit {MAX_JSON_DEPTH}"
+        ):
             read_container(written)
 
     def test_nesting_at_the_limit_passes_the_depth_check(self, tmp_path: Path) -> None:
@@ -1032,16 +1050,16 @@ class TestTheReaderRefuses:
         written = write_synthetic(tmp_path, single=False)
         rewrite_part0(written[0], model=b"[" * (MAX_JSON_DEPTH + 1) + b"]" * (MAX_JSON_DEPTH + 1))
 
-        with pytest.raises(ContainerFormatError, match="modelDescriptor がオブジェクトでない"):
+        with pytest.raises(ContainerFormatError, match="modelDescriptor is not an object"):
             read_container(written)
 
     @pytest.mark.parametrize(
         ("field", "value", "message"),
         [
-            ("offset", 63, r"blocks\[1\]: offset 63 が 64 の倍数でない"),
-            ("length", 0, r"blocks\[1\]: length が 0"),
+            ("offset", 63, r"blocks\[1\]: offset 63 is not a multiple of 64"),
+            ("length", 0, r"blocks\[1\]: length is 0"),
             # blocks[0] は同じ part の 0..256 — 192 始まりは重なる（64 の倍数なので整列は通る）。
-            ("offset", 192, "block 's0003' が直前の block と重なる"),
+            ("offset", 192, "block 's0003' overlaps the preceding block"),
         ],
         ids=["unaligned-offset", "zero-length", "overlap"],
     )
@@ -1058,15 +1076,15 @@ class TestTheReaderRefuses:
         written = write_synthetic(tmp_path, single=False)
         edit_model_document(written, lambda document: document.update({"extra": 1}))
 
-        with pytest.raises(ContainerFormatError, match="modelDescriptor: 未知のキー 'extra'"):
+        with pytest.raises(ContainerFormatError, match="modelDescriptor: unknown key 'extra'"):
             read_container(written)
 
     @pytest.mark.parametrize(
         ("requires", "message"),
         [
-            ({}, r"requires\.ops が無い"),
-            ({"ops": "matmul"}, r"requires\.ops が配列でない"),
-            ({"ops": ["matmul"], "features": []}, r"requires: 未知のキー 'features'"),
+            ({}, r"requires\.ops is missing"),
+            ({"ops": "matmul"}, r"requires\.ops is not an array"),
+            ({"ops": ["matmul"], "features": []}, r"requires: unknown key 'features'"),
         ],
         ids=["missing-ops", "string-ops", "unknown-key"],
     )
@@ -1151,7 +1169,9 @@ class TestTheReaderAcceptsIntegralFloats:
             {"__OFFSET__": literal},
         )
 
-        with pytest.raises(ContainerFormatError, match=r"blocks\[1\]\.offset が非負の安全整数"):
+        with pytest.raises(
+            ContainerFormatError, match=r"blocks\[1\]\.offset is not a non-negative safe integer"
+        ):
             read_container(written)
 
 
@@ -1198,7 +1218,7 @@ class TestTheReaderMatchesTheRuntimeRefusals:
 
         _raw_model_document(written, edit, {})
 
-        with pytest.raises(ContainerFormatError, match="キー '__proto__' は受理しない"):
+        with pytest.raises(ContainerFormatError, match="key '__proto__' is not accepted"):
             read_container(written)
 
     def test_an_empty_asset_name_is_refused(self, tmp_path: Path) -> None:
@@ -1208,7 +1228,9 @@ class TestTheReaderMatchesTheRuntimeRefusals:
             lambda document: document["assets"].update({"": document["assets"].pop("rope_base")}),
         )
 
-        with pytest.raises(ContainerFormatError, match=r"assets のキー が非空文字列でない"):
+        with pytest.raises(
+            ContainerFormatError, match=r"key of modelDescriptor\.assets is not a non-empty string"
+        ):
             read_container(written)
 
     def test_too_many_model_blocks_are_refused(
@@ -1218,7 +1240,9 @@ class TestTheReaderMatchesTheRuntimeRefusals:
         model_blocks = len(read_container(written).model.blocks)  # type: ignore[union-attr]
         monkeypatch.setattr(container_module, "MAX_BLOCKS", model_blocks - 1)
 
-        with pytest.raises(ContainerFormatError, match=r"modelDescriptor\.blocks の件数が上限"):
+        with pytest.raises(
+            ContainerFormatError, match=r"modelDescriptor\.blocks count exceeds the limit"
+        ):
             read_container(written)
 
     def test_too_many_blocks_across_both_documents_are_refused(
@@ -1232,7 +1256,9 @@ class TestTheReaderMatchesTheRuntimeRefusals:
         assert const_blocks > 0, "被験体に const block が無い（合計の上限が空振りする）"
         monkeypatch.setattr(container_module, "MAX_BLOCKS", const_blocks + model_blocks - 1)
 
-        with pytest.raises(ContainerFormatError, match=r"block 件数（const .* \+ 重み .*）が上限"):
+        with pytest.raises(
+            ContainerFormatError, match=r"Block count \(const .* \+ weights .*\) exceeds the limit"
+        ):
             read_container(written)
 
 
@@ -1291,7 +1317,9 @@ class TestThePieceOrder:
 
         edit_model_document(written, edit)
 
-        with pytest.raises(ContainerFormatError, match="part 2 が直前の piece の part 3 より前"):
+        with pytest.raises(
+            ContainerFormatError, match="part 2 comes before part 3 of the preceding piece"
+        ):
             read_container(written)
 
 
@@ -1311,7 +1339,7 @@ class TestTheWriterRowAxes:
         )
         graph.values["p_w"] = IrValue(dtype="f32", shape=[16, 16])
 
-        with pytest.raises(ContainerFormatError, match=f"codec '{codec}' の rowAxis は 0 だけ"):
+        with pytest.raises(ContainerFormatError, match=f"rowAxis of codec '{codec}' must be 0"):
             write_model_container(
                 tmp_path / "m.krm",
                 graph,
@@ -1371,15 +1399,15 @@ class TestATrailingNewlineIsRefused:
         edited["graphs"] = {f"{name}\n": graph for name, graph in edited["graphs"].items()}
         rewrite_part0(written[0], graph=canonical_json(edited).encode())
 
-        with pytest.raises(ContainerFormatError, match="語彙外"):
+        with pytest.raises(ContainerFormatError, match="outside the vocabulary"):
             read_container(written)
 
     def test_a_graph_name_with_a_trailing_newline_is_refused_by_the_writer(self) -> None:
-        with pytest.raises(ContainerFormatError, match="語彙外"):
+        with pytest.raises(ContainerFormatError, match="outside the vocabulary"):
             container_module._assert_graph_name("synthetic\n")
 
     def test_a_block_id_with_a_trailing_newline_is_refused(self) -> None:
-        with pytest.raises(ContainerFormatError, match="語彙外"):
+        with pytest.raises(ContainerFormatError, match="outside the vocabulary"):
             container_module._require_block_id("b0\n", "test")
 
     def test_a_sha256_with_a_trailing_newline_is_refused(self) -> None:

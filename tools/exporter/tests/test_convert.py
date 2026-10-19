@@ -82,7 +82,7 @@ class TestTensorInputs:
             def forward(self, mask):
                 return mask * 0.5
 
-        with pytest.raises(NotImplementedError, match="スカラ被演算子は未対応"):
+        with pytest.raises(NotImplementedError, match="scalar operands are not supported"):
             convert_module(Scaled(), (torch.ones(3, 4, dtype=torch.int64),))
 
 
@@ -224,7 +224,7 @@ class TestUnsupportedOpDiagnostics:
             ModuleOrigin(module_type=_qualified_name(_StackedAtanBlocks), first_path="", count=1),
         )
         message = str(err.value)
-        assert "aten.lgamma.default ×1 [Core ATen 外]" in message
+        assert "aten.lgamma.default ×1 [outside Core ATen]" in message
         assert "_StackedAtanBlocks ×1 (<root>)" in message
 
     def test_target_outside_aten_is_not_classified_as_core_aten(self, convert_module):
@@ -240,7 +240,7 @@ class TestUnsupportedOpDiagnostics:
             report for target, report in err.value.reports.items() if "getitem" in target
         ]
         assert [report.category for report in getitem_reports] == ["non_aten"]
-        assert "[aten 外]" in str(err.value)
+        assert "[outside aten]" in str(err.value)
 
     def test_node_without_module_stack_is_counted_as_untracked(self):
         """normalize が作るノードは `nn_module_stack` を持たない — 由来を捏造せず不明と数える。"""
@@ -255,7 +255,7 @@ class TestUnsupportedOpDiagnostics:
         assert report.origins == ()
         assert report.untracked == 1
         assert error.ops == {"aten.atan.default": [atan.name]}
-        assert "モジュール不明 ×1" in str(error)
+        assert "unknown module ×1" in str(error)
 
 
 class TestConstantFolding:
@@ -306,7 +306,9 @@ class TestConstantFolding:
             def forward(self, x):
                 return x.masked_fill(torch.arange(4) < 2, 0.0)
 
-        with pytest.raises(NotImplementedError, match="の定数は IR v1 の initializer にできない"):
+        with pytest.raises(
+            NotImplementedError, match=r"a constant of dtype .* cannot be an IR v1 initializer"
+        ):
             convert_module(Masked(), (torch.randn(3, 4),))
 
 
@@ -426,7 +428,7 @@ class TestSymbolicConstantFolding:
                 wide = table.unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(-1)  # [1,1,1,T,1]
                 return x.reshape(1, 1, 1, length, 1) + wide
 
-        with pytest.raises(NotImplementedError, match="strided カーネル"):
+        with pytest.raises(NotImplementedError, match="strided kernel"):
             convert_module(Wide(), (torch.randn(6),), ({0: dyn_t},))
 
     def test_a_static_subtree_stays_a_plain_constant(self, convert_module, dyn_t):
@@ -452,7 +454,7 @@ class TestSymbolicConstantFolding:
             def forward(self, x):
                 return x + torch.arange(x.shape[0], dtype=torch.float32) / x.shape[0]
 
-        with pytest.raises(NotImplementedError, match=r"SymInt .* を値として使う形"):
+        with pytest.raises(NotImplementedError, match=r"a form that uses SymInt .* as a value"):
             convert_module(NormalizedPositions(), (torch.randn(6),), ({0: dyn_t},))
 
     def test_a_constant_filled_with_the_symbol_is_rejected(self, convert_module, dyn_t):
@@ -497,10 +499,10 @@ class TestSymbolicConstantFolding:
             # 添字の形ではなく、記号軸を添字テンソルで引くこと自体を外す（負かは値の性質）。
             (_LastPositionBySymbolicIndex(), (6,), UnsupportedAtenOpsError, "aten.index.Tensor"),
             # `r[-2:]` は負の start の slice — 外れた slice は記号軸を受けない対応表で落ちる。
-            (_LastPositionsByNegativeSlice(), (6, 2), NotImplementedError, "記号次元"),
+            (_LastPositionsByNegativeSlice(), (6, 2), NotImplementedError, "symbolic dimension"),
             # 記号軸に沿った cat — 位置 7 がどの入力に落ちるかが T で決まる。cat が外れると、
             # 後ろの slice も記号軸を受けない対応表で落ちる。
-            (_PositionAcrossConcatenation(), (6,), NotImplementedError, "記号次元"),
+            (_PositionAcrossConcatenation(), (6,), NotImplementedError, "symbolic dimension"),
             # 記号軸を繰り返す repeat — cat と同じ理由で外れ、repeat は語彙外として落ちる。
             (_PositionAcrossRepetition(), (6,), UnsupportedAtenOpsError, "aten.repeat.default"),
         ],
@@ -612,7 +614,7 @@ class TestSymbolicConstantFolding:
             def forward(self, x):
                 return x + torch.arange(x.shape[0], dtype=torch.float32)
 
-        with pytest.raises(NotImplementedError, match="有限でない"):
+        with pytest.raises(NotImplementedError, match="is not finite"):
             convert_module(PositionIndex(), (torch.randn(6),), ({0: Dim.DYNAMIC},))
 
     def test_a_symbol_range_too_narrow_for_two_points_is_rejected(self, convert_module):
@@ -622,7 +624,7 @@ class TestSymbolicConstantFolding:
             def forward(self, x):
                 return x + torch.arange(x.shape[0], dtype=torch.float32)
 
-        with pytest.raises(ValueError, match="2 点評価ができない"):
+        with pytest.raises(ValueError, match="does not allow folding's 2-point evaluation"):
             convert_module(PositionIndex(), (torch.randn(2),), ({0: Dim("T", min=1, max=2)},))
 
 
@@ -694,7 +696,7 @@ class TestConstantDedup:
         # 突合キーだけ落として「別の定数が同じ短縮名に落ちた」状況にする。
         converter._const_by_digest.clear()
 
-        with pytest.raises(AssertionError, match="衝突"):
+        with pytest.raises(AssertionError, match="collided"):
             converter._add_const(torch.zeros(3), "テスト定数")
 
 
@@ -753,13 +755,15 @@ class TestInitializerProvenance:
             def forward(self, x):
                 return x + self.mask
 
-        with pytest.raises(NotImplementedError, match="は IR v1 の initializer にできない"):
+        with pytest.raises(NotImplementedError, match="cannot be an IR v1 initializer"):
             convert_module(BoolBuffer(), (torch.randn(3, 4),))
 
 
 class TestDtypes:
     def test_dtype_outside_the_semantic_vocabulary_is_rejected(self, convert_module):
-        with pytest.raises(NotImplementedError, match="意味論 dtype 語彙に無い"):
+        with pytest.raises(
+            NotImplementedError, match="is not in IR v1's semantic dtype vocabulary"
+        ):
             convert_module(Scale(), (torch.randn(3, 4, dtype=torch.float64),))
 
 
@@ -807,17 +811,17 @@ class TestSymbols:
                 ({0: Dim("A", min=2, max=16)}, {1: Dim("B", min=2, max=16)}),
             )
 
-        assert "IR シンボル名が足りない" in str(err.value)
+        assert "not enough IR symbol names" in str(err.value)
         assert "symbol_names" in str(err.value)
 
     def test_duplicate_symbol_names_are_rejected(self, convert_module):
-        with pytest.raises(ValueError, match="symbol_names に重複"):
+        with pytest.raises(ValueError, match="symbol_names has duplicates"):
             convert_module(Scale(), (torch.randn(3, 4),), symbol_names=("T", "T"))
 
     @pytest.mark.parametrize("name", ["2T", "T+1", "", "T-1"])
     def test_symbol_name_outside_the_dim_grammar_is_rejected(self, convert_module, name):
         """名前が次元表記の文法に載らないと、書けてもランタイムが読めない次元になる。"""
-        with pytest.raises(ValueError, match="次元表記の文法に載らない"):
+        with pytest.raises(ValueError, match="is not in the grammar of the dimension notation"):
             convert_module(Scale(), (torch.randn(3, 4),), symbol_names=(name,))
 
 
@@ -871,8 +875,8 @@ class TestDuplicateOutputs:
         with pytest.raises(NotImplementedError) as err:
             convert_module(SameTwice(), (torch.randn(3, 4),))
 
-        assert "出力" in str(err.value)
-        assert "重複" in str(err.value)
+        assert "outputs" in str(err.value)
+        assert "duplicates" in str(err.value)
 
     def test_two_structurally_identical_outputs_fail_loudly(self, convert_module):
         """CSE が畳む経路 — 別々の部分木でも `(op, ins, attrs, shape)` が同じなら 1 本になる。"""
@@ -884,7 +888,7 @@ class TestDuplicateOutputs:
         with pytest.raises(NotImplementedError) as err:
             convert_module(SameShape(), (torch.randn(3, 4),))
 
-        assert "重複" in str(err.value)
+        assert "duplicates" in str(err.value)
 
     def test_distinct_outputs_still_convert(self, convert_module):
         """回帰の逆側 — 値が違えば 2 出力はそのまま通る（門の恒真化を防ぐ検出器）。"""
@@ -916,7 +920,7 @@ class TestOutputSpecAgreement:
         # user 出力を 1 件削った偽物（specs だけが減り、output 引数は 2 本のまま）。
         decomposed.graph_signature.output_specs = list(decomposed.graph_signature.output_specs)[:-1]
 
-        with pytest.raises(AssertionError, match="本数不一致"):
+        with pytest.raises(AssertionError, match="differ in count"):
             convert(decomposed)
 
 
@@ -954,10 +958,10 @@ class TestDtypeBoundary:
         """黙って切り詰めると添字が静かにずれる — 値域外は必ず落とす。"""
         too_big = torch.tensor([2**31], dtype=torch.int64)
 
-        with pytest.raises(ValueError, match="i32 に収まらない"):
+        with pytest.raises(ValueError, match="does not fit in i32"):
             normalize_boundary_tensor(too_big, "t")
 
-        with pytest.raises(ValueError, match="i32 に収まらない"):
+        with pytest.raises(ValueError, match="does not fit in i32"):
             normalize_boundary_tensor(torch.tensor([-(2**31) - 1], dtype=torch.int64), "t")
 
         # 境界値ちょうどは通る
@@ -966,7 +970,7 @@ class TestDtypeBoundary:
         ).tolist() == [2**31 - 1, -(2**31)]
 
     def test_unsupported_dtype_fails_loudly(self):
-        with pytest.raises(NotImplementedError, match="意味論 dtype に落とせない"):
+        with pytest.raises(NotImplementedError, match="cannot be dropped to a semantic dtype"):
             normalize_boundary_tensor(torch.zeros(2, dtype=torch.float64), "t")
 
 

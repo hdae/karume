@@ -205,7 +205,8 @@ class TestThePayloadDigest:
         doctored = {**stored.tensors, key: self._flipped(stored.tensors[key])}
 
         with pytest.raises(
-            PublishError, match=rf"initializer '{key}': payload の sha256 が渡した実体と違う"
+            PublishError,
+            match=rf"initializer '{key}': the payload sha256 differs from the passed data",
         ):
             publish._assert_payloads_match(read_back, bound, stored.bindings, doctored)
 
@@ -219,7 +220,9 @@ class TestThePayloadDigest:
         assert scale_key is not None
         doctored = {**stored.tensors, scale_key: self._flipped(stored.tensors[scale_key])}
 
-        with pytest.raises(PublishError, match=r"の scale .*payload の sha256 が渡した実体と違う"):
+        with pytest.raises(
+            PublishError, match=r", scale .*: the payload sha256 differs from the passed data"
+        ):
             publish._assert_payloads_match(read_back, bound, stored.bindings, doctored)
 
 
@@ -254,15 +257,15 @@ class TestTheAssetAgreement:
         [
             (
                 lambda assets: {"absent": assets["rope_base"]},
-                "資産 'absent' が書いた容器の宣言に無い",
+                "Asset 'absent' is not in the written container's declaration",
             ),
             (
                 lambda assets: {"rope_base": assets["rope_base"]._replace(role="ple-index")},
-                "資産 'rope_base': 役割が 'rope-base'",
+                "Asset 'rope_base': role is 'rope-base'",
             ),
             (
                 lambda assets: {"rope_base": assets["rope_base"]._replace(length=36)},
-                "資産 'rope_base': 宣言の論理長が 37",
+                "Asset 'rope_base': declared logical length is 37",
             ),
             (
                 lambda assets: {
@@ -270,7 +273,7 @@ class TestTheAssetAgreement:
                         payload=b"\xff" + bytes(assets["rope_base"].payload)[1:]
                     )
                 },
-                "資産 'rope_base': payload が渡したバイト列と違う",
+                "Asset 'rope_base': payload differs from the passed bytes",
             ),
             (
                 # 書き手へ渡した回と長さが変わった呼び出し（引かれるたびに同じバイト列 MUST）。
@@ -279,7 +282,7 @@ class TestTheAssetAgreement:
                         payload=lambda: bytes(assets["rope_base"].payload) + b"\x00"
                     )
                 },
-                "資産 'rope_base': 引き直した実体が 38 バイト",
+                "Asset 'rope_base': the re-fetched data is 38 bytes",
             ),
         ],
         ids=["undeclared", "role", "length", "payload", "repulled-length"],
@@ -309,7 +312,7 @@ class TestTheAssetAgreement:
 
         monkeypatch.setattr(read_back, "block", doctored)
 
-        with pytest.raises(PublishError, match="資産 'rope_base': 末尾の詰め物が 0x00 でない"):
+        with pytest.raises(PublishError, match="Asset 'rope_base': trailing padding is not 0x00"):
             publish._assert_assets_match(read_back, split_assets())
 
 
@@ -367,7 +370,7 @@ class TestTheTernaryCodes:
 
         with pytest.raises(
             ContainerFormatError,
-            match=r"initializer 'w': ternary の payload にコード 0.*（バイト 5）",
+            match=r"initializer 'w': the ternary payload has code 0.*\(byte 5\)",
         ):
             publish_material(tmp_path, ternary_material(bytes(packed)))
 

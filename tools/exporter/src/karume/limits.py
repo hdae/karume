@@ -1,43 +1,53 @@
-"""quant が要求する device limit（manifest の optional `requiredLimits`）の導出（純関数側）。
+"""Derivation of the device limits a quant requires (the optional `requiredLimits` of the
+manifest) — the pure-function side.
 
-重みテンソルの需要（常駐 1 バッファの最大バイト数）は**コンテナの合流**から出るので
-`karume.dist.component_demand_bytes` が持ち、ここが持つのは state スロットの寸法と、需要 →
-`requiredLimits` の写像だけである。
+The demand of the weight tensors (the largest byte count of one resident buffer) comes from **the
+container merge**, so `karume.dist.component_demand_bytes` owns it; this module owns only the size
+of the state slots and the mapping demand → `requiredLimits`.
 
 
-読み手は hub — 宣言があれば**取得の前に**「このデバイスでは動かない」を出せる（宣言の無い
-quant は GB 級を落としてから `createSession` で初めて落ちる）。綴りの正本は
-`packages/hub/src/manifest.ts` の `REQUIRED_LIMIT_NAMES`（runtime の `REQUIRED_LIMIT_KEYS` と
-1 対 1）で、そのうちここが焼くのは**サイズ系 2 つだけ**（{@link WEBGPU_DEFAULT_LIMITS}）:
+The reader is the hub — with a declaration it can report "this does not run on this device"
+**before the download** (a quant without the declaration fails only at `createSession`, after
+downloading GBs). The source of truth for the spelling is `REQUIRED_LIMIT_NAMES` in
+`packages/hub/src/manifest.ts` (one-to-one with the runtime's `REQUIRED_LIMIT_KEYS`), and of those
+this module bakes **only the two size limits** ({@link WEBGPU_DEFAULT_LIMITS}):
 
-- `maxStorageBufferBindingSize` — storage buffer 1 本を binding として渡せる上限
-- `maxBufferSize` — buffer 1 本の確保上限
+- `maxStorageBufferBindingSize` — the limit for passing one storage buffer as a binding
+- `maxBufferSize` — the allocation limit of one buffer
 
-workgroup 系（`maxComputeWorkgroupStorageSize` / `maxComputeInvocationsPerWorkgroup` /
-`maxComputeWorkgroupSize*`）は**焼かない**: 要求値を決めるのはカーネル設計（タイル形・
-`@workgroup_size` の選び・行ブロック化）であって配布物のバイト列ではなく、同じ資産でも
-実行時のノブ（数値変種の opt-in）で必要量が変わる。export 時の定数として宣言すると「古い
-カーネル設計の下限を名乗り続ける配布物」になり、宣言と実装が独立に動く二重管理になる。
+The workgroup limits (`maxComputeWorkgroupStorageSize` / `maxComputeInvocationsPerWorkgroup` /
+`maxComputeWorkgroupSize*`) are **not baked**: the required value is decided by the kernel design
+(tile shape, the choice of `@workgroup_size`, row blocking), not by the bytes of the distribution,
+and even for the same assets the need changes with run-time knobs (opt-in numerics variants).
+Declaring them as export-time constants would make "a distribution that keeps claiming the lower
+bound of an old kernel design", double bookkeeping where the declaration and the implementation
+move independently.
 
-MUST: 宣言が保証するのは**常駐分**（格納テンソルと state スロット）が既定内に収まることだけで、
-実行中の**中間テンソル（ノード出力）は含まない**（2026-09-04 裁定）。「欄が無い = 既定スペックの
-デバイスで動く」は常駐分についての主張で、中間まで名乗る宣言ではない。融合後の実需要は device が
-実際に granted した limit に依存する（行ブロック化は許された binding 幅で刻みが決まる）ので配布形
-からは原理的に決まらず、融合**前**のノード出力の最大を焼くと「行ブロックで走るデバイス」を取得の
-前に誤って拒否する（宣言は満たせないが実行はできる、が最も損な形）。中間が上限を超える形は Session
-構築時の実行時検査が受ける。
+MUST: the declaration guarantees only that the **resident part** (stored tensors and state slots)
+fits within the defaults; it **does not cover the intermediate tensors (node outputs)** during
+execution (ruling of 2026-09-04). "No field = runs on a default-spec device" is a claim about the
+resident part, not a declaration that extends to intermediates. The actual demand after fusion
+depends on the limits the device actually granted (row blocking sets its step by the allowed binding
+width), so it is in principle not determined by the distribution, and baking the largest node output
+**before** fusion would wrongly reject, before the download, "devices that run with row blocks" (a
+declaration that cannot be met although execution can — the worst outcome). Forms whose
+intermediates exceed the limits are caught by the run-time check at Session construction.
 
-MUST: 需要は **payload 基準**（格納テンソルの payload 長の最大）で採る — 常駐できずに f32 へ
-展開して確保される席（runtime `planWeightResidency` の `expanded` — f16 / i8 / i4 の展開後
-numel × 4）の寸法は含めない。展開するかはグラフだけで決まりデバイスに依らないので、これは
-誤拒否を避けるための除外ではなく、適格判定の鏡像を Python 側に持たないことによる**限定**である
-（ADR 0089 決定 3）。したがって「欄が無い = 既定スペックのデバイスで動く」は展開席について
-主張しない — 展開後の実寸が保証既定を超える配布物は、欄が焼かれないまま Session 構築の上限検査
-（`assertWeightsWithinLimits`）で落ちる。2026-09-24 時点の配布資産に展開席は無い。
+MAY (re-graded 2026-10-18 — ADR 0089 decision 3): the demand is taken on a **payload basis** (the
+largest payload length of the stored tensors) — the size of weights that cannot stay resident and
+are decoded to f32 for allocation (`expanded` of the runtime's `planWeightResidency` — numel × 4
+after decoding f16 / i8 / i4) is not included. Whether a weight is decoded is decided by the graph
+alone and does not depend on the device, so this is not an exclusion to avoid false rejection but a
+**limitation** from not keeping a mirror of the eligibility check on the Python side (ADR 0089
+decision 3). "No field = runs on a default-spec device" therefore makes no claim about expanded
+weights — a distribution whose decoded size exceeds the guaranteed defaults fails, with no field
+baked, at the limit check of Session construction (`assertWeightsWithinLimits`). As of 2026-09-24
+the distributed assets have no expanded weights.
 
-MUST: 焼くのは**保証既定を超える席だけ**。「`requiredLimits` が無い = 既定スペックの
-デバイスで動く」という意味論を保つためで、既定以内の値を書くと「宣言があるのに何も
-制約していない」欄が全配布物に増える（境界＝ちょうど既定値も焼かない）。
+MUST: bake **only the fields above the guaranteed defaults**. This keeps the semantics "no
+`requiredLimits` = runs on a default-spec device"; writing values within the defaults would add to
+every distribution fields that "are declared but constrain nothing" (the boundary — exactly the
+default value — is not baked either).
 """
 
 from __future__ import annotations
@@ -49,59 +59,69 @@ from karume.dims import DimError, DimExpr, eval_dim, try_parse_dim
 
 
 class LimitsError(ValueError):
-    """requiredLimits の導出が成立しない（記号束縛の欠落・壊れた宣言）。"""
+    """requiredLimits cannot be derived (a missing symbol binding, a broken declaration)."""
 
 
-#: WebGPU 仕様の**保証既定値**（supported limits の default — アダプタに要求しなくても得られる
-#: 下限）。これを超える需要だけが `requiredLimits` になる。
+#: The **guaranteed defaults** of the WebGPU spec (the defaults of the supported limits — the
+#: lower bound obtained without requesting anything from the adapter). Only demand above these
+#: becomes `requiredLimits`.
 #:
-#: MUST: 並びがそのまま manifest のキー順になる（辞書順で固定 — 焼き直しで欄の並びが揺れない）。
+#: MUST: the order is the manifest key order as is (fixed in dictionary order — the field order does
+#: not move when re-baked).
 WEBGPU_DEFAULT_LIMITS: Mapping[str, int] = {
     "maxBufferSize": 268_435_456,
     "maxStorageBufferBindingSize": 134_217_728,
 }
 
-#: state スロットの dtype → 1 要素のバイト数。語彙の正本は `karume.verify.STATE_DTYPES`
-#: （f16 は席だけの予約で、実行経路があるのは f32 だけ）— ここは寸法を数えるための対応表なので、
-#: 語彙の写しではなく**知っている dtype だけ**を持ち、未知は fail loudly で落とす。
+#: state slot dtype → bytes per element. The source of truth for the vocabulary is
+#: `karume.verify.STATE_DTYPES` (f16 is only reserved; only f32 has an execution path) — this is a
+#: table for counting sizes, so it holds **only the dtypes it knows** rather than a copy of the
+#: vocabulary, and an unknown one fails loudly.
 STATE_DTYPE_BYTES: Mapping[str, int] = {"f32": 4}
 
-#: state shape の記号次元（KV 容量）の束縛値を引く `pipelineConfig` の席。
+#: The `pipelineConfig` field that gives the bound value of the symbolic dimension (the KV
+#: capacity) of the state shapes.
 #:
-#: MUST: 既定容量（`capacity`）ではなく**配布形が許す最大容量**（`maxPosition`）を読む。
-#: 容量は実行時ノブ（ホストが `createGenerationContext` で選ぶ）なので、既定値で焼くと
-#: 「既定より大きい容量を選んだ瞬間に、宣言を満たすデバイスで `createSession` が落ちる」
-#: という最も損な形になる。上限で焼けば宣言は常に十分側へ倒れる。
+#: MUST: read **the largest capacity the distribution allows** (`maxPosition`), not the default
+#: capacity (`capacity`). The capacity is a run-time knob (the host chooses it at
+#: `createGenerationContext`), so baking with the default gives the worst outcome: "the moment a
+#: capacity larger than the default is chosen, `createSession` fails on a device that meets the
+#: declaration". Baking with the upper bound always errs on the sufficient side.
 STATE_CAPACITY_KEY = "maxPosition"
 
 
 def required_limits(demand: int) -> dict[str, int]:
-    """常駐 1 バッファの最大バイト数 → 焼く `requiredLimits`（既定超えの席だけ・厳密比較）。
+    """The largest byte count of one resident buffer → the `requiredLimits` to bake (only fields
+    above the default, strict comparison).
 
-    binding 需要と buffer 需要が同じ値なのは、重みテンソルも state スロットも**1 バッファ =
-    1 binding**で置かれるため（分割して束ねる形は無い）。既定の違いから、需要が
-    128MiB〜256MiB の帯では `maxStorageBufferBindingSize` だけが焼かれる — このとき
-    `maxBufferSize` は仕様既定 256MiB に落ちるので、`maxStorageBufferBindingSize ≤
-    maxBufferSize`（requestDevice の前提）は自動で保たれる。
+    The binding demand and the buffer demand are the same value because weight tensors and state
+    slots alike are placed as **1 buffer = 1 binding** (there is no split-and-bundle form). Because
+    the defaults differ, in the band where the demand is 128MiB to 256MiB only
+    `maxStorageBufferBindingSize` is baked — `maxBufferSize` then falls back to the spec default
+    256MiB, so `maxStorageBufferBindingSize ≤ maxBufferSize` (a precondition of requestDevice) holds
+    automatically.
     """
     if demand < 0:
-        raise LimitsError(f"需要 {demand} バイトが負")
+        raise LimitsError(f"Demand {demand} bytes is negative")
     return {name: demand for name, default in WEBGPU_DEFAULT_LIMITS.items() if demand > default}
 
 
 def state_bindings(
     states: Mapping[str, Any], pipeline_config: Mapping[str, Any], where: str
 ) -> dict[str, int]:
-    """state shape の記号次元 → 束縛値（`pipelineConfig` の位置上限の席から引く）。
+    """Symbolic dimensions of the state shapes → bound values (taken from the position-limit field
+    of `pipelineConfig`).
 
-    束縛点は `createGenerationContext(spec.bindings)`（ADR 0066 追記 7）で、そこへ渡る容量は
-    ホストが選ぶ実行時ノブ。配布形が持っているその**上限**が `pipelineConfig` の
-    {@link STATE_CAPACITY_KEY} 席で、requiredLimits はこの上限で焼く（席の docstring）。
+    The binding point is `createGenerationContext(spec.bindings)` (ADR 0066 addendum 7), and the
+    capacity passed there is a run-time knob the host chooses. Its **upper bound**, which the
+    distribution carries, is the {@link STATE_CAPACITY_KEY} field of `pipelineConfig`, and
+    requiredLimits is baked with that upper bound (the field's docstring).
 
-    MUST: 束縛が取れなければ fail loudly — 黙って state を勘定から外すと「重みだけを見た
-    小さい値」が焼かれ、**宣言があるのに足りない**という最も損な形になる（宣言が無い方が
-    まだ実行時に落ちる）。記号が 2 本以上あるのも同じ扱い: どれが容量記号かを配布形からは
-    決められない（states 形の記号は容量 1 本 — ADR 0066 決定 2）。
+    MUST: fail loudly when a binding cannot be obtained — silently leaving state out of the count
+    bakes "a small value that looked only at the weights", the worst outcome of **a declaration that
+    is not enough** (without a declaration it would at least fail at run time). Two or more symbols
+    are treated the same way: which one is the capacity symbol cannot be decided from the
+    distribution (a states-form shape has one symbol, the capacity — ADR 0066 decision 2).
     """
     found: set[str] = set()
     for slot in states.values():
@@ -113,14 +133,15 @@ def state_bindings(
         return {}
     if len(symbols) > 1:
         raise LimitsError(
-            f"{where}: state shape の記号が {symbols} の複数ある"
-            f" — 束縛できるのは pipelineConfig['{STATE_CAPACITY_KEY}'] が決める容量 1 本だけ"
+            f"{where}: state shapes have several symbols {symbols}"
+            f" — only the one capacity set by pipelineConfig['{STATE_CAPACITY_KEY}'] can be bound"
         )
     capacity = pipeline_config.get(STATE_CAPACITY_KEY)
     if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
         raise LimitsError(
-            f"{where}: state shape の記号 '{symbols[0]}' を束縛する"
-            f" pipelineConfig['{STATE_CAPACITY_KEY}'] が正整数でない（{capacity!r}）"
+            f"{where}: state shape symbol '{symbols[0]}' is bound by"
+            f" pipelineConfig['{STATE_CAPACITY_KEY}'], which is not a positive integer"
+            f" ({capacity!r})"
         )
     return {symbols[0]: capacity}
 
@@ -128,28 +149,29 @@ def state_bindings(
 def max_state_slot_bytes(
     graph: Mapping[str, Any], pipeline_config: Mapping[str, Any], where: str
 ) -> int:
-    """グラフの state スロット（ADR 0066 決定 2）**1 本の最大**バイト数（states 無しなら 0）。
+    """The byte count of **the largest single** state slot of the graph (ADR 0066 decision 2; 0
+    without states).
 
-    スロットは `createGenerationContext` が容量ぶん丸ごと確保する常駐バッファ（1 スロット =
-    1 バッファ = 1 binding）なので、記号を**配布形が許す最大容量**で束縛した寸法がそのまま
-    需要になる。KV 容量の大きい系列では**最大テンソルより state の方が大きい**（どちらも
-    1 バッファのまま — 重みは part を跨いで配れるが、GPU 側で 1 本に戻る）。
+    A slot is a resident buffer that `createGenerationContext` allocates whole for the capacity
+    (1 slot = 1 buffer = 1 binding), so the size with the symbol bound to **the largest capacity the
+    distribution allows** is the demand as is. In families with a large KV capacity **the state is
+    larger than the largest tensor** (both stay one buffer — weights can be distributed across
+    parts, but they become one again on the GPU side).
     """
     states = graph.get("states")
     if states is None:
         return 0
     if not isinstance(states, dict):
-        raise LimitsError(f"{where}: graph.states がオブジェクトでない")
+        raise LimitsError(f"{where}: graph.states is not an object")
     bindings = state_bindings(states, pipeline_config, where)
     largest = 0
     for name, slot in states.items():
-        at = f"{where}: state スロット '{name}'"
+        at = f"{where}: state slot '{name}'"
         dtype = slot.get("dtype") if isinstance(slot, Mapping) else None
         item_bytes = STATE_DTYPE_BYTES.get(dtype) if isinstance(dtype, str) else None
         if item_bytes is None:
             raise LimitsError(
-                f"{at} の dtype {dtype!r} は寸法を数えられない"
-                f"（知っているのは {sorted(STATE_DTYPE_BYTES)}）"
+                f"{at} dtype {dtype!r} cannot be sized (known: {sorted(STATE_DTYPE_BYTES)})"
             )
         elements = 1
         for dim in _slot_shape(slot, where):
@@ -159,30 +181,34 @@ def max_state_slot_bytes(
 
 
 def _slot_shape(slot: Any, where: str) -> list[Any]:
-    """state スロット宣言の `shape`（形だけを見る — 値域の門は `karume.verify` が持つ）。"""
+    """The `shape` of a state slot declaration (looks at the form only — the range checks are in
+    `karume.verify`)."""
     shape = slot.get("shape") if isinstance(slot, Mapping) else None
     if not isinstance(shape, list) or not shape:
-        raise LimitsError(f"{where}: state スロットの shape が非空の配列でない（{shape!r}）")
+        raise LimitsError(f"{where}: state slot shape is not a non-empty array ({shape!r})")
     return shape
 
 
 def _parse_symbol(dim: str, where: str) -> DimExpr:
-    """記号次元 `coeff·sym+offset` を分解する（非正準は fail loudly）。"""
+    """Decomposes a symbolic dimension `coeff·sym+offset` (non-canonical fails loudly)."""
     expr = try_parse_dim(dim)
     if expr is None:
-        raise LimitsError(f"{where}: state shape の次元式 '{dim}' が正準文法に適合しない")
+        raise LimitsError(
+            f"{where}: state shape dimension expression '{dim}'"
+            " does not match the canonical grammar"
+        )
     return expr
 
 
 def _dim_size(dim: Any, bindings: Mapping[str, int], where: str) -> int:
-    """次元 1 つを具体値にする（数値はそのまま・記号は束縛表を当てる）。"""
+    """Makes one dimension concrete (a number as is, a symbol through the binding table)."""
     if isinstance(dim, bool) or not isinstance(dim, int | str):
-        raise LimitsError(f"{where}: shape の次元 {dim!r} が整数でも記号でもない")
+        raise LimitsError(f"{where}: shape dimension {dim!r} is neither an integer nor a symbol")
     if isinstance(dim, int):
         if dim < 1:
-            raise LimitsError(f"{where}: shape の次元 {dim} が正整数でない")
+            raise LimitsError(f"{where}: shape dimension {dim} is not a positive integer")
         return dim
     try:
         return eval_dim(_parse_symbol(dim, where), bindings)
     except DimError as cause:
-        raise LimitsError(f"{where}: 次元 '{dim}' を束縛できない: {cause}") from cause
+        raise LimitsError(f"{where}: dimension '{dim}' cannot be bound: {cause}") from cause

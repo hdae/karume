@@ -1,20 +1,24 @@
-"""旧配布形（safetensors 方言の shard 列）の**読み取り専用**の層（移行 CLI 専用）。
+"""The **read-only** layer for the old distribution (shard sequences of the safetensors dialect),
+for the migration CLI only.
 
-配布形は `krm`（container-v1）へ移ったので、safetensors 方言を**書く**コードはもう無い。
-公開リポは 0.13.0 で上げ直し済みだが、旧形は HF の旧 revision（pin した読み手が指す先）に
-残るので、`karume migrate` が旧形を読む経路だけがここに残る（container-v1 §12「旧形式を
-読む処理はこの CLI にだけ置く」）。
+The distribution moved to `krm` (container-v1), so no code **writes** the safetensors dialect any
+more. The public repositories were re-uploaded at 0.13.0, but the old form remains in the old HF
+revisions (what pinned readers point at), so only the path by which `karume migrate` reads the old
+form stays here (container-v1 §12 "Migration CLI contract": "Reading the old format lives **only
+in this CLI**").
 
-ここが読むのは旧規則の配布形も含む列（単一ファイル / fat グラフ shard / 尾部スラック /
-piece キー `<親名>#NNNNN-of-NNNNN`）で、現行の門は掛けない（掛けたら移行できない）。分割
-テンソルは読むときに**親 1 本へ畳む**ので、呼び手は常に「親の全バイト」だけを見る。
+What this reads are sequences that include distributions under the old rules (single file / fat
+graph shard / tail slack / piece key `<parent>#NNNNN-of-NNNNN`), and the current checks are not
+applied (applying them would make migration impossible). A split tensor is **folded into its one
+parent** while reading, so the caller always sees only "all bytes of the parent".
 
-MUST: torch を持ち込まない。扱うのは**バイト列と宣言だけ**で、テンソルを torch へ起こして
-持ち回ると dtype の往復（f16 / i4 の器）で沈黙誤値を作る余地が生まれる。
+MUST: do not bring in torch. This handles **only byte sequences and declarations**; raising
+tensors into torch and carrying them around leaves room for silently wrong values through a dtype
+round trip (the f16 / i4 carrier types).
 
-MUST: 新しいものを**書く**ために使わない。連番のファイル名規約（`<stem>-NNNNN-of-NNNNN`）は
-コンテナ側（{@link karume.container.numbered_name}）が正本で、ここはそれを借りて旧形の列を
-解決するだけである。
+MUST: do not use this to **write** anything new. The source of truth for the numbered file name
+convention (`<stem>-NNNNN-of-NNNNN`) is the container side ({@link
+karume.container.numbered_name}); this only borrows it to resolve sequences of the old form.
 """
 
 from __future__ import annotations
@@ -29,20 +33,24 @@ from typing import Any
 from karume.container import resolve_sequence
 from karume.verify import assert_reader_layout
 
-#: 旧配布形（safetensors 方言）でグラフ JSON を載せていた `__metadata__` のキー（読むのは
-#: 移行 CLI の `karume.legacy` / `karume.migrate` だけ）。
+#: The `__metadata__` key that carried the graph JSON in the old distribution (safetensors
+#: dialect); only the migration CLI's `karume.legacy` / `karume.migrate` read it.
 IR_METADATA_KEY = "karume_ir"
 
-#: 旧書き手が格納 dtype（IR v1 の `storage.dtype`）に対して書いた safetensors dtype（1 対 1）。
+#: The safetensors dtype the old writer wrote for each storage dtype (IR v1 `storage.dtype`), one
+#: to one.
 #:
-#: MUST: shape は**論理形**のまま書かれている（packed の i4 / i2 も器の形ではない — ADR 0069
-#: 決定 2）。移行はこの表と IR の宣言 shape で旧テンソルの宣言を照合してから焼く — バイト長
-#: だけを見ると、同じ長さの別型（I32 の 1 を f32 として読むと約 1.4e-45）や要素数だけ同じ
-#: 別形が新しいコンテナへ黙って焼かれる。PLE sidecar の `values` も同じ表で引く。
+#: MUST: the shape is written as the **logical shape** (packed i4 / i2 is not the carrier shape
+#: either — ADR 0069 decision 2). Migration checks the old tensor declarations against this table
+#: and the declared IR shape before writing — looking at the byte length alone would silently
+#: write a different type of the same length (reading an I32 1 as f32 gives about 1.4e-45) or a
+#: different shape with only the same element count into the new container. The PLE sidecar's
+#: `values` are looked up in the same table.
 #:
-#: `bf16` の行は置かない — 旧書き手は bf16 を書けなかった（格納の書き出しは f32 / f16 / i8 /
-#: i4 だけで、torch → safetensors の表にも bfloat16 が無い）。表に無い格納は移行で
-#: fail loudly になる（推測で行を足すと、旧書き手が作りえない入力を黙って受理する）。
+#: There is no `bf16` row — the old writer could not write bf16 (storage output was only f32 / f16 /
+#: i8 / i4, and the torch → safetensors table has no bfloat16 either). Storage not in the table
+#: fails loudly in migration (adding a row by guess would silently accept input the old writer could
+#: never have produced).
 LEGACY_STORED_DTYPE: Mapping[str, str] = {
     "f32": "F32",
     "f16": "F16",
@@ -52,34 +60,40 @@ LEGACY_STORED_DTYPE: Mapping[str, str] = {
     "i2": "I2",
 }
 
-#: 旧書き手の scale（companion scale・PLE の `scales`）の safetensors dtype。
+#: The safetensors dtype of the old writer's scales (companion scale, PLE `scales`).
 LEGACY_SCALE_DTYPE = "F32"
 
-#: 生バイトの読み出し単位。数 GB を丸読みしないための唯一の要件で、値自体は素の I/O 単位。
+#: Read unit for raw bytes. Its only requirement is not reading several GB at once; the value
+#: itself is a plain I/O unit.
 _CHUNK_BYTES = 1 << 20
 
-#: safetensors のヘッダ長欄のバイト数。
+#: Byte count of the safetensors header length field.
 _HEADER_LENGTH_BYTES = 8
 
-#: piece キーの連番の桁数（旧 shard 仕様 v3 — `packages/runtime` 側の正規表現と同じ綴り）。
+#: Digit count of the piece key's sequence numbers (old shard spec v3, ADR 0090 decision 1 — the
+#: same spelling as the regular expression the `packages/runtime` reader had until ADR 0108 step 3d
+#: removed it).
 _PIECE_DIGITS = 5
 
-#: piece キーの綴り（`<親名>#NNNNN-of-NNNNN`）。親名は貪欲に取る — `#` を含む親名は旧書き手の
-#: 出力に現れないので、末尾の連番だけが分割の印になる。
+#: Spelling of a piece key (`<parent>#NNNNN-of-NNNNN`). The parent name is taken greedily — parent
+#: names containing `#` never appear in the old writer's output, so only the trailing sequence
+#: number marks the split.
 _PIECE_PATTERN = re.compile(rf"^(.+)#(\d{{{_PIECE_DIGITS}}})-of-(\d{{{_PIECE_DIGITS}}})$")
 
 
 class LegacyFormatError(ValueError):
-    """旧配布形が読めない（ヘッダの矛盾・piece 列の不整合・重複テンソル）。"""
+    """The old distribution cannot be read (inconsistent header, inconsistent piece sequence,
+    duplicate tensor)."""
 
 
 def parse_piece_key(key: str) -> tuple[str, int, int] | None:
-    """piece キー → `(親名, index, count)`（piece でなければ None）。
+    """Piece key → `(parent name, index, count)` (None when it is not a piece).
 
-    MUST: `count >= 2` と `1 <= index <= count` を**ここで**見る。範囲外の綴り
-    （`#00003-of-00002`・1 本しかない piece 列）を piece として通すと、それが列の進行状態の
-    初期値になって違反の帰属が「piece 列の並び」へ移る。実際にはそのキー自体が旧配布形の
-    誤りなので、piece と解釈せず 1 本のテンソルとして運ぶほうが直す側にとって決定的になる。
+    MUST: check `count >= 2` and `1 <= index <= count` **here**. Passing an out-of-range spelling
+    (`#00003-of-00002`, a piece sequence of only one) as a piece makes it the initial value of the
+    sequence's progress state, and the violation gets attributed to "the order of the piece
+    sequence". In fact the key itself is the old distribution's error, so carrying it as one tensor
+    rather than reading it as a piece is more decisive for whoever fixes it.
     """
     match = _PIECE_PATTERN.fullmatch(key)
     if match is None:
@@ -91,17 +105,19 @@ def parse_piece_key(key: str) -> tuple[str, int, int] | None:
 
 
 def resolve_shards(path: Path) -> tuple[Path, ...]:
-    """旧コンポーネントの代表 path → 実在する shard 列（読む順 = 連番順）。
+    """Representative path of an old component → the existing shard sequence (read order =
+    sequence-number order).
 
-    連番規約は新しい part と同じ（container-v1 §8）ので、解決は
-    {@link karume.container.resolve_sequence} の 1 本道を借りる。
+    The numbering convention is the same as for new parts (container-v1 §8), so resolution borrows
+    the single path of {@link karume.container.resolve_sequence}.
     """
     return resolve_sequence(path)
 
 
 @dataclass(frozen=True)
 class StoredEntry:
-    """旧コンテナのテンソル 1 本の宣言（safetensors dtype・**論理** shape・バイト長）。"""
+    """Declaration of one tensor in an old container (safetensors dtype, **logical** shape, byte
+    length)."""
 
     name: str
     dtype: str
@@ -111,12 +127,12 @@ class StoredEntry:
 
 @dataclass(frozen=True)
 class SourceTensor:
-    """入力側のテンソル 1 本 — **親としての宣言**と、現物の在処。
+    """One tensor on the input side — its **declaration as the parent** and where the bytes are.
 
-    分割テンソルは piece が別々のファイルに散っているので、在処は 1 点ではなく**区間の列**に
-    なる（`(ファイル, ファイル先頭からの絶対 offset, バイト長)` を piece の index 順に）。
-    丸ごと 1 本のときは要素 1 つの列で、以降の経路（sha256・写し・行範囲の切り出し）は
-    区間の列だけを見るので分岐しない。
+    A split tensor has its pieces scattered over separate files, so the location is not one point
+    but a **sequence of ranges** (`(file, absolute offset from the start of the file, byte
+    length)`, in piece index order). A whole tensor is a sequence of one element; the later paths
+    (sha256, copy, row-range slicing) look only at the sequence of ranges, so they do not branch.
     """
 
     entry: StoredEntry
@@ -124,44 +140,46 @@ class SourceTensor:
 
 
 def _read_header(path: Path) -> tuple[Mapping[str, Any], int]:
-    """ヘッダ JSON と**データ節の絶対開始位置**を返す。
+    """Return the header JSON and the **absolute start of the data section**.
 
-    NOTE: レイアウト規則（既知 dtype・宣言バイト長の一致・隙間なし・整列）は
-    {@link karume.verify.assert_reader_layout} の担当で、呼び出し側が**先に**通す。ここは
-    通った後の読み出しだけなので、素で添字してよい。
+    NOTE: the layout rules (known dtype, matching declared byte length, no gaps, alignment) belong
+    to {@link karume.verify.assert_reader_layout}, which the caller runs **first**. This is only
+    the read after that has passed, so plain indexing is fine.
     """
     size = path.stat().st_size
     with path.open("rb") as handle:
         header_length = int.from_bytes(handle.read(_HEADER_LENGTH_BYTES), "little")
-        # 宣言長はファイル実長で拘束する（不正な 8 バイトをそのまま read すると巨大確保になる）。
+        # Bound the declared length by the actual file length (reading an invalid 8 bytes as is
+        # would be a huge allocation).
         if header_length <= 0 or header_length > size - _HEADER_LENGTH_BYTES:
             raise LegacyFormatError(
-                f"{path}: ヘッダ長 {header_length} がファイル長 {size} と矛盾する"
+                f"{path}: header length {header_length} contradicts the file length {size}"
             )
         header = json.loads(handle.read(header_length))
     if not isinstance(header, dict):
-        raise LegacyFormatError(f"{path}: safetensors ヘッダが最上位オブジェクトでない")
+        raise LegacyFormatError(f"{path}: the safetensors header is not a top-level object")
     return header, _HEADER_LENGTH_BYTES + header_length
 
 
 def safetensors_header(path: Path) -> Mapping[str, Any]:
-    """ヘッダ JSON だけを読む（数 GB のペイロードを舐めない）。"""
+    """Read only the header JSON (without scanning a payload of several GB)."""
     return _read_header(path)[0]
 
 
 def _read_metadata(path: Path, header: Mapping[str, Any]) -> dict[str, str]:
-    """`__metadata__` を文字列 → 文字列のまま取り出す（**逐語**で持ち回す唯一の入口）。"""
+    """Take `__metadata__` out as string → string (the only entry that carries it **verbatim**)."""
     raw = header.get("__metadata__", {})
     if not isinstance(raw, dict) or any(
         not isinstance(key, str) or not isinstance(value, str) for key, value in raw.items()
     ):
-        raise LegacyFormatError(f"{path}: __metadata__ が文字列 → 文字列のマップでない")
+        raise LegacyFormatError(f"{path}: __metadata__ is not a string → string map")
     return dict(raw)
 
 
 @dataclass(frozen=True)
 class _Fragment:
-    """読み込み中の piece 1 本（畳む前 — 連番と収容 shard の並びを見るための材料）。"""
+    """One piece being read (before folding — the material for checking the sequence numbers and
+    the order of the shards that hold them)."""
 
     shard: int
     index: int
@@ -171,24 +189,25 @@ class _Fragment:
 
 
 def _join_pieces(name: str, fragments: Sequence[_Fragment]) -> SourceTensor:
-    """piece 列を親 1 本へ畳む（旧読み手契約 5 を全部ここで見る）。
+    """Fold a piece sequence into its one parent (all of old reader contract 5 is checked here).
 
-    `fragments` は**読む順**（shard 番号順）に並んでいる。畳んだ宣言は親の dtype・全体
-    shape（先頭次元 = 各 piece の行数の和）・合計バイト長で、在処は piece の区間列になる。
+    `fragments` is in **read order** (shard number order). The folded declaration is the parent's
+    dtype, the whole shape (leading dimension = sum of each piece's rows) and the total byte
+    length; the location is the pieces' sequence of ranges.
     """
     shards = [fragment.shard for fragment in fragments]
     repeated = sorted({shard for shard in shards if shards.count(shard) > 1})
     if repeated:
         raise LegacyFormatError(
-            f"テンソル '{name}': shard{repeated} に同じ親の piece が 2 本ある"
-            "（piece は連続する shard に 1 本ずつ）"
+            f"Tensor '{name}': shard{repeated} holds two pieces of the same parent"
+            " (one piece per consecutive shard)"
         )
-    # count >= 2 と index の域は `parse_piece_key` が既に見ている（域外の綴りは piece と解釈
-    # されず、名前そのままの 1 本として運ばれる）。
+    # `parse_piece_key` already checked count >= 2 and the index range (an out-of-range spelling
+    # is not read as a piece and is carried as one tensor under its name as is).
     count = fragments[0].count
     if len(fragments) != count:
         raise LegacyFormatError(
-            f"テンソル '{name}': piece が {len(fragments)} 本で宣言の総数 {count} と合わない"
+            f"Tensor '{name}': {len(fragments)} pieces do not match the declared total {count}"
         )
     head = fragments[0].entry
     rows = 0
@@ -197,34 +216,34 @@ def _join_pieces(name: str, fragments: Sequence[_Fragment]) -> SourceTensor:
         entry = fragment.entry
         if fragment.count != count:
             raise LegacyFormatError(
-                f"テンソル '{name}': piece の総数が {count} と {fragment.count} で食い違っている"
+                f"Tensor '{name}': the piece totals disagree, {count} and {fragment.count}"
             )
         if fragment.index != position:
             raise LegacyFormatError(
-                f"テンソル '{name}': shard 順で {position} 本目の piece が index {fragment.index}"
-                "（index は shard 順に 1 から増える）"
+                f"Tensor '{name}': piece {position} in shard order has index {fragment.index}"
+                " (index rises from 1 in shard order)"
             )
         if previous is not None and fragment.shard != previous + 1:
             raise LegacyFormatError(
-                f"テンソル '{name}': piece {fragment.index} が shard[{fragment.shard}]・前の"
-                f" piece が shard[{previous}]（piece は連続する shard に 1 本ずつ）"
+                f"Tensor '{name}': piece {fragment.index} is in shard[{fragment.shard}], the"
+                f" previous piece in shard[{previous}] (one piece per consecutive shard)"
             )
         if entry.dtype != head.dtype:
             raise LegacyFormatError(
-                f"テンソル '{name}': piece {fragment.index} の dtype が {entry.dtype}"
-                f"（piece 1 は {head.dtype}）"
+                f"Tensor '{name}': the dtype of piece {fragment.index} is {entry.dtype}"
+                f" (piece 1 is {head.dtype})"
             )
         if entry.shape[1:] != head.shape[1:]:
             raise LegacyFormatError(
-                f"テンソル '{name}': piece {fragment.index} の残り次元 {list(entry.shape[1:])} が"
-                f" piece 1 の {list(head.shape[1:])} と違う"
+                f"Tensor '{name}': piece {fragment.index} has remaining dimensions"
+                f" {list(entry.shape[1:])}, which differ from piece 1's {list(head.shape[1:])}"
             )
         if not entry.shape or entry.shape[0] < 1:
-            raise LegacyFormatError(f"テンソル '{name}': piece {fragment.index} が 1 行未満")
+            raise LegacyFormatError(f"Tensor '{name}': piece {fragment.index} has fewer than 1 row")
         if position < count and entry.nbytes % 4:
             raise LegacyFormatError(
-                f"テンソル '{name}': 末尾でない piece {fragment.index} が {entry.nbytes} バイトで"
-                " 4 の倍数でない（読み手が親バッファへオフセット書きできない）"
+                f"Tensor '{name}': non-final piece {fragment.index} is {entry.nbytes} bytes, not"
+                " a multiple of 4 (the reader cannot write it at an offset into the parent buffer)"
             )
         rows += entry.shape[0]
         previous = fragment.shard
@@ -240,17 +259,18 @@ def _join_pieces(name: str, fragments: Sequence[_Fragment]) -> SourceTensor:
 
 
 def read_component(paths: Sequence[Path]) -> tuple[dict[str, str], dict[str, SourceTensor]]:
-    """旧コンポーネントの現物を読み、`(先頭 shard の __metadata__, 名前 → 現物)` を返す。
+    """Read the files of an old component and return `(__metadata__ of the first shard, name →
+    source tensor)`.
 
-    受けるのは**旧規則の配布形も含む**列（単一ファイル / fat グラフ shard / 尾部スラック）。
-    それでも「先頭だけが `karume_ir` を持つ」「同名テンソルが 2 本無い」は旧規則でも成り立って
-    いた不変条件なので、ここで見る（破れているものを移行すると、どちらのバイト列を配るかが
-    一意に決まらない）。
+    Accepted are sequences that **include distributions under the old rules** (single file / fat
+    graph shard / tail slack). Even so, "only the first shard has `karume_ir`" and "no two tensors
+    share a name" were invariants under the old rules too, so they are checked here (migrating
+    something that breaks them leaves it undetermined which byte sequence to distribute).
 
-    分割テンソル（piece キー）は**親 1 本へ畳む**（{@link _join_pieces} が旧読み手契約 5 を
-    検査する）。畳むのは形だけで判定する — 入力の `karume_ir` はまだ parse していないので
-    「親名が宣言に在るか」はここでは見ず、移行側の突合（`migrate._assert_tensor_cover`）が
-    余剰として落とす。
+    A split tensor (piece key) is **folded into its one parent** ({@link _join_pieces} checks old
+    reader contract 5). Folding is decided by shape alone — the input's `karume_ir` is not parsed
+    yet, so "is the parent name declared" is not checked here; the migration side's cross-check
+    (`migrate._assert_tensor_cover`) rejects it as surplus.
     """
     metadata: dict[str, str] = {}
     stored: dict[str, SourceTensor] = {}
@@ -258,7 +278,7 @@ def read_component(paths: Sequence[Path]) -> tuple[dict[str, str], dict[str, Sou
     owner: dict[str, Path] = {}
     for index, path in enumerate(paths):
         if not path.is_file():
-            raise LegacyFormatError(f"移行の入力が無い: {path}")
+            raise LegacyFormatError(f"Migration input does not exist: {path}")
         assert_reader_layout(path, allow_legacy_dtypes=True)
         header, data_start = _read_header(path)
         raw = _read_metadata(path, header)
@@ -266,15 +286,15 @@ def read_component(paths: Sequence[Path]) -> tuple[dict[str, str], dict[str, Sou
             metadata = raw
         elif raw:
             raise LegacyFormatError(
-                f"{path}: shard[{index}] が __metadata__ を持っている"
-                f"（{sorted(raw)} — メタデータを載せるのは先頭 shard だけ）"
+                f"{path}: shard[{index}] has __metadata__"
+                f" ({sorted(raw)} — only the first shard carries metadata)"
             )
         for name, spec in header.items():
             if name == "__metadata__":
                 continue
             if name in owner:
                 raise LegacyFormatError(
-                    f"テンソル '{name}' が {owner[name].name} と {path.name} に重複している"
+                    f"Tensor '{name}' is duplicated in {owner[name].name} and {path.name}"
                 )
             owner[name] = path
             begin, end = spec["data_offsets"]
@@ -299,22 +319,24 @@ def read_component(paths: Sequence[Path]) -> tuple[dict[str, str], dict[str, Sou
     for parent in sorted(fragments):
         if parent in stored:
             raise LegacyFormatError(
-                f"テンソル '{parent}' が丸ごとと piece の両方でコンテナに居る"
-                "（1 テンソルはどちらか一方 MUST）"
+                f"Tensor '{parent}' is in the container both whole and as pieces"
+                " (a tensor MUST be one or the other)"
             )
         stored[parent] = _join_pieces(parent, fragments[parent])
     if IR_METADATA_KEY not in metadata:
         raise LegacyFormatError(
-            f"{paths[0]}: __metadata__.{IR_METADATA_KEY} が無い（Karume の旧配布形ではない）"
+            f"{paths[0]}: __metadata__.{IR_METADATA_KEY} is missing (not an old Karume"
+            " distribution)"
         )
     return metadata, stored
 
 
 def _range_chunks(source: SourceTensor, begin: int, end: int) -> Iterator[bytes]:
-    """親の**バイト範囲** `[begin, end)` を読み出し単位ずつ流す（丸読みしない）。
+    """Stream the parent's **byte range** `[begin, end)` one read unit at a time (no whole read).
 
-    範囲は区間の列（= piece の並び）を跨いでよい — 旧形の切り目は移行後の block の切り目と
-    無関係なので、読み手は「親の連続バイト列」だけを見る。
+    The range may cross the sequence of ranges (= the order of the pieces) — the old form's cuts
+    are unrelated to the block cuts after migration, so the reader sees only "the parent's
+    contiguous byte sequence".
     """
     cursor = 0
     for path, offset, length in source.segments:
@@ -330,8 +352,8 @@ def _range_chunks(source: SourceTensor, begin: int, end: int) -> Iterator[bytes]
                 chunk = handle.read(min(_CHUNK_BYTES, remaining))
                 if not chunk:
                     raise LegacyFormatError(
-                        f"{path}: テンソル '{source.entry.name}' の宣言"
-                        f"（{source.entry.nbytes} バイト）に対しデータ節が途中で尽きた"
+                        f"{path}: the data section ran out partway through the declaration of"
+                        f" tensor '{source.entry.name}' ({source.entry.nbytes} bytes)"
                     )
                 remaining -= len(chunk)
                 yield chunk
@@ -339,5 +361,5 @@ def _range_chunks(source: SourceTensor, begin: int, end: int) -> Iterator[bytes]
 
 
 def payload_chunks(source: SourceTensor) -> Iterator[bytes]:
-    """1 本ぶん（親の全バイト）を読み出し単位ずつ流す。"""
+    """Stream one tensor (all bytes of the parent) one read unit at a time."""
     return _range_chunks(source, 0, source.entry.nbytes)

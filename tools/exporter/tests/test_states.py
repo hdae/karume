@@ -238,7 +238,7 @@ class TestSlidingWindow:
         """スロット契約（`window ≤ C`）との整合 — 数値容量なら宣言だけで決まる。"""
         spec = StateAttentionSpec(output="a", k_slot="l0.k", v_slot="l0.v", window=128, capacity=64)
 
-        with pytest.raises(OpContractError, match="スロット容量 64 を超える"):
+        with pytest.raises(OpContractError, match="exceeds the slot capacity 64"):
             checked(to_states_form(source(), plan(spec)))
 
 
@@ -267,7 +267,9 @@ class TestSharedSlots:
         """共有層は所有層の k/v 値テンソルをそのまま配線する — 別の値なら配線ミス。"""
         graph = parse_ir_graph(json.dumps(two_layer_dict(shared=False)))
 
-        with pytest.raises(StatesFormError, match=re.escape("へ書く値が読者ごとに違う")):
+        with pytest.raises(
+            StatesFormError, match=r"value written to slot '[^']*' differs between readers"
+        ):
             to_states_form(
                 graph, plan(SPEC, StateAttentionSpec(output="a1", k_slot="l0.k", v_slot="l0.v"))
             )
@@ -277,7 +279,9 @@ class TestSharedSlots:
         graph = parse_ir_graph(json.dumps(two_layer_dict()))
         shared = StateAttentionSpec(output="a1", k_slot="l0.k", v_slot="l0.v", capacity=128)
 
-        with pytest.raises(StatesFormError, match=re.escape("導出 shape が読者ごとに違う")):
+        with pytest.raises(
+            StatesFormError, match=re.escape("derived shape differs between readers")
+        ):
             to_states_form(graph, plan(SPEC, shared))
 
     def test_readers_disagreeing_on_the_window_are_rejected(self):
@@ -285,7 +289,7 @@ class TestSharedSlots:
         graph = parse_ir_graph(json.dumps(two_layer_dict()))
         shared = StateAttentionSpec(output="a1", k_slot="l0.k", v_slot="l0.v", window=32)
 
-        with pytest.raises(StatesFormError, match=re.escape("window が読者ごとに違う")):
+        with pytest.raises(StatesFormError, match=re.escape("window differs between readers")):
             to_states_form(graph, plan(SPEC, shared))
 
 
@@ -308,10 +312,10 @@ class TestCapacity:
     @pytest.mark.parametrize(
         ("capacity", "diagnosis"),
         [
-            (0, "次元 0 が正整数でない"),
-            (-1, "次元 -1 が非負整数でない"),
-            (True, "次元が数値でも文字列でもない"),
-            (1.5, "次元が数値でも文字列でもない"),
+            (0, "dimension 0 is not a positive integer"),
+            (-1, "dimension -1 is not a non-negative integer"),
+            (True, "dimension is neither a number nor a string"),
+            (1.5, "dimension is neither a number nor a string"),
         ],
     )
     def test_a_capacity_outside_the_value_range_is_caught_only_by_the_parser(
@@ -359,11 +363,11 @@ class TestCapacity:
 
 class TestRejectedSurgery:
     def test_an_unknown_target_is_rejected(self):
-        with pytest.raises(StatesFormError, match="この値を定義するノードがグラフに無い"):
+        with pytest.raises(StatesFormError, match="no node in the graph defines this value"):
             to_states_form(source(), plan(StateAttentionSpec("ghost", "l0.k", "l0.v")))
 
     def test_a_node_that_is_not_attention_is_rejected(self):
-        with pytest.raises(StatesFormError, match=re.escape("op が 'sym_prefix_slice'")):
+        with pytest.raises(StatesFormError, match=re.escape("op is 'sym_prefix_slice'")):
             to_states_form(source(), plan(StateAttentionSpec("mask", "l0.k", "l0.v")))
 
     def test_an_attention_without_a_mask_is_rejected(self):
@@ -371,25 +375,25 @@ class TestRejectedSurgery:
         nodes = [dict(node) for node in source_dict()["nodes"]]
         nodes[1] = {**nodes[1], "ins": ["q", "k", "v"]}
 
-        with pytest.raises(StatesFormError, match="入力が 3 本"):
+        with pytest.raises(StatesFormError, match="3 inputs"):
             to_states_form(source(nodes=nodes), plan(SPEC))
 
     def test_a_second_surgery_on_the_same_node_is_rejected(self):
         """二重手術は「今 step の k/v を 2 度書く」形になる（append も 2 本になる）。"""
         once = to_states_form(source(), plan(SPEC))
 
-        with pytest.raises(StatesFormError, match="すでに states 形"):
+        with pytest.raises(StatesFormError, match="already in the states form"):
             to_states_form(once, plan(SPEC))
 
     def test_a_capacity_symbol_colliding_with_an_existing_symbol_is_rejected(self):
         """入力由来の束縛を持つ記号を容量にも使うと、値 shape が容量で解けてしまう。"""
-        with pytest.raises(StatesFormError, match=re.escape("graph.symbols に既にある")):
+        with pytest.raises(StatesFormError, match=re.escape("is already in graph.symbols")):
             to_states_form(source(), plan(SPEC, capacity_symbol="T"))
 
     @pytest.mark.parametrize("symbol", ["q", "o"])
     def test_a_capacity_symbol_colliding_with_a_value_name_is_rejected(self, symbol):
         """記号の欄へ値名（入力 / ノード出力）を渡した取り違えを検出する。"""
-        with pytest.raises(StatesFormError, match="値名と同名"):
+        with pytest.raises(StatesFormError, match="same name as a value"):
             to_states_form(source(), plan(SPEC, capacity_symbol=symbol))
 
     @pytest.mark.parametrize("window", [0, -1, True, 1.5])
@@ -397,7 +401,7 @@ class TestRejectedSurgery:
         """bool は int の派生だが窓幅ではない（`True` が窓幅 1 として黙って通る）。"""
         spec = StateAttentionSpec(output="a", k_slot="l0.k", v_slot="l0.v", window=window)
 
-        with pytest.raises(StatesFormError, match="が正整数でない"):
+        with pytest.raises(StatesFormError, match="is not a positive integer"):
             to_states_form(source(), plan(spec))
 
     def test_an_input_orphaned_by_the_surgery_is_rejected(self):
@@ -406,7 +410,7 @@ class TestRejectedSurgery:
         nodes = [dict(node) for node in graph["nodes"]]
         nodes[1] = {**nodes[1], "ins": ["q", "k", "v", "m"]}
 
-        with pytest.raises(StatesFormError, match=re.escape("入力 ['m'] が到達不能")):
+        with pytest.raises(StatesFormError, match=re.escape("inputs ['m'] unreachable")):
             to_states_form(
                 source(inputs=[*graph["inputs"], _input("m", [1, 1, "T", "T"])], nodes=nodes),
                 plan(SPEC),
@@ -425,7 +429,7 @@ class TestTheOrderCheckIsEffective:
         graph["nodes"] = [nodes[1], nodes[0], *nodes[2:]]
         parsed = parse_ir_graph(json.dumps(graph))
 
-        with pytest.raises(IrError, match="より後に読者"):
+        with pytest.raises(IrError, match="is followed by reader"):
             assert_op_contracts(parsed)
 
 

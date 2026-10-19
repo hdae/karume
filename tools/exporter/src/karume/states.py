@@ -1,25 +1,30 @@
-"""torch.export 済みグラフを **states 形**（ADR 0067 決定 4 / 5 / 5b）へ書き換える手術。
+"""Graph surgery that rewrites a torch.export'ed graph into the **states form** (ADR 0067
+decisions 4 / 5 / 5b).
 
-torch.export は KV state を trace できない。recipe は「chunk 局所の causal self-attention」
-（attention が mask を第 4 入力に取る従来形）を export し、その IR をここで states 形
-（過去分は state スロット・今 step の k/v は `ins`）へ書き換える。**モデル非依存の機構**なので
-汎用 core に置く（Gemma 4 も MiniCPM5 も同じ手術を通る）。
+torch.export cannot trace KV state. A recipe exports "chunk-local causal self-attention" (the
+previous form, where attention takes a mask as its fourth input), and this module rewrites that IR
+into the states form (the past in state slots, this step's k/v in `ins`). It is a
+**model-independent mechanism**, so it lives in the generic core (Gemma 4 and MiniCPM5 go through
+the same surgery).
 
-手術は 3 操作:
+The surgery is three operations:
 
-1. **読み替え** — 対象 attention の mask 入力を落とし、`states` 欄 `{k, v}`（sliding なら
-   attrs `window` も）を付ける。causal は述語計算になるので mask tensor は要らなくなる。
-2. **書き込みの挿入** — スロット 1 本につき `state_append` を 1 本、**そのスロットの最後の
-   読者の直後**へ置く（ADR 0067 決定 5b の発行規約 = 全読者 → append）。
-3. **刈り込み** — `outputs` と `state_append` から到達しないノード・宣言を落とす。mask の
-   Tmax² 定数と `sym_prefix_slice`（ADR 0010 の定数畳み込みの結果）はここで死ぬ — 残すと
-   「誰も読まない Tmax² の f32」が配布物に居座る。
+1. **Reinterpretation** — drop the mask input of the target attention and attach the `states` field
+   `{k, v}` (plus attrs `window` for sliding). causal becomes a predicate computation, so the mask
+   tensor is no longer needed.
+2. **Inserting the writes** — one `state_append` per slot, placed **right after the last reader of
+   that slot** (the emission rule of ADR 0067 decision 5b = all readers → append).
+3. **Pruning** — drop the nodes and declarations not reachable from `outputs` and `state_append`.
+   The Tmax² mask constant and `sym_prefix_slice` (the result of the constant folding of ADR 0010)
+   die here — kept, "an f32 of Tmax² nobody reads" would sit in the distribution.
 
-MUST: **純関数**（入力 graph を変異させない）。手術前後の 2 本を同じ検証に掛けられないと、
-壊れた IR の出どころ（export か手術か）を切り分けられない。
+MUST: a **pure function** (does not mutate the input graph). Unless the graphs before and after the
+surgery can go through the same verification, the origin of a broken IR (export or surgery) cannot
+be told apart.
 
-NOTE: 結果の正しさの門は verify（states 検査・順序検査・shape 検査）で、本モジュールは
-**それを通る形を組み立てるだけ**。同じ規則をここへ写さない（二重管理にしない）。
+NOTE: the check of the result's correctness is verify (states check, order check, shape check);
+this module **only assembles a form that passes it**. The same rules are not copied here (no double
+bookkeeping).
 """
 
 from __future__ import annotations
@@ -32,25 +37,29 @@ from karume.ir import IrDim, IrGraph, IrNode, IrState
 from karume.ops import ATTENTION_OP, STATE_APPEND_OP
 from karume.shapes import declared_shape
 
-#: state スロットの dtype（ADR 0066 決定 2）。語彙の正本は `verify.STATE_DTYPES` で、f16 は
-#: 席だけの予約（追記 5）— 手術が作れるのは現に実行できる f32 スロットだけ。
+#: The state slot dtype (ADR 0066 decision 2). The source of truth for the vocabulary is
+#: `verify.STATE_DTYPES`, where f16 is only reserved (addendum 5) — the surgery can create only f32
+#: slots, which can actually run.
 _SLOT_DTYPE = "f32"
 
 
 class StatesFormError(ValueError):
-    """states 形への手術が成立しない（対象の取り違え・配線ミス・指定の誤り）。"""
+    """The surgery into the states form fails (a mixed-up target, a wiring mistake, a wrong
+    spec)."""
 
 
 @dataclass(frozen=True)
 class StateAttentionSpec:
-    """states 形へ書き換える attention 1 本の指定。
+    """The spec of one attention to rewrite into the states form.
 
-    `output` は対象ノードの `outs[0]` — SSA 単一代入なので、値名がそのままノードの一意識別子。
+    `output` is the target node's `outs[0]` — with SSA single assignment, the value name is itself
+    the node's unique identifier.
 
-    `window` は sliding の窓幅（`None` = 全 context — ADR 0067 決定 4 の省略可能 attrs）で、
-    `capacity` はスロット容量の**数値上書き**（`None` なら plan の容量記号を使う）。容量は
-    `createGenerationContext` が決める値なので記号が既定で、export 時定数に焼くのは
-    「容量が実行時に選べない」ことを承知した形（ADR 0066 決定 3）。
+    `window` is the sliding window width (`None` = the whole context — the optional attrs of ADR
+    0067 decision 4), and `capacity` is a **numeric override** of the slot capacity (`None` uses
+    the plan's capacity symbol). The capacity is a value `createGenerationContext` decides, so a
+    symbol is the default; baking it as an export-time constant is a form that accepts "the
+    capacity cannot be chosen at run time" (ADR 0066 decision 3).
     """
 
     output: str
@@ -62,7 +71,7 @@ class StateAttentionSpec:
 
 @dataclass(frozen=True)
 class StatesPlan:
-    """1 グラフぶんの手術指定（容量記号 + 対象 attention の並び）。"""
+    """The surgery spec for one graph (the capacity symbol + the target attentions in order)."""
 
     capacity_symbol: str
     attentions: tuple[StateAttentionSpec, ...]
@@ -70,11 +79,12 @@ class StatesPlan:
 
 @dataclass
 class _Slot:
-    """登録中の state スロット。
+    """A state slot being registered.
 
-    `source` は `state_append` の入力名（= 読者が k / v として受けている値）、`last_reader` は
-    **nodes 配列添字**で最後にこのスロットへ触れる読者。KV 共有層（同じスロットを複数の
-    attention が読む形）は 2 度目以降の登録で既存と突き合わせる。
+    `source` is the input name of `state_append` (= the value the readers receive as k / v), and
+    `last_reader` is the **nodes array index** of the last reader that touches this slot. KV-sharing
+    layers (several attentions reading the same slot) are matched against the existing entry on the
+    second and later registrations.
     """
 
     shape: list[IrDim]
@@ -84,10 +94,11 @@ class _Slot:
 
 
 def to_states_form(graph: IrGraph, plan: StatesPlan) -> IrGraph:
-    """従来形 attention のグラフを states 形へ書き換えた**新しいグラフ**を返す。
+    """Returns a **new graph** with the previous-form attentions of the graph rewritten into the
+    states form.
 
-    入力 `graph` は読むだけ（MUST — モジュール docstring）。返るグラフは states 節 +
-    `state_append` を持ち、mask の定数畳み込み残骸が刈られている。
+    The input `graph` is only read (MUST — module docstring). The returned graph has the states
+    section + `state_append`, with the constant-folding leftovers of the mask pruned.
     """
     nodes = list(graph.nodes)
     slots: dict[str, _Slot] = {}
@@ -98,7 +109,8 @@ def to_states_form(graph: IrGraph, plan: StatesPlan) -> IrGraph:
         _assert_convertible(node, where)
         window = _window(spec.window, where)
         capacity: IrDim = plan.capacity_symbol if spec.capacity is None else spec.capacity
-        # k / v の順で登録する（同着の append 並びがこの順になる — _with_appends）。
+        # Register in k / v order (appends at the same position are ordered this way —
+        # _with_appends).
         for slot_name, source in ((spec.k_slot, node.ins[1]), (spec.v_slot, node.ins[2])):
             candidate = _Slot(
                 shape=_slot_shape(graph, source, capacity, where),
@@ -112,7 +124,7 @@ def to_states_form(graph: IrGraph, plan: StatesPlan) -> IrGraph:
             attrs["window"] = window
         nodes[index] = IrNode(
             op=node.op,
-            # mask（第 4 入力）を落として q / k / v の 3 本にする。
+            # Drop the mask (fourth input), leaving the three q / k / v.
             ins=list(node.ins[:3]),
             outs=list(node.outs),
             attrs=attrs,
@@ -123,16 +135,18 @@ def to_states_form(graph: IrGraph, plan: StatesPlan) -> IrGraph:
 
 @dataclass(frozen=True)
 class ExternalAttentionSpec:
-    """**external states 形**（ADR 0096 段 2）へ書き換える attention 1 本の指定。
+    """The spec of one attention to rewrite into the **external states form** (ADR 0096 stage 2).
 
-    `output` は対象ノードの `outs[0]`（SSA 単一代入なのでノードの一意識別子）。`k_input` /
-    `v_input` は trace 用に置いた K / V の**グラフ入力名**で、手術はこの 2 本を落とす
-    （借り手は今 step の k/v を持たない — 過去だけを読む）。
+    `output` is the target node's `outs[0]` (with SSA single assignment, the node's unique
+    identifier). `k_input` / `v_input` are the **graph input names** of the K / V placed for
+    tracing, and the surgery drops these two (the borrower has no k/v for this step — it reads only
+    the past).
 
-    MUST: スロットの形は `kv_heads` / `head_dim` / `capacity` を**指定で受ける**（k/v 入力の
-    宣言 shape からは導かない）。外部スロットの実体は貸し手 context のもので、借り手の宣言は
-    「貸し手と一致していること」だけが正しさなので、trace 用の使い捨て placeholder の形に
-    引きずられてはならない（placeholder の T を小さくした日に宣言が黙って動く）。
+    MUST: the slot form **takes `kv_heads` / `head_dim` / `capacity` from the spec** (it is not
+    derived from the declared shapes of the k/v inputs). The external slot's storage belongs to the
+    lender context, and the borrower's declaration is correct only by "matching the lender", so it
+    must not follow the shape of a throwaway placeholder put in for tracing (the day the
+    placeholder's T is made smaller, the declaration would silently move).
     """
 
     output: str
@@ -142,32 +156,39 @@ class ExternalAttentionSpec:
     v_input: str
     kv_heads: int
     head_dim: int
-    #: スロット容量（数値、または plan の記号）。
+    #: The slot capacity (a number, or the plan's symbol).
     capacity: IrDim
     window: int | None = None
 
 
 @dataclass(frozen=True)
 class ExternalStatesPlan:
-    """1 グラフぶんの external 手術指定（容量記号 + 対象 attention の並び）。"""
+    """The external surgery spec for one graph (the capacity symbol + the target attentions in
+    order)."""
 
     capacity_symbol: str
     attentions: tuple[ExternalAttentionSpec, ...]
 
 
 def to_external_states_form(graph: IrGraph, plan: ExternalStatesPlan) -> IrGraph:
-    """従来形 attention のグラフを **external states 形**へ書き換えた新しいグラフを返す。
+    """Returns a new graph with the previous-form attentions of the graph rewritten into the
+    **external states form**.
 
-    `to_states_form` との差は 3 点だけで、規律（純関数・`_prune` の根・検査は verify）は同じ:
+    It differs from `to_states_form` in three points only, and the discipline (pure function, the
+    roots of `_prune`, checks in verify) is the same:
 
-    1. ノードは `ins=[q]` の **readonly 形**（`attrs.readonly = True`）になる。今 step の k / v も
-       mask も持たない — 借り手は貸し手のスロットの列 `[column_base, P)` だけを読む
-    2. `state_append` を**挿さない**（実体は貸し手のもの）。スロット宣言は `external: True`
-    3. 落とした k / v のグラフ入力は `_prune` の孤児入力拒否から外す（意図して落とす 2 本）
+    1. The node becomes the **readonly form** with `ins=[q]` (`attrs.readonly = True`). It has
+       neither this step's k / v nor a mask — the borrower reads only the columns
+       `[column_base, P)` of the lender's slots
+    2. **No** `state_append` is inserted (the storage belongs to the lender). The slot declaration
+       is `external: True`
+    3. The dropped k / v graph inputs are exempt from `_prune`'s orphan-input rejection (two inputs
+       dropped on purpose)
 
-    MUST: 入力 `graph` は読むだけ（純関数 — モジュール docstring）。
-    MUST: mask 入力（第 4 入力）は従来どおり落とす。借り手の q は 1 行で、bidirectional な
-    「全列を見る」形なので mask tensor に情報が無い（列の絞りは window と論理長が持つ）。
+    MUST: the input `graph` is only read (pure function — module docstring).
+    MUST: the mask input (fourth input) is dropped as before. The borrower's q is one row, in a
+    bidirectional "look at every column" form, so the mask tensor carries no information (the
+    column narrowing is held by window and the logical length).
     """
     nodes = list(graph.nodes)
     slots: dict[str, _Slot] = {}
@@ -178,8 +199,8 @@ def to_external_states_form(graph: IrGraph, plan: ExternalStatesPlan) -> IrGraph
         node = nodes[index]
         _assert_convertible(node, where)
         window = _window(spec.window, where)
-        # 添字は K = 1 / V = 2（`_assert_dropped_input` が個別に照合する — 集合で見ると
-        # K / V の取り違えが通る）。
+        # The indices are K = 1 / V = 2 (`_assert_dropped_input` matches each one separately —
+        # looking at a set would let a K / V mix-up through).
         for slot_name, source, kv_index in (
             (spec.k_slot, spec.k_input, 1),
             (spec.v_slot, spec.v_input, 2),
@@ -199,7 +220,7 @@ def to_external_states_form(graph: IrGraph, plan: ExternalStatesPlan) -> IrGraph
             attrs["window"] = window
         nodes[index] = IrNode(
             op=node.op,
-            # q だけを残す（今 step の k / v と mask を落とす）。
+            # Keep only q (drop this step's k / v and the mask).
             ins=[node.ins[0]],
             outs=list(node.outs),
             attrs=attrs,
@@ -218,90 +239,101 @@ def to_external_states_form(graph: IrGraph, plan: ExternalStatesPlan) -> IrGraph
 def _assert_dropped_input(
     graph: IrGraph, node: IrNode, source: str, index: int, where: str
 ) -> None:
-    """落とす k / v が**そのノードがその位置で実際に読んでいるグラフ入力**であることを見る。
+    """Checks that the k / v to drop is **the graph input that the node actually reads at that
+    position**.
 
-    `index` は期待する `ins` の添字（K = 1 / V = 2）。MUST: 添字ごとに**個別**に照合する
-    （集合 `{ins[1], ins[2]}` で見ると K に元 V・V に元 K を渡した取り違えが通り、同形なら
-    スロット登録まで成立して沈黙誤値になる — 借り手は貸し手の K スロットから V を読む形で走る）。
+    `index` is the expected index in `ins` (K = 1 / V = 2). MUST: match **each** index separately
+    (looking at the set `{ins[1], ins[2]}` lets through a mix-up that passes the original V as K and
+    the original K as V; with equal shapes even the slot registration succeeds and the result is a
+    silent wrong value — the borrower runs reading V from the lender's K slot).
 
-    MUST: グラフ入力であることも見る。入力でない名前の指定は「計算途中の値を入力扱いで落とす」
-    形で、`_prune` が読者ごと消すので出力の値だけが静かに変わる。
+    MUST: also check that it is a graph input. Naming something that is not an input "drops an
+    intermediate value as if it were an input"; `_prune` removes it together with its readers, so
+    only the output values change, silently.
     """
     role = {1: "k", 2: "v"}[index]
     if source != node.ins[index]:
         raise StatesFormError(
-            f"{where}: {role} に指定した '{source}' がこのノードの {role}"
-            f"（ins[{index}] = '{node.ins[index]}'）でない"
-            "（k は ins[1] / v は ins[2] ちょうど）"
+            f"{where}: {role} given as '{source}' is not this node's {role}"
+            f" (ins[{index}] = '{node.ins[index]}')"
+            " (k is exactly ins[1] / v is exactly ins[2])"
         )
     if not any(spec.name == source for spec in graph.inputs):
         raise StatesFormError(
-            f"{where}: 落とす k / v '{source}' がグラフ入力でない"
-            "（external 手術が落とせるのは trace 用に置いた入力だけ）"
+            f"{where}: k / v to drop '{source}' is not a graph input"
+            " (the external surgery can drop only inputs placed for tracing)"
         )
 
 
 def _target_index(nodes: Sequence[IrNode], output: str, where: str) -> int:
-    """`outs[0]` が `output` のノードの添字。"""
+    """The index of the node whose `outs[0]` is `output`."""
     for index, node in enumerate(nodes):
         if node.outs and node.outs[0] == output:
             return index
-    raise StatesFormError(f"{where}: この値を定義するノードがグラフに無い")
+    raise StatesFormError(f"{where}: no node in the graph defines this value")
 
 
 def _assert_convertible(node: IrNode, where: str) -> None:
-    """対象は**従来形の attention**（mask 込み 4 本・states 欄なし）ちょうど。
+    """The target is exactly a **previous-form attention** (four inputs including the mask, no
+    states field).
 
-    MUST: 3 点とも見る。op 違いは指定の取り違え、states 欄ありは二重手術（今 step の k/v を
-    2 度書く形になる）、`ins` 3 本は「mask を持たない export」（causal が別の形で表されている
-    = 手術の前提が崩れている）。
+    MUST: check all three points. A different op is a mixed-up spec, a states field means a double
+    surgery (it would write this step's k/v twice), and three `ins` mean "an export without a mask"
+    (causal is expressed in another form = the premise of the surgery is broken).
 
-    MUST: states 欄の検査を arity より**先**に置く。手術済みノードは `ins` が 3 本なので、
-    順序が逆だと二重手術が「mask を持たない export」と同じ診断に化ける。
+    MUST: put the states-field check **before** the arity check. A node that already went through
+    the surgery has three `ins`, so in the reverse order a double surgery would turn into the same
+    diagnostic as "an export without a mask".
     """
     if node.op != ATTENTION_OP:
-        raise StatesFormError(f"{where}: op が '{node.op}'（手術できるのは '{ATTENTION_OP}' だけ）")
+        raise StatesFormError(
+            f"{where}: op is '{node.op}' (only '{ATTENTION_OP}' can go through the surgery)"
+        )
     if node.states:
-        raise StatesFormError(f"{where}: すでに states 形（{node.states}）")
+        raise StatesFormError(f"{where}: already in the states form ({node.states})")
     if len(node.ins) != 4:
         raise StatesFormError(
-            f"{where}: 入力が {len(node.ins)} 本（mask 込みの 4 本 = q / k / v / mask のみ）"
+            f"{where}: {len(node.ins)} inputs (only the four including the mask = q / k / v / mask)"
         )
 
 
 def _window(window: int | None, where: str) -> int | None:
-    """sliding の窓幅（`None` = 全 context）。
+    """The sliding window width (`None` = the whole context).
 
-    MUST: bool を弾く。Python の bool は int の派生なので、`True` が窓幅 1 として黙って通る
-    （契約層の `_assert_integer_attr` と同じ規律）。
+    MUST: reject bool. Python's bool derives from int, so `True` would silently pass as a window
+    width of 1 (the same discipline as `_assert_integer_attr` in the contract layer).
     """
     if window is None:
         return None
     if isinstance(window, bool) or not isinstance(window, int) or window < 1:
-        raise StatesFormError(f"{where}: window {window!r} が正整数でない")
+        raise StatesFormError(f"{where}: window {window!r} is not a positive integer")
     return window
 
 
 def _slot_shape(graph: IrGraph, source: str, capacity: IrDim, where: str) -> list[IrDim]:
-    """今 step の k / v の宣言 `[B,Hkv,M,D]` → スロットの容量込み具体形 `[B,Hkv,C,D]`。
+    """The declaration `[B,Hkv,M,D]` of this step's k / v → the concrete slot shape including the
+    capacity, `[B,Hkv,C,D]`.
 
-    MUST: B / Hkv / D は**宣言から導く**（引数で受け取らない）。手術が独自に持つと、
-    スロットと ins の形一致（ADR 0067 決定 4 の②）が指定ミスで崩れうる。
+    MUST: B / Hkv / D are **derived from the declaration** (not taken as arguments). If the surgery
+    held its own values, the shape agreement between the slot and ins (② of ADR 0067 decision 4)
+    could break through a wrong spec.
     """
     shape = declared_shape(graph, source)
     if len(shape) != 4:
         raise StatesFormError(
-            f"{where}: '{source}' の宣言 shape {shape} が [B,Hkv,M,D] の rank-4 でない"
+            f"{where}: '{source}' declared shape {shape} is not rank-4 [B,Hkv,M,D]"
         )
     return [shape[0], shape[1], capacity, shape[3]]
 
 
 def _register(slots: dict[str, _Slot], name: str, candidate: _Slot, where: str) -> None:
-    """スロットを登録する（KV 共有層は同じ名前へ複数の読者が来る — ADR 0067 決定 4）。
+    """Registers a slot (KV-sharing layers bring several readers to the same name — ADR 0067
+    decision 4).
 
-    MUST: 2 度目以降は導出 shape（= B / Hkv / D / 容量）・`window`・append の入力名の
-    **完全一致**を要求する。共有層は所有層の k/v 値テンソルをそのまま `ins` へ配線する規約
-    なので、食い違いは配線ミスそのもの — 通すと 1 本のスロットへ別テンソルを書く形になる。
+    MUST: on the second and later registrations, require an **exact match** of the derived shape
+    (= B / Hkv / D / capacity), `window` and the append's input name. By convention a sharing layer
+    wires the owning layer's k/v value tensors into `ins` as they are, so a mismatch is itself a
+    wiring mistake — letting it through would write different tensors into one slot.
     """
     slot = slots.get(name)
     if slot is None:
@@ -309,28 +341,30 @@ def _register(slots: dict[str, _Slot], name: str, candidate: _Slot, where: str) 
         return
     if slot.shape != candidate.shape:
         raise StatesFormError(
-            f"{where}: スロット '{name}' の導出 shape が読者ごとに違う"
-            f"（{slot.shape} / {candidate.shape}）"
+            f"{where}: slot '{name}' derived shape differs between readers"
+            f" ({slot.shape} / {candidate.shape})"
         )
     if slot.window != candidate.window:
         raise StatesFormError(
-            f"{where}: スロット '{name}' の window が読者ごとに違う"
-            f"（{slot.window} / {candidate.window}）"
+            f"{where}: slot '{name}' window differs between readers"
+            f" ({slot.window} / {candidate.window})"
         )
     if slot.source != candidate.source:
         raise StatesFormError(
-            f"{where}: スロット '{name}' へ書く値が読者ごとに違う"
-            f"（'{slot.source}' / '{candidate.source}'）"
-            " — KV 共有層は所有層の k/v 値テンソルをそのまま ins へ配線する"
+            f"{where}: the value written to slot '{name}' differs between readers"
+            f" ('{slot.source}' / '{candidate.source}')"
+            " — a KV-sharing layer wires the owning layer's k/v value tensors into ins as they are"
         )
     slot.last_reader = max(slot.last_reader, candidate.last_reader)
 
 
 def _with_appends(nodes: Sequence[IrNode], slots: Mapping[str, _Slot]) -> list[IrNode]:
-    """`state_append` を**そのスロットの最後の読者の直後**へ挿す（ADR 0067 決定 5b の①）。
+    """Inserts `state_append` **right after the last reader of the slot** (① of ADR 0067 decision
+    5b).
 
-    同じ位置へ複数本が来たときは**スロットの登録順**（spec の並び × k → v）で並べる —
-    state effect の順序は nodes 配列順が契約そのものなので、決め方を dict の気分に預けない。
+    When several land at the same position, they are ordered by **slot registration order** (spec
+    order × k → v) — the nodes array order is itself the contract for the order of state effects, so
+    the choice is not left to the whims of a dict.
     """
     pending: dict[int, list[IrNode]] = {}
     for name, slot in slots.items():
@@ -343,11 +377,12 @@ def _with_appends(nodes: Sequence[IrNode], slots: Mapping[str, _Slot]) -> list[I
 
 
 def _append_node(name: str, slot: _Slot) -> IrNode:
-    """1 スロットぶんの `state_append`（出力 0 本の effect op — ADR 0067 決定 5）。
+    """The `state_append` for one slot (an effect op with zero outputs — ADR 0067 decision 5).
 
-    MUST: sliding スロットには読者と同じ `window` を宣言する。論理 col → 物理 row の写像は
-    読み書き同式 MUST（ADR 0067 決定 4）で、片側だけ落とすと沈黙誤読になる（宣言の食い違いは
-    verify._assert_state_order が落とす）。
+    MUST: declare the same `window` as the readers on a sliding slot. The logical col → physical row
+    mapping MUST use the same formula for reads and writes (ADR 0067 decision 4), and dropping it on
+    one side would be a silent misread (a mismatch in the declaration is rejected by
+    verify._assert_state_order).
     """
     return IrNode(
         op=STATE_APPEND_OP,
@@ -361,21 +396,26 @@ def _append_node(name: str, slot: _Slot) -> IrNode:
 def _symbols(
     graph: IrGraph, plan: StatesPlan | ExternalStatesPlan, slots: Mapping[str, _Slot]
 ) -> list[str]:
-    """容量記号は**いずれかのスロットが使うときだけ** `symbols` へ足す。
+    """The capacity symbol is added to `symbols` **only when some slot uses it**.
 
-    MUST: 衝突は fail loudly。既存記号との衝突は「入力から束縛される記号を容量としても使う」
-    形（値 shape が context 生成時の容量で解けてしまう — ADR 0066 追記 7 の分担が壊れる）で、
-    値名との衝突は記号の欄へテンソル名を渡した取り違え。
+    MUST: a collision fails loudly. A collision with an existing symbol is the form "a symbol bound
+    from the inputs is also used as the capacity" (value shapes would resolve with the capacity at
+    context creation — the split of ADR 0066 addendum 7 breaks), and a collision with a value name
+    is a mix-up that passed a tensor name into the symbol field.
     """
     symbol = plan.capacity_symbol
     if not any(slot.shape[2] == symbol for slot in slots.values()):
         return list(graph.symbols)
     if symbol in graph.symbols:
         raise StatesFormError(
-            f"容量記号 '{symbol}' が graph.symbols に既にある（入力由来の束縛と二重になる）"
+            f"Capacity symbol '{symbol}' is already in graph.symbols"
+            " (it would double the binding from the inputs)"
         )
     if symbol in graph.values or any(spec.name == symbol for spec in graph.inputs):
-        raise StatesFormError(f"容量記号 '{symbol}' が値名と同名（記号の欄へ値名を渡していないか）")
+        raise StatesFormError(
+            f"Capacity symbol '{symbol}' has the same name as a value"
+            " (was a value name passed into the symbol field?)"
+        )
     return [*graph.symbols, symbol]
 
 
@@ -388,20 +428,23 @@ def _prune(
     external: bool = False,
     droppable_inputs: Collection[str] = (),
 ) -> IrGraph:
-    """生きた値から到達しないノード・initializer・`values` 宣言を落とす。
+    """Drops the nodes, initializers and `values` declarations not reachable from live values.
 
-    根は `outputs` と**出力を持たないノード**（値を定義しない effect op = `state_append` —
-    ADR 0067 決定 5）。effect op を根に入れないとデータ辺だけの到達可能性で丸ごと消える。
-    nodes はトポロジカル順（verify._check_definitions が前方参照を拒否する）なので、逆順の
-    1 走査で live が確定し、残ったノードの**相対順はそのまま**保たれる。
+    The roots are `outputs` and **nodes without outputs** (effect ops that define no value =
+    `state_append` — ADR 0067 decision 5). Without the effect ops as roots, reachability over data
+    edges alone would remove them entirely. The nodes are in topological order
+    (verify._check_definitions rejects forward references), so one reverse pass settles liveness,
+    and the **relative order** of the remaining nodes is kept as is.
 
-    MUST: 到達不能になった `inputs` は fail loudly。手術が入力を孤児化するのは配線ミス
-    （mask をグラフ入力から作っている export など）で、通すと「呼び手は今までどおり値を渡すのに
-    どのノードも読まない」グラフになる — 検査も実行も通るので、誰も気づかない。
+    MUST: `inputs` that became unreachable fail loudly. A surgery that orphans an input is a wiring
+    mistake (an export that builds the mask from a graph input, for example); letting it through
+    gives a graph where "the caller passes values as before but no node reads them" — it passes both
+    the checks and execution, so nobody notices.
 
-    `droppable_inputs` は **意図して落とす入力**（external 手術の k / v placeholder — ADR 0096
-    段 2）。孤児拒否から外すと同時に `inputs` 宣言そのものからも消す。MUST: 落とした後も誰かが
-    読んでいる形は fail loudly — 宣言だけ消すと「未定義の名前を読むノード」が残る。
+    `droppable_inputs` are **inputs dropped on purpose** (the k / v placeholders of the external
+    surgery — ADR 0096 stage 2). They are exempt from the orphan rejection and are also removed
+    from the `inputs` declaration itself. MUST: a form where someone still reads them after the drop
+    fails loudly — removing only the declaration would leave "a node that reads an undefined name".
     """
     live_values = set(graph.outputs)
     live = [False] * len(nodes)
@@ -417,8 +460,9 @@ def _prune(
     still_read = sorted(name for name in dropped if name in live_values)
     if still_read:
         raise StatesFormError(
-            f"落とすはずの入力 {still_read} を手術後もどれかのノードが読んでいる"
-            "（宣言だけ消すと未定義参照になる）"
+            f"Inputs {still_read} that should be dropped are still read by some node"
+            " after the surgery"
+            " (removing only the declaration would leave an undefined reference)"
         )
     orphans = [
         spec.name
@@ -427,8 +471,8 @@ def _prune(
     ]
     if orphans:
         raise StatesFormError(
-            f"手術で入力 {orphans} が到達不能になった"
-            "（mask を入力から作っている形は states 形へ落とせない）"
+            f"The surgery made inputs {orphans} unreachable"
+            " (a form that builds the mask from an input cannot be lowered to the states form)"
         )
 
     defined = {out for node in kept for out in node.outs}
@@ -436,9 +480,10 @@ def _prune(
         name: initializer for name, initializer in graph.initializers.items() if name in live_values
     }
     inputs = [spec for spec in graph.inputs if spec.name not in dropped]
-    # MUST: 記号は残った束縛点（入力 shape と states shape の次元位置 — ADR 0066 追記 7）から
-    # 導き直す。落とした K / V だけが束縛していた記号を引き継ぐと、parser が「束縛が取れない」で
-    # 拒否するグラフを手術が作る。宣言順は元の並びのまま保つ。
+    # MUST: re-derive the symbols from the remaining binding points (the dimension positions of
+    # the input shapes and the states shapes — ADR 0066 addendum 7). Carrying over a symbol that
+    # only the dropped K / V bound would make the surgery produce a graph the parser rejects with
+    # "cannot be bound". The declaration order stays as in the original.
     bound = {
         parse_dim(dim).sym
         for shape in [*(spec.shape for spec in inputs), *(slot.shape for slot in slots.values())]
