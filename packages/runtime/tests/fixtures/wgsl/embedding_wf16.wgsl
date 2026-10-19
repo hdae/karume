@@ -1,4 +1,4 @@
-// karume embedding (out[..., h] = weight[index[...], h], f32 / index i32, 重み f16 格納)
+// karume embedding (out[..., h] = weight[index[...], h], f32 / index i32, f16 weight storage)
 struct Dims {
   n: u32,
   hidden: u32,

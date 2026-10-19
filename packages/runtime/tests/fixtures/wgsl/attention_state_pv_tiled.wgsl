@@ -1,4 +1,4 @@
-// karume attention_state_pv (states-shaped O = P @ V, P = exp(S − m)·inv not materialised, f32, shared V row tiles of the GEMM skeleton, レジスタ 16x16 タイル / 1 スレッド 1x4 / wg 4x16)
+// karume attention_state_pv (states-shaped O = P @ V, P = exp(S − m)·inv not materialised, f32, shared V row tiles of the GEMM skeleton, register tile 16x16 / 1x4 per thread / wg 4x16)
 struct Lengths {
   past: u32,
   query: u32,

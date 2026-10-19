@@ -176,12 +176,12 @@ const assertPolicy = (policy: SubmitPolicy): void => {
   for (const key of ["initialChunkSize", "minChunkSize", "maxChunkSize"] as const) {
     const value = policy[key];
     if (!Number.isInteger(value) || value < 1) {
-      throw new SubmitPolicyError(`SubmitPolicy.${key} は 1 以上の整数である必要がある: ${value}`);
+      throw new SubmitPolicyError(`SubmitPolicy.${key} must be an integer >= 1: ${value}`);
     }
   }
   if (policy.minChunkSize > policy.maxChunkSize) {
     throw new SubmitPolicyError(
-      `SubmitPolicy.minChunkSize (${policy.minChunkSize}) が maxChunkSize (${policy.maxChunkSize}) を超えている`,
+      `SubmitPolicy.minChunkSize (${policy.minChunkSize}) exceeds maxChunkSize (${policy.maxChunkSize})`,
     );
   }
   if (
@@ -189,12 +189,12 @@ const assertPolicy = (policy: SubmitPolicy): void => {
     policy.initialChunkSize > policy.maxChunkSize
   ) {
     throw new SubmitPolicyError(
-      `SubmitPolicy.initialChunkSize (${policy.initialChunkSize}) が [${policy.minChunkSize}, ${policy.maxChunkSize}] の外にある`,
+      `SubmitPolicy.initialChunkSize (${policy.initialChunkSize}) is outside [${policy.minChunkSize}, ${policy.maxChunkSize}]`,
     );
   }
   if (!(policy.timeBudgetMs > 0) || !Number.isFinite(policy.timeBudgetMs)) {
     throw new SubmitPolicyError(
-      `SubmitPolicy.timeBudgetMs は正の有限値である必要がある: ${policy.timeBudgetMs}`,
+      `SubmitPolicy.timeBudgetMs must be a positive finite number: ${policy.timeBudgetMs}`,
     );
   }
 };
@@ -590,12 +590,12 @@ export class SubmitScheduler {
     // The default policy (1024 → 2048 queries = exactly the limit) passes.
     if (this.#timingEnabled && owned.maxChunkSize * 2 > MAX_TIMESTAMP_QUERIES) {
       throw new SubmitPolicyError(
-        `GPU 時間計測が有効な device では SubmitPolicy.maxChunkSize (${owned.maxChunkSize}) が ` +
-          `querySet 容量を超える（query ${
+        `On a device with GPU timing enabled, SubmitPolicy.maxChunkSize (${owned.maxChunkSize}) ` +
+          `exceeds the querySet capacity (${
             owned.maxChunkSize * 2
-          } 件 > ${MAX_TIMESTAMP_QUERIES}）。` +
-          `maxChunkSize を ${MAX_TIMESTAMP_QUERIES / 2} 以下にするか、gpuTiming: false で` +
-          "計測を切ること",
+          } queries > ${MAX_TIMESTAMP_QUERIES}). ` +
+          `Set maxChunkSize to ${MAX_TIMESTAMP_QUERIES / 2} or less, or set gpuTiming: false` +
+          " to turn timing off",
       );
     }
   }
@@ -703,7 +703,7 @@ export class SubmitScheduler {
     const oldest = this.#markers[0];
     if (oldest === undefined || this.#markers.length <= IN_FLIGHT_MAX_MARKERS) return undefined;
     this.#submitChunk();
-    return this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(oldest.work, "送り込みの先行の上限の待ち");
+    return this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(oldest.work, "in-flight submit bound wait");
   }
 
   /**
@@ -1054,10 +1054,10 @@ export class SubmitScheduler {
     const count = dispatches.length * 2;
     if (count > MAX_TIMESTAMP_QUERIES) {
       throw new SubmitPolicyError(
-        `GPU 時間計測の querySet 容量を超えた（dispatch ${dispatches.length} 件 = query ${count} 件 > ` +
-          `${MAX_TIMESTAMP_QUERIES}）。SubmitPolicy.maxChunkSize を ${
+        `GPU timing querySet capacity exceeded (${dispatches.length} dispatches = ${count} queries > ` +
+          `${MAX_TIMESTAMP_QUERIES}). Set SubmitPolicy.maxChunkSize to ${
             MAX_TIMESTAMP_QUERIES / 2
-          } 以下にするか、gpuTiming: false で計測を切ること`,
+          } or less, or set gpuTiming: false to turn timing off`,
       );
     }
     const byteLength = count * TIMESTAMP_BYTES;
@@ -1143,7 +1143,7 @@ export class SubmitScheduler {
       // as readback).
       await this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(
         Promise.all(pending.map((item) => item.readBuffer.mapAsync(MAP_MODE.READ))),
-        "timestamp の回収",
+        "timestamp collection",
       );
       for (const item of pending) {
         // Read entirely within the synchronous section, so no copy is needed (the view is valid

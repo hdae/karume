@@ -60,10 +60,14 @@ import { BUFFER_USAGE } from "./webgpu-constants.ts";
  */
 export const probePieces = (bytes: number, maxBufferSize: number): number[] => {
   if (!Number.isSafeInteger(bytes) || bytes < 0) {
-    throw new RangeError(`試し確保のバイト数は 0 以上の安全な整数（受け取った値: ${bytes}）`);
+    throw new RangeError(
+      `Headroom probe byte count must be a safe integer >= 0 (received: ${bytes})`,
+    );
   }
   if (!Number.isSafeInteger(maxBufferSize) || maxBufferSize < 4) {
-    throw new RangeError(`maxBufferSize が 4 未満か整数でない（受け取った値: ${maxBufferSize}）`);
+    throw new RangeError(
+      `maxBufferSize is less than 4 or not an integer (received: ${maxBufferSize})`,
+    );
   }
   if (bytes === 0) return [];
   let count = Math.ceil(bytes / maxBufferSize);
@@ -110,12 +114,12 @@ export const fitsHeadroom = async (gpu: GpuContext, bytes: number): Promise<bool
     for (const probe of probes) probe.destroy();
     throw cause;
   }
-  const failure = await popFailureScopes(device, "空きの試し確保");
+  const failure = await popFailureScopes(device, "headroom probe");
   for (const probe of probes) probe.destroy();
   // Settle the release (poll). On an already invalidated device this becomes GpuDeviceLostError.
   await gpu[RUNTIME_INTERNAL].raceDeviceLost(
     device.queue.onSubmittedWorkDone(),
-    "空きの試し確保の後始末",
+    "headroom probe cleanup",
   );
   if (failure === undefined) return true;
   if (failure instanceof GpuOutOfMemoryError) return false;

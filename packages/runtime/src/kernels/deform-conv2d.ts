@@ -245,7 +245,8 @@ export const deformConv2dParams = (dims: DeformConv2dDims): Uint32Array<ArrayBuf
     ["kernel_w", dims.kernelW],
   ];
   for (const [name, value] of positive) {
-    if (value < 1) throw new CodegenError(`deform_conv2d params: ${name} は正整数（${value}）`);
+    if (value < 1)
+      throw new CodegenError(`deform_conv2d params: ${name} must be a positive integer (${value})`);
   }
   const n = dims.batch * dims.channelsOut * dims.heightOut * dims.widthOut;
   assertU32Params("deform_conv2d params", { n });

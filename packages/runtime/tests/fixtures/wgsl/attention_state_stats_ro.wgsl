@@ -1,4 +1,4 @@
-// karume attention_state_stats (states-form row statistics m = amax(S) and inv = 1/Σexp(S - m), f32, readonly = past のみ)
+// karume attention_state_stats (states-form row statistics m = amax(S) and inv = 1/Σexp(S - m), f32, readonly = past only)
 struct Params {
   batch_heads: u32,
   rows_block: u32,

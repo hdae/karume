@@ -1,4 +1,4 @@
-// karume conv1d (x[B,Cin,L] * W[Cout,Cin,K] + b[Cout], f32, 重み i4 格納, implicit GEMM レジスタ 64x128 タイル / 1 スレッド 8x8 / wg 16x8)
+// karume conv1d (x[B,Cin,L] * W[Cout,Cin,K] + b[Cout], f32, i4 weight storage, implicit GEMM register tile 64x128 / 8x8 per thread / wg 16x8)
 struct Dims {
   m: u32,
   n: u32,

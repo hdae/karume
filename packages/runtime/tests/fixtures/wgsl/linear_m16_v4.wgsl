@@ -1,4 +1,4 @@
-// karume linear (x[m,k] · wᵀ[k,n] + bias[n], f32, レジスタ 16x16 タイル / 1 スレッド 1x4 / wg 4x16 + vec4)
+// karume linear (x[m,k] · wᵀ[k,n] + bias[n], f32, register tile 16x16 / 1x4 per thread / wg 4x16 + vec4)
 struct Dims {
   m: u32,
   n: u32,

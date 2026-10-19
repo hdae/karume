@@ -88,19 +88,19 @@ export const maskedFillParams = (
 ): Uint32Array<ArrayBuffer> => {
   if (outShape.length < 1 || outShape.length > STRIDED_RANK) {
     throw new CodegenError(
-      `masked_fill params: 出力の rank ${outShape.length} は 1..${STRIDED_RANK} の外`,
+      `masked_fill params: output rank ${outShape.length} is outside 1..${STRIDED_RANK}`,
     );
   }
   if (maskStrides.length !== outShape.length) {
     throw new CodegenError(
-      `masked_fill params: mask の stride 本数 ${maskStrides.length} が出力 rank ${outShape.length} と違う`,
+      `masked_fill params: mask stride count ${maskStrides.length} differs from output rank ${outShape.length}`,
     );
   }
   // MUST: the finiteness test is done **as an f32** (`1e39`, finite in f64, becomes `+Inf` as an
   // f32 word, and a non-finite value would be written to an output that specified "a finite fill
   // value" — the same check as the contract layer).
   if (!Number.isFinite(Math.fround(value))) {
-    throw new CodegenError(`masked_fill params: 埋め値が f32 として有限でない（${value}）`);
+    throw new CodegenError(`masked_fill params: fill value is not finite as f32 (${value})`);
   }
   const n = outShape.reduce((count, dim) => count * dim, 1);
   assertU32Params("masked_fill params", {

@@ -1,4 +1,4 @@
-// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P = exp(S − m)·inv not materialised, f32, GQA（v は kv-head へ整数除算で写す）, レジスタ 128x128 タイル / 1 スレッド 8x8 / wg 16x16)
+// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P = exp(S − m)·inv not materialised, f32, GQA (v is mapped to the kv-head by integer division), register tile 128x128 / 8x8 per thread / wg 16x16)
 struct Dims {
   m: u32,
   n: u32,

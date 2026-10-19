@@ -62,7 +62,7 @@ export const STORAGE_USAGE = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST | BUFF
  */
 export const toSizeClass = (bytes: number): number => {
   if (!Number.isSafeInteger(bytes) || bytes < 0) {
-    throw new ArenaError(`確保サイズは 0 以上の安全整数である必要がある: ${bytes}`);
+    throw new ArenaError(`Allocation size must be a safe integer >= 0: ${bytes}`);
   }
   return Math.max(4, Math.ceil(bytes / 4) * 4);
 };
@@ -144,7 +144,7 @@ export class RunArena {
   allocHostWritten(bytes: number, usage: number): GPUBuffer {
     this.#assertUsable();
     if ((usage & BUFFER_USAGE.COPY_DST) === 0) {
-      throw new ArenaError("writeBuffer で書くバッファには COPY_DST が必要");
+      throw new ArenaError("A buffer written with writeBuffer requires COPY_DST");
     }
     const buffer = this.#device.createBuffer({ size: toSizeClass(bytes), usage });
     this.#owned.push(buffer);
@@ -234,7 +234,7 @@ export class RunArena {
     // Allocation after destroy creates "a buffer that is never destroyed" (it escapes the owned
     // list), so it is refused.
     if (this.#destroying !== undefined) {
-      throw new ArenaError("破棄済みの RunArena は使えない（run ごとに作り直す）");
+      throw new ArenaError("A destroyed RunArena cannot be used (create a new one for each run)");
     }
   }
 }

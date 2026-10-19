@@ -125,13 +125,15 @@ export const linearGemvUnit = (storage: WeightStorage): number => {
   if (storage === "f32") return 4;
   // Unreachable; this line exists to turn a missing step for a newly added storage red at compile time.
   const unhandled: never = storage;
-  throw new CodegenError(`linear_gemv: 未処理の重み格納: ${JSON.stringify(unhandled)}`);
+  throw new CodegenError(`linear_gemv: unhandled weight storage: ${JSON.stringify(unhandled)}`);
 };
 
 /** f16 / bf16 / f32 are accepted at M=1 only. Do not widen them implicitly to the row block. */
 const assertRowsStorage = (storage: WeightStorage): void => {
   if (storage === "f16" || storage === "bf16" || storage === "f32") {
-    throw new CodegenError(`linear_gemv: ${storage} 格納の行ブロックは未対応（M=1 変種のみ）`);
+    throw new CodegenError(
+      `linear_gemv: row blocks are not supported for ${storage} storage (M=1 variant only)`,
+    );
   }
 };
 
@@ -247,10 +249,10 @@ export const linearGemvRowsForShape = (
 ): number => {
   assertRowsStorage(storage);
   if (!Number.isSafeInteger(m) || m < 1 || m > LINEAR_GEMV_MAX_ROWS) {
-    throw new CodegenError(`linear_gemv: 行数 ${m} は 1..${LINEAR_GEMV_MAX_ROWS} の外`);
+    throw new CodegenError(`linear_gemv: row count ${m} is outside 1..${LINEAR_GEMV_MAX_ROWS}`);
   }
   if (!Number.isSafeInteger(n) || n < 1) {
-    throw new CodegenError(`linear_gemv: 列数 ${n} は正整数でない`);
+    throw new CodegenError(`linear_gemv: column count ${n} is not a positive integer`);
   }
   const cap = ROWS_ELEMENTS_PER_WORD_CAP / linearGemvUnit(storage);
   let rows = 1;
@@ -277,10 +279,10 @@ export const defaultLinearGemvRowsVariant = (
 const assertVariant = (variant: LinearGemvVariant): void => {
   const { cols, unroll } = variant;
   if (!Number.isSafeInteger(cols) || cols < 1 || cols > MAX_THREADS) {
-    throw new CodegenError(`linear_gemv: cols は 1..${MAX_THREADS} の整数（${cols}）`);
+    throw new CodegenError(`linear_gemv: cols must be an integer in 1..${MAX_THREADS} (${cols})`);
   }
   if (!Number.isSafeInteger(unroll) || unroll < 1) {
-    throw new CodegenError(`linear_gemv: unroll は正整数（${unroll}）`);
+    throw new CodegenError(`linear_gemv: unroll must be a positive integer (${unroll})`);
   }
 };
 
@@ -288,7 +290,9 @@ const assertRowsVariant = (variant: LinearGemvRowsVariant): void => {
   assertVariant(variant);
   const { rows } = variant;
   if (!Number.isSafeInteger(rows) || rows < 1 || rows > LINEAR_GEMV_MAX_ROWS) {
-    throw new CodegenError(`linear_gemv: rows は 1..${LINEAR_GEMV_MAX_ROWS} の整数（${rows}）`);
+    throw new CodegenError(
+      `linear_gemv: rows must be an integer in 1..${LINEAR_GEMV_MAX_ROWS} (${rows})`,
+    );
   }
 };
 
@@ -311,8 +315,8 @@ const gemvGroupShift = (
   if (groupSize === undefined) return shift;
   if (shift === undefined || groupSize < unit) {
     throw new CodegenError(
-      `linear_gemv: group_size ${groupSize} が ${unit} 以上の 2 冪でない` +
-        `（1 語 = ${unit} 要素が group を跨ぐ）`,
+      `linear_gemv: group_size ${groupSize} is not a power of two that is at least ${unit}` +
+        ` (1 word = ${unit} elements would cross a group)`,
     );
   }
   return shift;
@@ -343,16 +347,22 @@ export const linearGemvParams = (
   const unit = linearGemvUnit(storage);
   gemvGroupShift(storage, groupSize);
   if ((storage === "f16" || storage === "bf16" || storage === "f32") && m !== 1) {
-    throw new CodegenError(`linear_gemv params: ${storage} 格納は m=1 のみ（${m}）`);
+    throw new CodegenError(`linear_gemv params: ${storage} storage supports only m=1 (${m})`);
   }
   if (!Number.isSafeInteger(m) || m < 1 || m > LINEAR_GEMV_MAX_ROWS) {
-    throw new CodegenError(`linear_gemv params: m は 1..${LINEAR_GEMV_MAX_ROWS} の整数（${m}）`);
+    throw new CodegenError(
+      `linear_gemv params: m must be an integer in 1..${LINEAR_GEMV_MAX_ROWS} (${m})`,
+    );
   }
   if (!Number.isSafeInteger(k) || k < 0 || k % unit !== 0) {
-    throw new CodegenError(`linear_gemv params: k は ${unit} の倍数の非負整数（${k}）`);
+    throw new CodegenError(
+      `linear_gemv params: k must be a non-negative integer multiple of ${unit} (${k})`,
+    );
   }
   if (groupSize !== undefined && k % groupSize !== 0) {
-    throw new CodegenError(`linear_gemv params: k=${k} が group_size ${groupSize} で割り切れない`);
+    throw new CodegenError(
+      `linear_gemv params: k=${k} is not divisible by group_size ${groupSize}`,
+    );
   }
   return gemmParams("linear", m, n, k);
 };
@@ -1075,7 +1085,7 @@ export const linearGemvStaticQuantizeParams = (
   scale: number,
   group?: number,
 ): Uint32Array<ArrayBuffer> => {
-  if (m < 1 || m > 8) throw new CodegenError("linear static_quantize: mは1..8のみ対応");
+  if (m < 1 || m > 8) throw new CodegenError("linear static_quantize: supports only m in 1..8");
   assertRowsStorage(storage);
   const params = new Uint32Array(264);
   params.set(linearGemvParams(storage, m, n, k, group));
@@ -1141,7 +1151,7 @@ export const linearGemvStaticQuantizePackedWgsl = (
 const activationScaleBits = (scale: number): number => {
   if (!Number.isFinite(scale) || scale <= 0 || Math.fround(scale) !== scale) {
     throw new CodegenError(
-      `linear_gemv packed: 活性 scale ${scale} は正・有限で厳密に f32 表現できる値が必要`,
+      `linear_gemv packed: activation scale ${scale} must be positive, finite and exactly representable as f32`,
     );
   }
   const scratch = new Float32Array(1);
@@ -1214,7 +1224,7 @@ const parallelWgsl = (
   packed = false,
 ): string => {
   if (![2, 4, 8, 16, 32].includes(lanes)) {
-    throw new CodegenError("linear_gemv_parallel: 不正なlane数");
+    throw new CodegenError("linear_gemv_parallel: invalid lane count");
   }
   assertRowsStorage(storage);
   const unit = linearGemvUnit(storage);
@@ -1222,7 +1232,7 @@ const parallelWgsl = (
   // MUST: `x_scale` is the **last member** of Dims (the packed variant's params add one word at
   // this position).
   return `// karume linear gemv K parallel (${storage}, ${lanes} lanes/output${
-    packed ? ", packed int8 活性" : ""
+    packed ? ", packed int8 activations" : ""
   })
 struct Dims {
   m: u32,
@@ -1287,7 +1297,7 @@ export const linearGemvSubgroupWgsl = (
   lanes: LinearGemvParallelLanes,
 ): string => {
   if (![2, 4, 8, 16, 32].includes(lanes)) {
-    throw new CodegenError("linear_gemv_parallel: 不正なlane数");
+    throw new CodegenError("linear_gemv_parallel: invalid lane count");
   }
   assertRowsStorage(storage);
   const unit = linearGemvUnit(storage);

@@ -32,8 +32,8 @@ export const assertI32Coordinates = (
   for (const [name, value] of Object.entries(values)) {
     if (value > I32_MAX) {
       throw new CodegenError(
-        `${where}: ${name} ${value} が i32 の上限 2^31 − 1 を超える` +
-          "（GPU の座標演算は i32 — 折り返した座標は例外を出さずに誤値を返す）",
+        `${where}: ${name} ${value} exceeds the i32 maximum 2^31 − 1` +
+          " (GPU coordinate arithmetic is i32 — a wrapped coordinate returns a wrong value without an exception)",
       );
     }
   }
@@ -58,7 +58,9 @@ export const assertConvAxisExtent = (
   length: number,
   padding: number,
 ): void => {
-  assertI32Coordinates(where, { [`軸 ${axis} の入力長 + 2·padding`]: length + 2 * padding });
+  assertI32Coordinates(where, {
+    [`input length of axis ${axis} + 2·padding`]: length + 2 * padding,
+  });
 };
 
 /**
@@ -79,8 +81,8 @@ export const assertConvFlatExtents = (
   extents: { readonly input: number; readonly output: number; readonly weight: number },
 ): void => {
   assertU32Params(where, {
-    入力の要素数: extents.input,
-    出力の要素数: extents.output,
-    重みの要素数: extents.weight,
+    "input element count": extents.input,
+    "output element count": extents.output,
+    "weight element count": extents.weight,
   });
 };

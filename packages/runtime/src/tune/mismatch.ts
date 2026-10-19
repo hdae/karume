@@ -44,13 +44,13 @@ export const geometryProfileMismatch = (
 ): string | undefined => {
   const { provenance } = profile;
   if (provenance === undefined) {
-    return `表 '${profile.id}' に provenance が無い（照合の材料が無い — 手書きの表か、掃引から作っていない表）`;
+    return `Table '${profile.id}' has no provenance (nothing to match against — a hand-written table or one not made from sweeps)`;
   }
   for (const field of ADAPTER_FIELDS) {
     if (provenance.adapter[field] !== adapterInfo[field]) {
-      return `表 '${profile.id}' の adapter の ${field} が違う（表 ${JSON.stringify(
+      return `Table '${profile.id}': adapter ${field} differs (table ${JSON.stringify(
         provenance.adapter[field],
-      )} / この adapter ${JSON.stringify(adapterInfo[field])} — 別の機か別の adapter で作った表）`;
+      )} / this adapter ${JSON.stringify(adapterInfo[field])} — a table made on another machine or another adapter)`;
     }
   }
   let kernels: string;
@@ -61,21 +61,21 @@ export const geometryProfileMismatch = (
     // that would fail Session construction if applied, so return it as a mismatch instead of
     // throwing (other exceptions are implementation errors and propagate as is)
     if (cause instanceof KernelsIdError) {
-      return `表 '${profile.id}' の幾何から掃引の shape のカーネルを組めない（${cause.message}）`;
+      return `Table '${profile.id}': its geometry cannot build the kernels of the sweep shapes (${cause.message})`;
     }
     throw cause;
   }
   if (kernels !== provenance.kernels) {
     return (
-      `表 '${profile.id}' のカーネルの指紋が違う（表 ${provenance.kernels} / 今の runtime ${kernels}` +
-      " — runtime の更新で表か既定の幾何のカーネルが変わった）"
+      `Table '${profile.id}': kernel fingerprint differs (table ${provenance.kernels} / current runtime ${kernels}` +
+      " — a runtime update changed the kernels of the table or of the default geometry)"
     );
   }
   const caseSet = sweepCaseSetId();
   if (caseSet !== provenance.caseSet) {
     return (
-      `表 '${profile.id}' のケース集合の版が違う（表 ${provenance.caseSet} / 今の runtime ${caseSet}` +
-      " — runtime の更新で掃引のケースか gemmRows の段の境界が変わった）"
+      `Table '${profile.id}': case-set version differs (table ${provenance.caseSet} / current runtime ${caseSet}` +
+      " — a runtime update changed the sweep cases or the gemmRows bucket bounds)"
     );
   }
   return undefined;

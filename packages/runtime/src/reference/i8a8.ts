@@ -131,12 +131,14 @@ export const quantizeRowsReference = (
     ["dim", dim],
   ] as const) {
     if (!Number.isSafeInteger(value) || value < 0) {
-      throw new I8a8Error(`行量子化の参照: ${name}=${value} が非負の整数でない`);
+      throw new I8a8Error(
+        `row quantization reference: ${name}=${value} is not a non-negative integer`,
+      );
     }
   }
   if (x.length !== rows * dim) {
     throw new I8a8Error(
-      `行量子化の参照: 要素数 ${x.length} が rows × dim = ${rows * dim} と合わない`,
+      `row quantization reference: element count ${x.length} does not match rows × dim = ${rows * dim}`,
     );
   }
   const q = new Int8Array(rows * dim);
@@ -264,7 +266,7 @@ export const referenceLinearW4a8 = (input: LinearW4a8Input): Float32Array<ArrayB
   // through non-integer activation and weight indices even when groups is an integer; a negative
   // one (k=4, g=-2) runs the group loop 0 times and silently returns bias.
   if (!Number.isSafeInteger(groupSize) || groupSize < 1) {
-    throw new I8a8Error(`w4a8 参照: group 長 ${groupSize} が正の整数でない`);
+    throw new I8a8Error(`w4a8 reference: group length ${groupSize} is not a positive integer`);
   }
   const groups = k / groupSize;
   // MUST: fail before the comparison. With a `k` that leaves a remainder, the group loop adds the
@@ -273,7 +275,7 @@ export const referenceLinearW4a8 = (input: LinearW4a8Input): Float32Array<ArrayB
   // number", and the check that claims atol=0 loses its meaning.
   if (!Number.isSafeInteger(groups)) {
     throw new I8a8Error(
-      `w4a8 参照: k=${k} が group 長 ${groupSize} で割り切れない（K 方向の量子化軸）`,
+      `w4a8 reference: k=${k} is not divisible by group length ${groupSize} (the quantization axis along K)`,
     );
   }
   const { q, scale } = quantizeRowsReference(x, m, k);

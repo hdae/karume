@@ -39,8 +39,18 @@ const VALUES: readonly (readonly [string, number])[] = [
 describe("正規化の params: eps", () => {
   it("非ゼロの subnormal（2^-149 と最大の subnormal）を layer_norm / rms_norm とも拒否する", () => {
     for (const eps of [F32_MIN_SUBNORMAL, F32_MAX_SUBNORMAL]) {
-      assertThrows(() => layerNormParams(4, 8, eps), CodegenError, "正規数", `layer_norm ${eps}`);
-      assertThrows(() => rmsNormParams(4, 8, eps), CodegenError, "正規数", `rms_norm ${eps}`);
+      assertThrows(
+        () => layerNormParams(4, 8, eps),
+        CodegenError,
+        "normal number",
+        `layer_norm ${eps}`,
+      );
+      assertThrows(
+        () => rmsNormParams(4, 8, eps),
+        CodegenError,
+        "normal number",
+        `rms_norm ${eps}`,
+      );
     }
   });
 

@@ -94,7 +94,7 @@ export const canonicalJson = (value: unknown): string => {
     if (Number.isFinite(value)) return JSON.stringify(value);
     if (value === Number.POSITIVE_INFINITY) return INFINITY_JSON;
     if (value === Number.NEGATIVE_INFINITY) return `-${INFINITY_JSON}`;
-    throw new Error("正規の JSON: NaN は書けない");
+    throw new Error("Canonical JSON: NaN cannot be written");
   }
   if (value === null || typeof value === "string" || typeof value === "boolean") {
     return JSON.stringify(value);
@@ -108,7 +108,7 @@ export const canonicalJson = (value: unknown): string => {
       .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
       .join(",")}}`;
   }
-  throw new Error(`正規の JSON: ${typeof value} の値は書けない`);
+  throw new Error(`Canonical JSON: a value of type ${typeof value} cannot be written`);
 };
 
 /**
@@ -133,9 +133,9 @@ export class KernelsIdError extends Error {
  * the device's limit can still fail).
  */
 const LIMIT_NOTE =
-  `指紋は device に依らないよう、WebGPU が全 device に保証する ` +
-  `maxComputeWorkgroupsPerDimension の既定値 ${FINGERPRINT_WORKGROUP_LIMIT} で dispatch を組む — ` +
-  "上限の大きい device の掃引を通った幾何でも、この数を超える表は指紋を導けない";
+  `to keep the fingerprint independent of the device, dispatches are built with the default ` +
+  `maxComputeWorkgroupsPerDimension ${FINGERPRINT_WORKGROUP_LIMIT} that WebGPU guarantees on every device — ` +
+  "a table that exceeds this count yields no fingerprint, even if its geometry passed the sweep on a device with a larger limit";
 
 /**
  * Turns a codegen exception from `build` into a {@link KernelsIdError} that names `where` (other
@@ -169,7 +169,7 @@ const profileSlot = (profile: GeometryProfile, sweepCase: SweepCase): ProfileSlo
     case "matmul":
     case "bmm":
       return {
-        field: `gemmRows の M ${sweepCase.m} の段`,
+        field: `gemmRows bucket for M ${sweepCase.m}`,
         candidate: gemmCandidate(gemmRowsGeometry(profile, sweepCase.m)),
       };
     case "attention":
@@ -276,21 +276,24 @@ export const profileKernelsId = (
   const lines: string[] = [];
   for (const sweepCase of cases) {
     const slot = naming(
-      () => `表 '${profile.id}' のケース ${sweepCase.id} に当てる欄`,
+      () => `Table '${profile.id}', field for case ${sweepCase.id}`,
       () => profileSlot(profile, sweepCase),
     );
     for (const dp4a of dp4aVariants(sweepCase)) {
       const plan = planner(sweepCase, FINGERPRINT_WORKGROUP_LIMIT, dp4a);
       const roles = [
-        { field: `表 '${profile.id}' の ${slot.field}`, candidate: slot.candidate },
-        { field: "既定の幾何（case plan の defaultCandidate）", candidate: plan.defaultCandidate },
+        { field: `table '${profile.id}', ${slot.field}`, candidate: slot.candidate },
+        {
+          field: "default geometry (defaultCandidate of the case plan)",
+          candidate: plan.defaultCandidate,
+        },
       ];
       for (const { field, candidate } of roles) {
         const launch = naming(
           () =>
-            `ケース ${sweepCase.id} で ${field} の幾何 ${candidate.name} ${JSON.stringify(
+            `Case ${sweepCase.id}, ${field}: cannot build the dispatch of geometry ${candidate.name} ${JSON.stringify(
               candidate.geometry,
-            )} の dispatch を組めない`,
+            )}`,
           () => plan.launch(candidate),
         );
         lines.push(launchLine(launch));
@@ -360,12 +363,14 @@ export const candidateKernelsId = (
     if (row.error !== undefined) continue;
     const sweepCase = byId.get(row.caseId);
     if (sweepCase === undefined) {
-      throw new KernelsIdError(`測った行のケース ${row.caseId} が今の runtime の形状表に無い`);
+      throw new KernelsIdError(
+        `Case ${row.caseId} of a measured row is not in the current runtime's shape table`,
+      );
     }
     const plan =
       plans.get(sweepCase.id) ??
       naming(
-        () => `ケース ${sweepCase.id} の case plan を組めない`,
+        () => `Cannot build the case plan of case ${sweepCase.id}`,
         () => planner(sweepCase, FINGERPRINT_WORKGROUP_LIMIT, dp4a),
       );
     plans.set(sweepCase.id, plan);
@@ -379,9 +384,9 @@ export const candidateKernelsId = (
           : gemmCandidate(row.geometryParams);
     const launch = naming(
       () =>
-        `ケース ${sweepCase.id} で測った幾何 ${candidate.name} ${JSON.stringify(
+        `Case ${sweepCase.id}: cannot build the dispatch of measured geometry ${candidate.name} ${JSON.stringify(
           candidate.geometry,
-        )} の dispatch を組めない`,
+        )}`,
       () => plan.launch(candidate),
     );
     lines.push(launchLine(launch));
@@ -458,7 +463,9 @@ const caseSetFields = (sweepCase: SweepCase): Record<string, unknown> =>
   Object.fromEntries(
     Object.entries(sweepCase).filter(([field]) => {
       if (!isSweepCaseField(field)) {
-        throw new Error(`ケース ${sweepCase.id}: 欄 ${field} の分類が無い（CASE_SET_FIELDS）`);
+        throw new Error(
+          `Case ${sweepCase.id}: field ${field} has no classification (CASE_SET_FIELDS)`,
+        );
       }
       return CASE_SET_FIELDS[field];
     }),

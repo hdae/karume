@@ -162,14 +162,14 @@ export const layerNormParams = (
 ): Uint32Array<ArrayBuffer> => {
   assertU32Params("layer_norm params", { rows, dim });
   if (dim < 1) {
-    throw new CodegenError(`layer_norm params: dim は正整数（${dim}）`);
+    throw new CodegenError(`layer_norm params: dim must be a positive integer (${dim})`);
   }
   // The test is shared with the op contract (assertEps in ops/attrs.ts) — so that neither side
   // alone lets a subnormal through.
   const defect = f32EpsDefect(eps);
   if (defect !== undefined) {
     throw new CodegenError(
-      `layer_norm params: eps は f32 として有限の正数で、正規数（2^-126 以上）に丸まる値（${eps}・${defect}）`,
+      `layer_norm params: eps must be a finite positive f32 value that rounds to a normal number (at least 2^-126) (${eps}, ${defect})`,
     );
   }
   const params = new Uint32Array(4);

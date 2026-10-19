@@ -91,7 +91,7 @@ export type GruScanDirection = "forward" | "reverse";
 
 const canonicalizeDirection = (direction: GruScanDirection): GruScanDirection => {
   if (direction === "forward" || direction === "reverse") return direction;
-  throw new CodegenError(`gru_scan codegen: 走査方向が不正（${direction}）`);
+  throw new CodegenError(`gru_scan codegen: invalid scan direction (${direction})`);
 };
 
 /**
@@ -226,11 +226,11 @@ export const gruScanParams = (dims: GruScanDims): Uint32Array<ArrayBuffer> => {
   const { time, batch, hidden } = dims;
   assertU32Params("gru_scan params", { time, batch });
   if (!Number.isSafeInteger(hidden) || hidden < 1) {
-    throw new CodegenError(`gru_scan params: hidden は正整数（${hidden}）`);
+    throw new CodegenError(`gru_scan params: hidden must be a positive integer (${hidden})`);
   }
   if (hidden > GRU_SCAN_MAX_HIDDEN) {
     throw new CodegenError(
-      `gru_scan params: hidden ${hidden} が上限 ${GRU_SCAN_MAX_HIDDEN} を超える（1 lane = 1 隠れユニットの割り当て — ADR 0056 決定 5）`,
+      `gru_scan params: hidden ${hidden} exceeds the limit ${GRU_SCAN_MAX_HIDDEN} (1 lane = 1 hidden unit — ADR 0056 decision 5)`,
     );
   }
   return new Uint32Array([time, batch, hidden, 0]);

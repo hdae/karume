@@ -528,11 +528,11 @@ describe("Wan の text_encoder の差し替え（手元の配布形 — 越境�
     const error = await assertRejects(
       () => WanPipeline.fromPretrained(wan.source, BASE_OPTIONS),
       Error,
-      `${rig.parts.umt5[0].path} の事前取得に失敗した（repo ${UMT5_REPO} @ ${UMT5_REVISION}）`,
+      `${rig.parts.umt5[0].path}: prefetch failed (repo ${UMT5_REPO} @ ${UMT5_REVISION})`,
     );
     // 取得層は取得元の案内を cause に残す（hub の local.ts — 隣のディレクトリを推測しない）。
     assertInstanceOf(error.cause, Error);
-    assertStringIncludes(error.cause.message, `repo '${UMT5_REPO}' の越境先が無い`);
+    assertStringIncludes(error.cause.message, `no cross-repo target for repo '${UMT5_REPO}'`);
     assertStringIncludes(error.cause.message, "crossRepo");
     // 越境先の part は Wan の取得元から読もうとしていない（隣を推測しない）。
     for (const part of rig.parts.umt5) {

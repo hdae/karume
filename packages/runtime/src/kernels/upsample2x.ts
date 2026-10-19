@@ -63,9 +63,11 @@ fn main(
  */
 export const upsample2xParams = (n: number, width: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("upsample2x params", { n, width });
-  if (width === 0) throw new CodegenError("upsample2x params: width は 1 以上");
+  if (width === 0) throw new CodegenError("upsample2x params: width must be at least 1");
   if (n % width !== 0) {
-    throw new CodegenError(`upsample2x params: n ${n} が width ${width} の整数行でない`);
+    throw new CodegenError(
+      `upsample2x params: n ${n} is not a whole number of rows of width ${width}`,
+    );
   }
   const outWidth = width * 2;
   const outN = n * 4;

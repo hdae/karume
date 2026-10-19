@@ -128,26 +128,26 @@ const isSweepOp = (value: string): value is SweepOp =>
 const planSweep = (options: GeometrySweepOptions): SweepPlan => {
   const candidateSet = options.candidateSet ?? DEFAULT_CANDIDATE_SET;
   if (!isCandidateSet(candidateSet)) {
-    throw new Error(`候補集合 ${candidateSet} は ${CANDIDATE_SETS.join(" / ")} のどれでもない`);
+    throw new Error(`Candidate set ${candidateSet} is none of ${CANDIDATE_SETS.join(" / ")}`);
   }
   const ops = options.ops ?? SWEEP_OPS;
   const unknownOp = ops.find((op) => !isSweepOp(op));
   if (unknownOp !== undefined) {
-    throw new Error(`op ${unknownOp} は ${SWEEP_OPS.join(" / ")} のどれでもない`);
+    throw new Error(`op ${unknownOp} is none of ${SWEEP_OPS.join(" / ")}`);
   }
   const caseIds = options.cases ?? [];
   const unknownCase = caseIds.find((id) => !SWEEP_CASES.some((sweepCase) => sweepCase.id === id));
-  if (unknownCase !== undefined) throw new Error(`ケース ${unknownCase} が形状表に無い`);
+  if (unknownCase !== undefined) throw new Error(`Case ${unknownCase} is not in the shape table`);
   const rounds = options.rounds ?? ROUNDS;
   if (!Number.isInteger(rounds) || rounds < 1) {
-    throw new Error(`rounds は 1 以上の整数（${rounds}）`);
+    throw new Error(`rounds must be an integer of at least 1 (${rounds})`);
   }
   const cases = SWEEP_CASES.filter(
     (sweepCase) =>
       ops.includes(sweepCase.op) && (caseIds.length === 0 || caseIds.includes(sweepCase.id)),
   );
   if (cases.length === 0) {
-    throw new Error(`op [${ops.join(", ")}] とケース [${caseIds.join(", ")}] に合うケースが無い`);
+    throw new Error(`No case matches op [${ops.join(", ")}] and cases [${caseIds.join(", ")}]`);
   }
   return { candidateSet, ops, caseIds, rounds, cases };
 };

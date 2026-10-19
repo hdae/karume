@@ -118,16 +118,16 @@ export const TOPK_CORE_LIMIT_MAX_K = 63;
  * the shape rule in src/ops/shapes.ts).
  */
 export const assertTopkK = (k: number, storageLimitBytes: number, where: string): void => {
-  assertU32Params(`${where} の topk`, { k });
+  assertU32Params(`${where} topk`, { k });
   if (k < 1) {
-    throw new CodegenError(`${where}: topk の k は正整数（${k}）`);
+    throw new CodegenError(`${where}: topk k must be a positive integer (${k})`);
   }
   const max = topkMaxK(storageLimitBytes);
   if (k > max) {
     throw new CodegenError(
-      `${where}: topk の k=${k} が実装上限 ${max} を超える（workgroup storage ${topkWorkgroupStorageBytes(
+      `${where}: topk k=${k} exceeds the implementation limit ${max} (workgroup storage needs ${topkWorkgroupStorageBytes(
         k,
-      )} バイトが要るが device 上限は ${storageLimitBytes} バイト・1 行 ${TOPK_WORKGROUP_SIZE} レーン）`,
+      )} bytes but the device limit is ${storageLimitBytes} bytes, ${TOPK_WORKGROUP_SIZE} lanes per row)`,
     );
   }
 };
@@ -249,7 +249,7 @@ fn main(
 export const topkParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("topk params", { rows, dim });
   if (dim < 1) {
-    throw new CodegenError(`topk params: dim は正整数（${dim}）`);
+    throw new CodegenError(`topk params: dim must be a positive integer (${dim})`);
   }
   const params = new Uint32Array(4);
   params[0] = rows;

@@ -1,4 +1,4 @@
-// karume state_append (this step's k / v into the state slot, f32, sliding window のリング書込み)
+// karume state_append (this step's k / v into the state slot, f32, ring write of the sliding window)
 struct Params {
   kv_planes: u32,
   chunk_rows: u32,

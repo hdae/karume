@@ -47,7 +47,10 @@ test("assertU32Params の文言はパラメタ名と値を含む（どの欄が�
     () => assertU32Params("rope params", { n: 4, sequence: U32_MAX + 1 }),
     CodegenError,
   );
-  assertEquals(error.message, "rope params: sequence は u32 の非負整数（4294967296）");
+  assertEquals(
+    error.message,
+    "rope params: sequence must be a non-negative u32 integer (4294967296)",
+  );
 });
 
 test("gatherParams は u32 を超える要素数を narrowing せずに落とす", () => {

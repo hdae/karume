@@ -228,7 +228,7 @@ type GpuContextInternals = {
 export const assertDeviceUsable = (gpu: GpuContext, where: string): void => {
   if (gpu.destroyRequested || gpu.lost !== undefined) {
     throw new GpuDeviceLostError(
-      `${where}: device が失われた（device を取り直して作り直すこと）` +
+      `${where}: device was lost (re-acquire the device and rebuild)` +
         describeDeviceLoss(gpu.lost),
     );
   }
@@ -474,7 +474,7 @@ export class GpuContext {
       unsubscribe = this.onLost((info) => {
         reject(
           new GpuDeviceLostError(
-            `${where} 中に device が失われた（再構築が必要）${describeDeviceLoss(info)}`,
+            `The device was lost during ${where} (rebuild required)${describeDeviceLoss(info)}`,
           ),
         );
       });
@@ -521,10 +521,10 @@ export class GpuContext {
    * entrance).
    */
   async createResident(byteLength: number, label = "resident"): Promise<ResidentTensor> {
-    assertDeviceUsable(this, `resident '${label}' の確保`);
+    assertDeviceUsable(this, `resident '${label}' allocation`);
     if (!Number.isInteger(byteLength) || byteLength <= 0 || byteLength % 4 !== 0) {
       throw new ResidentTensorError(
-        `resident '${label}': byteLength は 4 の倍数の正の整数である必要がある: ${byteLength}`,
+        `resident '${label}': byteLength must be a positive integer multiple of 4: ${byteLength}`,
       );
     }
     // MUST: no await between the push and the issue of the pop (the ground for preventing
@@ -538,7 +538,7 @@ export class GpuContext {
       await discardFailureScopes(this.device);
       throw cause;
     }
-    const failure = await popFailureScopes(this.device, `resident '${label}' の確保`);
+    const failure = await popFailureScopes(this.device, `resident '${label}' allocation`);
     if (failure !== undefined) {
       buffer.destroy();
       throw failure;
@@ -549,7 +549,7 @@ export class GpuContext {
     // allocation, and the failure point would shift to the first write / read (the same shape as
     // the check after the pop in `BatchScope.finish`).
     try {
-      assertDeviceUsable(this, `resident '${label}' の確保`);
+      assertDeviceUsable(this, `resident '${label}' allocation`);
     } catch (cause) {
       buffer.destroy();
       throw cause;
@@ -593,12 +593,12 @@ export class GpuContext {
    * while waiting for an earlier section to release the lock is not visible at the entrance).
    */
   async beginBatch(): Promise<BatchScope> {
-    assertDeviceUsable(this, "batch の開始");
+    assertDeviceUsable(this, "batch start");
     if (this.gpuTimingEnabled) {
       throw new BatchScopeError(
-        "gpuTiming が有効な device では batch を開けない（1 dispatch = 1 pass に開いた " +
-          "timestamp が flush まで回収されず、batch の間 run 数ぶん溜まる）。" +
-          "GPU 時間内訳は通常の run で計測すること",
+        "Cannot open a batch on a device with gpuTiming enabled (the timestamps opened per pass at 1 dispatch = 1 pass " +
+          "are not collected until flush and pile up by the number of runs during the batch). " +
+          "Measure the GPU time breakdown with ordinary runs",
       );
     }
     const batch = new BatchScope(this);
@@ -735,37 +735,37 @@ export class ResidentTensor {
       id,
       owner: gpu,
       retainBaked: () => {
-        this.#assertUsable("焼き込み");
+        this.#assertUsable("baking");
         this.#bakedRefs += 1;
       },
       releaseBaked: () => {
         if (this.#bakedRefs === 0) {
           throw new ResidentTensorError(
-            `resident '${this.label}': 焼き込み参照の解放が過多（ランタイム内部の簿記の破れ）`,
+            `resident '${this.label}': too many releases of baked references (the runtime's internal bookkeeping is broken)`,
           );
         }
         this.#bakedRefs -= 1;
       },
       retainBound: () => {
-        this.#assertUsable("束縛");
+        this.#assertUsable("binding");
         this.#boundRefs += 1;
       },
       releaseBound: () => {
         if (this.#boundRefs === 0) {
           throw new ResidentTensorError(
-            `resident '${this.label}': 束縛予約の解放が過多（ランタイム内部の簿記の破れ）`,
+            `resident '${this.label}': too many releases of binding reservations (the runtime's internal bookkeeping is broken)`,
           );
         }
         this.#boundRefs -= 1;
       },
       retainUse: () => {
-        this.#assertUsable("使用");
+        this.#assertUsable("use");
         this.#useRefs += 1;
       },
       releaseUse: () => {
         if (this.#useRefs === 0) {
           throw new ResidentTensorError(
-            `resident '${this.label}': 使用予約の解放が過多（ランタイム内部の簿記の破れ）`,
+            `resident '${this.label}': too many releases of use reservations (the runtime's internal bookkeeping is broken)`,
           );
         }
         this.#useRefs -= 1;
@@ -823,10 +823,10 @@ export class ResidentTensor {
    */
   write(data: ResidentData): void {
     this.#assertUsable("write");
-    assertDeviceUsable(this.#gpu, `resident '${this.label}' の write`);
+    assertDeviceUsable(this.#gpu, `resident '${this.label}' write`);
     if (data.byteLength !== this.byteLength) {
       throw new ResidentTensorError(
-        `resident '${this.label}': write のバイト数 ${data.byteLength} が確保 ${this.byteLength} と合わない`,
+        `resident '${this.label}': write byte count ${data.byteLength} does not match the allocation ${this.byteLength}`,
       );
     }
     this.#gpu.device.queue.writeBuffer(this.#buffer, 0, data);
@@ -849,7 +849,7 @@ export class ResidentTensor {
   async read(): Promise<ArrayBuffer> {
     this.#assertUsable("read");
     const device = this.#gpu.device;
-    const where = `resident '${this.label}' の読み戻し`;
+    const where = `resident '${this.label}' readback`;
     assertDeviceUsable(this.#gpu, where);
     // MUST: wrap copy → submit in the errorScope pair as well. Neither a validation failure such as
     // a missing COPY_SRC nor a failed staging allocation becomes an exception, and the readback
@@ -909,23 +909,23 @@ export class ResidentTensor {
     if (this.#disposed) return;
     if (this.#bakedRefs > 0) {
       throw new ResidentTensorError(
-        `resident '${this.label}': 焼き込み bind group から参照中（${this.#bakedRefs} 本）のため破棄できない。` +
-          "参照している Session を dispose するか、別 signature の run / enqueue で backing を切り替えること",
+        `resident '${this.label}': referenced by baked bind groups (${this.#bakedRefs} references), so it cannot be disposed. ` +
+          "Dispose the Session that references it, or switch the backing with a run / enqueue of another signature",
       );
     }
     if (this.#boundRefs > 0) {
       throw new ResidentTensorError(
-        `resident '${this.label}': 進行中の run が入力として束縛中（${this.#boundRefs} 本）のため破棄できない。` +
-          "その run の完了を await してから破棄すること",
+        `resident '${this.label}': bound as an input by an in-progress run (${this.#boundRefs} bindings), so it cannot be disposed. ` +
+          "Await the completion of that run before disposing it",
       );
     }
     // Checked after baking and binding (both name a window narrower than this one, so as a
     // diagnostic it is closer to the cause for them to come out first).
     if (this.#useRefs > 0) {
       throw new ResidentTensorError(
-        `resident '${this.label}': 発行済みの run / enqueue が入力または写し先として使用中` +
-          `（${this.#useRefs} 本）のため破棄できない。` +
-          "その run / enqueue の決着を await してから破棄すること",
+        `resident '${this.label}': in use as an input or a copy destination by an issued run / enqueue` +
+          ` (${this.#useRefs} uses), so it cannot be disposed. ` +
+          "Await the settlement of that run / enqueue before disposing it",
       );
     }
     this.#disposed = true;
@@ -939,7 +939,7 @@ export class ResidentTensor {
   #assertUsable(where: string): void {
     if (this.#disposed) {
       throw new ResidentTensorError(
-        `resident '${this.label}': 破棄済みの常駐テンソルは使えない（${where}）`,
+        `resident '${this.label}': a disposed resident tensor cannot be used (${where})`,
       );
     }
   }
@@ -1144,7 +1144,7 @@ export class BatchScope {
         // the section lock on a lost device and make later sections wait until the user's finish. A
         // throw makes the catch below reject the beginBatch wait and return the lock without
         // waiting for hold.
-        assertDeviceUsable(gpu, "batch の開始");
+        assertDeviceUsable(gpu, "batch start");
         pushFailureScopes(gpu.device);
       } catch (cause) {
         // MUST: always tell the beginBatch wait that opening failed (otherwise it hangs).
@@ -1171,7 +1171,7 @@ export class BatchScope {
       const checkFailureScopes = async (): Promise<void> => {
         const pending = popFailureScopes(
           device,
-          this.#readbackBytes() === 0 ? "batch のエンコード" : "batch のエンコードと読み戻し",
+          this.#readbackBytes() === 0 ? "batch encoding" : "batch encoding and readback",
         );
         popped = true;
         const failure = await pending;
@@ -1202,7 +1202,7 @@ export class BatchScope {
           for (const read of this.#graphReads) read.result = [];
           await gpu[RUNTIME_INTERNAL].raceDeviceLost(
             device.queue.onSubmittedWorkDone(),
-            "batch の完了",
+            "batch completion",
           );
           fenced = true;
         }
@@ -1229,7 +1229,7 @@ export class BatchScope {
         // (docs/research 2026-08-16-device-lost-wait-settlement), so without checking here a finish
         // that crossed a loss would return a success and be misread as "the section closed
         // cleanly".
-        assertDeviceUsable(gpu, "batch の完了");
+        assertDeviceUsable(gpu, "batch completion");
       }
       return outputs;
     });
@@ -1259,22 +1259,24 @@ export class BatchScope {
       assertReadAtFinish: (sources) => this.#assertGraphReadAcceptable(sources),
       enter: (owner) => {
         if (owner !== this.#gpu) {
-          throw new BatchScopeError("別の GpuContext で開いた batch には enqueue できない");
+          throw new BatchScopeError("Cannot enqueue into a batch opened on another GpuContext");
         }
         if (this.#finished) {
-          throw new BatchScopeError("finish() 済みの batch には enqueue できない");
+          throw new BatchScopeError("Cannot enqueue into a batch after finish()");
         }
         if (this.#settling) {
           throw new BatchScopeError(
-            "settle() の途中の batch には enqueue できない（窓を閉じる前に submit が混ざると、" +
-              "フェンスが待っていない dispatch まで実測に入って推定が過小 = チャンクが TDR 域へ膨らむ）",
+            "Cannot enqueue into a batch in the middle of settle() (a submit mixed in before the window closes " +
+              "puts dispatches the fence did not wait for into the observed time, and the estimate comes out too small = the chunks swell into the TDR range)",
           );
         }
         this.#leases += 1;
       },
       leave: (failure) => {
         if (this.#leases === 0) {
-          throw new BatchScopeError("batch の in-flight リースの返却が過多（内部の簿記の破れ）");
+          throw new BatchScopeError(
+            "Too many returns of batch in-flight leases (internal bookkeeping is broken)",
+          );
         }
         // MUST: record before resolving `#drained` (the section body joins the pop after that
         // resolution).
@@ -1314,12 +1316,12 @@ export class BatchScope {
    * finish.
    */
   async settle(): Promise<void> {
-    if (this.#finished) throw new BatchScopeError("finish() 済みの batch では settle() できない");
-    if (this.#settling) throw new BatchScopeError("settle() を重ねて呼べない");
+    if (this.#finished) throw new BatchScopeError("Cannot settle() a batch after finish()");
+    if (this.#settling) throw new BatchScopeError("settle() calls cannot overlap");
     if (this.#leases > 0) {
       throw new BatchScopeError(
-        `in-flight の enqueue が ${this.#leases} 本ある batch では settle() できない` +
-          "（enqueue を await してから呼ぶこと）",
+        `Cannot settle() a batch with ${this.#leases} in-flight enqueues` +
+          " (await the enqueues before calling it)",
       );
     }
     this.#settling = true;
@@ -1327,7 +1329,7 @@ export class BatchScope {
       for (const member of this.#members) member.submitPending();
       await this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(
         this.#gpu.device.queue.onSubmittedWorkDone(),
-        "batch の途中決着",
+        "batch intermediate settlement",
       );
       for (const member of this.#members) member.closeMeasurementWindowAfterFence();
     } finally {
@@ -1369,7 +1371,7 @@ export class BatchScope {
       // the same rejection even to a legitimate finish() after awaiting settle).
       return Promise.reject(
         new BatchScopeError(
-          "settle() の途中の batch は finish() できない（settle() を await してから閉じること）",
+          "Cannot finish() a batch in the middle of settle() (await settle() before closing it)",
         ),
       );
     }
@@ -1407,7 +1409,7 @@ export class BatchScope {
     const retained: ResidentTensor[] = [];
     try {
       this.#assertReadbackAcceptable();
-      assertDeviceUsable(this.#gpu, "batch の読み戻し");
+      assertDeviceUsable(this.#gpu, "batch readback");
       const entries = Object.entries(outputs);
       // MUST: check again after the copy. `Object.entries` runs the user's getters synchronously,
       // and inside them a `finishAndRead` / `finish` of the same batch can settle it first. Without
@@ -1421,7 +1423,7 @@ export class BatchScope {
           resident[RUNTIME_INTERNAL].owner !== this.#gpu
         ) {
           throw new BatchScopeError(
-            `finishAndRead '${name}': 同じ GpuContext の ResidentTensor が必要`,
+            `finishAndRead '${name}': requires a ResidentTensor of the same GpuContext`,
           );
         }
         resident[RUNTIME_INTERNAL].retainUse();
@@ -1442,7 +1444,9 @@ export class BatchScope {
    */
   #assertReadbackAcceptable(): void {
     if (this.#finished || this.#settling) {
-      throw new BatchScopeError("finishAndRead は未終了・settle中でない batch に1回だけ指定できる");
+      throw new BatchScopeError(
+        "finishAndRead can be specified only once, on a batch that is neither finished nor settling",
+      );
     }
   }
 
@@ -1452,10 +1456,12 @@ export class BatchScope {
    */
   #assertGraphReadAcceptable(sources: readonly BatchReadSource[]): void {
     if (this.#readbackStarted) {
-      throw new BatchScopeError("決着の読み戻しが始まった batch にはグラフ出力を登録できない");
+      throw new BatchScopeError(
+        "Cannot register graph outputs on a batch whose settlement readback has started",
+      );
     }
     const total = sources.reduce((sum, source) => sum + source.size, 0);
-    this.#assertReadbackBytes(this.#readbackBytes() + total, "グラフ出力の読み戻し");
+    this.#assertReadbackBytes(this.#readbackBytes() + total, "graph output readback");
   }
 
   /**
@@ -1479,7 +1485,7 @@ export class BatchScope {
   #assertReadbackBytes(total: number, where: string): void {
     if (!Number.isSafeInteger(total) || total > this.#gpu.limits.maxBufferSize) {
       throw new BatchScopeError(
-        `${where}: 合計 ${total} bytes が maxBufferSize ${this.#gpu.limits.maxBufferSize} を超える`,
+        `${where}: total ${total} bytes exceeds maxBufferSize ${this.#gpu.limits.maxBufferSize}`,
       );
     }
   }
@@ -1522,7 +1528,7 @@ export class BatchScope {
       await checkFailureScopes();
       await this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(
         staging.mapAsync(MAP_MODE.READ),
-        "batch の読み戻し",
+        "batch readback",
       );
       markFenced();
       const mapped = staging.getMappedRange();
@@ -1616,7 +1622,8 @@ export class BatchScope {
         if (failure === undefined && read.result !== undefined) read.resolve(read.result);
         else {
           read.reject(
-            failure?.cause ?? new BatchScopeError("batch がグラフ出力を読み戻さずに決着した"),
+            failure?.cause ??
+              new BatchScopeError("The batch settled without reading back the graph outputs"),
           );
         }
       }

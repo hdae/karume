@@ -95,7 +95,7 @@ describe("deriveGeometryProfile", () => {
     assertEquals(largest(), BIG);
     assertEquals(largest(1.03), A);
     for (const minSpeedup of [0.99, Number.NaN, Number.POSITIVE_INFINITY]) {
-      assertThrows(() => largest(minSpeedup), Error, "minSpeedup は 1 以上");
+      assertThrows(() => largest(minSpeedup), Error, "minSpeedup must be a number of at least 1");
     }
   });
 
@@ -113,7 +113,7 @@ describe("deriveGeometryProfile", () => {
     assertThrows(
       () => deriveGeometryProfile(wall, { id: "x", optIn: true }),
       Error,
-      'wall.json: gpuTiming.unit が "wall"',
+      'wall.json: gpuTiming.unit is "wall"',
     );
   });
 });
@@ -126,16 +126,20 @@ describe("runGeometrySweep: options の検査（GPU に触れる前）", () => {
     await assertRejects(
       () => runGeometrySweep(untyped('{ "candidateSet": "quik" }')),
       Error,
-      "候補集合 quik",
+      "Candidate set quik",
     );
     await assertRejects(() => runGeometrySweep(untyped('{ "ops": ["gemv"] }')), Error, "op gemv");
     await assertRejects(
       () => runGeometrySweep({ cases: ["linear-m1-n1-k1"] }),
       Error,
-      "ケース linear-m1-n1-k1 が形状表に無い",
+      "Case linear-m1-n1-k1 is not in the shape table",
     );
     for (const rounds of [0, 1.5]) {
-      await assertRejects(() => runGeometrySweep({ rounds }), Error, "rounds は 1 以上の整数");
+      await assertRejects(
+        () => runGeometrySweep({ rounds }),
+        Error,
+        "rounds must be an integer of at least 1",
+      );
     }
   });
 
@@ -143,7 +147,7 @@ describe("runGeometrySweep: options の検査（GPU に触れる前）", () => {
     await assertRejects(
       () => runGeometrySweep({ ops: ["linear"], cases: ["conv2d-c96-512x512"] }),
       Error,
-      "に合うケースが無い",
+      "No case matches",
     );
   });
 });

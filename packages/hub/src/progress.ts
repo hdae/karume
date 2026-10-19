@@ -90,7 +90,9 @@ export type ProgressEmitter = {
 const fileSizeOf = (refs: ReadonlyMap<string, FileRef>, key: string): number => {
   const ref = refs.get(key);
   if (ref === undefined) {
-    throw new Error(`hub: ${key} の size が取得対象の表に無い（進捗集計の不変条件破れ）`);
+    throw new Error(
+      `hub: the size of ${key} is not in the table of fetch targets (progress aggregation invariant violated)`,
+    );
   }
   return ref.size;
 };
@@ -154,8 +156,8 @@ export const createProgressEmitter = (
       onProgress(progress);
     } catch (error) {
       console.warn(
-        `@karume/hub: onProgress リスナーが throw した（${phase} ${ref.path} — この通知だけを捨てて` +
-          `取得は続行する）`,
+        `@karume/hub: the onProgress listener threw (${phase} ${ref.path} — dropping only this notification;` +
+          ` the fetch continues)`,
         error,
       );
     }

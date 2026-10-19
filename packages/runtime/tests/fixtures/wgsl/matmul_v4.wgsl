@@ -1,4 +1,4 @@
-// karume matmul (a[m,k] · b[k,n], f32, レジスタ 128x128 タイル / 1 スレッド 8x8 / wg 16x16 + vec4)
+// karume matmul (a[m,k] · b[k,n], f32, register tile 128x128 / 8x8 per thread / wg 16x16 + vec4)
 struct Dims {
   m: u32,
   n: u32,

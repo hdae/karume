@@ -1,4 +1,4 @@
-// karume attention_stats (per-row m = amax(S) and inv = 1/Σexp(S - m), f32, S は f16 格納（pack2x16float）)
+// karume attention_stats (per-row m = amax(S) and inv = 1/Σexp(S - m), f32, S in f16 storage (pack2x16float))
 struct Params {
   rows: u32,
   dim: u32,

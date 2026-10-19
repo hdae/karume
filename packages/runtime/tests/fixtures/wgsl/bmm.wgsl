@@ -1,4 +1,4 @@
-// karume bmm (a[b,m,k] · b[b,k,n], f32, レジスタ 128x128 タイル / 1 スレッド 8x8 / wg 16x16)
+// karume bmm (a[b,m,k] · b[b,k,n], f32, register tile 128x128 / 8x8 per thread / wg 16x16)
 struct Dims {
   m: u32,
   n: u32,

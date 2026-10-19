@@ -1617,7 +1617,7 @@ test("argmax は最小 index を保存する比較式・−inf identity・ビッ
   assertEquals(ARGMAX_WGSL.includes("row = row + nwg.x;"), true);
   assertEquals([...argmaxParams(7, 3)], [7, 3, ARGMAX_NEG_INF_BITS, 0]);
   assertEquals(argmaxParams(7, 3).byteLength, 16, "uniform struct の 16 バイト整列");
-  assertThrows(() => argmaxParams(7, 0), CodegenError, "dim は正整数");
+  assertThrows(() => argmaxParams(7, 0), CodegenError, "dim must be a positive integer");
   assertThrows(() => argmaxParams(-1, 3), CodegenError);
   assertThrows(() => argmaxParams(7, 1.5), CodegenError);
 });
@@ -1716,16 +1716,20 @@ test("topk は 2 相（レーン局所 top-k → トーナメント merge）で�
   assertTopkK(63, 16384, "t");
   // MUST: 超過は縮退させず、**上限値つきで** fail loudly（利用者が k をどこまで下げれば
   // よいか診断だけで分かる形）
-  assertThrows(() => assertTopkK(64, 16384, "t"), CodegenError, "実装上限 63 を超える");
-  assertThrows(() => assertTopkK(4, 1024, "t"), CodegenError, "実装上限 3 を超える");
-  assertThrows(() => assertTopkK(0, 16384, "t"), CodegenError, "k は正整数");
+  assertThrows(
+    () => assertTopkK(64, 16384, "t"),
+    CodegenError,
+    "exceeds the implementation limit 63",
+  );
+  assertThrows(() => assertTopkK(4, 1024, "t"), CodegenError, "exceeds the implementation limit 3");
+  assertThrows(() => assertTopkK(0, 16384, "t"), CodegenError, "k must be a positive integer");
   assertThrows(() => assertTopkK(1.5, 16384, "t"), CodegenError);
 
   assertEquals([...topkParams(7, 3)], [7, 3, TOPK_NEG_INF_BITS, 0]);
   assertEquals(topkParams(7, 3).byteLength, 16, "uniform struct の 16 バイト整列");
   // MUST: params に k を載せない（WGSL に焼いてある — 二重管理を構造で禁じる）
   assertEquals(topkParams(7, 3).length, 4);
-  assertThrows(() => topkParams(7, 0), CodegenError, "dim は正整数");
+  assertThrows(() => topkParams(7, 0), CodegenError, "dim must be a positive integer");
   assertThrows(() => topkParams(-1, 3), CodegenError);
 });
 
@@ -1747,7 +1751,7 @@ test("half-split RoPE は積を workgroup u32 へ丸め、一様 barrier 後に�
   assertEquals(ropeParams(768, 3, 128).byteLength, 16);
   assertThrows(() => ropeParams(768, 0, 128), CodegenError, "sequence");
   assertThrows(() => ropeParams(768, 3, 127), CodegenError, "headDim");
-  assertThrows(() => ropeParams(767, 3, 128), CodegenError, "整数行");
+  assertThrows(() => ropeParams(767, 3, 128), CodegenError, "whole number of rows");
   assertThrows(() => ropeParams(0x1_0000_0000, 1, 128), CodegenError, "u32");
 });
 
@@ -1766,7 +1770,7 @@ test("NCHW 2x upsample は入力要素ごとに 2x2 を書き、params の行境
   assertEquals(upsample2xParams(24, 3).byteLength, 16);
   assertThrows(() => upsample2xParams(-1, 3), CodegenError, "u32");
   assertThrows(() => upsample2xParams(24, 0), CodegenError, "width");
-  assertThrows(() => upsample2xParams(25, 3), CodegenError, "整数行");
+  assertThrows(() => upsample2xParams(25, 3), CodegenError, "whole number of rows");
   assertThrows(() => upsample2xParams(0x4000_0000, 1), CodegenError, "4 * n");
   assertThrows(() => upsample2xParams(0, 0x8000_0000), CodegenError, "2 * width");
 });
@@ -1817,7 +1821,7 @@ test("双線形 resample は出力 1 要素 = 1 スレッドで、末尾タッ�
   assertThrows(() => upsampleBilinear2dParams(0, 4, 5, 0, 9), CodegenError, "heightOut");
   assertThrows(() => upsampleBilinear2dParams(0, 4, 5, 7, 0), CodegenError, "widthOut");
   // 出力平面の整数倍でない n は平面の添字分解がずれる
-  assertThrows(() => upsampleBilinear2dParams(64, 4, 5, 7, 9), CodegenError, "整数倍");
+  assertThrows(() => upsampleBilinear2dParams(64, 4, 5, 7, 9), CodegenError, "integer multiple");
 });
 
 test("DCNv2 は範囲判定を正の形で書き、NaN をビット列で分けて伝播させる", () => {
@@ -1897,7 +1901,11 @@ test("DCNv2 は範囲判定を正の形で書き、NaN をビット列で分け�
     paddingH: 1,
     paddingW: 0,
   };
-  assertThrows(() => deformConv2dParams({ ...dims, paddingH: -1 }), CodegenError, "非負整数");
+  assertThrows(
+    () => deformConv2dParams({ ...dims, paddingH: -1 }),
+    CodegenError,
+    "non-negative u32 integer",
+  );
   // 空間長 0 は全タップが範囲外判定に落ち、出力が bias 一色になる沈黙誤値
   assertThrows(() => deformConv2dParams({ ...dims, heightIn: 0 }), CodegenError, "height_in");
   assertThrows(() => deformConv2dParams({ ...dims, widthIn: 0 }), CodegenError, "width_in");
@@ -1921,8 +1929,8 @@ test("gru_scan は更新式を分解形の逐語で書き、mul と add の間�
   );
   assertNotEquals(gruScanKey("forward"), gruScanKey("reverse"));
   const invalid = "backward" as GruScanDirection;
-  assertThrows(() => gruScanKey(invalid), CodegenError, "走査方向が不正");
-  assertThrows(() => gruScanWgsl(invalid), CodegenError, "走査方向が不正");
+  assertThrows(() => gruScanKey(invalid), CodegenError, "invalid scan direction");
+  assertThrows(() => gruScanWgsl(invalid), CodegenError, "invalid scan direction");
 
   const forward = gruScanWgsl("forward");
   const reverse = gruScanWgsl("reverse");
@@ -1968,18 +1976,18 @@ test("gru_scan は更新式を分解形の逐語で書き、mul と add の間�
   assertThrows(
     () => gruScanParams({ time: -1, batch: 2, hidden: 4 }),
     CodegenError,
-    "time は u32 の非負整数",
+    "time must be a non-negative u32 integer",
   );
   assertThrows(
     () => gruScanParams({ time: 5, batch: 2, hidden: 0 }),
     CodegenError,
-    "hidden は正整数",
+    "hidden must be a positive integer",
   );
   // MUST: 上限超過は fail loudly（黙って縮退させると h_shared の範囲外書き込みになる）
   assertThrows(
     () => gruScanParams({ time: 5, batch: 2, hidden: GRU_SCAN_MAX_HIDDEN + 1 }),
     CodegenError,
-    "上限 256 を超える",
+    "exceeds the limit 256",
   );
 });
 
@@ -1989,8 +1997,8 @@ test("SiLU は sigmoid の f32 格納境界を u32 workgroup staging で保ち�
   assertEquals(siluKey("sigmoid-x"), `silu:v1:sigmoid-x:f32:wg${SILU_WORKGROUP_SIZE}`);
   assertNotEquals(siluKey("x-sigmoid"), siluKey("sigmoid-x"));
   const invalid = "foreign-order" as SiluMulOrder;
-  assertThrows(() => siluKey(invalid), CodegenError, "入力順が不正");
-  assertThrows(() => siluWgsl(invalid), CodegenError, "入力順が不正");
+  assertThrows(() => siluKey(invalid), CodegenError, "invalid input order");
+  assertThrows(() => siluWgsl(invalid), CodegenError, "invalid input order");
 
   const xs = siluWgsl("x-sigmoid");
   const sx = siluWgsl("sigmoid-x");
@@ -2088,7 +2096,7 @@ test("elementwise params はスカラ attr を末尾に f32 のビット列で�
   assertThrows(
     () => elementwiseParams({ op: "clamp_min", rank: 1, dtype: "f32" }, [2], [[2]], [1e39]),
     CodegenError,
-    "f32 として有限でない",
+    "is not finite as f32",
   );
   // f32 へ普通に丸まる値は通る（門を広げすぎていないことの対）
   assertEquals(
@@ -2102,10 +2110,10 @@ test("elementwise params はスカラ attr を末尾に f32 のビット列で�
   assertThrows(
     () => elementwiseParams({ op: "clamp", rank: 1, dtype: "f32" }, [4], [[4], [4]], [0, 1]),
     CodegenError,
-    "アリティ",
+    "arity",
   );
   // スカラの本数も同じ 1 箇所で見る（多すぎるぶんは黙って捨てられていた）
-  assertThrows(() => elementwiseParams(clamp, [2, 3], [[2, 3]], [-1.5]), CodegenError, "スカラ");
+  assertThrows(() => elementwiseParams(clamp, [2, 3], [[2, 3]], [-1.5]), CodegenError, "scalars");
   // rank も spec 側が正本（出力 shape だけから導かない）
   assertThrows(() => elementwiseParams(clamp, [6], [[6]], [-1.5, 2.25]), CodegenError, "rank");
 });
@@ -2140,7 +2148,7 @@ test("elementwise params は broadcast 不能な軸長を受理しない", () =>
   assertThrows(
     () => elementwiseParams({ op: "neg", rank: 1, dtype: "f32" }, [5], [[3]]),
     CodegenError,
-    "一致せず 1 でもない",
+    "matches neither output 5 nor 1",
   );
   assertThrows(
     () =>
@@ -2153,7 +2161,7 @@ test("elementwise params は broadcast 不能な軸長を受理しない", () =>
         ],
       ),
     CodegenError,
-    "一致せず 1 でもない",
+    "matches neither output 3 nor 1",
   );
   // 適合形は 1 語も動かない（門を広げすぎていないことの対）
   assertEquals(
@@ -2343,24 +2351,28 @@ test("融合 attention の 3 カーネルは分解経路とビット同一にな
   assertThrows(
     () => attentionQkParams(5, 7, 4, 1e39),
     CodegenError,
-    "scale は f32 として有限の数値",
+    "scale must be a finite number as f32",
   );
   assertThrows(() => attentionStatsParams(30, 0), CodegenError);
   assertThrows(() => attentionStatsParams(-1, 7), CodegenError);
   // MUST: regcache 変種は `dim <= epc · 256` をここでも見る（生成側と二重だが、カーネル
   // 直呼びの経路も塞ぐ門）。超えた要素は max にも Σ にも入らず沈黙誤値になる。
   assertEquals([...attentionStatsParams(4, 4096, 16)], [4, 4096, 0xff800000, 0]);
-  assertThrows(() => attentionStatsParams(4, 8192, 16), CodegenError, "担当範囲");
+  assertThrows(
+    () => attentionStatsParams(4, 8192, 16),
+    CodegenError,
+    "covered by the regcache variant",
+  );
   assertThrows(
     () => attentionStatsParams(4, 4096, ATTENTION_STATS_REG_CACHE_MAX + 1),
     CodegenError,
-    "上限",
+    "limit",
   );
   // MUST: 被覆の突合より先に整数性を見る。生成側は非整数長を切り捨てて `1.5` を 1 スロット
   // （256 要素）で展開する一方、被覆計算は 1.5 × 256 = 384 を名乗るので、この門が無いと
   // dim 300 の 44 要素が縮約から黙って落ちる。
-  assertThrows(() => attentionStatsParams(4, 300, 1.5), CodegenError, "整数でない");
-  assertThrows(() => attentionStatsParams(4, 100, 0.5), CodegenError, "整数でない");
+  assertThrows(() => attentionStatsParams(4, 300, 1.5), CodegenError, "is not an integer");
+  assertThrows(() => attentionStatsParams(4, 100, 0.5), CodegenError, "is not an integer");
   // 整数の正常形（切り捨てが起きない形）は通る
   assertEquals([...attentionStatsParams(4, 300, 2)], [4, 300, 0xff800000, 0]);
   await Promise.resolve();
@@ -2457,7 +2469,7 @@ const undoGqa = (text: string, side: "k" | "v", mapped: string, plain: string): 
     )
     .map((line) => (line === mapped ? plain : line))
     .join("\n")
-    .replace(`, GQA（${side} は kv-head へ整数除算で写す）`, "");
+    .replace(`, GQA (${side} is mapped to the kv-head by integer division)`, "");
 
 /**
  * GQA（整除 broadcast — ADR 0067 決定 1 / 2）。**`r = 1` の生成物とキーがバイト同一**であること
@@ -2764,7 +2776,7 @@ test("融合 attention の行窓変種は片側の base と mask の行添字だ
     () => attentionQkI8a8Params(8, 12, 4, 0.5, { offset: 4, rowsFull: 9 }),
     () => attentionPvI8a8Params(8, 4, 8, { offset: 4, rowsFull: 9 }),
   ]) {
-    assertThrows(build, CodegenError, "をはみ出す");
+    assertThrows(build, CodegenError, "exceed the full M");
   }
 });
 
@@ -2780,7 +2792,7 @@ test("bmm の行窓 params は 5 語 32 バイトで、はみ出す窓を fail l
   assertEquals(params.byteLength, 32);
   assertEquals(bmmParams(4, 7, 8).byteLength, 16, "窓なしは従来どおり 16B");
   // MUST: ブロックが全 M をはみ出す組は fail loudly（黙って通すと隣のバッチを読み書きする）
-  assertThrows(() => bmmRowWindowParams(5, 7, 8, 5, 9), CodegenError, "をはみ出す");
+  assertThrows(() => bmmRowWindowParams(5, 7, 8, 5, 9), CodegenError, "exceed the full M");
   assertThrows(() => bmmRowWindowParams(4, 7, 8, -1, 9), CodegenError, "row_offset");
   // 語位置と WGSL の読み口は対（A 側 = 入力行 / C 側 = 出力行のどちらが全 M ストライドか）
   assertEquals(
@@ -3242,7 +3254,7 @@ test("i8a8 linear と quantize_rows は丸めの位置を決める 3 点を生�
   assertEquals(grouped.includes("pack4xI8Clamp"), false);
   assertEquals([...quantizeRowsParams(30, 8)], [30, 8, 0, 0]);
   assertEquals(quantizeRowsParams(30, 8).byteLength, 16, "uniform struct の 16 バイト整列");
-  assertThrows(() => quantizeRowsParams(30, 6), CodegenError, "4 の倍数");
+  assertThrows(() => quantizeRowsParams(30, 6), CodegenError, "multiple of 4");
   assertThrows(() => quantizeRowsParams(-1, 8), CodegenError);
   assertThrows(() => quantizeRowsParams(30, 0), CodegenError);
 
@@ -3326,8 +3338,12 @@ test("i8a8 linear と quantize_rows は丸めの位置を決める 3 点を生�
   // params は f32 骨格と同じ 3 語 + 16 バイト整列。k の門は params でも見る
   assertEquals([...linearI8a8Params(5, 7, 8)], [5, 7, 8, 0]);
   assertEquals(linearI8a8Params(5, 7, 8).byteLength, 16);
-  assertThrows(() => linearI8a8Params(5, 7, 7), CodegenError, "4 の倍数");
-  assertThrows(() => linearI8a8Params(5, 7, LINEAR_I8A8_MAX_K + 4), CodegenError, "i32 縮約の門");
+  assertThrows(() => linearI8a8Params(5, 7, 7), CodegenError, "multiple of 4");
+  assertThrows(
+    () => linearI8a8Params(5, 7, LINEAR_I8A8_MAX_K + 4),
+    CodegenError,
+    "i32 reduction guard",
+  );
   // 拡張の判定は WGSL 言語機能の列挙（device feature ではない）
   assertEquals(dp4aAvailable(new Set([DP4A_WGSL_FEATURE])), true);
   assertEquals(dp4aAvailable(new Set(["shader-f16"])), false);
@@ -3426,21 +3442,21 @@ test("w4a8 linear は group 境界でだけ f32 へ flush し、xs を最後の 
   assertThrows(
     () => linearI8a8Wgsl(true, true, undefined, "i4"),
     CodegenError,
-    "groupSize は重み i4 格納と対で渡す",
+    "groupSize must be passed together with i4 weight storage",
   );
   assertThrows(
     () => linearI8a8Wgsl(true, true, undefined, "i8", 32),
     CodegenError,
-    "groupSize は重み i4 格納と対で渡す",
+    "groupSize must be passed together with i4 weight storage",
   );
   // 整数内積に載らない格納形は fail loudly（f32 / f16 を渡す経路はそもそも無い）
-  assertThrows(() => linearI8a8Wgsl(true, true, undefined, "f16"), CodegenError, "i8 / i4 のみ");
+  assertThrows(() => linearI8a8Wgsl(true, true, undefined, "f16"), CodegenError, "must be i8 / i4");
   // MUST: 1 枚の K タイル（16）が group 境界を跨ぐ形は生成時に落とす — 通すと 2 group の
   // 重みが 1 つの i32 に混ざり、flush で片方の scale だけが掛かる沈黙誤値になる
   assertThrows(
     () => linearI8a8Wgsl(true, true, { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 32 }, "i4", 16),
     CodegenError,
-    "K タイル 32 の倍数でない",
+    "is not a multiple of the K tile 32",
   );
   // 正例（門が広すぎないことの対）: group が K タイルの倍数なら通り、内側ループの
   // `tilesPerGroup = group / tileK` がそのまま焼かれる。tileK を動かした幾何でも同じ。
@@ -3468,11 +3484,15 @@ test("w4a8 linear は group 境界でだけ f32 へ flush し、xs を最後の 
     4,
     "w4a8 では i8 の k 門を適用しない",
   );
-  assertThrows(() => linearI8a8Params(5, 8, 48, 32), CodegenError, "group_size 32 で割り切れない");
+  assertThrows(
+    () => linearI8a8Params(5, 8, 48, 32),
+    CodegenError,
+    "is not divisible by group_size 32",
+  );
   assertThrows(
     () => linearI8a8Params(5, 8, LINEAR_W4A8_MAX_GROUP * 2, LINEAR_W4A8_MAX_GROUP * 2),
     CodegenError,
-    "i32 縮約の門",
+    "i32 reduction guard",
   );
 });
 
@@ -3582,12 +3602,12 @@ test("i8a8 attention_qk は半スケールを dequant 側に持ち、バッチ b
   assertEquals([...params.slice(0, 3)], [5, 7, 8]);
   assertEquals(new Float32Array(params.buffer)[3], 0.5);
   assertEquals(params.byteLength, 16);
-  assertThrows(() => attentionQkI8a8Params(5, 7, 7, 0.5), CodegenError, "4 の倍数");
-  assertThrows(() => attentionQkI8a8Params(5, 7, 8, Number.NaN), CodegenError, "有限");
+  assertThrows(() => attentionQkI8a8Params(5, 7, 7, 0.5), CodegenError, "multiple of 4");
+  assertThrows(() => attentionQkI8a8Params(5, 7, 8, Number.NaN), CodegenError, "finite");
   assertThrows(
     () => attentionQkI8a8Params(5, 7, LINEAR_I8A8_MAX_K + 4, 0.5),
     CodegenError,
-    "i32 縮約の門",
+    "i32 reduction guard",
   );
 });
 
@@ -3734,11 +3754,11 @@ test("i8a8 attention_pv は P̃ を非実体化のまま作り、列 scale と�
   const params = attentionPvI8a8Params(5, 7, 8);
   assertEquals([...params], [5, 7, 8, 0]);
   assertEquals(params.byteLength, 16);
-  assertThrows(() => attentionPvI8a8Params(5, 7, 7), CodegenError, "4 の倍数");
+  assertThrows(() => attentionPvI8a8Params(5, 7, 7), CodegenError, "multiple of 4");
   assertThrows(
     () => attentionPvI8a8Params(5, 7, LINEAR_I8A8_MAX_K + 4),
     CodegenError,
-    "i32 縮約の門",
+    "i32 reduction guard",
   );
 });
 
@@ -3812,10 +3832,10 @@ test("i8a8 の幾何はキーと生成物に反映され、割り切れない組
     // tileK が 4 の倍数でない（i8 の 4 詰めが割り切れない）
     ["tileK", { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 18 }],
     // スレッド数が K パック数で割り切れない（充填の担当が組めない）
-    ["K パック数", { regM: 8, regN: 8, wgX: 3, wgY: 3, tileK: 16 }],
+    ["K pack count", { regM: 8, regN: 8, wgX: 3, wgY: 3, tileK: 16 }],
     // タイル辺が充填ストライドで割り切れない（届かない語が残る）
-    ["充填ストライド", { regM: 3, regN: 8, wgX: 8, wgY: 16, tileK: 16 }],
-    ["正整数", { regM: 0, regN: 8, wgX: 8, wgY: 16, tileK: 16 }],
+    ["fill stride", { regM: 3, regN: 8, wgX: 8, wgY: 16, tileK: 16 }],
+    ["positive integer", { regM: 0, regN: 8, wgX: 8, wgY: 16, tileK: 16 }],
   ];
   for (const [message, geometry] of bad) {
     assertThrows(() => linearI8a8Wgsl(true, true, geometry), CodegenError, message);
@@ -4498,7 +4518,7 @@ test("S の f16 格納は「スカラ経路」と「c16 との併用」を生成
     ["attention_pv", () => attentionPvWgsl(false, "f32", "f16")],
     ["attention_qk i8a8", () => attentionQkI8a8Wgsl(false, true, "f16")],
   ] as const) {
-    assertThrows(generate, CodegenError, "v4 経路専用", where);
+    assertThrows(generate, CodegenError, "is for the v4 path only", where);
   }
   // `:c16` は S を array<f16> で持つ別の格納形（冗長かつ矛盾する組）
   for (const [where, generate] of [
@@ -4506,7 +4526,7 @@ test("S の f16 格納は「スカラ経路」と「c16 との併用」を生成
     ["attention_pv", () => attentionPvWgsl(true, "f16", "f16")],
     ["attention_stats", () => attentionStatsWgsl("f16", "f16")],
   ] as const) {
-    assertThrows(generate, CodegenError, "同時に指定できない", where);
+    assertThrows(generate, CodegenError, "cannot be given together", where);
   }
   // 適格判定は書き手が v4 を取る条件そのもの（D%4 と N%4 の**両方**）
   for (const [depth, cols, expected] of [
@@ -4550,13 +4570,17 @@ test("格納判別子はキーの f16 側だけに付く（既存の f32 キー�
   assertEquals(embeddingKey("i4", 32), "embedding:v1:f32:i32:wg256:wi4g32");
   // group 長は i4 と 1 対 1（欠け / 余りはどちらも結線バグ — 黙って通すと g 部の無い
   // キーが立って group 違いの資産が同じパイプラインへ割り当たる）
-  assertThrows(() => linearKey("i4", false), CodegenError, "対で渡す");
-  assertThrows(() => linearKey("f32", false, "f32", undefined, 32), CodegenError, "対で渡す");
-  assertThrows(() => linearKey("i4", false, "f32", undefined, 24), CodegenError, "2 冪");
+  assertThrows(() => linearKey("i4", false), CodegenError, "must be passed together with");
+  assertThrows(
+    () => linearKey("f32", false, "f32", undefined, 32),
+    CodegenError,
+    "must be passed together with",
+  );
+  assertThrows(() => linearKey("i4", false, "f32", undefined, 24), CodegenError, "power of two");
   // 同じ規律が embedding にも掛かる（i4 の生成入口は 2 つあるので両方で言い直す）
-  assertThrows(() => embeddingKey("i4"), CodegenError, "対で渡す");
-  assertThrows(() => embeddingKey("i8", 32), CodegenError, "対で渡す");
-  assertThrows(() => embeddingKey("i4", 8), CodegenError, "2 冪");
+  assertThrows(() => embeddingKey("i4"), CodegenError, "must be passed together with");
+  assertThrows(() => embeddingKey("i8", 32), CodegenError, "must be passed together with");
+  assertThrows(() => embeddingKey("i4", 8), CodegenError, "power of two");
 });
 
 /**
@@ -4581,10 +4605,14 @@ test("conv1d の i4 は implicit GEMM 限定で、キーに group 部が乗る",
     conv1dIgemmKey("i4", false, GEMM_MTILE_SMALL, 32),
   );
   // ② i4 と group 長は 1 対 1（キーも生成も同じ門を通る）
-  assertThrows(() => conv1dIgemmKey("i4", false), CodegenError, "対で渡す");
-  assertThrows(() => conv1dIgemmKey("i8", false, GEMM_TILE, 32), CodegenError, "対で渡す");
-  assertThrows(() => conv1dIgemmKey("i4", false, GEMM_TILE, 24), CodegenError, "2 冪");
-  assertThrows(() => conv1dIgemmWgsl("i4", false), CodegenError, "対で渡す");
+  assertThrows(() => conv1dIgemmKey("i4", false), CodegenError, "must be passed together with");
+  assertThrows(
+    () => conv1dIgemmKey("i8", false, GEMM_TILE, 32),
+    CodegenError,
+    "must be passed together with",
+  );
+  assertThrows(() => conv1dIgemmKey("i4", false, GEMM_TILE, 24), CodegenError, "power of two");
+  assertThrows(() => conv1dIgemmWgsl("i4", false), CodegenError, "must be passed together with");
   // ③ 直接カーネル（groups > 1 用）は i4 を受けない — キーも生成物も出さない
   assertThrows(() => conv1dKey("i4"), CodegenError, "i4");
   assertThrows(() => conv1dWgsl("i4"), CodegenError, "i4");
@@ -4669,8 +4697,8 @@ test("融合カーネルの params は契約外の値を fail loudly にする",
   assertThrows(() => layerNormParams(4, 8, Number.POSITIVE_INFINITY), CodegenError);
   // MUST: 値域は **f32 として**見る（f64 で有限正でも、f32 語へ落とすと ±0 / ±Inf に化ける）。
   // 上振れ 1e39 は `1/sqrt(x + Inf) = 0` で GPU だけ bias 一色になる沈黙誤値の入口。
-  assertThrows(() => layerNormParams(4, 8, 1e39), CodegenError, "f32 として有限の正数");
-  assertThrows(() => layerNormParams(4, 8, 1e-50), CodegenError, "f32 として有限の正数");
+  assertThrows(() => layerNormParams(4, 8, 1e39), CodegenError, "finite positive f32 value");
+  assertThrows(() => layerNormParams(4, 8, 1e-50), CodegenError, "finite positive f32 value");
   // 正常な eps は通る（門を広げすぎていないことの対）
   assertEquals(new Float32Array(layerNormParams(4, 8, 1e-5).buffer)[2], Math.fround(1e-5));
 
@@ -4682,8 +4710,8 @@ test("融合カーネルの params は契約外の値を fail loudly にする",
   assertThrows(() => rmsNormParams(6, 0, 1e-6), CodegenError);
   assertThrows(() => rmsNormParams(6, 10, 0), CodegenError);
   assertThrows(() => rmsNormParams(6, 10, Number.NaN), CodegenError);
-  assertThrows(() => rmsNormParams(6, 10, 1e39), CodegenError, "f32 として有限の正数");
-  assertThrows(() => rmsNormParams(6, 10, 1e-50), CodegenError, "f32 として有限の正数");
+  assertThrows(() => rmsNormParams(6, 10, 1e39), CodegenError, "finite positive f32 value");
+  assertThrows(() => rmsNormParams(6, 10, 1e-50), CodegenError, "finite positive f32 value");
   assertEquals(new Float32Array(rmsNormParams(6, 10, 1e-5).buffer)[2], Math.fround(1e-5));
 
   assertEquals([...softmaxParams(4, 9)], [4, 9, 0, 0]);
@@ -4706,7 +4734,7 @@ test("融合カーネルの params は契約外の値を fail loudly にする",
   assertThrows(() => maskedFillParams([], [], 0), CodegenError);
   assertThrows(() => maskedFillParams([2, 3], [1, 1], Number.NaN), CodegenError);
   // MUST: 埋め値の有限判定も f32 として（f32 最小有限値ちょうどは通り、1e39 は落ちる）
-  assertThrows(() => maskedFillParams([2, 3], [1, 1], 1e39), CodegenError, "f32 として有限でない");
+  assertThrows(() => maskedFillParams([2, 3], [1, 1], 1e39), CodegenError, "is not finite as f32");
 
   const conv = conv1dParams({
     batch: 2,
@@ -5009,7 +5037,7 @@ test("BSHD RoPE は head 数で位置表を引き、異なるキーと uniform �
   assertEquals([...ropeParams(3 * 5 * 128, 3, 128, "bshd")], [1920, 3, 128, 64]);
   assertThrows(() => ropeParams(768, 0, 128, "bshd"), CodegenError, "heads");
   assertThrows(() => ropeParams(768, 3, 127, "bshd"), CodegenError, "headDim");
-  assertThrows(() => ropeParams(769, 3, 128, "bshd"), CodegenError, "整数行");
+  assertThrows(() => ropeParams(769, 3, 128, "bshd"), CodegenError, "whole number of rows");
   assertThrows(() => ropeParams(0, 0x80000000, 128, "bshd"), CodegenError, "u32");
 });
 
@@ -5155,7 +5183,7 @@ test("conv3d igemm params は {m,n,k} + 幾何 18 語を 24 語に詰め、契�
     "timeOut",
     "channelsIn",
   ] as const) {
-    assertThrows(() => conv3dIgemmParams({ ...base, [key]: 0 }), CodegenError, "正整数");
+    assertThrows(() => conv3dIgemmParams({ ...base, [key]: 0 }), CodegenError, "positive integer");
   }
   assertThrows(() => conv3dIgemmParams({ ...base, paddingT: -1 }), CodegenError);
   // MUST: groups > 1 は GPU の実装済み subset の外（ADR 0118 決定 1）
@@ -5211,7 +5239,7 @@ test("conv3d igemm params は入力長 + 2·padding が i32 に収まらない�
     assertThrows(
       () => conv3dIgemmParams(withLength(2)),
       CodegenError,
-      "i32 の上限",
+      "i32 maximum",
       `${lengthKey} 境界 + 1`,
     );
   }
@@ -5229,7 +5257,7 @@ test("conv3d igemm params は入力長 + 2·padding が i32 に収まらない�
         dilationW: 0xffff_ffff,
       }),
     CodegenError,
-    "軸 w",
+    "axis w",
   );
 });
 

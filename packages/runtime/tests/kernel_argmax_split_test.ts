@@ -46,9 +46,21 @@ describe("argmax 2 相分割の params は分割の形と一致しないと落�
   });
 
   it("groups が純関数の値と違えば落ちる（1 dispatch 形の dim も）", () => {
-    assertThrows(() => argmaxSplitParams(1, 262144, 63), CodegenError, "分割の形に合わない");
-    assertThrows(() => argmaxSplitParams(1, 4096, 1), CodegenError, "分割の形に合わない");
-    assertThrows(() => argmaxSplitParams(1, 262144, 0), CodegenError, "分割の形に合わない");
+    assertThrows(
+      () => argmaxSplitParams(1, 262144, 63),
+      CodegenError,
+      "does not match the split shape",
+    );
+    assertThrows(
+      () => argmaxSplitParams(1, 4096, 1),
+      CodegenError,
+      "does not match the split shape",
+    );
+    assertThrows(
+      () => argmaxSplitParams(1, 262144, 0),
+      CodegenError,
+      "does not match the split shape",
+    );
   });
 });
 

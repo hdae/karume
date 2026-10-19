@@ -1,4 +1,4 @@
-// karume attention_qk (S[b,m,n] = (q·scale)[b,m,d] · (k·scale)[b,n,d]ᵀ, f32, f16 タイル計算・S も f16, レジスタ 128x128 タイル / 1 スレッド 8x8 / wg 16x16 + vec4)
+// karume attention_qk (S[b,m,n] = (q·scale)[b,m,d] · (k·scale)[b,n,d]ᵀ, f32, f16 tile compute, S also f16, register tile 128x128 / 8x8 per thread / wg 16x16 + vec4)
 enable f16;
 struct Dims {
   m: u32,
@@ -12,7 +12,7 @@ struct Dims {
 @group(0) @binding(3) var<storage, read_write> s: array<vec4<f16>>;
 
 // Shared A tile (128 rows × K 16, scalar storage) and
-// shared B tile (K 16 × 32 column quads, column direction grouped into vec4)。f16 変種は共有バイトが半分
+// shared B tile (K 16 × 32 column quads, column direction grouped into vec4). The f16 variant halves the shared bytes
 // (16384 B → 8192 B / WG) — the expected gain rests entirely on this one mechanism
 var<workgroup> sa: array<f16, 2048>;
 var<workgroup> sb: array<vec4<f16>, 512>;
@@ -26,7 +26,7 @@ fn main(
   let k4 = dims.k / 4u;
   let n4 = dims.n / 4u;
   // The batch is uniform per workgroup (one z index = the tiles of one batch) — the premise for the
-  // inner workgroupBarrier to meet WGSL's uniformity requirement。MUST: base は quad 単位（要素単位で組むと隣のバッチを読む）
+  // inner workgroupBarrier to meet WGSL's uniformity requirement. MUST: base is in quad units (building it in element units reads the next batch)
   let abase = wid.z * dims.m * k4;
   let bbase = wid.z * dims.n * dims.k;
   let cbase = wid.z * dims.m * n4;

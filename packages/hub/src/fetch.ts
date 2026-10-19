@@ -135,9 +135,9 @@ export const assertTightView = (
 ): Uint8Array<ArrayBuffer> => {
   if (!isTightView(bytes)) {
     throw new Error(
-      `hub: ${path} の bytes が buffer 全体を占めていない` +
-        `（byteOffset ${bytes.byteOffset} / byteLength ${bytes.byteLength} /` +
-        ` buffer ${bytes.buffer.byteLength}）`,
+      `hub: the bytes of ${path} do not span the whole buffer` +
+        ` (byteOffset ${bytes.byteOffset} / byteLength ${bytes.byteLength} /` +
+        ` buffer ${bytes.buffer.byteLength})`,
     );
   }
   return bytes;
@@ -156,7 +156,7 @@ const decodeManifest = (
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch (error) {
-    throw new ManifestFormatError(`manifest: ${MANIFEST_FILENAME} が UTF-8 として読めない`, {
+    throw new ManifestFormatError(`manifest: ${MANIFEST_FILENAME} cannot be read as UTF-8`, {
       cause: error,
     });
   }
@@ -198,8 +198,8 @@ export const loadManifest = async (
   // non-strings are refused by the same branch.
   if (!isSource && (typeof ref.repo !== "string" || !isRepoName(ref.repo))) {
     throw new HubError(
-      `loadManifest: repo '${ref.repo}' が HF の 'owner/name' でない` +
-        `（2 セグメントちょうど・許可文字 [A-Za-z0-9._-]・先頭ドット禁止）`,
+      `loadManifest: repo '${ref.repo}' is not an HF 'owner/name'` +
+        ` (exactly 2 segments, allowed characters [A-Za-z0-9._-], no leading dot)`,
     );
   }
   await purgeLegacyCaches(options);
@@ -234,7 +234,9 @@ export const loadManifest = async (
   // before returning).
   options.signal?.throwIfAborted();
   if (manifest === undefined) {
-    throw new Error(`hub: ${MANIFEST_FILENAME} の検証フックが走っていない（取得層の不変条件破れ）`);
+    throw new Error(
+      `hub: the verification hook for ${MANIFEST_FILENAME} did not run (fetch layer invariant violated)`,
+    );
   }
   // **This value carries** the source (it is not rebuilt from the identity fields — a source with
   // no way to restore it could not be added otherwise).
@@ -311,7 +313,7 @@ export const fetchAssetsWithBudget = async (
       });
     } catch (error) {
       if (error instanceof HubError || isAborted(error, signal)) throw error;
-      throw context.fetchFailure(ref, "取得", error);
+      throw context.fetchFailure(ref, "fetch", error);
     }
     // Check again right after the fetch — with only the earlier check, "cancelled in the middle of
     // a cache read" goes unobserved, and a file that was cancelled advances to complete.
@@ -371,7 +373,9 @@ export const fetchAssetsWithBudget = async (
     keys.map((key): readonly [string, Uint8Array<ArrayBuffer>] => {
       const bytes = bytesByRef.get(fileRefKey(files[key]));
       if (bytes === undefined) {
-        throw new Error(`hub: ${files[key].path} の bytes が揃っていない（取得層の不変条件破れ）`);
+        throw new Error(
+          `hub: the bytes of ${files[key].path} are missing (fetch layer invariant violated)`,
+        );
       }
       return [key, bytes];
     }),
@@ -391,7 +395,7 @@ const preparePhase = (
   const available = context.available;
   if (refs.length === 0) {
     throw new ManifestReferenceError(
-      `prefetchAssets: 取得対象が 1 つも無い（${context.session}）`,
+      `prefetchAssets: there is nothing to fetch (${context.session})`,
       { available },
     );
   }
@@ -403,8 +407,8 @@ const preparePhase = (
     const refKey = fileRefKey(ref);
     if (declared.has(refKey)) {
       throw new ManifestReferenceError(
-        `prefetchAssets: 参照 '${refKey}' が重複している（この面は渡された列をそのまま扱う —` +
-          ` 同じ参照を 2 回渡すのは呼び出し側の誤り。全量面 fetchAssets は一意化する）`,
+        `prefetchAssets: reference '${refKey}' is duplicated (this surface takes the given list as is —` +
+          ` passing the same reference twice is a caller error; the whole-file surface fetchAssets deduplicates)`,
         { available },
       );
     }
@@ -451,7 +455,7 @@ const runPrefetchPhase = async (
       // configuration on the caller's side, so make it the same failure with context as on the
       // whole-file surface (the surfaces do not differ in how it looks).
       if (error instanceof HubError) throw error;
-      throw context.fetchFailure(ref, "事前取得", error);
+      throw context.fetchFailure(ref, "prefetch", error);
     }
     const prefetchFile = origin.prefetchFile;
     if (prefetchFile === undefined) {
@@ -460,7 +464,7 @@ const runPrefetchPhase = async (
       // capabilities).
       if (source.prefetchFile !== undefined) {
         throw new Error(
-          `hub: 越境先の取得元が相 1 を持たない（${fileRefKey(ref)} — 取得元契約の不変条件破れ）`,
+          `hub: the source of the cross-repo target has no phase 1 (${fileRefKey(ref)} — source contract invariant violated)`,
         );
       }
       // A ref of a source without phase 1 (a local directory) is not warmed; only one complete is
@@ -487,7 +491,7 @@ const runPrefetchPhase = async (
       //       so this alone does not restore the real cause. The final outcome is taken from the
       //       reason after phase 1's allSettled.
       if (prefetchSignal.aborted) throw prefetchSignal.reason;
-      throw context.fetchFailure(ref, "事前取得", error);
+      throw context.fetchFailure(ref, "prefetch", error);
     }
     // Check again right after the warm-up (the same before-and-after checks as fetchOne of the
     // whole-file surface) — with only the earlier check, files already in flight before the
@@ -641,8 +645,8 @@ export const openAsset = async (
         offset + length > ref.size
       ) {
         throw new Error(
-          `hub: ${ref.path} の区間 [${offset}, ${offset + length}) が不正` +
-            `（宣言 size ${ref.size} — 非負整数で size に収まる区間だけを読める）`,
+          `hub: ${ref.path} range [${offset}, ${offset + length}) is invalid` +
+            ` (declared size ${ref.size} — only ranges of non-negative integers within size can be read)`,
         );
       }
       return assertTightView(await reader.read(offset, length, readOptions), ref.path);

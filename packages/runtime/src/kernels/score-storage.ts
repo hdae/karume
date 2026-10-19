@@ -79,7 +79,7 @@ export const scoreKeyPart = (storage: ScoreStorage): string => (storage === "f16
 
 /** Note appended to the leading WGSL comment (empty for f32 — keeps the existing bytes). */
 export const scoreNote = (storage: ScoreStorage): string =>
-  storage === "f16" ? ", S は f16 格納（pack2x16float）" : "";
+  storage === "f16" ? ", S in f16 storage (pack2x16float)" : "";
 
 /**
  * WGSL element type of the S buffer. f16 storage packs 2 elements into one word, so it becomes a
@@ -182,15 +182,15 @@ export const assertScoreStorageSupported = (
   if (storage !== "f16") return;
   if (computeF16) {
     throw new CodegenError(
-      `${op}: S の f16 格納（s16）と f16 タイル計算（c16）は同時に指定できない` +
-        "（c16 は S を array<f16> で持つ別の形 — attentionScoreStorage か attentionCompute の" +
-        "どちらか一方にすること）",
+      `${op}: f16 storage of S (s16) and f16 tile compute (c16) cannot be given together` +
+        " (c16 is a different form that holds S as array<f16> — give only one of attentionScoreStorage" +
+        " and attentionCompute)",
     );
   }
   if (!v4) {
     throw new CodegenError(
-      `${op}: S の f16 格納（s16）は v4 経路専用` +
-        "（スカラ経路の部分書きは同じ u32 語への read-modify-write になる）",
+      `${op}: f16 storage of S (s16) is for the v4 path only` +
+        " (a partial write on the scalar path becomes a read-modify-write of the same u32 word)",
     );
   }
 };

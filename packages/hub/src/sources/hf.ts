@@ -71,10 +71,10 @@ const requestInit = (headers?: HeadersInit, signal?: AbortSignal): RequestInit =
  */
 const warnImplicitMain = (repo: string, revisionSha: string): void => {
   console.warn(
-    `@karume/hub: revision を指定していないため 'main' を解決した（repo ${repo} → ${revisionSha}）。\n` +
-      `main は付け替えられるので、同じコードが次の起動で別の重みを読み得る。次のどちらかで固定すること:\n` +
-      `  ① revision: "${revisionSha}" を渡す（この 1 行のコピーで pin が完成する）\n` +
-      `  ② @karume/models の *_SOURCES（公開配布リポの対応表 — パッケージ検証済みの pin）を使う`,
+    `@karume/hub: resolved 'main' because no revision was given (repo ${repo} → ${revisionSha}).\n` +
+      `main can be moved, so the same code may read different weights on the next start. Pin it in one of these ways:\n` +
+      `  ① pass revision: "${revisionSha}" (copying this one line completes the pin)\n` +
+      `  ② use *_SOURCES of @karume/models (the table of published distribution repos — pins verified by the package)`,
   );
 };
 
@@ -253,9 +253,9 @@ const pinnedHfSource = (
         // should open) or the inventory being deleted between the warm-up and the reopen (a race
         // with inventory deletion (7)), so fail naming every candidate.
         throw new Error(
-          `@karume/hub: ${ref.path} の区間読み口が温め直した直後も開かない` +
-            `（記録ハッシュを保持しないキャッシュ / CacheStorage が使えない / 温めと開き直しの` +
-            `間に在庫が消された〈evictCachedAssets・clearHubCache との競合〉の可能性）`,
+          `@karume/hub: the range reader for ${ref.path} does not open even right after re-warming` +
+            ` (possible causes: a cache that does not keep the recorded hash / CacheStorage is unavailable / the inventory was` +
+            ` deleted between warming and reopening <a race with evictCachedAssets or clearHubCache>)`,
         );
       }
       const entry = opened;
@@ -274,7 +274,7 @@ const pinnedHfSource = (
           // make a view over shared memory look sound by type alone).
           if (!(buffer instanceof ArrayBuffer)) {
             throw new Error(
-              `@karume/hub: ${ref.path} の区間読みが ArrayBuffer 以外の buffer を返した`,
+              `@karume/hub: the range read of ${ref.path} returned a buffer that is not an ArrayBuffer`,
             );
           }
           // The length check (exactly `length`?) and the tight view check belong to the fetch layer
@@ -353,8 +353,8 @@ export const createHfSource = (ref: HubRepoRef): DistributionSource => {
       // generation-resolution failure.
       if (!isCommitSha(revisionSha)) {
         throw new Error(
-          `@karume/hub: revision '${requested}' の解決応答が 40 桁小文字 hex の commit SHA でない` +
-            `（応答 '${revisionSha}' — 非準拠のミラーか fetch の差し替えを疑う）`,
+          `@karume/hub: the resolve response for revision '${requested}' is not a 40-digit lowercase hex commit SHA` +
+            ` (response '${revisionSha}' — suspect a non-conforming mirror or a replaced fetch)`,
         );
       }
       // Emit it **after** resolution — this is where the SHA to print is settled, and when

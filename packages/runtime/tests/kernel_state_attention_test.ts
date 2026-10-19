@@ -272,7 +272,7 @@ test("①③ の params 門が沈黙誤値になる幾何を全て拒否する",
   assertThrows(
     () => stateAttentionParams({ ...GEOMETRY, rowOffset: 6, rowsBlock: 4 }),
     CodegenError,
-    "行ブロック",
+    "row block",
   );
   // full: col_cap < C（P + Q ≤ C の context 側検査を通った形が S からはみ出す）
   assertThrows(() => stateAttentionParams({ ...GEOMETRY, colCap: 31 }), CodegenError, "col_cap");
@@ -299,7 +299,7 @@ test("①③ の params 門が沈黙誤値になる幾何を全て拒否する",
   assertThrows(
     () => stateAttentionParams({ ...GEOMETRY, scale: 1e39 }),
     CodegenError,
-    "scale は f32 として有限の数値",
+    "scale must be a finite number as f32",
   );
   assertThrows(() => stateAttentionParams({ ...GEOMETRY, depth: 2 ** 32 }), CodegenError, "depth");
   assertThrows(() => stateStatsParams(0, 4, 0, 32, 0), CodegenError, "batch_heads");
@@ -317,7 +317,7 @@ test("state_append の params 門（容量・正整数・u32 域）", () => {
   assertEquals([...stateAppendParams(base)], [2, 4, 3, 16, 0, 0, 0, 0]);
   assertEquals([...stateAppendParams({ ...base, window: 8 }).subarray(0, 5)], [2, 4, 3, 16, 8]);
   assertThrows(() => stateAppendParams({ ...base, window: 17 }), CodegenError, "window");
-  assertThrows(() => stateAppendParams({ ...base, depth: 0 }), CodegenError, "正整数");
+  assertThrows(() => stateAppendParams({ ...base, depth: 0 }), CodegenError, "positive integer");
   assertThrows(() => stateAppendParams({ ...base, capacity: -1 }), CodegenError, "capacity");
 });
 
@@ -408,11 +408,11 @@ test("dispatch 幾何は容量 C / col_cap を引数に取らない（64 → 655
 });
 
 test("dispatch の上限超過はタイル系が fail loudly・grid-stride 系が縮退", () => {
-  assertThrows(() => stateQkWorkgroups(DISPATCH, 100000, 1, 16, "t"), DispatchLimitError, "上限");
+  assertThrows(() => stateQkWorkgroups(DISPATCH, 100000, 1, 16, "t"), DispatchLimitError, "limit");
   assertThrows(
     () => statePvWorkgroups({ ...DISPATCH, batchHeads: 70000 }, 65535, "t"),
     DispatchLimitError,
-    "上限",
+    "limit",
   );
   // 論理長の値域門（Q ≥ 1・u32）
   assertThrows(() => stateQkWorkgroups(DISPATCH, 0, 0, LIMIT, "t"), CodegenError, "queryLength");
@@ -426,7 +426,11 @@ test("state_append の dispatch は Q に比例し P には依らない", () => 
   assertEquals(stateAppendWorkgroups(geometry, 64, LIMIT, "t"), [64, 1, 1]);
   // grid-stride なので上限は縮退
   assertEquals(stateAppendWorkgroups(geometry, 64, 8, "t"), [8, 1, 1]);
-  assertThrows(() => stateAppendWorkgroups(geometry, 0, LIMIT, "t"), CodegenError, "正整数");
+  assertThrows(
+    () => stateAppendWorkgroups(geometry, 0, LIMIT, "t"),
+    CodegenError,
+    "positive integer",
+  );
 });
 
 test("live 範囲の純関数（full は P+Q・sliding は W で頭打ち）", () => {
@@ -786,12 +790,12 @@ test("CPU 参照: 形の取り違えは突合の前で落ちる", () => {
   assertThrows(
     () => referenceStateAttention({ ...probe, heads: 3, kvHeads: 2 }),
     ReferenceOpError,
-    "割り切れない",
+    "not divisible",
   );
   assertThrows(
     () => referenceStateAttention({ ...probe, past: 4, capacity: 4 }),
     ReferenceOpError,
-    "容量",
+    "capacity",
   );
   assertThrows(
     () => referenceStateAttention({ ...probe, query: 2 }),
@@ -939,7 +943,7 @@ test("CPU 参照: NaN・非整数の次元は半端な shape の期待値へ化�
           slotV: filled(slotLength),
         }),
       ReferenceOpError,
-      "正の整数でない",
+      "not all positive integers",
       name,
     );
   }
@@ -1077,7 +1081,7 @@ test("①ₜ の params は語順どおりに詰まる（骨格の m/n/k は row
   assertThrows(
     () => stateQkTiledParams({ ...GEOMETRY, rowOffset: 6, rowsBlock: 4 }),
     CodegenError,
-    "行ブロック",
+    "row block",
   );
   assertThrows(() => stateQkTiledParams({ ...GEOMETRY, colCap: 31 }), CodegenError, "col_cap");
 });
@@ -1199,7 +1203,7 @@ test("③ₜ の params は語順どおりに詰まる（骨格の m/n/k は row
   assertThrows(
     () => statePvTiledParams({ ...GEOMETRY, rowOffset: 6, rowsBlock: 4 }),
     CodegenError,
-    "行ブロック",
+    "row block",
   );
   assertThrows(() => statePvTiledParams({ ...GEOMETRY, colCap: 31 }), CodegenError, "col_cap");
 });

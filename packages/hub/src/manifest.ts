@@ -490,7 +490,7 @@ type LabelSurvey = {
  */
 const createFail = ({ available, truncated }: LabelSurvey): Fail => {
   const note = truncated
-    ? "（利用可能ラベル〈available〉は規模上限を超えた表を上限件数で打ち切った）"
+    ? " (available labels <available>: tables above their size limit were cut off at the limit count)"
     : "";
   return {
     format: (message, cause) => new ManifestFormatError(message + note, { available, cause }),
@@ -511,7 +511,9 @@ const createFail = ({ available, truncated }: LabelSurvey): Fail => {
  */
 const assertNoForbiddenKeys = (value: unknown, where: string, depth: number): void => {
   if (depth > MAX_MANIFEST_DEPTH) {
-    throw new ManifestFormatError(`${where}: 入れ子が上限 ${MAX_MANIFEST_DEPTH} 段を超えた`);
+    throw new ManifestFormatError(
+      `${where}: nesting exceeds the limit of ${MAX_MANIFEST_DEPTH} levels`,
+    );
   }
   if (Array.isArray(value)) {
     value.forEach((entry, index) => assertNoForbiddenKeys(entry, `${where}[${index}]`, depth + 1));
@@ -520,7 +522,7 @@ const assertNoForbiddenKeys = (value: unknown, where: string, depth: number): vo
   if (!isRecord(value)) return;
   for (const key of Object.keys(value)) {
     if (FORBIDDEN_KEYS.includes(key)) {
-      throw new ManifestFormatError(`${where}: 禁止キー '${key}' が現れた`);
+      throw new ManifestFormatError(`${where}: forbidden key '${key}' found`);
     }
     assertNoForbiddenKeys(value[key], `${where}.${key}`, depth + 1);
   }
@@ -586,7 +588,7 @@ const assertAllowedKeys = (
 ): void => {
   for (const key of Object.keys(value)) {
     if (!allowed.includes(key)) {
-      throw fail.reference(`${where}: 未知キー '${key}'（許可: ${allowed.join(" / ")}）`);
+      throw fail.reference(`${where}: unknown key '${key}' (allowed: ${allowed.join(" / ")})`);
     }
   }
 };
@@ -600,19 +602,19 @@ const assertPath = (fail: Fail, path: string, where: string): void => {
   for (const segment of path.split("/")) {
     if (segment === "") {
       throw fail.path(
-        `${where}: path '${path}' に空セグメントがある（先頭 / 末尾 / 連続スラッシュ）`,
+        `${where}: path '${path}' has an empty segment (leading / trailing / consecutive slash)`,
         path,
       );
     }
     if (segment.startsWith(".")) {
       throw fail.path(
-        `${where}: path '${path}' に先頭ドットのセグメント '${segment}' がある`,
+        `${where}: path '${path}' has a segment with a leading dot '${segment}'`,
         path,
       );
     }
     if (!SEGMENT_RE.test(segment)) {
       throw fail.path(
-        `${where}: path '${path}' のセグメント '${segment}' が許可文字 [A-Za-z0-9._-] に一致しない`,
+        `${where}: path '${path}' segment '${segment}' does not match the allowed characters [A-Za-z0-9._-]`,
         path,
       );
     }
@@ -635,8 +637,8 @@ export const isRepoName = (repo: string): boolean => {
 const assertRepo = (fail: Fail, repo: string, where: string): void => {
   if (!isRepoName(repo)) {
     throw fail.format(
-      `${where}.repo: 'owner/name' の 2 セグメントでない / 許可文字 [A-Za-z0-9._-]（先頭ドット禁止）` +
-        `に一致しない: '${repo}'`,
+      `${where}.repo: not the 2 segments of 'owner/name' / does not match the allowed characters [A-Za-z0-9._-] (no leading dot)` +
+        `: '${repo}'`,
     );
   }
 };
@@ -679,25 +681,25 @@ const parseCrossRepo = (
   if (!hasRepo && !hasRevision) return undefined;
   if (hasRepo !== hasRevision) {
     throw fail.format(
-      `${where}: 越境参照は 'repo' と 'revision' を両方同時に書く` +
-        `（期待 両方 / 実際 ${hasRepo ? "'repo' だけ" : "'revision' だけ"}）`,
+      `${where}: a cross-repo reference writes both 'repo' and 'revision' together` +
+        ` (expected both / actual ${hasRepo ? "only 'repo'" : "only 'revision'"})`,
     );
   }
   const repo = raw["repo"];
   const revision = raw["revision"];
-  if (typeof repo !== "string") throw fail.format(`${where}.repo: 文字列でない`);
-  if (typeof revision !== "string") throw fail.format(`${where}.revision: 文字列でない`);
+  if (typeof repo !== "string") throw fail.format(`${where}.repo: not a string`);
+  if (typeof revision !== "string") throw fail.format(`${where}.revision: not a string`);
   assertRepo(fail, repo, where);
   if (!COMMIT_SHA_RE.test(revision)) {
     throw fail.format(
-      `${where}.revision: 40 桁小文字 hex の commit SHA でなければならない` +
-        `（ブランチ・タグ・短縮形は不可）: '${revision}'`,
+      `${where}.revision: must be a 40-digit lowercase hex commit SHA` +
+        ` (no branches, tags or short forms): '${revision}'`,
     );
   }
   if (repo === ownRepo) {
     throw fail.format(
-      `${where}.repo: 越境参照が manifest を読み込んだ repo 自身 '${repo}' を指している` +
-        `（自リポのファイルは 'repo' / 'revision' を書かずに参照する — ADR 0038 追記 2026-10-11）`,
+      `${where}.repo: the cross-repo reference points at '${repo}', the repo the manifest was loaded from` +
+        ` (files of the own repo are referenced without 'repo' / 'revision' — ADR 0038 addendum 2026-10-11)`,
     );
   }
   return { repo, revision };
@@ -717,16 +719,16 @@ const parseFileRef = (
   scope: RefScope,
   { allowEmpty = false }: { readonly allowEmpty?: boolean } = {},
 ): FileRef => {
-  if (!isRecord(raw)) throw fail.format(`${where}: ファイル参照がオブジェクトでない`);
+  if (!isRecord(raw)) throw fail.format(`${where}: file reference is not an object`);
   assertAllowedKeys(fail, raw, FILE_REF_KEYS, where);
   const path = raw["path"];
   const size = raw["size"];
   const sha256 = raw["sha256"];
-  if (typeof path !== "string") throw fail.format(`${where}: 'path' が無い / 文字列でない`);
-  if (typeof size !== "number") throw fail.format(`${where}: 'size' が無い / 数値でない`);
-  if (typeof sha256 !== "string") throw fail.format(`${where}: 'sha256' が無い / 文字列でない`);
+  if (typeof path !== "string") throw fail.format(`${where}: 'path' missing / not a string`);
+  if (typeof size !== "number") throw fail.format(`${where}: 'size' missing / not a number`);
+  if (typeof sha256 !== "string") throw fail.format(`${where}: 'sha256' missing / not a string`);
   if (!SHA256_RE.test(sha256)) {
-    throw fail.format(`${where}: 'sha256' は小文字 hex 64 桁でなければならない: '${sha256}'`);
+    throw fail.format(`${where}: 'sha256' must be 64 lowercase hex digits: '${sha256}'`);
   }
   // Empty is allowed only for index 1 and above of `container.parts` (a zero-length part — ADR 0109
   // decision 3). In any other field `size: 0` is "a ref that brings no bytes when fetched", so it
@@ -734,7 +736,7 @@ const parseFileRef = (
   const floor = allowEmpty ? 0 : 1;
   if (!Number.isSafeInteger(size) || size < floor || size > MAX_FILE_BYTES) {
     throw fail.format(
-      `${where}: 'size' は ${floor} <= size <= ${MAX_FILE_BYTES} の安全整数でなければならない` +
+      `${where}: 'size' must be a safe integer with ${floor} <= size <= ${MAX_FILE_BYTES}` +
         `: ${size}`,
     );
   }
@@ -742,7 +744,7 @@ const parseFileRef = (
   // 3).
   if (size === 0 && sha256 !== EMPTY_SHA256) {
     throw fail.format(
-      `${where}: 'size' が 0 の参照の 'sha256' は空列の値 ${EMPTY_SHA256} でなければならない` +
+      `${where}: the 'sha256' of a reference with 'size' 0 must be the empty-string value ${EMPTY_SHA256}` +
         `: '${sha256}'`,
     );
   }
@@ -754,8 +756,8 @@ const parseFileRef = (
   if (previous !== undefined) {
     if (previous.size !== size || previous.sha256 !== sha256) {
       throw fail.reference(
-        `${where}: 重複参照 '${key}' の {size, sha256} が食い違う ` +
-          `({${previous.size}, ${previous.sha256}} と {${size}, ${sha256}})`,
+        `${where}: the {size, sha256} of duplicate reference '${key}' disagree ` +
+          `({${previous.size}, ${previous.sha256}} and {${size}, ${sha256}})`,
       );
     }
     return previous;
@@ -769,20 +771,20 @@ const parseFileRef = (
  * document independently.
  */
 const parseDocument = (fail: Fail, raw: unknown, where: string): DocumentExpectation => {
-  if (!isRecord(raw)) throw fail.format(`${where}: 無い / オブジェクトでない`);
+  if (!isRecord(raw)) throw fail.format(`${where}: missing / not an object`);
   assertAllowedKeys(fail, raw, DOCUMENT_KEYS, where);
   const length = raw["length"];
   const sha256 = raw["sha256"];
-  if (typeof length !== "number") throw fail.format(`${where}: 'length' が無い / 数値でない`);
+  if (typeof length !== "number") throw fail.format(`${where}: 'length' missing / not a number`);
   if (!Number.isSafeInteger(length) || length <= 0 || length > MAX_DESCRIPTOR_BYTES) {
     throw fail.format(
-      `${where}: 'length' は 0 < length <= ${MAX_DESCRIPTOR_BYTES} の安全整数でなければならない` +
+      `${where}: 'length' must be a safe integer with 0 < length <= ${MAX_DESCRIPTOR_BYTES}` +
         `: ${length}`,
     );
   }
-  if (typeof sha256 !== "string") throw fail.format(`${where}: 'sha256' が無い / 文字列でない`);
+  if (typeof sha256 !== "string") throw fail.format(`${where}: 'sha256' missing / not a string`);
   if (!SHA256_RE.test(sha256)) {
-    throw fail.format(`${where}: 'sha256' は小文字 hex 64 桁でなければならない: '${sha256}'`);
+    throw fail.format(`${where}: 'sha256' must be 64 lowercase hex digits: '${sha256}'`);
   }
   return { length, sha256 };
 };
@@ -802,15 +804,15 @@ const parseParts = (
   where: string,
   scope: RefScope,
 ): readonly FileRef[] => {
-  if (!Array.isArray(raw)) throw fail.format(`${where}: 無い / 配列でない`);
+  if (!Array.isArray(raw)) throw fail.format(`${where}: missing / not an array`);
   if (raw.length < 2) {
     throw fail.format(
-      `${where}: ${raw.length} 件（part 0〈descriptor〉+ part 1〈const〉の 2 件以上が要る` +
-        ` — container-v1 §8）`,
+      `${where}: ${raw.length} entries (at least 2 are required: part 0 <descriptor> + part 1 <const>` +
+        ` — container-v1 §8)`,
     );
   }
   if (raw.length > MAX_PARTS) {
-    throw fail.format(`${where}: ${raw.length} 件が上限 ${MAX_PARTS} を超えた`);
+    throw fail.format(`${where}: ${raw.length} entries exceed the limit of ${MAX_PARTS}`);
   }
   return raw.map((entry, index) => {
     // Zero length only in the shape "part 1 with an empty const region" (part 0 always holds the
@@ -818,8 +820,8 @@ const parseParts = (
     const ref = parseFileRef(fail, entry, `${where}[${index}]`, scope, { allowEmpty: index > 0 });
     if (ref.size > MAX_PART_BYTES) {
       throw fail.format(
-        `${where}[${index}]: part '${ref.path}' が ${ref.size} バイトで` +
-          `上限 ${MAX_PART_BYTES} を超えた（part 長の天井 — container-v1 §10）`,
+        `${where}[${index}]: part '${ref.path}' is ${ref.size} bytes and` +
+          ` exceeds the limit of ${MAX_PART_BYTES} (the part length ceiling — container-v1 §10)`,
       );
     }
     return ref;
@@ -832,10 +834,10 @@ const parseParts = (
  * cross-repo references.
  */
 const parseContainer = (fail: Fail, raw: unknown, where: string, scope: RefScope): ContainerRef => {
-  if (!isRecord(raw)) throw fail.format(`${where}: 無い / オブジェクトでない`);
+  if (!isRecord(raw)) throw fail.format(`${where}: missing / not an object`);
   assertAllowedKeys(fail, raw, CONTAINER_KEYS, where);
   const descriptorRaw = raw["descriptor"];
-  if (!isRecord(descriptorRaw)) throw fail.format(`${where}.descriptor: 無い / オブジェクトでない`);
+  if (!isRecord(descriptorRaw)) throw fail.format(`${where}.descriptor: missing / not an object`);
   assertAllowedKeys(fail, descriptorRaw, DESCRIPTOR_KEYS, `${where}.descriptor`);
   const graph = parseDocument(fail, descriptorRaw["graph"], `${where}.descriptor.graph`);
   // A krm always has a model descriptor (karume/5 has no field that distributes a graph-only `krg`
@@ -849,9 +851,9 @@ const parseContainer = (fail: Fail, raw: unknown, where: string, scope: RefScope
   const part0 = CONTAINER_HEADER_BYTES + graph.length + model.length;
   if (parts[0].size !== part0) {
     throw fail.format(
-      `${where}.parts[0]: part 0 の size ${parts[0].size} が` +
-        ` ヘッダ ${CONTAINER_HEADER_BYTES} + グラフ記述 ${graph.length} +` +
-        ` モデル記述 ${model.length} = ${part0} と違う（container-v1 §8）`,
+      `${where}.parts[0]: the size ${parts[0].size} of part 0 differs from` +
+        ` header ${CONTAINER_HEADER_BYTES} + graph descriptor ${graph.length} +` +
+        ` model descriptor ${model.length} = ${part0} (container-v1 §8)`,
     );
   }
 
@@ -867,9 +869,9 @@ const parseContainer = (fail: Fail, raw: unknown, where: string, scope: RefScope
         : cross !== undefined && cross.repo === head.repo && cross.revision === head.revision;
     if (!agrees) {
       throw fail.format(
-        `${where}.parts[${index}]: 越境参照は容器単位 — ADR 0109 決定 3` +
-          `（part 0 は ${head === undefined ? "自リポ" : `${head.repo}@${head.revision}`} /` +
-          ` この part は ${cross === undefined ? "自リポ" : `${cross.repo}@${cross.revision}`}）`,
+        `${where}.parts[${index}]: cross-repo references are per container — ADR 0109 decision 3` +
+          ` (part 0 is ${head === undefined ? "own repo" : `${head.repo}@${head.revision}`} /` +
+          ` this part is ${cross === undefined ? "own repo" : `${cross.repo}@${cross.revision}`})`,
       );
     }
   }
@@ -882,7 +884,7 @@ const parseWeightContainer = (
   where: string,
   scope: RefScope,
 ): WeightContainer => {
-  if (!isRecord(raw)) throw fail.format(`${where}: dtype エントリがオブジェクトでない`);
+  if (!isRecord(raw)) throw fail.format(`${where}: dtype entry is not an object`);
   assertAllowedKeys(fail, raw, WEIGHT_DTYPE_KEYS, where);
   return { container: parseContainer(fail, raw["container"], `${where}.container`, scope) };
 };
@@ -894,10 +896,12 @@ const parseWeightEntry = (
   where: string,
   scope: RefScope,
 ): WeightEntry => {
-  if (!isRecord(raw)) throw fail.format(`${where}: weights エントリがオブジェクトでない`);
+  if (!isRecord(raw)) throw fail.format(`${where}: weights entry is not an object`);
   const labels = Object.keys(raw);
   if (labels.length === 0) {
-    throw fail.format(`${where}: 空（dtype ラベルが 1 つ以上要る — dtype キーは必須）`);
+    throw fail.format(
+      `${where}: empty (at least one dtype label is required — dtype keys are mandatory)`,
+    );
   }
   let entry: WeightEntry = {};
   for (const label of labels) {
@@ -918,10 +922,12 @@ const readEnum = <T extends string>(
 ): T | undefined => {
   if (!Object.hasOwn(raw, key)) return undefined;
   const value = raw[key];
-  if (typeof value !== "string") throw fail.format(`${where}.${key}: 文字列でない`);
+  if (typeof value !== "string") throw fail.format(`${where}.${key}: not a string`);
   const found = values.find((candidate) => candidate === value);
   if (found === undefined) {
-    throw fail.reference(`${where}.${key}: 未知の値 '${value}'（許可: ${values.join(" / ")}）`);
+    throw fail.reference(
+      `${where}.${key}: unknown value '${value}' (allowed: ${values.join(" / ")})`,
+    );
   }
   return found;
 };
@@ -935,13 +941,13 @@ const readBoolean = (
 ): boolean | undefined => {
   if (!Object.hasOwn(raw, key)) return undefined;
   const value = raw[key];
-  if (typeof value !== "boolean") throw fail.format(`${where}.${key}: 真偽値でない`);
+  if (typeof value !== "boolean") throw fail.format(`${where}.${key}: not a boolean`);
   return value;
 };
 
 const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
   if (raw === undefined) return {};
-  if (!isRecord(raw)) throw fail.format(`${where}.session: オブジェクトでない`);
+  if (!isRecord(raw)) throw fail.format(`${where}.session: not an object`);
   assertAllowedKeys(fail, raw, Object.keys(SESSION_KEYS), `${where}.session`);
   const at = `${where}.session`;
   const linearCompute = readEnum(fail, raw, "linearCompute", LINEAR_COMPUTE, at);
@@ -972,12 +978,12 @@ const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
 
 const parseGpuFeatures = (fail: Fail, raw: unknown, where: string): GpuFeaturesSpec | undefined => {
   if (raw === undefined) return undefined;
-  if (!isRecord(raw)) throw fail.format(`${where}.gpuFeatures: オブジェクトでない`);
+  if (!isRecord(raw)) throw fail.format(`${where}.gpuFeatures: not an object`);
   assertAllowedKeys(fail, raw, GPU_FEATURE_KEYS, `${where}.gpuFeatures`);
   if (!Object.hasOwn(raw, "shaderF16")) return {};
   const shaderF16 = raw["shaderF16"];
   if (typeof shaderF16 !== "boolean") {
-    throw fail.format(`${where}.gpuFeatures.shaderF16: 真偽値でない`);
+    throw fail.format(`${where}.gpuFeatures.shaderF16: not a boolean`);
   }
   return { shaderF16 };
 };
@@ -993,31 +999,33 @@ const parseQuantWeights = (
   where: string,
   weights: Readonly<Record<string, WeightEntry>>,
 ): Readonly<Record<string, string>> => {
-  if (!isRecord(raw)) throw fail.format(`${where}.weights: 無い / オブジェクトでない`);
+  if (!isRecord(raw)) throw fail.format(`${where}.weights: missing / not an object`);
   let mapping: Readonly<Record<string, string>> = {};
   for (const name of Object.keys(raw)) {
     if (!Object.hasOwn(weights, name)) {
       throw fail.reference(
-        `${where}.weights: 未知の weights '${name}'` +
-          `（利用可能: ${Object.keys(weights).join(" / ")}）`,
+        `${where}.weights: unknown weights '${name}'` +
+          ` (available: ${Object.keys(weights).join(" / ")})`,
       );
     }
     const label = raw[name];
     if (typeof label !== "string") {
-      throw fail.format(`${where}.weights.${name}: dtype ラベルが文字列でない`);
+      throw fail.format(`${where}.weights.${name}: dtype label is not a string`);
     }
     const entry = weights[name];
     if (!Object.hasOwn(entry, label)) {
       throw fail.reference(
-        `${where}.weights: '${name}' に dtype '${label}' が無い` +
-          `（利用可能: ${Object.keys(entry).join(" / ")}）`,
+        `${where}.weights: '${name}' has no dtype '${label}'` +
+          ` (available: ${Object.keys(entry).join(" / ")})`,
       );
     }
     mapping = { ...mapping, [name]: label };
   }
   for (const name of Object.keys(weights)) {
     if (!Object.hasOwn(mapping, name)) {
-      throw fail.reference(`${where}.weights: '${name}' の dtype 指定が無い（完全写像が必要）`);
+      throw fail.reference(
+        `${where}.weights: '${name}' has no dtype assigned (a complete mapping is required)`,
+      );
     }
   }
   return mapping;
@@ -1041,11 +1049,13 @@ const parseText = (
 ): string | undefined => {
   if (raw === undefined) return undefined;
   if (typeof raw !== "string") {
-    throw fail.format(`${where}.${key}: 期待 文字列 / 実際 ${typeof raw}`);
+    throw fail.format(`${where}.${key}: expected string / actual ${typeof raw}`);
   }
   const length = Array.from(raw).length;
   if (length > max) {
-    throw fail.format(`${where}.${key}: 期待 ${max} 文字以内 / 実際 ${length} 文字`);
+    throw fail.format(
+      `${where}.${key}: expected at most ${max} characters / actual ${length} characters`,
+    );
   }
   return raw;
 };
@@ -1065,14 +1075,14 @@ const parseRequiredLimits = (
 ): RequiredLimitsSpec | undefined => {
   if (raw === undefined) return undefined;
   const at = `${where}.requiredLimits`;
-  if (!isRecord(raw)) throw fail.format(`${at}: オブジェクトでない`);
+  if (!isRecord(raw)) throw fail.format(`${at}: not an object`);
   assertAllowedKeys(fail, raw, REQUIRED_LIMIT_NAMES, at);
   let limits: RequiredLimitsSpec = {};
   for (const name of Object.keys(raw)) {
     const value = raw[name];
     if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
       throw fail.format(
-        `${at}.${name}: 期待 正の安全整数 / 実際 ${JSON.stringify(value) ?? typeof value}`,
+        `${at}.${name}: expected positive safe integer / actual ${JSON.stringify(value) ?? typeof value}`,
       );
     }
     limits = { ...limits, [name]: value };
@@ -1086,7 +1096,7 @@ const parseQuant = (
   where: string,
   weights: Readonly<Record<string, WeightEntry>>,
 ): Quant => {
-  if (!isRecord(raw)) throw fail.format(`${where}: quant がオブジェクトでない`);
+  if (!isRecord(raw)) throw fail.format(`${where}: quant is not an object`);
   assertAllowedKeys(fail, raw, QUANT_KEYS, where);
   const mapping = parseQuantWeights(fail, raw["weights"], where, weights);
   const session = parseSession(fail, raw["session"], where);
@@ -1111,10 +1121,10 @@ const parseQuant = (
 };
 
 const parsePipeline = (fail: Fail, raw: unknown, where: string): PipelineId => {
-  if (typeof raw !== "string") throw fail.format(`${where}.pipeline: 無い / 文字列でない`);
+  if (typeof raw !== "string") throw fail.format(`${where}.pipeline: missing / not a string`);
   const matched = PIPELINE_RE.exec(raw);
   if (matched === null) {
-    throw fail.format(`${where}.pipeline: '<name>/<major>' の形でない: '${raw}'`);
+    throw fail.format(`${where}.pipeline: not of the form '<name>/<major>': '${raw}'`);
   }
   // The regular expression does not bound the digit count, so check for a safe integer after
   // conversion — otherwise 400 digits become `Infinity`, and above 2^53 a major rounded to a
@@ -1123,24 +1133,24 @@ const parsePipeline = (fail: Fail, raw: unknown, where: string): PipelineId => {
   const major = Number(matched[2]);
   if (!Number.isSafeInteger(major)) {
     throw fail.format(
-      `${where}.pipeline: major が安全な整数の範囲（${Number.MAX_SAFE_INTEGER} 以下）に無い: '${raw}'`,
+      `${where}.pipeline: major is outside the safe integer range (at most ${Number.MAX_SAFE_INTEGER}): '${raw}'`,
     );
   }
   return { name: matched[1], major };
 };
 
 const parseFormat = (fail: Fail, raw: unknown): string => {
-  if (typeof raw !== "string") throw fail.format("format: 無い / 文字列でない");
+  if (typeof raw !== "string") throw fail.format("format: missing / not a string");
   const matched = FORMAT_RE.exec(raw);
   if (matched === null) {
-    throw fail.format(`format: 'karume/<major>' でない（取り違え）: '${raw}'`);
+    throw fail.format(`format: not 'karume/<major>' (mixed-up file): '${raw}'`);
   }
   const major = Number(matched[1]);
   if (major !== FORMAT_MAJOR) {
     throw fail.format(
-      `format: 未対応の major '${raw}' — この版は karume/${FORMAT_MAJOR} のみ読む` +
-        `（旧版のパーサは持たない。配布形を karume/${FORMAT_MAJOR} で上げ直すか、` +
-        `その manifest を読める版の @karume/hub を使う）`,
+      `format: unsupported major '${raw}' — this version reads only karume/${FORMAT_MAJOR}` +
+        ` (there is no parser for older versions; re-upload the distribution as karume/${FORMAT_MAJOR},` +
+        ` or use a version of @karume/hub that can read that manifest)`,
     );
   }
   return raw;
@@ -1152,12 +1162,14 @@ const parsePipelineConfig = (
   where: string,
 ): Readonly<Record<string, unknown>> => {
   if (!isRecord(raw)) {
-    throw fail.format(`${where}.pipelineConfig: 無い / オブジェクトでない（空でも {} を明示）`);
+    throw fail.format(
+      `${where}.pipelineConfig: missing / not an object (write {} explicitly even when empty)`,
+    );
   }
   const bytes = new TextEncoder().encode(JSON.stringify(raw)).length;
   if (bytes > MAX_PIPELINE_CONFIG_BYTES) {
     throw fail.format(
-      `${where}.pipelineConfig: ${bytes} バイトが上限 ${MAX_PIPELINE_CONFIG_BYTES} を超えた`,
+      `${where}.pipelineConfig: ${bytes} bytes exceed the limit of ${MAX_PIPELINE_CONFIG_BYTES}`,
     );
   }
   return raw;
@@ -1175,11 +1187,12 @@ const parseMap = <T>(
   parseEntry: (name: string, value: unknown) => T,
   allowEmpty = false,
 ): Readonly<Record<string, T>> => {
-  if (!isRecord(raw)) throw fail.format(`${where}: 無い / オブジェクトでない`);
+  if (!isRecord(raw)) throw fail.format(`${where}: missing / not an object`);
   const names = Object.keys(raw);
-  if (names.length === 0 && !allowEmpty) throw fail.format(`${where}: 空（1 つ以上が要る）`);
+  if (names.length === 0 && !allowEmpty)
+    throw fail.format(`${where}: empty (at least one is required)`);
   if (names.length > max) {
-    throw fail.format(`${where}: ${names.length} 件が上限 ${max} を超えた`);
+    throw fail.format(`${where}: ${names.length} entries exceed the limit of ${max}`);
   }
   let parsed: Readonly<Record<string, T>> = {};
   for (const name of names) {
@@ -1198,7 +1211,7 @@ const parseModel = (
   const { available } = survey;
   const fail = createFail(survey);
   const where = `models.${name}`;
-  if (!isRecord(raw)) throw fail.format(`${where}: モデルエントリがオブジェクトでない`);
+  if (!isRecord(raw)) throw fail.format(`${where}: model entry is not an object`);
   assertAllowedKeys(fail, raw, MODEL_KEYS, where);
 
   const pipeline = parsePipeline(fail, raw["pipeline"], where);
@@ -1223,12 +1236,12 @@ const parseModel = (
 
   const defaultQuant = raw["defaultQuant"];
   if (typeof defaultQuant !== "string") {
-    throw fail.format(`${where}.defaultQuant: 無い / 文字列でない`);
+    throw fail.format(`${where}.defaultQuant: missing / not a string`);
   }
   if (!Object.hasOwn(quants, defaultQuant)) {
     throw fail.reference(
-      `${where}.defaultQuant: '${defaultQuant}' は quants に無い` +
-        `（利用可能: ${Object.keys(quants).join(" / ")}）`,
+      `${where}.defaultQuant: '${defaultQuant}' is not in quants` +
+        ` (available: ${Object.keys(quants).join(" / ")})`,
     );
   }
   return {
@@ -1265,7 +1278,7 @@ export const parseRepoManifest = (text: string, ownRepo: string | undefined): Ma
   const bytes = new TextEncoder().encode(text).length;
   if (bytes > MAX_MANIFEST_BYTES) {
     throw new ManifestFormatError(
-      `manifest: ${bytes} バイトが上限 ${MAX_MANIFEST_BYTES} を超えた`,
+      `manifest: ${bytes} bytes exceed the limit of ${MAX_MANIFEST_BYTES}`,
       { available: NO_LABELS },
     );
   }
@@ -1273,24 +1286,24 @@ export const parseRepoManifest = (text: string, ownRepo: string | undefined): Ma
   try {
     root = JSON.parse(text);
   } catch (error) {
-    throw new ManifestFormatError(`manifest: JSON として読めない`, { cause: error });
+    throw new ManifestFormatError(`manifest: cannot be read as JSON`, { cause: error });
   }
-  if (!isRecord(root)) throw new ManifestFormatError("manifest: 最上位がオブジェクトでない");
+  if (!isRecord(root)) throw new ManifestFormatError("manifest: the top level is not an object");
   assertNoForbiddenKeys(root, "manifest", 0);
 
   const survey = surveyLabels(root);
   const { available } = survey;
   const fail = createFail(survey);
   // MUST: check `format` **before** the unknown-key check. A v1 manifest spells its top level
-  // entirely differently, so in the reverse order an off-target diagnostic `未知キー 'components'`
+  // entirely differently, so in the reverse order an off-target diagnostic `unknown key 'components'`
   // would appear and hide the real reason (this version reads only karume/5) (ADR 0109
   // decision 1). The difference from v4 is only inside the dtype entries, so there it becomes the
-  // minor diagnostic `未知キー 'shards'`.
+  // minor diagnostic `unknown key 'shards'`.
   const format = parseFormat(fail, root["format"]);
   assertAllowedKeys(fail, root, ENVELOPE_KEYS, "manifest");
   const generator = root["generator"];
   if (typeof generator !== "string" || generator === "") {
-    throw fail.format("generator: 無い / 非空文字列でない");
+    throw fail.format("generator: missing / not a non-empty string");
   }
 
   // MUST: the duplicate-path check shares one table across the whole manifest — sharing between
@@ -1302,11 +1315,11 @@ export const parseRepoManifest = (text: string, ownRepo: string | undefined): Ma
   );
 
   const defaultModel = root["defaultModel"];
-  if (typeof defaultModel !== "string") throw fail.format("defaultModel: 無い / 文字列でない");
+  if (typeof defaultModel !== "string") throw fail.format("defaultModel: missing / not a string");
   if (!Object.hasOwn(models, defaultModel)) {
     throw fail.reference(
-      `defaultModel: '${defaultModel}' は models に無い` +
-        `（利用可能: ${Object.keys(models).join(" / ")}）`,
+      `defaultModel: '${defaultModel}' is not in models` +
+        ` (available: ${Object.keys(models).join(" / ")})`,
     );
   }
   return { format, generator, defaultModel, models, available };

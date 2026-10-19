@@ -403,8 +403,8 @@ export const attentionQkI8a8Wgsl = (
   // MUST: the payload counts in packs and the scale in rows (mixing up the units reads the next head).
   const qRows = rowWindow ? "dims.rows_full" : "dims.m";
   return `// karume attention_qk (S[b,m,n] = q[b,m,d] · k[b,n,d]ᵀ, integer dot product of per-token i8 q and k${
-    dp4a ? "" : "・エミュ"
-  }, half scale on the dequant side${scoreNote(score)}${rowWindow ? ", 行窓 a" : ""}, ${i8a8GeometryNote(
+    dp4a ? "" : " (emulated)"
+  }, half scale on the dequant side${scoreNote(score)}${rowWindow ? ", row window a" : ""}, ${i8a8GeometryNote(
     geometry,
   )}${v4 ? " + vec4" : ""})
 struct Dims {
@@ -443,7 +443,7 @@ ${
   v4 ? `  let n4 = dims.n / ${I8A8_PACK}u;\n` : ""
 }  // The batch axis folding B and H (uniform per workgroup — a precondition for the inner
   // workgroupBarrier to meet WGSL's uniformity requirement). MUST: the q / k payloads count in
-  // **packs**, the scales in rows, S in elements${v4 ? "（v4 では quad）" : ""} — mixing up the units
+  // **packs**, the scales in rows, S in elements${v4 ? " (quads in v4)" : ""} — mixing up the units
   // reads and writes the next head when B·H ≥ 2 (a wrong value without an exception, invisible
   // to tests with B=H=1)
   let qbase = wid.z * ${qRows} * k4${rowWindow ? " + dims.row_offset * k4" : ""};
@@ -451,12 +451,12 @@ ${
   let qsbase = wid.z * ${qRows}${rowWindow ? " + dims.row_offset" : ""};
   let ksbase = wid.z * dims.n;
   let sbase = wid.z * dims.m * ${v4 ? "n4" : "dims.n"};
-${prologueA(geometry, "qbase", "q タイルの担当")}
+${prologueA(geometry, "qbase", "q tile assignment")}
 ${prologueB(
   geometry,
   "kbase",
   "krow_base",
-  "k は [N,D] のまま読む（連続方向が D = パック方向なので**転置が要らない**）",
+  "k is read as [N,D] as is (the contiguous direction D is the pack direction, so **no transpose is needed**)",
 )}
   // The loop condition is uniform (dims is a uniform buffer) — needed for the inner
   // workgroupBarrier to meet WGSL's uniformity requirement
@@ -496,14 +496,18 @@ export const attentionQkI8a8Params = (
   // in f64 that becomes +Inf in f32 contaminates S through 0·Inf = NaN. Redundant with the attrs
   // check on the public API side).
   if (!Number.isFinite(Math.fround(scale))) {
-    throw new CodegenError(`attention_qk i8a8 params: scale は f32 で有限の数値（${scale}）`);
+    throw new CodegenError(
+      `attention_qk i8a8 params: scale must be a finite number as f32 (${scale})`,
+    );
   }
   if (!Number.isSafeInteger(k) || k < 0 || k % 4 !== 0) {
-    throw new CodegenError(`attention_qk i8a8 params: k は 4 の倍数の非負整数（${k}）`);
+    throw new CodegenError(
+      `attention_qk i8a8 params: k must be a non-negative integer multiple of 4 (${k})`,
+    );
   }
   if (k > LINEAR_I8A8_MAX_K) {
     throw new CodegenError(
-      `attention_qk i8a8 params: k=${k} が i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える`,
+      `attention_qk i8a8 params: k=${k} exceeds the i32 reduction guard ${LINEAR_I8A8_MAX_K}`,
     );
   }
   const params = gemmParams("attention_qk", m, n, k);
@@ -511,7 +515,7 @@ export const attentionQkI8a8Params = (
     new Float32Array(params.buffer)[3] = scale;
     return params;
   }
-  assertGemmRowWindow("attention_qk i8a8 行窓 params", m, window);
+  assertGemmRowWindow("attention_qk i8a8 row window params", m, window);
   const wide = new Uint32Array(8);
   wide.set(params.subarray(0, 3));
   new Float32Array(wide.buffer)[3] = scale;
@@ -675,8 +679,8 @@ export const attentionPvI8a8Wgsl = (
   // run.
   const oUnit = v4 ? "n4" : "dims.n";
   return `// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P̃ = round(127·exp(S − m)) not materialised${
-    dp4a ? "" : "・エミュ"
-  }, v is per-column i8 (Vᵀ contiguous)${scoreNote(score)}${rowWindow ? ", 行窓 c" : ""}, ${i8a8GeometryNote(
+    dp4a ? "" : " (emulated)"
+  }, v is per-column i8 (Vᵀ contiguous)${scoreNote(score)}${rowWindow ? ", row window c" : ""}, ${i8a8GeometryNote(
     geometry,
   )}${v4 ? " + vec4" : ""})
 struct Dims {
@@ -713,7 +717,7 @@ ${
   v4 ? `  let n4 = dims.n / ${I8A8_PACK}u;\n` : ""
 }  // The batch axis folding B and H (uniform per workgroup — a precondition for the inner
   // workgroupBarrier to meet WGSL's uniformity requirement). MUST: S counts in quads, vq in packs,
-  // the row statistics in 2 words per row, vscale in D entries, O in elements${v4 ? "（v4 では quad）" : ""}
+  // the row statistics in 2 words per row, vscale in D entries, O in elements${v4 ? " (quads in v4)" : ""}
   // — mixing up the units reads and writes the next head when B·H ≥ 2 (a wrong value without an
   // exception, invisible with B=H=1)
   let sbase = wid.z * dims.m * k4;
@@ -723,7 +727,7 @@ ${
   let obase = wid.z * ${rowWindow ? "dims.rows_full" : "dims.m"} * ${oUnit}${
     rowWindow ? ` + dims.row_offset * ${oUnit}` : ""
   };
-${prologueA(geometry, "sbase", "P̃ タイルの担当")}
+${prologueA(geometry, "sbase", "P̃ tile assignment")}
   // Row max m (invariant over the K tile loop, so read once). On the edge tile arow >= M can
   // happen, so the index falls back to 0 (the value read is used only in the arow < M branch)
 ${prologuePvStats(geometry)}
@@ -731,7 +735,7 @@ ${prologueB(
   geometry,
   "vbase",
   "vrow_base",
-  "列は D。vq は [D,N] の N 連続（= パック方向）なので**転置が要らない**",
+  "columns are D. vq is [D,N] with N contiguous (= the pack direction), so **no transpose is needed**",
 )}
   // The loop condition is uniform (dims is a uniform buffer) — needed for the inner
   // workgroupBarrier to meet WGSL's uniformity requirement
@@ -764,16 +768,18 @@ export const attentionPvI8a8Params = (
   window?: GemmRowWindowSpan,
 ): Uint32Array<ArrayBuffer> => {
   if (!Number.isSafeInteger(k) || k < 0 || k % 4 !== 0) {
-    throw new CodegenError(`attention_pv i8a8 params: k（= N）は 4 の倍数の非負整数（${k}）`);
+    throw new CodegenError(
+      `attention_pv i8a8 params: k (= N) must be a non-negative integer multiple of 4 (${k})`,
+    );
   }
   if (k > LINEAR_I8A8_MAX_K) {
     throw new CodegenError(
-      `attention_pv i8a8 params: k=${k} が i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える`,
+      `attention_pv i8a8 params: k=${k} exceeds the i32 reduction guard ${LINEAR_I8A8_MAX_K}`,
     );
   }
   const params = gemmParams("attention_pv", m, n, k);
   if (window === undefined) return params;
-  assertGemmRowWindow("attention_pv i8a8 行窓 params", m, window);
+  assertGemmRowWindow("attention_pv i8a8 row window params", m, window);
   const wide = new Uint32Array(8);
   wide.set(params.subarray(0, 3));
   wide[3] = window.offset;

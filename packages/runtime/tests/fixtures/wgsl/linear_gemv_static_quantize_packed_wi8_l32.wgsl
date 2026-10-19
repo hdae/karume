@@ -1,4 +1,4 @@
-// karume linear gemv K parallel (i8, 32 lanes/output, packed int8 活性)
+// karume linear gemv K parallel (i8, 32 lanes/output, packed int8 activations)
 struct Dims {
   m: u32,
   n: u32,

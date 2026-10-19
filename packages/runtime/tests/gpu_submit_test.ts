@@ -913,5 +913,5 @@ test("印の待ちの間に device が失われると GpuDeviceLostError で落�
   }
   assert(wait !== undefined);
   lost.resolve({ reason: "unknown", message: "test" } as unknown as GPUDeviceLostInfo);
-  await assertRejects(() => wait, GpuDeviceLostError, "送り込みの先行の上限の待ち");
+  await assertRejects(() => wait, GpuDeviceLostError, "in-flight submit bound wait");
 });

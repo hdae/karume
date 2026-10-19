@@ -207,7 +207,7 @@ describe("AcquireGpuOptions.gpu（WebGPU 実装の注入）", () => {
     const original = Object.getOwnPropertyDescriptor(navigator, "gpu");
     Object.defineProperty(navigator, "gpu", { value: undefined, configurable: true });
     try {
-      await assertRejects(() => acquireGpu(), Error, "navigator.gpu が存在しない");
+      await assertRejects(() => acquireGpu(), Error, "navigator.gpu does not exist");
     } finally {
       if (original === undefined) Reflect.deleteProperty(navigator, "gpu");
       else Object.defineProperty(navigator, "gpu", original);
@@ -375,7 +375,7 @@ test("shader-f16 カナリアは既知解と一致したときだけ通る", asy
       () => assertShaderF16Executes(canaryDevice({ mapped: observed })),
       GpuFeatureError,
     );
-    assert(error.message.includes("既知解と一致しない"), error.message);
+    assert(error.message.includes("does not match the known answer"), error.message);
   }
 });
 
@@ -387,13 +387,13 @@ test("shader-f16 カナリアは device 消失で待ち続けずに落ちる（a
   // await が永久に返らず acquireGpu がハングする — それをここで固定する。
   const readback = assertShaderF16Executes(canaryDevice({ lost: lossAfterMacrotask() }));
   const readbackError = await assertRejects(() => readback, GpuDeviceLostError);
-  assert(readbackError.message.includes("読み戻し"), readbackError.message);
+  assert(readbackError.message.includes("readback"), readbackError.message);
 
   const validation = assertShaderF16Executes(
     canaryDevice({ mapped: CANARY_SOLUTION, hangValidation: true, lost: loss() }),
   );
   const validationError = await assertRejects(() => validation, GpuDeviceLostError);
-  assert(validationError.message.includes("パイプライン生成"), validationError.message);
+  assert(validationError.message.includes("pipeline creation"), validationError.message);
 });
 
 test("readAdapterInfo は info を持たないアダプタでも安全な空値に正規化する", () => {
@@ -501,7 +501,7 @@ test("device 消失の例外はバックエンドが入れた reason / message �
   lose(loss);
   const raced = await assertRejects(() => hanging, GpuDeviceLostError);
   assert(
-    raced.message.startsWith("flush 中に device が失われた（再構築が必要）"),
+    raced.message.startsWith("The device was lost during flush (rebuild required)"),
     `接頭は変えない: ${raced.message}`,
   );
   assert(raced.message.includes("reason: destroyed"), raced.message);
@@ -512,7 +512,7 @@ test("device 消失の例外はバックエンドが入れた reason / message �
   await gpu.device.lost;
   const gated = await assertRejects(() => gpu.createResident(16, "after-lost"), GpuDeviceLostError);
   assert(
-    gated.message.startsWith("resident 'after-lost' の確保: device が失われた"),
+    gated.message.startsWith("resident 'after-lost' allocation: device was lost"),
     `接頭は変えない: ${gated.message}`,
   );
   assert(gated.message.includes("Device::create_query_set"), gated.message);
@@ -703,7 +703,7 @@ test("batch finish: errorScope の pop 待ちの間に消失した区間は成�
   // 消失の記録（`device.lost` の then）が pop の決着より先に走る形を作る。
   for (let i = 0; i < 4; i += 1) await Promise.resolve();
   for (const pop of pops) pop.resolve(null);
-  await assertRejects(() => finished, GpuDeviceLostError, "batch の完了");
+  await assertRejects(() => finished, GpuDeviceLostError, "batch completion");
 });
 
 test("createResident: errorScope の pop 待ちの間に消失した device では成功で返さず、確保したバッファを破棄する", async () => {
@@ -731,7 +731,7 @@ test("createResident: errorScope の pop 待ちの間に消失した device で�
   // 消失の記録（`device.lost` の then）が pop の決着より先に走る形を作る。
   for (let i = 0; i < 4; i += 1) await Promise.resolve();
   for (const pop of pops) pop.resolve(null);
-  await assertRejects(() => created, GpuDeviceLostError, "resident 'racing' の確保");
+  await assertRejects(() => created, GpuDeviceLostError, "resident 'racing' allocation");
   assertEquals(destroyed, 1, "確保したバッファを破棄せずに捨てている");
 });
 
@@ -740,7 +740,7 @@ test("beginBatch は破棄要求済み・消失済みの device で開かず、�
   // `destroy()` はフラグを同期に立てるので、`device.lost` の reaction を待たずに落ちる。
   const destroyed = fakeGpuContext(fakeDevice());
   destroyed.destroy();
-  await assertRejects(() => destroyed.beginBatch(), GpuDeviceLostError, "batch の開始");
+  await assertRejects(() => destroyed.beginBatch(), GpuDeviceLostError, "batch start");
   assertEquals(
     await destroyed[RUNTIME_INTERNAL].withScopeLock(() => Promise.resolve("next")),
     "next",
@@ -750,7 +750,7 @@ test("beginBatch は破棄要求済み・消失済みの device で開かず、�
   const { gpu, lose } = losableGpuContext();
   lose();
   await gpu.device.lost;
-  await assertRejects(() => gpu.beginBatch(), GpuDeviceLostError, "batch の開始");
+  await assertRejects(() => gpu.beginBatch(), GpuDeviceLostError, "batch start");
 });
 
 test("beginBatch: ロック待ちの間に消失した device では区間を開かず、ロックをすぐ返す", async () => {
@@ -762,7 +762,7 @@ test("beginBatch: ロック待ちの間に消失した device では区間を開
   lose();
   await gpu.device.lost;
   await first.finish().catch(() => undefined);
-  await assertRejects(() => second, GpuDeviceLostError, "batch の開始");
+  await assertRejects(() => second, GpuDeviceLostError, "batch start");
   assertEquals(
     await gpu[RUNTIME_INTERNAL].withScopeLock(() => Promise.resolve("next")),
     "next",

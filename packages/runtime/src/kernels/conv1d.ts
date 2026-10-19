@@ -89,11 +89,11 @@ export const CONV1D_SCALE_BINDING = 5;
  */
 const assertDirectWeight = (weight: WeightStorage): void => {
   if (weight === "i2") {
-    throw new CodegenError("畳み込み: 重み i2 格納は未対応（ADR 0097）");
+    throw new CodegenError("convolution: i2 weight storage is not supported (ADR 0097)");
   }
   if (weight === "i4") {
     throw new CodegenError(
-      "conv1d 直接カーネル: 重み i4 格納は未対応 — i4 の conv1d は groups == 1 の implicit GEMM 限定（ADR 0069 決定 5）",
+      "conv1d direct kernel: i4 weight storage is not supported — i4 conv1d is limited to the implicit GEMM with groups == 1 (ADR 0069 decision 5)",
     );
   }
 };
@@ -280,7 +280,7 @@ const checkConv1dDims = (dims: Conv1dDims): readonly number[] => {
   const values = Object.values(dimensions);
   if (dims.stride < 1 || dims.kernel < 1 || dims.dilation < 1 || dims.groups < 1) {
     throw new CodegenError(
-      `conv1d params: stride / kernel / dilation / groups は正整数（${dims.stride}, ${dims.kernel}, ${dims.dilation}, ${dims.groups}）`,
+      `conv1d params: stride / kernel / dilation / groups must be positive integers (${dims.stride}, ${dims.kernel}, ${dims.dilation}, ${dims.groups})`,
     );
   }
   // MUST: the tensor extents are positive integers too. A zero edge never runs the reduction and
@@ -294,7 +294,8 @@ const checkConv1dDims = (dims: Conv1dDims): readonly number[] => {
     ["length_out", dims.lengthOut],
   ];
   for (const [name, value] of positive) {
-    if (value < 1) throw new CodegenError(`conv1d params: ${name} は正整数（${value}）`);
+    if (value < 1)
+      throw new CodegenError(`conv1d params: ${name} must be a positive integer (${value})`);
   }
   // MUST: `input length + 2·padding ≤ 2^31 − 1` (WGSL coordinate arithmetic is i32 — kept in this
   // check, which both pass, so the direct and the implicit GEMM versions accept the same set).
@@ -304,7 +305,7 @@ const checkConv1dDims = (dims: Conv1dDims): readonly number[] => {
   // check, but it closes the direct kernel-call path too).
   if (dims.channelsIn % dims.groups !== 0 || dims.channelsOut % dims.groups !== 0) {
     throw new CodegenError(
-      `conv1d params: groups ${dims.groups} が Cin ${dims.channelsIn} / Cout ${dims.channelsOut} を割り切らない`,
+      `conv1d params: groups ${dims.groups} does not divide Cin ${dims.channelsIn} / Cout ${dims.channelsOut}`,
     );
   }
   // The weight's element count uses Cin/groups, so it comes after the divisibility check.
@@ -346,7 +347,7 @@ export const conv1dParams = (dims: Conv1dDims): Uint32Array<ArrayBuffer> => {
 export const conv1dIgemmParams = (dims: Conv1dDims): Uint32Array<ArrayBuffer> => {
   checkConv1dDims(dims);
   if (dims.groups !== 1) {
-    throw new CodegenError(`conv1d igemm params: groups は 1 専用（${dims.groups}）`);
+    throw new CodegenError(`conv1d igemm params: groups must be 1 (${dims.groups})`);
   }
   const k = dims.channelsIn * dims.kernel;
   assertU32Params("conv1d igemm params", { k });

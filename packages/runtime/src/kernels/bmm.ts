@@ -73,7 +73,7 @@ export const bmmRowWindowParams = (
   rowOffset: number,
   rowsFull: number,
 ): Uint32Array<ArrayBuffer> => {
-  assertGemmRowWindow("bmm 行窓 params", m, { offset: rowOffset, rowsFull });
+  assertGemmRowWindow("bmm row window params", m, { offset: rowOffset, rowsFull });
   const base = gemmParams("bmm", m, n, k);
   const params = new Uint32Array(8);
   params.set(base.subarray(0, 3));

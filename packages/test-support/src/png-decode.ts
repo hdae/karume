@@ -60,11 +60,11 @@ const chunkType = (bytes: Uint8Array<ArrayBuffer>, at: number): string =>
 
 /** IHDR の 13 バイトを検査して `[width, height]` を返す。 */
 const parseHeader = (data: Uint8Array<ArrayBuffer>, where: string): [number, number] => {
-  if (data.length !== 13) throw new Error(`${where}: IHDR が ${data.length} バイト（13 が必要）`);
+  if (data.length !== 13) throw new Error(`${where}: IHDR is ${data.length} bytes (13 required)`);
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const width = view.getUint32(0);
   const height = view.getUint32(4);
-  if (width <= 0 || height <= 0) throw new Error(`${where}: 画像サイズ ${width}×${height}`);
+  if (width <= 0 || height <= 0) throw new Error(`${where}: image size ${width}×${height}`);
   const declared = [data[8], data[9], data[10], data[11], data[12]];
   const expected = [
     BIT_DEPTH,
@@ -75,8 +75,8 @@ const parseHeader = (data: Uint8Array<ArrayBuffer>, where: string): [number, num
   ];
   if (declared.join(",") !== expected.join(",")) {
     throw new Error(
-      `${where}: IHDR が [depth,color,compression,filter,interlace] = [${declared.join(",")}]` +
-        `（このデコーダが受けるのは [${expected.join(",")}] だけ — モジュール doc）`,
+      `${where}: IHDR has [depth,color,compression,filter,interlace] = [${declared.join(",")}]` +
+        ` (this decoder accepts only [${expected.join(",")}] — see the module doc)`,
     );
   }
   return [width, height];
@@ -93,7 +93,7 @@ export const decodePng = async (
   where: string,
 ): Promise<DecodedRgb8> => {
   for (let index = 0; index < SIGNATURE.length; index += 1) {
-    if (bytes[index] !== SIGNATURE[index]) throw new Error(`${where}: PNG シグネチャでない`);
+    if (bytes[index] !== SIGNATURE[index]) throw new Error(`${where}: not a PNG signature`);
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
@@ -105,7 +105,7 @@ export const decodePng = async (
     const type = chunkType(bytes, at + 4);
     const begin = at + 8;
     if (begin + length + 4 > bytes.length) {
-      throw new Error(`${where}: チャンク '${type}' がファイル末尾を越える`);
+      throw new Error(`${where}: chunk '${type}' runs past the end of the file`);
     }
     const data = bytes.slice(begin, begin + length);
     if (type === "IHDR") size = parseHeader(data, where);
@@ -113,8 +113,8 @@ export const decodePng = async (
     if (type === "IEND") break;
     at = begin + length + 4;
   }
-  if (size === undefined) throw new Error(`${where}: IHDR が無い`);
-  if (parts.length === 0) throw new Error(`${where}: IDAT が無い`);
+  if (size === undefined) throw new Error(`${where}: no IHDR`);
+  if (parts.length === 0) throw new Error(`${where}: no IDAT`);
   const [width, height] = size;
 
   const compressed = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
@@ -127,7 +127,7 @@ export const decodePng = async (
   const raw = await inflate(compressed);
   const stride = 1 + width * CHANNELS;
   if (raw.length !== height * stride) {
-    throw new Error(`${where}: 展開後が ${raw.length} バイト（${height * stride} が必要）`);
+    throw new Error(`${where}: ${raw.length} bytes after inflating (${height * stride} required)`);
   }
 
   const data = new Uint8Array(height * width * CHANNELS);
@@ -135,8 +135,8 @@ export const decodePng = async (
     const rowStart = y * stride;
     if (raw[rowStart] !== FILTER_NONE) {
       throw new Error(
-        `${where}: 行 ${y} の filter type が ${raw[rowStart]}` +
-          `（このデコーダが受けるのは None(${FILTER_NONE}) だけ — モジュール doc）`,
+        `${where}: the filter type of row ${y} is ${raw[rowStart]}` +
+          ` (this decoder accepts only None(${FILTER_NONE}) — see the module doc)`,
       );
     }
     data.set(raw.subarray(rowStart + 1, rowStart + stride), y * width * CHANNELS);

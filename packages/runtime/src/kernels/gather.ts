@@ -91,7 +91,9 @@ export const gatherParams = (
   if (cols === 0 && count !== 0) {
     // The combination that divides by zero (element count > 0 with no columns) cannot arise under
     // the shape contract.
-    throw new CodegenError(`gather params: 列数 0 で要素数 ${count} の組み合わせは無い`);
+    throw new CodegenError(
+      `gather params: column count 0 with element count ${count} is not a valid combination`,
+    );
   }
   const params = new Uint32Array(4);
   params[0] = count;

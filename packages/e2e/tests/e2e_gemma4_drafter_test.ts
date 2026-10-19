@@ -219,7 +219,7 @@ test.skipIf(!MIRROR_PRESENT)(
     assertThrows(
       () => resolveSelection(mirrorManifest(), { weights: [MODEL, "mtp"] }),
       ManifestReferenceError,
-      "weights 'mtp' は manifest に無い",
+      "weights 'mtp' is not in the manifest",
     );
   },
 );

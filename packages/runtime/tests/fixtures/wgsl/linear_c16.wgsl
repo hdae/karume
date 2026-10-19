@@ -1,4 +1,4 @@
-// karume linear (x[m,k] · wᵀ[k,n] + bias[n], f32, f16 タイル計算, レジスタ 128x128 タイル / 1 スレッド 8x8 / wg 16x16)
+// karume linear (x[m,k] · wᵀ[k,n] + bias[n], f32, f16 tile compute, register tile 128x128 / 8x8 per thread / wg 16x16)
 enable f16;
 struct Dims {
   m: u32,
@@ -12,7 +12,7 @@ struct Dims {
 @group(0) @binding(4) var<storage, read_write> out: array<f32>;
 
 // Shared A tile (128 rows × K 16, scalar storage) and
-// shared B tile (K 16 × 32 column quads, column direction grouped into vec4)。f16 変種は共有バイトが半分
+// shared B tile (K 16 × 32 column quads, column direction grouped into vec4). The f16 variant halves the shared bytes
 // (16384 B → 8192 B / WG) — the expected gain rests entirely on this one mechanism
 var<workgroup> sa: array<f16, 2048>;
 var<workgroup> sb: array<vec4<f16>, 512>;

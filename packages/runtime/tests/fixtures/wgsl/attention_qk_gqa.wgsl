@@ -1,4 +1,4 @@
-// karume attention_qk (S[b,m,n] = (q·scale)[b,m,d] · (k·scale)[b,n,d]ᵀ, f32, GQA（k は kv-head へ整数除算で写す）, レジスタ 128x128 タイル / 1 スレッド 8x8 / wg 16x16)
+// karume attention_qk (S[b,m,n] = (q·scale)[b,m,d] · (k·scale)[b,n,d]ᵀ, f32, GQA (k is mapped to the kv-head by integer division), register tile 128x128 / 8x8 per thread / wg 16x16)
 struct Dims {
   m: u32,
   n: u32,

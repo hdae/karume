@@ -142,7 +142,7 @@ export const assertLimitsGranted = (planned: RequiredLimits, granted: GPUSupport
     (key) => `${key}: granted ${granted[key]} < required ${planned[key]}`,
   );
   if (shortfalls.length > 0) {
-    throw new GpuLimitError(`requiredLimits が満たされていない: ${shortfalls.join(", ")}`);
+    throw new GpuLimitError(`requiredLimits are not satisfied: ${shortfalls.join(", ")}`);
   }
 };
 
@@ -189,9 +189,9 @@ export const planTimestampFeature = (
   if (requested !== true) return false;
   if (!adapterFeatures.has(TIMESTAMP_QUERY_FEATURE)) {
     throw new GpuFeatureError(
-      `gpuTiming: true を指定したが、アダプタが '${TIMESTAMP_QUERY_FEATURE}' を持たない` +
-        `（利用可能: ${[...adapterFeatures].sort().join(", ") || "なし"}）。` +
-        "計測なしで続行するなら gpuTiming を省略する（= 要求しない）か false を指定する",
+      `gpuTiming: true was specified, but the adapter lacks '${TIMESTAMP_QUERY_FEATURE}'` +
+        ` (available: ${[...adapterFeatures].sort().join(", ") || "none"}). ` +
+        "To continue without timing, omit gpuTiming (= do not request it) or set it to false",
     );
   }
   return true;
@@ -216,10 +216,10 @@ export const planShaderF16Feature = (
   if (requested !== true) return false;
   if (!adapterFeatures.has(SHADER_F16_FEATURE)) {
     throw new GpuFeatureError(
-      `shaderF16: true を指定したが、アダプタが '${SHADER_F16_FEATURE}' を持たない` +
-        `（利用可能: ${[...adapterFeatures].sort().join(", ") || "なし"}）。` +
-        "f16 計算変種（attentionCompute / linearCompute の 'f16'）はこの環境では使えない — " +
-        "shaderF16 を省略して既定の f32 経路で実行する",
+      `shaderF16: true was specified, but the adapter lacks '${SHADER_F16_FEATURE}'` +
+        ` (available: ${[...adapterFeatures].sort().join(", ") || "none"}). ` +
+        "The f16 compute variants ('f16' of attentionCompute / linearCompute) cannot be used in this environment — " +
+        "omit shaderF16 to run on the default f32 path",
     );
   }
   return true;
@@ -319,7 +319,7 @@ const raceCanaryDeviceLost = <T>(
     work,
     device.lost.then((info): never => {
       throw new GpuDeviceLostError(
-        `${feature} カナリアの${where}中に device が失われた（再構築が必要）${describeDeviceLoss(
+        `${feature} canary: device was lost during ${where} (rebuild required)${describeDeviceLoss(
           info,
         )}`,
       );
@@ -346,7 +346,7 @@ export const assertShaderF16Executes = async (device: GPUDevice): Promise<void> 
   try {
     const pipeline = await raceCanaryDeviceLost(
       device,
-      withPipelineScope(device, "shader-f16 カナリア", () =>
+      withPipelineScope(device, "shader-f16 canary", () =>
         device.createComputePipeline({
           layout: "auto",
           compute: {
@@ -355,7 +355,7 @@ export const assertShaderF16Executes = async (device: GPUDevice): Promise<void> 
           },
         }),
       ),
-      "パイプライン生成",
+      "pipeline creation",
     );
     const bindGroup = device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
@@ -369,17 +369,17 @@ export const assertShaderF16Executes = async (device: GPUDevice): Promise<void> 
     pass.end();
     encoder.copyBufferToBuffer(out, 0, staging, 0, byteLength);
     device.queue.submit([encoder.finish()]);
-    await raceCanaryDeviceLost(device, staging.mapAsync(MAP_MODE.READ), "読み戻し");
+    await raceCanaryDeviceLost(device, staging.mapAsync(MAP_MODE.READ), "readback");
     const observed = [...new Float32Array(staging.getMappedRange().slice(0))];
     staging.unmap();
     const matches = SHADER_F16_CANARY_EXPECTED.every((value, index) => observed[index] === value);
     if (!matches) {
       throw new GpuFeatureError(
-        `'${SHADER_F16_FEATURE}' は列挙されているが、f16 カーネルの実走が既知解と一致しない` +
-          `（期待 [${SHADER_F16_CANARY_EXPECTED.join(", ")}] / 実測 [${observed.join(", ")}]）。` +
-          "この環境の f16 実装は信用できない（全 0 なら denoland/deno#23125 と同じ形の沈黙故障、" +
-          "1 要素目だけ違うなら共有 f16 タイル経由の丸めが起きていない）。shaderF16 を省略して" +
-          "既定の f32 経路で実行すること",
+        `'${SHADER_F16_FEATURE}' is listed, but an actual run of the f16 kernel does not match the known answer` +
+          ` (expected [${SHADER_F16_CANARY_EXPECTED.join(", ")}] / observed [${observed.join(", ")}]). ` +
+          "The f16 implementation of this environment cannot be trusted (all zeros is the same silent failure as denoland/deno#23125; " +
+          "a mismatch in the first element alone means the rounding through the shared f16 tile did not happen). Omit shaderF16 and " +
+          "run on the default f32 path",
       );
     }
   } finally {
@@ -450,16 +450,18 @@ export const planSubgroup32Features = (
   requested: boolean | undefined,
 ): readonly string[] => {
   if (requested !== undefined && typeof requested !== "boolean") {
-    throw new GpuFeatureError("subgroups はbooleanでなければならない");
+    throw new GpuFeatureError("subgroups must be a boolean");
   }
   if (requested !== true) return [];
   for (const feature of ["subgroups", "subgroup-size-control"]) {
     if (!adapterFeatures.has(feature)) {
-      throw new GpuFeatureError(`subgroups: true を指定したが、アダプタが '${feature}' を持たない`);
+      throw new GpuFeatureError(
+        `subgroups: true was specified, but the adapter lacks '${feature}'`,
+      );
     }
   }
   if (!languageFeatures.has("subgroup_id")) {
-    throw new GpuFeatureError("subgroups: true はWGSL言語機能 'subgroup_id' が必要");
+    throw new GpuFeatureError("subgroups: true requires the WGSL language feature 'subgroup_id'");
   }
   return ["subgroups", "subgroup-size-control"];
 };
@@ -495,7 +497,7 @@ fn main(@builtin(local_invocation_index) lid: u32,
   try {
     await raceCanaryDeviceLost(
       device,
-      withPipelineScope(device, "subgroups カナリア", () => {
+      withPipelineScope(device, "subgroups canary", () => {
         const pipeline = device.createComputePipeline({
           layout: "auto",
           compute: {
@@ -516,14 +518,16 @@ fn main(@builtin(local_invocation_index) lid: u32,
         encoder.copyBufferToBuffer(out, 0, staging, 0, 1024);
         device.queue.submit([encoder.finish()]);
       }),
-      "実行",
+      "execution",
       "subgroups",
     );
-    await raceCanaryDeviceLost(device, staging.mapAsync(MAP_MODE.READ), "読み戻し", "subgroups");
+    await raceCanaryDeviceLost(device, staging.mapAsync(MAP_MODE.READ), "readback", "subgroups");
     const observed = new Float32Array(staging.getMappedRange().slice(0));
     staging.unmap();
     if (observed.length !== 256 || observed.some((value) => value !== 32896)) {
-      throw new GpuFeatureError("subgroups カナリア: 32レーン縮約の既知解と一致しない");
+      throw new GpuFeatureError(
+        "subgroups canary: the 32-lane reduction does not match the known answer",
+      );
     }
   } finally {
     // The command was submitted before the readback. Even on failure, no reference to unsubmitted
@@ -663,12 +667,12 @@ const requestAdapterOrThrow = async (
   const gpu: GPU | undefined = host ?? navigator.gpu;
   if (gpu === undefined) {
     throw new GpuUnavailableError(
-      "navigator.gpu が存在しない（WebGPU 非対応環境。Node では AcquireGpuOptions.gpu に実装を渡す）",
+      "navigator.gpu does not exist (an environment without WebGPU; on Node, pass an implementation in AcquireGpuOptions.gpu)",
     );
   }
   const adapter = await gpu.requestAdapter(options);
   if (adapter === null) {
-    throw new GpuUnavailableError("GPUAdapter を取得できない（対応 GPU / ドライバが無い）");
+    throw new GpuUnavailableError("Cannot obtain a GPUAdapter (no supported GPU / driver)");
   }
   return { gpu, adapter };
 };
@@ -757,7 +761,7 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
  * value).
  */
 const DIRECT_PROFILE_LABEL = "geometryProfile";
-const CALLBACK_PROFILE_LABEL = "geometryProfile（コールバックの戻り）";
+const CALLBACK_PROFILE_LABEL = "geometryProfile (callback return value)";
 
 /**
  * Turns a failure of the injected-table guard into the public {@link GpuFeatureError} instead of
@@ -837,8 +841,8 @@ const profileFromCallback = (
     // runs)
     ignoreRejectionIfNativePromise(returned);
     throw new GpuFeatureError(
-      "geometryProfile: コールバックが Promise を返した（同期の関数であること — 保存した表の読み込みは " +
-        "acquireGpu の前に済ませ、コールバックは読み込んだ値から表を選ぶだけにする）",
+      "geometryProfile: the callback returned a Promise (it must be a synchronous function — load the saved table " +
+        "before acquireGpu, and let the callback only pick a table from the loaded values)",
     );
   }
   return returned === undefined

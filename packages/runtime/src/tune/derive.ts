@@ -219,7 +219,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const requireString = (record: Record<string, unknown>, key: string, where: string): string => {
   const value = record[key];
-  if (typeof value !== "string") throw new Error(`${where}: ${key} が文字列でない`);
+  if (typeof value !== "string") throw new Error(`${where}: ${key} is not a string`);
   return value;
 };
 
@@ -231,7 +231,8 @@ const optional = <T>(
 ): T | undefined => {
   const value = record[key];
   if (value === undefined) return undefined;
-  if (!accept(value)) throw new Error(`${where}: ${key} の型が違う（${JSON.stringify(value)}）`);
+  if (!accept(value))
+    throw new Error(`${where}: ${key} has the wrong type (${JSON.stringify(value)})`);
   return value;
 };
 
@@ -263,19 +264,21 @@ const isI8a8Op = (op: SweepOp): boolean => op === "i8a8-linear" || op === "i8a8-
  * combination of family and fields fails).
  */
 const parseGeometryParams = (value: unknown, op: SweepOp, where: string): Geometry => {
-  if (!isRecord(value)) throw new Error(`${where}: geometryParams がオブジェクトでない`);
+  if (!isRecord(value)) throw new Error(`${where}: geometryParams is not an object`);
   const keys = isI8a8Op(op)
     ? (["regM", "regN", "wgX", "wgY", "tileK"] as const)
     : (["regM", "regN", "wgX", "wgY"] as const);
   const extra = Object.keys(value).filter((key) => !(keys as readonly string[]).includes(key));
   if (extra.length > 0) {
-    throw new Error(`${where}: geometryParams に想定外の欄 ${extra.join(", ")}`);
+    throw new Error(`${where}: geometryParams has unexpected fields ${extra.join(", ")}`);
   }
   const params: Record<string, number> = {};
   for (const key of keys) {
     const field = value[key];
     if (typeof field !== "number" || !Number.isSafeInteger(field) || field < 1) {
-      throw new Error(`${where}: geometryParams.${key} は正整数（${JSON.stringify(field)}）`);
+      throw new Error(
+        `${where}: geometryParams.${key} must be a positive integer (${JSON.stringify(field)})`,
+      );
     }
     params[key] = field;
   }
@@ -291,11 +294,11 @@ const parseGeometryParams = (value: unknown, op: SweepOp, where: string): Geomet
 };
 
 const parseRow = (value: unknown, where: string): SweepObservation => {
-  if (!isRecord(value)) throw new Error(`${where}: 行がオブジェクトでない`);
+  if (!isRecord(value)) throw new Error(`${where}: row is not an object`);
   const op = value.op;
-  if (!isSweepOp(op)) throw new Error(`${where}: op が ${SWEEP_OPS.join(" / ")} のどれでもない`);
+  if (!isSweepOp(op)) throw new Error(`${where}: op is none of ${SWEEP_OPS.join(" / ")}`);
   const isDefault = value.isDefault;
-  if (!isBoolean(isDefault)) throw new Error(`${where}: isDefault が真偽値でない`);
+  if (!isBoolean(isDefault)) throw new Error(`${where}: isDefault is not a boolean`);
   const speedupVsDefault = optional(value, "speedupVsDefault", isPositiveNumber, where);
   const identicalToDefault = optional(value, "identicalToDefault", isBoolean, where);
   const error = optional(value, "error", isString, where);
@@ -319,10 +322,10 @@ const parseRow = (value: unknown, where: string): SweepObservation => {
 };
 
 const parseCaseRepeat = (value: unknown, where: string): SweepCaseRepeat => {
-  if (!isRecord(value)) throw new Error(`${where}: オブジェクトでない`);
+  if (!isRecord(value)) throw new Error(`${where}: not an object`);
   const repeat = value.defaultRepeat;
   if (repeat !== undefined && !isRecord(repeat)) {
-    throw new Error(`${where}: defaultRepeat がオブジェクトでない`);
+    throw new Error(`${where}: defaultRepeat is not an object`);
   }
   const driftRatio =
     repeat === undefined
@@ -342,20 +345,23 @@ const parseCaseRepeat = (value: unknown, where: string): SweepCaseRepeat => {
  * was introduced) read `quick` / `full` from `settings.quick`.
  */
 const parseCandidateSet = (settings: unknown, where: string): CandidateSet => {
-  if (!isRecord(settings)) throw new Error(`${where}: settings が無い（候補集合が読めない）`);
+  if (!isRecord(settings))
+    throw new Error(`${where}: settings is missing (the candidate set cannot be read)`);
   const { candidateSet, quick } = settings;
   if (candidateSet !== undefined) {
     if (typeof candidateSet !== "string" || !isCandidateSet(candidateSet)) {
       throw new Error(
-        `${where}: settings.candidateSet が ${CANDIDATE_SETS.join(" / ")} のどれでもない（${JSON.stringify(
+        `${where}: settings.candidateSet is none of ${CANDIDATE_SETS.join(" / ")} (${JSON.stringify(
           candidateSet,
-        )}）`,
+        )})`,
       );
     }
     return candidateSet;
   }
   if (!isBoolean(quick)) {
-    throw new Error(`${where}: settings に candidateSet も quick も無い（候補集合が読めない）`);
+    throw new Error(
+      `${where}: settings has neither candidateSet nor quick (the candidate set cannot be read)`,
+    );
   }
   return quick ? "quick" : "full";
 };
@@ -374,7 +380,7 @@ const userAgentText = (value: unknown, where: string): string | undefined => {
     return `Deno/${value.deno}`;
   }
   throw new Error(
-    `${where}: userAgent が文字列でも { deno: 文字列 } でもない（${JSON.stringify(value)}）`,
+    `${where}: userAgent is neither a string nor { deno: string } (${JSON.stringify(value)})`,
   );
 };
 
@@ -394,13 +400,13 @@ const assertRecordedKey = (
   const recorded = record[key];
   if (recorded === undefined) return;
   if (typeof recorded !== "string") {
-    throw new Error(`${where}: ${key} が文字列でない（${JSON.stringify(recorded)}）`);
+    throw new Error(`${where}: ${key} is not a string (${JSON.stringify(recorded)})`);
   }
   const now = current();
   if (recorded !== now) {
     throw new Error(
-      `${where}: ${key} ${recorded} が今の runtime の ${now} と違う（${meaning}が今の runtime と別物の記録で` +
-        "表を作らない — 今の runtime で掃引し直す）",
+      `${where}: ${key} ${recorded} differs from the current runtime's ${now} (the record's ${meaning} differs from the current runtime, so no table is built` +
+        " from it — sweep again with the current runtime)",
     );
   }
 };
@@ -410,7 +416,7 @@ const recordedDp4a = (record: Record<string, unknown>, where: string): boolean =
   const { dp4a } = record;
   if (!isBoolean(dp4a)) {
     throw new Error(
-      `${where}: dp4a が真偽値でない（${JSON.stringify(dp4a)} — candidateKernels を導けない）`,
+      `${where}: dp4a is not a boolean (${JSON.stringify(dp4a)} — candidateKernels cannot be derived)`,
     );
   }
   return dp4a;
@@ -428,71 +434,75 @@ export const parseSweepReport = (
   meta: { readonly path: string; readonly sha256: string },
 ): SweepSource => {
   const where = meta.path;
-  if (!isRecord(parsed)) throw new Error(`${where}: JSON がオブジェクトでない`);
+  if (!isRecord(parsed)) throw new Error(`${where}: the JSON is not an object`);
   if (parsed.format !== REPORT_FORMAT) {
-    throw new Error(`${where}: format が ${REPORT_FORMAT} でない（${String(parsed.format)}）`);
+    throw new Error(`${where}: format is not ${REPORT_FORMAT} (${String(parsed.format)})`);
   }
   const adapter = parsed.adapter;
-  if (!isRecord(adapter)) throw new Error(`${where}: adapter が無い`);
+  if (!isRecord(adapter)) throw new Error(`${where}: adapter is missing`);
   // MUST: only sweeps measured with GPU timestamps are accepted (ADR 0115 §4, ADR 0117 decision 3).
   // Wall clock includes the submit-to-completion floor, so ratios between geometries shrink toward
   // 1, and the floor moves per pass, so the error cannot be bounded by a known constant as rounding
   // can (no per-row bound can be derived from the record alone)
   const timingFix =
-    "Deno の CLI は adapter が timestamp-query を列挙すれば timestamp で測る" +
-    "（単位 deno-raw-tick）ので timestamp-query を持つ adapter で、Chrome のページは" +
-    "「GPU の timestamp で測る」にチェックを入れて測り直す";
+    "the Deno CLI measures with timestamps when the adapter lists timestamp-query" +
+    " (unit deno-raw-tick), so measure again on an adapter with timestamp-query; on the Chrome page," +
+    " check 'Measure with GPU timestamps' and measure again";
   const gpuTiming = parsed.gpuTiming;
   if (!isRecord(gpuTiming)) {
-    throw new Error(`${where}: gpuTiming が無い（時間の単位が分からない）— ${timingFix}`);
+    throw new Error(`${where}: gpuTiming is missing (the time unit is unknown) — ${timingFix}`);
   }
   const unit = gpuTiming.unit;
   if (unit !== "ns" && unit !== "deno-raw-tick") {
     throw new Error(
-      `${where}: gpuTiming.unit が ${JSON.stringify(unit)}（ns か deno-raw-tick であること — ` +
-        `wall は壁時計で比が 1 へ縮む）— ${timingFix}`,
+      `${where}: gpuTiming.unit is ${JSON.stringify(unit)} (must be ns or deno-raw-tick — ` +
+        `wall is the wall clock, where ratios shrink toward 1) — ${timingFix}`,
     );
   }
   // Quantization (Chrome's 100 µs rounding) does not reject a whole sweep — the rounding step q is
   // used for the per-observation error bound (deriveProfile, ADR 0117 decision 3)
   const quantized = gpuTiming.quantized;
   if (!isBoolean(quantized)) {
-    throw new Error(`${where}: gpuTiming.quantized が真偽値でない（${JSON.stringify(quantized)}）`);
+    throw new Error(
+      `${where}: gpuTiming.quantized is not a boolean (${JSON.stringify(quantized)})`,
+    );
   }
   // The writer (roundsLookQuantized in report.ts) judges quantization only for unit ns. Applying an
   // ns step to raw ticks would give a different bound, so a record with a broken combination fails
   if (quantized && unit !== "ns") {
     throw new Error(
-      `${where}: gpuTiming.quantized が true なのに単位が ${unit}（ns でだけ判定する）`,
+      `${where}: gpuTiming.quantized is true but the unit is ${unit} (quantization is judged only for ns)`,
     );
   }
   // MUST: only records whose ratio baseline (the default table's kernels) and case set equal the
   // current runtime's are accepted (ADR 0117 decision 8 — the same reason as checking the default
   // row (ADR 0115 decision 4): with a different baseline, "faster than the default" does not hold
   // on the current runtime)
-  assertRecordedKey(parsed, "caseSet", sweepCaseSetId, "ケース集合", where);
+  assertRecordedKey(parsed, "caseSet", sweepCaseSetId, "case set", where);
   assertRecordedKey(
     parsed,
     "defaultKernels",
     () => geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
-    "比の土台にした既定の表のカーネル",
+    "kernels of the default table used as the ratio baseline",
     where,
   );
   const userAgent = userAgentText(parsed.userAgent, where);
   // The default re-measurements (cases[]) are read by the material check — a record without them
   // would mean "no case has a re-measurement", so fail instead of silently dropping every case
   if (!Array.isArray(parsed.cases)) {
-    throw new Error(`${where}: cases が配列でない（ケースごとの既定の再測定が読めない）`);
+    throw new Error(
+      `${where}: cases is not an array (the per-case default re-measurements cannot be read)`,
+    );
   }
   const cases = parsed.cases.map((entry, index) =>
     parseCaseRepeat(entry, `${where} cases[${index}]`),
   );
   const caseIds = new Set<string>();
   for (const { caseId } of cases) {
-    if (caseIds.has(caseId)) throw new Error(`${where}: cases に ${caseId} が 2 本`);
+    if (caseIds.has(caseId)) throw new Error(`${where}: cases has ${caseId} twice`);
     caseIds.add(caseId);
   }
-  if (!Array.isArray(parsed.rows)) throw new Error(`${where}: rows が配列でない`);
+  if (!Array.isArray(parsed.rows)) throw new Error(`${where}: rows is not an array`);
   const rows = parsed.rows.map((row, index) => parseRow(row, `${where} rows[${index}]`));
   // MUST: only records whose measured candidates' kernels equal the current runtime's are accepted
   // (ADR 0117 decision 8) — defaultKernels protects only the ratio baseline, and the speed and
@@ -503,7 +513,7 @@ export const parseSweepReport = (
     parsed,
     "candidateKernels",
     () => sweepCandidateKernelsId(rows, recordedDp4a(parsed, where)),
-    "測った候補のカーネル",
+    "kernels of the measured candidates",
     where,
   );
   const defaults = new Map<string, number>();
@@ -512,7 +522,7 @@ export const parseSweepReport = (
   }
   for (const [caseId, count] of defaults) {
     if (count !== 1) {
-      throw new Error(`${where}: ${caseId} の既定の行が ${count} 本（1 本であること）`);
+      throw new Error(`${where}: ${caseId} has ${count} default rows (must be exactly 1)`);
     }
   }
   return {
@@ -610,19 +620,21 @@ export const rowsRange = (bounds: readonly number[], index: number): string => {
  * remove its registration from index.ts and then regenerate.
  */
 export const profileRowsSegments = (bounds: readonly number[]): readonly RowsSegment[] => {
-  const where = `gemmRows の段の境界 [${bounds.join(", ")}]`;
+  const where = `gemmRows bucket bounds [${bounds.join(", ")}]`;
   if (bounds.at(-1) !== Number.POSITIVE_INFINITY) {
-    throw new Error(`${where}: 末尾が Infinity でない（それより大きい M に当たる段が無い）`);
+    throw new Error(`${where}: the last bound is not Infinity (no bucket covers a larger M)`);
   }
   bounds.slice(0, -1).forEach((maxRows, index) => {
     if (!Number.isSafeInteger(maxRows) || maxRows < 1) {
-      throw new Error(`${where}: 末尾以外の境界は正整数（${maxRows}）`);
+      throw new Error(
+        `${where}: bounds other than the last must be positive integers (${maxRows})`,
+      );
     }
     if (!(maxRows < bounds[index + 1])) {
       throw new Error(
-        `${where}: 狭義昇順でない（${maxRows} → ${
+        `${where}: not strictly ascending (${maxRows} → ${
           bounds[index + 1]
-        } — 後ろの段に当たる行数が無くなる）`,
+        } — the later bucket would cover no row count)`,
       );
     }
   });
@@ -631,8 +643,8 @@ export const profileRowsSegments = (bounds: readonly number[]): readonly RowsSeg
   );
   if (missing.length > 0) {
     throw new Error(
-      `${where}: 既定の表の境界 ${missing.join(" / ")} を含まない（既定の細分でない）— ` +
-        "既定の境界をまたぐ段は、段の中で掃引の既定の行の幾何が割れ、段の既定も 1 つに決まらない",
+      `${where}: missing the default table's bounds ${missing.join(" / ")} (not a refinement of the default) — ` +
+        "a bucket that straddles a default bound splits the geometry of the sweep's default row within the bucket, and the bucket's default is not unique either",
     );
   }
   return bounds.map((maxRows, index) => {
@@ -642,7 +654,7 @@ export const profileRowsSegments = (bounds: readonly number[]): readonly RowsSeg
       GEMM_ROWS_BUCKETS[GEMM_ROWS_BUCKETS.length - 1];
     return {
       slot: `gemmRows ${range}`,
-      scope: `linear / matmul / bmm の行数 ${range}`,
+      scope: `linear / matmul / bmm row count ${range}`,
       maxRows,
       fallback: covering.geometry,
     };
@@ -656,22 +668,22 @@ export const profileRowsSegments = (bounds: readonly number[]): readonly RowsSeg
 const FIXED_SLOTS: readonly SlotSpec[] = [
   {
     slot: "attention.qk",
-    scope: "融合 attention f32 ①QK",
+    scope: "fused attention f32 ①QK",
     fallback: () => gemmCandidate(defaultGemmGeometry()),
   },
   {
     slot: "attention.pv",
-    scope: "融合 attention f32 ③PV",
+    scope: "fused attention f32 ③PV",
     fallback: () => gemmCandidate(defaultGemmGeometry()),
   },
   {
     slot: "conv2d.rows64",
-    scope: "conv2d implicit GEMM の m タイル 64 行",
+    scope: "conv2d implicit GEMM m tile of 64 rows",
     fallback: () => conv2dCandidate(gemmMTileGeometry(64)),
   },
   {
     slot: "conv2d.rows32",
-    scope: "conv2d implicit GEMM の m タイル 32 行",
+    scope: "conv2d implicit GEMM m tile of 32 rows",
     fallback: () => conv2dCandidate(gemmMTileGeometry(32)),
   },
   {
@@ -717,7 +729,7 @@ const ATTENTION_SHAPE = /^(qk|pv) BH\d+ M\d+ N\d+ D\d+$/;
 const attentionStage = (row: SweepObservation, where: string): "qk" | "pv" => {
   const matched = ATTENTION_SHAPE.exec(row.shape);
   if (matched === null) {
-    throw new Error(`${where}: ${row.caseId} の shape を読めない（${row.shape}）`);
+    throw new Error(`${where}: cannot read the shape of ${row.caseId} (${row.shape})`);
   }
   return matched[1] === "qk" ? "qk" : "pv";
 };
@@ -742,7 +754,7 @@ const slotOf = (
     case "bmm": {
       const matched = (row.op === "bmm" ? BMM_SHAPE : LINEAR_SHAPE).exec(row.shape);
       if (matched === null) {
-        throw new Error(`${where}: ${row.caseId} の shape を読めない（${row.shape}）`);
+        throw new Error(`${where}: cannot read the shape of ${row.caseId} (${row.shape})`);
       }
       const rows = Number(matched[1]);
       // The bucket list ends in Infinity (checked by profileRowsSegments), so some bucket always
@@ -756,7 +768,7 @@ const slotOf = (
       const tileM = conv2dDefaultTileM.get(row.caseId);
       if (tileM === 64) return "conv2d.rows64";
       if (tileM === 32) return "conv2d.rows32";
-      throw new Error(`${where}: ${row.caseId} の既定の m タイルが 64 / 32 でない（${tileM}）`);
+      throw new Error(`${where}: the default m tile of ${row.caseId} is not 64 / 32 (${tileM})`);
     }
     case "i8a8-linear":
       return "i8a8.linear";
@@ -835,9 +847,9 @@ export type ExcludedCase = {
  * on standard output and on the page).
  */
 export const excludedCaseLine = (excluded: ExcludedCase): string =>
-  `掃引 ${excluded.path}: ${excluded.caseId}${
-    excluded.geometry === undefined ? "" : ` の ${excluded.geometry}`
-  } は${excluded.reason}のため比の材料から外した（出力の一致と失敗は見る）`;
+  `Sweep ${excluded.path}: ${excluded.caseId}${
+    excluded.geometry === undefined ? "" : ` geometry ${excluded.geometry}`
+  } dropped from the ratio material due to ${excluded.reason} (output matches and failures are still checked)`;
 
 /**
  * The reason to drop a case from that sweep's ratio material (undefined if it is kept).
@@ -849,10 +861,10 @@ export const excludedCaseLine = (excluded: ExcludedCase): string =>
  * checked for drift, so it is treated the same.
  */
 const exclusionReason = (repeat: SweepCaseRepeat | undefined): string | undefined => {
-  if (repeat?.error !== undefined) return `既定の再測定が失敗（${repeat.error}）`;
-  if (repeat?.driftRatio === undefined) return "既定の再測定が無い";
+  if (repeat?.error !== undefined) return `failed default re-measurement (${repeat.error})`;
+  if (repeat?.driftRatio === undefined) return "no default re-measurement";
   return driftOutOfRange(repeat.driftRatio)
-    ? `既定の再測定比 ${formatRatio(repeat.driftRatio)} が範囲外`
+    ? `default re-measurement ratio ${formatRatio(repeat.driftRatio)} out of range`
     : undefined;
 };
 
@@ -874,9 +886,9 @@ type RoundingBound = { readonly bound: number } | { readonly unknown: string };
 const roundingBound = (row: SweepObservation, quantum: number): RoundingBound => {
   // No rounding means no error — old records without rounds pass here too
   if (quantum === 0) return { bound: 0 };
-  if (row.rounds === undefined) return { unknown: "rounds が無い" };
+  if (row.rounds === undefined) return { unknown: "no rounds" };
   const kept = row.rounds.filter((round) => round > 0);
-  if (kept.length === 0) return { unknown: "正の round が無い" };
+  if (kept.length === 0) return { unknown: "no positive round" };
   return { bound: quantum / Math.min(...kept) };
 };
 
@@ -891,9 +903,10 @@ const LIMIT_LABEL = `${ROUNDING_ERROR_LIMIT * 100}%`;
  * drop the whole case (undefined if it is kept).
  */
 const defaultRoundingReason = (bound: RoundingBound): string | undefined => {
-  if ("unknown" in bound) return `既定の行の丸め誤差の上界が不明（${bound.unknown}）`;
+  if ("unknown" in bound)
+    return `unknown rounding-error bound of the default row (${bound.unknown})`;
   return bound.bound > ROUNDING_ERROR_LIMIT
-    ? `既定の行の丸め誤差の上界 e ${formatPercent(bound.bound)}（> ${LIMIT_LABEL}）`
+    ? `rounding-error bound e ${formatPercent(bound.bound)} of the default row (> ${LIMIT_LABEL})`
     : undefined;
 };
 
@@ -902,10 +915,10 @@ const defaultRoundingReason = (bound: RoundingBound): string | undefined => {
  * the threshold or cannot be given.
  */
 const rowRoundingReason = (bound: RoundingBound, defaultBound: number): string | undefined => {
-  if ("unknown" in bound) return `丸め誤差の上界が不明（${bound.unknown}）`;
+  if ("unknown" in bound) return `unknown rounding-error bound (${bound.unknown})`;
   const total = bound.bound + defaultBound;
   return total > ROUNDING_ERROR_LIMIT
-    ? `丸め誤差の上界 E ${formatPercent(total)}（> ${LIMIT_LABEL}）`
+    ? `rounding-error bound E ${formatPercent(total)} (> ${LIMIT_LABEL})`
     : undefined;
 };
 
@@ -943,10 +956,10 @@ const judgeCandidate = (
     const all = (observations.get(caseId) ?? []).map(({ row }) => row);
     const failed = all.find((row) => row.error !== undefined);
     if (failed !== undefined) {
-      return { eligible: false, reason: `${caseId} で失敗（${failed.error}）` };
+      return { eligible: false, reason: `failed in ${caseId} (${failed.error})` };
     }
     if (all.some((row) => row.identicalToDefault === false)) {
-      return { eligible: false, reason: `${caseId} で出力が既定と不一致` };
+      return { eligible: false, reason: `output differs from the default in ${caseId}` };
     }
     const seen = (observations.get(caseId) ?? []).flatMap(({ row, included }) =>
       included ? [row] : [],
@@ -955,14 +968,17 @@ const judgeCandidate = (
       return {
         eligible: false,
         reason: unmeasured.has(caseId)
-          ? `${caseId} で測っていない（全掃引で比の材料から外した）`
-          : `${caseId} で測っていない`,
+          ? `not measured in ${caseId} (dropped from the ratio material in every sweep)`
+          : `not measured in ${caseId}`,
       };
     }
     const speedups: number[] = [];
     for (const row of seen) {
       if (row.identicalToDefault !== true || row.speedupVsDefault === undefined) {
-        return { eligible: false, reason: `${caseId} で既定との比較が無い（既定の行の失敗など）` };
+        return {
+          eligible: false,
+          reason: `no comparison with the default in ${caseId} (a failed default row or the like)`,
+        };
       }
       speedups.push(row.speedupVsDefault);
     }
@@ -972,7 +988,7 @@ const judgeCandidate = (
   if (worst.speedup < minSpeedup) {
     return {
       eligible: false,
-      reason: `${worst.caseId} で ${formatRatio(worst.speedup)} < ${formatRatio(minSpeedup)}`,
+      reason: `${worst.caseId}: ${formatRatio(worst.speedup)} < ${formatRatio(minSpeedup)}`,
     };
   }
   const speedups = perCase.map((entry) => entry.speedup);
@@ -996,7 +1012,7 @@ const judgeSlot = (
       slot: spec.slot,
       scope: spec.scope,
       cases: [],
-      outcome: { kind: "default", name, geometry, reason: "掃引にこのクラスのケースが無い" },
+      outcome: { kind: "default", name, geometry, reason: "the sweeps have no case of this class" },
       rejected: [],
       excluded,
     };
@@ -1016,9 +1032,9 @@ const judgeSlot = (
   // different versions and the like)
   if (defaultKeys.size !== 1) {
     throw new Error(
-      `${spec.slot}: 既定の行の幾何が割れている（${[
+      `${spec.slot}: the geometry of the default rows is split (${[
         ...new Set(defaults.map((row) => row.geometry)),
-      ].join(" / ")}）`,
+      ].join(" / ")})`,
     );
   }
   const defaultRow = defaults[0];
@@ -1028,8 +1044,8 @@ const judgeSlot = (
   // current runtime
   if (geometryKey(defaultRow.geometryParams) !== geometryKey(runtimeDefault.geometry)) {
     throw new Error(
-      `${spec.slot}: 掃引の既定の行（${defaultRow.geometry}）が今の runtime の既定（${runtimeDefault.name}）` +
-        "と違う — 古い runtime で取った掃引か境界のずれ。比の土台が別物なので生成しない",
+      `${spec.slot}: the sweep's default row (${defaultRow.geometry}) differs from the current runtime's default (${runtimeDefault.name})` +
+        " — a sweep taken with an old runtime, or shifted bounds; the ratio baseline differs, so nothing is generated",
     );
   }
   const byName = new Map<string, { geometry: Geometry; observations: Map<string, SlotRow[]> }>();
@@ -1041,7 +1057,9 @@ const judgeSlot = (
       observations: new Map<string, SlotRow[]>(),
     };
     if (geometryKey(entry.geometry) !== geometryKey(row.geometryParams)) {
-      throw new Error(`${spec.slot}: 幾何 ${row.geometry} の geometryParams が行ごとに違う`);
+      throw new Error(
+        `${spec.slot}: geometryParams of geometry ${row.geometry} differ between rows`,
+      );
     }
     // Dropped rows are kept as observations too — not used for ratios, but failures and output
     // mismatches count in the verdict (judgeCandidate)
@@ -1067,9 +1085,9 @@ const judgeSlot = (
     .map((candidate) => ({
       name: candidate.name,
       reason: candidate.eligibility.eligible
-        ? `幾何平均 ${formatRatio(candidate.eligibility.geomean)}（採用 ${formatRatio(
+        ? `geometric mean ${formatRatio(candidate.eligibility.geomean)} (below the adopted ${formatRatio(
             winner.geomean,
-          )} に届かない）`
+          )})`
         : candidate.eligibility.reason,
     }));
   return {
@@ -1084,8 +1102,8 @@ const judgeSlot = (
             geometry: defaultRow.geometryParams,
             reason:
               unmeasured.size === cases.length
-                ? "クラスの全ケースを全掃引で比の材料から外した"
-                : `全ケースで出力が一致し ${formatRatio(minSpeedup)} 以上の幾何が無い`,
+                ? "every case of the class was dropped from the ratio material in every sweep"
+                : `no geometry matches the output in every case at ${formatRatio(minSpeedup)} or faster`,
           }
         : {
             kind: "adopted",
@@ -1106,7 +1124,7 @@ const judgeSlot = (
  */
 export const targetLabel = (target: ProfileTarget): string =>
   target.optIn === true
-    ? "（注入専用 — match なし）"
+    ? "(injection only — no match)"
     : [target.vendor, target.architecture, target.description]
         .filter((part) => part !== undefined)
         .join(" / ");
@@ -1133,23 +1151,24 @@ export const deriveProfile = (
   sources: readonly SweepSource[],
   options: ProfileTarget & { readonly minSpeedup: number },
 ): readonly SlotVerdict[] => {
-  if (sources.length === 0) throw new Error("掃引の記録が 1 本も無い");
+  if (sources.length === 0) throw new Error("No sweep records");
   // Stop here if the bucket boundaries do not refine the default table (the ratio baseline would
   // split within a bucket — profileRowsSegments)
   const segments = profileRowsSegments(PROFILE_GEMM_ROWS_BOUNDS);
   // The same conditions as the runtime's check (assertGeometryProfile) — stop before generating
   // rather than failing at the injection or registration step. description is the machine model's
   // name, a field only for splitting within a vendor / architecture
-  if (options.description === "") throw new Error("description は空文字にしない（未指定は省く）");
+  if (options.description === "")
+    throw new Error("description must not be an empty string (omit it when unspecified)");
   if (options.description !== undefined && options.architecture === undefined) {
-    throw new Error("description は vendor と architecture の両方と組で指定する");
+    throw new Error("description must be given together with both vendor and architecture");
   }
   const seen = new Map<string, string>();
   for (const source of sources) {
     const twin = seen.get(source.sha256);
     // Counting the same record twice would give that record's observations double weight
     if (twin !== undefined) {
-      throw new Error(`同じ掃引を 2 度渡している（${twin} と ${source.path}）`);
+      throw new Error(`The same sweep is passed twice (${twin} and ${source.path})`);
     }
     seen.set(source.sha256, source.path);
     // MUST: measurements of different adapters are not mixed (a table is a per-adapter answer —
@@ -1163,9 +1182,9 @@ export const deriveProfile = (
         (options.description !== undefined && description !== options.description))
     ) {
       throw new Error(
-        `${source.path}: adapter ${vendor} / ${architecture} / ${description} が指定した ${targetLabel(
+        `${source.path}: adapter ${vendor} / ${architecture} / ${description} does not match the requested ${targetLabel(
           options,
-        )} と合わない`,
+        )}`,
       );
     }
     // MUST: all sweeps agree on all four adapter fields (two empty values match, one empty value
@@ -1178,9 +1197,9 @@ export const deriveProfile = (
     for (const field of ["vendor", "architecture", "device", "description"] as const) {
       if (source.adapter[field] !== first[field]) {
         throw new Error(
-          `${source.path}: adapter の ${field} ${JSON.stringify(source.adapter[field])} が ${
+          `${source.path}: adapter ${field} ${JSON.stringify(source.adapter[field])} differs from ${
             sources[0].path
-          } の ${JSON.stringify(first[field])} と違う（4 欄の揃った掃引だけを 1 本の表に合わせる）`,
+          }'s ${JSON.stringify(first[field])} (only sweeps that agree on all four fields are combined into one table)`,
         );
       }
     }
@@ -1205,7 +1224,7 @@ export const deriveProfile = (
       const slot = slotOf(row, segments, conv2dDefaultTileM, source.path);
       const base = defaultBounds.get(row.caseId);
       // parseSweepReport has checked one default row per case
-      if (base === undefined) throw new Error(`${source.path}: ${row.caseId} の既定の行が無い`);
+      if (base === undefined) throw new Error(`${source.path}: ${row.caseId} has no default row`);
       // The reason to drop the whole case (re-measurement ratio → the default row's rounding). A
       // case whose default row failed has no ratios, so rounding is not checked (no ratio material
       // — judgeCandidate looks at the failure)
@@ -1271,14 +1290,14 @@ export const deriveProfile = (
  */
 export const verdictLines = (verdicts: readonly SlotVerdict[]): string[] =>
   verdicts.flatMap((verdict) => {
-    const head = `${verdict.slot}（${verdict.scope}・${verdict.cases.length} ケース）`;
+    const head = `${verdict.slot} (${verdict.scope}, ${verdict.cases.length} cases)`;
     const { outcome } = verdict;
     const line =
       outcome.kind === "adopted"
-        ? `- ${head}: 採用 ${outcome.name} ${formatRatio(outcome.geomean)}（${formatRatio(
+        ? `- ${head}: adopted ${outcome.name} ${formatRatio(outcome.geomean)} (${formatRatio(
             outcome.min,
-          )}〜${formatRatio(outcome.max)}）`
-        : `- ${head}: 既定 ${outcome.name} のまま（${outcome.reason}）`;
+          )}–${formatRatio(outcome.max)})`
+        : `- ${head}: keeps the default ${outcome.name} (${outcome.reason})`;
     return [
       line,
       ...verdict.excluded.map((excluded) => `  - ${excludedCaseLine(excluded)}`),
@@ -1293,19 +1312,19 @@ export type GeneratedProfile = GeometryProfile & {
 
 const slotGeometry = (verdicts: readonly SlotVerdict[], slot: ProfileSlot): Geometry => {
   const verdict = verdicts.find((entry) => entry.slot === slot);
-  if (verdict === undefined) throw new Error(`${slot} の採否が無い`);
+  if (verdict === undefined) throw new Error(`${slot} has no verdict`);
   return verdict.outcome.geometry;
 };
 
 const gemmSlot = (verdicts: readonly SlotVerdict[], slot: ProfileSlot): GemmGeometry => {
   const geometry = slotGeometry(verdicts, slot);
-  if ("tileK" in geometry) throw new Error(`${slot} に i8a8 の幾何が入っている`);
+  if ("tileK" in geometry) throw new Error(`${slot} holds an i8a8 geometry`);
   return geometry;
 };
 
 const i8a8Slot = (verdicts: readonly SlotVerdict[], slot: ProfileSlot): I8a8Geometry => {
   const geometry = slotGeometry(verdicts, slot);
-  if (!("tileK" in geometry)) throw new Error(`${slot} に f32 骨格の幾何が入っている`);
+  if (!("tileK" in geometry)) throw new Error(`${slot} holds a geometry of the f32 skeleton`);
   return geometry;
 };
 
@@ -1330,7 +1349,7 @@ export const buildGeometryProfile = (
   // early at generation). profileRowsSegments checks the trailing Infinity and the refinement of
   // the default
   const segments = profileRowsSegments(PROFILE_GEMM_ROWS_BOUNDS);
-  if (sources.length === 0) throw new Error("掃引の記録が 1 本も無い（provenance を書けない）");
+  if (sources.length === 0) throw new Error("No sweep records (provenance cannot be written)");
   const joined = (pick: (source: SweepSource) => string): string => sources.map(pick).join(", ");
   const table: GeometryProfile = {
     id: spec.id,
@@ -1392,9 +1411,12 @@ const assertGeneratedProfile = (profile: GeneratedProfile): void => {
     assertGeometryProfile(profile);
   } catch (cause) {
     if (cause instanceof CodegenError) {
-      throw new Error(`生成した表 '${profile.id}' が注入の門を通らない — ${cause.message}`, {
-        cause,
-      });
+      throw new Error(
+        `Generated table '${profile.id}' fails the injection check — ${cause.message}`,
+        {
+          cause,
+        },
+      );
     }
     throw cause;
   }
@@ -1430,7 +1452,7 @@ const generatedKernelsId = (table: GeometryProfile): string => {
   } catch (cause) {
     if (cause instanceof KernelsIdError) {
       throw new Error(
-        `生成した表 '${table.id}' の provenance.kernels（カーネルの指紋）を導けない — ${cause.message}`,
+        `Cannot derive provenance.kernels (the kernel fingerprint) of generated table '${table.id}' — ${cause.message}`,
         { cause },
       );
     }
@@ -1498,7 +1520,7 @@ export const deriveGeometryProfile = (
   // Allowing less than 1 could adopt a geometry slower than the default (the ratio check would lose
   // its meaning — the same condition as the CLI's --min-speedup, removed in 0.15)
   if (!Number.isFinite(minSpeedup) || minSpeedup < 1) {
-    throw new Error(`minSpeedup は 1 以上の数（${minSpeedup}）`);
+    throw new Error(`minSpeedup must be a number of at least 1 (${minSpeedup})`);
   }
   const sources = reports.map(({ report, path, sha256 }) =>
     parseSweepReport(report, { path, sha256 }),
@@ -1537,7 +1559,7 @@ export const geometryProfileJson = (profile: GeometryProfile): string => infinit
 export const infinityJson = (value: unknown): string => {
   const plain = JSON.stringify(value);
   if (plain.includes(JSON.stringify(INFINITY_MARK).slice(1, -1))) {
-    throw new Error("JSON の文字列に Infinity の印と同じ綴りが含まれている");
+    throw new Error("A JSON string contains the same spelling as the Infinity marker");
   }
   return JSON.stringify(
     value,

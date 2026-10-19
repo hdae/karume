@@ -25,7 +25,7 @@ import { CodegenError } from "./errors.ts";
 export const assertU32Params = (where: string, values: Readonly<Record<string, number>>): void => {
   for (const [name, value] of Object.entries(values)) {
     if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
-      throw new CodegenError(`${where}: ${name} は u32 の非負整数（${value}）`);
+      throw new CodegenError(`${where}: ${name} must be a non-negative u32 integer (${value})`);
     }
   }
 };

@@ -353,7 +353,7 @@ test("parseStorageRoles は同じ binding の read / read_write 二重宣言を 
 @group(0) @binding(1) var<storage, read_write> b: array<f32>;
       `),
     StorageRoleError,
-    "binding 1 が read と read_write の両方",
+    "binding 1 is declared as both read and read_write",
   );
 });
 

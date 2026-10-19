@@ -184,7 +184,7 @@ describe("利用者のコールバックの例外は計測の失敗に化けず�
     [
       "onProgress: 入力を用意中",
       (throwIt) => ({
-        onProgress: (message) => (message.endsWith("入力を用意中") ? throwIt() : undefined),
+        onProgress: (message) => (message.endsWith("preparing inputs") ? throwIt() : undefined),
       }),
     ],
     [
@@ -196,7 +196,8 @@ describe("利用者のコールバックの例外は計測の失敗に化けず�
     [
       "onProgress: 既定幾何の再測定",
       (throwIt) => ({
-        onProgress: (message) => (message.endsWith("既定幾何の再測定") ? throwIt() : undefined),
+        onProgress: (message) =>
+          message.endsWith("re-measuring the default geometry") ? throwIt() : undefined,
       }),
     ],
     [
@@ -287,7 +288,7 @@ describe("perDispatch が 0 の既定（timestamp の差が 0）は比の土台�
           const excluded = verdicts.flatMap((verdict) => verdict.excluded);
           assertEquals(
             excluded.map(({ caseId, geometry, reason }) => ({ caseId, geometry, reason })),
-            [{ caseId: SMALLEST.id, geometry: undefined, reason: "既定の再測定が無い" }],
+            [{ caseId: SMALLEST.id, geometry: undefined, reason: "no default re-measurement" }],
             gpuTiming.unit,
           );
         }
@@ -302,7 +303,9 @@ describe("perDispatch が 0 の既定（timestamp の差が 0）は比の土台�
         const { cases } = await sweepSmallest(context, {});
         assertEquals(cases[0].defaultRepeat, undefined);
         assert(
-          cases[0].defaultRepeatError?.includes("既定の再測定の perDispatch が 0") === true,
+          cases[0].defaultRepeatError?.includes(
+            "perDispatch of the default re-measurement is 0",
+          ) === true,
           `defaultRepeatError: ${cases[0].defaultRepeatError}`,
         );
       },

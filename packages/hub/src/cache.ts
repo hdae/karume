@@ -83,8 +83,8 @@ export const clearHubCache = async (
     // environment without Cache Storage (a non-secure origin, for example) — the app would treat
     // copies that are still there as deleted.
     throw new Error(
-      "hub: この環境に CacheStorage が無いためキャッシュを消せない" +
-        "（options.caches で明示的に渡す）",
+      "hub: cannot clear the cache because this environment has no CacheStorage" +
+        " (pass one explicitly with options.caches)",
     );
   }
   // Reclaim the legacy namespaces here too (a caller may clean up without ever going through

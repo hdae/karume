@@ -1,4 +1,4 @@
-// karume conv2d (x[B,Cin,H,W] * W[Cout,Cin/groups,Kh,Kw] + b[Cout], f32, 重み bf16 格納, direct convolution)
+// karume conv2d (x[B,Cin,H,W] * W[Cout,Cin/groups,Kh,Kw] + b[Cout], f32, bf16 weight storage, direct convolution)
 struct Dims {
   n: u32,
   batch: u32,

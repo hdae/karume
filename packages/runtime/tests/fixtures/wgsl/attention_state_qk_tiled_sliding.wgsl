@@ -1,4 +1,4 @@
-// karume attention_state_qk (states-shaped S materialisation, f32, shared K row tiles of the GEMM skeleton, sliding window, レジスタ 16x16 タイル / 1 スレッド 1x4 / wg 4x16)
+// karume attention_state_qk (states-shaped S materialisation, f32, shared K row tiles of the GEMM skeleton, sliding window, register tile 16x16 / 1x4 per thread / wg 4x16)
 struct Lengths {
   past: u32,
   query: u32,

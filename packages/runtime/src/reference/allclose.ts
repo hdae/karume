@@ -60,20 +60,24 @@ export const allclose = (
   tolerance: Tolerance = DEFAULT_TOLERANCE,
 ): AllcloseReport => {
   if (actual.length !== expected.length) {
-    throw new AllcloseError(`長さ不一致: actual ${actual.length} vs expected ${expected.length}`);
+    throw new AllcloseError(
+      `Length mismatch: actual ${actual.length} vs expected ${expected.length}`,
+    );
   }
   // MUST: reject a NaN or negative tolerance. With NaN the right-hand side of the check is NaN and
   // `abs > rhs` is always false (any error passes); with a negative value even error 0 fails. e2e
   // tests deliberately pass atol = +Infinity as a record-only band, so atol is not required to be
   // finite.
   if (Number.isNaN(tolerance.atol) || tolerance.atol < 0) {
-    throw new AllcloseError(`許容差 atol が NaN か負である: ${tolerance.atol}`);
+    throw new AllcloseError(`Tolerance atol is NaN or negative: ${tolerance.atol}`);
   }
   // MUST: rtol is limited to finite non-negative values. With rtol = +Infinity an element whose
   // reference is 0 gives Infinity·0 = NaN, the right-hand side becomes NaN and it passes whatever
   // atol is (a record-only band is expressed on the atol side).
   if (!Number.isFinite(tolerance.rtol) || tolerance.rtol < 0) {
-    throw new AllcloseError(`許容差 rtol が有限の非負でない: ${tolerance.rtol}`);
+    throw new AllcloseError(
+      `Tolerance rtol is not a finite non-negative number: ${tolerance.rtol}`,
+    );
   }
   let failCount = 0;
   let maxAbsError = 0;
@@ -128,7 +132,7 @@ export const compareTensors = (
   floatTolerance: Tolerance = DEFAULT_TOLERANCE,
 ): AllcloseReport => {
   if (actual.dtype !== expected.dtype) {
-    throw new AllcloseError(`dtype 不一致: actual ${actual.dtype} vs expected ${expected.dtype}`);
+    throw new AllcloseError(`dtype mismatch: actual ${actual.dtype} vs expected ${expected.dtype}`);
   }
   return allclose(
     actual.data,

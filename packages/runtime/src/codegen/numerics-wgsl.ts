@@ -21,7 +21,7 @@ import { CodegenError } from "./errors.ts";
  */
 export const f32Literal = (value: number): string => {
   if (!Number.isFinite(value)) {
-    throw new CodegenError(`f32Literal: 非有限値は WGSL のリテラルにできない（${value}）`);
+    throw new CodegenError(`f32Literal: a non-finite value cannot be a WGSL literal (${value})`);
   }
   const text = String(value);
   return /[.eE]/.test(text) ? text : `${text}.0`;

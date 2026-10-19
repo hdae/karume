@@ -159,7 +159,7 @@ export const pinnedSourceOf = (
   const session = sessions.get(loaded);
   if (session === undefined) {
     throw new Error(
-      "hub: LoadedManifest に取得元が結び付いていない（loadManifest の返り値を作り替えた値は渡せない）",
+      "hub: no source is bound to the LoadedManifest (a value rebuilt from what loadManifest returned cannot be passed)",
     );
   }
   return session.driver.pin(session.generation, options);

@@ -264,7 +264,7 @@ test("判定の根拠 1 行は分岐と最大誤差を持つ（警告文言が�
     maxBandRatio: 0.0067,
   };
   const line = formatAttentionI8a8Decision(decision);
-  assert(line.includes("ビット同一"), line);
+  assert(line.includes("bit-identical"), line);
   assert(line.includes("'dp4a'"), line);
   assert(line.includes(String(decision.maxAbsError)), line);
   assert(line.includes(String(decision.maxBandRatio)), line);
@@ -512,7 +512,7 @@ test.skipIf(!GPU_AVAILABLE)(
       assert(error.message.includes("dp4a:"), error.message);
       assert(error.message.includes("emu:"), error.message);
       // 「帯は既に許容した上で外している」ことが読める（v2 の裁定順が診断に出る）
-      assert(error.message.includes("sanity 帯"), error.message);
+      assert(error.message.includes("sanity band"), error.message);
     } finally {
       gpu.destroy();
     }

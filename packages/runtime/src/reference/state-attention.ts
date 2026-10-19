@@ -96,10 +96,12 @@ export type StateAttentionRefInput = StateAttentionRefShape & {
  */
 const assertPastAndWindow = (where: string, past: number, window: number): void => {
   if (!Number.isSafeInteger(past) || past < 0) {
-    throw new ReferenceOpError(`${where}: pastLength ${past} が非負の整数でない`);
+    throw new ReferenceOpError(`${where}: pastLength ${past} is not a non-negative integer`);
   }
   if (!Number.isSafeInteger(window) || window < 0) {
-    throw new ReferenceOpError(`${where}: window ${window} が非負の整数でない（0 = full）`);
+    throw new ReferenceOpError(
+      `${where}: window ${window} is not a non-negative integer (0 = full)`,
+    );
   }
 };
 
@@ -112,7 +114,7 @@ const assertPastAndWindow = (where: string, past: number, window: number): void 
  */
 const assertQuery = (query: number, chunkRows: number): void => {
   if (!Number.isSafeInteger(query) || query < 1 || query > chunkRows) {
-    throw new ReferenceOpError(`queryLength ${query} が 1..${chunkRows}（= M）の整数でない`);
+    throw new ReferenceOpError(`queryLength ${query} is not an integer in 1..${chunkRows} (= M)`);
   }
 };
 
@@ -127,24 +129,26 @@ const assertQuery = (query: number, chunkRows: number): void => {
  */
 const assertShape = (shape: StateAttentionRefShape): void => {
   const { batch, heads, kvHeads, chunkRows, depth, capacity, window, past, query } = shape;
-  assertPastAndWindow("states 形", past, window);
+  assertPastAndWindow("states form", past, window);
   const dims = [batch, heads, kvHeads, chunkRows, depth, capacity];
   if (dims.some((dim) => !Number.isSafeInteger(dim) || dim < 1)) {
     throw new ReferenceOpError(
-      `states 形の形が正の整数でない（B=${batch} H=${heads} Hkv=${kvHeads} M=${chunkRows} D=${depth} C=${capacity}）`,
+      `states form shape is not all positive integers (B=${batch} H=${heads} Hkv=${kvHeads} M=${chunkRows} D=${depth} C=${capacity})`,
     );
   }
   if (heads % kvHeads !== 0) {
-    throw new ReferenceOpError(`H=${heads} が Hkv=${kvHeads} で割り切れない（ADR 0067 決定 1）`);
+    throw new ReferenceOpError(
+      `H=${heads} is not divisible by Hkv=${kvHeads} (ADR 0067 decision 1)`,
+    );
   }
   assertQuery(query, chunkRows);
   if (stateSliding(window)) {
     if (window > capacity) {
-      throw new ReferenceOpError(`window ${window} が容量 ${capacity} を超える`);
+      throw new ReferenceOpError(`window ${window} exceeds capacity ${capacity}`);
     }
   } else if (past + query > capacity) {
     throw new ReferenceOpError(
-      `full スロットで pastLength ${past} + queryLength ${query} が容量 ${capacity} を超える（ADR 0067 決定 4 ④）`,
+      `In a full slot, pastLength ${past} + queryLength ${query} exceeds capacity ${capacity} (ADR 0067 decision 4 ④)`,
     );
   }
 };
@@ -152,7 +156,9 @@ const assertShape = (shape: StateAttentionRefShape): void => {
 /** Whether a given array has the expected length (an argument mix-up fails as a shape mismatch). */
 const assertLength = (name: string, data: Float32Array<ArrayBuffer>, expected: number): void => {
   if (data.length !== expected) {
-    throw new ReferenceOpError(`${name}: 要素数 ${data.length} が期待 ${expected} と合わない`);
+    throw new ReferenceOpError(
+      `${name}: element count ${data.length} does not match the expected ${expected}`,
+    );
   }
 };
 
@@ -296,17 +302,17 @@ export const referenceStateAppend = (input: StateAppendRefInput): RefTensor => {
   assertPastAndWindow("state_append", past, window);
   if (kvPlanes < 1 || chunkRows < 1 || depth < 1 || capacity < 1) {
     throw new ReferenceOpError(
-      `state_append の形が正でない（B·Hkv=${kvPlanes} M=${chunkRows} D=${depth} C=${capacity}）`,
+      `state_append shape is not positive (B·Hkv=${kvPlanes} M=${chunkRows} D=${depth} C=${capacity})`,
     );
   }
   assertQuery(query, chunkRows);
   if (stateSliding(window)) {
     if (window > capacity) {
-      throw new ReferenceOpError(`window ${window} が容量 ${capacity} を超える`);
+      throw new ReferenceOpError(`window ${window} exceeds capacity ${capacity}`);
     }
   } else if (past + query > capacity) {
     throw new ReferenceOpError(
-      `full スロットで pastLength ${past} + queryLength ${query} が容量 ${capacity} を超える`,
+      `In a full slot, pastLength ${past} + queryLength ${query} exceeds capacity ${capacity}`,
     );
   }
   assertLength("x", input.x, kvPlanes * chunkRows * depth);
@@ -363,15 +369,17 @@ export const referenceStateAttentionReadonly = (
   assertPastAndWindow("readonly", past, window);
   if (batch < 1 || heads < 1 || kvHeads < 1 || depth < 1 || capacity < 1) {
     throw new ReferenceOpError(
-      `readonly の形が正でない（B=${batch} H=${heads} Hkv=${kvHeads} D=${depth} C=${capacity}）`,
+      `readonly shape is not positive (B=${batch} H=${heads} Hkv=${kvHeads} D=${depth} C=${capacity})`,
     );
   }
   if (heads % kvHeads !== 0) {
-    throw new ReferenceOpError(`H=${heads} が Hkv=${kvHeads} で割り切れない（ADR 0067 決定 1）`);
+    throw new ReferenceOpError(
+      `H=${heads} is not divisible by Hkv=${kvHeads} (ADR 0067 decision 1)`,
+    );
   }
   if (stateSliding(window) ? window > capacity : past > capacity) {
     throw new ReferenceOpError(
-      `readonly: window ${window} / pastLength ${past} が容量 ${capacity} に収まらない`,
+      `readonly: window ${window} / pastLength ${past} does not fit in capacity ${capacity}`,
     );
   }
   const repeat = heads / kvHeads;

@@ -283,9 +283,11 @@ export const attentionStatsWgsl = (
           )
           .join("\n");
   return `// karume attention_stats (per-row m = amax(S) and inv = 1/Σexp(S - m), f32${
-    f16 ? ", S は f16 格納" : ""
+    f16 ? ", S in f16 storage" : ""
   }${scoreNote(score)}${
-    regCache === undefined ? "" : `, S は 1 回読みでレジスタ保持（1 スレッド ${regCache} 要素）`
+    regCache === undefined
+      ? ""
+      : `, S read once and held in registers (${regCache} elements per thread)`
   })${f16 ? "\nenable f16;" : ""}
 struct Params {
   rows: u32,
@@ -380,7 +382,7 @@ export const ATTENTION_STATS_WGSL: string = attentionStatsWgsl();
 const assertKvRepeat = (where: string, kvRepeat: number): void => {
   assertU32Params(where, { kv_repeat: kvRepeat });
   if (kvRepeat < 1) {
-    throw new CodegenError(`${where}: kv_repeat は正整数（${kvRepeat}）`);
+    throw new CodegenError(`${where}: kv_repeat must be a positive integer (${kvRepeat})`);
   }
 };
 
@@ -414,10 +416,10 @@ export const attentionQkParams = (
   // becomes `+Inf`, and `0 * Inf = NaN` silently breaks the scores. The same check as the
   // contract layer's `assertFiniteAttr`).
   if (!Number.isFinite(Math.fround(scale))) {
-    throw new CodegenError(`attention_qk params: scale は f32 として有限の数値（${scale}）`);
+    throw new CodegenError(`attention_qk params: scale must be a finite number as f32 (${scale})`);
   }
   if (kvRepeat !== undefined) assertKvRepeat("attention_qk params", kvRepeat);
-  if (window !== undefined) assertGemmRowWindow("attention_qk 行窓 params", m, window);
+  if (window !== undefined) assertGemmRowWindow("attention_qk row window params", m, window);
   const base = gemmParams("attention_qk", m, n, k);
   if (kvRepeat === undefined && window === undefined) {
     new Float32Array(base.buffer)[3] = scale;
@@ -454,7 +456,7 @@ export const attentionPvParams = (
   window?: GemmRowWindowSpan,
 ): Uint32Array<ArrayBuffer> => {
   if (kvRepeat !== undefined) assertKvRepeat("attention_pv params", kvRepeat);
-  if (window !== undefined) assertGemmRowWindow("attention_pv 行窓 params", m, window);
+  if (window !== undefined) assertGemmRowWindow("attention_pv row window params", m, window);
   const params = gemmParams("attention_pv", m, n, k);
   if (window === undefined) {
     if (kvRepeat !== undefined) params[3] = kvRepeat;
@@ -487,7 +489,7 @@ export const attentionStatsParams = (
 ): Uint32Array<ArrayBuffer> => {
   assertU32Params("attention_stats params", { rows, dim });
   if (dim < 1) {
-    throw new CodegenError(`attention_stats params: dim は正整数（${dim}）`);
+    throw new CodegenError(`attention_stats params: dim must be a positive integer (${dim})`);
   }
   if (regCache !== undefined) {
     // MUST: check that it is an integer first. The generator's `Array.from({ length: regCache })`
@@ -496,17 +498,17 @@ export const attentionStatsParams = (
     // elements covered although only 1 slot = 256 elements is unrolled", and the leftover elements
     // enter neither max nor Σ — a silent wrong value.
     if (!Number.isInteger(regCache)) {
-      throw new CodegenError(`attention_stats params: regCache ${regCache} が整数でない`);
+      throw new CodegenError(`attention_stats params: regCache ${regCache} is not an integer`);
     }
     if (regCache > ATTENTION_STATS_REG_CACHE_MAX) {
       throw new CodegenError(
-        `attention_stats params: regCache ${regCache} が上限 ${ATTENTION_STATS_REG_CACHE_MAX} を超える`,
+        `attention_stats params: regCache ${regCache} exceeds the limit ${ATTENTION_STATS_REG_CACHE_MAX}`,
       );
     }
     const covered = regCache * ATTENTION_STATS_WORKGROUP_SIZE;
     if (dim > covered) {
       throw new CodegenError(
-        `attention_stats params: dim ${dim} が regcache 変種の担当範囲 ${covered}（${regCache} × ${ATTENTION_STATS_WORKGROUP_SIZE}）を超える`,
+        `attention_stats params: dim ${dim} exceeds the range ${covered} covered by the regcache variant (${regCache} × ${ATTENTION_STATS_WORKGROUP_SIZE})`,
       );
     }
   }

@@ -255,14 +255,14 @@ const F32 = 4;
 
 const gemmOf = (candidate: GeometryCandidate, where: string): GemmGeometry => {
   if (candidate.family !== "gemm") {
-    throw new Error(`${where}: f32 骨格の幾何ではない（${candidate.name}）`);
+    throw new Error(`${where}: not a geometry of the f32 skeleton (${candidate.name})`);
   }
   return candidate.geometry;
 };
 
 const i8a8Of = (candidate: GeometryCandidate, where: string): I8a8Geometry => {
   if (candidate.family !== "i8a8") {
-    throw new Error(`${where}: i8a8 の幾何ではない（${candidate.name}）`);
+    throw new Error(`${where}: not an i8a8 geometry (${candidate.name})`);
   }
   return candidate.geometry;
 };
@@ -720,9 +720,9 @@ export const assertBindingRoles = (
   const expected = sortedList(launch.bindings.map((_, index) => index + 1));
   if (declared !== expected) {
     throw new Error(
-      `${launch.key}: WGSL の storage 束縛 [${declared}] が写した表の位置 [${expected}]（${launch.bindings.join(
+      `${launch.key}: the WGSL storage bindings [${declared}] differ from the positions in the mirrored table [${expected}] (${launch.bindings.join(
         ", ",
-      )}）と違う`,
+      )})`,
     );
   }
   const expectedWrites = sortedList(
@@ -731,9 +731,9 @@ export const assertBindingRoles = (
   const declaredWrites = sortedList(roles.writes);
   if (declaredWrites !== expectedWrites) {
     throw new Error(
-      `${launch.key}: WGSL の書き込み束縛 [${declaredWrites}] が写した表の書き込み先 [${expectedWrites}]（${launch.writes.join(
+      `${launch.key}: the WGSL write bindings [${declaredWrites}] differ from the write targets in the mirrored table [${expectedWrites}] (${launch.writes.join(
         ", ",
-      )}）と違う`,
+      )})`,
     );
   }
 };
@@ -881,7 +881,7 @@ export const createSweepContext = async (
   const { device } = gpu;
   const unit: TimingUnit = gpu.gpuTimingEnabled ? timestampUnit : "wall";
   const stagingBytes = Math.min(DIGEST_CHUNK_BYTES, Math.floor(gpu.limits.maxBufferSize / 8) * 8);
-  const created = await scoped(gpu, "geometry-sweep の文脈", () => ({
+  const created = await scoped(gpu, "geometry-sweep context", () => ({
     staging: device.createBuffer({
       label: "geometry-sweep-staging",
       size: stagingBytes,
@@ -939,7 +939,7 @@ const createResources = async (
       const size = Math.max(4, Math.ceil(spec.bytes / 4) * 4);
       if (size > gpu.limits.maxStorageBufferBindingSize) {
         throw new Error(
-          `${spec.name}: ${size} B が maxStorageBufferBindingSize ${gpu.limits.maxStorageBufferBindingSize} を超える`,
+          `${spec.name}: ${size} B exceeds maxStorageBufferBindingSize ${gpu.limits.maxStorageBufferBindingSize}`,
         );
       }
       const buffer = await scoped(gpu, `createBuffer(${spec.name})`, () =>
@@ -1001,7 +1001,7 @@ const prepareLaunch = async (
     const entries: GPUBindGroupEntry[] = [{ binding: 0, resource: { buffer: params } }];
     for (const [index, name] of launch.bindings.entries()) {
       const buffer = resources.get(name);
-      if (buffer === undefined) throw new Error(`${launch.key}: 資源 ${name} が無い`);
+      if (buffer === undefined) throw new Error(`${launch.key}: resource ${name} is missing`);
       entries.push({ binding: index + 1, resource: { buffer } });
     }
     const bindGroup = await scoped(gpu, `createBindGroup(${launch.key})`, () =>
@@ -1060,7 +1060,7 @@ const runPass = async (
   if (timestamps === undefined) return { wallNs, clamped: false };
   await context.gpu[RUNTIME_INTERNAL].raceDeviceLost(
     timestamps.read.mapAsync(MAP_MODE.READ),
-    "timestamp の読み戻し",
+    "timestamp readback",
   );
   const stamps = new BigUint64Array(timestamps.read.getMappedRange());
   const delta = stamps[1] - stamps[0];
@@ -1084,12 +1084,12 @@ export const outputDigest = async (context: SweepContext, buffer: GPUBuffer): Pr
   const chunks: ArrayBuffer[] = [];
   for (let offset = 0; offset < buffer.size; offset += staging.size) {
     const length = Math.min(staging.size, buffer.size - offset);
-    await submitAndWait(gpu, "出力の読み戻し", (encoder) => {
+    await submitAndWait(gpu, "output readback", (encoder) => {
       encoder.copyBufferToBuffer(buffer, offset, staging, 0, length);
     });
     await gpu[RUNTIME_INTERNAL].raceDeviceLost(
       staging.mapAsync(MAP_MODE.READ, 0, length),
-      "出力の読み戻し",
+      "output readback",
     );
     // digest copies its input at call time (as WebCrypto specifies), but to stay independent of
     // implementation differences, the data is copied to the JS side before unmap and then passed
@@ -1223,7 +1223,7 @@ const timeCandidate = async (
   rounds: number,
 ): Promise<{ readonly launch: Launch; readonly timing: Timing }> => {
   const output = resources.get(plan.output);
-  if (output === undefined) throw new Error(`出力 ${plan.output} が無い`);
+  if (output === undefined) throw new Error(`Output ${plan.output} is missing`);
   const ready = await prepareLaunch(context, plan.launch(candidate), resources);
   try {
     return { launch: ready.launch, timing: await timeLaunch(context, ready, output, rounds) };
@@ -1233,7 +1233,7 @@ const timeCandidate = async (
 };
 
 const ALL_ROUNDS_NEGATIVE =
-  "timestamp が全 round で負（0 に丸めた sample しか無く min を採れない）";
+  "timestamp negative in every round (only samples clamped to 0, so no min can be taken)";
 
 const measureGeometry = async (
   context: SweepContext,
@@ -1267,7 +1267,7 @@ const measureGeometry = async (
   // report.ts)
   const realNs = context.unit === "ns" ? timing.perDispatch : timing.wallNsPerDispatch;
   const output = resources.get(plan.output);
-  if (output === undefined) throw new Error(`${sweepCase.id}: 出力 ${plan.output} が無い`);
+  if (output === undefined) throw new Error(`${sweepCase.id}: output ${plan.output} is missing`);
   return {
     ...measured,
     perDispatch: timing.perDispatch,
@@ -1336,7 +1336,7 @@ export const sweepCase = async (
   // would be duplicated. The user's exception propagates to the caller as is (the outer finally
   // releases the resources). emit / finish inside a catch clause are not re-caught, so they can
   // stay there
-  hooks.onProgress?.(`${target.id}: 入力を用意中`);
+  hooks.onProgress?.(`${target.id}: preparing inputs`);
   try {
     resources = await createResources(context, plan.resources);
   } catch (cause) {
@@ -1399,7 +1399,7 @@ export const sweepCase = async (
       aborted = true;
       return finish({ caseId: target.id });
     }
-    hooks.onProgress?.(`${target.id}: 既定幾何の再測定`);
+    hooks.onProgress?.(`${target.id}: re-measuring the default geometry`);
     let repeat: Pick<CaseSummary, "defaultRepeat" | "defaultRepeatError">;
     try {
       const { timing } = await timeCandidate(
@@ -1414,7 +1414,9 @@ export const sweepCase = async (
       // ratios, would reject the whole record — keep it as a failure so that only the case is
       // dropped
       if (!(timing.perDispatch > 0)) {
-        throw new Error("既定の再測定の perDispatch が 0（timestamp の差が 0 — 比を出せない）");
+        throw new Error(
+          "perDispatch of the default re-measurement is 0 (timestamp difference 0 — no ratio can be computed)",
+        );
       }
       repeat = {
         defaultRepeat: {

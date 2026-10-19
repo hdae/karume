@@ -1,4 +1,4 @@
-// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P̃ = round(127·exp(S − m)) not materialised・エミュ, v is per-column i8 (Vᵀ contiguous), S は f16 格納（pack2x16float）, タイル 64x128 / 1 スレッド 8x8 / wg 16x8 / K 16 + vec4)
+// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P̃ = round(127·exp(S − m)) not materialised (emulated), v is per-column i8 (Vᵀ contiguous), S in f16 storage (pack2x16float), tile 64x128 / 8x8 per thread / wg 16x8 / K 16 + vec4)
 struct Dims {
   m: u32,
   n: u32,
@@ -44,7 +44,7 @@ fn main(
   let n4 = dims.n / 4u;
   // The batch axis folding B and H (uniform per workgroup — a precondition for the inner
   // workgroupBarrier to meet WGSL's uniformity requirement). MUST: S counts in quads, vq in packs,
-  // the row statistics in 2 words per row, vscale in D entries, O in elements（v4 では quad）
+  // the row statistics in 2 words per row, vscale in D entries, O in elements (quads in v4)
   // — mixing up the units reads and writes the next head when B·H ≥ 2 (a wrong value without an
   // exception, invisible with B=H=1)
   let sbase = wid.z * dims.m * k4;
@@ -52,7 +52,7 @@ fn main(
   let rbase = wid.z * dims.m;
   let vsbase = wid.z * dims.n;
   let obase = wid.z * dims.m * n4;
-  // P̃ タイルの担当 (64 rows × 4 packs over 128 threads in 2 rounds)
+  // P̃ tile assignment (64 rows × 4 packs over 128 threads in 2 rounds)
   let ar = tid / 4u;
   let ap = tid % 4u;
   let sa_at = ap * 64u + ar;
@@ -67,7 +67,7 @@ fn main(
   let stat_at1 = select(0u, (rbase + arow1) * 2u, arow1 < dims.m);
   let row_max1 = stats[stat_at1];
   // B tile assignment (128 columns × 4 packs over 128 threads in 4 rounds).
-  // 列は D。vq は [D,N] の N 連続（= パック方向）なので**転置が要らない**
+  // columns are D. vq is [D,N] with N contiguous (= the pack direction), so **no transpose is needed**
   let wc = tid / 4u;
   let wp = tid % 4u;
   let sb_at = wp * 128u + wc;

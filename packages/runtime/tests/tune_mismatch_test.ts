@@ -64,25 +64,25 @@ describe("geometryProfileMismatch", () => {
 
   it("provenance の無い表（手書きの表）は照合の材料が無いと返す", () => {
     const message = mismatchOf(DEFAULT_GEOMETRY_PROFILE, ADAPTER);
-    assertStringIncludes(message, "'default' に provenance が無い");
-    assertStringIncludes(message, "照合の材料が無い");
+    assertStringIncludes(message, "'default' has no provenance");
+    assertStringIncludes(message, "nothing to match against");
   });
 
   for (const field of ["vendor", "architecture", "device", "description"] as const) {
     it(`adapter の ${field} が違えば、その欄と両方の値を名指す（空文字も値として比べる）`, () => {
       const blank = mismatchOf(stored(), { ...ADAPTER, [field]: "" });
-      assertStringIncludes(blank, `adapter の ${field} が違う`);
-      assertStringIncludes(blank, `表 ${JSON.stringify(ADAPTER[field])} / この adapter ""`);
+      assertStringIncludes(blank, `adapter ${field} differs`);
+      assertStringIncludes(blank, `table ${JSON.stringify(ADAPTER[field])} / this adapter ""`);
       // 表の側が空（フラグ無しの Chrome で作った表）で、adapter が値を返す（フラグを入れた）場合も不一致
       const filled = mismatchOf(
         stored(DEFAULT_GEOMETRY_PROFILE, { adapter: { ...ADAPTER, [field]: "" } }),
         ADAPTER,
       );
-      assertStringIncludes(filled, `adapter の ${field} が違う`);
+      assertStringIncludes(filled, `adapter ${field} differs`);
       // 大小文字も揃えない（文字列の完全一致）
       assertStringIncludes(
         mismatchOf(stored(), { ...ADAPTER, [field]: ADAPTER[field].toUpperCase() + "!" }),
-        `adapter の ${field} が違う`,
+        `adapter ${field} differs`,
       );
     });
   }
@@ -100,11 +100,11 @@ describe("geometryProfileMismatch", () => {
       stored(DEFAULT_GEOMETRY_PROFILE, { kernels: "0123456789abcdef" }),
       ADAPTER,
     );
-    assertStringIncludes(message, "カーネルの指紋が違う");
-    assertStringIncludes(message, "表 0123456789abcdef");
+    assertStringIncludes(message, "kernel fingerprint differs");
+    assertStringIncludes(message, "table 0123456789abcdef");
     assertStringIncludes(
       message,
-      `今の runtime ${geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE)}`,
+      `current runtime ${geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE)}`,
     );
     const edited: GeometryProfile = {
       ...stored(),
@@ -113,7 +113,7 @@ describe("geometryProfileMismatch", () => {
         qk: { regM: 4, regN: 4, wgX: 8, wgY: 16 },
       },
     };
-    assertStringIncludes(mismatchOf(edited, ADAPTER), "カーネルの指紋が違う");
+    assertStringIncludes(mismatchOf(edited, ADAPTER), "kernel fingerprint differs");
   });
 
   it("ケース集合の版が今の runtime の値と違えば返す", () => {
@@ -121,8 +121,8 @@ describe("geometryProfileMismatch", () => {
       stored(DEFAULT_GEOMETRY_PROFILE, { caseSet: "fedcba9876543210" }),
       ADAPTER,
     );
-    assertStringIncludes(message, "ケース集合の版が違う");
-    assertStringIncludes(message, `表 fedcba9876543210 / 今の runtime ${sweepCaseSetId()}`);
+    assertStringIncludes(message, "case-set version differs");
+    assertStringIncludes(message, `table fedcba9876543210 / current runtime ${sweepCaseSetId()}`);
   });
 
   it("最初の不一致だけを返す（adapter の 4 欄 → 指紋 → ケース集合の版の順）", () => {
@@ -130,14 +130,14 @@ describe("geometryProfileMismatch", () => {
       kernels: "0123456789abcdef",
       caseSet: "fedcba9876543210",
     });
-    assertStringIncludes(mismatchOf(all, { ...ADAPTER, device: "0x1234" }), "adapter の device");
-    assertStringIncludes(mismatchOf(all, ADAPTER), "カーネルの指紋が違う");
+    assertStringIncludes(mismatchOf(all, { ...ADAPTER, device: "0x1234" }), "adapter device");
+    assertStringIncludes(mismatchOf(all, ADAPTER), "kernel fingerprint differs");
     assertStringIncludes(
       mismatchOf(
         { ...all, provenance: { ...all.provenance, kernels: geometryProfileKernelsId(all) } },
         ADAPTER,
       ),
-      "ケース集合の版が違う",
+      "case-set version differs",
     );
   });
 
@@ -175,7 +175,7 @@ describe("geometryProfileMismatch", () => {
       conv2d: { ...DEFAULT_GEOMETRY_PROFILE.conv2d, rows32: { regM: 1, regN: 4, wgX: 1, wgY: 16 } },
     };
     const message = mismatchOf({ ...narrow, provenance: stored().provenance }, ADAPTER);
-    assertStringIncludes(message, "カーネルを組めない");
+    assertStringIncludes(message, "cannot build the kernels");
     assertStringIncludes(message, "conv2d-c96-512x512");
   });
 });

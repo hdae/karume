@@ -1,4 +1,4 @@
-// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P = exp(S − m)·inv not materialised, f32, GQA（v は kv-head へ整数除算で写す）, レジスタ 128x128 タイル / 1 スレッド 8x8 / wg 16x16 + vec4)
+// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P = exp(S − m)·inv not materialised, f32, GQA (v is mapped to the kv-head by integer division), register tile 128x128 / 8x8 per thread / wg 16x16 + vec4)
 struct Dims {
   m: u32,
   n: u32,
@@ -25,7 +25,7 @@ fn main(
   let k4 = dims.k / 4u;
   let n4 = dims.n / 4u;
   // The batch is uniform per workgroup (one z index = the tiles of one batch) — the premise for the
-  // inner workgroupBarrier to meet WGSL's uniformity requirement。MUST: base は quad 単位（要素単位で組むと隣のバッチを読む）
+  // inner workgroupBarrier to meet WGSL's uniformity requirement. MUST: base is in quad units (building it in element units reads the next batch)
   // GQA (ADR 0067 decision 2): only K / V map to the kv-head (wid.z / r = b·Hkv + h/r).
   // q / S / O / row statistics stay on the q-head
   let abase = wid.z * dims.m * k4;

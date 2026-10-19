@@ -15,7 +15,7 @@ export const rmsNormSubgroupKey = (order?: RmsNormAddOrder): string => {
 
 const assertOrder = (order: RmsNormAddOrder | undefined): void => {
   if (order !== undefined && order !== "norm-residual" && order !== "residual-norm") {
-    throw new CodegenError(`rms_norm subgroup32: 未対応の加算順 '${String(order)}'`);
+    throw new CodegenError(`rms_norm subgroup32: unsupported addition order '${String(order)}'`);
   }
 };
 

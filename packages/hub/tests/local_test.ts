@@ -590,7 +590,7 @@ test("openAsset: 非 tight view を返すアダプターは fail loudly（余白
   // ずれる。検査は共通層（`fetch.ts`）— 取得元ごとに置くと同じ不変条件の写しが増える。
   const error = await assertRejects(() => reader.read(0, 8), Error);
   assert(
-    error.message.includes("buffer 全体を占めていない"),
+    error.message.includes("do not span the whole buffer"),
     `${error.message} が tight view 違反を名乗っていない`,
   );
   assert(error.message.includes(TOKENIZER_PATH), `${error.message} が path を名乗っていない`);

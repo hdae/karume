@@ -211,20 +211,20 @@ test("M=1 は n によらず rows=1（decode の生成物を行ブロック化�
 test("門の外の (m, n) は黙って丸めず落ちる", () => {
   // m の域: 1..LINEAR_GEMV_MAX_ROWS。上限の外は既定の GEMM 骨格が受け持つ形なので、
   // ここが黙って上限へ丸めると「門が閉じた形が行ブロックで走る」沈黙誤値になる。
-  assertThrows(() => linearGemvRowsForShape("i4", 0, 2048), CodegenError, "行数 0");
+  assertThrows(() => linearGemvRowsForShape("i4", 0, 2048), CodegenError, "row count 0");
   assertThrows(
     () => linearGemvRowsForShape("i4", LINEAR_GEMV_MAX_ROWS + 1, 2048),
     CodegenError,
-    `行数 ${LINEAR_GEMV_MAX_ROWS + 1}`,
+    `row count ${LINEAR_GEMV_MAX_ROWS + 1}`,
   );
-  assertThrows(() => linearGemvRowsForShape("i8", -1, 2048), CodegenError, "行数 -1");
-  assertThrows(() => linearGemvRowsForShape("i4", 1.5, 2048), CodegenError, "行数 1.5");
+  assertThrows(() => linearGemvRowsForShape("i8", -1, 2048), CodegenError, "row count -1");
+  assertThrows(() => linearGemvRowsForShape("i4", 1.5, 2048), CodegenError, "row count 1.5");
   // n の域: 正整数。0 / 非整数は「スレッド数」の計算がそもそも意味を持たない。
-  assertThrows(() => linearGemvRowsForShape("i4", 8, 0), CodegenError, "列数 0");
-  assertThrows(() => linearGemvRowsForShape("i8", 8, -256), CodegenError, "列数 -256");
-  assertThrows(() => linearGemvRowsForShape("i4", 8, 2048.5), CodegenError, "列数 2048.5");
+  assertThrows(() => linearGemvRowsForShape("i4", 8, 0), CodegenError, "column count 0");
+  assertThrows(() => linearGemvRowsForShape("i8", 8, -256), CodegenError, "column count -256");
+  assertThrows(() => linearGemvRowsForShape("i4", 8, 2048.5), CodegenError, "column count 2048.5");
   // 格納は圧縮 2 種だけ（実測した範囲に留める — ADR 0082 決定 4）
-  assertThrows(() => linearGemvRowsForShape("f32", 8, 2048), CodegenError, "f32 格納");
+  assertThrows(() => linearGemvRowsForShape("f32", 8, 2048), CodegenError, "f32 storage");
 });
 
 test("キーに rows が載り、rows=1 の行ブロックは M=1 変種と別キーになる", () => {
@@ -254,12 +254,12 @@ test("キーに rows が載り、rows=1 の行ブロックは M=1 変種と別�
   assertThrows(
     () => linearGemvRowsKey("i4", 32, { cols: 32, unroll: 4, rows: 0 }),
     CodegenError,
-    "rows は",
+    "rows must be",
   );
   assertThrows(
     () => linearGemvRowsKey("i4", 32, { cols: 32, unroll: 4, rows: LINEAR_GEMV_MAX_ROWS + 1 }),
     CodegenError,
-    "rows は",
+    "rows must be",
   );
 });
 
@@ -272,56 +272,68 @@ test("uniform の m は 1..上限（行ブロックの y タイルが受ける�
   assertEquals([...linearGemvParams("i8", 2, 64, 64)], [2, 64, 64, 0]);
   // 域の外（m=0 / 上限 + 1）は落とす。通すと dispatch の y 枚数と dims.m が食い違い、
   // 書き戻しガードが黙って全行を捨てる / 範囲外の行を書く形になる。
-  assertThrows(() => linearGemvParams("i4", 0, 2048, 128, 32), CodegenError, "m は 1..");
+  assertThrows(
+    () => linearGemvParams("i4", 0, 2048, 128, 32),
+    CodegenError,
+    "m must be an integer in 1..",
+  );
   assertThrows(
     () => linearGemvParams("i4", LINEAR_GEMV_MAX_ROWS + 1, 2048, 128, 32),
     CodegenError,
-    "m は 1..",
+    "m must be an integer in 1..",
   );
   assertThrows(
     () => linearGemvParams("i8", LINEAR_GEMV_MAX_ROWS + 1, 64, 64),
     CodegenError,
-    "m は 1..",
+    "m must be an integer in 1..",
   );
 });
 
 test("f16 GEMV は M=1 と 8 要素整列のみを受け、行ブロックの生成を拒否する", () => {
   assertEquals([...linearGemvParams("f16", 1, 36, 40)], [1, 36, 40, 0]);
   assertEquals([...linearGemvParams("f16", 1, 4, 0)], [1, 4, 0, 0]);
-  assertThrows(() => linearGemvParams("f16", 2, 36, 40), CodegenError, "m=1 のみ");
+  assertThrows(() => linearGemvParams("f16", 2, 36, 40), CodegenError, "only m=1");
   assertThrows(() => linearGemvParams("f16", 1, 36, 36), CodegenError, "k");
   assertThrows(() => linearGemvParams("f16", 1, 36, 40, 32), CodegenError);
-  assertThrows(() => linearGemvRowsForShape("f16", 1, 36), CodegenError, "行ブロックは未対応");
+  assertThrows(
+    () => linearGemvRowsForShape("f16", 1, 36),
+    CodegenError,
+    "row blocks are not supported",
+  );
   const variant = { cols: 32, unroll: 4, rows: 1 };
   assertThrows(
     () => linearGemvRowsKey("f16", undefined, variant),
     CodegenError,
-    "行ブロックは未対応",
+    "row blocks are not supported",
   );
   assertThrows(
     () => linearGemvRowsWgsl("f16", undefined, variant),
     CodegenError,
-    "行ブロックは未対応",
+    "row blocks are not supported",
   );
 });
 
 test("f32 GEMV は M=1 と 4 要素整列のみを受け、行ブロックの生成を拒否する", () => {
   assertEquals([...linearGemvParams("f32", 1, 36, 40)], [1, 36, 40, 0]);
   assertEquals([...linearGemvParams("f32", 1, 4, 0)], [1, 4, 0, 0]);
-  assertThrows(() => linearGemvParams("f32", 2, 36, 40), CodegenError, "m=1 のみ");
+  assertThrows(() => linearGemvParams("f32", 2, 36, 40), CodegenError, "only m=1");
   assertThrows(() => linearGemvParams("f32", 1, 36, 38), CodegenError, "k");
   assertThrows(() => linearGemvParams("f32", 1, 36, 40, 32), CodegenError);
-  assertThrows(() => linearGemvRowsForShape("f32", 1, 36), CodegenError, "行ブロックは未対応");
+  assertThrows(
+    () => linearGemvRowsForShape("f32", 1, 36),
+    CodegenError,
+    "row blocks are not supported",
+  );
   const variant = { cols: 32, unroll: 4, rows: 1 };
   assertThrows(
     () => linearGemvRowsKey("f32", undefined, variant),
     CodegenError,
-    "行ブロックは未対応",
+    "row blocks are not supported",
   );
   assertThrows(
     () => linearGemvRowsWgsl("f32", undefined, variant),
     CodegenError,
-    "行ブロックは未対応",
+    "row blocks are not supported",
   );
 });
 

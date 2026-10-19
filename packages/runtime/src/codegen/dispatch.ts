@@ -27,7 +27,7 @@ export const gridStrideWorkgroups = (
   const stride = groups * workgroupSize;
   if (items + stride > 2 ** 32) {
     throw new DispatchLimitError(
-      `grid-stride: 要素数 ${items} + stride ${stride} が 2^32 を超える（u32 のループ添字が末尾の加算で折り返し、ループが終わらない）`,
+      `grid-stride: element count ${items} + stride ${stride} exceeds 2^32 (the u32 loop index wraps around on the final addition and the loop never ends)`,
     );
   }
   return groups;
@@ -47,7 +47,7 @@ export const tiledWorkgroups = (
   const groups = Math.ceil(items / tile);
   if (groups > limit) {
     throw new DispatchLimitError(
-      `${where}: 必要 workgroup 数 ${groups} が device 上限 ${limit} を超える（${items} / タイル ${tile}）`,
+      `${where}: required workgroup count ${groups} exceeds the device limit ${limit} (${items} / tile ${tile})`,
     );
   }
   return groups;

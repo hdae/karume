@@ -1,4 +1,4 @@
-// karume attention_stats (per-row m = amax(S) and inv = 1/Σexp(S - m), f32, S は 1 回読みでレジスタ保持（1 スレッド 16 要素）)
+// karume attention_stats (per-row m = amax(S) and inv = 1/Σexp(S - m), f32, S read once and held in registers (16 elements per thread))
 struct Params {
   rows: u32,
   dim: u32,

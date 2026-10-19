@@ -113,9 +113,9 @@ const pinTarget = (
 
 const missingCrossRepo = (label: string, repo: string, revision: string): Error =>
   new Error(
-    `@karume/hub: ローカル取得元（ディレクトリ ${label}）に repo '${repo}' の越境先が無い。` +
-      `localDirectory の crossRepo に { "${repo}": <取得元> } を渡すこと` +
-      `（宣言 revision ${revision} — 隣接する同名ディレクトリを推測して読むことはしない）`,
+    `@karume/hub: the local source (directory ${label}) has no cross-repo target for repo '${repo}'.` +
+      ` Pass { "${repo}": <source> } in the crossRepo of localDirectory` +
+      ` (declared revision ${revision} — an adjacent directory of the same name is never guessed and read)`,
   );
 
 /**
@@ -142,8 +142,8 @@ const localRangeReader = (
       offset + length > ref.size
     ) {
       throw new Error(
-        `hub: ${ref.path} の区間 [${offset}, ${offset + length}) が不正` +
-          `（宣言 size ${ref.size} — 非負整数で size に収まる区間だけを読める）`,
+        `hub: ${ref.path} range [${offset}, ${offset + length}) is invalid` +
+          ` (declared size ${ref.size} — only ranges of non-negative integers within size can be read)`,
       );
     }
     const { signal } = options;
@@ -156,11 +156,11 @@ const localRangeReader = (
     if (bytes.byteLength !== length) {
       const cause =
         bytes.byteLength < length
-          ? `実体が宣言 size ${ref.size} より短い`
-          : "アダプターが要求より長い戻りを返した（`readFileRange` の契約違反）";
+          ? `the file is shorter than the declared size ${ref.size}`
+          : "the adapter returned more than requested (`readFileRange` contract violated)";
       throw new Error(
-        `hub: ${ref.path} の区間読みが offset ${offset} の ${length} バイト要求に` +
-          ` ${bytes.byteLength} バイトを返した（${cause}）`,
+        `hub: the range read of ${ref.path} at offset ${offset} for ${length} bytes` +
+          ` returned ${bytes.byteLength} bytes (${cause})`,
       );
     }
     return bytes;
@@ -175,7 +175,7 @@ const pinnedLocalSource = (
   // Check the capability once here (binding it keeps the type narrowed inside the reader too).
   const readRange = adapter.readFileRange;
   const origin: SourceOrigin = {
-    label: `ディレクトリ ${settings.label}`,
+    label: `directory ${settings.label}`,
     // A failure origin that returns the same bytes when read again (no room for retry, unlike the
     // network).
     integrity: "local",
@@ -262,9 +262,9 @@ export const localDirectory = (
   adapter: DirectoryAdapter,
   options: LocalDirectoryOptions = {},
 ): DistributionSource => {
-  const settings = { ...options, label: options.label ?? "(ローカル)" };
+  const settings = { ...options, label: options.label ?? "(local)" };
   const driver: SourceDriver = {
-    origin: { label: `ディレクトリ ${settings.label}`, integrity: "local" },
+    origin: { label: `directory ${settings.label}`, integrity: "local" },
     // There is no notion of generations, so no resolution or request happens (no implicit-main
     // warning either — there is nothing to pin).
     resolveGeneration: () => Promise.resolve(""),

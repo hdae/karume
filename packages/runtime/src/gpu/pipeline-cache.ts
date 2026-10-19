@@ -67,9 +67,7 @@ export const parseStorageRoles = (wgsl: string): StorageRoles => {
     const target = match[2] === "read_write" ? writes : reads;
     const other = match[2] === "read_write" ? reads : writes;
     if (other.has(binding)) {
-      throw new StorageRoleError(
-        `WGSL の binding ${binding} が read と read_write の両方で宣言されている`,
-      );
+      throw new StorageRoleError(`WGSL binding ${binding} is declared as both read and read_write`);
     }
     target.add(binding);
   }
@@ -135,7 +133,7 @@ export class PipelineCache {
     if (cached !== undefined) {
       if (cached.wgsl !== wgsl) {
         throw new PipelineKeyConflictError(
-          `パイプラインキー "${key}" に異なる WGSL が渡された（codegen 決定性の破れ）`,
+          `Pipeline key "${key}" was given a different WGSL (codegen determinism is broken)`,
         );
       }
       return await cached.resolved;

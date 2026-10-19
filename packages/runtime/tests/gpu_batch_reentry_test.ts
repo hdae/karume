@@ -177,7 +177,7 @@ test("batch finishAndRead: 出力 getter からの再入は写しの後の再検
         return a;
       },
     });
-    await assertRejects(() => outer, BatchScopeError, "1回だけ");
+    await assertRejects(() => outer, BatchScopeError, "only once");
     const read = await inner!;
     assertEquals(Array.from(new Float32Array(read.i)), [2]);
     assertEquals(

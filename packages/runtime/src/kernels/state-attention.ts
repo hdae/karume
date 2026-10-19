@@ -1291,41 +1291,41 @@ const assertStateGeometry = (where: string, geometry: StateAttentionGeometry): v
   });
   if (rowsBlock < 1 || chunkRows < 1 || depth < 1 || capacity < 1 || colCap < 1) {
     throw new CodegenError(
-      `${where}: rows_block / chunk_rows / depth / capacity / col_cap は正整数` +
-        `（${rowsBlock} / ${chunkRows} / ${depth} / ${capacity} / ${colCap}）`,
+      `${where}: rows_block / chunk_rows / depth / capacity / col_cap must be positive integers` +
+        ` (${rowsBlock} / ${chunkRows} / ${depth} / ${capacity} / ${colCap})`,
     );
   }
   if (kvRepeat < 1) {
-    throw new CodegenError(`${where}: kv_repeat は正整数（${kvRepeat}）`);
+    throw new CodegenError(`${where}: kv_repeat must be a positive integer (${kvRepeat})`);
   }
   if (rowOffset + rowsBlock > chunkRows) {
     throw new CodegenError(
-      `${where}: 行ブロック [${rowOffset}, ${
+      `${where}: row block [${rowOffset}, ${
         rowOffset + rowsBlock
-      }) が chunk 行数 ${chunkRows} を超える`,
+      }) exceeds the chunk row count ${chunkRows}`,
     );
   }
   if (stateSliding(window)) {
     if (window > capacity) {
       throw new CodegenError(
-        `${where}: window ${window} が容量 ${capacity} を超える（ADR 0067 決定 4 ③）`,
+        `${where}: window ${window} exceeds capacity ${capacity} (ADR 0067 decision 4 ③)`,
       );
     }
     const need = window - 1 + chunkRows;
     if (colCap < need) {
       throw new CodegenError(
-        `${where}: col_cap ${colCap} が sliding の live 上限 ${need}（= W−1 + M）に足りない`,
+        `${where}: col_cap ${colCap} is below the sliding live limit ${need} (= W−1 + M)`,
       );
     }
   } else if (colCap < capacity) {
     throw new CodegenError(
-      `${where}: col_cap ${colCap} が full の live 上限 ${capacity}（= C）に足りない`,
+      `${where}: col_cap ${colCap} is below the full live limit ${capacity} (= C)`,
     );
   }
   // MUST: check finiteness **as f32** (the same check as the attention_qk params — `1e39`, finite in
   // f64, becomes `+Inf` in an f32 word, and `0 * Inf = NaN` silently breaks the scores).
   if (!Number.isFinite(Math.fround(geometry.scale))) {
-    throw new CodegenError(`${where}: scale は f32 として有限の数値（${geometry.scale}）`);
+    throw new CodegenError(`${where}: scale must be a finite number as f32 (${geometry.scale})`);
   }
 };
 
@@ -1430,14 +1430,14 @@ export const stateStatsParams = (
   });
   if (batchHeads < 1 || rowsBlock < 1 || colCap < 1) {
     throw new CodegenError(
-      `attention_state_stats params: batch_heads / rows_block / col_cap は正整数` +
-        `（${batchHeads} / ${rowsBlock} / ${colCap}）`,
+      `attention_state_stats params: batch_heads / rows_block / col_cap must be positive integers` +
+        ` (${batchHeads} / ${rowsBlock} / ${colCap})`,
     );
   }
   if (stateSliding(window) && colCap < window) {
     throw new CodegenError(
-      `attention_state_stats params: col_cap ${colCap} が sliding の live 上限 ${window}` +
-        `（= W−1 + M の最小 M = 1）に足りない`,
+      `attention_state_stats params: col_cap ${colCap} is below the sliding live limit ${window}` +
+        ` (= W−1 + M with the minimum M = 1)`,
     );
   }
   const params = new Uint32Array(8);
@@ -1481,7 +1481,7 @@ export const stateEffectiveRows = (rowsBlock: number, rowOffset: number, query: 
 const assertQueryLength = (where: string, query: number): void => {
   assertU32Params(where, { query });
   if (query < 1) {
-    throw new CodegenError(`${where}: queryLength は 1 以上（${query}）`);
+    throw new CodegenError(`${where}: queryLength must be at least 1 (${query})`);
   }
 };
 
@@ -1522,7 +1522,7 @@ const assertDispatchGeometry = (where: string, geometry: StateDispatchGeometry):
   });
   if (batchHeads < 1 || rowsBlock < 1 || depth < 1) {
     throw new CodegenError(
-      `${where}: batchHeads / rowsBlock / depth は正整数（${batchHeads} / ${rowsBlock} / ${depth}）`,
+      `${where}: batchHeads / rowsBlock / depth must be positive integers (${batchHeads} / ${rowsBlock} / ${depth})`,
     );
   }
 };
@@ -1880,7 +1880,7 @@ fn main(
  */
 export const stateStatsReadonlyWgsl = (sliding: boolean): string =>
   stateStatsBodyWgsl(sliding, {
-    headerNote: ", readonly = past のみ",
+    headerNote: ", readonly = past only",
     live: stateReadonlyLiveWgsl(sliding),
     rowsNote: "",
     amaxBarrierNote: "",

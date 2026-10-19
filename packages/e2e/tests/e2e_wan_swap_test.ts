@@ -308,11 +308,11 @@ test.skipIf(!DIST_PRESENT)(
           { gpu: fakeGpuContext(fakeDevice()), textEncoder: "gpu", quant: F16_QUANT },
         ),
       Error,
-      `${part0.path} の事前取得に失敗した（repo ${part0.repo} @ ${part0.revision}）`,
+      `${part0.path}: prefetch failed (repo ${part0.repo} @ ${part0.revision})`,
     );
     // 取得層は取得元の案内を cause に残す（hub の local.ts — 隣のディレクトリを推測しない）。
     assertInstanceOf(error.cause, Error);
-    assertStringIncludes(error.cause.message, `repo '${part0.repo}' の越境先が無い`);
+    assertStringIncludes(error.cause.message, `no cross-repo target for repo '${part0.repo}'`);
     assertStringIncludes(error.cause.message, "crossRepo");
     // NOTE: 保険（独立の検出力はほぼ無い）— 越境の解決は読みより先に投げるので、上の失敗文言の検査が通る限り
     // 読みは起きない。独立に赤になるのは、hub が Wan の配布形のディレクトリに越境先を推測しに行く退行だけ。

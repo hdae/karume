@@ -124,28 +124,32 @@ export const assertI8a8Geometry = (geometry: I8a8Geometry, where: string): void 
     ["tileK", tileK],
   ] as const) {
     if (!Number.isSafeInteger(value) || value < 1) {
-      throw new CodegenError(`${where}: 幾何の ${name} は正整数（${value}）`);
+      throw new CodegenError(`${where}: geometry ${name} must be a positive integer (${value})`);
     }
   }
   if (regN % I8A8_PACK !== 0) {
-    throw new CodegenError(`${where}: regN は ${I8A8_PACK} の倍数（acc は vec4 束ね・${regN}）`);
+    throw new CodegenError(
+      `${where}: regN must be a multiple of ${I8A8_PACK} (acc is bundled as vec4, ${regN})`,
+    );
   }
   if (tileK % I8A8_PACK !== 0) {
-    throw new CodegenError(`${where}: tileK は ${I8A8_PACK} の倍数（i8 の 4 詰め・${tileK}）`);
+    throw new CodegenError(
+      `${where}: tileK must be a multiple of ${I8A8_PACK} (four i8 packed per word, ${tileK})`,
+    );
   }
   const threads = i8a8Threads(geometry);
   const kPacks = i8a8KPacks(geometry);
   if (threads % kPacks !== 0) {
     throw new CodegenError(
-      `${where}: スレッド数 ${threads} が K パック数 ${kPacks} で割り切れない（充填の担当が組めない）`,
+      `${where}: thread count ${threads} is not divisible by the K pack count ${kPacks} (the fill assignment cannot be built)`,
     );
   }
   const stride = i8a8FillStride(geometry);
   if (i8a8TileM(geometry) % stride !== 0 || i8a8TileN(geometry) % stride !== 0) {
     throw new CodegenError(
-      `${where}: タイル辺 ${i8a8TileM(geometry)}x${i8a8TileN(
+      `${where}: tile edges ${i8a8TileM(geometry)}x${i8a8TileN(
         geometry,
-      )} が充填ストライド ${stride} で割り切れない`,
+      )} are not divisible by the fill stride ${stride}`,
     );
   }
 };
@@ -168,8 +172,8 @@ export const assertI8a8GroupGeometry = (
 ): void => {
   if (groupSize % geometry.tileK !== 0) {
     throw new CodegenError(
-      `${where}: group_size ${groupSize} が K タイル ${geometry.tileK} の倍数でない` +
-        "（1 枚の K タイルが group 境界を跨ぐと scale が混ざる）",
+      `${where}: group_size ${groupSize} is not a multiple of the K tile ${geometry.tileK}` +
+        " (a K tile that crosses a group boundary mixes scales)",
     );
   }
 };
@@ -264,6 +268,6 @@ ${rows}
 
 /** Geometry note for generated comments (in a form that fits on one header line). */
 export const i8a8GeometryNote = (geometry: I8a8Geometry): string =>
-  `タイル ${i8a8TileM(geometry)}x${i8a8TileN(
+  `tile ${i8a8TileM(geometry)}x${i8a8TileN(
     geometry,
-  )} / 1 スレッド ${geometry.regM}x${geometry.regN} / wg ${geometry.wgX}x${geometry.wgY} / K ${geometry.tileK}`;
+  )} / ${geometry.regM}x${geometry.regN} per thread / wg ${geometry.wgX}x${geometry.wgY} / K ${geometry.tileK}`;

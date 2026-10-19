@@ -134,7 +134,7 @@ export const ARGMAX_WGSL: string = [
 export const argmaxParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("argmax params", { rows, dim });
   if (dim < 1) {
-    throw new CodegenError(`argmax params: dim は正整数（${dim}）`);
+    throw new CodegenError(`argmax params: dim must be a positive integer (${dim})`);
   }
   const params = new Uint32Array(4);
   params[0] = rows;
@@ -356,8 +356,8 @@ export const argmaxSplitParams = (
   assertU32Params("argmax split params", { rows, dim, groups });
   if (dim < 1 || groups < 1 || groups !== argmaxSplitGroups(dim)) {
     throw new CodegenError(
-      `argmax split params: dim ${dim} / groups ${groups} が分割の形に合わない` +
-        `（${argmaxSplitGroups(dim)} 区間が正）`,
+      `argmax split params: dim ${dim} / groups ${groups} does not match the split shape` +
+        ` (expected ${argmaxSplitGroups(dim)} segments)`,
     );
   }
   const params = new Uint32Array(4);

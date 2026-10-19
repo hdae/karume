@@ -1193,7 +1193,11 @@ test.skipIf(!GPU_AVAILABLE)(
         GRAPH_NAME,
       );
       try {
-        await assertRejects(() => session.run({ x0: input }), CodegenError, "実装上限 3 を超える");
+        await assertRejects(
+          () => session.run({ x0: input }),
+          CodegenError,
+          "exceeds the implementation limit 3",
+        );
       } finally {
         await session.dispose();
       }

@@ -176,27 +176,31 @@ describe("selectGeometryProfile の選択順", () => {
           profileOf("apple-metal-3-copy", { vendor: "apple", architecture: "metal-3" }),
         ]),
       CodegenError,
-      "同じ順位に 2 本当たる",
+      "two tables would match at the same rank",
     );
     assertThrows(
       () => selectGeometryProfile(unrelated, [APPLE, profileOf("apple-2", { vendor: "apple" })]),
       CodegenError,
-      "同じ順位に 2 本当たる",
+      "two tables would match at the same rank",
     );
   });
 
   it("全 adapter に当たる表・vendor の無い architecture・空文字の match・重複 id は fail loudly", () => {
     const adapter = { vendor: "apple", architecture: "metal-3" };
     const cases: readonly (readonly [string, GeometryProfile, string])[] = [
-      ["match 空", profileOf("everything", {}), "既定プロファイルだけ"],
-      ["architecture だけ", profileOf("arch-only", { architecture: "metal-3" }), "vendor と対"],
-      ["vendor が空文字", profileOf("empty-vendor", { vendor: "" }), "空文字にしない"],
+      ["match 空", profileOf("everything", {}), "only the default profile"],
+      [
+        "architecture だけ",
+        profileOf("arch-only", { architecture: "metal-3" }),
+        "together with vendor",
+      ],
+      ["vendor が空文字", profileOf("empty-vendor", { vendor: "" }), "must not be an empty string"],
       [
         "architecture が空文字",
         profileOf("empty-arch", { vendor: "apple", architecture: "" }),
-        "空文字にしない",
+        "must not be an empty string",
       ],
-      ["既定と同じ id", profileOf("default", { vendor: "apple" }), "id が重複"],
+      ["既定と同じ id", profileOf("default", { vendor: "apple" }), "duplicate id"],
     ];
     for (const [name, profile, message] of cases) {
       assertThrows(() => selectGeometryProfile(adapter, [profile]), CodegenError, message, name);
@@ -204,7 +208,7 @@ describe("selectGeometryProfile の選択順", () => {
     assertThrows(
       () => selectGeometryProfile(adapter, [APPLE, profileOf("apple", { vendor: "intel" })]),
       CodegenError,
-      "id が重複",
+      "duplicate id",
     );
   });
 
@@ -338,13 +342,13 @@ describe("description の照合と match を省いた注入専用の表", () => 
     assertThrows(
       () => selectGeometryProfile(adapter, [OPT_IN, profileOf("opt-in", { vendor: "apple" })]),
       CodegenError,
-      "id が重複",
+      "duplicate id",
     );
     assertThrows(
       () =>
         selectGeometryProfile(adapter, [profileOf("opt-in-broken", undefined, { gemmRows: [] })]),
       CodegenError,
-      "gemmRows が空",
+      "gemmRows is empty",
     );
     // 省いた表は同順位の衝突に数えない（match を持たない表同士は照合で競合しない）
     assertStrictEquals(
@@ -359,22 +363,22 @@ describe("description の照合と match を省いた注入専用の表", () => 
       [
         "description だけ",
         profileOf("desc-only", { description: "Apple M2" }),
-        "vendor と architecture の両方と組",
+        "together with both vendor and architecture",
       ],
       [
         "vendor と description だけ",
         profileOf("vendor-desc", { vendor: "apple", description: "Apple M2" }),
-        "vendor と architecture の両方と組",
+        "together with both vendor and architecture",
       ],
       [
         "architecture と description だけ",
         profileOf("arch-desc", { architecture: "metal-3", description: "Apple M2" }),
-        "vendor と対",
+        "together with vendor",
       ],
       [
         "description が空文字",
         profileOf("empty-desc", { vendor: "apple", architecture: "metal-3", description: "" }),
-        "空文字にしない",
+        "must not be an empty string",
       ],
     ];
     for (const [name, profile, message] of cases) {
@@ -396,7 +400,7 @@ describe("description の照合と match を省いた注入専用の表", () => 
           }),
         ]),
       CodegenError,
-      "同じ順位に 2 本当たる",
+      "two tables would match at the same rank",
     );
     const m5 = profileOf("apple-m5", {
       vendor: "apple",
@@ -640,7 +644,11 @@ describe("gemmGeometryForRows buckets and the keys / WGSL they produce", () => {
 
   it("gemmGeometryForRows は非負整数以外を fail loudly にする", () => {
     for (const rows of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
-      assertThrows(() => gemmGeometryForRows(rows), CodegenError, "行数 M は u32 の非負整数");
+      assertThrows(
+        () => gemmGeometryForRows(rows),
+        CodegenError,
+        "row count M must be a non-negative u32 integer",
+      );
     }
   });
 
@@ -816,10 +824,18 @@ describe("gemmRowsGeometry", () => {
   it("規則が狭義昇順でない・最後が Infinity でない・空の表は、選択でも引く側でも fail loudly", () => {
     const adapter = { vendor: "test", architecture: "" };
     const broken: readonly (readonly [string, GeometryProfile, string])[] = [
-      ["降順", rules([100, small], [10, M64N32], [Number.POSITIVE_INFINITY, M64N64]), "狭義昇順"],
-      ["同値", rules([10, small], [10, M64N32], [Number.POSITIVE_INFINITY, M64N64]), "狭義昇順"],
+      [
+        "降順",
+        rules([100, small], [10, M64N32], [Number.POSITIVE_INFINITY, M64N64]),
+        "strictly increasing",
+      ],
+      [
+        "同値",
+        rules([10, small], [10, M64N32], [Number.POSITIVE_INFINITY, M64N64]),
+        "strictly increasing",
+      ],
       ["最後が有限", rules([10, small], [100, M64N32]), "Infinity"],
-      ["空", rules(), "空"],
+      ["空", rules(), "empty"],
     ];
     for (const [name, profile, message] of broken) {
       assertThrows(() => gemmRowsGeometry(profile, 1), CodegenError, message, name);
@@ -845,7 +861,7 @@ describe("conv2dProfileGeometry と幾何の門", () => {
     );
     assertStrictEquals(conv2dProfileGeometry(profile, 64), M64N64);
     assertStrictEquals(conv2dProfileGeometry(profile, 32), M64N32);
-    assertThrows(() => conv2dProfileGeometry(profile, 16), CodegenError, "クラスが無い");
+    assertThrows(() => conv2dProfileGeometry(profile, 16), CodegenError, "no class matches");
   });
 
   it("整除の破れた幾何を持つ表は、その op に当たる前（選択の時点）で落ちる", () => {
@@ -959,11 +975,11 @@ describe("acquireGpu の幾何プロファイル注入口", () => {
   it("壊れた表（id が空・整除の破れた幾何）は device を作る前に fail loudly", async () => {
     const hole: GemmGeometry = { regM: 3, regN: 4, wgX: 8, wgY: 8 };
     const broken: readonly (readonly [string, GeometryProfile, string])[] = [
-      ["id が空", profileOf("", { vendor: "test" }), "id が空"],
+      ["id が空", profileOf("", { vendor: "test" }), "id is empty"],
       [
         "description だけの match",
         profileOf("desc-only", { description: "Apple M2" }),
-        "vendor と architecture の両方と組",
+        "together with both vendor and architecture",
       ],
       [
         "gemmRows の幾何",
@@ -1131,7 +1147,7 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
       await assertRejects(
         () => acquireGpu({ geometryProfile: () => broken }),
         GpuFeatureError,
-        "geometryProfile（コールバックの戻り）: ",
+        "geometryProfile (callback return value): ",
       );
     });
     assertEquals(requests, 0, "壊れた表で requestDevice に届いた");
@@ -1167,7 +1183,7 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
         await assertRejects(
           () => acquireGpu({ geometryProfile: untypedCallback(returned) }),
           GpuFeatureError,
-          "コールバックが Promise を返した",
+          "the callback returned a Promise",
         );
       });
       assertEquals(requests, 0, "Promise を返したのに requestDevice に届いた");
@@ -1193,7 +1209,7 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
         await assertRejects(
           () => acquireGpu({ geometryProfile: asyncCallback }),
           GpuFeatureError,
-          "コールバックが Promise を返した",
+          "the callback returned a Promise",
         );
       });
       assertEquals(requests, 0, "Promise を返したのに requestDevice に届いた");
@@ -1236,7 +1252,7 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
           await assertRejects(
             () => acquireGpu({ geometryProfile: callback }),
             GpuFeatureError,
-            "コールバックが Promise を返した",
+            "the callback returned a Promise",
             name,
           );
         });
@@ -1273,7 +1289,7 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
         await assertRejects(
           () => acquireGpu({ geometryProfile: untypedCallback(thenable) }),
           GpuFeatureError,
-          "コールバックが Promise を返した",
+          "the callback returned a Promise",
           name,
         );
       });
@@ -1332,35 +1348,35 @@ describe("assertGeometryProfile は unknown を表へ絞る型述語", () => {
   it("欄の欠け・型違いは TypeError ではなく CodegenError で欄を名指す", () => {
     const { gemmRows: _gemmRows, ...withoutRows } = OPT_IN;
     const cases: readonly (readonly [string, unknown, string])[] = [
-      ["null", null, "表 がオブジェクトでない"],
-      ["id が数", { ...OPT_IN, id: 5 }, "id が文字列でない"],
-      ["match.vendor が数", { ...OPT_IN, match: { vendor: 1 } }, "match.vendor が文字列でない"],
-      ["gemmRows の欠け", withoutRows, "gemmRows が配列でない"],
+      ["null", null, "table is not an object"],
+      ["id が数", { ...OPT_IN, id: 5 }, "id is not a string"],
+      ["match.vendor が数", { ...OPT_IN, match: { vendor: 1 } }, "match.vendor is not a string"],
+      ["gemmRows の欠け", withoutRows, "gemmRows is not an array"],
       [
         "gemmRows の規則に geometry が無い",
         { ...OPT_IN, gemmRows: [{ maxRows: Number.POSITIVE_INFINITY }] },
-        "gemmRows[0].geometry がオブジェクトでない",
+        "gemmRows[0].geometry is not an object",
       ],
       [
         "maxRows が文字列",
         { ...OPT_IN, gemmRows: [{ maxRows: "64", geometry: M64N64 }] },
-        "gemmRows[0] の maxRows が数でない",
+        "maxRows of gemmRows[0] is not a number",
       ],
-      ["attention の欠け", { ...OPT_IN, attention: undefined }, "attention がオブジェクトでない"],
+      ["attention の欠け", { ...OPT_IN, attention: undefined }, "attention is not an object"],
       [
         "幾何の欄が文字列",
         { ...OPT_IN, attention: { qk: { ...M64N64, wgX: "16" }, pv: M64N64 } },
-        "attention.qk: 幾何の wgX は正整数（16）",
+        "attention.qk: geometry wgX must be a positive integer (16)",
       ],
       [
         "i8a8 の tileK の欠け",
         { ...OPT_IN, i8a8: { ...OPT_IN.i8a8, linear: M64N64 } },
-        "i8a8.linear: 幾何の tileK は正整数（undefined）",
+        "i8a8.linear: geometry tileK must be a positive integer (undefined)",
       ],
       [
         "provenance の欄の欠け",
         { ...OPT_IN, provenance: {} },
-        "provenance.sweep が文字列でない（無い）",
+        "provenance.sweep is not a string (missing)",
       ],
       [
         "provenance.userAgent が文字列",
@@ -1377,7 +1393,7 @@ describe("assertGeometryProfile は unknown を表へ絞る型述語", () => {
             userAgent: "Deno/2",
           },
         },
-        "provenance.userAgent が配列でない",
+        "provenance.userAgent is not an array",
       ],
     ];
     for (const [name, value, message] of cases) {
@@ -1403,31 +1419,35 @@ describe("assertGeometryProfile は unknown を表へ絞る型述語", () => {
       adapter: { vendor: "", architecture: "", device: "", description: "" },
     };
     const cases: readonly (readonly [string, unknown, string])[] = [
-      ["gemmRows が new Array(1)", { ...OPT_IN, gemmRows: sparse(1, {}) }, "gemmRows[0] が無い"],
+      [
+        "gemmRows が new Array(1)",
+        { ...OPT_IN, gemmRows: sparse(1, {}) },
+        "gemmRows[0] is missing",
+      ],
       [
         "gemmRows の先頭の穴",
         { ...OPT_IN, gemmRows: sparse(4, { 1: r64, 2: r512, 3: rest }) },
-        "gemmRows[0] が無い",
+        "gemmRows[0] is missing",
       ],
       [
         "gemmRows の途中の穴",
         { ...OPT_IN, gemmRows: sparse(4, { 0: r64, 1: r512, 3: rest }) },
-        "gemmRows[2] が無い",
+        "gemmRows[2] is missing",
       ],
       [
         "gemmRows の末尾の穴",
         { ...OPT_IN, gemmRows: sparse(4, { 0: r64, 1: r512, 2: rest }) },
-        "gemmRows[3] が無い",
+        "gemmRows[3] is missing",
       ],
       [
         "userAgent が new Array(1)",
         { ...OPT_IN, provenance: { ...provenance, userAgent: sparse(1, {}) } },
-        "provenance.userAgent[0] が無い",
+        "provenance.userAgent[0] is missing",
       ],
       [
         "userAgent の途中の穴",
         { ...OPT_IN, provenance: { ...provenance, userAgent: sparse(3, { 0: "a", 2: "b" }) } },
-        "provenance.userAgent[1] が無い",
+        "provenance.userAgent[1] is missing",
       ],
     ];
     for (const [name, value, message] of cases) {
@@ -1443,7 +1463,7 @@ describe("assertGeometryProfile は unknown を表へ絞る型述語", () => {
       await assertRejects(
         () => acquireGpu({ geometryProfile: untypedCallback({ ...OPT_IN, gemmRows: holed }) }),
         GpuFeatureError,
-        "geometryProfile（コールバックの戻り）: 幾何プロファイル 'opt-in': gemmRows[1] が無い",
+        "geometryProfile (callback return value): Geometry profile 'opt-in': gemmRows[1] is missing",
       );
     });
     assertEquals(requests, 0, "疎な配列の表で requestDevice に届いた");
@@ -1454,7 +1474,7 @@ describe("assertGeometryProfile は unknown を表へ絞る型述語", () => {
       await assertRejects(
         () => acquireGpu({ geometryProfile: untypedCallback({ id: "broken" }) }),
         GpuFeatureError,
-        "geometryProfile（コールバックの戻り）: 幾何プロファイル 'broken': gemmRows が配列でない",
+        "geometryProfile (callback return value): Geometry profile 'broken': gemmRows is not an array",
       );
     });
     assertEquals(requests, 0, "欠けた表で requestDevice に届いた");
@@ -1604,8 +1624,8 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
       await assertRejects(
         () => acquireGpu({ geometryProfile: profile }),
         GpuFeatureError,
-        "geometryProfile: 幾何プロファイル 'threads': device の上限を超える幾何（attention.qk" +
-          "（regM=8 regN=4 wgX=32 wgY=16）: スレッド数 wgX × wgY 512 が maxComputeInvocationsPerWorkgroup 256 を超える）",
+        "geometryProfile: Geometry profile 'threads': geometry exceeds the device limits (attention.qk" +
+          " (regM=8 regN=4 wgX=32 wgY=16): thread count wgX × wgY 512 exceeds maxComputeInvocationsPerWorkgroup 256)",
       );
     }, WEBGPU_DEFAULT_LIMITS);
     assertEquals(requests, 0, "上限超えの表で requestDevice に届いた");
@@ -1628,7 +1648,7 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
         await assertRejects(
           () => acquireGpu({ geometryProfile: profile }),
           GpuFeatureError,
-          "attention.qk（regM=8 regN=4 wgX=32 wgY=16）: wgX 32 が maxComputeWorkgroupSizeX 16 を超える",
+          "attention.qk (regM=8 regN=4 wgX=32 wgY=16): wgX 32 exceeds maxComputeWorkgroupSizeX 16",
         );
       },
       {
@@ -1649,7 +1669,7 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
         await assertRejects(
           () => acquireGpu({ geometryProfile: profile }),
           GpuFeatureError,
-          "attention.qk（regM=8 regN=4 wgX=32 wgY=16）: wgY 16 が maxComputeWorkgroupSizeY 8 を超える",
+          "attention.qk (regM=8 regN=4 wgX=32 wgY=16): wgY 16 exceeds maxComputeWorkgroupSizeY 8",
         );
       },
       {
@@ -1673,12 +1693,12 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
       const error = await assertRejects(
         () => acquireGpu({ geometryProfile: profile }),
         GpuFeatureError,
-        "gemmRows[1]（regM=8 regN=8 wgX=32 wgY=8）: 共有メモリ（バイト） 20480 が maxComputeWorkgroupStorageSize 16384 を超える",
+        "gemmRows[1] (regM=8 regN=8 wgX=32 wgY=8): shared memory (bytes) 20480 exceeds maxComputeWorkgroupStorageSize 16384",
       );
       assert(
         error.message.includes(
-          "i8a8.attentionPv（regM=8 regN=8 wgX=16 wgY=16 tileK=128）: 共有メモリ（バイト） 32768 が " +
-            "maxComputeWorkgroupStorageSize 16384 を超える",
+          "i8a8.attentionPv (regM=8 regN=8 wgX=16 wgY=16 tileK=128): shared memory (bytes) 32768 exceeds " +
+            "maxComputeWorkgroupStorageSize 16384",
         ),
         error.message,
       );
@@ -1708,7 +1728,7 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
             },
           }),
         GpuFeatureError,
-        "geometryProfile（コールバックの戻り）: 幾何プロファイル 'callback': device の上限を超える幾何（conv2d.rows64",
+        "geometryProfile (callback return value): Geometry profile 'callback': geometry exceeds the device limits (conv2d.rows64",
       );
     }, WEBGPU_DEFAULT_LIMITS);
     assertEquals(calls, 1);
@@ -1722,7 +1742,7 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
       await assertRejects(
         () => acquireGpu({ geometryProfile: profile }),
         GpuFeatureError,
-        "geometryProfile: 幾何プロファイル 'order': attention.qk",
+        "geometryProfile: Geometry profile 'order': attention.qk",
       );
     }, WEBGPU_DEFAULT_LIMITS);
     assertEquals(requests, 0);

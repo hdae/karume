@@ -426,8 +426,8 @@ describe("packed 活性の生成物（ADR 0105）", () => {
       [...staticQuantizePackedParams(1536, scale)],
       [...staticQuantizeParams(1536, scale)],
     );
-    assertThrows(() => staticQuantizePackedParams(1536, 0), Error, "恒等");
-    assertThrows(() => staticQuantizePackedParams(1534, scale), Error, "4 の倍数");
+    assertThrows(() => staticQuantizePackedParams(1536, 0), Error, "identity");
+    assertThrows(() => staticQuantizePackedParams(1534, scale), Error, "multiple of 4");
   });
 });
 

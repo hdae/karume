@@ -356,7 +356,10 @@ test("openContainerSource: 範囲外・長さ 0 の part・未知の添字は fa
 
   // 長さ 0 の part は読めない（読み手は partLength が 0 を答えた時点で読みに行かない）。
   const empty = await assertRejects(() => source.read(EMPTY_INDEX, 0, 0), Error);
-  assert(empty.message.includes("長さ 0"), `${empty.message} が長さ 0 の part を名乗っていない`);
+  assert(
+    empty.message.includes("zero-length"),
+    `${empty.message} が長さ 0 の part を名乗っていない`,
+  );
 
   for (const index of [NET_PARTS.length, -1, 1.5]) {
     const error = await assertRejects(() => source.read(index, 0, 1), Error);

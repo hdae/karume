@@ -475,7 +475,7 @@ export const assertGemmRowWindow = (where: string, m: number, window: GemmRowWin
   assertU32Params(where, { row_offset: window.offset, rows_full: window.rowsFull });
   if (window.offset + m > window.rowsFull) {
     throw new CodegenError(
-      `${where}: 行 [${window.offset}, ${window.offset + m}) が全 M ${window.rowsFull} をはみ出す`,
+      `${where}: rows [${window.offset}, ${window.offset + m}) exceed the full M ${window.rowsFull}`,
     );
   }
 };
@@ -601,15 +601,15 @@ const batchPrologue = (
   const bZ = gqa ? "(wid.z / dims.kv_repeat)" : "wid.z";
   return `  // The batch is uniform per workgroup (one z index = the tiles of one batch) — the premise for the
   // inner workgroupBarrier to meet WGSL's uniformity requirement${
-    v4 ? "。MUST: base は quad 単位（要素単位で組むと隣のバッチを読む）" : ""
+    v4 ? ". MUST: base is in quad units (building it in element units reads the next batch)" : ""
   }${
     rowWindow === undefined
       ? ""
       : `
   // Row window (${
     rowWindow === "a"
-      ? "A = q を全 M の row_offset 行目から読む"
-      : "C = 出力を全 M の row_offset 行目へ書く"
+      ? "A = read q starting at row row_offset of the full M"
+      : "C = write the output starting at row row_offset of the full M"
   }).
   // The other side is counted from 0 as a block of m rows`
   }${
@@ -1281,7 +1281,7 @@ ${loader}
 // Shared A tile (${tileM} rows × K ${GEMM_TILE_K}, scalar storage) and
 // shared B tile (K ${GEMM_TILE_K} × ${nQuads} column quads, column direction grouped into vec4)${
     compute === "f16"
-      ? `。f16 変種は共有バイトが半分
+      ? `. The f16 variant halves the shared bytes
 // (${gemmWorkgroupStorageBytes(geometry, "f32")} B → ${gemmWorkgroupStorageBytes(
           geometry,
           "f16",
@@ -1368,7 +1368,7 @@ const denseWgsl = (
   const signature = op === "bmm" ? "a[b,m,k] · b[b,k,n]" : "a[m,k] · b[k,n]";
   return skeleton(
     geometry,
-    `// karume ${op} (${signature}, f32${rowWindow === undefined ? "" : `, 行窓 ${rowWindow}`}, ${gemmGeometryNote(
+    `// karume ${op} (${signature}, f32${rowWindow === undefined ? "" : `, row window ${rowWindow}`}, ${gemmGeometryNote(
       geometry,
     )}${v4 ? " + vec4" : ""})`,
     `@group(0) @binding(1) var<storage, read> a: array<${element}>;
@@ -1424,9 +1424,9 @@ const attentionQkWgsl = (
     geometry,
     `// karume attention_qk (S[b,m,n] = (q·scale)[b,m,d] · (k·scale)[b,n,d]ᵀ${
       mask ? " + mask[m,n]" : ""
-    }, f32${f16 ? ", f16 タイル計算・S も f16" : ""}${scoreNote(score)}${
-      gqa ? ", GQA（k は kv-head へ整数除算で写す）" : ""
-    }${rowWindow ? ", 行窓 a" : ""}, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
+    }, f32${f16 ? ", f16 tile compute, S also f16" : ""}${scoreNote(score)}${
+      gqa ? ", GQA (k is mapped to the kv-head by integer division)" : ""
+    }${rowWindow ? ", row window a" : ""}, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
     `@group(0) @binding(1) var<storage, read> q: array<${element}>;
 @group(0) @binding(2) var<storage, read> k: array<${element}>;
 @group(0) @binding(3) var<storage, read_write> s: array<${scoreArrayType(
@@ -1490,9 +1490,9 @@ const attentionPvWgsl = (
   return skeleton(
     geometry,
     `// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P = exp(S − m)·inv not materialised, f32${
-      f16 ? ", f16 タイル計算・S は f16" : ""
-    }${scoreNote(score)}${gqa ? ", GQA（v は kv-head へ整数除算で写す）" : ""}${
-      rowWindow ? ", 行窓 c" : ""
+      f16 ? ", f16 tile compute, S is f16" : ""
+    }${scoreNote(score)}${gqa ? ", GQA (v is mapped to the kv-head by integer division)" : ""}${
+      rowWindow ? ", row window c" : ""
     }, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
     `@group(0) @binding(1) var<storage, read> s: array<${scoreArrayType(
       score,
@@ -1945,20 +1945,20 @@ const linearVariantWgsl = (
   // there is demand. Silently falling back to f32 compute would be a silence of the form "the f16
   // variant has no effect only with i8 assets", so it is rejected at the generation entry point.
   if (compute === "f16" && weight === "i2") {
-    throw new CodegenError("linear: 重み i2 格納 × f16 計算は未対応（ADR 0097）");
+    throw new CodegenError("linear: i2 weight storage × f16 compute is not supported (ADR 0097)");
   }
   if (compute === "f16" && weight === "i8") {
     throw new CodegenError(
-      "linear: 重み i8 格納 × f16 計算（w8a16）は未実装 — " +
-        "linearCompute を 'f32' か 'a8' にするか、重みを f32 / f16 格納で持つこと",
+      "linear: i8 weight storage × f16 compute (w8a16) is not implemented — " +
+        "set linearCompute to 'f32' or 'a8', or keep the weights in f32 / f16 storage",
     );
   }
   // i4 is the same (w4a16 is not implemented — ADR 0069; the reason not to fall back silently to
   // f32 compute is the same as for i8).
   if (compute === "f16" && weight === "i4") {
     throw new CodegenError(
-      "linear: 重み i4 格納 × f16 計算（w4a16）は未実装 — " +
-        "linearCompute を 'f32' にするか、重みを f32 / f16 格納で持つこと",
+      "linear: i4 weight storage × f16 compute (w4a16) is not implemented — " +
+        "set linearCompute to 'f32', or keep the weights in f32 / f16 storage",
     );
   }
   // MUST: the log2 of the group length is one-to-one with i4 (generating without it emits WGSL with
@@ -1966,14 +1966,14 @@ const linearVariantWgsl = (
   // are rejected at the generation entry point.
   if ((weight === "i4") !== (groupShift !== undefined)) {
     throw new CodegenError(
-      `linear: weightGroupShift は重み i4 格納と対で渡す（weight=${weight} / shift=${groupShift}）`,
+      `linear: weightGroupShift must be passed together with i4 weight storage (weight=${weight} / shift=${groupShift})`,
     );
   }
   const element = v4 ? "vec4<f32>" : "f32";
   return skeleton(
     geometry,
     `// karume linear (x[m,k] · wᵀ[k,n] + bias[n], f32${weightNote(weight)}${
-      compute === "f16" ? ", f16 タイル計算" : ""
+      compute === "f16" ? ", f16 tile compute" : ""
     }, ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
     `@group(0) @binding(1) var<storage, read> x: array<${element}>;
 @group(0) @binding(2) var<storage, read> w: array<${weightArrayType(weight, v4)}>;
@@ -2584,7 +2584,7 @@ const prologueBConv3d = (geometry: GemmGeometry, v4: boolean): string => {
       : `let bcol = wid.x * ${gemmTileN(geometry)}u + bcq * ${GEMM_QUAD}u;`
   }${rows}
   // Invariant in the K tile loop (the step for splitting flat k into (ic, kt, kh, kw)${
-    v4 ? "と、quad の先頭 n を (ot, 画素) へ割る刻み" : ""
+    v4 ? " and the step for splitting the first n of a quad into (ot, pixel)" : ""
   })
   let khw = dims.kernel_h * dims.kernel_w;
   let kthw = dims.kernel_t * khw;${v4 ? "\n  let hw_out = dims.height_out * dims.width_out;" : ""}`;
@@ -2751,20 +2751,20 @@ export const gemmWgsl = (spec: GemmSpec): string => {
       return linearVariantWgsl(geometry, spec.weight, spec.v4, spec.compute, spec.weightGroupShift);
     case "conv1d":
       if (spec.weight === "i2") {
-        throw new CodegenError("conv1d: 重み i2 格納は未対応（ADR 0097）");
+        throw new CodegenError("conv1d: i2 weight storage is not supported (ADR 0097)");
       }
       // MUST: the log2 of the group length is one-to-one with i4 (same as linear — generating
       // without it emits WGSL with a broken scale index; having it on anything other than i4 is a
       // wiring bug in the caller).
       if ((spec.weight === "i4") !== (spec.weightGroupShift !== undefined)) {
         throw new CodegenError(
-          `conv1d igemm: weightGroupShift は重み i4 格納と対で渡す（weight=${spec.weight} / shift=${spec.weightGroupShift}）`,
+          `conv1d igemm: weightGroupShift must be passed together with i4 weight storage (weight=${spec.weight} / shift=${spec.weightGroupShift})`,
         );
       }
       return conv1dIgemmWgsl(geometry, spec.weight, spec.v4, spec.weightGroupShift);
     case "conv2d":
       if (spec.weight === "i2") {
-        throw new CodegenError("conv2d: 重み i2 格納は未対応（ADR 0097）");
+        throw new CodegenError("conv2d: i2 weight storage is not supported (ADR 0097)");
       }
       // MUST: conv2d has no i4 execution path (the supplement to ADR 0069 decision 5 reaches only
       // conv1d). The A-side unroller is shared by 1D / 2D, so **generation would go through** —
@@ -2772,20 +2772,20 @@ export const gemmWgsl = (spec: GemmSpec): string => {
       // the generation entry point (closing the silent wrong value of a direct call).
       if (spec.weight === "i4" || spec.weightGroupShift !== undefined) {
         throw new CodegenError(
-          "conv2d: 重み i4 格納は未実装 — i4 の実行経路は linear / embedding / conv1d(groups==1) だけ（ADR 0069 決定 5）",
+          "conv2d: i4 weight storage is not implemented — the only i4 execution paths are linear / embedding / conv1d(groups==1) (ADR 0069 decision 5)",
         );
       }
       return conv2dIgemmWgsl(geometry, spec.weight, spec.v4);
     case "conv3d":
       if (spec.weight === "i2") {
-        throw new CodegenError("conv3d: 重み i2 格納は未対応（ADR 0097）");
+        throw new CodegenError("conv3d: i2 weight storage is not supported (ADR 0097)");
       }
       // MUST: conv3d has no i4 execution path (the supplement to ADR 0069 decision 5 reaches only
       // conv1d). The A-side unroller is shared by 1D / 2D / 3D, so generation would go through — as
       // with conv2d, it is also rejected at the generation entry point.
       if (spec.weight === "i4" || spec.weightGroupShift !== undefined) {
         throw new CodegenError(
-          "conv3d: 重み i4 格納は未実装 — i4 の実行経路は linear / embedding / conv1d(groups==1) だけ（ADR 0069 決定 5）",
+          "conv3d: i4 weight storage is not implemented — the only i4 execution paths are linear / embedding / conv1d(groups==1) (ADR 0069 decision 5)",
         );
       }
       return conv3dIgemmWgsl(geometry, spec.weight, spec.v4);

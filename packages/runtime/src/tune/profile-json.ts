@@ -30,14 +30,14 @@ type Match = NonNullable<GeometryProfile["match"]>;
 type Provenance = NonNullable<GeometryProfile["provenance"]>;
 
 /** The path spelling of the table itself (the top level). */
-const ROOT = "最上位";
+const ROOT = "top level";
 
 const fail = (path: string, reason: string): never => {
-  throw new GeometryProfileParseError(`幾何プロファイルの JSON: ${path} ${reason}`);
+  throw new GeometryProfileParseError(`Geometry profile JSON: ${path} ${reason}`);
 };
 
 const show = (value: unknown): string => {
-  if (value === undefined) return "無い";
+  if (value === undefined) return "missing";
   // JSON.stringify spells Infinity as null, so numbers are printed with String
   return typeof value === "number" ? String(value) : JSON.stringify(value);
 };
@@ -55,7 +55,7 @@ const readRecord = (
   optional: readonly string[] = [],
 ): Record<string, unknown> => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return fail(path, `がオブジェクトでない（${show(value)}）`);
+    return fail(path, `is not an object (${show(value)})`);
   }
   const fields: Record<string, unknown> = { ...value };
   const unknown = Object.keys(fields).filter(
@@ -64,32 +64,33 @@ const readRecord = (
   if (unknown.length > 0) {
     return fail(
       path,
-      `に未知の欄 ${unknown.join(", ")}（形の版が違う表は読まない — 掃引し直して作る）`,
+      `has unknown fields ${unknown.join(", ")} (a table of another format version is not read — sweep again to make it)`,
     );
   }
   const missing = required.filter((key) => fields[key] === undefined);
-  if (missing.length > 0) return fail(path, `に欄 ${missing.join(", ")} が無い`);
+  if (missing.length > 0) return fail(path, `is missing fields ${missing.join(", ")}`);
   return fields;
 };
 
 const readString = (value: unknown, path: string): string =>
-  typeof value === "string" ? value : fail(path, `が文字列でない（${show(value)}）`);
+  typeof value === "string" ? value : fail(path, `is not a string (${show(value)})`);
 
 /**
  * `provenance.userAgent` (an array of strings — order of appearance; deduplication is the writer's
  * job). An empty array is a form the writer never writes, so it is rejected.
  */
 const readUserAgents = (value: unknown, path: string): string[] => {
-  if (!Array.isArray(value)) return fail(path, `が配列でない（${show(value)}）`);
+  if (!Array.isArray(value)) return fail(path, `is not an array (${show(value)})`);
   const agents: readonly unknown[] = value;
-  if (agents.length === 0) return fail(path, "が空の配列（userAgent の無い表は欄ごと書かない）");
+  if (agents.length === 0)
+    return fail(path, "is an empty array (a table without userAgent omits the field entirely)");
   return agents.map((agent, index) => readString(agent, `${path}[${index}]`));
 };
 
 const readInteger = (value: unknown, path: string): number =>
   typeof value === "number" && Number.isSafeInteger(value)
     ? value
-    : fail(path, `が整数でない（${show(value)}）`);
+    : fail(path, `is not an integer (${show(value)})`);
 
 const GEMM_FIELDS = ["regM", "regN", "wgX", "wgY"] as const;
 
@@ -138,7 +139,7 @@ const readMatch = (value: unknown, path: string): Match => {
  * job.
  */
 const readGemmRows = (value: unknown, path: string): GemmRowsRule[] => {
-  if (!Array.isArray(value)) return fail(path, `が配列でない（${show(value)}）`);
+  if (!Array.isArray(value)) return fail(path, `is not an array (${show(value)})`);
   const rules: readonly unknown[] = value;
   return rules.map((entry, index) => {
     const where = `${path}[${index}]`;
@@ -148,17 +149,17 @@ const readGemmRows = (value: unknown, path: string): GemmRowsRule[] => {
     if (last && maxRows === null) {
       return fail(
         child(where, "maxRows"),
-        "が null（Infinity の欠落 — 素の JSON.stringify は Infinity を null にする。表は " +
-          "geometryProfileJson で書く）",
+        "is null (a lost Infinity — plain JSON.stringify turns Infinity into null; write the table " +
+          "with geometryProfileJson)",
       );
     }
     if (typeof maxRows !== "number") {
-      return fail(child(where, "maxRows"), `が数でない（${show(maxRows)}）`);
+      return fail(child(where, "maxRows"), `is not a number (${show(maxRows)})`);
     }
     if (last && maxRows !== Number.POSITIVE_INFINITY) {
       return fail(
         child(where, "maxRows"),
-        `が Infinity でない（${maxRows} — 末尾の規則はどの行数にも当たる 1e999）`,
+        `is not Infinity (${maxRows} — the last rule is 1e999, which covers every row count)`,
       );
     }
     return { maxRows, geometry: readGemmGeometry(fields.geometry, child(where, "geometry")) };
@@ -216,9 +217,9 @@ export const parseGeometryProfileJson = (text: string): GeometryProfile => {
     parsed = JSON.parse(text);
   } catch (cause) {
     throw new GeometryProfileParseError(
-      `幾何プロファイルの JSON: JSON として読めない（${
+      `Geometry profile JSON: cannot be parsed as JSON (${
         cause instanceof Error ? cause.message : String(cause)
-      }）`,
+      })`,
       { cause },
     );
   }
@@ -258,7 +259,7 @@ export const parseGeometryProfileJson = (text: string): GeometryProfile => {
     assertGeometryProfile(profile);
   } catch (cause) {
     if (cause instanceof CodegenError) {
-      throw new GeometryProfileParseError(`幾何プロファイルの JSON: ${cause.message}`, { cause });
+      throw new GeometryProfileParseError(`Geometry profile JSON: ${cause.message}`, { cause });
     }
     throw cause;
   }

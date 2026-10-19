@@ -84,11 +84,11 @@ export const CONV_TRANSPOSE1D_SCALE_BINDING = 5;
  */
 const assertGatherWeight = (weight: WeightStorage): void => {
   if (weight === "i2") {
-    throw new CodegenError("畳み込み: 重み i2 格納は未対応（ADR 0097）");
+    throw new CodegenError("convolution: i2 weight storage is not supported (ADR 0097)");
   }
   if (weight === "i4") {
     throw new CodegenError(
-      "conv_transpose1d: 重み i4 格納は未対応 — i4 の実行経路は linear / embedding / conv1d(groups==1) の implicit GEMM だけ（ADR 0069 決定 5）",
+      "conv_transpose1d: i4 weight storage is not supported — the only i4 execution paths are linear / embedding / the implicit GEMM of conv1d(groups==1) (ADR 0069 decision 5)",
     );
   }
 };
@@ -207,7 +207,7 @@ export const convTranspose1dParams = (dims: {
   // — the precedent of recon §4).
   if (dims.stride < 1 || dims.kernel < 1) {
     throw new CodegenError(
-      `conv_transpose1d params: stride / kernel は正整数（${dims.stride}, ${dims.kernel}）`,
+      `conv_transpose1d params: stride / kernel must be positive integers (${dims.stride}, ${dims.kernel})`,
     );
   }
   // MUST: the tensor extents are positive integers too. A zero edge never runs the reduction and
@@ -221,7 +221,10 @@ export const convTranspose1dParams = (dims: {
     ["length_out", dims.lengthOut],
   ];
   for (const [name, value] of positive) {
-    if (value < 1) throw new CodegenError(`conv_transpose1d params: ${name} は正整数（${value}）`);
+    if (value < 1)
+      throw new CodegenError(
+        `conv_transpose1d params: ${name} must be a positive integer (${value})`,
+      );
   }
   // MUST: only shapes whose tap-range arithmetic fits in i32. The WGSL computes
   // `shifted = ox + padding` in u32 and reinterprets `q = shifted / stride`, `length_in` and

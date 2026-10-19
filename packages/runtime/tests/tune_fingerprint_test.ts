@@ -303,10 +303,10 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
     assertInstanceOf(error.cause, DispatchLimitError);
     for (const part of [
       "conv2d-c96-512x512",
-      "表 'narrow' の conv2d.rows32",
+      "table 'narrow', conv2d.rows32",
       '{"regM":1,"regN":4,"wgX":1,"wgY":16}',
       "65535",
-      "全 device に保証する",
+      "WebGPU guarantees on every device",
     ]) {
       assertStringIncludes(error.message, part);
     }
@@ -415,7 +415,7 @@ describe("candidateKernelsId: 測った候補のカーネルの指紋（記録�
           false,
         ),
       KernelsIdError,
-      "測った行のケース linear-m3 が今の runtime の形状表に無い",
+      "Case linear-m3 of a measured row is not in the current runtime's shape table",
     );
   });
 
@@ -521,7 +521,7 @@ describe("sweepCaseSetId: ケース集合の版", () => {
     assertThrows(
       () => caseSetId([unknown, ...SWEEP_CASES.slice(1)], PROFILE_GEMM_ROWS_BOUNDS),
       Error,
-      "欄 note の分類が無い",
+      "field note has no classification",
     );
   });
 

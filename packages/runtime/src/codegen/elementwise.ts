@@ -99,7 +99,7 @@ const assertSlotDtype = (op: string, slot: number, dtype: IrDtype): void => {
   const accept = slotDtypesOf(resolveOpContract(op))[slot];
   if (accept === undefined || !accept.includes(dtype)) {
     throw new CodegenError(
-      `elementwise codegen: op '${op}' のスロット ${slot} は dtype '${dtype}' を実行できない`,
+      `elementwise codegen: op '${op}' slot ${slot} cannot run dtype '${dtype}'`,
     );
   }
 };
@@ -113,7 +113,7 @@ const outputDtype = (op: string, slotZeroDtype: IrDtype): IrDtype =>
 
 const canonicalize = (spec: ElementwiseSpec): CanonicalSpec => {
   if (!Number.isSafeInteger(spec.rank) || spec.rank < 1) {
-    throw new CodegenError(`elementwise codegen: rank は 1 以上の整数（${spec.rank}）`);
+    throw new CodegenError(`elementwise codegen: rank must be an integer >= 1 (${spec.rank})`);
   }
   const { op, rank, dtype } = spec;
   if (op === CAST_OP) {
@@ -171,7 +171,7 @@ const canonicalize = (spec: ElementwiseSpec): CanonicalSpec => {
       scalars: scalarParamCount(op),
     };
   }
-  throw new CodegenError(`elementwise codegen: op '${op}' は elementwise 語彙に無い`);
+  throw new CodegenError(`elementwise codegen: op '${op}' is not in the elementwise vocabulary`);
 };
 
 /** Semantic dtype → WGSL scalar type. A bool is stored as u32 0 / 1 (ADR 0009). */
@@ -492,7 +492,7 @@ export const elementwiseWgsl = (spec: ElementwiseSpec): string => {
 const padShape = (shape: readonly number[], rank: number): number[] => {
   if (shape.length > rank) {
     throw new CodegenError(
-      `elementwise params: 入力 rank ${shape.length} が出力 rank ${rank} を超える`,
+      `elementwise params: input rank ${shape.length} exceeds output rank ${rank}`,
     );
   }
   return [...Array<number>(rank - shape.length).fill(1), ...shape];
@@ -524,17 +524,17 @@ export const elementwiseParams = (
   const { rank, arity, scalars: scalarCount } = canonicalize(spec);
   if (outShape.length !== rank) {
     throw new CodegenError(
-      `elementwise params: 出力 rank ${outShape.length} が生成時の rank ${rank} と違う`,
+      `elementwise params: output rank ${outShape.length} does not match the rank ${rank} at generation time`,
     );
   }
   if (inputShapes.length !== arity) {
     throw new CodegenError(
-      `elementwise params: 入力 ${inputShapes.length} 本が op '${spec.op}' のアリティ ${arity} と違う`,
+      `elementwise params: ${inputShapes.length} inputs do not match op '${spec.op}' arity ${arity}`,
     );
   }
   if (scalars.length !== scalarCount) {
     throw new CodegenError(
-      `elementwise params: スカラ ${scalars.length} 本が op '${spec.op}' の ${scalarCount} 本と違う`,
+      `elementwise params: ${scalars.length} scalars do not match op '${spec.op}' scalar count ${scalarCount}`,
     );
   }
   const n = outShape.reduce((count, dim) => count * dim, 1);
@@ -550,9 +550,9 @@ export const elementwiseParams = (
     for (let d = 0; d < rank; d += 1) {
       if (padded[d] !== 1 && padded[d] !== outShape[d]) {
         throw new CodegenError(
-          `elementwise params: 入力 ${k} の軸 ${d} の長さ ${padded[d]} が出力 ${
+          `elementwise params: input ${k} axis ${d} length ${padded[d]} matches neither output ${
             outShape[d]
-          } と一致せず 1 でもない`,
+          } nor 1`,
         );
       }
     }
@@ -578,7 +578,7 @@ export const elementwiseParams = (
     // finite in f64, silently turns into `+Inf` — the same check as the contract layer's
     // `assertFiniteAttr`).
     if (!Number.isFinite(Math.fround(value))) {
-      throw new CodegenError(`elementwise params: スカラ attr が f32 として有限でない（${value}）`);
+      throw new CodegenError(`elementwise params: scalar attr is not finite as f32 (${value})`);
     }
     floats[1 + rank + inputShapes.length * rank + index] = value;
   });

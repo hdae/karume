@@ -156,21 +156,23 @@ export const assertGemmGeometry = (geometry: GemmGeometry, where: string): void 
     ["wgY", wgY],
   ] as const) {
     if (!Number.isSafeInteger(value) || value < 1) {
-      throw new CodegenError(`${where}: 幾何の ${name} は正整数（${value}）`);
+      throw new CodegenError(`${where}: geometry ${name} must be a positive integer (${value})`);
     }
   }
   // If regN is a multiple of the quad, so is tileN, so the `n4` conversion of the v4 path follows here.
   if (regN % GEMM_QUAD !== 0) {
-    throw new CodegenError(`${where}: regN は ${GEMM_QUAD} の倍数（acc は vec4 束ね・${regN}）`);
+    throw new CodegenError(
+      `${where}: regN must be a multiple of ${GEMM_QUAD} (acc is bundled as vec4, ${regN})`,
+    );
   }
   const threads = gemmThreads(geometry);
   for (const [name, unit] of [
     ["K quad", GEMM_K_QUADS],
-    ["列 quad", gemmColumnQuads(geometry)],
+    ["column quad", gemmColumnQuads(geometry)],
   ] as const) {
     if (threads % unit !== 0) {
       throw new CodegenError(
-        `${where}: スレッド数 ${threads} が ${name} 数 ${unit} で割り切れない（充填の担当が組めない）`,
+        `${where}: thread count ${threads} is not divisible by the ${name} count ${unit} (the fill assignment cannot be built)`,
       );
     }
   }
@@ -179,13 +181,13 @@ export const assertGemmGeometry = (geometry: GemmGeometry, where: string): void 
   const rowStride = gemmRowFillStride(geometry);
   if (tileM % rowStride !== 0 || tileN % rowStride !== 0) {
     throw new CodegenError(
-      `${where}: タイル辺 ${tileM}x${tileN} が行充填ストライド ${rowStride} で割り切れない`,
+      `${where}: tile edges ${tileM}x${tileN} are not divisible by the row fill stride ${rowStride}`,
     );
   }
   const quadStride = gemmQuadFillStride(geometry);
   if (GEMM_TILE_K % quadStride !== 0) {
     throw new CodegenError(
-      `${where}: K タイル ${GEMM_TILE_K} が quad 充填ストライド ${quadStride} で割り切れない`,
+      `${where}: K tile ${GEMM_TILE_K} is not divisible by the quad fill stride ${quadStride}`,
     );
   }
 };
@@ -216,9 +218,9 @@ export const gemmGeometryTileKeyPart = (geometry: GemmGeometry): string =>
 
 /** Geometry note for generated comments (in a form that fits on one WGSL header line). */
 export const gemmGeometryNote = (geometry: GemmGeometry): string =>
-  `レジスタ ${gemmTileM(geometry)}x${gemmTileN(
+  `register tile ${gemmTileM(geometry)}x${gemmTileN(
     geometry,
-  )} タイル / 1 スレッド ${geometry.regM}x${geometry.regN} / wg ${geometry.wgX}x${geometry.wgY}`;
+  )} / ${geometry.regM}x${geometry.regN} per thread / wg ${geometry.wgX}x${geometry.wgY}`;
 
 /**
  * The **only pure function** that decides the default geometry. One point common to every op, with
@@ -333,7 +335,7 @@ export const GEMM_ROWS_BUCKETS: readonly {
  * shape × adapter", and the ban on run-time autotuning is unchanged (DECIDED: ADR 0115).
  */
 export const gemmGeometryForRows = (rows: number): GemmGeometry => {
-  assertU32Params("幾何の選択", { "行数 M": rows });
+  assertU32Params("Geometry selection", { "row count M": rows });
   // The last step has no upper bound (Infinity), so a u32 row count always hits one of the steps.
   const bucket =
     GEMM_ROWS_BUCKETS.find((rule) => rows <= rule.maxRows) ??

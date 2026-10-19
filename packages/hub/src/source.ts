@@ -306,7 +306,7 @@ export const driverOf = (source: DistributionSource): SourceDriver => {
     // A value created without going through the constructor
     // (`Object.create(DistributionSource.prototype)`, …).
     throw new Error(
-      "hub: 取得元ハンドルに実装が結び付いていない（hub の factory が作った値でない）",
+      "hub: no implementation is bound to the source handle (not a value created by a hub factory)",
     );
   }
   return driver;

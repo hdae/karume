@@ -8,7 +8,9 @@ import { assertU32Params } from "../codegen/params.ts";
 export const staticQuantizeParams = (count: number, scale: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("static_quantize params", { count });
   if (!Number.isFinite(scale) || scale < 0 || Math.fround(scale) !== scale) {
-    throw new CodegenError("static_quantize: scale は非負・有限で厳密に f32 表現できる値が必要");
+    throw new CodegenError(
+      "static_quantize: scale must be non-negative, finite and exactly representable as f32",
+    );
   }
   // 16-byte aligned. count / 128 boundary words / 129 output words / identity flag / padding.
   const params = new Uint32Array(260);
@@ -84,10 +86,14 @@ export const staticQuantizePackedParams = (
   scale: number,
 ): Uint32Array<ArrayBuffer> => {
   if (!Number.isSafeInteger(count) || count < 0 || count % 4 !== 0) {
-    throw new CodegenError(`static_quantize packed: 要素数 ${count} が 4 の倍数の非負整数でない`);
+    throw new CodegenError(
+      `static_quantize packed: element count ${count} is not a non-negative integer multiple of 4`,
+    );
   }
   if (scale === 0) {
-    throw new CodegenError("static_quantize packed: scale 0（恒等）は packed int8 で表せない");
+    throw new CodegenError(
+      "static_quantize packed: scale 0 (identity) cannot be represented in packed int8",
+    );
   }
   return staticQuantizeParams(count, scale);
 };

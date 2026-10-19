@@ -219,7 +219,7 @@ test("loadManifest: 可変 ref の解決失敗はオフライン不可として 
   );
   assertEquals(error.repo, REPO);
   assertEquals(error.revisionSha, undefined);
-  assert(error.message.includes("オフライン"), "オフライン不可であることを明示する");
+  assert(error.message.includes("offline"), "オフライン不可であることを明示する");
 });
 
 describe("loadManifest: URL の構造を壊す repo 名は取得に出る前に HubError で断る", () => {
@@ -1757,7 +1757,7 @@ describe("openAsset: 宣言 size の外は取得元と在庫の有無に依ら�
       const reader = await openAsset(loaded, ref, access);
       assert(reader !== undefined);
       for (const [offset, length] of outside(ref.size)) {
-        await assertRejects(() => reader.read(offset, length), Error, "宣言 size");
+        await assertRejects(() => reader.read(offset, length), Error, "declared size");
       }
     });
   }
@@ -1769,7 +1769,7 @@ describe("openAsset: 宣言 size の外は取得元と在庫の有無に依ら�
     const shorter: FileRef = { ...ref, size: ref.size - 1 };
     const reader = await openAsset(loaded, shorter, access);
     assert(reader !== undefined);
-    await assertRejects(() => reader.read(shorter.size, 1), Error, "宣言 size");
+    await assertRejects(() => reader.read(shorter.size, 1), Error, "declared size");
   });
 
   for (const shrink of [0, 1]) {
@@ -1780,7 +1780,7 @@ describe("openAsset: 宣言 size の外は取得元と在庫の有無に依ら�
       const reader = await openAsset(local, declared);
       assert(reader !== undefined);
       for (const [offset, length] of outside(declared.size)) {
-        await assertRejects(() => reader.read(offset, length), Error, "宣言 size");
+        await assertRejects(() => reader.read(offset, length), Error, "declared size");
       }
     });
   }

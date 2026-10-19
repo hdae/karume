@@ -77,12 +77,16 @@ export const i4GroupShift = (
   groupSize: number | undefined,
 ): number | undefined => {
   if ((weight === "i4") !== (groupSize !== undefined)) {
-    throw new CodegenError(`${where}: groupSize は重み i4 格納と対で渡す（weight=${weight}）`);
+    throw new CodegenError(
+      `${where}: groupSize must be passed together with i4 weight storage (weight=${weight})`,
+    );
   }
   if (groupSize === undefined) return undefined;
   const shift = Math.log2(groupSize);
   if (!Number.isInteger(shift) || groupSize < 16) {
-    throw new CodegenError(`${where}: i4 の group_size ${groupSize} が 2 冪かつ 16 以上でない`);
+    throw new CodegenError(
+      `${where}: i4 group_size ${groupSize} is not a power of two that is at least 16`,
+    );
   }
   return shift;
 };
@@ -126,14 +130,14 @@ export const weightNote = (storage: WeightStorage): string =>
   storage === "f32"
     ? ""
     : storage === "f16"
-      ? ", 重み f16 格納"
+      ? ", f16 weight storage"
       : storage === "bf16"
-        ? ", 重み bf16 格納"
+        ? ", bf16 weight storage"
         : storage === "i8"
-          ? ", 重み i8 格納"
+          ? ", i8 weight storage"
           : storage === "i2"
-            ? ", 重み i2 格納"
-            : ", 重み i4 格納";
+            ? ", i2 weight storage"
+            : ", i4 weight storage";
 
 /**
  * The **default** name of the local variable that holds the per-channel scale in the i8 / i2

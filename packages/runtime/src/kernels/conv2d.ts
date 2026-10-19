@@ -89,11 +89,11 @@ export const CONV2D_SCALE_BINDING = 5;
  */
 const assertDirectWeight = (weight: WeightStorage): void => {
   if (weight === "i2") {
-    throw new CodegenError("畳み込み: 重み i2 格納は未対応（ADR 0097）");
+    throw new CodegenError("convolution: i2 weight storage is not supported (ADR 0097)");
   }
   if (weight === "i4") {
     throw new CodegenError(
-      "conv2d 直接カーネル: 重み i4 格納は未対応 — i4 の実行経路は linear / embedding / conv1d(groups==1) の implicit GEMM だけ（ADR 0069 決定 5）",
+      "conv2d direct kernel: i4 weight storage is not supported — the only i4 execution paths are linear / embedding / the implicit GEMM of conv1d(groups==1) (ADR 0069 decision 5)",
     );
   }
 };
@@ -340,7 +340,8 @@ const checkConv2dDims = (dims: Conv2dDims): readonly number[] => {
     ["groups", dims.groups],
   ];
   for (const [name, value] of positive) {
-    if (value < 1) throw new CodegenError(`conv2d params: ${name} は正整数（${value}）`);
+    if (value < 1)
+      throw new CodegenError(`conv2d params: ${name} must be a positive integer (${value})`);
   }
   // MUST: per axis `input length + 2·padding ≤ 2^31 − 1` (WGSL coordinate arithmetic is i32 — kept
   // in this check, which both pass, so the direct and the implicit GEMM versions accept the same
@@ -351,7 +352,7 @@ const checkConv2dDims = (dims: Conv2dDims): readonly number[] => {
   // truncates, and the input channel band read shifts silently).
   if (dims.channelsIn % dims.groups !== 0 || dims.channelsOut % dims.groups !== 0) {
     throw new CodegenError(
-      `conv2d params: groups ${dims.groups} が Cin ${dims.channelsIn} / Cout ${dims.channelsOut} を割り切らない`,
+      `conv2d params: groups ${dims.groups} does not divide Cin ${dims.channelsIn} / Cout ${dims.channelsOut}`,
     );
   }
   // The weight's element count uses Cin/groups, so it comes after the divisibility check.
@@ -393,7 +394,7 @@ export const conv2dParams = (dims: Conv2dDims): Uint32Array<ArrayBuffer> => {
 export const conv2dIgemmParams = (dims: Conv2dDims): Uint32Array<ArrayBuffer> => {
   checkConv2dDims(dims);
   if (dims.groups !== 1) {
-    throw new CodegenError(`conv2d igemm params: groups は 1 専用（${dims.groups}）`);
+    throw new CodegenError(`conv2d igemm params: groups must be 1 (${dims.groups})`);
   }
   const n = dims.heightOut * dims.widthOut;
   const k = dims.channelsIn * dims.kernelH * dims.kernelW;

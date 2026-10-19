@@ -1,4 +1,4 @@
-// karume conv3d (x[Cin,T,H,W] * W[Cout,Cin,Kt,Kh,Kw] + b[Cout], f32, 重み bf16 格納, implicit GEMM レジスタ 64x128 タイル / 1 スレッド 8x8 / wg 16x8 + vec4)
+// karume conv3d (x[Cin,T,H,W] * W[Cout,Cin,Kt,Kh,Kw] + b[Cout], f32, bf16 weight storage, implicit GEMM register tile 64x128 / 8x8 per thread / wg 16x8 + vec4)
 struct Dims {
   m: u32,
   n: u32,
@@ -79,7 +79,7 @@ fn main(
   let bk1 = bk0 + 4u;
   let bk2 = bk0 + 8u;
   let bk3 = bk0 + 12u;
-  // Invariant in the K tile loop (the step for splitting flat k into (ic, kt, kh, kw)と、quad の先頭 n を (ot, 画素) へ割る刻み)
+  // Invariant in the K tile loop (the step for splitting flat k into (ic, kt, kh, kw) and the step for splitting the first n of a quad into (ot, pixel))
   let khw = dims.kernel_h * dims.kernel_w;
   let kthw = dims.kernel_t * khw;
   let hw_out = dims.height_out * dims.width_out;

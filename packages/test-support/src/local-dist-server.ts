@@ -123,8 +123,8 @@ const assertMirrored = (ref: FileRef, mirror: string): void => {
   } catch (error) {
     if (!isNotFound(error)) throw error;
     throw new Error(
-      `越境参照のミラーが無い: ${ref.repo}@${ref.revision} の ${ref.path} が ${mirror} 配下に` +
-        `見つからない（repo 名の最終要素と同名のディレクトリへ配布形ミラーを置くこと）`,
+      `no mirror for a cross-repo reference: ${ref.repo}@${ref.revision} ${ref.path} is not found under ${mirror}` +
+        ` (put a distribution mirror in a directory named after the last element of the repo name)`,
     );
   }
 };
@@ -148,8 +148,8 @@ const buildRoutes = (dir: string): ReadonlyMap<string, ServedRepo> => {
     if (known === undefined) routes.set(ref.repo, { revision: ref.revision, dir: mirror });
     else if (known.revision !== ref.revision) {
       throw new Error(
-        `越境参照の revision が 1 リポで割れている（${ref.repo}: ${known.revision} と ` +
-          `${ref.revision}）— ミラー ${mirror} は 1 revision ぶんしか持てない`,
+        `the revisions of cross-repo references to one repo disagree (${ref.repo}: ${known.revision} and ` +
+          `${ref.revision}) — mirror ${mirror} can hold only one revision`,
       );
     }
     assertMirrored(ref, mirror);
@@ -253,7 +253,7 @@ export const serveLocalDist = (dir: string): Promise<LocalDistServer> => {
       server.off("error", reject);
       const address = server.address();
       if (address === null || typeof address === "string") {
-        reject(new Error(`serveLocalDist: TCP のアドレスが取れない（${String(address)}）`));
+        reject(new Error(`serveLocalDist: cannot get the TCP address (${String(address)})`));
         return;
       }
       resolve({

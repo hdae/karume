@@ -174,14 +174,22 @@ test("serveLocalDist: 越境参照の revision が 1 リポで割れていたら
       cross: [CROSS_REVISION, "e".repeat(40)],
       mirror: true,
     });
-    assertThrows(() => serveLocalDist(dir), Error, "越境参照の revision が 1 リポで割れている");
+    assertThrows(
+      () => serveLocalDist(dir),
+      Error,
+      "the revisions of cross-repo references to one repo disagree",
+    );
   });
 });
 
 test("serveLocalDist: 越境参照のミラーが無ければ起動時に落ちる（実行中の 404 にしない）", async () => {
   await withRoot(async (root) => {
     const dir = await buildDist(root, { cross: [CROSS_REVISION] });
-    const error = assertThrows(() => serveLocalDist(dir), Error, "越境参照のミラーが無い");
+    const error = assertThrows(
+      () => serveLocalDist(dir),
+      Error,
+      "no mirror for a cross-repo reference",
+    );
     assertStringIncludes(error.message, CROSS_PATH);
   });
 });

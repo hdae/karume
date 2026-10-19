@@ -185,7 +185,7 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(fences.count(), 2, "settle() 1 本 + finish 1 本");
       assertEquals(bits(await sink.read()), bits(expectedChain(0)));
 
-      await assertRejects(() => batch.settle(), BatchScopeError, "finish() 済み");
+      await assertRejects(() => batch.settle(), BatchScopeError, "after finish()");
     } finally {
       fences.restore();
       await producer.dispose();
@@ -244,9 +244,9 @@ test.skipIf(!GPU_AVAILABLE)(
       const late = producer.enqueue({ x: input(1) }, { batch, copyOutputs: { y: carrier } });
       const closing = batch.finish();
 
-      await assertRejects(() => duplicated, BatchScopeError, "重ねて");
-      await assertRejects(() => late, BatchScopeError, "settle() の途中");
-      await assertRejects(() => closing, BatchScopeError, "finish() できない");
+      await assertRejects(() => duplicated, BatchScopeError, "cannot overlap");
+      await assertRejects(() => late, BatchScopeError, "in the middle of settle()");
+      await assertRejects(() => closing, BatchScopeError, "Cannot finish()");
       await settling;
 
       // 拒否された enqueue が区間へ入っていないことは値で確かめる: 通っていれば carrier は
@@ -372,7 +372,7 @@ test.skipIf(!GPU_AVAILABLE)(
       await session.run({ x: bound });
       assertEquals(bound.bakedReferences, 1);
 
-      assertThrows(() => bound.dispose(), ResidentTensorError, "焼き込み bind group から参照中");
+      assertThrows(() => bound.dispose(), ResidentTensorError, "referenced by baked bind groups");
       assertEquals(bound.disposed, false, "拒否した破棄で状態を壊さない");
 
       // 恒真化の門: 参照されていない常駐テンソルは同じ呼び出しで通る（検査が常に落ちる形に
@@ -402,8 +402,12 @@ test.skipIf(!GPU_AVAILABLE)(
       dead.dispose();
       dead.dispose(); // 2 度目は no-op（破棄の冪等性）
 
-      assertThrows(() => dead.write(new Float32Array(COUNT)), ResidentTensorError, "破棄済み");
-      await assertRejects(() => dead.read(), ResidentTensorError, "破棄済み");
+      assertThrows(
+        () => dead.write(new Float32Array(COUNT)),
+        ResidentTensorError,
+        "a disposed resident tensor",
+      );
+      await assertRejects(() => dead.read(), ResidentTensorError, "a disposed resident tensor");
       await assertRejects(() => session.run({ x: dead }), ExecutionError, "disposed");
 
       const batch = await gpu.beginBatch();
@@ -443,16 +447,16 @@ test.skipIf(!GPU_AVAILABLE)(
     assertThrows(
       () => resident.write(new Float32Array(COUNT)),
       GpuDeviceLostError,
-      "device が失われた",
+      "device was lost",
     );
     // read も同じ門を通る。無いと破棄済み device 上で staging を確保して copy を submit し、
     // 消失後の popErrorScope は null で resolve するので失敗が捕まらない（この 1 本だけが
     // 門の証拠 — 下の lost 記録後は raceDeviceLost が既に同じ型で落としている）。
-    await assertRejects(() => resident.read(), GpuDeviceLostError, "device が失われた");
+    await assertRejects(() => resident.read(), GpuDeviceLostError, "device was lost");
     await assertRejects(
       () => gpu.createResident(BYTES, "after-destroy"),
       GpuDeviceLostError,
-      "device が失われた",
+      "device was lost",
     );
 
     await gpu.device.lost;
@@ -508,7 +512,7 @@ test.skipIf(!GPU_AVAILABLE)("createResident は 4 の倍数の正の大きさし
       await assertRejects(
         () => gpu.createResident(bad),
         ResidentTensorError,
-        "4 の倍数",
+        "multiple of 4",
         `byteLength=${bad}`,
       );
     }
@@ -532,7 +536,7 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertRejects(
         () => session.enqueue({ x: input(0) }, { batch }),
         BatchScopeError,
-        "finish() 済み",
+        "after finish()",
       );
 
       // 区間を閉じた後の通常 run は従来どおり動く（scope ロックが返っている）。
@@ -570,7 +574,7 @@ test.skipIf(!GPU_AVAILABLE)(
         await assertRejects(
           () => session.enqueue({ x: input(0) }, { batch }),
           BatchScopeError,
-          "別の GpuContext",
+          "another GpuContext",
         );
       } finally {
         await batch.finish();
@@ -732,7 +736,7 @@ test.skipIf(!GPU_AVAILABLE)(
           injected += 1;
           assertEquals(bound.bakedReferences, 0, "焼き込み参照はまだ立っていない窓");
           assertEquals(bound.boundReferences, 1, "束縛予約が立っている");
-          assertThrows(() => bound.dispose(), ResidentTensorError, "束縛中");
+          assertThrows(() => bound.dispose(), ResidentTensorError, "bound as an input");
         }
         return original(descriptor);
       };
@@ -835,7 +839,7 @@ test.skipIf(!GPU_AVAILABLE)(
       const pending = session.run({ x: fresh });
       assertEquals(fresh.useReferences, 1, "発行の同期区間で使用予約が立っていない");
       assertEquals(fresh.boundReferences, 0, "束縛予約は本体まで立たない（この窓の証拠）");
-      assertThrows(() => fresh.dispose(), ResidentTensorError, "使用中");
+      assertThrows(() => fresh.dispose(), ResidentTensorError, "in use");
       assertEquals(fresh.disposed, false, "拒否した破棄で状態を壊さない");
 
       // 拒否した dispose は run を壊さない（受理済みの実行はそのまま完走する）。
@@ -846,7 +850,7 @@ test.skipIf(!GPU_AVAILABLE)(
       const batch = await gpu.beginBatch();
       const queued = session.enqueue({ x: input(1) }, { batch, copyOutputs: { y: sink } });
       assertEquals(sink.useReferences, 1, "写し先に使用予約が立っていない");
-      assertThrows(() => sink.dispose(), ResidentTensorError, "使用中");
+      assertThrows(() => sink.dispose(), ResidentTensorError, "in use");
       await queued;
       await batch.finish();
       assertEquals(sink.useReferences, 0);
@@ -890,7 +894,7 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertRejects(
         () => session.enqueue({ x: alive }, { batch, copyOutputs: { y: spare } }),
         BatchScopeError,
-        "finish() 済み",
+        "after finish()",
       );
       assertEquals(alive.useReferences, 0, "enter 失敗で使用予約が漏れている");
       assertEquals(spare.useReferences, 0, "enter 失敗で使用予約が漏れている");
@@ -924,7 +928,7 @@ test.skipIf(!GPU_AVAILABLE)(
         () => gpu.createResident(tooBig, "too-big"),
         GpuValidationError,
       );
-      assert(error.message.startsWith("resident 'too-big' の確保: "), error.message);
+      assert(error.message.startsWith("resident 'too-big' allocation: "), error.message);
 
       // スコープ残高 0（失敗経路で pop を積み残していればここが赤くなる）。
       pushFailureScopes(gpu.device);

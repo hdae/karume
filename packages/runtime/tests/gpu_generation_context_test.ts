@@ -857,7 +857,7 @@ test.skipIf(!GPU_AVAILABLE)(
     await gpu.device.lost;
     assert(gpu.lost !== undefined, "消失が記録されていない（門が空振りする）");
 
-    assertThrows(() => context.pastLength, GpuDeviceLostError, "device が失われた");
+    assertThrows(() => context.pastLength, GpuDeviceLostError, "device was lost");
     assertThrows(() => context.rewind(0), GpuDeviceLostError);
     assertThrows(() => internals(context).acquireRun(), GpuDeviceLostError);
     assertThrows(() => internals(context).advance(1, 1), GpuDeviceLostError);
@@ -886,7 +886,7 @@ test.skipIf(!GPU_AVAILABLE)(
     assertStrictEquals(gpu.lost, undefined, "destroy 直後に lost の reaction が走っている");
     assert(gpu.destroyRequested, "destroy 要求が同期に立っていない");
 
-    assertThrows(() => context.pastLength, GpuDeviceLostError, "device が失われた");
+    assertThrows(() => context.pastLength, GpuDeviceLostError, "device was lost");
     assertThrows(() => context.rewind(0), GpuDeviceLostError);
     assertThrows(() => internals(context).advance(1, 1), GpuDeviceLostError);
     // writeLengths が最も危険な穴（破棄済みバッファへの writeBuffer は警告すら出ない no-op で、
@@ -1764,7 +1764,7 @@ test.skipIf(!GPU_AVAILABLE)("device 消失後の fork は GpuDeviceLostError（�
   gpu.destroy();
   // destroy 直後（lost の反応前）から拒否する — 失われた device 上の確保は無効なバッファを
   // 返すだけなので、通すと空の KV を持つ複製ができる。
-  await assertRejects(() => context.fork(), GpuDeviceLostError, "device が失われた");
+  await assertRejects(() => context.fork(), GpuDeviceLostError, "device was lost");
   await session.dispose().catch(() => undefined);
 });
 

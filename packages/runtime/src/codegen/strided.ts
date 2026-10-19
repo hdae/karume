@@ -52,7 +52,7 @@ const WGSL_SCALAR: Readonly<Record<IrDtype, string>> = {
 const canonicalize = (spec: StridedSpec): IrDtype => {
   const found = SEMANTIC_DTYPES.find((dtype) => dtype === spec.dtype);
   if (found === undefined) {
-    throw new CodegenError(`strided codegen: 要素型 '${spec.dtype}' は意味論 dtype でない`);
+    throw new CodegenError(`strided codegen: element type '${spec.dtype}' is not a semantic dtype`);
   }
   return found;
 };
@@ -115,7 +115,7 @@ export const stridedWgsl = (spec: StridedSpec): string => {
 const assertRank = (shape: readonly number[], what: string): void => {
   if (shape.length < 1 || shape.length > STRIDED_RANK) {
     throw new CodegenError(
-      `strided params: ${what} の rank ${shape.length} は 1..${STRIDED_RANK} の外`,
+      `strided params: ${what} rank ${shape.length} is outside 1..${STRIDED_RANK}`,
     );
   }
 };
@@ -140,17 +140,17 @@ export const permuteSrcStrides = (
   srcShape: readonly number[],
   dims: readonly number[],
 ): number[] => {
-  assertRank(srcShape, "permute の入力");
+  assertRank(srcShape, "permute input");
   if (dims.length !== srcShape.length) {
     throw new CodegenError(
-      `strided params: permute の dims [${dims.join(",")}] が入力 rank ${srcShape.length} と違う`,
+      `strided params: permute dims [${dims.join(",")}] do not match input rank ${srcShape.length}`,
     );
   }
   const contiguous = contiguousStrides(srcShape);
   return dims.map((dim) => {
     const stride = contiguous[dim];
     if (stride === undefined) {
-      throw new CodegenError(`strided params: permute の dims に軸 ${dim} が入っている`);
+      throw new CodegenError(`strided params: permute dims contain out-of-range axis ${dim}`);
     }
     return stride;
   });
@@ -162,7 +162,7 @@ type BroadcastLabels = {
   readonly out: string;
 };
 
-const EXPAND_LABELS: BroadcastLabels = { src: "expand の入力", out: "expand の出力" };
+const EXPAND_LABELS: BroadcastLabels = { src: "expand input", out: "expand output" };
 
 /**
  * Read strides of right-aligned broadcast. A replicated dimension (input length 1) gets
@@ -183,7 +183,7 @@ export const expandSrcStrides = (
   assertRank(outShape, labels.out);
   if (outShape.length < srcShape.length) {
     throw new CodegenError(
-      `strided params: ${labels.out} rank ${outShape.length} が ${labels.src} rank ${srcShape.length} 未満`,
+      `strided params: ${labels.out} rank ${outShape.length} is less than ${labels.src} rank ${srcShape.length}`,
     );
   }
   const contiguous = contiguousStrides(srcShape);
@@ -199,7 +199,7 @@ export const expandSrcStrides = (
  * is the one offset word in params").
  */
 export const sliceSrcStrides = (srcShape: readonly number[]): number[] => {
-  assertRank(srcShape, "slice の入力");
+  assertRank(srcShape, "slice input");
   return contiguousStrides(srcShape);
 };
 
@@ -211,15 +211,15 @@ export const sliceSrcStrides = (srcShape: readonly number[]): number[] => {
  * second and later rows read other rows (the same trap as the MUST of sym_prefix_slice).
  */
 export const sliceSrcOffset = (srcShape: readonly number[], dim: number, start: number): number => {
-  assertRank(srcShape, "slice の入力");
+  assertRank(srcShape, "slice input");
   if (!Number.isSafeInteger(dim) || dim < 0 || dim >= srcShape.length) {
     throw new CodegenError(
-      `strided params: slice の dim ${dim} が入力 rank ${srcShape.length} の外`,
+      `strided params: slice dim ${dim} is outside input rank ${srcShape.length}`,
     );
   }
   if (!Number.isSafeInteger(start) || start < 0 || start > srcShape[dim]) {
     throw new CodegenError(
-      `strided params: slice の start ${start} が軸 ${dim}（長さ ${srcShape[dim]}）の外`,
+      `strided params: slice start ${start} is outside axis ${dim} (length ${srcShape[dim]})`,
     );
   }
   return start * contiguousStrides(srcShape)[dim];
@@ -235,7 +235,7 @@ export const sliceSrcOffset = (srcShape: readonly number[], dim: number, start: 
  * (correct only when T = Tmax, silently broken otherwise).
  */
 export const prefixSliceSrcStrides = (srcShape: readonly number[]): number[] => {
-  assertRank(srcShape, "sym_prefix_slice の入力");
+  assertRank(srcShape, "sym_prefix_slice input");
   return contiguousStrides(srcShape);
 };
 
@@ -257,7 +257,7 @@ const packStridedParams = (
   assertRank(dims, labels.shape);
   if (strides.length !== dims.length) {
     throw new CodegenError(
-      `strided params: stride 本数 ${strides.length} が${labels.rank} rank ${dims.length} と違う`,
+      `strided params: stride count ${strides.length} does not match ${labels.rank} rank ${dims.length}`,
     );
   }
   const n = dims.reduce((count, dim) => count * dim, 1);
@@ -283,7 +283,7 @@ export const stridedParams = (
   srcStrides: readonly number[],
   offset: number,
 ): Uint32Array<ArrayBuffer> =>
-  packStridedParams(outShape, srcStrides, offset, { shape: "strided の出力", rank: "出力" });
+  packStridedParams(outShape, srcStrides, offset, { shape: "strided output", rank: "output" });
 
 // ---- strided write-copy family (the dual of the read family — ADR 0014) ----------------------
 
@@ -360,8 +360,8 @@ export const stridedWriteParams = (
   offset: number,
 ): Uint32Array<ArrayBuffer> =>
   packStridedParams(srcShape, outStrides, offset, {
-    shape: "strided 書きの入力",
-    rank: "入力",
+    shape: "strided write input",
+    rank: "input",
   });
 
 /**
@@ -373,18 +373,20 @@ export const stridedWriteParams = (
  * **unwritten** (the previous value when the buffer is reused).
  */
 export const catOutStrides = (outShape: readonly number[]): number[] => {
-  assertRank(outShape, "cat の出力");
+  assertRank(outShape, "cat output");
   return contiguousStrides(outShape);
 };
 
 export const catOutOffset = (outShape: readonly number[], dim: number, written: number): number => {
-  assertRank(outShape, "cat の出力");
+  assertRank(outShape, "cat output");
   if (!Number.isSafeInteger(dim) || dim < 0 || dim >= outShape.length) {
-    throw new CodegenError(`strided params: cat の dim ${dim} が出力 rank ${outShape.length} の外`);
+    throw new CodegenError(
+      `strided params: cat dim ${dim} is outside output rank ${outShape.length}`,
+    );
   }
   if (!Number.isSafeInteger(written) || written < 0 || written > outShape[dim]) {
     throw new CodegenError(
-      `strided params: cat の書き出し位置 ${written} が軸 ${dim}（長さ ${outShape[dim]}）の外`,
+      `strided params: cat write position ${written} is outside axis ${dim} (length ${outShape[dim]})`,
     );
   }
   return written * contiguousStrides(outShape)[dim];

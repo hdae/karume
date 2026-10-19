@@ -181,14 +181,14 @@ export const DEFAULT_GEOMETRY_PROFILE: GeometryProfile = {
  */
 const assertGemmRowsRules = (rules: readonly GemmRowsRule[], where: string): void => {
   if (rules.length === 0) {
-    throw new CodegenError(`${where}: gemmRows が空（どの行数にも幾何が当たらない）`);
+    throw new CodegenError(`${where}: gemmRows is empty (no geometry matches any row count)`);
   }
   rules.forEach((rule, index) => {
     const last = index === rules.length - 1;
     if (last) {
       if (rule.maxRows !== Number.POSITIVE_INFINITY) {
         throw new CodegenError(
-          `${where}: gemmRows の最後の maxRows は Infinity（${rule.maxRows} — それより大きい M に規則が無い）`,
+          `${where}: the last maxRows of gemmRows must be Infinity (${rule.maxRows} — no rule covers a larger M)`,
         );
       }
     } else {
@@ -196,9 +196,9 @@ const assertGemmRowsRules = (rules: readonly GemmRowsRule[], where: string): voi
       const next = rules[index + 1].maxRows;
       if (!(rule.maxRows < next)) {
         throw new CodegenError(
-          `${where}: gemmRows の maxRows が狭義昇順でない（[${index}] ${rule.maxRows} → [${
+          `${where}: maxRows of gemmRows is not strictly increasing ([${index}] ${rule.maxRows} → [${
             index + 1
-          }] ${next} — 後ろの規則に当たる行数が無くなる）`,
+          }] ${next} — no row count is left for the later rule)`,
         );
       }
     }
@@ -212,7 +212,7 @@ const assertGemmRowsRules = (rules: readonly GemmRowsRule[], where: string): voi
  */
 const recordOf = (value: unknown, where: string, path: string): Record<string, unknown> => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new CodegenError(`${where}: ${path} がオブジェクトでない`);
+    throw new CodegenError(`${where}: ${path} is not an object`);
   }
   return { ...value };
 };
@@ -220,7 +220,7 @@ const recordOf = (value: unknown, where: string, path: string): Record<string, u
 const stringOf = (value: unknown, where: string, path: string): string => {
   if (typeof value === "string") return value;
   throw new CodegenError(
-    `${where}: ${path} が文字列でない（${value === undefined ? "無い" : typeof value}）`,
+    `${where}: ${path} is not a string (${value === undefined ? "missing" : typeof value})`,
   );
 };
 
@@ -241,7 +241,7 @@ const denseEntriesOf = (
   const entries: unknown[] = [];
   for (let index = 0; index < values.length; index += 1) {
     if (!(index in values)) {
-      throw new CodegenError(`${where}: ${path}[${index}] が無い（疎な配列の穴）`);
+      throw new CodegenError(`${where}: ${path}[${index}] is missing (a hole in a sparse array)`);
     }
     entries.push(values[index]);
   }
@@ -255,7 +255,9 @@ const denseEntriesOf = (
  */
 const numberOf = (value: unknown, where: string, path: string, name: string): number => {
   if (typeof value === "number") return value;
-  throw new CodegenError(`${where}: ${path}: 幾何の ${name} は正整数（${String(value)}）`);
+  throw new CodegenError(
+    `${where}: ${path}: geometry ${name} must be a positive integer (${String(value)})`,
+  );
 };
 
 const gemmGeometryOf = (value: unknown, where: string, path: string): GemmGeometry => {
@@ -290,7 +292,7 @@ const assertProvenanceShape = (value: unknown, where: string): void => {
   }
   if (provenance.userAgent === undefined) return;
   if (!Array.isArray(provenance.userAgent)) {
-    throw new CodegenError(`${where}: provenance.userAgent が配列でない`);
+    throw new CodegenError(`${where}: provenance.userAgent is not an array`);
   }
   const agents = denseEntriesOf(provenance.userAgent, where, "provenance.userAgent");
   agents.forEach((agent, index) => stringOf(agent, where, `provenance.userAgent[${index}]`));
@@ -316,15 +318,17 @@ const assertProvenanceShape = (value: unknown, where: string): void => {
 export const assertGeometryProfile: (profile: unknown) => asserts profile is GeometryProfile = (
   profile,
 ) => {
-  const fields = recordOf(profile, "幾何プロファイル", "表");
+  const fields = recordOf(profile, "Geometry profile", "table");
   const { id } = fields;
   if (typeof id !== "string") {
-    throw new CodegenError(`幾何プロファイル: id が文字列でない（${typeof id}）`);
+    throw new CodegenError(`Geometry profile: id is not a string (${typeof id})`);
   }
   if (id.length === 0) {
-    throw new CodegenError("幾何プロファイル: id が空（診断で選ばれた表を名指せない）");
+    throw new CodegenError(
+      "Geometry profile: id is empty (diagnostics could not name the selected table)",
+    );
   }
-  const where = `幾何プロファイル '${id}'`;
+  const where = `Geometry profile '${id}'`;
   if (fields.match !== undefined) {
     const match = recordOf(fields.match, where, "match");
     const vendor = optionalStringOf(match.vendor, where, "match.vendor");
@@ -332,30 +336,30 @@ export const assertGeometryProfile: (profile: unknown) => asserts profile is Geo
     const description = optionalStringOf(match.description, where, "match.description");
     if (vendor === "" || architecture === "" || description === "") {
       throw new CodegenError(
-        `${where}: match の vendor / architecture / description は空文字にしない（未指定は省く）`,
+        `${where}: match vendor / architecture / description must not be an empty string (omit a field that is not specified)`,
       );
     }
     if (architecture !== undefined && vendor === undefined) {
-      throw new CodegenError(`${where}: match の architecture は vendor と対で指定する`);
+      throw new CodegenError(`${where}: match architecture must be given together with vendor`);
     }
     // description is the model name, a field only for splitting within a vendor / architecture. If
     // it were allowed alone, a rule could hit a machine of another vendor with the same name (or
     // one with an empty vendor).
     if (description !== undefined && (vendor === undefined || architecture === undefined)) {
       throw new CodegenError(
-        `${where}: match の description は vendor と architecture の両方と組で指定する`,
+        `${where}: match description must be given together with both vendor and architecture`,
       );
     }
   }
   if (!Array.isArray(fields.gemmRows)) {
-    throw new CodegenError(`${where}: gemmRows が配列でない`);
+    throw new CodegenError(`${where}: gemmRows is not an array`);
   }
   const rows = denseEntriesOf(fields.gemmRows, where, "gemmRows");
   assertGemmRowsRules(
     rows.map((entry, index): GemmRowsRule => {
       const rule = recordOf(entry, where, `gemmRows[${index}]`);
       if (typeof rule.maxRows !== "number") {
-        throw new CodegenError(`${where}: gemmRows[${index}] の maxRows が数でない`);
+        throw new CodegenError(`${where}: maxRows of gemmRows[${index}] is not a number`);
       }
       return {
         maxRows: rule.maxRows,
@@ -444,20 +448,20 @@ export const assertGeometryProfileWithinLimits = (
     const exceeds = (what: string, value: number, limit: keyof WorkgroupLimits): void => {
       if (value > limits[limit]) {
         violations.push(
-          `${name}（${geometryLabel(geometry)}）: ${what} ${value} が ${limit} ${
+          `${name} (${geometryLabel(geometry)}): ${what} ${value} exceeds ${limit} ${
             limits[limit]
-          } を超える`,
+          }`,
         );
       }
     };
     exceeds(
-      "スレッド数 wgX × wgY",
+      "thread count wgX × wgY",
       geometry.wgX * geometry.wgY,
       "maxComputeInvocationsPerWorkgroup",
     );
     exceeds("wgX", geometry.wgX, "maxComputeWorkgroupSizeX");
     exceeds("wgY", geometry.wgY, "maxComputeWorkgroupSizeY");
-    exceeds("共有メモリ（バイト）", storageBytes, "maxComputeWorkgroupStorageSize");
+    exceeds("shared memory (bytes)", storageBytes, "maxComputeWorkgroupStorageSize");
   };
   const gemm = (name: string, geometry: GemmGeometry): void =>
     check(name, geometry, gemmWorkgroupStorageBytes(geometry, "f32"));
@@ -473,7 +477,7 @@ export const assertGeometryProfileWithinLimits = (
   i8a8("i8a8.attentionPv", profile.i8a8.attentionPv);
   if (violations.length > 0) {
     throw new CodegenError(
-      `幾何プロファイル '${profile.id}': device の上限を超える幾何（${violations.join(" / ")}）`,
+      `Geometry profile '${profile.id}': geometry exceeds the device limits (${violations.join(" / ")})`,
     );
   }
 };
@@ -516,26 +520,28 @@ export const selectGeometryProfile = (
   for (const profile of profiles) {
     assertGeometryProfile(profile);
     if (ids.has(profile.id)) {
-      throw new CodegenError(`幾何プロファイル '${profile.id}': id が重複（診断で表を名指せない）`);
+      throw new CodegenError(
+        `Geometry profile '${profile.id}': duplicate id (diagnostics could not name the table)`,
+      );
     }
     ids.add(profile.id);
     if (profile.match === undefined) continue;
     const { vendor, architecture, description } = profile.match;
     if (vendor === undefined) {
       throw new CodegenError(
-        `幾何プロファイル '${profile.id}': match が空（全 adapter に当たる表は既定プロファイルだけ — ` +
-          "注入専用の表は match を省く）",
+        `Geometry profile '${profile.id}': match is empty (only the default profile matches every adapter — ` +
+          "an injection-only table omits match)",
       );
     }
     // The JSON array form cannot collide on a separator (`a/b` + `c` is not confused with `a` + `b/c`).
     const match = JSON.stringify([vendor, architecture ?? null, description ?? null]);
     if (matches.has(match)) {
       throw new CodegenError(
-        `幾何プロファイル '${profile.id}': match（vendor=${vendor} / architecture=${
-          architecture ?? "（未指定）"
+        `Geometry profile '${profile.id}': match (vendor=${vendor} / architecture=${
+          architecture ?? "(unspecified)"
         } / description=${
-          description ?? "（未指定）"
-        }）が他のプロファイルと同じ（同じ順位に 2 本当たる）`,
+          description ?? "(unspecified)"
+        }) is the same as another profile's (two tables would match at the same rank)`,
       );
     }
     matches.add(match);
@@ -576,8 +582,8 @@ export const selectGeometryProfile = (
  * not match, and output tiles would be missing without any exception).
  */
 export const gemmRowsGeometry = (profile: GeometryProfile, rows: number): GemmGeometry => {
-  assertU32Params("幾何の選択", { "行数 M": rows });
-  assertGemmRowsRules(profile.gemmRows, `幾何プロファイル '${profile.id}'`);
+  assertU32Params("Geometry selection", { "row count M": rows });
+  assertGemmRowsRules(profile.gemmRows, `Geometry profile '${profile.id}'`);
   const rules = profile.gemmRows;
   // Rules that passed the guard end with Infinity, so a u32 row count always hits one of them.
   return (rules.find((rule) => rows <= rule.maxRows) ?? rules[rules.length - 1]).geometry;
@@ -595,6 +601,6 @@ export const conv2dProfileGeometry = (profile: GeometryProfile, mTile: number): 
   if (mTile === GEMM_TILE) return profile.conv2d.rows64;
   if (mTile === GEMM_MTILE_SMALL) return profile.conv2d.rows32;
   throw new CodegenError(
-    `幾何プロファイル '${profile.id}': conv2d の m タイル ${mTile} に当たるクラスが無い（${GEMM_TILE} / ${GEMM_MTILE_SMALL} だけ）`,
+    `Geometry profile '${profile.id}': no class matches conv2d m tile ${mTile} (only ${GEMM_TILE} / ${GEMM_MTILE_SMALL})`,
   );
 };

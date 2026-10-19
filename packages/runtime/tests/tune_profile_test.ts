@@ -91,7 +91,7 @@ describe("deriveProfile: 規則の抽出", () => {
     const verdict = verdictOf(verdicts, "gemmRows > 512");
     assertEquals(verdict.outcome.kind, "default");
     assertEquals(verdict.outcome.geometry, BIG);
-    assertStringIncludes(rejectionOf(verdict, A), "linear-m1024 で ×1.040 < ×1.050");
+    assertStringIncludes(rejectionOf(verdict, A), "linear-m1024: ×1.040 < ×1.050");
   });
 
   it("出力が既定と不一致の幾何は、最も速くても採らない", () => {
@@ -111,7 +111,7 @@ describe("deriveProfile: 規則の抽出", () => {
     );
     assertEquals(verdict.outcome.kind, "adopted");
     assertEquals(verdict.outcome.geometry, B);
-    assertStringIncludes(rejectionOf(verdict, A), "不一致");
+    assertStringIncludes(rejectionOf(verdict, A), "output differs from the default");
   });
 
   it("クラスの 1 ケースでも既定比の門を越えない幾何は、幾何平均が最大でも採らない", () => {
@@ -134,7 +134,7 @@ describe("deriveProfile: 規則の抽出", () => {
       "gemmRows > 512",
     );
     assertEquals(verdict.outcome.geometry, B);
-    assertStringIncludes(rejectionOf(verdict, A), "linear-m4096 で ×1.010");
+    assertStringIncludes(rejectionOf(verdict, A), "linear-m4096: ×1.010");
   });
 
   it("クラスのどれかのケースで測っていない・失敗した幾何は採らない", () => {
@@ -154,8 +154,8 @@ describe("deriveProfile: 規則の抽出", () => {
       "gemmRows > 512",
     );
     assertEquals(verdict.outcome.kind, "default");
-    assertStringIncludes(rejectionOf(verdict, A), "linear-m4096 で測っていない");
-    assertStringIncludes(rejectionOf(verdict, B), "linear-m4096 で失敗（device lost）");
+    assertStringIncludes(rejectionOf(verdict, A), "not measured in linear-m4096");
+    assertStringIncludes(rejectionOf(verdict, B), "failed in linear-m4096 (device lost)");
   });
 
   it("候補どうしは幾何平均で比べる（算術平均なら逆を選ぶ組）", () => {
@@ -180,7 +180,10 @@ describe("deriveProfile: 規則の抽出", () => {
     );
     assertEquals(verdict.outcome.kind, "adopted");
     assertEquals(verdict.outcome.geometry, B);
-    assertStringIncludes(rejectionOf(verdict, A), "幾何平均 ×1.302（採用 ×1.310 に届かない）");
+    assertStringIncludes(
+      rejectionOf(verdict, A),
+      "geometric mean ×1.302 (below the adopted ×1.310)",
+    );
   });
 
   it("行数は段の境界 ±1 で正しい段に入り（rows <= maxRows で最初に当たる段）、conv2d は既定の行の tileM で分ける", () => {
@@ -280,11 +283,11 @@ describe("deriveProfile: 規則の抽出", () => {
     assertEquals(large.cases, ["linear-m1024", "matmul-m4096"]);
     assertEquals(large.outcome.kind, "adopted");
     assertEquals(large.outcome.geometry, B);
-    assertStringIncludes(rejectionOf(large, A), "matmul-m4096 で ×1.020 < ×1.050");
+    assertStringIncludes(rejectionOf(large, A), "matmul-m4096: ×1.020 < ×1.050");
     const middle = verdictOf(verdicts, "gemmRows 257〜512");
     assertEquals(middle.outcome.kind, "default");
     assertEquals(middle.outcome.geometry, A);
-    assertStringIncludes(rejectionOf(middle, B), "bmm-b16-m512 で ×1.040 < ×1.050");
+    assertStringIncludes(rejectionOf(middle, B), "bmm-b16-m512: ×1.040 < ×1.050");
   });
 
   it("掃引にケースが無いクラスは runtime の既定を書き、理由を残す", () => {
@@ -292,7 +295,7 @@ describe("deriveProfile: 規則の抽出", () => {
     const conv = verdictOf(verdicts, "conv2d.rows64");
     assertEquals(conv.outcome.geometry, gemmMTileGeometry(64));
     assert(conv.outcome.kind === "default");
-    assertEquals(conv.outcome.reason, "掃引にこのクラスのケースが無い");
+    assertEquals(conv.outcome.reason, "the sweeps have no case of this class");
     assertEquals(
       verdictOf(verdicts, "i8a8.attentionPv").outcome.geometry,
       defaultI8a8Geometry("attention_pv"),
@@ -326,7 +329,7 @@ describe("deriveProfile: 規則の抽出", () => {
     assert(verdict.outcome.kind === "adopted");
     assertEquals(verdict.outcome.geometry, A);
     assertEquals(verdict.outcome.geomean.toFixed(4), Math.sqrt(1.2).toFixed(4));
-    assertStringIncludes(rejectionOf(verdict, B), "不一致");
+    assertStringIncludes(rejectionOf(verdict, B), "output differs from the default");
   });
 
   it("i8a8 は tileK 込みの幾何を op と段ごとに選ぶ", () => {
@@ -380,7 +383,11 @@ describe("deriveProfile: 既定の再測定比が範囲外のケースは、そ�
     assertEquals(verdict.outcome.geomean, 1.3);
     assertEquals(verdict.cases, [ref.caseId]);
     assertEquals(verdict.excluded, [
-      { path: "drifted.json", caseId: ref.caseId, reason: "既定の再測定比 ×1.200 が範囲外" },
+      {
+        path: "drifted.json",
+        caseId: ref.caseId,
+        reason: "default re-measurement ratio ×1.200 out of range",
+      },
     ]);
   });
 
@@ -404,8 +411,8 @@ describe("deriveProfile: 既定の再測定比が範囲外のケースは、そ�
     const verdict = verdictOf(deriveProfile([drifted, steady], OPTIONS), "gemmRows > 512");
     assertEquals(verdict.outcome.kind, "default");
     assertEquals(verdict.outcome.geometry, BIG);
-    assertEquals(rejectionOf(verdict, A), `${ref.caseId} で出力が既定と不一致`);
-    assertEquals(rejectionOf(verdict, B), `${ref.caseId} で失敗（device lost）`);
+    assertEquals(rejectionOf(verdict, A), `output differs from the default in ${ref.caseId}`);
+    assertEquals(rejectionOf(verdict, B), `failed in ${ref.caseId} (device lost)`);
   });
 
   it("全掃引で外したケースは測っていない扱いで、欄は既定のまま（ケースの一覧には残る）", () => {
@@ -428,7 +435,7 @@ describe("deriveProfile: 既定の再測定比が範囲外のケースは、そ�
     assertEquals(verdict.outcome.geometry, BIG);
     assertEquals(
       rejectionOf(verdict, A),
-      `${wide.caseId} で測っていない（全掃引で比の材料から外した）`,
+      `not measured in ${wide.caseId} (dropped from the ratio material in every sweep)`,
     );
     assertEquals(
       verdict.excluded.map((entry) => [entry.path, entry.caseId]),
@@ -453,7 +460,10 @@ describe("deriveProfile: 既定の再測定比が範囲外のケースは、そ�
     );
     assert(verdict.outcome.kind === "default");
     assertEquals(verdict.outcome.geometry, BIG);
-    assertEquals(verdict.outcome.reason, "クラスの全ケースを全掃引で比の材料から外した");
+    assertEquals(
+      verdict.outcome.reason,
+      "every case of the class was dropped from the ratio material in every sweep",
+    );
   });
 
   it("ケースが 1 本の段でそれを全掃引で外したら、速い幾何があっても段の既定のまま", () => {
@@ -472,10 +482,13 @@ describe("deriveProfile: 既定の再測定比が範囲外のケースは、そ�
     assertEquals(verdict.cases, [only.caseId]);
     assert(verdict.outcome.kind === "default");
     assertEquals(verdict.outcome.geometry, A);
-    assertEquals(verdict.outcome.reason, "クラスの全ケースを全掃引で比の材料から外した");
+    assertEquals(
+      verdict.outcome.reason,
+      "every case of the class was dropped from the ratio material in every sweep",
+    );
     assertEquals(
       rejectionOf(verdict, B),
-      `${only.caseId} で測っていない（全掃引で比の材料から外した）`,
+      `not measured in ${only.caseId} (dropped from the ratio material in every sweep)`,
     );
   });
 
@@ -505,9 +518,9 @@ describe("deriveProfile: 既定の再測定比が範囲外のケースは、そ�
     assertEquals(
       verdict.excluded.map(({ caseId, reason }) => [caseId, reason]),
       [
-        [cases[2].caseId, "既定の再測定が失敗（device lost）"],
-        [cases[3].caseId, "既定の再測定が無い"],
-        [cases[4].caseId, "既定の再測定が無い"],
+        [cases[2].caseId, "failed default re-measurement (device lost)"],
+        [cases[3].caseId, "no default re-measurement"],
+        [cases[4].caseId, "no default re-measurement"],
       ],
     );
   });
@@ -532,7 +545,7 @@ describe("deriveProfile: 量子化した timestamp は観測ごとの丸め誤�
     ms * 10 * QUANTUM + QUANTUM,
   ];
   const lines = (verdict: SlotVerdict): string[] =>
-    verdictLines([verdict]).filter((line) => line.startsWith("  - 掃引 "));
+    verdictLines([verdict]).filter((line) => line.startsWith("  - Sweep "));
 
   it("E ≤ 1% の観測だけなら、量子化した掃引から採否が出て何も外さない", () => {
     // e(既定) = 0.1 / 100 = 0.1%・e(A) = 0.1 / 60 ≈ 0.17% → E ≈ 0.27%
@@ -568,18 +581,18 @@ describe("deriveProfile: 量子化した timestamp は観測ごとの丸め誤�
     );
     assert(verdict.outcome.kind === "adopted");
     assertEquals(verdict.outcome.geometry, B);
-    assertEquals(rejectionOf(verdict, A), `${ref.caseId} で測っていない`);
+    assertEquals(rejectionOf(verdict, A), `not measured in ${ref.caseId}`);
     const name = gemmCandidate(A).name;
     assertEquals(verdict.excluded, [
       {
         path: "q.json",
         caseId: ref.caseId,
         geometry: name,
-        reason: "丸め誤差の上界 E 1.30%（> 1%）",
+        reason: "rounding-error bound E 1.30% (> 1%)",
       },
     ]);
     assertEquals(lines(verdict), [
-      `  - 掃引 q.json: ${ref.caseId} の ${name} は丸め誤差の上界 E 1.30%（> 1%）のため比の材料から外した（出力の一致と失敗は見る）`,
+      `  - Sweep q.json: ${ref.caseId} geometry ${name} dropped from the ratio material due to rounding-error bound E 1.30% (> 1%) (output matches and failures are still checked)`,
     ]);
   });
 
@@ -610,7 +623,7 @@ describe("deriveProfile: 量子化した timestamp は観測ごとの丸め誤�
       "gemmRows > 512",
     );
     assertEquals(verdict.outcome.kind, "default");
-    assertEquals(rejectionOf(verdict, A), `${ref.caseId} で出力が既定と不一致`);
+    assertEquals(rejectionOf(verdict, A), `output differs from the default in ${ref.caseId}`);
     assertEquals(
       verdict.excluded.map((entry) => entry.geometry),
       [gemmCandidate(A).name],
@@ -634,16 +647,19 @@ describe("deriveProfile: 量子化した timestamp は観測ごとの丸め誤�
     );
     assert(verdict.outcome.kind === "default");
     assertEquals(verdict.outcome.geometry, BIG);
-    assertEquals(verdict.outcome.reason, "クラスの全ケースを全掃引で比の材料から外した");
+    assertEquals(
+      verdict.outcome.reason,
+      "every case of the class was dropped from the ratio material in every sweep",
+    );
     assertEquals(verdict.excluded, [
       {
         path: "q.json",
         caseId: ref.caseId,
-        reason: "既定の行の丸め誤差の上界 e 2.00%（> 1%）",
+        reason: "rounding-error bound e 2.00% of the default row (> 1%)",
       },
     ]);
     assertEquals(lines(verdict), [
-      `  - 掃引 q.json: ${ref.caseId} は既定の行の丸め誤差の上界 e 2.00%（> 1%）のため比の材料から外した（出力の一致と失敗は見る）`,
+      `  - Sweep q.json: ${ref.caseId} dropped from the ratio material due to rounding-error bound e 2.00% of the default row (> 1%) (output matches and failures are still checked)`,
     ]);
   });
 
@@ -685,9 +701,9 @@ describe("deriveProfile: 量子化した timestamp は観測ごとの丸め誤�
     assertEquals(
       verdict.excluded.map(({ caseId, geometry, reason }) => [caseId, geometry, reason]),
       [
-        [ref.caseId, gemmCandidate(A).name, "丸め誤差の上界が不明（rounds が無い）"],
-        [ref.caseId, gemmCandidate(B).name, "丸め誤差の上界が不明（正の round が無い）"],
-        [wide.caseId, undefined, "既定の行の丸め誤差の上界が不明（rounds が無い）"],
+        [ref.caseId, gemmCandidate(A).name, "unknown rounding-error bound (no rounds)"],
+        [ref.caseId, gemmCandidate(B).name, "unknown rounding-error bound (no positive round)"],
+        [wide.caseId, undefined, "unknown rounding-error bound of the default row (no rounds)"],
       ],
     );
   });
@@ -699,7 +715,7 @@ describe("deriveProfile: 量子化した timestamp は観測ごとの丸め誤�
       "gemmRows > 512",
     );
     assertEquals(verdict.excluded, []);
-    assertEquals(rejectionOf(verdict, A), `${ref.caseId} で失敗（device lost）`);
+    assertEquals(rejectionOf(verdict, A), `failed in ${ref.caseId} (device lost)`);
   });
 
   it("量子化していない掃引は rounds を見ない（rounds の無い記録も、短い pass も外さない）", () => {
@@ -723,7 +739,7 @@ describe("parseSweepReport: 既定の再測定（cases[]）", () => {
 
   it("cases が無い記録は落とす（黙って全ケースを外さない）", () => {
     const { cases: _, ...withoutCases } = report(rows);
-    assertThrows(() => parseSweepReport(withoutCases, meta), Error, "cases が配列でない");
+    assertThrows(() => parseSweepReport(withoutCases, meta), Error, "cases is not an array");
   });
 
   it("同じケースの記録が 2 本あれば落とす", () => {
@@ -731,7 +747,7 @@ describe("parseSweepReport: 既定の再測定（cases[]）", () => {
     assertThrows(
       () => parseSweepReport({ ...report(rows), cases: [entry, entry] }, meta),
       Error,
-      "linear-m1024 が 2 本",
+      "cases has linear-m1024 twice",
     );
   });
 });
@@ -747,7 +763,7 @@ describe("deriveProfile: description で adapter の機種まで揃える", () =
           description: "Test GPU",
         }),
       Error,
-      "合わない",
+      "does not match the requested",
     );
     deriveProfile([source(rows)], { ...OPTIONS, description: "Test GPU" });
   });
@@ -761,12 +777,12 @@ describe("deriveProfile: description で adapter の機種まで揃える", () =
           minSpeedup: 1.05,
         }),
       Error,
-      "architecture の両方と組",
+      "together with both vendor and architecture",
     );
     assertThrows(
       () => deriveProfile([source(rows)], { ...OPTIONS, description: "" }),
       Error,
-      "空文字",
+      "empty string",
     );
   });
 
@@ -775,11 +791,15 @@ describe("deriveProfile: description で adapter の機種まで揃える", () =
     const m5 = source(rows, "m5.json", { ...ADAPTER, description: "Apple M5" });
     const blank = source(rows, "blank.json", { ...ADAPTER, description: "" });
     for (const target of [{ optIn: true } as const, OPTIONS]) {
-      assertThrows(() => deriveProfile([m2, m5], { ...target, minSpeedup: 1.05 }), Error, "と違う");
+      assertThrows(
+        () => deriveProfile([m2, m5], { ...target, minSpeedup: 1.05 }),
+        Error,
+        "differs from",
+      );
       assertThrows(
         () => deriveProfile([m2, blank], { ...target, minSpeedup: 1.05 }),
         Error,
-        "と違う",
+        "differs from",
       );
     }
     deriveProfile([blank, source(rows, "blank2.json", { ...ADAPTER, description: "" })], OPTIONS);
@@ -797,7 +817,7 @@ describe("deriveProfile: description で adapter の機種まで揃える", () =
           { optIn: true, minSpeedup: 1.05 },
         ),
       Error,
-      "と違う",
+      "differs from",
     );
   });
 });
@@ -849,8 +869,8 @@ describe("profileRowsSegments: gemmRows の段の境界の検査", () => {
       segments.map((segment) => segment.slot),
       [...ROWS_SLOT_NAMES],
     );
-    assertEquals(segments[1].scope, "linear / matmul / bmm の行数 17〜32");
-    assertEquals(segments[6].scope, "linear / matmul / bmm の行数 > 512");
+    assertEquals(segments[1].scope, "linear / matmul / bmm row count 17〜32");
+    assertEquals(segments[6].scope, "linear / matmul / bmm row count > 512");
   });
 
   it("段の既定はその段の範囲を覆う既定の段の幾何（≤ 64 の 3 段 → ≤ 64・65〜512 の 3 段 → 65〜512・> 512 → > 512）", () => {
@@ -879,12 +899,12 @@ describe("profileRowsSegments: gemmRows の段の境界の検査", () => {
     assertThrows(
       () => profileRowsSegments([32, 128, Infinity]),
       Error,
-      "既定の表の境界 64 / 512 を含まない",
+      "missing the default table's bounds 64 / 512",
     );
     assertThrows(
       () => profileRowsSegments([16, 32, 64, 128, 256, Infinity]),
       Error,
-      "既定の表の境界 512 を含まない",
+      "missing the default table's bounds 512",
     );
   });
 
@@ -893,16 +913,16 @@ describe("profileRowsSegments: gemmRows の段の境界の検査", () => {
       [64, 32, 512, Infinity],
       [64, 64, 512, Infinity],
     ]) {
-      assertThrows(() => profileRowsSegments(bounds), Error, "狭義昇順でない");
+      assertThrows(() => profileRowsSegments(bounds), Error, "not strictly ascending");
     }
     for (const bounds of [[64, 512], []]) {
-      assertThrows(() => profileRowsSegments(bounds), Error, "末尾が Infinity でない");
+      assertThrows(() => profileRowsSegments(bounds), Error, "the last bound is not Infinity");
     }
     for (const bounds of [
       [0, 64, 512, Infinity],
       [16.5, 64, 512, Infinity],
     ]) {
-      assertThrows(() => profileRowsSegments(bounds), Error, "正整数");
+      assertThrows(() => profileRowsSegments(bounds), Error, "must be positive integers");
     }
   });
 });
@@ -926,12 +946,12 @@ describe("deriveProfile: ケースが 1 本の段", () => {
     assert(adopted.outcome.kind === "adopted");
     assertEquals(adopted.outcome.geometry, A);
     assertEquals(adopted.outcome.geomean, 1.05);
-    assertStringIncludes(rejectionOf(adopted, B), "linear-m16 で ×1.040 < ×1.050");
+    assertStringIncludes(rejectionOf(adopted, B), "linear-m16: ×1.040 < ×1.050");
     const kept = verdictOf(verdicts, "gemmRows 17〜32");
     assertEquals(kept.cases, ["linear-m32"]);
     assertEquals(kept.outcome.kind, "default");
     assertEquals(kept.outcome.geometry, SMALL);
-    assertStringIncludes(rejectionOf(kept, A), "linear-m32 で ×1.049 < ×1.050");
+    assertStringIncludes(rejectionOf(kept, A), "linear-m32: ×1.049 < ×1.050");
   });
 });
 
@@ -978,8 +998,8 @@ describe("deriveProfile: 掃引の既定の行は今の runtime の既定であ�
   for (const { slot, rows } of shifted) {
     it(`${slot} の既定の行の幾何が runtime の既定と違えば落ちる`, () => {
       const error = assertThrows(() => deriveProfile([source(rows)], OPTIONS), Error);
-      assertStringIncludes(error.message, `${slot}: 掃引の既定の行`);
-      assertStringIncludes(error.message, "今の runtime の既定");
+      assertStringIncludes(error.message, `${slot}: the sweep's default row`);
+      assertStringIncludes(error.message, "the current runtime's default");
     });
   }
 });
@@ -998,7 +1018,7 @@ describe("deriveProfile: adapter を混ぜない", () => {
           { vendor: "apple", minSpeedup: 1.05 },
         ),
       Error,
-      "と違う",
+      "differs from",
     );
   });
 
@@ -1006,17 +1026,17 @@ describe("deriveProfile: adapter を混ぜない", () => {
     assertThrows(
       () => deriveProfile([source(rows)], { ...OPTIONS, vendor: "intel" }),
       Error,
-      "合わない",
+      "does not match the requested",
     );
     assertThrows(
       () => deriveProfile([source(rows)], { ...OPTIONS, architecture: "metal-2" }),
       Error,
-      "合わない",
+      "does not match the requested",
     );
   });
 
   it("同じ掃引（同じ sha256）を 2 度渡すと落ちる", () => {
-    assertThrows(() => deriveProfile([source(rows), source(rows)], OPTIONS), Error, "2 度");
+    assertThrows(() => deriveProfile([source(rows), source(rows)], OPTIONS), Error, "passed twice");
   });
 
   it("掃引どうしの adapter の device が違えば、他の 3 欄が同じでも落ちる（表は 4 欄の 1 組だけを持つ）", () => {
@@ -1028,11 +1048,11 @@ describe("deriveProfile: adapter を混ぜない", () => {
         const error = assertThrows(
           () => deriveProfile([m2, mixed], { ...target, minSpeedup: 1.05 }),
           Error,
-          "と違う",
+          "differs from",
         );
         assertStringIncludes(
           error.message,
-          `adapter の device ${JSON.stringify(mixed.adapter.device)} が m2.json の "0x0000"`,
+          `adapter device ${JSON.stringify(mixed.adapter.device)} differs from m2.json's "0x0000"`,
         );
       }
     }
@@ -1049,7 +1069,7 @@ describe("parseSweepReport", () => {
     assertThrows(
       () => parseSweepReport(report(rows, withoutDevice), meta),
       Error,
-      "adapter: device が文字列でない",
+      "adapter: device is not a string",
     );
     assertEquals(
       parseSweepReport(report(rows, { ...ADAPTER, device: "" }), meta).adapter.device,
@@ -1063,9 +1083,9 @@ describe("parseSweepReport", () => {
     assertEquals(read({ candidateSet: "quick+", quick: false }), "quick+");
     assertEquals(read({ quick: true }), "quick");
     assertEquals(read({ quick: false }), "full");
-    assertThrows(() => read({ candidateSet: "quik" }), Error, "settings.candidateSet が");
-    assertThrows(() => read({}), Error, "candidateSet も quick も無い");
-    assertThrows(() => read(undefined), Error, "settings が無い");
+    assertThrows(() => read({ candidateSet: "quik" }), Error, "settings.candidateSet is none of");
+    assertThrows(() => read({}), Error, "neither candidateSet nor quick");
+    assertThrows(() => read(undefined), Error, "settings is missing");
   });
 
   it("既定の行が 1 本でないケースがあれば落ちる（比の土台が決まらない）", () => {
@@ -1073,7 +1093,7 @@ describe("parseSweepReport", () => {
     assertThrows(
       () => parseSweepReport(report([...rows, rows[0]]), meta),
       Error,
-      "既定の行が 2 本",
+      "has 2 default rows",
     );
   });
 
@@ -1105,7 +1125,7 @@ describe("parseSweepReport", () => {
             meta,
           ),
         Error,
-        "gpuTiming.quantized が真偽値でない",
+        "gpuTiming.quantized is not a boolean",
       );
     }
     assertThrows(
@@ -1118,7 +1138,7 @@ describe("parseSweepReport", () => {
           meta,
         ),
       Error,
-      "単位が deno-raw-tick",
+      "the unit is deno-raw-tick",
     );
   });
 
@@ -1134,7 +1154,7 @@ describe("parseSweepReport", () => {
         () =>
           parseSweepReport(report(caseRows(ref, BIG, [[A, { speedup: 1.2, ...measured }]])), meta),
         Error,
-        "の型が違う",
+        "has the wrong type",
       );
     }
   });
@@ -1150,13 +1170,13 @@ describe("parseSweepReport", () => {
           meta,
         ),
       Error,
-      'gpuTiming.unit が "wall"',
+      'gpuTiming.unit is "wall"',
     );
   });
 
   it("gpuTiming が無い掃引は材料にしない（単位が分からない）", () => {
     const { gpuTiming: _, ...withoutTiming } = report(caseRows(linearCase(1024), BIG, []));
-    assertThrows(() => parseSweepReport(withoutTiming, meta), Error, "gpuTiming が無い");
+    assertThrows(() => parseSweepReport(withoutTiming, meta), Error, "gpuTiming is missing");
   });
 
   it("GPU の timestamp で測った掃引（ns / deno-raw-tick）は受ける", () => {
@@ -1258,7 +1278,7 @@ describe("buildGeometryProfile: 指紋を導けない表", () => {
     const error = assertThrows(() => buildGeometryProfile(SPEC, SOURCES, verdicts), Error);
     assertInstanceOf(error.cause, KernelsIdError);
     for (const part of [
-      "生成した表 'test-gpu' の provenance.kernels（カーネルの指紋）を導けない",
+      "Cannot derive provenance.kernels (the kernel fingerprint) of generated table 'test-gpu'",
       "conv2d-c96-512x512",
       "conv2d.rows32",
       JSON.stringify(narrow),
@@ -1348,16 +1368,16 @@ describe("記録の照合キー caseSet / defaultKernels（ADR 0117 決定 8）"
       const error = assertThrows(
         () => derive(record({ ...current, [key]: stale })),
         Error,
-        `sweep-0.json: ${key} ${stale} が今の runtime の ${current[key]} と違う`,
+        `sweep-0.json: ${key} ${stale} differs from the current runtime's ${current[key]}`,
       );
-      assertStringIncludes(error.message, "掃引し直す");
+      assertStringIncludes(error.message, "sweep again");
     });
 
     it(`${key} が文字列でなければ止まる（黙って照合を飛ばさない）`, () => {
       assertThrows(
         () => derive(record({ ...current, [key]: 1 })),
         Error,
-        `sweep-0.json: ${key} が文字列でない（1）`,
+        `sweep-0.json: ${key} is not a string (1)`,
       );
     });
   }
@@ -1427,7 +1447,7 @@ describe("表の provenance.userAgent（ADR 0117 追記 2026-10-02）", () => {
       assertThrows(
         () => derive(record({ userAgent })),
         Error,
-        "sweep-0.json: userAgent が文字列でも { deno: 文字列 } でもない",
+        "sweep-0.json: userAgent is neither a string nor { deno: string }",
         JSON.stringify(userAgent),
       );
     }
@@ -1485,9 +1505,9 @@ describe("記録の照合キー candidateKernels（測った候補のカーネ�
           }),
         ),
       Error,
-      `sweep-0.json: candidateKernels ${stale} が今の runtime の ${current} と違う（測った候補のカーネル`,
+      `sweep-0.json: candidateKernels ${stale} differs from the current runtime's ${current} (the record's kernels of the measured candidates`,
     );
-    assertStringIncludes(error.message, "掃引し直す");
+    assertStringIncludes(error.message, "sweep again");
   });
 
   it("candidateKernels が文字列でない・dp4a が真偽値でない記録は止まる（黙って照合を飛ばさない）", () => {
@@ -1495,12 +1515,12 @@ describe("記録の照合キー candidateKernels（測った候補のカーネ�
     assertThrows(
       () => derive(measuredRecord({ candidateKernels: 1 })),
       Error,
-      "sweep-0.json: candidateKernels が文字列でない（1）",
+      "sweep-0.json: candidateKernels is not a string (1)",
     );
     assertThrows(
       () => derive(measuredRecord({ candidateKernels: current, dp4a: undefined })),
       Error,
-      "sweep-0.json: dp4a が真偽値でない",
+      "sweep-0.json: dp4a is not a boolean",
     );
   });
 });
@@ -1511,7 +1531,7 @@ describe("deriveGeometryProfile は返す表を注入の門に通す", () => {
       assertThrows(
         () => deriveGeometryProfile(inputs(record()), options),
         Error,
-        "生成した表 '' が注入の門を通らない — 幾何プロファイル: id が空",
+        "Generated table '' fails the injection check — Geometry profile: id is empty",
       );
     }
   });

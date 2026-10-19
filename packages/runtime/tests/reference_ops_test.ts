@@ -401,7 +401,7 @@ test("topk の CPU 参照は値と添字の 2 本を返し、単数形の入口�
   assertEquals([...outputs[1].data], [1, 2, 2, 3]);
   // MUST: 単数形の入口は多出力を黙って slot 0 だけ返さない（添字が誰にも突き合わされない
   // テストが書けてしまう）
-  assertThrows(() => applyReferenceOp("topk", [x], { k: 2 }), ReferenceOpError, "出力 2 本");
+  assertThrows(() => applyReferenceOp("topk", [x], { k: 2 }), ReferenceOpError, "has 2 outputs");
   // 受理領域の外（k=0 / k > 最終次元 / k 欠落 / 記号 k）は全て fail loudly
   assertThrows(() => applyReferenceOpOutputs("topk", [x], { k: 0 }), OpContractError);
   assertThrows(() => applyReferenceOpOutputs("topk", [x], { k: 5 }), OpContractError);
@@ -1729,9 +1729,9 @@ test("applyReferenceOp は契約表の kind で分岐し、アリティ違反を
 });
 
 test("refTensor は負・非整数の次元を拒否する（次元の積だけを見ると [-1,-1] が要素数 1 で通る）", () => {
-  assertThrows(() => refTensor([-1, -1], Float32Array.from([7])), ReferenceOpError, "次元");
-  assertThrows(() => refTensor([0.5, 2], Float32Array.from([7])), ReferenceOpError, "次元");
-  assertThrows(() => refTensor([Number.NaN], new Float32Array(0)), ReferenceOpError, "次元");
+  assertThrows(() => refTensor([-1, -1], Float32Array.from([7])), ReferenceOpError, "dimension");
+  assertThrows(() => refTensor([0.5, 2], Float32Array.from([7])), ReferenceOpError, "dimension");
+  assertThrows(() => refTensor([Number.NaN], new Float32Array(0)), ReferenceOpError, "dimension");
   assertEquals(refTensor([0, 3], new Float32Array(0)).shape, [0, 3]);
 });
 
@@ -1779,12 +1779,12 @@ test("applyReferenceOp は state_append を素通りさせず CPU 参照の不�
   assertThrows(
     () => applyReferenceOpOutputs("state_append", [x], {}),
     ReferenceOpError,
-    "CPU 参照を持たない",
+    "has no CPU reference",
   );
   assertThrows(
     () => applyReferenceOp("state_append", [x], {}),
     ReferenceOpError,
-    "CPU 参照を持たない",
+    "has no CPU reference",
   );
 });
 
@@ -1841,14 +1841,14 @@ test("allclose は NaN / 負の許容差を AllcloseError で拒み、atol = +In
     assertThrows(
       () => allclose(actual, expected, tolerance),
       AllcloseError,
-      "許容差",
+      "Tolerance",
       JSON.stringify(tolerance),
     );
     // 空配列でも不正な許容差は拒否する（要素が無いことは許容差の正しさを保証しない）。
     assertThrows(
       () => allclose([], [], tolerance),
       AllcloseError,
-      "許容差",
+      "Tolerance",
       JSON.stringify(tolerance),
     );
   }
@@ -1866,7 +1866,7 @@ test("allclose は rtol = +Infinity を AllcloseError で拒む（参照 0 の�
         rtol: Number.POSITIVE_INFINITY,
       }),
     AllcloseError,
-    "許容差 rtol",
+    "Tolerance rtol",
   );
 });
 

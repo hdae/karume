@@ -214,11 +214,12 @@ export const conv3dIgemmParams = (dims: Conv3dDims): Uint32Array<ArrayBuffer> =>
     ["groups", dims.groups],
   ];
   for (const [name, value] of positive) {
-    if (value < 1) throw new CodegenError(`conv3d igemm params: ${name} は正整数（${value}）`);
+    if (value < 1)
+      throw new CodegenError(`conv3d igemm params: ${name} must be a positive integer (${value})`);
   }
   if (dims.groups !== 1) {
     throw new CodegenError(
-      `conv3d igemm params: groups は 1 専用（${dims.groups}）— groups > 1 の GPU 実行経路は無い（ADR 0118 決定 1）`,
+      `conv3d igemm params: groups must be 1 (${dims.groups}) — there is no GPU execution path for groups > 1 (ADR 0118 decision 1)`,
     );
   }
   const n = dims.timeOut * dims.heightOut * dims.widthOut;

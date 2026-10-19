@@ -1,4 +1,4 @@
-// karume attention_qk (S[b,m,n] = (q·scale)[b,m,d] · (k·scale)[b,n,d]ᵀ + mask[m,n], f32, レジスタ 128x128 タイル / 1 スレッド 8x8 / wg 16x16 + vec4)
+// karume attention_qk (S[b,m,n] = (q·scale)[b,m,d] · (k·scale)[b,n,d]ᵀ + mask[m,n], f32, register tile 128x128 / 8x8 per thread / wg 16x16 + vec4)
 struct Dims {
   m: u32,
   n: u32,
@@ -26,7 +26,7 @@ fn main(
   let k4 = dims.k / 4u;
   let n4 = dims.n / 4u;
   // The batch is uniform per workgroup (one z index = the tiles of one batch) — the premise for the
-  // inner workgroupBarrier to meet WGSL's uniformity requirement。MUST: base は quad 単位（要素単位で組むと隣のバッチを読む）
+  // inner workgroupBarrier to meet WGSL's uniformity requirement. MUST: base is in quad units (building it in element units reads the next batch)
   let abase = wid.z * dims.m * k4;
   let bbase = wid.z * dims.n * dims.k;
   let cbase = wid.z * dims.m * n4;

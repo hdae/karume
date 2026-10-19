@@ -197,7 +197,7 @@ export const softmaxParams = (
 ): Uint32Array<ArrayBuffer> => {
   assertU32Params("softmax params", { rows, dim });
   if (dim < 1) {
-    throw new CodegenError(`softmax params: dim は正整数（${dim}）`);
+    throw new CodegenError(`softmax params: dim must be a positive integer (${dim})`);
   }
   const params = new Uint32Array(4);
   params[0] = rows;

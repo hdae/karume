@@ -98,15 +98,15 @@ export const ropeParams = (
 ): Uint32Array<ArrayBuffer> => {
   const axis = layout === "bhsd" ? "sequence" : "heads";
   assertU32Params("rope params", { n, [axis]: tableAxisSize, headDim });
-  if (tableAxisSize === 0) throw new CodegenError(`rope params: ${axis} は 1 以上`);
+  if (tableAxisSize === 0) throw new CodegenError(`rope params: ${axis} must be at least 1`);
   if (headDim === 0 || headDim % 2 !== 0) {
-    throw new CodegenError(`rope params: headDim は正の偶数（${headDim}）`);
+    throw new CodegenError(`rope params: headDim must be a positive even number (${headDim})`);
   }
   const rowSize = tableAxisSize * headDim;
   assertU32Params("rope params", { [`${axis} × headDim`]: rowSize });
   if (n % rowSize !== 0) {
     throw new CodegenError(
-      `rope params: n ${n} が ${axis} ${tableAxisSize} × headDim ${headDim} の整数行でない`,
+      `rope params: n ${n} is not a whole number of rows of ${axis} ${tableAxisSize} × headDim ${headDim}`,
     );
   }
   return new Uint32Array([n, tableAxisSize, headDim, headDim / 2]);

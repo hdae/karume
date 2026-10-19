@@ -39,10 +39,10 @@ const noopFlush = (): Promise<void> => Promise.resolve();
  * 切り上げた顔で配る」形になる（`toSizeClass` の MUST が例外なしに破れる）。
  */
 test("toSizeClass は安全整数を超えるバイト数を拒否する（切り上げで丸めない）", () => {
-  assertThrows(() => toSizeClass(2 ** 53), ArenaError, "0 以上の安全整数");
-  assertThrows(() => toSizeClass(2 ** 53 + 4), ArenaError, "0 以上の安全整数");
-  assertThrows(() => toSizeClass(-4), ArenaError, "0 以上の安全整数");
-  assertThrows(() => toSizeClass(1.5), ArenaError, "0 以上の安全整数");
+  assertThrows(() => toSizeClass(2 ** 53), ArenaError, "safe integer >= 0");
+  assertThrows(() => toSizeClass(2 ** 53 + 4), ArenaError, "safe integer >= 0");
+  assertThrows(() => toSizeClass(-4), ArenaError, "safe integer >= 0");
+  assertThrows(() => toSizeClass(1.5), ArenaError, "safe integer >= 0");
   // 対照: 安全整数の上限直下は 4 バイト整列へ切り上げて通る。
   assertEquals(toSizeClass(Number.MAX_SAFE_INTEGER - 6), 2 ** 53 - 4);
   assertEquals(toSizeClass(0), 4);
@@ -124,7 +124,7 @@ test("RunArena.destroy は flush 完了後にのみバッファを破棄する",
   assertThrows(
     () => arena.allocRegion(32),
     ArenaError,
-    "破棄済み",
+    "destroyed",
     "flush 待ちの間に確保されたバッファは誰にも破棄されない",
   );
 
@@ -134,7 +134,7 @@ test("RunArena.destroy は flush 完了後にのみバッファを破棄する",
   await Promise.all([destroying, second]);
   assertEquals(gpu.destroyedCount(), 2);
 
-  assertThrows(() => arena.allocRegion(32), ArenaError, "破棄済み");
+  assertThrows(() => arena.allocRegion(32), ArenaError, "destroyed");
 });
 
 test("RunArena.destroy は flush が失敗してもバッファを破棄し、その失敗を伝える", async () => {
@@ -150,7 +150,7 @@ test("RunArena.destroy は flush が失敗してもバッファを破棄し、�
   assertEquals(gpu.destroyedCount(), 2, "flush が失敗しても所有バッファは 1 本残らず破棄する");
 
   // 破棄済みの状態は確定している（後始末が済んでいるので再確保は受け付けない）
-  assertThrows(() => arena.allocRegion(32), ArenaError, "破棄済み");
+  assertThrows(() => arena.allocRegion(32), ArenaError, "destroyed");
   const again = await assertRejects(() => arena.destroy());
   assertStrictEquals(again, lost);
   assertEquals(gpu.destroyedCount(), 2, "2 度目の destroy が二重破棄を起こさない");

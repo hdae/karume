@@ -134,7 +134,7 @@ test("decodePng: IDAT が複数チャンクに割れていても連結して同�
 test("decodePng: PNG でないバイト列をシグネチャで落とす", async () => {
   const broken = await buildPng();
   broken[3] = 0x00;
-  await assertRejects(() => decodePng(broken, "壊れたシグネチャ"), Error, "PNG シグネチャでない");
+  await assertRejects(() => decodePng(broken, "壊れたシグネチャ"), Error, "not a PNG signature");
 });
 
 test("decodePng: 受理しない IHDR（color type 6 / interlace 1）を落とす", async () => {
@@ -142,13 +142,13 @@ test("decodePng: 受理しない IHDR（color type 6 / interlace 1）を落と�
   await assertRejects(
     () => decodePng(rgba, "RGBA"),
     Error,
-    "IHDR が [depth,color,compression,filter,interlace]",
+    "IHDR has [depth,color,compression,filter,interlace]",
   );
   const interlaced = await buildPng({ interlace: 1 });
   await assertRejects(
     () => decodePng(interlaced, "Adam7"),
     Error,
-    "IHDR が [depth,color,compression,filter,interlace]",
+    "IHDR has [depth,color,compression,filter,interlace]",
   );
 });
 
@@ -157,27 +157,27 @@ test("decodePng: None 以外の行 filter を落とす（黙って近似しな�
   const error = await assertRejects(
     () => decodePng(subFiltered, "Sub フィルタ"),
     Error,
-    "filter type が 1",
+    "filter type of row 0 is 1",
   );
   assertEquals(error.message.includes("None(0)"), true, error.message);
 });
 
 test("decodePng: IHDR / IDAT の欠落をそれぞれの帰属で落とす", async () => {
   const noIhdr = await buildPng({ omitIhdr: true });
-  await assertRejects(() => decodePng(noIhdr, "IHDR 欠落"), Error, "IHDR が無い");
+  await assertRejects(() => decodePng(noIhdr, "IHDR 欠落"), Error, "no IHDR");
   const noIdat = await buildPng({ omitIdat: true });
-  await assertRejects(() => decodePng(noIdat, "IDAT 欠落"), Error, "IDAT が無い");
+  await assertRejects(() => decodePng(noIdat, "IDAT 欠落"), Error, "no IDAT");
 });
 
 test("decodePng: チャンク宣言長がファイル末尾を越える形を落とす", async () => {
   const bytes = await buildPng();
   // IDAT は シグネチャ 8 + IHDR チャンク 25 の直後。その長さ欄を巨大な値へ書き換える。
   new DataView(bytes.buffer).setUint32(8 + 25, 0xffff);
-  await assertRejects(() => decodePng(bytes, "長さ超過"), Error, "ファイル末尾を越える");
+  await assertRejects(() => decodePng(bytes, "長さ超過"), Error, "runs past the end of the file");
 });
 
 test("decodePng: 展開後のバイト数が宣言した高さと食い違う形を落とす", async () => {
   // IHDR の height だけを +1 する（画素は 3 行ぶんしか無い）
   const tallerHeader = await buildPng({ height: HEIGHT + 1 });
-  await assertRejects(() => decodePng(tallerHeader, "高さ不一致"), Error, "展開後が");
+  await assertRejects(() => decodePng(tallerHeader, "高さ不一致"), Error, "bytes after inflating");
 });

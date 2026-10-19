@@ -186,7 +186,7 @@ const ditLinear = (op: LinearCase["op"]): LinearCase[] =>
       k,
       censusCount: count,
       source: `transformer [1,${m},${k}] × [${n},${k}]${
-        m === 4096 ? "" : "（census の M 4096 を 1024 に置換）"
+        m === 4096 ? "" : " (census M 4096 replaced with 1024)"
       }`,
     })),
   );
@@ -213,7 +213,7 @@ const LINEAR_CASES: readonly LinearCase[] = [
     n: 2048,
     k: 1024,
     censusCount: 56,
-    source: `transformer [1,${m},1024] × [2048,1024]（census の M 512 を ${m} に置換）`,
+    source: `transformer [1,${m},1024] × [2048,1024] (census M 512 replaced with ${m})`,
   })),
   {
     // Small-M control (census: text_encoder's `[1,64,1024] × [3072,1024]`, stored in f16)
@@ -233,7 +233,7 @@ const LINEAR_CASES: readonly LinearCase[] = [
     n: 3072,
     k: 1024,
     censusCount: 56,
-    source: `text_encoder [1,${m},1024] × [3072,1024]（census の M 64 を ${m} に置換）`,
+    source: `text_encoder [1,${m},1024] × [3072,1024] (census M 64 replaced with ${m})`,
   })),
   ...ditLinear("i8a8-linear"),
 ];
@@ -263,7 +263,7 @@ const MATMUL_CASES: readonly MatmulCase[] = [
     k,
     censusCount: 0 as const,
     mirrorOf,
-    source: `${mirrorOf} の鏡像 [${m},${k}] × [${k},${n}]（census に matmul の行は無い）`,
+    source: `mirror of ${mirrorOf} [${m},${k}] × [${k},${n}] (the census has no matmul row)`,
   };
 });
 
@@ -308,7 +308,7 @@ const BMM_DERIVED_CASES: readonly BmmCase[] = [16, 32, 128, 256].flatMap((m) =>
     n: 64,
     k,
     censusCount: count,
-    source: `${component} bmm [16,${m},${k}] × [16,${k},64]（census の M ${origin} を ${m} に置換）`,
+    source: `${component} bmm [16,${m},${k}] × [16,${k},64] (census M ${origin} replaced with ${m})`,
   })),
 );
 
@@ -338,7 +338,7 @@ const attentionCases = (op: AttentionCase["op"]): AttentionCase[] =>
       score: op === "attention" ? ("f32" as const) : ("f16" as const),
       censusCount: 28,
       source: `transformer attention [1,16,${m},128] × [1,16,${n},128]${
-        m === 4096 ? "" : "（census の M 4096 を 1024 に置換）"
+        m === 4096 ? "" : " (census M 4096 replaced with 1024)"
       }`,
     })),
   );

@@ -153,11 +153,13 @@ export const embeddingParams = (
   if (hidden === 0 && count !== 0) {
     // The combination that divides by zero (element count > 0 with no hidden) cannot arise under
     // the shape contract.
-    throw new CodegenError(`embedding params: hidden 0 で要素数 ${count} の組み合わせは無い`);
+    throw new CodegenError(
+      `embedding params: hidden 0 with element count ${count} is not a valid combination`,
+    );
   }
   if (groupSize !== undefined && hidden % groupSize !== 0) {
     throw new CodegenError(
-      `embedding params: hidden=${hidden} が group_size ${groupSize} で割り切れない`,
+      `embedding params: hidden=${hidden} is not divisible by group_size ${groupSize}`,
     );
   }
   const params = new Uint32Array(4);

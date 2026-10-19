@@ -23,7 +23,7 @@ import type { LoadedManifest } from "./session.ts";
 import type { SizeViolation, SourceOrigin } from "./source.ts";
 
 /** The verb in the failure message (the surfaces split between the fetch and the prefetch verb). */
-export type FetchVerb = "取得" | "事前取得";
+export type FetchVerb = "fetch" | "prefetch";
 
 /**
  * The part of the naming that diagnostics use. **It does not include the failure origin
@@ -100,8 +100,8 @@ export const createFetchContext = (loaded: LoadedManifest, session: SourceOrigin
     sizeViolation: (ref) => (actual, integrity) => {
       const origin = originOf(ref);
       return new IntegrityError(
-        `${ref.path}: バイト数が manifest の size と食い違う` +
-          `（期待 ${ref.size} / 実際 ${actual} — ${origin.label}）`,
+        `${ref.path}: byte count does not match the manifest's size` +
+          ` (expected ${ref.size} / actual ${actual} — ${origin.label})`,
         {
           ...identityOf(origin),
           path: ref.path,
@@ -116,7 +116,7 @@ export const createFetchContext = (loaded: LoadedManifest, session: SourceOrigin
     },
     fetchFailure: (ref, verb, cause) => {
       const origin = originOf(ref);
-      return new HubFetchError(`${ref.path} の${verb}に失敗した（${origin.label}）`, {
+      return new HubFetchError(`${ref.path}: ${verb} failed (${origin.label})`, {
         ...identityOf(origin),
         path: ref.path,
         available,
@@ -137,8 +137,8 @@ export const createFetchContext = (loaded: LoadedManifest, session: SourceOrigin
  */
 export const revisionResolutionFailure = (origin: SourceOrigin, cause: unknown): HubFetchError =>
   new HubFetchError(
-    `世代の解決に失敗した（${origin.label}）。可変 ref はオフラインで` +
-      `起動できない — revision に commit SHA を渡すと解決要求そのものが発生しない`,
+    `failed to resolve the revision (${origin.label}). A mutable ref cannot start` +
+      ` offline — passing a commit SHA as revision avoids the resolve request altogether`,
     { ...identityOf(origin), cause },
   );
 
@@ -147,13 +147,13 @@ export const manifestOversize =
   (origin: SourceOrigin): SizeViolation =>
   (actual) =>
     new ManifestFormatError(
-      `manifest: ${MANIFEST_FILENAME} が上限 ${MAX_MANIFEST_BYTES} バイトを超えた` +
-        `（${actual} バイト — ${origin.label}）`,
+      `manifest: ${MANIFEST_FILENAME} exceeds the limit of ${MAX_MANIFEST_BYTES} bytes` +
+        ` (${actual} bytes — ${origin.label})`,
     );
 
 /** Fetching `karume.json` itself failed. */
 export const manifestFetchFailure = (origin: SourceOrigin, cause: unknown): HubFetchError =>
-  new HubFetchError(`${MANIFEST_FILENAME} の取得に失敗した（${origin.label}）`, {
+  new HubFetchError(`${MANIFEST_FILENAME}: fetch failed (${origin.label})`, {
     ...identityOf(origin),
     path: MANIFEST_FILENAME,
     cause,

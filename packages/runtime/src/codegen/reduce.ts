@@ -54,11 +54,11 @@ type CanonicalSpec = {
 const canonicalize = (spec: ReduceSpec): CanonicalSpec => {
   const op = REDUCE_OPS.find((name) => name === spec.op);
   if (op === undefined) {
-    throw new CodegenError(`reduce codegen: op '${spec.op}' は reduce 語彙に無い`);
+    throw new CodegenError(`reduce codegen: op '${spec.op}' is not in the reduce vocabulary`);
   }
   const contract = resolveOpContract(op);
   if (!contract.dtypes.includes(spec.dtype)) {
-    throw new CodegenError(`reduce codegen: op '${op}' は dtype '${spec.dtype}' を実行できない`);
+    throw new CodegenError(`reduce codegen: op '${op}' cannot run dtype '${spec.dtype}'`);
   }
   // Row reduce has a single output, so output slot 0.
   return { op, from: spec.dtype, to: outputDtypeOf(contract, 0, spec.dtype, "reduce codegen") };
@@ -120,9 +120,7 @@ export const reduceWgsl = (spec: ReduceSpec): string => {
   const combine = COMBINE[op];
   const identity = IDENTITY[op][to];
   if (identity === undefined) {
-    throw new CodegenError(
-      `reduce codegen: op '${op}' は出力 dtype '${to}' の identity を持たない`,
-    );
+    throw new CodegenError(`reduce codegen: op '${op}' has no identity for output dtype '${to}'`);
   }
   const accumulator = WGSL_SCALAR[to];
   // When both types are the same, write one word (the f32 form's output is frozen byte for byte by
@@ -215,7 +213,7 @@ export const AXIS_REDUCE_WORKGROUP_SIZE = REDUCE_WORKGROUP_SIZE;
 const workgroupSizeBits = (size: number): number => {
   const bits = Math.log2(size);
   if (!Number.isInteger(bits)) {
-    throw new CodegenError(`reduce codegen: workgroup サイズ ${size} が 2 の冪でない`);
+    throw new CodegenError(`reduce codegen: workgroup size ${size} is not a power of 2`);
   }
   return bits;
 };
@@ -254,9 +252,7 @@ export const axisReduceWgsl = (spec: ReduceSpec): string => {
   const combine = COMBINE[op];
   const identity = IDENTITY[op][to];
   if (identity === undefined) {
-    throw new CodegenError(
-      `reduce codegen: op '${op}' は出力 dtype '${to}' の identity を持たない`,
-    );
+    throw new CodegenError(`reduce codegen: op '${op}' has no identity for output dtype '${to}'`);
   }
   const accumulator = WGSL_SCALAR[to];
   const label = from === to ? from : `${from}>${to}`;

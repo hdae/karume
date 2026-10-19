@@ -1,4 +1,4 @@
-// karume attention_qk (S[b,m,n] = q[b,m,d] · k[b,n,d]ᵀ, integer dot product of per-token i8 q and k, half scale on the dequant side, 行窓 a, タイル 128x64 / 1 スレッド 8x8 / wg 8x16 / K 16 + vec4)
+// karume attention_qk (S[b,m,n] = q[b,m,d] · k[b,n,d]ᵀ, integer dot product of per-token i8 q and k, half scale on the dequant side, row window a, tile 128x64 / 8x8 per thread / wg 8x16 / K 16 + vec4)
 struct Dims {
   m: u32,
   n: u32,
@@ -36,7 +36,7 @@ fn main(
   let n4 = dims.n / 4u;
   // The batch axis folding B and H (uniform per workgroup — a precondition for the inner
   // workgroupBarrier to meet WGSL's uniformity requirement). MUST: the q / k payloads count in
-  // **packs**, the scales in rows, S in elements（v4 では quad） — mixing up the units
+  // **packs**, the scales in rows, S in elements (quads in v4) — mixing up the units
   // reads and writes the next head when B·H ≥ 2 (a wrong value without an exception, invisible
   // to tests with B=H=1)
   let qbase = wid.z * dims.rows_full * k4 + dims.row_offset * k4;
@@ -44,7 +44,7 @@ fn main(
   let qsbase = wid.z * dims.rows_full + dims.row_offset;
   let ksbase = wid.z * dims.n;
   let sbase = wid.z * dims.m * n4;
-  // q タイルの担当 (128 rows × 4 packs over 128 threads in 4 rounds)
+  // q tile assignment (128 rows × 4 packs over 128 threads in 4 rounds)
   let ar = tid / 4u;
   let ap = tid % 4u;
   let sa_at = ap * 128u + ar;
@@ -57,7 +57,7 @@ fn main(
   let arow3 = arow0 + 96u;
   let arow_base3 = qbase + arow3 * k4;
   // B tile assignment (64 columns × 4 packs over 128 threads in 2 rounds).
-  // k は [N,D] のまま読む（連続方向が D = パック方向なので**転置が要らない**）
+  // k is read as [N,D] as is (the contiguous direction D is the pack direction, so **no transpose is needed**)
   let wc = tid / 4u;
   let wp = tid % 4u;
   let sb_at = wp * 64u + wc;

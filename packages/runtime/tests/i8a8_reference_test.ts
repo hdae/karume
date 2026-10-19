@@ -57,8 +57,8 @@ test("i8a8 参照: 全ゼロ行の scale は f32 tiny（床が無いと 0/0 = Na
 test("i8a8 参照: 入力長が rows × dim と合わない・次元が非負整数でない入力は計算に入る前に落ちる", () => {
   // 長さを見ないと、足りない要素は undefined → NaN として行の scale へ伝播し、契約外の
   // 「NaN 行」を期待値として返す（[1] を 1×2 で読むと scale=[NaN]）。
-  assertThrows(() => quantizeRowsReference([1], 1, 2), I8a8Error, "要素数");
-  assertThrows(() => quantizeRowsReference([1, 2, 3], 1, 2), I8a8Error, "要素数");
+  assertThrows(() => quantizeRowsReference([1], 1, 2), I8a8Error, "element count");
+  assertThrows(() => quantizeRowsReference([1, 2, 3], 1, 2), I8a8Error, "element count");
   assertThrows(() => quantizeRowsReference([], -1, 0), I8a8Error, "rows");
   assertThrows(() => quantizeRowsReference([1, 2], 1, 2.5), I8a8Error, "dim");
 });
@@ -237,7 +237,7 @@ test("w4a8 参照: 非整数・負の group 長は k を割り切っても計算
         groupSize: 2.5,
       }),
     I8a8Error,
-    "正の整数",
+    "positive integer",
   );
   // k=4 / g=-2 は groups = -2 で group ループが 0 回になり、bias をそのまま返す
   assertThrows(
@@ -250,7 +250,7 @@ test("w4a8 参照: 非整数・負の group 長は k を割り切っても計算
         groupSize: -2,
       }),
     I8a8Error,
-    "正の整数",
+    "positive integer",
   );
 });
 

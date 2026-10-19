@@ -1,4 +1,4 @@
-// karume linear (x[m,k] · wᵀ[k,n] + bias[n], integer dot product of per-token i8 activations × i8 weights, タイル 128x64 / 1 スレッド 8x8 / wg 8x16 / K 16 + vec4)
+// karume linear (x[m,k] · wᵀ[k,n] + bias[n], integer dot product of per-token i8 activations × i8 weights, tile 128x64 / 8x8 per thread / wg 8x16 / K 16 + vec4)
 struct Dims {
   m: u32,
   n: u32,

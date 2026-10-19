@@ -162,10 +162,10 @@ fn main(
 export const quantizeRowsParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("quantize_rows params", { rows, dim });
   if (dim < 1) {
-    throw new CodegenError(`quantize_rows params: dim は正整数（${dim}）`);
+    throw new CodegenError(`quantize_rows params: dim must be a positive integer (${dim})`);
   }
   if (dim % 4 !== 0) {
-    throw new CodegenError(`quantize_rows params: dim は 4 の倍数（${dim}）`);
+    throw new CodegenError(`quantize_rows params: dim must be a multiple of 4 (${dim})`);
   }
   const params = new Uint32Array(4);
   params[0] = rows;
@@ -198,7 +198,9 @@ export type QuantizeRowsGeometry = {
 
 export const quantizeRowsGeometry = (dim: number): QuantizeRowsGeometry => {
   if (!Number.isSafeInteger(dim) || dim < 1 || dim % 4 !== 0) {
-    throw new CodegenError(`quantize_rows geometry: dim は 4 の倍数の正整数（${dim}）`);
+    throw new CodegenError(
+      `quantize_rows geometry: dim must be a positive integer multiple of 4 (${dim})`,
+    );
   }
   const quads = dim / 4;
   let lanesPerRow = 1;

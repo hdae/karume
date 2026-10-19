@@ -118,7 +118,7 @@ export const openContainerSource = (
   const partAt = (index: number): FileRef => {
     if (!Number.isInteger(index) || index < 0 || index >= parts.length) {
       throw new Error(
-        `hub: part ${index} はこの容器に無い（宣言は ${parts.length} 本 — 添字が part の id）`,
+        `hub: part ${index} is not in this container (${parts.length} declared — the index is the part's id)`,
       );
     }
     return parts[index];
@@ -135,7 +135,7 @@ export const openContainerSource = (
     // on the caller's side. Fail the same way `fetchAssets` does for the same manifest (with path /
     // repo / revisionSha / available).
     if (error instanceof HubError) throw error;
-    throw context.fetchFailure(parts[0], "取得", error);
+    throw context.fetchFailure(parts[0], "fetch", error);
   }
   const verified = origin.origin.integrity === "network";
 
@@ -218,8 +218,8 @@ export const openContainerSource = (
       const ref = partAt(part);
       if (ref.size === 0) {
         throw new Error(
-          `hub: part ${part}（${ref.path}）は長さ 0 の part なので読めない` +
-            `（読み手は partLength が 0 を答えた時点で読みに行かない）`,
+          `hub: part ${part} (${ref.path}) cannot be read because it is a zero-length part` +
+            ` (a reader does not read once partLength returns 0)`,
         );
       }
       if (
@@ -230,8 +230,8 @@ export const openContainerSource = (
         offset + length > ref.size
       ) {
         throw new Error(
-          `hub: part ${part}（${ref.path}）の区間 [${offset}, ${offset + length}) が不正` +
-            `（宣言 size ${ref.size} — 非負整数で size に収まる区間だけを読める）`,
+          `hub: part ${part} (${ref.path}) range [${offset}, ${offset + length}) is invalid` +
+            ` (declared size ${ref.size} — only ranges of non-negative integers within size can be read)`,
         );
       }
       const plan = await planFor(part);

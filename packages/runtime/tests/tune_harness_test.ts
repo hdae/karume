@@ -147,7 +147,7 @@ test("束縛表の書き込み先の位置が WGSL と違えば落ちる（位�
         roles,
       ),
     Error,
-    "書き込み束縛",
+    "write bindings",
   );
 });
 
@@ -171,7 +171,7 @@ test("束縛表の本数が WGSL と違えば落ちる", () => {
     () =>
       assertBindingRoles({ key: "linear", bindings: ["x", "w", "out"], writes: ["out"] }, roles),
     Error,
-    "storage 束縛",
+    "storage bindings",
   );
 });
 

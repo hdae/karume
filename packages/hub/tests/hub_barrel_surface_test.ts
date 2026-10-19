@@ -49,7 +49,7 @@ test("barrel: 不透明ハンドルと LoadedManifest は手で組んだ値を�
   // 実行時も受けない — 取得元は loadManifest の返り値にしか結び付いていない。
   assertEquals(hub.isDistributionSource(source), false);
   const error = await assertRejects(() => hub.fetchAssets(loaded, {}), Error);
-  assertStringIncludes(error.message, "取得元が結び付いていない");
+  assertStringIncludes(error.message, "no source is bound to the LoadedManifest");
 });
 
 /**

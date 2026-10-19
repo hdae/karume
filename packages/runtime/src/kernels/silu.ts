@@ -34,7 +34,7 @@ export const SILU_WORKGROUP_SIZE = 256;
 
 const canonicalizeOrder = (order: SiluMulOrder): SiluMulOrder => {
   if (order === "x-sigmoid" || order === "sigmoid-x") return order;
-  throw new CodegenError(`silu codegen: mul の入力順が不正（${order}）`);
+  throw new CodegenError(`silu codegen: invalid input order of mul (${order})`);
 };
 
 export const siluKey = (order: SiluMulOrder): string => {

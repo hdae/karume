@@ -154,7 +154,7 @@ import { BUFFER_USAGE, MAP_MODE } from "./webgpu-constants.ts";
 /**
  * The name used in diagnostics and error messages (this one string tells "which canary failed").
  */
-const WHERE = "attention i8a8 カナリア";
+const WHERE = "attention i8a8 canary";
 
 /**
  * A hook to replace the generated WGSL (**for fault-injection tests only**). By default the
@@ -545,7 +545,7 @@ const compareToReference = (
   for (let i = 0; i < expected.length; i += 1) {
     if (actual[i] !== expected[i]) {
       exact = false;
-      mismatch ??= `${key}[${i}]: 実測 ${actual[i]} / 既知解 ${expected[i]}`;
+      mismatch ??= `${key}[${i}]: observed ${actual[i]} / known answer ${expected[i]}`;
     }
     const diff = Math.abs(actual[i] - expected[i]);
     const tolerance = Math.max(
@@ -554,7 +554,7 @@ const compareToReference = (
     );
     if (!(diff <= tolerance)) {
       withinBand = false;
-      bandMismatch ??= `${key}[${i}]: 実測 ${actual[i]} / 既知解 ${expected[i]}`;
+      bandMismatch ??= `${key}[${i}]: observed ${actual[i]} / known answer ${expected[i]}`;
     }
     maxAbsError = Math.max(maxAbsError, diff);
     maxBandRatio = Math.max(maxBandRatio, diff / tolerance);
@@ -643,7 +643,7 @@ export const probeAttentionI8a8Dot = async (
           compute: { module: device.createShaderModule({ code: patch(wgsl) }), entryPoint: "main" },
         }),
       ),
-      `${WHERE} '${key}' のパイプライン生成`,
+      `${WHERE} '${key}' pipeline creation`,
     );
 
   // Pipelines are created **outside** the synchronous section (creation involves awaits). **scalar
@@ -818,7 +818,7 @@ export const probeAttentionI8a8Dot = async (
     }
     const failure = await gpu[RUNTIME_INTERNAL].raceDeviceLost(
       popFailureScopes(device, WHERE),
-      `${WHERE}の検証`,
+      `${WHERE} validation`,
     );
     // MUST: raise validation / OOM as a loud failure, not as "differs from the known answer". An
     // invalid dispatch returns all 0, so collapsing it into a mismatch would misdiagnose "this
@@ -827,7 +827,7 @@ export const probeAttentionI8a8Dot = async (
 
     await gpu[RUNTIME_INTERNAL].raceDeviceLost(
       staging.mapAsync(MAP_MODE.READ),
-      `${WHERE}の読み戻し`,
+      `${WHERE} readback`,
     );
     const mapped = staging.getMappedRange().slice(0);
     staging.unmap();
@@ -873,13 +873,14 @@ export type CanaryBranch =
  * formatAttentionI8a8Decision}).
  */
 const BRANCH_NOTE: Record<CanaryBranch, string> = {
-  "dp4a-exact": "dot4I8Packed 版が既知解と厳密一致した",
-  "emu-exact": "dot4I8Packed 版だけが既知解を外し、エミュ版は厳密一致した",
-  "band-single-arm": "厳密一致した腕が無く、sanity 帯に収まったのは 1 腕だけだった",
+  "dp4a-exact": "The dot4I8Packed variant matched the known answer exactly",
+  "emu-exact":
+    "Only the dot4I8Packed variant missed the known answer, and the emulated variant matched exactly",
+  "band-single-arm": "No arm matched exactly, and only 1 arm fell inside the sanity band",
   "band-both-identical":
-    "両腕とも厳密一致は外したが sanity 帯に収まり、腕同士は全 6 変種でビット同一だった",
+    "Both arms missed an exact match but fell inside the sanity band, and the arms were bit-identical across all 6 variants",
   "band-both-differ":
-    "両腕とも厳密一致は外したが sanity 帯に収まり、腕同士は相違したので既知解に近い側を採った",
+    "Both arms missed an exact match but fell inside the sanity band, and the arms differed, so the one closer to the known answer was taken",
 };
 
 /** The canary's verdict ({@link decideAttentionI8a8Dot}). */
@@ -900,8 +901,8 @@ export type AttentionI8a8Decision = {
 
 /** The one-line rationale of the verdict (wording shared by the warning and the diagnostics). */
 export const formatAttentionI8a8Decision = (decision: AttentionI8a8Decision): string =>
-  `${BRANCH_NOTE[decision.branch]}ので '${decision.dot}' を選んだ` +
-  `（既知解との最大絶対誤差 ${decision.maxAbsError} / 帯余裕 ${decision.maxBandRatio}）`;
+  `${BRANCH_NOTE[decision.branch]}; chose '${decision.dot}'` +
+  ` (maximum absolute error against the known answer ${decision.maxAbsError} / band ratio ${decision.maxBandRatio})`;
 
 const decide = (probe: CanaryProbe, branch: CanaryBranch): AttentionI8a8Decision => ({
   dot: probe.dot,
@@ -970,12 +971,12 @@ export const decideAttentionI8a8Dot = (
       return decide(emu.maxAbsError < dp4a.maxAbsError ? emu : dp4a, "band-both-differ");
     }
     throw new GpuFeatureError(
-      `融合 attention の i8a8 カーネルが dot4I8Packed 版・エミュ版とも既知解の sanity 帯` +
-        `（相対 ${SANITY_RELATIVE_TOLERANCE} / 絶対床 ${SANITY_ABSOLUTE_FLOOR}）を外した` +
-        `（dp4a: ${dp4a.mismatch} 帯余裕 ${dp4a.maxBandRatio} / ` +
-        `emu: ${emu.mismatch} 帯余裕 ${emu.maxBandRatio}）。` +
-        "共有 f32 エピローグの丸め差（帯内）は既に許容した上で外しているので、" +
-        "整数内積の変種選択の問題ではなく、この device の整数 attention 自体が信用できない — " +
-        "attentionCompute を 'f32' か 'f16' にして実行すること",
+      `The i8a8 kernel of fused attention missed the sanity band of the known answer` +
+        ` (relative ${SANITY_RELATIVE_TOLERANCE} / absolute floor ${SANITY_ABSOLUTE_FLOOR}) in both the dot4I8Packed and the emulated variants` +
+        ` (dp4a: ${dp4a.mismatch} band ratio ${dp4a.maxBandRatio} / ` +
+        `emu: ${emu.mismatch} band ratio ${emu.maxBandRatio}). ` +
+        "It misses with the rounding differences of the shared f32 epilogue (inside the band) already allowed, so " +
+        "this is not a problem of choosing the integer dot product variant: the integer attention of this device itself cannot be trusted — " +
+        "run with attentionCompute set to 'f32' or 'f16'",
     );
   });

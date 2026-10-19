@@ -200,7 +200,7 @@ export const linearI8a8Key = (
   // i8 leaves the fragment above empty, so without the check f32 storage could not be told apart
   // from i8 by key, and another path sharing the slot would run on the same assets.
   if (weight !== "i8" && weight !== "i4") {
-    throw new CodegenError(`linear i8a8: 重み格納は i8 / i4 のみ（${weight}）`);
+    throw new CodegenError(`linear i8a8: weight storage must be i8 / i4 (${weight})`);
   }
   i4GroupShift("linear i8a8", weight, groupSize);
   // The generation that keeps w4a8's group scale in range on edge columns too. The i8 output stays
@@ -598,7 +598,7 @@ export const linearI8a8Wgsl = (
 ): string => {
   assertI8a8Geometry(geometry, "linear i8a8");
   if (weight !== "i8" && weight !== "i4") {
-    throw new CodegenError(`linear i8a8: 重み格納は i8 / i4 のみ（${weight}）`);
+    throw new CodegenError(`linear i8a8: weight storage must be i8 / i4 (${weight})`);
   }
   // MUST: i4 and the group length come as a pair (a missing or extra one is a wiring bug —
   // weight-storage.ts)
@@ -608,8 +608,8 @@ export const linearI8a8Wgsl = (
   }
   const kPacks = i8a8KPacks(geometry);
   return `// karume linear (x[m,k] · wᵀ[k,n] + bias[n], integer dot product of per-token i8 activations × ${
-    shift === undefined ? "i8" : `i4 群 ${groupSize}`
-  } weights${dp4a ? "" : "・エミュ"}, ${i8a8GeometryNote(geometry)}${v4 ? " + vec4" : ""})
+    shift === undefined ? "i8" : `i4 group ${groupSize}`
+  } weights${dp4a ? "" : " (emulated)"}, ${i8a8GeometryNote(geometry)}${v4 ? " + vec4" : ""})
 struct Dims {
   m: u32,
   n: u32,
@@ -683,12 +683,14 @@ export const linearI8a8Params = (
   groupSize?: number,
 ): Uint32Array<ArrayBuffer> => {
   if (!Number.isSafeInteger(k) || k < 0 || k % 4 !== 0) {
-    throw new CodegenError(`linear i8a8 params: k は 4 の倍数の非負整数（${k}）`);
+    throw new CodegenError(
+      `linear i8a8 params: k must be a non-negative integer multiple of 4 (${k})`,
+    );
   }
   if (groupSize === undefined) {
     if (k > LINEAR_I8A8_MAX_K) {
       throw new CodegenError(
-        `linear i8a8 params: k=${k} が i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える`,
+        `linear i8a8 params: k=${k} exceeds the i32 reduction guard ${LINEAR_I8A8_MAX_K}`,
       );
     }
     return gemmParams("linear", m, n, k);
@@ -697,11 +699,13 @@ export const linearI8a8Params = (
   // the WGSL bakes in (tiles/group is a constant) — letting it through silently makes the reduction
   // run past k into the next row.
   if (k % groupSize !== 0) {
-    throw new CodegenError(`linear w4a8 params: k=${k} が group_size ${groupSize} で割り切れない`);
+    throw new CodegenError(
+      `linear w4a8 params: k=${k} is not divisible by group_size ${groupSize}`,
+    );
   }
   if (groupSize > LINEAR_W4A8_MAX_GROUP) {
     throw new CodegenError(
-      `linear w4a8 params: group_size ${groupSize} が i32 縮約の門 ${LINEAR_W4A8_MAX_GROUP} を超える`,
+      `linear w4a8 params: group_size ${groupSize} exceeds the i32 reduction guard ${LINEAR_W4A8_MAX_GROUP}`,
     );
   }
   const params = gemmParams("linear", m, n, k);

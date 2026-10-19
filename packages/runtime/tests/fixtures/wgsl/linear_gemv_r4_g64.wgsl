@@ -1,4 +1,4 @@
-// karume linear gemv rows (M≥2: out[m,n] = x[m,k] · wᵀ[n,k] + bias[n], f32, 重み i4 格納, 32 cols / wg, 4 words prefetched, 4 rows / thread)
+// karume linear gemv rows (M≥2: out[m,n] = x[m,k] · wᵀ[n,k] + bias[n], f32, i4 weight storage, 32 cols / wg, 4 words prefetched, 4 rows / thread)
 struct Dims {
   m: u32,
   n: u32,

@@ -1,4 +1,4 @@
-// karume conv_transpose1d (x[B,Cin,L] * W[Cin,Cout,K] + b[Cout], f32, 重み i8 格納, gather form)
+// karume conv_transpose1d (x[B,Cin,L] * W[Cin,Cout,K] + b[Cout], f32, i8 weight storage, gather form)
 struct Dims {
   n: u32,
   batch: u32,

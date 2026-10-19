@@ -56,7 +56,7 @@ export const stateAppendKey = (sliding: boolean): string =>
  */
 export const stateAppendWgsl = (sliding: boolean): string =>
   `// karume state_append (this step's k / v into the state slot, f32${
-    sliding ? ", sliding window のリング書込み" : ""
+    sliding ? ", ring write of the sliding window" : ""
   })
 struct Params {
   kv_planes: u32,
@@ -143,13 +143,13 @@ export const stateAppendParams = (geometry: StateAppendGeometry): Uint32Array<Ar
   });
   if (kvPlanes < 1 || chunkRows < 1 || depth < 1 || capacity < 1) {
     throw new CodegenError(
-      `state_append params: kv_planes / chunk_rows / depth / capacity は正整数` +
-        `（${kvPlanes} / ${chunkRows} / ${depth} / ${capacity}）`,
+      `state_append params: kv_planes / chunk_rows / depth / capacity must be positive integers` +
+        ` (${kvPlanes} / ${chunkRows} / ${depth} / ${capacity})`,
     );
   }
   if (window > capacity) {
     throw new CodegenError(
-      `state_append params: window ${window} が容量 ${capacity} を超える（ADR 0067 決定 4 ③）`,
+      `state_append params: window ${window} exceeds capacity ${capacity} (ADR 0067 decision 4 ③)`,
     );
   }
   const params = new Uint32Array(8);
@@ -178,7 +178,7 @@ export const stateAppendWorkgroups = (
   assertU32Params(where, { kv_planes: kvPlanes, depth, query });
   if (kvPlanes < 1 || depth < 1 || query < 1) {
     throw new CodegenError(
-      `${where}: kv_planes / depth / query は正整数（${kvPlanes} / ${depth} / ${query}）`,
+      `${where}: kv_planes / depth / query must be positive integers (${kvPlanes} / ${depth} / ${query})`,
     );
   }
   const total = kvPlanes * query * depth;

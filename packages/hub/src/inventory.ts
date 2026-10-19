@@ -165,7 +165,9 @@ const allSelections = (manifest: Manifest): readonly Selection[] =>
 const namedSelection = (manifest: Manifest, selection: ResolveOptions): Selection => {
   const model = selection.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, model)) {
-    throw new Error(`hub: model '${model}' が resolveSelection 通過後に引けない（不変条件破れ）`);
+    throw new Error(
+      `hub: model '${model}' cannot be looked up after passing resolveSelection (invariant violated)`,
+    );
   }
   return { model, quant: selection.quant ?? manifest.models[model].defaultQuant };
 };
@@ -251,7 +253,7 @@ const queryInventory = async (
       // Both built-in sources have it, so reaching here means a broken source contract (not caused
       // by user input) — fail with a bare `Error`, not a `HubError`.
       throw new Error(
-        `hub: 取得元 ${originSource.origin.label} が在庫の照会を持たない（取得元契約の不変条件破れ）`,
+        `hub: source ${originSource.origin.label} has no inventory query (source contract invariant violated)`,
       );
     }
     for (const key of await inventory(bucket)) cached.add(key);
@@ -327,8 +329,8 @@ export const evictCachedAssets = async (
   const evictRefs = source.evict;
   if (evictRefs === undefined) {
     throw new HubError(
-      `evictCachedAssets: 取得元 ${source.origin.label} はキャッシュを持たない` +
-        `（手元のディレクトリは取得物ではなく利用者の資産 — 消さない）`,
+      `evictCachedAssets: source ${source.origin.label} has no cache` +
+        ` (a local directory holds the application's assets, not fetched copies — not deleted)`,
       { available: manifest.available },
     );
   }

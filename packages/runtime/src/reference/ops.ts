@@ -92,11 +92,13 @@ export const refTensor = (
   const bad = shape.findIndex((dim) => !Number.isSafeInteger(dim) || dim < 0);
   if (bad >= 0) {
     throw new ReferenceOpError(
-      `shape [${shape.join(",")}] の次元 ${bad}（${shape[bad]}）が非負の整数でない`,
+      `shape [${shape.join(",")}] dimension ${bad} (${shape[bad]}) is not a non-negative integer`,
     );
   }
   if (data.length !== numel(shape)) {
-    throw new ReferenceOpError(`要素数 ${data.length} が shape [${shape.join(",")}] と合わない`);
+    throw new ReferenceOpError(
+      `Element count ${data.length} does not match shape [${shape.join(",")}]`,
+    );
   }
   if (data instanceof Float32Array) return { dtype: "f32", shape, data };
   if (data instanceof Int32Array) return { dtype: "i32", shape, data };
@@ -258,7 +260,7 @@ const binaryEvaluator = (op: BinaryOpName, dtype: IrDtype): ((a: number, b: numb
     const arithmetic = BINARY_F32[op];
     if (arithmetic !== undefined) return (a, b) => Math.fround(arithmetic(a, b));
   }
-  throw new ReferenceOpError(`op '${op}' に dtype '${dtype}' の参照実装が無い`);
+  throw new ReferenceOpError(`op '${op}' has no reference implementation for dtype '${dtype}'`);
 };
 
 export const referenceUnary = (
@@ -335,7 +337,7 @@ export const referenceBinary = (op: BinaryOpName, a: RefTensor, b: RefTensor): R
   assertDtype(contract, a.dtype, "reference");
   assertDtype(contract, b.dtype, "reference");
   if (a.dtype !== b.dtype) {
-    throw new ReferenceOpError(`op '${op}' の入力 dtype が混在（${a.dtype} / ${b.dtype}）`);
+    throw new ReferenceOpError(`op '${op}' has mixed input dtypes (${a.dtype} / ${b.dtype})`);
   }
   const shape = computeOutputShape(contract, [a.shape, b.shape], "reference")[0];
   const evaluate = binaryEvaluator(op, a.dtype);
@@ -502,7 +504,7 @@ export const referenceGather = (src: RefTensor, index: RefTensor): RefTensor => 
       const pick = index.data[flat];
       if (pick < 0 || pick >= srcCols) {
         throw new ReferenceOpError(
-          `gather の添字 index[${flat}] = ${pick} が src の最終次元 ${srcCols} の範囲外`,
+          `gather index index[${flat}] = ${pick} is out of range of the src last dimension ${srcCols}`,
         );
       }
       out[flat] = src.data[row * srcCols + pick];
@@ -681,7 +683,7 @@ export const referenceReshape = (x: RefTensor, shape: readonly number[]): RefTen
   const target = [...shape];
   if (numel(target) !== x.data.length) {
     throw new ReferenceOpError(
-      `reshape の要素数が合わない ${x.data.length} → [${target.join(",")}]`,
+      `reshape element count does not match ${x.data.length} → [${target.join(",")}]`,
     );
   }
   return materialize(x.dtype, target, Array.from(x.data));
@@ -701,13 +703,13 @@ export const referencePermute = (x: RefTensor, dims: readonly number[]): RefTens
   const rank = x.shape.length;
   if (dims.length !== rank || new Set(dims).size !== rank) {
     throw new ReferenceOpError(
-      `permute の dims [${dims.join(",")}] が shape [${x.shape.join(",")}] の並べ替えでない`,
+      `permute dims [${dims.join(",")}] are not a permutation of shape [${x.shape.join(",")}]`,
     );
   }
   const outShape = dims.map((dim) => {
     const extent = x.shape[dim];
     if (extent === undefined) {
-      throw new ReferenceOpError(`permute の dims に軸 ${dim} が入っている（rank ${rank}）`);
+      throw new ReferenceOpError(`permute dims contain out-of-range axis ${dim} (rank ${rank})`);
     }
     return extent;
   });
@@ -736,14 +738,14 @@ export const referenceExpand = (x: RefTensor, shape: readonly number[]): RefTens
   const target = [...shape];
   if (target.length < x.shape.length) {
     throw new ReferenceOpError(
-      `expand は rank を下げられない [${x.shape.join(",")}] → [${target.join(",")}]`,
+      `expand cannot lower the rank [${x.shape.join(",")}] → [${target.join(",")}]`,
     );
   }
   const offset = target.length - x.shape.length;
   x.shape.forEach((extent, index) => {
     if (extent !== 1 && extent !== target[offset + index]) {
       throw new ReferenceOpError(
-        `expand は長さ 1 でない次元 ${index}（${extent}）を ${target[offset + index]} にできない`,
+        `expand cannot turn dimension ${index} (${extent}), whose length is not 1, into ${target[offset + index]}`,
       );
     }
   });
@@ -838,7 +840,7 @@ export const referenceCat = (
   }
   const hole = values.findIndex((value) => value === undefined);
   if (hole >= 0) {
-    throw new ReferenceOpError(`cat の出力 [${shape.join(",")}] の要素 ${hole} が書かれていない`);
+    throw new ReferenceOpError(`cat output [${shape.join(",")}] element ${hole} is not written`);
   }
   return materialize(inputs[0].dtype, shape, values as number[]);
 };
@@ -918,15 +920,15 @@ export const referenceSymPrefixSlice = (x: RefTensor, shape: readonly number[]):
   const rank = x.shape.length;
   if (target.length !== rank) {
     throw new ReferenceOpError(
-      `sym_prefix_slice は rank を変えない [${x.shape.join(",")}] → [${target.join(",")}]`,
+      `sym_prefix_slice does not change the rank [${x.shape.join(",")}] → [${target.join(",")}]`,
     );
   }
   target.forEach((extent, index) => {
     if (extent < 0 || extent > x.shape[index]) {
       throw new ReferenceOpError(
-        `sym_prefix_slice の prefix [${target.join(",")}] が定数 [${x.shape.join(
+        `sym_prefix_slice prefix [${target.join(",")}] does not fit in the constant [${x.shape.join(
           ",",
-        )}] に収まらない`,
+        )}]`,
       );
     }
   });
@@ -1229,7 +1231,7 @@ export const referenceEmbedding = (weight: RefTensor, index: RefTensor): RefTens
     const pick = index.data[row];
     if (pick < 0 || pick >= vocab) {
       throw new ReferenceOpError(
-        `embedding の添字 index[${row}] = ${pick} が語彙数 ${vocab} の範囲外`,
+        `embedding index index[${row}] = ${pick} is out of range of the vocabulary size ${vocab}`,
       );
     }
     for (let col = 0; col < hidden; col += 1) {
@@ -1803,7 +1805,7 @@ export const applyReferenceOpOutputs = (
   const contract: OpContract = resolveOpContract(op);
   if (!arityFits(contract, inputs.length)) {
     throw new ReferenceOpError(
-      `op '${op}' の入力数が ${inputs.length}（契約は ${describeArity(contract)}）`,
+      `op '${op}' has ${inputs.length} inputs (the contract is ${describeArity(contract)})`,
     );
   }
   // MUST: the attrs key set is checked with the same single check as the node contract check
@@ -1821,12 +1823,12 @@ export const applyReferenceOpOutputs = (
   assertInputDtypes(
     contract,
     inputs.map((input) => input.dtype),
-    (index) => `reference の入力 ${index}`,
+    (index) => `reference input ${index}`,
     "reference",
   );
   const declared = (): readonly number[] => {
     if (outShape === undefined) {
-      throw new ReferenceOpError(`op '${op}' は出力 shape が目標形（outShape が要る）`);
+      throw new ReferenceOpError(`op '${op}' has a target-shaped output (outShape is required)`);
     }
     return outShape;
   };
@@ -1910,7 +1912,7 @@ export const applyReferenceOpOutputs = (
     // test that counts it as "the reference and the GPU agreed".
     case "stateAppend":
       throw new ReferenceOpError(
-        `op '${op}' は CPU 参照を持たない（state への effect は GenerationContext の担当）`,
+        `op '${op}' has no CPU reference (the effect on state is GenerationContext's responsibility)`,
       );
     case "embedding":
       return sole(referenceEmbedding(inputs[0], inputs[1]));
@@ -1951,7 +1953,7 @@ export const applyReferenceOp = (
   const outputs = applyReferenceOpOutputs(op, inputs, attrs, outShape);
   if (outputs.length !== 1) {
     throw new ReferenceOpError(
-      `op '${op}' は出力 ${outputs.length} 本（多出力は applyReferenceOpOutputs で受ける）`,
+      `op '${op}' has ${outputs.length} outputs (receive multiple outputs with applyReferenceOpOutputs)`,
     );
   }
   return outputs[0];

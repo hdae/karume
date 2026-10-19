@@ -161,7 +161,7 @@ test("resolveSelection: 実在しない weights 名は利用可能一覧つき�
   const error = assertThrows(
     () => resolveSelection(manifest, { weights: ["transformer", "drafter"] }),
     ManifestReferenceError,
-    "weights 'drafter' は manifest に無い",
+    "weights 'drafter' is not in the manifest",
   );
   assertEquals(error.available.models, ["anima-turbo", "anima-lite"]);
 });
@@ -170,7 +170,7 @@ test("resolveSelection: weights の重複は拒否する", () => {
   assertThrows(
     () => resolveSelection(manifest, { weights: ["transformer", "transformer"] }),
     ManifestReferenceError,
-    "weights 'transformer' が 2 度指定された",
+    "weights 'transformer' was given twice",
   );
 });
 
@@ -179,7 +179,7 @@ test("resolveSelection: weights の実在はモデルごとに見る", () => {
   assertThrows(
     () => resolveSelection(manifest, { model: "anima-lite", weights: ["text_conditioner"] }),
     ManifestReferenceError,
-    "利用可能: text_encoder / transformer",
+    "available: text_encoder / transformer",
   );
 });
 

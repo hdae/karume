@@ -1,4 +1,4 @@
-// karume bmm (a[b,m,k] · b[b,k,n], f32, 行窓 c, レジスタ 128x128 タイル / 1 スレッド 8x8 / wg 16x16)
+// karume bmm (a[b,m,k] · b[b,k,n], f32, row window c, register tile 128x128 / 8x8 per thread / wg 16x16)
 struct Dims {
   m: u32,
   n: u32,
@@ -24,7 +24,7 @@ fn main(
   let tid = lid.y * 16u + lid.x;
   // The batch is uniform per workgroup (one z index = the tiles of one batch) — the premise for the
   // inner workgroupBarrier to meet WGSL's uniformity requirement
-  // Row window (C = 出力を全 M の row_offset 行目へ書く).
+  // Row window (C = write the output starting at row row_offset of the full M).
   // The other side is counted from 0 as a block of m rows
   let abase = wid.z * dims.m * dims.k;
   let bbase = wid.z * dims.k * dims.n;

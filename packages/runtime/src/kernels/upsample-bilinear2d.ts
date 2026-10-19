@@ -152,13 +152,13 @@ export const upsampleBilinear2dParams = (
   assertU32Params("upsample_bilinear2d params", { n, heightIn, widthIn, heightOut, widthOut });
   for (const [name, value] of Object.entries({ heightIn, widthIn, heightOut, widthOut })) {
     if (value === 0) {
-      throw new CodegenError(`upsample_bilinear2d params: ${name} は 1 以上`);
+      throw new CodegenError(`upsample_bilinear2d params: ${name} must be at least 1`);
     }
   }
   const plane = heightOut * widthOut;
   if (n % plane !== 0) {
     throw new CodegenError(
-      `upsample_bilinear2d params: n ${n} が出力平面 ${heightOut}×${widthOut} の整数倍でない`,
+      `upsample_bilinear2d params: n ${n} is not an integer multiple of the output plane ${heightOut}×${widthOut}`,
     );
   }
   const params = new Uint32Array([n, heightIn, widthIn, heightOut, widthOut, 0, 0, 0]);

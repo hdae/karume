@@ -80,13 +80,13 @@ const selectWeightNames = (
   for (const name of weights) {
     if (!Object.hasOwn(entry.weights, name)) {
       throw new ManifestReferenceError(
-        `weights '${name}' は manifest に無い（利用可能: ${declared.join(" / ")}）`,
+        `weights '${name}' is not in the manifest (available: ${declared.join(" / ")})`,
         { available: entry.available },
       );
     }
     if (chosen.has(name)) {
       throw new ManifestReferenceError(
-        `weights '${name}' が 2 度指定された（取得する weights の部分集合は重複なしで並べる）`,
+        `weights '${name}' was given twice (list the subset of weights to fetch without duplicates)`,
         { available: entry.available },
       );
     }
@@ -111,7 +111,7 @@ const selectModel = (
   const name = model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, name)) {
     throw new ManifestReferenceError(
-      `model '${name}' は manifest に無い（利用可能: ${manifest.available.models.join(" / ")}）`,
+      `model '${name}' is not in the manifest (available: ${manifest.available.models.join(" / ")})`,
       { available: manifest.available },
     );
   }
@@ -136,7 +136,7 @@ export const resolveSelection = (
   const quant = options.quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quant)) {
     throw new ManifestReferenceError(
-      `quant '${quant}' は manifest に無い（利用可能: ${entry.available.quants.join(" / ")}）`,
+      `quant '${quant}' is not in the manifest (available: ${entry.available.quants.join(" / ")})`,
       { available: entry.available },
     );
   }

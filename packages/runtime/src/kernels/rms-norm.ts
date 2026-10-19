@@ -137,7 +137,7 @@ export const rmsNormAddKey = (order: RmsNormAddOrder): string => {
 
 const assertRmsNormAddOrder = (order: RmsNormAddOrder): void => {
   if (order !== "norm-residual" && order !== "residual-norm") {
-    throw new CodegenError(`rms_norm_add: 未対応の加算順 '${String(order)}'`);
+    throw new CodegenError(`rms_norm_add: unsupported addition order '${String(order)}'`);
   }
 };
 
@@ -157,14 +157,14 @@ const assertRmsNormAddOrder = (order: RmsNormAddOrder): void => {
 export const rmsNormParams = (rows: number, dim: number, eps: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("rms_norm params", { rows, dim });
   if (dim < 1) {
-    throw new CodegenError(`rms_norm params: dim は正整数（${dim}）`);
+    throw new CodegenError(`rms_norm params: dim must be a positive integer (${dim})`);
   }
   // The test is shared with the op contract (assertEps in ops/attrs.ts) — so that neither side
   // alone lets a subnormal through.
   const defect = f32EpsDefect(eps);
   if (defect !== undefined) {
     throw new CodegenError(
-      `rms_norm params: eps は f32 として有限の正数で、正規数（2^-126 以上）に丸まる値（${eps}・${defect}）`,
+      `rms_norm params: eps must be a finite positive f32 value that rounds to a normal number (at least 2^-126) (${eps}, ${defect})`,
     );
   }
   const params = new Uint32Array(4);

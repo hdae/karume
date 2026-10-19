@@ -202,7 +202,7 @@ test("parseManifest: 直前版（karume/4）も読まず、現行が karume/5 �
     `${error.message} が「読めるのは karume/5」を名指ししていない`,
   );
   assert(
-    error.message.includes("旧版"),
+    error.message.includes("older versions"),
     `${error.message} が「旧版のパーサを持たない」を伝えていない`,
   );
   assert(!error.message.includes("'shards'"), `${error.message} が枝葉の未知キーを主因にしている`);
@@ -336,7 +336,7 @@ describe("parseManifest: 1MiB 未満でも深すぎる入れ子は型付きエ�
     const text = withDeepConfig(3000);
     assert(new TextEncoder().encode(text).length < 1024 * 1024, "1MiB 未満で組めていない");
     const error = assertThrows(() => parseManifest(text), ManifestFormatError);
-    assert(error.message.includes("入れ子"), `${error.message} が深さ超過を名指ししていない`);
+    assert(error.message.includes("nesting"), `${error.message} が深さ超過を名指ししていない`);
   });
 
   it("実用の入れ子（pipelineConfig 数段）は通る", () => {
@@ -391,7 +391,7 @@ describe("parseManifest: 規模上限を超える weights の診断は線形で�
       LABEL_LIMIT,
       `${Object.keys(error.available.dtypes).length} 件が載った（打ち切り値 ${LABEL_LIMIT}）`,
     );
-    assert(error.message.includes("打ち切"), `${error.message} が打ち切りを名乗っていない`);
+    assert(error.message.includes("cut off"), `${error.message} が打ち切りを名乗っていない`);
   });
 
   it("件数検査より前のエラーでも打ち切りを名乗る", () => {
@@ -407,7 +407,7 @@ describe("parseManifest: 規模上限を超える weights の診断は線形で�
       LABEL_LIMIT,
       `${Object.keys(error.available.dtypes).length} 件が載った（打ち切り値 ${LABEL_LIMIT}）`,
     );
-    assert(error.message.includes("打ち切"), `${error.message} が打ち切りを名乗っていない`);
+    assert(error.message.includes("cut off"), `${error.message} が打ち切りを名乗っていない`);
   });
 
   it("上限ちょうど（weights 32 件）は全件が載り、打ち切りを名乗らない", () => {
@@ -419,7 +419,7 @@ describe("parseManifest: 規模上限を超える weights の診断は線形で�
       ManifestReferenceError,
     );
     assertEquals(Object.keys(error.available.dtypes).length, LABEL_LIMIT);
-    assert(!error.message.includes("打ち切"), `${error.message} が打ち切りを誤って名乗った`);
+    assert(!error.message.includes("cut off"), `${error.message} が打ち切りを誤って名乗った`);
   });
 });
 
@@ -558,7 +558,7 @@ describe("parseManifest: weights の container 欄（ADR 0109 決定 3）", () =
     assertThrows(
       () => parseManifest(withModel({ weights: withContainer({ parts: [PART0] }) })),
       ManifestFormatError,
-      "2 件以上",
+      "at least 2",
     );
   });
 
@@ -633,7 +633,7 @@ describe("parseManifest: weights の container 欄（ADR 0109 決定 3）", () =
           }),
         ),
       ManifestFormatError,
-      "descriptor.model: 無い",
+      "descriptor.model: missing",
     );
   });
 });
@@ -880,14 +880,20 @@ describe("parseManifest: quant の表示欄 label / description（ADR 0075）", 
       () => parseManifest(withQuant({ label: "x".repeat(70) })),
       ManifestFormatError,
     );
-    assert(error.message.includes("期待 64 文字以内"), `${error.message} が期待値を出していない`);
-    assert(error.message.includes("実際 70 文字"), `${error.message} が実際の長さを出していない`);
+    assert(
+      error.message.includes("expected at most 64 characters"),
+      `${error.message} が期待値を出していない`,
+    );
+    assert(
+      error.message.includes("actual 70 characters"),
+      `${error.message} が実際の長さを出していない`,
+    );
   });
 
   it("非文字列は期待と実際を添えて落ちる", () => {
     const error = assertThrows(() => parseManifest(withQuant({ label: 12 })), ManifestFormatError);
-    assert(error.message.includes("期待 文字列"), `${error.message} が期待の型を出していない`);
-    assert(error.message.includes("実際 number"), `${error.message} が実際の型を出していない`);
+    assert(error.message.includes("expected string"), `${error.message} が期待の型を出していない`);
+    assert(error.message.includes("actual number"), `${error.message} が実際の型を出していない`);
   });
 
   it("内容の意味は解釈しない（上限内なら実態と食い違う説明も通る）", () => {
@@ -962,7 +968,10 @@ describe("parseManifest: quant の requiredLimits（ADR 0038 §7 の据え置き
         undefined,
         `requiredLimits.maxBufferSize = ${JSON.stringify(value)} が通ってしまった`,
       );
-      assert(error.message.includes("期待 正の安全整数"), `${error.message} が期待を出していない`);
+      assert(
+        error.message.includes("expected positive safe integer"),
+        `${error.message} が期待を出していない`,
+      );
     }
   });
 });
@@ -1017,7 +1026,7 @@ describe("parseManifest: ファイル参照の越境席 repo / revision（ADR 00
         `${JSON.stringify(parts)} が通ってしまった`,
       );
       assert(
-        error.message.includes("容器単位 — ADR 0109 決定 3"),
+        error.message.includes("per container — ADR 0109 decision 3"),
         `${error.message} が容器単位の規則を名乗っていない`,
       );
     }
@@ -1042,7 +1051,7 @@ describe("parseManifest: ファイル参照の越境席 repo / revision（ADR 00
         `${JSON.stringify(half)} だけの宣言が通ってしまった`,
       );
       assert(
-        error.message.includes("両方同時"),
+        error.message.includes("both 'repo' and 'revision' together"),
         `${error.message} が「両方同時」の要求を出していない`,
       );
     }
