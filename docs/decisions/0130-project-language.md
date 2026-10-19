@@ -257,8 +257,9 @@ All resolved by the maintainer's rulings of 2026-10-18 (step 2-9 plan check):
   of the public entry points are English; the code skeleton of every file is unchanged
   (`tools/lang/code-skeleton.ts`, which now carries a WGSL comment across `${…}`), the 249 WGSL
   fixtures were regenerated with `KARUME_WGSL_SNAPSHOT=write` (comment lines only), and the kernel
-  fingerprint of the two embedded geometry profiles was re-derived because it hashes the generated
-  WGSL with its comments (ADR 0117 decision 4). What stays Japanese there is string literals —
+  fingerprint of the two embedded geometry profiles was re-derived because it hashed the generated
+  WGSL with its comments (ADR 0117 decision 4; since the addendum of 2026-10-19 it hashes the WGSL
+  without comments, so comment edits no longer move it). What stays Japanese there is string literals —
   error messages, diagnostics, WGSL header fragments such as `gemmGeometryNote`, test-name labels
   — about 3,150 lines, the subject of 2-9e; a few comments keep a Japanese example in a code span.
   Three test assertions that matched Japanese comment text (`codegen_wgsl_test.ts`,
