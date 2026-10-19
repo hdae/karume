@@ -44,20 +44,20 @@ test("umt5SessionInputs: 表の長さが id 列と違えば落とす（L は 2 �
     assertThrows(
       () => umt5SessionInputs(ids, buildUmt5RelativePositionBuckets(length)),
       Error,
-      "でない",
+      "is not",
       `表の長さ ${length}`,
     );
   }
   const flat: I32Tensor = { dtype: "i32", shape: [9], data: new Int32Array(9) };
-  assertThrows(() => umt5SessionInputs(ids, flat), Error, "でない");
+  assertThrows(() => umt5SessionInputs(ids, flat), Error, "is not");
   const short: I32Tensor = { dtype: "i32", shape: [3, 3], data: new Int32Array(8) };
-  assertThrows(() => umt5SessionInputs(ids, short), Error, "要素数");
+  assertThrows(() => umt5SessionInputs(ids, short), Error, "element count");
 });
 
 test("umt5SessionInputs: id 列の長さが 2〜512 の外なら落とす", () => {
   const buckets = buildUmt5RelativePositionBuckets(2);
-  assertThrows(() => umt5SessionInputs(idsOf(1), buckets), Error, "の外");
-  assertThrows(() => umt5SessionInputs(new Int32Array(513), buckets), Error, "の外");
+  assertThrows(() => umt5SessionInputs(idsOf(1), buckets), Error, "outside");
+  assertThrows(() => umt5SessionInputs(new Int32Array(513), buckets), Error, "outside");
 });
 
 /** `[1, tokens, width]` の出力（値 = 1 始まりの通し番号 — 位置の取り違えが値で見える）。 */
@@ -78,13 +78,13 @@ test("umt5HiddenStates: [1, tokens, width] の中身を写さずに [tokens, wid
 test("umt5HiddenStates: 形・dtype・要素数の食い違いを落とす（詰めはしないので行数の上限は無い）", () => {
   const output = outputOf(3, 4);
   // 入力に渡した長さと出力の行数が違う（別の run の出力の取り違えなど）。
-  assertThrows(() => umt5HiddenStates(output, 2, 4), Error, "でない");
+  assertThrows(() => umt5HiddenStates(output, 2, 4), Error, "is not");
   // グラフ宣言の幅と違う。
-  assertThrows(() => umt5HiddenStates(output, 3, 8), Error, "でない");
+  assertThrows(() => umt5HiddenStates(output, 3, 8), Error, "is not");
   const integer: Tensor = { dtype: "i32", shape: [1, 3, 4], data: new Int32Array(12) };
   assertThrows(() => umt5HiddenStates(integer, 3, 4), Error, "f32");
   const short: Tensor = { dtype: "f32", shape: [1, 3, 4], data: new Float32Array(11) };
-  assertThrows(() => umt5HiddenStates(short, 3, 4), Error, "要素数");
+  assertThrows(() => umt5HiddenStates(short, 3, 4), Error, "element count");
 });
 
 test("padUmt5Context: 有効長の行はそのまま・後ろの行はゼロ", () => {
@@ -114,15 +114,15 @@ test("padUmt5Context: 有効長が文脈の行数と同じなら詰めずに全�
 test("padUmt5Context: 形・dtype・行数の食い違いを落とす", () => {
   const output = outputOf(3, 4);
   // 入力に渡した長さと出力の行数が違う（positive / negative の取り違えなど）。
-  assertThrows(() => padUmt5Context(output, 2, 6, 4), Error, "でない");
+  assertThrows(() => padUmt5Context(output, 2, 6, 4), Error, "is not");
   // DiT の文脈の幅と違う。
-  assertThrows(() => padUmt5Context(output, 3, 6, 8), Error, "でない");
+  assertThrows(() => padUmt5Context(output, 3, 6, 8), Error, "is not");
   // 文脈の行数を超える。
-  assertThrows(() => padUmt5Context(output, 3, 2, 4), Error, "超える");
+  assertThrows(() => padUmt5Context(output, 3, 2, 4), Error, "exceeds");
   const integer: Tensor = { dtype: "i32", shape: [1, 3, 4], data: new Int32Array(12) };
   assertThrows(() => padUmt5Context(integer, 3, 6, 4), Error, "f32");
   const rank2: Tensor = { dtype: "f32", shape: [3, 4], data: new Float32Array(12) };
-  assertThrows(() => padUmt5Context(rank2, 3, 6, 4), Error, "でない");
+  assertThrows(() => padUmt5Context(rank2, 3, 6, 4), Error, "is not");
   const short: Tensor = { dtype: "f32", shape: [1, 3, 4], data: new Float32Array(11) };
-  assertThrows(() => padUmt5Context(short, 3, 6, 4), Error, "要素数");
+  assertThrows(() => padUmt5Context(short, 3, 6, 4), Error, "element count");
 });

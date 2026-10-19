@@ -31,16 +31,20 @@ test("denormalizeLatents: B>1 と channel 数の食い違いを落とす", () =>
   const latents = new Float32Array(2 * 2 * 1 * 1);
   const mean = Float32Array.from([0, 0]);
   const std = Float32Array.from([1, 1]);
-  assertThrows(() => denormalizeLatents(latents, [2, 2, 1, 1], mean, std), Error, "batch=1 前提");
+  assertThrows(
+    () => denormalizeLatents(latents, [2, 2, 1, 1], mean, std),
+    Error,
+    "assumes batch=1",
+  );
   assertThrows(
     () => denormalizeLatents(new Float32Array(3), [1, 3, 1, 1], mean, std),
     Error,
-    "チャネル数",
+    "channel count",
   );
   assertThrows(
     () => denormalizeLatents(new Float32Array(5), [1, 2, 1, 1], mean, std),
     Error,
-    "要素数",
+    "element count",
   );
 });
 
@@ -106,17 +110,17 @@ test("padSequence: 余白はゼロ・B>1 と行数超過は落とす", () => {
   const hidden = { dtype: "f32", shape: [1, 2, 3], data: Float32Array.from([1, 2, 3, 4, 5, 6]) };
   const padded = padSequence(hidden as never, 4);
   assertEquals([...padded], [1, 2, 3, 4, 5, 6, 0, 0, 0, 0, 0, 0]);
-  assertThrows(() => padSequence(hidden as never, 1), Error, "上限");
+  assertThrows(() => padSequence(hidden as never, 1), Error, "upper bound");
   assertThrows(
     () => padSequence({ dtype: "f32", shape: [2, 1, 3], data: new Float32Array(6) } as never, 4),
     Error,
-    "batch=1 前提",
+    "assumes batch=1",
   );
   // i32 / bool は `set` が黙って数値変換する（shape も長さも合ったまま値だけ別物）。
   assertThrows(
     () => padSequence({ dtype: "i32", shape: [1, 2, 3], data: new Int32Array(6) } as never, 4),
     Error,
-    "f32 前提",
+    "assumes f32",
   );
 });
 
@@ -135,14 +139,22 @@ test("imageToRgba: [-1,1] → [0,255]・planar から interleave・アルファ 
 });
 
 test("imageToRgba: 要素数とサイズの食い違いを落とす", () => {
-  assertThrows(() => imageToRgba(new Float32Array(5), 2, 1), Error, "要素数");
+  assertThrows(() => imageToRgba(new Float32Array(5), 2, 1), Error, "element count");
   assertThrows(() => imageToRgba(new Float32Array(6), 0, 1), RangeError);
 });
 
 test("imageToRgba: 寸法が正の整数でなければ、要素数が合っていても RangeError（wanFrameToRgba と同じ入口契約）", () => {
   // どれも `image.length === 3·width·height` は満たす（長さの照合だけでは通る形）。
-  assertThrows(() => imageToRgba(new Float32Array(3), 0.5, 2), RangeError, "正の整数でない");
-  assertThrows(() => imageToRgba(new Float32Array(3), -1, -1), RangeError, "正の整数でない");
+  assertThrows(
+    () => imageToRgba(new Float32Array(3), 0.5, 2),
+    RangeError,
+    "not a positive integer",
+  );
+  assertThrows(
+    () => imageToRgba(new Float32Array(3), -1, -1),
+    RangeError,
+    "not a positive integer",
+  );
 });
 
 test("imageToRgba: 非有限値は座標付きで落とす（黒画素へ沈黙変換しない）", () => {

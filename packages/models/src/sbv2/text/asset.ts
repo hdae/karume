@@ -27,7 +27,7 @@ import { type CleanRanges, DebertaTokenizer } from "./tokenizer.ts";
  * asset).
  */
 const parseRanges = (raw: unknown, where: string): (readonly [number, number])[] => {
-  if (!Array.isArray(raw)) throw new Error(`${where}: 区間表が配列でない`);
+  if (!Array.isArray(raw)) throw new Error(`${where}: the range table is not an array`);
   let previousEnd = -1;
   return raw.map((entry, index) => {
     if (
@@ -36,21 +36,21 @@ const parseRanges = (raw: unknown, where: string): (readonly [number, number])[]
       typeof entry[0] !== "number" ||
       typeof entry[1] !== "number"
     ) {
-      throw new Error(`${where}[${index}]: 区間が [start, end] の数値対でない`);
+      throw new Error(`${where}[${index}]: the range is not a [start, end] pair of numbers`);
     }
     const [start, end]: [number, number] = [entry[0], entry[1]];
     if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end > MAX_CODE_POINT) {
       throw new Error(
-        `${where}[${index}]: 区間 [${start}, ${end}] が 0..${MAX_CODE_POINT} の整数対でない`,
+        `${where}[${index}]: range [${start}, ${end}] is not a pair of integers in 0..${MAX_CODE_POINT}`,
       );
     }
     if (start > end) {
-      throw new Error(`${where}[${index}]: 区間 [${start}, ${end}] の start が end より大きい`);
+      throw new Error(`${where}[${index}]: range [${start}, ${end}] has start greater than end`);
     }
     if (start <= previousEnd) {
       throw new Error(
-        `${where}[${index}]: 区間 [${start}, ${end}] が直前の終端 ${previousEnd} 以下から始まる` +
-          "（昇順・非重複でない — 二分探索が黙って外す）",
+        `${where}[${index}]: range [${start}, ${end}] starts at or below the previous end ${previousEnd}` +
+          " (not ascending and non-overlapping — the binary search would silently miss)",
       );
     }
     previousEnd = end;
@@ -69,12 +69,12 @@ const MAX_TOKEN_ID = 2147483647;
  * meaningless (the doc of `text/tokenizer.ts`).
  */
 export const parseTokenizerAsset = (raw: unknown, where: string): DebertaTokenizer => {
-  if (!isRecord(raw)) throw new Error(`${where}: オブジェクトでない`);
+  if (!isRecord(raw)) throw new Error(`${where}: not an object`);
   const special = raw["special"];
-  if (!isRecord(special)) throw new Error(`${where}.special: オブジェクトでない`);
+  if (!isRecord(special)) throw new Error(`${where}.special: not an object`);
   const [clsId, sepId, unkId] = [special["clsId"], special["sepId"], special["unkId"]];
   if (typeof clsId !== "number" || typeof sepId !== "number" || typeof unkId !== "number") {
-    throw new Error(`${where}.special: clsId / sepId / unkId が数値でない`);
+    throw new Error(`${where}.special: clsId / sepId / unkId are not numbers`);
   }
   // MUST: an integer within the i32 range. ids are written to an `Int32Array`, so a non-integer is
   // **silently truncated** and an out-of-range value wraps — both are silent wrong values that
@@ -86,15 +86,15 @@ export const parseTokenizerAsset = (raw: unknown, where: string): DebertaTokeniz
     ["unkId", unkId],
   ] as const) {
     if (!Number.isInteger(id) || id < 0 || id > MAX_TOKEN_ID) {
-      throw new Error(`${where}.special.${name}: 0..${MAX_TOKEN_ID} の整数でない（${id}）`);
+      throw new Error(`${where}.special.${name}: not an integer in 0..${MAX_TOKEN_ID} (${id})`);
     }
   }
   const vocabText = raw["vocabText"];
   if (typeof vocabText !== "string" || vocabText.length === 0) {
-    throw new Error(`${where}.vocabText: 空`);
+    throw new Error(`${where}.vocabText: empty`);
   }
   const clean = raw["cleanRanges"];
-  if (!isRecord(clean)) throw new Error(`${where}.cleanRanges: オブジェクトでない`);
+  if (!isRecord(clean)) throw new Error(`${where}.cleanRanges: not an object`);
   const ranges: CleanRanges = {
     removed: parseRanges(clean["removed"], `${where}.cleanRanges.removed`),
     spaced: parseRanges(clean["spaced"], `${where}.cleanRanges.spaced`),

@@ -86,7 +86,7 @@ export class DebertaTokenizer {
     for (const [id, line] of lines.entries()) vocab.set(line, id);
     const size = lines.length;
     for (const [name, id] of Object.entries(special)) {
-      if (id >= size) throw new Error(`${name} ${id} が語彙の行数 ${size} 以上`);
+      if (id >= size) throw new Error(`${name} ${id} is >= the vocabulary row count ${size}`);
     }
     return new DebertaTokenizer(vocab, clean, special);
   }

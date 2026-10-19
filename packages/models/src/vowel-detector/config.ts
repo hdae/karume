@@ -112,11 +112,11 @@ const readOnlyNumber = <T extends number>(
   accepted: T,
   why: string,
 ): T => {
-  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
+  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: missing`);
   const value = raw[key];
   if (value !== accepted) {
     throw new Error(
-      `${where}.${key}: この実装が対応するのは ${accepted} だけ（${String(value)}）— ${why}`,
+      `${where}.${key}: this implementation supports only ${accepted} (${String(value)}) — ${why}`,
     );
   }
   return accepted;
@@ -131,7 +131,7 @@ const readClasses = (
   key: string,
   where: string,
 ): typeof LIPSYNC_CLASSES => {
-  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
+  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: missing`);
   const value = raw[key];
   if (
     !Array.isArray(value) ||
@@ -139,9 +139,9 @@ const readClasses = (
     value.some((entry, index) => entry !== LIPSYNC_CLASSES[index])
   ) {
     throw new Error(
-      `${where}.${key}: この実装が対応するのは [${LIPSYNC_CLASSES.join(", ")}] の並びだけ` +
-        `（${JSON.stringify(value)}）— 並びがそのままクラス id なので、` +
-        "違う並びはラベルが置換されるだけで区間割りも .lab も成立してしまう",
+      `${where}.${key}: this implementation supports only the order [${LIPSYNC_CLASSES.join(", ")}]` +
+        ` (${JSON.stringify(value)}) — the order is the class id itself, so ` +
+        "a different order would only swap the labels while the segmentation and the .lab still come out valid",
     );
   }
   return LIPSYNC_CLASSES;
@@ -155,7 +155,7 @@ const readClasses = (
  * cannot pass".
  */
 const readFrameBound = (raw: Record<string, unknown>, key: string, where: string): number => {
-  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
+  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: missing`);
   const value = raw[key];
   if (
     typeof value !== "number" ||
@@ -164,8 +164,8 @@ const readFrameBound = (raw: Record<string, unknown>, key: string, where: string
     value % LENGTH_MULTIPLE !== 0
   ) {
     throw new Error(
-      `${where}.${key}: 正の ${LENGTH_MULTIPLE} の倍数でない（${JSON.stringify(value)}）` +
-        "— 出力は 20ms 格子で、入力 2 フレームが 1 本になる",
+      `${where}.${key}: not a positive multiple of ${LENGTH_MULTIPLE} (${JSON.stringify(value)})` +
+        " — the output is on a 20ms grid, and 2 input frames become 1",
     );
   }
   return value;
@@ -181,8 +181,8 @@ export const parseVowelDetectorPipelineConfig = (
   const maxFrames = readFrameBound(raw, "maxFrames", where);
   if (minFrames > maxFrames) {
     throw new Error(
-      `${where}: minFrames ${minFrames} が maxFrames ${maxFrames} を超えている` +
-        "— 受理できる入力長が 1 本も無い宣言になる",
+      `${where}: minFrames ${minFrames} exceeds maxFrames ${maxFrames}` +
+        " — the declaration would accept no input length at all",
     );
   }
   return {
@@ -191,14 +191,14 @@ export const parseVowelDetectorPipelineConfig = (
       "sampleRate",
       where,
       SAMPLE_RATE,
-      "特徴抽出はリサンプラを持たず、窓長 / hop / mel 基底が 16kHz 前提で焼かれている",
+      "feature extraction has no resampler, and the window length / hop / mel basis are built for 16kHz",
     ),
     featureDim: readOnlyNumber(
       raw,
       "featureDim",
       where,
       FEATURE_DIM,
-      "80 次元 log-mel + DSP 3 次元は学習時の契約そのもの（src/vowel-detector/features.ts）",
+      "the 80-dim log-mel + 3 DSP dims are the training-time contract itself (src/vowel-detector/features.ts)",
     ),
     classes: readClasses(raw, "classes", where),
     minFrames,

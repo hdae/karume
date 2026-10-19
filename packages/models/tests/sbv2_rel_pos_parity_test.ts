@@ -16,21 +16,29 @@ import { buildRelPosTables } from "../src/sbv2/text/rel-pos-tables.ts";
 
 test("buildRelPosTables: 引数の受理集合（式が成立する下限を割る値は落とす）", () => {
   // 長さ 0 は表が空になるだけでなく、対角配列 `2·length-1` が負長になる。
-  assertThrows(() => buildRelPosTables(0, 256, 512), RangeError, "1 以上の整数でない");
+  assertThrows(() => buildRelPosTables(0, 256, 512), RangeError, "is not an integer >= 1");
   // bucketSize 1 は mid = 0 で対数の分母（log((maxPosition-1)/mid)）が壊れる。
-  assertThrows(() => buildRelPosTables(4, 1, 512), RangeError, "bucketSize 1 が 2 以上");
+  assertThrows(
+    () => buildRelPosTables(4, 1, 512),
+    RangeError,
+    "bucketSize 1 is not an integer >= 2",
+  );
   // maxPosition 1 は log(0/…) で -Infinity を作る。
-  assertThrows(() => buildRelPosTables(4, 256, 1), RangeError, "maxPosition 1 が 2 以上");
+  assertThrows(
+    () => buildRelPosTables(4, 256, 1),
+    RangeError,
+    "maxPosition 1 is not an integer >= 2",
+  );
 });
 
 test("buildRelPosTables: 対数バケットの式が成立しない組は NaN 経由の誤った添字を作らずに落ちる", () => {
   // (bucket 2, maxPosition 2): mid = 1 で対数の分母 log(1) = 0、係数 mid − 1 = 0 →
   // `Infinity × 0 = NaN`。NaN は clamp の比較をすり抜け、Int32Array で 0 になって形の合った
   // 誤った gather 添字になる（|d| = 2 の位置が 0 に化ける）。
-  assertThrows(() => buildRelPosTables(4, 2, 2), RangeError, "対数バケット");
+  assertThrows(() => buildRelPosTables(4, 2, 2), RangeError, "log-bucket");
   // mid ≥ 2 でも maxPosition − 1 ≤ mid なら分母が 0 以下で、遠方の向きが壊れる。
-  assertThrows(() => buildRelPosTables(4, 4, 3), RangeError, "対数バケット");
-  assertThrows(() => buildRelPosTables(4, 3, 512), RangeError, "対数バケット");
+  assertThrows(() => buildRelPosTables(4, 4, 3), RangeError, "log-bucket");
+  assertThrows(() => buildRelPosTables(4, 3, 512), RangeError, "log-bucket");
 });
 
 test("buildRelPosTables: 配布値（256 / 512）の近傍は線形のまま d + 256", () => {

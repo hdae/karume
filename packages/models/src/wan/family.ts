@@ -182,7 +182,7 @@ export const WAN22_TI2V_FAMILY: WanFamilySpec = {
   owner: "WanTi2vPipeline",
   pipeline: { name: WAN_TI2V_PIPELINE_NAME, major: WAN_TI2V_PIPELINE_MAJOR },
   generation: WAN22_TI2V_GENERATION,
-  sourcesExample: 'WAN_SOURCES["wan2.2"]（@karume/models/wan）',
+  sourcesExample: 'WAN_SOURCES["wan2.2"] (@karume/models/wan)',
 };
 
 /**
@@ -417,24 +417,24 @@ const admitWan = async (
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
-      `${spec.owner}: model '${modelName}' は manifest に無い` +
-        `（利用可能: ${manifest.available.models.join(" / ")}）`,
+      `${spec.owner}: model '${modelName}' is not in the manifest` +
+        ` (available: ${manifest.available.models.join(" / ")})`,
     );
   }
   const entry: ModelEntry = manifest.models[modelName];
   const { name, major } = entry.pipeline;
   if (name !== spec.pipeline.name) {
     throw new Error(
-      `${spec.owner}: manifest の pipeline が '${name}/${major}'` +
-        `（'${spec.pipeline.name}/${spec.pipeline.major}' が必要）`,
+      `${spec.owner}: the manifest's pipeline is '${name}/${major}'` +
+        ` ('${spec.pipeline.name}/${spec.pipeline.major}' is required)`,
     );
   }
   if (major !== spec.pipeline.major) {
     // The only check that stops the silent degradation of "old implementation × new repository"
     // (ADR 0038 §6).
     throw new Error(
-      `${spec.owner}: pipeline '${name}/${major}' の major に未対応` +
-        `（この実装が読めるのは ${spec.pipeline.name}/${spec.pipeline.major}）`,
+      `${spec.owner}: pipeline '${name}/${major}' has an unsupported major` +
+        ` (this implementation reads ${spec.pipeline.name}/${spec.pipeline.major})`,
     );
   }
   const config = parseWanPipelineConfig(entry.pipelineConfig);
@@ -442,8 +442,8 @@ const admitWan = async (
   const quantName = options.quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quantName)) {
     throw new Error(
-      `${spec.owner}: quant '${quantName}' は manifest に無い` +
-        `（利用可能: ${entry.available.quants.join(" / ")}）`,
+      `${spec.owner}: quant '${quantName}' is not in the manifest` +
+        ` (available: ${entry.available.quants.join(" / ")})`,
     );
   }
   const quant = entry.quants[quantName];
@@ -462,8 +462,8 @@ const admitWan = async (
 
   if (options.gpu?.gpuTimingEnabled === true) {
     throw new Error(
-      `${spec.owner}: gpuTiming が有効な device では VAE の段（1 タイル = 1 batch）を回せない` +
-        "（runtime は計測の device で batch を開かない）— 計測なしの device を渡す",
+      `${spec.owner}: cannot run the VAE stage (1 tile = 1 batch) on a device with gpuTiming enabled` +
+        " (the runtime does not open a batch on a timing device) — pass a device without timing",
     );
   }
   // MUST: a shared GPU's missing capabilities (feature / device limit) fail here — the only family
@@ -677,7 +677,9 @@ export const generateWanVideo = async (
     if (vaeEncoder === undefined) {
       // The check (plan.ts) lets an image through only for a generation of input form "ti2v", and that
       // generation builds the encoder at construction, so reaching here means broken wiring.
-      throw new Error(`${spec.owner}: 条件画像を受けたが VAE encoder の部品が組まれていない`);
+      throw new Error(
+        `${spec.owner}: received a condition image but the VAE encoder component is not built`,
+      );
     }
     // A stage boundary (entry → encoder).
     await settleAbort(signal);

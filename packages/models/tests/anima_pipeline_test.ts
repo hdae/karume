@@ -125,7 +125,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   await assertRejects(
     () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
-    "major に未対応",
+    "the major of pipeline 'anima/2' is not supported",
   );
 });
 
@@ -134,7 +134,7 @@ test("fromAssets: pipelineConfig のスキーマ違反は構築時に落ちる",
   await assertRejects(
     () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
-    "pipelineConfig.scheduler: 無い",
+    "pipelineConfig.scheduler: missing",
   );
 });
 
@@ -156,7 +156,7 @@ test("fromAssets: scheduler.type を宣言した manifest も同じ位置まで�
   await assertRejects(
     () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
-    "資産 'tokenizer' が無い",
+    "asset 'tokenizer' is missing",
   );
 });
 
@@ -171,7 +171,7 @@ test("fromAssets: scheduler.type の未知値は資産に触る前に落ちる",
   await assertRejects(
     () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
-    "pipelineConfig.scheduler.type: 期待 'euler' / 'dpmpp-2m'",
+    "pipelineConfig.scheduler.type: expected 'euler' / 'dpmpp-2m'",
   );
 });
 
@@ -180,7 +180,7 @@ test("fromAssets: 存在しない quant は利用可能な一覧を添えて落�
   await assertRejects(
     () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "f16+dit8-a8" }),
     Error,
-    "利用可能: f16+dit8-a8-attn8-s16",
+    "available: f16+dit8-a8-attn8-s16",
   );
 });
 
@@ -191,7 +191,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
   await assertRejects(
     () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { model: "anima-xl" }),
     Error,
-    "利用可能: anima-turbo",
+    "available: anima-turbo",
   );
 });
 
@@ -203,7 +203,7 @@ test("fromAssets: manifest 契約を全て満たして初めて資産へ触る�
   await assertRejects(
     () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
-    "資産 'tokenizer' が無い",
+    "asset 'tokenizer' is missing",
   );
 });
 
@@ -214,7 +214,7 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   await assertRejects(
     () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
-    "部品 'text_encoder' の容器が無い",
+    "component 'text_encoder' has no container",
   );
 });
 
@@ -294,7 +294,7 @@ test("fromAssets: 不正な明示値と Anima が受けないノブは資産に�
         optionsWith("linearCompute", null),
       ),
     ModelInputError,
-    "linearComputeが不正",
+    "linearCompute is invalid",
   );
   // 並列 GEMV は Anima の受理表の外 — 黙って捨てると「指定したのに効かない」になる。
   await assertRejects(
@@ -304,7 +304,7 @@ test("fromAssets: 不正な明示値と Anima が受けないノブは資産に�
         optionsWith("linearGemvReduce", "parallel"),
       ),
     ModelInputError,
-    "linearGemvReduceはこの系列では指定できない",
+    "linearGemvReduce cannot be specified for this family",
   );
 });
 
@@ -320,7 +320,7 @@ test("fromAssets: 受理される明示は admission を通って資産の段ま
         },
       ),
     Error,
-    "資産 'tokenizer' が無い",
+    "asset 'tokenizer' is missing",
   );
 });
 
@@ -356,7 +356,7 @@ test("fromAssets: residency の未知の綴りは資産に触る前に ModelInpu
           optionsWith("residency", value),
         ),
       ModelInputError,
-      "AnimaPipeline: residency: 期待 'per-stage' / 'transformer'",
+      "AnimaPipeline: residency: expected 'per-stage' / 'transformer'",
     );
   }
 });
@@ -369,7 +369,7 @@ test("fromAssets: 受理される residency は admission を通って資産の�
     await assertRejects(
       () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { residency }),
       Error,
-      "資産 'tokenizer' が無い",
+      "asset 'tokenizer' is missing",
     );
   }
 });
@@ -450,7 +450,7 @@ test("generate: request の residency の未知の綴りは GPU に触る前に 
   await assertRejects(
     () => pipeline.generate({ ...request, onEvent: (event) => void events.push(event.kind) }),
     ModelInputError,
-    "residency: 期待 'per-stage' / 'transformer'（実際 'transformers'）",
+    "residency: expected 'per-stage' / 'transformer' (actual 'transformers')",
   );
   assertEquals(events, [], "入口の検査より先に段へ入っている");
 });
@@ -495,7 +495,7 @@ test("generate: f32 で有限に収まらない guidanceScale は GPU に触る�
           onEvent: (event) => void events.push(event.kind),
         }),
       ModelInputError,
-      `guidanceScale ${guidanceScale} が f32 に収まる有限の数でない`,
+      `guidanceScale ${guidanceScale} is not a finite number that fits in f32`,
     );
     assertEquals(events, [], `${guidanceScale}: 入口の検査より先に段へ入っている`);
   }
@@ -508,7 +508,7 @@ test("resolveNegativePrompt: guidanceScale 1 で negativePrompt を渡したら�
   assertThrows(
     () => resolveNegativePrompt("worst quality", undefined, 1),
     ModelInputError,
-    "negativePrompt は効かない",
+    "negativePrompt has no effect",
   );
   // 落とすのは **request での明示指定**だけ。manifest の既定が埋まっているだけの状態は
   // 「効かないノブを渡した」ことにならないので、guidance=1 でも通る。これは配布形
@@ -520,7 +520,7 @@ test("resolveNegativePrompt: guidanceScale 1 で negativePrompt を渡したら�
   assertThrows(
     () => resolveNegativePrompt("worst quality", "既定のネガ", 1),
     ModelInputError,
-    "negativePrompt は効かない",
+    "negativePrompt has no effect",
   );
   assertEquals(resolveNegativePrompt(undefined, undefined, 1), undefined);
 });
@@ -531,7 +531,7 @@ test("resolveNegativePrompt: uncond を計算する設定で negativePrompt が�
   assertThrows(
     () => resolveNegativePrompt(undefined, undefined, 7),
     ModelInputError,
-    "negativePrompt が要る",
+    "negativePrompt is required",
   );
   // 供給元は request > defaults の順。どちらかがあれば通る。
   assertEquals(resolveNegativePrompt(undefined, "既定のネガ", 7), "既定のネガ");
@@ -546,9 +546,13 @@ test("assertAcceptableSeed: 生成の入口と Randn が同じ受理集合を通
     const direct = assertThrows(
       () => assertAcceptableSeed(seed),
       ModelInputError,
-      "非負の安全整数",
+      "non-negative safe integer",
     );
-    const viaRandn = assertThrows(() => new Randn(seed), ModelInputError, "非負の安全整数");
+    const viaRandn = assertThrows(
+      () => new Randn(seed),
+      ModelInputError,
+      "non-negative safe integer",
+    );
     assertEquals(direct.message, viaRandn.message, `seed ${seed} の診断`);
   }
   for (const seed of [0, 42, Number.MAX_SAFE_INTEGER]) assertAcceptableSeed(seed);
@@ -604,7 +608,7 @@ test("denoiseStep: 更新後の latent が非有限なら step を名指しし�
     assertThrows(
       () => denoiseStep(type, input),
       Error,
-      "step 1/2 の更新後の latent の要素 1 が非有限",
+      "step 1/2: element 1 of the updated latent is non-finite",
       type,
     );
   }
@@ -627,13 +631,13 @@ test("assertAnimaSamplerType: request 側の綴りも 2 語だけを受け、出
   const misspelled = assertThrows(
     () => assertAnimaSamplerType("dpm++", "sampler"),
     Error,
-    "sampler: 期待 'euler' / 'dpmpp-2m'",
+    "sampler: expected 'euler' / 'dpmpp-2m'",
   );
-  assertStringIncludes(misspelled.message, "実際 'dpm++'");
+  assertStringIncludes(misspelled.message, "actual 'dpm++'");
   // 非文字列でも「実際」に何が来たかを出す（型の縁で診断が消えない）。
   for (const [value, expected] of [
-    [2, "実際 2"],
-    [undefined, "実際 undefined"],
+    [2, "actual 2"],
+    [undefined, "actual undefined"],
   ] as const) {
     const thrown = assertThrows(() => assertAnimaSamplerType(value, "sampler"), Error);
     assertStringIncludes(thrown.message, expected);
@@ -655,7 +659,7 @@ test("ANIMA_SAMPLER_TYPES: 公開した並びは受理集合そのもので、�
   );
   assertEquals(Reflect.set(ANIMA_SAMPLER_TYPES, 0, "dpm++"), false);
   assertEquals([...ANIMA_SAMPLER_TYPES], ["euler", "dpmpp-2m"]);
-  assertThrows(() => assertAnimaSamplerType("dpm++", "sampler"), Error, "実際 'dpm++'");
+  assertThrows(() => assertAnimaSamplerType("dpm++", "sampler"), Error, "actual 'dpm++'");
 });
 
 test("latentSnapshot: 束縛した時点の latent を写す（step を進めても写しは変わらない）", () => {

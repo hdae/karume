@@ -842,7 +842,7 @@ describe.skipIf(!RUNNABLE || references.lacksReference("onEvent-1024"))(
       await assertRejects(
         () => pipeline.generate({ prompt: PROMPT, steps: 2, seed: SEED }),
         Error,
-        "dispose 済み",
+        "after dispose",
       );
     });
 
@@ -1351,7 +1351,7 @@ describe.skipIf(!RESIDENCY_RUNNABLE)(
       await assertRejects(
         () => pipeline.generate({ prompt: PROMPT, steps: 2, seed: SEED }),
         Error,
-        "dispose 済み",
+        "after dispose",
       );
     });
   },

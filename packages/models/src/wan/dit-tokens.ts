@@ -49,12 +49,12 @@ const latentExtents = (
   where: string,
 ): readonly [number, number, number] => {
   if (latentShape.length !== 4) {
-    throw new Error(`${where}: 潜在は [C,F,H,W] 前提（[${latentShape}]）`);
+    throw new Error(`${where}: the latent must be [C,F,H,W] ([${latentShape}])`);
   }
   const [channels, frames, height, width] = latentShape;
   if (channels !== geometry.channels) {
     throw new Error(
-      `${where}: 潜在のチャネル数 ${channels} が patch 幾何の ${geometry.channels} と違う`,
+      `${where}: latent channel count ${channels} does not match the patch geometry's ${geometry.channels}`,
     );
   }
   if (
@@ -64,8 +64,8 @@ const latentExtents = (
     width % geometry.patchWidth !== 0
   ) {
     throw new Error(
-      `${where}: 潜在 ${frames}×${height}×${width} が patch ` +
-        `${geometry.patchFrames}×${geometry.patchHeight}×${geometry.patchWidth} で割り切れない`,
+      `${where}: latent ${frames}×${height}×${width} is not divisible by patch ` +
+        `${geometry.patchFrames}×${geometry.patchHeight}×${geometry.patchWidth}`,
     );
   }
   return [frames, height, width];
@@ -76,7 +76,7 @@ export const wanTokenGrid = (
   latentShape: readonly number[],
   geometry: WanPatchGeometry,
 ): WanTokenGrid => {
-  const [frames, height, width] = latentExtents(latentShape, geometry, "トークン格子");
+  const [frames, height, width] = latentExtents(latentShape, geometry, "token grid");
   const grid = {
     frames: frames / geometry.patchFrames,
     rows: height / geometry.patchHeight,
@@ -99,7 +99,7 @@ export const patchifyLatents = (
   const [frames, height, width] = latentExtents(latentShape, geometry, "patchify");
   const { channels, patchFrames, patchHeight, patchWidth } = geometry;
   if (latents.length !== channels * frames * height * width) {
-    throw new Error(`patchify: 要素数 ${latents.length} が [${latentShape}] と違う`);
+    throw new Error(`patchify: element count ${latents.length} does not match [${latentShape}]`);
   }
   const grid = wanTokenGrid(latentShape, geometry);
   const volume = patchFrames * patchHeight * patchWidth;
@@ -149,7 +149,7 @@ export const unpatchifyTokens = (
   const tokenWidth = wanTokenWidth(geometry);
   if (tokens.length !== grid.count * tokenWidth) {
     throw new Error(
-      `unpatchify: 要素数 ${tokens.length} が [1,${grid.count},${tokenWidth}] と違う`,
+      `unpatchify: element count ${tokens.length} does not match [1,${grid.count},${tokenWidth}]`,
     );
   }
   const latents = new Float32Array(channels * frames * height * width);

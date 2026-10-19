@@ -160,12 +160,12 @@ for (const model of ["e2b", "e4b"] as const) {
         assertThrows(
           () => pipeline.estimateSessionMemory({ capacity: chunkLength - 1 }),
           Error,
-          `capacity ${chunkLength - 1} が chunkLength ${chunkLength} を下回る`,
+          `capacity ${chunkLength - 1} is below chunkLength ${chunkLength}`,
         );
         assertThrows(
           () => pipeline.estimateSessionMemory({ capacity: maxPosition + 1 }),
           Error,
-          `capacity ${maxPosition + 1} が maxPosition ${maxPosition} を超えた`,
+          `capacity ${maxPosition + 1} exceeds maxPosition ${maxPosition}`,
         );
       });
       it("chatのcapacityはsequenceへ降りる（既定へ黙って縮退しない）", async () => {
@@ -179,7 +179,7 @@ for (const model of ["e2b", "e4b"] as const) {
         await assertRejects(
           () => stream.text(),
           Error,
-          `capacity ${chunkLength - 1} が chunkLength ${chunkLength} を下回る`,
+          `capacity ${chunkLength - 1} is below chunkLength ${chunkLength}`,
         );
       });
       it("同じ容量の会話を作り直してもstateが累積しない", () => {

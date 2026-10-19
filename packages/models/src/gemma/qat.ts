@@ -25,7 +25,7 @@ const PLE_DIM = 256;
 
 export const assertGemma4QatModel = (model: string): Gemma4QatModel => {
   if (model !== "e2b" && model !== "e4b") {
-    throw new Error(`Gemma4QatPipeline: 未対応 model '${model}'`);
+    throw new Error(`Gemma4QatPipeline: unsupported model '${model}'`);
   }
   return model;
 };
@@ -33,28 +33,28 @@ export const assertGemma4QatModel = (model: string): Gemma4QatModel => {
 export const admitGemma4Qat = (graph: Graph, selected?: string): Gemma4QatModel => {
   const shape = graph.inputs.find((input) => input.name === "per_layer_inputs")?.shape;
   if (shape === undefined) {
-    throw new Error("Gemma4QatPipeline: グラフ入力 per_layer_inputs が無い");
+    throw new Error("Gemma4QatPipeline: graph input per_layer_inputs is missing");
   }
   const model = shape[2] === 35 ? "e2b" : shape[2] === 42 ? "e4b" : undefined;
   if (model === undefined) {
     throw new Error(
-      `Gemma4QatPipeline: per_layer_inputs の層数 ${shape[2]} が E2B 35 / E4B 42 でない`,
+      `Gemma4QatPipeline: the layer count ${shape[2]} of per_layer_inputs is not E2B 35 / E4B 42`,
     );
   }
   if (shape[3] !== PLE_DIM) {
     throw new Error(
-      `Gemma4QatPipeline: per_layer_inputs の PLE 次元 ${shape[3]} が ${PLE_DIM} でない`,
+      `Gemma4QatPipeline: the PLE dimension ${shape[3]} of per_layer_inputs is not ${PLE_DIM}`,
     );
   }
   const hidden = graph.values[graph.outputs[1]]?.shape[2];
   const expectedHidden = model === "e2b" ? 1536 : 2560;
   if (hidden !== expectedHidden) {
     throw new Error(
-      `Gemma4QatPipeline: hidden 幅 ${hidden} が ${model} の ${expectedHidden} でない`,
+      `Gemma4QatPipeline: hidden width ${hidden} is not ${model}'s ${expectedHidden}`,
     );
   }
   if (selected !== undefined && assertGemma4QatModel(selected) !== model) {
-    throw new Error("Gemma4QatPipeline: model 名とグラフの構成が違う");
+    throw new Error("Gemma4QatPipeline: the model name and the graph's configuration differ");
   }
   const producers = new Map(
     graph.nodes.flatMap((node) => node.outs.map((out) => [out, node] as const)),
@@ -71,12 +71,12 @@ export const admitGemma4Qat = (graph: Graph, selected?: string): Gemma4QatModel 
     (node) => node.op === "embedding" && node.ins[1] === "input_ids",
   );
   if (embeddings.length !== 1) {
-    throw new Error("Gemma4QatPipeline: token embedding が1本でない");
+    throw new Error("Gemma4QatPipeline: there is not exactly one token embedding");
   }
   const tokenWeight = embeddings[0].ins[0];
   const tokenStorage = graph.initializers[tokenWeight]?.storage;
   if (tokenStorage === undefined || codecLayout(tokenStorage.codec) !== "i2") {
-    throw new Error("Gemma4QatPipeline: token embedding は固定 INT2 が必要");
+    throw new Error("Gemma4QatPipeline: the token embedding needs fixed INT2");
   }
   let heads = 0,
     ordinary = 0;
@@ -93,16 +93,16 @@ export const admitGemma4Qat = (graph: Graph, selected?: string): Gemma4QatModel 
       continue;
     }
     if (weight === undefined) {
-      throw new Error(`Gemma4QatPipeline: linear の重み '${node.ins[1]}' が initializer でない`);
+      throw new Error(`Gemma4QatPipeline: linear weight '${node.ins[1]}' is not an initializer`);
     }
     if (weight.shared !== undefined) {
       throw new Error(
-        `Gemma4QatPipeline: linear の重み '${node.ins[1]}' は共有 initializer（QAT は受けない）`,
+        `Gemma4QatPipeline: linear weight '${node.ins[1]}' is a shared initializer (QAT does not accept it)`,
       );
     }
     const layout = codecLayout(weight.storage.codec);
     if (!["i2", "i4", "i8"].includes(layout)) {
-      throw new Error("Gemma4QatPipeline: linear は固定 INT2/INT4/INT8 が必要");
+      throw new Error("Gemma4QatPipeline: linear needs fixed INT2/INT4/INT8");
     }
     storages.add(layout);
     if (node.ins[1] === tokenWeight) {
@@ -120,17 +120,17 @@ export const admitGemma4Qat = (graph: Graph, selected?: string): Gemma4QatModel 
       after?.length !== 1 ||
       after[0].op !== "static_quantize"
     ) {
-      throw new Error("Gemma4QatPipeline: linear の前後に固定 SRQ が必要");
+      throw new Error("Gemma4QatPipeline: linear needs fixed SRQ before and after it");
     }
   }
   if (heads !== 1) {
     throw new Error(
-      `Gemma4QatPipeline: token embedding を共有する head が ${heads} 本（1本が必要）`,
+      `Gemma4QatPipeline: ${heads} heads share the token embedding (exactly 1 is needed)`,
     );
   }
   if (ordinary !== 1) {
     throw new Error(
-      `Gemma4QatPipeline: per_layer_model_projection の f32 linear が ${ordinary} 本（1本が必要）`,
+      `Gemma4QatPipeline: per_layer_model_projection has ${ordinary} f32 linears (exactly 1 is needed)`,
     );
   }
   // i2 is always satisfied by the shared head (the head uses the same i2 initializer as the token
@@ -139,8 +139,8 @@ export const admitGemma4Qat = (graph: Graph, selected?: string): Gemma4QatModel 
   // the official E2B / E4B (ADR 0097 addendum 7).
   if (!["i4", "i8"].every((dtype) => storages.has(dtype))) {
     throw new Error(
-      `Gemma4QatPipeline: 量子化 linear の格納が固定 INT4 と INT8 を揃えていない` +
-        `（${[...storages].sort().join(" / ")}）`,
+      `Gemma4QatPipeline: the storage of the quantized linears does not include both fixed INT4 and INT8` +
+        ` (${[...storages].sort().join(" / ")})`,
     );
   }
   return model;
@@ -153,8 +153,8 @@ export const assertGemma4QatPle = (
 ): void => {
   if (index.storage !== PLE_STORAGE[model]) {
     throw new Error(
-      `Gemma4QatPipeline: PLE の格納 '${index.storage}' が ${model} の` +
-        ` '${PLE_STORAGE[model]}' と違う`,
+      `Gemma4QatPipeline: PLE storage '${index.storage}' differs from ${model}'s` +
+        ` '${PLE_STORAGE[model]}'`,
     );
   }
   // The canonical layer count and dimension are the graph's `per_layer_inputs` (the tokens
@@ -162,14 +162,14 @@ export const assertGemma4QatPle = (
   const shape = graph.inputs.find((input) => input.name === "per_layer_inputs")?.shape;
   if (index.layers !== shape?.[2]) {
     throw new Error(
-      `Gemma4QatPipeline: PLE の層数 ${index.layers} がグラフの per_layer_inputs` +
-        ` ${shape?.[2]} と違う`,
+      `Gemma4QatPipeline: PLE layer count ${index.layers} differs from the graph's per_layer_inputs` +
+        ` ${shape?.[2]}`,
     );
   }
   if (index.dim !== shape[3]) {
     throw new Error(
-      `Gemma4QatPipeline: PLE の次元 ${index.dim} がグラフの per_layer_inputs` +
-        ` ${shape[3]} と違う`,
+      `Gemma4QatPipeline: PLE dimension ${index.dim} differs from the graph's per_layer_inputs` +
+        ` ${shape[3]}`,
     );
   }
 };

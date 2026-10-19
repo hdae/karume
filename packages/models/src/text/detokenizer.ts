@@ -175,7 +175,7 @@ const partialTail = (buffer: string, stopStrings: readonly string[]): number => 
  */
 export const createStopStringFilter = (stopStrings: readonly string[]): StopStringFilter => {
   if (!Array.isArray(stopStrings)) {
-    throw new ModelInputError("stopStrings が文字列の配列でない");
+    throw new ModelInputError("stopStrings is not an array of strings");
   }
   // MUST: copy at issue (if the array were rewritten while running, the stop condition would change
   // midway).
@@ -188,11 +188,11 @@ export const createStopStringFilter = (stopStrings: readonly string[]): StopStri
   for (let index = 0; index < elements.length; index++) {
     const stop = elements[index];
     if (typeof stop !== "string") {
-      throw new ModelInputError(`stopStrings[${index}] ${String(stop)} が文字列でない`);
+      throw new ModelInputError(`stopStrings[${index}] ${String(stop)} is not a string`);
     }
-    if (stop === "") throw new ModelInputError(`stopStrings[${index}] が空文字列`);
+    if (stop === "") throw new ModelInputError(`stopStrings[${index}] is an empty string`);
     if (declared.has(stop)) {
-      throw new ModelInputError(`stopStrings に ${JSON.stringify(stop)} が 2 度出る`);
+      throw new ModelInputError(`stopStrings contains ${JSON.stringify(stop)} twice`);
     }
     declared.add(stop);
     stops.push(stop);

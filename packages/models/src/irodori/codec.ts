@@ -76,7 +76,7 @@ type CodecTilePlanOptions = {
  */
 export const assertCodecTileFrames = (tileFrames: number, haloFrames: number): void => {
   if (!Number.isInteger(haloFrames) || haloFrames < 0) {
-    throw new Error(`planCodecTiles: haloFrames ${haloFrames} が非負整数でない`);
+    throw new Error(`planCodecTiles: haloFrames ${haloFrames} is not a non-negative integer`);
   }
   if (!Number.isInteger(tileFrames) || tileFrames <= 2 * haloFrames) {
     // `tileFrames` is the caller's request knob (`IrodoriGenerateRequest.codecTileFrames`), so
@@ -84,8 +84,8 @@ export const assertCodecTileFrames = (tileFrames: number, haloFrames: number): v
     // just above is a number the distribution declares, which the caller cannot fix, so it stays a
     // plain `Error`.
     throw new ModelInputError(
-      `planCodecTiles: tileFrames ${tileFrames} が halo 2 枚ぶん（${2 * haloFrames}）` +
-        "より大きい整数でない（採用できるフレームが 1 枚も残らない）",
+      `planCodecTiles: tileFrames ${tileFrames} is not an integer greater than two halos (${2 * haloFrames})` +
+        " (no frame would be left to keep)",
     );
   }
 };
@@ -104,7 +104,7 @@ export const planCodecTiles = (
 ): readonly CodecTile[] => {
   const { tileFrames, haloFrames } = options;
   if (!Number.isInteger(frames) || frames <= 0) {
-    throw new Error(`planCodecTiles: frames ${frames} が正の整数でない`);
+    throw new Error(`planCodecTiles: frames ${frames} is not a positive integer`);
   }
   assertCodecTileFrames(tileFrames, haloFrames);
   if (frames <= tileFrames) return [{ start: 0, length: frames, offset: 0, take: frames }];
@@ -155,7 +155,7 @@ export const decodeTiles = async (
   const { latentDim, hopLength, tiles } = options;
   if (latent.length % latentDim !== 0) {
     throw new Error(
-      `decodeTiles: latent の要素数 ${latent.length} が latentDim ${latentDim} で割れない`,
+      `decodeTiles: latent element count ${latent.length} is not divisible by latentDim ${latentDim}`,
     );
   }
   const frames = latent.length / latentDim;
@@ -170,8 +170,8 @@ export const decodeTiles = async (
     const decoded = await run(slice, tile.length);
     if (decoded.length !== tile.length * hopLength) {
       throw new Error(
-        `decodeTiles: decoder の出力が ${decoded.length} サンプル` +
-          `（${tile.length}×${hopLength} = ${tile.length * hopLength} のはず）`,
+        `decodeTiles: the decoder output is ${decoded.length} samples` +
+          ` (expected ${tile.length}×${hopLength} = ${tile.length * hopLength})`,
       );
     }
     waveform.set(
@@ -199,29 +199,31 @@ const assertTileContext = (
     const takeStart = tile.start + tile.offset;
     const takeEnd = takeStart + tile.take;
     if (takeStart !== covered) {
-      throw new Error(`planCodecTiles: 採用区間が ${covered} で途切れた（次は ${takeStart}）`);
+      throw new Error(
+        `planCodecTiles: the kept ranges break off at ${covered} (the next starts at ${takeStart})`,
+      );
     }
     if (tile.start + tile.length > frames) {
       throw new Error(
-        `planCodecTiles: タイル [${tile.start}, ${
-          tile.start + tile.length
-        }) が S ${frames} を超えた`,
+        `planCodecTiles: tile [${tile.start}, ${tile.start + tile.length}) exceeds S ${frames}`,
       );
     }
     if (tile.start > 0 && tile.offset < haloFrames) {
       throw new Error(
-        `planCodecTiles: 左の文脈が ${tile.offset} フレームしかない（halo ${haloFrames} が要る）`,
+        `planCodecTiles: the left context is only ${tile.offset} frames (halo ${haloFrames} is required)`,
       );
     }
     const right = tile.start + tile.length - takeEnd;
     if (tile.start + tile.length < frames && right < haloFrames) {
       throw new Error(
-        `planCodecTiles: 右の文脈が ${right} フレームしかない（halo ${haloFrames} が要る）`,
+        `planCodecTiles: the right context is only ${right} frames (halo ${haloFrames} is required)`,
       );
     }
     covered = takeEnd;
   }
   if (covered !== frames) {
-    throw new Error(`planCodecTiles: 採用区間の合計 ${covered} が S ${frames} と違う`);
+    throw new Error(
+      `planCodecTiles: the total of the kept ranges ${covered} differs from S ${frames}`,
+    );
   }
 };

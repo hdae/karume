@@ -119,19 +119,19 @@ const soleIo = (owner: string, part: string, model: GraphOwner) => {
   const { inputs, outputs } = model.graph;
   if (inputs.length !== 1 || outputs.length !== 1) {
     throw new Error(
-      `${owner}: ${part} の入出力が ${inputs.length} 本 → ${outputs.length} 本（1 本 → 1 本だけを組む）`,
+      `${owner}: ${part} has ${inputs.length} inputs → ${outputs.length} outputs (only 1 → 1 is built)`,
     );
   }
   const [input] = inputs;
   const [output] = outputs;
   const value = valueOf(owner, model, output);
   const declared: readonly (readonly [string, string])[] = [
-    [`入力 '${input.name}'`, input.dtype],
-    [`出力 '${output}'`, value.dtype],
+    [`input '${input.name}'`, input.dtype],
+    [`output '${output}'`, value.dtype],
   ];
   for (const [what, dtype] of declared) {
     if (dtype !== "f32") {
-      throw new Error(`${owner}: ${part} の${what} の dtype ${dtype} が f32 でない`);
+      throw new Error(`${owner}: ${part} ${what} has dtype ${dtype}, not f32`);
     }
   }
   return { input: input.name, inputShape: input.shape, output, outputShape: value.shape };
@@ -149,7 +149,7 @@ const symbolAt = (
   const dim = dims.at(axis);
   if (typeof dim !== "string" || !model.graph.symbols.includes(dim)) {
     throw new Error(
-      `${owner}: ${part} の${where} の軸 ${axis} が記号そのものでない（${String(dim)}）`,
+      `${owner}: ${part} ${where} axis ${axis} is not a bare symbol (${String(dim)})`,
     );
   }
   return dim;
@@ -165,7 +165,7 @@ const staticAt = (
 ): number => {
   const dim = dims.at(axis);
   if (typeof dim !== "number") {
-    throw new Error(`${owner}: ${part} の${where} の軸 ${axis} が静的でない（${String(dim)}）`);
+    throw new Error(`${owner}: ${part} ${where} axis ${axis} is not static (${String(dim)})`);
   }
   return dim;
 };
@@ -181,9 +181,9 @@ const assertSymbols = (
   const wanted = [...expected].sort();
   if (declared.length !== wanted.length || declared.some((name, at) => name !== wanted[at])) {
     throw new Error(
-      `${owner}: ${part} の記号が [${model.graph.symbols.join(", ")}]（期待: [${expected.join(
+      `${owner}: ${part} symbols are [${model.graph.symbols.join(", ")}] (expected: [${expected.join(
         ", ",
-      )}]）`,
+      )}])`,
     );
   }
 };
@@ -215,8 +215,8 @@ export const wanVaeEncoderBinding = (
   const width = size.width / contract.compression;
   if (!Number.isInteger(height) || !Number.isInteger(width) || height < 1 || width < 1) {
     throw new Error(
-      `${owner}: ${size.width}×${size.height} は VAE encoder の空間の圧縮 ${contract.compression} で` +
-        "潜在が正の整数にならない",
+      `${owner}: ${size.width}×${size.height} with the VAE encoder's spatial compression ${contract.compression}` +
+        " does not give a latent of positive integers",
     );
   }
   return {
@@ -263,13 +263,13 @@ export const wanVaeEncoderContract = (
   const inputScale = compression / patchSize;
   if (!Number.isInteger(inputScale) || inputScale < 1) {
     throw new Error(
-      `${owner}: 空間の圧縮 ${compression} が patchify の倍率 ${patchSize} で割り切れない（VAE encoder の入口の倍率）`,
+      `${owner}: spatial compression ${compression} is not divisible by the patchify patch size ${patchSize} (the scale of the VAE encoder input)`,
     );
   }
   const patchChannels = RGB_CHANNELS * patchSize * patchSize;
 
   const pre = soleIo(owner, VAE_ENCODER_PRE, parts.pre);
-  const preWhere = `出力 '${pre.output}'`;
+  const preWhere = `output '${pre.output}'`;
   const hiddenChannels = staticAt(owner, VAE_ENCODER_PRE, pre.outputShape, 0, preWhere);
   const preHeight = symbolAt(owner, VAE_ENCODER_PRE, parts.pre, pre.outputShape, 2, preWhere);
   const preWidth = symbolAt(owner, VAE_ENCODER_PRE, parts.pre, pre.outputShape, 3, preWhere);
@@ -278,13 +278,13 @@ export const wanVaeEncoderContract = (
     owner,
     pre.outputShape,
     [hiddenChannels, 1, preHeight, preWidth],
-    `${VAE_ENCODER_PRE} の${preWhere}`,
+    `${VAE_ENCODER_PRE} ${preWhere}`,
   );
   assertDims(
     owner,
     pre.inputShape,
     [patchChannels, 1, scaledSymbol(inputScale, preHeight), scaledSymbol(inputScale, preWidth)],
-    `${VAE_ENCODER_PRE} の入力 '${pre.input}'`,
+    `${VAE_ENCODER_PRE} input '${pre.input}'`,
   );
 
   const attn = soleIo(owner, VAE_ENCODER_ATTN, parts.attn);
@@ -294,18 +294,18 @@ export const wanVaeEncoderContract = (
     parts.attn,
     attn.inputShape,
     1,
-    `入力 '${attn.input}'`,
+    `input '${attn.input}'`,
   );
   assertSymbols(owner, VAE_ENCODER_ATTN, parts.attn, [sequence]);
   for (const [what, dims] of [
-    [`入力 '${attn.input}'`, attn.inputShape],
-    [`出力 '${attn.output}'`, attn.outputShape],
+    [`input '${attn.input}'`, attn.inputShape],
+    [`output '${attn.output}'`, attn.outputShape],
   ] as const) {
-    assertDims(owner, dims, [hiddenChannels, sequence], `${VAE_ENCODER_ATTN} の${what}`);
+    assertDims(owner, dims, [hiddenChannels, sequence], `${VAE_ENCODER_ATTN} ${what}`);
   }
 
   const post = soleIo(owner, VAE_ENCODER_POST, parts.post);
-  const postWhere = `入力 '${post.input}'`;
+  const postWhere = `input '${post.input}'`;
   const postHeight = symbolAt(owner, VAE_ENCODER_POST, parts.post, post.inputShape, 2, postWhere);
   const postWidth = symbolAt(owner, VAE_ENCODER_POST, parts.post, post.inputShape, 3, postWhere);
   assertSymbols(owner, VAE_ENCODER_POST, parts.post, [postHeight, postWidth]);
@@ -313,13 +313,13 @@ export const wanVaeEncoderContract = (
     owner,
     post.inputShape,
     [hiddenChannels, 1, postHeight, postWidth],
-    `${VAE_ENCODER_POST} の${postWhere}`,
+    `${VAE_ENCODER_POST} ${postWhere}`,
   );
   assertDims(
     owner,
     post.outputShape,
     [layout.latentChannels, 1, postHeight, postWidth],
-    `${VAE_ENCODER_POST} の出力 '${post.output}'`,
+    `${VAE_ENCODER_POST} output '${post.output}'`,
   );
 
   const contract: WanVaeEncoderContract = {
@@ -447,8 +447,8 @@ export const encodeWanImageStage = async (
     image.shape.some((dim, axis) => dim !== binding.inputShape[axis])
   ) {
     throw new Error(
-      `${owner}: 条件画像の前処理の形 [${image.shape.join(", ")}] が VAE encoder の入口 ` +
-        `[${binding.inputShape.join(", ")}] と違う`,
+      `${owner}: the preprocessed condition image shape [${image.shape.join(", ")}] differs from the VAE encoder input ` +
+        `[${binding.inputShape.join(", ")}]`,
     );
   }
   const area = binding.height * binding.width;
@@ -492,10 +492,10 @@ export const encodeWanImageStage = async (
     if (broken !== -1) {
       const pixel = broken % area;
       throw new Error(
-        `${owner}: 条件画像の潜在（VAE encoder の mu の正規化の後）の channel ${Math.floor(
+        `${owner}: condition image latent (after normalizing the VAE encoder's mu) channel ${Math.floor(
           broken / area,
-        )}・位置 (x=${pixel % binding.width}, y=${Math.floor(pixel / binding.width)}) が非有限` +
-          `（${latents[broken]}）— DiT の段へは渡さない`,
+        )}, position (x=${pixel % binding.width}, y=${Math.floor(pixel / binding.width)}) is non-finite` +
+          ` (${latents[broken]}) — not passed to the DiT stage`,
       );
     }
   } catch (error) {

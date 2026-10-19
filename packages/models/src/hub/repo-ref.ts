@@ -41,8 +41,8 @@ const assertRepoSpelling = (repo: string, where: string): void => {
   const segments = repo.split("/");
   if (segments.length !== 2 || !segments.every((segment) => REPO_SEGMENT_RE.test(segment))) {
     throw new Error(
-      `${where}: repo '${repo}' が HF の 'owner/name' でない` +
-        `（2 セグメントちょうど・許可文字 [A-Za-z0-9._-]・先頭ドット禁止）`,
+      `${where}: repo '${repo}' is not an HF 'owner/name'` +
+        ` (exactly 2 segments, allowed characters [A-Za-z0-9._-], no leading dot)`,
     );
   }
 };
@@ -71,11 +71,11 @@ export const toRepoRef = (
   const repo: unknown = typeof ref === "string" ? ref : ref?.repo;
   if (ref === undefined || typeof repo !== "string" || repo.length === 0) {
     throw new Error(
-      `${where}: repo が必須（取得元に既定は無い）— ` +
-        '{ repo: "owner/name", revision: "<40 桁の commit SHA>" } を渡すか、' +
+      `${where}: repo is required (there is no default source) — ` +
+        'pass { repo: "owner/name", revision: "<40-digit commit SHA>" }, or ' +
         (sourcesExample === undefined
-          ? "リポ名の文字列（= main 追従）を渡す"
-          : `このパッケージ版が検証した ${sourcesExample} を渡す`),
+          ? "pass a repo name string (= tracks main)"
+          : `pass ${sourcesExample}, which this package version verified`),
     );
   }
   assertRepoSpelling(repo, where);

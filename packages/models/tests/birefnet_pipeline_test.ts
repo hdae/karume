@@ -103,7 +103,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
   await assertRejects(
     () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }, { model: "nope" }),
     Error,
-    "model 'nope' は manifest に無い",
+    "model 'nope' is not in the manifest",
   );
 });
 
@@ -112,7 +112,7 @@ test("fromAssets: pipeline の契約名が birefnet でない manifest を落と
   await assertRejects(
     () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
-    "manifest の pipeline が 'siglip2/1'",
+    "the manifest's pipeline is 'siglip2/1'",
   );
 });
 
@@ -122,7 +122,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   await assertRejects(
     () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
-    "major に未対応",
+    "major of pipeline 'birefnet/3' is not supported",
   );
 });
 
@@ -135,7 +135,7 @@ test("fromAssets: 旧 major（birefnet/1 — 後処理の手順を宣言しな�
   await assertRejects(
     () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
-    "pipeline 'birefnet/1' の major に未対応（この実装が読めるのは birefnet/2）",
+    "the major of pipeline 'birefnet/1' is not supported (this implementation reads birefnet/2)",
   );
 });
 
@@ -144,7 +144,7 @@ test("fromAssets: 存在しない quant は利用可能な一覧を添えて落�
   await assertRejects(
     () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }, { quant: "nope" }),
     Error,
-    "quant 'nope' は manifest に無い",
+    "quant 'nope' is not in the manifest",
   );
 });
 
@@ -156,7 +156,7 @@ test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async
   await assertRejects(
     () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
-    "pipelineConfig: 未知キー 'image_mean'",
+    "pipelineConfig: unknown key 'image_mean'",
   );
 });
 
@@ -167,7 +167,7 @@ test("fromAssets: bilinear 以外の補間を宣言した配布形は受理し�
   await assertRejects(
     () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
-    "pipelineConfig.interpolation: この実装が対応するのは 'bilinear' だけ",
+    "pipelineConfig.interpolation: this implementation supports only 'bilinear'",
   );
 });
 
@@ -178,7 +178,7 @@ test("fromAssets: 後処理の手順を宣言しない pipelineConfig は構築�
   await assertRejects(
     () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
-    "pipelineConfig.postprocess: 無い",
+    "pipelineConfig.postprocess: missing",
   );
 });
 
@@ -189,7 +189,7 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   await assertRejects(
     () => BirefnetPipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
-    "部品 'matte' の容器が無い",
+    "component 'matte' has no container",
   );
 });
 
@@ -224,16 +224,16 @@ test("assertStaticDim: 宣言どおりのグラフは通り、解像度違いは
         "imageWidth",
       ),
     Error,
-    "birefnet: imageWidth — グラフ入力 'pixel_values' の軸 3 が 2048",
+    "birefnet: imageWidth — graph input 'pixel_values' axis 3 is 2048",
   );
-  assert(error.message.includes("pipelineConfig は 1024"), error.message);
+  assert(error.message.includes("pipelineConfig has 1024"), error.message);
 });
 
 test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
   assertThrows(
     () => assertStaticDim(matteGraph(), "pixel", 3, birefnetConfig.imageWidth, "imageWidth"),
     Error,
-    "birefnet: グラフ入力 'pixel' が無い（imageWidth）",
+    "birefnet: graph input 'pixel' is missing (imageWidth)",
   );
 });
 
@@ -248,7 +248,7 @@ test("assertMatteShape: multi-scale で焼かれた出力は要素数でなく�
         "マットの形",
       ),
     Error,
-    "期待は [1, 1, 1024, 1024]",
+    "expected [1, 1, 1024, 1024]",
   );
 });
 
@@ -258,7 +258,7 @@ test("assertMatteShape: 先頭が一致する短い宣言も落とす（軸ご�
   assertThrows(
     () => assertMatteShape(matteGraph({ outputShape: [1, 1, 1024] }), birefnetConfig, "マットの形"),
     Error,
-    "グラフ出力 'matte' の形が [1, 1, 1024]",
+    "graph output 'matte' has shape [1, 1, 1024]",
   );
 });
 
@@ -271,7 +271,7 @@ test("assertMatteShape: 出力名の宣言が values に無ければ落とす", 
   assertThrows(
     () => assertMatteShape(model, birefnetConfig, "マットの形"),
     Error,
-    "birefnet: グラフ出力 'matte' の宣言が無い（マットの形）",
+    "birefnet: graph output 'matte' has no declaration (マットの形)",
   );
 });
 
@@ -442,8 +442,8 @@ test("resizePlaneF32: 横方向だけの勾配は resize しても横方向だ�
 });
 
 test("resizePlaneF32: 長さの食い違いは落とす（黙って途中まで読まない）", () => {
-  assertThrows(() => resizePlaneF32(new Float32Array(5), 3, 2, 3, 2), Error, "平面の長さ 5");
-  assertThrows(() => resizePlaneF32(new Float32Array(6), 3, 2, 0, 2), RangeError, "出力幅");
+  assertThrows(() => resizePlaneF32(new Float32Array(5), 3, 2, 3, 2), Error, "Plane length 5");
+  assertThrows(() => resizePlaneF32(new Float32Array(6), 3, 2, 0, 2), RangeError, "Output width");
 });
 
 test("後処理: α は 8bit の全域を使う（飽和側が 1 LSB で潰れていない）", () => {

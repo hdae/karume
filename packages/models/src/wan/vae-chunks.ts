@@ -100,7 +100,9 @@ export type WanVaeChunkLayout = {
 const staticShape = (dims: readonly (number | string)[], where: string): readonly number[] =>
   dims.map((dim, axis) => {
     if (typeof dim !== "number") {
-      throw new WanVaeChunkError(`${where} の軸 ${axis} が静的次元でない（${String(dim)}）`);
+      throw new WanVaeChunkError(
+        `${where} axis ${axis} is not a static dimension (${String(dim)})`,
+      );
     }
     return dim;
   });
@@ -113,9 +115,9 @@ const elements = (shape: readonly number[]): number => shape.reduce((count, dim)
 /** The static shape of a graph value (an undeclared name fails loudly — looked up by `Object.hasOwn`). */
 const valueShape = (owner: GraphOwner, name: string, where: string): readonly number[] => {
   if (!Object.hasOwn(owner.graph.values, name)) {
-    throw new WanVaeChunkError(`${where}: 値 '${name}' の宣言が無い`);
+    throw new WanVaeChunkError(`${where}: value '${name}' is not declared`);
   }
-  return staticShape(owner.graph.values[name].shape, `${where} の '${name}'`);
+  return staticShape(owner.graph.values[name].shape, `${where}'s '${name}'`);
 };
 
 /**
@@ -126,7 +128,7 @@ const valueShape = (owner: GraphOwner, name: string, where: string): readonly nu
  */
 const assertF32Declared = (dtype: string, where: string, what: string): void => {
   if (dtype !== "f32") {
-    throw new WanVaeChunkError(`${where}: ${what} の dtype ${dtype} が f32 でない`);
+    throw new WanVaeChunkError(`${where}: ${what} has dtype ${dtype}, not f32`);
   }
 };
 
@@ -142,26 +144,28 @@ const chunkGraph = (
   const { inputs, outputs } = owner.graph;
   const [latentSpec, ...cacheSpecs] = inputs;
   if (latentSpec?.name !== WAN_VAE_LATENT_INPUT) {
-    throw new WanVaeChunkError(`${where}: 先頭の入力が '${WAN_VAE_LATENT_INPUT}' でない`);
+    throw new WanVaeChunkError(`${where}: the first input is not '${WAN_VAE_LATENT_INPUT}'`);
   }
-  assertF32Declared(latentSpec.dtype, where, `潜在の入力 '${WAN_VAE_LATENT_INPUT}'`);
-  const latent = staticShape(latentSpec.shape, `${where} の '${WAN_VAE_LATENT_INPUT}'`);
+  assertF32Declared(latentSpec.dtype, where, `latent input '${WAN_VAE_LATENT_INPUT}'`);
+  const latent = staticShape(latentSpec.shape, `${where}'s '${WAN_VAE_LATENT_INPUT}'`);
   const [channels, latentFrames, rows, cols] = latent;
   if (latent.length !== 4 || latentFrames !== 1 || rows !== cols || channels < 1) {
-    throw new WanVaeChunkError(`${where}: 潜在は [C,1,t,t]（${latent.join(",")}）`);
+    throw new WanVaeChunkError(`${where}: the latent must be [C,1,t,t] (${latent.join(",")})`);
   }
   if (outputs.length !== inputs.length) {
     throw new WanVaeChunkError(
-      `${where}: 出力 ${outputs.length} 本が入力 ${inputs.length} 本と違う（フレーム + cache）`,
+      `${where}: output count ${outputs.length} differs from input count ${inputs.length} (frame + cache)`,
     );
   }
   if (cacheSpecs.length === 0) {
     // Only the causal cache carries state between chunks (with zero caches chunks cannot be chained).
-    throw new WanVaeChunkError(`${where}: cache の入力が 0 本（cache_NN で chunk を繋ぐ取り決め）`);
+    throw new WanVaeChunkError(
+      `${where}: no cache inputs (by convention, cache_NN chains the chunks)`,
+    );
   }
   const [frameOutput, ...cacheOutputs] = outputs;
-  const frameShape = valueShape(owner, frameOutput, `${where} のフレーム出力`);
-  assertF32Declared(owner.graph.values[frameOutput].dtype, where, `フレーム出力 '${frameOutput}'`);
+  const frameShape = valueShape(owner, frameOutput, `${where} frame output`);
+  assertF32Declared(owner.graph.values[frameOutput].dtype, where, `frame output '${frameOutput}'`);
   const [sampleChannels, , side] = frameShape;
   if (
     !sameShape(frameShape, [sampleChannels, frames, side, side]) ||
@@ -169,26 +173,28 @@ const chunkGraph = (
     side % rows !== 0
   ) {
     throw new WanVaeChunkError(
-      `${where}: フレームの形 [${frameShape.join(",")}] が [C,${frames},8t,8t] でない`,
+      `${where}: frame shape [${frameShape.join(",")}] is not [C,${frames},8t,8t]`,
     );
   }
   cacheSpecs.forEach((spec, index) => {
     if (!CACHE_INPUT.test(spec.name)) {
-      throw new WanVaeChunkError(`${where}: 入力 '${spec.name}' が cache_NN の綴りでない`);
+      throw new WanVaeChunkError(`${where}: input '${spec.name}' is not spelled cache_NN`);
     }
-    assertF32Declared(spec.dtype, where, `cache の入力 '${spec.name}'`);
-    const shape = staticShape(spec.shape, `${where} の '${spec.name}'`);
+    assertF32Declared(spec.dtype, where, `cache input '${spec.name}'`);
+    const shape = staticShape(spec.shape, `${where}'s '${spec.name}'`);
     if (shape.length !== 4 || shape[1] !== CACHE_FRAMES) {
-      throw new WanVaeChunkError(`${where}: '${spec.name}' は [Cin,2,h,w]（${shape.join(",")}）`);
+      throw new WanVaeChunkError(
+        `${where}: '${spec.name}' must be [Cin,2,h,w] (${shape.join(",")})`,
+      );
     }
     const output = cacheOutputs[index];
-    const updated = valueShape(owner, output, `${where} の出力`);
-    assertF32Declared(owner.graph.values[output].dtype, where, `更新後の cache の出力 '${output}'`);
+    const updated = valueShape(owner, output, `${where} output`);
+    assertF32Declared(owner.graph.values[output].dtype, where, `updated cache output '${output}'`);
     if (!sameShape(shape, updated)) {
       throw new WanVaeChunkError(
-        `${where}: 出力 ${
+        `${where}: output ${
           index + 1
-        }（'${output}'）の形が '${spec.name}' と違う（入力と同じ順の取り決め）`,
+        } ('${output}') shape differs from '${spec.name}' (by convention, outputs follow the input order)`,
       );
     }
   });
@@ -212,20 +218,20 @@ export const wanVaeChunkLayout = (first: GraphOwner, next: GraphOwner): WanVaeCh
   const nextGraph = chunkGraph(next, "vae_decoder_next", NEXT_FRAMES);
   if (!sameShape(firstGraph.latent, nextGraph.latent)) {
     throw new WanVaeChunkError(
-      `潜在の形が 2 本で違う（first [${firstGraph.latent.join(",")}]・next [${nextGraph.latent.join(
+      `The latent shapes of the 2 graphs differ (first [${firstGraph.latent.join(",")}], next [${nextGraph.latent.join(
         ",",
-      )}]）`,
+      )}])`,
     );
   }
   const [sampleChannels, , sampleTile] = nextGraph.graph.frameShape;
   if (firstGraph.graph.frameShape[2] !== sampleTile) {
-    throw new WanVaeChunkError("フレームの辺が first と next で違う");
+    throw new WanVaeChunkError("The frame side differs between first and next");
   }
   if (firstGraph.graph.frameShape[0] !== sampleChannels) {
     throw new WanVaeChunkError(
-      `フレームのチャネル数が first と next で違う（first ${
+      `The frame channel count differs between first and next (first ${
         firstGraph.graph.frameShape[0]
-      }・next ${sampleChannels}）`,
+      }, next ${sampleChannels})`,
     );
   }
   const cacheShapes = new Map<string, readonly number[]>(
@@ -239,11 +245,11 @@ export const wanVaeChunkLayout = (first: GraphOwner, next: GraphOwner): WanVaeCh
       name,
     );
     if (shape === undefined || !sameShape(shape, firstShape)) {
-      throw new WanVaeChunkError(`first の '${name}' が next に同じ形で無い`);
+      throw new WanVaeChunkError(`'${name}' of first is not in next with the same shape`);
     }
     const position = nextGraph.graph.caches.indexOf(name);
     if (position < cursor) {
-      throw new WanVaeChunkError(`first の cache の順が next と違う（'${name}'）`);
+      throw new WanVaeChunkError(`The cache order of first differs from next ('${name}')`);
     }
     cursor = position + 1;
   }
@@ -363,7 +369,7 @@ export class WanVaeChunkCaches {
 
   #cache(name: string): ResidentTensor {
     const resident = this.#caches.get(name);
-    if (resident === undefined) throw new WanVaeChunkError(`cache '${name}' の常駐が無い`);
+    if (resident === undefined) throw new WanVaeChunkError(`Cache '${name}' is not resident`);
     return resident;
   }
 }
@@ -377,7 +383,7 @@ export const wanVaeChunkCount = (
   const chunks = latents.length / plane;
   if (!Number.isInteger(chunks) || chunks < 1) {
     throw new WanVaeChunkError(
-      `潜在の要素数 ${latents.length} が [${layout.latentChannels},F,${layout.tile},${layout.tile}] でない`,
+      `Latent element count ${latents.length} does not match [${layout.latentChannels},F,${layout.tile},${layout.tile}]`,
     );
   }
   return chunks;
@@ -393,7 +399,7 @@ export const wanVaeLatentChunk = (
   // Letting an out-of-range index through would read the neighbouring channel's plane or past the
   // end (an empty subarray) and silently return values mixed with zeros.
   if (!Number.isInteger(index) || index < 0 || index >= chunks) {
-    throw new RangeError(`chunk ${index} が [0, ${chunks}) の外`);
+    throw new RangeError(`chunk ${index} is outside [0, ${chunks})`);
   }
   const area = layout.tile * layout.tile;
   const data = new Float32Array(layout.latentChannels * area);
@@ -440,7 +446,9 @@ export const concatWanVaeFrames = (
     const frames = index === 0 ? FIRST_FRAMES : NEXT_FRAMES;
     const values = new Float32Array(buffer);
     if (values.length !== sampleChannels * frames * plane) {
-      throw new WanVaeChunkError(`chunk ${index} のフレームの要素数 ${values.length} が合わない`);
+      throw new WanVaeChunkError(
+        `chunk ${index} frame element count ${values.length} does not match`,
+      );
     }
     for (let channel = 0; channel < sampleChannels; channel += 1) {
       const from = channel * frames * plane;

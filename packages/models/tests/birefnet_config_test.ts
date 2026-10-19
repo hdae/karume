@@ -53,7 +53,7 @@ test("未知キーは落とす（綴り違いが黙って既定へ縮退しな�
   assertThrows(
     () => parseBirefnetPipelineConfig(withPatch({ image_mean: [0.5, 0.5, 0.5] })),
     Error,
-    "未知キー 'image_mean'",
+    "unknown key 'image_mean'",
   );
 });
 
@@ -86,7 +86,7 @@ test("imageMean / imageStd の組で正規化後の値が f32 で溢れる配布
   const error = assertThrows(
     () => parseBirefnetPipelineConfig({ ...CONFIG, imageStd: [1e-50, 0.5, 0.5] }),
     Error,
-    "pipelineConfig.imageMean / imageStd: チャネル 0 の正規化後の値域",
+    "pipelineConfig.imageMean / imageStd: channel 0: the normalized range",
   );
   assert(!(error instanceof ModelInputError), "資産の不正が入力起因に分類された");
 });
@@ -126,7 +126,7 @@ test("対応していない補間は受理しない（黙って bilinear で通�
   assertThrows(
     () => parseBirefnetPipelineConfig(withPatch({ interpolation: "bicubic" })),
     Error,
-    "'bilinear' だけ",
+    "only 'bilinear'",
   );
 });
 
@@ -146,7 +146,7 @@ test("集合の外の後処理の手順は落とす（綴り違い・大小文�
     assertThrows(
       () => parseBirefnetPipelineConfig(withPatch({ postprocess: bad })),
       Error,
-      "pipelineConfig.postprocess: 未知の後処理の手順",
+      "pipelineConfig.postprocess: unknown postprocessing procedure",
     );
   }
 });

@@ -22,27 +22,35 @@ import {
 test("asRecord / asString / asNumber: 型が違う値は読まずに落とす", () => {
   assertEquals(asRecord({ a: 1 }, "表"), { a: 1 });
   // `typeof null === "object"` を通さない（`null.foo` ではなく門で落とす）。
-  assertThrows(() => asRecord(null, "表"), Error, "表: オブジェクトでない");
-  assertThrows(() => asRecord("{}", "表"), Error, "表: オブジェクトでない");
+  assertThrows(() => asRecord(null, "表"), Error, "表: not an object");
+  assertThrows(() => asRecord("{}", "表"), Error, "表: not an object");
 
   assertEquals(asString("abc", "欄"), "abc");
-  assertThrows(() => asString(12, "欄"), Error, "欄: 文字列でない");
+  assertThrows(() => asString(12, "欄"), Error, "欄: not a string");
 
   assertEquals(asNumber(12, "欄"), 12);
-  assertThrows(() => asNumber("12", "欄"), Error, "欄: 数値でない");
+  assertThrows(() => asNumber("12", "欄"), Error, "欄: not a number");
 });
 
 test("asId: `Int32Array` へ書くと黙って別の id になる値を全て落とす", () => {
   // 非整数は `Int32Array` が切り捨てる = 別のトークンを指す（門が無ければ例外は出ない）。
   assertEquals(Int32Array.of(1.5)[0], 1);
-  assertThrows(() => asId(1.5, "unkId"), Error, "unkId: トークン id が 0..2147483647 の整数でない");
+  assertThrows(
+    () => asId(1.5, "unkId"),
+    Error,
+    "unkId: token id is not an integer in 0..2147483647",
+  );
 
   // i32 の範囲外は wrap する（2147483648 → -2147483648）。
   assertEquals(Int32Array.of(2147483648)[0], -2147483648);
-  assertThrows(() => asId(2147483648, "eosId"), Error, "トークン id が 0..2147483647 の整数でない");
+  assertThrows(
+    () => asId(2147483648, "eosId"),
+    Error,
+    "token id is not an integer in 0..2147483647",
+  );
 
-  assertThrows(() => asId(-1, "eosId"), Error, "トークン id が 0..2147483647 の整数でない");
-  assertThrows(() => asId("3", "eosId"), Error, "eosId: 数値でない");
+  assertThrows(() => asId(-1, "eosId"), Error, "token id is not an integer in 0..2147483647");
+  assertThrows(() => asId("3", "eosId"), Error, "eosId: not a number");
 
   // 両端は受理集合の中（0 と i32 の上限）。
   assertEquals(asId(0, "unkId"), 0);
@@ -51,9 +59,13 @@ test("asId: `Int32Array` へ書くと黙って別の id になる値を全て落
 
 test("asVocabId: 語彙の行数以上の id は落とす（gather が別の行を引く前に）", () => {
   assertEquals(asVocabId(2, "unkId", 3), 2);
-  assertThrows(() => asVocabId(3, "unkId", 3), Error, "unkId: トークン id 3 が語彙の行数 3 以上");
+  assertThrows(
+    () => asVocabId(3, "unkId", 3),
+    Error,
+    "unkId: token id 3 is not below the vocabulary row count 3",
+  );
   // 土台の {@link asId} の規律もそのまま効く。
-  assertThrows(() => asVocabId(1.5, "unkId", 3), Error, "整数でない");
+  assertThrows(() => asVocabId(1.5, "unkId", 3), Error, "not an integer");
 });
 
 test("parseAddedTokens: 対の列を写像にし、重複鍵は後勝ちにせず落とす", () => {
@@ -83,13 +95,13 @@ test("parseAddedTokens: 対の列を写像にし、重複鍵は後勝ちにせ�
         "added",
       ),
     Error,
-    'added: 鍵 "<s>" が重複している',
+    'added: duplicate key "<s>"',
   );
 
-  assertThrows(() => parseAddedTokens({ "<s>": 1 }, "added"), Error, "added: 配列でない");
-  assertThrows(() => parseAddedTokens([["<s>"]], "added"), Error, "added: [文字列, id] でない");
-  assertThrows(() => parseAddedTokens([[1, 1]], "added"), Error, "added: 文字列でない");
-  assertThrows(() => parseAddedTokens([["<s>", 1.5]], "added"), Error, "added: トークン id が");
+  assertThrows(() => parseAddedTokens({ "<s>": 1 }, "added"), Error, "added: not an array");
+  assertThrows(() => parseAddedTokens([["<s>"]], "added"), Error, "added: not [string, id]");
+  assertThrows(() => parseAddedTokens([[1, 1]], "added"), Error, "added: not a string");
+  assertThrows(() => parseAddedTokens([["<s>", 1.5]], "added"), Error, "added: token id is");
 });
 
 test("parseAddedTokens: 追加トークンは語彙の行数で縛らない（語彙表の外へ採番される形）", () => {

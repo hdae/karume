@@ -51,13 +51,13 @@ export const ditPatchGeometry = (tokenWidth: number, outputWidth: number): DitPa
   const patchVolume = tokenWidth - outputWidth;
   if (patchVolume <= 0 || outputWidth <= 0 || outputWidth % patchVolume !== 0) {
     throw new Error(
-      `DiT の patch 幾何を割り出せない（tokens 幅 ${tokenWidth} / 出力幅 ${outputWidth}）`,
+      `Cannot derive the DiT patch geometry (tokens width ${tokenWidth} / output width ${outputWidth})`,
     );
   }
   const side = Math.round(Math.sqrt(patchVolume));
   if (side * side !== patchVolume) {
     throw new Error(
-      `patch 体積 ${patchVolume} が平方数でない（pt=1・正方 patch の前提が崩れている）`,
+      `Patch volume ${patchVolume} is not a perfect square (the assumption of pt=1 and a square patch does not hold)`,
     );
   }
   return { channels: outputWidth / patchVolume, patchHeight: side, patchWidth: side };
@@ -70,17 +70,17 @@ const latentSides = (
   where: string,
 ): readonly [number, number] => {
   if (latentShape.length !== 4 || latentShape[0] !== 1) {
-    throw new Error(`${where}: latent は [1,C,H,W] 前提（[${latentShape}]）`);
+    throw new Error(`${where}: assumes a [1,C,H,W] latent ([${latentShape}])`);
   }
   if (latentShape[1] !== geometry.channels) {
     throw new Error(
-      `${where}: latent のチャネル数 ${latentShape[1]} がグラフの ${geometry.channels} と違う`,
+      `${where}: latent channel count ${latentShape[1]} does not match the graph's ${geometry.channels}`,
     );
   }
   const [, , height, width] = latentShape;
   if (height % geometry.patchHeight !== 0 || width % geometry.patchWidth !== 0) {
     throw new Error(
-      `${where}: latent ${height}×${width} が patch ${geometry.patchHeight}×${geometry.patchWidth} で割り切れない`,
+      `${where}: latent ${height}×${width} is not divisible by patch ${geometry.patchHeight}×${geometry.patchWidth}`,
     );
   }
   return [height, width];
@@ -88,7 +88,7 @@ const latentSides = (
 
 /** Token length `S` for a latent `[1,C,H,W]`. */
 export const tokenCount = (latentShape: readonly number[], geometry: DitPatchGeometry): number => {
-  const [height, width] = latentSides(latentShape, geometry, "トークン長");
+  const [height, width] = latentSides(latentShape, geometry, "token length");
   return (height / geometry.patchHeight) * (width / geometry.patchWidth);
 };
 
@@ -110,7 +110,7 @@ export const patchifyLatents = (
   const [height, width] = latentSides(latentShape, geometry, "patchify");
   const { channels, patchHeight, patchWidth } = geometry;
   if (latents.length !== channels * height * width) {
-    throw new Error(`patchify: 要素数 ${latents.length} が [${latentShape}] と違う`);
+    throw new Error(`patchify: element count ${latents.length} does not match [${latentShape}]`);
   }
   const rows = height / patchHeight;
   const cols = width / patchWidth;
@@ -154,7 +154,7 @@ export const unpatchifyTokens = (
   const tokenWidth = patchHeight * patchWidth * channels;
   if (tokens.length !== rows * cols * tokenWidth) {
     throw new Error(
-      `unpatchify: 要素数 ${tokens.length} が [1,${rows * cols},${tokenWidth}] と違う`,
+      `unpatchify: element count ${tokens.length} does not match [1,${rows * cols},${tokenWidth}]`,
     );
   }
   const latents = new Float32Array(channels * height * width);
@@ -188,13 +188,13 @@ export const ropeTables = (
   latentShape: readonly number[],
   geometry: DitPatchGeometry,
 ): { readonly cos: Float32Array<ArrayBuffer>; readonly sin: Float32Array<ArrayBuffer> } => {
-  const [height, width] = latentSides(latentShape, geometry, "rope 表");
+  const [height, width] = latentSides(latentShape, geometry, "rope table");
   const rows = height / geometry.patchHeight;
   const cols = width / geometry.patchWidth;
   if (rows > base.rows || cols > base.rows) {
     throw new Error(
-      `rope 素表の行数 ${base.rows} では H'=${rows} / W'=${cols} を組めない` +
-        "（モデル側の位置表の天井を超えている）",
+      `The rope base table's ${base.rows} rows cannot build H'=${rows} / W'=${cols}` +
+        " (exceeds the ceiling of the model's position table)",
     );
   }
   const rowWidth = ropeWidth(base);

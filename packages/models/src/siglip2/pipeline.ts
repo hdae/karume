@@ -217,13 +217,13 @@ export const assertOutputDim = (
   const name = model.graph.outputs[0];
   const value = model.graph.values[name];
   if (value === undefined) {
-    throw new Error(`siglip2: グラフ出力 '${name}' の宣言が無い（${where}）`);
+    throw new Error(`siglip2: graph output '${name}' has no declaration (${where})`);
   }
   const dim = value.shape[axis];
   if (dim !== expected) {
     throw new Error(
-      `siglip2: ${where} — グラフ出力 '${name}' の軸 ${axis} が ${String(dim)}、` +
-        `pipelineConfig は ${expected}`,
+      `siglip2: ${where} — graph output '${name}' axis ${axis} is ${String(dim)}, ` +
+        `pipelineConfig has ${expected}`,
     );
   }
 };
@@ -244,18 +244,18 @@ export const assertPooledOutput = (model: GraphOwner, where: string): void => {
   const name = model.graph.outputs[0];
   const value = model.graph.values[name];
   if (value === undefined) {
-    throw new Error(`siglip2: グラフ出力 '${name}' の宣言が無い（${where}）`);
+    throw new Error(`siglip2: graph output '${name}' has no declaration (${where})`);
   }
   if (value.dtype !== "f32" || value.shape.length !== 2 || value.shape[0] !== 1) {
     throw new Error(
-      `siglip2: ${where} — グラフ出力 '${name}' が ${value.dtype} ` +
-        `[${value.shape.map(String).join(", ")}]、期待は f32 の [1, hiddenDim]`,
+      `siglip2: ${where} — graph output '${name}' is ${value.dtype} ` +
+        `[${value.shape.map(String).join(", ")}], expected f32 [1, hiddenDim]`,
     );
   }
 };
 
 const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
-  if (tensor.dtype !== "f32") throw new Error(`${where}: f32 でない（${tensor.dtype}）`);
+  if (tensor.dtype !== "f32") throw new Error(`${where}: not f32 (${tensor.dtype})`);
   return tensor.data;
 };
 
@@ -358,24 +358,24 @@ const admitSiglip2 = (
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
-      `Siglip2Pipeline: model '${modelName}' は manifest に無い` +
-        `（利用可能: ${manifest.available.models.join(" / ")}）`,
+      `Siglip2Pipeline: model '${modelName}' is not in the manifest` +
+        ` (available: ${manifest.available.models.join(" / ")})`,
     );
   }
   const entry: ModelEntry = manifest.models[modelName];
   const { name, major } = entry.pipeline;
   if (name !== SIGLIP2_PIPELINE_NAME) {
     throw new Error(
-      `Siglip2Pipeline: manifest の pipeline が '${name}/${major}'` +
-        `（'${SIGLIP2_PIPELINE_NAME}/${SIGLIP2_PIPELINE_MAJOR}' が必要）`,
+      `Siglip2Pipeline: the manifest's pipeline is '${name}/${major}'` +
+        ` ('${SIGLIP2_PIPELINE_NAME}/${SIGLIP2_PIPELINE_MAJOR}' is required)`,
     );
   }
   if (major !== SIGLIP2_PIPELINE_MAJOR) {
     // The only check that stops silent degradation from "old implementation × new repository"
     // (ADR 0038 §6).
     throw new Error(
-      `Siglip2Pipeline: pipeline '${name}/${major}' の major に未対応` +
-        `（この実装が読めるのは ${SIGLIP2_PIPELINE_NAME}/${SIGLIP2_PIPELINE_MAJOR}）`,
+      `Siglip2Pipeline: the major of pipeline '${name}/${major}' is not supported` +
+        ` (this implementation reads ${SIGLIP2_PIPELINE_NAME}/${SIGLIP2_PIPELINE_MAJOR})`,
     );
   }
   const config = parseSiglip2PipelineConfig(entry.pipelineConfig);
@@ -383,8 +383,8 @@ const admitSiglip2 = (
   const quantName = options.quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quantName)) {
     throw new Error(
-      `Siglip2Pipeline: quant '${quantName}' は manifest に無い` +
-        `（利用可能: ${entry.available.quants.join(" / ")}）`,
+      `Siglip2Pipeline: quant '${quantName}' is not in the manifest` +
+        ` (available: ${entry.available.quants.join(" / ")})`,
     );
   }
   const quant = entry.quants[quantName];
@@ -405,13 +405,13 @@ const admitSiglip2 = (
   // read other values.
   if (vision.graph.inputs.length !== 1 || vision.graph.outputs.length !== 1) {
     throw new Error(
-      `Siglip2Pipeline: vision グラフの入出力が ${vision.graph.inputs.length} /` +
-        ` ${vision.graph.outputs.length} 本（どちらも 1 本の vision tower が必要）`,
+      `Siglip2Pipeline: the vision graph has ${vision.graph.inputs.length} /` +
+        ` ${vision.graph.outputs.length} inputs / outputs (one vision tower requires exactly 1 of each)`,
     );
   }
-  assertGraphInputDtype("siglip2", vision, PIXEL_VALUES, "f32", "前処理の pixel_values");
-  assertStaticDim(vision, PIXEL_VALUES, 0, 1, "batch は静的 1");
-  assertStaticDim(vision, PIXEL_VALUES, 1, CHANNELS, "RGB の 3 チャネル");
+  assertGraphInputDtype("siglip2", vision, PIXEL_VALUES, "f32", "preprocessing's pixel_values");
+  assertStaticDim(vision, PIXEL_VALUES, 0, 1, "batch is static 1");
+  assertStaticDim(vision, PIXEL_VALUES, 1, CHANNELS, "3 RGB channels");
   assertStaticDim(vision, PIXEL_VALUES, 2, config.imageHeight, "imageHeight");
   assertStaticDim(vision, PIXEL_VALUES, 3, config.imageWidth, "imageWidth");
   assertPooledOutput(vision, "pooler_output");
@@ -503,11 +503,12 @@ const embedImage = async (
   if (state.onRunDiagnostics !== undefined) state.onRunDiagnostics(state.session.diagnostics());
   const name = state.vision.graph.outputs[0];
   const tensor = outputs[name];
-  if (tensor === undefined) throw new Error(`siglip2: グラフ出力 '${name}' が実行結果に無い`);
+  if (tensor === undefined)
+    throw new Error(`siglip2: graph output '${name}' is not in the run result`);
   const data = asF32(tensor, "pooler_output");
   if (data.length !== config.hiddenDim) {
     throw new Error(
-      `siglip2: pooler_output の要素数 ${data.length} が hiddenDim ${config.hiddenDim} と違う`,
+      `siglip2: pooler_output element count ${data.length} does not match hiddenDim ${config.hiddenDim}`,
     );
   }
   return data;
@@ -562,7 +563,7 @@ export class Siglip2Pipeline {
     const source = toManifestSource(
       ref,
       "Siglip2Pipeline.fromPretrained",
-      'SIGLIP2_SOURCES["siglip2"]（@karume/models/siglip2）',
+      'SIGLIP2_SOURCES["siglip2"] (@karume/models/siglip2)',
     );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
@@ -640,7 +641,7 @@ export class Siglip2Pipeline {
     // The disposed check happens at call time (checking inside the chain would also fail the
     // embeddings accepted before dispose).
     if (this.#disposal !== undefined) {
-      throw new Error("Siglip2Pipeline: dispose 済みでは埋め込めない");
+      throw new Error("Siglip2Pipeline: cannot embed after dispose");
     }
     return await this.#chain(() => embedImage(this.#state, image));
   }

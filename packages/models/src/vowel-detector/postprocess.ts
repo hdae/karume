@@ -79,7 +79,7 @@ const assertFiniteGrid = (
       const value = values[frame * CLASS_COUNT + cls];
       if (!Number.isFinite(value)) {
         throw new Error(
-          `${where} frame ${frame} / class ${cls}（${LIPSYNC_CLASSES[cls]}）が非有限（${value}）`,
+          `${where} frame ${frame} / class ${cls} (${LIPSYNC_CLASSES[cls]}) is non-finite (${value})`,
         );
       }
     }
@@ -110,14 +110,14 @@ export const viterbiSmooth = (
 ): Int32Array<ArrayBuffer> => {
   if (logProbabilities.length !== frames * CLASS_COUNT) {
     throw new Error(
-      `viterbiSmooth: log 事後確率が ${logProbabilities.length} 要素` +
-        `（${frames}×${CLASS_COUNT} が要る）`,
+      `viterbiSmooth: the log posteriors have ${logProbabilities.length} elements` +
+        ` (${frames}×${CLASS_COUNT} are required)`,
     );
   }
-  if (frames < 1) throw new Error(`viterbiSmooth: フレーム数 ${frames} が 1 未満`);
+  if (frames < 1) throw new Error(`viterbiSmooth: frame count ${frames} is less than 1`);
   // It is a public function and can be called alone (through `logitsToSegments` the entry has
   // already checked).
-  assertFiniteGrid(logProbabilities, frames, "viterbiSmooth: log 事後確率");
+  assertFiniteGrid(logProbabilities, frames, "viterbiSmooth: log posteriors");
 
   const score = new Float64Array(CLASS_COUNT);
   for (let cls = 0; cls < CLASS_COUNT; cls += 1) score[cls] = logProbabilities[cls];
@@ -263,11 +263,11 @@ export const logitsToSegments = (
 ): LabSegment[] => {
   if (logits.length !== frames * CLASS_COUNT) {
     throw new Error(
-      `logitsToSegments: ロジットが ${logits.length} 要素（${frames}×${CLASS_COUNT} が要る）`,
+      `logitsToSegments: the logits have ${logits.length} elements (${frames}×${CLASS_COUNT} are required)`,
     );
   }
-  if (frames < 1) throw new Error(`logitsToSegments: フレーム数 ${frames} が 1 未満`);
-  assertFiniteGrid(logits, frames, "logitsToSegments: ロジット");
+  if (frames < 1) throw new Error(`logitsToSegments: frame count ${frames} is less than 1`);
+  assertFiniteGrid(logits, frames, "logitsToSegments: logits");
 
   const logProbabilities = new Float64Array(frames * CLASS_COUNT);
   for (let frame = 0; frame < frames; frame += 1) {

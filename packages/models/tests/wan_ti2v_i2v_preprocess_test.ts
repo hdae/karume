@@ -251,7 +251,7 @@ describe("LANCZOS（Pillow の 8bit 経路の逐語の移植）", () => {
       { left: 0, top: 0, width: 0, height: 8 },
       { left: 0.5, top: 0, width: 4, height: 8 },
     ]) {
-      assertThrows(() => resizeRgb8LanczosWindow(image, 8, 8, window), RangeError, "窓");
+      assertThrows(() => resizeRgb8LanczosWindow(image, 8, 8, window), RangeError, "window");
     }
   });
 
@@ -338,10 +338,10 @@ describe("出力寸法の選択（受理集合 × 公式の比較式 max(r/rc, r
   it("明示した寸法が受理集合の外なら ModelInputError", () => {
     const image = blank(832, 480);
     for (const [requested, message] of [
-      [{ width: 832, height: 480 }, "832×480 が受理集合（1280×704 / 704×1280）に無い"],
-      [{ width: 1280, height: 1280 }, "1280×1280 が受理集合"],
-      [{ width: 1000 }, "width 1000 が受理集合"],
-      [{ height: 1000 }, "height 1000 が受理集合"],
+      [{ width: 832, height: 480 }, "832×480 is not in the accepted set (1280×704 / 704×1280)"],
+      [{ width: 1280, height: 1280 }, "1280×1280 is not in the accepted set"],
+      [{ width: 1000 }, "width 1000 is not in the accepted set"],
+      [{ height: 1000 }, "height 1000 is not in the accepted set"],
     ] as const) {
       assertThrows(
         () => selectWanI2vSize(image, requested, WAN22_TI2V_GENERATION),
@@ -482,7 +482,7 @@ describe("寸法合わせ（crop = 覆ってから中央を切り出す / stretc
     assertThrows(
       () => fitWanI2vImage(coordinateImage(4, 4), landscape, "cover" as never),
       Error,
-      "未対応",
+      "is not supported",
     );
   });
 });
@@ -574,9 +574,9 @@ describe("patchify（上流 diffusers の patchify — permute(0,1,6,4,2,3,5)・
     assertThrows(
       () => patchifyWanImage(new Float32Array(3 * 5 * 4), [3, 5, 4], 2),
       Error,
-      "割り切れない",
+      "is not divisible by",
     );
-    assertThrows(() => patchifyWanImage(new Float32Array(7), [3, 2, 2], 2), Error, "要素数");
+    assertThrows(() => patchifyWanImage(new Float32Array(7), [3, 2, 2], 2), Error, "element count");
   });
 });
 
@@ -679,13 +679,13 @@ describe("encoder の出口の正規化（上流 (mu − mean) · f32(1 / f32(st
     assertThrows(
       () => normalizeWanLatents(new Float32Array(49), stats),
       Error,
-      "正規化: 要素数 49",
+      "Normalization: element count 49",
     );
     assertThrows(
       () =>
         normalizeWanLatents(new Float32Array(48), { mean: stats.mean, std: stats.std.slice(1) }),
       Error,
-      "正規化: mean 48 本と std 47 本の数が違う",
+      "Normalization: mean count 48 and std count 47 differ",
     );
   });
 });

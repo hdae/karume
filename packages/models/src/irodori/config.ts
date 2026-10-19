@@ -227,7 +227,7 @@ const parseCfgScales = (raw: unknown): IrodoriCfgScales => {
   assertAllowedKeys(record, CFG_SCALE_KEYS, where);
   // 0 is a regular value meaning "do not run CFG for that condition" (upstream
   // `has_*_cfg = scale > 0`).
-  const requirement = "非負の有限数でない、または f32 で厳密に表せない";
+  const requirement = "not a non-negative finite number, or not exactly representable in f32";
   return {
     text: readNumber(record, "text", where, isNonNegativeF32, requirement),
     speaker: readNumber(record, "speaker", where, isNonNegativeF32, requirement),
@@ -241,7 +241,7 @@ export const parseIrodoriPipelineConfig = (
 ): IrodoriPipelineConfig => {
   const where = "pipelineConfig";
   assertAllowedKeys(raw, ROOT_KEYS, where);
-  const positive = "正の整数でない";
+  const positive = "not a positive integer";
   // A field that loses one entry to a leading token (BOS for text / caption, the mean token for
   // speaker) needs at least 2 so that the body keeps a budget. Accepting 1 gives text a body of 0
   // tokens and speaker 0 rows of reference latent, and the failure surfaces with an unrelated
@@ -249,9 +249,9 @@ export const parseIrodoriPipelineConfig = (
   // `integratedLoudness`.
   const withLeadingToken = (value: number): boolean => Number.isInteger(value) && value >= 2;
   const config: IrodoriPipelineConfig = {
-    maxTextLen: readNumber(raw, "maxTextLen", where, withLeadingToken, "2 以上の整数でない"),
-    maxCaptionLen: readNumber(raw, "maxCaptionLen", where, withLeadingToken, "2 以上の整数でない"),
-    speakerRows: readNumber(raw, "speakerRows", where, withLeadingToken, "2 以上の整数でない"),
+    maxTextLen: readNumber(raw, "maxTextLen", where, withLeadingToken, "not an integer >= 2"),
+    maxCaptionLen: readNumber(raw, "maxCaptionLen", where, withLeadingToken, "not an integer >= 2"),
+    speakerRows: readNumber(raw, "speakerRows", where, withLeadingToken, "not an integer >= 2"),
     ditSymMax: readNumber(raw, "ditSymMax", where, isPositiveInteger, positive),
     frameRate: readNumber(raw, "frameRate", where, isPositiveInteger, positive),
     sampleRate: readNumber(raw, "sampleRate", where, isPositiveInteger, positive),
@@ -268,7 +268,7 @@ export const parseIrodoriPipelineConfig = (
       "timestepEmbedDim",
       where,
       (value) => isPositiveInteger(value) && value % 2 === 0,
-      "正の偶数でない",
+      "not a positive even number",
     ),
     steps: readNumber(raw, "steps", where, isPositiveInteger, positive),
     initScale: readNumber(
@@ -276,38 +276,50 @@ export const parseIrodoriPipelineConfig = (
       "initScale",
       where,
       isPositiveF32Finite,
-      "正の有限数でない、または f32 で有限に収まらない",
+      "not a positive finite number, or not finite in f32",
     ),
-    cfgMinT: readNumber(raw, "cfgMinT", where, Number.isFinite, "有限の数でない"),
-    cfgMaxT: readNumber(raw, "cfgMaxT", where, Number.isFinite, "有限の数でない"),
+    cfgMinT: readNumber(raw, "cfgMinT", where, Number.isFinite, "not a finite number"),
+    cfgMaxT: readNumber(raw, "cfgMaxT", where, Number.isFinite, "not a finite number"),
     cfgScales: parseCfgScales(Object.hasOwn(raw, "cfgScales") ? raw["cfgScales"] : undefined),
-    minSeconds: readNumber(raw, "minSeconds", where, isPositiveFinite, "正の有限数でない"),
-    maxSeconds: readNumber(raw, "maxSeconds", where, isPositiveFinite, "正の有限数でない"),
+    minSeconds: readNumber(
+      raw,
+      "minSeconds",
+      where,
+      isPositiveFinite,
+      "not a positive finite number",
+    ),
+    maxSeconds: readNumber(
+      raw,
+      "maxSeconds",
+      where,
+      isPositiveFinite,
+      "not a positive finite number",
+    ),
     speakerUncondMode: readOnly(
       raw,
       "speakerUncondMode",
       where,
       SPEAKER_UNCOND_MODE,
-      "uncond を『cond の state + 該当区間のマスク全 False』で表す（ADR 0047 決定 1）",
+      "uncond is expressed as 'the cond state + every mask of that segment False' (ADR 0047 decision 1)",
     ),
     cfgGuidanceMode: readOnly(
       raw,
       "cfgGuidanceMode",
       where,
       CFG_GUIDANCE_MODE,
-      "CFG の合成が `v_cond + Σ s_k(v_cond − v_k)` の形に限られる（ADR 0047 決定 1）",
+      "the CFG combination is limited to the form `v_cond + Σ s_k(v_cond − v_k)` (ADR 0047 decision 1)",
     ),
   };
   // A declaration with an empty / reversed interval stays silent as "CFG never applies" (only the
   // forward count goes down).
   if (config.cfgMinT > config.cfgMaxT) {
     throw new Error(
-      `${where}: cfgMinT ${config.cfgMinT} が cfgMaxT ${config.cfgMaxT} より大きい（CFG が 1 度も掛からない）`,
+      `${where}: cfgMinT ${config.cfgMinT} is greater than cfgMaxT ${config.cfgMaxT} (CFG would never apply)`,
     );
   }
   if (config.minSeconds > config.maxSeconds) {
     throw new Error(
-      `${where}: minSeconds ${config.minSeconds} が maxSeconds ${config.maxSeconds} より大きい`,
+      `${where}: minSeconds ${config.minSeconds} is greater than maxSeconds ${config.maxSeconds}`,
     );
   }
   // The two conversions, seconds → frames (`frameRate`) and seconds → samples → frames
@@ -315,8 +327,8 @@ export const parseIrodoriPipelineConfig = (
   // decided changes per path, and only the cut length quietly disagrees (no exception).
   if (config.sampleRate !== config.frameRate * config.hopLength) {
     throw new Error(
-      `${where}: sampleRate ${config.sampleRate} が frameRate ${config.frameRate} × hopLength` +
-        ` ${config.hopLength} = ${config.frameRate * config.hopLength} と違う`,
+      `${where}: sampleRate ${config.sampleRate} differs from frameRate ${config.frameRate} × hopLength` +
+        ` ${config.hopLength} = ${config.frameRate * config.hopLength}`,
     );
   }
   // A declaration where the S reachable from the maximum seconds exceeds the declared maximum of
@@ -327,8 +339,8 @@ export const parseIrodoriPipelineConfig = (
   const reachable = maxSequenceLength(config);
   if (reachable > config.ditSymMax) {
     throw new Error(
-      `${where}: maxSeconds ${config.maxSeconds} から到達しうる latent 長 ${reachable} が` +
-        ` ditSymMax ${config.ditSymMax} を超えている`,
+      `${where}: maxSeconds ${config.maxSeconds} can reach latent length ${reachable}, which` +
+        ` exceeds ditSymMax ${config.ditSymMax}`,
     );
   }
   return config;

@@ -56,12 +56,12 @@ type RawTable = {
  */
 const tableOf = (file: SafetensorsFile, name: string): RawTable => {
   const view = file.tensors.get(name);
-  if (view === undefined) throw new Error(`rope 素表に '${name}' が無い`);
+  if (view === undefined) throw new Error(`The rope base table has no '${name}'`);
   if (view.dtype !== F32_DTYPE) {
-    throw new Error(`rope 素表 '${name}': 格納 dtype が ${view.dtype}（F32 が必要）`);
+    throw new Error(`Rope base table '${name}': storage dtype is ${view.dtype} (F32 is required)`);
   }
   if (view.shape.length !== 2) {
-    throw new Error(`rope 素表 '${name}': rank が 2 でない`);
+    throw new Error(`Rope base table '${name}': rank is not 2`);
   }
   const shape: readonly [number, number] = [view.shape[0], view.shape[1]];
   return {
@@ -84,7 +84,8 @@ export const parseRopeBase = (buffer: ArrayBuffer): RopeBase => {
   // call is negligible.
   const expectedKeys = new Set(ROPE_AXES.flatMap((axis) => [`cos_${axis}`, `sin_${axis}`]));
   for (const name of file.tensors.keys()) {
-    if (!expectedKeys.has(name)) throw new Error(`rope 素表に想定外のテンソル '${name}' がある`);
+    if (!expectedKeys.has(name))
+      throw new Error(`The rope base table has an unexpected tensor '${name}'`);
   }
   const cos: Float32Array<ArrayBuffer>[] = [];
   const sin: Float32Array<ArrayBuffer>[] = [];
@@ -94,10 +95,12 @@ export const parseRopeBase = (buffer: ArrayBuffer): RopeBase => {
     const cosTable = tableOf(file, `cos_${axis}`);
     const sinTable = tableOf(file, `sin_${axis}`);
     if (cosTable.shape[0] !== sinTable.shape[0] || cosTable.shape[1] !== sinTable.shape[1]) {
-      throw new Error(`rope 素表 ${axis} の cos / sin で shape が違う`);
+      throw new Error(`Rope base table ${axis}: the shapes of cos / sin do not match`);
     }
     if (rows !== undefined && cosTable.shape[0] !== rows) {
-      throw new Error(`rope 素表 ${axis} の行数 ${cosTable.shape[0]} が他軸の ${rows} と違う`);
+      throw new Error(
+        `Rope base table ${axis}: row count ${cosTable.shape[0]} does not match the other axes' ${rows}`,
+      );
     }
     rows = cosTable.shape[0];
     widths.push(cosTable.shape[1]);

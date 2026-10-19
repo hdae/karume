@@ -27,10 +27,10 @@ test("ditPatchGeometry: グラフの入出力幅から patch とチャネル数�
 });
 
 test("ditPatchGeometry: 割り出せない幅は落とす（黙って正方 patch を仮定しない）", () => {
-  assertThrows(() => ditPatchGeometry(64, 68), Error, "割り出せない");
-  assertThrows(() => ditPatchGeometry(70, 64), Error, "割り出せない");
+  assertThrows(() => ditPatchGeometry(64, 68), Error, "Cannot derive");
+  assertThrows(() => ditPatchGeometry(70, 64), Error, "Cannot derive");
   // 差が平方数でない = pt=1・正方 patch の前提が崩れている。
-  assertThrows(() => ditPatchGeometry(72, 64), Error, "平方数");
+  assertThrows(() => ditPatchGeometry(72, 64), Error, "perfect square");
 });
 
 test("tokenCount: latent を patch で割った格子の積（S）", () => {
@@ -126,18 +126,26 @@ test("unpatchifyTokens: 最終次元は (ih, iw, c) — patchify の逆順では
 
 test("patchify / unpatchify: 形の食い違いは落とす（沈黙誤値にしない）", () => {
   const shape = [1, TOKEN_GEOMETRY.channels, 4, 9];
-  assertThrows(() => patchifyLatents(new Float32Array(4), shape, TOKEN_GEOMETRY), Error, "要素数");
+  assertThrows(
+    () => patchifyLatents(new Float32Array(4), shape, TOKEN_GEOMETRY),
+    Error,
+    "element count",
+  );
   assertThrows(
     () => patchifyLatents(new Float32Array(36), [1, 3, 5, 9], TOKEN_GEOMETRY),
     Error,
-    "割り切れない",
+    "is not divisible by",
   );
   assertThrows(
     () => patchifyLatents(new Float32Array(36), [2, 3, 4, 9], TOKEN_GEOMETRY),
     Error,
-    "[1,C,H,W] 前提",
+    "assumes a [1,C,H,W]",
   );
-  assertThrows(() => unpatchifyTokens(new Float32Array(7), shape, TOKEN_GEOMETRY), Error, "要素数");
+  assertThrows(
+    () => unpatchifyTokens(new Float32Array(7), shape, TOKEN_GEOMETRY),
+    Error,
+    "element count",
+  );
 });
 
 /** 軸ごとに違う幅・違う値を持つ素表（ブロック順と読み出し位置の取り違えが必ず露見する形）。 */
@@ -194,7 +202,7 @@ test("ropeTables: 素表の行数を超える解像度は落とす（モデル�
   const base = syntheticRopeBase(3);
   const geometry = { channels: 2, patchHeight: 2, patchWidth: 2 } as const;
 
-  assertThrows(() => ropeTables(base, [1, 2, 8, 4], geometry), Error, "天井");
+  assertThrows(() => ropeTables(base, [1, 2, 8, 4], geometry), Error, "ceiling");
 });
 
 const ropeTable = (rows: number, width: number, seed: number) => ({
@@ -233,7 +241,7 @@ test("parseRopeBase: 軸ごとの行数が揃わない素表は落とす（黙�
     { name: "sin_w", ...ropeTable(3, 2, 0) },
   ]);
 
-  assertThrows(() => parseRopeBase(buffer), Error, "行数");
+  assertThrows(() => parseRopeBase(buffer), Error, "row count");
 });
 
 test("parseRopeBase: 想定外のテンソルが混ざった素表は落とす", () => {
@@ -249,7 +257,7 @@ test("parseRopeBase: 想定外のテンソルが混ざった素表は落とす",
     { name: "cos_x", ...ropeTable(4, 1, 0) },
   ]);
 
-  assertThrows(() => parseRopeBase(buffer), Error, "想定外のテンソル 'cos_x'");
+  assertThrows(() => parseRopeBase(buffer), Error, "unexpected tensor 'cos_x'");
 });
 
 test("parseRopeBase: 同一軸の cos / sin で列幅が違えば落とす（行数一致では捕まらない）", () => {
@@ -264,7 +272,7 @@ test("parseRopeBase: 同一軸の cos / sin で列幅が違えば落とす（行
     { name: "sin_w", ...ropeTable(4, 3, 0) },
   ]);
 
-  assertThrows(() => parseRopeBase(buffer), Error, "cos / sin で shape が違う");
+  assertThrows(() => parseRopeBase(buffer), Error, "the shapes of cos / sin do not match");
 });
 
 test("parseRopeBase: 欠けた表・非 F32・rank 違いは落とす", () => {
@@ -277,7 +285,7 @@ test("parseRopeBase: 欠けた表・非 F32・rank 違いは落とす", () => {
         ]),
       ),
     Error,
-    "'cos_h' が無い",
+    "has no 'cos_h'",
   );
   assertThrows(
     () =>
@@ -285,7 +293,7 @@ test("parseRopeBase: 欠けた表・非 F32・rank 違いは落とす", () => {
         buildSafetensors([{ name: "cos_t", dtype: "F16", shape: [2, 1], data: new Uint8Array(4) }]),
       ),
     Error,
-    "F32 が必要",
+    "F32 is required",
   );
   assertThrows(
     () =>
@@ -293,6 +301,6 @@ test("parseRopeBase: 欠けた表・非 F32・rank 違いは落とす", () => {
         buildSafetensors([{ name: "cos_t", dtype: "F32", shape: [2], data: f32Bytes([0, 0]) }]),
       ),
     Error,
-    "rank が 2 でない",
+    "rank is not 2",
   );
 });

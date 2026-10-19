@@ -150,10 +150,10 @@ const round8 = (value: number): number => Math.min(255, Math.max(0, Math.floor(v
 export const assertRgb8 = (image: Rgb8Image): void => {
   const { data, width, height } = image;
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
-    throw new ModelInputError(`画像サイズ ${width}×${height} が正の整数でない`);
+    throw new ModelInputError(`Image size ${width}×${height} is not a positive integer`);
   }
   if (data.length !== width * height * CHANNELS) {
-    throw new ModelInputError(`RGB8 の長さ ${data.length} が 3×${width}×${height} と違う`);
+    throw new ModelInputError(`RGB8 length ${data.length} does not match 3×${width}×${height}`);
   }
 };
 
@@ -183,7 +183,7 @@ export const resizeRgb8 = (
   // reaches here** — the only remaining path is a caller hitting `resizeRgb8` directly from the
   // barrel, where the size is the caller's request itself.
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
-    throw new ModelInputError(`出力サイズ ${width}×${height} が正の整数でない`);
+    throw new ModelInputError(`Output size ${width}×${height} is not a positive integer`);
   }
   // MUST: look up with `Object.hasOwn` — when a JS caller passes `"toString"` etc., a member of
   // Object.prototype would be taken as the kernel, support becomes NaN → every tap is empty → an
@@ -191,9 +191,11 @@ export const resizeRgb8 = (
   // decision 3 — the same treatment as sampler names).
   if (!Object.hasOwn(KERNELS, filter)) {
     throw new Error(
-      `resizeRgb8: 補間フィルタ ${JSON.stringify(filter)} は未対応（期待 ${Object.keys(KERNELS)
+      `resizeRgb8: interpolation filter ${JSON.stringify(filter)} is not supported (expected ${Object.keys(
+        KERNELS,
+      )
         .map((name) => `'${name}'`)
-        .join(" / ")}）`,
+        .join(" / ")})`,
     );
   }
   const kernel = KERNELS[filter];
@@ -267,17 +269,17 @@ export const resizePlaneF32 = (
   height: number,
 ): Float32Array<ArrayBuffer> => {
   for (const [size, label] of [
-    [sourceWidth, "入力幅"],
-    [sourceHeight, "入力高さ"],
-    [width, "出力幅"],
-    [height, "出力高さ"],
+    [sourceWidth, "Input width"],
+    [sourceHeight, "Input height"],
+    [width, "Output width"],
+    [height, "Output height"],
   ] as const) {
     if (!Number.isInteger(size) || size <= 0) {
-      throw new RangeError(`${label} ${size} が正の整数でない`);
+      throw new RangeError(`${label} ${size} is not a positive integer`);
     }
   }
   if (plane.length !== sourceWidth * sourceHeight) {
-    throw new Error(`平面の長さ ${plane.length} が ${sourceWidth}×${sourceHeight} と違う`);
+    throw new Error(`Plane length ${plane.length} does not match ${sourceWidth}×${sourceHeight}`);
   }
 
   const horizontal = buildTaps(sourceWidth, width, KERNELS.bilinear);
@@ -341,8 +343,8 @@ export const normalizationOverflow = (
     const high = (255 - offset) / divisor;
     if (!Number.isFinite(Math.fround(low)) || !Number.isFinite(Math.fround(high))) {
       return (
-        `チャネル ${channel} の正規化後の値域 [${low}, ${high}] が f32 で有限に収まらない` +
-        `（mean ${mean[channel]} / std ${std[channel]}）`
+        `channel ${channel}: the normalized range [${low}, ${high}] is not finite in f32` +
+        ` (mean ${mean[channel]} / std ${std[channel]})`
       );
     }
   }
@@ -372,12 +374,12 @@ export const normalizeToNchw = (
   for (let channel = 0; channel < CHANNELS; channel += 1) {
     if (!Number.isFinite(mean[channel])) {
       throw new ModelInputError(
-        `normalizeToNchw: mean[${channel}] = ${mean[channel]} が有限でない`,
+        `normalizeToNchw: mean[${channel}] = ${mean[channel]} is not finite`,
       );
     }
     if (!Number.isFinite(std[channel]) || std[channel] <= 0) {
       throw new ModelInputError(
-        `normalizeToNchw: std[${channel}] = ${std[channel]} が正の有限数でない`,
+        `normalizeToNchw: std[${channel}] = ${std[channel]} is not a positive finite number`,
       );
     }
   }

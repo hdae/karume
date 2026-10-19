@@ -45,8 +45,16 @@ test("integratedLoudness: 無音は下限 −70 に clamp される（−Infinit
 });
 
 test("integratedLoudness: 空の波形と不正な周波数は落とす", () => {
-  assertThrows(() => integratedLoudness(new Float32Array(0), SAMPLE_RATE), RangeError, "波形が空");
-  assertThrows(() => integratedLoudness(Float32Array.of(1), 0), RangeError, "正の整数でない");
+  assertThrows(
+    () => integratedLoudness(new Float32Array(0), SAMPLE_RATE),
+    RangeError,
+    "the waveform is empty",
+  );
+  assertThrows(
+    () => integratedLoudness(Float32Array.of(1), 0),
+    RangeError,
+    "not a positive integer",
+  );
 });
 
 test("integratedLoudness: 窓が導出できない極小の周波数は落とす（正の整数だけでは足りない）", () => {
@@ -56,12 +64,12 @@ test("integratedLoudness: 窓が導出できない極小の周波数は落とす
   assertThrows(
     () => integratedLoudness(Float32Array.of(0.5, 0.5), 9),
     RangeError,
-    "loudness 窓が導出できない",
+    "the loudness window cannot be derived",
   );
   assertThrows(
     () => integratedLoudness(Float32Array.of(0.5, 0.5), 2),
     RangeError,
-    "0.4 秒 = 0 サンプル / stride 0 サンプル",
+    "0.4 s = 0 samples / stride 0 samples",
   );
   // 10Hz からは窓が立つ（下限検査が正常域まで落としていない）。
   assertEquals(integratedLoudness(new Float32Array(20), 10), -70);
@@ -78,7 +86,7 @@ test("normalizeReference: 非有限サンプルは位置付きで落とす（利
     assertThrows(
       () => normalizeReference(samples, SAMPLE_RATE),
       ModelInputError,
-      "参照音声の 7 番目のサンプルが非有限",
+      "sample 7 of the reference audio is non-finite",
     );
   }
 });
@@ -90,7 +98,7 @@ test("normalizeReference: 空の波形は入口で落とす（窓の門に化け
   assertThrows(
     () => normalizeReference(new Float32Array(0), SAMPLE_RATE),
     ModelInputError,
-    "参照音声のサンプルが 0 個",
+    "the reference audio has 0 samples",
   );
   // 逆側: 導出値の前提を見る `integratedLoudness` の `RangeError` は残す（呼び手は直せない）。
   const windows = assertThrows(() => integratedLoudness(Float32Array.of(0.5, 0.5), 9));
@@ -127,6 +135,6 @@ test("reflectPadToHop: hop 未満の入力は落とす（鏡像が自分の先�
   assertThrows(
     () => reflectPadToHop(new Float32Array(3) as Float32Array<ArrayBuffer>, 1920),
     ModelInputError,
-    "hopLength 1920 が要る",
+    "hopLength 1920 is required",
   );
 });

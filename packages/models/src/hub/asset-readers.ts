@@ -35,16 +35,16 @@ export const readAssetBuffer = (
 ): ArrayBuffer => {
   if (!Object.hasOwn(assets, key)) {
     throw new Error(
-      `${family}: 資産 '${key}' が無い（manifest の ${tables} に ${key} が要る）` +
-        `（揃っているキー: ${Object.keys(assets).join(" / ")}）`,
+      `${family}: asset '${key}' is missing (the manifest's ${tables} needs ${key})` +
+        ` (keys present: ${Object.keys(assets).join(" / ")})`,
     );
   }
   const bytes = assets[key];
   if (bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength) {
     throw new Error(
-      `${family}: 資産 '${key}' の bytes が buffer 全体を占めていない` +
-        `（byteOffset ${bytes.byteOffset} / byteLength ${bytes.byteLength} /` +
-        ` buffer ${bytes.buffer.byteLength}）`,
+      `${family}: the bytes of asset '${key}' do not cover the whole buffer` +
+        ` (byteOffset ${bytes.byteOffset} / byteLength ${bytes.byteLength} /` +
+        ` buffer ${bytes.buffer.byteLength})`,
     );
   }
   return bytes.buffer;
@@ -106,11 +106,11 @@ export const readAssetJson = (
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
   } catch (cause) {
-    throw new Error(`${family}: 資産 '${key}' が UTF-8 として読めない`, { cause });
+    throw new Error(`${family}: asset '${key}' cannot be read as UTF-8`, { cause });
   }
   try {
     return JSON.parse(text);
   } catch (cause) {
-    throw new Error(`${family}: 資産 '${key}' が JSON として読めない`, { cause });
+    throw new Error(`${family}: asset '${key}' cannot be read as JSON`, { cause });
   }
 };

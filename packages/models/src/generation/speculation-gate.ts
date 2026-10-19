@@ -254,14 +254,14 @@ type GateState = {
  */
 const assertPositive = (name: string, value: number): void => {
   if (!Number.isFinite(value) || value <= 0) {
-    throw new ModelInputError(`speculation gate: ${name} ${value} が正の有限数でない`);
+    throw new ModelInputError(`speculation gate: ${name} ${value} is not a positive finite number`);
   }
 };
 
 /** Check for a cycle count — a fractional cycle count cannot mean "every so many cycles". */
 const assertInterval = (name: string, value: number, least: number): void => {
   if (!Number.isSafeInteger(value) || value < least) {
-    throw new ModelInputError(`speculation gate: ${name} ${value} が ${least} 以上の整数でない`);
+    throw new ModelInputError(`speculation gate: ${name} ${value} is not an integer ≥ ${least}`);
   }
 };
 
@@ -479,7 +479,7 @@ export const createSpeculationGate = (options: SpeculationGateOptions = {}): Spe
   assertPositive("alpha", alpha);
   // An EWMA with α > 1 puts negative weight on the past (it stops being an average), so the upper
   // end is closed too.
-  if (alpha > 1) throw new ModelInputError(`speculation gate: alpha ${alpha} が 0 < α ≤ 1 の外`);
+  if (alpha > 1) throw new ModelInputError(`speculation gate: alpha ${alpha} is outside 0 < α ≤ 1`);
   // A 1-cycle block turns "block aggregation" back into a one-sample decision (the seeding defect
   // itself).
   assertInterval("window", window, 2);
@@ -488,9 +488,7 @@ export const createSpeculationGate = (options: SpeculationGateOptions = {}): Spe
   assertInterval("burstMin", burstMin, 1);
   // `burstMin > burst` is a dead knob ("the abort never fires"), so it is not passed silently.
   if (burstMin > burst) {
-    throw new ModelInputError(
-      `speculation gate: burstMin ${burstMin} が burst ${burst} を超えている`,
-    );
+    throw new ModelInputError(`speculation gate: burstMin ${burstMin} exceeds burst ${burst}`);
   }
   assertInterval("exploreBase", exploreBase, 1);
   assertInterval("exploreMax", exploreMax, exploreBase);
@@ -501,7 +499,7 @@ export const createSpeculationGate = (options: SpeculationGateOptions = {}): Spe
   // The dead band straddles 1 (with `enter ≥ 1` it returns while losing, with `leave ≤ 1` it leaves
   // even while winning).
   if (!(enter < 1 && 1 < leave)) {
-    throw new Error(`speculation gate: enter ${enter} < 1 < leave ${leave} でない`);
+    throw new Error(`speculation gate: enter ${enter} < 1 < leave ${leave} does not hold`);
   }
 
   return openGate(

@@ -33,18 +33,18 @@ export const buildZp = (
   noiseScale: number,
 ): Float32Array<ArrayBuffer> => {
   if (!Number.isInteger(channels) || channels <= 0) {
-    throw new Error(`チャネル数 ${channels} が 1 以上の整数でない`);
+    throw new Error(`Channel count ${channels} is not an integer >= 1`);
   }
   if (logsP.length !== mP.length) {
-    throw new Error(`m_p(${mP.length}) と logs_p(${logsP.length}) の要素数が違う`);
+    throw new Error(`m_p(${mP.length}) and logs_p(${logsP.length}) differ in element count`);
   }
   const phonemes = mP.length / channels;
   if (!Number.isInteger(phonemes)) {
-    throw new Error(`m_p の要素数 ${mP.length} が C=${channels} で割り切れない`);
+    throw new Error(`m_p element count ${mP.length} is not divisible by C=${channels}`);
   }
   const frames = expandIdx.length;
   if (noise.length !== channels * frames) {
-    throw new Error(`ノイズ長 ${noise.length} が C·Ty(${channels * frames}) と違う`);
+    throw new Error(`Noise length ${noise.length} differs from C·Ty(${channels * frames})`);
   }
   const zP = new Float32Array(channels * frames);
   for (let c = 0; c < channels; c += 1) {
@@ -53,7 +53,7 @@ export const buildZp = (
     for (let f = 0; f < frames; f += 1) {
       const index = expandIdx[f];
       if (index < 0 || index >= phonemes) {
-        throw new Error(`展開インデックス ${index}（フレーム ${f}）が P=${phonemes} の外`);
+        throw new Error(`Expansion index ${index} (frame ${f}) is outside P=${phonemes}`);
       }
       const source = rowSource + index;
       zP[rowTarget + f] = mP[source] + noise[rowTarget + f] * Math.exp(logsP[source]) * noiseScale;

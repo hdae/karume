@@ -128,19 +128,25 @@ export const parseSiglip2PipelineConfig = (
 ): Siglip2PipelineConfig => {
   const where = "pipelineConfig";
   assertAllowedKeys(raw, ROOT_KEYS, where);
-  const positive = "正の整数でない";
+  const positive = "not a positive integer";
   const config: Siglip2PipelineConfig = {
     imageWidth: readNumber(raw, "imageWidth", where, isPositiveInteger, positive),
     imageHeight: readNumber(raw, "imageHeight", where, isPositiveInteger, positive),
     // The mean may be negative (a translation in `(x − mean·255) / (std·255)`), but a non-finite
     // one turns every pixel into NaN.
-    imageMean: readChannels(raw, "imageMean", where, Number.isFinite, "有限の数でない要素がある"),
+    imageMean: readChannels(
+      raw,
+      "imageMean",
+      where,
+      Number.isFinite,
+      "has an element that is not a finite number",
+    ),
     imageStd: readChannels(
       raw,
       "imageStd",
       where,
       (value) => Number.isFinite(value) && value > 0,
-      "正の有限数でない要素がある",
+      "has an element that is not a positive finite number",
     ),
     hiddenDim: readNumber(raw, "hiddenDim", where, isPositiveInteger, positive),
     interpolation: readOnly(
@@ -148,8 +154,8 @@ export const parseSiglip2PipelineConfig = (
       "interpolation",
       where,
       INTERPOLATION,
-      "上流 preprocessor_config.json の resample は 2（PIL の BILINEAR）で、" +
-        "bicubic で通すと resize の値が最大 47/255 ずれる",
+      "upstream preprocessor_config.json has resample 2 (PIL's BILINEAR), " +
+        "and running bicubic shifts the resized values by up to 47/255",
     ),
   };
   // A distribution whose fields are each finite but whose pair overflows f32 after normalization is

@@ -164,9 +164,9 @@ test("planPrefillChunks: 位置は飛ばず重ならず、有効行の総和が 
 });
 
 test("planPrefillChunks: 長さ / chunkLength が 1 以上の整数でなければ落ちる", () => {
-  assertThrows(() => planPrefillChunks(0, 32), Error, "prompt の長さ 0");
-  assertThrows(() => planPrefillChunks(-1, 32), Error, "prompt の長さ -1");
-  assertThrows(() => planPrefillChunks(1.5, 32), Error, "prompt の長さ 1.5");
+  assertThrows(() => planPrefillChunks(0, 32), Error, "prompt length 0");
+  assertThrows(() => planPrefillChunks(-1, 32), Error, "prompt length -1");
+  assertThrows(() => planPrefillChunks(1.5, 32), Error, "prompt length 1.5");
   assertThrows(() => planPrefillChunks(8, 0), Error, "chunkLength 0");
   assertThrows(() => planPrefillChunks(8, 2.5), Error, "chunkLength 2.5");
 });
@@ -397,35 +397,35 @@ test("generateGreedy: token 出力の名前 / dtype / 形が違えば fail loudl
         (_call, rows) => ({
           logits: { dtype: "f32", shape: [1, rows, 1], data: new Float32Array(rows) },
         }),
-        "グラフ出力 'next_token' が無い",
+        "Graph output 'next_token' is missing",
       ],
       [
         "dtype が f32",
         (_call, rows) => ({
           [TOKEN]: { dtype: "f32", shape: [1, rows, 1], data: new Float32Array(rows) },
         }),
-        "が i32 でない",
+        "is not i32",
       ],
       [
         "rank が 2",
         (_call, rows) => ({
           [TOKEN]: { dtype: "i32", shape: [1, rows], data: new Int32Array(rows) },
         }),
-        "が [1,4,1] でない",
+        "not [1,4,1]",
       ],
       [
         "行数が物理 chunk 行数と違う",
         (_call, rows) => ({
           [TOKEN]: { dtype: "i32", shape: [1, rows + 1, 1], data: new Int32Array(rows + 1) },
         }),
-        "が [1,4,1] でない",
+        "not [1,4,1]",
       ],
       [
         "最終軸が 1 でない",
         (_call, rows) => ({
           [TOKEN]: { dtype: "i32", shape: [1, rows, 2], data: new Int32Array(rows * 2) },
         }),
-        "が [1,4,1] でない",
+        "not [1,4,1]",
       ],
     ];
 
@@ -463,7 +463,7 @@ test("generateGreedy: 入口検査は context を作る前に落ちる", async (
     maxNewTokens: 2,
   };
   const cases: readonly (readonly [Partial<typeof base>, string])[] = [
-    [{ prompt: [] }, "prompt の長さ 0"],
+    [{ prompt: [] }, "prompt length 0"],
     [{ chunkLength: 0 }, "chunkLength 0"],
     [{ chunkLength: 2.5 }, "chunkLength 2.5"],
     [{ maxNewTokens: 0 }, "maxNewTokens 0"],
@@ -471,12 +471,12 @@ test("generateGreedy: 入口検査は context を作る前に落ちる", async (
     [{ maxNewTokens: 1.5 }, "maxNewTokens 1.5"],
     [{ maxPosition: 0 }, "maxPosition 0"],
     [{ maxPosition: 2.5 }, "maxPosition 2.5"],
-    [{ prompt: [10, 1.5] }, "prompt[1] 1.5 が 0..2147483647 の整数でない"],
+    [{ prompt: [10, 1.5] }, "prompt[1] 1.5 is not an integer in 0..2147483647"],
     // `Int32Array` の wrap は例外を出さず別の有効 id（2^32+1 → 1）に化ける — 入口が唯一の検出線。
-    [{ prompt: [10, 4294967297] }, "prompt[1] 4294967297 が 0..2147483647 の整数でない"],
-    [{ prompt: [-1, 10] }, "prompt[0] -1 が 0..2147483647 の整数でない"],
+    [{ prompt: [10, 4294967297] }, "prompt[1] 4294967297 is not an integer in 0..2147483647"],
+    [{ prompt: [-1, 10] }, "prompt[0] -1 is not an integer in 0..2147483647"],
     // 踏む最大位置 = T + K - 2。maxPosition は排他的上限なので、ちょうど届く形は落ちる。
-    [{ maxPosition: 2 }, "最終位置 2 を踏む"],
+    [{ maxPosition: 2 }, "reaches the last position 2"],
   ];
 
   for (const [override, message] of cases) {
@@ -659,7 +659,7 @@ test("generateGreedy(lastRow): token 出力が [1,1,1] でなければ fail loud
         maxNewTokens: 1,
       }),
     Error,
-    "[1,1,1] でない",
+    "not [1,1,1]",
   );
 });
 

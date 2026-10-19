@@ -166,21 +166,21 @@ describe("gemma4 chat 射程: 素の会話の外は fail loudly（黙って無�
     });
   };
 
-  reject("空の会話", [], "会話が空");
+  reject("空の会話", [], "the conversation is empty");
   reject(
     "tools（関数宣言）",
     [{ role: "user", content: "hi", tools: [{ name: "search" }] }],
-    "射程外の欄",
+    "out-of-scope fields",
   );
   reject(
     "reasoning（thinking チャネル）",
     [{ role: "assistant", content: "hi", reasoning: "…" }],
-    "射程外の欄",
+    "out-of-scope fields",
   );
   reject(
     "tool_calls",
     [{ role: "assistant", content: "", tool_calls: [{ function: { name: "f" } }] }],
-    "射程外の欄",
+    "out-of-scope fields",
   );
   reject("role が tool", [{ role: "tool", content: "…" }], "role");
   reject("role が model（template の出力側の綴り）", [{ role: "model", content: "…" }], "role");
@@ -372,10 +372,10 @@ describe("gemma4 chat 増分 射程: 素の発話の外は fail loudly", () => {
   };
 
   // model turn は生成が埋める席で、template も連続 assistant を 1 つへ畳む（差分では描けない）。
-  reject("assistant", { role: "assistant", content: "…" }, "'assistant' は差分にできない");
+  reject("assistant", { role: "assistant", content: "…" }, "'assistant' cannot be a delta");
   reject("role が tool", { role: "tool", content: "…" }, "role");
   reject("role が model", { role: "model", content: "…" }, "role");
-  reject("tools（射程外の欄）", { role: "user", content: "hi", tools: [] }, "射程外の欄");
+  reject("tools（射程外の欄）", { role: "user", content: "hi", tools: [] }, "out-of-scope fields");
   reject("content が配列", { role: "user", content: [{ type: "text" }] }, "content");
 });
 
@@ -410,11 +410,11 @@ test("gemma4 chat 停止 token: 綴りが欠けた資産は fail loudly", () => 
 
 describe("gemma4 chat の失敗の型（呼び手の分岐先で分ける）", () => {
   it("要求そのものが受理できない拒否は ModelInputError で捕まる", () => {
-    assertThrows(() => renderGemma4Chat([]), ModelInputError, "会話が空");
+    assertThrows(() => renderGemma4Chat([]), ModelInputError, "the conversation is empty");
     assertThrows(
       () => renderGemma4ChatTurn({ role: "assistant", content: "…" }),
       ModelInputError,
-      "'assistant' は差分にできない",
+      "'assistant' cannot be a delta",
     );
   });
 
@@ -546,11 +546,11 @@ test("chat 停止文字列: byte run の確定ぶんも判定に入る（列の�
 
 test("chat 停止文字列: 空文字列と重複は fail loudly", () => {
   // 空文字列は「常に一致する」= 1 文字も出せない指定、重複は同じ条件の二重書き（どちらも取り違え）。
-  assertThrows(() => createStopStringFilter([""]), Error, "stopStrings[0] が空文字列");
+  assertThrows(() => createStopStringFilter([""]), Error, "stopStrings[0] is an empty string");
   assertThrows(
     () => createStopStringFilter(["END", "END"]),
     Error,
-    'stopStrings に "END" が 2 度出る',
+    'stopStrings contains "END" twice',
   );
 });
 
@@ -597,8 +597,8 @@ test("投機の切替（speculativeSetup）: drafter 無しの pipeline に true
   const withoutDrafter = { drafter: undefined, speculativeK: undefined };
   assertEquals(speculativeSetup(withoutDrafter, undefined), undefined);
   assertEquals(speculativeSetup(withoutDrafter, false), undefined);
-  assertThrows(() => speculativeSetup(withoutDrafter, true), Error, "drafter 無し");
-  assertThrows(() => speculativeSetup(withoutDrafter, "always"), Error, "drafter 無し");
+  assertThrows(() => speculativeSetup(withoutDrafter, true), Error, "without a drafter");
+  assertThrows(() => speculativeSetup(withoutDrafter, "always"), Error, "without a drafter");
 });
 
 // drafter は `session: Session`（`#` private を持つ名前的な型）を抱えるので、GPU 無しでは構造的に
@@ -643,7 +643,7 @@ test("投機のゲートのノブ: 不正な値は重みを読む前に落ちる
         speculative: { gate: { burstAbort: 0 } },
       }),
     ModelInputError,
-    "burstAbort 0 が正の有限数でない",
+    "burstAbort 0 is not a positive finite number",
   );
   await assertRejects(
     () =>
@@ -651,13 +651,13 @@ test("投機のゲートのノブ: 不正な値は重みを読む前に落ちる
         speculative: { gate: { burst: 8, burstMin: 9 } },
       }),
     ModelInputError,
-    "burstMin 9 が burst 8 を超えている",
+    "burstMin 9 exceeds burst 8",
   );
   // 段数 `k` も同じ束の呼び手指定なので同じ型で落ちる（ADR 0107 決定 2）。
   await assertRejects(
     () => Gemma4Pipeline.fromPretrained("karume/gemma4-e2b", { speculative: { k: 0 } }),
     ModelInputError,
-    "speculative.k 0 が 1..",
+    "speculative.k 0 is outside 1..",
   );
 });
 
@@ -719,15 +719,15 @@ test("chat 一括: 1 つのストリームは 1 通りにしか消費できな�
   for await (const _part of iterated) {
     /* 汲み切る */
   }
-  assertThrows(() => iterated.text(), Error, "1 通りにしか消費できない");
+  assertThrows(() => iterated.text(), Error, "can be consumed in only one way");
 
   const collected = streamOf();
   assertEquals(await collected.text(), "a");
-  assertThrows(() => collected[Symbol.asyncIterator](), Error, "1 通りにしか消費できない");
+  assertThrows(() => collected[Symbol.asyncIterator](), Error, "can be consumed in only one way");
 
   const twice = streamOf();
   twice[Symbol.asyncIterator]();
-  assertThrows(() => twice[Symbol.asyncIterator](), Error, "1 通りにしか消費できない");
+  assertThrows(() => twice[Symbol.asyncIterator](), Error, "can be consumed in only one way");
 });
 
 // ---- ターンの後始末（`closeChatTurn`）---------------------------------------
@@ -987,7 +987,7 @@ test("観測席: drafter が居ないのに draft が届いたら fail loudly", 
   assertThrows(
     () => onRun({ kind: "draft", cycle: 1 }),
     Error,
-    "drafter が居ないのに draft run の観測が届いた",
+    "a draft run observation arrived although there is no drafter",
   );
 });
 

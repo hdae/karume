@@ -148,10 +148,10 @@ const assertRgb8Shaped = (image: unknown): void => {
       : typeof image !== "object"
         ? typeof image
         : "data" in image
-          ? `data が ${Object.prototype.toString.call(image.data).slice("[object ".length, -1)}`
-          : "data が無い";
+          ? `data is ${Object.prototype.toString.call(image.data).slice("[object ".length, -1)}`
+          : "no data";
   throw new ModelInputError(
-    `image が RGB8 の画像（data が Uint8Array・width・height の object）でない（実際: ${actual}）`,
+    `image is not an RGB8 image (an object with a Uint8Array data, width and height) (actual: ${actual})`,
   );
 };
 
@@ -191,7 +191,7 @@ export const planWanRequest = <Text>(
   generation: WanGenerationDescriptor,
 ): WanGenerationPlan<Text> => {
   const resolve = (text: unknown, what: "prompt" | "negativePrompt"): Text => {
-    if (typeof text !== "string") throw new ModelInputError(`${what} が文字列でない`);
+    if (typeof text !== "string") throw new ModelInputError(`${what} is not a string`);
     return gate.resolve(text, what);
   };
   const positive = resolve(request.prompt, "prompt");
@@ -203,8 +203,8 @@ export const planWanRequest = <Text>(
   const maxSteps = WAN_UNIPC_CONFIG.numTrainTimesteps;
   if (!Number.isInteger(steps) || steps < 1 || steps > maxSteps) {
     throw new ModelInputError(
-      `steps ${steps} が 1 以上 ${maxSteps} 以下の整数でない` +
-        "（上限は num_train_timesteps — 超えると整数の timestep が必ず重複する）",
+      `steps ${steps} is not an integer in 1..${maxSteps}` +
+        " (the upper limit is num_train_timesteps — beyond it, integer timesteps always repeat)",
     );
   }
   const guidance = request.guidance ?? config.defaults.guidance;
@@ -212,13 +212,13 @@ export const planWanRequest = <Text>(
   // finite in f64 but Infinity in f32 (such as `Number.MAX_VALUE`) would make the combination NaN.
   if (!Number.isFinite(Math.fround(guidance)) || guidance < 1) {
     throw new ModelInputError(
-      `guidance ${guidance} が 1 以上で f32 に収まる有限の数でない` +
-        "（上流は 1 以下で CFG を回さないので、1 未満は効かない・CFG は f32 で掛ける）",
+      `guidance ${guidance} is not a finite number ≥ 1 that fits in f32` +
+        " (upstream does not run CFG at 1 or below, so a value below 1 has no effect; CFG multiplies in f32)",
     );
   }
   const shift = request.shift ?? config.scheduler.shift;
   if (!Number.isFinite(shift) || shift <= 0) {
-    throw new ModelInputError(`shift ${shift} が正の有限の数でない`);
+    throw new ModelInputError(`shift ${shift} is not a positive finite number`);
   }
   let schedule: WanUniPcSchedule;
   try {
@@ -229,7 +229,7 @@ export const planWanRequest = <Text>(
     // check, so reaching here means the request passed the values.
     if (!(error instanceof RangeError)) throw error;
     throw new ModelInputError(
-      `steps ${steps} と shift ${shift} の組では UniPC の σ 列が組めない（${error.message}）`,
+      `the pair of steps ${steps} and shift ${shift} cannot build a UniPC σ sequence (${error.message})`,
       { cause: error },
     );
   }
@@ -243,7 +243,7 @@ export const planWanRequest = <Text>(
         : gate.defaultNegative();
   } else if (request.negativePrompt !== undefined) {
     throw new ModelInputError(
-      "guidance 1 では uncond 側を回さないので negativePrompt は効かない（効かせるなら guidance を 1 より大きくする）",
+      "guidance 1 does not run the uncond side, so negativePrompt has no effect (to use it, set guidance above 1)",
     );
   }
 
@@ -255,7 +255,7 @@ export const planWanRequest = <Text>(
     (frames - 1) % TEMPORAL_COMPRESSION !== 0
   ) {
     throw new ModelInputError(
-      `frames ${frames} が受理集合（4n+1 の ${generation.minFrames}〜${generation.maxFrames}）に無い`,
+      `frames ${frames} is not in the accepted set (4n+1 in ${generation.minFrames}..${generation.maxFrames})`,
     );
   }
   // The check of the I2V fields (ADR 0121 decisions 10 and 11). Only a generation whose DiT has
@@ -267,15 +267,15 @@ export const planWanRequest = <Text>(
     (request.image !== undefined || request.fit !== undefined)
   ) {
     throw new ModelInputError(
-      "image / fit（画像からの生成）はこの世代では受けない（受けるのは Wan2.2 の WanTi2vPipeline）",
+      "image / fit (generation from an image) is not accepted by this generation (Wan2.2's WanTi2vPipeline accepts it)",
     );
   }
   if (request.fit !== undefined && !isWanI2vFit(request.fit)) {
-    throw new Error(`fit '${String(request.fit)}' は 'crop' / 'stretch' のどちらでもない`);
+    throw new Error(`fit '${String(request.fit)}' is neither 'crop' nor 'stretch'`);
   }
   if (request.image === undefined && request.fit !== undefined) {
     throw new ModelInputError(
-      "fit は image を渡したときだけ効く（条件画像の寸法の合わせ方 — image 無しでは渡さない）",
+      "fit takes effect only when image is passed (how the condition image is fitted to the size — do not pass it without image)",
     );
   }
   let width: number;
@@ -286,9 +286,9 @@ export const planWanRequest = <Text>(
     height = request.height ?? generation.defaults.height;
     if (!generation.acceptedSizes.some((size) => size.width === width && size.height === height)) {
       throw new ModelInputError(
-        `${width}×${height} が受理集合（${generation.acceptedSizes
+        `${width}×${height} is not in the accepted set (${generation.acceptedSizes
           .map((size) => `${size.width}×${size.height}`)
-          .join(" / ")}）に無い`,
+          .join(" / ")})`,
       );
     }
   } else {
@@ -313,11 +313,15 @@ export const planWanRequest = <Text>(
   if (!latentShape.every(Number.isInteger)) {
     // The accepted set holds only sizes divisible by the spatial compression — if one does not
     // divide, the asset is mixed up (not input-caused).
-    throw new Error(`潜在の形 [${latentShape}] が整数でない（空間の圧縮 ${compression}）`);
+    throw new Error(
+      `Latent shape [${latentShape}] is not integral (spatial compression ${compression})`,
+    );
   }
 
   if (request.seed !== undefined && request.latents !== undefined) {
-    throw new ModelInputError("seed と latents は排他（初期ノイズの出所はどちらか 1 つ）");
+    throw new ModelInputError(
+      "seed and latents are mutually exclusive (the initial noise comes from exactly one of them)",
+    );
   }
   let initial: InitialNoise;
   if (request.latents !== undefined) {
@@ -325,10 +329,11 @@ export const planWanRequest = <Text>(
     const count = latentShape.reduce((product, dim) => product * dim, 1);
     if (!(latents instanceof Float32Array) || latents.length !== count) {
       throw new ModelInputError(
-        `latents が Float32Array [${latentShape.join(", ")}]（${count} 要素）でない`,
+        `latents is not a Float32Array [${latentShape.join(", ")}] (${count} elements)`,
       );
     }
-    if (!latents.every(Number.isFinite)) throw new ModelInputError("latents に非有限値がある");
+    if (!latents.every(Number.isFinite))
+      throw new ModelInputError("latents contains a non-finite value");
     initial = { kind: "latents", data: latents };
   } else {
     const seed = request.seed ?? DEFAULT_SEED;

@@ -147,7 +147,7 @@ describe("Gemma4Pipeline.fromPretrained の gpuFeatures（共有 GPU）", () => 
       () => loadWithQuant({ gpuFeatures: { shaderF16: true } }),
       Error,
     );
-    assertStringIncludes(error.message, "Gemma4Pipeline: quant 'f32' は shader-f16 を要求するが");
+    assertStringIncludes(error.message, "Gemma4Pipeline: quant 'f32' requires shader-f16, but");
   });
 
   it("宣言しない quant は同じ共有 GPU でこの門を抜け、PLE 索引の段まで進む（対照）", async () => {

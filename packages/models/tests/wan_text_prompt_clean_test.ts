@@ -101,7 +101,7 @@ test("拒否: mojibake・C1・未割り当ては PromptCleanError（入力起因
 });
 
 test("孤立サロゲートは前処理の前に拒む（PromptCleanError ではなく ModelInputError）", () => {
-  const error = assertThrows(() => clean("a\ud800b"), ModelInputError, "サロゲート");
+  const error = assertThrows(() => clean("a\ud800b"), ModelInputError, "surrogate");
   assert(!(error instanceof PromptCleanError));
 });
 
@@ -114,7 +114,7 @@ test("壊れた表で不動点に届かなければ素の Error で落ちる（�
       [0xff21, "A"],
     ]),
   };
-  const error = assertThrows(() => cleanPrompt(cyclic, "A"), Error, "不動点");
+  const error = assertThrows(() => cleanPrompt(cyclic, "A"), Error, "fixed point");
   assert(!(error instanceof ModelInputError), "資産の破損は入力起因ではない");
 });
 

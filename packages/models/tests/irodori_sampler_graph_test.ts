@@ -209,7 +209,7 @@ test("ホストで組む宣言はグラフ単体の規則を通る（前方参�
   assertThrows(
     () => parseIrDeclarationValue({ ...declaration, nodes: [...declaration.nodes].reverse() }),
     IrError,
-    "前方参照",
+    "forward reference",
   );
 });
 

@@ -249,7 +249,7 @@ const strip = (tables: PromptCleanTables, text: string): string => {
   return out;
 };
 
-/** `regex.sub(r"\s+", " ", text)`。 */
+/** `regex.sub(r"\s+", " ", text)`. */
 const collapse = (tables: PromptCleanTables, text: string): string => {
   let out = "";
   let inSpace = false;
@@ -268,9 +268,9 @@ const collapse = (tables: PromptCleanTables, text: string): string => {
 const rejectEntity = (label: string, found: string): PromptCleanError =>
   new PromptCleanError(
     "entity",
-    `${label}: HTML の文字参照になりうる並び ${JSON.stringify(found)} を含む — 上流（ftfy / ` +
-      "html.unescape）は文字参照を解除するが、ここは解除の表を持たないので受けない。" +
-      "`&` の直後に空白を入れる（例 `R&D` → `R & D`）か、参照を元の文字に直してから渡す",
+    `${label}: contains a sequence ${JSON.stringify(found)} that can be an HTML character reference — upstream (ftfy / ` +
+      "html.unescape) decodes character references, but this port has no decoding table, so it is not accepted. " +
+      "Put a space right after `&` (e.g. `R&D` → `R & D`) or replace the reference with the original character before passing it",
   );
 
 /**
@@ -290,9 +290,9 @@ const fixSegment = (tables: PromptCleanTables, segment: string, label: string): 
       if (bad !== null) {
         throw new PromptCleanError(
           "mojibake",
-          `${label}: 文字化け（mojibake）に見える並び ${JSON.stringify(bad[0])} を含む — ` +
-            "上流（ftfy）は推定で修復するが、その推定は移植していないので受けない。" +
-            "元の文字に直してから渡す",
+          `${label}: contains a sequence ${JSON.stringify(bad[0])} that looks like mojibake — ` +
+            "upstream (ftfy) repairs it by guessing, but that guessing is not ported, so it is not accepted. " +
+            "Replace it with the original characters before passing it",
         );
       }
     }
@@ -307,7 +307,7 @@ const fixSegment = (tables: PromptCleanTables, segment: string, label: string): 
     if (text === before) return text;
   }
   throw new Error(
-    `前処理が ${MAX_FIX_ROUNDS} 周で不動点に届かない — 前処理の表（資産の promptClean）が壊れている`,
+    `Preprocessing does not reach a fixed point in ${MAX_FIX_ROUNDS} rounds — the preprocessing tables (the asset's promptClean) are broken`,
   );
 };
 
@@ -321,7 +321,7 @@ const fixSegment = (tables: PromptCleanTables, segment: string, label: string): 
 export const cleanPrompt = (
   tables: PromptCleanTables,
   text: string,
-  label: string = "プロンプト",
+  label: string = "prompt",
 ): string => {
   assertEncodableText(text, label);
   for (const ch of text) {
@@ -329,15 +329,15 @@ export const cleanPrompt = (
     if (!inCodeRanges(tables.assigned, cp)) {
       throw new PromptCleanError(
         "unassigned",
-        `${label}: Unicode 16.0.0 で未割り当てのコードポイント ${codePointLabel(cp)} を含む — ` +
-          "正規化（NFC）の結果が実行環境の Unicode の版で割れうるので受けない。その文字を外して渡す",
+        `${label}: contains code point ${codePointLabel(cp)}, unassigned in Unicode 16.0.0 — ` +
+          "it is not accepted because the result of normalization (NFC) can differ with the runtime's Unicode version. Remove that character before passing it",
       );
     }
     if (cp >= C1_FIRST && cp <= C1_LAST) {
       throw new PromptCleanError(
         "c1",
-        `${label}: C1 制御文字 ${codePointLabel(cp)} を含む — 上流（ftfy）は文字化けの手掛かりと` +
-          "して別の文字へ読み直すが、その推定は移植していないので受けない。その文字を外して渡す",
+        `${label}: contains C1 control character ${codePointLabel(cp)} — upstream (ftfy) takes it as a mojibake clue` +
+          " and reinterprets it as another character, but that guessing is not ported, so it is not accepted. Remove that character before passing it",
       );
     }
   }
@@ -354,7 +354,7 @@ export const cleanPrompt = (
  * surrogates in the replacement).
  */
 const parseCharMap = (raw: unknown, label: string): Map<number, string> => {
-  if (!Array.isArray(raw)) throw new Error(`${label}: 配列でない`);
+  if (!Array.isArray(raw)) throw new Error(`${label}: not an array`);
   const out = new Map<number, string>();
   for (const entry of raw) {
     if (
@@ -363,7 +363,7 @@ const parseCharMap = (raw: unknown, label: string): Map<number, string> => {
       typeof entry[0] !== "number" ||
       typeof entry[1] !== "string"
     ) {
-      throw new Error(`${label}: [cp, 文字列] でない`);
+      throw new Error(`${label}: not a [cp, string] pair`);
     }
     assertCodePoint(entry[0], label);
     // A lone surrogate in the replacement would split NFC and the later steps from upstream (a
@@ -388,8 +388,8 @@ export const parsePromptCleanTables = (raw: unknown, label: string): PromptClean
   const digest = sha256HexSync(new TextEncoder().encode(source));
   if (digest !== FTFY_BADNESS_SHA256) {
     throw new Error(
-      `${label}.badness: 正規表現が ftfy 6.3.1 の BADNESS_RE の固定の翻訳と違う（sha256 ${digest}・` +
-        `期待 ${FTFY_BADNESS_SHA256}）— 資産の任意の式は実行しない`,
+      `${label}.badness: the regular expression differs from the fixed translation of ftfy 6.3.1's BADNESS_RE (sha256 ${digest}, ` +
+        `expected ${FTFY_BADNESS_SHA256}) — arbitrary expressions from the asset are not executed`,
     );
   }
   let badness: RegExp;
@@ -402,7 +402,7 @@ export const parsePromptCleanTables = (raw: unknown, label: string): PromptClean
     // No `g` / `y` — `exec` / `test` keep no lastIndex and search from the start on every call.
     badness = new RegExp(source, "u");
   } catch (cause) {
-    throw new Error(`${label}.badness: 正規表現として読めない`, { cause });
+    throw new Error(`${label}.badness: cannot be read as a regular expression`, { cause });
   }
   return {
     ligatures: parseCharMap(obj["ligatures"], `${label}.ligatures`),

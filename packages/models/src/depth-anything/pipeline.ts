@@ -281,7 +281,7 @@ export const assertDepthShape = (
   const name = model.graph.outputs[0];
   const value = model.graph.values[name];
   if (value === undefined) {
-    throw new Error(`depth-anything: グラフ出力 '${name}' の宣言が無い（${where}）`);
+    throw new Error(`depth-anything: graph output '${name}' has no declaration (${where})`);
   }
   const expected = [1, config.imageHeight, config.imageWidth];
   if (
@@ -289,14 +289,14 @@ export const assertDepthShape = (
     value.shape.some((dim, axis) => dim !== expected[axis])
   ) {
     throw new Error(
-      `depth-anything: ${where} — グラフ出力 '${name}' の形が ` +
-        `[${value.shape.map(String).join(", ")}]、期待は [${expected.join(", ")}]`,
+      `depth-anything: ${where} — graph output '${name}' has shape ` +
+        `[${value.shape.map(String).join(", ")}], expected [${expected.join(", ")}]`,
     );
   }
 };
 
 const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
-  if (tensor.dtype !== "f32") throw new Error(`${where}: f32 でない（${tensor.dtype}）`);
+  if (tensor.dtype !== "f32") throw new Error(`${where}: not f32 (${tensor.dtype})`);
   return tensor.data;
 };
 
@@ -362,7 +362,7 @@ export const resampleDepth = (
     if (!Number.isFinite(depth[index])) {
       const x = index % sourceWidth;
       const y = Math.floor(index / sourceWidth);
-      throw new Error(`depth-anything: 深度値 (x=${x}, y=${y}) が非有限値`);
+      throw new Error(`depth-anything: depth value (x=${x}, y=${y}) is non-finite`);
     }
   }
   return {
@@ -445,25 +445,25 @@ const admitDepthAnything = (
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
-      `DepthAnythingPipeline: model '${modelName}' は manifest に無い` +
-        `（利用可能: ${manifest.available.models.join(" / ")}）`,
+      `DepthAnythingPipeline: model '${modelName}' is not in the manifest` +
+        ` (available: ${manifest.available.models.join(" / ")})`,
     );
   }
   const entry: ModelEntry = manifest.models[modelName];
   const { name, major } = entry.pipeline;
   if (name !== DEPTH_ANYTHING_PIPELINE_NAME) {
     throw new Error(
-      `DepthAnythingPipeline: manifest の pipeline が '${name}/${major}'` +
-        `（'${DEPTH_ANYTHING_PIPELINE_NAME}/${DEPTH_ANYTHING_PIPELINE_MAJOR}' が必要）`,
+      `DepthAnythingPipeline: the manifest's pipeline is '${name}/${major}'` +
+        ` ('${DEPTH_ANYTHING_PIPELINE_NAME}/${DEPTH_ANYTHING_PIPELINE_MAJOR}' is required)`,
     );
   }
   if (major !== DEPTH_ANYTHING_PIPELINE_MAJOR) {
     // The only check that stops silent degradation from "old implementation × new repository"
     // (ADR 0038 §6).
     throw new Error(
-      `DepthAnythingPipeline: pipeline '${name}/${major}' の major に未対応` +
-        `（この実装が読めるのは ${DEPTH_ANYTHING_PIPELINE_NAME}/` +
-        `${DEPTH_ANYTHING_PIPELINE_MAJOR}）`,
+      `DepthAnythingPipeline: the major of pipeline '${name}/${major}' is not supported` +
+        ` (this implementation reads ${DEPTH_ANYTHING_PIPELINE_NAME}/` +
+        `${DEPTH_ANYTHING_PIPELINE_MAJOR})`,
     );
   }
   const config = parseDepthAnythingPipelineConfig(entry.pipelineConfig);
@@ -471,8 +471,8 @@ const admitDepthAnything = (
   const quantName = options.quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quantName)) {
     throw new Error(
-      `DepthAnythingPipeline: quant '${quantName}' は manifest に無い` +
-        `（利用可能: ${entry.available.quants.join(" / ")}）`,
+      `DepthAnythingPipeline: quant '${quantName}' is not in the manifest` +
+        ` (available: ${entry.available.quants.join(" / ")})`,
     );
   }
   const quant = entry.quants[quantName];
@@ -492,16 +492,22 @@ const admitDepthAnything = (
   // mixed in, the later steps that pick by position would silently read other values as depth.
   if (depth.graph.inputs.length !== 1 || depth.graph.outputs.length !== 1) {
     throw new Error(
-      `DepthAnythingPipeline: depth グラフの入出力が ${depth.graph.inputs.length} /` +
-        ` ${depth.graph.outputs.length} 本（どちらも 1 本の深度地図が必要）`,
+      `DepthAnythingPipeline: the depth graph has ${depth.graph.inputs.length} /` +
+        ` ${depth.graph.outputs.length} inputs / outputs (one depth map requires exactly 1 of each)`,
     );
   }
-  assertGraphInputDtype("depth-anything", depth, PIXEL_VALUES, "f32", "前処理の pixel_values");
-  assertStaticDim(depth, PIXEL_VALUES, 0, 1, "batch は静的 1");
-  assertStaticDim(depth, PIXEL_VALUES, 1, CHANNELS, "RGB の 3 チャネル");
+  assertGraphInputDtype(
+    "depth-anything",
+    depth,
+    PIXEL_VALUES,
+    "f32",
+    "preprocessing's pixel_values",
+  );
+  assertStaticDim(depth, PIXEL_VALUES, 0, 1, "batch is static 1");
+  assertStaticDim(depth, PIXEL_VALUES, 1, CHANNELS, "3 RGB channels");
   assertStaticDim(depth, PIXEL_VALUES, 2, config.imageHeight, "imageHeight");
   assertStaticDim(depth, PIXEL_VALUES, 3, config.imageWidth, "imageWidth");
-  assertDepthShape(depth, config, "深度地図の形");
+  assertDepthShape(depth, config, "depth map shape");
 
   // MUST: a shared GPU's missing capability (feature / device limit) fails here — unlike acquiring
   // our own, there is no reason to wait for `acquireGpu`, and this is the only family check that
@@ -591,14 +597,14 @@ const estimateImage = async (state: DepthAnythingState, image: Rgb8Image): Promi
   const name = state.depth.graph.outputs[0];
   const tensor = outputs[name];
   if (tensor === undefined) {
-    throw new Error(`depth-anything: グラフ出力 '${name}' が実行結果に無い`);
+    throw new Error(`depth-anything: graph output '${name}' is not in the run result`);
   }
   const depth = asF32(tensor, "depth");
   const expected = config.imageWidth * config.imageHeight;
   if (depth.length !== expected) {
     throw new Error(
-      `depth-anything: 深度地図の要素数 ${depth.length} が ` +
-        `${config.imageWidth}×${config.imageHeight} と違う`,
+      `depth-anything: depth map element count ${depth.length} does not match ` +
+        `${config.imageWidth}×${config.imageHeight}`,
     );
   }
   return resampleDepth(depth, config.imageWidth, config.imageHeight, image.width, image.height);
@@ -653,7 +659,7 @@ export class DepthAnythingPipeline {
     const source = toManifestSource(
       ref,
       "DepthAnythingPipeline.fromPretrained",
-      'DEPTH_ANYTHING_SOURCES["depth-anything-v2"]（@karume/models/depth-anything）',
+      'DEPTH_ANYTHING_SOURCES["depth-anything-v2"] (@karume/models/depth-anything)',
     );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
@@ -732,7 +738,7 @@ export class DepthAnythingPipeline {
     // The disposed check happens at call time (checking inside the chain would also fail the
     // estimations accepted before dispose).
     if (this.#disposal !== undefined) {
-      throw new Error("DepthAnythingPipeline: dispose 済みでは推定できない");
+      throw new Error("DepthAnythingPipeline: cannot estimate after dispose");
     }
     return await this.#chain(() => estimateImage(this.#state, image));
   }

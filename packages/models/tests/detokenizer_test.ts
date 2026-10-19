@@ -15,7 +15,7 @@ describe("createStopStringFilter: 受理できない停止文字列は入力起�
     assertThrows(
       () => createStopStringFilter(["END", ""]),
       ModelInputError,
-      "stopStrings[1] が空文字列",
+      "stopStrings[1] is an empty string",
     );
   });
 
@@ -23,7 +23,7 @@ describe("createStopStringFilter: 受理できない停止文字列は入力起�
     assertThrows(
       () => createStopStringFilter(["END", "END"]),
       ModelInputError,
-      'stopStrings に "END" が 2 度出る',
+      'stopStrings contains "END" twice',
     );
   });
 

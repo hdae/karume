@@ -112,10 +112,10 @@ export const encodePng = async (
   // is not called from inside a pipeline). The only remedy is "fix the size / bytes you pass", hence
   // {@link ModelInputError} (ADR 0107 decision 2).
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
-    throw new ModelInputError(`画像サイズ ${width}×${height} が正の整数でない`);
+    throw new ModelInputError(`Image size ${width}×${height} is not a positive integer`);
   }
   if (rgba.length !== width * height * 4) {
-    throw new ModelInputError(`RGBA の長さ ${rgba.length} が 4×${width}×${height} と違う`);
+    throw new ModelInputError(`RGBA length ${rgba.length} does not match 4×${width}×${height}`);
   }
 
   const stride = 1 + width * 3;
@@ -128,9 +128,7 @@ export const encodePng = async (
       if (rgba[source + 3] !== 255) {
         // Alpha is also the content of the `rgba` the caller passed, so it is input-caused like the
         // size and the length (the only remedy is "make it 255" — ADR 0107 decision 2).
-        throw new ModelInputError(
-          `画素 (${x}, ${y}) のアルファが ${rgba[source + 3]}（255 でない）`,
-        );
+        throw new ModelInputError(`Alpha of pixel (${x}, ${y}) is ${rgba[source + 3]} (not 255)`);
       }
       const target = rowStart + 1 + x * 3;
       raw[target] = rgba[source];

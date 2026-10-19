@@ -124,7 +124,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
   await assertRejects(
     () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }, { model: "nope" }),
     Error,
-    "model 'nope' は manifest に無い",
+    "model 'nope' is not in the manifest",
   );
 });
 
@@ -133,7 +133,7 @@ test("fromAssets: pipeline の契約名が vowel-detector でない manifest を
   await assertRejects(
     () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
-    "manifest の pipeline が 'sbv2/1'",
+    "the manifest pipeline is 'sbv2/1'",
   );
 });
 
@@ -143,7 +143,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   await assertRejects(
     () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
-    "major に未対応",
+    "has an unsupported major",
   );
 });
 
@@ -152,7 +152,7 @@ test("fromAssets: 存在しない quant は利用可能な一覧を添えて落�
   await assertRejects(
     () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }, { quant: "nope" }),
     Error,
-    "quant 'nope' は manifest に無い",
+    "quant 'nope' is not in the manifest",
   );
 });
 
@@ -164,7 +164,7 @@ test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async
   await assertRejects(
     () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
-    "pipelineConfig: 未知キー 'max_frames'",
+    "pipelineConfig: unknown key 'max_frames'",
   );
 });
 
@@ -175,7 +175,7 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   await assertRejects(
     () => VowelDetectorPipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
-    "部品 'crnn' の容器が無い",
+    "component 'crnn' has no container",
   );
 });
 
@@ -186,7 +186,7 @@ test("fromAssets: 容器が揃っていれば資産（mel_basis）の不在ま�
   await assertRejects(
     () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
-    "資産 'mel_basis' が無い",
+    "asset 'mel_basis' is missing",
   );
 });
 
@@ -233,7 +233,7 @@ test("assertGraph: 長さを固定して焼いた古い形は記号次元で落�
         graphConfig,
       ),
     Error,
-    "VowelDetectorPipeline: グラフの記号次元が []",
+    "VowelDetectorPipeline: the graph's symbolic dimensions are []",
   );
 });
 
@@ -242,7 +242,7 @@ test("assertGraph: 入力の時間軸から 2 倍の係数が抜けたら落と�
   assertThrows(
     () => assertGraph(crnnGraph({ inputShape: [1, "T", FEATURE_DIM] }), graphConfig),
     Error,
-    "VowelDetectorPipeline: グラフ入力の形が [1, T, 83]、期待は [1, 2T, 83]",
+    "VowelDetectorPipeline: the graph input shape is [1, T, 83], expected [1, 2T, 83]",
   );
 });
 
@@ -250,7 +250,7 @@ test("assertGraph: 入力名が features でなければ落とす", () => {
   assertThrows(
     () => assertGraph(crnnGraph({ inputName: "input" }), graphConfig),
     Error,
-    "VowelDetectorPipeline: グラフ入力が 'input'",
+    "VowelDetectorPipeline: the graph input is 'input'",
   );
 });
 
@@ -259,7 +259,7 @@ test("assertGraph: 出力のクラス数が宣言と違えば落とす", () => {
   assertThrows(
     () => assertGraph(crnnGraph({ outputShape: [1, "T", 5] }), graphConfig),
     Error,
-    "VowelDetectorPipeline: グラフ出力の形が [1, T, 5]",
+    "VowelDetectorPipeline: the graph output shape is [1, T, 5]",
   );
 });
 
@@ -281,7 +281,7 @@ test("pipelineConfig: 16kHz 以外の配布形は受理しない（リサンプ�
   assertThrows(
     () => config({ sampleRate: 22050 }),
     Error,
-    "pipelineConfig.sampleRate: この実装が対応するのは 16000 だけ",
+    "pipelineConfig.sampleRate: this implementation supports only 16000",
   );
 });
 
@@ -289,7 +289,7 @@ test("pipelineConfig: 特徴次元が 83 でない配布形は受理しない", 
   assertThrows(
     () => config({ featureDim: 80 }),
     Error,
-    "pipelineConfig.featureDim: この実装が対応するのは 83 だけ",
+    "pipelineConfig.featureDim: this implementation supports only 83",
   );
 });
 
@@ -300,7 +300,7 @@ test("pipelineConfig: クラスの**並び**が違う配布形は受理しない
   assertThrows(
     () => config({ classes: swapped }),
     Error,
-    "pipelineConfig.classes: この実装が対応するのは",
+    "pipelineConfig.classes: this implementation supports only",
   );
 });
 
@@ -310,7 +310,7 @@ test("pipelineConfig: 奇数・非整数・非正の上限宣言は落とす", (
     assertThrows(
       () => config({ maxFrames: value }),
       Error,
-      "pipelineConfig.maxFrames: 正の 2 の倍数でない",
+      "pipelineConfig.maxFrames: not a positive multiple of 2",
       `maxFrames=${JSON.stringify(value)}`,
     );
   }
@@ -321,7 +321,7 @@ test("pipelineConfig: 上限の欠落は落とす（既定へ縮退しない）"
   assertThrows(
     () => parseVowelDetectorPipelineConfig(rest),
     Error,
-    "pipelineConfig.maxFrames: 無い",
+    "pipelineConfig.maxFrames: missing",
   );
 });
 
@@ -331,7 +331,7 @@ test("pipelineConfig: 奇数・非整数・非正の下限宣言は落とす", (
     assertThrows(
       () => config({ minFrames: value }),
       Error,
-      "pipelineConfig.minFrames: 正の 2 の倍数でない",
+      "pipelineConfig.minFrames: not a positive multiple of 2",
       `minFrames=${JSON.stringify(value)}`,
     );
   }
@@ -342,12 +342,16 @@ test("pipelineConfig: 下限の欠落は落とす（既定へ縮退しない）"
   assertThrows(
     () => parseVowelDetectorPipelineConfig(rest),
     Error,
-    "pipelineConfig.minFrames: 無い",
+    "pipelineConfig.minFrames: missing",
   );
 });
 
 test("pipelineConfig: 下限が上限を超える宣言は落とす（受理集合が空になる）", () => {
-  assertThrows(() => config({ minFrames: MAX_FRAMES + 2 }), Error, "受理できる入力長が 1 本も無い");
+  assertThrows(
+    () => config({ minFrames: MAX_FRAMES + 2 }),
+    Error,
+    "would accept no input length at all",
+  );
 });
 
 // ---- 運用範囲（入力長の門・両側）---------------------------------------------
@@ -360,11 +364,11 @@ test("運用上限: ちょうどの長さは通り、1 フレーム超過で落�
   const error = assertThrows(
     () => assertFrameLimit(parsed, MAX_FRAMES + 2),
     ModelInputError,
-    "音声が長すぎる",
+    "the audio is too long",
   );
   // 何秒までなら通るのかが文言に出ていること（切り詰めの代わりに呼び出し側が区切るため）。
-  assert(error.message.includes(`${MAX_FRAMES} フレーム`), error.message);
-  assert(error.message.includes("600.00 秒"), error.message);
+  assert(error.message.includes(`${MAX_FRAMES} frames`), error.message);
+  assert(error.message.includes("600.00 s"), error.message);
 });
 
 test("運用下限: ちょうどの長さは通り、1 フレーム不足で落ちる（境界は下側に閉じる）", () => {
@@ -376,19 +380,19 @@ test("運用下限: ちょうどの長さは通り、1 フレーム不足で落�
     const error = assertThrows(
       () => assertFrameFloor(parsed, frames),
       ModelInputError,
-      "音声が短すぎる",
+      "the audio is too short",
       `frames=${frames}`,
     );
     // 何本あれば通るのかが文言に出ていること（pad の代わりに呼び出し側が長く渡すため）。
-    assert(error.message.includes(`${MIN_FRAMES} フレーム`), error.message);
-    assert(error.message.includes(`${frames} 本`), error.message);
+    assert(error.message.includes(`${MIN_FRAMES} frames`), error.message);
+    assert(error.message.includes(`${frames} frames of 10ms`), error.message);
   }
 });
 
 test("運用下限: 下限は配布形の宣言から来る（TS 側の定数ではない）", () => {
   // 同じ入力長が、宣言の下限が違う配布形では通ったり落ちたりする = 数の出所が manifest 側。
   const strict = config({ minFrames: 8 });
-  assertThrows(() => assertFrameFloor(strict, 6), ModelInputError, "8 フレーム");
+  assertThrows(() => assertFrameFloor(strict, 6), ModelInputError, "8 frames");
   assertFrameFloor(config({ minFrames: 2 }), 2);
 });
 
@@ -421,7 +425,7 @@ test("mel 基底: テンソル名が違えば入っているものを添えて�
   assertThrows(
     () => parseMelBasis(melBasisBytes("mel").buffer),
     Error,
-    "テンソル 'mel_basis' が無い",
+    "has no tensor 'mel_basis'",
   );
 });
 
@@ -429,7 +433,7 @@ test("mel 基底: 転置は要素数が同じでも落とす（形を 2 軸と�
   assertThrows(
     () => parseMelBasis(melBasisBytes("mel_basis", [MEL_BINS, N_MELS]).buffer),
     Error,
-    `期待は [${N_MELS}, ${MEL_BINS}]`,
+    `expected [${N_MELS}, ${MEL_BINS}]`,
   );
 });
 
@@ -447,7 +451,7 @@ test("mel 基底: f32 でない格納形は落とす", () => {
     ]),
     {},
   );
-  assertThrows(() => parseMelBasis(bytes.buffer), Error, "mel 基底が F32 でない");
+  assertThrows(() => parseMelBasis(bytes.buffer), Error, "the mel basis is not F32");
 });
 
 // ---- 検出の実行経路（Session を偽物にして例外の運び方を見る）------------------
@@ -592,7 +596,7 @@ test("detect: 上限を超える音声は特徴を作る前に入力エラーで
   await assertRejects(
     () => pipeline.detect(silenceOfFrames(10)),
     ModelInputError,
-    "音声が長すぎる",
+    "the audio is too long",
   );
 });
 
@@ -605,5 +609,9 @@ test("detect: 端数を落として上限ちょうどになる音声は上限を
   // 9 本は端数 1 本を落として 8 本 = 上限ちょうど。上限の判定は切り捨て後の値で比べる。
   // NOTE: 境界を固定するテストで、退行は検出しない（上限の検査を消しても、mel 基底の寸法で
   // 同じ文言のまま落ちる）。退行を縛るのは上の「上限超過」のテスト。
-  await assertRejects(() => pipeline.detect(silenceOfFrames(9)), Error, "mel 基底が 0 要素");
+  await assertRejects(
+    () => pipeline.detect(silenceOfFrames(9)),
+    Error,
+    "the mel basis has 0 elements",
+  );
 });

@@ -68,10 +68,10 @@ export const buildRelattnTables = (
   windowSize: number = RELATTN_WINDOW_SIZE,
 ): RelattnTables => {
   if (!Number.isInteger(length) || length < 1) {
-    throw new RangeError(`相対位置表の長さ ${length} が 1 以上の整数でない`);
+    throw new RangeError(`Relative position table length ${length} is not an integer >= 1`);
   }
   if (!Number.isInteger(windowSize) || windowSize < 0) {
-    throw new RangeError(`窓幅 ${windowSize} が 0 以上の整数でない`);
+    throw new RangeError(`Window size ${windowSize} is not a non-negative integer`);
   }
   const idxK = new Int32Array(length * length);
   const valid = new Float32Array(length * length);

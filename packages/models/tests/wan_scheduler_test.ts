@@ -300,14 +300,22 @@ test("UniPC: σ 列の外の step と長さ違いの入力は fail loudly", () =
   const schedule = wanUniPcSchedule(1, SHIFT, WAN_UNIPC_CONFIG.numTrainTimesteps);
   assertEquals(schedule.timesteps, [999]);
   const sampler = new WanUniPcSampler(schedule, WAN_UNIPC_CONFIG);
-  assertThrows(() => sampler.step(new Float32Array(3), new Float32Array(4)), RangeError, "要素");
+  assertThrows(
+    () => sampler.step(new Float32Array(3), new Float32Array(4)),
+    RangeError,
+    "elements",
+  );
   const once = sampler.step(new Float32Array([1, -1]), new Float32Array([0.5, 0.25]));
   // 1 step（σ: 0.999999 → 0）は 1 次で x0 の予測そのものになる: x0 = x − σ·v。
   assertEquals(
     [...once],
     [Math.fround(0.5 - schedule.sigmas[0]), Math.fround(0.25 + schedule.sigmas[0])],
   );
-  assertThrows(() => sampler.step(new Float32Array(2), new Float32Array(2)), RangeError, "σ 列");
+  assertThrows(
+    () => sampler.step(new Float32Array(2), new Float32Array(2)),
+    RangeError,
+    "σ sequence",
+  );
   assertThrows(() => wanUniPcSchedule(0, SHIFT, 1000), RangeError, "steps");
   assertThrows(() => wanUniPcSchedule(2, 0, 1000), RangeError, "shift");
   assertThrows(() => wanUniPcSchedule(2, Number.NaN, 1000), RangeError, "shift");

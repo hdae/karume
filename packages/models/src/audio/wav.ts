@@ -48,7 +48,7 @@ export const encodeWav = (
   sampleRate: number,
 ): Uint8Array<ArrayBuffer> => {
   if (!Number.isInteger(sampleRate) || sampleRate <= 0) {
-    throw new ModelInputError(`サンプリング周波数 ${sampleRate} が 1 以上の整数でない`);
+    throw new ModelInputError(`Sample rate ${sampleRate} is not an integer of at least 1`);
   }
   const bytesPerSample = BITS_PER_SAMPLE / 8;
   const frameBytes = CHANNELS * bytesPerSample;
@@ -58,8 +58,8 @@ export const encodeWav = (
   const byteRate = sampleRate * frameBytes;
   if (byteRate > U32_MAX) {
     throw new ModelInputError(
-      `サンプリング周波数 ${sampleRate} の byte rate ${byteRate} が u32 に収まらない` +
-        `（上限 ${Math.floor(U32_MAX / frameBytes)} Hz）`,
+      `Sample rate ${sampleRate}: byte rate ${byteRate} does not fit in u32` +
+        ` (upper bound ${Math.floor(U32_MAX / frameBytes)} Hz)`,
     );
   }
   const dataBytes = samples.length * bytesPerSample;
@@ -67,10 +67,10 @@ export const encodeWav = (
   const riffBytes = HEADER_BYTES - 8 + dataBytes;
   if (riffBytes > U32_MAX) {
     throw new ModelInputError(
-      `サンプル数 ${samples.length}（data ${dataBytes} バイト）の RIFF チャンク長 ${riffBytes} が` +
-        ` u32 に収まらない（上限 ${Math.floor(
+      `Sample count ${samples.length} (data ${dataBytes} bytes): the RIFF chunk length ${riffBytes}` +
+        ` does not fit in u32 (upper bound ${Math.floor(
           (U32_MAX - (HEADER_BYTES - 8)) / bytesPerSample,
-        )} サンプル）`,
+        )} samples)`,
     );
   }
   // MUST: reject non-finite samples here. The clip below uses `Math.max` / `Math.min`, which pass
@@ -78,7 +78,9 @@ export const encodeWav = (
   // neither throws, so numerical breakdown turns into "a valid silent / clipped WAV".
   for (let i = 0; i < samples.length; i += 1) {
     if (!Number.isFinite(samples[i])) {
-      throw new ModelInputError(`${i} 番目のサンプル ${samples[i]} が非有限（WAV には書けない）`);
+      throw new ModelInputError(
+        `Sample ${i} (${samples[i]}) is non-finite (cannot be written to WAV)`,
+      );
     }
   }
   const out = new Uint8Array(HEADER_BYTES + dataBytes);
@@ -149,19 +151,19 @@ const ascii = (view: DataView, offset: number): string =>
  */
 const findChunks = (view: DataView): { readonly fmt: RiffChunk; readonly data: RiffChunk } => {
   if (view.byteLength < 12) {
-    throw new ModelInputError(`decodeWav: ${view.byteLength} バイトしかない`);
+    throw new ModelInputError(`decodeWav: only ${view.byteLength} bytes`);
   }
   if (ascii(view, 0) !== "RIFF" || ascii(view, 8) !== "WAVE") {
     throw new ModelInputError(
-      `decodeWav: RIFF/WAVE ヘッダでない（'${ascii(view, 0)}' / '${ascii(view, 8)}'）`,
+      `decodeWav: not a RIFF/WAVE header ('${ascii(view, 0)}' / '${ascii(view, 8)}')`,
     );
   }
   const riffSize = view.getUint32(4, true);
   const logicalEnd = 8 + riffSize;
   if (logicalEnd > view.byteLength) {
     throw new ModelInputError(
-      `decodeWav: RIFF が ${riffSize} バイトを宣言しているが、` +
-        `残りは ${view.byteLength - 8} バイトしかない`,
+      `decodeWav: RIFF declares ${riffSize} bytes, ` +
+        `but only ${view.byteLength - 8} bytes remain`,
     );
   }
   let fmt: RiffChunk | undefined;
@@ -170,9 +172,9 @@ const findChunks = (view: DataView): { readonly fmt: RiffChunk; readonly data: R
   while (cursor < logicalEnd) {
     if (cursor + 8 > logicalEnd) {
       throw new ModelInputError(
-        `decodeWav: RIFF の終端の手前に ${logicalEnd - cursor} バイトの断片がある` +
-          "（チャンクヘッダは 8 バイト — 器が壊れているか、奇数長チャンクの詰めが欠けて" +
-          "以後の境界がずれている）",
+        `decodeWav: there is a fragment of ${logicalEnd - cursor} bytes before the end of RIFF` +
+          " (a chunk header is 8 bytes — the container is broken, or the pad of an odd-length chunk is missing and " +
+          "every later boundary is shifted)",
       );
     }
     const id = ascii(view, cursor);
@@ -180,14 +182,14 @@ const findChunks = (view: DataView): { readonly fmt: RiffChunk; readonly data: R
     const offset = cursor + 8;
     if (offset + length > logicalEnd) {
       throw new ModelInputError(
-        `decodeWav: チャンク '${id}' が ${length} バイトを宣言しているが、` +
-          `残りは ${logicalEnd - offset} バイトしかない`,
+        `decodeWav: chunk '${id}' declares ${length} bytes, ` +
+          `but only ${logicalEnd - offset} bytes remain`,
       );
     }
     // MUST: one `fmt ` / `data` each. Overwriting with the last one could silently read a data other
     // than the one the writer intended (skipped unknown chunks may repeat).
     if ((id === "fmt " && fmt !== undefined) || (id === "data" && data !== undefined)) {
-      throw new ModelInputError(`decodeWav: チャンク '${id}' が 2 本ある`);
+      throw new ModelInputError(`decodeWav: chunk '${id}' appears twice`);
     }
     if (id === "fmt ") fmt = { offset, length };
     if (id === "data") data = { offset, length };
@@ -195,7 +197,7 @@ const findChunks = (view: DataView): { readonly fmt: RiffChunk; readonly data: R
   }
   if (fmt === undefined || data === undefined) {
     throw new ModelInputError(
-      `decodeWav: ${fmt === undefined ? "'fmt '" : "'data'"} チャンクが無い`,
+      `decodeWav: ${fmt === undefined ? "'fmt '" : "'data'"} chunk is missing`,
     );
   }
   return { fmt, data };
@@ -223,21 +225,21 @@ export const decodeWav = (bytes: Uint8Array<ArrayBufferLike>): DecodedWav => {
   const { fmt, data } = findChunks(view);
   if (fmt.length < 16) {
     throw new ModelInputError(
-      `decodeWav: 'fmt ' チャンクが ${fmt.length} バイトしかない（16 以上が要る）`,
+      `decodeWav: 'fmt ' chunk is only ${fmt.length} bytes (at least 16 are required)`,
     );
   }
   const format = view.getUint16(fmt.offset, true);
   const channels = view.getUint16(fmt.offset + 2, true);
   const sampleRate = view.getUint32(fmt.offset + 4, true);
   const bits = view.getUint16(fmt.offset + 14, true);
-  if (channels < 1) throw new ModelInputError("decodeWav: チャネル数が 0");
-  if (sampleRate < 1) throw new ModelInputError("decodeWav: サンプリング周波数が 0");
+  if (channels < 1) throw new ModelInputError("decodeWav: channel count is 0");
+  if (sampleRate < 1) throw new ModelInputError("decodeWav: sample rate is 0");
   const pcm16 = format === FORMAT_PCM && bits === 16;
   const float32 = format === FORMAT_IEEE_FLOAT && bits === 32;
   if (!pcm16 && !float32) {
     throw new ModelInputError(
-      `decodeWav: format ${format} / ${bits}bit に未対応` +
-        `（PCM ${FORMAT_PCM} の 16bit と IEEE float ${FORMAT_IEEE_FLOAT} の 32bit だけ）`,
+      `decodeWav: format ${format} / ${bits}bit is not supported` +
+        ` (only PCM ${FORMAT_PCM} 16bit and IEEE float ${FORMAT_IEEE_FLOAT} 32bit)`,
     );
   }
   const bytesPerSample = bits / 8;
@@ -250,20 +252,20 @@ export const decodeWav = (bytes: Uint8Array<ArrayBufferLike>): DecodedWav => {
   const byteRate = view.getUint32(fmt.offset + 8, true);
   if (blockAlign !== frameBytes) {
     throw new ModelInputError(
-      `decodeWav: 'fmt ' の block align 宣言 ${blockAlign} が、` +
-        `${channels}ch × ${bits}bit から出る ${frameBytes} と食い違う`,
+      `decodeWav: the declared 'fmt ' block align ${blockAlign} does not match ` +
+        `${channels}ch × ${bits}bit = ${frameBytes}`,
     );
   }
   if (byteRate !== sampleRate * blockAlign) {
     throw new ModelInputError(
-      `decodeWav: 'fmt ' の byte rate 宣言 ${byteRate} が、` +
-        `${sampleRate}Hz × block align ${blockAlign} = ${sampleRate * blockAlign} と食い違う`,
+      `decodeWav: the declared 'fmt ' byte rate ${byteRate} does not match ` +
+        `${sampleRate}Hz × block align ${blockAlign} = ${sampleRate * blockAlign}`,
     );
   }
   if (data.length % frameBytes !== 0) {
     throw new ModelInputError(
-      `decodeWav: 'data' が ${data.length} バイトで、` +
-        `1 フレーム ${frameBytes} バイト（${channels}ch × ${bits}bit）で割り切れない`,
+      `decodeWav: 'data' is ${data.length} bytes, ` +
+        `not divisible by one frame of ${frameBytes} bytes (${channels}ch × ${bits}bit)`,
     );
   }
   const frames = data.length / frameBytes;

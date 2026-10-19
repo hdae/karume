@@ -609,7 +609,7 @@ describe.skipIf(!RUNNABLE)(
       await assertRejects(
         () => pipeline.generate(utterance, { style: "Whisper" }),
         Error,
-        "スタイル 'Whisper' は manifest に無い",
+        "Style 'Whisper' is not in the manifest",
       );
     });
 
@@ -618,7 +618,7 @@ describe.skipIf(!RUNNABLE)(
       await assertRejects(
         () => pipeline.generate(utterance, { speaker: "jvnv-F9-jp" }),
         Error,
-        "話者 'jvnv-F9-jp' は manifest に無い",
+        "Speaker 'jvnv-F9-jp' is not in the manifest",
       );
     });
 
@@ -627,7 +627,7 @@ describe.skipIf(!RUNNABLE)(
       await assertRejects(
         () => open({ style_vectors: table("style_vectors", 3, 256) }),
         Error,
-        "の行数 3 が pipelineConfig の 7 件",
+        "has 3 rows, which differs from the 7 entries of pipelineConfig",
       );
     });
 
@@ -635,7 +635,7 @@ describe.skipIf(!RUNNABLE)(
       await assertRejects(
         () => open({ speaker_embeddings: table("speaker_embeddings", 1, 256) }),
         Error,
-        "の列数 256 がグラフ入力の",
+        "has 256 columns, which differs from the graph input's",
       );
     });
 
@@ -649,7 +649,7 @@ describe.skipIf(!RUNNABLE)(
       await assertRejects(
         () => pipeline.generate(utterance, { lengthScale: 0 }),
         Sbv2InputError,
-        "lengthScale 0 が正でない",
+        "lengthScale 0 is not positive",
       );
     });
 
@@ -657,7 +657,7 @@ describe.skipIf(!RUNNABLE)(
       await assertRejects(
         () => pipeline.generate(utterance, { sdpRatio: Number.NaN }),
         Sbv2InputError,
-        "sdpRatio NaN が有限の数でない",
+        "sdpRatio NaN is not a finite number",
       );
     });
 
@@ -665,7 +665,7 @@ describe.skipIf(!RUNNABLE)(
       await assertRejects(
         () => pipeline.generate({ leadingPunctuations: [], moras: [], words: [] }),
         Sbv2InputError,
-        "utterance が空",
+        "the utterance is empty",
       );
     });
   },
@@ -725,7 +725,7 @@ describe.skipIf(!RUNNABLE)(
       await assertRejects(
         () => pipeline.generate(utterance, { seed: SEED }),
         Error,
-        "Sbv2Pipeline: dispose 済みでは生成できない",
+        "Sbv2Pipeline: cannot generate after dispose",
       );
     });
 
@@ -831,7 +831,7 @@ test.skipIf(!RUNNABLE)(
           { seed: SEED },
         ),
       Error,
-      "が words の",
+      "differs from words'",
     );
   },
 );

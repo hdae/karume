@@ -91,7 +91,7 @@ const bucketOf = (distance: number): number => {
 export const buildUmt5RelativePositionBuckets = (length: number): I32Tensor => {
   if (!Number.isInteger(length) || length < UMT5_MIN_TOKENS || length > UMT5_MAX_LENGTH) {
     throw new RangeError(
-      `umT5 の有効長 ${length} が ${UMT5_MIN_TOKENS}〜${UMT5_MAX_LENGTH} の整数でない`,
+      `umT5 valid length ${length} is not an integer in ${UMT5_MIN_TOKENS}..${UMT5_MAX_LENGTH}`,
     );
   }
   // The values for diagonals d = j − i ∈ [−(L−1), L−1] (index d + L − 1).

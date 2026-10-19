@@ -77,7 +77,7 @@ test("planCodecTiles: halo 2 枚ぶん以下のタイル長は落とす（採用
   assertThrows(
     () => planCodecTiles(300, { tileFrames: 16, haloFrames: HALO }),
     ModelInputError,
-    "halo 2 枚ぶん",
+    "greater than two halos",
   );
 });
 
@@ -190,7 +190,7 @@ test("decodeTiles: latent の要素数が latentDim で割れなければ落と�
         equivariantDecoder,
       ),
     Error,
-    "latentDim 2 で割れない",
+    "is not divisible by latentDim 2",
   );
 });
 
@@ -205,9 +205,9 @@ test("decodeTiles: decoder の出力長が合わなければ落とす（期待�
         (_slice, tileFrames) => Promise.resolve(new Float32Array(tileFrames * TILE_HOP - 1)),
       ),
     Error,
-    "decoder の出力が",
+    "the decoder output is",
   );
-  assertStringIncludes(error.message, `${tiles[0].length * TILE_HOP} のはず`);
+  assertStringIncludes(error.message, `= ${tiles[0].length * TILE_HOP})`);
 });
 
 test("decodeTiles: 1 枚に縮退した計画では単発 decode の写しそのもの", async () => {
@@ -299,7 +299,11 @@ test("findFlatteningPoint: 末尾を 0 にした位置をそのまま返す（go
 });
 
 test("findFlatteningPoint: 要素数が frames × latentDim と違えば落とす", () => {
-  assertThrows(() => findFlatteningPoint(new Float32Array(31), 1, LATENT_DIM), Error, "要素数 31");
+  assertThrows(
+    () => findFlatteningPoint(new Float32Array(31), 1, LATENT_DIM),
+    Error,
+    "element count 31",
+  );
 });
 
 test("trimmedSampleCount: 短いほうを採る（上流 max_samples）", () => {

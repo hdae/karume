@@ -130,8 +130,8 @@ export const assertGpuFeaturesGranted = (
   for (const feature of Object.values(FEATURES)) {
     if (feature.wanted(spec) && !feature.enabled(gpu)) {
       throw new Error(
-        `${where} は ${feature.label} を要求するが、渡された GpuContext で` +
-          `有効になっていない（${feature.reacquire} で取り直す）`,
+        `${where} requires ${feature.label}, but it is not enabled on the passed GpuContext` +
+          ` (re-acquire with ${feature.reacquire})`,
       );
     }
   }
@@ -170,16 +170,17 @@ export const assertRequiredLimitsSatisfied = (
       // Vocabulary drift (a name hub accepted that the runtime does not have). Skipping it silently
       // goes back to "a declared limit nobody looks at" = a silent ceiling.
       throw new Error(
-        `${where} が要求する limit '${name}' は runtime の limits に無い` +
-          `（hub と runtime の語彙のずれ — tests/limit_vocabulary_test.ts）`,
+        `${where}: the required limit '${name}' is not in the runtime's limits` +
+          ` (vocabulary drift between hub and runtime — tests/limit_vocabulary_test.ts)`,
       );
     }
-    if (actual < required) shortfalls.push(`${name}: 要求 ${required} / この GPU は ${actual}`);
+    if (actual < required)
+      shortfalls.push(`${name}: required ${required} / this GPU has ${actual}`);
   }
   if (shortfalls.length > 0) {
     throw new Error(
-      `${where} が要求する device limit をこの GPU が満たさない: ${shortfalls.join(", ")}` +
-        `（別の quant を選ぶ）`,
+      `${where}: this GPU does not meet the required device limits: ${shortfalls.join(", ")}` +
+        ` (choose another quant)`,
     );
   }
 };

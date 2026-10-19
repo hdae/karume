@@ -129,7 +129,7 @@ export type Sampler = {
 
 const assertFiniteAtLeast = (value: number, minimum: number, where: string): void => {
   if (!Number.isFinite(value) || value < minimum) {
-    throw new ModelInputError(`${where} ${value} が ${minimum} 以上の有限数でない`);
+    throw new ModelInputError(`${where} ${value} is not a finite number ≥ ${minimum}`);
   }
 };
 
@@ -160,48 +160,54 @@ const assertSpec = (spec: SamplerSpec): void => {
   for (const key of Object.keys(spec)) {
     if (!Object.hasOwn(SAMPLER_SPEC_KEYS, key)) {
       throw new ModelInputError(
-        `sampler 指定の未知キー '${key}'（許可: ${Object.keys(SAMPLER_SPEC_KEYS).join(" / ")}）`,
+        `Unknown key '${key}' in the sampler spec (allowed: ${Object.keys(SAMPLER_SPEC_KEYS).join(" / ")})`,
       );
     }
   }
   if (spec.temperature !== undefined) assertFiniteAtLeast(spec.temperature, 0, "temperature");
   if (spec.topK !== undefined && (!Number.isSafeInteger(spec.topK) || spec.topK < 1)) {
-    throw new ModelInputError(`topK ${spec.topK} が 1 以上の整数でない`);
+    throw new ModelInputError(`topK ${spec.topK} is not a positive integer`);
   }
   if (spec.topP !== undefined) {
     if (!Number.isFinite(spec.topP) || spec.topP <= 0 || spec.topP > 1) {
-      throw new ModelInputError(`topP ${spec.topP} が 0 < topP ≤ 1 の範囲にない`);
+      throw new ModelInputError(`topP ${spec.topP} is not in the range 0 < topP ≤ 1`);
     }
   }
   if (spec.repetitionPenalty !== undefined) {
     if (!Number.isFinite(spec.repetitionPenalty) || spec.repetitionPenalty <= 0) {
-      throw new ModelInputError(`repetitionPenalty ${spec.repetitionPenalty} が正の有限数でない`);
+      throw new ModelInputError(
+        `repetitionPenalty ${spec.repetitionPenalty} is not a positive finite number`,
+      );
     }
   }
   // MUST: check the shape and the types too (untyped JS / JSON input arrives here). Do not silently
   // accept a `Map` or an object through a different iteration shape, and do not let a string bias
   // concatenate through `+=` (`1 + "0"` = `"10"`).
   if (spec.logitBias !== undefined && !Array.isArray(spec.logitBias)) {
-    throw new ModelInputError("logitBias が [token, bias] の組の配列でない");
+    throw new ModelInputError("logitBias is not an array of [token, bias] pairs");
   }
   const biased = new Set<number>();
   for (const [position, entry] of (spec.logitBias ?? []).entries()) {
     if (!Array.isArray(entry) || entry.length !== 2) {
-      throw new ModelInputError(`logitBias[${position}] が [token, bias] の 2 要素の組でない`);
+      throw new ModelInputError(`logitBias[${position}] is not a two-element [token, bias] pair`);
     }
     const [token, bias] = entry;
     if (!Number.isSafeInteger(token) || token < 0) {
-      throw new ModelInputError(`logitBias の token ${token} が 0 以上の整数でない`);
+      throw new ModelInputError(`logitBias token ${token} is not a non-negative integer`);
     }
     if (biased.has(token)) {
-      throw new ModelInputError(`logitBias に token ${token} が 2 度出る（後勝ちで畳まない）`);
+      throw new ModelInputError(
+        `Token ${token} appears twice in logitBias (not folded as last-wins)`,
+      );
     }
     biased.add(token);
     // `-Infinity` is the idiom for "ban this token" (the same as HF's `SequenceBias`). `+Infinity`
     // and `NaN` only turn softmax into NaN, so they are rejected. Non-numbers (string, null,
     // boolean) are implicitly converted by the addition into another value, so they are rejected.
     if (typeof bias !== "number" || !(Number.isFinite(bias) || bias === Number.NEGATIVE_INFINITY)) {
-      throw new ModelInputError(`logitBias[${token}] ${bias} が有限数でも -Infinity でもない`);
+      throw new ModelInputError(
+        `logitBias[${token}] ${bias} is neither a finite number nor -Infinity`,
+      );
     }
   }
 };
@@ -236,7 +242,9 @@ const processLogits = (
       // `program.vocabSize`), so unlike `logitBias` below (a value the caller passes) it is not a
       // `ModelInputError` — ADR 0107 decision 2.
       if (!Number.isSafeInteger(token) || token < 0 || token >= processed.length) {
-        throw new RangeError(`履歴の token id ${token} が語彙 0..${processed.length - 1} の外`);
+        throw new RangeError(
+          `History token id ${token} is outside the vocabulary 0..${processed.length - 1}`,
+        );
       }
       const value = processed[token];
       // HF's `RepetitionPenaltyLogitsProcessor` direction: multiply if negative, divide if not.
@@ -250,7 +258,7 @@ const processLogits = (
         // check is deferred to here. The value itself is the caller's `logitBias`, so it is
         // input-caused (ADR 0107 decision 3).
         throw new ModelInputError(
-          `logitBias の token ${token} が語彙 0..${processed.length - 1} の外`,
+          `logitBias token ${token} is outside the vocabulary 0..${processed.length - 1}`,
         );
       }
       processed[token] += amount;
@@ -279,7 +287,9 @@ const assertNoNaN = (logits: Float32Array<ArrayBuffer>): void => {
     // MUST: do not use `Number.isNaN` (it would be called V times) — NaN is the value not equal to
     // itself.
     if (logits[token] !== logits[token]) {
-      throw new Error(`logits[${token}] が NaN（非有限） — token id へ畳まずここで落とす`);
+      throw new Error(
+        `logits[${token}] is NaN (non-finite) — failing here instead of folding it into a token id`,
+      );
     }
   }
 };
@@ -316,11 +326,13 @@ const nonFiniteMaximum = (message: string, raw: Float32Array<ArrayBuffer> | unde
  */
 const checkedMaximum = (value: number, index: number, raw?: Float32Array<ArrayBuffer>): number => {
   if (value !== value) {
-    throw new Error(`logits[${index}] が NaN（非有限） — token id へ畳まずここで落とす`);
+    throw new Error(
+      `logits[${index}] is NaN (non-finite) — failing here instead of folding it into a token id`,
+    );
   }
   if (!Number.isFinite(value)) {
     throw nonFiniteMaximum(
-      `logits の最大値が非有限（${value}） — token id へ畳まずここで落とす`,
+      `The maximum of the logits is non-finite (${value}) — failing here instead of folding it into a token id`,
       raw,
     );
   }
@@ -344,7 +356,9 @@ const argmax = (logits: Float32Array<ArrayBuffer>, raw?: Float32Array<ArrayBuffe
   for (let token = 0; token < logits.length; token += 1) {
     const value = logits[token];
     if (value !== value) {
-      throw new Error(`logits[${token}] が NaN（非有限） — token id へ畳まずここで落とす`);
+      throw new Error(
+        `logits[${token}] is NaN (non-finite) — failing here instead of folding it into a token id`,
+      );
     }
     if (value > bestValue) {
       bestValue = value;
@@ -414,7 +428,9 @@ const selectTopKHeap = (logits: Float32Array<ArrayBuffer>, k: number): number[] 
   for (; token < k; token += 1) {
     const value = logits[token];
     if (value !== value) {
-      throw new Error(`logits[${token}] が NaN（非有限） — token id へ畳まずここで落とす`);
+      throw new Error(
+        `logits[${token}] is NaN (non-finite) — failing here instead of folding it into a token id`,
+      );
     }
     heap.push(token);
     let at = heap.length - 1;
@@ -433,7 +449,9 @@ const selectTopKHeap = (logits: Float32Array<ArrayBuffer>, k: number): number[] 
   for (; token < logits.length; token += 1) {
     const value = logits[token];
     if (value !== value) {
-      throw new Error(`logits[${token}] が NaN（非有限） — token id へ畳まずここで落とす`);
+      throw new Error(
+        `logits[${token}] is NaN (non-finite) — failing here instead of folding it into a token id`,
+      );
     }
     if (value <= cutoff) continue;
     heap[0] = token;
@@ -506,7 +524,7 @@ export const samplerDistribution = (
   spec: SamplerSpec,
   history: readonly number[],
 ): SamplerDistribution => {
-  if (logits.length < 1) throw new Error("logits が空");
+  if (logits.length < 1) throw new Error("logits is empty");
   assertSpec(spec);
   // Checked **after** processing (this catches not only the raw logits but also combinations such
   // as a `-Infinity` bias added to a `+Infinity` entry).
@@ -543,7 +561,7 @@ export const samplerDistribution = (
     // Classify the origin by the same rule as the temperature-0 path (finite before processing =
     // the bias removed the candidates).
     throw nonFiniteMaximum(
-      `候補の最大 logit が非有限（${peak}） — 全 token が禁止されている`,
+      `The maximum candidate logit is non-finite (${peak}) — every token is banned`,
       logits,
     );
   }

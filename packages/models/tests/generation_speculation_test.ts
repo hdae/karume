@@ -802,7 +802,7 @@ test("T7′ 例外復旧: verify の戻りで落ちても保留は残らず、�
   await assertRejects(
     () => drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 9 })),
     Error,
-    `verify@1: 'logits' の形 [1,2,${VOCAB}] が [1,4,${VOCAB}] でない`,
+    `verify@1: 'logits' has shape [1,2,${VOCAB}], not [1,4,${VOCAB}]`,
   );
   // `commit(0)` で畳む: b は未投入のまま・棄却行は次の run が上書きする。
   assertEquals(opened.fake.commits, [0], "例外の経路が commit(0) を通っていない");
@@ -907,38 +907,41 @@ describe("T8 門: 投機の指定は sequence 生成時に落ち、開いた面�
   it("k + 1 が sliding ring の余裕を超える", async () => {
     await assertRejected(
       { k: K, session: { slidingSlack: K } },
-      `speculative.k ${K} は sliding ring の余裕 ${K} に入らない`,
+      `speculative.k ${K} does not fit in the sliding ring's slack ${K}`,
     );
   });
 
   it("k が drafter の段数を超える", async () => {
-    await assertRejected({ k: K + 1 }, `speculative.k ${K + 1} が 1..${K}（drafter の段数）の外`);
+    await assertRejected(
+      { k: K + 1 },
+      `speculative.k ${K + 1} is outside 1..${K} (the drafter's step count)`,
+    );
   });
 
   it("k が 1 未満", async () => {
-    await assertRejected({ k: 0 }, `speculative.k 0 が 1..${K}（drafter の段数）の外`);
+    await assertRejected({ k: 0 }, `speculative.k 0 is outside 1..${K} (the drafter's step count)`);
   });
 
   it("drafter が名乗る段数が 1 以上の整数でない", async () => {
     // `k` を省くと `k = steps` になるので、段数を見ない実装では `k` の検査が素通りする
     // （NaN はどの比較も false・1.5 は `1.5 > 1.5` が false）。段数の門が `k` の門より
     // **前**に立っていることを、文言（段数の側）で縛る。
-    await assertRejected({ steps: Number.NaN }, "drafter の段数 NaN が 1 以上の整数でない");
-    await assertRejected({ steps: 0 }, "drafter の段数 0 が 1 以上の整数でない");
-    await assertRejected({ steps: 1.5 }, "drafter の段数 1.5 が 1 以上の整数でない");
+    await assertRejected({ steps: Number.NaN }, "Drafter step count NaN is not a positive integer");
+    await assertRejected({ steps: 0 }, "Drafter step count 0 is not a positive integer");
+    await assertRejected({ steps: 1.5 }, "Drafter step count 1.5 is not a positive integer");
   });
 
   it("k + 1 行が chunkLength を超える", async () => {
     await assertRejected(
       { k: K, program: { chunkLength: K, chunkBuckets: [] } },
-      `speculative.k ${K} の verify ${K + 1} 行が chunkLength ${K} を超える`,
+      `The verify of speculative.k ${K} (${K + 1} rows) exceeds chunkLength ${K}`,
     );
   });
 
   it("k + 1 行を載せるバケットが無い", async () => {
     await assertRejected(
       { k: K, program: { chunkBuckets: [2] } },
-      `verify ${K + 1} 行を載せるバケットが無い（chunkBuckets [2]）`,
+      `No bucket holds the ${K + 1} verify rows (chunkBuckets [2])`,
     );
   });
 
@@ -969,7 +972,7 @@ describe("T8 門: 投機の指定は sequence 生成時に落ち、開いた面�
       caught = error;
     }
     assert(caught instanceof Error, `落ちていない: ${String(caught)}`);
-    assertStringIncludes(caught.message, '"always" にはゲートが居ない');
+    assertStringIncludes(caught.message, '"always" has no gate');
     assertEquals(fake.disposals(), 1, "門で落ちた借り手の巻き添えで貸し手が漏れている");
   });
 
@@ -1259,15 +1262,21 @@ describe("T12 値域門: 語彙外・本数不足の draft は verify を出す�
   };
 
   it("語彙の上を超える", async () => {
-    await assertDraftRejected(() => [VOCAB, 8, 9], `draft[0] ${VOCAB} が語彙 0..${VOCAB - 1} の外`);
+    await assertDraftRejected(
+      () => [VOCAB, 8, 9],
+      `draft[0] ${VOCAB} is outside the vocabulary 0..${VOCAB - 1}`,
+    );
   });
 
   it("負の id", async () => {
-    await assertDraftRejected(() => [8, -1, 9], `draft[1] -1 が語彙 0..${VOCAB - 1} の外`);
+    await assertDraftRejected(
+      () => [8, -1, 9],
+      `draft[1] -1 is outside the vocabulary 0..${VOCAB - 1}`,
+    );
   });
 
   it("本数が足りない", async () => {
-    await assertDraftRejected(() => [8, 9], "draft が 2 本しか無い（3 本要る）");
+    await assertDraftRejected(() => [8, 9], "Only 2 drafts (3 needed)");
   });
 });
 
@@ -1429,7 +1438,7 @@ test("T15 抽選の失敗: run が通った後に抽選が落ちても、旧 fro
     () => drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 5 })),
     Error,
     // 落ちるのは抽選（`assertNoNaN`）— run の失敗ではない（汚染した id は fake の実装事情なので見ない）。
-    "が NaN（非有限）",
+    "is NaN (non-finite)",
   );
   assertEquals(
     opened.fake.pastLength(),
@@ -1856,7 +1865,7 @@ describe("takeDrafts: 先頭 k' 本だけを取り、語彙の外と本数不足
     assertThrows(
       () => takeDrafts(Int32Array.from([8, 9]), 3, VOCAB),
       Error,
-      "draft が 2 本しか無い（3 本要る）",
+      "Only 2 drafts (3 needed)",
     );
   });
 
@@ -1864,12 +1873,12 @@ describe("takeDrafts: 先頭 k' 本だけを取り、語彙の外と本数不足
     assertThrows(
       () => takeDrafts(Int32Array.from([8, VOCAB]), 2, VOCAB),
       Error,
-      `draft[1] ${VOCAB} が語彙 0..${VOCAB - 1} の外`,
+      `draft[1] ${VOCAB} is outside the vocabulary 0..${VOCAB - 1}`,
     );
     assertThrows(
       () => takeDrafts(Int32Array.from([-1]), 1, VOCAB),
       Error,
-      `draft[0] -1 が語彙 0..${VOCAB - 1} の外`,
+      `draft[0] -1 is outside the vocabulary 0..${VOCAB - 1}`,
     );
   });
 });

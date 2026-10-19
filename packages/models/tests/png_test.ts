@@ -120,12 +120,12 @@ test("encodePng: サイズが正の整数でなければ落とす（長さ検査
     await assertRejects(
       () => encodePng(new Uint8ClampedArray(4), bad, 1),
       ModelInputError,
-      "正の整数でない",
+      "is not a positive integer",
     );
     await assertRejects(
       () => encodePng(new Uint8ClampedArray(4), 1, bad),
       ModelInputError,
-      "正の整数でない",
+      "is not a positive integer",
     );
   }
   // 門の順序: `width × height × 4` が偶然 RGBA 長と一致する組でも、長さ検査より先に
@@ -133,17 +133,17 @@ test("encodePng: サイズが正の整数でなければ落とす（長さ検査
   await assertRejects(
     () => encodePng(new Uint8ClampedArray(4), 2, 0.5),
     ModelInputError,
-    "正の整数でない",
+    "is not a positive integer",
   );
 });
 
 test("encodePng: 不透明でない画素は落とす（黙って不透明化しない）", async () => {
   const rgba = new Uint8ClampedArray([1, 2, 3, 254]);
-  await assertRejects(() => encodePng(rgba, 1, 1), ModelInputError, "アルファ");
+  await assertRejects(() => encodePng(rgba, 1, 1), ModelInputError, "Alpha");
   await assertRejects(
     () => encodePng(new Uint8ClampedArray(3), 1, 1),
     ModelInputError,
-    "RGBA の長さ",
+    "RGBA length",
   );
 });
 

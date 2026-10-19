@@ -95,7 +95,10 @@ const prepareResources = async (
     try {
       await disposeSteps([() => selector?.dispose(), ...residents.map((r) => () => r.dispose())]);
     } catch (cleanup) {
-      throw new AggregateError([error, cleanup], "greedy出力の確保と後始末が失敗した");
+      throw new AggregateError(
+        [error, cleanup],
+        "Allocating the greedy output and the clean-up both failed",
+      );
     }
     throw error;
   }
@@ -119,7 +122,7 @@ const withPleInput = async (
   inputs: RunInputs,
 ): Promise<RunInputs> => {
   if (ple === undefined) return inputs;
-  const ids = gemma4PleGatherIds("greedy出力", inputs, ple.idsName);
+  const ids = gemma4PleGatherIds("greedy output", inputs, ple.idsName);
   return { ...inputs, [ple.inputName]: await ple.enqueue(batch, ids) };
 };
 
@@ -150,7 +153,7 @@ export const createGemmaGreedyOutput = (
   let ready: Promise<Resources> | undefined;
   let disposal: Promise<void> | undefined;
   const assertAlive = (): void => {
-    if (disposal !== undefined) throw new Error("greedy出力はdispose済み");
+    if (disposal !== undefined) throw new Error("The greedy output is disposed");
   };
   return {
     extraBytes,
@@ -160,7 +163,7 @@ export const createGemmaGreedyOutput = (
         assertAlive();
         return chain(async () => {
           if (ple === undefined) return await target.run(inputs, bindings, generation);
-          const rows = gemma4PleGatherIds("greedy出力", inputs, ple.idsName).length;
+          const rows = gemma4PleGatherIds("greedy output", inputs, ple.idsName).length;
           const batch = await gpu.beginBatch();
           try {
             const extra = await withPleInput(ple, batch, inputs);

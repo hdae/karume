@@ -102,28 +102,28 @@ export type JpExtraRules = {
 
 const asRecord = (value: unknown, where: string): Record<string, unknown> => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`${where}: オブジェクトでない`);
+    throw new Error(`${where}: not an object`);
   }
   return value as Record<string, unknown>;
 };
 
 const asNumber = (value: unknown, where: string): number => {
   if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`${where}: 有限の数値でない（${String(value)}）`);
+    throw new Error(`${where}: not a finite number (${String(value)})`);
   }
   return value;
 };
 
 const asInteger = (value: unknown, where: string): number => {
   const numeric = asNumber(value, where);
-  if (!Number.isInteger(numeric)) throw new Error(`${where}: 整数でない（${numeric}）`);
+  if (!Number.isInteger(numeric)) throw new Error(`${where}: not an integer (${numeric})`);
   return numeric;
 };
 
 const asStringArray = (value: unknown, where: string): string[] => {
-  if (!Array.isArray(value)) throw new Error(`${where}: 配列でない`);
+  if (!Array.isArray(value)) throw new Error(`${where}: not an array`);
   return value.map((entry, index) => {
-    if (typeof entry !== "string") throw new Error(`${where}[${index}]: 文字列でない`);
+    if (typeof entry !== "string") throw new Error(`${where}[${index}]: not a string`);
     return entry;
   });
 };
@@ -145,10 +145,10 @@ const parseBertRelPos = (raw: unknown, where: string): Sbv2BertRelPos => {
   // Below 2, mid = 0 breaks the log's denominator (bound here the lower limit at which the formula
   // holds).
   if (positionBuckets < 2) {
-    throw new Error(`${where}.positionBuckets: 2 以上でない（${positionBuckets}）`);
+    throw new Error(`${where}.positionBuckets: less than 2 (${positionBuckets})`);
   }
   if (maxPosition < 2) {
-    throw new Error(`${where}.maxPosition: 2 以上でない（${maxPosition}）`);
+    throw new Error(`${where}.maxPosition: less than 2 (${maxPosition})`);
   }
   // Even above the lower limits, some pairs produce NaN ({@link assertLogBucketDomain}) — fail when
   // the asset is read rather than waiting for the table to be built on each generation.
@@ -164,14 +164,14 @@ const parseBertRelPos = (raw: unknown, where: string): Sbv2BertRelPos => {
 export const parseJpExtraRules = (raw: unknown, where: string): JpExtraRules => {
   const root = asRecord(raw, where);
   const symbols = asStringArray(root["symbols"], `${where}.symbols`);
-  if (symbols.length === 0) throw new Error(`${where}.symbols: 空`);
+  if (symbols.length === 0) throw new Error(`${where}.symbols: empty`);
   const symbolToId = new Map(symbols.map((symbol, index) => [symbol, index] as const));
   if (symbolToId.size !== symbols.length) {
-    throw new Error(`${where}.symbols: 重複がある（ID の一意性が崩れる）`);
+    throw new Error(`${where}.symbols: has duplicates (the IDs would not be unique)`);
   }
   const pad = root["pad"];
   if (typeof pad !== "string" || !symbolToId.has(pad)) {
-    throw new Error(`${where}.pad: 記号表に無い（${JSON.stringify(pad)}）`);
+    throw new Error(`${where}.pad: not in the symbol table (${JSON.stringify(pad)})`);
   }
   const rules: JpExtraRules = {
     symbols,
@@ -200,7 +200,9 @@ export const parseJpExtraRules = (raw: unknown, where: string): JpExtraRules => 
     // A model with add_blank=False does not go through intersperse, so the phoneme length and
     // word2ph follow different formulas. The pipeline has only the one path that assumes add_blank
     // — letting it through silently would build a sequence twice as long.
-    throw new Error(`${where}.addBlank: true でない（add_blank 前提のパイプラインでは未対応）`);
+    throw new Error(
+      `${where}.addBlank: not true (unsupported by the pipeline, which assumes add_blank)`,
+    );
   }
   // MUST: blank goes into **all 3** ID sequences — phoneme, tone and language — with the same value
   // (`intersperse`), so being outside any one of the 3 tables gives an out-of-range embedding
@@ -208,15 +210,15 @@ export const parseJpExtraRules = (raw: unknown, where: string): JpExtraRules => 
   const blankLimit = Math.min(symbols.length, rules.numTones, rules.numLanguages);
   if (rules.blankId < 0 || rules.blankId >= blankLimit) {
     throw new Error(
-      `${where}.blankId: 音素・tone・language の埋め込みの範囲外（${rules.blankId} / ` +
-        `0..${blankLimit - 1} — 記号表 ${symbols.length} 件・numTones ${rules.numTones}・` +
-        `numLanguages ${rules.numLanguages}）`,
+      `${where}.blankId: outside the phoneme / tone / language embeddings (${rules.blankId} / ` +
+        `0..${blankLimit - 1} — symbol table ${symbols.length} entries, numTones ${rules.numTones}, ` +
+        `numLanguages ${rules.numLanguages})`,
     );
   }
   if (rules.languageId < 0 || rules.languageId >= rules.numLanguages) {
     throw new Error(
-      `${where}.languageId: language 埋め込みの範囲外（${rules.languageId} / ` +
-        `0..${rules.numLanguages - 1}）`,
+      `${where}.languageId: outside the language embedding (${rules.languageId} / ` +
+        `0..${rules.numLanguages - 1})`,
     );
   }
   return rules;
@@ -234,8 +236,8 @@ export const phonesToIds = (rules: JpExtraRules, phones: readonly string[]): num
       // Reachable through the caller's utterance alone (writing an unknown phoneme into moras /
       // words), so it is input-caused = 400.
       throw new Sbv2InputError(
-        `記号表に無い音素 ${JSON.stringify(phone)} が phones に含まれる（ID 化不能）。` +
-          " 発話（moras / words）の音素記号と JP-Extra モデルの記号表の齟齬を疑う。",
+        `Phoneme ${JSON.stringify(phone)}, which is not in the symbol table, appears in phones (cannot be mapped to an ID).` +
+          " Suspect a mismatch between the phoneme symbols of the utterance (moras / words) and the symbol table of the JP-Extra model.",
       );
     }
     return id;
@@ -274,21 +276,21 @@ export const phonesTonesToModelIds = (
   tones: readonly number[],
 ): ModelIdSequences => {
   if (phones.length !== tones.length) {
-    throw new Error(`phones(${phones.length}) と tones(${tones.length}) の長さが不一致`);
+    throw new Error(`phones(${phones.length}) and tones(${tones.length}) differ in length`);
   }
   const phoneIds = phonesToIds(rules, phones);
   const shiftedTones = tones.map((tone, index) => {
     const shifted = tone + rules.toneStart;
     if (shifted < 0 || shifted >= rules.numTones) {
       throw new Error(
-        `トーン ID ${shifted}（位置 ${index}・生値 ${tone}）が tone 埋め込みの範囲外` +
-          `（0..${rules.numTones - 1}）`,
+        `Tone ID ${shifted} (position ${index}, raw value ${tone}) is outside the tone embedding` +
+          ` (0..${rules.numTones - 1})`,
       );
     }
     return shifted;
   });
   if (rules.languageId < 0 || rules.languageId >= rules.numLanguages) {
-    throw new Error(`言語 ID ${rules.languageId} が language 埋め込みの範囲外`);
+    throw new Error(`Language ID ${rules.languageId} is outside the language embedding`);
   }
   return {
     phoneIds: intersperse(phoneIds, rules.blankId),
@@ -308,7 +310,7 @@ export const phonesTonesToModelIds = (
  */
 export const addBlankWord2ph = (baseWord2ph: readonly number[]): number[] => {
   if (baseWord2ph.length === 0) {
-    throw new Error("base word2ph が空（両端の番兵が欠落）");
+    throw new Error("base word2ph is empty (the sentinels at both ends are missing)");
   }
   const doubled = baseWord2ph.map((count) => count * 2);
   doubled[0] += 1;

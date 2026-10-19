@@ -219,8 +219,8 @@ test("decodeWav: RIFF/WAVE でないバイト列は落とす", () => {
   const bytes = new Uint8Array(64);
   ascii(bytes, 0, "RIFX");
   ascii(bytes, 8, "WAVE");
-  assertThrows(() => decodeWav(bytes), ModelInputError, "RIFF/WAVE ヘッダでない");
-  assertThrows(() => decodeWav(new Uint8Array(8)), ModelInputError, "バイトしかない");
+  assertThrows(() => decodeWav(bytes), ModelInputError, "not a RIFF/WAVE header");
+  assertThrows(() => decodeWav(new Uint8Array(8)), ModelInputError, "only 8 bytes");
 });
 
 test("decodeWav: 未対応の format / bit 深度は落とす（黙って近似しない）", () => {
@@ -237,7 +237,7 @@ test("decodeWav: 未対応の format / bit 深度は落とす（黙って近似�
         }),
       ),
     ModelInputError,
-    "format 1 / 24bit に未対応",
+    "format 1 / 24bit is not supported",
   );
   // A-law。
   assertThrows(
@@ -246,7 +246,7 @@ test("decodeWav: 未対応の format / bit 深度は落とす（黙って近似�
         buildWav({ format: 6, channels: 1, sampleRate: 8000, bits: 8, payload: new Uint8Array(4) }),
       ),
     ModelInputError,
-    "format 6 / 8bit に未対応",
+    "format 6 / 8bit is not supported",
   );
   // WAVE_FORMAT_EXTENSIBLE は SubFormat を読まないと種別が決まらないので受理しない。
   assertThrows(
@@ -261,7 +261,7 @@ test("decodeWav: 未対応の format / bit 深度は落とす（黙って近似�
         }),
       ),
     ModelInputError,
-    "に未対応",
+    "is not supported",
   );
 });
 
@@ -275,12 +275,12 @@ test("decodeWav: 'data' が無い / 長さが宣言と食い違うファイル�
   });
   // data チャンクの宣言長だけを実体より大きくする（末尾 8 バイト = 'data' + 長さ の直後）。
   const truncated = complete.slice(0, complete.length - 2) as Uint8Array<ArrayBuffer>;
-  assertThrows(() => decodeWav(truncated), ModelInputError, "残りは");
+  assertThrows(() => decodeWav(truncated), ModelInputError, "bytes remain");
   // fmt だけのファイル（data 無し）。RIFF の宣言サイズも 36 バイトの器に揃える — 揃えないと
   // 「器が切り詰められている」ほうの門で先に落ち、data 欠落の門を踏まない。
   const fmtOnly = complete.slice(0, 36) as Uint8Array<ArrayBuffer>;
   new DataView(fmtOnly.buffer).setUint32(4, 36 - 8, true);
-  assertThrows(() => decodeWav(fmtOnly), ModelInputError, "'data' チャンクが無い");
+  assertThrows(() => decodeWav(fmtOnly), ModelInputError, "'data' chunk is missing");
 });
 
 /** 器の末尾にチャンクを 1 本足し、RIFF の宣言サイズを揃える（奇数長は 1 バイト詰め）。 */
@@ -311,14 +311,14 @@ describe("decodeWav が同じ id のチャンクを 2 本持つ器を受けた�
 
   it("'data' が 2 本なら後勝ちで読まずに落とす", () => {
     const twoData = appendChunk(single(), "data", int16Payload([-16384]));
-    assertThrows(() => decodeWav(twoData), ModelInputError, "チャンク 'data' が 2 本ある");
+    assertThrows(() => decodeWav(twoData), ModelInputError, "chunk 'data' appears twice");
   });
 
   it("'fmt ' が 2 本なら後勝ちで読まずに落とす", () => {
     const wav = single();
     // 1 本目の `fmt ` の中身（offset 20 から 16 バイト）をそのまま写す — 中身が同じでも重複は重複。
     const twoFmt = appendChunk(wav, "fmt ", wav.slice(20, 36));
-    assertThrows(() => decodeWav(twoFmt), ModelInputError, "チャンク 'fmt ' が 2 本ある");
+    assertThrows(() => decodeWav(twoFmt), ModelInputError, "chunk 'fmt ' appears twice");
   });
 
   it("読み飛ばす未知チャンク（LIST）は 2 本あっても通る", () => {
@@ -375,7 +375,7 @@ describe("decodeWav がチャンクの走査を RIFF の論理終端ちょうど
     assertThrows(
       () => decodeWav(appendRaw(single(), fragment)),
       ModelInputError,
-      "RIFF の終端の手前に 4 バイトの断片がある",
+      "a fragment of 4 bytes before the end of RIFF",
     );
   });
 
@@ -386,7 +386,7 @@ describe("decodeWav がチャンクの走査を RIFF の論理終端ちょうど
       ...unpaddedChunk("JUNK", [7]),
       ...unpaddedChunk("LIST", [0, 0, 0, 0]),
     ]);
-    assertThrows(() => decodeWav(appendRaw(single(), tail)), ModelInputError, "の断片がある");
+    assertThrows(() => decodeWav(appendRaw(single(), tail)), ModelInputError, "a fragment of");
   });
 
   it("最後のチャンクだけが詰めを欠く形は受ける（実在の書き手に多く、後ろに読むものが無い）", () => {
@@ -409,7 +409,7 @@ test("decodeWav: フレーム境界で割り切れない data は落とす", () 
         }),
       ),
     ModelInputError,
-    "割り切れない",
+    "not divisible",
   );
 });
 
@@ -427,7 +427,7 @@ test("decodeWav: RIFF の宣言サイズが物理長を超える器は落とす�
   assertThrows(
     () => decodeWav(complete),
     ModelInputError,
-    `RIFF が ${complete.length + 8} バイトを宣言`,
+    `RIFF declares ${complete.length + 8} bytes`,
   );
 });
 
@@ -445,7 +445,7 @@ test("decodeWav: data の宣言が RIFF の論理終端をはみ出すファイ�
   padded.set(complete);
   const view = new DataView(padded.buffer);
   view.setUint32(40, view.getUint32(40, true) + 8, true); // data チャンクの長さ欄（44 バイト定型）
-  assertThrows(() => decodeWav(padded), ModelInputError, "チャンク 'data' が 16 バイトを宣言");
+  assertThrows(() => decodeWav(padded), ModelInputError, "chunk 'data' declares 16 bytes");
 });
 
 test("decodeWav: fmt の block align / byte rate が導出値と矛盾するファイルは落とす", () => {
@@ -463,7 +463,7 @@ test("decodeWav: fmt の block align / byte rate が導出値と矛盾するフ�
   assertThrows(
     () => decodeWav(badAlign),
     ModelInputError,
-    "block align 宣言 4 が、1ch × 16bit から出る 2 と食い違う",
+    "block align 4 does not match 1ch × 16bit = 2",
   );
   // byte rate だけを壊す（48000 × 2 = 96000）。fmt 定型では offset 28。
   const badRate = build();
@@ -471,7 +471,7 @@ test("decodeWav: fmt の block align / byte rate が導出値と矛盾するフ�
   assertThrows(
     () => decodeWav(badRate),
     ModelInputError,
-    "byte rate 宣言 192000 が、48000Hz × block align 2 = 96000 と食い違う",
+    "byte rate 192000 does not match 48000Hz × block align 2 = 96000",
   );
 });
 
@@ -487,7 +487,7 @@ test("encodeWav: 非有限サンプルは位置と値付きで落とす（無音
     assertThrows(
       () => encodeWav(samples, 48000),
       ModelInputError,
-      `2 番目のサンプル ${text} が非有限`,
+      `Sample 2 (${text}) is non-finite`,
     );
   }
   // 値域外の有限値は今までどおりクリップして通る（検査が全部を落としていない）。
@@ -506,7 +506,7 @@ test("encodeWav: u32 に収まらない sampleRate / byte rate は落とす", ()
   // `setUint32` が mod 2^32 で巻き戻し、byte rate 0 を宣言した **valid な WAV** が出る。
   assertThrows(() => encodeWav(samples, 0x8000_0000), ModelInputError, "byte rate 4294967296");
   // sampleRate 自身が u32 を超える場合も同じ門で落ちる。
-  assertThrows(() => encodeWav(samples, 0x1_0000_0000), ModelInputError, "u32 に収まらない");
+  assertThrows(() => encodeWav(samples, 0x1_0000_0000), ModelInputError, "does not fit in u32");
 });
 
 test("encodeWav: RIFF チャンク長が u32 を超えるサンプル数は落とす", () => {
@@ -517,7 +517,7 @@ test("encodeWav: RIFF チャンク長が u32 を超えるサンプル数は落�
   assertThrows(
     () => encodeWav(huge, 48000),
     ModelInputError,
-    "RIFF チャンク長 4294967296 が u32 に収まらない",
+    "RIFF chunk length 4294967296 does not fit in u32",
   );
 });
 

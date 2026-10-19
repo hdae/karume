@@ -345,19 +345,19 @@ export class Gemma4ChatSession {
     // diagnostic.
     if (!Number.isSafeInteger(this.#capacity) || this.#capacity < 1) {
       throw new ModelInputError(
-        `Gemma4ChatSession: capacity ${this.#capacity} が 1 以上の整数でない`,
+        `Gemma4ChatSession: capacity ${this.#capacity} is not a positive integer`,
       );
     }
     if (this.#capacity < host.program.chunkLength) {
       throw new ModelInputError(
-        `Gemma4ChatSession: capacity ${this.#capacity} が chunkLength ` +
-          `${host.program.chunkLength} を下回る（1 chunk すら入らない）`,
+        `Gemma4ChatSession: capacity ${this.#capacity} is below chunkLength ` +
+          `${host.program.chunkLength} (not even one chunk fits)`,
       );
     }
     if (this.#capacity > host.program.maxPosition) {
       throw new ModelInputError(
-        `Gemma4ChatSession: capacity ${this.#capacity} が maxPosition ` +
-          `${host.program.maxPosition} を超えた（容量いっぱいの会話がモデルの位置上限の外を引く）`,
+        `Gemma4ChatSession: capacity ${this.#capacity} exceeds maxPosition ` +
+          `${host.program.maxPosition} (a conversation filling the capacity would look up positions beyond the model's position limit)`,
       );
     }
     this.#turns = options.system === undefined ? [] : [{ role: "system", content: options.system }];
@@ -384,12 +384,12 @@ export class Gemma4ChatSession {
    */
   send(text: string, options: Gemma4ChatTurnOptions = {}): Gemma4ChatStream {
     if (this.#disposal !== undefined) {
-      throw new Error("Gemma4ChatSession: dispose 済みでは生成できない");
+      throw new Error("Gemma4ChatSession: cannot generate after dispose");
     }
     if (this.#busy) {
       throw new Error(
-        "Gemma4ChatSession: 前のターンがまだ終わっていない" +
-          "（1 セッション = 1 生成 — 発行した stream は汲み切るか break で閉じる）",
+        "Gemma4ChatSession: the previous turn has not finished yet" +
+          " (1 session = 1 generation — drain the issued stream or close it with break)",
       );
     }
     // MUST: the request is **copied at issue** (ADR 0083 addendum 2026-09-02). The body (an async
@@ -554,12 +554,12 @@ export class Gemma4ChatSession {
    */
   fork(): Promise<Gemma4ChatSession> {
     if (this.#disposal !== undefined) {
-      throw new Error("Gemma4ChatSession: dispose 済みでは fork できない");
+      throw new Error("Gemma4ChatSession: cannot fork after dispose");
     }
     if (this.#busy) {
       throw new Error(
-        "Gemma4ChatSession: 前のターンがまだ終わっていない" +
-          "（fork はターンの合間だけ — 発行した stream は汲み切るか break で閉じる）",
+        "Gemma4ChatSession: the previous turn has not finished yet" +
+          " (fork only between turns — drain the issued stream or close it with break)",
       );
     }
     // Copy along with the KV-to-history mapping (`#committed`). Between turns, "no sequence ⇔ the KV
@@ -606,7 +606,7 @@ export class Gemma4ChatSession {
       // Draining an issued stream after disposing only the session would otherwise take a sequence
       // with fresh capacity from a live pipeline.
       if (this.#disposal !== undefined) {
-        throw new Error("Gemma4ChatSession: dispose 済みでは生成できない");
+        throw new Error("Gemma4ChatSession: cannot generate after dispose");
       }
       const held = this.#sequence;
       // Carry on with a delta only when "exactly the last message is uncommitted". Streaming a delta
@@ -614,8 +614,8 @@ export class Gemma4ChatSession {
       // over is itself a check.
       if (this.#committed !== 0 && this.#committed !== this.#turns.length - 1) {
         throw new Error(
-          `Gemma4ChatSession 内部不整合: KV は ${this.#committed} 件だが履歴は ` +
-            `${this.#turns.length} 件`,
+          `Gemma4ChatSession internal inconsistency: the KV holds ${this.#committed} turns but the history holds ` +
+            `${this.#turns.length}`,
         );
       }
       // `used` is a derived value (`#committed === 0` ⇔ the KV is empty ⇔ `used === 0`). Assuming 0
@@ -625,13 +625,13 @@ export class Gemma4ChatSession {
       if (this.#committed !== 0) {
         if (held === undefined) {
           throw new Error(
-            `Gemma4ChatSession 内部不整合: KV は ${this.#committed} 件だが sequence が無い`,
+            `Gemma4ChatSession internal inconsistency: the KV holds ${this.#committed} turns but there is no sequence`,
           );
         }
         used = held.used;
       } else if (held !== undefined && held.used !== 0) {
         throw new Error(
-          `Gemma4ChatSession 内部不整合: KV は空だが sequence の used が ${held.used}`,
+          `Gemma4ChatSession internal inconsistency: the KV is empty but the sequence's used is ${held.used}`,
         );
       }
       const prompt =
@@ -659,14 +659,16 @@ export class Gemma4ChatSession {
         // `#releaseSequence`) — this re-check is the only thing that closes the window.
         if (this.#disposal !== undefined) {
           await created.dispose();
-          throw new Error("Gemma4ChatSession: dispose 済みでは生成できない");
+          throw new Error("Gemma4ChatSession: cannot generate after dispose");
         }
         this.#sequence = created;
         this.#committed = 0;
         return { sequence: created, prompt };
       }
       if (attempt >= attempts) {
-        throw new Error(`Gemma4ChatSession 内部不整合: 溢れ処理が ${attempts} 回で収束しなかった`);
+        throw new Error(
+          `Gemma4ChatSession internal inconsistency: overflow handling did not converge in ${attempts} attempts`,
+        );
       }
       await this.#shrink(detail);
     }
@@ -694,15 +696,15 @@ export class Gemma4ChatSession {
     const last = next.at(-1);
     if (last === undefined || !sameTurn(last, asked)) {
       throw new Error(
-        `Gemma4ChatSession: 溢れ処理が今の発話（末尾）を落とした` +
-          `（履歴 ${before} 件 → ${next.length} 件 — 今答えようとしている発話は残すこと）`,
+        `Gemma4ChatSession: overflow handling dropped the current utterance (the last one)` +
+          ` (history ${before} turns → ${next.length} — keep the utterance being answered now)`,
       );
     }
     if (next.length >= before) {
       throw new GenerationCapacityError(
-        `会話が入り切らない: ${detail.constraint} 上限 ${detail.limit} に対し ${needed} 要る` +
-          `（溢れ処理は履歴 ${before} 件を縮めなかった — 発話を短くするか maxNewTokens を` +
-          ` 下げる。この長さなら maxNewTokens ≤ ${detail.maxNewTokens}）`,
+        `The conversation does not fit: the ${detail.constraint} limit is ${detail.limit}, but ${needed} are needed` +
+          ` (overflow handling did not shrink the history of ${before} turns — shorten the utterance or lower` +
+          ` maxNewTokens. At this length maxNewTokens ≤ ${detail.maxNewTokens})`,
         detail,
       );
     }

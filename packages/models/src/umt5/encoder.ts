@@ -271,24 +271,24 @@ const admitUmt5 = (
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
-      `${OWNER}: model '${modelName}' は manifest に無い` +
-        `（利用可能: ${manifest.available.models.join(" / ")}）`,
+      `${OWNER}: model '${modelName}' is not in the manifest` +
+        ` (available: ${manifest.available.models.join(" / ")})`,
     );
   }
   const entry: ModelEntry = manifest.models[modelName];
   const { name, major } = entry.pipeline;
   if (name !== UMT5_PIPELINE_NAME) {
     throw new Error(
-      `${OWNER}: manifest の pipeline が '${name}/${major}'` +
-        `（'${UMT5_PIPELINE_NAME}/${UMT5_PIPELINE_MAJOR}' が必要）`,
+      `${OWNER}: the manifest's pipeline is '${name}/${major}'` +
+        ` ('${UMT5_PIPELINE_NAME}/${UMT5_PIPELINE_MAJOR}' is required)`,
     );
   }
   if (major !== UMT5_PIPELINE_MAJOR) {
     // The only check that stops the silent degradation of "old implementation × new repository"
     // (ADR 0038 §6).
     throw new Error(
-      `${OWNER}: pipeline '${name}/${major}' の major に未対応` +
-        `（この実装が読めるのは ${UMT5_PIPELINE_NAME}/${UMT5_PIPELINE_MAJOR}）`,
+      `${OWNER}: pipeline '${name}/${major}' has an unsupported major` +
+        ` (this implementation reads ${UMT5_PIPELINE_NAME}/${UMT5_PIPELINE_MAJOR})`,
     );
   }
   assertUmt5PipelineConfig(entry.pipelineConfig);
@@ -296,8 +296,8 @@ const admitUmt5 = (
   const quantName = options.quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quantName)) {
     throw new Error(
-      `${OWNER}: quant '${quantName}' は manifest に無い` +
-        `（利用可能: ${entry.available.quants.join(" / ")}）`,
+      `${OWNER}: quant '${quantName}' is not in the manifest` +
+        ` (available: ${entry.available.quants.join(" / ")})`,
     );
   }
   const quant = entry.quants[quantName];
@@ -305,9 +305,9 @@ const admitUmt5 = (
   // declaration fails before the weights (about 5.3 GiB) are fetched.
   if (!Object.hasOwn(entry.assets, TOKENIZER)) {
     throw new Error(
-      `${OWNER}: model '${modelName}' の manifest の assets にトークナイザ資産 '${TOKENIZER}' が無い` +
-        "（単体の encoder は配布形のトークナイザで符号化する。トークナイザを持たない配布形〈取り込み由来の" +
-        "手元の実験用ミラーなど〉は Wan の部品差し替え〈components の text_encoder〉でだけ使える）",
+      `${OWNER}: the manifest assets of model '${modelName}' have no tokenizer asset '${TOKENIZER}'` +
+        " (the standalone encoder encodes with the distribution's tokenizer. A distribution without a tokenizer [such as a local" +
+        " experimental mirror made by intake] can be used only as Wan's component replacement [text_encoder in components])",
     );
   }
   // An unsupported declaration fails before the components are opened (= before the weight parts are
@@ -361,8 +361,8 @@ const buildUmt5 = async (
   // silently (when smaller).
   if (tokenizer.maxLength !== UMT5_MAX_LENGTH) {
     throw new Error(
-      `${OWNER}: トークナイザ資産の maxLength ${tokenizer.maxLength} が umT5 の有効長の上限 ` +
-        `${UMT5_MAX_LENGTH} と違う`,
+      `${OWNER}: the tokenizer asset's maxLength ${tokenizer.maxLength} differs from umT5's valid-length upper limit ` +
+        `${UMT5_MAX_LENGTH}`,
     );
   }
   // The supplier is **the same one** admission looked at (`open` only looks up the opened component).
@@ -416,7 +416,7 @@ const encodeIds = async (
   );
   state.onRunDiagnostics?.(session.diagnostics());
   if (!Object.hasOwn(outputs, contract.output)) {
-    throw new Error(`${OWNER}: グラフ出力 '${contract.output}' が実行結果に無い`);
+    throw new Error(`${OWNER}: graph output '${contract.output}' is missing from the run results`);
   }
   const hiddenStates = umt5HiddenStates(
     outputs[contract.output],
@@ -429,9 +429,9 @@ const encodeIds = async (
   const broken = hiddenStates.findIndex((value) => !Number.isFinite(value));
   if (broken !== -1) {
     throw new Error(
-      `${OWNER}: umT5 の出力（${inputIds.length} トークン）の行 ` +
-        `${Math.floor(broken / contract.hiddenSize)}・列 ${broken % contract.hiddenSize} が非有限` +
-        `（${hiddenStates[broken]}）`,
+      `${OWNER}: umT5 output (${inputIds.length} tokens) row ` +
+        `${Math.floor(broken / contract.hiddenSize)}, column ${broken % contract.hiddenSize} is non-finite` +
+        ` (${hiddenStates[broken]})`,
     );
   }
   return { inputIds, hiddenStates, length: inputIds.length, hiddenSize: contract.hiddenSize };
@@ -482,7 +482,7 @@ export class Umt5Encoder {
     const source = toManifestSource(
       ref,
       `${OWNER}.fromPretrained`,
-      'UMT5_SOURCES["umt5-xxl"]（@karume/models/umt5）',
+      'UMT5_SOURCES["umt5-xxl"] (@karume/models/umt5)',
     );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
@@ -563,7 +563,7 @@ export class Umt5Encoder {
     // The disposed check happens at call time (checking inside the chain would also fail encodings
     // accepted before dispose).
     if (this.#disposal !== undefined) {
-      throw new Error(`${OWNER}: dispose 済みでは符号化できない`);
+      throw new Error(`${OWNER}: cannot encode after dispose`);
     }
     // Input-error rejections return without waiting for the turn (the tokenizer is pure and
     // stateless).

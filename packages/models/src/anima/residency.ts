@@ -139,8 +139,8 @@ export const assertAnimaResidency = (value: unknown, where: string): AnimaReside
       : undefined;
   if (accepted === undefined) {
     throw new ModelInputError(
-      `${where}: 期待 ${ANIMA_RESIDENCIES.map((name) => `'${name}'`).join(" / ")}` +
-        `（実際 ${typeof value === "string" ? `'${value}'` : String(value)}）`,
+      `${where}: expected ${ANIMA_RESIDENCIES.map((name) => `'${name}'`).join(" / ")}` +
+        ` (actual ${typeof value === "string" ? `'${value}'` : String(value)})`,
     );
   }
   return accepted;
@@ -224,7 +224,7 @@ export const decideAfterTransformer = (
 ): TransformerDecision => {
   if (facts.held && facts.downgraded) {
     throw new Error(
-      "anima: 常駐の席に DiT があるのに格下げ済み（到達しない状態 — 状態機械の破れ）",
+      "anima: a DiT is in the resident slot although residency is already downgraded (unreachable state — the state machine is broken)",
     );
   }
   const source = transformerSource(facts);
@@ -592,13 +592,13 @@ export class TransformerResidency<T> {
  * Marker passed to {@link cleanupFailures} for an eviction without an original failure
  * (pre-emptive); matches no exception.
  */
-const NO_ORIGINAL_FAILURE: unique symbol = Symbol("元の失敗なし");
+const NO_ORIGINAL_FAILURE: unique symbol = Symbol("no original failure");
 
 /**
  * Message of the `AggregateError` listing clean-up failures (used for both the per-stage DiT and
  * the resident DiT).
  */
-const CLEANUP_FAILED = "anima: DiT の後始末が失敗した";
+const CLEANUP_FAILED = "anima: DiT clean-up failed";
 
 /**
  * Runs every clean-up and collects the failures. A rethrow of the same exception as the original

@@ -183,9 +183,9 @@ test("512 を超える入力は切り詰められ、T5 は必ず `</s>` で終�
 });
 
 test("対にならないサロゲートは受け付けない（正本に無い入力を黙って通さない）", () => {
-  assertThrows(() => toCodePoints("a\ud800b"), Error, "サロゲート");
-  assertThrows(() => qwen.encode("a\ud800b"), Error, "サロゲート");
-  assertThrows(() => t5.encode("a\ud800b"), Error, "サロゲート");
+  assertThrows(() => toCodePoints("a\ud800b"), Error, "surrogate");
+  assertThrows(() => qwen.encode("a\ud800b"), Error, "surrogate");
+  assertThrows(() => t5.encode("a\ud800b"), Error, "surrogate");
 });
 
 test("追加語彙は leftmost-longest（途中まで一致する文字列は切り出さない）", () => {
@@ -200,7 +200,7 @@ test("追加語彙は leftmost-longest（途中まで一致する文字列は切
   // 位置が同じなら長い方が勝つ（短い候補を先に置いても結果が変わらない）。
   assertEquals(splitAddedTokens("<|a|>", ["<|a|>", "<|a"]), [{ text: "<|a|>", added: true }]);
   // 空文字の追加語彙は全位置で一致して走査が進まない（無限ループの芽）。
-  assertThrows(() => splitAddedTokens("abc", ["", "<|a"]), Error, "空文字");
+  assertThrows(() => splitAddedTokens("abc", ["", "<|a"]), Error, "empty string");
 });
 
 test("区間表: 昇順・非重複でない表は受け付けない（黙って別の分類にしない）", () => {
@@ -218,7 +218,7 @@ test("区間表: 昇順・非重複でない表は受け付けない（黙って
       [4, 9],
     ],
   );
-  assertThrows(() => parseCodeRanges([[5, 1]], "表"), Error, "始端が終端より大きい");
+  assertThrows(() => parseCodeRanges([[5, 1]], "表"), Error, "has a start greater than its end");
   assertThrows(
     () =>
       parseCodeRanges(
@@ -229,7 +229,7 @@ test("区間表: 昇順・非重複でない表は受け付けない（黙って
         "表",
       ),
     Error,
-    "昇順でない",
+    "is not in ascending order",
   );
   assertThrows(
     () =>
@@ -241,9 +241,13 @@ test("区間表: 昇順・非重複でない表は受け付けない（黙って
         "表",
       ),
     Error,
-    "重なる",
+    "overlaps",
   );
-  assertThrows(() => parseCodeRanges([[1, 2], [4]], "表"), Error, "数値対でない");
+  assertThrows(
+    () => parseCodeRanges([[1, 2], [4]], "表"),
+    Error,
+    "is not a [start, end] number pair",
+  );
 });
 
 test("正規化: 結合文字クラスタは最短の一致接頭辞だけを出して残りを捨てる", () => {
@@ -387,7 +391,7 @@ test("T5: 切り詰めで捨てる後続の断片は符号化しない", () => {
 test("Qwen2: 切り詰めで捨てる後続の pre-token は符号化しない", () => {
   // 番兵 `ק` は語彙の部分集合に無いので、符号化すれば「語彙に無いトークン」で投げる。
   const sentinel = " ק";
-  assertThrows(() => qwen.encode(sentinel), Error, "語彙に無いトークン");
+  assertThrows(() => qwen.encode(sentinel), Error, "is not in the Qwen2 vocabulary");
   const long = caseById("long");
   assertEquals(qwen.encode(long.text + sentinel), long.qwenIds);
 });
@@ -440,7 +444,7 @@ test("受理集合: 通常のタグ列は受理し、上限超過は拒否する
   assertThrows(
     () => assertPromptTokenLengths("プロンプト", fixture.maxLength + 1, 4, fixture.maxLength),
     Error,
-    "上限",
+    "upper bound",
   );
 });
 
@@ -452,7 +456,7 @@ test("AnimaTokenizers: 片方だけ古い資産（maxLength の食い違い）�
   assertThrows(
     () => new AnimaTokenizers(qwenAssets, { ...t5Assets, maxLength: 256 }),
     Error,
-    "maxLength が食い違う",
+    "maxLength of the tokenizer assets does not match",
   );
 });
 
@@ -522,12 +526,12 @@ test("createTokenizers: バイト列（manifest の tokenizer / tokenizer_2）�
   assertThrows(
     () => createTokenizers(encode({ ...qwen2Json, mergesCount: 2 }), encode(t5Json)),
     Error,
-    "行数",
+    "line count",
   );
   assertThrows(
     () => createTokenizers(new TextEncoder().encode("{"), encode(t5Json)),
     Error,
-    "JSON として読めない",
+    "cannot be read as JSON",
   );
 
   // id は `Int32Array` へ写るので、非整数は切り捨て・範囲外は wrap で「別のトークン」に
@@ -535,17 +539,17 @@ test("createTokenizers: バイト列（manifest の tokenizer / tokenizer_2）�
   assertThrows(
     () => createTokenizers(encode(qwen2Json), encode({ ...t5Json, unkId: 1.5 })),
     Error,
-    "tokenizer_2.unkId: トークン id が 0..2147483647 の整数でない（1.5）",
+    "tokenizer_2.unkId: token id is not an integer in 0..2147483647 (1.5)",
   );
   assertThrows(
     () => createTokenizers(encode(qwen2Json), encode({ ...t5Json, eosId: -1 })),
     Error,
-    "tokenizer_2.eosId: トークン id が 0..2147483647 の整数でない（-1）",
+    "tokenizer_2.eosId: token id is not an integer in 0..2147483647 (-1)",
   );
   assertThrows(
     () => createTokenizers(encode(qwen2Json), encode({ ...t5Json, eosId: 6 })),
     Error,
-    "tokenizer_2.eosId: トークン id 6 が語彙の行数 6 以上",
+    "tokenizer_2.eosId: token id 6 is not below the vocabulary row count 6",
   );
   // 追加語彙の id は語彙表の**外**を指してよい（Qwen2 の実資産がそう）ので、上限では
   // 縛らない — 整数性と i32 範囲だけを見る。
@@ -553,7 +557,7 @@ test("createTokenizers: バイト列（manifest の tokenizer / tokenizer_2）�
     () =>
       createTokenizers(encode({ ...qwen2Json, addedTokens: [["<|x|>", 2 ** 31]] }), encode(t5Json)),
     Error,
-    "トークン id が 0..2147483647 の整数でない（2147483648）",
+    "token id is not an integer in 0..2147483647 (2147483648)",
   );
   assertEquals(
     createTokenizers(encode({ ...qwen2Json, addedTokens: [["<|x|>", 3]] }), encode(t5Json))
@@ -615,24 +619,24 @@ test("資産の値域門: maxLength は正の安全整数（壊れた資産が�
   assertThrows(
     () => createTokenizers(...brokenQwen2({ maxLength: 0 })),
     Error,
-    "tokenizer.maxLength: 正の安全整数でない（0）",
+    "tokenizer.maxLength: not a positive safe integer (0)",
   );
   // 非整数は `slice` が切り捨てるので、長いプロンプトでだけ id 列長が 1 ずれる。
   assertThrows(
     () => createTokenizers(...brokenQwen2({ maxLength: 1.5 })),
     Error,
-    "tokenizer.maxLength: 正の安全整数でない（1.5）",
+    "tokenizer.maxLength: not a positive safe integer (1.5)",
   );
   assertThrows(
     () => createTokenizers(...brokenT5({ maxLength: -1 })),
     Error,
-    "tokenizer_2.maxLength: 正の安全整数でない（-1）",
+    "tokenizer_2.maxLength: not a positive safe integer (-1)",
   );
   // 2^53 超は切り詰めが一度も効かない状態（比較が精度を落とす）。
   assertThrows(
     () => createTokenizers(...brokenQwen2({ maxLength: Number.MAX_VALUE })),
     Error,
-    "tokenizer.maxLength: 正の安全整数でない",
+    "tokenizer.maxLength: not a positive safe integer",
   );
 });
 
@@ -642,7 +646,7 @@ test("資産の値域門: T5 の scores は有限（minScore が汚染される�
     assertThrows(
       () => createTokenizers(...brokenT5({ scores: [0, 0, 0, -1, bad, -2] })),
       Error,
-      "tokenizer_2.scores[4]: 有限の数値でない",
+      "tokenizer_2.scores[4]: not a finite number",
     );
   }
 });
@@ -652,13 +656,13 @@ test("資産の値域門: 行番号 = id の表に重複行があれば落とす
   assertThrows(
     () => createTokenizers(...brokenQwen2({ vocabText: "a\nb\na", vocabCount: 3 })),
     Error,
-    "tokenizer.vocabText: 行 2 が行 0 と同じトークン",
+    "tokenizer.vocabText: line 2 has the same token as line 0",
   );
   // merges は rank が BPE の優先順位そのもの。重複すると分割規則だけが静かに変わる。
   assertThrows(
     () => createTokenizers(...brokenQwen2({ mergesText: "a b\na b", mergesCount: 2 })),
     Error,
-    "tokenizer.mergesText: 行 1 が行 0 と同じトークン",
+    "tokenizer.mergesText: line 1 has the same token as line 0",
   );
   assertThrows(
     () =>
@@ -666,7 +670,7 @@ test("資産の値域門: 行番号 = id の表に重複行があれば落とす
         ...brokenT5({ vocabText: "<pad>\n</s>\n<unk>\n▁\na\na", scores: [0, 0, 0, -1, -1, -2] }),
       ),
     Error,
-    "tokenizer_2.vocabText: 行 5 が行 4 と同じトークン",
+    "tokenizer_2.vocabText: line 5 has the same token as line 4",
   );
 });
 
@@ -682,7 +686,7 @@ test("資産の値域門: 鍵つき写像の重複鍵は落とす（addedTokens 
         }),
       ),
     Error,
-    '鍵 "<|x|>" が重複している',
+    'duplicate key "<|x|>"',
   );
   assertThrows(
     () =>
@@ -695,7 +699,7 @@ test("資産の値域門: 鍵つき写像の重複鍵は落とす（addedTokens 
         }),
       ),
     Error,
-    "tokenizer.caseFold: 鍵 65 が重複している",
+    "tokenizer.caseFold: duplicate key 65",
   );
   assertThrows(
     () =>
@@ -708,22 +712,22 @@ test("資産の値域門: 鍵つき写像の重複鍵は落とす（addedTokens 
         }),
       ),
     Error,
-    "tokenizer_2.addedTokens: 鍵 ",
+    "tokenizer_2.addedTokens: duplicate key ",
   );
   // caseFold の鍵もコードポイント（表と同じ規律に揃える）。
   assertThrows(
     () => createTokenizers(...brokenQwen2({ caseFold: [[0x110000, 0x61]] })),
     Error,
-    "tokenizer.caseFold: コードポイントが 0..1114111 の整数でない",
+    "tokenizer.caseFold: code point is not an integer in 0..1114111",
   );
 });
 
 test("区間表: 非整数・コードポイント域外は受け付けない（sbv2 の parseRanges と同じ規律）", () => {
   // `[65.5, 90]` は二分探索を例外にせず境界だけ半端にずらす → 文字分類が変わり、pre-token の
   // 切れ目 → id 列が黙って別物になる。
-  assertThrows(() => parseCodeRanges([[65.5, 90]], "表"), Error, "コードポイントが");
-  assertThrows(() => parseCodeRanges([[-1, 90]], "表"), Error, "コードポイントが");
-  assertThrows(() => parseCodeRanges([[65, 0x110000]], "表"), Error, "コードポイントが");
+  assertThrows(() => parseCodeRanges([[65.5, 90]], "表"), Error, "code point");
+  assertThrows(() => parseCodeRanges([[-1, 90]], "表"), Error, "code point");
+  assertThrows(() => parseCodeRanges([[65, 0x110000]], "表"), Error, "code point");
   // 端点ちょうど（0 と 0x10FFFF）は受理集合の内側。
   assertEquals(parseCodeRanges([[0, 0x10ffff]], "表"), [[0, 0x10ffff]]);
 });
@@ -750,7 +754,7 @@ test("正規化表: 重複鍵・域外コードポイント・tuple 長違反は
         "表",
       ),
     Error,
-    "表.single: 鍵 65 が重複している",
+    "表.single: duplicate key 65",
   );
   assertThrows(
     () =>
@@ -764,29 +768,29 @@ test("正規化表: 重複鍵・域外コードポイント・tuple 長違反は
         "表",
       ),
     Error,
-    "表.multi: 鍵 ",
+    "表.multi: duplicate key ",
   );
   // 合成鍵 `cp * 0x110000 + cp` の一意性は「鍵が 0x10FFFF 以下」が前提。
   assertThrows(
     () => parseSpmTables(tables({ single: [[0x110000, "a"]] }), "表"),
     Error,
-    "表.single: コードポイントが",
+    "表.single: code point",
   );
   assertThrows(
     () => parseSpmTables(tables({ multi: [[0x41, -1, "x"]] }), "表"),
     Error,
-    "表.multi: コードポイントが",
+    "表.multi: code point",
   );
   // tuple 長は schema どおり固定（余った要素は読まれないまま資産の破損を隠す）。
   assertThrows(
     () => parseSpmTables(tables({ single: [[0x41, "a", "b"]] }), "表"),
     Error,
-    "表.single: [cp, 文字列] でない",
+    "表.single: not [cp, string]",
   );
   assertThrows(
     () => parseSpmTables(tables({ multi: [[0x41, 0x42, "x", "y"]] }), "表"),
     Error,
-    "表.multi: [cp, cp, 文字列] でない",
+    "表.multi: not [cp, cp, string]",
   );
 });
 

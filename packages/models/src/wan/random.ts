@@ -62,7 +62,7 @@ export class WanRandn {
    */
   normals(count: number): Float32Array<ArrayBuffer> {
     if (!Number.isInteger(count) || count < 0) {
-      throw new RangeError(`要素数 ${count} が 0 以上の整数でない`);
+      throw new RangeError(`Element count ${count} is not a non-negative integer`);
     }
     const out = new Float32Array(count);
     for (let i = 0; i < count; i += 2) {

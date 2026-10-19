@@ -106,12 +106,16 @@ const elementsPerChannel = (
   what: string,
 ): number => {
   if (stats.mean.length !== stats.std.length) {
-    throw new Error(`${what}: mean ${stats.mean.length} 本と std ${stats.std.length} 本の数が違う`);
+    throw new Error(
+      `${what}: mean count ${stats.mean.length} and std count ${stats.std.length} differ`,
+    );
   }
   const channels = stats.mean.length;
   const perChannel = latents.length / channels;
   if (!Number.isInteger(perChannel) || perChannel < 1) {
-    throw new Error(`${what}: 要素数 ${latents.length} が ${channels} チャネルで割り切れない`);
+    throw new Error(
+      `${what}: element count ${latents.length} is not divisible by ${channels} channels`,
+    );
   }
   return perChannel;
 };
@@ -127,7 +131,7 @@ export const denormalizeWanLatents = (
   latents: Float32Array<ArrayBuffer>,
   stats: WanLatentStats,
 ): Float32Array<ArrayBuffer> => {
-  const perChannel = elementsPerChannel(latents, stats, "逆正規化");
+  const perChannel = elementsPerChannel(latents, stats, "Denormalization");
   const channels = stats.mean.length;
   const out = new Float32Array(latents.length);
   for (let channel = 0; channel < channels; channel += 1) {
@@ -154,7 +158,7 @@ export const normalizeWanLatents = (
   latents: Float32Array<ArrayBuffer>,
   stats: WanLatentStats,
 ): Float32Array<ArrayBuffer> => {
-  const perChannel = elementsPerChannel(latents, stats, "正規化");
+  const perChannel = elementsPerChannel(latents, stats, "Normalization");
   const channels = stats.mean.length;
   const out = new Float32Array(latents.length);
   for (let channel = 0; channel < channels; channel += 1) {

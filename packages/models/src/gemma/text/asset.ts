@@ -88,7 +88,7 @@ export type GemmaTokenizerAssets = {
 
 const asRecord = (value: unknown, label: string): Record<string, unknown> => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`${label}: オブジェクトでない`);
+    throw new Error(`${label}: not an object`);
   }
   return value as Record<string, unknown>;
 };
@@ -98,12 +98,12 @@ const asRecord = (value: unknown, label: string): Record<string, unknown> => {
  * type message).
  */
 const readField = (record: Record<string, unknown>, key: string, where: string): unknown => {
-  if (!Object.hasOwn(record, key)) throw new Error(`${where}.${key}: 無い`);
+  if (!Object.hasOwn(record, key)) throw new Error(`${where}.${key}: missing`);
   return record[key];
 };
 
 const asString = (value: unknown, label: string): string => {
-  if (typeof value !== "string") throw new Error(`${label}: 文字列でない`);
+  if (typeof value !== "string") throw new Error(`${label}: not a string`);
   return value;
 };
 
@@ -112,13 +112,13 @@ const MAX_ID = 2147483647;
 
 const asId = (value: unknown, label: string): number => {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > MAX_ID) {
-    throw new Error(`${label}: トークン id が 0..${MAX_ID} の整数でない（${String(value)}）`);
+    throw new Error(`${label}: the token id is not an integer in 0..${MAX_ID} (${String(value)})`);
   }
   return value;
 };
 
 const asArray = (value: unknown, label: string): unknown[] => {
-  if (!Array.isArray(value)) throw new Error(`${label}: 配列でない`);
+  if (!Array.isArray(value)) throw new Error(`${label}: not an array`);
   return value;
 };
 
@@ -133,14 +133,12 @@ const parseSpec = (raw: unknown, label: string): GemmaTokenizerSpec => {
   ] as const) {
     const got = asString(readField(spec, field, label), `${label}.${field}`);
     if (got !== want) {
-      throw new Error(
-        `${label}.${field}: ${JSON.stringify(want)} でない（${JSON.stringify(got)}）`,
-      );
+      throw new Error(`${label}.${field}: not ${JSON.stringify(want)} (${JSON.stringify(got)})`);
     }
   }
   const post = asString(readField(spec, "postProcessor", label), `${label}.postProcessor`);
   if (post !== "none" && post !== "bos-eos") {
-    throw new Error(`${label}.postProcessor: 未知の形（${JSON.stringify(post)}）`);
+    throw new Error(`${label}.postProcessor: unknown form (${JSON.stringify(post)})`);
   }
   return { postProcessor: post };
 };
@@ -153,14 +151,16 @@ const parseMerges = (raw: unknown, count: unknown, label: string): [number, numb
   const want = asId(count, `${label}Count`);
   const lines = text === "" ? [] : text.split("\n");
   if (lines.length !== want) {
-    throw new Error(`${label}: 行数 ${lines.length} が申告の ${want} と違う（資産が壊れている）`);
+    throw new Error(
+      `${label}: line count ${lines.length} differs from the declared ${want} (the asset is corrupt)`,
+    );
   }
   return lines.map((line, rank) => {
     const parts = line.split(" ");
-    if (parts.length !== 2) throw new Error(`${label}: 行 ${rank} が「左 右」でない`);
+    if (parts.length !== 2) throw new Error(`${label}: line ${rank} is not "left right"`);
     return [
-      asId(Number(parts[0]), `${label}[${rank}].左`),
-      asId(Number(parts[1]), `${label}[${rank}].右`),
+      asId(Number(parts[0]), `${label}[${rank}].left`),
+      asId(Number(parts[1]), `${label}[${rank}].right`),
       rank,
     ];
   });
@@ -170,7 +170,7 @@ const parseAddedTokens = (raw: unknown, label: string): Map<string, number> => {
   const out = new Map<string, number>();
   for (const [index, entry] of asArray(raw, label).entries()) {
     const pair = asArray(entry, `${label}[${index}]`);
-    if (pair.length !== 2) throw new Error(`${label}[${index}]: [綴り, id] でない`);
+    if (pair.length !== 2) throw new Error(`${label}[${index}]: not [spelling, id]`);
     // NOTE: not bounded by the vocabulary row count — added vocabulary may be numbered **outside**
     // the vocabulary table (EmbeddingGemma's `<image_soft_token>` is id 262144 / 262,144 vocabulary
     // rows).
@@ -189,7 +189,7 @@ const interpretGemmaTokenizerAsset = (raw: unknown): GemmaTokenizerAssets => {
   const asset = asRecord(raw, "tokenizer");
   const format = asString(readField(asset, "format", "tokenizer"), "tokenizer.format");
   if (format !== ASSET_FORMAT) {
-    throw new Error(`tokenizer.format: ${JSON.stringify(ASSET_FORMAT)} でない（${format}）`);
+    throw new Error(`tokenizer.format: not ${JSON.stringify(ASSET_FORMAT)} (${format})`);
   }
   // Placed after the version check — a newer version with more fields fails as "wrong version", not
   // "unknown key".
@@ -228,14 +228,14 @@ const interpretGemmaTokenizerAsset = (raw: unknown): GemmaTokenizerAssets => {
   const addedIds = new Set<number>();
   for (const [token, id] of addedTokens) {
     if (addedIds.has(id)) {
-      throw new Error(`tokenizer.addedTokens: id ${id} が 2 つの綴りに割り当てられている`);
+      throw new Error(`tokenizer.addedTokens: id ${id} is assigned to two spellings`);
     }
     addedIds.add(id);
     const base = model.tokenOf.get(id);
     if (base !== undefined && base !== token) {
       throw new Error(
-        `tokenizer.addedTokens: id ${id} の綴り ${JSON.stringify(token)} が語彙の` +
-          ` ${JSON.stringify(base)} と違う`,
+        `tokenizer.addedTokens: id ${id} has spelling ${JSON.stringify(token)}, which differs from the vocabulary's` +
+          ` ${JSON.stringify(base)}`,
       );
     }
   }
@@ -249,14 +249,17 @@ const interpretGemmaTokenizerAsset = (raw: unknown): GemmaTokenizerAssets => {
     // looks at the added-vocabulary side). Letting a stray id through makes "a token that should be
     // skipped appear in the text / one that should appear disappear".
     if (!addedIds.has(specialId)) {
-      throw new Error(`tokenizer.specialIds[${index}]: id ${specialId} が追加語彙に無い`);
+      throw new Error(
+        `tokenizer.specialIds[${index}]: id ${specialId} is not in the added vocabulary`,
+      );
     }
     specialIds.add(specialId);
   }
 
   const vocabId = (field: string): number => {
     const id = asId(readField(asset, field, "tokenizer"), `tokenizer.${field}`);
-    if (!model.tokenOf.has(id)) throw new Error(`tokenizer.${field}: id ${id} が語彙に無い`);
+    if (!model.tokenOf.has(id))
+      throw new Error(`tokenizer.${field}: id ${id} is not in the vocabulary`);
     return id;
   };
   return {
@@ -276,13 +279,13 @@ export const parseGemmaTokenizerAsset = (bytes: Uint8Array<ArrayBuffer>): GemmaT
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch (cause) {
-    throw new Error("tokenizer: UTF-8 として読めない", { cause });
+    throw new Error("tokenizer: cannot be read as UTF-8", { cause });
   }
   let json: unknown;
   try {
     json = JSON.parse(text);
   } catch (cause) {
-    throw new Error("tokenizer: JSON として読めない", { cause });
+    throw new Error("tokenizer: cannot be read as JSON", { cause });
   }
   return interpretGemmaTokenizerAsset(json);
 };

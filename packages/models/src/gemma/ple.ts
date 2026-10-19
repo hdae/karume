@@ -302,7 +302,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   // The budget is the caller's `maxResidentPleBytes` itself, so it is input-caused (ADR 0107
   // decision 2).
   if (!Number.isSafeInteger(budget) || budget < 0) {
-    throw new ModelInputError(`maxResidentBytes ${budget} が 0 以上の整数でない`);
+    throw new ModelInputError(`maxResidentBytes ${budget} is not a non-negative integer`);
   }
   const largest = largestBlockBytes(index);
   // MUST: "a budget that cannot hold even one block" fails loudly. Silently exceeding it voids the
@@ -312,9 +312,9 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   // passed, so it is input-caused.
   if (budget > 0 && budget < largest) {
     throw new ModelInputError(
-      `maxResidentBytes ${budget} が PLE の block 1 本ぶん ${largest} バイトに満たない` +
-        `（この索引の block は values ${index.values.blocks.length} 本 /` +
-        ` scales ${index.scales.blocks.length} 本 — 常駐させないなら 0 を渡す）`,
+      `maxResidentBytes ${budget} is less than one PLE block, ${largest} bytes` +
+        ` (this index has ${index.values.blocks.length} values blocks /` +
+        ` ${index.scales.blocks.length} scales blocks — pass 0 for no residency)`,
     );
   }
   // (1) the index's row count and (2) the main embedding's vocab row count (ADR 0085 decision 5's
@@ -322,8 +322,8 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   // caller cannot fix it by changing a setting).
   if (index.tokens !== vocabSize) {
     throw new Error(
-      `PLE の索引の行数 ${index.tokens} が主 embedding の vocab 行数 ${vocabSize} と違う` +
-        `（別の語彙で焼かれた組み合わせ — 引ける id が食い違ったまま形は合う）`,
+      `The PLE index's row count ${index.tokens} differs from the main embedding's vocab row count ${vocabSize}` +
+        ` (a combination baked with a different vocabulary — the shapes match while the ids that can be looked up disagree)`,
     );
   }
   const stride = index.layers * index.dim;
@@ -595,7 +595,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     if (buffer === undefined) {
       // If this happens, the plan and the lookup disagree (= a bug in this implementation), so do
       // not silently hand out a zero row.
-      throw new Error(`PLE gather: token ${id} の block ${position} を取っていない`);
+      throw new Error(`PLE gather: token ${id}: block ${position} was not fetched`);
     }
     return {
       array: view(buffer),
@@ -634,9 +634,11 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   return {
     async gather(ids: readonly number[], options: Gemma4PleReadOptions = {}): Promise<Tensor> {
       if (disposed) {
-        throw new Error("PLE gather: dispose 済みの索引は引けない（常駐は解放済み）");
+        throw new Error(
+          "PLE gather: a disposed index cannot be looked up (its residency is released)",
+        );
       }
-      if (ids.length < 1) throw new Error("PLE gather の token 列が空");
+      if (ids.length < 1) throw new Error("The token sequence of the PLE gather is empty");
       // Called already aborted: return without touching a single asset byte (the first step
       // boundary).
       options.signal?.throwIfAborted();
@@ -646,7 +648,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
         // fail-loudly point.
         if (!Number.isSafeInteger(id) || id < 0 || id >= index.tokens) {
           throw new Error(
-            `token id[${position}] ${id} が PLE の索引の 0..${index.tokens - 1} の外`,
+            `token id[${position}] ${id} is outside the PLE index's 0..${index.tokens - 1}`,
           );
         }
       });

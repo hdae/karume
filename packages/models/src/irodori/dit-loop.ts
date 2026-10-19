@@ -191,7 +191,7 @@ const projectContextOnHost = async (
   const context: Record<string, ResidentTensor> = {};
   for (const { name, byteLength } of state.ditContextOutputs) {
     if (!Object.hasOwn(outputs, name)) {
-      throw new Error(`dit_context の出力 '${name}' が実行結果に無い`);
+      throw new Error(`dit_context output '${name}' is missing from the run results`);
     }
     const tensor = await createResident(byteLength, `irodori.${name}`);
     // `write` checks the size for an exact match (matching the byteLength admission derived against
@@ -284,7 +284,7 @@ export const runDitLoopOnHost = async (
             await run({ x_t: xTensor, t_embed: tEmbed, mask: loop.condMask, ...context }),
             0,
           ),
-          "dit の速度場",
+          "dit velocity field",
         );
         forwards += 1;
         const variants: CfgVariant[] = [];
@@ -303,7 +303,7 @@ export const runDitLoopOnHost = async (
               scale: variant.scale,
               velocity: asF32(
                 outputAt(state.dit, outputs, 0),
-                `dit の速度場（uncond ${variant.segment}）`,
+                `dit velocity field (uncond ${variant.segment})`,
               ),
             });
           }

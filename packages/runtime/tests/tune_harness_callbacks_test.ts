@@ -190,7 +190,7 @@ describe("利用者のコールバックの例外は計測の失敗に化けず�
     [
       "onProgress: 候補（1/n）",
       (throwIt) => ({
-        onProgress: (message) => (message.includes("（1/") ? throwIt() : undefined),
+        onProgress: (message) => (message.includes(" (1/") ? throwIt() : undefined),
       }),
     ],
     [

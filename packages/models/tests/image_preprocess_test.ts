@@ -280,20 +280,20 @@ test("bicubic の縮小は台を縮尺ぶん伸ばす（DA-V2 の実運用その
 
 test("画素列の長さが寸法と合わなければ落ちる", () => {
   const image: Rgb8Image = { data: new Uint8Array(11), width: 2, height: 2 };
-  assertThrows(() => resizeRgb8(image, 4, 4), ModelInputError, "RGB8 の長さ 11");
+  assertThrows(() => resizeRgb8(image, 4, 4), ModelInputError, "RGB8 length 11");
   assertThrows(
     () => normalizeToNchw(image, imageMean, imageStd),
     ModelInputError,
-    "RGB8 の長さ 11",
+    "RGB8 length 11",
   );
 });
 
 test("寸法が正の整数でなければ落ちる", () => {
   const empty: Rgb8Image = { data: new Uint8Array(0), width: 0, height: 3 };
-  assertThrows(() => resizeRgb8(empty, 4, 4), ModelInputError, "画像サイズ 0×3");
+  assertThrows(() => resizeRgb8(empty, 4, 4), ModelInputError, "Image size 0×3");
   const image: Rgb8Image = { data: new Uint8Array(12), width: 2, height: 2 };
-  assertThrows(() => resizeRgb8(image, 0, 4), ModelInputError, "出力サイズ 0×4");
-  assertThrows(() => resizeRgb8(image, 4, 2.5), ModelInputError, "出力サイズ 4×2.5");
+  assertThrows(() => resizeRgb8(image, 0, 4), ModelInputError, "Output size 0×4");
+  assertThrows(() => resizeRgb8(image, 4, 2.5), ModelInputError, "Output size 4×2.5");
 });
 
 test("未知の補間フィルタ名は落ちる（Object.prototype のメンバを kernel に受けて全黒にしない）", () => {
@@ -303,7 +303,7 @@ test("未知の補間フィルタ名は落ちる（Object.prototype のメンバ
     const error = assertThrows(
       () => resizeRgb8(image, 4, 4, filter as never),
       Error,
-      `補間フィルタ ${JSON.stringify(filter)} は未対応`,
+      `interpolation filter ${JSON.stringify(filter)} is not supported`,
     );
     // 名前の綴り違いは入力の値域違反ではない（ADR 0107 決定 3 — sampler 名と同じ扱い）。
     assert(!(error instanceof ModelInputError), `${filter} が ModelInputError になっている`);
@@ -316,14 +316,14 @@ test("mean / std が正規化に使えない値なら落ちる（Inf / NaN の�
     assertThrows(
       () => normalizeToNchw(image, imageMean, [imageStd[0], bad, imageStd[2]]),
       ModelInputError,
-      `std[1] = ${bad} が正の有限数でない`,
+      `std[1] = ${bad} is not a positive finite number`,
     );
   }
   for (const bad of [Number.NaN, Number.NEGATIVE_INFINITY]) {
     assertThrows(
       () => normalizeToNchw(image, [imageMean[0], imageMean[1], bad], imageStd),
       ModelInputError,
-      `mean[2] = ${bad} が有限でない`,
+      `mean[2] = ${bad} is not finite`,
     );
   }
 });
@@ -349,7 +349,7 @@ test("有限でも正規化の結果が f32 で溢れる mean / std は落ちる
     assertThrows(
       () => normalizeToNchw(image, mean, std),
       ModelInputError,
-      "f32 で有限に収まらない",
+      "is not finite in f32",
       label,
     );
   }
@@ -361,12 +361,12 @@ test("mean / std が個々に有限でも、正規化後の値が f32 で溢れ�
   assertThrows(
     () => normalizeToNchw(image, imageMean, [imageStd[0], 1e-50, imageStd[2]]),
     ModelInputError,
-    "チャネル 1 の正規化後の値域",
+    "channel 1: the normalized range",
   );
   assertThrows(
     () => normalizeToNchw(image, [1e40, imageMean[1], imageMean[2]], imageStd),
     ModelInputError,
-    "f32 で有限に収まらない",
+    "is not finite in f32",
   );
   // 判定は画素の両端で決まるので、画素の値に依らない（全画素 128 でも落ちる = 走査していない）。
   assertEquals(normalizationOverflow(imageMean, imageStd), undefined);

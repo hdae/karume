@@ -113,13 +113,13 @@ test("Wan2.2 の要求の門: 1280×704 / 704×1280 × 121 フレームまでを
     assertThrows(
       () => planOf({ width, height }),
       ModelInputError,
-      `${width}×${height} が受理集合（1280×704 / 704×1280）に無い`,
+      `${width}×${height} is not in the accepted set (1280×704 / 704×1280)`,
     );
   }
   assertThrows(
     () => planOf({ frames: 125 }),
     ModelInputError,
-    "frames 125 が受理集合（4n+1 の 5〜121）に無い",
+    "frames 125 is not in the accepted set (4n+1 in 5..121)",
   );
 
   // 下限は 5（5 は通り、4n+1 でも 1 は落ちる）。4n+1 でない値も落ちる。
@@ -128,7 +128,7 @@ test("Wan2.2 の要求の門: 1280×704 / 704×1280 × 121 フレームまでを
     assertThrows(
       () => planOf({ frames }),
       ModelInputError,
-      `frames ${frames} が受理集合（4n+1 の 5〜121）に無い`,
+      `frames ${frames} is not in the accepted set (4n+1 in 5..121)`,
     );
   }
 });
@@ -304,7 +304,7 @@ test.skipIf(!ALL_GRAPHS)(
     assertThrows(
       () => assertWanVaeMatchesGeneration(layout, WAN21_GENERATION, OWNER),
       Error,
-      `${OWNER}: 逆正規化の統計（mean 16 本・std 16 本）が VAE の潜在 48 チャネルと違う`,
+      `${OWNER}: the denormalization statistics (mean 16, std 16) do not match the VAE latent's 48 channels`,
     );
     // 統計の本数だけでなく出口のチャネル数でも落ちること（統計を 48 本にした 2.1 の倍率の記述子）。
     assertThrows(
@@ -315,7 +315,7 @@ test.skipIf(!ALL_GRAPHS)(
           OWNER,
         ),
       Error,
-      `${OWNER}: VAE の出口 12 チャネルが RGB 3 × unpatchify 1² = 3 と違う`,
+      `${OWNER}: VAE output 12 channels differ from RGB 3 × unpatchify 1² = 3`,
     );
   },
 );

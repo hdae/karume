@@ -41,7 +41,7 @@ const SIZE = 2;
 const UNSATISFIABLE = { maxBufferSize: Number.MAX_SAFE_INTEGER };
 
 /** limits の門の文言（`assertRequiredLimitsSatisfied`）。 */
-const LIMITS_MESSAGE = "が要求する device limit をこの GPU が満たさない";
+const LIMITS_MESSAGE = "this GPU does not meet the required device limits";
 
 /** 配布形の骨格（部品 1 本・quant 1 つ・満たせない limits）。 */
 const manifestOf = (

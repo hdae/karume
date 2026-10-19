@@ -125,7 +125,7 @@ test("GenerationSequence: 頼んだ行数と返った行数の食い違いは ru
   await assertRejects(
     () => drain(sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 1 })),
     Error,
-    `prefill@0: '${LOGITS}' の形 [1,2,${VOCAB}] が [1,1,${VOCAB}] でない`,
+    `prefill@0: '${LOGITS}' has shape [1,2,${VOCAB}], not [1,1,${VOCAB}]`,
   );
 });
 
@@ -309,7 +309,7 @@ test("要求の stopTokens: 語彙外・重複は同期に落ちる（効かな�
   assertThrows(
     () => sequence.generate({ prompt: [1], maxNewTokens: 1, stopTokens: [VOCAB] }),
     Error,
-    `stopTokens[0] ${VOCAB} が語彙 0..${VOCAB - 1} の外`,
+    `stopTokens[0] ${VOCAB} is outside the vocabulary 0..${VOCAB - 1}`,
   );
   assertThrows(
     () => sequence.generate({ prompt: [1], maxNewTokens: 1, stopTokens: [1, -1] }),
@@ -319,7 +319,7 @@ test("要求の stopTokens: 語彙外・重複は同期に落ちる（効かな�
   assertThrows(
     () => sequence.generate({ prompt: [1], maxNewTokens: 1, stopTokens: [3, 5, 3] }),
     Error,
-    "stopTokens に token 3 が 2 度出る",
+    "Token 3 appears twice in stopTokens",
   );
   assertEquals(fake.calls.length, 0);
 });
@@ -401,7 +401,7 @@ test("GenerationSequence: prompt が空で pendingToken も無ければ fail lou
   await assertRejects(
     () => drain(sequence.generate({ prompt: [], maxNewTokens: 1 })),
     ModelInputError,
-    "prompt が空",
+    "prompt is empty",
   );
   assertEquals(fake.calls.length, 0);
 });
@@ -627,7 +627,7 @@ test("capacity ノブ: 予算検査は program の既定ではなく選んだ容
   const error = await assertRejects(
     () => drain(sequence.generate({ prompt: [1, 2, 3, 4, 5, 6], maxNewTokens: 4 })),
     GenerationCapacityError,
-    "state 容量を超える",
+    "exceeds the state capacity",
   );
   assertEquals(error.limit, 8, "例外が運ぶ上限も選んだ容量");
   assertEquals(fake.calls.length, 0);
@@ -647,7 +647,7 @@ test("capacity ノブ: 関係を破る値は sequence を作る時点で fail lo
         capacity: CHUNK_LENGTH - 1,
       }),
     ModelInputError,
-    `capacity ${CHUNK_LENGTH - 1} が chunkLength ${CHUNK_LENGTH} を下回る`,
+    `capacity ${CHUNK_LENGTH - 1} is below chunkLength ${CHUNK_LENGTH}`,
   );
   // モデルの位置上限の外まで容量を取る形（容量いっぱいの会話が学習外の位置を踏む）。
   await assertRejects(
@@ -658,7 +658,7 @@ test("capacity ノブ: 関係を破る値は sequence を作る時点で fail lo
         capacity: 129,
       }),
     ModelInputError,
-    "capacity 129 が maxPosition 128 を超えた",
+    "capacity 129 exceeds maxPosition 128",
   );
   await assertRejects(
     () =>
@@ -668,7 +668,7 @@ test("capacity ノブ: 関係を破る値は sequence を作る時点で fail lo
         capacity: 8.5,
       }),
     ModelInputError,
-    "capacity 8.5 が 1 以上の整数でない",
+    "capacity 8.5 is not a positive integer",
   );
   assertEquals(fake.specs.length, 0, "context を 1 本も確保していない");
 });
@@ -683,7 +683,7 @@ test("GenerationSequence: 容量超過は GenerationCapacityError（run の前�
   await assertRejects(
     () => drain(sequence.generate({ prompt: [1, 2, 3, 4, 5, 6], maxNewTokens: 4 })),
     GenerationCapacityError,
-    "state 容量を超える",
+    "exceeds the state capacity",
   );
   assertEquals(fake.calls.length, 0);
   // ちょうど収まる形は通る（peak = 8）。
@@ -733,7 +733,7 @@ test("GenerationCapacityError: 切り詰めに要る実値を欄で運ぶ（文�
   const error = await assertRejects(
     () => drain(sequence.generate({ prompt: [1, 2, 3, 4], maxNewTokens: 4 })),
     GenerationCapacityError,
-    "state 容量を超える",
+    "exceeds the state capacity",
   );
   assertEquals(error.constraint, "capacity");
   assertEquals(error.pastLength, 2);
@@ -754,7 +754,7 @@ test("GenerationCapacityError: 位置表の上限も同じ欄で運ぶ（constra
   const error = await assertRejects(
     () => drain(sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 4 })),
     GenerationCapacityError,
-    "位置表の外",
+    "leaves the position table",
   );
   assertEquals(error.constraint, "maxPosition");
   assertEquals(error.limit, 5);
@@ -776,7 +776,7 @@ test("GenerationSequence: 位置表の上限超過も同じ型で落とす", asy
   await assertRejects(
     () => drain(sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 4 })),
     GenerationCapacityError,
-    "位置表の外",
+    "leaves the position table",
   );
   assertEquals(fake.calls.length, 0);
   // 最終位置 4 はぎりぎり適法。
@@ -796,7 +796,7 @@ test("GenerationSequence: 容量は自分の順番が来てから見る（先行
   await assertRejects(
     () => drain(sequence.generate({ prompt: [5, 6], maxNewTokens: 2 })),
     GenerationCapacityError,
-    "既存 7",
+    "existing 7",
   );
 });
 
@@ -935,14 +935,14 @@ test("DerivedRunInputs: derive の await 明けに届いた中断は run を出�
 
 test("DerivedRunInputs: 宣言と違うキーを返したら fail loudly", async () => {
   const cases: readonly (readonly [string, RunInputs, string])[] = [
-    ["欠け", {}, "欠け: per_layer_inputs"],
+    ["欠け", {}, "missing: per_layer_inputs"],
     [
       "余り",
       {
         [DERIVED]: { dtype: "f32", shape: [1, 4, 2], data: new Float32Array(8) },
         other: { dtype: "f32", shape: [1], data: new Float32Array(1) },
       },
-      "余り: other",
+      "extra: other",
     ],
   ];
   for (const [name, result, message] of cases) {
@@ -984,7 +984,7 @@ test("GenerationSequence: 受理集合は同期に落ちる（順番待ちにも
   assertThrows(
     () => sequence.generate({ prompt: [1, VOCAB], maxNewTokens: 1 }),
     ModelInputError,
-    `prompt[1] ${VOCAB} が語彙 0..${VOCAB - 1} の外`,
+    `prompt[1] ${VOCAB} is outside the vocabulary 0..${VOCAB - 1}`,
   );
   assertThrows(
     () => sequence.generate({ prompt: [4294967297], maxNewTokens: 1 }),
@@ -1017,7 +1017,7 @@ describe("受理集合の値域検査は 1 本の純関数（高レベル面と 
     assertThrows(
       () => assertGenerationRequestValues(VOCAB, { maxNewTokens: 0 }),
       ModelInputError,
-      "0 が 1",
+      "0 is not a positive integer",
     );
     assertThrows(
       () => assertGenerationRequestValues(VOCAB, { maxNewTokens: 1.5 }),
@@ -1030,12 +1030,12 @@ describe("受理集合の値域検査は 1 本の純関数（高レベル面と 
     assertThrows(
       () => assertGenerationRequestValues(VOCAB, { maxNewTokens: 1, stopTokens: [VOCAB] }),
       ModelInputError,
-      `stopTokens[0] ${VOCAB} が語彙 0..${VOCAB - 1} の外`,
+      `stopTokens[0] ${VOCAB} is outside the vocabulary 0..${VOCAB - 1}`,
     );
     assertThrows(
       () => assertGenerationRequestValues(VOCAB, { maxNewTokens: 1, stopTokens: [2, 2] }),
       ModelInputError,
-      "token 2 が 2 度出る",
+      "Token 2 appears twice",
     );
   });
 
@@ -1059,8 +1059,12 @@ describe("受理集合の値域検査は 1 本の純関数（高レベル面と 
       program: programOf(fake),
     });
     const request = { prompt: [1], maxNewTokens: 1, stopTokens: [2, 2] };
-    assertThrows(() => assertGenerationRequestValues(VOCAB, request), ModelInputError, "2 度出る");
-    assertThrows(() => sequence.generate(request), ModelInputError, "2 度出る");
+    assertThrows(
+      () => assertGenerationRequestValues(VOCAB, request),
+      ModelInputError,
+      "appears twice",
+    );
+    assertThrows(() => sequence.generate(request), ModelInputError, "appears twice");
     assertEquals(fake.calls.length, 0);
   });
 });
@@ -1190,7 +1194,7 @@ test("GenerationSequence: dispose 済みの generate は同期に落ちる（自
   assertThrows(
     () => sequence.generate({ prompt: [1], maxNewTokens: 1 }),
     Error,
-    "GenerationSequence: dispose 済み",
+    "GenerationSequence: cannot generate after dispose",
   );
   assertEquals(fake.calls.length, 0);
   // dispose 発行直後（完了前）も同じ — `disposal` が立った時点で新しい生成は受けない。
@@ -1202,7 +1206,7 @@ test("GenerationSequence: dispose 済みの generate は同期に落ちる（自
   assertThrows(
     () => running.generate({ prompt: [1], maxNewTokens: 1 }),
     Error,
-    "GenerationSequence: dispose 済み",
+    "GenerationSequence: cannot generate after dispose",
   );
   await disposal;
 });
@@ -1409,7 +1413,7 @@ test("GenerationSequence.fork: dispose 済みでは同期に落ち、dispose の
   // fork → dispose の順に発行すると、同じ鎖なので fork が先に走る。dispose 発行の後は同期に落ちる。
   const forking = sequence.fork();
   const disposal = sequence.dispose();
-  assertThrows(() => sequence.fork(), Error, "GenerationSequence: dispose 済みでは fork できない");
+  assertThrows(() => sequence.fork(), Error, "GenerationSequence: cannot fork after dispose");
   const forked = await forking;
   await disposal;
   assertEquals(fake.disposals(), 1, "元の context が畳まれていない");

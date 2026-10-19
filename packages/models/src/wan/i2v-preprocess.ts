@@ -97,9 +97,9 @@ export const selectWanI2vSize = (
   );
   if (candidates.length === 0) {
     throw new ModelInputError(
-      `${describeRequested(requested)} が受理集合（${generation.acceptedSizes
+      `${describeRequested(requested)} is not in the accepted set (${generation.acceptedSizes
         .map((size) => `${size.width}×${size.height}`)
-        .join(" / ")}）に無い`,
+        .join(" / ")})`,
     );
   }
   let best = candidates[0];
@@ -165,7 +165,9 @@ export const wanI2vCoverSize = (image: Size, target: Size): Size => {
 export const fitWanI2vImage = (image: Rgb8Image, size: Size, fit: WanI2vFit): Rgb8Image => {
   if (fit === "stretch") return resizeRgb8Lanczos(image, size.width, size.height);
   if (fit !== "crop") {
-    throw new Error(`I2V の fit ${JSON.stringify(fit)} は未対応（期待 'crop' / 'stretch'）`);
+    throw new Error(
+      `I2V fit ${JSON.stringify(fit)} is not supported (expected 'crop' / 'stretch')`,
+    );
   }
   const cover = wanI2vCoverSize(image, size);
   // On the axis that set the scale, the rounding error of `iw·(ow / iw)` (under 0.5) disappears in
@@ -174,7 +176,7 @@ export const fitWanI2vImage = (image: Rgb8Image, size: Size, fit: WanI2vFit): Rg
   // `assert img.width == ow and img.height == oh`).
   if (cover.width < size.width || cover.height < size.height) {
     throw new Error(
-      `I2V の crop: 縮尺後の ${cover.width}×${cover.height} が出力 ${size.width}×${size.height} を覆わない`,
+      `I2V crop: the scaled ${cover.width}×${cover.height} does not cover the output ${size.width}×${size.height}`,
     );
   }
   return resizeRgb8LanczosWindow(image, cover.width, cover.height, {
@@ -223,20 +225,24 @@ export const patchifyWanImage = (
   patchSize: number,
 ): Float32Array<ArrayBuffer> => {
   if (!Number.isInteger(patchSize) || patchSize < 1) {
-    throw new Error(`patchify の倍率 ${patchSize} が正の整数でない`);
+    throw new Error(`patchify patch size ${patchSize} is not a positive integer`);
   }
   if (shape.some((dim) => !Number.isInteger(dim) || dim < 1)) {
-    throw new Error(`patchify の入力の形 [${shape.join(", ")}] の次元が正の整数でない`);
+    throw new Error(
+      `patchify input shape [${shape.join(", ")}] has a dimension that is not a positive integer`,
+    );
   }
   const [channels, height, width] = shape;
   if (height % patchSize !== 0 || width % patchSize !== 0) {
-    throw new Error(`patchify の入力 ${width}×${height} が倍率 ${patchSize} で割り切れない`);
+    throw new Error(
+      `patchify input ${width}×${height} is not divisible by patch size ${patchSize}`,
+    );
   }
   if (pixels.length !== channels * height * width) {
     throw new Error(
-      `patchify の入力の要素数 ${pixels.length} が [${shape.join(", ")}]（${
+      `patchify input element count ${pixels.length} does not match [${shape.join(", ")}] (${
         channels * height * width
-      }）と違う`,
+      })`,
     );
   }
   const rows = height / patchSize;

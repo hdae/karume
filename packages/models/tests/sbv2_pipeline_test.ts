@@ -115,7 +115,7 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   await assertRejects(
     () => Sbv2Pipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
-    "部品 'front' の容器が無い",
+    "component 'front' has no container",
   );
 });
 
@@ -135,7 +135,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   await assertRejects(
     () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
-    "major に未対応",
+    "has an unsupported major",
   );
 });
 
@@ -144,7 +144,7 @@ test("fromAssets: 存在しない quant は利用可能な一覧を添えて落�
   await assertRejects(
     () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "f16" }),
     Error,
-    "利用可能: i8",
+    "available: i8",
   );
 });
 
@@ -154,7 +154,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
   await assertRejects(
     () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { model: "FN1" }),
     Error,
-    "利用可能: FN4",
+    "available: FN4",
   );
 });
 
@@ -175,7 +175,7 @@ test("fromAssets: f16 計算を宣言した quant は gpuFeatures を書き落�
   await assertRejects(
     () => Sbv2Pipeline.fromAssets({ manifest: f16Compute, assets: COMPONENTS }, shared),
     Error,
-    "Sbv2Pipeline: quant 'i8' は shader-f16 を要求するが",
+    "Sbv2Pipeline: quant 'i8' requires shader-f16, but",
   );
   // 対照: f16 計算を言わない quant は同じ共有 GPU で admission を通り、資産の段まで進む
   // （門が恒真でないことの対）。
@@ -213,7 +213,7 @@ test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async
   await assertRejects(
     () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
-    "pipelineConfig: 未知キー 'sampleRate'",
+    "pipelineConfig: unknown key 'sampleRate'",
   );
 });
 
@@ -239,7 +239,7 @@ test("fromAssets: defaults.style が styles に無ければ構築時に落ちる
   await assertRejects(
     () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
-    "pipelineConfig.defaults.style: 'Angry' が styles に無い",
+    "pipelineConfig.defaults.style: 'Angry' is not in styles",
   );
 });
 
@@ -264,7 +264,7 @@ test("fromAssets: defaults.speaker が speakers に無ければ構築時に落�
   await assertRejects(
     () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
-    "pipelineConfig.defaults.speaker: 'jvnv-F1-jp' が speakers に無い",
+    "pipelineConfig.defaults.speaker: 'jvnv-F1-jp' is not in speakers",
   );
 });
 
@@ -291,7 +291,7 @@ test("fromAssets: 行番号が順列でない styles は構築時に落ちる（
   await assertRejects(
     () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
-    "行番号が 0..1 の整数でない",
+    "the row index is not an integer in 0..1",
   );
 });
 
@@ -315,7 +315,7 @@ test("parseSbv2PipelineConfig: 行番号の重複を落とす（名前と行が 
         },
       }),
     Error,
-    "行番号 0 が重複している",
+    "row index 0 is duplicated",
   );
 });
 
@@ -371,7 +371,7 @@ test("parseSbv2PipelineConfig: lengthScale 0 は落とす（総フレーム数�
         },
       }),
     Error,
-    "pipelineConfig.defaults.lengthScale: 正の有限数でない",
+    "pipelineConfig.defaults.lengthScale: not a positive finite number",
   );
 });
 
@@ -404,12 +404,12 @@ test("parseSbv2PipelineConfig: maxTokens / maxFrames が無い配布形は読め
   assertThrows(
     () => parseSbv2PipelineConfig(configWithLimits({ maxFrames: 4096 })),
     Error,
-    "pipelineConfig.maxTokens: 無い",
+    "pipelineConfig.maxTokens: missing",
   );
   assertThrows(
     () => parseSbv2PipelineConfig(configWithLimits({ maxTokens: 512 })),
     Error,
-    "pipelineConfig.maxFrames: 無い",
+    "pipelineConfig.maxFrames: missing",
   );
 });
 
@@ -419,7 +419,7 @@ test("parseSbv2PipelineConfig: 上限が正の安全整数でなければ落と�
     assertThrows(
       () => parseSbv2PipelineConfig(configWithLimits({ maxTokens: bad, maxFrames: 4096 })),
       Error,
-      "pipelineConfig.maxTokens: 正の安全整数でない",
+      "pipelineConfig.maxTokens: not a positive safe integer",
       `maxTokens=${String(bad)} が通った`,
     );
   }
@@ -431,7 +431,7 @@ test("assertTokenLimit: 上限超過は落とし、ちょうど上限は通る",
   assertThrows(
     () => assertTokenLimit(513, 512),
     Error,
-    "Sbv2Pipeline: トークン数 513 が配布形の上限 maxTokens=512 を超えている",
+    "Sbv2Pipeline: token count 513 exceeds the distribution's maximum maxTokens=512",
   );
 });
 
@@ -442,10 +442,10 @@ test("assertPhonemeLimit: 上限超過は落とし、ちょうど上限は通る
   assertThrows(
     () => assertPhonemeLimit(513, 512),
     Error,
-    "Sbv2Pipeline: 音素数 513 が配布形の上限 maxTokens=512 を超えている",
+    "Sbv2Pipeline: phoneme count 513 exceeds the distribution's maximum maxTokens=512",
   );
   // 文言は T 側と別（診断でどちらの門か分かる形）。
-  assertThrows(() => assertTokenLimit(513, 512), Error, "トークン数 513");
+  assertThrows(() => assertTokenLimit(513, 512), Error, "token count 513");
 });
 
 test("assertSeed: 受理集合は非負の安全整数（Randn と同一条件・型は Sbv2InputError）", () => {
@@ -458,7 +458,7 @@ test("assertSeed: 受理集合は非負の安全整数（Randn と同一条件�
     const thrown = assertThrows(
       () => assertSeed(bad),
       Sbv2InputError,
-      `seed ${bad} が非負の安全整数でない`,
+      `seed ${bad} is not a non-negative safe integer`,
     );
     // 包み直しは所有者の例外を捨てない（cause が所有者 `request-gates.ts` の送出そのもの）。
     assert(thrown.cause instanceof ModelInputError, "所有者の例外を cause に残していない");
@@ -477,13 +477,13 @@ test("assertFiniteNoise: f32 で溢れる z_noise は出どころで型を分け
   assertThrows(
     () => assertFiniteNoise(overflowing, 1e39, true),
     Sbv2InputError,
-    "noiseScaleW 1e+39 では z_noise が f32 で有限に収まらない",
+    "noiseScaleW 1e+39 makes z_noise non-finite in f32",
   );
   // 配布形の既定値なら資産の不正（入力起因の分岐に乗せない）。
   const fromAsset = assertThrows(
     () => assertFiniteNoise(overflowing, 1e39, false),
     Error,
-    "pipelineConfig.defaults の noiseScaleW 1e+39",
+    "pipelineConfig.defaults: noiseScaleW 1e+39",
   );
   assertFalse(fromAsset instanceof ModelInputError, "資産由来が入力起因に分類された");
   // 正常域は通る。
@@ -578,7 +578,7 @@ describe("synthesizeSbv2: z_noise の有限性の検査の結線", () => {
     await assertRejects(
       () => synthesizeSbv2(noiseWiringState(calls, 0.8), PUNCTUATION_ONLY, { noiseScaleW: 1e39 }),
       Sbv2InputError,
-      "noiseScaleW 1e+39 では z_noise が f32 で有限に収まらない",
+      "noiseScaleW 1e+39 makes z_noise non-finite in f32",
     );
     assertEquals(calls, []);
   });
@@ -588,7 +588,7 @@ describe("synthesizeSbv2: z_noise の有限性の検査の結線", () => {
     const error = await assertRejects(
       () => synthesizeSbv2(noiseWiringState(calls, 1e39), PUNCTUATION_ONLY),
       Error,
-      "pipelineConfig.defaults の noiseScaleW 1e+39",
+      "pipelineConfig.defaults: noiseScaleW 1e+39",
     );
     assertFalse(error instanceof ModelInputError, "資産由来が入力起因に分類された");
     assertEquals(calls, []);
@@ -643,10 +643,14 @@ test("assertTiledBert: 故障注入 — 走査が取りこぼした tile を確�
   assertThrows(
     () => assertTiledBert(broken, 3),
     Error,
-    "BERT 展開が書いた 1 列 × dim 3 が確保した 9 要素と合わない",
+    "The 1 columns × dim 3 written by the BERT expansion do not match the allocated 9 elements",
   );
   // 音素数との不一致（analysis と tile の齟齬）は従来どおり別の文言で落ちる。
-  assertThrows(() => assertTiledBert(good, 4), Error, "BERT 展開長 3 が音素数 4 と違う");
+  assertThrows(
+    () => assertTiledBert(good, 4),
+    Error,
+    "BERT expansion length 3 differs from the phoneme count 4",
+  );
 });
 
 describe("SBV2 の throw の分類軸（家族横断の分岐に乗るか）", () => {
@@ -666,7 +670,7 @@ describe("SBV2 の throw の分類軸（家族横断の分岐に乗るか）", (
     // tile 走査の破れは呼び手が text も seed も直しようがない = 500 相当。入力起因と同じ型に
     // なると、配線の故障を「入力を直せ」と呼び手へ返すことになる。
     const broken = tileWithShortRepeat(new Float32Array([1, 2, 3, 10, 20, 30]), 2, [1, 2]);
-    const error = assertThrows(() => assertTiledBert(broken, 3), Error, "tile 走査の破れ");
+    const error = assertThrows(() => assertTiledBert(broken, 3), Error, "the tile walk is broken");
     assertFalse(error instanceof ModelInputError);
   });
 });
@@ -699,7 +703,7 @@ test("assertTableFits: 名前表の件数とグラフ入力の幅の両方に合
         256,
       ),
     Error,
-    "の行数 3 が pipelineConfig の 7 件",
+    "has 3 rows, which differs from the 7 entries of pipelineConfig",
   );
   assertThrows(
     () =>
@@ -710,7 +714,7 @@ test("assertTableFits: 名前表の件数とグラフ入力の幅の両方に合
         256,
       ),
     Error,
-    "の列数 128 がグラフ入力の 256 と違う",
+    "has 128 columns, which differs from the graph input's 256",
   );
 });
 
@@ -747,13 +751,13 @@ test("assertFrontOutputs: front の出力は 4 本ちょうど（位置引きの
   assertThrows(
     () => assertFrontOutputs(frontStub({ outputs: 3 })),
     Error,
-    "front のグラフ出力が 3 本",
+    "front has 3 graph outputs",
   );
   // MUST「4 本以上」で妥協しない: 余分な出力は位置 0..3 しか読まれず静かに無視される。
   assertThrows(
     () => assertFrontOutputs(frontStub({ outputs: 5 })),
     Error,
-    "front のグラフ出力が 5 本",
+    "front has 5 graph outputs",
   );
 });
 
@@ -765,17 +769,21 @@ test("assertBertWidth: text_encoder の hidden 幅と front の 'bert' 入力幅
   const error = assertThrows(
     () => assertBertWidth(textEncoderStub({ width: 768 }), frontStub(), 1),
     Error,
-    "の幅 768 が front のグラフ入力 'bert' の 1024 と違う",
+    "has width 768, which differs from the width of front's graph input 'bert', 1024",
   );
   assertEquals(error.message.includes("layer_norm_0"), true, error.message);
   // 見るのは最終軸だけ（`[1, T, dim]` の T は記号次元）。最終軸が記号なら幅が読めない。
   assertThrows(
     () => assertBertWidth(textEncoderStub({ width: "D" }), frontStub(), 1),
     Error,
-    "の最終軸が静的次元でない（D）",
+    "the last axis of text_encoder output 'layer_norm_0' is not a static dimension (D)",
   );
   // 出力の選び方は末尾からの相対（`bertHiddenFromEnd`）— 本数が足りない資産はそこで落ちる。
-  assertThrows(() => assertBertWidth(textEncoderStub(), frontStub(), 3), Error, "3 本以上");
+  assertThrows(
+    () => assertBertWidth(textEncoderStub(), frontStub(), 3),
+    Error,
+    "at least 3 are required",
+  );
 });
 
 // ---- 資産 JSON の decode（不正 UTF-8 を黙って置換しない）------------------
@@ -806,7 +814,7 @@ test("assetJson: 不正 UTF-8 の資産は decode 段の文言で落ちる（JSO
   assertThrows(
     () => assetJson({ tokenizer: broken }, "tokenizer"),
     Error,
-    "sbv2: 資産 'tokenizer' が UTF-8 として読めない",
+    "sbv2: asset 'tokenizer' cannot be read as UTF-8",
   );
 });
 
@@ -815,7 +823,7 @@ test("assetJson: JSON 構文違反は decode とは別の文言で落ちる（�
   assertThrows(
     () => assetJson({ symbols: truncated }, "symbols"),
     Error,
-    "sbv2: 資産 'symbols' が JSON として読めない",
+    "sbv2: asset 'symbols' cannot be read as JSON",
   );
   // 正しい UTF-8 は多バイト文字を含んでもそのまま通る。
   const valid = new TextEncoder().encode('{"unkId":0,"space":"あ"}');
@@ -839,18 +847,18 @@ test("parseTokenizerAsset: 特殊 id は整数かつ語彙の行数未満", () =
   assertThrows(
     () => parseTokenizerAsset(tokenizerAsset({ clsId: 1.5 }), "tokenizer"),
     Error,
-    "tokenizer.special.clsId: 0..2147483647 の整数でない（1.5）",
+    "tokenizer.special.clsId: not an integer in 0..2147483647 (1.5)",
   );
   assertThrows(
     () => parseTokenizerAsset(tokenizerAsset({ sepId: -1 }), "tokenizer"),
     Error,
-    "tokenizer.special.sepId: 0..2147483647 の整数でない（-1）",
+    "tokenizer.special.sepId: not an integer in 0..2147483647 (-1)",
   );
   // 語彙 5 行に対する id 5 = 1 つ外側（gather が範囲外添字を引く）。
   assertThrows(
     () => parseTokenizerAsset(tokenizerAsset({ unkId: 5 }), "tokenizer"),
     Error,
-    "unkId 5 が語彙の行数 5 以上",
+    "unkId 5 is >= the vocabulary row count 5",
   );
 });
 
@@ -880,7 +888,7 @@ test("parseTokenizerAsset: 区間表は昇順・非重複の閉区間でなけ�
   assertThrows(
     () => parseTokenizerAsset(tokenizerRanges({ removed: [[31, 8]], spaced: [] }), "tok"),
     Error,
-    "tok.cleanRanges.removed[0]: 区間 [31, 8] の start が end より大きい",
+    "tok.cleanRanges.removed[0]: range [31, 8] has start greater than end",
   );
   assertThrows(
     () =>
@@ -895,7 +903,7 @@ test("parseTokenizerAsset: 区間表は昇順・非重複の閉区間でなけ�
         "tok",
       ),
     Error,
-    "tok.cleanRanges.removed[1]: 区間 [8, 31] が直前の終端 159 以下から始まる",
+    "tok.cleanRanges.removed[1]: range [8, 31] starts at or below the previous end 159",
   );
   // 端点を共有するだけの重複でも探索は外しうる（境界を 1 つ緩めていない）。
   assertThrows(
@@ -911,23 +919,23 @@ test("parseTokenizerAsset: 区間表は昇順・非重複の閉区間でなけ�
         "tok",
       ),
     Error,
-    "tok.cleanRanges.removed[1]: 区間 [31, 40] が直前の終端 31 以下から始まる",
+    "tok.cleanRanges.removed[1]: range [31, 40] starts at or below the previous end 31",
   );
   // 非整数はコードポイント比較の意味を失い、範囲外は資産の生成規則から外れる。
   assertThrows(
     () => parseTokenizerAsset(tokenizerRanges({ removed: [[0.5, 3]], spaced: [] }), "tok"),
     Error,
-    "tok.cleanRanges.removed[0]: 区間 [0.5, 3] が 0..1114111 の整数対でない",
+    "tok.cleanRanges.removed[0]: range [0.5, 3] is not a pair of integers in 0..1114111",
   );
   assertThrows(
     () => parseTokenizerAsset(tokenizerRanges({ removed: [[0, 0x110000]], spaced: [] }), "tok"),
     Error,
-    "tok.cleanRanges.removed[0]: 区間 [0, 1114112] が 0..1114111 の整数対でない",
+    "tok.cleanRanges.removed[0]: range [0, 1114112] is not a pair of integers in 0..1114111",
   );
   // spaced 側も同じ門を通る（removed だけ塞いだ形になっていない）。
   assertThrows(
     () => parseTokenizerAsset(tokenizerRanges({ removed: [], spaced: [[5, 4]] }), "tok"),
     Error,
-    "tok.cleanRanges.spaced[0]: 区間 [5, 4] の start が end より大きい",
+    "tok.cleanRanges.spaced[0]: range [5, 4] has start greater than end",
   );
 });

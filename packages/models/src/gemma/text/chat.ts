@@ -107,26 +107,26 @@ const trim = (text: string): string => {
  */
 const assertPlainMessage = (message: Gemma4ChatMessage, where: string): void => {
   if (typeof message !== "object" || message === null) {
-    throw new ModelInputError(`${where} がオブジェクトでない`);
+    throw new ModelInputError(`${where} is not an object`);
   }
   const extra = Object.keys(message).filter((key) => !MESSAGE_KEYS.includes(key));
   if (extra.length > 0) {
     throw new ModelInputError(
-      `${where}: 射程外の欄 ${extra.join(" / ")}` +
-        `（tools / reasoning / tool_calls などは初版では拒否する — ADR 0084 決定 5。` +
-        `黙って無視すると「渡したのに効かない」が例外なしで通る）`,
+      `${where}: out-of-scope fields ${extra.join(" / ")}` +
+        ` (tools / reasoning / tool_calls and the like are rejected in the first version — ADR 0084 decision 5.` +
+        ` Silently ignoring them would let "passed but has no effect" through without an exception)`,
     );
   }
   if (!ROLES.includes(message.role)) {
     throw new ModelInputError(
-      `${where}.role '${String(message.role)}' が ${ROLES.join(" / ")} のどれでもない` +
-        `（'model' は template の出力側の綴りで、入力の role ではない）`,
+      `${where}.role '${String(message.role)}' is none of ${ROLES.join(" / ")}` +
+        ` ('model' is the template's output-side spelling, not an input role)`,
     );
   }
   if (typeof message.content !== "string") {
     throw new ModelInputError(
-      `${where}.content が文字列でない` +
-        `（画像 / 音声パートの配列は初版では拒否する — ADR 0084 決定 5）`,
+      `${where}.content is not a string` +
+        ` (arrays of image / audio parts are rejected in the first version — ADR 0084 decision 5)`,
     );
   }
   // Upstream applies `strip_thinking` only to the body of a model turn (it rewinds the thinking
@@ -137,8 +137,8 @@ const assertPlainMessage = (message: Gemma4ChatMessage, where: string): void => 
     (message.content.includes(START_OF_CHANNEL) || message.content.includes(END_OF_CHANNEL))
   ) {
     throw new ModelInputError(
-      `${where}.content に thinking チャネルの綴り（${START_OF_CHANNEL} / ` +
-        `${END_OF_CHANNEL}）がある（初版の射程外 — ADR 0084 決定 5）`,
+      `${where}.content contains the thinking channel spelling (${START_OF_CHANNEL} / ` +
+        `${END_OF_CHANNEL}) (out of scope in the first version — ADR 0084 decision 5)`,
     );
   }
 };
@@ -152,7 +152,7 @@ const assertPlainMessage = (message: Gemma4ChatMessage, where: string): void => 
 const assertPlainConversation = (messages: readonly Gemma4ChatMessage[]): void => {
   if (messages.length === 0) {
     throw new ModelInputError(
-      "gemma4ChatPrompt: 会話が空（上流の apply_chat_template も拒否する）",
+      "gemma4ChatPrompt: the conversation is empty (the upstream apply_chat_template rejects it too)",
     );
   }
   messages.forEach((message, index) => {
@@ -257,9 +257,9 @@ export const renderGemma4ChatTurn = (message: Gemma4ChatMessage): string => {
   assertPlainMessage(message, "gemma4ChatTurn: message");
   if (message.role === "assistant") {
     throw new ModelInputError(
-      `gemma4ChatTurn: role 'assistant' は差分にできない` +
-        `（model turn は生成が埋める席で、template も連続 assistant を 1 つへ畳む — ` +
-        `会話へ差し込むなら gemma4ChatPrompt で全体を描き直す）`,
+      `gemma4ChatTurn: role 'assistant' cannot be a delta` +
+        ` (the model turn is the slot generation fills, and the template folds consecutive assistant turns into one — ` +
+        `to insert one into the conversation, re-render the whole conversation with gemma4ChatPrompt)`,
     );
   }
   // The leading newline is the one character "right after the `<turn|>` that closed the previous
@@ -301,8 +301,8 @@ export const gemma4StopTokens = (tokenizer: GemmaTokenizer): number[] => {
     const id = tokenizer.addedTokenId(spelling);
     if (id === undefined) {
       throw new Error(
-        `gemma4StopTokens: 停止 token '${spelling}' がトークナイザ資産の追加語彙に無い` +
-          `（chat 形式と EOS 集合は同じ digest set から来る — ADR 0084 決定 5）`,
+        `gemma4StopTokens: stop token '${spelling}' is not in the tokenizer asset's added vocabulary` +
+          ` (the chat format and the EOS set come from the same digest set — ADR 0084 decision 5)`,
       );
     }
     stops.push(id);

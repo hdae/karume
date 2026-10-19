@@ -110,7 +110,7 @@ export class GemmaTokenizer {
    * is raised here at the entry.
    */
   encode(text: string): number[] {
-    assertEncodableText(text, "Gemma の本文");
+    assertEncodableText(text, "Gemma text");
     const ids: number[] = [];
     for (const chunk of this.#added.split(text)) {
       if (chunk.added) {
@@ -169,7 +169,7 @@ export class GemmaTokenizer {
         if (token === undefined) {
           // The reference silently skips unknown ids; this fails (the cross-cutting invariant: fail
           // loudly).
-          throw new Error(`復号: id ${id} が語彙にも追加語彙にも無い`);
+          throw new Error(`Decode: id ${id} is in neither the vocabulary nor the added vocabulary`);
         }
         // The first step of the decoder chain, `Replace("▁" → " ")`. byte_fallback spellings
         // contain no metaspace, so the order of this replacement and the byte check does not change

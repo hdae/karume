@@ -361,7 +361,7 @@ describe("WanTi2vPipeline.fromAssets: manifest の門（pipeline 名 / major・q
     const error = await assertRejects(
       () => buildTi2v(ti2vManifest({ pipeline: "wan/1" })),
       Error,
-      "manifest の pipeline が 'wan/1'（'wan-ti2v/1' が必要）",
+      "the manifest's pipeline is 'wan/1' ('wan-ti2v/1' is required)",
     );
     assert(error.message.startsWith(OWNER), error.message);
     assert(!(error instanceof ModelInputError), "資産の齟齬を入力起因にしない");
@@ -375,7 +375,7 @@ describe("WanTi2vPipeline.fromAssets: manifest の門（pipeline 名 / major・q
           { textEncoder: "precomputed", gpu: fakeGpuContext(fakeDevice()) },
         ),
       Error,
-      "WanPipeline: manifest の pipeline が 'wan-ti2v/1'（'wan/1' が必要）",
+      "WanPipeline: the manifest's pipeline is 'wan-ti2v/1' ('wan/1' is required)",
     );
     assert(!error.message.startsWith(OWNER), error.message);
   });
@@ -384,7 +384,7 @@ describe("WanTi2vPipeline.fromAssets: manifest の門（pipeline 名 / major・q
     const error = await assertRejects(
       () => buildTi2v(ti2vManifest({ pipeline: "wan-ti2v/2" })),
       Error,
-      "pipeline 'wan-ti2v/2' の major に未対応（この実装が読めるのは wan-ti2v/1）",
+      "pipeline 'wan-ti2v/2' has an unsupported major (this implementation reads wan-ti2v/1)",
     );
     assert(error.message.startsWith(OWNER), error.message);
   });
@@ -393,7 +393,7 @@ describe("WanTi2vPipeline.fromAssets: manifest の門（pipeline 名 / major・q
     const error = await assertRejects(
       () => buildTi2v(ti2vManifest(), {}, { quant: "f16+dit8" }),
       Error,
-      "quant 'f16+dit8' は manifest に無い（利用可能: f16）",
+      "quant 'f16+dit8' is not in the manifest (available: f16)",
     );
     assert(error.message.startsWith(OWNER), error.message);
   });
@@ -405,7 +405,7 @@ describe("WanTi2vPipeline.fromAssets: manifest の門（pipeline 名 / major・q
           ti2vManifest({ pipelineConfig: { ...CONFIG, scheduler: { shift: 5, flowShift: 5 } } }),
         ),
       Error,
-      "pipelineConfig.scheduler: 未知キー 'flowShift'（許可: shift）",
+      "pipelineConfig.scheduler: unknown key 'flowShift' (allowed: shift)",
     );
   });
 
@@ -417,7 +417,7 @@ describe("WanTi2vPipeline.fromAssets: manifest の門（pipeline 名 / major・q
           optionsWith("textEncoder", "cpu"),
         ),
       Error,
-      `${OWNER} textEncoder 'cpu' は 'gpu' / 'precomputed' のどちらでもない`,
+      `${OWNER} textEncoder 'cpu' is neither 'gpu' nor 'precomputed'`,
     );
     assert(!(error instanceof ModelInputError));
   });
@@ -432,7 +432,7 @@ describe("WanTi2vPipeline.fromAssets: 家族 admission は 2.2 の世代で照�
     await assertRejects(
       () => buildTi2v(ti2vManifest(), vae),
       Error,
-      `${OWNER} 逆正規化の統計（mean 48 本・std 48 本）が VAE の潜在 16 チャネルと違う`,
+      `${OWNER} the denormalization statistics (mean 48, std 48) do not match the VAE latent's 16 channels`,
     );
   });
 
@@ -444,7 +444,7 @@ describe("WanTi2vPipeline.fromAssets: 家族 admission は 2.2 の世代で照�
     await assertRejects(
       () => buildTi2v(ti2vManifest(), vae),
       Error,
-      `${OWNER} VAE の出口 3 チャネルが RGB 3 × unpatchify 2² = 12 と違う`,
+      `${OWNER} VAE output 3 channels differ from RGB 3 × unpatchify 2² = 12`,
     );
   });
 
@@ -454,8 +454,8 @@ describe("WanTi2vPipeline.fromAssets: 家族 admission は 2.2 の世代で照�
     await assertRejects(
       () => buildTi2v(ti2vManifest(), dit),
       Error,
-      `${OWNER} transformer のグラフ入力が [${t2v}]` +
-        `（期待: [${t2v}, timesteps_proj_condition, condition_mask] — 入力の形 'ti2v'）`,
+      `${OWNER} transformer graph inputs are [${t2v}]` +
+        ` (expected: [${t2v}, timesteps_proj_condition, condition_mask] — input form 'ti2v')`,
     );
   });
 });
@@ -548,7 +548,7 @@ describe("WanTi2vPipeline.fromPretrained: 取得面も 2.2 の family を渡す�
     const error = await assertRejects(
       async () => fromPretrained(await ti2vDirectory("wan/1")),
       Error,
-      "manifest の pipeline が 'wan/1'（'wan-ti2v/1' が必要）",
+      "the manifest's pipeline is 'wan/1' ('wan-ti2v/1' is required)",
     );
     assert(error.message.startsWith(OWNER), error.message);
   });
@@ -612,12 +612,12 @@ describe("WAN22_TI2V_FAMILY の世代の値（計画の門）", () => {
     assertThrows(
       () => plan({ width: 832, height: 480 }),
       ModelInputError,
-      "832×480 が受理集合（1280×704 / 704×1280）に無い",
+      "832×480 is not in the accepted set (1280×704 / 704×1280)",
     );
     assertThrows(
       () => plan({ frames: 125 }),
       ModelInputError,
-      "frames 125 が受理集合（4n+1 の 5〜121）に無い",
+      "frames 125 is not in the accepted set (4n+1 in 5..121)",
     );
   });
 });
@@ -1004,7 +1004,7 @@ describe("WanTi2vPipeline.generate（模擬 Session — 2.2 の世代の値が V
     await assertRejects(
       () => generate({ width: 832, height: 480 }),
       ModelInputError,
-      "832×480 が受理集合（1280×704 / 704×1280）に無い",
+      "832×480 is not in the accepted set (1280×704 / 704×1280)",
     );
     assertEquals(
       log.filter((entry) => entry.startsWith("create:")),
@@ -1015,13 +1015,13 @@ describe("WanTi2vPipeline.generate（模擬 Session — 2.2 の世代の値が V
   it("集合の外のプロンプトの文言は WanTi2vPipeline.prompts を案内する", async () => {
     const { generate } = mockTi2v();
     const error = await assertRejects(() => generate({ prompt: "A ferret." }), ModelInputError);
-    assertStringIncludes(error.message, "WanTi2vPipeline.prompts で引ける");
+    assertStringIncludes(error.message, "WanTi2vPipeline.prompts lists them");
   });
 
   it("dispose 済みの生成は WanTi2vPipeline: の文言で拒む", async () => {
     const { pipeline, generate } = mockTi2v();
     await pipeline.dispose();
-    await assertRejects(() => generate(), Error, `${OWNER} dispose 済みでは生成できない`);
+    await assertRejects(() => generate(), Error, `${OWNER} cannot generate after dispose`);
   });
 });
 
@@ -1308,12 +1308,12 @@ describe("WanTi2vPipeline.generate の I2V: encoder の受け渡し（模擬 Ses
     [
       "NaN",
       (index: number) => (index === 0 ? Number.NaN : 0.25),
-      "channel 0・位置 (x=0, y=0) が非有限（NaN）",
+      "channel 0, position (x=0, y=0) is non-finite (NaN)",
     ],
     [
       "Infinity",
       (index: number) => (index === I2V_PLANE + 80 + 1 ? Number.POSITIVE_INFINITY : 0.25),
-      "channel 1・位置 (x=1, y=1) が非有限（Infinity）",
+      "channel 1, position (x=1, y=1) is non-finite (Infinity)",
     ],
   ] as const) {
     it(`条件の潜在（mu の正規化の後）が ${label} なら encoder の段で落ち、DiT の段を張らない（encoder は畳む）`, async () => {
@@ -1321,7 +1321,7 @@ describe("WanTi2vPipeline.generate の I2V: encoder の受け渡し（模擬 Ses
       await assertRejects(
         () => generate({ image: LANDSCAPE }),
         Error,
-        `${OWNER} 条件画像の潜在（VAE encoder の mu の正規化の後）の ${message}`,
+        `${OWNER} condition image latent (after normalizing the VAE encoder's mu) ${message}`,
       );
       assert(!log.includes("create:transformer"), `DiT の Session を張った: ${log}`);
       assert(!log.includes("vae_encoder:end"), "途中で落ちた段の end を出した");
@@ -1528,7 +1528,7 @@ describe("WanTi2vPipeline.generate の I2V: 要求の門（模擬 Session — Se
     await rejects(
       { fit: "stretch" },
       ModelInputError,
-      "fit は image を渡したときだけ効く（条件画像の寸法の合わせ方 — image 無しでは渡さない）",
+      "fit takes effect only when image is passed (how the condition image is fitted to the size — do not pass it without image)",
     );
   });
 
@@ -1536,7 +1536,7 @@ describe("WanTi2vPipeline.generate の I2V: 要求の門（模擬 Session — Se
     const error = await rejects(
       { ...requestWith("fit", "cover"), image: LANDSCAPE },
       Error,
-      "fit 'cover' は 'crop' / 'stretch' のどちらでもない",
+      "fit 'cover' is neither 'crop' nor 'stretch'",
     );
     assert(!(error instanceof ModelInputError));
   });
@@ -1545,7 +1545,7 @@ describe("WanTi2vPipeline.generate の I2V: 要求の門（模擬 Session — Se
     const error = await rejects(
       requestWith("fit", "cover"),
       Error,
-      "fit 'cover' は 'crop' / 'stretch' のどちらでもない",
+      "fit 'cover' is neither 'crop' nor 'stretch'",
     );
     assert(!(error instanceof ModelInputError));
   });
@@ -1553,18 +1553,18 @@ describe("WanTi2vPipeline.generate の I2V: 要求の門（模擬 Session — Se
   for (const [label, value, actual] of [
     ["null", null, "null"],
     ["数", 42, "number"],
-    ["data の無い object", { width: 4, height: 4 }, "data が無い"],
+    ["data の無い object", { width: 4, height: 4 }, "no data"],
     [
       "data が Float32Array",
       { width: 4, height: 4, data: new Float32Array(48) },
-      "data が Float32Array",
+      "data is Float32Array",
     ],
   ] as const) {
     it(`RGB8 の形でない image（${label}）は ModelInputError（JS の呼び手の型のすり抜け — 長さの検査を通る別の型の配列も）`, async () => {
       await rejects(
         requestWith("image", value),
         ModelInputError,
-        `image が RGB8 の画像（data が Uint8Array・width・height の object）でない（実際: ${actual}`,
+        `image is not an RGB8 image (an object with a Uint8Array data, width and height) (actual: ${actual}`,
       );
     });
   }
@@ -1573,12 +1573,12 @@ describe("WanTi2vPipeline.generate の I2V: 要求の門（模擬 Session — Se
     await rejects(
       { image: LANDSCAPE, width: 832 },
       ModelInputError,
-      "width 832 が受理集合（1280×704 / 704×1280）に無い",
+      "width 832 is not in the accepted set (1280×704 / 704×1280)",
     );
     await rejects(
       { image: LANDSCAPE, width: 832, height: 480 },
       ModelInputError,
-      "832×480 が受理集合（1280×704 / 704×1280）に無い",
+      "832×480 is not in the accepted set (1280×704 / 704×1280)",
     );
   });
 
@@ -1586,7 +1586,7 @@ describe("WanTi2vPipeline.generate の I2V: 要求の門（模擬 Session — Se
     await rejects(
       { image: { data: new Uint8Array(10), width: 4, height: 4 } },
       ModelInputError,
-      "RGB8 の長さ 10 が 3×4×4 と違う",
+      "RGB8 length 10 does not match 3×4×4",
     );
   });
 });
@@ -1673,7 +1673,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
           },
         }),
       Error,
-      `${OWNER} vae_encoder_pre の入力 'image' の形 [12, 1, 4h, 4w] がホストの組む [12, 1, 8h, 8w] と違う`,
+      `${OWNER} vae_encoder_pre input 'image' shape [12, 1, 4h, 4w] differs from the host's [12, 1, 8h, 8w]`,
     );
   });
 
@@ -1684,7 +1684,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
           vae_encoder_post: { ...ENCODER_GRAPHS.vae_encoder_post, output: [96, 1, "h", "w"] },
         }),
       Error,
-      `${OWNER} vae_encoder_post の出力 'out' の形 [96, 1, h, w] がホストの組む [48, 1, h, w] と違う`,
+      `${OWNER} vae_encoder_post output 'out' shape [96, 1, h, w] differs from the host's [48, 1, h, w]`,
     );
   });
 
@@ -1695,7 +1695,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
           vae_encoder_attn: { ...ENCODER_GRAPHS.vae_encoder_attn, symbols: ["S", "T"] },
         }),
       Error,
-      `${OWNER} vae_encoder_attn の記号が [S, T]（期待: [S]）`,
+      `${OWNER} vae_encoder_attn symbols are [S, T] (expected: [S])`,
     );
   });
 
@@ -1709,7 +1709,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
           },
         }),
       Error,
-      `${OWNER} vae_encoder_post の入力 'hidden' の軸 2 が記号そのものでない（2h）`,
+      `${OWNER} vae_encoder_post input 'hidden' axis 2 is not a bare symbol (2h)`,
     );
   });
 
@@ -1738,7 +1738,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
           }),
         }),
       Error,
-      `${OWNER} vae_encoder_pre の入出力が 2 本 → 1 本（1 本 → 1 本だけを組む）`,
+      `${OWNER} vae_encoder_pre has 2 inputs → 1 outputs (only 1 → 1 is built)`,
     );
   });
 
@@ -1755,7 +1755,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
           }),
         }),
       Error,
-      `${OWNER} vae_encoder_post の入出力が 1 本 → 2 本（1 本 → 1 本だけを組む）`,
+      `${OWNER} vae_encoder_post has 1 inputs → 2 outputs (only 1 → 1 is built)`,
     );
   });
 
@@ -1772,7 +1772,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
           }),
         }),
       Error,
-      `${OWNER} vae_encoder_attn の入力 'tokens' の dtype i32 が f32 でない`,
+      `${OWNER} vae_encoder_attn input 'tokens' has dtype i32, not f32`,
     );
   });
 
@@ -1786,7 +1786,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
           },
         }),
       Error,
-      `${OWNER} vae_encoder_post の出力 'out' の dtype bool が f32 でない`,
+      `${OWNER} vae_encoder_post output 'out' has dtype bool, not f32`,
     );
   });
 
@@ -1801,7 +1801,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
           },
         }),
       Error,
-      `${OWNER} vae_encoder_pre の出力 'out' の軸 0 が静的でない（C）`,
+      `${OWNER} vae_encoder_pre output 'out' axis 0 is not static (C)`,
     );
   });
 
@@ -1812,7 +1812,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
           vae_encoder_pre: { ...ENCODER_GRAPHS.vae_encoder_pre, symbols: ["h", "w", "T"] },
         }),
       Error,
-      `${OWNER} vae_encoder_pre の記号が [h, w, T]（期待: [h, w]）`,
+      `${OWNER} vae_encoder_pre symbols are [h, w, T] (expected: [h, w])`,
     );
   });
 
@@ -1826,7 +1826,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
           },
         }),
       Error,
-      `${OWNER} vae_encoder_attn の入力 'tokens' の形 [320, S] がホストの組む [640, S] と違う`,
+      `${OWNER} vae_encoder_attn input 'tokens' shape [320, S] differs from the host's [640, S]`,
     );
   });
 
@@ -1837,7 +1837,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
           vae_encoder_attn: { ...ENCODER_GRAPHS.vae_encoder_attn, output: [320, "S"] },
         }),
       Error,
-      `${OWNER} vae_encoder_attn の出力 'out' の形 [320, S] がホストの組む [640, S] と違う`,
+      `${OWNER} vae_encoder_attn output 'out' shape [320, S] differs from the host's [640, S]`,
     );
   });
 
@@ -1851,7 +1851,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
           },
         }),
       Error,
-      `${OWNER} vae_encoder_post の入力 'hidden' の形 [320, 1, h, w] がホストの組む [640, 1, h, w] と違う`,
+      `${OWNER} vae_encoder_post input 'hidden' shape [320, 1, h, w] differs from the host's [640, 1, h, w]`,
     );
   });
 
@@ -1863,7 +1863,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
     assertThrows(
       () => wanVaeEncoderContract(encoderGraphs(), layout, generation, WAN22_TI2V_FAMILY.owner),
       Error,
-      `${OWNER} 1288×704 は VAE encoder の空間の圧縮 16 で潜在が正の整数にならない`,
+      `${OWNER} 1288×704 with the VAE encoder's spatial compression 16 does not give a latent of positive integers`,
     );
   });
 });
@@ -1880,7 +1880,7 @@ describe("WanTi2vPipeline.fromAssets: I2V の VAE encoder の部品（家族 adm
           { textEncoder: "precomputed", gpu: fakeGpuContext(fakeDevice()) },
         ),
       Error,
-      `${OWNER} 部品 'vae_encoder_pre' の容器が無い`,
+      `${OWNER} component 'vae_encoder_pre' has no container`,
     );
   });
 
@@ -1894,7 +1894,7 @@ describe("WanTi2vPipeline.fromAssets: I2V の VAE encoder の部品（家族 adm
     await assertRejects(
       () => buildTi2v(ti2vManifest(), encoder),
       Error,
-      `${OWNER} vae_encoder_pre の入力 'image' の形 [12, 1, 4h, 4w] がホストの組む [12, 1, 8h, 8w] と違う`,
+      `${OWNER} vae_encoder_pre input 'image' shape [12, 1, 4h, 4w] differs from the host's [12, 1, 8h, 8w]`,
     );
   });
 });

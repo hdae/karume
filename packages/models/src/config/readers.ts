@@ -26,7 +26,7 @@ export const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 /** Reads as a set of fields (missing and not-an-object are fixed the same way, so one message). */
 export const readRecord = (raw: unknown, where: string): Record<string, unknown> => {
-  if (!isRecord(raw)) throw new Error(`${where}: 無い / オブジェクトでない`);
+  if (!isRecord(raw)) throw new Error(`${where}: missing / not an object`);
   return raw;
 };
 
@@ -41,7 +41,7 @@ export const assertAllowedKeys = (
 ): void => {
   for (const key of Object.keys(value)) {
     if (!allowed.includes(key)) {
-      throw new Error(`${where}: 未知キー '${key}'（許可: ${allowed.join(" / ")}）`);
+      throw new Error(`${where}: unknown key '${key}' (allowed: ${allowed.join(" / ")})`);
     }
   }
 };
@@ -54,10 +54,10 @@ export const readNumber = (
   check: (value: number) => boolean,
   requirement: string,
 ): number => {
-  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
+  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: missing`);
   const value = raw[key];
   if (typeof value !== "number" || !check(value)) {
-    throw new Error(`${where}.${key}: ${requirement}（${String(value)}）`);
+    throw new Error(`${where}.${key}: ${requirement} (${String(value)})`);
   }
   return value;
 };
@@ -76,14 +76,16 @@ export const readChannels = (
   check: (value: number) => boolean,
   requirement: string,
 ): readonly [number, number, number] => {
-  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
+  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: missing`);
   const value = raw[key];
   if (!Array.isArray(value) || value.length !== CHANNELS) {
-    throw new Error(`${where}.${key}: 長さ ${CHANNELS} の配列でない（${JSON.stringify(value)}）`);
+    throw new Error(
+      `${where}.${key}: not an array of length ${CHANNELS} (${JSON.stringify(value)})`,
+    );
   }
   for (const entry of value) {
     if (typeof entry !== "number" || !check(entry)) {
-      throw new Error(`${where}.${key}: ${requirement}（${JSON.stringify(value)}）`);
+      throw new Error(`${where}.${key}: ${requirement} (${JSON.stringify(value)})`);
     }
   }
   return [value[0], value[1], value[2]];
@@ -97,11 +99,11 @@ export const readOnly = <T extends string>(
   accepted: T,
   why: string,
 ): T => {
-  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
+  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: missing`);
   const value = raw[key];
   if (value !== accepted) {
     throw new Error(
-      `${where}.${key}: この実装が対応するのは '${accepted}' だけ（${String(value)}）— ${why}`,
+      `${where}.${key}: this implementation supports only '${accepted}' (${String(value)}) — ${why}`,
     );
   }
   return accepted;

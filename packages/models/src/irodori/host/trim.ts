@@ -42,14 +42,14 @@ export const findFlatteningPoint = (
   latentDim: number,
 ): number => {
   if (!Number.isInteger(frames) || frames < 0) {
-    throw new Error(`findFlatteningPoint: frames ${frames} が非負整数でない`);
+    throw new Error(`findFlatteningPoint: frames ${frames} is not a non-negative integer`);
   }
   if (!Number.isInteger(latentDim) || latentDim <= 0) {
-    throw new Error(`findFlatteningPoint: latentDim ${latentDim} が正の整数でない`);
+    throw new Error(`findFlatteningPoint: latentDim ${latentDim} is not a positive integer`);
   }
   if (latent.length !== frames * latentDim) {
     throw new Error(
-      `findFlatteningPoint: latent の要素数 ${latent.length} が ${frames}×${latentDim} と違う`,
+      `findFlatteningPoint: latent element count ${latent.length} differs from ${frames}×${latentDim}`,
     );
   }
   const count = WINDOW * latentDim;

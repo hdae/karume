@@ -89,7 +89,7 @@ describe("スタイル表の解釈: 行数・列数は現物の safetensors が�
     assertThrows(
       () => parseSbv2Table(styleTableAsset(STYLE_ROWS), SPEAKER_TENSOR),
       Error,
-      `資産にテンソル '${SPEAKER_TENSOR}' が無い`,
+      `The asset has no tensor '${SPEAKER_TENSOR}'`,
     );
   });
 
@@ -102,7 +102,7 @@ describe("スタイル表の解釈: 行数・列数は現物の safetensors が�
         data: new Uint8Array(4 * COLS * 2),
       },
     ]);
-    assertThrows(() => parseSbv2Table(buffer, STYLE_TENSOR), Error, "F32 でない");
+    assertThrows(() => parseSbv2Table(buffer, STYLE_TENSOR), Error, "is not F32");
   });
 
   it("2 次元でない表は落ちる（行の切り出し幅が決まらない）", () => {
@@ -114,7 +114,7 @@ describe("スタイル表の解釈: 行数・列数は現物の safetensors が�
         data: f32Bytes(STYLE_TABLE),
       },
     ]);
-    assertThrows(() => parseSbv2Table(buffer, STYLE_TENSOR), Error, "2 次元でない");
+    assertThrows(() => parseSbv2Table(buffer, STYLE_TENSOR), Error, "not the 2-D");
   });
 });
 
@@ -200,18 +200,18 @@ describe("行番号・weight・表の食い違いは fail loudly", () => {
     assertThrows(
       () => styleVector(STYLE_TABLE, rows, COLS, rows, 1),
       Error,
-      `行番号 ${rows} が表の範囲外（0..${rows - 1}）`,
+      `Row index ${rows} is outside the table (0..${rows - 1})`,
     );
-    assertThrows(() => styleVector(STYLE_TABLE, rows, COLS, -1, 1), Error, "表の範囲外");
+    assertThrows(() => styleVector(STYLE_TABLE, rows, COLS, -1, 1), Error, "outside the table");
     assertThrows(
       () => speakerEmbedding(SPEAKER_TABLE, SPEAKER_ROWS.length, 4, 2),
       Error,
-      "表の範囲外",
+      "outside the table",
     );
   });
 
   it("非整数の行番号は落ちる（切り出し位置が行の途中になる）", () => {
-    assertThrows(() => styleVector(STYLE_TABLE, rows, COLS, 1.5, 1), Error, "表の範囲外");
+    assertThrows(() => styleVector(STYLE_TABLE, rows, COLS, 1.5, 1), Error, "outside the table");
   });
 
   it("要素数が 行×列 と違う表は落ちる", () => {
@@ -219,7 +219,7 @@ describe("行番号・weight・表の食い違いは fail loudly", () => {
     assertThrows(
       () => styleVector(STYLE_TABLE, rows + 1, COLS, 4, 1),
       Error,
-      `表の要素数 ${STYLE_TABLE.length} が ${rows + 1}×${COLS} と違う`,
+      `Table element count ${STYLE_TABLE.length} differs from ${rows + 1}×${COLS}`,
     );
   });
 
@@ -230,7 +230,7 @@ describe("行番号・weight・表の食い違いは fail loudly", () => {
       assertThrows(
         () => styleVector(STYLE_TABLE, rows, COLS, 1, weight),
         Sbv2InputError,
-        "有限の数でない",
+        "not a finite number",
       );
     }
   });
@@ -243,7 +243,7 @@ describe("styleWeight の受理集合", () => {
     const viaGate = assertThrows(
       () => assertFiniteStyleWeight(Number.NaN),
       Sbv2InputError,
-      "styleWeight NaN が有限の数でない",
+      "styleWeight NaN is not a finite number",
     );
     const viaTable = assertThrows(
       () => styleVector(STYLE_TABLE, rows, COLS, 1, Number.NaN),

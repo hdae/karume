@@ -42,7 +42,8 @@ export type SampleBounds = FrameBounds & {
  * that such exact half-integers are not missed.
  */
 export const bankerRound = (value: number): number => {
-  if (!Number.isFinite(value)) throw new RangeError(`丸め対象 ${value} が有限の数でない`);
+  if (!Number.isFinite(value))
+    throw new RangeError(`Value to round ${value} is not a finite number`);
   const lower = Math.floor(value);
   const fraction = value - lower;
   if (fraction > 0.5) return lower + 1;
@@ -83,7 +84,7 @@ export const sequenceLengthFromLogFrames = (
 ): SequencePlan => {
   const frames = f32(Math.expm1(f32(logFrames)));
   if (!Number.isFinite(frames)) {
-    throw new Error(`duration の出力 ${logFrames} から得たフレーム数が有限でない`);
+    throw new Error(`The frame count derived from the duration output ${logFrames} is not finite`);
   }
   const { min, max } = clampRange(bounds);
   const bounded = Math.max(min, Math.min(max, bankerRound(frames)));
@@ -112,7 +113,7 @@ export const sequenceLengthFromSeconds = (seconds: number, bounds: SampleBounds)
   // `maxSequenceLength`, but it comes after `config.ts` confirmed finiteness at parse time, so it
   // never reaches here.
   if (!Number.isFinite(seconds)) {
-    throw new ModelInputError(`durationSeconds ${seconds} が有限の数でない`);
+    throw new ModelInputError(`durationSeconds ${seconds} is not a finite number`);
   }
   // Upstream does not clamp again on the frame side (the seconds were clamped first, so the range
   // fits automatically).

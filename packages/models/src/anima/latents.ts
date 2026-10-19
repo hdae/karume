@@ -79,16 +79,18 @@ export const denormalizeLatents = (
   std: Float32Array<ArrayBufferLike>,
 ): Float32Array<ArrayBuffer> => {
   if (shape[0] !== 1) {
-    throw new Error(`逆正規化は batch=1 前提（B=${shape[0]} はチャネル区間が崩れる）`);
+    throw new Error(`Denormalization assumes batch=1 (B=${shape[0]} breaks the channel ranges)`);
   }
   if (shape[1] !== mean.length || shape[1] !== std.length) {
     throw new Error(
-      `逆正規化: latent のチャネル数 ${shape[1]} が mean ${mean.length} / std ${std.length} と違う`,
+      `Denormalization: latent channel count ${shape[1]} does not match mean ${mean.length} / std ${std.length}`,
     );
   }
   const elements = shape.reduce((a, b) => a * b, 1);
   if (latents.length !== elements) {
-    throw new Error(`逆正規化: 要素数 ${latents.length} が shape [${shape}] と違う`);
+    throw new Error(
+      `Denormalization: element count ${latents.length} does not match shape [${shape}]`,
+    );
   }
   const perChannel = latents.length / mean.length;
   const out = new Float32Array(latents.length);
@@ -115,13 +117,15 @@ export const denormalizeLatents = (
  */
 export const padSequence = (hidden: Tensor, rows: number): Float32Array<ArrayBuffer> => {
   if (hidden.dtype !== "f32") {
-    throw new Error(`512 パディングは f32 前提（dtype ${hidden.dtype} は黙って数値変換される）`);
+    throw new Error(`512 padding assumes f32 (dtype ${hidden.dtype} would be converted silently)`);
   }
   if (hidden.shape[0] !== 1) {
-    throw new Error(`512 パディングは batch=1 前提（B=${hidden.shape[0]} は余白へ流れ込む）`);
+    throw new Error(
+      `512 padding assumes batch=1 (B=${hidden.shape[0]} would flow into the padding)`,
+    );
   }
   if (hidden.shape[1] > rows) {
-    throw new Error(`512 パディング: 行数 ${hidden.shape[1]} が上限 ${rows} を超えている`);
+    throw new Error(`512 padding: row count ${hidden.shape[1]} exceeds the upper bound ${rows}`);
   }
   const width = hidden.shape[2];
   const padded = new Float32Array(rows * width);

@@ -34,10 +34,10 @@ import { Sbv2InputError } from "../errors.ts";
  */
 export const distributePhone = (phoneCount: number, wordLength: number): number[] => {
   if (!Number.isInteger(wordLength) || wordLength <= 0) {
-    throw new Error(`分配先の文字数 ${wordLength} が 1 以上の整数でない`);
+    throw new Error(`Target character count ${wordLength} is not an integer >= 1`);
   }
   if (!Number.isInteger(phoneCount) || phoneCount < 0) {
-    throw new Error(`分配する音素数 ${phoneCount} が 0 以上の整数でない`);
+    throw new Error(`Phoneme count to distribute ${phoneCount} is not a non-negative integer`);
   }
   const quotient = Math.floor(phoneCount / wordLength);
   const remainder = phoneCount % wordLength;
@@ -77,7 +77,7 @@ export const buildBaseWord2ph = (
       // Reachable only through the surface the caller passed (a whitespace-only word and the like),
       // so it is input-caused = 400.
       throw new Sbv2InputError(
-        `語 surface が 0 トークンに正規化された: ${JSON.stringify(word.surface)}`,
+        `Word surface normalised to 0 tokens: ${JSON.stringify(word.surface)}`,
       );
     }
     tokenTotal += wordLength;
@@ -88,12 +88,12 @@ export const buildBaseWord2ph = (
   const expectedLength = tokenTotal + 2;
   if (word2ph.length !== expectedLength) {
     throw new Error(
-      `word2ph 長 ${word2ph.length} が Σtokenize(surface)+2 (${expectedLength}) と違う`,
+      `word2ph length ${word2ph.length} differs from Σtokenize(surface)+2 (${expectedLength})`,
     );
   }
   const total = word2ph.reduce((sum, count) => sum + count, 0);
   if (total !== givenPhoneLength) {
-    throw new Error(`sum(word2ph) ${total} が given_phone 長 ${givenPhoneLength} と違う`);
+    throw new Error(`sum(word2ph) ${total} differs from given_phone length ${givenPhoneLength}`);
   }
   return word2ph;
 };

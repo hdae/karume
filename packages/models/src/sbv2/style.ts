@@ -50,12 +50,12 @@ export const parseSbv2Table = (buffer: ArrayBuffer, name: string): Sbv2Table => 
   const view = file.tensors.get(name);
   if (view === undefined) {
     throw new Error(
-      `資産にテンソル '${name}' が無い（入っているもの: ${[...file.tensors.keys()].join(" / ")}）`,
+      `The asset has no tensor '${name}' (it contains: ${[...file.tensors.keys()].join(" / ")})`,
     );
   }
-  if (view.dtype !== "F32") throw new Error(`テンソル '${name}' が F32 でない（${view.dtype}）`);
+  if (view.dtype !== "F32") throw new Error(`Tensor '${name}' is not F32 (${view.dtype})`);
   if (view.shape.length !== 2) {
-    throw new Error(`テンソル '${name}' の形 [${view.shape}] が [行, 列] の 2 次元でない`);
+    throw new Error(`Tensor '${name}' has shape [${view.shape}], not the 2-D [rows, cols]`);
   }
   const [rows, cols] = view.shape;
   return {
@@ -72,10 +72,10 @@ const assertRow = (
   data: Float32Array<ArrayBuffer>,
 ): void => {
   if (data.length !== rows * cols) {
-    throw new Error(`表の要素数 ${data.length} が ${rows}×${cols} と違う`);
+    throw new Error(`Table element count ${data.length} differs from ${rows}×${cols}`);
   }
   if (!Number.isInteger(index) || index < 0 || index >= rows) {
-    throw new Error(`行番号 ${index} が表の範囲外（0..${rows - 1}）`);
+    throw new Error(`Row index ${index} is outside the table (0..${rows - 1})`);
   }
 };
 
@@ -91,7 +91,8 @@ const assertRow = (
  * bound to split).
  */
 export const assertFiniteStyleWeight = (weight: number): void => {
-  if (!Number.isFinite(weight)) throw new Sbv2InputError(`styleWeight ${weight} が有限の数でない`);
+  if (!Number.isFinite(weight))
+    throw new Sbv2InputError(`styleWeight ${weight} is not a finite number`);
 };
 
 /**

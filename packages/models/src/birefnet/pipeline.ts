@@ -241,7 +241,7 @@ export const assertMatteShape = (
   const name = model.graph.outputs[0];
   const value = model.graph.values[name];
   if (value === undefined) {
-    throw new Error(`birefnet: グラフ出力 '${name}' の宣言が無い（${where}）`);
+    throw new Error(`birefnet: graph output '${name}' has no declaration (${where})`);
   }
   const expected = [1, MATTE_CHANNELS, config.imageHeight, config.imageWidth];
   if (
@@ -249,14 +249,14 @@ export const assertMatteShape = (
     value.shape.some((dim, axis) => dim !== expected[axis])
   ) {
     throw new Error(
-      `birefnet: ${where} — グラフ出力 '${name}' の形が ` +
-        `[${value.shape.map(String).join(", ")}]、期待は [${expected.join(", ")}]`,
+      `birefnet: ${where} — graph output '${name}' has shape ` +
+        `[${value.shape.map(String).join(", ")}], expected [${expected.join(", ")}]`,
     );
   }
 };
 
 const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
-  if (tensor.dtype !== "f32") throw new Error(`${where}: f32 でない（${tensor.dtype}）`);
+  if (tensor.dtype !== "f32") throw new Error(`${where}: not f32 (${tensor.dtype})`);
   return tensor.data;
 };
 
@@ -366,24 +366,24 @@ const admitBirefnet = (
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
-      `BirefnetPipeline: model '${modelName}' は manifest に無い` +
-        `（利用可能: ${manifest.available.models.join(" / ")}）`,
+      `BirefnetPipeline: model '${modelName}' is not in the manifest` +
+        ` (available: ${manifest.available.models.join(" / ")})`,
     );
   }
   const entry: ModelEntry = manifest.models[modelName];
   const { name, major } = entry.pipeline;
   if (name !== BIREFNET_PIPELINE_NAME) {
     throw new Error(
-      `BirefnetPipeline: manifest の pipeline が '${name}/${major}'` +
-        `（'${BIREFNET_PIPELINE_NAME}/${BIREFNET_PIPELINE_MAJOR}' が必要）`,
+      `BirefnetPipeline: the manifest's pipeline is '${name}/${major}'` +
+        ` ('${BIREFNET_PIPELINE_NAME}/${BIREFNET_PIPELINE_MAJOR}' is required)`,
     );
   }
   if (major !== BIREFNET_PIPELINE_MAJOR) {
     // The only check that stops silent degradation from "old implementation × new repository"
     // (ADR 0038 §6).
     throw new Error(
-      `BirefnetPipeline: pipeline '${name}/${major}' の major に未対応` +
-        `（この実装が読めるのは ${BIREFNET_PIPELINE_NAME}/${BIREFNET_PIPELINE_MAJOR}）`,
+      `BirefnetPipeline: the major of pipeline '${name}/${major}' is not supported` +
+        ` (this implementation reads ${BIREFNET_PIPELINE_NAME}/${BIREFNET_PIPELINE_MAJOR})`,
     );
   }
   const config = parseBirefnetPipelineConfig(entry.pipelineConfig);
@@ -391,8 +391,8 @@ const admitBirefnet = (
   const quantName = options.quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quantName)) {
     throw new Error(
-      `BirefnetPipeline: quant '${quantName}' は manifest に無い` +
-        `（利用可能: ${entry.available.quants.join(" / ")}）`,
+      `BirefnetPipeline: quant '${quantName}' is not in the manifest` +
+        ` (available: ${entry.available.quants.join(" / ")})`,
     );
   }
   const quant = entry.quants[quantName];
@@ -413,16 +413,16 @@ const admitBirefnet = (
   // other values as α.
   if (matte.graph.inputs.length !== 1 || matte.graph.outputs.length !== 1) {
     throw new Error(
-      `BirefnetPipeline: matte グラフの入出力が ${matte.graph.inputs.length} /` +
-        ` ${matte.graph.outputs.length} 本（どちらも 1 本のマットが必要）`,
+      `BirefnetPipeline: the matte graph has ${matte.graph.inputs.length} /` +
+        ` ${matte.graph.outputs.length} inputs / outputs (one matte requires exactly 1 of each)`,
     );
   }
-  assertGraphInputDtype("birefnet", matte, PIXEL_VALUES, "f32", "前処理の pixel_values");
-  assertStaticDim(matte, PIXEL_VALUES, 0, 1, "batch は静的 1");
-  assertStaticDim(matte, PIXEL_VALUES, 1, CHANNELS, "RGB の 3 チャネル");
+  assertGraphInputDtype("birefnet", matte, PIXEL_VALUES, "f32", "preprocessing's pixel_values");
+  assertStaticDim(matte, PIXEL_VALUES, 0, 1, "batch is static 1");
+  assertStaticDim(matte, PIXEL_VALUES, 1, CHANNELS, "3 RGB channels");
   assertStaticDim(matte, PIXEL_VALUES, 2, config.imageHeight, "imageHeight");
   assertStaticDim(matte, PIXEL_VALUES, 3, config.imageWidth, "imageWidth");
-  assertMatteShape(matte, config, "マットの形");
+  assertMatteShape(matte, config, "matte shape");
 
   // MUST: a shared GPU's missing capability (feature / device limit) fails here — unlike acquiring
   // our own, there is no reason to wait for `acquireGpu`, and this is the only family check that
@@ -521,13 +521,14 @@ export const matteLogits = async (
   if (state.onRunDiagnostics !== undefined) state.onRunDiagnostics(state.session.diagnostics());
   const name = state.matte.graph.outputs[0];
   const tensor = outputs[name];
-  if (tensor === undefined) throw new Error(`birefnet: グラフ出力 '${name}' が実行結果に無い`);
+  if (tensor === undefined)
+    throw new Error(`birefnet: graph output '${name}' is not in the run result`);
   const logits = asF32(tensor, "matte");
   const expected = config.imageWidth * config.imageHeight;
   if (logits.length !== expected) {
     throw new Error(
-      `birefnet: マットの要素数 ${logits.length} が ` +
-        `${config.imageWidth}×${config.imageHeight} と違う`,
+      `birefnet: matte element count ${logits.length} does not match ` +
+        `${config.imageWidth}×${config.imageHeight}`,
     );
   }
   return logits;
@@ -573,7 +574,7 @@ export const loadBirefnetState = async (
   const source = toManifestSource(
     ref,
     "BirefnetPipeline.fromPretrained",
-    'BIREFNET_SOURCES["birefnet-hr"]（@karume/models/birefnet）',
+    'BIREFNET_SOURCES["birefnet-hr"] (@karume/models/birefnet)',
   );
   const hubOptions = hubLoadOptions(options);
   const loaded = await loadManifest(source, hubOptions);
@@ -699,7 +700,7 @@ export class BirefnetPipeline {
     // The disposed check happens at call time (checking inside the chain would also fail the
     // segmentations accepted before dispose).
     if (this.#disposal !== undefined) {
-      throw new Error("BirefnetPipeline: dispose 済みでは切り抜けない");
+      throw new Error("BirefnetPipeline: cannot segment after dispose");
     }
     return await this.#chain(() => segmentImage(this.#state, image));
   }

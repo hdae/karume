@@ -127,9 +127,9 @@ const splitOnSpace = (text: string, space: CodeRanges): string[] => {
  * person find what to fix).
  */
 const describeText = (text: string): string =>
-  `${JSON.stringify(text)}（${toCodePoints(text)
+  `${JSON.stringify(text)} (${toCodePoints(text)
     .map((cp) => `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`)
-    .join(" ")}）`;
+    .join(" ")})`;
 
 export class T5UnigramTokenizer {
   readonly #tables: T5Tables;
@@ -154,8 +154,8 @@ export class T5UnigramTokenizer {
     for (const segment of unigramSegments(model, cps)) {
       if (segment.entry === undefined) {
         throw new ModelInputError(
-          `${label}: 語彙に無い文字列 ${describeText(segment.text)} を含む — 未知トークンへ` +
-            "黙って潰さない。その文字を除くか言い換える",
+          `${label}: contains text ${describeText(segment.text)} that is not in the vocabulary — it is not ` +
+            "silently collapsed into the unknown token. Remove the characters or rephrase",
         );
       }
       ids.push(segment.entry.id);
@@ -174,14 +174,14 @@ export class T5UnigramTokenizer {
    * `label` appears in rejection messages (a form that tells whether it was the positive or the
    * negative prompt).
    */
-  encode(text: string, label: string = "入力"): number[] {
+  encode(text: string, label: string = "input"): number[] {
     const budget = this.#tables.maxLength - 1;
     const reject = this.#policy.overflow === "reject";
     const ids: number[] = [];
     const overflow = (): ModelInputError =>
       new ModelInputError(
-        `${label}: トークン数が上限 ${this.#tables.maxLength}（末尾の </s> を含む）を超える — ` +
-          "黙って切り詰めない。プロンプトを短くする",
+        `${label}: the token count exceeds the upper bound ${this.#tables.maxLength} (including the trailing </s>) — ` +
+          "it is not silently truncated. Shorten the prompt",
       );
     /**
      * Called before pushing the next id (added vocabulary and pieces always emit at least one id).
@@ -231,7 +231,9 @@ export const parseT5Tables = (raw: unknown, label: string): T5Tables => {
   const tokens = asString(obj["vocabText"], `${label}.vocabText`).split("\n");
   const rawScores = obj["scores"];
   if (!Array.isArray(rawScores) || rawScores.length !== tokens.length) {
-    throw new Error(`${label}: scores の長さが語彙数 ${tokens.length} と合わない`);
+    throw new Error(
+      `${label}: the length of scores does not match the vocabulary size ${tokens.length}`,
+    );
   }
   assertUniqueLines(tokens, `${label}.vocabText`);
   const vocab = new Map<string, T5VocabEntry>();

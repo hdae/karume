@@ -45,10 +45,12 @@ const MAX_PERIOD = 10000;
  */
 export const timestepsProj = (timestep: number, width: number): Float32Array<ArrayBuffer> => {
   if (!Number.isInteger(width) || width <= 0 || width % 2 !== 0) {
-    throw new RangeError(`timesteps_proj の幅 ${width} が正の偶数でない`);
+    throw new RangeError(`timesteps_proj width ${width} is not a positive even number`);
   }
   if (!Number.isInteger(timestep) || timestep < 0) {
-    throw new RangeError(`timestep ${timestep} が 0 以上の整数でない（上流は int64 の timestep）`);
+    throw new RangeError(
+      `timestep ${timestep} is not a non-negative integer (upstream's timestep is int64)`,
+    );
   }
   const half = width / 2;
   const time = f32(timestep);

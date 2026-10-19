@@ -21,7 +21,7 @@ const f32 = Math.fround;
  */
 export const tSchedule = (steps: number, initScale: number): Float32Array<ArrayBuffer> => {
   if (!Number.isInteger(steps) || steps < 1) {
-    throw new RangeError(`steps ${steps} が 1 以上の整数でない`);
+    throw new RangeError(`steps ${steps} is not an integer >= 1`);
   }
   const schedule = new Float32Array(steps + 1);
   for (let index = 0; index <= steps; index += 1) {
@@ -59,7 +59,9 @@ export const combineCfg = (
   const out = new Float32Array(cond.length);
   for (const variant of variants) {
     if (variant.velocity.length !== cond.length) {
-      throw new Error(`CFG 変種の長さ ${variant.velocity.length} が cond ${cond.length} と違う`);
+      throw new Error(
+        `CFG variant length ${variant.velocity.length} differs from cond ${cond.length}`,
+      );
     }
   }
   for (let index = 0; index < cond.length; index += 1) {
@@ -80,7 +82,7 @@ export const eulerStep = (
   deltaT: number,
 ): Float32Array<ArrayBuffer> => {
   if (velocity.length !== x.length) {
-    throw new Error(`速度場の長さ ${velocity.length} が x ${x.length} と違う`);
+    throw new Error(`Velocity field length ${velocity.length} differs from x ${x.length}`);
   }
   const out = new Float32Array(x.length);
   for (let index = 0; index < x.length; index += 1) {

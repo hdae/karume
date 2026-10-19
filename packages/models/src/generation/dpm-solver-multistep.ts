@@ -132,27 +132,33 @@ export const dpmSolverMultistepStep = (
   const { sample, cond, uncond, guidance, sigmas, index, previousX0 } = input;
   const steps = sigmas.length - 1;
   if (steps < 1) {
-    throw new RangeError(`sigma 梯子の長さ ${sigmas.length} が 2 未満（step が 1 つも無い）`);
+    throw new RangeError(
+      `Sigma ladder length ${sigmas.length} is less than 2 (there is not a single step)`,
+    );
   }
   if (sigmas[steps] !== 0) {
     throw new RangeError(
-      `sigma 梯子の終端 ${sigmas[steps]} が 0 でない（最終 step の 1 次落ちが成り立たない）`,
+      `The end of the sigma ladder ${sigmas[steps]} is not 0 (the first-order drop of the final step does not hold)`,
     );
   }
   if (!Number.isInteger(index) || index < 0 || index >= steps) {
-    throw new RangeError(`step の添字 ${index} が [0, ${steps}) の整数でない`);
+    throw new RangeError(`Step index ${index} is not an integer in [0, ${steps})`);
   }
   const wants = needsUncond(guidance);
   if (wants && uncond === undefined) {
-    throw new Error(`CFG scale ${guidance} は uncond 側のモデル出力を要求する`);
+    throw new Error(`CFG scale ${guidance} needs the model output of the uncond side`);
   }
   if (!wants && uncond !== undefined) {
-    throw new Error("CFG scale 1 で uncond が渡された（uncond 分岐を計算しない経路のはず）");
+    throw new Error(
+      "uncond was passed with CFG scale 1 (this path is supposed to skip computing the uncond branch)",
+    );
   }
   // If the state hand-off is broken, do not silently drop to first order (first and second order
   // give different pictures).
   if ((index === 0) !== (previousX0 === undefined)) {
-    throw new Error(`step ${index} と直前 x0 の有無が食い違う（step 0 でのみ undefined を渡す）`);
+    throw new Error(
+      `Step ${index} and the presence of the previous x0 disagree (pass undefined only at step 0)`,
+    );
   }
 
   const sigmaS0 = sigmas[index];

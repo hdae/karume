@@ -27,11 +27,11 @@ export const imageToRgba = (
   height: number,
 ): Uint8ClampedArray<ArrayBuffer> => {
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
-    throw new RangeError(`画像サイズ ${width}×${height} が正の整数でない`);
+    throw new RangeError(`Image size ${width}×${height} is not a positive integer`);
   }
   const plane = width * height;
   if (image.length !== plane * 3) {
-    throw new Error(`画像の要素数 ${image.length} が 3×${width}×${height} と違う`);
+    throw new Error(`Image element count ${image.length} does not match 3×${width}×${height}`);
   }
   const rgba = new Uint8ClampedArray(plane * 4);
   for (let index = 0; index < plane; index += 1) {
@@ -43,7 +43,7 @@ export const imageToRgba = (
       if (!Number.isFinite(raw)) {
         const x = index % width;
         const y = Math.floor(index / width);
-        throw new Error(`画素 (x=${x}, y=${y}) の channel ${channel} が非有限値`);
+        throw new Error(`Pixel (x=${x}, y=${y}): channel ${channel} is non-finite`);
       }
       const value = Math.min(1, Math.max(0, raw / 2 + 0.5));
       rgba[index * 4 + channel] = Math.round(value * 255);

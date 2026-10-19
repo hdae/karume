@@ -80,14 +80,17 @@ test("assetComponentOpener: 添字の欠番は part を名乗って落ちる", a
     () => openerOf({ "dit[0]": part(0), "dit[2]": part(2) }),
     Error,
   );
-  assertStringIncludes(error.message, "part 添字が [0] から連続していない");
+  assertStringIncludes(
+    error.message,
+    "part indexes of component 'dit' are not contiguous from [0]",
+  );
   // 揃っているキーを列挙する（読み手が現物と突き合わせられる形 — 既存の資産診断の流儀）。
   assertStringIncludes(error.message, "dit[0] / dit[2]");
 });
 
 test("assetComponentOpener: 単一形キーと分割形キーの混在は落ちる", async () => {
   const error = await assertRejects(() => openerOf({ dit: single(), ...parts("dit") }), Error);
-  assertStringIncludes(error.message, "単一形のキーと分割形のキー");
+  assertStringIncludes(error.message, "both the single-form key and split-form keys");
   assertStringIncludes(error.message, "dit / dit[0]");
 });
 
@@ -96,7 +99,7 @@ test("assetComponentOpener: 単一形キーと [0] 以外の分割形キーの�
   // 1 本」として組んでしまう（`dit[1]` を黙って無視する = 分割配布のつもりで組んだ Record が
   // 遠くの層から「part が足りない」で落ちる）。
   const error = await assertRejects(() => openerOf({ dit: single(), "dit[1]": part(1) }), Error);
-  assertStringIncludes(error.message, "単一形のキーと分割形のキー");
+  assertStringIncludes(error.message, "both the single-form key and split-form keys");
   assertStringIncludes(error.message, "dit / dit[1]");
 });
 
@@ -105,7 +108,7 @@ test("assetComponentOpener: 添字が [0] から始まらない列は始点を�
     () => openerOf({ "dit[1]": part(1), "dit[2]": part(2) }),
     Error,
   );
-  assertStringIncludes(error.message, "part 添字が [0] から始まっていない");
+  assertStringIncludes(error.message, "part indexes of component 'dit' do not start at [0]");
   assertStringIncludes(error.message, "dit[1] / dit[2]");
 });
 
@@ -121,8 +124,8 @@ test("assetComponentOpener: 単一形の 1 本も同じ供給口から開ける"
 
 test("assetComponentOpener: キーがどちらの形でも無ければ 2 形の綴りを添えて落ちる", async () => {
   const error = await assertRejects(() => openerOf(parts("dit"), ["dit", "vae"]), Error);
-  assertStringIncludes(error.message, "部品 'vae' の容器が無い");
-  assertStringIncludes(error.message, "分割形なら 'vae[0]' から添字順");
+  assertStringIncludes(error.message, "component 'vae' has no container");
+  assertStringIncludes(error.message, "split form: 'vae[0]' onwards in index order");
 });
 
 test("assetComponentOpener: 重みの part が欠けた列は part 数と宣言の食い違いを名乗って落ちる", async () => {

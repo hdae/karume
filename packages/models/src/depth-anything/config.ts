@@ -136,27 +136,33 @@ export const parseDepthAnythingPipelineConfig = (
 ): DepthAnythingPipelineConfig => {
   const where = "pipelineConfig";
   assertAllowedKeys(raw, ROOT_KEYS, where);
-  const positive = "正の整数でない";
+  const positive = "not a positive integer";
   const config: DepthAnythingPipelineConfig = {
     imageWidth: readNumber(raw, "imageWidth", where, isPositiveInteger, positive),
     imageHeight: readNumber(raw, "imageHeight", where, isPositiveInteger, positive),
     // The mean may be negative (a translation in `(x − mean·255) / (std·255)`), but a non-finite
     // one turns every pixel into NaN.
-    imageMean: readChannels(raw, "imageMean", where, Number.isFinite, "有限の数でない要素がある"),
+    imageMean: readChannels(
+      raw,
+      "imageMean",
+      where,
+      Number.isFinite,
+      "has an element that is not a finite number",
+    ),
     imageStd: readChannels(
       raw,
       "imageStd",
       where,
       (value) => Number.isFinite(value) && value > 0,
-      "正の有限数でない要素がある",
+      "has an element that is not a positive finite number",
     ),
     interpolation: readOnly(
       raw,
       "interpolation",
       where,
       INTERPOLATION,
-      "上流 preprocessor_config.json の resample は 3（PIL の BICUBIC）で、" +
-        "bilinear で通すと pixel_values が uint8 1 LSB の 34 倍ずれる",
+      "upstream preprocessor_config.json has resample 3 (PIL's BICUBIC), " +
+        "and running bilinear shifts pixel_values by 34 times one uint8 LSB",
     ),
   };
   // A distribution whose fields are each finite but whose pair overflows f32 after normalization is

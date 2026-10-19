@@ -481,9 +481,9 @@ describe("Wan の text_encoder の差し替え（疑似 HF — 越境参照の�
           components: { text_encoder: { source: http.replacementSource, quant: "i4" } },
         }),
       Error,
-      "text_encoder の initializer 'embed' の格納 int4-sym-g は受けない",
+      "text_encoder initializer 'embed' has storage int4-sym-g, which is not accepted",
     );
-    assertStringIncludes(error.message, "ADR 0119 決定 5");
+    assertStringIncludes(error.message, "ADR 0119 decision 5");
 
     // descriptor（part 0）は admission のために取ったが、重みの part は 1 本も取っていない。
     const [descriptor, ...weightParts] = rig.parts.replacementI4;
@@ -510,7 +510,7 @@ describe("Wan の text_encoder の差し替え（疑似 HF — 越境参照の�
     const error = await assertRejects(
       () => http.load({ components: { text_encoder: { source: http.replacementSource } } }),
       Error,
-      "グラフ記述が manifest の宣言と違う",
+      "the graph descriptor does not match the manifest's declaration",
     );
     assertStringIncludes(error.message, "components['text_encoder']");
     // 宣言だけで判る — どのリポの `.krm` も取っていない（差し替え先は manifest だけ）。

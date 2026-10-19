@@ -146,7 +146,7 @@ const naming = <T>(where: () => string, build: () => T): T => {
     return build();
   } catch (cause) {
     if (cause instanceof DispatchLimitError) {
-      throw new KernelsIdError(`${where()}: ${cause.message}（${LIMIT_NOTE}）`, { cause });
+      throw new KernelsIdError(`${where()}: ${cause.message} (${LIMIT_NOTE})`, { cause });
     }
     if (cause instanceof CodegenError) {
       throw new KernelsIdError(`${where()}: ${cause.message}`, { cause });

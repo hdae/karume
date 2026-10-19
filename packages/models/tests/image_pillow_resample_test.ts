@@ -17,19 +17,19 @@ describe("resizeU8PlaneBicubic の事前条件", () => {
     assertThrows(
       () => resizeU8PlaneBicubic(new Uint8Array(5), 3, 2, 4, 4),
       RangeError,
-      "BICUBIC の入力 3×2×1 と長さ 5 が合わない",
+      "BICUBIC: input 3×2×1 and length 5 do not match",
     );
     assertThrows(
       () => resizeU8PlaneBicubic(new Uint8Array(7), 3, 2, 4, 4),
       RangeError,
-      "と長さ 7 が合わない",
+      "and length 7 do not match",
     );
   });
 
   it("入力の寸法が正の整数でなければ RangeError（長さが積と合っていても）", () => {
     // 0 × n は長さ 0 と積が合うので、長さの検査だけでは通ってしまう。
-    assertThrows(() => resizeU8PlaneBicubic(new Uint8Array(0), 0, 3, 2, 2), RangeError, "入力");
-    assertThrows(() => resizeU8PlaneBicubic(new Uint8Array(3), 1.5, 2, 2, 2), RangeError, "入力");
+    assertThrows(() => resizeU8PlaneBicubic(new Uint8Array(0), 0, 3, 2, 2), RangeError, "input");
+    assertThrows(() => resizeU8PlaneBicubic(new Uint8Array(3), 1.5, 2, 2, 2), RangeError, "input");
   });
 
   it("出力の寸法が正の整数でなければ RangeError", () => {
@@ -41,7 +41,7 @@ describe("resizeU8PlaneBicubic の事前条件", () => {
       assertThrows(
         () => resizeU8PlaneBicubic(new Uint8Array(6), 3, 2, width, height),
         RangeError,
-        `BICUBIC の出力寸法 ${width}×${height} が正の整数でない`,
+        `BICUBIC: output size ${width}×${height} is not a positive integer`,
       );
     }
   });
@@ -66,7 +66,7 @@ describe("resampleU8Window の事前条件", () => {
       assertThrows(
         () => resampleU8Window(image, 7, 5, window, PILLOW_LANCZOS),
         RangeError,
-        "LANCZOS の窓",
+        "LANCZOS: window",
       );
     }
   });
@@ -82,7 +82,7 @@ describe("resampleU8Window の事前条件", () => {
           PILLOW_BICUBIC,
         ),
       RangeError,
-      "BICUBIC の入力 4×3×1 と長さ 36 が合わない",
+      "BICUBIC: input 4×3×1 and length 36 do not match",
     );
   });
 });

@@ -179,7 +179,7 @@ export class WanTi2vPipeline {
    */
   async generate(request: WanTi2vGenerateRequest): Promise<GeneratedVideo> {
     if (this.#disposal !== undefined) {
-      throw new Error("WanTi2vPipeline: dispose 済みでは生成できない");
+      throw new Error("WanTi2vPipeline: cannot generate after dispose");
     }
     return await this.#chain(() => generateWanVideo(WAN22_TI2V_FAMILY, this.#state, request));
   }

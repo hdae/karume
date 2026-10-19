@@ -105,16 +105,20 @@ type TileGeometry = {
  */
 export const planTileAxis = (extent: number, tile: number, minOverlap: number): TileAxis => {
   if (!Number.isInteger(extent) || !Number.isInteger(tile) || !Number.isInteger(minOverlap)) {
-    throw new Error(`タイル配置は整数で組む（extent=${extent} tile=${tile} 重なり=${minOverlap}）`);
+    throw new Error(
+      `The tile layout is built from integers (extent=${extent} tile=${tile} overlap=${minOverlap})`,
+    );
   }
-  if (tile < 1) throw new Error(`タイル幅 ${tile} が 1 未満`);
+  if (tile < 1) throw new Error(`Tile width ${tile} is below 1`);
   if (extent < tile) {
     throw new Error(
-      `latent 全長 ${extent} がタイル幅 ${tile} より小さい（固定形の decoder に食わせられない）`,
+      `Latent length ${extent} is smaller than the tile width ${tile} (cannot be fed to the fixed-shape decoder)`,
     );
   }
   if (minOverlap < 0 || minOverlap >= tile) {
-    throw new Error(`最小の重なり ${minOverlap} が [0, ${tile}) の外（重なりはタイル幅未満）`);
+    throw new Error(
+      `Minimum overlap ${minOverlap} is outside [0, ${tile}) (the overlap must be less than the tile width)`,
+    );
   }
   const span = extent - tile;
   if (span === 0) {
@@ -134,8 +138,8 @@ export const planTileAxis = (extent: number, tile: number, minOverlap: number): 
     const overlap = tile - (starts[index] - starts[index - 1]);
     if (overlap < minOverlap) {
       throw new Error(
-        `タイル ${index - 1}/${index} の重なり ${overlap} が下限 ${minOverlap} 未満` +
-          `（latent ${extent} / タイル ${tile} / 開始位置 ${starts}）`,
+        `Tiles ${index - 1}/${index}: overlap ${overlap} is below the lower bound ${minOverlap}` +
+          ` (latent ${extent} / tile ${tile} / start positions ${starts})`,
       );
     }
   }
@@ -149,9 +153,9 @@ export const planTileAxis = (extent: number, tile: number, minOverlap: number): 
 export const blendExtentAt = (axis: TileAxis, scale: number, index: number): number => {
   if (!Number.isInteger(index) || index < 1 || index >= axis.starts.length) {
     throw new RangeError(
-      `ブレンド対 ${index} が範囲外（開始位置 ${axis.starts.length} 本 = 対 ${
+      `Blend pair ${index} is out of range (${axis.starts.length} start positions = ${
         axis.starts.length - 1
-      } 組）`,
+      } pairs)`,
     );
   }
   return (axis.tile - (axis.starts[index] - axis.starts[index - 1])) * scale;
@@ -172,25 +176,23 @@ export const planVaeTiling = (
 ): TileGeometry => {
   if (latentShape.length !== 4 || tileShape.length !== 4 || sampleShape.length !== 4) {
     throw new Error(
-      `タイル化は rank4 前提（latent [${latentShape}] / タイル入力 [${tileShape}] / タイル出力 [${sampleShape}]）`,
+      `Tiling assumes rank 4 (latent [${latentShape}] / tile input [${tileShape}] / tile output [${sampleShape}])`,
     );
   }
   if (latentShape[0] !== 1 || tileShape[0] !== 1) {
-    throw new Error(
-      `タイル化は batch=1 前提（latent B=${latentShape[0]} / タイル B=${tileShape[0]}）`,
-    );
+    throw new Error(`Tiling assumes batch=1 (latent B=${latentShape[0]} / tile B=${tileShape[0]})`);
   }
   if (latentShape[1] !== tileShape[1]) {
     throw new Error(
-      `latent のチャネル数 ${latentShape[1]} がタイル decoder の入力 ${tileShape[1]} と違う`,
+      `Latent channel count ${latentShape[1]} does not match the tile decoder's input ${tileShape[1]}`,
     );
   }
   const scale = sampleShape[2] / tileShape[2];
   if (!Number.isInteger(scale) || scale < 1 || sampleShape[3] !== tileShape[3] * scale) {
     throw new Error(
-      `タイル decoder の縮尺が軸で揃わない（入力 ${tileShape[2]}×${tileShape[3]} → 出力 ${
+      `The tile decoder's scale differs between axes (input ${tileShape[2]}×${tileShape[3]} → output ${
         sampleShape[2]
-      }×${sampleShape[3]}）`,
+      }×${sampleShape[3]})`,
     );
   }
   return {
@@ -226,13 +228,13 @@ export const latentTile = (
     col >= cols.starts.length
   ) {
     throw new RangeError(
-      `タイル (${row}, ${col}) が範囲外（${rows.starts.length}×${cols.starts.length}）`,
+      `Tile (${row}, ${col}) is out of range (${rows.starts.length}×${cols.starts.length})`,
     );
   }
   const sourcePlane = rows.extent * cols.extent;
   if (latents.length !== channels * sourcePlane) {
     throw new Error(
-      `latent の要素数 ${latents.length} が [1,${channels},${rows.extent},${cols.extent}] と違う`,
+      `Latent element count ${latents.length} does not match [1,${channels},${rows.extent},${cols.extent}]`,
     );
   }
   const top = rows.starts[row];
@@ -327,7 +329,7 @@ const assembleOwnedTiles = (
   const rowCount = rows.starts.length;
   const colCount = cols.starts.length;
   if (working.length !== rowCount * colCount) {
-    throw new Error(`タイル ${working.length} 枚が幾何の ${rowCount}×${colCount} と違う`);
+    throw new Error(`${working.length} tiles do not match the geometry's ${rowCount}×${colCount}`);
   }
   const tileHeight = rows.tile * scale;
   const tileWidth = cols.tile * scale;
@@ -335,13 +337,13 @@ const assembleOwnedTiles = (
   const channels = working[0].length / tilePlane;
   if (!Number.isInteger(channels) || channels < 1) {
     throw new Error(
-      `decode 出力の要素数 ${working[0].length} が ${tileHeight}×${tileWidth} の平面で割り切れない`,
+      `Decode output element count ${working[0].length} is not divisible by the ${tileHeight}×${tileWidth} plane`,
     );
   }
   for (const [index, tile] of working.entries()) {
     if (tile.length !== channels * tilePlane) {
       throw new Error(
-        `タイル ${index} の要素数 ${tile.length} が 1 枚目の ${channels * tilePlane} と違う`,
+        `Tile ${index}: element count ${tile.length} does not match the first tile's ${channels * tilePlane}`,
       );
     }
   }

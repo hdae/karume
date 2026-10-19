@@ -250,7 +250,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
             { maxNewTokens: 4 },
           ),
         Error,
-        "射程外の欄",
+        "out-of-scope fields",
       );
       assertThrows(
         () =>
@@ -385,7 +385,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       await assertRejects(
         () => stream.text(),
         Error,
-        `capacity ${CHUNK_LENGTH - 1} が chunkLength ${CHUNK_LENGTH} を下回る`,
+        `capacity ${CHUNK_LENGTH - 1} is below chunkLength ${CHUNK_LENGTH}`,
       );
     });
 
@@ -419,24 +419,24 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       assertThrows(
         () => pipeline.estimateSessionMemory({ capacity: CHUNK_LENGTH - 1 }),
         Error,
-        `capacity ${CHUNK_LENGTH - 1} が chunkLength ${CHUNK_LENGTH} を下回る`,
+        `capacity ${CHUNK_LENGTH - 1} is below chunkLength ${CHUNK_LENGTH}`,
       );
       assertThrows(
         () => pipeline.estimateSessionMemory({ capacity: MAX_POSITION + 1 }),
         Error,
-        `capacity ${MAX_POSITION + 1} が maxPosition ${MAX_POSITION} を超えた`,
+        `capacity ${MAX_POSITION + 1} exceeds maxPosition ${MAX_POSITION}`,
       );
       assertThrows(
         () => pipeline.estimateSessionMemory({ chunkLength: MAX_CHUNK_LENGTH + 1 }),
         Error,
-        `chunkLength ${MAX_CHUNK_LENGTH + 1} が配布形の宣言 maxChunkLength`,
+        `chunkLength ${MAX_CHUNK_LENGTH + 1} exceeds the distribution's declared maxChunkLength`,
       );
       // 安全整数でない容量は「1 以上の整数でない」の門が受ける（大小関係の診断とは分ける —
       // `createGenerationSequence` / `Gemma4ChatSession` と同じ 3 本・値域の穴を作らない）。
       assertThrows(
         () => pipeline.estimateSessionMemory({ capacity: 1.5 }),
         Error,
-        "capacity 1.5 が 1 以上の整数でない",
+        "capacity 1.5 is not a positive integer",
       );
     });
 
@@ -459,9 +459,9 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
         assertThrows(
           () => pipeline.chat([{ role: "user", content: "hi" }], { maxNewTokens: 4 }),
           Error,
-          "dispose 済み",
+          "after dispose",
         );
-        await assertRejects(() => pipeline.sequence(), Error, "dispose 済み");
+        await assertRejects(() => pipeline.sequence(), Error, "after dispose");
 
         // 発行済み・未反復の stream も**発行時と同じ pipeline の文言**で閉じる（ランタイムの
         // Session 文言に化けると、呼び手には真因＝自分が dispose したことが読み取れない）。
@@ -474,7 +474,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
             }
           },
           Error,
-          "Gemma4Pipeline: dispose 済みでは生成できない",
+          "Gemma4Pipeline: cannot generate after dispose",
         );
       });
 

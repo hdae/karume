@@ -56,11 +56,13 @@ const ANIMA_MAX_STEPS = 1000;
 export const assertAcceptableSteps = (steps: number): void => {
   if (!Number.isInteger(steps) || steps < 2) {
     throw new ModelInputError(
-      `steps ${steps} が 2 以上の整数でない（sigma の linspace が組めない）`,
+      `steps ${steps} is not an integer of at least 2 (the sigma linspace cannot be built)`,
     );
   }
   if (steps > ANIMA_MAX_STEPS) {
-    throw new ModelInputError(`steps ${steps} が ${ANIMA_MAX_STEPS} 以下でない（steps の上限）`);
+    throw new ModelInputError(
+      `steps ${steps} is not at most ${ANIMA_MAX_STEPS} (the upper bound of steps)`,
+    );
   }
 };
 
@@ -140,15 +142,15 @@ export const sigmaSchedule = (steps: number, shift: number): Float32Array<ArrayB
   // upper branch). NaN compares false, so it fails on the same branch.
   if (!(sigmas[0] <= 1 && 1 - sigmas[0] <= SIGMA_HEAD_TOLERANCE)) {
     throw new RangeError(
-      `sigma 梯子の先頭が ${sigmas[0]}（1 を超えている / 1 から下へ ${SIGMA_HEAD_TOLERANCE} を` +
-        `超えて離れている）— shift ${shift} は梯子の成立域の外`,
+      `The head of the sigma ladder is ${sigmas[0]} (above 1 / more than ${SIGMA_HEAD_TOLERANCE} ` +
+        `below 1) — shift ${shift} is outside the range where the ladder holds`,
     );
   }
   for (let index = 1; index < sigmas.length; index += 1) {
     if (!(sigmas[index] < sigmas[index - 1])) {
       throw new RangeError(
-        `sigma 梯子が狭義単調減少でない（index ${index - 1} → ${index} が` +
-          ` ${sigmas[index - 1]} → ${sigmas[index]}）— shift ${shift} は梯子の成立域の外`,
+        `The sigma ladder is not strictly decreasing (index ${index - 1} → ${index} is` +
+          ` ${sigmas[index - 1]} → ${sigmas[index]}) — shift ${shift} is outside the range where the ladder holds`,
       );
     }
   }
@@ -195,10 +197,10 @@ export const timestepsProj = (
   numTrainTimesteps: number,
 ): Float32Array<ArrayBuffer> => {
   if (!Number.isInteger(width) || width <= 0 || width % 2 !== 0) {
-    throw new RangeError(`timesteps_proj の幅 ${width} が正の偶数でない`);
+    throw new RangeError(`timesteps_proj width ${width} is not a positive even number`);
   }
   if (!Number.isInteger(numTrainTimesteps) || numTrainTimesteps <= 0) {
-    throw new RangeError(`num_train_timesteps ${numTrainTimesteps} が正の整数でない`);
+    throw new RangeError(`num_train_timesteps ${numTrainTimesteps} is not a positive integer`);
   }
   const half = width / 2;
   const timestep = f32(f32(sigma * numTrainTimesteps) / numTrainTimesteps);
@@ -240,10 +242,12 @@ export const cfgEulerStep = (
 ): Float32Array<ArrayBuffer> => {
   const wants = needsUncond(guidance);
   if (wants && uncond === undefined) {
-    throw new Error(`CFG scale ${guidance} は uncond 側の DiT 出力を要求する`);
+    throw new Error(`CFG scale ${guidance} requires the DiT output of the uncond side`);
   }
   if (!wants && uncond !== undefined) {
-    throw new Error("CFG scale 1 で uncond が渡された（uncond 分岐を計算しない経路のはず）");
+    throw new Error(
+      "uncond was passed with CFG scale 1 (this path should not compute the uncond branch)",
+    );
   }
   // Drop the scale to f32 first (torch drops a Python float scalar to f32 before the product with
   // an f32 tensor — multiplying in f64 makes the mix 1 ulp off for a scale f32 cannot represent,

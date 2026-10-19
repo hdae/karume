@@ -638,12 +638,12 @@ describe.skipIf(!RUNNABLE)(
       await assertRejects(
         () => pipeline.generate({ text: CASES[1].text }),
         Error,
-        "dispose 済みでは生成できない",
+        "cannot generate after dispose",
       );
       await assertRejects(
         () => pipeline.generateLatent({ text: CASES[1].text }),
         Error,
-        "dispose 済みでは生成できない",
+        "cannot generate after dispose",
       );
     });
   },

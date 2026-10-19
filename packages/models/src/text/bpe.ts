@@ -84,10 +84,10 @@ export const createBpeModel = (source: BpeSource): BpeModel => {
   let maxId = 0;
   for (const [id, token] of source.vocab) {
     if (!Number.isSafeInteger(id) || id < 0) {
-      throw new Error(`語彙の id が非負の安全整数でない（${id}）`);
+      throw new Error(`Vocabulary id is not a non-negative safe integer (${id})`);
     }
-    setUnique(tokenOf, id, token, "語彙の id");
-    setUnique(idOf, token, id, "語彙の綴り");
+    setUnique(tokenOf, id, token, "vocabulary id");
+    setUnique(idOf, token, id, "vocabulary spelling");
     maxId = Math.max(maxId, id);
   }
   // The pair key is one number, `left * stride + right`. The stride is derived from the vocabulary,
@@ -95,11 +95,13 @@ export const createBpeModel = (source: BpeSource): BpeModel => {
   // (never let it silently hit another pair).
   const pairStride = maxId + 1;
   if (pairStride * pairStride > Number.MAX_SAFE_INTEGER) {
-    throw new Error(`語彙が大きすぎて対の合成鍵が安全整数に収まらない（最大 id ${maxId}）`);
+    throw new Error(
+      `The vocabulary is too large for the pair key to fit in a safe integer (max id ${maxId})`,
+    );
   }
 
   if (source.byteIds.length !== 256) {
-    throw new Error(`byteIds が 256 本でない（${source.byteIds.length} 本）`);
+    throw new Error(`byteIds does not have 256 entries (${source.byteIds.length} entries)`);
   }
   const byteOf = new Map<number, number>();
   for (const [byte, id] of source.byteIds.entries()) {
@@ -109,7 +111,7 @@ export const createBpeModel = (source: BpeSource): BpeModel => {
     // shifted table through would make the byte expansion point at other rows.
     if (token !== byteTokenSpelling(byte)) {
       throw new Error(
-        `byteIds[${byte}] の id ${id} の綴りが ${byteTokenSpelling(byte)} でない（${token}）`,
+        `byteIds[${byte}]: the spelling of id ${id} is not ${byteTokenSpelling(byte)} (${token})`,
       );
     }
     setUnique(byteOf, id, byte, "byteIds");
@@ -128,19 +130,21 @@ export const createBpeModel = (source: BpeSource): BpeModel => {
     const leftToken = tokenOf.get(left);
     const rightToken = tokenOf.get(right);
     if (leftToken === undefined || rightToken === undefined) {
-      throw new Error(`merge の対 (${left}, ${right}) に語彙外の id がある`);
+      throw new Error(`Merge pair (${left}, ${right}) has an id outside the vocabulary`);
     }
     const newId = idOf.get(leftToken + rightToken);
     if (newId === undefined) {
-      throw new Error(`merge (${left}, ${right}) の連結した綴りが語彙に無い`);
+      throw new Error(
+        `Merge (${left}, ${right}): the concatenated spelling is not in the vocabulary`,
+      );
     }
     if (!Number.isSafeInteger(rank) || rank < 0) {
-      throw new Error(`merge の rank が非負の安全整数でない（${rank}）`);
+      throw new Error(`Merge rank is not a non-negative safe integer (${rank})`);
     }
     // MUST: forbid later-wins. Upstream is a HashMap too, so a duplicate pair silently loses one
     // side and only the segmentation rule changes (the very reason `setUnique` exists in
     // `asset-gates.ts`).
-    setUnique(merges, pairKey(model, left, right), { rank, newId }, "merge の対");
+    setUnique(merges, pairKey(model, left, right), { rank, newId }, "merge pair");
   }
   return model;
 };

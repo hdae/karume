@@ -150,7 +150,7 @@ describe("wanVaeChunkLayout（グラフ宣言 → chunk 列の取り決め）", 
           NEXT,
         ),
       WanVaeChunkError,
-      "フレームのチャネル数が first と next で違う（first 12・next 3）",
+      "The frame channel count differs between first and next (first 12, next 3)",
     );
   });
 
@@ -162,25 +162,25 @@ describe("wanVaeChunkLayout（グラフ宣言 → chunk 列の取り決め）", 
         "フレーム出力が i32",
         FIRST,
         patched(NEXT, { outputs: { 0: { ...NEXT.outputs[0], dtype: "i32" } } }),
-        "vae_decoder_next: フレーム出力 'frame' の dtype i32 が f32 でない",
+        "vae_decoder_next: frame output 'frame' has dtype i32, not f32",
       ],
       [
         "cache の入力が i32",
         patched(FIRST, { inputs: { 2: { ...FIRST.inputs[2], dtype: "i32" } } }),
         NEXT,
-        "vae_decoder_first: cache の入力 'cache_02' の dtype i32 が f32 でない",
+        "vae_decoder_first: cache input 'cache_02' has dtype i32, not f32",
       ],
       [
         "更新後の cache の出力が bool",
         FIRST,
         patched(NEXT, { outputs: { 2: { ...NEXT.outputs[2], dtype: "bool" } } }),
-        "vae_decoder_next: 更新後の cache の出力 'cache_01_out' の dtype bool が f32 でない",
+        "vae_decoder_next: updated cache output 'cache_01_out' has dtype bool, not f32",
       ],
       [
         "潜在の入力が i32",
         patched(FIRST, { inputs: { 0: { ...FIRST.inputs[0], dtype: "i32" } } }),
         NEXT,
-        "vae_decoder_first: 潜在の入力 'latent' の dtype i32 が f32 でない",
+        "vae_decoder_first: latent input 'latent' has dtype i32, not f32",
       ],
     ];
     for (const [label, first, next, message] of rejected) {
@@ -195,55 +195,55 @@ describe("wanVaeChunkLayout（グラフ宣言 → chunk 列の取り決め）", 
         "先頭の入力が潜在でない",
         patched(FIRST, { inputs: { 0: { name: "z", shape: [CHANNELS, 1, TILE, TILE] } } }),
         NEXT,
-        "vae_decoder_first: 先頭の入力が 'latent' でない",
+        "vae_decoder_first: the first input is not 'latent'",
       ],
       [
         "潜在が記号次元",
         FIRST,
         patched(NEXT, { inputs: { 0: latent([CHANNELS, 1, "T", TILE]) } }),
-        "静的次元でない",
+        "is not a static dimension",
       ],
       [
         "潜在が 2 フレーム",
         patched(FIRST, { inputs: { 0: latent([CHANNELS, 2, TILE, TILE]) } }),
         NEXT,
-        "潜在は [C,1,t,t]",
+        "the latent must be [C,1,t,t]",
       ],
       [
         "潜在が正方でない",
         FIRST,
         patched(NEXT, { inputs: { 0: latent([CHANNELS, 1, TILE, 2 * TILE]) } }),
-        "潜在は [C,1,t,t]",
+        "the latent must be [C,1,t,t]",
       ],
       [
         "出力の本数が入力と違う",
         patched(FIRST, { outputs: { 2: null } }),
         NEXT,
-        "出力 2 本が入力 3 本と違う",
+        "output count 2 differs from input count 3",
       ],
       [
         "first のフレームが 4 枚",
         patched(FIRST, { outputs: { 0: { name: "frame", shape: [3, 4, SIDE, SIDE] } } }),
         NEXT,
-        "vae_decoder_first: フレームの形",
+        "vae_decoder_first: frame shape",
       ],
       [
         "フレームの辺がタイルの倍数でない",
         FIRST,
         patched(NEXT, { outputs: { 0: { name: "frame", shape: [3, 4, SIDE + 1, SIDE + 1] } } }),
-        "vae_decoder_next: フレームの形",
+        "vae_decoder_next: frame shape",
       ],
       [
         "cache の綴り",
         FIRST,
         patched(NEXT, { inputs: { 2: { name: "cache_1", shape: [4, 2, TILE, TILE] } } }),
-        "'cache_1' が cache_NN の綴りでない",
+        "'cache_1' is not spelled cache_NN",
       ],
       [
         "cache が 3 フレームを持つ",
         FIRST,
         patched(NEXT, { inputs: { 2: { name: "cache_01", shape: [4, 3, TILE, TILE] } } }),
-        "'cache_01' は [Cin,2,h,w]",
+        "'cache_01' must be [Cin,2,h,w]",
       ],
       [
         "更新後の cache の形が入力と違う（順の取り違え）",
@@ -254,25 +254,25 @@ describe("wanVaeChunkLayout（グラフ宣言 → chunk 列の取り決め）", 
             2: { name: "cache_00_out", shape: [3, 2, TILE, TILE] },
           },
         }),
-        "入力と同じ順の取り決め",
+        "by convention, outputs follow the input order",
       ],
       [
         "cache が 0 本",
         FIRST,
         { inputs: [NEXT.inputs[0]], outputs: [NEXT.outputs[0]] },
-        "vae_decoder_next: cache の入力が 0 本",
+        "vae_decoder_next: no cache inputs",
       ],
       [
         "潜在の形が 2 本で違う",
         patched(FIRST, { inputs: { 0: latent([CHANNELS + 1, 1, TILE, TILE]) } }),
         NEXT,
-        "潜在の形が 2 本で違う",
+        "The latent shapes of the 2 graphs differ",
       ],
       [
         "フレームの辺が first と next で違う",
         patched(FIRST, { outputs: { 0: { name: "frame", shape: [3, 1, 2 * SIDE, 2 * SIDE] } } }),
         NEXT,
-        "フレームの辺が first と next で違う",
+        "The frame side differs between first and next",
       ],
       [
         "first の cache が next に無い",
@@ -280,7 +280,7 @@ describe("wanVaeChunkLayout（グラフ宣言 → chunk 列の取り決め）", 
           inputs: { 1: { name: "cache_03", shape: [3, 2, TILE, TILE] } },
         }),
         NEXT,
-        "first の 'cache_03' が next に同じ形で無い",
+        "'cache_03' of first is not in next with the same shape",
       ],
       [
         "first の cache の形が next と違う",
@@ -289,7 +289,7 @@ describe("wanVaeChunkLayout（グラフ宣言 → chunk 列の取り決め）", 
           outputs: { 1: { name: "cache_00_out", shape: [6, 2, TILE, TILE] } },
         }),
         NEXT,
-        "first の 'cache_00' が next に同じ形で無い",
+        "'cache_00' of first is not in next with the same shape",
       ],
       [
         "first の cache の順が next と違う",
@@ -298,7 +298,7 @@ describe("wanVaeChunkLayout（グラフ宣言 → chunk 列の取り決め）", 
           outputs: [FIRST.outputs[0], FIRST.outputs[2], FIRST.outputs[1]],
         },
         NEXT,
-        "first の cache の順が next と違う（'cache_00'）",
+        "The cache order of first differs from next ('cache_00')",
       ],
     ];
     for (const [label, first, next, message] of rejected) {
@@ -321,7 +321,7 @@ describe("潜在の chunk の切り出しとフレームの連結", () => {
     assertThrows(
       () => wanVaeChunkCount(layout, latents.subarray(1)),
       WanVaeChunkError,
-      "潜在の要素数",
+      "Latent element count",
     );
     assertThrows(() => wanVaeChunkCount(layout, new Float32Array(0)), WanVaeChunkError);
   });
@@ -338,7 +338,11 @@ describe("潜在の chunk の切り出しとフレームの連結", () => {
 
   it("chunk の番号が [0, chunks) の外・整数でないなら RangeError（隣の平面やゼロを黙って返さない）", () => {
     for (const index of [3, -1, 1.5, Number.NaN]) {
-      assertThrows(() => wanVaeLatentChunk(layout, latents, index), RangeError, "[0, 3) の外");
+      assertThrows(
+        () => wanVaeLatentChunk(layout, latents, index),
+        RangeError,
+        "is outside [0, 3)",
+      );
     }
   });
 
@@ -362,7 +366,7 @@ describe("潜在の chunk の切り出しとフレームの連結", () => {
     assertThrows(
       () => concatWanVaeFrames(layout, [chunk(0, 1), chunk(1, 1)]),
       WanVaeChunkError,
-      "chunk 1 のフレームの要素数",
+      "chunk 1 frame element count",
     );
   });
 

@@ -181,20 +181,20 @@ describe("資産 JSON の門: 信用できない外部入力として扱う", ()
     assertThrows(
       () => parseAsset({ ...minimalAsset(), mergeCount: 1 }),
       Error,
-      "未知キー 'mergeCount'",
+      "unknown key 'mergeCount'",
     );
     const asset = minimalAsset();
     asset["spec"] = { ...(asset["spec"] as Record<string, unknown>), extra: "x" };
-    assertThrows(() => parseAsset(asset), Error, "tokenizer.spec: 未知キー 'extra'");
+    assertThrows(() => parseAsset(asset), Error, "tokenizer.spec: unknown key 'extra'");
   });
 
   it("欄が欠ければ「無い」で落ちる", () => {
     const { mergesCount: _, ...withoutCount } = minimalAsset();
-    assertThrows(() => parseAsset(withoutCount), Error, "tokenizer.mergesCount: 無い");
+    assertThrows(() => parseAsset(withoutCount), Error, "tokenizer.mergesCount: missing");
     const asset = minimalAsset();
     const { decoder: __, ...specWithoutDecoder } = asset["spec"] as Record<string, unknown>;
     asset["spec"] = specWithoutDecoder;
-    assertThrows(() => parseAsset(asset), Error, "tokenizer.spec.decoder: 無い");
+    assertThrows(() => parseAsset(asset), Error, "tokenizer.spec.decoder: missing");
   });
 
   it("宣言された構成が 1 欄でも違えば落ちる", () => {
@@ -213,14 +213,14 @@ describe("資産 JSON の門: 信用できない外部入力として扱う", ()
 
   it("merges の行数が申告と違えば落ちる", () => {
     // 欠けても BPE は「見つからないので結合しない」だけで落ちない（分割だけが静かに変わる）。
-    assertThrows(() => parseAsset({ ...minimalAsset(), mergesCount: 2 }), Error, "行数");
+    assertThrows(() => parseAsset({ ...minimalAsset(), mergesCount: 2 }), Error, "line count");
   });
 
   it("特殊トークンが追加語彙の外なら落ちる", () => {
     assertThrows(
       () => parseAsset({ ...minimalAsset(), specialIds: [0, 1, 2, 5] }),
       Error,
-      "追加語彙",
+      "added vocabulary",
     );
   });
 
@@ -241,7 +241,7 @@ describe("資産 JSON の門: 信用できない外部入力として扱う", ()
           ],
         }),
       Error,
-      "tokenizer.addedTokens: id 300 が 2 つの綴りに割り当てられている",
+      "tokenizer.addedTokens: id 300 is assigned to two spellings",
     );
   });
 
@@ -276,14 +276,18 @@ describe("資産 JSON の門: 信用できない外部入力として扱う", ()
   });
 
   it("`<bos>` / `<eos>` / `<unk>` が語彙の外なら落ちる", () => {
-    assertThrows(() => parseAsset({ ...minimalAsset(), bosId: 9999 }), Error, "語彙に無い");
+    assertThrows(
+      () => parseAsset({ ...minimalAsset(), bosId: 9999 }),
+      Error,
+      "is not in the vocabulary",
+    );
   });
 
   it("JSON でないバイト列は落ちる", () => {
     assertThrows(
       () => parseGemmaTokenizerAsset(new TextEncoder().encode("{")),
       Error,
-      "JSON として読めない",
+      "cannot be read as JSON",
     );
   });
 });
@@ -356,8 +360,8 @@ for (const { family, fixtureName, series } of [
     // 呼び手が本文を直せば解消する誤りなので、内部障害（素の Error）に見せない（ADR 0107）。
     // chat の描画も encode を通るので、ここ 1 箇所で chat まで覆う。
     for (const text of ["\uD800", "a\uDC00b"]) {
-      assertThrows(() => tokenizer.encode(text), ModelInputError, "サロゲート");
-      assertThrows(() => tokenizer.encodeWithSpecialTokens(text), ModelInputError, "サロゲート");
+      assertThrows(() => tokenizer.encode(text), ModelInputError, "surrogate");
+      assertThrows(() => tokenizer.encodeWithSpecialTokens(text), ModelInputError, "surrogate");
     }
   });
 

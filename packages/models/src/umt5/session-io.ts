@@ -47,16 +47,20 @@ export const umt5SessionInputs = (
 ): Umt5SessionInputs => {
   const length = ids.length;
   if (length < UMT5_MIN_TOKENS || length > UMT5_MAX_LENGTH) {
-    throw new Error(`umT5 の id 列の長さ ${length} が ${UMT5_MIN_TOKENS}〜${UMT5_MAX_LENGTH} の外`);
+    throw new Error(
+      `umT5 id sequence length ${length} is outside ${UMT5_MIN_TOKENS}..${UMT5_MAX_LENGTH}`,
+    );
   }
   const [rows, columns] = buckets.shape;
   if (buckets.shape.length !== 2 || rows !== length || columns !== length) {
     const shape = buckets.shape.join(",");
-    throw new Error(`umT5 のバケット表 [${shape}] が id 列の長さ ${length} の正方形でない`);
+    throw new Error(
+      `umT5 bucket table [${shape}] is not a square of the id sequence length ${length}`,
+    );
   }
   if (buckets.data.length !== length * length) {
     throw new Error(
-      `umT5 のバケット表の要素数 ${buckets.data.length} が [${length},${length}] と合わない`,
+      `umT5 bucket table element count ${buckets.data.length} does not match [${length},${length}]`,
     );
   }
   return {
@@ -79,15 +83,15 @@ export const umt5HiddenStates = (
   width: number,
 ): Float32Array<ArrayBuffer> => {
   if (output.dtype !== "f32") {
-    throw new Error(`umT5 の出力の dtype ${output.dtype} が f32 でない`);
+    throw new Error(`umT5 output dtype ${output.dtype} is not f32`);
   }
   const [batch, length, channels] = output.shape;
   if (output.shape.length !== 3 || batch !== 1 || length !== tokens || channels !== width) {
-    throw new Error(`umT5 の出力 [${output.shape.join(",")}] が [1,${tokens},${width}] でない`);
+    throw new Error(`umT5 output [${output.shape.join(",")}] is not [1,${tokens},${width}]`);
   }
   if (output.data.length !== tokens * width) {
     throw new Error(
-      `umT5 の出力の要素数 ${output.data.length} が [1,${tokens},${width}] と合わない`,
+      `umT5 output element count ${output.data.length} does not match [1,${tokens},${width}]`,
     );
   }
   return output.data;
@@ -108,7 +112,7 @@ export const padUmt5Context = (
 ): Float32Array<ArrayBuffer> => {
   const states = umt5HiddenStates(output, tokens, width);
   if (tokens > rows) {
-    throw new Error(`umT5 の出力の行数 ${tokens} が DiT の文脈の行数 ${rows} を超える`);
+    throw new Error(`umT5 output row count ${tokens} exceeds the DiT context row count ${rows}`);
   }
   const padded = new Float32Array(rows * width);
   padded.set(states);

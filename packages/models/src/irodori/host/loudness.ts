@@ -144,9 +144,9 @@ export const integratedLoudness = (
   sampleRate: number,
 ): number => {
   if (!Number.isInteger(sampleRate) || sampleRate <= 0) {
-    throw new RangeError(`integratedLoudness: サンプリング周波数 ${sampleRate} が正の整数でない`);
+    throw new RangeError(`integratedLoudness: sample rate ${sampleRate} is not a positive integer`);
   }
-  if (samples.length === 0) throw new RangeError("integratedLoudness: 波形が空");
+  if (samples.length === 0) throw new RangeError("integratedLoudness: the waveform is empty");
   // Below 0.5 s, zeros are appended **only for the measurement** (upstream
   // `AudioSignal.loudness`).
   const minimum = Math.round(MIN_MEASURE_SECONDS * sampleRate);
@@ -170,8 +170,8 @@ export const integratedLoudness = (
   // mean "this rate cannot be measured", so the minimum of the derived values fails explicitly.
   if (kernel < 1 || stride < 1) {
     throw new RangeError(
-      `integratedLoudness: サンプリング周波数 ${sampleRate} では loudness 窓が導出できない` +
-        `（${BLOCK_SECONDS} 秒 = ${kernel} サンプル / stride ${stride} サンプル — 各 1 以上が要る）`,
+      `integratedLoudness: the loudness window cannot be derived at sample rate ${sampleRate}` +
+        ` (${BLOCK_SECONDS} s = ${kernel} samples / stride ${stride} samples — each must be >= 1)`,
     );
   }
   const blocks = Math.ceil((Math.max(filtered.length, kernel) - kernel) / stride) + 1;

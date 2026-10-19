@@ -793,8 +793,8 @@ const assertSpeculative = (
     // graph declaration (the generation surface's `assertSpeculativeSetup`) is an asset mismatch, so
     // that stays a plain `Error`.
     throw new ModelInputError(
-      `${where}: speculative.k ${k} が 1..${GEMMA4_DRAFT_STEPS} の外` +
-        `（配布形の drafter は ${GEMMA4_DRAFT_STEPS} 段で焼かれている — 出口の本数が上限）`,
+      `${where}: speculative.k ${k} is outside 1..${GEMMA4_DRAFT_STEPS}` +
+        ` (the distribution's drafter is baked with ${GEMMA4_DRAFT_STEPS} steps — the number of outputs is the upper limit)`,
     );
   }
   if (speculative.gate !== undefined) createSpeculationGate(speculative.gate);
@@ -824,14 +824,14 @@ export const resolveGemma4PleResidency = (
   // errors (ADR 0107 decision 2).
   if (options.maxResidentPleBytes !== undefined) {
     throw new ModelInputError(
-      `${where}: pleResidency: "gpu" では maxResidentPleBytes が効かない` +
-        `（GPU 常駐ではホスト側の行キャッシュを 1 度も引かない）`,
+      `${where}: maxResidentPleBytes has no effect with pleResidency: "gpu"` +
+        ` (GPU residency never looks up the host-side row cache)`,
     );
   }
   if (options.speculative !== undefined) {
     throw new ModelInputError(
-      `${where}: pleResidency: "gpu" と speculative は併用できない` +
-        `（drafter の per-layer 入力は GPU 常駐席の範囲外 — ADR 0085 追記〈GPU 常駐席〉）`,
+      `${where}: pleResidency: "gpu" and speculative cannot be combined` +
+        ` (the drafter's per-layer inputs are outside the scope of GPU residency — ADR 0085 addendum, GPU residency)`,
     );
   }
   return residency;
@@ -867,8 +867,8 @@ export const speculativeSetup = (
     // result either (the absence of the `speculation` field).
     if (enabled !== undefined) {
       throw new Error(
-        `speculative: ${JSON.stringify(enabled)} を渡したが、この pipeline は drafter 無しで` +
-          `開かれている`,
+        `speculative: ${JSON.stringify(enabled)} was passed, but this pipeline was opened without` +
+          ` a drafter`,
       );
     }
     return undefined;
@@ -997,8 +997,8 @@ const buildGemma4Program = (
   // ① the ids the tokenizer can produce and ② the vocab rows of the main embedding.
   if (tokenizer.maxTokenId >= vocabSize) {
     throw new Error(
-      `${entry}: tokenizer の最大 token id ${tokenizer.maxTokenId} が` +
-        ` 主 embedding の vocab 行数 ${vocabSize} の外（別の語彙で焼かれた組み合わせ）`,
+      `${entry}: the tokenizer's largest token id ${tokenizer.maxTokenId} is outside` +
+        ` the main embedding's ${vocabSize} vocab rows (a combination baked with a different vocabulary)`,
     );
   }
   // ③ the rows of the PLE index (`createGemma4Ple` owns this check — the same check is not
@@ -1096,7 +1096,7 @@ class GemmaPipeline {
     const entry = gemmaEntryName(family);
     const where = `${entry}.fromPretrained`;
     if (family === "gemma4-qat" && options.speculative !== undefined) {
-      throw new Error(`${where}: QAT の MTP は未対応`);
+      throw new Error(`${where}: MTP is not supported for QAT`);
     }
     if (options.speculative !== undefined) {
       assertSpeculative(where, options.speculative);
@@ -1108,8 +1108,8 @@ class GemmaPipeline {
       ref,
       where,
       family === "gemma4"
-        ? 'GEMMA4_SOURCES["gemma4"]（@karume/models/gemma）'
-        : "明示した QAT 配布形の取得元",
+        ? 'GEMMA4_SOURCES["gemma4"] (@karume/models/gemma)'
+        : "an explicitly given source of a QAT distribution",
     );
     const hubOptions: FetchAssetsOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
@@ -1224,8 +1224,8 @@ class GemmaPipeline {
     // failing loudly.
     if (options.speculative !== undefined) {
       throw new Error(
-        `${where}: speculative は受けられない` +
-          `（Gemma4Assets に drafter の容器が無い — 投機は fromPretrained から組む）`,
+        `${where}: speculative is not accepted` +
+          ` (Gemma4Assets has no drafter container — build speculation from fromPretrained)`,
       );
     }
     // The placement option is checked before opening a single byte of the assets (the same position
@@ -1238,7 +1238,9 @@ class GemmaPipeline {
     assertGemmaSessionOverrides(options, where);
     const config = parseGemma4PipelineConfig(input.config);
     if (input.model.length === 0) {
-      throw new Error(`${where}: 製品グラフの part 列が空（part 0 から添字順に並べる）`);
+      throw new Error(
+        `${where}: the product graph's part list is empty (list them in index order from part 0)`,
+      );
     }
     const parts = Object.fromEntries(
       input.model.map((bytes, index): readonly [string, Uint8Array<ArrayBuffer>] => [
@@ -1362,8 +1364,8 @@ class GemmaPipeline {
     // does not work at all).
     if (residency === "gpu" && gpu.gpuTimingEnabled) {
       throw new Error(
-        `${entry}: pleResidency: "gpu" は gpuTiming が有効な device では使えない` +
-          `（GPU 内 gather は batch へ積むが、計測中は batch を開けない — ADR 0021）`,
+        `${entry}: pleResidency: "gpu" cannot be used on a device with gpuTiming enabled` +
+          ` (the on-GPU gather is queued into a batch, but a batch cannot be opened while timing — ADR 0021)`,
       );
     }
     // The supplier is **the same one** admission looked at (the earlier and later steps do not hold
@@ -1520,7 +1522,7 @@ class GemmaPipeline {
    */
   chat(messages: readonly Gemma4ChatMessage[], options: Gemma4ChatOptions): Gemma4ChatStream {
     if (this.#disposal !== undefined) {
-      throw new Error(`${this.#state.entry}: dispose 済みでは生成できない`);
+      throw new Error(`${this.#state.entry}: cannot generate after dispose`);
     }
     // The accepted set fails synchronously (before entering the GPU or the queue).
     const prompt = gemma4ChatPrompt(this.#state.tokenizer, messages);
@@ -1588,7 +1590,7 @@ class GemmaPipeline {
         // a **runtime message** far from the real cause, so this aligns it to **the same pipeline
         // message as at issue**.
         if (disposed()) {
-          throw new Error(`${state.entry}: dispose 済みでは生成できない`);
+          throw new Error(`${state.entry}: cannot generate after dispose`);
         }
         release = await acquire();
         sequence = await createGenerationSequence({
@@ -1663,7 +1665,7 @@ class GemmaPipeline {
    */
   async sequence(options: Gemma4SequenceOptions = {}): Promise<GenerationSequence> {
     if (this.#disposal !== undefined) {
-      throw new Error(`${this.#state.entry}: dispose 済みでは sequence を作れない`);
+      throw new Error(`${this.#state.entry}: cannot create a sequence after dispose`);
     }
     const state = this.#state;
     const speculative = speculativeSetup(state, options.speculative);
@@ -1698,7 +1700,7 @@ class GemmaPipeline {
     const state = this.#state;
     if (this.#disposal !== undefined) {
       await inner.dispose();
-      throw new Error(`${state.entry}: dispose 済みでは sequence を作れない`);
+      throw new Error(`${state.entry}: cannot create a sequence after dispose`);
     }
     // A sequence returned properly is removed from tracking (otherwise, with a multi-turn UI that
     // creates and closes one per conversation, the Set grows monotonically and `dispose` awaits every
@@ -1716,7 +1718,7 @@ class GemmaPipeline {
         // **synchronously**, and wrapping it in async would turn it into a reject. After the
         // pipeline's dispose it likewise fails synchronously.
         if (this.#disposal !== undefined) {
-          throw new Error(`${state.entry}: dispose 済みでは sequence を作れない`);
+          throw new Error(`${state.entry}: cannot create a sequence after dispose`);
         }
         return inner.fork().then((forked) => this.#hand(forked));
       },
@@ -1793,16 +1795,16 @@ class GemmaPipeline {
     // `1.5` would both be diagnosed as "below", and the same option would look as if it failed for a
     // different reason per entry point.
     if (!Number.isSafeInteger(capacity) || capacity < 1) {
-      throw new ModelInputError(`${entry}: capacity ${capacity} が 1 以上の整数でない`);
+      throw new ModelInputError(`${entry}: capacity ${capacity} is not a positive integer`);
     }
     if (capacity < chunkLength) {
       throw new ModelInputError(
-        `${entry}: capacity ${capacity} が chunkLength ${chunkLength} を下回る（1 chunk すら入らない）`,
+        `${entry}: capacity ${capacity} is below chunkLength ${chunkLength} (not even one chunk fits)`,
       );
     }
     if (capacity > wiring.maxPosition) {
       throw new ModelInputError(
-        `${entry}: capacity ${capacity} が maxPosition ${wiring.maxPosition} を超えた`,
+        `${entry}: capacity ${capacity} exceeds maxPosition ${wiring.maxPosition}`,
       );
     }
     // MUST: pass the same budget as was passed to the Session (if only one side fell back to the
@@ -1887,8 +1889,8 @@ class GemmaPipeline {
       peakAccountedBytes: target.peakAccountedBytes + residentBytes,
       unaccounted: [
         ...target.unaccounted,
-        "drafter の run 1 本ぶんの入出力と中間（借り手 Session の slot backing — draft run は" +
-          " verify run と同時に走らず、必要量は k にも capacity にも依らない）",
+        "The inputs, outputs and intermediates of one drafter run (the borrowing Session's slot backing — a draft run" +
+          " never runs at the same time as a verify run, and the requirement depends on neither k nor capacity)",
       ],
     };
   }

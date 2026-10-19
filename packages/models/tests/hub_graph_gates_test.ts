@@ -39,9 +39,9 @@ test("assertGraphInputDim: 軸の食い違いは family・where・実値・期�
         "imageHeight",
       ),
     Error,
-    "siglip2: imageHeight — グラフ入力 'pixel_values' の軸 2 が 384",
+    "siglip2: imageHeight — graph input 'pixel_values' axis 2 is 384",
   );
-  assert(error.message.includes("pipelineConfig は 224"), error.message);
+  assert(error.message.includes("pipelineConfig has 224"), error.message);
 });
 
 test("assertGraphInputDim: family ラベルは呼び手のものがそのまま出る", () => {
@@ -49,7 +49,7 @@ test("assertGraphInputDim: family ラベルは呼び手のものがそのまま�
     () =>
       assertGraphInputDim("depth-anything", visionGraph(), "pixel_values", 3, 518, "imageWidth"),
     Error,
-    "depth-anything: imageWidth — グラフ入力 'pixel_values' の軸 3 が 224、pipelineConfig は 518",
+    "depth-anything: imageWidth — graph input 'pixel_values' axis 3 is 224, pipelineConfig has 518",
   );
 });
 
@@ -57,7 +57,7 @@ test("assertGraphInputDim: 入力名そのものが無ければ軸を読む前�
   assertThrows(
     () => assertGraphInputDim("irodori", visionGraph(), "pixel", 2, 224, "imageHeight"),
     Error,
-    "irodori: グラフ入力 'pixel' が無い（imageHeight）",
+    "irodori: graph input 'pixel' is missing (imageHeight)",
   );
 });
 
@@ -75,7 +75,7 @@ test("assertGraphInputDim: 記号次元の軸は静的値と一致しないの�
         "imageHeight",
       ),
     Error,
-    "birefnet: imageHeight — グラフ入力 'pixel_values' の軸 2 が H、pipelineConfig は 224",
+    "birefnet: imageHeight — graph input 'pixel_values' axis 2 is H, pipelineConfig has 224",
   );
 });
 
@@ -84,6 +84,6 @@ test("assertGraphInputDim: 宣言の次元数より外の軸は undefined とし
   assertThrows(
     () => assertGraphInputDim("birefnet", visionGraph(), "pixel_values", 4, 224, "imageHeight"),
     Error,
-    "birefnet: imageHeight — グラフ入力 'pixel_values' の軸 4 が undefined、pipelineConfig は 224",
+    "birefnet: imageHeight — graph input 'pixel_values' axis 4 is undefined, pipelineConfig has 224",
   );
 });

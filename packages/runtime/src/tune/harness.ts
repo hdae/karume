@@ -1368,7 +1368,7 @@ export const sweepCase = async (
         emit(errorRow(target, candidate, isDefault, new Error(`device lost: ${gpu.lost.message}`)));
         continue;
       }
-      hooks.onProgress?.(`${target.id}: ${candidate.name}（${index + 1}/${ordered.length}）`);
+      hooks.onProgress?.(`${target.id}: ${candidate.name} (${index + 1}/${ordered.length})`);
       let row: SweepRow;
       try {
         row = await measureGeometry(

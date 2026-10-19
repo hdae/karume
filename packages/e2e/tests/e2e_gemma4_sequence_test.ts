@@ -754,10 +754,10 @@ describe.skipIf(!MIRROR_WITH_DRAFTER || !GPU_AVAILABLE)(
       assertThrows(
         () => forked.generate({ prompt: [...x], maxNewTokens: 1 }),
         Error,
-        "GenerationSequence: dispose 済みでは生成できない",
+        "GenerationSequence: cannot generate after dispose",
       );
       // pipeline の dispose 後の分岐の fork は、包みが同期に落とす。
-      assertThrows(() => forked.fork(), Error, "dispose 済みでは sequence を作れない");
+      assertThrows(() => forked.fork(), Error, "cannot create a sequence after dispose");
     });
   },
 );

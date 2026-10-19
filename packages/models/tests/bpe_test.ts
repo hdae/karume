@@ -44,7 +44,7 @@ describe("資産の門: 通すと沈黙誤値になる形を落とす", () => {
     assertThrows(
       () => createBpeModel({ vocab: [[0, "a"]], merges: [], byteIds: [0] }),
       Error,
-      "256 本でない",
+      "does not have 256 entries",
     );
   });
 
@@ -61,7 +61,7 @@ describe("資産の門: 通すと沈黙誤値になる形を落とす", () => {
           byteIds: Array.from({ length: 256 }, (_, byte) => byte),
         }),
       Error,
-      "綴りが",
+      "the spelling of",
     );
   });
 
@@ -76,12 +76,12 @@ describe("資産の門: 通すと沈黙誤値になる形を落とす", () => {
           ],
         ),
       Error,
-      "重複",
+      "duplicate",
     );
   });
 
   it("併合先の綴りが語彙に無いと落ちる", () => {
-    assertThrows(() => buildModel(["a", "b"], [["a", "b"]]), Error, "語彙に無い");
+    assertThrows(() => buildModel(["a", "b"], [["a", "b"]]), Error, "is not in the vocabulary");
   });
 
   it("語彙の綴りが重複すると落ちる（行番号 = id が引けなくなる）", () => {
@@ -96,7 +96,7 @@ describe("資産の門: 通すと沈黙誤値になる形を落とす", () => {
           byteIds: [],
         }),
       Error,
-      "重複",
+      "duplicate",
     );
   });
 });
@@ -175,7 +175,7 @@ describe("byte_fallback: 語彙に無い文字は UTF-8 バイトへ割れる", 
   });
 
   it("対にならないサロゲートは落とす（正本の str に載らない値）", () => {
-    assertThrows(() => bpeEncode(model, "\ud800"), Error, "サロゲート");
+    assertThrows(() => bpeEncode(model, "\ud800"), Error, "surrogate");
   });
 });
 

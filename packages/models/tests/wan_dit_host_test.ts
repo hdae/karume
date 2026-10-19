@@ -119,8 +119,8 @@ test("wanTokenGrid: 潜在 [C,F,H,W] を patch で割った格子と S = F'·H'�
 });
 
 test("wanTokenGrid: patch で割り切れない潜在・チャネル数違い・rank 違いは落とす", () => {
-  assertThrows(() => wanTokenGrid([16, 3, 15, 16], WAN_GEOMETRY), Error, "割り切れない");
-  assertThrows(() => wanTokenGrid([4, 3, 16, 16], WAN_GEOMETRY), Error, "チャネル数");
+  assertThrows(() => wanTokenGrid([16, 3, 15, 16], WAN_GEOMETRY), Error, "is not divisible by");
+  assertThrows(() => wanTokenGrid([4, 3, 16, 16], WAN_GEOMETRY), Error, "channel count");
   assertThrows(() => wanTokenGrid([1, 16, 3, 16, 16], WAN_GEOMETRY), Error, "[C,F,H,W]");
 });
 
@@ -209,12 +209,12 @@ test("unpatchifyTokens: 要素数の食い違いは落とす", () => {
   assertThrows(
     () => unpatchifyTokens(new Float32Array(10), meta.latent_shape, WAN_GEOMETRY),
     Error,
-    "要素数",
+    "element count",
   );
   assertThrows(
     () => patchifyLatents(new Float32Array(10), meta.latent_shape, WAN_GEOMETRY),
     Error,
-    "要素数",
+    "element count",
   );
 });
 
@@ -244,7 +244,7 @@ test("wanRopeTables: 素表の行数を超える格子は落とす（上流の�
   assertThrows(
     () => wanRopeTables(base, { frames: 1, rows: base.rows + 1, cols: 1, count: base.rows + 1 }),
     Error,
-    "天井",
+    "ceiling",
   );
 });
 
@@ -268,18 +268,18 @@ test("parseWanRopeBase: 正しい形は軸ごとの行数・幅を返す", () =>
 
 test("parseWanRopeBase: 想定外のキー・欠け・行数違い・F32 以外は落とす", () => {
   const extra = [...ropeSpecs(), { name: "cos_x", dtype: "F32", shape: [1], data: f32Bytes([0]) }];
-  assertThrows(() => parseWanRopeBase(buildSafetensors(extra)), Error, "想定外");
+  assertThrows(() => parseWanRopeBase(buildSafetensors(extra)), Error, "unexpected");
   assertThrows(
     () => parseWanRopeBase(buildSafetensors(ropeSpecs().filter((s) => s.name !== "sin_h"))),
     Error,
-    "'sin_h' が無い",
+    "has no 'sin_h'",
   );
   const rows = ropeSpecs().map((spec) =>
     spec.name.endsWith("_w")
       ? { ...spec, shape: [1, 6], data: f32Bytes(new Array(6).fill(0)) }
       : spec,
   );
-  assertThrows(() => parseWanRopeBase(buildSafetensors(rows)), Error, "行数");
+  assertThrows(() => parseWanRopeBase(buildSafetensors(rows)), Error, "row count");
   const dtype = ropeSpecs().map((spec) =>
     spec.name === "cos_t"
       ? { ...spec, dtype: "I32", data: new Uint8Array(new Int32Array([0, 1]).buffer) }
@@ -332,8 +332,8 @@ test("timestepsProj: timestep の 1 ずれと cos / sin の前後反転は atol 
 });
 
 test("timestepsProj: 幅が正の偶数でない・timestep が負や非整数は落とす", () => {
-  assertThrows(() => timestepsProj(10, 255), RangeError, "偶数");
-  assertThrows(() => timestepsProj(10, 0), RangeError, "偶数");
-  assertThrows(() => timestepsProj(-1, 256), RangeError, "整数");
-  assertThrows(() => timestepsProj(0.5, 256), RangeError, "整数");
+  assertThrows(() => timestepsProj(10, 255), RangeError, "even number");
+  assertThrows(() => timestepsProj(10, 0), RangeError, "even number");
+  assertThrows(() => timestepsProj(-1, 256), RangeError, "integer");
+  assertThrows(() => timestepsProj(0.5, 256), RangeError, "integer");
 });

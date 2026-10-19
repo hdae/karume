@@ -68,14 +68,18 @@ test("parseIrodoriPipelineConfig: 実重みの値を読み切る", () => {
 });
 
 test("parseIrodoriPipelineConfig: 未知キーは落とす（綴り違いの黙認を作らない）", () => {
-  assertThrows(() => parseIrodoriPipelineConfig(withPatch({ step: 40 })), Error, "未知キー 'step'");
+  assertThrows(
+    () => parseIrodoriPipelineConfig(withPatch({ step: 40 })),
+    Error,
+    "unknown key 'step'",
+  );
 });
 
 test("parseIrodoriPipelineConfig: cfgScales の未知キーも落とす", () => {
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ cfgScales: { text: 3, speaker: 5, style: 3 } })),
     Error,
-    "未知キー 'style'",
+    "unknown key 'style'",
   );
 });
 
@@ -93,7 +97,7 @@ test("parseIrodoriPipelineConfig: 対応外の speakerUncondMode は拒否する
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ speakerUncondMode: "noise" })),
     Error,
-    "'mask' だけ",
+    "only 'mask'",
   );
 });
 
@@ -102,31 +106,35 @@ test("parseIrodoriPipelineConfig: 対応外の cfgGuidanceMode は拒否する�
     assertThrows(
       () => parseIrodoriPipelineConfig(withPatch({ cfgGuidanceMode: mode })),
       Error,
-      "'independent' だけ",
+      "only 'independent'",
     );
   }
 });
 
 test("parseIrodoriPipelineConfig: 幅と長さの値域を見る", () => {
   // token 列は BOS を必ず 1 本置くので、本文の予算が残らない 1 は組めない。
-  assertThrows(() => parseIrodoriPipelineConfig(withPatch({ maxTextLen: 1 })), Error, "2 以上");
+  assertThrows(() => parseIrodoriPipelineConfig(withPatch({ maxTextLen: 1 })), Error, ">= 2");
   // t_embed は前半 cos / 後半 sin に割るので奇数幅は組めない。
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ timestepEmbedDim: 511 })),
     Error,
-    "正の偶数でない",
+    "not a positive even number",
   );
-  assertThrows(() => parseIrodoriPipelineConfig(withPatch({ latentDim: 0 })), Error, "正の整数");
+  assertThrows(
+    () => parseIrodoriPipelineConfig(withPatch({ latentDim: 0 })),
+    Error,
+    "positive integer",
+  );
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ initScale: 0 })),
     Error,
-    "正の有限数でない",
+    "not a positive finite number",
   );
   assertThrows(
     () =>
       parseIrodoriPipelineConfig(withPatch({ cfgScales: { text: -1, speaker: 5, caption: 3 } })),
     Error,
-    "非負の有限数でない",
+    "not a non-negative finite number",
   );
 });
 
@@ -136,7 +144,7 @@ test("parseIrodoriPipelineConfig: initScale は f32 へ丸めても有限な値�
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ initScale: 1e39 })),
     Error,
-    "f32 で有限に収まらない",
+    "not finite in f32",
   );
   // f32 の最大値そのものは有限なので通る（境界は「丸めた結果が有限か」）。
   const largest = 3.4028234663852886e38;
@@ -147,7 +155,7 @@ test("parseIrodoriPipelineConfig: CFG の窓が逆順なら落とす（沈黙で
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ cfgMinT: 1, cfgMaxT: 0.5 })),
     Error,
-    "CFG が 1 度も掛からない",
+    "CFG would never apply",
   );
 });
 
@@ -189,8 +197,8 @@ test("parseIrodoriPipelineConfig: speakerRows 1 は落とす（参照 latent が
   // speaker 条件は「平均トークン 1 本 + patch した参照」なので、1 行では参照が 1 行も載らない。
   // 素通しすると参照音声の上限サンプル数が 0 になり、`integratedLoudness` の「波形が空」という
   // **無関係な文言**で生成の途中に落ちる。maxTextLen / maxCaptionLen と同じ理屈・同じ受理集合。
-  assertThrows(() => parseIrodoriPipelineConfig(withPatch({ speakerRows: 1 })), Error, "2 以上");
-  assertThrows(() => parseIrodoriPipelineConfig(withPatch({ speakerRows: 0 })), Error, "2 以上");
+  assertThrows(() => parseIrodoriPipelineConfig(withPatch({ speakerRows: 1 })), Error, ">= 2");
+  assertThrows(() => parseIrodoriPipelineConfig(withPatch({ speakerRows: 0 })), Error, ">= 2");
 });
 
 test("parseIrodoriPipelineConfig: maxSeconds から到達しうる S が ditSymMax を超えたら落とす", () => {
@@ -199,14 +207,14 @@ test("parseIrodoriPipelineConfig: maxSeconds から到達しうる S が ditSymM
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ maxSeconds: 30.5 })),
     Error,
-    "到達しうる latent 長 763",
+    "can reach latent length 763",
   );
   // 手動秒経路（`ceil(trunc(秒×sampleRate) / hopLength)`）だけが 1 フレーム上に出る宣言。
   // duration 経路の `floor(秒×frameRate)` だけを見る式ではここを取りこぼす。
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ maxSeconds: 30.02 })),
     Error,
-    "到達しうる latent 長 751",
+    "can reach latent length 751",
   );
   // 実配布の 30 秒 / ditSymMax 750 はちょうど成立する（境界を締めすぎていない）。
   assertEquals(parseIrodoriPipelineConfig(withPatch({})).ditSymMax, 750);
@@ -226,7 +234,7 @@ test("parseIrodoriPipelineConfig: f32 で厳密に表せない cfgScale は宣�
     () =>
       parseIrodoriPipelineConfig(withPatch({ cfgScales: { text: 1.3, speaker: 5, caption: 3 } })),
     Error,
-    "f32 で厳密に表せない",
+    "not exactly representable in f32",
   );
   // 実配布の 3 / 5 / 3 と、f32 厳密な非整数（2 の冪の和）は通る。
   const config = parseIrodoriPipelineConfig(

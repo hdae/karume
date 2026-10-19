@@ -40,11 +40,11 @@ test("toRepoRef: 取得元が無ければ『repo が必須』+ 記述例 2 択�
   const error = assertThrows(
     () => toRepoRef(undefined, "AnimaPipeline.fromPretrained", 'ANIMA_SOURCES["anima"]'),
     Error,
-    "repo が必須",
+    "repo is required",
   );
   // 主語（どの入口が落ちたか）と記述例 2 択が揃っていること。
   assertStringIncludes(error.message, "AnimaPipeline.fromPretrained");
-  assertStringIncludes(error.message, '{ repo: "owner/name", revision: "<40 桁の commit SHA>" }');
+  assertStringIncludes(error.message, '{ repo: "owner/name", revision: "<40-digit commit SHA>" }');
   assertStringIncludes(error.message, 'ANIMA_SOURCES["anima"]');
 });
 
@@ -53,16 +53,20 @@ test("toRepoRef: 公開配布リポを持たないファミリには対応表を
   const error = assertThrows(
     () => toRepoRef(undefined, "VowelDetectorPipeline.fromPretrained"),
     Error,
-    "repo が必須",
+    "repo is required",
   );
-  assertStringIncludes(error.message, '{ repo: "owner/name", revision: "<40 桁の commit SHA>" }');
-  assertStringIncludes(error.message, "リポ名の文字列");
+  assertStringIncludes(error.message, '{ repo: "owner/name", revision: "<40-digit commit SHA>" }');
+  assertStringIncludes(error.message, "repo name string");
   assertEquals(error.message.includes("_SOURCES"), false);
 });
 
 test("toRepoRef: 空の repo も同じ門で落ちる（空文字の URL を組み立てない）", () => {
-  assertThrows(() => toRepoRef("", "Sbv2Pipeline.fromPretrained"), Error, "repo が必須");
-  assertThrows(() => toRepoRef({ repo: "" }, "Sbv2Pipeline.fromPretrained"), Error, "repo が必須");
+  assertThrows(() => toRepoRef("", "Sbv2Pipeline.fromPretrained"), Error, "repo is required");
+  assertThrows(
+    () => toRepoRef({ repo: "" }, "Sbv2Pipeline.fromPretrained"),
+    Error,
+    "repo is required",
+  );
 });
 
 test("toRepoRef: パスにしか見えない綴りは HF へ投げる前に落ちる", () => {
@@ -83,7 +87,7 @@ test("toRepoRef: パスにしか見えない綴りは HF へ投げる前に落�
     assertThrows(
       () => toRepoRef(repo, "Gemma4Pipeline.fromPretrained"),
       Error,
-      "'owner/name' でない",
+      "is not an HF 'owner/name'",
       repo,
     );
   }
@@ -129,9 +133,9 @@ test("toManifestSource: 取得元ハンドルでない値は従来どおり綴�
   assertThrows(
     () => toManifestSource("./models/karume-gemma4", "X.fromPretrained"),
     Error,
-    "'owner/name' でない",
+    "is not an HF 'owner/name'",
   );
-  assertThrows(() => toManifestSource(undefined, "X.fromPretrained"), Error, "repo が必須");
+  assertThrows(() => toManifestSource(undefined, "X.fromPretrained"), Error, "repo is required");
 });
 
 test("fromPretrained: 取得元の綴りが空なら fetch を 1 度も呼ばずに落ちる", async () => {
@@ -147,7 +151,7 @@ test("fromPretrained: 取得元の綴りが空なら fetch を 1 度も呼ばず
   await assertRejects(
     () => AnimaPipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
     Error,
-    "AnimaPipeline.fromPretrained: repo が必須",
+    "AnimaPipeline.fromPretrained: repo is required",
   );
   assertEquals(calls, 0);
 });
@@ -160,9 +164,9 @@ test("fromPretrained: birefnet も ref 欠落時に対応表（BIREFNET_SOURCES�
   const error = await assertRejects(
     () => BirefnetPipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
     Error,
-    "BirefnetPipeline.fromPretrained: repo が必須",
+    "BirefnetPipeline.fromPretrained: repo is required",
   );
-  assertStringIncludes(error.message, 'BIREFNET_SOURCES["birefnet-hr"]（@karume/models/birefnet）');
+  assertStringIncludes(error.message, 'BIREFNET_SOURCES["birefnet-hr"] (@karume/models/birefnet)');
 });
 
 test("fromPretrained: umT5 と Wan2.2 は ref 欠落時に対応表を案内し、未公開の Wan2.1 は案内しない", async () => {
@@ -174,20 +178,20 @@ test("fromPretrained: umT5 と Wan2.2 は ref 欠落時に対応表を案内し�
   const umt5 = await assertRejects(
     () => Umt5Encoder.fromPretrained({ repo: "" }, { fetch: fetchStub }),
     Error,
-    "Umt5Encoder.fromPretrained: repo が必須",
+    "Umt5Encoder.fromPretrained: repo is required",
   );
-  assertStringIncludes(umt5.message, 'UMT5_SOURCES["umt5-xxl"]（@karume/models/umt5）');
+  assertStringIncludes(umt5.message, 'UMT5_SOURCES["umt5-xxl"] (@karume/models/umt5)');
   const wan22 = await assertRejects(
     () => WanTi2vPipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
     Error,
-    "WanTi2vPipeline.fromPretrained: repo が必須",
+    "WanTi2vPipeline.fromPretrained: repo is required",
   );
-  assertStringIncludes(wan22.message, 'WAN_SOURCES["wan2.2"]（@karume/models/wan）');
+  assertStringIncludes(wan22.message, 'WAN_SOURCES["wan2.2"] (@karume/models/wan)');
   const wan21 = await assertRejects(
     () => WanPipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
     Error,
-    "WanPipeline.fromPretrained: repo が必須",
+    "WanPipeline.fromPretrained: repo is required",
   );
-  assertStringIncludes(wan21.message, "リポ名の文字列（= main 追従）を渡す");
+  assertStringIncludes(wan21.message, "pass a repo name string (= tracks main)");
   assertEquals(wan21.message.includes("WAN_SOURCES"), false, wan21.message);
 });

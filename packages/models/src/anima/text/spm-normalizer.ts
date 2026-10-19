@@ -116,7 +116,7 @@ const clusterEnd = (tables: SpmTables, cps: readonly number[], i: number): numbe
  * different one).
  */
 export const parseSpmTables = (raw: unknown, label: string): SpmTables => {
-  if (typeof raw !== "object" || raw === null) throw new Error(`${label}: オブジェクトでない`);
+  if (typeof raw !== "object" || raw === null) throw new Error(`${label}: not an object`);
   const obj = raw as Record<string, unknown>;
   const single = new Map<number, string>();
   for (const entry of asArray(obj["single"], `${label}.single`)) {
@@ -126,7 +126,7 @@ export const parseSpmTables = (raw: unknown, label: string): SpmTables => {
       typeof entry[0] !== "number" ||
       typeof entry[1] !== "string"
     ) {
-      throw new Error(`${label}.single: [cp, 文字列] でない`);
+      throw new Error(`${label}.single: not [cp, string]`);
     }
     assertCodePoint(entry[0], `${label}.single`);
     setUnique(single, entry[0], entry[1], `${label}.single`);
@@ -140,7 +140,7 @@ export const parseSpmTables = (raw: unknown, label: string): SpmTables => {
       typeof entry[1] !== "number" ||
       typeof entry[2] !== "string"
     ) {
-      throw new Error(`${label}.multi: [cp, cp, 文字列] でない`);
+      throw new Error(`${label}.multi: not [cp, cp, string]`);
     }
     assertCodePoint(entry[0], `${label}.multi`);
     assertCodePoint(entry[1], `${label}.multi`);
@@ -156,6 +156,6 @@ export const parseSpmTables = (raw: unknown, label: string): SpmTables => {
 };
 
 const asArray = (value: unknown, label: string): unknown[] => {
-  if (!Array.isArray(value)) throw new Error(`${label}: 配列でない`);
+  if (!Array.isArray(value)) throw new Error(`${label}: not an array`);
   return value;
 };

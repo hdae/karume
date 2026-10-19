@@ -17,7 +17,7 @@ export const SPEAKER_MIN_TOKENS = 2;
 type PatchedReference = {
   readonly data: Float32Array<ArrayBuffer>;
   readonly tokens: number;
-  /** `latentDim × patchSize`。 */
+  /** `latentDim × patchSize`. */
   readonly width: number;
 };
 
@@ -39,14 +39,16 @@ export const patchReferenceLatent = (
   patchSize: number,
 ): PatchedReference => {
   if (latent.length % latentDim !== 0) {
-    throw new Error(`参照 latent の長さ ${latent.length} が latentDim ${latentDim} の倍数でない`);
+    throw new Error(
+      `Reference latent length ${latent.length} is not a multiple of latentDim ${latentDim}`,
+    );
   }
   const frames = latent.length / latentDim;
   const tokens = Math.floor(frames / patchSize);
   if (tokens < SPEAKER_MIN_TOKENS) {
     throw new Error(
-      `参照 latent のフレーム数 ${frames} が patch 幅 ${patchSize} × ${SPEAKER_MIN_TOKENS} に満たない` +
-        `（${tokens} トークン — speaker の記号次元の下限は ${SPEAKER_MIN_TOKENS} トークン）`,
+      `Reference latent frame count ${frames} is less than patch width ${patchSize} × ${SPEAKER_MIN_TOKENS}` +
+        ` (${tokens} tokens — the minimum of the speaker symbolic dimension is ${SPEAKER_MIN_TOKENS} tokens)`,
     );
   }
   const width = latentDim * patchSize;

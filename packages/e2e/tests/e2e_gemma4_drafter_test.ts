@@ -317,9 +317,9 @@ test.skipIf(!MIRROR_PRESENT)(
       });
 
     // hidden の幅が違う target（= 別世代）とは組めない。
-    assertThrows(() => admit(HIDDEN + 1, CAPACITY_SYMBOL), Error, "drafter 入力 'hidden'");
+    assertThrows(() => admit(HIDDEN + 1, CAPACITY_SYMBOL), Error, "drafter input 'hidden'");
     // 容量記号の綴りが違えば借り手 context の束縛点が無い。
-    assertThrows(() => admit(HIDDEN, "K"), Error, "drafter グラフの記号");
+    assertThrows(() => admit(HIDDEN, "K"), Error, "the drafter graph's symbols are");
     // 貸し手に共有テンソルが無い形（initializer を落とした target）。
     const stripped = {
       ...target,
@@ -336,7 +336,7 @@ test.skipIf(!MIRROR_PRESENT)(
           capacitySymbol: CAPACITY_SYMBOL,
         }),
       Error,
-      "共有 initializer",
+      "shared initializer",
     );
   },
 );

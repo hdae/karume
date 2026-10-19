@@ -21,9 +21,9 @@ export const rowMean = (
   width: number,
 ): Float32Array<ArrayBuffer> => {
   if (state.length !== rows * width) {
-    throw new Error(`系列の長さ ${state.length} が ${rows}×${width} と違う`);
+    throw new Error(`Sequence length ${state.length} differs from ${rows}×${width}`);
   }
-  if (rows < 1) throw new Error("系列が空（行平均を作れない）");
+  if (rows < 1) throw new Error("The sequence is empty (cannot take the row mean)");
   const out = new Float32Array(width);
   for (let column = 0; column < width; column += 1) {
     let sum = 0;

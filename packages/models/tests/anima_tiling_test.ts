@@ -169,7 +169,7 @@ test("planTileAxis: 受理集合の全 97 辺の開始位置を値で凍結す�
 test("planTileAxis: latent 64（512px）は 1 タイルに縮退しブレンド対が無い", () => {
   const axis = planTileAxis(64, 64, 8);
   assertEquals([...axis.starts], [0]);
-  assertThrows(() => blendExtentAt(axis, 8, 1), RangeError, "範囲外");
+  assertThrows(() => blendExtentAt(axis, 8, 1), RangeError, "out of range");
 });
 
 test("planTileAxis: どの latent 全長でも配置の不変条件が成り立つ", () => {
@@ -202,8 +202,8 @@ test("planTileAxis: どの latent 全長でも配置の不変条件が成り立�
 });
 
 test("planTileAxis: タイルより短い latent と広すぎる重なりは落とす", () => {
-  assertThrows(() => planTileAxis(32, 64, 8), Error, "タイル幅");
-  assertThrows(() => planTileAxis(128, 64, 64), Error, "重なり");
+  assertThrows(() => planTileAxis(32, 64, 8), Error, "tile width");
+  assertThrows(() => planTileAxis(128, 64, 64), Error, "overlap");
 });
 
 test("planVaeTiling: 縮尺は資産の入出力形から割り出し、軸は独立に配置する", () => {
@@ -217,12 +217,12 @@ test("planVaeTiling: 縮尺は資産の入出力形から割り出し、軸は�
   assertThrows(
     () => planVaeTiling([1, 8, 128, 128], [1, 16, 64, 64], [1, 3, 512, 512]),
     Error,
-    "チャネル数",
+    "channel count",
   );
   assertThrows(
     () => planVaeTiling([1, 16, 128, 128], [1, 16, 64, 64], [1, 3, 512, 256]),
     Error,
-    "縮尺",
+    "scale",
   );
   assertThrows(
     () => planVaeTiling([2, 16, 128, 128], [1, 16, 64, 64], [1, 3, 512, 512]),
@@ -260,7 +260,7 @@ test("latentTile: 整数でない添字（0.5・NaN）はゼロのタイルを�
     assertThrows(
       () => latentTile(latents, geometry, row, col),
       RangeError,
-      "範囲外",
+      "out of range",
       `(${row}, ${col})`,
     );
   }
@@ -335,11 +335,11 @@ test("assembleTiles: 渡されたタイルを破壊しない（in-place ブレ�
 test("assembleTiles: タイル枚数と要素数の食い違いを落とす", () => {
   const geometry = planVaeTiling([1, 2, 16, 16], [1, 2, 8, 8], [1, 1, 8, 8], 2);
   const flat = new Float32Array(64);
-  assertThrows(() => assembleTiles([flat], geometry), Error, "幾何の");
+  assertThrows(() => assembleTiles([flat], geometry), Error, "geometry's");
   assertThrows(
     () => assembleTiles([...Array.from({ length: 8 }, () => flat), new Float32Array(63)], geometry),
     Error,
-    "1 枚目",
+    "first tile's",
   );
 });
 

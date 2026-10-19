@@ -62,7 +62,7 @@ export class WanPromptEncoder {
   }
 
   /** Preprocessing only (the same string as the output of upstream `prompt_clean`). */
-  clean(prompt: string, label: string = "プロンプト"): string {
+  clean(prompt: string, label: string = "prompt"): string {
     return cleanPrompt(this.#promptClean, prompt, label);
   }
 
@@ -75,7 +75,7 @@ export class WanPromptEncoder {
    * while accumulating from the start) → under the lower limit (after preprocessing it is the shared
    * implementation — `Umt5Tokenizer.tokenize`).
    */
-  encode(prompt: string, label: string = "プロンプト"): Int32Array<ArrayBuffer> {
+  encode(prompt: string, label: string = "prompt"): Int32Array<ArrayBuffer> {
     return this.#tokenizer.tokenize(this.clean(prompt, label), label);
   }
 }
@@ -94,7 +94,9 @@ export const parseWanTokenizerAsset = (
   if (format !== WAN_TOKENIZER_FORMAT) {
     // Do not read an unknown version silently (if a field's meaning changed, there would be no
     // exception and only the id sequence would change).
-    throw new Error(`${label}: 形式 ${format} を読めない（${WAN_TOKENIZER_FORMAT} だけを読む）`);
+    throw new Error(
+      `${label}: cannot read format ${format} (only ${WAN_TOKENIZER_FORMAT} is read)`,
+    );
   }
   return {
     t5: parseT5Tables(obj, label),

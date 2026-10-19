@@ -60,7 +60,7 @@ const pseudoRandom = (length: number, seed: number): Float32Array<ArrayBuffer> =
 
 test("Fft: 2 冪でない変換長は作れない", () => {
   for (const size of [3, 1, 0, -4, 2.5]) {
-    assertThrows(() => new Fft(size), RangeError, "2 以上の 2 冪でない", `size=${size}`);
+    assertThrows(() => new Fft(size), RangeError, "is not a power of 2 >= 2", `size=${size}`);
   }
 });
 
@@ -68,7 +68,7 @@ test("Fft.powerSpectrum: 入力が変換長を超えたら落ちる（黙って�
   assertThrows(
     () => new Fft(8).powerSpectrum(new Float32Array(9), new Float64Array(5)),
     RangeError,
-    "変換長 8 を超えている",
+    "exceeds the transform length 8",
   );
 });
 
@@ -77,7 +77,7 @@ test("Fft.powerSpectrum: 出力が rfft のビン数に足りなければ落ち�
   assertThrows(
     () => new Fft(8).powerSpectrum(new Float32Array(4), new Float64Array(4)),
     RangeError,
-    "rfft の 5 ビンに足りない",
+    "is fewer than the 5 rfft bins",
   );
 });
 
@@ -85,7 +85,7 @@ test("Fft.autocorrelation: 変換長が信号長の 2 倍未満なら落ちる�
   assertThrows(
     () => new Fft(8).autocorrelation(new Float32Array(5), new Float64Array(4)),
     RangeError,
-    "2 倍以上の変換長が要る",
+    "requires a transform length of at least twice the signal length",
   );
 });
 
@@ -95,7 +95,7 @@ test("Fft.autocorrelation: 信号長以上の lag を求めたら落ちる（線
   assertThrows(
     () => new Fft(4).autocorrelation(Float32Array.from([1, 2]), new Float64Array(3)),
     RangeError,
-    "lag 2 が信号長 2 以上",
+    "lag 2 is >= the signal length 2",
   );
   // 境界: lag が信号長 − 1 まで（out.length = 信号長）は線形自己相関として通る。
   const out = new Float64Array(2);

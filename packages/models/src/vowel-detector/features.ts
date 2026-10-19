@@ -160,9 +160,9 @@ export const extractFeatures = (
 ): VowelFeatures => {
   if (melBasis.length !== N_MELS * MEL_BINS) {
     throw new Error(
-      `extractFeatures: mel 基底が ${melBasis.length} 要素（${N_MELS}×${MEL_BINS} = ${
+      `extractFeatures: the mel basis has ${melBasis.length} elements (${N_MELS}×${MEL_BINS} = ${
         N_MELS * MEL_BINS
-      } が要る）`,
+      } are required)`,
     );
   }
   const frames = featureFrameCount(audio.length);
@@ -171,8 +171,8 @@ export const extractFeatures = (
     // a longer waveform" (ADR 0107 decision 2). The mel basis just above is a number that comes
     // from the asset, so it stays a plain `Error`.
     throw new ModelInputError(
-      `extractFeatures: 波形が ${audio.length} サンプルしかない` +
-        `（${N_FFT} サンプル = ${(N_FFT / SAMPLE_RATE) * 1000}ms 以上が要る）`,
+      `extractFeatures: the waveform is only ${audio.length} samples` +
+        ` (at least ${N_FFT} samples = ${(N_FFT / SAMPLE_RATE) * 1000}ms are required)`,
     );
   }
   for (let index = 0; index < audio.length; index += 1) {
@@ -183,7 +183,7 @@ export const extractFeatures = (
     // it is input-caused (ADR 0107 decision 2).
     if (!Number.isFinite(value)) {
       throw new ModelInputError(
-        `extractFeatures: 波形の ${index} 番目のサンプル ${value} が非有限`,
+        `extractFeatures: waveform sample ${index} (${value}) is non-finite`,
       );
     }
   }

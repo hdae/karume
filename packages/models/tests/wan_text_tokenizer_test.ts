@@ -74,10 +74,10 @@ const encoder = new WanPromptEncoder({ t5: t5Tables, promptClean });
 
 /** トークナイザ側の拒否の理由 → メッセージの目印（前処理の拒否は `PromptCleanError.reason`）。 */
 const TOKENIZER_REJECTS: Record<string, string> = {
-  oov: "語彙に無い文字列",
-  "too-long": "上限 512",
-  "too-short": `最低 ${WAN_PROMPT_MIN_TOKENS}`,
-  "added-token": "特殊トークン",
+  oov: "not in the vocabulary",
+  "too-long": "upper bound 512",
+  "too-short": `minimum ${WAN_PROMPT_MIN_TOKENS}`,
+  "added-token": "special token",
   metaspace: "U+2581",
 };
 const PROMPT_CLEAN_REJECTS = new Set(["unassigned", "c1", "entity", "mojibake"]);
@@ -164,13 +164,13 @@ test("上限: 512 トークンちょうどは受理・513 は拒む（黙って�
   const max = encoder.encode(caseById("max-512").text);
   assertEquals(max.length, 512);
   assertEquals(max.at(-1), fixture.t5.eosId, "末尾は </s>");
-  assertThrows(() => encoder.encode(caseById("over-513").text), ModelInputError, "上限 512");
+  assertThrows(() => encoder.encode(caseById("over-513").text), ModelInputError, "upper bound 512");
 });
 
 test("下限: 2 トークンは受理・空文字と空白だけ（</s> だけ）は拒む", () => {
   assertEquals(encoder.encode("cat").length, WAN_PROMPT_MIN_TOKENS);
   for (const text of ["", " \n\t　 "]) {
-    assertThrows(() => encoder.encode(text), ModelInputError, `最低 ${WAN_PROMPT_MIN_TOKENS}`);
+    assertThrows(() => encoder.encode(text), ModelInputError, `minimum ${WAN_PROMPT_MIN_TOKENS}`);
   }
 });
 
@@ -184,7 +184,7 @@ test("拒否のメッセージに正 / ネガティブのラベルが出る", ()
 });
 
 test("孤立サロゲートは前処理の前に入力起因で拒む", () => {
-  assertThrows(() => encoder.encode("a\ud800b"), ModelInputError, "サロゲート");
+  assertThrows(() => encoder.encode("a\ud800b"), ModelInputError, "surrogate");
 });
 
 // ---- 共通層の方針（合成の小語彙で規則そのものを見る）-------------------------
@@ -226,11 +226,11 @@ test("上限: 拒む方針は `</s>` を含めてちょうど maxLength まで�
   const reject = new T5UnigramTokenizer(tinyTables(5), { unknown: "reject", overflow: "reject" });
   // `▁a` は ▁ + a の 2 id。"a a" = 4 id + </s> = 5（ちょうど上限）。
   assertEquals(reject.encode("a a"), [3, 4, 3, 4, 1]);
-  assertThrows(() => reject.encode("a a b"), ModelInputError, "上限 5");
+  assertThrows(() => reject.encode("a a b"), ModelInputError, "upper bound 5");
   // 最後の断片が予算をまたぐ形（4 + 2 = 6 id）も拒む。
-  assertThrows(() => reject.encode("a aa"), ModelInputError, "上限 5");
+  assertThrows(() => reject.encode("a aa"), ModelInputError, "upper bound 5");
   // 追加語彙は 1 id を出すので、予算ちょうどの後ろに来れば拒む。
-  assertThrows(() => reject.encode("a a</s>"), ModelInputError, "上限 5");
+  assertThrows(() => reject.encode("a a</s>"), ModelInputError, "upper bound 5");
 });
 
 test("上限: 予算ちょうどの後ろが空白だけの chunk なら id は増えないので拒まない", () => {
@@ -271,14 +271,14 @@ test("parseWanTokenizerAsset: 資産 JSON から組んだ encoder が符号化�
   const tiny = new WanPromptEncoder(assets);
   assertEquals(tiny.maxLength, 512);
   assertEquals([...tiny.encode("cat cat")], [4, 4, 1]);
-  assertThrows(() => tiny.encode("dog"), ModelInputError, "語彙に無い文字列");
+  assertThrows(() => tiny.encode("dog"), ModelInputError, "not in the vocabulary");
 });
 
 test("parseWanTokenizerAsset: 知らない形式の版は読まない", () => {
   assertThrows(
     () => parseWanTokenizerAsset(minimalAsset({ format: "karume-wan-umt5-tokenizer/2" })),
     Error,
-    "形式",
+    "cannot read format",
   );
 });
 
@@ -286,7 +286,7 @@ test("parseWanTokenizerAsset: 壊れた前処理の表は落とす（黙って�
   const clean = fixture.promptClean as Record<string, unknown>;
   const broken = (patch: Record<string, unknown>): Record<string, unknown> =>
     minimalAsset({ promptClean: { ...clean, ...patch } });
-  assertThrows(() => parseWanTokenizerAsset(broken({ badness: "[" })), Error, "正規表現");
+  assertThrows(() => parseWanTokenizerAsset(broken({ badness: "[" })), Error, "regular expression");
   assertThrows(
     () =>
       parseWanTokenizerAsset(
@@ -298,7 +298,7 @@ test("parseWanTokenizerAsset: 壊れた前処理の表は落とす（黙って�
         }),
       ),
     Error,
-    "重なる",
+    "overlaps",
   );
   assertThrows(
     () =>
@@ -311,18 +311,14 @@ test("parseWanTokenizerAsset: 壊れた前処理の表は落とす（黙って�
         }),
       ),
     Error,
-    "重複",
+    "duplicate",
   );
   assertThrows(
     () => parseWanTokenizerAsset(broken({ ligatures: [[0xfb01, "\ud800"]] })),
     Error,
-    "サロゲート",
+    "surrogate",
   );
-  assertThrows(
-    () => parseWanTokenizerAsset(broken({ width: [[-1, "A"]] })),
-    Error,
-    "コードポイント",
-  );
+  assertThrows(() => parseWanTokenizerAsset(broken({ width: [[-1, "A"]] })), Error, "code point");
 });
 
 test("parseWanTokenizerAsset: badness の式が ftfy 6.3.1 の固定の翻訳と違えば、式を実行せずに落とす", () => {
@@ -341,7 +337,7 @@ test("parseWanTokenizerAsset: badness の式が ftfy 6.3.1 の固定の翻訳と
     assertThrows(
       () => parseWanTokenizerAsset(withBadness(badness)),
       Error,
-      "BADNESS_RE の固定の翻訳と違う",
+      "differs from the fixed translation of ftfy 6.3.1's BADNESS_RE",
       label,
     );
   }
@@ -359,12 +355,12 @@ test("parseWanTokenizerAsset: 語彙の値域門は T5 の共通層と同じ（�
         }),
       ),
     Error,
-    "重複は配布の破損",
+    "a duplicate is a corrupt distribution",
   );
   assertThrows(
     () => parseWanTokenizerAsset(minimalAsset({ scores: [0, 0, 0, 0, -1, Number.NaN] })),
     Error,
-    "有限",
+    "finite",
   );
 });
 

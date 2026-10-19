@@ -75,10 +75,10 @@ const tokenizer = new Umt5Tokenizer(t5Tables);
 
 /** 拒否の理由 → メッセージの目印（理由ごとに他の理由の文言に現れない綴り）。 */
 const REJECT_MARKERS: Record<string, string> = {
-  oov: "語彙に無い文字列",
-  "too-long": `上限 ${UMT5_MAX_LENGTH}`,
-  "too-short": `最低 ${UMT5_MIN_TOKENS}`,
-  "added-token": "特殊トークン",
+  oov: "not in the vocabulary",
+  "too-long": `upper bound ${UMT5_MAX_LENGTH}`,
+  "too-short": `minimum ${UMT5_MIN_TOKENS}`,
+  "added-token": "special token",
   metaspace: "U+2581",
   whitespace: "U+0020",
 };
@@ -175,7 +175,7 @@ test("拒否の順: 追加語彙 → 空白の直後の ▁ → 空白 → 語�
 
 test("拒否の文言に呼び手のラベルが出る・孤立サロゲートは入力起因で拒む", () => {
   assertThrows(() => tokenizer.tokenize("\u{2000b}", "negative"), ModelInputError, "negative:");
-  assertThrows(() => tokenizer.tokenize("a\ud800b"), ModelInputError, "サロゲート");
+  assertThrows(() => tokenizer.tokenize("a\ud800b"), ModelInputError, "surrogate");
 });
 
 // ---- Wan の経路（前処理の後に同じトークナイザを通す）---------------------------
@@ -248,7 +248,7 @@ test("parseUmt5TokenizerAsset: 資産 JSON から組んだトークナイザが�
   const tiny = new Umt5Tokenizer(parseUmt5TokenizerAsset(minimalAsset()));
   assertEquals(tiny.maxLength, 512);
   assertEquals([...tiny.tokenize("cat cat")], [4, 4, 1]);
-  assertThrows(() => tiny.tokenize("dog"), ModelInputError, "語彙に無い文字列");
+  assertThrows(() => tiny.tokenize("dog"), ModelInputError, "not in the vocabulary");
   assertThrows(() => tiny.tokenize("cat\tcat"), ModelInputError, "U+0009");
 });
 
@@ -257,7 +257,7 @@ test("parseUmt5TokenizerAsset: 知らない形式の版は読まない（Wan の
     assertThrows(
       () => parseUmt5TokenizerAsset(minimalAsset({ format })),
       Error,
-      `形式 ${format} を読めない`,
+      `cannot read format ${format}`,
     );
   }
   assertThrows(
@@ -265,14 +265,18 @@ test("parseUmt5TokenizerAsset: 知らない形式の版は読まない（Wan の
     Error,
     "tokenizer.format",
   );
-  assertThrows(() => parseUmt5TokenizerAsset("tokenizer"), Error, "オブジェクトでない");
+  assertThrows(() => parseUmt5TokenizerAsset("tokenizer"), Error, "not an object");
 });
 
 test("parseUmt5TokenizerAsset: 壊れた表は落とす（入力起因ではない素の Error）", () => {
   const rejected: readonly [string, Record<string, unknown>, string][] = [
-    ["スコアの本数違い", { scores: [0, 0, 0, 0, -1] }, "scores の長さ"],
-    ["語彙の重複行", { vocabText: "<pad>\n</s>\n<s>\n<unk>\n▁cat\n▁cat" }, "重複は配布の破損"],
-    ["非有限のスコア", { scores: [0, 0, 0, 0, -1, Number.NaN] }, "有限"],
+    ["スコアの本数違い", { scores: [0, 0, 0, 0, -1] }, "the length of scores"],
+    [
+      "語彙の重複行",
+      { vocabText: "<pad>\n</s>\n<s>\n<unk>\n▁cat\n▁cat" },
+      "a duplicate is a corrupt distribution",
+    ],
+    ["非有限のスコア", { scores: [0, 0, 0, 0, -1, Number.NaN] }, "finite"],
     [
       "空白の表の重なり",
       {
@@ -281,7 +285,7 @@ test("parseUmt5TokenizerAsset: 壊れた表は落とす（入力起因ではな�
           [0x20, 0x20],
         ],
       },
-      "重なる",
+      "overlaps",
     ],
     ["最大長が無い", { maxLength: undefined }, "maxLength"],
     ["eos が語彙の外", { eosId: 6 }, "eosId"],

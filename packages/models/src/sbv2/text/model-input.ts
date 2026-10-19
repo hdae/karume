@@ -67,16 +67,16 @@ export const assertWordPhones = (phones: readonly string[], words: readonly Sbv2
   const derived = phones.slice(1, -1);
   if (aligned.length !== derived.length) {
     throw new Sbv2InputError(
-      `moras から組んだ音素数 ${derived.length} が words の音素数 ${aligned.length} と違う` +
-        "（moras と words は同じ解析から採ったものを渡す — 読みを変えたいなら解析からやり直す）",
+      `The phoneme count ${derived.length} built from moras differs from the phoneme count ${aligned.length} of words` +
+        " (pass moras and words taken from the same analysis — to change the reading, redo the analysis)",
     );
   }
   for (const [index, phone] of derived.entries()) {
     if (phone !== aligned[index]) {
       throw new Sbv2InputError(
-        `moras から組んだ音素[${index}] = ${JSON.stringify(phone)} が words の` +
-          ` ${JSON.stringify(aligned[index])} と違う（動かせるのは tone だけ —` +
-          "音素を変える編集〈vowel / consonant の書き換え・記号の増減〉は受け付けない）",
+        `Phoneme[${index}] = ${JSON.stringify(phone)} built from moras differs from words'` +
+          ` ${JSON.stringify(aligned[index])} (only tone may be changed —` +
+          " edits that change phonemes (rewriting vowel / consonant, adding or removing symbols) are not accepted)",
       );
     }
   }
@@ -105,8 +105,8 @@ export const buildSbv2ModelInput = (
     // normal form yielding a different token count, etc.), so it is input-caused = 400. The caller
     // fixes it by restoring words to what the analysis produced.
     throw new Sbv2InputError(
-      `input_ids 長(${inputIds.length}) !== word2ph 長(${baseWord2ph.length})` +
-        `（bertText=${JSON.stringify(bertText)}）`,
+      `input_ids length(${inputIds.length}) !== word2ph length(${baseWord2ph.length})` +
+        ` (bertText=${JSON.stringify(bertText)})`,
     );
   }
   return {

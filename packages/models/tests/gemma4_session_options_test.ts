@@ -181,7 +181,7 @@ describe("Gemmaのquant実行設定", () => {
         assertEquals(resolve(spec, {}, "test"), spec);
         continue;
       }
-      assertThrows(() => resolve(spec, {}, "test"), Error, `session.${key}は未対応`);
+      assertThrows(() => resolve(spec, {}, "test"), Error, `session.${key} is not supported`);
       rejected.push(key);
     }
     assertEquals([...accepted, ...rejected].sort(), Object.keys(full).sort());
@@ -197,11 +197,11 @@ describe("Gemmaのquant実行設定", () => {
     // 期待メッセージまで縛るのは、型検査ではなく組合せ検査で落ちる「理由のすり替わり」を
     // 通さないため（resolveは4種類の異なる理由でthrowする）。
     const invalid = [
-      ["linearGemvReduce", "linearGemvReduceが不正"],
-      ["stateAttentionReduce", "stateAttentionReduceが不正"],
-      ["fuseRmsNormAdd", "fuseRmsNormAddはbooleanでなければならない"],
-      ["fuseLinearStaticQuantize", "fuseLinearStaticQuantizeはbooleanでなければならない"],
-      ["packedStaticQuantize", "packedStaticQuantizeはbooleanでなければならない"],
+      ["linearGemvReduce", "linearGemvReduce is invalid"],
+      ["stateAttentionReduce", "stateAttentionReduce is invalid"],
+      ["fuseRmsNormAdd", "fuseRmsNormAdd must be a boolean"],
+      ["fuseLinearStaticQuantize", "fuseLinearStaticQuantize must be a boolean"],
+      ["packedStaticQuantize", "packedStaticQuantize must be a boolean"],
     ] as const;
     for (const [key, message] of invalid) {
       for (const value of [null, 0, 1, [], object]) {
@@ -269,7 +269,7 @@ describe("Gemmaのquant実行設定（明示指定だけの門）", () => {
     assertThrows(
       () => assertGemmaSessionOverrides(bogus, "test"),
       ModelInputError,
-      "fuseRmsNormAddはbooleanでなければならない",
+      "fuseRmsNormAdd must be a boolean",
     );
   });
   it("resolveが同じ明示指定に下す判定と一致する", () => {

@@ -341,7 +341,7 @@ test("資産パーサ: 行数不一致と必須キー欠落は fail loudly", () 
   assertThrows(
     () => parseIrodoriTokenizerAsset({ ...base, scores: [0, 0] }),
     Error,
-    "scores の長さ",
+    "the length of scores",
   );
   for (const key of [
     "vocabText",
@@ -360,7 +360,7 @@ test("資産パーサ: 行数不一致と必須キー欠落は fail loudly", () 
       key === "scores" ? "scores" : key,
     );
   }
-  assertThrows(() => parseIrodoriTokenizerAsset(undefined), Error, "オブジェクトでない");
+  assertThrows(() => parseIrodoriTokenizerAsset(undefined), Error, "not an object");
 });
 
 test("資産パーサ: 特殊 id は整数かつ語彙の行数未満（Int32Array で沈黙切り捨てになる前に落とす）", () => {
@@ -383,23 +383,23 @@ test("資産パーサ: 特殊 id は整数かつ語彙の行数未満（Int32Arr
   assertThrows(
     () => parseIrodoriTokenizerAsset({ ...base, unkId: 1.5 }),
     Error,
-    "tokenizer.unkId: トークン id が 0..2147483647 の整数でない（1.5）",
+    "tokenizer.unkId: token id is not an integer in 0..2147483647 (1.5)",
   );
   assertThrows(
     () => parseIrodoriTokenizerAsset({ ...base, byteBaseId: -1 }),
     Error,
-    "tokenizer.byteBaseId: トークン id が 0..2147483647 の整数でない（-1）",
+    "tokenizer.byteBaseId: token id is not an integer in 0..2147483647 (-1)",
   );
   // 語彙の行数ちょうど = 1 つ外側（バイト行込みで VOCAB_SIZE 行）。
   assertThrows(
     () => parseIrodoriTokenizerAsset({ ...base, bosId: VOCAB_SIZE }),
     Error,
-    `tokenizer.bosId: トークン id ${VOCAB_SIZE} が語彙の行数 ${VOCAB_SIZE} 以上`,
+    `tokenizer.bosId: token id ${VOCAB_SIZE} is not below the vocabulary row count ${VOCAB_SIZE}`,
   );
   assertThrows(
     () => parseIrodoriTokenizerAsset({ ...base, addedTokens: [["<unk>", 0.5]] }),
     Error,
-    "トークン id が 0..2147483647 の整数でない（0.5）",
+    "token id is not an integer in 0..2147483647 (0.5)",
   );
 });
 
@@ -420,18 +420,18 @@ test("資産パーサ: 追加トークンの id は語彙の行数未満で、�
   assertThrows(
     () => parseIrodoriTokenizerAsset({ ...base, addedTokens: [["<s>", 2147483647]] }),
     Error,
-    'tokenizer.addedTokens: "<s>" の id 2147483647 が語彙の行数 300 以上',
+    'tokenizer.addedTokens: "<s>" has id 2147483647, which is >= the vocabulary row count 300',
   );
   // 境界: 行数ちょうどは 1 つ外側。
   assertThrows(
     () => parseIrodoriTokenizerAsset({ ...base, addedTokens: [["<x>", VOCAB_SIZE]] }),
     Error,
-    `が語彙の行数 ${VOCAB_SIZE} 以上`,
+    `, which is >= the vocabulary row count ${VOCAB_SIZE}`,
   );
   assertThrows(
     () => parseIrodoriTokenizerAsset({ ...base, addedTokens: [["<s>", 1]] }),
     Error,
-    'tokenizer.addedTokens: "<s>" の id 1 が語彙の行 0 と食い違う',
+    'tokenizer.addedTokens: "<s>" has id 1, which disagrees with vocabulary row 0',
   );
   // 正例: 語彙と一致する綴り・語彙に無い綴りの範囲内の id はどちらも通る。
   const parsed = parseIrodoriTokenizerAsset({
@@ -469,7 +469,7 @@ test("資産パーサ: byteBaseId はバイト 256 本の連番全体が語彙�
   assertThrows(
     () => parseIrodoriTokenizerAsset({ ...base, byteBaseId: 299 }),
     Error,
-    "バイト 256 本",
+    "the 256 bytes",
   );
   // 正例: byteBaseId = 300 − 256 = 44 はちょうど収まる（44..299 の 256 本が末尾まで）。
   const parsed = parseIrodoriTokenizerAsset({ ...base, byteBaseId: 44 });
@@ -494,7 +494,7 @@ test("資産パーサ: byteBaseId からの 256 行は <0x00>..<0xFF> の綴り�
   assertThrows(
     () => parseIrodoriTokenizerAsset({ ...base, vocabText: [...words, ...swapped].join("\n") }),
     Error,
-    `tokenizer.byteBaseId: 行 ${44 + 0x41} が <0x41> でない`,
+    `tokenizer.byteBaseId: row ${44 + 0x41} is not <0x41>`,
   );
   // 1 つずれた位置（先頭が語彙の単語）も同じく落ちる。
   assertThrows(
@@ -505,7 +505,7 @@ test("資産パーサ: byteBaseId からの 256 行は <0x00>..<0xFF> の綴り�
         byteBaseId: 43,
       }),
     Error,
-    "tokenizer.byteBaseId: 行 43 が <0x00> でない",
+    "tokenizer.byteBaseId: row 43 is not <0x00>",
   );
 });
 
@@ -536,7 +536,7 @@ test("資産パーサ: 語彙の重複行・追加語彙の重複鍵は落とす
   assertThrows(
     () => parseIrodoriTokenizerAsset({ ...base, vocabText: duplicated.join("\n") }),
     Error,
-    `tokenizer.vocabText: 行 ${VOCAB_SIZE - 1} が行 0 と同じトークン`,
+    `tokenizer.vocabText: line ${VOCAB_SIZE - 1} has the same token as line 0`,
   );
   // 追加語彙は正規化の**前**に切り出されるので、後勝ちは切り出し先 id を静かに変える。
   assertThrows(
@@ -549,7 +549,7 @@ test("資産パーサ: 語彙の重複行・追加語彙の重複鍵は落とす
         ],
       }),
     Error,
-    "tokenizer.addedTokens: 鍵 ",
+    "tokenizer.addedTokens: duplicate key ",
   );
 });
 
@@ -578,7 +578,7 @@ test("資産パーサ: scores は有限（minScore が汚れると未知ノー�
           scores: scores.map((value, index) => (index === 7 ? bad : value)),
         }),
       Error,
-      "tokenizer.scores[7]: 有限の数値でない",
+      "tokenizer.scores[7]: not a finite number",
     );
   }
 });
@@ -588,7 +588,7 @@ test("資産パーサ: scores は有限（minScore が汚れると未知ノー�
 test("対にならないサロゲートは受け付けない（正本に無い入力を黙って通さない）", () => {
   // 生成要求の本文として通るので入力起因（ADR 0107 決定 2 — 文字を直せば通る）。受理条件の
   // 正本は `toCodePoints` 1 本のままなので、所有者の診断は `cause` に残る。
-  const error = assertThrows(() => tokenizer.encode("a\ud800b"), ModelInputError, "サロゲート");
+  const error = assertThrows(() => tokenizer.encode("a\ud800b"), ModelInputError, "surrogate");
   assert(error.cause instanceof Error);
   assert(!(error.cause instanceof ModelInputError), "cause は共有ヘルパの素の Error");
   // 逆側: 対になっているサロゲート（U+1F600 など）は通る。

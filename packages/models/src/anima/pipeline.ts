@@ -498,14 +498,16 @@ const assetBytes = (
  */
 const graphInputShape = (model: GraphOwner, inputName: string): readonly (number | string)[] => {
   const spec = model.graph.inputs.find((input) => input.name === inputName);
-  if (spec === undefined) throw new Error(`グラフ入力 '${inputName}' が無い`);
+  if (spec === undefined) throw new Error(`Graph input '${inputName}' is missing`);
   return spec.shape;
 };
 
 const staticInputShape = (model: GraphOwner, inputName: string): readonly number[] =>
   graphInputShape(model, inputName).map((dim, axis) => {
     if (typeof dim !== "number") {
-      throw new Error(`グラフ入力 '${inputName}' の軸 ${axis} が静的次元でない（${String(dim)}）`);
+      throw new Error(
+        `Graph input '${inputName}': axis ${axis} is not a static dimension (${String(dim)})`,
+      );
     }
     return dim;
   });
@@ -517,7 +519,9 @@ const staticOutputShape = (model: GraphOwner): readonly number[] => {
   const name = model.graph.outputs[0];
   return graphOutputShape(model).map((dim, axis) => {
     if (typeof dim !== "number") {
-      throw new Error(`グラフ出力 '${name}' の軸 ${axis} が静的次元でない（${String(dim)}）`);
+      throw new Error(
+        `Graph output '${name}': axis ${axis} is not a static dimension (${String(dim)})`,
+      );
     }
     return dim;
   });
@@ -530,12 +534,12 @@ const staticOutputShape = (model: GraphOwner): readonly number[] => {
  */
 const featureWidth = (dims: readonly (number | string)[], where: string): number => {
   const last = dims.at(-1);
-  if (typeof last !== "number") throw new Error(`${where} の最終次元が静的でない`);
+  if (typeof last !== "number") throw new Error(`${where}: the last dimension is not static`);
   return last;
 };
 
 const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
-  if (tensor.dtype !== "f32") throw new Error(`${where}: f32 でない（${tensor.dtype}）`);
+  if (tensor.dtype !== "f32") throw new Error(`${where}: not f32 (${tensor.dtype})`);
   return tensor.data;
 };
 
@@ -617,15 +621,15 @@ export const resolveNegativePrompt = (
   // the non-finite `guidanceScale` check at the same entry.
   if (!wantsUncond && requested !== undefined) {
     throw new ModelInputError(
-      `guidanceScale ${guidance} では uncond 側を計算しないので negativePrompt は効かない` +
-        "（効かせるなら guidanceScale を 1 以外にする）",
+      `guidanceScale ${guidance} does not compute the uncond side, so negativePrompt has no effect` +
+        " (to make it take effect, set guidanceScale to a value other than 1)",
     );
   }
   const negativePrompt = requested ?? fallback;
   if (wantsUncond && negativePrompt === undefined) {
     throw new ModelInputError(
-      `guidanceScale ${guidance} は uncond 側を計算するので negativePrompt が要る` +
-        "（manifest の pipelineConfig.defaults.negativePrompt か request で渡す）",
+      `guidanceScale ${guidance} computes the uncond side, so negativePrompt is required` +
+        " (pass it in the manifest's pipelineConfig.defaults.negativePrompt or in the request)",
     );
   }
   return negativePrompt;
@@ -676,8 +680,8 @@ export const denoiseStep = (
     throw new Error(
       `AnimaPipeline: step ${
         input.index + 1
-      }/${steps} の更新後の latent の要素 ${broken} が非有限` +
-        `（${value}）— DiT の出力・CFG の合成・更新則のどこかが溢れた（次の step と VAE の段へは渡さない）`,
+      }/${steps}: element ${broken} of the updated latent is non-finite` +
+        ` (${value}) — the DiT output, the CFG mix or the update rule overflowed (not passed to the next step or the VAE stage)`,
     );
   }
   return update;
@@ -727,10 +731,10 @@ type DynDitPlan = {
  * (rebuilding it every step would add a waste of 4MB×2 per step at 1024px).
  */
 const planDynDit = (model: GraphOwner, ropeBase: RopeBase, resolution: ImageSize): DynDitPlan => {
-  const tokenWidth = featureWidth(graphInputShape(model, "tokens"), "グラフ入力 'tokens'");
+  const tokenWidth = featureWidth(graphInputShape(model, "tokens"), "graph input 'tokens'");
   const geometry = ditPatchGeometry(
     tokenWidth,
-    featureWidth(graphOutputShape(model), "グラフ出力"),
+    featureWidth(graphOutputShape(model), "graph output"),
   );
   // MUST: derive the latent size **from the resolution** (the S-form graph holds no resolution). A
   // mix-up is caught by the "output image size == requested resolution" check at the end of
@@ -742,8 +746,8 @@ const planDynDit = (model: GraphOwner, ropeBase: RopeBase, resolution: ImageSize
   const latentWidth = resolution.width / ANIMA_SPATIAL_COMPRESSION;
   if (!Number.isInteger(latentHeight) || !Number.isInteger(latentWidth)) {
     throw new Error(
-      `解像度 ${resolution.width}×${resolution.height} が空間圧縮率 ${ANIMA_SPATIAL_COMPRESSION}` +
-        " で割り切れない",
+      `Resolution ${resolution.width}×${resolution.height}: the spatial compression ratio ${ANIMA_SPATIAL_COMPRESSION}` +
+        " does not divide it",
     );
   }
   const latentShape = [1, geometry.channels, latentHeight, latentWidth];
@@ -950,7 +954,7 @@ export class AnimaPipeline {
     const source = toManifestSource(
       ref,
       "AnimaPipeline.fromPretrained",
-      'ANIMA_SOURCES["anima"]（@karume/models/anima）',
+      'ANIMA_SOURCES["anima"] (@karume/models/anima)',
     );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
@@ -1031,24 +1035,24 @@ export class AnimaPipeline {
     const modelName = options.model ?? manifest.defaultModel;
     if (!Object.hasOwn(manifest.models, modelName)) {
       throw new Error(
-        `AnimaPipeline: model '${modelName}' は manifest に無い` +
-          `（利用可能: ${manifest.available.models.join(" / ")}）`,
+        `AnimaPipeline: model '${modelName}' is not in the manifest` +
+          ` (available: ${manifest.available.models.join(" / ")})`,
       );
     }
     const entry: ModelEntry = manifest.models[modelName];
     const { name, major } = entry.pipeline;
     if (name !== ANIMA_PIPELINE_NAME) {
       throw new Error(
-        `AnimaPipeline: manifest の pipeline が '${name}/${major}'` +
-          `（'${ANIMA_PIPELINE_NAME}/${ANIMA_PIPELINE_MAJOR}' が必要）`,
+        `AnimaPipeline: the manifest's pipeline is '${name}/${major}'` +
+          ` ('${ANIMA_PIPELINE_NAME}/${ANIMA_PIPELINE_MAJOR}' is required)`,
       );
     }
     if (major !== ANIMA_PIPELINE_MAJOR) {
       // The only check that stops the silent degradation of "old implementation × new repository"
       // (ADR 0038 §6).
       throw new Error(
-        `AnimaPipeline: pipeline '${name}/${major}' の major に未対応` +
-          `（この実装が読めるのは ${ANIMA_PIPELINE_NAME}/${ANIMA_PIPELINE_MAJOR}）`,
+        `AnimaPipeline: the major of pipeline '${name}/${major}' is not supported` +
+          ` (this implementation reads ${ANIMA_PIPELINE_NAME}/${ANIMA_PIPELINE_MAJOR})`,
       );
     }
     const config = parseAnimaPipelineConfig(entry.pipelineConfig);
@@ -1056,8 +1060,8 @@ export class AnimaPipeline {
     const quantName = options.quant ?? entry.defaultQuant;
     if (!Object.hasOwn(entry.quants, quantName)) {
       throw new Error(
-        `AnimaPipeline: quant '${quantName}' は manifest に無い` +
-          `（利用可能: ${entry.available.quants.join(" / ")}）`,
+        `AnimaPipeline: quant '${quantName}' is not in the manifest` +
+          ` (available: ${entry.available.quants.join(" / ")})`,
       );
     }
     const quant = entry.quants[quantName];
@@ -1244,7 +1248,7 @@ export class AnimaPipeline {
     // The disposed check happens at call time (checked inside the chain, generations accepted
     // before the dispose would fail along with it).
     if (this.#disposal !== undefined) {
-      throw new Error("AnimaPipeline: dispose 済みでは生成できない");
+      throw new Error("AnimaPipeline: cannot generate after dispose");
     }
     return await this.#chain(() => this.#generate(request));
   }
@@ -1280,7 +1284,9 @@ export class AnimaPipeline {
     // the DiT output fails, with the step named, in the post-update finiteness check
     // (`denoiseStep`).
     if (!Number.isFinite(Math.fround(guidance))) {
-      throw new ModelInputError(`guidanceScale ${guidance} が f32 に収まる有限の数でない`);
+      throw new ModelInputError(
+        `guidanceScale ${guidance} is not a finite number that fits in f32`,
+      );
     }
     // Effective residency (request ?? construction option). It means "keep the DiT **after** this
     // generate" — a resident DiT present at the start is used whatever the value
@@ -1334,9 +1340,9 @@ export class AnimaPipeline {
     };
 
     // --- ① Prompt layer (no GPU, deterministic) ------------------------------------
-    const positive = state.tokenizers.encode(request.prompt, "プロンプト");
+    const positive = state.tokenizers.encode(request.prompt, "prompt");
     const negative = wantsUncond
-      ? state.tokenizers.encode(negativePrompt as string, "ネガティブプロンプト")
+      ? state.tokenizers.encode(negativePrompt as string, "negative prompt")
       : undefined;
     const sigmas = sigmaSchedule(steps, state.config.scheduler.shift);
 
@@ -1402,7 +1408,9 @@ export class AnimaPipeline {
           const embedShape = staticInputShape(model, "encoder_hidden_states");
           const [, rows, width] = embedShape;
           if (embeds[0].shape[2] !== width) {
-            throw new Error(`conditioner 出力の幅 ${embeds[0].shape[2]} が DiT の ${width} と違う`);
+            throw new Error(
+              `Conditioner output width ${embeds[0].shape[2]} does not match the DiT's ${width}`,
+            );
           }
           /**
            * Runs one latent through the DiT. It only wraps patchify at the entry and unpatchify at
@@ -1425,7 +1433,7 @@ export class AnimaPipeline {
               rope_sin: { dtype: "f32", shape: plan.ropeShape, data: plan.sin },
             });
             return unpatchifyTokens(
-              asF32(output, "DiT 出力（S 形）"),
+              asF32(output, "DiT output (S form)"),
               plan.latentShape,
               plan.geometry,
             );
@@ -1494,7 +1502,7 @@ export class AnimaPipeline {
         let decodedTiles = 0;
         const pixels = await decodeTiled(denormalized, geometry, async (tile, row, col) => {
           const output = await run({ latents: { dtype: "f32", shape: tileShape, data: tile } });
-          const sample = asF32(output, `VAE 出力（タイル ${row},${col}）`);
+          const sample = asF32(output, `VAE output (tile ${row},${col})`);
           decodedTiles += 1;
           await emit({ kind: "vae-tile", tile: decodedTiles, tiles });
           return sample;
@@ -1519,11 +1527,11 @@ export class AnimaPipeline {
       // Consistency with the element count is checked by `imageToRgba`.
       if (decoded.width !== resolution.width || decoded.height !== resolution.height) {
         throw new Error(
-          `VAE 出力が ${decoded.width}×${decoded.height} で要求解像度 ${formatResolution(
+          `VAE output ${decoded.width}×${decoded.height} does not match the requested resolution ${formatResolution(
             resolution,
-          )} と違う（タイル ${decoded.tiles} 枚 / ブレンド 縦 [${decoded.blend[0]}] 横 [${
+          )} (${decoded.tiles} tiles / blend vertical [${decoded.blend[0]}] horizontal [${
             decoded.blend[1]
-          }]px）`,
+          }]px)`,
         );
       }
 

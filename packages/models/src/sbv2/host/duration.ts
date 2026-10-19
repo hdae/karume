@@ -59,7 +59,7 @@ export const durationsToFrames = (
   const phonemes = logwSdp.length;
   if (logwDp.length !== phonemes || xMask.length !== phonemes) {
     throw new Error(
-      `長さ不一致 logw_sdp=${phonemes} logw_dp=${logwDp.length} x_mask=${xMask.length}`,
+      `Length mismatch logw_sdp=${phonemes} logw_dp=${logwDp.length} x_mask=${xMask.length}`,
     );
   }
   const wCeil = new Int32Array(phonemes);
@@ -70,13 +70,17 @@ export const durationsToFrames = (
     if (!Number.isFinite(frames) || frames < 0) {
       // Passing a diverged logw (broken front values) downstream as "a huge Ty" makes only the
       // allocation size abnormal and turns it into an OOM far from its cause. Fail here.
-      throw new Error(`音素 ${i} の継続長 ${frames} が有限の非負値でない`);
+      throw new Error(
+        `Phoneme ${i} has duration ${frames}, which is not a finite non-negative value`,
+      );
     }
     wCeil[i] = frames;
     total += frames;
   }
   if (total < 1) {
-    throw new Error("総フレーム数が 0（発話にならない — x_mask か front 出力を疑う）");
+    throw new Error(
+      "The total frame count is 0 (not an utterance — suspect x_mask or the front output)",
+    );
   }
   if (total > maxFrames) {
     // MUST: only this one is a `Sbv2InputError`. The other throws in this file mean the front
@@ -84,8 +88,8 @@ export const durationsToFrames = (
     // lengthScale cannot be accepted" = input-caused (400), which the caller fixes by fixing the
     // request (the classification axis of `errors.ts`).
     throw new Sbv2InputError(
-      `総フレーム数 ${total} が配布形の上限 maxFrames=${maxFrames} を超えている` +
-        "（text を短く分けるか lengthScale を下げる）",
+      `The total frame count ${total} exceeds the distribution's maximum maxFrames=${maxFrames}` +
+        " (split the text into shorter parts or lower lengthScale)",
     );
   }
   const expandIdx = new Int32Array(total);

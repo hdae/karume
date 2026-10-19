@@ -37,7 +37,7 @@ describe("wanConditionMask（I2V の条件マスク）", () => {
     assertThrows(
       () => wanConditionMask("t2v", GRID, PATCH, true, OWNER),
       Error,
-      `${OWNER}: 入力の形 't2v' の DiT は条件の潜在を受けない`,
+      `${OWNER}: a DiT of input form 't2v' does not accept a condition latent`,
     );
   });
 
@@ -48,7 +48,7 @@ describe("wanConditionMask（I2V の条件マスク）", () => {
     assertThrows(
       () => wanConditionMask("ti2v", grid, patch, true, OWNER),
       Error,
-      `${OWNER}: 時間の patch 2 では先頭の潜在フレームがトークンのフレームに揃わない`,
+      `${OWNER}: with temporal patch 2 the first latent frame does not align with the token frames`,
     );
   });
 
@@ -66,7 +66,7 @@ describe("withWanFirstFrameCondition（モデル入力の先頭フレームの�
     assertThrows(
       () => withWanFirstFrameCondition(new Float32Array(7), new Float32Array(4), [1, 2, 1, 4]),
       Error,
-      "条件の置き換え: 潜在 7 要素・条件 4 要素が潜在の形 [1, 2, 1, 4]（条件は 1 フレーム）と合わない",
+      "Condition replacement: latent 7 elements, condition 4 elements do not match the latent shape [1, 2, 1, 4] (the condition is 1 frame)",
     );
   });
 
@@ -74,7 +74,7 @@ describe("withWanFirstFrameCondition（モデル入力の先頭フレームの�
     assertThrows(
       () => withWanFirstFrameCondition(new Float32Array(8), new Float32Array(8), [1, 2, 1, 4]),
       Error,
-      "条件の置き換え: 潜在 8 要素・条件 8 要素",
+      "Condition replacement: latent 8 elements, condition 8 elements",
     );
   });
 

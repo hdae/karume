@@ -95,20 +95,26 @@ export const approximatePreview = (
   readonly rgba: Uint8ClampedArray<ArrayBuffer>;
 } => {
   if (shape.length !== 4) {
-    throw new Error(`プレビュー近似は [1,C,H,W] 前提（shape [${shape}] は 4 軸でない）`);
+    throw new Error(
+      `Preview approximation assumes [1,C,H,W] (shape [${shape}] does not have 4 axes)`,
+    );
   }
   if (shape[0] !== 1) {
-    throw new Error(`プレビュー近似は batch=1 前提（B=${shape[0]} はチャネル区間が崩れる）`);
+    throw new Error(
+      `Preview approximation assumes batch=1 (B=${shape[0]} breaks the channel ranges)`,
+    );
   }
   if (shape[1] !== LATENT_RGB_FACTORS.length) {
     throw new Error(
-      `プレビュー近似: latent のチャネル数 ${shape[1]} が係数表の行数` +
-        ` ${LATENT_RGB_FACTORS.length} と違う`,
+      `Preview approximation: latent channel count ${shape[1]} does not match the coefficient table's row count` +
+        ` ${LATENT_RGB_FACTORS.length}`,
     );
   }
   const elements = shape.reduce((a, b) => a * b, 1);
   if (latents.length !== elements) {
-    throw new Error(`プレビュー近似: 要素数 ${latents.length} が shape [${shape}] と違う`);
+    throw new Error(
+      `Preview approximation: element count ${latents.length} does not match shape [${shape}]`,
+    );
   }
   const [, channels, height, width] = shape;
   const plane = height * width;

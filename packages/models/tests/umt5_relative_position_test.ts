@@ -148,7 +148,7 @@ test("buildUmt5RelativePositionBuckets: 有効長の受理集合（グラフの�
     assertThrows(
       () => buildUmt5RelativePositionBuckets(length),
       RangeError,
-      "の整数でない",
+      "is not an integer in",
       `有効長 ${length}`,
     );
   }

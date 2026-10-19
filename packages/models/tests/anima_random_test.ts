@@ -78,8 +78,12 @@ test("Randn: scale は同じ列に線形に効く（列そのものは seed で�
 test("Randn: seed の受理集合は assertAcceptableSeed と同じ（生成器側の入口）", () => {
   // 受理集合は 1 本しか持たない（`generate` の入口と生成器で条件が割れると、片方だけ緩む）。
   for (const seed of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
-    assertThrows(() => assertAcceptableSeed(seed), ModelInputError, "非負の安全整数でない");
-    assertThrows(() => new Randn(seed), ModelInputError, "非負の安全整数でない");
+    assertThrows(
+      () => assertAcceptableSeed(seed),
+      ModelInputError,
+      "not a non-negative safe integer",
+    );
+    assertThrows(() => new Randn(seed), ModelInputError, "not a non-negative safe integer");
   }
   assertAcceptableSeed(0);
   assertEquals(new Randn(0).normals(2).length, 2);

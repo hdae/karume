@@ -31,8 +31,8 @@ test("readAssetBuffer: 資産が無ければ落とし、文言に family・表�
   assertThrows(
     () => readAssetBuffer("sbv2", "weights / assets", { front: wholeView([0]) }, "voice"),
     Error,
-    "sbv2: 資産 'voice' が無い（manifest の weights / assets に voice が要る）" +
-      "（揃っているキー: front）",
+    "sbv2: asset 'voice' is missing (the manifest's weights / assets needs voice)" +
+      " (keys present: front)",
   );
 });
 
@@ -40,7 +40,7 @@ test("readAssetBuffer: manifest の表は呼び手のラベルがそのまま出
   assertThrows(
     () => readAssetBuffer("birefnet", "weights", {}, "matte"),
     Error,
-    "birefnet: 資産 'matte' が無い（manifest の weights に matte が要る）（揃っているキー: ）",
+    "birefnet: asset 'matte' is missing (the manifest's weights needs matte) (keys present: )",
   );
 });
 
@@ -50,7 +50,7 @@ test("readAssetBuffer: 資産の有無は Object.hasOwn で見る（prototype �
   assertThrows(
     () => readAssetBuffer("anima", "weights / assets", {}, "toString"),
     Error,
-    "anima: 資産 'toString' が無い",
+    "anima: asset 'toString' is missing",
   );
 });
 
@@ -61,8 +61,8 @@ test("readAssetBuffer: buffer 全体を占めない view は取得層の不変�
   assertThrows(
     () => readAssetBuffer("irodori", "weights / assets", { dit: shifted }, "dit"),
     Error,
-    "irodori: 資産 'dit' の bytes が buffer 全体を占めていない（byteOffset 1 / byteLength 2 /" +
-      " buffer 4）",
+    "irodori: the bytes of asset 'dit' do not cover the whole buffer (byteOffset 1 / byteLength 2 /" +
+      " buffer 4)",
   );
 });
 
@@ -88,7 +88,7 @@ test("readAssetJson: 不正 UTF-8 の資産は decode 段の文言で落ちる�
   assertThrows(
     () => readAssetJson("sbv2", "weights / assets", { tokenizer: broken }, "tokenizer"),
     Error,
-    "sbv2: 資産 'tokenizer' が UTF-8 として読めない",
+    "sbv2: asset 'tokenizer' cannot be read as UTF-8",
   );
 });
 
@@ -97,7 +97,7 @@ test("readAssetJson: JSON 構文違反は decode とは別の文言で落ちる�
   assertThrows(
     () => readAssetJson("irodori", "weights / assets", { tokenizer: truncated }, "tokenizer"),
     Error,
-    "irodori: 資産 'tokenizer' が JSON として読めない",
+    "irodori: asset 'tokenizer' cannot be read as JSON",
   );
   // 正しい UTF-8 は多バイト文字を含んでもそのまま通る。
   const valid = new TextEncoder().encode('{"unkId":0,"space":"あ"}');
@@ -111,7 +111,7 @@ test("readAssetJson: 資産そのものが無い場合は buffer 段の文言で
   assertThrows(
     () => readAssetJson("sbv2", "weights / assets", {}, "symbols"),
     Error,
-    "sbv2: 資産 'symbols' が無い（manifest の weights / assets に symbols が要る）",
+    "sbv2: asset 'symbols' is missing (the manifest's weights / assets needs symbols)",
   );
 });
 

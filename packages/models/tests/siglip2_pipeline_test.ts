@@ -92,7 +92,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
   await assertRejects(
     () => Siglip2Pipeline.fromAssets({ manifest, assets: VISION }, { model: "nope" }),
     Error,
-    "model 'nope' は manifest に無い",
+    "model 'nope' is not in the manifest",
   );
 });
 
@@ -101,7 +101,7 @@ test("fromAssets: pipeline の契約名が siglip2 でない manifest を落と�
   await assertRejects(
     () => Siglip2Pipeline.fromAssets({ manifest, assets: VISION }),
     Error,
-    "manifest の pipeline が 'anima/1'",
+    "the manifest's pipeline is 'anima/1'",
   );
 });
 
@@ -111,7 +111,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   await assertRejects(
     () => Siglip2Pipeline.fromAssets({ manifest, assets: VISION }),
     Error,
-    "major に未対応",
+    "the major of pipeline 'siglip2/2' is not supported",
   );
 });
 
@@ -120,7 +120,7 @@ test("fromAssets: 存在しない quant は利用可能な一覧を添えて落�
   await assertRejects(
     () => Siglip2Pipeline.fromAssets({ manifest, assets: VISION }, { quant: "nope" }),
     Error,
-    "quant 'nope' は manifest に無い",
+    "quant 'nope' is not in the manifest",
   );
 });
 
@@ -130,7 +130,7 @@ test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async
   await assertRejects(
     () => Siglip2Pipeline.fromAssets({ manifest, assets: VISION }),
     Error,
-    "pipelineConfig: 未知キー 'image_mean'",
+    "pipelineConfig: unknown key 'image_mean'",
   );
 });
 
@@ -141,7 +141,7 @@ test("fromAssets: pipelineConfig の欄が欠けていれば構築時に落ち�
   await assertRejects(
     () => Siglip2Pipeline.fromAssets({ manifest, assets: VISION }),
     Error,
-    "pipelineConfig.hiddenDim: 無い",
+    "pipelineConfig.hiddenDim: missing",
   );
 });
 
@@ -153,7 +153,7 @@ test("fromAssets: bilinear 以外の補間を宣言した配布形は受理し�
   await assertRejects(
     () => Siglip2Pipeline.fromAssets({ manifest, assets: VISION }),
     Error,
-    "pipelineConfig.interpolation: この実装が対応するのは 'bilinear' だけ",
+    "pipelineConfig.interpolation: this implementation supports only 'bilinear'",
   );
 });
 
@@ -164,7 +164,7 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   await assertRejects(
     () => Siglip2Pipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
-    "部品 'vision' の容器が無い",
+    "component 'vision' has no container",
   );
 });
 
@@ -185,7 +185,7 @@ test("parseSiglip2PipelineConfig: std に 0 があれば落ちる（0 除算は�
   assertThrows(
     () => parseSiglip2PipelineConfig({ ...PIPELINE_CONFIG, imageStd: [0.5, 0, 0.5] }),
     Error,
-    "pipelineConfig.imageStd: 正の有限数でない要素がある",
+    "pipelineConfig.imageStd: has an element that is not a positive finite number",
   );
 });
 
@@ -194,7 +194,7 @@ test("imageMean / imageStd の組で正規化後の値が f32 で溢れる配布
   const error = assertThrows(
     () => parseSiglip2PipelineConfig({ ...PIPELINE_CONFIG, imageStd: [1e-50, 0.5, 0.5] }),
     Error,
-    "pipelineConfig.imageMean / imageStd: チャネル 0 の正規化後の値域",
+    "pipelineConfig.imageMean / imageStd: channel 0: the normalized range",
   );
   assert(!(error instanceof ModelInputError), "資産の不正が入力起因に分類された");
 });
@@ -203,7 +203,7 @@ test("parseSiglip2PipelineConfig: mean / std の要素数が 3 でなければ�
   assertThrows(
     () => parseSiglip2PipelineConfig({ ...PIPELINE_CONFIG, imageMean: [0.5, 0.5] }),
     Error,
-    "pipelineConfig.imageMean: 長さ 3 の配列でない",
+    "pipelineConfig.imageMean: not an array of length 3",
   );
 });
 
@@ -236,16 +236,16 @@ test("assertStaticDim: 宣言どおりのグラフは通り、解像度違いは
         "imageHeight",
       ),
     Error,
-    "siglip2: imageHeight — グラフ入力 'pixel_values' の軸 2 が 384",
+    "siglip2: imageHeight — graph input 'pixel_values' axis 2 is 384",
   );
-  assert(error.message.includes("pipelineConfig は 224"), error.message);
+  assert(error.message.includes("pipelineConfig has 224"), error.message);
 });
 
 test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
   assertThrows(
     () => assertStaticDim(visionGraph(), "pixel", 2, 224, "imageHeight"),
     Error,
-    "siglip2: グラフ入力 'pixel' が無い（imageHeight）",
+    "siglip2: graph input 'pixel' is missing (imageHeight)",
   );
 });
 
@@ -255,7 +255,7 @@ test("assertOutputDim: 埋め込み次元の宣言違いは名指しで落ちる
   assertThrows(
     () => assertOutputDim(visionGraph({ outputShape: [1, 1152] }), 1, 768, "hiddenDim"),
     Error,
-    "siglip2: hiddenDim — グラフ出力 'pooler_output' の軸 1 が 1152",
+    "siglip2: hiddenDim — graph output 'pooler_output' axis 1 is 1152",
   );
 });
 
@@ -268,7 +268,7 @@ test("assertOutputDim: 出力名の宣言が values に無ければ落とす", (
   assertThrows(
     () => assertOutputDim(model, 1, 768, "hiddenDim"),
     Error,
-    "siglip2: グラフ出力 'pooler_output' の宣言が無い（hiddenDim）",
+    "siglip2: graph output 'pooler_output' has no declaration (hiddenDim)",
   );
 });
 

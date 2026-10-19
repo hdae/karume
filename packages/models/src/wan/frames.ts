@@ -27,14 +27,18 @@ export const wanFrameToRgba = (
   // A length check alone cannot pin the dimensions (width 0.5 × height 2 also has the right
   // length) — the same entry contract as Anima's `imageToRgba`.
   if (![frames, width, height].every((dim) => Number.isInteger(dim) && dim > 0)) {
-    throw new RangeError(`動画の寸法 ${frames} フレーム × ${width}×${height} が正の整数でない`);
+    throw new RangeError(
+      `Video size ${frames} frames × ${width}×${height} is not a positive integer`,
+    );
   }
   if (!Number.isInteger(frame) || frame < 0 || frame >= frames) {
-    throw new RangeError(`フレーム ${frame} が [0, ${frames}) の外`);
+    throw new RangeError(`Frame ${frame} is outside [0, ${frames})`);
   }
   const plane = width * height;
   if (data.length !== 3 * frames * plane) {
-    throw new Error(`動画の要素数 ${data.length} が [3, ${frames}, ${height}, ${width}] と違う`);
+    throw new Error(
+      `Video element count ${data.length} does not match [3, ${frames}, ${height}, ${width}]`,
+    );
   }
   const rgba = new Uint8ClampedArray(plane * 4);
   for (let channel = 0; channel < 3; channel += 1) {
@@ -44,8 +48,8 @@ export const wanFrameToRgba = (
       // MUST: never turn a non-finite value into a pixel silently (`Uint8ClampedArray` makes NaN 0).
       if (!Number.isFinite(raw)) {
         throw new Error(
-          `フレーム ${frame} の画素 (x=${index % width}, y=${Math.floor(index / width)}) の ` +
-            `channel ${channel} が非有限値`,
+          `Frame ${frame}, pixel (x=${index % width}, y=${Math.floor(index / width)}): ` +
+            `channel ${channel} is non-finite`,
         );
       }
       rgba[index * 4 + channel] = Math.round(Math.min(1, Math.max(0, raw / 2 + 0.5)) * 255);

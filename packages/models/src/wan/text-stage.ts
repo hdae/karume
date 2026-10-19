@@ -72,9 +72,7 @@ export const textEncoderRouteOf = (
 ): WanTextEncoderRoute => {
   const route: unknown = options.textEncoder ?? DEFAULT_TEXT_ENCODER;
   if (route !== "gpu" && route !== "precomputed") {
-    throw new Error(
-      `${owner}: textEncoder '${String(route)}' は 'gpu' / 'precomputed' のどちらでもない`,
-    );
+    throw new Error(`${owner}: textEncoder '${String(route)}' is neither 'gpu' nor 'precomputed'`);
   }
   return route;
 };
@@ -99,9 +97,9 @@ export const assertTextEncoderDeclared = (
   if (!Object.hasOwn(manifest.models, modelName)) return;
   if (!Object.hasOwn(manifest.models[modelName].weights, TEXT_ENCODER)) {
     throw new Error(
-      `${owner}: model '${modelName}' の weights に umT5 の部品 '${TEXT_ENCODER}' が無い` +
-        '（textEncoder の既定 "gpu" が取る。umT5 を持たない配布形を事前計算の埋め込みで回すなら ' +
-        'textEncoder: "precomputed"）',
+      `${owner}: the weights of model '${modelName}' have no umT5 component '${TEXT_ENCODER}'` +
+        ' (the default textEncoder "gpu" takes it. To run a distribution without umT5 on precomputed embeddings, use ' +
+        'textEncoder: "precomputed")',
     );
   }
 };
@@ -171,7 +169,7 @@ export const umt5Contract = (
   const { output } = umt5GraphContract(textEncoder, owner, dit.contextWidth);
   if (UMT5_MAX_LENGTH > dit.contextRows) {
     throw new Error(
-      `${owner}: umT5 の有効長の上限 ${UMT5_MAX_LENGTH} が DiT の文脈の行数 ${dit.contextRows} を超える`,
+      `${owner}: umT5's valid-length upper limit ${UMT5_MAX_LENGTH} exceeds the DiT context row count ${dit.contextRows}`,
     );
   }
   return { output };
@@ -194,8 +192,8 @@ export const assertTokenizerDeclared = (
 ): void => {
   if (route === "gpu" && !Object.hasOwn(entry.assets, UMT5_TOKENIZER)) {
     throw new Error(
-      `${owner}: manifest の assets に umT5 のトークナイザ資産 '${UMT5_TOKENIZER}' が無い` +
-        '（textEncoder: "gpu" の経路が読む。事前計算の埋め込みだけで回すなら textEncoder: "precomputed"）',
+      `${owner}: the manifest assets have no umT5 tokenizer asset '${UMT5_TOKENIZER}'` +
+        ' (the textEncoder: "gpu" path reads it. To run on precomputed embeddings only, use textEncoder: "precomputed")',
     );
   }
 };
@@ -216,13 +214,13 @@ export const admitWanText = (
 const assertEmbedsFitContext = (dit: DitContract, embeds: WanTextEmbeds, owner: string): void => {
   if (dit.contextWidth !== embeds.width) {
     throw new Error(
-      `${owner}: '${DIT_CONTEXT}' の幅 ${dit.contextWidth} が埋め込み資産の幅 ${embeds.width} と違う`,
+      `${owner}: '${DIT_CONTEXT}' width ${dit.contextWidth} differs from the embedding asset width ${embeds.width}`,
     );
   }
   const longest = Math.max(...embeds.entries.map((entry) => entry.tokens));
   if (longest > dit.contextRows) {
     throw new Error(
-      `${owner}: 埋め込みの有効長 ${longest} が文脈の行数 ${dit.contextRows} を超える`,
+      `${owner}: embedding valid length ${longest} exceeds the context row count ${dit.contextRows}`,
     );
   }
 };
@@ -273,18 +271,18 @@ export const loadWanTextStage = async (
     // length upstream accepts is silently rejected (the smaller side).
     if (encoder.maxLength !== UMT5_MAX_LENGTH) {
       throw new Error(
-        `${owner}: トークナイザ資産の maxLength ${encoder.maxLength} が umT5 の有効長の上限 ` +
-          `${UMT5_MAX_LENGTH} と違う`,
+        `${owner}: the tokenizer asset's maxLength ${encoder.maxLength} differs from umT5's valid-length upper limit ` +
+          `${UMT5_MAX_LENGTH}`,
       );
     }
     // The default negative MUST pass this asset's check — if it does not, the asset is inconsistent,
     // and failing at the entry of a generation that omitted negativePrompt as an input error
     // (`ModelInputError`) would blame the wrong party (it is not the caller's input).
     try {
-      encoder.encode(WAN_DEFAULT_NEGATIVE_PROMPT, "既定の negative");
+      encoder.encode(WAN_DEFAULT_NEGATIVE_PROMPT, "default negative");
     } catch (cause) {
       throw new Error(
-        `${owner}: 既定の negative（公式の sample_neg_prompt）がトークナイザ資産の門を通らない`,
+        `${owner}: the default negative (the official sample_neg_prompt) does not pass the tokenizer asset's check`,
         { cause },
       );
     }
@@ -310,10 +308,12 @@ export const precomputedPromptGate = (
     const entry = findWanTextEmbedding(embeds, text);
     if (entry === undefined) {
       throw new ModelInputError(
-        `${what} がテキスト埋め込み資産の集合に無い（事前計算の経路〈textEncoder: "precomputed"〉は ` +
-          `${embeds.entries.length} 本だけを受ける: ${embeds.entries
+        `${what} is not in the text embedding asset's set (the precomputed path [textEncoder: "precomputed"] accepts ` +
+          `only these ${embeds.entries.length} entries: ${embeds.entries
             .map((entry) => entry.name)
-            .join(" / ")} — 原文か正規化後の文字列に完全一致させる。${owner}.prompts で引ける）`,
+            .join(
+              " / ",
+            )} — match the original or the normalized text exactly. ${owner}.prompts lists them)`,
       );
     }
     return entry;
@@ -322,7 +322,7 @@ export const precomputedPromptGate = (
     const defaults = embeds.entries.filter((entry) => entry.role === "negative");
     if (defaults.length !== 1) {
       throw new ModelInputError(
-        `negativePrompt を省いたが、資産に negative の行が ${defaults.length} 本ある（1 本のときだけ既定にする）`,
+        `negativePrompt was omitted, but the asset has ${defaults.length} negative rows (only a single one becomes the default)`,
       );
     }
     return defaults[0];
@@ -336,7 +336,7 @@ export const precomputedPromptGate = (
  */
 export const gpuPromptGate = (encoder: WanPromptEncoder): PromptGate<Int32Array<ArrayBuffer>> => ({
   resolve: (text, what) => encoder.encode(text, what),
-  defaultNegative: () => encoder.encode(WAN_DEFAULT_NEGATIVE_PROMPT, "negativePrompt（既定）"),
+  defaultNegative: () => encoder.encode(WAN_DEFAULT_NEGATIVE_PROMPT, "negativePrompt (default)"),
 });
 
 /**
@@ -407,7 +407,7 @@ export const encodeWanPrompts = async (
       );
       observe?.("text_encoder", session.diagnostics());
       if (!Object.hasOwn(outputs, text.contract.output)) {
-        throw new Error(`${owner}: umT5 の出力 '${text.contract.output}' が無い`);
+        throw new Error(`${owner}: umT5 output '${text.contract.output}' is missing`);
       }
       const context = padUmt5Context(
         outputs[text.contract.output],
@@ -418,9 +418,9 @@ export const encodeWanPrompts = async (
       const broken = firstNonFinite(context);
       if (broken !== -1) {
         throw new Error(
-          `${owner}: umT5 の出力（${label}・${ids.length} トークン）の行 ` +
-            `${Math.floor(broken / dit.contextWidth)}・列 ${broken % dit.contextWidth} が非有限` +
-            `（${context[broken]}）— DiT の段へは渡さない`,
+          `${owner}: umT5 output (${label}, ${ids.length} tokens) row ` +
+            `${Math.floor(broken / dit.contextWidth)}, column ${broken % dit.contextWidth} is non-finite` +
+            ` (${context[broken]}) — not passed to the DiT stage`,
         );
       }
       contexts.push(context);

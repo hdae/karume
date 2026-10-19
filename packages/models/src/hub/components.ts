@@ -206,7 +206,7 @@ const openerOf =
     const component = components.get(key);
     if (component === undefined) {
       throw new Error(
-        `${where}: 部品 '${key}' は開いていない（開いた部品: ${[...components.keys()].join(" / ")}）`,
+        `${where}: component '${key}' is not open (open components: ${[...components.keys()].join(" / ")})`,
       );
     }
     return component;
@@ -250,33 +250,33 @@ const planComponentKeys = (
     partKeys.push(`${componentKey}[${index}]`);
   }
   const indexed = indexedKeyCount(keys, componentKey);
-  const available = `（揃っているキー: ${keys.join(" / ")}）`;
+  const available = ` (keys present: ${keys.join(" / ")})`;
   if (has(componentKey)) {
     if (indexed > 0) {
       throw new Error(
-        `${where}: 部品 '${componentKey}' が単一形のキーと分割形のキー` +
-          `（'${componentKey}[0]' 等）の両方で届いている（どちらか一方 MUST — ` +
-          `添字つきのキーは ${indexed} 本）${available}`,
+        `${where}: component '${componentKey}' arrived under both the single-form key and split-form keys` +
+          ` ('${componentKey}[0]' etc.) (exactly one of the two MUST be used — ` +
+          `${indexed} indexed keys)${available}`,
       );
     }
     return { kind: "bytes", key: componentKey };
   }
   if (indexed === 0) {
     throw new Error(
-      `${where}: 部品 '${componentKey}' の容器が無い` +
-        `（単一形なら '${componentKey}'・分割形なら '${componentKey}[0]' から添字順）${available}`,
+      `${where}: component '${componentKey}' has no container` +
+        ` (single form: '${componentKey}'; split form: '${componentKey}[0]' onwards in index order)${available}`,
     );
   }
   if (partKeys.length === 0) {
     throw new Error(
-      `${where}: 部品 '${componentKey}' の part 添字が [0] から始まっていない` +
-        `（'${componentKey}[0]' が無い / 添字つきのキーは ${indexed} 本）${available}`,
+      `${where}: the part indexes of component '${componentKey}' do not start at [0]` +
+        ` ('${componentKey}[0]' is missing / ${indexed} indexed keys)${available}`,
     );
   }
   if (indexed !== partKeys.length) {
     throw new Error(
-      `${where}: 部品 '${componentKey}' の part 添字が [0] から連続していない` +
-        `（連続しているのは ${partKeys.length} 本 / 添字つきのキーは ${indexed} 本）${available}`,
+      `${where}: the part indexes of component '${componentKey}' are not contiguous from [0]` +
+        ` (${partKeys.length} contiguous / ${indexed} indexed keys)${available}`,
     );
   }
   return { kind: "parts", keys: partKeys };
@@ -434,8 +434,8 @@ export const loadContainerComponents = async <Admitted>(
   for (const key of Object.keys(replacements)) {
     if (!componentKeys.includes(key)) {
       throw new Error(
-        `${where}: components の '${key}' はこの系列の部品ではない` +
-          `（差し替えられる役割: ${componentKeys.join(" / ")}）`,
+        `${where}: '${key}' in components is not a component of this family` +
+          ` (replaceable roles: ${componentKeys.join(" / ")})`,
       );
     }
   }
@@ -451,10 +451,10 @@ export const loadContainerComponents = async <Admitted>(
     const base = Object.hasOwn(selection.containers, key) ? selection.containers[key] : undefined;
     if (base === undefined) {
       throw new Error(
-        `${where}: 部品 '${key}' の容器が manifest に無い` +
-          `（選択 ${selection.model} / ${selection.quant} が持つ部品: ${Object.keys(
+        `${where}: the container of component '${key}' is not in the manifest` +
+          ` (components of selection ${selection.model} / ${selection.quant}: ${Object.keys(
             selection.containers,
-          ).join(" / ")}）`,
+          ).join(" / ")})`,
       );
     }
     const replacement = Object.hasOwn(replacements, key) ? replacements[key] : undefined;
@@ -476,14 +476,16 @@ export const loadContainerComponents = async <Admitted>(
     });
     const container = Object.hasOwn(containers, key) ? containers[key] : undefined;
     if (container === undefined) {
-      throw new Error(`${seatWhere}: 参照先の manifest に部品 '${key}' の容器が無い`);
+      throw new Error(
+        `${seatWhere}: the referenced manifest has no container for component '${key}'`,
+      );
     }
     // Identity of the graph contract — judged from the two manifests' declarations alone, before a
     // single byte of weights is fetched.
     if (container.descriptor.graph.sha256 !== base.descriptor.graph.sha256) {
       throw new Error(
-        `${seatWhere}: グラフ記述が manifest の宣言と違う（差し替えられるのはグラフ記述の sha256 が` +
-          ` 同一の部品だけ — 宣言 ${base.descriptor.graph.sha256} / 差し替え ${container.descriptor.graph.sha256}）`,
+        `${seatWhere}: the graph descriptor does not match the manifest's declaration (only a component whose graph descriptor sha256 is` +
+          ` identical can be replaced — declared ${base.descriptor.graph.sha256} / replacement ${container.descriptor.graph.sha256})`,
       );
     }
     seats.push({ key, loaded: other, container });

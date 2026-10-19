@@ -49,7 +49,7 @@ test("相対位置表: 窓の内外で idx_k と valid が対で効く", () => {
 });
 
 test("相対位置表: 不正な長さ・窓幅は落とす", () => {
-  assertThrows(() => buildRelattnTables(0), RangeError, "長さ");
-  assertThrows(() => buildRelattnTables(1.5), RangeError, "長さ");
-  assertThrows(() => buildRelattnTables(4, -1), RangeError, "窓幅");
+  assertThrows(() => buildRelattnTables(0), RangeError, "length");
+  assertThrows(() => buildRelattnTables(1.5), RangeError, "length");
+  assertThrows(() => buildRelattnTables(4, -1), RangeError, "Window size");
 });

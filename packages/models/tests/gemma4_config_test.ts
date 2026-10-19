@@ -104,26 +104,26 @@ test("gemma4 pipelineConfig: 3 つの数 + rope と optional な sampler を読�
 describe("gemma4 pipelineConfig: 未知キーと欠落は fail loudly", () => {
   it("オブジェクトでない宣言（`unknown` の境界パーサ）", () => {
     for (const raw of [undefined, null, 42, "chunkLength=32", [MINIMAL]]) {
-      assertThrows(() => parseGemma4PipelineConfig(raw), Error, "オブジェクトでない");
+      assertThrows(() => parseGemma4PipelineConfig(raw), Error, "not an object");
     }
   });
   it("根の未知キー（綴り違いが既定へ縮退しない）", () => {
     assertThrows(
       () => parseGemma4PipelineConfig({ ...MINIMAL, capasity: 640 }),
       Error,
-      "未知キー 'capasity'",
+      "unknown key 'capasity'",
     );
   });
   it("sampler の未知キー（宣言できる欄は 3 つだけ）", () => {
     assertThrows(
       () => parseGemma4PipelineConfig({ ...MINIMAL, sampler: { ...RECOMMENDED, seed: 7 } }),
       Error,
-      "未知キー 'seed'",
+      "unknown key 'seed'",
     );
   });
   it("欄の欠落", () => {
     const { capacity: _dropped, ...rest } = MINIMAL;
-    assertThrows(() => parseGemma4PipelineConfig(rest), Error, "pipelineConfig.capacity: 無い");
+    assertThrows(() => parseGemma4PipelineConfig(rest), Error, "pipelineConfig.capacity: missing");
   });
   it("maxChunkLength は必須（無いと trace 範囲の外を誰も落とせない）", () => {
     // 欠落を「上限なし」として通すと、上限 768 の資産に chunkLength 1024 を渡す形が例外なしで
@@ -132,12 +132,12 @@ describe("gemma4 pipelineConfig: 未知キーと欠落は fail loudly", () => {
     assertThrows(
       () => parseGemma4PipelineConfig(rest),
       Error,
-      "pipelineConfig.maxChunkLength: 無い",
+      "pipelineConfig.maxChunkLength: missing",
     );
   });
   it("rope は必須（欠けたまま動くと回転しない attention が黙って走る）", () => {
     const { rope: _dropped, ...rest } = MINIMAL;
-    assertThrows(() => parseGemma4PipelineConfig(rest), Error, "pipelineConfig.rope: 無い");
+    assertThrows(() => parseGemma4PipelineConfig(rest), Error, "pipelineConfig.rope: missing");
   });
   it("sampler は欄ごと無ければ通る（= 低層の既定 = greedy）", () => {
     assertEquals(parseGemma4PipelineConfig(MINIMAL).sampler, undefined);
@@ -151,13 +151,13 @@ describe("gemma4 pipelineConfig: rope の受理集合", () => {
     assertThrows(
       () => parseGemma4PipelineConfig(withRope({ ...ROPE, local_attention: ROPE.full_attention })),
       Error,
-      "未知キー 'local_attention'",
+      "unknown key 'local_attention'",
     );
     const { full_attention: _dropped, ...sliding } = ROPE;
     assertThrows(
       () => parseGemma4PipelineConfig(withRope(sliding)),
       Error,
-      "pipelineConfig.rope.full_attention: 無い",
+      "pipelineConfig.rope.full_attention: missing",
     );
   });
 
@@ -168,7 +168,7 @@ describe("gemma4 pipelineConfig: rope の受理集合", () => {
           withRope({ ...ROPE, full_attention: { ...ROPE.full_attention, ropeType: "linear" } }),
         ),
       Error,
-      "未知キー 'ropeType'",
+      "unknown key 'ropeType'",
     );
     assertThrows(
       () =>
@@ -176,7 +176,7 @@ describe("gemma4 pipelineConfig: rope の受理集合", () => {
           withRope({ ...ROPE, sliding_attention: { theta: 10000, headDim: 256 } }),
         ),
       Error,
-      "pipelineConfig.rope.sliding_attention.rotaryDim: 無い",
+      "pipelineConfig.rope.sliding_attention.rotaryDim: missing",
     );
     assertThrows(
       () =>
@@ -184,7 +184,7 @@ describe("gemma4 pipelineConfig: rope の受理集合", () => {
           withRope({ ...ROPE, sliding_attention: { ...ROPE.sliding_attention, theta: "10000" } }),
         ),
       Error,
-      "pipelineConfig.rope.sliding_attention.theta: 数でない",
+      "pipelineConfig.rope.sliding_attention.theta: not a number",
     );
   });
 
@@ -196,7 +196,7 @@ describe("gemma4 pipelineConfig: rope の受理集合", () => {
           withRope({ ...ROPE, full_attention: { ...ROPE.full_attention, rotaryDim: 129 } }),
         ),
       Error,
-      "rotaryDim は 2 以上 headDim 以下の偶数",
+      "rotaryDim must be an even number in 2..headDim",
     );
     assertThrows(
       () =>
@@ -204,7 +204,7 @@ describe("gemma4 pipelineConfig: rope の受理集合", () => {
           withRope({ ...ROPE, full_attention: { ...ROPE.full_attention, rotaryDim: 1024 } }),
         ),
       Error,
-      "rotaryDim は 2 以上 headDim 以下の偶数",
+      "rotaryDim must be an even number in 2..headDim",
     );
     assertThrows(
       () =>
@@ -212,7 +212,7 @@ describe("gemma4 pipelineConfig: rope の受理集合", () => {
           withRope({ ...ROPE, sliding_attention: { ...ROPE.sliding_attention, theta: 0 } }),
         ),
       Error,
-      "theta は正の有限値",
+      "theta must be a positive finite number",
     );
     assertThrows(
       () =>
@@ -220,7 +220,7 @@ describe("gemma4 pipelineConfig: rope の受理集合", () => {
           withRope({ ...ROPE, sliding_attention: { ...ROPE.sliding_attention, headDim: 255 } }),
         ),
       Error,
-      "headDim は 2 以上の偶数",
+      "headDim must be an even number ≥ 2",
     );
   });
 });
@@ -235,7 +235,7 @@ describe("gemma4 pipelineConfig: 値域", () => {
       const error = assertThrows(
         () => parseGemma4PipelineConfig({ ...MINIMAL, [key]: 1 }),
         Error,
-        `pipelineConfig.${key}: 2 以上の整数でない`,
+        `pipelineConfig.${key}: not an integer ≥ 2`,
       );
       assert(!(error instanceof ModelInputError), error.message);
     }
@@ -245,17 +245,17 @@ describe("gemma4 pipelineConfig: 値域", () => {
     assertThrows(
       () => parseGemma4PipelineConfig({ ...MINIMAL, sampler: { ...sampler, temperature: -1 } }),
       Error,
-      "0 以上の有限数でない",
+      "not a finite number ≥ 0",
     );
     assertThrows(
       () => parseGemma4PipelineConfig({ ...MINIMAL, sampler: { ...sampler, topK: 0 } }),
       Error,
-      "1 以上の整数でない",
+      "not a positive integer",
     );
     assertThrows(
       () => parseGemma4PipelineConfig({ ...MINIMAL, sampler: { ...sampler, topP: 0 } }),
       Error,
-      "0 < topP ≤ 1 の範囲にない",
+      "not in the range 0 < topP ≤ 1",
     );
   });
 });
@@ -265,7 +265,7 @@ describe("gemma4 pipelineConfig: chunkLength ≤ maxChunkLength / capacity ≤ m
     assertThrows(
       () => parseGemma4PipelineConfig({ ...MINIMAL, chunkLength: 129 }),
       Error,
-      "maxChunkLength 128 を超えた",
+      "exceeds maxChunkLength 128",
     );
   });
   it("上限ちょうどは通る（門が広すぎないことの対）", () => {
@@ -276,14 +276,14 @@ describe("gemma4 pipelineConfig: chunkLength ≤ maxChunkLength / capacity ≤ m
     assertThrows(
       () => parseGemma4PipelineConfig({ ...MINIMAL, chunkLength: 64, capacity: 32 }),
       Error,
-      "capacity 32 を超えた",
+      "exceeds capacity 32",
     );
   });
   it("容量いっぱいの会話がモデルの位置上限の外を引く", () => {
     assertThrows(
       () => parseGemma4PipelineConfig({ ...MINIMAL, capacity: 2048, maxPosition: 1024 }),
       Error,
-      "maxPosition 1024 を超えた",
+      "exceeds maxPosition 1024",
     );
   });
 });
@@ -310,21 +310,21 @@ describe("gemma4 fromAssets: config は fromPretrained と同じ門を、バイ�
     await assertRejects(
       () => fromAssets({ ...MINIMAL, capasity: 640 }),
       Error,
-      "未知キー 'capasity'",
+      "unknown key 'capasity'",
     );
   });
   it("3 つの数の関係", async () => {
     await assertRejects(
       () => fromAssets({ ...MINIMAL, capacity: 2048 }),
       Error,
-      "maxPosition 1024 を超えた",
+      "exceeds maxPosition 1024",
     );
   });
   it("sampler の値域（V2-b が名指しした非対称そのもの）", async () => {
     await assertRejects(
       () => fromAssets({ ...MINIMAL, sampler: { ...RECOMMENDED, temperature: -1 } }),
       Error,
-      "0 以上の有限数でない",
+      "not a finite number ≥ 0",
     );
   });
   it("宣言が正しければ門を抜け、コンテナ側の文言で落ちる（陰性対照）", async () => {
@@ -431,7 +431,7 @@ describe("gemma4 rope 突合: 宣言どおりのグラフは通り、幅の食�
     assertThrows(
       () => assertRopeInputShapes(ropeGraph({ slidingSin: [] }), config),
       Error,
-      "グラフ入力 'rope_sliding_attention_sin' が無い",
+      "graph input 'rope_sliding_attention_sin' is missing",
     );
   });
 });
@@ -458,7 +458,7 @@ describe("gemma4 家族 admission: 配下の門の文言は呼んだ家族の入
     const error = assertThrows(
       () => admitGemma4(ropeOwner(), config, undefined, qat),
       Error,
-      "グラフ出力が 1 本",
+      "the graph has 1 outputs",
     );
     assert(error.message.startsWith("Gemma4QatPipeline: "), error.message);
   });
@@ -508,7 +508,7 @@ describe("assertChunkLength: 実行時ノブの受理集合（宣言との関係
     assertThrows(
       () => assertChunkLength(1, config),
       ModelInputError,
-      "chunkLength 1 が 2 以上の整数でない",
+      "chunkLength 1 is not an integer ≥ 2",
     );
   });
 
@@ -516,7 +516,7 @@ describe("assertChunkLength: 実行時ノブの受理集合（宣言との関係
     assertThrows(
       () => assertChunkLength(3.5, config),
       ModelInputError,
-      "chunkLength 3.5 が 2 以上の整数でない",
+      "chunkLength 3.5 is not an integer ≥ 2",
     );
   });
 
@@ -528,7 +528,7 @@ describe("assertChunkLength: 実行時ノブの受理集合（宣言との関係
     assertThrows(
       () => assertChunkLength(config.maxChunkLength + 1, config),
       ModelInputError,
-      `chunkLength 129 が配布形の宣言 maxChunkLength ${config.maxChunkLength} を超えた`,
+      `chunkLength 129 exceeds the distribution's declared maxChunkLength ${config.maxChunkLength}`,
     );
   });
 
@@ -543,7 +543,7 @@ describe("assertChunkLength: 実行時ノブの受理集合（宣言との関係
     assertThrows(
       () => assertChunkLength(1025, wide),
       ModelInputError,
-      "chunkLength 1025 が maxPosition 1024 を超えた",
+      "chunkLength 1025 exceeds maxPosition 1024",
     );
   });
 });

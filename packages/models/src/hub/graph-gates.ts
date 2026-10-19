@@ -32,13 +32,13 @@ export const assertGraphInputDim = (
 ): void => {
   const spec = model.graph.inputs.find((input) => input.name === inputName);
   if (spec === undefined) {
-    throw new Error(`${family}: グラフ入力 '${inputName}' が無い（${where}）`);
+    throw new Error(`${family}: graph input '${inputName}' is missing (${where})`);
   }
   const dim = spec.shape[axis];
   if (dim !== expected) {
     throw new Error(
-      `${family}: ${where} — グラフ入力 '${inputName}' の軸 ${axis} が ${String(dim)}、` +
-        `pipelineConfig は ${expected}`,
+      `${family}: ${where} — graph input '${inputName}' axis ${axis} is ${String(dim)}, ` +
+        `pipelineConfig has ${expected}`,
     );
   }
 };
@@ -61,12 +61,12 @@ export const assertGraphInputDtype = (
 ): void => {
   const spec = model.graph.inputs.find((input) => input.name === inputName);
   if (spec === undefined) {
-    throw new Error(`${family}: グラフ入力 '${inputName}' が無い（${where}）`);
+    throw new Error(`${family}: graph input '${inputName}' is missing (${where})`);
   }
   if (spec.dtype !== expected) {
     throw new Error(
-      `${family}: ${where} — グラフ入力 '${inputName}' の dtype が ${spec.dtype}、` +
-        `前処理が書くのは ${expected}`,
+      `${family}: ${where} — graph input '${inputName}' dtype is ${spec.dtype}, ` +
+        `the preprocessing writes ${expected}`,
     );
   }
 };

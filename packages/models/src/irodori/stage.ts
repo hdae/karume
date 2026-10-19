@@ -49,7 +49,7 @@ export const emitter = (
       };
 
 export const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
-  if (tensor.dtype !== "f32") throw new Error(`${where}: f32 でない（${tensor.dtype}）`);
+  if (tensor.dtype !== "f32") throw new Error(`${where}: not f32 (${tensor.dtype})`);
   return tensor.data;
 };
 
@@ -76,7 +76,9 @@ export const bool = (value: boolean): Tensor => ({
 export const outputNameAt = (model: GraphOwner, index: number): string => {
   const name = model.graph.outputs[index];
   if (name === undefined) {
-    throw new Error(`グラフ出力 ${index} が無い（${model.graph.outputs.length} 本しかない）`);
+    throw new Error(
+      `Graph output ${index} does not exist (there are only ${model.graph.outputs.length})`,
+    );
   }
   return name;
 };
@@ -89,7 +91,8 @@ export const outputAt = (
 ): Tensor => {
   const name = outputNameAt(model, index);
   const tensor = outputs[name];
-  if (tensor === undefined) throw new Error(`グラフ出力 ${index}（'${name}'）が実行結果に無い`);
+  if (tensor === undefined)
+    throw new Error(`Graph output ${index} ('${name}') is missing from the run results`);
   return tensor;
 };
 

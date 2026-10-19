@@ -491,7 +491,7 @@ export const assertGenerationRequestValues = (
   request: Pick<GenerationRequest, "maxNewTokens" | "stopTokens" | "sampler">,
 ): void => {
   if (!Number.isSafeInteger(request.maxNewTokens) || request.maxNewTokens < 1) {
-    throw new ModelInputError(`maxNewTokens ${request.maxNewTokens} が 1 以上の整数でない`);
+    throw new ModelInputError(`maxNewTokens ${request.maxNewTokens} is not a positive integer`);
   }
   // A stop token is "an id that does not appear in the output", so even an out-of-vocabulary one
   // lets generation **run to completion normally** (that id is just never drawn). To avoid quietly
@@ -500,11 +500,14 @@ export const assertGenerationRequestValues = (
   const declared = new Set<number>();
   (request.stopTokens ?? []).forEach((token, index) => {
     if (!Number.isSafeInteger(token) || token < 0 || token >= vocabSize) {
-      throw new ModelInputError(`stopTokens[${index}] ${token} が語彙 0..${vocabSize - 1} の外`);
+      throw new ModelInputError(
+        `stopTokens[${index}] ${token} is outside the vocabulary 0..${vocabSize - 1}`,
+      );
     }
     // A duplicate cannot mean more than "the same condition written twice" = a sign of a caller
     // mix-up.
-    if (declared.has(token)) throw new ModelInputError(`stopTokens に token ${token} が 2 度出る`);
+    if (declared.has(token))
+      throw new ModelInputError(`Token ${token} appears twice in stopTokens`);
     declared.add(token);
   });
   // The sampler spec also fails here. `createSampler` only checks, copies and initializes `Randu`,
@@ -843,16 +846,16 @@ const readRows = (
   expectedRows: number,
 ): LogitsRows => {
   if (!Object.hasOwn(outputs, name)) {
-    throw new Error(`${where}: グラフ出力 '${name}' が無い`);
+    throw new Error(`${where}: graph output '${name}' is missing`);
   }
   const tensor = outputs[name];
   if (tensor.dtype !== "f32") {
-    throw new Error(`${where}: '${name}' が f32 でない（${tensor.dtype}）`);
+    throw new Error(`${where}: '${name}' is not f32 (${tensor.dtype})`);
   }
   const shape = tensor.shape;
   if (shape.length !== 3 || shape[0] !== 1 || shape[1] !== expectedRows || shape[2] !== width) {
     throw new Error(
-      `${where}: '${name}' の形 [${shape.join(",")}] が [1,${expectedRows},${width}] でない`,
+      `${where}: '${name}' has shape [${shape.join(",")}], not [1,${expectedRows},${width}]`,
     );
   }
   const data = tensor.data;
@@ -860,7 +863,7 @@ const readRows = (
     rows: expectedRows,
     row: (index: number): Float32Array<ArrayBuffer> => {
       if (!Number.isSafeInteger(index) || index < 0 || index >= expectedRows) {
-        throw new Error(`${where}: 行 ${index} が 0..${expectedRows - 1} の外`);
+        throw new Error(`${where}: row ${index} is outside 0..${expectedRows - 1}`);
       }
       return data.subarray(index * width, (index + 1) * width);
     },
@@ -916,18 +919,18 @@ const assertBudget = (
   const lastPosition = pastLength + promptLength + maxNewTokens - 2;
   if (lastPosition >= program.maxPosition) {
     throw new GenerationCapacityError(
-      `会話が位置表の外へ出る: 既存 ${pastLength} + prompt ${promptLength} + ` +
-        `maxNewTokens ${maxNewTokens} は最終位置 ${lastPosition} を踏む` +
-        `（この資産が引けるのは 0..${program.maxPosition - 1} — 会話の切り詰めはホストの責務）`,
+      `The conversation leaves the position table: existing ${pastLength} + prompt ${promptLength} + ` +
+        `maxNewTokens ${maxNewTokens} reaches the last position ${lastPosition}` +
+        ` (this asset can look up 0..${program.maxPosition - 1} — truncating the conversation is the host's job)`,
       detail("maxPosition", program.maxPosition),
     );
   }
   const peak = pastLength + promptLength + maxNewTokens - 1;
   if (peak > capacity) {
     throw new GenerationCapacityError(
-      `会話が state 容量を超える: 既存 ${pastLength} + prompt ${promptLength} + ` +
-        `maxNewTokens ${maxNewTokens} は ${peak} 行を要求する` +
-        `（容量 ${capacity} — 会話の切り詰めはホストの責務）`,
+      `The conversation exceeds the state capacity: existing ${pastLength} + prompt ${promptLength} + ` +
+        `maxNewTokens ${maxNewTokens} needs ${peak} rows` +
+        ` (capacity ${capacity} — truncating the conversation is the host's job)`,
       detail("capacity", capacity),
     );
   }
@@ -960,26 +963,26 @@ const assertSpeculativeSetup = (
   // `k = steps` and every NaN comparison is false; passing `k` makes `k > steps` false), so it is
   // checked before `k`.
   if (!Number.isSafeInteger(steps) || steps < 1) {
-    throw new Error(`drafter の段数 ${steps} が 1 以上の整数でない`);
+    throw new Error(`Drafter step count ${steps} is not a positive integer`);
   }
   if (!Number.isSafeInteger(k) || k < 1 || k > steps) {
-    throw new Error(`speculative.k ${k} が 1..${steps}（drafter の段数）の外`);
+    throw new Error(`speculative.k ${k} is outside 1..${steps} (the drafter's step count)`);
   }
   if (slidingSlack !== undefined && k + 1 > slidingSlack) {
     throw new Error(
-      `speculative.k ${k} は sliding ring の余裕 ${slidingSlack} に入らない（k + 1 ≤ 余裕 MUST）`,
+      `speculative.k ${k} does not fit in the sliding ring's slack ${slidingSlack} (k + 1 ≤ slack MUST hold)`,
     );
   }
   if (k + 1 > program.chunkLength) {
     throw new Error(
-      `speculative.k ${k} の verify ${k + 1} 行が chunkLength ${program.chunkLength} を超える`,
+      `The verify of speculative.k ${k} (${k + 1} rows) exceeds chunkLength ${program.chunkLength}`,
     );
   }
   if (!program.chunkBuckets.some((rows) => rows >= k + 1)) {
     throw new Error(
-      `verify ${k + 1} 行を載せるバケットが無い（chunkBuckets [${program.chunkBuckets.join(
+      `No bucket holds the ${k + 1} verify rows (chunkBuckets [${program.chunkBuckets.join(
         ", ",
-      )}]）`,
+      )}])`,
     );
   }
 };
@@ -1015,19 +1018,19 @@ export const createGenerationSequence = async <C extends ForkableContextFace<C>>
   // same conditions and wording in `chat-session.ts` — split, the same value would turn into 400 /
   // 500 depending on the entry.
   if (!Number.isSafeInteger(capacity) || capacity < 1) {
-    throw new ModelInputError(`capacity ${capacity} が 1 以上の整数でない`);
+    throw new ModelInputError(`capacity ${capacity} is not a positive integer`);
   }
   // The capacity relations are checked before the context is allocated (the same two expressions
   // `parseGemma4PipelineConfig` checks against the declaration, applied to the run-time knob too).
   if (capacity < program.chunkLength) {
     throw new ModelInputError(
-      `capacity ${capacity} が chunkLength ${program.chunkLength} を下回る（1 chunk すら入らない）`,
+      `capacity ${capacity} is below chunkLength ${program.chunkLength} (not even one chunk fits)`,
     );
   }
   if (capacity > program.maxPosition) {
     throw new ModelInputError(
-      `capacity ${capacity} が maxPosition ${program.maxPosition} を超えた` +
-        `（容量いっぱいの会話がモデルの位置上限の外を引く）`,
+      `capacity ${capacity} exceeds maxPosition ${program.maxPosition}` +
+        ` (a conversation filling the capacity would look up positions beyond the model's position limit)`,
     );
   }
   // MUST: the capacity symbol is bound only at context creation (ADR 0066 addendum 7 — not passed to
@@ -1102,9 +1105,9 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
         // Passing knobs where there is no gate is "a knob that does nothing" — not passed silently
         // (cross-cutting invariant).
         throw new Error(
-          `speculative: policy "always" にゲートのノブ ${JSON.stringify(
+          `speculative: gate knobs ${JSON.stringify(
             options.speculative.gate,
-          )} を` + `渡したが、"always" にはゲートが居ない`,
+          )} were passed with policy "always"` + `, but "always" has no gate`,
         );
       }
       face = await options.speculative.open(context);
@@ -1120,7 +1123,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
       } catch (cleanup) {
         throw new AggregateError(
           [error, cleanup],
-          "speculative.open が失敗し、貸し手 context の後始末も失敗した",
+          "speculative.open failed, and cleaning up the lending context failed too",
         );
       }
       throw error;
@@ -1193,8 +1196,8 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
     const surplus = keys.filter((name) => !derived.names.includes(name));
     if (missing.length > 0 || surplus.length > 0) {
       throw new Error(
-        `derivedInputs が宣言と食い違う（欠け: ${missing.join(" / ") || "なし"} / ` +
-          `余り: ${surplus.join(" / ") || "なし"}）`,
+        `derivedInputs disagree with the declaration (missing: ${missing.join(" / ") || "none"} / ` +
+          `extra: ${surplus.join(" / ") || "none"})`,
       );
     }
     return extra;
@@ -1206,7 +1209,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
     // fail until the first iteration, and with the generic wording of `GenerationContext`, so the
     // real cause (the caller disposed it) could not be read.
     if (disposal !== undefined) {
-      throw new Error("GenerationSequence: dispose 済みでは生成できない");
+      throw new Error("GenerationSequence: cannot generate after dispose");
     }
     // MUST: **copy** the request here (the MUST of {@link GenerationSequence.generate}). An async
     // generator body does not run until the first `next()`, so reading `request` without copying
@@ -1228,7 +1231,9 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
       // (2^32+1 → 1 = another valid token id), so fail at the entry. Out of vocabulary means an
       // out-of-range embedding gather = NaN contamination of the whole row, so check it here too.
       if (!Number.isSafeInteger(id) || id < 0 || id >= program.vocabSize) {
-        throw new ModelInputError(`prompt[${index}] ${id} が語彙 0..${program.vocabSize - 1} の外`);
+        throw new ModelInputError(
+          `prompt[${index}] ${id} is outside the vocabulary 0..${program.vocabSize - 1}`,
+        );
       }
     });
     // One sampler per generation (it carries RNG state across steps). The spec check and the spec
@@ -1244,9 +1249,11 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
         result.index < 0 ||
         result.index >= program.vocabSize
       ) {
-        throw new Error(`greedyの添字 ${result.index} が語彙 0..${program.vocabSize - 1} の外`);
+        throw new Error(
+          `Greedy index ${result.index} is outside the vocabulary 0..${program.vocabSize - 1}`,
+        );
       }
-      if (sampler.greedy === undefined) throw new Error("greedy選択能力が無い");
+      if (sampler.greedy === undefined) throw new Error("No greedy selection capability");
       return sampler.greedy(result.value, result.index);
     };
     // With a drafter, speculation runs **regardless of temperature**. Acceptance calls
@@ -1334,7 +1341,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
           // The prompt is the public request itself, and the only remedy is "put tokens in" (ADR
           // 0107 decision 2). Same type as this function throws for out-of-vocabulary ids.
           throw new ModelInputError(
-            "prompt が空（前ターンの pendingToken も無いので流す token が 1 つも無い）",
+            "prompt is empty (there is no pendingToken from the previous turn either, so there is no token to feed)",
           );
         }
         assertBudget(program, capacity, past, promptIds.length, maxNewTokens);
@@ -1391,7 +1398,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
           onRun?.({ kind: "prefill", chunk: index + 1, chunks: chunks.length });
           yield { kind: "prefill", chunk: index + 1, chunks: chunks.length };
         }
-        if (logits === undefined) throw new Error("prefill が 1 回も走っていない");
+        if (logits === undefined) throw new Error("prefill never ran");
 
         // Generation starts from the last valid row of the last chunk (the one row `last_row`
         // selected = row 0).
@@ -1409,7 +1416,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
         if (tally !== undefined && face !== undefined) {
           // ---- The speculative path (the "speculative path" section of the module doc, ADR 0096
           // stage 3)
-          if (hidden === undefined) throw new Error("prefill が hidden を出していない");
+          if (hidden === undefined) throw new Error("prefill did not produce hidden");
           const isStop = (id: number): boolean =>
             isStopToken(id, program.stopTokens) || isStopToken(id, requestStopTokens);
           /**
@@ -1697,7 +1704,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
       // MUST: the lifetime check is **synchronous** (as in `generate` — the context is not exposed,
       // so the caller has no other way to find out it was disposed).
       if (disposal !== undefined) {
-        throw new Error("GenerationSequence: dispose 済みでは fork できない");
+        throw new Error("GenerationSequence: cannot fork after dispose");
       }
       return chain(async () => {
         // MUST: the three things copied (frontier, gate, context) are captured at the same point

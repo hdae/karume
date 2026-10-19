@@ -106,11 +106,15 @@ test("sampler: greedy は範囲内の最初の NaN を最大値より優先し�
     const error = assertThrows(() => createSampler().next(logits, []), Error);
     assertEquals(
       error.message,
-      `logits[${first}] が NaN（非有限） — token id へ畳まずここで落とす`,
+      `logits[${first}] is NaN (non-finite) — failing here instead of folding it into a token id`,
     );
   }
   assertEquals(createSampler().next(f32([-Infinity, -0, 0, -Infinity]), []), 1);
-  assertThrows(() => createSampler().next(f32([0, Infinity, -1]), []), Error, "最大値が非有限");
+  assertThrows(
+    () => createSampler().next(f32([0, Infinity, -1]), []),
+    Error,
+    "maximum of the logits is non-finite",
+  );
 });
 
 test("sampler: topK は候補の範囲外でも最初の NaN を拒否する", () => {
@@ -129,7 +133,7 @@ test("sampler: topK は候補の範囲外でも最初の NaN を拒否する", (
       );
       assertEquals(
         error.message,
-        `logits[${first}] が NaN（非有限） — token id へ畳まずここで落とす`,
+        `logits[${first}] is NaN (non-finite) — failing here instead of folding it into a token id`,
       );
     }
   }
@@ -146,7 +150,7 @@ test("sampler: topK は候補の範囲外でも最初の NaN を拒否する", (
         [],
       ),
     Error,
-    "logits[2] が NaN",
+    "logits[2] is NaN",
   );
 });
 
@@ -154,10 +158,14 @@ test("sampler: 最大 logit が非有限なら token id へ畳まずに落ちる
   // 位置表の外の gather は行ごと NaN 汚染する（known-issues）ので、最終行 logits は**丸ごと**
   // 非有限になる。argmax はそれを「もっともらしい token id」（NaN 比較が常に false なので
   // 先頭 = token 0）へ畳むため、畳まれる前がここしかない。
-  assertThrows(() => createSampler().next(f32([NaN, NaN, NaN]), []), Error, "非有限");
-  assertThrows(() => createSampler().next(f32([-Infinity, -Infinity]), []), Error, "非有限");
+  assertThrows(() => createSampler().next(f32([NaN, NaN, NaN]), []), Error, "non-finite");
+  assertThrows(() => createSampler().next(f32([-Infinity, -Infinity]), []), Error, "non-finite");
   // 温度 > 0 側も同じ段で落ちる（softmax が全 0 になって抽選が壊れる前）。
-  assertThrows(() => createSampler({ temperature: 1 }).next(f32([NaN, NaN]), []), Error, "非有限");
+  assertThrows(
+    () => createSampler({ temperature: 1 }).next(f32([NaN, NaN]), []),
+    Error,
+    "non-finite",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -438,7 +446,7 @@ test("sampler: 履歴の token id が語彙の外なら fail loudly", () => {
   assertThrows(
     () => samplerDistribution(f32([1, 2]), { temperature: 1, repetitionPenalty: 2 }, [5]),
     RangeError,
-    "語彙",
+    "vocabulary",
   );
 });
 
@@ -473,17 +481,17 @@ test("sampler: 全 token を禁止したら fail loudly（黙って 0 を返さ�
   assertThrows(
     () => samplerDistribution(f32([1, 2]), { temperature: 1, logitBias: banned }, []),
     ModelInputError,
-    "全 token が禁止されている",
+    "every token is banned",
   );
   assertThrows(
     () => samplerDistribution(f32([1, 2]), { temperature: 0, logitBias: banned }, []),
     ModelInputError,
-    "logits の最大値が非有限",
+    "The maximum of the logits is non-finite",
   );
   assertThrows(
     () => samplerDistribution(f32([1, 2]), { temperature: 1, topK: 1, logitBias: banned }, []),
     ModelInputError,
-    "全 token が禁止されている",
+    "every token is banned",
   );
 });
 
@@ -515,7 +523,7 @@ test("sampler: logit bias の token が語彙の外なら fail loudly", () => {
   assertThrows(
     () => createSampler({ logitBias: [[9, 1]] }).next(f32([1, 2]), []),
     ModelInputError,
-    "語彙",
+    "vocabulary",
   );
 });
 
@@ -531,7 +539,7 @@ test("sampler: 同じ token の logit bias を 2 度書いたら fail loudly（�
         ],
       }),
     ModelInputError,
-    "token 2 が 2 度出る",
+    "Token 2 appears twice",
   );
   assertThrows(
     () =>
@@ -547,7 +555,7 @@ test("sampler: 同じ token の logit bias を 2 度書いたら fail loudly（�
         [],
       ),
     ModelInputError,
-    "token 0 が 2 度出る",
+    "Token 0 appears twice",
   );
 });
 
@@ -612,7 +620,7 @@ test("sampler: 未知のキーは黙って無視せず、許可キーを並べ�
     const error = assertThrows(
       () => createSampler(untypedSpec(spec)),
       ModelInputError,
-      "未知キー",
+      "Unknown key",
       JSON.stringify(spec),
     );
     for (const key of ["temperature", "topK", "topP", "repetitionPenalty", "logitBias", "seed"]) {
@@ -700,7 +708,7 @@ describe("sampler: 失敗の分類は呼び手の分岐先で決まる", () => {
     assertThrows(
       () => createSampler({ logitBias: [[9, 1]] }).next(f32([1, 2]), []),
       ModelInputError,
-      "logitBias の token 9 が語彙 0..1 の外",
+      "logitBias token 9 is outside the vocabulary 0..1",
     );
   });
 
@@ -716,7 +724,7 @@ describe("sampler: 失敗の分類は呼び手の分岐先で決まる", () => {
     const error = assertThrows(
       () => samplerDistribution(f32([1, 2]), { temperature: 1, repetitionPenalty: 2 }, [5]),
       RangeError,
-      "語彙",
+      "vocabulary",
     );
     assert(!(error instanceof ModelInputError), "履歴の語彙外が入力起因に分類されている");
   });

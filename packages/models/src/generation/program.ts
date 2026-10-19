@@ -318,7 +318,7 @@ export const generationProgramFace = (wiring: GenerationWiring): GenerationProgr
 
 const assertPositiveInteger = (value: number, where: string): void => {
   if (!Number.isSafeInteger(value) || value < 1) {
-    throw new Error(`${where} ${value} が 1 以上の整数でない`);
+    throw new Error(`${where} ${value} is not a positive integer`);
   }
 };
 
@@ -329,15 +329,15 @@ const findInput = (graph: GenerationGraph, name: string, role: string) => {
   const spec = graph.inputs.find((input) => input.name === name);
   if (spec === undefined) {
     throw new Error(
-      `${role} '${name}' がグラフ入力に無い（実在するのは ` +
-        `${graph.inputs.map((input) => input.name).join(" / ")}）`,
+      `${role} '${name}' is not a graph input (the existing ones are ` +
+        `${graph.inputs.map((input) => input.name).join(" / ")})`,
     );
   }
   return spec;
 };
 
 const assertDtype = (actual: string, expected: string, where: string): void => {
-  if (actual !== expected) throw new Error(`${where} の dtype が ${actual}（${expected} でない）`);
+  if (actual !== expected) throw new Error(`${where} has dtype ${actual} (not ${expected})`);
 };
 
 /**
@@ -354,8 +354,8 @@ const assertRowInput = (graph: GenerationGraph, name: string, role: string): str
   const lengthSymbol = spec.shape[1];
   if (spec.shape.length !== 2 || spec.shape[0] !== 1 || typeof lengthSymbol !== "string") {
     throw new Error(
-      `${role} '${name}' の shape ${showShape(spec.shape)} が [1,<記号>] でない` +
-        `（prefill 形と decode 形を同じグラフで回せない）`,
+      `${role} '${name}' has shape ${showShape(spec.shape)}, not [1,<symbol>]` +
+        ` (the prefill shape and the decode shape cannot run on the same graph)`,
     );
   }
   return lengthSymbol;
@@ -374,13 +374,13 @@ const assertRowInput = (graph: GenerationGraph, name: string, role: string): str
  * needs no context binding.
  */
 const assertLastRowInput = (graph: GenerationGraph, name: string): string => {
-  const spec = findInput(graph, name, "last_row 入力");
-  assertDtype(spec.dtype, "i32", `last_row 入力 '${name}'`);
+  const spec = findInput(graph, name, "last_row input");
+  assertDtype(spec.dtype, "i32", `last_row input '${name}'`);
   const rowSymbol = spec.shape[0];
   if (spec.shape.length !== 1 || typeof rowSymbol !== "string") {
     throw new Error(
-      `last_row 入力 '${name}' の shape ${showShape(spec.shape)} が [<記号>] でない` +
-        `（R=1 の prefill / decode と R>1 の verify を同じグラフで回せない）`,
+      `last_row input '${name}' has shape ${showShape(spec.shape)}, not [<symbol>]` +
+        ` (prefill / decode with R=1 and verify with R>1 cannot run on the same graph)`,
     );
   }
   return rowSymbol;
@@ -396,11 +396,11 @@ const assertLastRowInput = (graph: GenerationGraph, name: string): string => {
 const findOutputValue = (graph: GenerationGraph, name: string, role: string) => {
   if (!graph.outputs.includes(name)) {
     throw new Error(
-      `${role} '${name}' がグラフ出力に無い（実在するのは ${graph.outputs.join(" / ")}）`,
+      `${role} '${name}' is not a graph output (the existing ones are ${graph.outputs.join(" / ")})`,
     );
   }
   if (!Object.hasOwn(graph.values, name)) {
-    throw new Error(`${role} '${name}' の値情報がグラフに無い`);
+    throw new Error(`${role} '${name}' has no value info in the graph`);
   }
   return graph.values[name];
 };
@@ -418,8 +418,8 @@ const assertLogitsOutput = (
   vocabSize: number,
   rowSymbol: string,
 ): void => {
-  const info = findOutputValue(graph, name, "logits 出口");
-  assertDtype(info.dtype, "f32", `logits 出口 '${name}'`);
+  const info = findOutputValue(graph, name, "logits output");
+  assertDtype(info.dtype, "f32", `logits output '${name}'`);
   if (
     info.shape.length !== 3 ||
     info.shape[0] !== 1 ||
@@ -427,9 +427,9 @@ const assertLogitsOutput = (
     info.shape[2] !== vocabSize
   ) {
     throw new Error(
-      `logits 出口 '${name}' の shape ${showShape(info.shape)} が ` +
-        `[1,${rowSymbol},${vocabSize}] でない` +
-        `（選んだ**行**だけの出口であること — ADR 0083 決定 6）`,
+      `logits output '${name}' has shape ${showShape(info.shape)}, not ` +
+        `[1,${rowSymbol},${vocabSize}]` +
+        ` (it must be an output of the selected **rows** only — ADR 0083 decision 6)`,
     );
   }
 };
@@ -444,8 +444,8 @@ const assertLogitsOutput = (
  * drafter's weights.
  */
 const assertHiddenOutput = (graph: GenerationGraph, name: string, rowSymbol: string): number => {
-  const info = findOutputValue(graph, name, "hidden 出口");
-  assertDtype(info.dtype, "f32", `hidden 出口 '${name}'`);
+  const info = findOutputValue(graph, name, "hidden output");
+  assertDtype(info.dtype, "f32", `hidden output '${name}'`);
   const hiddenSize = info.shape[2];
   if (
     info.shape.length !== 3 ||
@@ -454,11 +454,11 @@ const assertHiddenOutput = (graph: GenerationGraph, name: string, rowSymbol: str
     typeof hiddenSize !== "number"
   ) {
     throw new Error(
-      `hidden 出口 '${name}' の shape ${showShape(info.shape)} が [1,${rowSymbol},<H>] でない` +
-        `（選んだ行の最終 norm 後 hidden であること）`,
+      `hidden output '${name}' has shape ${showShape(info.shape)}, not [1,${rowSymbol},<H>]` +
+        ` (it must be the final-norm hidden of the selected rows)`,
     );
   }
-  assertPositiveInteger(hiddenSize, `hidden 出口 '${name}' の H`);
+  assertPositiveInteger(hiddenSize, `hidden output '${name}' H`);
   return hiddenSize;
 };
 
@@ -472,19 +472,19 @@ const assertHiddenOutput = (graph: GenerationGraph, name: string, rowSymbol: str
 const assertInputCoverage = (graph: GenerationGraph, wired: readonly string[]): void => {
   const declared = new Set(wired);
   if (declared.size !== wired.length) {
-    throw new Error(`結線した入力名に重複がある（${wired.join(" / ")}）`);
+    throw new Error(`The wired input names contain duplicates (${wired.join(" / ")})`);
   }
   const actual = new Set(graph.inputs.map((input) => input.name));
   const missing = [...actual].filter((name) => !declared.has(name));
   if (missing.length > 0) {
     throw new Error(
-      `グラフ入力 ${missing.join(" / ")} が結線されていない` +
-        `（ホスト由来の入力は derivedInputs で供給する）`,
+      `Graph inputs ${missing.join(" / ")} are not wired` +
+        ` (host-derived inputs are supplied through derivedInputs)`,
     );
   }
   const extra = wired.filter((name) => !actual.has(name));
   if (extra.length > 0) {
-    throw new Error(`結線した ${extra.join(" / ")} がグラフ入力に無い`);
+    throw new Error(`The wired ${extra.join(" / ")} are not graph inputs`);
   }
 };
 
@@ -503,7 +503,7 @@ const assertSymbols = (graph: GenerationGraph, capacitySymbol: string): void => 
   }
   if (!graph.symbols.includes(capacitySymbol)) {
     throw new Error(
-      `容量記号 ${capacitySymbol} がグラフの symbols [${graph.symbols.join(", ")}] に無い`,
+      `Capacity symbol ${capacitySymbol} is not in the graph's symbols [${graph.symbols.join(", ")}]`,
     );
   }
   // Choosing an input-derived symbol as the capacity symbol makes the run's inputs and the
@@ -511,8 +511,8 @@ const assertSymbols = (graph: GenerationGraph, capacitySymbol: string): void => 
   // — it is a spelling mix-up, so fail when the wiring is built.
   if (fromInputs.has(capacitySymbol)) {
     throw new Error(
-      `容量記号 ${capacitySymbol} は入力 shape から決まる記号である` +
-        `（state スロットの容量記号は入力に現れない 1 本 — ADR 0066 追記 7）`,
+      `Capacity symbol ${capacitySymbol} is a symbol determined by an input shape` +
+        ` (the capacity symbol of the state slots is the one symbol that does not appear in the inputs — ADR 0066 addendum 7)`,
     );
   }
   const unresolved = graph.symbols.filter(
@@ -520,8 +520,8 @@ const assertSymbols = (graph: GenerationGraph, capacitySymbol: string): void => 
   );
   if (unresolved.length > 0) {
     throw new Error(
-      `記号 ${unresolved.join(" / ")} が入力 shape からも容量記号からも決まらない` +
-        `（state スロットの容量記号は 1 本だけ — ADR 0066 追記 7）`,
+      `Symbols ${unresolved.join(" / ")} are determined neither by an input shape nor by the capacity symbol` +
+        ` (the state slots have exactly one capacity symbol — ADR 0066 addendum 7)`,
     );
   }
 };
@@ -545,11 +545,13 @@ export const createGenerationProgram = (spec: GenerationProgramSpec): Generation
   assertPositiveInteger(spec.vocabSize, "vocabSize");
   spec.stopTokens.forEach((token, index) => {
     if (!Number.isSafeInteger(token) || token < 0 || token >= spec.vocabSize) {
-      throw new Error(`stopTokens[${index}] ${token} が語彙 0..${spec.vocabSize - 1} の外`);
+      throw new Error(
+        `stopTokens[${index}] ${token} is outside the vocabulary 0..${spec.vocabSize - 1}`,
+      );
     }
   });
 
-  const lengthSymbol = assertRowInput(graph, spec.inputIds, "token id 入力");
+  const lengthSymbol = assertRowInput(graph, spec.inputIds, "token id input");
   const rowSymbol = assertLastRowInput(graph, spec.lastRow);
   // MUST: the input length (physical rows) and the selected row count are different symbols.
   // With the same symbol each shape check passes, but the first prefill run (physical rows =
@@ -557,14 +559,16 @@ export const createGenerationProgram = (spec: GenerationProgramSpec): Generation
   // passes by chance, so detecting the miswiring is delayed until after the GPU build.
   if (lengthSymbol === rowSymbol) {
     throw new Error(
-      `token id 入力 '${spec.inputIds}' の長さと last_row 入力 '${spec.lastRow}' の行数が` +
-        `同じ記号 ${rowSymbol} を使っている（入力長と選択行数は run ごとに別の値をとる）`,
+      `The length of token id input '${spec.inputIds}' and the row count of last_row input '${spec.lastRow}'` +
+        ` use the same symbol ${rowSymbol} (the input length and the selected row count take different values per run)`,
     );
   }
   // Wiring the same name to both exits passes both shape checks only when V = H
   // (the drafter eats logits as hidden = a mix-up without an exception).
   if (spec.logits === spec.hidden) {
-    throw new Error(`logits 出口と hidden 出口が同じ名前 '${spec.logits}' を指している`);
+    throw new Error(
+      `The logits output and the hidden output point at the same name '${spec.logits}'`,
+    );
   }
   assertLogitsOutput(graph, spec.logits, spec.vocabSize, rowSymbol);
   const hiddenSize = assertHiddenOutput(graph, spec.hidden, rowSymbol);

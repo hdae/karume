@@ -117,14 +117,14 @@ test("sequenceLengthFromSeconds: 切り出し長は S × hopLength より短く�
 
 test("bankerRound: 非有限は落とす（丸め先が無い値を黙って通さない）", () => {
   for (const value of [NaN, Infinity, -Infinity]) {
-    assertThrows(() => bankerRound(value), RangeError, "有限の数でない");
+    assertThrows(() => bankerRound(value), RangeError, "is not a finite number");
   }
 });
 
 test("sequenceLengthFromLogFrames: expm1 が有限でない出力は落とす（clamp で隠さない）", () => {
   // duration グラフが壊れた値を出したとき、clamp が黙って上限（750）へ倒すと「30 秒の音声が
   // 出た」だけになって真因が消える。f32 の expm1 は logFrames=1e5 で Infinity になる。
-  assertThrows(() => sequenceLengthFromLogFrames(1e5, BOUNDS), Error, "有限でない");
+  assertThrows(() => sequenceLengthFromLogFrames(1e5, BOUNDS), Error, "is not finite");
 });
 
 test("sequenceLengthFromSeconds: 非有限の秒は落とす", () => {
@@ -180,7 +180,7 @@ test("buildDitMask: 使用長が宣言長を超えたら落とす（右 pad の�
   assertThrows(
     () => buildDitMask(3, { ...USED, speaker: 6 }, CAPS),
     Error,
-    "speaker 区間の使用長 6",
+    "speaker segment: used length 6",
   );
 });
 
@@ -238,7 +238,7 @@ test("combineCfg: 長さの食い違いは落とす", () => {
   assertThrows(
     () => combineCfg(Float32Array.from([1, 2]), [{ scale: 1, velocity: Float32Array.from([1]) }]),
     Error,
-    "CFG 変種の長さ 1",
+    "CFG variant length 1",
   );
 });
 
@@ -254,13 +254,13 @@ test("eulerStep: 速度場の長さ不一致は落とす（combineCfg 側の同�
   assertThrows(
     () => eulerStep(Float32Array.from([0, 0]), Float32Array.from([1]), -0.1),
     Error,
-    "速度場の長さ 1",
+    "Velocity field length 1",
   );
 });
 
 test("tSchedule: steps が 1 以上の整数でなければ落とす", () => {
   for (const steps of [0, -1, 2.5]) {
-    assertThrows(() => tSchedule(steps, 0.999), RangeError, "1 以上の整数でない");
+    assertThrows(() => tSchedule(steps, 0.999), RangeError, "is not an integer >= 1");
   }
 });
 
@@ -278,8 +278,12 @@ test("patchReferenceLatent: 端数のフレームは捨てて reshape する", (
 });
 
 test("patchReferenceLatent: 下限に満たない参照（0 トークン）と形の破れは落とす", () => {
-  assertThrows(() => patchReferenceLatent(new Float32Array(3 * 2), 2, 4), Error, "満たない");
-  assertThrows(() => patchReferenceLatent(new Float32Array(5), 2, 4), Error, "倍数でない");
+  assertThrows(() => patchReferenceLatent(new Float32Array(3 * 2), 2, 4), Error, "is less than");
+  assertThrows(
+    () => patchReferenceLatent(new Float32Array(5), 2, 4),
+    Error,
+    "is not a multiple of",
+  );
   // 逆側: この関数は codec encoder の出力も受けるので、破れは内部不変条件のまま
   // （出所を知らない関数が入力起因を名乗ると、モデル出力の故障が 400 になる — ADR 0107 決定 2）。
   const shortcut = assertThrows(() => patchReferenceLatent(new Float32Array(5), 2, 4));
@@ -293,7 +297,7 @@ test("patchReferenceLatent: speaker の下限 2 トークン（export の Dim(mi
     const error = assertThrows(
       () => patchReferenceLatent(new Float32Array(frames * 2), 2, 4),
       Error,
-      "満たない",
+      "is less than",
     );
     assert(!(error instanceof ModelInputError), "codec encoder の出力の破れは内部不変条件のまま");
   }
@@ -313,18 +317,18 @@ describe("speaker を直接指定したときの受理集合", () => {
     assertThrows(
       () => conditionFromStateOverride(new Float32Array(0), SHAPE),
       ModelInputError,
-      "正の倍数でない",
+      "is not a positive multiple of",
     );
     assertThrows(
       () => conditionFromStateOverride(new Float32Array(5), SHAPE),
       ModelInputError,
-      "正の倍数でない",
+      "is not a positive multiple of",
     );
     // 宣言長を超える行数は `rightPad` まで持ち越さずここで落とす。
     assertThrows(
       () => conditionFromStateOverride(new Float32Array(4 * 4), SHAPE),
       ModelInputError,
-      "speaker 条件 4 行になり、宣言長 3 を超える",
+      "makes 4 rows of speaker condition, exceeding the declared length 3",
     );
   });
 
@@ -339,19 +343,19 @@ describe("speaker を直接指定したときの受理集合", () => {
     const shape = assertThrows(
       () => patchRequestedLatent(new Float32Array(5), SHAPE),
       ModelInputError,
-      "倍数でない",
+      "is not a multiple of",
     );
     assert(shape.cause instanceof Error, "受理条件の所有者の診断を捨てていない");
     assert(!(shape.cause instanceof ModelInputError));
     assertThrows(
       () => patchRequestedLatent(new Float32Array(3 * 2), SHAPE),
       ModelInputError,
-      "満たない",
+      "is less than",
     );
     assertThrows(
       () => patchRequestedLatent(new Float32Array(12 * 2), SHAPE),
       ModelInputError,
-      "speaker 条件 4 行になり、宣言長 3 を超える",
+      "makes 4 rows of speaker condition, exceeding the declared length 3",
     );
   });
 
@@ -360,7 +364,7 @@ describe("speaker を直接指定したときの受理集合", () => {
       assertThrows(
         () => patchRequestedLatent(new Float32Array(frames * 2), SHAPE),
         ModelInputError,
-        "満たない",
+        "is less than",
       );
     }
   });
@@ -414,7 +418,7 @@ test("packIds: 正規化後に空なら落とす（BOS だけの列を通さな�
   assertThrows(
     () => packIds(tinyTokenizer(), "　 ", 8, "caption"),
     ModelInputError,
-    "caption が正規化後に空",
+    "caption is empty after normalisation",
   );
 });
 
@@ -439,7 +443,7 @@ test("packCaptionIds: strip 後に空なら落とす（BOS だけの caption を
   assertThrows(
     () => packCaptionIds(tinyTokenizer(), " \n\t ", 8),
     Error,
-    "caption が strip 後に空",
+    "caption is empty after strip",
   );
 });
 
@@ -505,7 +509,7 @@ describe("irodori の入力起因の失敗（ADR 0107）", () => {
     // 受理集合の所有者は `request-gates.ts` の 1 本（ADR 0107 決定 6）。生成器が家族固有の写しを
     // 持ち続けていると、ここだけ `RangeError` のまま残って入口と型が割れる。
     for (const seed of [-1, 1.5, Number.MAX_SAFE_INTEGER + 2]) {
-      assertThrows(() => new Randn(seed), ModelInputError, "非負の安全整数でない");
+      assertThrows(() => new Randn(seed), ModelInputError, "is not a non-negative safe integer");
     }
   });
 });

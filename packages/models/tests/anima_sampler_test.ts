@@ -67,11 +67,19 @@ test("sigmaSchedule: 代表 shift で梯子の先頭が厳密に 1（DPM++ 2M �
 
 test("sigmaSchedule: 梯子の成立域の外は fail loudly（黙って別軌道を走らせない）", () => {
   // 分母 `f32(shift−1)+1` が f32 で厳密に 0 へ潰れる域 → 先頭が +Inf。
-  assertThrows(() => sigmaSchedule(8, 1e-8), RangeError, "梯子の成立域の外");
+  assertThrows(
+    () => sigmaSchedule(8, 1e-8),
+    RangeError,
+    "is outside the range where the ladder holds",
+  );
   // 潰れはしないが先頭が 1 でなくなる域（実測 0.8388…）。
-  assertThrows(() => sigmaSchedule(8, 1e-7), RangeError, "梯子の成立域の外");
+  assertThrows(
+    () => sigmaSchedule(8, 1e-7),
+    RangeError,
+    "is outside the range where the ladder holds",
+  );
   // 先頭は 1 のまま、直後が f32 の刻みに潰れて同値になる域（狭義単調減少が破れる側）。
-  assertThrows(() => sigmaSchedule(8, 1e7), RangeError, "狭義単調減少でない");
+  assertThrows(() => sigmaSchedule(8, 1e7), RangeError, "is not strictly decreasing");
 });
 
 describe("sigmaSchedule: 先頭が 1 から ulp 級にずれる小数 shift", () => {
@@ -83,7 +91,7 @@ describe("sigmaSchedule: 先頭が 1 から ulp 級にずれる小数 shift", ()
     assertThrows(
       () => sigmaSchedule(8, 1.32),
       RangeError,
-      `sigma 梯子の先頭が ${1 + 2 ** -23}（1 を超えている`,
+      `The head of the sigma ladder is ${1 + 2 ** -23} (above 1`,
     );
   });
 
@@ -131,12 +139,12 @@ test("cfgEulerStep: uncond の有無が needsUncond と食い違ったら落と�
   assertThrows(
     () => cfgEulerStep(previous, cond, undefined, -0.1, 4),
     Error,
-    "uncond 側の DiT 出力を要求する",
+    "requires the DiT output of the uncond side",
   );
   assertThrows(
     () => cfgEulerStep(previous, cond, uncond, -0.1, 1),
     Error,
-    "uncond 分岐を計算しない経路",
+    "path should not compute the uncond branch",
   );
 });
 
@@ -182,12 +190,20 @@ describe("Anima の生成要求が受理できないとき", () => {
   it("steps の上限は 1000（ちょうどは梯子まで組め、超えると梯子を確保する前に ModelInputError）", () => {
     assertAcceptableSteps(1000);
     assertEquals(sigmaSchedule(1000, 3).length, 1001, "上限ちょうどは境界の内");
-    const direct = assertThrows(() => assertAcceptableSteps(1001), ModelInputError, "1000 以下");
+    const direct = assertThrows(
+      () => assertAcceptableSteps(1001),
+      ModelInputError,
+      "is not at most 1000",
+    );
     const viaSchedule = assertThrows(() => sigmaSchedule(1001, 3), ModelInputError);
     assertEquals(direct.message, viaSchedule.message, "steps の診断が 2 か所で割れている");
     // 門が配列の確保より先に効くことの証拠: 上限の無いコードでは `new Float32Array(2⁵³)` が即座に
     // `RangeError`（Invalid typed array length）を投げるので、型が違ってこの 1 行が赤になる。
-    assertThrows(() => sigmaSchedule(Number.MAX_SAFE_INTEGER, 3), ModelInputError, "1000 以下");
+    assertThrows(
+      () => sigmaSchedule(Number.MAX_SAFE_INTEGER, 3),
+      ModelInputError,
+      "is not at most 1000",
+    );
   });
 
   it("対にならないサロゲートを含む本文は ModelInputError で飛ぶ", () => {
@@ -211,7 +227,7 @@ describe("Anima の内部不変条件が破れたとき", () => {
     const error = assertThrows(
       () => assertPromptTokenLengths("プロンプト", 513, 4, 512),
       Error,
-      "上限 512",
+      "upper bound 512",
     );
     assert(!(error instanceof ModelInputError), "500 相当が入力起因の型で飛んでいる");
   });
@@ -219,7 +235,11 @@ describe("Anima の内部不変条件が破れたとき", () => {
   it("VAE 出力の要素数と寸法の食い違いは ModelInputError ではない（呼び手は直せない）", () => {
     // `imageToRgba` の寸法は幾何（latent の全長 × 縮尺）から来るので、ここが割れているのは
     // 開いた export か配線の破れであって、要求を直しても直らない = 500 相当。
-    const error = assertThrows(() => imageToRgba(new Float32Array(5), 2, 1), Error, "要素数");
+    const error = assertThrows(
+      () => imageToRgba(new Float32Array(5), 2, 1),
+      Error,
+      "element count",
+    );
     assert(!(error instanceof ModelInputError), "500 相当が入力起因の型で飛んでいる");
   });
 });

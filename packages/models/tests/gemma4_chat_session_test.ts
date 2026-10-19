@@ -453,7 +453,7 @@ test("ChatSession 溢れ: 落とせるものが尽きたら fail loudly（黙っ
   const error = await assertRejects(
     () => session.send(LONG_ASK).text(),
     GenerationCapacityError,
-    "会話が入り切らない",
+    "The conversation does not fit",
   );
   assertEquals(error.constraint, "capacity");
   assertEquals(error.limit, TIGHT_CAPACITY);
@@ -518,7 +518,11 @@ describe("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す /
       maxNewTokens: MAX_NEW_TOKENS,
       onOverflow: ({ turns }) => turns.slice(0, -1),
     });
-    await assertRejects(() => session.send(LONG_ASK).text(), Error, "今の発話（末尾）を落とした");
+    await assertRejects(
+      () => session.send(LONG_ASK).text(),
+      Error,
+      "dropped the current utterance (the last one)",
+    );
   });
 
   it("履歴を写して返すポリシーは通る（末尾の判定は参照でなく値）", async () => {
@@ -556,7 +560,7 @@ describe("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す /
     await assertRejects(
       () => session.send(LONG_ASK).text(),
       GenerationCapacityError,
-      "縮めなかった",
+      "did not shrink",
     );
     // 縮まない結果は 1 回で打ち切る（再試行の回数は履歴の件数に張り付かない）。
     assertEquals(calls, 1);
@@ -587,7 +591,7 @@ describe("ChatSession capacity: 省略時は program の既定・渡せばそれ
     const error = await assertRejects(
       () => session.send(LONG_ASK).text(),
       GenerationCapacityError,
-      "会話が入り切らない",
+      "The conversation does not fit",
     );
     assertEquals(error.limit, TIGHT_CAPACITY, "選んだ容量が上限として運ばれる");
     assertEquals(overflows, 1, "溢れ処理は選んだ容量で呼ばれる");
@@ -691,14 +695,14 @@ test("ChatSession: 1 セッション = 1 生成（同時 send と dispose 後は
 
   // 発行しただけ（まだ汲んでいない）のターンが走っている間は 2 本目を受けない。
   const first = session.send("Name a color.");
-  assertThrows(() => session.send("Another one."), Error, "前のターンがまだ終わっていない");
+  assertThrows(() => session.send("Another one."), Error, "the previous turn has not finished yet");
   assertEquals(await first.text(), "Blue.");
   // 汲み切ったターンの後は受ける。
   assertEquals(await session.send("Another one.").text(), "Red.");
 
   await session.dispose();
   assertEquals(host.disposed(), 1, "dispose は sequence を畳む");
-  assertThrows(() => session.send("hi"), Error, "dispose 済み");
+  assertThrows(() => session.send("hi"), Error, "after dispose");
 });
 
 test("ChatSession: この層で起きた失敗は done も reject する（成功を名乗らない）", async () => {
@@ -788,7 +792,7 @@ test("ChatSession: 受理集合は同期に落ち、セッションの状態を�
   assertThrows(
     () => session.send("Name a color.", { stopTokens: [2, 2] }),
     Error,
-    "token 2 が 2 度出る",
+    "Token 2 appears twice",
   );
   assertEquals(session.turns, [], "不正な要求は履歴へ発話を積まない");
   assertEquals(host.created(), 0, "sequence も取らない");
@@ -804,7 +808,7 @@ test("ChatSession: dispose 済みでは発行済みの stream も生成しない
 
   const stream = session.send("Name a color.");
   await session.dispose();
-  await assertRejects(() => stream.text(), Error, "dispose 済み");
+  await assertRejects(() => stream.text(), Error, "after dispose");
   assertEquals(host.created(), 0, "dispose の後に sequence を取らない");
 });
 
@@ -825,7 +829,7 @@ test("ChatSession: 停止文字列で切ったターンは chat() と同じ理�
   assert(stop.reason === "stop-string" && stop.stopString === "\nUser:");
   assert(stop.tokens > 0, "内側の数をそのまま運ぶ");
   // 1 つのストリームは 1 通りにしか消費できない（`chat()` と同じ契約）。
-  assertThrows(() => stream[Symbol.asyncIterator](), Error, "1 通りにしか消費できない");
+  assertThrows(() => stream[Symbol.asyncIterator](), Error, "can be consumed in only one way");
 
   assertEquals(
     session.turns,
@@ -853,7 +857,7 @@ describe("ChatSession capacity: 容量の関係は構築時に見る（設定し
     assertThrows(
       () => new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 8 }),
       ModelInputError,
-      "capacity 8 が chunkLength 32 を下回る",
+      "capacity 8 is below chunkLength 32",
     );
   });
 
@@ -861,7 +865,7 @@ describe("ChatSession capacity: 容量の関係は構築時に見る（設定し
     assertThrows(
       () => new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 4097 }),
       ModelInputError,
-      "capacity 4097 が maxPosition 4096 を超えた",
+      "capacity 4097 exceeds maxPosition 4096",
     );
   });
 
@@ -869,7 +873,7 @@ describe("ChatSession capacity: 容量の関係は構築時に見る（設定し
     assertThrows(
       () => new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 64.5 }),
       ModelInputError,
-      "capacity 64.5 が 1 以上の整数でない",
+      "capacity 64.5 is not a positive integer",
     );
   });
 
@@ -910,7 +914,7 @@ test("ChatSession: sequence 確保の await 中に dispose されたら、その
   const caught = await settled;
   assert(caught instanceof Error, `例外で終わっていない: ${caught}`);
   assert(
-    caught.message.includes("dispose 済みでは生成できない"),
+    caught.message.includes("cannot generate after dispose"),
     `別の理由で落ちた: ${caught.message}`,
   );
   assertEquals(host.created(), 1, "確保そのものは通っている（窓の外で捨てる形ではない）");
@@ -1164,7 +1168,7 @@ test("ChatSession 溢れ: 引数展開の上限を超える長さの発話も容
   const error = await assertRejects(
     () => session.send("\u0001".repeat(150_000)).text(),
     GenerationCapacityError,
-    "会話が入り切らない",
+    "The conversation does not fit",
   );
   // 位置表（4096）も容量も超える長さなので、どちらの上限で落ちるかは問わない。
   assert(error.requestedNewTokens === MAX_NEW_TOKENS);
@@ -1297,7 +1301,7 @@ test("ChatSession.fork: 走行中のターンと dispose 済みは同期に落�
 
   // 走行中のターン（stream が終端していない）の間は同期に落ちる。
   const first = session.send("Name a color.");
-  assertThrows(() => session.fork(), Error, "前のターンがまだ終わっていない");
+  assertThrows(() => session.fork(), Error, "the previous turn has not finished yet");
   assertEquals(await first.text(), "Blue.");
   assertEquals(host.forks(), 0, "拒否された fork が複製を出した");
 
@@ -1318,7 +1322,7 @@ test("ChatSession.fork: 走行中のターンと dispose 済みは同期に落�
   );
 
   await session.dispose();
-  assertThrows(() => session.fork(), Error, "Gemma4ChatSession: dispose 済みでは fork できない");
+  assertThrows(() => session.fork(), Error, "Gemma4ChatSession: cannot fork after dispose");
   await branch.dispose();
 });
 

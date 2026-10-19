@@ -115,7 +115,7 @@ export type PrefillChunk = {
 
 const assertPositiveInteger = (value: number, where: string): void => {
   if (!Number.isSafeInteger(value) || value < 1) {
-    throw new Error(`${where} ${value} が 1 以上の整数でない`);
+    throw new Error(`${where} ${value} is not a positive integer`);
   }
 };
 
@@ -132,7 +132,7 @@ export const planPrefillChunks = (
   promptLength: number,
   chunkLength: number,
 ): readonly PrefillChunk[] => {
-  assertPositiveInteger(promptLength, "prompt の長さ");
+  assertPositiveInteger(promptLength, "prompt length");
   assertPositiveInteger(chunkLength, "chunkLength");
   const chunks: PrefillChunk[] = [];
   for (let position = 0; position < promptLength; position += chunkLength) {
@@ -201,11 +201,11 @@ const decodeInputs = <C extends GenerationDisposable>(
  * "the shape of an argmax token sequence".
  */
 const readToken = (outputs: RunOutputs, name: string, rows: number, row: number): number => {
-  if (!Object.hasOwn(outputs, name)) throw new Error(`グラフ出力 '${name}' が無い`);
+  if (!Object.hasOwn(outputs, name)) throw new Error(`Graph output '${name}' is missing`);
   const tensor = outputs[name];
   if (tensor.dtype !== "i32") {
     throw new Error(
-      `グラフ出力 '${name}' が i32 でない（${tensor.dtype}） — argmax token 列を指していない`,
+      `Graph output '${name}' is not i32 (${tensor.dtype}) — it does not point at the argmax token sequence`,
     );
   }
   if (
@@ -215,7 +215,7 @@ const readToken = (outputs: RunOutputs, name: string, rows: number, row: number)
     tensor.shape[2] !== 1
   ) {
     throw new Error(
-      `グラフ出力 '${name}' の形 [${tensor.shape.join(",")}] が [1,${rows},1] でない`,
+      `Graph output '${name}' has shape [${tensor.shape.join(",")}], not [1,${rows},1]`,
     );
   }
   return tensor.data[row];
@@ -240,7 +240,7 @@ export const generateGreedy = async <C extends GenerationDisposable>(
     // i32 range (e.g. 2^32+1 → 1 — it turns into another valid token id without an exception), so
     // fail at the entry.
     if (!Number.isSafeInteger(id) || id < 0 || id > 0x7fffffff) {
-      throw new Error(`prompt[${index}] ${id} が 0..2147483647 の整数でない`);
+      throw new Error(`prompt[${index}] ${id} is not an integer in 0..2147483647`);
     }
   });
   // The largest absolute position touched = T + maxNewTokens - 2 at the last decode step (with zero
@@ -249,8 +249,8 @@ export const generateGreedy = async <C extends GenerationDisposable>(
   const lastPosition = prompt.length + maxNewTokens - 2;
   if (lastPosition >= maxPosition) {
     throw new Error(
-      `prompt ${prompt.length} + maxNewTokens ${maxNewTokens} は最終位置 ${lastPosition} を踏む` +
-        `（maxPosition ${maxPosition} の外 — この資産では位置 0..${maxPosition - 1} しか引けない）`,
+      `prompt ${prompt.length} + maxNewTokens ${maxNewTokens} reaches the last position ${lastPosition}` +
+        ` (outside maxPosition ${maxPosition} — this asset can look up only positions 0..${maxPosition - 1})`,
     );
   }
 

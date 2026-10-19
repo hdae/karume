@@ -315,7 +315,7 @@ const breakOutput = (component: SingleOutput, axis: number, value: number | stri
 test("admitIrodori: 突合を全て満たすグラフは資産の段まで進む（門の位置の対偶）", async () => {
   // `tokenizer` を渡していないので、突合を全部通れば落ちるのはその 1 本。ここが
   // 「グラフ入力 '…' の軸 …」で落ちるなら、正常系のはずの宣言が門に引っかかっている。
-  await assertRejects(() => build(), Error, "irodori: 資産 'tokenizer' が無い");
+  await assertRejects(() => build(), Error, "irodori: asset 'tokenizer' is missing");
 });
 
 test("admitIrodori: 壊した軸ごとに軸名・期待値・実測値を出して落ちる（12 点）", async () => {
@@ -330,74 +330,74 @@ test("admitIrodori: 壊した軸ごとに軸名・期待値・実測値を出し
     {
       where: "latentDim",
       patch: breakInput("dit", "x_t", 2, 33),
-      actual: "'x_t' の軸 2 が 33",
-      expected: "pipelineConfig は 32",
+      actual: "'x_t' axis 2 is 33",
+      expected: "pipelineConfig has 32",
     },
     {
       where: "timestepEmbedDim",
       patch: breakInput("dit", "t_embed", 1, 511),
-      actual: "'t_embed' の軸 1 が 511",
-      expected: "pipelineConfig は 512",
+      actual: "'t_embed' axis 1 is 511",
+      expected: "pipelineConfig has 512",
     },
     {
       where: "maxTextLen",
       patch: breakInput("dit_context", "text_state", 1, 255),
-      actual: "'text_state' の軸 1 が 255",
-      expected: "pipelineConfig は 256",
+      actual: "'text_state' axis 1 is 255",
+      expected: "pipelineConfig has 256",
     },
     {
       where: "textDim",
       patch: breakInput("dit_context", "text_state", 2, 511),
-      actual: "'text_state' の軸 2 が 511",
-      expected: "pipelineConfig は 512",
+      actual: "'text_state' axis 2 is 511",
+      expected: "pipelineConfig has 512",
     },
     {
       where: "speakerRows",
       patch: breakInput("dit_context", "speaker_state", 1, 750),
-      actual: "'speaker_state' の軸 1 が 750",
-      expected: "pipelineConfig は 751",
+      actual: "'speaker_state' axis 1 is 750",
+      expected: "pipelineConfig has 751",
     },
     {
       where: "speakerDim",
       patch: breakInput("dit_context", "speaker_state", 2, 767),
-      actual: "'speaker_state' の軸 2 が 767",
-      expected: "pipelineConfig は 768",
+      actual: "'speaker_state' axis 2 is 767",
+      expected: "pipelineConfig has 768",
     },
     {
       where: "maxCaptionLen",
       patch: breakInput("dit_context", "caption_state", 1, 511),
-      actual: "'caption_state' の軸 1 が 511",
-      expected: "pipelineConfig は 512",
+      actual: "'caption_state' axis 1 is 511",
+      expected: "pipelineConfig has 512",
     },
     {
       where: "captionDim",
       patch: breakInput("dit_context", "caption_state", 2, 511),
-      actual: "'caption_state' の軸 2 が 511",
-      expected: "pipelineConfig は 512",
+      actual: "'caption_state' axis 2 is 511",
+      expected: "pipelineConfig has 512",
     },
     {
       where: "textDim",
       patch: breakInput("duration", "text_state", 2, 511),
-      actual: "'text_state' の軸 2 が 511",
-      expected: "pipelineConfig は 512",
+      actual: "'text_state' axis 2 is 511",
+      expected: "pipelineConfig has 512",
     },
     {
       where: "speakerDim",
       patch: breakInput("duration", "speaker_vec", 1, 767),
-      actual: "'speaker_vec' の軸 1 が 767",
-      expected: "pipelineConfig は 768",
+      actual: "'speaker_vec' axis 1 is 767",
+      expected: "pipelineConfig has 768",
     },
     {
       where: "captionDim",
       patch: breakInput("duration", "caption_vec", 1, 511),
-      actual: "'caption_vec' の軸 1 が 511",
-      expected: "pipelineConfig は 512",
+      actual: "'caption_vec' axis 1 is 511",
+      expected: "pipelineConfig has 512",
     },
     {
       where: "latentDim × speakerPatchSize",
       patch: breakInput("speaker", "latent", 2, 64),
-      actual: "'latent' の軸 2 が 64",
-      expected: "pipelineConfig は 128",
+      actual: "'latent' axis 2 is 64",
+      expected: "pipelineConfig has 128",
     },
   ];
 
@@ -417,7 +417,7 @@ test("admitIrodori: codec_decoder の latent 幅と出力倍率を別々に見�
     Error,
     "latentDim",
   );
-  assertStringIncludes(width.message, "'latent' の軸 2 が 31");
+  assertStringIncludes(width.message, "'latent' axis 2 is 31");
 
   // 出力の**派生次元の係数**。shape は「それらしい長さの波形」のままなので、ここだけが
   // 「1 フレーム → hopLength サンプル」の破れを捕まえる（秒指定の切り出しと末尾トリムが
@@ -427,8 +427,8 @@ test("admitIrodori: codec_decoder の latent 幅と出力倍率を別々に見�
     Error,
     "hopLength",
   );
-  assertStringIncludes(scale.message, "軸 2 が 960S");
-  assertStringIncludes(scale.message, "期待は '1920S'");
+  assertStringIncludes(scale.message, "axis 2 = 960S");
+  assertStringIncludes(scale.message, "expects '1920S'");
 });
 
 test("admitIrodori: codec_encoder の入力フレーム幅と出力 latent 幅を別々に見る", async () => {
@@ -437,14 +437,14 @@ test("admitIrodori: codec_encoder の入力フレーム幅と出力 latent 幅�
     Error,
     "hopLength",
   );
-  assertStringIncludes(frame.message, "'wav' の軸 2 が 1919");
+  assertStringIncludes(frame.message, "'wav' axis 2 is 1919");
 
   const latent = await assertRejects(
     () => build(breakOutput("codec_encoder", 2, 31)),
     Error,
     "latentDim",
   );
-  assertStringIncludes(latent.message, "グラフ出力 'latent' の軸 2 が 31");
+  assertStringIncludes(latent.message, "graph output 'latent' has axis 2 = 31");
 });
 
 test("admitIrodori: dit の記号次元が 1 本でなければ落とす（経路に依らず同じ文言）", async () => {
@@ -463,7 +463,7 @@ test("admitIrodori: dit の記号次元が 1 本でなければ落とす（経�
   await assertRejects(
     () => build({ dit: twoSymbols }),
     Error,
-    "dit の記号次元が 1 本でない（[B, S]）",
+    "dit does not have exactly one symbolic dimension ([B, S])",
   );
 });
 
@@ -501,7 +501,7 @@ test("admitIrodori: dit_context が記号次元を持てば落とす（常駐テ
   await assertRejects(
     () => build({ dit_context: symbolic }),
     Error,
-    "dit_context が記号次元を持つ（[T]）",
+    "dit_context has symbolic dimensions ([T])",
   );
 });
 
@@ -517,7 +517,7 @@ test("admitIrodori: dit_context の出力が K / V の対にならなければ�
         dit: { ...dit, inputs: dit.inputs.filter((input) => input.name !== "context_v_11") },
       }),
     Error,
-    "dit_context の出力が 23 本",
+    "dit_context has 23 outputs",
   );
 });
 
@@ -535,10 +535,10 @@ test("admitIrodori: dit の入力名が {x_t, t_embed, mask} ∪ dit_context の
         },
       }),
     Error,
-    "dit の入力が {x_t, t_embed, mask} ∪ dit_context の出力と一致しない",
+    "the dit inputs do not match {x_t, t_embed, mask} ∪ the dit_context outputs",
   );
-  assertStringIncludes(renamed.message, "dit に無い: [context_v_11]");
-  assertStringIncludes(renamed.message, "dit にだけある: [context_v_12]");
+  assertStringIncludes(renamed.message, "missing from dit: [context_v_11]");
+  assertStringIncludes(renamed.message, "only in dit: [context_v_12]");
 
   // 旧形（dit が条件 state 3 本を直接受け、mask 以外に K / V を持たない）は名指しで落ちる。
   const legacy = await assertRejects(
@@ -553,7 +553,7 @@ test("admitIrodori: dit の入力名が {x_t, t_embed, mask} ∪ dit_context の
         },
       }),
     Error,
-    "dit にだけある: [text_state]",
+    "only in dit: [text_state]",
   );
   assertStringIncludes(legacy.message, "context_k_0");
 });
@@ -570,9 +570,9 @@ test("admitIrodori: dit_context の出力と dit の同名入力の形・dtype �
   const shape = await assertRejects(
     () => build({ dit_context: transposed }),
     Error,
-    "dit_context の出力 'context_k_3'（f32 [1, 1519, 64, 20]）が dit の同名入力（f32 [1, 1519, 20, 64]）と合わない",
+    "dit_context output 'context_k_3' (f32 [1, 1519, 64, 20]) does not match the dit input of the same name (f32 [1, 1519, 20, 64])",
   );
-  assertStringIncludes(shape.message, "静的な同じ形・同じ dtype が要る");
+  assertStringIncludes(shape.message, "the same static shape and the same dtype are required");
 
   // dtype だけが違う（4 バイト同士なのでこれもバイト数では見えない）。i32 の出力を宣言として
   // 成り立たせるために i32 の入力を 1 本足す（突合の門は条件 3 本の軸しか見ない）。
@@ -586,7 +586,7 @@ test("admitIrodori: dit_context の出力と dit の同名入力の形・dtype �
   await assertRejects(
     () => build({ dit_context: retyped }),
     Error,
-    "dit_context の出力 'context_v_0'（i32 [1, 1519, 20, 64]）が dit の同名入力（f32 [1, 1519, 20, 64]）と合わない",
+    "dit_context output 'context_v_0' (i32 [1, 1519, 20, 64]) does not match the dit input of the same name (f32 [1, 1519, 20, 64])",
   );
 });
 
@@ -647,7 +647,7 @@ test("fromPretrained: components で差した dit の次元が違えば重みを
         },
       ),
     Error,
-    "グラフ記述が manifest の宣言と違う",
+    "the graph descriptor does not match the manifest's declaration",
   );
   assertStringIncludes(error.message, "dit");
   // 差し替え先の manifest を引いた（= 席が loader まで届いた）。検査は 2 つの manifest の宣言
@@ -679,7 +679,7 @@ test("admitIrodori: 不正な明示値と attention 系のノブはグラフ突�
     () =>
       IrodoriPipeline.fromAssets({ manifest, assets: broken }, optionsWith("linearCompute", null)),
     ModelInputError,
-    "linearComputeが不正",
+    "linearCompute is invalid",
   );
   // dit の attention は融合 attention の契約に載らない（分解経路）ので、効く席が無い。
   await assertRejects(
@@ -689,7 +689,7 @@ test("admitIrodori: 不正な明示値と attention 系のノブはグラフ突�
         optionsWith("attentionCompute", "f16"),
       ),
     ModelInputError,
-    "attentionComputeはこの系列では指定できない",
+    "attentionCompute cannot be specified for this family",
   );
 });
 
@@ -704,7 +704,7 @@ test("admitIrodori: 受理される linearCompute の明示は突合を通って
         { linearCompute: "a8" },
       ),
     Error,
-    "irodori: 資産 'tokenizer' が無い",
+    "irodori: asset 'tokenizer' is missing",
   );
 });
 

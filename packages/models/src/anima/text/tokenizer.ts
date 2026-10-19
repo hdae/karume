@@ -70,16 +70,18 @@ export const assertPromptTokenLengths = (
   ] as const) {
     if (length < PROMPT_MIN_TOKENS) {
       throw new ModelInputError(
-        `${label}の ${which} id 列が ${length} トークン（最低 ${PROMPT_MIN_TOKENS}）— ` +
-          `空文字や空白だけのプロンプトは受理集合 Dim(min=${PROMPT_MIN_TOKENS}) の外。` +
-          "1 語以上入れる。",
+        `${label}: the ${which} id sequence is ${length} tokens (minimum ${PROMPT_MIN_TOKENS}) — ` +
+          `an empty or whitespace-only prompt is outside the accepted set Dim(min=${PROMPT_MIN_TOKENS}). ` +
+          "Enter at least one word.",
       );
     }
     if (length > maxLength) {
       // The upper side is not input-caused (ADR 0107 decision 2) — both tokenizers truncate to
       // `maxLength` before returning, so this is reached only when truncation is broken = a broken
       // internal invariant. Shortening the prompt would not fix it, so a plain `Error` is thrown.
-      throw new Error(`${label}の ${which} id 列が ${length} トークン（上限 ${maxLength}）`);
+      throw new Error(
+        `${label}: the ${which} id sequence is ${length} tokens (upper bound ${maxLength})`,
+      );
     }
   }
 };
@@ -96,8 +98,8 @@ export class AnimaTokenizers {
       // lengths disagree on long prompts, which surfaces no earlier than the conditioner's
       // 512-padding check.
       throw new Error(
-        `トークナイザ資産の maxLength が食い違う（Qwen2 ${qwen2Assets.maxLength} / ` +
-          `T5 ${t5Assets.maxLength}）`,
+        `The maxLength of the tokenizer assets does not match (Qwen2 ${qwen2Assets.maxLength} / ` +
+          `T5 ${t5Assets.maxLength})`,
       );
     }
     this.#qwen2 = new Qwen2Tokenizer(qwen2Assets);
@@ -114,7 +116,7 @@ export class AnimaTokenizers {
    * Passes one prompt through both tokenizers. A length outside the accepted set fails here
    * (`label` appears in that message — so it tells the positive from the negative prompt).
    */
-  encode(prompt: string, label: string = "プロンプト"): AnimaPromptIds {
+  encode(prompt: string, label: string = "prompt"): AnimaPromptIds {
     // The acceptance check of the text itself runs **before it is passed to the tokenizers**
     // (input-caused per ADR 0107 decision 2). Parsing the vocabulary assets passes the same
     // condition, but a violation there is an asset inconsistency, so the type differs.
@@ -137,7 +139,7 @@ const parseClasses = (raw: unknown, label: string): Qwen2CharClasses => {
 
 /** Equivalence table of `(?i:)` (pairs of `[cp, the character on the suffix side]`). */
 const parseCaseFold = (raw: unknown, label: string): Qwen2CaseFold => {
-  if (!Array.isArray(raw)) throw new Error(`${label}: 配列でない`);
+  if (!Array.isArray(raw)) throw new Error(`${label}: not an array`);
   const out = new Map<number, number>();
   for (const entry of raw) {
     if (
@@ -146,7 +148,7 @@ const parseCaseFold = (raw: unknown, label: string): Qwen2CaseFold => {
       typeof entry[0] !== "number" ||
       typeof entry[1] !== "number"
     ) {
-      throw new Error(`${label}: [cp, cp] でない`);
+      throw new Error(`${label}: not [cp, cp]`);
     }
     assertCodePoint(entry[0], label);
     assertCodePoint(entry[1], label);
@@ -168,7 +170,7 @@ const parseLines = (raw: unknown, count: unknown, label: string, countLabel: str
   const want = asNumber(count, countLabel);
   if (lines.length !== want) {
     throw new Error(
-      `${label}: 行数 ${lines.length} が ${countLabel} の ${want} と違う（資産が壊れている）`,
+      `${label}: line count ${lines.length} does not match ${countLabel} ${want} (the asset is broken)`,
     );
   }
   return lines;
@@ -225,12 +227,12 @@ const decodeJson = (bytes: Uint8Array<ArrayBuffer>, label: string): unknown => {
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch (cause) {
-    throw new Error(`${label}: UTF-8 として読めない`, { cause });
+    throw new Error(`${label}: cannot be read as UTF-8`, { cause });
   }
   try {
     return JSON.parse(text);
   } catch (cause) {
-    throw new Error(`${label}: JSON として読めない`, { cause });
+    throw new Error(`${label}: cannot be read as JSON`, { cause });
   }
 };
 

@@ -22,7 +22,7 @@ export const valueOf = (
   name: string,
 ): GraphOwner["graph"]["values"][string] => {
   if (!Object.hasOwn(model.graph.values, name)) {
-    throw new Error(`${owner}: グラフの値 '${name}' の宣言が無い`);
+    throw new Error(`${owner}: graph value '${name}' is not declared`);
   }
   return model.graph.values[name];
 };
@@ -47,12 +47,12 @@ export const assertDims = (
   if (dims.length !== expected.length || dims.some((dim, axis) => dim !== expected[axis])) {
     const declared = dims.join(", ");
     const host = expected.join(", ");
-    throw new Error(`${owner}: ${where} の形 [${declared}] がホストの組む [${host}] と違う`);
+    throw new Error(`${owner}: ${where} shape [${declared}] differs from the host's [${host}]`);
   }
 };
 
 export const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
-  if (tensor.dtype !== "f32") throw new Error(`${where}: f32 でない（${tensor.dtype}）`);
+  if (tensor.dtype !== "f32") throw new Error(`${where}: not f32 (${tensor.dtype})`);
   return tensor.data;
 };
 

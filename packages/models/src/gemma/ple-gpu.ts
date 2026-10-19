@@ -112,7 +112,7 @@ const PLE_RESIDENCIES: readonly Gemma4PleResidency[] = ["host", "gpu"];
 export const assertGemma4PleResidency = (where: string, value: unknown): Gemma4PleResidency => {
   if (typeof value !== "string" || !PLE_RESIDENCIES.includes(value as Gemma4PleResidency)) {
     throw new Error(
-      `${where}: pleResidency ${JSON.stringify(value)} が ${PLE_RESIDENCIES.join(" / ")} でない`,
+      `${where}: pleResidency ${JSON.stringify(value)} is not ${PLE_RESIDENCIES.join(" / ")}`,
     );
   }
   return value as Gemma4PleResidency;
@@ -316,8 +316,8 @@ export const buildGemma4PleGatherContainer = async (
   const rowBytes = index.dim / factor;
   if (!Number.isSafeInteger(rowBytes) || rowBytes % 4 !== 0) {
     throw new Error(
-      `${entry}: PLE の 1 層ぶん ${index.dim} 要素（格納 ${index.storage}）が` +
-        ` ${rowBytes} バイトで 4 整列しない（容器の block 末尾整列を満たせない）`,
+      `${entry}: one PLE layer of ${index.dim} elements (storage ${index.storage}) is` +
+        ` ${rowBytes} bytes, not 4-aligned (the container's block end alignment cannot be met)`,
     );
   }
   const bytes = gemma4PleGpuBytes(index);
@@ -375,14 +375,14 @@ const assertBindingLimits = (options: Gemma4PleResidentOptions, valuesBytes: num
   ).filter(([, granted]) => granted < valuesBytes);
   if (shortfalls.length === 0) return;
   throw new Error(
-    `${options.entry}: pleResidency: "gpu" は PLE の量子化バイト列 ${valuesBytes} バイトを` +
-      `単一束縛で載せるが、この device は ` +
+    `${options.entry}: pleResidency: "gpu" puts the PLE's ${valuesBytes} bytes of quantized data` +
+      ` in a single binding, but this device has ` +
       shortfalls.map(([key, granted]) => `${key} ${granted}`).join(" / ") +
-      `（不足 ${shortfalls
+      ` (short by ${shortfalls
         .map(([key, granted]) => `${key} ${valuesBytes - granted}`)
         .join(
           " / ",
-        )} バイト）— 既定の pleResidency: "host" で読むか、束縛上限の大きい device で開く`,
+        )} bytes) — read it with the default pleResidency: "host", or open it on a device with a larger binding limit`,
   );
 };
 
@@ -406,8 +406,8 @@ export const createGemma4PleResident = async (
   // applied in this option too).
   if (index.tokens !== options.vocabSize) {
     throw new Error(
-      `${entry}: PLE の索引の行数 ${index.tokens} が主 embedding の vocab 行数` +
-        ` ${options.vocabSize} と違う（別の語彙で焼かれた組み合わせ）`,
+      `${entry}: the PLE index's row count ${index.tokens} differs from the main embedding's vocab row count` +
+        ` ${options.vocabSize} (a combination baked with a different vocabulary)`,
     );
   }
   const bytes = gemma4PleGpuBytes(index);
@@ -460,9 +460,9 @@ export const createGemma4PleResident = async (
     extraBytes: estimate.peakAccountedBytes + outputBytes,
     residentBytes: bytes.total,
     async enqueue(batch: BatchScope, ids: Int32Array<ArrayBuffer>): Promise<ResidentTensor> {
-      if (disposal !== undefined) throw new Error(`${entry}: dispose 済みの PLE は引けない`);
+      if (disposal !== undefined) throw new Error(`${entry}: a disposed PLE cannot be looked up`);
       const rows = ids.length;
-      if (rows < 1) throw new Error(`${entry}: PLE gather の token 列が空`);
+      if (rows < 1) throw new Error(`${entry}: the token sequence of the PLE gather is empty`);
       let expanded = indices.get(rows);
       if (expanded === undefined) {
         expanded = new Int32Array(new ArrayBuffer(rows * index.layers * 4));
@@ -474,7 +474,7 @@ export const createGemma4PleResident = async (
         // is the fail-loudly point (the same check as (3) of the host path's `Gemma4Ple.gather`).
         if (id < 0 || id >= index.tokens) {
           throw new Error(
-            `${entry}: token id[${row}] ${id} が PLE の索引の 0..${index.tokens - 1} の外`,
+            `${entry}: token id[${row}] ${id} is outside the PLE index's 0..${index.tokens - 1}`,
           );
         }
         const base = id * index.layers;
@@ -525,7 +525,7 @@ export const gemma4PleGatherIds = (
   const input: RunInput | undefined = Object.hasOwn(inputs, name) ? inputs[name] : undefined;
   if (input === undefined || !("dtype" in input) || input.dtype !== "i32") {
     throw new Error(
-      `${where}: 入力 '${name}' が i32 のホストテンソルでない（GPU 内 gather の添字）`,
+      `${where}: input '${name}' is not an i32 host tensor (the indices of the on-GPU gather)`,
     );
   }
   return input.data;

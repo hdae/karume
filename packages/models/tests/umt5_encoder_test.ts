@@ -185,18 +185,18 @@ const fakeGpu = () => fakeGpuContext(fakeDevice());
 
 describe("fromAssets: 家族 admission は GPU に触る前に落ちる（容器は揃えたまま）", () => {
   const rejected: readonly [string, Record<string, unknown>, string][] = [
-    ["pipeline の名前違い", { pipeline: "wan/1" }, "manifest の pipeline が 'wan/1'"],
-    ["未知の major", { pipeline: "umt5-encoder/2" }, "major に未対応"],
-    ["pipelineConfig の欄", { pipelineConfig: { maxLength: 512 } }, "未知キー 'maxLength'"],
+    ["pipeline の名前違い", { pipeline: "wan/1" }, "the manifest's pipeline is 'wan/1'"],
+    ["未知の major", { pipeline: "umt5-encoder/2" }, "unsupported major"],
+    ["pipelineConfig の欄", { pipelineConfig: { maxLength: 512 } }, "unknown key 'maxLength'"],
     [
       "トークナイザ資産の宣言が無い（取り込み由来のミラーの形）",
       { assets: {} },
-      "assets にトークナイザ資産 'tokenizer' が無い",
+      "have no tokenizer asset 'tokenizer'",
     ],
     [
       "quant の session に実行ノブ",
       { quants: { i8: { weights: { text_encoder: "i8" }, session: { linearCompute: "a8" } } } },
-      "session.linearComputeは未対応",
+      "session.linearCompute is not supported",
     ],
   ];
   for (const [label, patch, message] of rejected) {
@@ -222,12 +222,12 @@ describe("fromAssets: 家族 admission は GPU に触る前に落ちる（容器
     await assertRejects(
       () => Umt5Encoder.fromAssets(input, { model: "base", gpu: fakeGpu() }),
       Error,
-      "model 'base' は manifest に無い（利用可能: xxl）",
+      "model 'base' is not in the manifest (available: xxl)",
     );
     await assertRejects(
       () => Umt5Encoder.fromAssets(input, { quant: "f16", gpu: fakeGpu() }),
       Error,
-      "quant 'f16' は manifest に無い（利用可能: i8）",
+      "quant 'f16' is not in the manifest (available: i8)",
     );
   });
 
@@ -242,7 +242,7 @@ describe("fromAssets: 家族 admission は GPU に触る前に落ちる（容器
           { gpu: fakeGpu() },
         ),
       Error,
-      "text_encoder の initializer 'embed' の格納 int4-sym-g は受けない",
+      "text_encoder initializer 'embed' has storage int4-sym-g, which is not accepted",
     );
   });
 
@@ -250,7 +250,7 @@ describe("fromAssets: 家族 admission は GPU に触る前に落ちる（容器
     await assertRejects(
       () => Umt5Encoder.fromAssets({ manifest: manifestOf(DECLARED), assets: {} }),
       Error,
-      "部品 'text_encoder' の容器が無い",
+      "component 'text_encoder' has no container",
     );
   });
 });
@@ -270,7 +270,7 @@ describe("fromAssets: トークナイザ資産の中身は GPU に触る前に�
           { gpu: fakeGpu() },
         ),
       Error,
-      "資産 'tokenizer' が無い",
+      "asset 'tokenizer' is missing",
     );
   });
 
@@ -278,7 +278,7 @@ describe("fromAssets: トークナイザ資産の中身は GPU に触る前に�
     await assertRejects(
       () => build(tokenizerJson({ format: "karume-wan-umt5-tokenizer/1" })),
       Error,
-      "形式 karume-wan-umt5-tokenizer/1 を読めない",
+      "cannot read format karume-wan-umt5-tokenizer/1",
     );
   });
 
@@ -286,7 +286,7 @@ describe("fromAssets: トークナイザ資産の中身は GPU に触る前に�
     await assertRejects(
       () => build(tokenizerJson({ maxLength: 256 })),
       Error,
-      "maxLength 256 が umT5 の有効長の上限 512 と違う",
+      "maxLength 256 differs from umT5's valid-length upper limit 512",
     );
   });
 });
@@ -336,13 +336,9 @@ const serveUmt5 = async (patch: Record<string, unknown>, tokenizer: Uint8Array<A
 
 describe("fromPretrained: admission の違反は重みの part を 1 本も取らずに落ちる", () => {
   const rejected: readonly [string, Record<string, unknown>, string][] = [
-    [
-      "トークナイザ資産の宣言が無い",
-      { assets: {} },
-      "assets にトークナイザ資産 'tokenizer' が無い",
-    ],
-    ["pipeline の名前違い", { pipeline: "siglip2/1" }, "manifest の pipeline が 'siglip2/1'"],
-    ["未知の major", { pipeline: "umt5-encoder/2" }, "major に未対応"],
+    ["トークナイザ資産の宣言が無い", { assets: {} }, "have no tokenizer asset 'tokenizer'"],
+    ["pipeline の名前違い", { pipeline: "siglip2/1" }, "the manifest's pipeline is 'siglip2/1'"],
+    ["未知の major", { pipeline: "umt5-encoder/2" }, "unsupported major"],
   ];
   for (const [label, patch, message] of rejected) {
     it(label, async () => {
@@ -357,7 +353,7 @@ describe("fromPretrained: admission の違反は重みの part を 1 本も取�
     // 観測の仕掛け: トークナイザ資産を形式欄の無い JSON にする。構築は admission → 重みの part の取得 → 資産の
     // 取得 → 資産の解析の順なので、この文言で落ちれば手前の段は全部通っている（GPU には触らない）。
     const rig = await serveUmt5({}, new TextEncoder().encode("{}"));
-    await assertRejects(() => rig.load(), Error, "tokenizer.format: 文字列でない");
+    await assertRejects(() => rig.load(), Error, "tokenizer.format: not a string");
     for (const part of nonEmpty(rig.parts)) {
       assert(rig.paths.includes(part.path), `重みの part ${part.path} を取っていない`);
     }
@@ -371,7 +367,7 @@ describe("fromPretrained: 取得元に既定は無い", () => {
       // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply supplies Umt5Encoder as `this`
       () => Reflect.apply(Umt5Encoder.fromPretrained, Umt5Encoder, []),
       Error,
-      "Umt5Encoder.fromPretrained: repo が必須（取得元に既定は無い）",
+      "Umt5Encoder.fromPretrained: repo is required (there is no default source)",
     );
   });
 });
@@ -409,7 +405,7 @@ describe("umt5GraphContract: 出力の幅", () => {
     assertThrows(
       () => umt5GraphContract(ownerOf([1, "L", "W"]), "Umt5Encoder"),
       Error,
-      "軸 2 が静的な正の整数でない",
+      "axis 2 is not a static positive integer",
     );
   });
 
@@ -418,7 +414,7 @@ describe("umt5GraphContract: 出力の幅", () => {
     assertThrows(
       () => umt5GraphContract(ownerOf([1, "L", 2048]), "WanPipeline", 4096),
       Error,
-      "出力 'out' の形 [1, L, 2048] がホストの組む [1, L, 4096] と違う",
+      "output 'out' shape [1, L, 2048] differs from the host's [1, L, 4096]",
     );
   });
 });

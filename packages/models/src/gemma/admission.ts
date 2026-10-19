@@ -108,20 +108,18 @@ export type Gemma4Admission = {
 const vocabSizeOf = (graph: GenerationGraph, entry: string): number => {
   if (graph.outputs.length !== GRAPH_OUTPUTS) {
     throw new Error(
-      `${entry}: グラフ出力が ${graph.outputs.length} 本` +
-        `（製品グラフの出口は logits + hidden の ${GRAPH_OUTPUTS} 本 — ADR 0083 決定 6）`,
+      `${entry}: the graph has ${graph.outputs.length} outputs` +
+        ` (the product graph has ${GRAPH_OUTPUTS} outputs, logits + hidden — ADR 0083 decision 6)`,
     );
   }
   const name = graph.outputs[0];
   if (!Object.hasOwn(graph.values, name)) {
-    throw new Error(`${entry}: グラフ出力 '${name}' の値情報が無い`);
+    throw new Error(`${entry}: graph output '${name}' has no value info`);
   }
   const shape = graph.values[name].shape;
   const vocab = shape[2];
   if (shape.length !== 3 || typeof vocab !== "number") {
-    throw new Error(
-      `${entry}: グラフ出力 '${name}' の shape [${shape.join(",")}] が [1,R,V] でない`,
-    );
+    throw new Error(`${entry}: graph output '${name}' has shape [${shape.join(",")}], not [1,R,V]`);
   }
   return vocab;
 };
@@ -136,14 +134,12 @@ const vocabSizeOf = (graph: GenerationGraph, entry: string): number => {
 const hiddenSizeOf = (graph: GenerationGraph, entry: string): number => {
   const name = graph.outputs[1];
   if (!Object.hasOwn(graph.values, name)) {
-    throw new Error(`${entry}: グラフ出力 '${name}' の値情報が無い`);
+    throw new Error(`${entry}: graph output '${name}' has no value info`);
   }
   const shape = graph.values[name].shape;
   const hidden = shape[2];
   if (shape.length !== 3 || typeof hidden !== "number") {
-    throw new Error(
-      `${entry}: グラフ出力 '${name}' の shape [${shape.join(",")}] が [1,R,H] でない`,
-    );
+    throw new Error(`${entry}: graph output '${name}' has shape [${shape.join(",")}], not [1,R,H]`);
   }
   return hidden;
 };
@@ -167,8 +163,8 @@ const capacitySymbolOf = (graph: GenerationGraph, entry: string): string => {
   const free = graph.symbols.filter((symbol) => !fromInputs.has(symbol));
   if (free.length !== 1) {
     throw new Error(
-      `${entry}: 入力 shape から決まらない記号が ${free.length} 本` +
-        `（[${free.join(", ")}] — full スロットの容量記号 1 本であること）`,
+      `${entry}: ${free.length} symbols are not determined by the input shapes` +
+        ` ([${free.join(", ")}] — there must be exactly one, the capacity symbol of the full slots)`,
     );
   }
   return free[0];
@@ -204,13 +200,15 @@ export const assertRopeInputShapes = (
       const name = gemma4RopeInputName(layerType, part);
       const input = graph.inputs.find((entry) => entry.name === name);
       if (input === undefined) {
-        throw new Error(`${entry}: グラフ入力 '${name}' が無い（RoPE がホスト供給の資産でない）`);
+        throw new Error(
+          `${entry}: graph input '${name}' is missing (RoPE is not an asset the host supplies)`,
+        );
       }
       if (input.shape.length !== 3 || input.shape[2] !== headDim) {
         throw new Error(
-          `${entry}: グラフ入力 '${name}' の shape [${input.shape.join(",")}] が` +
-            ` pipelineConfig.rope.${layerType}.headDim ${headDim} と食い違う` +
-            `（[1, M, ${headDim}] が要る）`,
+          `${entry}: graph input '${name}' has shape [${input.shape.join(",")}], which disagrees` +
+            ` with pipelineConfig.rope.${layerType}.headDim ${headDim}` +
+            ` ([1, M, ${headDim}] is needed)`,
         );
       }
     }
@@ -306,17 +304,17 @@ export const assertChunkLength = (
   entry: string = gemmaEntryName("gemma4"),
 ): number => {
   if (!Number.isSafeInteger(chunkLength) || chunkLength < 2) {
-    throw new ModelInputError(`${entry}: chunkLength ${chunkLength} が 2 以上の整数でない`);
+    throw new ModelInputError(`${entry}: chunkLength ${chunkLength} is not an integer ≥ 2`);
   }
   if (chunkLength > config.maxChunkLength) {
     throw new ModelInputError(
-      `${entry}: chunkLength ${chunkLength} が配布形の宣言 maxChunkLength` +
-        ` ${config.maxChunkLength} を超えた（記号 M を焼いた trace 範囲の外）`,
+      `${entry}: chunkLength ${chunkLength} exceeds the distribution's declared maxChunkLength` +
+        ` ${config.maxChunkLength} (outside the trace range the symbol M was baked with)`,
     );
   }
   if (chunkLength > config.maxPosition) {
     throw new ModelInputError(
-      `${entry}: chunkLength ${chunkLength} が maxPosition ${config.maxPosition} を超えた`,
+      `${entry}: chunkLength ${chunkLength} exceeds maxPosition ${config.maxPosition}`,
     );
   }
   return chunkLength;
@@ -381,29 +379,29 @@ export const gemma4ManifestConfig = (
   if (family === "gemma4-qat") assertGemma4QatModel(modelName);
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
-      `${where}: model '${modelName}' は manifest に無い` +
-        `（利用可能: ${manifest.available.models.join(" / ")}）`,
+      `${where}: model '${modelName}' is not in the manifest` +
+        ` (available: ${manifest.available.models.join(" / ")})`,
     );
   }
   const entry: ModelEntry = manifest.models[modelName];
   const { name, major } = entry.pipeline;
   if (name !== family) {
     throw new Error(
-      `${where}: manifest の pipeline が '${name}/${major}'` +
-        `（'${family}/${GEMMA4_PIPELINE_MAJOR}' が必要）`,
+      `${where}: the manifest's pipeline is '${name}/${major}'` +
+        ` ('${family}/${GEMMA4_PIPELINE_MAJOR}' is needed)`,
     );
   }
   if (major !== GEMMA4_PIPELINE_MAJOR) {
     throw new Error(
-      `${where}: pipeline '${name}/${major}' の major に未対応` +
-        `（この実装が読めるのは ${family}/${GEMMA4_PIPELINE_MAJOR}）`,
+      `${where}: unsupported major of pipeline '${name}/${major}'` +
+        ` (this implementation reads ${family}/${GEMMA4_PIPELINE_MAJOR})`,
     );
   }
   const quantName = selection.quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quantName)) {
     throw new Error(
-      `${where}: quant '${quantName}' は manifest に無い` +
-        `（利用可能: ${entry.available.quants.join(" / ")}）`,
+      `${where}: quant '${quantName}' is not in the manifest` +
+        ` (available: ${entry.available.quants.join(" / ")})`,
     );
   }
   return {

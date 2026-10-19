@@ -35,6 +35,6 @@ import { ModelInputError } from "./errors.ts";
  */
 export const assertAcceptableSeed = (seed: number): void => {
   if (!Number.isInteger(seed) || seed < 0 || seed > Number.MAX_SAFE_INTEGER) {
-    throw new ModelInputError(`seed ${seed} が非負の安全整数でない`);
+    throw new ModelInputError(`seed ${seed} is not a non-negative safe integer`);
   }
 };

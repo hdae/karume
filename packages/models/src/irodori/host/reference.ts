@@ -62,7 +62,7 @@ export const normalizeReference = (
   // (`sampleRate` and the window length), so as a diagnostic about the length of the caller's
   // waveform its origin is unreadable (the "audio dimensions" of ADR 0107 decision 5).
   if (samples.length === 0) {
-    throw new ModelInputError("irodori: 参照音声のサンプルが 0 個（波形が空）");
+    throw new ModelInputError("irodori: the reference audio has 0 samples (the waveform is empty)");
   }
   const refDb = integratedLoudness(samples, sampleRate);
   const loudnessGain = Math.exp((TARGET_DB - refDb) * GAIN_FACTOR);
@@ -76,7 +76,9 @@ export const normalizeReference = (
     if (!Number.isFinite(samples[i])) {
       // The sample values are the content of the wav the caller passed, so input-caused (ADR 0107
       // decision 2).
-      throw new ModelInputError(`irodori: 参照音声の ${i} 番目のサンプルが非有限（${samples[i]}）`);
+      throw new ModelInputError(
+        `irodori: sample ${i} of the reference audio is non-finite (${samples[i]})`,
+      );
     }
     // The assignment rounds to f32. The peak is taken from **the rounded value** (upstream also
     // takes the max of an f32 tensor).
@@ -107,7 +109,7 @@ export const reflectPadToHop = (
   hopLength: number,
 ): Float32Array<ArrayBuffer> => {
   if (!Number.isInteger(hopLength) || hopLength <= 0) {
-    throw new RangeError(`reflectPadToHop: hopLength ${hopLength} が正の整数でない`);
+    throw new RangeError(`reflectPadToHop: hopLength ${hopLength} is not a positive integer`);
   }
   if (samples.length < hopLength) {
     // The length comes from the reference audio the caller passed (the wav of
@@ -115,7 +117,7 @@ export const reflectPadToHop = (
     // `hopLength` just above is a number the distribution declares, which the caller cannot fix,
     // so it stays a `RangeError`.
     throw new ModelInputError(
-      `reflectPadToHop: 参照音声が ${samples.length} サンプルしかない（hopLength ${hopLength} が要る）`,
+      `reflectPadToHop: the reference audio is only ${samples.length} samples (hopLength ${hopLength} is required)`,
     );
   }
   const pad = (hopLength - (samples.length % hopLength)) % hopLength;

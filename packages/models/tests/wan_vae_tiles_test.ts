@@ -106,8 +106,8 @@ test("planWanVaeTileAxis: どの全長でも配置の不変条件が成り立つ
 });
 
 test("planWanVaeTileAxis / planWanVaeTiles: 受理できない形は落とす", () => {
-  assertThrows(() => planWanVaeTileAxis(31, TILE, MIN_OVERLAP), Error, "タイル幅");
-  assertThrows(() => planWanVaeTileAxis(60, TILE, TILE), Error, "重なり");
+  assertThrows(() => planWanVaeTileAxis(31, TILE, MIN_OVERLAP), Error, "tile width");
+  assertThrows(() => planWanVaeTileAxis(60, TILE, TILE), Error, "overlap");
   assertThrows(
     () => wanVaeBlendExtentAt(planWanVaeTileAxis(32, TILE, MIN_OVERLAP), SCALE, 1),
     RangeError,
@@ -122,7 +122,7 @@ test("planWanVaeTileAxis / planWanVaeTiles: 受理できない形は落とす", 
         MIN_OVERLAP,
       ),
     Error,
-    "縮尺",
+    "scale",
   );
 });
 
@@ -142,7 +142,7 @@ test("wanVaeMinTileOverlap: 64 px を割り切れない圧縮と、正の整数�
   assertThrows(
     () => wanVaeMinTileOverlap(8, 3),
     Error,
-    "重なり 64 px が空間の圧縮 24（グラフの比 8 × unpatchify 3）で割り切れない",
+    "Overlap 64 px is not divisible by the spatial compression 24 (graph ratio 8 × unpatchify 3)",
   );
   for (const [scale, patchSize] of [
     [7.8125, 1],
@@ -154,7 +154,7 @@ test("wanVaeMinTileOverlap: 64 px を割り切れない圧縮と、正の整数�
     assertThrows(
       () => wanVaeMinTileOverlap(scale, patchSize),
       Error,
-      `空間の圧縮の因子が正の整数でない（グラフの比 ${scale}・unpatchify ${patchSize}）`,
+      `Spatial compression factors are not positive integers (graph ratio ${scale}, unpatchify ${patchSize})`,
     );
   }
 });
@@ -190,7 +190,7 @@ test("wanVaeLatentTile: [C,F,H,W] の各平面から同じ矩形を切り出す�
     }
   }
   assertThrows(() => wanVaeLatentTile(plan, latents, 2, 0), RangeError);
-  assertThrows(() => wanVaeLatentTile(plan, latents.subarray(1), 0, 0), Error, "要素数");
+  assertThrows(() => wanVaeLatentTile(plan, latents.subarray(1), 0, 0), Error, "element count");
 });
 
 test("wanVaeLatentTile: 整数でない添字（0.5・NaN）はゼロのタイルを返さずに落とす", () => {
@@ -207,7 +207,7 @@ test("wanVaeLatentTile: 整数でない添字（0.5・NaN）はゼロのタイ�
     assertThrows(
       () => wanVaeLatentTile(plan, latents, row, col),
       RangeError,
-      "範囲外",
+      "out of range",
       `(${row}, ${col})`,
     );
   }
@@ -295,11 +295,11 @@ test("assembleWanVaeTiles: 末端まで覆い、渡したタイルを破壊し�
 test("assembleWanVaeTiles: タイル枚数と要素数の食い違いを落とす", () => {
   const plan = smallPlan(16, 16, 1);
   const tile = new Float32Array(3 * 64);
-  assertThrows(() => assembleWanVaeTiles([tile], plan), Error, "計画");
+  assertThrows(() => assembleWanVaeTiles([tile], plan), Error, "plan");
   assertThrows(
     () => assembleWanVaeTiles([...Array.from({ length: 8 }, () => tile), tile.subarray(1)], plan),
     Error,
-    "1 枚目",
+    "the first tile's",
   );
   assertThrows(() => assembleWanVaeTiles(Array(9).fill(new Float32Array(64)), plan), Error, "3,F");
 });
@@ -475,25 +475,29 @@ test("unpatchifyWanVaeFrames: 倍率・形・チャネル数・長さの食い�
   assertThrows(
     () => unpatchifyWanVaeFrames(input, PATCH_SHAPE, 0),
     Error,
-    "倍率 0 が正の整数でない",
+    "patch size 0 is not a positive integer",
   );
-  assertThrows(() => unpatchifyWanVaeFrames(input, PATCH_SHAPE, 1.5), Error, "倍率 1.5");
+  assertThrows(() => unpatchifyWanVaeFrames(input, PATCH_SHAPE, 1.5), Error, "patch size 1.5");
   assertThrows(
     () => unpatchifyWanVaeFrames(input, [12, 2, 3, 0], 2),
     Error,
-    "[12, 2, 3, 0] の次元が正の整数でない",
+    "[12, 2, 3, 0] has a dimension that is not a positive integer",
   );
   assertThrows(
     () => unpatchifyWanVaeFrames(arange(10 * 2 * 3 * 5), [10, 2, 3, 5], 2),
     Error,
-    "チャネル数 10 が倍率 2² = 4 で割り切れない",
+    "channel count 10 is not divisible by patch size 2² = 4",
   );
   assertThrows(
     () => unpatchifyWanVaeFrames(arange(359), PATCH_SHAPE, 2),
     Error,
-    "要素数 359 が [12, 2, 3, 5]（360）と違う",
+    "element count 359 does not match [12, 2, 3, 5] (360)",
   );
-  assertThrows(() => unpatchifyWanVaeFrames(arange(89), [3, 2, 3, 5], 1), Error, "要素数 89");
+  assertThrows(
+    () => unpatchifyWanVaeFrames(arange(89), [3, 2, 3, 5], 1),
+    Error,
+    "element count 89",
+  );
 });
 
 const OWNER = "WanPipeline";
@@ -549,7 +553,7 @@ test("finishWanVaeFrames: 非有限はクランプの前に RGB の座標で名�
   assertThrows(
     () => finishWanVaeFrames(assembled, PATCHED, { vaePatchSize: 2 }, OWNER),
     Error,
-    `${OWNER}: VAE の出力（クランプ前）の channel 1・フレーム 1・画素 (x=7, y=4) が非有限（Infinity）`,
+    `${OWNER}: VAE output (before clamping) channel 1, frame 1, pixel (x=7, y=4) is non-finite (Infinity)`,
   );
 });
 
@@ -559,18 +563,18 @@ test("finishWanVaeFrames: 形は次元ごとに見る（要素数が同じでも
   assertThrows(
     () => finishWanVaeFrames(assembled, PATCHED, WAN21_GENERATION, OWNER),
     Error,
-    `${OWNER}: VAE の出力の形 [12, 2, 4, 6]（unpatchify 1 で [12, 2, 4, 6]）が [3, 2, 8, 12] と違う`,
+    `${OWNER}: VAE output shape [12, 2, 4, 6] (unpatchify 1 gives [12, 2, 4, 6]) differs from [3, 2, 8, 12]`,
   );
   // 実フレーム数は長さから導く（要求の 3 フレームに対して 2 フレームぶん）。
   assertThrows(
     () => finishWanVaeFrames(assembled, { ...PATCHED, frames: 3 }, { vaePatchSize: 2 }, OWNER),
     Error,
-    `${OWNER}: VAE の出力の形 [12, 2, 4, 6]（unpatchify 2 で [3, 2, 8, 12]）が [3, 3, 8, 12] と違う`,
+    `${OWNER}: VAE output shape [12, 2, 4, 6] (unpatchify 2 gives [3, 2, 8, 12]) differs from [3, 3, 8, 12]`,
   );
   assertThrows(
     () => finishWanVaeFrames(assembled.subarray(1), PATCHED, { vaePatchSize: 2 }, OWNER),
     Error,
-    `${OWNER}: VAE の出力 575 要素が [12, F, 4, 6] にならない（1 フレーム 288 要素で割り切れない）`,
+    `${OWNER}: the VAE output's 575 elements do not form [12, F, 4, 6] (not divisible by 288 elements per frame)`,
   );
 });
 
@@ -578,7 +582,7 @@ test("finishWanVaeFrames: 0 要素と、出口のチャネル数が p² で割�
   assertThrows(
     () => finishWanVaeFrames(new Float32Array(0), PATCHED, { vaePatchSize: 2 }, OWNER),
     Error,
-    `${OWNER}: VAE の出力が 0 要素（フレームが 1 枚も無い）`,
+    `${OWNER}: the VAE output has 0 elements (no frames at all)`,
   );
   // 出口 3 ch の計画を p = 2 で閉じる（形の比較に小数のチャネル数 0.75 を出さない）。
   assertThrows(
@@ -590,6 +594,6 @@ test("finishWanVaeFrames: 0 要素と、出口のチャネル数が p² で割�
         OWNER,
       ),
     Error,
-    `${OWNER}: VAE の出口 3 チャネルが unpatchify の倍率 2² = 4 で割り切れない`,
+    `${OWNER}: VAE output 3 channels are not divisible by the unpatchify patch size 2² = 4`,
   );
 });

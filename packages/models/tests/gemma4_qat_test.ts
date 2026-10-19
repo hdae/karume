@@ -166,7 +166,7 @@ describe("固定 QAT の family admission", () => {
       assertThrows(
         () => admitGemma4Qat(graph, model === "e2b" ? "e4b" : "e2b"),
         Error,
-        "構成が違う",
+        "configuration differ",
       );
     });
     it(`${model} の共有 head は前後の SRQ が無くても受ける`, () => {
@@ -179,22 +179,22 @@ describe("固定 QAT の family admission", () => {
   // 拒否の 1 分岐 = 1 fault。文言まで縛るのは、条件を 1 つ書き換えたときに「別の理由で
   // たまたま落ちる」形を緑にしないため（門の 3 条件同居を解いたのがこの表の前提）。
   const rejections: readonly [Fault, string][] = [
-    ["no-per-layer-inputs", "per_layer_inputs が無い"],
-    ["layers", "E2B 35 / E4B 42 でない"],
-    ["ple-dim", "PLE 次元"],
-    ["hidden", "hidden 幅"],
-    ["two-embeddings", "token embedding が1本でない"],
-    ["embedding-i8", "token embedding は固定 INT2"],
-    ["no-head", "token embedding を共有する head が 0 本"],
-    ["no-projection", "per_layer_model_projection の f32 linear が 0 本"],
-    ["two-projections", "per_layer_model_projection の f32 linear が 2 本"],
-    ["linear-not-initializer", "が initializer でない"],
-    ["linear-shared", "共有 initializer"],
-    ["linear-f32", "固定 INT2/INT4/INT8 が必要"],
-    ["only-i4", "固定 INT4 と INT8 を揃えていない"],
-    ["srq-before-missing", "前後に固定 SRQ"],
-    ["srq-after-missing", "前後に固定 SRQ"],
-    ["extra-consumer", "前後に固定 SRQ"],
+    ["no-per-layer-inputs", "per_layer_inputs is missing"],
+    ["layers", "is not E2B 35 / E4B 42"],
+    ["ple-dim", "PLE dimension"],
+    ["hidden", "hidden width"],
+    ["two-embeddings", "not exactly one token embedding"],
+    ["embedding-i8", "token embedding needs fixed INT2"],
+    ["no-head", "0 heads share the token embedding"],
+    ["no-projection", "per_layer_model_projection has 0 f32 linears"],
+    ["two-projections", "per_layer_model_projection has 2 f32 linears"],
+    ["linear-not-initializer", "is not an initializer"],
+    ["linear-shared", "shared initializer"],
+    ["linear-f32", "needs fixed INT2/INT4/INT8"],
+    ["only-i4", "does not include both fixed INT4 and INT8"],
+    ["srq-before-missing", "fixed SRQ before and after"],
+    ["srq-after-missing", "fixed SRQ before and after"],
+    ["extra-consumer", "fixed SRQ before and after"],
   ];
   for (const [fault, message] of rejections) {
     it(`改変 ${fault} を拒否する`, () => {
@@ -203,10 +203,10 @@ describe("固定 QAT の family admission", () => {
   }
 
   it("未対応の model 名を拒否する", () => {
-    assertThrows(() => assertGemma4QatModel("12b"), Error, "未対応 model '12b'");
+    assertThrows(() => assertGemma4QatModel("12b"), Error, "unsupported model '12b'");
     assertEquals(assertGemma4QatModel("e2b"), "e2b");
     assertEquals(assertGemma4QatModel("e4b"), "e4b");
-    assertThrows(() => admitGemma4Qat(graphOf("e2b"), "12b"), Error, "未対応 model '12b'");
+    assertThrows(() => admitGemma4Qat(graphOf("e2b"), "12b"), Error, "unsupported model '12b'");
   });
 
   it("PLE の格納・層数・次元をグラフへ突合する", () => {
@@ -217,22 +217,22 @@ describe("固定 QAT の family admission", () => {
     assertThrows(
       () => assertGemma4QatPle("e2b", graphOf("e2b"), { ...index, storage: "i2" }),
       Error,
-      "PLE の格納 'i2'",
+      "PLE storage 'i2'",
     );
     assertThrows(
       () => assertGemma4QatPle("e4b", graphOf("e4b"), { ...pleIndexOf("e4b"), storage: "i4" }),
       Error,
-      "PLE の格納 'i4'",
+      "PLE storage 'i4'",
     );
     assertThrows(
       () => assertGemma4QatPle("e2b", graphOf("e2b"), { ...index, layers: 42 }),
       Error,
-      "PLE の層数 42",
+      "PLE layer count 42",
     );
     assertThrows(
       () => assertGemma4QatPle("e2b", graphOf("e2b"), { ...index, dim: 128 }),
       Error,
-      "PLE の次元 128",
+      "PLE dimension 128",
     );
   });
 });
@@ -244,14 +244,14 @@ describe("固定 QAT は MTP 指定を資産取得より前に拒否する", () 
     await assertRejects(
       () => Gemma4QatPipeline.fromPretrained("does-not-exist", { speculative: true } as never),
       Error,
-      "QAT の MTP は未対応",
+      "MTP is not supported for QAT",
     );
   });
   it("fromAssets", async () => {
     await assertRejects(
       () => Gemma4QatPipeline.fromAssets({} as never, { speculative: true } as never),
       Error,
-      "speculative は受けられない",
+      "speculative is not accepted",
     );
   });
 });
@@ -326,7 +326,7 @@ describe("QAT のホスト RoPE", () => {
     }
   });
   it("不正な位置と f32 で表せない逆周波数を拒否する", () => {
-    assertThrows(() => gemma4QatRopeInputs(spec, [-1]), Error, "非負整数");
+    assertThrows(() => gemma4QatRopeInputs(spec, [-1]), Error, "non-negative integer");
     assertThrows(
       () =>
         gemma4QatRopeInputs(
@@ -337,7 +337,7 @@ describe("QAT のホスト RoPE", () => {
           [1],
         ),
       Error,
-      "f32 逆周波数",
+      "f32 inverse frequency",
     );
   });
 });

@@ -35,7 +35,9 @@ const umt5Input = (
   const spec = textEncoder.graph.inputs.find((input) => input.name === name);
   if (spec === undefined) {
     const declared = textEncoder.graph.inputs.map((input) => input.name).join(" / ");
-    throw new Error(`${owner}: text_encoder のグラフ入力 '${name}' が無い（宣言: ${declared}）`);
+    throw new Error(
+      `${owner}: text_encoder graph input '${name}' is missing (declared: ${declared})`,
+    );
   }
   return spec;
 };
@@ -54,7 +56,7 @@ const assertDims = (
   if (dims.length !== expected.length || dims.some((dim, axis) => dim !== expected[axis])) {
     const declared = dims.join(", ");
     const host = expected.join(", ");
-    throw new Error(`${owner}: ${where} の形 [${declared}] がホストの組む [${host}] と違う`);
+    throw new Error(`${owner}: ${where} shape [${declared}] differs from the host's [${host}]`);
   }
 };
 
@@ -87,15 +89,15 @@ export const umt5GraphContract = (
   const buckets = umt5Input(owner, textEncoder, UMT5_RELATIVE_POSITION_BUCKETS);
   if (graph.inputs.length !== 2) {
     throw new Error(
-      `${owner}: text_encoder のグラフ入力が ${graph.inputs.length} 本（` +
-        `'${UMT5_INPUT_IDS}' と '${UMT5_RELATIVE_POSITION_BUCKETS}' の 2 本だけを組む）`,
+      `${owner}: text_encoder has ${graph.inputs.length} graph inputs (` +
+        `the host builds only the 2 inputs '${UMT5_INPUT_IDS}' and '${UMT5_RELATIVE_POSITION_BUCKETS}')`,
     );
   }
   const length = ids.shape.at(1);
   if (typeof length !== "string") {
     throw new Error(
-      `${owner}: text_encoder の '${UMT5_INPUT_IDS}' の軸 1 が記号次元でない` +
-        `（${String(length)}）— ホストは有効長 L ごとに形を変えて渡す`,
+      `${owner}: text_encoder's '${UMT5_INPUT_IDS}' axis 1 is not a symbolic dimension` +
+        ` (${String(length)}) — the host passes a different shape for each valid length L`,
     );
   }
   for (const [spec, expected] of [
@@ -103,58 +105,54 @@ export const umt5GraphContract = (
     [buckets, [length, length]],
   ] as const) {
     if (spec.dtype !== "i32") {
-      throw new Error(
-        `${owner}: text_encoder の '${spec.name}' の dtype ${spec.dtype} が i32 でない`,
-      );
+      throw new Error(`${owner}: text_encoder's '${spec.name}' has dtype ${spec.dtype}, not i32`);
     }
-    assertDims(owner, spec.shape, expected, `text_encoder の '${spec.name}'`);
+    assertDims(owner, spec.shape, expected, `text_encoder's '${spec.name}'`);
   }
   if (graph.outputs.length !== 1) {
     throw new Error(
-      `${owner}: text_encoder の出力が ${graph.outputs.length} 本（1 本の [1, L, W]）`,
+      `${owner}: text_encoder has ${graph.outputs.length} outputs (expected one [1, L, W])`,
     );
   }
   const [output] = graph.outputs;
   if (!Object.hasOwn(graph.values, output)) {
-    throw new Error(`${owner}: グラフの値 '${output}' の宣言が無い`);
+    throw new Error(`${owner}: graph value '${output}' is not declared`);
   }
   const value = graph.values[output];
   if (value.dtype !== "f32") {
-    throw new Error(
-      `${owner}: text_encoder の出力 '${output}' の dtype ${value.dtype} が f32 でない`,
-    );
+    throw new Error(`${owner}: text_encoder output '${output}' has dtype ${value.dtype}, not f32`);
   }
   const declaredWidth = value.shape.at(2);
   const width = hiddenSize ?? declaredWidth;
   if (typeof width !== "number" || !Number.isInteger(width) || width <= 0) {
     throw new Error(
-      `${owner}: text_encoder の出力 '${output}' の形 [${value.shape.join(", ")}] の軸 2 が` +
-        "静的な正の整数でない（ホストは [1, L, W] の W を宣言から読む）",
+      `${owner}: text_encoder output '${output}' has shape [${value.shape.join(", ")}], whose axis 2` +
+        " is not a static positive integer (the host reads W of [1, L, W] from the declaration)",
     );
   }
-  assertDims(owner, value.shape, [1, length, width], `text_encoder の出力 '${output}'`);
+  assertDims(owner, value.shape, [1, length, width], `text_encoder output '${output}'`);
   let quantized = 0;
   for (const [name, initializer] of Object.entries(graph.initializers)) {
     if (initializer.storage === undefined) {
       // A shared declaration (borrows the weights of a lender Session — no storage of its own). umT5
       // has no lender.
       throw new Error(
-        `${owner}: text_encoder の initializer '${name}' が共有の宣言（umT5 は重みを借りない）`,
+        `${owner}: text_encoder initializer '${name}' is a shared declaration (umT5 borrows no weights)`,
       );
     }
     const layout = codecLayout(initializer.storage.codec);
     if (layout === "i8") quantized += 1;
     else if (layout !== "f32") {
       throw new Error(
-        `${owner}: text_encoder の initializer '${name}' の格納 ${initializer.storage.codec} は受けない` +
-          "（受けるのは i8 per-channel の重みと f32 の表だけ — ADR 0119 決定 5）",
+        `${owner}: text_encoder initializer '${name}' has storage ${initializer.storage.codec}, which is not accepted` +
+          " (only i8 per-channel weights and f32 tables are accepted — ADR 0119 decision 5)",
       );
     }
   }
   if (quantized === 0) {
     throw new Error(
-      `${owner}: text_encoder に i8 の重みが 1 本も無い（受けるのは i8 per-channel の重みと f32 の表 — ` +
-        "ADR 0119 決定 5）",
+      `${owner}: text_encoder has no i8 weights at all (only i8 per-channel weights and f32 tables are accepted — ` +
+        "ADR 0119 decision 5)",
     );
   }
   return { output, hiddenSize: width };

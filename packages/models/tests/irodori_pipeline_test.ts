@@ -138,7 +138,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
   await assertRejects(
     () => IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }, { model: "nope" }),
     Error,
-    "model 'nope' は manifest に無い",
+    "model 'nope' is not in the manifest",
   );
 });
 
@@ -147,7 +147,7 @@ test("fromAssets: pipeline の契約名が irodori でない manifest を落と�
   await assertRejects(
     () => IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
-    "manifest の pipeline が 'sbv2/1'",
+    "the manifest pipeline is 'sbv2/1'",
   );
 });
 
@@ -157,7 +157,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   await assertRejects(
     () => IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
-    "major に未対応",
+    "has an unsupported major",
   );
 });
 
@@ -166,7 +166,7 @@ test("fromAssets: 存在しない quant は利用可能な一覧を添えて落�
   await assertRejects(
     () => IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "nope" }),
     Error,
-    "quant 'nope' は manifest に無い",
+    "quant 'nope' is not in the manifest",
   );
 });
 
@@ -176,7 +176,7 @@ test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async
   await assertRejects(
     () => IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
-    "pipelineConfig: 未知キー 'step'",
+    "pipelineConfig: unknown key 'step'",
   );
 });
 
@@ -188,7 +188,7 @@ test("fromAssets: pipelineConfig の欄が欠けていれば構築時に落ち�
   await assertRejects(
     () => IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
-    "pipelineConfig.hopLength: 無い",
+    "pipelineConfig.hopLength: missing",
   );
 });
 
@@ -199,7 +199,7 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   await assertRejects(
     () => IrodoriPipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
-    "部品 'backbone' の容器が無い",
+    "component 'backbone' has no container",
   );
 });
 
@@ -260,7 +260,7 @@ test("assetJson: 不正 UTF-8 の資産は decode 段の文言で落ちる（JSO
   assertThrows(
     () => assetJson({ tokenizer: broken }, "tokenizer"),
     Error,
-    "irodori: 資産 'tokenizer' が UTF-8 として読めない",
+    "irodori: asset 'tokenizer' cannot be read as UTF-8",
   );
 });
 
@@ -269,7 +269,7 @@ test("assetJson: JSON 構文違反は decode とは別の文言で落ちる（�
   assertThrows(
     () => assetJson({ tokenizer: truncated }, "tokenizer"),
     Error,
-    "irodori: 資産 'tokenizer' が JSON として読めない",
+    "irodori: asset 'tokenizer' cannot be read as JSON",
   );
   // 正しい UTF-8 は多バイト文字を含んでもそのまま通る。
   const valid = new TextEncoder().encode('{"unkId":0,"space":"あ"}');
@@ -289,14 +289,14 @@ test("assertIrodoriRequest: 要求ノブの綴り違いは重い計算に入る�
     assertThrows(
       () => assertIrodoriRequest({ text, codecTileFrames }, config),
       ModelInputError,
-      "より大きい整数でない",
+      "is not an integer greater than two halos",
     );
   }
   for (const seed of [-1, 1.5]) {
     assertThrows(
       () => assertIrodoriRequest({ text, seed }, config),
       ModelInputError,
-      "非負の安全整数",
+      "non-negative safe integer",
     );
   }
   assertThrows(
@@ -324,7 +324,7 @@ test("assertIrodoriRequest: speaker の参照が 2 トークン（export の Dim
     assertThrows(
       () => assertIrodoriRequest({ text, speaker: audio(samples) }, config),
       ModelInputError,
-      "トークン",
+      "tokens",
     );
   }
   // 末尾は reflect pad で hop の倍数へ切り上がるので、7 フレーム + 1 サンプルは 8 フレーム = 2 トークン。
@@ -339,7 +339,7 @@ test("assertIrodoriRequest: speaker の参照が 2 トークン（export の Dim
         config,
       ),
     ModelInputError,
-    "リサンプル",
+    "resampler",
   );
 
   const latent = (frames: number) => ({ latent: new Float32Array(frames * 32) });
@@ -347,7 +347,7 @@ test("assertIrodoriRequest: speaker の参照が 2 トークン（export の Dim
     assertThrows(
       () => assertIrodoriRequest({ text, speaker: latent(frames) }, config),
       ModelInputError,
-      "満たない",
+      "is less than",
     );
   }
   assertIrodoriRequest({ text, speaker: latent(8) }, config);
@@ -360,7 +360,7 @@ test("assertIrodoriRequest: codecTileFrames を渡さない要求でも既定タ
   assertThrows(
     () => assertIrodoriRequest({ text: "テスト" }, config),
     ModelInputError,
-    "tileFrames 182 が halo 2 枚ぶん（182）より大きい整数でない",
+    "tileFrames 182 is not an integer greater than two halos (182)",
   );
 });
 

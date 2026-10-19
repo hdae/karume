@@ -171,19 +171,19 @@ export const chatStreamOf = (
   chunks: AsyncGenerator<string, void, undefined>,
   done: Promise<Gemma4ChatStop>,
 ): Gemma4ChatStream => {
-  let claimed: "反復" | "text()" | undefined;
-  const claim = (how: "反復" | "text()"): void => {
+  let claimed: "iteration" | "text()" | undefined;
+  const claim = (how: "iteration" | "text()"): void => {
     if (claimed !== undefined) {
       throw new Error(
-        `Gemma4ChatStream: 1 つのストリームは 1 通りにしか消費できない` +
-          `（${claimed} で消費済み — ${how} は同じ生成をもう一度読もうとしている）`,
+        `Gemma4ChatStream: one stream can be consumed in only one way` +
+          ` (already consumed by ${claimed} — ${how} tries to read the same generation again)`,
       );
     }
     claimed = how;
   };
   return {
     [Symbol.asyncIterator]: (): AsyncGenerator<string, void, undefined> => {
-      claim("反復");
+      claim("iteration");
       return chunks;
     },
     done,
@@ -242,7 +242,9 @@ export const runDiagnosticsHook = <D>(state: {
     // silently passing the lender's diagnostics would accumulate another run's values under the
     // draft name).
     if (drafter === undefined) {
-      throw new Error("Gemma4Pipeline: drafter が居ないのに draft run の観測が届いた");
+      throw new Error(
+        "Gemma4Pipeline: a draft run observation arrived although there is no drafter",
+      );
     }
     listener(drafter.session.diagnostics(), phase);
   };
@@ -293,7 +295,7 @@ export const closeChatTurn = async (
     if (failure === undefined) throw error;
     throw new AggregateError(
       [failure.error, error],
-      `${where}: ターン本体と後始末の両方が失敗した`,
+      `${where}: both the turn body and the clean-up failed`,
     );
   } finally {
     release?.();

@@ -79,7 +79,7 @@ const MIN_OVERLAP_PX = 64;
 export const wanVaeSpatialCompression = (scale: number, patchSize: number): number => {
   if (!Number.isInteger(scale) || scale < 1 || !Number.isInteger(patchSize) || patchSize < 1) {
     throw new Error(
-      `空間の圧縮の因子が正の整数でない（グラフの比 ${scale}・unpatchify ${patchSize}）`,
+      `Spatial compression factors are not positive integers (graph ratio ${scale}, unpatchify ${patchSize})`,
     );
   }
   return scale * patchSize;
@@ -98,8 +98,8 @@ export const wanVaeMinTileOverlap = (scale: number, patchSize: number): number =
   const compression = wanVaeSpatialCompression(scale, patchSize);
   if (MIN_OVERLAP_PX % compression !== 0) {
     throw new Error(
-      `重なり ${MIN_OVERLAP_PX} px が空間の圧縮 ${compression}` +
-        `（グラフの比 ${scale} × unpatchify ${patchSize}）で割り切れない`,
+      `Overlap ${MIN_OVERLAP_PX} px is not divisible by the spatial compression ${compression}` +
+        ` (graph ratio ${scale} × unpatchify ${patchSize})`,
     );
   }
   return MIN_OVERLAP_PX / compression;
@@ -158,16 +158,20 @@ export const planWanVaeTileAxis = (
   minOverlap: number,
 ): WanVaeTileAxis => {
   if (!Number.isInteger(extent) || !Number.isInteger(tile) || !Number.isInteger(minOverlap)) {
-    throw new Error(`タイル配置は整数で組む（extent=${extent} tile=${tile} 重なり=${minOverlap}）`);
+    throw new Error(
+      `Tile placement must use integers (extent=${extent} tile=${tile} overlap=${minOverlap})`,
+    );
   }
-  if (tile < 1) throw new Error(`タイル幅 ${tile} が 1 未満`);
+  if (tile < 1) throw new Error(`Tile width ${tile} is less than 1`);
   if (extent < tile) {
     throw new Error(
-      `潜在の全長 ${extent} がタイル幅 ${tile} より小さい（固定形の chunk グラフに食わせられない）`,
+      `Latent extent ${extent} is smaller than tile width ${tile} (cannot be fed to the fixed-shape chunk graph)`,
     );
   }
   if (minOverlap < 0 || minOverlap >= tile) {
-    throw new Error(`最小の重なり ${minOverlap} が [0, ${tile}) の外（重なりはタイル幅未満）`);
+    throw new Error(
+      `Minimum overlap ${minOverlap} is outside [0, ${tile}) (the overlap must be less than the tile width)`,
+    );
   }
   const span = extent - tile;
   if (span === 0) {
@@ -187,8 +191,8 @@ export const planWanVaeTileAxis = (
     const overlap = tile - (starts[index] - starts[index - 1]);
     if (overlap < minOverlap) {
       throw new Error(
-        `タイル ${index - 1}/${index} の重なり ${overlap} が下限 ${minOverlap} 未満` +
-          `（潜在 ${extent} / タイル ${tile} / 開始位置 ${starts}）`,
+        `Tiles ${index - 1}/${index} overlap by ${overlap}, below the minimum ${minOverlap}` +
+          ` (latent ${extent} / tile ${tile} / start positions ${starts})`,
       );
     }
   }
@@ -203,9 +207,9 @@ export const planWanVaeTileAxis = (
 export const wanVaeBlendExtentAt = (axis: WanVaeTileAxis, scale: number, index: number): number => {
   if (!Number.isInteger(index) || index < 1 || index >= axis.starts.length) {
     throw new RangeError(
-      `ブレンド対 ${index} が範囲外（開始位置 ${axis.starts.length} 本 = 対 ${
+      `Blend pair ${index} is out of range (${axis.starts.length} start positions = ${
         axis.starts.length - 1
-      } 組）`,
+      } pairs)`,
     );
   }
   return (axis.tile - (axis.starts[index] - axis.starts[index - 1])) * scale;
@@ -230,7 +234,7 @@ export const planWanVaeTiles = (
 ): WanVaeTilePlan => {
   const scale = layout.sampleTile / layout.tile;
   if (!Number.isInteger(scale) || scale < 1) {
-    throw new Error(`タイルの縮尺 ${layout.sampleTile} / ${layout.tile} が正の整数でない`);
+    throw new Error(`Tile scale ${layout.sampleTile} / ${layout.tile} is not a positive integer`);
   }
   return {
     latentChannels: layout.latentChannels,
@@ -251,7 +255,7 @@ const latentFrames = (plan: WanVaeTilePlan, latents: Float32Array<ArrayBuffer>):
   const frames = latents.length / plane;
   if (!Number.isInteger(frames) || frames < 1) {
     throw new Error(
-      `潜在の要素数 ${latents.length} が [${plan.latentChannels},F,${plan.rows.extent},${plan.cols.extent}] でない`,
+      `Latent element count ${latents.length} does not match [${plan.latentChannels},F,${plan.rows.extent},${plan.cols.extent}]`,
     );
   }
   return frames;
@@ -279,7 +283,7 @@ export const wanVaeLatentTile = (
     col >= cols.starts.length
   ) {
     throw new RangeError(
-      `タイル (${row}, ${col}) が範囲外（${rows.starts.length}×${cols.starts.length}）`,
+      `Tile (${row}, ${col}) is out of range (${rows.starts.length}×${cols.starts.length})`,
     );
   }
   const planes = plan.latentChannels * latentFrames(plan, latents);
@@ -375,7 +379,7 @@ const assembleOwnedTiles = (
   const rowCount = rows.starts.length;
   const colCount = cols.starts.length;
   if (working.length !== rowCount * colCount) {
-    throw new Error(`タイル ${working.length} 枚が計画の ${rowCount}×${colCount} と違う`);
+    throw new Error(`${working.length} tiles do not match the plan's ${rowCount}×${colCount}`);
   }
   const tileHeight = rows.tile * scale;
   const tileWidth = cols.tile * scale;
@@ -383,15 +387,15 @@ const assembleOwnedTiles = (
   const planes = working[0].length / tilePlane;
   if (!Number.isInteger(planes) || planes < 1 || planes % plan.sampleChannels !== 0) {
     throw new Error(
-      `タイルの要素数 ${
+      `Tile element count ${
         working[0].length
-      } が [${plan.sampleChannels},F,${tileHeight},${tileWidth}] でない`,
+      } does not match [${plan.sampleChannels},F,${tileHeight},${tileWidth}]`,
     );
   }
   for (const [index, tile] of working.entries()) {
     if (tile.length !== planes * tilePlane) {
       throw new Error(
-        `タイル ${index} の要素数 ${tile.length} が 1 枚目の ${planes * tilePlane} と違う`,
+        `Tile ${index} element count ${tile.length} differs from the first tile's ${planes * tilePlane}`,
       );
     }
   }
@@ -503,9 +507,9 @@ export const decodeWanVaeTiles = async (
     plan.sampleChannels !== layout.sampleChannels
   ) {
     throw new Error(
-      `タイル計画（C ${plan.latentChannels}・タイル ${plan.rows.tile}×${plan.cols.tile}・縮尺 ${plan.scale}` +
-        `・出口 ${plan.sampleChannels} チャネル）が資産（C ${layout.latentChannels}・タイル ${layout.tile}` +
-        `・sample ${layout.sampleTile}・出口 ${layout.sampleChannels} チャネル）と違う`,
+      `Tile plan (C ${plan.latentChannels}, tile ${plan.rows.tile}×${plan.cols.tile}, scale ${plan.scale}` +
+        `, output ${plan.sampleChannels} channels) differs from the asset (C ${layout.latentChannels}, tile ${layout.tile}` +
+        `, sample ${layout.sampleTile}, output ${layout.sampleChannels} channels)`,
     );
   }
   // The latent length is checked before running the GPU (cutting each tile would also fail, but only
@@ -555,22 +559,24 @@ export const unpatchifyWanVaeFrames = (
   patchSize: number,
 ): Float32Array<ArrayBuffer> => {
   if (!Number.isInteger(patchSize) || patchSize < 1) {
-    throw new Error(`unpatchify の倍率 ${patchSize} が正の整数でない`);
+    throw new Error(`unpatchify patch size ${patchSize} is not a positive integer`);
   }
   if (shape.some((dim) => !Number.isInteger(dim) || dim < 1)) {
-    throw new Error(`unpatchify の入力の形 [${shape.join(", ")}] の次元が正の整数でない`);
+    throw new Error(
+      `unpatchify input shape [${shape.join(", ")}] has a dimension that is not a positive integer`,
+    );
   }
   const [channels, count, height, width] = shape;
   const area = patchSize * patchSize;
   if (channels % area !== 0) {
     throw new Error(
-      `unpatchify の入力のチャネル数 ${channels} が倍率 ${patchSize}² = ${area} で割り切れない`,
+      `unpatchify input channel count ${channels} is not divisible by patch size ${patchSize}² = ${area}`,
     );
   }
   const elements = channels * count * height * width;
   if (frames.length !== elements) {
     throw new Error(
-      `unpatchify の入力の要素数 ${frames.length} が [${shape.join(", ")}]（${elements}）と違う`,
+      `unpatchify input element count ${frames.length} does not match [${shape.join(", ")}] (${elements})`,
     );
   }
   if (patchSize === 1) return frames;

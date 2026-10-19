@@ -238,6 +238,6 @@ test("パラメータの値域門 — 奇数 / 範囲外 / 非有限は fail lou
   assertThrows(() => gemma4RopeInverseFrequencies({ ...ok, rotaryDim: 3 }), Error, "rotaryDim");
   assertThrows(() => gemma4RopeInverseFrequencies({ ...ok, theta: 0 }), Error, "theta");
   assertThrows(() => gemma4RopeInverseFrequencies({ ...ok, theta: Infinity }), Error, "theta");
-  assertThrows(() => gemma4RopeRows(ok, [-1]), Error, "位置");
-  assertThrows(() => gemma4RopeRows(ok, [1.5]), Error, "位置");
+  assertThrows(() => gemma4RopeRows(ok, [-1]), Error, "position");
+  assertThrows(() => gemma4RopeRows(ok, [1.5]), Error, "position");
 });

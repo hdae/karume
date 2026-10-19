@@ -98,23 +98,23 @@ export class Umt5Tokenizer {
     for (const chunk of this.#added.split(text)) {
       if (chunk.added) {
         throw new ModelInputError(
-          `${label}: 特殊トークン ${JSON.stringify(chunk.text)} を含む — 本文中の特殊トークンは` +
-            "上流の版で id 列が割れるので受けない（その綴りを除く）",
+          `${label}: contains special token ${JSON.stringify(chunk.text)} — special tokens in the text` +
+            " are not accepted because the id sequence differs between upstream versions (remove that spelling)",
         );
       }
     }
     if (text.includes(SPACE_METASPACE)) {
       throw new ModelInputError(
-        `${label}: 空白の直後に ${METASPACE}（U+2581）がある — SentencePiece の空白の印で、` +
-          "上流の版で断片化が割れるので受けない（空白を詰めるか ▁ を除く）",
+        `${label}: ${METASPACE} (U+2581) right after whitespace — it is SentencePiece's whitespace marker,` +
+          " not accepted because the segmentation differs between upstream versions (remove the whitespace or the ▁)",
       );
     }
     this.#assertPlainSpaces(text, label);
     const ids = this.#t5.encode(text, label);
     if (ids.length < UMT5_MIN_TOKENS) {
       throw new ModelInputError(
-        `${label}: id 列が ${ids.length} トークン（最低 ${UMT5_MIN_TOKENS}）— 空文字や` +
-          "空白だけのプロンプトは受けない。1 語以上入れる",
+        `${label}: the id sequence has ${ids.length} tokens (minimum ${UMT5_MIN_TOKENS}) — an empty or` +
+          " whitespace-only prompt is not accepted. Enter at least one word",
       );
     }
     return Int32Array.from(ids);
@@ -127,15 +127,15 @@ export class Umt5Tokenizer {
       if (ch !== SPACE && inCodeRanges(this.#space, cp)) {
         const found = codePointLabel(cp);
         throw new ModelInputError(
-          `${label}: U+0020 以外の空白 ${found} を含む — 前処理をしないトークナイザでは` +
-            "上流の版で id 列が割れるので受けない（U+0020 に置き換える）",
+          `${label}: contains whitespace ${found} other than U+0020 — with a tokenizer that does no preprocessing,` +
+            " it is not accepted because the id sequence differs between upstream versions (replace it with U+0020)",
         );
       }
     }
     if (text.endsWith(SPACE)) {
       throw new ModelInputError(
-        `${label}: 末尾が空白（U+0020）— 前処理をしないトークナイザでは上流の版で id 列が割れるので` +
-          "受けない（末尾の空白を除く）",
+        `${label}: ends in whitespace (U+0020) — with a tokenizer that does no preprocessing, it is not accepted because the id sequence differs` +
+          " between upstream versions (remove the trailing whitespace)",
       );
     }
   }
@@ -156,7 +156,9 @@ export const parseUmt5TokenizerAsset = (raw: unknown, label: string = "tokenizer
   if (format !== UMT5_TOKENIZER_FORMAT) {
     // Do not read an unknown version silently (if a field's meaning changed, there would be no
     // exception and only the id sequence would change).
-    throw new Error(`${label}: 形式 ${format} を読めない（${UMT5_TOKENIZER_FORMAT} だけを読む）`);
+    throw new Error(
+      `${label}: cannot read format ${format} (only ${UMT5_TOKENIZER_FORMAT} is read)`,
+    );
   }
   return parseT5Tables(obj, label);
 };

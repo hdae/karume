@@ -131,8 +131,8 @@ export type Sbv2Phrases = {
 const phraseTones = (accentNucleus: number, moraCount: number, where: string): (0 | 1)[] => {
   if (!Number.isInteger(accentNucleus) || accentNucleus < 0) {
     throw new Sbv2InputError(
-      `${where}.accentNucleus = ${accentNucleus} が 0 以上の整数でない` +
-        "（0 = 平板、1-origin の核位置、モーラ数 = 尾高）",
+      `${where}.accentNucleus = ${accentNucleus} is not a non-negative integer` +
+        " (0 = flat, a 1-origin nucleus position, the mora count = tail-high)",
     );
   }
   const k = Math.min(accentNucleus, moraCount);

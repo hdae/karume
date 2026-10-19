@@ -1790,9 +1790,9 @@ So the riffSize placeholder declaration, a convention of streaming writers, is b
 not accepted:
 
 - `riffSize=0` puts the logical end right after the header, so not a single chunk is scanned, and it fails with
-  `decodeWav: 'fmt ' チャンクが無い`.
+  `decodeWav: 'fmt ' chunk is missing`.
 - `riffSize=0xFFFFFFFF` fails as a truncated container with
-  `decodeWav: RIFF が 4294967295 バイトを宣言しているが、残りは … バイトしかない`.
+  `decodeWav: RIFF declares 4294967295 bytes, but only … bytes remain`.
 
 The input is assumed to be a WAV as a complete file (both for reference audio and for detector input). If a real need arises to
 feed streaming WAVs, the accepted form will be ruled on then (no silent fallback to the physical length — the cross-cutting

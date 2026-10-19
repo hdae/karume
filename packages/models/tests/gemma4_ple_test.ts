@@ -109,20 +109,20 @@ describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
       assertThrows(
         () => parseGemma4PleIndex({ ...raw, schema }),
         Error,
-        `ple_index.schema ${schema} が 3 でない`,
+        `ple_index.schema ${schema} is not 3`,
       );
     }
   });
 
   it("未知キー（綴り違いが黙って既定へ縮退しない）", () => {
-    assertThrows(() => parseGemma4PleIndex({ ...raw, shards: [] }), Error, "未知キー 'shards'");
+    assertThrows(() => parseGemma4PleIndex({ ...raw, shards: [] }), Error, "unknown key 'shards'");
   });
 
   it("storage は i8 / i4 / i2", () => {
     assertThrows(
       () => parseGemma4PleIndex({ ...raw, storage: "i3" }),
       Error,
-      "ple_index.storage i3 が i8 / i4 / i2 でない",
+      "ple_index.storage i3 is not i8 / i4 / i2",
     );
   });
 
@@ -131,7 +131,7 @@ describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
     assertThrows(
       () => parseGemma4PleIndex(withoutStorage),
       Error,
-      "ple_index.storage undefined が i8 / i4 / i2 でない",
+      "ple_index.storage undefined is not i8 / i4 / i2",
     );
   });
 
@@ -139,7 +139,7 @@ describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
     assertThrows(
       () => parseGemma4PleIndex({ ...raw, embedScale: 0 }),
       Error,
-      "ple_index.embedScale 0 が正の有限数でない",
+      "ple_index.embedScale 0 is not a positive finite number",
     );
   });
 
@@ -148,7 +148,7 @@ describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
     assertThrows(
       () => parseGemma4PleIndex({ ...raw, values: { ...values, rowBytes: values.rowBytes + 4 } }),
       Error,
-      `ple_index.values.rowBytes ${values.rowBytes + 4} が宣言から決まる ${values.rowBytes} と違う`,
+      `ple_index.values.rowBytes ${values.rowBytes + 4} differs from ${values.rowBytes}, which the declaration determines`,
     );
   });
 
@@ -171,7 +171,7 @@ describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
           },
         }),
       Error,
-      ".asset 'ple.values.0' が重複している",
+      ".asset 'ple.values.0' is a duplicate",
     );
   });
 
@@ -194,7 +194,7 @@ describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
           },
         }),
       Error,
-      ".start 3 が直前の block の末尾 2 と連続しない",
+      ".start 3 does not continue from the end 2 of the previous block",
     );
   });
 
@@ -202,7 +202,7 @@ describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
     assertThrows(
       () => parseGemma4PleIndex({ ...raw, tokens: SPEC.tokens + 1 }),
       Error,
-      `block の合計 ${SPEC.tokens} 行が tokens ${SPEC.tokens + 1} と違う`,
+      `the blocks total ${SPEC.tokens} rows, which differs from tokens ${SPEC.tokens + 1}`,
     );
   });
 
@@ -230,7 +230,7 @@ describe("readGemma4PleIndex: 容器の資産から索引を読み、指し先�
     await assertRejects(
       () => readGemma4PleIndex("test", pleComponentOf(rig, { ple_index: undefined })),
       Error,
-      "容器が資産 'ple_index' を宣言していない",
+      "the container does not declare asset 'ple_index'",
     );
   });
 
@@ -238,7 +238,7 @@ describe("readGemma4PleIndex: 容器の資産から索引を読み、指し先�
     await assertRejects(
       () => readGemma4PleIndex("test", pleComponentOf(rig, { ple_index: { role: "rope-base" } })),
       Error,
-      "資産 'ple_index' の役割が 'rope-base'",
+      "asset 'ple_index' has role 'rope-base'",
     );
   });
 
@@ -254,11 +254,11 @@ describe("readGemma4PleIndex: 容器の資産から索引を読み、指し先�
           }),
         ),
       Error,
-      "PLE の索引と容器の資産が食い違う（3 件）",
+      "the PLE index and the container's assets disagree (3 problems)",
     );
-    assert(error.message.includes("ple.values.0: 容器が宣言していない"), error.message);
-    assert(error.message.includes("ple.values.1: 役割 'ple-scales'"), error.message);
-    assert(error.message.includes("ple.scales.2: 論理長 1"), error.message);
+    assert(error.message.includes("ple.values.0: not declared by the container"), error.message);
+    assert(error.message.includes("ple.values.1: role 'ple-scales'"), error.message);
+    assert(error.message.includes("ple.scales.2: logical length 1"), error.message);
   });
 
   it("容器にあって索引が指していない block（1 本も読まないまま動く形）", () => {
@@ -272,7 +272,7 @@ describe("readGemma4PleIndex: 容器の資産から索引を読み、指し先�
           asset: pleComponentOf(rig).asset,
         }),
       Error,
-      "ple.values.99: 役割 'ple-values' の資産だが索引が指していない",
+      "ple.values.99: an asset with role 'ple-values' that the index does not point at",
     );
   });
 });
@@ -531,12 +531,12 @@ test("Gemma4Ple: block 1 本すら載らない予算は構築時に fail loudly"
   const error = assertThrows(
     () => pleOf(rig, BLOCK_BYTES - 1),
     ModelInputError,
-    `maxResidentBytes ${BLOCK_BYTES - 1} が PLE の block 1 本ぶん ${BLOCK_BYTES} バイトに満たない`,
+    `maxResidentBytes ${BLOCK_BYTES - 1} is less than one PLE block, ${BLOCK_BYTES} bytes`,
   );
   assert(error instanceof ModelInputError, "呼び手の指定なので入力起因（ADR 0107 決定 2）");
   // 0 は「常駐させない」という正当な指定（陰性対照）。
   assertEquals(pleOf(rig, 0).stats().residentBytes, 0);
-  assertThrows(() => pleOf(rig, -1), ModelInputError, "が 0 以上の整数でない");
+  assertThrows(() => pleOf(rig, -1), ModelInputError, "is not a non-negative integer");
 });
 
 // ---- id 空間の相互照合と値域 -----------------------------------------------
@@ -551,7 +551,7 @@ test("createGemma4Ple: vocab の相互照合は読み口に触る前に落ちる
         vocabSize: SPEC.tokens + 1,
       }),
     Error,
-    `PLE の索引の行数 ${SPEC.tokens} が主 embedding の vocab 行数 ${SPEC.tokens + 1} と違う`,
+    `PLE index's row count ${SPEC.tokens} differs from the main embedding's vocab row count ${SPEC.tokens + 1}`,
   );
   assertEquals(rig.opens.length, 0, "照合の前に block を開きに行っている");
   // 焼いた組み合わせの齟齬なので、同じ関数の予算の門と違って入力起因では**ない**
@@ -566,10 +566,10 @@ test("Gemma4Ple.gather: id の値域と空列は fail loudly（別 token の有�
     await assertRejects(
       () => ple.gather([bad]),
       Error,
-      `token id[0] ${bad} が PLE の索引の 0..${SPEC.tokens - 1} の外`,
+      `token id[0] ${bad} is outside the PLE index's 0..${SPEC.tokens - 1}`,
     );
   }
-  await assertRejects(() => ple.gather([]), Error, "PLE gather の token 列が空");
+  await assertRejects(() => ple.gather([]), Error, "token sequence of the PLE gather is empty");
   assertEquals(rig.opens.length, 0, "値域の門より先に block を開きに行っている");
 });
 
@@ -657,7 +657,7 @@ test("Gemma4Ple: dispose で常駐が空になり、以後の gather は fail lo
   assert(ple.stats().residentBytes > 0);
   ple.dispose();
   assertEquals(ple.stats(), { loads: 2, rowReads: 0, resident: 0, residentBytes: 0 });
-  await assertRejects(() => ple.gather([0]), Error, "dispose 済みの索引は引けない");
+  await assertRejects(() => ple.gather([0]), Error, "a disposed index cannot be looked up");
   // 冪等。
   ple.dispose();
   assertEquals(ple.stats().residentBytes, 0);

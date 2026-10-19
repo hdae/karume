@@ -157,7 +157,7 @@ for (const dtype of ["i2", "i4"] as const) {
     await assertRejects(
       () => readGemma4PleIndex("test: 資産欠け", { ...source, assets: missing }),
       Error,
-      `${dropped}: 容器が宣言していない`,
+      `${dropped}: not declared by the container`,
     );
 
     // (b) 索引が指していない PLE 資産が容器に在る（配布形が宣言した資産を 1 本も読まない形）。
@@ -168,7 +168,7 @@ for (const dtype of ["i2", "i4"] as const) {
           assets: { ...source.assets, "ple.values.999": "ple-values" },
         }),
       Error,
-      "ple.values.999: 役割 'ple-values' の資産だが索引が指していない",
+      "ple.values.999: an asset with role 'ple-values' that the index does not point at",
     );
 
     // (c) 役割が違う（値と scale を取り違えた焼き直し）。
@@ -179,7 +179,7 @@ for (const dtype of ["i2", "i4"] as const) {
           assets: { ...source.assets, [dropped]: "ple-scales" },
         }),
       Error,
-      `${dropped}: 役割 'ple-scales'`,
+      `${dropped}: role 'ple-scales'`,
     );
   });
 }

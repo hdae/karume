@@ -144,8 +144,8 @@ const assertDrafterInputs = (
   const names = graph.inputs.map((input) => input.name);
   if (names.length !== DRAFTER_INPUTS.length || !names.every((n, i) => n === DRAFTER_INPUTS[i])) {
     throw new Error(
-      `${where}: drafter グラフの入力が [${names.join(", ")}]` +
-        `（順序も含めて [${DRAFTER_INPUTS.join(", ")}] であること）`,
+      `${where}: the drafter graph's inputs are [${names.join(", ")}]` +
+        ` (they must be [${DRAFTER_INPUTS.join(", ")}], including the order)`,
     );
   }
   const expected = new Map<string, { dtype: string; shape: readonly (number | string)[] }>([
@@ -162,11 +162,11 @@ const assertDrafterInputs = (
   }
   for (const input of graph.inputs) {
     const want = expected.get(input.name);
-    if (want === undefined) throw new Error(`${where}: 想定外の drafter 入力 '${input.name}'`);
+    if (want === undefined) throw new Error(`${where}: unexpected drafter input '${input.name}'`);
     if (input.dtype !== want.dtype || !sameShape(input.shape, want.shape)) {
       throw new Error(
-        `${where}: drafter 入力 '${input.name}' が ${input.dtype} ${showShape(input.shape)}` +
-          `（${want.dtype} ${showShape(want.shape)} が要る）`,
+        `${where}: drafter input '${input.name}' is ${input.dtype} ${showShape(input.shape)}` +
+          ` (${want.dtype} ${showShape(want.shape)} is needed)`,
       );
     }
   }
@@ -176,17 +176,18 @@ const assertDrafterInputs = (
 const assertDrafterOutputs = (where: string, graph: DrafterGraph): readonly string[] => {
   if (graph.outputs.length !== GEMMA4_DRAFT_STEPS) {
     throw new Error(
-      `${where}: drafter グラフの出口が ${graph.outputs.length} 本` +
-        `（配布形の drafter は ${GEMMA4_DRAFT_STEPS} 段で焼かれている — 段数を変えるのは再 export）`,
+      `${where}: the drafter graph has ${graph.outputs.length} outputs` +
+        ` (the distribution's drafter is baked with ${GEMMA4_DRAFT_STEPS} steps — changing the step count means a re-export)`,
     );
   }
   for (const name of graph.outputs) {
     const value = graph.values[name];
-    if (value === undefined) throw new Error(`${where}: drafter 出口 '${name}' の値情報が無い`);
+    if (value === undefined)
+      throw new Error(`${where}: drafter output '${name}' has no value info`);
     if (value.dtype !== "i32" || !sameShape(value.shape, [1, 1, 1])) {
       throw new Error(
-        `${where}: drafter 出口 '${name}' が ${value.dtype} ${showShape(value.shape)}` +
-          `（i32 [1,1,1] の draft token が要る）`,
+        `${where}: drafter output '${name}' is ${value.dtype} ${showShape(value.shape)}` +
+          ` (an i32 [1,1,1] draft token is needed)`,
       );
     }
   }
@@ -204,27 +205,29 @@ const assertDrafterOutputs = (where: string, graph: DrafterGraph): readonly stri
 const assertDrafterStates = (where: string, graph: DrafterGraph, target: DrafterGraph): void => {
   const names = Object.keys(graph.states);
   if (names.length === 0) {
-    throw new Error(`${where}: drafter グラフに state スロットが無い（target の KV を読まない）`);
+    throw new Error(
+      `${where}: the drafter graph has no state slots (it would not read the target's KV)`,
+    );
   }
   for (const name of names) {
     const slot = graph.states[name];
     if (!slot.external) {
       throw new Error(
-        `${where}: drafter の state スロット '${name}' が external でない` +
-          `（借り物の実体は貸し手 context にある — 自前確保は空の過去を読む）`,
+        `${where}: drafter state slot '${name}' is not external` +
+          ` (the borrowed storage lives in the lending context — allocating its own would read an empty past)`,
       );
     }
     const lender = target.states[name];
     if (lender === undefined) {
       throw new Error(
-        `${where}: drafter が読む external スロット '${name}' が target グラフに無い` +
-          `（target のスロット: ${Object.keys(target.states).join(" / ")}）`,
+        `${where}: external slot '${name}' that the drafter reads is not in the target graph` +
+          ` (the target's slots: ${Object.keys(target.states).join(" / ")})`,
       );
     }
     if (slot.dtype !== lender.dtype || !sameShape(slot.shape, lender.shape)) {
       throw new Error(
-        `${where}: external スロット '${name}' が ${slot.dtype} ${showShape(slot.shape)}` +
-          `（target 側は ${lender.dtype} ${showShape(lender.shape)}）`,
+        `${where}: external slot '${name}' is ${slot.dtype} ${showShape(slot.shape)}` +
+          ` (the target side is ${lender.dtype} ${showShape(lender.shape)})`,
       );
     }
   }
@@ -252,16 +255,16 @@ const resolveSharedWeights = (
     const lender = target.initializers[name];
     if (lender === undefined || lender.shared !== undefined) {
       throw new Error(
-        `${where}: drafter の共有 initializer '${name}' に対応する実体が target グラフに無い` +
-          `（借り手の名前は貸し手の initializer 名と同じであること）`,
+        `${where}: the target graph has no initializer backing the drafter's shared initializer '${name}'` +
+          ` (the borrower's name must be the same as the lender's initializer name)`,
       );
     }
     shared = { ...shared, [name]: name };
   }
   if (Object.keys(shared).length === 0) {
     throw new Error(
-      `${where}: drafter グラフに共有 initializer が 1 本も無い` +
-        `（target の埋め込み表を借りる宣言が焼かれていない）`,
+      `${where}: the drafter graph has no shared initializer at all` +
+        ` (the declaration that borrows the target's embedding table was not baked)`,
     );
   }
   return shared;
@@ -297,8 +300,8 @@ export const admitGemma4Drafter = (
   const sharedWeights = resolveSharedWeights(where, graph, target.graph);
   if (graph.symbols.length !== 1 || graph.symbols[0] !== target.capacitySymbol) {
     throw new Error(
-      `${where}: drafter グラフの記号が [${graph.symbols.join(", ")}]` +
-        `（貸し手から継承する容量記号 '${target.capacitySymbol}' 1 本であること）`,
+      `${where}: the drafter graph's symbols are [${graph.symbols.join(", ")}]` +
+        ` (there must be exactly one, the capacity symbol '${target.capacitySymbol}' inherited from the lender)`,
     );
   }
   return { outputs, hiddenSize: target.hiddenSize, sharedWeights };
@@ -376,13 +379,15 @@ export const draftOnce = async (
   const where = "gemma4 draftOnce";
   const { token, hidden, position } = cycle;
   if (!Number.isSafeInteger(token) || token < 0) {
-    throw new Error(`${where}: 直前 token ${token} が非負整数でない`);
+    throw new Error(`${where}: previous token ${token} is not a non-negative integer`);
   }
   if (!Number.isSafeInteger(position) || position < 0) {
-    throw new Error(`${where}: 位置 ${position} が非負整数でない`);
+    throw new Error(`${where}: position ${position} is not a non-negative integer`);
   }
   if (hidden.length !== drafter.hiddenSize) {
-    throw new Error(`${where}: hidden の要素数 ${hidden.length} が幅 ${drafter.hiddenSize} と違う`);
+    throw new Error(
+      `${where}: hidden element count ${hidden.length} differs from the width ${drafter.hiddenSize}`,
+    );
   }
   const inputs: Record<string, Tensor> = {
     [TOKEN_INPUT]: { dtype: "i32", shape: [1, 1], data: Int32Array.of(token) },
@@ -395,11 +400,12 @@ export const draftOnce = async (
   const draft = new Int32Array(new ArrayBuffer(drafter.outputs.length * 4));
   drafter.outputs.forEach((name, step) => {
     const tensor = outputs[name];
-    if (tensor === undefined) throw new Error(`${where}: 出口 '${name}' が run の結果に無い`);
+    if (tensor === undefined)
+      throw new Error(`${where}: output '${name}' is not in the run's results`);
     if (tensor.dtype !== "i32" || tensor.data.length !== 1) {
       throw new Error(
-        `${where}: 出口 '${name}' が ${tensor.dtype} ${tensor.data.length} 要素` +
-          `（i32 1 要素の draft token が要る）`,
+        `${where}: output '${name}' is ${tensor.dtype} with ${tensor.data.length} elements` +
+          ` (a one-element i32 draft token is needed)`,
       );
     }
     draft[step] = tensor.data[0];

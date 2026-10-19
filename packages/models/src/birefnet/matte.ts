@@ -85,7 +85,7 @@ const sigmoidAt = (
   if (!Number.isFinite(raw)) {
     const x = index % sourceWidth;
     const y = Math.floor(index / sourceWidth);
-    throw new Error(`birefnet: マットの logit (x=${x}, y=${y}) が非有限値`);
+    throw new Error(`birefnet: the matte logit (x=${x}, y=${y}) is non-finite`);
   }
   return 1 / (1 + Math.exp(-raw));
 };
@@ -151,9 +151,9 @@ export const matteFromLogits = (
   // (ADR 0107 decision 3).
   if (!Object.hasOwn(PROCEDURES, procedure)) {
     throw new Error(
-      `birefnet: 後処理の手順 ${JSON.stringify(procedure)} は未対応（期待 ${MATTE_PROCEDURES.map(
+      `birefnet: postprocessing procedure ${JSON.stringify(procedure)} is not supported (expected ${MATTE_PROCEDURES.map(
         (name) => `'${name}'`,
-      ).join(" / ")}）`,
+      ).join(" / ")})`,
     );
   }
   return {

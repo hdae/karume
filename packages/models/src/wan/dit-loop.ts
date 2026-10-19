@@ -62,7 +62,7 @@ const DIT_CONDITION_MASK = "condition_mask";
  * not silently run as t2v).
  */
 const unknownDitInputForm = (form: never, owner: string): Error =>
-  new Error(`${owner}: DiT の入力の形 '${String(form)}' は未知（"t2v" / "ti2v"）`);
+  new Error(`${owner}: unknown DiT input form '${String(form)}' ("t2v" / "ti2v")`);
 
 /** The set of graph input names per DiT input form (an unknown form fails loudly). */
 const ditInputNames = (form: WanDitInputForm, owner: string): readonly string[] => {
@@ -100,7 +100,7 @@ const graphInput = (
   name: string,
 ): GraphOwner["graph"]["inputs"][number] => {
   const spec = model.graph.inputs.find((input) => input.name === name);
-  if (spec === undefined) throw new Error(`${owner}: transformer のグラフ入力 '${name}' が無い`);
+  if (spec === undefined) throw new Error(`${owner}: transformer graph input '${name}' is missing`);
   return spec;
 };
 
@@ -119,7 +119,7 @@ const assertInput = (
   const spec = graphInput(owner, model, name);
   if (spec.dtype !== dtype) {
     throw new Error(
-      `${owner}: transformer のグラフ入力 '${name}' の dtype ${spec.dtype} が ${dtype} でない`,
+      `${owner}: transformer graph input '${name}' has dtype ${spec.dtype}, not ${dtype}`,
     );
   }
   assertDims(owner, spec.shape, expected, `'${name}'`);
@@ -133,7 +133,7 @@ const staticDim = (
   where: string,
 ): number => {
   const dim = dims.at(axis);
-  if (typeof dim !== "number") throw new Error(`${owner}: ${where} の軸 ${axis} が静的でない`);
+  if (typeof dim !== "number") throw new Error(`${owner}: ${where} axis ${axis} is not static`);
   return dim;
 };
 
@@ -202,22 +202,22 @@ export const ditContract = (
   const sequence = tokens.at(1);
   if (typeof sequence !== "string") {
     throw new Error(
-      `${owner}: '${DIT_TOKENS}' の軸 1 が記号次元でない（${String(sequence)}）— ` +
-        "ホストは S を寸法とフレーム数ごとに変えて渡す",
+      `${owner}: '${DIT_TOKENS}' axis 1 is not a symbolic dimension (${String(sequence)}) — ` +
+        "the host passes a different S for each size and frame count",
     );
   }
   assertDims(owner, tokens, [1, sequence, tokenWidth], `'${DIT_TOKENS}'`);
   const [output] = transformer.graph.outputs;
   if (transformer.graph.outputs.length !== 1) {
     throw new Error(
-      `${owner}: transformer の出力が ${transformer.graph.outputs.length} 本（1 本の S 形）`,
+      `${owner}: transformer has ${transformer.graph.outputs.length} outputs (expected one S-shaped output)`,
     );
   }
   assertDims(
     owner,
     valueShape(owner, transformer, output),
     [1, sequence, tokenWidth],
-    `transformer の出力 '${output}'`,
+    `transformer output '${output}'`,
   );
   const ropeWidth = wanRopeWidth(ropeBase);
   for (const name of [DIT_ROPE_COS, DIT_ROPE_SIN]) {
@@ -243,8 +243,8 @@ export const ditContract = (
     sortedDeclared.some((name, index) => name !== sortedExpected[index])
   ) {
     throw new Error(
-      `${owner}: transformer のグラフ入力が [${declared.join(", ")}]` +
-        `（期待: [${expected.join(", ")}] — 入力の形 '${form}'）`,
+      `${owner}: transformer graph inputs are [${declared.join(", ")}]` +
+        ` (expected: [${expected.join(", ")}] — input form '${form}')`,
     );
   }
   switch (form) {
@@ -365,7 +365,7 @@ export const wanConditionMask = (
     case "t2v":
       if (conditioned) {
         throw new Error(
-          `${owner}: 入力の形 't2v' の DiT は条件の潜在を受けない（条件マスクの入力が無い）`,
+          `${owner}: a DiT of input form 't2v' does not accept a condition latent (it has no condition mask input)`,
         );
       }
       return undefined;
@@ -374,8 +374,8 @@ export const wanConditionMask = (
       if (conditioned) {
         if (patch.patchFrames !== 1) {
           throw new Error(
-            `${owner}: 時間の patch ${patch.patchFrames} では先頭の潜在フレームがトークンのフレームに揃わない` +
-              "（I2V の条件マスクは時間の patch 1 の前提）",
+            `${owner}: with temporal patch ${patch.patchFrames} the first latent frame does not align with the token frames` +
+              " (the I2V condition mask assumes temporal patch 1)",
           );
         }
         mask.fill(1, 0, grid.rows * grid.cols);
@@ -411,8 +411,8 @@ export const withWanFirstFrameCondition = (
   const plane = height * width;
   if (latents.length !== channels * frames * plane || condition.length !== channels * plane) {
     throw new Error(
-      `条件の置き換え: 潜在 ${latents.length} 要素・条件 ${condition.length} 要素が潜在の形 ` +
-        `[${latentShape.join(", ")}]（条件は 1 フレーム）と合わない`,
+      `Condition replacement: latent ${latents.length} elements, condition ${condition.length} elements do not match the latent shape ` +
+        `[${latentShape.join(", ")}] (the condition is 1 frame)`,
     );
   }
   const out = new Float32Array(latents.length);
@@ -525,7 +525,7 @@ export const runWanDenoise = async (
         }),
       );
       observe?.("transformer", session.diagnostics());
-      return unpatchifyTokens(asF32(outputs[dit.output], "DiT の出力"), latentShape, patch);
+      return unpatchifyTokens(asF32(outputs[dit.output], "DiT output"), latentShape, patch);
     };
     const sampler = new WanUniPcSampler(schedule, WAN_UNIPC_CONFIG);
     for (let index = 0; index < plan.steps; index += 1) {
@@ -550,9 +550,9 @@ export const runWanDenoise = async (
       const broken = firstNonFinite(current);
       if (broken !== -1) {
         throw new Error(
-          `${owner}: step ${index + 1}/${plan.steps} の更新後の潜在の要素 ${broken} が非有限` +
-            `（${current[broken]}）— DiT の出力・CFG の合成・UniPC の更新のどこかが溢れた` +
-            "（VAE の段へは渡さない）",
+          `${owner}: after the update of step ${index + 1}/${plan.steps}, latent element ${broken} is non-finite` +
+            ` (${current[broken]}) — the DiT output, the CFG combination or the UniPC update overflowed` +
+            " (not passed to the VAE stage)",
         );
       }
       const snapshot = current;

@@ -164,14 +164,14 @@ export type BirefnetPipelineConfig = {
  */
 const readPostprocess = (raw: Readonly<Record<string, unknown>>, where: string): MatteProcedure => {
   const key = "postprocess";
-  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
+  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: missing`);
   const value = raw[key];
   const procedure = MATTE_PROCEDURES.find((name) => name === value);
   if (procedure === undefined) {
     throw new Error(
-      `${where}.${key}: 未知の後処理の手順 ${JSON.stringify(value)}（期待 ${MATTE_PROCEDURES.map(
+      `${where}.${key}: unknown postprocessing procedure ${JSON.stringify(value)} (expected ${MATTE_PROCEDURES.map(
         (name) => `'${name}'`,
-      ).join(" / ")}）`,
+      ).join(" / ")})`,
     );
   }
   return procedure;
@@ -183,27 +183,33 @@ export const parseBirefnetPipelineConfig = (
 ): BirefnetPipelineConfig => {
   const where = "pipelineConfig";
   assertAllowedKeys(raw, ROOT_KEYS, where);
-  const positive = "正の整数でない";
+  const positive = "not a positive integer";
   const config: BirefnetPipelineConfig = {
     imageWidth: readNumber(raw, "imageWidth", where, isPositiveInteger, positive),
     imageHeight: readNumber(raw, "imageHeight", where, isPositiveInteger, positive),
     // The mean may be negative (a translation in `(x − mean·255) / (std·255)`), but a non-finite
     // one turns every pixel into NaN.
-    imageMean: readChannels(raw, "imageMean", where, Number.isFinite, "有限の数でない要素がある"),
+    imageMean: readChannels(
+      raw,
+      "imageMean",
+      where,
+      Number.isFinite,
+      "has an element that is not a finite number",
+    ),
     imageStd: readChannels(
       raw,
       "imageStd",
       where,
       (value) => Number.isFinite(value) && value > 0,
-      "正の有限数でない要素がある",
+      "has an element that is not a positive finite number",
     ),
     interpolation: readOnly(
       raw,
       "interpolation",
       where,
       INTERPOLATION,
-      "上流 handler.py の torchvision Resize は既定の補間（= bilinear）で、" +
-        "bicubic で通すと resize の値が最大 47/255 ずれる",
+      "upstream handler.py's torchvision Resize uses the default interpolation (= bilinear), " +
+        "and running bicubic shifts the resized values by up to 47/255",
     ),
     postprocess: readPostprocess(raw, where),
   };

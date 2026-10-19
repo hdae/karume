@@ -58,8 +58,8 @@ export const toSbv2PhoneTone = (utterance: Sbv2Utterance, pad: string): Sbv2Phon
     const { tone } = mora;
     if (tone !== 0 && tone !== 1) {
       throw new Sbv2InputError(
-        `moras[${index}]（${mora.kana}）の tone = ${tone} が 0/1 でない` +
-          "（生の 2 値トーンで与える）",
+        `moras[${index}] (${mora.kana}) has tone = ${tone}, not 0/1` +
+          " (give it as a raw binary tone)",
       );
     }
     // When a mora expands to [consonant, vowel], consonant and vowel get the same tone.
@@ -78,7 +78,7 @@ export const toSbv2PhoneTone = (utterance: Sbv2Utterance, pad: string): Sbv2Phon
   tones.push(0);
 
   if (phones.length !== tones.length) {
-    throw new Error(`phones(${phones.length}) と tones(${tones.length}) の長さが不一致`);
+    throw new Error(`phones(${phones.length}) and tones(${tones.length}) differ in length`);
   }
   return { phones, tones };
 };

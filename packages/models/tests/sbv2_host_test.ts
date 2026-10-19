@@ -81,13 +81,13 @@ test("durationsToFrames: 長さ不一致・全 0 フレームは落とす", () =
   const mismatch = assertThrows(
     () => durationsToFrames(logw, logwFor([1]), new Float32Array([1, 1]), 0, 1, AMPLE_FRAMES),
     Error,
-    "長さ不一致",
+    "Length mismatch",
   );
   assert(!(mismatch instanceof Sbv2InputError), "長さ不一致は入力起因ではない");
   const empty = assertThrows(
     () => durationsToFrames(logw, logw, new Float32Array([0, 0]), 0, 1, AMPLE_FRAMES),
     Error,
-    "総フレーム数が 0",
+    "total frame count is 0",
   );
   assert(!(empty instanceof Sbv2InputError), "総フレーム数 0 は入力起因ではない");
 });
@@ -103,7 +103,7 @@ test("durationsToFrames: 総フレーム数が配布形の上限を超えたら�
   assertThrows(
     () => durationsToFrames(logw, logw, mask, 0.5, 2, 7),
     Sbv2InputError,
-    "総フレーム数 8 が配布形の上限 maxFrames=7 を超えている",
+    "The total frame count 8 exceeds the distribution's maximum maxFrames=7",
   );
 });
 
@@ -142,12 +142,12 @@ test("buildZp: 形状の食い違いは落とす", () => {
   const mP = new Float32Array([1, 2, 3, 4]);
   const logsP = new Float32Array([0, 0, 0, 0]);
   const idx = Int32Array.from([0, 1]);
-  assertThrows(() => buildZp(mP, logsP, idx, 3, new Float32Array(6), 1), Error, "割り切れない");
-  assertThrows(() => buildZp(mP, logsP, idx, 2, new Float32Array(3), 1), Error, "ノイズ長");
+  assertThrows(() => buildZp(mP, logsP, idx, 3, new Float32Array(6), 1), Error, "not divisible");
+  assertThrows(() => buildZp(mP, logsP, idx, 2, new Float32Array(3), 1), Error, "Noise length");
   assertThrows(
     () => buildZp(mP, logsP, Int32Array.from([0, 9]), 2, new Float32Array(4), 1),
     Error,
-    "展開インデックス",
+    "Expansion index",
   );
 });
 

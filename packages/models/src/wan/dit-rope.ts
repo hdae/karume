@@ -63,11 +63,11 @@ type RawTable = {
 /** Fetches one F32 rank-2 table (`parseSafetensors` already guarantees alignment — the view is zero-copy). */
 const tableOf = (file: SafetensorsFile, name: string): RawTable => {
   const view = file.tensors.get(name);
-  if (view === undefined) throw new Error(`rope 素表に '${name}' が無い`);
+  if (view === undefined) throw new Error(`The rope base table has no '${name}'`);
   if (view.dtype !== F32_DTYPE) {
-    throw new Error(`rope 素表 '${name}': 格納 dtype が ${view.dtype}（F32 が必要）`);
+    throw new Error(`Rope base table '${name}': storage dtype is ${view.dtype} (F32 is required)`);
   }
-  if (view.shape.length !== 2) throw new Error(`rope 素表 '${name}': rank が 2 でない`);
+  if (view.shape.length !== 2) throw new Error(`Rope base table '${name}': rank is not 2`);
   const shape: readonly [number, number] = [view.shape[0], view.shape[1]];
   return { data: new Float32Array(file.buffer, view.byteOffset, shape[0] * shape[1]), shape };
 };
@@ -83,20 +83,23 @@ export const parseWanRopeBase = (buffer: ArrayBuffer): WanRopeBase => {
   // MUST: not a module-scope const (cross-cutting invariant "every module is side-effect free").
   const expectedKeys = new Set(ROPE_AXES.flatMap((axis) => [`cos_${axis}`, `sin_${axis}`]));
   for (const name of file.tensors.keys()) {
-    if (!expectedKeys.has(name)) throw new Error(`rope 素表に想定外のテンソル '${name}' がある`);
+    if (!expectedKeys.has(name))
+      throw new Error(`The rope base table has an unexpected tensor '${name}'`);
   }
   const tables = ROPE_AXES.map((axis) => {
     const cos = tableOf(file, `cos_${axis}`);
     const sin = tableOf(file, `sin_${axis}`);
     if (cos.shape[0] !== sin.shape[0] || cos.shape[1] !== sin.shape[1]) {
-      throw new Error(`rope 素表 ${axis} の cos / sin で shape が違う`);
+      throw new Error(`Rope base table ${axis}: cos and sin shapes differ`);
     }
     return { axis, cos, sin };
   });
   const rows = tables[0].cos.shape[0];
   for (const { axis, cos } of tables) {
     if (cos.shape[0] !== rows) {
-      throw new Error(`rope 素表 ${axis} の行数 ${cos.shape[0]} が他軸の ${rows} と違う`);
+      throw new Error(
+        `Rope base table ${axis} row count ${cos.shape[0]} differs from the other axes' ${rows}`,
+      );
     }
   }
   const [t, h, w] = tables;
@@ -128,8 +131,8 @@ export const wanRopeTables = (
   const positions = [grid.frames, grid.rows, grid.cols];
   if (positions.some((extent) => extent > base.rows)) {
     throw new Error(
-      `rope 素表の行数 ${base.rows} では F'=${grid.frames} / H'=${grid.rows} / W'=${grid.cols} を` +
-        "組めない（上流の位置表の天井を超えている）",
+      `The rope base table's ${base.rows} rows cannot build F'=${grid.frames} / H'=${grid.rows} / W'=${grid.cols}` +
+        " (beyond the ceiling of the upstream position table)",
     );
   }
   const rowWidth = wanRopeWidth(base);

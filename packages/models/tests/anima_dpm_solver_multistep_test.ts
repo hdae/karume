@@ -249,12 +249,12 @@ test("dpmSolverMultistepStep: uncond の有無が needsUncond と食い違った
   assertThrows(
     () => dpmSolverMultistepStep({ ...common, uncond: undefined, guidance: 4 }),
     Error,
-    "uncond 側のモデル出力を要求する",
+    "needs the model output of the uncond side",
   );
   assertThrows(
     () => dpmSolverMultistepStep({ ...common, uncond: Float32Array.from([2, 2]), guidance: 1 }),
     Error,
-    "uncond 分岐を計算しない経路",
+    "path is supposed to skip computing the uncond branch",
   );
 });
 
@@ -271,7 +271,7 @@ test("dpmSolverMultistepStep: 直前 x0 の有無が step 0 かどうかと食�
   assertThrows(
     () => dpmSolverMultistepStep({ ...common, index: 3, previousX0: undefined }),
     Error,
-    "直前 x0 の有無が食い違う",
+    "the presence of the previous x0 disagree",
   );
   assertThrows(
     () =>
@@ -281,7 +281,7 @@ test("dpmSolverMultistepStep: 直前 x0 の有無が step 0 かどうかと食�
         previousX0: Float32Array.from([0, 0, 0, 0]),
       }),
     Error,
-    "直前 x0 の有無が食い違う",
+    "the presence of the previous x0 disagree",
   );
 });
 
@@ -292,23 +292,23 @@ test("dpmSolverMultistepStep: 梯子と step 添字の受理集合", () => {
   assertThrows(
     () => dpmSolverMultistepStep({ ...common, sigmas: Float32Array.from([0]), index: 0 }),
     RangeError,
-    "step が 1 つも無い",
+    "there is not a single step",
   );
   // 終端が 0 でない梯子は最終 step の 1 次落ちが成り立たない（`final_sigmas_type="zero"` 前提）。
   assertThrows(
     () => dpmSolverMultistepStep({ ...common, sigmas: Float32Array.from([1, 0.5]), index: 0 }),
     RangeError,
-    "0 でない",
+    "is not 0",
   );
   assertThrows(
     () => dpmSolverMultistepStep({ ...common, sigmas: Float32Array.from([1, 0]), index: 1 }),
     RangeError,
-    "の整数でない",
+    "is not an integer in",
   );
   assertThrows(
     () => dpmSolverMultistepStep({ ...common, sigmas: Float32Array.from([1, 0]), index: -1 }),
     RangeError,
-    "の整数でない",
+    "is not an integer in",
   );
 });
 

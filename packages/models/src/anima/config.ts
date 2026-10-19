@@ -142,8 +142,8 @@ const parseResolutionEntry = (raw: unknown, where: string): ImageSize => {
   const record = readRecord(raw, where);
   assertAllowedKeys(record, RESOLUTION_KEYS, where);
   const size: ImageSize = {
-    width: readNumber(record, "width", where, Number.isInteger, "正の整数でない"),
-    height: readNumber(record, "height", where, Number.isInteger, "正の整数でない"),
+    width: readNumber(record, "width", where, Number.isInteger, "not a positive integer"),
+    height: readNumber(record, "height", where, Number.isInteger, "not a positive integer"),
   };
   // The default must also be inside the accepted set (if the distribution falls outside it,
   // fromAssets fails — no "found out only after running one generation").
@@ -163,7 +163,7 @@ const parseDefaults = (raw: unknown): AnimaDefaults => {
   const where = "pipelineConfig.defaults";
   const record = readRecord(raw, where);
   assertAllowedKeys(record, DEFAULTS_KEYS, where);
-  const steps = readNumber(record, "steps", where, Number.isFinite, "有限の数でない");
+  const steps = readNumber(record, "steps", where, Number.isFinite, "not a finite number");
   // If the default is outside the generation check, a generate whose request passes nothing fails
   // as input-caused.
   // MUST: the accepted-set conditions call the single generation check (`assertAcceptableSteps` in
@@ -183,7 +183,7 @@ const parseDefaults = (raw: unknown): AnimaDefaults => {
     "guidanceScale",
     where,
     Number.isFinite,
-    "有限の数でない",
+    "not a finite number",
   );
   const resolution = parseResolutionEntry(record["resolution"], `${where}.resolution`);
   if (!Object.hasOwn(record, "negativePrompt")) {
@@ -191,7 +191,7 @@ const parseDefaults = (raw: unknown): AnimaDefaults => {
   }
   const negativePrompt = record["negativePrompt"];
   if (typeof negativePrompt !== "string") {
-    throw new Error(`${where}.negativePrompt: 文字列でない`);
+    throw new Error(`${where}.negativePrompt: not a string`);
   }
   return { steps, guidanceScale, resolution, negativePrompt };
 };
@@ -212,8 +212,8 @@ export const assertAnimaSamplerType = (value: unknown, where: string): AnimaSamp
       : undefined;
   if (accepted === undefined) {
     throw new Error(
-      `${where}: 期待 ${ANIMA_SAMPLER_TYPES.map((name) => `'${name}'`).join(" / ")}` +
-        `（実際 ${typeof value === "string" ? `'${value}'` : String(value)}）`,
+      `${where}: expected ${ANIMA_SAMPLER_TYPES.map((name) => `'${name}'`).join(" / ")}` +
+        ` (actual ${typeof value === "string" ? `'${value}'` : String(value)})`,
     );
   }
   return accepted;
@@ -239,14 +239,14 @@ const parseScheduler = (raw: unknown): AnimaScheduler => {
       "shift",
       where,
       (value) => Number.isFinite(value) && value > 0,
-      "正の有限数でない",
+      "not a positive finite number",
     ),
     numTrainTimesteps: readNumber(
       record,
       "numTrainTimesteps",
       where,
       (value) => Number.isInteger(value) && value > 0,
-      "正の整数でない",
+      "not a positive integer",
     ),
   };
 };

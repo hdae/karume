@@ -193,14 +193,14 @@ describe("resolveSessionOptions: 受理できない指定", () => {
       },
     };
     const messages: Readonly<Record<keyof SessionSpec, string>> = {
-      linearCompute: "linearComputeが不正",
-      attentionCompute: "attentionComputeが不正",
-      attentionScoreStorage: "attentionScoreStorageが不正",
-      linearGemvReduce: "linearGemvReduceが不正",
-      stateAttentionReduce: "stateAttentionReduceが不正",
-      fuseRmsNormAdd: "fuseRmsNormAddはbooleanでなければならない",
-      fuseLinearStaticQuantize: "fuseLinearStaticQuantizeはbooleanでなければならない",
-      packedStaticQuantize: "packedStaticQuantizeはbooleanでなければならない",
+      linearCompute: "linearCompute is invalid",
+      attentionCompute: "attentionCompute is invalid",
+      attentionScoreStorage: "attentionScoreStorage is invalid",
+      linearGemvReduce: "linearGemvReduce is invalid",
+      stateAttentionReduce: "stateAttentionReduce is invalid",
+      fuseRmsNormAdd: "fuseRmsNormAdd must be a boolean",
+      fuseLinearStaticQuantize: "fuseLinearStaticQuantize must be a boolean",
+      packedStaticQuantize: "packedStaticQuantize must be a boolean",
     };
     for (const [key, message] of Object.entries(messages)) {
       for (const value of [null, 0, "bogus", [], object]) {
@@ -221,7 +221,7 @@ describe("resolveSessionOptions: 受理できない指定", () => {
       const error = assertThrows(
         () => resolveSessionOptions(LINEAR_ONLY, declared, {}, "test"),
         Error,
-        `test: session.${key}は未対応`,
+        `test: session.${key} is not supported`,
       );
       assert(!(error instanceof ModelInputError), "資産の齟齬が入力起因の型で飛んでいる");
     }
@@ -237,7 +237,7 @@ describe("resolveSessionOptions: 受理できない指定", () => {
           "test",
         ),
       Error,
-      "session.attentionComputeは未対応",
+      "session.attentionCompute is not supported",
     );
   });
 
@@ -245,7 +245,7 @@ describe("resolveSessionOptions: 受理できない指定", () => {
     assertThrows(
       () => resolveSessionOptions(LINEAR_ONLY, {}, { attentionCompute: "f16" }, "test"),
       ModelInputError,
-      "test: attentionComputeはこの系列では指定できない",
+      "test: attentionCompute cannot be specified for this family",
     );
     // undefined は「指定なし」なので受理表に依らず通る。
     assertEquals(

@@ -123,15 +123,15 @@ export const assertWanVaeMatchesGeneration = (
   const { mean, std } = generation.latents;
   if (mean.length !== layout.latentChannels || std.length !== layout.latentChannels) {
     throw new Error(
-      `${owner}: 逆正規化の統計（mean ${mean.length} 本・std ${std.length} 本）が VAE の潜在 ` +
-        `${layout.latentChannels} チャネルと違う`,
+      `${owner}: the denormalization statistics (mean ${mean.length}, std ${std.length}) do not match the VAE latent's ` +
+        `${layout.latentChannels} channels`,
     );
   }
   const sampleChannels = WAN_RGB_CHANNELS * generation.vaePatchSize ** 2;
   if (layout.sampleChannels !== sampleChannels) {
     throw new Error(
-      `${owner}: VAE の出口 ${layout.sampleChannels} チャネルが RGB ${WAN_RGB_CHANNELS} × ` +
-        `unpatchify ${generation.vaePatchSize}² = ${sampleChannels} と違う`,
+      `${owner}: VAE output ${layout.sampleChannels} channels differ from RGB ${WAN_RGB_CHANNELS} × ` +
+        `unpatchify ${generation.vaePatchSize}² = ${sampleChannels}`,
     );
   }
 };
@@ -161,8 +161,8 @@ export const assertWanVaeTilesCover = (
     const latentWidth = width / compression;
     if (!Number.isInteger(latentHeight) || !Number.isInteger(latentWidth)) {
       throw new Error(
-        `${owner}: 空間の圧縮 ${compression}（VAE の縮尺 ${layout.sampleTile} / ${layout.tile} × ` +
-          `unpatchify ${generation.vaePatchSize}）では ${width}×${height} の潜在が整数にならない`,
+        `${owner}: with spatial compression ${compression} (VAE scale ${layout.sampleTile} / ${layout.tile} × ` +
+          `unpatchify ${generation.vaePatchSize}), the latent of ${width}×${height} is not integral`,
       );
     }
     try {
@@ -170,8 +170,8 @@ export const assertWanVaeTilesCover = (
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       throw new Error(
-        `${owner}: VAE のタイル（潜在 ${layout.tile}）では ${width}×${height}` +
-          `（潜在 ${latentHeight}×${latentWidth}）をタイル decode できない — ${reason}`,
+        `${owner}: the VAE tile (latent ${layout.tile}) cannot tile-decode ${width}×${height}` +
+          ` (latent ${latentHeight}×${latentWidth}) — ${reason}`,
         { cause: error },
       );
     }
@@ -223,19 +223,19 @@ export const finishWanVaeFrames = (
   const width = tiles.cols.extent * tiles.scale;
   const perFrame = channels * height * width;
   if (assembled.length === 0) {
-    throw new Error(`${owner}: VAE の出力が 0 要素（フレームが 1 枚も無い）`);
+    throw new Error(`${owner}: the VAE output has 0 elements (no frames at all)`);
   }
   const frames = assembled.length / perFrame;
   if (!Number.isInteger(frames)) {
     throw new Error(
-      `${owner}: VAE の出力 ${assembled.length} 要素が [${channels}, F, ${height}, ${width}] にならない` +
-        `（1 フレーム ${perFrame} 要素で割り切れない）`,
+      `${owner}: the VAE output's ${assembled.length} elements do not form [${channels}, F, ${height}, ${width}]` +
+        ` (not divisible by ${perFrame} elements per frame)`,
     );
   }
   const area = patchSize ** 2;
   if (channels % area !== 0) {
     throw new Error(
-      `${owner}: VAE の出口 ${channels} チャネルが unpatchify の倍率 ${patchSize}² = ${area} で割り切れない`,
+      `${owner}: VAE output ${channels} channels are not divisible by the unpatchify patch size ${patchSize}² = ${area}`,
     );
   }
   const patchShape = [channels, frames, height, width] as const;
@@ -243,8 +243,8 @@ export const finishWanVaeFrames = (
   const expected = [WAN_RGB_CHANNELS, plan.frames, plan.height, plan.width];
   if (rgbShape.some((dim, axis) => dim !== expected[axis])) {
     throw new Error(
-      `${owner}: VAE の出力の形 [${patchShape.join(", ")}]（unpatchify ${patchSize} で ` +
-        `[${rgbShape.join(", ")}]）が [${expected.join(", ")}] と違う`,
+      `${owner}: VAE output shape [${patchShape.join(", ")}] (unpatchify ${patchSize} gives ` +
+        `[${rgbShape.join(", ")}]) differs from [${expected.join(", ")}]`,
     );
   }
   const video = unpatchifyWanVaeFrames(assembled, patchShape, patchSize);
@@ -254,9 +254,9 @@ export const finishWanVaeFrames = (
     const pixel = broken % plane;
     const sheet = Math.floor(broken / plane);
     throw new Error(
-      `${owner}: VAE の出力（クランプ前）の channel ${Math.floor(sheet / plan.frames)}・` +
-        `フレーム ${sheet % plan.frames}・画素 (x=${pixel % plan.width}, ` +
-        `y=${Math.floor(pixel / plan.width)}) が非有限（${video[broken]}）`,
+      `${owner}: VAE output (before clamping) channel ${Math.floor(sheet / plan.frames)}, ` +
+        `frame ${sheet % plan.frames}, pixel (x=${pixel % plan.width}, ` +
+        `y=${Math.floor(pixel / plan.width)}) is non-finite (${video[broken]})`,
     );
   }
   clampWanVaeFrames(video);

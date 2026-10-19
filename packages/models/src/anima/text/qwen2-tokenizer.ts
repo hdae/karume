@@ -208,7 +208,9 @@ export const qwen2PreTokenize = (
       end = k === n ? k : Math.max(i + 1, k - 1);
     }
     if (end <= i) {
-      throw new Error(`pre-token 走査が進まない（位置 ${i}, U+${cps[i].toString(16)}）`);
+      throw new Error(
+        `The pre-token scan does not advance (position ${i}, U+${cps[i].toString(16)})`,
+      );
     }
     // No argument spreading even for a long pre-token (`fromCodePoint(...)` hits the stack limit).
     let piece = "";
@@ -299,7 +301,9 @@ export class Qwen2Tokenizer {
       // byte-level, so a token missing from the vocabulary cannot occur in principle. If it does,
       // the table is broken.
       if (id === undefined) {
-        throw new Error(`Qwen2 語彙に無いトークン ${JSON.stringify(spellings[symbol])}`);
+        throw new Error(
+          `Token ${JSON.stringify(spellings[symbol])} is not in the Qwen2 vocabulary`,
+        );
       }
       return id;
     });

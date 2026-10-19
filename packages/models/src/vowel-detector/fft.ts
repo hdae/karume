@@ -58,7 +58,7 @@ export class Fft {
 
   constructor(size: number) {
     if (!Number.isInteger(size) || size < 2 || (size & (size - 1)) !== 0) {
-      throw new RangeError(`Fft: 変換長 ${size} が 2 以上の 2 冪でない`);
+      throw new RangeError(`Fft: transform length ${size} is not a power of 2 >= 2`);
     }
     this.size = size;
     this.#reversed = bitReverseTable(size);
@@ -81,10 +81,14 @@ export class Fft {
   powerSpectrum(input: Float32Array<ArrayBuffer>, out: Float64Array<ArrayBuffer>): void {
     const bins = this.size / 2 + 1;
     if (input.length > this.size) {
-      throw new RangeError(`Fft: 入力 ${input.length} 点が変換長 ${this.size} を超えている`);
+      throw new RangeError(
+        `Fft: input of ${input.length} points exceeds the transform length ${this.size}`,
+      );
     }
     if (out.length < bins) {
-      throw new RangeError(`Fft: 出力 ${out.length} 点が rfft の ${bins} ビンに足りない`);
+      throw new RangeError(
+        `Fft: output of ${out.length} points is fewer than the ${bins} rfft bins`,
+      );
     }
     this.#load(input);
     this.#butterflies();
@@ -109,15 +113,15 @@ export class Fft {
   autocorrelation(input: Float32Array<ArrayBuffer>, out: Float64Array<ArrayBuffer>): void {
     if (input.length * 2 > this.size) {
       throw new RangeError(
-        `Fft: 自己相関には信号長 ${input.length} の 2 倍以上の変換長が要る（${this.size} しかない）`,
+        `Fft: autocorrelation requires a transform length of at least twice the signal length ${input.length} (only ${this.size})`,
       );
     }
     if (out.length > input.length) {
       throw new RangeError(
         `Fft: lag ${
           out.length - 1
-        } が信号長 ${input.length} 以上（線形では 0 で、変換長 − 信号長を超える添字には負の lag が` +
-          "回り込む — 区別せず信号長未満に限る）",
+        } is >= the signal length ${input.length} (it is 0 linearly, and negative lags wrap around into` +
+          " indices beyond transform length − signal length — they are not told apart, so lags stay below the signal length)",
       );
     }
     this.#load(input);

@@ -13,7 +13,7 @@ test("Gemma4Pipeline: speculative の k は 1..3・fromAssets では受けない
   await assertRejects(
     () => Gemma4Pipeline.fromPretrained("owner/name", { speculative: { k: 0 } }),
     Error,
-    `speculative.k 0 が 1..${GEMMA4_DRAFT_STEPS} の外`,
+    `speculative.k 0 is outside 1..${GEMMA4_DRAFT_STEPS}`,
   );
   await assertRejects(
     () =>
@@ -21,7 +21,7 @@ test("Gemma4Pipeline: speculative の k は 1..3・fromAssets では受けない
         speculative: { k: GEMMA4_DRAFT_STEPS + 1 },
       }),
     Error,
-    `speculative.k ${GEMMA4_DRAFT_STEPS + 1} が 1..${GEMMA4_DRAFT_STEPS} の外`,
+    `speculative.k ${GEMMA4_DRAFT_STEPS + 1} is outside 1..${GEMMA4_DRAFT_STEPS}`,
   );
   // `Gemma4Assets` に drafter の席が無いので、黙って投機なしで組まずに断る。
   const assets: Gemma4Assets = {
@@ -41,6 +41,6 @@ test("Gemma4Pipeline: speculative の k は 1..3・fromAssets では受けない
   await assertRejects(
     () => Gemma4Pipeline.fromAssets(assets, { speculative: {} }),
     Error,
-    "speculative は受けられない",
+    "speculative is not accepted",
   );
 });

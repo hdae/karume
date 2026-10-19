@@ -50,7 +50,7 @@ test("未知キーは落とす（綴り違いが黙って既定へ縮退しな�
   assertThrows(
     () => parseDepthAnythingPipelineConfig(withPatch({ image_mean: [0.5, 0.5, 0.5] })),
     Error,
-    "未知キー 'image_mean'",
+    "unknown key 'image_mean'",
   );
 });
 
@@ -61,7 +61,7 @@ test("上流 config の余った欄も落とす（keep_aspect_ratio / ensure_mul
     assertThrows(
       () => parseDepthAnythingPipelineConfig(withPatch({ [key]: 14 })),
       Error,
-      `未知キー '${key}'`,
+      `unknown key '${key}'`,
     );
   }
 });
@@ -99,7 +99,7 @@ test("imageMean / imageStd の組で正規化後の値が f32 で溢れる配布
   const error = assertThrows(
     () => parseDepthAnythingPipelineConfig({ ...CONFIG, imageStd: [1e-50, 0.5, 0.5] }),
     Error,
-    "pipelineConfig.imageMean / imageStd: チャネル 0 の正規化後の値域",
+    "pipelineConfig.imageMean / imageStd: channel 0: the normalized range",
   );
   assert(!(error instanceof ModelInputError), "資産の不正が入力起因に分類された");
 });
@@ -141,6 +141,6 @@ test("bilinear を宣言した配布形は受理しない（BiRefNet / SigLIP2 �
   assertThrows(
     () => parseDepthAnythingPipelineConfig(withPatch({ interpolation: "bilinear" })),
     Error,
-    "'bicubic' だけ",
+    "only 'bicubic'",
   );
 });

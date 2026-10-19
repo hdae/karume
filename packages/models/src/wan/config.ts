@@ -113,7 +113,7 @@ export const parseWanPipelineConfig = (
     "shift",
     "pipelineConfig.scheduler",
     (value) => Number.isFinite(value) && value > 0,
-    "正の有限数でない",
+    "not a positive finite number",
   );
   const steps = readNumber(
     defaults,
@@ -122,7 +122,7 @@ export const parseWanPipelineConfig = (
     // The upper limit is `num_train_timesteps`, as in the request check (the MUST of
     // `wanUniPcSchedule` in `scheduler.ts`).
     (value) => Number.isInteger(value) && value >= 1 && value <= WAN_UNIPC_CONFIG.numTrainTimesteps,
-    `1 以上 ${WAN_UNIPC_CONFIG.numTrainTimesteps} 以下の整数でない`,
+    `not an integer in 1..${WAN_UNIPC_CONFIG.numTrainTimesteps}`,
   );
   const guidance = readNumber(
     defaults,
@@ -131,15 +131,15 @@ export const parseWanPipelineConfig = (
     // CFG is applied in f32 (as in the request check — finite in f64 but Infinity in f32 makes the
     // combination NaN).
     (value) => Number.isFinite(Math.fround(value)) && value >= 1,
-    "1 以上で f32 に収まる有限の数でない",
+    "not a finite number ≥ 1 that fits in f32",
   );
   try {
     wanUniPcSchedule(steps, shift, WAN_UNIPC_CONFIG.numTrainTimesteps);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(
-      `pipelineConfig: 既定の defaults.steps ${steps} と scheduler.shift ${shift} の組では UniPC の ` +
-        `σ 列が組めない（${reason}）`,
+      `pipelineConfig: the default pair of defaults.steps ${steps} and scheduler.shift ${shift} cannot build a UniPC ` +
+        `σ sequence (${reason})`,
       { cause: error },
     );
   }

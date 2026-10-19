@@ -16,21 +16,25 @@ const syntheticLatents = (): Float32Array<ArrayBuffer> =>
   );
 
 test("approximatePreview: 入口ゲート（軸数 / B>1 / チャネル数 / 要素数）", () => {
-  assertThrows(() => approximatePreview(new Float32Array(16), [16, 2, 2]), Error, "4 軸でない");
+  assertThrows(
+    () => approximatePreview(new Float32Array(16), [16, 2, 2]),
+    Error,
+    "does not have 4 axes",
+  );
   assertThrows(
     () => approximatePreview(new Float32Array(2 * 16 * 4), [2, 16, 2, 2]),
     Error,
-    "batch=1 前提",
+    "assumes batch=1",
   );
   assertThrows(
     () => approximatePreview(new Float32Array(4 * 4), [1, 4, 2, 2]),
     Error,
-    "チャネル数",
+    "channel count",
   );
   assertThrows(
     () => approximatePreview(new Float32Array(16 * 4 + 1), [1, 16, 2, 2]),
     Error,
-    "要素数",
+    "element count",
   );
 });
 

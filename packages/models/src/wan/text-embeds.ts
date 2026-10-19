@@ -61,7 +61,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const textField = (entry: Record<string, unknown>, key: string, where: string): string => {
   const value = entry[key];
-  if (typeof value !== "string") throw new WanTextEmbedsError(`${where}: '${key}' が文字列でない`);
+  if (typeof value !== "string") throw new WanTextEmbedsError(`${where}: '${key}' is not a string`);
   return value;
 };
 
@@ -79,61 +79,59 @@ export const parseWanTextEmbeds = (buffer: ArrayBuffer): WanTextEmbeds => {
   const keys = [...file.metadata.keys()];
   if (keys.length !== 1 || keys[0] !== WAN_TEXT_EMBEDS_METADATA_KEY) {
     throw new WanTextEmbedsError(
-      `メタのキー [${keys.join(", ")}] が '${WAN_TEXT_EMBEDS_METADATA_KEY}' 1 つでない`,
+      `Metadata keys [${keys.join(", ")}] are not the single key '${WAN_TEXT_EMBEDS_METADATA_KEY}'`,
     );
   }
   let meta: unknown;
   try {
     meta = JSON.parse(file.metadata.get(WAN_TEXT_EMBEDS_METADATA_KEY) as string);
   } catch (cause) {
-    throw new WanTextEmbedsError("メタが JSON として読めない", { cause });
+    throw new WanTextEmbedsError("Metadata cannot be read as JSON", { cause });
   }
   if (!isRecord(meta) || !Array.isArray(meta.prompts) || meta.prompts.length === 0) {
-    throw new WanTextEmbedsError("メタに 'prompts' の配列（1 行以上）が無い");
+    throw new WanTextEmbedsError("Metadata has no 'prompts' array (with at least 1 row)");
   }
   const names = new Set<string>();
   const texts = new Map<string, string>();
   let width: number | undefined;
   const entries = meta.prompts.map((raw, index): WanTextEmbedding => {
     const where = `prompts[${index}]`;
-    if (!isRecord(raw)) throw new WanTextEmbedsError(`${where} がオブジェクトでない`);
+    if (!isRecord(raw)) throw new WanTextEmbedsError(`${where} is not an object`);
     const name = textField(raw, "name", where);
     const role = textField(raw, "role", where);
     if (role !== "positive" && role !== "negative") {
-      throw new WanTextEmbedsError(
-        `${where}: 役割 '${role}' は positive / negative のどちらでもない`,
-      );
+      throw new WanTextEmbedsError(`${where}: role '${role}' is neither positive nor negative`);
     }
     const prompt = textField(raw, "prompt", where);
     const normalized = textField(raw, "normalized", where);
     const tokens = raw.tokens;
     if (typeof tokens !== "number" || !Number.isInteger(tokens) || tokens < 1) {
-      throw new WanTextEmbedsError(`${where}: 'tokens' が正の整数でない（${String(tokens)}）`);
+      throw new WanTextEmbedsError(
+        `${where}: 'tokens' is not a positive integer (${String(tokens)})`,
+      );
     }
-    if (names.has(name)) throw new WanTextEmbedsError(`${where}: 名前 '${name}' が重複`);
+    if (names.has(name)) throw new WanTextEmbedsError(`${where}: duplicate name '${name}'`);
     names.add(name);
     for (const text of new Set([prompt, normalized])) {
       const owner = texts.get(text);
       if (owner !== undefined) {
         throw new WanTextEmbedsError(
-          `${where}: '${name}' の文字列が '${owner}' と同じ（行が決まらない）`,
+          `${where}: the text of '${name}' is the same as '${owner}' (the row is ambiguous)`,
         );
       }
       texts.set(text, name);
     }
     const view = file.tensors.get(name);
-    if (view === undefined) throw new WanTextEmbedsError(`${where}: テンソル '${name}' が無い`);
+    if (view === undefined) throw new WanTextEmbedsError(`${where}: tensor '${name}' is missing`);
     if (view.dtype !== "F32" || view.shape.length !== 2 || view.shape[0] !== tokens) {
       throw new WanTextEmbedsError(
-        `テンソル '${name}' が F32 [${tokens}, width] でない（${view.dtype} [${view.shape.join(
-          ",",
-        )}]）`,
+        `Tensor '${name}' is not F32 [${tokens}, width] (${view.dtype} [${view.shape.join(",")}])`,
       );
     }
     width ??= view.shape[1];
     if (view.shape[1] !== width || width < 1) {
       throw new WanTextEmbedsError(
-        `テンソル '${name}' の幅 ${view.shape[1]} が他の行の ${width} と違う`,
+        `Tensor '${name}' width ${view.shape[1]} differs from the other rows' ${width}`,
       );
     }
     const data = new Float32Array(file.buffer, view.byteOffset, tokens * width);
@@ -144,8 +142,8 @@ export const parseWanTextEmbeds = (buffer: ArrayBuffer): WanTextEmbeds => {
     for (let at = 0; at < data.length; at += 1) {
       if (!Number.isFinite(data[at])) {
         throw new WanTextEmbedsError(
-          `テンソル '${name}' の行 ${Math.floor(at / width)}・列 ${at % width} が有限でない` +
-            `（${data[at]}）`,
+          `Tensor '${name}' row ${Math.floor(at / width)}, column ${at % width} is non-finite` +
+            ` (${data[at]})`,
         );
       }
     }
@@ -153,7 +151,7 @@ export const parseWanTextEmbeds = (buffer: ArrayBuffer): WanTextEmbeds => {
   });
   const extra = [...file.tensors.keys()].filter((name) => !names.has(name));
   if (extra.length > 0) {
-    throw new WanTextEmbedsError(`メタに無いテンソル [${extra.join(", ")}] がある`);
+    throw new WanTextEmbedsError(`Tensors [${extra.join(", ")}] are not in the metadata`);
   }
   return { width: width as number, entries };
 };
@@ -175,11 +173,13 @@ export const padWanTextEmbedding = (
   width: number,
 ): Float32Array<ArrayBuffer> => {
   if (entry.data.length !== entry.tokens * width) {
-    throw new WanTextEmbedsError(`'${entry.name}' の幅が DiT の文脈の幅 ${width} と違う`);
+    throw new WanTextEmbedsError(
+      `'${entry.name}' width differs from the DiT context width ${width}`,
+    );
   }
   if (entry.tokens > rows) {
     throw new WanTextEmbedsError(
-      `'${entry.name}' の有効長 ${entry.tokens} が文脈の行数 ${rows} を超える`,
+      `'${entry.name}' valid length ${entry.tokens} exceeds the context row count ${rows}`,
     );
   }
   const padded = new Float32Array(rows * width);

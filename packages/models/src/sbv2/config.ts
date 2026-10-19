@@ -121,10 +121,10 @@ export type Sbv2PipelineConfig = {
 const isPositiveSafeInteger = (value: number): boolean => Number.isSafeInteger(value) && value > 0;
 
 const readString = (raw: Record<string, unknown>, key: string, where: string): string => {
-  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
+  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: missing`);
   const value = raw[key];
   if (typeof value !== "string" || value.length === 0) {
-    throw new Error(`${where}.${key}: 非空の文字列でない（${String(value)}）`);
+    throw new Error(`${where}.${key}: not a non-empty string (${String(value)})`);
   }
   return value;
 };
@@ -140,19 +140,19 @@ const readString = (raw: Record<string, unknown>, key: string, where: string): s
 const parseRowIndex = (raw: unknown, where: string): ReadonlyMap<string, number> => {
   const record = readRecord(raw, where);
   const names = Object.keys(record);
-  if (names.length === 0) throw new Error(`${where}: 空（1 件以上必要）`);
+  if (names.length === 0) throw new Error(`${where}: empty (at least one is required)`);
   const table = new Map<string, number>();
   const seen = new Set<number>();
   for (const name of names) {
     const row = record[name];
     if (typeof row !== "number" || !Number.isInteger(row) || row < 0 || row >= names.length) {
       throw new Error(
-        `${where}['${name}']: 行番号が 0..${names.length - 1} の整数でない（${String(row)}）`,
+        `${where}['${name}']: the row index is not an integer in 0..${names.length - 1} (${String(row)})`,
       );
     }
     if (seen.has(row)) {
       throw new Error(
-        `${where}: 行番号 ${row} が重複している（'${name}' — 表の行と名前が 1 対 1 でない）`,
+        `${where}: row index ${row} is duplicated ('${name}' — table rows and names are not one-to-one)`,
       );
     }
     seen.add(row);
@@ -175,23 +175,23 @@ const parseDefaults = (
   // time, fromAssets fails — do not create "found out only by running one generation").
   if (!speakers.has(speaker)) {
     throw new Error(
-      `${where}.speaker: '${speaker}' が speakers に無い（利用可能: ${[...speakers.keys()].join(
+      `${where}.speaker: '${speaker}' is not in speakers (available: ${[...speakers.keys()].join(
         " / ",
-      )}）`,
+      )})`,
     );
   }
   if (!styles.has(style)) {
     throw new Error(
-      `${where}.style: '${style}' が styles に無い（利用可能: ${[...styles.keys()].join(" / ")}）`,
+      `${where}.style: '${style}' is not in styles (available: ${[...styles.keys()].join(" / ")})`,
     );
   }
   return {
     speaker,
     style,
-    styleWeight: readNumber(record, "styleWeight", where, Number.isFinite, "有限の数でない"),
-    sdpRatio: readNumber(record, "sdpRatio", where, Number.isFinite, "有限の数でない"),
-    noiseScale: readNumber(record, "noiseScale", where, Number.isFinite, "有限の数でない"),
-    noiseScaleW: readNumber(record, "noiseScaleW", where, Number.isFinite, "有限の数でない"),
+    styleWeight: readNumber(record, "styleWeight", where, Number.isFinite, "not a finite number"),
+    sdpRatio: readNumber(record, "sdpRatio", where, Number.isFinite, "not a finite number"),
+    noiseScale: readNumber(record, "noiseScale", where, Number.isFinite, "not a finite number"),
+    noiseScaleW: readNumber(record, "noiseScaleW", where, Number.isFinite, "not a finite number"),
     // lengthScale multiplies the durations directly. At 0 or below the total frame count becomes 0
     // and the downstream (durationsToFrames) fails in the form "not an utterance" — do not make it
     // a failure far from its cause.
@@ -200,7 +200,7 @@ const parseDefaults = (
       "lengthScale",
       where,
       (value) => Number.isFinite(value) && value > 0,
-      "正の有限数でない",
+      "not a positive finite number",
     ),
   };
 };
@@ -218,7 +218,7 @@ export const parseSbv2PipelineConfig = (
     Object.hasOwn(raw, "speakers") ? raw["speakers"] : undefined,
     "pipelineConfig.speakers",
   );
-  const limit = "正の安全整数でない";
+  const limit = "not a positive safe integer";
   return {
     styles,
     speakers,

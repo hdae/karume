@@ -136,12 +136,12 @@ export const wanUniPcSchedule = (
 ): WanUniPcSchedule => {
   if (!Number.isInteger(steps) || steps < 1 || steps > numTrainTimesteps) {
     throw new RangeError(
-      `steps ${steps} が 1 以上 ${numTrainTimesteps} 以下の整数でない` +
-        "（上限は num_train_timesteps — 超えると整数の timestep が必ず重複する）",
+      `steps ${steps} is not an integer in 1..${numTrainTimesteps}` +
+        " (the upper limit is num_train_timesteps — beyond it, integer timesteps always repeat)",
     );
   }
   if (!Number.isFinite(shift) || shift <= 0) {
-    throw new RangeError(`shift ${shift} が正の有限値でない`);
+    throw new RangeError(`shift ${shift} is not a positive finite number`);
   }
   const sigmas64 = flowShiftedSigmas(steps, shift, numTrainTimesteps);
   // Upstream's `np.fabs(sigmas[0] - 1) < eps` branch (avoids divergence of `log(alpha)` in the
@@ -154,8 +154,8 @@ export const wanUniPcSchedule = (
     const current = sigmas[index];
     if (!(current > sigmas[index + 1]) || !(current <= 1)) {
       throw new RangeError(
-        `σ 列が (0, 1] で狭義単調減少でない（steps ${steps}・shift ${shift}・` +
-          `σ[${index}] = ${current}・σ[${index + 1}] = ${sigmas[index + 1]}）`,
+        `The σ sequence is not strictly decreasing in (0, 1] (steps ${steps}, shift ${shift}, ` +
+          `σ[${index}] = ${current}, σ[${index + 1}] = ${sigmas[index + 1]})`,
       );
     }
   }
@@ -228,7 +228,9 @@ export class WanUniPcSampler {
 
   constructor(schedule: { readonly sigmas: Float32Array<ArrayBuffer> }, config: WanUniPcConfig) {
     if (schedule.sigmas.length < 2) {
-      throw new RangeError(`σ 列の長さ ${schedule.sigmas.length} が 2 未満（steps ≥ 1 が要る）`);
+      throw new RangeError(
+        `σ sequence length ${schedule.sigmas.length} is less than 2 (steps ≥ 1 is required)`,
+      );
     }
     this.#sigmas = schedule.sigmas;
     this.#steps = schedule.sigmas.length - 1;
@@ -250,11 +252,11 @@ export class WanUniPcSampler {
   ): Float32Array<ArrayBuffer> {
     const index = this.#index;
     if (index >= this.#steps) {
-      throw new RangeError(`step ${index + 1} 回目は σ 列（${this.#steps} step）の外`);
+      throw new RangeError(`Step ${index + 1} is outside the σ sequence (${this.#steps} steps)`);
     }
     if (modelOutput.length !== sample.length) {
       throw new RangeError(
-        `モデル出力 ${modelOutput.length} 要素と潜在 ${sample.length} 要素が違う`,
+        `Model output ${modelOutput.length} elements and latent ${sample.length} elements do not match`,
       );
     }
     const { solverOrder } = this.#config;
@@ -412,7 +414,9 @@ export const wanClassifierFreeGuidance = (
   guidance: number,
 ): Float32Array<ArrayBuffer> => {
   if (cond.length !== uncond.length) {
-    throw new RangeError(`CFG: cond ${cond.length} 要素と uncond ${uncond.length} 要素が違う`);
+    throw new RangeError(
+      `CFG: cond ${cond.length} elements and uncond ${uncond.length} elements do not match`,
+    );
   }
   const scale = f32(guidance);
   const out = new Float32Array(cond.length);

@@ -16,10 +16,12 @@
  */
 export const bertHiddenOutput = (outputs: readonly string[], fromEnd: number): string => {
   if (!Number.isInteger(fromEnd) || fromEnd < 1) {
-    throw new Error(`hidden_states の末尾からの位置 ${fromEnd} が 1 以上の整数でない`);
+    throw new Error(`hidden_states position from the end ${fromEnd} is not an integer >= 1`);
   }
   if (outputs.length < fromEnd) {
-    throw new Error(`hidden_states が ${outputs.length} 本しかない（${fromEnd} 本以上必要）`);
+    throw new Error(
+      `hidden_states has only ${outputs.length} entries (at least ${fromEnd} are required)`,
+    );
   }
   return outputs[outputs.length - fromEnd];
 };
@@ -54,12 +56,12 @@ export const tileBertToPhoneLevel = (
   word2ph: readonly number[],
 ): TiledBert => {
   if (tokenCount <= 0 || hidden.length % tokenCount !== 0) {
-    throw new Error(`hidden 長 ${hidden.length} が tokenCount ${tokenCount} で割り切れない`);
+    throw new Error(`hidden length ${hidden.length} is not divisible by tokenCount ${tokenCount}`);
   }
   if (word2ph.length !== tokenCount) {
     throw new Error(
-      `DeBERTa トークン数 ${tokenCount} が word2ph 長 ${word2ph.length} と違う` +
-        "（文字トークナイズと word2ph の齟齬を疑う）",
+      `DeBERTa token count ${tokenCount} differs from word2ph length ${word2ph.length}` +
+        " (suspect a mismatch between the character tokenisation and word2ph)",
     );
   }
   const dim = hidden.length / tokenCount;

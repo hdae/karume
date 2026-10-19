@@ -269,10 +269,12 @@ export const assetJson = (
  */
 const staticInputDim = (model: GraphOwner, inputName: string, axis: number): number => {
   const spec = model.graph.inputs.find((input) => input.name === inputName);
-  if (spec === undefined) throw new Error(`グラフ入力 '${inputName}' が無い`);
+  if (spec === undefined) throw new Error(`Graph input '${inputName}' does not exist`);
   const dim = spec.shape[axis];
   if (typeof dim !== "number") {
-    throw new Error(`グラフ入力 '${inputName}' の軸 ${axis} が静的次元でない（${String(dim)}）`);
+    throw new Error(
+      `Graph input '${inputName}' axis ${axis} is not a static dimension (${String(dim)})`,
+    );
   }
   return dim;
 };
@@ -285,7 +287,7 @@ const featureWidth = (model: GraphOwner, inputName: string): number =>
   staticInputDim(model, inputName, 1);
 
 const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
-  if (tensor.dtype !== "f32") throw new Error(`${where}: f32 でない（${tensor.dtype}）`);
+  if (tensor.dtype !== "f32") throw new Error(`${where}: not f32 (${tensor.dtype})`);
   return tensor.data;
 };
 
@@ -315,10 +317,13 @@ const outputAt = (
 ): Tensor => {
   const name = model.graph.outputs[index];
   if (name === undefined) {
-    throw new Error(`グラフ出力 ${index} が無い（${model.graph.outputs.length} 本しかない）`);
+    throw new Error(
+      `Graph output ${index} does not exist (there are only ${model.graph.outputs.length})`,
+    );
   }
   const tensor = outputs[name];
-  if (tensor === undefined) throw new Error(`グラフ出力 ${index}（'${name}'）が実行結果に無い`);
+  if (tensor === undefined)
+    throw new Error(`Graph output ${index} ('${name}') is missing from the run results`);
   return tensor;
 };
 
@@ -353,13 +358,13 @@ export const assertTableFits = (
 ): void => {
   if (table.rows !== names.size) {
     throw new Error(
-      `Sbv2Pipeline: 資産 '${key}' の行数 ${table.rows} が pipelineConfig の ${names.size} 件` +
-        `（${[...names.keys()].join(" / ")}）と違う — 行番号は表の物理行そのもの`,
+      `Sbv2Pipeline: asset '${key}' has ${table.rows} rows, which differs from the ${names.size} entries of pipelineConfig` +
+        ` (${[...names.keys()].join(" / ")}) — the row index is the physical row of the table itself`,
     );
   }
   if (table.cols !== cols) {
     throw new Error(
-      `Sbv2Pipeline: 資産 '${key}' の列数 ${table.cols} がグラフ入力の ${cols} と違う`,
+      `Sbv2Pipeline: asset '${key}' has ${table.cols} columns, which differs from the graph input's ${cols}`,
     );
   }
 };
@@ -382,8 +387,8 @@ export const assertTableFits = (
 export const assertFrontOutputs = (front: GraphOwner): void => {
   if (front.graph.outputs.length !== FRONT_OUTPUTS) {
     throw new Error(
-      `Sbv2Pipeline: front のグラフ出力が ${front.graph.outputs.length} 本` +
-        `（logw_sdp / logw_dp / m_p / logs_p の ${FRONT_OUTPUTS} 本ちょうどが要る）`,
+      `Sbv2Pipeline: front has ${front.graph.outputs.length} graph outputs` +
+        ` (exactly ${FRONT_OUTPUTS} are required: logw_sdp / logw_dp / m_p / logs_p)`,
     );
   }
 };
@@ -411,19 +416,19 @@ export const assertBertWidth = (
   const name = bertHiddenOutput(textEncoder.graph.outputs, bertHiddenFromEnd);
   const info = textEncoder.graph.values[name];
   if (info === undefined) {
-    throw new Error(`Sbv2Pipeline: text_encoder の出力 '${name}' の宣言が graph.values に無い`);
+    throw new Error(`Sbv2Pipeline: text_encoder output '${name}' is not declared in graph.values`);
   }
   const width = info.shape.at(-1);
   if (typeof width !== "number") {
     throw new Error(
-      `Sbv2Pipeline: text_encoder の出力 '${name}' の最終軸が静的次元でない（${String(width)}）`,
+      `Sbv2Pipeline: the last axis of text_encoder output '${name}' is not a static dimension (${String(width)})`,
     );
   }
   const expected = featureWidth(front, "bert");
   if (width !== expected) {
     throw new Error(
-      `Sbv2Pipeline: text_encoder の出力 '${name}' の幅 ${width} が front のグラフ入力 'bert' の` +
-        ` ${expected} と違う（text_encoder と front が別の BERT を前提にしている）`,
+      `Sbv2Pipeline: text_encoder output '${name}' has width ${width}, which differs from the width of front's graph input 'bert',` +
+        ` ${expected} (text_encoder and front assume different BERTs)`,
     );
   }
 };
@@ -487,14 +492,14 @@ const resolveRow = (names: ReadonlyMap<string, number>, name: string, where: str
   const row = names.get(name);
   if (row === undefined) {
     throw new Sbv2InputError(
-      `${where} '${name}' は manifest に無い（利用可能: ${[...names.keys()].join(" / ")}）`,
+      `${where} '${name}' is not in the manifest (available: ${[...names.keys()].join(" / ")})`,
     );
   }
   return row;
 };
 
 const finiteKnob = (value: number, name: string): number => {
-  if (!Number.isFinite(value)) throw new Sbv2InputError(`${name} ${value} が有限の数でない`);
+  if (!Number.isFinite(value)) throw new Sbv2InputError(`${name} ${value} is not a finite number`);
   return value;
 };
 
@@ -541,8 +546,8 @@ export const assertSeed = (seed: number): void => {
 export const assertTokenLimit = (tokens: number, maxTokens: number): void => {
   if (tokens > maxTokens) {
     throw new Sbv2InputError(
-      `Sbv2Pipeline: トークン数 ${tokens} が配布形の上限 maxTokens=${maxTokens} を超えている` +
-        "（text を短く分けて合成する）",
+      `Sbv2Pipeline: token count ${tokens} exceeds the distribution's maximum maxTokens=${maxTokens}` +
+        " (split the text into shorter parts and synthesise each)",
     );
   }
 };
@@ -569,8 +574,8 @@ export const assertTokenLimit = (tokens: number, maxTokens: number): void => {
 export const assertPhonemeLimit = (phonemes: number, maxTokens: number): void => {
   if (phonemes > maxTokens) {
     throw new Sbv2InputError(
-      `Sbv2Pipeline: 音素数 ${phonemes} が配布形の上限 maxTokens=${maxTokens} を超えている` +
-        "（text を短く分けて合成する）",
+      `Sbv2Pipeline: phoneme count ${phonemes} exceeds the distribution's maximum maxTokens=${maxTokens}` +
+        " (split the text into shorter parts and synthesise each)",
     );
   }
 };
@@ -597,9 +602,9 @@ export const assertFiniteNoise = (
   fromRequest: boolean,
 ): void => {
   if (noise.every(Number.isFinite)) return;
-  const problem = `noiseScaleW ${noiseScaleW} では z_noise が f32 で有限に収まらない`;
-  if (fromRequest) throw new Sbv2InputError(`Sbv2Pipeline: ${problem}（小さい値を渡す）`);
-  throw new Error(`Sbv2Pipeline: pipelineConfig.defaults の ${problem}`);
+  const problem = `noiseScaleW ${noiseScaleW} makes z_noise non-finite in f32`;
+  if (fromRequest) throw new Sbv2InputError(`Sbv2Pipeline: ${problem} (pass a smaller value)`);
+  throw new Error(`Sbv2Pipeline: pipelineConfig.defaults: ${problem}`);
 };
 
 /**
@@ -617,12 +622,14 @@ export const assertFiniteNoise = (
 export const assertTiledBert = (tiled: TiledBert, phonemes: number): void => {
   if (tiled.data.length !== tiled.dim * tiled.columns) {
     throw new Error(
-      `BERT 展開が書いた ${tiled.columns} 列 × dim ${tiled.dim} が確保した` +
-        ` ${tiled.data.length} 要素と合わない（tile 走査の破れ）`,
+      `The ${tiled.columns} columns × dim ${tiled.dim} written by the BERT expansion do not match the allocated` +
+        ` ${tiled.data.length} elements (the tile walk is broken)`,
     );
   }
   if (tiled.columns !== phonemes) {
-    throw new Error(`BERT 展開長 ${tiled.columns} が音素数 ${phonemes} と違う`);
+    throw new Error(
+      `BERT expansion length ${tiled.columns} differs from the phoneme count ${phonemes}`,
+    );
   }
 };
 
@@ -693,24 +700,24 @@ const admitSbv2 = (
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
-      `Sbv2Pipeline: model '${modelName}' は manifest に無い` +
-        `（利用可能: ${manifest.available.models.join(" / ")}）`,
+      `Sbv2Pipeline: model '${modelName}' is not in the manifest` +
+        ` (available: ${manifest.available.models.join(" / ")})`,
     );
   }
   const entry: ModelEntry = manifest.models[modelName];
   const { name, major } = entry.pipeline;
   if (name !== SBV2_PIPELINE_NAME) {
     throw new Error(
-      `Sbv2Pipeline: manifest の pipeline が '${name}/${major}'` +
-        `（'${SBV2_PIPELINE_NAME}/${SBV2_PIPELINE_MAJOR}' が必要）`,
+      `Sbv2Pipeline: the manifest pipeline is '${name}/${major}'` +
+        ` ('${SBV2_PIPELINE_NAME}/${SBV2_PIPELINE_MAJOR}' is required)`,
     );
   }
   if (major !== SBV2_PIPELINE_MAJOR) {
     // The only check that stops the silent degradation "old implementation × new repository" (ADR
     // 0038 §6).
     throw new Error(
-      `Sbv2Pipeline: pipeline '${name}/${major}' の major に未対応` +
-        `（この実装が読めるのは ${SBV2_PIPELINE_NAME}/${SBV2_PIPELINE_MAJOR}）`,
+      `Sbv2Pipeline: pipeline '${name}/${major}' has an unsupported major` +
+        ` (this implementation reads ${SBV2_PIPELINE_NAME}/${SBV2_PIPELINE_MAJOR})`,
     );
   }
   const config = parseSbv2PipelineConfig(entry.pipelineConfig);
@@ -718,8 +725,8 @@ const admitSbv2 = (
   const quantName = options.quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quantName)) {
     throw new Error(
-      `Sbv2Pipeline: quant '${quantName}' は manifest に無い` +
-        `（利用可能: ${entry.available.quants.join(" / ")}）`,
+      `Sbv2Pipeline: quant '${quantName}' is not in the manifest` +
+        ` (available: ${entry.available.quants.join(" / ")})`,
     );
   }
   const quant = entry.quants[quantName];
@@ -789,8 +796,8 @@ const buildSbv2State = async (
   const voiceGin = featureWidth(voice, "g");
   if (voiceGin !== speakers.cols) {
     throw new Error(
-      `Sbv2Pipeline: voice のグラフ入力 'g' の幅 ${voiceGin} が話者表の列数 ${speakers.cols}` +
-        " と違う（front / voice が別の話者埋め込みを要求している）",
+      `Sbv2Pipeline: the width ${voiceGin} of voice's graph input 'g' differs from the speaker table's column count ${speakers.cols}` +
+        " (front / voice require different speaker embeddings)",
     );
   }
   // MUST: declared features can be requested only at device creation (ADR 0028). With a shared GPU
@@ -870,7 +877,9 @@ export const synthesizeSbv2 = async (
   options: Sbv2GenerateOptions = {},
 ): Promise<Sbv2Synthesis> => {
   if (utterance.moras.length === 0 && utterance.leadingPunctuations.length === 0) {
-    throw new Sbv2InputError("Sbv2Pipeline: utterance が空（moras も leadingPunctuations も無い）");
+    throw new Sbv2InputError(
+      "Sbv2Pipeline: the utterance is empty (no moras and no leadingPunctuations)",
+    );
   }
   const defaults = state.config.defaults;
   const speaker = options.speaker ?? defaults.speaker;
@@ -886,12 +895,12 @@ export const synthesizeSbv2 = async (
     lengthScale: finiteKnob(options.lengthScale ?? defaults.lengthScale, "lengthScale"),
   };
   if (knobs.lengthScale <= 0) {
-    throw new Sbv2InputError(`lengthScale ${knobs.lengthScale} が正でない`);
+    throw new Sbv2InputError(`lengthScale ${knobs.lengthScale} is not positive`);
   }
   const seed = options.seed ?? 0;
   assertSeed(seed);
-  const styleRow = resolveRow(state.config.styles, style, "スタイル");
-  const speakerRow = resolveRow(state.config.speakers, speaker, "話者");
+  const styleRow = resolveRow(state.config.styles, style, "Style");
+  const speakerRow = resolveRow(state.config.speakers, speaker, "Speaker");
 
   // --- (1) text layer (no GPU, deterministic) ------------------------------
   // The self-consistency of the utterance (phoneme match of moras and words, sum(word2ph) === P) is
@@ -939,8 +948,8 @@ export const synthesizeSbv2 = async (
       });
       const name = bertHiddenOutput(state.textEncoder.graph.outputs, state.rules.bertHiddenFromEnd);
       const tensor = outputs[name];
-      if (tensor === undefined) throw new Error(`text_encoder の出力 '${name}' が無い`);
-      return { name, data: asF32(tensor, `text_encoder の出力 '${name}'`) };
+      if (tensor === undefined) throw new Error(`text_encoder output '${name}' does not exist`);
+      return { name, data: asF32(tensor, `text_encoder output '${name}'`) };
     },
   );
 
@@ -983,10 +992,10 @@ export const synthesizeSbv2 = async (
       });
       const mP = outputAt(state.front, outputs, 2);
       return {
-        logwSdp: asF32(outputAt(state.front, outputs, 0), "front の logw_sdp"),
-        logwDp: asF32(outputAt(state.front, outputs, 1), "front の logw_dp"),
-        mP: asF32(mP, "front の m_p"),
-        logsP: asF32(outputAt(state.front, outputs, 3), "front の logs_p"),
+        logwSdp: asF32(outputAt(state.front, outputs, 0), "front logw_sdp"),
+        logwDp: asF32(outputAt(state.front, outputs, 1), "front logw_dp"),
+        mP: asF32(mP, "front m_p"),
+        logsP: asF32(outputAt(state.front, outputs, 3), "front logs_p"),
         channels: mP.shape[1],
       };
     },
@@ -1029,18 +1038,20 @@ export const synthesizeSbv2 = async (
         idx_k: tables.idxK,
         valid: tables.valid,
       });
-      return asF32(outputAt(state.voice, outputs, 0), "voice の波形出力");
+      return asF32(outputAt(state.voice, outputs, 0), "voice waveform output");
     },
   );
 
   const expectedSamples = plan.totalFrames * state.rules.hopLength;
   if (audio.length !== expectedSamples) {
-    throw new Error(`波形長 ${audio.length} が hopLength×Ty(${expectedSamples}) と違う`);
+    throw new Error(
+      `Waveform length ${audio.length} differs from hopLength×Ty(${expectedSamples})`,
+    );
   }
   // MUST: do not silently return non-finite values. WAV encoding rounds NaN to 0, so a silent wrong
   // value would come out as is as "audio that is partly silent".
   for (const sample of audio) {
-    if (!Number.isFinite(sample)) throw new Error("波形に非有限値が含まれる");
+    if (!Number.isFinite(sample)) throw new Error("The waveform contains non-finite values");
   }
 
   return {
@@ -1111,7 +1122,7 @@ export class Sbv2Pipeline {
     const source = toManifestSource(
       ref,
       "Sbv2Pipeline.fromPretrained",
-      'SBV2_SOURCES["sbv2-jvnv"]（@karume/models/sbv2）',
+      'SBV2_SOURCES["sbv2-jvnv"] (@karume/models/sbv2)',
     );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
@@ -1190,7 +1201,7 @@ export class Sbv2Pipeline {
     // The disposed check is made at call time (checked inside the chain, it would also take down
     // generations accepted before the dispose).
     if (this.#disposal !== undefined) {
-      throw new Error("Sbv2Pipeline: dispose 済みでは生成できない");
+      throw new Error("Sbv2Pipeline: cannot generate after dispose");
     }
     return await this.#chain(async () => {
       const { sampleRate, audio } = await synthesizeSbv2(this.#state, utterance, options);

@@ -308,7 +308,7 @@ test("toSbv2PhoneTone: 0/1 以外の tone は落とす（JS からの呼び出�
       index === 1 ? ({ ...mora, tone } as Sbv2Mora) : mora,
     ),
   });
-  assertThrows(() => toSbv2PhoneTone(broken(2), "_"), Sbv2InputError, "moras[1]（ル）の tone = 2");
+  assertThrows(() => toSbv2PhoneTone(broken(2), "_"), Sbv2InputError, "moras[1] (ル) has tone = 2");
   assertThrows(() => toSbv2PhoneTone(broken(-1), "_"), Sbv2InputError, "tone = -1");
   assertThrows(() => toSbv2PhoneTone(broken(0.5), "_"), Sbv2InputError, "tone = 0.5");
 });
@@ -322,9 +322,13 @@ test("assertWordPhones: 長さが合っていても内容が違えば落とす",
   assertThrows(
     () => assertWordPhones(["_", "k", "a", "r", "u", "m", "o", "_"], words),
     Sbv2InputError,
-    "音素[5]",
+    "Phoneme[5]",
   );
-  assertThrows(() => assertWordPhones(phones.slice(0, 7), words), Sbv2InputError, "音素数 5");
+  assertThrows(
+    () => assertWordPhones(phones.slice(0, 7), words),
+    Sbv2InputError,
+    "phoneme count 5",
+  );
 });
 
 test("tone の直編集は合成入力の tone ID まで届く（音素側は動かない）", () => {
@@ -375,14 +379,14 @@ test("音素を変える編集・記号の増減・words の取り違えは入�
         rules,
       ),
     Sbv2InputError,
-    "音素[3]",
+    "Phoneme[3]",
   );
 
   // ② モーラを 1 つ落とす（音素数が変わる）。
   assertThrows(
     () => buildSbv2ModelInput(withMoras(base.moras.slice(0, 2)), tokenizer, rules),
     Sbv2InputError,
-    "音素数 4",
+    "phoneme count 4",
   );
 
   // ③ 記号を足す（疑問形の上げを差し込もうとした場合）。
@@ -394,7 +398,7 @@ test("音素を変える編集・記号の増減・words の取り違えは入�
         rules,
       ),
     Sbv2InputError,
-    "音素数 7",
+    "phoneme count 7",
   );
 
   // ④ 別の解析から採った words を混ぜた（= moras と words が同一解析でない）。
@@ -406,7 +410,7 @@ test("音素を変える編集・記号の増減・words の取り違えは入�
         rules,
       ),
     Sbv2InputError,
-    "音素数",
+    "phoneme count",
   );
 });
 

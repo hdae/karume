@@ -46,7 +46,9 @@ export const createAddedTokenMatcher = (added: readonly string[]): AddedTokenMat
     if (token === "") {
       // The empty string matches at every position and the scan never advances (an infinite loop).
       // Silently skipping it would change the cut-out rule itself, so it fails.
-      throw new Error("追加語彙に空文字がある — 切り出しが進まない");
+      throw new Error(
+        "The added vocabulary has an empty string — the cut-out scan would not advance",
+      );
     }
     let node = root;
     for (let unit = 0; unit < token.length; unit += 1) {

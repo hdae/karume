@@ -33,7 +33,7 @@ const FREQ_SCALE = 1000;
  */
 export const timestepFrequencies = (dim: number): Float32Array<ArrayBuffer> => {
   if (!Number.isInteger(dim) || dim <= 0 || dim % 2 !== 0) {
-    throw new RangeError(`t_embed の幅 ${dim} が正の偶数でない`);
+    throw new RangeError(`t_embed width ${dim} is not a positive even number`);
   }
   const half = dim / 2;
   const logMaxPeriod = f32(-Math.log(MAX_PERIOD));

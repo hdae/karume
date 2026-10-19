@@ -42,11 +42,13 @@ export const rightPad = (
   where: string,
 ): Float32Array<ArrayBuffer> => {
   if (state.rows > rows) {
-    throw new Error(`IrodoriPipeline: ${where} の長さ ${state.rows} が宣言長 ${rows} を超えている`);
+    throw new Error(
+      `IrodoriPipeline: ${where} length ${state.rows} exceeds the declared length ${rows}`,
+    );
   }
   if (state.data.length !== state.rows * width) {
     throw new Error(
-      `IrodoriPipeline: ${where} の要素数 ${state.data.length} が ${state.rows}×${width} と違う`,
+      `IrodoriPipeline: ${where} element count ${state.data.length} differs from ${state.rows}×${width}`,
     );
   }
   const padded = new Float32Array(rows * width);
@@ -97,8 +99,8 @@ const assertReferenceAudio = (
     // There is no resampling (the convention of ADR 0048 — no silent approximation; conversion is
     // the caller's responsibility).
     throw new ModelInputError(
-      `IrodoriPipeline: 参照音声が ${audio.sampleRate}Hz（配布形は ${config.sampleRate}Hz）` +
-        " — リサンプルは持たないので、あらかじめ変換して渡す",
+      `IrodoriPipeline: the reference audio is ${audio.sampleRate}Hz (the distribution is ${config.sampleRate}Hz)` +
+        " — there is no resampler, so convert it before passing it",
     );
   }
   const samples = Math.min(audio.data.length, referenceMaxSamples(config));
@@ -106,8 +108,8 @@ const assertReferenceAudio = (
   if (tokens < SPEAKER_MIN_TOKENS) {
     const minSamples = (SPEAKER_MIN_TOKENS * config.speakerPatchSize - 1) * config.hopLength + 1;
     throw new ModelInputError(
-      `IrodoriPipeline: 参照音声 ${audio.data.length} サンプルは speaker の ${tokens} トークンにしか` +
-        `ならない（下限 ${SPEAKER_MIN_TOKENS} トークン = ${minSamples} サンプル以上が要る）`,
+      `IrodoriPipeline: ${audio.data.length} samples of reference audio make only ${tokens} speaker tokens` +
+        ` (the minimum is ${SPEAKER_MIN_TOKENS} tokens = at least ${minSamples} samples)`,
     );
   }
 };
@@ -148,7 +150,7 @@ const encodeReferenceAudio = async (
     {},
     async (run) => {
       const outputs = await run({ wav: f32(padded, [1, frames, config.hopLength]) });
-      return asF32(outputAt(state.codecEncoder, outputs, 0), "codec encoder の出力");
+      return asF32(outputAt(state.codecEncoder, outputs, 0), "codec encoder output");
     },
   );
 };
@@ -175,7 +177,7 @@ type SpeakerShape = {
 const assertSpeakerRows = (rows: number, speakerRows: number, where: string): void => {
   if (rows > speakerRows) {
     throw new ModelInputError(
-      `IrodoriPipeline: ${where} が speaker 条件 ${rows} 行になり、宣言長 ${speakerRows} を超える`,
+      `IrodoriPipeline: ${where} makes ${rows} rows of speaker condition, exceeding the declared length ${speakerRows}`,
     );
   }
 };
@@ -200,8 +202,8 @@ export const conditionFromStateOverride = (
 ): ConditionState => {
   if (stateOverride.length === 0 || stateOverride.length % config.speakerDim !== 0) {
     throw new ModelInputError(
-      `IrodoriPipeline: speaker.stateOverride の長さ ${stateOverride.length} が` +
-        ` speakerDim ${config.speakerDim} の正の倍数でない`,
+      `IrodoriPipeline: speaker.stateOverride length ${stateOverride.length} is not a positive` +
+        ` multiple of speakerDim ${config.speakerDim}`,
     );
   }
   const rows = stateOverride.length / config.speakerDim;
@@ -293,7 +295,7 @@ export const encodeSpeaker = async (
     const outputs = await run({
       latent: f32(patched.data, [1, patched.tokens, patched.width]),
     });
-    return asF32(outputAt(state.speaker, outputs, 0), "speaker の出力");
+    return asF32(outputAt(state.speaker, outputs, 0), "speaker output");
   });
   // The mean token is prepended outside the graph (ADR 0047 decision 4).
   return {

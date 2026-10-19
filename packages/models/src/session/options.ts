@@ -127,35 +127,35 @@ const VALUE_GATES: {
   linearCompute: ({ linearCompute }) =>
     linearCompute === undefined || isOneOf(LINEAR_COMPUTES, linearCompute)
       ? undefined
-      : "linearComputeが不正",
+      : "linearCompute is invalid",
   attentionCompute: ({ attentionCompute }) =>
     attentionCompute === undefined || isOneOf(ATTENTION_COMPUTES, attentionCompute)
       ? undefined
-      : "attentionComputeが不正",
+      : "attentionCompute is invalid",
   attentionScoreStorage: ({ attentionScoreStorage }) =>
     attentionScoreStorage === undefined || isOneOf(SCORE_STORAGES, attentionScoreStorage)
       ? undefined
-      : "attentionScoreStorageが不正",
+      : "attentionScoreStorage is invalid",
   linearGemvReduce: ({ linearGemvReduce }) =>
     linearGemvReduce === undefined || isOneOf(LINEAR_GEMV_REDUCES, linearGemvReduce)
       ? undefined
-      : "linearGemvReduceが不正",
+      : "linearGemvReduce is invalid",
   stateAttentionReduce: ({ stateAttentionReduce }) =>
     stateAttentionReduce === undefined || isOneOf(STATE_ATTENTION_REDUCES, stateAttentionReduce)
       ? undefined
-      : "stateAttentionReduceが不正",
+      : "stateAttentionReduce is invalid",
   fuseRmsNormAdd: ({ fuseRmsNormAdd }) =>
     fuseRmsNormAdd === undefined || typeof fuseRmsNormAdd === "boolean"
       ? undefined
-      : "fuseRmsNormAddはbooleanでなければならない",
+      : "fuseRmsNormAdd must be a boolean",
   fuseLinearStaticQuantize: ({ fuseLinearStaticQuantize }) =>
     fuseLinearStaticQuantize === undefined || typeof fuseLinearStaticQuantize === "boolean"
       ? undefined
-      : "fuseLinearStaticQuantizeはbooleanでなければならない",
+      : "fuseLinearStaticQuantize must be a boolean",
   packedStaticQuantize: ({ packedStaticQuantize }) =>
     packedStaticQuantize === undefined || typeof packedStaticQuantize === "boolean"
       ? undefined
-      : "packedStaticQuantizeはbooleanでなければならない",
+      : "packedStaticQuantize must be a boolean",
 };
 
 /**
@@ -212,7 +212,7 @@ export const resolveSessionOptions = (
   where: string,
 ): SessionOptions => {
   for (const key of Object.keys(declared)) {
-    if (!accepts(policy, key)) throw new Error(`${where}: session.${key}は未対応`);
+    if (!accepts(policy, key)) throw new Error(`${where}: session.${key} is not supported`);
   }
   // So that a getter cannot swap the value that was checked for the value used in the merge, the
   // explicit settings are read once and copied into a plain object (`writeOptions` reads each field
@@ -220,7 +220,7 @@ export const resolveSessionOptions = (
   const explicit = writeOptions(overrides);
   for (const key of Object.keys(explicit)) {
     if (!accepts(policy, key)) {
-      throw new ModelInputError(`${where}: ${key}はこの系列では指定できない`);
+      throw new ModelInputError(`${where}: ${key} cannot be specified for this family`);
     }
   }
   // ?? is not used because it would send null back to the declaration — an explicit field overrides

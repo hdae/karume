@@ -322,12 +322,14 @@ export const resampleU8Window = (
     image.data.length !== image.width * image.height * channels
   ) {
     throw new RangeError(
-      `${filter.name} の入力 ${image.width}×${image.height}×${channels} と長さ ${image.data.length} が` +
-        "合わない",
+      `${filter.name}: input ${image.width}×${image.height}×${channels} and length ${image.data.length}` +
+        " do not match",
     );
   }
   if (!isPositiveInteger(width) || !isPositiveInteger(height)) {
-    throw new RangeError(`${filter.name} の出力寸法 ${width}×${height} が正の整数でない`);
+    throw new RangeError(
+      `${filter.name}: output size ${width}×${height} is not a positive integer`,
+    );
   }
   const { left, top } = window;
   if (
@@ -341,8 +343,8 @@ export const resampleU8Window = (
     top + window.height > height
   ) {
     throw new RangeError(
-      `${filter.name} の窓 (${left}, ${top}) ${window.width}×${window.height} が出力 ${width}×${height}` +
-        " の内側でない",
+      `${filter.name}: window (${left}, ${top}) ${window.width}×${window.height} and output ${width}×${height}` +
+        ": the window is not inside the output",
     );
   }
   const columns = { offset: left, length: window.width };

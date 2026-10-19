@@ -126,7 +126,7 @@ const BLOCK_KEYS: readonly string[] = ["asset", "start", "stop"];
 const readCount = (raw: Record<string, unknown>, key: string, where: string): number => {
   const value = Object.hasOwn(raw, key) ? raw[key] : undefined;
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
-    throw new Error(`${where}.${key} ${String(value)} が 1 以上の整数でない`);
+    throw new Error(`${where}.${key} ${String(value)} is not a positive integer`);
   }
   return value;
 };
@@ -134,7 +134,7 @@ const readCount = (raw: Record<string, unknown>, key: string, where: string): nu
 const readOffset = (raw: Record<string, unknown>, key: string, where: string): number => {
   const value = Object.hasOwn(raw, key) ? raw[key] : undefined;
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`${where}.${key} ${String(value)} が 0 以上の整数でない`);
+    throw new Error(`${where}.${key} ${String(value)} is not a non-negative integer`);
   }
   return value;
 };
@@ -162,10 +162,12 @@ const readTable = (
   assertAllowedKeys(table, TABLE_KEYS, at);
   const rowBytes = readCount(table, "rowBytes", at);
   if (rowBytes !== expectedRowBytes) {
-    throw new Error(`${at}.rowBytes ${rowBytes} が宣言から決まる ${expectedRowBytes} と違う`);
+    throw new Error(
+      `${at}.rowBytes ${rowBytes} differs from ${expectedRowBytes}, which the declaration determines`,
+    );
   }
   if (!Array.isArray(table.blocks) || table.blocks.length === 0) {
-    throw new Error(`${at}.blocks が非空の配列でない`);
+    throw new Error(`${at}.blocks is not a non-empty array`);
   }
   const blocks: Gemma4PleBlock[] = [];
   const names = new Set<string>();
@@ -176,21 +178,25 @@ const readTable = (
     assertAllowedKeys(block, BLOCK_KEYS, path);
     const asset = block.asset;
     if (typeof asset !== "string" || asset === "") {
-      throw new Error(`${path}.asset が非空の文字列でない`);
+      throw new Error(`${path}.asset is not a non-empty string`);
     }
-    if (names.has(asset)) throw new Error(`${path}.asset '${asset}' が重複している`);
+    if (names.has(asset)) throw new Error(`${path}.asset '${asset}' is a duplicate`);
     names.add(asset);
     const start = readOffset(block, "start", path);
     const stop = readOffset(block, "stop", path);
     if (start !== expected) {
-      throw new Error(`${path}.start ${start} が直前の block の末尾 ${expected} と連続しない`);
+      throw new Error(
+        `${path}.start ${start} does not continue from the end ${expected} of the previous block`,
+      );
     }
-    if (stop <= start) throw new Error(`${path}: 範囲 [${start}, ${stop}) が空`);
+    if (stop <= start) throw new Error(`${path}: range [${start}, ${stop}) is empty`);
     expected = stop;
     blocks.push({ asset, start, stop });
   });
   if (expected !== tokens) {
-    throw new Error(`${at}: block の合計 ${expected} 行が tokens ${tokens} と違う`);
+    throw new Error(
+      `${at}: the blocks total ${expected} rows, which differs from tokens ${tokens}`,
+    );
   }
   return { rowBytes, blocks };
 };
@@ -204,8 +210,8 @@ export const parseGemma4PleIndex = (raw: unknown, where = PLE_INDEX_ASSET): Gemm
   assertAllowedKeys(root, INDEX_KEYS, where);
   if (root.schema !== SCHEMA) {
     throw new Error(
-      `${where}.schema ${String(root.schema)} が ${SCHEMA} でない` +
-        `（旧 sidecar の索引は読まない — 配布形は容器の資産へ移った）`,
+      `${where}.schema ${String(root.schema)} is not ${SCHEMA}` +
+        ` (the old sidecar index is not read — the distribution moved to container assets)`,
     );
   }
   // MUST: do not read a missing field as i8 — a schema 3 writer always spells it. Falling back to a
@@ -213,18 +219,20 @@ export const parseGemma4PleIndex = (raw: unknown, where = PLE_INDEX_ASSET): Gemm
   // rowBytes mismatch (or pass silently for an i8 block).
   const storage = Object.hasOwn(root, "storage") ? root.storage : undefined;
   if (storage !== "i8" && storage !== "i4" && storage !== "i2") {
-    throw new Error(`${where}.storage ${String(storage)} が i8 / i4 / i2 でない`);
+    throw new Error(`${where}.storage ${String(storage)} is not i8 / i4 / i2`);
   }
   const tokens = readCount(root, "tokens", where);
   const layers = readCount(root, "layers", where);
   const dim = readCount(root, "dim", where);
   const factor = packFactor({ storage });
   if (dim % factor !== 0) {
-    throw new Error(`${where}.dim ${dim} が格納 '${storage}' の詰め数 ${factor} で割り切れない`);
+    throw new Error(
+      `${where}.dim ${dim} is not divisible by the packing factor of storage '${storage}', ${factor}`,
+    );
   }
   const embedScale = root.embedScale;
   if (typeof embedScale !== "number" || !Number.isFinite(embedScale) || embedScale <= 0) {
-    throw new Error(`${where}.embedScale ${String(embedScale)} が正の有限数でない`);
+    throw new Error(`${where}.embedScale ${String(embedScale)} is not a positive finite number`);
   }
   return {
     storage,
@@ -329,31 +337,32 @@ export const assertGemma4PleAssets = (
         ? component.assets[block.asset]
         : undefined;
       if (found === undefined) {
-        problems.push(`${block.asset}: 容器が宣言していない`);
+        problems.push(`${block.asset}: not declared by the container`);
         continue;
       }
       if (found !== role) {
-        problems.push(`${block.asset}: 役割 '${found}'（'${role}' が要る）`);
+        problems.push(`${block.asset}: role '${found}' ('${role}' is needed)`);
         continue;
       }
       const want = gemma4PleBlockBytes(table, block);
       const got = component.asset(block.asset).length;
       if (got !== want) {
         problems.push(
-          `${block.asset}: 論理長 ${got}（[${block.start}, ${block.stop}) × ${table.rowBytes} =` +
-            ` ${want} が要る）`,
+          `${block.asset}: logical length ${got} ([${block.start}, ${block.stop}) × ${table.rowBytes} =` +
+            ` ${want} is needed)`,
         );
       }
     }
   }
   for (const [name, role] of Object.entries(component.assets)) {
     if ((role === TABLE_ROLE.values || role === TABLE_ROLE.scales) && !indexed.has(name)) {
-      problems.push(`${name}: 役割 '${role}' の資産だが索引が指していない`);
+      problems.push(`${name}: an asset with role '${role}' that the index does not point at`);
     }
   }
   if (problems.length === 0) return;
   throw new Error(
-    `${where}: PLE の索引と容器の資産が食い違う（${problems.length} 件） — ` + problems.join(" / "),
+    `${where}: the PLE index and the container's assets disagree (${problems.length} problems) — ` +
+      problems.join(" / "),
   );
 };
 
@@ -374,28 +383,28 @@ export const readGemma4PleIndex = async (
     : undefined;
   if (role === undefined) {
     throw new Error(
-      `${where}: 容器が資産 '${PLE_INDEX_ASSET}' を宣言していない` +
-        `（宣言されている資産: ${Object.keys(component.assets).join(" / ") || "なし"}）`,
+      `${where}: the container does not declare asset '${PLE_INDEX_ASSET}'` +
+        ` (declared assets: ${Object.keys(component.assets).join(" / ") || "none"})`,
     );
   }
   if (role !== PLE_INDEX_ROLE) {
     throw new Error(
-      `${where}: 資産 '${PLE_INDEX_ASSET}' の役割が '${role}'（'${PLE_INDEX_ROLE}' が要る）`,
+      `${where}: asset '${PLE_INDEX_ASSET}' has role '${role}' ('${PLE_INDEX_ROLE}' is needed)`,
     );
   }
   const bytes = await readWholeAsset(component.asset(PLE_INDEX_ASSET));
-  const at = `${where}: 資産 '${PLE_INDEX_ASSET}'`;
+  const at = `${where}: asset '${PLE_INDEX_ASSET}'`;
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch (cause) {
-    throw new Error(`${at} が UTF-8 として読めない`, { cause });
+    throw new Error(`${at} cannot be read as UTF-8`, { cause });
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch (cause) {
-    throw new Error(`${at} が JSON として読めない`, { cause });
+    throw new Error(`${at} cannot be read as JSON`, { cause });
   }
   const index = parseGemma4PleIndex(parsed, at);
   assertGemma4PleAssets(where, index, component);

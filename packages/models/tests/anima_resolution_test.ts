@@ -86,7 +86,7 @@ test("parseResolution: 綴りでない入力を落とす（既定へ縮退させ
     assertThrows(
       () => parseResolution(raw),
       ModelInputError,
-      "が WxH でも",
+      "is neither WxH nor",
       `綴り: ${JSON.stringify(raw)}`,
     );
   }
@@ -97,12 +97,20 @@ test("受理集合: 4 条件をそれぞれ名指しで落とす", () => {
   assertThrows(
     () => parseResolution("1352x768"),
     ModelInputError,
-    `${RESOLUTION_GRANULARITY} の倍数でない`,
+    `is not a multiple of ${RESOLUTION_GRANULARITY}`,
   );
   // ②下限（VAE タイル decoder の latent 64 が入らない）。
-  assertThrows(() => parseResolution(`1024x${MIN_RESOLUTION_SIDE - 16}`), ModelInputError, "下限");
+  assertThrows(
+    () => parseResolution(`1024x${MIN_RESOLUTION_SIDE - 16}`),
+    ModelInputError,
+    "lower bound",
+  );
   // ③天井（rope 素表の行数）。
-  assertThrows(() => parseResolution(`${MAX_RESOLUTION_SIDE + 16}x512`), ModelInputError, "上限");
+  assertThrows(
+    () => parseResolution(`${MAX_RESOLUTION_SIDE + 16}x512`),
+    ModelInputError,
+    "upper bound",
+  );
   // ④S の上限。現行定数では各辺の天井が S の上限を含意するので**超える形は作れない**
   // （2048×2048 = 16,384 がちょうど上限 — 定数関係そのものは下の門が固定する）。
   assertEquals(parseResolution("2048x2048"), { width: 2048, height: 2048 });
@@ -115,22 +123,22 @@ test("assertAcceptableResolution: 構造体で渡す経路も同じ 4 条件で�
   assertThrows(
     () => assertAcceptableResolution({ width: 1024, height: 1000 }),
     ModelInputError,
-    "倍数",
+    "multiple",
   );
   assertThrows(
     () => assertAcceptableResolution({ width: 256, height: 1024 }),
     ModelInputError,
-    "下限",
+    "lower bound",
   );
   assertThrows(
     () => assertAcceptableResolution({ width: 4096, height: 512 }),
     ModelInputError,
-    "上限",
+    "upper bound",
   );
   assertThrows(
     () => assertAcceptableResolution({ width: 1024.5, height: 1024 }),
     ModelInputError,
-    "整数",
+    "integer",
   );
 });
 

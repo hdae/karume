@@ -525,7 +525,7 @@ test("家族 admission（pipeline major 不一致）は descriptor だけで落�
     Error,
   );
   // 落ちた理由が家族の major 門であること（別の失敗で「重みを取らなかった」が成立しない）。
-  if (!error.message.includes("major に未対応")) {
+  if (!error.message.includes("the major of pipeline 'siglip2/99' is not supported")) {
     throw new Error(`家族 admission の文言でない: ${error.message}`);
   }
   // descriptor は取りに行き、重みの part は 1 度も叩いていない（ADR 0070 決定 5 の文面
@@ -627,10 +627,10 @@ test("loadContainerComponents: manifest が持たない部品名は選択の部�
         rig.hubOptions,
       ),
     Error,
-    "部品 'vae' の容器が manifest に無い",
+    "the container of component 'vae' is not in the manifest",
   );
   // 読み手が現物と突き合わせられる形（既存の資産診断の流儀）。
-  assertStringIncludes(error.message, "持つ部品: dit");
+  assertStringIncludes(error.message, "components of selection test / f32: dit");
 });
 
 test("loadContainerComponents: 開いていない役割で open() すると開いた一覧つきで落ちる", async () => {
@@ -643,8 +643,8 @@ test("loadContainerComponents: 開いていない役割で open() すると開�
     NO_FAMILY_GATE,
     rig.hubOptions,
   );
-  const error = assertThrows(() => open("vae"), Error, "部品 'vae' は開いていない");
-  assertStringIncludes(error.message, "開いた部品: dit");
+  const error = assertThrows(() => open("vae"), Error, "component 'vae' is not open");
+  assertStringIncludes(error.message, "open components: dit");
 });
 
 // ---- Component replacement seat (`LoadContainerOptions.components`) -------------------
@@ -753,7 +753,7 @@ test("components: グラフ記述が違う容器は admission で落ちる（重
         { ...rig.hubOptions, components: { voice: { source: rig.source } } },
       ),
     Error,
-    "グラフ記述が manifest の宣言と違う",
+    "the graph descriptor does not match the manifest's declaration",
   );
   // 読み手が現物と突き合わせられる形（宣言と差し替えの 2 つの sha256 が並ぶ）。
   assertStringIncludes(error.message, rig.selection.containers["voice"].descriptor.graph.sha256);
@@ -775,9 +775,9 @@ test("components: この系列が持たない役割名は差し替えられる�
         { ...rig.hubOptions, components: { vae: { source: rig.source } } },
       ),
     Error,
-    "components の 'vae' はこの系列の部品ではない",
+    "'vae' in components is not a component of this family",
   );
-  assertStringIncludes(error.message, "差し替えられる役割: front / voice");
+  assertStringIncludes(error.message, "replaceable roles: front / voice");
   // 綴り間違いは取得へ 1 度も出ない。
   assertEquals(fetchedContainers(rig.mock.paths), []);
 });

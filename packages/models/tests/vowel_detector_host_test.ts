@@ -158,7 +158,7 @@ test("特徴: 1 フレームも取れない波形は fail loudly（NaN を撒か
   assertThrows(
     () => extractFeatures(new Float32Array(N_FFT - 1), melBasis),
     ModelInputError,
-    "サンプルしかない",
+    "the waveform is only",
   );
 });
 
@@ -172,7 +172,7 @@ test("特徴: 非有限のサンプルは位置と値を添えて入力エラー
     assertThrows(
       () => extractFeatures(tainted, melBasis),
       ModelInputError,
-      `波形の ${at} 番目のサンプル ${value} が非有限`,
+      `waveform sample ${at} (${value}) is non-finite`,
     );
   }
 });
@@ -181,12 +181,12 @@ test("特徴: mel 基底の要素数が違えば受け付けない", () => {
   assertThrows(
     () => extractFeatures(audio, new Float32Array(N_MELS * MEL_BINS - 1)),
     Error,
-    "mel 基底が",
+    "the mel basis has",
   );
   assertThrows(
     () => extractFeatures(audio, new Float32Array(MEL_BINS * N_MELS + 1)),
     Error,
-    "mel 基底が",
+    "the mel basis has",
   );
   // 逆側: mel 基底は資産から来る数なので、呼び手が波形を直しても直らない = 入力起因ではない。
   const basis = assertThrows(() => extractFeatures(audio, new Float32Array(N_MELS * MEL_BINS - 1)));
@@ -215,8 +215,8 @@ test("後処理パリティ: 同じロジットから Python と同じ .lab が�
 });
 
 test("後処理: ロジットの要素数がフレーム数と合わなければ受け付けない", () => {
-  assertThrows(() => logitsToSegments(new Float32Array(8 * 3 + 1), 3), Error, "ロジットが");
-  assertThrows(() => logitsToSegments(new Float32Array(0), 0), Error, "フレーム数");
+  assertThrows(() => logitsToSegments(new Float32Array(8 * 3 + 1), 3), Error, "the logits have");
+  assertThrows(() => logitsToSegments(new Float32Array(0), 0), Error, "frame count");
 });
 
 test("後処理: 非有限ロジットは座標を添えて落とす（全区間 a の .lab に化けない）", () => {
@@ -236,7 +236,7 @@ test("後処理: 非有限ロジットは座標を添えて落とす（全区間
     assertThrows(
       () => logitsToSegments(logits, fixture.logits.length),
       Error,
-      `logitsToSegments: ロジット frame 7 / class 5（N）が非有限（${shown}）`,
+      `logitsToSegments: logits frame 7 / class 5 (N) is non-finite (${shown})`,
     );
   }
 });
@@ -251,7 +251,7 @@ test("Viterbi: 非有限の log 事後確率は座標を添えて落とす", () 
   assertThrows(
     () => viterbiSmooth(logProbabilities, frames),
     Error,
-    "viterbiSmooth: log 事後確率 frame 3 / class 6（pau）が非有限（-Infinity）",
+    "viterbiSmooth: log posteriors frame 3 / class 6 (pau) is non-finite (-Infinity)",
   );
 });
 
@@ -303,7 +303,11 @@ test("Viterbi: ペナルティを上回る優位が続けば乗り換える", ()
 });
 
 test("Viterbi: 格子の形が合わなければ受け付けない", () => {
-  assertThrows(() => viterbiSmooth(new Float64Array(8 * 4 - 1), 4), Error, "log 事後確率が");
+  assertThrows(
+    () => viterbiSmooth(new Float64Array(8 * 4 - 1), 4),
+    Error,
+    "the log posteriors have",
+  );
 });
 
 test("短区間マージ: 最小継続長未満は事後確率の高い隣へ塗り替える", () => {

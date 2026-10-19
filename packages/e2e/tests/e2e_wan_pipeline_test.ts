@@ -540,7 +540,7 @@ describe.skipIf(!DIST_PRESENT)(
         label: "pipeline の major 2",
         patch: (model) => ({ ...model, pipeline: "wan/2" }),
         textEncoder: "precomputed",
-        message: "major に未対応",
+        message: "unsupported major",
       },
       {
         label: "pipelineConfig の未知キー",
@@ -552,7 +552,7 @@ describe.skipIf(!DIST_PRESENT)(
           },
         }),
         textEncoder: "precomputed",
-        message: "未知キー 'type'",
+        message: "unknown key 'type'",
       },
       {
         // 受理表（WAN_SESSION_POLICY）が受けるのは linear / attention の実行形 3 欄だけ
@@ -571,7 +571,7 @@ describe.skipIf(!DIST_PRESENT)(
           };
         },
         textEncoder: "precomputed",
-        message: "session.stateAttentionReduceは未対応",
+        message: "session.stateAttentionReduce is not supported",
       },
       {
         // VAE の段は 1 タイル = 1 batch で、runtime は計測の device で batch を開かない。DiT の段を
@@ -581,7 +581,7 @@ describe.skipIf(!DIST_PRESENT)(
         patch: (model) => model,
         textEncoder: "precomputed",
         gpu: fakeGpuContext(fakeDevice({ features: ["timestamp-query"] })),
-        message: "gpuTiming が有効な device",
+        message: "device with gpuTiming enabled",
       },
       {
         // GPU 経路はトークナイザ資産を読む — 宣言が無ければ umT5（i8 で約 5.3 GiB）の part 1 以降を取る前に落とす。
@@ -594,7 +594,7 @@ describe.skipIf(!DIST_PRESENT)(
           return { ...model, assets: rest };
         },
         textEncoder: "gpu",
-        message: "umT5 のトークナイザ資産 'umt5_tokenizer' が無い",
+        message: "have no umT5 tokenizer asset 'umt5_tokenizer'",
       },
     ];
     for (const { label, patch, textEncoder, gpu, message } of faults) {

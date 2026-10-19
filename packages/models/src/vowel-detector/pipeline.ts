@@ -257,16 +257,16 @@ export const parseMelBasis = (buffer: ArrayBuffer): Float32Array<ArrayBuffer> =>
   const view = file.tensors.get(MEL_BASIS);
   if (view === undefined) {
     throw new Error(
-      `vowel-detector: mel 基底の資産にテンソル '${MEL_BASIS}' が無い` +
-        `（入っているもの: ${[...file.tensors.keys()].join(" / ")}）`,
+      `vowel-detector: the mel basis asset has no tensor '${MEL_BASIS}'` +
+        ` (it contains: ${[...file.tensors.keys()].join(" / ")})`,
     );
   }
   if (view.dtype !== "F32") {
-    throw new Error(`vowel-detector: mel 基底が F32 でない（${view.dtype}）`);
+    throw new Error(`vowel-detector: the mel basis is not F32 (${view.dtype})`);
   }
   if (view.shape.length !== 2 || view.shape[0] !== N_MELS || view.shape[1] !== MEL_BINS) {
     throw new Error(
-      `vowel-detector: mel 基底の形が [${view.shape.join(", ")}]、期待は [${N_MELS}, ${MEL_BINS}]`,
+      `vowel-detector: the mel basis shape is [${view.shape.join(", ")}], expected [${N_MELS}, ${MEL_BINS}]`,
     );
   }
   return new Float32Array(file.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
@@ -289,21 +289,21 @@ export const parseMelBasis = (buffer: ArrayBuffer): Float32Array<ArrayBuffer> =>
 export const assertGraph = (model: GraphOwner, config: VowelDetectorPipelineConfig): string => {
   if (model.graph.inputs.length !== 1 || model.graph.outputs.length !== 1) {
     throw new Error(
-      `VowelDetectorPipeline: グラフの入出力が ${model.graph.inputs.length} /` +
-        ` ${model.graph.outputs.length} 本（どちらも 1 本の CRNN が必要）`,
+      `VowelDetectorPipeline: the graph has ${model.graph.inputs.length} inputs /` +
+        ` ${model.graph.outputs.length} outputs (a CRNN with one of each is required)`,
     );
   }
   if (model.graph.symbols.length !== 1) {
     throw new Error(
-      `VowelDetectorPipeline: グラフの記号次元が [${model.graph.symbols.join(", ")}]` +
-        "（時間軸 1 本だけが記号）",
+      `VowelDetectorPipeline: the graph's symbolic dimensions are [${model.graph.symbols.join(", ")}]` +
+        " (only the one time axis may be symbolic)",
     );
   }
   const [symbol] = model.graph.symbols;
   const [input] = model.graph.inputs;
   if (input.name !== INPUT_NAME) {
     throw new Error(
-      `VowelDetectorPipeline: グラフ入力が '${input.name}'（'${INPUT_NAME}' が必要）`,
+      `VowelDetectorPipeline: the graph input is '${input.name}' ('${INPUT_NAME}' is required)`,
     );
   }
   // The canonical notation is `coeff·sym` (a coefficient of 1 is omitted — `formatDim` in
@@ -314,14 +314,14 @@ export const assertGraph = (model: GraphOwner, config: VowelDetectorPipelineConf
     input.shape.some((dim, axis) => dim !== expectedInput[axis])
   ) {
     throw new Error(
-      `VowelDetectorPipeline: グラフ入力の形が ` +
-        `[${input.shape.map(String).join(", ")}]、期待は [${expectedInput.join(", ")}]`,
+      `VowelDetectorPipeline: the graph input shape is ` +
+        `[${input.shape.map(String).join(", ")}], expected [${expectedInput.join(", ")}]`,
     );
   }
   const name = model.graph.outputs[0];
   const value = model.graph.values[name];
   if (value === undefined) {
-    throw new Error(`VowelDetectorPipeline: グラフ出力 '${name}' の宣言が無い`);
+    throw new Error(`VowelDetectorPipeline: graph output '${name}' is not declared`);
   }
   const expectedOutput = [1, symbol, config.classes.length];
   if (
@@ -329,8 +329,8 @@ export const assertGraph = (model: GraphOwner, config: VowelDetectorPipelineConf
     value.shape.some((dim, axis) => dim !== expectedOutput[axis])
   ) {
     throw new Error(
-      `VowelDetectorPipeline: グラフ出力の形が ` +
-        `[${value.shape.map(String).join(", ")}]、期待は [${expectedOutput.join(", ")}]`,
+      `VowelDetectorPipeline: the graph output shape is ` +
+        `[${value.shape.map(String).join(", ")}], expected [${expectedOutput.join(", ")}]`,
     );
   }
   return symbol;
@@ -360,10 +360,10 @@ export const assertFrameLimit = (config: VowelDetectorPipelineConfig, frames: nu
   // The length comes from the caller's waveform, so it is input-caused (ADR 0107 decision 2 —
   // passing it in pieces works).
   throw new ModelInputError(
-    `VowelDetectorPipeline: 音声が長すぎる（10ms フレーム ${frames} 本 = ` +
-      `${seconds(frames)} 秒）— この配布形が焼かれている上限は ` +
-      `${config.maxFrames} フレーム（${seconds(config.maxFrames)} 秒）。` +
-      "切り詰めると末尾が黙って落ちるので、呼び出し側で区切って渡す",
+    `VowelDetectorPipeline: the audio is too long (${frames} frames of 10ms = ` +
+      `${seconds(frames)} s) — the maximum this distribution was built with is ` +
+      `${config.maxFrames} frames (${seconds(config.maxFrames)} s). ` +
+      "Truncating would silently drop the end, so split the audio on the caller side",
   );
 };
 
@@ -382,11 +382,11 @@ export const assertFrameFloor = (config: VowelDetectorPipelineConfig, frames: nu
   if (frames >= config.minFrames) return;
   // Like the upper side, a dimension of the caller's waveform (ADR 0107 decision 2).
   throw new ModelInputError(
-    `VowelDetectorPipeline: 音声が短すぎる（10ms フレーム ${frames} 本 = ` +
-      `${seconds(frames)} 秒）— この配布形が焼かれている最小長は ` +
-      `${config.minFrames} フレーム（${seconds(config.minFrames)} 秒）。` +
-      "足りない分を右ゼロ pad で埋めると逆方向 GRU が pad 側から状態を持ち帰るので、" +
-      "呼び出し側で十分な長さを渡す",
+    `VowelDetectorPipeline: the audio is too short (${frames} frames of 10ms = ` +
+      `${seconds(frames)} s) — the minimum length this distribution was built with is ` +
+      `${config.minFrames} frames (${seconds(config.minFrames)} s). ` +
+      "Filling the shortfall with zero padding on the right makes the backward GRU carry state back from the padding, " +
+      "so pass audio of sufficient length from the caller side",
   );
 };
 
@@ -472,25 +472,25 @@ const admitVowelDetector = (
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
-      `VowelDetectorPipeline: model '${modelName}' は manifest に無い` +
-        `（利用可能: ${manifest.available.models.join(" / ")}）`,
+      `VowelDetectorPipeline: model '${modelName}' is not in the manifest` +
+        ` (available: ${manifest.available.models.join(" / ")})`,
     );
   }
   const entry: ModelEntry = manifest.models[modelName];
   const { name, major } = entry.pipeline;
   if (name !== VOWEL_DETECTOR_PIPELINE_NAME) {
     throw new Error(
-      `VowelDetectorPipeline: manifest の pipeline が '${name}/${major}'` +
-        `（'${VOWEL_DETECTOR_PIPELINE_NAME}/${VOWEL_DETECTOR_PIPELINE_MAJOR}' が必要）`,
+      `VowelDetectorPipeline: the manifest pipeline is '${name}/${major}'` +
+        ` ('${VOWEL_DETECTOR_PIPELINE_NAME}/${VOWEL_DETECTOR_PIPELINE_MAJOR}' is required)`,
     );
   }
   if (major !== VOWEL_DETECTOR_PIPELINE_MAJOR) {
     // The only check that stops the silent degradation "old implementation × new repository" (ADR
     // 0038 §6).
     throw new Error(
-      `VowelDetectorPipeline: pipeline '${name}/${major}' の major に未対応` +
-        `（この実装が読めるのは ` +
-        `${VOWEL_DETECTOR_PIPELINE_NAME}/${VOWEL_DETECTOR_PIPELINE_MAJOR}）`,
+      `VowelDetectorPipeline: pipeline '${name}/${major}' has an unsupported major` +
+        ` (this implementation reads ` +
+        `${VOWEL_DETECTOR_PIPELINE_NAME}/${VOWEL_DETECTOR_PIPELINE_MAJOR})`,
     );
   }
   const config = parseVowelDetectorPipelineConfig(entry.pipelineConfig);
@@ -498,8 +498,8 @@ const admitVowelDetector = (
   const quantName = options.quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quantName)) {
     throw new Error(
-      `VowelDetectorPipeline: quant '${quantName}' は manifest に無い` +
-        `（利用可能: ${entry.available.quants.join(" / ")}）`,
+      `VowelDetectorPipeline: quant '${quantName}' is not in the manifest` +
+        ` (available: ${entry.available.quants.join(" / ")})`,
     );
   }
   const quant = entry.quants[quantName];
@@ -624,12 +624,12 @@ const runGraph = (
     const name = model.graph.outputs[0];
     const tensor = outputs[name];
     if (tensor === undefined) {
-      throw new Error(`vowel-detector: グラフ出力 '${name}' が実行結果に無い`);
+      throw new Error(`vowel-detector: graph output '${name}' is missing from the run results`);
     }
     // Narrow by the discriminant (a cast to Float32Array would pass silently when the dtype is
     // off).
     if (tensor.dtype !== "f32") {
-      throw new Error(`vowel-detector: ロジットが f32 でない（${tensor.dtype}）`);
+      throw new Error(`vowel-detector: the logits are not f32 (${tensor.dtype})`);
     }
     return tensor.data;
   });
@@ -677,8 +677,8 @@ const detectAudio = async (
   const expected = rows * config.classes.length;
   if (logits.length !== expected) {
     throw new Error(
-      `vowel-detector: ロジットの要素数 ${logits.length} が ` +
-        `${rows}×${config.classes.length} と違う`,
+      `vowel-detector: logit element count ${logits.length} differs from ` +
+        `${rows}×${config.classes.length}`,
     );
   }
   const segments = logitsToSegments(logits, rows);
@@ -815,7 +815,7 @@ export class VowelDetectorPipeline {
     // The disposed check is made at call time (checked inside the chain, it would also take down
     // detections accepted before the dispose).
     if (this.#disposal !== undefined) {
-      throw new Error("VowelDetectorPipeline: dispose 済みでは検出できない");
+      throw new Error("VowelDetectorPipeline: cannot detect after dispose");
     }
     return await this.#chain(() => detectAudio(this.#state, audio));
   }

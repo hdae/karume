@@ -106,13 +106,13 @@ export const takeDrafts = (
   vocabSize: number,
 ): number[] => {
   if (raw.length < drafted) {
-    throw new Error(`draft が ${raw.length} 本しか無い（${drafted} 本要る）`);
+    throw new Error(`Only ${raw.length} drafts (${drafted} needed)`);
   }
   const drafts: number[] = [];
   for (let index = 0; index < drafted; index += 1) {
     const id = raw[index];
     if (!Number.isSafeInteger(id) || id < 0 || id >= vocabSize) {
-      throw new Error(`draft[${index}] ${id} が語彙 0..${vocabSize - 1} の外`);
+      throw new Error(`draft[${index}] ${id} is outside the vocabulary 0..${vocabSize - 1}`);
     }
     drafts.push(id);
   }

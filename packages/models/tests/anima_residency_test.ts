@@ -189,7 +189,7 @@ describe("assertAnimaResidency", () => {
       assertThrows(
         () => assertAnimaResidency(value, "residency"),
         ModelInputError,
-        `residency: 期待 'per-stage' / 'transformer'（実際 ${actual}）`,
+        `residency: expected 'per-stage' / 'transformer' (actual ${actual})`,
       );
     }
   });
@@ -244,7 +244,7 @@ describe("decideAfterTransformer（DiT 段を抜けるときの決定）", () =>
         assertThrows(
           () => decideAfterTransformer({ effective, downgraded: true, held: true }, outcome),
           Error,
-          "到達しない状態",
+          "unreachable state",
         );
       }
     }
@@ -505,7 +505,7 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
         error.errors.map((cause: Error) => cause.message),
         ["vae: not enough memory left", "dispose 1 に失敗"],
       );
-      assertEquals(error.message, "anima: DiT の後始末が失敗した");
+      assertEquals(error.message, "anima: DiT clean-up failed");
       // 破棄の瞬間に格下げは立ち、席は空いている（MUST の順序）。
       assertEquals(h.disposals, [{ id: 1, holding: false, downgraded: true }]);
       assertEquals(h.notices.at(-1), { action: "evicted", reason: "out-of-memory" });
@@ -670,7 +670,7 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
           error.errors.map((cause: Error) => cause.message),
           ["dispose 1 に失敗"],
         );
-        assertEquals(error.message, "anima: DiT の後始末が失敗した");
+        assertEquals(error.message, "anima: DiT clean-up failed");
         assertEquals(h.log, ["dispose:1", "settle", "notice:evicted/headroom"]);
         assert(h.residency.downgraded);
         assertFalse(h.residency.holding);

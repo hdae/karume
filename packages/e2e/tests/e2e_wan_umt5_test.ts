@@ -880,7 +880,7 @@ describe.skipIf(!DIST_PRESENT || !GOLDENS_PRESENT || !GPU_AVAILABLE)(
       const encoder = mirror.encoder();
       await encoder.dispose();
       await settleReleases(mirror.gpu());
-      await assertRejects(() => encoder.encode("a cat"), Error, "dispose 済み");
+      await assertRejects(() => encoder.encode("a cat"), Error, "after dispose");
       assertEquals(mirror.deviceLost(), undefined, "device lost");
     });
   },

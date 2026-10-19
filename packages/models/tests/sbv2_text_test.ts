@@ -83,14 +83,18 @@ test("addBlankWord2ph: 故障注入 — 先頭の +1 を落とすと音素長と
 });
 
 test("addBlankWord2ph: 空の base は落とす（両端の番兵が欠落）", () => {
-  assertThrows(() => addBlankWord2ph([]), Error, "空");
+  assertThrows(() => addBlankWord2ph([]), Error, "is empty");
 });
 
 test("phonesToIds: 記号表の添字を返し、未知の音素は落とす", () => {
   const rules = testRules();
   assertEquals(phonesToIds(rules, ["_", "k", "o", "."]), [0, 2, 3, 5]);
   // 呼び手の発話だけで到達する失敗なので入力起因（400 相当）— 素の Error では 500 に化ける。
-  assertThrows(() => phonesToIds(rules, ["ky"]), Sbv2InputError, "記号表に無い音素");
+  assertThrows(
+    () => phonesToIds(rules, ["ky"]),
+    Sbv2InputError,
+    "which is not in the symbol table",
+  );
 });
 
 test("phonesTonesToModelIds: tone 基点の加算・言語 ID の配布・add_blank が同時に効く", () => {
@@ -105,17 +109,17 @@ test("phonesTonesToModelIds: tone 基点の加算・言語 ID の配布・add_bl
 
 test("phonesTonesToModelIds: 範囲外の tone / 長さ不一致は落とす", () => {
   const rules = testRules();
-  assertThrows(() => phonesTonesToModelIds(rules, ["_"], [0, 0]), Error, "長さが不一致");
+  assertThrows(() => phonesTonesToModelIds(rules, ["_"], [0, 0]), Error, "differ in length");
   // 12 トーンのモデルに tone=7 を渡すと 6+7=13 で範囲外。黙って別の行を引かせない。
-  assertThrows(() => phonesTonesToModelIds(rules, ["_"], [7]), Error, "範囲外");
+  assertThrows(() => phonesTonesToModelIds(rules, ["_"], [7]), Error, "is outside");
 });
 
 test("parseJpExtraRules: 壊れた資産を黙って使わない", () => {
-  assertThrows(() => parseJpExtraRules({ ...TEST_RULES_JSON, symbols: [] }, "x"), Error, "空");
+  assertThrows(() => parseJpExtraRules({ ...TEST_RULES_JSON, symbols: [] }, "x"), Error, "empty");
   assertThrows(
     () => parseJpExtraRules({ ...TEST_RULES_JSON, symbols: ["_", "_"] }, "x"),
     Error,
-    "重複",
+    "has duplicates",
   );
   assertThrows(
     () => parseJpExtraRules({ ...TEST_RULES_JSON, addBlank: false }, "x"),
@@ -126,7 +130,7 @@ test("parseJpExtraRules: 壊れた資産を黙って使わない", () => {
   assertThrows(
     () => parseJpExtraRules({ ...TEST_RULES_JSON, toneStart: 1.5 }, "x"),
     Error,
-    "整数でない",
+    "not an integer",
   );
 });
 
@@ -184,7 +188,7 @@ test("parseJpExtraRules: 実行定数の値域を構築時に見る（整数だ�
       assertThrows(
         () => parseJpExtraRules({ ...TEST_RULES_JSON, [key]: bad }, "x"),
         Error,
-        `x.${key}: 正の安全整数でない（${bad}）`,
+        `x.${key}: not a positive safe integer (${bad})`,
       );
     }
   }
@@ -192,12 +196,12 @@ test("parseJpExtraRules: 実行定数の値域を構築時に見る（整数だ�
   assertThrows(
     () => parseJpExtraRules({ ...TEST_RULES_JSON, languageId: TEST_RULES_JSON.numLanguages }, "x"),
     Error,
-    "x.languageId: language 埋め込みの範囲外",
+    "x.languageId: outside the language embedding",
   );
   assertThrows(
     () => parseJpExtraRules({ ...TEST_RULES_JSON, languageId: -1 }, "x"),
     Error,
-    "x.languageId: language 埋め込みの範囲外",
+    "x.languageId: outside the language embedding",
   );
   assertEquals(parseJpExtraRules({ ...TEST_RULES_JSON, languageId: 0 }, "x").languageId, 0);
 });
@@ -207,7 +211,7 @@ test("distributePhone: 音素を文字へ均等分配する（余りは左から
   assertEquals(distributePhone(1, 3), [1, 0, 0]);
   assertEquals(distributePhone(0, 2), [0, 0]);
   assertEquals(distributePhone(6, 3), [2, 2, 2]);
-  assertThrows(() => distributePhone(3, 0), Error, "1 以上の整数でない");
+  assertThrows(() => distributePhone(3, 0), Error, "is not an integer >= 1");
 });
 
 /** 上流 `__distribute_phone` の反復をそのまま書いた期待側（閉形式の実装と突き合わせる）。 */
@@ -277,7 +281,7 @@ test("buildBaseWord2ph: 0 トークンへ正規化される surface は入力起
   assertThrows(
     () => buildBaseWord2ph([{ surface: " ", phones: ["a"] }], tokenizer, 3),
     Sbv2InputError,
-    "0 トークンに正規化された",
+    "normalised to 0 tokens",
   );
   // 対: sum(word2ph) の不一致は内部不変条件の破れなので素の Error のまま残す
   // （errors.ts が名指しで 500 側に置いている経路 — 両方 400 にすると分類が消える）。
@@ -303,7 +307,7 @@ test("buildSbv2ModelInput: input_ids 長と word2ph 長の食い違いは入力�
   assertThrows(
     () => buildSbv2ModelInput(utterance, tokenizer, rules),
     Sbv2InputError,
-    "input_ids 長",
+    "input_ids length",
   );
 });
 
@@ -356,7 +360,7 @@ test("DebertaTokenizer: 語彙の重複行は落とす（後勝ちで別の行�
         { clsId: 1, sepId: 2, unkId: 3 },
       ),
     Error,
-    "vocabText: 行 5 が行 4 と同じトークン",
+    "vocabText: line 5 has the same token as line 4",
   );
 });
 
@@ -375,8 +379,8 @@ test("bertHiddenOutput: 末尾からの相対で選ぶ（層数が違っても�
   const full = Array.from({ length: 25 }, (_, index) => `h${index}`);
   assertEquals(bertHiddenOutput(full, 3), "h22");
   assertEquals(bertHiddenOutput(["h0", "h1", "h2"], 3), "h0");
-  assertThrows(() => bertHiddenOutput(["h0", "h1"], 3), Error, "3 本以上");
-  assertThrows(() => bertHiddenOutput(full, 0), Error, "1 以上");
+  assertThrows(() => bertHiddenOutput(["h0", "h1"], 3), Error, "at least 3 are required");
+  assertThrows(() => bertHiddenOutput(full, 0), Error, "is not an integer >= 1");
 });
 
 test("tileBertToPhoneLevel: トークンを word2ph 回だけ複製し、転置して [dim, P] にする", () => {
@@ -404,8 +408,8 @@ test("tileBertToPhoneLevel: 故障注入 — word2ph の配分が変わると値
 
 test("tileBertToPhoneLevel: トークン数と word2ph 長の不一致は落とす", () => {
   const hidden = new Float32Array([1, 2, 3, 10, 20, 30]);
-  assertThrows(() => tileBertToPhoneLevel(hidden, 2, [1, 2, 1]), Error, "word2ph 長");
-  assertThrows(() => tileBertToPhoneLevel(hidden, 4, [1, 1, 1, 1]), Error, "割り切れない");
+  assertThrows(() => tileBertToPhoneLevel(hidden, 2, [1, 2, 1]), Error, "word2ph length");
+  assertThrows(() => tileBertToPhoneLevel(hidden, 4, [1, 1, 1, 1]), Error, "is not divisible by");
 });
 
 // ---- 実資産（あれば）--------------------------------------------------------

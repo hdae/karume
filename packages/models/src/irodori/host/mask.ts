@@ -38,13 +38,13 @@ export const buildDitMask = (
   uncond?: IrodoriSegment,
 ): Uint32Array<ArrayBuffer> => {
   if (!Number.isInteger(latentLength) || latentLength < 1) {
-    throw new RangeError(`latent 長 ${latentLength} が 1 以上の整数でない`);
+    throw new RangeError(`Latent length ${latentLength} is not an integer >= 1`);
   }
   let total = latentLength;
   for (const segment of SEGMENT_ORDER) {
     if (used[segment] > caps[segment]) {
       throw new Error(
-        `${segment} 区間の使用長 ${used[segment]} が宣言長 ${caps[segment]} を超えている`,
+        `${segment} segment: used length ${used[segment]} exceeds the declared length ${caps[segment]}`,
       );
     }
     total += caps[segment];

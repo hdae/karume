@@ -33,6 +33,6 @@ test("timestepFrequencies: 幅の受理集合（正の偶数）", () => {
   // 前半 cos / 後半 sin に割るので奇数幅は組めない（`config.ts` の `timestepEmbedDim` と
   // 同じ条件がこちら側にもある）。
   for (const dim of [0, -2, 3, 2.5]) {
-    assertThrows(() => timestepFrequencies(dim), RangeError, "正の偶数でない");
+    assertThrows(() => timestepFrequencies(dim), RangeError, "not a positive even number");
   }
 });

@@ -564,25 +564,33 @@ describe("ゲート T8 実測: 8 条件のうち負ける 3 本だけが plain �
 
 describe("ゲート T9 門: ノブの値域は生成時に fail loudly", () => {
   it("alpha は 0 < α ≤ 1", () => {
-    assertThrows(() => createSpeculationGate({ alpha: 0 }), Error, "alpha 0 が正の有限数でない");
+    assertThrows(
+      () => createSpeculationGate({ alpha: 0 }),
+      Error,
+      "alpha 0 is not a positive finite number",
+    );
     assertThrows(
       () => createSpeculationGate({ alpha: Number.NaN }),
       Error,
-      "alpha NaN が正の有限数でない",
+      "alpha NaN is not a positive finite number",
     );
-    assertThrows(() => createSpeculationGate({ alpha: 1.5 }), Error, "alpha 1.5 が 0 < α ≤ 1 の外");
+    assertThrows(
+      () => createSpeculationGate({ alpha: 1.5 }),
+      Error,
+      "alpha 1.5 is outside 0 < α ≤ 1",
+    );
   });
 
   it("ブロックは 2 cycle 以上（1 なら 1 サンプル判定に戻る）", () => {
     assertThrows(
       () => createSpeculationGate({ window: 1 }),
       Error,
-      "window 1 が 2 以上の整数でない",
+      "window 1 is not an integer ≥ 2",
     );
     assertThrows(
       () => createSpeculationGate({ window: 16.5 }),
       Error,
-      "window 16.5 が 2 以上の整数でない",
+      "window 16.5 is not an integer ≥ 2",
     );
   });
 
@@ -590,28 +598,24 @@ describe("ゲート T9 門: ノブの値域は生成時に fail loudly", () => {
     assertThrows(
       () => createSpeculationGate({ confirm: 0 }),
       Error,
-      "confirm 0 が 1 以上の整数でない",
+      "confirm 0 is not an integer ≥ 1",
     );
-    assertThrows(() => createSpeculationGate({ burst: 0 }), Error, "burst 0 が 1 以上の整数でない");
+    assertThrows(() => createSpeculationGate({ burst: 0 }), Error, "burst 0 is not an integer ≥ 1");
   });
 
   it("打ち切りの下限は 1 以上 burst 以下の整数", () => {
     assertThrows(
       () => createSpeculationGate({ burstMin: 0 }),
       Error,
-      "burstMin 0 が 1 以上の整数でない",
+      "burstMin 0 is not an integer ≥ 1",
     );
     assertThrows(
       () => createSpeculationGate({ burstMin: 4.5 }),
       Error,
-      "burstMin 4.5 が 1 以上の整数でない",
+      "burstMin 4.5 is not an integer ≥ 1",
     );
     // `burstMin > burst` は一度も発火しない死んだノブ（既定の `burst` は 8）。
-    assertThrows(
-      () => createSpeculationGate({ burstMin: 9 }),
-      Error,
-      "burstMin 9 が burst 8 を超えている",
-    );
+    assertThrows(() => createSpeculationGate({ burstMin: 9 }), Error, "burstMin 9 exceeds burst 8");
     // 既定の `burstMin` は `burst` で抑えてある（バースト 1 cycle の席が門で落ちない）。
     assertEquals(createSpeculationGate({ burst: 1 }).mode, "speculate");
   });
@@ -628,7 +632,7 @@ describe("ゲート T9 門: ノブの値域は生成時に fail loudly", () => {
       assertThrows(
         () => createSpeculationGate({ [name]: value }),
         Error,
-        `${name} ${value} が正の有限数でない`,
+        `${name} ${value} is not a positive finite number`,
       );
     }
     // 未指定の `earlyLeave` は「off」であって門の対象ではない（`0` を渡す形と混ぜない — 0 は
@@ -641,17 +645,17 @@ describe("ゲート T9 門: ノブの値域は生成時に fail loudly", () => {
     assertThrows(
       () => createSpeculationGate({ exploreBase: 0 }),
       Error,
-      "exploreBase 0 が 1 以上の整数でない",
+      "exploreBase 0 is not an integer ≥ 1",
     );
     assertThrows(
       () => createSpeculationGate({ exploreBase: 1.5 }),
       Error,
-      "exploreBase 1.5 が 1 以上の整数でない",
+      "exploreBase 1.5 is not an integer ≥ 1",
     );
     assertThrows(
       () => createSpeculationGate({ exploreBase: 8, exploreMax: 4 }),
       Error,
-      "exploreMax 4 が 8 以上の整数でない",
+      "exploreMax 4 is not an integer ≥ 8",
     );
   });
 
@@ -659,17 +663,17 @@ describe("ゲート T9 門: ノブの値域は生成時に fail loudly", () => {
     assertThrows(
       () => createSpeculationGate({ enter: 1 }),
       Error,
-      "enter 1 < 1 < leave 1.01 でない",
+      "enter 1 < 1 < leave 1.01 does not hold",
     );
     assertThrows(
       () => createSpeculationGate({ leave: 0.99 }),
       Error,
-      "enter 0.97 < 1 < leave 0.99 でない",
+      "enter 0.97 < 1 < leave 0.99 does not hold",
     );
     assertThrows(
       () => createSpeculationGate({ enter: -0.5 }),
       Error,
-      "enter -0.5 が正の有限数でない",
+      "enter -0.5 is not a positive finite number",
     );
   });
 

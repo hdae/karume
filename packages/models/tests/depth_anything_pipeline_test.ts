@@ -93,7 +93,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
   await assertRejects(
     () => DepthAnythingPipeline.fromAssets({ manifest, assets: COMPONENT }, { model: "nope" }),
     Error,
-    "model 'nope' は manifest に無い",
+    "model 'nope' is not in the manifest",
   );
 });
 
@@ -102,7 +102,7 @@ test("fromAssets: pipeline の契約名が depth-anything でない manifest を
   await assertRejects(
     () => DepthAnythingPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
-    "manifest の pipeline が 'birefnet/1'",
+    "the manifest's pipeline is 'birefnet/1'",
   );
 });
 
@@ -112,7 +112,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   await assertRejects(
     () => DepthAnythingPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
-    "major に未対応",
+    "the major of pipeline 'depth-anything/2' is not supported",
   );
 });
 
@@ -121,7 +121,7 @@ test("fromAssets: 存在しない quant は利用可能な一覧を添えて落�
   await assertRejects(
     () => DepthAnythingPipeline.fromAssets({ manifest, assets: COMPONENT }, { quant: "nope" }),
     Error,
-    "quant 'nope' は manifest に無い",
+    "quant 'nope' is not in the manifest",
   );
 });
 
@@ -133,7 +133,7 @@ test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async
   await assertRejects(
     () => DepthAnythingPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
-    "pipelineConfig: 未知キー 'image_mean'",
+    "pipelineConfig: unknown key 'image_mean'",
   );
 });
 
@@ -144,7 +144,7 @@ test("fromAssets: bicubic 以外の補間を宣言した配布形は受理しな
   await assertRejects(
     () => DepthAnythingPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
-    "pipelineConfig.interpolation: この実装が対応するのは 'bicubic' だけ",
+    "pipelineConfig.interpolation: this implementation supports only 'bicubic'",
   );
 });
 
@@ -155,7 +155,7 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   await assertRejects(
     () => DepthAnythingPipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
-    "部品 'depth' の容器が無い",
+    "component 'depth' has no container",
   );
 });
 
@@ -189,16 +189,16 @@ test("assertStaticDim: 宣言どおりのグラフは通り、事前学習解像
         "imageHeight",
       ),
     Error,
-    "depth-anything: imageHeight — グラフ入力 'pixel_values' の軸 2 が 384",
+    "depth-anything: imageHeight — graph input 'pixel_values' axis 2 is 384",
   );
-  assert(error.message.includes("pipelineConfig は 518"), error.message);
+  assert(error.message.includes("pipelineConfig has 518"), error.message);
 });
 
 test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
   assertThrows(
     () => assertStaticDim(depthGraph(), "pixel", 2, depthConfig.imageHeight, "imageHeight"),
     Error,
-    "depth-anything: グラフ入力 'pixel' が無い（imageHeight）",
+    "depth-anything: graph input 'pixel' is missing (imageHeight)",
   );
 });
 
@@ -209,7 +209,7 @@ test("assertDepthShape: 宣言どおりなら通り、チャネル軸を持っ�
     () =>
       assertDepthShape(depthGraph({ outputShape: [1, 1, 518, 518] }), depthConfig, "深度地図の形"),
     Error,
-    "期待は [1, 518, 518]",
+    "expected [1, 518, 518]",
   );
 });
 
@@ -218,7 +218,7 @@ test("assertDepthShape: 先頭が一致する短い宣言も落とす（軸ご�
   assertThrows(
     () => assertDepthShape(depthGraph({ outputShape: [1, 518] }), depthConfig, "深度地図の形"),
     Error,
-    "グラフ出力 'depth' の形が [1, 518]",
+    "graph output 'depth' has shape [1, 518]",
   );
 });
 
@@ -231,7 +231,7 @@ test("assertDepthShape: 出力名の宣言が values に無ければ落とす", 
   assertThrows(
     () => assertDepthShape(model, depthConfig, "深度地図の形"),
     Error,
-    "depth-anything: グラフ出力 'depth' の宣言が無い（深度地図の形）",
+    "depth-anything: graph output 'depth' has no declaration (深度地図の形)",
   );
 });
 
@@ -390,7 +390,7 @@ test("後処理: 非有限の深度は resize の前に画素座標つきで落�
     assertThrows(
       () => resampleDepth(plane, width, height, width, height),
       Error,
-      `depth-anything: 深度値 (x=${index % width}, y=${Math.floor(index / width)}) が非有限値`,
+      `depth-anything: depth value (x=${index % width}, y=${Math.floor(index / width)}) is non-finite`,
     );
     // 拡大する呼び出し（`resizePlaneF32` が重み付き和で NaN を広げる経路）でも同じ座標。
     assertThrows(

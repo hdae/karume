@@ -274,7 +274,7 @@ describe("手順の共通の約束", () => {
         // 型の外の綴り（JS の呼び手）を模すための変換。
         () => matteFromLogits(new Float32Array(4), 2, 2, 2, 2, name as MatteProcedure),
         Error,
-        "後処理の手順",
+        "postprocessing procedure",
       );
     }
   });
@@ -285,7 +285,7 @@ describe("手順の共通の約束", () => {
     assertThrows(
       () => Reflect.apply(matteFromLogits, undefined, [new Float32Array(4), 2, 2, 2, 2]),
       Error,
-      "後処理の手順 undefined は未対応",
+      "postprocessing procedure undefined is not supported",
     );
   });
 
@@ -297,22 +297,22 @@ describe("手順の共通の約束", () => {
       assertThrows(
         () => matteFromLogits(Float32Array.of(0, 0, NaN, 0), 2, 2, 3, 3, procedure),
         Error,
-        "マットの logit (x=0, y=1) が非有限値",
+        "the matte logit (x=0, y=1) is non-finite",
       );
       assertThrows(
         () => matteFromLogits(Float32Array.of(0, NaN, 0, 0), 2, 2, 2, 2, procedure),
         Error,
-        "マットの logit (x=1, y=0) が非有限値",
+        "the matte logit (x=1, y=0) is non-finite",
       );
       assertThrows(
         () => matteFromLogits(Float32Array.of(0, 0, 0, Infinity), 2, 2, 2, 2, procedure),
         Error,
-        "マットの logit (x=1, y=1) が非有限値",
+        "the matte logit (x=1, y=1) is non-finite",
       );
       assertThrows(
         () => matteFromLogits(Float32Array.of(-Infinity, 0, 0, 0), 2, 2, 2, 2, procedure),
         Error,
-        "マットの logit (x=0, y=0) が非有限値",
+        "the matte logit (x=0, y=0) is non-finite",
       );
     }
   });

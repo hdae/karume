@@ -78,7 +78,7 @@ export class IrodoriTokenizer {
     // per ADR 0107 decision 2). The asset parsing below (`parseIrodoriTokenizerAsset`) goes
     // through the same condition, but a violation there is an asset mismatch, so it stays a plain
     // `Error`.
-    assertEncodableText(text, "irodori の本文");
+    assertEncodableText(text, "irodori text");
     const ids: number[] = [];
     for (const chunk of this.#added.split(text)) {
       if (chunk.added) {
@@ -109,7 +109,7 @@ export class IrodoriTokenizer {
    */
   encodePadded(text: string, maxLength: number): IrodoriPaddedIds {
     if (!Number.isInteger(maxLength) || maxLength <= 0) {
-      throw new Error(`maxLength は 1 以上の整数（受け取った値: ${maxLength}）`);
+      throw new Error(`maxLength must be an integer >= 1 (received: ${maxLength})`);
     }
     const body = this.encode(text).slice(0, maxLength - 1);
     const ids = new Int32Array(maxLength).fill(this.#assets.padId);
@@ -143,14 +143,14 @@ const asByteBaseId = (value: unknown, label: string, tokens: readonly string[]):
   const id = asId(value, label);
   if (id + 255 >= tokens.length) {
     throw new Error(
-      `${label}: バイト 256 本（${id}..${id + 255}）が語彙の行数 ${tokens.length} に収まらない`,
+      `${label}: the 256 bytes (${id}..${id + 255}) do not fit in the vocabulary row count ${tokens.length}`,
     );
   }
   for (let byte = 0; byte < 256; byte += 1) {
     const want = `<0x${byte.toString(16).toUpperCase().padStart(2, "0")}>`;
     if (tokens[id + byte] !== want) {
       throw new Error(
-        `${label}: 行 ${id + byte} が ${want} でない（${JSON.stringify(tokens[id + byte])}）`,
+        `${label}: row ${id + byte} is not ${want} (${JSON.stringify(tokens[id + byte])})`,
       );
     }
   }
@@ -179,13 +179,13 @@ const parseIrodoriAddedTokens = (
   for (const [token, id] of added) {
     if (id >= vocab.size) {
       throw new Error(
-        `${label}: ${JSON.stringify(token)} の id ${id} が語彙の行数 ${vocab.size} 以上`,
+        `${label}: ${JSON.stringify(token)} has id ${id}, which is >= the vocabulary row count ${vocab.size}`,
       );
     }
     const row = vocab.get(token)?.id;
     if (row !== undefined && row !== id) {
       throw new Error(
-        `${label}: ${JSON.stringify(token)} の id ${id} が語彙の行 ${row} と食い違う`,
+        `${label}: ${JSON.stringify(token)} has id ${id}, which disagrees with vocabulary row ${row}`,
       );
     }
   }
@@ -218,7 +218,9 @@ export const parseIrodoriTokenizerAsset = (
   const tokens = asString(obj["vocabText"], `${label}.vocabText`).split("\n");
   const rawScores = obj["scores"];
   if (!Array.isArray(rawScores) || rawScores.length !== tokens.length) {
-    throw new Error(`${label}: scores の長さが語彙の行数 ${tokens.length} と合わない`);
+    throw new Error(
+      `${label}: the length of scores does not match the vocabulary row count ${tokens.length}`,
+    );
   }
   assertUniqueLines(tokens, `${label}.vocabText`);
   const vocab = new Map<string, UnigramVocabEntry>();

@@ -24,17 +24,17 @@
  */
 
 export const asRecord = (value: unknown, label: string): Record<string, unknown> => {
-  if (typeof value !== "object" || value === null) throw new Error(`${label}: オブジェクトでない`);
+  if (typeof value !== "object" || value === null) throw new Error(`${label}: not an object`);
   return value as Record<string, unknown>;
 };
 
 export const asString = (value: unknown, label: string): string => {
-  if (typeof value !== "string") throw new Error(`${label}: 文字列でない`);
+  if (typeof value !== "string") throw new Error(`${label}: not a string`);
   return value;
 };
 
 export const asNumber = (value: unknown, label: string): number => {
-  if (typeof value !== "number") throw new Error(`${label}: 数値でない`);
+  if (typeof value !== "number") throw new Error(`${label}: not a number`);
   return value;
 };
 
@@ -54,7 +54,7 @@ export const MAX_CODE_POINT = 0x10ffff;
  */
 export const assertCodePoint = (cp: number, label: string): void => {
   if (!Number.isInteger(cp) || cp < 0 || cp > MAX_CODE_POINT) {
-    throw new Error(`${label}: コードポイントが 0..${MAX_CODE_POINT} の整数でない（${cp}）`);
+    throw new Error(`${label}: code point is not an integer in 0..${MAX_CODE_POINT} (${cp})`);
   }
 };
 
@@ -71,7 +71,7 @@ const MAX_ID = 2147483647;
 export const asId = (value: unknown, label: string): number => {
   const id = asNumber(value, label);
   if (!Number.isInteger(id) || id < 0 || id > MAX_ID) {
-    throw new Error(`${label}: トークン id が 0..${MAX_ID} の整数でない（${id}）`);
+    throw new Error(`${label}: token id is not an integer in 0..${MAX_ID} (${id})`);
   }
   return id;
 };
@@ -82,7 +82,7 @@ export const asId = (value: unknown, label: string): number => {
 export const asVocabId = (value: unknown, label: string, vocabSize: number): number => {
   const id = asId(value, label);
   if (id >= vocabSize) {
-    throw new Error(`${label}: トークン id ${id} が語彙の行数 ${vocabSize} 以上`);
+    throw new Error(`${label}: token id ${id} is not below the vocabulary row count ${vocabSize}`);
   }
   return id;
 };
@@ -96,7 +96,7 @@ export const asVocabId = (value: unknown, label: string, vocabSize: number): num
  */
 export const asPositiveInteger = (value: unknown, label: string): number => {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
-    throw new Error(`${label}: 正の安全整数でない（${String(value)}）`);
+    throw new Error(`${label}: not a positive safe integer (${String(value)})`);
   }
   return value;
 };
@@ -109,7 +109,7 @@ export const asPositiveInteger = (value: unknown, label: string): number => {
  */
 export const asFiniteNumber = (value: unknown, label: string): number => {
   if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`${label}: 有限の数値でない（${String(value)}）`);
+    throw new Error(`${label}: not a finite number (${String(value)})`);
   }
   return value;
 };
@@ -128,8 +128,8 @@ export const assertUniqueLines = (lines: readonly string[], label: string): void
     const seen = firstAt.get(line);
     if (seen !== undefined) {
       throw new Error(
-        `${label}: 行 ${index} が行 ${seen} と同じトークン ${JSON.stringify(line)}` +
-          "（行番号 = id なので重複は配布の破損）",
+        `${label}: line ${index} has the same token as line ${seen}: ${JSON.stringify(line)}` +
+          " (line number = id, so a duplicate is a corrupt distribution)",
       );
     }
     firstAt.set(line, index);
@@ -147,7 +147,7 @@ export const assertUniqueLines = (lines: readonly string[], label: string): void
 export const setUnique = <K, V>(map: Map<K, V>, key: K, value: V, label: string): void => {
   if (map.has(key)) {
     throw new Error(
-      `${label}: 鍵 ${JSON.stringify(key)} が重複している（後勝ちで黙って上書きされる）`,
+      `${label}: duplicate key ${JSON.stringify(key)} (the later entry would silently overwrite the earlier one)`,
     );
   }
   map.set(key, value);
@@ -155,11 +155,11 @@ export const setUnique = <K, V>(map: Map<K, V>, key: K, value: V, label: string)
 
 /** Added vocabulary (a sequence of `[string, id]` pairs) into a map. */
 export const parseAddedTokens = (raw: unknown, label: string): Map<string, number> => {
-  if (!Array.isArray(raw)) throw new Error(`${label}: 配列でない`);
+  if (!Array.isArray(raw)) throw new Error(`${label}: not an array`);
   const out = new Map<string, number>();
   for (const entry of raw) {
     if (!Array.isArray(entry) || entry.length !== 2) {
-      throw new Error(`${label}: [文字列, id] でない`);
+      throw new Error(`${label}: not [string, id]`);
     }
     // NOTE: not bounded by the vocabulary row count — added tokens can be numbered **outside** the
     // vocabulary table (anima's Qwen2 actually does this: the real asset has 151643..151668 against

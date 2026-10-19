@@ -63,8 +63,8 @@ export const assertLogBucketDomain = (
   const mid = Math.floor(bucketSize / 2);
   if (mid < 2 || maxPosition - 1 <= mid) {
     throw new RangeError(
-      `${where}: bucketSize ${bucketSize} / maxPosition ${maxPosition} では対数バケットの式が` +
-        `成立しない（bucketSize ≥ 4 かつ maxPosition − 1 > ⌊bucketSize / 2⌋ が要る）`,
+      `${where}: the log-bucket formula does not hold with bucketSize ${bucketSize} / maxPosition ${maxPosition}` +
+        ` (bucketSize ≥ 4 and maxPosition − 1 > ⌊bucketSize / 2⌋ are required)`,
     );
   }
 };
@@ -102,15 +102,15 @@ export const buildRelPosTables = (
   maxPosition: number,
 ): RelPosTables => {
   if (!Number.isInteger(length) || length < 1) {
-    throw new RangeError(`相対位置表の長さ ${length} が 1 以上の整数でない`);
+    throw new RangeError(`Relative position table length ${length} is not an integer >= 1`);
   }
   if (!Number.isInteger(bucketSize) || bucketSize < 2) {
-    throw new RangeError(`bucketSize ${bucketSize} が 2 以上の整数でない`);
+    throw new RangeError(`bucketSize ${bucketSize} is not an integer >= 2`);
   }
   if (!Number.isInteger(maxPosition) || maxPosition < 2) {
-    throw new RangeError(`maxPosition ${maxPosition} が 2 以上の整数でない`);
+    throw new RangeError(`maxPosition ${maxPosition} is not an integer >= 2`);
   }
-  assertLogBucketDomain(bucketSize, maxPosition, "相対位置表");
+  assertLogBucketDomain(bucketSize, maxPosition, "relative position table");
   const span = bucketSize;
   const upper = 2 * span - 1;
   // Values on diagonal d = i − j ∈ [−(length−1), length−1] (the tables depend only on d).
@@ -121,7 +121,7 @@ export const buildRelPosTables = (
     // into 0). With the current formula assertLogBucketDomain above excludes it first, so this is
     // not reached — a defence for when the formula changes.
     if (!Number.isFinite(shifted)) {
-      throw new Error(`相対位置 ${d} のバケットが有限でない（${shifted}）`);
+      throw new Error(`The bucket of relative position ${d} is not finite (${shifted})`);
     }
     diagonal[d + length - 1] = shifted < 0 ? 0 : shifted > upper ? upper : shifted;
   }

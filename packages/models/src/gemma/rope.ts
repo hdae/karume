@@ -113,14 +113,14 @@ export const gemma4RopeInputNames = (): string[] =>
 const assertGemma4RopeLayerSpec = (where: string, spec: Gemma4RopeLayerSpec): void => {
   const { theta, headDim, rotaryDim } = spec;
   if (!Number.isFinite(theta) || theta <= 0) {
-    throw new Error(`${where}: theta は正の有限値（${theta}）`);
+    throw new Error(`${where}: theta must be a positive finite number (${theta})`);
   }
   if (!Number.isInteger(headDim) || headDim < 2 || headDim % 2 !== 0) {
-    throw new Error(`${where}: headDim は 2 以上の偶数（${headDim}）`);
+    throw new Error(`${where}: headDim must be an even number ≥ 2 (${headDim})`);
   }
   if (!Number.isInteger(rotaryDim) || rotaryDim < 2 || rotaryDim % 2 !== 0 || rotaryDim > headDim) {
     throw new Error(
-      `${where}: rotaryDim は 2 以上 headDim 以下の偶数（${rotaryDim} / headDim ${headDim}）`,
+      `${where}: rotaryDim must be an even number in 2..headDim (${rotaryDim} / headDim ${headDim})`,
     );
   }
 };
@@ -151,7 +151,7 @@ const ropeInverseFrequencies = (
       ? Math.fround(1 / Math.fround(Math.pow(spec.theta, Math.fround((2 * i) / spec.headDim))))
       : Math.pow(spec.theta, -(2 * i) / spec.headDim);
     if (qat && (!Number.isFinite(invFreq[i]) || invFreq[i] <= 0)) {
-      throw new Error("gemma4-qat rope: f32 逆周波数が正の有限数でない");
+      throw new Error("gemma4-qat rope: an f32 inverse frequency is not a positive finite number");
     }
   }
   return invFreq;
@@ -183,7 +183,9 @@ const ropeRows = (
   for (let row = 0; row < rows; row += 1) {
     const position = positions[row];
     if (!Number.isInteger(position) || position < 0) {
-      throw new Error(`gemma4 rope: 位置は非負整数（row ${row}: ${position}）`);
+      throw new Error(
+        `gemma4 rope: a position must be a non-negative integer (row ${row}: ${position})`,
+      );
     }
     const base = row * width;
     for (let i = 0; i < half; i += 1) {

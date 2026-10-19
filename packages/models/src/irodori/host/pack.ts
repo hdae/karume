@@ -56,7 +56,9 @@ export const packIds = (
     // (ADR 0107). The empty check of `packCaptionIds` just below is an internal premise that is
     // reached only after the pipeline has routed an empty caption to another path, so it stays a
     // plain `Error`.
-    throw new ModelInputError(`irodori: ${where} が正規化後に空（合成する本文が無い）`);
+    throw new ModelInputError(
+      `irodori: ${where} is empty after normalisation (there is no text to synthesise)`,
+    );
   }
   return packBody(tokenizer, normalized, maxLength);
 };
@@ -77,7 +79,9 @@ export const packCaptionIds = (
 ): Int32Array<ArrayBuffer> => {
   const stripped = caption.trim();
   if (stripped.length === 0) {
-    throw new Error("irodori: caption が strip 後に空（caption なし経路へ回すべき入力）");
+    throw new Error(
+      "irodori: caption is empty after strip (input that belongs on the no-caption path)",
+    );
   }
   return packBody(tokenizer, stripped, maxLength);
 };

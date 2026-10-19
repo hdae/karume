@@ -128,7 +128,7 @@ const assertOutputScale = (
   const name = model.graph.outputs[0];
   const value = model.graph.values[name];
   if (value === undefined) {
-    throw new Error(`irodori: グラフ出力 '${name}' の宣言が無い（${where}）`);
+    throw new Error(`irodori: graph output '${name}' is not declared (${where})`);
   }
   const symbol = model.graph.symbols[0];
   // The canonical spelling is `coeff·sym`, and **a coefficient of 1 is omitted** (`formatDim` in
@@ -138,8 +138,8 @@ const assertOutputScale = (
   const dim = value.shape[axis];
   if (symbol === undefined || dim !== canonical) {
     throw new Error(
-      `irodori: ${where} — グラフ出力 '${name}' の軸 ${axis} が ${String(dim)}、` +
-        `pipelineConfig からの期待は '${canonical}'`,
+      `irodori: ${where} — graph output '${name}' has axis ${axis} = ${String(dim)}; ` +
+        `pipelineConfig expects '${canonical}'`,
     );
   }
 };
@@ -160,13 +160,13 @@ const assertOutputDim = (
   const name = model.graph.outputs[0];
   const value = model.graph.values[name];
   if (value === undefined) {
-    throw new Error(`irodori: グラフ出力 '${name}' の宣言が無い（${where}）`);
+    throw new Error(`irodori: graph output '${name}' is not declared (${where})`);
   }
   const dim = value.shape[axis];
   if (dim !== expected) {
     throw new Error(
-      `irodori: ${where} — グラフ出力 '${name}' の軸 ${axis} が ${String(dim)}、` +
-        `pipelineConfig は ${expected}`,
+      `irodori: ${where} — graph output '${name}' has axis ${axis} = ${String(dim)}; ` +
+        `pipelineConfig expects ${expected}`,
     );
   }
 };
@@ -196,15 +196,15 @@ const admitDitContext = (dit: GraphOwner, ditContext: GraphOwner): readonly DitC
   const symbols = ditContext.graph.symbols;
   if (symbols.length !== 0) {
     throw new Error(
-      `irodori: dit_context が記号次元を持つ（[${symbols.join(", ")}]）— 出力は生成 1 回ぶんの` +
-        "静的な形でなければならない",
+      `irodori: dit_context has symbolic dimensions ([${symbols.join(", ")}]) — its outputs must have` +
+        " a static shape for one generation",
     );
   }
   const outputs = ditContext.graph.outputs;
   if (outputs.length < 2 || outputs.length % 2 !== 0) {
     throw new Error(
-      `irodori: dit_context の出力が ${outputs.length} 本（ブロックごとの K / V の対 = 2 本以上の` +
-        "偶数本が要る）",
+      `irodori: dit_context has ${outputs.length} outputs (one K / V pair per block = an even count` +
+        " of at least 2 is required)",
     );
   }
   const ditInputs = new Map(dit.graph.inputs.map((input) => [input.name, input] as const));
@@ -213,16 +213,17 @@ const admitDitContext = (dit: GraphOwner, ditContext: GraphOwner): readonly DitC
   const extra = [...ditInputs.keys()].filter((name) => !expected.includes(name));
   if (missing.length > 0 || extra.length > 0) {
     throw new Error(
-      `irodori: dit の入力が {${DIT_STEP_INPUTS.join(", ")}} ∪ dit_context の出力と一致しない` +
-        `（dit に無い: [${missing.join(", ")}] / dit にだけある: [${extra.join(", ")}]）`,
+      `irodori: the dit inputs do not match {${DIT_STEP_INPUTS.join(", ")}} ∪ the dit_context outputs` +
+        ` (missing from dit: [${missing.join(", ")}] / only in dit: [${extra.join(", ")}])`,
     );
   }
   return outputs.map((name) => {
     const value = ditContext.graph.values[name];
-    if (value === undefined) throw new Error(`irodori: dit_context の出力 '${name}' の宣言が無い`);
+    if (value === undefined)
+      throw new Error(`irodori: dit_context output '${name}' is not declared`);
     // Always present given the set equality above (checked here only to narrow the type).
     const input = ditInputs.get(name);
-    if (input === undefined) throw new Error(`irodori: dit の入力 '${name}' が無い`);
+    if (input === undefined) throw new Error(`irodori: dit input '${name}' does not exist`);
     const dims = value.shape.filter((dim): dim is number => typeof dim === "number");
     const sameShape =
       value.shape.length === input.shape.length &&
@@ -231,8 +232,8 @@ const admitDitContext = (dit: GraphOwner, ditContext: GraphOwner): readonly DitC
       const produced = `${value.dtype} [${value.shape.join(", ")}]`;
       const consumed = `${input.dtype} [${input.shape.join(", ")}]`;
       throw new Error(
-        `irodori: dit_context の出力 '${name}'（${produced}）が dit の同名入力（${consumed}）と` +
-          "合わない（静的な同じ形・同じ dtype が要る）",
+        `irodori: dit_context output '${name}' (${produced}) does not match the dit input of the same name (${consumed})` +
+          " (the same static shape and the same dtype are required)",
       );
     }
     // Elements are 4 bytes for every dtype (ADR 0009).
@@ -348,24 +349,24 @@ export const admitIrodori = async (
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
-      `IrodoriPipeline: model '${modelName}' は manifest に無い` +
-        `（利用可能: ${manifest.available.models.join(" / ")}）`,
+      `IrodoriPipeline: model '${modelName}' is not in the manifest` +
+        ` (available: ${manifest.available.models.join(" / ")})`,
     );
   }
   const entry: ModelEntry = manifest.models[modelName];
   const { name, major } = entry.pipeline;
   if (name !== IRODORI_PIPELINE_NAME) {
     throw new Error(
-      `IrodoriPipeline: manifest の pipeline が '${name}/${major}'` +
-        `（'${IRODORI_PIPELINE_NAME}/${IRODORI_PIPELINE_MAJOR}' が必要）`,
+      `IrodoriPipeline: the manifest pipeline is '${name}/${major}'` +
+        ` ('${IRODORI_PIPELINE_NAME}/${IRODORI_PIPELINE_MAJOR}' is required)`,
     );
   }
   if (major !== IRODORI_PIPELINE_MAJOR) {
     // The only check that stops the silent degradation of "old implementation × new repository"
     // (ADR 0038 §6).
     throw new Error(
-      `IrodoriPipeline: pipeline '${name}/${major}' の major に未対応` +
-        `（この実装が読めるのは ${IRODORI_PIPELINE_NAME}/${IRODORI_PIPELINE_MAJOR}）`,
+      `IrodoriPipeline: pipeline '${name}/${major}' has an unsupported major` +
+        ` (this implementation reads ${IRODORI_PIPELINE_NAME}/${IRODORI_PIPELINE_MAJOR})`,
     );
   }
   const config = parseIrodoriPipelineConfig(entry.pipelineConfig);
@@ -373,8 +374,8 @@ export const admitIrodori = async (
   const quantName = options.quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quantName)) {
     throw new Error(
-      `IrodoriPipeline: quant '${quantName}' は manifest に無い` +
-        `（利用可能: ${entry.available.quants.join(" / ")}）`,
+      `IrodoriPipeline: quant '${quantName}' is not in the manifest` +
+        ` (available: ${entry.available.quants.join(" / ")})`,
     );
   }
   const quant = entry.quants[quantName];
@@ -447,7 +448,9 @@ export const admitIrodori = async (
   // observation path.
   const ditSymbols = dit.graph.symbols;
   if (ditSymbols.length !== 1) {
-    throw new Error(`irodori: dit の記号次元が 1 本でない（[${ditSymbols.join(", ")}]）`);
+    throw new Error(
+      `irodori: dit does not have exactly one symbolic dimension ([${ditSymbols.join(", ")}])`,
+    );
   }
   const ditSymbol = ditSymbols[0];
   const ditContextOutputs = admitDitContext(dit, ditContext);

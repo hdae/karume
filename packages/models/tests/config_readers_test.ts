@@ -24,7 +24,7 @@ test("assertAllowedKeys: 未知キーは落とし、文言に label と許可一
   assertThrows(
     () => assertAllowedKeys({ a: 1, image_mean: 2 }, ["a", "b"], "pipelineConfig"),
     Error,
-    "pipelineConfig: 未知キー 'image_mean'（許可: a / b）",
+    "pipelineConfig: unknown key 'image_mean' (allowed: a / b)",
   );
 });
 
@@ -36,7 +36,7 @@ test("readNumber: 欄が無ければ落とし、文言に label.key が入る", 
   assertThrows(
     () => readNumber({}, "imageWidth", "pipelineConfig", isPositive, "正でない"),
     Error,
-    "pipelineConfig.imageWidth: 無い",
+    "pipelineConfig.imageWidth: missing",
   );
 });
 
@@ -44,7 +44,7 @@ test("readNumber: 欄は Object.hasOwn で見る（継承した prototype の値
   assertThrows(
     () => readNumber({} as Record<string, unknown>, "toString", "here", isPositive, "正でない"),
     Error,
-    "here.toString: 無い",
+    "here.toString: missing",
   );
 });
 
@@ -53,7 +53,7 @@ test("readNumber: 値が undefined の欄は『無い』ではなく型違いと
   assertThrows(
     () => readNumber({ n: undefined }, "n", "here", isPositive, "正でない"),
     Error,
-    "here.n: 正でない（undefined）",
+    "here.n: 正でない (undefined)",
   );
 });
 
@@ -86,7 +86,7 @@ test("readChannels: 欄が無ければ落とす", () => {
   assertThrows(
     () => readChannels({}, "imageMean", "pipelineConfig", Number.isFinite, "だめ"),
     Error,
-    "pipelineConfig.imageMean: 無い",
+    "pipelineConfig.imageMean: missing",
   );
 });
 
@@ -95,7 +95,7 @@ test("readChannels: 配列でない / 長さが 3 でないものを落とす", 
     assertThrows(
       () => readChannels({ c: bad }, "c", "here", Number.isFinite, "だめ"),
       Error,
-      "here.c: 長さ 3 の配列でない",
+      "here.c: not an array of length 3",
     );
   }
 });
@@ -125,7 +125,7 @@ test("readOnly: 欄が無ければ落とす", () => {
   assertThrows(
     () => readOnly({}, "interpolation", "pipelineConfig", "bilinear", "why"),
     Error,
-    "pipelineConfig.interpolation: 無い",
+    "pipelineConfig.interpolation: missing",
   );
 });
 
@@ -134,8 +134,8 @@ test("readOnly: 綴り違いも対応外も同じ文言で落とし、label と�
     assertThrows(
       () => readOnly({ i: bad }, "i", "pipelineConfig", "bilinear", "上流が bilinear で焼いている"),
       Error,
-      "pipelineConfig.i: この実装が対応するのは 'bilinear' だけ" +
-        `（${String(bad)}）— 上流が bilinear で焼いている`,
+      "pipelineConfig.i: this implementation supports only 'bilinear'" +
+        ` (${String(bad)}) — 上流が bilinear で焼いている`,
     );
   }
 });

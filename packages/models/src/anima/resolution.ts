@@ -97,7 +97,7 @@ export const parseResolution = (raw: string): ImageSize => {
   const spelled = parts.length === 1 ? [parts[0], parts[0]] : parts;
   if (spelled.length !== 2 || spelled.some((part) => !/^\d+$/.test(part))) {
     throw new ModelInputError(
-      `解像度 ${JSON.stringify(raw)} が WxH でも正方の略記でもない（例: 1344x768 / 512）`,
+      `Resolution ${JSON.stringify(raw)} is neither WxH nor the square shorthand (e.g. 1344x768 / 512)`,
     );
   }
   const size = { width: Number(spelled[0]), height: Number(spelled[1]) };
@@ -129,30 +129,30 @@ const tokensOf = (size: ImageSize): number =>
 export const assertAcceptableResolution = (size: ImageSize): void => {
   const label = `${size.width}×${size.height}`;
   for (const [side, axis] of [
-    [size.width, "幅"],
-    [size.height, "高さ"],
+    [size.width, "width"],
+    [size.height, "height"],
   ] as const) {
     if (!Number.isInteger(side)) {
-      throw new ModelInputError(`解像度 ${label} の${axis} ${side} が整数でない`);
+      throw new ModelInputError(`Resolution ${label}: ${axis} ${side} is not an integer`);
     }
     if (side % RESOLUTION_GRANULARITY !== 0) {
       throw new ModelInputError(
-        `解像度 ${label} の${axis} ${side} が ${RESOLUTION_GRANULARITY} の倍数でない` +
-          `（latent が patch ${DIT_PATCH_SIDE} で割り切れない）`,
+        `Resolution ${label}: ${axis} ${side} is not a multiple of ${RESOLUTION_GRANULARITY}` +
+          ` (the latent is not divisible by patch ${DIT_PATCH_SIDE})`,
       );
     }
     if (side < MIN_RESOLUTION_SIDE) {
       throw new ModelInputError(
-        `解像度 ${label} の${axis} ${side} が下限 ${MIN_RESOLUTION_SIDE} 未満` +
-          `（VAE タイル decoder の latent ${
+        `Resolution ${label}: ${axis} ${side} is below the lower bound ${MIN_RESOLUTION_SIDE}` +
+          ` (the VAE tile decoder's latent ${
             MIN_RESOLUTION_SIDE / ANIMA_SPATIAL_COMPRESSION
-          } が入らない）`,
+          } does not fit)`,
       );
     }
     if (side > MAX_RESOLUTION_SIDE) {
       throw new ModelInputError(
-        `解像度 ${label} の${axis} ${side} が上限 ${MAX_RESOLUTION_SIDE} 超` +
-          `（rope 素表の天井 = latent ${MAX_LATENT_SIDE}）`,
+        `Resolution ${label}: ${axis} ${side} exceeds the upper bound ${MAX_RESOLUTION_SIDE}` +
+          ` (the ceiling of the rope base table = latent ${MAX_LATENT_SIDE})`,
       );
     }
   }
@@ -163,8 +163,8 @@ export const assertAcceptableResolution = (size: ImageSize): void => {
   // (`anima_resolution_test.ts`) pins that it is unreachable.
   if (tokens > MAX_DIT_TOKENS) {
     throw new Error(
-      `解像度 ${label} のトークン長 S=${tokens} が上限 ${MAX_DIT_TOKENS} 超` +
-        '（S 形グラフを export したときの Dim("S") の上限 — 各辺の条件とは別に面積で決まる）',
+      `Resolution ${label}: token length S=${tokens} exceeds the upper bound ${MAX_DIT_TOKENS}` +
+        ' (the upper bound of Dim("S") when the S-form graph was exported — set by the area, separately from the per-side conditions)',
     );
   }
 };

@@ -19,7 +19,7 @@ export const toCodePoints = (text: string): number[] => {
   for (const ch of text) {
     const cp = ch.codePointAt(0) as number;
     if (cp >= 0xd800 && cp <= 0xdfff) {
-      throw new Error(`対にならないサロゲート U+${cp.toString(16).toUpperCase()} が入力にある`);
+      throw new Error(`The input has an unpaired surrogate U+${cp.toString(16).toUpperCase()}`);
     }
     out.push(cp);
   }

@@ -462,7 +462,7 @@ export class WanPipeline {
    * Concurrent calls wait and run in turn (no graphs resident at the same time — module doc).
    */
   async generate(request: WanGenerateRequest): Promise<GeneratedVideo> {
-    if (this.#disposal !== undefined) throw new Error("WanPipeline: dispose 済みでは生成できない");
+    if (this.#disposal !== undefined) throw new Error("WanPipeline: cannot generate after dispose");
     return await this.#chain(() => generateWanVideo(WAN21_FAMILY, this.#state, request));
   }
 

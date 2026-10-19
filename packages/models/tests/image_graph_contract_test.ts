@@ -123,7 +123,7 @@ describe("画像 3 家族の構築前検査", () => {
       await assertRejects(
         () => buildSiglip2("i32", [1, HIDDEN]),
         Error,
-        "siglip2: 前処理の pixel_values — グラフ入力 'pixel_values' の dtype が i32、前処理が書くのは f32",
+        "siglip2: preprocessing's pixel_values — graph input 'pixel_values' dtype is i32, the preprocessing writes f32",
       );
     });
 
@@ -139,7 +139,7 @@ describe("画像 3 家族の構築前検査", () => {
             assets: await assetsOf("matte", declaration("i32", "logits", [1, 1, SIZE, SIZE])),
           }),
         Error,
-        "birefnet: 前処理の pixel_values — グラフ入力 'pixel_values' の dtype が i32",
+        "birefnet: preprocessing's pixel_values — graph input 'pixel_values' dtype is i32",
       );
     });
 
@@ -154,7 +154,7 @@ describe("画像 3 家族の構築前検査", () => {
             assets: await assetsOf("depth", declaration("i32", "predicted_depth", [1, SIZE, SIZE])),
           }),
         Error,
-        "depth-anything: 前処理の pixel_values — グラフ入力 'pixel_values' の dtype が i32",
+        "depth-anything: preprocessing's pixel_values — graph input 'pixel_values' dtype is i32",
       );
     });
   });
@@ -164,7 +164,7 @@ describe("画像 3 家族の構築前検査", () => {
       await assertRejects(
         () => buildSiglip2("f32", [2, HIDDEN]),
         Error,
-        "siglip2: pooler_output — グラフ出力 'pooler_output' が f32 [2, 12]、期待は f32 の [1, hiddenDim]",
+        "siglip2: pooler_output — graph output 'pooler_output' is f32 [2, 12], expected f32 [1, hiddenDim]",
       );
     });
 
@@ -174,7 +174,7 @@ describe("画像 3 家族の構築前検査", () => {
       await assertRejects(
         () => buildSiglip2("f32", [1, HIDDEN, 1]),
         Error,
-        "siglip2: pooler_output — グラフ出力 'pooler_output' が f32 [1, 12, 1]、期待は f32 の [1, hiddenDim]",
+        "siglip2: pooler_output — graph output 'pooler_output' is f32 [1, 12, 1], expected f32 [1, hiddenDim]",
       );
     });
 
@@ -182,7 +182,7 @@ describe("画像 3 家族の構築前検査", () => {
       await assertRejects(
         () => buildSiglip2("f32", [1, HIDDEN], "i32"),
         Error,
-        "siglip2: pooler_output — グラフ出力 'pooler_output' が i32 [1, 12]、期待は f32 の [1, hiddenDim]",
+        "siglip2: pooler_output — graph output 'pooler_output' is i32 [1, 12], expected f32 [1, hiddenDim]",
       );
     });
   });

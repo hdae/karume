@@ -72,20 +72,20 @@ test("parseAnimaPipelineConfig: scheduler.type は 2 語だけを受ける", () 
   const unknown = assertThrows(
     () => parseAnimaPipelineConfig({ ...VALID, scheduler: { ...VALID.scheduler, type: "dpm++" } }),
     Error,
-    "pipelineConfig.scheduler.type: 期待 'euler' / 'dpmpp-2m'",
+    "pipelineConfig.scheduler.type: expected 'euler' / 'dpmpp-2m'",
   );
-  assertEquals(unknown.message.includes("実際 'dpm++'"), true, unknown.message);
+  assertEquals(unknown.message.includes("actual 'dpm++'"), true, unknown.message);
   const notString = assertThrows(
     () => parseAnimaPipelineConfig({ ...VALID, scheduler: { ...VALID.scheduler, type: 2 } }),
     Error,
-    "pipelineConfig.scheduler.type: 期待",
+    "pipelineConfig.scheduler.type: expected",
   );
-  assertEquals(notString.message.includes("実際 2"), true, notString.message);
+  assertEquals(notString.message.includes("actual 2"), true, notString.message);
   // 大文字違い・前後の空白も受けない（受理集合は 2 語の完全一致）。
   assertThrows(
     () => parseAnimaPipelineConfig({ ...VALID, scheduler: { ...VALID.scheduler, type: "Euler" } }),
     Error,
-    "実際 'Euler'",
+    "actual 'Euler'",
   );
 });
 
@@ -93,42 +93,42 @@ test("parseAnimaPipelineConfig: 未知キーは fail loudly（綴り違いを既
   assertThrows(
     () => parseAnimaPipelineConfig({ ...VALID, sampler: {} }),
     Error,
-    "pipelineConfig: 未知キー 'sampler'",
+    "pipelineConfig: unknown key 'sampler'",
   );
   assertThrows(
     () => parseAnimaPipelineConfig({ ...VALID, scheduler: { ...VALID.scheduler, sigmaMax: 1 } }),
     Error,
-    "pipelineConfig.scheduler: 未知キー 'sigmaMax'",
+    "pipelineConfig.scheduler: unknown key 'sigmaMax'",
   );
   assertThrows(
     () => parseAnimaPipelineConfig(withDefaults({ step: 8 })),
     Error,
-    "pipelineConfig.defaults: 未知キー 'step'",
+    "pipelineConfig.defaults: unknown key 'step'",
   );
   assertThrows(
     () =>
       parseAnimaPipelineConfig(withDefaults({ resolution: { width: 1024, height: 1024, w: 1 } })),
     Error,
-    "未知キー 'w'",
+    "unknown key 'w'",
   );
 });
 
 test("parseAnimaPipelineConfig: 必須欄の欠落を名指しで落とす", () => {
-  assertThrows(() => parseAnimaPipelineConfig({}), Error, "pipelineConfig.scheduler: 無い");
+  assertThrows(() => parseAnimaPipelineConfig({}), Error, "pipelineConfig.scheduler: missing");
   assertThrows(
     () => parseAnimaPipelineConfig({ scheduler: VALID.scheduler }),
     Error,
-    "pipelineConfig.defaults: 無い",
+    "pipelineConfig.defaults: missing",
   );
   assertThrows(
     () => parseAnimaPipelineConfig({ scheduler: { shift: 3 }, defaults: VALID.defaults }),
     Error,
-    "pipelineConfig.scheduler.numTrainTimesteps: 無い",
+    "pipelineConfig.scheduler.numTrainTimesteps: missing",
   );
   assertThrows(
     () => parseAnimaPipelineConfig(withDefaults({ resolution: { width: 1024 } })),
     Error,
-    "height: 無い",
+    "height: missing",
   );
 });
 
@@ -136,7 +136,7 @@ test("parseAnimaPipelineConfig: 型と値域を検査する", () => {
   assertThrows(
     () => parseAnimaPipelineConfig({ ...VALID, scheduler: { shift: 0, numTrainTimesteps: 1000 } }),
     Error,
-    "正の有限数でない",
+    "not a positive finite number",
   );
   assertThrows(
     () =>
@@ -145,17 +145,21 @@ test("parseAnimaPipelineConfig: 型と値域を検査する", () => {
         scheduler: { shift: 3, numTrainTimesteps: 1000.5 },
       }),
     Error,
-    "正の整数でない",
+    "not a positive integer",
   );
   // steps < 2 は sigma の linspace が組めない（sampler の受理集合と同じ下限）。
-  assertThrows(() => parseAnimaPipelineConfig(withDefaults({ steps: 1 })), Error, "2 以上の整数");
+  assertThrows(
+    () => parseAnimaPipelineConfig(withDefaults({ steps: 1 })),
+    Error,
+    "integer of at least 2",
+  );
   // 上限も sampler の受理集合と同じ（既定が門の外だと、要求が何も渡さない generate が入力起因で落ちる）。
   // 診断は生成の門（`assertAcceptableSteps`）の文言そのもの — 条件を書き写さず門を呼んでいる証拠。
   assertEquals(parseAnimaPipelineConfig(withDefaults({ steps: 1000 })).defaults.steps, 1000);
   const overLimit = assertThrows(
     () => parseAnimaPipelineConfig(withDefaults({ steps: 1001 })),
     Error,
-    "1000 以下でない",
+    "is not at most 1000",
   );
   // 解像度と同じく、manifest 側で外れたのは資産の齟齬なので `ModelInputError` では**ない**。
   assert(!(overLimit instanceof ModelInputError));
@@ -163,12 +167,12 @@ test("parseAnimaPipelineConfig: 型と値域を検査する", () => {
   assertThrows(
     () => parseAnimaPipelineConfig(withDefaults({ guidanceScale: "1" })),
     Error,
-    "有限の数でない",
+    "not a finite number",
   );
   assertThrows(
     () => parseAnimaPipelineConfig(withDefaults({ negativePrompt: 42 })),
     Error,
-    "文字列でない",
+    "not a string",
   );
 });
 
@@ -177,12 +181,12 @@ test("parseAnimaPipelineConfig: 既定の解像度も受理集合の内側であ
   assertThrows(
     () => parseAnimaPipelineConfig(withDefaults({ resolution: { width: 1000, height: 1024 } })),
     Error,
-    "倍数でない",
+    "is not a multiple of",
   );
   assertThrows(
     () => parseAnimaPipelineConfig(withDefaults({ resolution: { width: 256, height: 256 } })),
     Error,
-    "下限",
+    "lower bound",
   );
   // 逆側: 受理集合の条件は生成要求と共有するが、manifest 側で外れたのは資産の齟齬なので
   // `ModelInputError` では**ない**（ADR 0107 決定 2）。元の例外は `cause` に残る。

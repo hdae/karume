@@ -664,7 +664,7 @@ const generateLatent = async (
     {},
     async (run) => {
       const output = outputAt(state.textProj, await run({ hidden: hidden.text }), 0);
-      return { data: asF32(output, "text-proj の出力"), rows: output.shape[1] };
+      return { data: asF32(output, "text-proj output"), rows: output.shape[1] };
     },
   );
 
@@ -684,8 +684,8 @@ const generateLatent = async (
         const raw = outputAt(state.captionProj, outputs, 0);
         const normed = outputAt(state.captionProj, outputs, 1);
         return {
-          state: { data: asF32(raw, "caption-proj の第 1 出力"), rows: raw.shape[1] },
-          normed: asF32(normed, "caption-proj の第 2 出力"),
+          state: { data: asF32(raw, "caption-proj first output"), rows: raw.shape[1] },
+          normed: asF32(normed, "caption-proj second output"),
         };
       },
     );
@@ -729,7 +729,7 @@ const generateLatent = async (
           ]),
           has_caption: bool(captionVec !== undefined),
         });
-        return asF32(outputAt(state.duration, outputs, 0), "duration の出力")[0];
+        return asF32(outputAt(state.duration, outputs, 0), "duration output")[0];
       },
     );
     plan = sequenceLengthFromLogFrames(logFrames, bounds);
@@ -737,7 +737,7 @@ const generateLatent = async (
   const { frames } = plan;
   if (frames > config.ditSymMax) {
     throw new Error(
-      `IrodoriPipeline: 決まった latent 長 ${frames} が dit の宣言上限 ${config.ditSymMax} を超えている`,
+      `IrodoriPipeline: the decided latent length ${frames} exceeds the declared maximum of dit ${config.ditSymMax}`,
     );
   }
 
@@ -753,9 +753,9 @@ const generateLatent = async (
     caption: captionState.rows,
   };
   const conditionValues = {
-    text_state: rightPad(textState, caps.text, config.textDim, "text 条件"),
-    speaker_state: rightPad(speakerState, caps.speaker, config.speakerDim, "speaker 条件"),
-    caption_state: rightPad(captionState, caps.caption, config.captionDim, "caption 条件"),
+    text_state: rightPad(textState, caps.text, config.textDim, "text condition"),
+    speaker_state: rightPad(speakerState, caps.speaker, config.speakerDim, "speaker condition"),
+    caption_state: rightPad(captionState, caps.caption, config.captionDim, "caption condition"),
   };
   // Inputs of `dit_context` (used once in (6') — projected to K / V and then passed to `dit`).
   const conditions = {
@@ -801,8 +801,8 @@ const generateLatent = async (
       // uniquely by the request (there is the duration-graph path), so the entry cannot check it
       // and stage 7 stays its owner.
       throw new ModelInputError(
-        `IrodoriPipeline: initialNoise の長さ ${request.initialNoise.length} が` +
-          ` ${frames}×${config.latentDim} と違う（決まった latent 長は ${frames}）`,
+        `IrodoriPipeline: initialNoise length ${request.initialNoise.length} differs from` +
+          ` ${frames}×${config.latentDim} (the decided latent length is ${frames})`,
       );
     }
     initial = request.initialNoise;
@@ -864,7 +864,7 @@ const decodeWaveform = async (
     async (run) =>
       await decodeTiles(latent.data, { latentDim, hopLength, tiles }, async (slice, frames) => {
         const outputs = await run({ latent: f32(slice, [1, frames, latentDim]) });
-        return asF32(outputAt(state.codecDecoder, outputs, 0), "codec decoder の出力");
+        return asF32(outputAt(state.codecDecoder, outputs, 0), "codec decoder output");
       }),
   );
 };
@@ -893,7 +893,8 @@ const generateAudio = async (
   // full scale, so a silent wrong value would come out as "audio that is silent in places / roaring
   // in places".
   for (const sample of data) {
-    if (!Number.isFinite(sample)) throw new Error("irodori: 波形に非有限値が含まれる");
+    if (!Number.isFinite(sample))
+      throw new Error("irodori: the waveform contains non-finite values");
   }
   return {
     data,
@@ -952,7 +953,7 @@ export class IrodoriPipeline {
     const source = toManifestSource(
       ref,
       "IrodoriPipeline.fromPretrained",
-      'IRODORI_SOURCES["irodori-v4.1-small"]（@karume/models/irodori）',
+      'IRODORI_SOURCES["irodori-v4.1-small"] (@karume/models/irodori)',
     );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
@@ -1039,7 +1040,7 @@ export class IrodoriPipeline {
     // The disposed check happens at call time (checking inside the chain would also fail
     // generations accepted before the dispose).
     if (this.#disposal !== undefined) {
-      throw new Error("IrodoriPipeline: dispose 済みでは生成できない");
+      throw new Error("IrodoriPipeline: cannot generate after dispose");
     }
     // The request-knob checks also happen at call time (outside the chain) — inside the chain, a
     // typo would fail only after waiting for the preceding generation to settle
@@ -1057,7 +1058,7 @@ export class IrodoriPipeline {
    */
   async generateLatent(request: IrodoriGenerateRequest): Promise<GeneratedLatent> {
     if (this.#disposal !== undefined) {
-      throw new Error("IrodoriPipeline: dispose 済みでは生成できない");
+      throw new Error("IrodoriPipeline: cannot generate after dispose");
     }
     assertIrodoriRequest(request, this.#state.config);
     return await this.#chain(

@@ -266,7 +266,7 @@ const siglip2: Family = {
     ),
   }),
   tolerance: 0,
-  disposedMessage: "dispose 済みでは埋め込めない",
+  disposedMessage: "cannot embed after dispose",
 };
 
 const birefnet: Family = {
@@ -331,7 +331,7 @@ const birefnet: Family = {
   //     （2 の上界の 1,000 倍超）、平面は GPU と CPU で同一になる。resample は整数の演算なので出力も
   //     ビット一致 → 許容差 0。前提は `expected` が毎回確かめる（{@link assertNoRoundingTie}）。
   tolerance: 0,
-  disposedMessage: "dispose 済みでは切り抜けない",
+  disposedMessage: "cannot segment after dispose",
 };
 
 const depthAnything: Family = {
@@ -365,7 +365,7 @@ const depthAnything: Family = {
     return { values: Array.from(map.data), width: map.width, height: map.height };
   },
   tolerance: 1e-5,
-  disposedMessage: "dispose 済みでは推定できない",
+  disposedMessage: "cannot estimate after dispose",
 };
 
 const assertOutput = (actual: Output, expected: Output, tolerance: number): void => {

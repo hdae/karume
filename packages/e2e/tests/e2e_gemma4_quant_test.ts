@@ -380,7 +380,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
             family === "gemma4"
               ? Gemma4Pipeline.fromPretrained(noWeightsSource, { quant: "unsupported" })
               : Gemma4QatPipeline.fromPretrained(noWeightsSource, { quant: "unsupported" });
-          await assertRejects(loadUnsupported, Error, "session.linearComputeは未対応");
+          await assertRejects(loadUnsupported, Error, "session.linearCompute is not supported");
           if (family === "gemma4-qat") {
             await assertRejects(
               () =>

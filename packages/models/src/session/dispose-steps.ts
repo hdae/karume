@@ -42,6 +42,6 @@ export const disposeSteps = async (
   }
   if (failures.length === 1) throw failures[0];
   if (failures.length > 1) {
-    throw new AggregateError(failures, `dispose: 後始末が ${failures.length} 件失敗した`);
+    throw new AggregateError(failures, `dispose: ${failures.length} clean-up steps failed`);
   }
 };

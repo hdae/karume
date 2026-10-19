@@ -177,9 +177,10 @@ const ROPE_LAYER_KEYS: readonly string[] = ["theta", "headDim", "rotaryDim"];
 
 /** Checks only that the field exists and is a number (the caller adds the value range). */
 const readRawNumber = (raw: Record<string, unknown>, key: string, where: string): number => {
-  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
+  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: missing`);
   const value = raw[key];
-  if (typeof value !== "number") throw new Error(`${where}.${key}: 数でない（${String(value)}）`);
+  if (typeof value !== "number")
+    throw new Error(`${where}.${key}: not a number (${String(value)})`);
   return value;
 };
 
@@ -191,7 +192,7 @@ const readNumber = (
   requirement: string,
 ): number => {
   const value = readRawNumber(raw, key, where);
-  if (!check(value)) throw new Error(`${where}.${key}: ${requirement}（${String(value)}）`);
+  if (!check(value)) throw new Error(`${where}.${key}: ${requirement} (${String(value)})`);
   return value;
 };
 
@@ -203,7 +204,7 @@ const readNumber = (
  */
 const parseSampler = (raw: unknown, where: string): Gemma4DefaultSampler => {
   const record = isRecord(raw) ? raw : undefined;
-  if (record === undefined) throw new Error(`${where}: 無い / オブジェクトでない`);
+  if (record === undefined) throw new Error(`${where}: missing / not an object`);
   assertAllowedKeys(record, SAMPLER_KEYS, where);
   return {
     temperature: readNumber(
@@ -211,21 +212,21 @@ const parseSampler = (raw: unknown, where: string): Gemma4DefaultSampler => {
       "temperature",
       where,
       (value) => Number.isFinite(value) && value >= 0,
-      "0 以上の有限数でない",
+      "not a finite number ≥ 0",
     ),
     topK: readNumber(
       record,
       "topK",
       where,
       (value) => Number.isSafeInteger(value) && value >= 1,
-      "1 以上の整数でない",
+      "not a positive integer",
     ),
     topP: readNumber(
       record,
       "topP",
       where,
       (value) => Number.isFinite(value) && value > 0 && value <= 1,
-      "0 < topP ≤ 1 の範囲にない",
+      "not in the range 0 < topP ≤ 1",
     ),
   };
 };
@@ -239,7 +240,7 @@ const parseSampler = (raw: unknown, where: string): Gemma4DefaultSampler => {
  * shape of the declaration** (unknown keys, missing fields, types).
  */
 const parseRopeLayer = (raw: unknown, where: string): Gemma4RopeLayerSpec => {
-  if (!isRecord(raw)) throw new Error(`${where}: オブジェクトでない（${String(raw)}）`);
+  if (!isRecord(raw)) throw new Error(`${where}: not an object (${String(raw)})`);
   assertAllowedKeys(raw, ROPE_LAYER_KEYS, where);
   return {
     theta: readRawNumber(raw, "theta", where),
@@ -250,10 +251,10 @@ const parseRopeLayer = (raw: unknown, where: string): Gemma4RopeLayerSpec => {
 
 /** Reads both layer types and leaves the value ranges to the check in `./rope.ts`. */
 const parseRope = (raw: unknown, where: string): Gemma4RopeSpec => {
-  if (!isRecord(raw)) throw new Error(`${where}: オブジェクトでない（${String(raw)}）`);
+  if (!isRecord(raw)) throw new Error(`${where}: not an object (${String(raw)})`);
   assertAllowedKeys(raw, GEMMA4_ROPE_LAYER_TYPES, where);
   const layer = (layerType: Gemma4RopeLayerType): Gemma4RopeLayerSpec => {
-    if (!Object.hasOwn(raw, layerType)) throw new Error(`${where}.${layerType}: 無い`);
+    if (!Object.hasOwn(raw, layerType)) throw new Error(`${where}.${layerType}: missing`);
     return parseRopeLayer(raw[layerType], `${where}.${layerType}`);
   };
   const spec: Gemma4RopeSpec = {
@@ -287,7 +288,7 @@ const parseRope = (raw: unknown, where: string): Gemma4RopeSpec => {
  */
 export const parseGemma4PipelineConfig = (raw: unknown): Gemma4PipelineConfig => {
   const where = "pipelineConfig";
-  if (!isRecord(raw)) throw new Error(`${where}: オブジェクトでない（${String(raw)}）`);
+  if (!isRecord(raw)) throw new Error(`${where}: not an object (${String(raw)})`);
   assertAllowedKeys(raw, ROOT_KEYS, where);
   const positiveInteger = (value: number): boolean => Number.isSafeInteger(value) && value >= 1;
   // MUST: chunk row counts are at least 2 (the same lower bound as the runtime option's check
@@ -296,29 +297,35 @@ export const parseGemma4PipelineConfig = (raw: unknown): Gemma4PipelineConfig =>
   // (`ModelInputError`) (ADR 0107 decision 2). The writer `gemma4_pipeline_config` also bakes [2,
   // max].
   const chunkRows = (value: number): boolean => Number.isSafeInteger(value) && value >= 2;
-  const chunkLength = readNumber(raw, "chunkLength", where, chunkRows, "2 以上の整数でない");
-  const maxChunkLength = readNumber(raw, "maxChunkLength", where, chunkRows, "2 以上の整数でない");
-  const maxPosition = readNumber(raw, "maxPosition", where, positiveInteger, "1 以上の整数でない");
-  const capacity = readNumber(raw, "capacity", where, positiveInteger, "1 以上の整数でない");
+  const chunkLength = readNumber(raw, "chunkLength", where, chunkRows, "not an integer ≥ 2");
+  const maxChunkLength = readNumber(raw, "maxChunkLength", where, chunkRows, "not an integer ≥ 2");
+  const maxPosition = readNumber(
+    raw,
+    "maxPosition",
+    where,
+    positiveInteger,
+    "not a positive integer",
+  );
+  const capacity = readNumber(raw, "capacity", where, positiveInteger, "not a positive integer");
   if (chunkLength > maxChunkLength) {
     throw new Error(
-      `${where}: chunkLength ${chunkLength} が maxChunkLength ${maxChunkLength} を超えた` +
-        `（記号 M を焼いた trace 範囲の外）`,
+      `${where}: chunkLength ${chunkLength} exceeds maxChunkLength ${maxChunkLength}` +
+        ` (outside the trace range the symbol M was baked with)`,
     );
   }
   if (chunkLength > capacity) {
     throw new Error(
-      `${where}: chunkLength ${chunkLength} が capacity ${capacity} を超えた` +
-        `（1 chunk すら入らない容量）`,
+      `${where}: chunkLength ${chunkLength} exceeds capacity ${capacity}` +
+        ` (a capacity that does not fit even one chunk)`,
     );
   }
   if (capacity > maxPosition) {
     throw new Error(
-      `${where}: capacity ${capacity} が maxPosition ${maxPosition} を超えた` +
-        `（容量いっぱいの会話が位置表の外を引く）`,
+      `${where}: capacity ${capacity} exceeds maxPosition ${maxPosition}` +
+        ` (a conversation filling the capacity would look up beyond the position table)`,
     );
   }
-  if (!Object.hasOwn(raw, "rope")) throw new Error(`${where}.rope: 無い`);
+  if (!Object.hasOwn(raw, "rope")) throw new Error(`${where}.rope: missing`);
   const rope = parseRope(raw["rope"], `${where}.rope`);
   if (!Object.hasOwn(raw, "sampler")) {
     return { chunkLength, maxChunkLength, maxPosition, capacity, rope };

@@ -43,7 +43,7 @@ export const inCodeRanges = (ranges: CodeRanges, cp: number): boolean => {
  * id sequence). The value-range discipline is the same as sbv2's isomorphic `parseRanges`.
  */
 export const parseCodeRanges = (raw: unknown, label: string): CodeRanges => {
-  if (!Array.isArray(raw)) throw new Error(`${label}: 区間表が配列でない`);
+  if (!Array.isArray(raw)) throw new Error(`${label}: the range table is not an array`);
   const ranges: (readonly [number, number])[] = [];
   for (const [index, entry] of raw.entries()) {
     if (
@@ -52,18 +52,20 @@ export const parseCodeRanges = (raw: unknown, label: string): CodeRanges => {
       typeof entry[0] !== "number" ||
       typeof entry[1] !== "number"
     ) {
-      throw new Error(`${label}[${index}]: 区間が [start, end] の数値対でない`);
+      throw new Error(`${label}[${index}]: the range is not a [start, end] number pair`);
     }
     assertCodePoint(entry[0], `${label}[${index}]`);
     assertCodePoint(entry[1], `${label}[${index}]`);
     if (entry[0] > entry[1]) {
-      throw new Error(`${label}[${index}]: 区間 [${entry[0]}, ${entry[1]}] の始端が終端より大きい`);
+      throw new Error(
+        `${label}[${index}]: range [${entry[0]}, ${entry[1]}] has a start greater than its end`,
+      );
     }
     const previous = ranges[index - 1];
     if (previous !== undefined && previous[1] >= entry[0]) {
       throw new Error(
-        `${label}[${index}]: 区間 [${entry[0]}, ${entry[1]}] が前の区間 ` +
-          `[${previous[0]}, ${previous[1]}] と重なる / 昇順でない`,
+        `${label}[${index}]: range [${entry[0]}, ${entry[1]}] overlaps the previous range ` +
+          `[${previous[0]}, ${previous[1]}] / is not in ascending order`,
       );
     }
     ranges.push([entry[0], entry[1]]);
