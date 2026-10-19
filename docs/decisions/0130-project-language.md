@@ -206,9 +206,9 @@ See "Open points".
 | 2-9d (done 2026-10-18) | Comments and JSDoc of `packages/*/src` rewritten with a fact check; WGSL comments translated and the snapshots regenerated in the same commit | Code skeleton unchanged per file; lanes green; sha256 rows unchanged |
 | 2-9e (done 2026-10-19) | Error messages with their assertions, module by module; verbatim quotes in docs in the same commit | All lanes green with unchanged test counts |
 | 2-9f (done 2026-10-19) | Python exporter (`tools/exporter`, sources and tests) | AST unchanged apart from docstrings; `uv run pytest` green |
-| 2-9g | Remaining tools and fixture notes | The scan shows no Japanese there |
+| 2-9g (done 2026-10-19) | Remaining tools and the hand-written fixture notes | The scan shows no Japanese there apart from the allow-list |
 | 2-9h | Language gate (`verify_language_test.ts`, core lane) with an allow-list of the files that keep Japanese by nature or by this staging | Gate green; allow-list recorded here |
-| 0.15.x (after the release) | Comments in `packages/*/tests` (about 37,000 lines) and `tools/export-recipes` (about 30,000 lines) | Allow-list entries removed as each area is translated |
+| 0.15.x (after the release) | Comments in `packages/*/tests` (about 37,000 lines), `tools/export-recipes` (about 30,000 lines) and, with the recipes, the notes of the fixtures the recipes generate (710 strings in 14 files) | Allow-list entries removed as each area is translated |
 | Phase 3 — behaviour change | None from this ADR | — |
 
 ## Open points
@@ -301,6 +301,23 @@ All resolved by the maintainer's rulings of 2026-10-18 (step 2-9 plan check):
   of `tools/*`. `tools/export-recipes` still prints Japanese (0.15.x). The `RUF001-003` ignore in
   `tools/exporter/pyproject.toml` (full-width punctuation in Japanese prose) loses its reason once
   2-9g ends; 2-9h decides whether to drop it.
+- **Residue after 2-9g (2026-10-19).** The remaining tools (`tools/lint`, `tools/published-smoke`,
+  `tools/verify-diff`, `tools/release`, `tools/diag`, `tools/llm-baseline`, the comments of
+  `tools/.gitignore` and `tools/pyproject.toml`) and the hand-written fixture notes
+  (`op-contracts.json`, `dim-grammar.json`, `quant-presentation.json`, `gemma4-qat-rope-golden.json`,
+  the comment of `fixtures/golden/.gitignore`) are English. Proofs: the TypeScript and Python
+  skeletons for the tools, `zsh -n` plus the diff for the shell scripts, and
+  `tools/lang/fixture-notes.ts` for the fixtures (only the strings under `_doc` / `why` / `note`
+  changed; keys, order, numbers and data strings identical). The tools' own tests are re-keyed at
+  the same strength. The notes of the fixtures that `tools/export-recipes` generates (710 strings in
+  14 files — `wan-text/parity.json`, `umt5/tokenizer-cases.json`, `birefnet-matte/matte.json`,
+  the gemma, anima and irodori parity files, …) are written by the recipes' scripts, so they move
+  with the recipes to 0.15.x (ruling of 2026-10-19). The allow-list of 2-9h, as it stands after
+  2-9g: the input data of `tools/lang`'s own tests and the `JAPANESE` character classes; the three
+  fixture payloads of `tools/exporter/tests`; the 10 data lines of `packages/*/src`; the data
+  strings of the fixtures (vocabularies, sample texts, expected values); the generated fixtures'
+  notes (until 0.15.x); `tools/export-recipes`; `packages/*/tests`; `docs/research` and
+  `docs/GLOSSARY.ja.md`; the excluded ADRs.
 - **Baseline (tracked files, line-based, 2026-10-18).** `docs/decisions` 19,541 lines in 129 files;
   `docs/` otherwise 5,651; `docs/research` 23,964; `packages/runtime/src` 16,512; `packages/models/src`
   11,911; `packages/hub/src` 1,433; tests of the three packages and e2e 37,113; test fixtures 11,964;
