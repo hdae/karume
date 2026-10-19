@@ -204,7 +204,7 @@ See "Open points".
 | 2-9b (done 2026-10-18) | ADRs: force triage over every ADR → the maintainer's rulings → translation in numeric batches of five, each with an independent review | Every ADR in force is English; excluded ADRs carry an English status line; links and `DECIDED:` pointers resolve |
 | 2-9c (done 2026-10-18) | `docs/*.md` and `docs/glossary.md` (English; the Japanese column moves to `GLOSSARY.ja.md`); `CLAUDE.md`, `AGENTS.md`, `.claude/ACTIVE_DESIGN.md` as a whole; CHANGELOG remnants; the English header line on research snapshots | No Japanese under `docs/` outside `GLOSSARY.ja.md` and `research/` |
 | 2-9d (done 2026-10-18) | Comments and JSDoc of `packages/*/src` rewritten with a fact check; WGSL comments translated and the snapshots regenerated in the same commit | Code skeleton unchanged per file; lanes green; sha256 rows unchanged |
-| 2-9e | Error messages with their assertions, module by module; verbatim quotes in docs in the same commit | All lanes green with unchanged test counts |
+| 2-9e (done 2026-10-19) | Error messages with their assertions, module by module; verbatim quotes in docs in the same commit | All lanes green with unchanged test counts |
 | 2-9f | Python exporter (`tools/exporter`, sources and tests) | AST unchanged apart from docstrings; `uv run pytest` green |
 | 2-9g | Remaining tools and fixture notes | The scan shows no Japanese there |
 | 2-9h | Language gate (`verify_language_test.ts`, core lane) with an allow-list of the files that keep Japanese by nature or by this staging | Gate green; allow-list recorded here |
@@ -264,6 +264,26 @@ All resolved by the maintainer's rulings of 2026-10-18 (step 2-9 plan check):
   — about 3,150 lines, the subject of 2-9e; a few comments keep a Japanese example in a code span.
   Three test assertions that matched Japanese comment text (`codegen_wgsl_test.ts`,
   `linear_gemv_rows_test.ts`) were re-keyed to the English text.
+- **Residue after 2-9e (2026-10-19).** The string literals that reach a human — error messages,
+  warnings, diagnostics, labels, the notes written into WGSL headers — of `packages/*/src` and
+  `packages/test-support/src` are English: 3,103 literals in 244 files over three iterations
+  (runtime core; kernels / tune / gpu / codegen / reference / hub; models). The proof per file is the
+  strings mode of `tools/lang/code-skeleton.ts` (`--strings`): the skeleton with every literal lifted
+  out is unchanged, and every changed literal held Japanese before, except full-width parentheses
+  turned ASCII and the three object keys of `assertConvFlatExtents` (Japanese identifiers that
+  reached the message) made quoted English keys. The notes interpolated into WGSL headers changed
+  171 snapshots (comment lines only; the kernel fingerprint does not count comments). The assertions
+  of 180 test files were re-keyed to the same fragments of the English messages at the same strength,
+  one to the interpolated binding limit (`estimate_test.ts`), and the verbatim quotes in
+  `docs/known-issues.md` and `docs/limitations.md` carry the English messages. What stays Japanese
+  under `packages/*/src` is data by nature — 10 lines in 4 files: the Wan default negative prompt
+  (`wan/text-stage.ts`, Chinese, upstream's), the irodori normalisation tables
+  (`irodori/text/normalize.ts`), and tokenizer / detokenizer examples in comments
+  (`sbv2/text/bert-text.ts`, `text/detokenizer.ts`) — the allow-list of 2-9h. The glyphs `·` and
+  `〜` (the row-range spelling of `tune/derive.ts`, also in the embedded tables' comments) are not
+  Japanese to the scanner. Test comments that quote old messages verbatim (`*_pipeline_test.ts`
+  headers) are left for the test-comment step. The Python exporter (2-9f) and `tools/*` (2-9g) still
+  print Japanese.
 - **Baseline (tracked files, line-based, 2026-10-18).** `docs/decisions` 19,541 lines in 129 files;
   `docs/` otherwise 5,651; `docs/research` 23,964; `packages/runtime/src` 16,512; `packages/models/src`
   11,911; `packages/hub/src` 1,433; tests of the three packages and e2e 37,113; test fixtures 11,964;
