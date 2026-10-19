@@ -1,12 +1,16 @@
-"""移行 CLI のリポ丸ごとモード（`karume migrate --manifest`）— ADR 0109 決定 3 / 4 / 8。
+"""The whole-repository mode of the migration CLI (`karume migrate --manifest`) — ADR 0109
+decisions 3 / 4 / 8.
 
-被験体は**合成の `karume/4` リポ**（実ミラーは読まない）。グラフ 1 本ぶんの変換そのものは
-`test_migrate.py` の担当なので、ここが見るのはリポ単位でしか現れない事実である:
+The subject is **a synthetic `karume/4` repository** (the real mirror is not read). Converting a
+single graph is the job of `test_migrate.py`, so what this file checks are the facts that appear
+only at repository level:
 
-- shard 列を manifest の宣言から組む（ディレクトリを跨ぐ列・同じ列を指す複数モデルの畳み込み）
-- `extras` と PLE sidecar が容器の資産になり、manifest の `assets` から消える
-- 越境参照は変換せず `--cross-repo` の変換済みディレクトリから引き写す
-- 変換しなかったファイルがそのまま複写され、`karume/5` の karume.json が出る
+- the shard sequences are built from the manifest's declarations (sequences spanning directories,
+  several models pointing at the same sequence folded into one)
+- `extras` and the PLE sidecar become container assets and disappear from the manifest's `assets`
+- cross-repository references are not converted but copied from the converted directory given by
+  `--cross-repo`
+- files that were not converted are copied as is, and a `karume/5` karume.json is written
 """
 
 from __future__ import annotations
@@ -31,17 +35,19 @@ from karume.verify import ContainerError
 
 PROVENANCE = Provenance(license="apache-2.0", writer="karume/test")
 
-#: 合成資産（数 KiB）で part またぎと資産の block 分割を踏むために下げた寸法。
+#: Sizes lowered so that the synthetic assets (a few KiB) exercise part crossings and the block
+#: split of assets.
 SMALL_PART_BYTES = 1024
 SMALL_BLOCK_BYTES = 512
 
 MIB = 1024 * 1024
 
-#: 越境参照の pin（40 桁 hex 小文字 — `dist.REVISION_RE` の受理形）。
+#: The pin of a cross-repository reference (40 lowercase hex digits — the form `dist.REVISION_RE`
+#: accepts).
 REVISION = "0" * 39 + "1"
 
-#: PLE の合成寸法（`values` の 1 行 = layers × dim / 2 = 16 B・
-#: `scales` の 1 行 = layers × 4 = 8 B）。
+#: The synthetic PLE sizes (one `values` row = layers × dim / 2 = 16 B, one `scales` row =
+#: layers × 4 = 8 B).
 PLE_TOKENS = 64
 PLE_LAYERS = 2
 PLE_DIM = 16
@@ -49,12 +55,12 @@ PLE_RANGES: tuple[tuple[int, int], ...] = ((0, 20), (20, 45), (45, 64))
 
 
 # ---------------------------------------------------------------------------
-# 合成の `karume/4` リポ
+# The synthetic `karume/4` repository
 # ---------------------------------------------------------------------------
 
 
 def place(root: Path, rel: str, blob: bytes) -> dict[str, Any]:
-    """1 ファイルを置いて 3 点セットを返す。"""
+    """Place one file and return its triple (path / size / sha256)."""
     target = root / rel
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(blob)
@@ -64,7 +70,8 @@ def place(root: Path, rel: str, blob: bytes) -> dict[str, Any]:
 def stage_component(
     root: Path, directories: Sequence[str], stem: str, shards: Sequence[bytes]
 ) -> list[dict[str, Any]]:
-    """shard 列を**shard ごとの置き場**へ並べて FileRef 列を返す（列がディレクトリを跨げる）。"""
+    """Lay the shard sequence out **in each shard's own directory** and return the FileRefs (a
+    sequence can span directories)."""
     total = len(shards)
     return [
         place(root, numbered_name(f"{directory}/{stem}.safetensors", index, total), blob)
@@ -107,23 +114,27 @@ def write_manifest(root: Path, models: Mapping[str, Any], default_model: str) ->
 
 @pytest.fixture(autouse=True)
 def small_parts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """書き手の選択集合（256 MiB〜）に**合成資産の寸法**を足す（このモジュールの全ケース）。
+    """Add **the synthetic assets' size** to the writer's choice set (256 MiB and up) (every case
+    in this module).
 
-    数 KiB の合成リポは集合の part 長では part を割らないので、`migrated` の寸法を通すために
-    集合を広げる。集合の検査そのもの（集合外は落ちる）は `TestThePartLength` が本物の集合で見る
-    （あのクラスはこの fixture を同名の fixture で打ち消す）。
+    A synthetic repository of a few KiB does not split into parts at the set's part lengths, so
+    the set is widened to let `migrated`'s size through. The check of the set itself (values
+    outside it fail) is done by `TestThePartLength` with the real set (that class cancels this
+    fixture with a fixture of the same name).
     """
     monkeypatch.setattr(migrate, "PART_LENGTH_CHOICES", (*PART_LENGTH_CHOICES, SMALL_PART_BYTES))
 
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
-    """2 モデルが `encoder` を共有し、`decoder` の列がディレクトリを跨ぐリポ。"""
+    """A repository in which 2 models share `encoder` and the `decoder` sequence spans
+    directories."""
     root = tmp_path / "src"
     encoder = stage_component(
         root, ["shared/encoder"] * 2, "model.f32", legacy_shards(mark="enc", storage="f32")
     )
-    # 列がディレクトリを跨ぐ形（グラフ shard は共有ディレクトリ・重み shard は話者ディレクトリ）。
+    # A sequence spanning directories (the graph shard in the shared directory, the weight shard
+    # in the speaker directory).
     decoder = stage_component(
         root, ["shared/decoder", "alpha/decoder"], "model.f32", legacy_shards(mark="dec")
     )
@@ -178,7 +189,8 @@ def opened(out: Path, container: Mapping[str, Any]) -> Any:
 
 
 def asset_payload(read: Any, name: str) -> bytes:
-    """資産 1 本の payload（宣言の論理長で切る — 末尾の 0x00 を推測で剥がない）。"""
+    """The payload of one asset (cut at the declared logical length — trailing 0x00 bytes are not
+    stripped by guesswork)."""
     record = read.model.assets[name]
     return read.block(record.block)[: record.length]
 
@@ -211,7 +223,8 @@ class TestTheRepositoryManifest:
         assert set(alpha["assets"]) == {"tokenizer"}
 
     def test_the_container_entry_has_the_declared_shape(self, repo: Path, tmp_path: Path) -> None:
-        """ADR 0109 決定 3 — 2 文書それぞれの期待値 + part 0 を含む全 part の FileRef。"""
+        """ADR 0109 decision 3 — the expected values of each of the 2 documents + the FileRefs of
+        every part including part 0."""
         out = tmp_path / "out"
         migrated(repo, out)
         container = container_of(out, "alpha", "encoder", "f32")
@@ -238,10 +251,10 @@ class TestTheRepositoryManifest:
     def test_a_zero_length_part_is_written_and_declared_with_size_zero(
         self, tmp_path: Path
     ) -> None:
-        """const が空でも part 1 は 0 バイトのファイルとして並ぶ（ADR 0109 決定 3）。
+        """Even with an empty const region, part 1 is listed as a 0-byte file (ADR 0109 decision 3).
 
-        被験体は**定数を 1 本も持たない**コンポーネント（`legacy_fill_shards`）— const を
-        持つ合成では part 1 が埋まってしまい、0 バイトの席そのものを踏めない。
+        The subject is a component **with no constant at all** (`legacy_fill_shards`) — a
+        synthesis with consts would fill part 1 and could not exercise the 0-byte part itself.
         """
         root = tmp_path / "empty-const"
         plain = stage_component(
@@ -267,14 +280,15 @@ class TestTheRepositoryManifest:
         assert parts[1]["sha256"] == hashlib.sha256(b"").hexdigest()
 
     def test_the_output_sits_beside_the_old_weight_shards(self, repo: Path, tmp_path: Path) -> None:
-        """置き場は**重み shard の親**（列がディレクトリを跨いでも推測しない）。"""
+        """The output goes to **the parent of the weight shards** (no guessing even when the
+        sequence spans directories)."""
         out = tmp_path / "out"
         migrated(repo, out)
 
         assert container_of(out, "alpha", "encoder", "f32")["parts"][0]["path"].startswith(
             "shared/encoder/model.f32-"
         )
-        # decoder はグラフ shard が shared/・重み shard が alpha/ に居る。
+        # decoder has its graph shard in shared/ and its weight shard in alpha/.
         assert container_of(out, "alpha", "decoder", "f32")["parts"][0]["path"].startswith(
             "alpha/decoder/model.f32-"
         )
@@ -283,7 +297,7 @@ class TestTheRepositoryManifest:
         out = tmp_path / "out"
         result = migrated(repo, out)
 
-        # encoder（共有）+ decoder の 2 本だけが変換される（席は 3 つ）。
+        # Only encoder (shared) + decoder, 2 in all, are converted (there are 3 entries).
         assert len(result.converted) == 2
         assert container_of(out, "alpha", "encoder", "f32") == container_of(
             out, "beta", "encoder", "f32"
@@ -330,7 +344,8 @@ class TestTheRepositoryManifest:
             migrated(repo, repo / "out")
 
     def test_weight_shards_spread_over_directories_fail_loudly(self, tmp_path: Path) -> None:
-        """置き場は重み shard の親 1 つ（散っていたら推測せずに止まる）。"""
+        """The output goes to the one parent of the weight shards (if they are scattered, it stops
+        instead of guessing)."""
         root = tmp_path / "src"
         spread = stage_component(
             root,
@@ -354,7 +369,8 @@ class TestTheRepositoryManifest:
             migrated(root, tmp_path / "out")
 
     def test_a_shard_row_with_mixed_stems_fails_loudly(self, tmp_path: Path) -> None:
-        """出力の stem は旧 shard 名から取る（揃っていなければ推測せずに止まる）。"""
+        """The output stem is taken from the old shard names (if they differ, it stops instead of
+        guessing)."""
         root = tmp_path / "src"
         blobs = legacy_shards(mark="mix")
         mixed = [
@@ -375,7 +391,7 @@ class TestTheRepositoryManifest:
             migrated(root, tmp_path / "out")
 
     def test_the_single_form_is_refused(self, repo: Path, tmp_path: Path) -> None:
-        """karume/5 の container.parts は 2 要素以上 MUST（ADR 0109 決定 3）。"""
+        """container.parts of karume/5 MUST have 2 or more elements (ADR 0109 decision 3)."""
         with pytest.raises(MigrateError, match="--single cannot be used in whole-repository mode"):
             migrate.main(
                 [
@@ -392,7 +408,8 @@ class TestTheRepositoryManifest:
     def test_a_failure_midway_through_the_swap_leaves_nothing_behind(
         self, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """落ちた回は何も残さない（半分だけ本番名で公開された容器を残さない — §12）。"""
+        """A failed run leaves nothing behind (no container half-published under its final name —
+        §12)."""
         out = tmp_path / "out"
         real = os.replace
         seen = 0
@@ -401,11 +418,11 @@ class TestTheRepositoryManifest:
             nonlocal seen
             seen += 1
             if seen == 2:
-                raise OSError("据え替えの途中で落ちた回")
+                raise OSError("a run that failed midway through the swap")
             real(source, target)
 
         monkeypatch.setattr(publish.os, "replace", flaky)
-        with pytest.raises(OSError, match="据え替えの途中"):
+        with pytest.raises(OSError, match="midway through the swap"):
             migrated(repo, out)
 
         assert not list(out.rglob("*.krm"))
@@ -421,10 +438,10 @@ class TestTheCopiedFiles:
 
         assert "README.md" in copied
         assert "tokenizer.json" in copied
-        # `.` で始まるディレクトリは入らない。
+        # Directories starting with `.` are not included.
         assert not any(name.startswith(".git/") for name in copied)
-        # 変換した shard・容器の資産になった extras・旧 karume.json は複写されない
-        # （新しい karume.json は書かれる）。
+        # The converted shards, the extras that became container assets and the old karume.json
+        # are not copied (the new karume.json is written).
         assert not any(name.endswith(".safetensors") for name in copied)
         assert not (out / "alpha" / "decoder" / "rope_base.safetensors").exists()
         assert result.copied == 2  # README.md / tokenizer.json
@@ -442,17 +459,20 @@ class TestTheCopiedFiles:
 
 
 class TestTheDeclaredFiles:
-    """旧 manifest の FileRef（size / sha256）を現物と突き合わせてから変換する。
+    """The old manifest's FileRefs (size / sha256) are matched against the actual files before
+    converting.
 
-    移行の「生バイト同一」は手元のファイルとの比較なので、ここが無いと旧 revision と食い違う
-    ミラーの中身が新しい sha256 で洗浄され、逐語で写す assets の FileRef は現物と違う sha256 を
-    名乗る。突合は変換より前 — 落ちた時点で out に容器が 1 本も無い。
+    The migration's "raw bytes identical" is a comparison with the local files, so without this a
+    mirror whose contents disagree with the old revision would be laundered into a new sha256, and
+    the FileRefs of the assets copied verbatim would claim a sha256 different from the actual
+    files. The match runs before the conversion — when it fails, out holds no container at all.
     """
 
     def test_a_flipped_byte_in_an_old_shard_fails_before_any_container_is_written(
         self, repo: Path, tmp_path: Path
     ) -> None:
-        # 宣言順で後ろの席（alpha.decoder）の重み shard — 先頭の席の変換より前に落ちることを見る。
+        # The weight shard of a later entry in declaration order (alpha.decoder) — checks that it
+        # fails before the first entry is converted.
         shard = repo / numbered_name("alpha/decoder/model.f32.safetensors", 2, 2)
         blob = bytearray(shard.read_bytes())
         blob[-1] ^= 0xFF
@@ -499,7 +519,8 @@ class TestTheDeclaredFiles:
     def test_a_crossed_descriptor_sha256_is_spelled_like_a_sha256(
         self, borrower: Path, repo: Path, tmp_path: Path
     ) -> None:
-        """引き写す側（参照先の `karume/5`）の sha256 も綴りを見る — 逐語で写す値だから。"""
+        """The spelling of the sha256 on the copied side (the referenced `karume/5`) is checked too
+        — it is a value copied verbatim."""
         lender_out = tmp_path / "lender"
         migrated(repo, lender_out)
         manifest = json.loads((lender_out / "karume.json").read_text(encoding="utf-8"))
@@ -528,7 +549,7 @@ class TestTheExtras:
         raw = read.block("a.0")
         assert raw[: len(expected)] == expected
         assert raw[len(expected) :] == b"\x00" * (len(raw) - len(expected))
-        # extras は manifest の席から消える（容器が持つ）。
+        # extras disappear from the manifest entry (the container holds them).
         assert "extras" not in container_of(out, "alpha", "decoder", "f32")
 
     def test_an_unknown_extra_fails_loudly(self, repo: Path, tmp_path: Path) -> None:
@@ -542,13 +563,13 @@ class TestTheExtras:
 
 
 # ---------------------------------------------------------------------------
-# 越境参照
+# Cross-repository references
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def borrower(tmp_path: Path, repo: Path) -> Path:
-    """`hdae/lender` の `alpha.encoder.f32` を借りるリポ（自前の重みは 1 本）。"""
+    """A repository that borrows `alpha.encoder.f32` from `hdae/lender` (one weight of its own)."""
     root = tmp_path / "borrower"
     own = stage_component(root, ["gamma/decoder"] * 2, "model.f32", legacy_shards(mark="own"))
     lender = json.loads((repo / "karume.json").read_text(encoding="utf-8"))
@@ -598,17 +619,19 @@ class TestTheCrossRepoReferences:
             strict=True,
         ):
             assert ref == {**source, "repo": "hdae/lender", "revision": REVISION}
-        # 越境の列は自リポへ置かない。
+        # A cross-repository sequence is not placed in the own repository.
         assert not (out / crossed["parts"][0]["path"]).exists()
 
     def test_the_lookup_follows_the_output_path_not_the_seat_name(
         self, borrower: Path, repo: Path, tmp_path: Path
     ) -> None:
-        """引き写す鍵は part 0 の置き場（貸し手と借り手で席の名前が揃う保証は無い）。"""
+        """The key for copying is part 0's location (nothing guarantees that the lender and the
+        borrower use the same entry names)."""
         lender_out = tmp_path / "lender"
         migrated(repo, lender_out)
         manifest = json.loads((lender_out / "karume.json").read_text(encoding="utf-8"))
-        # 貸し手の席を全部別名のモデルへ移す（容器の path は変えない）。
+        # Move all of the lender's entries to a model with another name (the container paths do
+        # not change).
         manifest["models"] = {"renamed": manifest["models"]["alpha"]}
         manifest["defaultModel"] = "renamed"
         (lender_out / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -629,7 +652,8 @@ class TestTheCrossRepoReferences:
         lender_out = tmp_path / "lender"
         migrated(repo, lender_out)
         manifest = json.loads((lender_out / "karume.json").read_text(encoding="utf-8"))
-        # 借り手が指す列（shared/encoder）が参照先から消えた形。
+        # The sequence the borrower points at (shared/encoder) is gone from the referenced
+        # repository.
         for model in manifest["models"].values():
             model["weights"].pop("encoder", None)
         (lender_out / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -657,7 +681,7 @@ class TestTheCrossRepoReferences:
             migrated(borrower, tmp_path / "out")
 
     def test_the_same_repo_twice_fails_loudly(self, borrower: Path, tmp_path: Path) -> None:
-        """どちらの変換済みディレクトリから引くかが決まらない。"""
+        """It cannot be decided which converted directory to copy from."""
         spec = parse_cross_repo(f"hdae/lender={tmp_path / 'lender'}@{REVISION}")
 
         with pytest.raises(MigrateError, match="the same repo twice"):
@@ -678,12 +702,13 @@ class TestTheCrossRepoReferences:
 
 
 # ---------------------------------------------------------------------------
-# PLE sidecar → 容器の資産（索引 schema 3）
+# PLE sidecar → container assets (index schema 3)
 # ---------------------------------------------------------------------------
 
 
 def ple_rows(start: int, stop: int, width: int, seed: int) -> bytes:
-    """token 行そのもの（`start` から決まるので新旧の突合が行単位で効く）。"""
+    """The token rows themselves (determined by `start`, so the old / new match works row by
+    row)."""
     return bytes(
         ((token * 31 + offset * 7 + seed) & 0xFF)
         for token in range(start, stop)
@@ -692,7 +717,8 @@ def ple_rows(start: int, stop: int, width: int, seed: int) -> bytes:
 
 
 def ple_common(layers: int = PLE_LAYERS, dim: int = PLE_DIM, *, schema: int = 2) -> dict[str, Any]:
-    """旧索引 / shard メタデータの共通欄。schema 1（I8）は `storage` 欄を持たない（実資産の形）。"""
+    """The fields common to the old index and the shard metadata. Schema 1 (I8) has no `storage`
+    field (the shape of the real assets)."""
     return {
         "schema": schema,
         **({"storage": "i4"} if schema == 2 else {}),
@@ -711,9 +737,11 @@ def stage_ple(
     dim: int = PLE_DIM,
     schema: int = 2,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
-    """旧 PLE sidecar（索引 + token 範囲 shard）を置き、`(索引の FileRef, assets)` を返す。
+    """Place an old PLE sidecar (index + token-range shards) and return `(the index FileRef,
+    assets)`.
 
-    `layers` / `dim` を動かせるのは、行バイト数から決まる門（4 の倍数 MUST）を踏むためである。
+    `layers` / `dim` can be varied in order to exercise the check decided by the row byte count
+    (MUST be a multiple of 4).
     """
     values_row = layers * dim // (2 if schema == 2 else 1)
     values_dtype = "I4" if schema == 2 else "I8"
@@ -768,7 +796,7 @@ def gemma_repo(tmp_path: Path) -> Path:
 def stage_gemma_repo(
     root: Path, *, layers: int = PLE_LAYERS, dim: int = PLE_DIM, schema: int = 2
 ) -> Path:
-    """`gemma4` の PLE を持つリポ（部品 `model` に f32 / f16 の 2 席）。"""
+    """A repository with a `gemma4` PLE (component `model` with 2 entries, f32 / f16)."""
     weights = {
         dtype: {
             "shards": stage_component(
@@ -790,10 +818,11 @@ def stage_gemma_repo(
 
 
 def redeclare_asset(repo: Path, model: str, asset: str, blob: bytes) -> None:
-    """宣言済みの資産を書き換え、manifest の 3 点セットも合わせる。
+    """Rewrite a declared asset and update the manifest's triple to match.
 
-    宣言と現物の食い違いは移行の入口の突合が先に落とすので、中身の検査を踏む故障注入は
-    manifest ごと書き直す。
+    A mismatch between the declaration and the actual file is caught first by the match at the
+    migration's entry, so a fault injection that exercises the content checks rewrites the
+    manifest too.
     """
     manifest_path = repo / "karume.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -803,10 +832,11 @@ def redeclare_asset(repo: Path, model: str, asset: str, blob: bytes) -> None:
 
 
 def doctor_ple_shard(repo: Path, position: int, edit: Any) -> None:
-    """旧 PLE shard `position` のヘッダ JSON だけを `edit` で書き換え、manifest も合わせる。
+    """Rewrite only the header JSON of the old PLE shard `position` with `edit`, and update the
+    manifest to match.
 
-    データ節は 1 バイトも動かさない（ヘッダ長は元と同じ 8 の倍数へ空白で詰め直す）ので、壊れて
-    いるのは書き換えた宣言だけになる。
+    The data section does not move by a single byte (the header is padded with spaces to a
+    multiple of 8, as originally), so only the rewritten declaration is broken.
     """
     name = numbered_name("ple.safetensors", position, len(PLE_RANGES))
     blob = (repo / "e2b" / "ple" / name).read_bytes()
@@ -819,7 +849,8 @@ def doctor_ple_shard(repo: Path, position: int, edit: Any) -> None:
 
 
 def source_rows(repo: Path, directory: str, key: str) -> bytes:
-    """旧 shard の `key` を token 順に連結した生バイト（突合の相手を別経路で取る）。"""
+    """The raw bytes of `key` in the old shards concatenated in token order (the counterpart of the
+    match, taken by another path)."""
     out = bytearray()
     for position in range(1, len(PLE_RANGES) + 1):
         blob = (
@@ -856,7 +887,8 @@ class TestThePleFold:
         assert index["tokens"] == PLE_TOKENS
         assert index["values"]["rowBytes"] == PLE_LAYERS * PLE_DIM // 2
         assert index["scales"]["rowBytes"] == PLE_LAYERS * 4
-        # 旧 shard の境界（20 / 45）は消え、block 上限（512 B）だけが刻みを決める。
+        # The old shard boundaries (20 / 45) are gone; only the block limit (512 B) decides the
+        # step.
         assert [(b["start"], b["stop"]) for b in index["values"]["blocks"]] == [(0, 32), (32, 64)]
         assert [(b["start"], b["stop"]) for b in index["scales"]["blocks"]] == [(0, 64)]
         for key in ("values", "scales"):
@@ -876,10 +908,12 @@ class TestThePleFold:
     def test_a_range_read_block_sits_alone_in_its_part(
         self, gemma_repo: Path, tmp_path: Path
     ) -> None:
-        """区間読みを要する block は 1 block = 1 part（ADR 0109 決定 4 / container-v1 §4.2）。
+        """A block that needs range reads gets one part to itself (ADR 0109 decision 4 /
+        container-v1 §4.2).
 
-        走査型の取得元（Deno の既定）は part を先頭から切るので、同居させると 1 行引くのに
-        part の先頭から読み飛ばすことになる — §4.2 がこの MUST を置いた当の失敗形である。
+        A scan-type source (the default on Deno and Node) cuts a part from its start, so sharing
+        the part would mean skipping from the part's start to fetch one row — the very failure
+        that §4.2 placed this MUST against.
         """
         out = tmp_path / "out"
         migrated(gemma_repo, out)
@@ -893,18 +927,21 @@ class TestThePleFold:
             for key in ("values", "scales")
             for block in index[key]["blocks"]
         ]
-        assert len(ranged) == 3  # values 2 本 + scales 1 本（空振りしない形で固定する）
+        # 2 values + 1 scales (pinned so that the check cannot pass vacuously).
+        assert len(ranged) == 3
         for block_id in ranged:
             assert occupants[part_of[block_id]] == 1
 
-        # 全量読みの索引は専用 part を取らないが、重み block とは同居しない。
+        # The index, read whole, does not get a dedicated part, but it does not share one with
+        # weight blocks.
         index_part = part_of[read.model.assets["ple_index"].block]
         assert index_part not in {
             part_of[block.id] for block in read.model.blocks if block.role != "asset"
         }
 
     def test_a_schema_1_i8_sidecar_folds_with_storage_i8(self, tmp_path: Path) -> None:
-        # karume-gemma4（非 QAT）の実資産は schema 1（I8・storage 欄なし）。新索引は格納を必ず綴る。
+        # The real assets of karume-gemma4 (non-QAT) are schema 1 (I8, no storage field). The
+        # new index always spells the storage.
         repo = stage_gemma_repo(tmp_path / "gem1", schema=1)
         out = tmp_path / "out"
         migrated(repo, out)
@@ -952,7 +989,8 @@ class TestThePleFold:
     def test_a_shard_whose_metadata_disagrees_with_the_index_fails_loudly(
         self, gemma_repo: Path, tmp_path: Path
     ) -> None:
-        """索引と `karume_ple` の食い違いは沈黙誤値の種（行の持ち主が 2 通りになる）。"""
+        """A mismatch between the index and `karume_ple` breeds silently wrong values (a row would
+        have 2 owners)."""
         manifest = json.loads((gemma_repo / "karume.json").read_text(encoding="utf-8"))
         index_path = gemma_repo / manifest["models"]["e2b"]["assets"]["ple_index"]["path"]
         index = json.loads(index_path.read_text(encoding="utf-8"))
@@ -966,7 +1004,8 @@ class TestThePleFold:
     def test_a_dim_that_the_packing_cannot_divide_fails_loudly(
         self, gemma_repo: Path, tmp_path: Path
     ) -> None:
-        """i4 は 1 バイトに 2 要素（割り切れない dim は行バイト数が決まらない）。"""
+        """i4 packs 2 elements per byte (a dim that does not divide leaves the row byte count
+        undefined)."""
         manifest = json.loads((gemma_repo / "karume.json").read_text(encoding="utf-8"))
         index_path = gemma_repo / manifest["models"]["e2b"]["assets"]["ple_index"]["path"]
         index = json.loads(index_path.read_text(encoding="utf-8"))
@@ -979,8 +1018,9 @@ class TestThePleFold:
             migrated(gemma_repo, tmp_path / "out")
 
     def test_a_row_that_is_not_a_multiple_of_four_bytes_fails_loudly(self, tmp_path: Path) -> None:
-        """block は行の倍数で切る（行が 4 の倍数でなければ block 長の整列と両立しない）。"""
-        root = stage_gemma_repo(tmp_path / "thin", layers=1, dim=4)  # values の 1 行 = 2 バイト
+        """Blocks are cut at multiples of a row (a row that is not a multiple of 4 is incompatible
+        with the alignment of the block length)."""
+        root = stage_gemma_repo(tmp_path / "thin", layers=1, dim=4)  # one values row = 2 bytes
 
         with pytest.raises(MigrateError, match=r"one values row of 2 bytes is not a multiple of 4"):
             migrated(root, tmp_path / "out")
@@ -993,8 +1033,8 @@ class TestThePleFold:
                 r"Tensor 'values': dtype 'X9' unknown to the reader",
             ),
             (
-                # 行数とバイト長は合ったまま、行の中身の形だけが嘘をつく（旧来は行数とバイト長
-                # しか見ていなかったので通っていた）。
+                # The row count and the byte length still match; only the shape of the rows lies
+                # (this passed before, when only the row count and the byte length were checked).
                 lambda header: header["values"].update(
                     shape=[header["values"]["shape"][0], PLE_LAYERS, PLE_DIM * 2]
                 ),
@@ -1006,7 +1046,7 @@ class TestThePleFold:
     def test_a_shard_that_breaks_the_reader_layout_fails_loudly(
         self, gemma_repo: Path, tmp_path: Path, edit: Any, message: str
     ) -> None:
-        """旧 shard の読み取り（`legacy.read_component`）と同じレイアウトの門を通る。"""
+        """Goes through the same layout check as reading an old shard (`legacy.read_component`)."""
         doctor_ple_shard(gemma_repo, 2, edit)
 
         with pytest.raises(ContainerError, match=message):
@@ -1015,7 +1055,7 @@ class TestThePleFold:
     def test_a_metadata_value_that_is_not_a_string_fails_loudly(
         self, gemma_repo: Path, tmp_path: Path
     ) -> None:
-        """`__metadata__` は逐語で受ける（`str()` で強制変換して黙って通さない）。"""
+        """`__metadata__` is taken verbatim (not silently passed through a `str()` conversion)."""
         doctor_ple_shard(gemma_repo, 2, lambda header: header["__metadata__"].update(note=5))
 
         with pytest.raises(LegacyFormatError, match="__metadata__ is not a string → string map"):
@@ -1024,7 +1064,8 @@ class TestThePleFold:
     def test_a_doctored_but_well_formed_shard_still_migrates(
         self, gemma_repo: Path, tmp_path: Path
     ) -> None:
-        """対照 — ヘッダを書き直しただけ（宣言は同じ）なら通る（上の門は恒真に落ちない）。"""
+        """Control — only rewriting the header (with the same declaration) passes (the checks above
+        do not fail tautologically)."""
         doctor_ple_shard(gemma_repo, 2, lambda header: None)
 
         assert migrated(gemma_repo, tmp_path / "out").converted
@@ -1032,7 +1073,8 @@ class TestThePleFold:
     def test_an_owner_without_a_local_seat_fails_loudly(
         self, gemma_repo: Path, tmp_path: Path
     ) -> None:
-        """畳み先が 1 つも無いまま assets から消すと PLE が黙って配布物から落ちる。"""
+        """Removing it from assets with no fold target at all would silently drop the PLE from the
+        distribution."""
         lender_out = tmp_path / "lender"
         migrated(gemma_repo, lender_out)
         lender = json.loads((gemma_repo / "karume.json").read_text(encoding="utf-8"))
@@ -1136,15 +1178,18 @@ class TestTheCli:
 
 
 class TestThePartLength:
-    """リポ丸ごとモードも part 長を選べる（書き手の選択集合 — container-v1 §4.2 / ADR 0108）。"""
+    """Whole-repository mode can choose the part length too (the writer's choice set —
+    container-v1 §4.2 / ADR 0108)."""
 
     @pytest.fixture
     def small_parts(self) -> None:
-        """モジュールの autouse（集合を合成寸法で広げる）を打ち消す — 本物の集合で見る。"""
+        """Cancels the module's autouse fixture (which widens the set with the synthetic size) —
+        checks with the real set."""
 
     @staticmethod
     def _spy(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-        """書き手に届いた part 長を呼ばれた順に拾う（書き出しは素通し）。"""
+        """Collect the part lengths that reached the writer, in call order (the write goes through
+        unchanged)."""
         seen: list[int] = []
         original = publish.write_model_container
 
@@ -1166,7 +1211,8 @@ class TestThePartLength:
         flag: list[str],
         expected: int,
     ) -> None:
-        """既定は 256 MiB・`--part-bytes 512` は 512 MiB のバイト数として全容器の書き手に届く。"""
+        """The default is 256 MiB; `--part-bytes 512` reaches the writer of every container as the
+        byte count of 512 MiB."""
         seen = self._spy(monkeypatch)
         out = tmp_path / "out"
         migrate.main(
@@ -1174,7 +1220,8 @@ class TestThePartLength:
         )
 
         assert seen == [expected, expected]
-        # 選んだ part 長で書いた容器が karume/5 の `container.parts` として宣言され、読み直せる。
+        # The containers written with the chosen part length are declared as the
+        # `container.parts` of karume/5 and can be read back.
         for component in ("encoder", "decoder"):
             container = container_of(out, "alpha", component, "f32")
             assert len(container["parts"]) >= 2
@@ -1183,7 +1230,8 @@ class TestThePartLength:
     def test_the_function_default_is_256_mib(
         self, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """関数を直接呼ぶ経路の既定（CLI は既定値を明示で渡すので、CLI の門では守れない）。"""
+        """The default of the path that calls the function directly (the CLI passes the default
+        explicitly, so a CLI check cannot protect it)."""
         seen = self._spy(monkeypatch)
         migrate_repository(repo / "karume.json", tmp_path / "out", provenance=PROVENANCE)
 
@@ -1209,11 +1257,14 @@ class TestThePartLength:
 
 
 class TestThePathsInTheOldManifest:
-    """旧 manifest の path は hub と同じ文法で読む（R7-002 — 出力先の外へ書かない・読まない）。
+    """The paths of the old manifest are read with the same grammar as the hub (R7-002 — nothing is
+    written or read outside the output directory).
 
-    書き先は旧 path の親ディレクトリをそのまま `out` の下へ繋ぐので、`../` や絶対パスを
-    通すと新しいコンテナが出力先の外（旧入力のツリー内）に書かれ、manifest にも hub が拒否する
-    path が載る。symlink で入力リポの外を指す宣言も、旧入力の範囲の外を読むので落とす。
+    The write target joins the old path's parent directory under `out` as is, so letting `../` or
+    an absolute path through would write the new container outside the output directory (inside
+    the old input's tree), and the manifest would carry a path the hub rejects. A declaration that
+    points outside the input repository through a symlink is rejected too, since it reads outside
+    the old input.
     """
 
     @staticmethod
@@ -1234,7 +1285,8 @@ class TestThePathsInTheOldManifest:
     def test_a_path_outside_the_repository_is_refused_before_anything_is_written(
         self, repo: Path, tmp_path: Path, spelling: str, message: str
     ) -> None:
-        # 指し先の現物は在る（在るのに通さないことを見る — 無いので落ちる形と区別する）。
+        # The target file does exist (checks that it is refused although it exists — as distinct
+        # from failing because it is missing).
         place(tmp_path, "outside/tokenizer.json", (repo / "tokenizer.json").read_bytes())
         self._redeclare(repo, spelling)
         out = tmp_path / "out"
@@ -1258,10 +1310,13 @@ class TestThePathsInTheOldManifest:
 
 
 class TestAFailedRepositoryMigrationLeavesNothing:
-    """リポ丸ごとの移行は作業席で組み、全部通った回だけ出力先へ据える（R7-011）。
+    """A whole-repository migration is assembled in a staging directory and placed in the output
+    directory only when everything passed (R7-011).
 
-    部品を順に最終の出力先へ置くと、2 つ目の部品で落ちた回に 1 つ目のコンテナだけが残り、
-    同じ指定の再実行が「前回の成果物が残っている」で止まる（出力先を手で消すまで進めない）。
+    Placing the components into the final output directory one by one would leave only the first
+    container behind when the second component fails, and a rerun with the same arguments would
+    stop with "artifacts of a previous run remain" (no progress until the output directory is
+    removed by hand).
     """
 
     def test_a_failure_in_the_second_unit_leaves_the_output_empty_and_rerunnable(
@@ -1274,15 +1329,15 @@ class TestAFailedRepositoryMigrationLeavesNothing:
             nonlocal calls
             calls += 1
             if calls == 2:
-                raise MigrateError("2 つ目の部品の変換で落ちた回")
+                raise MigrateError("a run that failed converting the second component")
             return real(*args, **kwargs)
 
         monkeypatch.setattr(migrate, "_migrate_shards", second_fails)
         out = tmp_path / "out"
 
-        with pytest.raises(MigrateError, match="2 つ目の部品"):
+        with pytest.raises(MigrateError, match="the second component"):
             migrated(repo, out)
-        assert calls == 2, "被験体の前提: 変換する単位が 2 つ以上ある"
+        assert calls == 2, "premise of the subject: there are 2 or more units to convert"
         assert not out.exists() or not any(out.iterdir())
 
         monkeypatch.setattr(migrate, "_migrate_shards", real)
@@ -1297,7 +1352,7 @@ class TestAFailedRepositoryMigrationLeavesNothing:
         (out / "stray.txt").write_text("前回の残り\n", encoding="utf-8")
 
         def never(*args: Any, **kwargs: Any) -> Any:
-            raise AssertionError("出力先の検査より前に変換が走った")
+            raise AssertionError("a conversion ran before the output directory check")
 
         monkeypatch.setattr(migrate, "_migrate_shards", never)
 
@@ -1315,12 +1370,14 @@ class TestAFailedRepositoryMigrationLeavesNothing:
 
 
 class TestThePleShardDeclarations:
-    """旧 PLE shard の dtype と**全 shape** を索引と照合する（R7-003 の PLE 側）。
+    """The dtype and **the whole shape** of the old PLE shards are matched against the index (the
+    PLE side of R7-003).
 
-    先頭次元とバイト長だけを見ると、要素数が同じ別形（`[rows, layers, dim]` の後ろ 2 軸の
-    入れ替え）や同じバイト長の別型（F32 の scale を I32 と宣言）が黙って畳まれる。旧書き手は
-    `values` を格納の旧綴り（i8 → I8 / i4 → I4 / i2 → I2）+ `[rows, layers, dim]`、`scales` を
-    F32 + `[rows, layers]` で書いた。
+    Looking only at the leading dimension and the byte length would silently fold another shape
+    with the same element count (the last 2 axes of `[rows, layers, dim]` swapped) or another type
+    with the same byte length (an F32 scale declared as I32). The old writer wrote `values` with
+    the old storage spelling (i8 → I8 / i4 → I4 / i2 → I2) + `[rows, layers, dim]`, and `scales`
+    as F32 + `[rows, layers]`.
     """
 
     @pytest.mark.parametrize(
@@ -1335,7 +1392,7 @@ class TestThePleShardDeclarations:
         self, gemma_repo: Path, tmp_path: Path, key: str, spec: dict[str, Any], message: str
     ) -> None:
         def edit(header: dict[str, Any]) -> None:
-            assert header[key]["shape"][0] == 25, "被験体の前提: shard 2 は 25 行"
+            assert header[key]["shape"][0] == 25, "premise of the subject: shard 2 has 25 rows"
             header[key].update(spec)
 
         doctor_ple_shard(gemma_repo, 2, edit)
@@ -1347,9 +1404,11 @@ class TestThePleShardDeclarations:
 
 
 class TestATrailingNewlineIsRefused:
-    """旧 manifest と `--cross-repo` の綴りは末尾の改行付きを拒否する（hub と同じ受理集合）。
+    """Spellings in the old manifest and in `--cross-repo` are refused with a trailing newline (the
+    same accepted set as the hub).
 
-    Python の `$` は末尾の改行の直前でも一致するので、`^…$` を `.match` で引くと改行付きが通る。
+    Python's `$` also matches just before a trailing newline, so looking `^…$` up with `.match`
+    lets a trailing newline through.
     """
 
     @pytest.mark.parametrize(

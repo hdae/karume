@@ -1,12 +1,15 @@
-"""校正付き丸め（GPTQ / AWQ）— 格納グリッドは 1 段目のまま、丸め先だけを選び直す方式。
+"""Calibrated rounding (GPTQ / AWQ) — the storage grid stays that of the first step; only the
+rounding targets are chosen again.
 
-見るのは 5 点: ①同一入力 → **ビット同一**（乱数不使用）②丸め済みの値が**格納グリッド**に
-載る（`q·scale`・`|q| ≤ 7`）③ `H` が対角なら `quantize.fake_quant_int4` と**ビット同一**
-（補償項が消える数学的帰結 = 恒真化していないオラクル）④相関入力では GPTQ の `H` 加重誤差が
-RTN より**小さい**（方式が実際に効く対照）⑤ stage 逐次の**誤差伝播**が後段へ届いている
-（伝播を止めると結果が変わる故障注入）⑥掃引軸（`static_groups` / `act_order` / `damping`）は
-**既定で既存経路とビット同一**、かつ有効時は格納の形（元列順・連続 group・group scale）を
-1 つも動かさない。
+Six points are checked: (1) same input → **bit-identical** (no random numbers); (2) rounded values
+lie on the **storage grid** (`q·scale`, `|q| ≤ 7`); (3) with a diagonal `H` the result is
+**bit-identical** to `quantize.fake_quant_int4` (the compensation term vanishes as a mathematical
+consequence = an oracle that is not tautological); (4) with correlated inputs GPTQ's `H`-weighted
+error is **smaller** than RTN's (the counterpart showing the method actually works); (5) the
+**error propagation** of the stage-by-stage pass reaches later stages (fault injection: stopping
+the propagation changes the result); (6) the sweep axes (`static_groups` / `act_order` /
+`damping`) are **bit-identical to the existing path by default**, and when enabled move nothing of
+the storage form (original column order, contiguous groups, group scales).
 """
 
 from __future__ import annotations
@@ -42,10 +45,10 @@ from karume.quantize import (
     quantize_to_int4,
 )
 
-#: 校正テストの group 長（フィクスチャの in 軸 32 / 128 を割り切る短さ）。
+#: Group length of the calibration tests (short enough to divide the fixtures' in axes 32 / 128).
 GROUP = 8
 
-#: `group_size=GROUP` の既定グリッド（出荷経路 = RTN）。
+#: Default grid with `group_size=GROUP` (the shipping path = RTN).
 GRID = GridSpec(group_size=GROUP)
 
 
@@ -55,36 +58,38 @@ def weights(rows: int, columns: int, seed: int) -> torch.Tensor:
 
 
 def correlated_inputs(tokens: int, columns: int, seed: int) -> torch.Tensor:
-    """入力チャネル間に相関を入れた校正入力（`H` が対角から遠い形 — GPTQ が効く条件）。"""
+    """Calibration input with correlated input channels (`H` far from diagonal — the condition
+    under which GPTQ helps)."""
     torch.manual_seed(seed)
     mixing = torch.randn(columns, columns) * 0.3 + torch.eye(columns)
     return torch.randn(tokens, columns) @ mixing
 
 
 def gram(inputs: torch.Tensor) -> torch.Tensor:
-    """`H = Σ XᵀX`（F64）。"""
+    """`H = Σ XᵀX` (F64)."""
     wide = inputs.detach().to(torch.float64)
     return wide.T @ wide
 
 
 def weighted_error(delta: torch.Tensor, hessian: torch.Tensor) -> float:
-    """`tr(ΔW·H·ΔWᵀ)` — GPTQ が最小化しようとしている量そのもの。"""
+    """`tr(ΔW·H·ΔWᵀ)` — exactly the quantity GPTQ tries to minimize."""
     wide = delta.to(torch.float64)
     return float((wide @ hessian * wide).sum())
 
 
 def round_to_nearest(rows: torch.Tensor, group_size: int) -> torch.Tensor:
-    """比較対象の RTN（`quantize` の格子・校正データを見ない丸め）。"""
+    """RTN for comparison (the `quantize` grid; rounding that ignores calibration data)."""
     scale = group_scale(rows, group_size)
     return dequantize_int4(quantize_to_int4(rows, scale), scale)
 
 
 class Chain(nn.Module):
-    """`(hidden, state)` の tuple を返す stage（transformer ブロックの返り値の形）。
+    """A stage returning a `(hidden, state)` tuple (the return shape of a transformer block).
 
-    kwargs の効きは `shift`（proj の入力への**加算**）で観測する。乗算にしないのは GPTQ が
-    `H` の定数倍に**不変**だから（`H → cH` で damping も `U` も同じ比で動き、補償項が
-    相殺する）— 倍率では「kwargs が届いたか」を結果から判別できない。
+    The effect of kwargs is observed through `shift` (an **addition** to the proj input). Not a
+    multiplication, because GPTQ is **invariant** to scaling `H` by a constant (with `H → cH`,
+    damping and `U` move by the same ratio and the compensation cancels out) — with a factor, the
+    result could not tell "did the kwargs arrive".
     """
 
     def __init__(self, in_features: int, out_features: int) -> None:
@@ -96,7 +101,7 @@ class Chain(nn.Module):
 
 
 class Roped(nn.Module):
-    """rope の `(cos, sin)` のような**組**を keyword で受ける stage（実 DiT block と同じ形）。"""
+    """A stage taking a **tuple** like rope's `(cos, sin)` by keyword (as a real DiT block does)."""
 
     def __init__(self, features: int) -> None:
         super().__init__()
@@ -108,7 +113,7 @@ class Roped(nn.Module):
 
 
 class Pair(nn.Module):
-    """1 つの stage に 2 本の linear（`include` の効きを見るための形）。"""
+    """Two linears in one stage (to see the effect of `include`)."""
 
     def __init__(self, features: int) -> None:
         super().__init__()
@@ -121,7 +126,7 @@ class Pair(nn.Module):
 
 class TestGridSpec:
     def test_only_rtn_is_shippable(self):
-        """emit へ渡せるのは RTN 格子だけ（モジュール docstring の MUST）。"""
+        """Only the RTN grid may be passed to emit (the MUST of the module docstring)."""
         assert GridSpec(kind="rtn").shippable
         assert not GridSpec(kind="nf4").shippable
         assert not GridSpec(kind="kmeans_shared").shippable
@@ -135,7 +140,8 @@ class TestGridSpec:
             GridSpec(kind="int3")  # type: ignore[arg-type]
 
     def test_a_stride_on_a_grid_without_a_fitted_table_fails_loudly(self):
-        """`fit_stride` は表を fit する粒度専用（`quant_methods` と同じ流儀）。"""
+        """`fit_stride` is only for granularities that fit a table (the same convention as
+        `quant_methods`)."""
         with pytest.raises(QuantizeError, match="is for kmeans_shared only"):
             GridSpec(kind="rtn", fit_stride=2)
 
@@ -146,10 +152,12 @@ class TestGridSpec:
 
 class TestGptqRows:
     def test_a_diagonal_hessian_reproduces_the_storage_round(self):
-        """**オラクル**: `H` が対角なら補償項が消えて `fake_quant_int4` とビット同一。
+        """**Oracle**: with a diagonal `H` the compensation vanishes, bit-identical to
+        `fake_quant_int4`.
 
-        `U = cholesky(H⁻¹, upper)` が対角になるので `U[j, j+1:]` が厳密に 0 で、
-        `W[:, j+1:] −= err ⊗ 0` が 1bit も動かさない — 実装の性質ではなく数学的帰結。
+        `U = cholesky(H⁻¹, upper)` is diagonal, so `U[j, j+1:]` is exactly 0 and
+        `W[:, j+1:] −= err ⊗ 0` moves not a single bit — a mathematical consequence, not a
+        property of the implementation.
         """
         module = nn.Linear(32, 6, bias=False)
         twin = copy.deepcopy(module)
@@ -164,7 +172,8 @@ class TestGptqRows:
         assert torch.equal(ledger, group_scale(channel_rows(twin.weight.detach(), 0), GROUP))
 
     def test_the_oracle_is_not_vacuous(self):
-        """上の対 — 相関のある `H` では RTN と**違う**結果になる（対角でなければ動く）。"""
+        """Counterpart of the above — a correlated `H` gives a result **different** from RTN (it
+        moves when not diagonal)."""
         rows = weights(6, 32, seed=1)
 
         rounded, _ = gptq_quantize_rows(rows, gram(correlated_inputs(96, 32, seed=2)), GRID)
@@ -172,7 +181,7 @@ class TestGptqRows:
         assert not torch.equal(rounded, round_to_nearest(rows, GROUP))
 
     def test_every_value_lands_on_the_int4_grid(self):
-        """丸め済みの全要素が `q·scale`（`|q| ≤ 7`・−8 不使用）に載る = 出荷可能な形。"""
+        """Every rounded element lies on `q·scale` (`|q| ≤ 7`, −8 unused) = a shippable form."""
         rows = weights(6, 32, seed=3)
 
         rounded, ledger = gptq_quantize_rows(rows, gram(correlated_inputs(96, 32, seed=4)), GRID)
@@ -183,14 +192,16 @@ class TestGptqRows:
         assert torch.equal(dequantize_int4(quantized, ledger), rounded)
 
     def test_the_ledger_is_the_scale_that_was_used_not_a_recomputed_one(self):
-        """MUST: 台帳は**量子化に使った値そのもの**（丸め済みから引き直すと別物になる）。
+        """MUST: the ledger is **the very values used for quantization** (re-deriving from the
+        rounded values gives something else).
 
-        RTN なら group の amax 要素が必ず `|q| = 7` に乗るので引き直しても同じ scale が出るが、
-        GPTQ は補償で amax 要素を押し下げうる。押し下がった group では `|q|` が 7 に届かず、
-        `group_scale` を丸め済みへ当て直すと**別の scale** になって格納値が復元されない。
+        With RTN the amax element of a group always lands on `|q| = 7`, so re-deriving gives the
+        same scale, but GPTQ's compensation can push the amax element down. In a group pushed
+        down, `|q|` does not reach 7, and applying `group_scale` to the rounded values again gives
+        **a different scale**, so the stored values are not recovered.
 
-        この模型は**その条件を満たす group を含む**（下の `peak` の assert が条件そのものを
-        固定するので、フィクスチャが変わって条件が消えたらここで気づける）。
+        This model **contains a group that meets that condition** (the `peak` assert below pins
+        the condition itself, so a fixture change that removes it is noticed here).
         """
         rows = weights(6, 32, seed=5)
 
@@ -198,18 +209,18 @@ class TestGptqRows:
 
         assert ledger is not None
         peak = quantize_to_int4(rounded, ledger).abs().reshape(rows.shape[0], -1, GROUP).amax(-1)
-        assert int((peak < INT4_MAX).sum()), "amax 要素が押し下がった group が 1 つも無い"
+        assert int((peak < INT4_MAX).sum()), "no group has its amax element pushed down"
 
         recomputed = group_scale(rounded, GROUP)
         assert not torch.equal(ledger, recomputed)
-        # 台帳側でだけ復元が成立する（= 台帳が「使った値」であることの裏取り）。
+        # Recovery works only with the ledger (= confirms the ledger holds "the values used").
         assert torch.equal(dequantize_int4(quantize_to_int4(rounded, ledger), ledger), rounded)
         assert not torch.equal(
             dequantize_int4(quantize_to_int4(rounded, recomputed), recomputed), rounded
         )
 
     def test_correlated_inputs_beat_round_to_nearest(self):
-        """相関入力では GPTQ の `H` 加重誤差 `tr(ΔW·H·ΔWᵀ)` が RTN より小さい。"""
+        """With correlated inputs GPTQ's `H`-weighted error `tr(ΔW·H·ΔWᵀ)` is smaller than RTN's."""
         rows = weights(24, 128, seed=7)
         hessian = gram(correlated_inputs(512, 128, seed=8))
 
@@ -220,7 +231,7 @@ class TestGptqRows:
         )
 
     def test_the_same_input_gives_a_bit_identical_result(self):
-        """MUST: 乱数を 1 つも使わない（seed を振っても結果が動かない）。"""
+        """MUST: no random numbers at all (varying the seed does not move the result)."""
         rows = weights(6, 32, seed=9)
         hessian = gram(correlated_inputs(96, 32, seed=10))
 
@@ -232,7 +243,7 @@ class TestGptqRows:
 
     @pytest.mark.parametrize("kind", ["nf4", "kmeans_shared"])
     def test_a_grid_without_a_storage_path_returns_no_ledger(self, kind):
-        """`quant_methods` と同じ MUST — 格納経路の無い方式へ emit の口を作らない。"""
+        """The same MUST as `quant_methods` — no emit route for a method without a storage path."""
         rows = weights(6, 32, seed=11)
 
         rounded, ledger = gptq_quantize_rows(
@@ -243,7 +254,8 @@ class TestGptqRows:
         assert rounded.shape == rows.shape
 
     def test_the_nf4_grid_lands_on_the_nf4_table(self):
-        """グリッドを差し替えれば丸め先も差し替わる（`rtn` 一択の恒真化を排す）。"""
+        """Swapping the grid swaps the rounding targets (rules out a tautology where only `rtn`
+        exists)."""
         rows = weights(6, 32, seed=13)
         table = levels_tensor(NF4_LEVELS)
 
@@ -252,17 +264,17 @@ class TestGptqRows:
         )
 
         scale = group_absmax_scale(rows, GROUP, float(table.abs().max()))
-        grouped = grouped_view(rounded, GROUP, "検査")
+        grouped = grouped_view(rounded, GROUP, "check")
         allowed = scale.unsqueeze(-1).unsqueeze(-1) * table
         assert bool((grouped.unsqueeze(-1) == allowed).any(dim=-1).all())
 
     def test_an_axis_the_group_size_does_not_divide_fails_loudly(self):
-        """端数 group を作らない（`quantize.grouped_view` の共有 — ADR 0069 決定 2）。"""
+        """No partial groups (shared with `quantize.grouped_view` — ADR 0069 decision 2)."""
         with pytest.raises(QuantizeError, match="is not divisible by group_size"):
             gptq_quantize_rows(weights(3, 20, seed=14), torch.eye(20, dtype=torch.float64), GRID)
 
     def test_a_hessian_that_never_saw_an_input_fails_loudly(self):
-        """`H` が丸ごと 0 だと damping も 0 になり特異 — 黙って近似しない。"""
+        """An all-zero `H` makes damping 0 too and is singular — no silent approximation."""
         with pytest.raises(QuantizeError, match="diagonal mean"):
             gptq_quantize_rows(weights(3, 32, seed=15), torch.zeros(32, 32), GRID)
 
@@ -272,25 +284,28 @@ class TestGptqRows:
 
 
 class TestGptqOptions:
-    """掃引軸 `static_groups` / `act_order` / `damping`（既定は現行経路とビット同一の opt-in）。
+    """Sweep axes `static_groups` / `act_order` / `damping` (opt-in; the default is bit-identical to
+    the current path).
 
-    見るのは 3 点: ①既定のままなら 1bit も動かない ② `static_groups` の scale が**丸める前の
-    元の連続列ブロック**由来である ③ `act_order` は処理順しか変えず、格納の形（元列順・連続
-    group・group scale の台帳）を動かさない。
+    Three points are checked: (1) left at the default, not a single bit moves; (2) the scale of
+    `static_groups` comes from **the original contiguous column block before rounding**;
+    (3) `act_order` changes only the processing order and moves nothing of the storage form
+    (original column order, contiguous groups, the group-scale ledger).
     """
 
     @staticmethod
     def fixture(seed: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """`H` が対角から遠い（= 補償が実際に効く）小さい模型。"""
+        """A small model with `H` far from diagonal (= the compensation actually acts)."""
         return weights(6, 32, seed=seed), gram(correlated_inputs(96, 32, seed=seed + 1))
 
     @staticmethod
     def order_of(hessian: torch.Tensor) -> torch.Tensor:
-        """`diag(H)` 降順の処理順（実装と同じ安定ソート）。"""
+        """Processing order by descending `diag(H)` (the same stable sort as the implementation)."""
         return torch.argsort(torch.diagonal(hessian), descending=True, stable=True)
 
     def test_the_options_off_are_bit_identical_to_the_call_without_them(self):
-        """MUST: 掃引軸を足しても既定経路は 1bit も動かない（既存 i4 配布資産の再現性）。"""
+        """MUST: adding the sweep axes moves not a bit of the default path (reproducibility of the
+        existing i4 distribution assets)."""
         rows, hessian = self.fixture(seed=101)
 
         bare, bare_ledger = gptq_quantize_rows(rows, hessian, GRID)
@@ -304,10 +319,12 @@ class TestGptqOptions:
         assert torch.equal(bare_ledger, off_ledger)
 
     def test_static_groups_takes_the_scale_from_the_original_block(self):
-        """`static_groups=True` の台帳 = **丸める前**の `rows` の連続列ブロックの group scale。
+        """The `static_groups=True` ledger = the group scales of the contiguous column blocks of
+        `rows` **before rounding**.
 
-        対（恒真化の排除）は dynamic 側 — 補償済みの現在値から採るので**別物**になる。
-        差が出ない模型ではこの門は何も言っていないので、差そのものを assert で固定する。
+        The counterpart (ruling out a tautology) is the dynamic side — it takes the compensated
+        current values, so it is **something else**. On a model with no difference this check
+        says nothing, so the difference itself is pinned by an assert.
         """
         rows, hessian = self.fixture(seed=103)
 
@@ -317,15 +334,19 @@ class TestGptqOptions:
         assert static_ledger is not None
         assert dynamic_ledger is not None
         assert torch.equal(static_ledger, group_scale(rows, GROUP))
-        assert not torch.equal(dynamic_ledger, static_ledger), "dynamic と差が出ない模型"
+        assert not torch.equal(dynamic_ledger, static_ledger), (
+            "the model shows no difference from dynamic"
+        )
         assert not torch.equal(static, dynamic)
-        # 台帳は「使った scale そのもの」のまま = 格納値が復元される（MUST は静的化でも不変）。
+        # The ledger stays "the very scale used" = the stored values are recovered (the MUST holds
+        # with static groups too).
         assert torch.equal(
             dequantize_int4(quantize_to_int4(static, static_ledger), static_ledger), static
         )
 
     def test_a_diagonal_hessian_reproduces_the_storage_round_with_static_groups(self):
-        """オラクルは静的化でも成立 — 対角 `H` では補償が 0 なので dynamic と static が一致する。"""
+        """The oracle holds with static groups too — a diagonal `H` has zero compensation, so
+        dynamic and static agree."""
         module = nn.Linear(32, 6, bias=False)
         twin = copy.deepcopy(module)
         fake_quant_int4(twin, group_size=GROUP)
@@ -342,12 +363,13 @@ class TestGptqOptions:
         assert torch.equal(ledger, group_scale(channel_rows(twin.weight.detach(), 0), GROUP))
 
     def test_act_order_writes_the_columns_back_in_the_original_order(self):
-        """**オラクル**: 対角 `H` なら並べ替えても `fake_quant_int4` とビット同一。
+        """**Oracle**: with a diagonal `H`, reordering is still bit-identical to `fake_quant_int4`.
 
-        補償項が厳密に 0 なので丸めの中身は処理順に依らない。したがって一致することは
-        「並べ替えた列が**元の列へ**戻り、group 帰属も元の連続ブロックのまま」の証明になる
-        （upstream の `Q = Q[:, invperm]` と同値）。対角値は非一様にして perm を**恒等でない**
-        ものにする — 恒等 perm では並べ替えの門にならない。
+        The compensation term is exactly 0, so the rounding does not depend on the processing
+        order. Agreement therefore proves "the reordered columns go back **to their original
+        columns**, and group membership stays the original contiguous blocks" (equivalent to the
+        upstream `Q = Q[:, invperm]`). The diagonal values are non-uniform so the perm is **not
+        the identity** — an identity perm would not check the reordering.
         """
         module = nn.Linear(32, 6, bias=False)
         twin = copy.deepcopy(module)
@@ -368,7 +390,8 @@ class TestGptqOptions:
         assert torch.equal(ledger, group_scale(channel_rows(module.weight.detach(), 0), GROUP))
 
     def test_act_order_changes_the_result_but_not_the_storage_shape(self):
-        """対 — 相関 `H` では処理順が実際に効く。それでも**格納の形は 1 つも動かない**。"""
+        """Counterpart — with a correlated `H` the processing order really matters. Even so
+        **nothing of the storage form moves**."""
         rows, hessian = self.fixture(seed=105)
         assert not torch.equal(self.order_of(hessian), torch.arange(32))
 
@@ -380,14 +403,14 @@ class TestGptqOptions:
         assert not torch.equal(ordered, plain)
         assert ordered_ledger is not None
         assert plain_ledger is not None
-        # group 整列（元順・連続 group）は不変 = ランタイム側の変更ゼロ。
+        # Group alignment (original order, contiguous groups) is unchanged = zero runtime changes.
         assert torch.equal(ordered_ledger, plain_ledger)
         quantized = quantize_to_int4(ordered, ordered_ledger)
         assert int(quantized.abs().amax()) <= INT4_MAX
         assert torch.equal(dequantize_int4(quantized, ordered_ledger), ordered)
 
     def test_act_order_without_static_groups_fails_loudly(self):
-        """dynamic group で並べ替えると group 帰属が写し戻せない — 黙って近似しない。"""
+        """Reordering dynamic groups cannot map group membership back — no silent approximation."""
         rows, hessian = self.fixture(seed=106)
 
         with pytest.raises(QuantizeError, match="requires static_groups=True"):
@@ -402,7 +425,7 @@ class TestGptqOptions:
         assert torch.equal(explicit, default)
 
     def test_damping_reaches_the_solver(self):
-        """対照 — `damping` は `_inverse_cholesky` の `λ` に届いて結果を動かす。"""
+        """Counterpart — `damping` reaches `λ` of `_inverse_cholesky` and moves the result."""
         rows = weights(24, 128, seed=108)
         hessian = gram(correlated_inputs(512, 128, seed=109))
         grid = GridSpec(group_size=32)
@@ -414,7 +437,7 @@ class TestGptqOptions:
 
     @pytest.mark.parametrize("damping", [0.0, -0.01])
     def test_a_non_positive_damping_fails_loudly(self, damping):
-        """`λ = 0` では対角 0 の入力チャネルが残って `H` が特異になりうる。"""
+        """With `λ = 0`, input channels with a zero diagonal remain and `H` can become singular."""
         rows, hessian = self.fixture(seed=110)
 
         with pytest.raises(QuantizeError, match="damping must be positive"):
@@ -423,7 +446,8 @@ class TestGptqOptions:
 
 class TestAwqSearch:
     def test_a_flat_activation_profile_keeps_alpha_zero(self):
-        """全チャネル同じ大きさなら `s` は α に依らず 1 — 同値は小さい α が勝つ（決定性）。"""
+        """With all channels the same size, `s` is 1 for any α — ties go to the smaller α
+        (determinism)."""
         rows = weights(6, 32, seed=17)
 
         search = awq_search_scale(
@@ -434,7 +458,7 @@ class TestAwqSearch:
         assert torch.equal(search.channel_scale, torch.ones(32, dtype=torch.float64))
 
     def test_a_skewed_activation_profile_moves_alpha_off_zero(self):
-        """対照 — 外れチャネルがあると α > 0 が目的関数を**実際に**下げる。"""
+        """Counterpart — with an outlier channel, α > 0 **actually** lowers the objective."""
         torch.manual_seed(19)
         act_amax = torch.rand(32, dtype=torch.float64) * 0.1 + 0.01
         act_amax[5] = 20.0
@@ -448,7 +472,8 @@ class TestAwqSearch:
         assert search.alpha <= 1.0
 
     def test_the_channel_scale_has_geometric_mean_one(self):
-        """`s` 全体の定数倍は absmax scale に吸収されるので、正規化しないと α が意味を失う。"""
+        """A constant factor on all of `s` is absorbed by the absmax scale, so without normalization
+        α loses its meaning."""
         torch.manual_seed(22)
         act_amax = torch.rand(32, dtype=torch.float64) * 5.0 + 0.01
 
@@ -459,7 +484,7 @@ class TestAwqSearch:
         assert float(torch.log(search.channel_scale).mean()) == pytest.approx(0.0, abs=1e-10)
 
     def test_the_alpha_grid_has_seventeen_points(self):
-        """α ∈ {0, 1/16, …, 1}（採用値が格子上にある）。"""
+        """α ∈ {0, 1/16, …, 1} (the chosen value is on the grid)."""
         torch.manual_seed(25)
         act_amax = torch.rand(32, dtype=torch.float64) * 5.0 + 0.01
 
@@ -470,12 +495,13 @@ class TestAwqSearch:
         assert search.alpha in {step / AWQ_ALPHA_STEPS for step in range(AWQ_ALPHA_STEPS + 1)}
 
     def test_a_non_finite_act_amax_silently_collapses_alpha_to_zero(self):
-        """非有限の `act_amax` は α>0 の目的関数を全て NaN にし、黙って α=0 が残る。
+        """A non-finite `act_amax` turns every α>0 objective into NaN, and α=0 silently remains.
 
-        `NaN < best_error` は常に偽なので α>0 は 1 点も採用されない。α=0 だけは
-        `amax.pow(0)` が非有限要素に対しても 1 を返すので有限値のまま残り、返り値は
-        「α=0 が最適だった」形（有限の error・幾何平均 1 の `s`）と区別できない。
-        対照は同じ偏りで α>0 が勝つ test_a_skewed_activation_profile_moves_alpha_off_zero。
+        `NaN < best_error` is always false, so no α>0 point is ever chosen. Only for α=0 does
+        `amax.pow(0)` return 1 even for non-finite elements, so it stays finite, and the return
+        value cannot be told apart from "α=0 was optimal" (a finite error, an `s` with geometric
+        mean 1). The counterpart is test_a_skewed_activation_profile_moves_alpha_off_zero, where
+        α>0 wins with the same skew.
         """
         torch.manual_seed(19)
         act_amax = torch.rand(32, dtype=torch.float64) * 0.1 + 0.01
@@ -490,14 +516,21 @@ class TestAwqSearch:
             weights(6, 32, seed=20), act_amax, correlated_inputs(64, 32, seed=21), GRID
         )
 
-        assert control.alpha > 0.0, "対照 — 非有限を混ぜる前は α>0 が目的関数を下げる"
+        assert control.alpha > 0.0, (
+            "counterpart — before mixing in non-finite values, α>0 lowers the objective"
+        )
         assert search.alpha == 0.0
-        assert math.isfinite(search.error), "α=0 の目的関数だけは有限（沈黙が見えない所以）"
+        assert math.isfinite(search.error), (
+            "only the α=0 objective is finite (why the silence is invisible)"
+        )
         assert torch.equal(search.channel_scale, torch.ones(32, dtype=torch.float64))
-        assert search.channel_scale.device == act_amax.device, "`s` は入力と同じデバイスに出る"
+        assert search.channel_scale.device == act_amax.device, (
+            "`s` comes out on the same device as the input"
+        )
 
     def test_a_non_finite_weight_fails_loudly_instead_of_reporting_alpha_zero(self):
-        """重みの NaN は α=0 を含む全 α の目的関数を NaN にする — 初期値を黙って採らない。"""
+        """A NaN in the weight turns the objective of every α, α=0 included, into NaN — the initial
+        value is not taken silently."""
         rows = weights(6, 32, seed=17)
         rows[0, 0] = float("nan")
 
@@ -540,7 +573,7 @@ class TestCalibrateStages:
         return [((correlated_inputs(24, 32, seed=seed),), {})]
 
     def test_the_same_input_gives_a_bit_identical_result(self):
-        """MUST: 同一入力 → ビット同一（乱数不使用・seed を振っても動かない）。"""
+        """MUST: same input → bit-identical (no random numbers; varying the seed moves nothing)."""
         stages = self.two_stages()
         twin = [(prefix, copy.deepcopy(module)) for prefix, module in stages]
         batches = self.batch()
@@ -553,7 +586,7 @@ class TestCalibrateStages:
             assert torch.equal(quantized.weight.detach(), other.weight.detach())
 
     def test_the_ledger_keys_are_model_wide_fqns(self):
-        """台帳のキーは stage 内の局所名ではなく**モデル内 FQN**（emit と同じ空間）。"""
+        """Ledger keys are **model-wide FQNs**, not stage-local names (the same space as emit)."""
         report = calibrate_stages(self.two_stages(), self.batch(), spec=GRID)
 
         assert isinstance(report, CalibReport)
@@ -565,10 +598,12 @@ class TestCalibrateStages:
         assert report.modules == 2
 
     def test_stage_one_quantization_reaches_the_stage_two_hessian(self):
-        """誤差伝播: 後段の `H` は**量子化後の**前段の出力から採られる。
+        """Error propagation: the later stage's `H` is taken from the earlier stage's output **after
+        quantization**.
 
-        故障注入は「伝播を止めた `H`」— 元の重みの出力で採った `H` から丸めると結果が変わる。
-        変わらなければ 3 の再 forward は何の役にも立っていないことになる。
+        The fault injected is "an `H` with propagation stopped" — rounding from an `H` taken on
+        the original weights' output changes the result. If it did not, the re-forward of step 3
+        would serve no purpose.
         """
         stages = self.two_stages()
         (_, first), (_, second) = stages
@@ -591,7 +626,8 @@ class TestCalibrateStages:
         assert not torch.equal(without_propagation, expected_second)
 
     def test_only_included_modules_are_touched(self):
-        """`include` は **stage 内の局所モジュール FQN** の述語（`quantize` と同じ意味）。"""
+        """`include` is a predicate on **module FQNs local to the stage** (the same meaning as in
+        `quantize`)."""
         torch.manual_seed(46)
         stage = Pair(32)
         untouched = stage.right.weight.detach().clone()
@@ -606,7 +642,8 @@ class TestCalibrateStages:
         assert not torch.equal(stage.left.weight.detach(), before)
 
     def test_a_stage_without_a_target_fails_loudly(self):
-        """「方式を指定したのに 0 本」を沈黙させない（`quantize` 側と同じ常設診断）。"""
+        """Does not silence "a method was given but matched 0 modules" (the same standing
+        diagnostic as in `quantize`)."""
         with pytest.raises(QuantizeError, match=r"there is no target nn\.Linear"):
             calibrate_stages([("norm", nn.LayerNorm(32))], self.batch(), spec=GRID)
         with pytest.raises(QuantizeError, match=r"there is no target nn\.Linear"):
@@ -634,7 +671,7 @@ class TestCalibrateStages:
             )
 
     def test_a_layer_the_calibration_never_reaches_fails_loudly(self):
-        """forward に載っていない linear（= `H` が採れない）を黙って丸めない。"""
+        """A linear not on the forward path (= no `H` can be taken) is not rounded silently."""
 
         class Detour(nn.Module):
             def __init__(self) -> None:
@@ -651,19 +688,20 @@ class TestCalibrateStages:
 
 
 class TestCalibrateStagesDevice:
-    """計算デバイスは **stage から導き**、校正バッチは呼び出し側の置き場に留める（JIT 移動）。
+    """The compute device is **derived from the stage**, and calibration batches stay where the
+    caller put them (just-in-time moves).
 
-    校正バッチは stage あたり数百本 × 数十 MB になりうるので、駆動が勝手に計算デバイスへ
-    引き上げると重みと同じ VRAM を取り合う。ここが固定するのは「バッチの置き場は動かない」
-    「stage が居るデバイスで計算が回る」の 2 点で、全 CPU の既定経路が no-op になることは
-    上のビット同一テストが受け持つ。
+    Calibration batches can reach hundreds × tens of MB per stage, so a driver that moved them to
+    the compute device on its own would compete with the weights for the same VRAM. This pins two
+    points, "the batches do not move" and "computation runs on the stage's device"; that the
+    all-CPU default path is a no-op is covered by the bit-identity tests above.
     """
 
     def test_the_batches_reach_the_stage_without_a_copy(self):
-        """CPU の既定経路では `Tensor.to` が self を返す — 写しすら作らない。
+        """On the CPU default path `Tensor.to` returns self — not even a copy is made.
 
-        stage が**実際に受け取った**テンソルで見る（呼び出し側のリストを見るだけでは、駆動が
-        入力を書き換えないことしか言えず恒真化する）。
+        Checked on the tensors the stage **actually received** (looking only at the caller's list
+        would say only that the driver does not rewrite its input — a tautology).
         """
         stages = TestCalibrateStages.two_stages()
         batches = TestCalibrateStages.batch()
@@ -673,16 +711,16 @@ class TestCalibrateStagesDevice:
 
         calibrate_stages(stages, batches, spec=GRID)
 
-        assert seen, "先頭 stage が 1 度も呼ばれていない"
+        assert seen, "the first stage was never called"
         assert all(tensor is given for tensor in seen)
 
     def test_a_stage_without_parameters_fails_loudly(self):
-        """デバイスの導出元が無い stage を黙って CPU 扱いにしない。"""
+        """A stage with nothing to derive a device from is not treated as CPU silently."""
         with pytest.raises(QuantizeError, match="the stage has no parameters"):
             calibrate_stages([("act", nn.ReLU())], TestCalibrateStages.batch(), spec=GRID)
 
     def test_a_tuple_keyword_reaches_the_stage_without_a_copy(self):
-        """組で渡る kwargs（rope の `(cos, sin)`）も CPU 経路では写しを作らない。"""
+        """Tuple kwargs (rope's `(cos, sin)`) are not copied on the CPU path either."""
         torch.manual_seed(46)
         stages: list[tuple[str, nn.Module]] = [("block.0", Roped(32))]
         rotary = (torch.ones(32), torch.zeros(32))
@@ -695,16 +733,18 @@ class TestCalibrateStagesDevice:
             stages, [((correlated_inputs(24, 32, seed=47),), {"rotary": rotary})], spec=GRID
         )
 
-        assert seen, "stage が 1 度も呼ばれていない"
+        assert seen, "the stage was never called"
         assert all(tuple(given) == rotary for given in seen)
         assert all(given[0] is rotary[0] and given[1] is rotary[1] for given in seen)
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA が無い環境では検証できない")
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="cannot be checked without CUDA")
     def test_a_cuda_stage_runs_from_cpu_batches(self):
-        """GPU の stage × CPU のバッチ（組の kwargs 込み）で完走し、バッチは CPU に置かれたまま。
+        """A GPU stage × CPU batches (tuple kwargs included) runs to completion, and the batches
+        stay on the CPU.
 
-        共有 venv の torch は CPU 版なので既定では skip される（GPTQ 校正を CUDA で回すのは
-        感度実験用の経路で、配布経路は CPU のまま）。
+        The shared venv's torch is the CPU build, so this is skipped by default (running GPTQ
+        calibration on CUDA is a path for sensitivity experiments; the distribution path stays on
+        the CPU).
         """
         torch.manual_seed(44)
         stages: list[tuple[str, nn.Module]] = [
@@ -733,12 +773,13 @@ class TestCalibrateStagesMethods:
 
     @staticmethod
     def sign_batch() -> list[tuple[tuple[object, ...], dict[str, object]]]:
-        """全チャネルの `|x|` max が厳密に 1 の校正入力（AWQ の `s` が α に依らず 1 になる形）。"""
+        """Calibration input whose `|x|` max is exactly 1 on every channel (AWQ's `s` is 1 for any
+        α)."""
         torch.manual_seed(37)
         return [((torch.randn(24, 32).sign(),), {})]
 
     def test_awq_with_a_flat_activation_profile_matches_round_to_nearest(self):
-        """α = 0 は `s = 1` なので、書き戻る重みは `fake_quant_int4` とビット同一。"""
+        """α = 0 means `s = 1`, so the weights written back match `fake_quant_int4` bit for bit."""
         stages = self.linear_stage()
         (_, module) = stages[0]
         twin = copy.deepcopy(module)
@@ -750,7 +791,7 @@ class TestCalibrateStagesMethods:
         assert torch.equal(module.weight.detach(), twin.weight.detach())
 
     def test_awq_returns_no_ledger(self):
-        """MUST: `W_eff = Q(W')/s` は単独では格納できない（fold か companion が要る）。"""
+        """MUST: `W_eff = Q(W')/s` cannot be stored alone (it needs a fold or a companion)."""
         report = calibrate_stages(self.linear_stage(), self.sign_batch(), method="awq", spec=GRID)
 
         assert report.int4 is None
@@ -770,7 +811,8 @@ class TestCalibrateStagesMethods:
         assert report.layers[0].error is not None
 
     def test_a_fitted_table_stride_is_reported(self):
-        """MUST: 部分標本で fit したら測定側の出力へ明記する（`quant_methods` と同文）。"""
+        """MUST: a fit on a subsample is stated in the measuring side's output (same wording as
+        `quant_methods`)."""
         report = calibrate_stages(
             self.linear_stage(),
             [((correlated_inputs(64, 32, seed=39),), {})],
@@ -783,7 +825,8 @@ class TestCalibrateStagesMethods:
 
 
 class TestCalibrateStagesOptions:
-    """掃引軸が駆動から層まで**そのまま**届く（sweep は `calibrate_stages` 越しに回す）。"""
+    """The sweep axes reach the layers from the driver **unchanged** (sweeps run through
+    `calibrate_stages`)."""
 
     @staticmethod
     def stage_and_inputs() -> tuple[nn.Linear, torch.Tensor]:
@@ -807,7 +850,7 @@ class TestCalibrateStagesOptions:
             original, gram(inputs), GRID, static_groups=True, act_order=True, damping=0.05
         )
         assert torch.equal(stage.weight.detach(), expected)
-        # 対 — 既定で回した結果とは違う（軸が素通しされていることの裏取り）。
+        # Counterpart — differs from the default run (confirms the axis is passed through).
         default, _ = gptq_quantize_rows(original, gram(inputs), GRID)
         assert not torch.equal(expected, default)
 
@@ -821,7 +864,8 @@ class TestCalibrateStagesOptions:
         assert torch.equal(stage.weight.detach(), expected)
 
     def test_gptq_options_on_a_method_without_a_hessian_fail_loudly(self):
-        """`GridSpec.fit_stride` と同じ流儀 — 効かない軸を渡されて黙って無視しない。"""
+        """The same convention as `GridSpec.fit_stride` — an axis that has no effect is not silently
+        ignored."""
         stage, inputs = self.stage_and_inputs()
 
         with pytest.raises(QuantizeError, match="have no effect"):
@@ -850,7 +894,7 @@ class TestStageHandoff:
 
     @staticmethod
     def run_with(advance) -> list[torch.Tensor]:
-        """同じ模型・同じ校正入力で `advance_kwargs` だけを差し替えて回す。"""
+        """Run the same model on the same calibration input, swapping only `advance_kwargs`."""
         torch.manual_seed(42)
         stages: list[tuple[str, nn.Module]] = [("a", Chain(32, 32)), ("b", Chain(32, 16))]
         inputs = correlated_inputs(24, 32, seed=43)
@@ -858,7 +902,8 @@ class TestStageHandoff:
         return [module.proj.weight.detach().clone() for _, module in stages]
 
     def test_the_keyword_arguments_carry_over_unchanged_by_default(self):
-        """既定は「stage 間で kwargs 不変」— 明示の恒等上書きと**同じ結果**になる。"""
+        """The default is "kwargs unchanged between stages" — **the same result** as an explicit
+        identity override."""
         assert all(
             torch.equal(default, explicit)
             for default, explicit in zip(
@@ -867,9 +912,10 @@ class TestStageHandoff:
         )
 
     def test_advance_kwargs_overrides_the_next_stage_arguments(self):
-        """対照 — 上書き口が実際に効く（後段の `shift` を変えると `H` が変わる）。
+        """Counterpart — the override really takes effect (changing the later `shift` changes `H`).
 
-        前段は `current` の kwargs で回るので**変わらない**のが正しい（上書きは次 stage 用）。
+        The earlier stage runs with the `current` kwargs, so it **not changing** is correct (the
+        override is for the next stage).
         """
         default = self.run_with(None)
         overridden = self.run_with(lambda _index, _kwargs: {"shift": 0.0})

@@ -1,6 +1,8 @@
-"""一本道（export → 格納変換 → 書き出し → 読み直して検証 → 据え替え）の原子性。
+"""Atomicity of the single path (export → storage conversion → write → read back and verify →
+swap).
 
-検証を通るまで最終 path に触れない — 途中で落ちた回は、前回の配布物を 1 バイトも変えない。
+The final path is not touched until verification passes — a run that fails midway does not change
+the previous distribution by a single byte.
 """
 
 from __future__ import annotations
@@ -33,7 +35,8 @@ class Biased(nn.Module):
 
 
 class TwoWeights(nn.Module):
-    """格納テンソルを 2 本持つ（f32 4 要素 = 16 バイトずつ）— part 分割を踏むための最小形。"""
+    """Holds two stored tensors (f32, 4 elements = 16 bytes each) — the minimal shape that exercises
+    the part split."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -47,34 +50,36 @@ class TwoWeights(nn.Module):
 EXAMPLE = (torch.randn(2, 4),)
 TWO_EXAMPLE = (torch.randn(2, 4),)
 
-#: 既に配布できている成果物（再エクスポートの失敗で失われてはいけないバイト列）。
+#: An artifact already shipped (bytes that a failed re-export must not lose).
 SENTINEL = b"already-shipped"
 
-#: `TwoWeights` の重み 1 本ぶん（f32 4 要素）。part 長をここへ下げると 1 part = 1 重み。
+#: One weight of `TwoWeights` (f32, 4 elements). Lowering the part length to this gives one part
+#: per weight.
 ONE_WEIGHT_BYTES = 16
 
 
 def break_write(monkeypatch: pytest.MonkeyPatch) -> None:
-    """書き出しが途中まで進んでから落ちる（ディスク溢れ・I/O 故障の形）。"""
+    """The write fails partway through (the shape of a full disk or an I/O fault)."""
 
     def half_written(path, *args, **kwargs):
         Path(path).write_bytes(b"half")
-        raise OSError("書き出し中に落ちた")
+        raise OSError("failed while writing")
 
     monkeypatch.setattr(publish, "write_model_container", half_written)
 
 
 def break_verify(monkeypatch: pytest.MonkeyPatch) -> None:
-    """書けたファイルが読み直せない（= 配布したら実行できない）。"""
+    """The written file cannot be read back (= it could not run once distributed)."""
 
     def reject(paths):
-        raise ContainerFormatError("読めないファイル")
+        raise ContainerFormatError("unreadable file")
 
     monkeypatch.setattr(publish, "read_container", reject)
 
 
 def published(module: nn.Module, example, path: Path, **kwargs):
-    """`export_module` で変換してから据える（part 長の差し込みは publish 側の席）。"""
+    """Convert with `export_module`, then place it (injecting the part length is the publish side's
+    option)."""
     kwargs.setdefault("graph_name", "series")
     return publish_model(path, *export_module(module, example), provenance=PROVENANCE, **kwargs)
 
@@ -111,7 +116,8 @@ class TestAtomicReplacement:
         assert list(tmp_path.iterdir()) == []
 
     def test_the_delivered_bytes_do_not_depend_on_the_staging_path(self, tmp_path):
-        """一時ファイル経由でも配布物のバイト列は変わらない（名前は中身に入らない）。"""
+        """Going through a temporary file does not change the distribution's bytes (the name does
+        not enter the contents)."""
         left = tmp_path / "series" / "model.krm"
         right = tmp_path / "series2" / "model.krm"
 
@@ -124,9 +130,10 @@ class TestAtomicReplacement:
 
     @pytest.mark.parametrize("name", ["model.f32.safetensors", "model", "model.krm.tmp"])
     def test_a_path_without_the_container_suffix_is_rejected(self, tmp_path, name):
-        """`.krm` 以外の path は黙って読み替えずに落ち、何も据わらない。
+        """A path other than `.krm` fails instead of being silently reinterpreted, and nothing is
+        placed.
 
-        配布形は `krm` の 1 つだけ（container-v1 §8）。
+        The distribution has exactly one form, `krm` (container-v1 §8).
         """
         with pytest.raises(ValueError, match=r"\.krm"):
             export_to_file(
@@ -136,7 +143,8 @@ class TestAtomicReplacement:
         assert list(tmp_path.iterdir()) == []
 
     def test_publish_model_rejects_a_path_without_the_container_suffix(self, tmp_path):
-        """export を済ませたグラフを渡す入口でも同じく落ちる（読み替えは 1 箇所にも残さない）。"""
+        """The entry that takes an already exported graph fails the same way (no reinterpretation is
+        left anywhere)."""
         with pytest.raises(ValueError, match=r"\.krm"):
             published(Biased(), EXAMPLE, tmp_path / "model.safetensors")
 
@@ -144,13 +152,16 @@ class TestAtomicReplacement:
 
 
 class TestPartitionedPublication:
-    """コンテナは**連番の part 列**として据わる（container-v1 §8 — HF の公式配布は分割形）。
+    """The container is placed as a **numbered sequence of parts** (container-v1 §8 — the official
+    HF distribution is the split form).
 
-    重みの part 本数は合成の小テンソルに対して part 長を下げて増やす。
+    The number of weight parts is raised by lowering the part length for the small synthetic
+    tensors.
     """
 
     def test_it_publishes_the_numbered_sequence(self, tmp_path):
-        # 重みは 16 バイト × 2 本。part 長 16 で重み part は 1 本ずつ（+ part 0 と part 1）。
+        # The weights are 2 × 16 bytes. With a part length of 16 each weight gets its own part
+        # (+ part 0 and part 1).
         final = tmp_path / "model.krm"
 
         published(TwoWeights(), TWO_EXAMPLE, final, _part_bytes=ONE_WEIGHT_BYTES)
@@ -169,15 +180,17 @@ class TestPartitionedPublication:
 
         written = container_parts(final)
         assert len(written) == 4
-        # グラフ名は呼び手が名乗る（`published` が渡す部品名）— 親ディレクトリ名の既定は
-        # 作業席の名前を拾うので退役した（`pipeline._assert_graph_name`）。
+        # The caller names the graph (the component name `published` passes) — the default from
+        # the parent directory name picked up the staging path's name and was retired
+        # (`pipeline._assert_graph_name`).
         bound = verify_container(written, blocks=True).graphs["series"]
         assert sorted(bound.supplies) == sorted(
             graph.initializers[name].tensor for name in graph.initializers
         )
 
     def test_a_failed_export_leaves_no_part_behind(self, tmp_path, monkeypatch):
-        """分割の途中まで書けた一時ファイルも残さない（`.partial` の連番ごと捨てる）。"""
+        """Temporary files written partway through the split are not left either (the whole
+        `.partial` sequence is discarded)."""
         break_verify(monkeypatch)
 
         with pytest.raises(ContainerFormatError):
@@ -186,7 +199,8 @@ class TestPartitionedPublication:
         assert list(tmp_path.iterdir()) == []
 
     def test_it_clears_the_parts_of_a_previous_export(self, tmp_path):
-        """本数が変わった再 export の残骸は残さない（同居は組み立てが拒否する形）。"""
+        """A re-export with a different part count leaves no debris (a mix is a state the assembly
+        rejects)."""
         final = tmp_path / "model.krm"
         published(TwoWeights(), TWO_EXAMPLE, final)
         assert len(container_parts(final)) == 3
@@ -198,7 +212,7 @@ class TestPartitionedPublication:
         assert len(list(tmp_path.iterdir())) == 4
 
     def test_it_clears_the_parts_of_a_previous_split(self, tmp_path):
-        """本数が減る再 export でも、前回の連番は置き去りにしない。"""
+        """Even a re-export with fewer parts does not leave the previous sequence behind."""
         final = tmp_path / "model.krm"
         published(TwoWeights(), TWO_EXAMPLE, final, _part_bytes=ONE_WEIGHT_BYTES)
 
@@ -211,10 +225,10 @@ class TestPartitionedPublication:
         ]
 
     def test_the_cli_verifies_the_container_from_its_representative_path(self, tmp_path, capsys):
-        """`karume verify <代表 path>` は連番へ解決してまとめて検証する。
+        """`karume verify <representative path>` resolves the sequence and verifies it as a whole.
 
-        part 1 本だけを単体で検証しても「2 文書が無い」としか言えないので、CLI の引数は
-        本数に依らず**コンテナの代表 path**で通る形にしてある。
+        Verifying a single part on its own can only say "the 2 documents are missing", so the CLI
+        argument is **the container's representative path** whatever the number of parts.
         """
         final = tmp_path / "model.krm"
         published(TwoWeights(), TWO_EXAMPLE, final, _part_bytes=ONE_WEIGHT_BYTES)
@@ -225,11 +239,12 @@ class TestPartitionedPublication:
 
 
 class TestTheIrAcceptanceGate:
-    """書き出しの**前**に IR の受理規則（ランタイム支援 + op 契約）を掛ける。
+    """The IR acceptance rules (runtime support + op contracts) are applied **before** the write.
 
-    台本は `to_states_form` のようなグラフ手術を挟むので、変換段の検査だけでは「書けるが
-    ランタイムが読めない」容器を止められない — 語彙外の op を 1 本足したグラフは、krm を
-    1 バイトも据えずに落ちる MUST（`verify.py` のモジュール doc が掲げる目的の書き出し側）。
+    The scripts insert graph surgery such as `to_states_form`, so the conversion step's checks
+    alone cannot stop a container that "can be written but the runtime cannot read" — a graph with
+    one op added from outside the vocabulary MUST fail without placing a single byte of krm (the
+    write side of the purpose stated in the module doc of `verify.py`).
     """
 
     def _graph_with_an_unknown_op(self):
@@ -257,7 +272,8 @@ class TestTheIrAcceptanceGate:
         assert list(tmp_path.iterdir()) == []
 
     def test_a_contract_violation_places_nothing(self, tmp_path: Path) -> None:
-        """語彙の中でも**契約**（入力本数）が破れていれば据えない。"""
+        """Even inside the vocabulary, nothing is placed when the **contract** (the input count) is
+        broken."""
         graph, tensors = export_module(Biased(), EXAMPLE)
         graph.nodes[-1] = replace(graph.nodes[-1], ins=graph.nodes[-1].ins[:1])
 
@@ -273,7 +289,7 @@ class TestTheIrAcceptanceGate:
         assert list(tmp_path.iterdir()) == []
 
     def test_the_same_graph_without_the_extra_op_is_published(self, tmp_path: Path) -> None:
-        """対照 — 門が「常に落ちる」のではないことの裏側。"""
+        """Control — the flip side showing that the check does not "always fail"."""
         graph, tensors = export_module(Biased(), EXAMPLE)
 
         publish_model(
@@ -284,11 +300,12 @@ class TestTheIrAcceptanceGate:
 
 
 class TestTheGraphNameIsNamedByTheCaller:
-    """グラフ名に既定は無い（`provenance` と同じ扱い）。
+    """The graph name has no default (handled like `provenance`).
 
-    既定を親ディレクトリ名にしていた頃は、作業席（`<部品>.staging/`）へ書く全 recipe が
-    `<部品>.staging` というグラフ名の容器を焼いた — 語彙に `.` が入るので fail loudly もせず、
-    ランタイムが部品名で引いた時点で初めて「コンテナにグラフが無い」になる。
+    When the default was the parent directory name, every recipe writing to a staging path
+    (`<component>.staging/`) wrote a container whose graph was named `<component>.staging` — the
+    vocabulary allows `.`, so it did not fail loudly either, and only when the runtime looked it
+    up by component name did it become "the container has no such graph".
     """
 
     def test_the_container_carries_the_name_the_caller_gave(self, tmp_path: Path) -> None:
@@ -308,7 +325,8 @@ class TestTheGraphNameIsNamedByTheCaller:
         assert list(tmp_path.iterdir()) == []
 
     def test_a_name_with_a_trailing_newline_fails_loudly(self, tmp_path: Path) -> None:
-        """Python の `$` は末尾の改行の直前でも一致する — `.match` だと通り TS が拒否する綴り。"""
+        """Python's `$` also matches just before a trailing newline — a spelling that `.match` lets
+        through and TS rejects."""
         with pytest.raises(ContainerFormatError, match="vocabulary"):
             published(Biased(), EXAMPLE, tmp_path / "model.krm", graph_name="dit\n")
 
@@ -316,11 +334,12 @@ class TestTheGraphNameIsNamedByTheCaller:
 
 
 class TestTheGraphWideGate:
-    """公開前に**グラフ全体**の構造検査（重複出力・SSA・前方参照・記号の束縛）も掛かる。
+    """Before publication the **graph-wide** structural checks (duplicate outputs, SSA, forward
+    references, symbol binding) apply too.
 
-    op ごとの契約検査だけでは、グラフ手術を挟んだ IR の「各ノードは正しいが全体として壊れた」
-    形を止められない。runtime の parser が拒否する `.krm` を公開しない（`karume dist` や
-    `karume verify` まで持ち越さない）。
+    Per-op contract checks alone cannot stop an IR that went through graph surgery and ended up
+    "each node correct but broken as a whole". A `.krm` that the runtime's parser rejects is not
+    published (the failure is not carried over to `karume dist` or `karume verify`).
     """
 
     @staticmethod
@@ -348,7 +367,7 @@ class TestTheGraphWideGate:
         self, tmp_path: Path, broken: str, message: str
     ) -> None:
         graph, tensors = export_module(TwoWeights(), TWO_EXAMPLE)
-        assert len(graph.nodes) == 2, "前方参照を作るには 2 ノード要る（被験体の前提）"
+        assert len(graph.nodes) == 2, "a forward reference needs 2 nodes (a premise of the subject)"
         getattr(self, broken)(graph)
 
         with pytest.raises(publish.PublishError, match=message):

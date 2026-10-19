@@ -1,12 +1,15 @@
-"""コンテナ形式の書き手と読み手（`karume.container`）— docs/container-v1.md / docs/ir-v2.md。
+"""Writer and reader of the container format (`karume.container`) — docs/container-v1.md /
+docs/ir-v2.md.
 
-正解判定の正本は **TS 側の読み手**なので、ここが見るのは「Python 側だけで閉じる規則」である:
-正準 JSON の綴り・IR v2 への改名と並び・block / part の詰め方・自己検査の読み直し。
-「TS が本当に開けるか」は言語横断 fixture（{@link TestTheCrossLanguageFixture} が焼き、
-`packages/runtime/tests/container_fixture_test.ts` が開く）が受け持つ。
+The source of truth for correctness is **the TS reader**, so this file checks "the rules that close
+on the Python side alone": the spelling of canonical JSON, the renaming and ordering into IR v2,
+how blocks / parts are packed, and the re-read of the self-check. "Can TS really open it" is covered
+by the cross-language fixture ({@link TestTheCrossLanguageFixture} writes it,
+`packages/runtime/tests/container_fixture_test.ts` opens it).
 
-台帳と寸法定数は**両側で同じ表を持つ**（導出できる事実ではなく cross-package の不変条件）ので、
-その突合点も 1 本ここに置く（{@link TestTheSharedTables}）。
+The ledger and the size constants **are held as the same table on both sides** (a cross-package
+invariant, not a derivable fact), so their single comparison point also lives here
+({@link TestTheSharedTables}).
 """
 
 from __future__ import annotations
@@ -67,7 +70,7 @@ from karume.container import (
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrShared, IrStorage, IrValue
 from karume.verify import STORAGE_DTYPES
 
-#: TS 側の台帳と寸法定数の置き場（突合の相手）。
+#: Location of the TS ledger and size constants (the other side of the comparison).
 CODECS_TS = RUNTIME_FIXTURES.parents[1] / "src" / "format" / "container" / "codecs.ts"
 LIMITS_TS = RUNTIME_FIXTURES.parents[1] / "src" / "format" / "container" / "limits.ts"
 
@@ -77,9 +80,11 @@ def write_synthetic(tmp_path: Path, *, single: bool) -> list[Path]:
 
 
 def rewrite_part0(part0: Path, *, graph: bytes | None = None, model: bytes | None = None) -> None:
-    """分割形の part 0（ヘッダ + 2 文書だけ）の文書を差し替え、ヘッダの長さも合わせて書き直す。
+    """Replace the documents of a split-form part 0 (header + two documents only) and rewrite the
+    header lengths to match.
 
-    長さを揃えるので、壊した文書が「part 0 の長さ違い」に化けず、狙った検査分岐だけを踏む。
+    With the lengths in line, a broken document does not turn into "a wrong part 0 length" and
+    takes only the targeted check branch.
     """
     raw = part0.read_bytes()
     header = read_header(raw)
@@ -95,14 +100,15 @@ def rewrite_part0(part0: Path, *, graph: bytes | None = None, model: bytes | Non
 
 
 def edit_model_document(written: list[Path], edit: Callable[[dict[str, Any]], None]) -> None:
-    """分割形のモデル記述を JSON として書き換える（正準 JSON で綴り直す）。"""
+    """Rewrite the split form's model descriptor as JSON (respelled as canonical JSON)."""
     document = json.loads(read_container(written).model_descriptor_bytes)
     edit(document)
     rewrite_part0(written[0], model=canonical_json(document).encode())
 
 
 class TestCanonicalJson:
-    """数値の綴りは ECMAScript `Number::toString`（docs/ir-v2.md「正準直列化」）。"""
+    """Numbers are spelled as ECMAScript `Number::toString` (docs/ir-v2.md "Canonical
+    serialization")."""
 
     @pytest.mark.parametrize(
         ("value", "expected"),
@@ -117,10 +123,11 @@ class TestCanonicalJson:
             (1e-12, "1e-12"),
             (0.2973017692565918, "0.2973017692565918"),
             (123456789012345680000, "123456789012345680000"),
-            # 端: 倍精度の最大と非正規化の最小（どちらも指数表記で綴る領域）。
+            # Edges: the double maximum and the subnormal minimum (both spelled in exponent
+            # notation).
             (1.7976931348623157e308, "1.7976931348623157e+308"),
             (5e-324, "5e-324"),
-            # 整数値の float は小数点を持たない（`repr` は `10000.0` を返す）。
+            # An integral float has no decimal point (`repr` returns `10000.0`).
             (-1024.0, "-1024"),
         ],
     )
@@ -128,7 +135,7 @@ class TestCanonicalJson:
         assert canonical_json(value) == expected
 
     def test_the_document_has_no_whitespace_and_keeps_the_declared_key_order(self) -> None:
-        """並べ替えは組み立て側の責任 — 直列化器は宣言順をそのまま綴る。"""
+        """Ordering is the assembler's job — the serializer spells the declared order as is."""
         assert canonical_json({"b": 1, "a": [True, False, None]}) == '{"b":1,"a":[true,false,null]}'
 
     def test_non_ascii_stays_raw_and_control_characters_are_escaped(self) -> None:
@@ -145,7 +152,7 @@ class TestCanonicalJson:
 
 
 def _minimal_graph(**overrides: object) -> IrGraph:
-    """1 initializer・1 ノードの最小グラフ（改名と並びの検査の被験体）。"""
+    """Minimal graph with one initializer and one node (subject of the rename and order checks)."""
     graph = IrGraph(
         symbols=["T"],
         inputs=[IrInput(name="x", dtype="f32", shape=["T", 4])],
@@ -194,21 +201,22 @@ class TestIrV2Document:
         assert document["version"] == 2
         assert list(document["initializers"]) == ["a.weight", "b.weight"]
         assert list(document["values"]) == ["a.weight", "b.weight", "y"]
-        # attrs も再帰的に code point 順（自由形の値なので組み立て側が正準化する）。
+        # attrs are in code point order recursively too (free-form values, so the assembler
+        # canonicalizes them).
         assert '"attrs":{"a":2,"b":1}' in text
-        # 配列は宣言順のまま（順序が意味を持つ欄）。
+        # Arrays keep the declared order (fields where order has meaning).
         assert '"ins":["x","a.weight"]' in text
 
     def test_digit_only_names_follow_code_point_order_like_the_ts_writer(self) -> None:
-        """数字だけの名前も code point 順（"10" < "2"）。
+        """Digit-only names are in code point order too ("10" < "2").
 
-        TS の書き手と共有する fixture とバイト単位で一致する。
+        Matches the fixture shared with the TS writer byte for byte.
         """
         emoji = "\U0001f600"
         tensors = ["10", "2", emoji, "0"]
         chain = ["x", "a1", "a2", "a3", "y"]
-        # 改名前の initializer 名（p_*）から実体の鍵へ。
-        # ノードは "0" → "2" → "10" → 絵文字の順に足す。
+        # From the initializer names before renaming (p_*) to the real keys.
+        # Nodes are added in the order "0" → "2" → "10" → emoji.
         order = ["0", "2", "10", emoji]
         graph = IrGraph(
             symbols=[],
@@ -265,14 +273,15 @@ class TestIrV2Document:
 
 
 def _parse_ts_ledger(source: str) -> dict[str, tuple[str, int, int, int, str, str | None]]:
-    """TS の `CODEC_LEDGER` を読む（登録名 → layout + packing 3 値 + scale + grouping）。
+    """Read the TS `CODEC_LEDGER` (registered name → layout + 3 packing values + scale + grouping).
 
-    正規表現で読むのは、突合の相手が**リポ内の不変なデータ**だからである（実行時に import できる
-    形にすると Python 側のテストが deno を要求する）。TS 側の綴りが動けばここが落ちる。
+    It is read with regular expressions because the other side is **immutable data in the
+    repository** (a form importable at run time would make the Python tests require a TypeScript
+    runtime). If the TS spelling moves, this fails.
     """
     raw_align = re.search(r"const RAW = \(.*?alignBytes: (\d+)", source, re.S)
     raw_elements = re.search(r"const RAW = \(.*?blockElements: (\d+)", source, re.S)
-    assert raw_align is not None and raw_elements is not None, "RAW ヘルパを読めない"
+    assert raw_align is not None and raw_elements is not None, "cannot read the RAW helper"
     entries: dict[str, tuple[str, int, int, int, str, str | None]] = {}
     for name, layout, block_bytes in re.findall(
         r'\["([\w-]+)", RAW\("([\w-]+)", (\d+)\)\]', source
@@ -285,8 +294,9 @@ def _parse_ts_ledger(source: str) -> dict[str, tuple[str, int, int, int, str, st
             "forbidden",
             None,
         )
-    # Oxfmt（2026-10-16）は長い項目を「[ / 名前 / { … } / ]」の複数行に割るので、名前と \`{\` の間・
-    # \`}\` と \`]\` の間の空白と改行を許す（RAW の行は 1 行のまま）。
+    # Oxfmt (2026-10-16) splits long entries over several lines "[ / name / { … } / ]", so
+    # whitespace and newlines are allowed between the name and \`{\` and between \`}\` and \`]\`
+    # (RAW lines stay on one line).
     for name, body in re.findall(r'\[\s*"([\w-]+)",\s*\{(.*?)\n\s*\},?\s*\]', source, re.S):
         numbers = {
             key: int(re.search(rf"{key}: (\d+)", body).group(1))  # type: ignore[union-attr]
@@ -295,8 +305,8 @@ def _parse_ts_ledger(source: str) -> dict[str, tuple[str, int, int, int, str, st
         layout_match = re.search(r'layout: "([\w-]+)"', body)
         scale = re.search(r'scale: "(\w+)"', body)
         grouping = re.search(r'grouping: "?(\w+)"?', body)
-        assert layout_match is not None, f"{name}: layout を読めない"
-        assert scale is not None and grouping is not None, f"{name}: scale / grouping を読めない"
+        assert layout_match is not None, f"{name}: cannot read layout"
+        assert scale is not None and grouping is not None, f"{name}: cannot read scale / grouping"
         entries[name] = (
             layout_match.group(1),
             numbers["blockElements"],
@@ -309,7 +319,8 @@ def _parse_ts_ledger(source: str) -> dict[str, tuple[str, int, int, int, str, st
 
 
 class TestTheSharedTables:
-    """台帳と寸法定数は両側が**同じ値**を持つ（資産に焼かれる値なので片側だけ動かせない）。"""
+    """Both sides hold **the same values** for the ledger and size constants (they are written into
+    assets, so one side cannot move alone)."""
 
     def test_the_codec_ledger_matches_the_runtime_one(self) -> None:
         ours = {
@@ -327,10 +338,12 @@ class TestTheSharedTables:
         assert _parse_ts_ledger(CODECS_TS.read_text(encoding="utf-8")) == ours
 
     def test_every_legacy_storage_dtype_maps_to_a_registered_codec(self) -> None:
-        """旧 `storage.dtype` の全種に写し先がある（移行 CLI が黙って席を落とさない）。"""
+        """Every kind of old `storage.dtype` has a target (the migration CLI does not silently drop
+        a slot)."""
         assert set(CODEC_FOR_STORAGE) == set(STORAGE_DTYPES)
         assert set(CODEC_FOR_STORAGE.values()) <= set(CODEC_LEDGER)
-        # 三値であるという主張は量子化器の側がする — 旧 i2 は `int2-off` へだけ写る（§6.3）。
+        # The claim of being ternary is the quantizer's to make — old i2 maps only to `int2-off`
+        # (§6.3).
         assert "ternary" not in CODEC_FOR_STORAGE.values()
 
     def test_the_group_size_floor_matches(self) -> None:
@@ -361,7 +374,8 @@ class TestTheSharedTables:
 
 
 class TestWriteAndReadBack:
-    """書いたものを読み直す（§12 の不変条件 5 と同じ流儀 — 書けたのに読めないものを作らない）。"""
+    """Re-read what was written (the same discipline as invariant 5 of §12 — never produce
+    something that was written but cannot be read)."""
 
     def test_a_written_container_reads_back_and_reserializes_to_the_same_bytes(
         self, tmp_path: Path
@@ -425,7 +439,7 @@ class TestWriteAndReadBack:
         assert [rows for _, rows in supply.pieces] == [(0, 8), (8, 16)]
         assert all(blocks[block].length == 256 for block, _ in supply.pieces)
         assert supply.encoding.scale_block is not None
-        # 規則③: companion scale は piece 1 と同一 part。
+        # Rule ③: the companion scale is in the same part as piece 1.
         assert blocks[supply.encoding.scale_block].part == blocks[supply.pieces[0][0]].part
 
     def test_a_tail_pad_is_baked_by_the_writer(self, tmp_path: Path) -> None:
@@ -471,7 +485,8 @@ class TestWriteAndReadBack:
 
 
 class TestTheGraphContainer:
-    """`krg` は `krm` からバイトコピーで抜ける（§9 — 同一性を内容ハッシュで判定する条件）。"""
+    """A `krg` is extracted from a `krm` by byte copy (§9 — the condition for judging identity by
+    content hash)."""
 
     def test_the_extracted_krg_equals_a_directly_written_krg(self, tmp_path: Path) -> None:
         read = read_container(write_synthetic(tmp_path, single=True))
@@ -516,7 +531,7 @@ class TestTheGraphContainer:
             )
 
     def test_an_empty_const_region_still_extracts(self, tmp_path: Path) -> None:
-        """長さ 0 の part の前に詰め物を挿まない（§3 — 挿むと抽出結果がずれる）。"""
+        """No padding before a zero-length part (§3 — padding would shift the extraction result)."""
         graph = _minimal_graph()
         bindings = {"a.weight": Encoding("f32"), "b.weight": Encoding("f32")}
         tensors = {"a.weight": pattern_bytes(64, 5), "b.weight": pattern_bytes(64, 6)}
@@ -551,7 +566,8 @@ class TestTheWriterRefusesWhatItCannotRepresent:
             )
 
     def test_a_const_that_exceeds_the_block_limit_fails_loudly(self, tmp_path: Path) -> None:
-        """const は piece 分割の機構を持たない（§3 — 逃げ道を作らず書き手が止まる）。"""
+        """The const region has no piece-splitting mechanism (§3 — the writer stops instead of
+        opening an escape hatch)."""
         graph = _minimal_graph()
         graph.initializers["c"] = IrInitializer(
             tensor="const.0011223344556677", storage=IrStorage(dtype="f32")
@@ -587,7 +603,7 @@ class TestTheWriterRefusesWhatItCannotRepresent:
                 graph_name=GRAPH_NAME,
                 provenance=Provenance(license="mit"),
                 part_bytes=FIXTURE_PART_BYTES,
-                # conv.weight（96 バイト・rowAxis 1）が割れる寸法まで下げる。
+                # Lower the size until conv.weight (96 bytes, rowAxis 1) splits.
                 block_bytes=64,
             )
 
@@ -629,10 +645,12 @@ class TestTheWriterRefusesWhatItCannotRepresent:
 
 
 class TestTheProvenanceReader:
-    """省略可の 3 欄（notice / upstreamRevision / writer）も TS の読み手と同じく非空文字列を要る。
+    """The three optional fields (notice / upstreamRevision / writer) also require a non-empty
+    string, as in the TS reader.
 
-    publish の読み直しと `karume verify` はこの読み手を通るので、ここが素通しだと TS の
-    `openContainer` が開けない容器（`karume migrate --notice ""` 等）が据わる。
+    The publish re-read and `karume verify` go through this reader, so if it let them through, a
+    container TS `openContainer` cannot open (`karume migrate --notice ""` and the like) would be
+    installed.
     """
 
     def test_an_empty_notice_from_the_writer_is_refused_on_read_back(self, tmp_path: Path) -> None:
@@ -681,7 +699,7 @@ class TestTheProvenanceReader:
 
 
 class TestTheAssetIntake:
-    """資産の受け口（§2.2 / §4.2）— piece 分割せず、重みと part を共有しない。"""
+    """Asset input (§2.2 / §4.2) — no piece splitting, no part shared with weights."""
 
     @staticmethod
     def _write(tmp_path: Path, assets: dict[str, AssetInput], **overrides: object) -> list[Path]:
@@ -699,7 +717,7 @@ class TestTheAssetIntake:
         )
 
     def test_a_lazy_payload_writes_the_same_bytes_as_a_plain_one(self, tmp_path: Path) -> None:
-        """遅延の呼び出しは「いつ引くか」だけを変える（出るバイト列は同じ）。"""
+        """A deferred call changes only "when it is pulled" (the bytes produced are the same)."""
         payload = pattern_bytes(37, 61)
         plain = self._write(tmp_path / "a", {"x": AssetInput("rope-base", 37, payload)})
         lazy = self._write(tmp_path / "b", {"x": AssetInput("rope-base", 37, lambda: payload)})
@@ -716,7 +734,8 @@ class TestTheAssetIntake:
         assert all(block.part != asset.part for block in blocks.values() if block.role != "asset")
 
     def test_the_declared_length_survives_into_the_model_descriptor(self, tmp_path: Path) -> None:
-        """論理長は宣言の写し・block 長はそれを 4 の倍数へ切り上げた値（ADR 0109 決定 4）。"""
+        """The logical length copies the declaration; the block length rounds it up to a multiple of
+        4 (ADR 0109 decision 4)."""
         read = read_container(
             self._write(tmp_path, {"x": AssetInput("rope-base", 37, b"\x01" * 37)})
         )
@@ -729,10 +748,11 @@ class TestTheAssetIntake:
         assert read.block(record.block) == b"\x01" * 37 + b"\x00" * 3
 
     def test_a_dedicated_asset_gets_a_part_of_its_own(self, tmp_path: Path) -> None:
-        """区間読みを要する資産は専用 part に単独で置く MUST（container-v1 §4.2）。
+        """An asset that needs range reads MUST sit alone in a dedicated part (container-v1 §4.2).
 
-        全量読みの資産を**先に**渡すのは、専用 part が「直前の part の続き」にならないことまで
-        見るためである（後ろに開く側だけを見ると、この規則は空振りで緑になる）。
+        A read-whole asset is passed **first** to also check that the dedicated part does not
+        become "the continuation of the previous part" (looking only at the side that opens
+        after it, this rule would pass green without checking anything).
         """
         read = read_container(
             self._write(
@@ -749,7 +769,8 @@ class TestTheAssetIntake:
         blocks = {block.id: block for block in read.model.blocks}
         parts = {name: blocks[record.block].part for name, record in read.model.assets.items()}
 
-        # 専用 part は 1 block だけを持ち、全量読みの資産とも同居しない。
+        # The dedicated part holds exactly one block and is not shared with read-whole assets
+        # either.
         assert len({parts["idx"], parts["v.0"], parts["v.1"], parts["tail"]}) == 4
         for name in ("v.0", "v.1"):
             assert [block.id for block in read.model.blocks if block.part == parts[name]] == [
@@ -757,7 +778,7 @@ class TestTheAssetIntake:
             ]
 
     def test_the_physical_order_follows_the_call_order(self, tmp_path: Path) -> None:
-        """配置の順は**渡した順**（PLE は token 順で渡る）— 名前の辞書順ではない。"""
+        """Layout order is **the order passed in** (PLE arrives in token order) — not name order."""
         read = read_container(
             self._write(
                 tmp_path,
@@ -780,7 +801,7 @@ class TestTheAssetIntake:
         ]
 
     def test_an_asset_that_exceeds_the_block_limit_fails_loudly(self, tmp_path: Path) -> None:
-        """資産は piece 分割の機構を持たない（読み手は役割の索引で行を引く）。"""
+        """Assets have no piece-splitting mechanism (readers find rows through the role's index)."""
         with pytest.raises(ContainerFormatError, match="an asset must fit in one block"):
             self._write(
                 tmp_path, {"x": AssetInput("ple-values", 300, b"\x00" * 300)}, block_bytes=256
@@ -793,12 +814,13 @@ class TestTheAssetIntake:
     def test_an_asset_name_that_collides_with_a_tensor_key_fails_loudly(
         self, tmp_path: Path
     ) -> None:
-        """衝突を許すと block の実体が黙って入れ替わる。"""
+        """Allowing a collision would silently swap the block contents."""
         with pytest.raises(ContainerFormatError, match="collide with tensor keys"):
             self._write(tmp_path, {"a.weight": AssetInput("ple-values", 8, b"\x01" * 8)})
 
     def test_a_payload_that_differs_between_pulls_fails_loudly(self, tmp_path: Path) -> None:
-        """引かれるたびに同じバイト列を返す MUST（何度引く実装でも同じ結論になる形で見る）。"""
+        """MUST return the same bytes each time it is pulled (checked so that any number of pulls
+        gives the same conclusion)."""
         pulls = count(8)
 
         with pytest.raises(
@@ -809,7 +831,7 @@ class TestTheAssetIntake:
     def test_a_payload_that_disagrees_with_the_declared_length_fails_loudly(
         self, tmp_path: Path
     ) -> None:
-        """宣言が先（配置は宣言で決まる）— 実体が違えば落とす。"""
+        """The declaration comes first (it decides the layout) — different contents fail."""
         with pytest.raises(
             ContainerFormatError, match="differ from the 8 bytes decided by the declaration"
         ):
@@ -821,7 +843,7 @@ class TestTheAssetIntake:
 
 
 class TestTheCrossLanguageFixture:
-    """TS 側 `container_fixture_test.ts` が開く資産を、この書き手が焼いたまま保つ。"""
+    """Keeps the asset the TS `container_fixture_test.ts` opens exactly as this writer writes it."""
 
     def test_the_committed_fixture_matches_the_generator(self, tmp_path: Path) -> None:
         rebuilt = write_synthetic(tmp_path, single=True)[0].read_bytes()
@@ -830,12 +852,12 @@ class TestTheCrossLanguageFixture:
             FIXTURE_PATH.write_bytes(rebuilt)
 
         assert FIXTURE_PATH.read_bytes() == rebuilt, (
-            "fixture が書き手とずれている"
-            "（焼き直し: KARUME_FIXTURE=write uv run pytest tests/test_container.py -k fixture）"
+            "the fixture drifted from the writer"
+            " (rebuild: KARUME_FIXTURE=write uv run pytest tests/test_container.py -k fixture)"
         )
 
     def test_the_fixture_exercises_the_readers_branches(self, tmp_path: Path) -> None:
-        """fixture が「分岐を 1 回ずつ踏む」形であること（痩せた資産に黙って戻らない）。"""
+        """The fixture "takes each branch once" (no silent fallback to a thinner asset)."""
         read = read_container([FIXTURE_PATH])
         assert read.model is not None
         supplies = read.model.binding[GRAPH_NAME]
@@ -862,12 +884,12 @@ class TestTheCrossLanguageFixture:
                 path.write_bytes(raw)
 
         assert [path.read_bytes() for path in committed] == rebuilt, (
-            "分割形 fixture が書き手とずれている"
-            "（焼き直し: KARUME_FIXTURE=write uv run pytest tests/test_container.py -k fixture）"
+            "the split-form fixture drifted from the writer"
+            " (rebuild: KARUME_FIXTURE=write uv run pytest tests/test_container.py -k fixture)"
         )
 
     def test_the_split_fixture_exercises_the_asset_and_empty_const_branches(self) -> None:
-        """資産 + 空 const + 重み part 2 本（単一形の fixture では踏めない分岐）。"""
+        """Assets + empty const + 2 weight parts (branches the single-form fixture cannot take)."""
         paths = split_fixture_paths()
         read = read_container(paths)
         assert read.model is not None
@@ -884,32 +906,35 @@ class TestTheCrossLanguageFixture:
             "ple_index": 64,
             "rope_base": 37,
         }
-        # 資産の block は重み block と part を共有しない（§4.2）。
+        # Asset blocks do not share a part with weight blocks (§4.2).
         asset_blocks = {record.block for record in read.model.assets.values()}
         parts = {block.part for block in read.model.blocks if block.id in asset_blocks}
         assert parts.isdisjoint(
             {block.part for block in read.model.blocks if block.id not in asset_blocks}
         )
-        # 奇数長の payload は末尾 0x00 で 4 バイト整列へ詰められる。
+        # An odd-length payload is padded with trailing 0x00 to 4-byte alignment.
         payloads = split_asset_payloads()
         raw = read.block(read.model.assets["rope_base"].block)
         assert raw == payloads["rope_base"] + b"\x00" * 3
 
 
 class TestTheDescriptorReadIsBounded:
-    """`read_descriptor_refs` は part 0 を**丸ごと RAM へ載せない**（ヘッダ + 2 文書だけ）。
+    """`read_descriptor_refs` does **not load the whole of** part 0 into RAM (header + two
+    documents only).
 
-    呼び手（`karume.dist._materialize_family`）は「単一形かどうか」を判定する**前に**ここを
-    通る。全量読みにすると、単一形の容器を weights 席へ挿した組み立てが、規則違反として
-    落ちる前に数 GB を読む（段 2 で harness を入れた RAM ピークの関心事）。
+    The caller (`karume.dist._materialize_family`) goes through here **before** deciding "is it a
+    single form". A whole read would make an assembly that put a single-form container in the
+    weights slot read several GB before failing as a rule violation (the RAM-peak concern for
+    which a harness was added at ADR 0108 step 2).
     """
 
     def test_it_never_reads_the_whole_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         path = write_synthetic_container(tmp_path / "model.krm", single=True)[0]
-        # 実装は `path.open("rb")` 経由で読むので、`read_bytes` を塞ぐだけでは `handle.read()` の
-        # 全量読みへの退行を見逃す — 対象 path のハンドルが返したバイト数を数えて縛る。
+        # The implementation reads through `path.open("rb")`, so blocking `read_bytes` alone would
+        # miss a regression to a whole read via `handle.read()` — count the bytes the handle of
+        # the target path returned and bound them.
         reads: list[int] = []
         original_open = Path.open
 
@@ -936,7 +961,9 @@ class TestTheDescriptorReadIsBounded:
             return CountingHandle(handle) if self == path else handle
 
         def forbidden(self: Path) -> bytes:
-            raise AssertionError(f"{self}: 現物を丸ごと読んだ（ヘッダ + 2 文書だけ MUST）")
+            raise AssertionError(
+                f"{self}: read the whole file (MUST be header + two documents only)"
+            )
 
         monkeypatch.setattr(Path, "open", spying_open)
         monkeypatch.setattr(Path, "read_bytes", forbidden)
@@ -945,12 +972,14 @@ class TestTheDescriptorReadIsBounded:
         assert graph.length > 0
         assert model.length > 0
         descriptors = HEADER_BYTES + graph.length + model.length
-        # 被験体の前提: part 0 の後ろに const / 重みの data が続く単一形（痩せると門が恒真になる）。
+        # Premise of the subject: a single form with const / weight data after part 0 (thinner, the
+        # check would become tautological).
         assert path.stat().st_size > descriptors
         assert sum(reads) == descriptors
 
     def test_a_graph_container_is_refused(self, tmp_path: Path) -> None:
-        """`krg` は 2 文書を持たない（モデル記述が無い）— manifest の期待値を採る口ではない。"""
+        """A `krg` lacks the two documents (no model descriptor) — not an entry for taking manifest
+        expected values."""
         bindings = synthetic_bindings()
         path = write_graph_container(
             tmp_path / "synthetic.krg",
@@ -966,12 +995,14 @@ class TestTheDescriptorReadIsBounded:
 
 
 class TestTheReaderRefuses:
-    """読み手（ヘッダと 2 文書の検査）の負例 — 1 分岐 1 ケースで `ContainerFormatError` を縛る。
+    """Negative cases of the reader (checks of the header and the two documents) — one case per
+    branch pins `ContainerFormatError`.
 
-    `karume verify` と publish / migrate の自己検査はこの読み手に全面的に頼るので、検査が 1 本
-    緩んでも（比較演算子の取り違え等）どこかが赤になる形にしておく。被験体は分割形の part 0
-    （ヘッダ + 2 文書だけ）で、文書を書き換えるケースは {@link rewrite_part0} がヘッダの長さも
-    合わせる — 「長さ違い」に化けず、狙った分岐だけを踏む。
+    `karume verify` and the publish / migrate self-checks rely entirely on this reader, so any one
+    check loosening (a swapped comparison operator and the like) must turn something red. The
+    subject is a split-form part 0 (header + two documents only); cases that rewrite a document
+    have {@link rewrite_part0} fix the header lengths too — so they do not turn into "wrong
+    length" and take only the targeted branch.
     """
 
     @staticmethod
@@ -983,7 +1014,8 @@ class TestTheReaderRefuses:
         return written
 
     def test_an_untouched_rewrite_still_reads(self, tmp_path: Path) -> None:
-        """対照 — 書き換えの足場そのものは容器を壊さない（下の赤は注入した違反のもの）。"""
+        """Counterpart — the rewriting scaffold itself does not break the container (the failures
+        below come from the injected violations)."""
         written = write_synthetic(tmp_path, single=False)
         edit_model_document(written, lambda document: None)
 
@@ -1046,7 +1078,8 @@ class TestTheReaderRefuses:
             read_container(written)
 
     def test_nesting_at_the_limit_passes_the_depth_check(self, tmp_path: Path) -> None:
-        """境界 — 深さちょうど上限は深さでは落ちない（次の「オブジェクトでない」で落ちる）。"""
+        """Boundary — depth exactly at the limit does not fail on depth (it fails on the next "not
+        an object")."""
         written = write_synthetic(tmp_path, single=False)
         rewrite_part0(written[0], model=b"[" * (MAX_JSON_DEPTH + 1) + b"]" * (MAX_JSON_DEPTH + 1))
 
@@ -1058,7 +1091,8 @@ class TestTheReaderRefuses:
         [
             ("offset", 63, r"blocks\[1\]: offset 63 is not a multiple of 64"),
             ("length", 0, r"blocks\[1\]: length is 0"),
-            # blocks[0] は同じ part の 0..256 — 192 始まりは重なる（64 の倍数なので整列は通る）。
+            # blocks[0] is 0..256 of the same part — a start at 192 overlaps (a multiple of 64, so
+            # alignment passes).
             ("offset", 192, "block 's0003' overlaps the preceding block"),
         ],
         ids=["unaligned-offset", "zero-length", "overlap"],
@@ -1091,10 +1125,11 @@ class TestTheReaderRefuses:
     def test_a_graph_requires_outside_the_ts_acceptance_set_is_refused(
         self, tmp_path: Path, requires: dict[str, Any], message: str
     ) -> None:
-        """`requires` は TS の `parseIrDeclaration` と同じく `{ops: string[]}` だけを受ける。
+        """`requires` takes only `{ops: string[]}`, like TS `parseIrDeclaration`.
 
-        素の添字だと `ops` の欠落は `KeyError` になり、文字列は 1 文字ずつ反復されて
-        「capabilities.ops が和集合と一致しない」という別の場所の違反に化ける。
+        With plain indexing a missing `ops` becomes a `KeyError`, and a string is iterated one
+        character at a time and turns into a violation elsewhere, "capabilities.ops does not
+        match the union".
         """
         written = write_synthetic(tmp_path, single=False)
         document = json.loads(read_container(written).graph_descriptor_bytes)
@@ -1108,26 +1143,27 @@ class TestTheReaderRefuses:
 def _raw_model_document(
     written: list[Path], edit: Callable[[dict[str, Any]], None], literals: dict[str, str]
 ) -> None:
-    """モデル記述を書き換え、プレースホルダ文字列を**生の数値リテラル**へ置き換えて差し込む。
+    """Rewrite the model descriptor and splice in placeholder strings replaced by **raw number
+    literals**.
 
-    `canonical_json` は `64.0` を `64` へ畳むので、整数値の float を綴りのまま届けるには
-    `json.dumps` の出力を文字列置換する（読み手は正準形との一致を要求しない）。
+    `canonical_json` folds `64.0` to `64`, so to deliver an integral float as spelled, the
+    `json.dumps` output is string-replaced (the reader does not require the canonical form).
     """
     document = json.loads(read_container(written).model_descriptor_bytes)
     edit(document)
     text = json.dumps(document, ensure_ascii=False, separators=(",", ":"))
     for placeholder, literal in literals.items():
-        assert f'"{placeholder}"' in text, f"{placeholder} を差し込んでいない（空振り）"
+        assert f'"{placeholder}"' in text, f"{placeholder} was not spliced in (a no-op)"
         text = text.replace(f'"{placeholder}"', literal)
     rewrite_part0(written[0], model=text.encode())
 
 
 class TestTheReaderAcceptsIntegralFloats:
-    """JSON の整数欄を `64.0` / `6.4e1` と綴っても、TS と同じく整数として受理する。
+    """JSON integer fields spelled `64.0` / `6.4e1` are accepted as integers, as in TS.
 
-    TS の読み手は `Number.isSafeInteger` で判定するので `64.0` と `64` を区別しない。Python が
-    float を丸ごと拒むと、**ランタイムが開けるコンテナをエクスポータの検証だけが開けない**
-    乖離になる（`_assert_integer_attr` / `verify._parse_shape` と同じ受理集合）。
+    The TS reader decides with `Number.isSafeInteger`, so it does not tell `64.0` from `64`. If
+    Python refused floats outright, **only the exporter's checks could not open a container the
+    runtime opens** (the same accepted set as `_assert_integer_attr` / `verify._parse_shape`).
     """
 
     @pytest.mark.parametrize("spelling", ["{}.0", "{}e0"], ids=["fraction", "exponent"])
@@ -1152,7 +1188,8 @@ class TestTheReaderAcceptsIntegralFloats:
         assert read is not None
         assert read.blocks[1].offset == block.offset
         assert read.blocks[1].length == block.length
-        # int で持つ（float のまま持つと to_document が往復で別の綴りを書く余地が残る）。
+        # Held as int (holding a float would leave room for to_document to write a different
+        # spelling in the round trip).
         assert type(read.blocks[1].offset) is int
         assert type(read.blocks[1].length) is int
 
@@ -1160,7 +1197,7 @@ class TestTheReaderAcceptsIntegralFloats:
     def test_a_non_integral_float_or_a_bool_is_still_refused(
         self, tmp_path: Path, literal: str
     ) -> None:
-        """正規化は受理集合を広げない — 非整数値と bool は従来どおり拒否する。"""
+        """Normalization does not widen the accepted set — non-integers and bool stay refused."""
         written = write_synthetic(tmp_path, single=False)
 
         _raw_model_document(
@@ -1176,11 +1213,13 @@ class TestTheReaderAcceptsIntegralFloats:
 
 
 class TestTheReaderMatchesTheRuntimeRefusals:
-    """TS の読み手が拒否する宣言を、Python の読み手も同じく拒否する（ADR 0108 追記1 §13・§0）。
+    """Declarations the TS reader refuses are refused by the Python reader too (ADR 0108 addendum 1,
+    item 13 / container-v1 §0).
 
-    Python の bool は int の派生で `True == 1` が真なので、`==` やタプル比較だけで版や packing を
-    見ると `true` が `1` として通る。TS は `!== 1` で別物として落とす — 外部の `.krm` を
-    `karume verify` で検証したとき「Python は緑・ブラウザは赤」になる非対称を塞ぐ。
+    Python's bool derives from int and `True == 1` is true, so checking the version or packing with
+    `==` or tuple comparison alone lets `true` pass as `1`. TS rejects it as different with
+    `!== 1` — this closes the asymmetry where verifying an external `.krm` with `karume verify` is
+    "green in Python, red in the browser".
     """
 
     @pytest.mark.parametrize("document", ["graph", "model"])
@@ -1201,7 +1240,7 @@ class TestTheReaderMatchesTheRuntimeRefusals:
         def edit(document: dict[str, Any]) -> None:
             supplies = document["binding"][GRAPH_NAME]
             f16 = [s for s in supplies.values() if s["encoding"]["codec"] == "f16"]
-            assert f16, "被験体に blockElements = 1 の codec が無い（空振り）"
+            assert f16, "the subject has no codec with blockElements = 1 (a no-op)"
             f16[0]["encoding"]["packing"]["blockElements"] = True
 
         edit_model_document(written, edit)
@@ -1210,7 +1249,7 @@ class TestTheReaderMatchesTheRuntimeRefusals:
             read_container(written)
 
     def test_a_proto_key_is_refused_wherever_it_appears(self, tmp_path: Path) -> None:
-        """名前を自由に置ける map（ここは資産名）でも `__proto__` は読みの時点で落ちる。"""
+        """Even in a map with free-form names (asset names here), `__proto__` fails at read time."""
         written = write_split_container(tmp_path)
 
         def edit(document: dict[str, Any]) -> None:
@@ -1248,12 +1287,15 @@ class TestTheReaderMatchesTheRuntimeRefusals:
     def test_too_many_blocks_across_both_documents_are_refused(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """各文書は上限内でも、const と重みの合計が上限を超えれば落ちる（TS と同じ合計の上限）。"""
+        """Even with each document within its limit, const plus weights over the limit fails (the
+        same total limit as TS)."""
         written = write_synthetic(tmp_path, single=False)
         read = read_container(written)
         const_blocks = len(read.graph.const_blocks)
         model_blocks = len(read.model.blocks)  # type: ignore[union-attr]
-        assert const_blocks > 0, "被験体に const block が無い（合計の上限が空振りする）"
+        assert const_blocks > 0, (
+            "the subject has no const block (the total limit would check nothing)"
+        )
         monkeypatch.setattr(container_module, "MAX_BLOCKS", const_blocks + model_blocks - 1)
 
         with pytest.raises(
@@ -1263,10 +1305,11 @@ class TestTheReaderMatchesTheRuntimeRefusals:
 
 
 def _write_pieced_f16(tmp_path: Path) -> list[Path]:
-    """scale を持たない f16 の重み 1 本を 4 piece（part 2, 2, 3, 3）に割って書く。
+    """Write one f16 weight without a scale split into 4 pieces (parts 2, 2, 3, 3).
 
-    scale の無い codec を使うのは、規則③（scale は piece 1 と同一 part）に化けずに piece の
-    part 順だけを踏むため。同じ part の piece が続く形（非減少の等号側）も同時に作れる。
+    A codec without a scale takes only the part order of the pieces without turning into rule ③
+    (the scale is in the same part as piece 1). It also yields consecutive pieces in the same part
+    (the equal side of non-decreasing).
     """
     graph = IrGraph(
         symbols=["T"],
@@ -1298,7 +1341,8 @@ def _piece_parts(document: dict[str, Any]) -> list[int]:
 
 
 class TestThePieceOrder:
-    """規則④: piece の part は添字順に非減少（container-v1 §5・TS は `bindGraphs` で拒否）。"""
+    """Rule ④: piece parts are non-decreasing in index order (container-v1 §5; TS refuses in
+    `bindGraphs`)."""
 
     def test_pieces_that_stay_in_the_same_part_are_accepted(self, tmp_path: Path) -> None:
         written = _write_pieced_f16(tmp_path)
@@ -1307,7 +1351,7 @@ class TestThePieceOrder:
         assert _piece_parts(document) == [2, 2, 3, 3]
 
     def test_pieces_whose_parts_go_backwards_are_refused(self, tmp_path: Path) -> None:
-        """piece 2 と 3 の block 参照を入れ替えて part 2, 3, 2, 3 にする（長さは同じ 256）。"""
+        """Swap the block refs of pieces 2 and 3 to get parts 2, 3, 2, 3 (the same length 256)."""
         written = _write_pieced_f16(tmp_path)
 
         def edit(document: dict[str, Any]) -> None:
@@ -1324,7 +1368,8 @@ class TestThePieceOrder:
 
 
 class TestTheWriterRowAxes:
-    """書き手も codec ごとの `rowAxis` の受理集合で止まる（書けたのに読めない容器を作らない）。"""
+    """The writer also stops at each codec's accepted `rowAxis` set (no container that was written
+    but cannot be read)."""
 
     @pytest.mark.parametrize(
         ("codec", "storage", "payload"),
@@ -1358,9 +1403,9 @@ class TestTheWriterRowAxes:
 
 
 def _parse_ts_row_axes(source: str) -> dict[str, tuple[int, ...]]:
-    """TS の `CODEC_LEDGER` の `rowAxes`（RAW ヘルパの既定と各エントリの明示値）を読む。"""
+    """Read `rowAxes` of the TS `CODEC_LEDGER` (the RAW helper's default and each entry's value)."""
     raw = re.search(r"const RAW = \(.*?rowAxes: \[([\d, ]*)\]", source, re.S)
-    assert raw is not None, "RAW ヘルパの rowAxes を読めない"
+    assert raw is not None, "cannot read rowAxes of the RAW helper"
 
     def axes(text: str) -> tuple[int, ...]:
         return tuple(int(axis) for axis in re.findall(r"\d+", text))
@@ -1369,11 +1414,12 @@ def _parse_ts_row_axes(source: str) -> dict[str, tuple[int, ...]]:
         name: axes(raw.group(1))
         for name in re.findall(r'\["([\w-]+)", RAW\("[\w-]+", \d+\)\]', source)
     }
-    # Oxfmt（2026-10-16）は長い項目を「[ / 名前 / { … } / ]」の複数行に割るので、名前と \`{\` の間・
-    # \`}\` と \`]\` の間の空白と改行を許す（RAW の行は 1 行のまま）。
+    # Oxfmt (2026-10-16) splits long entries over several lines "[ / name / { … } / ]", so
+    # whitespace and newlines are allowed between the name and \`{\` and between \`}\` and \`]\`
+    # (RAW lines stay on one line).
     for name, body in re.findall(r'\[\s*"([\w-]+)",\s*\{(.*?)\n\s*\},?\s*\]', source, re.S):
         found = re.search(r"rowAxes: \[([\d, ]*)\]", body)
-        assert found is not None, f"{name}: rowAxes を読めない"
+        assert found is not None, f"{name}: cannot read rowAxes"
         entries[name] = axes(found.group(1))
     return entries
 
@@ -1386,9 +1432,11 @@ class TestTheSharedRowAxes:
 
 
 class TestATrailingNewlineIsRefused:
-    """語彙の検査は末尾の改行付きを拒否する — TS の読み手（JS の `$`）と受理集合を揃える。
+    """The vocabulary checks refuse a trailing newline — the same accepted set as the TS reader
+    (JS `$`).
 
-    Python の `$` は末尾の改行の直前でも一致するので、`^…$` を `.match` で引くと改行付きが通る。
+    Python's `$` also matches just before a trailing newline, so `^…$` with `.match` would let a
+    trailing newline through.
     """
 
     def test_a_graph_name_with_a_trailing_newline_is_refused_by_the_reader(

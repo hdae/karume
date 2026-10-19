@@ -1,8 +1,8 @@
-"""manifest の `generator` が名乗る版と、ソースの `pyproject.toml` の版が一致すること。
+"""The version the manifest's `generator` names matches the source's `pyproject.toml` version.
 
-`dist.generator_tag()` は venv に入っている `karume` の dist-info の版を写す。bump の後に venv を
-同期し忘れると、前の版を名乗る manifest が黙って焼ける。その取り違えをこのテストが赤で止める
-（直し方は `(cd tools && uv sync --all-groups)`）。
+`dist.generator_tag()` copies the version from the dist-info of the `karume` installed in the venv.
+Forgetting to sync the venv after a bump silently writes a manifest that names the previous
+version. This test stops that mix-up by going red (the fix is `(cd tools && uv sync --all-groups)`).
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ def _source_version() -> str:
 
 
 class TestGeneratorVersion:
-    """venv の dist-info と pyproject.toml の `[project].version` の突き合わせ。"""
+    """Compares the venv's dist-info with `[project].version` in pyproject.toml."""
 
     def test_installed_distribution_matches_pyproject_version(self) -> None:
         assert importlib.metadata.version("karume") == _source_version()

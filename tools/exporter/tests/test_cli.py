@@ -1,11 +1,12 @@
-"""`karume` サブコマンド CLI（`karume.cli`）のディスパッチ。
+"""Dispatch of the `karume` subcommand CLI (`karume.cli`).
 
-引数の解釈は各本体の parser が持つ（CLI は写しを持たない）ので、ここで固定するのは
-**どの main へ argv がそのまま渡るか**だけ。
+Argument parsing belongs to each command's own parser (the CLI keeps no copy of it), so what this
+file pins is only **which main receives argv unchanged**.
 
-NOTE: `export-*` サブコマンドと台本ローダ（旧 `load_script`）は名簿ごと消えた
-（ADR 0065 段 3+4 完了 — 台本は `tools/export-recipes/<family>/` へ出た）ので、その主張は
-このファイルから**被験体ごと**居なくなった。残るのは dist / migrate / verify の 3 コマンド。
+NOTE: the `export-*` subcommands and the script loader (formerly `load_script`) are gone together
+with their roster (ADR 0065 stages 3+4 complete — the scripts moved to
+`tools/export-recipes/<family>/`), so their claims left this file **together with their subject**.
+What remains is the three commands dist / migrate / verify.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from karume import cli, dist, migrate, verify
 
 
 def _spy(monkeypatch: pytest.MonkeyPatch, target: object, name: str) -> list[list[str]]:
-    """`target.name` を「呼ばれた argv を積むだけ」に差し替える。"""
+    """Replace `target.name` with a stub that only records the argv it is called with."""
     seen: list[list[str]] = []
     monkeypatch.setattr(target, name, lambda argv: seen.append(list(argv)))
     return seen
@@ -41,13 +42,15 @@ class TestDispatch:
     def test_it_passes_help_through_to_the_body_parser(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """`karume dist --help` は CLI が握らず本体の使い方を出す（写しを持たない帰結）。"""
+        """`karume dist --help` is not handled by the CLI; the command prints its own usage (a
+        consequence of keeping no copy)."""
         seen = _spy(monkeypatch, dist, "main")
         cli.main(["dist", "--help"])
         assert seen == [["--help"]]
 
     def test_it_takes_no_arguments_of_its_own(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """サブコマンドの後ろは 1 語も解釈しない（`--models` 等を CLI 側が食わない）。"""
+        """The CLI parses no word after the subcommand (it does not consume `--models` and the
+        like)."""
         seen = _spy(monkeypatch, dist, "main")
         cli.main(["dist"])
         assert seen == [[]]
@@ -65,10 +68,11 @@ class TestUsage:
         assert raised.value.code == 2
 
     def test_the_roster_is_dist_migrate_and_verify(self) -> None:
-        """名簿は dist / migrate / verify の 3 つ。
+        """The roster is the three commands dist / migrate / verify.
 
-        `karume export-siglip2` が残っていると、wheel に無い台本を wheel の CLI が読む形が
-        「たまたま作業ツリーでだけ動く」経路として復活する。`karume repack`（shard 仕様への
-        詰め替え）は配布形が `krm` になった段 3a で退役した。
+        If `karume export-siglip2` remained, the wheel's CLI reading a script that is not in the
+        wheel would come back as a path that "happens to work only in the working tree".
+        `karume repack` (repacking into the shard layout) was retired at step 3a, when the
+        distribution became `krm`.
         """
         assert sorted(cli.COMMANDS) == ["dist", "migrate", "verify"]

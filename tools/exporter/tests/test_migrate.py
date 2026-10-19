@@ -1,11 +1,15 @@
-"""旧配布形 → コンテナ形式の移行（`karume.migrate`）— docs/container-v1.md §12。
+"""Migration from the old distribution to the container format (`karume.migrate`) —
+docs/container-v1.md §12.
 
-被験体は合成の**正当な**旧配布形（{@link legacy_writer.legacy_shards} が旧規約で焼く shard 列 —
-書き手は製品側にもう無いのでテストの中だけに置く）。突き合わせの正本は**入力の safetensors から
-直に読んだ生バイト**で、移行器の自己検査とは別経路で取る（自己検査が恒真でも落ちる形にしておく）。
+The subject is a synthetic **valid** old distribution (the shard sequence
+{@link legacy_writer.legacy_shards} writes under the old convention — the writer no longer exists
+in the product, so it lives only in the tests). The source of truth for the comparison is **the
+raw bytes read directly from the input safetensors**, taken on a path separate from the migrator's
+self-check (so that the tests fail even if the self-check is tautological).
 
-グラフ単体の規則（改名・正準直列化・block の詰め方）は `test_container.py` の担当。ここが見るのは
-移行そのもの — 束縛の導出・scale の形の門・payload の同一性・据え替えの規律・CLI。
+The rules of the graph alone (renaming, canonical serialization, block packing) belong to
+`test_container.py`. What this file checks is the migration itself — deriving the bindings, the
+check of the scale shape, payload identity, the discipline of the swap, the CLI.
 """
 
 from __future__ import annotations
@@ -67,31 +71,37 @@ from karume.ple import PLE_INDEX_ASSET, ple_assets
 from karume.publish import publish_container
 from karume.verify import bind_graphs, parse_ir_graph
 
-#: コンポーネントの代表 path のファイル名（格納形のタグ込み — 系列の綴りと同じ）。
+#: The file name of the component's representative path (with the storage tag — the same spelling
+#: as the series).
 COMPONENT = "model.i4.safetensors"
 
-#: 旧 `extras` の `rope_base` が畳まれる容器の資産名と役割（`karume.migrate.EXTRA_ASSETS`）。
+#: The container asset name and role the old `extras`' `rope_base` is folded into
+#: (`karume.migrate.EXTRA_ASSETS`).
 ROPE_BASE_ASSET, ROPE_BASE_ROLE = EXTRA_ASSETS[ROPE_BASE_NAME]
 
-#: PLE を切るときの block 上限（合成の小さな表を**複数 block**へ割る席 — 容器側の block 上限
-#: とは別の軸で、資産 1 本ぶんの大きさを決める）。
+#: The block limit when cutting the PLE (the setting that splits the small synthetic table into
+#: **several blocks** — an axis separate from the container's block limit, deciding the size of
+#: one asset).
 PLE_BLOCK_BYTES = 64
 
-#: 移行の呼び手が渡す出所（`--license` は必須・`writer` は明示したときだけ載る）。
+#: The provenance the caller of the migration passes (`--license` is required; `writer` appears
+#: only when given explicitly).
 PROVENANCE = Provenance(license="apache-2.0", writer="karume/test")
 
-#: 合成資産（数 KiB）で part またぎと piece 分割を踏むために下げた寸法。
+#: Sizes lowered so that the synthetic assets (a few KiB) exercise part crossing and piece
+#: splitting.
 SMALL_PART_BYTES = 512
 SMALL_BLOCK_BYTES = 256
 
-#: 1 block と companion scale の一群が入らない part 長（配置が決まらない回を作る）。
+#: A part length that one block and its group of companion scales do not fit in (makes a run whose
+#: placement cannot be decided).
 UNPLACEABLE_PART_BYTES = 64
 
 MIB = 1024 * 1024
 
 
 def read_safetensors(blob: bytes) -> tuple[dict[str, str], dict[str, bytes]]:
-    """safetensors のバイト列を `(__metadata__, テンソルキー → 生バイト)` へ開く。"""
+    """Opens safetensors bytes into `(__metadata__, tensor key → raw bytes)`."""
     length = struct.unpack("<Q", blob[:8])[0]
     header = json.loads(blob[8 : 8 + length])
     start = 8 + length
@@ -104,7 +114,7 @@ def read_safetensors(blob: bytes) -> tuple[dict[str, str], dict[str, bytes]]:
 
 
 def source_material(shards: list[bytes]) -> tuple[dict[str, str], dict[str, bytes]]:
-    """shard 列を 1 つの素材へ畳む（メタデータは先頭 shard のもの）。"""
+    """Folds a shard sequence into one material (the metadata is the first shard's)."""
     metadata, tensors = read_safetensors(shards[0])
     for blob in shards[1:]:
         tensors.update(read_safetensors(blob)[1])
@@ -112,7 +122,8 @@ def source_material(shards: list[bytes]) -> tuple[dict[str, str], dict[str, byte
 
 
 def stage_series(directory: Path, shards: list[bytes]) -> Path:
-    """現行形（連番の shard 列）を置き、コンポーネントの代表 path を返す。"""
+    """Places the current form (a numbered shard sequence) and returns the component's
+    representative path."""
     directory.mkdir(parents=True, exist_ok=True)
     for index, blob in enumerate(shards, start=1):
         numbered_path(directory / COMPONENT, index, len(shards)).write_bytes(blob)
@@ -120,7 +131,7 @@ def stage_series(directory: Path, shards: list[bytes]) -> Path:
 
 
 def stage_legacy_single(directory: Path, shards: list[bytes]) -> Path:
-    """旧・単一ファイル配布形（`karume_ir` と全テンソルが 1 つの器に同居）。"""
+    """The old single-file distribution (`karume_ir` and every tensor share one file)."""
     directory.mkdir(parents=True, exist_ok=True)
     metadata, tensors = source_material(shards)
     shapes = {}
@@ -141,10 +152,12 @@ def stage_legacy_single(directory: Path, shards: list[bytes]) -> Path:
 
 
 def migrated_payloads(paths: list[Path]) -> dict[str, bytes]:
-    """書いたコンテナから **initializer ごとの payload** を取り直す（詰め物を除いた実バイト）。
+    """Reads **the payload of each initializer** back from the written container (the actual bytes
+    without padding).
 
-    取り直しは合流層の供給計画（`verify.bind_graphs`）越しなので、piece 列も scale も
-    「宣言がそう言っている場所」から読む — 移行器の自己検査とは別の経路で同じ答えに着く。
+    The read goes through the merge layer's supply plan (`verify.bind_graphs`), so both the piece
+    sequence and the scales are read from "where the declaration says they are" — reaching the same
+    answer on a path separate from the migrator's self-check.
     """
     read = read_container(paths)
     bound = next(iter(bind_graphs(read.graph, read.model).values()))
@@ -160,7 +173,8 @@ def migrated_payloads(paths: list[Path]) -> dict[str, bytes]:
 
 
 def scale_keys(graph: IrGraph) -> dict[str, str]:
-    """initializer のテンソルキー → scale のテンソルキー（突合の相手を旧宣言から引く）。"""
+    """Initializer tensor key → scale tensor key (the counterpart of the comparison is looked up
+    from the old declaration)."""
     return {
         init.tensor: init.storage.scale
         for init in graph.initializers.values()
@@ -170,10 +184,11 @@ def scale_keys(graph: IrGraph) -> dict[str, str]:
 
 @pytest.fixture
 def small_parts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """書き手の選択集合（256 MiB〜）に**合成資産の寸法**を足す。
+    """Adds **the size of the synthetic assets** to the writer's choice set (256 MiB and up).
 
-    数 KiB の合成資産は集合の part 長では part を割らないので、part またぎを踏む回だけ集合を
-    広げる。集合の検査そのもの（集合外は落ちる）は `TestThePartLength` が本物の集合で見る。
+    Synthetic assets of a few KiB do not split into parts at the set's part lengths, so the set is
+    widened only for runs that exercise part crossing. The check of the set itself (values outside
+    the set fail) is covered by `TestThePartLength` with the real set.
     """
     monkeypatch.setattr(
         migrate,
@@ -184,7 +199,8 @@ def small_parts(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def written_part_bytes(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """書き手（`write_model_container`）に届いた part 長を呼ばれた順に拾う（書き出しは素通し）。"""
+    """Collects the part lengths that reached the writer (`write_model_container`) in call order
+    (the write itself passes through)."""
     seen: list[int] = []
     original = publish.write_model_container
 
@@ -198,7 +214,8 @@ def written_part_bytes(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 
 @pytest.fixture
 def component(tmp_path: Path) -> tuple[Path, dict[str, str], dict[str, bytes]]:
-    """i4 混成（i4 / i8 / f32 が同居する実物と同じ形）の現行配布形を置く。"""
+    """Places a current distribution with mixed i4 (the same form as the real one, where i4 / i8 /
+    f32 coexist)."""
     shards = legacy_shards(mark="mig", storage="i4")
     metadata, tensors = source_material(shards)
     return stage_series(tmp_path / "src", shards), metadata, tensors
@@ -208,7 +225,8 @@ class TestTheMigratedContainer:
     def test_every_payload_survives_byte_for_byte(
         self, component: tuple[Path, dict[str, str], dict[str, bytes]], tmp_path: Path
     ) -> None:
-        """§12 の不変条件 1 — 実体も scale も 1 バイトも変わらない（詰め物は新たに焼かれる）。"""
+        """Invariant 1 of §12 — neither the data nor the scales change by a single byte (padding is
+        written anew)."""
         path, metadata, tensors = component
         result = migrate_component(path, tmp_path / "out", provenance=PROVENANCE)
         graph = parse_ir_graph(metadata[IR_METADATA_KEY])
@@ -225,14 +243,14 @@ class TestTheMigratedContainer:
             }
         )
         assert found == expected
-        # 自己検査が数えた本数（実体 + scale）と、突き合わせた本数が一致する。
+        # The count the self-check made (data + scales) matches the count compared here.
         assert result.payloads == len(expected)
         assert result.initializers == len(graph.initializers)
 
     def test_the_old_distribution_is_read_only(
         self, component: tuple[Path, dict[str, str], dict[str, bytes]], tmp_path: Path
     ) -> None:
-        """§12 —「旧入力は保持する」（CLI は入力を消さない・書き換えない）。"""
+        """§12 — "the old input is kept" (the CLI neither deletes nor rewrites the input)."""
         path, _, _ = component
         before = {entry.name: entry.read_bytes() for entry in sorted(path.parent.iterdir())}
         migrate_component(path, tmp_path / "out", provenance=PROVENANCE)
@@ -242,7 +260,8 @@ class TestTheMigratedContainer:
     def test_the_same_input_produces_the_same_bytes(
         self, component: tuple[Path, dict[str, str], dict[str, bytes]], tmp_path: Path
     ) -> None:
-        """§12 の不変条件 4 — 決定的（part への詰め方も JSON のキー順も入力から決まる）。"""
+        """Invariant 4 of §12 — deterministic (both the packing into parts and the JSON key order
+        are decided by the input)."""
         path, _, _ = component
         first = migrate_component(path, tmp_path / "a", provenance=PROVENANCE)
         second = migrate_component(path, tmp_path / "b", provenance=PROVENANCE)
@@ -252,7 +271,8 @@ class TestTheMigratedContainer:
         ]
 
     def test_an_old_single_file_form_migrates_to_the_same_container(self, tmp_path: Path) -> None:
-        """旧規則の配布形（単一ファイル）も受ける — 現行の門は入力に掛けない。"""
+        """A distribution under the old rules (single file) is accepted too — the current checks are
+        not applied to the input."""
         shards = legacy_shards(mark="mig", storage="i4")
         series = migrate_component(
             stage_series(tmp_path / "series", shards),
@@ -274,7 +294,7 @@ class TestTheMigratedContainer:
     def test_a_numbered_input_path_is_folded_to_the_component(
         self, component: tuple[Path, dict[str, str], dict[str, bytes]], tmp_path: Path
     ) -> None:
-        """手元の現物（`-00001-of-00002`）を指しても、1 本だけを移す形にならない。"""
+        """Pointing at a local file (`-00001-of-00002`) does not migrate that one file alone."""
         path, _, _ = component
         first = sorted(path.parent.iterdir())[0]
         whole = migrate_component(path, tmp_path / "a", provenance=PROVENANCE)
@@ -296,7 +316,8 @@ class TestTheMigratedContainer:
     def test_a_directory_name_outside_the_container_vocabulary_asks_for_an_explicit_name(
         self, tmp_path: Path
     ) -> None:
-        """既定は暗黙（親ディレクトリ名）なので、外れた回は**何を渡すか**まで綴って止まる。"""
+        """The default is implicit (the parent directory name), so a run where it does not fit stops
+        and spells out **what to pass**."""
         shards = legacy_shards(mark="mig", storage="f32")
         path = stage_series(tmp_path / "text encoder", shards)
 
@@ -336,7 +357,8 @@ class TestTheMigratedContainer:
     def test_the_graph_container_carries_the_same_graph_description(
         self, component: tuple[Path, dict[str, str], dict[str, bytes]], tmp_path: Path
     ) -> None:
-        """`krg` は `krm` からのバイトコピー抽出（§9 — グラフ記述はバイト単位で同一）。"""
+        """The `krg` is a byte-copy extraction from the `krm` (§9 — the graph descriptor is
+        byte-identical)."""
         path, _, _ = component
         result = migrate_component(path, tmp_path / "out", provenance=PROVENANCE, write_graph=True)
         assert result.graph is not None
@@ -351,7 +373,8 @@ class TestTheMigratedContainer:
     def test_the_container_is_never_staged_over_a_previous_output(
         self, component: tuple[Path, dict[str, str], dict[str, bytes]], tmp_path: Path
     ) -> None:
-        """出力先の残骸は**消さずに止まる**（どのバイト列を配るかが一意に決まらない）。"""
+        """Leftovers at the destination **stop the run without being deleted** (which bytes to ship
+        is not uniquely decided)."""
         path, _, _ = component
         migrate_component(path, tmp_path / "out", provenance=PROVENANCE)
 
@@ -364,20 +387,23 @@ class TestTheMigratedContainer:
         tmp_path: Path,
         small_parts: None,
     ) -> None:
-        """検査を通してから据える — 落ちた回は一時ファイルごと消える（本番名は生まれない）。"""
+        """Put in place only after the checks pass — a failed run disappears together with its
+        temporary files (the final name never appears)."""
         path, _, _ = component
         out = tmp_path / "out"
         out.mkdir()
 
         with pytest.raises(ContainerFormatError):
-            # 1 block と companion scale の一群が入らない part 長（配置が決まらない）。
+            # A part length that one block and its group of companion scales do not fit in (the
+            # placement cannot be decided).
             migrate_component(path, out, provenance=PROVENANCE, part_bytes=UNPLACEABLE_PART_BYTES)
 
         assert sorted(out.iterdir()) == []
 
 
 class TestTheDerivedBindings:
-    """束縛（codec / rowAxis / groupSize）は旧宣言と**消費側 op** から決まる。"""
+    """The binding (codec / rowAxis / groupSize) is decided by the old declaration and **the
+    consuming op**."""
 
     @staticmethod
     def _graph(storage: IrStorage, shape: list[int], op: str = "linear") -> IrGraph:
@@ -406,12 +432,13 @@ class TestTheDerivedBindings:
         }
 
     def test_a_conv_transpose1d_weight_declares_row_axis_1(self) -> None:
-        """`[Cin,Cout,K]` の転置レイアウトだけが軸 1（`emit.weight_channel_axes` の鏡像）。"""
+        """Only the transposed layout `[Cin,Cout,K]` is axis 1 (the mirror of
+        `emit.weight_channel_axes`)."""
         bindings = migrate._bindings(
             self._graph(IrStorage(dtype="i8", scale="w_scale"), [4, 3, 8], op="conv_transpose1d")
         )
 
-        # 行長 = numel / shape[1] = 96 / 3。
+        # Row length = numel / shape[1] = 96 / 3.
         assert bindings == {
             "w": Encoding("int8-sym", group_size=32, row_axis=1, scale_key="w_scale")
         }
@@ -426,7 +453,8 @@ class TestTheDerivedBindings:
         }
 
     def test_an_i2_storage_maps_to_int2_off_and_never_to_ternary(self) -> None:
-        """三値であるという主張は量子化器の側がする（§6.3 — 旧 i2 には値域外のコードが出る）。"""
+        """The claim of being ternary is made by the quantizer (§6.3 — old i2 has codes outside that
+        range)."""
         bindings = migrate._bindings(self._graph(IrStorage(dtype="i2", scale="w_scale"), [4, 32]))
 
         assert bindings["w"].codec == "int2-off"
@@ -441,7 +469,8 @@ class TestTheDerivedBindings:
         assert set(migrate._bindings(graph)) == {"w"}
 
     def test_a_group_storage_consumed_on_axis_1_fails_loudly(self) -> None:
-        """旧 group scale は先頭次元を行として焼かれている — 軸 1 の消費とは両立しない。"""
+        """An old group scale was written with the leading dimension as rows — incompatible with
+        consumption on axis 1."""
         graph = self._graph(
             IrStorage(dtype="i4", scale="w_scale", group_size=16), [4, 3, 8], "conv_transpose1d"
         )
@@ -455,7 +484,8 @@ class TestTheDerivedBindings:
 
 
 class TestTheScaleLayoutGate:
-    """旧 scale の**形**が新しい宣言（`rowAxis` / `groupSize`）と一致することを焼く前に見る。"""
+    """Checks before writing that the **shape** of an old scale matches the new declaration
+    (`rowAxis` / `groupSize`)."""
 
     @staticmethod
     def _sources(weight: tuple[int, ...], scale: tuple[int, ...]) -> dict[str, SourceTensor]:
@@ -480,7 +510,8 @@ class TestTheScaleLayoutGate:
         )
 
     def test_a_per_column_scale_is_refused_even_though_the_byte_count_agrees(self) -> None:
-        """正方の重みではバイト数が一致してしまう — 形まで見ないとチャネルが入れ替わる。"""
+        """For a square weight the byte count happens to match — without checking the shape, the
+        channels get swapped."""
         graph = self._graph()
 
         with pytest.raises(MigrateError, match=r"scale 'w_scale' has shape \[1, 8\]"):
@@ -500,19 +531,20 @@ class TestTheCli:
         migrate.main([str(path), "--out", str(tmp_path / "out"), "--license", "apache-2.0"])
         printed = capsys.readouterr().out
 
-        # part 0（2 文書）+ part 1（const 領域）+ 重みの part 1 本。
+        # Part 0 (the two documents) + part 1 (the const region) + one weight part.
         assert (tmp_path / "out" / "model.i4-00001-of-00003.krm").is_file()
         assert "parts 3" in printed and "payloads" in printed
 
     def test_the_writer_is_absent_unless_the_caller_names_one(
         self, component: tuple[Path, dict[str, str], dict[str, bytes]], tmp_path: Path
     ) -> None:
-        """MUST: 既定では `writer` を**書かない**（生成器タグを埋めない）。
+        """MUST: by default `writer` is **not written** (no generator tag is embedded).
 
-        埋めると、移行した容器と recipe が直接 export した容器（`PROVENANCE` はどれも
-        `writer` を綴らない）が永久に別バイトになる — 実測で、ミラー 7 リポの part 0 が
-        `,"writer":"karume/0.12.0"` の 25 バイトぶんだけ焼き直しと食い違っていた。
-        ツールの版は `karume.json` の `generator` 欄が 1 箇所で持つ。
+        Embedding it would make a migrated container and a container a recipe exported directly
+        (no `PROVENANCE` spells `writer`) different bytes forever — observed: part 0 of the 7
+        mirror repositories differed from the rebuild by exactly the 25 bytes of
+        `,"writer":"karume/0.12.0"`. The tool version is held in one place, the `generator` field
+        of `karume.json`.
         """
         path, _, _ = component
         migrate.main([str(path), "--out", str(tmp_path / "out"), "--license", "mit"])
@@ -526,7 +558,8 @@ class TestTheCli:
     def test_an_explicit_writer_is_still_written(
         self, component: tuple[Path, dict[str, str], dict[str, bytes]], tmp_path: Path
     ) -> None:
-        """対（恒真でない）: 明示すれば載る — 落ちたのは「既定」であって席ではない。"""
+        """Counterpart (not tautological): given explicitly, it appears — what was dropped is "the
+        default", not the field."""
         path, _, _ = component
         migrate.main(
             [str(path), "--out", str(tmp_path / "out"), "--license", "mit", "--writer", "acme/1"]
@@ -562,7 +595,8 @@ class TestTheCli:
 
 
 class TestThePartLength:
-    """part 長は書き手の選択集合 {256, 512, 768, 1024} MiB の 1 つ（container-v1 §4.2）。"""
+    """The part length is one of the writer's choice set {256, 512, 768, 1024} MiB (container-v1
+    §4.2)."""
 
     def test_the_default_is_256_mib(
         self,
@@ -596,7 +630,8 @@ class TestThePartLength:
         tmp_path: Path,
         part_bytes: int,
     ) -> None:
-        """天井（1024 MiB）の内側でも集合外なら止まる — 書き手の天井検査とは別の門。"""
+        """Even inside the ceiling (1024 MiB), a value outside the set stops the run — a check
+        separate from the writer's ceiling check."""
         path, _, _ = component
         out = tmp_path / "out"
 
@@ -625,7 +660,8 @@ class TestThePartLength:
 
 
 class TestTheSelfCheck:
-    """自己検査が恒真でないこと（故障注入）— 書いたバイトが旧と違えば据えない。"""
+    """The self-check is not tautological (fault injection) — written bytes that differ from the old
+    ones are not put in place."""
 
     def test_a_flipped_byte_in_a_written_part_is_caught(
         self,
@@ -633,7 +669,8 @@ class TestTheSelfCheck:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """書いた直後に 1 バイト化けた回は据わらない（block の sha256 は書き手が宣言する）。"""
+        """A run where one byte is corrupted right after writing is not put in place (the writer
+        declares the block's sha256)."""
         path, _, _ = component
         original = publish.write_model_container
 
@@ -657,9 +694,10 @@ class TestTheSelfCheck:
     def test_the_payload_check_reads_the_old_shards(
         self, component: tuple[Path, dict[str, str], dict[str, bytes]]
     ) -> None:
-        """突合の相手は**旧 shard から読み直したバイト**（新しい容器の写しではない）。
+        """The counterpart of the comparison is **the bytes read back from the old shards** (not a
+        copy of the new container).
 
-        ここが恒真化すると、移行が「自分で書いたものを自分で確かめる」だけになる。
+        If this became tautological, the migration would only "check what it wrote itself".
         """
         path, _, tensors = component
         _, stored = read_component(list(resolve_shards(path)))
@@ -669,7 +707,8 @@ class TestTheSelfCheck:
 
 
 def test_the_payload_reader_reads_the_whole_payload(tmp_path: Path) -> None:
-    """突合の土台（旧実体の読み出し）が本当に全バイトを流す — 1 バイトでも欠ければ別の値。"""
+    """The base of the comparison (reading the old data) really streams every byte — missing even
+    one byte gives a different value."""
     blob = bytes(range(256)) * 8
     target = tmp_path / "raw.bin"
     target.write_bytes(blob)
@@ -686,16 +725,19 @@ def test_the_payload_reader_reads_the_whole_payload(tmp_path: Path) -> None:
 
 
 class TestTheMigratedContainerMatchesADirectWrite:
-    """**同一性の門** — 同じ素材から出た容器は、経路が違ってもバイト同一。
+    """**The identity check** — containers made from the same material are byte-identical even
+    through different paths.
 
-    ①旧 shard 形へ焼いてから `karume migrate` で移した容器と、②`stored_model` →
-    `publish_container` で直接書いた容器が、part 列のバイト列まで一致する。ここが割れると
-    「移行済みのミラー」と「再 export した系列」が同じ重みなのに別の資産になり、pin と
-    sha256 の対応が段をまたぐたびに切れる（container-v1 §12 の不変条件 4「決定的」の実効面）。
+    ① A container written in the old shard form and then moved with `karume migrate`, and ② a
+    container written directly with `stored_model` → `publish_container`, match down to the bytes
+    of the part sequence. If this splits, "the migrated mirror" and "the re-exported series" become
+    different assets despite the same weights, and the pin ↔ sha256 correspondence breaks at every
+    step (the effective side of invariant 4 "deterministic" of container-v1 §12).
 
-    束縛表も配置も JSON のキー順も入力から決まるので、割れる余地があるのは**導出が 2 経路に
-    分かれている場所**だけ — 実際に分かれていた頃（`container_bindings` の写しが移行側にあった
-    頃）は「宣言 i4 / 実体 i8」が作れた。
+    The binding table, the placement and the JSON key order are all decided by the input, so the
+    only room for a split is **where the derivation forks into two paths** — when it actually did
+    (when a copy of `container_bindings` lived on the migration side), "declared i4 / actual i8"
+    could be produced.
     """
 
     @staticmethod
@@ -703,7 +745,7 @@ class TestTheMigratedContainerMatchesADirectWrite:
         return fixture_spec("ident", storage, (), ([1],), ("weight",), None)
 
     def _migrated(self, tmp_path: Path, storage: str) -> list[bytes]:
-        """旧 shard 形へ焼いてから移す（①）。"""
+        """Writes the old shard form, then migrates it (①)."""
         shards = legacy_shards(mark="ident", storage=storage, groups=2)
         source = stage_shards(tmp_path / "old" / "enc", f"model.{storage}.safetensors", shards)
         out = tmp_path / "migrated"
@@ -711,7 +753,7 @@ class TestTheMigratedContainerMatchesADirectWrite:
         return [path.read_bytes() for path in result.parts]
 
     def _direct(self, tmp_path: Path, storage: str) -> list[bytes]:
-        """同じ素材から直接書く（②）。"""
+        """Writes directly from the same material (②)."""
         graph, tensors, scales, overrides = self._material(storage)
         stored = stored_model(
             graph,
@@ -739,12 +781,14 @@ class TestTheMigratedContainerMatchesADirectWrite:
         assert migrated == direct
 
     def _asset_material(self, tmp_path: Path, kind: str):
-        """旧 sidecar を置き、①移行が組む資産と ②直接書く側が組む資産の対を返す。
+        """Places the old sidecar and returns the pair of ① the assets the migration builds and ②
+        the assets the direct writer builds.
 
-        ①は移行 CLI の資産経路（`migrate._extra_assets` / `migrate._ple_assets` — 旧形の読みと
-        索引の畳み込み）、②は書き手が現に使う口（`AssetInput` / `karume.ple.ple_assets`）。
-        **どちらも「正しい容器」を作る**ので、物理配置（専用 part・末尾詰め物・`assets` 節の
-        正準直列化）のずれを見る検出器はこの門しか無い。
+        ① is the asset path of the migration CLI (`migrate._extra_assets` / `migrate._ple_assets` —
+        reading the old form and folding the index), ② is the entry point the writer actually uses
+        (`AssetInput` / `karume.ple.ple_assets`). **Both build "a correct container"**, so this
+        check is the only detector of a drift in the physical placement (dedicated parts, trailing
+        padding, canonical serialization of the `assets` section).
         """
         repo = tmp_path / "old"
         where = "ident"
@@ -758,7 +802,8 @@ class TestTheMigratedContainerMatchesADirectWrite:
             return migrated, direct
         ple = legacy_ple_sidecar(repo)
         if kind == "ple-sidecar":
-            # 系列ディレクトリを移す経路（`migrate_series` が通る口 — 在処は索引が名乗る）。
+            # The path that migrates a series directory (the entry `migrate_series` goes through —
+            # the index names the location).
             migrated = migrate.ple_sidecar_assets(
                 repo / PLE_INDEX_FILE, where=where, block_bytes=PLE_BLOCK_BYTES
             )
@@ -784,13 +829,16 @@ class TestTheMigratedContainerMatchesADirectWrite:
 
     @pytest.mark.parametrize("kind", ["rope_base", "ple", "ple-sidecar"])
     def test_both_routes_place_the_same_assets(self, tmp_path: Path, kind: str) -> None:
-        """資産を同梱した容器も両経路でバイト同一（契約の「重み + scale + const + 資産 1 本」）。
+        """A container with bundled assets is byte-identical on both paths too (the contract's
+        "weights + scales + const + one asset").
 
-        `rope_base` は通常 part に載る資産、PLE は **1 block = 1 part**（`dedicated_part`）の
-        資産で、物理配置の規則が別 — どちらも踏む。PLE は在処の引き方が 2 つあるので
-        （旧 manifest の `assets` / 索引が名乗るファイル名）、**両方**を直接書きと突き合わせる
-        — 資産の block id は呼び手が渡した dict の順で決まる（`_plan_asset_parts` は並べ直さない）
-        ので、経路ごとに並びが割れると「同じ値・別バイトの容器」ができる。
+        `rope_base` is an asset in an ordinary part, while the PLE is an asset with **1 block = 1
+        part** (`dedicated_part`), with different placement rules — both are exercised. The PLE's
+        location can be looked up in two ways (the old manifest's `assets` / the file name the
+        index gives), so **both** are compared with the direct write — the block id of an asset is
+        decided by the order of the dict the caller passes (`_plan_asset_parts` does not reorder),
+        so an order that differs per path gives "a container with the same values and different
+        bytes".
         """
         migrated_assets, direct_assets = self._asset_material(tmp_path, kind)
         graph, tensors, scales, _ = self._material("f32")
@@ -817,12 +865,13 @@ class TestTheMigratedContainerMatchesADirectWrite:
         assert [path.read_bytes() for path in left.parts] == [
             path.read_bytes() for path in right.parts
         ]
-        # 資産が本当に載っている（空の `assets` どうしを比べていない）ことの対。
+        # The counterpart showing the assets are really there (not comparing two empty `assets`).
         assert sorted(migrated_assets) == sorted(direct_assets)
         assert migrated_assets
 
     def test_the_asset_gate_is_not_vacuous(self, tmp_path: Path) -> None:
-        """恒真化の門 — 資産の payload が 1 バイト違えば part 列は動く。"""
+        """The check against a tautological test — a one-byte difference in an asset payload moves
+        the part sequence."""
         migrated_assets, _ = self._asset_material(tmp_path, "rope_base")
         graph, tensors, scales, _ = self._material("f32")
         stored = stored_model(graph, tensors, weight_dtype="f32", weight_scales=scales)
@@ -852,9 +901,11 @@ class TestTheMigratedContainerMatchesADirectWrite:
         ]
 
     def test_the_gate_is_not_vacuous(self, tmp_path: Path) -> None:
-        """恒真化の門 — 出所が 1 文字違えば part 0 のバイト列は動く。
+        """The check against a tautological test — a one-character difference in the provenance
+        moves the bytes of part 0.
 
-        比較が「どちらの経路も同じ関数を呼んだ」ではなく**実バイト**を見ていることの対。
+        The counterpart showing the comparison looks at **actual bytes**, not at "both paths called
+        the same function".
         """
         graph, tensors, scales, _ = self._material("f32")
         stored = stored_model(graph, tensors, weight_dtype="f32", weight_scales=scales)
@@ -871,11 +922,13 @@ class TestTheMigratedContainerMatchesADirectWrite:
 
 
 class TestTheTensorPieces:
-    """旧 shard 仕様 v3 の tensor piece（`<親名>#NNNNN-of-NNNNN`）を親 1 本へ畳む（ADR 0090）。
+    """Folds the tensor pieces of old shard spec v3 (`<parent name>#NNNNN-of-NNNNN`) into one parent
+    (ADR 0090).
 
-    移行器の自己検査は「畳んだ結果」どうしを比べる（突合の相手も同じ `read_component` の出力）
-    ので、畳み込みの誤りはそこでは相殺されて見えない。正常系は**直接書いた容器**と、異常系は
-    旧読み手契約 5 の分岐ごとに `LegacyFormatError` の文言で縛る。
+    The migrator's self-check compares "folded results" with each other (the counterpart is the
+    output of the same `read_component`), so a folding error cancels out there and stays invisible.
+    The normal cases are pinned against **a directly written container**, the error cases by the
+    `LegacyFormatError` message for each branch of old reader contract 5.
     """
 
     PARENT = "piece.weight"
@@ -905,19 +958,21 @@ class TestTheTensorPieces:
             provenance=PROVENANCE,
         )
 
-        # 分割前の生バイト（piece を持たない旧形から直に読む — 移行器とは別の経路）。
+        # The raw bytes before splitting (read directly from the old form without pieces — a path
+        # separate from the migrator).
         unsplit = source_material(legacy_shards(mark="piece"))[1][self.PARENT]
         assert migrated_payloads(list(migrated.parts))[self.PARENT] == unsplit
         assert [path.read_bytes() for path in migrated.parts] == [
             path.read_bytes() for path in direct.parts
         ]
 
-    #: 4 行 × 32 バイトの親（行は 4 の倍数バイト）。
+    #: A parent of 4 rows × 32 bytes (rows are a multiple of 4 bytes).
     WHOLE = Entry("w", "F32", (4, 8), bytes(range(128)))
 
     @staticmethod
     def _read(tmp_path: Path, weight_shards: list[list[Entry]]):
-        """グラフ shard + `weight_shards`（shard ごとのテンソル列）を置いて旧読み手に通す。"""
+        """Places the graph shard + `weight_shards` (the tensors of each shard) and runs them
+        through the old reader."""
         shards = [
             legacy_shards(mark="piece")[0],
             *(write_safetensors(order(entries), {}) for entries in weight_shards),
@@ -927,7 +982,8 @@ class TestTheTensorPieces:
         )
 
     def test_the_readers_join_is_the_unsplit_tensor(self, tmp_path: Path) -> None:
-        """対照 — 正当な配置は親 1 本に畳まれる（下の異常系が「常に落ちる」ではない）。"""
+        """Counterpart — a valid placement folds into one parent (the error cases below are not
+        "always fail")."""
         first, second = piece_entries(self.WHOLE, [(0, 1), (1, 4)])
 
         _, stored = self._read(tmp_path, [[first], [second]])
@@ -1015,10 +1071,11 @@ class TestTheTensorPieces:
 def stage_doctored(
     directory: Path, shards: list[bytes], name: str, *, dtype: str | None = None, shape=None
 ) -> Path:
-    """旧・単一ファイル形を置き、テンソル `name` の宣言（dtype / shape）だけを書き換える。
+    """Places the old single-file form and rewrites only the declaration (dtype / shape) of the
+    tensor `name`.
 
-    バイト列は 1 バイトも変えない — 旧 shard の読み手の検査（宣言長の一致・整列）は通り、
-    IR の宣言との突合だけが食い違いを捕まえられる形にする。
+    Not a single byte changes — the old shard reader's checks (declared length match, alignment)
+    pass, so only the comparison with the IR declaration can catch the mismatch.
     """
     directory.mkdir(parents=True, exist_ok=True)
     metadata, tensors = source_material(shards)
@@ -1028,7 +1085,7 @@ def stage_doctored(
         for key, spec in json.loads(blob[8 : 8 + length]).items():
             if key != "__metadata__":
                 specs[key] = (spec["dtype"], tuple(spec["shape"]))
-    assert name in specs, f"被験体に '{name}' が無い"
+    assert name in specs, f"the subject has no '{name}'"
     old_dtype, old_shape = specs[name]
     specs[name] = (dtype or old_dtype, tuple(shape) if shape is not None else old_shape)
     entries = order(
@@ -1043,11 +1100,13 @@ def stage_doctored(
 
 
 class TestTheStoredDeclarationsMatchTheIr:
-    """旧 safetensors の dtype / shape を IR の宣言（旧書き手の規則）と照合してから焼く（R7-003）。
+    """Checks the old safetensors' dtype / shape against the IR declaration (the old writer's rules)
+    before writing (R7-003).
 
-    旧書き手は格納 dtype → safetensors dtype（f32 → F32 / i8 → I8 / i4 → I4 …）を 1 対 1 で
-    写し、shape は**論理形**のまま書いた。照合しないと、同じバイト長の別型（I32 の 1 を f32 と
-    して読むと約 1.4e-45）や、要素数だけ同じ別形が新しいコンテナへ黙って焼かれる。
+    The old writer mapped storage dtype → safetensors dtype (f32 → F32 / i8 → I8 / i4 → I4 …) one
+    to one and wrote shapes in **logical form**. Without the check, a different type of the same
+    byte length (an I32 1 read as f32 is about 1.4e-45) or a different shape with only the same
+    element count would be silently written into the new container.
     """
 
     @pytest.mark.parametrize(
@@ -1072,7 +1131,8 @@ class TestTheStoredDeclarationsMatchTheIr:
         assert not out.exists() or not any(out.iterdir())
 
     def test_a_storage_the_old_writer_never_wrote_fails_loudly(self) -> None:
-        """旧書き手は bf16 を書けなかった — 宣言と現物が揃っていても旧配布形として受理しない。"""
+        """The old writer could not write bf16 — even with matching declaration and data it is not
+        accepted as an old distribution."""
         graph = TestTheDerivedBindings._graph(IrStorage(dtype="bf16"), [4, 32])
         sources = {"w": SourceTensor(StoredEntry("w", "BF16", (4, 32), 256), ())}
 
@@ -1080,7 +1140,8 @@ class TestTheStoredDeclarationsMatchTheIr:
             migrate._assert_stored_declarations(graph, sources)
 
     def test_the_undoctored_form_still_migrates(self, tmp_path: Path) -> None:
-        """対照 — 書き換えの足場そのものは移行を壊さない（上の赤は注入した食い違いのもの）。"""
+        """Counterpart — the rewriting scaffold itself does not break the migration (the failures
+        above come from the injected mismatch)."""
         source = stage_doctored(tmp_path / "src", legacy_shards(mark="x", storage="i8"), "x.weight")
 
         result = migrate_component(source, tmp_path / "out", provenance=PROVENANCE)

@@ -1,9 +1,11 @@
-"""エクスポータ側 shape 層の規則
-（packages/runtime/tests/fixtures/op-contracts.json では書けない領域）。
+"""Rules of the exporter's shape layer
+(the area packages/runtime/tests/fixtures/op-contracts.json cannot express).
 
-適合表（test_ops_conformance.py）が押さえるのは TS 側と**結論が一致しなければならない**
-面だけ。ここが押さえるのはその外側 — 束縛前の宣言 shape でしか起きない判定（記号次元の
-一致・要素数の因数分解・記号長 conv1d）と、グラフ全体の突合（宣言 ≠ 計算で fail loudly）。
+The conformance table (test_ops_conformance.py) covers only the surface where the conclusion
+**must agree** with the TS side. This file covers what lies outside it — judgements that arise
+only on declared shapes before binding (equality of symbolic dimensions, factorization of element
+counts, symbolic-length conv1d), and the whole-graph agreement check (declared ≠ computed fails
+loudly).
 """
 
 from __future__ import annotations
@@ -21,29 +23,31 @@ from karume.shapes import assert_graph_shapes, compute_output_shape
 
 
 def shapes_of(op, ins, **kwargs):
-    """出力 slot 昇順の shape 列（ADR 0068 決定 1 — 2 本を返すのは topk だけ）。"""
+    """Shapes in ascending output-slot order (ADR 0068 decision 1 — only topk returns two)."""
     return compute_output_shape(resolve_op_contract(op), ins, "t", **kwargs)
 
 
 def shape_of(op, ins, **kwargs):
-    """単一出力 op の出力 shape（多出力 op は shapes_of を使う）。
+    """Output shape of a single-output op (multi-output ops use shapes_of).
 
-    MUST: 本数を見てから slot 0 を返す。多出力 op を黙って slot 0 だけ返すと、2 本目の
-    shape が誰にも突き合わされないテストが書けてしまう。
+    MUST: check the count before returning slot 0. Silently returning only slot 0 of a
+    multi-output op would allow tests whose second shape nobody checks.
     """
     outs = shapes_of(op, ins, **kwargs)
-    assert len(outs) == 1, f"op '{op}' は出力 {len(outs)} 本（shapes_of で受ける）"
+    assert len(outs) == 1, f"op '{op}' has {len(outs)} outputs (receive them with shapes_of)"
     return outs[0]
 
 
 class TestSymbolicDimensions:
-    """記号次元は「同じ式か」でしか比較しない（束縛次第の判定はランタイム側の層）。"""
+    """Symbolic dimensions compare only as "the same expression" (binding-dependent judgements
+    belong to the runtime layer)."""
 
     def test_matching_symbols_propagate(self):
         assert shape_of("linear", [[1, "T", 192], [192, 192], [192]]) == [1, "T", 192]
 
     def test_different_symbolic_extents_are_not_silently_unified(self):
-        # `T` と `2T` は束縛次第で一致しうるが、宣言だけでは同じ長さと言えない。
+        # `T` and `2T` may agree depending on the binding, but the declaration alone cannot
+        # call them the same length.
         with pytest.raises(OpContractError, match="contraction dimension"):
             shape_of("matmul", [["T", "2T"], ["T", 4]])
 
@@ -55,7 +59,8 @@ class TestSymbolicDimensions:
         assert shape_of("add", [["T", 4], [1, 4]]) == ["T", 4]
 
     def test_a_symbolic_reduction_axis_is_not_treated_as_empty(self):
-        """長さ 0 かどうかは束縛次第 — 記号のまま拒否すると実在のグラフを落とす。"""
+        """Whether the length is 0 depends on the binding — rejecting the symbol would fail real
+        graphs."""
         assert shape_of("amax", [[3, "T"]], attrs={"dim": 1}) == [3]
 
     def test_a_constant_zero_reduction_axis_is_still_rejected(self):
@@ -67,7 +72,7 @@ class TestSymbolicDimensions:
 
 
 class TestReduceAxis:
-    """reduce の軸は attrs `dim`（宣言必須・rank 外は fail loudly）。"""
+    """The reduce axis is attrs `dim` (declaration required; out of rank fails loudly)."""
 
     def test_a_non_last_axis_is_removed_from_the_shape(self):
         assert shape_of("sum", [[2, 384, 5, 7]], attrs={"dim": 1}) == [2, 5, 7]
@@ -88,13 +93,13 @@ class TestReduceAxis:
 
 
 class TestScalarAttrInvariants:
-    """キーを跨ぐ attrs の不変条件は shape 層でしか見られない（スキーマはキー単位の検査）。"""
+    """Invariants across attrs keys show only in the shape layer (the schema checks per key)."""
 
     def test_clamp_accepts_bounds_in_order(self):
         assert shape_of("clamp", [[2, 3]], attrs={"min": -1, "max": 1}) == [2, 3]
 
     def test_clamp_rejects_inverted_bounds(self):
-        # WGSL の clamp は lo > hi で未定義（TS 側 computeOutputShape と同じ門）。
+        # WGSL clamp is undefined for lo > hi (the same check as computeOutputShape on the TS side).
         with pytest.raises(OpContractError, match="min"):
             shape_of("clamp", [[2, 3]], attrs={"min": 1, "max": -1})
 
@@ -103,12 +108,13 @@ class TestScalarAttrInvariants:
             shape_of("leaky_relu", [[4]], attrs={})
 
     def test_the_params_table_and_the_attrs_schema_cover_the_same_unary_ops(self):
-        """スカラ attr を宣言した単項 op は必ず params 表にも載る（逆も）。
+        """A unary op declaring a scalar attr is always in the params table too (and vice versa).
 
-        attrs スキーマ（`_UNARY_ATTRS`）と params のレイアウト（`SCALAR_PARAM_ATTRS`）は
-        別々に書かれた 2 表で、片方だけに op を足しても**例外は出ない**:
-        params 表に無い側は `scalar_param_values` が空リストを返して attr の値が黙って
-        カーネルへ届かず、attrs スキーマに無い側は宣言そのものが契約外 attrs 扱いになる。
+        The attrs schema (`_UNARY_ATTRS`) and the params layout (`SCALAR_PARAM_ATTRS`) are two
+        tables written separately, and adding an op to only one of them **raises nothing**:
+        missing from the params table, `scalar_param_values` returns an empty list and the attr
+        value silently never reaches the kernel; missing from the attrs schema, the declaration
+        itself is treated as attrs outside the contract.
         """
         assert set(SCALAR_PARAM_ATTRS) == set(_UNARY_ATTRS)
 
@@ -121,7 +127,7 @@ class TestScalarAttrInvariants:
 
 
 class TestWhereAndCumsum:
-    """波3 の 2 kind（三項 broadcast / 最終次元固定の前縁和）。"""
+    """The two kinds of phase 3 (ternary broadcast / prefix sum over the fixed last dimension)."""
 
     def test_where_broadcasts_all_three_operands(self):
         assert shape_of("where", [["T", 1], [1, 5], [1, 1]]) == ["T", 5]
@@ -139,7 +145,8 @@ class TestWhereAndCumsum:
 
 
 class TestReshapeElementCount:
-    """要素数は一次式の積。原始一次式の多重集合で比較する（`2T+2` = `2·(T+1)`）。"""
+    """An element count is a product of linear expressions, compared as a multiset of primitive
+    linear expressions (`2T+2` = `2·(T+1)`)."""
 
     def test_symbolic_element_counts_match_after_factorisation(self):
         assert shape_of("reshape", [["2T+2"]], declared=[2, "T+1"]) == [2, "T+1"]
@@ -153,11 +160,12 @@ class TestReshapeElementCount:
             shape_of("reshape", [["2T"]], declared=["T", 2, 2])
 
     def test_a_zero_extent_collapses_the_element_count_on_both_sides(self):
-        # 数値 shape での `0 × 何か = 0` と結論を揃える（片側だけ記号でも 0 は 0）。
+        # Agrees with `0 × anything = 0` on numeric shapes (0 is 0 even if only one side is
+        # symbolic).
         assert shape_of("reshape", [[0, "T"]], declared=[0]) == [0]
 
 
-#: conv1d の attrs は 4 つとも宣言必須（既定値補完なし — ADR 0015）。
+#: All four conv1d attrs must be declared (no default filling — ADR 0015).
 _CONV = {"stride": 1, "padding": 0, "dilation": 1, "groups": 1}
 
 
@@ -177,12 +185,14 @@ class TestSymbolicConv1d:
         ]
 
     def test_a_stride_that_does_not_divide_the_coefficient_fails_loudly(self):
-        # floor((T + …) / 2) は 1 次元 1 シンボルの一次式にならない — 黙って近似しない。
+        # floor((T + …) / 2) is not a one-symbol linear expression per dimension — no silent
+        # approximation.
         with pytest.raises(OpContractError, match="does not give a linear output length"):
             shape_of("conv1d", [[1, 4, "T"], [6, 4, 2], [6]], attrs={**_CONV, "stride": 2})
 
     def test_a_negative_offset_fails_loudly(self):
-        # K が大きいと `T - 4` 形になり、非負オフセットの正準文法に載らない。
+        # A large K gives the `T - 4` form, which the canonical grammar of non-negative offsets
+        # cannot express.
         with pytest.raises(OpContractError, match="canonical grammar"):
             shape_of("conv1d", [[1, 4, "T"], [6, 4, 6], [6]], attrs=_CONV)
 
@@ -191,7 +201,7 @@ class TestSymbolicConv1d:
             shape_of("conv1d", [[1, 4, 8], [6, 4, "T"], [6]], attrs=_CONV)
 
     def test_dilation_widens_the_kernel_span(self):
-        # 張りは D·(K−1)+1 = 7 なので、padding 3 で長さが保たれる（DDSConv と同じ関係）。
+        # The span is D·(K−1)+1 = 7, so padding 3 keeps the length (the same relation as DDSConv).
         assert shape_of(
             "conv1d",
             [[1, 6, "T"], [6, 1, 4], [6]],
@@ -199,7 +209,8 @@ class TestSymbolicConv1d:
         ) == [1, 6, "T"]
 
     def test_a_symbolic_channel_axis_fails_loudly(self):
-        # groups の割り切りを判定できない（実測にチャネル記号は無い — 黙って通さない）。
+        # Divisibility by groups cannot be decided (no observed model has a channel symbol — not
+        # let through silently).
         with pytest.raises(OpContractError, match="symbolic"):
             shape_of("conv1d", [[1, "T", 8], ["T", "T", 3], ["T"]], attrs=_CONV)
 
@@ -220,7 +231,8 @@ class TestSymbolicConvTranspose1d:
         ) == [1, 2, "4T+2"]
 
     def test_the_general_output_length_is_rejected(self):
-        # 2P != K − S の形は出力長が L·stride にならない — 一般形は見送り（ADR 0015）。
+        # With 2P != K − S the output length is not L·stride — the general form is deferred
+        # (ADR 0015).
         with pytest.raises(OpContractError, match="2·padding"):
             shape_of(
                 "conv_transpose1d",
@@ -229,7 +241,7 @@ class TestSymbolicConvTranspose1d:
             )
 
     def test_a_transposed_weight_layout_is_rejected(self):
-        # [Cout, Cin, K] と読む取り違えは**非対称チャネル**でのみ赤くなる。
+        # Misreading it as [Cout, Cin, K] turns red only with **asymmetric channels**.
         with pytest.raises(OpContractError, match=r"\[Cin, Cout, K\]"):
             shape_of(
                 "conv_transpose1d",
@@ -252,31 +264,36 @@ class TestSymPrefixSlice:
         assert shape_of("sym_prefix_slice", [[4, 512]], attrs=attrs) == [4, "2T+1"]
 
     def test_a_symbolic_input_extent_is_rejected(self):
-        """入力は Tmax で焼いた静的形（ADR 0010）— 記号入力は prefix の意味を壊す。"""
+        """The input is a static shape fixed at Tmax (ADR 0010) — a symbolic input breaks the
+        meaning of the prefix."""
         attrs = {"sym": "T", "slices": [{"dim": 0, "coeff": 1, "offset": 0}]}
 
         with pytest.raises(OpContractError, match="symbolic"):
             shape_of("sym_prefix_slice", [["T", 4]], attrs=attrs)
 
 
-#: shape 層は attrs の scale も必ず引く（値域の検査を通すための最小の attrs）。
+#: The shape layer always reads the attrs scale too (the minimal attrs that pass the range
+#: check).
 _ATTENTION = {"scale": 0.5}
 
 
 class TestAttentionGqaBroadcast:
-    """GQA の整除 broadcast（ADR 0067 決定 1）— 適合表に書けない 2 面。
+    """GQA divisible broadcast (ADR 0067 decision 1) — the two surfaces the conformance table
+    cannot express.
 
-    受理 / 拒否の集合そのものは適合表（op-contracts.json の GQA 9 ケース）が TS 側と
-    突き合わせる。表では押さえられないのは:
+    The accept / reject sets themselves are checked against the TS side by the conformance table
+    (the 9 GQA cases in op-contracts.json). What the table cannot cover:
 
-    1. **`Hkv = 0`** — 両実装とも剰余より**先**に `Hkv ≥ 1` を見るが、その順序が崩れたときの
-       壊れ方が違う: TS は `H % 0` が NaN で条件が真になり契約エラーへ落ちるのに対し、Python の
-       `%` は ZeroDivisionError を投げる（表が書けるのは「throws」までで例外の型は書けない）。
-    2. **記号次元の H / Hkv** — 束縛前の宣言 shape でしか現れない（数値へ解決した時点で
-       記号だった事実が消える）。
+    1. **`Hkv = 0`** — both implementations check `Hkv ≥ 1` **before** the remainder, but they
+       break differently when that order is lost: in TS `H % 0` is NaN, the condition is true and
+       it falls into the contract error, whereas Python's `%` raises ZeroDivisionError (the table
+       can say "throws" but not the exception type).
+    2. **Symbolic H / Hkv** — they appear only on declared shapes before binding (the fact that
+       they were symbols disappears once resolved to numbers).
 
-    整数形の拒否 4 件は表と重なるが、条件の枝が 1 箇所に並ぶと「順序が崩れたときどの枝が
-    壊れたか」がここで読めるので、GQA の枝の回帰として同じクラスに置く。
+    The 4 integer-shape rejections overlap the table, but with the condition branches side by
+    side one can read here "which branch broke when the order was lost", so they sit in the same
+    class as regressions of the GQA branches.
     """
 
     def _shape_of(self, heads, kv_heads, value_heads=None):
@@ -300,32 +317,32 @@ class TestAttentionGqaBroadcast:
         assert self._shape_of(3, 3) == [2, 3, 5, 4]
 
     def test_a_zero_kv_head_count_raises_the_contract_error_not_a_division_error(self):
-        """MUST: 剰余より先に `Hkv == 0` を見る（ZeroDivisionError は契約エラーではない）。"""
+        """MUST: check `Hkv == 0` before the remainder (ZeroDivisionError is no contract error)."""
         with pytest.raises(OpContractError, match="positive integer multiple"):
             self._shape_of(4, 0)
 
     @pytest.mark.parametrize(
         ("heads", "kv_heads", "why"),
         [
-            (0, 2, "H = 0（`0 % Hkv == 0` は整除を満たすので H ≥ Hkv を別条件で見る）"),
-            (0, 0, "(H,Hkv) = (0,0)（H = Hkv は等値で整除枝を短絡するので Hkv ≥ 1 を先に見る）"),
-            (4, 3, "H が Hkv の整数倍でない"),
-            (2, 4, "Hkv > H（broadcast の向きが逆 — q 側を増やす形は語彙に無い）"),
+            (0, 2, "H = 0 (`0 % Hkv == 0` divides, so H ≥ Hkv is checked separately)"),
+            (0, 0, "(H,Hkv) = (0,0) (H = Hkv skips the divisibility branch: Hkv ≥ 1 first)"),
+            (4, 3, "H is not an integer multiple of Hkv"),
+            (2, 4, "Hkv > H (reversed broadcast — widening the q side is not in the vocabulary)"),
         ],
         ids=("zero-h", "zero-both", "indivisible", "reversed"),
     )
     def test_a_head_count_that_is_not_a_positive_multiple_is_rejected(self, heads, kv_heads, why):
         with pytest.raises(OpContractError, match="positive integer multiple"):
             self._shape_of(heads, kv_heads)
-        assert why  # 失敗時に形の意図が読めるようにパラメータへ残す
+        assert why  # kept as a parameter so a failure shows the intent of the shape
 
     def test_a_kv_head_mismatch_between_k_and_v_is_rejected(self):
-        """GQA でも k / v 間の Hkv は完全一致（緩めたのは q との関係だけ）。"""
+        """With GQA too, Hkv matches exactly between k and v (only the q relation was relaxed)."""
         with pytest.raises(OpContractError, match=r"Hkv \(axis 1 of k / v\)"):
             self._shape_of(4, 2, value_heads=4)
 
     def test_a_symbolic_head_count_that_matches_structurally_is_accepted(self):
-        """同じ式なら r=1 として通る（記号のまま「同じ長さか」は判定できる）。"""
+        """The same expression passes as r=1 ("the same length" can be decided on symbols)."""
         assert self._shape_of("T", "T") == [2, "T", 5, 4]
 
     @pytest.mark.parametrize(
@@ -334,13 +351,14 @@ class TestAttentionGqaBroadcast:
         ids=("symbolic-h", "symbolic-hkv", "both-symbolic"),
     )
     def test_head_counts_that_need_a_binding_to_divide_are_rejected(self, heads, kv_heads):
-        """束縛次第で整除しうる形は黙って通さない（broadcast 可否と同じ規律）。"""
+        """Shapes that divide only depending on the binding are not let through silently (the same
+        rule as broadcast eligibility)."""
         with pytest.raises(OpContractError, match="the declaration alone"):
             self._shape_of(heads, kv_heads)
 
 
 def _graph() -> IrGraph:
-    """入力 → linear → relu の最小グラフ（宣言はすべて正しい）。"""
+    """Minimal input → linear → relu graph (every declaration is correct)."""
     return IrGraph(
         symbols=["T"],
         inputs=[IrInput(name="x", dtype="f32", shape=["T", 7])],
@@ -359,15 +377,17 @@ def _graph() -> IrGraph:
 
 
 class TestLayoutAxisIsStatic:
-    """レイアウト第 2 群の対象軸の記号規則。
+    """Symbol rules for the target axis of layout group 2.
 
-    `slice` / `flip` は**静的軸のみ**（ADR 0014）。`cat` の連結軸だけは ADR 0046 が
-    「〈定数〉または〈**同一**シンボルの一次式〉」まで緩め、拒否は**異シンボルの混在**に
-    差し替わった。
+    `slice` / `flip` take **static axes only** (ADR 0014). Only the concatenation axis of `cat` was
+    relaxed by ADR 0046 to "a constant or a linear expression of **one** symbol", and the rejection
+    became **mixing different symbols**.
 
-    束縛前の宣言 shape でしか判定できない**拒否**規則なので適合表には書けない（数値へ
-    解決した時点で「T と U が別シンボル」という事実が消える）。TS 側は同じ規則を plan.ts が
-    持つ — 層は違うが受理集合は同じ。受理側は適合表の shapes 節が両側で踏む。
+    These are **rejection** rules decidable only on declared shapes before binding, so the
+    conformance table cannot express them (the fact that "T and U are different symbols"
+    disappears once resolved to numbers). On the TS side plan.ts holds the same rules — a
+    different layer, the same accepted set. The accepting side is taken on both sides by the
+    shapes section of the conformance table.
     """
 
     def test_a_static_axis_slice_keeps_the_other_symbolic_dimensions(self):
@@ -385,7 +405,8 @@ class TestLayoutAxisIsStatic:
         assert shape_of("cat", [[1, 3, "T"], [1, 5, "T"]], attrs={"dim": 1}) == [1, 8, "T"]
 
     def test_a_symbolic_cat_axis_sums_with_a_constant(self):
-        """ADR 0046 — `S`+定数 は正準文法にそのまま載る（DiT の KV 連結と同型）。"""
+        """ADR 0046 — `S` + constant fits the canonical grammar as is (the same form as DiT's KV
+        concatenation)."""
         assert shape_of("cat", [["T", 4], [3, 4]], attrs={"dim": 0}) == ["T+3", 4]
 
     def test_the_same_symbol_on_both_sides_accumulates_the_coefficient(self):
@@ -393,7 +414,8 @@ class TestLayoutAxisIsStatic:
         assert shape_of("cat", [["2T+1", 4], [4, 4], ["T", 4]], attrs={"dim": 0}) == ["3T+5", 4]
 
     def test_mixing_different_symbols_on_the_cat_axis_is_rejected(self):
-        """異シンボルの和は 1 次元 1 シンボルの次元言語に載らない（ADR 0046 の唯一の拒否）。"""
+        """A sum of different symbols does not fit the one-symbol-per-dimension language (the only
+        rejection of ADR 0046)."""
         with pytest.raises(OpContractError, match="different symbols"):
             shape_of("cat", [["T", 4], ["U", 4]], attrs={"dim": 0})
 
@@ -406,7 +428,8 @@ class TestLayoutAxisIsStatic:
             shape_of("flip", [[1, "T"]], attrs={"dim": 1})
 
     def test_pad_extends_a_symbolic_last_dimension(self):
-        """pad の最終次元は記号でよい（実測の T+2w = T+8 — 次元言語のオフセット付き形）。"""
+        """The last dimension of pad may be symbolic (the observed T+2w = T+8 — the offset form of
+        the dimension language)."""
         assert shape_of("pad", [[1, 2, "T"]], attrs={"left": 4, "right": 4}) == [1, 2, "T+8"]
 
     def test_pad_keeps_the_coefficient_of_a_symbolic_last_dimension(self):
@@ -414,10 +437,11 @@ class TestLayoutAxisIsStatic:
 
 
 class TestTopk:
-    """topk は**唯一の多出力 op**（ADR 0068 決定 3）— 2 本とも `[..., k]`。
+    """topk is **the only multi-output op** (ADR 0068 decision 3) — both outputs are `[..., k]`.
 
-    受理領域（`1 <= k <= 最終次元`）の下限は attrs スキーマ、上限は shape 規則が見る。
-    記号の最終次元では上限判定を**保留する**（束縛次第 — 判定はランタイム側の層）。
+    Of the accepting region (`1 <= k <= last dimension`), the attrs schema checks the lower bound
+    and the shape rule the upper. With a symbolic last dimension the upper-bound check is
+    **deferred** (it depends on the binding — the runtime layer decides).
     """
 
     def test_both_outputs_take_the_last_dimension_to_k(self):
@@ -430,23 +454,24 @@ class TestTopk:
         assert shapes_of("topk", [[1, "T", 5]], attrs={"k": 2}) == [[1, "T", 2], [1, "T", 2]]
 
     def test_a_symbolic_last_dimension_defers_the_upper_bound(self):
-        # 記号のままでは k <= dim を断定できない（束縛後にランタイムが判定する）。
+        # k <= dim cannot be asserted on a symbol (the runtime decides after binding).
         assert shapes_of("topk", [[2, "T"]], attrs={"k": 9}) == [[2, 9], [2, 9]]
 
     def test_the_single_output_helper_refuses_a_multi_output_op(self):
-        # 多出力 op を黙って slot 0 だけ返さない（2 本目が無検証になる形を潰す）。
-        with pytest.raises(AssertionError, match="出力 2 本"):
+        # Does not silently return only slot 0 of a multi-output op (rules out an unchecked
+        # second output).
+        with pytest.raises(AssertionError, match="has 2 outputs"):
             shape_of("topk", [[6, 10]], attrs={"k": 2})
 
     @pytest.mark.parametrize(
         ("attrs", "why"),
         [
-            ({"k": 0}, "k=0 は語彙に無い（torch は受理するが値を定義しない）"),
-            ({"k": 11}, "k > 最終次元"),
-            ({}, "k は宣言必須（static-k）"),
-            ({"k": "T"}, "記号 k は静的形状の前提に載らない"),
-            ({"k": 1.5}, "整数でない k"),
-            ({"k": True}, "bool は int の派生だが k ではない"),
+            ({"k": 0}, "k=0 is not in the vocabulary (torch accepts it but defines no values)"),
+            ({"k": 11}, "k > last dimension"),
+            ({}, "k must be declared (static-k)"),
+            ({"k": "T"}, "a symbolic k does not fit the static-shape premise"),
+            ({"k": 1.5}, "non-integer k"),
+            ({"k": True}, "bool derives from int but is not a k"),
         ],
     )
     def test_values_outside_the_accepting_region_are_rejected(self, attrs, why):
@@ -463,10 +488,10 @@ class TestTopk:
 
 
 def _topk_graph() -> IrGraph:
-    """topk の 2 出力を持つ最小グラフ（多出力ノードを `assert_graph_shapes` に通す形）。
+    """Minimal graph with topk's two outputs (a multi-output node through `assert_graph_shapes`).
 
-    エクスポータは topk を emit しないが（aten ハンドラ不在 — ADR 0068 追記）、契約の鏡像
-    としての shape 突合は多出力でも閉じていなければならない。
+    The exporter does not emit topk (no aten handler — ADR 0068 addendum 2), but the shape check
+    that mirrors the contract must be complete for multi-output nodes too.
     """
     return IrGraph(
         symbols=["T"],
@@ -481,13 +506,13 @@ def _topk_graph() -> IrGraph:
 
 
 class TestMultiOutputGraphAgreement:
-    """多出力ノードの shape 突合（ADR 0068 決定 1 — slot ごとに宣言と突き合わせる）。"""
+    """Shape check of multi-output nodes (ADR 0068 decision 1 — each slot vs. its declaration)."""
 
     def test_a_consistent_multi_output_graph_passes(self):
         assert assert_graph_shapes(_topk_graph()) is None
 
     def test_a_contradicting_second_output_is_rejected(self):
-        """**slot 1 だけ**が契約と食い違う形（slot 0 の突合だけでは素通りする）。"""
+        """Only **slot 1** contradicts the contract (checking slot 0 alone would let it through)."""
         graph = _topk_graph()
         graph.values["i"] = IrValue(dtype="i32", shape=["T", 2])
 
@@ -495,10 +520,10 @@ class TestMultiOutputGraphAgreement:
             assert_graph_shapes(graph)
 
     def test_a_missing_output_slot_is_rejected(self):
-        """出力を 1 本に削った形は本数の突合で落ちる（列長の門）。"""
+        """A graph cut down to one output fails the count check (the list-length check)."""
         graph = _topk_graph()
         graph.outputs = ["v"]
-        # IrNode は frozen なので差し替えで組み直す（宣言も 1 本に揃える）。
+        # IrNode is frozen, so it is rebuilt by replacement (the declaration also cut to one).
         graph.nodes[0] = IrNode(op="topk", ins=["x"], outs=["v"], attrs={"k": 3})
         del graph.values["i"]
 
@@ -508,11 +533,12 @@ class TestMultiOutputGraphAgreement:
 
 class TestGraphAgreement:
     def test_a_consistent_graph_passes(self):
-        # 例外が出ないことが仕様（返り値は無い）。
+        # Raising nothing is the specification (there is no return value).
         assert assert_graph_shapes(_graph()) is None
 
     def test_a_declared_output_that_contradicts_the_contract_is_rejected(self):
-        """宣言（torch の meta 由来）を正としない — 契約から計算した shape と突き合わせる。"""
+        """The declaration (from torch's meta) is not trusted — it is checked against the shape
+        computed from the contract."""
         graph = _graph()
         graph.values["h"] = IrValue(dtype="f32", shape=["T", 4])
 

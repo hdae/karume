@@ -1,8 +1,8 @@
-"""パッケージ `karume` の初期化が torch を読まず、公開面の解決先が eager import と同じであること。
+"""Importing `karume` loads no torch, and the public surface resolves as the eager import did.
 
-`karume/__init__` は公開面を初回参照で解決する（PEP 562）。主張はどれも「どのモジュールが
-既に import 済みか」に依存するので、テストセッションの `sys.modules` を使わず、毎回新しい
-インタプリタで確かめる。
+`karume/__init__` resolves the public surface on first access (PEP 562). Every claim depends on
+"which modules are already imported", so each is checked in a fresh interpreter rather than with
+the test session's `sys.modules`.
 """
 
 from __future__ import annotations
@@ -13,8 +13,9 @@ import sys
 
 import pytest
 
-#: 公開名 → 定義元モジュール（eager import だった頃の `from <module> import <name>` の写し）。
-#: 公開面の名前集合と各名前の解決先の仕様で、`karume._EXPORTS` の写しではない。
+#: Public name → defining module (a copy of the `from <module> import <name>` of the eager-import
+#: days). It specifies the public name set and where each name resolves; it is not a copy of
+#: `karume._EXPORTS`.
 EXPECTED_ORIGINS: dict[str, str] = {
     "FixedQuantizedWeight": "karume.emit",
     "IrGraph": "karume.ir",
@@ -30,9 +31,10 @@ EXPECTED_ORIGINS: dict[str, str] = {
     "verify_container": "karume.verify",
 }
 
-#: torch を要らないモジュール。配布・カード層（recipes の dist ドライバ）はこの連鎖だけで組み、
-#: 移行 CLI（`karume migrate`）はこれに旧形の読み手・公開の 3 段・PLE / limits を足した連鎖で
-#: 組む。CLI の入口も dispatch を遅延しているので、import しただけでは torch を読まない。
+#: Modules that do not need torch. The distribution / card layer (the recipes' dist driver) is built
+#: from this chain alone, and the migration CLI (`karume migrate`) from this chain plus the old-form
+#: reader, the three publish steps and PLE / limits. The CLI entry point also defers its dispatch,
+#: so importing it does not load torch.
 TORCH_FREE_MODULES: tuple[str, ...] = (
     "karume",
     "karume.dist",
@@ -48,7 +50,8 @@ TORCH_FREE_MODULES: tuple[str, ...] = (
     "karume.cli",
 )
 
-#: 定義元が torch を要らない公開名（`EXPECTED_ORIGINS` のうち ir / container / verify の分）。
+#: Public names whose defining module needs no torch (the ir / container / verify part of
+#: `EXPECTED_ORIGINS`).
 TORCH_FREE_EXPORTS: tuple[str, ...] = tuple(
     name
     for name, module_name in EXPECTED_ORIGINS.items()
@@ -76,24 +79,27 @@ class TestImportingTorchFreeModules:
 
     @pytest.mark.parametrize("name", TORCH_FREE_EXPORTS)
     def test_touching_a_torch_free_export_does_not_load_torch(self, name: str) -> None:
-        """同じオブジェクトでも torch 依存のモジュール経由で解決すると、触れるだけで torch が乗る。
+        """Resolved through a torch-dependent module, even the same object loads torch on access.
 
-        定義元を指す `_EXPORTS` の行がずれたときに赤になる（解決先の同一性だけでは区別できない）。
+        Turns red when a row of `_EXPORTS` stops pointing at the defining module (the identity of
+        the resolved object alone cannot tell the difference).
         """
         loaded = run_python(f"import karume, sys\nkarume.{name}\nprint('torch' in sys.modules)")
 
         assert loaded.strip() == "False"
 
     def test_touching_an_export_that_needs_torch_loads_it(self) -> None:
-        """遅延は「読まない」ではなく「必要になったら読む」— 上の門が恒真でないことの対照。"""
+        """Deferral means "load when needed", not "never load" — the counterpart showing the check
+        above is not tautological."""
         loaded = run_python("import karume, sys\nkarume.convert\nprint('torch' in sys.modules)")
 
         assert loaded.strip() == "True"
 
 
-#: 名前ごとに「公開面の値が定義元モジュールの同名属性と同一か」を JSON で返す台本。
-#: `{prelude}` で先に import しておくモジュールを差し替え、解決の順序を変える。
-#: `dir` は解決より前に採る（解決後はどの名前もモジュールの辞書に載っていて区別できない）。
+#: Script that returns, per name, "is the public value identical to the same-named attribute of
+#: the defining module" as JSON. `{prelude}` swaps the modules imported first, changing the
+#: resolution order. `dir` is taken before resolution (after it every name sits in the module
+#: dictionary and cannot be told apart).
 RESOLUTION_PROBE = """
 import importlib, json
 {prelude}
@@ -114,8 +120,9 @@ class TestThePublicSurfaceResolvesLikeTheEagerImport:
         "prelude",
         [
             pytest.param("", id="package-first"),
-            # `karume.convert` は公開関数 `convert` と同名のサブモジュール。先に読まれると import
-            # システムが親へ同名の属性を張るので、公開名がモジュールに化けないかをここで見る。
+            # `karume.convert` is a submodule with the same name as the public function `convert`.
+            # When it is loaded first, the import system sets a same-named attribute on the
+            # parent, so this checks that the public name does not turn into the module.
             pytest.param(
                 "import " + ", ".join(sorted(set(EXPECTED_ORIGINS.values()))),
                 id="submodules-first",
@@ -135,10 +142,10 @@ class TestThePublicSurfaceResolvesLikeTheEagerImport:
         assert mismatched == []
 
     def test_a_non_exported_submodule_stays_reachable_as_an_attribute(self) -> None:
-        """公開名と同名でないサブモジュールは、import 後に親の属性として張られたままである。
+        """A submodule not named like a public name stays an attribute of the parent after import.
 
-        ガード（公開名と同名のモジュール属性だけ捨てる）を広げすぎると `karume.dist` が
-        AttributeError になる — その変異をここで赤にする。
+        Widening the guard (which drops only module attributes named like a public name) too far
+        would make `karume.dist` raise AttributeError — this turns that mutation red.
         """
         reachable = run_python(
             "import sys, karume.dist, karume.modelcard\n"

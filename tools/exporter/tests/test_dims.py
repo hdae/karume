@@ -1,8 +1,10 @@
-"""次元文法の適合テスト。
+"""Conformance tests of the dimension grammar.
 
-正本は実装ではなく `packages/runtime/tests/fixtures/dim-grammar.json`（リポジトリ直下）で、TS 実装
-（packages/runtime/src/format/dims.ts）と本実装は同じ表で検証する。表をコピーせず読み込むのは、
-コピーが増えた瞬間に「片側だけ通る文法」が生まれるため。
+The source of truth is not the implementation but
+`packages/runtime/tests/fixtures/dim-grammar.json` (from the repository root); the TS
+implementation (packages/runtime/src/format/dims.ts) and this one are checked against the same
+table. The table is loaded rather than copied because the moment a copy exists, a "grammar that
+passes on one side only" appears.
 """
 
 from __future__ import annotations
@@ -23,12 +25,13 @@ from karume.dims import (
 
 class TestFixtureTable:
     def test_the_shared_case_table_exists_and_has_all_three_sections(self):
-        assert DIM_GRAMMAR_PATH.exists(), f"適合ケース表が無い: {DIM_GRAMMAR_PATH}"
+        assert DIM_GRAMMAR_PATH.exists(), f"conformance case table is missing: {DIM_GRAMMAR_PATH}"
         assert {"valid", "invalid", "eval"} <= set(DIM_GRAMMAR)
 
 
 class TestCanonicalSpellings:
-    """valid 節: 正準表記は分解でき、format との往復が文字列同一になる。"""
+    """valid section: a canonical spelling parses, and the round trip through format is
+    string-identical."""
 
     @pytest.mark.parametrize("case", DIM_GRAMMAR["valid"], ids=lambda c: c["text"])
     def test_parses_into_the_declared_parts(self, case):
@@ -42,7 +45,8 @@ class TestCanonicalSpellings:
 
 
 class TestNonCanonicalSpellings:
-    """invalid 節: 非正準表記は判定でも分解でも受理しない。"""
+    """invalid section: a non-canonical spelling is accepted neither by the check nor by the
+    parse."""
 
     @pytest.mark.parametrize("text", DIM_GRAMMAR["invalid"], ids=repr)
     def test_try_parse_returns_none(self, text):
@@ -55,7 +59,8 @@ class TestNonCanonicalSpellings:
 
 
 class TestBindingEvaluation:
-    """eval 節: 束縛表の当て方（未束縛・非整数・負値は既定値で進めない）。"""
+    """eval section: how the bindings apply (an unbound, non-integer or negative value does not
+    proceed with a default)."""
 
     @pytest.mark.parametrize("case", DIM_GRAMMAR["eval"], ids=lambda c: c["expr"])
     def test_evaluates_or_fails_as_the_table_declares(self, case):
@@ -78,7 +83,7 @@ class TestSymbolNames:
 
 
 class TestFormatGuards:
-    """format_dim は非正準な部品を組み立てさせない（書ける表記を 1 通りに保つ）。"""
+    """format_dim does not assemble non-canonical parts (keeps exactly one writable spelling)."""
 
     @pytest.mark.parametrize(
         "expr",

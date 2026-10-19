@@ -1,11 +1,12 @@
-"""成果物の transactional な公開（`karume.artifacts`）の単体テスト。
+"""Unit tests of the transactional publication of artifacts (`karume.artifacts`).
 
-観測する不変条件は 1 つ — **final は据わるか、前のままか、その 2 つしかない**。中途の形が
-正規 path に現れる経路が本当に無いことは、各段で故障を注入して確かめる（書き込みの途中で
-落ちる / 検証門が拒否する / rename が I/O 故障する）。
+The invariant observed is one — **final is either swapped in or left as it was, nothing else**.
+That no path really lets a half-built state appear at the canonical path is checked by injecting a
+fault at each step (the write fails midway / the verification check rejects / the rename hits an
+I/O fault).
 
-被験体は数バイトのテキスト木で足りる — この層が知っているのは path と rename だけで、中身の
-形式には 1 つも触れない。
+A text tree of a few bytes is enough as the subject — this layer knows only paths and rename and
+does not touch the format of the contents at all.
 """
 
 from __future__ import annotations
@@ -41,17 +42,19 @@ def _snapshot(root: Path) -> dict[str, str]:
 
 
 def _siblings(final: Path) -> list[str]:
-    """final の隣に残った席（作業席・退避席）— 成功でも失敗でも空。"""
+    """The paths left next to final (staging and superseded paths) — empty on success and on
+    failure alike."""
     return sorted(path.name for path in final.parent.iterdir() if path.name != final.name)
 
 
 class TestStagedPublication:
-    """作業席 → 本体（書き込み + 検証門）→ 据え替えの 1 本道。"""
+    """The single path staging path → body (write + verification check) → swap."""
 
     def test_a_successful_body_lands_the_staged_tree_at_the_final_path(
         self, tmp_path: Path
     ) -> None:
-        """据え替えは**丸ごと** — 旧にだけあったファイルは引き継がない。"""
+        """The swap is **whole** — a file that existed only in the old artifact is not carried
+        over."""
         final = _tree(tmp_path, "final", {"model": "old", "stale": "old"})
 
         with staged_publication(final) as staging:
@@ -64,17 +67,17 @@ class TestStagedPublication:
     def test_a_failure_while_writing_leaves_the_final_artifact_untouched(
         self, tmp_path: Path
     ) -> None:
-        """書き込みの途中で落ちても、正規 path は 1 バイトも変わらない。"""
+        """Even when the write fails midway, the canonical path does not change by a single byte."""
         final = _tree(tmp_path, "final", {"model": "old"})
         before = _snapshot(final)
 
         with (
-            pytest.raises(OSError, match="書き込みの途中で落ちた"),
+            pytest.raises(OSError, match="the write failed midway"),
             staged_publication(final) as staging,
         ):
             staging.mkdir()
             (staging / "model").write_text("half", encoding="utf-8")
-            raise OSError("書き込みの途中で落ちた")
+            raise OSError("the write failed midway")
 
         assert _snapshot(final) == before
         assert _siblings(final) == []
@@ -82,15 +85,16 @@ class TestStagedPublication:
     def test_a_rejecting_verification_hook_leaves_the_final_artifact_untouched(
         self, tmp_path: Path
     ) -> None:
-        """門は本体の中 — 全部書き終えてから拒否しても、据え替えごと起きない。"""
+        """The check is inside the body — even when it rejects after everything is written, the swap
+        does not happen at all."""
         final = _tree(tmp_path, "final", {"model": "old"})
         before = _snapshot(final)
 
         def verify(tree: Path) -> None:
-            raise AssertionError(f"{tree.name} の検証に失敗した")
+            raise AssertionError(f"verification of {tree.name} failed")
 
         with (
-            pytest.raises(AssertionError, match="検証に失敗した"),
+            pytest.raises(AssertionError, match=r"verification of .* failed"),
             staged_publication(final) as staging,
         ):
             staging.mkdir()
@@ -103,7 +107,8 @@ class TestStagedPublication:
     def test_a_working_directory_left_by_an_interrupted_run_is_discarded(
         self, tmp_path: Path
     ) -> None:
-        """中断が残した席は踏み直さない（書き手が計画していないファイルが混ざらない）。"""
+        """A path left by an interruption is not reused (no file the writer did not plan gets mixed
+        in)."""
         final = _tree(tmp_path, "final", {"model": "old"})
         _tree(tmp_path, "final" + STAGING_SUFFIX, {"interrupted": "半端"})
 
@@ -115,20 +120,22 @@ class TestStagedPublication:
         assert _siblings(final) == []
 
     def test_an_artifact_left_only_in_the_superseded_slot_is_restored(self, tmp_path: Path) -> None:
-        """前回が rename 2 回の**間**で落ちた形 — 退避席の last-known-good を捨てずに戻す。
+        """The previous run failed **between** the two renames — the last-known-good in the
+        superseded path is moved back, not discarded.
 
-        本体が落ちても正規 path には last-known-good が戻っている（捨てていれば「final も
-        退避席も無い」= 手元の成果物が完全消失した状態で次が止まる）。
+        Even when the body fails, the last-known-good is back at the canonical path (had it been
+        discarded, "neither final nor a superseded path" = the next step would stop with the local
+        artifact lost entirely).
         """
         superseded = _tree(tmp_path, "final" + SUPERSEDED_SUFFIX, {"model": "old"})
         final = tmp_path / "final"
 
         with (
-            pytest.raises(OSError, match="書き込みの途中で落ちた"),
+            pytest.raises(OSError, match="the write failed midway"),
             staged_publication(final) as staging,
         ):
             staging.mkdir()
-            raise OSError("書き込みの途中で落ちた")
+            raise OSError("the write failed midway")
 
         assert _snapshot(final) == {"model": "old"}
         assert not superseded.exists()
@@ -136,7 +143,8 @@ class TestStagedPublication:
     def test_a_single_file_artifact_is_swapped_with_one_atomic_rename(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """1 ファイルの成果物は退避席を経由しない — final が不在になる瞬間そのものが無い。"""
+        """A single-file artifact does not go through the superseded path — there is no moment at
+        all when final is absent."""
         final = tmp_path / "model.safetensors"
         final.write_text("old", encoding="utf-8")
         renames: list[tuple[str, str]] = []
@@ -157,12 +165,14 @@ class TestStagedPublication:
 
 
 class TestSwapIntoPlace:
-    """既に埋まった席を渡す呼び手向けの据え替え（rename の I/O 故障を注入する）。"""
+    """The swap for callers that pass an already filled staging path (injects an I/O fault into
+    the rename)."""
 
     def _fail_replace_from(
         self, monkeypatch: pytest.MonkeyPatch, source: Path, message: str
     ) -> None:
-        """`source` を移す `os.replace` だけを I/O 故障にする（他は本物を通す）。"""
+        """Make only the `os.replace` that moves `source` fail with an I/O fault (the others go
+        through to the real one)."""
         real = os.replace
 
         def failing(src: Path, dst: Path) -> None:
@@ -175,29 +185,31 @@ class TestSwapIntoPlace:
     def test_a_failing_promotion_puts_the_previous_artifact_back(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """昇格が落ちても final は**完全な旧資産のまま**（不在にも混成にもならない）。"""
+        """Even when the promotion fails, final stays **the complete old asset** (neither absent nor
+        mixed)."""
         final = _tree(tmp_path, "final", {"model": "old"})
         staging = _tree(tmp_path, "staging", {"model": "new"})
-        self._fail_replace_from(monkeypatch, staging, "昇格に失敗")
+        self._fail_replace_from(monkeypatch, staging, "promotion failed")
 
         with pytest.raises(ArtifactSwapError, match="swap") as failure:
             swap_into_place(staging, final)
 
-        # 原因（I/O 故障）は連鎖で残す — 据え替えの失敗と書き出しの失敗を取り違えない。
+        # The cause (the I/O fault) is kept in the chain — a failed swap is not mistaken for a
+        # failed write.
         assert isinstance(failure.value.__cause__, OSError)
         assert _snapshot(final) == {"model": "old"}
-        # 席は呼び手のもの（消さない）が、退避席は残さない。
+        # The staging path belongs to the caller (not removed), but no superseded path is left.
         assert _siblings(final) == ["staging"]
 
     def test_a_failing_evacuation_leaves_the_previous_artifact_untouched(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """退避が落ちても、os.replace は原子的なので final は無傷のまま残る。"""
+        """Even when moving aside fails, os.replace is atomic, so final stays intact."""
         final = _tree(tmp_path, "final", {"model": "old"})
         staging = _tree(tmp_path, "staging", {"model": "new"})
-        self._fail_replace_from(monkeypatch, final, "退避に失敗")
+        self._fail_replace_from(monkeypatch, final, "moving aside failed")
 
-        with pytest.raises(ArtifactSwapError, match="退避") as failure:
+        with pytest.raises(ArtifactSwapError, match="aside") as failure:
             swap_into_place(staging, final)
 
         assert isinstance(failure.value.__cause__, OSError)

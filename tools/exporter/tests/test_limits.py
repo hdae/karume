@@ -1,8 +1,8 @@
-"""quant の `requiredLimits` 導出（`karume.limits`）の単体テスト。
+"""Unit tests of the derivation of a quant's `requiredLimits` (`karume.limits`).
 
-見るのは**純関数の層**だけ — 現物（系列コンテナ）から入口を辿る結線は
-`test_dist.py` の `TestRequiredLimits`。ここでは「何を需要と数えるか」「どこから焼くか」を
-合成の宣言だけで固定する。
+Only the **pure-function layer** is covered here — the wiring that walks the entry points from the
+real thing (the series containers) is `TestRequiredLimits` in `test_dist.py`. Here "what counts as
+demand" and "from where a value is written" are pinned with synthetic declarations alone.
 """
 
 from __future__ import annotations
@@ -19,53 +19,60 @@ from karume.limits import (
     state_bindings,
 )
 
-#: WebGPU 仕様の保証既定（読みやすさのための別名 — 値の門は {@link TestWebgpuDefaults}）。
+#: The guaranteed defaults of the WebGPU spec (aliases for readability — the check of the values is
+#: {@link TestWebgpuDefaults}).
 _BINDING = WEBGPU_DEFAULT_LIMITS["maxStorageBufferBindingSize"]
 _BUFFER = WEBGPU_DEFAULT_LIMITS["maxBufferSize"]
 
 
 def _tensor(begin: int, end: int, dtype: str = "F32") -> dict[str, Any]:
-    """safetensors ヘッダのテンソル 1 件（導出が読むのは `data_offsets` だけ）。"""
+    """One tensor of a safetensors header (the derivation reads only `data_offsets`)."""
     return {"dtype": dtype, "shape": [end - begin], "data_offsets": [begin, end]}
 
 
 class TestWebgpuDefaults:
-    """既定値は**外部仕様の写し**なので、値そのものを門にする。"""
+    """The defaults are **a copy of an external spec**, so the values themselves are the check."""
 
     def test_the_defaults_are_the_two_size_limits_of_the_spec(self) -> None:
-        """1 バイトでも違うと「焼く / 焼かない」の境界が実機とずれる。"""
+        """Off by even one byte, the "write / do not write" boundary drifts from real devices."""
         assert WEBGPU_DEFAULT_LIMITS == {
             "maxBufferSize": 268_435_456,
             "maxStorageBufferBindingSize": 134_217_728,
         }
 
     def test_it_names_no_workgroup_limit(self) -> None:
-        """workgroup 系はカーネル設計が決めるので配布物からは導けない（焼かない席）。"""
+        """The workgroup limits are decided by the kernel design and cannot be derived from the
+        distribution (fields that are not written)."""
         assert not any(name.startswith("maxCompute") for name in WEBGPU_DEFAULT_LIMITS)
 
 
 class TestRequiredLimitsSelection:
-    """焼くのは**保証既定を超える席だけ**（「欄が無い = 既定スペックで動く」の意味論）。"""
+    """Only **the fields that exceed the guaranteed defaults** are written (the semantics "no field
+    = runs on default-spec devices")."""
 
     def test_a_demand_within_both_defaults_declares_nothing(self) -> None:
         assert required_limits(1024) == {}
 
     def test_a_demand_exactly_at_the_binding_default_declares_nothing(self) -> None:
-        """境界（ちょうど既定値）は満たされている — 要求に書くと何も制約しない欄が増える。"""
+        """The boundary (exactly the default) is satisfied — writing it into the requirement adds a
+        field that constrains nothing."""
         assert required_limits(_BINDING) == {}
 
     def test_a_demand_past_the_binding_default_declares_only_the_binding(self) -> None:
-        """既定の違う 2 つなので、128MiB〜256MiB の帯では binding だけが要求になる。"""
+        """The two have different defaults, so in the 128MiB–256MiB band only the binding becomes a
+        requirement."""
         demand = _BINDING + 1
 
         assert required_limits(demand) == {"maxStorageBufferBindingSize": demand}
 
     def test_a_demand_exactly_at_the_buffer_default_still_leaves_the_buffer_out(self) -> None:
-        """buffer 側の境界（= 既定ちょうど）も焼かない。binding 側は超えているので残る。"""
+        """The buffer-side boundary (= exactly the default) is not written either. The binding side
+        is exceeded, so it stays."""
         assert required_limits(_BUFFER) == {"maxStorageBufferBindingSize": _BUFFER}
 
     def test_a_demand_past_both_defaults_declares_both_with_the_same_value(self) -> None:
-        """重みも state も 1 バッファ = 1 binding なので、2 つの要求値は同じ。"""
+        """Weights and state are both 1 buffer = 1 binding, so the two required values are the
+        same."""
         demand = _BUFFER + 1
 
         assert required_limits(demand) == {
@@ -74,7 +81,8 @@ class TestRequiredLimitsSelection:
         }
 
     def test_the_declared_names_keep_a_stable_order(self) -> None:
-        """焼き直しで欄の並びが揺れない（manifest のバイト列が理由なく動かない）。"""
+        """A rebuild does not reorder the fields (the manifest bytes do not move without a
+        reason)."""
         assert list(required_limits(_BUFFER + 1)) == [
             "maxBufferSize",
             "maxStorageBufferBindingSize",
@@ -86,23 +94,28 @@ class TestRequiredLimitsSelection:
 
 
 class TestWhatTheDeclarationDoesNotCover:
-    """宣言が保証するのは**常駐分**（格納テンソルと state スロット）だけ — 中間は含まない。
+    """The declaration guarantees only the **resident part** (stored tensors and state slots) — not
+    the intermediates.
 
-    規則と理由の正本は `karume.limits` のモジュール docstring 冒頭の MUST。融合後の実需要は
-    device が実際に granted した limit に依存する（行ブロック化の刻みがそこで決まる）ので
-    配布形からは原理的に決まらず、融合**前**のノード出力の最大を焼くと「行ブロックで走る
-    デバイス」を取得の前に誤って拒否する。中間が上限を超える形は Session 構築時の実行時検査
-    が受ける。
+    The source of truth for the rule and its reason is the MUST in the module docstring of
+    `karume.limits`. The actual demand after fusion depends on the limits the device actually
+    granted (the row-blocking step is set there), so it is in principle not determined by the
+    distribution, and writing the largest node output **before** fusion would wrongly reject
+    "devices that run with row blocks" before the download. Forms whose intermediates exceed the
+    limits are caught by the run-time check at Session construction.
 
-    ここは 2026-09-04 の裁定（「常駐分だけ」）**そのもの**を名乗るテスト — 逆へ倒す（中間も
-    数える）なら、下の期待値が `{}` から両上限入りへ変わる。
+    This test names the ruling of 2026-09-04 ("the resident part only") **itself** — flipping it
+    (counting the intermediates too) changes the expected value below from `{}` to one with both
+    limits.
     """
 
-    #: 中間ノード出力の宣言 shape（f32 で 960 MiB = binding 既定の 7.5 倍・birefnet 1024² の形）。
+    #: The declared shape of an intermediate node output (960 MiB in f32 = 7.5 times the binding
+    #: default; the birefnet 1024² shape).
     _INTERMEDIATE_SHAPE: ClassVar[list[int]] = [1, 240, 1024, 1024]
 
     def test_a_graph_whose_intermediates_dwarf_its_weights_declares_nothing(self) -> None:
-        """ノード出力が既定の 7.5 倍でも、state を持たないグラフの需要は 0（欄は生えない）。"""
+        """Even with node outputs at 7.5 times the default, a graph without state has a demand of 0
+        (no field appears)."""
         graph = {
             "values": {"cat": {"dtype": "f32", "shape": self._INTERMEDIATE_SHAPE}},
             "nodes": [{"op": "cat", "ins": ["w0", "w1"], "outs": ["cat"], "attrs": {}}],
@@ -114,10 +127,12 @@ class TestWhatTheDeclarationDoesNotCover:
         assert required_limits(demand) == {}
 
     def test_the_same_number_would_be_declared_if_it_came_from_a_stored_tensor(self) -> None:
-        """恒真化の門 — 落としているのは「値が小さいから」ではなく「入口に無いから」。
+        """The check against a tautological test — the value is dropped not "because it is small"
+        but "because it is not at an entry point".
 
-        同じバイト数が**格納**テンソルとして現れれば両欄とも焼かれる。上のケースが `{}` に
-        なるのは、ノード出力が需要の入口（ヘッダと state 宣言）のどちらにも居ないため。
+        The same byte count appearing as a **stored** tensor writes both fields. The case above
+        gives `{}` because node outputs are at neither entry point of the demand (the header and
+        the state declaration).
         """
         intermediate = 240 * 1024 * 1024 * 4
 
@@ -130,30 +145,34 @@ class TestWhatTheDeclarationDoesNotCover:
 
 
 class TestStateSlotDemand:
-    """需要の 2 本目 — **容量ぶん常駐する** state スロット（ADR 0066 決定 2）。"""
+    """The second source of demand — the state slots that **stay resident for the whole capacity**
+    (ADR 0066 decision 2)."""
 
-    #: 束縛は**配布形が許す最大容量**（`maxPosition`）から採る — 既定容量（`capacity`）は
-    #: ホストが上書きできる実行時ノブなので、そちらで焼くと足りない宣言になる。
+    #: The binding is taken from **the largest capacity the distribution allows** (`maxPosition`)
+    #: — the default capacity (`capacity`) is a run-time knob the host can override, so writing
+    #: from it would give an insufficient declaration.
     _CONFIG: ClassVar[dict[str, Any]] = {"chunkLength": 32, "capacity": 640, "maxPosition": 4096}
 
     def test_a_graph_without_states_has_no_state_demand(self) -> None:
-        """states を持たない既存の全モデルは無風（欄そのものが無い）。"""
+        """Every existing model without states is unaffected (the field itself is absent)."""
         assert max_state_slot_bytes({"symbols": [], "nodes": []}, self._CONFIG, "where") == 0
 
     def test_a_numeric_slot_is_counted_as_f32_elements(self) -> None:
-        """sliding スロットは窓幅を数値で持つ（f32 = 4 バイト/要素）。"""
+        """A sliding slot holds the window width as a number (f32 = 4 bytes/element)."""
         graph = {"states": {"l0.k": {"dtype": "f32", "shape": [1, 2, 512, 256]}}}
 
         assert max_state_slot_bytes(graph, self._CONFIG, "where") == 2 * 512 * 256 * 4
 
     def test_a_symbolic_slot_is_bound_by_the_pipeline_config_max_position(self) -> None:
-        """full スロットは容量記号のまま焼かれる — 数値化の値は配布形が許す**最大**容量。"""
+        """A full slot is written with the capacity symbol as is — the value it is evaluated with is
+        the **largest** capacity the distribution allows."""
         graph = {"states": {"l4.k": {"dtype": "f32", "shape": [1, 1, "C", 512]}}}
 
         assert max_state_slot_bytes(graph, self._CONFIG, "where") == 4096 * 512 * 4
 
     def test_the_default_capacity_is_not_what_binds_the_symbol(self) -> None:
-        """MUST: 既定容量で焼くと「既定より大きい容量を選んだ瞬間に落ちる」宣言になる。"""
+        """MUST: writing from the default capacity gives a declaration that "fails the moment a
+        capacity larger than the default is chosen"."""
         graph = {"states": {"l4.k": {"dtype": "f32", "shape": [1, 1, "C", 512]}}}
 
         demand = max_state_slot_bytes(graph, self._CONFIG, "where")
@@ -161,13 +180,15 @@ class TestStateSlotDemand:
         assert demand != self._CONFIG["capacity"] * 512 * 4
 
     def test_it_evaluates_a_derived_dimension(self) -> None:
-        """`coeff·sym+offset` の派生形も束縛して数える（ADR 0057 の次元言語）。"""
+        """The derived form `coeff·sym+offset` is also bound and counted (the dimension language of
+        ADR 0057)."""
         graph = {"states": {"s": {"dtype": "f32", "shape": ["2C+8"]}}}
 
         assert max_state_slot_bytes(graph, self._CONFIG, "where") == (2 * 4096 + 8) * 4
 
     def test_it_takes_the_largest_slot_of_the_graph(self) -> None:
-        """スロットは 1 本ずつ別バッファ — 合計ではなく最大が binding / buffer の需要。"""
+        """Each slot is a separate buffer — the binding / buffer demand is the largest, not the
+        sum."""
         graph = {
             "states": {
                 "sliding": {"dtype": "f32", "shape": [1, 1, 512, 256]},
@@ -178,10 +199,12 @@ class TestStateSlotDemand:
         assert max_state_slot_bytes(graph, self._CONFIG, "where") == 4096 * 256 * 4
 
     def test_a_large_capacity_outgrows_any_single_tensor(self) -> None:
-        """重みは block 上限で割れるが、スロットは 1 本のまま — 長い会話は state が支配する。
+        """Weights split at the block limit, but a slot stays one buffer — state dominates in long
+        conversations.
 
-        gemma4 の full スロット（`[1, 1, C, 512]`）を容量 131,072 で数えるとちょうど 256MiB =
-        buffer 既定そのもので、binding 既定（128MiB）だけを超える帯に入る。
+        gemma4's full slot (`[1, 1, C, 512]`) counted at capacity 131,072 is exactly 256MiB = the
+        buffer default itself, which falls into the band that exceeds only the binding default
+        (128MiB).
         """
         graph = {"states": {"full": {"dtype": "f32", "shape": [1, 1, "C", 512]}}}
 
@@ -191,17 +214,19 @@ class TestStateSlotDemand:
         assert required_limits(demand) == {"maxStorageBufferBindingSize": demand}
 
     def test_the_gemma4_state_stays_under_its_int8_embedding(self) -> None:
-        """gemma4 E2B の実寸: 上限 131,072 の full スロットは主 embedding より小さい。
+        """gemma4 E2B at actual size: the full slot at the limit of 131,072 is smaller than the main
+        embedding.
 
-        束縛を既定容量（`capacity`）から上限（`maxPosition`）へ移しても、この family の
-        焼き値が動かないことの根拠。full スロットは `[1, 1, C, 512]` の f32 で 256MiB、
-        主 embedding（tied lm_head と同一実体）は i8 格納の 262,144 × 1,536 = 384MiB —
-        需要は後者のままなので `requiredLimits` は 2 欄とも 384MiB で不変。
+        The reason this family's written values do not move when the binding moves from the default
+        capacity (`capacity`) to the limit (`maxPosition`). The full slot is `[1, 1, C, 512]` in f32
+        = 256MiB; the main embedding (the same object as the tied lm_head) is 262,144 × 1,536 =
+        384MiB in i8 storage — the demand stays the latter, so both fields of `requiredLimits` stay
+        at 384MiB.
         """
         graph = {"states": {"full": {"dtype": "f32", "shape": [1, 1, "C", 512]}}}
 
         state = max_state_slot_bytes(graph, {"maxPosition": 131_072}, "where")
-        embedding = 262_144 * 1_536  # i8 = 1 バイト/要素
+        embedding = 262_144 * 1_536  # i8 = 1 byte/element
 
         assert state == 256 * 1024**2
         assert embedding == 384 * 1024**2
@@ -218,19 +243,22 @@ class TestStateSlotDemand:
             {"maxPosition": 0},
             {"maxPosition": "640"},
             {"maxPosition": True},
-            # 既定容量だけがある配布形（上限を宣言しない世代）も落とす。
+            # A distribution with only the default capacity (a generation that declares no
+            # limit) is refused too.
             {"capacity": 640},
         ],
     )
     def test_it_refuses_a_capacity_the_distribution_does_not_pin(self, config: Any) -> None:
-        """束縛が取れないなら fail loudly — 黙って state を外すと「宣言があるのに足りない」。"""
+        """Without a binding, fail loudly — silently leaving the state out gives "declared, yet
+        insufficient"."""
         graph = {"states": {"full": {"dtype": "f32", "shape": [1, 1, "C", 512]}}}
 
         with pytest.raises(LimitsError, match="maxPosition"):
             max_state_slot_bytes(graph, config, "where")
 
     def test_it_refuses_two_symbols_it_cannot_tell_apart(self) -> None:
-        """容量記号は 1 本 — 2 本あるとどちらが容量かを配布形からは決められない。"""
+        """There is one capacity symbol — with two, the distribution cannot tell which one is the
+        capacity."""
         states = {
             "a": {"dtype": "f32", "shape": [1, "C", 8]},
             "b": {"dtype": "f32", "shape": [1, "D", 8]},
@@ -240,13 +268,15 @@ class TestStateSlotDemand:
             state_bindings(states, self._CONFIG, "where")
 
     def test_a_numeric_only_graph_needs_no_binding(self) -> None:
-        """記号が無ければ容量席も要らない（pipelineConfig を持たない family も通る）。"""
+        """Without a symbol no capacity field is needed (a family without a pipelineConfig passes
+        too)."""
         states = {"a": {"dtype": "f32", "shape": [1, 512, 8]}}
 
         assert state_bindings(states, {}, "where") == {}
 
     def test_it_refuses_a_slot_dtype_it_cannot_size(self) -> None:
-        """f16 は席だけの予約（ADR 0066 追記 5）— 寸法を勝手に決めない。"""
+        """f16 is reserved as an option only (ADR 0066, addendum 2026-08-17 item 5) — the size is
+        not guessed."""
         graph = {"states": {"s": {"dtype": "f16", "shape": [1, 512]}}}
 
         with pytest.raises(LimitsError, match="dtype"):

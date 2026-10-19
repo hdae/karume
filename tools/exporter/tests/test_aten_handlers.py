@@ -1,8 +1,8 @@
-"""aten op 対応表（aten_handlers.py）の振る舞い固定。
+"""Pins the behaviour of the aten op table (aten_handlers.py).
 
-個別の aten op と融合 op が IR の語彙へ狙いどおりに落ちること、attrs が torch の意味論を
-境界で明示化していること、契約に無い形が fail loudly になることを固定する。
-エンジン側（convert.py）の契約面は test_convert.py。
+Pins that individual aten ops and fused ops lower to the intended IR vocabulary, that attrs make
+torch semantics explicit at the boundary, and that shapes outside the contract fail loudly.
+The contract surface of the engine (convert.py) is in test_convert.py.
 """
 
 from __future__ import annotations
@@ -21,19 +21,22 @@ from karume.ops import EMITTABLE_OPS
 
 
 def _gelu_tanh_reference(x: torch.Tensor) -> torch.Tensor:
-    """`gelu_tanh` の参照実装（TS 側 packages/runtime/src/reference/ops.ts の鏡像）。
+    """Reference implementation of `gelu_tanh` (mirror of the TS
+    packages/runtime/src/reference/ops.ts).
 
-    0.7978845608028654 = √(2/π)。erf 形と違いこの式そのものが定義なので、torch と別式に
-    書き換える余地は無い（突合が見るのは近似の外れではなく**式の取り違え**）。
+    0.7978845608028654 = √(2/π). Unlike the erf form, this formula is the definition itself, so
+    there is no room to rewrite it differently from torch (the comparison looks for **a mixed-up
+    formula**, not an approximation error).
     """
     return 0.5 * x * (1 + torch.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)))
 
 
 class TestGelu:
-    """gelu は分解を止めて 1 ノードで運ぶ（core 分解は M0 語彙の外に散る）。
+    """gelu stops decomposition and travels as one node (the core decomposition scatters outside
+    the M0 vocabulary).
 
-    近似種別は attrs ではなく **op 名**で分ける（契約が attrs 空 — 同じ op 名のまま数値だけ
-    変わる分岐を契約の外に作らない）。
+    The approximation kind is told apart by **op name**, not attrs (the contract has empty attrs —
+    no branch outside the contract where only the numbers change under the same op name).
     """
 
     def test_exact_gelu_stays_a_single_node(self, convert_module):
@@ -57,7 +60,8 @@ class TestGelu:
     def test_reference_matches_torch_on_random_and_edge_values(self):
         generator = torch.Generator().manual_seed(20260811)
         random = torch.randn(4096, generator=generator) * 3.0
-        # ±0 / ±大値（x³ が f32 で inf へ飛ぶ域を含む）/ ±小値（x³ が 0 へ落ちる域）。
+        # ±0 / ±large values (including the range where x³ overflows to inf in f32) / ±small
+        # values (the range where x³ underflows to 0).
         edges = torch.tensor(
             [0.0, -0.0, 3.4e38, -3.4e38, 1e20, -1e20, 1e-20, -1e-20, 20.0, -20.0],
             dtype=torch.float32,
@@ -67,18 +71,20 @@ class TestGelu:
             torch.testing.assert_close(_gelu_tanh_reference(x), expected, msg=name)
 
     def test_two_gelus_are_numerically_distinguishable(self):
-        # 同じ op へ畳めないことの根拠（畳むと 1e-3 級の誤差が黙って入る）。
+        # Why they cannot fold into one op (folding would silently add errors of order 1e-3).
         x = torch.linspace(-3.0, 3.0, 101)
         gap = (nn.functional.gelu(x) - _gelu_tanh_reference(x)).abs().max()
         assert gap > 1e-4
 
 
 class TestSin:
-    """`sin` は畳み込みと発行の 2 経路を**同時に**持つ（ADR 0043 の第 1 層）。
+    """`sin` has both paths, folding and emission, **at once** (layer 1 of ADR 0043 — now the Core
+    ATen layer, ADR 0059).
 
-    定数部分木（RoPE の位置表）は従来どおり FOLDABLE_OPS が initializer へ畳み、実行時値を
-    取る形だけが IR ノードとして残る。片方を消すともう片方が黙って劣化する — 定数を畳まなく
-    なれば実行時の dispatch が増え、発行できなければ Snake 活性が export で落ちる。
+    Constant subtrees (RoPE position tables) are folded into initializers by FOLDABLE_OPS as
+    before, and only forms taking runtime values stay as IR nodes. Removing either silently
+    degrades the other — without constant folding the runtime dispatches grow, and without
+    emission the Snake activation fails at export.
     """
 
     def test_runtime_valued_sin_becomes_a_node(self, convert_module):
@@ -91,7 +97,7 @@ class TestSin:
         assert node_ops(graph) == ["sin"]
 
     def test_constant_sin_is_still_folded_into_an_initializer(self, convert_module):
-        """定数入力の `sin`（RoPE 表の形）はノードを残さず焼かれる。"""
+        """`sin` on a constant input (the RoPE table form) is folded away, leaving no node."""
 
         class ConstantTable(nn.Module):
             def forward(self, x):
@@ -107,13 +113,13 @@ class TestSin:
         )
 
     def test_snake_activation_converts_with_a_single_sin(self, convert_module):
-        """DACVAE の Snake `x + sin²(αx)/(α+1e-9)`（この op を足した動機そのもの）。
+        """DACVAE's Snake `x + sin²(αx)/(α+1e-9)` (the very reason this op was added).
 
-        α は学習パラメータ = initializer なので `α+1e-9` も実行時ノードになる（パラメータ
-        経由の畳み込みは不適格 — `_classify_foldable`）。`sin` は実行時値 `αx` を取るため
-        1 ノードとして残り、`pow(2)` は分解で `mul` になる。
-        NOTE: 係数を `(α+1e-9).reciprocal()` と書くと `aten.reciprocal.default` に当たる
-        （FOLDABLE 専用で emit 経路が無い）。同値な除算形で書いてある。
+        α is a learned parameter = an initializer, so `α+1e-9` is also a runtime node (folding
+        through a parameter is not eligible — `_classify_foldable`). `sin` takes the runtime
+        value `αx`, so it stays as one node, and `pow(2)` decomposes into `mul`.
+        NOTE: writing the coefficient as `(α+1e-9).reciprocal()` hits `aten.reciprocal.default`
+        (FOLDABLE only, with no emit path). It is written in the equivalent division form.
         """
 
         class Snake(nn.Module):
@@ -131,7 +137,8 @@ class TestSin:
 
 
 class TestRowReduce:
-    """reduce は 1 軸・keepdim 無しのみ。軸は attrs `dim` に**非負で**載る。"""
+    """reduce takes one axis without keepdim only. The axis goes into attrs `dim` **as
+    non-negative**."""
 
     def test_last_dim_reductions_convert(self, convert_module):
         class Reduce(nn.Module):
@@ -142,11 +149,12 @@ class TestRowReduce:
 
         assert node_ops(graph) == ["sum", "amax", "amin"]
         assert [graph.values[name].shape for name in graph.outputs] == [[3], [3], [3]]
-        # 負の軸表記は境界で正規化する（IR の attrs は非負のみ）
+        # Negative axis notation is normalized at the boundary (IR attrs are non-negative only)
         assert [node.attrs["dim"] for node in graph.nodes] == [1, 1, 1]
 
     def test_a_non_last_axis_is_carried_in_attrs(self, convert_module):
-        """チャネル軸の縮約（VAE の L2 正規化）は permute 無しでそのまま書ける。"""
+        """A reduction over the channel axis (the VAE's L2 normalization) is written as is, without
+        a permute."""
 
         class Reduce(nn.Module):
             def forward(self, x):
@@ -178,11 +186,11 @@ class TestRowReduce:
 
 
 class TestArgmax:
-    """argmax は**最終次元 + keepdim=True** の固定形のみ（ADR 0068 決定 2）。
+    """argmax takes only the fixed form **last dimension + keepdim=True** (ADR 0068 decision 2).
 
-    reduce 族と違い attrs を持たない（軸は最終次元固定・rank 保存）ので、絞りは全て
-    ハンドラの受理判定が担う。出力は torch の i64 → 境界で **i32** へ正規化される
-    （ADR 0009）。
+    Unlike the reduce family it has no attrs (the axis is fixed to the last dimension, the rank is
+    kept), so all narrowing is done by the handler's acceptance check. The output is torch's
+    i64 → normalized to **i32** at the boundary (ADR 0009).
     """
 
     def test_last_dim_with_keepdim_becomes_one_node(self, convert_module):
@@ -193,14 +201,16 @@ class TestArgmax:
         graph, _ = convert_module(Argmax(), (torch.randn(3, 5),))
 
         assert node_ops(graph) == ["argmax"]
-        # attrs 空（`dim` / `keepdim` の欄が無いことがそのまま「他の形は語彙に無い」の宣言）
+        # Empty attrs (the absence of `dim` / `keepdim` fields itself declares "no other form is in
+        # the vocabulary")
         assert only_node(graph, "argmax").attrs == {}
-        # rank 保存 = 最終次元を 1 に潰した形・dtype は i32
+        # Rank kept = the last dimension collapsed to 1; the dtype is i32
         assert [graph.values[name].shape for name in graph.outputs] == [[3, 1]]
         assert [graph.values[name].dtype for name in graph.outputs] == ["i32"]
 
     def test_a_symbolic_leading_dimension_survives(self, convert_module, dyn_t):
-        """decode の出口形（`[B, T, V]` の最終次元 = 語彙軸）。先行次元は記号のまま残る。"""
+        """The decode exit shape (the last dimension of `[B, T, V]` = the vocabulary axis). Leading
+        dimensions stay symbolic."""
 
         class Argmax(nn.Module):
             def forward(self, x):
@@ -232,10 +242,12 @@ class TestArgmax:
             convert_module(Argmax(), (torch.randn(3, 5),))
 
     def test_kwarg_forms_read_the_same_slots(self):
-        """`dim` / `keepdim` が kwargs で来ても同じ欄として読む（reduce 族と同じ規律）。
+        """`dim` / `keepdim` arriving as kwargs are read as the same fields (the same rule as the
+        reduce family).
 
-        位置引数を素で添字すると `IndexError` になり、ADR 0005 の「未対応は診断つきで落とす」
-        規律の外へ落ちる（診断が「エクスポータが壊れた」に化ける）。
+        Plain indexing of positional arguments would raise `IndexError` and fall outside ADR
+        0005's rule "unsupported input fails with a diagnosis" (the diagnosis would turn into
+        "the exporter is broken").
         """
         target = torch.ops.aten.argmax.default
         node = _reduce_node(target, kwargs={"dim": -1, "keepdim": True})
@@ -251,11 +263,12 @@ class TestArgmax:
 
 
 def _reduce_node(target, args=(), kwargs=None, shape=(3, 5)):
-    """reduce ハンドラへ直接食わせる FX ノードを 1 本組む。
+    """Build one FX node to feed straight into a reduce handler.
 
-    torch 2.13 の分解は reduce の `dim` を必ず位置引数で出すので、**kwargs 形は export
-    からは作れない**（overload の呼び分け次第で来うる形）。ハンドラは純関数なので、
-    グラフを組む代わりにノード 1 本を手で組んで直接呼ぶ。
+    torch 2.13's decomposition always emits the reduce `dim` as a positional argument, so **the
+    kwargs form cannot be produced by export** (it can arrive depending on how the overload is
+    called). Handlers are pure functions, so instead of building a graph, one node is built by
+    hand and the handler is called directly.
     """
     graph = torch.fx.Graph()
     src = graph.placeholder("x")
@@ -264,10 +277,11 @@ def _reduce_node(target, args=(), kwargs=None, shape=(3, 5)):
 
 
 class TestReduceArgumentsInKwargs:
-    """reduce 族は `dim` / `keepdim` / `dtype` が kwargs で来ても同じ欄として読む。
+    """The reduce family reads `dim` / `keepdim` / `dtype` arriving as kwargs as the same fields.
 
-    位置引数を素で添字すると `IndexError` になり、ADR 0005 の「未対応は診断つきで落とす」
-    規律の外へ落ちる（診断が「エクスポータが壊れた」に化ける）。
+    Plain indexing of positional arguments would raise `IndexError` and fall outside ADR 0005's
+    rule "unsupported input fails with a diagnosis" (the diagnosis would turn into "the exporter
+    is broken").
     """
 
     @pytest.mark.parametrize(
@@ -332,7 +346,7 @@ class TestReduceArgumentsInKwargs:
 
 
 class TestCastAndBitwiseNot:
-    """aten._to_copy → cast / aten.bitwise_not → bitwise_not（ADR 0009）。"""
+    """aten._to_copy → cast / aten.bitwise_not → bitwise_not (ADR 0009)."""
 
     def test_to_copy_becomes_cast_with_the_target_dtype(self, convert_module):
         class Truncate(nn.Module):
@@ -342,12 +356,13 @@ class TestCastAndBitwiseNot:
         graph, _ = convert_module(Truncate(), (torch.randn(3, 4),))
 
         node = only_node(graph, "cast")
-        # i64 は境界正規化で i32 として宣言される（torch dtype をそのまま名前にしない）
+        # i64 is declared as i32 by the boundary normalization (the torch dtype is not used as the
+        # name as is)
         assert node.attrs == {"to": "i32"}
         assert graph.values[node.outs[0]].dtype == "i32"
 
     def test_casts_with_different_targets_are_not_merged_by_cse(self, convert_module):
-        """CSE キーに attrs が載っていないと、同じ入力の片方が黙って消える。"""
+        """Without attrs in the CSE key, one of two same-input nodes silently disappears."""
 
         class TwoCasts(nn.Module):
             def forward(self, x):
@@ -369,7 +384,7 @@ class TestCastAndBitwiseNot:
         assert graph.values[node.outs[0]].dtype == "bool"
 
     def test_integer_bitwise_not_is_rejected(self, convert_module):
-        """整数の ~x は bool の否定と意味が違う — 黙って読み替えない。"""
+        """Integer ~x means something other than bool negation — not reinterpreted silently."""
 
         class InvertInts(nn.Module):
             def forward(self, x):
@@ -380,14 +395,14 @@ class TestCastAndBitwiseNot:
 
 
 class TestBmmAndGather:
-    """bmm（rank-3 専業）と gather（最終次元固定）— ADR 0012。"""
+    """bmm (rank-3 only) and gather (last dimension fixed) — ADR 0012."""
 
     def test_bmm_keeps_the_batch_axis(self, convert_module, dyn_t):
         class Batched(nn.Module):
             def forward(self, x, y):
                 return torch.bmm(x, y)
 
-        # B / M / K / N を全て違う長さにする（軸の取り違えを shape 宣言から読める形）
+        # B / M / K / N all get different lengths (an axis mix-up shows in the declared shapes)
         graph, _ = convert_module(
             Batched(),
             (torch.randn(2, 6, 3), torch.randn(2, 3, 5)),
@@ -399,7 +414,7 @@ class TestBmmAndGather:
         assert graph.values[node.outs[0]].shape == [2, "T", 5]
 
     def test_rank2_matmul_stays_matmul(self, convert_module):
-        """rank-2 は matmul の担当（bmm と兼用にしない — 契約表）。"""
+        """rank-2 belongs to matmul (not shared with bmm — the contract table)."""
 
         class Flat(nn.Module):
             def forward(self, x, y):
@@ -410,9 +425,10 @@ class TestBmmAndGather:
         assert node_ops(graph) == ["matmul"]
 
     def test_rank4_matmul_is_rejected(self, convert_module):
-        """rank-4 の matmul は aten.bmm へ reshape 付きで落ちるか、語彙外として落ちる。
+        """A rank-4 matmul either lowers to aten.bmm with reshapes or fails as outside the
+        vocabulary.
 
-        どちらにせよ「rank-4 のまま bmm に化ける」ことは無い（rank-3 だけを受理する）。
+        Either way it never "turns into a bmm while still rank-4" (only rank-3 is accepted).
         """
 
         class Deep(nn.Module):
@@ -440,7 +456,7 @@ class TestBmmAndGather:
 
         node = only_node(graph, "gather")
         assert node.attrs == {}
-        # src は f32、index は i32（i64 からの境界正規化）— スロットで dtype が違う
+        # src is f32, index is i32 (boundary normalization from i64) — the dtype differs per slot
         assert [graph.inputs[0].dtype, graph.inputs[1].dtype] == ["f32", "i32"]
         assert graph.values[node.outs[0]].dtype == "f32"
 
@@ -456,11 +472,11 @@ class TestBmmAndGather:
             )
 
     def test_gather_with_a_shorter_leading_dim_is_rejected(self, convert_module):
-        """torch は `index.size(d) <= src.size(d)` を許すが IR 契約は完全一致
-        （packages/runtime/src/ops.ts）。
+        """torch allows `index.size(d) <= src.size(d)`, but the IR contract requires an exact match
+        (packages/runtime/src/ops.ts).
 
-        rank だけ見て通すと export は緑のままブラウザ側の契約検査で落ちる（`row = i / J` の
-        行対応が成り立たない形）。
+        Passing on rank alone would keep export green and fail the contract check in the browser
+        (a shape where the `row = i / J` row correspondence does not hold).
         """
 
         class Narrow(nn.Module):
@@ -486,15 +502,15 @@ class TestBmmAndGather:
 
 
 class TestMathOps:
-    """M1-P3 波3 の数理 op（sdp の spline / dec の leaky_relu — recon §2）。
+    """Math ops of M1-P3 phase 3 (sdp's spline / dec's leaky_relu — recon §2).
 
-    固定するのは 3 つ: ① 実測形が狙った 1 ノードへ落ちること ② attrs が torch の意味論を
-    **境界で明示化**していること ③ 契約に無い形（片側 clamp・整数の論理積・最終次元以外の
-    cumsum・スカラ被演算子）が fail loudly になること。
+    Three things are pinned: ① observed shapes lower to the intended single node; ② attrs make
+    torch semantics **explicit at the boundary**; ③ shapes outside the contract (one-sided clamp,
+    integer logical and, cumsum on a non-last dimension, scalar operands) fail loudly.
     """
 
     def test_the_inside_test_lowers_to_compare_and_bitwise_and(self, convert_module):
-        """spline の `inside = (x >= -b) & (x <= b)`（recon §2）。"""
+        """The spline's `inside = (x >= -b) & (x <= b)` (recon §2)."""
 
         class Inside(nn.Module):
             def forward(self, x):
@@ -508,7 +524,7 @@ class TestMathOps:
         assert graph.values[only_node(graph, "bitwise_and").outs[0]].dtype == "bool"
 
     def test_searchsorted_lowers_to_ge_tensor_and_a_bool_sum(self, convert_module):
-        """`sum(x[…,None] >= bl, dim=-1)`（recon §2）— bool の行 sum は i32 のカウント。"""
+        """`sum(x[…,None] >= bl, dim=-1)` (recon §2) — a row sum of bool is an i32 count."""
 
         class Searchsorted(nn.Module):
             def forward(self, x, bounds):
@@ -530,7 +546,7 @@ class TestMathOps:
         assert only_node(graph, "gt_scalar").attrs == {"value": 0.25}
 
     def test_integer_comparison_is_rejected(self, convert_module):
-        """契約は f32 専業（整数の比較は実測に無い — 黙って f32 に読み替えない）。"""
+        """The contract is f32 only (no observed integer comparison — not silently read as f32)."""
 
         class IntGate(nn.Module):
             def forward(self, x):
@@ -549,10 +565,11 @@ class TestMathOps:
         assert only_node(graph, "clamp").attrs == {"min": -0.75, "max": 0.5}
 
     def test_a_lower_bound_only_clamp_becomes_clamp_min(self, convert_module):
-        """下限だけの clamp は **別 op**（clamp_min）へ落ちる（ADR 0017）。
+        """A lower-bound-only clamp lowers to **a separate op** (clamp_min) (ADR 0017).
 
-        欠けた上限を +有限最大値で補うのは「表現が無い形を黙って別の形で実行する」ことに
-        なるので採らない — 語彙に片側 op を足したのが ADR 0017 の裁定。
+        Filling the missing upper bound with the largest finite value would "silently run a
+        shape that has no representation as another shape", so it is not done — adding a
+        one-sided op to the vocabulary was ADR 0017's decision.
         """
 
         class LowerBound(nn.Module):
@@ -565,7 +582,8 @@ class TestMathOps:
         assert only_node(graph, "clamp_min").attrs == {"min": -1.0}
 
     def test_an_upper_bound_only_clamp_is_rejected(self, convert_module):
-        """上限だけの形は語彙に無い（clamp_max は未実装 — 需要が出たら同じ手筋で足す）。"""
+        """An upper-bound-only form is not in the vocabulary (clamp_max is not implemented — added
+        the same way when needed)."""
 
         class UpperBound(nn.Module):
             def forward(self, x):
@@ -577,7 +595,8 @@ class TestMathOps:
             convert_module(UpperBound(), (torch.randn(4),))
 
     def test_inverted_clamp_bounds_are_rejected(self, convert_module):
-        """min > max は WGSL の clamp が未定義になる向き（契約表と同じ門）。"""
+        """min > max is the direction where WGSL clamp is undefined (the same check as the contract
+        table)."""
 
         class Inverted(nn.Module):
             def forward(self, x):
@@ -587,7 +606,7 @@ class TestMathOps:
             convert_module(Inverted(), (torch.randn(4),))
 
     def test_log1p_stays_a_single_node(self, convert_module):
-        """softplus 分解形の `log1p(exp(scaled))`（recon §2）。"""
+        """`log1p(exp(scaled))` of the decomposed softplus (recon §2)."""
 
         class Softplus(nn.Module):
             def forward(self, x):
@@ -610,9 +629,10 @@ class TestMathOps:
         assert graph.values[node.outs[0]].dtype == "f32"
 
     def test_a_scalar_branch_arrives_as_a_constant_tensor(self, convert_module):
-        """契約は attrs 空のアリティ 3 固定でスカラを載せる欄が無いが、torch 側の分解が
-        `scalar_tensor` を挟むため、実際には rank-0 の定数として届く（畳み込みで
-        initializer 化される）。IR 語彙を増やさずに通る形なのでそのまま受理する。
+        """The contract is arity 3 with empty attrs and has no field for a scalar, but torch's
+        decomposition inserts `scalar_tensor`, so it actually arrives as a rank-0 constant
+        (folded into an initializer). It passes without growing the IR vocabulary, so it is
+        accepted as is.
         """
 
         class ScalarBranch(nn.Module):
@@ -627,7 +647,7 @@ class TestMathOps:
         assert graph.values[node.ins[2]].shape == []
 
     def test_integer_bitwise_and_is_rejected(self, convert_module):
-        """整数の & は bool の論理積と意味が違う（bitwise_not と同じ絞り方）。"""
+        """Integer & means something other than bool logical and (narrowed like bitwise_not)."""
 
         class IntAnd(nn.Module):
             def forward(self, x, y):
@@ -642,13 +662,15 @@ class TestMathOps:
     @pytest.mark.parametrize(
         ("build", "expected"),
         [
-            # ups / ResBlock（LRELU_SLOPE=0.1）と最終段（位置引数を省略した torch 既定）
-            pytest.param(lambda x: nn.functional.leaky_relu(x, 0.1), 0.1, id="明示 0.1"),
-            pytest.param(lambda x: nn.functional.leaky_relu(x), 0.01, id="既定 0.01"),
+            # ups / ResBlock (LRELU_SLOPE=0.1) and the last stage (torch default, positional
+            # argument omitted)
+            pytest.param(lambda x: nn.functional.leaky_relu(x, 0.1), 0.1, id="explicit 0.1"),
+            pytest.param(lambda x: nn.functional.leaky_relu(x), 0.01, id="default 0.01"),
         ],
     )
     def test_leaky_relu_materializes_the_slope(self, convert_module, build, expected):
-        """MUST: torch 側の既定を**境界で attrs に明示化**する（ADR 0015 — 実測は 2 種混在）。"""
+        """MUST: make torch's default **explicit in attrs at the boundary** (ADR 0015 — both forms
+        are observed)."""
 
         class Leaky(nn.Module):
             def forward(self, x):
@@ -660,7 +682,7 @@ class TestMathOps:
         assert only_node(graph, "leaky_relu").attrs == {"negative_slope": expected}
 
     def test_cumsum_normalizes_the_negative_axis(self, convert_module, dyn_t):
-        """spline の cumwidths（`torch.cumsum(widths, dim=-1)`）。"""
+        """The spline's cumwidths (`torch.cumsum(widths, dim=-1)`)."""
 
         class Cumulative(nn.Module):
             def forward(self, x):
@@ -680,14 +702,14 @@ class TestMathOps:
 
 
 class TestFusedOps:
-    """融合 op（ADR 0012）— 保存リスト 9 op のうち実測に出る 6 本。
+    """Fused ops (ADR 0012) — the 6 of the 9 preserved ops that appear in observed models.
 
-    ここで固定するのは 2 つ: ① 保存が効いて**高位 op が 1 ノードのまま残る**こと
-    ② attrs の値域外・実測に無い形が fail loudly になること。
+    Two things are pinned here: ① preservation works and **the high-level op stays one node**;
+    ② attrs outside their range and shapes not observed fail loudly.
     """
 
     def test_linear_stays_a_single_node_with_bias(self, convert_module, dyn_t):
-        """保存しないと addmm + view に散る（recon §5）。"""
+        """Without preservation it scatters into addmm + view (recon §5)."""
 
         class Projected(nn.Module):
             def __init__(self):
@@ -703,16 +725,17 @@ class TestFusedOps:
         assert node.attrs == {}
         assert len(node.ins) == 3
         assert node_ops(graph) == ["linear"]
-        # 重みは [out, in] の転置レイアウトのまま運ぶ（転置ノードを挟まない）
+        # The weight travels in its transposed [out, in] layout (no transpose node in between)
         assert graph.values[node.ins[1]].shape == [3, 4]
         assert graph.values[node.ins[2]].shape == [3]
         assert graph.values[node.outs[0]].shape == ["T", 3]
 
     def test_a_bias_free_linear_gets_a_synthesized_zero_bias(self, convert_module):
-        """bias 無しの linear は**ゼロ bias 合成**でアリティ 3 へ正規化される（ADR 0016）。
+        """A bias-free linear is normalized to arity 3 by **synthesizing a zero bias** (ADR 0016).
 
-        conv の合成（ADR 0015）と同じ手筋で、契約・カーネル・shape 層に arity 分岐を
-        持ち込まない。合成が恒等なのは `+0` が f32 で厳密恒等だから。
+        The same approach as the conv synthesis (ADR 0015): no arity branch is brought into the
+        contract, the kernels or the shape layer. The synthesis is an identity because `+0` is
+        an exact identity in f32.
         """
 
         class NoBias(nn.Module):
@@ -732,7 +755,8 @@ class TestFusedOps:
         assert torch.equal(bias, torch.zeros(3))
 
     def test_layer_norm_stays_single_output_with_attrs(self, convert_module, dyn_t):
-        """保存しないと native_layer_norm（3 出力）+ getitem になり単一出力前提と衝突する。"""
+        """Without preservation it becomes native_layer_norm (3 outputs) + getitem, which conflicts
+        with the single-output premise."""
 
         class Normed(nn.Module):
             def __init__(self):
@@ -751,10 +775,10 @@ class TestFusedOps:
         assert node_ops(graph) == ["layer_norm"]
 
     def test_an_affine_free_layer_norm_gets_ones_and_zeros(self, convert_module):
-        """affine 無しの layer_norm は ones/zeros 合成でアリティ 3 へ正規化される（ADR 0016）。
+        """An affine-free layer_norm gets arity 3 by synthesizing ones/zeros (ADR 0016).
 
-        合成の順序（weight → bias）が入れ替わると `×0 +1` になって値が壊れるので、実体まで
-        見る（長さだけ見ると ones と zeros の取り違えが素通りする）。
+        Swapping the synthesis order (weight → bias) would give `×0 +1` and break the values, so
+        the contents are checked (checking lengths alone would let a ones/zeros mix-up through).
         """
 
         class NoAffine(nn.Module):
@@ -775,11 +799,11 @@ class TestFusedOps:
         assert torch.equal(bias, torch.zeros(4))
 
     def test_a_weight_only_layer_norm_gets_a_zero_bias(self, convert_module):
-        """weight だけの layer_norm は zeros 合成でアリティ 3 になる（`norm_bias=false` の形）。
+        """A weight-only layer_norm gets arity 3 by synthesizing zeros (the `norm_bias=false` form).
 
-        weight が**本物のスロットに残る**ことまで見る（合成が weight 側へ滑り込むと
-        「学習済み weight を捨てて ones で正規化」という沈黙誤値になり、長さは合うので
-        shape 検査では捕まらない）。
+        Also checks that the weight **stays in the real slot** (if the synthesis slipped into the
+        weight side, it would become a silent wrong value, "discard the learned weight and
+        normalize with ones", and the lengths match, so the shape check would not catch it).
         """
 
         class WeightOnly(nn.Module):
@@ -801,10 +825,10 @@ class TestFusedOps:
         assert torch.equal(bias, torch.zeros(4))
 
     def test_a_bias_only_layer_norm_is_rejected(self, convert_module):
-        """bias だけの形は落とす（合成は末尾へ足すので滑り込みが起きる）。
+        """A bias-only form fails (the synthesis appends at the end, so the bias would slip in).
 
-        `weight=None, bias=あり` を通すと bias が weight のスロットへ入る — 長さが同じ
-        なので shape 検査も素通りする沈黙誤値になる。
+        Letting `weight=None, bias=present` through puts the bias into the weight slot — the
+        lengths are equal, so it becomes a silent wrong value that passes the shape check too.
         """
 
         class BiasOnly(nn.Module):
@@ -819,7 +843,7 @@ class TestFusedOps:
             convert_module(BiasOnly(), (torch.randn(5, 4),))
 
     def test_multi_axis_layer_norm_is_rejected(self, convert_module):
-        """実測は [H] のみ（行カーネルは最終次元の連続並びが前提）。"""
+        """Only [H] is observed (the row kernel assumes a contiguous last dimension)."""
 
         class Wide(nn.Module):
             def __init__(self):
@@ -840,7 +864,8 @@ class TestFusedOps:
         graph, _ = convert_module(Attention(), (torch.randn(5, 4),), ({0: dyn_t},))
 
         node = only_node(graph, "softmax")
-        # 負の軸表記はエクスポータ境界で非負へ正規化する（IR の attrs は非負のみ）
+        # Negative axis notation is normalized to non-negative at the exporter boundary (IR attrs
+        # are non-negative only)
         assert node.attrs == {"dim": 1}
 
     def test_softmax_on_a_non_last_dim_is_rejected(self, convert_module):
@@ -852,10 +877,11 @@ class TestFusedOps:
             convert_module(ByColumn(), (torch.randn(5, 4),))
 
     def test_a_runtime_bool_mask_emits_safe_softmax(self, convert_module):
-        """ADR 0044 の連鎖: bool 入力 → `where(mask,0,-inf)` → add → **safe_softmax**。
+        """ADR 0044's chain: bool input → `where(mask,0,-inf)` → add → **safe_softmax**.
 
-        マスクが実行時値だとガードの不活性証明が原理的に立たないので、正規化パスが
-        safe_softmax へ構成的に置換する。IR 境界のマスク dtype は bool（ADR 0009）。
+        With a runtime mask, the guard's inactivity cannot be proven in principle, so the
+        normalization pass replaces it with safe_softmax by construction. The mask dtype at the
+        IR boundary is bool (ADR 0009).
         """
 
         class Masked(nn.Module):
@@ -875,12 +901,13 @@ class TestFusedOps:
         node = only_node(graph, "safe_softmax")
         assert node.attrs == {"dim": 3}
         assert "softmax" not in node_ops(graph)
-        # 0 / -inf は f32 バイナリ initializer に畳まれ、where 1 本で加算型へ変換される
+        # 0 / -inf are folded into f32 binary initializers, and a single where converts to the
+        # additive form
         assert node_ops(graph).count("where") == 1
         assert [spec.dtype for spec in graph.inputs] == ["f32", "f32", "f32", "bool"]
 
     def test_a_static_finite_mask_still_emits_plain_softmax(self, convert_module):
-        """静的マスクの経路は不変（ガードは従来どおり除去され、safe_softmax にならない）。"""
+        """The static-mask path is unchanged (the guard is removed as before; no safe_softmax)."""
 
         class StaticMasked(nn.Module):
             def __init__(self):
@@ -901,7 +928,7 @@ class TestFusedOps:
         assert "safe_softmax" not in node_ops(graph)
 
     def test_embedding_carries_the_inert_padding_idx(self, convert_module, dyn_t):
-        """padding_idx は受理して attrs に載せるが forward には効かない（ADR 0012）。"""
+        """padding_idx is accepted and put into attrs, but has no effect on forward (ADR 0012)."""
 
         class Table(nn.Module):
             def __init__(self):
@@ -915,7 +942,8 @@ class TestFusedOps:
 
         node = only_node(graph, "embedding")
         assert node.attrs == {"padding_idx": 0}
-        # weight は f32 / index は i32（i64 からの境界正規化）— スロットで dtype が違う
+        # weight is f32 / index is i32 (boundary normalization from i64) — the dtype differs per
+        # slot
         assert graph.values[node.ins[0]].dtype == "f32"
         assert graph.inputs[0].dtype == "i32"
         assert graph.values[node.outs[0]].shape == ["T", 3]
@@ -934,7 +962,8 @@ class TestFusedOps:
         assert only_node(graph, "embedding").attrs == {"padding_idx": -1}
 
     def test_embedding_with_a_scalar_index_is_rejected(self, convert_module):
-        """torch はスカラ添字で `[H]` を返すが、契約の出力は `[…index, H]`（rank ≥ 1）。"""
+        """torch returns `[H]` for a scalar index, but the contract output is `[…index, H]`
+        (rank ≥ 1)."""
 
         class Scalar(nn.Module):
             def __init__(self):
@@ -972,15 +1001,16 @@ class TestFusedOps:
 
         node = only_node(graph, "masked_fill")
         assert node.attrs == {"value": -3.4028234663852886e38}
-        # mask は bool（cast 経由）で、出力は x と同形（右詰め broadcast は mask 側だけ）
+        # mask is bool (through a cast), and the output has the shape of x (right-aligned broadcast
+        # on the mask side only)
         assert graph.values[node.ins[1]].dtype == "bool"
         assert graph.values[node.outs[0]].shape == [1, 2, "T", "T"]
 
     def test_masked_fill_value_survives_the_json_round_trip(self, convert_module, dyn_t):
-        """ADR 0012: −3.4028234663852886e+38 は JSON 往復で **ulp 不変**でなければならない。
+        """ADR 0012: −3.4028234663852886e+38 must be **ulp-stable** through the JSON round trip.
 
-        グラフ JSON は safetensors の `__metadata__` に文字列として載るので、往復で 1 ulp
-        でも動けば GPU に載る埋め値が torch と食い違う。
+        The graph JSON is carried as text (the container's graph descriptor), so a move of even
+        1 ulp in the round trip would make the fill value on the GPU disagree with torch.
         """
         import json as _json
         import struct
@@ -1001,14 +1031,15 @@ class TestFusedOps:
             n["attrs"]["value"] for n in restored["nodes"] if n["op"] == "masked_fill"
         )
         assert round_tripped == value == -3.4028234663852886e38
-        # f32 へ丸めても同じビット列（= f32 の最小有限値ちょうど）
+        # The same bits after rounding to f32 (= exactly the smallest finite f32)
         assert struct.unpack("<f", struct.pack("<f", round_tripped))[0] == round_tripped
 
     def test_infinite_fill_value_is_rejected(self, convert_module):
-        """`-inf` 埋めは attention で実在する書き方だが、IR v1 は非有限値を受理しない。
+        """Filling with `-inf` is a real idiom in attention, but IR v1 does not accept non-finite
+        values.
 
-        黙って -3.4e38 に置き換えると softmax の下流で「本当に 0 になる」保証が崩れるので、
-        fail loudly にして呼び出し側に書き換えさせる。
+        Silently replacing it with -3.4e38 would break the guarantee downstream of softmax that
+        it "really becomes 0", so it fails loudly and the caller rewrites it.
         """
 
         class Infinite(nn.Module):
@@ -1030,14 +1061,14 @@ class TestFusedOps:
         graph, _ = convert_module(Convolved(), (torch.randn(1, 4, 6),), ({2: dyn_t},))
 
         node = only_node(graph, "conv1d")
-        # MUST: 既定値でも 4 つとも明示する（既定値補完に頼らない — ADR 0012 / 0015）
+        # MUST: all four are explicit even at their defaults (no default filling — ADR 0012 / 0015)
         assert node.attrs == {"stride": 1, "padding": 1, "dilation": 1, "groups": 1}
         assert len(node.ins) == 3
         assert graph.values[node.ins[1]].shape == [4, 4, 3]
         assert graph.values[node.outs[0]].shape == [1, 4, "T"]
 
     def test_conv1d_carries_groups_and_dilation(self, convert_module, dyn_t):
-        """sdp の DDSConv 形（depthwise groups=C・dilation 3・k 5）が attrs で運ばれる。"""
+        """sdp's DDSConv form (depthwise groups=C, dilation 3, k 5) travels in attrs."""
 
         class Depthwise(nn.Module):
             def __init__(self):
@@ -1051,12 +1082,13 @@ class TestFusedOps:
 
         node = only_node(graph, "conv1d")
         assert node.attrs == {"stride": 1, "padding": 6, "dilation": 3, "groups": 6}
-        # 重みの第 2 軸は Cin/groups = 1（Cin のままだと shape 層が落とす）
+        # The weight's second axis is Cin/groups = 1 (left as Cin, the shape layer would fail it)
         assert graph.values[node.ins[1]].shape == [6, 1, 5]
         assert graph.values[node.outs[0]].shape == [1, 6, "T"]
 
     def test_a_bias_free_conv1d_gets_a_synthesized_zero_bias(self, convert_module, dyn_t):
-        """bias 無しは落とさず**ゼロ bias 合成でアリティ 3 へ正規化**する（ADR 0015）。"""
+        """No bias does not fail; it is **normalized to arity 3 by synthesizing a zero bias**
+        (ADR 0015)."""
 
         class Post(nn.Module):
             def __init__(self):
@@ -1071,7 +1103,8 @@ class TestFusedOps:
         node = only_node(graph, "conv1d")
         assert len(node.ins) == 3
         bias_name = node.ins[2]
-        # 合成 bias は通常の定数と同じ経路・命名（const_<digest>）で運ばれる
+        # The synthesized bias travels on the same path and naming (const_<digest>) as ordinary
+        # constants
         assert bias_name.startswith("const_")
         assert bias_name in graph.initializers
         assert graph.values[bias_name].shape == [3]
@@ -1080,7 +1113,7 @@ class TestFusedOps:
         assert torch.equal(synthesized, torch.zeros(3))
 
     def test_two_bias_free_convs_share_one_synthesized_initializer(self, convert_module):
-        """同じ長さのゼロ bias は digest で 1 本に畳まれる（_add_const の重複排除）。"""
+        """Zero biases of the same length fold into one by digest (the dedup of _add_const)."""
 
         class TwoPosts(nn.Module):
             def __init__(self):
@@ -1099,7 +1132,8 @@ class TestFusedOps:
         assert len([name for name in graph.initializers if name.startswith("const_")]) == 1
 
     def test_conv_transpose1d_carries_stride_and_padding(self, convert_module, dyn_t):
-        """dec の ups 形（up 8 / k 16 / pad 4）。重みは [Cin, Cout, K] で出力長は L·stride。"""
+        """dec's ups form (up 8 / k 16 / pad 4). The weight is [Cin, Cout, K] and the output length
+        is L·stride."""
 
         class Up(nn.Module):
             def __init__(self):
@@ -1114,12 +1148,13 @@ class TestFusedOps:
         node = only_node(graph, "conv_transpose1d")
         assert node.attrs == {"stride": 8, "padding": 4}
         assert len(node.ins) == 3
-        # MUST: [Cin, Cout, K]（conv1d の [Cout, Cin/groups, K] と転置）
+        # MUST: [Cin, Cout, K] (transposed relative to conv1d's [Cout, Cin/groups, K])
         assert graph.values[node.ins[1]].shape == [5, 3, 16]
         assert graph.values[node.outs[0]].shape == [1, 3, "8T"]
 
     def test_a_bias_free_conv_transpose1d_also_gets_a_zero_bias(self, convert_module):
-        """ゼロ bias 合成は Cout を**重みの第 2 軸**から取る（第 1 軸だと長さがずれる）。"""
+        """The zero-bias synthesis takes Cout from **the weight's second axis** (the first axis
+        would give the wrong length)."""
 
         class Up(nn.Module):
             def __init__(self):
@@ -1145,7 +1180,7 @@ class TestFusedOps:
     def test_conv_transpose1d_outside_the_kernel_contract_is_rejected(
         self, convert_module, kwargs, why
     ):
-        """output_padding / groups / dilation は attrs に欄が無い（実測どおり 0 / 1 / 1）。"""
+        """output_padding / groups / dilation have no attrs field (0 / 1 / 1, as observed)."""
 
         class Up(nn.Module):
             def __init__(self):
@@ -1160,7 +1195,7 @@ class TestFusedOps:
 
 
 class TestLayoutOps:
-    """レイアウト op（ADR 0011）— view / squeeze / unsqueeze → reshape、permute、expand。"""
+    """Layout ops (ADR 0011) — view / squeeze / unsqueeze → reshape, permute, expand."""
 
     def test_view_unsqueeze_and_squeeze_all_normalize_to_reshape(self, convert_module, dyn_t):
         class Reshapes(nn.Module):
@@ -1172,14 +1207,16 @@ class TestLayoutOps:
         graph, _ = convert_module(Reshapes(), (torch.randn(6, 3, 4),), ({0: dyn_t},))
 
         assert node_ops(graph) == ["reshape", "reshape", "reshape"]
-        # 目標形は attrs ではなく出力の宣言 shape（attrs は空）。`-1` は解決済みの形で入る。
+        # The target shape is the output's declared shape, not attrs (attrs are empty). `-1` arrives
+        # resolved.
         assert [node.attrs for node in graph.nodes] == [{}, {}, {}]
         assert graph.values[graph.nodes[0].outs[0]].shape == ["T", 12]
         assert graph.values[graph.nodes[1].outs[0]].shape == ["T", 1, 12]
         assert graph.values[graph.nodes[2].outs[0]].shape == ["T", 12]
 
     def test_reshapes_to_different_shapes_are_not_merged_by_cse(self, convert_module):
-        """reshape は attrs を持たない — CSE キーに出力 shape が無いと片方が黙って消える。"""
+        """reshape has no attrs — without the output shape in the CSE key, one of two silently
+        disappears."""
 
         class TwoViews(nn.Module):
             def forward(self, x):
@@ -1211,12 +1248,12 @@ class TestLayoutOps:
         assert only_node(graph, "permute").attrs == {"dims": [0, 2, 1]}
 
     def test_permute_beyond_the_strided_rank_is_rejected(self, convert_module):
-        """rank > STRIDED_RANK の permute は依然として落ちる（門の持ち主が変わっただけ）。
+        """A permute with rank > STRIDED_RANK still fails (only the owner of the check changed).
 
-        NOTE: ADR 0016 の rank 下げパス（`normalize._lower_reshape_permute`）が rank≥5 の
-        permute を先に掴むようになったため、実際に落とすのは**そちら**（rank4 の端点が
-        見つからない連鎖）。`_h_permute` の STRIDED_RANK 門は normalize を通さず convert を
-        直接呼ぶ経路の second line として残る。
+        NOTE: ADR 0016's rank-lowering pass (`normalize._lower_reshape_permute`) now catches
+        rank≥5 permutes first, so **that pass** is what actually fails it (a chain whose rank-4
+        endpoints cannot be found). The STRIDED_RANK check of `_h_permute` remains as the second
+        line for paths that call convert directly without normalize.
         """
 
         class Deep(nn.Module):
@@ -1253,10 +1290,11 @@ class TestLayoutOps:
 
 
 class TestLayoutOps2:
-    """レイアウト第 2 群（ADR 0014）— slice / cat / pad / flip。
+    """Layout group 2 (ADR 0014) — slice / cat / pad / flip.
 
-    受理側は「実測形が 1 ノードに落ちる」ことを、拒否側は「表現の無い形が境界で落ちる」ことを
-    見る（契約表に欄が無い軸を黙って既定で実行しない）。
+    The accepting side checks "observed shapes lower to one node", the rejecting side "shapes
+    with no representation fail at the boundary" (an axis with no field in the contract table is
+    not silently run with a default).
     """
 
     def test_a_static_channel_slice_becomes_one_node(self, convert_module, dyn_t):
@@ -1267,7 +1305,8 @@ class TestLayoutOps2:
         graph, _ = convert_module(Split(), (torch.randn(1, 6, 5),), ({2: dyn_t},))
 
         assert node_ops(graph) == ["slice", "slice"]
-        # 負の添字・省略はエクスポータ境界で軸長へ詰める（IR の attrs は非負のみ）
+        # Negative and omitted indices are resolved against the axis length at the exporter boundary
+        # (IR attrs are non-negative only)
         assert graph.nodes[0].attrs == {"dim": 1, "start": 3, "end": 6}
         assert graph.nodes[1].attrs == {"dim": 1, "start": 0, "end": 3}
         assert graph.values[graph.nodes[0].outs[0]].shape == [1, 3, "T"]
@@ -1290,7 +1329,7 @@ class TestLayoutOps2:
             convert_module(EverySecond(), (torch.randn(2, 6),))
 
     def test_a_symbolic_axis_slice_is_rejected(self, convert_module, dyn_t):
-        """記号軸の切り出しは sym_prefix_slice の担当（重複させない — ADR 0014）。"""
+        """Slicing a symbolic axis belongs to sym_prefix_slice (no duplication — ADR 0014)."""
 
         class Head(nn.Module):
             def forward(self, x):
@@ -1311,17 +1350,19 @@ class TestLayoutOps2:
         )
 
         node = only_node(graph, "cat")
-        # テンソルの**リスト**引数がそのままアリティになる（可変アリティ）
+        # The **list** argument of tensors becomes the arity as is (variable arity)
         assert node.ins == ["a", "b", "c"]
         assert node.attrs == {"dim": 1}
         assert graph.values[node.outs[0]].shape == [1, 6, "T"]
 
     def test_a_symbolic_cat_axis_sums_into_the_dimension_language(self, convert_module, dyn_t):
-        """ADR 0046 — 連結軸は〈定数〉/〈同一シンボルの一次式〉なら記号でよい。
+        """ADR 0046 — the concatenation axis may be symbolic if it is a constant / a linear
+        expression of one symbol.
 
-        ADR 0014 の「連結軸は静的」を改訂した。DiT の joint attention は
-        `cat([self | context], dim=1)` で self 側の軸長が記号（`S+1519`）— 記号 1 本 + 定数は
-        正準文法 `coeff·sym+offset` にそのまま載るので、拒否理由（和が載らない）が成り立たない。
+        It revised ADR 0014's "the concatenation axis is static". DiT's joint attention is
+        `cat([self | context], dim=1)` with a symbolic axis length on the self side (`S+1519`) —
+        one symbol + a constant fits the canonical grammar `coeff·sym+offset` as is, so the
+        reason for rejection (the sum does not fit) does not hold.
         """
 
         class JoinTime(nn.Module):
@@ -1339,7 +1380,8 @@ class TestLayoutOps2:
         assert graph.values[only_node(graph, "cat").outs[0]].shape == ["2T", 4]
 
     def test_mixing_different_symbols_on_the_cat_axis_is_rejected(self, convert_module, dyn_t):
-        """異シンボルの和は 1 次元 1 シンボルの次元言語に載らない（ADR 0046 の唯一の拒否）。"""
+        """A sum of different symbols does not fit the one-symbol-per-dimension language (the only
+        rejection of ADR 0046)."""
 
         class JoinTime(nn.Module):
             def forward(self, a, b):
@@ -1363,17 +1405,18 @@ class TestLayoutOps2:
 
         node = only_node(graph, "pad")
         assert node.attrs == {"left": 4, "right": 4}
-        # 記号長の最終次元は T+2w（次元言語のオフセット付き形）
+        # The symbolic last dimension is T+2w (the offset form of the dimension language)
         assert graph.values[node.outs[0]].shape == [1, 2, "T+8"]
 
     def test_an_asymmetric_pad_keeps_the_two_sides_apart(self, convert_module):
-        """左右幅が違う pad の対応を **torch オラクル**で固定する（ADR 0014）。
+        """Pins the mapping of a pad with different left and right widths with **the torch oracle**
+        (ADR 0014).
 
-        `[2, 1]` と `[1, 2]` は**出力長が同じ**なので、左右を取り違えても shape 検査も
-        次元言語も素通りする（対称幅の既存ケースでは原理的に検出できない）。attrs の値
-        だけを書き写したテストは「エクスポータが今そう出している」ことの追認にしかならない
-        ので、torch の eager 出力で「先頭に 2 個・末尾に 1 個の 0」を確定させ、その並びと
-        attrs の対応を 1 本のテストで結ぶ。
+        `[2, 1]` and `[1, 2]` give **the same output length**, so swapping left and right passes
+        both the shape check and the dimension language (the existing symmetric-width cases
+        cannot detect it in principle). A test that copies only the attrs values would merely
+        confirm "what the exporter emits today", so torch's eager output establishes "two zeros
+        at the start, one at the end", and one test ties that order to the attrs.
         """
 
         class Lopsided(nn.Module):
@@ -1385,7 +1428,8 @@ class TestLayoutOps2:
 
         assert only_node(graph, "pad").attrs == {"left": 2, "right": 1}
         assert graph.values[only_node(graph, "pad").outs[0]].shape == [1, 6]
-        # torch 側の意味: 第 1 要素が**先頭**の幅。取り違えれば 0 の並びが変わる。
+        # torch's meaning: the first element is the width at the **start**. A mix-up changes the
+        # order of the zeros.
         assert torch.equal(Lopsided()(x), torch.tensor([[0.0, 0.0, 1.0, 2.0, 3.0, 0.0]]))
 
     def test_a_nonzero_pad_value_is_rejected(self, convert_module):
@@ -1405,7 +1449,8 @@ class TestLayoutOps2:
             convert_module(Wide(), (torch.randn(2, 3),))
 
     def test_a_negative_pad_is_rejected(self, convert_module):
-        """負幅は切り詰め（slice の意味）— 同じ形を 2 つの op で書けるようにしない。"""
+        """A negative width truncates (the meaning of slice) — the same shape must not be writable
+        with two ops."""
 
         class Cropped(nn.Module):
             def forward(self, x):
@@ -1426,7 +1471,8 @@ class TestLayoutOps2:
         assert graph.values[node.outs[0]].shape == [1, 6, "T"]
 
     def test_a_multi_axis_flip_is_rejected(self, convert_module):
-        """IR の flip は 1 軸専業（黙って 1 軸に潰すと反転しない軸が出る）。"""
+        """IR flip takes one axis only (silently collapsing to one axis would leave an axis
+        unflipped)."""
 
         class ReverseBoth(nn.Module):
             def forward(self, x):
@@ -1437,7 +1483,8 @@ class TestLayoutOps2:
 
 
 class TestRmsNorm:
-    """ADR 0017 — アリティ 2・eps 必須。正規化長の正本は weight（attrs に載せない）。"""
+    """ADR 0017 — arity 2, eps required. The weight is the source of truth for the normalized
+    length (not put into attrs)."""
 
     def test_nn_rms_norm_stays_a_single_node_with_eps(self, convert_module, dyn_t):
         class Normed(nn.Module):
@@ -1457,7 +1504,8 @@ class TestRmsNorm:
         assert graph.values[node.ins[1]].shape == [4]
 
     def test_an_affine_free_rms_norm_gets_a_synthesized_ones_weight(self, convert_module):
-        """weight 無し形は ones 合成でアリティ 2 へ正規化される（`×1` の厳密恒等）。"""
+        """The weight-less form is normalized to arity 2 by synthesizing ones (`×1`, an exact
+        identity)."""
 
         class Plain(nn.Module):
             def __init__(self):
@@ -1474,7 +1522,7 @@ class TestRmsNorm:
         assert torch.equal(tensors[graph.initializers[node.ins[1]].tensor], torch.ones(4))
 
     def test_a_missing_eps_takes_the_torch_default(self, convert_module):
-        """torch は eps 省略時に `finfo(dtype).eps` を使う — 境界で明示化する。"""
+        """torch uses `finfo(dtype).eps` when eps is omitted — made explicit at the boundary."""
 
         class Defaulted(nn.Module):
             def forward(self, x, weight):
@@ -1485,7 +1533,7 @@ class TestRmsNorm:
         assert only_node(graph, "rms_norm").attrs == {"eps": float(torch.finfo(torch.float32).eps)}
 
     def test_a_multi_axis_normalized_shape_is_rejected(self, convert_module):
-        """行カーネルは最終次元 1 本が前提（複数軸は別の意味論）。"""
+        """The row kernel assumes the last dimension alone (several axes are other semantics)."""
 
         class MultiAxis(nn.Module):
             def forward(self, x, weight):
@@ -1496,10 +1544,11 @@ class TestRmsNorm:
 
 
 class TestConv2d:
-    """ADR 0017 — 空間 attrs は H/W の 2 成分・4 つとも宣言必須・重みは [Cout,Cin/g,Kh,Kw]。"""
+    """ADR 0017 — spatial attrs have 2 components H/W, all four must be declared, the weight is
+    [Cout,Cin/g,Kh,Kw]."""
 
     def test_asymmetric_attrs_are_carried_as_pairs(self, convert_module):
-        """MUST: Kh≠Kw・stride/padding の H/W 非対称・Cin≠Cout をまとめて踏む形。"""
+        """MUST: a shape that takes Kh≠Kw, H/W-asymmetric stride/padding and Cin≠Cout at once."""
 
         class Wide(nn.Module):
             def __init__(self):
@@ -1522,7 +1571,7 @@ class TestConv2d:
         assert graph.values[node.outs[0]].shape == [1, 6, 6, 3]
 
     def test_a_scalar_spatial_argument_is_normalized_to_two_components(self, convert_module):
-        """torch は `1` / `[1]` / `[1,1]` を同じ意味で受ける — 吸収は境界の側で済ませる。"""
+        """torch takes `1` / `[1]` / `[1,1]` with the same meaning — the boundary absorbs this."""
 
         class Square(nn.Module):
             def __init__(self):
@@ -1572,14 +1621,16 @@ class TestConv2d:
 
 
 class TestConv3d:
-    """ADR 0118 決定 1 — unbatched の rank 4 入力だけ・空間 attrs は T/H/W の 3 成分・
-    4 つとも宣言必須・重みは [Cout,Cin/g,Kt,Kh,Kw]。"""
+    """ADR 0118 decision 1 — unbatched rank-4 input only, spatial attrs have 3 components T/H/W,
+    all four must be declared, the weight is [Cout,Cin/g,Kt,Kh,Kw]."""
 
     def test_an_unbatched_conv3d_is_preserved_as_one_node_with_triples(self, convert_module):
-        """MUST: `aten.conv3d` の分解を止めて 1 ノードで残す（汎用 `aten.convolution` へ散らない）。
+        """MUST: stop the decomposition of `aten.conv3d` and keep one node (no scattering into the
+        generic `aten.convolution`).
 
-        Kt≠Kh≠Kw・stride / padding の 3 軸非対称・Cin≠Cout をまとめて踏む形。x は unbatched の
-        `[Cin, T, H, W]` で、出力も `[Cout, Tout, Hout, Wout]` の rank 4（バッチ軸を足さない）。
+        A shape that takes Kt≠Kh≠Kw, stride / padding asymmetric on all 3 axes and Cin≠Cout at
+        once. x is the unbatched `[Cin, T, H, W]`, and the output is rank 4 too,
+        `[Cout, Tout, Hout, Wout]` (no batch axis added).
         """
 
         class Wide(nn.Module):
@@ -1607,7 +1658,7 @@ class TestConv3d:
         assert graph.values[node.outs[0]].shape == [6, 3, 4, 5]
 
     def test_a_scalar_spatial_argument_is_normalized_to_three_components(self, convert_module):
-        """`F.conv3d(..., stride=2, padding=1)` はスカラのまま aten へ来る — 吸収は境界の側。"""
+        """`F.conv3d(..., stride=2, padding=1)` reaches aten as scalars; the boundary absorbs it."""
 
         class Functional(nn.Module):
             def __init__(self):
@@ -1642,7 +1693,8 @@ class TestConv3d:
         assert torch.equal(tensors[graph.initializers[node.ins[2]].tensor], torch.zeros(3))
 
     def test_dilation_and_groups_are_carried(self, convert_module):
-        """意味論は groups 一般（GPU の subset 外でも IR には正しく載る — 門は計画時）。"""
+        """The semantics cover groups in general (correct in the IR even outside the GPU subset —
+        the check is at plan time)."""
 
         class Dilated(nn.Module):
             def __init__(self):
@@ -1663,7 +1715,8 @@ class TestConv3d:
         assert graph.values[node.outs[0]].shape == [2, 4, 6, 6]
 
     def test_a_batched_rank5_input_fails_loudly(self, convert_module):
-        """MUST: batched の rank 5 は契約外 — recipe 側で B = 1 を落とす書き方を名指して落ちる。"""
+        """MUST: batched rank 5 is outside the contract — it fails, naming the recipe-side way to
+        drop B = 1."""
 
         class Batched(nn.Module):
             def __init__(self):
@@ -1678,10 +1731,11 @@ class TestConv3d:
 
 
 class TestUpsampleBilinear2d:
-    """第 1 層 — align_corners=True 専業。受理は実測形（size 指定・rank 4・f32）だけ。"""
+    """Core ATen layer (the old layer 1) — align_corners=True only. Only the observed form (size
+    given, rank 4, f32) is accepted."""
 
     def test_a_size_specified_interpolate_becomes_one_node(self, convert_module):
-        """`F.interpolate(size=…, mode="bilinear")` は 1 ノードに落ちる（分解されない）。"""
+        """`F.interpolate(size=…, mode="bilinear")` lowers to one node (not decomposed)."""
 
         class Resize(nn.Module):
             def forward(self, x):
@@ -1697,7 +1751,7 @@ class TestUpsampleBilinear2d:
         assert graph.values[node.outs[0]].shape == [1, 3, 7, 9]
 
     def test_shrinking_uses_the_same_op(self, convert_module):
-        """縮小も同じ op（torch も同一 op で、antialias が無いのは仕様どおり）。"""
+        """Downscaling is the same op (also one op in torch; no antialias, by specification)."""
 
         class Shrink(nn.Module):
             def forward(self, x):
@@ -1710,7 +1764,8 @@ class TestUpsampleBilinear2d:
         assert only_node(graph, "upsample_bilinear2d").attrs == {"output_size": [2, 3]}
 
     def test_align_corners_false_is_rejected(self, convert_module):
-        """MUST: 座標式も端の扱いも別物なので、黙って同じ op で実行しない。"""
+        """MUST: the coordinate formula and the edge handling differ, so it is not silently run with
+        the same op."""
 
         class HalfPixel(nn.Module):
             def forward(self, x):
@@ -1724,7 +1779,8 @@ class TestUpsampleBilinear2d:
         assert "align_corners" in str(err.value)
 
     def test_a_scale_factor_is_rejected(self, convert_module):
-        """MUST: 倍率指定は出力長の丸め規約がもう 1 つ増える（同じ形に 2 通りの IR）。"""
+        """MUST: a scale factor adds another rounding rule for the output length (two IRs for the
+        same shape)."""
 
         class Doubled(nn.Module):
             def forward(self, x):
@@ -1738,7 +1794,8 @@ class TestUpsampleBilinear2d:
         assert "scale_factors" in str(err.value)
 
     def test_a_non_f32_input_is_rejected(self, convert_module):
-        """契約は f32 専業。同じ overload で f16 / f64 が来るので入口で落とす。"""
+        """The contract is f32 only. f16 / f64 arrive through the same overload, so they fail at the
+        entry."""
 
         class Resize(nn.Module):
             def forward(self, x):
@@ -1752,10 +1809,10 @@ class TestUpsampleBilinear2d:
         assert "f32" in str(err.value)
 
     def test_a_non_bilinear_mode_is_not_in_the_vocabulary(self, convert_module):
-        """nearest は別の aten op（`upsample_nearest2d.vec`）で、対応表に無いので落ちる。
+        """nearest is another aten op (`upsample_nearest2d.vec`), not in the table, so it fails.
 
-        MUST: mode を attrs に載せていないので、ここが「別の補間が黙って双線形で実行される」
-        経路の唯一の門になる。
+        MUST: mode is not in attrs, so this is the only check on the path where "another
+        interpolation silently runs as bilinear".
         """
 
         class Nearest(nn.Module):
@@ -1769,7 +1826,8 @@ class TestUpsampleBilinear2d:
 
 
 class TestGruScan:
-    """第 2 層 — GRU 隠れ側スキャン（ADR 0056）。受理は実測形（アリティ 4・f32）だけ。"""
+    """Extended composite layer (the old layer 2) — GRU hidden-side scan (ADR 0056). Only the
+    observed form (arity 4, f32) is accepted."""
 
     HIDDEN = 5
 
@@ -1795,11 +1853,12 @@ class TestGruScan:
 
     @pytest.mark.parametrize("reverse", [False, True])
     def test_a_scan_stays_one_node_with_a_symbolic_time_axis(self, convert_module, dyn_t, reverse):
-        """MUST: 時間軸は記号のまま 1 ノードで残る（この op の存在理由そのもの）。
+        """MUST: the time axis stays symbolic in one node (the very reason this op exists).
 
-        `aten.gru.input` は分解が時間方向へ完全展開されるため長さが specialize されるが、
-        `karume::` の custom op は本体が `register_fake` の裏にあるのでトレースが入らず、
-        `run_decompositions(curated_decompositions())` を通しても展開されない。
+        `aten.gru.input` decomposes into a full unroll over time, so its length gets
+        specialized, but the body of a `karume::` custom op sits behind `register_fake`, so the
+        trace does not enter it and it is not unrolled even through
+        `run_decompositions(curated_decompositions())`.
         """
         graph, _ = convert_module(
             self._module(reverse=reverse), self._args(), dynamic_shapes=({0: dyn_t}, None)
@@ -1808,14 +1867,16 @@ class TestGruScan:
         name = "gru_scan_reverse" if reverse else "gru_scan"
         assert node_ops(graph) == [name]
         node = only_node(graph, name)
-        # attrs 空契約（走査方向は op 名が持つ — bool attr は語彙に無い）
+        # Empty-attrs contract (the op name carries the scan direction — no bool attr in the
+        # vocabulary)
         assert node.attrs == {}
-        # gi / h0 / w_hh / b_hh の 4 本（custom op の位置引数順）
+        # The four gi / h0 / w_hh / b_hh (in the custom op's positional order)
         assert len(node.ins) == 4
         assert graph.values[node.outs[0]].shape == ["T", 1, self.HIDDEN]
 
     def test_both_directions_are_distinct_ops(self, convert_module, dyn_t):
-        """MUST: 方向は別 op 名。同じ名前へ畳むと走査順が IR から読めなくなる。"""
+        """MUST: the direction is a separate op name. Folding into one name hides the scan order
+        from the IR."""
 
         class Bidirectional(nn.Module):
             def __init__(self):
@@ -1831,11 +1892,12 @@ class TestGruScan:
         graph, _ = convert_module(Bidirectional(), self._args(), dynamic_shapes=({0: dyn_t}, None))
 
         assert node_ops(graph) == ["gru_scan", "gru_scan_reverse", "cat"]
-        # 層間の結合は既存 cat（dim 2 は静的軸なので ADR 0046 の緩和すら要らない）
+        # Layers are joined by the existing cat (dim 2 is a static axis, so not even ADR 0046's
+        # relaxation is needed)
         assert only_node(graph, "cat").attrs == {"dim": 2}
 
     def test_a_non_f32_input_is_rejected(self, convert_module):
-        """契約は f32 専業（同じ op で f64 が来る）。"""
+        """The contract is f32 only (f64 arrives through the same op)."""
         args = tuple(tensor.to(torch.float64) for tensor in self._args())
 
         with pytest.raises(NotImplementedError) as err:
@@ -1844,10 +1906,11 @@ class TestGruScan:
         assert "f32" in str(err.value)
 
     def test_a_batch_first_layout_is_rejected(self, convert_module):
-        """MUST: `gi` は `[T,N,3H]`（time-first）固定。
+        """MUST: `gi` is fixed to `[T,N,3H]` (time-first).
 
-        `batch_first` の欄が無いので、時間軸と特徴軸を畳んだ rank-2 の `gi` は**ここで**
-        落ちる（通すと `[N,3H]` を「T = N の系列」として黙って走査する）。
+        There is no `batch_first` field, so a rank-2 `gi` with the time and feature axes folded
+        fails **here** (let through, `[N,3H]` would be silently scanned as "a sequence with
+        T = N").
         """
 
         class Flat(nn.Module):
@@ -1866,7 +1929,8 @@ class TestGruScan:
 
 
 class TestDeformConv2d:
-    """第 1' 層 — DCNv2 専業（ADR 0055）。受理は実測形（BiRefNet の 20 箇所）だけ。"""
+    """Extended atomic layer (the old layer 1') — DCNv2 only (ADR 0055). Only the observed form
+    (BiRefNet's 20 sites) is accepted."""
 
     @staticmethod
     def _module(padding=(1, 0), *, bias=True):
@@ -1894,20 +1958,21 @@ class TestDeformConv2d:
         return (torch.randn(1, 3, 4, 5), torch.randn(1, 12, 4, 4), torch.randn(1, 6, 4, 4))
 
     def test_a_modulated_deform_conv_becomes_one_node(self, convert_module):
-        """`torchvision::deform_conv2d` は curated decomp 後も 1 ノードで残る。"""
+        """`torchvision::deform_conv2d` stays one node after the curated decomposition."""
         graph, _ = convert_module(self._module(), self._args())
 
         assert node_ops(graph) == ["deform_conv2d"]
         node = only_node(graph, "deform_conv2d")
         assert node.attrs == {"padding": [1, 0]}
-        # 入力は x / weight / offset / mask / bias の 5 本（torchvision の位置引数順）
+        # The five inputs x / weight / offset / mask / bias (in torchvision's positional order)
         assert len(node.ins) == 5
         assert graph.values[node.outs[0]].shape == [1, 5, 4, 4]
 
     def test_a_missing_bias_is_folded_into_an_initializer(self, convert_module):
-        """bias 無しは torchvision のラッパが `aten.full` を挿し、第 0 層が initializer にする。
+        """Without bias, the torchvision wrapper inserts `aten.full`, and the export-eliminated
+        layer turns it into an initializer.
 
-        MUST: エクスポータ側でゼロ bias を合成しない（合成経路を二重に持たない — ADR 0055）。
+        MUST: the exporter does not synthesize a zero bias (no second synthesis path — ADR 0055).
         """
         graph, tensors = convert_module(self._module(bias=False), self._args())
 
@@ -1917,10 +1982,10 @@ class TestDeformConv2d:
         assert tensors[graph.initializers[node.ins[4]].tensor].tolist() == [0.0] * 5
 
     def test_an_unmodulated_deform_conv_is_rejected(self, convert_module):
-        """MUST: use_mask=False（DCNv1）は落とす。
+        """MUST: use_mask=False (DCNv1) fails.
 
-        torchvision は mask=None のとき **[1,1] のダミーテンソル**を渡してくるので、
-        素通しするとダミーが modulator として掛かる沈黙誤値になる。
+        With mask=None, torchvision passes **a [1,1] dummy tensor**, so letting it through would
+        apply the dummy as the modulator — a silent wrong value.
         """
 
         class Plain(nn.Module):
@@ -1945,7 +2010,8 @@ class TestDeformConv2d:
         ],
     )
     def test_values_without_a_field_are_rejected(self, convert_module, kwargs, shapes, what):
-        """MUST: attrs に欄が無い（= 1 固定）値は、既定値補完ではなく**実値**を見て落とす。"""
+        """MUST: values with no attrs field (= fixed at 1) fail on **the actual value**, not on a
+        filled-in default."""
 
         class Strided(nn.Module):
             def __init__(self):
@@ -1970,7 +2036,7 @@ class TestDeformConv2d:
         assert what in str(err.value)
 
     def test_offset_groups_greater_than_one_is_rejected(self, convert_module):
-        """MUST: offset_groups は offset のチャネル数から導かれる（欄が無い = 1 固定）。"""
+        """MUST: offset_groups derives from the offset's channel count (no field = fixed at 1)."""
 
         class Grouped(nn.Module):
             def __init__(self):
@@ -1982,7 +2048,7 @@ class TestDeformConv2d:
                     input=x, offset=offset, weight=self.weight, padding=(1, 0), mask=mask
                 )
 
-        # offset_groups = 3（offset のチャネルが 3 * 2 * Kh * Kw）
+        # offset_groups = 3 (the offset has 3 * 2 * Kh * Kw channels)
         with pytest.raises(NotImplementedError) as err:
             convert_module(
                 Grouped(),
@@ -1992,7 +2058,7 @@ class TestDeformConv2d:
         assert "offset_groups" in str(err.value)
 
     def test_a_non_f32_input_is_rejected(self, convert_module):
-        """契約は f32 専業（同じ op で f64 が来る）。"""
+        """The contract is f32 only (f64 arrives through the same op)."""
         args = tuple(tensor.to(torch.float64) for tensor in self._args())
         module = self._module().to(torch.float64)
 
@@ -2003,11 +2069,13 @@ class TestDeformConv2d:
 
 
 class TestCoefficientAdd:
-    """係数付き加算（`alpha != 1`）は IR 語彙に無い — 変換が fail loudly する。
+    """Addition with a coefficient (`alpha != 1`) is not in the IR vocabulary — conversion fails
+    loudly.
 
-    正規化側は触らない（`normalize` の 3 つの alpha ガード）ので、係数を黙って落とした
-    IR が書かれるのを止める最後の門がここ。alpha が分解で畳まれるかは torch 版次第なので、
-    FX ノードの kwargs へ**注入**して torch 版に依存させない。
+    The normalization side leaves it alone (the three alpha guards of `normalize`), so this is the
+    last check that stops IR with a silently dropped coefficient from being written. Whether
+    alpha is folded by the decomposition depends on the torch version, so it is **injected**
+    into the FX node's kwargs to stay independent of the torch version.
     """
 
     @staticmethod
@@ -2033,7 +2101,7 @@ class TestCoefficientAdd:
             convert(self._decomposed_add(2))
 
     def test_the_same_add_converts_when_the_coefficient_is_one(self):
-        """対照 — `alpha == 1` なら普通の add（上の拒否が恒真でないことの検出器）。"""
+        """Counterpart — `alpha == 1` is a plain add (detects a tautological rejection above)."""
         graph, _ = convert(self._decomposed_add(1))
 
         assert node_ops(graph) == ["add"]

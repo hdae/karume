@@ -1,11 +1,13 @@
-"""states 形への IR 手術（`karume.states`）の振る舞いを固定する。
+"""Pins the behaviour of the IR surgery into the states form (`karume.states`).
 
-手術の受入条件は「書ける IR」ではなく「**ランタイムが読める IR**」なので、主要な形は
-往復（`to_json` → `parse_ir_graph` → `assert_op_contracts` / `assert_runtime_support`）まで
-通す。手術側で規則を再実装せず既存の門に預けている以上、門を通ることそのものが仕様。
+The surgery's acceptance criterion is not "IR that can be written" but "**IR the runtime can
+read**", so the main shapes go through the round trip (`to_json` → `parse_ir_graph` →
+`assert_op_contracts` / `assert_runtime_support`). The surgery does not reimplement the rules but
+leaves them to the existing checks, so passing those checks is itself the specification.
 
-被験グラフは合成の小グラフ（torch 不要）— 実モデルは 894 ノードあり、手術の対象は
-「attention と mask の畳み込み残骸」だけなので、その形だけを最小で写す。
+The subject is a small synthetic graph (no torch) — the real model has 894 nodes, and the surgery
+touches only "attention and the folding leftovers of the mask", so only that shape is copied, at
+minimal size.
 """
 
 from __future__ import annotations
@@ -34,11 +36,12 @@ from karume.verify import (
     verify_container,
 )
 
-#: q の宣言 shape（`[B,H,M,D]` — H=8）と k / v の宣言 shape（`[B,Hkv,M,D]` — Hkv=2 の GQA 4:1）。
+#: Declared shape of q (`[B,H,M,D]` — H=8) and of k / v (`[B,Hkv,M,D]` — Hkv=2, GQA 4:1).
 Q = [1, 8, "T", 16]
 KV = [1, 2, "T", 16]
 
-#: 加算 causal mask を焼いた定数の Tmax（`sym_prefix_slice` が先頭 T×T を切り出す — ADR 0010）。
+#: Tmax of the constant holding the additive causal mask (`sym_prefix_slice` cuts out the leading
+#: T×T — ADR 0010).
 TMAX = 64
 
 
@@ -51,12 +54,12 @@ def _value(shape: Sequence) -> dict:
 
 
 def _attention(q: str, k: str, v: str, out: str) -> dict:
-    """従来形（mask 第 4 入力）の attention ノード。"""
+    """Attention node in the classic form (mask as the 4th input)."""
     return {"op": "attention", "ins": [q, k, v, "mask"], "outs": [out], "attrs": {"scale": 0.25}}
 
 
-#: Tmax² 定数 → 束縛後の T×T を切り出す畳み込み残骸。states 形では causal が述語計算になるので
-#: 死ぬ（刈り込みの主目標）。
+#: Folding leftovers: Tmax² constant → cut out the bound T×T. In the states form causality becomes
+#: a predicate computation, so they die (the main target of pruning).
 MASK_NODE = {
     "op": "sym_prefix_slice",
     "ins": ["mask.table"],
@@ -72,11 +75,11 @@ MASK_NODE = {
 
 
 def source_dict(**overrides) -> dict:
-    """chunk 局所 causal self-attention 1 層。
+    """One layer of chunk-local causal self-attention.
 
-    mask は Tmax² 定数 + `sym_prefix_slice`（実モデルの畳み込み結果と同じ形）で、attention の
-    後段には**生きた** initializer を食うノードを 1 本置く（刈り込みが生きた宣言まで巻き込んで
-    いないことの対照）。
+    The mask is a Tmax² constant + `sym_prefix_slice` (the same shape as the real model's folding
+    result), and after attention sits one node consuming a **live** initializer (the counterpart
+    showing pruning does not take live declarations with it).
     """
     graph = {
         "format": "karume-ir",
@@ -109,10 +112,10 @@ def source_dict(**overrides) -> dict:
 
 
 def two_layer_dict(*, shared: bool = True) -> dict:
-    """attention 2 本のグラフ。
+    """Graph with two attentions.
 
-    `shared=True` は KV 共有層の配線（層 1 が所有層の k/v 値テンソルをそのまま `ins` に取る —
-    ADR 0067 決定 4）、`shared=False` は層ごとに独立した k/v を持つ形。
+    `shared=True` is the wiring of a KV-sharing layer (layer 1 takes the owner layer's k/v value
+    tensors directly as `ins` — ADR 0067 decision 4); `shared=False` gives each layer its own k/v.
     """
     extra = [_input("q1", Q)] if shared else [_input("q1", Q), _input("k1", KV), _input("v1", KV)]
     k1, v1 = ("k", "v") if shared else ("k1", "v1")
@@ -141,7 +144,7 @@ def two_layer_dict(*, shared: bool = True) -> dict:
 
 
 def source(**overrides) -> IrGraph:
-    """被験グラフ。**パーサを通して作る** — 手術の入力が valid な IR であることが前提。"""
+    """The subject graph. **Built through the parser** — the surgery assumes valid IR as input."""
     return parse_ir_graph(json.dumps(source_dict(**overrides)))
 
 
@@ -149,12 +152,13 @@ def plan(*attentions: StateAttentionSpec, capacity_symbol: str = "C") -> StatesP
     return StatesPlan(capacity_symbol=capacity_symbol, attentions=attentions)
 
 
-#: 1 層グラフの標準の指定（full context・容量記号）。
+#: Standard spec of the one-layer graph (full context, capacity symbol).
 SPEC = StateAttentionSpec(output="a", k_slot="l0.k", v_slot="l0.v")
 
 
 def checked(graph: IrGraph) -> IrGraph:
-    """手術結果を JSON へ落として**パーサと契約検査へ掛け直す**（往復が受入条件）。"""
+    """Dump the surgery result to JSON and **run the parser and contract checks again** (the round
+    trip is the acceptance criterion)."""
     parsed = parse_ir_graph(graph.to_json())
     assert_op_contracts(parsed)
     assert_runtime_support(parsed)
@@ -167,19 +171,19 @@ def ops_of(graph: IrGraph) -> list[str]:
 
 class TestASingleLayerSurgery:
     def test_the_mask_input_is_replaced_by_the_states_field(self):
-        """mask を落として `states` 欄を付ける（causal は述語計算 — ADR 0067 決定 4）。"""
+        """Drops the mask, adds the `states` field (causal is a predicate — ADR 0067 decision 4)."""
         node = to_states_form(source(), plan(SPEC)).nodes[0]
 
         assert node.op == "attention"
         assert node.ins == ["q", "k", "v"]
         assert node.states == {"k": "l0.k", "v": "l0.v"}
-        # 既存 attrs は素通り（半スケール契約は手術の関心事ではない）。
+        # Existing attrs pass through (the half-scale contract is not the surgery's concern).
         assert node.attrs == {"scale": 0.25}
 
     def test_an_append_is_inserted_after_the_reader(self):
-        """スロットごとに `state_append` を 1 本、読者の直後へ（ADR 0067 決定 5b の①）。
+        """One `state_append` per slot, right after the reader (ADR 0067 decision 5b, item 1).
 
-        後段の `add` は append の**後ろ**に残る = 残存ノードの相対順が保たれている。
+        The later `add` stays **after** the append = the relative order of surviving nodes is kept.
         """
         graph = to_states_form(source(), plan(SPEC))
 
@@ -192,7 +196,7 @@ class TestASingleLayerSurgery:
         assert [node.outs for node in graph.nodes[1:3]] == [[], []]
 
     def test_the_slots_are_declared_with_the_capacity_symbol(self):
-        """スロットは ins の `[B,Hkv,M,D]` から `[B,Hkv,C,D]` を導く（容量だけが差し替わる）。"""
+        """A slot derives `[B,Hkv,C,D]` from the ins' `[B,Hkv,M,D]` (only the capacity changes)."""
         graph = to_states_form(source(), plan(SPEC))
 
         assert list(graph.states) == ["l0.k", "l0.v"]
@@ -201,16 +205,18 @@ class TestASingleLayerSurgery:
         assert graph.symbols == ["T", "C"]
 
     def test_the_folded_mask_constant_and_its_producer_are_pruned(self):
-        """Tmax² 定数と `sym_prefix_slice` は誰も読まなくなる = 配布物に残さない。"""
+        """Nobody reads the Tmax² constant and `sym_prefix_slice` any more = not kept in the
+        distribution."""
         graph = to_states_form(source(), plan(SPEC))
 
         assert "sym_prefix_slice" not in ops_of(graph)
         assert list(graph.initializers) == ["bias"]
-        # 死んだ値の宣言も落ちる（孤立宣言は verify が拒否する）。
+        # Declarations of dead values go too (verify rejects orphaned declarations).
         assert list(graph.values) == ["bias", "a", "o"]
 
     def test_the_source_graph_is_left_untouched(self):
-        """純関数 MUST — 手術前後の 2 本を同じ検証に掛けられないと出どころを切り分けられない。"""
+        """MUST be a pure function — without running the same checks on the graphs before and after
+        the surgery, the origin of a failure cannot be isolated."""
         graph = source()
         before = graph.to_json()
 
@@ -219,7 +225,7 @@ class TestASingleLayerSurgery:
         assert graph.to_json() == before
 
     def test_the_result_passes_the_ir_gates(self):
-        """states 検査・順序検査・shape 検査・列挙門の全部を往復で通る。"""
+        """Passes the states, order, shape and enumeration checks in the round trip."""
         graph = checked(to_states_form(source(), plan(SPEC)))
 
         assert graph.required_ops == ["add", "attention", "state_append"]
@@ -227,7 +233,8 @@ class TestASingleLayerSurgery:
 
 class TestSlidingWindow:
     def test_every_node_touching_the_slot_declares_the_window(self):
-        """論理 col → 物理 row の写像は読み書き同式 MUST（ADR 0067 決定 4）。"""
+        """The logical col → physical row mapping MUST be the same for reads and writes (ADR 0067
+        decision 4)."""
         spec = StateAttentionSpec(output="a", k_slot="l0.k", v_slot="l0.v", window=32)
 
         graph = checked(to_states_form(source(), plan(spec)))
@@ -235,7 +242,8 @@ class TestSlidingWindow:
         assert [node.attrs.get("window") for node in graph.nodes[:3]] == [32, 32, 32]
 
     def test_a_window_larger_than_the_capacity_is_rejected_by_the_slot_contract(self):
-        """スロット契約（`window ≤ C`）との整合 — 数値容量なら宣言だけで決まる。"""
+        """Consistency with the slot contract (`window ≤ C`) — a numeric capacity decides it from
+        the declaration alone."""
         spec = StateAttentionSpec(output="a", k_slot="l0.k", v_slot="l0.v", window=128, capacity=64)
 
         with pytest.raises(OpContractError, match="exceeds the slot capacity 64"):
@@ -243,10 +251,11 @@ class TestSlidingWindow:
 
 
 class TestSharedSlots:
-    """KV 共有層（同じスロットを複数の attention が読む — Gemma 4 E2B の末尾 20 層）。"""
+    """KV-sharing layers (several attentions read one slot — the last 20 layers of Gemma 4 E2B)."""
 
     def test_the_append_follows_the_last_reader(self):
-        """append は**全読者の後**（ring wrap が今 step の読者の過去行を潰さない — 決定 5b）。"""
+        """The append comes **after every reader** (a ring wrap cannot overwrite this step's
+        readers' past rows — decision 5b)."""
         graph = checked(
             to_states_form(
                 parse_ir_graph(json.dumps(two_layer_dict())),
@@ -264,7 +273,8 @@ class TestSharedSlots:
         assert list(graph.states) == ["l0.k", "l0.v"]
 
     def test_readers_wiring_a_different_value_are_rejected(self):
-        """共有層は所有層の k/v 値テンソルをそのまま配線する — 別の値なら配線ミス。"""
+        """A sharing layer wires the owner layer's k/v value tensors directly — another value is a
+        wiring mistake."""
         graph = parse_ir_graph(json.dumps(two_layer_dict(shared=False)))
 
         with pytest.raises(
@@ -275,7 +285,7 @@ class TestSharedSlots:
             )
 
     def test_readers_disagreeing_on_the_capacity_are_rejected(self):
-        """容量が読者ごとに違うと、同じスロットに 2 つの物理形を要求することになる。"""
+        """A capacity that differs per reader would demand two physical shapes for the same slot."""
         graph = parse_ir_graph(json.dumps(two_layer_dict()))
         shared = StateAttentionSpec(output="a1", k_slot="l0.k", v_slot="l0.v", capacity=128)
 
@@ -285,7 +295,7 @@ class TestSharedSlots:
             to_states_form(graph, plan(SPEC, shared))
 
     def test_readers_disagreeing_on_the_window_are_rejected(self):
-        """窓幅の食い違いは沈黙誤読（片方だけ別の物理 row を読む）。"""
+        """A window mismatch is a silent misread (one side reads a different physical row)."""
         graph = parse_ir_graph(json.dumps(two_layer_dict()))
         shared = StateAttentionSpec(output="a1", k_slot="l0.k", v_slot="l0.v", window=32)
 
@@ -302,7 +312,7 @@ class TestCapacity:
         assert graph.states["l0.k"].shape == [1, 2, 256, 16]
 
     def test_the_symbol_is_absent_when_no_slot_uses_it(self):
-        """使わない記号を宣言すると束縛点の無い記号としてグラフごと拒否される。"""
+        """Declaring an unused symbol rejects the whole graph (a symbol with no binding point)."""
         spec = StateAttentionSpec(output="a", k_slot="l0.k", v_slot="l0.v", capacity=256)
 
         graph = checked(to_states_form(source(), plan(spec)))
@@ -321,10 +331,11 @@ class TestCapacity:
     def test_a_capacity_outside_the_value_range_is_caught_only_by_the_parser(
         self, capacity, diagnosis
     ):
-        """`window`（`_window` が正整数を要求）と違い `capacity` には手術側の値域検査が無い。
+        """Unlike `window` (`_window` requires a positive integer), `capacity` has no range check in
+        the surgery.
 
-        現状の 2 段を明示的に固定する — 手術は通り、往復の `parse_ir_graph` が落とす
-        （診断は plan の欄ではなく IR の shape を指す）。
+        Pins the current two steps explicitly — the surgery passes, and `parse_ir_graph` in the
+        round trip fails (the diagnosis points at the IR shape, not at the plan field).
         """
         spec = StateAttentionSpec(output="a", k_slot="l0.k", v_slot="l0.v", capacity=capacity)
 
@@ -335,9 +346,9 @@ class TestCapacity:
             parse_ir_graph(graph.to_json())
 
     def test_a_mixed_plan_declares_the_symbol_once(self):
-        """層ごとに容量が違う形（Gemma 4 の sliding / full 混在）。
+        """Capacity differing per layer (Gemma 4's mix of sliding / full).
 
-        記号を使う層が 1 つでもあれば足す（数値容量の層は記号を使わない）。
+        The symbol is added if at least one layer uses it (numeric-capacity layers do not).
         """
         layer1 = StateAttentionSpec(output="a1", k_slot="l1.k", v_slot="l1.v", capacity=TMAX)
 
@@ -371,7 +382,7 @@ class TestRejectedSurgery:
             to_states_form(source(), plan(StateAttentionSpec("mask", "l0.k", "l0.v")))
 
     def test_an_attention_without_a_mask_is_rejected(self):
-        """mask を持たない export は causal が別の形で表されている = 手術の前提が崩れている。"""
+        """A mask-less export expresses causality otherwise = the surgery's premise is broken."""
         nodes = [dict(node) for node in source_dict()["nodes"]]
         nodes[1] = {**nodes[1], "ins": ["q", "k", "v"]}
 
@@ -379,33 +390,35 @@ class TestRejectedSurgery:
             to_states_form(source(nodes=nodes), plan(SPEC))
 
     def test_a_second_surgery_on_the_same_node_is_rejected(self):
-        """二重手術は「今 step の k/v を 2 度書く」形になる（append も 2 本になる）。"""
+        """A double surgery would "write this step's k/v twice" (two appends too)."""
         once = to_states_form(source(), plan(SPEC))
 
         with pytest.raises(StatesFormError, match="already in the states form"):
             to_states_form(once, plan(SPEC))
 
     def test_a_capacity_symbol_colliding_with_an_existing_symbol_is_rejected(self):
-        """入力由来の束縛を持つ記号を容量にも使うと、値 shape が容量で解けてしまう。"""
+        """Using a symbol bound by an input as the capacity too would resolve value shapes by the
+        capacity."""
         with pytest.raises(StatesFormError, match=re.escape("is already in graph.symbols")):
             to_states_form(source(), plan(SPEC, capacity_symbol="T"))
 
     @pytest.mark.parametrize("symbol", ["q", "o"])
     def test_a_capacity_symbol_colliding_with_a_value_name_is_rejected(self, symbol):
-        """記号の欄へ値名（入力 / ノード出力）を渡した取り違えを検出する。"""
+        """Detects the mix-up of passing a value name (input / node output) as the symbol field."""
         with pytest.raises(StatesFormError, match="same name as a value"):
             to_states_form(source(), plan(SPEC, capacity_symbol=symbol))
 
     @pytest.mark.parametrize("window", [0, -1, True, 1.5])
     def test_a_window_outside_the_value_range_is_rejected(self, window):
-        """bool は int の派生だが窓幅ではない（`True` が窓幅 1 として黙って通る）。"""
+        """bool derives from int but is not a window (`True` would pass silently as width 1)."""
         spec = StateAttentionSpec(output="a", k_slot="l0.k", v_slot="l0.v", window=window)
 
         with pytest.raises(StatesFormError, match="is not a positive integer"):
             to_states_form(source(), plan(spec))
 
     def test_an_input_orphaned_by_the_surgery_is_rejected(self):
-        """mask をグラフ入力から作っている export は states 形へ落とせない（配線ミス）。"""
+        """An export that builds the mask from a graph input cannot go to the states form (a wiring
+        mistake)."""
         graph = source_dict()
         nodes = [dict(node) for node in graph["nodes"]]
         nodes[1] = {**nodes[1], "ins": ["q", "k", "v", "m"]}
@@ -418,14 +431,15 @@ class TestRejectedSurgery:
 
 
 class TestTheOrderCheckIsEffective:
-    """手術の出す並びが「偶然通っている」のではないことの故障注入（ADR 0067 決定 5b の②）。"""
+    """Fault injection showing the surgery's order does not "pass by accident" (ADR 0067 decision
+    5b, item 2)."""
 
     def test_moving_an_append_before_its_reader_is_rejected(self):
-        """append を読者の前へ動かすと順序検査が落ちる = 検査が実効。"""
+        """Moving an append before its reader fails the order check = the check is effective."""
         graph = to_states_form(source(), plan(SPEC)).to_dict()
         nodes = graph["nodes"]
-        # attention と k の append を入れ替える（データ辺は入力しか使わないので SSA は valid の
-        # まま — 落ちるのは順序検査だけ）。
+        # Swap the attention and the append of k (the data edges use only inputs, so SSA stays
+        # valid — only the order check fails).
         graph["nodes"] = [nodes[1], nodes[0], *nodes[2:]]
         parsed = parse_ir_graph(json.dumps(graph))
 
@@ -434,12 +448,14 @@ class TestTheOrderCheckIsEffective:
 
 
 class TestTheStatesFormSurvivesTheContainer:
-    """手術済みグラフが容器の 2 文書から**起こし直せる**（`verify.ir_graph_from_container`）。
+    """The surgered graph **can be rebuilt** from the container's two documents
+    (`verify.ir_graph_from_container`).
 
-    容器のグラフ文書は IR v2（initializer 名がテンソルキー・格納は束縛表へ出ている）なので、
-    `karume dist` と `karume verify` の門は v1 へ起こし直してから規則を掛ける。`states` 節と
-    ノードの `states` 欄は v2 でもそのまま載るが、落とすと**参照完全性の検査が通らなくなる**
-    （宣言したスロットを誰も参照しない形になる）ので、往復そのものを固定する。
+    The container's graph document is IR v2 (initializer names are tensor keys, storage is in the
+    binding table), so the `karume dist` and `karume verify` checks rebuild v1 before applying the
+    rules. The `states` section and the nodes' `states` field carry over to v2 as is, but dropping
+    them **fails the referential-integrity check** (declared slots nobody references), so the
+    round trip itself is pinned.
     """
 
     def _published(self, tmp_path: Path) -> list[Path]:
@@ -473,5 +489,5 @@ class TestTheStatesFormSurvivesTheContainer:
         assert referenced == set(restored.states)
 
     def test_the_acceptance_gate_passes_on_the_container(self, tmp_path: Path) -> None:
-        """組み立て（`karume dist`）と `karume verify` が通る形そのもの。"""
+        """Exactly the form that passes assembly (`karume dist`) and `karume verify`."""
         assert_ir_accepted(verify_container(self._published(tmp_path)).read)

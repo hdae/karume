@@ -1,4 +1,5 @@
-"""fake-quant（格納表現可能値への丸め）— ADR 0006 の「丸めは参照より前」の実体。"""
+"""fake-quant (rounding to values the storage can represent) — what ADR 0006's "rounding comes
+before the reference" is in practice."""
 
 from __future__ import annotations
 
@@ -45,7 +46,7 @@ class Tiny(nn.Module):
         super().__init__()
         self.linear = nn.Linear(4, 3)
         self.register_buffer("scale", torch.randn(3))
-        # i64 バッファ（添字表など）は丸めの対象外 — 触ると値が壊れる。
+        # i64 buffers (index tables and the like) are not rounded — touching them breaks the values.
         self.register_buffer("index", torch.arange(3, dtype=torch.int64))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -64,7 +65,8 @@ class TestRounding:
         assert is_f16_exact(model.scale)
 
     def test_non_f32_buffers_are_left_alone(self):
-        """i32 / i64 のバッファは f16 の値域と無関係。丸めに巻き込むと添字が壊れる。"""
+        """i32 / i64 buffers have nothing to do with the f16 range. Rounding them breaks the
+        indices."""
         model = Tiny()
 
         round_weights_to_f16(model)
@@ -73,7 +75,7 @@ class TestRounding:
         assert torch.equal(model.index, torch.arange(3, dtype=torch.int64))
 
     def test_dtype_stays_f32(self):
-        """意味論は f32 のまま（格納だけが f16 — ADR 0006）。"""
+        """The semantics stay f32 (only the storage is f16 — ADR 0006)."""
         model = Tiny()
 
         round_weights_to_f16(model)
@@ -95,16 +97,17 @@ class TestRounding:
         report = round_weights_to_f16(model)
 
         assert report.parameters == 2  # weight / bias
-        assert report.buffers == 1  # scale のみ（index は f32 でない）
+        assert report.buffers == 1  # scale only (index is not f32)
         assert report.elements == 4 * 3 + 3 + 3
 
 
 class TestOverflow:
     def test_finite_values_that_saturate_to_infinity_fail_loudly(self):
-        """f16 の値域（|x| ≤ 65504）超えは静かに ±inf になる。
+        """Values beyond the f16 range (|x| ≤ 65504) silently become ±inf.
 
-        無検査だと「inf を含む重み」と「同じ inf で計算した参照」が一致してしまい、
-        E2E は緑のまま出力だけが壊れる（差 0 になる方向の壊れ方）。
+        Without a check, "weights containing inf" and "a reference computed with the same inf"
+        agree, and the E2E stays green while only the output breaks (a breakage toward a zero
+        difference).
         """
         model = Tiny()
         with torch.no_grad():
@@ -114,7 +117,8 @@ class TestOverflow:
             round_weights_to_f16(model)
 
     def test_already_infinite_values_are_not_reported_as_overflow(self):
-        """元から非有限なら丸めのせいではない（limitations: 非有限は検査対象外）。"""
+        """A value that was already non-finite is not the rounding's fault (limitations: non-finite
+        values are not checked)."""
         model = Tiny()
         with torch.no_grad():
             model.linear.weight[0, 0] = float("inf")
@@ -124,9 +128,11 @@ class TestOverflow:
         assert torch.isinf(model.linear.weight[0, 0])
 
     def test_a_saturating_value_next_to_an_existing_infinity_still_fails_loudly(self):
-        """判定は要素単位 — 既存の inf が同じテンソルにあっても、有限値の飽和は見逃さない。
+        """The verdict is per element — even with an existing inf in the same tensor, saturation of
+        a finite value is not missed.
 
-        件数は「元が有限・丸め後が非有限」の要素だけを数える（既存の inf は含めない）。
+        The count includes only elements that were "finite before, non-finite after rounding"
+        (existing infs are not counted).
         """
         model = Tiny()
         with torch.no_grad():
@@ -142,7 +148,8 @@ def is_bf16_exact(tensor: torch.Tensor) -> bool:
 
 
 class TestBf16Rounding:
-    """bf16 の fake-quant（f16 版と対 — 対象・冪等性・計数は同じ）。"""
+    """bf16 fake-quant (the counterpart of the f16 version — same targets, idempotence and
+    counting)."""
 
     def test_parameters_and_f32_buffers_become_bf16_representable(self):
         model = Tiny()
@@ -156,17 +163,18 @@ class TestBf16Rounding:
         assert model.linear.weight.dtype is torch.float32
 
     def test_rounding_is_round_to_nearest_even(self):
-        """仮数 7 bit の RNE — ちょうど中間は偶数側、中間より上は繰り上がる。
+        """RNE with a 7-bit mantissa — an exact midpoint goes to even, above the midpoint rounds up.
 
-        切り捨て（上位 16 bit をそのまま取る）だと 2 つ目と 3 つ目が下側へ落ちる。
+        Truncation (taking the upper 16 bits as is) would drop the second and third values to the
+        lower side.
         """
         model = Tiny()
         with torch.no_grad():
-            # 1 + 2**-8 は 1.0 と 1 + 2**-7 のちょうど中間 → 偶数（1.0）へ。
+            # 1 + 2**-8 is exactly midway between 1.0 and 1 + 2**-7 → to even (1.0).
             model.scale[0] = 1 + 2**-8
-            # 1 + 3·2**-9 は中間より上 → 1 + 2**-7 へ。
+            # 1 + 3·2**-9 is above the midpoint → to 1 + 2**-7.
             model.scale[1] = 1 + 3 * 2**-9
-            # 1 + 3·2**-8 は 1 + 2**-7 と 1 + 2**-6 の中間 → 偶数（1 + 2**-6）へ。
+            # 1 + 3·2**-8 is midway between 1 + 2**-7 and 1 + 2**-6 → to even (1 + 2**-6).
             model.scale[2] = 1 + 3 * 2**-8
 
         round_weights_to_bf16(model)
@@ -182,8 +190,9 @@ class TestBf16Rounding:
         assert torch.equal(model.index, torch.arange(3, dtype=torch.int64))
 
     def test_non_persistent_buffers_keep_their_f32_values(self):
-        """checkpoint に無い計算値（RoPE の inv_freq のような `persistent=False` のバッファ）は
-        上流も f32 のまま使うので丸めない。永続バッファ（`scale`）は丸める。
+        """Computed values absent from the checkpoint (`persistent=False` buffers such as RoPE's
+        inv_freq) are used in f32 upstream too, so they are not rounded. Persistent buffers
+        (`scale`) are rounded.
         """
         model = Tiny()
         computed = torch.tensor([1 + 2**-9, 1 + 3 * 2**-9, 0.1])
@@ -211,11 +220,12 @@ class TestBf16Rounding:
         report = round_weights_to_bf16(model)
 
         assert report.parameters == 2  # weight / bias
-        assert report.buffers == 1  # scale のみ（index は f32 でない）
+        assert report.buffers == 1  # scale only (index is not f32)
         assert report.elements == 4 * 3 + 3 + 3
 
     def test_values_beyond_the_f16_range_stay_finite(self):
-        """bf16 の指数域は f32 と同じ — f16 なら飽和する 1e6 も有限のまま丸まる。"""
+        """bf16 has the same exponent range as f32 — 1e6, which saturates in f16, rounds and stays
+        finite."""
         model = Tiny()
         with torch.no_grad():
             model.linear.weight[0, 0] = 1e6
@@ -225,7 +235,8 @@ class TestBf16Rounding:
         assert torch.isfinite(model.linear.weight).all()
 
     def test_finite_values_at_the_top_of_the_f32_range_fail_loudly(self):
-        """f32 の最大有限値は bf16 の最大有限値（≈3.39e38）を超え、RNE で静かに inf になる。"""
+        """f32's largest finite value exceeds bf16's (≈3.39e38) and silently becomes inf under
+        RNE."""
         model = Tiny()
         with torch.no_grad():
             model.linear.weight[0, 0] = torch.finfo(torch.float32).max
@@ -234,7 +245,8 @@ class TestBf16Rounding:
             round_weights_to_bf16(model)
 
     def test_already_infinite_values_are_not_reported_as_overflow(self):
-        """元から非有限なら丸めのせいではない（f16 版と同じ扱い）。"""
+        """A value that was already non-finite is not the rounding's fault (the same handling as the
+        f16 version)."""
         model = Tiny()
         with torch.no_grad():
             model.linear.weight[0, 0] = float("inf")
@@ -245,18 +257,19 @@ class TestBf16Rounding:
 
 
 class Weighted(nn.Module):
-    """`WEIGHT_SLOTS` の全 6 op 相当のモジュール（i8 の per-channel 軸を全種類踏む）。"""
+    """Modules equivalent to all 6 ops of `WEIGHT_SLOTS` (exercises every kind of i8 per-channel
+    axis)."""
 
     def __init__(self) -> None:
         super().__init__()
         self.dense = nn.Linear(5, 3)
         self.conv = nn.Conv1d(3, 5, kernel_size=3)
         self.image = nn.Conv2d(2, 3, kernel_size=(3, 1))
-        # conv3d（ADR 0118 決定 1）— 重み [Cout, Cin, Kt, Kh, Kw] の rank 5 で軸 0
+        # conv3d (ADR 0118 decision 1) — weight [Cout, Cin, Kt, Kh, Kw], rank 5, axis 0
         self.volume = nn.Conv3d(2, 4, kernel_size=(2, 1, 3))
         self.up = nn.ConvTranspose1d(5, 2, kernel_size=3, stride=3)
         self.table = nn.Embedding(7, 5)
-        # norm 系 weight と生 Parameter は量子化の対象外（bias も同様 — ADR 0006）
+        # Norm weights and bare Parameters are not quantized (nor is bias — ADR 0006)
         self.norm = nn.LayerNorm(3)
         self.gain = nn.Parameter(torch.randn(3))
 
@@ -266,10 +279,12 @@ class Weighted(nn.Module):
 
 class TestInt8ChannelAxes:
     def test_the_module_table_mirrors_the_op_table(self):
-        """モジュール型で引く表と op 名で引く表が**同じ軸**を返す（ADR 0019）。
+        """The table looked up by module type and the table looked up by op name return **the same
+        axis** (ADR 0019).
 
-        割れると「エクスポータが軸 0 で作った scale をカーネルが軸 1 として引く」になり、
-        例外なしで値だけが壊れる。対応は 1 対 1 なので、ここで写像として突き合わせる。
+        A split gives "the kernel reads a scale the exporter built on axis 0 as axis 1", where
+        only the values break without an exception. The correspondence is one to one, so they are
+        compared as a mapping here.
         """
         expected = {
             nn.Linear: LINEAR_OP,
@@ -285,7 +300,7 @@ class TestInt8ChannelAxes:
             assert QUANT_CHANNEL_AXES[module_type] == WEIGHT_CHANNEL_AXES[op], op
 
     def test_conv_transpose1d_uses_the_second_axis(self):
-        """重みが `[Cin, Cout, K]` の転置レイアウト — ここだけ軸 1。"""
+        """The weight has the transposed layout `[Cin, Cout, K]` — only here is it axis 1."""
         assert QUANT_CHANNEL_AXES[nn.ConvTranspose1d] == 1
 
     def test_scale_is_a_keepdim_tensor_on_the_channel_axis(self):
@@ -301,7 +316,7 @@ class TestInt8ChannelAxes:
         assert list(report.scales["table.weight"].shape) == [7, 1]
 
     def test_a_subclass_of_a_known_module_is_still_quantized(self):
-        """実モデルは nn.Linear の薄い派生を使うことがある（黙って対象から外さない）。"""
+        """Real models may use thin subclasses of nn.Linear (they are not silently left out)."""
 
         class Derived(nn.Linear):
             pass
@@ -315,7 +330,8 @@ class TestInt8ChannelAxes:
 
 class TestInt8Quantization:
     def test_weights_are_exactly_representable_after_the_round(self):
-        """`q·scale` で**ビット一致**して戻る（emit の逆変換ゲートが立つ条件）。"""
+        """Restores **bit-identically** via `q·scale` (the condition for emit's bit-identity check
+        of the inverse conversion to pass)."""
         model = Weighted()
 
         report = fake_quant_int8(model)
@@ -333,7 +349,8 @@ class TestInt8Quantization:
             assert torch.equal(restored, module.weight), name
 
     def test_minus_128_is_never_used(self):
-        """−128 を捨てて ±127 に閉じる（最大絶対値要素が ±127 に乗って scale が不動点になる）。"""
+        """Drops −128 and closes at ±127 (the element with the largest magnitude lands on ±127,
+        making the scale a fixed point)."""
         model = Weighted()
 
         report = fake_quant_int8(model)
@@ -345,8 +362,9 @@ class TestInt8Quantization:
             assert int(quantized.max()) <= INT8_MAX, name
 
     def test_reapplying_the_round_is_bit_identical(self):
-        """冪等（ADR 0019）。scale を引き直しても同じ値になることが、二重適用や再 export で
-        golden との対応が黙って壊れないことの担保になる。"""
+        """Idempotent (ADR 0019). That recomputing the scale gives the same values is what
+        guarantees that double application or a re-export does not silently break the correspondence
+        with the golden."""
         model = Weighted()
         first = fake_quant_int8(model)
         snapshot = {name: model.get_parameter(name).clone() for name in first.scales}
@@ -355,10 +373,11 @@ class TestInt8Quantization:
 
         for name, before in snapshot.items():
             assert torch.equal(model.get_parameter(name), before), name
-            assert torch.equal(second.scales[name], first.scales[name]), f"{name} の scale"
+            assert torch.equal(second.scales[name], first.scales[name]), f"scale of {name}"
 
     def test_an_all_zero_channel_does_not_produce_nan(self):
-        """`amax == 0` の行は下限 clamp（f32 tiny）で 0/0 を避ける — 値は 0 のまま。"""
+        """A row with `amax == 0` avoids 0/0 through the lower clamp (f32 tiny) — the values stay
+        0."""
         model = Weighted()
         with torch.no_grad():
             model.table.weight[2].zero_()
@@ -378,7 +397,7 @@ class TestInt8Quantization:
         assert torch.equal(scale, weight.abs().amax(dim=1, keepdim=True) / INT8_MAX)
 
     def test_dtype_stays_f32(self):
-        """意味論は f32 のまま（格納だけが i8 — ADR 0006）。"""
+        """The semantics stay f32 (only the storage is i8 — ADR 0006)."""
         model = Weighted()
 
         fake_quant_int8(model)
@@ -386,7 +405,8 @@ class TestInt8Quantization:
         assert model.dense.weight.dtype is torch.float32
 
     def test_bias_and_norm_weights_are_left_alone(self):
-        """MUST: bias を量子化の対象に載せない（プロトタイプの降格バグの根治形）。"""
+        """MUST: bias is not a quantization target (the root fix of the prototype's demotion
+        bug)."""
         model = Weighted()
         bias = model.dense.bias.detach().clone()
         norm = model.norm.weight.detach().clone()
@@ -412,10 +432,12 @@ class TestInt8Quantization:
 
 
 class Grouped(nn.Module):
-    """i4 の対象（`nn.Linear`）と対象外（conv / embedding / norm / 生 Parameter）を混ぜた模型。
+    """A model mixing i4 targets (`nn.Linear`) and non-targets (conv / embedding / norm / bare
+    Parameter).
 
-    linear の in 軸はどちらも 32 の倍数（ADR 0069 決定 2 の整除 MUST）で、`wide` は 1 行に
-    group が 2 つ入る形 — group ごとに scale が分かれていることを直接踏める。
+    Both linears have an in axis that is a multiple of 32 (the divisibility MUST of ADR 0069
+    decision 2), and `wide` fits two groups in a row — which directly exercises separate scales
+    per group.
     """
 
     def __init__(self) -> None:
@@ -441,10 +463,12 @@ class TestInt4GroupQuantization:
         assert torch.equal(scale, grouped.abs().amax(dim=-1) / INT4_MAX)
 
     def test_the_scale_has_one_value_per_group(self):
-        """形は**重みと同 rank・最終次元だけ group 数**（ADR 0069 決定 3）。
+        """The shape has **the weight's rank, with only the last dimension being the group count**
+        (ADR 0069 decision 3).
 
-        i8 の keepdim broadcast 形（`[3,1]`）と受理集合が交わらないのがこの形の眼目で、
-        取り違えると group ごとの scale が 1 チャネル 1 値として読まれる。
+        The point of this shape is that its accepted set does not intersect the i8 keepdim
+        broadcast shape (`[3,1]`); mixing them up would read the per-group scales as one value per
+        channel.
         """
         model = Grouped()
 
@@ -454,7 +478,7 @@ class TestInt4GroupQuantization:
         assert list(report.scales["wide.weight"].shape) == [2, 2]
 
     def test_the_default_group_size_is_32(self):
-        """Phase 0 sweep の実測で確定した既定（ADR 0069 追記 1）。"""
+        """The default confirmed by the Phase 0 sweep measurements (ADR 0069 addendum 1)."""
         model = Grouped()
 
         report = fake_quant_int4(model)
@@ -464,7 +488,8 @@ class TestInt4GroupQuantization:
         assert list(report.scales["wide.weight"].shape) == [2, 2]
 
     def test_weights_are_exactly_representable_after_the_round(self):
-        """`q·scale` で**ビット一致**して戻る（emit の逆変換ゲートが立つ条件）。"""
+        """Restores **bit-identically** via `q·scale` (the condition for emit's bit-identity check
+        of the inverse conversion to pass)."""
         model = Grouped()
 
         report = fake_quant_int4(model, group_size=32)
@@ -475,7 +500,8 @@ class TestInt4GroupQuantization:
             assert torch.equal(dequantize_int4(quantize_to_int4(weight, scale), scale), weight)
 
     def test_minus_eight_is_never_used(self):
-        """−8 を捨てて ±7 に閉じる（最大絶対値要素が ±7 に乗って scale が不動点になる）。"""
+        """Drops −8 and closes at ±7 (the element with the largest magnitude lands on ±7, making the
+        scale a fixed point)."""
         model = Grouped()
 
         report = fake_quant_int4(model, group_size=32)
@@ -486,10 +512,11 @@ class TestInt4GroupQuantization:
             assert int(quantized.max()) <= INT4_MAX, name
 
     def test_every_group_reaches_the_full_seven(self):
-        """各 group の最大絶対値要素は必ず `q = ±7` に乗る（`scale = amax/7` の帰結）。
+        """The element with the largest magnitude of each group always lands on `q = ±7` (a
+        consequence of `scale = amax/7`).
 
-        冪等（次のテスト）の機構そのもの。どこかの group が ±7 に届かないと、そこだけ
-        再量子化で scale が縮んで値が動く。
+        This is the mechanism of idempotence (the next test) itself. If some group did not reach
+        ±7, its scale would shrink on requantization and its values would move.
         """
         weight = torch.randn(3, 32)
         scale = group_scale(weight, 16)
@@ -501,13 +528,15 @@ class TestInt4GroupQuantization:
         )
 
     def test_recomputing_the_scale_from_a_rounded_weight_is_a_fixed_point(self):
-        """丸め済みの重みから引き直した scale は同値（冪等が成り立つ理由 — i8 と同じ性質）。
+        """A scale recomputed from rounded weights is equal (why idempotence holds — the same
+        property as i8).
 
-        NOTE（実測・ADR の文言より弱い）: 「amax 要素の**厳密**復元」は f32 では常には
-        成り立たない — `fl(7·fl(amax/7))` は amax と 1ulp ずれることがある
-        （group 16 の乱数 20 万 group で約 9.5%）。それでも `|q| = 7` に乗る事実から
-        `fl(amax(|q·s|)/7) = s` は不動点になり、**冪等は保たれる**（ADR 0069 決定 3 が
-        効かせたいのはこちら）。同型の実測は i8 側 `tests/test_emit.py` にもある。
+        NOTE (observed; weaker than the ADR's wording): "**exact** restoration of the amax element"
+        does not always hold in f32 — `fl(7·fl(amax/7))` can differ from amax by 1ulp (about 9.5%
+        over 200,000 random groups of 16). Still, since `|q| = 7` is reached,
+        `fl(amax(|q·s|)/7) = s` is a fixed point and **idempotence holds** (which is what ADR 0069
+        decision 3 is after). A measurement of the same kind exists on the i8 side in
+        `tests/test_emit.py`.
         """
         weight = torch.randn(3, 32)
         scale = group_scale(weight, 16)
@@ -517,7 +546,7 @@ class TestInt4GroupQuantization:
         assert torch.equal(group_scale(rounded, 16), scale)
 
     def test_reapplying_the_round_is_bit_identical(self):
-        """冪等（ADR 0069 決定 3 — ADR 0019 の ±127 論証の 4bit 版）。"""
+        """Idempotent (ADR 0069 decision 3 — the 4-bit version of ADR 0019's ±127 argument)."""
         model = Grouped()
         first = fake_quant_int4(model, group_size=32)
         snapshot = {name: model.get_parameter(name).clone() for name in first.scales}
@@ -526,10 +555,11 @@ class TestInt4GroupQuantization:
 
         for name, before in snapshot.items():
             assert torch.equal(model.get_parameter(name), before), name
-            assert torch.equal(second.scales[name], first.scales[name]), f"{name} の scale"
+            assert torch.equal(second.scales[name], first.scales[name]), f"scale of {name}"
 
     def test_an_all_zero_group_does_not_produce_nan(self):
-        """`amax == 0` の group は下限 clamp（f32 tiny）で 0/0 を避ける — 値は 0 のまま。"""
+        """A group with `amax == 0` avoids 0/0 through the lower clamp (f32 tiny) — the values stay
+        0."""
         model = Grouped()
         with torch.no_grad():
             model.wide.weight[1, 32:].zero_()
@@ -541,10 +571,11 @@ class TestInt4GroupQuantization:
         assert float(report.scales["wide.weight"][1, 1]) == torch.finfo(torch.float32).tiny
 
     def test_only_linear_weights_are_quantized(self):
-        """対象は `nn.Linear` の weight だけ（ADR 0069 決定 5 — 実行経路が linear 限定）。
+        """Only the weights of `nn.Linear` are targets (ADR 0069 decision 5 — the execution path is
+        linear only).
 
-        i8 の {@link QUANT_CHANNEL_AXES} 全種とは対象が違う。conv / embedding を巻き込むと
-        「実行できない格納で書かれた重み」ができる。
+        The targets differ from all the kinds of i8's {@link QUANT_CHANNEL_AXES}. Including conv /
+        embedding would produce "weights written in a storage that cannot be executed".
         """
         model = Grouped()
         untouched = {
@@ -561,7 +592,7 @@ class TestInt4GroupQuantization:
             assert torch.equal(model.get_parameter(name), before), name
 
     def test_dtype_stays_f32(self):
-        """意味論は f32 のまま（格納だけが i4 — ADR 0006）。"""
+        """The semantics stay f32 (only the storage is i4 — ADR 0006)."""
         model = Grouped()
 
         fake_quant_int4(model, group_size=32)
@@ -569,7 +600,7 @@ class TestInt4GroupQuantization:
         assert model.dense.weight.dtype is torch.float32
 
     def test_a_subclass_of_linear_is_still_quantized(self):
-        """実モデルは nn.Linear の薄い派生を使うことがある（黙って対象から外さない）。"""
+        """Real models may use thin subclasses of nn.Linear (they are not silently left out)."""
 
         class Derived(nn.Linear):
             pass
@@ -588,9 +619,10 @@ class TestInt4GroupQuantization:
         assert report.group_size == 32
 
 
-#: 「in 軸」の group を踏むための固定重み — 3 要素の group を 4 つ（= 2 チャネル × 2 group）。
-#: scale が 1 / 2 / tiny の 3 通りに割れる並びで、丸めが起きる要素（3.25 → 3・1.75 → 2・
-#: 6.5 → 3 段）を含み、かつ**丸めに曖昧さが無い**（.5 の同点が無いので偶数丸めに依存しない）。
+#: Fixed weights for exercising groups along the "in axis" — 4 groups of 3 elements (= 2 channels
+#: × 2 groups). The order splits the scale three ways, 1 / 2 / tiny, includes elements that get
+#: rounded (3.25 → 3, 1.75 → 2, 6.5 → 3 steps), and **the rounding is unambiguous** (no .5 ties,
+#: so it does not depend on round-to-even).
 GROUP_VALUES: tuple[tuple[float, ...], ...] = (
     (7.0, 3.25, -2.0),
     (-7.0, 1.75, 0.0),
@@ -598,7 +630,8 @@ GROUP_VALUES: tuple[tuple[float, ...], ...] = (
     (0.0, 0.0, 0.0),
 )
 
-#: {@link GROUP_VALUES} を `q·scale` へ落とした期待値（scale = amax/7 = 1 / 1 / 2 / tiny）。
+#: The expected values of {@link GROUP_VALUES} reduced to `q·scale` (scale = amax/7 = 1 / 1 / 2 /
+#: tiny).
 GROUP_ROUNDED: tuple[tuple[float, ...], ...] = (
     (7.0, 3.0, -2.0),
     (-7.0, 2.0, 0.0),
@@ -606,12 +639,12 @@ GROUP_ROUNDED: tuple[tuple[float, ...], ...] = (
     (0.0, 0.0, 0.0),
 )
 
-#: 期待する group scale（チャネル × group）。全ゼロ group は下限 clamp に落ちる。
+#: The expected group scales (channel × group). An all-zero group falls to the lower clamp.
 GROUP_SCALES = ((1.0, 1.0), (2.0, torch.finfo(torch.float32).tiny))
 
 
 def group_tensor(values: tuple[tuple[float, ...], ...]) -> torch.Tensor:
-    """`[チャネル, in]` へ畳んだ期待形（チャネル c は group 2c・2c+1 を持つ）。"""
+    """The expected form folded to `[channel, in]` (channel c holds groups 2c and 2c+1)."""
     rows = [values[2 * channel] + values[2 * channel + 1] for channel in range(2)]
     return torch.tensor(rows, dtype=torch.float32)
 
@@ -631,7 +664,7 @@ def embedding_with_groups() -> nn.Embedding:
 
 
 def conv1d_with_groups() -> nn.Conv1d:
-    """`[Cout, Cin, K]` — 出力チャネルごとに `Cin·K` を平坦化した先が group に割れる。"""
+    """`[Cout, Cin, K]` — `Cin·K`, flattened per output channel, is split into groups."""
     module = nn.Conv1d(2, 2, kernel_size=3)
     with torch.no_grad():
         module.weight.copy_(group_tensor(GROUP_VALUES).reshape(2, 2, 3))
@@ -639,7 +672,8 @@ def conv1d_with_groups() -> nn.Conv1d:
 
 
 def conv2d_with_groups() -> nn.Conv2d:
-    """`[Cout, Cin, Kh, Kw]` — 平坦化は `Cin·Kh·Kw` の行優先（group は Kh 境界で割れる）。"""
+    """`[Cout, Cin, Kh, Kw]` — flattened row-major as `Cin·Kh·Kw` (groups split at Kh
+    boundaries)."""
     module = nn.Conv2d(1, 2, kernel_size=(2, 3))
     with torch.no_grad():
         module.weight.copy_(group_tensor(GROUP_VALUES).reshape(2, 1, 2, 3))
@@ -647,8 +681,8 @@ def conv2d_with_groups() -> nn.Conv2d:
 
 
 def conv3d_with_groups() -> nn.Conv3d:
-    """`[Cout, Cin, Kt, Kh, Kw]` の rank 5 — 平坦化は `Cin·Kt·Kh·Kw` の行優先
-    （group は Kt 境界で割れる）。"""
+    """`[Cout, Cin, Kt, Kh, Kw]`, rank 5 — flattened row-major as `Cin·Kt·Kh·Kw` (groups split at
+    Kt boundaries)."""
     module = nn.Conv3d(1, 2, kernel_size=(2, 1, 3))
     with torch.no_grad():
         module.weight.copy_(group_tensor(GROUP_VALUES).reshape(2, 1, 2, 1, 3))
@@ -656,10 +690,10 @@ def conv3d_with_groups() -> nn.Conv3d:
 
 
 def conv_transpose1d_with_groups() -> nn.ConvTranspose1d:
-    """`[Cin, Cout, K]` の転置レイアウト — **軸 1**（Cout）ごとに `Cin·K` を平坦化する。
+    """The transposed layout `[Cin, Cout, K]` — `Cin·K` is flattened per **axis 1** (Cout).
 
-    重みの軸 0 と 1 を入れ替えて置くので、軸 0 で読んだ実装は別の group を切ってしまう
-    （= 軸の取り違えがこのフィクスチャで露見する）。
+    The weight is placed with axes 0 and 1 swapped, so an implementation that reads axis 0 cuts
+    different groups (= this fixture exposes an axis mix-up).
     """
     module = nn.ConvTranspose1d(2, 2, kernel_size=3)
     with torch.no_grad():
@@ -668,8 +702,8 @@ def conv_transpose1d_with_groups() -> nn.ConvTranspose1d:
 
 
 class WeightedGroups(nn.Module):
-    """`QUANT_MODULE_TYPES` の全種を 1 つに束ねた模型（**平坦化後の in 軸が全部 6**なので同じ
-    group_size で通る）。"""
+    """A model bundling every kind of `QUANT_MODULE_TYPES` (**the in axis after flattening is 6 for
+    all**, so the same group_size passes)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -682,7 +716,8 @@ class WeightedGroups(nn.Module):
 
 
 class TestInt4InAxisPerOpType:
-    """group の軸 = 各 op の「in 軸」一般化（`op_types` で広げたときの軸の正しさ）。"""
+    """The group axis = the generalized "in axis" of each op (the correctness of the axis when
+    widened with `op_types`)."""
 
     @pytest.mark.parametrize(
         ("build", "op_type"),
@@ -696,10 +731,12 @@ class TestInt4InAxisPerOpType:
         ],
     )
     def test_each_op_type_groups_along_its_own_in_axis(self, build, op_type) -> None:
-        """どの op 種も「出力チャネルごとの受容野」を group に割る（期待値は直書き）。
+        """Every op kind splits "the receptive field per output channel" into groups (the expected
+        values are written out).
 
-        期待値は実装と別経路（{@link GROUP_ROUNDED} の直書き）で持つ — 実装の平坦化を
-        期待値側でも呼ぶと、軸を取り違えたまま両者が一致して緑になる。
+        The expected values come from a path separate from the implementation (the written-out
+        {@link GROUP_ROUNDED}) — calling the implementation's flattening on the expected side too
+        would make both agree, and go green, with the axes mixed up.
         """
         module = build()
 
@@ -712,10 +749,12 @@ class TestInt4InAxisPerOpType:
         )
 
     def test_the_transposed_layout_is_written_back_in_place(self) -> None:
-        """`ConvTranspose1d` の平坦形は重みの view にならない（`movedim` → `reshape` がコピー）。
+        """The flattened form of `ConvTranspose1d` is not a view of the weight (`movedim` →
+        `reshape` copies).
 
-        書き戻しを平坦形へ書いて済ませると、丸めは走ったのに**重みは 1 要素も変わらない**
-        （報告だけが正しく見える沈黙）。ここは元の `[Cin, Cout, K]` 上で直接確かめる。
+        Writing back only into the flattened form would run the rounding while **not a single
+        element of the weight changes** (a silence where only the report looks right). This checks
+        directly on the original `[Cin, Cout, K]`.
         """
         module = conv_transpose1d_with_groups()
 
@@ -725,7 +764,8 @@ class TestInt4InAxisPerOpType:
         assert torch.equal(module.weight, expected)
 
     def test_the_default_target_is_still_linear_only(self) -> None:
-        """既定は `nn.Linear` のまま（`op_types` は明示 opt-in — 既存呼び出しの挙動は不変）。"""
+        """The default stays `nn.Linear` (`op_types` is an explicit opt-in — existing calls behave
+        as before)."""
         model = Weighted()
         untouched = {
             name: parameter.detach().clone()
@@ -740,9 +780,11 @@ class TestInt4InAxisPerOpType:
             assert torch.equal(model.get_parameter(name), before), name
 
     def test_widening_to_all_types_quantizes_all_of_them(self) -> None:
-        """`QUANT_MODULE_TYPES`（i8 と同じ全種）まで広げると全部が同じ group で丸まる。"""
+        """Widening to `QUANT_MODULE_TYPES` (all the kinds, as for i8) rounds all of them with the
+        same group."""
         model = WeightedGroups()
-        # 模型が全種を持つこと自体を固定する（型が増えたのに模型が古いまま緑になるのを防ぐ）
+        # Pins that the model has every kind (prevents going green with a stale model when a type
+        # is added)
         assert {type(module) for module in model.children()} == set(QUANT_MODULE_TYPES)
 
         report = fake_quant_int4(model, group_size=3, op_types=QUANT_MODULE_TYPES)
@@ -764,46 +806,52 @@ class TestInt4InAxisPerOpType:
     def test_a_group_size_that_does_not_divide_a_flattened_receptive_field_fails_loudly(
         self,
     ) -> None:
-        """整除は**平坦化後の in 軸**で見る（conv の `Cin·K` が割り切れなければ落とす）。"""
+        """Divisibility is checked on **the in axis after flattening** (a conv whose `Cin·K` does
+        not divide fails)."""
         model = nn.Conv1d(3, 5, kernel_size=3)  # Cin·K = 9
 
         with pytest.raises(QuantizeError, match="is not divisible by"):
             fake_quant_int4(model, group_size=32, op_types=(nn.Conv1d,))
 
     def test_a_type_without_a_channel_axis_is_not_a_target(self) -> None:
-        """軸を引けない型を渡しても対象にはならない（= 対象 0 本として fail loudly）。"""
+        """A type whose axis cannot be looked up does not become a target (= fails loudly as zero
+        targets)."""
         with pytest.raises(QuantizeError, match="there is no weight"):
             fake_quant_int4(Weighted(), group_size=32, op_types=(nn.LayerNorm,))
 
 
-#: `[Cout=1, Cin=4, K=2]` の conv1d 重み — 平坦行は `[7,1,2,0, 14,3,0,0]`（`Cin·K` = 8）。
-#: group 4 で切ると amax は 7 と 14 = scale 1 と 2 になり、**K（=2）で切った場合と group 境界が
-#: 一致しない**ので、畳み方の取り違えが値で露見する。
+#: A conv1d weight `[Cout=1, Cin=4, K=2]` — the flattened row is `[7,1,2,0, 14,3,0,0]` (`Cin·K` =
+#: 8). Cut into groups of 4, amax is 7 and 14 = scales 1 and 2, and **the group boundaries differ
+#: from cutting at K (=2)**, so a folding mix-up shows in the values.
 CONV_ROW_WEIGHT: tuple[tuple[tuple[float, ...], ...], ...] = (
     ((7.0, 1.0), (2.0, 0.0), (14.0, 3.0), (0.0, 0.0)),
 )
 
 
 class TestInt4StorageRowsForRank3:
-    """格納の scale 規則は **rank 非依存**（ADR 0069 決定 3）— `[先頭次元, 行長/g]` の rank2。
+    """The storage's scale rule is **rank-independent** (ADR 0069 decision 3) — rank 2 as
+    `[leading dimension, row length/g]`.
 
-    conv1d `[Cout,Cin,K]` が唯一の新形（波 J-5b）。行は**連続メモリ順**の `Cin·K` で、
-    最終次元（K）で切ると受容野をまたぐ group が別の scale で丸められる（形もバイト長も
-    合ったままの沈黙誤値）。
+    conv1d `[Cout,Cin,K]` is the only new shape (phase J-5b). A row is `Cin·K` in **contiguous
+    memory order**; cutting at the last dimension (K) would round groups that span receptive
+    fields with a different scale (a silent wrong value with shape and byte length still
+    matching).
     """
 
     def test_the_group_scale_of_a_conv1d_weight_is_rank2(self):
         report = fake_quant_int4(conv1d_with_groups(), group_size=3, op_types=(nn.Conv1d,))
 
         scale = report.scales["weight"]
-        assert list(scale.shape) == [2, 2], "重みは rank3 でも scale は rank2"
+        assert list(scale.shape) == [2, 2], "the weight is rank 3 but the scale is rank 2"
 
     def test_the_row_is_flattened_in_contiguous_memory_order(self):
-        """期待値は手書き — 実装の畳み込みを期待値側で呼ぶと取り違えたまま緑になる。
+        """The expected values are hand-written — calling the implementation's folding on the
+        expected side would go green with the mix-up in place.
 
-        平坦行 `[7,1,2,0 | 14,3,0,0]` の group scale は 1 と 2 で、`3.0` は 2 の格子へ
-        `round(3/2)·2 = 4` に落ちる。K（=2）で切る実装なら行長 8 が group 4 で割れず落ち、
-        列優先で畳む実装なら `3.0` が amax 7 の group に入って動かない。
+        The group scales of the flattened row `[7,1,2,0 | 14,3,0,0]` are 1 and 2, and `3.0` falls
+        onto the grid of 2 as `round(3/2)·2 = 4`. An implementation that cuts at K (=2) fails
+        because row length 8 does not split into groups of 4, and one that folds column-major puts
+        `3.0` into the group with amax 7, where it does not move.
         """
         weight = torch.tensor(CONV_ROW_WEIGHT)
 
@@ -816,7 +864,8 @@ class TestInt4StorageRowsForRank3:
         )
 
     def test_the_round_trip_of_a_rank3_weight_is_bit_identical(self):
-        """emit の逆変換ビット一致門（ADR 0069 決定 4 ③）が rank3 でも立つ条件。"""
+        """The condition for emit's bit-identity check of the inverse conversion (ADR 0069 decision
+        4 ③) to pass for rank 3 too."""
         module = conv1d_with_groups()
 
         report = fake_quant_int4(module, group_size=3, op_types=(nn.Conv1d,))
@@ -827,17 +876,19 @@ class TestInt4StorageRowsForRank3:
 
 
 class TestInt4GroupSize:
-    """group 長は**渡された scale の形**から引く（別引数で受けると宣言と実体が割れる）。"""
+    """The group length is taken from **the shape of the passed scale** (taking it as a separate
+    argument would split the declaration from the data)."""
 
     def test_the_group_size_comes_from_the_scale_shape(self):
         assert group_size_of(torch.zeros(3, 64), torch.zeros(3, 2)) == 32
 
     def test_the_group_size_of_a_rank3_weight_comes_from_the_flattened_row(self):
-        """`[3,2,16]` の行長は 32（`Cin·K`）— 最終次元 16 ではない。"""
+        """The row length of `[3,2,16]` is 32 (`Cin·K`) — not the last dimension 16."""
         assert group_size_of(torch.zeros(3, 2, 16), torch.zeros(3, 2)) == 16
 
     def test_a_scale_with_the_same_rank_as_a_rank3_weight_fails_loudly(self):
-        """「重みと同 rank」は rank2 の重みでしか成り立たない規則（rank3 は rank2 の scale）。"""
+        """ "The weight's rank" is a rule that holds only for rank-2 weights (rank 3 has a rank-2
+        scale)."""
         with pytest.raises(QuantizeError, match="group shape"):
             group_size_of(torch.zeros(3, 2, 16), torch.zeros(3, 2, 1))
 
@@ -856,14 +907,15 @@ class TestInt4GroupSize:
 
 class TestInt4FailsLoudly:
     def test_an_axis_the_group_size_does_not_divide_fails_loudly(self):
-        """端数 group を作らない MUST（ADR 0069 決定 2）— 行境界が語境界からずれる。"""
+        """The MUST of no partial groups (ADR 0069 decision 2) — row boundaries would drift from
+        word boundaries."""
         model = nn.Linear(48, 3)
 
         with pytest.raises(QuantizeError, match="is not divisible by"):
             fake_quant_int4(model, group_size=32)
 
     def test_a_model_without_linear_fails_loudly(self):
-        """「i4 指定なのに対象 0 本」を沈黙させない（ADR 0006 の常設診断）。"""
+        """ "i4 requested but zero targets" is not silent (ADR 0006's standing diagnostic)."""
 
         class NoLinear(nn.Module):
             def __init__(self) -> None:
@@ -883,7 +935,7 @@ class TestInt4FailsLoudly:
 
 class TestInt8FailsLoudly:
     def test_a_model_without_weight_slots_fails_loudly(self):
-        """「i8 指定なのに対象 0 本」を沈黙させない（ADR 0006 の常設診断）。"""
+        """ "i8 requested but zero targets" is not silent (ADR 0006's standing diagnostic)."""
 
         class NoWeights(nn.Module):
             def __init__(self) -> None:
@@ -902,7 +954,8 @@ class TestInt8FailsLoudly:
 
 
 class TestIncludeFilter:
-    """`include`（モジュール FQN の述語）— 混成格納で i8 / i4 の対象を排他に割る口。"""
+    """`include` (a predicate on module FQNs) — the hook that splits i8 / i4 targets exclusively in
+    mixed storage."""
 
     def test_int8_only_touches_included_modules(self):
         model = Weighted()
@@ -931,9 +984,11 @@ class TestIncludeFilter:
             fake_quant_int4(Grouped(), include=lambda fqn: False)
 
     def test_an_excluded_module_does_not_trip_the_type_ambiguity_check(self):
-        """include の判定は型検査より先 — 対象外モジュールの曖昧型で落とさない。"""
-        # 軸の違う 2 型（Linear=0 / ConvTranspose1d=1）へ同時に isinstance ヒットする型を
-        # __class__ 差し替えで作る（正規の __init__ 連鎖では合成できない — 型判定だけの模型）。
+        """The include predicate runs before the type check — an ambiguous type on a non-target
+        module does not fail."""
+        # Builds, by swapping __class__, a type that is an isinstance hit for two types with
+        # different axes (Linear=0 / ConvTranspose1d=1) at once (it cannot be built through the
+        # regular __init__ chain — a model only for the type check).
         odd = nn.Linear(4, 3)
         odd.__class__ = type("Odd", (nn.Linear, nn.ConvTranspose1d), {})
 
@@ -951,21 +1006,24 @@ class TestIncludeFilter:
 
 
 class TestReachableScaleIsAFixedPoint:
-    """冪等の根拠そのもの: 到達可能な scale `s = fl(amax/D)` は `fl(fl(D·s)/D)` の不動点。
+    """The basis of idempotence itself: a reachable scale `s = fl(amax/D)` is a fixed point of
+    `fl(fl(D·s)/D)`.
 
-    amax 要素の厳密復元（`fl(D·s) == amax`）は成り立たないことがあるので、冪等の根拠を
-    そちらに置かない（`INT8_MAX` のコメント・ADR 0069 追記 3）。f32 の丸めは正規数の範囲で
-    2 冪倍に対して不変なので、amax を `[1, 2)` の全 f32（2^23 個）で網羅すれば正規数の
-    大半を覆う。scale が非正規数へ落ちる最小正規数の binade `[2^−126, 2^−125)` は別に網羅する。
-    D は i8（127）/ i4（7）/ FP4（6）/ NF4（1）の表の最大準位。
+    Exact restoration of the amax element (`fl(D·s) == amax`) does not always hold, so
+    idempotence does not rest on it (the comment of `INT8_MAX`; ADR 0069 addendum 3). f32 rounding
+    is invariant under multiplication by powers of two within the normal range, so covering amax
+    with every f32 in `[1, 2)` (2^23 values) covers most normal numbers. The binade of the smallest
+    normal number `[2^−126, 2^−125)`, where the scale falls into subnormals, is covered separately.
+    D is the top level of the table for i8 (127) / i4 (7) / FP4 (6) / NF4 (1).
     """
 
-    ONE_TO_TWO = 0x3F800000  # f32 の 1.0 のビット列
-    SMALLEST_NORMAL = 0x00800000  # f32 の 2^−126 のビット列
+    ONE_TO_TWO = 0x3F800000  # the bit pattern of f32 1.0
+    SMALLEST_NORMAL = 0x00800000  # the bit pattern of f32 2^−126
 
     @staticmethod
     def every_f32_in_one_binade(start: int = ONE_TO_TWO) -> torch.Tensor:
-        """`start`（binade 先頭のビット列）から 2^23 個 = その binade の全 f32。"""
+        """2^23 values from `start` (the bit pattern at the head of the binade) = every f32 of that
+        binade."""
         return torch.arange(start, start + (1 << 23), dtype=torch.int32).view(torch.float32)
 
     @pytest.mark.parametrize("binade", [ONE_TO_TWO, SMALLEST_NORMAL])
@@ -980,7 +1038,8 @@ class TestReachableScaleIsAFixedPoint:
 
     @pytest.mark.parametrize("max_level", [float(INT8_MAX), float(INT4_MAX), 6.0])
     def test_the_amax_element_itself_is_not_always_restored_exactly(self, max_level: float):
-        """冪等を「amax の厳密復元」で説明すると誤りになることの固定（1ulp ずれる amax がある）。"""
+        """Pins that explaining idempotence by "exact restoration of amax" is wrong (some amax
+        values are off by 1ulp)."""
         amax = self.every_f32_in_one_binade()
 
         restored = (amax / max_level) * max_level

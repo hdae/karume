@@ -1,12 +1,12 @@
-"""モデルカードの**汎用描画部品**（`karume.modelcard`）。
+"""The **generic rendering pieces** of the model card (`karume.modelcard`).
 
-実物の配布形の `karume.json` は使わない — 偽 manifest の値がそのまま本文に出ること
-（＝手書きの数値が 1 つも混ざっていないこと）を見るのがここの仕事なので、実物と**違う**値で
-組んだほうが検出力が高い。
+The `karume.json` of a real distribution is not used — the job here is to see that the values of a
+fake manifest reach the body as they are (= not a single hand-written number is mixed in), so values
+**different** from the real ones detect more.
 
-NOTE: pipeline 別のカードテンプレートは 1 つ残らず wheel の外へ出た（ADR 0065 段 3+4 完了）
-ので、テンプレート単位のケースは `tools/export-recipes/<family>/tests/test_card.py` に居る。
-ここに残るのは、テンプレートを経由せずに core だけで観測できる層。
+NOTE: every per-pipeline card template has moved out of the wheel (ADR 0065 stages 3+4 done), so
+the per-template cases live in `tools/export-recipes/<family>/tests/test_card.py`. What remains here
+is the layer observable with the core alone, without going through a template.
 """
 
 from __future__ import annotations
@@ -29,19 +29,21 @@ from karume.modelcard import (
     require_pipeline,
 )
 
-# ---- frontmatter の任意席 -----------------------------------------------------
+# ---- optional frontmatter fields ------------------------------------------------
 #
-# recipe 側の family はどれも `base_model_relation` / `license_name` / `license_link` を
-# 持たない（格納形を変えない配布形 + SPDX 標準タグ）か、持っていても wheel の外なので、
-# **書いたときに出る**側の枝は family 経由では 1 つも踏まれない。席そのものは core の責務
-# なので、ここで直接見る。
+# None of the recipe-side families has `base_model_relation` / `license_name` / `license_link`
+# (distributions that keep the storage form + standard SPDX tags), or if one does it is outside the
+# wheel, so the **emitted when written** branch is never exercised through a family. The fields
+# themselves are the core's responsibility, so they are checked directly here.
 
 
 class TestFrontmatterOptionalFields:
-    """任意 3 席は「値があるときだけ 1 行出る」— 空欄で並べると別の主張になる。
+    """The three optional fields "emit one line only when they have a value" — listing them empty
+    makes a different claim.
 
-    `license_name` / `license_link` を空で並べたカードは「名前の無い独自ライセンス」に読め、
-    `base_model_relation` を空で並べたカードは HF の推論を殺す（CardMetadata の doc）。
+    A card that lists `license_name` / `license_link` empty reads as "a custom license without a
+    name", and a card that lists `base_model_relation` empty kills HF's inference (the doc of
+    CardMetadata).
     """
 
     @staticmethod
@@ -72,21 +74,22 @@ class TestFrontmatterOptionalFields:
         assert "license_link: https://example.invalid/terms" in lines
 
 
-# ---- recipe 向けの公開描画部品 -------------------------------------------------
+# ---- public rendering pieces for recipes -----------------------------------------
 #
-# `quants` / `models` / `require_pipeline` / `render` は wheel の外の
-# `card.py` が名指しで呼ぶ公開面（ADR 0065 段 6）。core だけを回したときにこの面の回帰が
-# 見えるよう、偽 manifest を被験体として core 側に門を置く（recipe 側の門は family ごとの
-# 間接的な踏み方で、回帰の主語が読めない）。
+# `quants` / `models` / `require_pipeline` / `render` are the public surface that the `card.py`
+# outside the wheel calls by name (ADR 0065 stage 6). So that a regression of this surface shows
+# when only the core runs, the checks sit on the core side with a fake manifest as the subject (the
+# recipe-side checks exercise it indirectly per family, so the subject of a regression is unclear).
 
 
 def _ref(path: str, size: int, sha: str) -> dict[str, Any]:
-    """ファイル参照の 3 点セット（実物と**違う**値 — 手書き混入はここで見える）。"""
+    """The three fields of a file reference (values **different** from the real ones — a
+    hand-written value mixed in shows here)."""
     return {"path": path, "size": size, "sha256": sha}
 
 
 def _container(*refs: dict[str, Any]) -> dict[str, Any]:
-    """コンテナの入口 1 件（カードが読むのは `parts` の size だけ）。"""
+    """One container entry (the card reads only the sizes of `parts`)."""
     return {
         "descriptor": {
             "graph": {"length": 64, "sha256": "0" * 64},
@@ -97,10 +100,11 @@ def _container(*refs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _manifest() -> dict[str, Any]:
-    """2 モデル・共有資産つきの偽 manifest（ADR 0109 決定 3 の形）。
+    """A fake manifest with two models and a shared asset (the form of ADR 0109 decision 3).
 
-    モデルの並びは `zeta` → `alpha` で辞書順と**逆** — 並べ替えが混ざれば表の順で分かる。
-    `tables` は f16 / i8 の両 dtype が同一 path を指す形（共有部品と同型）。
+    The models are ordered `zeta` → `alpha`, the **reverse** of lexical order — any sorting mixed
+    in shows in the table order. `tables` has both dtypes f16 / i8 point at the same path (the same
+    form as a shared component).
     """
     return {
         "format": "karume/5",
@@ -154,28 +158,30 @@ def _manifest() -> dict[str, Any]:
 
 
 def _row(lines: Sequence[str], name: str) -> str:
-    """quant 表からその席の行を 1 本引く（列の位置ではなく席名で引く）。"""
+    """Looks up the row of that preset in the quant table (by preset name, not by column
+    position)."""
     return next(line for line in lines if line.startswith(f"| `{name}`"))
 
 
 class TestQuantsDownload:
-    """Download 欄 = その席を選んだ読み手が実際に落とすバイト数（2026-09-03 裁定）。
+    """The Download column = the bytes a reader who chooses that preset actually downloads (ruling
+    of 2026-09-03).
 
-    part の本数が多いのでファイル 1 本 1 行の表は廃止した。読み手が知りたい「このプリセットで
-    何 GiB 落ちるか」を席ごとの合計 1 セルで持つ。
+    There are many parts, so the table with one row per file was retired. What the reader wants to
+    know, "how many GiB does this preset download", is one cell per preset holding the total.
     """
 
     def test_it_sums_the_parts_and_assets_the_quant_selects(self) -> None:
-        """f16 = front part 4,096 + 64 + tables 128 + tokenizer 32 = 4,320 B（= 4.22 KiB）。"""
+        """f16 = front part 4,096 + 64 + tables 128 + tokenizer 32 = 4,320 B (= 4.22 KiB)."""
         lines = quants(_manifest()["models"]["zeta"])
 
         assert "| 4.22 KiB (32 B shared) |" in _row(lines, "f16")
 
     def test_it_leaves_out_the_dtype_the_quant_does_not_select(self) -> None:
-        """w8 = front i8 2,048 + tables 128 + tokenizer 32 = 2,208 B = 2.16 KiB（f16 の 4,096 は
-        入らない）。
+        """w8 = front i8 2,048 + tables 128 + tokenizer 32 = 2,208 B = 2.16 KiB (f16's 4,096 is not
+        included).
 
-        席ごとに数え直していなければ、f16 側の重みを動かしたとき w8 の欄も動く。
+        Without a recount per preset, moving the f16-side weights would move the w8 cell too.
         """
         manifest = _manifest()
         manifest["models"]["zeta"]["weights"]["front"]["f16"]["container"]["parts"][0]["size"] = (
@@ -189,7 +195,7 @@ class TestQuantsDownload:
         assert "| 1.00 GiB (" in _row(quants(manifest["models"]["zeta"]), "f16")
 
     def test_it_counts_every_part_of_the_selected_container(self) -> None:
-        """part は 1 本ずつ落ちるファイル — f16 の 2 本目 64 B が合計に入る。"""
+        """Each part is a file downloaded on its own — f16's second part of 64 B is in the total."""
         manifest = _manifest()
         parts = manifest["models"]["zeta"]["weights"]["front"]["f16"]["container"]["parts"]
         del parts[1]
@@ -197,27 +203,31 @@ class TestQuantsDownload:
         assert "| 4.16 KiB (" in _row(quants(manifest["models"]["zeta"]), "f16")
 
     def test_a_file_two_components_point_at_is_counted_once(self) -> None:
-        """1 本のファイルを 2 席が指す形（1 本化済みの rope_base と同型）で二重に数えない。"""
+        """A file that two components point at (the same form as the merged rope_base) is not
+        counted twice."""
         manifest = _manifest()
         front = manifest["models"]["zeta"]["weights"]["front"]["f16"]["container"]["parts"]
         manifest["models"]["zeta"]["weights"]["tables"]["f16"]["container"]["parts"] = front
 
-        # front 4,096 + rope 64 + tokenizer 32 = 4,192 B（tables の 128 は同一 path なので消える）。
+        # front 4,096 + rope 64 + tokenizer 32 = 4,192 B (the 128 of tables drops out as the same
+        # path).
         assert "| 4.09 KiB (" in _row(quants(manifest["models"]["zeta"]), "f16")
 
     def test_it_calls_out_the_bytes_a_second_model_does_not_fetch_again(self) -> None:
-        """`shared/` の分は「2 本目のモデルではこの分を落とさない」量として添える。"""
+        """The `shared/` part is added as the amount "a second model does not download again"."""
         assert "(32 B shared)" in _row(quants(_manifest()["models"]["zeta"]), "f16")
 
     def test_a_model_that_shares_nothing_keeps_the_cell_bare(self) -> None:
-        """掛からない注記は出さない（0 B shared と綴ると、共有がある形に読める）。"""
+        """A note that does not apply is not emitted (spelling 0 B shared reads as if something were
+        shared)."""
         row = _row(quants(_manifest()["models"]["alpha"]), "f16")
 
         assert row.count("512 B") == 1
         assert "shared" not in row
 
     def test_bytes_borrowed_from_another_repository_count_as_shared(self) -> None:
-        """越境参照（ADR 0038 §7）も 2 度は落ちない — 同じ「落とし直さない量」に入る。"""
+        """A cross-repository reference (ADR 0038 §7, superseded — now ADR 0109 decision 3) is not
+        downloaded twice either — it goes into the same "not downloaded again" amount."""
         manifest = _manifest()
         manifest["models"]["alpha"]["weights"]["front"]["f16"]["container"]["parts"] = [
             {
@@ -232,11 +242,12 @@ class TestQuantsDownload:
         assert "| 512 B (512 B shared) |" in _row(quants(manifest["models"]["alpha"]), "f16")
 
     def test_it_calls_out_assets_that_are_a_real_share_of_the_download(self) -> None:
-        """assets は**ホスト側で読むだけ**（gemma4 の PLE sidecar）— Download と常駐量の差になる。
+        """Assets are **only read on the host side** (gemma4's PLE sidecar) — they are the
+        difference between Download and the resident size.
 
-        w8 では tokenizer 32 B が 2,208 B の 1.4%（≥ 1%）なので内訳が出る。f16 では 4,320 B の
-        0.7% なので出ない — どのカードにも書くと、数 MiB の tokenizer に読み手の目を向ける
-        だけの行になる。
+        In w8 the tokenizer's 32 B is 1.4% (≥ 1%) of 2,208 B, so the breakdown is shown. In f16 it
+        is 0.7% of 4,320 B, so it is not — writing it on every card would make a line that only
+        draws the reader's eye to a tokenizer of a few MiB.
         """
         lines = quants(_manifest()["models"]["zeta"])
 
@@ -245,24 +256,29 @@ class TestQuantsDownload:
 
 
 class TestDownloadSizeUnits:
-    """単位は**丸めた後**の値で選ぶ（`3.24 GiB` / `248 MiB` — 単位を跨いでも精度が揃う）。
+    """The unit is chosen from the value **after rounding** (`3.24 GiB` / `248 MiB` — the precision
+    stays even across units).
 
-    丸める前に選ぶと、繰り上がる帯で `1024 MiB` という有効 3 桁でも単位でもない綴りが出る。
-    繰り上がりの閾値は 1000 ではなく **1024**（= 1 段上の単位のちょうど 1）— `1000 MiB` は
-    MiB として正しい綴りで、上げると「1 単位未満」の `0.977 GiB` になる。
+    Choosing before rounding gives, in the band that carries over, the spelling `1024 MiB`, which
+    is neither 3 significant digits nor the right unit. The carry threshold is **1024**, not 1000
+    (= exactly 1 of the next unit up) — `1000 MiB` is a correct MiB spelling, and moving it up
+    would give `0.977 GiB`, "less than one unit".
     """
 
     @pytest.mark.parametrize(
         ("size", "spelled"),
         [
-            # 繰り上がる帯（丸める前に単位を選ぶ実装ではここが `1024 MiB` / `1024 KiB` になる）。
+            # The band that carries over (an implementation that chooses the unit before rounding
+            # gives `1024 MiB` / `1024 KiB` here).
             (1_073_741_823, "1.00 GiB"),
             (1_048_575, "1.00 MiB"),
-            # 境界の逆側 — 丸めても 1024 に届かないので単位はそのまま。
+            # The other side of the boundary — rounding does not reach 1024, so the unit stays.
             (1_073_217_535, "1023 MiB"),
-            # 4 桁でも MiB として正しい帯（1 段上げると 1 単位未満の綴りになる）。
+            # A band that is correct in MiB despite 4 digits (one unit up would spell less than
+            # one unit).
             (1_048_576_000, "1000 MiB"),
-            # 既存の綴りが動かないことの対照（docstring の 2 例と、単位未満の生バイト）。
+            # Counterparts showing the existing spellings do not move (the two examples of the
+            # docstring, and raw bytes below one unit).
             (3_479_000_000, "3.24 GiB"),
             (260_000_000, "248 MiB"),
             (512, "512 B"),
@@ -280,10 +296,12 @@ class TestDownloadSizeUnits:
 
 
 class TestQuantsNotes:
-    """廃止したファイル表から引き継いだ注記 — **掛かるときだけ**出す（条件は manifest 由来）。"""
+    """Notes carried over from the retired file table — emitted **only when they apply** (the
+    conditions come from the manifest)."""
 
     def test_it_points_at_karume_json_for_the_per_file_values(self) -> None:
-        """表から sha256 が消えた分、正本の所在は必ず残す（fetch 層の照合先）。"""
+        """With sha256 gone from the table, where the source of truth lives is always kept (what the
+        fetch layer checks against)."""
         lines = quants(_manifest()["models"]["zeta"])
 
         assert (
@@ -292,7 +310,9 @@ class TestQuantsNotes:
         )
 
     def test_the_dtype_vocabulary_note_spells_the_packed_labels(self) -> None:
-        """語彙文が packed の綴りを落とすと、方言の注記（`i4` / `i2`）と繋がらなくなる。"""
+        """If the vocabulary sentence drops the packed spellings (`i4` / `i2`), it no longer names
+        the labels the quant table uses (the dialect note that once relied on them was retired —
+        ADR 0109 decision 3)."""
         assert any(
             line.startswith("Dtype labels use the runtime's **storage dtype vocabulary**")
             and "`i4` / `i2`" in line
@@ -300,7 +320,8 @@ class TestQuantsNotes:
         )
 
     def test_a_shared_path_is_explained(self) -> None:
-        """`(N shared)` の意味は本文の 1 文と対（注記が無いと何と共有なのか読めない）。"""
+        """The meaning of `(N shared)` pairs with one sentence of the body (without the note, what
+        it is shared with cannot be read)."""
         assert any(
             line.startswith("A path under `shared/`")
             for line in quants(_manifest()["models"]["zeta"])
@@ -313,7 +334,7 @@ class TestQuantsNotes:
         )
 
     def test_it_names_the_repository_borrowed_bytes_come_from(self) -> None:
-        """指し先（リポ + pin した commit）まで出して初めて注記が事実になる。"""
+        """The note becomes a fact only once it names the target (repository + pinned commit)."""
         manifest = _manifest()
         manifest["models"]["alpha"]["weights"]["front"]["f16"]["container"]["parts"] = [
             {
@@ -342,10 +363,12 @@ class TestQuantsNotes:
         )
 
     def test_it_names_the_container_form_of_the_weights(self) -> None:
-        """重みは `.krm` の part 列で配られる — 読み手が現物の形を目にする前に知れる 1 行。
+        """The weights ship as the parts of a `.krm` — one line that tells the reader the form
+        before they see the files.
 
-        `I4` / `I2` が safetensors の方言だという注記は、配布形が safetensors でなくなった段で
-        退役した（ADR 0109 決定 3）— 掛からない主張をカードに残さない。
+        The note that `I4` / `I2` are a safetensors dialect was retired at the step where the
+        distribution stopped being safetensors (ADR 0109 decision 3) — a claim that does not apply
+        is not left on the card.
         """
         lines = quants(_manifest()["models"]["zeta"])
 
@@ -355,7 +378,8 @@ class TestQuantsNotes:
 
 class TestQuantsSection:
     def test_the_default_mark_follows_default_quant(self) -> None:
-        """既定マークは `defaultQuant` から導く（表の 1 行目でも先頭でもない）。"""
+        """The default mark is derived from `defaultQuant` (not from the first row or the head of
+        the table)."""
         lines = quants(_manifest()["models"]["zeta"])
 
         assert [line for line in lines if "(default)" in line] == [
@@ -365,13 +389,15 @@ class TestQuantsSection:
         ]
 
     def test_a_seat_without_the_presentation_fields_keeps_an_empty_cell(self) -> None:
-        """表示欄は optional（ADR 0075 決定 1）— 書いていない席は id をそのまま読ませる。"""
+        """The presentation fields are optional (ADR 0075 decision 1) — a preset without them is
+        read by its id as is."""
         lines = quants(_manifest()["models"]["alpha"])
 
         assert "| `f16` (default) | — | 512 B | `front` = `f16` | — |" in lines
 
     def test_a_multi_line_description_stays_in_one_table_row(self) -> None:
-        """hub は改行を含む表示欄を受理する（2026-10-11 裁定）— 表の 1 セルに畳んで綴る。"""
+        """The hub accepts presentation fields with line breaks (ruling of 2026-10-11) — they are
+        folded into one table cell."""
         model = _manifest()["models"]["zeta"]
         model["quants"]["w8"]["description"] = "Both components\n  in int8 storage."
 
@@ -386,7 +412,8 @@ class TestQuantsSection:
         )
 
     def test_a_pipe_in_the_presentation_fields_does_not_split_the_table_row(self) -> None:
-        """hub は `|` を含む表示欄も受理する — 列を割らない `\\|` に逃がして 1 セルに綴る。"""
+        """The hub also accepts presentation fields with `|` — it is escaped to `\\|`, which does
+        not split the column, and spelled in one cell."""
         model = _manifest()["models"]["zeta"]
         model["quants"]["w8"]["label"] = "Half | int8"
         model["quants"]["w8"]["description"] = "front|tables in int8."
@@ -400,17 +427,19 @@ class TestQuantsSection:
 
     @pytest.mark.parametrize("blank", ["", "   ", "\n"])
     def test_a_blank_label_reads_like_a_seat_without_one(self, blank: str) -> None:
-        """空白しか無い欄は書いていない席と同じ `—`（`** **` のような崩れた強調を出さない）。"""
+        """A field with only whitespace gets the same `—` as a preset without it (no broken emphasis
+        such as `** **`)."""
         model = _manifest()["models"]["alpha"]
         model["quants"]["f16"]["label"] = blank
 
         assert "| `f16` (default) | — | 512 B | `front` = `f16` | — |" in quants(model)
 
     def test_it_writes_the_abbreviation_legend_only_when_one_is_given(self) -> None:
-        """略称の対応は**カードに必ず出す**（ADR 0074 決定 4）が、略称のない family には出ない。
+        """The abbreviation legend is **always on the card** (ADR 0074 decision 4), but not for a
+        family without abbreviations.
 
-        トークンが weights 名そのものの family（irodori）で「`dit` は `dit`」の行が生えると、
-        対応表そのものが読み飛ばされる注記になる。
+        In a family whose tokens are the weights names themselves (irodori), a line "`dit` is
+        `dit`" would turn the legend itself into a note readers skip.
         """
         model = _manifest()["models"]["zeta"]
         legend = "In a quant name, `tbl` is the `tables` component."
@@ -420,10 +449,12 @@ class TestQuantsSection:
 
 
 class TestFromPretrained:
-    """使い方スニペットの `fromPretrained` 呼び出し — **object ref 形** + revision の pin の席。
+    """The `fromPretrained` call of the usage snippet — **the object ref form** + a place for
+    pinning the revision.
 
-    source を文字列 1 本で綴っていた頃は revision を書く席そのものが無く、読み手は暗黙に
-    `main` 追従になっていた（リポを上げ直した日に他人のアプリが壊れる）。
+    When the source was spelled as a single string there was no place to write the revision at
+    all, and readers implicitly followed `main` (other people's apps break on the day the
+    repository is re-uploaded).
     """
 
     def test_it_passes_the_repository_as_an_object_and_keeps_the_options_second(self) -> None:
@@ -436,22 +467,24 @@ class TestFromPretrained:
         assert lines[-3:] == ["}, {", '  // quant: "f16",', "});"]
 
     def test_it_offers_the_pin_as_a_commented_out_line(self) -> None:
-        """既定は `main` 追従のまま — 外すだけで pin できる形にする（2 本のサンプルに割らない）。"""
+        """The default stays following `main` — uncommenting alone pins it (not split into two
+        samples)."""
         lines = from_pretrained("AnimaPipeline", "hdae/x", [], disposable="using")
 
         assert '  // revision: "<full commit sha>",' in lines
         assert any("Pin a commit for reproducible builds" in line for line in lines)
 
     def test_the_disposable_spelling_is_the_callers_fact(self) -> None:
-        """同期 dispose か非同期かは pipeline ごとの事実（ここでは選ばない）。"""
+        """Synchronous or asynchronous dispose is a per-pipeline fact (not chosen here)."""
         lines = from_pretrained("Siglip2Pipeline", "hdae/x", [], disposable="await using")
 
         assert lines[0].startswith("await using pipeline = await Siglip2Pipeline")
 
     def test_the_disposable_spelling_has_no_default(self) -> None:
-        """綴りを名乗らない呼び出しは落ちる。
+        """A call that does not name the spelling fails.
 
-        既定が family の事実と違えば、カードの使い方が黙って誤ったコードになる。
+        If a default differed from the family's fact, the card's usage would silently become wrong
+        code.
         """
         with pytest.raises(TypeError, match="disposable"):
             from_pretrained("Siglip2Pipeline", "hdae/x", [])  # type: ignore[call-arg]
@@ -459,7 +492,8 @@ class TestFromPretrained:
 
 class TestRequirePipeline:
     def test_it_refuses_a_manifest_that_mixes_another_pipeline(self) -> None:
-        """1 つでも別契約なら描かない — 表は合っているのに説明だけ別のモデル、を作らない。"""
+        """Nothing is drawn if even one model has another contract — no card whose table is right
+        but whose description belongs to another model."""
         manifest = _manifest()
         manifest["models"]["alpha"]["pipeline"] = "other/1"
 
@@ -471,7 +505,8 @@ class TestRequirePipeline:
 
 
 class TestRenderDeterminism:
-    """同一 manifest なら**バイト単位で同一**（差分 = 資産が変わった、が再組み立ての前提）。"""
+    """The same manifest gives a **byte-identical** card (diff = the assets changed, the premise of
+    reassembly)."""
 
     @staticmethod
     def _card(manifest: dict[str, Any]) -> str:
@@ -479,7 +514,8 @@ class TestRenderDeterminism:
         return render(sections)
 
     def test_it_draws_no_file_table(self) -> None:
-        """shard 1 本 1 行の表は廃止（2026-09-03 裁定）— 席ごとの合計が Download 欄に入る。"""
+        """The table with one row per shard is retired (ruling of 2026-09-03) — the per-preset total
+        goes into the Download column."""
         card = self._card(_manifest())
 
         assert "### Files" not in card
@@ -487,8 +523,8 @@ class TestRenderDeterminism:
         assert "| Quant | What it is | Download | Weights | Compute |" in card
 
     def test_two_renderings_of_an_equal_manifest_agree_byte_for_byte(self) -> None:
-        # JSON 経由で組み直した別オブジェクト（同値・同じ挿入順）— 同一 dict の再描画だけだと
-        # 「オブジェクトの同一性に依存した並び」を踏めない。
+        # A separate object rebuilt through JSON (equal, same insertion order) — re-rendering the
+        # same dict alone cannot exercise "an order that depends on object identity".
         rebuilt = json.loads(json.dumps(_manifest()))
 
         assert self._card(_manifest()) == self._card(rebuilt)
@@ -499,17 +535,19 @@ class TestRenderDeterminism:
         assert card.endswith("\n") and not card.endswith("\n\n")
 
     def test_the_models_keep_the_manifest_order(self) -> None:
-        """並べ替えを挟むと「manifest の並び」という事実がカードから消える。"""
+        """Sorting in between would erase the fact "the manifest order" from the card."""
         card = self._card(_manifest())
 
         assert card.index("## Model: zeta") < card.index("## Model: alpha")
 
 
 class TestTheSameNameFromAnotherOrigin:
-    """同じ相対 path でも出所（repo・revision）が違えば別ファイル（hub の `fileRefKey` と同じ）。
+    """The same relative path with a different origin (repo, revision) is a different file (the same
+    as the hub's `fileRefKey`).
 
-    path だけで一意化すると、後から来た参照が捨てられ、Download が過小に出て借用元の注記から
-    片方が落ちる — hub は両方を別々に取得するので、カードだけが実際の取得と食い違う。
+    Deduplicating by path alone drops the later reference, understates Download and loses one side
+    from the note on the borrowed sources — the hub fetches both separately, so only the card
+    disagrees with the actual fetch.
     """
 
     @staticmethod
@@ -524,7 +562,7 @@ class TestTheSameNameFromAnotherOrigin:
 
     @staticmethod
     def _with_back(back: dict[str, Any], front: dict[str, Any] | None = None) -> dict[str, Any]:
-        """alpha に 2 部品目 `back` を足し、f16 の席が両方を選ぶ形にする。"""
+        """Adds a second component `back` to alpha and makes the f16 preset select both."""
         manifest = _manifest()
         alpha = manifest["models"]["alpha"]
         if front is not None:
@@ -536,14 +574,14 @@ class TestTheSameNameFromAnotherOrigin:
     @pytest.mark.parametrize(
         ("front", "back", "total", "repos"),
         [
-            # 別リポの同名 path: 512 + 256 = 768 B・借用元は 2 件。
+            # The same path in different repositories: 512 + 256 = 768 B; two borrowed sources.
             (
                 ("hdae/source-a", "1" * 40, 512),
                 ("hdae/source-b", "1" * 40, 256),
                 "768 B",
                 ["hdae/source-a", "hdae/source-b"],
             ),
-            # 同じリポの別 revision: 別ファイルとして 2 本とも落ちる。
+            # Different revisions of the same repository: both are downloaded as separate files.
             (
                 ("hdae/source-a", "1" * 40, 512),
                 ("hdae/source-a", "2" * 40, 256),
@@ -568,18 +606,21 @@ class TestTheSameNameFromAnotherOrigin:
         assert [line.split("`")[1] for line in notes] == repos
 
     def test_an_own_file_and_a_borrowed_file_with_the_same_path_are_both_counted(self) -> None:
-        """自リポの `alpha/front.krm`（512 B）と、借用元の同名 path（256 B）は別物。"""
+        """The own repository's `alpha/front.krm` (512 B) and the borrowed source's path of the same
+        name (256 B) are different things."""
         borrowed = {**self._borrowed("hdae/source-a", "1" * 40, 256), "path": "alpha/front.krm"}
         lines = quants(self._with_back(borrowed))
 
         assert "| 768 B (256 B shared) |" in _row(lines, "f16")
 
     def test_container_assets_are_counted_per_origin_of_part_0(self) -> None:
-        """容器の資産（`host_assets`）も part 0 の同一性で引く — path では引かない。
+        """Container assets (`host_assets`) are also looked up by the identity of part 0 — not by
+        path.
 
-        自リポの `alpha/front.krm`（資産 400 B）と借用元の同名 path（資産 100 B）は別の容器。
-        path で引くと 2 つが 1 つに畳まれて片方の資産が落ち、借用した容器だけを選ぶ席に
-        自リポの容器の資産量が足される。
+        The own repository's `alpha/front.krm` (assets 400 B) and the borrowed source's path of the
+        same name (assets 100 B) are different containers. Looking them up by path folds the two
+        into one, drops one side's assets, and adds the own container's asset size to a preset that
+        selects only the borrowed container.
         """
         borrowed = {**self._borrowed("hdae/source-a", "1" * 40, 256), "path": "alpha/front.krm"}
         alpha = self._with_back(borrowed)

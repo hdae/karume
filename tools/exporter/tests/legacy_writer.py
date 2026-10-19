@@ -1,19 +1,23 @@
-"""**テスト専用**の最小 safetensors 書き手 — 移行 CLI の入力（旧配布形）を合成する。
+"""Minimal safetensors writer **for tests only** — synthesizes the old distribution to migrate.
 
-配布形は `krm` へ移ったので、safetensors 方言を書くコードは製品側に 1 本も無い
-（container-v1 §12: 旧形式を**読む**のは `karume.legacy` だけ・**書く**のはここだけ）。
-`karume migrate` の被験体を作るために、旧書き手が守っていた規約だけをここで写す:
+The distribution moved to `krm`, so the product has no code at all that writes the safetensors
+dialect (container-v1 §12: only `karume.legacy` **reads** the old format, and only this file
+**writes** it). To build subjects for `karume migrate`, it copies just the conventions the old
+writer kept:
 
-- 先頭 shard は `karume_ir` だけを持ち、データ節は空（ADR 0081）。
-- 実データは後続の weight shard に載り、`__metadata__` は空。
-- データ節の並びは**整列単位の降順**（F32 / I32 / I4 / I2 → F16 → I8）で、同群は名前昇順。
-  要素数が奇数の F16 はさらに後ろへ寄せる（ADR 0063 — Karume のリーダは絶対 offset が
-  dtype の整列単位に載ることを要求する）。
-- i4 / i2 は **shape が論理形のまま**で、バイト長だけが bit 幅から決まる（ADR 0069 決定 2）。
+- The first shard holds only `karume_ir`, and its data section is empty (ADR 0081).
+- The real data sits in the following weight shards, whose `__metadata__` is empty.
+- The data section is ordered by **descending alignment unit** (F32 / I32 / I4 / I2 → F16 → I8),
+  by name ascending within a group. F16 entries with an odd element count go further back
+  (ADR 0063 — the Karume reader requires every absolute offset to sit on the dtype's alignment
+  unit).
+- i4 / i2 keep **the logical shape**, and only the byte length follows from the bit width
+  (ADR 0069 decision 2).
 
-MUST: 素材（グラフ・格納テンソル・scale）は {@link ir_fixtures.fixture_spec} と**同じ 1 本**
-から取る。素材を割ると「旧形から移した容器」と「直接書いた容器」のバイト同一が、移行の
-問題ではなく素材の違いで崩れる。
+MUST: the inputs (graph, stored tensors, scales) come from **the same single source** as
+{@link ir_fixtures.fixture_spec}. With split inputs, the byte identity of "the container migrated
+from the old form" and "the container written directly" would break on the difference of inputs,
+not on a migration problem.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ from karume.ir import IrGraph
 from karume.legacy import IR_METADATA_KEY
 from karume.ple import ple_row_bytes
 
-#: 格納 dtype → (safetensors dtype 名, 1 要素の bit 数)。旧書き手の表の写し。
+#: Storage dtype → (safetensors dtype name, bits per element). A copy of the old writer's table.
 _STORED_DTYPE: Mapping[str, tuple[str, int]] = {
     "f32": ("F32", 32),
     "f16": ("F16", 16),
@@ -44,16 +48,17 @@ _STORED_DTYPE: Mapping[str, tuple[str, int]] = {
     "i2": ("I2", 2),
 }
 
-#: 並び順の第 1 キー（整列単位の降順）。
+#: First sort key (descending alignment unit).
 _DTYPE_GROUP = {"F32": 0, "I32": 1, "I4": 2, "I2": 2, "BF16": 3, "F16": 3, "I8": 4}
 
-#: ヘッダ長はこの倍数へ空白で詰める（データ節先頭を 4 バイト境界へ載せる）。
+#: The header length is padded with spaces to a multiple of this (puts the start of the data
+#: section on a 4-byte boundary).
 _HEADER_ALIGN = 8
 
 
 @dataclass(frozen=True)
 class Entry:
-    """データ節に並ぶテンソル 1 本の宣言（**論理** shape・格納後のバイト長）。"""
+    """Declaration of one tensor in the data section (**logical** shape, stored byte length)."""
 
     name: str
     dtype: str
@@ -66,7 +71,7 @@ class Entry:
 
 
 def write_safetensors(entries: Sequence[Entry], metadata: Mapping[str, str]) -> bytes:
-    """`[u64 LE ヘッダ長][ヘッダ JSON][データ節]` を**宣言の順で**組む。"""
+    """Assemble `[u64 LE header length][header JSON][data section]` **in declaration order**."""
     header: dict[str, object] = {"__metadata__": dict(metadata)}
     offset = 0
     for entry in entries:
@@ -82,7 +87,7 @@ def write_safetensors(entries: Sequence[Entry], metadata: Mapping[str, str]) -> 
 
 
 def order(entries: Sequence[Entry]) -> list[Entry]:
-    """データ節に並ぶ順（整列単位の降順 → 奇数 F16 は後ろ → 名前昇順）。"""
+    """Data-section order (descending alignment unit → odd F16 last → name ascending)."""
     return sorted(
         entries,
         key=lambda entry: (
@@ -94,18 +99,18 @@ def order(entries: Sequence[Entry]) -> list[Entry]:
 
 
 def _scale_shape(shape: Sequence[int], encoding) -> tuple[int, ...]:
-    """旧配布形が持っていた scale の形（group 形 / per-channel の keepdim 形）。"""
+    """Scale shape the old distribution had (group form / per-channel keepdim form)."""
     if codec_entry(encoding.codec).grouping == "group":
         return (shape[0], math.prod(shape[1:]) // encoding.group_size)
     return tuple(dim if axis == encoding.row_axis else 1 for axis, dim in enumerate(shape))
 
 
 def legacy_entries(stored: StoredModel) -> list[Entry]:
-    """格納変換を済ませた素材 → 旧配布形のデータ節の宣言（並べ替え済み）。
+    """Inputs after the storage conversion → old-distribution data-section declarations (sorted).
 
-    受けるのは {@link karume.emit.stored_model} の戻り**そのもの** — 同じ素材から 2 つの
-    `StoredModel` を作ると、格納変換を 2 度回したうえに「どちらのグラフを焼いたか」が
-    呼び手ごとに割れる。
+    It takes **the very return value** of {@link karume.emit.stored_model} — building two
+    `StoredModel`s from the same inputs would run the storage conversion twice, and "which graph
+    was written" would differ per caller.
     """
     committed = stored.graph
     entries: list[Entry] = []
@@ -135,11 +140,11 @@ def legacy_shards(
     baked: tuple[str, int] | None = None,
     groups: int = 1,
 ) -> list[bytes]:
-    """旧配布形 1 コンポーネントの shard バイト列（読む順 — 先頭がグラフ shard）。
+    """Shard bytes of one old-distribution component (in reading order — the graph shard first).
 
-    `groups` は weight shard の本数（データ節を均等に割る本数ではなく、**宣言の並びを
-    その本数へ順に配る**）。移行が「ディレクトリを跨ぐ列」や「複数 shard」を解くところを
-    踏むための席。
+    `groups` is the number of weight shards (not a count that splits the data section evenly:
+    **the declarations are dealt to that many shards in order**). The option exists to take the
+    paths where the migration resolves "a list across directories" and "several shards".
     """
     graph, tensors, scales, overrides = fixture_spec(mark, storage, inputs, outputs, weights, baked)
     stored = stored_model(
@@ -153,10 +158,11 @@ def legacy_shards(
 
 
 def piece_entries(entry: Entry, rows: Sequence[tuple[int, int]]) -> list[Entry]:
-    """親 1 本を行範囲 `rows` の piece 列へ割る（旧 shard 仕様 v3 — ADR 0090）。
+    """Split one parent into pieces over the row ranges `rows` (old shard spec v3 — ADR 0090).
 
-    piece のキーは `<親名>#NNNNN-of-NNNNN`（index は 1 始まり・総数は `len(rows)`）、shape は
-    `(行数, *残り次元)` で、payload は親の行優先バイト列の該当区間。
+    A piece key is `<parent name>#NNNNN-of-NNNNN` (the index starts at 1, the total is
+    `len(rows)`), its shape is `(rows, *remaining dims)`, and its payload is the matching span of
+    the parent's row-major bytes.
     """
     row_bytes = entry.nbytes // entry.shape[0]
     count = len(rows)
@@ -174,10 +180,11 @@ def piece_entries(entry: Entry, rows: Sequence[tuple[int, int]]) -> list[Entry]:
 def legacy_piece_shards(
     *, parent: str, pieces: Sequence[tuple[int, int]], mark: str = "fixture", storage: str = "f32"
 ) -> list[bytes]:
-    """{@link legacy_shards} と同じ素材で、テンソル `parent` を piece 列に割った shard 列。
+    """Shards from the {@link legacy_shards} inputs with the tensor `parent` split into pieces.
 
-    旧書き手の配置（旧読み手契約 5）を写す: piece 1 は他のテンソルと同じ先頭の weight shard に、
-    piece 2 以降は**連続する後続の shard に 1 本ずつ**置く。
+    It copies the old writer's layout (old reader contract 5): piece 1 goes to the first weight
+    shard with the other tensors, and pieces 2 onwards go **one each into consecutive following
+    shards**.
     """
     graph, tensors, scales, overrides = fixture_spec(mark, storage)
     stored = stored_model(
@@ -199,16 +206,18 @@ def legacy_piece_shards(
 
 
 def legacy_fill_shards(count: int, *, mark: str) -> list[bytes]:
-    """`count` 本の shard 列になる旧配布形（先頭がグラフ shard・以降 1 本 1 テンソル）。"""
+    """Old distribution of `count` shards (the graph shard first, then one tensor each)."""
     if count < 2:
-        raise ValueError(f"shard 数 {count} は 2 以上（先頭はテンソルを持たないグラフ shard）")
+        raise ValueError(
+            f"shard count {count} must be at least 2 (the first is a graph shard with no tensors)"
+        )
     graph, tensors = fill_spec(count - 1, mark=mark)
     stored = stored_model(graph, tensors)
     return _shards(stored.graph, legacy_entries(stored), count - 1)
 
 
 def _shards(committed: IrGraph, entries: Sequence[Entry], groups: int) -> list[bytes]:
-    """グラフ shard + weight shard 列（宣言の並びを `groups` 本へ順に配る）。"""
+    """Graph shard + weight shards (the declarations are dealt to `groups` shards in order)."""
     shards = [write_safetensors([], {IR_METADATA_KEY: committed.to_json()})]
     if not entries:
         return shards
@@ -219,7 +228,7 @@ def _shards(committed: IrGraph, entries: Sequence[Entry], groups: int) -> list[b
 
 
 def stage_shards(directory: Path, name: str, shards: Sequence[bytes]) -> Path:
-    """旧配布形を連番で置き、コンポーネントの代表 path を返す。"""
+    """Place the old distribution as numbered files; return the component's representative path."""
     directory.mkdir(parents=True, exist_ok=True)
     representative = directory / name
     for index, blob in enumerate(shards, start=1):
@@ -227,25 +236,28 @@ def stage_shards(directory: Path, name: str, shards: Sequence[bytes]) -> Path:
     return representative
 
 
-#: 旧 `extras` の実在 1 種（`karume.migrate.EXTRA_ASSETS` の鍵）— 容器の資産 `rope_base` の素。
+#: The one old `extras` kind that exists (the key of `karume.migrate.EXTRA_ASSETS`) — the source of
+#: the container asset `rope_base`.
 ROPE_BASE_NAME = "rope_base"
 
-#: 旧 PLE sidecar の索引ファイル名（`karume.ple.PLE_INDEX_ASSET` + `.json`）。
+#: Index file name of the old PLE sidecar (`karume.ple.PLE_INDEX_ASSET` + `.json`).
 PLE_INDEX_FILE = "ple.json"
 
-#: 旧 PLE sidecar の shard 名（1 本だけ置く — 境界の意味は移行が捨てる）。
+#: Shard name of the old PLE sidecar (only one is placed — the migration discards the meaning of
+#: the boundaries).
 PLE_SHARD_FILE = "ple-00001.safetensors"
 
-#: 旧 PLE shard が `__metadata__` に持つキー（`karume.migrate.PLE_METADATA_KEY` の写し）。
+#: Key the old PLE shard holds in `__metadata__` (a copy of `karume.migrate.PLE_METADATA_KEY`).
 _PLE_METADATA_KEY = "karume_ple"
 
 
 def legacy_rope_base(directory: Path, *, values: Sequence[float] = (0.5, 1.5, 2.5, 3.5)) -> bytes:
-    """旧 `extras` の `rope_base.safetensors` を置き、その**バイト列**を返す。
+    """Place the old `extras` file `rope_base.safetensors` and return its **bytes**.
 
-    容器の資産は「重みではないが同じ容器で配るバイト列」の席なので、移行はこのファイルを
-    **1 バイトも変えずに** payload として畳む（`karume.migrate._extra_assets`）。直接書く側は
-    同じバイト列を `AssetInput` に載せるので、両経路の part 列はバイト同一になる MUST。
+    A container asset is the field for "bytes that are not weights but ship in the same
+    container", so the migration folds this file in as a payload **without changing a single
+    byte** (`karume.migrate._extra_assets`). The direct writer puts the same bytes into an
+    `AssetInput`, so the part lists of both paths MUST be byte-identical.
     """
     payload = write_safetensors(
         [
@@ -265,14 +277,14 @@ def legacy_rope_base(directory: Path, *, values: Sequence[float] = (0.5, 1.5, 2.
 
 @dataclass(frozen=True)
 class LegacyPle:
-    """置いた旧 PLE sidecar（schema 2）と、直接書く側が同じ資産を組むのに要る事実。"""
+    """The old PLE sidecar placed (schema 2) plus what the direct writer needs for its assets."""
 
     tokens: int
     layers: int
     dim: int
     storage: str
     embed_scale: float
-    #: token 順に連結した行優先 payload（`values` / `scales`）。
+    #: Row-major payloads concatenated in token order (`values` / `scales`).
     payloads: Mapping[str, bytes]
 
 
@@ -285,11 +297,12 @@ def legacy_ple_sidecar(
     storage: str = "i8",
     embed_scale: float = 0.125,
 ) -> LegacyPle:
-    """旧 PLE sidecar（`ple.json` schema 2 + shard 1 本）を置き、素材を返す。
+    """Place the old PLE sidecar (`ple.json` schema 2 + one shard) and return its inputs.
 
-    移行 CLI（`karume.migrate._ple_assets`）はこの 2 ファイルを読み、索引 schema 3 と
-    `ple.values.<k>` / `ple.scales.<k>` の block 列へ畳む。直接書く側は同じ payload を
-    `karume.ple.ple_assets` へ渡すので、両経路の part 列はバイト同一になる MUST。
+    The migration CLI (`karume.migrate._ple_assets`) reads these two files and folds them into
+    index schema 3 and the `ple.values.<k>` / `ple.scales.<k>` blocks. The direct writer passes
+    the same payloads to `karume.ple.ple_assets`, so the part lists of both paths MUST be
+    byte-identical.
     """
     row_bytes = ple_row_bytes(storage, layers, dim)
     payloads = {
@@ -313,7 +326,8 @@ def legacy_ple_sidecar(
     (directory / PLE_SHARD_FILE).write_bytes(
         write_safetensors(
             [
-                # 旧書き手と旧読み手（gemma の ple.ts）の形は `[rows, layers, dim]`（論理形）。
+                # The old writer and old reader (gemma's ple.ts) use `[rows, layers, dim]`
+                # (the logical shape).
                 Entry(
                     "values",
                     _PLE_SHARD_DTYPE[storage],
@@ -340,5 +354,5 @@ def legacy_ple_sidecar(
     return LegacyPle(tokens, layers, dim, storage, embed_scale, payloads)
 
 
-#: PLE の格納 → shard の safetensors dtype 名（`values` 側だけが packed になりうる）。
+#: PLE storage → the shard's safetensors dtype name (only `values` can be packed).
 _PLE_SHARD_DTYPE: Mapping[str, str] = {"i8": "I8", "i4": "I4", "i2": "I2"}

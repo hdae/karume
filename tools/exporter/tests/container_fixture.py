@@ -1,36 +1,38 @@
-"""言語横断 fixture の合成モデルと生成器。
+"""Synthetic model and generator of the cross-language fixture.
 
-置き場は `packages/runtime/tests/fixtures/container/`（単一形 `synthetic.krm` と分割形
-`synthetic-split-NNNNN-of-NNNNN.krm`）。
+It lives in `packages/runtime/tests/fixtures/container/` (the single form `synthetic.krm` and the
+split form `synthetic-split-NNNNN-of-NNNNN.krm`).
 
-TS 側の読み手（`packages/runtime/src/format/container/*.ts`）が**この機以外で**書かれたコンテナを
-開けることを示すための資産で、`packages/runtime/tests/container_fixture_test.ts` が
-`openContainer` で開き、全 block の sha256 と descriptor の正準直列化を確かめる。
+The asset shows that the TS reader (`packages/runtime/src/format/container/*.ts`) can open a
+container written **outside this machine**: `packages/runtime/tests/container_fixture_test.ts`
+opens it with `openContainer` and checks the sha256 of every block and the canonical serialization
+of the descriptors.
 
-再生成は 1 コマンド:
+Regeneration is one command:
 
 ```
 KARUME_FIXTURE=write uv run pytest tests/test_container.py -k fixture
 ```
 
-合成の中身は「読み手の分岐を 1 回ずつ踏む」ことだけを目的に選んである:
+The synthetic content is chosen only to take each branch of the reader once:
 
-- const 領域（f32 と i32 の 2 本）と重み（f16 / int8-sym / int4-sym-g）
-- 末尾の詰め物が要る payload（f16 で 42 バイト → 44 バイト）
-- block 上限（この fixture では 256 B）を超えて piece 列になる重み
-- `rowAxis: 1`（`conv_transpose1d` 形）の per-channel scale
-- `shared` 宣言（束縛表の突合集合から外れる initializer）
-- part 長（512 B）をまたぐ配置（part が 3 本に割れる）
+- a const region (two entries, f32 and i32) and weights (f16 / int8-sym / int4-sym-g)
+- a payload that needs trailing padding (42 bytes of f16 → 44 bytes)
+- a weight that exceeds the block limit (256 B in this fixture) and becomes a piece list
+- a per-channel scale with `rowAxis: 1` (the `conv_transpose1d` shape)
+- a `shared` declaration (an initializer outside the set the binding table is matched against)
+- a layout that crosses the part length (512 B) (the parts split into 3)
 
-分割形（{@link SPLIT_FIXTURE_PATH}）が足すのは、単一形では踏めない 3 つである:
+The split form ({@link SPLIT_FIXTURE_PATH}) adds the three things the single form cannot take:
 
-- **資産**（`ple_index` 64 B と `rope_base` 37 B — 後者は 0x00 詰めが要る奇数長）が重みの
-  part の後ろの専用 part に載る
-- **const が空**で part 1 が **0 バイトのファイル**として並ぶ
-- 重みの part が **2 本**に割れる（part 0 / 1 を含めてファイル 5 本）
+- **assets** (`ple_index` 64 B and `rope_base` 37 B — the latter is an odd length that needs 0x00
+  padding) sit in a dedicated part after the weight parts
+- **the const region is empty** and part 1 is a **0-byte file**
+- the weight parts split into **2** (5 files including parts 0 / 1)
 
-MUST: payload は乱数器ではなく**単純な決定的パターン**（{@link pattern_bytes}）で作る — 同じ
-入力から同じ fixture が出て、TS 側テストが期待値を綴るのに生成器の写しを持たずに済む。
+MUST: payloads are made from a **simple deterministic pattern** ({@link pattern_bytes}), not a
+random generator — the same input gives the same fixture, and the TS test can spell its expected
+values without carrying a copy of the generator.
 """
 
 from __future__ import annotations
@@ -47,43 +49,45 @@ from karume.container import (
 )
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrShared, IrStorage, IrValue
 
-#: リポジトリ直下（tools/exporter/tests → tools/exporter → tools → repo）。
+#: Repository root (tools/exporter/tests → tools/exporter → tools → repo).
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-#: 言語横断 fixture の置き場（TS 側テストが読む）。
+#: Location of the cross-language fixture (read by the TS test).
 FIXTURE_PATH = (
     REPO_ROOT / "packages" / "runtime" / "tests" / "fixtures" / "container" / "synthetic.krm"
 )
 
-#: 分割形 fixture の代表 path（実ファイルは `-NNNNN-of-NNNNN` の連番 — part 0 から）。
+#: Representative path of the split-form fixture (the real files are numbered
+#: `-NNNNN-of-NNNNN` — from part 0).
 SPLIT_FIXTURE_PATH = FIXTURE_PATH.with_name("synthetic-split.krm")
 
-#: 分割形 fixture の part 本数（part 0 + const〈0 バイト〉+ 重み 2 本 + 資産 1 本）。
+#: Part count of the split-form fixture (part 0 + const [0 bytes] + 2 weight parts + 1 asset part).
 SPLIT_FIXTURE_PARTS = 5
 
-#: 合成のグラフ名。
+#: Graph name of the synthetic model.
 GRAPH_NAME = "synthetic"
 
-#: 分割形 fixture のグラフ名。
+#: Graph name of the split-form fixture.
 SPLIT_GRAPH_NAME = "synthetic-split"
 
-#: fixture 用に下げた寸法（実物は 32 MiB / 256 MiB）。piece 分割と part またぎを数 KiB で踏む。
+#: Sizes lowered for the fixture (the real ones are 32 MiB / 256 MiB). Takes piece splitting and
+#: part crossing in a few KiB.
 FIXTURE_BLOCK_BYTES = 256
 FIXTURE_PART_BYTES = 512
 
 
 def pattern_bytes(length: int, seed: int) -> bytes:
-    """`seed` から 1 ずつ上がるバイト列（`seed` は本ごとに変えて取り違えを見える形にする）。
+    """Bytes rising by 1 from `seed` (`seed` differs per tensor so a mix-up shows).
 
-    MUST: **乱数器を使わない** — TS 側テストが期待値を綴るのに Python の生成器を写す必要が
-    無い形に保つ（写しがあると、fixture を焼き直したとき「読み手の契約が壊れた」ではなく
-    「ミラーがずれた」で赤くなる）。
+    MUST: **no random generator** — keep the form such that the TS test can spell its expected
+    values without copying the Python generator (with a copy, rebuilding the fixture would turn
+    red as "the mirror drifted" rather than "the reader contract broke").
     """
     return bytes((seed + index) & 0xFF for index in range(length))
 
 
 def synthetic_graph() -> IrGraph:
-    """IR v1 の合成グラフ（`ir_v2_document` が実体の鍵へ改名する前の形）。"""
+    """Synthetic IR v1 graph (the form before `ir_v2_document` renames to the real keys)."""
     return IrGraph(
         symbols=["T"],
         inputs=[IrInput(name="x", dtype="f32", shape=["T", 8])],
@@ -125,14 +129,14 @@ def synthetic_graph() -> IrGraph:
 
 
 def synthetic_bindings() -> dict[str, Encoding]:
-    """テンソルキー → 格納の指定（shared でない initializer ぜんぶを覆う）。"""
+    """Tensor key → storage spec (covers every initializer that is not shared)."""
     return {
         "enc.weight": Encoding(
             "int4-sym-g", group_size=32, row_axis=0, scale_key="enc.weight_scale"
         ),
         "dec.weight": Encoding("f16"),
         "big.weight": Encoding("int8-sym", group_size=32, row_axis=0, scale_key="big.weight_scale"),
-        # conv_transpose1d 形: 行の軸は 1（per-channel scale の長さは shape[1]）。
+        # conv_transpose1d shape: the row axis is 1 (the per-channel scale has length shape[1]).
         "conv.weight": Encoding(
             "int8-sym", group_size=32, row_axis=1, scale_key="conv.weight_scale"
         ),
@@ -142,17 +146,17 @@ def synthetic_bindings() -> dict[str, Encoding]:
 
 
 def synthetic_tensors() -> dict[str, bytes]:
-    """テンソルキー → 生バイト（長さは宣言 shape と codec から決まる値ちょうど）。"""
+    """Tensor key → raw bytes (exactly the length the declared shape and codec give)."""
     return {
-        # i4: 8 x 32 = 256 要素 → 128 バイト・scale は [8, 1] の f32。
+        # i4: 8 x 32 = 256 elements → 128 bytes; the scale is f32 [8, 1].
         "enc.weight": pattern_bytes(128, 21),
         "enc.weight_scale": pattern_bytes(8 * 4, 22),
-        # f16: 3 x 7 = 21 要素 → 42 バイト（末尾の詰め物 2 バイトを書き手が焼く）。
+        # f16: 3 x 7 = 21 elements → 42 bytes (the writer writes 2 bytes of trailing padding).
         "dec.weight": pattern_bytes(42, 23),
-        # i8: 16 x 32 = 512 バイト → block 上限 256 B で 2 piece（8 行ずつ）。
+        # i8: 16 x 32 = 512 bytes → 2 pieces at the 256 B block limit (8 rows each).
         "big.weight": pattern_bytes(512, 24),
         "big.weight_scale": pattern_bytes(16 * 4, 25),
-        # i8 rowAxis 1: 4 x 3 x 8 = 96 バイト・scale は [3, 1] の f32。
+        # i8 rowAxis 1: 4 x 3 x 8 = 96 bytes; the scale is f32 [3, 1].
         "conv.weight": pattern_bytes(96, 26),
         "conv.weight_scale": pattern_bytes(3 * 4, 27),
         "const.a1b2c3d4e5f60718": pattern_bytes(8 * 4, 31),
@@ -161,7 +165,7 @@ def synthetic_tensors() -> dict[str, bytes]:
 
 
 def write_synthetic_container(path: Path, *, single: bool = True) -> list[Path]:
-    """合成モデルを `path` へ書く（既定は単一形）。"""
+    """Write the synthetic model to `path` (single form by default)."""
     return write_model_container(
         path,
         synthetic_graph(),
@@ -176,18 +180,18 @@ def write_synthetic_container(path: Path, *, single: bool = True) -> list[Path]:
 
 
 def build_fixture_bytes(tmp_path: Path) -> bytes:
-    """fixture のバイト列（`tmp_path` は書き出しの作業場）。"""
+    """The fixture bytes (`tmp_path` is the scratch space for writing)."""
     written = write_synthetic_container(tmp_path / FIXTURE_PATH.name)
     return written[0].read_bytes()
 
 
 # ---------------------------------------------------------------------------
-# 分割形 fixture（資産 + 空 const + 重み part 2 本）
+# Split-form fixture (assets + empty const + 2 weight parts)
 # ---------------------------------------------------------------------------
 
 
 def split_graph() -> IrGraph:
-    """const を 1 本も持たない合成グラフ（part 1 が長さ 0 になる形）。"""
+    """Synthetic graph with no const at all (the form where part 1 has length 0)."""
     return IrGraph(
         symbols=["T"],
         inputs=[IrInput(name="x", dtype="f32", shape=["T", 4])],
@@ -212,7 +216,7 @@ def split_bindings() -> dict[str, Encoding]:
 
 
 def split_tensors() -> dict[str, bytes]:
-    """4 x 16 の f32 = 256 バイト 3 本（block 上限ちょうど・part 長 512 で 2 本に割れる）。"""
+    """Three f32 4 x 16 = 256-byte tensors (exactly the block limit; split into 2 parts at 512)."""
     return {
         "a.weight": pattern_bytes(4 * 16 * 4, 41),
         "b.weight": pattern_bytes(4 * 16 * 4, 42),
@@ -221,14 +225,14 @@ def split_tensors() -> dict[str, bytes]:
 
 
 def split_asset_payloads() -> dict[str, bytes]:
-    """資産名 → payload。`rope_base` は 37 バイト（0x00 詰め 3 バイトが要る奇数長）。"""
+    """Asset name → payload. `rope_base` is 37 bytes (an odd length needing 3 bytes of 0x00)."""
     return {"ple_index": pattern_bytes(64, 51), "rope_base": pattern_bytes(37, 52)}
 
 
 def split_assets() -> dict[str, AssetInput]:
-    """資産名 → 受け口。役割は models 側の解釈者名（runtime は解釈しない）。
+    """Asset name → input. The role names the models-side interpreter (the runtime ignores it).
 
-    どちらも全量読みの資産なので専用 part は要らない（2 本で 1 part を共有する）。
+    Both are read-whole assets, so no dedicated part each is needed (the two share one part).
     """
     payloads = split_asset_payloads()
     return {
@@ -238,7 +242,7 @@ def split_assets() -> dict[str, AssetInput]:
 
 
 def write_split_container(directory: Path) -> list[Path]:
-    """分割形の合成モデルを `directory` へ書く（part 0 から順の実ファイルを返す）。"""
+    """Write the split-form synthetic model to `directory` (returns the real files from part 0)."""
     return write_model_container(
         directory / SPLIT_FIXTURE_PATH.name,
         split_graph(),
@@ -254,10 +258,10 @@ def write_split_container(directory: Path) -> list[Path]:
 
 
 def split_fixture_paths() -> list[Path]:
-    """分割形 fixture の実ファイル（resources 側の置き場・part 0 から）。"""
+    """Real files of the split-form fixture (in the resources location, from part 0)."""
     return container_paths(SPLIT_FIXTURE_PATH, SPLIT_FIXTURE_PARTS)
 
 
 def fixture_write_requested() -> bool:
-    """`KARUME_FIXTURE=write` — 焼き直しを明示したときだけ resources を書き換える。"""
+    """`KARUME_FIXTURE=write` — rewrite the resources only on an explicit rebuild request."""
     return os.environ.get("KARUME_FIXTURE") == "write"

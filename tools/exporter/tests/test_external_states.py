@@ -1,20 +1,24 @@
-"""借り手グラフの 3 宣言（external スロット / readonly attention / 共有 initializer）を固定する。
+"""Pins the 3 declarations of a borrower graph (external slot / readonly attention / shared
+initializer).
 
-正本は ADR [0096](../../../docs/decisions/0096-speculative-decoding.md) 段 2 の契約で、TS 側の
-鏡像は `packages/runtime/src/format/ir.ts` + `packages/runtime/src/runtime/plan.ts`。ここが見るのは
-Python 側の 3 層すべて — 宣言の往復（`to_json` → `parse_ir_graph`）・契約と shape の門・
-手術（`karume.states.to_external_states_form`）・書き出し（共有宣言を格納から外す）。
+The source of truth is the stage 2 contract of ADR
+[0096](../../../docs/decisions/0096-speculative-decoding.md); its TS mirror is
+`packages/runtime/src/format/ir.ts` + `packages/runtime/src/runtime/plan.ts`. This file covers all
+3 layers on the Python side — the declarations' round trip (`to_json` → `parse_ir_graph`), the
+contract and shape checks, the surgery (`karume.states.to_external_states_form`) and the write
+(shared declarations are excluded from storage).
 
-被験グラフは合成の小グラフ（torch 不要）。実 drafter は 4 層 × k 段の展開形だが、3 宣言の規律は
-attention 1〜2 本で全部踏める。
+The subject graphs are small synthetic graphs (no torch needed). The real drafter is unrolled as
+4 layers × k steps, but the discipline of the 3 declarations is fully exercised with 1–2
+attentions.
 
-故障注入（この 4 本が拒否されることが「検査が実効である」ことの担保 — 通ると**値だけ**が
-静かに変わる）:
+Fault injection (these 4 being rejected is what guarantees "the checks are effective" — if they
+passed, **only the values** would change silently):
 
-1. external スロットへの `state_append`（借り手が貸し手の ring を汚す）
-2. readonly でない読者が external を読む（今 step の k/v を足して読む形）
-3. 共有 initializer に `tensor` / `scale`（バイトの出どころが 2 箇所になる）
-4. external と自前スロットの混在（確保規則がグラフから決まらない）
+1. `state_append` into an external slot (the borrower pollutes the lender's ring)
+2. a reader that is not readonly reads an external slot (reading with this step's k/v added)
+3. `tensor` / `scale` on a shared initializer (the bytes come from 2 places)
+4. external and owned slots mixed (the graph does not determine the allocation rule)
 """
 
 from __future__ import annotations
@@ -51,14 +55,16 @@ from karume.verify import (
     parse_ir_graph,
 )
 
-#: 借り手の q（`[B,H,1,D]` — H=4・M は 1 ちょうど MUST）と、trace 用に置く K / V 入力の形。
-#: T は「固定の小さい値でよい」placeholder（手術で落ちるので配布形には残らない）。
+#: The borrower's q (`[B,H,1,D]` — H=4; M MUST be exactly 1) and the shapes of the K / V inputs
+#: placed for the trace. T is a placeholder that "may be a small fixed value" (the surgery drops it,
+#: so it does not remain in the distribution).
 Q_SLIDING = [1, 4, 1, 256]
 KV_SLIDING = [1, 1, 8, 256]
 Q_FULL = [1, 4, 1, 512]
 KV_FULL = [1, 1, 8, 512]
 
-#: 貸し手スロットの容量（sliding = window 512 + 余裕 8 の実数 / full = 記号）。
+#: The capacity of the lender's slots (sliding = window 512 + slack 8 as a number / full = a
+#: symbol).
 SLIDING_CAPACITY = 520
 CAPACITY_SYMBOL = "C"
 WINDOW = 512
@@ -73,10 +79,12 @@ def _value(shape: Sequence) -> dict:
 
 
 def source_dict() -> dict:
-    """借り手の trace 直後（手術前）の形 — 従来形 attention 2 本（sliding / full）。
+    """The borrower right after the trace (before the surgery) — 2 attentions in the classic form
+    (sliding / full).
 
-    mask は**焼いた定数**（q_len 1 の bidirectional = 全列許可の 0 行）。手術がノードの入力から
-    外すと誰も読まなくなるので、刈り込みでそのまま死ぬ。
+    The mask is **a baked constant** (bidirectional with q_len 1 = a zero row allowing every
+    column). Once the surgery removes it from the node's inputs nobody reads it, so pruning
+    removes it as is.
     """
     return {
         "format": "karume-ir",
@@ -124,7 +132,8 @@ def source_dict() -> dict:
 
 
 def source() -> IrGraph:
-    """被験グラフ。**パーサを通して作る** — 手術の入力が valid な IR であることが前提。"""
+    """The subject graph. **Built through the parser** — the surgery presupposes a valid IR as
+    input."""
     return parse_ir_graph(json.dumps(source_dict()))
 
 
@@ -156,7 +165,8 @@ def plan(*attentions: ExternalAttentionSpec) -> ExternalStatesPlan:
 
 
 def checked(graph: IrGraph) -> IrGraph:
-    """手術結果を JSON へ落として**パーサと契約検査へ掛け直す**（往復が受入条件）。"""
+    """Serialize the surgery result to JSON and **run it through the parser and the contract checks
+    again** (the round trip is the acceptance condition)."""
     parsed = parse_ir_graph(graph.to_json())
     assert_op_contracts(parsed)
     assert_runtime_support(parsed)
@@ -165,24 +175,26 @@ def checked(graph: IrGraph) -> IrGraph:
 
 class TestTheExternalSurgery:
     def test_the_reader_becomes_a_readonly_node_with_only_q(self):
-        """readonly 形は q の 1 本ちょうど（今 step の k/v も mask も持たない）。"""
+        """The readonly form has exactly one input, q (neither this step's k/v nor a mask)."""
         graph = checked(to_external_states_form(source(), plan(SLIDING_SPEC, FULL_SPEC)))
 
         sliding, full = (node for node in graph.nodes if node.op == "attention")
         assert sliding.ins == ["qs"]
         assert sliding.attrs == {"scale": 1.0, "readonly": True, "window": WINDOW}
         assert sliding.states == {"k": "l13.k", "v": "l13.v"}
-        # full 層は `window` を宣言しない（欄の不存在がそのまま「全 context」— ADR 0067 決定 4）。
+        # A full layer declares no `window` (the absence of the field is itself "the whole
+        # context" — ADR 0067 decision 4).
         assert full.attrs == {"scale": 1.0, "readonly": True}
 
     def test_no_append_is_inserted(self):
-        """external の実体は貸し手のもの — 借り手は 1 本も書かない。"""
+        """The external storage belongs to the lender — the borrower writes nothing."""
         graph = to_external_states_form(source(), plan(SLIDING_SPEC, FULL_SPEC))
 
         assert [node.op for node in graph.nodes] == ["attention", "attention", "add"]
 
     def test_the_slots_are_declared_external_from_the_plan(self):
-        """スロットの形は plan の `[1, Hkv, capacity, D]`（placeholder の T は残らない）。"""
+        """The slot shape is the plan's `[1, Hkv, capacity, D]` (the placeholder T does not
+        remain)."""
         graph = to_external_states_form(source(), plan(SLIDING_SPEC, FULL_SPEC))
 
         assert graph.states["l13.k"] == IrState(
@@ -193,25 +205,26 @@ class TestTheExternalSurgery:
         )
 
     def test_the_traced_kv_inputs_are_dropped(self):
-        """K / V の placeholder は宣言ごと消える（呼び手はもう渡さない）。"""
+        """The K / V placeholders disappear together with their declarations (the caller no longer
+        passes them)."""
         graph = to_external_states_form(source(), plan(SLIDING_SPEC, FULL_SPEC))
 
         assert [spec.name for spec in graph.inputs] == ["qs", "qf"]
 
     def test_the_baked_masks_are_pruned(self):
-        """誰も読まなくなった mask 定数は刈られ、生きた initializer は残る。"""
+        """Mask constants that nobody reads any more are pruned; live initializers remain."""
         graph = to_external_states_form(source(), plan(SLIDING_SPEC, FULL_SPEC))
 
         assert sorted(graph.initializers) == ["bias"]
         assert "mask_s" not in graph.values
 
     def test_the_capacity_symbol_is_declared_only_when_used(self):
-        """記号容量を使うスロットがあるときだけ `symbols` へ足す。"""
+        """The capacity symbol is added to `symbols` only when a slot uses it."""
         with_symbol = to_external_states_form(source(), plan(SLIDING_SPEC, FULL_SPEC))
         assert with_symbol.symbols == [CAPACITY_SYMBOL]
 
     def test_the_input_declaration_order_is_preserved(self):
-        """残る入力の並びは元のまま（ホストは順序で束ねる）。"""
+        """The remaining inputs keep their original order (the host binds by order)."""
         graph = to_external_states_form(source(), plan(FULL_SPEC, SLIDING_SPEC))
 
         assert [spec.name for spec in graph.inputs] == ["qs", "qf"]
@@ -219,7 +232,8 @@ class TestTheExternalSurgery:
 
 class TestTheSurgeryRejectsMiswiring:
     def test_dropping_a_value_that_is_not_the_node_kv_is_rejected(self):
-        """落とす入力がそのノードの k / v でなければ配線ミス（別の値が消える）。"""
+        """If the input to drop is not that node's k / v, it is a wiring error (another value would
+        disappear)."""
         spec = ExternalAttentionSpec(
             output="as",
             k_slot="l13.k",
@@ -236,7 +250,8 @@ class TestTheSurgeryRejectsMiswiring:
             to_external_states_form(source(), plan(spec))
 
     def test_swapping_k_and_v_is_rejected(self):
-        """K に元 V・V に元 K を指定した取り違え — 同形なので通ると値だけが静かに違う。"""
+        """A mix-up giving the original V as K and the original K as V — same shape, so if it passed
+        only the values would silently differ."""
         spec = ExternalAttentionSpec(
             output="as",
             k_slot="l13.k",
@@ -253,7 +268,8 @@ class TestTheSurgeryRejectsMiswiring:
             to_external_states_form(source(), plan(spec))
 
     def test_naming_the_same_input_as_both_k_and_v_is_rejected(self):
-        """K と V に同じ入力を指定した形（V スロットへ K が入る）も添字ごとの照合で落ちる。"""
+        """Giving the same input as K and V (K goes into the V slot) also fails the per-index
+        match."""
         spec = ExternalAttentionSpec(
             output="as",
             k_slot="l13.k",
@@ -270,7 +286,8 @@ class TestTheSurgeryRejectsMiswiring:
             to_external_states_form(source(), plan(spec))
 
     def test_an_already_operated_node_is_rejected(self):
-        """二重手術（すでに states 形）は従来の検出線がそのまま受ける。"""
+        """A double surgery (already in the states form) is caught by the existing detection as
+        is."""
         once = to_external_states_form(source(), plan(SLIDING_SPEC, FULL_SPEC))
 
         with pytest.raises(StatesFormError, match="already in the states form"):
@@ -279,13 +296,14 @@ class TestTheSurgeryRejectsMiswiring:
 
 class TestTheDeclarationsRoundTrip:
     def test_external_false_is_not_written(self):
-        """自前スロットのグラフ JSON は 1 バイトも動かない（既存資産の sha 門が動かない）。"""
+        """The graph JSON of owned slots does not move by a single byte (the sha256 regression
+        checks of existing assets do not move)."""
         slot = IrState(dtype="f32", shape=[1, 1, 8, 4])
 
         assert slot.to_dict() == {"dtype": "f32", "shape": [1, 1, 8, 4]}
 
     def test_a_shared_initializer_writes_no_tensor_key(self):
-        """共有宣言は `shared.tensor` だけ（自前のテンソルキーを持たない）。"""
+        """A shared declaration is `shared.tensor` only (it has no tensor key of its own)."""
         initializer = IrInitializer(
             shared=IrShared(tensor="model.lm_head.weight"), storage=IrStorage(dtype="i8")
         )
@@ -297,7 +315,8 @@ class TestTheDeclarationsRoundTrip:
         assert initializer.is_shared
 
     def test_the_operated_graph_survives_a_json_round_trip(self):
-        """往復でバイトが動かない（宣言 3 種とも読み書きの受理集合が同じ）。"""
+        """The round trip does not move the bytes (all 3 declarations have the same accepted set for
+        reading and writing)."""
         graph = to_external_states_form(source(), plan(SLIDING_SPEC, FULL_SPEC))
         text = graph.to_json()
 
@@ -305,7 +324,8 @@ class TestTheDeclarationsRoundTrip:
 
 
 def _operated_json(**mutate) -> dict:
-    """手術済みグラフの JSON に共有 initializer を 1 本足したもの（故障注入の土台）。"""
+    """The JSON of the operated graph with one shared initializer added (the base for fault
+    injection)."""
     graph = to_external_states_form(source(), plan(SLIDING_SPEC, FULL_SPEC)).to_dict()
     graph["initializers"]["target_embed"] = {
         "shared": {"tensor": "model.lm_head.weight"},
@@ -337,10 +357,12 @@ def _parse_and_check(graph: dict) -> IrGraph:
 
 
 class TestTheGraphChecksAreEffective:
-    """故障注入 — 4 本とも通ると「形も型も合ったまま値だけが違う」IR になる。"""
+    """Fault injection — if any of the 4 passed, the IR would be "shapes and types match, only the
+    values differ"."""
 
     def test_the_baseline_is_accepted(self):
-        """土台そのものは通る（下の 4 本が「元から落ちていた」ではないことの対照）。"""
+        """The base itself passes (the control showing that the 4 below did not "fail from the
+        start")."""
         assert _parse_and_check(_operated_json()).states["l13.k"].external is True
 
     def test_an_append_into_an_external_slot_is_rejected(self):
@@ -376,7 +398,7 @@ class TestTheGraphChecksAreEffective:
             _parse_and_check(graph)
 
     def test_a_readonly_reader_of_an_owned_slot_is_rejected(self):
-        """逆向き — readonly が自前スロットを読む形（貸し手のいない借り手）。"""
+        """The reverse — readonly reading an owned slot (a borrower without a lender)."""
         graph = _operated_json()
         for slot in graph["states"].values():
             slot.pop("external")
@@ -400,7 +422,8 @@ class TestTheGraphChecksAreEffective:
 
     @pytest.mark.parametrize("key", ["scale", "group_size"])
     def test_a_shared_initializer_with_a_companion_descriptor_is_rejected(self, key):
-        """付随実体（scale）と group の刻みは貸し手だけが持つ（写すと出どころが 2 箇所）。"""
+        """The companion tensor (scale) and the group step belong to the lender only (copying them
+        gives 2 sources)."""
         graph = _operated_json()
         graph["initializers"]["target_embed"]["storage"][key] = (
             32 if key == "group_size" else "drafter.embed.scale"
@@ -419,7 +442,7 @@ class TestTheGraphChecksAreEffective:
             _parse_and_check(graph)
 
     def test_a_readonly_node_with_two_query_rows_is_rejected(self):
-        """M = 1 MUST（段 2 は「論理位置 P−1 の 1 行」だけを意味づける）。"""
+        """M = 1 MUST (stage 2 defines meaning only for "the one row at logical position P−1")."""
         graph = _operated_json()
         graph["inputs"] = [
             _input("qs", [1, 4, 2, 256]) if spec["name"] == "qs" else spec
@@ -432,7 +455,7 @@ class TestTheGraphChecksAreEffective:
             _parse_and_check(graph)
 
     def test_a_slot_whose_head_dim_disagrees_with_q_is_rejected(self):
-        """スロット取り違え（別種別のスロットを読む形）は D 軸で落ちる。"""
+        """A slot mix-up (reading a slot of another kind) fails on the D axis."""
         graph = _operated_json()
         graph["states"]["l13.k"]["shape"] = [1, 1, SLIDING_CAPACITY, 512]
         graph["states"]["l13.v"]["shape"] = [1, 1, SLIDING_CAPACITY, 512]
@@ -450,7 +473,7 @@ class TestTheGraphChecksAreEffective:
 
 
 def _shared_container_graph() -> tuple[IrGraph, dict[str, torch.Tensor], dict]:
-    """共有 initializer 1 本 + 自前の重み 1 本を持つ最小コンテナ。"""
+    """The minimal container with one shared initializer + one owned weight."""
     weight = (torch.arange(16, dtype=torch.float32) % 7 - 3).reshape(4, 4)
     scale = channel_scale(weight, 0)
     rounded = quantize_to_int8(weight, scale).to(torch.float32) * scale
@@ -490,21 +513,24 @@ def _shared_container_graph() -> tuple[IrGraph, dict[str, torch.Tensor], dict]:
 
 class TestTheContainerExcludesSharedDeclarations:
     def test_a_shared_declaration_needs_no_stored_tensor(self):
-        """宣言 / 格納の完全一致から外れる（借り手の容器にバイトは 1 つも無い）。"""
+        """Exempt from the exact match of declarations and storage (the borrower's container holds
+        no byte of it)."""
         graph, tensors, scales = _shared_container_graph()
 
         committed = stored_model(graph, tensors, weight_dtype="i8", weight_scales=scales).graph
 
-        # 宣言された storage はそのまま焼かれる（計画も変換も掛からない）。
+        # The declared storage is written as is (neither planning nor conversion applies).
         assert committed.initializers["target_embed"].shared == IrShared(
             tensor="model.lm_head.weight"
         )
         assert committed.initializers["target_embed"].storage == IrStorage(dtype="i8")
-        # 自前の重みは従来どおり i8 へ計画される（除外が「全部素通し」ではない対照）。
+        # Owned weights are planned to i8 as before (the control showing the exclusion is not
+        # "let everything through").
         assert committed.initializers["w"].storage.dtype == "i8"
 
     def test_a_shared_tensor_key_present_in_the_container_is_surplus(self):
-        """借り手が同名のバイトを持っていたら余剰（貸し手と二重に持つ形を拒否する）。"""
+        """If the borrower holds bytes under the same name they are surplus (holding them twice,
+        with the lender, is rejected)."""
         graph, tensors, scales = _shared_container_graph()
         tensors = {**tensors, "model.lm_head.weight": torch.zeros(16, 8)}
 
@@ -513,10 +539,12 @@ class TestTheContainerExcludesSharedDeclarations:
 
 
 def dynamic_kv_source() -> IrGraph:
-    """K / V の placeholder **だけ**が記号 T を束縛する借り手（q は 1 行の固定形）。
+    """A borrower in which **only** the K / V placeholders bind the symbol T (q has a fixed shape of
+    one row).
 
-    mask は Tmax 定数 + `sym_prefix_slice`（ADR 0010 の畳み込み残骸と同じ形）で、T は K / V の
-    入力 shape からしか束縛されない — 手術で K / V を落とすと T は束縛元を失う。
+    The mask is a Tmax constant + `sym_prefix_slice` (the same shape as the leftovers of ADR 0010
+    folding), and T is bound only by the K / V input shapes — when the surgery drops K / V, T loses
+    its binding source.
     """
     return parse_ir_graph(
         json.dumps(
@@ -559,10 +587,12 @@ def dynamic_kv_source() -> IrGraph:
 
 
 class TestTheSymbolsAfterTheSurgery:
-    """落とした K / V だけが束縛していた記号は `symbols` から消える（ADR 0066 追記 7 の束縛点）。
+    """A symbol bound only by the dropped K / V disappears from `symbols` (the binding point of ADR
+    0066 addendum (2026-08-17) item 7).
 
-    元の `symbols` をそのまま引き継ぐと、束縛元の無い記号が残り、Python・runtime の両方の
-    parser が「束縛が取れない」で拒否するグラフを手術が作る。
+    Carrying the original `symbols` over as is would leave a symbol without a binding source, and
+    the surgery would produce a graph that both the Python and the runtime parsers reject with
+    "cannot be bound".
     """
 
     def test_a_symbol_bound_only_by_the_dropped_kv_is_removed(self):
@@ -572,7 +602,8 @@ class TestTheSymbolsAfterTheSurgery:
         assert [spec.name for spec in graph.inputs] == ["qs"]
 
     def test_a_symbol_still_bound_by_a_kept_input_survives(self):
-        """q も T を持つ形（残った入力が束縛点）では T は残る（落としすぎない対照）。"""
+        """When q also carries T (a remaining input is the binding point), T stays (the control
+        against dropping too much)."""
         source_graph = dynamic_kv_source()
         q_shape = [1, 4, "T", 256]
         source_graph.inputs[0] = IrInput(name="qs", dtype="f32", shape=q_shape)

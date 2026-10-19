@@ -1,7 +1,9 @@
-"""tiny golden fixtures の生成と、後段（Deno E2E）が依存する約束事の固定。
+"""Generation of the tiny golden fixtures, and the conventions the downstream E2E
+(`packages/runtime/tests/e2e_golden_test.ts`) relies on, pinned.
 
-約束事は 3 つ: ①契約表の全 op を全部どれかのモデルが踏む ②レイアウトとテンソルキーが
-README どおり ③固定 seed で再生成しても同じバイト列になる。
+There are three conventions: ① every op of the contract table is exercised by some model ② the
+layout and the tensor keys follow the README ③ regenerating with the fixed seed gives the same
+bytes.
 """
 
 from __future__ import annotations
@@ -32,34 +34,38 @@ from karume.ir import IrGraph
 from karume.ops import EMITTABLE_OPS
 from karume.verify import verify_container
 
-#: コミット済み golden の置き場。**リポの綴りはテスト側が持つ** — 生成側（`karume.goldens`）は
-#: 置き場を引数で受けるだけで repo topology を知らない（ADR 0065 Consequences）。
+#: Where the committed goldens live. **The test side owns the repository spelling** — the generator
+#: (`karume.goldens`) only takes the location as an argument and does not know the repo topology
+#: (ADR 0065 Consequences).
 GOLDEN_ROOT = (
     Path(__file__).resolve().parents[3] / "packages" / "runtime" / "tests" / "fixtures" / "golden"
 )
 
-#: 後段テストが読む配布物なので、リポジトリに置ける大きさに留める。
+#: Downstream tests read these files, so they stay small enough to keep in the repository.
 MAX_FILE_BYTES = 16 * 1024
 
-#: 意味論 dtype → io.safetensors の格納 torch dtype（ADR 0009 の境界正規化）。
+#: Semantic dtype → the torch dtype stored in io.safetensors (the boundary normalization of ADR
+#: 0009).
 IO_ENCODING = {"f32": torch.float32, "i32": torch.int32, "bool": torch.uint32}
 
 
 @pytest.fixture(scope="module")
 def generated(tmp_path_factory):
-    """一時ディレクトリへ全 golden を再生成する（リポジトリの成果物には触らない）。"""
+    """Regenerates every golden into a temporary directory (the repository's files are not
+    touched)."""
     root = tmp_path_factory.mktemp("golden")
     return root, generate_all(root)
 
 
 def _io_tensors(root, name) -> dict[str, torch.Tensor]:
     with safe_open(str(root / name / IO_FILE), framework="pt") as handle:
-        # safe_open は Mapping ではないので keys() が唯一の列挙手段。
+        # safe_open is not a Mapping, so keys() is the only way to enumerate.
         return {key: handle.get_tensor(key) for key in handle.keys()}  # noqa: SIM118
 
 
 def _bindings(graph: IrGraph, io: dict[str, torch.Tensor]) -> dict[str, int]:
-    """入力 shape の次元位置からシンボルを束縛する（要素数からの逆算はしない）。"""
+    """Binds the symbols from the dimension positions of the input shapes (no back-calculation from
+    element counts)."""
     bindings: dict[str, int] = {}
     for spec in graph.inputs:
         actual = io[f"{INPUT_PREFIX}{spec.name}"].shape
@@ -72,17 +78,19 @@ def _bindings(graph: IrGraph, io: dict[str, torch.Tensor]) -> dict[str, int]:
     return bindings
 
 
-#: README の golden 台帳の目印（この行の後ろの最初の表が「モデル名 | 記号次元 | IR ops」）。
+#: The marker of the golden ledger in the README (the first table after this line is "model name |
+#: symbolic dimensions | IR ops").
 COVERAGE_MARKER = "Current models and coverage:"
-#: coverage 表の 1 行（見出し行と区切り行は名前を持たないので落ちる）。
+#: One row of the coverage table (the header and separator rows carry no name, so they drop out).
 COVERAGE_ROW = re.compile(r"^\| `([a-z0-9_]+)`\s+\|")
 
 
 def _readme_coverage_names() -> list[str]:
-    """README の coverage 表に並ぶモデル名（Module 表など他の表と混ざらないよう位置で切る）。"""
+    """The model names in the README's coverage table (cut by position so that other tables such as
+    the Module table do not mix in)."""
     text = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
     _, marker, after = text.partition(COVERAGE_MARKER)
-    assert marker, f"README に '{COVERAGE_MARKER}' が無い（表の位置を決められない）"
+    assert marker, f"the README has no '{COVERAGE_MARKER}' (cannot locate the table)"
     rows = itertools.takewhile(
         lambda line: line.startswith("|"),
         itertools.dropwhile(lambda line: not line.startswith("|"), after.splitlines()),
@@ -92,10 +100,11 @@ def _readme_coverage_names() -> list[str]:
 
 class TestCoverage:
     def test_the_readme_ledger_lists_exactly_the_generated_models(self):
-        """台帳と現物のズレを門にする（op を足したら golden を足す契約の可視面 — ADR 0005）。
+        """Makes drift between the ledger and the generated models a check (the visible side of the
+        contract "add an op, add a golden" — ADR 0005).
 
-        表は recipe 作者の一次資料なので、人手更新に任せると op 追加のたびに同じ経路で
-        遅れる（実際に ADR 0017 の 2 本ぶん遅れていた）。
+        The table is the primary source for recipe authors, so leaving it to manual updates makes
+        it lag the same way on every op addition (it actually lagged by the two of ADR 0017).
         """
         assert set(_readme_coverage_names()) == {spec.name for spec in GOLDEN_SPECS}
 
@@ -111,7 +120,7 @@ class TestCoverage:
         assert any(graph.symbols for graph in graphs.values())
 
     def test_a_model_exercises_right_aligned_broadcast(self, generated):
-        """rank の違う被演算子を持つ binary が最低 1 本ある。"""
+        """At least one binary op has operands of different ranks."""
         _, graphs = generated
         ranks = [
             {len(_declared_shape(graph, name)) for name in node.ins}
@@ -123,7 +132,8 @@ class TestCoverage:
         assert any(len(distinct) > 1 for distinct in ranks)
 
     def test_a_model_carries_a_non_f32_output(self, generated):
-        """readback の非 f32 経路を E2E に載せる（ADR 0009）— f32 固定だと踏まれない。"""
+        """Puts the non-f32 readback path into the E2E (ADR 0009) — with f32 only it is never
+        exercised."""
         _, graphs = generated
         out_dtypes = {
             graph.values[name].dtype for graph in graphs.values() for name in graph.outputs
@@ -132,17 +142,18 @@ class TestCoverage:
         assert out_dtypes - {"f32"}
 
     def test_a_model_exercises_the_i64_input_boundary(self, generated):
-        """torch 既定の整数 i64 は入力宣言で i32 へ正規化される（ADR 0009）。"""
+        """torch's default integer i64 is normalized to i32 in the input declarations (ADR 0009)."""
         _, graphs = generated
         in_dtypes = {spec.dtype for graph in graphs.values() for spec in graph.inputs}
 
         assert "i32" in in_dtypes
 
     def test_the_bmm_model_uses_four_distinct_axis_lengths(self, generated):
-        """B / M / K / N が全て違う長さであること（ACTIVE_DESIGN の Pitfalls）。
+        """B / M / K / N all have different lengths (ACTIVE_DESIGN Pitfalls).
 
-        バッチ stride を隣の次元の積で組む誤りは、2 軸が同じ長さの形では数値に出ない。
-        golden を縮めて対称な形にした瞬間にここが落ちる。
+        The mistake of building the batch stride from the product of the neighboring dimensions
+        does not show in the numbers on a shape where two axes have the same length. This fails the
+        moment the golden is shrunk to a symmetric shape.
         """
         _, graphs = generated
         bmms = [
@@ -159,11 +170,12 @@ class TestCoverage:
         )
 
     def test_the_attention_model_uses_five_distinct_axis_lengths(self, generated):
-        """融合 attention の golden は B / H / M / N / D が全て違う長さ（ADR 0023）。
+        """The fused-attention golden has B / H / M / N / D all of different lengths (ADR 0023).
 
-        カーネルは B と H を 1 本のバッチ軸へ畳むので、B=1（実測形）や B==H では軸の
-        取り違えが値に出ない（設計 recon §4.6 の検出限界 ①）。golden を縮めて対称な形に
-        した瞬間にここが落ちる。
+        The kernel folds B and H into one batch axis, so with B=1 (the observed shape) or B==H a
+        mix-up of the axes does not show in the values (detection limit ① of the design recon,
+        docs/research/2026-08-03-attention-design.md §4.6). This fails the moment the golden is
+        shrunk to a symmetric shape.
         """
         _, graphs = generated
         attentions = [
@@ -173,31 +185,33 @@ class TestCoverage:
             if node.op == "attention"
         ]
 
-        assert attentions, "attention を踏む golden が無い"
+        assert attentions, "no golden exercises attention"
         assert any(len({q[0], q[1], q[2], k[2], q[3]}) == 5 for q, k, _ in attentions), (
-            f"軸が 5 種類の長さになっていない: {attentions}"
+            f"the axes do not have 5 distinct lengths: {attentions}"
         )
 
     def test_the_decomposed_attention_models_are_untouched(self, generated):
-        """SDPA 保存はターゲット別（ADR 0023）— 既存 golden は分解形のまま。
+        """Preserving SDPA is per target (ADR 0023) — the existing goldens stay in decomposed form.
 
-        `attention_block` は `torch.bmm` + `torch.softmax` の手書き分解形、`masked_scores` は
-        そもそも SDPA を通っていない。ここが動いたら保存の適用範囲が漏れている。
+        `attention_block` is a hand-written decomposition with `torch.bmm` + `torch.softmax`, and
+        `masked_scores` does not go through SDPA at all. If this moves, the scope of preservation
+        has leaked.
         """
         _, graphs = generated
 
         for name in ("attention_block", "masked_scores"):
             ops = {node.op for node in graphs[name].nodes}
-            assert "attention" not in ops, f"{name} に attention が漏れている"
+            assert "attention" not in ops, f"attention leaked into {name}"
         assert "bmm" in {node.op for node in graphs["attention_block"].nodes}
         assert "softmax" in {node.op for node in graphs["masked_scores"].nodes}
 
     def test_every_gather_index_is_i32_from_both_sources(self, generated):
-        """gather の添字スロットは必ず意味論 i32（スロット別 dtype 契約 — ADR 0012）。
+        """The index slot of gather is always semantic i32 (the per-slot dtype contract — ADR 0012).
 
-        出どころは 2 通り: グラフ入力（gather_last_dim）と、記号依存の部分木を Tmax で焼いた
-        **i32 initializer の prefix**（symbolic_table — ADR 0010）。両方が golden に在ることを
-        要求する — 片方だけだと i32 添字の経路の一方が無検証のまま残る。
+        It comes from two places: a graph input (gather_last_dim) and **the prefix of an i32
+        initializer** baked from a symbol-dependent subtree at Tmax (symbolic_table — ADR 0010).
+        Both are required in the goldens — with only one, one of the two i32 index paths stays
+        untested.
         """
         _, graphs = generated
         index_slots = [
@@ -212,7 +226,7 @@ class TestCoverage:
         for model, graph, name in index_slots:
             declared = [spec for spec in graph.inputs if spec.name == name]
             dtype = declared[0].dtype if declared else graph.values[name].dtype
-            assert dtype == "i32", f"{model}: gather の添字 '{name}' が i32 でない"
+            assert dtype == "i32", f"{model}: gather index '{name}' is not i32"
             sources.add("input" if declared else "folded")
         assert sources == {"input", "folded"}
 
@@ -236,10 +250,11 @@ def _declared_shape(graph: IrGraph, name: str) -> list:
 
 
 def _model_parts(root: Path, name: str) -> tuple[Path, ...]:
-    """モデルの現物（コンテナの part 列 — part 0 から）。
+    """The model's actual files (the container's parts — from part 0).
 
-    配布形は常に連番へ分割されるので（container-v1 §8）、代表 path `model.krm` 自身は
-    書かれない — 現物を数えるのは `container_parts` の役目。
+    A distribution is always split into numbered parts (container-v1 §8), so the representative
+    path `model.krm` itself is never written — counting the actual files is `container_parts`'s
+    job.
     """
     return container_parts(root / name / MODEL_FILE)
 
@@ -252,8 +267,9 @@ class TestLayout:
         parts = _model_parts(root, spec.name)
         assert all(part.is_file() for part in parts)
         assert (root / spec.name / IO_FILE).is_file()
-        # part 0（2 文書）+ part 1（const 領域）は**常に**並ぶ（container-v1 §8）ので、
-        # 重みを 1 本も持たない golden でも 2 本以上になり、代表 path 自身は書かれない。
+        # Part 0 (the two documents) + part 1 (the const region) are **always** there
+        # (container-v1 §8), so even a golden without a single weight has 2 or more, and the
+        # representative path itself is not written.
         assert len(parts) >= 2
         assert not (root / spec.name / MODEL_FILE).exists()
 
@@ -276,9 +292,11 @@ class TestLayout:
 
     @pytest.mark.parametrize("spec", GOLDEN_SPECS, ids=lambda s: s.name)
     def test_io_dtypes_use_the_runtime_representation(self, generated, spec):
-        """io は意味論 dtype の実表現で書く（i64 → int32 / bool → uint32 の 0/1）。
+        """io is written in the actual representation of the semantic dtype (i64 → int32 / bool →
+        uint32 0/1).
 
-        後段の Deno E2E はこの対応で view を張るので、揃っていないと golden が読めない。
+        The downstream E2E builds its views on this mapping, so a mismatch makes the golden
+        unreadable.
         """
         root, graphs = generated
         graph = graphs[spec.name]
@@ -291,7 +309,8 @@ class TestLayout:
 
     @pytest.mark.parametrize("spec", GOLDEN_SPECS, ids=lambda s: s.name)
     def test_io_shapes_agree_with_the_declarations(self, generated, spec):
-        """宣言 shape を束縛で解決したものが実テンソルと一致する（レイアウトの意味検査）。"""
+        """The declared shape resolved with the bindings matches the actual tensor (a semantic check
+        of the layout)."""
         root, graphs = generated
         graph = graphs[spec.name]
         io = _io_tensors(root, spec.name)
@@ -323,21 +342,23 @@ class TestLayout:
 
 
 class TestDeterminism:
-    """固定 seed の再生成はバイト単位で同一（codegen 決定性と同じ規律）。
+    """Regeneration with the fixed seed is byte-identical (the same discipline as codegen
+    determinism).
 
-    ただし io（torch CPU の期待出力）のバイト一致は**参照環境専用** — oneDNN が CPU の ISA で
-    gemm / conv の kernel を出し分けるため、計算結果は最終 bit がマシン依存になる（CI 初回
-    実測 2026-08-16: GitHub runner で activations / conv2d_block の 2 spec だけ ±1〜2 ulp）。
-    model（グラフ + 固定 seed の重み — torch の CPU RNG はクロスマシンで決定的）は
-    どの環境でもバイト一致を要求する。sha256 参照門が参照環境専用なのと同じ性格
-    （docs/limitations.md）で、緩めるのではなく環境で検査を分ける。
+    The byte match of io (torch CPU's expected outputs), however, is **for the reference environment
+    only** — oneDNN dispatches gemm / conv kernels by the CPU's ISA, so the last bit of the results
+    depends on the machine (observed on the first CI run, 2026-08-16: on the GitHub runner only the
+    2 specs activations / conv2d_block differ by ±1–2 ulp). The model (graph + fixed-seed weights —
+    torch's CPU RNG is deterministic across machines) is required to match bytes in every
+    environment. The same nature as the sha256 reference check being for the reference environment
+    only (docs/limitations.md): the check is split by environment instead of being loosened.
     """
 
     @pytest.mark.parametrize("spec", GOLDEN_SPECS, ids=lambda s: s.name)
     def test_two_runs_produce_the_same_model_bytes(self, generated, tmp_path, spec):
-        """同じ seed から 2 度生成してバイト一致（決定性そのものを被験体にする）。
+        """Generating twice from the same seed matches bytes (determinism itself is the subject).
 
-        置き場が違ってもバイトは動かない（ファイル名は中身に入らない）。
+        A different location does not move the bytes (file names do not go into the content).
         """
         root, _ = generated
         generate_golden(spec, tmp_path)
@@ -353,7 +374,7 @@ class TestDeterminism:
         generated_parts = _model_parts(root, spec.name)
         committed = _model_parts(GOLDEN_ROOT, spec.name)
         assert [path.name for path in committed] == [path.name for path in generated_parts], (
-            f"生成物が未コミット: {GOLDEN_ROOT / spec.name}"
+            f"generated files are not committed: {GOLDEN_ROOT / spec.name}"
         )
         assert [path.read_bytes() for path in committed] == [
             path.read_bytes() for path in generated_parts
@@ -361,15 +382,15 @@ class TestDeterminism:
 
     @pytest.mark.skipif(
         os.environ.get("CI") == "true",
-        reason="io の torch CPU 出力は最終 bit がマシン依存（oneDNN の ISA 別 kernel）— "
-        "バイト一致は参照環境専用",
+        reason="the last bit of io's torch CPU output depends on the machine (oneDNN's per-ISA "
+        "kernels) — the byte match is for the reference environment only",
     )
     @pytest.mark.parametrize("spec", GOLDEN_SPECS, ids=lambda s: s.name)
     def test_regeneration_matches_the_committed_reference_io(self, generated, spec):
         root, _ = generated
 
         committed = GOLDEN_ROOT / spec.name / IO_FILE
-        assert committed.is_file(), f"生成物が未コミット: {committed}"
+        assert committed.is_file(), f"generated files are not committed: {committed}"
         assert committed.read_bytes() == (root / spec.name / IO_FILE).read_bytes()
 
 
@@ -382,12 +403,14 @@ def _tree_bytes(directory: Path) -> dict[str, bytes]:
 
 
 class TestAFailedRegenerationKeepsTheOldFixture:
-    """1 モデル分の生成が途中で落ちても、前回の fixture は 1 バイトも変わらない。
+    """Even when the generation of one model fails partway, the previous fixture does not change by
+    a single byte.
 
-    モデルを最終の置き場へ直接書いてから検算すると、検算の失敗で「新しいモデル + 古い io」が
-    残る（`publish_container` の MUST — 作業席の外で呼ぶと前回の成果物が消えうる）。
-    前回の中身は再生成と同じバイトにならないよう番兵へ差し替えておく（決定的な生成で同じ
-    バイトが書き戻されると、上書きされても検出できない）。
+    Writing the model straight to its final location and checking afterwards leaves "new model +
+    old io" when the check fails (the MUST of `publish_container` — called outside the staging
+    directory, the previous artifacts can be lost). The previous content is replaced by sentinels
+    so that it differs from the regenerated bytes (if deterministic generation wrote the same bytes
+    back, an overwrite could not be detected).
     """
 
     SPEC = GOLDEN_SPECS[0]
@@ -404,10 +427,10 @@ class TestAFailedRegenerationKeepsTheOldFixture:
         root, before = previous
 
         def refuse(where, tensor):
-            raise AssertionError(f"{where}: 検算で落ちた回")
+            raise AssertionError(f"{where}: a run that failed the check")
 
         monkeypatch.setattr(goldens, "_assert_not_trivial", refuse)
-        with pytest.raises(AssertionError, match="検算で落ちた回"):
+        with pytest.raises(AssertionError, match="a run that failed the check"):
             generate_golden(self.SPEC, root)
 
         assert _tree_bytes(root / self.SPEC.name) == before
@@ -418,16 +441,17 @@ class TestAFailedRegenerationKeepsTheOldFixture:
         real = os.replace
 
         def flaky(source, target):
-            # どの据え替えかは target 名で決める — `publish.os` は os モジュールそのものなので、
-            # 呼び出しの順番で数えると作業席の据え替え（`staged_publication`）も数に入り、
-            # publish 内部の順序が変わると別の段を落とすテストに化ける。2 本目の part は
-            # 1 本目が据わった後なので「part の据え替えの途中」になる。
+            # Which swap it is is decided by the target name — `publish.os` is the os module
+            # itself, so counting calls in order would also count the swap of the staging
+            # directory (`staged_publication`), and a change in publish's internal order would turn
+            # this into a test that fails a different step. The second part comes after the first
+            # is in place, so it is "partway through the swap of the parts".
             if re.search(r"-00002-of-\d{5}\.krm$", os.fspath(target)):
-                raise OSError("据え替えの途中で落ちた回")
+                raise OSError("a run that failed partway through the swap")
             real(source, target)
 
         monkeypatch.setattr(publish.os, "replace", flaky)
-        with pytest.raises(OSError, match="据え替えの途中"):
+        with pytest.raises(OSError, match="partway through the swap"):
             generate_golden(self.SPEC, root)
 
         assert _tree_bytes(root / self.SPEC.name) == before

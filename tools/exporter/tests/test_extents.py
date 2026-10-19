@@ -1,8 +1,9 @@
-"""記号次元の同一性判定（`karume.extents`）— 素の `==` との差だけを固定する。
+"""Identity of symbolic dimensions (`karume.extents`) — pins only the difference from a plain `==`.
 
-素の比較が**ヒント値**で答えを出すことは torch の実装挙動なので、実際に export した
-SymInt を材料に採る（定数を並べたテストでは、直したはずの経路が再び `==` に戻っても緑のまま
-通ってしまう）。guard は shape env を書き換えるため、`==` を踏むケースは**毎回 export し直す**。
+That the plain comparison answers by the **hint value** is torch implementation behavior, so the
+material is SymInts from an actual export (a test that lines up constants would stay green even if
+the fixed path went back to `==`). A guard rewrites the shape env, so a case that hits `==`
+**exports again every time**.
 """
 
 from __future__ import annotations
@@ -15,14 +16,16 @@ from karume.extents import extent_key, extent_keys, same_extents
 
 
 class TwoInputs(nn.Module):
-    """先頭次元だけが動的な 2 入力（形の比較をしないので、export 時点では無関係な 2 記号）。"""
+    """Two inputs whose leading dimension alone is dynamic (no shape comparison, so at export time
+    they are two unrelated symbols)."""
 
     def forward(self, a, b):
         return a.sum() + b.sum()
 
 
 def _two_symbols(hint: int = 4) -> tuple[torch.Tensor, torch.Tensor]:
-    """**別のシンボル**で、**ヒント値が同じ**先頭次元を持つ 2 つの meta を採る。"""
+    """Takes two metas whose leading dimensions are **different symbols** with **the same hint
+    value**."""
     exported = torch.export.export(
         TwoInputs(),
         (torch.zeros(hint, 3), torch.zeros(hint, 5)),
@@ -39,11 +42,12 @@ class TestSymbolicExtents:
         assert extent_keys(first.shape[:1]) != extent_keys(second.shape[:1])
 
     def test_the_plain_comparison_this_replaces_answers_by_the_hint(self) -> None:
-        """素の `==` は別シンボルでも `True` を返す（= 直前のテストの regress 検出器）。
+        """A plain `==` returns `True` even for different symbols (= the regression detector of the
+        previous test).
 
-        観測できるのは答えだけではない — `==` は shape env に等価 guard を積むので、**踏んだ
-        後**は 2 つの記号が同じ式へ潰れる。export 済みの制約に後付けの特殊化が混ざるとは
-        この書き換えのこと。
+        The answer is not the only thing observable — `==` adds an equality guard to the shape env,
+        so **after hitting it** the two symbols collapse into the same expression. This rewrite is
+        what "an after-the-fact specialization mixed into the exported constraints" means.
         """
         first, second = _two_symbols()
         assert [first.shape[0]] == [second.shape[0]]
@@ -60,7 +64,8 @@ class TestSymbolicExtents:
         assert extent_key(second.shape[1]) == 5
 
     def test_shapes_that_share_a_hint_are_not_the_same_shape(self) -> None:
-        """同じ rank・同じヒント値でも、記号が違えば `same_extents` は False。"""
+        """Even with the same rank and the same hint values, `same_extents` is False when the
+        symbols differ."""
         first, second = _two_symbols()
         assert not same_extents(first, second[:, :3])
 

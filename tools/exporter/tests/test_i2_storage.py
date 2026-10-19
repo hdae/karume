@@ -1,4 +1,4 @@
-"""INT2 の固定整数・宣言・容器への往復（ADR 0097）。"""
+"""INT2 fixed integers, declarations and the round trip through the container (ADR 0097)."""
 
 import json
 
@@ -18,14 +18,14 @@ from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValu
 from karume.publish import publish_container
 from karume.verify import IrError, parse_ir_graph, verify_container
 
-#: 2 行 × 16 要素を [-2,1] で埋めた固定整数の packed バイト（1 行 4 バイト）。
+#: Packed bytes of fixed integers filling 2 rows × 16 elements with [-2,1] (4 bytes per row).
 PACKED = bytes([0xE4, 0x1B, 0x72, 0x8D] * 2)
 
 PROVENANCE = Provenance(license="mit")
 
 
 def graph(storage: IrStorage | None = None):
-    """i2 を宣言したグラフ（IR 単体の規則を見る側が使う形）。"""
+    """Graph declaring i2 (the form the IR-only rule checks use)."""
     declared = storage if storage is not None else IrStorage(dtype="i2", scale="scale")
     return IrGraph(
         symbols=[],
@@ -64,7 +64,7 @@ class TestFixedInt2:
 
 
 def _fixed(scale_shape: tuple[int, int]) -> tuple[IrGraph, dict, dict]:
-    """i2 の固定重み 1 本（論理は f32/meta・実体は packed）。"""
+    """One fixed i2 weight (logically f32/meta, packed in storage)."""
     plain = graph(IrStorage(dtype="f32"))
     tensors = {"w": torch.empty(2, 16, dtype=torch.float32, device="meta")}
     fixed = {
@@ -78,7 +78,7 @@ def _fixed(scale_shape: tuple[int, int]) -> tuple[IrGraph, dict, dict]:
 
 
 class TestFixedPackedBytesReachTheContainer:
-    """固定 packed 値は**再量子化せずそのまま** block の payload になる。"""
+    """Fixed packed values become the block payload **as they are, without requantization**."""
 
     def test_a_row_scale_lands_in_the_container_byte_for_byte(self, tmp_path):
         plain, tensors, fixed = _fixed((2, 1))
@@ -101,7 +101,7 @@ class TestFixedPackedBytesReachTheContainer:
         assert (counts.compressed_bytes, counts.scale_bytes) == (8, 8)
 
     def test_a_per_column_scale_is_refused_before_anything_is_written(self):
-        """`[1, rows]` は行ごとの scale ではない — 通すとチャネルの値が黙って入れ替わる。"""
+        """`[1, rows]` is not a per-row scale — accepting it would silently swap channel values."""
         plain, tensors, fixed = _fixed((1, 2))
 
         with pytest.raises(EmitError, match="scale"):

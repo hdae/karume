@@ -1,8 +1,9 @@
-"""正規化パスの振る舞い固定。
+"""Pins the behavior of the normalization passes.
 
-各パスは「IR 語彙を増やさない同値書き換え」なので、①書き換え前は語彙外で落ちること
-②書き換え後は狙った 1 ノードになること の両方を見る（片側だけでは、パスが無くても
-通る恒真テストになりうる）。
+Each pass is "an equivalent rewrite that adds no IR vocabulary", so both ① that the form fails as
+outside the vocabulary before the rewrite and ② that it becomes the intended single node after
+the rewrite are checked (either side alone could be a tautological test that passes even without
+the pass).
 """
 
 from __future__ import annotations
@@ -54,7 +55,7 @@ class TestPow2ToMul:
         assert normalize_graph(decomposed)["pow2->mul"] == 1
 
     def test_without_the_pass_pow_is_outside_the_vocabulary(self):
-        """パスが載荷であることの確認 — 書き換えなければ未対応 op で落ちる。"""
+        """Confirms the pass is load-bearing — without the rewrite it fails on an unsupported op."""
         decomposed = decompose(Square(), (torch.randn(3, 4),))
 
         with pytest.raises(UnsupportedAtenOpsError) as err:
@@ -63,7 +64,7 @@ class TestPow2ToMul:
         assert "aten.pow.Tensor_Scalar" in err.value.ops
 
     def test_other_exponents_are_left_alone(self):
-        """同値でない書き換えはしない（3 乗は mul 1 回に落ちない）。"""
+        """No non-equivalent rewrite (a cube does not become a single mul)."""
         decomposed = decompose(Cube(), (torch.randn(3, 4),))
         normalize_graph(decomposed)
 
@@ -73,10 +74,12 @@ class TestPow2ToMul:
         assert "aten.pow.Tensor_Scalar" in err.value.ops
 
     def test_a_promoting_float_exponent_is_left_alone(self):
-        """`2.0` は `2.0 == 2` で素通りするが、整数テンソルでは型昇格を伴う（同値でない）。
+        """`2.0` slips through as `2.0 == 2`, but on an integer tensor it involves type promotion
+        (not equivalent).
 
-        `pow(i64, 2.0)` は f32 を返す一方 `mul(i64, i64)` は i64 のまま — 書き換えると
-        黙って別の dtype の値になる。触らなければ未対応 op として全件列挙で落ちる。
+        `pow(i64, 2.0)` returns f32 while `mul(i64, i64)` stays i64 — a rewrite would silently
+        give values of a different dtype. Left alone, it fails as an unsupported op in the full
+        enumeration.
         """
         decomposed = decompose(FloatSquare(), (torch.arange(6).reshape(3, 2),))
         stats = normalize_graph(decomposed)
@@ -88,10 +91,11 @@ class TestPow2ToMul:
         assert "aten.pow.Tensor_Scalar" in err.value.ops
 
     def test_a_float_exponent_is_left_alone_even_without_promotion(self):
-        """受理するのは**整数リテラルの 2**だけ（f32 では昇格が無くても書き換えない）。
+        """Only **the integer literal 2** is accepted (no rewrite in f32 even without promotion).
 
-        `2.0 == 2` に頼ると「昇格が無ければ同値」という判断を dtype 検査 1 本に預けることに
-        なる。指数の表記そのものを門にしておけば、受理条件が「見た形」で読める。
+        Relying on `2.0 == 2` would leave the judgment "equivalent if there is no promotion" to a
+        single dtype check. Making the spelling of the exponent itself the check keeps the
+        acceptance condition readable as "the form as written".
         """
         decomposed = decompose(FloatSquare(), (torch.randn(3, 2),))
         stats = normalize_graph(decomposed)
@@ -100,28 +104,29 @@ class TestPow2ToMul:
 
 
 class FloatSquare(nn.Module):
-    """型昇格を伴う 2 乗（整数テンソル × float の指数）。"""
+    """A square involving type promotion (integer tensor × float exponent)."""
 
     def forward(self, x):
         return x**2.0
 
 
 class Repeated(nn.Module):
-    """恒等 repeat（引数が全て 1）— 実測 4 本と同じ形（recon §4-1）。"""
+    """An identity repeat (all arguments 1) — the same form as the 4 observed ones (recon §4-1)."""
 
     def forward(self, x):
         return x.repeat(1, 1)
 
 
 class Tripled(nn.Module):
-    """本物の repeat（IR 語彙に無い）— 恒等除去が誤爆しないことの対照。"""
+    """A real repeat (not in the IR vocabulary) — the counterpart showing identity removal does not
+    misfire."""
 
     def forward(self, x):
         return x.repeat(3, 1)
 
 
 class RankRaisingRepeat(nn.Module):
-    """引数が全て 1 でも本数が rank を超えれば rank が上がる（恒等ではない）。"""
+    """Even with all arguments 1, more arguments than the rank raise the rank (not an identity)."""
 
     def forward(self, x):
         return x.repeat(1, 1, 1)
@@ -148,7 +153,8 @@ class TestDropIdentityRepeat:
         "module", [Tripled(), RankRaisingRepeat()], ids=["real-repeat", "rank-raising"]
     )
     def test_non_identity_repeats_stay_in_the_enumeration(self, module):
-        """B > 1 の repeat と rank を上げる形は書き換えない（黙って近似しない）。"""
+        """A repeat with B > 1 and a form that raises the rank are not rewritten (no silent
+        approximation)."""
         decomposed = decompose(module, (torch.randn(3, 4),))
         normalize_graph(decomposed)
 
@@ -159,23 +165,25 @@ class TestDropIdentityRepeat:
 
 
 class Alpha(nn.Module):
-    """係数付き加算（`x + alpha·y`）— IR 語彙に無いので正規化は触らず変換が落とす。"""
+    """Addition with a coefficient (`x + alpha·y`) — not in the IR vocabulary, so normalization
+    leaves it alone and conversion fails on it."""
 
     def forward(self, x, y):
         return torch.add(x, y, alpha=2)
 
 
-#: {@link Alpha} の被験体（第 2 被演算子は `_rewrite_add` がスカラへ差し替える）。
+#: The subject of {@link Alpha} (`_rewrite_add` swaps the second operand for a scalar).
 ALPHA_ARGS = (torch.randn(3, 4), torch.randn(4))
 
 
 def _rewrite_add(decomposed, *, addend: float, alpha: int):
-    """分解後グラフの `aten.add.Tensor` を「テンソル + スカラ（係数 alpha）」へ書き換える。
+    """Rewrites the `aten.add.Tensor` of the decomposed graph into "tensor + scalar (coefficient
+    alpha)".
 
-    alpha が分解で畳まれるかは torch 版次第なので、**どちらの値も注入**して torch 版に
-    依存させない（テスト自身が既に args を書き換えている手法の延長）。`addend` は縛りたい
-    ガードで変える — 昇格（`_promote_scalar_operands`）は非ゼロ、恒等除去
-    （`_drop_identity_add`）は 0.0 でないと発火条件を満たさない。
+    Whether decomposition folds alpha depends on the torch version, so **both values are injected**
+    to stay independent of it (an extension of the technique the test already uses to rewrite
+    args). `addend` changes with the guard to pin — promotion (`_promote_scalar_operands`) fires
+    only on a non-zero value, identity removal (`_drop_identity_add`) only on 0.0.
     """
     node = next(
         node
@@ -194,7 +202,8 @@ class TestDropIdentityAdd:
         assert node_ops(graph) == []
 
     def test_it_runs_before_scalar_promotion(self):
-        """順序が逆だと `+0` が rank-1 定数になり、恒等除去の対象でなくなる。"""
+        """In the reverse order `+0` would become a rank-1 constant and no longer be removed as an
+        identity."""
         decomposed = decompose(ZeroAdd(), (torch.randn(3, 4),))
         stats = normalize_graph(decomposed)
 
@@ -211,10 +220,11 @@ class TestDropIdentityAdd:
         assert node_ops(graph) == ["add"]
 
     def test_a_coefficient_add_is_not_dropped_as_identity(self):
-        """`x + 2·0` も恒等だが、**alpha を落とした IR** を書かないためにここでは触らない。
+        """`x + 2·0` is an identity too, but it is left alone here so as not to write **IR that
+        drops alpha**.
 
-        触ると次に来るのは「係数を黙って落とした IR」なので、恒等除去は alpha 無しの形
-        だけに掛ける（対照は下の 1 本）。
+        Touching it would next lead to "IR that silently dropped the coefficient", so identity
+        removal applies only to the form without alpha (the counterpart is the one test below).
         """
         decomposed = decompose(Alpha(), ALPHA_ARGS)
         _rewrite_add(decomposed, addend=0.0, alpha=2)
@@ -224,7 +234,8 @@ class TestDropIdentityAdd:
         assert "drop_identity_add" not in stats
 
     def test_the_same_zero_addend_is_dropped_without_alpha(self):
-        """対照 — `alpha == 1` なら同じ形は消える（上の assert の恒真化を防ぐ）。"""
+        """Counterpart — with `alpha == 1` the same form disappears (keeps the assert above from
+        being tautological)."""
         decomposed = decompose(Alpha(), ALPHA_ARGS)
         _rewrite_add(decomposed, addend=0.0, alpha=1)
 
@@ -234,7 +245,8 @@ class TestDropIdentityAdd:
 
 
 class TestPromoteScalarOperands:
-    """スカラ被演算子は rank-1 定数へ（IR 語彙も attrs も増やさない — recon §4-4）。"""
+    """Scalar operands become rank-1 constants (adding neither IR vocabulary nor attrs — recon
+    §4-4)."""
 
     @pytest.mark.parametrize(
         ("build", "expected"),
@@ -256,7 +268,8 @@ class TestPromoteScalarOperands:
         assert only_node(graph, expected[0]).ins[0] == "x"
 
     def test_a_scalar_on_the_left_stays_on_the_left(self):
-        """`1 − mask` は非可換 — 定数を右に置くと符号が黙って反転する（mask 経路の実測形）。"""
+        """`1 − mask` is not commutative — putting the constant on the right silently flips the sign
+        (the observed form of the mask path)."""
 
         class OneMinus(nn.Module):
             def forward(self, mask):
@@ -270,7 +283,8 @@ class TestPromoteScalarOperands:
         assert torch.equal(constant, torch.tensor([1], dtype=torch.int32))
 
     def test_the_constant_takes_the_tensor_dtype(self):
-        """i32 側は i32 initializer（二項 op の「入力 dtype は同型」契約 — ADR 0010）。"""
+        """The i32 side gets an i32 initializer (the binary-op contract "input dtypes are the same"
+        — ADR 0010)."""
 
         class Offset(nn.Module):
             def forward(self, mask):
@@ -283,14 +297,16 @@ class TestPromoteScalarOperands:
         assert graph.initializers[constant].storage.dtype == "i32"
 
     def test_a_rank0_tensor_operand_is_left_alone(self):
-        """`[] × [1] → [1]` は rank が上がる — 昇格すると宣言と実体が黙って食い違う。
+        """`[] × [1] → [1]` raises the rank — promoting would silently make the declaration and the
+        data disagree.
 
-        実測でも lifted スカラ定数の `sqrt(c * 3)` がこの形（畳み込みで消える）。
+        The observed `sqrt(c * 3)` of a lifted scalar constant has this form too (it disappears in
+        folding).
         """
 
         class ScalarTensor(nn.Module):
             def forward(self, x):
-                scalar = x.sum(dim=-1).amax(dim=-1)  # rank-0 テンソル
+                scalar = x.sum(dim=-1).amax(dim=-1)  # rank-0 tensor
                 return x + (scalar * 3.0)
 
         decomposed = decompose(ScalarTensor(), (torch.randn(3, 4),))
@@ -299,11 +315,13 @@ class TestPromoteScalarOperands:
         assert "promote_scalar_operand" not in stats
 
     def test_alpha_is_left_alone(self):
-        """係数付き加算は IR 語彙に無い — 昇格で alpha を黙って落とさない。
+        """Addition with a coefficient is not in the IR vocabulary — promotion does not silently
+        drop alpha.
 
-        alpha が分解で畳まれるかは torch 版次第なので、**注入**して確定的に踏む
-        （テスト自身が既に args を書き換えている手法の延長）。対照は同じ被験体で
-        alpha を入れない形 — そちらは昇格するので、この assert は恒真ではない。
+        Whether decomposition folds alpha depends on the torch version, so it is **injected** to
+        exercise it deterministically (an extension of the technique the test already uses to
+        rewrite args). The counterpart is the same subject without alpha — that one is promoted,
+        so this assert is not tautological.
         """
         decomposed = decompose(Alpha(), ALPHA_ARGS)
         _rewrite_add(decomposed, addend=1.0, alpha=2)
@@ -313,7 +331,8 @@ class TestPromoteScalarOperands:
         assert "promote_scalar_operand" not in stats
 
     def test_the_same_addend_is_promoted_without_alpha(self):
-        """対照 — `alpha == 1` なら同じ形は昇格する（上の assert の恒真化を防ぐ）。"""
+        """Counterpart — with `alpha == 1` the same form is promoted (keeps the assert above from
+        being tautological)."""
         decomposed = decompose(Alpha(), ALPHA_ARGS)
         _rewrite_add(decomposed, addend=1.0, alpha=1)
 
@@ -323,9 +342,11 @@ class TestPromoteScalarOperands:
 
 
 class MaskedByEqZero(nn.Module):
-    """実測形（`scores.masked_fill(attn_mask == 0, -1e4)`）を縮めたもの — recon §2。
+    """A reduced version of the observed form (`scores.masked_fill(attn_mask == 0, -1e4)`) — recon
+    §2.
 
-    attn_mask はグラフ入力由来なので定数畳み込みできず、`eq` が実行系に残る。
+    attn_mask comes from a graph input, so it cannot be constant-folded and `eq` stays in the
+    executed graph.
     """
 
     def forward(self, scores, mask):
@@ -338,9 +359,10 @@ class EqNonZero(nn.Module):
 
 
 class TestEqZeroToNotBool:
-    """`eq(x, 0)` → `bitwise_not(cast(x, bool))`（ADR 0015 — 新 op を作らない裁定）。
+    """`eq(x, 0)` → `bitwise_not(cast(x, bool))` (ADR 0015 — the ruling not to add a new op).
 
-    同値性の根拠は cast 規約「x → bool は x != 0」で、`not (x != 0)` は `x == 0` そのもの。
+    The equivalence rests on the cast convention "x → bool is x != 0": `not (x != 0)` is exactly
+    `x == 0`.
     """
 
     def test_the_measured_masked_fill_graph_lowers_without_a_new_op(self):
@@ -361,7 +383,7 @@ class TestEqZeroToNotBool:
         assert normalize_graph(decomposed)["eq_zero->bitwise_not_cast"] == 1
 
     def test_without_the_pass_eq_is_outside_the_vocabulary(self):
-        """パスが載荷であることの確認 — 書き換えなければ未対応 op で落ちる。"""
+        """Confirms the pass is load-bearing — without the rewrite it fails on an unsupported op."""
         decomposed = decompose(
             MaskedByEqZero(),
             (torch.randn(2, 3), torch.tensor([[1, 0, 1], [0, 1, 1]], dtype=torch.int64)),
@@ -373,7 +395,8 @@ class TestEqZeroToNotBool:
         assert "aten.eq.Scalar" in err.value.ops
 
     def test_a_non_zero_comparand_is_left_alone(self):
-        """0 以外との比較には成り立たない書き換えなので、触らず列挙へ回す。"""
+        """The rewrite does not hold for comparisons with anything other than 0, so the form is left
+        alone and goes to the enumeration."""
         decomposed = decompose(EqNonZero(), (torch.randn(3),))
 
         stats = normalize_graph(decomposed)
@@ -384,10 +407,10 @@ class TestEqZeroToNotBool:
 
 
 class TestDropMetadataAsserts:
-    """`_assert_tensor_metadata` は IR に出ない副作用ノード。
+    """`_assert_tensor_metadata` is a side-effect node that does not appear in the IR.
 
-    eliminate_dead_code はこれを impure と見なして残すため、消さないと置き換え済みの
-    部分木が assert 経由で生き残る。
+    eliminate_dead_code deems it impure and keeps it, so unless it is removed, already-replaced
+    subtrees survive through the assert.
     """
 
     def test_assert_nodes_are_removed(self):
@@ -396,7 +419,7 @@ class TestDropMetadataAsserts:
         before = [
             node for node in graph.nodes if node.target is aten._assert_tensor_metadata.default
         ]
-        assert before, "前提: 分解後に assert ノードが在ること"
+        assert before, "precondition: assert nodes exist after decomposition"
 
         stats = normalize_graph(decomposed)
 
@@ -407,7 +430,7 @@ class TestDropMetadataAsserts:
 
 
 class Split(nn.Module):
-    """ConvFlow / ResidualCoupling の `torch.split(x, [half]*2, 1)`（recon §2）の縮小形。"""
+    """A reduced form of ConvFlow / ResidualCoupling's `torch.split(x, [half]*2, 1)` (recon §2)."""
 
     def forward(self, x):
         first, second = torch.split(x, [2, 3], 1)
@@ -415,13 +438,15 @@ class Split(nn.Module):
 
 
 class TestSplitToSlices:
-    """split_with_sizes + getitem → slice の列（IR に多出力 op は無い — ADR 0014）。"""
+    """split_with_sizes + getitem → a sequence of slices (the IR has no multi-output op — ADR
+    0014)."""
 
     def test_each_getitem_becomes_its_own_slice(self):
         graph, _ = export_and_convert(Split(), (torch.randn(1, 5, 4),))
 
         assert node_ops(graph) == ["slice", "slice", "mul"]
-        # 区間は sizes の累積そのもの（境界を 1 つずらすと区間が重なる / 隙間ができる）
+        # The ranges are exactly the cumulative sizes (shifting a boundary by one makes ranges
+        # overlap / leaves a gap)
         assert graph.nodes[0].attrs == {"dim": 1, "start": 0, "end": 2}
         assert graph.nodes[1].attrs == {"dim": 1, "start": 2, "end": 5}
         assert graph.nodes[0].ins == ["x"] and graph.nodes[1].ins == ["x"]
@@ -429,28 +454,30 @@ class TestSplitToSlices:
     def test_the_pass_reports_its_firing_count(self):
         decomposed = decompose(Split(), (torch.randn(1, 5, 4),))
 
-        # 取り出し口の本数ぶん（getitem 1 本 = slice 1 本）
+        # As many as the extraction points (one getitem = one slice)
         assert normalize_graph(decomposed)["split_with_sizes->slice"] == 2
 
     def test_without_the_pass_split_is_outside_the_vocabulary(self):
-        """パスが載荷であることの確認 — 書き換えなければ未対応 op で落ちる。"""
+        """Confirms the pass is load-bearing — without the rewrite it fails on an unsupported op."""
         decomposed = decompose(Split(), (torch.randn(1, 5, 4),))
 
         with pytest.raises(UnsupportedAtenOpsError) as err:
             convert(decomposed)
 
-        # split 自身の meta はテンソルでない（タプル）ので列挙に出るのは取り出し口の getitem。
+        # split's own meta is not a tensor (a tuple), so what shows in the enumeration is the
+        # getitem extraction points.
         assert [name for names in err.value.ops.values() for name in names] == [
             "getitem",
             "getitem_1",
         ]
 
 
-# ---- M1-P4 波 2（ADR 0016）— rms fold / ガード除去 / rank 下げ / select ------
+# ---- M1-P4 phase 2 (ADR 0016) — rms fold / guard removal / rank lowering / select ------
 
 
 class HandWrittenRmsNorm(nn.Module):
-    """Qwen3 / DiT と同じ手書き分解形（preserve では畳めず FX 照合が要る）。"""
+    """The same hand-written decomposition as Qwen3 / DiT (preserve cannot fold it; it needs FX
+    matching)."""
 
     EPS = 1e-6
 
@@ -463,7 +490,8 @@ class HandWrittenRmsNorm(nn.Module):
 
 
 class BroadcastRmsNorm(HandWrittenRmsNorm):
-    """weight が最終次元長の rank1 でない形（契約と別の意味論になるので畳まない）。"""
+    """A form whose weight is not rank 1 of the last-dimension length (different semantics from the
+    contract, so not folded)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -471,15 +499,16 @@ class BroadcastRmsNorm(HandWrittenRmsNorm):
 
 
 class PowRmsNorm(HandWrittenRmsNorm):
-    """Gemma4 形 — rsqrt でなく `pow(ms, -0.5)`（modeling_gemma4.py が torch/JAX の
-    コンパイラ差を理由に書く形。`_pow_neg_half_to_rsqrt` が前段で寄せる）。"""
+    """The Gemma4 form — `pow(ms, -0.5)` instead of rsqrt (the form modeling_gemma4.py writes
+    because of torch/JAX compiler differences; `_pow_neg_half_to_rsqrt` normalizes it in an
+    earlier step)."""
 
     def forward(self, x):
         return x * (x.pow(2).mean(-1, keepdim=True) + self.EPS).pow(-0.5) * self.weight
 
 
 class WeightlessRmsNorm(nn.Module):
-    """Gemma4 `v_norm`（RMSNorm with_scale=False）— weight 無し形。"""
+    """Gemma4 `v_norm` (RMSNorm with_scale=False) — the form without weight."""
 
     EPS = 1e-6
 
@@ -495,10 +524,11 @@ class TestFoldRmsNorm:
         assert only_node(graph, "rms_norm").attrs == {"eps": HandWrittenRmsNorm.EPS}
 
     def test_it_runs_before_the_pow2_rewrite(self):
-        """順序 MUST（ADR 0016）— `pow2->mul` が先に走るとパターンが 1 つ減る。
+        """Order MUST (ADR 0016) — if `pow2->mul` ran first, the pattern would lose one node.
 
-        rms fold が先なら `pow(x,2)` は rms_norm ごと消えるので、`pow2->mul` の発火は 0 本。
-        逆順だと mul(x,x) が残り、統計に 1 本立つ（= 順序が入れ替わったことが数に出る）。
+        With rms fold first, `pow(x,2)` disappears together with the rms_norm, so `pow2->mul`
+        fires 0 times. In the reverse order mul(x,x) remains and the stats show 1 (= a swapped
+        order shows in the count).
         """
         decomposed = decompose(HandWrittenRmsNorm(), (torch.randn(3, 4),))
 
@@ -517,15 +547,15 @@ class TestFoldRmsNorm:
         assert "aten.rsqrt.default" in err.value.ops
 
     def test_the_pow_form_becomes_one_rms_norm_node(self):
-        """Gemma4 の pow(ms, -0.5) 形も `_pow_neg_half_to_rsqrt` 経由で 1 ノードに畳まれる。"""
+        """Gemma4's pow(ms, -0.5) form also folds into one node via `_pow_neg_half_to_rsqrt`."""
         graph, _ = export_and_convert(PowRmsNorm(), (torch.randn(3, 4),))
 
         assert node_ops(graph) == ["rms_norm"]
         assert only_node(graph, "rms_norm").attrs == {"eps": PowRmsNorm.EPS}
 
     def test_a_stray_pow_neg_half_surfaces_as_rsqrt_in_the_enumeration(self):
-        """RMSNorm に畳まれない pow(-0.5) は rsqrt になって**未対応 op として落ちる**
-        （rsqrt は IR 語彙に無い — 黙って通らないことの固定）。"""
+        """A pow(-0.5) that does not fold into RMSNorm becomes rsqrt and **fails as an unsupported
+        op** (rsqrt is not in the IR vocabulary — pins that it does not pass silently)."""
 
         class StrayPow(nn.Module):
             def forward(self, x):
@@ -537,7 +567,8 @@ class TestFoldRmsNorm:
         assert "aten.rsqrt.default" in err.value.ops
 
     def test_the_weightless_form_becomes_rms_norm_with_synthesized_ones(self):
-        """weight 無し形（Gemma4 v_norm）は rms_norm 1 ノード + ones 合成（×1 の厳密恒等）。"""
+        """The form without weight (Gemma4 v_norm) becomes one rms_norm node + synthesized ones (×1,
+        an exact identity)."""
         graph, tensors = export_and_convert(WeightlessRmsNorm(), (torch.randn(3, 4),))
 
         assert node_ops(graph) == ["rms_norm"]
@@ -547,11 +578,12 @@ class TestFoldRmsNorm:
         assert torch.equal(tensors[weight_key], torch.ones(4))
 
     def test_a_coefficient_on_the_eps_add_blocks_the_fold(self):
-        """`add(ms, eps)` に係数が付いた形は畳まない（eps を `alpha·eps` として黙って読まない）。
+        """A form with a coefficient on `add(ms, eps)` is not folded (eps is not silently read as
+        `alpha·eps`).
 
-        `_eps_operand` の alpha ガードを外すと畳んだ rms_norm の attrs が実際の eps と
-        食い違う — 値だけが静かにずれる形なので、畳まないことを縛る（対照は同じ被験体を
-        alpha 無しで通す上の 1 本）。
+        Removing the alpha guard of `_eps_operand` would make the attrs of the folded rms_norm
+        disagree with the actual eps — a form where only the values quietly drift, so not folding
+        is pinned (the counterpart is the test above that runs the same subject without alpha).
         """
         decomposed = decompose(HandWrittenRmsNorm(), (torch.randn(3, 4),))
         eps_add = next(
@@ -568,10 +600,11 @@ class TestFoldRmsNorm:
         assert "rms_norm" not in stats
 
     def test_a_weighted_norm_never_splits_into_the_weightless_form(self):
-        """第 2 走査（weight 無し）が weight 付き norm の内側 mul を先取りしないこと。
+        """The second sweep (without weight) does not grab the inner mul of a norm with weight
+        first.
 
-        崩れると rms_norm_weightless + 裸の mul に割れて weight の融合が消える —
-        統計の内訳がそのまま検出器になる。
+        If it did, the norm would split into rms_norm_weightless + a bare mul and the weight fusion
+        would disappear — the breakdown of the stats is the detector.
         """
         decomposed = decompose(HandWrittenRmsNorm(), (torch.randn(3, 4),))
 
@@ -581,9 +614,10 @@ class TestFoldRmsNorm:
         assert "rms_norm_weightless" not in stats
 
     def test_a_broadcast_weight_folds_weightless_and_keeps_its_own_mul(self):
-        """broadcast weight は rms_norm に**入らない**（契約 = 正規化長の正本は weight の
-        長さ）。正規化部だけ weight 無しで畳まれ、broadcast の乗算は裸の mul として残る —
-        意味論は torch と同一のまま、契約外の weight が rms_norm へ混入しないことの固定。"""
+        """A broadcast weight does **not go into** the rms_norm (the contract = the weight's length
+        is the source of truth for the normalized length). Only the normalization part folds without
+        weight, and the broadcast multiplication stays as a bare mul — semantics identical to torch,
+        pinning that a weight outside the contract does not get into the rms_norm."""
         graph, tensors = export_and_convert(BroadcastRmsNorm(), (torch.randn(3, 3),))
 
         assert node_ops(graph) == ["rms_norm", "mul"]
@@ -593,14 +627,15 @@ class TestFoldRmsNorm:
 
 
 class CausalAttention(nn.Module):
-    """SDPA の因果マスク経路（safe-softmax ガードが立つ最小形）。"""
+    """The causal-mask path of SDPA (the smallest form that raises the safe-softmax guard)."""
 
     def forward(self, q, k, v):
         return nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
 
 
 class FullyMaskedAttention(nn.Module):
-    """全要素 -inf のマスク（ガードが**本当に効く**形 — 除去すると NaN が下流へ流れる）。"""
+    """A mask that is -inf everywhere (a form where the guard **really matters** — removing it lets
+    NaN flow downstream)."""
 
     def forward(self, q, k, v):
         bias = torch.full((1, 1, 4, 4), float("-inf"))
@@ -608,9 +643,10 @@ class FullyMaskedAttention(nn.Module):
 
 
 class LiteralMaskedAttention(nn.Module):
-    """グラフ内のリテラルから組むマスク（`-inf` を直書きしない -inf 源の形）。
+    """A mask built from a literal in the graph (a -inf source that does not write `-inf`
+    directly).
 
-    `negate=True` は `+inf` のリテラルを符号反転して -inf にする形（`-mask * inf` の類）。
+    `negate=True` negates a `+inf` literal into -inf (the `-mask * inf` kind).
     """
 
     def __init__(self, literal: float, *, negate: bool = False) -> None:
@@ -626,10 +662,11 @@ class LiteralMaskedAttention(nn.Module):
 
 
 class BufferMaskedAttention(nn.Module):
-    """マスクを `register_buffer` で持つ SDPA。
+    """SDPA holding its mask via `register_buffer`.
 
-    buffer は torch.export で **placeholder に持ち上がる**ので、「placeholder は有限」と
-    決め打つ判定はこの形を素通りさせる（-inf 行があってもガードを消す = NaN が下流へ流れる）。
+    torch.export **lifts a buffer to a placeholder**, so a verdict that assumes "placeholders are
+    finite" lets this form through (it removes the guard even with a -inf row = NaN flows
+    downstream).
     """
 
     def __init__(self, bias: torch.Tensor) -> None:
@@ -641,9 +678,9 @@ class BufferMaskedAttention(nn.Module):
 
 
 class RuntimeMaskedAttention(nn.Module):
-    """マスクが**実行時入力**の SDPA（ADR 0044 の主対象）。
+    """SDPA whose mask is **a run-time input** (the main subject of ADR 0044).
 
-    実値が export 時に決まらないので不活性の証明が原理的に立たない。
+    The actual values are not known at export time, so inactivity can in principle not be proven.
     """
 
     def forward(self, q, k, v, mask):
@@ -651,10 +688,11 @@ class RuntimeMaskedAttention(nn.Module):
 
 
 class NegInfScoreAttention(nn.Module):
-    """スコア**側**にも -inf 源がある形（証明不能のもう 1 系 — マスクの実評価では閉じない）。
+    """A form with a -inf source on the score **side** too (the other unprovable kind — evaluating
+    the mask does not settle it).
 
-    マスクは行を空にしない有限形だが、q 側の buffer が -inf を含むので「-inf は加算マスク
-    1 本からのみ入る」という証明の前提が崩れる。
+    The mask is finite and leaves no row empty, but the buffer on the q side contains -inf, which
+    breaks the premise of the proof that "-inf enters only from the one additive mask".
     """
 
     def __init__(self) -> None:
@@ -673,10 +711,12 @@ class NegInfScoreAttention(nn.Module):
 
 
 class LogScoreAttention(nn.Module):
-    """スコア側に `log`（-inf を**生む** op）を持つ形。マスク自体は有限。
+    """A form with `log` (an op that **produces** -inf) on the score side. The mask itself is
+    finite.
 
-    `log(0) = -inf` は引数に -inf リテラルを持たないので、定数走査だけを見る判定では
-    源として数えられない — 依存錐が「有限」と誤判定され、ガードが**除去**される。
+    `log(0) = -inf` has no -inf literal among its arguments, so a verdict that looks only at the
+    constant sweep does not count it as a source — the dependency cone is wrongly judged "finite"
+    and the guard is **removed**.
     """
 
     def __init__(self) -> None:
@@ -690,7 +730,8 @@ class LogScoreAttention(nn.Module):
 
 
 class DividedScoreAttention(nn.Module):
-    """スコア側の除数が**テンソル**（非ゼロと示せない）の形 — `div(x, 0) = ±inf`。"""
+    """A form whose divisor on the score side is **a tensor** (cannot be shown non-zero) — `div(x,
+    0) = ±inf`."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -701,11 +742,13 @@ class DividedScoreAttention(nn.Module):
 
 
 class GatheredMaskAttention(nn.Module):
-    """マスクを buffer からの `index_select` で作る形（不活性判定の実評価が例外で落ちる系）。
+    """A form that builds the mask with `index_select` from a buffer (the kind where evaluating the
+    inactivity verdict raises).
 
-    実評価は buffer（placeholder）を**実値**（最終軸 4）へ解決する一方、記号長は probe 値
-    （5 / 9）へ置換するので、両者が同じ式で出会うと torch が `IndexError` を投げる。
-    判定の失敗であってエクスポータの故障ではないので、export ごと落としてはいけない。
+    The evaluation resolves the buffer (placeholder) to its **actual values** (last axis 4) while
+    substituting probe values (5 / 9) for the symbolic length, so when the two meet in one
+    expression torch raises `IndexError`. That is a failure of the verdict, not a fault of the
+    exporter, so it must not take the whole export down.
     """
 
     def __init__(self) -> None:
@@ -723,7 +766,8 @@ class GatheredMaskAttention(nn.Module):
 
 ATTENTION_ARGS = (torch.randn(1, 1, 4, 3), torch.randn(1, 1, 4, 3), torch.randn(1, 1, 4, 3))
 RUNTIME_MASK_ARGS = (*ATTENTION_ARGS, torch.tensor([[[[True, True, False, False]]]]))
-#: `GatheredMaskAttention` を記号長つきで export するための軸指定（q / k / v の系列軸）。
+#: The axis spec for exporting `GatheredMaskAttention` with a symbolic length (the sequence axis of
+#: q / k / v).
 SYMBOLIC_LENGTH_SHAPES = ({2: Dim("T", max=16)},) * 3
 
 
@@ -745,7 +789,7 @@ def _softmax_nodes(decomposed) -> list:
 
 class TestDropSafeSoftmaxGuard:
     def test_a_symbolic_mask_keeps_the_guard_outside_the_probe_lengths(self):
-        """T=5/9 の非空は、T=2..4 の全マスク行を否定しない。"""
+        """Non-empty rows at T=5/9 do not rule out fully masked rows at T=2..4."""
 
         class ShortMaskedRows(nn.Module):
             def forward(self, x):
@@ -773,7 +817,8 @@ class TestDropSafeSoftmaxGuard:
 
         assert stats["softmax_guard:masked-rows-nonempty"] == 1
         assert _guard_ops_gone(decomposed)
-        # 証明できた形は**素の softmax のまま**（safe_softmax へ落ちない = 既存資産の不変）
+        # A proven form **stays a plain softmax** (does not drop to safe_softmax = existing assets
+        # unchanged)
         assert not any(node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed))
 
     def test_without_the_pass_the_guard_ops_are_outside_the_vocabulary(self):
@@ -787,7 +832,8 @@ class TestDropSafeSoftmaxGuard:
         assert "aten.full_like.default" in err.value.ops
 
     def test_a_runtime_mask_rewrites_the_guard_to_safe_softmax(self):
-        """実行時マスクは証明が原理的に立たない → safe_softmax へ構成的置換（ADR 0044）。"""
+        """A run-time mask can in principle not be proven → constructive replacement with
+        safe_softmax (ADR 0044)."""
         decomposed = decompose(RuntimeMaskedAttention(), RUNTIME_MASK_ARGS)
 
         stats = normalize_graph(decomposed)
@@ -797,11 +843,11 @@ class TestDropSafeSoftmaxGuard:
         assert [node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed)] == [True]
 
     def test_an_all_masked_row_rewrites_the_guard_to_safe_softmax(self):
-        """全 -inf 行が実在する静的マスクも safe_softmax へ落ちる。
+        """A static mask with an actual all -inf row also drops to safe_softmax.
 
-        ADR 0016 ではここが fail loudly だった（ガードを消すと NaN が下流へ流れるため）。
-        ADR 0044 でガードと**厳密に同じ意味論**を持つ op ができたので、消すのではなく
-        置き換える — 消していないので NaN は流れない。
+        Under ADR 0016 this failed loudly (removing the guard lets NaN flow downstream). ADR 0044
+        added an op with **exactly the same semantics** as the guard, so the guard is replaced
+        rather than removed — nothing is removed, so no NaN flows.
         """
         decomposed = decompose(FullyMaskedAttention(), ATTENTION_ARGS)
 
@@ -811,10 +857,12 @@ class TestDropSafeSoftmaxGuard:
         assert [node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed)] == [True]
 
     def test_an_all_masked_row_in_a_buffer_rewrites_the_guard_to_safe_softmax(self):
-        """-inf 源が **placeholder（buffer）** でも実値で見て、証明できないので置換に回る。
+        """A -inf source that is **a placeholder (buffer)** is also judged by its actual values, and
+        since it cannot be proven it goes to replacement.
 
-        「placeholder は有限」と決め打つ判定はこの形を素通りさせ、ガードが消えて NaN が
-        下流へ流れる（グラフ内 `torch.full` の形だけを見ていると空振りする穴）。
+        A verdict that assumes "placeholders are finite" lets this form through, the guard is
+        removed and NaN flows downstream (a hole that a check looking only at in-graph
+        `torch.full` forms misses).
         """
         module = BufferMaskedAttention(torch.full((1, 1, 4, 4), float("-inf")))
         decomposed = decompose(module, ATTENTION_ARGS)
@@ -832,10 +880,12 @@ class TestDropSafeSoftmaxGuard:
         ],
     )
     def test_a_literal_that_is_neg_inf_only_in_f32_or_after_negation_is_a_source(self, module):
-        """`+inf` の符号反転と、f32 へ丸めると -inf になるリテラルも -inf 源に数える。
+        """A negated `+inf` and a literal that becomes -inf when rounded to f32 also count as -inf
+        sources.
 
-        `value == -inf` の double 比較だけを見る判定は両方を「有限」と誤り、全要素 -inf の
-        行があるのにガードを**除去**する（torch は 0 を返す行を IR は NaN にする）。
+        A verdict that looks only at the double comparison `value == -inf` wrongly calls both
+        "finite" and **removes** the guard despite a row that is -inf everywhere (the IR turns a
+        row torch returns as 0 into NaN).
         """
         decomposed = decompose(module, ATTENTION_ARGS)
 
@@ -845,7 +895,8 @@ class TestDropSafeSoftmaxGuard:
         assert [node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed)] == [True]
 
     def test_the_most_negative_finite_f32_literal_is_not_a_source(self):
-        """`finfo(f32).min` は f32 で有限 — 丸めて見ても源にならない（過剰判定の検出器）。"""
+        """`finfo(f32).min` is finite in f32 — it is not a source even after rounding (the detector
+        of over-detection)."""
         decomposed = decompose(
             LiteralMaskedAttention(torch.finfo(torch.float32).min), ATTENTION_ARGS
         )
@@ -856,7 +907,8 @@ class TestDropSafeSoftmaxGuard:
         assert not any(node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed))
 
     def test_a_neg_inf_source_on_the_score_side_rewrites_to_safe_softmax(self):
-        """スコア側に -inf 源がある形（マスクの実評価では閉じないもう 1 系）も置換に回る。"""
+        """A form with a -inf source on the score side (the other kind that evaluating the mask does
+        not settle) also goes to replacement."""
         decomposed = decompose(NegInfScoreAttention(), ATTENTION_ARGS)
 
         stats = normalize_graph(decomposed)
@@ -865,11 +917,12 @@ class TestDropSafeSoftmaxGuard:
         assert [node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed)] == [True]
 
     def test_a_probe_that_raises_rewrites_the_guard_instead_of_killing_the_export(self):
-        """実評価が torch の例外で落ちる形も置換に回る（ADR 0044 が閉じたはずの穴）。
+        """A form whose evaluation fails with a torch exception also goes to replacement (the hole
+        ADR 0044 was meant to close).
 
-        `NotImplementedError` しか捕まえていないと、この形だけ「証明できない = export 不能」
-        に戻る。統計キーは構造で証明できなかった形（`rewritten-safe`）と分けて数える —
-        例外を黙って吸収する経路を作らないため。
+        Catching only `NotImplementedError` would send this form alone back to "unprovable =
+        cannot export". The stats key is counted separately from forms the structure could not
+        prove (`rewritten-safe`) — so that no path silently absorbs exceptions.
         """
         decomposed = decompose(
             GatheredMaskAttention(), ATTENTION_ARGS, dynamic_shapes=SYMBOLIC_LENGTH_SHAPES
@@ -883,7 +936,8 @@ class TestDropSafeSoftmaxGuard:
         assert [node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed)] == [True]
 
     def test_the_probe_failure_keeps_the_original_exception_as_its_cause(self):
-        """正規化した判定結果に原因を必ず連鎖させる（本物の実装バグを追える形で残す）。"""
+        """The normalized verdict always chains the cause (keeps a real implementation bug
+        traceable)."""
         decomposed = decompose(
             GatheredMaskAttention(), ATTENTION_ARGS, dynamic_shapes=SYMBOLIC_LENGTH_SHAPES
         )
@@ -902,7 +956,8 @@ class TestDropSafeSoftmaxGuard:
         assert isinstance(err.value.__cause__, IndexError)
 
     def test_a_finite_buffer_mask_still_lets_the_guard_go(self):
-        """実値が有限な buffer マスクは従来どおり除去できる（判定が過剰にならないこと）。"""
+        """A buffer mask with finite actual values can still be removed as before (the verdict does
+        not over-detect)."""
         decomposed = decompose(BufferMaskedAttention(torch.zeros(1, 1, 4, 4)), ATTENTION_ARGS)
 
         stats = normalize_graph(decomposed)
@@ -922,11 +977,13 @@ class TestDropSafeSoftmaxGuard:
         ],
     )
     def test_an_op_that_produces_neg_inf_keeps_the_guard(self, module, args):
-        """-inf を**生む** op（`log` / 分母が非ゼロと示せない `div`）は源に数える。
+        """Ops that **produce** -inf (`log` / a `div` whose denominator cannot be shown non-zero)
+        count as sources.
 
-        引数に -inf リテラルを持たないので定数走査では拾えない。源から漏らすと依存錐が
-        「有限」と判定され、ガードが**除去**されて全 -inf 行の NaN が下流へ流れる
-        （ADR 0044 決定 3 = plain softmax への全 -inf 行は契約違反）。安全側 = 分岐②。
+        They have no -inf literal among their arguments, so the constant sweep cannot pick them
+        up. Leaving them out of the sources would judge the dependency cone "finite", **remove**
+        the guard and let the NaN of an all -inf row flow downstream (ADR 0044 decision 3 = an all
+        -inf row into a plain softmax violates the contract). The safe side = branch ②.
         """
         decomposed = decompose(module, args)
 
@@ -936,11 +993,13 @@ class TestDropSafeSoftmaxGuard:
         assert [node.meta.get(SAFE_SOFTMAX_META) for node in _softmax_nodes(decomposed)] == [True]
 
     def test_a_division_by_a_nonzero_literal_is_not_a_neg_inf_source(self):
-        """分母がリテラル非ゼロの除算は源でない（`scores / sqrt(d)` は通常経路）。
+        """A division by a non-zero literal denominator is not a source (`scores / sqrt(d)` is the
+        ordinary path).
 
-        除数の値を見ずに op 名だけで源にすると、事実上すべての attention が分岐②へ倒れる
-        （= 分岐①を廃す案そのもの）。この 1 本と
-        {@link test_a_finite_buffer_mask_still_lets_the_guard_go} が過剰判定の検出器。
+        Counting by op name alone, without looking at the divisor's value, would send practically
+        every attention to branch ② (= exactly the proposal to drop branch ①). This test and
+        {@link test_a_finite_buffer_mask_still_lets_the_guard_go} are the detectors of
+        over-detection.
         """
 
         class ScaledScoreAttention(nn.Module):
@@ -962,14 +1021,14 @@ class TestDropSafeSoftmaxGuard:
 
 
 class IdentityPermute(nn.Module):
-    """軸順を変えない単独 permute。"""
+    """A lone permute that does not change the axis order."""
 
     def forward(self, x):
         return x.permute(0, 1, 2, 3)
 
 
 class InversePermuteChain(nn.Module):
-    """同じ転置を 2 回適用する恒等鎖。"""
+    """An identity chain applying the same transpose twice."""
 
     def forward(self, x):
         first = x.permute(0, 2, 1, 3)
@@ -977,7 +1036,7 @@ class InversePermuteChain(nn.Module):
 
 
 class NonIdentityPermuteChain(nn.Module):
-    """合成後も実体化が 1 回必要な隣接 permute。"""
+    """Adjacent permutes that still need one materialization after composition."""
 
     def forward(self, x):
         first = x.permute(0, 1, 3, 2)
@@ -985,14 +1044,15 @@ class NonIdentityPermuteChain(nn.Module):
 
 
 class ThreeStagePermuteChain(nn.Module):
-    """3 段の鎖（位相順に 1 度掃くだけで 1 ノードへ畳めること）。"""
+    """A three-stage chain (one sweep in topological order folds it into one node)."""
 
     def forward(self, x):
         return x.permute(0, 1, 3, 2).permute(0, 2, 1, 3).permute(1, 0, 2, 3)
 
 
 class SharedIntermediatePermute(nn.Module):
-    """中間 permute に別の消費者がいる鎖（合成しても中間は残り、意味も変わらない）。"""
+    """A chain whose intermediate permute has another consumer (after composition the intermediate
+    stays and the meaning does not change)."""
 
     def forward(self, x):
         first = x.permute(0, 1, 3, 2)
@@ -1033,22 +1093,25 @@ class TestComposePermuteChains:
         assert only_node(graph, "permute").attrs == {"dims": [0, 3, 1, 2]}
 
     def test_three_stage_chain_folds_in_one_pass(self):
-        """3 段以上でも 1 パスで 1 ノードになる（位相順に上流から畳まれるため）。"""
+        """Three or more stages become one node in one pass (they fold from upstream in topological
+        order)."""
         args = (torch.randn(2, 3, 4, 5),)
         decomposed = decompose(ThreeStagePermuteChain(), args)
 
         stats = normalize_graph(decomposed)
 
-        assert stats["permute_chain:composed"] == 2, "2 回の合成が 1 パス中に起きる"
+        assert stats["permute_chain:composed"] == 2, "two compositions happen within one pass"
         graph, _ = export_and_convert(ThreeStagePermuteChain(), args)
         assert node_ops(graph) == ["permute"]
-        # p1=[0,1,3,2] → p2=[0,2,1,3] → p3=[1,0,2,3] の合成は [3,0,1,2]
+        # p1=[0,1,3,2] → p2=[0,2,1,3] → p3=[1,0,2,3] composes to [3,0,1,2]
         assert only_node(graph, "permute").attrs == {"dims": [3, 0, 1, 2]}
 
     def test_shared_intermediate_keeps_its_own_consumer(self):
-        """中間に別の消費者がいても意味が変わらない（下流の入力だけを付け替えるため）。
+        """Another consumer of the intermediate does not change the meaning (only the downstream
+        input is rewired).
 
-        合成順を取り違える（`q[p[i]]`）と、この形は**形状が合うまま値だけ**ずれる。
+        Mixing up the composition order (`q[p[i]]`) makes this form drift **in values only, with
+        the shapes still matching**.
         """
         module = SharedIntermediatePermute()
         args = (torch.randn(2, 3, 4, 5),)
@@ -1066,13 +1129,13 @@ class TestComposePermuteChains:
             for node in decomposed.graph_module.graph.nodes
             if node.op == "call_function" and node.target is aten.permute.default
         ]
-        assert len(permutes) == 2, "中間 permute は消費者が残っているので生き残る"
+        assert len(permutes) == 2, "the intermediate permute survives because its consumer remains"
         assert [node.args[1] for node in permutes] == [[0, 1, 3, 2], [0, 3, 1, 2]]
-        assert permutes[1].args[0] is permutes[0].args[0], "下流は base を直接読む"
+        assert permutes[1].args[0] is permutes[0].args[0], "the downstream reads base directly"
 
 
 class RepeatKv(nn.Module):
-    """GQA の kv 複製（`unsqueeze → expand → view` が rank5 を作る唯一の形）。"""
+    """GQA's kv duplication (the only form where `unsqueeze → expand → view` creates rank 5)."""
 
     def forward(self, x):
         batch, groups, length, head = x.shape
@@ -1081,7 +1144,8 @@ class RepeatKv(nn.Module):
 
 
 class UnitRepeatKv(nn.Module):
-    """複製数 1 の kv 複製（GQA 無し = MHA 構成）— 鎖まるごと恒等。"""
+    """kv duplication with a count of 1 (no GQA = an MHA configuration) — the whole chain is an
+    identity."""
 
     def forward(self, x):
         batch, groups, length, head = x.shape
@@ -1090,7 +1154,8 @@ class UnitRepeatKv(nn.Module):
 
 
 class SymbolicRepeatKv(nn.Module):
-    """複製数が**記号次元**の kv 複製（複製軸の長さが実行時にしか決まらない形）。"""
+    """kv duplication whose count is **a symbolic dimension** (the length of the duplication axis is
+    known only at run time)."""
 
     def forward(self, x, reps):
         batch, groups, length, head = x.shape
@@ -1100,7 +1165,7 @@ class SymbolicRepeatKv(nn.Module):
 
 
 class RopeUnbind(nn.Module):
-    """`use_real_unbind_dim=-2` の RoPE 分割（rank5 の幅 1 slice + squeeze）。"""
+    """The RoPE split of `use_real_unbind_dim=-2` (a width-1 slice of rank 5 + squeeze)."""
 
     def forward(self, x):
         batch, heads, length, dim = x.shape
@@ -1111,7 +1176,8 @@ class RopeUnbind(nn.Module):
 
 
 class SymbolicRopeUnbind(nn.Module):
-    """分割の取り出し位置が**記号**な rank5 slice（区間端が FX Node で来る形）。"""
+    """A rank-5 slice whose extraction position is **symbolic** (the range ends arrive as FX
+    Nodes)."""
 
     def forward(self, x, idx):
         batch, heads, length, dim = x.shape
@@ -1123,10 +1189,12 @@ class SymbolicRopeUnbind(nn.Module):
 
 
 class Rank5NotUnbind(nn.Module):
-    """最終次元を割る rank5 の view だが、消費者が unbind ではない形（reshape → mul → reshape）。
+    """A rank-5 view that splits the last dimension, but whose consumer is not an unbind (reshape →
+    mul → reshape).
 
-    `_lower_split_unbind` は形の入口（最終次元を (A,B) に割る view）だけで掴むので、この形も
-    一度は掴む。unbind でないと分かった時点で**書き換えずスキップ**するのが正しい。
+    `_lower_split_unbind` grabs on the entry form alone (a view splitting the last dimension into
+    (A,B)), so it grabs this form once too. The correct behavior is to **skip without rewriting**
+    as soon as it turns out not to be an unbind.
     """
 
     def forward(self, x):
@@ -1136,11 +1204,11 @@ class Rank5NotUnbind(nn.Module):
 
 
 class RopeUnbindSqueezing(nn.Module):
-    """RoPE と同じ分割（最終次元を (2, D/2) に割る rank5 の view → 分割軸の幅 1 slice）の後、
-    `squeeze` で落とす軸を選べる形。
+    """The same split as RoPE (a rank-5 view splitting the last dimension into (2, D/2) → a width-1
+    slice of the split axis), followed by a `squeeze` whose dropped axis can be chosen.
 
-    `axis=3` は分割軸を落とす本物の unbind、`axis=0` は別の長さ 1 軸（batch）を落とす形で、
-    後者は幅 1 の軸の位置が違うので unbind ではない。
+    `axis=3` is a real unbind dropping the split axis; `axis=0` drops another length-1 axis
+    (batch), and since the width-1 axis is in a different position, it is not an unbind.
     """
 
     def __init__(self, axis: int) -> None:
@@ -1156,7 +1224,7 @@ class RopeUnbindSqueezing(nn.Module):
 
 
 class Patchify(nn.Module):
-    """patchify（rank8 の reshape → permute → reshape）。"""
+    """patchify (rank-8 reshape → permute → reshape)."""
 
     def forward(self, x):
         batch, channels, height, width = x.shape
@@ -1181,7 +1249,8 @@ class TestRankLowering:
         ],
     )
     def test_the_rewritten_graph_returns_the_same_numbers(self, module, args, key):
-        """rank 下げは同値書き換え — 書き換え後のグラフを実行して eager と突き合わせる。"""
+        """Rank lowering is an equivalent rewrite — runs the rewritten graph and compares it with
+        eager."""
         decomposed = decompose(module, args)
 
         stats = normalize_graph(decomposed)
@@ -1201,16 +1270,18 @@ class TestRankLowering:
         ],
     )
     def test_every_value_fits_the_strided_rank_after_the_pass(self, module, args):
-        """狙いは rank ≤ STRIDED_RANK に収めること（収まらないと convert が落ちる）。"""
+        """The aim is to fit within rank ≤ STRIDED_RANK (otherwise convert fails)."""
         graph, _ = export_and_convert(module, args)
 
         assert max(len(value.shape) for value in graph.values.values()) <= STRIDED_RANK
 
     def test_a_non_unbind_consumer_is_skipped_not_rejected(self):
-        """unbind でない rank5 の view は**素通し**（照合完了前にグラフは 1 ノードも変わらない）。
+        """A rank-5 view that is not an unbind **passes through** (not a single node of the graph
+        changes before the match completes).
 
-        ここで落とすと、他のパスで rank ≤ 4 に落ちうる形まで正規化の途中で殺す。本当に
-        落ちない形が残れば convert 側の門（strided 族の rank 上限）が全件列挙で落とす。
+        Failing here would kill, partway through normalization, even forms that other passes can
+        bring down to rank ≤ 4. If a form that really cannot be lowered remains, the check on the
+        convert side (the rank limit of the strided family) fails it in the full enumeration.
         """
         args = (torch.randn(1, 2, 4, 6),)
         decomposed = decompose(Rank5NotUnbind(), args)
@@ -1220,7 +1291,8 @@ class TestRankLowering:
         assert "split_unbind->slice" not in stats
         with torch.no_grad():
             assert torch.equal(decomposed.module()(*args), Rank5NotUnbind()(*args))
-        # 変換もできる（rank 上限が効くのは strided コピー族だけで、elementwise は rank 自由）
+        # It also converts (the rank limit applies only to the strided copy family; elementwise
+        # is free of rank)
         graph, _ = export_and_convert(Rank5NotUnbind(), args)
         assert node_ops(graph) == ["reshape", "mul", "reshape"]
 
@@ -1229,10 +1301,12 @@ class TestRankLowering:
         [pytest.param(3, 2, id="split axis"), pytest.param(0, 0, id="batch axis")],
     )
     def test_only_a_squeeze_of_the_split_axis_is_folded(self, axis, expected):
-        """畳むのは squeeze が**分割軸**を落とす形だけ — 別の長さ 1 軸を落とす squeeze は素通し。
+        """Only a squeeze that drops **the split axis** is folded — a squeeze dropping another
+        length-1 axis passes through.
 
-        op 種だけで照合すると batch 軸を落とす形も掴み、置換後の slice（`[1,T,H,64]`）が元の
-        squeeze の出力（`[T,H,1,64]`）と食い違う。
+        Matching on op kinds alone would also grab the form dropping the batch axis, and the
+        replacing slice (`[1,T,H,64]`) would disagree with the original squeeze's output
+        (`[T,H,1,64]`).
         """
         module = RopeUnbindSqueezing(axis)
         args = (torch.randn(1, 3, 2, 8),)
@@ -1245,10 +1319,11 @@ class TestRankLowering:
             assert torch.equal(decomposed.module()(*args), module(*args))
 
     def test_a_unit_replication_collapses_the_whole_chain(self):
-        """複製数 1（GQA 無し = MHA 構成）の鎖は丸ごと恒等として消える。
+        """A chain with a duplication count of 1 (no GQA = an MHA configuration) disappears as a
+        whole identity.
 
-        誤ると「軸を 1 本落としたグラフ」が shape 検査を通る（最後の砦は `extent_keys` の
-        一致検査だけ）。
+        Getting it wrong lets "a graph that dropped one axis" through the shape checks (the last
+        line of defense is only the `extent_keys` match check).
         """
         args = (torch.randn(1, 2, 4, 3),)
         decomposed = decompose(UnitRepeatKv(), args)
@@ -1259,12 +1334,13 @@ class TestRankLowering:
         with torch.no_grad():
             assert torch.equal(decomposed.module()(*args), UnitRepeatKv()(*args))
         graph, _ = export_and_convert(UnitRepeatKv(), args)
-        # 鎖が丸ごと消えるので残るノードは 0 本（出力は入力そのもの）。
+        # The whole chain disappears, so zero nodes remain (the output is the input itself).
         assert node_ops(graph) == []
         assert graph.outputs == ["x"]
 
     def test_a_symbolic_replication_count_is_rejected(self, dyn_t):
-        """複製数が記号次元の rank5 は表現できない — ヒント値へ特殊化せず落とす。"""
+        """Rank 5 with a symbolic duplication count cannot be represented — fails instead of
+        specializing to the hint value."""
         args = (torch.randn(1, 2, 4, 3), torch.randn(3))
         decomposed = decompose(SymbolicRepeatKv(), args, dynamic_shapes=(None, {0: dyn_t}))
 
@@ -1272,11 +1348,13 @@ class TestRankLowering:
             normalize_graph(decomposed)
 
     def test_a_symbolic_length_still_lowers_the_gqa_form(self, dyn_t):
-        """複製軸以外が記号でも本物の repeat_kv は rank3 へ落ちる。
+        """A real repeat_kv lowers to rank 3 even when axes other than the duplication axis are
+        symbolic.
 
-        shape の突合を `extent_keys`（式の構造等価）でやる根拠の受け入れ側 — 素の list `!=` は
-        SymInt の `__eq__` をヒント値で解いてしまい、評価そのものが export 済みの ShapeEnv へ
-        後付けの guard 置換を積む（置換は `convert._dim` まで届く）。
+        The accepting side of the reason shapes are compared with `extent_keys` (structural
+        equality of expressions) — a plain list `!=` resolves SymInt's `__eq__` by the hint value,
+        and the evaluation itself adds an after-the-fact guard substitution to the exported
+        ShapeEnv (the substitution reaches `convert._dim`).
         """
         decomposed = decompose(RepeatKv(), (torch.randn(1, 2, 4, 3),), dynamic_shapes=({2: dyn_t},))
 
@@ -1288,12 +1366,13 @@ class TestRankLowering:
         assert graph.values[graph.outputs[0]].shape == [1, 6, "T", 3]
 
     def test_a_symbolic_slice_bound_is_skipped_not_crashed(self):
-        """区間端が記号の rank5 slice は**触らずスキップ**（この関数の MUST）。
+        """A rank-5 slice with symbolic range ends is **skipped untouched** (this function's MUST).
 
-        `aten.slice.Tensor(…, SymInt? start, SymInt? end, …)` の端は記号値なら FX Node で
-        来る。素の `int()` を掛けると診断（未対応 op の全件列挙）ではなく `TypeError` の
-        素のクラッシュになる — ヒント値へ特殊化するのも同じく不可なので、掴んだ形を
-        unbind と見なさずに他のパスと convert の rank 門へ委ねる。
+        The ends of `aten.slice.Tensor(…, SymInt? start, SymInt? end, …)` arrive as FX Nodes when
+        symbolic. Applying a plain `int()` gives a bare `TypeError` crash instead of the
+        diagnostic (the full enumeration of unsupported ops) — specializing to the hint value is
+        equally not allowed, so the grabbed form is not treated as an unbind and is left to the
+        other passes and convert's rank check.
         """
         args = (torch.randn(1, 2, 4, 6), torch.randn(2))
         decomposed = decompose(
@@ -1305,7 +1384,8 @@ class TestRankLowering:
         assert "split_unbind->slice" not in stats
 
     def test_a_rank4_graph_is_left_untouched(self):
-        """発火条件は rank > STRIDED_RANK — 既存グラフ（rank ≤ 4）へ誤爆しない。"""
+        """The firing condition is rank > STRIDED_RANK — no misfire on existing graphs (rank ≤
+        4)."""
 
         class Rank4(nn.Module):
             def forward(self, x):
@@ -1333,8 +1413,9 @@ class TestSelectToSqueeze:
         assert graph.values[graph.nodes[0].outs[0]].shape == [2, 3]
 
     def test_selecting_a_longer_axis_becomes_slice_and_reshape(self):
-        """長さ 2 以上の静的軸の select は `slice(幅 1) + squeeze`（Gemma4 の PLE 層別
-        スライスが初出。squeeze は既存の reshape 正規化が受ける）。"""
+        """A select on a static axis of length 2 or more becomes `slice(width 1) + squeeze` (first
+        seen in Gemma4's per-layer PLE slices; the existing reshape normalization handles the
+        squeeze)."""
 
         class SelectRow(nn.Module):
             def forward(self, x):
@@ -1347,7 +1428,8 @@ class TestSelectToSqueeze:
         assert graph.values[graph.nodes[1].outs[0]].shape == [2, 4]
 
     def test_a_negative_select_index_is_normalized(self):
-        """負添字は torch の select 意味論（-size ≤ index < size）どおり正の幅 1 区間へ。"""
+        """A negative index becomes a positive width-1 range per torch's select semantics (-size ≤
+        index < size)."""
 
         class SelectLast(nn.Module):
             def forward(self, x):
@@ -1358,7 +1440,8 @@ class TestSelectToSqueeze:
         assert only_node(graph, "slice").attrs == {"dim": 1, "start": 2, "end": 3}
 
     def test_selecting_a_symbolic_axis_is_rejected(self, dyn_t):
-        """記号次元の軸はヒント値で長さを採ると無言の誤値になる — ここで止める。"""
+        """Taking the length of a symbolic axis from its hint value gives a silent wrong value —
+        stopped here."""
 
         class SelectSymbolic(nn.Module):
             def forward(self, x):
@@ -1372,12 +1455,13 @@ class TestSelectToSqueeze:
             normalize_graph(decomposed)
 
     def test_selecting_with_a_symbolic_index_is_rejected(self):
-        """**添字**が記号の select も落とす（軸長が静的でも沈黙誤値の経路は同じ）。
+        """A select with a symbolic **index** also fails (even with a static axis length, the path
+        to a silent wrong value is the same).
 
-        `aten.select.int(self, int dim, SymInt index)` の index をヒント値で採ると
-        `slice(hint, hint+1)` が焼かれ、別の束縛では黙って別の行を読む。記号値は生の
-        `SymInt` ではなく **FX Node**（ここでは `sub`）で来るので、`torch.SymInt` だけを
-        見る門では素通りする。
+        Taking the index of `aten.select.int(self, int dim, SymInt index)` from the hint value
+        bakes `slice(hint, hint+1)`, which silently reads a different row under another binding. A
+        symbolic value arrives not as a raw `SymInt` but as **an FX Node** (`sub` here), so a check
+        that looks only for `torch.SymInt` lets it through.
         """
 
         class SelectSymbolicIndex(nn.Module):

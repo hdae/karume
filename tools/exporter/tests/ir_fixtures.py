@@ -1,33 +1,36 @@
-"""組み立て層のテストが入力に使う**正当な最小コンテナ**（`krm`）の合成。
+"""Synthesis of **valid minimal containers** (`krm`) that the assembly-layer tests use as input.
 
-返すのは 1 ファイルではなく **part 列**（part 0 = 2 文書・part 1 = const 領域・part 2 以降 =
-重み）— HF の公式配布は分割形だけなので（container-v1 §8）、単一形のフィクスチャは実物と
-同じ形ではない（`karume/5` の `container.parts` は 2 要素以上 MUST）。
+What it returns is not one file but **a sequence of parts** (part 0 = the 2 documents, part 1 =
+the const region, part 2 onwards = weights) — the official HF distribution is the split form only
+(container-v1 §8), so a single-form fixture would not have the shape of the real thing
+(`container.parts` of `karume/5` MUST have 2 or more elements).
 
-`karume.dist` の組み立ては入力コンテナを宣言の全規則で見る
-（{@link karume.dist.assert_weight_components_verified}）ので、weights の席へ挿すフィクスチャは
-**本物のコンテナ**でなければならない。手で綴った偽物では descriptor の構造検査にも合流にも
-届かない。
+The `karume.dist` assembly checks its input containers against every rule of the declarations
+({@link karume.dist.assert_weight_components_verified}), so a fixture plugged into the weights
+field must be **a real container**. A hand-spelled fake reaches neither the descriptor's structural
+checks nor the merge.
 
-置き場がここ 1 箇所なのは、消費者が 2 つの木にまたがるため — core 側の
-`tools/exporter/tests/test_dist.py` と、リポ専用 recipe の
-`tools/export-recipes/<family>/tests/test_distribution.py`（後者へは
-`tools/export-recipes/conftest.py` が sys.path を張る）。依存の向きは recipe → core の一方向の
-まま（ADR 0065 決定 3）で、wheel の中身（`src/karume/`）は 1 バイトも増えない。
+It lives in this one place because its consumers span 2 trees — the core side's
+`tools/exporter/tests/test_dist.py` and the repository-only recipes'
+`tools/export-recipes/<family>/tests/test_distribution.py` (for the latter,
+`tools/export-recipes/conftest.py` sets up sys.path). Dependencies still point one way, recipe →
+core (ADR 0065 decision 3), and the wheel's contents (`src/karume/`) do not grow by a single byte.
 
-MUST: バイト列を手で綴らない — 書き出しは `karume.emit.stored_model` →
-`karume.publish.publish_container` の 1 本道を通す（読み直し検証込み）。規則の写しを持つと、
-規則が動いた日にフィクスチャだけが古びて「テストは緑・実物だけ落ちる」になる。
-例外は `ir_container(symbols=…)` の故障注入の席だけ — 束縛点の無い記号は IR の受理規則に
-反するので公開の門（`publish_container`）が拒否する。この席だけは同じ書き手の低水準の口
-（`karume.container.write_model_container`）で書き、読み直し検証を通さない。
+MUST: bytes are not spelled by hand — writing goes through the single path
+`karume.emit.stored_model` → `karume.publish.publish_container` (read-back verification
+included). Holding a copy of the rules would leave the fixtures stale on the day the rules move:
+"tests green, only the real thing fails". The only exception is the fault-injection case of
+`ir_container(symbols=…)` — a symbol without a binding point violates the IR acceptance rules,
+so the publication check (`publish_container`) rejects it. Only this case is written through the
+same writer's low-level entry (`karume.container.write_model_container`), without read-back
+verification.
 
-同じ引数からは**同じバイト列**が出る（乱数を使わない）— 役割ごとのバイト列の違いは
-`mark`（テンソルキーの接頭辞）から出るので、モジュール定数として持てる。
+The same arguments give **the same bytes** (no randomness) — the bytes differ per role through
+`mark` (the tensor-key prefix), so they can be kept as module constants.
 
-NOTE: グラフ入力は全て意味論 f32 で宣言する。門が読むのは名前と shape（と本数）だけで、
-入力自体はどのノードも消費しない**宣言だけの席**なので、i32 の添字入力を名乗り分ける理由が
-無い。
+NOTE: every graph input is declared with f32 semantics. The checks read only the names and shapes
+(and the count), and the inputs are **declaration-only fields** that no node consumes, so there is
+no reason to declare i32 index inputs separately.
 """
 
 from __future__ import annotations
@@ -63,30 +66,33 @@ from karume.quantize import (
     quantize_to_int8,
 )
 
-#: フィクスチャの出所（`--license` を落とした配布形は作らない — container-v1 §12）。
+#: The fixtures' provenance (no distribution is made without `--license` — container-v1 §12).
 FIXTURE_PROVENANCE = Provenance(license="apache-2.0", writer="karume-fixture")
 
-#: linear 重みの形と i4 の group 長。行長 32 は group 16 の 2 本ぶん（格納 i4 の「行長が
-#: group_size で割り切れる」— ADR 0069 決定 2 — を満たす最小の形）。
+#: The shape of the linear weights and the i4 group length. A row length of 32 is 2 groups of 16
+#: (the minimal shape that satisfies "the row length is divisible by group_size" of i4 storage —
+#: ADR 0069 decision 2).
 GROUP_SIZE = 16
 _IN = 32
 _OUT = 4
 
-#: 分割フィクスチャ 1 part ぶんのテンソル（f32 16 要素 = 64 バイト — 連番 part: container-v1 §8）。
+#: The tensor of one part of a split fixture (f32, 16 elements = 64 bytes — numbered parts:
+#: container-v1 §8).
 _FILL_ELEMENTS = 16
 
-#: 合成が自分で足す席の接頭辞。recipe の門は initializer 名から層番号を数える
-#: （SBV2）ので、呼び出し側が渡す名前と混ざらない綴りにしておく。
+#: The prefix of the names the synthesis adds by itself. Recipe checks count layer numbers from
+#: initializer names (SBV2), so it is spelled so as not to mix with the names the caller passes.
 _OWN = "karume_fixture_"
 
 Shape = Sequence[int | str]
 
 
 def _ramp(*shape: int) -> torch.Tensor:
-    """決定的な小さい値のテンソル（乱数を使わない — 同じ spec は同じバイト列 MUST）。
+    """A tensor of small deterministic values (no randomness — the same spec MUST give the same
+    bytes).
 
-    値域を ±3 に取るのは、f16 でも i8 でも i4 でも**丸めが恒等**になり、量子化の scale が
-    0 にならない（= 0 除算にならない）形だから。
+    The range is ±3 because then **rounding is the identity** for f16, i8 and i4 alike, and the
+    quantization scale is not 0 (= no division by 0).
     """
     count = 1
     for dim in shape:
@@ -95,11 +101,14 @@ def _ramp(*shape: int) -> torch.Tensor:
 
 
 def _symbols(shapes: Sequence[Shape]) -> list[str]:
-    """宣言 shape に現れる記号（`2T` / `S+24` のような派生形も素の記号へ畳む）。
+    """The symbols that appear in the declared shapes (derived forms such as `2T` / `S+24` fold to
+    the bare symbol).
 
-    束縛点（入力 shape の次元位置）を持つ記号は**現れた shape から導く** — 呼び出し側に別欄で
-    名乗らせると、shape と宣言が独立に動く（`ir_container(symbols=…)` は束縛点を持たない記号を
-    故意に名乗る故障注入の席で、そちらだけが別欄を使う）。
+    Symbols with a binding point (a dimension position of an input shape) are **derived from the
+    shapes they appear in** — having the caller declare them in a separate field would let the
+    shapes and the declaration move independently (`ir_container(symbols=…)` is the fault-injection
+    case that deliberately declares symbols without a binding point; only it uses the separate
+    field).
     """
     found = {parse_dim(dim).sym for shape in shapes for dim in shape if isinstance(dim, str)}
     return sorted(found)
@@ -119,9 +128,10 @@ def _write(
     block_bytes: int = BLOCK_MAX_BYTES,
     verified: bool = True,
 ) -> list[bytes]:
-    """書いて読み直して検証し、part ごとのバイト列を添字順に返す。
+    """Write, read back and verify, and return the bytes of each part in index order.
 
-    `verified=False` は故障注入の席（モジュール doc の例外）— 公開の門を通さず書くだけにする。
+    `verified=False` is the fault-injection case (the exception in the module doc) — it only
+    writes, without the publication check.
     """
     stored = stored_model(
         graph,
@@ -162,46 +172,54 @@ def ir_container(
     part_bytes: int = DEFAULT_PART_BYTES,
     block_bytes: int = BLOCK_MAX_BYTES,
 ) -> list[bytes]:
-    """正当なコンテナ 1 本ぶんの part バイト列（添字順 — 先頭が part 0）。
+    """The part bytes of one valid container (in index order — part 0 first).
 
-    返るのは**必ず 3 要素以上**: part 0（ヘッダ + 2 文書）・part 1（const 領域）・part 2 以降
-    （重み）。合成の資産は小さいので重みは 1 part に収まり、戻り値は 3 要素になる。呼び出し
-    側は `karume.container.numbered_name` で連番のファイル名を作って書き出す。
+    The result **always has 3 or more elements**: part 0 (header + the 2 documents), part 1 (the
+    const region), part 2 onwards (weights). The synthetic assets are small, so the weights fit in
+    one part and the result has 3 elements. The caller builds the numbered file names with
+    `karume.container.numbered_name` and writes them out.
 
-    `storage` は系列の格納形（`f32` / `f16` / `bf16` / `i8` / `i4`）。実物と同じく**適格な重みスロット
-    だけ**が圧縮格納になり、bias やグラフ定数（i8 / i4 の scale も）は f32 のまま残るので、
-    束縛表の codec 集合は実配布資産と同じ形になる。`i4` は**混成**（i4 適格な重みが i4・
-    残りが i8・その他 f32）— 実物の i4 系列がこの形で、単一 codec の器では「圧縮席どうしの
-    取り違え」を再現できない。
+    `storage` is the series' storage form (`f32` / `f16` / `bf16` / `i8` / `i4`). As in the real
+    thing, **only eligible weight slots** get compressed storage; biases and graph constants (the
+    i8 / i4 scales too) stay f32, so the binding table's codec set has the same shape as a real
+    distribution's assets. `i4` is **mixed** (i4-eligible weights i4, the rest i8, everything
+    else f32) — real i4 series have this shape, and a single-codec container cannot reproduce "a
+    mix-up between compressed slots".
 
-    `inputs`（名前と shape）と `outputs`（出力ごとの宣言 shape）は family 固有の門が読む席。
-    入力はどのノードも消費しない宣言だけの席で、出力は小さな定数を `expand` した値なので、
-    2048×2048 のような宣言でも実バイトは数十バイトのまま。`output_names` は出力の値名
-    （既定 `out_<位置>`）— ランタイムが出力を**名前で**束ねる family（常駐テンソルへ写す境界 —
-    irodori の `dit_context`）の門が綴りを読む席。
+    `inputs` (names and shapes) and `outputs` (the declared shape of each output) are fields that
+    family-specific checks read. The inputs are declaration-only fields that no node consumes,
+    and the outputs are small constants passed through `expand`, so even a declaration such as
+    2048×2048 stays a few dozen actual bytes. `output_names` gives the outputs' value names
+    (default `out_<position>`) — a field whose spelling the checks of families that bind outputs
+    **by name** read (the boundary that maps into resident tensors — irodori's `dit_context`).
 
-    `weights` は linear の重みになる initializer 名（層数を数える門が読む綴り）。
-    `baked` は `(記号名, 焼き込み上限)` で、`sym_prefix_slice` の焼き込み定数を 1 本足す
-    （記号は `inputs` の次元位置で束縛されている必要がある）。
+    `weights` are the initializer names that become linear weights (the spelling the checks that
+    count layers read). `baked` is `(symbol name, baked upper bound)` and adds one baked
+    `sym_prefix_slice` constant (the symbol must be bound at a dimension position of `inputs`).
 
-    `assets` は容器へ同梱する資産（資産名 → {@link karume.container.AssetInput}）— PLE 索引や
-    `rope_base` のように「重みではないが同じ容器で配るバイト列」の席で、weights の part の
-    後ろに載る（ADR 0109 決定 4）。
+    `assets` are the assets bundled into the container (asset name →
+    {@link karume.container.AssetInput}) — the field for "bytes that are not weights but are
+    distributed in the same container", such as the PLE index or `rope_base`; they go after the
+    weights' parts (ADR 0109 decision 4).
 
-    `symbols` は宣言へ**足すだけ**の記号（`inputs` / `outputs` の shape から導かれる分に加える）。
-    「記号次元を持つグラフを配らない」側の門を試すための故障注入の席で、束縛点を持たない記号を
-    名乗るのは実物には無い形である — 束縛点のある記号は `inputs` の shape に綴ればよい。
-    IR の受理規則に反する容器になるので、この席を使った回だけ公開の門を通さずに書く
-    （モジュール doc の例外 — 束縛点のある記号で門に届く family はそちらで作ること）。
+    `symbols` are symbols **only added** to the declaration (on top of those derived from the
+    `inputs` / `outputs` shapes). This is the fault-injection case for testing the check that
+    "graphs with symbolic dimensions are not distributed"; declaring a symbol without a binding
+    point is a shape the real thing never has — a symbol with a binding point is simply spelled in
+    an `inputs` shape. The container then violates the IR acceptance rules, so only a run that uses
+    this field writes without the publication check (the exception in the module doc — families
+    that reach their check with a symbol that has a binding point build it that way).
 
-    `named` は容器のグラフ名 = **部品名**（`karume.json` の weights のキー）。既定は `mark` から
-    導いた綴りで、weights の席へ挿すフィクスチャは**そのキーで名乗らせる** MUST — 組み立ては
-    グラフ名とキーの一致を見る（{@link karume.dist.assert_weight_components_verified}）ので、
-    `mark` 由来の綴り（`siglip2-vision` など）のままだと実物には無い形の入力になる。
+    `named` is the container's graph name = **the component name** (the weights key of
+    `karume.json`). The default is the spelling derived from `mark`, and a fixture plugged into the
+    weights field MUST **be named with that key** — the assembly checks that the graph name equals
+    the key ({@link karume.dist.assert_weight_components_verified}), so the `mark`-derived spelling
+    (`siglip2-vision` and the like) would be an input the real thing never has.
 
-    `part_bytes` / `block_bytes` は寸法の差し込み（`publish_container` の席）— 合成の小さい重みを
-    **複数 part** / **piece 列**へ割らせるための席で、既定は実物と同じ 256 MiB / 32 MiB。何本に
-    なるかは現物のバイト数が決めるので、渡した側は本数を仮定せず**現物を観測する**こと。
+    `part_bytes` / `block_bytes` inject the sizes (the `publish_container` options) — they make the
+    small synthetic weights split into **several parts** / **a piece sequence**; the defaults are
+    256 MiB / 32 MiB, as in the real thing. The number of parts is decided by the actual byte
+    count, so the caller does not assume a count and **observes the actual result**.
     """
     graph, tensors, scales, overrides = _spec(
         mark, storage, inputs, outputs, weights, baked, symbols, output_names
@@ -222,16 +240,18 @@ def ir_container(
 
 
 def graph_name(mark: str) -> str:
-    """`mark` からコンテナのグラフ名を作る（語彙 `[A-Za-z0-9._-]` の外は `-` へ畳む）。
+    """Build the container's graph name from `mark` (characters outside the vocabulary
+    `[A-Za-z0-9._-]` fold to `-`).
 
-    `mark` はテンソルキーの接頭辞で、テストは「どのモデルがどのバイト列を主張するか」を
-    そこで作り分ける — グラフ名の語彙に縛られない綴りも使えるようにしておく。
+    `mark` is the tensor-key prefix, and the tests use it to vary "which model claims which bytes"
+    — spellings outside the graph-name vocabulary stay usable too.
     """
     return re.sub(r"[^A-Za-z0-9._-]", "-", mark)[:64]
 
 
 def fill_spec(count: int, *, mark: str) -> tuple[IrGraph, dict[str, torch.Tensor]]:
-    """同じ大きさの f32 テンソルを `count` 本持つだけのグラフ（分割を踏むための素材）。"""
+    """A graph that only holds `count` f32 tensors of the same size (material for exercising the
+    split)."""
     initializers = {}
     values = {}
     tensors = {}
@@ -244,15 +264,18 @@ def fill_spec(count: int, *, mark: str) -> tuple[IrGraph, dict[str, torch.Tensor
 
 
 def ir_parts(count: int, *, mark: str, named: str | None = None) -> list[bytes]:
-    """`count` 本の part 列になる正当なコンテナ（添字順 — 先頭が part 0）。
+    """A valid container that becomes a sequence of `count` parts (in index order — part 0 first).
 
-    何本に割れるかは現物のバイト数が決めるので、同じ大きさのテンソルを `count - 2` 本並べ、
-    part 長の差し込みをその 1 本ぶんに合わせて **1 重み part = 1 テンソル**へ割り付ける。
-    `count` は part 0（2 文書）と part 1（const 領域 — const を持たないので 0 バイト）を
-    含む総数なので 3 以上。
+    The number of parts is decided by the actual byte count, so `count - 2` tensors of the same
+    size are lined up and the injected part length is set to one of them, giving **one weight part
+    = one tensor**. `count` is the total including part 0 (the 2 documents) and part 1 (the const
+    region — 0 bytes, since there are no consts), so it is 3 or more.
     """
     if count < 3:
-        raise ValueError(f"part 数 {count} は 3 以上（part 0〈2 文書〉+ part 1〈const〉を含む）")
+        raise ValueError(
+            f"part count {count} must be 3 or more"
+            " (including part 0 <2 documents> + part 1 <const>)"
+        )
     graph, tensors = fill_spec(count - 2, mark=mark)
     return _write(
         graph,
@@ -275,10 +298,13 @@ def fixture_spec(
     baked: tuple[str, int] | None = None,
     symbols: Sequence[str] = (),
 ) -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, torch.Tensor], dict[str, str]]:
-    """{@link ir_container} と**同じ素材**（グラフ・格納テンソル・scale 台帳・1 本単位指定）。
+    """**The same material** as {@link ir_container} (graph, stored tensors, scale ledger,
+    per-tensor overrides).
 
-    旧配布形の合成（`legacy_writer`）が同じ素材を別の器へ書くための口 — 素材を 2 つに割ると
-    「旧形から移した容器」と「直接書いた容器」のバイト同一が素材の違いで崩れる。
+    The entry through which the old-distribution synthesis (`legacy_writer`) writes the same
+    material into another container — splitting the material in two would break the byte identity
+    of "the container migrated from the old form" and "the container written directly" through a
+    difference in material.
     """
     return _spec(mark, storage, inputs, outputs, weights, baked, symbols)
 
@@ -293,9 +319,10 @@ def _spec(
     symbols: Sequence[str],
     output_names: Sequence[str] | None = None,
 ) -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, torch.Tensor], dict[str, str]]:
-    """spec からグラフ・格納テンソル・scale 台帳・格納 dtype の 1 本単位指定を組む。"""
+    """Build the graph, the stored tensors, the scale ledger and the per-tensor storage dtype
+    overrides from the spec."""
     if output_names is not None and len(output_names) != len(outputs):
-        raise ValueError(f"出力 {len(outputs)} 本に名前 {len(output_names)} 本")
+        raise ValueError(f"{len(outputs)} outputs but {len(output_names)} names")
     initializers: dict[str, IrInitializer] = {}
     values: dict[str, IrValue] = {}
     nodes: list[IrNode] = []
@@ -313,19 +340,22 @@ def _spec(
     activation = f"{_OWN}x"
     bias = f"{_OWN}bias"
     declare(activation, _ramp(1, _IN))
-    # bias は常に f32（量子化されない）ので、`mark` 依存の値を載せる席に使える — 重みの part を
-    # **mark ごとに違うバイト列**にしておかないと、共有の畳み込みを観測するテストが「どの
-    # モデルでも同じ part」を見てしまう（テンソルキーの違いは part 0 の descriptor にしか出ない）。
+    # The bias is always f32 (never quantized), so it can carry a `mark`-dependent value — unless
+    # the weight parts are **different bytes per mark**, the tests that observe the shared folding
+    # would see "the same part for every model" (a difference in tensor keys shows only in part
+    # 0's descriptor).
     declare(bias, _ramp(_OUT) + float(sum(mark.encode()) % 97))
-    # const 領域（part 1）を空にしない — 実物の容器は定数を持ち、part 1 が 0 バイトだと
-    # 「どのモデルでもバイト同一な席」が 1 本できて共有の畳み込みの観測がぼやける。
-    # 値は `mark` に依存させる（同じ長さの mark でもバイトは違う = 共有判定の被験体になる）。
+    # The const region (part 1) is not left empty — real containers hold constants, and a 0-byte
+    # part 1 would create "a slot that is byte-identical for every model" and blur the observation
+    # of the shared folding. The values depend on `mark` (marks of the same length still give
+    # different bytes = a subject for the sharing decision).
     const_key = f"const.{mark}"
     const_name = f"{_OWN}const"
     initializers[const_name] = IrInitializer(tensor=const_key, storage=IrStorage(dtype="f32"))
     values[const_name] = IrValue(dtype="f32", shape=[_OUT])
     tensors[const_key] = _ramp(_OUT) + float(sum(mark.encode()) % 97)
-    # i4 系列は混成（i4 適格外の重みが i8 のまま残る）— その相方をここで 1 本持つ。
+    # An i4 series is mixed (weights not eligible for i4 stay i8) — one such counterpart is held
+    # here.
     rest = f"{_OWN}rest"
     for index, name in enumerate([*weights, *([rest] if storage == "i4" else [])]):
         weight = _ramp(_OUT, _IN)
@@ -351,16 +381,19 @@ def _spec(
         values[shifted] = IrValue(dtype="f32", shape=[1, _OUT])
         nodes.append(IrNode(op="add", ins=[out, const_name], outs=[shifted], attrs={}))
 
-    # part の**サイズ**も `mark` で変える（長さの違う mark は違うサイズの part を作る）。
-    # 共有の畳み込みの前置フィルタ（サイズ違いは hash を採らずに落ちる）を観測する側の道具で、
-    # const 領域（part 1）と重み（part 2 以降）の両方に 1 本ずつ置く。
+    # The part **size** also varies with `mark` (marks of different lengths make parts of
+    # different sizes). A tool for observing the pre-filter of the shared folding (a size mismatch
+    # drops out without hashing); one is placed in the const region (part 1) and one in the weights
+    # (part 2 onwards).
     #
-    # MUST: 詰め物を**グラフ出力に足さない** — family の門は「出力が何本か」で配布形の取り違えを
-    # 見る（BiRefNet の multi-scale supervision・SigLIP2 の全層出し）ので、素材が出力を 2 本
-    # 増やすと `outputs` の期待が素材の都合で決まってしまう。消費されない値は宣言として残る。
+    # MUST: the padding is **not added to the graph outputs** — family checks detect a mix-up of
+    # distributions by "how many outputs there are" (BiRefNet's multi-scale supervision, SigLIP2's
+    # all-layer outputs), so if the material added 2 outputs, the `outputs` expectation would be
+    # decided by the material. Unconsumed values remain as declarations.
     for region, key, span in (
-        # 刻みは 16 要素 = 64 バイト（block の先頭整列の単位）— これより細かいと、長さの
-        # 違いが整列の詰め物に吸われて part のサイズが動かない。
+        # The step is 16 elements = 64 bytes (the unit of a block's start alignment) — any finer
+        # and the length difference is absorbed by the alignment padding, so the part size does
+        # not move.
         ("const", f"const.{mark}.pad", 16 * (1 + len(mark) % 11)),
         ("weight", f"{mark}.{_OWN}pad", 16 * (1 + len(mark) % 13)),
     ):
@@ -411,24 +444,28 @@ def _spec(
     return graph, tensors, scales, overrides
 
 
-#: 故障注入で差し込む**語彙外**の op（`karume.ops.OP_CONTRACTS` に無い綴り）。
+#: The op **outside the vocabulary** injected for fault injection (a spelling not in
+#: `karume.ops.OP_CONTRACTS`).
 #:
-#: MUST: 置き換える `linear` と**同じバイト長**（6 文字）で、`requires.ops` / `capabilities.ops`
-#: の code point 順の位置も変わらない綴りにする — part 0 の長さが動くと、落ちるのが IR の
-#: 受理規則ではなく「part の長さが宣言と違う」になり、被験体が別物になる。
+#: MUST: spelled with **the same byte length** (6 characters) as the `linear` it replaces, and so
+#: that its code-point position in `requires.ops` / `capabilities.ops` does not change either — if
+#: part 0's length moved, the failure would be "the part length differs from the declaration"
+#: instead of the IR acceptance rules, and the subject would be something else.
 UNKNOWN_OP = "nosuch"
 
-#: 置き換え元の op（合成のグラフが必ず 1 本以上持つ）。
+#: The op being replaced (every synthetic graph has at least one).
 _REPLACED_OP = "linear"
 
 
 def with_an_unknown_op(parts: Sequence[bytes]) -> list[bytes]:
-    """part 0 のグラフ文書の `linear` を**語彙外の op** へ書き換えた part 列を返す。
+    """Return the part sequence with `linear` in part 0's graph document rewritten to **an op
+    outside the vocabulary**.
 
-    構造検査（`capabilities.ops` が `graphs[].requires.ops` の和と一致すること・block 目次・
-    codec 台帳）は満たしたままなので、落とせるのは IR の受理規則
-    （{@link karume.verify.assert_ir_accepted}）だけ — 「語彙外の op を宣言した容器」が
-    組み立てにも `karume verify` にも掛からずに配布形へ据わる、という穴の被験体。
+    The structural checks (`capabilities.ops` equals the union of `graphs[].requires.ops`, the
+    block index, the codec ledger) stay satisfied, so only the IR acceptance rules
+    ({@link karume.verify.assert_ir_accepted}) can reject it — the subject for the hole where "a
+    container declaring an op outside the vocabulary" lands in a distribution without being caught
+    by the assembly or by `karume verify`.
     """
     part0, *rest = parts
     header = read_header(part0[:HEADER_BYTES])
@@ -446,8 +483,8 @@ def with_an_unknown_op(parts: Sequence[bytes]) -> list[bytes]:
     rewritten = canonical_json(document).encode("utf-8")
     if len(rewritten) != header.graph_length:
         raise AssertionError(
-            f"書き換えでグラフ文書の長さが {header.graph_length} → {len(rewritten)} へ動いた"
-            "（被験体が『part の長さ違い』に化ける）"
+            f"the rewrite moved the graph document length {header.graph_length} →"
+            f" {len(rewritten)} (the subject would turn into 'a part length mismatch')"
         )
     head = write_header(kind="model", graph_length=len(rewritten), model_length=header.model_length)
     return [head + rewritten + tail, *rest]

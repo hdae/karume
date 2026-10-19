@@ -1,13 +1,14 @@
-"""IR の受理集合（グラフ単体の規則）と、safetensors のレイアウト規則を固定する。
+"""Pins the IR's accepted set (the rules of a graph alone) and the safetensors layout rules.
 
-エクスポータ側の検証がランタイム（packages/runtime/src/format/ir.ts）より広い受理集合を
-持つと、「export は緑・ブラウザだけ落ちる」乖離になる。ここは規則 1 本ずつに
-「受理する形」と「fail loudly する形」を並べて置く。
+If the exporter-side verification accepted a wider set than the runtime
+(packages/runtime/src/format/ir.ts), the two would diverge as "export green, fails only in the
+browser". Here each rule gets "a form that is accepted" and "a form that fails loudly" side by side.
 
-NOTE: **コンテナ（`krm`）との突合は `test_verify_container.py`** が持つ（宣言 shape を要する
-規則・piece 列・量子化の刻み・scale の長さ）。旧配布形（safetensors の shard 列）を読み返す
-門はここから退役した — 読むのは移行 CLI（`karume.legacy`）だけになったので、被験体ごと
-`test_migrate.py` 側に居る。
+NOTE: **the match against the container (`krm`) lives in `test_verify_container.py`** (the rules
+that need declared shapes, piece sequences, the quantization steps, the scale lengths). The check
+that read back the old distribution (safetensors shard sequences) was retired from here — only the
+migration CLI (`karume.legacy`) reads it now, so it moved to `test_migrate.py` together with its
+subject.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from karume.verify import (
 
 
 def base_graph() -> dict:
-    """記号次元 1 本・initializer 1 本・ノード 1 本の最小の valid グラフ。"""
+    """The minimal valid graph: one symbolic dimension, one initializer, one node."""
     return {
         "format": "karume-ir",
         "version": 1,
@@ -69,7 +70,8 @@ class TestFormatAndVersion:
             parse(version=2)
 
     def test_unknown_top_level_key_is_rejected(self):
-        """未リリースにつき前方互換チャネルは持たない — 未知キーは黙って無視しない。"""
+        """Unreleased, so there is no forward-compatibility channel — unknown keys are not silently
+        ignored."""
         with pytest.raises(IrError, match="unknown key"):
             parse(metadata={})
 
@@ -107,7 +109,8 @@ class TestSymbols:
             )
 
     def test_symbol_never_appearing_in_an_input_is_rejected(self):
-        """束縛は入力 shape の次元位置から取る — 値にしか現れない記号は束縛できない。"""
+        """Binding comes from dimension positions of input shapes — a symbol that appears only in
+        values cannot be bound."""
         with pytest.raises(IrError, match="appears in no dimension position"):
             parse(
                 inputs=[{"name": "x", "dtype": "f32", "shape": [8, 4]}],
@@ -118,7 +121,7 @@ class TestSymbols:
             )
 
     def test_a_derived_dim_is_a_binding_source(self):
-        """派生形（`2T`）でも解は一意なので束縛源になる（ADR 0057）。"""
+        """A derived form (`2T`) has a unique solution too, so it is a binding source (ADR 0057)."""
         graph = parse(
             inputs=[{"name": "x", "dtype": "f32", "shape": ["2T", 4]}],
             values={
@@ -187,10 +190,11 @@ class TestSsaAndTopologicalOrder:
             parse(outputs=["y", "y"])
 
     def test_empty_outs_is_rejected_by_the_contract_layer(self):
-        """0 本席（ADR 0067 決定 5）— パーサは `outs` の本数に意味を与えない。
+        """Zero outputs (ADR 0067 decision 5) — the parser gives no meaning to the number of `outs`.
 
-        「0 本を許すのは契約が effect を宣言する op だけ」の執行点は契約層の出力数突合。
-        パーサ側で本数を見ていた頃の拒否は、この 1 本に置き換わっている。
+        "Only ops whose contract declares an effect may have zero outputs" is enforced by the
+        contract layer's output-count match. The rejection from the days when the parser looked
+        at the count has been replaced by this one.
         """
         graph = parse(
             outputs=[],
@@ -237,7 +241,8 @@ class TestDeclarationCompleteness:
             )
 
     def test_i32_initializer_pairs_with_i32_storage(self):
-        """記号依存定数の焼き込み先（ADR 0010）— 意味論 i32 は生の int32 格納と組む。"""
+        """Where symbol-dependent constants are baked (ADR 0010) — semantic i32 pairs with raw int32
+        storage."""
         graph = parse(
             requires={"ops": ["mul"]},
             inputs=[{"name": "x", "dtype": "i32", "shape": ["T", 4]}],
@@ -257,10 +262,11 @@ class TestDeclarationCompleteness:
         ids=["i32-as-f32", "f32-as-i32", "f32-as-f16-is-fine"],
     )
     def test_crossed_semantic_and_storage_dtypes_are_rejected(self, semantic, storage):
-        """f32 の格納語彙（f32/f16/bf16/i8）と生の int32 は交差させない。
+        """The f32 storage vocabulary (f32/f16/bf16/i8) and raw int32 do not cross.
 
-        交差を許すと i32 宣言の initializer が f16 のビット列として読まれる沈黙誤値になる。
-        f32 × f16 だけは valid な組（宣言としては受理し、実行可否は対応表突合の層）。
+        Allowing a cross would read an initializer declared i32 as f16 bits — a silently wrong
+        value. Only f32 × f16 is a valid pair (accepted as a declaration; whether it runs is the
+        concern of the support-table layer).
         """
 
         def build():
@@ -296,7 +302,8 @@ class TestDeclarationCompleteness:
             )
 
     def test_symbolic_initializer_shape_is_rejected(self):
-        """束縛前に確定していない initializer は safetensors 側 shape と突合できない。"""
+        """An initializer not fixed before binding cannot be matched against the safetensors-side
+        shape."""
         with pytest.raises(IrError, match="cannot use a symbolic dimension"):
             parse(
                 values={
@@ -307,10 +314,12 @@ class TestDeclarationCompleteness:
 
 
 class TestEmptyDeclarationNames:
-    """空文字の値名は宣言できない（TS 側 packages/runtime/src/format/ir.ts の鏡像）。
+    """An empty value name cannot be declared (mirror of the TS side,
+    packages/runtime/src/format/ir.ts).
 
-    参照側（入力名・ノードの入出力・グラフ出力）は空でない文字列しか受理しないので、空名の
-    宣言は原理的に参照できない値になる。`states` は既にこの門を持っていた。
+    The referencing side (input names, node inputs and outputs, graph outputs) accepts only
+    non-empty strings, so a declaration with an empty name is a value that can never be referenced.
+    `states` already had this check.
     """
 
     def test_an_empty_value_name_is_rejected(self):
@@ -333,12 +342,14 @@ class TestEmptyDeclarationNames:
             )
 
     def test_the_pair_that_neutralizes_both_orphan_checks_is_rejected(self):
-        """空名の `values` と空名の `initializers` を**対で**書いた形。
+        """An empty-named `values` entry and an empty-named `initializers` entry written **as a
+        pair**.
 
-        孤立宣言の門は互いに満たされて発火せず（values 側は「initializer が定義する」・
-        initializer 側は「values に宣言がある」）、余剰テンソル検査も initializer から
-        参照されているので鳴らない — 空名の門が無いと、参照不能な実テンソル 1 本が
-        `karume verify` 緑のまま配布形に居座る。
+        The orphan-declaration checks satisfy each other and do not fire (on the values side "an
+        initializer defines it", on the initializer side "values has a declaration"), and the
+        surplus-tensor check stays quiet because the initializer references it — without the
+        empty-name check, one unreferenceable real tensor would sit in the distribution while
+        `karume verify` stays green.
         """
         with pytest.raises(IrError, match="is not a non-empty string"):
             parse(
@@ -383,7 +394,8 @@ class TestStorageDescriptor:
             )
 
     def test_group_size_beyond_the_safe_integer_range_is_rejected(self):
-        """TS 側は JSON の数値を JS の number として読むので 2^53 以上は整数で持てない。"""
+        """The TS side reads JSON numbers as JS numbers, so 2^53 and above cannot be held as
+        integers."""
         with pytest.raises(IrError, match="safe integer"):
             parse(
                 initializers={
@@ -395,11 +407,12 @@ class TestStorageDescriptor:
             )
 
     def test_i8_without_a_scale_is_rejected(self):
-        """MUST: i8 は scale を明示宣言する
-        （ADR 0019・TS 側 packages/runtime/src/format/ir.ts の鏡像）。
+        """MUST: i8 declares its scale explicitly
+        (ADR 0019; mirror of the TS side, packages/runtime/src/format/ir.ts).
 
-        既定 1.0 で補完すると、書き忘れが「全チャネル 1.0 で dequant した重み」に化けて
-        ロードも実行も通ってしまう（差は O(scale) なのにどこにも例外が出ない）。
+        Filling in a default of 1.0 would turn an omission into "weights dequantized with 1.0 for
+        every channel", and both loading and running would pass (the difference is O(scale), yet
+        no exception appears anywhere).
         """
         with pytest.raises(IrError, match=r"requires scale \(the scale tensor's key\)"):
             parse(initializers={"w": {"tensor": "enc.w", "storage": {"dtype": "i8"}}})
@@ -418,11 +431,12 @@ class TestStorageDescriptor:
 
 
 class TestGroupQuantizedStorage:
-    """group 量子化格納（i4 — ADR 0069 決定 2）の宣言規則。
+    """Declaration rules of group-quantized storage (i4 — ADR 0069 decision 2).
 
-    scale と group_size を必須にし、group 長は 2 冪かつ 16 以上・量子化軸（最終次元）が
-    group 長で割り切れることを MUST とする（端数 group を作らない制約が、行境界・group 境界の
-    バイト整列を保証している）。TS 側 `packages/runtime/src/format/ir.ts` の鏡像。
+    scale and group_size are required, and the group length MUST be a power of 2 and 16 or more,
+    with the quantized axis (last dimension) divisible by it (the constraint of never making a
+    remainder group guarantees the byte alignment of row and group boundaries). Mirror of the TS
+    side, `packages/runtime/src/format/ir.ts`.
     """
 
     def _i4(self, storage: dict, last_dim: int = 32) -> dict:
@@ -458,10 +472,11 @@ class TestGroupQuantizedStorage:
             parse(**self._i4({"dtype": "i4", "scale": "enc.s", "group_size": 32}, last_dim=48))
 
     def test_a_shared_declaration_is_accepted_without_a_group_size(self):
-        """共有 initializer は group_size を宣言できない（刻みは貸し手が正本 — ADR 0096 段 2）。
+        """A shared initializer cannot declare group_size (the lender is the source of truth for the
+        step — ADR 0096 stage 2).
 
-        宣言側がそう定める以上、宣言の完全性検査が「i4 なのに group_size が無い」で落とすと
-        i4 の埋め込みを貸す共有宣言が原理的に書けない。
+        Since the declaration side says so, if the declaration completeness check failed on "i4
+        without group_size", a shared declaration lending an i4 embedding could never be written.
         """
         graph = parse(
             requires={"ops": ["embedding"]},
@@ -486,13 +501,14 @@ class TestGroupQuantizedStorage:
 
 
 def declared_states(states: dict, *, referenced: list[str] | None = None) -> dict:
-    """スロットを参照する `state_append` を足したグラフの上書き集合。
+    """The overrides of a graph with `state_append` nodes added that reference the slots.
 
-    参照完全性（ADR 0067 決定 4 / 5 — 宣言されたスロットは 1 つ以上のノードから参照される
-    MUST）が入ったので、「宣言だけして誰も参照しない」グラフはもう受理されない。スロット宣言
-    そのものの受理集合を見るテストは、この足場の上で 1 点だけを動かす。
+    Since reference completeness (ADR 0067 decisions 4 / 5 — a declared slot MUST be referenced by
+    at least one node) went in, a graph that "declares but nobody references" is no longer
+    accepted. Tests that look at the accepted set of the slot declaration itself move one point
+    on top of this scaffold.
 
-    `referenced` を渡すと参照するスロットを絞れる（孤立スロットの検出線を踏むため）。
+    Passing `referenced` narrows the referenced slots (to exercise the orphan-slot detection).
     """
     names = list(states) if referenced is None else referenced
     nodes = [
@@ -510,18 +526,20 @@ def declared_states(states: dict, *, referenced: list[str] | None = None) -> dic
 
 
 class TestStateSlots:
-    """名前付き state スロット（ADR 0066 決定 2）— 宣言側の受理集合。
+    """Named state slots (ADR 0066 decision 2) — the accepted set on the declaration side.
 
-    ノードからの参照（ADR 0067 の states 欄 / `state_append`）は TestNodeStates が持つ。ここは
-    「参照は最小の足場で満たしたうえで、宣言 1 点だけを動かす」形に揃える。
+    References from nodes (ADR 0067's states field / `state_append`) belong to TestNodeStates.
+    Here the shape is "satisfy the references with the minimal scaffold, then move one point of
+    the declaration".
     """
 
     def test_a_graph_without_the_section_has_no_slots(self):
-        """節を持たないグラフ（= 既存の全モデル）は無風。"""
+        """A graph without the section (= every existing model) is unaffected."""
         graph = parse()
 
         assert graph.states == {}
-        # MUST: 空の states は書き戻さない — 出すと既存モデルのグラフ JSON がバイト単位で変わる。
+        # MUST: empty states are not written back — writing them would change the graph JSON of
+        # existing models byte for byte.
         assert "states" not in graph.to_dict()
 
     def test_an_empty_section_is_accepted(self):
@@ -531,7 +549,8 @@ class TestStateSlots:
         assert "states" not in graph.to_dict()
 
     def test_slots_with_different_capacities_are_accepted(self):
-        """sliding 層と full 層は容量の違う別スロット（層 × 均一 KV の前提を作らない）。"""
+        """Sliding layers and full layers are separate slots of different capacities (no premise of
+        layers × uniform KV)."""
         graph = parse(
             **declared_states(
                 {
@@ -548,13 +567,15 @@ class TestStateSlots:
 
     @pytest.mark.parametrize("shape", [[8], [1, 2, 3, 4], ["T", 4]])
     def test_accepted_shapes(self, shape):
-        """rank 1..4 の両端と記号次元（束縛源は入力 shape または states shape の次元位置）。"""
+        """Both ends of rank 1..4 and a symbolic dimension (the binding source is a dimension
+        position of an input shape or a states shape)."""
         graph = parse(**declared_states({"cache": {"dtype": "f32", "shape": shape}}))
 
         assert graph.states["cache"].shape == shape
 
     def test_the_section_round_trips_in_place(self):
-        """宣言節なので `values` の直後・`nodes` の前に戻す（TS 側の並びと同じ）。"""
+        """A declaration section, so it is written back right after `values` and before `nodes` (the
+        same order as the TS side)."""
         slot = {"dtype": "f32", "shape": [1, 2, 512, 128]}
         graph = parse(**declared_states({"layer0.k": slot}))
         keys = list(graph.to_dict())
@@ -564,10 +585,11 @@ class TestStateSlots:
         assert keys.index("nodes") == keys.index("states") + 1
 
     def test_a_slot_that_no_node_references_is_rejected(self):
-        """参照完全性（ADR 0067 決定 4 / 5）— values の孤立宣言と同じ穴を塞ぐ。
+        """Reference completeness (ADR 0067 decisions 4 / 5) — closes the same hole as orphan
+        declarations in values.
 
-        誰も参照しないスロットは GenerationContext が確保だけして誰も読まない容量
-        （KV なら数十 MiB 単位）が黙って残る。
+        A slot nobody references silently leaves capacity that the GenerationContext allocates
+        and nobody reads (tens of MiB for KV).
         """
         with pytest.raises(
             IrError, match=re.escape("graph.states['orphan']: a declaration no node references")
@@ -583,7 +605,8 @@ class TestStateSlots:
             )
 
     def test_the_reserved_f16_storage_is_rejected_as_unsupported(self):
-        """f16 は席の予約だけ（ADR 0066 追記 5）— 「語彙外」ではなく「未対応」で落とす。"""
+        """f16 is only a reserved option (ADR 0066 addendum of 2026-08-17, item 5) — it fails as
+        "not supported", not as "outside the vocabulary"."""
         with pytest.raises(IrError, match="is not supported"):
             parse(states={"cache": {"dtype": "f16", "shape": [4]}})
 
@@ -598,7 +621,8 @@ class TestStateSlots:
             parse(states={"cache": {"dtype": "f32", "shape": shape}})
 
     def test_zero_capacity_is_rejected(self):
-        """容量込みの具体形なので数値次元は正整数（`values` の非負とは違う）。"""
+        """A concrete shape including the capacity, so numeric dimensions are positive integers
+        (unlike the non-negative ones of `values`)."""
         with pytest.raises(IrError, match="is not a positive integer"):
             parse(states={"cache": {"dtype": "f32", "shape": [1, 0, 4]}})
 
@@ -622,7 +646,8 @@ class TestStateSlots:
             ({"cache": {"dtype": "f32", "shape": 4}}, "shape: is not an array"),
             ({"cache": {"shape": [4]}}, "required key 'dtype' is missing"),
             ({"cache": {"dtype": "f32", "shape": [4], "window": 512}}, "unknown key 'window'"),
-            # 空のスロット名は参照側の欄（ADR 0067）が受理しない = 参照できない宣言になる。
+            # An empty slot name is not accepted by the referencing fields (ADR 0067) = a
+            # declaration that cannot be referenced.
             (
                 {"": {"dtype": "f32", "shape": [4]}},
                 "slot name of graph.states: is not a non-empty string",
@@ -635,8 +660,8 @@ class TestStateSlots:
 
     @pytest.mark.parametrize("name", ["x", "w", "y"])
     def test_a_slot_named_after_a_value_is_rejected(self, name):
-        """スロット名は値名前空間と別だが、同名は取り違えの検出線として拒否する
-        （入力 / initializer / ノード出力の 3 役）。
+        """Slot names are a namespace separate from values, but the same name is rejected as a
+        detection line for mix-ups (the 3 roles input / initializer / node output).
         """
         with pytest.raises(
             IrError, match=re.escape(f"graph.states['{name}']: same name as a value")
@@ -645,11 +670,11 @@ class TestStateSlots:
 
 
 def kv_graph(**overrides) -> dict:
-    """states 形 attention + `state_append` の最小グラフ（decode 1 step・1 層ぶん）。
+    """The minimal graph of states-form attention + `state_append` (one decode step, one layer).
 
-    `q[1,8,1,16]` / `k`・`v[1,2,1,16]`（GQA 4:1）と容量 64 のスロット 2 本。ins は**今 step の
-    chunk だけ**で、過去はスロットが持つ（ADR 0067 決定 4）。発行順は「全読者 → append」
-    （決定 5b）。
+    `q[1,8,1,16]` / `k`, `v[1,2,1,16]` (GQA 4:1) and 2 slots of capacity 64. The ins are **only
+    this step's chunk**; the past is held by the slots (ADR 0067 decision 4). The emission order
+    is "every reader → append" (decision 5b).
     """
     graph = {
         "format": "karume-ir",
@@ -693,8 +718,8 @@ def kv_graph(**overrides) -> dict:
         ],
     }
     graph.update(overrides)
-    # requires.ops ≡ 使用 op 集合（明示指定が無ければノード列から導く — ノードを差し替える
-    # テストごとに宣言を書き直さないため）。
+    # requires.ops ≡ the set of ops used (derived from the nodes unless given explicitly — so
+    # that tests that replace nodes do not have to rewrite the declaration).
     if "requires" not in overrides:
         graph["requires"] = {"ops": sorted({node["op"] for node in graph["nodes"]})}
     return graph
@@ -705,14 +730,15 @@ def parse_kv(**overrides):
 
 
 def check_kv(**overrides):
-    """パース → 契約検査（アリティ / states 欄 / 順序 / shape）まで通す。"""
+    """Run parse → the contract checks (arity / states field / order / shape)."""
     graph = parse_kv(**overrides)
     assert_op_contracts(graph)
     return graph
 
 
 def kv_windows(*windows: int | None) -> list[dict]:
-    """3 ノード（attention / append k / append v）の `window` だけを差し替えたノード列。"""
+    """The node list with only the `window` of the 3 nodes (attention / append k / append v)
+    replaced."""
     nodes = [dict(node) for node in kv_graph()["nodes"]]
     for node, window in zip(nodes, windows, strict=True):
         node["attrs"] = dict(node["attrs"])
@@ -722,7 +748,8 @@ def kv_windows(*windows: int | None) -> list[dict]:
 
 
 def plain_attention_graph(attrs: dict) -> dict:
-    """states 欄を持たない**従来形** attention の最小グラフ（欄の有無で分かれる契約の対照）。"""
+    """The minimal graph of **classic-form** attention without a states field (the control for the
+    contract that splits on the field's presence)."""
     graph = kv_graph()
     del graph["states"]
     graph["requires"] = {"ops": ["attention"]}
@@ -731,12 +758,12 @@ def plain_attention_graph(attrs: dict) -> dict:
 
 
 class TestNodeStates:
-    """ノードの `states` 欄と `state_append`（ADR 0067 決定 4 / 5 / 5b）。
+    """The `states` field of nodes and `state_append` (ADR 0067 decisions 4 / 5 / 5b).
 
-    TS 側（format/ir.ts の parseNodeStates・ops/contracts.ts の assertStateField・
-    runtime/plan.ts の assertStateOrder・ops/shapes.ts の assertStateSlotForm）と**同じ
-    受理集合・同じ拒否集合**であることがここの仕様。層が違うだけで、片側だけ緩むと
-    「export は緑・ブラウザだけ落ちる」が state 軸で復活する。
+    The specification here is **the same accepted set and the same rejected set** as the TS side
+    (parseNodeStates in format/ir.ts, assertStateField in ops/contracts.ts, assertStateOrder in
+    runtime/plan.ts, assertStateSlotForm in ops/shapes.ts). Only the layers differ; if one side
+    loosened, "export green, fails only in the browser" would come back on the state axis.
     """
 
     def test_a_decode_step_graph_is_accepted(self):
@@ -747,7 +774,8 @@ class TestNodeStates:
         assert assert_runtime_support(graph) is None
 
     def test_the_field_round_trips_only_when_present(self):
-        """欄の有無がそのまま形の判別（ADR 0067 決定 4）— 空欄は書き戻さない。"""
+        """The presence of the field decides the form (ADR 0067 decision 4) — an empty field is not
+        written back."""
         node = parse_kv().nodes[0].to_dict()
 
         assert list(node) == ["op", "ins", "outs", "attrs", "states"]
@@ -755,22 +783,26 @@ class TestNodeStates:
         assert "states" not in parse().nodes[0].to_dict()
 
     def test_a_layer_without_an_append_is_accepted(self):
-        """KV 共有層は「`state_append` ノードが無い」だけで表せる（ORT の kv_empty 相当）。"""
+        """A KV-sharing layer is expressed simply by "no `state_append` node" (the equivalent of
+        ORT's kv_empty)."""
         graph = check_kv(nodes=kv_graph()["nodes"][:1])
 
         assert [node.op for node in graph.nodes] == ["attention"]
 
     def test_a_sliding_layer_is_accepted(self):
-        """省略可能 attrs `window`（欄の不存在 = 全 context）。読み書きで同じ値を宣言する。"""
+        """The optional attr `window` (absence of the field = the whole context). Reads and writes
+        declare the same value."""
         graph = check_kv(nodes=kv_windows(64, 64, 64))
 
         assert graph.nodes[0].attrs["window"] == 64
-        # 列挙門（capability 突合）も必須と省略可能の**和**で見る — 落とすと states 形の
-        # 正しいグラフが「未実装 attrs」として拒否される。
+        # The enumeration check (capability match) also looks at the **union** of required and
+        # optional attrs — dropping it would reject a correct states-form graph as
+        # "unimplemented attrs".
         assert assert_runtime_support(graph) is None
 
     def test_an_undeclared_slot_reference_is_rejected(self):
-        """未宣言スロットは実体を持たない名前 — 確保も束縛もされないまま実行段へ抜ける。"""
+        """An undeclared slot is a name without storage — it would slip through to execution neither
+        allocated nor bound."""
         nodes = [dict(node) for node in kv_graph()["nodes"]]
         nodes[0] = {**nodes[0], "states": {"k": "ghost", "v": "l0.v"}}
 
@@ -780,7 +812,8 @@ class TestNodeStates:
             parse_kv(nodes=nodes)
 
     def test_an_effect_op_with_outputs_is_rejected(self):
-        """`state_append` は**値を定義しない**（出力 0 本の宣言は契約表の空列そのもの）。"""
+        """`state_append` **defines no value** (declaring zero outputs is the contract table's empty
+        list itself)."""
         nodes = [dict(node) for node in kv_graph()["nodes"]]
         nodes[1] = {**nodes[1], "outs": ["z"]}
         values = {**kv_graph()["values"], "z": {"dtype": "f32", "shape": [1, 2, 1, 16]}}
@@ -789,7 +822,7 @@ class TestNodeStates:
             check_kv(nodes=nodes, values=values)
 
     def test_the_same_slot_in_two_fields_is_rejected(self):
-        """`k` と `v` に同じスロットを書いた取り違えは shape では捕まらない（同形だから）。"""
+        """A mix-up writing the same slot for `k` and `v` is not caught by shape (same shape)."""
         nodes = [dict(node) for node in kv_graph()["nodes"][:2]]
         nodes[0] = {**nodes[0], "states": {"k": "l0.k", "v": "l0.k"}}
 
@@ -799,7 +832,8 @@ class TestNodeStates:
             check_kv(nodes=nodes, states={"l0.k": kv_graph()["states"]["l0.k"]})
 
     def test_a_states_form_attention_with_a_mask_is_rejected(self):
-        """states 形は causal 固定で mask tensor を実体化しない（省略可能な末尾入力を取らない）。"""
+        """The states form is fixed causal and materializes no mask tensor (it takes no optional
+        trailing input)."""
         nodes = [dict(node) for node in kv_graph()["nodes"]]
         nodes[0] = {**nodes[0], "ins": ["q", "k", "v", "m"]}
         inputs = [*kv_graph()["inputs"], {"name": "m", "dtype": "f32", "shape": [1, 1, 1, 64]}]
@@ -814,56 +848,62 @@ class TestNodeStates:
 
     @pytest.mark.parametrize("window", [8.0, 8e0, 64.0])
     def test_an_integral_float_window_is_accepted(self, window):
-        """JSON の `8.0` / `8e0` は int 扱い（TS 側の受理集合と揃える）。
+        """JSON `8.0` / `8e0` are treated as int (aligned with the TS side's accepted set).
 
-        TS は JSON.parse が単一の number を返すので「整数値の float」という区別が無く
-        （`Number.isSafeInteger(8.0)` は true）、Python が float を丸ごと拒むと**ランタイムが
-        読める graph をエクスポータの検証だけが読めない**乖離になる（受理集合はどちらの向きにも
-        ずれてはいけない）。
+        In TS, JSON.parse returns a single number type, so there is no "float with an integer
+        value" distinction (`Number.isSafeInteger(8.0)` is true); if Python rejected floats
+        outright, **only the exporter's verification would fail on a graph the runtime can read**
+        (the accepted sets must not drift in either direction).
         """
         graph = check_kv(nodes=kv_windows(window, window, window))
 
         for node in graph.nodes:
-            assert isinstance(node.attrs["window"], float), "float を渡していない（空振り）"
+            assert isinstance(node.attrs["window"], float), (
+                "no float was passed (the check would pass vacuously)"
+            )
             assert state_window(node.attrs, "t") == int(window)
-            assert isinstance(state_window(node.attrs, "t"), int), "int へ正規化されていない"
+            assert isinstance(state_window(node.attrs, "t"), int), "not normalized to int"
 
     @pytest.mark.parametrize(
         "window",
         [1.5, float(2**53), float("inf"), float("-inf"), float("nan")],
     )
     def test_a_non_integral_or_out_of_range_float_window_is_rejected(self, window):
-        """整数値でない / safe range 外の float は従来どおり拒否（正規化は受理集合を広げない）。
+        """A float that is not integral or is outside the safe range is rejected as before (the
+        normalization does not widen the accepted set).
 
-        非有限値は JSON 読み（`parse_graph_json` の非標準リテラル拒否）でも止まるので、ここは
-        直接呼びで attrs 層そのものを踏む。
+        Non-finite values are also stopped by the JSON reading (`parse_graph_json` rejecting
+        non-standard literals), so this exercises the attrs layer itself through a direct call.
         """
         with pytest.raises(OpContractError, match="is not an integer of at least 1"):
             state_window({"window": window}, "t")
 
     def test_window_on_a_plain_attention_is_rejected(self):
-        """省略可能 attrs は states 形専用 — 従来形に書けると誰も読まない attr ができる。"""
+        """The optional attrs are for the states form only — allowing them on the classic form would
+        create an attr nobody reads."""
         with pytest.raises(OpContractError, match="only on a node with a states field"):
             assert_op_contracts(
                 parse_ir_graph(json.dumps(plain_attention_graph({"scale": 0.25, "window": 8})))
             )
 
     def test_a_plain_attention_is_untouched(self):
-        """欄が無いノードは従来契約そのまま（既存資産・既存門は無風）。"""
+        """A node without the field keeps the classic contract as is (existing assets and checks are
+        unaffected)."""
         graph = parse_ir_graph(json.dumps(plain_attention_graph({"scale": 0.25})))
 
         assert assert_op_contracts(graph) is None
         assert graph.nodes[0].states == {}
 
     def test_a_reader_after_the_append_is_rejected(self):
-        """append より後の読者は「今 step の k/v を過去として二重に読む」（決定 5b の②）。"""
+        """A reader after the append would "read this step's k/v twice, as the past" (decision 5b
+        ②)."""
         nodes = kv_graph()["nodes"]
 
         with pytest.raises(IrError, match="is followed by reader"):
             check_kv(nodes=[nodes[1], nodes[2], nodes[0]])
 
     def test_two_appends_to_one_slot_are_rejected(self):
-        """1 step に 2 回書くと ring の位置式が二重に進む（決定 5b の①）。"""
+        """Writing twice in one step advances the ring's position formula twice (decision 5b ①)."""
         nodes = kv_graph()["nodes"]
 
         with pytest.raises(IrError, match=re.escape("state_append appears 2 times")):
@@ -872,21 +912,26 @@ class TestNodeStates:
     @pytest.mark.parametrize(
         ("windows", "why"),
         [
-            ((64, 32, 64), "読み側と書き側で値が違う"),
-            ((None, 64, 64), "読み側だけ宣言が無い（全 context と ring の取り違え）"),
-            ((64, None, 64), "書き側だけ宣言が無い"),
+            ((64, 32, 64), "the read side and the write side differ in value"),
+            (
+                (None, 64, 64),
+                "only the read side lacks the declaration (whole context mixed up with the ring)",
+            ),
+            ((64, None, 64), "only the write side lacks the declaration"),
         ],
     )
     def test_a_window_mismatch_on_one_slot_is_rejected(self, windows, why):
-        """論理 col → 物理 row の写像は読み書き同式 MUST（決定 4）— 存在有無も値も一致する。"""
+        """The mapping logical col → physical row MUST use the same formula for reads and writes
+        (decision 4) — presence and value both match."""
         with pytest.raises(IrError, match=re.escape("attrs.window disagrees")):
             check_kv(nodes=kv_windows(*windows))
 
     def test_a_state_append_input_that_is_not_rank_four_is_rejected(self):
-        """入力の宣言 shape は `[B,Hkv,M,D]` 固定（attention の ins と同じ物理 chunk 次元）。
+        """The declared input shape is fixed at `[B,Hkv,M,D]` (the same physical chunk dimensions as
+        the attention ins).
 
-        rank 5 は B / Hkv / D が**偶然そろう**（軸 3 が D のまま）ので、rank 検査だけが
-        検出線になる形。
+        With rank 5, B / Hkv / D **happen to match** (axis 3 stays D), so only the rank check
+        detects it.
         """
         inputs = [*kv_graph()["inputs"], {"name": "k5", "dtype": "f32", "shape": [1, 2, 1, 16, 1]}]
         nodes = [dict(node) for node in kv_graph()["nodes"]]
@@ -896,7 +941,8 @@ class TestNodeStates:
             check_kv(inputs=inputs, nodes=nodes)
 
     def test_a_zero_length_chunk_is_rejected(self):
-        """空軸の softmax は amax の identity が定義できない（従来形の N=0 拒否と同じ理由）。"""
+        """A softmax over an empty axis has no defined amax identity (the same reason as the classic
+        form rejecting N=0)."""
         inputs = [
             {"name": "q", "dtype": "f32", "shape": [1, 8, 0, 16]},
             {"name": "k", "dtype": "f32", "shape": [1, 2, 0, 16]},
@@ -907,21 +953,22 @@ class TestNodeStates:
             check_kv(inputs=inputs, values={"o": {"dtype": "f32", "shape": [1, 8, 0, 16]}})
 
     def test_a_slot_that_is_not_rank_four_is_rejected(self):
-        """スロットの物理形は `[B,Hkv,C,D]` 固定（ADR 0067 決定 4 の②）。"""
+        """The physical slot shape is fixed at `[B,Hkv,C,D]` (ADR 0067 decision 4 ②)."""
         slot = {"dtype": "f32", "shape": [1, 2, 64]}
 
         with pytest.raises(OpContractError, match=re.escape("must be rank-4 [B,Hkv,C,D]")):
             check_kv(states={"l0.k": slot, "l0.v": slot})
 
     def test_a_slot_whose_head_count_differs_from_the_input_is_rejected(self):
-        """別の層のスロットを参照した形 — 容量が同じだと沈黙誤読になる。"""
+        """Referencing another layer's slot — with the same capacity it would be a silent
+        misread."""
         slot = {"dtype": "f32", "shape": [1, 4, 64, 16]}
 
         with pytest.raises(OpContractError, match="B / Hkv / D mismatch"):
             check_kv(states={"l0.k": slot, "l0.v": slot})
 
     def test_slots_of_different_capacity_for_k_and_v_are_rejected(self):
-        """片方だけ先に wrap する ring は値が静かにずれる。"""
+        """A ring where only one side wraps first shifts the values silently."""
         with pytest.raises(OpContractError, match="differ in shape"):
             check_kv(
                 states={
@@ -931,16 +978,19 @@ class TestNodeStates:
             )
 
     def test_a_window_larger_than_the_capacity_is_rejected(self):
-        """ring 幅が容量を超えると、書いた行が同 step 中に自分で潰れる。"""
+        """With a ring width above the capacity, a written row gets overwritten by itself within the
+        same step."""
         with pytest.raises(OpContractError, match="exceeds the slot capacity 64"):
             check_kv(nodes=kv_windows(65, 65, 65))
 
     def test_a_symbolic_capacity_defers_the_window_bound(self):
-        """記号容量では `window <= C` を判定しない（束縛は `createGenerationContext` の層）。
+        """With a symbolic capacity, `window <= C` is not decided (binding is the layer of
+        `createGenerationContext`).
 
-        TS 側は束縛解決後の数値しか扱わないので常に判定できる — この 1 点だけが片側で保留に
-        なる非対称で、「宣言だけでは決められないものを決めたことにしない」という既存の規律
-        （broadcast 可否・整除 broadcast と同じ）に揃えた結果。
+        The TS side handles only numbers after binding is resolved, so it can always decide — this
+        one point is an asymmetry deferred on one side, the result of following the existing rule
+        "do not pretend to have decided what the declaration alone cannot decide" (the same as for
+        broadcastability and divisible broadcast).
         """
         slot = {"dtype": "f32", "shape": [1, 2, "C", 16]}
         graph = check_kv(
@@ -955,13 +1005,15 @@ class TestNodeStates:
         assert graph.symbols == ["C"]
 
     def test_a_states_only_symbol_is_bindable(self):
-        """states にしか現れない記号（KV 容量）も束縛点を持つ（ADR 0066 追記 7）。"""
+        """A symbol that appears only in states (the KV capacity) has a binding point too (ADR 0066
+        addendum of 2026-08-17, item 7)."""
         slot = {"dtype": "f32", "shape": [1, 2, "C", 16]}
 
         assert check_kv(symbols=["C"], states={"l0.k": slot, "l0.v": slot}).symbols == ["C"]
 
     def test_a_states_only_symbol_in_a_value_shape_is_rejected(self):
-        """値 shape の解決に効くのは入力由来の束縛だけ — 現れると実行時に必ず束縛不能。"""
+        """Only bindings from inputs resolve value shapes — if it appeared there, it would always
+        fail to bind at run time."""
         slot = {"dtype": "f32", "shape": [1, 2, "C", 16]}
 
         with pytest.raises(
@@ -974,7 +1026,8 @@ class TestNodeStates:
             )
 
     def test_a_symbol_bound_nowhere_is_still_rejected(self):
-        """束縛点は「入力 shape ∪ states shape」— どちらにも無い記号は従来どおり落とす。"""
+        """The binding points are "input shapes ∪ states shapes" — a symbol in neither fails as
+        before."""
         with pytest.raises(IrError, match="appears in no dimension position"):
             parse_kv(symbols=["C"])
 
@@ -1005,7 +1058,8 @@ class TestNodeStates:
         ],
     )
     def test_a_key_set_other_than_the_contract_is_rejected(self, states, message):
-        """キー集合は契約の宣言と完全一致 — 部分集合を許すと `v` 書き忘れが通る。"""
+        """The key set exactly equals the contract's declaration — allowing a subset would let a
+        forgotten `v` through."""
         nodes = [dict(node) for node in kv_graph()["nodes"]]
         nodes[0] = {**nodes[0], "states": states}
 
@@ -1013,7 +1067,8 @@ class TestNodeStates:
             check_kv(nodes=nodes)
 
     def test_a_state_append_without_the_field_is_rejected(self):
-        """`state_append` の states 欄は必須（書き先の無い書き込み op は存在しない）。"""
+        """The states field of `state_append` is required (there is no write op without a
+        destination)."""
         nodes = [dict(node) for node in kv_graph()["nodes"]]
         del nodes[1]["states"]
 
@@ -1021,7 +1076,8 @@ class TestNodeStates:
             check_kv(nodes=nodes)
 
     def test_an_op_without_a_states_contract_is_rejected(self):
-        """欄を持てない op に欄を書いた形（契約が `None` = 持てない、の執行）。"""
+        """The field written on an op that cannot have one (enforcing the contract's `None` = cannot
+        have it)."""
         nodes = [
             *kv_graph()["nodes"],
             {"op": "relu", "ins": ["o"], "outs": ["r"], "attrs": {}, "states": {"k": "l0.k"}},
@@ -1033,16 +1089,17 @@ class TestNodeStates:
 
 
 class TestIntegralFloatDimensions:
-    """JSON の整数値 float（`1.0` / `1e0`）を TS と同じく受理する。
+    """Integral JSON floats (`1.0` / `1e0`) are accepted, as in TS.
 
-    TS は JSON.parse が単一の number を返すので `4` と `4.0` を区別できない（どちらも
-    `Number.isSafeInteger` が true）。ここが float を丸ごと拒むと「ランタイムは読めるのに
-    エクスポータの検証だけが落ちる」乖離になるので、両側で同じ受理集合を固定する。
+    In TS, JSON.parse returns a single number type, so `4` and `4.0` cannot be told apart
+    (`Number.isSafeInteger` is true for both). Rejecting floats outright here would diverge as "the
+    runtime can read it, but the exporter's verification alone fails", so both sides pin the same
+    accepted set.
     """
 
     @staticmethod
     def parse_raw_dim(raw: str, **overrides):
-        """次元 1 個だけを生の JSON テキストで差し込む（json.dumps は `1e0` を `1.0` に畳む）。"""
+        """Inject a single dimension as raw JSON text (json.dumps would fold `1e0` into `1.0`)."""
         text = json.dumps({**base_graph(), **overrides})
         assert '"__DIM__"' in text
         return parse_ir_graph(text.replace('"__DIM__"', raw))
@@ -1058,7 +1115,8 @@ class TestIntegralFloatDimensions:
         )
 
         assert graph.values["w"].shape == [4]
-        # 正規化の結果は int（float のまま持つと to_dict が `4.0` を書き戻して往復が壊れる）。
+        # The normalized result is int (kept as float, to_dict would write `4.0` back and break
+        # the round trip).
         assert all(isinstance(dim, int) for dim in graph.values["w"].shape)
 
     @pytest.mark.parametrize("raw", ["4.0", "4e0"])
@@ -1084,7 +1142,8 @@ class TestIntegralFloatDimensions:
             self.parse_raw_dim(raw, states={"cache": {"dtype": "f32", "shape": [1, "__DIM__"]}})
 
     def test_integral_float_beyond_the_safe_range_is_rejected(self):
-        """`Number.isSafeInteger` と同じ上限で落ちる（TS だけが読めない値を通さない）。"""
+        """Fails at the same upper bound as `Number.isSafeInteger` (no value that only TS cannot
+        read gets through)."""
         with pytest.raises(IrError, match="is not a non-negative integer"):
             self.parse_raw_dim(
                 "1e300",
@@ -1096,16 +1155,18 @@ class TestIntegralFloatDimensions:
 
 
 class TestIntegralFloatGroupSize:
-    """`group_size` も次元と同じく整数値 float を受理する（受理集合の向きを揃える）。
+    """`group_size` accepts integral floats like the dimensions do (keeps the accepted sets
+    aligned).
 
-    TS 側は `Number.isSafeInteger(32.0)` が true なので `32.0` と書かれた i4 グラフを読める。
-    Python だけが「正整数でない」で落とすと、**ランタイムが読める配布形をエクスポータの
-    検証だけが読めない**乖離になる（`_parse_shape` の正規化と同じ理由）。
+    On the TS side `Number.isSafeInteger(32.0)` is true, so an i4 graph written with `32.0` can be
+    read. If only Python failed with "not a positive integer", **only the exporter's verification
+    would fail on a distribution the runtime can read** (the same reason as the normalization in
+    `_parse_shape`).
     """
 
     @staticmethod
     def parse_raw_group_size(raw: str):
-        """`group_size` だけを生の JSON テキストで差し込む（json.dumps は `32.0` へ畳む）。"""
+        """Inject only `group_size` as raw JSON text (json.dumps would fold it into `32.0`)."""
         graph = {
             **base_graph(),
             "initializers": {
@@ -1128,7 +1189,7 @@ class TestIntegralFloatGroupSize:
         group_size = self.parse_raw_group_size(raw).initializers["w"].storage.group_size
 
         assert group_size == 32
-        # int で持つ（float のまま持つと to_dict が `32.0` を書き戻して往復が壊れる）。
+        # Kept as int (kept as float, to_dict would write `32.0` back and break the round trip).
         assert isinstance(group_size, int)
 
     def test_a_non_integral_group_size_is_still_rejected(self):
@@ -1136,7 +1197,8 @@ class TestIntegralFloatGroupSize:
             self.parse_raw_group_size("32.5")
 
     def test_an_integral_float_beyond_the_safe_range_is_still_rejected(self):
-        """`Number.isSafeInteger` と同じ上限（TS だけが読めない値は通さない）。"""
+        """The same upper bound as `Number.isSafeInteger` (no value that only TS cannot read gets
+        through)."""
         with pytest.raises(IrError, match="safe integer"):
             self.parse_raw_group_size("1e300")
 
@@ -1148,7 +1210,7 @@ class TestJsonLiterals:
             parse_ir_graph('{"format":"karume-ir","version":' + literal + "}")
 
     def test_overflowing_exponent_is_rejected_at_the_value_level(self):
-        """`1e999` は構文としては有効だが Infinity へ丸まる — 値で弾く。"""
+        """`1e999` is valid syntax but rounds to Infinity — it is rejected by value."""
         with pytest.raises(IrError, match="is not finite"):
             parse_ir_graph('{"format":"karume-ir","version":1e999}')
 
@@ -1158,17 +1220,19 @@ class TestJsonLiterals:
 
 
 class TestRuntimeSupport:
-    """ランタイム対応表との突合は op 名だけでなく dtype・attrs・格納 dtype まで見る。"""
+    """The match against the runtime support table looks not only at op names but also at dtypes,
+    attrs and storage dtypes."""
 
     def test_the_baseline_graph_is_executable(self):
         assert assert_runtime_support(parse()) is None
 
     def test_unsupported_ops_are_enumerated_at_once(self):
-        """語彙にすら無い op は**まとめて**列挙されて落ちる（1 件ずつ落とさない）。
+        """Ops not even in the vocabulary are enumerated **together** and fail (not one at a time).
 
-        NOTE: 代表として使う op は語彙の拡張のたびに入れ替わる — conv_transpose1d は
-        ADR 0015 で、conv2d は ADR 0017 で、conv3d は ADR 0118 で契約表に入った。ここは
-        転置畳み込みの多次元版（conv_transpose2d / conv_transpose3d）で**複数件の列挙**を固定する。
+        NOTE: the representative ops change with every vocabulary extension — conv_transpose1d
+        entered the contract table with ADR 0015, conv2d with ADR 0017, conv3d with ADR 0118. This
+        pins **the enumeration of several** with the multi-dimensional transposed convolutions
+        (conv_transpose2d / conv_transpose3d).
         """
         graph = parse(
             requires={"ops": ["conv_transpose2d", "conv_transpose3d"]},
@@ -1192,8 +1256,9 @@ class TestRuntimeSupport:
         assert "conv_transpose3d" in message and "conv_transpose2d" in message
 
     def test_an_unbatched_conv3d_graph_is_executable(self):
-        """conv3d（ADR 0118 決定 1）は語彙に入った — unbatched の rank 4 入力・rank 5 の重み・
-        [T, H, W] の 3 成分 attrs の形が対応表と契約の両方を通る（旧版はここで拒否していた）。"""
+        """conv3d (ADR 0118 decision 1) entered the vocabulary — an unbatched rank-4 input, a rank-5
+        weight and 3-component [T, H, W] attrs pass both the support table and the contract (the
+        old version rejected it here)."""
         graph = parse(
             requires={"ops": ["conv3d"]},
             symbols=[],
@@ -1226,10 +1291,11 @@ class TestRuntimeSupport:
         assert_op_contracts(graph)
 
     def test_every_semantic_dtype_can_be_transferred(self):
-        """転送層の軸は意味論 dtype 全語彙を受理する（ADR 0009 で i32 / bool を解禁）。
+        """The transfer layer's axis accepts the whole semantic dtype vocabulary (ADR 0009 allowed
+        i32 / bool).
 
-        どのノードも消費しない入力にも転送層の制約は実在する（実行器は全 graph.inputs を
-        転送する）ので、軸自体は残す。
+        Inputs that no node consumes are still subject to the transfer layer's constraints (the
+        executor transfers every graph.inputs), so the axis itself stays.
         """
         graph = parse(
             inputs=[
@@ -1242,29 +1308,32 @@ class TestRuntimeSupport:
         assert_runtime_support(graph)
 
     def test_a_storage_only_dtype_cannot_be_a_graph_input(self):
-        """反対側 — 転送できるのは意味論 dtype だけで、格納 dtype は入力に置けない。
+        """The other side — only semantic dtypes can be transferred; a storage dtype cannot be an
+        input.
 
-        `f16` は initializer の格納としては valid（TestDeclarationCompleteness の
-        f32-as-f16）なので、「格納できる dtype」と「転送できる dtype」が別語彙であることは
-        こちらからしか固定できない。
+        `f16` is valid as an initializer's storage (f32-as-f16 in TestDeclarationCompleteness), so
+        that "dtypes that can be stored" and "dtypes that can be transferred" are separate
+        vocabularies can only be pinned from this side.
         """
         with pytest.raises(IrError, match="semantic dtype 'f16'"):
             parse(inputs=[{"name": "x", "dtype": "f16", "shape": ["T", 4]}])
 
     def test_an_op_that_does_not_accept_the_input_dtype_is_reported(self):
-        """転送できても op が受理しない dtype はここで落ちる（軸が 2 本ある理由）。"""
+        """A dtype that can be transferred but that the op does not accept fails here (the reason
+        there are 2 axes)."""
         graph = parse(inputs=[{"name": "x", "dtype": "i32", "shape": ["T", 4]}])
 
         with pytest.raises(ContainerError, match="unsupported semantic dtype"):
             assert_runtime_support(graph)
 
     def test_swapped_slots_of_a_per_slot_op_are_enumerated(self):
-        """受理集合の**和**だけで突き合わせると素通りする形
-        （packages/runtime/src/format/container.ts と同義）。
+        """A form that slips through when matched only against the **union** of the accepted sets
+        (same meaning as packages/runtime/src/ops/support.ts).
 
-        gather の和は {f32, i32} なので、値と添字を逆に渡してもどちらの dtype も和には入る。
-        列挙門がスロットを見ないと、契約検査まで落ちて 1 件ずつ止まることになり
-        「非対応は全件列挙」の意図が壊れる。
+        The union for gather is {f32, i32}, so even with the value and the index swapped both
+        dtypes are in the union. If the enumerating check did not look at slots, it would fall
+        through to the contract checks and stop one at a time, breaking the intent "enumerate
+        every unsupported case".
         """
         graph = parse(
             requires={"ops": ["gather"]},
@@ -1285,7 +1354,8 @@ class TestRuntimeSupport:
         assert "value 'src': i32" in message and "value 'idx': f32" in message
 
     def test_the_output_of_a_per_slot_op_is_checked_against_the_value_slot(self):
-        """出力はスロット 0（値の側）と同型 — 和で見ると gather の i32 出力が通ってしまう。"""
+        """The output has the same type as slot 0 (the value side) — checking against the union
+        would let gather's i32 output through."""
         graph = parse(
             requires={"ops": ["gather"]},
             inputs=[
@@ -1301,17 +1371,19 @@ class TestRuntimeSupport:
             assert_runtime_support(graph)
 
     def test_swapped_output_slots_of_a_multi_output_op_are_enumerated(self):
-        """多出力 op（topk）の出力宣言を slot 間で**入れ替えた**形
-        （packages/runtime/tests/format_container_test.ts の同形テストと対）。
+        """The output declarations of a multi-output op (topk) **swapped** between slots
+        (counterpart of the same-shaped test in packages/runtime/tests/ops_support_test.ts).
 
-        全出力を slot 0 の受理集合で見る退行だと、値の側（f32）と添字の側（i32）がどちらも
-        同じ集合に照らして判定され、片方しか列挙されない（あるいは両方素通りする）。
+        With a regression that checks every output against slot 0's accepted set, the value side
+        (f32) and the index side (i32) would both be judged against the same set, and only one of
+        them would be enumerated (or both would slip through).
         """
         graph = parse(
             requires={"ops": ["topk"]},
             outputs=["v", "i"],
             initializers={},
-            # slot 0 は値（f32）・slot 1 は添字（i32）なので、この 2 本は**どちらも**非対応
+            # slot 0 is the values (f32) and slot 1 the indices (i32), so **both** of these are
+            # unsupported
             values={
                 "v": {"dtype": "i32", "shape": ["T", 2]},
                 "i": {"dtype": "f32", "shape": ["T", 2]},
@@ -1327,16 +1399,18 @@ class TestRuntimeSupport:
         assert "value 'v': i32" in message and "value 'i': f32" in message
 
     def test_bf16_storage_passes_the_capability_gate(self):
-        """bf16 は f16 と同じ経路で実行できる（ADR 0131・TS 側 RUNTIME_SUPPORT.storage と同じ）。"""
+        """bf16 runs on the same path as f16 (ADR 0131; the same as RUNTIME_SUPPORT.storage on the
+        TS side)."""
         graph = parse(initializers={"w": {"tensor": "enc.w", "storage": {"dtype": "bf16"}}})
 
         assert assert_runtime_support(graph) is None
 
     def test_unsupported_storage_dtype_is_reported(self, monkeypatch):
-        """対応表に無い格納は列挙で落ちる。
+        """A storage not in the support table fails in the enumeration.
 
-        IR の格納語彙は全て実行できるので、対応表を bf16 抜きへ狭めて門そのものを見る
-        （TS 側 ops_support_test の `M0_SUPPORT` と同じ形）。
+        Every storage in the IR vocabulary can run, so the table is narrowed to one without bf16
+        to look at the check itself (the same shape as `M0_SUPPORT` in the TS side's
+        ops_support_test).
         """
         monkeypatch.setattr(
             "karume.verify.M0_STORAGE_DTYPES", frozenset({"f32", "f16", "i8", "i4", "i2", "i32"})
@@ -1347,11 +1421,12 @@ class TestRuntimeSupport:
             assert_runtime_support(graph)
 
     def test_group_size_on_a_storage_other_than_i4_is_reported(self):
-        """group 量子化を受理する格納は i4 だけ（ADR 0069 決定 2）。
+        """The only storage that accepts group quantization is i4 (ADR 0069 decision 2).
 
-        i8 に付いた group_size は実行経路が無く、黙って無視すると group ごとの scale を
-        per-channel として読む沈黙誤値になる。TS 側 assertRuntimeSupport の鏡像で、
-        この検査が Python 側に無いと「verify は緑・ブラウザだけ落ちる」非対称になる。
+        A group_size on i8 has no execution path, and silently ignoring it would read per-group
+        scales as per-channel — a silently wrong value. Mirror of assertRuntimeSupport on the TS
+        side; without this check on the Python side there would be the asymmetry "verify green,
+        fails only in the browser".
         """
         graph = parse(
             initializers={
@@ -1413,7 +1488,8 @@ class TestOpContracts:
         assert_op_contracts(graph)
 
     def test_missing_required_attr_is_rejected(self):
-        """宣言キーは全て必須（未知キーだけ見る検査ではここが素通りする — ADR 0012）。"""
+        """Every declared key is required (a check that looks only for unknown keys lets this
+        through — ADR 0012)."""
         graph = parse(**self._cast_graph({}))
 
         with pytest.raises(OpContractError, match="required attr 'to' is missing"):
@@ -1427,7 +1503,7 @@ class TestOpContracts:
             assert_op_contracts(graph)
 
     def test_output_dtype_must_agree_with_the_contract(self):
-        """attrs.to と values{} の宣言が食い違うグラフは受理しない。"""
+        """A graph whose attrs.to disagrees with the declaration in values{} is not accepted."""
         graph = parse(**self._cast_graph({"to": "bool"}, out_dtype="i32"))
 
         with pytest.raises(OpContractError, match="differs from the contract's 'bool'"):
@@ -1446,7 +1522,8 @@ class TestOpContracts:
 
 
 class TestSymPrefixSlice:
-    """記号 prefix スライス（ADR 0010）— attrs の形と、グラフ文脈が要る 3 つの契約。"""
+    """The symbolic prefix slice (ADR 0010) — the shape of its attrs and the 3 contracts that need
+    the graph context."""
 
     def _graph(self, attrs: dict, *, const_shape=(16, 16), out_shape=("T", "T")) -> dict:
         return {
@@ -1470,7 +1547,8 @@ class TestSymPrefixSlice:
         assert_op_contracts(graph)
 
     def test_an_unbound_symbol_is_rejected(self):
-        """graph.symbols に無い sym はランタイムが束縛できず prefix 長が決まらない。"""
+        """A sym not in graph.symbols cannot be bound by the runtime, so the prefix length is
+        undecided."""
         graph = parse(**self._graph({"sym": "U", "slices": self._slices(0, 1)}))
 
         with pytest.raises(IrError, match=re.escape("graph.symbols")):
@@ -1483,10 +1561,12 @@ class TestSymPrefixSlice:
             assert_op_contracts(graph)
 
     def test_a_symbolic_input_shape_is_rejected(self):
-        """入力は Tmax で焼いた静的形 — 記号だと読み出し stride が実行ごとに縮む。
+        """The input is a static shape baked at Tmax — with a symbol, the read stride would shrink
+        per run.
 
-        initializer 経由なら parse_ir_graph の「記号次元は使えない」で先に落ちるので、
-        ここは**記号 shape を持つグラフ入力**を食わせてこの検査だけを踏ませる。
+        Through an initializer it would fail earlier on parse_ir_graph's "cannot use a symbolic
+        dimension", so this feeds **a graph input with a symbolic shape** to exercise this check
+        alone.
         """
         graph = parse(
             requires={"ops": ["sym_prefix_slice"]},
@@ -1533,7 +1613,7 @@ class TestSymPrefixSlice:
 
 
 class TestSlotDtypes:
-    """スロット別 dtype 契約（ADR 0012 の拡張）— gather の src=f32 / index=i32。"""
+    """Per-slot dtype contracts (an extension of ADR 0012) — gather's src=f32 / index=i32."""
 
     def _gather_graph(self, index_dtype: str = "i32", out_dtype: str = "f32") -> dict:
         return {
@@ -1548,7 +1628,8 @@ class TestSlotDtypes:
         }
 
     def test_mixed_slot_dtypes_are_accepted(self):
-        """スロット別契約は「入力 dtype の混在は拒否」の対象外（それが per-slot の意味）。"""
+        """A per-slot contract is exempt from "mixed input dtypes are rejected" (that is what
+        per-slot means)."""
         graph = parse(**self._gather_graph())
 
         assert_op_contracts(graph)
@@ -1561,7 +1642,8 @@ class TestSlotDtypes:
             assert_op_contracts(graph)
 
     def test_swapped_slots_are_rejected(self):
-        """src と index を逆に渡した形（和との突合だけでは素通りする）。"""
+        """src and index passed the other way round (a match against the union alone lets it
+        through)."""
         graph = parse(
             requires={"ops": ["gather"]},
             inputs=[
@@ -1583,7 +1665,7 @@ class TestSlotDtypes:
             assert_op_contracts(graph)
 
     def test_uniform_ops_still_reject_mixed_dtypes(self):
-        """uniform 契約の混在拒否は温存する（per-slot に潰していない）。"""
+        """The uniform contract keeps rejecting mixes (it was not collapsed into per-slot)."""
         graph = parse(
             requires={"ops": ["mul"]},
             inputs=[
@@ -1600,10 +1682,13 @@ class TestSlotDtypes:
 
 
 def write_raw_container(path, header: dict, data: bytes = b""):
-    """ヘッダ JSON を直に組んだ safetensors（`save_file` では作れない不正形の故障注入用）。
+    """A safetensors file with its header JSON built directly (for fault injection of invalid
+    shapes that `save_file` cannot produce).
 
-    ヘッダ長は 8 の倍数へ空白で詰める（`emit._HEADER_ALIGN` と同じ規約）。詰めないと
-    データ節先頭が 4 バイト境界から外れ、整列検査が先に落ちて**添字の域の検査を踏めない**。
+    The header length is padded with spaces to a multiple of 8 (the same convention as
+    `legacy_writer._HEADER_ALIGN`). Without padding the data section would start off the 4-byte
+    boundary, the alignment check would fail first, and **the index-range checks could not be
+    exercised**.
     """
     blob = json.dumps(header).encode("utf-8")
     blob += b" " * (-len(blob) % 8)
@@ -1612,15 +1697,18 @@ def write_raw_container(path, header: dict, data: bytes = b""):
 
 
 class TestReaderIndexRange:
-    """ヘッダの添字は TS リーダの `asIndex`（非負・2^53−1 以下）と同じ受理集合。
+    """The header's indices have the same accepted set as the TS reader's `asIndex` (non-negative,
+    at most 2^53−1).
 
-    `packages/runtime/src/format/safetensors.ts` が拒否する値を verify が受理すると、
-    「エクスポータは緑・ブラウザのリーダだけ落ちる」ファイルが配布形として残る。要素数の積
-    だけを見る検査は、負の次元も安全整数超も**積が合ってしまう**形で素通りする。
+    If verify accepted values that `packages/runtime/src/format/safetensors.ts` rejects, a file
+    "green in the exporter, failing only in the browser's reader" would remain as a distribution.
+    A check that looks only at the product of the element counts lets negative dimensions and
+    values above the safe integer through in shapes where **the product happens to match**.
     """
 
     def test_a_negative_dimension_is_rejected(self, tmp_path):
-        """`[0,-1]` は積 0 でバイト長 0 と一致するので、積だけの検査では素通りする。"""
+        """`[0,-1]` has the product 0, equal to the byte length 0, so a product-only check lets it
+        through."""
         header = {"t": {"dtype": "F32", "shape": [0, -1], "data_offsets": [0, 0]}}
 
         with pytest.raises(ContainerError, match="non-negative integer"):
@@ -1633,14 +1721,15 @@ class TestReaderIndexRange:
             assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header))
 
     def test_an_element_count_beyond_the_safe_integer_range_is_rejected(self, tmp_path):
-        """各次元は安全整数でも**積**が越える形（TS の elementCount と同じ段階で見る）。"""
+        """Each dimension is a safe integer but **the product** exceeds it (checked at the same
+        stage as TS's elementCount)."""
         header = {"t": {"dtype": "F32", "shape": [2**27, 2**27], "data_offsets": [0, 0]}}
 
         with pytest.raises(ContainerError, match="element count exceeds the safe integer"):
             assert_reader_layout(write_raw_container(tmp_path / "m.safetensors", header))
 
     def test_a_data_offset_beyond_the_safe_integer_range_is_rejected(self, tmp_path):
-        """サイズ不一致より前に添字の域で落ちる（TS は asIndex を先に通す）。"""
+        """Fails on the index range before the size mismatch (TS runs asIndex first)."""
         header = {"t": {"dtype": "F32", "shape": [2], "data_offsets": [0, 2**53]}}
 
         with pytest.raises(ContainerError, match="non-negative integer"):
@@ -1648,15 +1737,17 @@ class TestReaderIndexRange:
 
 
 class TestReaderEntryStructure:
-    """ヘッダ 1 項目の構造も門の診断で落とす（素の添字は KeyError / TypeError で漏れる）。
+    """The structure of a single header entry also fails with the check's diagnostic (bare indexing
+    would leak a KeyError / TypeError).
 
-    エクスポータが書いたファイルでは到達しない（`_save_ordered` が必ず 3 キーを書く）が、
-    外部で作られた safetensors を読む経路は実在する — 移行 CLI が旧 shard を読む入力
-    （`karume.legacy` / `karume.migrate` — 旧形読み用の上位集合 `allow_legacy_dtypes=True`）と、
-    dacvae 変換（`tools/export-recipes/irodori/dacvae/convert.py`）が書く safetensors（既定の
-    モード = TS リーダと同じ dtype 集合 — I4 / I2 は受けない）。`karume verify` は容器しか
-    受けない。
-    診断の主語が「不正なファイル」から「エクスポータが壊れた」に化けるのを防ぐ。
+    Files the exporter wrote never reach this (the old writer `_save_ordered`, retired at step 3a,
+    always wrote the 3 keys), but paths that read externally made safetensors do exist — the input
+    of the migration CLI reading old shards (`karume.legacy` / `karume.migrate` — the superset for
+    reading the old format, `allow_legacy_dtypes=True`) and the safetensors written by the dacvae
+    conversion (`tools/export-recipes/irodori/dacvae/convert.py`) (the default mode = the same
+    dtype set as the TS reader — no I4 / I2). `karume verify` accepts only containers.
+    This keeps the subject of the diagnostic from turning from "an invalid file" into "the
+    exporter broke".
     """
 
     @pytest.mark.parametrize(
@@ -1678,16 +1769,19 @@ class TestReaderEntryStructure:
 
 
 class TestReaderPackedFourBit:
-    """packed 4bit（ADR 0069 決定 2）— サイズは bit 単位・整列はテンソル**先頭** 4 バイト。
+    """packed 4-bit (ADR 0069 decision 2) — the size is in bits, the alignment is 4 bytes at the
+    tensor's **start**.
 
-    `safetensors` ライブラリは `I4` を知らない（0.8.0 の dtype 語彙に無い）ので、ヘッダ JSON を
-    直に読む `assert_reader_layout` が I4 を踏める唯一の門。TS 側リーダ
-    （`packages/runtime/src/format/safetensors.ts`）は I4 を拒否するので、ここは旧 shard を
-    読む移行入力のモード（`allow_legacy_dtypes=True`）の規則を固定する。
+    The `safetensors` library does not know `I4` (it is not in the dtype vocabulary of 0.8.0), so
+    `assert_reader_layout`, which reads the header JSON directly, is the only check that can
+    exercise I4. The TS-side reader (`packages/runtime/src/format/safetensors.ts`) rejects I4, so
+    this pins the rules of the migration input mode that reads old shards
+    (`allow_legacy_dtypes=True`).
     """
 
     def test_the_asset_gate_rejects_a_packed_tensor(self, tmp_path):
-        """資産の門は TS リーダと同じ dtype 集合 — 通すとブラウザで初めて落ちる資産が書ける。"""
+        """The asset check has the same dtype set as the TS reader — letting it through would allow
+        writing an asset that first fails in the browser."""
         header = {"w": {"dtype": "I4", "shape": [3, 32], "data_offsets": [0, 48]}}
 
         with pytest.raises(ContainerError, match="dtype 'I4' unknown to the reader"):
@@ -1704,7 +1798,8 @@ class TestReaderPackedFourBit:
         )
 
     def test_an_odd_element_count_is_rejected(self, tmp_path):
-        """bit 総量が byte 境界に乗らない形（末尾要素が半バイトだけ突き出す）。"""
+        """The total bit count does not land on a byte boundary (the last element sticks out by half
+        a byte)."""
         header = {"w": {"dtype": "I4", "shape": [3], "data_offsets": [0, 2]}}
 
         with pytest.raises(ContainerError, match="does not land on a byte boundary"):
@@ -1723,7 +1818,8 @@ class TestReaderPackedFourBit:
             )
 
     def test_a_tensor_start_off_the_four_byte_boundary_is_rejected(self, tmp_path):
-        """I4 は要素整列（0.5 バイト）ではなく u32 束縛のための先頭 4 バイト整列を要求する。"""
+        """I4 requires not element alignment (0.5 bytes) but a 4-byte alignment of its start for the
+        u32 binding."""
         header = {
             "a": {"dtype": "I8", "shape": [2], "data_offsets": [0, 2]},
             "w": {"dtype": "I4", "shape": [4], "data_offsets": [2, 4]},
@@ -1737,10 +1833,12 @@ class TestReaderPackedFourBit:
 
 
 class TestHeaderLengthBound:
-    """ヘッダ長 u64 はファイル実長で拘束してから read へ渡す（`dist.safetensors_header` と同型）。
+    """The u64 header length is bounded by the actual file length before it goes to read (the same
+    shape as `legacy.safetensors_header`).
 
-    拘束しないと巨大値が `read` へ抜けて OverflowError / MemoryError になり、規則違反が
-    門の例外（ContainerError）として出てこない。
+    Without the bound a huge value would slip through to `read` and become an OverflowError /
+    MemoryError, and the rule violation would not come out as the check's exception
+    (ContainerError).
     """
 
     @pytest.mark.parametrize("header_length", [2**64 - 1, 2**40], ids=["u64-max", "1TiB"])
@@ -1762,10 +1860,11 @@ class TestHeaderLengthBound:
 
 
 class TestStridedRank:
-    """strided コピー族の rank 上限（ADR 0011）—
-    packages/runtime/src/ops.ts の assertStridedRank と同義。
+    """The rank limit of the strided copy family (ADR 0011) —
+    same meaning as assertStridedRank in packages/runtime/src/ops/shapes.ts.
 
-    束縛に依らず宣言 shape の長さだけで決まるので、記号次元があってもここで見られる。
+    It depends only on the length of the declared shape, not on bindings, so it can be checked
+    here even with symbolic dimensions.
     """
 
     def _permute_graph(self, rank: int) -> dict:
@@ -1794,7 +1893,8 @@ class TestStridedRank:
             assert_op_contracts(parse(**self._permute_graph(5)))
 
     def test_a_scalar_mask_is_rejected(self):
-        """masked_fill の mask は右詰め broadcast の stride を組むので rank 1 以上が要る。"""
+        """masked_fill's mask builds the strides of a right-aligned broadcast, so it needs rank 1 or
+        more."""
         graph = parse(
             requires={"ops": ["masked_fill"]},
             inputs=[
@@ -1813,24 +1913,28 @@ class TestStridedRank:
 
 
 class TestIntegralFloatPermuteDims:
-    """permute の `dims` も他の整数 attr と同じく整数値 float を受理する（TS と同じ受理集合）。
+    """permute's `dims` accepts integral floats like the other integer attrs (the same accepted set
+    as TS).
 
-    TS 側の検査（`ops/attrs.ts`）は `Number.isSafeInteger` なので `[0.0, 2e0, 1]` を読める。
-    Python だけが落とすと、**ランタイムが読める graph をエクスポータの検証だけが読めない**
-    乖離になる。
+    The TS-side check (`ops/attrs.ts`) uses `Number.isSafeInteger`, so `[0.0, 2e0, 1]` can be read.
+    If only Python failed, **only the exporter's verification would fail on a graph the runtime
+    can read**.
     """
 
     @pytest.mark.parametrize("dims", [[0.0, 2.0, 1.0], [0, 2e0, 1]])
     def test_integral_float_dims_are_accepted_as_int(self, dims):
-        assert any(isinstance(dim, float) for dim in dims), "float を渡していない（空振り）"
+        assert any(isinstance(dim, float) for dim in dims), (
+            "no float was passed (the check would pass vacuously)"
+        )
 
         normalized = permute_dims({"dims": dims}, "t")
 
         assert normalized == [0, 2, 1]
-        assert all(type(dim) is int for dim in normalized), "int へ正規化されていない"
+        assert all(type(dim) is int for dim in normalized), "not normalized to int"
 
     @pytest.mark.parametrize("dims", [[0, 1.5], [True, 0], [0.0, 0]])
     def test_non_integral_bool_or_duplicate_dims_are_still_rejected(self, dims):
-        """正規化は受理集合を広げない（`0.0` と `0` の重複も重複として落ちる）。"""
+        """The normalization does not widen the accepted set (`0.0` and `0` duplicated also fail as
+        a duplicate)."""
         with pytest.raises(OpContractError, match="permute dims"):
             permute_dims({"dims": dims}, "t")

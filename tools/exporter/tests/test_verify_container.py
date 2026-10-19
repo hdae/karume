@@ -1,9 +1,10 @@
-"""コンテナの合流層（`karume.verify.bind_graphs` / `verify_container`）— container-v1 §5 / §6。
+"""The container merge layer (`karume.verify.bind_graphs` / `verify_container`) — container-v1
+§5 / §6.
 
-TS 側 `packages/runtime/src/format/container/bind.ts` の鏡像なので、ここが固定するのは
-**宣言 shape を要する規則**だけ（2 文書の構造と block の配置は読み手 = `test_container.py` の
-担当）。故障注入は descriptor を手組みして掛ける — 正しいコンテナを壊すよりも「どの欄が規則を
-破ったのか」が 1 対 1 で見えるため。
+It mirrors TS `packages/runtime/src/format/container/bind.ts`, so this file pins only **the rules
+that need declared shapes** (the structure of the two documents and the block layout belong to the
+reader = `test_container.py`). Faults are injected through hand-built descriptors — rather than
+breaking a correct container, this shows one to one "which field broke the rule".
 """
 
 from __future__ import annotations
@@ -44,7 +45,8 @@ from karume.emit import FixedQuantizedWeight, stored_model
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.verify import InitializerSupply, bind_graphs, verify_container
 
-#: 手組みの descriptor が持つ sha256 欄（合流層は実バイトを読まないので値は効かない）。
+#: sha256 field of the hand-built descriptors (the merge layer reads no real bytes, so the value
+#: does not matter).
 ZERO_SHA = "0" * 64
 
 GRAPH = "g"
@@ -52,7 +54,7 @@ WEIGHT = "w"
 
 
 def declaration(values: dict[str, tuple[str, list[int]]], shared: Sequence[str] = ()) -> dict:
-    """IR v2 のグラフ宣言（合流層が読むのは `initializers` と `values` だけ）。"""
+    """IR v2 graph declaration (the merge layer reads only `initializers` and `values`)."""
     return {
         "format": "karume-ir",
         "version": 2,
@@ -75,7 +77,8 @@ def bind(
     *,
     dtype: str = "f32",
 ) -> InitializerSupply:
-    """1 グラフ・1 initializer の descriptor を組んで合流する（`blocks` は id / 長さ / role）。"""
+    """Build descriptors for one graph and one initializer and merge them (`blocks` are id /
+    length / role)."""
     graph = GraphDescriptor(
         graphs={GRAPH: declaration({WEIGHT: (dtype, shape)})},
         const_length=0,
@@ -100,7 +103,7 @@ def quantized(codec: str, group_size: int, row_axis: int = 0) -> BlockEncoding:
 
 
 class TestTheFixtureContainer:
-    """言語横断 fixture（Python が書いた実物）が合流まで通る。"""
+    """The cross-language fixture (the real file Python wrote) gets through the merge."""
 
     def test_every_initializer_gets_a_supply(self) -> None:
         bound = verify_container([FIXTURE_PATH]).graphs[GRAPH_NAME]
@@ -113,7 +116,7 @@ class TestTheFixtureContainer:
             "const.a1b2c3d4e5f60718": "f32",
             "const.b1b2c3d4e5f6071a": "i32",
         }
-        # shared 宣言は供給計画を持たない（貸し手の常駐重みが実体）。
+        # A shared declaration has no supply plan (the lender's resident weights are the real data).
         assert "lm_head.weight" not in bound.supplies
 
     def test_a_const_initializer_is_supplied_from_the_graph(self) -> None:
@@ -130,7 +133,7 @@ class TestTheFixtureContainer:
         assert [block.payload_bytes for block in supply.blocks] == [256, 256]
 
     def test_a_tail_pad_is_outside_the_payload(self) -> None:
-        """f16 の 42 バイトは 44 バイトの block に入る（差 2 バイトが詰め物）。"""
+        """42 bytes of f16 go into a 44-byte block (the 2-byte difference is padding)."""
         supply = verify_container([FIXTURE_PATH]).graphs[GRAPH_NAME].supplies["dec.weight"]
 
         assert [(block.length, block.payload_bytes) for block in supply.blocks] == [(44, 42)]
@@ -139,13 +142,13 @@ class TestTheFixtureContainer:
         supply = verify_container([FIXTURE_PATH]).graphs[GRAPH_NAME].supplies["conv.weight"]
         assert supply.scale is not None
 
-        # conv_transpose1d 形 [4,3,8]: 行数は shape[1] = 3。
+        # conv_transpose1d shape [4,3,8]: the row count is shape[1] = 3.
         assert supply.encoding.row_axis == 1
         assert supply.scale.rows == (0, 3)
         assert supply.scale.payload_bytes == 12
 
     def test_a_graph_container_supplies_only_its_const_region(self, tmp_path: Path) -> None:
-        """`krg` は束縛表を持たない — 重みが要る initializer は供給無しのまま残る。"""
+        """A `krg` has no binding table — initializers that need weights stay without a supply."""
         bindings = synthetic_bindings()
         path = write_graph_container(
             tmp_path / "synthetic.krg",
@@ -165,7 +168,7 @@ class TestTheFixtureContainer:
 
 
 class TestTheDeclarationRules:
-    """宣言 shape × encoding × block 目次で決まる規則（bind.ts の受理集合）。"""
+    """Rules decided by declared shape × encoding × block index (the accepted set of bind.ts)."""
 
     def test_a_whole_block_carries_the_declared_payload(self) -> None:
         supply = bind(
@@ -176,7 +179,7 @@ class TestTheDeclarationRules:
         assert [(block.rows, block.payload_bytes) for block in supply.blocks] == [((0, 4), 512)]
 
     def test_a_codec_outside_the_semantic_dtype_is_refused(self) -> None:
-        """`i32` 宣言は生の int32 だけ — f16 のビット列として読む形を作らない。"""
+        """An `i32` declaration is raw int32 only — no form that reads it as f16 bits."""
         with pytest.raises(ContainerFormatError, match="cannot pair with codec 'f16'"):
             bind(
                 [4, 32],
@@ -196,10 +199,10 @@ class TestTheDeclarationRules:
             bind([4, "T"], WeightSupply(BlockEncoding("f32"), block="w1"), [("w1", 512, "weight")])
 
     def test_an_integral_float_dimension_is_read_as_the_integer(self) -> None:
-        """他の書き手の `4.0` はランタイム（JSON の number）と同じく次元 4 として読む。
+        """Another writer's `4.0` reads as dimension 4, as in the runtime (a JSON number).
 
-        graph の `_parse_shape` と同じ受理集合 — exporter の検証だけが拒むと、ランタイムが
-        読める容器をエクスポータだけが読めない乖離になる。
+        The same accepted set as the graph's `_parse_shape` — if only the exporter's checks
+        refused it, the exporter alone could not read a container the runtime can.
         """
         supply = bind(
             [4.0, 32], WeightSupply(BlockEncoding("f32"), block="w1"), [("w1", 512, "weight")]
@@ -245,11 +248,12 @@ class TestThePieceRules:
             bind([4, 32], supply, [("w1", 256, "weight"), ("w2", 128, "weight")])
 
     def test_an_intermediate_piece_cannot_be_padded(self) -> None:
-        """中間 piece の詰め物は次の piece の先頭を潰す（行範囲のバイト数ちょうど MUST）。"""
+        """Padding an intermediate piece would overwrite the start of the next (it MUST be exactly
+        the bytes of its row range)."""
         supply = WeightSupply(BlockEncoding("f16"), pieces=(("w1", (0, 1)), ("w2", (1, 3))))
 
         with pytest.raises(ContainerFormatError, match="no padding allowed"):
-            # 1 行 = 7 要素 = 14 バイト。中間 piece を 16 バイトに膨らませる。
+            # 1 row = 7 elements = 14 bytes. Inflate the intermediate piece to 16 bytes.
             bind([3, 7], supply, [("w1", 16, "weight"), ("w2", 28, "weight")])
 
     def test_a_row_axis_1_initializer_cannot_be_split(self) -> None:
@@ -298,7 +302,7 @@ class TestTheQuantizedRules:
         )
         assert supply.scale is not None
 
-        # 4 行 × (32 / 16) group × 4 バイト。
+        # 4 rows × (32 / 16) groups × 4 bytes.
         assert supply.scale.payload_bytes == 32
 
     def test_a_scale_block_of_the_wrong_length_is_refused(self) -> None:
@@ -329,7 +333,8 @@ class TestTheQuantizedRules:
 
 
 class TestTheContainerCli:
-    """`karume verify` — 2 文書の構造検査 + 合流 + 全 block の sha256（受けるのは容器だけ）。"""
+    """`karume verify` — structure check of the two documents + merge + sha256 of every block
+    (it takes containers only)."""
 
     def test_it_reports_the_split_form_from_the_part_0_file(
         self, capsys: pytest.CaptureFixture[str]
@@ -353,7 +358,7 @@ class TestTheContainerCli:
         assert "assets=(none)" in printed
 
     def test_a_flipped_block_byte_is_caught(self, tmp_path: Path) -> None:
-        """block の sha256 まで見る（宣言が通るだけでは「検証した」と言わない）。"""
+        """Checks down to the block sha256 (passing declarations alone is not "verified")."""
         copied = tmp_path / FIXTURE_PATH.name
         raw = bytearray(FIXTURE_PATH.read_bytes())
         raw[-1] ^= 0xFF
@@ -365,10 +370,10 @@ class TestTheContainerCli:
             verify.main([str(copied)])
 
     def test_the_retired_flag_is_gone(self) -> None:
-        """`--container` は退役した（受けるのは容器だけなので選択肢そのものが無い）。
+        """`--container` is retired (only containers are taken, so there is nothing to choose).
 
-        残っていると「旧形式も受ける入口がある」と読めてしまう — 旧形式を読むのは移行 CLI
-        だけ MUST（container-v1 §12）。
+        Left in place it would read as "there is an entry point that also takes the old format" —
+        only the migration CLI MUST read the old format (container-v1 §12).
         """
         with pytest.raises(SystemExit) as raised:
             verify.main(["--container", str(FIXTURE_PATH)])
@@ -377,11 +382,12 @@ class TestTheContainerCli:
 
 
 class TestTheIrAcceptanceGate:
-    """容器の 2 文書から `IrGraph` を起こし、IR の受理規則を掛ける
-    （{@link karume.verify.ir_graph_from_container} / {@link karume.verify.assert_ir_accepted}）。
+    """Rebuild an `IrGraph` from the container's two documents and apply the IR acceptance rules
+    ({@link karume.verify.ir_graph_from_container} / {@link karume.verify.assert_ir_accepted}).
 
-    構造検査（上のクラス群）は「容器として開けるか」しか見ない。op 語彙・ランタイム支援・
-    op 契約はここが受け持つ — 組み立て（`karume dist`）と `karume verify` が**同じ 1 本**を通る。
+    The structure checks (the classes above) only ask "does it open as a container". The op
+    vocabulary, runtime support and op contracts are covered here — assembly (`karume dist`) and
+    `karume verify` go through **the same single path**.
     """
 
     def _written(self, tmp_path: Path, parts: Sequence[bytes]) -> list[Path]:
@@ -394,7 +400,8 @@ class TestTheIrAcceptanceGate:
         return paths
 
     def test_the_storage_declaration_comes_from_the_binding_table(self, tmp_path: Path) -> None:
-        """束縛表の codec が IR v1 の `storage` へ戻る（宣言の正本は 1 つ）。"""
+        """The binding table's codec comes back as the IR v1 `storage` (one source of truth for the
+        declaration)."""
         paths = self._written(tmp_path, ir_container(mark="gate", storage="i4"))
         read = verify_container(paths).read
 
@@ -405,7 +412,8 @@ class TestTheIrAcceptanceGate:
             if init.storage.dtype != "f32"
         }
 
-        # i4 系列は混成（i4 適格な重みが i4・相方が i8）— 容器の束縛表から両方が戻る。
+        # The i4 series is mixed (i4-eligible weights are i4, the others i8) — both come back from
+        # the container's binding table.
         assert sorted(set(storages.values())) == ["i4", "i8"]
         for name, init in graph.initializers.items():
             if init.storage.dtype in ("i4", "i8"):
@@ -426,23 +434,24 @@ class TestTheIrAcceptanceGate:
             verify.assert_ir_accepted(read)
 
     def test_the_same_container_without_the_unknown_op_is_accepted(self, tmp_path: Path) -> None:
-        """対照 — 門が「常に落ちる」のではないことの裏側。"""
+        """Counterpart — the other side showing the check does not "always fail"."""
         paths = self._written(tmp_path, ir_container(mark="gate"))
 
         verify.assert_ir_accepted(verify_container(paths).read)
 
     def test_the_cli_rejects_a_container_declaring_an_unknown_op(self, tmp_path: Path) -> None:
-        """`karume verify` も組み立てと**同じ門**を通る（受け入れ側の半分）。"""
+        """`karume verify` goes through **the same check** as assembly (the accepting half)."""
         paths = self._written(tmp_path, with_an_unknown_op(ir_container(mark="gate")))
 
         with pytest.raises(verify.ContainerError, match="unsupported ops"):
             verify.main([str(paths[0])])
 
     def test_a_graph_container_is_accepted(self, tmp_path: Path) -> None:
-        """`krg` は束縛表を持たない — 供給の無い席は意味論 dtype の生の格納で起こす。
+        """A `krg` has no binding table — a slot without a supply is rebuilt as raw storage of its
+        semantic dtype.
 
-        格納の主張はこの容器に実体を持たない席のもの（貸し手 / `krm` 側の事実）なので、
-        ここが見るのは op 語彙とランタイム支援・契約の側だけになる。
+        The storage claim belongs to slots with no data in this container (a fact of the lender /
+        the `krm`), so this checks only the op vocabulary, runtime support and contracts.
         """
         bindings = synthetic_bindings()
         path = write_graph_container(
@@ -458,10 +467,11 @@ class TestTheIrAcceptanceGate:
 
 
 def ternary_container(tmp_path: Path, packed: bytes) -> list[Path]:
-    """`ternary` を宣言した 2 行 × 16 要素（1 行 4 バイト）の容器を書く。
+    """Write a container declaring `ternary` with 2 rows × 16 elements (4 bytes per row).
 
-    三値の量子化器はまだ無い（段 6）ので、i2 の固定重みを書き手へ通し、束縛の codec だけを
-    `ternary` へ差し替える（値の詰め方と scale は `int2-off` と同じ — container-v1 §6.3）。
+    There is no ternary quantizer yet (step 6), so a fixed i2 weight goes through the writer and
+    only the binding's codec is swapped to `ternary` (the packing and the scale are those of
+    `int2-off` — container-v1 §6.3).
     """
     graph = IrGraph(
         symbols=[],
@@ -495,15 +505,15 @@ def ternary_container(tmp_path: Path, packed: bytes) -> list[Path]:
     )
 
 
-#: 全 2 bit コードが {1, 2, 3} の 2 行ぶん（0x6D = 01 10 11 01 など）。
+#: Two rows in which every 2-bit code is in {1, 2, 3} (0x6D = 01 10 11 01 and so on).
 TERNARY_PACKED = bytes([0x6D, 0xB6, 0xDB, 0x79] * 2)
 
 
 class TestTheTernaryPayload:
-    """`ternary` の payload にコード 0（q = −2）があれば verify が拒否する（container-v1 §6.3）。
+    """verify rejects a `ternary` payload containing code 0 (q = −2) (container-v1 §6.3).
 
-    TS はロード時に同じ検査（`assertTernaryCodes`）を掛けるので、ここが無いと「verify は
-    緑・ロードで初めて落ちる」形になる。
+    TS applies the same check at load (`assertTernaryCodes`), so without this one "verify is
+    green and it first fails at load".
     """
 
     def test_a_payload_whose_codes_are_all_in_1_to_3_is_accepted(self, tmp_path: Path) -> None:
@@ -524,10 +534,12 @@ class TestTheTernaryPayload:
 
 
 class TestTheCodecRowAxes:
-    """codec ごとに許す `rowAxis`（TS 台帳の `rowAxes` — container-v1 §6.3・ADR 0108 追記1 §4）。
+    """The `rowAxis` each codec allows (`rowAxes` of the TS ledger — container-v1 §6.3, ADR 0108
+    addendum 1, item 4).
 
-    i4 / i2 / ternary は行方向（`rowAxis: 0`）の量子化しか持たない。一般の「0 か 1」だけを見ると
-    正方 shape の `rowAxis: 1` が Python の検証を通り、ブラウザの `bindGraphs` だけが落とす。
+    i4 / i2 / ternary quantize only along rows (`rowAxis: 0`). Checking only the general "0 or 1"
+    would let `rowAxis: 1` of a square shape pass the Python checks and fail only in the browser's
+    `bindGraphs`.
     """
 
     @pytest.mark.parametrize(
@@ -539,7 +551,8 @@ class TestTheCodecRowAxes:
     ) -> None:
         supply = WeightSupply(quantized(codec, group_size, row_axis=1), block="w1")
         blocks = [("w1", payload, "weight"), ("s1", 64, "scale")]
-        # 対照: 同じ宣言の rowAxis 0 は合流まで通る（下の赤は軸の規則のもの）。
+        # Counterpart: rowAxis 0 with the same declaration gets through the merge (the failure below
+        # is the axis rule's).
         bind([16, 16], replace(supply, encoding=quantized(codec, group_size)), blocks)
 
         with pytest.raises(ContainerFormatError, match=f"rowAxis of codec '{codec}' must be 0"):

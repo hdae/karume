@@ -1,18 +1,20 @@
-"""配布ディレクトリ組み立て（`karume.dist`）の単体テスト。
+"""Unit tests of distribution directory assembly (`karume.dist`).
 
-実資産は使わない。ただし weights の席へ挿す入力は**正当な IR コンテナ**でなければならない —
-組み立ては weights の役割が生成物（`payload`）を指す計画を計画の受け口で落とし
-（`dist.ModelPlan.__post_init__`）、配置の前に入力コンテナを IR v1 の全規則で見る
-（`dist.assert_weight_components_verified`）。その合成は {@link ir_fixtures}（数 KB のグラフ
-1 本ぶん）で、生バイト列を持てるのは `assets` の席だけ（`extras` の席は `karume/5` で退役）。
+No real assets are used. The inputs plugged into the weights fields must, however, be **valid IR
+containers** — assembly rejects, at the plan's entry point, a plan whose weights role points at a
+generated product (`payload`) (`dist.ModelPlan.__post_init__`), and checks the input containers
+against every rule of IR v1 before placing them (`dist.assert_weight_components_verified`). They
+are synthesized by {@link ir_fixtures} (one graph of a few KB), and only the `assets` field can
+hold raw bytes (the `extras` field was retired in `karume/5`).
 
-manifest v2（`karume/2` — ADR 0041）以降、リポ内レイアウトは一律「モデル別サブツリー +
-`shared/`」なので、期待 path は全て `<モデル名>/…` を頭に持つ。
+Since manifest v2 (`karume/2` — ADR 0041) the repository layout is uniformly "per-model subtree +
+`shared/`", so every expected path starts with `<model name>/…`.
 
-NOTE: family 別の配布 recipe は 1 つ残らず wheel の外へ出た（ADR 0065 段 3+4 完了）ので、その
-依存ケースは `tools/export-recipes/<family>/tests/test_distribution.py` に居る。ここに残るのは
-core だけで観測できる層だけ — 合成計画で足りる規模上限・quant 完全写像・staging/swap の
-不変条件・帰属プロファイルの解決規則・受理集合を呼び出し側から受ける規約。
+NOTE: every per-family distribution recipe has moved out of the wheel (ADR 0065 stages 3+4 done),
+so the cases that depend on them live in `tools/export-recipes/<family>/tests/test_distribution.py`.
+What remains here is only the layer observable with the core alone — the size limits a synthetic
+plan suffices for, the complete quant mapping, the staging/swap invariants, the resolution rules of
+the attributed profile, and the convention of taking the accepted set from the caller.
 """
 
 from __future__ import annotations
@@ -80,10 +82,12 @@ from karume.modelcard import FileRefKey
 
 
 def _write_series(root: Path, payloads: Sequence[bytes], name: str = "model.krm") -> Path:
-    """part 列を系列ディレクトリへ連番で書き、**代表 path** を返す。
+    """Writes a part sequence into a series directory with numbered names and returns **the
+    representative path**.
 
-    配布形は常に分割される（ADR 0081）ので、系列側の現物も常に連番 — 代表 path 自身は
-    書かない（書くと「単一ファイルと連番の同居」になり、組み立てが fail loudly する）。
+    A distribution is always split (ADR 0081), so the series-side files are always numbered too —
+    the representative path itself is not written (writing it would make "a single file
+    coexisting with numbered ones", and assembly fails loudly).
     """
     root.mkdir(parents=True, exist_ok=True)
     total = len(payloads)
@@ -92,23 +96,27 @@ def _write_series(root: Path, payloads: Sequence[bytes], name: str = "model.krm"
     return root / name
 
 
-#: 合成計画の weights のキー（= 部品名）。`_synthetic_plan` が据える席は全部この 1 語。
+#: The weights key (= component name) of the synthetic plans. Every field `_synthetic_plan` sets
+#: uses this one word.
 COMPONENT = "w"
 
 
 def ir_container(*, mark: str, named: str = COMPONENT, **extra: Any) -> list[bytes]:
-    """{@link ir_fixtures.ir_container} を**部品名で名乗らせる**既定で包む。
+    """Wraps {@link ir_fixtures.ir_container} with a default that **names it after the
+    component**.
 
-    組み立ては「容器のグラフ名 == weights のキー」を見る
-    （{@link karume.dist.assert_weight_components_verified}）ので、`mark` から導いた綴り
-    （`weights-D1` など）のままだと実物には無い形の入力になる。`mark` はテンソルキーの接頭辞
-    （= バイト列の作り分け）のままで、グラフ名だけを席のキーに合わせる。
+    Assembly checks "the container's graph name == the weights key"
+    ({@link karume.dist.assert_weight_components_verified}), so keeping the spelling derived from
+    `mark` (`weights-D1` and so on) would give an input of a form the real thing never has.
+    `mark` stays the tensor key prefix (= what makes the bytes differ), and only the graph name is
+    matched to the field's key.
     """
     return _ir_container(mark=mark, named=named, **extra)
 
 
 def _ref(path: str) -> dict[str, Any]:
-    """3 点セットの偽値（規模上限の検査は件数しか見ないので中身は形だけで足りる）。"""
+    """Fake values of the three fields (the size-limit checks only count entries, so the form alone
+    suffices)."""
     return {"path": path, "size": 1, "sha256": "0" * 64}
 
 
@@ -117,20 +125,24 @@ def _present(out_dir: Path) -> list[str]:
 
 
 def _synthetic_series(root: Path, mark: str, named: str = COMPONENT) -> Path:
-    """`mark` ごとに違う正当な IR コンテナ系列を `root/<mark>/` へ書いて**代表 path** を返す。
+    """Writes a valid IR container series that differs per `mark` into `root/<mark>/` and returns
+    **the representative path**.
 
-    weights の席が指せるのは配置（`source`）だけなので（`dist.ModelPlan.__post_init__`）、
-    合成計画も系列を実際に書いてから指す。「どのモデルがどのバイト列を主張するか」の作り分けは
-    重みテンソルのキー接頭辞（`mark`）— **同じ長さの `mark` はサイズが同じで中身だけが違う**
-    列になり、長さを変えるとサイズも変わる（共有判定の前置フィルタを観測する側の道具）。
+    A weights field can point only at a placement (`source`) (`dist.ModelPlan.__post_init__`), so
+    synthetic plans also write the series before pointing at it. Which model claims which bytes is
+    told apart by the key prefix of the weight tensors (`mark`) — **`mark`s of the same length give
+    sequences of the same size that differ only in content**, and a different length changes the
+    size too (a tool for observing the pre-filter of the sharing check).
     """
     return _write_series(root / mark, ir_container(mark=mark, named=named))
 
 
 def _part_rel_paths(rel_path: str, mark: str, named: str = COMPONENT) -> list[str]:
-    """{@link _synthetic_series} の系列が据わる**モデルサブツリー内**の相対 path（宣言と同じ順）。
+    """The relative paths **within the model subtree** where the series of {@link _synthetic_series}
+    lands (in declaration order).
 
-    配布形は常に分割される（container-v1 §8）ので、1 役は必ず複数要素の part 列になる。
+    A distribution is always split (container-v1 §8), so one role is always a part sequence of
+    several elements.
     """
     total = len(ir_container(mark=mark, named=named))
     return [numbered_name(rel_path, index, total) for index in range(1, total + 1)]
@@ -139,7 +151,8 @@ def _part_rel_paths(rel_path: str, mark: str, named: str = COMPONENT) -> list[st
 def _part_refs(
     prefix: str, rel_path: str, mark: str, named: str = COMPONENT
 ) -> list[dict[str, Any]]:
-    """`prefix/` 配下へ据わった {@link _synthetic_series} の 3 点セット（宣言と同じ順）。"""
+    """The three fields of {@link _synthetic_series} placed under `prefix/` (in declaration
+    order)."""
     return [
         {
             "path": f"{prefix}/{rel}",
@@ -155,19 +168,21 @@ def _part_refs(
 
 
 def _part_paths(prefix: str, rel_path: str, mark: str, named: str = COMPONENT) -> list[str]:
-    """{@link _part_refs} の path だけ（`verify_dist` の返り値と突き合わせる並び）。"""
+    """Only the paths of {@link _part_refs} (in the order compared with the return value of
+    `verify_dist`)."""
     return [ref["path"] for ref in _part_refs(prefix, rel_path, mark, named)]
 
 
 def _part_sizes(prefix: str, rel_path: str, mark: str, named: str = COMPONENT) -> dict[str, int]:
-    """{@link _part_refs} の `{path: size}`（`verify_dist` の返り値そのものの形）。"""
+    """`{path: size}` of {@link _part_refs} (exactly the form `verify_dist` returns)."""
     return {ref["path"]: ref["size"] for ref in _part_refs(prefix, rel_path, mark, named)}
 
 
 def _synthetic_plan(root: Path, name: str, rel_path: str, mark: str) -> ModelPlan:
-    """1 役だけを持つ最小の計画（配置と共有の畳み込みだけを観測するための合成）。
+    """The smallest plan with one role only (a synthetic plan for observing only placement and the
+    folding of shared files).
 
-    weights の席は {@link _synthetic_series} が書いた実物の IR コンテナ系列を指す。
+    The weights field points at the real IR container series {@link _synthetic_series} wrote.
     """
     return ModelPlan(
         name=name,
@@ -182,7 +197,8 @@ def _synthetic_plan(root: Path, name: str, rel_path: str, mark: str) -> ModelPla
 
 
 class TestModelName:
-    """モデル名は manifest のキーであると同時にリポ内のディレクトリ名（ADR 0041 §6 / §9）。"""
+    """A model name is both a manifest key and a directory name in the repository (ADR 0041 §6 /
+    §9)."""
 
     @pytest.mark.parametrize("name", ["../escape", "with space", ".hidden", "a/b", ""])
     def test_it_refuses_a_name_that_is_not_a_path_segment(self, name: str) -> None:
@@ -194,18 +210,19 @@ class TestModelName:
             assert_model_name(SHARED_DIRNAME)
 
     def test_it_accepts_the_names_the_distributions_actually_use(self) -> None:
-        """実在の recipe が使う綴りの形（英小文字 / 数字 / ハイフン / ドット）は通す。
+        """The spelling forms the existing recipes use (lowercase letters / digits / hyphen / dot)
+        pass.
 
-        NOTE: 定数を recipe から import してこない — core のテストが family へ逆流する形に
-        しない（ADR 0065 決定 3）。綴りが実物と噛み合っていることは各 recipe の
-        `tests/test_distribution.py` が自分の定数で見る。
+        NOTE: the constants are not imported from the recipes — the core's tests do not flow back
+        into the families (ADR 0065 decision 3). Each recipe's `tests/test_distribution.py`
+        checks with its own constants that the spellings fit the real thing.
         """
         for name in ("small", "base", "so400m", "v4-small", "crnn-epoch3", "jvnv-F1"):
             assert assert_model_name(name) == name
 
 
 class TestQuantCompletion:
-    """quant の `weights` は hub が**完全写像**として検査する（ADR 0041 §3）。"""
+    """The hub checks a quant's `weights` as **a complete mapping** (ADR 0041 §3)."""
 
     _weights: ClassVar[dict] = {
         "text_encoder": {"i8": WeightFiles("text_encoder")},
@@ -219,7 +236,8 @@ class TestQuantCompletion:
         assert completed["w8"]["weights"] == {"front": "i8", "text_encoder": "i8"}
 
     def test_it_orders_the_mapping_by_the_weights_declaration(self) -> None:
-        """埋めた席が末尾に溜まると weights 節と quant 節で同じ役割が別の順に並ぶ。"""
+        """If filled-in entries piled up at the end, the same roles would appear in different orders
+        in the weights section and the quant section."""
         completed = complete_quant_weights(
             self._weights, {"w8": {"weights": {"front": "i8"}, "session": {}}}
         )
@@ -238,7 +256,8 @@ class TestQuantCompletion:
         assert completed["w8a8"]["gpuFeatures"] == {"shaderF16": True}
 
     def test_it_refuses_to_pick_a_dtype_when_the_weights_offer_a_choice(self) -> None:
-        """埋めてよいのは選択肢が 1 つの席だけ — 既定を勝手に選ぶと別の格納形が黙って配られる。"""
+        """Only entries with a single choice may be filled in — picking a default on our own would
+        silently ship a different storage form."""
         with pytest.raises(DistError, match=r"has several dtypes .* but none is specified"):
             complete_quant_weights(self._weights, {"w8": {"weights": {}, "session": {}}})
 
@@ -256,11 +275,13 @@ class TestQuantCompletion:
 
 
 class TestManifestLimits:
-    """規模上限（ADR 0041 §7）は hub も同じ値で弾く — 配ってから落ちる形にしない。"""
+    """The hub rejects with the same size limits (ADR 0041 §7) — nothing ships only to fail
+    afterwards."""
 
     @staticmethod
     def _container() -> dict[str, Any]:
-        """規模上限の検査が通る最小のコンテナ入口（part 0 の長さは 2 文書から決まる）。"""
+        """The smallest container entry that passes the size-limit checks (the length of part 0
+        follows from the two documents)."""
         graph, model = 40, 24
         return {
             "descriptor": {
@@ -308,10 +329,12 @@ class TestManifestLimits:
 
 
 class TestPartDeclaration:
-    """`karume/5` の weights は dtype ごとに**コンテナの入口**を持つ（ADR 0109 決定 3 の欄）。
+    """The weights of `karume/5` have **a container entry** per dtype (the field of ADR 0109
+    decision 3).
 
-    ここが見るのは**欄の形**（v2 の `file` が残っていないこと・3 点セットが現物へ届くこと・
-    列の値域）で、何本に割れるかを現物から解決する側は {@link TestPartExpansion}。
+    This checks **the form of the field** (no v2 `file` left over, the three fields reach the
+    files, the value range of the list); resolving from the files how many parts there are is
+    {@link TestPartExpansion}.
     """
 
     _MARK = "weights-A"
@@ -323,7 +346,8 @@ class TestPartDeclaration:
         return out_dir, assemble_family(plans, out_dir, "A")
 
     def _rewrite_weights(self, out_dir: Path, entry: Any) -> None:
-        """据わった配布形の manifest だけを別形に差し替える（現物はそのまま）。"""
+        """Swaps only the manifest of the placed distribution for another form (the files stay as
+        they are)."""
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
         manifest["models"]["A"]["weights"]["w"]["f16"] = entry
         (out_dir / MANIFEST_FILENAME).write_text(
@@ -331,10 +355,12 @@ class TestPartDeclaration:
         )
 
     def test_the_format_identifier_names_the_fifth_manifest_version(self) -> None:
-        """形式識別子は hub と 1 文字も違えられない（hub は 1 形しか読まない）。
+        """The format identifier cannot differ from the hub's by a single character (the hub reads
+        one form only).
 
-        `karume/5` は weights の dtype エントリを**コンテナの入口**へ置き換えた形（ADR 0109
-        決定 3）— 旧 major は読まないので、上げ忘れると hub が unsupported format で落とす。
+        `karume/5` is the form that replaced the dtype entries of weights with **container
+        entries** (ADR 0109 decision 3) — old majors are not read, so forgetting the bump makes
+        the hub fail with unsupported format.
         """
         assert MANIFEST_FORMAT == "karume/5"
 
@@ -344,7 +370,8 @@ class TestPartDeclaration:
         out_dir, manifest = self._assemble(tmp_path)
         entry = manifest["models"]["A"]["weights"]["w"]["f16"]
 
-        # v2 の `file` は残っていない（2 形が同居すると hub が「どちらを読むか」を持つ）。
+        # No v2 `file` is left (with two forms side by side the hub would have to decide "which
+        # one to read").
         assert list(entry) == ["container"]
         assert entry["container"]["parts"] == _part_refs("A", self._REL_PATH, self._MARK)
         for ref, payload in zip(
@@ -353,12 +380,14 @@ class TestPartDeclaration:
             assert (out_dir / ref["path"]).read_bytes() == payload
 
     def test_the_parts_are_covered_by_the_declaration_check(self, tmp_path: Path) -> None:
-        """突合は part 列を辿って現物へ届く（列に移して素通りしはじめると宣言外扱いになる）。"""
+        """The comparison follows the part list to the files (if moving to a list started to slip
+        through, they would count as undeclared)."""
         out_dir, _ = self._assemble(tmp_path)
         assert verify_dist(out_dir) == _part_sizes("A", self._REL_PATH, self._MARK)
 
     def test_it_refuses_a_manifest_that_kept_the_v2_single_file_form(self, tmp_path: Path) -> None:
-        """形式識別子だけ v3 で中身が `{file}` の manifest は、hub が読めないのでここで落とす。"""
+        """A manifest whose format identifier alone is v3 while its content is `{file}` cannot be
+        read by the hub, so it fails here."""
         out_dir, manifest = self._assemble(tmp_path)
         ref = manifest["models"]["A"]["weights"]["w"]["f16"]["container"]["parts"][0]
         self._rewrite_weights(out_dir, {"file": ref})
@@ -369,10 +398,11 @@ class TestPartDeclaration:
     def test_it_refuses_a_part_list_that_is_not_a_two_element_array(
         self, tmp_path: Path, parts: Any
     ) -> None:
-        """空の列（= part を 1 本も指さない dtype 席）も、列ですらない値も受理しない。
+        """Neither an empty list (= a dtype entry pointing at no part) nor a value that is not even
+        a list is accepted.
 
-        `container.parts` は part 0（descriptor）+ part 1（const）の **2 要素以上** MUST
-        （ADR 0109 決定 3 / container-v1 §8）。
+        `container.parts` MUST have **two or more elements**, part 0 (descriptor) + part 1
+        (const) (ADR 0109 decision 3 / container-v1 §8).
         """
         out_dir, manifest = self._assemble(tmp_path)
         entry = manifest["models"]["A"]["weights"]["w"]["f16"]["container"]
@@ -382,15 +412,17 @@ class TestPartDeclaration:
 
 
 class TestTheContainerEntryLimits:
-    """`karume/5` の `container` 入口 1 件に掛かる上限と規則（ADR 0109 決定 6）。
+    """The limits and rules on one `container` entry of `karume/5` (ADR 0109 decision 6).
 
-    この関数は hub のパーサ（`packages/hub/src/manifest.ts` の `parseContainer`）の**唯一の
-    Python 側の鏡**で、緩んだ回は「焼けたのに hub が読めない manifest」として利用者側で初めて
-    出る。規則 1 本ずつに故障注入を掛けて、どれも実際に落ちることを固定する。
+    This function is **the only Python-side mirror** of the hub's parser (`parseContainer` in
+    `packages/hub/src/manifest.ts`); a loosening would first surface on the user's side as "a
+    manifest that was written but the hub cannot read". Fault injection on each rule pins that
+    every one of them actually fails.
 
-    MUST: 欄の欠落も `DistError` で落ちる（素の添字の `KeyError` / `TypeError` にしない）—
-    {@link karume.dist.verify_dist} は**外から来た `karume.json`** を受ける門なので、組み立ての
-    語彙から外れた例外が出ると「壊れた manifest」と「門の不具合」が区別できない。
+    MUST: a missing field also fails with `DistError` (not a bare indexing `KeyError` /
+    `TypeError`) — {@link karume.dist.verify_dist} is the check that takes **a `karume.json` from
+    outside**, so an exception outside the assembly's vocabulary would make "a broken manifest"
+    indistinguishable from "a bug in the check".
     """
 
     _MARK = "limits-A"
@@ -403,7 +435,8 @@ class TestTheContainerEntryLimits:
 
     @staticmethod
     def _rewrite(out_dir: Path, mutate) -> None:
-        """据わった `karume.json` の container 入口だけを書き換える（現物はそのまま）。"""
+        """Rewrites only the container entry of the placed `karume.json` (the files stay as they
+        are)."""
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
         mutate(manifest["models"]["A"]["weights"]["w"]["f16"]["container"])
         (out_dir / MANIFEST_FILENAME).write_text(
@@ -477,18 +510,21 @@ class TestTheContainerEntryLimits:
             verify_dist(out_dir)
 
     def test_the_assembled_manifest_passes_every_rule(self, tmp_path: Path) -> None:
-        """対照 — 組み立てが焼いた manifest はそのまま通る（門が「常に落ちる」ではない）。"""
+        """Counterpart — the manifest assembly wrote passes as is (the check is not "always
+        fails")."""
         out_dir, _ = self._assemble(tmp_path)
 
         assert verify_dist(out_dir)
 
 
 class TestTheManifestFieldsVerifyDistReads:
-    """`verify_dist` は model / quant / 資産の欄の欠落・型違いも `DistError` で落とす。
+    """`verify_dist` also fails with `DistError` on missing or mistyped model / quant / asset
+    fields.
 
-    container 入口の外側（`weights` / `quants` / `defaultQuant` / 資産の 3 点セット）も、外から
-    来た `karume.json` の一部なので、素の添字の `KeyError` / `TypeError` を漏らさない
-    （{@link karume.dist.assert_container_limits} の MUST と同じ理由）。
+    What lies outside the container entry (`weights` / `quants` / `defaultQuant` / the three
+    fields of an asset) is also part of a `karume.json` from outside, so no bare indexing
+    `KeyError` / `TypeError` leaks (the same reason as the MUST of
+    {@link karume.dist.assert_container_limits}).
     """
 
     def _assemble(self, tmp_path: Path) -> Path:
@@ -499,7 +535,8 @@ class TestTheManifestFieldsVerifyDistReads:
 
     @staticmethod
     def _rewrite(out_dir: Path, mutate: Callable[[dict[str, Any]], None]) -> None:
-        """据わった `karume.json` のモデル A の節だけを書き換える（現物はそのまま）。"""
+        """Rewrites only the section of model A in the placed `karume.json` (the files stay as they
+        are)."""
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
         mutate(manifest["models"]["A"])
         (out_dir / MANIFEST_FILENAME).write_text(
@@ -555,20 +592,23 @@ class TestTheManifestFieldsVerifyDistReads:
 
 
 class TestDtypeLabelVocabulary:
-    """weights の dtype ラベルは runtime の**格納 dtype 語彙**の内側
-    （{@link karume.dist.STORAGE_DTYPE_LABELS}）。
+    """The dtype labels of weights are inside the runtime's **storage dtype vocabulary**
+    ({@link karume.dist.STORAGE_DTYPE_LABELS}).
 
-    ラベルは manifest の自由キーで hub も文字列としか見ないが、モデルカードは
-    「`I4` は公式 safetensors ライブラリで開けない」注記を**ラベルの綴り**で出すか出さないか
-    決める（`modelcard.quants`）。語彙を縛らないと、i4 を含む配布形をラベル `w4` で綴った
-    家族で注記が黙って消え、カード自身の「ラベルは格納 dtype 語彙」という主張も裏づけを失う。
+    Labels are free keys of the manifest and the hub sees them only as strings, but the model
+    card's body states that the labels are "the storage dtype vocabulary" (`modelcard.quants`; the
+    card's note that `I4` cannot be opened with the official safetensors library, which used to be
+    decided by **the label's spelling**, was retired with ADR 0109 decision 3). Without restricting
+    the vocabulary, a family that spells a distribution containing i4 with the label `w4` would
+    leave that claim of the card without backing.
     """
 
     _MARK = "weights-A"
     _REL_PATH = "w/model.krm"
 
     def _distribution(self, tmp_path: Path, label: str) -> Path:
-        """据わった配布形の manifest だけを `label` の dtype 席へ書き換えて返す。"""
+        """Rewrites only the manifest of the placed distribution to the dtype entry `label` and
+        returns it."""
         out_dir = tmp_path / "models" / "labelled"
         plan = _synthetic_plan(tmp_path / "series", "A", self._REL_PATH, self._MARK)
         assemble_family([plan], out_dir, "A")
@@ -582,7 +622,8 @@ class TestDtypeLabelVocabulary:
         return out_dir
 
     def test_it_refuses_a_label_outside_the_storage_dtype_vocabulary(self, tmp_path: Path) -> None:
-        """席名を dtype ラベルへ持ち込む綴り（`w4`）は fail loudly — 許可語彙を文言に出す。"""
+        """A spelling that carries a preset name into a dtype label (`w4`) fails loudly — the
+        message lists the allowed vocabulary."""
         out_dir = self._distribution(tmp_path, "w4")
 
         with pytest.raises(DistError, match="dtype label 'w4'") as error:
@@ -590,32 +631,37 @@ class TestDtypeLabelVocabulary:
         assert "'i4'" in str(error.value)
 
     def test_it_accepts_the_packed_int4_label(self, tmp_path: Path) -> None:
-        """`i4` は語彙の内側（カード側の i4 注記の pin と対になる綴り）。"""
+        """`i4` is inside the vocabulary (the spelling the card's dtype-vocabulary line names)."""
         out_dir = self._distribution(tmp_path, "i4")
 
         assert verify_dist(out_dir) == _part_sizes("A", self._REL_PATH, self._MARK)
 
     def test_it_accepts_the_packed_int2_label(self, tmp_path: Path) -> None:
-        """`i2`（ADR 0097 の INT2 格納）も語彙の内側 — INT2 を名乗る配布形が組めること。"""
+        """`i2` (ADR 0097's INT2 storage) is inside the vocabulary too — a distribution that
+        declares INT2 can be assembled."""
         out_dir = self._distribution(tmp_path, "i2")
 
         assert verify_dist(out_dir) == _part_sizes("A", self._REL_PATH, self._MARK)
 
     def test_the_label_vocabulary_covers_every_storage_dtype_of_the_ir_gate(self) -> None:
-        """ラベル語彙は IR 検証側の格納 dtype 語彙を包含する（写しの追随漏れの機械化）。
+        """The label vocabulary contains the storage dtype vocabulary of the IR verifier
+        (mechanizing a copy that fails to keep up).
 
-        `STORAGE_DTYPE_LABELS` は codec 台帳の展開経路の語彙（`CodecLayout`）の人手の写しで、同じ
-        パッケージに 2 本目の写し（`karume.verify.STORAGE_DTYPES`）がある。IR としては通る
-        格納 dtype がラベル語彙に無いと、**その dtype を名乗る配布形を組んだ瞬間**に
-        `verify_dist` が落ちる（ADR 0097 の `i2` で実際に起きていた食い違い）。
+        `STORAGE_DTYPE_LABELS` is a hand-made copy of the decode-path vocabulary of the codec
+        ledger (`CodecLayout`), and the same package has a second copy
+        (`karume.verify.STORAGE_DTYPES`). If a storage dtype that passes as IR were missing from
+        the label vocabulary, `verify_dist` would fail **the moment a distribution declaring that
+        dtype is assembled** (the mismatch that actually happened with ADR 0097's `i2`).
         """
         assert set(verify.STORAGE_DTYPES) <= STORAGE_DTYPE_LABELS
 
 
 class TestPlanGates:
-    """`plans` だけから決まる検査は**最初の 1 バイトを書く前**（dist.py 冒頭の MUST）。
+    """Checks decided by `plans` alone run **before the first byte is written** (the MUST at the
+    top of dist.py).
 
-    数 GB を並べ切ってから落ちると、`karume.json` の無い / 前回のままの中途半端なツリーが残る。
+    Failing after laying out several GB would leave a half-finished tree without a `karume.json`,
+    or with the previous one.
     """
 
     def test_it_refuses_too_many_models_before_writing_anything(self, tmp_path: Path) -> None:
@@ -631,11 +677,12 @@ class TestPlanGates:
     def test_it_refuses_a_rel_path_that_climbs_out_of_the_model_subtree(
         self, tmp_path: Path
     ) -> None:
-        """`A/../../victim` は staging の外の既存ファイルを truncate で潰す。
+        """`A/../../victim` would truncate an existing file outside staging.
 
-        書いた後の門は 1 つも鳴らない — manifest の root 検査は先頭セグメント（`A`）しか
-        見ず、宣言外ファイル検査は staging の中しか見ない。`out_dir / rel_path` は
-        `is_file()` も size も宣言と一致するので、`verify_dist` は最後まで緑で通る。
+        Not a single post-write check would fire — the manifest's root check looks only at the
+        leading segment (`A`), and the undeclared-file check looks only inside staging.
+        `out_dir / rel_path` matches the declaration in both `is_file()` and size, so
+        `verify_dist` passes green to the end.
         """
         victim = tmp_path / "models" / "victim.bin"
         victim.parent.mkdir(parents=True)
@@ -650,7 +697,8 @@ class TestPlanGates:
         assert not out_dir.exists()
 
     def test_it_refuses_a_model_name_that_is_not_a_path_segment(self, tmp_path: Path) -> None:
-        """名前検査は recipe 側にしか無かった（core の組み立て経路は素通しだった）。"""
+        """The name check used to exist only on the recipe side (the core's assembly path let names
+        through)."""
         plans = [_synthetic_plan(tmp_path / "series", "../escape", "w/model.krm", "w")]
         out_dir = tmp_path / "models" / "bad-name"
 
@@ -659,10 +707,12 @@ class TestPlanGates:
         assert not out_dir.exists()
 
     def test_it_refuses_two_roles_of_one_model_claiming_the_same_path(self, tmp_path: Path) -> None:
-        """同一モデル内の `rel_path` 衝突は後勝ちで沈黙する（モデル間には同じ MUST がある）。
+        """A `rel_path` collision within one model would silently let the later one win (the same
+        MUST exists across models).
 
-        後の役が先の役の実体を上書きし、manifest は**両役を後の digest** で宣言するので、
-        現物と表は一致したまま `encoder` のセッションが `decoder` のグラフを読む。
+        The later role overwrites the earlier role's data and the manifest declares **both roles
+        with the later digest**, so files and table still agree while the `encoder` session reads
+        the `decoder` graph.
         """
         series = tmp_path / "series"
         plan = ModelPlan(
@@ -692,8 +742,9 @@ class TestPlanGates:
         assert not out_dir.exists()
 
 
-#: quant の表示欄の受理集合の共有表。正本は hub の parser（2026-10-11 裁定）で、TS 側
-#: （packages/hub/tests/quant_presentation_test.ts）も**この 1 ファイル**で回す。
+#: The shared table of the accepted set of a quant's presentation fields. The source of truth is
+#: the hub's parser (ruling of 2026-10-11), and the TS side
+#: (packages/hub/tests/quant_presentation_test.ts) also runs on **this one file**.
 QUANT_PRESENTATION_TABLE = json.loads(
     (REPO_ROOT / "packages" / "hub" / "tests" / "fixtures" / "quant-presentation.json").read_text(
         encoding="utf-8"
@@ -702,11 +753,13 @@ QUANT_PRESENTATION_TABLE = json.loads(
 
 
 class TestQuantPresentation:
-    """quant の表示欄（ADR 0075 決定 1 の `label` / `description`）— optional・上限つき。
+    """A quant's presentation fields (`label` / `description` of ADR 0075 decision 1) — optional,
+    with limits.
 
-    受理集合は hub の parser が正本（2026-10-11 裁定）。hub より緩いと「組み上がったのに
-    読めない配布形」ができ、hub より厳しいと hub が読める値を焼けない — どちらの食い違いも
-    共有表が両側で赤にする。
+    The source of truth for the accepted set is the hub's parser (ruling of 2026-10-11). Looser
+    than the hub gives "a distribution that assembles but cannot be read", stricter than the hub
+    cannot write values the hub can read — the shared table turns either mismatch red on both
+    sides.
     """
 
     def test_the_limits_are_the_ones_of_the_shared_table(self) -> None:
@@ -752,7 +805,8 @@ class TestQuantPresentation:
             assert_quant_presentation("m.quants.f16", {key: "x" * (limit + 1)})
 
     def test_the_plan_gate_catches_it_before_writing_anything(self, tmp_path: Path) -> None:
-        """計画段の門（ADR 0041 §7 の規模上限と同じ席）— 数 GB を並べてから落とさない。"""
+        """The check at the plan step (the same place as the size limits of ADR 0041 §7) — no
+        failing after laying out several GB."""
         plan = _synthetic_plan(tmp_path / "series", "A", "w/model.krm", "w")
         oversized = {
             "f16": {**plan.quants["f16"], "label": "x" * (MAX_QUANT_LABEL_CHARS + 1)},
@@ -765,11 +819,13 @@ class TestQuantPresentation:
 
 
 class TestManifestJsonLiterals:
-    """manifest に載る綴りは**標準 JSON だけ** — hub の読み口はブラウザの `JSON.parse`。
+    """Only **standard JSON** goes into the manifest — the hub reads it with the browser's
+    `JSON.parse`.
 
-    Python の `json` は `NaN` / `Infinity` を既定で書き、既定で読み返す（`verify_dist` の
-    読み返しも素通しする）ので、焼く側で落とさないと配布してから利用者の手元で初めて壊れる。
-    同じ MUST は IR 側（`karume.ir.IrGraph.to_json`）に既にある。
+    Python's `json` writes `NaN` / `Infinity` by default and reads them back by default (the
+    read-back of `verify_dist` lets them through too), so unless the writing side fails, the
+    distribution breaks only after shipping, on the user's machine. The same MUST already exists on
+    the IR side (`karume.ir.IrGraph.to_json`).
     """
 
     def test_it_refuses_a_non_finite_float_in_the_manifest(self) -> None:
@@ -781,7 +837,8 @@ class TestManifestJsonLiterals:
 
     @pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
     def test_it_refuses_a_non_finite_preprocessor_channel(self, bad: float) -> None:
-        """`NaN` は `<= 0` が偽なので、正数検査だけでは `image_std` すらすり抜ける。"""
+        """`<= 0` is false for `NaN`, so a positivity check alone lets it slip through even
+        `image_std`."""
         with pytest.raises(DistError, match="non-finite"):
             preprocessor_channels(
                 {"image_std": [0.5, bad, 0.5]},
@@ -802,14 +859,18 @@ class TestManifestJsonLiterals:
 
 
 class TestFamilyAssembly:
-    """1 リポに複数モデル（ADR 0041 §2）+ 共有ファイルは `shared/` に 1 回だけ（§5）。"""
+    """Several models in one repository (ADR 0041 §2) + shared files only once under `shared/`
+    (§5)."""
 
     def test_it_never_folds_a_path_that_two_byte_strings_both_claim(self, tmp_path: Path) -> None:
-        """同じ相対 path に畳める組が 2 つあるとき、どの組も畳まない（席は path で 1 つだけ）。
+        """When two foldable groups share the same relative path, neither is folded (there is only
+        one slot per path).
 
-        畳むと後の組が先の組の `shared/` 実体を上書きし、先の組のモデルは自分の manifest が
-        宣言する sha256 とは**別のバイト列**を読む配布形になる。長さを揃えてあるので
-        `verify_dist` の size 突合も重複 path の 3 点セット突合も緑のまま = 沈黙する経路。
+        Folding would let the later group overwrite the earlier group's `shared/` data, giving a
+        distribution where the earlier group's models read **different bytes** from the sha256
+        their manifest declares. The lengths are equal, so both the size comparison of
+        `verify_dist` and the three-field comparison of duplicate paths stay green = a silent
+        path.
         """
         rel_path = "text_encoder/model.krm"
         first, second = "weights-D1", "weights-D2"
@@ -835,10 +896,11 @@ class TestFamilyAssembly:
 
     @staticmethod
     def _record_source_digests(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-        """出所 hash を採った席の `(モデル名, 相対 path)` を記録する。
+        """Records `(model name, relative path)` of the entries whose source hash was taken.
 
-        「読まれなかった」は現物を並べただけでは観測できない（結果のツリーは読んでも読まなくても
-        同じ）ので、共有判定が使う唯一の読み口を計装して回数で見る。
+        "Not read" cannot be observed by laying out the files alone (the resulting tree is the
+        same whether read or not), so the only read path the sharing check uses is instrumented
+        and counted.
         """
         real = dist._source_digest
         taken: list[str] = []
@@ -853,10 +915,12 @@ class TestFamilyAssembly:
     def test_it_settles_a_path_two_sizes_claim_without_reading_either(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """同じ相対 path でもサイズが違えば中身も必ず違う — hash を採る前に非共有が決まる。"""
+        """Even at the same relative path, a different size always means different content — not
+        shared is decided before taking a hash."""
         rel_path = "text_encoder/model.krm"
         short, long = "weights-A", "a-much-longer-mark"
-        # 席は part ごとなので、**どの part も**相方とサイズが違っていないと前置は掛からない。
+        # Entries are per part, so the pre-filter applies only if **every part** differs in size
+        # from its counterpart.
         assert all(
             len(first) != len(second)
             for first, second in zip(ir_container(mark=short), ir_container(mark=long), strict=True)
@@ -880,7 +944,8 @@ class TestFamilyAssembly:
     def test_it_still_reads_the_source_to_separate_two_equal_sized_byte_strings(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """サイズが同じ中身違いは前置では落とせない — 従来どおり出所 sha256 が弁別する。"""
+        """Same size with different content cannot be ruled out by the pre-filter — the source
+        sha256 tells them apart as before."""
         rel_path = "text_encoder/model.krm"
         first, second = "weights-D1", "weights-D2"
         assert [len(item) for item in ir_container(mark=first)] == [
@@ -894,7 +959,8 @@ class TestFamilyAssembly:
         out_dir = tmp_path / "models" / "equal-sized"
         manifest = assemble_family(plans, out_dir, "A")
 
-        # 席は part ごと（2 モデル × 2 part）— どの席も同サイズの相方を持つので全部が読まれる。
+        # Entries are per part (2 models × 2 parts) — every entry has a same-sized counterpart, so
+        # all of them are read.
         assert taken == _part_rel_paths(rel_path, first) * 2
         for name, mark in (("A", first), ("B", second)):
             refs = manifest["models"][name]["weights"]["w"]["f16"]["container"]["parts"]
@@ -906,10 +972,12 @@ class TestFamilyAssembly:
     def test_it_folds_the_matching_pair_while_a_differently_sized_seat_looks_on(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """前置フィルタは**畳める組**に一切触らない — 落ちるのはサイズ違いの単独だけ。
+        """The pre-filter never touches **a foldable group** — only the differently sized loner
+        drops out.
 
-        同じ相対 path に「畳める組」と「サイズ違いの単独」が同居する形が、前置を相対 path
-        ごとに掛けてしまった場合（= 組まで巻き添えに落ちる）と結果が割れる唯一の形。
+        A form where "a foldable group" and "a differently sized loner" share the same relative
+        path is the only form whose result differs from a pre-filter applied per relative path (=
+        the group dropping out along with it).
         """
         rel_path = "text_encoder/model.krm"
         shared_mark, odd = "same-bytes", "a-longer-byte-string"
@@ -946,11 +1014,13 @@ class TestFamilyAssembly:
     def test_it_refuses_a_shared_copy_that_did_not_land_byte_identical(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """共有席は 1 本しか置かないので、コピーが壊れると**全モデルが揃って**壊れた実体を指す。
+        """A shared entry is placed only once, so a broken copy makes **all models alike** point at
+        broken data.
 
-        宣言する sha256 は置いた現物から採るため、壊れたバイト列と宣言は一致したままになり
-        `verify_dist` は沈黙する（採り直さない）。出所の sha256 と突き合わせられるのは、
-        共有判定のために既に出所を読んでいる配置の側だけ。
+        The declared sha256 is taken from the placed file, so the broken bytes and the
+        declaration stay in agreement and `verify_dist` stays silent (it does not recompute).
+        Only the placement side, which already reads the source for the sharing check, can compare
+        against the source sha256.
         """
 
         def corrupt(artifact: Artifact, dest: Path) -> None:
@@ -970,12 +1040,13 @@ class TestFamilyAssembly:
     def test_it_refuses_a_series_part_that_disagrees_with_the_descriptor(
         self, tmp_path: Path, names: tuple[str, ...]
     ) -> None:
-        """系列の part が同じ長さのまま壊れていたら、置いた現物を descriptor の宣言と突き合わせて
-        落とす。
+        """If a series part is broken while keeping its length, the placed file is compared with the
+        descriptor's declaration and fails.
 
-        manifest の sha256 は置いた現物から採るので、壊れたバイト列と宣言は一致したまま据わる。
-        HF 経由の取得は block の sha256 を掛けないので、公開後にこれを見つける門は無い。
-        共有席でも出所との突合（出所自体が壊れている）では拾えない。
+        The manifest's sha256 is taken from the placed file, so the broken bytes and the
+        declaration land in agreement. Fetching through HF does not apply the block sha256, so no
+        check finds this after publication. Even for a shared entry, the comparison with the source
+        cannot catch it (the source itself is broken).
         """
         plans = [
             _synthetic_plan(tmp_path / "series", name, "w/model.krm", "same-bytes")
@@ -998,14 +1069,16 @@ class TestFamilyAssembly:
 
 
 class TestRootFiles:
-    """配布リポ直下の法的テキスト（上流ライセンスが再配布の条件として要求するファイル）。
+    """Legal text at the root of the distribution repository (files the upstream license requires
+    as a condition of redistribution).
 
-    manifest はこれを宣言しない（どのモデルにも属さず、配布リポそのものに掛かる）ので、
-    宣言外ファイル検査の例外として名指しで通す席になる。
+    The manifest does not declare them (they belong to no model and apply to the distribution
+    repository itself), so they are the entries let through by name as exceptions to the
+    undeclared-file check.
     """
 
     def test_it_writes_them_at_the_repository_root_and_verifies(self, tmp_path: Path) -> None:
-        """直下へ UTF-8 で置かれ、その状態のまま `verify_dist` を通る。"""
+        """They are placed at the root in UTF-8 and pass `verify_dist` in that state."""
         out_dir = tmp_path / "models" / "legal"
         texts = {"LICENSE.md": "ライセンス原文\n", "NOTICE.md": "notice\n"}
         assemble_family(
@@ -1017,13 +1090,14 @@ class TestRootFiles:
 
         for name, text in texts.items():
             assert (out_dir / name).read_text(encoding="utf-8") == text
-        # manifest は 1 つも宣言していない（資産ではない）が、検査は通る。
+        # The manifest declares none of them (they are not assets), yet the check passes.
         assert sorted(verify_dist(out_dir)) == _part_paths("A", "w/model.krm", "w")
 
     def test_it_refuses_a_name_outside_the_legal_seat_before_writing_anything(
         self, tmp_path: Path
     ) -> None:
-        """席は法的テキストの 2 つだけ — 直下は「宣言外ファイルの不在」の網が届かない場所。"""
+        """Only the two legal-text entries — the root is a place the "no undeclared files" net does
+        not reach."""
         out_dir = tmp_path / "models" / "smuggled"
         with pytest.raises(DistError, match="entries for legal text only"):
             assemble_family(
@@ -1037,7 +1111,8 @@ class TestRootFiles:
     def test_a_family_without_them_still_refuses_an_undeclared_root_file(
         self, tmp_path: Path
     ) -> None:
-        """例外は**その 2 つの名前**だけに掛かる — 席を使わない family の網は緩まない。"""
+        """The exception applies only to **those two names** — the net of a family that does not use
+        the entries is not loosened."""
         out_dir = tmp_path / "models" / "plain"
         plan = _synthetic_plan(tmp_path / "series", "A", "w/model.krm", "w")
         assemble_family([plan], out_dir, "A")
@@ -1047,7 +1122,8 @@ class TestRootFiles:
             verify_dist(out_dir)
 
     def test_the_exemption_does_not_reach_a_subdirectory(self, tmp_path: Path) -> None:
-        """例外は名前でなく**相対 path** — モデルサブツリーに紛れた同名は従来どおり落ちる。"""
+        """The exception is by **relative path**, not by name — a file of the same name slipped into
+        a model subtree fails as before."""
         out_dir = tmp_path / "models" / "nested"
         assemble_family(
             [_synthetic_plan(tmp_path / "series", "A", "w/model.krm", "w")],
@@ -1062,30 +1138,34 @@ class TestRootFiles:
 
 
 class TestAtomicReplacement:
-    """組み立ては staging へ作って rename で据える — 既存の配布形に中途の形を一度も晒さない。"""
+    """Assembly builds in staging and swaps in with a rename — the existing distribution never shows
+    a half-done state."""
 
     def _snapshot(self, out_dir: Path) -> dict[str, bytes]:
         return {rel_path: (out_dir / rel_path).read_bytes() for rel_path in _present(out_dir)}
 
     def _siblings(self, out_dir: Path) -> list[str]:
-        """出力先の隣に残った作業ディレクトリ（staging / 退避先）— 成功でも失敗でも空。"""
+        """Working directories left next to the destination (staging / the set-aside copy) — empty
+        on success and on failure."""
         return sorted(path.name for path in out_dir.parent.iterdir() if path.name != out_dir.name)
 
     def _fail_at(self, monkeypatch: pytest.MonkeyPatch, nth: int) -> None:
-        """`nth` 回目の配置だけを I/O 故障にする（数 GB の途中で落ちる形の注入）。"""
+        """Makes only the `nth` placement an I/O fault (injects a failure partway through several
+        GB)."""
         calls = 0
 
         def failing(artifact: Artifact, dest: Path) -> None:
             nonlocal calls
             calls += 1
             if calls == nth:
-                raise OSError("配置の途中で落ちた")
+                raise OSError("failed partway through placement")
             materialize(artifact, dest)
 
         monkeypatch.setattr("karume.dist.materialize", failing)
 
     def _fail_replace_at(self, monkeypatch: pytest.MonkeyPatch, nth: int) -> None:
-        """`nth` 回目の `os.replace` だけを I/O 故障にする（据え替えの途中で落ちる形の注入）。"""
+        """Makes only the `nth` `os.replace` an I/O fault (injects a failure partway through the
+        swap)."""
         real = os.replace
         calls = 0
 
@@ -1093,16 +1173,18 @@ class TestAtomicReplacement:
             nonlocal calls
             calls += 1
             if calls == nth:
-                raise OSError("据え替えの途中で落ちた")
+                raise OSError("failed partway through the swap")
             real(src, dst)
 
         monkeypatch.setattr("karume.artifacts.os.replace", failing)
 
     def _versioned_plans(self, root: Path, version: str) -> list[ModelPlan]:
-        """3 モデル × 1 役の最小計画。版ごとに**中身だけ**が変わる（長さは同じ）。
+        """The smallest plans of 3 models × 1 role. Each version changes **only the content** (the
+        lengths are the same).
 
-        同じ中身で組み直すと、途中まで上書きされた木も前回の木とバイト単位で見分けられない
-        （不変の主張が空振りする）— 故障注入の観測には版の違いが要る。
+        Reassembling with the same content would make a partially overwritten tree
+        indistinguishable byte for byte from the previous one (the invariance claim would test
+        nothing) — observing fault injection needs a difference between versions.
         """
         return [
             _synthetic_plan(root, name, "w/model.krm", f"{version}-{name}")
@@ -1112,13 +1194,13 @@ class TestAtomicReplacement:
     def test_a_failure_midway_leaves_the_previous_distribution_byte_identical(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """in-place で更新していた頃はここで「旧 manifest + 新旧混在ツリー」が残っていた。"""
+        """Back when updates were in place, this left "old manifest + a tree mixing old and new"."""
         out_dir = tmp_path / "models" / "synthetic"
         assemble_family(self._versioned_plans(tmp_path / "series", "v1"), out_dir, "A")
         before = self._snapshot(out_dir)
 
         self._fail_at(monkeypatch, nth=2)
-        with pytest.raises(OSError, match="配置の途中で落ちた"):
+        with pytest.raises(OSError, match="failed partway through placement"):
             assemble_family(self._versioned_plans(tmp_path / "series", "v2"), out_dir, "A")
 
         assert self._snapshot(out_dir) == before
@@ -1127,15 +1209,16 @@ class TestAtomicReplacement:
     def test_a_failing_card_renderer_leaves_the_previous_distribution_byte_identical(
         self, tmp_path: Path
     ) -> None:
-        """カードも差し替えの内側 — 描けなければ据え替えごと起きない。"""
+        """The card is inside the swap too — if it cannot be rendered, the swap does not happen at
+        all."""
         out_dir = tmp_path / "models" / "synthetic"
         assemble_family(self._versioned_plans(tmp_path / "series", "v1"), out_dir, "A")
         before = self._snapshot(out_dir)
 
         def explode(manifest: Mapping[str, Any], host_assets: Mapping[FileRefKey, int]) -> str:
-            raise DistError("カードが描けない")
+            raise DistError("cannot render the card")
 
-        with pytest.raises(DistError, match="カードが描けない"):
+        with pytest.raises(DistError, match="cannot render the card"):
             assemble_family(
                 self._versioned_plans(tmp_path / "series", "v2"),
                 out_dir,
@@ -1149,19 +1232,22 @@ class TestAtomicReplacement:
     def test_a_failing_swap_puts_the_previous_distribution_back_at_the_canonical_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """据え替えの 2 回目（staging → 出力先）で落ちても、正規 path から配布形が消えない。"""
+        """Even when the second step of the swap (staging → destination) fails, the distribution
+        does not disappear from the canonical path."""
         out_dir = tmp_path / "models" / "synthetic"
         assemble_family(self._versioned_plans(tmp_path / "series", "v1"), out_dir, "A")
         before = self._snapshot(out_dir)
 
-        # MUST: 系列は**注入の前**に書く — `os.replace` はモジュールが共有なので、系列側の
-        # 据え替え（`karume.publish`）まで巻き込むと被験体が組み立ての据え替えでなくなる。
+        # MUST: the series is written **before the injection** — `os.replace` is shared by the
+        # modules, so catching the series-side swap (`karume.publish`) too would make the subject
+        # something other than the assembly's swap.
         plans = self._versioned_plans(tmp_path / "series", "v2")
         self._fail_replace_at(monkeypatch, nth=2)
         with pytest.raises(DistError, match=r"swap \(rename\) into") as failure:
             assemble_family(plans, out_dir, "A")
 
-        # 原因（I/O 故障）は連鎖で残す — 据え替えの失敗と組み立ての失敗を取り違えない。
+        # The cause (the I/O fault) stays chained — a swap failure is not mistaken for an
+        # assembly failure.
         assert isinstance(failure.value.__cause__, OSError)
         assert self._snapshot(out_dir) == before
         assert self._siblings(out_dir) == []
@@ -1169,8 +1255,8 @@ class TestAtomicReplacement:
     def test_a_failing_evacuation_leaves_the_previous_distribution_byte_identical(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """据え替えの 1 回目（出力先 → 退避先）で落ちても、os.replace は原子的なので出力先は
-        無傷のまま残る。"""
+        """Even when the first step of the swap (destination → set-aside) fails, os.replace is
+        atomic, so the destination stays intact."""
         out_dir = tmp_path / "models" / "synthetic"
         assemble_family(self._versioned_plans(tmp_path / "series", "v1"), out_dir, "A")
         before = self._snapshot(out_dir)
@@ -1180,7 +1266,8 @@ class TestAtomicReplacement:
         with pytest.raises(DistError, match=r"moving .* aside") as failure:
             assemble_family(plans, out_dir, "A")
 
-        # 原因（I/O 故障）は連鎖で残す — 退避の失敗と組み立ての失敗を取り違えない。
+        # The cause (the I/O fault) stays chained — a set-aside failure is not mistaken for an
+        # assembly failure.
         assert isinstance(failure.value.__cause__, OSError)
         assert self._snapshot(out_dir) == before
         assert self._siblings(out_dir) == []
@@ -1188,10 +1275,12 @@ class TestAtomicReplacement:
     def test_it_restores_a_distribution_left_only_in_the_superseded_slot(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """前回が rename 2 回の**間**で落ちた形 — 退避先の last-known-good を捨てずに戻す。
+        """The case where the previous run failed **between** the two renames — the last-known-good
+        in the set-aside slot is restored rather than discarded.
 
-        次の組み立てが失敗しても、正常な配布形は正規 path に戻っている（捨てていれば
-        「出力先も退避先も無い」= 手元の配布形が完全消失した状態で止まる）。
+        Even if the next assembly fails, the healthy distribution is back at the canonical path
+        (discarding it would stop at "neither destination nor set-aside copy" = the local
+        distribution completely gone).
         """
         out_dir = tmp_path / "models" / "synthetic"
         assemble_family(self._versioned_plans(tmp_path / "series", "v1"), out_dir, "A")
@@ -1199,7 +1288,7 @@ class TestAtomicReplacement:
         os.replace(out_dir, out_dir.with_name(out_dir.name + SUPERSEDED_SUFFIX))
 
         self._fail_at(monkeypatch, nth=2)
-        with pytest.raises(OSError, match="配置の途中で落ちた"):
+        with pytest.raises(OSError, match="failed partway through placement"):
             assemble_family(self._versioned_plans(tmp_path / "series", "v2"), out_dir, "A")
 
         assert self._snapshot(out_dir) == before
@@ -1207,12 +1296,13 @@ class TestAtomicReplacement:
 
 
 class TestTheGraphNameMatchesTheWeightsKey:
-    """容器のグラフ名 == その席の weights のキー（container-v1 §2.1）。
+    """The container's graph name == the weights key of its entry (container-v1 §2.1).
 
-    ランタイムは `prepareContainer(opened, <weights キー>)` で**名前で**引くので、綴りが
-    割れた容器は manifest ごと据わり、利用者の `createSession` で初めて「コンテナにグラフが
-    無い」になる。書き手側の綴りの門（recipe の定数と AST の突合）はソースしか見ないので、
-    現物と宣言を突き合わせるのはここだけ。
+    The runtime looks it up **by name** with `prepareContainer(opened, <weights key>)`, so a
+    container with a diverging spelling would land together with its manifest and only turn into
+    "the container has no graph" at the user's `createSession`. The writer-side spelling check
+    (comparing the recipe's constants with the AST) looks only at the source, so this is the only
+    place comparing the files with the declaration.
     """
 
     @staticmethod
@@ -1231,7 +1321,8 @@ class TestTheGraphNameMatchesTheWeightsKey:
     def test_a_container_named_after_the_series_directory_fails_loudly(
         self, tmp_path: Path
     ) -> None:
-        """置き場の名前（系列名）で名乗った容器は配らせない — この門の存在理由。"""
+        """A container named after its location (the series name) is not shipped — the reason this
+        check exists."""
         series = _write_series(
             tmp_path / "series" / "w", ir_container(mark="w", named="siglip2-so400m-patch14-384")
         )
@@ -1242,7 +1333,7 @@ class TestTheGraphNameMatchesTheWeightsKey:
         assert not out_dir.exists()
 
     def test_the_same_series_named_after_the_part_passes(self, tmp_path: Path) -> None:
-        """対（恒真でない）: 同じ素材を部品名で名乗らせれば通る。"""
+        """Counterpart (not tautological): the same material named after the component passes."""
         series = _write_series(tmp_path / "series" / "w", ir_container(mark="w", named="w"))
         out_dir = tmp_path / "models" / "named-after-the-part"
 
@@ -1251,10 +1342,10 @@ class TestTheGraphNameMatchesTheWeightsKey:
         assert set(manifest["models"]["A"]["weights"]) == {"w"}
 
     def test_one_container_cannot_fill_two_different_keys(self, tmp_path: Path) -> None:
-        """1 本の容器は 1 本のグラフしか持たないので、2 つの席の両方は名乗れない。
+        """One container holds only one graph, so it cannot claim both of two entries.
 
-        バイト同一の共有（同じキーの席）は通る形なので、dedupe をキーまで含めて畳まないと
-        この形が門をすり抜ける。
+        Byte-identical sharing (entries with the same key) is a form that passes, so unless the
+        dedupe folds by key as well, this form slips through the check.
         """
         series = _write_series(tmp_path / "series" / "w", ir_container(mark="w", named="w"))
         plan = replace(
@@ -1276,10 +1367,12 @@ class TestTheGraphNameMatchesTheWeightsKey:
 
 
 class TestExternalComponents:
-    """越境コンポーネント参照（ADR 0038 §7 の `repo` / `revision` 席）— **opt-in**。
+    """Cross-repository component references (the `repo` / `revision` fields of ADR 0038 §7,
+    superseded — now ADR 0109 decision 3) — **opt-in**.
 
-    用途は「同じバイト列を 2 つのリポへ二重に上げない」こと 1 つで、指定が無ければ配布形は
-    完全に自己完結のまま（{@link test_a_plain_assembly_stays_self_contained}）。
+    The only purpose is "not uploading the same bytes to two repositories", and without the option
+    the distribution stays fully self-contained
+    ({@link test_a_plain_assembly_stays_self_contained}).
     """
 
     _SHARED = "text-encoder"
@@ -1287,9 +1380,11 @@ class TestExternalComponents:
     _REVISION = "0123456789abcdef0123456789abcdef01234567"
 
     def _plan(self, name: str, series: Path, *, shared: str | None = None) -> ModelPlan:
-        """2 役のモデル（片方は他リポと同一バイト・片方はこのリポ固有）。
+        """A model with two roles (one byte-identical with another repository, one specific to this
+        repository).
 
-        `shared` は `text_encoder` の中身を差し替える席（参照先と食い違う形を作るため）。
+        `shared` swaps the content of `text_encoder` (to build a form that disagrees with the
+        referenced one).
         """
         return ModelPlan(
             name=name,
@@ -1317,7 +1412,7 @@ class TestExternalComponents:
         )
 
     def _source_dist(self, tmp_path: Path) -> Path:
-        """参照元（既に組み上がっている別リポの配布形）。"""
+        """The referenced source (the already assembled distribution of another repository)."""
         source = tmp_path / "models" / "karume-source"
         assemble_family([self._plan("source", tmp_path / "series")], source, "source")
         return source
@@ -1335,11 +1430,13 @@ class TestExternalComponents:
         )
 
     def _pinned(self, refs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-        """3 点セットの列を「参照元へ pin した」形へ（repo / revision は全要素同一）。"""
+        """Turns a list of three-field refs into the form "pinned to the referenced source" (repo /
+        revision identical on every element)."""
         return [{"repo": "hdae/karume-source", "revision": self._REVISION, **ref} for ref in refs]
 
     def test_a_plain_assembly_stays_self_contained(self, tmp_path: Path) -> None:
-        """指定なしの組み立ては 1 バイトも変わらない — 参照は 1 つも生えず現物が全部揃う。"""
+        """Assembly without the option does not change by a single byte — no reference appears and
+        all files are present."""
         out_dir = tmp_path / "models" / "karume-plain"
         manifest = assemble_family([self._plan("plain", tmp_path / "series")], out_dir, "plain")
 
@@ -1368,7 +1465,8 @@ class TestExternalComponents:
         )
 
     def test_the_referenced_bytes_are_not_stored_here_a_second_time(self, tmp_path: Path) -> None:
-        """参照の存在理由そのもの — 置いた上で参照を書くと利得がゼロになる。"""
+        """The very reason references exist — placing the files and also writing the reference would
+        gain nothing."""
         source = self._source_dist(tmp_path)
         out_dir = tmp_path / "models" / "karume-borrower"
 
@@ -1380,7 +1478,8 @@ class TestExternalComponents:
         )
 
         assert not (out_dir / "borrower" / "text_encoder").exists()
-        # 越境参照は実在検査の対象外で、自リポ固有の役割だけが現物として残る。
+        # Cross-repository references are exempt from the existence check, and only the roles
+        # specific to this repository remain as files.
         assert sorted(verify_dist(out_dir)) == _part_paths(
             "borrower", "transformer/model.krm", self._OWN, "transformer"
         )
@@ -1389,16 +1488,18 @@ class TestExternalComponents:
     def test_it_refuses_a_revision_that_is_not_a_full_commit_sha(
         self, tmp_path: Path, revision: str
     ) -> None:
-        """ブランチ名やタグは pin にならない — 指し先が動けば size / sha256 と現物が食い違う。"""
+        """A branch name or a tag is not a pin — if the target moves, size / sha256 disagree with
+        the files."""
         with pytest.raises(DistError, match="is not a 40-digit commit sha"):
             self._components(tmp_path, revision=revision)
 
     def test_it_refuses_a_role_the_source_distribution_does_not_declare(
         self, tmp_path: Path
     ) -> None:
-        """参照先に無いものは参照できない（**指定した役割**が向こうで欠けている形）。"""
+        """What the referenced repository lacks cannot be referenced (the form where **the named
+        role** is missing there)."""
         source = tmp_path / "models" / "karume-source"
-        # 参照元は `transformer` しか持たない配布形。
+        # The referenced source is a distribution with only `transformer`.
         assemble_family(
             [_synthetic_plan(tmp_path / "series", "source", "transformer/model.krm", self._OWN)],
             source,
@@ -1406,7 +1507,8 @@ class TestExternalComponents:
         )
         out_dir = tmp_path / "models" / "karume-borrower"
 
-        # 綴りは展開後の part 役割（`<代表役割>#<番号>`）— 参照は part 1 本ごとに解決する。
+        # The spelling is the part role after expansion (`<representative role>#<number>`) — a
+        # reference is resolved per part.
         with pytest.raises(
             DistError, match="The file of role 'text_encoder#1' is not in the referenced dist"
         ):
@@ -1419,9 +1521,11 @@ class TestExternalComponents:
         assert not out_dir.exists()
 
     def test_a_broken_source_manifest_fails_as_a_dist_error(self, tmp_path: Path) -> None:
-        """参照元の `karume.json` は形の検査を通さずに読まれるので、欄の欠落も `DistError`。
+        """The referenced source's `karume.json` is read without the form checks, so a missing field
+        is also a `DistError`.
 
-        素の `KeyError` だと「参照元が壊れている」と「門の不具合」が区別できない。
+        A bare `KeyError` would make "the referenced source is broken" indistinguishable from "a
+        bug in the check".
         """
         source = self._source_dist(tmp_path)
         manifest_path = source / MANIFEST_FILENAME
@@ -1446,9 +1550,9 @@ class TestExternalComponents:
     def test_it_refuses_a_reference_whose_bytes_differ_from_the_local_ones(
         self, tmp_path: Path
     ) -> None:
-        """中身違いの参照は「別のモデルの重み」を自分のものとして配る形になる。
+        """A reference with different content would ship "another model's weights" as one's own.
 
-        shape も manifest も正しいままなので、突き合わせをここで切ると沈黙する。
+        Shapes and manifest all stay correct, so cutting the comparison here would be silent.
         """
         source = tmp_path / "models" / "karume-source"
         other = self._plan("source", tmp_path / "series", shared="other-bytes!")
@@ -1465,10 +1569,12 @@ class TestExternalComponents:
         assert not out_dir.exists()
 
     def test_it_applies_one_reference_to_every_model_of_a_family(self, tmp_path: Path) -> None:
-        """複数モデル同居リポでも越境参照は掛けられる（ADR 0087 の extra リポがこの形）。
+        """A cross-repository reference also works in a repository with several models (ADR 0087's
+        extra repository has this form).
 
-        成立条件は「指定役割の現物が全モデルで参照先とバイト同一」— 満たしていれば全モデルの
-        同名役割が**同一の参照**を宣言し、そのバイト列は自リポのどこにも置かれない。
+        The condition is "the files of the named role are byte-identical with the referenced ones
+        in every model" — when it holds, the role of the same name in every model declares **the
+        same reference**, and those bytes are placed nowhere in this repository.
         """
         source = self._source_dist(tmp_path)
         out_dir = tmp_path / "models" / "karume-family"
@@ -1492,11 +1598,12 @@ class TestExternalComponents:
             manifest["models"]["B"]["weights"]["text_encoder"]["f16"]["container"]["parts"]
             == expected
         )
-        # 参照したバイト列は自リポのどの席（モデル別サブツリー・`shared/`）にも無い。
+        # The referenced bytes are in no place of this repository (per-model subtrees, `shared/`).
         assert not (out_dir / "A" / "text_encoder").exists()
         assert not (out_dir / "B" / "text_encoder").exists()
         assert not (out_dir / SHARED_DIRNAME / "text_encoder").exists()
-        # 自リポ固有の役割は 2 モデルで同一バイトなので従来どおり `shared/` へ畳まれる。
+        # The role specific to this repository is byte-identical in both models, so it folds into
+        # `shared/` as before.
         assert sorted(verify_dist(out_dir)) == _part_paths(
             SHARED_DIRNAME, "transformer/model.krm", self._OWN, "transformer"
         )
@@ -1504,9 +1611,11 @@ class TestExternalComponents:
     def test_it_refuses_a_family_where_one_model_holds_different_bytes(
         self, tmp_path: Path
     ) -> None:
-        """1 モデルだけ現物が参照先と違う形 — 「同じ役割名が別バイトを指す」の実体。
+        """Only one model's files differ from the referenced ones — what "the same role name points
+        at different bytes" looks like.
 
-        通してしまうと、そのモデルには**別のモデルの重み**を指す manifest が配られる。
+        Letting it through would ship that model a manifest pointing at **another model's
+        weights**.
         """
         source = self._source_dist(tmp_path)
         out_dir = tmp_path / "models" / "karume-family"
@@ -1525,18 +1634,20 @@ class TestExternalComponents:
     def test_it_refuses_a_family_whose_models_resolve_to_different_references(
         self, tmp_path: Path
     ) -> None:
-        """バイト列が同じでも**指し先が 1 つに定まらない**なら落とす。
+        """Even with the same bytes, fails when **the target is not unique**.
 
-        参照は全モデルへ同じ 1 つを書く形なので、モデルごとに別の path へ解決する組み合わせは
-        そもそも宣言できない（食い違った役割名と両モデル名を綴る）。
+        A reference writes the same single one for every model, so a combination that resolves to
+        a different path per model cannot be declared at all (the message spells the diverging
+        role name and both model names).
         """
         source = tmp_path / "models" / "karume-source"
         series = tmp_path / "series"
         shared_series = _synthetic_series(series, self._SHARED, "text_encoder")
-        # 同じバイト列を 2 つの相対 path で宣言する参照元（借り手ごとに別の席が当たる）。
-        # 2 つ目の席は**同じ weights のキーの別 dtype ラベル** — キーを変えると「容器の
-        # グラフ名 ≠ weights のキー」になり、組み立ての門（{@link
-        # karume.dist.assert_weight_components_verified}）が参照の曖昧さより先に落とす。
+        # A referenced source declaring the same bytes at two relative paths (each borrower hits a
+        # different entry). The second entry is **another dtype label of the same weights key** —
+        # changing the key would make "the container's graph name ≠ the weights key", and the
+        # assembly check ({@link karume.dist.assert_weight_components_verified}) would fail before
+        # the reference ambiguity.
         base = self._plan("source", series)
         assemble_family(
             [
@@ -1590,7 +1701,8 @@ class TestExternalComponents:
         assert not out_dir.exists()
 
     def test_the_cli_stays_inert_until_every_flag_is_given(self, tmp_path: Path) -> None:
-        """部分指定を黙って無視すると、参照するつもりの組み立てが自己完結形で静かに出来上がる。"""
+        """Silently ignoring a partial spec would quietly produce a self-contained assembly where a
+        reference was intended."""
         assert (
             resolve_external_components(repo=None, revision=None, dist=None, model=None, roles=None)
             is None
@@ -1601,7 +1713,8 @@ class TestExternalComponents:
             )
 
     def test_the_cli_wires_the_five_flags_through(self, tmp_path: Path) -> None:
-        """`main` 経由の一本通し（合成 pipeline は 1 役 `w` の計画を返す）。"""
+        """End to end through `main` (the synthetic pipeline returns a plan with the one role
+        `w`)."""
         source = tmp_path / "models" / "karume-source"
         assemble_family([_synthetic_plan(tmp_path, "m", "w/model.krm", "w")], source, "m")
         out_dir = tmp_path / "models" / "karume-borrower"
@@ -1635,12 +1748,14 @@ class TestExternalComponents:
         assert verify_dist(out_dir) == {}
 
 
-#: 帰属が 1 通りだけの合成 pipeline（実在 family の代わりに「表の形」だけを持つ被験体）。
+#: A synthetic pipeline with a single attribution (a subject that has only "the form of the
+#: table" in place of a real family).
 #:
-#: NOTE: 実物の recipe は 1 つ残らず wheel の外なので、**core が recipe を import して被験体に
-#: する形は取らない**（ADR 0065 決定 3 — 依存は recipe → core の一方向）。ここで観測するのは
-#: 「渡された表をどう扱うか」という core 側の規則だけで、実物の表の中身は各 recipe の
-#: `tests/test_distribution.py` と repo driver の `tests/test_dist_driver.py` が見る。
+#: NOTE: every real recipe is outside the wheel, so **the core does not import a recipe as a
+#: subject** (ADR 0065 decision 3 — dependencies go one way, recipe → core). What is observed here
+#: is only the core-side rule "how a passed table is handled"; the content of the real tables is
+#: checked by each recipe's `tests/test_distribution.py` and the repo driver's
+#: `tests/test_dist_driver.py`.
 _ONE_PROFILE_PIPELINE = Pipeline(
     default_model="m",
     repo_name=lambda model: f"karume-solo-{model}",
@@ -1648,11 +1763,12 @@ _ONE_PROFILE_PIPELINE = Pipeline(
     card_profiles={"solo": lambda manifest, repo, host_assets: "solo"},
 )
 
-#: 帰属が 2 通りある合成 pipeline（描き手は名前ごとに別の関数オブジェクト）。
+#: A synthetic pipeline with two attributions (a separate function object renders each name).
 #:
-#: NOTE: 実在の 2 プロファイル family（SBV2）は wheel の外へ出たが、**選ばせる規則は core の
-#: 責務**（{@link resolve_card_renderer}）なので、規則の側は表の形だけで観測する。実物の表が
-#: 2 つ持っていることは `tools/export-recipes/sbv2/tests/test_distribution.py` が見る。
+#: NOTE: the real two-profile family (SBV2) has moved out of the wheel, but **the rule that makes
+#: the caller choose is the core's responsibility** ({@link resolve_card_renderer}), so the rule is
+#: observed with the form of the table alone. That the real table has two is checked by
+#: `tools/export-recipes/sbv2/tests/test_distribution.py`.
 _TWO_PROFILE_PIPELINE = Pipeline(
     default_model="m",
     repo_name=lambda model: f"karume-{model}",
@@ -1663,7 +1779,8 @@ _TWO_PROFILE_PIPELINE = Pipeline(
     },
 )
 
-#: 呼び出し側が渡す表の代わり（repo driver が渡すものの合成版）。
+#: A stand-in for the table the caller passes (a synthetic version of what the repo driver
+#: passes).
 _CALLER_REGISTRY: Mapping[str, Pipeline] = {
     "solo": _ONE_PROFILE_PIPELINE,
     "duo": _TWO_PROFILE_PIPELINE,
@@ -1672,23 +1789,25 @@ _CALLER_REGISTRY: Mapping[str, Pipeline] = {
 
 class TestCli:
     def test_it_has_no_default_pipeline_of_its_own(self) -> None:
-        """既定を core に焼かない（受理集合は呼び出し側が渡す — ADR 0065 決定 2）。"""
+        """No default is baked into the core (the caller passes the accepted set — ADR 0065 decision
+        2)."""
         args = build_parser().parse_args([])
         assert args.pipeline is None
-        assert args.models is None  # 解決は main（pipeline ごとの既定を引くため）
+        assert args.models is None  # resolved in main (to look up the per-pipeline default)
 
     def test_the_core_table_is_empty(self) -> None:
-        """family 別 recipe は 1 つ残らず wheel の外（ADR 0065 段 3+4 完了）。
+        """Every per-family recipe is outside the wheel (ADR 0065 stages 3+4 done).
 
-        `PIPELINES` が空でないなら、core wheel が family 知識を持ち直したということ。
+        A non-empty `PIPELINES` would mean the core wheel has taken family knowledge back.
         """
         assert PIPELINES == {}
 
     def test_it_still_fails_loudly_with_an_empty_table(self) -> None:
-        """既定 = 空の表でも文言が壊れない（選択肢が 0 個でも「要る」と言い切る）。
+        """Even with the default = an empty table the message does not break (it states "required"
+        even with zero choices).
 
-        MUST: 空欄で黙って通らない — 表を渡し忘れた呼び出しは、資産を 1 バイトも触る前に
-        ここで落ちるのが唯一の検出点。
+        MUST: an empty value does not pass silently — failing here, before touching a single byte
+        of the assets, is the only point that detects a call that forgot to pass the table.
         """
         with pytest.raises(DistError, match="--pipeline is required") as error:
             main([])
@@ -1697,18 +1816,19 @@ class TestCli:
 
     @pytest.mark.parametrize("name", ["siglip2", "anima", ""])
     def test_an_empty_table_accepts_no_pipeline_name(self, name: str) -> None:
-        """受理集合が空なら**どの名前も**通らない（argparse の choices が空集合）。"""
+        """With an empty accepted set **no name** passes (argparse's choices are the empty set)."""
         with pytest.raises(SystemExit) as raised:
             build_parser().parse_args(["--pipeline", name])
         assert raised.value.code == 2
 
     def test_a_caller_supplied_registry_carries_its_own_default(self) -> None:
-        """リポの dist ドライバは recipe を足した表と既定を渡す（受理集合はそちらが正）。"""
+        """The repository's dist driver passes the table with the recipes added and a default (its
+        accepted set is authoritative)."""
         args = build_parser(_CALLER_REGISTRY, "solo").parse_args([])
         assert args.pipeline == "solo"
 
     def test_a_caller_supplied_registry_widens_the_accepted_names(self) -> None:
-        """渡された表の名前だけが通る（core の空の表とは独立）。"""
+        """Only the names of the passed table pass (independent of the core's empty table)."""
         args = build_parser(_CALLER_REGISTRY, "solo").parse_args(["--pipeline", "duo"])
         assert args.pipeline == "duo"
 
@@ -1717,25 +1837,30 @@ class TestCli:
         assert args.models == ["F1", "F2"]
 
     def test_it_has_no_place_of_its_own_to_write_into(self) -> None:
-        """置き場の既定も呼び出し側が渡す（`models/` / `outputs/series/` は repo topology）。"""
+        """The default locations are also passed by the caller (`models/` / `outputs/series/` are
+        repo topology)."""
         args = build_parser().parse_args([])
         assert args.out is None
         assert args.series is None
 
     def test_it_refuses_to_assemble_without_a_series_root(self) -> None:
-        """MUST: 渡されなければ落ちる — 黙って cwd 相対のどこかを系列として読まない。"""
+        """MUST: fails when not given — never silently reads some cwd-relative place as the
+        series."""
         with pytest.raises(DistError, match="--series is required"):
             main(["--pipeline", "solo"], pipelines=_CALLER_REGISTRY)
 
     def test_it_refuses_to_assemble_without_an_output_directory(self, tmp_path: Path) -> None:
-        """`--out` の既定を作る hook を渡さない呼び出しは、資産を触る前にここで落ちる。"""
+        """A call that passes no hook for the default `--out` fails here, before touching the
+        assets."""
         with pytest.raises(DistError, match="--out is required"):
             main(["--pipeline", "solo", "--series", str(tmp_path)], pipelines=_CALLER_REGISTRY)
 
     def test_a_caller_supplied_hook_decides_where_the_default_lands(self, tmp_path: Path) -> None:
-        """hook を渡した呼び出しは `--out` 省略で通り、**hook が返した場所**へ組み上がる。
+        """A call that passes the hook goes through without `--out` and assembles into **the place
+        the hook returns**.
 
-        hook が受け取るのは解決済みの pipeline とモデル名の並び（リポ名を綴るのに要る全部）。
+        The hook receives the resolved pipeline and the list of model names (everything needed to
+        spell the repository name).
         """
         seen: list[tuple[Pipeline, list[str]]] = []
 
@@ -1754,20 +1879,22 @@ class TestCli:
 
 
 class TestCardProfile:
-    """帰属プロファイルの選択（`--card-profile`）— 誤帰属は配ってからでないと気づけない。"""
+    """Choosing the attribution profile (`--card-profile`) — a wrong attribution is noticed only
+    after shipping."""
 
     def test_it_is_unset_until_asked_for(self) -> None:
         assert build_parser().parse_args([]).card_profile is None
         assert build_parser().parse_args(["--card-profile", "jvnv"]).card_profile == "jvnv"
 
     def test_a_pipeline_with_one_profile_needs_no_choice(self) -> None:
-        """帰属が 1 通りしかない pipeline には聞かない（選びようがない）。"""
+        """A pipeline with a single attribution is not asked (there is nothing to choose)."""
         profiles = _ONE_PROFILE_PIPELINE.card_profiles
         assert len(profiles) == 1
         assert resolve_card_renderer(_ONE_PROFILE_PIPELINE, None) is next(iter(profiles.values()))
 
     def test_it_refuses_to_pick_an_attribution_when_several_exist(self) -> None:
-        """既定を黙って選ぶと、新しいファミリーへ前のファミリーの帰属がそのまま残る。"""
+        """Silently picking a default would leave the previous family's attribution on a new
+        family."""
         with pytest.raises(DistError, match="--card-profile") as error:
             resolve_card_renderer(_TWO_PROFILE_PIPELINE, None)
         assert "fn" in str(error.value)
@@ -1778,7 +1905,8 @@ class TestCardProfile:
             resolve_card_renderer(_TWO_PROFILE_PIPELINE, "FN9")
 
     def test_it_resolves_each_name_to_its_own_renderer(self) -> None:
-        """名前ごとに別の描き手（束ね違いなら 2 つのファミリーが同じカードを描く）。"""
+        """A separate renderer per name (with a wrong binding, two families would render the same
+        card)."""
         profiles = _TWO_PROFILE_PIPELINE.card_profiles
         assert sorted(profiles) == ["fn", "jvnv"]
         assert resolve_card_renderer(_TWO_PROFILE_PIPELINE, "jvnv") is profiles["jvnv"]
@@ -1786,7 +1914,8 @@ class TestCardProfile:
 
 
 def _repo_echo_pipeline(repo_name: Callable[[str], str]) -> Pipeline:
-    """カードに**渡された repo だけ**を書く合成 pipeline（Usage 例の repo を観測する被験体）。"""
+    """A synthetic pipeline that writes **only the passed repo** into the card (a subject for
+    observing the repo of the Usage example)."""
     return Pipeline(
         default_model="m",
         repo_name=repo_name,
@@ -1795,10 +1924,11 @@ def _repo_echo_pipeline(repo_name: Callable[[str], str]) -> Pipeline:
     )
 
 
-#: モデル名をリポ名に含む pipeline（1 モデル 1 リポが既定 — 束ねる名前は宣言から決まらない）。
+#: A pipeline whose repository name contains the model name (one repository per model by default
+#: — a bundling name does not follow from the declaration).
 _PER_MODEL_REPO_PIPELINE = _repo_echo_pipeline(lambda model: f"karume-voice-{model}")
 
-#: どのモデルも同じ 1 リポを宣言する pipeline（家族 1 リポ）。
+#: A pipeline where every model declares the same one repository (one repository per family).
 _ONE_REPO_PIPELINE = _repo_echo_pipeline(lambda _model: "karume-family")
 
 _REPO_REGISTRY: Mapping[str, Pipeline] = {
@@ -1808,10 +1938,12 @@ _REPO_REGISTRY: Mapping[str, Pipeline] = {
 
 
 class TestCardRepository:
-    """カードの Usage 例に綴る repo — 正本は pipeline の宣言で、`--repo` は明示の上書き口。
+    """The repo spelled in the card's Usage example — the source of truth is the pipeline's
+    declaration, and `--repo` is the explicit override.
 
-    置き場（`--out`）はリポの事実ではない。ここから導くと、別名のディレクトリで焼いた配布形の
-    カードが実在しないリポを指したまま公開される。
+    The location (`--out`) is not a fact about the repository. Deriving from it would publish the
+    card of a distribution built in a differently named directory still pointing at a repository
+    that does not exist.
     """
 
     def _card(self, tmp_path: Path, out_name: str, *argv: str) -> str:
@@ -1828,7 +1960,8 @@ class TestCardRepository:
         )
 
     def test_the_output_directory_name_does_not_reach_the_card(self, tmp_path: Path) -> None:
-        """ステージング名で焼いても、手順どおりの名前で焼いたのと同じカードになる。"""
+        """Building under a staging name gives the same card as building under the name the
+        procedure uses."""
         staged = self._card(tmp_path, "karume-voice-m-release", "--pipeline", "voice")
         assert staged == self._card(tmp_path, "karume-voice-m", "--pipeline", "voice")
         assert "release" not in staged
@@ -1842,7 +1975,8 @@ class TestCardRepository:
     def test_it_refuses_to_guess_the_name_of_a_repository_that_bundles_models(
         self, tmp_path: Path
     ) -> None:
-        """宣言が揃わない束ね方は推定しない — しかも**組み立てる前**に落ちる（残骸を作らない）。"""
+        """A bundling whose declarations disagree is not guessed — and it fails **before assembly**
+        (leaving no debris)."""
         with pytest.raises(DistError, match="--repo") as error:
             self._card(tmp_path, "out", "--pipeline", "voice", "--model", "a", "--model", "b")
         assert "karume-voice-a" in str(error.value)
@@ -1860,7 +1994,8 @@ class TestCardRepository:
             resolve_repo(_PER_MODEL_REPO_PIPELINE, ["m"], repo)
 
     def test_an_override_needs_an_explicit_output_directory(self, tmp_path: Path) -> None:
-        """既定の出力先は宣言の名前で綴られる — 名前だけ上書きすると置き場とカードが割れる。"""
+        """The default destination is spelled with the declared name — overriding the name alone
+        would split the location from the card."""
         called: list[Sequence[str]] = []
 
         def hook(pipeline: Pipeline, models: Sequence[str]) -> Path:
@@ -1877,14 +2012,17 @@ class TestCardRepository:
 
 
 class TestPartExpansion:
-    """分割されたコンポーネントは、現物から解決した**複数要素の part 列**として宣言される。
+    """A split component is declared as **a part list of several elements** resolved from the
+    files.
 
-    何本に割れるかは書いたバイト数で決まる（`karume.container`）ので、pipeline の表には書けない
-    — 組み立ては代表 path から現物を辿る（{@link karume.dist.expand_weight_parts}）。
+    How many parts there are depends on the bytes written (`karume.container`), so it cannot be
+    written in the pipeline's table — assembly follows the files from the representative path
+    ({@link karume.dist.expand_weight_parts}).
     """
 
     def _plan(self, series: Path, sources: Sequence[bytes]) -> ModelPlan:
-        """1 役だけの計画。系列側は part 列（先頭 = part 0 の 2 文書）を連番で持つ。"""
+        """A plan with one role only. The series side holds the part sequence (head = part 0 with
+        the two documents) with numbered names."""
         source = _write_series(series, sources)
         return ModelPlan(
             name="A",
@@ -1910,7 +2048,8 @@ class TestPartExpansion:
             "A/w/model-00002-of-00003.krm",
             "A/w/model-00003-of-00003.krm",
         ]
-        # 並びは part 番号順 MUST（先頭 = part 0 の 2 文書）。中身も番号どおりに置かれている。
+        # The order MUST be by part number (head = part 0 with the two documents). The contents
+        # are placed by number too.
         assert [ref["size"] for ref in entry["container"]["parts"]] == [
             len(item) for item in payloads
         ]
@@ -1921,7 +2060,8 @@ class TestPartExpansion:
             assert (out_dir / ref["path"]).read_bytes() == payload
 
     def test_the_split_parts_are_covered_by_the_declaration_check(self, tmp_path: Path) -> None:
-        """突合は列を辿って現物へ届く（宣言外ファイル検査に落ちない）。"""
+        """The comparison follows the list to the files (they do not fail the undeclared-file
+        check)."""
         payloads = ir_parts(3, mark="w")
         plan = self._plan(tmp_path / "series", payloads)
         out_dir = tmp_path / "models" / "partitioned"
@@ -1934,7 +2074,8 @@ class TestPartExpansion:
         }
 
     def test_the_smallest_component_still_declares_two_elements(self, tmp_path: Path) -> None:
-        """数 KB の資産でも part 0（2 文書）+ part 1（const）の 2 要素以上（ADR 0109 決定 3）。"""
+        """Even an asset of a few KB has two or more elements, part 0 (the two documents) + part 1
+        (const) (ADR 0109 decision 3)."""
         plan = self._plan(tmp_path / "series", ir_container(mark="w"))
         out_dir = tmp_path / "models" / "whole"
 
@@ -1948,7 +2089,7 @@ class TestPartExpansion:
         ]
 
     def test_the_leftovers_of_a_previous_export_fail_loudly(self, tmp_path: Path) -> None:
-        """単一ファイルと連番の同居は「どちらを配るか」が一意に決まらない。"""
+        """A single file next to numbered ones leaves "which one to ship" undecided."""
         series = tmp_path / "series"
         plan = self._plan(series, ir_parts(3, mark="w"))
         (series / "model.krm").write_bytes(b"stale")
@@ -1959,7 +2100,8 @@ class TestPartExpansion:
     def test_a_split_component_that_another_seat_also_names_fails_loudly(
         self, tmp_path: Path
     ) -> None:
-        """assets の席は 1 ファイル参照 — 複数 part になった役割は指せない。"""
+        """An assets entry is a single-file reference — it cannot point at a role that became
+        several parts."""
         plan = self._plan(tmp_path / "series", ir_parts(3, mark="w"))
         plan = replace(plan, assets={"table": "w"})
 
@@ -1968,18 +2110,22 @@ class TestPartExpansion:
 
 
 class TestRequiredLimits:
-    """quant の `requiredLimits`（ADR 0038 §7）は組み立てが**現物から**導いて焼く。
+    """Assembly derives a quant's `requiredLimits` (the ADR 0038 §7 addendum, superseded — the
+    derivation is ADR 0089 decision 3) **from the files** and writes it.
 
-    導出規則そのもの（何を需要と数え、どこから焼くか）の門は `test_limits.py` — ここが見るのは
-    結線だけ: 現物のどこを入口にするか・quant の席にどう載るか・計画側が同じ欄を書いたら
-    落ちるか。既定を差し替える 2 本は、合成資産（数 KB）では 128MiB の帯へ届かないため
-    （実配布資産を作らずに「導出が現物のどこを見ているか」を観測する）。
+    The check of the derivation rules themselves (what counts as demand, from where values are
+    written) is `test_limits.py` — this checks only the wiring: which part of the files is the
+    entry point, how it lands in the quant entry, whether a plan that writes the same field itself
+    fails. The two tests that swap the defaults do so because synthetic assets (a few KB) do not
+    reach the 128MiB band (observing "which part of the files the derivation looks at" without
+    building real distribution assets).
     """
 
-    #: フィクスチャの最大テンソル = linear 重み 4×32 の f32 = 512 バイト（`ir_fixtures`）。
+    #: The fixture's largest tensor = the 4×32 linear weight in f32 = 512 bytes (`ir_fixtures`).
     _LARGEST_TENSOR: ClassVar[int] = 512
 
-    #: 上の 512 バイトの重み（1 行 128 バイト）を **2 piece** へ割る block 上限（§4.1）。
+    #: The block limit that splits the 512-byte weight above (128 bytes per row) into **2
+    #: pieces** (§4.1).
     _PIECE_BLOCK: ClassVar[int] = 256
 
     def _plan(
@@ -1990,7 +2136,8 @@ class TestRequiredLimits:
         quant: Mapping[str, Any] | None = None,
         block_bytes: int | None = None,
     ) -> ModelPlan:
-        """1 役だけの計画（weights の席は正当な IR コンテナ = 導出の入口）。"""
+        """A plan with one role only (the weights entry is a valid IR container = the entry point of
+        the derivation)."""
         source = _write_series(
             series, ir_container(mark="w", block_bytes=block_bytes or BLOCK_MAX_BYTES)
         )
@@ -2009,7 +2156,8 @@ class TestRequiredLimits:
         return assemble_family([plan], tmp_path / "models" / "limits", "A")
 
     def test_a_distribution_within_the_defaults_declares_nothing(self, tmp_path: Path) -> None:
-        """既定スペックで動く資産に欄は生えない（「欄が無い = 既定で動く」の意味論）。"""
+        """Assets that run on default specs get no field (the semantics "no field = runs on the
+        defaults")."""
         manifest = self._assemble(tmp_path, self._plan(tmp_path / "series"))
 
         assert manifest["models"]["A"]["quants"]["f16"] == {
@@ -2020,7 +2168,8 @@ class TestRequiredLimits:
     def test_it_bakes_the_largest_tensor_of_the_container(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """需要の出所は**配布に入る現物**のテンソル寸法（モデル定義の再計算ではない）。"""
+        """The demand comes from the tensor sizes of **the files that go into the distribution**
+        (not a recomputation from the model definition)."""
         monkeypatch.setattr(
             limits,
             "WEBGPU_DEFAULT_LIMITS",
@@ -2033,7 +2182,8 @@ class TestRequiredLimits:
             "maxBufferSize": self._LARGEST_TENSOR,
             "maxStorageBufferBindingSize": self._LARGEST_TENSOR,
         }
-        # 焼いた欄は据わった `karume.json` にも居る（返り値だけの飾りではない）。
+        # The written field is also in the placed `karume.json` (not decoration on the return
+        # value only).
         written = json.loads(
             (tmp_path / "models" / "limits" / MANIFEST_FILENAME).read_text(encoding="utf-8")
         )
@@ -2045,13 +2195,14 @@ class TestRequiredLimits:
     def test_a_tensor_split_into_pieces_is_baked_as_its_whole_parent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """piece 列（container-v1 §5 の規則④）の需要は**親の全長**（GPU は piece を知らない）。
+        """The demand of a piece list (rule ④ of container-v1 §5) is **the parent's full length**
+        (the GPU does not know about pieces).
 
-        導出は合流した供給計画の block を足し上げる（`dist.component_demand_bytes`）。piece ごと
-        に最大を採る形へ退化すると、ここは断片 1 本ぶん（256 バイト）になり `maxBufferSize` の
-        欄が消える — 「宣言は満たすのに `createSession` で落ちる」形。対照は直上の
-        {@link test_it_bakes_the_largest_tensor_of_the_container}（piece ゼロの同じ系列でも
-        同じ 512 が出る）。
+        The derivation sums the blocks of the merged supply plan (`dist.component_demand_bytes`).
+        Degrading to the maximum per piece would give one fragment here (256 bytes) and drop the
+        `maxBufferSize` field — the form "satisfies the declaration yet fails in `createSession`".
+        The counterpart is {@link test_it_bakes_the_largest_tensor_of_the_container} right above
+        (the same series with zero pieces gives the same 512).
         """
         monkeypatch.setattr(
             limits,
@@ -2063,7 +2214,8 @@ class TestRequiredLimits:
 
         manifest = self._assemble(tmp_path, plan)
 
-        # 被験体が本当に割れていること — 割れなかった日に主張が黙って恒真化しないための観測。
+        # The subject really is split — an observation so that the claim does not silently become
+        # tautological on a day it is not split.
         entry = manifest["models"]["A"]["weights"]["w"]["f16"]
         parts = [out_dir / ref["path"] for ref in entry["container"]["parts"]]
         supplies = verify.verify_container(parts).graphs["w"].supplies
@@ -2076,7 +2228,8 @@ class TestRequiredLimits:
     def test_it_declares_only_the_limit_the_demand_actually_exceeds(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """既定の違う 2 つなので、片方だけを超える帯では欄も片方だけ（実配布 irodori f16 の形）。"""
+        """The two have different defaults, so in the band that exceeds only one, there is only one
+        field (the form of the real irodori f16 distribution)."""
         monkeypatch.setattr(
             limits,
             "WEBGPU_DEFAULT_LIMITS",
@@ -2092,11 +2245,13 @@ class TestRequiredLimits:
     def test_a_state_slot_can_be_the_largest_resident_buffer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """KV 容量の大きい系列では**最大テンソルより state スロットの方が大きい**。
+        """In a series with a large KV capacity **the state slot is larger than the largest
+        tensor**.
 
-        states 形のコンテナは合成できない（手術済み IR = attention の契約ごと組む必要がある）
-        ので、読み口だけを差し替えて「state も需要に入る」ことを観測する。容量は
-        `pipelineConfig` の席から来る（束縛点は `createGenerationContext` — ADR 0066 追記 7）。
+        A container in states form cannot be synthesized (surgically modified IR = it would have
+        to be built with the attention contract), so only the reader is swapped to observe that
+        "state counts as demand too". The capacity comes from the `pipelineConfig` field (the
+        binding point is `createGenerationContext` — ADR 0066, addendum 2026-08-17 item 7).
         """
         monkeypatch.setattr(
             dist,
@@ -2119,7 +2274,8 @@ class TestRequiredLimits:
     def test_a_state_slot_the_config_cannot_bind_fails_loudly(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """容量席が無ければ落とす — 黙って state を外すと「宣言があるのに足りない」欄が焼ける。"""
+        """Fails without a capacity field — silently leaving the state out would write a "declared,
+        yet insufficient" field."""
         monkeypatch.setattr(
             dist,
             "ir_graph",
@@ -2133,7 +2289,8 @@ class TestRequiredLimits:
             self._assemble(tmp_path, plan)
 
     def test_it_refuses_a_plan_that_writes_the_field_itself(self, tmp_path: Path) -> None:
-        """導出できる値を表にも持たせない（表だけが古い下限を名乗る形を作らせない）。"""
+        """A derivable value is not also held in the table (no form where only the table claims a
+        stale lower bound)."""
         plan = self._plan(
             tmp_path / "series", quant={"requiredLimits": {"maxBufferSize": 1_073_741_824}}
         )
@@ -2144,7 +2301,8 @@ class TestRequiredLimits:
     def test_nothing_is_written_when_the_derivation_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """導出は**1 バイトも書く前**（落ちるなら途中の配布形を 1 ファイルも残さない）。"""
+        """The derivation runs **before a single byte is written** (a failure leaves not a single
+        file of a half-done distribution)."""
         monkeypatch.setattr(
             dist,
             "ir_graph",
@@ -2161,20 +2319,23 @@ class TestRequiredLimits:
 
 
 class TestInputContainerVerification:
-    """組み立ては入力コンテナを「過去に検証済み」と信頼しない（CG4-1）。
+    """Assembly does not trust input containers as "verified in the past" (CG4-1).
 
-    系列ディレクトリは据え替えで書き換わる可変な場所（`dist` のモジュール doc）なので、
-    **古いエクスポータで焼いた系列を `--series` で指す**運用事故が現実にありうる。組み立てが
-    自前で読むのは格納と IR の一部だけなので、descriptor / 束縛表の壊れは family 固有の門を
-    すり抜けて配布形に据わり、利用者の `createSession` で初めて落ちる。
+    A series directory is a mutable place rewritten by swaps (the module doc of `dist`), so the
+    operational accident of **pointing `--series` at a series written by an old exporter** is a
+    real possibility. Assembly itself reads only the storage and part of the IR, so a broken
+    descriptor / binding table would slip through the family-specific checks into the
+    distribution and fail only at the user's `createSession`.
     """
 
     def _tampered(self, payloads: Sequence[bytes]) -> list[bytes]:
-        """重みの part はそのままで、**part 0 のグラフ記述**を手で書き換えた列。
+        """A sequence with the weight parts unchanged and **the graph descriptor of part 0**
+        rewritten by hand.
 
-        手作業の改竄 / 別実装の出力そのもの — `capabilities.ops` を `graphs[].requires.ops` の
-        和集合からずらす（container-v1 §2.1 の不変条件）。宣言外ファイル検査も size 突合も
-        緑のままなので、落とせるのは入力コンテナを開き直す門だけ。
+        Exactly a manual tampering / the output of another implementation — moves
+        `capabilities.ops` away from the union of `graphs[].requires.ops` (the invariant of
+        container-v1 §2.1). Both the undeclared-file check and the size comparison stay green, so
+        only the check that reopens the input containers can fail it.
         """
         part0, *rest = payloads
         header = read_header(part0[:HEADER_BYTES])
@@ -2189,11 +2350,13 @@ class TestInputContainerVerification:
         return [head + rewritten + model, *rest]
 
     def _plan(self, series: Path) -> ModelPlan:
-        """2 席のモデル — **quant が選ばない席**（`f32`）の容器だけを改竄する。
+        """A model with two entries — only the container of **the entry no quant selects** (`f32`)
+        is tampered with.
 
-        MUST: 被験体は選ばれない席。選ばれる席は `requiredLimits` の導出が同じ容器を開くので、
-        preflight を外しても別の門が落とす = 恒真化の観測にならない。preflight だけが見るのは
-        「どの quant も選ばない dtype 席」で、そこが壊れたまま配られる形が閉じている穴。
+        MUST: the subject is the unselected entry. For a selected entry the `requiredLimits`
+        derivation opens the same container, so another check would fail even without the
+        preflight = it would not observe tautology. What only the preflight looks at is "the
+        dtype entries no quant selects", and shipping one of them broken is the hole it closes.
         """
         return ModelPlan(
             name="A",
@@ -2226,8 +2389,9 @@ class TestInputContainerVerification:
     ) -> None:
         out_dir = tmp_path / "models" / "tampered"
 
-        # 落ちる層まで見る — 「ファイルが無い」ではなく**コンテナの構造検査**で落ちること
-        # そのものが、この門が閉じている穴（現物は揃っているのに宣言が整合しない）の定義。
+        # Checks the layer that fails too — failing in **the container's structural checks**
+        # rather than on "file missing" is itself the definition of the hole this check closes
+        # (the files are all there, yet the declarations are inconsistent).
         with pytest.raises(
             DistError,
             match=r"does not satisfy the container rules: graphDescriptor\.capabilities\.ops",
@@ -2238,10 +2402,11 @@ class TestInputContainerVerification:
     def test_without_the_preflight_the_same_distribution_is_assembled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """故障注入 — 門を外すと壊れたコンテナがそのまま据わる（恒真化していないことの証明）。
+        """Fault injection — without the check the broken container lands as is (proof that the test
+        is not tautological).
 
-        他の門（宣言と現物の突合・宣言外ファイル検査）はどれもこの改竄を見ない、が上の 1 本の
-        意味そのもの。
+        That none of the other checks (declaration-to-file comparison, the undeclared-file check)
+        sees this tampering is the very meaning of the test above.
         """
         monkeypatch.setattr(dist, "assert_weight_components_verified", lambda partitioned: {})
         out_dir = tmp_path / "models" / "tampered"
@@ -2251,10 +2416,12 @@ class TestInputContainerVerification:
         assert (out_dir / MANIFEST_FILENAME).is_file()
 
     def _unknown_op_plan(self, series: Path) -> ModelPlan:
-        """weights の席が**語彙外の op を宣言した容器**を指す計画（構造検査は通る形）。
+        """A plan whose weights entry points at **a container that declares an op outside the
+        vocabulary** (a form that passes the structural checks).
 
-        被験体は quant が選ぶ席にする — IR の受理規則は「どの席の容器も配布形へ据わる前に
-        通る」ことが主張なので、選ばれない席で観測すると穴の位置が別になる。
+        The subject is an entry a quant selects — the claim of the IR acceptance rules is that
+        "every entry's container passes them before landing in the distribution", so observing
+        on an unselected entry would put the hole somewhere else.
         """
         source = _write_series(series / "odd", with_an_unknown_op(ir_container(mark="odd")))
         return ModelPlan(
@@ -2271,11 +2438,13 @@ class TestInputContainerVerification:
     def test_a_weights_container_that_declares_an_unknown_op_fails_loudly(
         self, tmp_path: Path
     ) -> None:
-        """構造は正しいが**ランタイムが実行できない** IR を宣言した容器を据えない。
+        """A container declaring IR that is structurally correct but **the runtime cannot execute**
+        is not placed.
 
-        `verify_container` は op 語彙に触れないので、これを落とせるのは IR の受理規則
-        （{@link karume.verify.assert_ir_accepted}）だけ — 抜けると「語彙外の op を宣言した
-        容器」が配布形に据わり、利用者の `createSession` で初めて落ちる。
+        `verify_container` does not touch the op vocabulary, so only the IR acceptance rules
+        ({@link karume.verify.assert_ir_accepted}) can fail it — without them, "a container
+        declaring an op outside the vocabulary" would land in the distribution and fail only at the
+        user's `createSession`.
         """
         out_dir = tmp_path / "models" / "odd"
 
@@ -2286,7 +2455,8 @@ class TestInputContainerVerification:
     def test_without_the_preflight_the_unknown_op_container_is_assembled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """故障注入 — 門を外すと語彙外 op の容器がそのまま据わる（恒真化していないことの証明）。"""
+        """Fault injection — without the check the container with an op outside the vocabulary lands
+        as is (proof that the test is not tautological)."""
         monkeypatch.setattr(dist, "assert_weight_components_verified", lambda partitioned: {})
         out_dir = tmp_path / "models" / "odd"
 
@@ -2295,11 +2465,13 @@ class TestInputContainerVerification:
         assert (out_dir / MANIFEST_FILENAME).is_file()
 
     def test_a_generated_payload_in_the_weights_seat_fails_loudly(self) -> None:
-        """生成物（`payload`）は IR コンテナではない — weights の席に据えたら計画の受け口で落ちる。
+        """A generated file (`payload`) is not an IR container — put in a weights entry, it fails at
+        the plan's entry point.
 
-        素通しにすると、その役割だけ IR v1 の全検証も分割解決も需要の導出も掛からないまま
-        `parts: [1 要素]` として宣言される（表・資産の役割名を weights へ渡す綴り誤りが
-        全門緑で通り、利用者の `createSession` で初めて落ちる）。
+        Letting it through would declare that role alone as `parts: [one element]` without the
+        full IR v1 verification, part resolution or demand derivation (a spelling mistake that
+        passes a table / asset role name to weights would go green through every check and fail
+        only at the user's `createSession`).
         """
         with pytest.raises(
             DistError, match=r"A\.weights: role 'w' points at a generated file \(payload\)"
@@ -2316,8 +2488,8 @@ class TestInputContainerVerification:
             )
 
     def test_the_same_payload_in_the_assets_seat_is_assembled(self, tmp_path: Path) -> None:
-        """対照 — `assets` は IR コンテナではない席なので、生成物はそのまま通る
-        （rope 素表・スタイル表・話者埋め込みが現に使っている形）。"""
+        """Counterpart — `assets` is not an IR container entry, so a generated file passes as is
+        (the form the raw rope table, style tables and speaker embeddings actually use)."""
         plan = ModelPlan(
             name="A",
             pipeline="anima/1",
@@ -2345,30 +2517,35 @@ class TestInputContainerVerification:
 
 
 class TestExternalPartitionedComponents:
-    """**分割されたコンポーネントへの越境参照** — `container.parts` の各要素が 1 つの参照になる
-    （ADR 0038 §7 / ADR 0071 決定 2「各要素は従来の FileRef 検査をそのまま通す」）。
+    """**Cross-repository references to a split component** — each element of `container.parts`
+    becomes one reference (ADR 0038 §7 / ADR 0071 decision 2, "each element goes through the
+    usual FileRef checks as is"; both superseded — now ADR 0109 decision 3, cross-repository
+    references per container).
 
-    実需は turbo リポの共有 text_encoder（1GiB 超で複数本へ割れる）で、1 役 = 1 参照しか
-    書けないと「同じバイト列を 2 つのリポへ上げない」という参照の存在理由そのものが、
-    分割された資産にだけ届かなくなる。
+    The actual need is the turbo repository's shared text_encoder (over 1GiB, split into several
+    parts); if one role could only write one reference, the very reason references exist, "not
+    uploading the same bytes to two repositories", would not reach split assets.
     """
 
     _REVISION = "0123456789abcdef0123456789abcdef01234567"
     _REPO = "hdae/karume-source"
-    #: part 1（const 領域）が**空でない**容器を使う — 0 バイトの part は「長さを保った
-    #: まま書き換える」故障注入の被験体にならない（同じ長さの別バイト列が無い）。
+    #: Uses a container whose part 1 (const region) is **not empty** — a 0-byte part cannot be the
+    #: subject of the fault injection "rewrite while keeping the length" (there are no other bytes
+    #: of the same length).
     _SHARDS = tuple(ir_container(mark="text-encoder", named="text_encoder"))
     _OWN = "transformer"
 
     def _series(self, root: Path, payloads: Sequence[bytes]) -> Path:
-        """系列出力を書いて**代表 path** を返す（連番 = 現物が決める part 列）。"""
+        """Writes the series output and returns **the representative path** (numbered = the part
+        list the files decide)."""
         return _write_series(root, payloads)
 
     def _plan(self, name: str, series: Path) -> ModelPlan:
-        """2 役のモデル（`text_encoder` は他リポと同一バイト・`transformer` はこのリポ固有）。
+        """A model with two roles (`text_encoder` byte-identical with another repository,
+        `transformer` specific to this repository).
 
-        自リポ固有の役割の系列は `text_encoder` の系列の隣に書く（weights の席は配置だけ —
-        `dist.ModelPlan.__post_init__`）。
+        The series of the role specific to this repository is written next to the series of
+        `text_encoder` (a weights entry is a placement only — `dist.ModelPlan.__post_init__`).
         """
         return ModelPlan(
             name=name,
@@ -2393,7 +2570,8 @@ class TestExternalPartitionedComponents:
         )
 
     def _source_dist(self, tmp_path: Path, series: Path) -> Path:
-        """参照元（既に組み上がっている別リポの配布形 — 向こうでも同じ本数に割れている）。"""
+        """The referenced source (the already assembled distribution of another repository — split
+        into the same number of parts there)."""
         source = tmp_path / "models" / "karume-source"
         assemble_family([self._plan("source", series)], source, "source")
         return source
@@ -2411,7 +2589,8 @@ class TestExternalPartitionedComponents:
         )
 
     def test_every_part_becomes_its_own_pinned_reference(self, tmp_path: Path) -> None:
-        """repo / revision は全要素同一・path / size / sha256 は part ごと・並びは番号順。"""
+        """repo / revision identical on every element; path / size / sha256 per part; ordered by
+        number."""
         series = self._series(tmp_path / "series", self._SHARDS)
         source = self._source_dist(tmp_path, series)
         out_dir = tmp_path / "models" / "karume-borrower"
@@ -2436,7 +2615,8 @@ class TestExternalPartitionedComponents:
         ]
 
     def test_the_referenced_parts_are_not_stored_here_a_second_time(self, tmp_path: Path) -> None:
-        """参照の存在理由そのもの — 全 part が向こう側に残り、自リポは固有の役割だけ持つ。"""
+        """The very reason references exist — every part stays on the other side, and this
+        repository holds only its own role."""
         series = self._series(tmp_path / "series", self._SHARDS)
         source = self._source_dist(tmp_path, series)
         out_dir = tmp_path / "models" / "karume-borrower"
@@ -2457,10 +2637,12 @@ class TestExternalPartitionedComponents:
     def test_it_checks_every_part_against_the_source_distribution(
         self, tmp_path: Path, victim: int
     ) -> None:
-        """突合は part 列の**全要素**へ届く（先頭だけ見る形なら後続の改竄が沈黙する）。"""
+        """The comparison reaches **every element** of the part list (looking at the head only would
+        keep tampering in later parts silent)."""
         series = self._series(tmp_path / "series", self._SHARDS)
         source = self._source_dist(tmp_path, series)
-        # 参照元の現物だけを、長さを保ったまま書き換える（size ではなく sha256 の門を踏む）。
+        # Rewrites only the referenced source's files, keeping their length (exercises the sha256
+        # check, not the size check).
         tampered = source / "source" / "text_encoder" / (f"model-{victim + 1:05d}-of-00003.krm")
         tampered.write_bytes(bytes(len(self._SHARDS[victim])))
         out_dir = tmp_path / "models" / "karume-borrower"
@@ -2475,7 +2657,8 @@ class TestExternalPartitionedComponents:
         assert not out_dir.exists()
 
     def test_the_smallest_component_is_referenced_part_by_part(self, tmp_path: Path) -> None:
-        """数 KB の役割でも参照は part ごと（常時分割 — 代表 path 1 本の参照は無い）。"""
+        """Even a role of a few KB is referenced part by part (always split — there is no single
+        reference to the representative path)."""
         whole = tuple(ir_container(mark="whole-text-encoder", named="text_encoder"))
         series = self._series(tmp_path / "series", whole)
         source = self._source_dist(tmp_path, series)
@@ -2501,15 +2684,18 @@ class TestExternalPartitionedComponents:
         ]
 
     def test_an_asset_seat_cannot_point_at_a_split_component(self, tmp_path: Path) -> None:
-        """assets は 1 ファイル参照しか書けない席 — 先頭 part だけを黙って指さない。
+        """assets is an entry that can only hold a single-file reference — it does not silently
+        point at the first part only.
 
-        参照元では weights の役割として分割されているコンポーネントを、こちら側では assets の
-        席から指した形（席が違えば同じ綴りの役割が別の意味を持つ）。
+        The form where a component that is split as a weights role in the referenced source is
+        pointed at from an assets entry on this side (in a different entry, a role with the same
+        spelling has a different meaning).
         """
         series = self._series(tmp_path / "series", self._SHARDS)
         source = self._source_dist(tmp_path, series)
         out_dir = tmp_path / "models" / "karume-borrower"
-        # 自リポ側は単一ファイル（分割は参照先の事実）。参照は assets の席から掛ける。
+        # This repository's side is a single file (the split is a fact of the referenced side).
+        # The reference is applied from the assets entry.
         base = self._plan("borrower", series)
         borrower = replace(
             base,
@@ -2530,12 +2716,13 @@ class TestExternalPartitionedComponents:
 
 
 class TestTheManifestHubReads:
-    """`karume dist` が書いた `karume.json` を hub の `karume/5` の規則がそのまま受理する。
+    """The hub's `karume/5` rules accept the `karume.json` that `karume dist` wrote as is.
 
-    見るのは**宣言だけで閉じる**面（ADR 0109 決定 6）— 上限と `size: 0` の規則は
-    {@link karume.dist.assert_container_limits}、選択が引く形（`container.descriptor` /
-    `container.parts`）はここで綴る。TS 側 parser の写経はしない（正本が 2 つになる）が、
-    **同じ値を持つ定数**だけは下の {@link TestTheHubConstants} が機械で突き合わせる。
+    What is checked is the surface **settled by declarations alone** (ADR 0109 decision 6) — the
+    limits and the `size: 0` rule are {@link karume.dist.assert_container_limits}, and the form the
+    selection looks up (`container.descriptor` / `container.parts`) is spelled here. The TS-side
+    parser is not copied (that would make two sources of truth), but **the constants holding the
+    same values** are compared mechanically by {@link TestTheHubConstants} below.
     """
 
     _MARK = "hub-reader"
@@ -2546,7 +2733,8 @@ class TestTheManifestHubReads:
         return out_dir, assemble_family([plan], out_dir, "A")
 
     def test_the_written_manifest_passes_the_declared_limits(self, tmp_path: Path) -> None:
-        """据わった `karume.json` を読み直しても同じ門を通る（返り値だけの飾りではない）。"""
+        """Reading the placed `karume.json` back passes the same checks (not decoration on the
+        return value only)."""
         out_dir, _ = self._assembled(tmp_path)
 
         written = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
@@ -2556,7 +2744,7 @@ class TestTheManifestHubReads:
         verify_dist(out_dir)
 
     def test_the_selection_finds_a_descriptor_and_a_part_list(self, tmp_path: Path) -> None:
-        """`resolveSelection` が引く形 — quant → 部品 → dtype → `container`。"""
+        """The form `resolveSelection` looks up — quant → component → dtype → `container`."""
         _, manifest = self._assembled(tmp_path)
         model = manifest["models"]["A"]
         label = model["quants"][model["defaultQuant"]]["weights"]["w"]
@@ -2571,7 +2759,8 @@ class TestTheManifestHubReads:
     def test_the_descriptor_expectation_matches_the_part_zero_that_was_placed(
         self, tmp_path: Path
     ) -> None:
-        """2 文書の期待値は**置いた現物**から採る（表と現物が独立に動かない）。"""
+        """The expectations of the two documents are taken from **the placed files** (table and
+        files do not move independently)."""
         out_dir, manifest = self._assembled(tmp_path)
         container = manifest["models"]["A"]["weights"]["w"]["f16"]["container"]
 
@@ -2580,11 +2769,12 @@ class TestTheManifestHubReads:
 
         assert container["descriptor"]["graph"] == graph.to_document()
         assert container["descriptor"]["model"] == model.to_document()
-        # part 0 は「ヘッダ + 2 文書ちょうど」（container-v1 §8）。
+        # Part 0 is "header + exactly the two documents" (container-v1 §8).
         assert container["parts"][0]["size"] == HEADER_BYTES + graph.length + model.length
 
     def test_the_parts_open_as_a_container(self, tmp_path: Path) -> None:
-        """宣言した part 列をそのまま渡せばコンテナとして開ける（並びは添字順 MUST）。"""
+        """Passing the declared part list as is opens it as a container (the order MUST be by
+        index)."""
         out_dir, manifest = self._assembled(tmp_path)
         container = manifest["models"]["A"]["weights"]["w"]["f16"]["container"]
 
@@ -2596,12 +2786,13 @@ class TestTheManifestHubReads:
 
 
 def _evaluate_product(expression: str) -> int:
-    """`1024 * 2 ** 20` のような**積と冪だけ**の式を数にする。
+    """Turns an expression of **products and powers only**, such as `1024 * 2 ** 20`, into a number.
 
-    MUST: `eval` を持ち込まない — TS 側が右辺の綴りを変えた日（別の定数を参照する・関数呼び出しに
-    なる）に、突合が「値が違う」ではなく `SyntaxError` / `NameError` で落ちる。そのときに読み手が
-    知りたいのは「どちらの値が動いたか」であって Python の例外名ではない。受理集合を積と冪に
-    絞ってあるので、式の形が変わればここが**そう言って**落ちる。
+    MUST: no `eval` — on the day the TS side changes the spelling of the right-hand side (refers to
+    another constant, becomes a function call), the comparison would fail with `SyntaxError` /
+    `NameError` instead of "the values differ". What the reader wants to know then is "which value
+    moved", not a Python exception name. The accepted set is narrowed to products and powers, so if
+    the form of the expression changes, this fails **saying so**.
     """
     total = 1
     tokens = [token.strip() for token in expression.replace("**", "^").split("*")]
@@ -2615,10 +2806,12 @@ def _evaluate_product(expression: str) -> int:
 
 
 class TestTheHubConstants:
-    """コンテナの上限は **hub と exporter で同じ値**（ADR 0109 決定 6 の「独立に持つ」）。
+    """The container limits have **the same values in the hub and the exporter** ("kept
+    independently" in ADR 0109 decision 3).
 
-    値を導出で結ばずそれぞれの言語で綴る決定なので、片方だけが動いた日に落ちる門をここに置く
-    （`packages/hub/src/manifest.ts` は Python から読めるテキストなので、突合は機械でできる）。
+    The decision spells the values in each language instead of linking them by derivation, so the
+    check that fails on the day only one side moves lives here (`packages/hub/src/manifest.ts` is
+    text Python can read, so the comparison can be mechanical).
     """
 
     _MANIFEST_TS: ClassVar[Path] = (
@@ -2628,7 +2821,7 @@ class TestTheHubConstants:
     def _declared(self, name: str) -> int:
         source = self._MANIFEST_TS.read_text(encoding="utf-8")
         match = re.search(rf"^const {name} = ([^;]+);", source, re.MULTILINE)
-        assert match is not None, f"{name} が {self._MANIFEST_TS} に無い"
+        assert match is not None, f"{name} is not in {self._MANIFEST_TS}"
         return _evaluate_product(match.group(1))
 
     @pytest.mark.parametrize(
@@ -2644,7 +2837,7 @@ class TestTheHubConstants:
         assert python_value == self._declared(typescript_name)
 
     def test_the_empty_sha256_agrees_with_the_hub(self) -> None:
-        """長さ 0 の part が名乗る sha256 は 1 つに決まる（ADR 0109 決定 3）。"""
+        """The sha256 a zero-length part declares is uniquely determined (ADR 0109 decision 3)."""
         source = self._MANIFEST_TS.read_text(encoding="utf-8")
         match = re.search(r'^const EMPTY_SHA256 = "([0-9a-f]+)";', source, re.MULTILINE)
         assert match is not None
@@ -2653,10 +2846,11 @@ class TestTheHubConstants:
 
 
 class TestTheHubConstantReader:
-    """定数突合の読み手そのもの（`eval` を持ち込まない受理集合）。
+    """The reader of the constant comparison itself (an accepted set without `eval`).
 
-    TS 側が右辺の綴りを変えた日に「値が違う」ではなく Python の例外名で落ちると、読み手が
-    知りたいこと（どちらの値が動いたか）が診断から消える。
+    If the day the TS side changes the spelling of the right-hand side failed with a Python
+    exception name instead of "the values differ", what the reader wants to know (which value
+    moved) would vanish from the diagnostic.
     """
 
     @pytest.mark.parametrize(
@@ -2673,11 +2867,13 @@ class TestTheHubConstantReader:
 
 
 class TestTheRepositorySpelling:
-    """`<owner>/<name>` の各セグメントは hub の `REPO_SEGMENT_RE` と同じ許可リスト。
+    """Each segment of `<owner>/<name>` uses the same allow list as the hub's `REPO_SEGMENT_RE`.
 
-    hub は**先頭ドット**のセグメント（`.` / `..` そのものを含む）を拒否する — repo の `/` は
-    取得層で構造要素として扱われ percent-encode されないので、通すと SHA ピン外への traversal に
-    なる。Python 側が通すと、組み立ては緑なのに hub が manifest を開けない配布形が作れる。
+    The hub rejects segments with **a leading dot** (including `.` / `..` themselves) — the `/` of
+    a repo is treated as a structural element by the fetch layer and is not percent-encoded, so
+    letting it through would mean traversal outside the SHA pin. If the Python side let it
+    through, it could build a distribution whose assembly is green but whose manifest the hub
+    cannot open.
     """
 
     @pytest.mark.parametrize("repo", [".hidden/name", "owner/.name", "../name", "owner/.."])
@@ -2687,16 +2883,17 @@ class TestTheRepositorySpelling:
 
     @pytest.mark.parametrize("repo", ["hdae/karume.voices", "hdae/karume-voices_2", "_o/n"])
     def test_a_dot_after_the_first_character_is_accepted(self, repo: str) -> None:
-        """対照 — 先頭以外のドットは hub も受理する（拒否しすぎない）。"""
+        """Counterpart — a dot anywhere but first is accepted by the hub too (no over-rejection)."""
         assert resolve_repo(_PER_MODEL_REPO_PIPELINE, ["m"], repo) == repo
 
 
 class TestATrailingNewlineIsRefused:
-    """綴りの検査は末尾の改行付きを拒否する — hub（JS の `$`）と受理集合を揃える。
+    """The spelling checks reject a trailing newline — aligning the accepted set with the hub (JS
+    `$`).
 
-    Python の `$` は末尾の改行の直前でも一致するので、`^…$` を `.match` で引くと
-    `'owner/name\\n'` が通る。hub は拒否するので、組み立ては緑なのに hub が開けない
-    manifest になる。
+    Python's `$` also matches right before a trailing newline, so looking up `^…$` with `.match`
+    lets `'owner/name\\n'` through. The hub rejects it, so assembly would be green while the hub
+    cannot open the manifest.
     """
 
     def test_a_repository_with_a_trailing_newline_is_refused(self) -> None:
@@ -2733,7 +2930,8 @@ class TestATrailingNewlineIsRefused:
             dist.assert_external_ref("test", {**ref, field: value})
 
     def test_the_same_reference_without_the_newline_is_accepted(self) -> None:
-        """対照 — 改行を除いた同じ綴りは通る（拒否の理由が改行だけであることの確認）。"""
+        """Counterpart — the same spelling without the newline passes (confirms the newline is the
+        only reason for the rejection)."""
         dist.assert_external_ref(
             "test",
             {

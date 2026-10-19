@@ -1,10 +1,13 @@
-"""配布形を据える 3 段（`karume.publish`）— 書く → 読み直して検証 → 据え替え。
+"""The three steps that put a distribution in place (`karume.publish`) — write → read back and
+verify → swap into place.
 
-ここが固定するのは**据え替えの規律**そのもの（原子性・後始末・読み直し検証の検出力）で、
-容器のバイト列の規則は `test_container.py`、export の一本道は `test_pipeline.py` の担当。
+What this file pins is **the discipline of the swap** itself (atomicity, cleanup, the detection
+power of the read-back verification); the byte rules of the container belong to
+`test_container.py`, the end-to-end export path to `test_pipeline.py`.
 
-故障注入は「書き出しの途中で落とす」「据え替えの rename を落とす」「渡した束縛だけを壊す」の
-3 系統。どれも**呼び出しが書いていない現物**（前回の成果物）が巻き添えにならないことまで見る。
+Fault injection comes in three kinds: "fail partway through writing", "fail the rename of the
+swap" and "break only the passed binding". Each also checks that **files the call did not write**
+(the previous artifacts) are not taken down with it.
 """
 
 from __future__ import annotations
@@ -25,14 +28,14 @@ from karume.emit import FixedQuantizedWeight, StoredModel, stored_model
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.publish import PublishError, publish_container
 
-#: 前回の成果物の目印（`krg` の中身は読まないので、バイト列は何でもよい）。
+#: The marker of the previous artifact (the content of the `krg` is not read, so any bytes do).
 SENTINEL = b"previous"
 
 GRAPH_NAME = "publish"
 
 
 def material(storage: str = "i8") -> StoredModel:
-    """合成の部品 1 つを `publish_container` へ渡せる 3 点へ落とす。"""
+    """Turns one synthetic component into the three pieces `publish_container` accepts."""
     graph, tensors, scales, overrides = fixture_spec("publish", storage)
     return stored_model(
         graph,
@@ -58,13 +61,13 @@ def publish_material(
 
 
 class _Exploding(Mapping[str, Buffer]):
-    """引かれた瞬間に落ちるテンソルの口（書き出しの途中で落ちる形を作る）。"""
+    """A tensor source that fails the moment it is read (makes writing fail partway through)."""
 
     def __init__(self, inner: Mapping[str, Buffer]) -> None:
         self._inner = inner
 
     def __getitem__(self, key: str) -> Buffer:
-        raise OSError(f"実体を読めない: {key}")
+        raise OSError(f"cannot read the data: {key}")
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._inner)
@@ -74,10 +77,10 @@ class _Exploding(Mapping[str, Buffer]):
 
 
 class TestTheGraphFileIsPlacedAtomically:
-    """`krg` も `krm` と同じ 3 段（一時名 → `os.replace`）を通る。
+    """The `krg` goes through the same three steps as the `krm` (temporary name → `os.replace`).
 
-    最終名へ直接書くと、途中で落ちた回に**切り詰められた `krg`** が最終名に残る（プロセスの
-    強制終了では例外経路の後始末すら走らない）。
+    Writing straight to the final name leaves **a truncated `krg`** under the final name when a run
+    fails partway (a forced process kill does not even run the cleanup of the exception path).
     """
 
     def test_a_failed_swap_leaves_the_previous_graph_file_untouched(
@@ -89,21 +92,22 @@ class TestTheGraphFileIsPlacedAtomically:
 
         def failing(src: object, dst: object) -> None:
             if Path(str(dst)) == graph_path:
-                raise OSError("据え替えに失敗した")
+                raise OSError("the swap failed")
             real(src, dst)  # type: ignore[arg-type]
 
         monkeypatch.setattr(publish.os, "replace", failing)
 
-        with pytest.raises(OSError, match="据え替えに失敗した"):
+        with pytest.raises(OSError, match="the swap failed"):
             publish_material(tmp_path, material(), graph_path=graph_path)
 
-        # 最終名へ直接書いていれば、ここで前回のバイト列は既に上書きされている。
+        # Had it written straight to the final name, the previous bytes would be overwritten by now.
         assert graph_path.read_bytes() == SENTINEL
-        # 一時名（`.partial`）の残骸も残さない。
+        # No leftover temporary name (`.partial`) either.
         assert sorted(entry.name for entry in tmp_path.iterdir()) == ["model.krg"]
 
     def test_a_successful_publish_replaces_the_graph_file(self, tmp_path: Path) -> None:
-        """対照 — 通った回は新しい `krg` が据わる（上の門が「常に消さない」ではない）。"""
+        """Counterpart — a run that passes puts the new `krg` in place (the check above is not
+        "never removes")."""
         graph_path = tmp_path / "model.krg"
         graph_path.write_bytes(SENTINEL)
 
@@ -114,10 +118,11 @@ class TestTheGraphFileIsPlacedAtomically:
 
 
 class TestTheCleanupTouchesOnlyWhatItWrote:
-    """例外経路が消すのは**この呼び出しが据えた現物**だけ。
+    """The exception path removes only **the files this call put in place**.
 
-    `graph_path` を無条件に消すと、書き出しが `krg` を抜く前に落ちた回に前回の `krg` が
-    道連れになる — 自分が触っていないファイルを消すのは後始末ではなく破壊。
+    Removing `graph_path` unconditionally would take the previous `krg` down with it when writing
+    fails before the `krg` is extracted — removing a file you did not touch is destruction, not
+    cleanup.
     """
 
     def test_a_failure_before_the_graph_is_extracted_keeps_the_previous_graph_file(
@@ -127,7 +132,7 @@ class TestTheCleanupTouchesOnlyWhatItWrote:
         graph_path.write_bytes(SENTINEL)
         stored = material()
 
-        with pytest.raises(OSError, match="実体を読めない"):
+        with pytest.raises(OSError, match="cannot read the data"):
             publish_container(
                 tmp_path / "model.krm",
                 stored.graph,
@@ -143,18 +148,20 @@ class TestTheCleanupTouchesOnlyWhatItWrote:
 
 
 class TestTheScaleAgreement:
-    """渡した束縛と書いた容器の供給が **scale の有無**で食い違ったら落とす。
+    """Fails when the passed binding and the supply of the written container disagree on **whether
+    there is a scale**.
 
-    片方だけ `None` を素通しすると、「宣言 i4 / 実体 i8」の相方（scale を持つはずの席が
-    scale 無しで据わる）がこの門を抜ける。被験体は**渡す束縛表**だけを壊した組で、書いた容器
-    そのものは正しい — 読み直し検証以外に検出器が無い形。
+    Passing `None` on one side only would let the counterpart of "declared i4 / actual i8" (a slot
+    that should carry a scale put in place without one) through this check. The subject is a set
+    where only **the binding table passed in** is broken, while the written container itself is
+    correct — a form with no detector other than the read-back verification.
     """
 
     def _quantized_key(self, stored: StoredModel) -> str:
         keys = sorted(
             key for key, encoding in stored.bindings.items() if encoding.scale_key is not None
         )
-        assert keys, "i8 の合成に量子化席が 1 つも無い"
+        assert keys, "the i8 synthetic model has no quantized slot"
         return keys[0]
 
     def test_a_binding_without_the_scale_key_fails_loudly(self, tmp_path: Path) -> None:
@@ -167,7 +174,7 @@ class TestTheScaleAgreement:
             publish._assert_payloads_match(read_back, bound, doctored, stored.tensors)
 
     def test_the_matching_binding_passes(self, tmp_path: Path) -> None:
-        """対照 — 束縛が合っていれば通る（上の門が「常に落ちる」ではない）。"""
+        """Counterpart — a matching binding passes (the check above is not "always fails")."""
         stored = material("i8")
         read_back, bound = _published(tmp_path, stored)
 
@@ -177,17 +184,19 @@ class TestTheScaleAgreement:
 
 
 def _published(tmp_path: Path, stored: StoredModel):
-    """合成の部品を据え、読み直した容器と合流結果を返す（門の単体試験の土台）。"""
+    """Puts the synthetic component in place and returns the read-back container and the merge
+    result (the base of the unit tests of the checks)."""
     result = publish_material(tmp_path, stored)
     read_back = publish.read_container(list(result.parts))
     return read_back, publish.bind_graphs(read_back.graph, read_back.model)[GRAPH_NAME]
 
 
 class TestThePayloadDigest:
-    """検証 1 の本体: 書いた payload の sha256 を、渡した実体と突き合わせる。
+    """The core of verification 1: compares the sha256 of the written payload with the passed data.
 
-    被験体は**渡した実体**だけを 1 バイト壊した組（書いた容器は正しい）— 書き手が 2 度引く
-    `Mapping` から違うバイト列が来た形と同じで、読み直し検証以外に検出器が無い。
+    The subject is a set where only **the passed data** is broken by one byte (the written
+    container is correct) — the same as different bytes coming from a `Mapping` the writer reads
+    twice, with no detector other than the read-back verification.
     """
 
     @staticmethod
@@ -227,9 +236,11 @@ class TestThePayloadDigest:
 
 
 class TestTheAssetAgreement:
-    """検証 2: 書いた資産を、渡した宣言（役割・論理長）と payload に突き合わせる。
+    """Verification 2: compares the written assets with the passed declaration (role, logical
+    length) and payload.
 
-    `rope_base` は 37 バイト（0x00 の詰め物 3 バイトが要る奇数長）なので、詰め物の分岐も踏める。
+    `rope_base` is 37 bytes (an odd length that needs 3 bytes of 0x00 padding), so the padding
+    branch is exercised too.
     """
 
     @staticmethod
@@ -247,7 +258,8 @@ class TestTheAssetAgreement:
         return publish.read_container(list(result.parts))
 
     def test_the_passed_assets_agree_with_the_written_ones(self, tmp_path: Path) -> None:
-        """対照 — 正しい資産なら突き合わせた本数が返る（下の門が「常に落ちる」ではない）。"""
+        """Counterpart — correct assets return the number compared (the checks below are not "always
+        fail")."""
         read_back = self._published_with_assets(tmp_path)
 
         assert publish._assert_assets_match(read_back, split_assets()) == 2
@@ -276,7 +288,8 @@ class TestTheAssetAgreement:
                 "Asset 'rope_base': payload differs from the passed bytes",
             ),
             (
-                # 書き手へ渡した回と長さが変わった呼び出し（引かれるたびに同じバイト列 MUST）。
+                # A call whose length differs from the one passed to the writer (each read MUST
+                # return the same bytes).
                 lambda assets: {
                     "rope_base": assets["rope_base"]._replace(
                         payload=lambda: bytes(assets["rope_base"].payload) + b"\x00"
@@ -317,10 +330,11 @@ class TestTheAssetAgreement:
 
 
 def ternary_material(packed: bytes) -> StoredModel:
-    """`ternary` を宣言した 2 行 × 16 要素（1 行 4 バイト）の部品。
+    """A component of 2 rows × 16 elements (4 bytes per row) that declares `ternary`.
 
-    三値の量子化器はまだ無い（段 6）ので、i2 の固定重みを通し、束縛の codec だけを `ternary` へ
-    差し替える（値の詰め方と scale は `int2-off` と同じ — container-v1 §6.3）。
+    There is no ternary quantizer yet (step 6 of ADR 0108), so fixed i2 weights go through and
+    only the codec of the binding is swapped to `ternary` (the packing and the scale are the same
+    as `int2-off` — container-v1 §6.3).
     """
     graph = IrGraph(
         symbols=[],
@@ -347,15 +361,16 @@ def ternary_material(packed: bytes) -> StoredModel:
     return replace(stored, bindings=bindings)
 
 
-#: 全 2 bit コードが {1, 2, 3} の 2 行ぶん（0x6D = 01 10 11 01 など）。
+#: Two rows whose 2-bit codes are all in {1, 2, 3} (0x6D = 01 10 11 01 and so on).
 TERNARY_PACKED = bytes([0x6D, 0xB6, 0xDB, 0x79] * 2)
 
 
 class TestTheTernaryCodes:
-    """検証 4: `ternary` の payload にコード 0 があれば据えない（container-v1 §6.3）。
+    """Verification 4: a `ternary` payload with a code 0 is not put in place (container-v1 §6.3).
 
-    TS の読み手はロード時に同じ検査で落とすので、ここが無いと「書けて据わったが、利用者の
-    `openContainer` で初めて落ちる」容器が配布形になる。
+    The TS reader fails on the same check at load time, so without this a container that "was
+    written and put in place but fails only in the user's `openContainer`" would become a
+    distribution.
     """
 
     def test_a_payload_whose_codes_are_all_in_1_to_3_is_placed(self, tmp_path: Path) -> None:

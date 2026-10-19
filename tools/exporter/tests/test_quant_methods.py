@@ -1,8 +1,10 @@
-"""測定専用の丸め方式（FP4 / NF4 / MXFP4 / k-means codebook）— 格納経路は持たない。
+"""Measurement-only rounding methods (FP4 / NF4 / MXFP4 / k-means codebook) — they have no
+storage path.
 
-どの方式も見るのは 3 点: ①丸めた重みが**表 × scale の表現可能集合**に載っていること
-②同一入力 → **ビット同一出力**（k-means の初期化まで決定的・seed に依存しない）
-③対象選択が `quantize` と**同じ 1 本**（include / op_types / 対象 0 本 / 整除違反）。
+Every method is checked on 3 points: ① the rounded weights lie on **the representable set of
+table × scale** ② same input → **bit-identical output** (deterministic down to the k-means
+initialization, independent of the seed) ③ target selection is **the same single path** as
+`quantize` (include / op_types / zero targets / divisibility violation).
 """
 
 from __future__ import annotations
@@ -36,14 +38,15 @@ from karume.quantize import (
     iter_quant_targets,
 )
 
-#: 方式テストの group 長（フィクスチャの in 軸 16 / 32 を割り切る短さ — 格納側の受理集合
-#: 「2 冪かつ ≥ 16」は `verify.py` の規則で、丸めそのものに下限は無い）。
+#: The group length of the method tests (short enough to divide the fixtures' in axes 16 / 32 —
+#: the storage side's accepted set "a power of 2 and ≥ 16" is a rule of `verify.py`; the rounding
+#: itself has no lower bound).
 GROUP = 8
 
 
 class Layers(nn.Module):
-    """`QUANT_MODULE_TYPES` の全種 + 対象外（norm / 生 Parameter）— **平坦化後の in 軸が全部
-    8 の倍数**。"""
+    """Every kind in `QUANT_MODULE_TYPES` + non-targets (norm / bare Parameter) — **every in axis
+    is a multiple of 8 after flattening**."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -64,16 +67,18 @@ def layers(seed: int = 0) -> Layers:
 
 
 def unit_group_layers(seed: int = 0) -> nn.Module:
-    """全 group の absmax が**厳密に 1.0**の模型（`shared` の表を割り算なしで見るための形）。
+    """A model whose every group has an absmax of **exactly 1.0** (a shape for looking at the
+    `shared` table without a division).
 
-    absmax 正規化の scale がちょうど 1.0 になるので、丸め済みの重みの値集合が**そのまま
-    共有表**になる（`w/s` の割り戻しを挟むと 1ulp の誤差が入って厳密比較ができない）。
+    The scale of the absmax normalization is exactly 1.0, so the value set of the rounded weights
+    **is the shared table as is** (dividing back by `w/s` would add a 1 ulp error and rule out an
+    exact comparison).
     """
     torch.manual_seed(seed)
     model = nn.Sequential(nn.Linear(16, 3), nn.Linear(32, 2))
     with torch.no_grad():
         for module in model:
-            grouped = grouped_view(module.weight, GROUP, "検査")
+            grouped = grouped_view(module.weight, GROUP, "test")
             module.weight.copy_(
                 (grouped / grouped.abs().amax(dim=-1, keepdim=True)).reshape(module.weight.shape)
             )
@@ -81,18 +86,21 @@ def unit_group_layers(seed: int = 0) -> nn.Module:
 
 
 def targets(model: nn.Module) -> list[tuple[str, torch.Tensor, int]]:
-    """検査側でも対象を `quantize` の列挙から引く（対象の綴りをテストへ写さない）。"""
+    """The test side also takes its targets from the `quantize` enumeration (the target spelling is
+    not copied into the tests)."""
     return list(iter_quant_targets(model, QUANT_MODULE_TYPES, None))
 
 
 def representable(weight: torch.Tensor, levels: torch.Tensor, scale: torch.Tensor) -> bool:
-    """`weight` の全要素が group ごとの表現可能集合（`levels × scale`）に載っているか。"""
-    grouped = grouped_view(weight, group_size_of(weight, scale), "検査")
+    """Whether every element of `weight` lies on the per-group representable set
+    (`levels × scale`)."""
+    grouped = grouped_view(weight, group_size_of(weight, scale), "test")
     representable_values = scale.unsqueeze(-1).unsqueeze(-1) * levels
     return bool((grouped.unsqueeze(-1) == representable_values).any(dim=-1).all())
 
 
-#: 固定表 × group scale の 3 方式（表と scale の作り方だけが違う）。
+#: The 3 methods of fixed table × group scale (they differ only in how the table and the scale
+#: are made).
 FIXED_TABLE_METHODS = (
     pytest.param(fake_quant_fp4, FP4_E2M1_LEVELS, False, id="fp4"),
     pytest.param(fake_quant_nf4, NF4_LEVELS, False, id="nf4"),
@@ -102,15 +110,17 @@ FIXED_TABLE_METHODS = (
 
 class TestLevelTables:
     def test_fp4_is_the_e2m1_value_set(self):
-        """符号 1 / 指数 2 / 仮数 1 bit の値集合。±0 が同値なので**相異なる値は 15**。"""
+        """The value set of 1 sign / 2 exponent / 1 mantissa bit. ±0 are equal, so **there are 15
+        distinct values**."""
         table = levels_tensor(FP4_E2M1_LEVELS)
 
         assert table.numel() == 15
         assert float(table.abs().max()) == 6.0
-        assert torch.equal(table, -table.flip(0))  # 0 対称
+        assert torch.equal(table, -table.flip(0))  # symmetric about 0
 
     def test_nf4_is_the_qlora_table(self):
-        """QLoRA の 16 分位値 — 0.0 と ±1.0 を厳密に含み、正負で非対称。"""
+        """The 16 quantiles of QLoRA — contains 0.0 and ±1.0 exactly, asymmetric between positive
+        and negative."""
         table = levels_tensor(NF4_LEVELS)
 
         assert table.numel() == 16
@@ -120,7 +130,8 @@ class TestLevelTables:
         assert not torch.equal(table, -table.flip(0))
 
     def test_a_table_that_is_not_ascending_fails_loudly(self):
-        """昇順でない表は二分探索が黙って別の準位を返す（例外なしで最近傍でなくなる）。"""
+        """With a table that is not ascending, the binary search silently returns another level (no
+        longer the nearest, without an exception)."""
         with pytest.raises(QuantizeError, match="is not ascending"):
             levels_tensor((0.0, 1.0, 0.5))
 
@@ -134,13 +145,14 @@ class TestRoundToLevels:
         assert torch.equal(rounded, torch.tensor([-1.0, 0.0, 0.0, 2.0, 2.0]))
 
     def test_a_value_on_the_midpoint_goes_down(self):
-        """同点の向きを 1 つに決めておく（決定性のため — 偶数丸めではない）。"""
+        """Ties go one fixed way (for determinism — not round-half-to-even)."""
         table = levels_tensor((0.0, 1.0))
 
         assert float(round_to_levels(torch.tensor([0.5]), table)) == 0.0
 
     def test_values_outside_the_table_saturate(self):
-        """表の外は両端へ飽和する（MXFP4 の block 飽和もこの経路）。"""
+        """Values outside the table saturate to the ends (MXFP4's block saturation takes this path
+        too)."""
         table = levels_tensor((-1.0, 0.0, 1.0))
 
         rounded = round_to_levels(torch.tensor([-9.0, 9.0]), table)
@@ -151,10 +163,11 @@ class TestRoundToLevels:
 class TestFixedTableMethods:
     @pytest.mark.parametrize(("method", "levels", "power_of_two"), FIXED_TABLE_METHODS)
     def test_every_weight_lands_on_the_representable_set(self, method, levels, power_of_two):
-        """丸め後の全要素が「表 × その group の scale」に載る。
+        """Every element after rounding lies on "table × the scale of its group".
 
-        scale は**丸める前の重み**から引き直す（丸め済みから引くと、実装が使った scale と
-        同じ値になる保証を前提にしてしまい、検査が自分自身を確かめるだけになる）。
+        The scale is derived again from **the weights before rounding** (deriving it from the
+        rounded weights would presuppose that it equals the scale the implementation used, and
+        the check would only confirm itself).
         """
         model = layers()
         table = levels_tensor(levels)
@@ -173,7 +186,7 @@ class TestFixedTableMethods:
 
     @pytest.mark.parametrize(("method", "levels", "power_of_two"), FIXED_TABLE_METHODS)
     def test_the_same_input_gives_a_bit_identical_result(self, method, levels, power_of_two):
-        """同一入力 → ビット同一（乱数状態に依存しない）。"""
+        """Same input → bit-identical (independent of the RNG state)."""
         model = layers()
         twin = copy.deepcopy(model)
 
@@ -186,7 +199,8 @@ class TestFixedTableMethods:
 
     @pytest.mark.parametrize(("method", "levels", "power_of_two"), FIXED_TABLE_METHODS)
     def test_reapplying_the_round_is_bit_identical(self, method, levels, power_of_two):
-        """冪等（group の amax 要素が表の端へ乗るので scale が不動点になる — 実測）。"""
+        """Idempotent (the group's amax element lands on the table's end, so the scale is a fixed
+        point — observed)."""
         model = layers()
         method(model, group_size=GROUP, op_types=QUANT_MODULE_TYPES)
         snapshot = {name: weight.detach().clone() for name, weight in model.named_parameters()}
@@ -208,7 +222,8 @@ class TestFixedTableMethods:
 
     @pytest.mark.parametrize(("method", "levels", "power_of_two"), FIXED_TABLE_METHODS)
     def test_no_target_fails_loudly(self, method, levels, power_of_two):
-        """「方式を指定したのに 0 本」を沈黙させない（`quantize` 側と同じ常設診断）。"""
+        """Zero targets with a method specified is not silenced (the same permanent diagnostic as on
+        the `quantize` side)."""
         with pytest.raises(QuantizeError, match="there is no weight"):
             method(nn.LayerNorm(3), group_size=GROUP)
         with pytest.raises(QuantizeError, match="there is no weight"):
@@ -218,20 +233,22 @@ class TestFixedTableMethods:
     def test_an_axis_the_group_size_does_not_divide_fails_loudly(
         self, method, levels, power_of_two
     ):
-        """端数 group を作らない（`quantize.grouped_view` の共有 — ADR 0069 決定 2 と同じ流儀）。"""
+        """No remainder group (shared with `quantize.grouped_view` — the same rule as ADR 0069
+        decision 2)."""
         with pytest.raises(QuantizeError, match="is not divisible"):
             method(nn.Linear(20, 3), group_size=GROUP)
 
     @pytest.mark.parametrize(("method", "levels", "power_of_two"), FIXED_TABLE_METHODS)
     def test_the_target_set_is_shared_with_the_storage_path(self, method, levels, power_of_two):
-        """対象選択は `quantize.iter_quant_targets` の共有 — 既定 linear のみ・全種まで広がる。"""
+        """Target selection is shared with `quantize.iter_quant_targets` — linear only by default,
+        widening to every kind."""
         assert method(layers(), group_size=GROUP).modules == 2
         assert method(layers(), group_size=GROUP, op_types=QUANT_MODULE_TYPES).modules == 7
 
 
 class TestMxfp4Scale:
     def test_the_scale_is_a_power_of_two(self):
-        """OCP MX の共有 scale は 2 のべき（E8M0 に載る形）。"""
+        """The shared scale of OCP MX is a power of 2 (a shape that fits E8M0)."""
         rows = channel_rows(layers().dense.weight, 0)
 
         scale = group_power_of_two_scale(rows, GROUP)
@@ -240,18 +257,21 @@ class TestMxfp4Scale:
         assert torch.equal(mantissa, torch.full_like(mantissa, 0.5))
 
     def test_the_group_amax_is_not_restored_exactly(self):
-        """absmax 版との差 — amax は 2 のべきへ切り下げられるので厳密復元されず、**超えうる**。
+        """The difference from the absmax version — amax is rounded down to a power of 2, so it is
+        not restored exactly and **can be exceeded**.
 
-        代わりに scale の乗除算が厳密になる（{@link TestFixedTableMethods} の冪等が真に成立）。
+        In exchange, multiplying and dividing by the scale are exact (the idempotence of
+        {@link TestFixedTableMethods} truly holds).
         """
         model = nn.Linear(16, 1)
         with torch.no_grad():
             model.weight.copy_(torch.full((1, 16), 0.1))
-            model.weight[0, 0] = 5.5  # 2² と 2³ の間 = 切り下げで scale 1.0・格子の外へ出る値
+            # Between 2² and 2³ = scale 1.0 after rounding down; a value off the grid.
+            model.weight[0, 0] = 5.5
 
         fake_quant_mxfp4(model, group_size=16)
 
-        assert float(model.weight[0, 0].detach()) == 6.0  # 5.5 → 最近傍は 6.0（amax 超え）
+        assert float(model.weight[0, 0].detach()) == 6.0  # 5.5 → nearest is 6.0 (above amax)
 
 
 class TestKMeansCodebook:
@@ -265,7 +285,8 @@ class TestKMeansCodebook:
         assert int(torch.unique(model.wide.weight).numel()) <= 16
 
     def test_a_per_channel_table_is_fitted_row_by_row(self):
-        """行ごとに別の表（= 行の値集合が 16 以下・行をまたぐと 16 を超える）。"""
+        """A separate table per row (= each row has at most 16 values; across rows there are more
+        than 16)."""
         model = layers()
 
         fake_quant_kmeans(model, "per_channel", group_size=GROUP, op_types=QUANT_MODULE_TYPES)
@@ -276,7 +297,8 @@ class TestKMeansCodebook:
         assert int(torch.unique(rows).numel()) > 16
 
     def test_a_shared_table_spans_every_layer(self):
-        """層をまたいで 1 枚（正規化 scale が厳密に 1.0 の模型なので値集合がそのまま表）。"""
+        """One table across layers (the model's normalization scale is exactly 1.0, so the value set
+        is the table as is)."""
         model = unit_group_layers()
 
         fake_quant_kmeans(model, "shared", group_size=GROUP)
@@ -285,7 +307,8 @@ class TestKMeansCodebook:
         assert int(torch.unique(values).numel()) <= 16
 
     def test_a_per_tensor_table_is_not_shared_between_layers(self):
-        """`shared` の対（同じ模型で層ごとに表を張ると値集合が 16 を超える）。"""
+        """The counterpart of `shared` (with a table per layer on the same model, the value set
+        exceeds 16)."""
         model = unit_group_layers()
 
         fake_quant_kmeans(model, "per_tensor", group_size=GROUP)
@@ -295,7 +318,8 @@ class TestKMeansCodebook:
 
     @pytest.mark.parametrize("granularity", KMEANS_GRANULARITIES)
     def test_the_same_input_gives_a_bit_identical_result(self, granularity):
-        """MUST: 初期化まで決定的（分位点 + 固定反復）— seed を振っても結果が動かない。"""
+        """MUST: deterministic down to the initialization (quantiles + fixed iterations) — changing
+        the seed does not move the result."""
         model = layers()
         twin = copy.deepcopy(model)
 
@@ -336,12 +360,14 @@ class TestKMeansCodebook:
         )
 
     def test_an_axis_the_group_size_does_not_divide_fails_loudly_for_the_shared_table(self):
-        """group が効くのは `shared` だけ（表の粒度が group 正規化に乗る形）。"""
+        """The group applies only to `shared` (the table's granularity sits on the group
+        normalization)."""
         with pytest.raises(QuantizeError, match="is not divisible"):
             fake_quant_kmeans(nn.Linear(20, 3), "shared", group_size=GROUP)
 
     def test_a_strided_fit_is_deterministic(self):
-        """`fit_stride` は等間隔標本（乱数なし）— seed を振っても結果が動かない。"""
+        """`fit_stride` is evenly spaced sampling (no randomness) — changing the seed does not move
+        the result."""
         model = layers()
         twin = copy.deepcopy(model)
 
@@ -353,8 +379,9 @@ class TestKMeansCodebook:
         assert torch.equal(model.wide.weight, twin.wide.weight)
 
     def test_the_strided_fit_sees_only_the_sampled_values(self):
-        """対照（標本化が実際に効く）— 偶数添字 +1 / 奇数 −1 の重みで stride=2 の表は
-        +1 しか見ないので、適用後は全要素が +1 へ倒れる（全量 fit は ±1 を厳密復元する）。
+        """Control (the sampling really takes effect) — with weights of +1 at even indices / −1 at
+        odd ones, the stride=2 table sees only +1, so after applying it every element falls to +1
+        (the full fit restores ±1 exactly).
         """
 
         def alternating() -> nn.Linear:
@@ -375,7 +402,7 @@ class TestKMeansCodebook:
         assert torch.equal(sampled.weight, torch.ones(1, 32))
 
     def test_a_stride_on_a_granularity_without_a_concat_fit_fails_loudly(self):
-        """`fit_stride` は shared 専用 — 他粒度で黙って無視される形を作らない。"""
+        """`fit_stride` is for shared only — it is never silently ignored on another granularity."""
         with pytest.raises(QuantizeError, match="is for shared only"):
             fake_quant_kmeans(layers(), "per_tensor", group_size=GROUP, fit_stride=2)
 
@@ -390,14 +417,16 @@ class TestKMeansCodebook:
 
 class TestFitCodebook:
     def test_the_centroids_are_ascending(self):
-        """表は昇順 MUST（最近傍が中点の二分探索）。"""
+        """The table MUST be ascending (the nearest is found by a binary search over the
+        midpoints)."""
         codebook = fit_codebook(torch.randn(2, 512), levels=16, iterations=8)
 
         assert codebook.shape == (2, 16)
         assert bool(torch.all(codebook[:, 1:] > codebook[:, :-1]))
 
     def test_clearly_separated_clusters_are_found(self):
-        """恒真化の対 — 分位点初期化 + Lloyd が実際にクラスタへ寄る（表が入力に応じて動く）。"""
+        """The counterpart against a tautological test — quantile initialization + Lloyd really
+        moves to the clusters (the table moves with the input)."""
         values = torch.cat([torch.full((1, 64), -3.0), torch.full((1, 64), 5.0)], dim=1)
 
         codebook = fit_codebook(values, levels=2, iterations=8)

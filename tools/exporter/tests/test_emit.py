@@ -1,8 +1,10 @@
-"""配布形の格納変換。宣言（グラフ）と格納テンソルの対応が崩れたら 1 バイトも書かない。
+"""Storage conversion of the distribution. If the declaration (graph) and the stored tensors fall
+out of step, not a single byte is written.
 
-観測点は 2 つ: **commit した宣言**（`stored_model` の戻りのグラフ）と、**据えた容器**
-（block の payload と束縛表の codec）。器の物理形式そのものは `test_container.py`、
-宣言 shape を要する合流の規則は `test_verify_container.py` が持つ。
+There are two observation points: **the committed declaration** (the graph `stored_model` returns)
+and **the installed container** (the block payloads and the codecs of the binding table). The
+physical format of the container itself belongs to `test_container.py`, and the merge rules that
+need declared shapes to `test_verify_container.py`.
 """
 
 from __future__ import annotations
@@ -56,10 +58,10 @@ from karume.quantize import (
 )
 from karume.verify import ir_graph_from_container, verify_container
 
-#: 合成の出所（`--license` を落とした配布形は作らない — container-v1 §12）。
+#: Provenance of the synthetic model (no distribution without `--license` — container-v1 §12).
 PROVENANCE = Provenance(license="mit")
 
-#: 合成のグラフ名（容器は 1 本 1 グラフ — ADR 0109 決定 2）。
+#: Graph name of the synthetic model (one graph per container — ADR 0109 decision 2).
 GRAPH_NAME = "emit"
 
 
@@ -80,24 +82,26 @@ def sample_graph() -> tuple[IrGraph, dict[str, torch.Tensor]]:
 
 class TestRoundTrip:
     def test_the_container_supplies_the_tensor_key_and_carries_the_provenance(self, tmp_path):
-        """書いた容器を開いて合流まで通すと、グラフ 1 本の initializer がテンソルキーで供給され、
-        モデル記述に provenance が載る。"""
+        """Opening the written container and taking it through the merge supplies the one graph's
+        initializer by tensor key, and the model descriptor carries the provenance."""
         graph, tensors = sample_graph()
 
         path = write_component(tmp_path / "model.krm", graph, tensors)
 
         verified = bound(path)
         assert set(verified.graphs) == {GRAPH_NAME}
-        # v2 の initializer 名は**テンソルキー**（docs/ir-v2.md §13.1）。
+        # In v2 the initializer name is **the tensor key** (container-v1 §13.1).
         assert set(verified.graphs[GRAPH_NAME].supplies) == {"enc.w"}
         assert verified.read.model is not None
         assert verified.read.model.provenance == PROVENANCE
 
     def test_the_graph_read_back_from_the_file_is_the_written_declaration(self, tmp_path):
-        """全検証を通した容器の 2 文書から起こし直した宣言 = 書き手が commit した宣言。
+        """The declaration rebuilt from the two documents of a fully verified container = the
+        declaration the writer committed.
 
-        容器の文書は IR v2（initializer 名がテンソルキー — docs/ir-v2.md §13.1）なので、
-        グラフは v2 の文書どうしで、格納はテンソルキーごとの initializer 宣言で突き合わせる。
+        The container's documents are IR v2 (initializer names are tensor keys — container-v1
+        §13.1), so the graphs are compared as v2 documents and the storage per tensor key through
+        the initializer declarations.
         """
         graph, tensors = sample_graph()
 
@@ -127,19 +131,19 @@ class TestDeclarationAgreement:
 
 
 def rounded(*shape: int) -> torch.Tensor:
-    """f16 表現可能値へ丸めた乱数（= fake-quant 済みの重み）。"""
+    """Random values rounded to f16-representable values (= fake-quantized weights)."""
     return torch.randn(*shape).to(torch.float16).to(torch.float32)
 
 
 def weight_graph(
     *, share_weight: bool = False, unused: bool = False, output_weight: bool = False
 ) -> tuple[IrGraph, dict[str, torch.Tensor]]:
-    """linear（重み偶数要素）+ embedding（重み **奇数要素**）を持つグラフ。
+    """A graph with linear (even weight element count) + embedding (**odd** weight element count).
 
-    `share_weight` は linear の重みを elementwise でも消費する形（適格外になるはず）、
-    `unused` は誰も消費しない initializer を 1 本足す（同じく適格外）、
-    `output_weight` は linear の重みをそのままグラフ出力にする形（同じく適格外 —
-    ランタイムの readback は semantic f32 を仮定する）。
+    `share_weight` also consumes the linear weight in an elementwise op (should be ineligible),
+    `unused` adds one initializer nobody consumes (ineligible as well), and `output_weight` makes
+    the linear weight a graph output as is (ineligible as well — the runtime's readback assumes
+    semantic f32).
     """
     nodes = [
         IrNode(op="linear", ins=["x", "w", "b"], outs=["h"], attrs={}),
@@ -160,7 +164,8 @@ def weight_graph(
     tensors = {"enc.w": rounded(3, 4), "enc.b": rounded(3), "enc.emb": rounded(3, 5)}
     outputs = ["h", "e"]
     if share_weight:
-        # 同じテンソルを linear の重みと mul の被演算子の両方で使う（後者は f32 として読む）。
+        # The same tensor serves as the linear weight and as a mul operand (the latter reads it
+        # as f32).
         nodes.append(IrNode(op="mul", ins=["w", "w"], outs=["w2"], attrs={}))
         values["w2"] = IrValue(dtype="f32", shape=[3, 4])
         outputs.append("w2")
@@ -169,7 +174,8 @@ def weight_graph(
         values["dead"] = IrValue(dtype="f32", shape=[6])
         tensors["enc.dead"] = rounded(6)
     if output_weight:
-        # IR は initializer 名をそのままグラフ出力に書くことを許す（値は実行に依らない定数）。
+        # IR allows an initializer name as a graph output as is (the value is a constant that does
+        # not depend on execution).
         outputs.append("w")
     graph = IrGraph(
         symbols=["T"],
@@ -188,11 +194,13 @@ def weight_graph(
 def compressed_view(
     graph: IrGraph, dtypes: dict[str, str], *, group_size: int | None = None
 ) -> IrGraph:
-    """`write_model` がヘッダへ載せるはずの宣言ビュー（呼び手の graph は書き換わらない）。
+    """The declaration view `write_model` should commit to the container (the caller's graph is
+    not rewritten).
 
-    companion scale のキー規則（`karume.scale.<テンソルキー>`）は実装を呼ばずテスト側で
-    書き下す — 実装から引くと突合が恒真になる。`group_size` は i4 の宣言欄
-    （ADR 0069 決定 2）で、i8 / f16 の宣言には載らない。
+    The key rule of companion scales (`karume.scale.<tensor key>`) is spelled out on the test
+    side without calling the implementation — taking it from the implementation would make the
+    comparison tautological. `group_size` is a declaration field of i4 (ADR 0069 decision 2) and
+    does not appear in i8 / f16 declarations.
     """
     initializers = dict(graph.initializers)
     for name, dtype in dtypes.items():
@@ -208,8 +216,8 @@ def compressed_view(
 
 
 class TestEligibility:
-    """適格判定は `packages/runtime/src/runtime/plan.ts` の鏡像 —
-    ずれると VRAM 削減が黙って消える。
+    """The eligibility check mirrors `packages/runtime/src/runtime/plan.ts` —
+    if they drift, the VRAM saving silently disappears.
     """
 
     def test_only_weight_slots_are_eligible(self):
@@ -218,26 +226,27 @@ class TestEligibility:
         assert eligible_compressed_initializers(graph) == {"w", "emb"}
 
     def test_a_weight_consumed_elsewhere_is_disqualified(self):
-        """1 つでも重みスロット以外の消費があれば適格外（そちらは f32 として読む）。"""
+        """Any consumption outside a weight slot makes it ineligible (that consumer reads f32)."""
         graph, _ = weight_graph(share_weight=True)
 
         assert eligible_compressed_initializers(graph) == {"emb"}
 
     def test_an_unconsumed_initializer_is_disqualified(self):
-        """実行に使われないバイトを「GPU 常駐圧縮」と数えると診断が実態からずれる。"""
+        """Counting bytes no execution uses as "GPU-resident compression" skews the diagnostic."""
         graph, _ = weight_graph(unused=True)
 
         assert "dead" not in eligible_compressed_initializers(graph)
 
     def test_an_initializer_in_the_graph_outputs_is_disqualified(self):
-        """readback は semantic f32（4 バイト / 要素）を仮定して重みバッファから写す。
+        """readback copies from the weight buffer assuming semantic f32 (4 bytes / element).
 
-        圧縮のまま常駐させると copy が実バッファをはみ出して validation で落ちるか、
-        極小サイズではビット列の読み替えが黙って返る。
+        Kept resident compressed, the copy would overrun the real buffer and fail validation, or
+        at tiny sizes silently return reinterpreted bits.
         """
         graph, _ = weight_graph(output_weight=True)
 
-        # 失格は出力に載った名前だけ（同じグラフの embedding 表は適格のまま）
+        # Only the name in the outputs is disqualified (the embedding table of the same graph stays
+        # eligible)
         assert eligible_compressed_initializers(graph) == {"emb"}
 
 
@@ -247,20 +256,24 @@ class TestF16Storage:
 
         path = write_component(tmp_path / "model.krm", graph, tensors, weight_dtype="f16")
 
-        # 宣言の観測点はファイル側（`write_model` は呼び手の graph を書き換えない）。
+        # The declaration is observed on the file side (`write_model` does not rewrite the caller's
+        # graph).
         declared = written_graph(path).initializers
         assert declared["w"].storage.dtype == "f16"
         assert declared["emb"].storage.dtype == "f16"
-        # MUST: bias は常に f32（プロトタイプの f16 降格バグの根治形 — ADR 0006）。
+        # MUST: bias is always f32 (the root-cause fix of the prototype's f16 demotion bug —
+        # ADR 0006).
         assert declared["b"].storage.dtype == "f32"
         assert stored_layout(path, "enc.w") == "f16"
         assert stored_layout(path, "enc.b") == "f32"
 
     def test_a_weight_in_the_graph_outputs_is_not_stored_compressed(self, tmp_path):
-        """グラフ出力の重みは f32 のまま書く（ランタイム側の適格判定と対）。
+        """A weight among the graph outputs is written as f32 (the counterpart of the runtime's
+        eligibility check).
 
-        鏡像がずれると「exporter は f16 で書き、ランタイムは f32 として読み戻す」の
-        食い違いになり、ロードした瞬間に読めないモデルが配布形として通ってしまう。
+        If the mirror drifted, "the exporter writes f16 and the runtime reads it back as f32"
+        would disagree, and a model unreadable from the moment it loads would pass as a
+        distribution.
         """
         graph, tensors = weight_graph(output_weight=True)
 
@@ -291,10 +304,11 @@ class TestF16Storage:
         assert torch.equal(stored, expected)
 
     def test_an_unrounded_eligible_weight_fails_loudly(self, tmp_path):
-        """丸めの掛け忘れ / 掛ける順序の誤りは黙って通さない（ADR 0006）。
+        """A forgotten rounding / a wrong rounding order is not let through silently (ADR 0006).
 
-        通すと「golden は元値・実行は丸め値」になり、E2E の差が量子化誤差と実装誤差の
-        合成になる — tolerance を緩める方向にしか効かないので、緑のまま検出力だけが落ちる。
+        Letting it through gives "golden on the original values, execution on rounded values",
+        and the E2E difference becomes a mix of quantization error and implementation error — it
+        only pushes towards looser tolerances, so the tests stay green while losing their power.
         """
         graph, tensors = weight_graph()
         tensors["enc.w"] = torch.full((3, 4), 1.0 / 3.0)
@@ -303,7 +317,8 @@ class TestF16Storage:
             write_model(tmp_path / "model.krm", graph, tensors, weight_dtype="f16")
 
     def test_a_graph_without_eligible_weights_fails_loudly(self, tmp_path):
-        """「f16 指定なのに適格 0MB」を沈黙させない（ADR 0006 の常設診断の書き出し側）。"""
+        """Does not silence "f16 requested but 0 MB eligible" (the writer side of ADR 0006's
+        standing diagnostic)."""
         graph, tensors = sample_graph()
 
         with pytest.raises(EmitError, match="Not a single compressed storage was planned"):
@@ -312,7 +327,8 @@ class TestF16Storage:
     def test_an_unknown_weight_dtype_fails_loudly(self, tmp_path):
         graph, tensors = weight_graph()
 
-        # i2 は IR の語彙にはあるが書き手が無い（固定 packed の QAT 系列だけが持つ — ADR 0097）。
+        # i2 is in the IR vocabulary but has no writer (only fixed packed QAT series carry it —
+        # ADR 0097).
         with pytest.raises(EmitError, match="cannot be written"):
             write_model(tmp_path / "model.krm", graph, tensors, weight_dtype="i2")
 
@@ -320,7 +336,8 @@ class TestF16Storage:
         graph, tensors = weight_graph()
 
         path = write_component(tmp_path / "model.krm", graph, tensors, weight_dtype="f16")
-        # 内訳は**書いたファイルの宣言**から数える（呼び手の graph は圧縮宣言を持たない）。
+        # The breakdown counts from **the declaration of the written file** (the caller's graph
+        # holds no compressed declarations).
         breakdown = storage_breakdown(written_graph(path))
 
         assert breakdown.compressed_tensors == 2
@@ -329,11 +346,12 @@ class TestF16Storage:
         assert breakdown.plain_bytes == 3 * 4
 
     def test_the_breakdown_counts_a_declared_bf16_initializer(self):
-        """内訳は宣言だけから数える — 書き手を通さない手組みグラフの bf16 も数えられる。
+        """The breakdown counts from the declaration alone — it can count bf16 in a hand-built
+        graph that never went through the writer.
 
-        内訳はバイト数を数えるだけの層なので、**読めるグラフを数えられない**状態
-        （語彙にある dtype で KeyError）を作らない。書き手が書いた bf16 の内訳は
-        `TestBf16Storage` が見る。
+        The breakdown is a layer that only counts bytes, so it must not reach a state where it
+        **cannot count a readable graph** (a KeyError on a dtype in the vocabulary). The breakdown
+        of bf16 written by the writer is checked by `TestBf16Storage`.
         """
         graph, _ = weight_graph()
         graph.initializers["w"] = IrInitializer(tensor="enc.w", storage=IrStorage(dtype="bf16"))
@@ -347,10 +365,11 @@ class TestF16Storage:
         assert breakdown.scale_bytes == 0
 
     def test_the_breakdown_does_not_count_a_shared_initializer(self):
-        """共有宣言（ADR 0096 段 2）は貸し手のバイトを借りるだけで、この容器に 1 バイトも書かない。
+        """A shared declaration (ADR 0096 stage 2) only borrows the lender's bytes and writes not a
+        single byte into this container.
 
-        内訳が数えるのは「この容器に書くバイト」— 貸し手の重みが載ると常設診断（ADR 0006）が
-        実態からずれる。
+        The breakdown counts "the bytes written into this container" — counting the lender's
+        weights would skew the standing diagnostic (ADR 0006).
         """
         graph = IrGraph(
             symbols=[],
@@ -383,9 +402,9 @@ class TestF16Storage:
 
 
 def bf16_weight_graph(**kwargs) -> tuple[IrGraph, dict[str, torch.Tensor]]:
-    """`weight_graph` を bf16 の fake-quant 済みにしたもの。
+    """`weight_graph` fake-quantized to bf16.
 
-    `weight_graph` の値は f16 で丸めてあり、bf16 では表現できない。
+    The values of `weight_graph` are rounded to f16 and cannot be represented in bf16.
     """
     graph, tensors = weight_graph(**kwargs)
     return graph, {
@@ -394,7 +413,7 @@ def bf16_weight_graph(**kwargs) -> tuple[IrGraph, dict[str, torch.Tensor]]:
 
 
 class TestBf16Storage:
-    """bf16 格納（ADR 0131）— 適格規則と書き出しの骨格は f16 と同じ。"""
+    """bf16 storage (ADR 0131) — the eligibility rules and the writing skeleton are those of f16."""
 
     def test_eligible_weights_are_stored_as_bf16_and_bias_stays_f32(self, tmp_path):
         graph, tensors = bf16_weight_graph()
@@ -412,9 +431,9 @@ class TestBf16Storage:
         assert written_graph(path).to_dict() == expected.to_dict()
 
     def test_the_eligibility_is_the_same_as_f16(self, tmp_path):
-        """適格集合は f16 と同じ（i4 のような絞り込みは無い）。
+        """The eligible set is the same as for f16 (no narrowing like i4's).
 
-        グラフ出力に載った重みは f16 と同じく f32 のまま書く。
+        A weight among the graph outputs is written as f32, as with f16.
         """
         graph, tensors = bf16_weight_graph(output_weight=True)
 
@@ -424,10 +443,10 @@ class TestBf16Storage:
 
     @pytest.mark.parametrize("key", ["enc.w", "enc.emb"])
     def test_the_payload_is_the_upper_half_of_each_f32(self, tmp_path, key):
-        """payload = bf16 のリトルエンディアン 2 バイト / 要素（奇数要素の `enc.emb` も含む）。
+        """payload = little-endian bf16, 2 bytes / element (including the odd-sized `enc.emb`).
 
-        比較の基準は f32 のビット列の上位 16 bit を直接切り出したもの — `to(bfloat16)` を
-        基準にすると書き手と同じ変換をなぞるだけになる。
+        The reference is the upper 16 bits cut directly from the f32 bits — using
+        `to(bfloat16)` as the reference would only retrace the writer's conversion.
         """
         graph, tensors = bf16_weight_graph()
         bits = tensors[key].reshape(-1).view(torch.int32)
@@ -449,9 +468,11 @@ class TestBf16Storage:
         assert torch.equal(stored.view(torch.int32), expected.view(torch.int32))
 
     def test_an_f16_exact_but_not_bf16_exact_weight_fails_loudly(self, tmp_path):
-        """f16 の丸め済みは bf16 の丸め済みではない — 格納を取り違えた丸めは黙って通さない。
+        """Rounded for f16 is not rounded for bf16 — rounding for the wrong storage is not let
+        through silently.
 
-        `1 + 2**-9` は f16（仮数 10 bit）では厳密・bf16（仮数 7 bit）では表現できない。
+        `1 + 2**-9` is exact in f16 (10-bit mantissa) and not representable in bf16 (7-bit
+        mantissa).
         """
         graph, tensors = bf16_weight_graph()
         tensors["enc.w"] = torch.full((3, 4), 1 + 2**-9)
@@ -473,10 +494,10 @@ class TestBf16Storage:
 
 
 def int8_weight_graph() -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-    """`weight_graph` を i8 の fake-quant 済みにしたもの（グラフ / テンソル / scale 台帳）。
+    """`weight_graph` fake-quantized to i8 (graph / tensors / scale ledger).
 
-    `enc.w` は linear の重み（軸 0・`[3,4]`）、`enc.emb` は embedding の表（軸 0・`[3,5]`）。
-    conv_transpose1d の軸 1 は `TestI8ChannelAxes` が別に踏む。
+    `enc.w` is the linear weight (axis 0, `[3,4]`), `enc.emb` the embedding table (axis 0,
+    `[3,5]`). Axis 1 of conv_transpose1d is taken separately by `TestI8ChannelAxes`.
     """
     graph, tensors = weight_graph()
     scales: dict[str, torch.Tensor] = {}
@@ -488,7 +509,8 @@ def int8_weight_graph() -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, tor
 
 
 class TestI8ChannelAxes:
-    """per-channel 軸は**消費側の op** から引く（重みの shape だけでは決まらない）。"""
+    """The per-channel axis comes from **the consuming op** (the weight shape alone does not
+    decide it)."""
 
     def test_the_axis_comes_from_the_consuming_op(self):
         graph, _ = weight_graph()
@@ -502,7 +524,7 @@ class TestI8ChannelAxes:
         assert weight_channel_axes(graph)["w"] == 1
 
     def test_conflicting_axes_fail_loudly(self):
-        """同じ重みを軸の違う op が消費する形は 1 本の scale で表せない。"""
+        """A weight consumed by ops with different axes cannot be expressed with one scale."""
         graph, _ = weight_graph()
         graph.nodes.append(
             IrNode(op="conv_transpose1d", ins=["x", "w", "b"], outs=["h2"], attrs={})
@@ -510,7 +532,8 @@ class TestI8ChannelAxes:
         graph.values["h2"] = IrValue(dtype="f32", shape=["T", 3])
         graph.outputs.append("h2")
 
-        # 束縛表の写像は torch を要らない側（`karume.container`）に在るので、例外も器の語彙。
+        # The binding-table mapping lives on the torch-free side (`karume.container`), so the
+        # exception is the container's vocabulary too.
         with pytest.raises(ContainerFormatError, match="per-channel axis differs"):
             weight_channel_axes(graph)
 
@@ -527,11 +550,13 @@ class TestI8Storage:
         assert declared["w"].storage.dtype == "i8"
         assert declared["w"].storage.scale == "karume.scale.enc.w"
         assert declared["emb"].storage.dtype == "i8"
-        # MUST: bias は常に f32（プロトタイプの降格バグの根治形 — ADR 0006）。
+        # MUST: bias is always f32 (the root-cause fix of the prototype's demotion bug —
+        # ADR 0006).
         assert declared["b"].storage.dtype == "f32"
         assert stored_layout(path, "enc.w") == "i8"
         assert stored_layout(path, "enc.b") == "f32"
-        # scale は f32 固定（container-v1 §6.1）で、per-channel なら行数ぶんちょうど。
+        # The scale is fixed to f32 (container-v1 §6.1), and per-channel it has exactly one entry
+        # per row.
         assert len(stored_bytes(path, "karume.scale.enc.w")) == 3 * 4
 
     def test_the_i8_file_passes_the_full_verification(self, tmp_path):
@@ -545,7 +570,8 @@ class TestI8Storage:
         assert written_graph(path).to_dict() == expected.to_dict()
 
     def test_the_stored_values_reconstruct_the_weights_bit_for_bit(self, tmp_path):
-        """`q8·scale` が fake-quant 済みの重みと**ビット一致**する（格納の意味そのもの）。"""
+        """`q8·scale` **matches** the fake-quantized weight **bit for bit** (the very meaning of
+        the storage)."""
         graph, tensors, scales = int8_weight_graph()
         expected = tensors["enc.w"].clone()
 
@@ -558,7 +584,7 @@ class TestI8Storage:
         assert torch.equal(stored * scale, expected)
 
     def test_an_unrounded_eligible_weight_fails_loudly(self, tmp_path):
-        """丸めの掛け忘れ / 順序の誤りは黙って通さない（ADR 0006）。"""
+        """A forgotten rounding / a wrong order is not let through silently (ADR 0006)."""
         graph, tensors, scales = int8_weight_graph()
         tensors["enc.w"] = torch.full((3, 4), 1.0 / 3.0)
 
@@ -572,11 +598,12 @@ class TestI8Storage:
             )
 
     def test_a_scale_that_is_not_the_one_fake_quant_used_fails_loudly(self, tmp_path):
-        """fake-quant が使ったのと**別の** scale で書こうとすると逆変換ゲートが落ちる。
+        """Writing with a scale **other than** the one fake-quant used fails the inverse-conversion
+        gate.
 
-        ADR 0019 の「scale は再計算せずそのまま渡す」を守れなかったときの一般形。1ulp でも
-        違えば全要素の格納値が golden と対応しなくなり、差は例外にならず値にだけ出るので、
-        ここで書き出しごと止める。
+        The general form of failing ADR 0019's "pass the scale on as is, without recomputing it".
+        A difference of even 1 ulp makes no stored value correspond to golden, and the difference
+        shows only in values, never as an exception, so writing is stopped here.
         """
         graph, tensors, scales = int8_weight_graph()
         drifted = {key: value * 1.0000002 for key, value in scales.items()}
@@ -591,14 +618,16 @@ class TestI8Storage:
             )
 
     def test_recomputing_the_scale_from_a_quantized_weight_is_a_fixed_point(self):
-        """NOTE（実測・期待と違う）: **正しく fake-quant 済みの重みからの再計算は同値**。
+        """NOTE (observed, against expectation): **recomputing from a correctly fake-quantized
+        weight gives the same value**.
 
-        `q` を ±127 に閉じているので最大絶対値要素は必ず `q = ±127` に乗り、
-        `amax(|q·s|)/127 = fl(fl(127·s)/127) = s`（f32 の不動点 — 乱数 8.9e7 サンプルで
-        反例ゼロ）。つまり ADR 0019 の「再計算禁止」は**逆変換ゲートでは検出できない**規律で、
-        守る理由は「emit の時点の重みが実効重みでない / 軸が違う / 式が違う」ときに黙って別の
-        scale になることのほうにある。この不動点性は冪等性（test_quantize.py）と同じ性質なので、
-        ここでも固定しておく（崩れたら両方が同時に崩れる）。
+        `q` is clamped to ±127, so the element of largest magnitude always lands on `q = ±127`,
+        and `amax(|q·s|)/127 = fl(fl(127·s)/127) = s` (an f32 fixed point — zero counterexamples
+        in 8.9e7 random samples). So ADR 0019's "no recomputation" is a rule **the
+        inverse-conversion gate cannot detect**; the reason to keep it is that the scale silently
+        changes when "the weight at emit time is not the effective weight / the axis differs /
+        the formula differs". This fixed-point property is the same property as idempotency
+        (test_quantize.py), so it is pinned here too (if it breaks, both break at once).
         """
         _, tensors, scales = int8_weight_graph()
 
@@ -606,10 +635,11 @@ class TestI8Storage:
             assert torch.equal(channel_scale(tensors[key], 0), scale), key
 
     def test_a_scale_that_is_not_f32_fails_loudly(self, tmp_path):
-        """companion scale は F32 固定（ADR 0019）。writer は F16 もそのまま直列化できる。
+        """The companion scale is fixed to F32 (ADR 0019). The writer could serialize F16 as is.
 
-        逆変換の等値検査は「同じ f16 scale で fake-quant 済み」なら通ってしまうので、
-        検出は計画段の dtype 検査でしか掛からない（後段の `verify_container` は書いた後）。
+        The inverse-conversion equality check would pass for "fake-quantized with the same f16
+        scale", so only the dtype check at the planning step detects it (the later
+        `verify_container` runs after writing).
         """
         graph, tensors, scales = int8_weight_graph()
         half = {key: value.to(torch.float16) for key, value in scales.items()}
@@ -626,7 +656,7 @@ class TestI8Storage:
             )
 
     def test_a_missing_scale_fails_loudly(self, tmp_path):
-        """適格なのに scale が無い = fake-quant が届いていない重み（f32 へ落とさない）。"""
+        """Eligible but without a scale = a weight fake-quant never reached (not dropped to f32)."""
         graph, tensors, scales = int8_weight_graph()
         del scales["enc.emb"]
 
@@ -640,7 +670,8 @@ class TestI8Storage:
             )
 
     def test_a_scale_with_the_wrong_shape_fails_loudly(self, tmp_path):
-        """broadcast できるだけの形（`[1,4]`）はカーネルの読み方と食い違う沈黙誤値になる。"""
+        """A shape that merely broadcasts (`[1,4]`) disagrees with how the kernel reads it — a
+        silent wrong value."""
         graph, tensors, scales = int8_weight_graph()
         scales["enc.w"] = torch.ones(1, 4)
 
@@ -654,7 +685,7 @@ class TestI8Storage:
             )
 
     def test_a_scale_key_colliding_with_a_real_tensor_fails_loudly(self, tmp_path):
-        """scale のキーが実テンソルと衝突すると「別の重みを scale として読む」形になる。"""
+        """A scale key colliding with a real tensor would "read another weight as the scale"."""
         graph, tensors, scales = int8_weight_graph()
         graph.initializers["b"] = IrInitializer(
             tensor="karume.scale.enc.w", storage=IrStorage(dtype="f32")
@@ -682,30 +713,34 @@ class TestI8Storage:
         path = write_component(
             tmp_path / "model.krm", graph, tensors, weight_dtype="i8", weight_scales=scales
         )
-        # 内訳は**書いたファイルの宣言**から数える（呼び手の graph は圧縮宣言を持たない）。
+        # The breakdown counts from **the declaration of the written file** (the caller's graph
+        # holds no compressed declarations).
         breakdown = storage_breakdown(written_graph(path))
 
         assert breakdown.compressed_tensors == 2
-        assert breakdown.compressed_bytes == 3 * 4 + 3 * 5  # i8 = 1 バイト/要素
-        # scale は出力チャネル数 × 4 バイト（w も emb も軸 0 の長さ 3）。
+        assert breakdown.compressed_bytes == 3 * 4 + 3 * 5  # i8 = 1 byte/element
+        # The scale is output channels × 4 bytes (axis 0 has length 3 for both w and emb).
         assert breakdown.scale_bytes == (3 + 3) * 4
         assert breakdown.plain_tensors == 1
         assert breakdown.plain_bytes == 3 * 4
 
 
-#: 据えた容器 → その回に commit した宣言（**書いた後の宣言**の観測点）。
+#: Installed container → the declaration committed in that run (the observation point of **the
+#: declaration after writing**).
 
-#: 器には IR v2 の文書だけが載り、`storage` は束縛表へ出ている（docs/ir-v2.md §13.1）ので、
-#: 「どの initializer をどの格納で焼いたか」は書き手の戻りが正本になる。
+#: The container holds only IR v2 documents, and `storage` has moved into the binding table
+#: (container-v1 §13.1), so the writer's return value is the source of truth for "which
+#: initializer was written with which storage".
 _COMMITTED: dict[Path, IrGraph] = {}
 
 
 def write_model(path, graph: IrGraph, tensors, **kwargs) -> list[Path]:
-    """格納変換 → 容器（`stored_model` → `publish_container` の 1 本道）。
+    """Storage conversion → container (the single path `stored_model` → `publish_container`).
 
-    テスト側でこの呼び口を保つのは、格納の規則（適格判定・scale・fail loudly）を見る被験体が
-    「計画」と「書き出し」の 2 段に跨るため — 遅延変換なので、実データを読む検査は payload が
-    引かれたとき（= 容器を書くとき）に初めて掛かる。
+    The tests keep this entry point because the subjects of the storage rules (eligibility,
+    scale, fail loudly) span two steps, "planning" and "writing" — the conversion is deferred,
+    so checks that read real data run only when the payload is pulled (= when the container is
+    written).
     """
     block_bytes = kwargs.pop("_block_bytes", BLOCK_MAX_BYTES)
     part_bytes = kwargs.pop("_part_bytes", DEFAULT_PART_BYTES)
@@ -726,80 +761,86 @@ def write_model(path, graph: IrGraph, tensors, **kwargs) -> list[Path]:
 
 
 def write_component(path, *args, **kwargs) -> Path:
-    """書いて**代表 path** を返す（現物は連番の part 列 — container-v1 §8）。"""
+    """Write and return the **representative path** (the real files are numbered parts —
+    container-v1 §8)."""
     write_model(path, *args, **kwargs)
     return Path(path).with_suffix(".krm")
 
 
 def written_graph(path) -> IrGraph:
-    """その回に commit した宣言（実際に焼いた `storage` を持つビュー）。"""
+    """The declaration committed in that run (a view holding the `storage` actually written)."""
     return _COMMITTED[Path(path).with_suffix(".krm")]
 
 
 def bound(path):
-    """据えた容器を開いて合流まで通した結果（束縛表の観測点）。"""
+    """The installed container opened and taken through the merge (the binding-table observation
+    point)."""
     return verify_container(container_parts(Path(path).with_suffix(".krm")), blocks=True)
 
 
 def stored_layout(path, key: str) -> str:
-    """テンソル 1 本の**展開経路**（codec 台帳の `layout` — 旧 safetensors dtype の置き換え）。"""
+    """The **decode path** of one tensor (the codec ledger's `layout` — it replaces the old
+    safetensors dtype)."""
     supply = bound(path).graphs[GRAPH_NAME].supplies[key]
     return codec_entry(supply.encoding.codec).layout
 
 
 def stored_bytes(path, key: str) -> bytes:
-    """テンソル 1 本の payload（piece 列は親 1 本へ繋ぐ・末尾の詰め物は含まない）。
+    """The payload of one tensor (piece lists joined into the parent; no trailing padding).
 
-    `karume.scale.<キー>` を渡すと companion scale の payload を返す。
+    Passing `karume.scale.<key>` returns the payload of the companion scale.
     """
     verified = bound(path)
     supplies = verified.graphs[GRAPH_NAME].supplies
     weight = key.removeprefix("karume.scale.")
     supply = supplies[weight]
     if key != weight:
-        assert supply.scale is not None, f"'{weight}' は companion scale を持たない"
+        assert supply.scale is not None, f"'{weight}' has no companion scale"
         return verified.read.block(supply.scale.id)[: supply.scale.payload_bytes]
     return b"".join(verified.read.block(block.id)[: block.payload_bytes] for block in supply.blocks)
 
 
 def stored_payload(path, name: str) -> torch.Tensor:
-    """1 本ぶんの生バイトを uint8 テンソルで取り出す（代表 path を受ける）。"""
+    """Take one tensor's raw bytes as a uint8 tensor (takes the representative path)."""
     return torch.frombuffer(bytearray(stored_bytes(path, name)), dtype=torch.uint8)
 
 
 def stored_tensor(path, key: str, dtype: torch.dtype, shape=None) -> torch.Tensor:
-    """payload を `dtype` として読み直す（`shape` を渡せばその形へ畳む）。"""
+    """Read the payload back as `dtype` (reshaped to `shape` when given)."""
     flat = torch.frombuffer(bytearray(stored_bytes(path, key)), dtype=dtype)
     return flat if shape is None else flat.reshape(shape)
 
 
 def asymmetric_nibbles(count: int) -> torch.Tensor:
-    """隣接要素が全て異なる非対称パターン `[1,−2,3,−4,…]`（値域 ±7）。
+    """An asymmetric pattern `[1,−2,3,−4,…]` whose neighbours all differ (range ±7).
 
-    pack 順の検出器（ADR 0069 決定 4 ①）— 対称なパターンだと上下 nibble を取り違えても
-    往復が通ってしまう。
+    The detector of the pack order (ADR 0069 decision 4 ①) — with a symmetric pattern the round
+    trip would pass even with the upper and lower nibbles swapped.
     """
     index = torch.arange(count)
     return (((index % 7) + 1) * torch.where(index % 2 == 0, 1, -1)).to(torch.int8)
 
 
 class TestPackedFourBitOrder:
-    """pack 順の正本（ADR 0069 決定 4）— 「要素 2i が下位 nibble / 2i+1 が上位 nibble」。
+    """The source of truth of the pack order (ADR 0069 decision 4) — "element 2i is the low nibble
+    / 2i+1 the high nibble".
 
-    上流でも割れている自由パラメータで、間違えても**形も型も合う沈黙誤値**にしかならない。
-    往復（pack → unpack）だけでは pack と unpack が同じ向きに間違った形を検出できないので、
-    バイト値を手で書き下した固定と対で置く。
+    A free parameter on which upstream projects also differ; a mistake only ever gives **a silent
+    wrong value with matching shape and type**. A round trip (pack → unpack) alone cannot detect
+    pack and unpack being wrong in the same direction, so it is paired with a pin of hand-written
+    byte values.
     """
 
     def test_the_even_element_goes_to_the_low_nibble(self):
-        """`q = [1, 2]` → `u = [9, 10]` → 1 バイト `0xA9`（上下を逆に詰めると `0x9A`）。"""
+        """`q = [1, 2]` → `u = [9, 10]` → one byte `0xA9` (packed the other way round: `0x9A`)."""
         packed = pack_int4(torch.tensor([1, 2], dtype=torch.int8))
 
         assert packed.dtype is torch.uint8
         assert packed.tolist() == [0xA9]
 
     def test_the_stored_nibbles_are_offset_by_eight_and_never_zero(self):
-        """格納値は `u = q + 8`（値域 [1,15]・0 は未使用の 15 準位 — ADR 0069 決定 3）。"""
+        """The stored value is `u = q + 8` (range [1,15], 15 levels with 0 unused — ADR 0069
+        decision 3)."""
         packed = pack_int4(torch.tensor([-7, 7, 0, -7], dtype=torch.int8))
 
         assert INT4_OFFSET == 8
@@ -815,10 +856,12 @@ class TestPackedFourBitOrder:
         ids=["one-row", "two-words", "six-words", "row-straddles", "short-rows", "rank3"],
     )
     def test_the_round_trip_preserves_every_position(self, shape):
-        """行長が語（4 バイト = 8 要素）境界と一致しない形も含めて、位置が完全に一致する。
+        """Every position matches exactly, including shapes whose row length does not meet a word
+        boundary (4 bytes = 8 elements).
 
-        平坦添字の罠（ADR 0019 の同型検出器の 4bit 版）— 行ごとに詰め直す実装だと
-        `(5,20)` / `(7,4)` のように行が語の途中で終わる形で位置がずれる。
+        The flat-index trap (the 4-bit version of ADR 0019's isomorphism detector) — an
+        implementation that repacks row by row shifts positions in shapes such as `(5,20)` /
+        `(7,4)`, where a row ends in the middle of a word.
         """
         count = 1
         for dim in shape:
@@ -831,10 +874,12 @@ class TestPackedFourBitOrder:
         assert torch.equal(unpack_int4(packed, shape), quantized)
 
     def test_a_split_half_pack_does_not_survive_the_round_trip(self):
-        """故障注入: llama.cpp Q4_0 型の split-half 順（前半 = 下位 / 後半 = 上位）で詰めると、
-        こちらの unpack は**形も型も合ったまま**別の列を返す。
+        """Fault injection: packing in the llama.cpp Q4_0-style split-half order (first half = low
+        / second half = high) makes our unpack return other columns **with matching shape and
+        type**.
 
-        検出器が実際に検出力を持つことの確認 — ここが通ってしまうなら往復テストは恒真。
+        Confirms that the detector really detects — if this passed, the round-trip test would be
+        tautological.
         """
         quantized = asymmetric_nibbles(16)
         nibbles = (quantized + INT4_OFFSET).to(torch.uint8)
@@ -847,13 +892,14 @@ class TestPackedFourBitOrder:
         assert not torch.equal(restored, quantized)
 
     def test_an_odd_element_count_fails_loudly(self):
-        """末尾要素が半バイトだけ突き出す形は詰められない（バイト長が宣言から決まらない）。"""
+        """A last element sticking out by half a byte cannot be packed (the byte length would not
+        follow from the declaration)."""
         with pytest.raises(EmitError, match="is odd"):
             pack_int4(torch.zeros(3, dtype=torch.int8))
 
 
 def conv1d_attrs(groups: int = 1) -> dict:
-    """conv1d の attrs（4 つとも宣言必須 — `ops.CONV1D_ATTRS`）。"""
+    """conv1d attrs (all four must be declared — `ops.CONV1D_ATTRS`)."""
     return {"stride": 1, "padding": 0, "dilation": 1, "groups": groups}
 
 
@@ -867,17 +913,18 @@ def int4_weight_graph(
     conv_groups: int = 1,
     conv_op: str = "conv1d",
 ) -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-    """linear の重み `[3,32]` を group 対称 i4 で fake-quant 済みにしたグラフ。
+    """A graph with the linear weight `[3,32]` fake-quantized to group-symmetric i4.
 
-    in 軸 32 / group 16 なので 1 行に group が 2 つ入る（scale の group 形 `[3,2]`）。
-    `embedding` を立てると **embedding 表**（i4 適格の 2 つ目の重みスロット — ADR 0069
-    決定 5 の追補）が、`conv` を立てると **conv の重み**（既定は `groups == 1` の conv1d
-    `[3,2,16]` = i4 適格の 3 つ目。`conv_shape` / `conv_groups` / `conv_op` で適格から
-    外れる枝も踏める）が増える。`wide` を立てると **行長 48 の linear**（出荷 g 16 では
-    割り切れるが `quantize.DEFAULT_GROUP_SIZE` = 32 では割り切れない形）が増える。
+    The in axis is 32 and the group 16, so one row holds two groups (the group-form scale
+    `[3,2]`). `embedding` adds **an embedding table** (the second i4-eligible weight slot — the
+    extension of ADR 0069 decision 5), `conv` adds **a conv weight** (by default the conv1d
+    `[3,2,16]` with `groups == 1` = the third i4-eligible one; `conv_shape` / `conv_groups` /
+    `conv_op` also take the branches that fall outside eligibility), and `wide` adds **a linear
+    with row length 48** (divisible by the shipped g 16 but not by
+    `quantize.DEFAULT_GROUP_SIZE` = 32).
 
-    conv の重みは**適格な形のときだけ**丸めて台帳に載せる（適格外は emit が f32 のまま
-    残すので、丸めても台帳が使われない）。
+    The conv weight is rounded and put into the ledger **only in an eligible shape** (emit leaves
+    an ineligible one as f32, so the ledger would go unused even if it were rounded).
     """
     nodes = [IrNode(op="linear", ins=["x", "w", "b"], outs=["h"], attrs={})]
     inputs = [IrInput(name="x", dtype="f32", shape=["T", 32])]
@@ -914,8 +961,8 @@ def int4_weight_graph(
         tensors["enc.bw"] = torch.randn(3)
         outputs.append("hw")
     if conv:
-        # conv の入力は rank 3（`x[B,Cin,L]`）— L = K + 1 なので出力長は 2
-        # （stride / dilation 1・padding 0）。verify の shape 推論まで通す形にしておく。
+        # The conv input is rank 3 (`x[B,Cin,L]`) — L = K + 1, so the output length is 2
+        # (stride / dilation 1, padding 0). Kept in a form that passes verify's shape inference.
         channels, kernel = conv_shape[1] * conv_groups, conv_shape[2]
         attrs = conv1d_attrs(conv_groups) if conv_op == "conv1d" else {"stride": 1, "padding": 0}
         nodes.append(IrNode(op=conv_op, ins=["cx", "cw", "cb"], outs=["c"], attrs=attrs))
@@ -940,7 +987,7 @@ def int4_weight_graph(
     for key in ["enc.w"] + (["enc.ww"] if wide else []) + (["enc.cw"] if conv else []):
         weight = tensors[key]
         if weight.numel() // weight.shape[0] % group_size:
-            continue  # 端数 group（ADR 0069 決定 2）— 丸められない = 適格でもない
+            continue  # partial group (ADR 0069 decision 2) — cannot be rounded = not eligible
         scale = group_scale(weight, group_size)
         tensors[key] = dequantize_int4(quantize_to_int4(weight, scale), scale)
         scales[key] = scale
@@ -952,10 +999,12 @@ def write_int4(path, graph: IrGraph, tensors, scales):
 
 
 def int4_embedding_graph() -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-    """linear と embedding の**両方**を group 対称 i4 で丸めたグラフ（embedding 追補の正の形）。
+    """A graph with **both** linear and embedding rounded to group-symmetric i4 (the positive form
+    of the embedding extension).
 
-    embedding 表 `[V,D]` は `channel_rows` が恒等なので、group scale も `[V, D/group]` の
-    「重みと同 rank・最終次元だけ group 数」— linear とまったく同じ形で格納できる。
+    For the embedding table `[V,D]`, `channel_rows` is the identity, so the group scale is
+    `[V, D/group]`, "the weight's rank with only the last dimension a group count" — it can be
+    stored in exactly the same form as linear.
     """
     graph, tensors, scales = int4_weight_graph(embedding=True)
     emb_scale = group_scale(tensors["enc.emb"], 16)
@@ -965,11 +1014,12 @@ def int4_embedding_graph() -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, 
 
 
 class TestI4Eligibility:
-    """i4 の適格は **linear / embedding / conv1d の重みスロット限定**（ADR 0069 決定 5 +
-    embedding / conv1d 追補 — i4 の展開経路を持つカーネルはこの 3 つだけ）。
+    """i4 eligibility is **limited to the weight slots of linear / embedding / conv1d** (ADR 0069
+    decision 5 + the embedding / conv1d extensions — only these three kernels have an i4 decode
+    path).
 
-    conv1d は展開できるのが igemm 変種だけなので `groups == 1` が要り、さらに格納行
-    （`Cin·K` の平坦化）が group 長で割り切れることが要る。
+    For conv1d only the igemm variant can decode, so it needs `groups == 1`, and the stored row
+    (the flattened `Cin·K`) must also be divisible by the group length.
     """
 
     def test_linear_and_embedding_weight_slots_are_listed(self):
@@ -979,11 +1029,12 @@ class TestI4Eligibility:
         assert i4_eligible_initializers(graph) == {"w", "emb"}
 
     def test_a_dense_conv1d_weight_is_i4_eligible(self):
-        """`groups == 1` の conv1d は i4 の適格（波 J-5b の追補）。
+        """A conv1d with `groups == 1` is i4-eligible (the extension of phase J-5b).
 
-        行長は最終次元（K = 16）ではなく**受容野の平坦化**（`Cin·K` = 32）— group 16 で
-        2 group に割れる。K だけを見ていると `[3,2,16]` が「16 % 16 == 0」で通ってしまい、
-        受容野をまたぐ group が別の scale で読まれる沈黙誤値になる。
+        The row length is **the flattened receptive field** (`Cin·K` = 32), not the last
+        dimension (K = 16) — it splits into 2 groups of 16. Looking only at K, `[3,2,16]` would
+        pass as "16 % 16 == 0", and groups spanning the receptive field would be read with
+        another scale — a silent wrong value.
         """
         graph, _, _ = int4_weight_graph(conv=True)
 
@@ -991,17 +1042,18 @@ class TestI4Eligibility:
         assert i4_eligible_initializers(graph, group_size=16) == {"w", "cw"}
 
     def test_a_grouped_conv1d_weight_is_not_i4_eligible(self):
-        """`groups > 1` は direct カーネルで実行され、i4 の展開経路が無い。"""
+        """`groups > 1` runs on the direct kernel, which has no i4 decode path."""
         graph, _, _ = int4_weight_graph(conv=True, conv_groups=2)
 
         assert eligible_compressed_initializers(graph) == {"w", "cw"}
         assert i4_eligible_initializers(graph, group_size=16) == {"w"}
 
     def test_a_conv1d_without_a_declared_groups_attr_fails_loudly(self):
-        """`groups` の宣言が無い形に既定値 1 を補わない（ADR 0012・ランタイム側と同じ扱い）。
+        """A missing `groups` declaration is not filled with a default of 1 (ADR 0012; the same
+        handling as the runtime).
 
-        黙って 1 を仮定すると depthwise の重みが i4 で常駐し、direct カーネルが packed バイトを
-        f32 として読む（例外の出ない沈黙誤値）。
+        Silently assuming 1 would keep a depthwise weight resident as i4, and the direct kernel
+        would read the packed bytes as f32 (a silent wrong value with no exception).
         """
         graph, _, _ = int4_weight_graph(conv=True)
         without_groups = {key: value for key, value in conv1d_attrs().items() if key != "groups"}
@@ -1011,10 +1063,11 @@ class TestI4Eligibility:
             i4_eligible_initializers(graph, group_size=16)
 
     def test_a_conv1d_whose_flattened_row_is_not_divisible_is_not_i4_eligible(self):
-        """行長 `Cin·K` = 24 は group 16 で端数 group を作る（ADR 0069 決定 2）。
+        """A row length `Cin·K` = 24 leaves a partial group with group 16 (ADR 0069 decision 2).
 
-        適格に入れてしまうと「fake-quant が届いていない重み」として export 全体が落ちる —
-        linear と割り切れない conv1d を持つ普通のグラフが i4 で書けなくなる。
+        Counting it as eligible would fail the whole export as "a weight fake-quant never
+        reached" — an ordinary graph with linear and a non-divisible conv1d could no longer be
+        written as i4.
         """
         graph, _, _ = int4_weight_graph(conv=True, conv_shape=(3, 3, 8))
 
@@ -1022,9 +1075,11 @@ class TestI4Eligibility:
         assert i4_eligible_initializers(graph, group_size=16) == {"w"}
 
     def test_a_conv_transpose1d_weight_is_not_i4_eligible(self):
-        """転置レイアウト `[Cin,Cout,K]` は行軸が先頭でない = pack 順と行の並びが食い違う。
+        """The transposed layout `[Cin,Cout,K]` does not lead with the row axis = the pack order
+        and the row order disagree.
 
-        2026-08-20 のユーザー裁定で permuted pack は買わないので、展開経路ごと持たない。
+        The maintainer's ruling of 2026-08-20 does not buy a permuted pack, so there is no decode
+        path for it at all.
         """
         graph, _, _ = int4_weight_graph(conv=True, conv_op="conv_transpose1d")
 
@@ -1032,8 +1087,8 @@ class TestI4Eligibility:
         assert i4_eligible_initializers(graph, group_size=16) == {"w"}
 
     def test_a_weight_shared_with_another_weight_slot_is_excluded(self):
-        """i4 の経路を持たない重みスロットとも共有される重みは適格に入らない
-        （展開経路が 1 つに決まらない）。"""
+        """A weight also shared with a weight slot that has no i4 path is not eligible
+        (the decode path would not be unique)."""
         graph, _, _ = int4_weight_graph()
         graph.nodes.append(
             IrNode(op="conv1d", ins=["x", "w", "b"], outs=["c"], attrs=conv1d_attrs(groups=2))
@@ -1052,19 +1107,21 @@ class TestI4Storage:
         assert declared["w"].storage.dtype == "i4"
         assert declared["w"].storage.scale == "karume.scale.enc.w"
         assert declared["w"].storage.group_size == 16
-        # MUST: bias は常に f32（プロトタイプの降格バグの根治形 — ADR 0006）。
+        # MUST: bias is always f32 (the root-cause fix of the prototype's demotion bug — ADR 0006).
         assert declared["b"].storage.dtype == "f32"
         assert stored_layout(path, "enc.w") == "i4"
-        # 宣言 shape は論理形のまま・payload のバイト長だけが bit 幅から決まる。
+        # The declared shape stays logical; only the payload byte length follows from the bit
+        # width.
         assert len(stored_bytes(path, "enc.w")) == 3 * 32 // 2
-        # scale は 32 / 16 = 2 group × 3 行の f32。
+        # The scale is f32, 32 / 16 = 2 groups × 3 rows.
         assert len(stored_bytes(path, "karume.scale.enc.w")) == 3 * 2 * 4
 
     def test_the_stored_bytes_reconstruct_the_weight_bit_for_bit(self, tmp_path):
-        """`dequant(unpack(格納バイト))` が fake-quant 済みの重みと**ビット一致**する。
+        """`dequant(unpack(stored bytes))` **matches** the fake-quantized weight **bit for bit**.
 
-        emit の門（`_convert_for_storage`）と同じ式だが、こちらは**ファイルに出たバイト**から
-        辿る — 書き出しの経路（順序・offset・memoryview の cast）まで含めて対応を固定する。
+        The same formula as emit's check (`_convert_for_storage`), but this one starts from **the
+        bytes that reached the file** — pinning the correspondence including the writing path
+        (order, offset, the memoryview cast).
         """
         graph, tensors, scales = int4_weight_graph()
         expected = tensors["enc.w"].clone()
@@ -1080,15 +1137,18 @@ class TestI4Storage:
 
         path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
-        # 例外が出なければ合格（block の 64 B 整列と 4 B 倍数長を読み手が見る）。
+        # Passes if nothing is raised (the reader checks 64 B block alignment and lengths that are
+        # multiples of 4 B).
         bound(path)
 
     def test_the_i4_file_passes_the_full_verification(self, tmp_path):
-        """i4 の書き出しが読み直しと合流の全規則を最後まで通る（実行 capability は開放済み）。
+        """The i4 write passes every rule of the re-read and the merge to the end (the execution
+        capability is open).
 
-        ここが緑なのは、書き出し経路の読み直し（`karume.container.read_container` → 合流
-        `verify.bind_graphs`）が `int4-sym-g` の block を受理できていることそのもの。宣言・shape・
-        group 形 scale・runtime support・op 契約の全規則を通る。
+        This being green is exactly the re-read of the writing path
+        (`karume.container.read_container` → the merge `verify.bind_graphs`) accepting
+        `int4-sym-g` blocks. It passes every rule: declaration, shape, group-form scale, runtime
+        support, op contracts.
         """
         graph, tensors, scales = int4_weight_graph()
 
@@ -1104,17 +1164,19 @@ class TestI4Storage:
         breakdown = storage_breakdown(written_graph(path))
 
         assert breakdown.compressed_tensors == 1
-        assert breakdown.compressed_bytes == 3 * 32 // 2  # i4 = 0.5 バイト/要素
-        # scale は group 数（3 行 × 2 group）× 4 バイト。
+        assert breakdown.compressed_bytes == 3 * 32 // 2  # i4 = 0.5 byte/element
+        # The scale is the group count (3 rows × 2 groups) × 4 bytes.
         assert breakdown.scale_bytes == 3 * 2 * 4
         assert breakdown.plain_tensors == 1
         assert breakdown.plain_bytes == 3 * 4
 
     def test_a_dense_conv1d_weight_is_stored_as_i4_with_a_rank2_group_scale(self, tmp_path):
-        """`groups == 1` の conv1d `[3,2,16]` は i4 格納・scale は **rank2**（波 J-5b）。
+        """A conv1d `[3,2,16]` with `groups == 1` is stored as i4 with a **rank-2** scale
+        (phase J-5b).
 
-        scale の形は rank に依らず「行数 = 先頭次元・最終次元 = 行長 / group 長」
-        （ADR 0069 決定 3 の rank 非依存規則）— 重みと同 rank の `[3,2,1]` ではない。
+        The scale shape is "rows = the leading dimension, last dimension = row length / group
+        length" whatever the rank (the rank-independent rule of ADR 0069 decision 3) — not
+        `[3,2,1]` with the weight's rank.
         """
         graph, tensors, scales = int4_weight_graph(conv=True)
 
@@ -1126,14 +1188,16 @@ class TestI4Storage:
         assert stored_layout(path, "enc.cw") == "i4"
         assert len(stored_bytes(path, "enc.cw")) == 3 * 2 * 16 // 2
         assert len(stored_bytes(path, "karume.scale.enc.cw")) == 3 * 2 * 4
-        assert declared["cb"].storage.dtype == "f32", "bias は常に f32（ADR 0006）"
+        assert declared["cb"].storage.dtype == "f32", "bias is always f32 (ADR 0006)"
 
     def test_the_stored_conv1d_bytes_reconstruct_the_rank3_weight_bit_for_bit(self, tmp_path):
-        """rank3 でも `dequant(unpack(格納バイト))` が丸め済みの重みと**ビット一致**する。
+        """At rank 3 too, `dequant(unpack(stored bytes))` **matches** the rounded weight **bit for
+        bit**.
 
-        payload の nibble 順は重みの連続メモリ順（`[O,Cin,K]` の row-major = `[O,Cin·K]` の
-        平坦と同一バイト列）— 行の畳み方を取り違えても形も型もバイト長も合うので、この門が
-        唯一の検出点（ADR 0069 決定 4 ③）。
+        The nibble order of the payload is the weight's contiguous memory order (the row-major
+        `[O,Cin,K]` = the same bytes as the flat `[O,Cin·K]`) — a wrong row folding still matches
+        shape, type and byte length, so this check is the only detection point (ADR 0069
+        decision 4 ③).
         """
         graph, tensors, scales = int4_weight_graph(conv=True)
         expected = tensors["enc.cw"].clone()
@@ -1145,11 +1209,11 @@ class TestI4Storage:
         assert torch.equal(restored, expected)
 
     def test_the_conv1d_i4_file_passes_the_full_verification(self, tmp_path):
-        """emit → verify_container の往復が rank3 の i4 でも最後まで通る。
+        """The emit → verify_container round trip runs to the end for rank-3 i4 too.
 
-        group 形の検査（`_check_group_quantized_shape` / `_assert_scale_tensor`）が rank2 の
-        scale を rank3 の重みに対して受理する — ここが同 rank を要求したままだと、書けた
-        ファイルが読めない。
+        The group-form checks (`_check_group_quantized_shape` / the scale-length rule of
+        `verify.bind_graphs`) accept a rank-2 scale for a rank-3 weight — if they still required
+        the same rank, a file that could be written could not be read.
         """
         graph, tensors, scales = int4_weight_graph(conv=True)
 
@@ -1160,14 +1224,15 @@ class TestI4Storage:
         assert declared["w"].storage.dtype == "i4"
 
     def test_a_grouped_conv1d_weight_stays_f32(self, tmp_path):
-        """適格外の conv1d は i4 にせず f32 のまま残す（Codex 波 F 指摘 I4-ELIG-01）。
+        """An ineligible conv1d is not made i4 but stays f32 (Codex phase F finding I4-ELIG-01).
 
-        ここで export 全体を落とすと、linear + depthwise conv を持つ普通のグラフが i4 で
-        書けなくなる。ランタイム側の受け皿（eligible ∩ i4Eligible の外は CPU 展開）と対の
-        設計は「展開経路のある op の重みだけ圧縮・他は f32」で、i8 の適格外と同じ。
+        Failing the whole export here would make an ordinary graph with linear + depthwise conv
+        impossible to write as i4. The design paired with the runtime's fallback (outside
+        eligible ∩ i4Eligible, decoded on the CPU) is "compress only the weights of ops with a
+        decode path, f32 for the rest", the same as i8's ineligible weights.
         """
-        # Cout は groups で割り切れる 4 にする（既定の 3 は conv1d の契約〈groups が Cin と Cout を
-        # 割り切る〉を破り、runtime の parser が拒否するグラフになる — 被験体の誤り）。
+        # Cout is 4, divisible by groups (the default 3 breaks the conv1d contract [groups divides
+        # Cin and Cout] and gives a graph the runtime parser rejects — an error in the subject).
         graph, tensors, scales = int4_weight_graph(conv=True, conv_groups=2, conv_shape=(4, 2, 16))
 
         path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
@@ -1177,29 +1242,39 @@ class TestI4Storage:
         assert declared["cw"].storage.dtype == "f32"
 
     def test_a_row_only_the_shipped_group_length_divides_is_still_stored_as_i4(self, tmp_path):
-        """g16 で丸めた行長 48 の linear も i4 で格納される（除数は出荷の実 g）。
+        """A linear with row length 48 rounded with g16 is also stored as i4 (the divisor is the
+        actual shipped g).
 
-        適格判定の除数を既定 g（32）に固定すると、`48 % 32 != 0` でこの重みだけが適格から
-        外れ、値は i4 グリッドへ丸められたまま **f32 で格納**される — 行長 32 の linear が
-        1 本でもあれば「適格 0 本」の門も鳴らないので、品質劣化だけ乗ってサイズが縮まない
-        配布形が例外も診断も無しに出る（ADR 0006 の「圧縮指定なのに実質 f32」）。
+        Fixing the eligibility divisor to the default g (32) would drop only this weight from
+        eligibility on `48 % 32 != 0`, and its values, still rounded to the i4 grid, would be
+        **stored as f32** — with even one linear of row length 32 the "0 eligible" check does not
+        fire either, so a distribution that carries the quality loss without shrinking would ship
+        with no exception and no diagnostic (ADR 0006's "compression requested but effectively
+        f32").
         """
         graph, tensors, scales = int4_weight_graph(wide=True)
 
         path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
         declared = written_graph(path).initializers
-        assert declared["w"].storage.dtype == "i4", "行長 32 側（既定 g でも割り切れる）"
-        assert declared["ww"].storage.dtype == "i4", "行長 48 側（出荷 g 16 でだけ割り切れる）"
+        assert declared["w"].storage.dtype == "i4", (
+            "the row-length-32 side (divisible by the default g too)"
+        )
+        assert declared["ww"].storage.dtype == "i4", (
+            "the row-length-48 side (divisible only by the shipped g 16)"
+        )
         assert declared["ww"].storage.group_size == 16
-        # scale は 48 / 16 = 3 group（既定 g を使っていれば宣言そのものが立たない）。
+        # The scale has 48 / 16 = 3 groups (with the default g the declaration itself would not
+        # exist).
         assert len(stored_bytes(path, "karume.scale.enc.ww")) == 3 * 3 * 4
 
     def test_an_embedding_table_is_stored_as_i4_with_a_group_scale(self, tmp_path):
-        """embedding 表 `[V,D]` も i4 で格納される（ADR 0069 決定 5 の embedding 追補）。
+        """The embedding table `[V,D]` is stored as i4 too (the embedding extension of ADR 0069
+        decision 5).
 
-        scale は linear とまったく同じ group 形（同 rank・最終次元だけ group 数）で、
-        宣言も `storage.group_size` を持つ — 席が増えただけで格納規則は 1 つ。
+        The scale has exactly linear's group form (same rank, only the last dimension a group
+        count), and the declaration carries `storage.group_size` too — one more slot, still one
+        storage rule.
         """
         graph, tensors, scales = int4_embedding_graph()
 
@@ -1214,7 +1289,8 @@ class TestI4Storage:
         assert len(stored_bytes(path, "karume.scale.enc.emb")) == 3 * 2 * 4
 
     def test_the_stored_embedding_bytes_reconstruct_the_table_bit_for_bit(self, tmp_path):
-        """embedding 表でも `dequant(unpack(格納バイト))` が丸め済みの重みとビット一致する。"""
+        """For the embedding table too, `dequant(unpack(stored bytes))` matches the rounded weight
+        bit for bit."""
         graph, tensors, scales = int4_embedding_graph()
         expected = tensors["enc.emb"].clone()
 
@@ -1225,7 +1301,8 @@ class TestI4Storage:
         assert torch.equal(restored, expected)
 
     def test_the_emitted_embedding_i4_file_satisfies_the_reader_layout_rules(self, tmp_path):
-        """I4 が 2 本並んでも「隙間なく・4 バイト整列」が保たれる（ADR 0069 追記 2 の並び）。"""
+        """Two I4 tensors side by side stay "gapless and 4-byte aligned" (the order of ADR 0069
+        addendum 2)."""
         graph, tensors, scales = int4_embedding_graph()
 
         path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
@@ -1233,10 +1310,10 @@ class TestI4Storage:
         bound(path)
 
     def test_the_embedding_i4_file_passes_the_full_verification(self, tmp_path):
-        """emit → verify_container の往復が embedding の i4 でも最後まで通る。
+        """The emit → verify_container round trip runs to the end for embedding i4 too.
 
-        group 形の検査（`_check_group_quantized_shape` — 最終次元 % group_size）は
-        embedding `[V,D]` の D 軸でそのまま成立する。
+        The group-form check (`_check_group_quantized_shape` — last dimension % group_size) holds
+        as is on the D axis of the embedding `[V,D]`.
         """
         graph, tensors, scales = int4_embedding_graph()
 
@@ -1246,7 +1323,8 @@ class TestI4Storage:
         assert written_graph(path).to_dict() == expected.to_dict()
 
     def test_the_breakdown_counts_both_i4_tensors(self, tmp_path):
-        """内訳の i4 バイトは linear と embedding の 2 本ぶん（0.5 バイト / 要素）。"""
+        """The i4 bytes of the breakdown cover the two tensors, linear and embedding (0.5 byte /
+        element)."""
         graph, tensors, scales = int4_embedding_graph()
 
         path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
@@ -1259,7 +1337,8 @@ class TestI4Storage:
         assert breakdown.plain_bytes == 3 * 4
 
     def test_a_graph_whose_only_weight_is_shared_with_conv_fails_loudly(self, tmp_path):
-        """linear と depthwise conv で共有された重みしか無い形は「適格 0 本」で落ちる。"""
+        """A graph whose only weight is shared by linear and a depthwise conv fails as "0
+        eligible"."""
         graph, tensors, scales = int4_weight_graph()
         graph.nodes.append(
             IrNode(op="conv1d", ins=["x", "w", "b"], outs=["c"], attrs=conv1d_attrs(groups=2))
@@ -1271,7 +1350,7 @@ class TestI4Storage:
             write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
     def test_a_missing_scale_fails_loudly(self, tmp_path):
-        """適格なのに scale が無い = fake-quant が届いていない重み（ADR 0006）。"""
+        """Eligible but without a scale = a weight fake-quant never reached (ADR 0006)."""
         graph, tensors, _ = int4_weight_graph()
 
         with pytest.raises(EmitError, match="has no group scale"):
@@ -1284,10 +1363,10 @@ class TestI4Storage:
             write_int4(tmp_path / "model.krm", graph, tensors, {"enc.w": torch.ones(1, 2)})
 
     def test_a_group_size_outside_the_accepted_set_fails_loudly(self, tmp_path):
-        """scale `[3,4]` は group 8 を意味する — 2 冪だが 16 未満（ADR 0069 決定 2）。
+        """A scale `[3,4]` means group 8 — a power of 2 but below 16 (ADR 0069 decision 2).
 
-        書いてから `verify` で落とすのでは「読めないファイルを配布形に残す」ので、
-        書く前の計画段で落とす。
+        Failing in `verify` after writing would "leave an unreadable file in the distribution",
+        so it fails at the planning step before writing.
         """
         graph, tensors, _ = int4_weight_graph()
 
@@ -1295,7 +1374,8 @@ class TestI4Storage:
             write_int4(tmp_path / "model.krm", graph, tensors, {"enc.w": torch.ones(3, 4)})
 
     def test_a_scale_that_is_not_f32_fails_loudly(self, tmp_path):
-        """companion scale は F32 固定（i8 と同じ理由 — 逆変換の等値検査では検出できない）。"""
+        """The companion scale is fixed to F32 (for the same reason as i8 — the
+        inverse-conversion equality check cannot detect it)."""
         graph, tensors, scales = int4_weight_graph()
         half = {key: value.to(torch.float16) for key, value in scales.items()}
 
@@ -1303,7 +1383,7 @@ class TestI4Storage:
             write_int4(tmp_path / "model.krm", graph, tensors, half)
 
     def test_an_unrounded_eligible_weight_fails_loudly(self, tmp_path):
-        """丸めの掛け忘れ / 順序の誤りは黙って通さない（ADR 0006）。"""
+        """A forgotten rounding / a wrong order is not let through silently (ADR 0006)."""
         graph, tensors, scales = int4_weight_graph()
         tensors["enc.w"] = torch.full((3, 32), 1.0 / 3.0)
 
@@ -1311,7 +1391,8 @@ class TestI4Storage:
             write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
     def test_a_scale_that_is_not_the_one_fake_quant_used_fails_loudly(self, tmp_path):
-        """fake-quant が使ったのと**別の** scale で書こうとすると逆変換ゲートが落ちる。"""
+        """Writing with a scale **other than** the one fake-quant used fails the inverse-conversion
+        gate."""
         graph, tensors, scales = int4_weight_graph()
         drifted = {key: value * 1.0000002 for key, value in scales.items()}
 
@@ -1319,10 +1400,10 @@ class TestI4Storage:
             write_int4(tmp_path / "model.krm", graph, tensors, drifted)
 
     def test_a_tampered_packed_byte_is_caught_by_the_round_trip_gate(self, tmp_path, monkeypatch):
-        """故障注入: packed バイトを 1 個だけ書き換えると逆変換ビット一致門が発火する
-        （ADR 0069 決定 4 ③）。
+        """Fault injection: rewriting a single packed byte fires the inverse-conversion bit-identity
+        gate (ADR 0069 decision 4 ③).
 
-        shape も dtype もバイト長も変わらないので、この門以外に検出点は無い。
+        Neither shape nor dtype nor byte length changes, so there is no other detection point.
         """
         from karume import emit
 
@@ -1330,7 +1411,7 @@ class TestI4Storage:
 
         def tamper(quantized):
             packed = pack(quantized)
-            packed[0] ^= 0x10  # 上位 nibble を 1 段ずらす
+            packed[0] ^= 0x10  # shift the high nibble by one level
             return packed
 
         monkeypatch.setattr(emit, "pack_int4", tamper)
@@ -1347,12 +1428,14 @@ class TestI4Storage:
 
 
 class TestFailureLeavesTheGraphUntouched:
-    """1 本でも落ちたら宣言は 1 つも書き換えない（commit は全バイトを書き終えた後）。
+    """If even one tensor fails, no declaration is rewritten (the commit comes after every byte is
+    written).
 
-    適格な重みは 2 本（`emb` / `w`）あり、以下はどれも「片方は通る・もう片方で落ちる」形。
-    落ちた時点で書き換えていると、書き出しが例外で止まっても呼び出し側の `graph` に片方だけ
-    圧縮宣言が残り、その graph を使い回す経路（同じ graph を別 dtype で書き直す / 内訳を
-    数える）が黙って宣言と実体の食い違った答えを出す。
+    There are two eligible weights (`emb` / `w`), and each case below is "one passes, the other
+    fails". Rewriting at the point of failure would leave a compressed declaration for one of them
+    in the caller's `graph` even though writing stopped with an exception, and paths that reuse
+    that graph (rewriting the same graph with another dtype / counting the breakdown) would
+    silently answer with declarations that disagree with the data.
     """
 
     def test_a_failed_f16_pass_leaves_no_partial_declaration(self, tmp_path):
@@ -1384,17 +1467,18 @@ class TestFailureLeavesTheGraphUntouched:
         assert json.loads(graph.to_json()) == before
 
     def test_a_failure_while_the_payload_is_pulled_leaves_no_declaration(self, tmp_path):
-        """逆変換ゲートは**実体が引かれたとき**に踏む（計画段では 1 バイトも読まない）。
+        """The inverse-conversion gate runs **when the data is pulled** (the planning step reads
+        not a single byte).
 
-        据える層（`karume.publish`）が `.partial` ごと捨てるので現物は 1 本も残らず、
-        呼び出し側の `graph` も 1 つも書き換わっていてはいけない。
+        The installing layer (`karume.publish`) discards everything including `.partial`, so no
+        file remains, and the caller's `graph` must not have been rewritten at all.
         """
         graph, tensors, scales = int8_weight_graph()
         tensors["enc.w"] = torch.full((3, 4), 1.0 / 3.0)
         before = json.loads(graph.to_json())
         path = tmp_path / "model.krm"
 
-        # 計画だけなら通る（実データを読む検査は payload が引かれるまで掛からない）。
+        # Planning alone passes (checks that read real data wait until the payload is pulled).
         stored_model(graph, tensors, weight_dtype="i8", weight_scales=scales)
 
         with pytest.raises(EmitError, match="not bit-identical"):
@@ -1405,12 +1489,13 @@ class TestFailureLeavesTheGraphUntouched:
 
 
 class TestSuccessLeavesTheGraphUntouched:
-    """書き出しが成功しても呼び出し側の `graph` は 1 バイトも変わらない。
+    """Even when writing succeeds, the caller's `graph` does not change by a single byte.
 
-    commit を呼び手の graph へ書き戻していると、同じ graph を別 dtype で書き直す経路
-    （`write_model` の docstring が再利用経路として名指ししている形）で前回の圧縮宣言が
-    残る — f32 の計画は空プランで宣言を**復元しない**ので、2 本目は「宣言 f16 / 実体 F32」の
-    壊れたコンテナになる。
+    Writing the commit back into the caller's graph would leave the previous compressed
+    declarations on the path that rewrites the same graph with another dtype (the form the
+    `stored_model` docstring names as a reuse path) — the f32 plan is empty and does **not
+    restore** declarations, so the second one would be a broken container with "declaration f16
+    / data F32".
     """
 
     def test_a_successful_f16_write_leaves_the_declarations_alone(self, tmp_path):
@@ -1428,30 +1513,34 @@ class TestSuccessLeavesTheGraphUntouched:
         plain = write_component(tmp_path / "plain.safetensors", graph, tensors)
 
         assert stored_layout(plain, "enc.w") == "f32"
-        # 宣言と実体が食い違っていれば verify_container がここで落ちる。
+        # verify_container fails here if declaration and data disagree.
         assert written_graph(plain).to_dict() == graph.to_dict()
 
 
 class TestStreamingConversion:
-    """圧縮変換は**引かれたときに 1 本ずつ**掛ける（ADR 0018 / 0019 の格納そのものは不変）。
+    """The compression conversion runs **one tensor at a time, when pulled** (the storage of
+    ADR 0018 / 0019 itself is unchanged).
 
-    全件を先に変換すると、圧縮側の集合が呼び出し側の f32 集合と同時に生きてピーク RAM が
-    両者の和になる（Irodori 規模で f32 3.44GB に f16 1.72GB / i8 0.87GB が重なる）。
+    Converting everything up front would keep the compressed set alive together with the caller's
+    f32 set, and peak RAM would be the sum of both (at Irodori scale, f16 1.72GB / i8 0.87GB on
+    top of f32 3.44GB).
 
-    引かれるのは 1 本につき 2 度（**書きながら sha256 を採る**走査と、据える前の読み直し検証）で、
-    **毎回同じバイト列**が返る MUST — 変換が決定的でないと、宣言した sha256 と実バイトが違う
-    容器が出る。
+    Each tensor is pulled twice (the pass that **takes the sha256 while writing**, and the re-read
+    verification before installing), and it MUST return **the same bytes every time** — a
+    non-deterministic conversion would produce a container whose real bytes differ from the
+    declared sha256.
     """
 
     def test_only_one_converted_tensor_is_alive_at_a_time(self, tmp_path, monkeypatch):
-        """故障注入: 変換済みを溜めてから書く実装へ戻すと、前の 1 本が生き残って落ちる。"""
+        """Fault injection: reverting to an implementation that collects the converted tensors
+        before writing keeps the previous one alive and fails."""
         from karume import emit
 
         alive: list[weakref.ReferenceType] = []
         convert = emit._convert_for_storage
 
         def spy(key, tensor, conversion):
-            # 次の 1 本へ入る時点で、前の変換済みは解放されているはず。
+            # By the time the next tensor starts, the previous converted one should be freed.
             assert [ref for ref in alive if ref() is not None] == []
             converted = convert(key, tensor, conversion)
             alive.append(weakref.ref(converted))
@@ -1462,17 +1551,19 @@ class TestStreamingConversion:
 
         write_model(tmp_path / "model.krm", graph, tensors, weight_dtype="f16")
 
-        # 2 テンソル（enc.w / enc.emb）× 2 走査 — **書きながら** sha256 を採る回と、据える前の
-        # 読み直し検証で引き直す回。分割形は part 0 を最後に書けるので、書き出しと digest が
-        # 同じ 1 走査になる（単一形だけが part 0 を先頭に置くぶん 2 度引く — container-v1 §4.1）。
+        # 2 tensors (enc.w / enc.emb) × 2 passes — the one that takes the sha256 **while
+        # writing**, and the one pulled again by the re-read verification before installing. The
+        # split form can write part 0 last, so writing and digest are a single pass (only the
+        # single form, which puts part 0 first, pulls twice — container-v1 §4.1).
         assert len(alive) == 4
 
     def test_the_streamed_f16_bytes_match_a_pre_converted_write(self, tmp_path):
-        """流しながら書いたバイト列 = 全件を先に変換してから素のバイト列として渡した容器。
+        """The bytes written while streaming = the container given everything pre-converted as
+        plain bytes.
 
-        block / part の配置は**宣言から決まる**（実体を 1 バイトも読まずに決まる）ので、
-        変換を挟んだ経路と挟まない経路で同じ配置・同じ payload になる。導出を間違えると
-        ここで offset ごとずれる。
+        The block / part layout **follows from the declaration** (decided without reading a single
+        byte of data), so the path with the conversion and the path without give the same layout
+        and the same payloads. A wrong derivation shifts whole offsets here.
         """
         graph, tensors = weight_graph()
         compressed = {"enc.w", "enc.emb"}
@@ -1499,7 +1590,7 @@ class TestStreamingConversion:
         ]
 
     def test_the_streamed_i8_bytes_match_a_pre_converted_write(self, tmp_path):
-        """i8 も同じ（companion scale が増える形を踏む）。"""
+        """The same for i8 (takes the form with companion scales added)."""
         graph, tensors, scales = int8_weight_graph()
         stored = stored_model(graph, tensors, weight_dtype="i8", weight_scales=scales)
         pre = {key: value.numpy().tobytes() for key, value in tensors.items()}
@@ -1530,7 +1621,7 @@ class TestStreamingConversion:
 
 class TestJsonCompliance:
     def test_non_finite_values_are_refused_at_serialization(self):
-        """NaN / Infinity は JSON の標準リテラルに無い — 書き出しの時点で失敗させる。"""
+        """NaN / Infinity are not standard JSON literals — fail at serialization time."""
         graph, _ = sample_graph()
         graph.nodes[0] = IrNode(op="add", ins=["x", "w"], outs=["y"], attrs={"value": float("inf")})
 
@@ -1546,9 +1637,10 @@ class TestJsonCompliance:
 
 
 def mixed_weight_graph() -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-    """linear = i4 / embedding = i8 の混成向けに両方を fake-quant 済みにしたグラフ。
+    """A graph with both fake-quantized for the mix linear = i4 / embedding = i8.
 
-    LLM の「embedding / tied lm_head は i8・linear 本体は i4」（Gemma 4 E2B が初出）の最小形。
+    The minimal form of the LLM layout "embedding / tied lm_head in i8, the linear body in i4"
+    (first seen with Gemma 4 E2B).
     """
     graph, tensors, scales = int4_weight_graph(embedding=True)
     emb_scale = channel_scale(tensors["enc.emb"], 0)
@@ -1560,7 +1652,8 @@ def mixed_weight_graph() -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, to
 
 
 class TestMixedStorage:
-    """`weight_dtype_overrides` — 1 本単位の明示指定（既定に優先・満たせなければ fail loudly）。"""
+    """`weight_dtype_overrides` — explicit per-tensor choices (override the default; fail loudly
+    when they cannot be met)."""
 
     def test_an_override_mixes_i8_into_an_i4_default(self, tmp_path):
         graph, tensors, scales = mixed_weight_graph()
@@ -1584,7 +1677,8 @@ class TestMixedStorage:
         assert stored_layout(path, "enc.emb") == "i8"
 
     def test_overrides_compress_even_with_a_f32_default(self, tmp_path):
-        """既定 f32 は従来「空プランで即返し」だった — 明示指定だけの圧縮も通ること。"""
+        """A default of f32 used to "return an empty plan at once" — compression by explicit
+        choices alone must pass too."""
         graph, tensors, scales = mixed_weight_graph()
 
         path = write_component(
@@ -1627,7 +1721,8 @@ class TestMixedStorage:
             )
 
     def test_an_override_on_an_ineligible_weight_fails_loudly(self, tmp_path):
-        """既定 dtype は適格外を静かに f32 へ残すが、明示指定は黙って別の格納にしない。"""
+        """The default dtype quietly leaves ineligible weights as f32, but an explicit choice is
+        never silently turned into another storage."""
         graph, tensors = weight_graph(share_weight=True)
 
         with pytest.raises(EmitError, match="not eligible"):
@@ -1639,9 +1734,10 @@ class TestMixedStorage:
             )
 
     def test_an_explicit_i4_on_a_conv_weight_fails_loudly(self, tmp_path):
-        """適格外の conv（ここでは depthwise）は一般適格でも i4 の展開経路が無い。
+        """An i4-ineligible conv (depthwise here) has no i4 decode path even if generally eligible.
 
-        既定は静かに f32 へ残すが、明示指定は fail loudly（`_plan_weight_dtype` の線引き）。
+        The default quietly leaves it as f32, but an explicit choice fails loudly (the line drawn
+        by `_plan_weight_dtype`).
         """
         graph, tensors, scales = int4_weight_graph(conv=True, conv_groups=2)
 
@@ -1666,10 +1762,12 @@ class TestMixedStorage:
             )
 
     def test_an_override_on_a_non_f32_tensor_fails_loudly(self, tmp_path):
-        """既定は非 f32 実体を静かに飛ばすが、明示指定は「圧縮格納は f32 実体のみ」で落ちる。
+        """The default quietly skips non-f32 data, but an explicit choice fails with "compressed
+        storage takes f32 data only".
 
-        i32 格納（記号依存定数 — ADR 0010）が重みスロットへ流れた形。意味論ごと違うので
-        黙って圧縮格納にしない側の枝（他の 3 枝と対）。
+        i32 storage (a symbol-dependent constant — ADR 0010) flowing into a weight slot. Its
+        semantics differ entirely, so this is the branch that never silently compresses (the
+        counterpart of the other 3 branches).
         """
         graph, tensors, scales = mixed_weight_graph()
         tensors["enc.emb"] = torch.zeros(3, 32, dtype=torch.int32)
@@ -1685,7 +1783,8 @@ class TestMixedStorage:
 
 
 def conv2d_only_graph() -> tuple[IrGraph, dict[str, torch.Tensor]]:
-    """重みスロットは在るが **i4 の展開経路が無い**グラフ（conv2d 1 本 — VAE の最小形）。"""
+    """A graph with a weight slot but **no i4 decode path** (one conv2d — the VAE's minimal
+    form)."""
     graph = IrGraph(
         symbols=[],
         inputs=[IrInput(name="x", dtype="f32", shape=[1, 2, 4, 4])],
@@ -1712,17 +1811,19 @@ def conv2d_only_graph() -> tuple[IrGraph, dict[str, torch.Tensor]]:
 
 
 class TestThePlannedCompressionGate:
-    """「圧縮指定なのに適格 0MB」の門は **圧縮格納が 1 本も計画されなかったか**で見る
-    （ADR 0006 の常設診断）。
+    """The "compression requested but 0 MB eligible" check asks **whether no compressed storage
+    at all was planned** (ADR 0006's standing diagnostic).
 
-    既定 dtype と同じ格納 dtype が 0 本でも、明示指定が適格な全件を別 dtype で覆っていれば
-    意図は果たされている — その形まで落とすと、混成格納を 1 本単位で書き切った配布形が
-    書けなくなる。真に 0 本の形で従来どおり落ちることは
-    {@link TestF16Storage.test_a_graph_without_eligible_weights_fails_loudly} 以下 3 本が持つ。
+    Even with zero tensors in the default dtype's storage, the intent is met if explicit choices
+    cover every eligible tensor with another dtype — failing that form too would make a
+    distribution written out with per-tensor mixed storage impossible. That a truly empty plan
+    still fails is covered by
+    {@link TestF16Storage.test_a_graph_without_eligible_weights_fails_loudly} and the 3 tests
+    after it.
     """
 
     def test_overrides_covering_every_eligible_weight_pass_the_gate(self, tmp_path):
-        """既定 i8 の宣言が 1 本も無くても、明示指定の i4 が計画されていれば通る。"""
+        """Passes when explicit i4 choices are planned, even with no default i8 declaration."""
         graph, tensors, scales = int4_weight_graph()
 
         path = write_component(
@@ -1737,11 +1838,11 @@ class TestThePlannedCompressionGate:
         assert written_graph(path).initializers["w"].storage.dtype == "i4"
 
     def test_the_i4_message_names_the_expansion_path(self, tmp_path):
-        """i4 適格が 0 本のとき、原因は「重みスロットが無い」ではなく「展開経路が無い」。
+        """With 0 i4-eligible tensors, the cause is "no decode path", not "no weight slot".
 
-        conv2d の重みは一般適格でも i4 で展開できるカーネルが無い（ADR 0069 決定 5）。
-        「融合 op の重みを持たないグラフに i4 を指定していないか」ではグラフの構造を疑って
-        空振りする。
+        A conv2d weight is generally eligible, but no kernel can decode it as i4 (ADR 0069
+        decision 5). "Is i4 requested for a graph without fused-op weights" would suspect the
+        graph's structure and miss.
         """
         graph, tensors = conv2d_only_graph()
 
@@ -1751,7 +1852,8 @@ class TestThePlannedCompressionGate:
         assert "i4 decode path (linear / embedding / conv1d" in str(err.value)
 
     def test_the_message_reports_the_default_and_the_explicit_dtypes(self, tmp_path):
-        """診断は既定と明示指定の内訳を出す（どちらの指定が空振りしたかを読ませる）。"""
+        """The diagnostic shows the default and explicit breakdown (so the reader sees which choice
+        matched nothing)."""
         graph, tensors = sample_graph()
 
         with pytest.raises(EmitError) as err:
@@ -1762,10 +1864,12 @@ class TestThePlannedCompressionGate:
 
 
 class TestInitializerKeyInjectivity:
-    """宣言は名前単位・実体はキー単位 — 名前 ↔ テンソルキーが 1:1 でなければ計画段で落とす。"""
+    """Declarations are per name, data per key — unless name ↔ tensor key is 1:1, it fails at the
+    planning step."""
 
     def test_two_initializers_sharing_one_tensor_key_fail_loudly(self, tmp_path):
-        """片方だけが適格だと「実体は packed / 宣言は f32」の沈黙誤値になる形。"""
+        """If only one were eligible, it would be a silent wrong value "data packed / declaration
+        f32"."""
         graph, tensors = weight_graph()
         graph = replace(
             graph,

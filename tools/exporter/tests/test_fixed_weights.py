@@ -1,4 +1,4 @@
-"""固定量子化の保存値と、曖昧な値の供給を拒否する契約（ADR 0097）。"""
+"""Stored values of fixed quantization and the contract refusing ambiguous values (ADR 0097)."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from karume.verify import verify_container
 
 PROVENANCE = Provenance(license="mit")
 
-#: piece 分割を踏む block 上限（33 行の重みが 2 本以上の piece に割れる大きさ）。
+#: Block limit that takes piece splitting (small enough that a 33-row weight splits into 2+ pieces).
 SMALL_BLOCK = 256
 
 
@@ -48,9 +48,10 @@ def fixture(dtype: str = "i2"):
 
 
 def payloads(paths: tuple[Path, ...] | list[Path]) -> dict[str, bytes]:
-    """コンテナの全 initializer と companion scale の **payload 部**（詰め物を含まない）。
+    """The **payload part** of every initializer and companion scale in the container (no padding).
 
-    piece 列は親 1 本へ繋ぐ（合流が行範囲を持っているので、ここは block を順に繋ぐだけ）。
+    Piece lists are joined into their parent (the merge holds the row ranges, so this only joins
+    the blocks in order).
     """
     verified = verify_container(list(paths), blocks=True)
     result: dict[str, bytes] = {}
@@ -67,7 +68,7 @@ def payloads(paths: tuple[Path, ...] | list[Path]) -> dict[str, bytes]:
 
 
 def write(tmp_path: Path, graph, tensors, fixed, *, block_bytes=BLOCK_MAX_BYTES, **kwargs):
-    """格納変換 → 容器（テストが踏みたい寸法は block 上限の差し込みで作る）。"""
+    """Storage conversion → container (tests get the sizes they need by injecting a block limit)."""
     stored = stored_model(graph, tensors, fixed_weights=fixed, **kwargs)
     result = publish_container(
         tmp_path / "model.krm",
@@ -225,7 +226,7 @@ class TestFixedQuantizedWeights:
             )
             tensors[key], fixed[key] = source["layer.weight"], payload["layer.weight"]
             outputs.append(result)
-        # 同じ重みを embedding と linear の両方で読む共有は適格。
+        # Sharing that reads the same weight as both embedding and linear is eligible.
         initializers["head_bias"] = IrInitializer(
             tensor="head_bias", storage=IrStorage(dtype="f32")
         )

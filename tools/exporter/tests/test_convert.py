@@ -1,8 +1,9 @@
-"""コンバータの振る舞い固定。
+"""Pins the converter's behaviour.
 
-黙って壊れた IR を書き出す経路（入力欠落・prefix 非可換な焼き込み・語彙外 op の近似）を
-実際に踏むモジュールで再現し、fail loudly か正しい表現かのどちらかになることを固定する。
-個別 aten op の対応表（aten_handlers.py）側の検証は test_aten_handlers.py。
+Paths that would silently write a broken IR (a missing input, baking that does not commute with the
+prefix, approximating an op outside the vocabulary) are reproduced with modules that really take
+them, pinning that each ends either in fail loudly or in a correct representation. The checks of
+the per-aten-op table (aten_handlers.py) are in test_aten_handlers.py.
 """
 
 from __future__ import annotations
@@ -34,7 +35,8 @@ class Scale(nn.Module):
 
 
 class TestTensorInputs:
-    """テンソル入力は位置引数から組む（all_input_nodes の重複排除に依らない）。"""
+    """Tensor inputs are built from the positional arguments (not relying on the deduplication of
+    all_input_nodes)."""
 
     def test_same_tensor_on_both_operands_yields_two_inputs(self, convert_module, dyn_t):
         class Square(nn.Module):
@@ -59,7 +61,8 @@ class TestTensorInputs:
         assert "args=" in message
 
     def test_scalar_operand_becomes_a_rank1_constant(self, convert_module):
-        """スカラ被演算子は正規化パスが rank-1 定数へ昇格させる（ADR 0010 / recon §4-4）。"""
+        """A scalar operand is promoted to a rank-1 constant by the normalization pass (ADR 0010 /
+        recon §4-4)."""
 
         class Doubling(nn.Module):
             def forward(self, x):
@@ -72,10 +75,10 @@ class TestTensorInputs:
         assert torch.equal(tensors[graph.initializers[folded].tensor], torch.tensor([2.0]))
 
     def test_type_promoting_scalar_operand_is_still_rejected(self, convert_module):
-        """昇格させるのは dtype が変わらない形だけ — 型昇格を含む形は fail loudly。
+        """Only forms that keep the dtype are promoted — a form with type promotion fails loudly.
 
-        `i32 テンソル × f32 スカラ` は cast を含むので、rank-1 定数に落とすと二項 op の
-        「入力 dtype は同型」契約を黙って破る。
+        `i32 tensor × f32 scalar` includes a cast, so turning it into a rank-1 constant would
+        silently break the binary ops' contract that "the input dtypes are the same".
         """
 
         class Scaled(nn.Module):
@@ -87,11 +90,13 @@ class TestTensorInputs:
 
 
 class TestUnsupportedOps:
-    """語彙外の aten op は全件列挙して落とす（部分近似も 1 件打ち切りもしない）。"""
+    """aten ops outside the vocabulary are all enumerated and rejected (neither partial
+    approximation nor stopping at the first one)."""
 
     def test_every_unsupported_op_is_listed_at_once(self, convert_module):
-        """NOTE: 2 本目の見本は `sin` → `atan` に差し替えた（sin が IR 語彙に入り、
-        「語彙外」の見本でなくなったため）。検査そのもの（2 件を 1 度に列挙する）は不変。
+        """NOTE: the second example was replaced, `sin` → `atan` (sin entered the IR vocabulary and
+        was no longer an example "outside the vocabulary"). The check itself (listing 2 at once)
+        is unchanged.
         """
 
         class Trigonometry(nn.Module):
@@ -106,12 +111,13 @@ class TestUnsupportedOps:
         assert "aten.atan.default" in str(err.value)
 
     def test_op_outside_the_fold_allowlist_stays_in_the_enumeration(self, convert_module, dyn_t):
-        """畳み込み allowlist に無い op は記号依存でも畳まない（黙って近似しない）。
+        """An op not in the folding allowlist is not folded even when it depends on a symbol (no
+        silent approximation).
 
-        NOTE: 見本の op は `flip` → `sin` → `floor` と差し替えてきた（ADR 0014 で flip が実行系の
-        語彙に、ADR 0016 で sin が畳み allowlist に入り、それぞれ「allowlist にも対応表にも
-        無い op」の見本でなくなったため）。検査そのもの（記号依存でも畳まず全件列挙へ回す）は
-        変えていない。
+        NOTE: the example op has been replaced `flip` → `sin` → `floor` (ADR 0014 put flip into the
+        runtime's vocabulary and ADR 0016 put sin into the folding allowlist, so each stopped
+        being an example of "an op in neither the allowlist nor the table"). The check itself (not
+        folding even when symbol-dependent, sending it to the full enumeration) is unchanged.
         """
 
         class Stepped(nn.Module):
@@ -125,17 +131,18 @@ class TestUnsupportedOps:
         assert "aten.floor.default" in err.value.ops
 
     def test_topk_is_declared_non_emittable_and_really_cannot_be_exported(self, convert_module):
-        """`topk` は契約表にあるが **torch から出せない**（ADR 0068 追記）。
+        """`topk` is in the contract table but **cannot be emitted from torch** (ADR 0068 addendum).
 
-        多出力 aten のタプル meta + `operator.getitem` スロット結線は新機構で、sampling の
-        実需まで先送りした（裁定済み）。`NON_EMITTABLE_OPS` に席があるだけでは「ハンドラを
-        足したのに golden 被覆の門から外れたまま」を防げないので、**落ちること自体**を門に
-        する（ハンドラと getitem 結線を入れた日にここが赤くなり、そのとき
-        `NON_EMITTABLE_OPS` から外して golden を足す）。
+        Tuple meta of multi-output aten ops + wiring `operator.getitem` slots is a new mechanism,
+        deferred until sampling really needs it (ruled). An entry in `NON_EMITTABLE_OPS` alone
+        cannot prevent "a handler was added but it stays outside the golden-coverage check", so
+        **the failure itself** is the check (this turns red on the day the handler and the getitem
+        wiring go in; then it is removed from `NON_EMITTABLE_OPS` and goldens are added).
 
-        実測（2026-08-17）: 止まるのは `aten.topk.default` ではなく **`operator.getitem`**。
-        torch.export はタプル返しをそのまま返す形でも getitem ノードを挟むので、aten
-        ハンドラだけを足しても道は開かない（結線が新機構だという ADR 追記の裏付け）。
+        Observed (2026-08-17): what stops is not `aten.topk.default` but **`operator.getitem`**.
+        torch.export inserts getitem nodes even when the tuple is returned as is, so adding only an
+        aten handler does not open the way (supporting the ADR addendum's point that the wiring
+        is a new mechanism).
         """
 
         class Topk(nn.Module):
@@ -153,7 +160,8 @@ class TestUnsupportedOps:
 
 
 class _AtanActivation(nn.Module):
-    """Core ATen 内（`torch.Tag.core` 付き）だが IR 語彙に無い op を出す葉モジュール。"""
+    """A leaf module that emits an op inside Core ATen (tagged `torch.Tag.core`) but not in the IR
+    vocabulary."""
 
     def forward(self, x):
         return torch.atan(x)
@@ -169,7 +177,8 @@ class _AtanBlock(nn.Module):
 
 
 class _StackedAtanBlocks(nn.Module):
-    """同じ未対応 op が入れ子のモジュールから複数回出る形（移植先の層の繰り返しの縮図）。"""
+    """The same unsupported op appears several times from nested modules (a miniature of the
+    repeated layers of a ported model)."""
 
     def __init__(self):
         super().__init__()
@@ -186,11 +195,12 @@ def _qualified_name(cls: type) -> str:
 
 
 class TestUnsupportedOpDiagnostics:
-    """未対応 op のエラーは、op ごとに移植の判断材料を運ぶ（P4-006）。
+    """The unsupported-op error carries, per op, what a port needs to decide (P4-006).
 
-    判断材料は 3 つ: Core ATen 帰属（語彙へ足すときの ADR 要否を決める唯一の軸 —
-    docs/op-vocabulary.md「op 追加の判定手順」）・由来モジュール（recipe 側で書き換える場所）・
-    出現数。エラー 1 回でこの 3 つが分かれば、op ごとに調べ直さずに済む。
+    Three things: Core ATen membership (the one axis that decides whether adding it to the
+    vocabulary needs an ADR — docs/op-vocabulary.md "Procedure for adding an op"), the originating
+    module (where to rewrite on the recipe side) and the occurrence count. With all three in one
+    error, nothing has to be looked up again per op.
     """
 
     def test_core_aten_op_carries_its_count_and_innermost_module(self, convert_module):
@@ -243,7 +253,8 @@ class TestUnsupportedOpDiagnostics:
         assert "[outside aten]" in str(err.value)
 
     def test_node_without_module_stack_is_counted_as_untracked(self):
-        """normalize が作るノードは `nn_module_stack` を持たない — 由来を捏造せず不明と数える。"""
+        """Nodes created by normalize have no `nn_module_stack` — the origin is counted as unknown,
+        not made up."""
         graph = torch.fx.Graph()
         x = graph.placeholder("x")
         atan = graph.call_function(torch.ops.aten.atan.default, (x,))
@@ -259,7 +270,8 @@ class TestUnsupportedOpDiagnostics:
 
 
 class TestConstantFolding:
-    """定数部分木は initializer に焼く（記号に依存しないものだけ）。"""
+    """Constant subtrees are baked into initializers (only those that do not depend on a
+    symbol)."""
 
     def test_constant_subtree_becomes_an_initializer(self, convert_module):
         class ScaleByOnes(nn.Module):
@@ -283,7 +295,8 @@ class TestConstantFolding:
         assert only_node(graph, "mul").ins[1] == only_node(graph, "add").ins[1]
 
     def test_integer_constant_becomes_an_i32_initializer(self, convert_module):
-        """整数定数は i32 initializer（生の int32 格納 — ADR 0010）。i64 は境界で i32 へ。"""
+        """An integer constant becomes an i32 initializer (raw int32 storage — ADR 0010). i64 goes
+        to i32 at the boundary."""
 
         class IntegerIndex(nn.Module):
             def forward(self, src):
@@ -292,7 +305,8 @@ class TestConstantFolding:
         graph, tensors = convert_module(IntegerIndex(), (torch.randn(3, 4),))
 
         index = only_node(graph, "gather").ins[1]
-        # expand は畳み込み frontier で止まる（実体化が膨らむ）ので、定数はその入力側。
+        # expand stops at the folding frontier (materializing it would inflate), so the constant
+        # is on its input side.
         folded = only_node(graph, "expand").ins[0]
         assert index == only_node(graph, "expand").outs[0]
         assert graph.values[folded].dtype == "i32"
@@ -300,7 +314,7 @@ class TestConstantFolding:
         assert tensors[graph.initializers[folded].tensor].dtype is torch.int32
 
     def test_bool_constant_is_rejected(self, convert_module):
-        """bool の initializer は IR v1 の語彙に無い（意味論は f32 / i32 のみ）。"""
+        """A bool initializer is not in the IR v1 vocabulary (semantics f32 / i32 only)."""
 
         class Masked(nn.Module):
             def forward(self, x):
@@ -313,7 +327,7 @@ class TestConstantFolding:
 
 
 class _LastPositionByTensorIndex(nn.Module):
-    """`arange(T)[[-1]] >= Tmax−2` — Tmax と Tmax−1 では真、T=5 では偽。"""
+    """`arange(T)[[-1]] >= Tmax−2` — true at Tmax and Tmax−1, false at T=5."""
 
     def forward(self, x):
         positions = torch.arange(x.shape[0])
@@ -321,7 +335,8 @@ class _LastPositionByTensorIndex(nn.Module):
 
 
 class _LastPositionBySymbolicIndex(nn.Module):
-    """添字テンソルが記号長でも同じ穴 — `full((T,), -1)` で引けば全要素が T−1 になる。"""
+    """The same hole with an index tensor of symbolic length — indexing with `full((T,), -1)` makes
+    every element T−1."""
 
     def forward(self, x):
         positions = torch.arange(x.shape[0])
@@ -330,7 +345,7 @@ class _LastPositionBySymbolicIndex(nn.Module):
 
 
 class _LastPositionsByNegativeSlice(nn.Module):
-    """`arange(T)[-2:] >= Tmax−3` — Tmax と Tmax−1 では両要素とも真、T=5 では偽。"""
+    """`arange(T)[-2:] >= Tmax−3` — both elements true at Tmax and Tmax−1, false at T=5."""
 
     def forward(self, x):
         positions = torch.arange(x.shape[0])
@@ -338,10 +353,12 @@ class _LastPositionsByNegativeSlice(nn.Module):
 
 
 class _PositionAcrossConcatenation(nn.Module):
-    """`cat([r, r, r, r])[7:8] >= 5` — 位置 7 は T=15・16 なら 1 本目の 7、T=5 なら 2 本目の 2。
+    """`cat([r, r, r, r])[7:8] >= 5` — position 7 is the first copy's 7 at T=15 or 16, the second
+    copy's 2 at T=5.
 
-    4 本つなぐのは、T の下限 2 でも全長 4T >= 8 になり `[7:8]` が静的な 1 要素に決まるため
-    （記号長の slice 出力にすると、焼く前に shape の側で落ちて反例にならない）。
+    Four copies are joined so that even at T's lower bound 2 the total length 4T >= 8, which makes
+    `[7:8]` a static single element (a slice output of symbolic length would fail on the shape
+    side before baking and would not be a counterexample).
     """
 
     def forward(self, x):
@@ -350,7 +367,8 @@ class _PositionAcrossConcatenation(nn.Module):
 
 
 class _PositionAcrossRepetition(nn.Module):
-    """`r.repeat(4)[7:8] >= 5` — 値は cat の 4 本つなぎと同じ（2 周目の位置が T でずれる）。"""
+    """`r.repeat(4)[7:8] >= 5` — the values equal the 4-way cat (the second round's positions
+    shift with T)."""
 
     def forward(self, x):
         positions = torch.arange(x.shape[0])
@@ -358,9 +376,11 @@ class _PositionAcrossRepetition(nn.Module):
 
 
 def _assert_slips_past_two_point_evaluation(module: nn.Module, trailing: tuple[int, ...]) -> None:
-    """反例の前提: 2 つの評価点（Tmax と Tmax−1）では一致し、その外の T=5 では食い違う。
+    """The counterexample's premise: it agrees at the 2 evaluation points (Tmax and Tmax−1) and
+    disagrees outside them at T=5.
 
-    = 2 点評価では止まらない形。前提が崩れたら、反例を使うテストは何も守っていない。
+    = a shape that the 2-point evaluation does not stop. If the premise broke, the tests using the
+    counterexample would protect nothing.
     """
     assert torch.equal(module(torch.zeros(SYM_MAX, *trailing)), torch.ones(SYM_MAX, *trailing))
     assert torch.equal(
@@ -370,11 +390,13 @@ def _assert_slips_past_two_point_evaluation(module: nn.Module, trailing: tuple[i
 
 
 class TestSymbolicConstantFolding:
-    """記号依存の部分木は Tmax で焼き、実行時は sym_prefix_slice で切り出す（ADR 0010）。"""
+    """Symbol-dependent subtrees are baked at Tmax and cut out with sym_prefix_slice at run time
+    (ADR 0010)."""
 
     @pytest.mark.parametrize("axis", [0, 1, 2])
     def test_symbolic_reshape_is_applied_after_slicing(self, convert_module, dyn_t, axis):
-        """長さで行境界が動く view は、上限近傍で偶然一致しても定数化しない。"""
+        """A view whose row boundaries move with the length is not made constant, even when it
+        happens to agree near the upper bound."""
 
         class ReshapedTable(nn.Module):
             def forward(self, x):
@@ -386,7 +408,8 @@ class TestSymbolicConstantFolding:
         shape.insert(axis, 6)
         module = ReshapedTable()
         graph, tensors = convert_module(module, (torch.zeros(shape),), ({axis: dyn_t},))
-        # 記号長で並べ替える前の表だけを焼く。上限で並べ替えた表の prefix とは異なる。
+        # Only the table before reshaping by the symbolic length is baked. It differs from the
+        # prefix of the table reshaped at the upper bound.
         sliced = only_node(graph, "sym_prefix_slice")
         reshaped = only_node(graph, "reshape")
         assert reshaped.ins == sliced.outs
@@ -410,15 +433,17 @@ class TestSymbolicConstantFolding:
 
         sliced = only_node(graph, "sym_prefix_slice")
         assert sliced.attrs == {"sym": "T", "slices": [{"dim": 0, "coeff": 1, "offset": 0}]}
-        # 焼いた定数は **Tmax = dyn_t の上限**の長さで、実行時は先頭 T 要素だけを読む。
+        # The baked constant has the length **Tmax = the upper bound of dyn_t**; at run time only
+        # the first T elements are read.
         baked = tensors[graph.initializers[sliced.ins[0]].tensor]
         assert torch.equal(baked, torch.arange(SYM_MAX, dtype=torch.float32).unsqueeze(-1))
         assert graph.values[sliced.outs[0]].shape == ["T", 1]
 
     def test_prefix_slice_beyond_the_strided_rank_is_rejected(self, convert_module, dyn_t):
-        """prefix スライスは strided 実体化コピーで実行する（新カーネルは無い — ADR 0010）。
+        """A prefix slice runs as a strided materializing copy (no new kernel — ADR 0010).
 
-        rank 上限を export 時点で見ないと「export は緑・ブラウザだけ落ちる」になる。
+        Without checking the rank limit at export time, it would be "export green, fails only in
+        the browser".
         """
 
         class Wide(nn.Module):
@@ -432,7 +457,8 @@ class TestSymbolicConstantFolding:
             convert_module(Wide(), (torch.randn(6),), ({0: dyn_t},))
 
     def test_a_static_subtree_stays_a_plain_constant(self, convert_module, dyn_t):
-        """記号次元が無ければ sym_prefix_slice は出ない（無駄な 1 dispatch を足さない）。"""
+        """Without a symbolic dimension no sym_prefix_slice is emitted (no wasted dispatch is
+        added)."""
 
         class StaticOffset(nn.Module):
             def forward(self, x):
@@ -443,11 +469,13 @@ class TestSymbolicConstantFolding:
         assert node_ops(graph) == ["add"]
 
     def test_a_subtree_that_uses_the_symbol_as_a_value_is_rejected(self, convert_module, dyn_t):
-        """`arange(T) / T` は allowlist だけ見れば適格 — 消費位置の検査が止める。
+        """`arange(T) / T` qualifies by the allowlist alone — the consumption-position check stops
+        it.
 
-        NOTE: 期待する診断を「2 点評価の非可換」から差し替えた。除数の T は extent でなく
-        値位置なので div が畳み込みから外れ、テンソル入力 1 本の形として arity 検査が先に
-        落とす（拒否されること自体は変わらない）。
+        NOTE: the expected diagnostic was changed from "does not commute under the 2-point
+        evaluation". The divisor T is in a value position, not an extent, so div drops out of the
+        folding, and the arity check fails it first as a form with a single tensor input (that it
+        is rejected does not change).
         """
 
         class NormalizedPositions(nn.Module):
@@ -458,10 +486,12 @@ class TestSymbolicConstantFolding:
             convert_module(NormalizedPositions(), (torch.randn(6),), ({0: dyn_t},))
 
     def test_a_constant_filled_with_the_symbol_is_rejected(self, convert_module, dyn_t):
-        """`full((T,), T)` — shape も値も T 依存で、prefix の値だけが食い違う形。
+        """`full((T,), T)` — both the shape and the values depend on T, and only the prefix's values
+        disagree.
 
-        NOTE: 期待する診断を「2 点評価の非可換」から差し替えた。`fill_value` の T は値位置
-        なので full が畳み込みから外れ、実行系の語彙に無い op として全件列挙へ回る。
+        NOTE: the expected diagnostic was changed from "does not commute under the 2-point
+        evaluation". The T of `fill_value` is in a value position, so full drops out of the
+        folding and goes to the full enumeration as an op outside the runtime's vocabulary.
         """
 
         class FilledWithLength(nn.Module):
@@ -474,11 +504,13 @@ class TestSymbolicConstantFolding:
         assert "aten.full.default" in err.value.ops
 
     def test_a_symbol_promoted_to_tensor_data_is_rejected(self, convert_module, dyn_t):
-        """`scalar_tensor(T)` でテンソルデータへ昇格したシンボルは畳まない（2 点評価の穴）。
+        """A symbol promoted to tensor data through `scalar_tensor(T)` is not folded (the hole in
+        the 2-point evaluation).
 
-        `(T−Tmax)(T−(Tmax−1))` は 2 つの評価点で**両方 0** になるので実測はすり抜ける —
-        焼けば T=2 で 182 倍が黙って消える。消費位置（値 vs extent）で落とすため
-        scalar_tensor は畳み込みから外れ、実行系の語彙に無い op として拒否される。
+        `(T−Tmax)(T−(Tmax−1))` is **0 at both** evaluation points, so the observation slips
+        through — baking it would silently lose a factor of 182 at T=2. Since the rejection is by
+        consumption position (value vs extent), scalar_tensor drops out of the folding and is
+        rejected as an op outside the runtime's vocabulary.
         """
 
         class SymbolAsData(nn.Module):
@@ -494,16 +526,20 @@ class TestSymbolicConstantFolding:
     @pytest.mark.parametrize(
         ("module", "shape", "error", "match"),
         [
-            # `r[tensor([-1])]` は index.Tensor — 記号軸を添字テンソルで引く形。
+            # `r[tensor([-1])]` is index.Tensor — indexing the symbolic axis with an index tensor.
             (_LastPositionByTensorIndex(), (6,), UnsupportedAtenOpsError, "aten.index.Tensor"),
-            # 添字の形ではなく、記号軸を添字テンソルで引くこと自体を外す（負かは値の性質）。
+            # Not the index's shape: indexing the symbolic axis with an index tensor is itself
+            # excluded (being negative is a property of the values).
             (_LastPositionBySymbolicIndex(), (6,), UnsupportedAtenOpsError, "aten.index.Tensor"),
-            # `r[-2:]` は負の start の slice — 外れた slice は記号軸を受けない対応表で落ちる。
+            # `r[-2:]` is a slice with a negative start — the excluded slice fails in the table,
+            # which does not accept a symbolic axis.
             (_LastPositionsByNegativeSlice(), (6, 2), NotImplementedError, "symbolic dimension"),
-            # 記号軸に沿った cat — 位置 7 がどの入力に落ちるかが T で決まる。cat が外れると、
-            # 後ろの slice も記号軸を受けない対応表で落ちる。
+            # cat along the symbolic axis — which input position 7 falls into is decided by T.
+            # With cat excluded, the slice after it also fails in the table, which does not
+            # accept a symbolic axis.
             (_PositionAcrossConcatenation(), (6,), NotImplementedError, "symbolic dimension"),
-            # 記号軸を繰り返す repeat — cat と同じ理由で外れ、repeat は語彙外として落ちる。
+            # repeat over the symbolic axis — excluded for the same reason as cat; repeat fails as
+            # outside the vocabulary.
             (_PositionAcrossRepetition(), (6,), UnsupportedAtenOpsError, "aten.repeat.default"),
         ],
         ids=["tensor-index", "symbolic-tensor-index", "negative-slice", "cat", "repeat"],
@@ -511,13 +547,16 @@ class TestSymbolicConstantFolding:
     def test_a_position_that_depends_on_the_symbolic_length_is_not_folded(
         self, convert_module, dyn_t, module, shape, error, match
     ):
-        """記号軸上の位置が長さ T で決まる形は畳まない（2 点評価の穴 — ADR 0010 の追記）。
+        """A form in which a position on the symbolic axis is decided by the length T is not folded
+        (the hole in the 2-point evaluation — ADR 0010 addendum).
 
-        `arange(T)` を末尾から数えて引く・記号軸に沿ってつなぐ / 繰り返すと、長さ T が値
-        （T−1 や「どの周回に落ちるか」）に化ける。記号は値位置へ届かないので消費位置の検査を
-        通り、後段の比較が Tmax と Tmax−1 の両方で真になると 2 点評価も通る — 焼けば T=5 で
-        0 のはずの値が黙って 1 になる。添字の値を見ずに構造で外すため、部分木は通常の
-        lowering へ落ちて明示的に失敗する。
+        Indexing `arange(T)` counted from the end, or joining / repeating along the symbolic axis,
+        turns the length T into a value (T−1, or "which round it falls in"). The symbol does not
+        reach a value position, so it passes the consumption-position check, and when the later
+        comparison is true at both Tmax and Tmax−1 it passes the 2-point evaluation too — baking it
+        would silently turn a value that should be 0 at T=5 into 1. The exclusion is structural,
+        without looking at the index values, so the subtree drops to the normal lowering and fails
+        explicitly.
         """
         _assert_slips_past_two_point_evaluation(module, shape[1:])
 
@@ -525,7 +564,8 @@ class TestSymbolicConstantFolding:
             convert_module(module, (torch.randn(*shape),), ({0: dyn_t},))
 
     def test_a_concatenation_along_the_symbolic_axis_runs_at_runtime(self, convert_module, dyn_t):
-        """記号軸に沿った cat は畳まない — 2 本目の位置が 1 本目の長さ T でずれる。"""
+        """cat along the symbolic axis is not folded — the second input's positions shift by the
+        first input's length T."""
 
         class Doubled(nn.Module):
             def forward(self, x):
@@ -537,10 +577,12 @@ class TestSymbolicConstantFolding:
         assert node_ops(graph).count("cat") == 2
 
     def test_a_contraction_over_the_symbolic_axis_runs_at_runtime(self, convert_module, dyn_t):
-        """記号軸で縮約する bmm は畳まない — 結果が T 個ぶんの和で全長に依存する。
+        """A bmm that contracts over the symbolic axis is not folded — the result is a sum over T
+        terms and depends on the total length.
 
-        `sum(arange(T)) >= (Tmax−1)(Tmax−2)/2` は Tmax と Tmax−1 で真、T=5 で偽 — 焼けば
-        2 点評価を通って黙って 1 になる形。外れた bmm は実行時の op として lowering される。
+        `sum(arange(T)) >= (Tmax−1)(Tmax−2)/2` is true at Tmax and Tmax−1 and false at T=5 —
+        baked, it would pass the 2-point evaluation and silently become 1. The excluded bmm is
+        lowered as a run-time op.
         """
 
         class SumOfPositions(nn.Module):
@@ -558,13 +600,15 @@ class TestSymbolicConstantFolding:
         assert "bmm" in node_ops(graph)
 
     def test_a_boolean_mask_index_is_not_folded(self, convert_module, dyn_t):
-        """bool マスクの index は記号軸の有無を問わず畳まない（保守的な側）。
+        """An index with a bool mask is not folded, with or without a symbolic axis (the
+        conservative side).
 
-        rank 2 のマスクは 1 本の添字で入力の 2 軸を占めるので、記号軸（2 軸目）が「添字 k ↔
-        入力の軸 k」の対応の外に隠れる。
-        この除外が無くても、マスク添字の出力長は値で決まる unbacked な記号になり、焼いた
-        結果の shape で明示的に落ちていた（沈黙誤値ではない）。このテストが固定するのは
-        失敗の出方 — 外れた index が語彙外の op として未対応 op の全件列挙に載って落ちる経路。
+        A rank-2 mask occupies 2 axes of the input with a single index, so the symbolic axis (the
+        second axis) hides outside the correspondence "index k ↔ input axis k".
+        Even without this exclusion, the output length of mask indexing is an unbacked symbol
+        decided by values, and it failed explicitly on the baked result's shape (not a silently
+        wrong value). What this test pins is how it fails — the excluded index goes into the full
+        enumeration of unsupported ops as an op outside the vocabulary.
         """
 
         class Masked(nn.Module):
@@ -580,7 +624,8 @@ class TestSymbolicConstantFolding:
     def test_a_non_negative_slice_start_on_the_symbolic_axis_still_folds(
         self, convert_module, dyn_t
     ):
-        """先頭から数える slice は prefix と可換 — 外すのは負の start だけ。"""
+        """A slice counted from the start commutes with the prefix — only a negative start is
+        excluded."""
 
         class Shifted(nn.Module):
             def forward(self, x):
@@ -595,7 +640,8 @@ class TestSymbolicConstantFolding:
     def test_a_symbol_free_fill_value_still_folds_under_a_symbolic_extent(
         self, convert_module, dyn_t
     ):
-        """落とすのは消費**位置** — 形が T 依存でも、値が T に依らなければ従来どおり畳む。"""
+        """The rejection is by consumption **position** — even when the shape depends on T, values
+        independent of T are folded as before."""
 
         class ConstantRow(nn.Module):
             def forward(self, x):
@@ -608,7 +654,7 @@ class TestSymbolicConstantFolding:
         assert torch.equal(baked, torch.full((SYM_MAX,), 3.0))
 
     def test_an_unbounded_symbol_is_rejected(self, convert_module):
-        """Tmax が無ければ焼く長さを決められない（既定値で進めない）。"""
+        """Without Tmax the length to bake cannot be decided (no proceeding with a default)."""
 
         class PositionIndex(nn.Module):
             def forward(self, x):
@@ -618,7 +664,8 @@ class TestSymbolicConstantFolding:
             convert_module(PositionIndex(), (torch.randn(6),), ({0: Dim.DYNAMIC},))
 
     def test_a_symbol_range_too_narrow_for_two_points_is_rejected(self, convert_module):
-        """第 2 評価点が 0/1 特殊化の回避線を割る値域は、検査が恒真化するので受理しない。"""
+        """A range in which the second evaluation point falls below the line that avoids 0/1
+        specialization is not accepted, since the check would become tautological."""
 
         class PositionIndex(nn.Module):
             def forward(self, x):
@@ -629,18 +676,21 @@ class TestSymbolicConstantFolding:
 
 
 class TestFoldProbeComparison:
-    """2 点評価の比較はビット厳密（数値等価では符号ビットの差が素通りする）。
+    """The comparison of the 2-point evaluation is bit-exact (numerical equality lets a sign-bit
+    difference through).
 
-    NOTE: 比較関数を直に呼ぶ。symbol-as-data を拒否した後、export 経由でこの差を作るには
-    「値が T に依るのに畳める部分木」が要る — つまり黙って通る形そのもので、テストから
-    合成できない（合成できたらそれが未修正のバグ）。
+    NOTE: the comparison function is called directly. After symbol-as-data was rejected, producing
+    this difference through export would need "a foldable subtree whose values depend on T" —
+    exactly the shape that slips through silently, which a test cannot synthesize (if it could,
+    that would be an unfixed bug).
     """
 
     def test_negative_zero_is_not_equal_to_positive_zero(self):
         minus = torch.tensor([-0.0])
         plus = torch.tensor([0.0])
 
-        assert torch.equal(minus, plus)  # 数値等価は素通りする — 強化した理由そのもの
+        # Numerical equality lets it through — the very reason it was tightened.
+        assert torch.equal(minus, plus)
         assert not _bitwise_equal(minus, plus)
 
     def test_identical_bits_are_equal(self):
@@ -653,7 +703,7 @@ class TestFoldProbeComparison:
 
 class TestCommonSubexpression:
     def test_identical_nodes_collapse_to_one(self, convert_module):
-        """export は同一部分式を残す — IR 側で 1 本に畳む。"""
+        """export keeps identical subexpressions — the IR side folds them into one."""
 
         class Twice(nn.Module):
             def forward(self, x, y):
@@ -667,41 +717,47 @@ class TestCommonSubexpression:
 
 
 class TestConstantDedup:
-    """定数の重複排除は full SHA-256 で突合する（名前の短縮形は表示だけ）。"""
+    """Constant deduplication matches on the full SHA-256 (the shortened name is for display
+    only)."""
 
     def _converter(self) -> Converter:
         ep = torch.export.export(Scale(), (torch.randn(3, 4),), strict=False)
         return Converter(ep)
 
     def test_the_dedup_key_is_the_full_digest_not_the_shortened_name(self):
-        """64bit 前置だけを突合キーにすると、衝突した 2 定数を実体比較なしで畳む。"""
+        """Matching on a 64-bit prefix alone would fold 2 colliding constants without comparing
+        their contents."""
         converter = self._converter()
 
-        name = converter._add_const(torch.zeros(3), "テスト定数")
+        name = converter._add_const(torch.zeros(3), "test constant")
 
         (digest,) = converter._const_by_digest
         assert len(digest) == 64
-        # 名前・テンソルキーの綴りは従来どおり先頭 16 hex。
+        # The name and the tensor key are spelled with the first 16 hex digits, as before.
         assert name == f"const_{digest[:16]}"
         assert converter.graph.initializers[name].tensor == f"const.{digest[:16]}"
 
     def test_a_short_name_collision_between_distinct_constants_fails_loudly(self):
-        """full が違うのに短縮名が一致した形（本物の衝突は到達不能）を作って踏む。
+        """Builds and exercises a case where the full digests differ but the short names match (a
+        real collision is unreachable).
 
-        黙って通すと後から来た定数が先の宣言を上書きし、先の定数を参照していたノードが
-        別の値を読む（沈黙誤グラフ）。
+        Letting it through would make the later constant overwrite the earlier declaration, and
+        nodes that referenced the earlier constant would read another value (a silently wrong
+        graph).
         """
         converter = self._converter()
-        converter._add_const(torch.zeros(3), "テスト定数")
-        # 突合キーだけ落として「別の定数が同じ短縮名に落ちた」状況にする。
+        converter._add_const(torch.zeros(3), "test constant")
+        # Drop only the match keys to create the situation "another constant landed on the same
+        # short name".
         converter._const_by_digest.clear()
 
         with pytest.raises(AssertionError, match="collided"):
-            converter._add_const(torch.zeros(3), "テスト定数")
+            converter._add_const(torch.zeros(3), "test constant")
 
 
 class TestDeclarations:
-    """宣言はちょうど 1 箇所（入力は inputs[]、それ以外は values{}）。"""
+    """Each value is declared in exactly one place (inputs in inputs[], everything else in
+    values{})."""
 
     def test_inputs_are_not_declared_in_values(self, convert_module, dyn_t):
         graph, _ = convert_module(Scale(), (torch.randn(6, 4),), ({0: dyn_t},))
@@ -728,7 +784,7 @@ class TestDeclarations:
 
 
 class TestInitializerProvenance:
-    """パラメータ・バッファ・lifted 定数はいずれも FQN のテンソルキーで運ぶ。"""
+    """Parameters, buffers and lifted constants are all carried by their FQN tensor keys."""
 
     def test_parameters_buffers_and_lifted_constants_all_become_initializers(self, convert_module):
         class WithState(nn.Module):
@@ -736,7 +792,7 @@ class TestInitializerProvenance:
                 super().__init__()
                 self.weight = nn.Parameter(torch.randn(4))
                 self.register_buffer("shift", torch.randn(4))
-                self.gain = torch.randn(4)  # 素の属性 → lifted tensor constant
+                self.gain = torch.randn(4)  # plain attribute → lifted tensor constant
 
             def forward(self, x):
                 return x * self.weight + self.shift - self.gain
@@ -768,7 +824,8 @@ class TestDtypes:
 
 
 class TestSymbols:
-    """IR に載る名前は呼び出し側が与え、user 入力の出現順で割り当てる。"""
+    """The names that go into the IR are given by the caller and assigned in the order the user
+    inputs appear."""
 
     def test_static_graph_declares_no_symbols(self, convert_module):
         graph, _ = convert_module(Scale(), (torch.randn(3, 4),))
@@ -820,13 +877,14 @@ class TestSymbols:
 
     @pytest.mark.parametrize("name", ["2T", "T+1", "", "T-1"])
     def test_symbol_name_outside_the_dim_grammar_is_rejected(self, convert_module, name):
-        """名前が次元表記の文法に載らないと、書けてもランタイムが読めない次元になる。"""
+        """A name outside the grammar of the dimension notation would give a dimension that can be
+        written but that the runtime cannot read."""
         with pytest.raises(ValueError, match="is not in the grammar of the dimension notation"):
             convert_module(Scale(), (torch.randn(3, 4),), symbol_names=(name,))
 
 
 class TestOutputs:
-    """出力列は graph_signature の user 出力だけで構成する。"""
+    """The output list is built from the user outputs of graph_signature only."""
 
     def test_multiple_user_outputs_keep_their_order(self, convert_module):
         class TwoOutputs(nn.Module):
@@ -839,7 +897,8 @@ class TestOutputs:
         assert graph.outputs == [node.outs[0] for node in graph.nodes]
 
     def test_buffer_mutation_is_rejected(self, convert_module):
-        """IR v1 は状態更新を表現できない — 黙って捨てず未対応として落とす。"""
+        """IR v1 cannot express a state update — it fails as unsupported instead of being silently
+        dropped."""
 
         class Accumulating(nn.Module):
             def __init__(self):
@@ -857,15 +916,17 @@ class TestOutputs:
 
 
 class TestDuplicateOutputs:
-    """同じ IR 値を 2 つの出力へ割り当てる形は `convert()` の時点で落とす。
+    """Assigning the same IR value to 2 outputs fails already at `convert()`.
 
-    出力名は集合（docs/ir-v2.md）で、受理側 `verify.parse_ir_graph` は重複を拒否する。
-    検出を受理側まで遅らせると、検証を挟まない `emit.write_model` の直呼びが
-    「書けたが読めない」配布形をそのまま据える。
+    The output names are a set (docs/ir-v2.md), and the accepting side `verify.parse_ir_graph`
+    rejects duplicates. Delaying the detection to the accepting side would let a direct call of
+    `emit.write_model`, which runs no verification, place a distribution that "was written but
+    cannot be read".
     """
 
     def test_returning_the_same_value_twice_fails_loudly(self, convert_module):
-        """同一 Node の 2 度返し（`_user_outputs` は出力引数を位置でそのまま返す）。"""
+        """The same Node returned twice (`_user_outputs` returns the output arguments by position as
+        is)."""
 
         class SameTwice(nn.Module):
             def forward(self, x):
@@ -879,7 +940,8 @@ class TestDuplicateOutputs:
         assert "duplicates" in str(err.value)
 
     def test_two_structurally_identical_outputs_fail_loudly(self, convert_module):
-        """CSE が畳む経路 — 別々の部分木でも `(op, ins, attrs, shape)` が同じなら 1 本になる。"""
+        """The path CSE folds — separate subtrees become one when `(op, ins, attrs, shape)`
+        match."""
 
         class SameShape(nn.Module):
             def forward(self, x):
@@ -891,7 +953,8 @@ class TestDuplicateOutputs:
         assert "duplicates" in str(err.value)
 
     def test_distinct_outputs_still_convert(self, convert_module):
-        """回帰の逆側 — 値が違えば 2 出力はそのまま通る（門の恒真化を防ぐ検出器）。"""
+        """The other side of the regression — with different values, the 2 outputs pass as they are
+        (a detector against a tautological check)."""
 
         class TwoValues(nn.Module):
             def forward(self, x):
@@ -903,10 +966,12 @@ class TestDuplicateOutputs:
 
 
 class TestOutputSpecAgreement:
-    """`output_specs` と output 引数の対応は**位置**でしか有効でない（normalize は
-    `graph_signature` を更新しないので `output_specs[].arg.name` は実在しない名前を指しうる）。
+    """The correspondence between `output_specs` and the output arguments holds **by position**
+    only (normalize does not update `graph_signature`, so `output_specs[].arg.name` can name
+    something that does not exist).
 
-    本数が食い違ったまま `zip(strict=True)` へ渡すと出力列が黙ってずれるので、その前に落とす。
+    Passing mismatched counts to `zip(strict=True)` would silently shift the outputs, so it fails
+    before that.
     """
 
     def test_a_signature_with_fewer_output_specs_fails_loudly(self):
@@ -917,7 +982,8 @@ class TestOutputSpecAgreement:
         exported = torch.export.export(TwoOutputs(), (torch.randn(3, 4),), strict=False)
         decomposed = exported.run_decompositions(curated_decompositions())
         normalize_graph(decomposed)
-        # user 出力を 1 件削った偽物（specs だけが減り、output 引数は 2 本のまま）。
+        # A fake with one user output removed (only the specs shrink; the output arguments stay
+        # 2).
         decomposed.graph_signature.output_specs = list(decomposed.graph_signature.output_specs)[:-1]
 
         with pytest.raises(AssertionError, match="differ in count"):
@@ -925,7 +991,7 @@ class TestOutputSpecAgreement:
 
 
 class TestDtypeBoundary:
-    """torch 既定の i64 を IR の i32 へ落とす境界（ADR 0009）。"""
+    """The boundary that drops torch's default i64 to the IR's i32 (ADR 0009)."""
 
     def test_int64_input_is_declared_as_i32(self, convert_module, dyn_t):
         class MaskProduct(nn.Module):
@@ -946,7 +1012,7 @@ class TestDtypeBoundary:
         assert normalized.dtype is torch.int32
         assert normalized.tolist() == [1, -2]
 
-        # bool は u32 の 0/1（GPU 格納と同じ規約）
+        # bool becomes u32 0/1 (the same convention as GPU storage)
         flags = normalize_boundary_tensor(torch.tensor([True, False]), "t")
         assert flags.dtype is torch.uint32
         assert flags.tolist() == [1, 0]
@@ -955,7 +1021,7 @@ class TestDtypeBoundary:
         assert normalize_boundary_tensor(floats, "t").dtype is torch.float32
 
     def test_out_of_range_int64_fails_loudly(self):
-        """黙って切り詰めると添字が静かにずれる — 値域外は必ず落とす。"""
+        """Silent truncation would shift indices silently — out of range always fails."""
         too_big = torch.tensor([2**31], dtype=torch.int64)
 
         with pytest.raises(ValueError, match="does not fit in i32"):
@@ -964,7 +1030,7 @@ class TestDtypeBoundary:
         with pytest.raises(ValueError, match="does not fit in i32"):
             normalize_boundary_tensor(torch.tensor([-(2**31) - 1], dtype=torch.int64), "t")
 
-        # 境界値ちょうどは通る
+        # The exact boundary values pass
         assert normalize_boundary_tensor(
             torch.tensor([2**31 - 1, -(2**31)], dtype=torch.int64), "t"
         ).tolist() == [2**31 - 1, -(2**31)]
@@ -975,7 +1041,8 @@ class TestDtypeBoundary:
 
 
 class TestCloneAlias:
-    """aten.clone は恒等（IR の値は常に連続 — ADR 0011）。IR には出さず別名にする。"""
+    """aten.clone is the identity (IR values are always contiguous — ADR 0011). It is not emitted
+    into the IR but becomes an alias."""
 
     def test_contiguous_clone_after_permute_is_absorbed(self, convert_module, dyn_t):
         class Materialize(nn.Module):
@@ -984,7 +1051,7 @@ class TestCloneAlias:
 
         graph, _ = convert_module(Materialize(), (torch.randn(6, 3, 4),), ({0: dyn_t},))
 
-        # clone は 1 ノードも残らず、permute の出力がそのままグラフ出力になる
+        # No clone node remains; the permute output becomes the graph output as is
         assert node_ops(graph) == ["permute"]
         assert graph.outputs == [graph.nodes[0].outs[0]]
 
@@ -998,10 +1065,12 @@ class TestCloneAlias:
 
 
 class SymbolicCatJoin(nn.Module):
-    """記号軸 cat（self | context）+ **連結後の長さを持つ入力**（recon の DiT 形の縮小版）。
+    """cat on the symbolic axis (self | context) + **an input with the concatenated length** (a
+    scaled-down version of the DiT shape from the recon).
 
-    `gate` の宣言が派生次元 `T+3` になるのが肝で、この形は `Dim("T") + 3` を dynamic_shapes に
-    書いたときだけ現れる（ADR 0046 の実測で初めて出た）。
+    The point is that `gate` is declared with the derived dimension `T+3`; this shape appears only
+    when `Dim("T") + 3` is written in dynamic_shapes (it first showed up in the observations of
+    ADR 0046).
     """
 
     def __init__(self) -> None:
@@ -1013,15 +1082,17 @@ class SymbolicCatJoin(nn.Module):
 
 
 class TestSymbolicCatEndToEnd:
-    """記号軸 cat のグラフが export → 書き出し → verify_container まで通る（ADR 0046）。"""
+    """A graph with cat on the symbolic axis passes export → write → verify_container (ADR 0046)."""
 
     def test_a_derived_input_dimension_survives_the_range_constraint_scan(self, tmp_path, dyn_t):
-        """MUST: 派生次元は range_constraints に **sympy の `Add`** としても並ぶ。
+        """MUST: derived dimensions also appear in range_constraints as **a sympy `Add`**.
 
-        `Dim("T") + 3` を入力 shape に宣言すると `ep.range_constraints` のキーに `s27 + 3` が
-        入る。`.name` を素で読む走査は `AttributeError: 'Add' object has no attribute 'name'`
-        で落ち、記号軸 cat のグラフは**変換に入る前に**死ぬ（ADR 0046 の同時修正）。
-        派生次元の値域は素のシンボルの値域から決まる冗長情報なので、除いて失うものは無い。
+        Declaring `Dim("T") + 3` in an input shape puts `s27 + 3` into the keys of
+        `ep.range_constraints`. A scan that reads `.name` bare fails with `AttributeError: 'Add'
+        object has no attribute 'name'`, and a graph with cat on the symbolic axis dies **before
+        conversion starts** (fixed together with ADR 0046). The range of a derived dimension is
+        redundant information decided by the bare symbol's range, so nothing is lost by leaving it
+        out.
         """
         graph = export_to_file(
             SymbolicCatJoin(),
@@ -1032,6 +1103,7 @@ class TestSymbolicCatEndToEnd:
             dynamic_shapes=({1: dyn_t}, None, {1: dyn_t + 3}),
         )
 
-        # 派生次元は入力の宣言としてそのまま残る（束縛源は素の `T` の位置だけ）
+        # The derived dimension stays in the input declaration as is (the binding source is only
+        # the position of the bare `T`)
         assert [spec.shape for spec in graph.inputs] == [[1, "T", 4], [1, 3, 4], [1, "T+3", 1]]
         assert graph.values[only_node(graph, "cat").outs[0]].shape == [1, "T+3", 4]

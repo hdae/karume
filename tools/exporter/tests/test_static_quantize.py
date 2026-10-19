@@ -1,4 +1,5 @@
-"""固定 SRQ の数値保存と、単一ノード・記号次元の維持を検査する（ADR 0097）。"""
+"""Checks that fixed SRQ preserves the values bit for bit, and that the export keeps one node and
+the symbolic dimension (ADR 0097)."""
 
 from __future__ import annotations
 

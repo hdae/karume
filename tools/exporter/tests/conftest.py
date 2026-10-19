@@ -1,7 +1,7 @@
-"""合成モジュールを export→normalize→convert する共通ヘルパ。
+"""Shared helpers that export → normalize → convert synthetic modules.
 
-実モデルは使わない — 数十行の nn.Module を CPU で export するだけなので、
-ダウンロードも GPU も要らず各ケースが数秒で回る。
+No real model is used — each case only exports an nn.Module of a few dozen lines on the CPU, so
+it needs neither a download nor a GPU and runs in a few seconds.
 """
 
 from __future__ import annotations
@@ -19,22 +19,24 @@ from karume.convert import PRESERVED_OP_PREFIXES, convert, curated_decomposition
 from karume.ir import IrGraph
 from karume.normalize import normalize_graph
 
-#: リポジトリ直下（tools/exporter/tests → tools/exporter → tools → repo）。
+#: The repository root (tools/exporter/tests → tools/exporter → tools → repo).
 REPO_ROOT = Path(__file__).resolve().parents[3]
-#: ランタイムパッケージのテスト資産（適合ケース表は TS 実装と共有する）。
+#: The runtime package's test fixtures (the conformance case tables are shared with the TS
+#: implementation).
 RUNTIME_FIXTURES = REPO_ROOT / "packages" / "runtime" / "tests" / "fixtures"
-#: 次元文法の適合ケース表。TS 実装と Python 実装は**この 1 ファイル**で検証する
-#: （コピーを作ると同期が人手の規律に戻る — docs/ir-v2.md）。
+#: The conformance case table of the dimension grammar. The TS and Python implementations are
+#: checked against **this one file** (a copy would put the sync back on manual discipline —
+#: docs/ir-v2.md).
 DIM_GRAMMAR_PATH = RUNTIME_FIXTURES / "dim-grammar.json"
 DIM_GRAMMAR = json.loads(DIM_GRAMMAR_PATH.read_text(encoding="utf-8"))
 
-#: op 契約の適合ケース表。同じく TS 側（packages/runtime/tests/ops_conformance_test.ts）と
-#: 共有する 1 ファイルで、両実装が**自分の契約表をこの表へ突き合わせる**
-#: （片側だけ動かすと両方赤になる）。
+#: The conformance case table of the op contracts. Likewise one file shared with the TS side
+#: (packages/runtime/tests/ops_conformance_test.ts); both implementations **check their own
+#: contract table against this table** (moving only one side turns both red).
 OP_CONTRACT_TABLE_PATH = RUNTIME_FIXTURES / "op-contracts.json"
 OP_CONTRACT_TABLE = json.loads(OP_CONTRACT_TABLE_PATH.read_text(encoding="utf-8"))
 
-#: 合成テストの動的軸の上限。
+#: The upper bound of the dynamic axis in the synthetic tests.
 SYM_MAX = 16
 
 
@@ -45,7 +47,7 @@ def export_and_convert(
     symbol_names: Sequence[str] = ("T",),
     preserved: Sequence[str] = PRESERVED_OP_PREFIXES,
 ) -> tuple[IrGraph, dict[str, torch.Tensor]]:
-    """`pipeline.export_module` と同じ段（`preserved` の受け口まで含めて鏡像）。"""
+    """The same steps as `pipeline.export_module` (a mirror, down to the `preserved` parameter)."""
     ep = torch.export.export(module, args, dynamic_shapes=dynamic_shapes, strict=False)
     decomposed = ep.run_decompositions(curated_decompositions(preserved))
     normalize_graph(decomposed)
@@ -59,7 +61,8 @@ def convert_module() -> Callable[..., tuple[IrGraph, dict[str, torch.Tensor]]]:
 
 @pytest.fixture
 def dyn_t() -> Dim:
-    """動的軸（min=2 で 0/1 特殊化を避ける）。IR 側の名前は torch に伝わらない。"""
+    """A dynamic axis (min=2 avoids the 0/1 specialization). The IR-side name does not reach
+    torch."""
     return Dim("T", min=2, max=SYM_MAX)
 
 
@@ -69,5 +72,5 @@ def node_ops(graph: IrGraph) -> list[str]:
 
 def only_node(graph: IrGraph, op: str):
     matched = [node for node in graph.nodes if node.op == op]
-    assert len(matched) == 1, f"{op} ノードが {len(matched)} 件: {graph.nodes}"
+    assert len(matched) == 1, f"expected one {op} node, got {len(matched)}: {graph.nodes}"
     return matched[0]
