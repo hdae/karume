@@ -22,7 +22,7 @@ fn score_quad(q: u32) -> vec4<f32> {
 }
 
 // emulation of the integer dot product (core WGSL only); returns **the same integer** as dot4I8Packed —
-// integer addition is associative and exact, and the intermediates stay at most 4·127² = 64,516, so nothing wraps
+// integer addition is associative and exact, and the intermediates stay at most 4·127·128 = 65,024, so nothing wraps
 fn idot(a: u32, b: u32) -> i32 {
   return dot(unpack4xI8(a), unpack4xI8(b));
 }

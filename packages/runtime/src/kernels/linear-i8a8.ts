@@ -220,11 +220,10 @@ export const linearI8a8Key = (
  * src/kernels/attention-i8a8.ts). The claim "the emulation is numerically identical" rests on
  * `idot` having a single body; copying it would let each kernel drift separately.
  *
- * MUST NOT: do not change the wording of the comments inside the WGSL below. The generated WGSL is
- * part of the kernel fingerprint, and changing it requires regenerating the embedded geometry
- * profile tables by a sweep on real hardware (ADR 0117 decision 4). That is why the bound inside
- * the WGSL is left at the old 4·127² — the exact bound (4·127·128 = 65,024) is in the module
- * docstring, which is the source of truth.
+ * The comments inside the WGSL below are free to edit: the kernel fingerprint hashes the WGSL
+ * without its comments (ADR 0117 addendum 2026-10-19), so a comment edit moves no embedded table.
+ * Changing a token of the WGSL still does, and then the embedded geometry profile tables are
+ * regenerated (ADR 0117 decision 4).
  */
 export const i8a8IdotWgsl = (dp4a: boolean): string =>
   dp4a
@@ -233,7 +232,7 @@ fn idot(a: u32, b: u32) -> i32 {
   return dot4I8Packed(a, b);
 }`
     : `// emulation of the integer dot product (core WGSL only); returns **the same integer** as dot4I8Packed —
-// integer addition is associative and exact, and the intermediates stay at most 4·127² = 64,516, so nothing wraps
+// integer addition is associative and exact, and the intermediates stay at most 4·127·128 = 65,024, so nothing wraps
 fn idot(a: u32, b: u32) -> i32 {
   return dot(unpack4xI8(a), unpack4xI8(b));
 }`;
