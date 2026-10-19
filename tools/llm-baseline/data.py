@@ -1,4 +1,4 @@
-"""モデルを走らせる前に評価集合と入力トークンを固定する。"""
+"""Fix the evaluation set and the input tokens before running the model."""
 
 from __future__ import annotations
 
@@ -11,12 +11,14 @@ from transformers import AutoTokenizer
 
 
 def profiles(root: Path) -> dict:
-    """評価できるモデル → 公式 checkpoint と**配布形**（`karume/5` の `karume.json`）。
+    """Evaluable models → the official checkpoint and the **distribution** (`karume.json` of
+    `karume/5`).
 
-    読むのは容器（`krm`）だけである。旧 shard 形のまま残している `-probe` 系列
-    （gemma4 E4B / MiniCPM5-2B / Qwen3-0.6B の 2026-09 の実験）は**この表に席を持たない** —
-    両読みは実装しない（container-v1 §12）。当時の測定そのものは時点スナップショットとして
-    `docs/research/` に残っており、再計測するなら系列を容器へ焼き直してから表に足す。
+    Only containers (`krm`) are read. The `-probe` series still kept in the old shard form
+    (the 2026-09 experiments with gemma4 E4B / MiniCPM5-2B / Qwen3-0.6B) **have no entry in this
+    table** — dual reading is not implemented (container-v1 §12). The measurements of that time
+    remain as point-in-time snapshots in `docs/research/`; to measure again, rebuild the series as
+    containers first and then add them to the table.
     """
     return {
         "gemma4-e2b": {
@@ -50,7 +52,7 @@ def arc_input(tokenizer, row: dict) -> dict:
     context = encode(tokenizer, prefix)
     choices = [encode(tokenizer, prefix + " " + answer) for answer in row["choices"]["text"]]
     if any(ids[: len(context)] != context or len(ids) == len(context) for ids in choices):
-        raise ValueError(f"{row['id']}: 継続のtoken境界を固定できません")
+        raise ValueError(f"{row['id']}: cannot fix the token boundary of the continuation")
     return {
         "id": row["id"],
         "choices": choices,
@@ -61,16 +63,16 @@ def arc_input(tokenizer, row: dict) -> dict:
 
 def prepare(root: Path, data: Path, destination: Path, count: int = 64, chars: int = 8192) -> None:
     if count <= 0 or chars <= 0:
-        raise ValueError("count と chars は正である必要があります")
+        raise ValueError("count and chars must be positive")
     destination.mkdir()
     source = json.loads((data / "sources.json").read_text())
     for row in source:
         raw = (data / f"{row['name']}.parquet").read_bytes()
         if hashlib.sha256(raw).hexdigest() != row["sha256"]:
-            raise ValueError("データの指紋が一致しません")
+            raise ValueError("data fingerprint does not match")
         normalized = (data / f"{row['name']}.json").read_bytes()
         if hashlib.sha256(normalized).hexdigest() != row["jsonSha256"]:
-            raise ValueError("JSON の指紋が一致しません")
+            raise ValueError("JSON fingerprint does not match")
     tokenizers = {
         name: AutoTokenizer.from_pretrained(profile["checkpoint"], local_files_only=True)
         for name, profile in profiles(root).items()
@@ -88,7 +90,7 @@ def prepare(root: Path, data: Path, destination: Path, count: int = 64, chars: i
         if len(next(iter(selected.values()))) == count:
             break
     if len(next(iter(selected.values()))) != count:
-        raise ValueError("指定数の問題がありません")
+        raise ValueError("the requested number of questions is not available")
     wiki_rows = json.loads((data / "wiki.json").read_text())
     text = "\n\n".join(row["text"] for row in wiki_rows)[:chars]
     result = {

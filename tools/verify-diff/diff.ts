@@ -1,54 +1,60 @@
 /**
- * verify-diff の純関数部 — 読み込んだ `results.json` の並び → 「ケース × 環境キー」の行列。
+ * The pure part of verify-diff — a sequence of loaded `results.json` → a "case × environment key"
+ * matrix.
  *
- * FS も GPU も触らない（読み込みは main.ts の仕事）。スキーマの正本は書く側の
- * `packages/runtime/tests/helpers/results.ts` で、ここは**読む側**である。そのため検査するのは
- * 道具が実際に読む欄だけだが、欠け・型違い・`schema` 違いは黙って空にせず throw する
- * （空の行列は「差異なし」と区別が付かず、割れているのに緑に見える形になる）。
+ * Touches neither the FS nor the GPU (loading is main.ts's job). The source of truth for the schema
+ * is the writer, `packages/runtime/tests/helpers/results.ts`; this is the **reader**. So it checks
+ * only the fields the tool actually reads, but a missing field, a wrong type or a different `schema`
+ * throws instead of silently becoming empty (an empty matrix cannot be told apart from "no
+ * differences", and would look green while the results diverge).
  *
- * sha256 のクロスデバイス一致は仕様として保証しない（ADR 0106 / docs/limitations.md）ので、
- * 実物の sha が環境間で食い違っても**失敗ではなく差異として挙げるだけ**である。
+ * Cross-device identity of sha256 is not guaranteed by the spec (ADR 0106 / docs/limitations.md), so
+ * an artifact sha that differs between environments is **only listed as a difference, not a
+ * failure**.
  */
 
-/** ケース 1 件の決着（results.ts の `ResultStatus` と同じ語彙）。 */
+/** The outcome of one case (the same vocabulary as `ResultStatus` in results.ts). */
 export type ResultStatus = "pass" | "fail" | "written" | "rewritten";
 
-/** 受理に使った許容差の帯。 */
+/** The tolerance band used for acceptance. */
 export type Tolerance = { readonly atol: number; readonly rtol: number };
 
-/** 許容差判定の実測（golden 系列のケースが出力ごとに積む）。 */
+/** An observed tolerance check (the cases of the golden family record one per output). */
 export type Measurement = {
-  /** グラフの出力名。 */
+  /** The output name in the graph. */
   readonly output: string;
-  /** JSON では非有限が null になる。 */
+  /** In JSON a non-finite value becomes null. */
   readonly maxAbs: number | null;
   readonly maxRel: number | null;
-  /** 受理に使った帯。 */
+  /** The band used for acceptance. */
   readonly tolerance: Tolerance;
-  /** どの段で受理したか（fail のときは最後に測った段）。 */
+  /** The stage that accepted it (on fail, the last stage measured). */
   readonly stage: "karume" | "spec";
 };
 
-/** 自機 A/B 門の帯（results.ts の `ComparisonBand` と同じ形）。 */
+/** The band of the self A/B check (the same shape as `ComparisonBand` in results.ts). */
 export type ComparisonBand = {
   readonly metric: "relRms";
   readonly floor: number;
   readonly ceiling: number;
 };
 
-/** 自機 A/B 門の実測（results.ts の `Comparison` — 参照席と実用席の同じ観測点の差）。 */
+/**
+ * An observation of the self A/B check (`Comparison` in results.ts — the difference between the
+ * reference preset and the practical preset at the same observation point).
+ */
 export type Comparison = {
   readonly output: string;
   readonly reference: string;
   readonly practical: string;
-  /** JSON では非有限が null になる。 */
+  /** In JSON a non-finite value becomes null. */
   readonly relRms: number | null;
   readonly maxAbs: number | null;
-  /** 未導出（または記録だけの観測）の回は持たない。 */
+  /** Absent on a run whose band is not derived (or an observation that is only recorded). */
   readonly band?: ComparisonBand;
 };
 
-/** `results.json` の `cases` 1 件。 */
+/** One item of `cases` in `results.json`. */
 export type ResultEntry = {
   readonly id: string;
   readonly status: ResultStatus;
@@ -61,15 +67,15 @@ export type ResultEntry = {
   readonly comparisons?: readonly Comparison[];
 };
 
-/** 結果を採ったチェックアウト（`git` が無い機で採られた結果は持たない = null）。 */
+/** The checkout the results were taken from (null for results taken on a machine without `git`). */
 export type Checkout = { readonly sha: string; readonly dirty: boolean };
 
 /**
- * `results.json` 1 本。
+ * One `results.json`.
  *
- * `environment.key` を必須にするのは、書き手が環境キーを持たない機では席を決められず throw
- * するためで、実在する `results.json` は必ずキーを持つ。持たない文書は結果を「どの環境の列か」
- * 決められないので、読んだ側でも通さない。
+ * `environment.key` is required because on a machine without an environment key the writer cannot
+ * pick the results directory and throws, so every existing `results.json` has the key. A document without
+ * it cannot tell which environment's column its results belong to, so the reader rejects it too.
  */
 export type ResultsDocument = {
   readonly schema: 1;
@@ -80,11 +86,11 @@ export type ResultsDocument = {
   readonly cases: readonly ResultEntry[];
 };
 
-/** 読み込んだ `results.json` 1 本と、その席の日付。 */
+/** One loaded `results.json` and the date of its results directory. */
 export type LoadedResults = {
-  /** 出どころ（警告と失敗の文面に出す）。 */
+  /** Where it came from (printed in warnings and failure messages). */
   readonly path: string;
-  /** 席のディレクトリ名から採った日付（`YYYY-MM-DD`）。 */
+  /** The date taken from the results directory's directory name (`YYYY-MM-DD`). */
   readonly date: string;
   readonly document: ResultsDocument;
 };
@@ -93,13 +99,13 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 const requireRecord = (value: unknown, where: string): Record<string, unknown> => {
-  if (!isRecord(value)) throw new Error(`${where}: オブジェクトでない`);
+  if (!isRecord(value)) throw new Error(`${where}: not an object`);
   return value;
 };
 
 const requireString = (record: Record<string, unknown>, key: string, where: string): string => {
   const value = record[key];
-  if (typeof value !== "string") throw new Error(`${where}: ${key} が文字列でない`);
+  if (typeof value !== "string") throw new Error(`${where}: ${key} is not a string`);
   return value;
 };
 
@@ -114,11 +120,11 @@ const optionalString = (
 
 const requireNumber = (record: Record<string, unknown>, key: string, where: string): number => {
   const value = record[key];
-  if (typeof value !== "number") throw new Error(`${where}: ${key} が数値でない`);
+  if (typeof value !== "number") throw new Error(`${where}: ${key} is not a number`);
   return value;
 };
 
-/** JSON では非有限が null になるので、`null` はそのまま「測れなかった」として通す。 */
+/** In JSON a non-finite value becomes null, so `null` passes as is, meaning "could not be measured". */
 const nullableNumber = (
   record: Record<string, unknown>,
   key: string,
@@ -133,9 +139,10 @@ const STAGES: readonly Measurement["stage"][] = ["karume", "spec"];
 
 const requireStatus = (record: Record<string, unknown>, where: string): ResultStatus => {
   const status = requireString(record, "status", where);
-  // 未知の綴りを黙って通すと、行列に「知らない決着」が並んで差異の判定に混ざる。
+  // Passing an unknown spelling silently would put an "unknown outcome" into the matrix and mix it
+  // into the difference check.
   const known = STATUSES.find((candidate) => candidate === status);
-  if (known === undefined) throw new Error(`${where}: 未知の status '${status}'`);
+  if (known === undefined) throw new Error(`${where}: unknown status '${status}'`);
   return known;
 };
 
@@ -143,7 +150,7 @@ const parseMeasurement = (value: unknown, where: string): Measurement => {
   const record = requireRecord(value, where);
   const stage = requireString(record, "stage", where);
   const known = STAGES.find((candidate) => candidate === stage);
-  if (known === undefined) throw new Error(`${where}: 未知の stage '${stage}'`);
+  if (known === undefined) throw new Error(`${where}: unknown stage '${stage}'`);
   const tolerance = requireRecord(record.tolerance, `${where}.tolerance`);
   return {
     output: requireString(record, "output", where),
@@ -165,9 +172,9 @@ const parseComparison = (value: unknown, where: string): Comparison => {
   if (Object.hasOwn(record, "band")) {
     const raw = requireRecord(record.band, `${where}.band`);
     const metric = requireString(raw, "metric", `${where}.band`);
-    // 未知の指標を黙って通すと、別の量の帯を relRMS の帯として並べてしまう。
+    // Passing an unknown metric silently would list a band of another quantity as a relRMS band.
     const known = BAND_METRICS.find((candidate) => candidate === metric);
-    if (known === undefined) throw new Error(`${where}.band: 未知の metric '${metric}'`);
+    if (known === undefined) throw new Error(`${where}.band: unknown metric '${metric}'`);
     band = {
       metric: known,
       floor: requireNumber(raw, "floor", `${where}.band`),
@@ -194,11 +201,11 @@ const parseEntry = (value: unknown, where: string): ResultEntry => {
   const note = optionalString(record, "note", at);
   const measurements = record.measurements;
   if (measurements !== undefined && !Array.isArray(measurements)) {
-    throw new Error(`${at}: measurements が配列でない`);
+    throw new Error(`${at}: measurements is not an array`);
   }
   const comparisons = record.comparisons;
   if (comparisons !== undefined && !Array.isArray(comparisons)) {
-    throw new Error(`${at}: comparisons が配列でない`);
+    throw new Error(`${at}: comparisons is not an array`);
   }
   return {
     id,
@@ -229,31 +236,32 @@ const parseCheckout = (value: unknown, where: string): Checkout | null => {
   if (value === null) return null;
   const record = requireRecord(value, `${where}.checkout`);
   const dirty = record.dirty;
-  if (typeof dirty !== "boolean") throw new Error(`${where}.checkout: dirty が真偽値でない`);
+  if (typeof dirty !== "boolean") throw new Error(`${where}.checkout: dirty is not a boolean`);
   return { sha: requireString(record, "sha", `${where}.checkout`), dirty };
 };
 
 /**
- * `results.json` の中身（`unknown`）を検査して型を付ける。
+ * Checks the contents of a `results.json` (`unknown`) and types them.
  *
- * MUST: 検査に落ちたら throw する（この道具の値打ちは「割れている所を指す」ことなので、
- * 読めない文書を空として飲み込むと嘘の「差異なし」になる）。
+ * MUST: throw when a check fails (the value of this tool is "pointing at where the results
+ * diverge", so swallowing an unreadable document as empty would print a false "no differences").
  */
 export const parseResultsDocument = (value: unknown, source = "results.json"): ResultsDocument => {
   const record = requireRecord(value, source);
   const schema = record.schema;
   if (schema !== 1) {
-    throw new Error(`${source}: schema が 1 でない（${JSON.stringify(schema)}）`);
+    throw new Error(`${source}: schema is not 1 (${JSON.stringify(schema)})`);
   }
   const environment = requireRecord(record.environment, `${source}.environment`);
   const cases = record.cases;
-  if (!Array.isArray(cases)) throw new Error(`${source}: cases が配列でない`);
+  if (!Array.isArray(cases)) throw new Error(`${source}: cases is not an array`);
   const parsed = cases.map((one, index) => parseEntry(one, `${source}.cases[${index}]`));
-  // 行はケース ID で引く（1 本目だけが採られる）ので、重複を通すと 2 本目以降の決着が
-  // 黙って消える — 読めない文書と同じく境界で落とす。
+  // Rows are looked up by case ID (only the first one is taken), so letting a duplicate through
+  // would silently drop the outcomes from the second one on — reject it at the boundary, like an
+  // unreadable document.
   const ids = new Set<string>();
   for (const entry of parsed) {
-    if (ids.has(entry.id)) throw new Error(`${source}: ケース ID が重複 '${entry.id}'`);
+    if (ids.has(entry.id)) throw new Error(`${source}: duplicate case ID '${entry.id}'`);
     ids.add(entry.id);
   }
   return {
@@ -266,15 +274,15 @@ export const parseResultsDocument = (value: unknown, source = "results.json"): R
   };
 };
 
-/** 行列の絞り込み。 */
+/** Filters of the matrix. */
 export type DiffOptions = {
-  /** この系列だけ（未指定 = 全系列）。 */
+  /** Only these families (unset = every family). */
   readonly families?: readonly string[];
-  /** この日付だけ（未指定 = 環境ごとに最新の日付）。 */
+  /** Only this date (unset = the newest date per environment). */
   readonly date?: string;
 };
 
-/** 行列の 1 マス（その環境がそのケースについて持っている決着）。 */
+/** One cell of the matrix (the outcome that environment holds for that case). */
 export type Cell = {
   readonly status: ResultStatus;
   readonly actual?: string;
@@ -284,7 +292,7 @@ export type Cell = {
   readonly comparisons?: readonly Comparison[];
 };
 
-/** 系列 1 本について、その環境から採った文書。 */
+/** For one family, the document taken from that environment. */
 export type SelectedDocument = {
   readonly environment: string;
   readonly date: string;
@@ -292,32 +300,35 @@ export type SelectedDocument = {
   readonly checkout: Checkout | null;
 };
 
-/** 差異の種類（実物の sha 違いは失敗ではない — 冒頭の注記）。 */
+/** The kind of a difference (an artifact sha mismatch is not a failure — see the header note). */
 export type DifferenceKind = "status" | "actual" | "missing";
 
 export type Difference = {
   readonly caseId: string;
   readonly kind: DifferenceKind;
-  /** 環境キー → その環境の値（status か実物の sha）。値を持たない環境は含まない。 */
+  /**
+   * Environment key → that environment's value (the status or the artifact sha). Environments
+   * without a value are not included.
+   */
   readonly values: Readonly<Record<string, string>>;
-  /** そのケースを持たない環境（`kind` が `missing` のときだけ）。 */
+  /** The environments that do not have the case (only when `kind` is `missing`). */
   readonly missing?: readonly string[];
 };
 
 export type MatrixRow = {
   readonly id: string;
-  /** 環境キー → マス。結果が無い環境は欄ごと持たない。 */
+  /** Environment key → cell. An environment without a result has no field at all. */
   readonly cells: Readonly<Record<string, Cell>>;
 };
 
 export type FamilyMatrix = {
   readonly family: string;
-  /** 列（辞書順）。 */
+  /** The columns (lexicographic order). */
   readonly environments: readonly string[];
   readonly selected: readonly SelectedDocument[];
-  /** 根には居るが、この系列（と `--date`）の結果を持たない環境。 */
+  /** Environments present under the root that have no results for this family (and `--date`). */
   readonly absent: readonly string[];
-  /** 行（ケース ID の和集合・辞書順）。 */
+  /** The rows (the union of case IDs, lexicographic order). */
   readonly rows: readonly MatrixRow[];
   readonly differences: readonly Difference[];
   readonly warnings: readonly string[];
@@ -339,7 +350,7 @@ const toCell = (entry: ResultEntry): Cell => ({
 
 const shortSha = (sha: string): string => sha.slice(0, 7);
 
-/** 選んだ文書のチェックアウトを見る（別のコミットの結果を並べていないか）。 */
+/** Looks at the checkouts of the selected documents (are results of different commits side by side?). */
 const checkoutWarnings = (selected: readonly SelectedDocument[]): string[] => {
   const warnings: string[] = [];
   const known = selected.flatMap((one) =>
@@ -350,17 +361,17 @@ const checkoutWarnings = (selected: readonly SelectedDocument[]): string[] => {
       .map((one) => `${one.environment}=${shortSha(one.checkout.sha)}`)
       .join(" / ");
     warnings.push(
-      `checkout の sha が環境間で食い違う（別のコミットの結果を並べている）: ${columns}`,
+      `checkout sha differs between environments (results of different commits side by side): ${columns}`,
     );
   }
   for (const one of selected) {
     if (one.checkout === null) {
-      warnings.push(`${one.environment}: checkout が無い（git の無い機で採られた結果）`);
+      warnings.push(`${one.environment}: no checkout (results taken on a machine without git)`);
       continue;
     }
     if (one.checkout.dirty) {
       warnings.push(
-        `${one.environment}: 作業木が dirty なチェックアウトで採られた結果` +
+        `${one.environment}: results taken from a checkout with a dirty working tree` +
           `（${shortSha(one.checkout.sha)}）`,
       );
     }
@@ -386,14 +397,15 @@ const differencesOf = (
       statuses[environment] = cell.status;
       if (cell.actual !== undefined) actuals[environment] = cell.actual;
     }
-    // 片方にしか無いケース（環境が 1 本しか無いときは「割れよう」が無いので挙げない）。
+    // A case only one side has (not listed with a single environment, where nothing can diverge).
     if (environments.length > 1 && missing.length > 0) {
       differences.push({ caseId: row.id, kind: "missing", values: statuses, missing });
     }
     if (new Set(Object.values(statuses)).size > 1) {
       differences.push({ caseId: row.id, kind: "status", values: statuses });
     }
-    // sha を持つ環境どうしだけを見る（片方が sha を採らないケースは「割れた」ではない）。
+    // Compare only the environments that have a sha (a case where one side takes no sha has not
+    // diverged).
     if (new Set(Object.values(actuals)).size > 1) {
       differences.push({ caseId: row.id, kind: "actual", values: actuals });
     }
@@ -402,10 +414,11 @@ const differencesOf = (
 };
 
 /**
- * 読み込んだ結果を系列ごとの行列にする。
+ * Turns the loaded results into one matrix per family.
  *
- * 同じ（系列, 環境キー）に複数の日付があれば**最新の日付**を採る（`date` 指定があればその
- * 日付だけ）。席は日付までで分かれるので、これが「その環境の最後の走行」になる。
+ * When the same (family, environment key) has several dates, the **newest date** is taken (with
+ * `date` given, only that date). Result entries are split down to the date, so this is "the last run
+ * of that environment".
  */
 export const buildDiff = (
   loaded: readonly LoadedResults[],
@@ -416,14 +429,15 @@ export const buildDiff = (
   if (wanted !== undefined) {
     const present = new Set(loaded.map((one) => one.document.family));
     for (const family of [...wanted].sort()) {
-      // 系列名の打ち間違いが「差異なし」に化けないよう、当たらなかった指定を必ず言う。
-      if (!present.has(family)) warnings.push(`--family ${family} に当たる結果が無い`);
+      // Always report a filter that matched nothing, so a mistyped family name does not turn into
+      // "no differences".
+      if (!present.has(family)) warnings.push(`no results match --family ${family}`);
     }
   }
-  // 日付の打ち間違い（暦に無い日・採っていない日）も「差異なし」に化けるので、--family と
-  // 同じく当たらなかった指定を必ず言う。
+  // A mistyped date (a day not in the calendar, a day with no run) also turns into "no
+  // differences", so, as with --family, always report a filter that matched nothing.
   if (options.date !== undefined && !loaded.some((one) => one.date === options.date)) {
-    warnings.push(`--date ${options.date} に当たる席が無い`);
+    warnings.push(`no results directory matches --date ${options.date}`);
   }
 
   const allEnvironments = [...new Set(loaded.map((one) => one.document.environment.key))].sort();
@@ -435,13 +449,14 @@ export const buildDiff = (
     const perEnvironment = byFamily.get(family) ?? new Map<string, LoadedResults>();
     byFamily.set(family, perEnvironment);
     const held = perEnvironment.get(environment.key);
-    // 同じ（系列, 環境キー, 日付）が 2 席あると片方は黙って捨てられる（同型 GPU の 2 台は同じ
-    // 環境キーを名乗るので、手コピーで普通に起こる）。どちらが残ったかは読み手に分からないので
-    // 両方の path を挙げる。終了コードは変えない（ADR 0106 の「1 は読めない・schema 違いだけ」）。
+    // Two results directories with the same (family, environment key, date) silently drop one of them
+    // (two machines with the same GPU model report the same environment key, so a hand copy does
+    // this routinely). The reader cannot tell which one stayed, so both paths are listed. The exit
+    // code does not change (ADR 0106: "1 only for unreadable documents or a different schema").
     if (held !== undefined && held.date === entry.date && held.path !== entry.path) {
       warnings.push(
-        `同じ系列・環境キー・日付の席が 2 つある（${family} / ${environment.key} / ${entry.date}）` +
-          `— 片方だけを採る: ${held.path} / ${entry.path}`,
+        `two results directories with the same family, environment key and date (${family} / ${environment.key} / ${entry.date})` +
+          ` — only one is taken: ${held.path} / ${entry.path}`,
       );
     }
     if (held === undefined || held.date < entry.date) perEnvironment.set(environment.key, entry);

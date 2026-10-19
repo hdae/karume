@@ -1,10 +1,12 @@
-// verify-diff の CLI 面の門（GPU も outputs/ も触らない — 席は毎回一時ディレクトリに合成する）。
+// Checks of the CLI side of verify-diff (touches neither the GPU nor outputs/ — results directories are
+// synthesized in a temporary directory every time).
 //
-// 純関数部は diff_test.ts が押さえるので、ここで固定するのは**プロセスとして走らせたときだけ
-// 観測できる面**である: ① 根の歩き方（席の読み込み・`--root` の綴りの解釈）② 終了コードの契約
-// （差異は 0・読めない文書だけ 1 — ADR 0106）③ Markdown と `--json` の出力の形。
+// diff_test.ts covers the pure part, so what is pinned here is **what can only be observed when it
+// runs as a process**: ① how the root is walked (loading results directories, how the spelling of
+// `--root` is interpreted) ② the exit code contract (0 for differences, 1 only for unreadable
+// documents — ADR 0106) ③ the shape of the Markdown and `--json` output.
 //
-// 道具立て: node:child_process の execFile で `node main.ts` を子プロセスとして起動する。
+// Setup: node:child_process's execFile starts `node main.ts` as a child process.
 
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -17,7 +19,7 @@ const ENTRY = fileURLToPath(new URL("../main.ts", import.meta.url));
 
 type Run = { readonly code: number; readonly stdout: string; readonly stderr: string };
 
-/** 終了コードが 0 でなくても結果として返す（起動そのものの失敗だけ reject する）。 */
+/** Returns a non-zero exit code as a result too (only a failure to start rejects). */
 const run = (args: readonly string[]): Promise<Run> =>
   new Promise((resolve, reject) => {
     execFile(process.execPath, [ENTRY, ...args], { encoding: "utf8" }, (error, stdout, stderr) => {
@@ -30,7 +32,10 @@ const run = (args: readonly string[]): Promise<Run> =>
     });
   });
 
-/** `results.json` 1 本ぶんの中身（書き手 `packages/runtime/tests/helpers/results.ts` と同じ形）。 */
+/**
+ * The contents of one `results.json` (the same shape as the writer,
+ * `packages/runtime/tests/helpers/results.ts`).
+ */
 const document = (
   family: string,
   environmentKey: string,
@@ -46,7 +51,7 @@ const document = (
 
 const passing = (id: string): Record<string, unknown> => ({ id, status: "pass", elapsedMs: 1 });
 
-/** 席 1 本を置く。`body` を文字列で渡すと（壊れた JSON のために）そのまま書く。 */
+/** Places one results directory. A string `body` is written as is (for broken JSON). */
 const writeSeat = async (
   root: string,
   environmentDir: string,
@@ -61,7 +66,7 @@ const writeSeat = async (
   );
 };
 
-/** 席を置いた一時の根で 1 本走らせる（後始末込み）。 */
+/** Runs once on a temporary root with results directories placed in it (cleanup included). */
 const withRoot = async (
   place: (root: string) => Promise<void>,
   use: (root: string) => Promise<void>,
@@ -75,8 +80,8 @@ const withRoot = async (
   }
 };
 
-describe("verify-diff CLI: 読める根", () => {
-  it("差異があっても終了コードは 0 で、行列と差異を Markdown に出す", async () => {
+describe("verify-diff CLI: a readable root", () => {
+  it("exits with 0 even with differences, and prints the matrix and the differences as Markdown", async () => {
     await withRoot(
       async (root) => {
         await writeSeat(
@@ -94,18 +99,18 @@ describe("verify-diff CLI: 読める根", () => {
       },
       async (root) => {
         const result = await run(["--root", root]);
-        // 門ではないので差異があっても 0（ADR 0106）。
+        // Not a check, so 0 even with differences (ADR 0106).
         assertEquals(result.code, 0, result.stderr);
         assertStringIncludes(result.stdout, "# verify-diff");
-        assertStringIncludes(result.stdout, `根: ${root}`);
+        assertStringIncludes(result.stdout, `Root: ${root}`);
         assertStringIncludes(result.stdout, "## anima");
         assertStringIncludes(result.stdout, "| base | pass | fail |");
-        assertStringIncludes(result.stdout, "status が割れている — deno-a=pass / deno-b=fail");
+        assertStringIncludes(result.stdout, "status differs — deno-a=pass / deno-b=fail");
       },
     );
   });
 
-  it("--json は行列と警告を JSON で出す", async () => {
+  it("--json prints the matrix and the warnings as JSON", async () => {
     await withRoot(
       async (root) => {
         await writeSeat(
@@ -133,7 +138,7 @@ describe("verify-diff CLI: 読める根", () => {
     );
   });
 
-  it("自機 A/B の実測（comparisons）をケースごとの小表に並べる", async () => {
+  it("lists the self A/B observations (comparisons) in a small table per case", async () => {
     await withRoot(
       (root) =>
         writeSeat(
@@ -168,23 +173,24 @@ describe("verify-diff CLI: 読める根", () => {
       async (root) => {
         const result = await run(["--root", root]);
         assertEquals(result.code, 0, result.stderr);
-        assertStringIncludes(result.stdout, "### f16+dit8-a8-attn8-s16-512 の A/B");
+        assertStringIncludes(result.stdout, "### A/B of f16+dit8-a8-attn8-s16-512");
         assertStringIncludes(
           result.stdout,
           "| step1-latent | deno-a | f16+dit8 → f16+dit8-a8-attn8-s16 | 0.0123 | 0.5 | 0.001〜0.025 |",
         );
         assertStringIncludes(
           result.stdout,
-          "| zz-unbanded | deno-a | f16+dit8 → f16+dit8-a8-attn8-s16 | null | null | 未導出 |",
+          "| zz-unbanded | deno-a | f16+dit8 → f16+dit8-a8-attn8-s16 | null | null | not derived |",
         );
       },
     );
   });
 
-  it("同じ系列・環境キー・日付の席が 2 つあると警告を出す（終了コードは 0 のまま）", async () => {
+  it("warns on two results directories with the same family, environment key and date (exit code stays 0)", async () => {
     await withRoot(
       async (root) => {
-        // ディレクトリ名は違うが、文書が名乗る環境キーは同じ（手コピーで起こる形）。
+        // The directory names differ, but the documents report the same environment key (what a
+        // hand copy produces).
         await writeSeat(
           root,
           "deno-a",
@@ -205,9 +211,9 @@ describe("verify-diff CLI: 読める根", () => {
         assertEquals(report.warnings.length, 1);
         assertStringIncludes(
           report.warnings[0],
-          "同じ系列・環境キー・日付の席が 2 つある（anima / deno-a / 2026-09-21）",
+          "two results directories with the same family, environment key and date (anima / deno-a / 2026-09-21)",
         );
-        // 両方の path が読み手に渡る（どちらが採られたか分からないまま黙らない）。
+        // Both paths reach the reader (it does not stay silent about which one was taken).
         assertStringIncludes(report.warnings[0], `${root}/deno-a/2026-09-21_anima/results.json`);
         assertStringIncludes(report.warnings[0], `${root}/copied/2026-09-21_anima/results.json`);
       },
@@ -215,8 +221,8 @@ describe("verify-diff CLI: 読める根", () => {
   });
 });
 
-describe("verify-diff CLI: 読めない根", () => {
-  it("席に results.json が無ければ終了コード 1", async () => {
+describe("verify-diff CLI: an unreadable root", () => {
+  it("exits with 1 when a results directory has no results.json", async () => {
     await withRoot(
       async (root) => {
         await mkdir(`${root}/deno-a/2026-09-21_anima`, { recursive: true });
@@ -224,25 +230,25 @@ describe("verify-diff CLI: 読めない根", () => {
       async (root) => {
         const result = await run(["--root", root]);
         assertEquals(result.code, 1);
-        assertStringIncludes(result.stderr, "席に results.json が無い（壊れた席）");
+        assertStringIncludes(result.stderr, "the results directory has no results.json (broken)");
         assertEquals(result.stdout, "");
       },
     );
   });
 
-  it("JSON として読めない文書は終了コード 1", async () => {
+  it("exits with 1 on a document that cannot be read as JSON", async () => {
     await withRoot(
-      (root) => writeSeat(root, "deno-a", "2026-09-21_anima", "{ 壊れている"),
+      (root) => writeSeat(root, "deno-a", "2026-09-21_anima", "{ broken"),
       async (root) => {
         const result = await run(["--root", root]);
         assertEquals(result.code, 1);
-        assertStringIncludes(result.stderr, "JSON として読めない");
+        assertStringIncludes(result.stderr, "cannot be read as JSON");
         assertEquals(result.stdout, "");
       },
     );
   });
 
-  it("schema が違う文書は終了コード 1", async () => {
+  it("exits with 1 on a document with a different schema", async () => {
     await withRoot(
       (root) =>
         writeSeat(root, "deno-a", "2026-09-21_anima", {
@@ -252,12 +258,12 @@ describe("verify-diff CLI: 読めない根", () => {
       async (root) => {
         const result = await run(["--root", root]);
         assertEquals(result.code, 1);
-        assertStringIncludes(result.stderr, "schema が 1 でない（2）");
+        assertStringIncludes(result.stderr, "schema is not 1 (2)");
       },
     );
   });
 
-  it("ケース ID が重複した文書は終了コード 1", async () => {
+  it("exits with 1 on a document with a duplicate case ID", async () => {
     await withRoot(
       (root) =>
         writeSeat(
@@ -276,23 +282,24 @@ describe("verify-diff CLI: 読めない根", () => {
       async (root) => {
         const result = await run(["--root", root]);
         assertEquals(result.code, 1);
-        assertStringIncludes(result.stderr, "ケース ID が重複 'base'");
+        assertStringIncludes(result.stderr, "duplicate case ID 'base'");
       },
     );
   });
 
-  it("根が無ければ終了コード 1", async () => {
+  it("exits with 1 when the root does not exist", async () => {
     const result = await run(["--root", "/nonexistent-verify-diff-root"]);
     assertEquals(result.code, 1);
-    assertStringIncludes(result.stderr, "結果の根が無い");
+    assertStringIncludes(result.stderr, "the results root does not exist");
   });
 });
 
-describe("verify-diff CLI: --root の綴り", () => {
-  it("`%` を含む根は実名のまま読む（`%41` を `A` に解かない）", async () => {
+describe("verify-diff CLI: the spelling of --root", () => {
+  it("reads a root containing `%` by its real name (does not decode `%41` to `A`)", async () => {
     const parent = await makeTempDir({ prefix: "verify-diff-escape-" });
     try {
-      // 実体 `x%41y` と、`%41` を解いた先の `xAy` を並べて置く（別の場所を黙って読む形）。
+      // Place the real `x%41y` next to `xAy`, where `%41` decodes to (the shape that silently reads
+      // another place).
       await writeSeat(
         `${parent}/x%41y`,
         "deno-a",
@@ -312,14 +319,14 @@ describe("verify-diff CLI: --root の綴り", () => {
       assertStringIncludes(result.stdout, "literal");
       assert(
         !result.stdout.includes("decoded"),
-        `%41 を解いた別の根を読んでいる:\n${result.stdout}`,
+        `reads another root, with %41 decoded:\n${result.stdout}`,
       );
     } finally {
       await remove(parent, { recursive: true });
     }
   });
 
-  it("`#` を含む根も読める（URL の素片として切り落とさない）", async () => {
+  it("also reads a root containing `#` (does not cut it off as a URL fragment)", async () => {
     const parent = await makeTempDir({ prefix: "verify-diff-hash-" });
     try {
       const root = `${parent}/hash#dir`;

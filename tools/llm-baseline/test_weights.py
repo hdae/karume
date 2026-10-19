@@ -23,7 +23,8 @@ def test_original_ple_row_lookup_preserves_values_and_repeated_indices(tmp_path)
     assert torch.equal(module(ids), value.float()[ids] * 4)
 
 
-#: 合成の PLE（容器の資産の形 — schema 3）。`values` と `scales` は**別々に**切られる。
+#: Synthetic PLE (the shape of the container asset — schema 3). `values` and `scales` are cut
+#: **separately**.
 TOKENS, LAYERS, DIM = 8, 2, 4
 VALUES = torch.arange(-32, 32, dtype=torch.int8).reshape(TOKENS, LAYERS, DIM)
 SCALES = (torch.arange(1, TOKENS * LAYERS + 1, dtype=torch.float32) / 16).reshape(TOKENS, LAYERS)
@@ -37,7 +38,7 @@ def _ple_index() -> dict:
         "layers": LAYERS,
         "dim": DIM,
         "embedScale": 4,
-        # values は 2 block（境界は token 3）・scales は 1 block — 行の種別で切り方が違う。
+        # values has 2 blocks (boundary at token 3), scales 1 block — the cut differs by row kind.
         "values": {
             "rowBytes": LAYERS * DIM,
             "blocks": [
@@ -62,7 +63,8 @@ def _reader():
 
 
 def test_quantized_ple_keeps_layer_scales_and_block_boundaries():
-    """block 境界をまたぐ token 列でも、層ごとの scale が行に掛かったまま戻る。"""
+    """Even for a token sequence crossing block boundaries, rows come back with the per-layer scale
+    applied."""
     module = ContainerPle(_ple_index(), _reader(), 4)
     ids = torch.tensor([[7, 2, 3, 2, 0]])
     expected = (VALUES.float() * SCALES.unsqueeze(-1)).flatten(1)[ids] * 4
@@ -71,7 +73,8 @@ def test_quantized_ple_keeps_layer_scales_and_block_boundaries():
 
 
 def test_the_ple_record_names_the_row_lookup_that_was_installed(tmp_path):
-    """loader.json の `ple` は、容器の資産を引く経路と公式 checkpoint を引く経路を取り違えない。"""
+    """`ple` of loader.json does not confuse the route that reads the container asset with the route
+    that reads the official checkpoint."""
     save_file(
         {"model.language_model.embed_tokens_per_layer.weight": torch.zeros(8, 12)},
         tmp_path / "model.safetensors",
@@ -79,7 +82,7 @@ def test_the_ple_record_names_the_row_lookup_that_was_installed(tmp_path):
 
     assert ple_placement(ContainerPle(_ple_index(), _reader(), 4)) == "container-row-lookup"
     assert ple_placement(DiskPle(tmp_path, 4)) == "disk-row-lookup"
-    with pytest.raises(TypeError, match="未知の module"):
+    with pytest.raises(TypeError, match="unknown module"):
         ple_placement(torch.nn.Embedding(8, 12))
 
 
@@ -90,7 +93,7 @@ def test_a_ple_index_of_another_schema_is_refused():
 
 
 def test_a_ple_storage_this_tool_does_not_expand_is_refused():
-    """QAT の PLE（i4 / i2）は生バイトの一致で見る — 展開式をここへ増やさない。"""
+    """QAT's PLE (i4 / i2) is checked by raw-byte equality — no expansion is added here."""
     index = {**_ple_index(), "storage": "i4"}
     with pytest.raises(ValueError, match="i8"):
         ContainerPle(index, _reader(), 4)
@@ -129,11 +132,12 @@ def _qat_graph(initializers: dict) -> dict:
 
 
 def test_qat_reference_checks_every_declared_initializer():
-    """検査が回る集合（供給計画）と、グラフ宣言の集合が一致する。
+    """The set the check iterates (the supply plan) equals the set of the graph declaration.
 
-    `shared` 宣言（貸し手のバイトを借りる）は容器に実体を持たないので供給計画に入らない。
-    宣言だけが `shared` へ書き換われば、その重みは黙って検査対象から外れる —— 本数が減る
-    だけで赤にならない形なので、ここが両方向で落とす。
+    A `shared` declaration (borrowing the lender's bytes) has no body in the container, so it is not
+    in the supply plan. If only the declaration were rewritten to `shared`, that weight would
+    silently leave the checked set — a shape where only the count drops and nothing turns red, so
+    this test fails in both directions.
     """
     declared = {
         "model.a.weight": {},
@@ -142,16 +146,16 @@ def test_qat_reference_checks_every_declared_initializer():
     }
     assert_qat_checked_range(_qat_graph(declared), ["model.a.weight", "model.b.weight"])
 
-    # 宣言にあって供給に無い（焼き漏らし・`shared` への書き換え）。
+    # Declared but not supplied (left out when written / rewritten to `shared`).
     with pytest.raises(ValueError, match=r"model\.b\.weight"):
         assert_qat_checked_range(_qat_graph(declared), ["model.a.weight"])
 
-    # 供給にあって宣言に無い（別のグラフの実体を読んでいる）。
+    # Supplied but not declared (reading the body of another graph).
     with pytest.raises(ValueError, match=r"model\.c\.weight"):
         assert_qat_checked_range(
             _qat_graph(declared), ["model.a.weight", "model.b.weight", "model.c.weight"]
         )
 
-    # `shared` 宣言は**どちらの集合からも**外れる（借り物は容器に実体を持たない）。
+    # A `shared` declaration leaves **both** sets (a borrowed weight has no body in the container).
     borrowed = {**declared, "model.b.weight": {"shared": True}}
     assert_qat_checked_range(_qat_graph(borrowed), ["model.a.weight"])

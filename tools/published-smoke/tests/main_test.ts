@@ -1,13 +1,14 @@
-// published-smoke の純ロジックの門（ネットワークも公開物も要らない部分だけ）。
+// Checks of published-smoke's pure logic (only the part that needs neither the network nor the
+// published packages).
 //
-// 本体（main.ts）は起動と同時に registry から `jsr:@karume/*` を取りに行くので、門は cli.ts に
-// 切り出してある。
+// The main script (main.ts) fetches `jsr:@karume/*` from the registry as soon as it starts, so the
+// checks are split out into cli.ts.
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { isPinRef, parseSmokeArgs } from "../cli.ts";
 
-test("isPinRef: repo と revision が揃った値だけを pin と認める", () => {
+test("isPinRef: accepts as a pin only a value with both repo and revision", () => {
   assertEquals(isPinRef({ repo: "a", revision: "b" }), true);
   assertEquals(isPinRef({ repo: "a" }), false);
   assertEquals(isPinRef({ revision: "b" }), false);
@@ -17,13 +18,17 @@ test("isPinRef: repo と revision が揃った値だけを pin と認める", ()
   assertEquals(isPinRef(undefined), false);
 });
 
-test("parseSmokeArgs: 引数なしは完全経路・--manifests-only は manifest だけ", () => {
+test("parseSmokeArgs: no argument is the full path, --manifests-only is manifests only", () => {
   assertEquals(parseSmokeArgs([]), { manifestsOnly: false });
   assertEquals(parseSmokeArgs(["--manifests-only"]), { manifestsOnly: true });
 });
 
-test("parseSmokeArgs: 打ち間違いは黙って完全経路へ落ちず、使い方つきで落ちる", () => {
-  assertThrows(() => parseSmokeArgs(["--manifest-only"]), Error, "未知の引数 --manifest-only");
-  assertThrows(() => parseSmokeArgs(["--manifests_only"]), Error, "未知の引数");
-  assertThrows(() => parseSmokeArgs(["extra"]), Error, "未知の引数 extra");
+test("parseSmokeArgs: a typo does not fall silently through to the full path but fails with the usage", () => {
+  assertThrows(
+    () => parseSmokeArgs(["--manifest-only"]),
+    Error,
+    "unknown argument --manifest-only",
+  );
+  assertThrows(() => parseSmokeArgs(["--manifests_only"]), Error, "unknown argument");
+  assertThrows(() => parseSmokeArgs(["extra"]), Error, "unknown argument extra");
 });

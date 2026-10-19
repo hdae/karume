@@ -1,11 +1,12 @@
-// hf-upload.zsh の門: 断片化表（TG3 — 検証できなかった part を健全な行に化けさせない）と、
-// 公開前の門（ADR 0122 決定 6 の 3 — ライセンス未宣言の印の容器を上げない。末尾の節）。
+// Checks of hf-upload.zsh: the fragmentation table (TG3 — a part that could not be checked must not pass as a
+// healthy row) and the pre-publication check (ADR 0122 decision 6, guard 3 — a container with the undeclared-licence
+// marker is not uploaded; the last section).
 //
-// 台本を一時ディレクトリへ `tools/release/` の形で写し（台本は自分の位置から 2 段上をリポ根と
-// みなす）、`models/<name>/` に part を置いて `check` を走らせる。network へは出ない — PATH の
-// 先頭に置いた stub の `curl` が HF / CAS の応答を演じる（`deno eval` は本物を使う）。
+// Copies the script into a temporary directory in the shape of `tools/release/` (the script takes the directory
+// two levels above its own as the repository root), places parts in `models/<name>/` and runs `check`. It does not
+// go to the network — a stub `curl` placed first on PATH plays the HF / CAS responses (`node -e` is the real one).
 //
-// zsh が無い環境（CI の ubuntu ランナーなど）は明示 SKIP する（ADR 0005）。
+// An environment without zsh (the CI ubuntu runner and the like) is an explicit SKIP (ADR 0005).
 
 import { spawn, spawnSync } from "node:child_process";
 import { copyFile, truncate, writeFile as writeFileWithMode } from "node:fs/promises";
@@ -38,15 +39,15 @@ const hasZsh = (): boolean => {
 
 const ZSH_AVAILABLE = hasZsh();
 if (!ZSH_AVAILABLE) {
-  console.warn("[karume] zsh が無いため tools/release/hf-upload.zsh の門を SKIP する");
+  console.warn("[karume] zsh is not available; skipping the checks of tools/release/hf-upload.zsh");
 }
 
 const SCRIPT = new URL("../hf-upload.zsh", import.meta.url);
 const NAME = "karume-stub";
 
 /**
- * zsh で台本を走らせ、終了コードと stdout を返す（stderr は読み捨てる）。env は親の環境に重ねる。
- * 非 0 の終了も結果として返す（台本の終了コードを見るテストなので reject しない）。
+ * Runs the script with zsh and returns the exit code and stdout (stderr is discarded). env is layered over the parent's environment.
+ * A non-zero exit is returned as a result too (the tests look at the script's exit code, so it does not reject).
  */
 const runZsh = (args: readonly string[], env: Readonly<Record<string, string>>): Promise<Run> =>
   new Promise((resolve, reject) => {
@@ -60,7 +61,7 @@ const runZsh = (args: readonly string[], env: Readonly<Record<string, string>>):
     child.on("error", reject);
     child.on("close", (code, signal) => {
       if (code === null) {
-        reject(new Error(`zsh ${args.join(" ")} がシグナル ${signal} で終わった`));
+        reject(new Error(`zsh ${args.join(" ")} ended with signal ${signal}`));
         return;
       }
       resolve({ code, stdout: Buffer.concat(stdout).toString("utf8") });
@@ -68,12 +69,12 @@ const runZsh = (args: readonly string[], env: Readonly<Record<string, string>>):
   });
 
 /**
- * HF / CAS を演じる curl。part の名前で応答を決める:
- * `missing.krm` = 404（`-f` で終了コード 22）/ `small.krm`・`large-plain.krm` = xet ハッシュの無い
- * 200 / それ以外 = 名前（拡張子抜き）をハッシュに名乗る xet の part。reconstruction は
- * ハッシュ `empty` だけ term 0 本、`nofetch` は fetch_info の無い 2 term、`spread` は 3 term が
- * 2 xorb の 3 レンジを指す形、他は 2 term が 1 xorb の同じ 1 レンジを指す形（全ゼロの chunk の
- * 繰り返し参照と同じ形 — terms=2 だが取得範囲は 1 つ）。`STUB_TOKEN=fail` で token が 401。
+ * A curl that plays HF / CAS. The part's name decides the response:
+ * `missing.krm` = 404 (exit code 22 with `-f`) / `small.krm`, `large-plain.krm` = 200 without an xet
+ * hash / anything else = an xet part whose hash is its name (without the extension). For the reconstruction,
+ * only the hash `empty` has 0 terms, `nofetch` has 2 terms without fetch_info, `spread` has 3 terms pointing at
+ * 3 ranges of 2 xorbs, and the rest have 2 terms pointing at the same single range of 1 xorb (the same shape as
+ * repeated references to an all-zero chunk — terms=2 but one fetch range). With `STUB_TOKEN=fail` the token is a 401.
  */
 const STUB_CURL = `#!/bin/sh
 url=""
@@ -97,13 +98,13 @@ case "$url" in
     echo '{"terms":[{"hash":"a"},{"hash":"b"},{"hash":"a"}],"fetch_info":{"a":[{"range":{"start":0,"end":4}},{"range":{"start":9,"end":12}}],"b":[{"range":{"start":0,"end":2}}]}}' ;;
   */v1/reconstructions/*)
     echo '{"terms":[{"hash":"a"},{"hash":"a"}],"fetch_info":{"a":[{"range":{"start":0,"end":1}}]}}' ;;
-  *) echo "stub curl: 想定外の URL $url" >&2; exit 99 ;;
+  *) echo "stub curl: unexpected URL $url" >&2; exit 99 ;;
 esac
 `;
 
 type Run = { readonly code: number; readonly stdout: string };
 
-/** part（名前 → バイト数）を置いた一時リポで `check` を走らせる。 */
+/** Runs `check` in a temporary repository holding the parts (name → byte count). */
 const runCheck = async (
   parts: Readonly<Record<string, number>>,
   env: Readonly<Record<string, string>> = {},
@@ -116,7 +117,7 @@ const runCheck = async (
     await writeFileWithMode(`${root}/bin/curl`, STUB_CURL, { mode: 0o755 });
     await mkdir(`${root}/models/${NAME}`, { recursive: true });
     for (const [name, bytes] of Object.entries(parts)) {
-      // 疎ファイルで大きさだけ作る（中身は台本が読まない — 見るのは stat の長さ）。
+      // Create only the size with a sparse file (the script does not read the content — it looks at the stat length).
       await writeFile(`${root}/models/${NAME}/${name}`, new Uint8Array(0));
       await truncate(`${root}/models/${NAME}/${name}`, bytes);
     }
@@ -132,7 +133,7 @@ const runCheck = async (
 const MIB = 1048576;
 
 test.skipIf(!ZSH_AVAILABLE)(
-  "hf-upload check: 全 part を検証できたら表を出して 0 で終わる（xet に載らない小さいファイルは SKIP 行）",
+  "hf-upload check: prints the table and exits 0 when every part is checked (a small file not on xet gets a SKIP row)",
   async () => {
     const run = await runCheck({ "good.krm": 20 * MIB, "small.krm": 1024 });
     assertEquals(run.code, 0, run.stdout);
@@ -143,19 +144,19 @@ test.skipIf(!ZSH_AVAILABLE)(
 );
 
 test.skipIf(!ZSH_AVAILABLE)(
-  "hf-upload check: HF に無い part は FAILED 行で非 0 になり、健全な行に化けない",
+  "hf-upload check: a part not on HF gets a FAILED row and a non-zero exit, and does not pass as a healthy row",
   async () => {
     const run = await runCheck({ "good.krm": 20 * MIB, "missing.krm": 20 * MIB });
     assertNotEquals(run.code, 0, run.stdout);
     assert(run.stdout.includes("### FAILED missing.krm"), run.stdout);
     assert(!run.stdout.includes("### fragmentation missing.krm"), run.stdout);
-    // 残りの part の行は最後まで出す（落ちる場合でも実測を残す）。
+    // The rows of the remaining parts are printed to the end (the observations are kept even when failing).
     assert(run.stdout.includes("### fragmentation good.krm"), run.stdout);
   },
 );
 
 test.skipIf(!ZSH_AVAILABLE)(
-  "hf-upload check: term が 0 本の reconstruction と、大きいのに xet ハッシュの無い part は FAILED",
+  "hf-upload check: a reconstruction with 0 terms and a large part without an xet hash are FAILED",
   async () => {
     const run = await runCheck({ "empty.krm": 20 * MIB, "large-plain.krm": 20 * MIB });
     assertNotEquals(run.code, 0, run.stdout);
@@ -166,18 +167,18 @@ test.skipIf(!ZSH_AVAILABLE)(
 );
 
 test.skipIf(!ZSH_AVAILABLE)(
-  "hf-upload check: 表は terms の隣に fetch_info の取得レンジ数を出し、MiB/term は terms で割ったまま",
+  "hf-upload check: the table prints the number of fetch ranges of fetch_info next to terms, and MiB/term stays divided by terms",
   async () => {
     const run = await runCheck({ "good.krm": 20 * MIB, "spread.krm": 30 * MIB });
     assertEquals(run.code, 0, run.stdout);
-    // 同じレンジを 2 回指す 2 term は ranges=1（繰り返し参照は取得範囲を増やさない）。
+    // Two terms pointing at the same range twice give ranges=1 (repeated references do not add fetch ranges).
     assert(
       /### fragmentation good\.krm +20 MiB terms= +2 ranges= +1 xorbs= +1 MiB\/term=10\.0$/m.test(
         run.stdout,
       ),
       run.stdout,
     );
-    // 2 xorb にまたがる 3 レンジ（xorb a に 2 本・b に 1 本）は全 xorb の合計で数える。
+    // Three ranges across 2 xorbs (2 in xorb a, 1 in b) are counted as the total over all xorbs.
     assert(
       /### fragmentation spread\.krm +30 MiB terms= +3 ranges= +3 xorbs= +2 MiB\/term=10\.0$/m.test(
         run.stdout,
@@ -188,12 +189,12 @@ test.skipIf(!ZSH_AVAILABLE)(
 );
 
 test.skipIf(!ZSH_AVAILABLE)(
-  "hf-upload check: fetch_info の無い reconstruction は FAILED 行で非 0 になり、健全な行に化けない",
+  "hf-upload check: a reconstruction without fetch_info gets a FAILED row and a non-zero exit, and does not pass as a healthy row",
   async () => {
     const run = await runCheck({ "good.krm": 20 * MIB, "nofetch.krm": 20 * MIB });
     assertNotEquals(run.code, 0, run.stdout);
     assert(
-      run.stdout.includes("### FAILED nofetch.krm reconstruction の応答に fetch_info が無い"),
+      run.stdout.includes("### FAILED nofetch.krm reconstruction response has no fetch_info"),
       run.stdout,
     );
     assert(!run.stdout.includes("### fragmentation nofetch.krm"), run.stdout);
@@ -202,7 +203,7 @@ test.skipIf(!ZSH_AVAILABLE)(
 );
 
 test.skipIf(!ZSH_AVAILABLE)(
-  "hf-upload check: xet-read-token を取れなければ表を始めずに非 0 で落ちる",
+  "hf-upload check: fails non-zero without starting the table when xet-read-token cannot be obtained",
   async () => {
     const run = await runCheck({ "good.krm": 20 * MIB }, { STUB_TOKEN: "fail" });
     assertNotEquals(run.code, 0, run.stdout);
@@ -213,14 +214,14 @@ test.skipIf(!ZSH_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// 公開前の門（ADR 0122 決定 6 の 3）: 上げる前に全容器の provenance.license を読み、ライセンス未宣言の
-// 印（NOASSERTION）があれば 1 バイトも上げない。hf は stub（呼ばれたら印のファイルを置き、終了コード 3）
-// で、呼ばれたかどうかを見る — 本物の HF へは出ない。
+// Pre-publication check (ADR 0122 decision 6, guard 3): before uploading, read provenance.license of every container,
+// and with the undeclared-licence marker (NOASSERTION) upload not a single byte. hf is a stub (when called it creates
+// the marker file and exits with code 3), and the tests look at whether it was called — nothing goes to the real HF.
 // ---------------------------------------------------------------------------
 
 const encoder = new TextEncoder();
 
-/** part 0（container-v1 §1 — ヘッダ + グラフ記述 + モデル記述）のバイト列。 */
+/** The bytes of part 0 (container-v1 §1 — header + graph descriptor + model descriptor). */
 const part0 = (license: string, model: Record<string, unknown> = {}): Uint8Array => {
   const graph = encoder.encode(JSON.stringify({ format: "karume-container", version: 1 }));
   const descriptor = encoder.encode(
@@ -242,7 +243,7 @@ const part0 = (license: string, model: Record<string, unknown> = {}): Uint8Array
   return bytes;
 };
 
-/** part 1 以降の偽物（magic を持たない重みのバイト列）。 */
+/** A fake part 1 or later (weight bytes without a magic). */
 const weights = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
 
 const STUB_HF = `#!/bin/sh
@@ -253,9 +254,9 @@ echo "stub hf 1.0"
 type Upload = Run & { readonly hfCalled: boolean };
 
 /**
- * `files`（配布ディレクトリからの相対 path → 中身）を置いた一時リポで `upload` を走らせる。
- * `linkMirror` なら配布ディレクトリを `models/` の外に置き、`models/<name>` をそこへの symlink にする
- * （手で写した / 張ったミラーの形）。
+ * Runs `upload` in a temporary repository holding `files` (path relative to the distribution directory → content).
+ * With `linkMirror` the distribution directory is placed outside `models/` and `models/<name>` is a symlink to it
+ * (the shape of a mirror copied / linked by hand).
  */
 const runUpload = async (
   files: Readonly<Record<string, Uint8Array>>,
@@ -282,7 +283,7 @@ const runUpload = async (
       await writeFile(target, bytes);
     }
     const marker = `${root}/hf-called`;
-    // HOME を一時ディレクトリへ向ける（台本は ~/.cache/huggingface の shard-cache を退避する）。
+    // Point HOME at the temporary directory (the script moves the shard-cache of ~/.cache/huggingface aside).
     const output = await runZsh([`${root}/tools/release/hf-upload.zsh`, "upload", NAME], {
       HOME: `${root}/home`,
       HF_CALLED: marker,
@@ -300,7 +301,7 @@ const runUpload = async (
 const ENCODER_PARTS = "xxl/text_encoder/model.i8";
 
 test.skipIf(!ZSH_AVAILABLE)(
-  "hf-upload upload: ライセンス未宣言の印の容器があれば hf を呼ばずに非 0 で落ちる",
+  "hf-upload upload: fails non-zero without calling hf when a container carries the undeclared-licence marker",
   async () => {
     const run = await runUpload({
       [`${ENCODER_PARTS}-00001-of-00003.krm`]: part0(UNDECLARED_LICENSE),
@@ -313,12 +314,12 @@ test.skipIf(!ZSH_AVAILABLE)(
       run.stdout.includes(`### provenance ${ENCODER_PARTS}-00001-of-00003.krm license=NOASSERTION`),
       run.stdout,
     );
-    assert(run.stdout.includes("### FAILED ライセンス未宣言の印"), run.stdout);
+    assert(run.stdout.includes("### FAILED undeclared-licence marker"), run.stdout);
   },
 );
 
 test.skipIf(!ZSH_AVAILABLE)(
-  "hf-upload upload: models/ の下へ symlink で張った実験用ミラーも中身で止まる",
+  "hf-upload upload: an experimental mirror symlinked under models/ is stopped by its content too",
   async () => {
     const run = await runUpload(
       {
@@ -334,14 +335,14 @@ test.skipIf(!ZSH_AVAILABLE)(
 );
 
 test.skipIf(!ZSH_AVAILABLE)(
-  "hf-upload upload: 宣言済みのライセンスの容器だけなら門を通り hf を呼ぶ",
+  "hf-upload upload: with only containers of declared licences it passes the check and calls hf",
   async () => {
     const run = await runUpload({
       [`${ENCODER_PARTS}-00001-of-00002.krm`]: part0("apache-2.0"),
       [`${ENCODER_PARTS}-00002-of-00002.krm`]: weights,
       "other/model.f16.krm": part0("mit"),
     });
-    // stub の hf は終了コード 3 — 門を通って upload まで進んだ印。
+    // The stub hf exits with code 3 — the sign that it passed the check and reached the upload.
     assertEquals(run.code, 3, run.stdout);
     assert(run.hfCalled, run.stdout);
     assert(run.stdout.includes("license=apache-2.0"), run.stdout);
@@ -351,7 +352,7 @@ test.skipIf(!ZSH_AVAILABLE)(
 
 for (const license of ["unknown", "noassertion"]) {
   test.skipIf(!ZSH_AVAILABLE)(
-    `hf-upload upload: 再配布の条件を識別しない値（${license}）の容器も hf を呼ばずに落ちる`,
+    `hf-upload upload: a container with a value that does not identify the redistribution terms (${license}) also fails without calling hf`,
     async () => {
       const run = await runUpload({
         [`${ENCODER_PARTS}-00001-of-00002.krm`]: part0(license),
@@ -360,13 +361,13 @@ for (const license of ["unknown", "noassertion"]) {
       assertNotEquals(run.code, 0, run.stdout);
       assert(!run.hfCalled, run.stdout);
       assert(run.stdout.includes(`license=${license}`), run.stdout);
-      assert(run.stdout.includes("### FAILED ライセンス未宣言の印"), run.stdout);
+      assert(run.stdout.includes("### FAILED undeclared-licence marker"), run.stdout);
     },
   );
 }
 
 test.skipIf(!ZSH_AVAILABLE)(
-  "hf-upload upload: 容器が 1 本も無いディレクトリ（生の safetensors だけ）は hf を呼ばずに落ちる",
+  "hf-upload upload: a directory without a single container (raw safetensors only) fails without calling hf",
   async () => {
     const run = await runUpload({
       "fixture/model.safetensors": weights,
@@ -374,12 +375,12 @@ test.skipIf(!ZSH_AVAILABLE)(
     });
     assertNotEquals(run.code, 0, run.stdout);
     assert(!run.hfCalled, run.stdout);
-    assert(run.stdout.includes("容器（.krm）が 1 本も無い"), run.stdout);
+    assert(run.stdout.includes("not a single container (.krm)"), run.stdout);
   },
 );
 
 test.skipIf(!ZSH_AVAILABLE)(
-  "hf-upload upload: 読めない part 0 は合格に見せず hf を呼ばずに落ちる",
+  "hf-upload upload: an unreadable part 0 does not look like a pass and fails without calling hf",
   async () => {
     const broken = part0("apache-2.0");
     broken.set(encoder.encode("{"), broken.length - 1);
@@ -388,11 +389,11 @@ test.skipIf(!ZSH_AVAILABLE)(
     });
     assertNotEquals(run.code, 0, run.stdout);
     assert(!run.hfCalled, run.stdout);
-    assert(run.stdout.includes("### FAILED 容器の出所を読めない"), run.stdout);
+    assert(run.stdout.includes("### FAILED cannot read the containers' provenance"), run.stdout);
   },
 );
 
-test("container_license: part 0 だけを読み、part 1 以降と krg は読まない", async () => {
+test("container_license: reads only part 0, not parts 1 and later nor krg", async () => {
   const root = await makeTempDir({ prefix: "karume-container-license-" });
   try {
     await mkdir(`${root}/a`);
@@ -412,35 +413,35 @@ test("container_license: part 0 だけを読み、part 1 以降と krg は読ま
   }
 });
 
-test("container_license: part 列があるのに part 0 が無ければ読めなかったとして落ちる", async () => {
+test("container_license: fails as unreadable when parts are present but no part 0", async () => {
   const root = await makeTempDir({ prefix: "karume-container-license-" });
   try {
     await writeFile(`${root}/model-00002-of-00002.krm`, weights);
     await assertRejects(
       () => readContainerLicenses(root),
       ContainerLicenseError,
-      "part 0 が 1 本も無い",
+      "not a single part 0",
     );
   } finally {
     await remove(root, { recursive: true });
   }
 });
 
-test("container_license: 容器が 1 本も無いディレクトリは読めなかったとして落ちる", async () => {
+test("container_license: a directory without a single container fails as unreadable", async () => {
   const root = await makeTempDir({ prefix: "karume-container-license-" });
   try {
     await writeFile(`${root}/model.safetensors`, weights);
     await assertRejects(
       () => readContainerLicenses(root),
       ContainerLicenseError,
-      "容器（.krm）が 1 本も無い",
+      "not a single container (.krm)",
     );
   } finally {
     await remove(root, { recursive: true });
   }
 });
 
-test("container_license: 印の綴りの違いと再配布の条件を識別しない値を未宣言として扱う", () => {
+test("container_license: treats spelling variants of the marker and values that do not identify the redistribution terms as undeclared", () => {
   for (const license of [
     UNDECLARED_LICENSE,
     "noassertion",
@@ -451,21 +452,21 @@ test("container_license: 印の綴りの違いと再配布の条件を識別し�
   ]) {
     assert(isUnidentifiedLicense(license), license);
   }
-  // 対: 識別子として名乗る値は通す（判定がどれでも落ちる形でない）。`other` は既存の配布形（anima）が
-  // 名乗る値（条件は NOTICE）なので通す。
+  // Counterpart: values that declare an identifier pass (the predicate does not fail on everything). `other` passes
+  // because an existing distribution (anima) declares it (terms in the NOTICE).
   for (const license of ["apache-2.0", "mit", "cc-by-sa-4.0", "other", "other-vendor-license"]) {
     assert(!isUnidentifiedLicense(license), license);
   }
 });
 
-test("container_license: provenance.license の無いモデル記述は落ちる", async () => {
+test("container_license: a model descriptor without provenance.license fails", async () => {
   const root = await makeTempDir({ prefix: "karume-container-license-" });
   try {
     await writeFile(`${root}/model.krm`, part0("apache-2.0", { provenance: {} }));
     await assertRejects(
       () => readContainerLicenses(root),
       ContainerLicenseError,
-      "provenance.license が無い",
+      "provenance.license is missing",
     );
   } finally {
     await remove(root, { recursive: true });

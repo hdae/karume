@@ -1,9 +1,9 @@
 #!/usr/bin/env zsh
-# GPU の使用率の目安（RTX 3080 Ti・NVIDIA ドライバ — nvidia-smi）。学習と共有の GPU を使う前の判定に使う。
-# 使い方: gpu-busy.zsh [秒数=3]  → "busy=NN% max=NN% vram=used/totalMiB sm_clock=MMMMMHz temp=NN power=NNW throttle=... window=Ns" を 1 行。
-#   窓の間 1 秒ごとに utilization.gpu を取り、平均（busy）と最大（max）を出す。vram は GPU 全体（他プロセスの分を含む）。
-#   throttle は nvidia-smi の clocks_event_reasons のうち Active な理由の名前（gpu_idle は省く・無ければ none）。
-# 旧 Arc B570（xe の sysfs）版は gpu-busy-xe.zsh に残す。
+# A rough GPU utilisation reading (RTX 3080 Ti, NVIDIA driver — nvidia-smi). Used to decide before using a GPU shared with training.
+# Usage: gpu-busy.zsh [seconds=3]  → "busy=NN% max=NN% vram=used/totalMiB sm_clock=MMMMMHz temp=NN power=NNW throttle=... window=Ns" on one line.
+#   Samples utilization.gpu once per second over the window and prints the mean (busy) and the maximum (max). vram is for the whole GPU (including other processes).
+#   throttle is the names of the Active reasons among nvidia-smi's clocks_event_reasons (gpu_idle is left out; none when there are none).
+# The version for the former Arc B570 (xe sysfs) is kept in gpu-busy-xe.zsh.
 emulate -L zsh
 sec=${1:-3}
 (( sec < 1 )) && sec=1

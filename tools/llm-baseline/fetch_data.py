@@ -1,4 +1,4 @@
-"""公開 test split の固定版を取得し、元ファイルと JSON の指紋を残す。"""
+"""Fetch the pinned version of the public test splits; record fingerprints of the files and JSON."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def fetch(destination: Path) -> None:
         with urllib.request.urlopen(url, timeout=60) as response:
             raw = response.read()
         if hashlib.sha256(raw).hexdigest() != source["sha256"]:
-            raise ValueError(f"{source['name']}: 固定版の指紋が一致しません")
+            raise ValueError(f"{source['name']}: fingerprint of the pinned version does not match")
         path = destination / f"{source['name']}.parquet"
         with path.open("xb") as file:
             file.write(raw)

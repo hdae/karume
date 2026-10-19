@@ -1,4 +1,4 @@
-"""公式 Transformers のモデルへ保存済み重みを戻す。再量子化しない。"""
+"""Put the stored weights back into the official Transformers model. Does not requantize."""
 
 from __future__ import annotations
 
@@ -25,8 +25,9 @@ from karume.ple import PLE_INDEX_ASSET, PLE_INDEX_SCHEMA
 from karume.quantize import dequantize_int4
 from karume.verify import InitializerSupply, SupplyBlock, verify_container
 
-#: codec 台帳の展開経路（`codec_entry(...).layout`）→ 生バイトを載せる torch の器。
-#: i4 / i2 は packed なので uint8 の平坦な器のまま渡す（論理形へ戻すのは展開の仕事）。
+#: Decode path of the codec ledger (`codec_entry(...).layout`) → torch dtype holding the raw bytes.
+#: i4 / i2 are packed, so they are passed as a flat uint8 holder (restoring the logical shape is
+#: the expansion's job).
 STORAGE_DTYPES = {
     "f32": torch.float32,
     "f16": torch.float16,
@@ -37,7 +38,8 @@ STORAGE_DTYPES = {
     "i2": torch.uint8,
 }
 
-#: 部品名 = 容器が名乗るグラフ名 = manifest の weights キー（container-v1 §2.1）。
+#: Component name = graph name the container declares = the weights key of the manifest
+#: (container-v1 §2.1).
 MODEL_GRAPH = "model"
 
 
@@ -49,7 +51,8 @@ def fingerprint(path: Path) -> dict:
 
 @dataclass(frozen=True)
 class AssetSlice:
-    """資産 1 本の在り処。区間読みを要する資産は **1 block = 1 part**（container-v1 §4.2）。"""
+    """Location of one asset. An asset that needs range reads is **1 block = 1 part**
+    (container-v1 §4.2)."""
 
     path: Path
     offset: int
@@ -57,19 +60,21 @@ class AssetSlice:
 
 
 class ContainerAssets:
-    """容器の資産を読む口（索引は全量 + sha256 検証・PLE の行は区間読み）。
+    """Access to the container's assets (the index whole + sha256 check; PLE rows by range read).
 
-    MUST: 行の読みは区間で取る。PLE の block は 1 本 32 MiB まで在りうるので、token ごとに
-    block を丸ごと読むと 1 回の評価が桁で遅くなる（旧 sidecar は safetensors の mmap slice で
-    同じことをしていた）。区間読みでは block の sha256 を掛けられないが、宣言（長さ・part の
-    割り当て）は {@link verify_container} が既に通している。
+    MUST: rows are read by range. A PLE block can be up to 32 MiB, so reading the whole block per
+    token makes one evaluation orders of magnitude slower (the old sidecar did the same with a
+    safetensors mmap slice). A range read cannot apply the block's sha256, but the declaration
+    (lengths, part assignment) has already passed {@link verify_container}.
     """
 
     def __init__(self, read: ReadContainer, parts: Sequence[Path]) -> None:
         if read.model is None:
-            raise ValueError("グラフだけの容器（krg）に資産はありません")
+            raise ValueError("a graph-only container (krg) has no assets")
         if len(parts) < 2:
-            raise ValueError("単一形の容器は未対応です（part 0 から並べた分割形が要る）")
+            raise ValueError(
+                "single-form containers are not supported (needs the split form from part 0)"
+            )
         self._read = read
         self._records = read.model.assets
         self._blocks = {block.id: block for block in read.model.blocks}
@@ -81,11 +86,11 @@ class ContainerAssets:
     def _record(self, name: str):
         record = self._records.get(name)
         if record is None:
-            raise ValueError(f"容器に資産 '{name}' がありません（宣言: {sorted(self._records)}）")
+            raise ValueError(f"container has no asset '{name}' (declared: {sorted(self._records)})")
         return record
 
     def document(self, name: str) -> bytes:
-        """資産 1 本を全量で取る（block の sha256 まで突き合わせる — 索引と QAT の突合用）。"""
+        """Take one asset whole (checked up to the block's sha256 — for the index and QAT check)."""
         record = self._record(name)
         return self._read.block(record.block)[: record.length]
 
@@ -95,60 +100,64 @@ class ContainerAssets:
         return AssetSlice(self._parts[block.part], block.offset, record.length)
 
     def read_row(self, name: str, offset: int, length: int) -> bytes:
-        """資産の中の区間 `[offset, offset + length)`。"""
+        """The range `[offset, offset + length)` inside the asset."""
         where = self.slice_of(name)
         if offset < 0 or length < 0 or offset + length > where.length:
-            raise ValueError(f"{name}: 区間 [{offset}, {offset + length}) が資産の外です")
+            raise ValueError(f"{name}: range [{offset}, {offset + length}) is outside the asset")
         with where.path.open("rb") as source:
             source.seek(where.offset + offset)
             raw = source.read(length)
         if len(raw) != length:
-            raise ValueError(f"{where.path}: {name} の {length} バイトを読み切れません")
+            raise ValueError(f"{where.path}: reading {name} fell short of {length} bytes")
         return raw
 
 
 class StoredWeights:
-    """配布形の容器（`krm` の part 列）から、焼いた実体をそのまま読み返す。
+    """Read the baked bodies back as is from the distribution's container (the part sequence of
+    `krm`).
 
-    旧 shard 列の読み手の置き換え（ADR 0109 決定 3 / container-v1）。容器 1 本が部品 1 つで、
-    **initializer の名前がそのままテンソルキー**である（IR v2）。piece 分割は束縛表の中に
-    閉じるので、呼び手からは 1 本のテンソルに見える。
+    Replaces the reader of the old shard sequence (ADR 0109 decision 3 / container-v1). One
+    container is one component, and **the initializer name is the tensor key itself** (IR v2). Piece
+    splitting closes inside the binding table, so the caller sees a single tensor.
     """
 
     def __init__(self, parts: Sequence[Path], graph_name: str = MODEL_GRAPH) -> None:
         if len(parts) < 2:
-            raise ValueError("分割形の容器（part 0 から並べた part 列）が要ります")
+            raise ValueError(
+                "a split-form container (part sequence ordered from part 0) is required"
+            )
         verified = verify_container(list(parts))
         self.read = verified.read
         declaration = self.read.graph.graphs.get(graph_name)
         if declaration is None:
             declared = sorted(self.read.graph.graphs)
-            raise ValueError(f"容器にグラフ '{graph_name}' がありません（宣言: {declared}）")
-        #: IR v2 のグラフ宣言そのもの（`values` / `nodes` / `initializers`）。
+            raise ValueError(f"container has no graph '{graph_name}' (declared: {declared})")
+        #: The IR v2 graph declaration itself (`values` / `nodes` / `initializers`).
         self.graph = declaration
-        #: 実体を持つ initializer の供給計画（`shared` 宣言は入らない）。
+        #: Supply plan of the initializers that have a body (`shared` declarations are not in it).
         self.supplies = verified.graphs[graph_name].supplies
         self.assets = ContainerAssets(self.read, parts)
 
     def _supply(self, name: str) -> InitializerSupply:
         supply = self.supplies.get(name)
         if supply is None:
-            raise ValueError(f"initializer '{name}' の実体が容器にありません")
+            raise ValueError(f"the container has no body for initializer '{name}'")
         return supply
 
     def _payload(self, block: SupplyBlock) -> bytes:
-        """block の payload（末尾の詰め物を落とす — container-v1 §4.1）。"""
+        """Payload of a block (drops the trailing padding — container-v1 §4.1)."""
         return self.read.block(block.id)[: block.payload_bytes]
 
     def shape(self, name: str) -> list[int]:
         return list(self.graph["values"][name]["shape"])
 
     def storage(self, name: str) -> str:
-        """格納の展開経路（`i8` / `i4` / `i2` / `f32` …）。正本は束縛表の codec。"""
+        """Decode path of the storage (`i8` / `i4` / `i2` / `f32` …). The source of truth is the
+        binding table's codec."""
         return codec_entry(self._supply(name).encoding.codec).layout
 
     def tensor(self, name: str) -> torch.Tensor:
-        """焼いた実体そのまま（i4 / i2 は packed の平坦 uint8・それ以外は論理形）。"""
+        """The baked body as is (i4 / i2 as packed flat uint8, others in the logical shape)."""
         supply = self._supply(name)
         layout = codec_entry(supply.encoding.codec).layout
         data = bytearray(b"".join(self._payload(block) for block in supply.blocks))
@@ -156,16 +165,16 @@ class StoredWeights:
         return value if layout in ("i4", "i2") else value.reshape(self.shape(name))
 
     def scale(self, name: str) -> torch.Tensor:
-        """companion scale を `[行, group]` の f32 で返す。
+        """Return the companion scale as f32 `[row, group]`.
 
-        容器では scale は**名前を持たない block** で、束縛表の `encoding.scale` からしか
-        引けない（旧形の「もう 1 本のテンソルキー」は消えた）。
+        In the container the scale is a **block without a name**, reachable only through
+        `encoding.scale` of the binding table (the old form's "one more tensor key" is gone).
         """
         supply = self._supply(name)
         if supply.scale is None:
-            raise ValueError(f"initializer '{name}' は量子化ではありません（scale が無い）")
+            raise ValueError(f"initializer '{name}' is not quantized (no scale)")
         if supply.encoding.row_axis not in (None, 0):
-            raise ValueError(f"'{name}': rowAxis {supply.encoding.row_axis} は未対応です")
+            raise ValueError(f"'{name}': rowAxis {supply.encoding.row_axis} is not supported")
         data = bytearray(self._payload(supply.scale))
         return torch.frombuffer(data, dtype=torch.float32).reshape(self.shape(name)[0], -1)
 
@@ -177,14 +186,14 @@ class StoredWeights:
         if layout == "i8":
             scale = self.scale(name)
             if scale.numel() != value.shape[0]:
-                raise ValueError("i8 scale が行数と違います")
+                raise ValueError("i8 scale count differs from the row count")
             return value.float() * scale.reshape(-1, *([1] * (value.ndim - 1)))
         if layout not in ("f16", "f32", "bf16"):
-            raise ValueError(f"未対応の保存 dtype: {layout}")
+            raise ValueError(f"unsupported stored dtype: {layout}")
         return value.float()
 
     def ple_index(self) -> dict:
-        """PLE 索引（資産 `ple_index` — schema 3）。"""
+        """PLE index (asset `ple_index` — schema 3)."""
         return json.loads(self.assets.document(PLE_INDEX_ASSET))
 
     def ple(self, embed_scale: float) -> ContainerPle:
@@ -195,17 +204,18 @@ def checkpoint_index(checkpoint: Path) -> dict[str, Path]:
     owners = {}
     for path in sorted(checkpoint.glob("*.safetensors")):
         with safe_open(path, framework="pt") as source:
-            for key in source.keys():  # noqa: SIM118 — safe_open は dict ではない。
+            for key in source.keys():  # noqa: SIM118 — safe_open is not a dict.
                 if key in owners:
-                    raise ValueError(f"重複した checkpoint key: {key}")
+                    raise ValueError(f"duplicate checkpoint key: {key}")
                 owners[key] = path
     if not owners:
-        raise ValueError(f"{checkpoint}: 重みがありません")
+        raise ValueError(f"{checkpoint}: no weights")
     return owners
 
 
 class DiskPle(nn.Module):
-    """巨大な PLE を全量 f32 化せず、公式 checkpoint から同じ行 lookup を CPU 上で行う。"""
+    """Does the same row lookup on the CPU from the official checkpoint without converting the huge
+    PLE to f32 whole."""
 
     def __init__(self, checkpoint: Path, scale: float):
         super().__init__()
@@ -215,7 +225,7 @@ class DiskPle(nn.Module):
 
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
         if ids.device.type != "cpu":
-            raise ValueError("DiskPle は CPU 評価専用です")
+            raise ValueError("DiskPle is for CPU evaluation only")
         rows = {}
         for token in ids.flatten().tolist():
             if token in rows:
@@ -229,25 +239,30 @@ class DiskPle(nn.Module):
 
 
 class ContainerPle(nn.Module):
-    """容器の資産（索引 schema 3 + `ple.values.<k>` / `ple.scales.<k>`）から PLE の行を引く。
+    """Looks up PLE rows from the container's assets (index schema 3 + `ple.values.<k>` /
+    `ple.scales.<k>`).
 
-    `read_row(資産名, offset, length)` は区間読みの口で、容器を持たない呼び手（テスト）が
-    合成の索引と組みで差し替えられるようにしてある。
+    `read_row(asset name, offset, length)` is the range-read access, so that a caller without a
+    container (the tests) can substitute it together with a synthetic index.
 
-    MUST: 格納は `i8` だけを受ける。QAT の PLE（i4 / i2）は**公式の固定量子化そのもの**で、
-    このツールが掛ける門は復元ではなく生バイトの一致（{@link assert_qat_stored}）である —
-    ここで展開式をもう 1 本持つと、比べるべき相手が 2 つに割れる。
+    MUST: accept only `i8` storage. QAT's PLE (i4 / i2) **is the official fixed quantization
+    itself**, and the check this tool applies is raw-byte equality ({@link assert_qat_stored}), not
+    restoration — holding a second expansion here would split what to compare against in two.
     """
 
     def __init__(self, index: dict, read_row: Callable[[str, int, int], bytes], embed_scale: float):
         super().__init__()
         if index.get("schema") != PLE_INDEX_SCHEMA:
-            raise ValueError(f"PLE 索引の schema が {index.get('schema')}（要 {PLE_INDEX_SCHEMA}）")
+            raise ValueError(
+                f"PLE index schema is {index.get('schema')} (expected {PLE_INDEX_SCHEMA})"
+            )
         if index["embedScale"] != embed_scale:
-            raise ValueError("通常版 PLE の embedScale が公式と違います")
+            raise ValueError("embedScale of the regular PLE differs from the official one")
         if index["storage"] != "i8":
             storage = index["storage"]
-            raise ValueError(f"PLE の格納 '{storage}' は CPU 参照で復元しません（i8 のみ）")
+            raise ValueError(
+                f"PLE storage '{storage}' is not restored by the CPU reference (i8 only)"
+            )
         self.index = index
         self.read_row = read_row
         self.scale = embed_scale
@@ -260,11 +275,11 @@ class ContainerPle(nn.Module):
         for block in entry["blocks"]:
             if block["start"] <= token < block["stop"]:
                 return self.read_row(block["asset"], (token - block["start"]) * stride, stride)
-        raise ValueError(f"token {token} を覆う PLE の {kind} block がありません")
+        raise ValueError(f"token {token} is not covered by any PLE {kind} block")
 
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
         if ids.device.type != "cpu":
-            raise ValueError("ContainerPle は CPU 評価専用です")
+            raise ValueError("ContainerPle is for CPU evaluation only")
         rows = {}
         for token in ids.flatten().tolist():
             if token in rows:
@@ -282,12 +297,13 @@ class ContainerPle(nn.Module):
 
 
 def ple_placement(module: nn.Module) -> str:
-    """差し込んだ PLE の行読みの経路を名乗る（記録は分岐の判断でなく差し込んだ実体から導く）。"""
+    """Names the row-lookup route of the installed PLE (the record is derived from the installed
+    object, not from the branch decision)."""
     if isinstance(module, ContainerPle):
         return "container-row-lookup"
     if isinstance(module, DiskPle):
         return "disk-row-lookup"
-    raise TypeError(f"PLE の経路が未知の module です: {type(module).__name__}")
+    raise TypeError(f"unknown module for the PLE route: {type(module).__name__}")
 
 
 def put(model: nn.Module, name: str, value: torch.Tensor) -> None:
@@ -317,8 +333,8 @@ def load_float_model(
         )
     if family == "gemma4":
         scale = float(model.model.embed_tokens_per_layer.embed_scale)
-        # 保存重みの PLE は**同じ容器の資産**（ADR 0109 決定 4）— 公式 checkpoint 側の行
-        # lookup と入れ替えるのは `--weights stored` のときだけ。
+        # The PLE of the stored weights is **an asset of the same container** (ADR 0109 decision 4)
+        # — it replaces the official checkpoint's row lookup only with `--weights stored`.
         model.model.embed_tokens_per_layer = (
             DiskPle(checkpoint, scale) if stored is None else stored.ple(scale)
         )
@@ -332,7 +348,9 @@ def load_float_model(
             names = ["model.embed_tokens.weight", "lm_head.weight"]
         for target in names:
             if target in loaded and not torch.equal(model.get_parameter(target), value):
-                raise ValueError(f"{target}: tied weight の保存値が矛盾しています")
+                raise ValueError(
+                    f"{target}: stored values of the tied weight contradict each other"
+                )
             put(model, target, value)
             if target in parameters:
                 loaded.add(target)
@@ -361,18 +379,20 @@ def load_float_model(
                 with safe_open(owners[key], framework="pt") as source:
                     assign(name, source.get_tensor(key).float())
     else:
-        # IR v2 では initializer の名前がそのままテンソルキー（旧 `entry["tensor"]`）。
+        # In IR v2 the initializer name is the tensor key itself (formerly `entry["tensor"]`).
         for name in stored.supplies:
             if not name.startswith("model.") or name.endswith(("cos_table", "sin_table")):
                 continue
             target = name.removeprefix("model.")
             if target not in parameters and target not in buffers:
-                raise ValueError(f"公式モデルに保存重みの対応先がありません: {target}")
+                raise ValueError(
+                    f"the official model has no counterpart for the stored weight: {target}"
+                )
             assign(target, stored.dequantized(name))
     if loaded != set(parameters):
-        raise ValueError(f"未読込の parameter: {set(parameters) - loaded}")
+        raise ValueError(f"parameters not loaded: {set(parameters) - loaded}")
     if any(t.device.type == "meta" for t in [*model.parameters(), *model.buffers()]):
-        raise ValueError("meta tensor が残っています")
+        raise ValueError("meta tensors remain")
     model.eval()
     return model, {
         "loadedParameterNames": sorted(loaded),
@@ -383,17 +403,18 @@ def load_float_model(
 
 
 def assert_srq_scales(graph: dict, weight: str, input_scale: float, output_scale: float) -> int:
-    """線形演算の前後にある固定丸めを、公式の正の校正値と照合する。"""
+    """Matches the fixed rounding before and after the linear op against the official positive
+    calibration values."""
     linears = [
         node for node in graph["nodes"] if node["op"] == "linear" and node["ins"][1] == weight
     ]
     if len(linears) != 1:
-        raise ValueError(f"{weight}: 線形演算が一意ではありません")
+        raise ValueError(f"{weight}: linear op is not unique")
     linear = linears[0]
     checked = 0
     for direction, scale in [("input", input_scale), ("output", output_scale)]:
         if scale == 0:
-            continue  # 公式でも未校正は恒等。隣接演算の丸めまでは禁止しない。
+            continue  # Uncalibrated is the identity officially too; adjacent rounding is allowed.
         nodes = [
             node
             for node in graph["nodes"]
@@ -405,22 +426,23 @@ def assert_srq_scales(graph: dict, weight: str, input_scale: float, output_scale
             )
         ]
         if len(nodes) != 1 or nodes[0]["attrs"]["scale"] != scale:
-            raise ValueError(f"{weight}: {direction} SRQ scale が公式と違います")
+            raise ValueError(f"{weight}: {direction} SRQ scale differs from the official one")
         checked += 1
     return checked
 
 
 def assert_qat_checked_range(graph: dict, supplies: Iterable[str], prefix: str = "model.") -> None:
-    """検査が回る集合（供給計画）が、グラフ宣言の側と**一致する**ことを見る。
+    """Checks that the set the check iterates (the supply plan) **equals** the graph declaration's.
 
-    {@link assert_qat_stored} は `stored.supplies`（= 容器に実体がある initializer）を回る。
-    容器に実体を持たない `shared` 宣言（貸し手のバイトを借りる — ADR 0096 段 2 §1.3）は
-    そこに入らないので、宣言が `shared` へ書き換わった瞬間、その重みは**黙って検査対象から
-    外れる**。本数（`fixedInitializersChecked`）が静かに減るだけで赤にならない形なので、
-    `load_float_model` の `loaded != set(parameters)` に当たる対の門をここに置く。
+    {@link assert_qat_stored} iterates `stored.supplies` (= initializers with a body in the
+    container). A `shared` declaration, which has no body in the container (borrowing the lender's
+    bytes — ADR 0096 decision 2 and its stage-2 addendum of 2026-09-08), is not in it, so the moment
+    a declaration is rewritten to `shared`, that weight **silently leaves the checked set**. Only
+    the count (`fixedInitializersChecked`) drops quietly and nothing turns red, so the counterpart
+    check of `loaded != set(parameters)` in `load_float_model` lives here.
 
-    MUST: 両方向を見る（宣言にあって供給に無い = 焼き漏らし / 供給にあって宣言に無い =
-    別のグラフの実体を読んでいる）。
+    MUST: check both directions (declared but not supplied = left out when written / supplied but
+    not declared = reading the body of another graph).
     """
     declared = {
         name
@@ -430,9 +452,9 @@ def assert_qat_checked_range(graph: dict, supplies: Iterable[str], prefix: str =
     iterated = {name for name in supplies if name.startswith(prefix)}
     if declared != iterated:
         raise ValueError(
-            "QAT 固定量子化の検査範囲がグラフ宣言と違います"
-            f"（宣言のみ: {sorted(declared - iterated)} /"
-            f" 供給のみ: {sorted(iterated - declared)}）"
+            "QAT fixed-quantization check range differs from the graph declaration"
+            f" (declared only: {sorted(declared - iterated)} /"
+            f" supplied only: {sorted(iterated - declared)})"
         )
 
 
@@ -456,7 +478,7 @@ def assert_qat_stored(model: nn.Module, stored: StoredWeights) -> dict:
         dtype = stored.storage(key)
         if dtype in ("i2", "i4", "i8"):
             if leaf != "weight" or not isinstance(module, (QuantizedEmbedding, QuantizedLinear)):
-                raise ValueError(f"{key}: 公式固定量子化の対応がありません")
+                raise ValueError(f"{key}: no official fixed-quantization counterpart")
             packed = (
                 module.embedding_quantized
                 if isinstance(module, QuantizedEmbedding)
@@ -471,7 +493,7 @@ def assert_qat_stored(model: nn.Module, stored: StoredWeights) -> dict:
             if dtype != f"i{module.num_bits}" or not torch.equal(
                 actual.reshape(packed.shape), packed
             ):
-                raise ValueError(f"{key}: 固定整数が違います")
+                raise ValueError(f"{key}: fixed integers differ")
             if isinstance(module, QuantizedLinear):
                 srq_count += assert_srq_scales(
                     stored.graph,
@@ -481,21 +503,21 @@ def assert_qat_stored(model: nn.Module, stored: StoredWeights) -> dict:
                 )
             actual_scale = stored.scale(key)
             if not torch.equal(actual_scale, scale.expand_as(actual_scale)):
-                raise ValueError(f"{key}: 固定scaleが違います")
+                raise ValueError(f"{key}: fixed scale differs")
         else:
             if not torch.equal(stored.dequantized(key), getattr(module, leaf).float()):
-                raise ValueError(f"{key}: 非量子化の値が違います")
+                raise ValueError(f"{key}: non-quantized values differ")
         count += 1
-    # PLE は**同じ容器の資産**（ADR 0109 決定 4）。索引 schema 3 は行の種別ごとに別の切り方を
-    # するので、`values` / `scales` をそれぞれの block 列で突き合わせる（旧 sidecar は 1 つの
-    # shard が両方を持っていた）。
+    # PLE is **an asset of the same container** (ADR 0109 decision 4). Index schema 3 cuts each row
+    # kind differently, so `values` / `scales` are compared over their own block sequences (the old
+    # sidecar had both in one shard).
     layout = stored.ple_index()
     embedding = model.model.language_model.embed_tokens_per_layer
     if (
         layout["storage"] != f"i{embedding.num_bits}"
         or layout["embedScale"] != embedding.scalar_embed_scale
     ):
-        raise ValueError("QAT PLE の宣言が違います")
+        raise ValueError("QAT PLE declaration differs")
     ple_blocks = 0
     for kind, table in [
         ("values", embedding.embedding_quantized),
@@ -508,7 +530,7 @@ def assert_qat_stored(model: nn.Module, stored: StoredWeights) -> dict:
                 hashlib.sha256(raw).digest()
                 != hashlib.sha256(memoryview(expected.detach().numpy())).digest()
             ):
-                raise ValueError(f"{block['asset']}: PLE の {kind} が公式と違います")
+                raise ValueError(f"{block['asset']}: PLE {kind} differs from the official one")
             ple_blocks += 1
     return {
         "fixedInitializersChecked": count,

@@ -1,34 +1,37 @@
-// 公開前の門（ADR 0122 決定 6 の 3）: 配布ディレクトリの全容器（`.krm` の part 0）が名乗る
-// `provenance.license` を読み、ライセンス未宣言の印（`NOASSERTION`）か再配布の条件を識別しない値
-// （`unknown` など・大文字小文字を問わない — `UNIDENTIFIED_LICENSES`）があれば拒む。容器が 1 本も無い
-// ディレクトリも拒む（読む出所が無いものを合格に見せない）。
+// Pre-publication check (ADR 0122 decision 6, guard 3): reads the `provenance.license` that every container
+// (part 0 of `.krm`) of a distribution directory declares, and refuses when an undeclared-licence marker
+// (`NOASSERTION`) or a value that does not identify the redistribution terms (`unknown` and the like,
+// case-insensitive — `UNIDENTIFIED_LICENSES`) is present. A directory without a single container is refused
+// too (what has no provenance to read must not look like a pass).
 //
 //     node tools/release/container_license.ts models/<repo>
 //
-// `hf-upload.zsh upload` が上げる前に呼ぶ（置き場ではなく容器の中身で閉じる — 手で `models/` の下へ
-// 写したミラーや symlink も、中身で止まる）。容器ごとに `### provenance <相対 path> license=<識別子>`
-// を出し、印があれば `### FAILED …` を出して終了コード 1。読めない part 0 も 1（検証できなかった
-// 容器を合格に見せない）。
+// `hf-upload.zsh upload` calls it before uploading (closes on the containers' content, not on the location —
+// a mirror copied by hand under `models/` or a symlink is stopped by its content too). Prints
+// `### provenance <relative path> license=<identifier>` per container, and with a marker prints
+// `### FAILED …` and exits with code 1. An unreadable part 0 also exits with 1 (a container that could not be
+// checked must not look like a pass).
 //
-// part 0 の見分け方: container-v1 §1 — ファイル先頭が magic `KRMC`（単一形の `krm` も先頭が part 0）。
-// part 1 以降（const 領域・重みの block）は magic を持たない。`KRGC`（`krg`）は provenance を引き継がない
-// （§9）ので読まない。偶然 `KRMC` で始まる part 1 以降は descriptor として読めずに落ちる（安全側）。
+// How part 0 is recognised: container-v1 §1 — the file starts with the magic `KRMC` (a single-form `krm` also
+// starts with part 0). Parts 1 and later (const region, weight blocks) carry no magic. `KRGC` (`krg`) does not
+// carry provenance over (§9), so it is not read. A part 1 or later that happens to start with `KRMC` fails as an
+// unreadable descriptor (the safe side).
 //
-// MUST: `node:` の組み込み以外を import しない（台本と一緒に一時ディレクトリへ写して試す —
-// `tests/hf_upload_test.ts`）。
+// MUST: import nothing but `node:` built-ins (the test copies this file with the script into a temporary
+// directory — `tests/hf_upload_test.ts`).
 
 import { type FileHandle, open, readdir, realpath, stat } from "node:fs/promises";
 
-/** ライセンス未宣言の印（`wan.umt5_intake.UNDECLARED_LICENSE` と同じ綴り）。 */
+/** The undeclared-licence marker (the same spelling as `wan.umt5_intake.UNDECLARED_LICENSE`). */
 export const UNDECLARED_LICENSE = "NOASSERTION";
 
 /**
- * 再配布の条件を識別しない値（前後の空白と大文字小文字を無視して比べる —
- * `wan.umt5_intake.UNIDENTIFIED_LICENSES` と同じ集合）。印の綴りの完全一致だけを拒むと、手で書き換えた
- * 記録（`noassertion`）や HF の `unknown` から書いた容器が門を通る。
+ * Values that do not identify the redistribution terms (compared ignoring surrounding whitespace and case —
+ * the same set as `wan.umt5_intake.UNIDENTIFIED_LICENSES`). Refusing only the exact spelling of the marker
+ * would let through a hand-edited record (`noassertion`) or a container written from HF's `unknown`.
  *
- * NOTE: `other` は入れない — 既存の配布形（anima）の容器が `other` を名乗り、条件を NOTICE に書く形で
- * 公開している（取り込みは素の `other` を記録しない — `wan.umt5_intake.load_intake`）。
+ * NOTE: `other` is not included — the containers of an existing distribution (anima) declare `other` and
+ * are published with the terms in the NOTICE (intake never records a bare `other` — `wan.umt5_intake.load_intake`).
  */
 export const UNIDENTIFIED_LICENSES: ReadonlySet<string> = new Set([
   "",
@@ -37,14 +40,14 @@ export const UNIDENTIFIED_LICENSES: ReadonlySet<string> = new Set([
   "none",
 ]);
 
-/** `license` が再配布の条件を識別しない値か。 */
+/** Whether `license` is a value that does not identify the redistribution terms. */
 export const isUnidentifiedLicense = (license: string): boolean =>
   UNIDENTIFIED_LICENSES.has(license.trim().toLowerCase());
 
-/** part 0 のヘッダ長（container-v1 §1 — magic 4・version 4・グラフ記述長 8・モデル記述長 8）。 */
+/** Header length of part 0 (container-v1 §1 — magic 4, version 4, graph descriptor length 8, model descriptor length 8). */
 const HEADER_BYTES = 24;
 
-/** 読む descriptor の長さの上限（container-v1 §10 の天井より十分大きい — 壊れた長さで巨大な確保をしない）。 */
+/** Upper bound on the descriptor length read (well above the ceiling of container-v1 §10 — no huge allocation from a corrupt length). */
 const MAX_DESCRIPTOR_BYTES = 256 * 1024 * 1024;
 
 export class ContainerLicenseError extends Error {
@@ -52,7 +55,7 @@ export class ContainerLicenseError extends Error {
 }
 
 export type ContainerLicense = {
-  /** 走査の根からの相対 path。 */
+  /** Path relative to the root of the walk. */
   readonly path: string;
   readonly license: string;
 };
@@ -68,7 +71,7 @@ const readExactly = async (
   while (offset < length) {
     const { bytesRead } = await file.read(buffer, offset, length - offset, position + offset);
     if (bytesRead === 0) {
-      throw new ContainerLicenseError(`${where}: ${length} バイトを読む前にファイルが終わった`);
+      throw new ContainerLicenseError(`${where}: file ended before ${length} bytes were read`);
     }
     offset += bytesRead;
   }
@@ -78,12 +81,12 @@ const readExactly = async (
 const descriptorLength = (view: DataView, offset: number, where: string): number => {
   const value = view.getBigUint64(offset, true);
   if (value < 1n || value > BigInt(MAX_DESCRIPTOR_BYTES)) {
-    throw new ContainerLicenseError(`${where}: descriptor の長さ ${value} が範囲外`);
+    throw new ContainerLicenseError(`${where}: descriptor length ${value} is out of range`);
   }
   return Number(value);
 };
 
-/** `.krm` 1 本の provenance.license（part 0 でなければ `undefined`）。 */
+/** provenance.license of one `.krm` (`undefined` when it is not a part 0). */
 export const readPart0License = async (path: string): Promise<string | undefined> => {
   const file = await open(path, "r");
   try {
@@ -94,7 +97,7 @@ export const readPart0License = async (path: string): Promise<string | undefined
     const view = new DataView(header.buffer);
     const version = view.getUint32(4, true);
     if (version !== 1) {
-      throw new ContainerLicenseError(`${path}: container version ${version} は読めない`);
+      throw new ContainerLicenseError(`${path}: container version ${version} cannot be read`);
     }
     const graphBytes = descriptorLength(view, 8, path);
     const modelBytes = descriptorLength(view, 16, path);
@@ -105,14 +108,16 @@ export const readPart0License = async (path: string): Promise<string | undefined
     try {
       model = JSON.parse(text);
     } catch (cause) {
-      throw new ContainerLicenseError(`${path}: モデル記述が JSON として読めない`, { cause });
+      throw new ContainerLicenseError(`${path}: model descriptor cannot be read as JSON`, {
+        cause,
+      });
     }
     if (
       typeof model !== "object" ||
       model === null ||
       (model as { format?: unknown }).format !== "karume-model"
     ) {
-      throw new ContainerLicenseError(`${path}: モデル記述の format が karume-model でない`);
+      throw new ContainerLicenseError(`${path}: model descriptor format is not karume-model`);
     }
     const provenance = (model as { provenance?: unknown }).provenance;
     const license =
@@ -120,7 +125,7 @@ export const readPart0License = async (path: string): Promise<string | undefined
         ? (provenance as { license?: unknown }).license
         : undefined;
     if (typeof license !== "string" || license === "") {
-      throw new ContainerLicenseError(`${path}: provenance.license が無い`);
+      throw new ContainerLicenseError(`${path}: provenance.license is missing`);
     }
     return license;
   } finally {
@@ -128,7 +133,7 @@ export const readPart0License = async (path: string): Promise<string | undefined
   }
 };
 
-/** `root` の下の全 `.krm`（symlink は辿る — 同じ実体は 1 度だけ）の part 0 のライセンス。 */
+/** The part 0 licences of every `.krm` under `root` (symlinks are followed — the same target only once). */
 export const readContainerLicenses = async (root: string): Promise<ContainerLicense[]> => {
   const found: ContainerLicense[] = [];
   const visited = new Set<string>();
@@ -142,7 +147,7 @@ export const readContainerLicenses = async (root: string): Promise<ContainerLice
     for (const name of names) {
       const path = `${directory}/${name}`;
       const rel = relative === "" ? name : `${relative}/${name}`;
-      // stat は symlink を辿る（張ったミラーも中身で読む）。
+      // stat follows symlinks (a linked mirror is read by its content too).
       const info = await stat(path);
       if (info.isDirectory()) {
         await walk(path, rel);
@@ -155,14 +160,16 @@ export const readContainerLicenses = async (root: string): Promise<ContainerLice
   };
   await walk(root, "");
   if (containerFiles === 0) {
-    // 容器が無い = 出所を 1 本も読んでいない（今の配布形は全て容器を持つ — 生の safetensors だけの
-    // ディレクトリを「未宣言の印が無い」として通さない）。
-    throw new ContainerLicenseError(`${root}: 容器（.krm）が 1 本も無い — 読む出所が無い`);
+    // No container = not a single provenance was read (every current distribution has containers — a directory
+    // of raw safetensors only must not pass as "no undeclared marker").
+    throw new ContainerLicenseError(
+      `${root}: not a single container (.krm) — no provenance to read`,
+    );
   }
   if (found.length === 0) {
-    // part 列はあるのに part 0 が無い = 出所を読めていない（合格に見せない）。
+    // Parts present but no part 0 = the provenance was not read (must not look like a pass).
     throw new ContainerLicenseError(
-      `${root}: .krm が ${containerFiles} 本あるのに part 0 が 1 本も無い`,
+      `${root}: ${containerFiles} .krm files but not a single part 0`,
     );
   }
   return found;
@@ -172,7 +179,7 @@ if (import.meta.main) {
   const args = process.argv.slice(2);
   const root = args[0];
   if (root === undefined || args.length !== 1) {
-    console.log("### FAILED 使い方: container_license.ts <配布ディレクトリ>");
+    console.log("### FAILED usage: container_license.ts <distribution-directory>");
     process.exit(2);
   }
   try {
@@ -183,15 +190,15 @@ if (import.meta.main) {
     const undeclared = licenses.filter(({ license }) => isUnidentifiedLicense(license));
     if (undeclared.length > 0) {
       console.log(
-        `### FAILED ライセンス未宣言の印（${UNDECLARED_LICENSE} — 再配布の条件を識別しない値を含む）の容器が ` +
-          `${undeclared.length} 本 — 手元の実験用ミラーは公開しない（ADR 0122 決定 6）: ` +
+        `### FAILED undeclared-licence marker (${UNDECLARED_LICENSE} — including values that do not identify the redistribution terms) in ` +
+          `${undeclared.length} container(s) — a local experimental mirror is not published (ADR 0122 decision 6): ` +
           undeclared.map(({ path, license }) => `${path}（${license}）`).join(", "),
       );
       process.exit(1);
     }
   } catch (error) {
     console.log(
-      `### FAILED 容器の出所を読めない — ${error instanceof Error ? error.message : String(error)}`,
+      `### FAILED cannot read the containers' provenance — ${error instanceof Error ? error.message : String(error)}`,
     );
     process.exit(1);
   }

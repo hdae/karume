@@ -1,27 +1,31 @@
 /**
- * リポ内の Oxlint JS プラグイン（`vite.config.ts` の `lint.jsPlugins` に登録 — `vp lint` = verify の
- * lint 段で走る）。Node の型除去でそのまま読み込める TS で書く（型だけの import しか使わない）。
+ * The repository's Oxlint JS plugin (registered in `lint.jsPlugins` of `vite.config.ts` — it runs as
+ * `vp lint` inside `vp check`). Written in TS that Node's type stripping loads as is (it uses
+ * type-only imports only).
  *
- * 規則 `karume/typed-array-buffer`: packages の本体（`packages/<pkg>/src/`）で、型の位置に書いた
- * TypedArray が型引数を省くことを禁じる（ADR 0002 の「TypedArray は `<ArrayBuffer>` 明示」）。
- * 省くと TS 5.7 以降は既定の `ArrayBufferLike`（`SharedArrayBuffer` を含む）になり、
- * `GPUQueue.writeBuffer` などへ渡す値の型が黙って緩む。意図して任意のバッファを受ける境界は
- * `<ArrayBufferLike>` と明示する（例外の一覧は ADR 0002 の改訂節）。
+ * Rule `karume/typed-array-buffer`: in the package sources (`packages/<pkg>/src/`), a TypedArray
+ * written in a type position MUST NOT omit its type argument (ADR 0002: "TypedArrays name
+ * `<ArrayBuffer>` explicitly"). Since TS 5.7 an omitted argument means the default
+ * `ArrayBufferLike` (which includes `SharedArrayBuffer`), silently widening the type of values
+ * passed to `GPUQueue.writeBuffer` and the like. A boundary that deliberately accepts any buffer
+ * writes `<ArrayBufferLike>` explicitly (the exceptions are listed in the addendum of 2026-10-11 to
+ * ADR 0002).
  *
- * 判定は AST の型参照（`TSTypeReference`）と、interface の `extends`・class の `implements`
- * （`TSInterfaceHeritage` / `TSClassImplements`）を見る。型注釈・型引数・戻り型・型エイリアス・
- * 欄の型・`satisfies` は全て型参照の節点なので拾い、値の位置（`new Float32Array(n)` や
- * `instanceof Float32Array`）・コメント・文字列は構文上そもそも型参照にならない。修飾名
- * （`globalThis.Float32Array`）は右端の名前で判定する。
+ * The check looks at the AST's type references (`TSTypeReference`) and at interface `extends` and
+ * class `implements` (`TSInterfaceHeritage` / `TSClassImplements`). Type annotations, type
+ * arguments, return types, type aliases, field types and `satisfies` are all type-reference nodes,
+ * so they are caught; value positions (`new Float32Array(n)` or `instanceof Float32Array`),
+ * comments and strings are never type references by syntax. A qualified name
+ * (`globalThis.Float32Array`) is judged by its rightmost name.
  *
- * NOTE: TypedArray の名前を型参照として書かずに既定の `ArrayBufferLike` を作る形
- * （`InstanceType<typeof Float32Array>` / `ReturnType<typeof Uint8Array.from>`）は取りこぼす —
- * 構文だけでは型の中身が分からない（ADR 0002 の改訂節）。
+ * NOTE: forms that produce the default `ArrayBufferLike` without writing the TypedArray name as a
+ * type reference (`InstanceType<typeof Float32Array>` / `ReturnType<typeof Uint8Array.from>`) are
+ * missed — syntax alone does not tell what the type is (the addendum of 2026-10-11 to ADR 0002).
  */
 
 import type { ESTree, Plugin } from "vite-plus/lint/plugins";
 
-/** 型引数（バッファの型）を取る TypedArray の名前。 */
+/** The names of the TypedArrays that take a type argument (the buffer type). */
 const TYPED_ARRAY_NAMES: ReadonlySet<string> = new Set([
   "Int8Array",
   "Uint8Array",
@@ -37,14 +41,15 @@ const TYPED_ARRAY_NAMES: ReadonlySet<string> = new Set([
   "BigUint64Array",
 ]);
 
-/** 対象 = packages の本体。tests / tools / examples は対象外（区切りは `/` と `\` の両方）。 */
+/** In scope = the package sources. tests / tools / examples are out of scope (separator `/` or `\`). */
 const TARGET_PATH = /(?:^|[\\/])packages[\\/][^\\/]+[\\/]src[\\/]/;
 
 export const isTargetFile = (filename: string): boolean => TARGET_PATH.test(filename);
 
 /**
- * 型参照・heritage の名前の節点から右端の名前を取る（`Float32Array` / `globalThis.Float32Array`
- * のどちらも `Float32Array`）。名前で無い節点（`this`・計算した添字・呼び出し）は undefined。
+ * Takes the rightmost name from the name node of a type reference or heritage clause (both
+ * `Float32Array` and `globalThis.Float32Array` give `Float32Array`). A node that is not a name
+ * (`this`, a computed index, a call) gives undefined.
  */
 const rightmostName = (node: ESTree.Node): string | undefined => {
   switch (node.type) {
@@ -60,13 +65,13 @@ const rightmostName = (node: ESTree.Node): string | undefined => {
 };
 
 /**
- * 報告の文言。Oxlint の診断には Deno lint の `hint` に当たる欄が無いので、直し方を同じ文言の
- * 後ろに続ける（`vp lint` の出力に直し方が出るように）。
+ * The report message. Oxlint diagnostics have no field like Deno lint's `hint`, so the fix follows
+ * in the same message (so that the output of `vp lint` shows how to fix it).
  */
 const reportMessage = (name: string): string =>
-  `${name} の型引数が無い（既定は ArrayBufferLike に緩む）。` +
-  `${name}<ArrayBuffer> と書く。意図して任意のバッファを受ける境界なら ` +
-  `${name}<ArrayBufferLike> と明示し、ADR 0002 の例外表に足す。`;
+  `${name} has no type argument (the default widens to ArrayBufferLike). ` +
+  `Write ${name}<ArrayBuffer>. At a boundary that deliberately accepts any buffer, ` +
+  `write ${name}<ArrayBufferLike> explicitly and add it to the exception table of ADR 0002.`;
 
 const plugin: Plugin = {
   meta: { name: "karume" },
@@ -76,11 +81,11 @@ const plugin: Plugin = {
         type: "problem",
         docs: {
           description:
-            "packages/<pkg>/src/ の型の位置の TypedArray にバッファの型引数を求める（ADR 0002）",
+            "Requires a buffer type argument on TypedArrays in type positions under packages/<pkg>/src/ (ADR 0002)",
         },
       },
       create(context) {
-        // `physicalFilename` は前処理（Markdown の中のコード等）を挟んでも実ファイルの道を指す。
+        // `physicalFilename` names the real file's path even through preprocessing (code inside Markdown, etc.).
         if (!isTargetFile(context.physicalFilename)) return {};
         const check = (
           node: ESTree.Node,

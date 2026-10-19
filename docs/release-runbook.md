@@ -167,7 +167,7 @@ export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
       before moving the shard-cache aside and before starting hf, `upload` reads, with `tools/release/container_license.ts` (needs Node),
       `provenance.license` of every container (part 0 of `.krm`) in `models/<repo>`, and if any of these is present — an undeclared-licence marker
       (`NOASSERTION`, and values such as `unknown` that do not identify the redistribution terms — case-insensitive), an unreadable part 0, or a
-      directory without a single container — it prints `### FAILED 公開前の門` and exits non-zero without uploading a single byte.
+      directory without a single container — it prints `### FAILED pre-publication check` and exits non-zero without uploading a single byte.
       It closes on the containers' content rather than on the location, so a local experimental mirror copied by hand under `models/`
       (from intake — assets-layout) is stopped too. **An `hf upload` that bypasses the script does not pass this check** — when typing it by hand,
       run `node tools/release/container_license.ts models/<repo>` first and confirm the exit code is

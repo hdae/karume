@@ -1,15 +1,20 @@
-// verify-diff の純関数部の門（GPU も outputs/ も触らない — 入力は全て合成）。
+// Checks of the pure part of verify-diff (touches neither the GPU nor outputs/ — every input is
+// synthetic).
 //
-// この道具の値打ちは「割れた所を指す」ことなので、固定するのは ① 席の選び方（最新の日付 /
-// --date / 系列の絞り込み）② 差異の拾い方（status / 実物の sha / 片方にしか無いケース）
-// ③ 読めない文書で黙って空にしないこと の 3 面である。
+// The value of this tool is "pointing at where the results diverge", so three aspects are pinned:
+// ① how results directories are picked (newest date / --date / the family filter) ② how differences are
+// found (status / artifact sha / a case only one side has) ③ an unreadable document never silently
+// becomes empty.
 
 import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { buildDiff, type LoadedResults, parseResultsDocument } from "../diff.ts";
 import { parseArgs, single } from "../main.ts";
 
-/** 席 1 本ぶんの合成入力（`results.json` の実物と同じ形を境界の検査に通す）。 */
+/**
+ * Synthetic input for one results directory (the same shape as a real `results.json`, passed through the
+ * boundary check).
+ */
 const seat = (
   environment: string,
   date: string,
@@ -36,16 +41,16 @@ const passing = (id: string, actual?: string): Record<string, unknown> => ({
   ...(actual === undefined ? {} : { actual }),
 });
 
-describe("results.json の境界の検査", () => {
-  it("schema が 1 でない文書は throw する", () => {
+describe("boundary check of results.json", () => {
+  it("throws on a document whose schema is not 1", () => {
     assertThrows(
       () => parseResultsDocument({ schema: 2, family: "anima" }, "a.json"),
       Error,
-      "a.json: schema が 1 でない（2）",
+      "a.json: schema is not 1 (2)",
     );
   });
 
-  it("必須欄が欠けた文書は throw する（空の行列へ落とさない）", () => {
+  it("throws on a document missing a required field (does not fall back to an empty matrix)", () => {
     assertThrows(
       () =>
         parseResultsDocument({
@@ -56,7 +61,7 @@ describe("results.json の境界の検査", () => {
           startedAt: "2026-09-21T00:00:00.000Z",
         }),
       Error,
-      "cases が配列でない",
+      "cases is not an array",
     );
     assertThrows(
       () =>
@@ -69,16 +74,16 @@ describe("results.json の境界の検査", () => {
           cases: [],
         }),
       Error,
-      "environment: key が文字列でない",
+      "environment: key is not a string",
     );
     assertThrows(
       () => seat("deno-a", "2026-09-21", "anima", [{ id: "x", status: "ok", elapsedMs: 1 }]),
       Error,
-      "未知の status 'ok'",
+      "unknown status 'ok'",
     );
   });
 
-  it("ケース ID が重複した文書は throw する（2 本目の決着が黙って消えない）", () => {
+  it("throws on a document with a duplicate case ID (the second outcome does not vanish silently)", () => {
     assertThrows(
       () =>
         seat("deno-a", "2026-09-21", "anima", [
@@ -86,9 +91,9 @@ describe("results.json の境界の検査", () => {
           { id: "base", status: "fail", elapsedMs: 2 },
         ]),
       Error,
-      "ケース ID が重複 'base'",
+      "duplicate case ID 'base'",
     );
-    // 別の ID なら 2 件とも残る（重複だけを断る）。
+    // With different IDs both items stay (only duplicates are rejected).
     const loaded = seat("deno-a", "2026-09-21", "anima", [passing("base"), passing("extra")]);
     assertEquals(
       loaded.document.cases.map((one) => one.id),
@@ -96,7 +101,7 @@ describe("results.json の境界の検査", () => {
     );
   });
 
-  it("measurements を読む（非有限が null で来ても落ちない）", () => {
+  it("reads measurements (does not fail when a non-finite value arrives as null)", () => {
     const loaded = seat("deno-a", "2026-09-21", "golden", [
       {
         id: "activations",
@@ -122,12 +127,12 @@ describe("results.json の境界の検査", () => {
         stage: "spec",
       },
     ]);
-    // 行列にもそのまま載る（--json と実測の小表が読む所）。
+    // They also go into the matrix as is (what --json and the small measurement table read).
     const report = buildDiff([loaded]);
     assertEquals(report.families[0].rows[0].cells["deno-a"].measurements?.[0].maxRel, null);
   });
 
-  it("comparisons を読む（非有限の null・帯の無い回を受け、壊れた帯は throw する）", () => {
+  it("reads comparisons (accepts a non-finite null and a run without a band, throws on a broken band)", () => {
     const banded = {
       output: "step1-latent",
       reference: "f16+dit8",
@@ -136,7 +141,7 @@ describe("results.json の境界の検査", () => {
       maxAbs: 0.31,
       band: { metric: "relRms" as const, floor: 0.001, ceiling: 0.025 },
     };
-    // 帯の無い回は欄ごと無い（書き手の JSON.stringify が undefined の欄を落とす）。
+    // A run without a band has no field at all (the writer's JSON.stringify drops undefined fields).
     const { band: _dropped, ...unbanded } = banded;
     const loaded = seat("deno-a", "2026-09-26", "anima-ab", [
       {
@@ -165,14 +170,14 @@ describe("results.json の境界の検査", () => {
     assertThrows(
       broken({ ...banded, band: { ...banded.band, metric: "maxAbs" } }),
       Error,
-      "未知の metric 'maxAbs'",
+      "unknown metric 'maxAbs'",
     );
     assertThrows(
       broken({ ...banded, band: { metric: "relRms", floor: 0.001 } }),
       Error,
-      "ceiling が数値でない",
+      "ceiling is not a number",
     );
-    assertThrows(broken({ ...banded, practical: 3 }), Error, "practical が文字列でない");
+    assertThrows(broken({ ...banded, practical: 3 }), Error, "practical is not a string");
     assertThrows(
       () =>
         seat("deno-a", "2026-09-26", "anima-ab", [
@@ -184,13 +189,13 @@ describe("results.json の境界の検査", () => {
           },
         ]),
       Error,
-      "comparisons が配列でない",
+      "comparisons is not an array",
     );
   });
 });
 
-describe("席の選び方", () => {
-  it("同じ系列・同じ環境に複数の日付があれば最新の日付を採る", () => {
+describe("picking results directories", () => {
+  it("takes the newest date when the same family and environment have several dates", () => {
     const report = buildDiff([
       seat("deno-a", "2026-09-20", "anima", [passing("base")]),
       seat("deno-a", "2026-09-21", "anima", [passing("base"), passing("extra")]),
@@ -209,7 +214,7 @@ describe("席の選び方", () => {
     );
   });
 
-  it("--date を指定するとその日付だけを採り、持たない環境は「無し」になる", () => {
+  it("with --date takes only that date, and an environment without it becomes absent", () => {
     const report = buildDiff(
       [
         seat("deno-a", "2026-09-20", "anima", [passing("base")]),
@@ -223,32 +228,33 @@ describe("席の選び方", () => {
     assertEquals(report.families[0].absent, ["deno-b"]);
   });
 
-  it("--date に当たる席が無ければ警告する（当たれば警告は出ない）", () => {
+  it("warns when no results directory matches --date (no warning when one matches)", () => {
     const loaded = [seat("deno-a", "2026-09-21", "anima", [passing("base")])];
     const missed = buildDiff(loaded, { date: "2026-02-30" });
-    assertEquals(missed.warnings, ["--date 2026-02-30 に当たる席が無い"]);
+    assertEquals(missed.warnings, ["no results directory matches --date 2026-02-30"]);
     assertEquals(missed.families, []);
     assertEquals(buildDiff(loaded, { date: "2026-09-21" }).warnings, []);
   });
 
-  it("同じ系列・環境キー・日付の席が 2 つあれば両方の path を挙げて警告する", () => {
+  it("warns with both paths when two results directories share family, environment key and date", () => {
     const first = seat("deno-a", "2026-09-21", "anima", [passing("base")]);
-    // 同型 GPU の 2 台は同じ環境キーを名乗るので、手コピーで別 path の同じ席が並ぶ。
+    // Two machines with the same GPU model report the same environment key, so a hand copy puts
+    // the same results directory side by side under another path.
     const second: LoadedResults = {
       ...seat("deno-a", "2026-09-21", "anima", [{ id: "base", status: "fail", elapsedMs: 2 }]),
       path: "outputs/verify/copied/2026-09-21_anima/results.json",
     };
     const report = buildDiff([first, second]);
     assertEquals(report.warnings, [
-      "同じ系列・環境キー・日付の席が 2 つある（anima / deno-a / 2026-09-21）— 片方だけを採る: " +
+      "two results directories with the same family, environment key and date (anima / deno-a / 2026-09-21) — only one is taken: " +
         `${first.path} / ${second.path}`,
     ]);
-    // 採るのは 1 本のまま（警告は「どちらが消えたか」を読み手に渡すためのもの）。
+    // Still only one is taken (the warning is there to tell the reader "which one vanished").
     assertEquals(
       report.families[0].selected.map((one) => one.path),
       [first.path],
     );
-    // 日付が違えば「最新を採る」ので警告は出ない。
+    // With different dates the newest is taken, so no warning.
     assertEquals(
       buildDiff([
         seat("deno-a", "2026-09-20", "anima", [passing("base")]),
@@ -258,7 +264,7 @@ describe("席の選び方", () => {
     );
   });
 
-  it("--family で指定した系列だけを行列にし、当たらない指定は警告にする", () => {
+  it("builds matrices only for the families given by --family, and warns on a filter that matches none", () => {
     const report = buildDiff(
       [
         seat("deno-a", "2026-09-21", "anima", [passing("base")]),
@@ -270,12 +276,12 @@ describe("席の選び方", () => {
       report.families.map((matrix) => matrix.family),
       ["sbv2"],
     );
-    assertEquals(report.warnings, ["--family irodori に当たる結果が無い"]);
+    assertEquals(report.warnings, ["no results match --family irodori"]);
   });
 });
 
-describe("環境間の差異", () => {
-  it("全環境で一致していれば差異は空", () => {
+describe("differences between environments", () => {
+  it("has no differences when every environment agrees", () => {
     const report = buildDiff([
       seat("deno-a", "2026-09-21", "anima", [passing("base", "aa")]),
       seat("deno-b", "2026-09-21", "anima", [passing("base", "aa")]),
@@ -284,7 +290,7 @@ describe("環境間の差異", () => {
     assertEquals(report.families[0].environments, ["deno-a", "deno-b"]);
   });
 
-  it("status が食い違うケースを挙げる", () => {
+  it("lists a case whose status differs", () => {
     const report = buildDiff([
       seat("deno-a", "2026-09-21", "anima", [passing("base")]),
       seat("deno-b", "2026-09-21", "anima", [{ id: "base", status: "fail", elapsedMs: 2 }]),
@@ -298,7 +304,7 @@ describe("環境間の差異", () => {
     ]);
   });
 
-  it("実物の sha が食い違うケースを挙げる（赤にはしない = 差異として並ぶだけ）", () => {
+  it("lists a case whose artifact sha differs (not red = only listed as a difference)", () => {
     const report = buildDiff([
       seat("deno-a", "2026-09-21", "anima", [passing("base", "aa")]),
       seat("deno-b", "2026-09-21", "anima", [passing("base", "bb")]),
@@ -312,7 +318,7 @@ describe("環境間の差異", () => {
     ]);
   });
 
-  it("片方にしか無いケースを挙げる", () => {
+  it("lists a case only one side has", () => {
     const report = buildDiff([
       seat("deno-a", "2026-09-21", "anima", [passing("base"), passing("only-a")]),
       seat("deno-b", "2026-09-21", "anima", [passing("base")]),
@@ -328,8 +334,8 @@ describe("環境間の差異", () => {
   });
 });
 
-describe("チェックアウトの警告", () => {
-  it("選んだ結果の sha が環境間で食い違えば警告する", () => {
+describe("checkout warnings", () => {
+  it("warns when the sha of the selected results differs between environments", () => {
     const report = buildDiff([
       seat("deno-a", "2026-09-21", "anima", [passing("base")]),
       seat("deno-b", "2026-09-21", "anima", [passing("base")], {
@@ -338,12 +344,12 @@ describe("チェックアウトの警告", () => {
       }),
     ]);
     assertEquals(report.families[0].warnings, [
-      "checkout の sha が環境間で食い違う（別のコミットの結果を並べている）: " +
+      "checkout sha differs between environments (results of different commits side by side): " +
         "deno-a=1111111 / deno-b=2222222",
     ]);
   });
 
-  it("dirty な作業木と checkout の無い結果も警告する", () => {
+  it("also warns on a dirty working tree and on results without a checkout", () => {
     const report = buildDiff([
       seat("deno-a", "2026-09-21", "anima", [passing("base")], {
         sha: "1111111111111111111111111111111111111111",
@@ -352,27 +358,31 @@ describe("チェックアウトの警告", () => {
       seat("deno-b", "2026-09-21", "anima", [passing("base")], null),
     ]);
     assertEquals(report.families[0].warnings, [
-      "deno-a: 作業木が dirty なチェックアウトで採られた結果（1111111）",
-      "deno-b: checkout が無い（git の無い機で採られた結果）",
+      "deno-a: results taken from a checkout with a dirty working tree（1111111）",
+      "deno-b: no checkout (results taken on a machine without git)",
     ]);
   });
 });
 
-describe("CLI の引数", () => {
-  it("--json は値を取らず、以降の対をずらさない", () => {
+describe("CLI arguments", () => {
+  it("--json takes no value and does not shift the later pairs", () => {
     const args = parseArgs(["--json", "--family", "anima", "--family", "sbv2"]);
     assertEquals(args.flags.has("json"), true);
     assertEquals(args.values.get("family"), ["anima", "sbv2"]);
   });
 
-  it("未知のオプション・値の書き忘れ・2 度渡しは落ちる", () => {
-    assertThrows(() => parseArgs(["--families", "anima"]), Error, "未知のオプション --families");
-    assertThrows(() => parseArgs(["--date"]), Error, "'--キー 値' の対になっていない");
-    assertThrows(() => parseArgs(["--date", "--json"]), Error, "値が無い（'--json' はオプション）");
+  it("fails on an unknown option, a missing value and a key given twice", () => {
+    assertThrows(() => parseArgs(["--families", "anima"]), Error, "unknown option --families");
+    assertThrows(() => parseArgs(["--date"]), Error, "is not a '--key value' pair");
+    assertThrows(
+      () => parseArgs(["--date", "--json"]),
+      Error,
+      "has no value ('--json' is an option)",
+    );
     assertThrows(
       () => single(parseArgs(["--date", "2026-09-20", "--date", "2026-09-21"]), "date"),
       Error,
-      "--date は 1 度しか指定できない",
+      "--date can be given only once",
     );
   });
 });

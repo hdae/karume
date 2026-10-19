@@ -1,4 +1,4 @@
-"""PyTorch/Transformers の品質ベースライン。既存出力を上書きしない。"""
+"""PyTorch/Transformers quality baseline. Does not overwrite existing output."""
 
 from __future__ import annotations
 
@@ -16,27 +16,31 @@ from data import profiles
 from scoring import accuracy, token_nll, windows
 from weights import MODEL_GRAPH, StoredWeights, fingerprint, load_float_model, load_qat
 
-#: 読む配布 manifest の major（旧版は読まない — ADR 0109 決定 1）。
+#: Major version of the distribution manifest read (older ones are not read — ADR 0109 decision 1).
 MANIFEST_FORMAT = "karume/5"
 
 
 def container_paths(profile: dict) -> list[Path]:
-    """評価に使う部品 1 本のコンテナを、manifest が宣言する **part 列**として返す。
+    """Return the container of the one component used for evaluation as the **part sequence** the
+    manifest declares.
 
-    ファイル名の推測はしない（連番の綴りは manifest が持つ）。読み手の規約検査・2 文書の
-    parse・束縛表との合流は {@link StoredWeights} が通す `verify_container` の担当で、
-    ここが見るのは「どの part を渡すか」だけである。
+    File names are not guessed (the manifest holds the numbered spelling). The reader's rule checks,
+    the parse of the 2 documents and the merge with the binding table are the job of
+    `verify_container`, which {@link StoredWeights} runs; this function only decides "which parts to
+    pass".
     """
     root = profile["distribution"]
     manifest = json.loads((root / "karume.json").read_text())
     if manifest["format"] != MANIFEST_FORMAT:
-        raise ValueError(f"{MANIFEST_FORMAT} の配布形が必要（読んだのは {manifest['format']}）")
+        raise ValueError(
+            f"a {MANIFEST_FORMAT} distribution is required (read {manifest['format']})"
+        )
     model = manifest["models"][profile["model"]]
     quant = model["defaultQuant"]
     dtype = model["quants"][quant]["weights"][MODEL_GRAPH]
     parts = model["weights"][MODEL_GRAPH][dtype]["container"]["parts"]
     if any("repo" in part for part in parts):
-        raise ValueError("越境参照はこのローカル評価では未対応")
+        raise ValueError("cross-repository references are not supported by this local evaluation")
     return [root / part["path"] for part in parts]
 
 
@@ -57,9 +61,9 @@ def main() -> None:
     parser.add_argument("--wiki-limit", type=int)
     args = parser.parse_args()
     if transformers.__version__ != "5.14.1":
-        raise ValueError("この評価は Transformers 5.14.1 で検証しています")
+        raise ValueError("this evaluation is verified with Transformers 5.14.1")
     if args.threads < 1 or any(n is not None and n < 1 for n in [args.arc_limit, args.wiki_limit]):
-        raise ValueError("件数とthreadsは正である必要があります")
+        raise ValueError("counts and threads must be positive")
     args.out.mkdir()
     torch.set_num_threads(args.threads)
     torch.set_num_interop_threads(1)
@@ -68,21 +72,25 @@ def main() -> None:
     torch.use_deterministic_algorithms(True)
     suite = json.loads(args.suite.read_text())
     if suite["format"] != "karume-llm-quality/1":
-        raise ValueError("不明な評価集合")
+        raise ValueError("unknown evaluation set")
     data = suite["models"][args.model]
     profile = profiles(args.root)[args.model]
     checkpoint = profile["checkpoint"]
     tokenizer = fingerprint(checkpoint / "tokenizer.json")
     if tokenizer["sha256"] != data["tokenizerSha256"]:
-        raise ValueError("固定したtokenizerと現在のモデルが一致しません")
+        raise ValueError("the pinned tokenizer does not match the current model")
     if profile["family"] == "gemma4-qat" and args.weights != "stored":
-        raise ValueError("QATは公式の固定量子化とstoredが同じ1構成です。storedで実行してください")
+        raise ValueError(
+            "QAT is a single configuration where the official fixed quantization equals stored. "
+            "Run with stored"
+        )
     at = time.perf_counter()
     files = [fingerprint(path) for path in sorted(checkpoint.glob("*.safetensors"))]
     files += [fingerprint(checkpoint / "config.json"), tokenizer]
     stored = None
     if args.weights == "stored":
-        # PLE は同じ容器の資産（ADR 0109 決定 4）なので、指紋は part 列だけで閉じる。
+        # PLE is an asset of the same container (ADR 0109 decision 4), so the fingerprint closes
+        # over the part sequence alone.
         parts = container_paths(profile)
         files += [fingerprint(path) for path in parts]
         stored = StoredWeights(parts)
@@ -98,7 +106,7 @@ def main() -> None:
     )
     if profile["family"] == "gemma4-qat":
         if stored is None:
-            raise ValueError("QATの固定重みが必要")
+            raise ValueError("QAT fixed weights are required")
         model, checks = load_qat(checkpoint, stored)
     else:
         model, checks = load_float_model(checkpoint, profile["family"], stored)
@@ -162,9 +170,9 @@ def main() -> None:
         save(args.out / f"wiki-{window_count:03}.json", record)
         print("wiki", window_count, len(wiki), flush=True)
     if not arc or not wiki:
-        raise ValueError("評価結果がありません")
+        raise ValueError("no evaluation results")
     if args.wiki_limit is None and len(wiki) != len(wiki_ids) - 1:
-        raise ValueError("WikiTextの重複・未採点tokenがあります")
+        raise ValueError("WikiText has duplicate or unscored tokens")
     nll = math.fsum(wiki) / len(wiki)
     summary = {
         "format": "karume-llm-quality-result/1",

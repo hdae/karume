@@ -1,20 +1,21 @@
 /**
- * リポ内 lint プラグインの規則 `karume/typed-array-buffer` の検証（合成したソースを一時ディレクトリに
- * `packages/<pkg>/src/…` などの配置で書き、プラグインを登録した一時の `vite.config.ts` で実物の
- * `vp lint`（Oxlint）に通す — GPU は要らない）。
+ * Tests of the repository lint plugin's rule `karume/typed-array-buffer` (synthesised sources are
+ * written into a temporary directory at paths such as `packages/<pkg>/src/…` and run through the real
+ * `vp lint` (Oxlint) with a temporary `vite.config.ts` that registers the plugin — no GPU needed).
  *
- * 見る点:
+ * What is checked:
  *
- * 1. **報告する** — packages の本体で、型の位置の TypedArray が型引数を省いた形（引数・戻り型・
- *    型引数・配列・型エイリアス・欄・`satisfies`・修飾名 `globalThis.X`・interface の `extends`・
- *    class の `implements`）と、12 種の名前の全て
- * 2. **報告しない** — `<ArrayBuffer>` / `<ArrayBufferLike>` を書いた型と、値の位置
- *    （`new` / `from` / `instanceof` / `typeof` の型クエリ）・コメント・文字列。加えて、取りこぼすと
- *    ADR 0002 に明記した形（`InstanceType<typeof X>` / `ReturnType<typeof X.from>`）が今も
- *    取りこぼされること（明記と現物の食い違いを落とす）
- * 3. **対象の外** — `packages/<pkg>/tests/`・`tools/`・`examples/` は型引数が無くても報告しない
+ * 1. **Reported** — in the package sources, a TypedArray in a type position without its type
+ *    argument (parameter, return type, type argument, array, type alias, field, `satisfies`,
+ *    qualified name `globalThis.X`, interface `extends`, class `implements`), and all 12 names
+ * 2. **Not reported** — types that write `<ArrayBuffer>` / `<ArrayBufferLike>`, and value positions
+ *    (`new` / `from` / `instanceof` / `typeof` type queries), comments and strings. Also, the forms
+ *    ADR 0002 records as missed (`InstanceType<typeof X>` / `ReturnType<typeof X.from>`) are still
+ *    missed (catches a drift between the record and the code)
+ * 3. **Out of scope** — `packages/<pkg>/tests/`, `tools/` and `examples/` are not reported even
+ *    without a type argument
  *
- * NOTE: リポの慣習に合わせて `describe`（文脈）+ `it`（振る舞い）で書く。
+ * NOTE: written as `describe` (context) + `it` (behaviour), following the repository's convention.
  */
 
 import { execFile } from "node:child_process";
@@ -28,19 +29,19 @@ import { describe, it } from "vite-plus/test";
 import { isTargetFile } from "../oxlint-plugin.ts";
 
 const RULE = "karume/typed-array-buffer";
-/** Oxlint の JSON 出力での規則の綴り（`<plugin>(<rule>)`）。 */
+/** The rule's spelling in Oxlint's JSON output (`<plugin>(<rule>)`). */
 const RULE_CODE = "karume(typed-array-buffer)";
 const IN_SCOPE = "packages/runtime/src/sample.ts";
 
 const PLUGIN_PATH = fileURLToPath(new URL("../oxlint-plugin.ts", import.meta.url));
-/** この workspace の Vite+ の CLI（PATH に依らず、リポが固定した版の `vp` を走らせる）。 */
+/** This workspace's Vite+ CLI (runs the `vp` version the repository pins, independent of PATH). */
 const VP_BIN = join(
   dirname(createRequire(import.meta.url).resolve("vite-plus/package.json")),
   "bin",
   "vp",
 );
 
-/** `vp lint -f json` の出力のうち、ここで読む欄。`offset` / `length` は UTF-8 のバイト単位。 */
+/** The fields of the `vp lint -f json` output read here. `offset` / `length` are in UTF-8 bytes. */
 type LintDiagnostic = {
   readonly message: string;
   readonly code: string;
@@ -51,7 +52,7 @@ type LintDiagnostic = {
 };
 type LintOutput = { readonly diagnostics: readonly LintDiagnostic[] };
 
-/** この規則だけを有効にした設定（組み込み規則は切る — 報告の数を規則の判定だけにする）。 */
+/** A config with only this rule enabled (built-in rules off — the reports come from this rule alone). */
 const viteConfig = (): string =>
   `export default {
   lint: {
@@ -64,8 +65,9 @@ const viteConfig = (): string =>
 `;
 
 /**
- * `files`（一時ディレクトリからの相対の道 → ソース）を書き、`vp lint` に通してこの規則の診断を返す。
- * 報告があると `vp lint` は終了コード 1 で終わるので、0 と 1 は正常として JSON を読む。
+ * Writes `files` (path relative to the temporary directory → source), runs them through `vp lint` and
+ * returns this rule's diagnostics. `vp lint` exits with code 1 when it reports, so 0 and 1 are both
+ * normal and the JSON is read.
  */
 const lint = async (files: Readonly<Record<string, string>>): Promise<LintDiagnostic[]> => {
   const root = await makeTempDir({ prefix: "karume-lint-" });
@@ -94,7 +96,9 @@ const lint = async (files: Readonly<Record<string, string>>): Promise<LintDiagno
         )
       ) {
         const stderr = error instanceof Error && "stderr" in error ? String(error.stderr) : "";
-        throw new Error(`vp lint が報告以外の理由で失敗した: ${stderr}`, { cause: error });
+        throw new Error(`vp lint failed for a reason other than a report: ${stderr}`, {
+          cause: error,
+        });
       }
       stdout = error.stdout;
     }
@@ -105,7 +109,7 @@ const lint = async (files: Readonly<Record<string, string>>): Promise<LintDiagno
   }
 };
 
-/** 診断が指す元の綴り（報告の範囲が指す文字列）を、ファイルごとにソースの順で返す。 */
+/** The original spelling each diagnostic points at (the text its span covers), per file in source order. */
 const reportedByFile = async (
   files: Readonly<Record<string, string>>,
 ): Promise<Map<string, string[]>> => {
@@ -120,18 +124,18 @@ const reportedByFile = async (
     const bytes = new TextEncoder().encode(files[filename]);
     const spelled = new TextDecoder().decode(bytes.subarray(offset, offset + length));
     const list = result.get(filename);
-    assert(list !== undefined, `想定外のファイルへの報告: ${filename}`);
+    assert(list !== undefined, `report on an unexpected file: ${filename}`);
     list.push(spelled);
   }
   return result;
 };
 
-/** 規則が報告した箇所の元の綴り（報告の範囲が指す文字列）。 */
+/** The original spelling of the places the rule reported (the text each span covers). */
 const reported = async (source: string, filename = IN_SCOPE): Promise<string[]> =>
   (await reportedByFile({ [filename]: source })).get(filename) ?? [];
 
-describe("型の位置で型引数を省いた TypedArray を報告する", () => {
-  it("引数・戻り型・型引数・配列・型エイリアス・欄・satisfies の全てで拾う", async () => {
+describe("reports a TypedArray without its type argument in a type position", () => {
+  it("catches parameters, return types, type arguments, arrays, type aliases, fields and satisfies", async () => {
     const source = [
       "export const f = (a: Float32Array): Uint8Array => new Uint8Array(a.length);",
       "export const g = async (): Promise<Int32Array> => new Int32Array(1);",
@@ -151,7 +155,7 @@ describe("型の位置で型引数を省いた TypedArray を報告する", () =
     ]);
   });
 
-  it("修飾名 globalThis.X は右端の名前で拾う", async () => {
+  it("catches a qualified name globalThis.X by its rightmost name", async () => {
     const source = [
       "export type A = globalThis.Float32Array;",
       "export const f = (bytes: globalThis.Uint8Array): number => bytes.length;",
@@ -159,7 +163,7 @@ describe("型の位置で型引数を省いた TypedArray を報告する", () =
     assertEquals(await reported(source), ["globalThis.Float32Array", "globalThis.Uint8Array"]);
   });
 
-  it("interface の extends と class の implements でも拾う", async () => {
+  it("also catches interface extends and class implements", async () => {
     const source = [
       "export interface Samples extends Float32Array {}",
       "export interface Bytes extends globalThis.Uint8Array {}",
@@ -168,7 +172,7 @@ describe("型の位置で型引数を省いた TypedArray を報告する", () =
     assertEquals(await reported(source), ["Float32Array", "globalThis.Uint8Array", "Int16Array"]);
   });
 
-  it("12 種の TypedArray の名前を全て対象にする", async () => {
+  it("covers all 12 TypedArray names", async () => {
     const names = [
       "Int8Array",
       "Uint8Array",
@@ -187,17 +191,17 @@ describe("型の位置で型引数を省いた TypedArray を報告する", () =
     assertEquals(await reported(source), names);
   });
 
-  it("報告の文言は名前と、境界なら <ArrayBufferLike> を明示する道を示す", async () => {
+  it("the report message names the type and shows the explicit <ArrayBufferLike> way for a boundary", async () => {
     const [diagnostic] = await lint({ [IN_SCOPE]: "export type T = Float32Array;" });
-    assert(diagnostic !== undefined, "報告が無い");
+    assert(diagnostic !== undefined, "no report");
     assertEquals(diagnostic.code, RULE_CODE);
-    assert(diagnostic.message.includes("Float32Array の型引数が無い"), diagnostic.message);
+    assert(diagnostic.message.includes("Float32Array has no type argument"), diagnostic.message);
     assert(diagnostic.message.includes("Float32Array<ArrayBufferLike>"), diagnostic.message);
   });
 });
 
-describe("型引数を書いた型と、値の位置は報告しない", () => {
-  it("<ArrayBuffer> と <ArrayBufferLike> の明示は通す", async () => {
+describe("does not report types with a type argument or value positions", () => {
+  it("lets explicit <ArrayBuffer> and <ArrayBufferLike> pass", async () => {
     const source = [
       "export const f = (a: Float32Array<ArrayBuffer>): Uint8Array<ArrayBuffer> =>",
       "  new Uint8Array(a.length);",
@@ -210,9 +214,9 @@ describe("型引数を書いた型と、値の位置は報告しない", () => {
     assertEquals(await reported(source), []);
   });
 
-  it("new / from / instanceof / typeof の型クエリ・コメント・文字列は対象外", async () => {
+  it("new / from / instanceof / typeof type queries, comments and strings are out of scope", async () => {
     const source = [
-      "// Float32Array をコメントに書いても型の位置ではない",
+      "// Float32Array in a comment is not a type position",
       "export const a = new Float32Array(4);",
       "export const b = Uint8Array.from([1, 2]);",
       "export const c = (value: unknown): boolean => value instanceof Int16Array;",
@@ -223,9 +227,9 @@ describe("型引数を書いた型と、値の位置は報告しない", () => {
     assertEquals(await reported(source), []);
   });
 
-  it("TypedArray の名前を型参照に書かない typeof 経由の形は取りこぼす（ADR 0002 に明記）", async () => {
-    // 構文だけでは型の中身（既定の ArrayBufferLike になること）が分からない。拾えるように
-    // なったら ADR 0002 の「取りこぼす形」とこのケースを一緒に直す。
+  it("misses the typeof forms that do not write the TypedArray name as a type reference (recorded in ADR 0002)", async () => {
+    // Syntax alone does not tell what the type is (that it becomes the default ArrayBufferLike). When
+    // the rule catches them, update the "Misses" item of ADR 0002 and this case together.
     const source = [
       "export type I = InstanceType<typeof Float32Array>;",
       "export type R = ReturnType<typeof Uint8Array.from>;",
@@ -234,10 +238,10 @@ describe("型引数を書いた型と、値の位置は報告しない", () => {
   });
 });
 
-describe("対象は packages/<pkg>/src/ の下だけ", () => {
+describe("the scope is packages/<pkg>/src/ only", () => {
   const bare = "export const f = (a: Float32Array): number => a.length;";
 
-  it("packages の 3 パッケージの src は対象", async () => {
+  it("the src of the three packages is in scope", async () => {
     const filenames = ["runtime", "hub", "models"].map((pkg) => `packages/${pkg}/src/deep/file.ts`);
     const result = await reportedByFile(
       Object.fromEntries(filenames.map((filename) => [filename, bare])),
@@ -247,7 +251,7 @@ describe("対象は packages/<pkg>/src/ の下だけ", () => {
     }
   });
 
-  it("tests・tools・examples は型引数が無くても報告しない", async () => {
+  it("tests, tools and examples are not reported even without a type argument", async () => {
     const filenames = [
       "packages/runtime/tests/sample_test.ts",
       "packages/models/tests/helpers/sample.ts",
@@ -263,7 +267,7 @@ describe("対象は packages/<pkg>/src/ の下だけ", () => {
     }
   });
 
-  it("Windows の区切り（\\）でも同じ判定になる", () => {
+  it("gives the same result with Windows separators (\\)", () => {
     assert(isTargetFile("C:\\repo\\packages\\runtime\\src\\gpu\\submit.ts"));
     assert(!isTargetFile("C:\\repo\\packages\\runtime\\tests\\gpu_test.ts"));
   });
