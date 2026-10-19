@@ -762,7 +762,7 @@ export const APPLE_METAL_3: GeometryProfile = {
       device: "0x0000",
       description: "Apple M2",
     },
-    kernels: "12c263f91b54a904",
+    kernels: "fc81e4c33996e068",
     caseSet: "c1060d8829f3b9de",
   },
 };

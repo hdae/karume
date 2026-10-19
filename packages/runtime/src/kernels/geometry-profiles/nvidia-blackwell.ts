@@ -758,7 +758,7 @@ export const NVIDIA_BLACKWELL: GeometryProfile = {
       device: "0x2c05",
       description: "NVIDIA GeForce RTX 5070 Ti",
     },
-    kernels: "1b042bb456c8b1fa",
+    kernels: "27067d014c2f3b30",
     caseSet: "c1060d8829f3b9de",
   },
 };

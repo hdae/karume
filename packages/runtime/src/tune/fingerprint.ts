@@ -208,11 +208,48 @@ const dp4aVariants = (sweepCase: SweepCase): readonly boolean[] =>
 export type CasePlanner = (sweepCase: SweepCase, limit: number, dp4a: boolean) => CasePlan;
 
 /**
- * One fingerprint line of one dispatch (JSON of pipeline key, params, WGSL and workgroups —
- * contains no newline).
+ * The WGSL reduced to its tokens: comments removed (`//` to the end of the line, `/* … *\/` with
+ * nesting — WGSL block comments nest and WGSL has no string literals, so every `//` and `/*` opens
+ * a comment) and runs of whitespace collapsed to one space. Two shaders with the same token text
+ * compile to the same program, so the fingerprint hashes this form (DECIDED: ADR 0117 addendum
+ * 2026-10-19): editing a comment or re-wrapping a line changes no kernel and moves no fingerprint.
+ */
+export const wgslTokenText = (wgsl: string): string => {
+  let out = "";
+  let i = 0;
+  while (i < wgsl.length) {
+    if (wgsl.startsWith("//", i)) {
+      const newline = wgsl.indexOf("\n", i);
+      i = newline < 0 ? wgsl.length : newline;
+      continue;
+    }
+    if (wgsl.startsWith("/*", i)) {
+      let depth = 1;
+      i += 2;
+      while (i < wgsl.length && depth > 0) {
+        if (wgsl.startsWith("/*", i)) {
+          depth += 1;
+          i += 2;
+        } else if (wgsl.startsWith("*/", i)) {
+          depth -= 1;
+          i += 2;
+        } else i += 1;
+      }
+      out += " ";
+      continue;
+    }
+    out += wgsl[i];
+    i += 1;
+  }
+  return out.replace(/\s+/g, " ").trim();
+};
+
+/**
+ * One fingerprint line of one dispatch (JSON of pipeline key, params, the WGSL's token text and
+ * workgroups — contains no newline).
  */
 const launchLine = (launch: ReturnType<CasePlan["launch"]>): string =>
-  JSON.stringify([launch.key, [...launch.params], launch.wgsl, launch.workgroups]);
+  JSON.stringify([launch.key, [...launch.params], wgslTokenText(launch.wgsl), launch.workgroups]);
 
 /**
  * The body of the kernel fingerprint ({@link geometryProfileKernelsId} — a form into which the
@@ -221,8 +258,8 @@ const launchLine = (launch: ReturnType<CasePlan["launch"]>): string =>
  * For each case (in the order of `cases`) × dp4a variant (false → true), builds the dispatches of
  * the table's geometry and of the default geometry (the case plan's `defaultCandidate` = the
  * field's fallback — the value the generator compares with the sweep's default row), turns pipeline
- * key, params, WGSL and workgroups into one line of JSON, and hashes the lines joined with newlines
- * (JSON contains no newline, so the join is unambiguous).
+ * key, params, the WGSL's token text ({@link wgslTokenText}) and workgroups into one line of JSON,
+ * and hashes the lines joined with newlines (JSON contains no newline, so the join is unambiguous).
  *
  * MUST: dispatches are built with the same case plan as the sweep — the kernels measured by the
  * sweep and the kernels the fingerprint points to are never built by separate paths. `id`, `match`
@@ -268,10 +305,11 @@ export const profileKernelsId = (
  * digits) of the kernels that the table's geometry and the default geometry build for the shapes of
  * every sweep case. Reads neither the GPU nor the clock.
  *
- * The value changes when a GEMM kernel (key, params, WGSL, dispatch count) or the default geometry
- * changes. Changes outside key, params, WGSL and workgroups (the order of recipe bindings and the
- * like) do not show in the fingerprint — the runtime's own checks (codegen snapshots, GPU tests
- * with the default geometry) cover those. A table with a broken geometry (it fails a codegen check,
+ * The value changes when a GEMM kernel (key, params, WGSL tokens, dispatch count) or the default
+ * geometry changes. Changes outside key, params, WGSL and workgroups (the order of recipe bindings
+ * and the like) and changes to the WGSL's comments and whitespace do not show in the fingerprint —
+ * the runtime's own checks (codegen snapshots, GPU tests with the default geometry) cover the
+ * former, and the latter change no kernel. A table with a broken geometry (it fails a codegen check,
  * or the dispatch count exceeds 65535) throws {@link KernelsIdError}.
  */
 export const geometryProfileKernelsId = (profile: GeometryProfile): string =>

@@ -15,6 +15,13 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+### Changed
+
+- The kernel fingerprint of a geometry profile (`provenance.kernels`, `@karume/runtime/tune`) hashes
+  each kernel's WGSL without its comments and whitespace, so a comment edit in a kernel no longer
+  invalidates saved tables. Tables saved by earlier versions mismatch once on the fingerprint and
+  need one re-sweep; the two embedded tables carry the new value.
+
 ### Added
 
 - bf16 weight storage is executed (`@karume/runtime`). A weight stored as bf16 stays resident

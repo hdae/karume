@@ -21,7 +21,8 @@ const ADAPTER_FIELDS = ["vendor", "architecture", "device", "description"] as co
  * 2. The four adapter fields (`vendor` / `architecture` / `device` / `description` — empty strings
  *    are compared as values too).
  * 3. The kernel fingerprint (the value re-derived from the table by the current runtime vs
- *    `provenance.kernels`).
+ *    `provenance.kernels` — the WGSL counted without comments and whitespace, ADR 0117 addendum
+ *    2026-10-19).
  * 4. The case-set version (the current runtime's value vs `provenance.caseSet`).
  *
  * Not compared: `candidateSet` (whether a quick+ table suffices is the application's call), `match`

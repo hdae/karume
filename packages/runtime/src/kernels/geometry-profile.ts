@@ -141,7 +141,7 @@ export type GeometryProfile = {
     };
     /**
      * Kernel fingerprint (hash of the kernels the table and the default geometry build on the
-     * sweep's shapes — hex).
+     * sweep's shapes, the WGSL counted without comments and whitespace — hex).
      */
     readonly kernels: string;
     /** Case-set version (hash of the sweep's cases and the step boundaries of gemmRows — hex). */

@@ -4,7 +4,8 @@
 // 本体・道具の関数は src から引く。GPU を使わない。
 //
 // 固定するのは ① ハッシュが FNV-1a 64 bit そのもの ② 指紋は表の 14 欄・既定の幾何・dp4a の両変種・dispatch の
-// params と workgroups に効き、id / match / provenance に効かない ③ 組めない dispatch はケース・欄・幾何を
+// params と workgroups に効き、id / match / provenance と WGSL のコメント・空白に効かない（ADR 0117 追記
+// 2026-10-19）③ 組めない dispatch はケース・欄・幾何を
 // 名指して投げる ④ 埋め込みの 2 表の provenance が今の runtime の値と一致する（GEMM のカーネルを変える変更は
 // 2 表の再生成を伴う）⑤ ケース集合の版はケースの増減・dispatch を決める欄・境界に効き、説明などの情報の欄と
 // キーの並びに効かない ⑥ 記録の `candidateKernels`（測った候補の指紋）は、既定を変えず候補の WGSL だけ変えた
@@ -37,6 +38,7 @@ import {
   type MeasuredRow,
   profileKernelsId,
   sweepCandidateKernelsId,
+  wgslTokenText,
 } from "../src/tune/fingerprint.ts";
 import {
   type GeometryCandidate,
@@ -224,7 +226,7 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
           ...plan,
           launch: (candidate) => {
             const launch = plan.launch(candidate);
-            return { ...launch, wgsl: `${launch.wgsl}\n// changed` };
+            return { ...launch, wgsl: `${launch.wgsl}\nfn changed() {}` };
           },
         };
       };
@@ -261,6 +263,33 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
     assertNotEquals(paramsValue, base, "params");
     assertNotEquals(workgroupsValue, base, "workgroups");
     assertNotEquals(paramsValue, workgroupsValue);
+  });
+
+  it("WGSL のコメントと空白だけが違う runtime では値が変わらない（トークンが同じなら同じカーネル — ADR 0117 追記 2026-10-19）", () => {
+    const base = profileKernelsId(APPLE_METAL_3, SWEEP_CASES, casePlan);
+    const rewritten =
+      (change: (wgsl: string) => string): CasePlanner =>
+      (sweepCase, limit, dp4a) => {
+        const plan = casePlan(sweepCase, limit, dp4a);
+        return {
+          ...plan,
+          launch: (candidate) => {
+            const launch = plan.launch(candidate);
+            return { ...launch, wgsl: change(launch.wgsl) };
+          },
+        };
+      };
+    const commented = rewritten(
+      (wgsl) => `// 翻訳したコメント /* 入れ子 /* の */ 注記 */\n${wgsl}\n// changed`,
+    );
+    const stripped = rewritten((wgsl) => wgsl.replace(/\/\/[^\n]*/g, ""));
+    const reindented = rewritten((wgsl) => wgsl.replace(/\n[ \t]+/g, "\n\t\t"));
+    assertEquals(profileKernelsId(APPLE_METAL_3, SWEEP_CASES, commented), base, "comments added");
+    assertEquals(profileKernelsId(APPLE_METAL_3, SWEEP_CASES, stripped), base, "comments removed");
+    assertEquals(profileKernelsId(APPLE_METAL_3, SWEEP_CASES, reindented), base, "whitespace");
+    // 1 トークンでも変われば別のカーネル
+    const token = rewritten((wgsl) => `${wgsl}\nfn changed() {}`);
+    assertNotEquals(profileKernelsId(APPLE_METAL_3, SWEEP_CASES, token), base);
   });
 
   it("組めない dispatch（65535 を超える）は、ケース・表の欄・幾何と 65535 固定の理由を名指して投げる", () => {
@@ -343,7 +372,7 @@ describe("candidateKernelsId: 測った候補のカーネルの指紋（記録�
           const launch = plan.launch(candidate);
           return JSON.stringify(candidate.geometry) === defaultGeometry
             ? launch
-            : { ...launch, wgsl: `${launch.wgsl}\n// changed` };
+            : { ...launch, wgsl: `${launch.wgsl}\nfn changed() {}` };
         },
       };
     };
@@ -404,8 +433,8 @@ describe("candidateKernelsId: 測った候補のカーネルの指紋（記録�
 });
 
 describe("埋め込みの表の provenance は今の runtime の値と一致する", () => {
-  // 落ちたら: GEMM のカーネル（キー・params・WGSL・dispatch 数）か既定の幾何、または掃引のケースか gemmRows の
-  // 段の境界が変わった。各表の冒頭コメントの再生成コマンドで 2 表を再生成する（幾何の値は変わらない —
+  // 落ちたら: GEMM のカーネル（キー・params・WGSL のトークン・dispatch 数 — コメントと空白は数えない）か
+  // 既定の幾何、または掃引のケースか gemmRows の段の境界が変わった。各表の冒頭コメントの再生成コマンドで 2 表を再生成する（幾何の値は変わらない —
   // 掃引の記録が同じなので採否は同じ）。再生成を伴うのは、カーネルが変わったことを機械が告げ、per-profile の
   // GPU テスト（gpu_geometry_profile_test.ts）が新しいカーネルで出力一致を確かめ直すため（ADR 0117 決定 4）
   for (const profile of BUILTIN_GEOMETRY_PROFILES) {
@@ -501,6 +530,23 @@ describe("sweepCaseSetId: ケース集合の版", () => {
       Object.fromEntries(Object.entries(sweepCase).reverse()),
     );
     assertEquals(canonicalJson(reordered), canonicalJson(SWEEP_CASES));
+  });
+});
+
+describe("wgslTokenText: 指紋が数える WGSL", () => {
+  it("行コメント・入れ子のブロックコメントを落とし、空白の連なりを 1 つに畳む", () => {
+    assertEquals(
+      wgslTokenText(
+        "// head\nfn f() -> u32 { /* a /* nested */ b */ return 1u; } // tail\n\n  let x = 2u;",
+      ),
+      "fn f() -> u32 { return 1u; } let x = 2u;",
+    );
+  });
+
+  it("閉じないブロックコメントは末尾まで、コメントの外のトークンはそのまま", () => {
+    assertEquals(wgslTokenText("let a = 1u; /* open"), "let a = 1u;");
+    assertEquals(wgslTokenText("let url = 1u; // https://example"), "let url = 1u;");
+    assertEquals(wgslTokenText("a/b // c\nd*e"), "a/b d*e");
   });
 });
 

@@ -1470,7 +1470,7 @@ describe("記録の照合キー candidateKernels（測った候補のカーネ�
           const launch = plan.launch(candidate);
           return JSON.stringify(candidate.geometry) === defaultGeometry
             ? launch
-            : { ...launch, wgsl: `${launch.wgsl}\n// older` };
+            : { ...launch, wgsl: `${launch.wgsl}\nfn older() {}` };
         },
       };
     };
