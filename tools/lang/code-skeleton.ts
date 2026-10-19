@@ -130,7 +130,9 @@ const LITERAL_MARK = "\u{1}";
 /**
  * The skeleton of `source` (a TypeScript module named `filename`). In `"comments"` mode only
  * comments are cut; in `"strings"` mode string literals and template literals are cut too and
- * returned as cells. Throws when the source does not parse.
+ * returned as cells, and whitespace next to punctuation and trailing commas before a closing bracket
+ * are dropped (the formatter adds and removes them as lines wrap). Throws when the source does not
+ * parse.
  */
 export const analyze = (
   filename: string,
@@ -188,7 +190,17 @@ export const analyze = (
   }
   text += source.slice(cursor);
   cells.sort((a, b) => a.start - b.start);
-  return { text: text.replace(/\s+/g, " ").trim(), literals: cells.map((cell) => cell.text) };
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  // In strings mode the literals are gone, so whitespace next to punctuation and a trailing comma
+  // before a closing bracket can go too: they are the formatter's choice when a longer message
+  // wraps a call, and they change no semantics
+  return {
+    text:
+      mode === "strings"
+        ? collapsed.replace(/\s*([()[\]{},;:.])\s*/g, "$1").replace(/,([)\]}])/g, "$1")
+        : collapsed,
+    literals: cells.map((cell) => cell.text),
+  };
 };
 
 /** `text` (which starts at `offset` in the source) with the given source spans removed. */

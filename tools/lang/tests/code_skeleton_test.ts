@@ -87,10 +87,7 @@ describe("analyze in strings mode", () => {
     const source = `throw new Error("日本語の文言"); const w = ${BT}let x = 1u; // 注記\n${BT}; const k = 'key';\n`;
     const result = strings(source);
     assertEquals(result.literals, ["日本語の文言", "let x = 1u;", "key"]);
-    assertEquals(
-      result.text,
-      `throw new Error(\u{1}); const w = ${BT}\u{1}${BT}; const k = \u{1};`,
-    );
+    assertEquals(result.text, `throw new Error(\u{1});const w = ${BT}\u{1}${BT};const k = \u{1};`);
   });
 
   it("keeps the interpolated expressions of a template in the skeleton and marks them in the cell", () => {
@@ -103,6 +100,14 @@ describe("analyze in strings mode", () => {
       strings(`const m = ${BT}合計 \${count + 1} 個${BT};\n`).text !== before.text,
       true,
     );
+  });
+
+  it("ignores a formatter wrap (whitespace next to punctuation, a trailing comma) in strings mode", () => {
+    const before = 'f(\n  a,\n  "x",\n);\nconst o = { k: 1, };\n';
+    const after = 'f(a, "x");\nconst o = { k: 1 };\n';
+    assertEquals(strings(before).text, strings(after).text);
+    assertNotEquals(skeletonOf("t.ts", before), skeletonOf("t.ts", after));
+    assertNotEquals(strings("f(a, b);\n").text, strings("f(a + b);\n").text);
   });
 
   it("lists the literals that changed and whether the old text held Japanese", () => {
