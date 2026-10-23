@@ -492,3 +492,19 @@ bucket refinement approved here is ADR 0116. Details: research K-70 §13–§14.
   structure at injection. For a table built inside an application, the only evidence of output
   identity is the sweep's check (over its case set); no end-to-end sha check applies. Recording
   which table ran is the application's responsibility.
+
+### Addendum decision 10: generate and register `nvidia-ampere` (Node + Dawn on RTX 3080 Ti = `nvidia` / `ampere`; 2026-10-23)
+
+- Input: one `quick+` sweep on the RTX 3080 Ti taken one case per process with the GPU cooled to
+  56 °C before each case (a single-process sweep throttles within a minute and loses most cases to
+  the re-measurement band of addendum decision 8); 57 cases, 521 rows, no failure, no mismatch,
+  one case dropped from the ratio material. The merged record's `candidateKernels` is recomputed
+  over the merged rows with the sweep's own function. Rules of decision 4 (×1.050).
+- Adopted: `gemmRows` 129–256 `reg64x64r4x4w16` ×1.118, attention ③PV `reg64x64r4x4w16`
+  ×1.095, i8a8 linear `tile64x64r8x4w16x8k16` ×1.160; every other class keeps the default. The
+  generated file is the source of truth for its values.
+- Acceptance: the per-profile GPU test and the fingerprint test pass with the table registered.
+  On the Wan2.2 DiT (`f16+dit8-a8-attn8-online`, S = 27,280, cold) the table is ×1.03 on the i8a8
+  linear and ×1.009 on the forward — small, because the DiT's rows lie past the sweep's largest
+  case and the online attention kernel is not profile-selected; the two f32 adoptions apply to
+  other families. Record and A/B: [research](../research/2026-10-23-ampere-geometry-sweep.md).

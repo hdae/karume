@@ -30,6 +30,9 @@ measurements in `docs/research/`.
 
 ### Added
 
+- A third embedded geometry profile, `nvidia-ampere` (adapters `nvidia` / `ampere`, swept on an RTX 3080 Ti
+  under Node + Dawn): the i8a8 linear, the fused f32 attention ③PV and 129–256-row GEMMs take a faster tile
+  geometry on those adapters; outputs are bit-identical to the default (ADR 0115 addendum decision 10).
 - Online int8 attention (`@karume/runtime`, ADR 0132): `attentionScoreStorage: "none"` (with
   `attentionCompute: "a8"`) runs fused attention as one kernel per block of query rows that never
   stores the score matrix. Heads of width 64 or 128 and key lengths that are multiples of 4; other
