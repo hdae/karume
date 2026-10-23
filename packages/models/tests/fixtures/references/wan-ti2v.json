@@ -33,6 +33,9 @@
     "f16+dit8-50step-boxing-cats-seed42-1280x704-33f-shift5": {
       "deno-nvidia-geforce-rtx-3080-ti": "058bcd005ab21c2dd5c9b7347f3830d5e8f806a4e043d62a59fe7a0f4a4aee58"
     },
+    "f16+dit8-a8-attn8-online-2step-boxing-cats-seed42-1280x704-17f-shift5": {
+      "node-nvidia-geforce-rtx-3080-ti": "3602833535d7545cbc1a2e29c938f7e225b1e993506f0a7f6c16e1340a6db82f"
+    },
     "f16+dit8-a8-attn8-s16-2step-boxing-cats-seed42-1280x704-17f-shift5": {
       "deno-nvidia-geforce-rtx-3080-ti": "e8dd052850e13c4ed21fc9524d5265d1959dc04c2e63942fc00dcb09ef6796f3",
       "node-nvidia-geforce-rtx-3080-ti": "e8dd052850e13c4ed21fc9524d5265d1959dc04c2e63942fc00dcb09ef6796f3"
