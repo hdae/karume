@@ -159,6 +159,7 @@ describe("Gemmaのquant実行設定", () => {
     // spec（キーが増えればこの宣言が型検査で落ちる）から、1キーずつ通る／落ちるを確かめる。
     const full: Required<SessionSpec> = {
       linearCompute: "f16",
+      convCompute: "a8",
       attentionCompute: "f16",
       attentionScoreStorage: "f16",
       linearGemvReduce: "sequential",

@@ -34,7 +34,7 @@ const WITH_DP4A: ReadonlySet<string> = new Set([DP4A_WGSL_FEATURE]);
 
 describe("a8EmulationWarning（a8 を要求したが device に dp4a が無い）", () => {
   it("linear の a8 だけを要求した dp4a 無しの device では、linearCompute を名指しして警告する", () => {
-    const message = a8EmulationWarning("a8", "f32", WITHOUT_DP4A);
+    const message = a8EmulationWarning("a8", "f32", "f32", WITHOUT_DP4A);
     assert(message !== undefined);
     assertStringIncludes(message, "@karume/runtime");
     assertStringIncludes(message, DP4A_WGSL_FEATURE);
@@ -46,24 +46,31 @@ describe("a8EmulationWarning（a8 を要求したが device に dp4a が無い�
   });
 
   it("linear と attention の両方を要求すれば両方を名指しする", () => {
-    const message = a8EmulationWarning("a8", "a8", WITHOUT_DP4A);
+    const message = a8EmulationWarning("a8", "f32", "a8", WITHOUT_DP4A);
     assert(message !== undefined);
     assertStringIncludes(message, 'linearCompute / attentionCompute: "a8"');
   });
 
+  it("conv の a8 だけでも警告し、convCompute を名指しする", () => {
+    const message = a8EmulationWarning("f32", "a8", "f32", WITHOUT_DP4A);
+    assert(message !== undefined);
+    assertStringIncludes(message, 'convCompute: "a8"');
+    assert(!message.includes("linearCompute: "), "要求していない linear を名指ししない");
+  });
+
   it("attention の a8 だけでも警告する", () => {
-    const message = a8EmulationWarning("f32", "a8", WITHOUT_DP4A);
+    const message = a8EmulationWarning("f32", "f32", "a8", WITHOUT_DP4A);
     assert(message !== undefined);
     assertStringIncludes(message, 'attentionCompute: "a8"');
   });
 
   it("dp4a のある device では a8 を要求しても警告しない", () => {
-    assertEquals(a8EmulationWarning("a8", "a8", WITH_DP4A), undefined);
+    assertEquals(a8EmulationWarning("a8", "f32", "a8", WITH_DP4A), undefined);
   });
 
   it("a8 を要求しなければ dp4a の無い device でも警告しない（f32 / f16 の計算は無関係）", () => {
-    assertEquals(a8EmulationWarning("f32", "f32", WITHOUT_DP4A), undefined);
-    assertEquals(a8EmulationWarning("f16", "f16", WITHOUT_DP4A), undefined);
+    assertEquals(a8EmulationWarning("f32", "f32", "f32", WITHOUT_DP4A), undefined);
+    assertEquals(a8EmulationWarning("f16", "f32", "f16", WITHOUT_DP4A), undefined);
   });
 });
 

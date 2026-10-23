@@ -33,6 +33,10 @@ const LINEAR_COMPUTES: Readonly<Record<NonNullable<SessionOptions["linearCompute
   a8: true,
   f16: true,
 };
+const CONV_COMPUTES: Readonly<Record<NonNullable<SessionOptions["convCompute"]>, true>> = {
+  f32: true,
+  a8: true,
+};
 const ATTENTION_COMPUTES: Readonly<Record<ComputePrecision, true>> = {
   f32: true,
   f16: true,
@@ -72,6 +76,7 @@ const LINEAR_GEMV_REDUCES: Readonly<Record<LinearGemvReduce, true>> = {
  */
 export const assertExecutionKnobs = (
   linearCompute: NonNullable<SessionOptions["linearCompute"]>,
+  convCompute: NonNullable<SessionOptions["convCompute"]>,
   attentionCompute: ComputePrecision,
   attentionScoreStorage: ScoreStorage,
   stateAttentionReduce: StateAttentionReduce,
@@ -79,6 +84,7 @@ export const assertExecutionKnobs = (
 ): void => {
   const violation = executionKnobsViolation(
     linearCompute,
+    convCompute,
     attentionCompute,
     attentionScoreStorage,
     stateAttentionReduce,
@@ -90,6 +96,7 @@ export const assertExecutionKnobs = (
 /** The decision body of {@link assertExecutionKnobs} (returns the violation text; the caller decides whether to throw). */
 const executionKnobsViolation = (
   linearCompute: NonNullable<SessionOptions["linearCompute"]>,
+  convCompute: NonNullable<SessionOptions["convCompute"]>,
   attentionCompute: ComputePrecision,
   attentionScoreStorage: ScoreStorage,
   stateAttentionReduce: StateAttentionReduce,
@@ -97,6 +104,7 @@ const executionKnobsViolation = (
 ): string | undefined => {
   const knobs: readonly (readonly [string, string, Readonly<Record<string, true>>])[] = [
     ["linearCompute", linearCompute, LINEAR_COMPUTES],
+    ["convCompute", convCompute, CONV_COMPUTES],
     ["attentionCompute", attentionCompute, ATTENTION_COMPUTES],
     ["attentionScoreStorage", attentionScoreStorage, SCORE_STORAGES],
     ["stateAttentionReduce", stateAttentionReduce, STATE_ATTENTION_REDUCES],
@@ -128,6 +136,7 @@ const executionKnobsViolation = (
 export const executionKnobDefaults = (options: SessionOptions) => ({
   rmsNormReduce: options.rmsNormReduce === undefined ? "workgroup" : options.rmsNormReduce,
   linearCompute: options.linearCompute ?? "f32",
+  convCompute: options.convCompute ?? "f32",
   attentionCompute: options.attentionCompute ?? "f32",
   attentionScoreStorage: options.attentionScoreStorage ?? "f32",
   stateAttentionReduce: options.stateAttentionReduce ?? "sequential",
@@ -178,6 +187,7 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
   const {
     rmsNormReduce,
     linearCompute,
+    convCompute,
     attentionCompute,
     attentionScoreStorage,
     stateAttentionReduce,
@@ -196,6 +206,7 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
   // inside the union.
   const knobs = executionKnobsViolation(
     linearCompute,
+    convCompute,
     attentionCompute,
     attentionScoreStorage,
     stateAttentionReduce,

@@ -43,6 +43,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "ConvCompute",
+        "kind": "typeAlias"
+      },
+      {
         "name": "DirectoryAdapter",
         "kind": "typeAlias"
       },

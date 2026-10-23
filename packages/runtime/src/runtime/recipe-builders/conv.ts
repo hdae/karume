@@ -43,6 +43,29 @@ import {
   conv3dUsesVec4,
 } from "../../kernels/conv3d.ts";
 import {
+  CONV3D_ACT_SCALE_BINDING,
+  conv3dI8a8Eligible,
+  conv3dI8a8Geometry,
+  conv3dI8a8Key,
+  conv3dI8a8Params,
+  conv3dI8a8UsesVec4,
+  conv3dI8a8Wgsl,
+  conv3dI8a8Workgroups,
+} from "../../kernels/conv3d-i8a8.ts";
+import {
+  quantizeRowsGeometry,
+  quantizeRowsKey,
+  quantizeRowsParams,
+  quantizeRowsWgsl,
+} from "../../kernels/quantize-rows.ts";
+import {
+  permuteSrcStrides,
+  STRIDED_WORKGROUP_SIZE,
+  stridedKey,
+  stridedParams,
+  stridedWgsl,
+} from "../../codegen/strided.ts";
+import {
   CONV_TRANSPOSE1D_SCALE_BINDING,
   CONV_TRANSPOSE1D_WORKGROUP_SIZE,
   convTranspose1dKey,
@@ -55,7 +78,7 @@ import {
   DEFORM_CONV2D_WORKGROUP_SIZE,
   deformConv2dParams,
 } from "../../kernels/deform-conv2d.ts";
-import type { NodePlan } from "../plan.ts";
+import { ExecutionError, type NodePlan } from "../plan.ts";
 import type { WeightStorage } from "../../kernels/weight-storage.ts";
 import {
   conv1dAttrs,
@@ -71,7 +94,7 @@ import { conv2dProfileGeometry } from "../../kernels/geometry-profile.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../../codegen/dispatch.ts";
 import { gruScanKey, gruScanParams, gruScanWgsl } from "../../kernels/gru-scan.ts";
 import type { RecipeBuildFace } from "../recipe-builder.ts";
-import { PARAMS_UNIFORM_USAGE } from "./params-usage.ts";
+import { PARAMS_STORAGE_USAGE, PARAMS_UNIFORM_USAGE } from "./params-usage.ts";
 
 /**
  * deform_conv2d (DCNv2 — ADR 0055). A single grid-stride kernel with one output element = one
@@ -476,6 +499,21 @@ export const buildConv3d = async (
     groups,
   };
   const weightStorage = face.weightStorage(step);
+  // The integer dot-product path (ADR 0133): the upload reordered this weight to the kernel's
+  // tap-major layout (only with convCompute "a8", only when every consumer is an eligible conv3d —
+  // conv3dTapMajorInitializers in plan.ts). With the default "f32" nothing below changes by a
+  // byte; a node whose weight kept the canonical layout shows it by its key.
+  // MUST: a tap-major weight never reaches the f32 kernel (its bytes are permuted) — the flag and
+  // the predicate are derived from the same graph facts, so a disagreement is a wiring bug.
+  if (face.weightLayout(step) === "conv3d-tap-major") {
+    if (face.state.convCompute !== "a8" || !conv3dI8a8Eligible(dims, weightStorage)) {
+      throw new ExecutionError(
+        `conv3d [${x.join(",")}] * [${weight.join(",")}]: the weight was reordered for the w8a8 kernel but the node is not eligible (convCompute ${face.state.convCompute})`,
+      );
+    }
+    await buildConv3dI8a8(face, step, binds, outs, builder, dims);
+    return;
+  }
   const kFlat = dims.channelsIn * dims.kernelT * dims.kernelH * dims.kernelW;
   const v4 = conv3dUsesVec4(kFlat, dims.widthOut, dims.strideW);
   const mTile = conv2dIgemmMTile(dims.channelsOut);
@@ -511,6 +549,106 @@ export const buildConv3d = async (
     ],
     workgroups,
   });
+};
+
+/**
+ * conv3d's **w8a8 variant** (opt-in — {@link SessionOptions.convCompute}; ADR 0133).
+ * **One node = three dispatches**: ① a strided copy that transposes `x[Cin, T·H·W]` to
+ * `[T·H·W, Cin]` (the permute of ADR 0011) → ② `quantize_rows` over the pixels (one row = one input
+ * pixel, per-pixel i8 + scale) → ③ the integer dot-product implicit GEMM.
+ *
+ * MUST: the temporary buffers (the transposed copy, `xq`, `xs`) are declared → released at the end
+ * of the node (the arena's invariant — the same discipline as linear's i8a8 path).
+ */
+const buildConv3dI8a8 = async (
+  face: RecipeBuildFace,
+  step: NodePlan,
+  binds: readonly BindingSource[],
+  outs: readonly BindingSource[],
+  builder: StepRecipeBuilder,
+  dims: Conv3dDims,
+): Promise<void> => {
+  const where = `conv3d i8a8 [${step.inputShapes[0].join(",")}] * [${step.inputShapes[1].join(",")}]`;
+  const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
+  const pixelsIn = dims.timeIn * dims.heightIn * dims.widthIn;
+  const pixelsOut = dims.timeOut * dims.heightOut * dims.widthOut;
+  const channels = dims.channelsIn;
+  // Build params first: shapes outside the contract are rejected before any pipeline lookup.
+  const convParams = conv3dI8a8Params(dims);
+
+  const transposed = builder.allocTemp(Math.max(4, pixelsIn * channels * 4));
+  const xq = builder.allocTemp(Math.max(4, pixelsIn * (channels / 4) * 4));
+  const xs = builder.allocTemp(Math.max(4, pixelsIn * 4));
+
+  // ① x[Cin, P] → xt[P, Cin] (a permute of the two axes — the time, height and width axes are
+  // already contiguous as one pixel axis)
+  const stridedSpec = { dtype: "f32" } as const;
+  const stridedKeyValue = stridedKey(stridedSpec);
+  const strided = await face.state.cache.get(stridedKeyValue, stridedWgsl(stridedSpec));
+  builder.dispatch({
+    key: stridedKeyValue,
+    pipeline: strided.pipeline,
+    layout: strided.layout,
+    roles: strided.roles,
+    params: face.writeParams(
+      stridedParams([pixelsIn, channels], permuteSrcStrides([channels, pixelsIn], [1, 0]), 0),
+      PARAMS_STORAGE_USAGE,
+    ),
+    bindings: [
+      { binding: 1, source: binds[0] },
+      { binding: 2, source: transposed },
+    ],
+    workgroups: [gridStrideWorkgroups(pixelsIn * channels, STRIDED_WORKGROUP_SIZE, limit), 1, 1],
+  });
+
+  // ② Per-pixel quantisation (one row = one input pixel, grid-stride over rows)
+  const quantizeGeometry = quantizeRowsGeometry(channels);
+  const quantizeKeyValue = quantizeRowsKey(quantizeGeometry);
+  const quantize = await face.state.cache.get(quantizeKeyValue, quantizeRowsWgsl(quantizeGeometry));
+  builder.dispatch({
+    key: quantizeKeyValue,
+    pipeline: quantize.pipeline,
+    layout: quantize.layout,
+    roles: quantize.roles,
+    params: face.writeParams(quantizeRowsParams(pixelsIn, channels), PARAMS_UNIFORM_USAGE),
+    bindings: [
+      { binding: 1, source: transposed },
+      { binding: 2, source: xq },
+      { binding: 3, source: xs },
+    ],
+    workgroups: [gridStrideWorkgroups(pixelsIn, quantizeGeometry.rowsPerGroup, limit), 1, 1],
+  });
+
+  // ③ The integer dot-product implicit GEMM (the geometry is in the key — ADR 0133 decision 5)
+  const v4 = conv3dI8a8UsesVec4(pixelsOut);
+  const geometry = conv3dI8a8Geometry();
+  const dp4a = face.state.linearI8a8Dot === "dp4a";
+  const key = conv3dI8a8Key(v4, dp4a, geometry);
+  const { pipeline, layout, roles } = await face.state.cache.get(
+    key,
+    conv3dI8a8Wgsl(v4, dp4a, geometry),
+  );
+  builder.dispatch({
+    key,
+    pipeline,
+    layout,
+    roles,
+    params: face.writeParams(convParams, PARAMS_UNIFORM_USAGE),
+    bindings: [
+      { binding: 1, source: xq },
+      { binding: 2, source: binds[1] },
+      { binding: 3, source: binds[2] },
+      { binding: 4, source: outs[0] },
+      ...face.weightScaleBindings(step, CONV3D_SCALE_BINDING),
+      { binding: CONV3D_ACT_SCALE_BINDING, source: xs },
+    ],
+    workgroups: conv3dI8a8Workgroups(dims, geometry, limit, where),
+  });
+
+  // MUST: return the temporary buffers at the node boundary (the arena's invariant).
+  builder.releaseTemp(xs);
+  builder.releaseTemp(xq);
+  builder.releaseTemp(transposed);
 };
 
 /**

@@ -67,6 +67,7 @@ type SpecWriter = (source: SessionOverrides) => SessionOptions;
  */
 const WRITERS: { readonly [K in keyof Required<SessionSpec>]: SpecWriter } = {
   linearCompute: ({ linearCompute }) => (linearCompute === undefined ? {} : { linearCompute }),
+  convCompute: ({ convCompute }) => (convCompute === undefined ? {} : { convCompute }),
   attentionCompute: ({ attentionCompute }) =>
     attentionCompute === undefined ? {} : { attentionCompute },
   attentionScoreStorage: ({ attentionScoreStorage }) =>
@@ -101,6 +102,10 @@ const LINEAR_COMPUTES: Readonly<Record<NonNullable<SessionOptions["linearCompute
   a8: true,
   f16: true,
 };
+const CONV_COMPUTES: Readonly<Record<NonNullable<SessionOptions["convCompute"]>, true>> = {
+  f32: true,
+  a8: true,
+};
 const ATTENTION_COMPUTES: Readonly<Record<NonNullable<SessionOptions["attentionCompute"]>, true>> =
   { f32: true, f16: true, a8: true };
 const SCORE_STORAGES: Readonly<Record<NonNullable<SessionOptions["attentionScoreStorage"]>, true>> =
@@ -128,6 +133,10 @@ const VALUE_GATES: {
     linearCompute === undefined || isOneOf(LINEAR_COMPUTES, linearCompute)
       ? undefined
       : "linearCompute is invalid",
+  convCompute: ({ convCompute }) =>
+    convCompute === undefined || isOneOf(CONV_COMPUTES, convCompute)
+      ? undefined
+      : "convCompute is invalid",
   attentionCompute: ({ attentionCompute }) =>
     attentionCompute === undefined || isOneOf(ATTENTION_COMPUTES, attentionCompute)
       ? undefined

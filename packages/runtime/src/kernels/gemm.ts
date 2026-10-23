@@ -2512,7 +2512,7 @@ ${fillBConv1d(geometry, v4)}`,
  * `(ot, oy, ox)` back from n needs both `height_out·width_out` and `width_out`, so `height_out`
  * stays.
  */
-const CONV3D_DIMS_EXTRA = `  channels_in: u32,
+export const CONV3D_DIMS_EXTRA = `  channels_in: u32,
   time_in: u32,
   height_in: u32,
   width_in: u32,

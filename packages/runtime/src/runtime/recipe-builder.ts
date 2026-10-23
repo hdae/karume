@@ -131,6 +131,7 @@ export type RecipeBuilderContext = {
    */
   readonly residentWeights: ReadonlyMap<string, ResidentWeight>;
   readonly linearCompute: "f32" | "a8" | "f16";
+  readonly convCompute: "f32" | "a8";
   readonly attentionCompute: ComputePrecision;
   readonly attentionScoreStorage: ScoreStorage;
   /**
@@ -217,6 +218,7 @@ export type RecipeBuildFace = {
     | "gpu"
     | "cache"
     | "linearCompute"
+    | "convCompute"
     | "attentionCompute"
     | "attentionScoreStorage"
     | "attentionDevice"
@@ -232,6 +234,8 @@ export type RecipeBuildFace = {
   >;
   readonly writeParams: (params: Uint32Array<ArrayBuffer>, usage: number) => GPUBuffer;
   readonly weightStorage: (step: NodePlan) => WeightStorage;
+  /** The upload-time layout flag of the node's weight (`"conv3d-tap-major"` — ADR 0133 decision 4), else undefined. */
+  readonly weightLayout: (step: NodePlan) => "conv3d-tap-major" | undefined;
   readonly weightScaleBindings: (step: NodePlan, binding: number) => readonly BindingRecipe[];
   readonly weightGroupSize: (step: NodePlan) => number;
 };
@@ -266,6 +270,7 @@ export class RecipeBuilder {
       state,
       writeParams: (params, usage) => this.#writeParams(params, usage),
       weightStorage: (step) => this.#weightStorage(step),
+      weightLayout: (step) => this.#weightLayout(step),
       weightScaleBindings: (step, binding) => this.#weightScaleBindings(step, binding),
       weightGroupSize: (step) => this.#weightGroupSize(step),
     };
@@ -733,6 +738,12 @@ export class RecipeBuilder {
    */
   #residentWeight(step: NodePlan): ResidentWeight | undefined {
     return this.#state.residentWeights.get(this.#weightSlotName(step));
+  }
+
+  /** The layout flag the upload set on this node's weight (only i8 records carry one). */
+  #weightLayout(step: NodePlan): "conv3d-tap-major" | undefined {
+    const resident = this.#residentWeight(step);
+    return resident?.storage === "i8" ? resident.layout : undefined;
   }
 
   /** The value name bound to this node's weight slot ({@link WEIGHT_SLOTS} is the source of truth). */

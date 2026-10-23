@@ -261,6 +261,7 @@ const admitDitContext = (dit: GraphOwner, ditContext: GraphOwner): readonly DitC
  */
 export const IRODORI_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: true,
+  convCompute: false,
   attentionCompute: false,
   attentionScoreStorage: false,
   linearGemvReduce: false,

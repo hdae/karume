@@ -70,6 +70,7 @@ test("toSessionOptions: SessionSpec の全キーを写す（キー追加の取�
   // 全キーを埋めた spec を渡し、出てくるキー集合が入力と一致することを確かめる。
   const full: Required<SessionSpec> = {
     linearCompute: "f16",
+    convCompute: "a8",
     attentionCompute: "f16",
     attentionScoreStorage: "f16",
     linearGemvReduce: "sequential",
@@ -98,6 +99,7 @@ test("toSessionOptions: 融合の明示falseとtrueを保持する", () => {
 /** 8 キーを全て受ける受理表（規則そのものを家族の表から切り離して見るため）。 */
 const ALL: FamilySessionPolicy = {
   linearCompute: true,
+  convCompute: true,
   attentionCompute: true,
   attentionScoreStorage: true,
   linearGemvReduce: true,
@@ -110,6 +112,7 @@ const ALL: FamilySessionPolicy = {
 /** linear の実行形だけを受ける表（irodori / sbv2 と同じ形）。 */
 const LINEAR_ONLY: FamilySessionPolicy = {
   ...ALL,
+  convCompute: false,
   attentionCompute: false,
   attentionScoreStorage: false,
   linearGemvReduce: false,
@@ -122,6 +125,7 @@ const LINEAR_ONLY: FamilySessionPolicy = {
 /** 全キーを埋めた spec（キーが増えればこの宣言が型検査で落ちる）。 */
 const FULL: Required<SessionSpec> = {
   linearCompute: "f32",
+  convCompute: "f32",
   attentionCompute: "f32",
   attentionScoreStorage: "f32",
   linearGemvReduce: "parallel",
@@ -194,6 +198,7 @@ describe("resolveSessionOptions: 受理できない指定", () => {
     };
     const messages: Readonly<Record<keyof SessionSpec, string>> = {
       linearCompute: "linearCompute is invalid",
+      convCompute: "convCompute is invalid",
       attentionCompute: "attentionCompute is invalid",
       attentionScoreStorage: "attentionScoreStorage is invalid",
       linearGemvReduce: "linearGemvReduce is invalid",

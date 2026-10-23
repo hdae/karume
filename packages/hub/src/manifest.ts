@@ -181,6 +181,7 @@ const GPU_FEATURE_KEYS: readonly string[] = ["shaderF16"];
  * accelerated.
  */
 const LINEAR_COMPUTE: readonly LinearCompute[] = ["f32", "a8", "f16"];
+const CONV_COMPUTE: readonly ConvCompute[] = ["f32", "a8"];
 const ATTENTION_COMPUTE: readonly AttentionCompute[] = ["f32", "f16", "a8"];
 const SCORE_STORAGE: readonly ScoreStorage[] = ["f32", "f16", "none"];
 const LINEAR_GEMV_REDUCE = ["sequential", "parallel"] as const;
@@ -195,6 +196,7 @@ const STATE_ATTENTION_REDUCE = ["sequential", "parallel", "parallel-fused"] as c
  */
 const SESSION_KEYS: Readonly<Record<keyof Required<SessionSpec>, true>> = {
   linearCompute: true,
+  convCompute: true,
   attentionCompute: true,
   attentionScoreStorage: true,
   linearGemvReduce: true,
@@ -205,6 +207,8 @@ const SESSION_KEYS: Readonly<Record<keyof Required<SessionSpec>, true>> = {
 };
 
 export type LinearCompute = "f32" | "a8" | "f16";
+/** The execution form of conv3d (ADR 0133 — `"a8"` = int8 activations per input pixel). */
+export type ConvCompute = "f32" | "a8";
 export type AttentionCompute = "f32" | "f16" | "a8";
 /** `"none"` = the online kernel that never stores S (ADR 0132; implemented only with `attentionCompute: "a8"`). */
 export type ScoreStorage = "f32" | "f16" | "none";
@@ -362,6 +366,7 @@ export type WeightEntry = Readonly<Record<string, WeightContainer>>;
 /** The manifest-owned vocabulary of execution knobs (ADR 0038 §3 / 0098 / 0104). */
 export type SessionSpec = {
   readonly linearCompute?: LinearCompute;
+  readonly convCompute?: ConvCompute;
   readonly attentionCompute?: AttentionCompute;
   readonly attentionScoreStorage?: ScoreStorage;
   readonly linearGemvReduce?: "sequential" | "parallel";
@@ -952,6 +957,7 @@ const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
   assertAllowedKeys(fail, raw, Object.keys(SESSION_KEYS), `${where}.session`);
   const at = `${where}.session`;
   const linearCompute = readEnum(fail, raw, "linearCompute", LINEAR_COMPUTE, at);
+  const convCompute = readEnum(fail, raw, "convCompute", CONV_COMPUTE, at);
   const attentionCompute = readEnum(fail, raw, "attentionCompute", ATTENTION_COMPUTE, at);
   const attentionScoreStorage = readEnum(fail, raw, "attentionScoreStorage", SCORE_STORAGE, at);
   const linearGemvReduce = readEnum(fail, raw, "linearGemvReduce", LINEAR_GEMV_REDUCE, at);
@@ -967,6 +973,7 @@ const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
   const packedStaticQuantize = readBoolean(fail, raw, "packedStaticQuantize", at);
   return {
     ...(linearCompute === undefined ? {} : { linearCompute }),
+    ...(convCompute === undefined ? {} : { convCompute }),
     ...(attentionCompute === undefined ? {} : { attentionCompute }),
     ...(attentionScoreStorage === undefined ? {} : { attentionScoreStorage }),
     ...(linearGemvReduce === undefined ? {} : { linearGemvReduce }),

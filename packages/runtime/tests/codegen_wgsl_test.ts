@@ -267,6 +267,7 @@ import {
   attentionQkI8a8Wgsl,
 } from "../src/kernels/attention-i8a8.ts";
 import { attentionOnlineI8a8Wgsl } from "../src/kernels/attention-online-i8a8.ts";
+import { conv3dI8a8Wgsl } from "../src/kernels/conv3d-i8a8.ts";
 import {
   defaultI8a8Geometry,
   type I8a8Geometry,
@@ -764,6 +765,11 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["attention_online_i8a8_d128_wg.wgsl", attentionOnlineI8a8Wgsl(true, 128, "wg")],
     ["attention_online_i8a8_d128_emu_sg32.wgsl", attentionOnlineI8a8Wgsl(false, 128, "sg32")],
     ["attention_online_i8a8_d64_sg32.wgsl", attentionOnlineI8a8Wgsl(true, 64, "sg32")],
+    // conv3d の w8a8 変種（ADR 0133 — `convCompute: "a8"`）: 書き出し 2 変種 × 内積 2 変種のうち 3 つを
+    // 凍結する（スカラ × エミュは組み合わせの差分だけなので省く）。
+    ["conv3d_i8a8_v4.wgsl", conv3dI8a8Wgsl(true, true)],
+    ["conv3d_i8a8.wgsl", conv3dI8a8Wgsl(false, true)],
+    ["conv3d_i8a8_emu_v4.wgsl", conv3dI8a8Wgsl(true, false)],
     // ② 行統計の **regcache 変種**（S を 1 回だけ読んでレジスタに残す）。dim 依存の生成なので
     // `epc` がキー軸に増える — 実測形の self（dim 4096 → 16 要素／スレッド）を凍結する。
     // MUST: 上の 2 回読み版と対で置く（値はビット同一である以上、生成物の側でしか差が見えない）。

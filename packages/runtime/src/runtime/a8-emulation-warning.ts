@@ -36,11 +36,13 @@ export const A8_EMULATION_WARNING_KEY = "a8-without-dp4a";
  */
 export const a8EmulationWarning = (
   linearCompute: ComputePrecision,
+  convCompute: "f32" | "a8",
   attentionCompute: ComputePrecision,
   wgslLanguageFeatures: ReadonlySet<string>,
 ): string | undefined => {
   const requested = [
     ...(linearCompute === "a8" ? ["linearCompute"] : []),
+    ...(convCompute === "a8" ? ["convCompute"] : []),
     ...(attentionCompute === "a8" ? ["attentionCompute"] : []),
   ];
   if (requested.length === 0 || dp4aAvailable(wgslLanguageFeatures)) return undefined;
@@ -49,6 +51,6 @@ export const a8EmulationWarning = (
     `  the integer dot product of int8 activations (${requested.join(" / ")}: "a8") runs emulated.\n` +
     `The values are identical to the dp4a version, but it is not faster than the f32 path (observed slower on Apple Metal).\n` +
     `If you chose it for speed, pass quant explicitly with a preset of the same weights without activation quantization (one whose\n` +
-    `Compute column is empty in the Quants table of the model card), or set linearCompute / attentionCompute to 'f32'.`
+    `Compute column is empty in the Quants table of the model card), or set linearCompute / convCompute / attentionCompute to 'f32'.`
   );
 };

@@ -399,6 +399,7 @@ type DepthAnythingState = {
  */
 export const DEPTH_ANYTHING_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: false,
+  convCompute: false,
   attentionCompute: false,
   attentionScoreStorage: false,
   linearGemvReduce: false,

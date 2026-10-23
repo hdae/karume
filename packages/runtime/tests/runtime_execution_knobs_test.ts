@@ -14,23 +14,25 @@ import { ExecutionError } from "../src/runtime/plan.ts";
 const jsCallerAssert = assertExecutionKnobs as unknown as (...knobs: readonly unknown[]) => void;
 
 /** 受理集合の中の綴り（この並びが {@link assertExecutionKnobs} の引数順）。 */
-const VALID: readonly [string, string, string, string, string] = [
+const VALID: readonly [string, string, string, string, string, string] = [
+  "f32",
   "f32",
   "f32",
   "f32",
   "parallel-fused",
   "parallel",
 ];
-const NAMES: readonly [string, string, string, string, string] = [
+const NAMES: readonly [string, string, string, string, string, string] = [
   "linearCompute",
+  "convCompute",
   "attentionCompute",
   "attentionScoreStorage",
   "stateAttentionReduce",
   "linearGemvReduce",
 ];
 
-test("受理集合の中の綴りは 5 ノブとも通る（下が「何を渡しても落ちる」ではない証明）", () => {
-  assertExecutionKnobs("f32", "f32", "f32", "parallel-fused", "parallel");
+test("受理集合の中の綴りは 6 ノブとも通る（下が「何を渡しても落ちる」ではない証明）", () => {
+  assertExecutionKnobs("f32", "a8", "f32", "f32", "parallel-fused", "parallel");
 });
 
 test("実行形ノブの非文字列は受理集合を引く前に落ち、診断で利用者の変換を呼ばない", () => {
@@ -63,7 +65,7 @@ test("実行形ノブの非文字列は受理集合を引く前に落ち、診�
 test("union 外の綴りは全件列挙して 1 回で落ちる", () => {
   // `"i8a8"` は 0.5.0 で `"a8"` へ改名した綴り（ADR 0074 決定 3・互換シム無し）。
   const error = assertThrows(
-    () => jsCallerAssert("i8a8", "f32", "s16", "parallel-fused", "parallel"),
+    () => jsCallerAssert("i8a8", "f32", "f32", "s16", "parallel-fused", "parallel"),
     ExecutionError,
     "outside the accepted set: 2",
   );

@@ -202,6 +202,7 @@ export type Umt5Encoding = {
  */
 export const UMT5_ENCODER_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: false,
+  convCompute: false,
   attentionCompute: false,
   attentionScoreStorage: false,
   linearGemvReduce: false,

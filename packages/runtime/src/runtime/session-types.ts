@@ -312,6 +312,18 @@ export type SessionOptions = {
    */
   readonly linearCompute?: "f32" | "a8" | "f16";
   /**
+   * The execution form of conv3d (default `"f32"` = the implicit GEMM of ADR 0118).
+   *
+   * `"a8"` quantises the input to i8 **once per input pixel over its channels** and reduces each
+   * tap with an integer dot product, flushing to f32 per tap (ADR 0133 — the conv counterpart of
+   * `linearCompute: "a8"`, an axis of its own because the VAE Session opts in independently of the
+   * transformer's linears). It applies only to conv3d nodes with i8-resident weights, `groups == 1`
+   * and `Cin % 4 == 0`; every other node runs the f32 path and the pipeline key shows it. conv1d /
+   * conv2d are not covered.
+   * MUST: the default is `"f32"` (the same reason as `linearCompute`).
+   */
+  readonly convCompute?: "f32" | "a8";
+  /**
    * The execution form of fused attention (the three kernels of ADR 0023; default `"f32"` = the
    * original behaviour).
    *

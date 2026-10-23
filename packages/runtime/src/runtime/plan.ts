@@ -7,7 +7,9 @@
  * Only graphs that pass here proceed to the executor's encode step.
  */
 
+import { codecLayout } from "../format/container/codecs.ts";
 import { evalDim, parseDim, solveDim } from "../format/dims.ts";
+import { conv3dI8a8EligibleShape } from "../kernels/conv3d-i8a8.ts";
 import type { IrDim, IrDtype, IrGraph, IrNode } from "../format/ir.ts";
 import {
   assertNodeContract,
@@ -511,6 +513,40 @@ export const weightChannelAxes = (graph: IrGraph): ReadonlyMap<string, number> =
     axes.set(name, axis);
   }
   return axes;
+};
+
+/**
+ * Initializers whose bytes Session construction reorders to the tap-major layout of the conv3d
+ * w8a8 kernel (ADR 0133 decision 4) — decided from the graph alone, applied only with
+ * `convCompute: "a8"`.
+ *
+ * Reordered = i8 storage, consumed **only** at the weight slot of conv3d nodes that all satisfy the
+ * kernel's shape eligibility ({@link conv3dI8a8EligibleShape}), and not a graph output. One other
+ * consumer (an ineligible conv3d, another op, a graph output) keeps the canonical layout, and then
+ * every consumer runs the f32 path — the recipe builder reads the flag the upload sets, so the two
+ * never disagree.
+ */
+export const conv3dTapMajorInitializers = (graph: IrGraph): ReadonlySet<string> => {
+  const candidates = new Set<string>();
+  const blocked = new Set<string>(graph.outputs);
+  for (const node of graph.nodes) {
+    node.ins.forEach((name, index) => {
+      if (!Object.hasOwn(graph.initializers, name)) return;
+      const storage = graph.initializers[name].storage;
+      if (node.op !== "conv3d" || index !== 1 || storage === undefined) {
+        blocked.add(name);
+        return;
+      }
+      const shape = graph.values[name].shape.map(Number);
+      const { groups } = conv3dAttrs(node.attrs, `nodes (${node.op})`);
+      if (codecLayout(storage.codec) === "i8" && conv3dI8a8EligibleShape(shape[1], groups)) {
+        candidates.add(name);
+      } else {
+        blocked.add(name);
+      }
+    });
+  }
+  return new Set([...candidates].filter((name) => !blocked.has(name)));
 };
 
 /**

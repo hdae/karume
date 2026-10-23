@@ -312,6 +312,7 @@ type Siglip2State = {
  */
 export const SIGLIP2_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: false,
+  convCompute: false,
   attentionCompute: false,
   attentionScoreStorage: false,
   linearGemvReduce: false,

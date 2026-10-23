@@ -358,6 +358,7 @@ export const latentSnapshot =
  */
 export const ANIMA_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: true,
+  convCompute: false,
   attentionCompute: true,
   attentionScoreStorage: true,
   linearGemvReduce: false,

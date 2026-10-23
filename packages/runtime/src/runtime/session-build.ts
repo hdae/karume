@@ -16,6 +16,7 @@ import { alignF16Payload, decodeF16 } from "../format/f16.ts";
 import { decodeI2 } from "../format/i2.ts";
 import { decodeI4 } from "../format/i4.ts";
 import { alignI8Payload, decodeI8 } from "../format/i8.ts";
+import { reorderConv3dWeightTapMajor } from "../kernels/conv3d-i8a8.ts";
 import type { IrDtype, IrGraph } from "../format/ir.ts";
 import { RunArena } from "../gpu/arena.ts";
 import {
@@ -34,7 +35,7 @@ import type { ScoreStorage } from "../kernels/score-storage.ts";
 import { A8_EMULATION_WARNING_KEY, a8EmulationWarning } from "./a8-emulation-warning.ts";
 import { type AttentionDeviceFacts, attentionDeviceFacts } from "./attention-route.ts";
 import type { FusionCounts } from "./fusion.ts";
-import { countUses, declaredDtypes, ExecutionError } from "./plan.ts";
+import { conv3dTapMajorInitializers, countUses, declaredDtypes, ExecutionError } from "./plan.ts";
 import type { GenerationLimits, StepRecipe } from "./recipe.ts";
 import type { TransientLimits } from "./transient-plan.ts";
 import {
@@ -403,6 +404,8 @@ export type SessionState = {
   readonly buildStats: SessionBuildStats;
   /** The execution form of linear (opt-in — {@link SessionOptions.linearCompute}). */
   readonly linearCompute: "f32" | "a8" | "f16";
+  /** The execution form of conv3d (opt-in — {@link SessionOptions.convCompute}). */
+  readonly convCompute: "f32" | "a8";
   /** The budget for holding slot backings at the same time ({@link SessionOptions.planBackingBudgetBytes}). */
   readonly planBackingBudgetBytes: number;
   /** The execution form of fused attention (opt-in — {@link SessionOptions.attentionCompute}). */
@@ -494,6 +497,7 @@ const snapshotSessionOptions = (
   submitPolicy:
     requested.submitPolicy === undefined ? undefined : copySubmitPolicy(requested.submitPolicy),
   linearCompute: requested.linearCompute,
+  convCompute: requested.convCompute,
   attentionCompute: requested.attentionCompute,
   attentionScoreStorage: requested.attentionScoreStorage,
   stateAttentionReduce: requested.stateAttentionReduce,
@@ -544,6 +548,7 @@ export const buildSessionState = async (
   const {
     rmsNormReduce,
     linearCompute,
+    convCompute,
     attentionCompute,
     attentionScoreStorage,
     stateAttentionReduce,
@@ -622,6 +627,7 @@ export const buildSessionState = async (
   // numbers are the same and the user loses only speed, so show the fact and let them choose again.
   const emulationWarning = a8EmulationWarning(
     linearCompute,
+    convCompute,
     attentionCompute,
     gpu.wgslLanguageFeatures,
   );
@@ -640,6 +646,10 @@ export const buildSessionState = async (
   const weights = new RunArena(gpu.device, () => scheduler.flush());
   const weightBuffers = new Map<string, GPUBuffer>();
   const residentWeights = new Map<string, ResidentWeight>();
+  // The i8 weights the conv3d w8a8 kernel reads tap-major (ADR 0133 decision 4) — reordered at
+  // upload, flagged on the resident record, and never read by the f32 kernel.
+  const tapMajorWeights =
+    convCompute === "a8" ? conv3dTapMajorInitializers(graph) : new Set<string>();
   /**
    * The **copy** of the companion scale carried along a piece list of the expanded class (key =
    * initializer name).
@@ -677,6 +687,13 @@ export const buildSessionState = async (
     const expanded = decode();
     decodeMs += performance.now() - start;
     return expanded;
+  };
+  /** The host-side reorder of a conv3d w8a8 weight counts as decode time (CPU work on the bytes). */
+  const timedReorder = (reorder: () => Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> => {
+    const start = performance.now();
+    const reordered = reorder();
+    decodeMs += performance.now() - start;
+    return reordered;
   };
   const timedAlloc = (bytes: number): GPUBuffer => {
     const start = performance.now();
@@ -834,12 +851,28 @@ export const buildSessionState = async (
               if (scale.bytes.byteLength > 0) {
                 timedWrite(scaleBuffer, scale.bytes, 0);
               }
-              residentWeights.set(name, { storage: layout, scale: scaleBuffer });
+              residentWeights.set(name, {
+                storage: layout,
+                scale: scaleBuffer,
+                ...(tapMajorWeights.has(name) ? { layout: "conv3d-tap-major" } : {}),
+              });
             }
+            // The conv3d w8a8 layout is a permutation inside each row (= output channel), so a
+            // piece of a row-split list is reordered on its own (declaredShape = [Cout, Cin, Kt, Kh, Kw]).
+            const stored = tapMajorWeights.has(name)
+              ? timedReorder(() =>
+                  reorderConv3dWeightTapMajor(
+                    raw,
+                    rows,
+                    declaredShape[1],
+                    declaredShape[2] * declaredShape[3] * declaredShape[4],
+                  ),
+                )
+              : raw;
             // MUST: a weight whose element count is not a multiple of 4 is padded with trailing
             // zeros to 4-byte alignment (the same reason as the 2-byte padding of f16 — writeBuffer
             // fails validation).
-            payload = tailAligned ? alignI8Payload(raw) : raw;
+            payload = tailAligned ? alignI8Payload(stored) : stored;
             residentCompressedBytes += payload.byteLength;
           } else {
             const scale = expandedScale();
@@ -1044,6 +1077,7 @@ export const buildSessionState = async (
       uploadFenceMs,
     },
     linearCompute,
+    convCompute,
     attentionCompute,
     attentionScoreStorage,
     attentionDevice: attentionDeviceFacts(gpu),

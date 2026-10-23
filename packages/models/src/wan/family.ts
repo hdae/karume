@@ -248,6 +248,7 @@ export const planWanGpuGeneration = (
  */
 export const WAN_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: true,
+  convCompute: true,
   attentionCompute: true,
   attentionScoreStorage: true,
   linearGemvReduce: false,

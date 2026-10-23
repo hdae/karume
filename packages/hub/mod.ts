@@ -55,6 +55,7 @@ export type {
   DocumentExpectation,
   FileRef,
   GpuFeaturesSpec,
+  ConvCompute,
   LinearCompute,
   Manifest,
   ModelEntry,

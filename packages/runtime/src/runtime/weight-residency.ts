@@ -54,7 +54,16 @@ export type ResidentWeight =
   // leaves that member in place and cannot narrow to the side that holds a scale).
   | { readonly storage: "f16" }
   | { readonly storage: "bf16" }
-  | { readonly storage: "i8" | "i2"; readonly scale: GPUBuffer }
+  | {
+      readonly storage: "i8" | "i2";
+      readonly scale: GPUBuffer;
+      /**
+       * Set when the bytes were reordered to the tap-major layout of the conv3d w8a8 kernel at
+       * upload (ADR 0133 decision 4 — `conv3dTapMajorInitializers` in plan.ts). The f32 conv3d
+       * kernel MUST never read a weight carrying this flag.
+       */
+      readonly layout?: "conv3d-tap-major";
+    }
   | { readonly storage: "i4"; readonly scale: GPUBuffer; readonly groupSize: number };
 
 /**

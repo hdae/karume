@@ -16,6 +16,7 @@ import {
   ATTENTION_ONLINE_REDUCES,
   attentionOnlineI8a8Wgsl,
 } from "../src/kernels/attention-online-i8a8.ts";
+import { conv3dI8a8Wgsl } from "../src/kernels/conv3d-i8a8.ts";
 import { linearI8a8Wgsl } from "../src/kernels/linear-i8a8.ts";
 import {
   assertI8a8Geometry,
@@ -158,6 +159,7 @@ test("i8a8 の 3 カーネルは候補の全幾何 × 変種で外側スコー�
             () => attentionPvI8a8Wgsl(v4, dp4a, "f32", geometry, true),
           ],
           [`linear v4=${v4} dp4a=${dp4a}`, () => linearI8a8Wgsl(v4, dp4a, geometry)],
+          [`conv3d v4=${v4} dp4a=${dp4a}`, () => conv3dI8a8Wgsl(v4, dp4a, geometry)],
         ];
         if (v4) {
           variants.push([

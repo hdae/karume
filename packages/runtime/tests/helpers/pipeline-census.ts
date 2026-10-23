@@ -22,6 +22,7 @@ import {
 } from "../../src/kernels/attention.ts";
 import { attentionPvI8a8Key, attentionQkI8a8Key } from "../../src/kernels/attention-i8a8.ts";
 import { attentionOnlineI8a8Key } from "../../src/kernels/attention-online-i8a8.ts";
+import { conv3dI8a8Key } from "../../src/kernels/conv3d-i8a8.ts";
 import { gemmComputeKeyPart } from "../../src/kernels/gemm.ts";
 import { linearKey } from "../../src/kernels/linear.ts";
 import {
@@ -83,6 +84,7 @@ type SeatValue<Seat extends NumericSeat> = NonNullable<SessionOptions[Seat]>;
  */
 export const SEAT_REFERENCE = {
   linearCompute: "f32",
+  convCompute: "f32",
   attentionCompute: "f32",
   attentionScoreStorage: "f32",
   stateAttentionReduce: "sequential",
@@ -140,6 +142,8 @@ const stateVariants = (
 const GEMV_PARALLEL_SAMPLE = linearGemvParallelKey("i8", undefined, 4);
 
 const LINEAR_FAMILY = familyOf(linearKey("f32", true));
+// The conv3d w8a8 family (ADR 0133) — its keys carry the i8a8 dtype like linear's.
+const CONV3D_FAMILY = familyOf(conv3dI8a8Key(true, true));
 const I8A8_DTYPE = dtypeOf(linearI8a8Key(true, true));
 const C16 = gemmComputeKeyPart("f16");
 const S16 = scoreKeyPart("f16");
@@ -183,6 +187,9 @@ export const SEAT_SIGNATURES: SeatSignatures = {
   linearCompute: {
     a8: (key) => familyOf(key) === LINEAR_FAMILY && dtypeOf(key) === I8A8_DTYPE,
     f16: (key) => familyOf(key) === LINEAR_FAMILY && hasFragment(key, C16),
+  },
+  convCompute: {
+    a8: (key) => familyOf(key) === CONV3D_FAMILY && dtypeOf(key) === I8A8_DTYPE,
   },
   attentionCompute: {
     f16: (key) => ATTENTION_FAMILIES.has(familyOf(key)) && hasFragment(key, C16),

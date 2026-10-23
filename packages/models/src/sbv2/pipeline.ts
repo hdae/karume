@@ -649,6 +649,7 @@ export const assertTiledBert = (tiled: TiledBert, phonemes: number): void => {
  */
 export const SBV2_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: true,
+  convCompute: false,
   attentionCompute: false,
   attentionScoreStorage: false,
   linearGemvReduce: false,

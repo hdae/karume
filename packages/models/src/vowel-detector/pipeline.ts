@@ -420,6 +420,7 @@ type VowelDetectorState = {
  */
 export const VOWEL_DETECTOR_SESSION_POLICY: FamilySessionPolicy = {
   linearCompute: false,
+  convCompute: false,
   attentionCompute: false,
   attentionScoreStorage: false,
   linearGemvReduce: false,
