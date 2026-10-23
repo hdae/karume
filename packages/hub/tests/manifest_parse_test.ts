@@ -848,7 +848,7 @@ describe("parseManifest: the session knob attentionScoreStorage (ADR 0132)", () 
     }
     assertThrows(
       () => parseManifest(withQuant({ session: { attentionScoreStorage: "online" } })),
-      ManifestFormatError,
+      ManifestReferenceError,
     );
   });
 });
