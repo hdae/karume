@@ -165,6 +165,13 @@ WAN22_DEFAULT_FRAMES = 33
 #:   S = 7,920 = 1280×704×33）。49 フレーム（S = 11,440）と 121 フレーム（S = 27,280）の
 #:   1 forward は計測していない。
 #:
+#: - The `f16+dit8-a8-attn8-online` row (ADR 0132 "Results"): RTX 3080 Ti, Node + Dawn,
+#:   2026-10-23, the DiT measured-mode e2e at S = 27,280 (one forward, the second run of the same
+#:   input) — 1 forward 21.7 s and the DiT allocation 9.01 GiB by the runtime's own count (neither
+#:   nvidia-smi nor fdinfo); the card's note names that reading. It is the only measured 121-frame
+#:   forward. The preset has not run 50 steps, so its stage / VAE / clip cells are "not run", and
+#:   it has no 33 / 49-frame rows (not measured).
+#:
 #: MUST: 計測していない欄は「not measured」と書き、推し量った数で埋めない。表に無い席は「未計測」と
 #: 名乗る（席の並びは manifest のまま — 2.1 の {@link WAN_QUANT_TRANSFORMER} と同じ扱い）。
 WAN22_RESOURCES: Mapping[str, tuple[tuple[int, str, str, str, str, str], ...]] = {
@@ -177,6 +184,7 @@ WAN22_RESOURCES: Mapping[str, tuple[tuple[int, str, str, str, str, str], ...]] =
         (49, "not measured", "8.49 GiB", "1,504 s", "655 s", "36 min 5 s"),
         (121, "not measured", "11.09 GiB", "3,068 s", "710 s", "63 min 8 s"),
     ),
+    "f16+dit8-a8-attn8-online": ((121, "21.7 s", "9.01 GiB", "not run", "not run", "not run"),),
 }
 
 #: Wan2.2 の Usage が呼ぶ公開 class（`@karume/models`）。資源の注も名指しする（33 フレームの通しを
@@ -192,6 +200,13 @@ WAN22_PRACTICAL_QUANT_ERROR = ("f16+dit8-a8-attn8-s16", "f16+dit8", "0.044", "0.
 #: 1280×704・33 フレーム・条件画像 1 枚・fit crop・opt-in）: step 1 の潜在の relRMS。帯は × 2 の
 #: 切り上げ（9.3e-2）。
 WAN22_PRACTICAL_QUANT_I2V_ERROR_33 = "0.046"
+#: The online preset's (the default since 2026-10-23) step-1 latent relative RMS error against the
+#: reference preset (ADR 0132 "Results" — `e2e_wan_ti2v_ab_test.ts`, RTX 3080 Ti, Node + Dawn,
+#: 2026-10-23: 4.23e-2 at 1280×704×33, inside the s16 preset's band 8.8e-2).
+#: `(preset, reference, 33 frames)`. The 121-frame check has not run (the reference preset's
+#: 121-frame step does not fit the 12 GiB device under Node + Dawn — docs/known-issues.md), and the
+#: visual check was done for the s16 preset only; the card says both.
+WAN22_ONLINE_QUANT_ERROR = ("f16+dit8-a8-attn8-online", "f16+dit8", "0.042")
 
 
 @dataclass(frozen=True)
@@ -746,14 +761,19 @@ _WAN22_VERIFICATION = (
     "  Differences stay within tolerances measured on separate decision cases. The",
     "  `f16+dit8-a8-attn8-s16` quant is compared with `f16+dit8` on the same GPU: the first",
     "  step's latent at 1280 × 704 with 33 and 121 frames stays within twice the measured",
-    "  relative error, differs from `f16+dit8`, and repeats bit for bit. It became the default",
-    "  after a visual check of 12 clips (3 prompts × seeds 42–45, 1280 × 704 with 33 frames, 50",
-    "  steps) on an NVIDIA GeForce RTX 3080 Ti in Deno on 2026-10-06, and the same 12 clips",
-    "  side by side with `f16+dit8` showed no clear degradation on 2026-10-09. On image to",
-    "  video the same first-step check holds at 1280 × 704 with 33 frames (one image, `crop`,",
-    f"  an opt-in case: relative RMS error {WAN22_PRACTICAL_QUANT_I2V_ERROR_33}, within twice the",
-    "  measured error), and 12 clips (3 images × seeds 42–45, 1280 × 704 with 33 frames, 50",
-    "  steps) side by side with `f16+dit8` showed no clear degradation on 2026-10-10 either.",
+    "  relative error, differs from `f16+dit8`, and repeats bit for bit. It was the default until",
+    "  2026-10-23, chosen after a visual check of 12 clips (3 prompts × seeds 42–45, 1280 × 704",
+    "  with 33 frames, 50 steps) on an NVIDIA GeForce RTX 3080 Ti in Deno on 2026-10-06, and the",
+    "  same 12 clips side by side with `f16+dit8` showed no clear degradation on 2026-10-09. On",
+    "  image to video the same first-step check holds at 1280 × 704 with 33 frames (one",
+    f"  image, `crop`, an opt-in case: relative RMS error {WAN22_PRACTICAL_QUANT_I2V_ERROR_33},",
+    "  within twice the measured error), and 12 clips (3 images × seeds 42–45, 1280 × 704 with",
+    "  33 frames, 50 steps) side by side with `f16+dit8` showed no clear degradation on",
+    f"  2026-10-10 either. `{WAN22_ONLINE_QUANT_ERROR[0]}`, the default since 2026-10-23, was",
+    "  compared the same way on text to video at 1280 × 704 with 33 frames, under Node with",
+    f"  Dawn on the same GPU: relative RMS error {WAN22_ONLINE_QUANT_ERROR[2]}, within the same",
+    "  tolerance. Its 121-frame comparison, its visual check and its image-to-video comparison",
+    "  have not been done yet.",
     "- **Image to video against the upstream reference** (the `f16+dit8` quant, with the",
     "  precomputed embeddings, on an NVIDIA GeForce RTX 3080 Ti): the resized image and the",
     "  encoder input match Pillow and the upstream preprocessing bit for bit. The encoded image",
@@ -1046,13 +1066,17 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
         )
     unmeasured = [f"`{quant}`" for quant in seats if quant not in WAN22_RESOURCES]
     practical, reference, error_33, error_121 = WAN22_PRACTICAL_QUANT_ERROR
+    online, _, online_error_33 = WAN22_ONLINE_QUANT_ERROR
+    online_row = online in measured
     return [
         "## Resources",
         "",
         "The 33- and 49-frame rows were measured on an Intel Arc B570 in Deno 2.9.6 on 2026-10-05,",
         "at 1280 × 704 with 50 steps, shift 5 and guidance 5 (classifier-free guidance runs two",
-        "transformer passes per step, so 100 passes); the 121-frame row at the same size, steps,",
-        "shift and guidance on an NVIDIA GeForce RTX 3080 Ti (12 GiB) in Deno 2.9.6 on 2026-10-06:",
+        f"transformer passes per step, so 100 passes); the `{practical}` 121-frame row at the",
+        "same size, steps, shift and guidance on an NVIDIA GeForce RTX 3080 Ti (12 GiB) in Deno",
+        "2.9.6 on 2026-10-06"
+        + (f"; the `{online}` row is described below the table:" if online_row else ":"),
         "",
         "| Quant | Frames | Pass | Transformer peak | Transformer stage | VAE decode | Clip |",
         "| ----- | ------ | ---- | ---------------- | ----------------- | ---------- | ---- |",
@@ -1062,7 +1086,8 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
             for frames, forward, peak, stage, decode, clip in WAN22_RESOURCES[quant]
         ),
         "",
-        "Pass is one transformer pass (batch 1, 7,920 tokens) timed on its own on 2026-10-04.",
+        "Pass is one transformer pass (batch 1, 7,920 tokens) timed on its own on 2026-10-04"
+        + (f", except in the `{online}` row." if online_row else "."),
         "For the B570 rows, Transformer peak is the total allocation during the transformer stage",
         "(the driver's fdinfo). The stage and the tiled decode of the whole clip are timed within",
         "the 50-step run. The 33-frame runs went",
@@ -1071,7 +1096,8 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
         "class's in the one run measured both ways (33 frames). The VAE stage peaked at 4.36 GiB",
         "at 33 frames and 4.51 GiB at 49 frames with either quant.",
         "",
-        "The 121-frame row comes from a different GPU and a different reading, so it is not",
+        f"The `{practical}` 121-frame row comes from a different GPU and a different reading, so",
+        "it is not",
         "comparable with the B570 rows: it was driven by the same development script with another",
         "prompt (`cat-dog-baking`, where the B570 rows used `boxing-cats`) and the text encoder on",
         "the GPU (that stage took 9.1 s and is included in Clip); its transformer peak is the",
@@ -1079,6 +1105,20 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
         "times include thermal throttling (the GPU reached 93 °C). The 121-frame clip has not",
         "been run for 50 steps with the `f16+dit8` quant.",
         "",
+        *(
+            [
+                f"The `{online}` row is one transformer pass at 121 frames (batch 1, 27,280",
+                "tokens) timed on its own on the same NVIDIA GeForce RTX 3080 Ti under Node with",
+                "Dawn on 2026-10-23 (the second run of the same input); its Transformer peak is",
+                "the runtime's own count of what the transformer allocated in that run (neither",
+                "nvidia-smi nor the driver's fdinfo). That quant has not been run for 50 steps, so",
+                "its stage, decode and clip times are not given, and it has not been measured at",
+                "33 or 49 frames.",
+                "",
+            ]
+            if online_row
+            else []
+        ),
         *(
             [f"The other quants ({' / '.join(unmeasured)}) have not been measured yet.", ""]
             if unmeasured
@@ -1110,6 +1150,20 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
         "",
         *(
             [
+                f"- **Quality of `{online}`**: after the first step its latent differs from",
+                f"  `{reference}`'s (the same int8 weights, computed in float32) by a relative RMS",
+                f"  error of {online_error_33} at 33 frames (text to video, on the NVIDIA GeForce",
+                "  RTX 3080 Ti under Node with Dawn on 2026-10-23); at 121 frames it has not been",
+                f"  measured, because `{reference}`'s 121-frame step does not fit that 12 GiB GPU",
+                "  under Node with Dawn. The visual check of twelve 50-step clips was made with",
+                f"  `{practical}` only — the same check of `{online}` is still pending — and its",
+                "  image-to-video error has not been measured.",
+            ]
+            if online in seats and reference in seats
+            else []
+        ),
+        *(
+            [
                 f"- **Quality of `{practical}`**: after the first step its latent differs from",
                 f"  `{reference}`'s (the same int8 weights, computed in float32) by a relative",
                 f"  RMS error of {error_33} at 33 frames and {error_121} at 121 frames. Side",
@@ -1125,8 +1179,11 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
         ),
         *_download_and_memory(
             manifest,
-            peaks="the B570 rows' peaks are of the total allocation (the driver's fdinfo), and"
-            " the 121-frame row's is the memory in use on the whole GPU (nvidia-smi)",
+            peaks="the B570 rows' peaks are of the total allocation (the driver's fdinfo), "
+            + ("" if online_row else "and ")
+            + f"the `{practical}` 121-frame row's is the memory in use on the whole GPU"
+            " (nvidia-smi)"
+            + (f", and the `{online}` row's is the runtime's own count" if online_row else ""),
         ),
         "- **Storage buffer size**: at these sizes some of the transformer's intermediate tensors",
         "  are larger than WebGPU's default `maxStorageBufferBindingSize` (128 MiB) — the",

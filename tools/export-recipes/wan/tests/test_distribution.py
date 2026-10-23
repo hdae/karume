@@ -391,7 +391,7 @@ _TI2V_CARD_LIMITS_FIXTURE = REPO_ROOT / "packages/models/tests/fixtures/wan-ti2v
 #: Wan2.2 の参照席・実用席。
 _REFERENCE = "f16+dit8"
 _PRACTICAL = "f16+dit8-a8-attn8-s16"
-#: Wan2.2's online-attention preset (ADR 0132 decision 6 — a sibling of the practical preset).
+#: Wan2.2's online-attention preset (ADR 0132 decision 6 — the default since 2026-10-23).
 _ONLINE = "f16+dit8-a8-attn8-online"
 
 
@@ -1566,11 +1566,10 @@ class TestTheWan22Distribution:
 
     def test_the_manifest_declares_the_three_seats(self, assembled22) -> None:
         """Three presets: the reference, the practical (s16) and the online-attention preset (ADR
-        0132 decision 6); no f16 preset; the default stays the practical preset (the visual ruling
-        of 2026-10-06 — ADR 0121 addendum "results of step 8a"; the online preset becomes the
-        default only after its A/B check). Every preset takes the f16 VAE encoder (even for T2V
-        alone — the ruling in the addendum on step 9's plan and step 9a's results). The weights
-        are ordered as the I2V stages."""
+        0132 decision 6); no f16 preset; the default is the online preset since 2026-10-23 (its A/B
+        check and timing confirmed it — ADR 0132 decision 6; the s16 preset stays as a sibling).
+        Every preset takes the f16 VAE encoder (even for T2V alone — the ruling in the addendum
+        on step 9's plan and step 9a's results). The weights are ordered as the I2V stages."""
         _, manifest = assembled22
         model = manifest["models"][_TI2V]
         assert manifest["defaultModel"] == _TI2V
@@ -1598,7 +1597,7 @@ class TestTheWan22Distribution:
             f"{_TI2V}/{WAN_TOKENIZER_ROLE}/{umt5_tokenizer.ASSET_FILE}"
         )
         assert list(model["quants"]) == [_REFERENCE, _PRACTICAL, _ONLINE]
-        assert model["defaultQuant"] == _PRACTICAL
+        assert model["defaultQuant"] == _ONLINE
         seat = {
             **dict.fromkeys(WAN_VAE_ENCODER_ROLES, "f16"),
             WAN_TEXT_ENCODER_ROLE: "i8",
@@ -1896,7 +1895,14 @@ class TestTheWan22ModelCard:
         assert "- **size**: 1280 × 704 or 704 × 1280." in card
         assert "- **frames**: 4n+1 from 5 to 121." in card
         assert "  // width: 1280, height: 704, // or 704 × 1280" in card
-        assert f"| `{_PRACTICAL}` (default) |" in card.split("### Quants")[1]
+        quants = card.split("### Quants")[1].split("\n\n")[1]
+        rows = [line for line in quants.splitlines() if line.startswith("| `")]
+        assert [row.split("`")[1] for row in rows] == [_REFERENCE, _PRACTICAL, _ONLINE]
+        assert [row.split(" |")[0] for row in rows if "(default)" in row] == [
+            f"| `{_ONLINE}` (default)"
+        ]
+        assert f"If no quant is given, it runs as `{_ONLINE}`" in card
+        assert f'// quant: "{_ONLINE}", // default' in card
         assert f"implements `{WAN22_SUPPORTED_PIPELINE}`" in card
         prose = " ".join(card.split())
         # T2V と I2V の両方を名乗る（ADR 0121 段 9c — I2V が公開 API に出た）。
@@ -1973,7 +1979,10 @@ class TestTheWan22ModelCard:
             "| `f16+dit8-a8-attn8-s16` | 49 | not measured | 8.49 GiB | 1,504 s | 655 s |"
             " 36 min 5 s |" in card
         )
-        assert set(WAN22_RESOURCES) == {_REFERENCE, _PRACTICAL}
+        assert f"| `{_ONLINE}` | 121 | 21.7 s | 9.01 GiB | not run | not run | not run |" in card
+        assert f"| `{_ONLINE}` | 33 |" not in card
+        assert f"| `{_ONLINE}` | 49 |" not in card
+        assert set(WAN22_RESOURCES) == {_REFERENCE, _PRACTICAL, _ONLINE}
         prose = " ".join(card.split())
         assert (
             "- **Quality of `f16+dit8-a8-attn8-s16`**: after the first step its latent differs from"
@@ -1989,10 +1998,19 @@ class TestTheWan22ModelCard:
         assert "the 49-frame runs drove the same pipeline stages from a development script" in prose
         assert "4.36 GiB at 33 frames and 4.51 GiB at 49 frames with either quant" in prose
         assert "4.52" not in prose
-        # The online-attention preset (ADR 0132 decision 6) has no row yet, so the card names it as
-        # the only unmeasured quant instead of filling a row with estimates.
-        assert f"The other quants (`{_ONLINE}`) have not been measured yet." in prose
-        assert f"| `{_ONLINE}` |" not in card.split("### Quants")[0]
+        # The default preset's quality (ADR 0132 "Results"): the 33-frame A/B only; the 121-frame
+        # A/B and the visual check are not claimed (the visual check was the s16 preset's).
+        assert (
+            f"- **Quality of `{_ONLINE}`**: after the first step its latent differs from"
+            " `f16+dit8`'s (the same int8 weights, computed in float32) by a relative RMS error of"
+            " 0.042 at 33 frames (text to video, on the NVIDIA GeForce RTX 3080 Ti under Node with"
+            " Dawn on 2026-10-23); at 121 frames it has not been measured, because `f16+dit8`'s"
+            " 121-frame step does not fit that 12 GiB GPU under Node with Dawn. The visual check of"
+            f" twelve 50-step clips was made with `{_PRACTICAL}` only — the same check of"
+            f" `{_ONLINE}` is still pending — and its image-to-video error has not been measured."
+        ) in prose
+        # Every preset of the manifest has a row, so no quant is named as unmeasured.
+        assert "have not been measured yet" not in prose
         assert "has been measured with this distribution only in the 121-frame run above" in prose
         assert "`maxStorageBufferBindingSize` (128 MiB)" in card
 
@@ -2013,12 +2031,31 @@ class TestTheWan22ModelCard:
         )
         # 121 の行は寸法・ステップ・shift・guidance だけが同じ（プロンプトと text の経路は違う）。
         assert (
-            "the 121-frame row at the same size, steps, shift and guidance on an NVIDIA GeForce"
-            " RTX 3080 Ti (12 GiB) in Deno 2.9.6 on 2026-10-06" in prose
+            f"the `{_PRACTICAL}` 121-frame row at the same size, steps, shift and guidance on an"
+            " NVIDIA GeForce RTX 3080 Ti (12 GiB) in Deno 2.9.6 on 2026-10-06; the"
+            f" `{_ONLINE}` row is described below the table:" in prose
         )
         assert "same settings" not in prose
         assert "another prompt (`cat-dog-baking`, where the B570 rows used `boxing-cats`)" in prose
         assert "it is not comparable with the B570 rows" in prose
+        assert (
+            f"The `{_PRACTICAL}` 121-frame row comes from a different GPU and a different reading"
+            in prose
+        )
+        # The online row is one DiT pass under Node + Dawn (ADR 0132 "Results") with its own
+        # reading, and its 50-step cells are "not run".
+        assert (
+            "Pass is one transformer pass (batch 1, 7,920 tokens) timed on its own on 2026-10-04,"
+            f" except in the `{_ONLINE}` row." in prose
+        )
+        assert (
+            f"The `{_ONLINE}` row is one transformer pass at 121 frames (batch 1, 27,280 tokens)"
+            " timed on its own on the same NVIDIA GeForce RTX 3080 Ti under Node with Dawn on"
+            " 2026-10-23 (the second run of the same input); its Transformer peak is the runtime's"
+            " own count of what the transformer allocated in that run (neither nvidia-smi nor the"
+            " driver's fdinfo). That quant has not been run for 50 steps, so its stage, decode and"
+            " clip times are not given, and it has not been measured at 33 or 49 frames." in prose
+        )
         assert "the memory in use on the whole GPU as read by nvidia-smi, not the driver's" in prose
         assert "its times include thermal throttling" in prose
         # 2 ステップ × 121 の参照席の sha 行は別にあり得るので、50 ステップに限って名乗る。
@@ -2032,8 +2069,8 @@ class TestTheWan22ModelCard:
         )
         assert (
             "- **GPU memory**: the B570 rows' peaks are of the total allocation (the driver's"
-            " fdinfo), and the 121-frame row's is the memory in use on the whole GPU (nvidia-smi)."
-            in prose
+            f" fdinfo), the `{_PRACTICAL}` 121-frame row's is the memory in use on the whole GPU"
+            f" (nvidia-smi), and the `{_ONLINE}` row's is the runtime's own count." in prose
         )
         assert "- **GPU memory**: the peaks are of the total allocation" not in prose
         assert "about 1.46 GiB at 121 frames (S = 27,280)" in prose
@@ -2112,7 +2149,7 @@ class TestTheWan22ModelCard:
         quants = changed["models"][_TI2V]["quants"]
         quants["f16+other"] = quants[_REFERENCE]
         card = _card22(changed)
-        assert f"The other quants (`{_ONLINE}` / `f16+other`) have not been measured yet." in card
+        assert "The other quants (`f16+other`) have not been measured yet." in card
         assert "| `f16+other` |" not in card.split("### Quants")[0]
 
     def test_it_refuses_a_manifest_without_a_measured_seat(self, assembled22) -> None:
@@ -2353,6 +2390,18 @@ class TestTheWan22ImageToVideoCard:
         )
         assert "have not been compared on image to video" not in prose
         assert "has not been compared between the quants" not in prose
+        # The s16 preset's visual check is kept as its own (it was the default until 2026-10-23);
+        # the online preset's comparison is the 33-frame text-to-video A/B only.
+        assert (
+            "It was the default until 2026-10-23, chosen after a visual check of 12 clips" in prose
+        )
+        assert "It became the default" not in prose
+        assert (
+            f"`{_ONLINE}`, the default since 2026-10-23, was compared the same way on text to video"
+            " at 1280 × 704 with 33 frames, under Node with Dawn on the same GPU: relative RMS"
+            " error 0.042, within the same tolerance. Its 121-frame comparison, its visual check"
+            " and its image-to-video comparison have not been done yet." in prose
+        )
         assert "Text to video has been checked end to end on the GPU: 17 frames" in prose
 
     def test_the_resources_name_what_was_measured_for_image_to_video(self, assembled22) -> None:
@@ -2440,7 +2489,7 @@ class TestTheRealWan22Series:
             WAN_TOKENIZER_ROLE,
         }
         assert set(WAN_VAE_ENCODER_ROLES) <= set(plan.artifacts)
-        assert plan.default_quant == _PRACTICAL
+        assert plan.default_quant == _ONLINE
 
     def test_the_text_assets_are_the_wan21_series_files(self) -> None:
         assert (_REAL22.text_embeds, _REAL22.tokenizer) == (_REAL.text_embeds, _REAL.tokenizer)

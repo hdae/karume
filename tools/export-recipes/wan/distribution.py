@@ -437,8 +437,8 @@ WAN22_QUANTS: Mapping[str, Any] = {
     # (no new download — `weights` is the same complete-mapping filler) with attention computed by
     # the online kernel, which never stores the scores (`attentionScoreStorage: "none"` — ADR 0132
     # decision 1; the name token `online` takes the slot of `s16` — ADR 0074 §3). Wan2.2 only:
-    # Wan2.1's table is not changed. A sibling, not the default — the default moves only after the
-    # A/B check (ADR 0132 decision 6), so `WAN22_DEFAULT_QUANT` stays on the s16 preset.
+    # Wan2.1's table is not changed. The default since 2026-10-23 (`WAN22_DEFAULT_QUANT` — ADR 0132
+    # decision 6); the s16 preset above stays as its sibling.
     "f16+dit8-a8-attn8-online": {
         "weights": {},
         "session": {
@@ -453,10 +453,16 @@ WAN22_QUANTS: Mapping[str, Any] = {
     },
 }
 
-#: Wan2.2 の既定席 — 実用席。利用者の視認の裁定（2026-10-06）: 1280×704×33・50 ステップの
-#: 12 本〈3 プロンプト × seed 42〜45〉に破綻なし — ADR 0121 追記「段 8a の結果」・方針「既定は
-#: 最も実用的な席」。品質の裁定で替わりうるので、既定席はこの 1 か所だけで持つ。
-WAN22_DEFAULT_QUANT = "f16+dit8-a8-attn8-s16"
+#: Wan2.2's default preset — the online preset since 2026-10-23 (ADR 0132 decision 6: it becomes
+#: the default once the A/B check and the timing confirm it). It has the same weights and the same
+#: int8 activations as the s16 preset, with attention computed online without storing the scores.
+#: The maintainer's A/B at 1280×704×33 gave relRMS 0.042 against the reference preset (the s16
+#: preset: 0.044 — inside the same band 8.8e-2), and at 1280×704×121 one DiT forward on the RTX
+#: 3080 Ti took 21.7 s against 24.2–29.3 s for the s16 preset (attention 12.5 s against
+#: 15.6–18.4 s). The s16 preset stays as a sibling; it was the default from the visual ruling of
+#: 2026-10-06 (12 clips at 1280×704×33 with 50 steps, no breakdown — ADR 0121 addendum "results of
+#: step 8a"). The default can change with a quality ruling, so it is held in this one place only.
+WAN22_DEFAULT_QUANT = "f16+dit8-a8-attn8-online"
 
 #: Wan2.2 の `pipelineConfig`（スキーマは 2.1 と同じ — `packages/models/src/wan/config.ts`）:
 #:
