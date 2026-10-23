@@ -58,7 +58,11 @@ describe("parseIrDeclaration", () => {
     assertThrows(() => parseIrDeclaration(JSON.stringify(withStorage)), IrError, "unknown key");
     const sharedFalse = baseGraph();
     (sharedFalse.initializers as Json)["b"] = { shared: false };
-    assertThrows(() => parseIrDeclaration(JSON.stringify(sharedFalse)), IrError, "cannot be written");
+    assertThrows(
+      () => parseIrDeclaration(JSON.stringify(sharedFalse)),
+      IrError,
+      "cannot be written",
+    );
   });
 });
 
