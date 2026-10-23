@@ -207,6 +207,10 @@ WAN22_PRACTICAL_QUANT_I2V_ERROR_33 = "0.046"
 #: 121-frame step does not fit the 12 GiB device under Node + Dawn — docs/known-issues.md), and the
 #: visual check was done for the s16 preset only; the card says both.
 WAN22_ONLINE_QUANT_ERROR = ("f16+dit8-a8-attn8-online", "f16+dit8", "0.042")
+#: The two presets of the int8 VAE decoder (ADR 0133 decision 6): `(reference, practical)`. Their
+#: quality and timing are not measured yet (decision 8), so the card says so and gives no number;
+#: the table's "not measured yet" line names them too (they are not in {@link WAN22_RESOURCES}).
+WAN22_INT8_VAE_QUANTS = ("i8", "i8-a8-attn8-online-conv8")
 
 
 @dataclass(frozen=True)
@@ -509,7 +513,10 @@ def _wan22_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:
         "  its linear weights quantized per output channel (biases and normalization weights kept",
         "  in float32 at the source values); every parameter of the VAE decoder rounded to the",
         "  nearest float16 value (weight matrices and kernels stored as float16, computation in",
-        "  float32); the transformer graph re-expressed on patchified tokens, with the RoPE tables",
+        "  float32), and a second copy of the decoder with its convolution and linear weights",
+        "  quantized to int8 per output channel from those rounded values (computation in float32,",
+        "  or on per-pixel int8 activations in the quant that declares it); the transformer graph",
+        "  re-expressed on patchified tokens, with the RoPE tables",
         "  built on the host from per-axis base tables and applied in a pair-swap form, and with",
         "  the image-conditioning inputs (a condition mask and a second timestep — in image to",
         "  video the tokens of the first latent frame are masked in and take timestep 0, in text",
@@ -1067,6 +1074,7 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
     unmeasured = [f"`{quant}`" for quant in seats if quant not in WAN22_RESOURCES]
     practical, reference, error_33, error_121 = WAN22_PRACTICAL_QUANT_ERROR
     online, _, online_error_33 = WAN22_ONLINE_QUANT_ERROR
+    int8_vae_reference, int8_vae_practical = WAN22_INT8_VAE_QUANTS
     online_row = online in measured
     return [
         "## Resources",
@@ -1175,6 +1183,17 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
                 "  showed no clear degradation either.",
             ]
             if practical in seats and reference in seats
+            else []
+        ),
+        *(
+            [
+                f"- **`{int8_vae_reference}` and `{int8_vae_practical}`**: both store the VAE",
+                "  decoder's weights as int8 (one scale per output channel) as well as the",
+                "  transformer's; `conv8` computes the decoder's 3-D convolutions on per-pixel",
+                "  int8 activations (integer dot products). Their quality and timing have not been",
+                "  measured yet.",
+            ]
+            if int8_vae_reference in seats and int8_vae_practical in seats
             else []
         ),
         *_download_and_memory(

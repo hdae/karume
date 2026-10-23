@@ -170,17 +170,36 @@ WAN_TRANSFORMER_LABEL_ROLES: Mapping[str, str] = {
     "i8": WAN_TRANSFORMER_I8_ROLE,
 }
 
-#: 容器を持つ配置の役割（text_encoder は i8 の 1 本・transformer は格納ラベルごとに 2 本・VAE の
-#: encoder と decoder は f16 の 1 本ずつ）。全世代の役割の和。各世代は自分の格納ラベルの役割と、
-#: encoder を持つ世代だけが encoder の役割を使う（{@link WanGeneration.container_roles} — Wan2.1 は
-#: encoder の 3 本を持たない）。以下の格納の要求 / 禁止表・出力の path・weights の宣言も同じく
-#: 全世代の表で、世代はそこから自分の役割を引く。
+#: VAE の decoder の i8 の容器の配置の役割（ADR 0133 決定 7 — Wan2.2 だけ）。f16 の役割は容器の
+#: グラフ名 {@link WAN_VAE_FIRST_ROLE} / {@link WAN_VAE_NEXT_ROLE} のまま（改名すると Wan2.1 の
+#: 配布形が変わる）。manifest の weights のキーはどちらもグラフ名。
+WAN_VAE_FIRST_I8_ROLE = "vae_decoder_first_i8"
+WAN_VAE_NEXT_I8_ROLE = "vae_decoder_next_i8"
+
+#: decoder のグラフ 2 本の格納ラベル → 配置の役割（世代の表 {@link WanGeneration} の `vae_labels`
+#: からその世代の役割を引く — transformer の {@link WAN_TRANSFORMER_LABEL_ROLES} と同じ形）。
+WAN_VAE_FIRST_LABEL_ROLES: Mapping[str, str] = {
+    "f16": WAN_VAE_FIRST_ROLE,
+    "i8": WAN_VAE_FIRST_I8_ROLE,
+}
+WAN_VAE_NEXT_LABEL_ROLES: Mapping[str, str] = {
+    "f16": WAN_VAE_NEXT_ROLE,
+    "i8": WAN_VAE_NEXT_I8_ROLE,
+}
+
+#: 容器を持つ配置の役割（text_encoder は i8 の 1 本・transformer と VAE の decoder は格納ラベル
+#: ごとに 1 本・VAE の encoder は f16 の 1 本ずつ）。全世代の役割の和。各世代は自分の格納ラベルの
+#: 役割と、encoder を持つ世代だけが encoder の役割を使う（{@link WanGeneration.container_roles} —
+#: Wan2.1 は encoder の 3 本を持たない）。以下の格納の要求 / 禁止表・出力の path・weights の宣言も
+#: 同じく全世代の表で、世代はそこから自分の役割を引く。
 WAN_CONTAINER_ROLES: tuple[str, ...] = (
     *WAN_VAE_ENCODER_ROLES,
     WAN_TEXT_ENCODER_ROLE,
     *WAN_TRANSFORMER_ROLES,
     WAN_VAE_FIRST_ROLE,
+    WAN_VAE_FIRST_I8_ROLE,
     WAN_VAE_NEXT_ROLE,
+    WAN_VAE_NEXT_I8_ROLE,
 )
 
 #: モデル単位の資産（manifest の `assets` のキー = 役割名 — TS 側 `text-stage.ts` の
@@ -229,7 +248,9 @@ WAN_OUTPUT_PATHS: Mapping[str, str] = {
     WAN_TRANSFORMER_F16_ROLE: f"{WAN_TRANSFORMER_ROLE}/model.f16.krm",
     WAN_TRANSFORMER_I8_ROLE: f"{WAN_TRANSFORMER_ROLE}/model.i8.krm",
     WAN_VAE_FIRST_ROLE: f"{WAN_VAE_FIRST_ROLE}/model.f16.krm",
+    WAN_VAE_FIRST_I8_ROLE: f"{WAN_VAE_FIRST_ROLE}/model.i8.krm",
     WAN_VAE_NEXT_ROLE: f"{WAN_VAE_NEXT_ROLE}/model.f16.krm",
+    WAN_VAE_NEXT_I8_ROLE: f"{WAN_VAE_NEXT_ROLE}/model.i8.krm",
     WAN_TEXT_EMBEDS_ROLE: f"{WAN_TEXT_EMBEDS_ROLE}/{WAN_TEXT_EMBEDS_FILE}",
     WAN_TOKENIZER_ROLE: f"{WAN_TOKENIZER_ROLE}/{umt5_tokenizer.ASSET_FILE}",
 }
@@ -239,14 +260,17 @@ WAN_OUTPUT_PATHS: Mapping[str, str] = {
 #: なる（bias / norm は f32 のまま）ので「f16 を含む」を、i8 系列は linear の重みだけが i8 になる
 #: （scale・bias・norm は f32）ので「i8 を含む」を要求する。umT5 の i8 系列の種類ごとの格納は
 #: 束縛表の門（`wan.umt5_distribution.assert_umt5_bindings`）が別に見る。VAE の encoder は
-#: decoder と同じ f16 系列（書き手 `wan.export_vae_encoder` — f16 席だけ）。
+#: decoder と同じ f16 系列（書き手 `wan.export_vae_encoder` — f16 席だけ）。decoder の i8 系列は
+#: 畳み込みの重みだけが i8（ADR 0133 決定 7 — 書き手 `wan.export_vae --dtype i8`）。
 WAN_STORAGE_REQUIREMENTS: Mapping[str, str] = {
     **dict.fromkeys(WAN_VAE_ENCODER_ROLES, "f16"),
     WAN_TEXT_ENCODER_ROLE: "i8",
     WAN_TRANSFORMER_F16_ROLE: "f16",
     WAN_TRANSFORMER_I8_ROLE: "i8",
     WAN_VAE_FIRST_ROLE: "f16",
+    WAN_VAE_FIRST_I8_ROLE: "i8",
     WAN_VAE_NEXT_ROLE: "f16",
+    WAN_VAE_NEXT_I8_ROLE: "i8",
 }
 
 #: codec 台帳の layout のうち圧縮格納の全部（`karume.container.CODEC_LEDGER` から f32 / i32 を
@@ -278,8 +302,14 @@ WAN_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
         "f16": WeightFiles(WAN_TRANSFORMER_F16_ROLE),
         "i8": WeightFiles(WAN_TRANSFORMER_I8_ROLE),
     },
-    WAN_VAE_FIRST_ROLE: {"f16": WeightFiles(WAN_VAE_FIRST_ROLE)},
-    WAN_VAE_NEXT_ROLE: {"f16": WeightFiles(WAN_VAE_NEXT_ROLE)},
+    WAN_VAE_FIRST_ROLE: {
+        "f16": WeightFiles(WAN_VAE_FIRST_ROLE),
+        "i8": WeightFiles(WAN_VAE_FIRST_I8_ROLE),
+    },
+    WAN_VAE_NEXT_ROLE: {
+        "f16": WeightFiles(WAN_VAE_NEXT_ROLE),
+        "i8": WeightFiles(WAN_VAE_NEXT_I8_ROLE),
+    },
 }
 
 #: assets の宣言（quant 選択に依存しない無条件ファイル — ADR 0041 §3・決定 4）。
@@ -303,6 +333,11 @@ WAN_QUANT_ABBREVIATIONS: Mapping[str, str] = {"dit": WAN_TRANSFORMER_ROLE}
 #:   ADR 0110 決定 5 ②）。
 #: - 中間の席（`f16+dit8-a8` / `f16+dit8-a8-attn8`）は作らない（決定 1 — ノブ単位の切り分けは
 #:   テストの manifest 上書きで足りる）。
+#:
+#: 席名のノブのトークン（ADR 0074 §3 / ADR 0133 決定 6）: `a8` = `linearCompute: "a8"`・
+#: `attn8` = `attentionCompute: "a8"`・`s16` = `attentionScoreStorage: "f16"`・`online` =
+#: `attentionScoreStorage: "none"`（Wan2.2 — ADR 0132）・`conv8` = `convCompute: "a8"`（Wan2.2 の
+#: VAE の decoder の conv3d — ADR 0133）。
 #:
 #: `label` / `description` は選択 UI 向けの表示欄（ADR 0075 決定 1 — 英語・64 / 200 字上限）。速度と
 #: 品質は書かない — a8 の席の速度は B570 の実測（1 forward で −50% — ADR 0120 段 4）しか無く、
@@ -419,28 +454,35 @@ WAN22_SERIES = "wan2.2-ti2v-5b-f16-dyn"
 WAN22_I8_SERIES = "wan2.2-ti2v-5b-i8-dyn"
 
 #: Wan2.2 の quant 表（ADR 0121 決定 2 — 参照席と実用席・f16 席は作らない。実用席は s16 と online の
-#: 2 つ — ADR 0132）。transformer は
+#: 2 つ — ADR 0132。VAE の decoder を i8 にした参照席 `i8` と実用席 `i8-a8-attn8-online-conv8` —
+#: ADR 0133 決定 6）。transformer は
 #: 格納ラベルが i8 の 1 つなので、weights は書かない（{@link complete_quant_weights} が完全写像へ
-#: 埋める — 書くと導出できる状態の二重化になる）。実用席の `session` / `label` / `description` は
-#: 2.1 の同名の席と同じ 1 つを引く（ADR 0121 決定 2「2.1 の実用席と同じ名前と束」）。参照席の
-#: 表示欄は 2.1 の文（「f16 席の約半分」）が 2.2 では成り立たないので、2.2 の文を持つ。
+#: 埋める — 書くと導出できる状態の二重化になる）。VAE の decoder は f16 / i8 の 2 つなので席ごとに
+#: 書く（{@link _WAN22_VAE_F16} / {@link _WAN22_VAE_I8}）。実用席の `session` / `label` /
+#: `description` は 2.1 の同名の席と同じ 1 つを引く（ADR 0121 決定 2「2.1 の実用席と同じ名前と
+#: 束」）。参照席の表示欄は 2.1 の文（「f16 席の約半分」）が 2.2 では成り立たないので、2.2 の文を
+#: 持つ。
+#: 基底の格納は VAE の decoder の格納で決まる（ADR 0074 §1 — 全役割に共通の格納: decoder が f16 の
+#: 席は `f16+dit8…`・i8 の席は `i8…`）。
+_WAN22_VAE_F16: Mapping[str, str] = {WAN_VAE_FIRST_ROLE: "f16", WAN_VAE_NEXT_ROLE: "f16"}
+_WAN22_VAE_I8: Mapping[str, str] = {WAN_VAE_FIRST_ROLE: "i8", WAN_VAE_NEXT_ROLE: "i8"}
 WAN22_QUANTS: Mapping[str, Any] = {
     "f16+dit8": {
-        "weights": {},
+        "weights": _WAN22_VAE_F16,
         "session": {},
         "label": "int8 transformer, f32 compute",
         "description": "Transformer weights stored as int8 (one scale per output channel) and"
         " computed in f32; the VAE stays f16.",
     },
-    "f16+dit8-a8-attn8-s16": {**WAN_QUANTS["f16+dit8-a8-attn8-s16"], "weights": {}},
+    "f16+dit8-a8-attn8-s16": {**WAN_QUANTS["f16+dit8-a8-attn8-s16"], "weights": _WAN22_VAE_F16},
     # The online-attention preset (ADR 0132 decision 6): the same int8 weights as the s16 preset
-    # (no new download — `weights` is the same complete-mapping filler) with attention computed by
+    # (no new download — `weights` names the same f16 VAE decoder) with attention computed by
     # the online kernel, which never stores the scores (`attentionScoreStorage: "none"` — ADR 0132
     # decision 1; the name token `online` takes the slot of `s16` — ADR 0074 §3). Wan2.2 only:
     # Wan2.1's table is not changed. The default since 2026-10-23 (`WAN22_DEFAULT_QUANT` — ADR 0132
     # decision 6); the s16 preset above stays as its sibling.
     "f16+dit8-a8-attn8-online": {
-        "weights": {},
+        "weights": _WAN22_VAE_F16,
         "session": {
             "linearCompute": "a8",
             "attentionCompute": "a8",
@@ -450,6 +492,31 @@ WAN22_QUANTS: Mapping[str, Any] = {
         "description": "The int8 transformer with per-token int8 activations and attention"
         " computed online: the scores are never stored, so the long clips run faster on the same"
         " weights as the s16 preset.",
+    },
+    # The int8 VAE decoder (ADR 0133 decision 6): the reference preset — the transformer and the
+    # VAE decoder in int8 storage with an empty `session`, the control of the E2E difference floor
+    # — and the practical preset that adds `convCompute: "a8"` (token `conv8`) to the online
+    # preset's knobs. The base storage is `i8` because the decoder roles are now int8 (ADR 0074
+    # §1). Quality and timing are not measured yet, so the default does not move (decision 8).
+    "i8": {
+        "weights": _WAN22_VAE_I8,
+        "session": {},
+        "label": "int8 transformer and VAE decoder, f32 compute",
+        "description": "Transformer and VAE decoder weights stored as int8 (one scale per output"
+        " channel) and computed in f32; the reference preset of the int8 VAE decoder.",
+    },
+    "i8-a8-attn8-online-conv8": {
+        "weights": _WAN22_VAE_I8,
+        "session": {
+            "linearCompute": "a8",
+            "attentionCompute": "a8",
+            "attentionScoreStorage": "none",
+            "convCompute": "a8",
+        },
+        "label": "int8 transformer and VAE, int8 activations, online attention",
+        "description": "The online-attention preset with the VAE decoder's weights in int8 and"
+        " its 3-D convolutions computed on per-pixel int8 activations (integer dot products) —"
+        " the fastest decode.",
     },
 }
 
@@ -502,6 +569,11 @@ following changes were made:
   value to the nearest float16 value. Weight matrices and convolution kernels are stored as
   float16; the other parameters (biases, normalization weights) keep the rounded values in float32
   storage. Computation runs in float32.
+- **int8 VAE decoder**: a second copy of the VAE decoder in which the weights of every
+  convolution and linear layer are stored as int8, quantized per output channel with one float32
+  scale, from the float16-rounded values above; the other parameters keep those values in float32
+  storage. The int8 weights are computed in float32, or, in the quant that declares it, the 3-D
+  convolutions multiply them with activations quantized to int8 per pixel at run time.
 - The transformer graph takes patchified latent tokens (48 latent channels) and returns tokens:
   the patchify, the unpatchify and the sinusoidal timestep projection run on the host, and the
   patch-embedding convolution is applied as the equivalent linear layer. The rotary embedding keeps
@@ -574,6 +646,9 @@ class WanGeneration:
     i8_series: str
     #: transformer の格納ラベル（並びは manifest の weights の並び — {@link WAN_WEIGHTS} の順）。
     transformer_labels: tuple[str, ...]
+    #: VAE の decoder（グラフ 2 本）の格納ラベル（同じ並びの規則）。i8 は {@link i8_series} の
+    #: 系列から引く（ADR 0133 決定 7）。
+    vae_labels: tuple[str, ...]
     #: I2V の条件画像の VAE encoder（{@link WAN_VAE_ENCODER_ROLES} の 3 グラフ — f16 系列）を
     #: 配るか。Wan2.2 だけ（ADR 0121 決定 11）。全世代の表 {@link WAN_WEIGHTS} は Wan2.1 の計画にも
     #: 回るので、ここで絞らないと Wan2.1 の manifest に encoder の席が漏れる（2.1 は T2V だけの
@@ -610,6 +685,15 @@ class WanGeneration:
         return tuple(WAN_TRANSFORMER_LABEL_ROLES[label] for label in self.transformer_labels)
 
     @property
+    def vae_decoder_roles(self) -> tuple[str, ...]:
+        """VAE の decoder の容器の配置の役割（first の格納ラベルごと、次に next の格納ラベル
+        ごと）。"""
+        return (
+            *(WAN_VAE_FIRST_LABEL_ROLES[label] for label in self.vae_labels),
+            *(WAN_VAE_NEXT_LABEL_ROLES[label] for label in self.vae_labels),
+        )
+
+    @property
     def vae_encoder_roles(self) -> tuple[str, ...]:
         """VAE の encoder の容器の配置の役割（配らない世代では空）。"""
         return WAN_VAE_ENCODER_ROLES if self.vae_encoder else ()
@@ -621,8 +705,7 @@ class WanGeneration:
             *self.vae_encoder_roles,
             WAN_TEXT_ENCODER_ROLE,
             *self.transformer_roles,
-            WAN_VAE_FIRST_ROLE,
-            WAN_VAE_NEXT_ROLE,
+            *self.vae_decoder_roles,
         )
 
     @property
@@ -655,6 +738,7 @@ WAN21 = WanGeneration(
     series=WAN_SERIES,
     i8_series=WAN_I8_SERIES,
     transformer_labels=("f16", "i8"),
+    vae_labels=("f16",),
     vae_encoder=False,
     text_model=DEFAULT_MODEL,
     quants=WAN_QUANTS,
@@ -670,7 +754,8 @@ WAN21 = WanGeneration(
 #:
 #: - transformer は **i8 の 1 本だけ**（f16 の DiT は無い — ADR 0121 決定 2）。DiT は I2V 対応の
 #:   グラフ 1 本（決定 3 — 入力 7 本。組み立てが見るのは文脈入力と RoPE 素表だけで、2.1 と同じ門）。
-#: - VAE は Wan2.2-VAE の chunk グラフ 2 本（決定 6 — 潜在 48 ch・出口は patchify 空間）。
+#: - VAE は Wan2.2-VAE の chunk グラフ 2 本（決定 6 — 潜在 48 ch・出口は patchify 空間）。decoder は
+#:   f16 / i8 の 2 本ずつ（i8 は DiT と同じ i8 系列 — ADR 0133 決定 7）。
 #: - I2V の条件画像の VAE encoder の 3 グラフ（決定 11・段 9a — decoder と同じ f16 系列）を配る。
 #:   どの席も f16 の 1 本を取る（T2V だけの利用でも取る — 追記「段 9 の計画の裁定と段 9a の
 #:   結果」の裁定）。
@@ -684,6 +769,7 @@ WAN22 = WanGeneration(
     series=WAN22_SERIES,
     i8_series=WAN22_I8_SERIES,
     transformer_labels=("i8",),
+    vae_labels=("f16", "i8"),
     vae_encoder=True,
     text_model=WAN22_TEXT_MODEL,
     quants=WAN22_QUANTS,
@@ -729,19 +815,24 @@ def wan_placements(sources: WanSources, generation: WanGeneration = WAN21) -> di
 
     この表に無いものは出力へ入らない（系列に並ぶ `io.*` / `reference.*` / `vae_*.safetensors` /
     `pipeline_steps.*` の golden はこれで落ちる — encoder の golden `vae_encoder.*` も同じ）。
-    transformer はその世代の格納ラベルの容器だけ（f16 は f16 系列・i8 は i8 系列）、VAE の
-    encoder は配る世代だけ（f16 系列）。
+    transformer と VAE の decoder はその世代の格納ラベルの容器だけ（f16 は f16 系列・i8 は i8
+    系列）、VAE の encoder は配る世代だけ（f16 系列）。
     """
     transformers = {
         WAN_TRANSFORMER_F16_ROLE: sources.series / WAN_TRANSFORMER_ROLE / WAN_MODEL_FILE,
         WAN_TRANSFORMER_I8_ROLE: sources.i8_series / WAN_TRANSFORMER_ROLE / WAN_MODEL_FILE,
     }
+    decoders = {
+        WAN_VAE_FIRST_ROLE: sources.series / WAN_VAE_FIRST_ROLE / WAN_MODEL_FILE,
+        WAN_VAE_FIRST_I8_ROLE: sources.i8_series / WAN_VAE_FIRST_ROLE / WAN_MODEL_FILE,
+        WAN_VAE_NEXT_ROLE: sources.series / WAN_VAE_NEXT_ROLE / WAN_MODEL_FILE,
+        WAN_VAE_NEXT_I8_ROLE: sources.i8_series / WAN_VAE_NEXT_ROLE / WAN_MODEL_FILE,
+    }
     return {
         **{role: sources.series / role / WAN_MODEL_FILE for role in generation.vae_encoder_roles},
         WAN_TEXT_ENCODER_ROLE: sources.text_encoder,
         **{role: transformers[role] for role in generation.transformer_roles},
-        WAN_VAE_FIRST_ROLE: sources.series / WAN_VAE_FIRST_ROLE / WAN_MODEL_FILE,
-        WAN_VAE_NEXT_ROLE: sources.series / WAN_VAE_NEXT_ROLE / WAN_MODEL_FILE,
+        **{role: decoders[role] for role in generation.vae_decoder_roles},
         WAN_TEXT_EMBEDS_ROLE: sources.text_embeds,
         WAN_TOKENIZER_ROLE: sources.tokenizer,
     }
@@ -1084,6 +1175,14 @@ def wan_plan(
     assert_vae_chunk_pair(
         placements[WAN_VAE_FIRST_ROLE], placements[WAN_VAE_NEXT_ROLE], generation.vae_writer
     )
+    # The int8 decoder pair (ADR 0133 decision 7) is a second pair written by its own run of the
+    # same writer, so it passes the same gate on its own.
+    if WAN_VAE_FIRST_I8_ROLE in placements:
+        assert_vae_chunk_pair(
+            placements[WAN_VAE_FIRST_I8_ROLE],
+            placements[WAN_VAE_NEXT_I8_ROLE],
+            generation.vae_writer,
+        )
     # umT5 の容器は umT5 の配布形と同じ門（出所・束縛表・入出力の契約）を通す（越境参照の先は
     # この容器とバイト同一 — `karume.dist.external_refs` が見る）。モデル名は umT5 のリポの側の
     # 名前。

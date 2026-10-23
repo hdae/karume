@@ -27,13 +27,21 @@
 256 px ÷ 8、2.2 は 256 px ÷ 空間の圧縮 16）。ホストはタイル辺を literal で持たず、開いた資産の
 入力形から導く（決定 2）。
 
-格納は **f16 席だけ**（決定 7）: 重みを f16 表現可能値へ丸めて（fake-quant — ADR 0006）から
+格納は f16 席（決定 7）が既定: 重みを f16 表現可能値へ丸めて（fake-quant — ADR 0006）から
 export とフィクスチャの参照を採る。丸めより前に参照を採ると、照合の差が量子化誤差と実装誤差の
 合成になって帯の意味が消える。
+
+`--dtype i8`（ADR 0133 決定 7 — i8 系列を持つモデルだけ・今は Wan2.2）は f16 へ丸めた後に
+`fake_quant_int8`（既定の対象 — decoder の conv3d・conv2d と mid の 1×1 conv が出力チャネルごとの
+scale 1 本の i8）を掛け、同じ 2 グラフを**モデルの i8 系列の根**（Wan2.2 は DiT の i8 容器と同じ
+`wan2.2-ti2v-5b-i8-dyn` — 部品ディレクトリは `vae_decoder_first/` / `vae_decoder_next/` で
+`transformer/` と重ならない）へ書く。i8 の回はフィクスチャを書かない（フィクスチャは e2e の f16 の
+参照 — i8 系列は GPU 側で f16 の decode と比べる）。
 
     uv run --group wan --inexact python -m wan.export_vae              # 2 グラフ + フィクスチャ
     uv run --group wan --inexact python -m wan.export_vae --verify     # eager 同値の実測（実重み）
     uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b [--verify]   # Wan2.2
+    uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --dtype i8   # i8 系列
 
 MUST: diffusers / huggingface_hub は関数の中で import する（`wan` グループは既定の sync に
 入らない — `tests/test_optional_group_imports.py`）。
@@ -47,7 +55,7 @@ import resource
 import sys
 import time
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,7 +73,7 @@ from karume.dist import NOTICE_FILENAME
 from karume.emit import storage_breakdown
 from karume.ir import IrGraph
 from karume.pipeline import export_to_file
-from karume.quantize import round_weights_to_f16
+from karume.quantize import fake_quant_int8, round_weights_to_f16
 from wan import vae_patch
 from wan.sources import DEFAULT_MODEL, SOURCES, local_snapshot
 
@@ -156,6 +164,13 @@ FIXTURE_CASES = (
 #: Wan2.2 TI2V-5B の VAE の系列（ADR 0121 決定 7 — VAE だけの系列・DiT は持たない）。
 TI2V_SERIES_NAME = "wan2.2-ti2v-5b-f16-dyn"
 
+#: Wan2.2 の VAE の decoder の i8 系列（ADR 0133 決定 7 — DiT の i8 容器と同じ系列の根。書き手の
+#: 綴りは `wan.ti2v_export_dit.SERIES_NAME`）。
+TI2V_I8_SERIES_NAME = "wan2.2-ti2v-5b-i8-dyn"
+
+#: 書き出せる重みの格納（= `export_to_file` の `weight_dtype`）。i8 は i8 系列を持つモデルだけ。
+WEIGHT_DTYPES = ("f16", "i8")
+
 #: Wan2.2 の潜在タイルの辺（ADR 0121 決定 6 — 出力 256 px ÷ 空間の圧縮 16）。
 TI2V_TILE = 16
 
@@ -176,12 +191,14 @@ class VaeSeries:
     #: 上流 config の `patch_size` の期待値（違えば fail loudly — {@link assert_series_config}）。
     patch_size: int | None
     cases: tuple[FixtureCase, ...]
+    #: `--dtype i8` の書き先の系列（ADR 0133 決定 7 — None のモデルは i8 を書けない）。
+    i8_series: str | None = None
 
 
 #: モデル名（`wan.sources.SOURCES` のキー）→ 系列。
 VAE_SERIES: dict[str, VaeSeries] = {
-    "t2v-1.3b": VaeSeries(SERIES_NAME, DEFAULT_TILE, None, FIXTURE_CASES),
-    "ti2v-5b": VaeSeries(TI2V_SERIES_NAME, TI2V_TILE, 2, TI2V_FIXTURE_CASES),
+    "t2v-1.3b": VaeSeries(SERIES_NAME, DEFAULT_TILE, None, FIXTURE_CASES, None),
+    "ti2v-5b": VaeSeries(TI2V_SERIES_NAME, TI2V_TILE, 2, TI2V_FIXTURE_CASES, TI2V_I8_SERIES_NAME),
 }
 
 
@@ -201,6 +218,20 @@ def load_vae(model: str = DEFAULT_MODEL, *, round_f16: bool) -> AutoencoderKLWan
         report = round_weights_to_f16(vae)
         print(f"[fake-quant] vae: f16 表現可能値へ丸めた — {report.describe()}", flush=True)
     return vae
+
+
+def fake_quant_i8(vae: AutoencoderKLWan) -> Mapping[str, torch.Tensor]:
+    """f16 へ丸めた VAE の重みを per-channel symmetric i8 の表現可能値へ丸め、scale 台帳を返す
+    （ADR 0133 決定 7 — DiT の `dit8` と同じ量子化器・既定の対象）。
+
+    対象は `fake_quant_int8` の既定の型（`nn.Conv3d` を含む）の weight だけで、bias・norm は f16 へ
+    丸めた値のまま（格納は f32）。台帳のキーは VAE の FQN で、chunk グラフのラッパ
+    （{@link wan.vae_patch.WanVaeChunkDecoder}）は `decoder` / `post_quant_conv` を同じ名前で持つ
+    ので、そのまま `export_to_file` へ渡せる（encoder の分は emit が引かない）。
+    """
+    report = fake_quant_int8(vae)
+    print(f"[fake-quant] vae: i8 per-channel へ丸めた — {report.describe()}", flush=True)
+    return report.scales
 
 
 def provenance(model: str = DEFAULT_MODEL) -> Provenance:
@@ -388,9 +419,15 @@ def emit_targets(
     *,
     cases: Sequence[FixtureCase],
     patch_size: int | None,
+    weight_dtype: str = "f16",
+    weight_scales: Mapping[str, torch.Tensor] | None = None,
 ) -> dict[str, Any]:
     """グラフと chunk 列のフィクスチャ（`cases` — 空なら書かない）を一組で作業席へ書き、全部の
     検査を通してから据える。
+
+    `weight_dtype` は重みの格納（{@link WEIGHT_DTYPES}）で、i8 は `weight_scales`（{@link
+    fake_quant_i8} の台帳）を伴う。i8 はフィクスチャを書かない（メタの `weights` が f16-rounded の
+    参照だけを名乗る — i8 の重みで作った参照をその名で据えない）。
 
     `patch_size` は系列の表の値（{@link VaeSeries}）で、フィクスチャのメタ `reference` の文言だけを
     決める（2.1 は unpatchify が無いので、文言は 2.1 の既存のフィクスチャと同じまま）。
@@ -406,6 +443,10 @@ def emit_targets(
         raise ChunkGraphError(
             f"ターゲット {list(targets)} に未知か重複がある（既知: {', '.join(TARGETS)}）"
         )
+    if weight_dtype not in WEIGHT_DTYPES:
+        raise ChunkGraphError(f"格納 {weight_dtype!r} は書けない（{' / '.join(WEIGHT_DTYPES)}）")
+    if weight_dtype != "f16" and cases:
+        raise ChunkGraphError(f"{weight_dtype} の回はフィクスチャを書かない（f16 の参照だけ）")
     reference = FIXTURE_REFERENCE if patch_size is None else FIXTURE_REFERENCE_BEFORE_UNPATCHIFY
     out_root.mkdir(parents=True, exist_ok=True)
     finals = [out_root / target for target in targets]
@@ -424,7 +465,8 @@ def emit_targets(
                     staged / MODEL_FILE,
                     provenance=source,
                     graph_name=target,
-                    weight_dtype="f16",
+                    weight_dtype=weight_dtype,
+                    weight_scales=weight_scales,
                     preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
                 )
             assert_chunk_graph(graph, module, tile)
@@ -457,7 +499,7 @@ def emit_targets(
                     "path": str(fixture_path(out_root, case)),
                 }
             )
-    summary: dict[str, Any] = {"series": str(out_root), "graphs": graphs}
+    summary: dict[str, Any] = {"series": str(out_root), "dtype": weight_dtype, "graphs": graphs}
     if cases:
         summary["fixtures"] = written
     return summary
@@ -535,6 +577,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--tile", type=int, default=None, help="潜在タイルの辺（既定は表 — 2.1 は 32・2.2 は 16）"
     )
     parser.add_argument(
+        "--dtype",
+        choices=WEIGHT_DTYPES,
+        default="f16",
+        help="重みの格納（既定 f16。i8 は i8 系列を持つモデルだけ — ADR 0133 決定 7。i8 は"
+        " フィクスチャを書かない: フィクスチャは e2e の f16 の参照で、i8 系列は GPU 側で f16 の"
+        " decode と比べる）",
+    )
+    parser.add_argument(
         "--out", type=Path, default=None, help="系列の根（既定はモデルの系列 — 表の値）"
     )
     parser.add_argument(
@@ -551,6 +601,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     tile = series.tile if args.tile is None else args.tile
     if tile <= 0:
         parser.error(f"--tile は正の整数（{tile}）")
+    i8 = args.dtype == "i8"
+    series_name = series.series
+    if i8:
+        if series.i8_series is None:
+            parser.error(
+                f"--dtype i8: モデル {args.model} は VAE の i8 系列を持たない（ADR 0133 決定 7）"
+            )
+        series_name = series.i8_series
 
     if args.verify:
         summary = verify(args.model, tile, args.chunks, args.seed)
@@ -560,14 +618,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     source = provenance(args.model)
     vae = load_vae(args.model, round_f16=True)
     assert_series_config(vae, series)
+    scales = fake_quant_i8(vae) if i8 else None
     summary = emit_targets(
         args.target or TARGETS,
         vae,
         tile,
-        args.out or SERIES_ROOT / series.series,
+        args.out or SERIES_ROOT / series_name,
         source,
-        cases=() if args.no_fixtures else series.cases,
+        cases=() if i8 or args.no_fixtures else series.cases,
         patch_size=series.patch_size,
+        weight_dtype=args.dtype,
+        weight_scales=scales,
     )
     summary["weights"] = weight_summary(vae)
     summary["peak_rss_gib"] = round(_peak_rss_gib(), 2)

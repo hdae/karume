@@ -282,7 +282,15 @@ decision 6). `wan/vae_patch.py` accepts exactly two generations and adds two thi
 ```bash
 uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b            # both graphs + chunk fixtures (f16)
 uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --verify   # eager equivalence, tile 16, 9 chunks (writes nothing)
+uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --dtype i8 # both graphs in int8 (no fixtures)
 ```
+
+`--dtype i8` (ADR [0133](../../../docs/decisions/0133-conv3d-w8a8.md) decision 7, TI2V-5B only — the
+writer refuses it for `t2v-1.3b`) rounds the weights to f16 as above, then quantizes every
+convolution weight of the decoder to int8 with one scale per output channel, and writes the same two
+graphs to `outputs/series/wan2.2-ti2v-5b-i8-dyn/{vae_decoder_first,vae_decoder_next}/` (beside the
+int8 transformer's `transformer/`). It writes no chunk fixtures: those are the f16 reference of the
+e2e tests, and the int8 graphs are compared against the f16 decode on the GPU.
 
 `--model` defaults to `t2v-1.3b`; the table in `export_vae.py` (`VAE_SERIES`) picks the series, the
 tile and the fixture seeds for each model, and the writer refuses a VAE whose `patch_size` or spatial
@@ -751,7 +759,12 @@ checked against the Wan2.2 pin. The VAE graphs include the three encoder parts f
 (`vae_encoder_pre` / `vae_encoder_attn` / `vae_encoder_post`, f16, 107,887,956 B in all — ADR 0121
 stage 9b), and only the Wan2.2 distribution carries them; export them with
 `python -m wan.export_vae_encoder` (see the VAE section) before assembling, as the plan needs all
-three.
+three. The decoder graphs also come in int8 from `wan2.2-ti2v-5b-i8-dyn` (`model.i8.krm`, written by
+`python -m wan.export_vae --model ti2v-5b --dtype i8`), selected by two more quants (ADR 0133
+decision 6): `i8` (the int8 transformer and VAE decoder with no session knobs — the reference) and
+`i8-a8-attn8-online-conv8` (the online preset's knobs plus `convCompute` `a8`, which runs the
+decoder's 3-D convolutions on int8 activations). Every other quant selects the f16 decoder, and the
+default does not change.
 
 Until `karume-umt5-xxl` is published there is no commit SHA. The development mirror uses the
 placeholder `0000000000000000000000000000000000000000` and must say so with

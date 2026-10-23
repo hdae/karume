@@ -13,6 +13,9 @@ Wan2.1 は実重み（潜在タイル 8）、Wan2.2 は合成の VAE（conftest 
   から作られている）
 - 検査関数（{@link wan.export_vae.assert_chunk_graph}）自身が、順の取り違えと語彙外の op を
   落とすこと
+- `--dtype i8`（ADR 0133 決定 7）: 合成の 2.2 VAE の i8 の書き出しで、畳み込みの重みだけが
+  `int8-sym`（出力チャネルごとの scale）になり、グラフの構造と他の格納は f16 の回と同じで、
+  フィクスチャを書かないこと・i8 系列を持たないモデルは拒むこと
 """
 
 from __future__ import annotations
@@ -22,16 +25,19 @@ import json
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 import torch
 
 from _shared.paths import SERIES_ROOT
-from karume.container import Provenance, container_parts
+from karume.container import Provenance, codec_entry, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.ir import IrGraph, IrInput, IrNode, IrValue
+from karume.ops import WEIGHT_SLOTS
 from karume.pipeline import export_module
 from karume.quantize import round_weights_to_f16
+from karume.verify import BoundGraph, ir_graph_from_container, verify_container
 from wan import export_vae, vae_patch
 from wan.sources import SOURCES
 
@@ -394,6 +400,13 @@ class TestVaeSeries:
     def test_every_model_has_a_pinned_source(self):
         assert set(export_vae.VAE_SERIES) <= set(SOURCES)
 
+    def test_only_ti2v_has_an_i8_series_and_it_is_the_dit_series(self):
+        """ADR 0133 決定 7: Wan2.2 の VAE の i8 は DiT の i8 容器と同じ系列の根へ書く（部品
+        ディレクトリが違うので `transformer/` と重ならない）。"""
+        assert export_vae.VAE_SERIES["t2v-1.3b"].i8_series is None
+        assert export_vae.VAE_SERIES["ti2v-5b"].i8_series == "wan2.2-ti2v-5b-i8-dyn"
+        assert export_vae.TI2V_I8_SERIES_NAME == "wan2.2-ti2v-5b-i8-dyn"
+
 
 class TestSeriesConfigGate:
     """上流 config の `patch_size` と空間の圧縮が系列の前提と合わなければ書かない。"""
@@ -494,16 +507,32 @@ class TestTi2vWriter:
 class TestCommandLine:
     """`--model` が系列・潜在タイル・ケース・patch の倍率を一括で選ぶ（実重みは読まない）。"""
 
+    #: `fake_quant_i8` の身代わりが返す scale 台帳（中身は見ない — 渡り先だけを見る）。
+    SCALES: ClassVar[dict[str, torch.Tensor]] = {"decoder.conv_in.weight": torch.ones(1)}
+
     @pytest.fixture
-    def emitted(self, monkeypatch) -> dict:
+    def storage(self) -> dict:
+        """書き手へ渡った格納（`weight_dtype` / `weight_scales`）と、i8 へ丸めた VAE。"""
+        return {}
+
+    @pytest.fixture
+    def emitted(self, monkeypatch, storage) -> dict:
         captured: dict = {}
 
-        def emit_targets(targets, vae, tile, out_root, source, *, cases, patch_size):
+        def emit_targets(
+            targets, vae, tile, out_root, source, *, cases, patch_size, weight_dtype, weight_scales
+        ):
             captured.update(tile=tile, out=out_root, cases=cases, patch_size=patch_size)
+            storage.update(dtype=weight_dtype, scales=weight_scales)
             return {}
+
+        def fake_quant_i8(vae):
+            storage["quantized"] = vae
+            return self.SCALES
 
         monkeypatch.setattr(export_vae, "provenance", lambda model: model)
         monkeypatch.setattr(export_vae, "load_vae", lambda model, *, round_f16: model)
+        monkeypatch.setattr(export_vae, "fake_quant_i8", fake_quant_i8)
         monkeypatch.setattr(export_vae, "assert_series_config", lambda _vae, _series: None)
         monkeypatch.setattr(export_vae, "weight_summary", lambda _vae: {})
         monkeypatch.setattr(export_vae, "emit_targets", emit_targets)
@@ -533,6 +562,141 @@ class TestCommandLine:
         export_vae.main(["--model", "ti2v-5b", "--out", str(tmp_path), "--no-fixtures"])
 
         assert (emitted["out"], emitted["cases"], emitted["tile"]) == (tmp_path, (), 16)
+
+    def test_the_default_storage_is_f16_without_quantizing(self, emitted, storage, capsys):
+        export_vae.main(["--model", "ti2v-5b"])
+
+        assert storage == {"dtype": "f16", "scales": None}
+
+    def test_i8_writes_the_ti2v_i8_series_without_fixtures(self, emitted, storage, capsys):
+        """ADR 0133 決定 7: i8 の回はモデルの i8 系列の根へ・フィクスチャ無し・台帳を渡す。"""
+        export_vae.main(["--model", "ti2v-5b", "--dtype", "i8"])
+
+        assert emitted == {
+            "tile": 16,
+            "out": SERIES_ROOT / "wan2.2-ti2v-5b-i8-dyn",
+            "cases": (),
+            "patch_size": 2,
+        }
+        assert storage == {"dtype": "i8", "scales": self.SCALES, "quantized": "ti2v-5b"}
+
+    def test_i8_on_a_model_without_an_i8_series_is_refused(self, emitted, storage, capsys):
+        with pytest.raises(SystemExit):
+            export_vae.main(["--model", "t2v-1.3b", "--dtype", "i8"])
+
+        assert "i8 系列を持たない" in capsys.readouterr().err
+        assert (emitted, storage) == ({}, {})
+
+
+@pytest.fixture(scope="module")
+def written_i8(ti2v_synthetic_vae, tmp_path_factory) -> tuple[dict, Path]:
+    """合成の 2.2 VAE を `main` の i8 の回と同じ順（f16 へ丸め → i8 へ丸め）で書いた要約と
+    系列の根。"""
+    vae = copy.deepcopy(ti2v_synthetic_vae)
+    round_weights_to_f16(vae)
+    scales = export_vae.fake_quant_i8(vae)
+    root = tmp_path_factory.mktemp("ti2v-i8") / "series"
+    source = Provenance(license="apache-2.0", upstream_revision="0" * 40)
+    summary = export_vae.emit_targets(
+        export_vae.TARGETS,
+        vae,
+        TI2V_TILE,
+        root,
+        source,
+        cases=(),
+        patch_size=2,
+        weight_dtype="i8",
+        weight_scales=scales,
+    )
+    return summary, root
+
+
+def _container(root: Path, target: str) -> tuple[IrGraph, BoundGraph]:
+    """据わった容器のグラフ（IR）と束縛表（格納の正本）。"""
+    verified = verify_container(container_parts(root / target / export_vae.MODEL_FILE))
+    return ir_graph_from_container(verified.read, target), verified.graphs[target]
+
+
+def _weight_slots(graph: IrGraph) -> dict[str, str]:
+    """重みスロットに入る initializer → 消費する op。"""
+    return {
+        node.ins[WEIGHT_SLOTS[node.op]]: node.op
+        for node in graph.nodes
+        if node.op in WEIGHT_SLOTS and node.ins[WEIGHT_SLOTS[node.op]] in graph.initializers
+    }
+
+
+class TestTi2vI8Writer:
+    """`--dtype i8` の書き手（ADR 0133 決定 7）— 合成の 2.2 VAE の f16 の回（{@link written}）と
+    比べる。"""
+
+    @pytest.mark.parametrize("target", export_vae.TARGETS)
+    def test_every_convolution_weight_is_int8_with_a_scale_per_output_channel(
+        self, written_i8, target: str
+    ):
+        _, root = written_i8
+        graph, bound = _container(root, target)
+        slots = _weight_slots(graph)
+
+        # 空振りしない: decoder の conv3d と、up sampler / mid の attention の conv2d がある。
+        assert {"conv3d", "conv2d"} <= set(slots.values())
+        assert set(slots.values()) <= {"conv3d", "conv2d", "linear"}
+        for name in slots:
+            supply = bound.supplies[name]
+            out_channels = int(graph.values[name].shape[0])
+            assert supply.encoding.codec == "int8-sym", name
+            assert supply.encoding.row_axis == 0, name
+            assert supply.scale is not None, name
+            assert supply.scale.payload_bytes == 4 * out_channels, name
+
+    @pytest.mark.parametrize("target", export_vae.TARGETS)
+    def test_nothing_else_changes_from_the_f16_graph(self, written, written_i8, target: str):
+        """ノード・入出力・値の宣言は f16 の回と同じで、格納が変わるのは重みスロットの
+        initializer（f16 → int8-sym）だけ（bias・norm は f16 の回と同じ格納のまま）。"""
+        _, f16_root, _ = written
+        _, i8_root = written_i8
+        f16_graph, f16_bound = _container(f16_root, target)
+        i8_graph, i8_bound = _container(i8_root, target)
+        slots = set(_weight_slots(i8_graph))
+
+        assert i8_graph.nodes == f16_graph.nodes
+        assert (i8_graph.inputs, i8_graph.outputs) == (f16_graph.inputs, f16_graph.outputs)
+        assert i8_graph.values == f16_graph.values
+        assert set(i8_graph.initializers) == set(f16_graph.initializers)
+        codec = {name: supply.encoding.codec for name, supply in f16_bound.supplies.items()}
+        assert set(i8_bound.supplies) == set(codec)
+        for name, supply in i8_bound.supplies.items():
+            expected = "int8-sym" if name in slots else codec[name]
+            assert supply.encoding.codec == expected, name
+        assert {codec[name] for name in slots} == {"f16"}
+        assert {codec_entry(codec[name]).layout for name in set(codec) - slots} == {"f32"}
+
+    def test_no_fixture_is_written_and_the_summary_names_the_storage(self, written, written_i8):
+        summary, root = written_i8
+
+        assert sorted(path.name for path in root.iterdir()) == sorted(export_vae.TARGETS)
+        assert "fixtures" not in summary
+        assert summary["dtype"] == "i8"
+        assert written[0]["dtype"] == "f16"
+
+    def test_a_fixture_with_i8_weights_is_refused_before_anything_is_written(self, tmp_path):
+        """フィクスチャのメタは f16-rounded の参照を名乗る — i8 の重みで作った参照は据えない。"""
+        root = tmp_path / "series"
+
+        with pytest.raises(export_vae.ChunkGraphError, match="フィクスチャを書かない"):
+            export_vae.emit_targets(
+                export_vae.TARGETS,
+                None,
+                TI2V_TILE,
+                root,
+                None,
+                cases=export_vae.TI2V_FIXTURE_CASES,
+                patch_size=2,
+                weight_dtype="i8",
+                weight_scales={},
+            )
+
+        assert not root.exists()
 
 
 class TestTi2vVerify:
