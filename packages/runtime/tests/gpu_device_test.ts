@@ -665,6 +665,33 @@ test("subgroup32は明示要求と必要な全機能を要求し、既定では�
   );
 });
 
+test("subgroups 'available' requests the features only when all three are present, and never rejects", () => {
+  // ADR 0132 decision 5 (amends ADR 0100 decision 1): for bit-identical subgroup forms.
+  const present = new Set(["subgroups", "subgroup-size-control"]);
+  const language = new Set(["subgroup_id"]);
+  assertEquals(planSubgroup32Features(present, language, "available"), [
+    "subgroups",
+    "subgroup-size-control",
+  ]);
+  for (const [features, wgsl] of [
+    [new Set<string>(), language],
+    [new Set(["subgroups"]), language],
+    [new Set(["subgroup-size-control"]), language],
+    [present, new Set<string>()],
+  ] as const) {
+    assertEquals(planSubgroup32Features(features, wgsl, "available"), []);
+  }
+  // Anything but a boolean or "available" still throws (a JS caller outside the type).
+  const jsCaller = planSubgroup32Features as unknown as (
+    features: ReadonlySet<string>,
+    language: ReadonlySet<string>,
+    requested: unknown,
+  ) => readonly string[];
+  for (const requested of ["true", "required", 1]) {
+    assertThrows(() => jsCaller(present, language, requested), GpuFeatureError, "subgroups must");
+  }
+});
+
 test("subgroup32カナリアは全レーンの既知解だけを受理し、消失で待ち続けない", async () => {
   await assertSubgroup32Executes(canaryDevice({ mapped: Array<number>(256).fill(32896) }));
   for (const mapped of [[], Array<number>(256).fill(0), [...Array<number>(255).fill(32896), 0]]) {

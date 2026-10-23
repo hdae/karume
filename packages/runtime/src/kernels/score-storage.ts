@@ -40,11 +40,24 @@
 
 import { CodegenError } from "../codegen/errors.ts";
 
-/** Storage form of S. The semantics are f32 for both (computation is always f32 — ADR 0006). */
-export type ScoreStorage = "f32" | "f16";
+/**
+ * Storage form of S. The semantics are f32 for both stored forms (computation is always f32 — ADR
+ * 0006). `"none"` is the online kernel (ADR 0132, src/kernels/attention-online-i8a8.ts): S is never
+ * stored, so the three kernels of this module never see it.
+ */
+export type ScoreStorage = "f32" | "f16" | "none";
+
+/**
+ * The storage forms the three-pass kernels (①QK / ②row statistics / ③PV) take. MUST: every helper
+ * of this module takes this type, not {@link ScoreStorage} — `"none"` reaching a three-pass kernel
+ * is a type error, not a silent f32 (the route resolves `"none"` to the online kernel or falls back
+ * to `"f32"` before any of them is generated — src/runtime/attention-route.ts).
+ */
+export type MaterialisedScoreStorage = Exclude<ScoreStorage, "none">;
 
 /** Storage bytes per S element (f16 packs 2 elements into one word). */
-export const scoreStorageBytes = (storage: ScoreStorage): number => (storage === "f16" ? 2 : 4);
+export const scoreStorageBytes = (storage: MaterialisedScoreStorage): number =>
+  storage === "f16" ? 2 : 4;
 
 /**
  * Whether the shape allows f16 storage of S.
@@ -75,10 +88,11 @@ export const attentionScoreUsesF16 = (depth: number, cols: number): boolean =>
  * goes **at the end of the key** — the three axes can be enabled at once, so unless the order is
  * fixed in one place the same configuration gets two keys.
  */
-export const scoreKeyPart = (storage: ScoreStorage): string => (storage === "f16" ? ":s16" : "");
+export const scoreKeyPart = (storage: MaterialisedScoreStorage): string =>
+  storage === "f16" ? ":s16" : "";
 
 /** Note appended to the leading WGSL comment (empty for f32 — keeps the existing bytes). */
-export const scoreNote = (storage: ScoreStorage): string =>
+export const scoreNote = (storage: MaterialisedScoreStorage): string =>
   storage === "f16" ? ", S in f16 storage (pack2x16float)" : "";
 
 /**
@@ -87,7 +101,7 @@ export const scoreNote = (storage: ScoreStorage): string =>
  * per variant, `vec4<f32>` / `f32` / `vec4<f16>` / `f16`, so the caller passes it instead of the
  * decision being gathered here).
  */
-export const scoreArrayType = (storage: ScoreStorage, f32Type: string): string =>
+export const scoreArrayType = (storage: MaterialisedScoreStorage, f32Type: string): string =>
   storage === "f16" ? "u32" : f32Type;
 
 /**
@@ -95,7 +109,7 @@ export const scoreArrayType = (storage: ScoreStorage, f32Type: string): string =
  * does not change). Meant to follow the bindings directly, and shaped with one blank line before and
  * after (the empty string for f32).
  */
-export const scoreQuadLoaderWgsl = (name: string, storage: ScoreStorage): string =>
+export const scoreQuadLoaderWgsl = (name: string, storage: MaterialisedScoreStorage): string =>
   storage === "f16"
     ? `
 // Quad read of f16 storage: quad q = the 2 words ${name}[2q] and ${name}[2q + 1] (unpack is exact)
@@ -116,7 +130,7 @@ fn score_quad(q: u32) -> vec4<f32> {
  * index relative to the row matches only by accident when the row length is a multiple of 2 (the
  * same trap as in ADR 0018).
  */
-export const scoreScalarLoaderWgsl = (name: string, storage: ScoreStorage): string =>
+export const scoreScalarLoaderWgsl = (name: string, storage: MaterialisedScoreStorage): string =>
   storage === "f16"
     ? `
 // Decode of f16 storage: element i = unpack2x16float(${name}[i / 2])[i % 2]
@@ -134,7 +148,7 @@ fn score_at(i: u32) -> f32 {
  * MUST: called only from the v4 path, where one thread owns 4 consecutive columns (it writes
  * exactly 2 words exclusively).
  */
-export const scoreStoreWgsl = (name: string, storage: ScoreStorage): string =>
+export const scoreStoreWgsl = (name: string, storage: MaterialisedScoreStorage): string =>
   storage === "f16"
     ? `
 // Quad write of f16 storage: **this pack2x16float is the only rounding point** (the v4 path owns
@@ -148,17 +162,23 @@ fn score_store(q: u32, value: vec4<f32>) {
     : "";
 
 /** Read expression for **one quad** of S (f32 indexes the quad directly, f16 uses the decoder). */
-export const scoreReadQuad = (name: string, storage: ScoreStorage, quad: string): string =>
-  storage === "f16" ? `score_quad(${quad})` : `${name}[${quad}]`;
+export const scoreReadQuad = (
+  name: string,
+  storage: MaterialisedScoreStorage,
+  quad: string,
+): string => (storage === "f16" ? `score_quad(${quad})` : `${name}[${quad}]`);
 
 /** Read expression for **one element** of S (flat element index). */
-export const scoreReadAt = (name: string, storage: ScoreStorage, index: string): string =>
-  storage === "f16" ? `score_at(${index})` : `${name}[${index}]`;
+export const scoreReadAt = (
+  name: string,
+  storage: MaterialisedScoreStorage,
+  index: string,
+): string => (storage === "f16" ? `score_at(${index})` : `${name}[${index}]`);
 
 /** Write statement for **one quad** of S (including the trailing `;`). */
 export const scoreStoreQuad = (
   name: string,
-  storage: ScoreStorage,
+  storage: MaterialisedScoreStorage,
   quad: string,
   value: string,
 ): string =>
@@ -175,7 +195,7 @@ export const scoreStoreQuad = (
  */
 export const assertScoreStorageSupported = (
   op: string,
-  storage: ScoreStorage,
+  storage: MaterialisedScoreStorage,
   v4: boolean,
   computeF16 = false,
 ): void => {

@@ -75,7 +75,7 @@ import {
   scoreNote,
   scoreReadAt,
   scoreScalarLoaderWgsl,
-  type ScoreStorage,
+  type MaterialisedScoreStorage,
 } from "./score-storage.ts";
 
 /**
@@ -131,7 +131,7 @@ const rowWindowKeyPart = (side: "a" | "c", rowWindow: boolean): string =>
 export const attentionQkKey = (
   v4: boolean,
   compute: GemmCompute = "f32",
-  score: ScoreStorage = "f32",
+  score: MaterialisedScoreStorage = "f32",
   mask = false,
   gqa = false,
   rowWindow = false,
@@ -145,7 +145,7 @@ export const attentionQkKey = (
 export const attentionPvKey = (
   v4: boolean,
   compute: GemmCompute = "f32",
-  score: ScoreStorage = "f32",
+  score: MaterialisedScoreStorage = "f32",
   gqa = false,
   rowWindow = false,
   geometry?: GemmGeometry,
@@ -181,7 +181,7 @@ export const attentionStatsRegCache = (dim: number): number | undefined => {
 // (a port of safe_softmax's three guards — the bits of finite rows do not change)
 export const attentionStatsKey = (
   compute: GemmCompute = "f32",
-  score: ScoreStorage = "f32",
+  score: MaterialisedScoreStorage = "f32",
   regCache?: number,
 ): string =>
   `attention_stats:v2:f32:lastdim:safe:wg${ATTENTION_STATS_WORKGROUP_SIZE}${gemmComputeKeyPart(
@@ -194,7 +194,7 @@ export const ATTENTION_STATS_KEY = attentionStatsKey();
 export const attentionQkWgsl = (
   v4: boolean,
   compute: GemmCompute = "f32",
-  score: ScoreStorage = "f32",
+  score: MaterialisedScoreStorage = "f32",
   mask = false,
   gqa = false,
   rowWindow = false,
@@ -204,7 +204,7 @@ export const attentionQkWgsl = (
 export const attentionPvWgsl = (
   v4: boolean,
   compute: GemmCompute = "f32",
-  score: ScoreStorage = "f32",
+  score: MaterialisedScoreStorage = "f32",
   gqa = false,
   rowWindow = false,
   geometry?: GemmGeometry,
@@ -224,7 +224,7 @@ export const attentionPvWgsl = (
  */
 export const attentionStatsWgsl = (
   compute: GemmCompute = "f32",
-  score: ScoreStorage = "f32",
+  score: MaterialisedScoreStorage = "f32",
   regCache?: number,
 ): string => {
   const f16 = compute === "f16";

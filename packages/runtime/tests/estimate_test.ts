@@ -1472,6 +1472,81 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
 });
 
 // ---------------------------------------------------------------------------
+// The online kernel (attentionScoreStorage "none" — ADR 0132)
+// ---------------------------------------------------------------------------
+
+describe("the online attention kernel counts the a8 quantisation temporaries and no S", () => {
+  // q / k / v `[1,2,8,64]` (B·H = 2, M = N = 8, D = 64): eligible for the online kernel.
+  const onlineModel = (): PreparedModel =>
+    openGraph(
+      singleOpDeclaration(
+        "attention",
+        [
+          [1, 2, 8, 64],
+          [1, 2, 8, 64],
+          [1, 2, 8, 64],
+        ],
+        [[1, 2, 8, 64]],
+        { attrs: { scale: 0.5 } },
+      ),
+    );
+  const NONE = { attentionCompute: "a8", attentionScoreStorage: "none" } as const;
+  const SUBGROUPS = { subgroups: true, maxComputeWorkgroupStorageSize: 49152 };
+
+  it("one window: y 4,096 B + Vᵀ 4,096 B in one region, the six quantised inputs of the kernel in another", () => {
+    // Temporaries: qq 2×8×64 = 1,024 / qs 2×8×4 = 64 / kq 1,024 / ks 64 / vt 2×64×8×4 = 4,096 /
+    // vq 2×64×8 = 1,024 / vs 2×64×4 = 512; output y 2×8×64×4 = 4,096. No S, no row statistics.
+    // The kernel reads qq / kq / vq / qs / ks / vs and writes y, so those six cannot share y's
+    // region; vt is read by Vᵀ's quantisation, which writes vq / vs, so it cannot share theirs.
+    // Region 0: y [0, 4,096) + vt [4,096, 8,192) = 8,192 B. Region 1 (size order, 256 B aligned):
+    // qq [0, 1,024) + kq [1,024, 2,048) + vq [2,048, 3,072) + vs [3,072, 3,584) + qs [3,584, 3,648)
+    // + ks [3,840, 3,904) = 3,904 B.
+    assertEquals(
+      runScenario(onlineModel().estimate({ ...NONE, attentionDevice: SUBGROUPS })).workspaceBytes,
+      8192 + 3904,
+    );
+  });
+
+  it("a device that admits neither form counts the three a8 dispatches with S in f32", () => {
+    // 16 KiB without subgroups: the route falls back, so the estimate equals the plain a8 one.
+    assertEquals(
+      runScenario(
+        onlineModel().estimate({
+          ...NONE,
+          attentionDevice: { subgroups: false, maxComputeWorkgroupStorageSize: 16384 },
+        }),
+      ).workspaceBytes,
+      runScenario(onlineModel().estimate({ attentionCompute: "a8" })).workspaceBytes,
+    );
+  });
+
+  it("fails loudly without attentionDevice (the route depends on the device)", () => {
+    assertThrows(
+      () => onlineModel().estimate(NONE),
+      ExecutionError,
+      "attentionScoreStorage 'none' needs options.attentionDevice",
+    );
+  });
+
+  it("rejects 'none' without a8 with the Session's message, and malformed device facts", () => {
+    assertThrows(
+      () => onlineModel().estimate({ attentionScoreStorage: "none", attentionDevice: SUBGROUPS }),
+      ExecutionError,
+      "attentionScoreStorage 'none' (the online kernel) is implemented only with attentionCompute 'a8'",
+    );
+    assertThrows(
+      () =>
+        onlineModel().estimate({
+          ...NONE,
+          attentionDevice: { subgroups: true, maxComputeWorkgroupStorageSize: 0 },
+        }),
+      ExecutionError,
+      "options.attentionDevice.maxComputeWorkgroupStorageSize 0 must be a positive safe integer",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 行ブロックの一時 1 本ごとの予算（attentionRowBlockMaxBytes — ADR 0124）
 // ---------------------------------------------------------------------------
 

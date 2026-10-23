@@ -37,6 +37,7 @@ import { gridStrideWorkgroups } from "../codegen/dispatch.ts";
 import type { WeightStorage } from "../kernels/weight-storage.ts";
 import type { GeometryProfile } from "../kernels/geometry-profile.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
+import type { AttentionDeviceFacts } from "./attention-route.ts";
 import type { IrGraph } from "../format/ir.ts";
 import type { RunArena } from "../gpu/arena.ts";
 import type { GpuContext } from "../gpu/device.ts";
@@ -132,6 +133,11 @@ export type RecipeBuilderContext = {
   readonly linearCompute: "f32" | "a8" | "f16";
   readonly attentionCompute: ComputePrecision;
   readonly attentionScoreStorage: ScoreStorage;
+  /**
+   * The device facts the online attention kernel's route reads (ADR 0132 — fixed once at Session
+   * construction, like {@link geometryProfile}).
+   */
+  readonly attentionDevice: AttentionDeviceFacts;
   /** The reduction form of states-form attention ③PV (the executor's {@link SessionState} decides the default). */
   readonly stateAttentionReduce: StateAttentionReduce;
   readonly linearGemvReduce: LinearGemvReduce;
@@ -213,6 +219,7 @@ export type RecipeBuildFace = {
     | "linearCompute"
     | "attentionCompute"
     | "attentionScoreStorage"
+    | "attentionDevice"
     | "stateAttentionReduce"
     | "linearGemvReduce"
     | "rmsNormReduce"

@@ -133,7 +133,7 @@ import {
   attentionQkI8a8Wgsl,
 } from "../kernels/attention-i8a8.ts";
 import { tiledWorkgroups } from "../codegen/dispatch.ts";
-import type { ScoreStorage } from "../kernels/score-storage.ts";
+import type { MaterialisedScoreStorage } from "../kernels/score-storage.ts";
 import { f16BitsToF32, roundToF16 } from "../format/f16.ts";
 import {
   quantizeRowsReference,
@@ -657,7 +657,7 @@ export const probeAttentionI8a8Dot = async (
   type Resolved = {
     readonly key: string;
     readonly pipeline: GPUComputePipeline;
-    readonly score: ScoreStorage;
+    readonly score: MaterialisedScoreStorage;
   };
   const qkPipelines: Resolved[] = [];
   const pvPipelines: Resolved[] = [];

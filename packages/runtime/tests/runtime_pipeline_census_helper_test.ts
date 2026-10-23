@@ -10,6 +10,7 @@ import {
   attentionStatsKey,
 } from "../src/kernels/attention.ts";
 import { attentionPvI8a8Key, attentionQkI8a8Key } from "../src/kernels/attention-i8a8.ts";
+import { attentionOnlineI8a8Key } from "../src/kernels/attention-online-i8a8.ts";
 import { linearKey } from "../src/kernels/linear.ts";
 import {
   linearGemvKey,
@@ -20,7 +21,7 @@ import {
   linearGemvSubgroupKey,
 } from "../src/kernels/linear-gemv.ts";
 import { linearI8a8Key } from "../src/kernels/linear-i8a8.ts";
-import type { ScoreStorage } from "../src/kernels/score-storage.ts";
+import type { MaterialisedScoreStorage } from "../src/kernels/score-storage.ts";
 import { QUANTIZE_ROWS_KEY } from "../src/kernels/quantize-rows.ts";
 import { RMS_NORM_KEY, rmsNormAddKey } from "../src/kernels/rms-norm.ts";
 import { rmsNormSubgroupKey } from "../src/kernels/rms-norm-subgroup.ts";
@@ -35,7 +36,12 @@ import {
 } from "../src/kernels/state-attention.ts";
 import { stateStatsPvKey } from "../src/kernels/state-attention-stats-pv.ts";
 import { STATIC_QUANTIZE_KEY, STATIC_QUANTIZE_PACKED_KEY } from "../src/kernels/static-quantize.ts";
-import { type AttentionRoute, attentionRoute } from "../src/runtime/attention-route.ts";
+import {
+  type AttentionDeviceFacts,
+  type AttentionRoute,
+  attentionRoute,
+  type AttentionSeats,
+} from "../src/runtime/attention-route.ts";
 import type { SessionOptions } from "../src/runtime/session-types.ts";
 import {
   assertAttentionSeatsComplete,
@@ -69,7 +75,11 @@ const REPRESENTATIVES: {
   },
   attentionCompute: {
     f16: [attentionQkKey(true, "f16"), attentionPvKey(false, "f16"), attentionStatsKey("f16")],
-    a8: [attentionQkI8a8Key(true, false), attentionPvI8a8Key(false, true, "f16")],
+    a8: [
+      attentionQkI8a8Key(true, false),
+      attentionPvI8a8Key(false, true, "f16"),
+      attentionOnlineI8a8Key(false, 64, "wg"),
+    ],
   },
   attentionScoreStorage: {
     f16: [
@@ -77,6 +87,7 @@ const REPRESENTATIVES: {
       attentionStatsKey("f32", "f16", 4),
       attentionPvI8a8Key(true, true, "f16"),
     ],
+    none: [attentionOnlineI8a8Key(true, 128, "sg32"), attentionOnlineI8a8Key(false, 64, "wg")],
   },
   stateAttentionReduce: {
     parallel: [
@@ -333,13 +344,19 @@ describe("assertSeatsApplied", () => {
 
 const LAYERS = 30;
 const A8_S16: SessionOptions = { attentionCompute: "a8", attentionScoreStorage: "f16" };
+/** Device facts with subgroups and 48 KiB of workgroup storage (the online kernel's sg32 form). */
+const DEVICE: AttentionDeviceFacts = { subgroups: true, maxComputeWorkgroupStorageSize: 49152 };
 
 /**
  * 融合 attention 1 ノード × 行ブロック `blocks` 枚の census の行（①②③ が各 `blocks` 本）。経路は
  * `attentionRoute` の戻りをそのまま使う — 実行（buildAttention）と同じ判定から行を作る。
  */
 const attentionRows = (route: AttentionRoute, blocks: number): readonly CensusRow[] => {
-  const score: ScoreStorage = route.score;
+  // The online route (ADR 0132): one dispatch per row window, no ①②③.
+  if (route.online !== undefined) {
+    return [{ key: attentionOnlineI8a8Key(true, 128, route.online), dispatchCount: blocks }];
+  }
+  const score: MaterialisedScoreStorage = route.score;
   return [
     {
       key:
@@ -363,11 +380,14 @@ const attentionRows = (route: AttentionRoute, blocks: number): readonly CensusRo
  * a8 + s16 の席で、D = 128 の self（キー長 `selfCols`・行ブロック `blocks` 枚）と cross（N = 512・1 枚）を
  * transformer 30 層ぶん回した census（linear の i8a8 も混ぜる — 族の外の行を数えないことの確認）。
  */
-const ditCensus = (selfCols: number, blocks: number): readonly CensusRow[] => {
-  const seats = { attentionCompute: "a8", attentionScoreStorage: "f16" } as const;
+const ditCensus = (
+  selfCols: number,
+  blocks: number,
+  seats: AttentionSeats = { attentionCompute: "a8", attentionScoreStorage: "f16" },
+): readonly CensusRow[] => {
   const nodeRows = [
-    ...attentionRows(attentionRoute(seats, 128, selfCols), blocks),
-    ...attentionRows(attentionRoute(seats, 128, 512), 1),
+    ...attentionRows(attentionRoute(seats, 128, selfCols, DEVICE), blocks),
+    ...attentionRows(attentionRoute(seats, 128, 512, DEVICE), 1),
   ];
   // 族ごとに束ねる（実物の census と同じく、同じキーは 1 行に畳まれる）。
   const counts = new Map<string, number>();
@@ -389,7 +409,7 @@ describe("assertAttentionSeatsComplete: 宣言どおりの census", () => {
 
   it("a8 / s16 を宣言しない席は、dense の attention があっても見ない", () => {
     const census = attentionRows(
-      attentionRoute({ attentionCompute: "f32", attentionScoreStorage: "f32" }, 128, 1089),
+      attentionRoute({ attentionCompute: "f32", attentionScoreStorage: "f32" }, 128, 1089, DEVICE),
       1,
     );
     assertAttentionSeatsComplete(census, {}, "席なし");
@@ -398,7 +418,7 @@ describe("assertAttentionSeatsComplete: 宣言どおりの census", () => {
 
   it("a8 だけの席は S の格納を見ない（f32 格納の i8a8 で緑）", () => {
     const census = attentionRows(
-      attentionRoute({ attentionCompute: "a8", attentionScoreStorage: "f32" }, 128, 4096),
+      attentionRoute({ attentionCompute: "a8", attentionScoreStorage: "f32" }, 128, 4096, DEVICE),
       2,
     );
     assertAttentionSeatsComplete(census, { attentionCompute: "a8" }, "a8 だけ");
@@ -447,6 +467,38 @@ describe("assertAttentionSeatsComplete: 縮退を含む census（故障注入）
       () => assertAttentionSeatsComplete(census, A8_S16, "attention なし"),
       Error,
       "1 本も無い",
+    );
+  });
+});
+
+describe("the census helpers with attentionScoreStorage 'none' (the online kernel — ADR 0132)", () => {
+  const A8_NONE: SessionOptions = { attentionCompute: "a8", attentionScoreStorage: "none" };
+  const seats = { attentionCompute: "a8", attentionScoreStorage: "none" } as const;
+
+  it("a fully eligible census (self N = 4096 in 3 windows, cross N = 512) is applied and complete", () => {
+    const census = ditCensus(4096, 3, seats);
+    assertSeatsApplied(census, A8_NONE, "online");
+    assertAttentionSeatsComplete(census, A8_NONE, "online");
+  });
+
+  it("a node that fell back to the three dispatches (self N = 1089) is applied but not complete", () => {
+    // The cross attention runs the online kernel, the self attention the three a8 dispatches in f32.
+    const census = ditCensus(1089, 1, seats);
+    assertSeatsApplied(census, A8_NONE, "partly online");
+    assertThrows(
+      () => assertAttentionSeatsComplete(census, A8_NONE, "partly online"),
+      Error,
+      "fell back to the three dispatches",
+    );
+  });
+
+  it("a census without the online kernel is neither applied nor complete", () => {
+    const census = ditCensus(4096, 1);
+    assertThrows(() => assertSeatsApplied(census, A8_NONE, "no online"), Error, "none");
+    assertThrows(
+      () => assertAttentionSeatsComplete(census, A8_NONE, "no online"),
+      Error,
+      "no attention_online dispatch ran",
     );
   });
 });

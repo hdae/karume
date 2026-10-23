@@ -138,7 +138,7 @@ import {
   scoreNote,
   scoreQuadLoaderWgsl,
   scoreReadQuad,
-  type ScoreStorage,
+  type MaterialisedScoreStorage,
   scoreStoreQuad,
   scoreStoreWgsl,
 } from "./score-storage.ts";
@@ -308,7 +308,7 @@ ${slots}`;
 export const attentionQkI8a8Key = (
   v4: boolean,
   dp4a: boolean,
-  score: ScoreStorage = "f32",
+  score: MaterialisedScoreStorage = "f32",
   geometry: I8a8Geometry = defaultI8a8Geometry("attention_qk"),
   rowWindow = false,
 ): string =>
@@ -329,7 +329,7 @@ export const attentionQkI8a8UsesVec4 = (n: number): boolean => n % I8A8_PACK ===
  * {@link i8a8AccumulatorInit}). The guard structure, the folding order of `qs'·ks'` and the
  * position of the half scale are the same for every geometry.
  */
-const store = (geometry: I8a8Geometry, v4: boolean, score: ScoreStorage): string => {
+const store = (geometry: I8a8Geometry, v4: boolean, score: MaterialisedScoreStorage): string => {
   const { regM, regN } = geometry;
   const quads = regN / I8A8_PACK;
   const rows = rowDecls(geometry);
@@ -389,7 +389,7 @@ ${rowStores}`;
 export const attentionQkI8a8Wgsl = (
   v4: boolean,
   dp4a: boolean,
-  score: ScoreStorage = "f32",
+  score: MaterialisedScoreStorage = "f32",
   geometry: I8a8Geometry = defaultI8a8Geometry("attention_qk"),
   rowWindow = false,
 ): string => {
@@ -535,7 +535,7 @@ export const attentionQkI8a8Params = (
 export const attentionPvI8a8Key = (
   v4: boolean,
   dp4a: boolean,
-  score: ScoreStorage = "f32",
+  score: MaterialisedScoreStorage = "f32",
   geometry: I8a8Geometry = defaultI8a8Geometry("attention_pv"),
   rowWindow = false,
 ): string =>
@@ -566,7 +566,7 @@ export const attentionPvI8a8UsesVec4 = (depth: number): boolean => depth % I8A8_
  * §2.2). The detector of a "lattice becomes 128" regression is **this 127 and the 1/127 on the
  * dequant side**, not a clamp; comparison with the reference catches both.
  */
-const fillPTile = (geometry: I8a8Geometry, score: ScoreStorage): string => {
+const fillPTile = (geometry: I8a8Geometry, score: MaterialisedScoreStorage): string => {
   const stride = i8a8FillStride(geometry);
   const lane = (slot: number, component: string): string =>
     `round(exp(raw${slot}.${component} - row_max${slot}) * ${P_LATTICE_MAX}.0)`;
@@ -667,7 +667,7 @@ ${rowStores}`;
 export const attentionPvI8a8Wgsl = (
   v4: boolean,
   dp4a: boolean,
-  score: ScoreStorage = "f32",
+  score: MaterialisedScoreStorage = "f32",
   geometry: I8a8Geometry = defaultI8a8Geometry("attention_pv"),
   rowWindow = false,
 ): string => {

@@ -150,7 +150,7 @@ import {
   assertAttentionSeatsComplete,
   assertSeatsApplied,
 } from "../../runtime/tests/helpers/pipeline-census.ts";
-import { attentionRoute } from "../../runtime/src/runtime/attention-route.ts";
+import { attentionDeviceFacts, attentionRoute } from "../../runtime/src/runtime/attention-route.ts";
 import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import {
   assertAdapterMatchesEnvironment,
@@ -1521,7 +1521,7 @@ const practicalSubmitGate = (
             attentionCompute: options.attentionCompute ?? "f32",
             attentionScoreStorage: options.attentionScoreStorage ?? "f32",
           } as const;
-          const route = attentionRoute(seats, WAN22_HEAD_DIM, tokens);
+          const route = attentionRoute(seats, WAN22_HEAD_DIM, tokens, attentionDeviceFacts(gpu));
           const requestedStage = seats.attentionCompute === "a8" ? "i8a8" : "dense";
           if (
             route.qk === requestedStage &&

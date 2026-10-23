@@ -357,6 +357,20 @@ export type SessionOptions = {
    * path — one thread writes four consecutive columns = exactly two words, exclusively); other
    * shapes fall back **silently** to f32 storage (same convention as linear's `k % 4` and ADR 0030
    * decision 5: the fallback shows only in the diagnostic pipeline keys).
+   *
+   * `"none"` is **the online kernel** (ADR 0132): one dispatch per window of query rows streams the
+   * int8 keys and values, keeps the running row max and sum, and **never stores S** (no S and no row
+   * statistics temporaries — ② disappears). It keeps the activation quantisation of `"a8"` and is
+   * contract class Q (ADR 0110: one P̃ lattice step against a running max, the a8 error model).
+   * MUST: it needs `attentionCompute: "a8"` — any other compute form fails loudly at Session
+   * construction (an unimplemented combination, not a fallback).
+   * **Shapes outside `D ∈ {64, 128}` or with `N % 4 != 0` fall back silently to the three
+   * dispatches of a8 with S in f32** (the fallback shows in the pipeline keys — `attention_online`
+   * against `attention_qk` / `attention_stats` / `attention_pv`). The kernel uses subgroups when the
+   * device has them (`acquireGpu({ subgroups: true | "available" })`) and workgroup memory
+   * otherwise — **the two forms are bit-identical**, so the choice changes speed only; a device
+   * without subgroups whose workgroup-storage limit cannot hold the workgroup-memory form also falls
+   * back to the three dispatches.
    */
   readonly attentionScoreStorage?: ScoreStorage;
   /**

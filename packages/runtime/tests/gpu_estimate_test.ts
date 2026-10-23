@@ -13,6 +13,7 @@ import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
 import type { PreparedModel, SessionOptions } from "../src/runtime/executor.ts";
 import { planRowBlocks } from "../src/runtime/fusion.ts";
 import { planStateAttention } from "../src/runtime/state-attention-plan.ts";
+import { attentionDeviceFacts } from "../src/runtime/attention-route.ts";
 import {
   bothScenarios,
   decomposedAttentionGraph,
@@ -275,8 +276,20 @@ const assertFusedAttentionMatchesEstimate = async (variant: {
   readonly options: SessionOptions;
   readonly mask?: boolean;
   readonly expectedBlocks: number;
+  /** The online kernel (ADR 0132): the expected dispatch count (= row windows); the estimate then needs the device facts. */
+  readonly expectedOnlineWindows?: number;
+  /** Acquire with subgroups "available" (the online kernel's sg32 form on devices that have them). */
+  readonly subgroups?: "available";
+  /** The graph shape (default {@link FUSED}). */
+  readonly shape?: {
+    readonly b: number;
+    readonly h: number;
+    readonly m: number;
+    readonly n: number;
+    readonly d: number;
+  };
 }): Promise<void> => {
-  const { b, h, m, n, d } = FUSED;
+  const { b, h, m, n, d } = variant.shape ?? FUSED;
   const shapes = [
     [b, h, m, d],
     [b, h, n, d],
@@ -288,11 +301,16 @@ const assertFusedAttentionMatchesEstimate = async (variant: {
       attrs: { scale: 1 / Math.sqrt(d) },
     }),
   );
-  const gpu = await acquireGpu();
+  const gpu = await acquireGpu(
+    variant.subgroups === undefined ? {} : { subgroups: variant.subgroups },
+  );
   try {
     const { scenarios } = model.estimate({
       maxStorageBufferBindingSize: gpu.limits.maxStorageBufferBindingSize,
       maxBufferSize: gpu.limits.maxBufferSize,
+      ...(variant.expectedOnlineWindows === undefined
+        ? {}
+        : { attentionDevice: attentionDeviceFacts(gpu) }),
       ...variant.options,
     });
     assertEquals(
@@ -318,6 +336,20 @@ const assertFusedAttentionMatchesEstimate = async (variant: {
         variant.expectedBlocks === 1 ? 0 : variant.expectedBlocks,
         "行ブロックの枚数（1 枚は行窓を立てない）",
       );
+      if (variant.expectedOnlineWindows !== undefined) {
+        // The online route: one dispatch per row window, and none of the three-pass kernels.
+        const pipelines = diagnostics.lastRunPipelines ?? [];
+        const count = (family: string): number =>
+          pipelines
+            .filter(({ key }) => key.startsWith(family))
+            .reduce((total, { dispatchCount }) => total + dispatchCount, 0);
+        assertEquals(count("attention_online"), variant.expectedOnlineWindows, "online windows");
+        assertEquals(
+          count("attention_qk") + count("attention_stats") + count("attention_pv"),
+          0,
+          "the three-pass kernels must not run on the online route",
+        );
+      }
       assertEquals(diagnostics.planBacking.residentBytes, scenarios[0].workspaceBytes);
     } finally {
       await session.dispose();
@@ -352,6 +384,30 @@ test.skipIf(!GPU_AVAILABLE)(
         attentionRowBlockMaxBytes: 16 * 1024,
       },
       expectedBlocks: 2,
+    }),
+);
+
+test.skipIf(!GPU_AVAILABLE)(
+  "the workspace of a fused attention op matches the slot table on the online route (a8 + none, one window, real GPU)",
+  () =>
+    assertFusedAttentionMatchesEstimate({
+      options: { attentionCompute: "a8", attentionScoreStorage: "none" },
+      expectedBlocks: 1,
+      expectedOnlineWindows: 1,
+      subgroups: "available",
+    }),
+);
+
+test.skipIf(!GPU_AVAILABLE)(
+  "the workspace of a fused attention op matches the slot table on the online route over two row windows (real GPU)",
+  () =>
+    // 2³⁷ / (16,384 keys · 128 · 2) = 32,768 rows per window; 32,800 rows make two windows
+    assertFusedAttentionMatchesEstimate({
+      options: { attentionCompute: "a8", attentionScoreStorage: "none" },
+      expectedBlocks: 1,
+      expectedOnlineWindows: 2,
+      subgroups: "available",
+      shape: { b: 1, h: 1, m: 32800, n: 16384, d: 128 },
     }),
 );
 

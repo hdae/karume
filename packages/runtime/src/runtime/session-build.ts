@@ -32,6 +32,7 @@ import { type GeometryProfile, selectGeometryProfile } from "../kernels/geometry
 import { dp4aAvailable } from "../kernels/linear-i8a8.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
 import { A8_EMULATION_WARNING_KEY, a8EmulationWarning } from "./a8-emulation-warning.ts";
+import { type AttentionDeviceFacts, attentionDeviceFacts } from "./attention-route.ts";
 import type { FusionCounts } from "./fusion.ts";
 import { countUses, declaredDtypes, ExecutionError } from "./plan.ts";
 import type { GenerationLimits, StepRecipe } from "./recipe.ts";
@@ -408,6 +409,14 @@ export type SessionState = {
   readonly attentionCompute: ComputePrecision;
   /** The storage form of S (opt-in — {@link SessionOptions.attentionScoreStorage}). An axis orthogonal to the compute form. */
   readonly attentionScoreStorage: ScoreStorage;
+  /**
+   * The device facts the online attention kernel's route reads (subgroups and the workgroup-storage
+   * limit — ADR 0132 decision 5). Read once here from the device's enabled features and granted
+   * limits; `"none"` adds no construction-time rejection (the route falls back per node).
+   * MUST: not re-read after construction (the prepared plans' keys assume one route per shape — the
+   * same Session-level invariant as {@link geometryProfile}).
+   */
+  readonly attentionDevice: AttentionDeviceFacts;
   /**
    * The reduction form of states-form attention ①QK / ③PV (opt-in —
    * {@link SessionOptions.stateAttentionReduce}). Even with `"parallel"`, **①' is chosen only for
@@ -1037,6 +1046,7 @@ export const buildSessionState = async (
     linearCompute,
     attentionCompute,
     attentionScoreStorage,
+    attentionDevice: attentionDeviceFacts(gpu),
     stateAttentionReduce,
     linearGemvReduce,
     linearGemvRowsThreadTarget,

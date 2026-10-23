@@ -38,7 +38,7 @@ const ATTENTION_COMPUTES: Readonly<Record<ComputePrecision, true>> = {
   f16: true,
   a8: true,
 };
-const SCORE_STORAGES: Readonly<Record<ScoreStorage, true>> = { f32: true, f16: true };
+const SCORE_STORAGES: Readonly<Record<ScoreStorage, true>> = { f32: true, f16: true, none: true };
 const LINEAR_GEMV_REDUCES: Readonly<Record<LinearGemvReduce, true>> = {
   sequential: true,
   parallel: true,
@@ -265,6 +265,12 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
       " (attentionCompute 'f16' is a different storage form that holds S as array<f16> — " +
       "to halve S without shader-f16, set attentionCompute to 'f32' or 'a8')"
     );
+  }
+  // MUST: the online kernel exists only in the a8 form (ADR 0132 decision 1). Any other compute form
+  // fails loudly — an unimplemented combination is not a fallback (ADR 0058 decision 3); the shape
+  // and device fallbacks of an a8 request are the route's (attention-route.ts).
+  if (attentionScoreStorage === "none" && attentionCompute !== "a8") {
+    return "attentionScoreStorage 'none' (the online kernel) is implemented only with attentionCompute 'a8'";
   }
   return undefined;
 };

@@ -20,6 +20,13 @@ import {
   attentionQkI8a8Wgsl,
 } from "../../kernels/attention-i8a8.ts";
 import {
+  ATTENTION_ONLINE_ROWS,
+  type AttentionOnlineReduce,
+  attentionOnlineI8a8Key,
+  attentionOnlineI8a8Params,
+  attentionOnlineI8a8Wgsl,
+} from "../../kernels/attention-online-i8a8.ts";
+import {
   ATTENTION_QK_MASK_BINDING,
   type GemmCompute,
   gemmUsesVec4,
@@ -49,7 +56,7 @@ import {
   stridedParams,
   stridedWgsl,
 } from "../../codegen/strided.ts";
-import { type ScoreStorage, scoreStorageBytes } from "../../kernels/score-storage.ts";
+import { type MaterialisedScoreStorage, scoreStorageBytes } from "../../kernels/score-storage.ts";
 import { attentionRoute, type AttentionSeats } from "../attention-route.ts";
 import { attentionScale, stateWindow } from "../../ops.ts";
 import { gemmTileM, gemmTileN } from "../../kernels/gemm-geometry.ts";
@@ -218,6 +225,53 @@ export const planAttentionBlocks = (
 };
 
 /**
+ * The work budget of one online-attention dispatch (ADR 0132 decision 2), in multiply-accumulates:
+ * `B·H · window rows · N · D · 2` (the score and the P̃·V product each take D per key). 2³⁷ gives
+ * 768-row windows at the Wan2.2 121-frame shape (24 heads × 27,280 keys × D = 128 — 36 windows per
+ * node), about 9–10 ms per dispatch at the 26–29 TOPS the spike measured on the RTX 3080 Ti, well
+ * under the 1 s submit gate.
+ */
+export const ATTENTION_ONLINE_WINDOW_MACS = 2 ** 37;
+
+/** One window of query rows of the online kernel (the dispatch's `row_offset` and its row count). */
+export type AttentionOnlineWindow = { readonly offset: number; readonly rows: number };
+
+/**
+ * The query-row windows of the online kernel (a pure function — ADR 0132 decision 2). Not a capacity
+ * device (the kernel has no S temporary) but a dispatch-size one: each window holds at most
+ * {@link ATTENTION_ONLINE_WINDOW_MACS} of work, rounded down to a multiple of
+ * {@link ATTENTION_ONLINE_ROWS} rows, and never fewer than {@link ATTENTION_ONLINE_ROWS} rows (a
+ * key axis so long that one workgroup row exceeds the budget still runs, one workgroup row per
+ * window). The last window takes the remainder.
+ *
+ * MUST: every window but the last is a multiple of {@link ATTENTION_ONLINE_ROWS}. The kernel's
+ * workgroups cover 64 rows from `row_offset` and clamp only at M, so a window ending mid-workgroup
+ * would also compute (and write) the first rows of the next window.
+ * MUST: execution ({@link buildAttention}) and the estimate (estimate.ts — ADR 0124 decision 7) take
+ * the windows from this one function.
+ */
+export const planAttentionOnlineWindows = (
+  rows: number,
+  extent: {
+    /** `B·H` (the axis with batch and heads folded). */
+    readonly batch: number;
+    /** Key columns `N`. */
+    readonly cols: number;
+    /** Head width `D`. */
+    readonly depth: number;
+  },
+): readonly AttentionOnlineWindow[] => {
+  const groupMacs = extent.batch * extent.cols * extent.depth * 2 * ATTENTION_ONLINE_ROWS;
+  const windowRows =
+    Math.max(1, Math.floor(ATTENTION_ONLINE_WINDOW_MACS / groupMacs)) * ATTENTION_ONLINE_ROWS;
+  const windows: AttentionOnlineWindow[] = [];
+  for (let offset = 0; offset < rows; offset += windowRows) {
+    windows.push({ offset, rows: Math.min(windowRows, rows - offset) });
+  }
+  return windows;
+};
+
+/**
  * Bytes per element of fused attention's S (a pure function). f16 compute holds S as `array<f16>`
  * (2 B); otherwise it is S's storage form (`route.score` decided by {@link attentionRoute} — 2 B
  * for s16, 4 B for f32).
@@ -227,7 +281,7 @@ export const planAttentionBlocks = (
  */
 export const attentionScoreElementBytes = (
   attentionCompute: ComputePrecision,
-  route: Pick<ReturnType<typeof attentionRoute>, "score">,
+  route: { readonly score: MaterialisedScoreStorage },
 ): number => (attentionCompute === "f16" ? 2 : scoreStorageBytes(route.score));
 
 /**
@@ -413,6 +467,10 @@ export const stateAttentionVariantViolation = (
  * diagnostic pipeline key — the family check detects it with the full-eligibility check
  * `assertAttentionSeatsComplete`, ADR 0058 addendum of 2026-10-10).
  *
+ * With `attentionScoreStorage: "none"` (ADR 0132) and a route that admits the online kernel, the
+ * node is instead the same four quantization dispatches plus one online-kernel dispatch per window
+ * of query rows ({@link buildAttentionOnline}) — no S, no row statistics, no row blocks.
+ *
  * MUST: ① and ③ are one workgroup = one tile, so exceeding the limit fails loudly on all three axes
  * ({@link tiledWorkgroups}). Clamping would drop tiles and leave part of O unwritten (with a
  * reallocated buffer, the previous values) with no exception. Only ② is grid-stride over rows.
@@ -465,8 +523,7 @@ export const buildAttention = async (
   // MUST: do not write the decision back here (the acceptance-set tests go through the same
   // function, so the decisions cannot drift apart).
   const i8a8 = face.state.attentionCompute === "a8";
-  const route = attentionRoute(face.state, depth, cols);
-  const scoreStorage = route.score;
+  const route = attentionRoute(face.state, depth, cols, face.state.attentionDevice);
 
   // The additive mask (an optional fourth input — the contract is in src/ops.ts). An axis of ①'s
   // epilogue only; to ②③ it looks like "S is already masked".
@@ -483,6 +540,22 @@ export const buildAttention = async (
     { i8a8, mask: mask !== undefined, route },
   );
   if (violation !== undefined) throw new ExecutionError(violation);
+
+  // The online kernel (`attentionScoreStorage: "none"` — ADR 0132): the route chose it for this
+  // shape and device, so S is never materialised and none of the three dispatches below run. The
+  // guards above apply unchanged (the requested mode is a8).
+  if (route.online !== undefined) {
+    await buildAttentionOnline(
+      face,
+      builder,
+      binds,
+      outs[0],
+      { batch, rows, cols, depth },
+      { scale, reduce: route.online, where },
+    );
+    return;
+  }
+  const scoreStorage = route.score;
 
   // Block split over query rows (the same pure function as ADR 0060 — the same manner as the
   // states-form attention). An even split into the smallest count where one S block = `B·H · block
@@ -1261,10 +1334,47 @@ const prepareAttentionQkI8a8 = async (
   face: RecipeBuildFace,
   builder: StepRecipeBuilder,
   binds: readonly BindingSource[],
-  scoreStorage: ScoreStorage,
+  scoreStorage: MaterialisedScoreStorage,
   shape: AttentionShape,
   rowWindow: boolean,
 ): Promise<AttentionQkStage> => {
+  const quantized = await quantizeAttentionQk(face, builder, binds, shape);
+
+  // (c) The integer dot-product GEMM (the half scales go to both q and k on the dequant side —
+  // design §2.1). The geometry is chosen **separately** from ③PV (only ③ wins with a single N = D
+  // tile — measured). It comes from the per-op field of the profile
+  // (src/kernels/geometry-profile.ts). The dispatch is per block, so this only resolves it and
+  // returns it to the caller.
+  const v4 = attentionQkI8a8UsesVec4(shape.cols);
+  const dp4a = face.state.attentionI8a8Dot === "dp4a";
+  const geometry = face.state.geometryProfile.i8a8.attentionQk;
+  const key = attentionQkI8a8Key(v4, dp4a, scoreStorage, geometry, rowWindow);
+  const { pipeline, layout, roles } = await face.state.cache.get(
+    key,
+    attentionQkI8a8Wgsl(v4, dp4a, scoreStorage, geometry, rowWindow),
+  );
+  return { kind: "i8a8", key, pipeline, layout, roles, geometry, ...quantized };
+};
+
+/** The quantized q / k (four i8 packed per word) and their per-token scales — temporaries the caller releases at the end of the node. */
+type AttentionQkQuantized = {
+  readonly qq: TempSource;
+  readonly qs: TempSource;
+  readonly kq: TempSource;
+  readonly ks: TempSource;
+};
+
+/**
+ * (a)(b) of {@link prepareAttentionQkI8a8}: allocates `qq` / `qs` / `kq` / `ks` and dispatches the
+ * per-token quantization of q and k. Shared with the online kernel ({@link buildAttentionOnline} —
+ * ADR 0132 keeps the a8 quantization), so both forms read the same dispatches.
+ */
+const quantizeAttentionQk = async (
+  face: RecipeBuildFace,
+  builder: StepRecipeBuilder,
+  binds: readonly BindingSource[],
+  shape: AttentionShape,
+): Promise<AttentionQkQuantized> => {
   const { batch, rows, cols, depth } = shape;
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
 
@@ -1310,21 +1420,7 @@ const prepareAttentionQkI8a8 = async (
   };
   quantize(binds[0], qq, qs, batch * rows);
   quantize(binds[1], kq, ks, batch * cols);
-
-  // (c) The integer dot-product GEMM (the half scales go to both q and k on the dequant side —
-  // design §2.1). The geometry is chosen **separately** from ③PV (only ③ wins with a single N = D
-  // tile — measured). It comes from the per-op field of the profile
-  // (src/kernels/geometry-profile.ts). The dispatch is per block, so this only resolves it and
-  // returns it to the caller.
-  const v4 = attentionQkI8a8UsesVec4(cols);
-  const dp4a = face.state.attentionI8a8Dot === "dp4a";
-  const geometry = face.state.geometryProfile.i8a8.attentionQk;
-  const key = attentionQkI8a8Key(v4, dp4a, scoreStorage, geometry, rowWindow);
-  const { pipeline, layout, roles } = await face.state.cache.get(
-    key,
-    attentionQkI8a8Wgsl(v4, dp4a, scoreStorage, geometry, rowWindow),
-  );
-  return { kind: "i8a8", key, pipeline, layout, roles, geometry, qq, qs, kq, ks };
+  return { qq, qs, kq, ks };
 };
 
 /**
@@ -1361,10 +1457,44 @@ const prepareAttentionPvI8a8 = async (
   face: RecipeBuildFace,
   builder: StepRecipeBuilder,
   binds: readonly BindingSource[],
-  scoreStorage: ScoreStorage,
+  scoreStorage: MaterialisedScoreStorage,
   shape: AttentionShape,
   rowWindow: boolean,
 ): Promise<AttentionPvStage> => {
+  const quantized = await quantizeAttentionPv(face, builder, binds, shape);
+
+  // (c) The integer dot-product GEMM (P̃ is produced by filling the A tile = stays unmaterialised).
+  // The geometry is the per-op field of the profile. The dispatch is per block, so this only
+  // resolves it and returns it to the caller.
+  const v4 = attentionPvI8a8UsesVec4(shape.depth);
+  const dp4a = face.state.attentionI8a8Dot === "dp4a";
+  const geometry = face.state.geometryProfile.i8a8.attentionPv;
+  const key = attentionPvI8a8Key(v4, dp4a, scoreStorage, geometry, rowWindow);
+  const { pipeline, layout, roles } = await face.state.cache.get(
+    key,
+    attentionPvI8a8Wgsl(v4, dp4a, scoreStorage, geometry, rowWindow),
+  );
+  return { kind: "i8a8", key, pipeline, layout, roles, geometry, ...quantized };
+};
+
+/** Vᵀ (f32, the materialised permute), its quantization and the per-column scales — temporaries the caller releases at the end of the node. */
+type AttentionPvQuantized = {
+  readonly vt: TempSource;
+  readonly vq: TempSource;
+  readonly vs: TempSource;
+};
+
+/**
+ * (a)(b) of {@link prepareAttentionPvI8a8}: allocates `vt` / `vq` / `vs` and dispatches the permute
+ * to Vᵀ and its quantization. Shared with the online kernel ({@link buildAttentionOnline} — ADR 0132
+ * keeps the a8 quantization), so both forms read the same dispatches.
+ */
+const quantizeAttentionPv = async (
+  face: RecipeBuildFace,
+  builder: StepRecipeBuilder,
+  binds: readonly BindingSource[],
+  shape: AttentionShape,
+): Promise<AttentionPvQuantized> => {
   const { batch, cols, depth } = shape;
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
 
@@ -1425,17 +1555,77 @@ const prepareAttentionPvI8a8 = async (
     ],
     workgroups: [gridStrideWorkgroups(batch * depth, quantizeGeometry.rowsPerGroup, limit), 1, 1],
   });
+  return { vt, vq, vs };
+};
 
-  // (c) The integer dot-product GEMM (P̃ is produced by filling the A tile = stays unmaterialised).
-  // The geometry is the per-op field of the profile. The dispatch is per block, so this only
-  // resolves it and returns it to the caller.
-  const v4 = attentionPvI8a8UsesVec4(depth);
+/**
+ * The online kernel's node (ADR 0132 decision 2 — the `online` route of {@link buildAttention}):
+ * the four quantization dispatches of a8 (q and k per token, Vᵀ through the permute) followed by
+ * one `attention_online` dispatch per window of query rows ({@link planAttentionOnlineWindows}).
+ * No S and no row statistics exist.
+ *
+ * MUST: the quantization is the a8 path's own dispatches ({@link quantizeAttentionQk} /
+ * {@link quantizeAttentionPv}) — the kernel's contract is "the a8 quantization with S never
+ * stored", and a second spelling would let the two forms drift apart.
+ * MUST: `scale` is the op's half scale exactly as the a8 ①QK receives it (applied to both q and k
+ * on the dequant side — ADR 0023).
+ * MUST: the temporaries are released at the end of the node in reverse allocation order (ADR 0004 —
+ * the same closure as the a8 path).
+ */
+const buildAttentionOnline = async (
+  face: RecipeBuildFace,
+  builder: StepRecipeBuilder,
+  binds: readonly BindingSource[],
+  out: BindingSource,
+  shape: AttentionShape,
+  run: { readonly scale: number; readonly reduce: AttentionOnlineReduce; readonly where: string },
+): Promise<void> => {
+  const { batch, rows, cols, depth } = shape;
+  const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
+  const where = `${run.where} online`;
+  const qk = await quantizeAttentionQk(face, builder, binds, shape);
+  const pv = await quantizeAttentionPv(face, builder, binds, shape);
+  // The integer dot-product variant follows the same decision as the a8 kernels (the per-device
+  // canary — SessionState.attentionI8a8Dot); both variants are bit-identical.
   const dp4a = face.state.attentionI8a8Dot === "dp4a";
-  const geometry = face.state.geometryProfile.i8a8.attentionPv;
-  const key = attentionPvI8a8Key(v4, dp4a, scoreStorage, geometry, rowWindow);
+  const key = attentionOnlineI8a8Key(dp4a, depth, run.reduce);
   const { pipeline, layout, roles } = await face.state.cache.get(
     key,
-    attentionPvI8a8Wgsl(v4, dp4a, scoreStorage, geometry, rowWindow),
+    attentionOnlineI8a8Wgsl(dp4a, depth, run.reduce),
   );
-  return { kind: "i8a8", key, pipeline, layout, roles, geometry, vt, vq, vs };
+  for (const window of planAttentionOnlineWindows(rows, { batch, cols, depth })) {
+    builder.dispatch({
+      key,
+      pipeline,
+      layout,
+      roles,
+      params: face.writeParams(
+        attentionOnlineI8a8Params(rows, cols, window.offset, run.scale),
+        PARAMS_UNIFORM_USAGE,
+      ),
+      bindings: [
+        { binding: 1, source: qk.qq },
+        { binding: 2, source: qk.kq },
+        { binding: 3, source: pv.vq },
+        { binding: 4, source: out },
+        { binding: 5, source: qk.qs },
+        { binding: 6, source: qk.ks },
+        { binding: 7, source: pv.vs },
+      ],
+      // MUST: tiled on both axes (one workgroup = 64 rows of one head) — clamping would leave rows
+      // of O unwritten without an exception (the same rule as ①③).
+      workgroups: [
+        tiledWorkgroups(window.rows, ATTENTION_ONLINE_ROWS, limit, where),
+        tiledWorkgroups(batch, 1, limit, where),
+        1,
+      ],
+    });
+  }
+  builder.releaseTemp(pv.vs);
+  builder.releaseTemp(pv.vq);
+  builder.releaseTemp(pv.vt);
+  builder.releaseTemp(qk.ks);
+  builder.releaseTemp(qk.kq);
+  builder.releaseTemp(qk.qs);
+  builder.releaseTemp(qk.qq);
 };

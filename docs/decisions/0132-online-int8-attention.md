@@ -4,7 +4,7 @@
 - Date: 2026-10-23
 - Related: ADR [0023](0023-fused-attention.md) (fused attention: the three dispatches ①QK / ②
   stats / ③PV and their bit identity with the decomposed path — unchanged, the default path) /
-  [0030](0030-attention-i8a8.md) (the a8 variant whose quantisation this kernel keeps) /
+  [0030](0030-attention-a8-execution.md) (the a8 variant whose quantisation this kernel keeps) /
   [0058](0058-numerics-opt-in-contract.md) (one named option per numerics change; shape and limit
   fallback with the key showing it) / [0060](0060-row-block-attention.md) and
   [0124](0124-attention-row-block-budget.md) (row blocks: capacity of the S temporaries — this
@@ -51,7 +51,8 @@ and ADR 0100 decision 1 (`subgroups: true` rejects a device without them).
    `attention_online:v1:i8a8:…` once per window of query rows. The window is not a capacity
    device (there is no S) but a dispatch-size device: the planner (a pure function next to
    `planAttentionBlocks`) sizes the window from a work budget so that one dispatch stays well under
-   the 1 s submit gate (at the 121-frame shape about 1,024 rows ≈ 13 ms); the estimate (ADR 0124
+   the 1 s submit gate (`ATTENTION_ONLINE_WINDOW_MACS` = 2³⁷ multiply-accumulates: at the
+   121-frame shape 768-row windows, 36 per node, about 9–10 ms each); the estimate (ADR 0124
    decision 7) counts no S temporaries for this route and takes the window count from the same
    function.
 3. **Geometry**: 256 threads, 64 query rows per workgroup, 64 keys per tile, D ∈ {64, 128} as
@@ -81,12 +82,15 @@ and ADR 0100 decision 1 (`subgroups: true` rejects a device without them).
    device and requires Uint32 equality (the same discipline as `dot4I8Packed` against its
    emulation). The build selects `:sg32` when the device has `subgroups`, `subgroup-size-control`
    and the WGSL feature `subgroup_id`, otherwise `:wg` when the workgroup-storage limit allows it
-   (`:wg` needs 33,280 B — 32 KiB devices without subgroups fall back to the three dispatches,
+   (at D = 128 `:sg32` declares 29,440 B and `:wg` 33,536 B — 32 KiB devices without subgroups
+   fall back to the three dispatches,
    also keyed). Because the choice cannot change a bit, it is capability-driven without breaking
    ADR 0058 decision 2.
    **ADR 0100 decision 1 is amended**: `AcquireGpuOptions.subgroups` accepts `"available"` —
    request the features when the adapter advertises them, silently run without otherwise; `true`
-   keeps its rejecting meaning. The Wan family acquires with `"available"` when the preset's
+   keeps its rejecting meaning. The 32-lane known-answer check of ADR 0100 runs whenever the
+   features were requested, in both modes: an adapter that advertises them and fails the check is
+   rejected rather than silently demoted (a broken advertisement is a defect to surface). The Wan family acquires with `"available"` when the preset's
    `session` declares `"none"`; a default preset still declares no `gpuFeatures` (ADR 0128 C1
    holds — the feature is never required).
 6. **Wan2.2 gets a new practical preset `f16+dit8-a8-attn8-online`** with the same `weights` map as

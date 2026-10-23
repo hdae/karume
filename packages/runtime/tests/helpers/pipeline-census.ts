@@ -21,6 +21,7 @@ import {
   attentionQkKey,
 } from "../../src/kernels/attention.ts";
 import { attentionPvI8a8Key, attentionQkI8a8Key } from "../../src/kernels/attention-i8a8.ts";
+import { attentionOnlineI8a8Key } from "../../src/kernels/attention-online-i8a8.ts";
 import { gemmComputeKeyPart } from "../../src/kernels/gemm.ts";
 import { linearKey } from "../../src/kernels/linear.ts";
 import {
@@ -148,6 +149,9 @@ const ATTENTION_FAMILIES: ReadonlySet<string> = new Set(
 const ATTENTION_I8A8_FAMILIES: ReadonlySet<string> = new Set(
   [attentionQkI8a8Key(true, true), attentionPvI8a8Key(true, true)].map(familyOf),
 );
+// The online kernel's family (ADR 0132 — `attentionScoreStorage: "none"`). Its keys carry the i8a8
+// dtype too: the kernel is the a8 compute with S never stored.
+const ATTENTION_ONLINE_FAMILY = familyOf(attentionOnlineI8a8Key(true, 128, "sg32"));
 const STATE_PARALLEL_KEYS = stateVariants(
   stateQkParallelKey,
   statePvParallelKey,
@@ -182,10 +186,14 @@ export const SEAT_SIGNATURES: SeatSignatures = {
   },
   attentionCompute: {
     f16: (key) => ATTENTION_FAMILIES.has(familyOf(key)) && hasFragment(key, C16),
-    a8: (key) => ATTENTION_I8A8_FAMILIES.has(familyOf(key)) && dtypeOf(key) === I8A8_DTYPE,
+    // The online kernel is evidence of a8 as well (a `"none"` run has no attention_qk / attention_pv).
+    a8: (key) =>
+      (ATTENTION_I8A8_FAMILIES.has(familyOf(key)) || familyOf(key) === ATTENTION_ONLINE_FAMILY) &&
+      dtypeOf(key) === I8A8_DTYPE,
   },
   attentionScoreStorage: {
     f16: (key) => ATTENTION_FAMILIES.has(familyOf(key)) && hasFragment(key, S16),
+    none: (key) => familyOf(key) === ATTENTION_ONLINE_FAMILY,
   },
   stateAttentionReduce: {
     parallel: (key) => STATE_PARALLEL_KEYS.has(key),
@@ -392,6 +400,25 @@ export const assertAttentionSeatsComplete = (
       );
     }
   };
+  // `"none"` (the online kernel — ADR 0132): complete when the online kernel ran and none of the three
+  // dispatches did (every node's shape and the device admitted it). The online kernel is the a8
+  // compute, so this also covers the a8 check below (which would look for attention_qk / attention_pv).
+  if (options.attentionScoreStorage === "none") {
+    const online = countDispatches(census, (key) => familyOf(key) === ATTENTION_ONLINE_FAMILY);
+    const threePass = census
+      .filter((row) => ATTENTION_FAMILIES.has(familyOf(row.key)))
+      .map((row) => `${row.key}×${row.dispatchCount}`);
+    assert(
+      online > 0,
+      `${where}: attentionScoreStorage="none" was declared but no ${ATTENTION_ONLINE_FAMILY} dispatch ran`,
+    );
+    assert(
+      threePass.length === 0,
+      `${where}: attentionScoreStorage="none" fell back to the three dispatches for some node` +
+        ` (the shape or the device did not admit the online kernel — attentionRoute) — ${threePass.join(" / ")}`,
+    );
+    return;
+  }
   if (options.attentionCompute === "a8") {
     assertComplete(
       'attentionCompute="a8"',

@@ -95,12 +95,17 @@ import {
 } from "../kernels/argmax.ts";
 import { assertChunkRowsAllowed } from "./recipe.ts";
 import { planStateAttention, type StateAttentionBlock } from "./state-attention-plan.ts";
-import { attentionRoute, type AttentionSeats } from "./attention-route.ts";
+import {
+  type AttentionDeviceFacts,
+  attentionRoute,
+  type AttentionSeats,
+} from "./attention-route.ts";
 import {
   attentionI8a8TempBytes,
   attentionScoreElementBytes,
   fusedAttentionViolation,
   planAttentionBlocks,
+  planAttentionOnlineWindows,
   stateAttentionVariantViolation,
 } from "./recipe-builders/attention.ts";
 import { sessionOptionsViolation } from "./session-options-check.ts";
@@ -388,9 +393,25 @@ export type EstimateOptions = {
    * The storage form of fused attention's S (the same value as
    * `SessionOptions.attentionScoreStorage`; omitted = `"f32"`).
    * Eligibility (`attentionRoute`) is the same single function as in execution; ineligible shapes
-   * are counted with f32 storage.
+   * are counted with f32 storage. `"none"` (the online kernel — ADR 0132) counts no S and no row
+   * statistics for the nodes whose route takes it, only the a8 quantisation temporaries; it needs
+   * {@link attentionDevice}.
    */
   readonly attentionScoreStorage?: ScoreStorage;
+  /**
+   * The device facts the online kernel's route reads (ADR 0132 decision 5): whether the device has
+   * subgroups (`subgroups` and `subgroup-size-control` enabled and WGSL `subgroup_id` present) and
+   * its granted `maxComputeWorkgroupStorageSize`.
+   *
+   * MUST: required when `attentionScoreStorage` is `"none"` and the graph has a fused attention op —
+   * without it the estimate fails loudly instead of guessing a route (a device without subgroups and
+   * with a 32 KiB limit runs the three dispatches with S, the others the online kernel without it).
+   * Not read otherwise.
+   */
+  readonly attentionDevice?: {
+    readonly subgroups: boolean;
+    readonly maxComputeWorkgroupStorageSize: number;
+  };
 };
 
 /**
@@ -935,6 +956,28 @@ type TransientKnobs = {
   readonly attentionRowBlockMaxBytes: number | undefined;
   /** The compute form of fused attention and the storage form of S (defaults already filled in). */
   readonly seats: AttentionSeats;
+  /** The device facts of the online kernel's route (`EstimateOptions.attentionDevice` — `undefined` when not passed). */
+  readonly attentionDevice: AttentionDeviceFacts | undefined;
+};
+
+/**
+ * The device facts passed to `attentionRoute` for one fused attention node.
+ *
+ * MUST: with `attentionScoreStorage: "none"` and no `EstimateOptions.attentionDevice`, fail loudly —
+ * the route (and with it whether S exists) depends on the device, and assuming one would let the
+ * estimate claim temporaries the device does not produce (the same reason as the binding-limit
+ * requirement of {@link stateAttentionTemps}). Any other seat never reads the facts (attentionRoute
+ * consults them only for `"none"`), so a device with neither capability stands in.
+ */
+const routeDevice = (knobs: TransientKnobs, where: string): AttentionDeviceFacts => {
+  if (knobs.attentionDevice !== undefined) return knobs.attentionDevice;
+  if (knobs.seats.attentionScoreStorage === "none") {
+    throw new ExecutionError(
+      `${where}: attentionScoreStorage 'none' needs options.attentionDevice` +
+        " (the online kernel's route is decided by the device's subgroups and workgroup-storage limit — ADR 0132)",
+    );
+  }
+  return { subgroups: false, maxComputeWorkgroupStorageSize: 0 };
 };
 
 /**
@@ -985,8 +1028,12 @@ const fusedAttentionBlocks = (
  *    ①QK → ②row statistics → ③PV
  * 4. Release the quantisation temporaries at the end of the node (after the last ③PV)
  *
+ * The online route (`route.online` — ADR 0132) replaces step 3 with one dispatch per row window
+ * reading every quantisation temporary; it has no S and no row statistics.
+ *
  * MUST: take sizes and counts only from the same pure functions as execution (`attentionRoute`,
- * `attentionScoreElementBytes`, `planAttentionBlocks`, `attentionI8a8TempBytes`, `rowBlockLimit`).
+ * `attentionScoreElementBytes`, `planAttentionBlocks`, `planAttentionOnlineWindows`,
+ * `attentionI8a8TempBytes`, `rowBlockLimit`).
  * The combination check is the same `fusedAttentionViolation`, and no number is returned for shapes
  * execution rejects.
  * NOTE: the handling when there is no binding limit (`limit` —
@@ -1004,7 +1051,7 @@ const fusedAttentionProgram = (
   const shape = { batch: q[0] * q[1], rows: q[2], cols: k[2], depth: q[3] };
   const where = `attention [${q.join(",")}] × [${k.join(",")}] × [${v.join(",")}]`;
   const { seats } = knobs;
-  const route = attentionRoute(seats, shape.depth, shape.cols);
+  const route = attentionRoute(seats, shape.depth, shape.cols, routeDevice(knobs, where));
   const [qRef, kRef, vRef, maskRef] = reads;
   const violation = fusedAttentionViolation(
     where,
@@ -1012,6 +1059,50 @@ const fusedAttentionProgram = (
     { i8a8: seats.attentionCompute === "a8", mask: maskRef !== undefined, route },
   );
   if (violation !== undefined) throw new ExecutionError(violation);
+  const temps: TransientTempSpec[] = [];
+  const dispatches: TransientDispatchSpec[] = [];
+  const alloc = (byteLength: number, releaseAfter: number): TransientRef => {
+    temps.push({ byteLength, allocBefore: dispatches.length, releaseAfter });
+    return { kind: "temp", id: temps.length - 1 };
+  };
+  const quantized = attentionI8a8TempBytes(shape);
+  // The i8a8 quantisation of ①QK (q and k) and of ③PV (v's permute and Vᵀ), alive until `last`.
+  const quantizeQk = (last: number) => {
+    const refs = {
+      qq: alloc(quantized.qk.qq, last),
+      qs: alloc(quantized.qk.qs, last),
+      kq: alloc(quantized.qk.kq, last),
+      ks: alloc(quantized.qk.ks, last),
+    };
+    dispatches.push({ reads: [qRef], writes: [refs.qq, refs.qs] });
+    dispatches.push({ reads: [kRef], writes: [refs.kq, refs.ks] });
+    return refs;
+  };
+  const quantizePv = (last: number) => {
+    const refs = {
+      vt: alloc(quantized.pv.vt, last),
+      vq: alloc(quantized.pv.vq, last),
+      vs: alloc(quantized.pv.vs, last),
+    };
+    dispatches.push({ reads: [vRef], writes: [refs.vt] });
+    dispatches.push({ reads: [refs.vt], writes: [refs.vq, refs.vs] });
+    return refs;
+  };
+  if (route.online !== undefined) {
+    // The online kernel (ADR 0132): the four quantisation dispatches, then one dispatch per row
+    // window reading all of them — no S and no row statistics exist.
+    const windows = planAttentionOnlineWindows(shape.rows, shape);
+    const last = 4 + windows.length - 1;
+    const qk = quantizeQk(last);
+    const pv = quantizePv(last);
+    dispatches.push(
+      ...windows.map(() => ({
+        reads: [qk.qq, qk.kq, pv.vq, qk.qs, qk.ks, pv.vs],
+        writes: outputRefs,
+      })),
+    );
+    return { temps, dispatches };
+  }
   const blocks = fusedAttentionBlocks(
     { ...shape, scoreBytes: attentionScoreElementBytes(seats.attentionCompute, route) },
     limit,
@@ -1021,36 +1112,8 @@ const fusedAttentionProgram = (
   const qkI8a8 = route.qk === "i8a8";
   const pvI8a8 = route.pv === "i8a8";
   const last = (qkI8a8 ? 2 : 0) + (pvI8a8 ? 2 : 0) + blocks.length * 3 - 1;
-  const temps: TransientTempSpec[] = [];
-  const dispatches: TransientDispatchSpec[] = [];
-  const alloc = (byteLength: number, releaseAfter: number): TransientRef => {
-    temps.push({ byteLength, allocBefore: dispatches.length, releaseAfter });
-    return { kind: "temp", id: temps.length - 1 };
-  };
-  const quantized = attentionI8a8TempBytes(shape);
-  const qk = qkI8a8
-    ? {
-        qq: alloc(quantized.qk.qq, last),
-        qs: alloc(quantized.qk.qs, last),
-        kq: alloc(quantized.qk.kq, last),
-        ks: alloc(quantized.qk.ks, last),
-      }
-    : undefined;
-  if (qk !== undefined) {
-    dispatches.push({ reads: [qRef], writes: [qk.qq, qk.qs] });
-    dispatches.push({ reads: [kRef], writes: [qk.kq, qk.ks] });
-  }
-  const pv = pvI8a8
-    ? {
-        vt: alloc(quantized.pv.vt, last),
-        vq: alloc(quantized.pv.vq, last),
-        vs: alloc(quantized.pv.vs, last),
-      }
-    : undefined;
-  if (pv !== undefined) {
-    dispatches.push({ reads: [vRef], writes: [pv.vt] });
-    dispatches.push({ reads: [pv.vt], writes: [pv.vq, pv.vs] });
-  }
+  const qk = qkI8a8 ? quantizeQk(last) : undefined;
+  const pv = pvI8a8 ? quantizePv(last) : undefined;
   for (const block of blocks) {
     const end = dispatches.length + 2;
     const scores = alloc(block.scoreBytes, end);
@@ -1361,6 +1424,20 @@ export const estimateGraphMemory = (
     attentionCompute: options.attentionCompute ?? "f32",
     attentionScoreStorage: options.attentionScoreStorage ?? "f32",
   };
+  // The device facts are range-checked here regardless of the graph's shape (the rule of
+  // {@link assertLimitOption}); whether they are required depends on the nodes (routeDevice).
+  const attentionDevice = options.attentionDevice;
+  if (attentionDevice !== undefined) {
+    if (typeof attentionDevice.subgroups !== "boolean") {
+      throw new ExecutionError(
+        `options.attentionDevice.subgroups must be a boolean (${typeof attentionDevice.subgroups})`,
+      );
+    }
+    assertLimitOption(
+      "attentionDevice.maxComputeWorkgroupStorageSize",
+      attentionDevice.maxComputeWorkgroupStorageSize,
+    );
+  }
   const chunkDims = chunkRowDims(graph);
   const chunkSymbols = new Set(chunkDims.map((dim) => parseDim(dim).sym));
   const bindings = planBindings(graph, options.bindings, chunkSymbols);
@@ -1471,7 +1548,7 @@ export const estimateGraphMemory = (
         state.shapes,
         options.maxStorageBufferBindingSize,
         options.maxBufferSize,
-        { stateAttentionReduce, attentionRowBlockMaxBytes, seats },
+        { stateAttentionReduce, attentionRowBlockMaxBytes, seats, attentionDevice },
       ),
     };
   };

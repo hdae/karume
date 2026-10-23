@@ -104,7 +104,7 @@ const LINEAR_COMPUTES: Readonly<Record<NonNullable<SessionOptions["linearCompute
 const ATTENTION_COMPUTES: Readonly<Record<NonNullable<SessionOptions["attentionCompute"]>, true>> =
   { f32: true, f16: true, a8: true };
 const SCORE_STORAGES: Readonly<Record<NonNullable<SessionOptions["attentionScoreStorage"]>, true>> =
-  { f32: true, f16: true };
+  { f32: true, f16: true, none: true };
 const LINEAR_GEMV_REDUCES: Readonly<Record<NonNullable<SessionOptions["linearGemvReduce"]>, true>> =
   { sequential: true, parallel: true, "parallel-subgroup32": true };
 const STATE_ATTENTION_REDUCES: Readonly<

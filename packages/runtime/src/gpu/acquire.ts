@@ -441,16 +441,25 @@ const readWgslLanguageFeatures = (gpu: GPU): ReadonlySet<string> => {
 };
 
 /**
- * Checks the 3 capabilities needed for execution only when explicitly requested. No automatic
- * enabling, no silent fallback.
+ * Checks the 3 capabilities needed for execution only when requested. `true` = required (a
+ * shortfall is rejected — no silent fallback); `"available"` = requested when all three are present,
+ * otherwise nothing is requested and nothing is rejected (ADR 0132 decision 5 amends ADR 0100
+ * decision 1 — for code whose subgroup form is bit-identical to its portable form).
  */
 export const planSubgroup32Features = (
   adapterFeatures: GpuFeatureSet,
   languageFeatures: ReadonlySet<string>,
-  requested: boolean | undefined,
+  requested: boolean | "available" | undefined,
 ): readonly string[] => {
-  if (requested !== undefined && typeof requested !== "boolean") {
-    throw new GpuFeatureError("subgroups must be a boolean");
+  if (requested !== undefined && typeof requested !== "boolean" && requested !== "available") {
+    throw new GpuFeatureError("subgroups must be a boolean or 'available'");
+  }
+  if (requested === "available") {
+    return adapterFeatures.has("subgroups") &&
+      adapterFeatures.has("subgroup-size-control") &&
+      languageFeatures.has("subgroup_id")
+      ? ["subgroups", "subgroup-size-control"]
+      : [];
   }
   if (requested !== true) return [];
   for (const feature of ["subgroups", "subgroup-size-control"]) {
@@ -584,13 +593,22 @@ export type AcquireGpuOptions = {
    */
   readonly shaderF16?: boolean;
   /**
-   * Explicit request for 32-lane subgroups (default false, ADR 0100). Requires subgroups and
-   * subgroup-size-control, and WGSL's subgroup_id. At acquisition a known-answer run is checked; a
-   * shortfall or mismatch is rejected.
-   * Acquiring the capability alone does not change the compute path. A Session's rmsNormReduce is
-   * specified separately.
+   * Request for 32-lane subgroups (default false, ADR 0100). Requires subgroups and
+   * subgroup-size-control, and WGSL's subgroup_id. Whenever the features are requested, a
+   * known-answer run is checked at acquisition and a mismatch is rejected.
+   *
+   * - `true` = required. A shortfall is rejected ({@link GpuFeatureError}).
+   * - `"available"` = requested when the adapter has all three, otherwise the device is acquired
+   *   without them (no error — ADR 0132 decision 5, amending ADR 0100 decision 1). For code whose
+   *   subgroup form is bit-identical to its portable form, such as the online attention kernel
+   *   (`attentionScoreStorage: "none"`), which picks its form from the device it gets.
+   * - `false` = not requested (the same behavior as `undefined`).
+   *
+   * Acquiring the capability alone does not change the compute path of the other knobs. A
+   * Session's rmsNormReduce / linearGemvReduce subgroup forms are specified separately and still
+   * reject a device without the features.
    */
-  readonly subgroups?: boolean;
+  readonly subgroups?: boolean | "available";
   /**
    * Injection of one static GEMM geometry profile (DECIDED: ADR 0115). The way for a user on an
    * unknown device to apply the table from a sweep run on their own machine (the output of

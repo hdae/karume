@@ -12,6 +12,7 @@
 import { assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import {
+  type AttentionDeviceFacts,
   type AttentionRoute,
   attentionRoute,
   type AttentionSeats,
@@ -35,6 +36,8 @@ import {
 const PRACTICAL_SEATS: AttentionSeats = { attentionCompute: "a8", attentionScoreStorage: "f16" };
 /** 宣言どおりの経路。 */
 const REQUESTED: AttentionRoute = { qk: "i8a8", pv: "i8a8", score: "f16" };
+/** Device facts: the a8 + s16 seats never read them (only `attentionScoreStorage: "none"` does). */
+const DEVICE: AttentionDeviceFacts = { subgroups: true, maxComputeWorkgroupStorageSize: 32768 };
 
 /**
  * 配布形の DiT のグラフ宣言の写し（両世代で同じ）: `rope_cos [1,S,1,128]` の head_dim 128 = D・
@@ -113,7 +116,7 @@ describe("Wan の受理集合 × 実用席の attention の経路", () => {
         assertEquals(shapes.length, generation.acceptedSizes.length * frameCount);
         for (const { shape, keys } of shapes) {
           assertEquals(
-            attentionRoute(PRACTICAL_SEATS, HEAD_DIM, keys),
+            attentionRoute(PRACTICAL_SEATS, HEAD_DIM, keys, DEVICE),
             REQUESTED,
             `${shape}（S=${keys}）`,
           );
@@ -121,7 +124,7 @@ describe("Wan の受理集合 × 実用席の attention の経路", () => {
       });
 
       it("cross（キー長 512）は宣言どおり", () => {
-        assertEquals(attentionRoute(PRACTICAL_SEATS, HEAD_DIM, CROSS_KEYS), REQUESTED);
+        assertEquals(attentionRoute(PRACTICAL_SEATS, HEAD_DIM, CROSS_KEYS, DEVICE), REQUESTED);
       });
     });
   }

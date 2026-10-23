@@ -97,7 +97,7 @@ import {
   scoreNote,
   scoreQuadLoaderWgsl,
   scoreReadQuad,
-  type ScoreStorage,
+  type MaterialisedScoreStorage,
   scoreStoreQuad,
   scoreStoreWgsl,
 } from "./score-storage.ts";
@@ -319,7 +319,7 @@ type GemmSpec =
       readonly v4: boolean;
       readonly compute?: GemmCompute;
       /** Storage of S (the buffer ① writes and ③ reads in ADR 0023 — `"f32"` when omitted). */
-      readonly score?: ScoreStorage;
+      readonly score?: MaterialisedScoreStorage;
       /**
        * Whether there is an additive mask (①QK only; when omitted, `false`, and the generated code
        * does not move by a single byte). ③PV does not look at the mask (S is already masked).
@@ -703,7 +703,7 @@ const fillA = (
   v4: boolean,
   value?: (expr: string, slot: number) => string,
   compute: GemmCompute = "f32",
-  score: ScoreStorage = "f32",
+  score: MaterialisedScoreStorage = "f32",
   bounds: GemmABounds = DEFAULT_A_BOUNDS,
 ): string => {
   const filled = slots(gemmRowSlots(geometry))
@@ -1104,7 +1104,7 @@ const store = (
   v4: boolean,
   bias: boolean,
   outF16 = false,
-  score: ScoreStorage = "f32",
+  score: MaterialisedScoreStorage = "f32",
   mask = false,
   maskRowOffset = false,
 ): string => {
@@ -1412,7 +1412,7 @@ const attentionQkWgsl = (
   geometry: GemmGeometry,
   v4: boolean,
   compute: GemmCompute = "f32",
-  score: ScoreStorage = "f32",
+  score: MaterialisedScoreStorage = "f32",
   mask = false,
   gqa = false,
   rowWindow = false,
@@ -1476,7 +1476,7 @@ const attentionPvWgsl = (
   geometry: GemmGeometry,
   v4: boolean,
   compute: GemmCompute = "f32",
-  score: ScoreStorage = "f32",
+  score: MaterialisedScoreStorage = "f32",
   gqa = false,
   rowWindow = false,
 ): string => {

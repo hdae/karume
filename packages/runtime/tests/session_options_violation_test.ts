@@ -146,6 +146,33 @@ describe("sessionOptionsViolation", () => {
     );
   });
 
+  it("attentionScoreStorage 'none' (the online kernel — ADR 0132) is accepted only with attentionCompute 'a8'", () => {
+    assertEquals(
+      sessionOptionsViolation({ attentionCompute: "a8", attentionScoreStorage: "none" }),
+      undefined,
+    );
+    assertEquals(
+      sessionOptionsViolation({
+        linearCompute: "a8",
+        attentionCompute: "a8",
+        attentionScoreStorage: "none",
+      }),
+      undefined,
+    );
+    // An unimplemented combination, not a fallback (ADR 0058 decision 3) — omitted = 'f32' too.
+    for (const options of [
+      { attentionScoreStorage: "none" },
+      { attentionCompute: "f32", attentionScoreStorage: "none" },
+      { attentionCompute: "f16", attentionScoreStorage: "none" },
+    ] satisfies SessionOptions[]) {
+      assertEquals(
+        sessionOptionsViolation(options),
+        "attentionScoreStorage 'none' (the online kernel) is implemented only with attentionCompute 'a8'",
+        JSON.stringify(options),
+      );
+    }
+  });
+
   it("省略と同じく null も runtime 既定として読む（構築と同じ読み方）", () => {
     // 「欄はあるが値が不正」を既定へ戻さず拒否するのは、明示指定を受ける上位層の責務
     // （@karume/models の resolveSessionOptions）。ここで null を拒否に変えると構築の受理集合が
