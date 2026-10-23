@@ -101,14 +101,24 @@ export const sessionGpuFeatures = (
   return merged;
 };
 
-/** Builds `acquireGpu` options that request only the declared features. */
-export const toAcquireGpuOptions = (spec: GpuFeaturesSpec | undefined): AcquireGpuOptions => {
-  if (spec === undefined) return {};
-  let options: AcquireGpuOptions = {};
+/**
+ * Builds `acquireGpu` options that request only the declared features — plus, when the effective
+ * `SessionOptions` declare the online attention (`attentionScoreStorage: "none"`, ADR 0132
+ * decision 5), `subgroups: "available"`: the kernel's subgroup form is faster and bit-identical
+ * to its portable form, so the features are requested when the adapter advertises them and never
+ * required (a default preset still declares no `gpuFeatures` — ADR 0128 C1).
+ */
+export const toAcquireGpuOptions = (
+  spec: GpuFeaturesSpec | undefined,
+  options?: SessionOptions,
+): AcquireGpuOptions => {
+  let acquire: AcquireGpuOptions =
+    options?.attentionScoreStorage === "none" ? { subgroups: "available" } : {};
+  if (spec === undefined) return acquire;
   for (const feature of Object.values(FEATURES)) {
-    if (feature.wanted(spec)) options = { ...options, ...feature.acquire };
+    if (feature.wanted(spec)) acquire = { ...acquire, ...feature.acquire };
   }
-  return options;
+  return acquire;
 };
 
 /**

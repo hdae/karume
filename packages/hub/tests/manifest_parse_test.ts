@@ -838,6 +838,21 @@ test("parseManifest: pipeline の major は形だけ検査し、裁定は models
 const withQuant = (patch: Record<string, unknown>): string =>
   withModel({ quants: { q: { weights: { net: "f16" }, session: {}, ...patch } } });
 
+describe("parseManifest: the session knob attentionScoreStorage (ADR 0132)", () => {
+  it("accepts 'none' (the online kernel) beside 'f32' and 'f16', and rejects any other spelling", () => {
+    for (const value of ["f32", "f16", "none"]) {
+      const quant = parseManifest(
+        withQuant({ session: { attentionCompute: "a8", attentionScoreStorage: value } }),
+      ).models["m"].quants["q"];
+      assertEquals(quant.session.attentionScoreStorage, value);
+    }
+    assertThrows(
+      () => parseManifest(withQuant({ session: { attentionScoreStorage: "online" } })),
+      ManifestFormatError,
+    );
+  });
+});
+
 describe("parseManifest: quant の表示欄 label / description（ADR 0075）", () => {
   it("設定した文字列がそのまま型面へ出る", () => {
     const manifest = parseManifest(

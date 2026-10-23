@@ -552,7 +552,10 @@ const buildWan = async (
   );
 
   await settleAbort(options.signal);
-  const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
+  // The online attention preset (`attentionScoreStorage: "none"`) asks for subgroups when the adapter
+  // has them (ADR 0132 decision 5); a shared GPU runs the kernel's portable form or, on a 32 KiB
+  // device without subgroups, the three dispatches.
+  const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures, sessionOptions)));
   const ownsGpu = options.gpu === undefined;
   try {
     // MUST: the cancellation check **after** acquiring the GPU stays inside the try — outside it, the

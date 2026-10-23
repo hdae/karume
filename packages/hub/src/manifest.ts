@@ -182,7 +182,7 @@ const GPU_FEATURE_KEYS: readonly string[] = ["shaderF16"];
  */
 const LINEAR_COMPUTE: readonly LinearCompute[] = ["f32", "a8", "f16"];
 const ATTENTION_COMPUTE: readonly AttentionCompute[] = ["f32", "f16", "a8"];
-const SCORE_STORAGE: readonly ScoreStorage[] = ["f32", "f16"];
+const SCORE_STORAGE: readonly ScoreStorage[] = ["f32", "f16", "none"];
 const LINEAR_GEMV_REDUCE = ["sequential", "parallel"] as const;
 const STATE_ATTENTION_REDUCE = ["sequential", "parallel", "parallel-fused"] as const;
 /**
@@ -206,7 +206,8 @@ const SESSION_KEYS: Readonly<Record<keyof Required<SessionSpec>, true>> = {
 
 export type LinearCompute = "f32" | "a8" | "f16";
 export type AttentionCompute = "f32" | "f16" | "a8";
-export type ScoreStorage = "f32" | "f16";
+/** `"none"` = the online kernel that never stores S (ADR 0132; implemented only with `attentionCompute: "a8"`). */
+export type ScoreStorage = "f32" | "f16" | "none";
 
 /**
  * The names of the device limits a quant requires (`requiredLimits`, which ADR 0038 §7 listed as a

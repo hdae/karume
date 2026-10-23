@@ -40,6 +40,23 @@ test("toAcquireGpuOptions: 宣言された feature だけを要求する", () =>
   assertEquals(toAcquireGpuOptions({ shaderF16: true }), { shaderF16: true });
 });
 
+test("toAcquireGpuOptions: the online attention preset asks for subgroups only as 'available' (ADR 0132 decision 5)", () => {
+  // `attentionScoreStorage: "none"` runs faster with subgroups but is bit-identical without them,
+  // so the request never becomes a requirement (a default preset declares no feature — ADR 0128 C1).
+  assertEquals(toAcquireGpuOptions(undefined, { attentionScoreStorage: "none" }), {
+    subgroups: "available",
+  });
+  assertEquals(
+    toAcquireGpuOptions(
+      { shaderF16: true },
+      { attentionCompute: "a8", attentionScoreStorage: "none" },
+    ),
+    { subgroups: "available", shaderF16: true },
+  );
+  assertEquals(toAcquireGpuOptions(undefined, { attentionScoreStorage: "f16" }), {});
+  assertEquals(toAcquireGpuOptions({ shaderF16: true }, {}), { shaderF16: true });
+});
+
 test("toAcquireGpuOptions: GpuFeaturesSpec の全キーを写す（キー追加の取り残しを検出）", () => {
   // 写像の網羅は `src/session/gpu-features.ts` の `FEATURES`（`Required<GpuFeaturesSpec>` の
   // 網羅表）が型で固定しており、キーが増えれば**コンパイルエラー**になる。ここはその型門が
