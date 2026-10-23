@@ -20,6 +20,7 @@ import type { GemmGeometry } from "../gemm-geometry.ts";
 import type { GeometryProfile } from "../geometry-profile.ts";
 import type { I8a8Geometry } from "../i8a8-geometry.ts";
 import { APPLE_METAL_3 } from "./apple-metal-3.ts";
+import { NVIDIA_AMPERE } from "./nvidia-ampere.ts";
 import { NVIDIA_BLACKWELL } from "./nvidia-blackwell.ts";
 
 /**
@@ -70,5 +71,5 @@ const freezeGeometryProfile = (profile: GeometryProfile): GeometryProfile => {
 };
 
 export const BUILTIN_GEOMETRY_PROFILES: readonly GeometryProfile[] = Object.freeze(
-  [APPLE_METAL_3, NVIDIA_BLACKWELL].map(freezeGeometryProfile),
+  [APPLE_METAL_3, NVIDIA_AMPERE, NVIDIA_BLACKWELL].map(freezeGeometryProfile),
 );

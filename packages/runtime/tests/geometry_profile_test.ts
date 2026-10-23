@@ -50,6 +50,7 @@ import {
 } from "../src/kernels/geometry-profile.ts";
 import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/index.ts";
 import { APPLE_METAL_3 } from "../src/kernels/geometry-profiles/apple-metal-3.ts";
+import { NVIDIA_AMPERE } from "../src/kernels/geometry-profiles/nvidia-ampere.ts";
 import { NVIDIA_BLACKWELL } from "../src/kernels/geometry-profiles/nvidia-blackwell.ts";
 import {
   assertGemmGeometry,
@@ -269,8 +270,8 @@ describe("公開の一覧 BUILTIN_GEOMETRY_PROFILES は深く凍結した複製"
 
   it("値は生成物の定数と同じで、定数そのものは凍結しない（読み込み時に他の module の値を書き換えない）", () => {
     // 欄の落ちた複製（凍結の複製が型の新しい欄を写し忘れた形）もここで落ちる
-    assertEquals(BUILTIN_GEOMETRY_PROFILES, [APPLE_METAL_3, NVIDIA_BLACKWELL]);
-    for (const profile of [APPLE_METAL_3, NVIDIA_BLACKWELL]) {
+    assertEquals(BUILTIN_GEOMETRY_PROFILES, [APPLE_METAL_3, NVIDIA_AMPERE, NVIDIA_BLACKWELL]);
+    for (const profile of [APPLE_METAL_3, NVIDIA_AMPERE, NVIDIA_BLACKWELL]) {
       assert(!Object.isFrozen(profile), `${profile.id}: 生成物の定数が凍結された`);
       assert(!Object.isFrozen(profile.gemmRows[0].geometry), `${profile.id}: 幾何が凍結された`);
     }
