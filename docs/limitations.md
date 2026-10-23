@@ -299,6 +299,23 @@ dot product, and S in VRAM has f32 width. The canonical source of the decision i
   the f32 implicit GEMM and shows it by its pipeline key — the census of the decoder's A/B
   (`e2e_wan_ti2v_vae_a8_test.ts`) pins that every conv3d of the Wan2.2 decoder qualifies.
 
+## Wan2.2's 32-latent VAE tile (`vaeTile: 32`) is chosen explicitly and needs about 9.4 GiB during the decoder stage; the 10 GB class keeps 16
+
+- ADR [0134](decisions/0134-wan22-vae-tile32-shared.md): `WanGenerateRequest.vaeTile` defaults to 16
+  and is never chosen automatically — WebGPU exposes neither the total nor the free device memory
+  (ADR 0070 decision 5), so the application decides. At 32 the decoder stage holds the 16-tile pair
+  as lenders plus the 32-tile pair, four times the causal caches and frame backings: on the RTX
+  3080 Ti the GPU-wide peak during the stage is 9.4 GiB with the int8 decoder at 1280×704 (4.2 GiB
+  at tile 16). A 10 GB device cannot hold it; a request with `vaeTile: 32` there fails in the VAE
+  stage, after the DiT steps.
+- The gain is the overlap factor (4×7 → 2×3 tiles at 1280×704), so it grows with the clip: the
+  VAE stage with `i8-a8-attn8-online-conv8` on the RTX 3080 Ti is 0.81–0.83× of tile 16 at 17
+  frames and 0.70× at 33 frames (the ADR's kill line of 0.8× was ruled on the 33-frame clip).
+- The pair is accepted only when the preset's weights carry `vae_decoder_first_32` /
+  `vae_decoder_next_32` (Wan2.2's presets do; Wan2.1 has none, so `vaeTile: 32` is a
+  `ModelInputError` there). The output differs from tile 16's in the blended seams, so the sha256
+  rows carry the tile in the case id.
+
 ## On devices without dp4a, a8 does not get faster (a warning only, no fallback)
 
 The integer dot products of int8 activations (`linearCompute` / `attentionCompute: "a8"`) run emulated

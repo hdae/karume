@@ -14,6 +14,18 @@ top of 4.67 GiB of weights), so the shortfall is in the full pipeline step. A ca
 row-block budget of ADR 0124 (`attentionRowBlockMaxBytes`, bit-identical) for the reference run of
 the gate; the 121-frame bands of the practical presets cannot be re-measured until then.
 
+## Wan2.2's 121-frame generation runs out of device memory under Node + Dawn (12 GiB) with the default preset
+
+A 2-step `WanTi2vPipeline.generate` at 1280×704×121 with `i8-a8-attn8-online-conv8` (the default
+since 2026-10-23) fails with `vkAllocateMemory failed with VK_ERROR_OUT_OF_DEVICE_MEMORY` on
+`CreateBuffer` on the RTX 3080 Ti (12,288 MiB; observed 2026-10-23 while timing ADR 0134, at
+`vaeTile` 16 and 32 alike, one fresh process each; nvidia-smi sampled 9.3 GiB at the failure). The
+same clip completed under Deno + wgpu on 2026-10-07 with the s16 preset (ADR 0121 stage 10, DiT-stage
+peak 11,361 MiB), and the 121-frame DiT forward of the online preset fits on its own (9.01 GiB, ADR
+0132). The stage of the failure was not recorded; the opt-in 121-frame pipeline case
+(`KARUME_WAN_TI2V_121F=1`) has not been run under Node. Until this is isolated, the card's 121-frame
+figures stay those of the Deno runs.
+
 ## A fixed revision on the pseudo-HF server reuses a stale manifest
 
 The HTTP connectivity test server `packages/test-support/src/local-dist-server.ts` fixes the repo and the revision.

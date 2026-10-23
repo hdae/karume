@@ -1,6 +1,9 @@
 # 0134: Wan2.2 VAE decoder at a 32-latent tile — a second chunk-graph pair that borrows the 16-tile pair's weights
 
-- Status: proposed (2026-10-23 — the maintainer's ruling 20 a; accepted when the gates of decision 7 pass)
+- Status: accepted (2026-10-23 — the maintainer's ruling 20 a; the gates of decision 7 are in Results. The kill line of
+  decision 7.4 was ruled on the 17-frame case and is missed there by 1–3% (0.81–0.83×); the 33-frame clip meets it
+  (0.70–0.83×). Kept as the opt-in knob on the maintainer's standing instruction to proceed on the recommended option
+  and report; the reading of the kill line is the maintainer's to confirm)
 - Date: 2026-10-23
 - Related: ADR [0121](0121-wan22-ti2v-5b.md) decision 6 (tile 16 / overlap 4 — unchanged as the default) /
   [0096](0096-speculative-decoding.md) decision 2 (shared initializers — the mechanism this reuses) / [0133](0133-conv3d-w8a8.md)
@@ -81,6 +84,39 @@ names stay); the band is derived for tile 32 as for 16 (band × 5). The pipeline
 3. Tile 32: the degenerate gate, the band against the Python tile reference, 0 non-finite values, the conv8 census.
 4. Kill line: the VAE stage at 1280×704×17 with `i8-a8-attn8-online-conv8` and `vaeTile: 32` not under 0.8× of tile 16
    (−20%) → rejected with the number. Expected −30%. VRAM peak under 12 GiB on the int8 decoder.
+
+## Results (2026-10-23, RTX 3080 Ti, Node + Dawn)
+
+- Recipe (decisions 1, 5, 6): `wan.export_vae --tile 32 --shared` wrote the pair into both series roots (83 KB per
+  container, the f16 and i8 borrowers byte-identical; 109 / 113 initializers of first / next declared shared, the three
+  lifted constants included; empty binding table); the distribution lists `vae_decoder_first_32` / `next_32` under
+  every Wan2.2 preset and gates them on their lenders. `vae_tiling.py --model ti2v-5b --tile 32` writes
+  `vae_tiles.wide.t32.safetensors` (2×3 tiles, starts 0,12 / 0,24,48, blends 160 / 64,64; the `band` and `accept`
+  cases are 30 latents on one axis and cannot feed a 32-latent graph — skipped and named in the summary); the 16-tile
+  references are byte-identical before and after.
+- Runtime / models (decisions 2–4): `vaeTile` on the request; admission opens the pair only when a preset carries both
+  roles (one alone fails before any fetch), checks the pair's layout (tile 32, the lenders' compression and channels,
+  every accepted size) and that every initializer is borrowed by name from the lender of its role; the stage builds the
+  16-tile Sessions as lenders and the 32-tile Sessions as borrowers (`sharedWeights` from `exportWeight`), disposes
+  borrowers → lenders → caches. The 16-tile path builds no lender and is unchanged (its sha256 rows and containers are
+  byte-identical; the reference file gained one row).
+- Gates (decision 7, `e2e_wan_ti2v_vae_tile32_test.ts` + the pipeline e2e): the runtime's shared-weight checks pass for
+  f16 `{}`, i8 `{}` and i8 `{ convCompute: "a8" }` (borrower weights 0 bytes; lenders 1.01 / 1.03 GiB f16, 0.51 / 0.52
+  GiB i8); a borrower without `sharedWeights` fails loudly; the degenerate gate (one 32×32 latent through the tiled path
+  ≡ the untiled chunk sequence) is Uint32-identical with 0 non-finite values from NaN-poisoned frames in all three runs;
+  the a8 census at tile 32 is w8a8 33 / 35 with no f32 conv3d key; the TS plan equals the Python fixture's meta; the
+  band against the tile reference derived on `wide` (maxAbs 1.001e-5 → 5.1e-5 — `wide` is the only case that fits,
+  so it both derives and meets the band; opt-in like the 16-tile band). The conv8 `vae32` sha256 row is written for
+  this machine (its output differs from every other practical row).
+- Timing of the VAE stage with `i8-a8-attn8-online-conv8` at 1280×704 (the kill line of decision 7.4; GPU-wide peak by
+  nvidia-smi): 17 frames (the pipeline e2e, two runs) 50.9 → 41.4 s and 50.7 → 42.1 s (**0.81× / 0.83× — not under
+  0.8×**); 33 frames (2 steps, two samples each, alternating) tile 16 92.1 / 93.1 s, tile 32 64.5 / 76.8 s (**0.70× on
+  the minimums, 0.76× on the means**); peak 9.4 GiB during the stage at tile 32 (4.2 GiB at tile 16), under 12 GiB.
+  The expected −30% is reached only on the best sample; the samples spread by up to 19% on this display-shared GPU.
+- 121 frames: not measured. A 2-step 1280×704×121 request with `i8-a8-attn8-online-conv8` runs out of device
+  memory (`VK_ERROR_OUT_OF_DEVICE_MEMORY` on `CreateBuffer`) under Node + Dawn on the 12 GiB RTX 3080 Ti at tile 16
+  as well as at tile 32, in a fresh process each (nvidia-smi 9.3 GiB sampled at the failure) — a sibling of the
+  121-frame known issue of the A/B check, not a property of the tile (known-issues).
 
 ## Consequences
 
