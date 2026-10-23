@@ -19,7 +19,7 @@
  * CLAUDE.md).
  */
 
-import type { GpuContext, Session, SessionDiagnostics } from "@karume/runtime";
+import type { GpuContext, Session, SessionDiagnostics, SessionOptions } from "@karume/runtime";
 
 import { settleAbort } from "../concurrency/abort.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
@@ -184,6 +184,8 @@ export const assertWanVaeTilesCover = (
  */
 type WanVaeDecodeState = {
   readonly gpu: GpuContext;
+  /** The effective settings of the quant declaration (only the conv knob reaches the VAE — {@link wanVaeSessionOptions}). */
+  readonly sessionOptions: SessionOptions;
   readonly vaeFirst: ModelComponent;
   readonly vaeNext: ModelComponent;
   readonly layout: WanVaeChunkLayout;
@@ -268,6 +270,14 @@ export const finishWanVaeFrames = (
  * decode and closes them). The final shape check, unpatchify, finiteness and clamp are in
  * {@link finishWanVaeFrames}.
  */
+/**
+ * The Session options of the VAE decoder: the conv knob alone (ADR 0133 decision 6 — `convCompute:
+ * "a8"` is the VAE's opt-in; the linear / attention knobs of the preset are the transformer's).
+ * NOTE: `export` is for the host test of the decoder stage (not on the public surface — ADR 0008).
+ */
+export const wanVaeSessionOptions = (sessionOptions: SessionOptions): SessionOptions =>
+  sessionOptions.convCompute === undefined ? {} : { convCompute: sessionOptions.convCompute };
+
 export const decodeWanVaeStage = async (
   state: WanVaeDecodeState,
   plan: WanGenerationKnobs,
@@ -290,11 +300,13 @@ export const decodeWanVaeStage = async (
   let frames: Float32Array<ArrayBuffer>;
   let failure: { readonly error: unknown } | undefined;
   try {
-    // The VAE does not take the quant's session (`{}` — the same contract as anima's `withStage`.
-    // `sessionOptions` are the effective settings the family admission derived from the quant
-    // declaration through the acceptance table, passed to the DiT Session).
-    first = await state.vaeFirst.createSession(state.gpu, {});
-    next = await state.vaeNext.createSession(state.gpu, {});
+    // The VAE takes only the conv knob of the quant's session (ADR 0133 decision 6 — the rest of
+    // `sessionOptions`, the effective settings the family admission derived from the quant
+    // declaration through the acceptance table, is the DiT Session's; the same contract as
+    // anima's `withStage` for everything but conv3d).
+    const vaeOptions = wanVaeSessionOptions(state.sessionOptions);
+    first = await state.vaeFirst.createSession(state.gpu, vaeOptions);
+    next = await state.vaeNext.createSession(state.gpu, vaeOptions);
     caches = await WanVaeChunkCaches.create(state.gpu, layout);
     // Before the first tile (a cancellation that arrived during the start notification or while
     // allocating resources takes effect here — as in the text / encoder / DiT stages, checked after
