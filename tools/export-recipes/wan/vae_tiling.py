@@ -64,9 +64,19 @@ VAE 段の末尾〈ホストの unpatchify〉を上流の関数そのものと�
 
 重みは f16 表現可能値へ丸めてから参照を採る（ADR 0006 — `export_vae.load_vae(round_f16=True)`）。
 
+A tile other than the model's own (`--tile 32` for Wan2.2 — ADR 0134 decision 6) writes
+`vae_tiles.<case>.t<tile>.safetensors` beside the default-tile references ({@link fixture_name}:
+the `.t<tile>` suffix appears only when the tile differs from the series tile, so the default names
+never change). The plan keeps the minimum overlap of the model, and the meta carries `tile`. A case
+whose latent is smaller than the tile on either axis cannot be fed to the fixed-shape chunk graph
+(`plan_tile_axis` refuses it, as the TS side does): with the default case list it is skipped and
+named in the summary; named with `--case` it is refused before the VAE is loaded. At tile 32 this
+leaves Wan2.2 with `wide` only (`band` and `accept` are 30 latents on one axis).
+
     uv run --group wan --inexact python -m wan.vae_tiling                # band + accept
     uv run --group wan --inexact python -m wan.vae_tiling --case accept  # 1 本だけ
     uv run --group wan --inexact python -m wan.vae_tiling --model ti2v-5b  # Wan2.2
+    uv run --group wan --inexact python -m wan.vae_tiling --model ti2v-5b --tile 32  # *.t32
 
 MUST: diffusers は関数の中でだけ触る（`wan` グループは既定の sync に入らない —
 `tests/test_optional_group_imports.py`）。
@@ -138,6 +148,43 @@ WAN21_MIN_OVERLAP_LATENT = min_overlap_latent(export_vae.SPATIAL_SCALE, WAN21_VA
 #: 参照フィクスチャのファイル名（系列の根に置く — `vae_tiles.<case>.safetensors`）。
 FIXTURE_PREFIX = "vae_tiles."
 FIXTURE_SUFFIX = ".safetensors"
+
+#: `--tile` must be a positive multiple of this (the exported chunk-graph pairs are 16 and 32 —
+#: ADR 0121 decision 6 / ADR 0134 decision 1).
+TILE_MULTIPLE = 16
+
+
+def fixture_tile_suffix(tile: int, default_tile: int) -> str:
+    """The tile part of a reference's file name: empty at the series tile, `.t<tile>` otherwise.
+
+    MUST: the default tile writes no suffix — the existing references and every reader of them keep
+    their names (ADR 0134 decision 6).
+    """
+    return "" if tile == default_tile else f".t{tile}"
+
+
+def fixture_name(case_name: str, tile: int, default_tile: int) -> str:
+    """`vae_tiles.<case>[.t<tile>].safetensors` ({@link fixture_tile_suffix})."""
+    return f"{FIXTURE_PREFIX}{case_name}{fixture_tile_suffix(tile, default_tile)}{FIXTURE_SUFFIX}"
+
+
+def default_tile_of(patch_size: int | None) -> int:
+    """The series tile of the generation that `patch_size` names (`export_vae.VAE_SERIES`).
+
+    `write_fixture` already receives `patch_size` as the generation's identity (it picks the
+    `reference` string and the meta by it), so the default tile is looked up the same way instead of
+    being passed alongside. MUST: an ambiguous or unknown generation fails loudly — a guessed
+    default tile would put a non-default reference under a default name.
+    """
+    tiles = {
+        series.tile for series in export_vae.VAE_SERIES.values() if series.patch_size == patch_size
+    }
+    if len(tiles) != 1:
+        raise ValueError(
+            f"patch_size {patch_size!r} does not name exactly one series tile in"
+            f" export_vae.VAE_SERIES (found {sorted(tiles)})"
+        )
+    return next(iter(tiles))
 
 
 @dataclass(frozen=True)
@@ -495,6 +542,8 @@ def write_fixture(
         raise ValueError(
             f"ケース {case.name} の frames_rgb は patchify する世代だけ（patch_size が None）"
         )
+    # Resolved before the decode so an unknown generation fails before minutes of CPU work.
+    path = out_root / fixture_name(case.name, tile, default_tile_of(patch_size))
     plan = plan_tiles(case.height, case.width, tile, min_overlap)
     latents = seeded_latents(vae, case)
     started = time.perf_counter()
@@ -550,7 +599,6 @@ def write_fixture(
         )
     summary["peak_rss_gib"] = round(_peak_rss_gib(), 2)
 
-    path = out_root / f"{FIXTURE_PREFIX}{case.name}{FIXTURE_SUFFIX}"
     staging = path.with_name(path.name + ".staging")
     out_root.mkdir(parents=True, exist_ok=True)
     save_file(tensors, str(staging), metadata=metadata)
@@ -574,7 +622,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--tile",
         type=int,
         default=None,
-        help=f"潜在タイルの辺（既定は表 — {tiles}。export した chunk グラフの入力形と揃える）",
+        help=(
+            f"潜在タイルの辺（既定は表 — {tiles}。export した chunk グラフの入力形と揃える）."
+            f" A positive multiple of {TILE_MULTIPLE}; a non-default tile writes"
+            " vae_tiles.<case>.t<tile>.safetensors"
+        ),
     )
     parser.add_argument(
         "--out", type=Path, default=None, help="系列の根（既定はモデルの系列 — 決定 7 の表の値）"
@@ -604,15 +656,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     if tile <= min_overlap:
         # 計画（`plan_tile_axis`）でも落ちるが、それは VAE を読んだ後 — 読む前に落とす。
         parser.error(f"--tile {tile} が重なりの下限 {min_overlap}（潜在）以下")
+    if tile % TILE_MULTIPLE:
+        parser.error(f"--tile {tile} is not a multiple of {TILE_MULTIPLE}")
+    selected = [case for case in cases if args.case is None or case.name in args.case]
+    # A latent smaller than the tile cannot be fed to the fixed-shape chunk graph (the planner
+    # refuses it). Checked here, before the VAE is read.
+    too_small = [case for case in selected if min(case.height, case.width) < tile]
+    if too_small and args.case is not None:
+        parser.error(
+            "--case "
+            + ", ".join(f"{case.name} (latent {case.height}×{case.width})" for case in too_small)
+            + f" is smaller than --tile {tile}"
+        )
+    selected = [case for case in selected if case not in too_small]
+    if not selected:
+        parser.error(f"no case of --model {args.model} is at least --tile {tile} on both axes")
 
     vae = export_vae.load_vae(args.model, round_f16=True)
     export_vae.assert_series_config(vae, series)
     if vae.use_tiling:
         # MUST: 上流のタイル化は走査形が違う（モジュール doc）。参照は自前の幾何でだけ採る。
         raise SystemExit("vae.use_tiling が True — 上流のタイル化は使わない")
-    selected = [case for case in cases if args.case is None or case.name in args.case]
     summary = {
         "series": str(out),
+        "tile": tile,
+        "skipped": [
+            {"case": case.name, "latent": [case.height, case.width], "reason": "smaller than tile"}
+            for case in too_small
+        ],
         "fixtures": [
             write_fixture(
                 vae, case, tile, out, min_overlap=min_overlap, patch_size=series.patch_size

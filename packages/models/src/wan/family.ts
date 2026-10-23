@@ -82,6 +82,7 @@ import {
   planWanRequest,
   type WanGenerationKnobs,
   type WanGenerationPlan,
+  type WanVaeTile32Plan,
 } from "./plan.ts";
 import type {
   GeneratedVideo,
@@ -114,7 +115,12 @@ import {
   assertWanVaeTilesCover,
   decodeWanVaeStage,
   VAE_DECODER_FIRST,
+  VAE_DECODER_FIRST_32,
   VAE_DECODER_NEXT,
+  VAE_DECODER_NEXT_32,
+  type WanVaeTile32,
+  type WanVaeTile32Contract,
+  wanVaeTile32Contract,
 } from "./tile-decode.ts";
 import { type WanVaeChunkLayout, wanVaeChunkLayout } from "./vae-chunks.ts";
 import {
@@ -138,17 +144,62 @@ import {
  * 5.3 GiB in i8) to the light use as well (decision 7's "light use without umT5" would be lost).
  * MUST: for a generation of input form `"t2v"` (Wan2.1) the component order stays as before the
  * encoder was added (2.1's fetch does not change).
+ * The 32-latent decoder pair (ADR 0134) is fetched only when the preset's weights carry it
+ * (`vaeTile32` — {@link presetCarriesVaeTile32}); a preset without it fetches what it did before.
  */
 const wanComponentKeys = (
   generation: WanGenerationDescriptor,
   route: WanTextEncoderRoute,
+  vaeTile32: boolean,
 ): readonly string[] => [
   TRANSFORMER,
   VAE_DECODER_FIRST,
   VAE_DECODER_NEXT,
+  ...(vaeTile32 ? [VAE_DECODER_FIRST_32, VAE_DECODER_NEXT_32] : []),
   ...(generation.ditInputForm === "ti2v" ? WAN_VAE_ENCODER_KEYS : []),
   ...(route === "gpu" ? [TEXT_ENCODER] : []),
 ];
+
+/**
+ * Whether a preset's weights carry the 32-latent decoder pair (ADR 0134 decision 5 — both roles or
+ * neither; one alone fails loudly). `weights` is the preset's weights map (`quants.<name>.weights`).
+ */
+const presetCarriesVaeTile32 = (
+  weights: Readonly<Record<string, string>>,
+  where: string,
+): boolean => {
+  const first = Object.hasOwn(weights, VAE_DECODER_FIRST_32);
+  const next = Object.hasOwn(weights, VAE_DECODER_NEXT_32);
+  if (first !== next) {
+    const [present, missing] = first
+      ? [VAE_DECODER_FIRST_32, VAE_DECODER_NEXT_32]
+      : [VAE_DECODER_NEXT_32, VAE_DECODER_FIRST_32];
+    throw new Error(
+      `${where}: the weights carry '${present}' without '${missing}'` +
+        " (the tile-32 VAE decoder is a pair — both roles or neither)",
+    );
+  }
+  return first;
+};
+
+/**
+ * Whether the preset `options` selects in `manifest` carries the 32-latent decoder pair. Read before
+ * the components are listed, so the fetch and whole-bytes surfaces list the components admission
+ * checks with the same function. A model or quant not in the manifest gives false (admission rejects
+ * it with its own message).
+ */
+const selectionCarriesVaeTile32 = (
+  manifest: Manifest,
+  options: Pick<WanPipelineOptions, "model" | "quant">,
+  owner: string,
+): boolean => {
+  const modelName = options.model ?? manifest.defaultModel;
+  if (!Object.hasOwn(manifest.models, modelName)) return false;
+  const entry = manifest.models[modelName];
+  const quantName = options.quant ?? entry.defaultQuant;
+  if (!Object.hasOwn(entry.quants, quantName)) return false;
+  return presetCarriesVaeTile32(entry.quants[quantName].weights, `${owner}: quant '${quantName}'`);
+};
 
 /** The values that differ per family (a class passes its own to {@link loadWanFromPretrained} etc.). */
 export type WanFamilySpec = {
@@ -202,8 +253,9 @@ export const planWanGeneration = (
   config: WanPipelineConfig,
   generation: WanGenerationDescriptor,
   owner: string,
+  tile32?: WanVaeTile32Plan,
 ): WanGenerationPlan<WanTextEmbedding> =>
-  planWanRequest(request, precomputedPromptGate(embeds, owner), layout, config, generation);
+  planWanRequest(request, precomputedPromptGate(embeds, owner), layout, config, generation, tile32);
 
 /**
  * The entry of the `"gpu"` path (the same check order and the same knob checks as
@@ -225,8 +277,9 @@ export const planWanGpuGeneration = (
   layout: PlanLayout,
   config: WanPipelineConfig,
   generation: WanGenerationDescriptor,
+  tile32?: WanVaeTile32Plan,
 ): WanGenerationPlan<Int32Array<ArrayBuffer>> =>
-  planWanRequest(request, gpuPromptGate(encoder), layout, config, generation);
+  planWanRequest(request, gpuPromptGate(encoder), layout, config, generation, tile32);
 
 /**
  * The keys this family accepts from the manifest's `session` and explicit overrides (the acceptance
@@ -270,6 +323,8 @@ type WanAdmission = {
   readonly sessionOptions: SessionOptions;
   readonly gpuFeatures: GpuFeaturesSpec | undefined;
   readonly layout: WanVaeChunkLayout;
+  /** The 32-latent decoder pair's contract (undefined when the preset's weights carry no `_32` roles). */
+  readonly vaeTile32: WanVaeTile32Contract | undefined;
   readonly ropeBase: WanRopeBase;
   readonly dit: DitContract;
   /** The path (`"gpu"` comes with the umT5 graph contract). */
@@ -286,6 +341,8 @@ export type WanState = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly config: WanPipelineConfig;
+  /** The preset's name (named by the rejection of `vaeTile` 32 without the 32-latent pair). */
+  readonly quantName: string;
   readonly sessionOptions: SessionOptions;
   readonly transformer: ModelComponent;
   readonly vaeFirst: ModelComponent;
@@ -293,6 +350,8 @@ export type WanState = {
   /** The I2V VAE encoder (only for a generation whose DiT input form is `"ti2v"`; else undefined). */
   readonly vaeEncoder: WanVaeEncoder | undefined;
   readonly layout: WanVaeChunkLayout;
+  /** The 32-latent decoder pair (ADR 0134 — undefined when the preset's weights carry no `_32` roles). */
+  readonly vaeTile32: WanVaeTile32 | undefined;
   readonly ropeBase: WanRopeBase;
   readonly dit: DitContract;
   /** The embedding asset (the accepted set of `"precomputed"`, `prompts` on both paths). */
@@ -325,6 +384,7 @@ export const loadWanFromPretrained = async (
     ...(options.quant === undefined ? {} : { quant: options.quant }),
   };
   const selection = resolveSelection(loaded.manifest, choice);
+  const vaeTile32 = selectionCarriesVaeTile32(loaded.manifest, choice, spec.owner);
   const buildOptions: WanPipelineOptions = {
     ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
     ...choice,
@@ -340,7 +400,7 @@ export const loadWanFromPretrained = async (
     `${spec.owner}.fromPretrained`,
     loaded,
     selection,
-    wanComponentKeys(spec.generation, route),
+    wanComponentKeys(spec.generation, route, vaeTile32),
     async (open) => {
       const admitted = await admitWan(spec, loaded.manifest, open, buildOptions);
       // The `requiredLimits` the distribution declares are checked here, **before the weight parts are
@@ -383,7 +443,11 @@ export const loadWanFromAssets = async (
     spec.owner,
     input.assets,
     buffer,
-    wanComponentKeys(spec.generation, route),
+    wanComponentKeys(
+      spec.generation,
+      route,
+      selectionCarriesVaeTile32(input.manifest, options, spec.owner),
+    ),
   );
   const admitted = await admitWan(spec, input.manifest, open, options);
   return await buildWan(spec, admitted, input.assets, open, options);
@@ -485,6 +549,17 @@ const admitWan = async (
   // happens in ditContract, which checks the patch built with the same channel count.
   assertWanVaeMatchesGeneration(layout, spec.generation, spec.owner);
   assertWanVaeTilesCover(layout, spec.generation, spec.owner);
+  // The 32-latent pair (ADR 0134) is checked against its lenders here, before the weight parts are
+  // fetched. The same function decided whether its components were listed.
+  const vaeTile32 = presetCarriesVaeTile32(quant.weights, `${spec.owner}: quant '${quantName}'`)
+    ? wanVaeTile32Contract(
+        { first: open(VAE_DECODER_FIRST_32), next: open(VAE_DECODER_NEXT_32) },
+        { first: open(VAE_DECODER_FIRST), next: open(VAE_DECODER_NEXT) },
+        layout,
+        spec.generation,
+        spec.owner,
+      )
+    : undefined;
   const ropeBase = parseWanRopeBase(await readWholeAsset(transformer.asset(ROPE_BASE)));
   const dit = ditContract(
     transformer,
@@ -517,6 +592,7 @@ const admitWan = async (
     sessionOptions,
     gpuFeatures,
     layout,
+    vaeTile32,
     ropeBase,
     dit,
     textEncoder,
@@ -583,6 +659,7 @@ const buildWan = async (
       gpu,
       ownsGpu,
       config,
+      quantName,
       sessionOptions,
       // The supplier is **the same one** admission saw (`open` only looks up the opened components).
       transformer: open(TRANSFORMER),
@@ -598,6 +675,14 @@ const buildWan = async (
               contract: admitted.vaeEncoder,
             },
       layout,
+      vaeTile32:
+        admitted.vaeTile32 === undefined
+          ? undefined
+          : {
+              ...admitted.vaeTile32,
+              first: open(VAE_DECODER_FIRST_32),
+              next: open(VAE_DECODER_NEXT_32),
+            },
       ropeBase,
       dit,
       textEmbeds,
@@ -637,6 +722,10 @@ export const generateWanVideo = async (
   // stage runs after the encoder stage, so only how to build it is decided here.
   let knobs: WanGenerationKnobs;
   let encodeContexts: () => Promise<WanContexts>;
+  const tile32: WanVaeTile32Plan = {
+    ...(state.vaeTile32 === undefined ? {} : { layout: state.vaeTile32.layout }),
+    quant: state.quantName,
+  };
   if (state.text.kind === "gpu") {
     const text = state.text;
     const plan = planWanGpuGeneration(
@@ -645,6 +734,7 @@ export const generateWanVideo = async (
       state.layout,
       state.config,
       spec.generation,
+      tile32,
     );
     knobs = plan;
     encodeContexts = async () => {
@@ -661,6 +751,7 @@ export const generateWanVideo = async (
       state.config,
       spec.generation,
       spec.owner,
+      tile32,
     );
     knobs = plan;
     encodeContexts = () => Promise.resolve(precomputedContexts(plan, dit));

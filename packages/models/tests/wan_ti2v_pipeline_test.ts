@@ -26,7 +26,7 @@ import {
 } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { type DistributionSource, localDirectory, type Manifest, parseManifest } from "@karume/hub";
-import type { EnqueueOptions, RunInput, RunInputs, Tensor } from "@karume/runtime";
+import type { EnqueueOptions, RunInput, RunInputs, SessionOptions, Tensor } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
 import type { GraphOwner } from "../src/hub/components.ts";
 import type { Rgb8Image } from "../src/image/preprocess.ts";
@@ -50,6 +50,7 @@ import {
   wanUniPcSchedule,
 } from "../src/wan/scheduler.ts";
 import { wanVaeEncoderContract } from "../src/wan/vae-encoder.ts";
+import { wanVaeTile32Contract } from "../src/wan/tile-decode.ts";
 import { wanParityCase, wanParityEncoder } from "./helpers/wan-parity-encoder.ts";
 import type { WanRopeBase } from "../src/wan/dit-rope.ts";
 import { wanVaeChunkLayout } from "../src/wan/vae-chunks.ts";
@@ -181,8 +182,15 @@ const ditAssets = async (inputs: readonly DitInput[]) =>
 
 type VaeChannels = { readonly latent: number; readonly sample: number };
 
-/** VAE の chunk グラフ 1 本の容器の中身（潜在タイル 16・縮尺 8・cache 1 本 — 2.2 の系列と同じ幾何）。 */
-const vaeInput = (name: string, frames: number, channels: VaeChannels): ModelInput => ({
+/** Wan2.2's VAE channels (latent 48, exit 12 = RGB 3 × 2²). */
+const VAE_22_CHANNELS: VaeChannels = { latent: 48, sample: 12 };
+
+/**
+ * VAE の chunk グラフ 1 本の容器の中身（潜在タイル 16・縮尺 8・cache 1 本 — 2.2 の系列と同じ幾何）。`tile` 32 is
+ * the 32-latent pair's geometry (ADR 0134 — every spatial dimension doubled; like the tile-16 fixture it
+ * declares no initializer, so its "every initializer borrowed" holds vacuously).
+ */
+const vaeInput = (name: string, frames: number, channels: VaeChannels, tile = 16): ModelInput => ({
   graphs: {
     [name]: parseIrDeclarationValue({
       format: "karume-ir",
@@ -190,14 +198,14 @@ const vaeInput = (name: string, frames: number, channels: VaeChannels): ModelInp
       requires: { ops: ["mul"] },
       symbols: [],
       inputs: [
-        { name: "latent", dtype: "f32", shape: [channels.latent, 1, 16, 16] },
-        { name: "cache_00", dtype: "f32", shape: [4, 2, 16, 16] },
+        { name: "latent", dtype: "f32", shape: [channels.latent, 1, tile, tile] },
+        { name: "cache_00", dtype: "f32", shape: [4, 2, tile, tile] },
       ],
       outputs: ["frame", "cache_00_out"],
       initializers: {},
       values: {
-        frame: { dtype: "f32", shape: [channels.sample, frames, 128, 128] },
-        cache_00_out: { dtype: "f32", shape: [4, 2, 16, 16] },
+        frame: { dtype: "f32", shape: [channels.sample, frames, tile * 8, tile * 8] },
+        cache_00_out: { dtype: "f32", shape: [4, 2, tile, tile] },
       },
       states: {},
       nodes: [
@@ -213,8 +221,8 @@ const vaeInput = (name: string, frames: number, channels: VaeChannels): ModelInp
 });
 
 /** VAE の chunk グラフ 1 本の容器（`fromAssets` の part 列）。 */
-const vaeAssets = async (name: string, frames: number, channels: VaeChannels) =>
-  partAssets(name, await writeContainer(vaeInput(name, frames, channels)));
+const vaeAssets = async (name: string, frames: number, channels: VaeChannels, tile = 16) =>
+  partAssets(name, await writeContainer(vaeInput(name, frames, channels, tile)));
 
 /** I2V の VAE encoder のグラフ 1 本の宣言（入力 1 本 → 出力 1 本・記号長）。 */
 type EncoderGraph = {
@@ -290,9 +298,15 @@ const COMPONENTS = [
 
 /** 構築の入口のテストが使う manifest（系列から組む helper と同じ骨格 — 宣言だけ）。 */
 const ti2vManifest = (
-  overrides: { readonly pipeline?: string; readonly pipelineConfig?: unknown } = {},
-): Manifest =>
-  parseManifest(
+  overrides: {
+    readonly pipeline?: string;
+    readonly pipelineConfig?: unknown;
+    /** Components beyond {@link COMPONENTS} (the 32-latent decoder pair's roles — ADR 0134). */
+    readonly extraComponents?: readonly string[];
+  } = {},
+): Manifest => {
+  const components = [...COMPONENTS, ...(overrides.extraComponents ?? [])];
+  return parseManifest(
     JSON.stringify({
       format: "karume/5",
       generator: "karume/0.1.0",
@@ -301,14 +315,14 @@ const ti2vManifest = (
         "ti2v-5b": {
           pipeline: overrides.pipeline ?? "wan-ti2v/1",
           weights: Object.fromEntries(
-            COMPONENTS.map((name) => [name, { f16: declaredContainer(`${name}/model.f16`) }]),
+            components.map((name) => [name, { f16: declaredContainer(`${name}/model.f16`) }]),
           ),
           assets: {
             text_embeds: { path: "text_embeds.safetensors", size: 8, sha256: "e".repeat(64) },
           },
           quants: {
             f16: {
-              weights: Object.fromEntries(COMPONENTS.map((name) => [name, "f16"])),
+              weights: Object.fromEntries(components.map((name) => [name, "f16"])),
               session: {},
             },
           },
@@ -318,6 +332,7 @@ const ti2vManifest = (
       },
     }),
   );
+};
 
 /** 2.2 の宣言の資産一式（48 ch・出口 12 ch の VAE・7 入力の DiT・encoder 3 本・埋め込み幅 4096）。 */
 const VALID_ASSETS: WanAssets["assets"] = {
@@ -464,7 +479,11 @@ describe("WanTi2vPipeline.fromAssets: 家族 admission は 2.2 の世代で照�
  * 2.2 の宣言の容器を置いたメモリ上のディレクトリ（手元の配布形の席 — `localDirectory`）。`pipeline` だけを
  * 変えて、取得面の門が class の pipeline 名で効くかを見る。
  */
-const ti2vDirectory = async (pipeline: string): Promise<DistributionSource> => {
+const ti2vDirectory = async (
+  pipeline: string,
+  /** The 32-latent decoder pair's roles the preset carries (ADR 0134 — none by default). */
+  tile32Roles: readonly string[] = [],
+): Promise<DistributionSource> => {
   const transformer = await serveContainer(
     "ti2v/transformer/model.f16",
     ditInput(TI2V_DIT_INPUTS),
@@ -484,6 +503,18 @@ const ti2vDirectory = async (pipeline: string): Promise<DistributionSource> => {
         [name, await serveContainer(`ti2v/${name}/model.f16`, encoderInput(name, graph))] as const,
     ),
   );
+  const tile32 = await Promise.all(
+    tile32Roles.map(
+      async (name) =>
+        [
+          name,
+          await serveContainer(
+            `ti2v/${name}/model.f16`,
+            vaeInput(name, name.startsWith("vae_decoder_first") ? 1 : 4, VAE_22_CHANNELS, 32),
+          ),
+        ] as const,
+    ),
+  );
   const embeds = embedsAsset(4096);
   const embedsPath = "text_embeds.safetensors";
   const models = {
@@ -494,11 +525,12 @@ const ti2vDirectory = async (pipeline: string): Promise<DistributionSource> => {
         vae_decoder_first: { f16: first.entry },
         vae_decoder_next: { f16: next.entry },
         ...Object.fromEntries(encoders.map(([name, served]) => [name, { f16: served.entry }])),
+        ...Object.fromEntries(tile32.map(([name, served]) => [name, { f16: served.entry }])),
       },
       assets: { text_embeds: await fileRef(embedsPath, embeds) },
       quants: {
         f16: {
-          weights: Object.fromEntries(COMPONENTS.map((name) => [name, "f16"])),
+          weights: Object.fromEntries([...COMPONENTS, ...tile32Roles].map((name) => [name, "f16"])),
           session: {},
         },
       },
@@ -512,6 +544,7 @@ const ti2vDirectory = async (pipeline: string): Promise<DistributionSource> => {
     ...first.files,
     ...next.files,
     ...encoders.flatMap(([, served]) => [...served.files]),
+    ...tile32.flatMap(([, served]) => [...served.files]),
     [embedsPath, embeds],
   ]);
   return localDirectory(
@@ -554,16 +587,19 @@ describe("WanTi2vPipeline.fromPretrained: 取得面も 2.2 の family を渡す�
   });
 });
 
-/** 2.2 の VAE の chunk グラフ 2 本の宣言（潜在 48・タイル 16・縮尺 8・出口 12 = RGB 3 × 2²）。 */
-const vaeChunkGraphs = () => {
+/**
+ * 2.2 の VAE の chunk グラフ 2 本の宣言（潜在 48・タイル 16・縮尺 8・出口 12 = RGB 3 × 2²）。`tile` 32 is the
+ * 32-latent pair's geometry (ADR 0134 — every spatial dimension doubled).
+ */
+const vaeChunkGraphs = (tile = 16) => {
   const graph = (frames: number) =>
     stubModel({
       inputs: [
-        { name: "latent", shape: [48, 1, 16, 16] },
-        { name: "cache_00", shape: [4, 2, 16, 16] },
+        { name: "latent", shape: [48, 1, tile, tile] },
+        { name: "cache_00", shape: [4, 2, tile, tile] },
       ],
       outputs: ["frame", "cache_00_out"],
-      values: { frame: [12, frames, 128, 128], cache_00_out: [4, 2, 16, 16] },
+      values: { frame: [12, frames, tile * 8, tile * 8], cache_00_out: [4, 2, tile, tile] },
     });
   return { first: graph(1), next: graph(4) };
 };
@@ -690,6 +726,16 @@ const mockTi2v = (
     readonly failCreate?: string;
     /** encoder の mu の読み戻し（`finishAndRead`）を {@link READ_FAILURE} で reject する。 */
     readonly failRead?: boolean;
+    /**
+     * Builds the 32-latent decoder pair (ADR 0134): the 16-latent pair's Sessions become lenders
+     * that log `create` / `lend` / `dispose` with their options, and the pair's borrowers log their
+     * options and `sharedWeights`. `sessionOptions` is the state's quant settings; `failCreate`
+     * rejects that borrower's construction with {@link CREATE_FAILURE}.
+     */
+    readonly tile32?: {
+      readonly sessionOptions?: SessionOptions;
+      readonly failCreate?: "vae_decoder_first_32" | "vae_decoder_next_32";
+    };
   } = {},
 ) => {
   const log: string[] = [];
@@ -744,6 +790,57 @@ const mockTi2v = (
     },
   });
   const layout = wanVaeChunkLayout(first, next);
+  /** A 16-latent Session that lends its weights (only with `options.tile32`). */
+  const lenderSession = (name: string) => ({
+    createSession: (_gpu: unknown, sessionOptions: unknown) => {
+      log.push(`create:${name}:${JSON.stringify(sessionOptions)}`);
+      return Promise.resolve({
+        exportWeight: (initializer: string) => {
+          log.push(`lend:${name}:${initializer}`);
+          return { lentBy: name, initializer };
+        },
+        enqueue: (inputs: Record<string, Tensor>) => {
+          log.push(`enqueue:${name}`);
+          vaeLatents.push(inputs.latent);
+          return Promise.resolve();
+        },
+        diagnostics: () => ({}),
+        dispose: () => {
+          log.push(`dispose:${name}`);
+          return Promise.resolve();
+        },
+      });
+    },
+  });
+  /** A 32-latent Session that borrows (only with `options.tile32`). */
+  const borrowerSession = (name: "vae_decoder_first_32" | "vae_decoder_next_32") => ({
+    createSession: (_gpu: unknown, sessionOptions: Record<string, unknown>) => {
+      log.push(`create:${name}:${JSON.stringify(sessionOptions)}`);
+      if (options.tile32?.failCreate === name) return Promise.reject(CREATE_FAILURE);
+      return Promise.resolve({
+        enqueue: (inputs: Record<string, Tensor>) => {
+          log.push(`enqueue:${name}`);
+          vaeLatents.push(inputs.latent);
+          return Promise.resolve();
+        },
+        diagnostics: () => ({}),
+        dispose: () => {
+          log.push(`dispose:${name}`);
+          return Promise.resolve();
+        },
+      });
+    },
+  });
+  const tile32Graphs = vaeChunkGraphs(32);
+  const tile32 =
+    options.tile32 === undefined
+      ? undefined
+      : {
+          layout: wanVaeChunkLayout(tile32Graphs.first, tile32Graphs.next),
+          borrowed: { first: ["first.w"], next: ["next.w", "const.0"] },
+          first: borrowerSession("vae_decoder_first_32"),
+          next: borrowerSession("vae_decoder_next_32"),
+        };
   // 行数 64 は潜在 [48, 2, 44, 80] の格子（2 × 22 × 40）を覆う。値は門と無関係。
   const ropeBase: WanRopeBase = {
     rows: 64,
@@ -867,7 +964,8 @@ const mockTi2v = (
     },
     ownsGpu: false,
     config: CONFIG,
-    sessionOptions: {},
+    quantName: "f16",
+    sessionOptions: options.tile32?.sessionOptions ?? {},
     transformer: {
       createSession: () => {
         log.push("create:transformer");
@@ -888,8 +986,11 @@ const mockTi2v = (
         });
       },
     },
-    vaeFirst: vaeSession("vae_decoder_first"),
-    vaeNext: vaeSession("vae_decoder_next"),
+    vaeFirst:
+      tile32 === undefined ? vaeSession("vae_decoder_first") : lenderSession("vae_decoder_first"),
+    vaeNext:
+      tile32 === undefined ? vaeSession("vae_decoder_next") : lenderSession("vae_decoder_next"),
+    vaeTile32: tile32,
     vaeEncoder: {
       pre: encoderSession("vae_encoder_pre"),
       attn: encoderSession("vae_encoder_attn"),
@@ -1895,6 +1996,383 @@ describe("WanTi2vPipeline.fromAssets: I2V の VAE encoder の部品（家族 adm
       () => buildTi2v(ti2vManifest(), encoder),
       Error,
       `${OWNER} vae_encoder_pre input 'image' shape [12, 1, 4h, 4w] differs from the host's [12, 1, 8h, 8w]`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The VAE decoder's 32-latent tile (ADR 0134 — `vaeTile`: a second chunk-graph pair that borrows the
+// 16-latent pair's weights)
+// ---------------------------------------------------------------------------------------------
+
+const FIRST_32 = "vae_decoder_first_32";
+const NEXT_32 = "vae_decoder_next_32";
+const TILE32_ROLES = [FIRST_32, NEXT_32] as const;
+
+/** The 32-latent pair's containers (`tile` 16 puts the 16-latent geometry under the `_32` names). */
+const tile32Assets = async (tile = 32) => ({
+  ...(await vaeAssets(FIRST_32, 1, VAE_22_CHANNELS, tile)),
+  ...(await vaeAssets(NEXT_32, 4, VAE_22_CHANNELS, tile)),
+});
+
+/** The overlaps (latents) between neighbouring tiles of one axis of a tile plan. */
+const overlapsOf = (axis: { readonly tile: number; readonly starts: readonly number[] }) =>
+  axis.starts.slice(1).map((start, index) => axis.tile - (start - axis.starts[index]));
+
+describe("WanTi2vPipeline: the 32-latent decoder pair in family admission (ADR 0134)", () => {
+  it("a preset whose weights carry both _32 roles builds (fromAssets)", async () => {
+    const pipeline = await buildTi2v(
+      ti2vManifest({ extraComponents: TILE32_ROLES }),
+      await tile32Assets(),
+    );
+    assert(pipeline instanceof WanTi2vPipeline);
+    await pipeline.dispose();
+  });
+
+  for (const [present, missing] of [
+    [FIRST_32, NEXT_32],
+    [NEXT_32, FIRST_32],
+  ] as const) {
+    it(`a preset carrying '${present}' without '${missing}' fails loudly before any container is opened`, async () => {
+      const error = await assertRejects(
+        // No _32 container at all: the pair check comes before the components are opened.
+        () => buildTi2v(ti2vManifest({ extraComponents: [present] })),
+        Error,
+        `${OWNER} quant 'f16': the weights carry '${present}' without '${missing}'` +
+          " (the tile-32 VAE decoder is a pair — both roles or neither)",
+      );
+      assert(!(error instanceof ModelInputError), "a broken manifest is not an input error");
+    });
+  }
+
+  it("a _32 pair that declares a 16-latent tile is rejected in admission", async () => {
+    await assertRejects(
+      async () =>
+        buildTi2v(ti2vManifest({ extraComponents: TILE32_ROLES }), await tile32Assets(16)),
+      Error,
+      `${OWNER} the tile-32 VAE decoder (${FIRST_32} / ${NEXT_32}): the latent tile is 16, not 32`,
+    );
+  });
+
+  it("a _32 pair whose exit differs from the 16-latent pair's (RGB, no unpatchify) is rejected naming the pair", async () => {
+    const assets = {
+      ...(await vaeAssets(FIRST_32, 1, { latent: 48, sample: 3 }, 32)),
+      ...(await vaeAssets(NEXT_32, 4, { latent: 48, sample: 3 }, 32)),
+    };
+    await assertRejects(
+      () => buildTi2v(ti2vManifest({ extraComponents: TILE32_ROLES }), assets),
+      Error,
+      `${OWNER} the tile-32 VAE decoder (${FIRST_32} / ${NEXT_32}): scale 256 / 32, 48 → 3 channels` +
+        " differ from the tile-16 pair's 128 / 16, 48 → 12",
+    );
+  });
+
+  it("fromPretrained: a distribution carrying the pair builds; a lone _32 role fails before fetching", async () => {
+    const fromPretrained = (source: DistributionSource) =>
+      WanTi2vPipeline.fromPretrained(source, {
+        textEncoder: "precomputed",
+        gpu: fakeGpuContext(fakeDevice()),
+      });
+    const pipeline = await fromPretrained(await ti2vDirectory("wan-ti2v/1", TILE32_ROLES));
+    assert(pipeline instanceof WanTi2vPipeline);
+    await pipeline.dispose();
+    await assertRejects(
+      async () => fromPretrained(await ti2vDirectory("wan-ti2v/1", [NEXT_32])),
+      Error,
+      `${OWNER} quant 'f16': the weights carry '${NEXT_32}' without '${FIRST_32}'`,
+    );
+  });
+});
+
+describe("wanVaeTile32Contract: every weight of the 32-latent pair is borrowed from the lender of its role", () => {
+  type Initializers = GraphOwner["graph"]["initializers"];
+  const withInitializers = (owner: GraphOwner, initializers: Initializers): GraphOwner => ({
+    graph: { ...owner.graph, initializers },
+  });
+  const OWNED: Initializers = {
+    "w.a": { storage: { codec: "f16" } },
+    "const.0": { storage: { codec: "f32" } },
+  };
+  const SHARED: Initializers = { "w.a": { shared: true }, "const.0": { shared: true } };
+  const lenders = (initializers: Initializers = OWNED) => {
+    const graphs = vaeChunkGraphs();
+    return {
+      first: withInitializers(graphs.first, initializers),
+      next: withInitializers(graphs.next, initializers),
+    };
+  };
+  const pair = (first: Initializers, next: Initializers = SHARED) => {
+    const graphs = vaeChunkGraphs(32);
+    return {
+      first: withInitializers(graphs.first, first),
+      next: withInitializers(graphs.next, next),
+    };
+  };
+  const contract = (borrowers: ReturnType<typeof pair>, lent = lenders()) =>
+    wanVaeTile32Contract(
+      borrowers,
+      lent,
+      wanVaeChunkLayout(lent.first, lent.next),
+      WAN22_TI2V_FAMILY.generation,
+      "WanTi2vPipeline",
+    );
+
+  it("names every shared initializer of each borrower (the borrower's name is the lender's) and the 32-latent layout", () => {
+    const settled = contract(pair(SHARED, { "w.a": { shared: true } }));
+    assertEquals(settled.borrowed, { first: ["w.a", "const.0"], next: ["w.a"] });
+    assertEquals([settled.layout.tile, settled.layout.sampleTile], [32, 256]);
+  });
+
+  it("an initializer the borrower owns is rejected (the pair holds no weight bytes)", () => {
+    assertThrows(
+      () => contract(pair({ ...SHARED, "w.b": { storage: { codec: "f16" } } })),
+      Error,
+      `WanTi2vPipeline: ${FIRST_32}: 1 initializers are not shared (w.b…)`,
+    );
+  });
+
+  it("a shared initializer the lender does not have is rejected", () => {
+    assertThrows(
+      () => contract(pair(SHARED, { ...SHARED, "w.z": { shared: true } })),
+      Error,
+      `WanTi2vPipeline: ${NEXT_32}: 1 shared initializers have no weight of the same name in the lender (w.z…)`,
+    );
+  });
+
+  it("a pair whose spatial compression differs from the lenders' is rejected (the plan tiles the 16-latent latent shape with the pair's geometry)", () => {
+    const lent = lenders();
+    const lenderLayout = wanVaeChunkLayout(lent.first, lent.next);
+    assertThrows(
+      () =>
+        wanVaeTile32Contract(
+          pair(SHARED),
+          lent,
+          { ...lenderLayout, sampleTile: 64 },
+          WAN22_TI2V_FAMILY.generation,
+          "WanTi2vPipeline",
+        ),
+      Error,
+      `WanTi2vPipeline: the tile-32 VAE decoder (${FIRST_32} / ${NEXT_32}): scale 256 / 32, 48 → 12 channels` +
+        " differ from the tile-16 pair's 64 / 16, 48 → 12",
+    );
+  });
+
+  it("a lender initializer that is itself borrowed does not back a borrower (no borrowing chains)", () => {
+    assertThrows(
+      () =>
+        contract(
+          pair(SHARED),
+          lenders({ "w.a": { shared: true }, "const.0": { storage: { codec: "f32" } } }),
+        ),
+      Error,
+      `WanTi2vPipeline: ${FIRST_32}: 1 shared initializers have no weight of the same name in the lender (w.a…)`,
+    );
+  });
+});
+
+describe("planWanRequest: vaeTile picks the decoder pair's geometry (ADR 0134 decisions 2 and 4)", () => {
+  const embeds: WanTextEmbeds = parseWanTextEmbeds(embedsAsset(3).buffer);
+  const layout16 = (() => {
+    const graphs = vaeChunkGraphs();
+    return wanVaeChunkLayout(graphs.first, graphs.next);
+  })();
+  const layout32 = (() => {
+    const graphs = vaeChunkGraphs(32);
+    return wanVaeChunkLayout(graphs.first, graphs.next);
+  })();
+  const plan = (
+    request: Partial<WanTi2vGenerateRequest>,
+    tile32: { readonly layout: typeof layout32 | undefined; readonly quant: string } = {
+      layout: layout32,
+      quant: "f16",
+    },
+  ) =>
+    planWanGeneration(
+      { prompt: "Two cats.", ...request },
+      embeds,
+      layout16,
+      CONFIG,
+      WAN22_TI2V_FAMILY.generation,
+      WAN22_TI2V_FAMILY.owner,
+      tile32,
+    );
+
+  it("omitted and 16 plan the 16-latent pair: 4 rows × 7 cols at 1280×704", () => {
+    for (const request of [{}, { vaeTile: 16 as const }]) {
+      const planned = plan(request);
+      assertEquals(planned.vaeTile, 16);
+      assertEquals([planned.tiles.rows.tile, planned.tiles.cols.tile], [16, 16]);
+      assertEquals([planned.tiles.rows.starts.length, planned.tiles.cols.starts.length], [4, 7]);
+    }
+  });
+
+  it("32 plans the 32-latent pair: 2 rows × 3 cols at 1280×704 (3 × 2 at 704×1280), every overlap at least 4 latents", () => {
+    const wide = plan({ vaeTile: 32 });
+    assertEquals(wide.vaeTile, 32);
+    assertEquals([wide.tiles.rows.tile, wide.tiles.cols.tile], [32, 32]);
+    assertEquals([wide.tiles.rows.starts.length, wide.tiles.cols.starts.length], [2, 3]);
+    const tall = plan({ vaeTile: 32, width: 704, height: 1280 });
+    assertEquals([tall.tiles.rows.starts.length, tall.tiles.cols.starts.length], [3, 2]);
+    for (const planned of [wide, tall]) {
+      for (const axis of [planned.tiles.rows, planned.tiles.cols]) {
+        const overlaps = overlapsOf(axis);
+        assert(
+          overlaps.every((overlap) => overlap >= 4),
+          `overlap below 4 latents: [${overlaps.join(", ")}] (starts [${axis.starts.join(", ")}])`,
+        );
+      }
+    }
+  });
+
+  for (const value of [24, 0, "32"] as const) {
+    it(`vaeTile ${JSON.stringify(value)} is a ModelInputError`, () => {
+      assertThrows(
+        () => plan(requestWith("vaeTile", value)),
+        ModelInputError,
+        `vaeTile ${String(value)} is neither 16 nor 32`,
+      );
+    });
+  }
+
+  it("32 without the 32-latent pair is a ModelInputError naming the preset (16 still plans)", () => {
+    const absent = { layout: undefined, quant: "f16+dit8" };
+    assertThrows(
+      () => plan({ vaeTile: 32 }, absent),
+      ModelInputError,
+      "vaeTile 32 is not available for quant 'f16+dit8': the manifest has no tile-32 VAE decoder" +
+        " (no vae_decoder_first_32 / vae_decoder_next_32 weights — use vaeTile 16)",
+    );
+    assertEquals(plan({ vaeTile: 16 }, absent).vaeTile, 16);
+  });
+});
+
+describe("WanTi2vPipeline.generate with vaeTile 32 (mock Sessions — the 16 pair lends, the 32 pair borrows and runs)", () => {
+  /** The construction, lending and disposal entries of the decoder stage, in order. */
+  const decoderLifecycle = (log: readonly string[]) =>
+    log.filter(
+      (entry) => /^(create|lend|dispose):vae_decoder/.test(entry) || entry.startsWith("release:"),
+    );
+
+  it("lenders → borrowers (every borrowed weight lent by name) → residents; borrowers → lenders → residents on the way out; 6 tiles", async () => {
+    const { log, diagnosed, vaeLatents, generate } = mockTi2v({ tile32: {} });
+    const video = await generate({ vaeTile: 32 });
+    assertEquals([video.frames, video.width, video.height], [5, 1280, 704]);
+    const lent = (by: string, name: string) => ({ lentBy: by, initializer: name });
+    assertEquals(decoderLifecycle(log), [
+      "create:vae_decoder_first:{}",
+      "create:vae_decoder_next:{}",
+      "lend:vae_decoder_first:first.w",
+      `create:${FIRST_32}:${JSON.stringify({ sharedWeights: { "first.w": lent("vae_decoder_first", "first.w") } })}`,
+      "lend:vae_decoder_next:next.w",
+      "lend:vae_decoder_next:const.0",
+      `create:${NEXT_32}:${JSON.stringify({
+        sharedWeights: {
+          "next.w": lent("vae_decoder_next", "next.w"),
+          "const.0": lent("vae_decoder_next", "const.0"),
+        },
+      })}`,
+      `dispose:${FIRST_32}`,
+      `dispose:${NEXT_32}`,
+      "dispose:vae_decoder_first",
+      "dispose:vae_decoder_next",
+      "release:cache_00",
+      "release:frame 0",
+      "release:frame 1",
+    ]);
+    assert(
+      log.indexOf("resident:cache_00") >
+        log.indexOf(
+          `create:${NEXT_32}:${JSON.stringify({ sharedWeights: { "next.w": lent("vae_decoder_next", "next.w"), "const.0": lent("vae_decoder_next", "const.0") } })}`,
+        ),
+      "the residents are allocated after the borrowers",
+    );
+    assertEquals(log.filter((entry) => entry.startsWith("tile:")).length, 6);
+    // The lenders never run; each tile runs the borrowers (first, then one next — 5 frames = 2 chunks).
+    assertEquals(
+      log.filter((entry) => entry.startsWith("enqueue:vae_decoder")),
+      Array.from({ length: 6 }, () => [`enqueue:${FIRST_32}`, `enqueue:${NEXT_32}`]).flat(),
+    );
+    assertEquals(vaeLatents[0].shape, [48, 1, 32, 32]);
+    assertEquals(
+      diagnosed.filter((component) => component.startsWith("vae_decoder")),
+      Array.from({ length: 6 }, () => [FIRST_32, NEXT_32]).flat(),
+    );
+    assertEquals(log.at(-1), "vae_decoder:end");
+  });
+
+  it("the blended 32-latent tiles unpatchify like the 16-latent ones (RGB pixel (y, x) = patch channel c·4 + (x%2)·2 + (y%2))", async () => {
+    const { generate } = mockTi2v({ tile32: {} });
+    const video = await generate({ vaeTile: 32 });
+    let worst = 0;
+    for (let channel = 0; channel < 3; channel += 1) {
+      for (let frame = 0; frame < 5; frame += 1) {
+        for (let y = 0; y < 704; y += 1) {
+          const row = ((channel * 5 + frame) * 704 + y) * 1280;
+          for (let x = 0; x < 1280; x += 1) {
+            const expected = patchValue(channel * 4 + (x % 2) * 2 + (y % 2));
+            worst = Math.max(worst, Math.abs(video.data[row + x] - expected));
+          }
+        }
+      }
+    }
+    assert(worst <= 1e-6, `a pixel differs from the unpatchify order (max diff ${worst})`);
+  });
+
+  it("lenders and borrowers both take the decoder's options (the conv knob only)", async () => {
+    const { log, generate } = mockTi2v({
+      tile32: { sessionOptions: { convCompute: "a8", linearCompute: "a8" } },
+    });
+    await generate({ vaeTile: 32 });
+    const created = log.filter((entry) => entry.startsWith("create:vae_decoder"));
+    assertEquals(created.slice(0, 2), [
+      'create:vae_decoder_first:{"convCompute":"a8"}',
+      'create:vae_decoder_next:{"convCompute":"a8"}',
+    ]);
+    for (const entry of created.slice(2)) {
+      assert(entry.includes(':{"convCompute":"a8","sharedWeights":{'), entry);
+    }
+  });
+
+  it("omitted vaeTile on a preset with the pair runs the 16-latent pair alone (no lender, no borrower, 28 tiles)", async () => {
+    const { log, diagnosed, generate } = mockTi2v({ tile32: {} });
+    await generate();
+    assertEquals(
+      log.filter((entry) => /^(create|lend):vae_decoder/.test(entry)),
+      ["create:vae_decoder_first:{}", "create:vae_decoder_next:{}"],
+    );
+    assertEquals(log.filter((entry) => entry.startsWith("tile:")).length, 28);
+    assert(
+      diagnosed.every((component) => !component.endsWith("_32")),
+      "a _32 component reported diagnostics on the 16-latent path",
+    );
+  });
+
+  it("a borrower that fails to build: the built borrower, then both lenders are closed, the failure is thrown as is", async () => {
+    const { log, generate } = mockTi2v({ tile32: { failCreate: NEXT_32 } });
+    const error = await assertRejects(() => generate({ vaeTile: 32 }));
+    assertStrictEquals(error, CREATE_FAILURE);
+    assertEquals(
+      decoderLifecycle(log).filter(
+        (entry) => entry.startsWith("dispose:") || entry.startsWith("release:"),
+      ),
+      [`dispose:${FIRST_32}`, "dispose:vae_decoder_first", "dispose:vae_decoder_next"],
+    );
+    assert(
+      !log.includes("resident:cache_00"),
+      "no resident is allocated before the borrowers exist",
+    );
+  });
+
+  it("vaeTile 32 on a pipeline without the pair is a ModelInputError before any Session is built", async () => {
+    const { log, generate } = mockTi2v();
+    await assertRejects(
+      () => generate({ vaeTile: 32 }),
+      ModelInputError,
+      "vaeTile 32 is not available for quant 'f16': the manifest has no tile-32 VAE decoder",
+    );
+    assertEquals(
+      log.filter((entry) => entry.startsWith("create:")),
+      [],
     );
   });
 });

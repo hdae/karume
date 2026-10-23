@@ -74,7 +74,13 @@ export type WanGenerationKnobs = {
    * rebuild it).
    */
   readonly schedule: WanUniPcSchedule;
-  /** The VAE tile plan (latent `H/s × W/s` — made before denoise). */
+  /**
+   * The edge of the VAE decoder's latent tile (`WanGenerateRequest.vaeTile` — 16 when omitted). It
+   * picks the decoder's chunk-graph pair (ADR 0134 — 32 runs the pair that borrows the 16 pair's
+   * weights).
+   */
+  readonly vaeTile: WanVaeTile;
+  /** The VAE tile plan (latent `H/s × W/s` — made before denoise, from the pair of {@link vaeTile}). */
   readonly tiles: WanVaeTilePlan;
   /**
    * The VAE encoder input from the preprocessed I2V condition image (only for a request that passes
@@ -89,6 +95,19 @@ export type PlanLayout = Pick<
   WanVaeChunkLayout,
   "latentChannels" | "tile" | "sampleTile" | "sampleChannels"
 >;
+
+/** The VAE decoder's latent tile edges a request can choose (ADR 0134 decision 2). */
+export type WanVaeTile = NonNullable<WanTi2vGenerateRequest["vaeTile"]>;
+
+/**
+ * What the plan knows about the 32-latent decoder pair (ADR 0134 decision 2): its geometry, or
+ * `undefined` when the preset's weights carry no `_32` roles, and the preset's name for the
+ * rejection.
+ */
+export type WanVaeTile32Plan = {
+  readonly layout?: PlanLayout;
+  readonly quant: string;
+};
 
 /** The prompt check per path ({@link planWanRequest} calls it in one check order). */
 export type PromptGate<Text> = {
@@ -121,6 +140,7 @@ type WanPlanRequest = Pick<
   | "height"
   | "image"
   | "fit"
+  | "vaeTile"
 >;
 
 /**
@@ -182,6 +202,10 @@ const assertRgb8Shaped = (image: unknown): void => {
  * alone reveal would fail after paying for every step. The family admission (`assertWanVaeTilesCover`
  * in `tile-decode.ts`) has already passed every accepted size, so a failure here comes only from a
  * call that bypassed admission (an asset mismatch — a plain `Error`).
+ *
+ * `vaeTile` 32 plans with the geometry of the 32-latent pair (`tile32.layout`); without that pair
+ * (`tile32` omitted or its layout undefined — Wan2.1, or a preset without the `_32` roles) it is a
+ * `ModelInputError` naming the preset. The overlap stays 64 px of output (ADR 0121 decision 6).
  */
 export const planWanRequest = <Text>(
   request: WanPlanRequest,
@@ -189,6 +213,7 @@ export const planWanRequest = <Text>(
   layout: PlanLayout,
   config: WanPipelineConfig,
   generation: WanGenerationDescriptor,
+  tile32?: WanVaeTile32Plan,
 ): WanGenerationPlan<Text> => {
   const resolve = (text: unknown, what: "prompt" | "negativePrompt"): Text => {
     if (typeof text !== "string") throw new ModelInputError(`${what} is not a string`);
@@ -341,9 +366,25 @@ export const planWanRequest = <Text>(
     initial = { kind: "seed", seed };
   }
 
+  const vaeTile = request.vaeTile ?? 16;
+  // A value a JS caller passes past the type (`"32"`, 24, 0) is an input error, not a silent default.
+  if (vaeTile !== 16 && vaeTile !== 32) {
+    throw new ModelInputError(`vaeTile ${String(vaeTile)} is neither 16 nor 32`);
+  }
+  let tileLayout = layout;
+  if (vaeTile === 32) {
+    if (tile32?.layout === undefined) {
+      const preset = tile32 === undefined ? "this preset" : `quant '${tile32.quant}'`;
+      throw new ModelInputError(
+        `vaeTile 32 is not available for ${preset}: the manifest has no tile-32 VAE decoder` +
+          " (no vae_decoder_first_32 / vae_decoder_next_32 weights — use vaeTile 16)",
+      );
+    }
+    tileLayout = tile32.layout;
+  }
   // The overlap formula (64 px ÷ spatial compression) is computed after the latent integer check
   // (the same order as `assertWanVaeTilesCover`).
-  const tiles = planWanGenerationTiles(layout, latentShape[2], latentShape[3], generation);
+  const tiles = planWanGenerationTiles(tileLayout, latentShape[2], latentShape[3], generation);
   return {
     positive,
     negative,
@@ -356,6 +397,7 @@ export const planWanRequest = <Text>(
     latentShape,
     initial,
     schedule,
+    vaeTile,
     tiles,
     conditionImage,
   };

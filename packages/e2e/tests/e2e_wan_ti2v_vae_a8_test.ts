@@ -34,7 +34,6 @@ import {
   type GpuContext,
   prepareContainer,
   type Session,
-  type SessionDiagnostics,
   type SessionOptions,
 } from "@karume/runtime";
 import {
@@ -69,6 +68,7 @@ import {
 import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
+import { conv3dCensus } from "./helpers/conv3d-census.ts";
 
 /**
  * The collapse ceiling of the subject against the control at the first chunk's output frame (relative
@@ -129,24 +129,6 @@ const relativeRms = (got: Float32Array, reference: Float32Array): number => {
 /** The first chunk's output frame (`[12, 1, 128, 128]` — the first frame of the sequence). */
 const firstChunkFrame = (frames: Float32Array<ArrayBuffer>): Float32Array<ArrayBuffer> =>
   frames.slice(0, SAMPLE_CHANNELS * SAMPLE_TILE * SAMPLE_TILE);
-
-/** conv3d dispatch counts of the last run, split by the w8a8 key and the f32 key. */
-const conv3dCensus = (
-  graph: string,
-  diagnostics: SessionDiagnostics,
-): { readonly w8a8: number; readonly f32: number; readonly preludes: number } => {
-  const pipelines = diagnostics.lastRunPipelines;
-  if (pipelines === undefined) throw new Error(`${graph}: 直近 run の pipeline の census が無い`);
-  const sum = (predicate: (key: string) => boolean): number =>
-    pipelines
-      .filter(({ key }) => predicate(key))
-      .reduce((total, { dispatchCount }) => total + dispatchCount, 0);
-  return {
-    w8a8: sum((key) => key.startsWith("conv3d:") && key.split(":")[2] === "i8a8"),
-    f32: sum((key) => key.startsWith("conv3d:") && key.split(":")[2] === "f32"),
-    preludes: sum((key) => key.startsWith("quantize_rows:")),
-  };
-};
 
 const poisonFrames = async (caches: WanVaeChunkCaches, chunks: number): Promise<void> => {
   for (const resident of await caches.frames(chunks)) {

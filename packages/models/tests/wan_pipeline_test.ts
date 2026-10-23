@@ -1318,6 +1318,7 @@ const mockPipeline = (options: {
     },
     ownsGpu: false,
     config: CONFIG,
+    quantName: "f16",
     sessionOptions: {},
     transformer: {
       createSession: () => {
@@ -1550,6 +1551,30 @@ describe("WanPipeline.generate: I2V の欄（Wan2.2 だけの image / fit — JS
       );
     });
   }
+});
+
+describe("WanPipeline.generate: vaeTile (ADR 0134 — Wan2.1 has no 32-latent decoder pair)", () => {
+  it("vaeTile 32 is a ModelInputError naming the preset, before any Session is built", async () => {
+    const { log, generate } = mockPipeline({});
+    await assertRejects(
+      () => generate(undefined, { vaeTile: 32 }),
+      ModelInputError,
+      "vaeTile 32 is not available for quant 'f16': the manifest has no tile-32 VAE decoder" +
+        " (no vae_decoder_first_32 / vae_decoder_next_32 weights — use vaeTile 16)",
+    );
+    assertEquals(
+      log.filter((entry) => entry.startsWith("create:")),
+      [],
+    );
+  });
+
+  it("vaeTile 16 is the default: the same tiles and the same two decoder Sessions as an omitted knob", async () => {
+    const omitted = mockPipeline({});
+    await omitted.generate();
+    const explicit = mockPipeline({});
+    await explicit.generate(undefined, { vaeTile: 16 });
+    assertEquals(explicit.log, omitted.log);
+  });
 });
 
 describe("planWanGpuGeneration（GPU 経路の入口の門）", () => {

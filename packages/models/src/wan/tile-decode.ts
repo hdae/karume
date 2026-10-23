@@ -19,17 +19,23 @@
  * CLAUDE.md).
  */
 
-import type { GpuContext, Session, SessionDiagnostics, SessionOptions } from "@karume/runtime";
+import type {
+  GpuContext,
+  Session,
+  SessionDiagnostics,
+  SessionOptions,
+  SharedWeight,
+} from "@karume/runtime";
 
 import { settleAbort } from "../concurrency/abort.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
-import type { ModelComponent } from "../hub/components.ts";
+import type { GraphOwner, ModelComponent } from "../hub/components.ts";
 import type { WanGenerateEvent, WanRunComponent } from "./pipeline.ts";
 import type { PlanLayout, WanGenerationKnobs } from "./plan.ts";
 import type { WanGenerationDescriptor } from "./descriptor.ts";
 import { firstNonFinite } from "./graph-io.ts";
 import { denormalizeWanLatents } from "./latents.ts";
-import { WanVaeChunkCaches, type WanVaeChunkLayout } from "./vae-chunks.ts";
+import { WanVaeChunkCaches, type WanVaeChunkLayout, wanVaeChunkLayout } from "./vae-chunks.ts";
 import {
   clampWanVaeFrames,
   decodeWanVaeTiled,
@@ -44,6 +50,15 @@ import {
 /** Component keys (the series' graph names = the weights names of the step 7 manifest). */
 export const VAE_DECODER_FIRST = "vae_decoder_first";
 export const VAE_DECODER_NEXT = "vae_decoder_next";
+/**
+ * The 32-latent pair's component keys (ADR 0134 — weightless containers whose every initializer
+ * borrows the weight of the same name from {@link VAE_DECODER_FIRST} / {@link VAE_DECODER_NEXT}).
+ */
+export const VAE_DECODER_FIRST_32 = "vae_decoder_first_32";
+export const VAE_DECODER_NEXT_32 = "vae_decoder_next_32";
+
+/** The latent tile edge the 32-latent pair must declare (the value of `vaeTile` that runs it). */
+const WAN_VAE_TILE_32 = 32;
 
 /**
  * The channel count of the final output (RGB). The VAE graph's exit is `WAN_RGB_CHANNELS ·
@@ -179,6 +194,109 @@ export const assertWanVaeTilesCover = (
 };
 
 /**
+ * The initializers a borrowing chunk graph takes from its lender, by name (IR v2: a `shared`
+ * initializer's name is the lender's initializer name — ADR 0096 decision 2).
+ *
+ * MUST: every initializer of the borrower is shared (ADR 0134 decision 1 — the 32-latent pair holds
+ * no weight bytes), and each names a lender initializer that is not itself shared. Checked in
+ * admission, before the decoder's weight parts are fetched; the runtime's own checks (shape, dtype,
+ * residency class, device, "every shared declaration, no more, no fewer") run when the borrower's
+ * Session is built.
+ */
+const borrowedInitializers = (
+  borrower: GraphOwner,
+  lender: GraphOwner,
+  where: string,
+): readonly string[] => {
+  const names = Object.keys(borrower.graph.initializers);
+  const owned = names.filter((name) => borrower.graph.initializers[name].shared !== true);
+  if (owned.length > 0) {
+    throw new Error(
+      `${where}: ${owned.length} initializers are not shared (${owned.slice(0, 3).join(", ")}…) —` +
+        " the tile-32 decoder pair borrows every weight from the tile-16 pair (ADR 0134)",
+    );
+  }
+  const unbacked = names.filter(
+    (name) =>
+      !Object.hasOwn(lender.graph.initializers, name) ||
+      lender.graph.initializers[name].shared === true,
+  );
+  if (unbacked.length > 0) {
+    throw new Error(
+      `${where}: ${unbacked.length} shared initializers have no weight of the same name in the lender` +
+        ` (${unbacked.slice(0, 3).join(", ")}…)`,
+    );
+  }
+  return names;
+};
+
+/** The 32-latent pair's contract (what {@link wanVaeTile32Contract} settles in admission). */
+export type WanVaeTile32Contract = {
+  readonly layout: WanVaeChunkLayout;
+  /** The initializers each borrower takes from its lender (by the same name). */
+  readonly borrowed: { readonly first: readonly string[]; readonly next: readonly string[] };
+};
+
+/**
+ * Checks the 32-latent decoder pair against its lenders (the 16-latent pair) and the generation (a
+ * family admission check — ADR 0134): the chunk-graph contract (`wanVaeChunkLayout`), a latent tile
+ * of 32, the same spatial compression and channels as the lenders' layout (the plan derives the
+ * latent shape from the 16-latent layout and tiles it with this one — the two must agree), the
+ * generation's channels ({@link assertWanVaeMatchesGeneration}), every accepted size covered
+ * ({@link assertWanVaeTilesCover}), and every initializer borrowed from the lender of the same role
+ * ({@link borrowedInitializers}). Every message names the pair.
+ *
+ * NOTE: `export` is for tests that pin the checks without a GPU (not on the `mod.ts` / subpath
+ * surface — ADR 0008).
+ */
+export const wanVaeTile32Contract = (
+  pair: { readonly first: GraphOwner; readonly next: GraphOwner },
+  lenders: { readonly first: GraphOwner; readonly next: GraphOwner },
+  lenderLayout: PlanLayout,
+  generation: WanGenerationDescriptor,
+  owner: string,
+): WanVaeTile32Contract => {
+  const where = `${owner}: the tile-32 VAE decoder (${VAE_DECODER_FIRST_32} / ${VAE_DECODER_NEXT_32})`;
+  let layout: WanVaeChunkLayout;
+  try {
+    layout = wanVaeChunkLayout(pair.first, pair.next);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`${where}: ${reason}`, { cause: error });
+  }
+  if (layout.tile !== WAN_VAE_TILE_32) {
+    throw new Error(`${where}: the latent tile is ${layout.tile}, not ${WAN_VAE_TILE_32}`);
+  }
+  const compression = (of: PlanLayout) => of.sampleTile / of.tile;
+  if (
+    compression(layout) !== compression(lenderLayout) ||
+    layout.latentChannels !== lenderLayout.latentChannels ||
+    layout.sampleChannels !== lenderLayout.sampleChannels
+  ) {
+    throw new Error(
+      `${where}: scale ${layout.sampleTile} / ${layout.tile}, ${layout.latentChannels} → ` +
+        `${layout.sampleChannels} channels differ from the tile-16 pair's ${lenderLayout.sampleTile} / ` +
+        `${lenderLayout.tile}, ${lenderLayout.latentChannels} → ${lenderLayout.sampleChannels}`,
+    );
+  }
+  assertWanVaeMatchesGeneration(layout, generation, where);
+  assertWanVaeTilesCover(layout, generation, where);
+  return {
+    layout,
+    borrowed: {
+      first: borrowedInitializers(pair.first, lenders.first, `${owner}: ${VAE_DECODER_FIRST_32}`),
+      next: borrowedInitializers(pair.next, lenders.next, `${owner}: ${VAE_DECODER_NEXT_32}`),
+    },
+  };
+};
+
+/** The built 32-latent pair (only for a preset whose weights carry the `_32` roles). */
+export type WanVaeTile32 = WanVaeTile32Contract & {
+  readonly first: ModelComponent;
+  readonly next: ModelComponent;
+};
+
+/**
  * The built material the VAE stage reads (this stage's part of the pipeline's internal state — taken
  * structurally).
  */
@@ -189,6 +307,8 @@ type WanVaeDecodeState = {
   readonly vaeFirst: ModelComponent;
   readonly vaeNext: ModelComponent;
   readonly layout: WanVaeChunkLayout;
+  /** The 32-latent pair (undefined when the preset has none — a plan never asks for it then). */
+  readonly vaeTile32?: WanVaeTile32;
   readonly onRunDiagnostics?: (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
@@ -266,11 +386,6 @@ export const finishWanVaeFrames = (
 };
 
 /**
- * The VAE stage (creates the Sessions of the two chunk graphs and the resident caches, runs the tiled
- * decode and closes them). The final shape check, unpatchify, finiteness and clamp are in
- * {@link finishWanVaeFrames}.
- */
-/**
  * The Session options of the VAE decoder: the conv knob alone (ADR 0133 decision 6 — `convCompute:
  * "a8"` is the VAE's opt-in; the linear / attention knobs of the preset are the transformer's).
  * NOTE: `export` is for the host test of the decoder stage (not on the public surface — ADR 0008).
@@ -278,6 +393,26 @@ export const finishWanVaeFrames = (
 export const wanVaeSessionOptions = (sessionOptions: SessionOptions): SessionOptions =>
   sessionOptions.convCompute === undefined ? {} : { convCompute: sessionOptions.convCompute };
 
+/**
+ * The borrower's `sharedWeights`: each borrowed initializer → the lender Session's weight of the
+ * same name (`Session.exportWeight` — the runtime checks the set, shapes, dtypes and residency).
+ */
+const lentWeights = (
+  lender: Session,
+  names: readonly string[],
+): Readonly<Record<string, SharedWeight>> =>
+  Object.fromEntries(names.map((name) => [name, lender.exportWeight(name)]));
+
+/**
+ * The VAE stage (creates the Sessions of the two chunk graphs and the resident caches, runs the tiled
+ * decode and closes them). The final shape check, unpatchify, finiteness and clamp are in
+ * {@link finishWanVaeFrames}.
+ *
+ * `plan.vaeTile` 32 (ADR 0134 decision 3): the 16-latent pair's Sessions are built with the stage's
+ * options as **lenders** (they never run), then the 32-latent pair's Sessions as **borrowers** of
+ * every weight (`sharedWeights` — one copy of the weights on the device); the caches and the frame
+ * residents are sized by the 32-latent layout. The 16-latent path builds no lender.
+ */
 export const decodeWanVaeStage = async (
   state: WanVaeDecodeState,
   plan: WanGenerationKnobs,
@@ -287,13 +422,21 @@ export const decodeWanVaeStage = async (
   signal: AbortSignal | undefined,
   owner: string,
 ): Promise<Float32Array<ArrayBuffer>> => {
-  const { layout } = state;
+  const tile32 = plan.vaeTile === 32 ? state.vaeTile32 : undefined;
+  if (plan.vaeTile === 32 && tile32 === undefined) {
+    // The plan accepts 32 only when the pair exists (`planWanRequest`), so this is broken wiring.
+    throw new Error(`${owner}: the plan asks for vaeTile 32 but the tile-32 decoder is not built`);
+  }
+  const layout = tile32?.layout ?? state.layout;
   const tilePlan = plan.tiles;
   const tiles = wanVaeTileCount(tilePlan);
   const denormalized = denormalizeWanLatents(latents, generation.latents);
   const observe = state.onRunDiagnostics;
 
   await emit({ kind: "stage", component: "vae_decoder", at: "start" });
+  /** The 16-latent pair as lenders (only for `vaeTile` 32 — they never run). */
+  let lenderFirst: Session | undefined;
+  let lenderNext: Session | undefined;
   let first: Session | undefined;
   let next: Session | undefined;
   let caches: WanVaeChunkCaches | undefined;
@@ -305,8 +448,24 @@ export const decodeWanVaeStage = async (
     // declaration through the acceptance table, is the DiT Session's; the same contract as
     // anima's `withStage` for everything but conv3d).
     const vaeOptions = wanVaeSessionOptions(state.sessionOptions);
-    first = await state.vaeFirst.createSession(state.gpu, vaeOptions);
-    next = await state.vaeNext.createSession(state.gpu, vaeOptions);
+    if (tile32 === undefined) {
+      first = await state.vaeFirst.createSession(state.gpu, vaeOptions);
+      next = await state.vaeNext.createSession(state.gpu, vaeOptions);
+    } else {
+      // MUST: the lenders take the stage's options (the conv knob included) — a borrower's
+      // residency class is derived from its lender's, so the shared weights are resident in the
+      // form the borrower's kernels read.
+      lenderFirst = await state.vaeFirst.createSession(state.gpu, vaeOptions);
+      lenderNext = await state.vaeNext.createSession(state.gpu, vaeOptions);
+      first = await tile32.first.createSession(state.gpu, {
+        ...vaeOptions,
+        sharedWeights: lentWeights(lenderFirst, tile32.borrowed.first),
+      });
+      next = await tile32.next.createSession(state.gpu, {
+        ...vaeOptions,
+        sharedWeights: lentWeights(lenderNext, tile32.borrowed.next),
+      });
+    }
     caches = await WanVaeChunkCaches.create(state.gpu, layout);
     // Before the first tile (a cancellation that arrived during the start notification or while
     // allocating resources takes effect here — as in the text / encoder / DiT stages, checked after
@@ -314,6 +473,11 @@ export const decodeWanVaeStage = async (
     // below).
     await settleAbort(signal);
     const sessions = { first, next };
+    // The Sessions that run report under their own component (the borrowers for tile 32).
+    const [firstComponent, nextComponent] =
+      tile32 === undefined
+        ? ([VAE_DECODER_FIRST, VAE_DECODER_NEXT] as const)
+        : ([VAE_DECODER_FIRST_32, VAE_DECODER_NEXT_32] as const);
     frames = await decodeWanVaeTiled(
       state.gpu,
       sessions,
@@ -321,8 +485,8 @@ export const decodeWanVaeStage = async (
       tilePlan,
       denormalized,
       async (tile) => {
-        observe?.("vae_decoder_first", sessions.first.diagnostics());
-        observe?.("vae_decoder_next", sessions.next.diagnostics());
+        observe?.(firstComponent, sessions.first.diagnostics());
+        observe?.(nextComponent, sessions.next.diagnostics());
         await emit({ kind: "vae-tile", tile, tiles });
         // Between tiles (one tile = one batch, indivisible — cancellation takes effect before the
         // next tile).
@@ -333,15 +497,18 @@ export const decodeWanVaeStage = async (
     failure = { error };
     throw error;
   } finally {
-    // MUST: close Sessions → residents in that order (the same as the step 4 / 5 e2e). A failure to
-    // close does not overwrite the main failure.
-    const opened = { first, next, caches };
+    // MUST: close Sessions → residents in that order (the same as the step 4 / 5 e2e), and the
+    // borrowers before their lenders (the runtime refuses to dispose a lender while a borrower is
+    // alive). A failure to close does not overwrite the main failure.
+    const opened = { first, next, lenderFirst, lenderNext, caches };
     await disposeSteps([
       () => {
         if (failure !== undefined) throw failure.error;
       },
       () => opened.first?.dispose(),
       () => opened.next?.dispose(),
+      () => opened.lenderFirst?.dispose(),
+      () => opened.lenderNext?.dispose(),
       () => opened.caches?.dispose(),
     ]);
   }

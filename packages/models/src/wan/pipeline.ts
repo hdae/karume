@@ -153,7 +153,10 @@ export type WanLatentSnapshot = {
  * The component names that {@link WanPipelineOptions.onRunDiagnostics} receives (one Session = one
  * name). `text_encoder` is the umT5 of the `"gpu"` path (once each for positive / negative).
  * `vae_encoder_*` are the three graphs of Wan2.2's I2V encoder (once each for a request that passes a
- * condition image).
+ * condition image). `vae_decoder_first_32` / `vae_decoder_next_32` are the decoder's 32-latent pair
+ * that runs for a request with {@link WanGenerateRequest.vaeTile} 32 (in place of
+ * `vae_decoder_first` / `vae_decoder_next` — the 16-latent pair only lends its weights then and does
+ * not run).
  */
 export type WanRunComponent =
   | "vae_encoder_pre"
@@ -162,7 +165,9 @@ export type WanRunComponent =
   | "text_encoder"
   | "transformer"
   | "vae_decoder_first"
-  | "vae_decoder_next";
+  | "vae_decoder_next"
+  | "vae_decoder_first_32"
+  | "vae_decoder_next_32";
 
 /** The generation events that {@link WanGenerateRequest.onEvent} receives. */
 export type WanGenerateEvent =
@@ -275,6 +280,18 @@ export type WanGenerateRequest = {
   readonly width?: number;
   readonly height?: number;
   /**
+   * The edge of the VAE decoder's latent tile (default 16 — ADR 0134). `32` decodes in 32-latent
+   * tiles with the same 4-latent overlap: at 1280×704 that is 2×3 tiles instead of 4×7 (about a
+   * third less decoder work), and the decoder stage holds about four times the causal caches and
+   * frame backings (about 9.5 GiB on the int8 decoder at 1280×704 — the 10 GB class cannot hold it).
+   * It is accepted only when the preset's weights carry the 32-latent pair (`vae_decoder_first_32`
+   * / `vae_decoder_next_32` — Wan2.2's presets do; Wan2.1 has none); otherwise, and for any value
+   * other than 16 or 32, the request is a `ModelInputError`. Never chosen automatically (WebGPU
+   * exposes no free-VRAM figure — ADR 0070 decision 5). The output differs from tile 16's in the
+   * blended seams.
+   */
+  readonly vaeTile?: 16 | 32;
+  /**
    * Observer of generation events ({@link WanGenerateEvent}). **It is awaited** (the firing order is
    * deterministic). Exceptions are not swallowed — a throw cancels at step granularity (the stage's
    * Session is closed).
@@ -371,7 +388,9 @@ export type WanFromPretrainedOptions = WanPipelineOptions &
  * (`transformer[0]` / `transformer[1]` / … — from part 0 in index order): the three
  * `transformer` / `vae_decoder_first` / `vae_decoder_next`; for Wan2.2 (`WanTi2vPipeline`) the three
  * of the I2V VAE encoder `vae_encoder_pre` / `vae_encoder_attn` / `vae_encoder_post` (needed even for
- * use without an image); and on the `"gpu"` path (default) `text_encoder` (umT5). In addition the
+ * use without an image) and, when the preset's weights carry them, the 32-latent decoder pair
+ * `vae_decoder_first_32` / `vae_decoder_next_32` (ADR 0134 — weightless containers that borrow the
+ * 16-latent pair's weights); and on the `"gpu"` path (default) `text_encoder` (umT5). In addition the
  * manifest's `assets` `text_embeds` (the embedding asset's safetensors — both paths) and, on the
  * `"gpu"` path, `umt5_tokenizer` (the tokenizer asset's JSON).
  */
@@ -406,7 +425,8 @@ export class WanPipeline {
    * on the path ({@link WanPipelineOptions.textEncoder}) — `"precomputed"` does not fetch umT5
    * (`text_encoder`). To replace a component with the same role from another repository, use
    * {@link FromPretrainedComponentOptions.components} (`transformer` / `vae_decoder_first` /
-   * `vae_decoder_next`, plus `text_encoder` on the `"gpu"` path).
+   * `vae_decoder_next`, plus `text_encoder` on the `"gpu"` path and `vae_decoder_first_32` /
+   * `vae_decoder_next_32` when the preset carries the 32-latent decoder pair).
    *
    * **`ref` is required** (sources have no default — the MUST of `src/hub/repo-ref.ts`. Wan2.1 has no
    * public distribution repository, so `WAN_SOURCES` has no key for it either). A string `ref` reads as

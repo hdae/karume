@@ -63,6 +63,9 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
   "wan2.2-ti2v-5b-f16-dyn": {
     vae_decoder_first: "vae_decoder_first",
     vae_decoder_next: "vae_decoder_next",
+    // The 32-latent pair that borrows the pair above (ADR 0134 — `wan.export_vae --tile 32 --shared`).
+    vae_decoder_first_32: "vae_decoder_first_32",
+    vae_decoder_next_32: "vae_decoder_next_32",
     vae_encoder_pre: "vae_encoder_pre",
     vae_encoder_attn: "vae_encoder_attn",
     vae_encoder_post: "vae_encoder_post",
@@ -73,6 +76,8 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
     transformer: "transformer",
     vae_decoder_first: "vae_decoder_first",
     vae_decoder_next: "vae_decoder_next",
+    vae_decoder_first_32: "vae_decoder_first_32",
+    vae_decoder_next_32: "vae_decoder_next_32",
   },
 };
 

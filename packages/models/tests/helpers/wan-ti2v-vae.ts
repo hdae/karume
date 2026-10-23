@@ -201,3 +201,62 @@ export const ti2vVaeTileAssets = (): readonly {
     const url = ti2vVaeTileFixtureUrl(name);
     return { path: url.pathname, present: filePresent(url) };
   });
+
+// ---- The 32-latent pair (ADR 0134 — weightless containers that borrow the 16-latent pair) ---------
+
+/** The 32-latent pair's components (= component directories and graph names). */
+export const WAN_TI2V_VAE_FIRST_32 = "vae_decoder_first_32";
+export const WAN_TI2V_VAE_NEXT_32 = "vae_decoder_next_32";
+/** The 32-latent pair's latent tile edge and frame edge (patchify space — 8 per latent). */
+export const WAN_TI2V_VAE_TILE_32 = 32;
+export const WAN_TI2V_VAE_SAMPLE_TILE_32 = 256;
+
+/** The commands that write the 32-latent pair (f16 series and i8 series — each after its lender). */
+export const WAN_TI2V_VAE_TILE32_GENERATE =
+  "cd tools/export-recipes && uv run --group wan --inexact " +
+  "python -m wan.export_vae --model ti2v-5b --tile 32 --shared";
+export const WAN_TI2V_VAE_I8_TILE32_GENERATE =
+  "cd tools/export-recipes && uv run --group wan --inexact " +
+  "python -m wan.export_vae --model ti2v-5b --dtype i8 --tile 32 --shared";
+
+/**
+ * Presence of the 32-latent pair's two containers in a series root (`ROOT` = the f16 series,
+ * `I8_ROOT` = the int8 series). Checked on each call, never at module evaluation.
+ */
+export const ti2vVaeTile32Assets = (
+  root: URL,
+): readonly { readonly path: string; readonly present: boolean }[] =>
+  [WAN_TI2V_VAE_FIRST_32, WAN_TI2V_VAE_NEXT_32].map((component) => {
+    const url = new URL(`${component}/${WAN_TI2V_VAE_MODEL_FILE}`, root);
+    return { path: url.pathname, present: modelPresent(url) };
+  });
+
+/** The command that writes the tile references at tile 32 (`vae_tiles.<case>.t32.safetensors`). */
+export const WAN_TI2V_VAE_TILES_T32_GENERATE =
+  "cd tools/export-recipes && uv run --group wan --inexact " +
+  "python -m wan.vae_tiling --model ti2v-5b --tile 32";
+
+/**
+ * The tile references at tile 32 (ADR 0134 decision 6 — `vae_tiling.py --tile 32`). Only `wide`
+ * (1280×704×5, latent 44×80 → 2×3 tiles) fits a 32-latent tile: `band` and `accept` are 30 latents
+ * on one axis, so the writer skips them.
+ */
+export const WAN_TI2V_VAE_TILE32_CASES: readonly Ti2vVaeTileCase[] = WAN_TI2V_VAE_TILE_CASES.filter(
+  ({ height, width }) => height >= WAN_TI2V_VAE_TILE_32 && width >= WAN_TI2V_VAE_TILE_32,
+);
+
+export const ti2vVaeTile32FixtureUrl = (name: Ti2vVaeTileCase["name"]): URL =>
+  new URL(`vae_tiles.${name}.t32.safetensors`, WAN_TI2V_VAE_ROOT);
+
+/**
+ * Presence of the tile-32 references (none → explicit SKIP, some → FAIL — the convention of
+ * {@link ti2vVaeTileAssets}). Checked on each call, never at module evaluation.
+ */
+export const ti2vVaeTile32TileAssets = (): readonly {
+  readonly path: string;
+  readonly present: boolean;
+}[] =>
+  WAN_TI2V_VAE_TILE32_CASES.map(({ name }) => {
+    const url = ti2vVaeTile32FixtureUrl(name);
+    return { path: url.pathname, present: filePresent(url) };
+  });

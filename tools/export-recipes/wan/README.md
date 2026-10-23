@@ -292,6 +292,10 @@ uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --dtype i8
 graphs traced at a 32-latent tile, every initializer borrowing the 16-tile pair's weights — so the
 Wan2.2 distribution ships this second decoder pair with no extra weight download, and the application
 chooses the tile explicitly (16 by default; the 10 GB class keeps 16).
+`uv run --group wan --inexact python -m wan.vae_tiling --model ti2v-5b --tile 32` writes the 32-tile
+references as `vae_tiles.<case>.t32.safetensors` beside the 16-tile ones (decision 6; same 4-latent
+overlap, `tile` in the meta). Only `wide` (1280×704) fits a 32 tile; `band` and `accept` are 30
+latents on one axis, so they are skipped and named in the summary.
 
 `--dtype i8` (ADR [0133](../../../docs/decisions/0133-conv3d-w8a8.md) decision 7, TI2V-5B only — the
 writer refuses it for `t2v-1.3b`) rounds the weights to f16 as above, then quantizes every

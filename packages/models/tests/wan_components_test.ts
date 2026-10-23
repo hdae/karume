@@ -520,6 +520,22 @@ describe("Wan の text_encoder の差し替え（疑似 HF — 越境参照の�
   });
 });
 
+describe("Wan2.1's components carry no 32-latent decoder pair (ADR 0134 — its distribution has no _32 roles)", () => {
+  it("replacing 'vae_decoder_first_32' is rejected as not a component of this family, before any container is fetched", async () => {
+    const rig = await prepareWanRepos();
+    const http = overHttp(rig);
+    const error = await assertRejects(
+      () => http.load({ components: { vae_decoder_first_32: { source: http.replacementSource } } }),
+      Error,
+      "'vae_decoder_first_32' in components is not a component of this family" +
+        " (replaceable roles: transformer / vae_decoder_first / vae_decoder_next / text_encoder)",
+    );
+    assertStringIncludes(error.message, "WanPipeline.fromPretrained");
+    assertEquals(http.asked(WAN_REPO), [MANIFEST_PATH]);
+    assertEquals(http.asked(REPLACEMENT_REPO), []);
+  });
+});
+
 describe("Wan の text_encoder の差し替え（手元の配布形 — 越境先の mapping なし）", () => {
   it("対照: 差さなければ越境先の crossRepo mapping が無いことで落ちる", async () => {
     const rig = await prepareWanRepos();

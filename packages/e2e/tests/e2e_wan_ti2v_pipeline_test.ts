@@ -157,6 +157,11 @@ import {
   formatDrmUsage,
   monitorDrmUsage,
 } from "../../models/tests/helpers/drm-usage.ts";
+import {
+  formatNvidiaTimeline,
+  monitorNvidiaSmi,
+  type NvidiaTimeline,
+} from "../../models/tests/helpers/nvidia-smi.ts";
 import { filePresent, WAN_TI2V_SERIES_NAME } from "../../models/tests/helpers/wan-ti2v-dit.ts";
 import {
   readWanTi2vDistributionManifestText,
@@ -316,12 +321,41 @@ const CONV8_SEED_CASE_ID = caseIdOf(
   FRAMES,
 );
 
+/**
+ * The conv8 preset's seed case decoded in 32-latent tiles (ADR 0134 — `vaeTile: 32`, the decoder pair that
+ * borrows the 16-latent pair's weights): the same request as {@link CONV8_SEED_CASE_ID} with the tile knob — a
+ * practical row of its own. Its output must differ from the tile-16 case's (the knob reached the decoder: the
+ * seams blend at other places). Its VAE stage seconds and the nvidia-smi VRAM peak are recorded next to the tile-16
+ * case's ({@link Conv8VaeRecord} — ADR 0134 decision 7-4, the kill line is the orchestrator's reading, not a gate).
+ */
+const CONV8_VAE32_SEED_CASE_ID = caseIdOf(
+  `${WAN_TI2V_CONV8_QUANT}-vae32-2step-${SEED_PROMPT}-seed${SEED}`,
+  WIDTH,
+  HEIGHT,
+  FRAMES,
+);
+
 /** The practical presets' seed cases, run in this order after the reference preset's (the s16 preset first). */
-const PRACTICAL_SEED_CASES: readonly { readonly id: string; readonly quant: string }[] = [
+const PRACTICAL_SEED_CASES: readonly {
+  readonly id: string;
+  readonly quant: string;
+  /** `WanGenerateRequest.vaeTile` (omitted = the default 16). */
+  readonly vaeTile?: 32;
+}[] = [
   { id: PRACTICAL_SEED_CASE_ID, quant: WAN_TI2V_PRACTICAL_QUANT },
   { id: ONLINE_SEED_CASE_ID, quant: WAN_TI2V_ONLINE_QUANT },
   { id: CONV8_SEED_CASE_ID, quant: WAN_TI2V_CONV8_QUANT },
+  { id: CONV8_VAE32_SEED_CASE_ID, quant: WAN_TI2V_CONV8_QUANT, vaeTile: 32 },
 ];
+
+/** The VAE stage of one conv8 case at one tile (the record of ADR 0134 decision 7-4). */
+type Conv8VaeRecord = {
+  readonly vaeSeconds: number;
+  /** nvidia-smi's GPU-wide peak during the `vae_decoder` stage (undefined without nvidia-smi or samples). */
+  readonly vaePeakMiB: number | undefined;
+  /** nvidia-smi's GPU-wide peak before the first stage (the baseline other processes hold). */
+  readonly baselineMiB: number | undefined;
+};
 
 /**
  * GPU 経路のケース（umT5 i8 を GPU で回す — 固定プロンプトの原文・seed 42・2 ステップ・1280×704）。CPU の参照は持たない（umT5 の
@@ -566,6 +600,8 @@ type Observed = {
   readonly stageMs: Readonly<Record<string, number>>;
   readonly wallMs: number;
   readonly drm: DrmTimeline;
+  /** GPU-wide nvidia-smi samples per stage (only when `observe` was asked for them). */
+  readonly nvidia: NvidiaTimeline;
   readonly diagnostics: ReadonlyMap<WanRunComponent, SessionDiagnostics>;
 };
 
@@ -577,12 +613,16 @@ const observe = async (
   pipeline: WanTi2vPipeline,
   diagnostics: Map<WanRunComponent, SessionDiagnostics>,
   request: Omit<WanGenerateRequest, "onEvent">,
-  options: { readonly abortAfterDenoise?: boolean } = {},
+  options: { readonly abortAfterDenoise?: boolean; readonly nvidiaSmi?: boolean } = {},
 ): Promise<Observed | { readonly latents: readonly Float32Array[] }> => {
   const latents: Float32Array[] = [];
   const stageStarted = new Map<string, number>();
   const stageMs: Record<string, number> = {};
   const monitor = monitorDrmUsage();
+  // GPU-wide samples per stage (the phase is the stage between its start and end events, "between"
+  // after an end). Started before the generate and given one sample so the baseline is recorded.
+  const nvidia = options.nvidiaSmi === true ? monitorNvidiaSmi() : undefined;
+  await nvidia?.waitForSample(2000);
   const abort = new Error("DiT の段の後で止める（故障注入）");
   diagnostics.clear();
   const started = performance.now();
@@ -592,6 +632,7 @@ const observe = async (
     const label = `${event.component} ${event.at}`;
     monitor.mark(label);
     monitor.enter(label);
+    nvidia?.enter(event.at === "start" ? event.component : `after ${event.component}`);
     if (event.at === "start") stageStarted.set(event.component, performance.now());
     else stageMs[event.component] = performance.now() - (stageStarted.get(event.component) ?? 0);
     if (
@@ -611,10 +652,12 @@ const observe = async (
       stageMs,
       wallMs,
       drm: monitor.stop(),
+      nvidia: await nvidia?.stop(),
       diagnostics: new Map(diagnostics),
     };
   } catch (error) {
     monitor.stop();
+    await nvidia?.stop();
     if (error === abort) return { latents };
     throw error;
   }
@@ -629,6 +672,9 @@ const formatObserved = (observed: Observed): string[] => {
       .join("・")}`,
     ...[...observed.drm.peaks].map(([phase, peak]) => `VRAM 山 [${phase}] ${formatDrmUsage(peak)}`),
     ...observed.drm.marks.map(({ label, usage }) => `VRAM 点 [${label}] ${formatDrmUsage(usage)}`),
+    ...(observed.nvidia === undefined
+      ? []
+      : [`nvidia-smi ${formatNvidiaTimeline(observed.nvidia)}`]),
   ];
   for (const [component, diagnostics] of observed.diagnostics) {
     lines.push(
@@ -637,6 +683,30 @@ const formatObserved = (observed: Observed): string[] => {
       )}・幾何 ${diagnostics.geometryProfile}・submit ${diagnostics.submit.submitCount} 本・窓平均の最大 ${
         diagnostics.submit.chunkBudget.maxWindowMeanMs?.toFixed(1) ?? "—"
       } ms・予算超過 ${diagnostics.submit.chunkBudget.overBudgetChunks} 本`,
+    );
+  }
+  return lines;
+};
+
+/**
+ * The record line of the conv8 VAE stage by tile (ADR 0134 decision 7-4: at 1280×704×17 the tile-32 stage is
+ * rejected unless under 0.8× of tile 16; the VRAM peak is GPU-wide — other processes' allocations included, the
+ * baseline before the first stage says how much).
+ */
+const conv8VaeLines = (records: ReadonlyMap<16 | 32, Conv8VaeRecord>): string[] => {
+  const mib = (value: number | undefined) => (value === undefined ? "—" : `${value} MiB`);
+  const lines = [...records].map(
+    ([tile, record]) =>
+      `conv8 VAE tile ${tile}: ${record.vaeSeconds.toFixed(2)} s · nvidia-smi peak [vae_decoder] ${mib(
+        record.vaePeakMiB,
+      )} (baseline ${mib(record.baselineMiB)})`,
+  );
+  const tile16 = records.get(16);
+  const tile32 = records.get(32);
+  if (tile16 !== undefined && tile32 !== undefined) {
+    const ratio = tile32.vaeSeconds / tile16.vaeSeconds;
+    lines.push(
+      `conv8 VAE tile 32 / tile 16 = ${ratio.toFixed(3)} (kill line 0.8 — ${ratio < 0.8 ? "under" : "NOT under"})`,
     );
   }
   return lines;
@@ -804,30 +874,59 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
      * 1280×704 が同じ本体を通る（席ごとに検査が割れないように）。`beforeSettle` は sha の突合と行の書き込み
      * （`settleOrObserve`）の前に実物を受ける（`KARUME_REFERENCE=write` の走行でも、行を書く前に効かせる検査の置き場）。
      */
+    /** The conv8 cases' VAE stage by tile (filled in run order — tile 16 first). */
+    const conv8Vae = new Map<16 | 32, Conv8VaeRecord>();
     const runSeedCase = async (
       seatPipeline: WanTi2vPipeline,
       id: string,
       width: number,
       height: number,
       beforeSettle: (bytes: Uint8Array<ArrayBuffer>) => void,
+      knobs: {
+        readonly vaeTile?: 32;
+        /** Records the VAE stage under this tile in {@link conv8Vae} (with nvidia-smi samples). */
+        readonly conv8Record?: 16 | 32;
+      } = {},
     ): Promise<void> => {
       const gpu = assigned(gpuContext, "gpuContext");
       let settlement: ReferenceSettlement | undefined;
       try {
         await runRecordedCase(results, { id }, async () => {
-          const observed = await observe(seatPipeline, diagnostics, {
-            ...TWO_STEP,
-            prompt: textOf(seatPipeline.prompts, SEED_PROMPT, "prompt"),
-            seed: SEED,
-            width,
-            height,
-          });
+          const observed = await observe(
+            seatPipeline,
+            diagnostics,
+            {
+              ...TWO_STEP,
+              prompt: textOf(seatPipeline.prompts, SEED_PROMPT, "prompt"),
+              seed: SEED,
+              width,
+              height,
+              ...(knobs.vaeTile === undefined ? {} : { vaeTile: knobs.vaeTile }),
+            },
+            { nvidiaSmi: knobs.conv8Record !== undefined },
+          );
           assert("video" in observed, "generate が最後まで回っていない");
           assertEquals(observed.latents.length, STEPS, "denoise-step の数");
           const { video } = observed;
           assertEquals([video.frames, video.height, video.width], [FRAMES, height, width]);
           const nonFinite = countNonFinite(video.data);
           const notes = [`非有限 ${nonFinite}`, ...formatObserved(observed)];
+          if (knobs.conv8Record !== undefined) {
+            const vaeMs = observed.stageMs.vae_decoder;
+            assert(vaeMs !== undefined, `${id}: the vae_decoder stage was not timed`);
+            const peak = (phase: string): number | undefined => {
+              const sampled = observed.nvidia?.phases.get(phase);
+              return sampled === undefined || sampled.samples === 0
+                ? undefined
+                : sampled.peakMemoryMiB;
+            };
+            conv8Vae.set(knobs.conv8Record, {
+              vaeSeconds: vaeMs / 1000,
+              vaePeakMiB: peak("vae_decoder"),
+              baselineMiB: peak("start"),
+            });
+            notes.push(...conv8VaeLines(conv8Vae));
+          }
           console.log(`[wan-ti2v-pipeline] ${id}:\n  ${notes.join("\n  ")}`);
           assertEquals(nonFinite, 0, `${id}: 非有限`);
           assertEquals(deviceLost, undefined, "device lost");
@@ -1121,7 +1220,7 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
     }
 
     // 実用席の seed 経路（参照席の pipeline を畳んでから席の pipeline を組む — 構築では Session を張らない）。
-    for (const { id: seedCaseId, quant } of PRACTICAL_SEED_CASES) {
+    for (const { id: seedCaseId, quant, vaeTile } of PRACTICAL_SEED_CASES) {
       it(`${seedCaseId}（実用席・seed 経路・sha256 の環境行）`, async () => {
         // The reference-seat its above are done: dispose that pipeline before building this seat's
         // (afterAll disposes it again, idempotently, for runs where this it does not run).
@@ -1132,29 +1231,41 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
           "precomputed",
           quant,
         );
-        await runSeedCase(practical, seedCaseId, WIDTH, HEIGHT, (bytes) => {
-          // 床（ADR 0110 決定 5 — 実用席は同じ要求の参照席と 1 bit 以上違う）: 配布形の経路で席の `session` が Session に届かない
-          // 退行では、実用席は参照席と同じバイトを出す。その実物を実用行として書くと、参照行と同じ sha が凍結され、以後この行は
-          // 実用層の退行も決定性も縛らない。行を書く前（`settleOrObserve` の前）に落とす。
-          if (referenceSeedRgb === undefined) {
-            throw new Error(
-              `${seedCaseId}: 同じ要求の参照席の実物が無い（参照席の seed 経路の 1280×704 が回っていない — 床を確かめられない）`,
+        await runSeedCase(
+          practical,
+          seedCaseId,
+          WIDTH,
+          HEIGHT,
+          (bytes) => {
+            // 床（ADR 0110 決定 5 — 実用席は同じ要求の参照席と 1 bit 以上違う）: 配布形の経路で席の `session` が Session に届かない
+            // 退行では、実用席は参照席と同じバイトを出す。その実物を実用行として書くと、参照行と同じ sha が凍結され、以後この行は
+            // 実用層の退行も決定性も縛らない。行を書く前（`settleOrObserve` の前）に落とす。
+            if (referenceSeedRgb === undefined) {
+              throw new Error(
+                `${seedCaseId}: 同じ要求の参照席の実物が無い（参照席の seed 経路の 1280×704 が回っていない — 床を確かめられない）`,
+              );
+            }
+            const reference = referenceSeedRgb;
+            const differs = (other: Uint8Array<ArrayBuffer>): boolean =>
+              bytes.length !== other.length || bytes.some((value, index) => value !== other[index]);
+            assert(
+              differs(reference),
+              `${seedCaseId}: 実用席の出力が参照席の同じ要求とバイト単位で一致した（席の session が届いていない）`,
             );
-          }
-          const reference = referenceSeedRgb;
-          const differs = (other: Uint8Array<ArrayBuffer>): boolean =>
-            bytes.length !== other.length || bytes.some((value, index) => value !== other[index]);
-          assert(
-            differs(reference),
-            `${seedCaseId}: 実用席の出力が参照席の同じ要求とバイト単位で一致した（席の session が届いていない）`,
-          );
-          // The practical seats differ from each other too (the online seat replaces the three
-          // dispatches; a route that silently kept them would reproduce the s16 bytes).
-          for (const earlier of practicalSeedRgb) {
-            assert(differs(earlier), `${seedCaseId}: the output equals another practical seat's`);
-          }
-          practicalSeedRgb.push(bytes);
-        });
+            // The practical seats differ from each other too (the online seat replaces the three
+            // dispatches; a route that silently kept them would reproduce the s16 bytes).
+            // The vae32 case differs from every earlier case too: the conv8 tile-16 case among them, so a tile
+            // knob that does not reach the decoder fails here.
+            for (const earlier of practicalSeedRgb) {
+              assert(differs(earlier), `${seedCaseId}: the output equals another practical seat's`);
+            }
+            practicalSeedRgb.push(bytes);
+          },
+          {
+            ...(vaeTile === undefined ? {} : { vaeTile }),
+            ...(quant === WAN_TI2V_CONV8_QUANT ? { conv8Record: vaeTile ?? 16 } : {}),
+          },
+        );
       });
     }
 

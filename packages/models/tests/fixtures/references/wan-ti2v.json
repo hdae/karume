@@ -73,6 +73,9 @@
     },
     "i8-a8-attn8-online-conv8-2step-boxing-cats-seed42-1280x704-17f-shift5": {
       "node-nvidia-geforce-rtx-3080-ti": "613891c44670ff1a8d3f221b21f0fe539a4d0647edde47392432727ae2aa50a4"
+    },
+    "i8-a8-attn8-online-conv8-vae32-2step-boxing-cats-seed42-1280x704-17f-shift5": {
+      "node-nvidia-geforce-rtx-3080-ti": "04ff3861c676cd578cd63f3744859b55d8bdefad24f45366fbac29042f1aa77b"
     }
   }
 }
