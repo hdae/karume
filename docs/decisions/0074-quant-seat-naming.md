@@ -168,3 +168,13 @@ dtype label — ADR [0109](0109-manifest-v5-container.md) decision 2).
 
 It takes the slot of `s16` (both are the score-storage axis): `f16+dit8-a8-attn8-online`, the Wan2.2
 default since 2026-10-23.
+
+## Addendum (2026-10-23) — the `conv8` token (ADR 0133)
+
+| Token   | Axis                                        | Session value          |
+| ------- | ------------------------------------------- | ---------------------- |
+| `conv8` | conv3d activations to i8 (per input pixel)  | `convCompute: "a8"`   |
+
+It follows the attention tokens (`a8` / `attn8` / `s16` or `online` / `conv8`): the Wan2.2 preset
+`i8-a8-attn8-online-conv8`. Its base storage is `i8` because the VAE decoder roles are int8 in that
+preset (§1 — the storage common to every role); `f16+dit8…` presets keep the f16 decoder.

@@ -45,6 +45,17 @@ measurements in `docs/research/`.
   is the default: at 1280×704×121 one DiT forward on an RTX 3080 Ti takes about 22 s instead of
   24–29 s, with the same step-1 error against the reference preset as the s16 preset (relRMS 0.042
   vs 0.044 at 33 frames). `quant: "f16+dit8-a8-attn8-s16"` still selects the previous default.
+- conv3d on int8 activations (`@karume/runtime`, ADR 0133): `convCompute: "a8"` quantises the input
+  of a conv3d once per input pixel over its channels and reduces each tap with an integer dot
+  product against int8-resident weights (the conv counterpart of `linearCompute: "a8"`; a TS mirror
+  reproduces the GPU at atol = 0). It applies to conv3d nodes with int8 weights, `groups == 1` and
+  `Cin % 4 == 0`; other nodes keep the f32 path and their pipeline key shows it. The manifest
+  vocabulary (`@karume/hub`) accepts the key; the Wan family hands it to the VAE decoder Sessions;
+  the preset name token is `conv8`.
+- Wan2.2 ships two more presets with the VAE decoder in int8 storage: `i8` (f32 compute — the
+  reference of the int8 decoder) and `i8-a8-attn8-online-conv8` (the online bundle with the
+  decoder's 3-D convolutions on per-pixel int8 activations). The default is unchanged. The exporter's
+  `wan.export_vae --dtype i8` writes the int8 decoder into the model's int8 series.
 - bf16 weight storage is executed (`@karume/runtime`). A weight stored as bf16 stays resident
   packed two per 32-bit word and is expanded in the kernel by a bit cast, under the same eligibility
   rule as f16 (the weight slot of the fused kernels; everything else is expanded to f32 at load).

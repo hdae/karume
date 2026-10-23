@@ -286,6 +286,19 @@ dot product, and S in VRAM has f32 width. The canonical source of the decision i
   diagnostic pipeline keys contain dense ones such as `attention_pv:v1:f32`.
 - A change that handles the remainders on the declared path is in the later section of the backlog.
 
+## conv3d w8a8 (`convCompute: "a8"`) transposes the input to a per-pixel layout per node; 1×1×1 nodes come out slower than f32
+
+- The activation quantisation of ADR [0133](decisions/0133-conv3d-w8a8.md) reuses `quantize_rows`
+  on a transposed copy of the input (`x[Cin, T·H·W]` → `[T·H·W, Cin]`, one strided copy per conv3d
+  node). On the RTX 3080 Ti the copy costs 0.2–3.1 ms per node against 5.6–11.9 ms for the
+  integer GEMM on the Wan2.2 decoder's 3×3×3 layers (up to 20% of the path on the 256-channel
+  layer at 128²), and on the 1×1×1 layers (1% of the decoder's work) it exceeds the GEMM, so those
+  nodes run slower than on the f32 path (3.2 ms against 2.5 ms). A fused per-pixel quantiser is the
+  open point of the ADR.
+- The eligibility is per node (int8 weight, `groups == 1`, `Cin % 4 == 0`); a node outside it runs
+  the f32 implicit GEMM and shows it by its pipeline key — the census of the decoder's A/B
+  (`e2e_wan_ti2v_vae_a8_test.ts`) pins that every conv3d of the Wan2.2 decoder qualifies.
+
 ## On devices without dp4a, a8 does not get faster (a warning only, no fallback)
 
 The integer dot products of int8 activations (`linearCompute` / `attentionCompute: "a8"`) run emulated
