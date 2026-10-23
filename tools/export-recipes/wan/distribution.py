@@ -544,8 +544,9 @@ WAN22_QUANTS: Mapping[str, Any] = {
     # (no new download — `weights` names the same f16 VAE decoder) with attention computed by
     # the online kernel, which never stores the scores (`attentionScoreStorage: "none"` — ADR 0132
     # decision 1; the name token `online` takes the slot of `s16` — ADR 0074 §3). Wan2.2 only:
-    # Wan2.1's table is not changed. The default since 2026-10-23 (`WAN22_DEFAULT_QUANT` — ADR 0132
-    # decision 6); the s16 preset above stays as its sibling.
+    # Wan2.1's table is not changed. The default on 2026-10-23 (ADR 0132 decision 6) until the conv8
+    # preset below took over the same day (`WAN22_DEFAULT_QUANT`); the s16 preset above stays as its
+    # sibling.
     "f16+dit8-a8-attn8-online": {
         "weights": _WAN22_VAE_F16,
         "session": {
@@ -562,7 +563,8 @@ WAN22_QUANTS: Mapping[str, Any] = {
     # VAE decoder in int8 storage with an empty `session`, the control of the E2E difference floor
     # — and the practical preset that adds `convCompute: "a8"` (token `conv8`) to the online
     # preset's knobs. The base storage is `i8` because the decoder roles are now int8 (ADR 0074
-    # §1). Quality and timing are not measured yet, so the default does not move (decision 8).
+    # §1). The conv8 preset is the default (`WAN22_DEFAULT_QUANT` — decision 8: the decoder A/B, the
+    # timing and the maintainer's visual check of 2026-10-23).
     "i8": {
         "weights": _WAN22_VAE_I8,
         "session": {},
@@ -585,16 +587,20 @@ WAN22_QUANTS: Mapping[str, Any] = {
     },
 }
 
-#: Wan2.2's default preset — the online preset since 2026-10-23 (ADR 0132 decision 6: it becomes
-#: the default once the A/B check and the timing confirm it). It has the same weights and the same
-#: int8 activations as the s16 preset, with attention computed online without storing the scores.
-#: The maintainer's A/B at 1280×704×33 gave relRMS 0.042 against the reference preset (the s16
-#: preset: 0.044 — inside the same band 8.8e-2), and at 1280×704×121 one DiT forward on the RTX
-#: 3080 Ti took 21.7 s against 24.2–29.3 s for the s16 preset (attention 12.5 s against
-#: 15.6–18.4 s). The s16 preset stays as a sibling; it was the default from the visual ruling of
-#: 2026-10-06 (12 clips at 1280×704×33 with 50 steps, no breakdown — ADR 0121 addendum "results of
-#: step 8a"). The default can change with a quality ruling, so it is held in this one place only.
-WAN22_DEFAULT_QUANT = "f16+dit8-a8-attn8-online"
+#: Wan2.2's default preset — the conv8 preset since 2026-10-23 (ADR 0133 decision 8: the online
+#: preset's transformer with the VAE decoder in int8 storage and its 3-D convolutions on per-pixel
+#: int8 activations). The maintainer's ruling of 2026-10-23: 8 clips (2 prompts × seeds 42–45,
+#: 1280×704×33, 50 steps) side by side with the online preset showed no visible difference; the
+#: decoder's A/B gave relRMS 1.28e-2 at the first decoded frame against the same int8 weights on
+#: f32 compute (ceiling 2.6e-2) and 3.21e-2 against the f16 decoder (the int8 weights alone
+#: 2.99e-2); the VAE stage of a 33-frame clip took 87 s against 168 s (the clip 533 s against 611 s)
+#: on the RTX 3080 Ti under Node + Dawn, and the download is 0.5 GB smaller. The online preset was
+#: the default
+#: earlier the same day (ADR 0132 decision 6 — relRMS 0.042 against the reference preset, one DiT
+#: forward at 1280×704×121 21.7 s against 24.2–29.3 s for the s16 preset); the s16 preset was the
+#: default from the visual ruling of 2026-10-06 (ADR 0121 addendum "results of step 8a"). Both stay
+#: as siblings. The default can change with a quality ruling, so it is held in this one place only.
+WAN22_DEFAULT_QUANT = "i8-a8-attn8-online-conv8"
 
 #: Wan2.2 の `pipelineConfig`（スキーマは 2.1 と同じ — `packages/models/src/wan/config.ts`）:
 #:

@@ -468,7 +468,7 @@ _TI2V_CARD_LIMITS_FIXTURE = REPO_ROOT / "packages/models/tests/fixtures/wan-ti2v
 #: Wan2.2 の参照席・実用席。
 _REFERENCE = "f16+dit8"
 _PRACTICAL = "f16+dit8-a8-attn8-s16"
-#: Wan2.2's online-attention preset (ADR 0132 decision 6 — the default since 2026-10-23).
+#: Wan2.2's online-attention preset (ADR 0132 decision 6 — the default on 2026-10-23 until conv8).
 _ONLINE = "f16+dit8-a8-attn8-online"
 #: Wan2.2's int8 VAE decoder presets (ADR 0133 decision 6): the reference and the practical one.
 _I8 = "i8"
@@ -1772,10 +1772,10 @@ class TestTheWan22Distribution:
         """Five presets: the reference, the practical (s16) and the online-attention preset (ADR
         0132 decision 6) on the f16 VAE decoder, then the int8 VAE decoder's reference `i8` and
         practical `i8-a8-attn8-online-conv8` (ADR 0133 decision 6); no f16 preset; the default is
-        the online preset since 2026-10-23 (its A/B check and timing confirmed it — ADR 0132
-        decision 6; the s16 preset stays as a sibling). Every preset takes the f16 VAE encoder
-        (even for T2V alone — the ruling in the addendum on step 9's plan and step 9a's results).
-        The weights are ordered as the I2V stages."""
+        the conv8 preset since 2026-10-23 (ADR 0133 decision 8 — the decoder A/B, the timing and the
+        visual check; the online and s16 presets stay as siblings). Every preset takes the f16 VAE
+        encoder (even for T2V alone — the ruling in the addendum on step 9's plan and step 9a's
+        results). The weights are ordered as the I2V stages."""
         _, manifest = assembled22
         model = manifest["models"][_TI2V]
         assert manifest["defaultModel"] == _TI2V
@@ -1811,7 +1811,7 @@ class TestTheWan22Distribution:
             f"{_TI2V}/{WAN_TOKENIZER_ROLE}/{umt5_tokenizer.ASSET_FILE}"
         )
         assert list(model["quants"]) == [_REFERENCE, _PRACTICAL, _ONLINE, _I8, _CONV8]
-        assert model["defaultQuant"] == _ONLINE
+        assert model["defaultQuant"] == _CONV8
         seat = {
             **dict.fromkeys(WAN_VAE_ENCODER_ROLES, "f16"),
             WAN_TEXT_ENCODER_ROLE: "i8",
@@ -2201,10 +2201,10 @@ class TestTheWan22ModelCard:
             _CONV8,
         ]
         assert [row.split(" |")[0] for row in rows if "(default)" in row] == [
-            f"| `{_ONLINE}` (default)"
+            f"| `{_CONV8}` (default)"
         ]
-        assert f"If no quant is given, it runs as `{_ONLINE}`" in card
-        assert f'// quant: "{_ONLINE}", // default' in card
+        assert f"If no quant is given, it runs as `{_CONV8}`" in card
+        assert f'// quant: "{_CONV8}", // default' in card
         assert f"implements `{WAN22_SUPPORTED_PIPELINE}`" in card
         prose = " ".join(card.split())
         # T2V と I2V の両方を名乗る（ADR 0121 段 9c — I2V が公開 API に出た）。
@@ -2317,16 +2317,20 @@ class TestTheWan22ModelCard:
             f" twelve 50-step clips was made with `{_PRACTICAL}` only — the same check of"
             f" `{_ONLINE}` is still pending — and its image-to-video error has not been measured."
         ) in prose
-        # The int8 VAE decoder's presets (ADR 0133 decision 6) have no row yet: they are named as
-        # unmeasured, and their bullet gives no number.
+        # The int8 VAE decoder's presets (ADR 0133 decision 6) have no row in the Resources table
+        # (their measurements are the 33-frame clips of the visual check, in their bullet); the
+        # default-quant cell of the Models table names conv8, so the check is on the table itself.
         assert f"The other quants (`{_I8}` / `{_CONV8}`) have not been measured yet." in prose
-        assert f"| `{_I8}` |" not in card.split("### Quants")[0]
-        assert f"| `{_CONV8}` |" not in card.split("### Quants")[0]
+        resources = card.split("## Resources", 1)[1].split("\n## ", 1)[0]
+        assert f"| `{_I8}` |" not in resources
+        assert f"| `{_CONV8}` |" not in resources
         assert (
             f"- **`{_I8}` and `{_CONV8}`**: both store the VAE decoder's weights as int8 (one scale"
             " per output channel) as well as the transformer's; `conv8` computes the decoder's 3-D"
-            " convolutions on per-pixel int8 activations (integer dot products). Their quality and"
-            " timing have not been measured yet."
+            " convolutions on per-pixel int8 activations (integer dot products). On the NVIDIA"
+            " GeForce RTX 3080 Ti under Node with Dawn (2026-10-23, 1280 × 704 with 33 frames, 50"
+            f" steps, 8 clips) `{_CONV8}` decoded the clip in 87 s against 168 s for `{_ONLINE}`"
+            " (the whole clip 533 s against 611 s) with a GPU-wide peak of 6.2 GiB (nvidia-smi)."
         ) in prose
         assert "has been measured with this distribution only in the 121-frame run above" in prose
         assert "`maxStorageBufferBindingSize` (128 MiB)" in card
@@ -2717,10 +2721,22 @@ class TestTheWan22ImageToVideoCard:
         )
         assert "It became the default" not in prose
         assert (
-            f"`{_ONLINE}`, the default since 2026-10-23, was compared the same way on text to video"
-            " at 1280 × 704 with 33 frames, under Node with Dawn on the same GPU: relative RMS"
-            " error 0.042, within the same tolerance. Its 121-frame comparison, its visual check"
-            " and its image-to-video comparison have not been done yet." in prose
+            f"`{_ONLINE}`, the default from 2026-10-23 until `{_CONV8}` took over the same day, was"
+            " compared the same way on text to video at 1280 × 704 with 33 frames, under Node with"
+            " Dawn on the same GPU: relative RMS error 0.042, within the same tolerance. Its"
+            " 121-frame comparison, its visual check and its image-to-video comparison have not"
+            " been done yet." in prose
+        )
+        # The conv8 preset (the default since 2026-10-23 — ADR 0133 decision 8): the decoder's A/B
+        # numbers and the maintainer's visual check against the online preset.
+        assert (
+            f"`{_CONV8}`, the default since 2026-10-23, keeps that transformer and changes only the"
+            " VAE decoder (int8 weights, int8 activations in its 3-D convolutions): at the first"
+            " decoded frame its relative RMS error is 0.013 against the same int8 weights computed"
+            f" in f32 (`{_I8}`; the gate is 0.026) and 0.032 against the f16 decoder (`{_I8}`"
+            " itself 0.030), and 8 clips (2 prompts × seeds 42–45, 1280 × 704 with 33 frames, 50"
+            " steps)"
+            f" side by side with `{_ONLINE}` showed no visible difference on 2026-10-23." in prose
         )
         assert "Text to video has been checked end to end on the GPU: 17 frames" in prose
 
@@ -2819,7 +2835,7 @@ class TestTheRealWan22Series:
             WAN_TOKENIZER_ROLE,
         }
         assert set(WAN_VAE_ENCODER_ROLES) <= set(plan.artifacts)
-        assert plan.default_quant == _ONLINE
+        assert plan.default_quant == _CONV8
 
     def test_the_text_assets_are_the_wan21_series_files(self) -> None:
         assert (_REAL22.text_embeds, _REAL22.tokenizer) == (_REAL.text_embeds, _REAL.tokenizer)

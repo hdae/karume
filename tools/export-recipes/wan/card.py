@@ -200,16 +200,17 @@ WAN22_PRACTICAL_QUANT_ERROR = ("f16+dit8-a8-attn8-s16", "f16+dit8", "0.044", "0.
 #: 1280×704・33 フレーム・条件画像 1 枚・fit crop・opt-in）: step 1 の潜在の relRMS。帯は × 2 の
 #: 切り上げ（9.3e-2）。
 WAN22_PRACTICAL_QUANT_I2V_ERROR_33 = "0.046"
-#: The online preset's (the default since 2026-10-23) step-1 latent relative RMS error against the
-#: reference preset (ADR 0132 "Results" — `e2e_wan_ti2v_ab_test.ts`, RTX 3080 Ti, Node + Dawn,
-#: 2026-10-23: 4.23e-2 at 1280×704×33, inside the s16 preset's band 8.8e-2).
+#: The online preset's (the default on 2026-10-23 until `conv8`) step-1 latent relative RMS error
+#: against the reference preset (ADR 0132 "Results" — `e2e_wan_ti2v_ab_test.ts`, RTX 3080 Ti, Node +
+#: Dawn, 2026-10-23: 4.23e-2 at 1280×704×33, inside the s16 preset's band 8.8e-2).
 #: `(preset, reference, 33 frames)`. The 121-frame check has not run (the reference preset's
 #: 121-frame step does not fit the 12 GiB device under Node + Dawn — docs/known-issues.md), and the
 #: visual check was done for the s16 preset only; the card says both.
 WAN22_ONLINE_QUANT_ERROR = ("f16+dit8-a8-attn8-online", "f16+dit8", "0.042")
 #: The two presets of the int8 VAE decoder (ADR 0133 decision 6): `(reference, practical)`. Their
-#: quality and timing are not measured yet (decision 8), so the card says so and gives no number;
-#: the table's "not measured yet" line names them too (they are not in {@link WAN22_RESOURCES}).
+#: the practical one is the default since 2026-10-23 (decision 8 — the decoder A/B, the timing and
+#: the maintainer's visual check are in the card's prose). Neither has a row in
+#: {@link WAN22_RESOURCES}, so the table's "not measured yet" line names them.
 WAN22_INT8_VAE_QUANTS = ("i8", "i8-a8-attn8-online-conv8")
 
 
@@ -779,11 +780,18 @@ _WAN22_VERIFICATION = (
     f"  image, `crop`, an opt-in case: relative RMS error {WAN22_PRACTICAL_QUANT_I2V_ERROR_33},",
     "  within twice the measured error), and 12 clips (3 images × seeds 42–45, 1280 × 704 with",
     "  33 frames, 50 steps) side by side with `f16+dit8` showed no clear degradation on",
-    f"  2026-10-10 either. `{WAN22_ONLINE_QUANT_ERROR[0]}`, the default since 2026-10-23, was",
-    "  compared the same way on text to video at 1280 × 704 with 33 frames, under Node with",
-    f"  Dawn on the same GPU: relative RMS error {WAN22_ONLINE_QUANT_ERROR[2]}, within the same",
-    "  tolerance. Its 121-frame comparison, its visual check and its image-to-video comparison",
-    "  have not been done yet.",
+    f"  2026-10-10 either. `{WAN22_ONLINE_QUANT_ERROR[0]}`, the default from 2026-10-23 until",
+    f"  `{WAN22_INT8_VAE_QUANTS[1]}` took over the same day, was compared the same way on text to",
+    "  video at 1280 × 704 with 33 frames, under Node with Dawn on the same GPU: relative RMS",
+    f"  error {WAN22_ONLINE_QUANT_ERROR[2]}, within the same tolerance. Its 121-frame comparison,",
+    "  its visual check and its image-to-video comparison have not been done yet.",
+    f"  `{WAN22_INT8_VAE_QUANTS[1]}`, the default since 2026-10-23, keeps that transformer and",
+    "  changes only the VAE decoder (int8 weights, int8 activations in its 3-D convolutions): at",
+    "  the first decoded frame its relative RMS error is 0.013 against the same int8 weights",
+    f"  computed in f32 (`{WAN22_INT8_VAE_QUANTS[0]}`; the gate is 0.026) and 0.032 against the",
+    f"  f16 decoder (`{WAN22_INT8_VAE_QUANTS[0]}` itself 0.030), and 8 clips (2 prompts × seeds",
+    "  42–45, 1280 × 704 with 33 frames, 50 steps) side by side with",
+    f"  `{WAN22_ONLINE_QUANT_ERROR[0]}` showed no visible difference on 2026-10-23.",
     "- **Image to video against the upstream reference** (the `f16+dit8` quant, with the",
     "  precomputed embeddings, on an NVIDIA GeForce RTX 3080 Ti): the resized image and the",
     "  encoder input match Pillow and the upstream preprocessing bit for bit. The encoded image",
@@ -1193,8 +1201,11 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
                 f"- **`{int8_vae_reference}` and `{int8_vae_practical}`**: both store the VAE",
                 "  decoder's weights as int8 (one scale per output channel) as well as the",
                 "  transformer's; `conv8` computes the decoder's 3-D convolutions on per-pixel",
-                "  int8 activations (integer dot products). Their quality and timing have not been",
-                "  measured yet.",
+                "  int8 activations (integer dot products). On the NVIDIA GeForce RTX 3080 Ti",
+                "  under Node with Dawn (2026-10-23, 1280 × 704 with 33 frames, 50 steps, 8 clips)",
+                f"  `{int8_vae_practical}` decoded the clip in 87 s against 168 s for `{online}`",
+                "  (the whole clip 533 s against 611 s) with a GPU-wide peak of 6.2 GiB",
+                "  (nvidia-smi).",
             ]
             if int8_vae_reference in seats and int8_vae_practical in seats
             else []
