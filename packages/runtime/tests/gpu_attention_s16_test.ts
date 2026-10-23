@@ -91,6 +91,7 @@ import {
 } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { f32ToF16Bits } from "./helpers/f16.ts";
+import { deviceGeometryProfile } from "./helpers/geometry.ts";
 import {
   fill,
   type FilledTensor,
@@ -537,6 +538,7 @@ test.skipIf(!GPU_AVAILABLE)(
   "attentionScoreStorage:'f16' は ①QK / ②行統計 / ③PV が同時に s16 へ切り替わる（実 GPU）",
   async () => {
     const gpu = await acquireGpu();
+    const profile = deviceGeometryProfile(gpu);
     try {
       for (const shape of S16_SHAPES) {
         const { name, n } = shape;
@@ -545,16 +547,16 @@ test.skipIf(!GPU_AVAILABLE)(
         const running = new Map(actual.entries.map((entry) => [entry.key, entry.dispatchCount]));
         // 3 カーネルは**同時に**切り替わる（S の格納形が書き手と読み手で一致する条件）
         for (const key of [
-          attentionQkKey(true, "f32", "f16"),
+          attentionQkKey(true, "f32", "f16", false, false, false, profile.attention.qk),
           attentionStatsKey("f32", "f16", attentionStatsRegCache(n)),
-          attentionPvKey(true, "f32", "f16"),
+          attentionPvKey(true, "f32", "f16", false, false, profile.attention.pv),
         ]) {
           assertEquals(running.get(key), 1, `${name}: '${key}' が 1 本走っていない`);
         }
         for (const key of [
-          attentionQkKey(true),
+          attentionQkKey(true, "f32", "f32", false, false, false, profile.attention.qk),
           attentionStatsKey("f32", "f32", attentionStatsRegCache(n)),
-          attentionPvKey(true),
+          attentionPvKey(true, "f32", "f32", false, false, profile.attention.pv),
         ]) {
           assertEquals(running.has(key), false, `${name}: f32 格納の '${key}' が残っている`);
         }
@@ -696,6 +698,7 @@ test.skipIf(!GPU_AVAILABLE)(
   "attentionCompute:'a8' × attentionScoreStorage:'f16' は ①③ が i8a8・② だけ s16 のキーで走る（実 GPU）",
   async () => {
     const gpu = await acquireGpu();
+    const profile = deviceGeometryProfile(gpu);
     try {
       const shape = A8_S16_SHAPE;
       const both = await runAttention(gpu, shape, {
@@ -705,14 +708,14 @@ test.skipIf(!GPU_AVAILABLE)(
       assert(both.entries.length > 0, "内訳が空（キー検査が空振りしている）");
       const byKey = new Map(both.entries.map((entry) => [entry.key, entry.dispatchCount]));
       // ①QK / ③PV は i8a8 のまま、S だけが f16 格納（3 つの軸が同時に立つ）
-      assertEquals(byKey.get(attentionQkI8a8Key(true, true, "f16")), 1);
-      assertEquals(byKey.get(attentionPvI8a8Key(true, true, "f16")), 1);
+      assertEquals(byKey.get(attentionQkI8a8Key(true, true, "f16", profile.i8a8.attentionQk)), 1);
+      assertEquals(byKey.get(attentionPvI8a8Key(true, true, "f16", profile.i8a8.attentionPv)), 1);
       // ②行統計は f32 計算のまま s16 を読む
       assertEquals(byKey.get(attentionStatsKey("f32", "f16", attentionStatsRegCache(shape.n))), 1);
       // f32 格納の変種は 1 本も残らない
       for (const key of [
-        attentionQkI8a8Key(true, true),
-        attentionPvI8a8Key(true, true),
+        attentionQkI8a8Key(true, true, "f32", profile.i8a8.attentionQk),
+        attentionPvI8a8Key(true, true, "f32", profile.i8a8.attentionPv),
         attentionStatsKey("f32", "f32", attentionStatsRegCache(shape.n)),
       ]) {
         assertEquals(byKey.has(key), false, `f32 格納の '${key}' が残っている`);

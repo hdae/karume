@@ -70,6 +70,7 @@ import { createSessionFromContainer, type SessionOptions } from "../src/runtime/
 import type { I8a8Dot, SessionDiagnostics } from "../src/runtime/session-types.ts";
 import { fill, GRAPH_NAME, openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
 import { fakeDevice, fakeGpuContext } from "./helpers/fake-gpu.ts";
+import { deviceGeometryProfile } from "./helpers/geometry.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { assertPipelineCensus } from "./helpers/pipeline-census.ts";
 
@@ -668,6 +669,7 @@ test.skipIf(!GPU_AVAILABLE)(
   "注入した席（emu）は a8 Session の ①QK / ③PV の両方に届く（実 GPU・故障注入）",
   async () => {
     const gpu = await acquireGpu();
+    const profile = deviceGeometryProfile(gpu);
     try {
       const seeded = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() =>
         decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY, BREAK_DP4A),
@@ -680,10 +682,26 @@ test.skipIf(!GPU_AVAILABLE)(
         assertPipelineCensus(
           census,
           [
-            { label: "①QK の emu 変種", match: attentionQkI8a8Key(qkV4, false), atLeast: 1 },
-            { label: "①QK の dp4a 変種", match: attentionQkI8a8Key(qkV4, true), count: 0 },
-            { label: "③PV の emu 変種", match: attentionPvI8a8Key(pvV4, false), atLeast: 1 },
-            { label: "③PV の dp4a 変種", match: attentionPvI8a8Key(pvV4, true), count: 0 },
+            {
+              label: "①QK の emu 変種",
+              match: attentionQkI8a8Key(qkV4, false, "f32", profile.i8a8.attentionQk),
+              atLeast: 1,
+            },
+            {
+              label: "①QK の dp4a 変種",
+              match: attentionQkI8a8Key(qkV4, true, "f32", profile.i8a8.attentionQk),
+              count: 0,
+            },
+            {
+              label: "③PV の emu 変種",
+              match: attentionPvI8a8Key(pvV4, false, "f32", profile.i8a8.attentionPv),
+              atLeast: 1,
+            },
+            {
+              label: "③PV の dp4a 変種",
+              match: attentionPvI8a8Key(pvV4, true, "f32", profile.i8a8.attentionPv),
+              count: 0,
+            },
           ],
           `${pass} 本目`,
         );

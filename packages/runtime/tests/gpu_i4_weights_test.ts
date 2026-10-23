@@ -29,6 +29,7 @@ import { i4EligibleInitializers } from "../src/runtime/plan.ts";
 import { linearI8a8Key, linearI8a8UsesVec4 } from "../src/kernels/linear-i8a8.ts";
 import { quantizeRowsTieMargin, referenceLinearW4a8 } from "../src/reference/i8a8.ts";
 import type { TensorInput } from "./helpers/container-write.ts";
+import { deviceGeometryProfile } from "./helpers/geometry.ts";
 import { quantizeI4 } from "./helpers/i4.ts";
 import {
   type DeclarationJson,
@@ -1048,6 +1049,7 @@ test.skipIf(!GPU_AVAILABLE)(
       groupSize,
     });
     const gpu = await acquireGpu();
+    const profile = deviceGeometryProfile(gpu);
     try {
       const session = await createSessionFromContainer(
         gpu,
@@ -1069,7 +1071,9 @@ test.skipIf(!GPU_AVAILABLE)(
         // MUST: census が空なら赤 — `keys.length > 0` で守るとキー検査が黙って空振りする。
         const keys = requireCensus(diagnostics.lastRunPipelines, "w4a8").map((row) => row.key);
         assertEquals(
-          keys.includes(linearI8a8Key(linearI8a8UsesVec4(n), true, undefined, "i4", groupSize)),
+          keys.includes(
+            linearI8a8Key(linearI8a8UsesVec4(n), true, profile.i8a8.linear, "i4", groupSize),
+          ),
           true,
           `走ったキー: ${keys.join(" / ")}`,
         );

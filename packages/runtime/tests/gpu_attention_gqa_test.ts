@@ -31,6 +31,7 @@ import {
 } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { GRAPH_NAME, openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
+import { deviceGeometryProfile } from "./helpers/geometry.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
@@ -377,6 +378,7 @@ test.skipIf(!GPU_AVAILABLE)(
   "GQA のキーは r > 1 でだけ立つ（r=1 は従来キーのまま・実 GPU）",
   async () => {
     const gpu = await acquireGpu();
+    const profile = deviceGeometryProfile(gpu);
     try {
       for (const shape of SHAPES) {
         const { q, k, v } = inputsFor(shape);
@@ -388,12 +390,31 @@ test.skipIf(!GPU_AVAILABLE)(
         );
         assertEquals(attention.length, 2, `${shape.name}: ①③ が 1 本ずつ走る`);
         assertEquals(
-          keys.includes(attentionQkKey(gemmUsesVec4(shape.d, shape.n), "f32", "f32", false, gqa)),
+          keys.includes(
+            attentionQkKey(
+              gemmUsesVec4(shape.d, shape.n),
+              "f32",
+              "f32",
+              false,
+              gqa,
+              false,
+              profile.attention.qk,
+            ),
+          ),
           true,
           `${shape.name}: ①QK の期待キーが無い（走ったキー: ${attention.join(" / ")}）`,
         );
         assertEquals(
-          keys.includes(attentionPvKey(gemmUsesVec4(shape.n, shape.d), "f32", "f32", gqa)),
+          keys.includes(
+            attentionPvKey(
+              gemmUsesVec4(shape.n, shape.d),
+              "f32",
+              "f32",
+              gqa,
+              false,
+              profile.attention.pv,
+            ),
+          ),
           true,
           `${shape.name}: ③PV の期待キーが無い（走ったキー: ${attention.join(" / ")}）`,
         );

@@ -9,9 +9,11 @@ import { assert, assertEquals, assertGreater, assertThrows } from "@std/assert";
 import { elementwiseKey } from "../src/codegen/elementwise.ts";
 import { acquireGpu, GpuFeatureError, planTimestampFeature } from "../src/gpu/device.ts";
 import type { GpuTimingStats } from "../src/gpu/submit.ts";
+import { gemmRowsGeometry, type GeometryProfile } from "../src/kernels/geometry-profile.ts";
 import { matmulKey } from "../src/kernels/matmul.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { type DeclarationJson, f32Bytes, fill, openGraphModel } from "./helpers/model-fixture.ts";
+import { deviceGeometryProfile } from "./helpers/geometry.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
 
 /**
@@ -46,13 +48,14 @@ const W = [0.5, -1, 0.25, 2, 0.125, -0.5, -3, 1.5, 0.75, 1, -0.25, 0.5];
 const B = [1, -2, 0.5];
 
 /** グラフが実際に踏むパイプラインキー（executor と同じ生成関数から引く）。 */
-const EXPECTED_KEYS: ReadonlySet<string> = new Set([
-  // x[6,4] × w[4,3]: n = 3 は 4 の倍数でないのでスカラ変種を踏み、m = 6 は小 M の
-  // タイル幾何バケット（src/kernels/gemm-geometry.ts の `gemmGeometryForRows`）を踏む
-  matmulKey(false, 6),
-  elementwiseKey({ op: "add", rank: 2, dtype: "f32" }),
-  elementwiseKey({ op: "relu", rank: 2, dtype: "f32" }),
-]);
+const expectedKeys = (profile: GeometryProfile): ReadonlySet<string> =>
+  new Set([
+    // x[6,4] × w[4,3]: n = 3 は 4 の倍数でないのでスカラ変種を踏み、m = 6 は小 M の
+    // タイル幾何バケット（src/kernels/gemm-geometry.ts の `gemmGeometryForRows`）を踏む
+    matmulKey(false, 6, gemmRowsGeometry(profile, 6)),
+    elementwiseKey({ op: "add", rank: 2, dtype: "f32" }),
+    elementwiseKey({ op: "relu", rank: 2, dtype: "f32" }),
+  ]);
 
 /** 出力の**バイト列**（計測モードが結果を変えないことは値ではなくビットで見る）。 */
 const outputBytes = (tensor: Tensor): Uint8Array =>
@@ -68,6 +71,7 @@ const runOnce = async (
   readonly dispatchCount: number;
   readonly pipelineCount: number;
   readonly timing: GpuTimingStats | undefined;
+  readonly profile: GeometryProfile;
 }> => {
   const gpu = await acquireGpu(gpuTiming === undefined ? {} : { gpuTiming });
   const opened = await openGraphModel(GRAPH, [
@@ -85,6 +89,7 @@ const runOnce = async (
       dispatchCount: diagnostics.submit.dispatchCount,
       pipelineCount: diagnostics.pipelineCount,
       timing: diagnostics.lastRunTiming,
+      profile: deviceGeometryProfile(gpu),
     };
   } finally {
     await session.dispose();
@@ -127,7 +132,7 @@ test.skipIf(!GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE)(
     assertEquals(timing.dispatchCount, result.dispatchCount, "内訳の dispatch 総数の相互検算");
     assertEquals(
       new Set(timing.entries.map((entry) => entry.key)),
-      EXPECTED_KEYS,
+      expectedKeys(result.profile),
       "キー集合は実行された pipeline と一致する",
     );
     assertEquals(timing.entries.length, result.pipelineCount, "生成した pipeline は全て走った");

@@ -66,9 +66,11 @@ import {
   type Tensor,
 } from "../src/runtime/executor.ts";
 import type { BoundContainer } from "../src/format/container/bind.ts";
+import { gemmRowsGeometry } from "../src/kernels/geometry-profile.ts";
 import { linearKey } from "../src/kernels/linear.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import type { TensorInput } from "./helpers/container-write.ts";
+import { deviceGeometryProfile } from "./helpers/geometry.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 import { quantizeI4 } from "./helpers/i4.ts";
 import {
@@ -528,6 +530,7 @@ test.skipIf(!GPU_AVAILABLE)(
   "linearCompute:'a8' の linear が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数・実 GPU）",
   async () => {
     const gpu = await acquireGpu();
+    const profile = deviceGeometryProfile(gpu);
     try {
       for (const testCase of LINEAR_CASES) {
         const prepared = prepareLinear(testCase);
@@ -541,7 +544,7 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           actual.keys,
           [
-            linearI8a8Key(linearI8a8UsesVec4(testCase.n), true),
+            linearI8a8Key(linearI8a8UsesVec4(testCase.n), true, profile.i8a8.linear),
             quantizeRowsKey(quantizeRowsGeometry(testCase.k)),
           ].sort(),
           `${testCase.name}: 走ったパイプラインキー`,
@@ -602,6 +605,7 @@ test.skipIf(!GPU_AVAILABLE)(
   "i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
   async () => {
     const gpu = await acquireGpu();
+    const profile = deviceGeometryProfile(gpu);
     try {
       // 本機は packed_4x8_integer_dot_product を列挙するので**両変種とも実走できる**。
       // この 1 本が「エミュは数値同一」という主張の linear 側の機械的検出器（設計 §4.4。
@@ -615,7 +619,9 @@ test.skipIf(!GPU_AVAILABLE)(
           const actual = await runLinear(gpu, prepared, options);
           results[dot] = actual.y;
           assertEquals(
-            actual.keys.includes(linearI8a8Key(linearI8a8UsesVec4(testCase.n), dot === "dp4a")),
+            actual.keys.includes(
+              linearI8a8Key(linearI8a8UsesVec4(testCase.n), dot === "dp4a", profile.i8a8.linear),
+            ),
             true,
             `${testCase.name}: ${dot} のキー`,
           );
@@ -668,10 +674,13 @@ test.skipIf(!GPU_AVAILABLE)(
       // 同じ実物の device を「dp4a を列挙しない」GpuContext で包む — 変えるのは能力の面だけで、
       // 構築は実際にエミュ版のカーネルで走る（警告の根拠と実走が一致する）。
       const stripped = new GpuContext(gpu.device, gpu.adapterInfo, gpu.limits, new Set());
+      const profile = deviceGeometryProfile(stripped);
       const warnings = await captureWarnings(async () => {
         const first = await runLinear(stripped, prepared, { linearCompute: "a8" });
         assertEquals(
-          first.keys.includes(linearI8a8Key(linearI8a8UsesVec4(smallCase.n), false)),
+          first.keys.includes(
+            linearI8a8Key(linearI8a8UsesVec4(smallCase.n), false, profile.i8a8.linear),
+          ),
           true,
           "エミュ版のキーで走る",
         );
@@ -697,6 +706,7 @@ test.skipIf(!GPU_AVAILABLE)(
   "i8a8 は opt-in × i8 常駐 × k%4==0 のときだけ効く（既定は従来経路のまま・実 GPU）",
   async () => {
     const gpu = await acquireGpu();
+    const profile = deviceGeometryProfile(gpu);
     try {
       // ① 既定（linearCompute 省略）は i8 資産でも従来の f32 経路（linear 1 本だけ）
       const prepared = prepareLinear({ name: "default", m: 17, n: 19, k: 20 });
@@ -705,7 +715,11 @@ test.skipIf(!GPU_AVAILABLE)(
       // 見たいのは「i8a8 ではなく f32 linear（wi8 格納）が 1 本だけ走った」こと。キーの
       // 綴りそのものは tests/geometry_profile_test.ts が固定するので、ここは同じ形状
       //（m=17 → 小 M のタイル幾何バケット / n=19 でスカラ変種）から引く。
-      assertEquals(baseline.keys, [linearKey("i8", false, "f32", 17)], "既定のキー");
+      assertEquals(
+        baseline.keys,
+        [linearKey("i8", false, "f32", 17, undefined, gemmRowsGeometry(profile, 17))],
+        "既定のキー",
+      );
       // 既定の値は w8（重みだけ量子化）なので、w8a8 の参照とは**一致しない**
       // （一致してしまうなら活性量子化が効いていない）
       const i8a8 = await runLinear(gpu, prepared, { linearCompute: "a8" });
@@ -960,6 +974,7 @@ test.skipIf(!GPU_AVAILABLE)(
   "linearCompute:'a8' × i4 常駐（w4a8）が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / group 2 種・実 GPU）",
   async () => {
     const gpu = await acquireGpu();
+    const profile = deviceGeometryProfile(gpu);
     try {
       for (const testCase of W4A8_CASES) {
         const prepared = prepareW4a8(testCase);
@@ -973,7 +988,7 @@ test.skipIf(!GPU_AVAILABLE)(
         const key = linearI8a8Key(
           linearI8a8UsesVec4(testCase.n),
           true,
-          undefined,
+          profile.i8a8.linear,
           "i4",
           testCase.groupSize,
         );
@@ -1042,6 +1057,7 @@ test.skipIf(!GPU_AVAILABLE)(
   "w4a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（i4 レーン展開は内積変種に依らない・実 GPU）",
   async () => {
     const gpu = await acquireGpu();
+    const profile = deviceGeometryProfile(gpu);
     try {
       const dots: readonly I8a8Dot[] = ["dp4a", "emu"];
       for (const testCase of W4A8_CASES) {
@@ -1056,7 +1072,7 @@ test.skipIf(!GPU_AVAILABLE)(
               linearI8a8Key(
                 linearI8a8UsesVec4(testCase.n),
                 dot === "dp4a",
-                undefined,
+                profile.i8a8.linear,
                 "i4",
                 testCase.groupSize,
               ),
@@ -1079,6 +1095,7 @@ test.skipIf(!GPU_AVAILABLE)(
   "w4a8 は opt-in のときだけ効き、既定の f32 i4 経路とは値が割れる（活性量子化の裏取り・実 GPU）",
   async () => {
     const gpu = await acquireGpu();
+    const profile = deviceGeometryProfile(gpu);
     try {
       const testCase = W4A8_CASES[3];
       const prepared = prepareW4a8(testCase);
@@ -1087,7 +1104,16 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(baseline.pipelineCount, 1, "既定はパイプライン 1 本（quantize_rows が出ない）");
       assertEquals(
         baseline.keys,
-        [linearKey("i4", false, "f32", testCase.m, testCase.groupSize)],
+        [
+          linearKey(
+            "i4",
+            false,
+            "f32",
+            testCase.m,
+            testCase.groupSize,
+            gemmRowsGeometry(profile, testCase.m),
+          ),
+        ],
         "既定のキー",
       );
       // MUST: 既定の値は活性 f32 のままなので w4a8 の参照とは**一致しない**。一致するなら

@@ -104,6 +104,7 @@ import {
 } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { fill, GRAPH_NAME, openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
+import { deviceGeometryProfile } from "./helpers/geometry.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
@@ -1083,6 +1084,7 @@ test.skipIf(!GPU_AVAILABLE)(
   "attentionCompute:'a8' の変種選択（①③ i8a8 / ②行統計 f32 / dp4a ↔ エミュ）をキーで見る（実 GPU）",
   async () => {
     const gpu = await acquireGpu();
+    const profile = deviceGeometryProfile(gpu);
     try {
       const shape = { b: 2, h: 3, m: 65, n: 68 };
       const d = 20;
@@ -1090,11 +1092,34 @@ test.skipIf(!GPU_AVAILABLE)(
       assert(i8a8.entries.length > 0, "内訳が空（キー検査が空振りしている）");
       const byKey = new Map(i8a8.entries.map((entry) => [entry.key, entry.dispatchCount]));
       // ①QK / ③PV とも i8a8 変種で、f32 変種は 1 本も走らない
-      assertEquals(byKey.get(attentionQkI8a8Key(attentionQkI8a8UsesVec4(shape.n), true)), 1);
-      assertEquals(byKey.get(attentionPvI8a8Key(attentionPvI8a8UsesVec4(d), true)), 1);
+      assertEquals(
+        byKey.get(
+          attentionQkI8a8Key(
+            attentionQkI8a8UsesVec4(shape.n),
+            true,
+            "f32",
+            profile.i8a8.attentionQk,
+          ),
+        ),
+        1,
+      );
+      assertEquals(
+        byKey.get(
+          attentionPvI8a8Key(attentionPvI8a8UsesVec4(d), true, "f32", profile.i8a8.attentionPv),
+        ),
+        1,
+      );
       for (const v4 of [false, true]) {
-        assertEquals(byKey.has(attentionQkKey(v4)), false, "f32 の attention_qk が残っている");
-        assertEquals(byKey.has(attentionPvKey(v4)), false, "f32 の attention_pv が残っている");
+        assertEquals(
+          byKey.has(attentionQkKey(v4, "f32", "f32", false, false, false, profile.attention.qk)),
+          false,
+          "f32 の attention_qk が残っている",
+        );
+        assertEquals(
+          byKey.has(attentionPvKey(v4, "f32", "f32", false, false, profile.attention.pv)),
+          false,
+          "f32 の attention_pv が残っている",
+        );
       }
       // ②行統計は f32 のまま（S の格納形も f32 のまま — 設計 §4.3 の分母量子化は不採用）。
       // regcache（S 1 回読み）は dim 依存の生成なので epc がキーに載る（値はビット同一）
@@ -1118,12 +1143,30 @@ test.skipIf(!GPU_AVAILABLE)(
       });
       assert(emu.entries.length > 0, "エミュ側の内訳が空（キー検査が空振りしている）");
       const keys = new Set(emu.entries.map((entry) => entry.key));
-      assertEquals(keys.has(attentionPvI8a8Key(attentionPvI8a8UsesVec4(d), false)), true);
-      assertEquals(keys.has(attentionPvI8a8Key(attentionPvI8a8UsesVec4(d), true)), false);
+      assertEquals(
+        keys.has(
+          attentionPvI8a8Key(attentionPvI8a8UsesVec4(d), false, "f32", profile.i8a8.attentionPv),
+        ),
+        true,
+      );
+      assertEquals(
+        keys.has(
+          attentionPvI8a8Key(attentionPvI8a8UsesVec4(d), true, "f32", profile.i8a8.attentionPv),
+        ),
+        false,
+      );
       // ①QK follows the same knob
       const qkV4 = attentionQkI8a8UsesVec4(shape.n);
-      assertEquals(keys.has(attentionQkI8a8Key(qkV4, false)), true, "エミュ変種のキー");
-      assertEquals(keys.has(attentionQkI8a8Key(qkV4, true)), false, "dp4a 変種が残っている");
+      assertEquals(
+        keys.has(attentionQkI8a8Key(qkV4, false, "f32", profile.i8a8.attentionQk)),
+        true,
+        "エミュ変種のキー",
+      );
+      assertEquals(
+        keys.has(attentionQkI8a8Key(qkV4, true, "f32", profile.i8a8.attentionQk)),
+        false,
+        "dp4a 変種が残っている",
+      );
     } finally {
       gpu.destroy();
     }
@@ -1151,16 +1194,31 @@ test.skipIf(!GPU_AVAILABLE)(
   "attentionCompute:'a8' の適格判定は段ごとに独立で、片方だけ f32 へ縮退する混成が起こる（実 GPU）",
   async () => {
     const gpu = await acquireGpu();
+    const profile = deviceGeometryProfile(gpu);
     try {
       // ① N % 4 != 0 → ③PV だけ f32（①QK は D=20 で i8a8 のまま）
       const mixedPv = { b: 1, h: 2, m: 17, n: 19 };
       const pvF32 = await runAttention(gpu, mixedPv, 20, { attentionCompute: "a8" });
       assert(pvF32.entries.length > 0, "内訳が空（キー検査が空振りしている）");
       const pvKeys = new Map(pvF32.entries.map((entry) => [entry.key, entry.dispatchCount]));
-      assertEquals(pvKeys.get(attentionQkI8a8Key(attentionQkI8a8UsesVec4(19), true)), 1);
-      assertEquals(pvKeys.get(attentionPvKey(gemmUsesVec4(19, 20))), 1, "③PV は f32 へ縮退する");
+      assertEquals(
+        pvKeys.get(
+          attentionQkI8a8Key(attentionQkI8a8UsesVec4(19), true, "f32", profile.i8a8.attentionQk),
+        ),
+        1,
+      );
+      assertEquals(
+        pvKeys.get(
+          attentionPvKey(gemmUsesVec4(19, 20), "f32", "f32", false, false, profile.attention.pv),
+        ),
+        1,
+        "③PV は f32 へ縮退する",
+      );
       for (const v4 of [false, true]) {
-        assertEquals(pvKeys.has(attentionPvI8a8Key(v4, true)), false);
+        assertEquals(
+          pvKeys.has(attentionPvI8a8Key(v4, true, "f32", profile.i8a8.attentionPv)),
+          false,
+        );
       }
       // 量子化は q / k の 2 本だけ・Vᵀ の permute は走らない
       assertEquals(quantizeRowsDispatches(pvKeys), 2, "quantize_rows が q / k の 2 本でない");
@@ -1171,10 +1229,32 @@ test.skipIf(!GPU_AVAILABLE)(
       const qkF32 = await runAttention(gpu, mixedQk, 13, { attentionCompute: "a8" });
       assert(qkF32.entries.length > 0, "内訳が空（キー検査が空振りしている）");
       const qkKeys = new Map(qkF32.entries.map((entry) => [entry.key, entry.dispatchCount]));
-      assertEquals(qkKeys.get(attentionQkKey(gemmUsesVec4(13, 20))), 1, "①QK は f32 へ縮退する");
-      assertEquals(qkKeys.get(attentionPvI8a8Key(attentionPvI8a8UsesVec4(13), true)), 1);
+      assertEquals(
+        qkKeys.get(
+          attentionQkKey(
+            gemmUsesVec4(13, 20),
+            "f32",
+            "f32",
+            false,
+            false,
+            false,
+            profile.attention.qk,
+          ),
+        ),
+        1,
+        "①QK は f32 へ縮退する",
+      );
+      assertEquals(
+        qkKeys.get(
+          attentionPvI8a8Key(attentionPvI8a8UsesVec4(13), true, "f32", profile.i8a8.attentionPv),
+        ),
+        1,
+      );
       for (const v4 of [false, true]) {
-        assertEquals(qkKeys.has(attentionQkI8a8Key(v4, true)), false);
+        assertEquals(
+          qkKeys.has(attentionQkI8a8Key(v4, true, "f32", profile.i8a8.attentionQk)),
+          false,
+        );
       }
       // 量子化は Vᵀ の 1 本だけ（q / k は f32 のまま読まれる）
       assertEquals(quantizeRowsDispatches(qkKeys), 1, "quantize_rows が Vᵀ の 1 本でない");
@@ -1191,10 +1271,14 @@ test.skipIf(!GPU_AVAILABLE)(
         "縮退したのに量子化が走っている",
       );
       assertEquals(keys.has(stridedKey({ dtype: "f32" })), false, "縮退したのに permute が走る");
-      assertEquals(keys.has(attentionQkKey(false)), true, "f32 の attention_qk が走っていない");
+      assertEquals(
+        keys.has(attentionQkKey(false, "f32", "f32", false, false, false, profile.attention.qk)),
+        true,
+        "f32 の attention_qk が走っていない",
+      );
       for (const dp4a of [false, true]) {
         assertEquals(
-          keys.has(attentionQkI8a8Key(false, dp4a)),
+          keys.has(attentionQkI8a8Key(false, dp4a, "f32", profile.i8a8.attentionQk)),
           false,
           "縮退したのに i8a8 が走っている",
         );

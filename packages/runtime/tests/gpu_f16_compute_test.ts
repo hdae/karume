@@ -42,6 +42,7 @@ import {
   attentionStatsKey,
   attentionStatsRegCache,
 } from "../src/kernels/attention.ts";
+import { gemmRowsGeometry } from "../src/kernels/geometry-profile.ts";
 import { linearKey } from "../src/kernels/linear.ts";
 import {
   createSessionFromContainer,
@@ -61,6 +62,7 @@ import {
   openModelBytes,
   singleOpDeclaration,
 } from "./helpers/model-fixture.ts";
+import { deviceGeometryProfile } from "./helpers/geometry.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 import { GPU_AVAILABLE, SHADER_F16_AVAILABLE } from "./helpers/gpu.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
@@ -272,6 +274,7 @@ test.skipIf(!F16_GPU)(
   "linear の f16 計算変種は「入力を f16 に丸めた f32 変種」とビット単位で一致する（実 GPU）",
   async () => {
     const gpu = await acquireGpu({ shaderF16: true });
+    const profile = deviceGeometryProfile(gpu);
     try {
       for (const shape of LINEAR_SHAPES) {
         const { name, m, n, k } = shape;
@@ -299,12 +302,18 @@ test.skipIf(!F16_GPU)(
         // 幾何を解決する — src/runtime/recipe-builder.ts）。省くと既定幾何の綴りになり、
         // 幾何が違うキーと突き合わせることになる。
         assertEquals(
-          actual.keys.filter((key) => key === linearKey("f32", v4, "f16", m)).length,
+          actual.keys.filter(
+            (key) =>
+              key === linearKey("f32", v4, "f16", m, undefined, gemmRowsGeometry(profile, m)),
+          ).length,
           1,
           `linear ${name}: f16 変種のキーが走っていない（${actual.keys.join(", ")}）`,
         );
         assertEquals(
-          actual.keys.filter((key) => key === linearKey("f32", v4, "f32", m)).length,
+          actual.keys.filter(
+            (key) =>
+              key === linearKey("f32", v4, "f32", m, undefined, gemmRowsGeometry(profile, m)),
+          ).length,
           0,
           `linear ${name}: f32 変種のキーが残っている`,
         );
@@ -319,6 +328,7 @@ test.skipIf(!F16_GPU)(
   "重み f16 格納 × f16 計算の組は往復恒等（unpack2x16float の値は f16 に厳密に戻る）",
   async () => {
     const gpu = await acquireGpu({ shaderF16: true });
+    const profile = deviceGeometryProfile(gpu);
     try {
       for (const shape of LINEAR_SHAPES) {
         const { name, m, n, k } = shape;
@@ -352,7 +362,10 @@ test.skipIf(!F16_GPU)(
 
         const v4 = k % 4 === 0 && n % 4 === 0;
         assertEquals(
-          actual.keys.filter((key) => key === linearKey("f16", v4, "f16", m)).length,
+          actual.keys.filter(
+            (key) =>
+              key === linearKey("f16", v4, "f16", m, undefined, gemmRowsGeometry(profile, m)),
+          ).length,
           1,
           `linear wf16 ${name}: f16 計算のキーが走っていない`,
         );
@@ -467,6 +480,7 @@ test.skipIf(!F16_GPU)(
   "融合 attention の f16 変種は分解経路 + 丸め 3 点とビット単位で一致する（実 GPU）",
   async () => {
     const gpu = await acquireGpu({ shaderF16: true });
+    const profile = deviceGeometryProfile(gpu);
     try {
       for (const shape of ATTENTION_SHAPES) {
         const { name, b, h, m, n, d } = shape;
@@ -512,17 +526,17 @@ test.skipIf(!F16_GPU)(
         // なり、走ったキーと必ず食い違う。
         const regCache = attentionStatsRegCache(n);
         for (const key of [
-          attentionQkKey(qkV4, "f16"),
+          attentionQkKey(qkV4, "f16", "f32", false, false, false, profile.attention.qk),
           attentionStatsKey("f16", "f32", regCache),
-          attentionPvKey(pvV4, "f16"),
+          attentionPvKey(pvV4, "f16", "f32", false, false, profile.attention.pv),
         ]) {
           assert(running.has(key), `attention ${name}: '${key}' が走っていない`);
         }
         // 3 カーネルは**同時に**切り替わる（S の格納形が書き手と読み手で一致する条件）
         for (const key of [
-          attentionQkKey(qkV4),
+          attentionQkKey(qkV4, "f32", "f32", false, false, false, profile.attention.qk),
           attentionStatsKey("f32", "f32", regCache),
-          attentionPvKey(pvV4),
+          attentionPvKey(pvV4, "f32", "f32", false, false, profile.attention.pv),
         ]) {
           assert(!running.has(key), `attention ${name}: f32 変種 '${key}' が残っている`);
         }

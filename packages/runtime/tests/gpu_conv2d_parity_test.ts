@@ -48,8 +48,10 @@ import {
 import { allclose } from "../src/reference/allclose.ts";
 import { referenceConv2d, refTensor } from "../src/reference/ops.ts";
 import type { WeightStorage } from "../src/kernels/weight-storage.ts";
+import type { GeometryProfile } from "../src/kernels/geometry-profile.ts";
 import { createSessionFromContainer } from "../src/runtime/executor.ts";
 import { quantizeF16 } from "./helpers/f16.ts";
+import { deviceGeometryProfile } from "./helpers/geometry.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 import {
   fill,
@@ -726,8 +728,12 @@ test.skipIf(!GPU_AVAILABLE)(
  * MUST: 値ではなく**実際に走ったパイプラインキー**で見る。どちらのカーネルも正しいので、
  * 出力の一致は踏み分けの証拠にならない。
  */
-const conv2dKeysUsed = async (channels: number, groups: number): Promise<ReadonlySet<string>> => {
+const conv2dKeysUsed = async (
+  channels: number,
+  groups: number,
+): Promise<{ readonly keys: ReadonlySet<string>; readonly profile: GeometryProfile }> => {
   const gpu = await acquireGpu();
+  const profile = deviceGeometryProfile(gpu);
   const graph = singleOpDeclaration(
     "conv2d",
     [[1, channels, 4, 4], [channels, channels / groups, 3, 3], [channels]],
@@ -745,9 +751,12 @@ const conv2dKeysUsed = async (channels: number, groups: number): Promise<Readonl
       x1: fill([channels, channels / groups, 3, 3], WEIGHT),
       x2: fill([channels], BIAS),
     });
-    return new Set(
-      requireCensus(session.diagnostics().lastRunPipelines, "conv").map((row) => row.key),
-    );
+    return {
+      keys: new Set(
+        requireCensus(session.diagnostics().lastRunPipelines, "conv").map((row) => row.key),
+      ),
+      profile,
+    };
   } finally {
     await session.dispose();
     gpu.destroy();
@@ -759,13 +768,14 @@ test.skipIf(!GPU_AVAILABLE)(
   async () => {
     // Cin = Cout = 6・3×3 → kFlat = 54（groups=1）で 4 の倍数でないのでスカラ変種。
     // Cout=6 は `6 % 64 == 6` なので m タイルは 32 行（{@link conv2dIgemmMTile}）。
+    const small = await conv2dKeysUsed(6, 1);
     assertEquals(
-      await conv2dKeysUsed(6, 1),
-      new Set([conv2dIgemmKey("f32", false, GEMM_MTILE_SMALL)]),
+      small.keys,
+      new Set([conv2dIgemmKey("f32", false, GEMM_MTILE_SMALL, small.profile.conv2d.rows32)]),
     );
-    assertEquals(await conv2dKeysUsed(6, 3), new Set([conv2dKey("f32")]));
+    assertEquals((await conv2dKeysUsed(6, 3)).keys, new Set([conv2dKey("f32")]));
     // depthwise（groups = Cin = Cout）も直接カーネル側
-    assertEquals(await conv2dKeysUsed(6, 6), new Set([conv2dKey("f32")]));
+    assertEquals((await conv2dKeysUsed(6, 6)).keys, new Set([conv2dKey("f32")]));
   },
 );
 
@@ -779,11 +789,16 @@ test.skipIf(!GPU_AVAILABLE)(
   "executor は M%64 で m タイル 64/32 を踏み分ける（実 GPU）",
   async () => {
     // Cout = 96（census の本命 — `96 % 64 == 32`）→ 32 行
+    const rows32 = await conv2dKeysUsed(96, 1);
     assertEquals(
-      await conv2dKeysUsed(96, 1),
-      new Set([conv2dIgemmKey("f32", true, GEMM_MTILE_SMALL)]),
+      rows32.keys,
+      new Set([conv2dIgemmKey("f32", true, GEMM_MTILE_SMALL, rows32.profile.conv2d.rows32)]),
     );
     // Cout = 64（`64 % 64 == 0`）→ 64 行のまま（既存キーが動かないことの確認も兼ねる）
-    assertEquals(await conv2dKeysUsed(64, 1), new Set([conv2dIgemmKey("f32", true, GEMM_TILE)]));
+    const rows64 = await conv2dKeysUsed(64, 1);
+    assertEquals(
+      rows64.keys,
+      new Set([conv2dIgemmKey("f32", true, GEMM_TILE, rows64.profile.conv2d.rows64)]),
+    );
   },
 );

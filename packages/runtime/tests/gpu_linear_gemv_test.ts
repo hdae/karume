@@ -71,6 +71,7 @@ import {
 } from "../src/kernels/linear-gemv.ts";
 import type { WeightStorage } from "../src/kernels/weight-storage.ts";
 import { linearKey } from "../src/kernels/linear.ts";
+import { gemmRowsGeometry, type GeometryProfile } from "../src/kernels/geometry-profile.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
 import { applyReferenceOp, type RefTensor, refTensor } from "../src/reference/ops.ts";
@@ -93,6 +94,7 @@ import {
 } from "./helpers/model-fixture.ts";
 import { quantizeI4 } from "./helpers/i4.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
+import { deviceGeometryProfile } from "./helpers/geometry.ts";
 import { GPU_AVAILABLE, SHADER_F16_AVAILABLE } from "./helpers/gpu.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
@@ -306,7 +308,7 @@ type DoorCase = {
   /** 真ならこの形は GEMV 族へ、偽なら既定の `linear:` へ落ちる。 */
   readonly gemv: boolean;
   /** 既定へ落ちる形で期待する `linear:` キー（GEMV へ入る形では未使用）。 */
-  readonly fallback?: string;
+  readonly fallback?: (profile: GeometryProfile) => string;
 };
 
 /**
@@ -365,7 +367,8 @@ const DOOR_CASES: readonly DoorCase[] = [
     shape: { name: "", k: 128, n: 64, groupSize: 32 },
     m: GEMM_ROWS,
     gemv: false,
-    fallback: linearKey("i4", true, "f32", GEMM_ROWS, 32),
+    fallback: (profile) =>
+      linearKey("i4", true, "f32", GEMM_ROWS, 32, gemmRowsGeometry(profile, GEMM_ROWS)),
   },
   {
     // group 長だけを外す（16 = 1 語 32 要素が group を跨ぐ形）
@@ -373,7 +376,7 @@ const DOOR_CASES: readonly DoorCase[] = [
     shape: { name: "", k: 128, n: 64, groupSize: 16 },
     m: 1,
     gemv: false,
-    fallback: linearKey("i4", true, "f32", 1, 16),
+    fallback: (profile) => linearKey("i4", true, "f32", 1, 16, gemmRowsGeometry(profile, 1)),
   },
   {
     // 同じ条件を行ブロック側でも外す
@@ -381,7 +384,7 @@ const DOOR_CASES: readonly DoorCase[] = [
     shape: { name: "", k: 128, n: 64, groupSize: 16 },
     m: 2,
     gemv: false,
-    fallback: linearKey("i4", true, "f32", 2, 16),
+    fallback: (profile) => linearKey("i4", true, "f32", 2, 16, gemmRowsGeometry(profile, 2)),
   },
   {
     // v4 だけを外す（n % 4 != 0 — 既定のスカラ変種へ）
@@ -389,7 +392,7 @@ const DOOR_CASES: readonly DoorCase[] = [
     shape: { name: "", k: 128, n: 33, groupSize: 32 },
     m: 1,
     gemv: false,
-    fallback: linearKey("i4", false, "f32", 1, 32),
+    fallback: (profile) => linearKey("i4", false, "f32", 1, 32, gemmRowsGeometry(profile, 1)),
   },
   {
     // 同じ条件を行ブロック側でも外す
@@ -397,7 +400,7 @@ const DOOR_CASES: readonly DoorCase[] = [
     shape: { name: "", k: 128, n: 33, groupSize: 32 },
     m: 2,
     gemv: false,
-    fallback: linearKey("i4", false, "f32", 2, 32),
+    fallback: (profile) => linearKey("i4", false, "f32", 2, 32, gemmRowsGeometry(profile, 2)),
   },
 ];
 
@@ -406,6 +409,7 @@ test.skipIf(!GPU_AVAILABLE)(
     "（実 GPU / 診断キー）",
   async () => {
     const gpu = await acquireGpu();
+    const profile = deviceGeometryProfile(gpu);
     try {
       for (const door of DOOR_CASES) {
         const { k, n, groupSize } = door.shape;
@@ -433,9 +437,10 @@ test.skipIf(!GPU_AVAILABLE)(
             `${door.name}: 期待した変種のキー ${key} で走っていない（内訳: ${shown}）`,
           );
         } else {
+          const fallback = door.fallback?.(profile);
           assert(
-            door.fallback !== undefined && keys.includes(door.fallback),
-            `${door.name}: 既定経路のキー ${door.fallback} で走っていない（内訳: ${shown}）`,
+            fallback !== undefined && keys.includes(fallback),
+            `${door.name}: 既定経路のキー ${fallback} で走っていない（内訳: ${shown}）`,
           );
         }
       }
@@ -593,7 +598,7 @@ type DoorI8Case = {
   readonly shape: GemvI8Case;
   readonly m: number;
   readonly gemv: boolean;
-  readonly fallback?: string;
+  readonly fallback?: (profile: GeometryProfile) => string;
 };
 
 /**
@@ -628,7 +633,8 @@ const DOOR_I8_CASES: readonly DoorI8Case[] = [
     shape: { name: "", k: 64, n: 64 },
     m: GEMM_ROWS,
     gemv: false,
-    fallback: linearKey("i8", true, "f32", GEMM_ROWS),
+    fallback: (profile) =>
+      linearKey("i8", true, "f32", GEMM_ROWS, undefined, gemmRowsGeometry(profile, GEMM_ROWS)),
   },
   {
     // 縮約の刻みだけを外す（k=68 は 4 の倍数なので v4 は立ったまま）
@@ -636,7 +642,7 @@ const DOOR_I8_CASES: readonly DoorI8Case[] = [
     shape: { name: "", k: 68, n: 64 },
     m: 1,
     gemv: false,
-    fallback: linearKey("i8", true, "f32", 1),
+    fallback: (profile) => linearKey("i8", true, "f32", 1, undefined, gemmRowsGeometry(profile, 1)),
   },
   {
     // 同じ条件を行ブロック側でも外す
@@ -644,7 +650,7 @@ const DOOR_I8_CASES: readonly DoorI8Case[] = [
     shape: { name: "", k: 68, n: 64 },
     m: 2,
     gemv: false,
-    fallback: linearKey("i8", true, "f32", 2),
+    fallback: (profile) => linearKey("i8", true, "f32", 2, undefined, gemmRowsGeometry(profile, 2)),
   },
   {
     // v4 だけを外す（n % 4 != 0 — 既定のスカラ変種へ）
@@ -652,7 +658,8 @@ const DOOR_I8_CASES: readonly DoorI8Case[] = [
     shape: { name: "", k: 64, n: 33 },
     m: 1,
     gemv: false,
-    fallback: linearKey("i8", false, "f32", 1),
+    fallback: (profile) =>
+      linearKey("i8", false, "f32", 1, undefined, gemmRowsGeometry(profile, 1)),
   },
   {
     // 同じ条件を行ブロック側でも外す
@@ -660,7 +667,8 @@ const DOOR_I8_CASES: readonly DoorI8Case[] = [
     shape: { name: "", k: 64, n: 33 },
     m: 2,
     gemv: false,
-    fallback: linearKey("i8", false, "f32", 2),
+    fallback: (profile) =>
+      linearKey("i8", false, "f32", 2, undefined, gemmRowsGeometry(profile, 2)),
   },
 ];
 
@@ -669,6 +677,7 @@ test.skipIf(!GPU_AVAILABLE)(
     "（実 GPU / 診断キー）",
   async () => {
     const gpu = await acquireGpu();
+    const profile = deviceGeometryProfile(gpu);
     try {
       for (const door of DOOR_I8_CASES) {
         const { k, n } = door.shape;
@@ -694,9 +703,10 @@ test.skipIf(!GPU_AVAILABLE)(
             `${door.name}: 期待した変種のキー ${key} で走っていない（内訳: ${shown}）`,
           );
         } else {
+          const fallback = door.fallback?.(profile);
           assert(
-            door.fallback !== undefined && keys.includes(door.fallback),
-            `${door.name}: 既定経路のキー ${door.fallback} で走っていない（内訳: ${shown}）`,
+            fallback !== undefined && keys.includes(fallback),
+            `${door.name}: 既定経路のキー ${fallback} で走っていない（内訳: ${shown}）`,
           );
         }
       }
@@ -1127,6 +1137,7 @@ const checkFloatGemvBits = async (
   shapes: readonly (readonly [number, number])[],
 ): Promise<void> => {
   const gpu = await acquireGpu();
+  const profile = deviceGeometryProfile(gpu);
   try {
     for (const [n, k] of shapes) {
       const data = floatLinearFixture(1, n, k, storage);
@@ -1134,7 +1145,9 @@ const checkFloatGemvBits = async (
       // The float gate is M=1 only. M=2 runs the same M16N16 GEMM skeleton, not a family variant.
       const expected = await runFloatLinear(gpu, floatLinearFixture(2, n, k, storage));
       assertEquals(actual.keys, [linearGemvKey(storage)]);
-      assertEquals(expected.keys, [linearKey(storage, true, "f32", 2)]);
+      assertEquals(expected.keys, [
+        linearKey(storage, true, "f32", 2, undefined, gemmRowsGeometry(profile, 2)),
+      ]);
       assertEquals(actual.output.shape, [1, n]);
       assertEquals(bits(actual.output), bits(expected.output).subarray(0, n), `n=${n} k=${k}`);
       const report = compareTensors(actual.output, data.reference(), GEMM_TOLERANCE);
@@ -1204,6 +1217,7 @@ type FloatDoorCase = {
 
 const checkFloatDoor = async (cases: readonly FloatDoorCase[]): Promise<void> => {
   const gpu = await acquireGpu();
+  const profile = deviceGeometryProfile(gpu);
   try {
     for (const c of cases) {
       const data = floatLinearFixture(c.m, c.n, c.k, c.storage, c.roundToF16);
@@ -1211,7 +1225,14 @@ const checkFloatDoor = async (cases: readonly FloatDoorCase[]): Promise<void> =>
       assertEquals(actual.keys, [
         c.gemv === true
           ? linearGemvKey(c.storage)
-          : linearKey(c.storage, c.k % 4 === 0 && c.n % 4 === 0, "f32", c.m),
+          : linearKey(
+              c.storage,
+              c.k % 4 === 0 && c.n % 4 === 0,
+              "f32",
+              c.m,
+              undefined,
+              gemmRowsGeometry(profile, c.m),
+            ),
       ]);
       const report = compareTensors(actual.output, data.reference(), GEMM_TOLERANCE);
       assert(report.pass, formatAllclose(report));
@@ -1256,11 +1277,14 @@ test.skipIf(!GPU_AVAILABLE)(
 /** An f16-compute request keeps the GEMM key (checks the key only; numbers live above). */
 const checkF16ComputeKeepsGemm = async (storage: FloatStorage): Promise<void> => {
   const gpu = await acquireGpu({ shaderF16: true });
+  const profile = deviceGeometryProfile(gpu);
   try {
     const actual = await runFloatLinear(gpu, floatLinearFixture(1, 36, 40, storage), {
       linearCompute: "f16",
     });
-    assertEquals(actual.keys, [linearKey(storage, true, "f16", 1)]);
+    assertEquals(actual.keys, [
+      linearKey(storage, true, "f16", 1, undefined, gemmRowsGeometry(profile, 1)),
+    ]);
   } finally {
     gpu.destroy();
   }

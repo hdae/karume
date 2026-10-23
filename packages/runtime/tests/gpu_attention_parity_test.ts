@@ -30,6 +30,7 @@ import {
   singleOpDeclaration,
 } from "./helpers/model-fixture.ts";
 import { attentionPvKey, attentionQkKey } from "../src/kernels/attention.ts";
+import { deviceGeometryProfile } from "./helpers/geometry.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
@@ -395,6 +396,7 @@ test.skipIf(!GPU_AVAILABLE)(
  */
 test.skipIf(!GPU_AVAILABLE)("加算 mask は ①QK のキーと束縛だけを増やす（実 GPU）", async () => {
   const gpu = await acquireGpu();
+  const profile = deviceGeometryProfile(gpu);
   try {
     const { graph, inputs } = maskedAttention();
     const session = await createSessionFromContainer(gpu, await openGraphModel(graph), GRAPH_NAME);
@@ -407,10 +409,24 @@ test.skipIf(!GPU_AVAILABLE)("加算 mask は ①QK のキーと束縛だけを�
         entries.reduce((sum, entry) => sum + entry.dispatchCount, 0),
         3,
       );
-      assertEquals(keys.includes(attentionQkKey(true, "f32", "f32", true)), true, "mask 変種");
-      assertEquals(keys.includes(attentionQkKey(true)), false, "mask 無しの ①QK が残っている");
+      assertEquals(
+        keys.includes(attentionQkKey(true, "f32", "f32", true, false, false, profile.attention.qk)),
+        true,
+        "mask 変種",
+      );
+      assertEquals(
+        keys.includes(
+          attentionQkKey(true, "f32", "f32", false, false, false, profile.attention.qk),
+        ),
+        false,
+        "mask 無しの ①QK が残っている",
+      );
       // ②③ は mask なしと同じキー（生成物も同じ = スナップショットが固定）
-      assertEquals(keys.includes(attentionPvKey(true)), true, "③PV は mask で変わらない");
+      assertEquals(
+        keys.includes(attentionPvKey(true, "f32", "f32", false, false, profile.attention.pv)),
+        true,
+        "③PV は mask で変わらない",
+      );
     } finally {
       await session.dispose();
     }
