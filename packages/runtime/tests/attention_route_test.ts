@@ -190,21 +190,34 @@ describe("attentionRoute: the online kernel (attentionScoreStorage 'none' — AD
     }
   });
 
-  it("reads the device facts from the features the device enabled and its granted limit", () => {
+  it("reads the device facts from the features the device enabled, the measured lane mapping and its granted limit", () => {
     const limits = { maxComputeWorkgroupStorageSize: 49152 };
     const all = new Set(["subgroups", "subgroup-size-control"]);
     const language = new Set(["subgroup_id"]);
-    assertEquals(attentionDeviceFacts({ features: all, wgslLanguageFeatures: language, limits }), {
-      subgroups: true,
-      maxComputeWorkgroupStorageSize: 49152,
-    });
-    for (const [features, wgsl] of [
-      [new Set(["subgroups"]), language],
-      [new Set(["subgroup-size-control"]), language],
-      [all, new Set<string>()],
+    assertEquals(
+      attentionDeviceFacts({
+        features: all,
+        wgslLanguageFeatures: language,
+        subgroupLanesLinear: true,
+        limits,
+      }),
+      { subgroups: true, maxComputeWorkgroupStorageSize: 49152 },
+    );
+    for (const [features, wgsl, linear] of [
+      [new Set(["subgroups"]), language, true],
+      [new Set(["subgroup-size-control"]), language, true],
+      [all, new Set<string>(), true],
+      // The features alone are not enough: the sg32 form addresses its tiles by the thread index
+      // and needs the measured linear lane mapping (ADR 0132 decision 5).
+      [all, language, false],
     ] as const) {
       assertEquals(
-        attentionDeviceFacts({ features, wgslLanguageFeatures: wgsl, limits }).subgroups,
+        attentionDeviceFacts({
+          features,
+          wgslLanguageFeatures: wgsl,
+          subgroupLanesLinear: linear,
+          limits,
+        }).subgroups,
         false,
       );
     }

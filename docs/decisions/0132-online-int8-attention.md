@@ -51,8 +51,9 @@ and ADR 0100 decision 1 (`subgroups: true` rejects a device without them).
    `attention_online:v1:i8a8:…` once per window of query rows. The window is not a capacity
    device (there is no S) but a dispatch-size device: the planner (a pure function next to
    `planAttentionBlocks`) sizes the window from a work budget so that one dispatch stays well under
-   the 1 s submit gate (`ATTENTION_ONLINE_WINDOW_MACS` = 2³⁷ multiply-accumulates: at the
-   121-frame shape 768-row windows, 36 per node, about 9–10 ms each); the estimate (ADR 0124
+   the 1 s submit gate (`ATTENTION_ONLINE_WINDOW_MACS` = 2⁴⁰ multiply-accumulates: at the
+   121-frame shape 6,528-row windows, 5 per node, about 70 ms each — smaller windows lose
+   occupancy, 768-row windows measured 15% slower than one dispatch); the estimate (ADR 0124
    decision 7) counts no S temporaries for this route and takes the window count from the same
    function.
 3. **Geometry**: 256 threads, 64 query rows per workgroup, 64 keys per tile, D ∈ {64, 128} as
@@ -76,12 +77,14 @@ and ADR 0100 decision 1 (`subgroups: true` rejects a device without them).
    order and treats `exp` statistically as ③PV does (a mismatch is ±1 step of P̃, never ±2).
 5. **Subgroups are a speed-only variant, bit-identical to the portable one.** The kernel has two
    reduction forms with different keys: `:sg32` (`subgroupShuffleXor` across the 16 lanes of a row,
-   `@subgroup_size(32)`, lanes identified by `subgroup_invocation_id`) and `:wg` (workgroup memory).
+   `@subgroup_size(32)`, the lanes addressed by `local_invocation_index` under the linear lane
+   mapping that `acquireGpu` measures on the device — `GpuContext.subgroupLanesLinear`; identifying
+   them by the subgroup builtins instead costs 16%) and `:wg` (workgroup memory).
    The row max is exact under any order; the final sum of `l` uses the same butterfly pairing
    (`((l0+l8)+(l4+l12)) + …`) in both forms, so the bits are the same — a test runs both on one
    device and requires Uint32 equality (the same discipline as `dot4I8Packed` against its
-   emulation). The build selects `:sg32` when the device has `subgroups`, `subgroup-size-control`
-   and the WGSL feature `subgroup_id`, otherwise `:wg` when the workgroup-storage limit allows it
+   emulation). The build selects `:sg32` when the device has `subgroups`, `subgroup-size-control`,
+   the WGSL feature `subgroup_id` and the measured linear lane mapping, otherwise `:wg` when the workgroup-storage limit allows it
    (at D = 128 `:sg32` declares 29,440 B and `:wg` 33,536 B — 32 KiB devices without subgroups
    fall back to the three dispatches,
    also keyed). Because the choice cannot change a bit, it is capability-driven without breaking

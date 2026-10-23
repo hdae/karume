@@ -35,14 +35,12 @@ const NEG: f32 = -3.0e38;
 fn main(
   @builtin(workgroup_id) wid: vec3<u32>,
   @builtin(local_invocation_index) t: u32,
-  @builtin(subgroup_invocation_id) lane: u32,
-  @builtin(subgroup_id) sgid: u32,
 ) {
   let bh = wid.y;
   let row0 = dims.row_offset + wid.x * 64u;
-  // MUST: the 16 lanes of a row share a subgroup — identified by the subgroup builtins, not by t
-  let tx = lane % 16u;
-  let ty = sgid * 2u + lane / 16u;
+  // the 16 lanes of a row: one half of a subgroup under the measured linear lane mapping
+  let tx = t % 16u;
+  let ty = t / 16u;
   let n4 = dims.n / 4u;
   let q_bh = bh * dims.m * 32u;
   let k_bh = bh * dims.n * 32u;

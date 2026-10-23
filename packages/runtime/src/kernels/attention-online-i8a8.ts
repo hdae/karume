@@ -41,9 +41,12 @@
  * out explicitly in the workgroup-memory form. Hence the build may pick `sg32` or `wg` from the
  * device's capabilities without changing a bit (the same discipline as `idot` against its
  * emulation); tests/gpu_attention_online_i8a8_test.ts holds the Uint32 equality.
- * MUST: `sg32` identifies a lane by `subgroup_invocation_id`, never by `local_invocation_index`
- * (WGSL defines no relationship between the two; the shuffles only need the 16 lanes of a row to
- * share a subgroup, which `@subgroup_size(32)` and this identification guarantee).
+ * MUST: `sg32` addresses its tiles by `local_invocation_index` and assumes the 16 lanes of a row
+ * (`t / 16`) share a subgroup — the linear lane mapping (lane = t % 32 at `@subgroup_size(32)`).
+ * WGSL defines no such relationship, so the mapping is **measured** on the device by `acquireGpu`
+ * (`GpuContext.subgroupLanesLinear`) and the route takes `sg32` only where it holds. Identifying
+ * the lanes by `subgroup_invocation_id` / `subgroup_id` instead was measured 16% slower (the tile
+ * addresses no longer derive from the thread index — 2026-10-23, RTX 3080 Ti).
  *
  * ## Numerics (contract class Q — ADR 0110)
  *
@@ -264,24 +267,13 @@ const NEG: f32 = ${NEG};
 @compute @workgroup_size(${THREADS})${sg ? " @subgroup_size(32)" : ""}
 fn main(
   @builtin(workgroup_id) wid: vec3<u32>,
-  @builtin(local_invocation_index) t: u32,${
-    sg
-      ? `
-  @builtin(subgroup_invocation_id) lane: u32,
-  @builtin(subgroup_id) sgid: u32,`
-      : ""
-  }
+  @builtin(local_invocation_index) t: u32,
 ) {
   let bh = wid.y;
   let row0 = dims.row_offset + wid.x * ${ATTENTION_ONLINE_ROWS}u;
-${
-  sg
-    ? `  // MUST: the 16 lanes of a row share a subgroup — identified by the subgroup builtins, not by t
-  let tx = lane % ${LANES}u;
-  let ty = sgid * 2u + lane / ${LANES}u;`
-    : `  let tx = t % ${LANES}u;
-  let ty = t / ${LANES}u;`
-}
+  // the 16 lanes of a row: ${sg ? "one half of a subgroup under the measured linear lane mapping" : "reduced through workgroup memory"}
+  let tx = t % ${LANES}u;
+  let ty = t / ${LANES}u;
   let n4 = dims.n / ${I8A8_PACK}u;
   let q_bh = bh * dims.m * ${packs}u;
   let k_bh = bh * dims.n * ${packs}u;

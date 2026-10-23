@@ -401,13 +401,13 @@ test.skipIf(!GPU_AVAILABLE)(
 test.skipIf(!GPU_AVAILABLE)(
   "the workspace of a fused attention op matches the slot table on the online route over two row windows (real GPU)",
   () =>
-    // 2³⁷ / (16,384 keys · 128 · 2) = 32,768 rows per window; 32,800 rows make two windows
+    // 2⁴⁰ / (65,536 keys · 128 · 2) = 65,536 rows per window; 65,568 rows make two windows
     assertFusedAttentionMatchesEstimate({
       options: { attentionCompute: "a8", attentionScoreStorage: "none" },
       expectedBlocks: 1,
       expectedOnlineWindows: 2,
       subgroups: "available",
-      shape: { b: 1, h: 1, m: 32800, n: 16384, d: 128 },
+      shape: { b: 1, h: 1, m: 65568, n: 65536, d: 128 },
     }),
 );
 

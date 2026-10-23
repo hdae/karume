@@ -428,9 +428,9 @@ describe.skipIf(!GPU_AVAILABLE)("online int8 attention through the Session (ADR 
   });
 
   it("(iv) a shape over one dispatch's budget runs one dispatch per window, bit-identical to one raw dispatch", async (context) => {
-    // 2³⁷ / (16,384 keys · 128 · 2) = 32,768 rows per window: 32,832 rows make two windows.
-    // 32,800 = 32,768 + 32: the second window's only workgroup is partial and clamped at M
-    const shape: Shape = { b: 1, h: 1, m: 32800, n: 16384, d: 128 };
+    // 2⁴⁰ / (65,536 keys · 128 · 2) = 65,536 rows per window: 65,568 rows make two windows, and
+    // 65,568 = 65,536 + 32 leaves the second window's only workgroup partial and clamped at M
+    const shape: Shape = { b: 1, h: 1, m: 65568, n: 65536, d: 128 };
     const windows = planAttentionOnlineWindows(shape.m, {
       batch: 1,
       cols: shape.n,

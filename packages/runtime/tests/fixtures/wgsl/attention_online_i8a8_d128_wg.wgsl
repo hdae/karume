@@ -35,6 +35,7 @@ fn main(
 ) {
   let bh = wid.y;
   let row0 = dims.row_offset + wid.x * 64u;
+  // the 16 lanes of a row: reduced through workgroup memory
   let tx = t % 16u;
   let ty = t / 16u;
   let n4 = dims.n / 4u;

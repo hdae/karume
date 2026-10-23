@@ -226,12 +226,13 @@ export const planAttentionBlocks = (
 
 /**
  * The work budget of one online-attention dispatch (ADR 0132 decision 2), in multiply-accumulates:
- * `B·H · window rows · N · D · 2` (the score and the P̃·V product each take D per key). 2³⁷ gives
- * 768-row windows at the Wan2.2 121-frame shape (24 heads × 27,280 keys × D = 128 — 36 windows per
- * node), about 9–10 ms per dispatch at the 26–29 TOPS the spike measured on the RTX 3080 Ti, well
- * under the 1 s submit gate.
+ * `B·H · window rows · N · D · 2` (the score and the P̃·V product each take D per key). 2⁴⁰ gives
+ * 6,528-row windows at the Wan2.2 121-frame shape (24 heads × 27,280 keys × D = 128 — 5 windows per
+ * node, 2,448 workgroups each), about 70 ms per dispatch on the RTX 3080 Ti, well under the 1 s
+ * submit gate. Smaller windows cost occupancy: 768-row windows (288 workgroups on 80 SMs) ran 15%
+ * slower than one dispatch in the spike of 2026-10-23, 6,528-row windows within 1%.
  */
-export const ATTENTION_ONLINE_WINDOW_MACS = 2 ** 37;
+export const ATTENTION_ONLINE_WINDOW_MACS = 2 ** 40;
 
 /** One window of query rows of the online kernel (the dispatch's `row_offset` and its row count). */
 export type AttentionOnlineWindow = { readonly offset: number; readonly rows: number };

@@ -15,6 +15,7 @@ import {
   assertLimitsGranted,
   assertShaderF16Executes,
   assertSubgroup32Executes,
+  probeSubgroupLaneMapping,
   GpuDeviceLostError,
   GpuFeatureError,
   GpuLimitError,
@@ -690,6 +691,21 @@ test("subgroups 'available' requests the features only when all three are presen
   for (const requested of ["true", "required", 1]) {
     assertThrows(() => jsCaller(present, language, requested), GpuFeatureError, "subgroups must");
   }
+});
+
+test("the subgroup lane-mapping probe is true only when every lane reports the linear mapping, and does not wait on a lost device", async () => {
+  assertEquals(
+    await probeSubgroupLaneMapping(canaryDevice({ mapped: Array<number>(256).fill(1) })),
+    true,
+  );
+  for (const mapped of [[], Array<number>(256).fill(0), [...Array<number>(255).fill(1), 0]]) {
+    assertEquals(await probeSubgroupLaneMapping(canaryDevice({ mapped })), false);
+  }
+  await assertRejects(
+    () => probeSubgroupLaneMapping(canaryDevice({ lost: lossAfterMacrotask() })),
+    GpuDeviceLostError,
+    "subgroups",
+  );
 });
 
 test("subgroup32カナリアは全レーンの既知解だけを受理し、消失で待ち続けない", async () => {

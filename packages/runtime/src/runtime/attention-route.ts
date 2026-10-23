@@ -67,17 +67,21 @@ export type AttentionDeviceFacts = {
  * module stays free of GPU imports — the estimate imports it).
  * MUST: the subgroup fact is the three conditions the `sg32` form compiles under (the features the
  * device **enabled**, not those the adapter merely advertises — the same reading as the
- * `rmsNormReduce: "subgroup32"` check of session-build.ts).
+ * `rmsNormReduce: "subgroup32"` check of session-build.ts) **and** the measured linear lane
+ * mapping (`GpuContext.subgroupLanesLinear` — the form addresses its tiles by
+ * `local_invocation_index`, ADR 0132 decision 5).
  */
 export const attentionDeviceFacts = (gpu: {
   readonly features: ReadonlySet<string>;
   readonly wgslLanguageFeatures: ReadonlySet<string>;
+  readonly subgroupLanesLinear: boolean;
   readonly limits: { readonly maxComputeWorkgroupStorageSize: number };
 }): AttentionDeviceFacts => ({
   subgroups:
     gpu.features.has("subgroups") &&
     gpu.features.has("subgroup-size-control") &&
-    gpu.wgslLanguageFeatures.has("subgroup_id"),
+    gpu.wgslLanguageFeatures.has("subgroup_id") &&
+    gpu.subgroupLanesLinear,
   maxComputeWorkgroupStorageSize: gpu.limits.maxComputeWorkgroupStorageSize,
 });
 

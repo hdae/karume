@@ -32,6 +32,7 @@ export {
   assertLimitsGranted,
   assertShaderF16Executes,
   assertSubgroup32Executes,
+  probeSubgroupLaneMapping,
   GpuFeatureError,
   GpuLimitError,
   GpuUnavailableError,

@@ -546,6 +546,66 @@ fn main(@builtin(local_invocation_index) lid: u32,
   }
 };
 
+/**
+ * Measures whether the device maps `local_invocation_index` linearly onto subgroups (lane =
+ * index % 32, subgroup = index / 32 at `@subgroup_size(32)`, 256 threads). WGSL defines no such
+ * relationship; the online attention's subgroup form (ADR 0132 decision 5) is 16% faster when it
+ * can address its tiles by the index, so the fact is measured here and the portable form is used
+ * where it does not hold. Runs only after the subgroup features were granted.
+ */
+export const probeSubgroupLaneMapping = async (device: GPUDevice): Promise<boolean> => {
+  const code = `enable subgroups, subgroup_size_control;
+@group(0) @binding(0) var<storage, read_write> out: array<f32>;
+@compute @workgroup_size(256) @subgroup_size(32)
+fn main(@builtin(local_invocation_index) lid: u32,
+  @builtin(subgroup_invocation_id) sub: u32, @builtin(subgroup_id) sg: u32) {
+  out[lid] = select(0.0, 1.0, sub == lid % 32u && sg == lid / 32u);
+}`;
+  const out = device.createBuffer({
+    size: 1024,
+    usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_SRC,
+  });
+  const staging = device.createBuffer({
+    size: 1024,
+    usage: BUFFER_USAGE.COPY_DST | BUFFER_USAGE.MAP_READ,
+  });
+  try {
+    await raceCanaryDeviceLost(
+      device,
+      withPipelineScope(device, "subgroup lane-mapping probe", () => {
+        const pipeline = device.createComputePipeline({
+          layout: "auto",
+          compute: {
+            module: device.createShaderModule({ code }),
+            entryPoint: "main",
+          },
+        });
+        const bindings = device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [{ binding: 0, resource: { buffer: out } }],
+        });
+        const encoder = device.createCommandEncoder(),
+          pass = encoder.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindings);
+        pass.dispatchWorkgroups(1);
+        pass.end();
+        encoder.copyBufferToBuffer(out, 0, staging, 0, 1024);
+        device.queue.submit([encoder.finish()]);
+      }),
+      "execution",
+      "subgroups",
+    );
+    await raceCanaryDeviceLost(device, staging.mapAsync(MAP_MODE.READ), "readback", "subgroups");
+    const observed = new Float32Array(staging.getMappedRange().slice(0));
+    staging.unmap();
+    return observed.length === 256 && observed.every((value) => value === 1);
+  } finally {
+    out.destroy();
+    staging.destroy();
+  }
+};
+
 export type DeviceLostHandler = (info: GPUDeviceLostInfo) => void;
 
 export type AcquireGpuOptions = {
@@ -755,11 +815,15 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
     ],
     requiredLimits: limits,
   });
+  let subgroupLanesLinear = false;
   try {
     assertLimitsGranted(limits, device.limits);
     // MUST: confirm by running, not by the list (the silent all-0 of denoland/deno#23125).
     if (shaderF16) await assertShaderF16Executes(device);
     if (subgroupFeatures.length > 0) await assertSubgroup32Executes(device);
+    // The online attention's subgroup form assumes the linear lane mapping (ADR 0132 decision 5):
+    // measured, never assumed — a device whose mapping differs runs the portable form.
+    subgroupLanesLinear = subgroupFeatures.length > 0 && (await probeSubgroupLaneMapping(device));
   } catch (cause) {
     device.destroy();
     throw cause;
@@ -771,6 +835,7 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
     languageFeatures,
     options.onDeviceLost,
     geometryProfile,
+    subgroupLanesLinear,
   );
 };
 

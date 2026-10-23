@@ -286,6 +286,12 @@ export class GpuContext {
    * The source of truth for the line is `readWgslLanguageFeatures` in {@link "./acquire.ts"}.
    */
   readonly wgslLanguageFeatures: ReadonlySet<string>;
+  /**
+   * Whether the device maps `local_invocation_index` linearly onto subgroups (lane = index % 32,
+   * subgroup = index / 32), measured by `acquireGpu` when the subgroup features were requested
+   * (false otherwise). The online attention's subgroup form relies on it (ADR 0132 decision 5).
+   */
+  readonly subgroupLanesLinear: boolean;
   readonly limits: RequiredLimits;
   #lost: GPUDeviceLostInfo | undefined;
   #destroyRequested = false;
@@ -322,8 +328,10 @@ export class GpuContext {
     wgslLanguageFeatures: ReadonlySet<string>,
     onDeviceLost?: DeviceLostHandler,
     geometryProfile?: GeometryProfile,
+    subgroupLanesLinear = false,
   ) {
     this.device = device;
+    this.subgroupLanesLinear = subgroupLanesLinear;
     this.adapterInfo = adapterInfo;
     this.limits = limits;
     this.features = new Set(device.features);
