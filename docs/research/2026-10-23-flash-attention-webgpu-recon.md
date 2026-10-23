@@ -203,3 +203,79 @@ no prior art in WGSL.
   Ampere tuning guide (shared memory per SM).
 - Local: `.claude/reviews/2026-10-11_wan-attention-recon/` (untracked) — `NOTES.md`, `2026-10-23-fa2-web-sweep-digest.txt`,
   `2026-10-23-fa2-probe-results.txt`, `probe*.mjs`, `arith.mjs`; the microbench and aggregation scripts of §4 are kept there too.
+
+## 10. Spikes (2026-10-23, same machine, after the maintainer's ruling to run both)
+
+Standalone scripts next to the recon notes (`.claude/reviews/2026-10-11_wan-attention-recon/`, untracked); nothing in the
+runtime changed. Timestamp queries, medians of 3–7 repetitions; the slow-kernel episodes of 2026-10-18 showed up as single
+outliers (for example 449 ms among 347 ms) and are excluded by the median.
+
+### 10.1 Subgroup matrix (`chromium-experimental-subgroup-matrix`, `allow_unsafe_apis`)
+
+- **Canary**: an i8 → i32 16×16×32 GEMM reading the runtime's packed layout directly — A as `subgroup_matrix_left` row-major
+  with the K stride, B (stored `[N][K]` like `k` and `Vᵀ`) as `subgroup_matrix_right` column-major with the same stride — is
+  **exact against the CPU integer product** (32,768 and 131,072 elements, several tilings). So `qq`, `kq`, `vq` and a P̃
+  tile can feed the matrix units without repacking. Tint warns that the Dawn-form `subgroupMatrixLoad` / `Store` are
+  deprecated builtins (the surface is moving toward the draft's).
+- **i8 GEMM throughput** (M = N = K = 4,096; 256 threads = 8 subgroups per workgroup; fragments loaded straight from
+  storage, no workgroup tiles):
+
+| result block per subgroup | workgroup tile | TOPS |
+| --- | --- | --: |
+| 32 × 32 (2 × 2 tiles) | 128 × 64 | 62.4 |
+| 64 × 32 | 256 × 64 | 83.6 |
+| 32 × 64 | 64 × 256 | 78.2 |
+| **64 × 64** | 256 × 128 | **91.4** |
+| 64 × 64 | 128 × 256 | 84.4 |
+
+  Staging the tiles through workgroup memory first was slower (K step 32 / 64 / 128: 49.7 / 39.2 / 22.5 TOPS) — the
+  scalar copy loop and the workgroup-memory fragment loads cost more than the L1 / L2 reuse they buy. The naive 64 × 64
+  kernel is already **1.4× the dp4a ceiling (65 TOPS) and 2.6× the runtime's current i8a8 linear (34.7 TOPS at
+  S = 27,280)**, at a third of the GA102 tensor peak; the remaining gap is fragment-load bound and would need a real
+  pipeline (double-buffered tiles, larger blocks) to close.
+- **f16 → f32**: 31.3 TFLOP/s at 32 × 32 (no better than the f32 fma rate), 6.4 at 64 × 64 (register spill). The int8 path
+  is the one worth having.
+
+### 10.2 Online a8 attention (plain WGSL, dp4a, one dispatch per 64-row query block)
+
+Kernel: 256 threads; Br = 64 query rows, Bc = 64 keys per tile; `q` tile loaded once, `k` and `Vᵀ` tiles per key tile;
+S tile by `dot4I8Packed` (thread = 4 rows × 4 keys), row max across the 16 threads of a row, running `m` / `l` / f32 `O`
+with the `exp(m_old − m_new)` rescale, P̃ = `round(127·exp(S − m))` packed to a workgroup tile, then P̃·Vᵀ by
+`dot4I8Packed` (thread = 4 rows × 8 columns), `vs[d]·(1/127)/l` at the end. Checked against an f64 reference of the
+dequantised inputs with an unquantised P: relative RMS 1.4% and max 2.5% of the output range (the int8 P̃ lattice; the
+current ③PV quantises P̃ the same way — not compared head-to-head yet).
+
+| version | S = 7,920 (ms / layer, 24 heads) | S = 27,280 |
+| --- | --: | --: |
+| current three dispatches, self-attention keys only (§4.2 and a second run at 7,920) | 32.7 | 507.7 |
+| v1: natural layouts (`k[key][pack]`, `Vᵀ[d][pack]`), row max through workgroup memory | 70.0 (×0.47) | 825 (×0.62) |
+| v2: padded `k` rows (33 words), keys interleaved 16 apart per lane, `Vᵀ` as `[pack][d]`, workgroup-memory reduce | 34.0 (×0.96) | 430 (×1.18) |
+| **v2 with `subgroupShuffleXor` for the row max and the final `l`** | **28.5–31.4 (×1.04–1.15)** | **348 (×1.46)** |
+| v2 subgroup, Br = 128 (8 rows per thread) | 33.9 | 399 |
+| v2 subgroup, `Vᵀ` tile copied without the byte gather (timing only — wrong values) | 25.6 (×1.28) | 315 (×1.61) |
+
+Reading:
+
+- The first version lost to the three-pass design by 2×: the `k` and `Vᵀ` tile reads put the 16 lanes of a row on one
+  shared-memory bank (16-way conflicts). Fixing the layouts is what made the kernel win; the algorithm itself was never
+  the bound.
+- Subgroups matter here: the shuffle reduce beats the workgroup-memory reduce by 1.23× at the long shape (the ORT
+  finding against `subgroupShuffle` on NVIDIA was about broadcasting K / V, not about reductions).
+- The gain is **×1.46 at S = 27,280 (above the K-5b kill line ×1.3) and ×1.04–1.15 at S = 7,920 (below it)**: at the
+  short shape the three passes are already close to their compute bound and ② is a smaller share. In the 121-frame
+  forward the attention kernels would go from 15.6 s to about 10.7 s (−20% of the forward).
+- About 10% more is available by giving `Vᵀ` the interleaved key order on the host (the permute + quantise step already
+  rewrites `Vᵀ`; the kernel's byte gather is 4 loads per tile word): ×1.61 / ×1.28. Larger row tiles do not help (register
+  pressure); 26–29 TOPS is still under half the dp4a ceiling, so there is room (double-buffered tiles, `exp2`, Bc = 128 on
+  48 KiB devices), unmeasured.
+- The kernel needs 32.9 KiB of workgroup storage at Bc = 64 (q 8.4, k 8.4, Vᵀ 8, P̃ 4.3, reduce 4; 28.9 KiB with the subgroup
+  reduce) — inside the 48 KiB of Dawn / Vulkan and the 32 KiB of D3D12 / Metal only in the subgroup form; the core
+  default 16 KiB needs Bc = 32 and no `q` tile.
+
+### 10.3 Not settled by the spikes
+
+- A head-to-head of the online kernel's error against the current a8 path (both quantise P̃; the online one against a
+  running max) on real activations — the ADR 0110 four-point check would settle the contract class.
+- Whether the subgroup-matrix GEMM reaches its 91 TOPS inside an attention loop (the S → workgroup memory → P̃ → reload
+  detour, §5) — not built.
+- The 5070 Ti (Chrome, 32 KiB) was not measured for either spike.
