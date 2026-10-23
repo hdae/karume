@@ -54,8 +54,9 @@ and ADR 0100 decision 1 (`subgroups: true` rejects a device without them).
    the 1 s submit gate (at the 121-frame shape about 1,024 rows ≈ 13 ms); the estimate (ADR 0124
    decision 7) counts no S temporaries for this route and takes the window count from the same
    function.
-3. **Geometry**: 256 threads, 64 query rows per workgroup, 64 keys per tile, D ∈ {64, 128, 256}
-   as a generator parameter (`D % 16 == 0`; other depths and `N % 4 != 0` fall back to the three
+3. **Geometry**: 256 threads, 64 query rows per workgroup, 64 keys per tile, D ∈ {64, 128} as
+   a generator parameter (D = 256 would need 58 KiB of tiles, above the 48 KiB of Dawn / Vulkan,
+   and is not built; other depths and `N % 4 != 0` fall back to the three
    dispatches of a8 / f32 with the key showing it — shape eligibility, ADR 0058 decision 3). The
    `q` tile is loaded once; `k` rows are padded to 33 words and each lane owns keys 16 apart; the
    Vᵀ tile is stored `[pack][d]` (word `w` packs keys `{w, w+16, w+32, w+48}`, gathered byte-wise

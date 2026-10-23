@@ -266,6 +266,7 @@ import {
   attentionQkI8a8UsesVec4,
   attentionQkI8a8Wgsl,
 } from "../src/kernels/attention-i8a8.ts";
+import { attentionOnlineI8a8Wgsl } from "../src/kernels/attention-online-i8a8.ts";
 import {
   defaultI8a8Geometry,
   type I8a8Geometry,
@@ -756,6 +757,13 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["attention_qk_i8a8_emu_s16_v4.wgsl", attentionQkI8a8Wgsl(true, false, "f16")],
     ["attention_pv_i8a8_s16_v4.wgsl", attentionPvI8a8Wgsl(true, true, "f16")],
     ["attention_pv_i8a8_emu_s16_v4.wgsl", attentionPvI8a8Wgsl(true, false, "f16")],
+    // The online int8 attention (ADR 0132 — `attentionScoreStorage: "none"`): one dispatch per
+    // row window, S never stored. Both reduction forms are frozen (they MUST stay bit-identical,
+    // so a change to one of them shows up only here), the emulated dot product and both depths.
+    ["attention_online_i8a8_d128_sg32.wgsl", attentionOnlineI8a8Wgsl(true, 128, "sg32")],
+    ["attention_online_i8a8_d128_wg.wgsl", attentionOnlineI8a8Wgsl(true, 128, "wg")],
+    ["attention_online_i8a8_d128_emu_sg32.wgsl", attentionOnlineI8a8Wgsl(false, 128, "sg32")],
+    ["attention_online_i8a8_d64_sg32.wgsl", attentionOnlineI8a8Wgsl(true, 64, "sg32")],
     // ② 行統計の **regcache 変種**（S を 1 回だけ読んでレジスタに残す）。dim 依存の生成なので
     // `epc` がキー軸に増える — 実測形の self（dim 4096 → 16 要素／スレッド）を凍結する。
     // MUST: 上の 2 回読み版と対で置く（値はビット同一である以上、生成物の側でしか差が見えない）。

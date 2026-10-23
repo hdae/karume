@@ -12,6 +12,10 @@
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { attentionPvI8a8Wgsl, attentionQkI8a8Wgsl } from "../src/kernels/attention-i8a8.ts";
+import {
+  ATTENTION_ONLINE_REDUCES,
+  attentionOnlineI8a8Wgsl,
+} from "../src/kernels/attention-online-i8a8.ts";
 import { linearI8a8Wgsl } from "../src/kernels/linear-i8a8.ts";
 import {
   assertI8a8Geometry,
@@ -173,4 +177,18 @@ test("i8a8 の 3 カーネルは候補の全幾何 × 変種で外側スコー�
     }
   }
   assertEquals(failures, []);
+});
+
+test("the online int8 attention generator declares no shadowed name (both depths × reductions × dot)", () => {
+  for (const depth of [64, 128]) {
+    for (const reduce of ATTENTION_ONLINE_REDUCES) {
+      for (const dp4a of [true, false]) {
+        assertEquals(
+          shadowedDeclarations(attentionOnlineI8a8Wgsl(dp4a, depth, reduce)),
+          [],
+          `attention_online d${depth} ${reduce} ${dp4a ? "dp4a" : "emu"}`,
+        );
+      }
+    }
+  }
 });
