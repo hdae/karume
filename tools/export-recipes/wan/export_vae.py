@@ -38,10 +38,22 @@ scale 1 本の i8）を掛け、同じ 2 グラフを**モデルの i8 系列の
 `transformer/` と重ならない）へ書く。i8 の回はフィクスチャを書かない（フィクスチャは e2e の f16 の
 参照 — i8 系列は GPU 側で f16 の decode と比べる）。
 
+`--shared`（ADR 0134 決定 1 — `--tile` が必須）は同じモジュールを `--tile` の辺で trace し直し、
+重みのバイトを 1 つも持たない組 `<ターゲット>_<タイル>/model.krm`（例 `vae_decoder_first_32` /
+`vae_decoder_next_32` — グラフ名 = 部品ディレクトリ名 = manifest の weights のキー）を同じ系列の根へ
+書く。initializer は**全部**共有宣言（`IrShared` — 貸し手のテンソルキーと、貸し手の束縛表の
+格納）で、貸し手は同じ系列の根・同じ格納の既定タイルの容器（`<系列の根>/<ターゲット>/model.krm`
+— 表のタイル辺で書いたもの）。バイトを書かないので重みの丸めも i8 の量子化も掛けない（格納の
+宣言は貸し手から写す — `--dtype i8` も i8 系列の根の貸し手を読むだけ）。フィクスチャは書かない
+（chunk 列の参照は既定タイルの組のフィクスチャ）。
+
     uv run --group wan --inexact python -m wan.export_vae              # 2 グラフ + フィクスチャ
     uv run --group wan --inexact python -m wan.export_vae --verify     # eager 同値の実測（実重み）
     uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b [--verify]   # Wan2.2
     uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --dtype i8   # i8 系列
+    uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --tile 32 --shared
+    uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --dtype i8 \\
+        --tile 32 --shared                                             # 32 の組（i8 系列）
 
 MUST: diffusers / huggingface_hub は関数の中で import する（`wan` グループは既定の sync に
 入らない — `tests/test_optional_group_imports.py`）。
@@ -71,9 +83,10 @@ from karume.container import Provenance, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.dist import NOTICE_FILENAME
 from karume.emit import storage_breakdown
-from karume.ir import IrGraph
-from karume.pipeline import export_to_file
+from karume.ir import IrGraph, IrInitializer, IrShared, IrStorage
+from karume.pipeline import export_module, export_to_file, publish_model
 from karume.quantize import fake_quant_int8, round_weights_to_f16
+from karume.verify import ir_graph_from_container, verify_container
 from wan import vae_patch
 from wan.sources import DEFAULT_MODEL, SOURCES, local_snapshot
 
@@ -505,6 +518,157 @@ def emit_targets(
     return summary
 
 
+def shared_target(target: str, tile: int) -> str:
+    """共有の組（ADR 0134 決定 1）の名前 `<ターゲット>_<タイル>`（グラフ名 = 部品ディレクトリ名 =
+    manifest の weights のキー）。"""
+    return f"{target}_{tile}"
+
+
+#: 配布が名指す共有の組（ADR 0134 決定 5 — Wan2.2 の 32 潜在タイル）のグラフ名。`--shared` は
+#: どのタイルでも書けるが、weights のキーになるのはこの 2 つ（綴りの門 `tests/test_graph_names.py`
+#: が `wan.distribution.WAN_WEIGHTS` と突き合わせる）。
+SHARED_TILE = 32
+SHARED_TARGETS = tuple(shared_target(target, SHARED_TILE) for target in TARGETS)
+
+
+def read_lender(path: Path, target: str, lender_tile: int, weight_dtype: str) -> IrGraph:
+    """貸し手（既定タイルの容器）のグラフを、束縛表の格納を埋めた IR で読む（重みは読まない）。
+
+    門（外れたら fail loudly）: 容器が在る・グラフ名が `target`・潜在入力が `[z, 1, t, t]` で
+    `t = lender_tile`・圧縮格納が `weight_dtype` の 1 つだけ（f16 系列の根に i8 の容器を置いた
+    取り違えは、借り手が別の格納の重みを名指す形になる）。
+    """
+    parts = container_parts(path)
+    if not all(part.is_file() for part in parts):
+        raise ChunkGraphError(
+            f"貸し手の容器 {path} が無い — 先に既定タイルの組を書く（`--tile` と `--shared` 無し）"
+        )
+    lender = ir_graph_from_container(verify_container(parts).read, target)
+    latent = lender.inputs[0] if lender.inputs else None
+    if latent is None or latent.name != LATENT_INPUT or list(latent.shape[2:]) != [lender_tile] * 2:
+        shape = None if latent is None else [latent.name, list(latent.shape)]
+        raise ChunkGraphError(
+            f"貸し手 {path} の潜在入力 {shape} がタイル {lender_tile} の '{LATENT_INPUT}' でない"
+        )
+    compressed = {init.storage.dtype for init in lender.initializers.values()} - {"f32"}
+    if compressed != {weight_dtype}:
+        raise ChunkGraphError(
+            f"貸し手 {path} の圧縮格納 {sorted(compressed)} が {weight_dtype} の系列でない"
+        )
+    return lender
+
+
+def share_lender_weights(graph: IrGraph, lender: IrGraph, lender_path: Path) -> IrGraph:
+    """trace したグラフの initializer を**全部**、貸し手の同じテンソルキーへの共有宣言に置き換える。
+
+    宣言の格納は貸し手の束縛表の格納（layout）で、scale は書かない（貸し手の常駐重みが持つ —
+    `IrInitializer` の約束）。門: 各 initializer のテンソルキーが貸し手に実体として在り、値の
+    dtype と形が貸し手と同じ（別のタイル辺で trace しても重みの形は変わらない — 変わるなら
+    モジュールが別物）。
+    """
+    initializers: dict[str, IrInitializer] = {}
+    for name, initializer in graph.initializers.items():
+        key = initializer.tensor
+        lent = lender.initializers.get(key) if key is not None else None
+        if lent is None or lent.is_shared:
+            raise ChunkGraphError(
+                f"initializer '{name}'（{key}）の実体が貸し手 {lender_path} に無い"
+            )
+        mine, theirs = graph.values[name], lender.values[key]
+        if (mine.dtype, list(mine.shape)) != (theirs.dtype, list(theirs.shape)):
+            raise ChunkGraphError(
+                f"initializer '{key}' が {mine.dtype} {list(mine.shape)} — 貸し手 {lender_path} の"
+                f" {theirs.dtype} {list(theirs.shape)} と違う"
+            )
+        initializers[name] = IrInitializer(
+            shared=IrShared(tensor=key), storage=IrStorage(dtype=lent.storage.dtype)
+        )
+    return IrGraph(
+        symbols=list(graph.symbols),
+        inputs=list(graph.inputs),
+        outputs=list(graph.outputs),
+        initializers=initializers,
+        values=dict(graph.values),
+        states=dict(graph.states),
+        nodes=list(graph.nodes),
+    )
+
+
+def emit_shared_targets(
+    targets: Sequence[str],
+    vae: AutoencoderKLWan,
+    tile: int,
+    out_root: Path,
+    source: Provenance,
+    *,
+    lender_tile: int,
+    weight_dtype: str = "f16",
+    cases: Sequence[FixtureCase] = (),
+) -> dict[str, Any]:
+    """重みのバイトを持たない組 `<ターゲット>_<tile>` を書く（ADR 0134 決定 1 — `--shared`）。
+
+    貸し手は同じ系列の根の `<ターゲット>/model.krm`（タイル `lender_tile`・格納 `weight_dtype`）。
+    モジュールの重みは 1 バイトも書かないので、f16 への丸めも i8 の量子化も要らない（格納の宣言は
+    貸し手の束縛表から写す）。`cases` は空でなければ拒む — chunk 列の参照は貸し手の組の
+    フィクスチャで、この組は書かない（タイルの参照は ADR 0134 決定 6）。
+
+    門（外れたら何も据えない）: 貸し手の容器が在る（{@link read_lender}）・trace したグラフの
+    initializer が全部貸し手の同じキー・形・dtype の実体を名指す（{@link share_lender_weights}）・
+    書いた容器の initializer が全部共有宣言（バイトを持つものが無い）・{@link assert_chunk_graph} が
+    `tile` で成り立つ。2 本は {@link emit_targets} と同じく一組で据える。
+    """
+    unknown = sorted(set(targets) - set(TARGETS))
+    if unknown or len(set(targets)) != len(targets):
+        raise ChunkGraphError(
+            f"ターゲット {list(targets)} に未知か重複がある（既知: {', '.join(TARGETS)}）"
+        )
+    if weight_dtype not in WEIGHT_DTYPES:
+        raise ChunkGraphError(f"格納 {weight_dtype!r} は書けない（{' / '.join(WEIGHT_DTYPES)}）")
+    if cases:
+        raise ChunkGraphError("共有の組はフィクスチャを書かない（chunk 列の参照は貸し手の組）")
+    if tile == lender_tile:
+        raise ChunkGraphError(f"タイル {tile} は貸し手と同じ — 共有の組は別のタイル辺だけ")
+    lenders = {
+        target: read_lender(out_root / target / MODEL_FILE, target, lender_tile, weight_dtype)
+        for target in targets
+    }
+    names = [shared_target(target, tile) for target in targets]
+    graphs: list[dict[str, Any]] = []
+    with _staged_set([out_root / name for name in names]) as seats:
+        for target, name, staged in zip(targets, names, seats, strict=True):
+            started = time.perf_counter()
+            lender_path = out_root / target / MODEL_FILE
+            module = vae_patch.WanVaeChunkDecoder(vae, first=target == TARGET_FIRST).eval()
+            staged.mkdir()
+            with torch.no_grad():
+                traced, _ = export_module(
+                    module,
+                    example_inputs(module, tile),
+                    preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+                )
+            graph = publish_model(
+                staged / MODEL_FILE,
+                share_lender_weights(traced, lenders[target], lender_path),
+                {},
+                provenance=source,
+                graph_name=name,
+            )
+            owned = sorted(key for key, init in graph.initializers.items() if not init.is_shared)
+            if owned:
+                raise ChunkGraphError(f"{name}: バイトを持つ initializer が残った {owned[:4]}")
+            assert_chunk_graph(graph, module, tile)
+            summary = _graph_summary(name, out_root / name, staged, graph, tile, started)
+            summary["lender"] = str(lender_path)
+            graphs.append(summary)
+    return {
+        "series": str(out_root),
+        "dtype": weight_dtype,
+        "tile": tile,
+        "lender": {"tile": lender_tile, "targets": list(targets)},
+        "graphs": graphs,
+    }
+
+
 def fixture_latents(vae: AutoencoderKLWan, case: FixtureCase, tile: int) -> torch.Tensor:
     """固定 seed の乱数潜在を逆正規化した `[1, z, F, t, t]`（上流 `WanPipeline` の decode 直前の
     値・z は上流 config の `z_dim` — 2.1 は 16・2.2 は 48）。
@@ -593,6 +757,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--no-fixtures", action="store_true", help="chunk 列のフィクスチャを書かない"
     )
+    parser.add_argument(
+        "--shared",
+        action="store_true",
+        help="重みのバイトを持たない組 `<ターゲット>_<タイル>` を書く（--tile 必須・貸し手は同じ"
+        " 系列の根の既定タイルの組・フィクスチャは書かない — ADR 0134 決定 1）",
+    )
     parser.add_argument("--verify", action="store_true", help="eager 同値を測るだけ（書かない）")
     parser.add_argument("--chunks", type=int, default=9, help="--verify の chunk 数（既定 9）")
     parser.add_argument("--seed", type=int, default=0, help="--verify の潜在の seed")
@@ -609,6 +779,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"--dtype i8: モデル {args.model} は VAE の i8 系列を持たない（ADR 0133 決定 7）"
             )
         series_name = series.i8_series
+    if args.shared and args.tile is None:
+        parser.error("--shared は --tile を要する（貸し手の既定タイルと別の辺 — ADR 0134 決定 1）")
+    if args.shared and args.verify:
+        parser.error("--shared と --verify は同時に使えない（--verify は書かない）")
 
     if args.verify:
         summary = verify(args.model, tile, args.chunks, args.seed)
@@ -616,6 +790,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     source = provenance(args.model)
+    if args.shared:
+        # バイトを書かないので丸めない（格納の宣言は貸し手から写す）。
+        vae = load_vae(args.model, round_f16=False)
+        assert_series_config(vae, series)
+        summary = emit_shared_targets(
+            args.target or TARGETS,
+            vae,
+            tile,
+            args.out or SERIES_ROOT / series_name,
+            source,
+            lender_tile=series.tile,
+            weight_dtype=args.dtype,
+        )
+        summary["peak_rss_gib"] = round(_peak_rss_gib(), 2)
+        print(json.dumps(summary, indent=1, ensure_ascii=False))
+        return 0
     vae = load_vae(args.model, round_f16=True)
     assert_series_config(vae, series)
     scales = fake_quant_i8(vae) if i8 else None

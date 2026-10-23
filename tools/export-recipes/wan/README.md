@@ -283,7 +283,15 @@ decision 6). `wan/vae_patch.py` accepts exactly two generations and adds two thi
 uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b            # both graphs + chunk fixtures (f16)
 uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --verify   # eager equivalence, tile 16, 9 chunks (writes nothing)
 uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --dtype i8 # both graphs in int8 (no fixtures)
+uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --tile 32 --shared            # the 32-tile pair (f16 series)
+uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --dtype i8 --tile 32 --shared # the 32-tile pair (i8 series)
 ```
+
+`--shared` (ADR [0134](../../../docs/decisions/0134-wan22-vae-tile32-shared.md) decision 1) writes
+`vae_decoder_first_32` / `vae_decoder_next_32` beside the 16-tile pair of the same series — the same
+graphs traced at a 32-latent tile, every initializer borrowing the 16-tile pair's weights — so the
+Wan2.2 distribution ships this second decoder pair with no extra weight download, and the application
+chooses the tile explicitly (16 by default; the 10 GB class keeps 16).
 
 `--dtype i8` (ADR [0133](../../../docs/decisions/0133-conv3d-w8a8.md) decision 7, TI2V-5B only — the
 writer refuses it for `t2v-1.3b`) rounds the weights to f16 as above, then quantizes every

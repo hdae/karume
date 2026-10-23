@@ -18,20 +18,28 @@ import json
 import re
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
+import ir_fixtures
 import numpy as np
 import pytest
-from container_series import part_paths, placed_paths, read_component, write_component
-from ir_fixtures import ir_container
+from container_series import (
+    part_paths,
+    placed_paths,
+    read_component,
+    write_component,
+)
+from ir_fixtures import fixture_spec, ir_container
 from safetensors.numpy import save
 from upstream_fixture import FIXTURE_REVISION, OTHER_REVISION, stamp_fixture_provenance
 
 import dist
 from _shared.licenses import APACHE_LICENSE_2_0_PATH
 from _shared.paths import REPO_ROOT, SERIES_ROOT
-from karume.container import CODEC_LEDGER, AssetInput, Provenance
+from karume.container import CODEC_LEDGER, AssetInput, Provenance, container_parts
 from karume.dist import (
     MANIFEST_FILENAME,
     MODEL_CARD_FILENAME,
@@ -42,7 +50,10 @@ from karume.dist import (
     resolve_card_renderer,
     verify_dist,
 )
+from karume.emit import stored_model
+from karume.ir import IrInitializer, IrShared, IrStorage
 from karume.modelcard import FileRefKey
+from karume.pipeline import publish_model
 from wan import umt5_tokenizer
 from wan.card import (
     WAN21_CARD,
@@ -101,14 +112,20 @@ from wan.distribution import (
     WAN_VAE_ENCODER_POST_ROLE,
     WAN_VAE_ENCODER_PRE_ROLE,
     WAN_VAE_ENCODER_ROLES,
+    WAN_VAE_FIRST_32_I8_ROLE,
+    WAN_VAE_FIRST_32_ROLE,
     WAN_VAE_FIRST_I8_ROLE,
     WAN_VAE_FIRST_ROLE,
     WAN_VAE_LATENT_INPUT,
+    WAN_VAE_LENDER_ROLES,
+    WAN_VAE_NEXT_32_I8_ROLE,
+    WAN_VAE_NEXT_32_ROLE,
     WAN_VAE_NEXT_I8_ROLE,
     WAN_VAE_NEXT_ROLE,
     WAN_WEIGHTS,
     WanGeneration,
     WanSources,
+    assert_shared_decoder,
     wan_placements,
     wan_plan,
     wan_sources,
@@ -285,7 +302,56 @@ def _default_container(role: str) -> list[bytes]:
         return _graph_container(WAN_TRANSFORMER_ROLE, storage="i8")
     if role in _VAE_I8_GRAPHS:
         return _graph_container(_VAE_I8_GRAPHS[role], storage="i8")
+    if role in WAN_VAE_LENDER_ROLES:
+        return _shared_container(role)
     return _graph_container(role)
+
+
+#: 重みを借りる組の配置の役割 → 容器のグラフ名（ADR 0134 — f16 / i8 の役割が同じグラフ名）。
+_VAE_SHARED_GRAPHS = {
+    WAN_VAE_FIRST_32_ROLE: WAN_VAE_FIRST_32_ROLE,
+    WAN_VAE_FIRST_32_I8_ROLE: WAN_VAE_FIRST_32_ROLE,
+    WAN_VAE_NEXT_32_ROLE: WAN_VAE_NEXT_32_ROLE,
+    WAN_VAE_NEXT_32_I8_ROLE: WAN_VAE_NEXT_32_ROLE,
+}
+
+
+def _shared_container(role: str, *, mark: str | None = None) -> list[bytes]:
+    """重みを借りる組の容器（書き手 `wan.export_vae --shared` と同じ形: initializer が全部、貸し手の
+    同じテンソルキーへの共有宣言で、貸し手の格納を宣言し、重みのバイトを持たない）。
+
+    貸し手は同じラベルの既定タイルの容器（{@link _default_container} — 同じ材料 `fixture_spec`）。
+    `mark` を貸し手のグラフ名と違えると、貸し手に無いテンソルキーを名指す借り手になる（故障注入）。
+    """
+    lender = WAN_VAE_LENDER_ROLES[role]
+    storage = "i8" if lender in _VAE_I8_GRAPHS else "f16"
+    graph, tensors, scales, overrides = fixture_spec(
+        mark=mark or _VAE_I8_GRAPHS.get(lender, lender),
+        storage=storage,
+        inputs=((WAN_VAE_LATENT_INPUT, [1, 2]),),
+    )
+    committed = stored_model(
+        graph, tensors, weight_dtype=storage, weight_scales=scales, weight_dtype_overrides=overrides
+    ).graph
+    shared = replace(
+        committed,
+        initializers={
+            name: IrInitializer(
+                shared=IrShared(tensor=init.tensor), storage=IrStorage(dtype=init.storage.dtype)
+            )
+            for name, init in committed.initializers.items()
+        },
+    )
+    with TemporaryDirectory() as staging:
+        path = Path(staging) / "model.krm"
+        publish_model(
+            path,
+            shared,
+            {},
+            provenance=ir_fixtures.FIXTURE_PROVENANCE,
+            graph_name=_VAE_SHARED_GRAPHS[role],
+        )
+        return [part.read_bytes() for part in container_parts(path)]
 
 
 def _build_sources(
@@ -1432,6 +1498,16 @@ class TestTheWritersSpellTheSameNames:
 
         assert export_vae.LATENT_INPUT == WAN_VAE_LATENT_INPUT
 
+    def test_the_vae_tiles_and_the_32_tile_graph_names(self) -> None:
+        """既定タイルの組は書き手の表のタイル・32 の組のグラフ名は書き手 `--shared` の綴り
+        （ADR 0134）。"""
+        from wan import export_vae
+
+        assert WAN21.vae_tiles[0] == export_vae.VAE_SERIES[DEFAULT_MODEL].tile
+        assert WAN22.vae_tiles[0] == export_vae.VAE_SERIES[_TI2V].tile
+        assert export_vae.shared_target(WAN_VAE_FIRST_ROLE, 32) == WAN_VAE_FIRST_32_ROLE
+        assert export_vae.shared_target(WAN_VAE_NEXT_ROLE, 32) == WAN_VAE_NEXT_32_ROLE
+
     def test_the_rope_base_asset_and_the_context_input(self) -> None:
         from wan import export_dit
 
@@ -1466,11 +1542,18 @@ class TestTheWritersSpellTheSameNames:
 
 class TestTheGenerationTables:
     """世代の表から導く配置・格納・weights の表（Wan2.1 は全世代の表から Wan2.2 だけの VAE
-    encoder と VAE decoder の i8 を除いたもの — 2.1 の配布形が不変）。"""
+    encoder と VAE decoder の i8 と 32 潜在タイルの組を除いたもの — 2.1 の配布形が不変）。"""
 
     def test_the_wan21_tables_are_the_full_tables_without_the_wan22_only_roles(self) -> None:
-        encoder = {*WAN_VAE_ENCODER_ROLES, WAN_VAE_FIRST_I8_ROLE, WAN_VAE_NEXT_I8_ROLE}
+        encoder = {
+            *WAN_VAE_ENCODER_ROLES,
+            WAN_VAE_FIRST_I8_ROLE,
+            WAN_VAE_NEXT_I8_ROLE,
+            *WAN_VAE_LENDER_ROLES,
+        }
         assert WAN21.vae_encoder_roles == ()
+        # Wan2.1 の decoder は重みを持つ既定タイル（32）の組だけ（書き手の表のタイル）。
+        assert WAN21.vae_tiles == (32,)
         assert WAN21.container_roles == (
             WAN_TEXT_ENCODER_ROLE,
             WAN_TRANSFORMER_F16_ROLE,
@@ -1519,6 +1602,10 @@ class TestTheGenerationTables:
             WAN_VAE_FIRST_I8_ROLE,
             WAN_VAE_NEXT_ROLE,
             WAN_VAE_NEXT_I8_ROLE,
+            WAN_VAE_FIRST_32_ROLE,
+            WAN_VAE_FIRST_32_I8_ROLE,
+            WAN_VAE_NEXT_32_ROLE,
+            WAN_VAE_NEXT_32_I8_ROLE,
         )
         assert list(WAN22.weights[WAN_TRANSFORMER_ROLE]) == ["i8"]
         assert set(WAN22.storage_requirements) == set(WAN22.container_roles)
@@ -1557,6 +1644,11 @@ class TestTheGenerationTables:
             WAN_VAE_FIRST_I8_ROLE,
             WAN_VAE_NEXT_ROLE,
             WAN_VAE_NEXT_I8_ROLE,
+            # 32 潜在タイルの組（ADR 0134）は既定タイルの組の後ろに同じ並びで。
+            WAN_VAE_FIRST_32_ROLE,
+            WAN_VAE_FIRST_32_I8_ROLE,
+            WAN_VAE_NEXT_32_ROLE,
+            WAN_VAE_NEXT_32_I8_ROLE,
         )
         assert WAN_OUTPUT_PATHS[WAN_VAE_FIRST_I8_ROLE] == "vae_decoder_first/model.i8.krm"
         assert WAN_OUTPUT_PATHS[WAN_VAE_NEXT_I8_ROLE] == "vae_decoder_next/model.i8.krm"
@@ -1590,6 +1682,44 @@ class TestTheGenerationTables:
             wan_placements(wan_sources(tmp_path), WAN21)
         )
 
+    def test_only_wan22_carries_the_32_tile_pair_per_storage_label(self, tmp_path: Path) -> None:
+        """ADR 0134 決定 5: 32 潜在タイルの組は Wan2.2 だけ・格納ラベルごとに 1 組で、decoder と
+        同じ規則の役割（f16 はグラフ名・i8 は `_i8` 接尾）・`<グラフ名>/model.<ラベル>.krm`・
+        貸し手（同じラベルの 16 の組）と同じ系列の根の `<グラフ名>/model.krm`。"""
+        assert WAN22.vae_tiles == (16, 32)
+        assert (WAN_VAE_FIRST_32_ROLE, WAN_VAE_NEXT_32_ROLE) == (
+            "vae_decoder_first_32",
+            "vae_decoder_next_32",
+        )
+        assert (WAN_VAE_FIRST_32_I8_ROLE, WAN_VAE_NEXT_32_I8_ROLE) == (
+            "vae_decoder_first_32_i8",
+            "vae_decoder_next_32_i8",
+        )
+        assert WAN_VAE_LENDER_ROLES == {
+            WAN_VAE_FIRST_32_ROLE: WAN_VAE_FIRST_ROLE,
+            WAN_VAE_FIRST_32_I8_ROLE: WAN_VAE_FIRST_I8_ROLE,
+            WAN_VAE_NEXT_32_ROLE: WAN_VAE_NEXT_ROLE,
+            WAN_VAE_NEXT_32_I8_ROLE: WAN_VAE_NEXT_I8_ROLE,
+        }
+        placements = wan_placements(wan_sources(tmp_path, WAN22), WAN22)
+        for graph, f16_role, i8_role in (
+            (WAN_VAE_FIRST_32_ROLE, WAN_VAE_FIRST_32_ROLE, WAN_VAE_FIRST_32_I8_ROLE),
+            (WAN_VAE_NEXT_32_ROLE, WAN_VAE_NEXT_32_ROLE, WAN_VAE_NEXT_32_I8_ROLE),
+        ):
+            assert {label: files.file for label, files in WAN22.weights[graph].items()} == {
+                "f16": f16_role,
+                "i8": i8_role,
+            }
+            assert WAN_OUTPUT_PATHS[f16_role] == f"{graph}/model.f16.krm"
+            assert WAN_OUTPUT_PATHS[i8_role] == f"{graph}/model.i8.krm"
+            assert placements[f16_role] == tmp_path / WAN22_SERIES / graph / WAN_MODEL_FILE
+            assert placements[i8_role] == tmp_path / WAN22_I8_SERIES / graph / WAN_MODEL_FILE
+            assert WAN22.storage_requirements[f16_role] == "f16"
+            assert WAN22.storage_requirements[i8_role] == "i8"
+            assert graph not in WAN21.weights
+        assert not set(WAN_VAE_LENDER_ROLES) & set(WAN21.container_roles)
+        assert not set(WAN_VAE_LENDER_ROLES) & set(wan_placements(wan_sources(tmp_path), WAN21))
+
     def test_the_driver_offers_wan_ti2v_right_after_wan(self) -> None:
         names = list(dist.PIPELINES)
         assert names[names.index("wan") + 1] == "wan-ti2v"
@@ -1600,8 +1730,9 @@ class TestTheWan22Distribution:
     """`--pipeline wan-ti2v` の配布形（ADR 0121 段 8 — `karume-wan2.2`・モデル `ti2v-5b`）。"""
 
     def test_it_places_the_int8_transformer_the_vae_and_the_assets(self, assembled22) -> None:
-        """transformer は i8 の 1 本だけ・VAE の decoder は f16 / i8 の 2 本ずつ（ADR 0133）・
-        encoder は 1 本ずつ・資産 2 本。text_encoder は越境参照。encoder の golden
+        """transformer は i8 の 1 本だけ・VAE の decoder は f16 / i8 の 2 本ずつ（ADR 0133）と
+        32 潜在タイルの組を f16 / i8 の 2 本ずつ（ADR 0134 — 2 文書の part 0 と空の const 領域
+        だけ）・encoder は 1 本ずつ・資産 2 本。text_encoder は越境参照。encoder の golden
         （`vae_encoder.*`）は配らない。"""
         out_dir, _ = assembled22
         own = {
@@ -1613,6 +1744,7 @@ class TestTheWan22Distribution:
                 WAN_VAE_FIRST_I8_ROLE,
                 WAN_VAE_NEXT_ROLE,
                 WAN_VAE_NEXT_I8_ROLE,
+                *WAN_VAE_LENDER_ROLES,
                 WAN_TEXT_EMBEDS_ROLE,
                 WAN_TOKENIZER_ROLE,
             )
@@ -1622,7 +1754,7 @@ class TestTheWan22Distribution:
             for rel in placed_paths(
                 own,
                 {name: labels for name, labels in WAN22.weights.items() if name != UMT5_ROLE},
-                {WAN_TRANSFORMER_I8_ROLE: 4},
+                {WAN_TRANSFORMER_I8_ROLE: 4, **dict.fromkeys(WAN_VAE_LENDER_ROLES, 2)},
             )
         ]
         assert _present(out_dir) == sorted(
@@ -1657,13 +1789,21 @@ class TestTheWan22Distribution:
             WAN_TRANSFORMER_ROLE,
             WAN_VAE_FIRST_ROLE,
             WAN_VAE_NEXT_ROLE,
+            # The 32-tile pair (ADR 0134 decision 5) after the 16-tile pair it borrows from.
+            WAN_VAE_FIRST_32_ROLE,
+            WAN_VAE_NEXT_32_ROLE,
         ]
         for role in WAN_VAE_ENCODER_ROLES:
             assert list(model["weights"][role]) == ["f16"]
         assert list(model["weights"][WAN_TEXT_ENCODER_ROLE]) == ["i8"]
         assert list(model["weights"][WAN_TRANSFORMER_ROLE]) == ["i8"]
-        assert list(model["weights"][WAN_VAE_FIRST_ROLE]) == ["f16", "i8"]
-        assert list(model["weights"][WAN_VAE_NEXT_ROLE]) == ["f16", "i8"]
+        for graph in (
+            WAN_VAE_FIRST_ROLE,
+            WAN_VAE_NEXT_ROLE,
+            WAN_VAE_FIRST_32_ROLE,
+            WAN_VAE_NEXT_32_ROLE,
+        ):
+            assert list(model["weights"][graph]) == ["f16", "i8"]
         assert model["assets"][WAN_TEXT_EMBEDS_ROLE]["path"] == (
             f"{_TI2V}/{WAN_TEXT_EMBEDS_ROLE}/{WAN_TEXT_EMBEDS_FILE}"
         )
@@ -1678,6 +1818,9 @@ class TestTheWan22Distribution:
             WAN_TRANSFORMER_ROLE: "i8",
             WAN_VAE_FIRST_ROLE: "f16",
             WAN_VAE_NEXT_ROLE: "f16",
+            # Every preset maps the 32-tile pair with the decoder's label (ADR 0134 decision 5).
+            WAN_VAE_FIRST_32_ROLE: "f16",
+            WAN_VAE_NEXT_32_ROLE: "f16",
         }
         assert model["quants"][_REFERENCE]["weights"] == seat
         assert model["quants"][_PRACTICAL]["weights"] == seat
@@ -1701,7 +1844,13 @@ class TestTheWan22Distribution:
             " the scores are never stored, so the long clips run faster on the same weights as the"
             " s16 preset."
         )
-        int8_vae = {**seat, WAN_VAE_FIRST_ROLE: "i8", WAN_VAE_NEXT_ROLE: "i8"}
+        int8_vae = {
+            **seat,
+            WAN_VAE_FIRST_ROLE: "i8",
+            WAN_VAE_NEXT_ROLE: "i8",
+            WAN_VAE_FIRST_32_ROLE: "i8",
+            WAN_VAE_NEXT_32_ROLE: "i8",
+        }
         assert model["quants"][_I8]["weights"] == int8_vae
         assert model["quants"][_CONV8]["weights"] == int8_vae
         assert model["quants"][_I8]["session"] == {}
@@ -1931,6 +2080,47 @@ class TestTheWan22Gates:
         with pytest.raises(DistError, match=rf"Assembly input is missing: .*{role}"):
             wan_plan(sources, generation=WAN22)
 
+    @pytest.mark.parametrize("role", sorted(WAN_VAE_LENDER_ROLES))
+    def test_every_32_tile_container_borrows_everything_from_its_lender(
+        self, tmp_path: Path, wan22_provenance, role: str
+    ) -> None:
+        """ADR 0134 決定 1: 借り手は part 0 の外に 1 バイトも持たず、initializer が全部共有宣言で、
+        名指すキーを貸し手（同じラベルの 16 の組）が同じ dtype・形の実体として持つ。"""
+        placements = wan_placements(_build_sources22(tmp_path), WAN22)
+        borrower = placements[role]
+
+        assert_shared_decoder(borrower, placements[WAN_VAE_LENDER_ROLES[role]])
+        parts = container_parts(borrower)
+        assert [part.stat().st_size == 0 for part in parts] == [False, *[True] * (len(parts) - 1)]
+
+    @pytest.mark.parametrize("role", [WAN_VAE_FIRST_32_ROLE, WAN_VAE_NEXT_32_I8_ROLE])
+    def test_it_refuses_a_32_tile_container_that_carries_weight_bytes(
+        self, tmp_path: Path, wan22_provenance, role: str
+    ) -> None:
+        """重みを持つ容器を借りる組の席へ挿した取り違え（格納の門は貸し手を見るので通る —
+        共有の門だけが落とす）。"""
+        storage = "i8" if role.endswith("_i8") else "f16"
+        graph = _VAE_SHARED_GRAPHS[role]
+        sources = _build_sources22(
+            tmp_path, containers={role: _graph_container(graph, storage=storage)}
+        )
+        with pytest.raises(DistError, match=rf"{graph}/model.krm: 記述の外に \d+ バイトを持つ"):
+            wan_plan(sources, generation=WAN22)
+
+    @pytest.mark.parametrize("role", [WAN_VAE_FIRST_32_I8_ROLE, WAN_VAE_NEXT_32_ROLE])
+    def test_it_refuses_a_32_tile_container_naming_a_tensor_its_lender_lacks(
+        self, tmp_path: Path, wan22_provenance, role: str
+    ) -> None:
+        """貸し手だけを焼き直した系列の形（借り手が名指すキーが貸し手に無い）。"""
+        sources = _build_sources22(
+            tmp_path, containers={role: _shared_container(role, mark="vae_decoder_other")}
+        )
+        with pytest.raises(
+            DistError,
+            match=r"共有 initializer '[^']*vae_decoder_other[^']*' の実体が貸し手 .* に無い",
+        ):
+            wan_plan(sources, generation=WAN22)
+
     def test_it_refuses_a_wan21_model(self, tmp_path: Path, wan22_provenance) -> None:
         with pytest.raises(DistError, match=r"Wan2\.2 のモデル 't2v-1\.3b' は知らない"):
             wan_plan(_build_sources22(tmp_path), DEFAULT_MODEL, WAN22)
@@ -2025,7 +2215,13 @@ class TestTheWan22ModelCard:
         assert "Text to video only." not in prose
         assert "not available yet" not in prose
         assert "at 24 fps" in prose
-        assert "- Seven graphs:" in prose
+        assert "- Nine graphs:" in prose
+        # The 32-tile pair (ADR 0134): borrowed weights, an explicit tile, 16 by default.
+        assert (
+            "a second decoder pair at a 32-latent tile that borrows the 16-tile pair's weights, so"
+            " there is no extra weight download; the application chooses the tile explicitly, 16 by"
+            " default, and the 10 GB class keeps 16" in prose
+        )
 
     def test_the_overview_names_every_graph_of_the_manifest(self, assembled22) -> None:
         _overview_names_every_graph(*assembled22)
@@ -2590,6 +2786,13 @@ _REAL22_PRESENT = (
     # VAE の decoder の i8（ADR 0133 決定 7 — `wan.export_vae --model ti2v-5b --dtype i8`）。
     and (_REAL22.i8_series / WAN_VAE_FIRST_ROLE).is_dir()
     and (_REAL22.i8_series / WAN_VAE_NEXT_ROLE).is_dir()
+    # The 32-tile pairs (ADR 0134 — `wan.export_vae --model ti2v-5b [--dtype i8] --tile 32
+    # --shared`).
+    and all(
+        (root / graph).is_dir()
+        for root in (_REAL22.series, _REAL22.i8_series)
+        for graph in (WAN_VAE_FIRST_32_ROLE, WAN_VAE_NEXT_32_ROLE)
+    )
     and _REAL22.text_embeds.is_file()
     and _REAL22.text_encoder.parent.is_dir()
     and _REAL22.tokenizer.is_file()

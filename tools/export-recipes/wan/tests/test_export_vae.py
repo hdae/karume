@@ -16,6 +16,11 @@ Wan2.1 は実重み（潜在タイル 8）、Wan2.2 は合成の VAE（conftest 
 - `--dtype i8`（ADR 0133 決定 7）: 合成の 2.2 VAE の i8 の書き出しで、畳み込みの重みだけが
   `int8-sym`（出力チャネルごとの scale）になり、グラフの構造と他の格納は f16 の回と同じで、
   フィクスチャを書かないこと・i8 系列を持たないモデルは拒むこと
+- `--shared`（ADR 0134 決定 1）: 合成の 2.2 VAE の f16 / i8 の組（タイル 4）を貸し手に、
+  タイル 8 の組 `<ターゲット>_8` を同じ系列の根へ書き、initializer が全部貸し手の同じキー・形・
+  格納の共有宣言で、重みのバイトを持たず、chunk グラフの取り決めがタイル 8 で成り立ち、貸し手の
+  組がバイト同一のままであること・貸し手の無い系列 / フィクスチャ / 別の格納・別のタイルの
+  貸し手 / `--tile` 無しを拒むこと
 """
 
 from __future__ import annotations
@@ -33,7 +38,7 @@ import torch
 from _shared.paths import SERIES_ROOT
 from karume.container import Provenance, codec_entry, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
-from karume.ir import IrGraph, IrInput, IrNode, IrValue
+from karume.ir import IrGraph, IrInput, IrNode, IrStorage, IrValue
 from karume.ops import WEIGHT_SLOTS
 from karume.pipeline import export_module
 from karume.quantize import round_weights_to_f16
@@ -734,3 +739,267 @@ class TestTi2vVerify:
         assert summary["frames"] == [12, 1 + 4 * (self.CHUNKS - 1), side, side]
         assert summary["clamped_reference_equals_decode"] is True
         assert summary["normalized_cache_bit_exact"] is True
+
+
+# ---- `--shared`（ADR 0134 決定 1 — 重みのバイトを持たない別タイルの組）-----------------------
+
+#: 共有の組のタイル（貸し手の {@link TI2V_TILE} と別の辺 — 実寸の 16 → 32 と同じ 2 倍）。
+SHARED_TILE = 8
+
+_SOURCE = Provenance(license="apache-2.0", upstream_revision="0" * 40)
+
+
+@pytest.fixture(scope="module")
+def written_shared(
+    ti2v_synthetic_vae, written, written_i8, tmp_path_factory
+) -> dict[str, tuple[dict, Path, Path]]:
+    """格納ラベル → (要約, 系列の根, 書く前の貸し手の系列の根)。f16 / i8 の貸し手の組
+    （{@link written} / {@link written_i8}）の写しへ、共有の組をタイル {@link SHARED_TILE} で書く。
+
+    VAE は丸めない（`main` の `--shared` と同じ — バイトを書かないので丸めも量子化も要らない）。
+    """
+    import shutil
+
+    out = {}
+    for dtype, lender_root in (("f16", written[1]), ("i8", written_i8[1])):
+        root = tmp_path_factory.mktemp(f"shared-{dtype}") / "series"
+        shutil.copytree(lender_root, root)
+        summary = export_vae.emit_shared_targets(
+            export_vae.TARGETS,
+            ti2v_synthetic_vae,
+            SHARED_TILE,
+            root,
+            _SOURCE,
+            lender_tile=TI2V_TILE,
+            weight_dtype=dtype,
+        )
+        out[dtype] = (summary, root, lender_root)
+    return out
+
+
+def _shared_name(target: str) -> str:
+    return export_vae.shared_target(target, SHARED_TILE)
+
+
+@pytest.mark.parametrize("dtype", export_vae.WEIGHT_DTYPES)
+class TestSharedWriter:
+    """合成の 2.2 VAE の 16 の組（ここではタイル 4）を貸し手に、タイル 8 の組を書く。"""
+
+    @pytest.mark.parametrize("target", export_vae.TARGETS)
+    def test_every_initializer_borrows_a_lender_tensor_of_the_same_key_and_shape(
+        self, written_shared, dtype: str, target: str
+    ):
+        _, root, _ = written_shared[dtype]
+        graph, _ = _container(root, _shared_name(target))
+        lender, lender_bound = _container(root, target)
+
+        assert graph.initializers
+        assert all(init.is_shared for init in graph.initializers.values())
+        # IR v2 では initializer の名前がテンソルキー — 共有宣言の名前が貸し手の実体を指す。
+        assert set(graph.initializers) <= set(lender_bound.supplies)
+        for name in graph.initializers:
+            assert graph.values[name] == lender.values[name], name
+
+    @pytest.mark.parametrize("target", export_vae.TARGETS)
+    def test_no_weight_byte_is_written(self, written_shared, dtype: str, target: str):
+        """束縛表が空で、part 0（2 文書）の外は 0 バイト。"""
+        _, root, _ = written_shared[dtype]
+        _, bound = _container(root, _shared_name(target))
+        parts = container_parts(root / _shared_name(target) / export_vae.MODEL_FILE)
+
+        assert bound.supplies == {}
+        assert parts[0].stat().st_size > 0
+        assert [part.stat().st_size for part in parts[1:]] == [0] * (len(parts) - 1)
+
+    @pytest.mark.parametrize("target", export_vae.TARGETS)
+    def test_the_chunk_graph_contract_holds_at_the_shared_tile(
+        self, written_shared, ti2v_synthetic_vae, dtype: str, target: str
+    ):
+        _, root, _ = written_shared[dtype]
+        graph, _ = _container(root, _shared_name(target))
+        module = vae_patch.WanVaeChunkDecoder(
+            ti2v_synthetic_vae, first=target == export_vae.TARGET_FIRST
+        ).eval()
+
+        export_vae.assert_chunk_graph(graph, module, SHARED_TILE)
+        assert graph.inputs[0].shape == [48, 1, SHARED_TILE, SHARED_TILE]
+
+    def test_the_summary_names_the_lender_and_the_tile(self, written_shared, dtype: str):
+        summary, root, _ = written_shared[dtype]
+
+        assert (summary["series"], summary["dtype"], summary["tile"]) == (
+            str(root),
+            dtype,
+            SHARED_TILE,
+        )
+        assert summary["lender"] == {"tile": TI2V_TILE, "targets": list(export_vae.TARGETS)}
+        assert "fixtures" not in summary
+        for graph, target in zip(summary["graphs"], export_vae.TARGETS, strict=True):
+            assert graph["target"] == _shared_name(target) == f"{target}_{SHARED_TILE}"
+            assert graph["tile"] == SHARED_TILE
+            assert graph["lender"] == str(root / target / export_vae.MODEL_FILE)
+            assert (graph["compressed_bytes"], graph["plain_bytes"]) == (0, 0)
+
+    def test_only_the_shared_pair_is_added_and_the_lenders_are_unchanged(
+        self, written_shared, dtype: str
+    ):
+        """フィクスチャは書かない・貸し手の組はバイト同一（ADR 0134 決定 7 の 1）。"""
+        _, root, lender_root = written_shared[dtype]
+
+        before = sorted(path.name for path in lender_root.iterdir())
+        assert sorted(path.name for path in root.iterdir()) == sorted(
+            [*before, *(_shared_name(target) for target in export_vae.TARGETS)]
+        )
+        for target in export_vae.TARGETS:
+            lent = container_parts(lender_root / target / export_vae.MODEL_FILE)
+            kept = container_parts(root / target / export_vae.MODEL_FILE)
+            assert [part.read_bytes() for part in kept] == [part.read_bytes() for part in lent]
+
+    def test_each_declaration_carries_the_lender_storage(
+        self, written_shared, ti2v_synthetic_vae, dtype: str
+    ):
+        """共有宣言の格納は貸し手の束縛表の格納（容器には残らないので、置き換えの関数で見る）。
+        i8 の貸し手では畳み込みの重みが i8・それ以外は f32。"""
+        _, root, _ = written_shared[dtype]
+        target = export_vae.TARGET_NEXT
+        path = root / target / export_vae.MODEL_FILE
+        lender = export_vae.read_lender(path, target, TI2V_TILE, dtype)
+        module = vae_patch.WanVaeChunkDecoder(ti2v_synthetic_vae, first=False).eval()
+        with torch.no_grad():
+            traced, _ = export_module(
+                module,
+                export_vae.example_inputs(module, SHARED_TILE),
+                preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+            )
+
+        shared = export_vae.share_lender_weights(traced, lender, path)
+
+        storage = {init.shared.tensor: init.storage for init in shared.initializers.values()}
+        assert storage == {
+            key: IrStorage(dtype=init.storage.dtype) for key, init in lender.initializers.items()
+        }
+        assert {value.dtype for value in storage.values()} == {dtype, "f32"}
+
+
+class TestSharedRefusals:
+    """共有の組の門 — 外れたら何も据えない。"""
+
+    def test_no_lender_is_refused(self, ti2v_synthetic_vae, tmp_path):
+        root = tmp_path / "series"
+
+        with pytest.raises(export_vae.ChunkGraphError, match=r"貸し手の容器 .* が無い"):
+            export_vae.emit_shared_targets(
+                export_vae.TARGETS,
+                ti2v_synthetic_vae,
+                SHARED_TILE,
+                root,
+                _SOURCE,
+                lender_tile=TI2V_TILE,
+            )
+        assert not root.exists() or not list(root.iterdir())
+
+    def test_fixtures_are_refused(self, ti2v_synthetic_vae, tmp_path):
+        with pytest.raises(export_vae.ChunkGraphError, match="フィクスチャを書かない"):
+            export_vae.emit_shared_targets(
+                export_vae.TARGETS,
+                ti2v_synthetic_vae,
+                SHARED_TILE,
+                tmp_path,
+                _SOURCE,
+                lender_tile=TI2V_TILE,
+                cases=export_vae.TI2V_FIXTURE_CASES,
+            )
+        assert list(tmp_path.iterdir()) == []
+
+    def test_a_lender_of_the_other_storage_is_refused(self, written, ti2v_synthetic_vae, tmp_path):
+        """f16 系列の根の貸し手を i8 の組として借りる取り違え。"""
+        import shutil
+
+        root = tmp_path / "series"
+        shutil.copytree(written[1], root)
+        with pytest.raises(
+            export_vae.ChunkGraphError, match=r"圧縮格納 \['f16'\] が i8 の系列でない"
+        ):
+            export_vae.emit_shared_targets(
+                export_vae.TARGETS,
+                ti2v_synthetic_vae,
+                SHARED_TILE,
+                root,
+                _SOURCE,
+                lender_tile=TI2V_TILE,
+                weight_dtype="i8",
+            )
+        assert not [path for path in root.iterdir() if path.name.endswith(f"_{SHARED_TILE}")]
+
+    def test_a_lender_of_another_tile_is_refused(self, written, ti2v_synthetic_vae, tmp_path):
+        """貸し手のタイルは系列の表のタイル（別のタイルで書いた組は貸し手にしない）。"""
+        import shutil
+
+        root = tmp_path / "series"
+        shutil.copytree(written[1], root)
+        with pytest.raises(export_vae.ChunkGraphError, match="タイル 16 の 'latent' でない"):
+            export_vae.emit_shared_targets(
+                export_vae.TARGETS,
+                ti2v_synthetic_vae,
+                SHARED_TILE,
+                root,
+                _SOURCE,
+                lender_tile=16,
+            )
+
+
+class TestSharedCommandLine:
+    """`--shared` の CLI（実重みは読まない — 書き手は差し替える）。"""
+
+    @pytest.fixture
+    def emitted(self, monkeypatch) -> dict:
+        captured: dict = {}
+
+        def emit_shared_targets(targets, vae, tile, out_root, source, *, lender_tile, weight_dtype):
+            captured.update(
+                targets=targets, tile=tile, out=out_root, lender=lender_tile, dtype=weight_dtype
+            )
+            return {}
+
+        def load_vae(model, *, round_f16):
+            captured["round_f16"] = round_f16
+            return model
+
+        def refuse(*_args, **_kwargs):
+            raise AssertionError("--shared は既定の書き手・量子化を通らない")
+
+        monkeypatch.setattr(export_vae, "provenance", lambda model: model)
+        monkeypatch.setattr(export_vae, "load_vae", load_vae)
+        monkeypatch.setattr(export_vae, "assert_series_config", lambda _vae, _series: None)
+        monkeypatch.setattr(export_vae, "fake_quant_i8", refuse)
+        monkeypatch.setattr(export_vae, "emit_targets", refuse)
+        monkeypatch.setattr(export_vae, "emit_shared_targets", emit_shared_targets)
+        return captured
+
+    def test_f16_writes_the_32_pair_beside_the_f16_lender(self, emitted, capsys):
+        export_vae.main(["--model", "ti2v-5b", "--tile", "32", "--shared"])
+
+        assert emitted == {
+            "targets": export_vae.TARGETS,
+            "tile": 32,
+            "out": SERIES_ROOT / "wan2.2-ti2v-5b-f16-dyn",
+            "lender": 16,
+            "dtype": "f16",
+            "round_f16": False,
+        }
+
+    def test_i8_writes_the_32_pair_beside_the_i8_lender_without_quantizing(self, emitted, capsys):
+        export_vae.main(["--model", "ti2v-5b", "--dtype", "i8", "--tile", "32", "--shared"])
+
+        assert (emitted["out"], emitted["dtype"], emitted["lender"]) == (
+            SERIES_ROOT / "wan2.2-ti2v-5b-i8-dyn",
+            "i8",
+            16,
+        )
+
+    def test_shared_without_a_tile_is_a_parser_error(self, emitted, capsys):
+        with pytest.raises(SystemExit):
+            export_vae.main(["--model", "ti2v-5b", "--shared"])
+
+        assert "--tile を要する" in capsys.readouterr().err
+        assert emitted == {}

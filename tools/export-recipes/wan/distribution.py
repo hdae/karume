@@ -54,7 +54,12 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from _shared.container_read import ContainerReadError, read_asset, read_asset_declarations
+from _shared.container_read import (
+    ContainerReadError,
+    open_container,
+    read_asset,
+    read_asset_declarations,
+)
 from _shared.licenses import apache_license_2_0
 from _shared.upstream import assert_upstream_provenance
 from karume.dist import (
@@ -68,6 +73,7 @@ from karume.dist import (
     assert_storage,
     assert_storage_absent,
     complete_quant_weights,
+    component_parts,
     graph_inputs,
     ir_graph,
 )
@@ -135,6 +141,12 @@ WAN_TRANSFORMER_ROLE = "transformer"
 WAN_VAE_FIRST_ROLE = "vae_decoder_first"
 WAN_VAE_NEXT_ROLE = "vae_decoder_next"
 
+#: VAE の decoder の 32 潜在タイルの組（ADR 0134 — Wan2.2 だけ）のグラフ名 = weights のキー
+#: （書き手 `wan.export_vae --tile 32 --shared` の `shared_target`）。重みのバイトを持たない容器で、
+#: initializer は全部、同じ系列の根の既定タイルの組（貸し手）の重みを共有宣言で名指す。
+WAN_VAE_FIRST_32_ROLE = "vae_decoder_first_32"
+WAN_VAE_NEXT_32_ROLE = "vae_decoder_next_32"
+
 #: I2V の条件画像（1 枚）を潜在へ写す VAE encoder の 3 グラフ（ADR 0121 決定 11 の改訂・段 9a —
 #: mid の attention の前後で切った記号長のグラフ: pre / attn / post）。書き手の綴りは
 #: `wan.export_vae_encoder.TARGETS`。配るのは encoder を持つ世代だけ（Wan2.2 —
@@ -154,6 +166,8 @@ WAN_GRAPH_ROLES: tuple[str, ...] = (
     WAN_TRANSFORMER_ROLE,
     WAN_VAE_FIRST_ROLE,
     WAN_VAE_NEXT_ROLE,
+    WAN_VAE_FIRST_32_ROLE,
+    WAN_VAE_NEXT_32_ROLE,
 )
 
 #: `transformer` の容器の配置の役割（格納ラベルごとに 1 本 — ADR 0120 決定 1。anima の
@@ -187,6 +201,29 @@ WAN_VAE_NEXT_LABEL_ROLES: Mapping[str, str] = {
     "i8": WAN_VAE_NEXT_I8_ROLE,
 }
 
+#: 32 潜在タイルの組の i8 の配置の役割（decoder と同じ規則 — f16 の役割はグラフ名のまま）。
+WAN_VAE_FIRST_32_I8_ROLE = "vae_decoder_first_32_i8"
+WAN_VAE_NEXT_32_I8_ROLE = "vae_decoder_next_32_i8"
+
+#: 貸し手の組から重みを借りる組の潜在タイル → (first の格納ラベル → 役割, next の格納ラベル →
+#: 役割)（ADR 0134 決定 5 — 格納ラベルごとに 1 組）。重みを持つ既定タイルの組は
+#: {@link WAN_VAE_FIRST_LABEL_ROLES} / {@link WAN_VAE_NEXT_LABEL_ROLES}。
+WAN_VAE_SHARED_LABEL_ROLES: Mapping[int, tuple[Mapping[str, str], Mapping[str, str]]] = {
+    32: (
+        {"f16": WAN_VAE_FIRST_32_ROLE, "i8": WAN_VAE_FIRST_32_I8_ROLE},
+        {"f16": WAN_VAE_NEXT_32_ROLE, "i8": WAN_VAE_NEXT_32_I8_ROLE},
+    ),
+}
+
+#: 借りる組の役割 → 貸し手の役割（同じ系列の根・同じ格納ラベルの既定タイルの容器 — 書き手は
+#: `<系列の根>/<グラフ名>/model.krm` を貸し手に読む）。
+WAN_VAE_LENDER_ROLES: Mapping[str, str] = {
+    WAN_VAE_FIRST_32_ROLE: WAN_VAE_FIRST_ROLE,
+    WAN_VAE_FIRST_32_I8_ROLE: WAN_VAE_FIRST_I8_ROLE,
+    WAN_VAE_NEXT_32_ROLE: WAN_VAE_NEXT_ROLE,
+    WAN_VAE_NEXT_32_I8_ROLE: WAN_VAE_NEXT_I8_ROLE,
+}
+
 #: 容器を持つ配置の役割（text_encoder は i8 の 1 本・transformer と VAE の decoder は格納ラベル
 #: ごとに 1 本・VAE の encoder は f16 の 1 本ずつ）。全世代の役割の和。各世代は自分の格納ラベルの
 #: 役割と、encoder を持つ世代だけが encoder の役割を使う（{@link WanGeneration.container_roles} —
@@ -200,6 +237,10 @@ WAN_CONTAINER_ROLES: tuple[str, ...] = (
     WAN_VAE_FIRST_I8_ROLE,
     WAN_VAE_NEXT_ROLE,
     WAN_VAE_NEXT_I8_ROLE,
+    WAN_VAE_FIRST_32_ROLE,
+    WAN_VAE_FIRST_32_I8_ROLE,
+    WAN_VAE_NEXT_32_ROLE,
+    WAN_VAE_NEXT_32_I8_ROLE,
 )
 
 #: モデル単位の資産（manifest の `assets` のキー = 役割名 — TS 側 `text-stage.ts` の
@@ -251,6 +292,10 @@ WAN_OUTPUT_PATHS: Mapping[str, str] = {
     WAN_VAE_FIRST_I8_ROLE: f"{WAN_VAE_FIRST_ROLE}/model.i8.krm",
     WAN_VAE_NEXT_ROLE: f"{WAN_VAE_NEXT_ROLE}/model.f16.krm",
     WAN_VAE_NEXT_I8_ROLE: f"{WAN_VAE_NEXT_ROLE}/model.i8.krm",
+    WAN_VAE_FIRST_32_ROLE: f"{WAN_VAE_FIRST_32_ROLE}/model.f16.krm",
+    WAN_VAE_FIRST_32_I8_ROLE: f"{WAN_VAE_FIRST_32_ROLE}/model.i8.krm",
+    WAN_VAE_NEXT_32_ROLE: f"{WAN_VAE_NEXT_32_ROLE}/model.f16.krm",
+    WAN_VAE_NEXT_32_I8_ROLE: f"{WAN_VAE_NEXT_32_ROLE}/model.i8.krm",
     WAN_TEXT_EMBEDS_ROLE: f"{WAN_TEXT_EMBEDS_ROLE}/{WAN_TEXT_EMBEDS_FILE}",
     WAN_TOKENIZER_ROLE: f"{WAN_TOKENIZER_ROLE}/{umt5_tokenizer.ASSET_FILE}",
 }
@@ -261,7 +306,10 @@ WAN_OUTPUT_PATHS: Mapping[str, str] = {
 #: （scale・bias・norm は f32）ので「i8 を含む」を要求する。umT5 の i8 系列の種類ごとの格納は
 #: 束縛表の門（`wan.umt5_distribution.assert_umt5_bindings`）が別に見る。VAE の encoder は
 #: decoder と同じ f16 系列（書き手 `wan.export_vae_encoder` — f16 席だけ）。decoder の i8 系列は
-#: 畳み込みの重みだけが i8（ADR 0133 決定 7 — 書き手 `wan.export_vae --dtype i8`）。
+#: 畳み込みの重みだけが i8（ADR 0133 決定 7 — 書き手 `wan.export_vae --dtype i8`）。32 潜在タイルの
+#: 組（ADR 0134）は束縛表を持たない（共有宣言には供給が無く、容器は宣言の格納も残さない）ので、
+#: 要求 / 禁止は貸し手の容器（{@link WAN_VAE_LENDER_ROLES}）の束縛表で見る — 借りる組が走る格納は
+#: 貸し手の常駐重みの格納である（{@link wan_plan}）。
 WAN_STORAGE_REQUIREMENTS: Mapping[str, str] = {
     **dict.fromkeys(WAN_VAE_ENCODER_ROLES, "f16"),
     WAN_TEXT_ENCODER_ROLE: "i8",
@@ -271,6 +319,10 @@ WAN_STORAGE_REQUIREMENTS: Mapping[str, str] = {
     WAN_VAE_FIRST_I8_ROLE: "i8",
     WAN_VAE_NEXT_ROLE: "f16",
     WAN_VAE_NEXT_I8_ROLE: "i8",
+    WAN_VAE_FIRST_32_ROLE: "f16",
+    WAN_VAE_FIRST_32_I8_ROLE: "i8",
+    WAN_VAE_NEXT_32_ROLE: "f16",
+    WAN_VAE_NEXT_32_I8_ROLE: "i8",
 }
 
 #: codec 台帳の layout のうち圧縮格納の全部（`karume.container.CODEC_LEDGER` から f32 / i32 を
@@ -309,6 +361,14 @@ WAN_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     WAN_VAE_NEXT_ROLE: {
         "f16": WeightFiles(WAN_VAE_NEXT_ROLE),
         "i8": WeightFiles(WAN_VAE_NEXT_I8_ROLE),
+    },
+    WAN_VAE_FIRST_32_ROLE: {
+        "f16": WeightFiles(WAN_VAE_FIRST_32_ROLE),
+        "i8": WeightFiles(WAN_VAE_FIRST_32_I8_ROLE),
+    },
+    WAN_VAE_NEXT_32_ROLE: {
+        "f16": WeightFiles(WAN_VAE_NEXT_32_ROLE),
+        "i8": WeightFiles(WAN_VAE_NEXT_32_I8_ROLE),
     },
 }
 
@@ -463,9 +523,14 @@ WAN22_I8_SERIES = "wan2.2-ti2v-5b-i8-dyn"
 #: 束」）。参照席の表示欄は 2.1 の文（「f16 席の約半分」）が 2.2 では成り立たないので、2.2 の文を
 #: 持つ。
 #: 基底の格納は VAE の decoder の格納で決まる（ADR 0074 §1 — 全役割に共通の格納: decoder が f16 の
-#: 席は `f16+dit8…`・i8 の席は `i8…`）。
-_WAN22_VAE_F16: Mapping[str, str] = {WAN_VAE_FIRST_ROLE: "f16", WAN_VAE_NEXT_ROLE: "f16"}
-_WAN22_VAE_I8: Mapping[str, str] = {WAN_VAE_FIRST_ROLE: "i8", WAN_VAE_NEXT_ROLE: "i8"}
+#: 席は `f16+dit8…`・i8 の席は `i8…`）。32 潜在タイルの組（ADR 0134 決定 5）は decoder と同じ
+#: ラベルを名指す — 借りる組は同じラベルの貸し手の重みで走るので、席の中でラベルが割れない。
+_WAN22_VAE_F16: Mapping[str, str] = dict.fromkeys(
+    (WAN_VAE_FIRST_ROLE, WAN_VAE_NEXT_ROLE, WAN_VAE_FIRST_32_ROLE, WAN_VAE_NEXT_32_ROLE), "f16"
+)
+_WAN22_VAE_I8: Mapping[str, str] = dict.fromkeys(
+    (WAN_VAE_FIRST_ROLE, WAN_VAE_NEXT_ROLE, WAN_VAE_FIRST_32_ROLE, WAN_VAE_NEXT_32_ROLE), "i8"
+)
 WAN22_QUANTS: Mapping[str, Any] = {
     "f16+dit8": {
         "weights": _WAN22_VAE_F16,
@@ -590,9 +655,10 @@ following changes were made:
   (the first frame, and every later frame), with the causal convolution cache passed in and out of
   the graph instead of kept in a Python list, and its upsampling shortcuts written as copies and
   depth-to-space reshapes. The graphs return the decoder output in the upstream patchified space
-  (`patch_size` 2, 12 channels); the host decodes in overlapping tiles of 16 latent pixels, blends
-  them in that space and then unpatchifies to RGB, so the output differs slightly from the
-  upstream untiled decode.
+  (`patch_size` 2, 12 channels); the host decodes in overlapping tiles of 16 latent pixels (or 32
+  when the application asks for it — a second pair of the same two graphs traced at that tile, which
+  holds no weights of its own and borrows the 16-tile pair's), blends them in that space and then
+  unpatchifies to RGB, so the output differs slightly from the upstream untiled decode.
 - **f16 VAE encoder for image-to-video**: only the part of the VAE encoder (Wan2.2-VAE) that
   encodes one conditioning image (the first latent frame) is included, re-expressed as three graphs
   with a symbolic latent height and width, split around its middle attention block: the layers
@@ -649,6 +715,10 @@ class WanGeneration:
     #: VAE の decoder（グラフ 2 本）の格納ラベル（同じ並びの規則）。i8 は {@link i8_series} の
     #: 系列から引く（ADR 0133 決定 7）。
     vae_labels: tuple[str, ...]
+    #: VAE の decoder の組の潜在タイル。先頭は重みを持つ既定タイルの組（役割に接尾辞が無い —
+    #: Wan2.1 は 32・Wan2.2 は 16 — 書き手 `wan.export_vae.VAE_SERIES` のタイル）、残りはその組から
+    #: 重みを借りる組（{@link WAN_VAE_SHARED_LABEL_ROLES} — ADR 0134・格納ラベルごとに 1 組）。
+    vae_tiles: tuple[int, ...]
     #: I2V の条件画像の VAE encoder（{@link WAN_VAE_ENCODER_ROLES} の 3 グラフ — f16 系列）を
     #: 配るか。Wan2.2 だけ（ADR 0121 決定 11）。全世代の表 {@link WAN_WEIGHTS} は Wan2.1 の計画にも
     #: 回るので、ここで絞らないと Wan2.1 の manifest に encoder の席が漏れる（2.1 は T2V だけの
@@ -687,10 +757,18 @@ class WanGeneration:
     @property
     def vae_decoder_roles(self) -> tuple[str, ...]:
         """VAE の decoder の容器の配置の役割（first の格納ラベルごと、次に next の格納ラベル
-        ごと）。"""
-        return (
-            *(WAN_VAE_FIRST_LABEL_ROLES[label] for label in self.vae_labels),
-            *(WAN_VAE_NEXT_LABEL_ROLES[label] for label in self.vae_labels),
+        ごと。重みを借りる組はその後ろにタイルの順で同じ並び）。"""
+        pairs = [
+            (WAN_VAE_FIRST_LABEL_ROLES, WAN_VAE_NEXT_LABEL_ROLES),
+            *(WAN_VAE_SHARED_LABEL_ROLES[tile] for tile in self.vae_tiles[1:]),
+        ]
+        return tuple(
+            role
+            for first, following in pairs
+            for role in (
+                *(first[label] for label in self.vae_labels),
+                *(following[label] for label in self.vae_labels),
+            )
         )
 
     @property
@@ -739,6 +817,7 @@ WAN21 = WanGeneration(
     i8_series=WAN_I8_SERIES,
     transformer_labels=("f16", "i8"),
     vae_labels=("f16",),
+    vae_tiles=(32,),
     vae_encoder=False,
     text_model=DEFAULT_MODEL,
     quants=WAN_QUANTS,
@@ -755,7 +834,9 @@ WAN21 = WanGeneration(
 #: - transformer は **i8 の 1 本だけ**（f16 の DiT は無い — ADR 0121 決定 2）。DiT は I2V 対応の
 #:   グラフ 1 本（決定 3 — 入力 7 本。組み立てが見るのは文脈入力と RoPE 素表だけで、2.1 と同じ門）。
 #: - VAE は Wan2.2-VAE の chunk グラフ 2 本（決定 6 — 潜在 48 ch・出口は patchify 空間）。decoder は
-#:   f16 / i8 の 2 本ずつ（i8 は DiT と同じ i8 系列 — ADR 0133 決定 7）。
+#:   f16 / i8 の 2 本ずつ（i8 は DiT と同じ i8 系列 — ADR 0133 決定 7）。加えて 32 潜在タイルの組
+#:   （ADR 0134）を格納ラベルごとに 1 組配る — 重みのバイトを持たず、同じ系列の根・同じラベルの
+#:   16 の組の重みを借りる（追加の重みのダウンロードは無い）。
 #: - I2V の条件画像の VAE encoder の 3 グラフ（決定 11・段 9a — decoder と同じ f16 系列）を配る。
 #:   どの席も f16 の 1 本を取る（T2V だけの利用でも取る — 追記「段 9 の計画の裁定と段 9a の
 #:   結果」の裁定）。
@@ -770,6 +851,7 @@ WAN22 = WanGeneration(
     i8_series=WAN22_I8_SERIES,
     transformer_labels=("i8",),
     vae_labels=("f16", "i8"),
+    vae_tiles=(16, 32),
     vae_encoder=True,
     text_model=WAN22_TEXT_MODEL,
     quants=WAN22_QUANTS,
@@ -827,6 +909,11 @@ def wan_placements(sources: WanSources, generation: WanGeneration = WAN21) -> di
         WAN_VAE_FIRST_I8_ROLE: sources.i8_series / WAN_VAE_FIRST_ROLE / WAN_MODEL_FILE,
         WAN_VAE_NEXT_ROLE: sources.series / WAN_VAE_NEXT_ROLE / WAN_MODEL_FILE,
         WAN_VAE_NEXT_I8_ROLE: sources.i8_series / WAN_VAE_NEXT_ROLE / WAN_MODEL_FILE,
+        # 重みを借りる組は貸し手と同じ系列の根（ADR 0134 決定 5）。
+        WAN_VAE_FIRST_32_ROLE: sources.series / WAN_VAE_FIRST_32_ROLE / WAN_MODEL_FILE,
+        WAN_VAE_FIRST_32_I8_ROLE: sources.i8_series / WAN_VAE_FIRST_32_ROLE / WAN_MODEL_FILE,
+        WAN_VAE_NEXT_32_ROLE: sources.series / WAN_VAE_NEXT_32_ROLE / WAN_MODEL_FILE,
+        WAN_VAE_NEXT_32_I8_ROLE: sources.i8_series / WAN_VAE_NEXT_32_ROLE / WAN_MODEL_FILE,
     }
     return {
         **{role: sources.series / role / WAN_MODEL_FILE for role in generation.vae_encoder_roles},
@@ -954,6 +1041,53 @@ def assert_vae_chunk_pair(first: Path, following: Path, writer: str) -> None:
         if position < cursor:
             raise DistError(f"{first}: cache 入力の順が next と違う（'{name}'）")
         cursor = position + 1
+
+
+def assert_shared_decoder(borrower: Path, lender: Path) -> None:
+    """重みを借りる組の容器（ADR 0134 決定 1）が、貸し手の容器から全部の重みを借りることを見る。
+
+    見るのは 3 つ: 借り手が part 0（2 文書）の外に 1 バイトも持たない・initializer が全部共有宣言・
+    各共有宣言が名指すテンソルキー（IR v2 では initializer の名前そのもの）を貸し手が実体
+    （束縛表の供給）として持ち、値の dtype と形が貸し手と同じ。借り手の格納の宣言は容器に残らない
+    （共有宣言には供給が無い）ので、借り手が走る格納は貸し手の束縛表の格納で、{@link wan_plan} が
+    貸し手の容器へ格納の門を掛ける。
+
+    MUST: 組み立てで落とす。貸し手だけを焼き直した系列では、借り手が名指すキーが消えるか形が
+    変わる — ランタイムの共有の検査はセッションを組むときまで（利用者が重みを落とした後まで）
+    走らない。
+    """
+    carried = sum(part.stat().st_size for part in component_parts(borrower)[1:])
+    if carried:
+        raise DistError(
+            f"{borrower}: 記述の外に {carried} バイトを持つ — 重みを借りる組は重みのバイトを"
+            " 持たない（`python -m wan.export_vae … --shared` で焼き直す）"
+        )
+    graph = ir_graph(borrower)
+    opened = open_container(lender)
+    lent = ir_graph(lender, opened)
+    supplied = {name for bound in opened.graphs.values() for name in bound.supplies}
+    initializers = graph.get("initializers") or {}
+    owned = sorted(
+        name
+        for name, entry in initializers.items()
+        if not (isinstance(entry, dict) and entry.get("shared") is True)
+    )
+    if owned:
+        raise DistError(
+            f"{borrower}: 共有宣言でない initializer {owned[:4]}（全部が貸し手 {lender} を名指す）"
+        )
+    values, lent_values = graph.get("values") or {}, lent.get("values") or {}
+    for name in sorted(initializers):
+        if name not in supplied:
+            raise DistError(
+                f"{borrower}: 共有 initializer '{name}' の実体が貸し手 {lender} に無い"
+                "（貸し手を焼き直した世代と噛み合っていない）"
+            )
+        if values.get(name) != lent_values.get(name):
+            raise DistError(
+                f"{borrower}: 共有 initializer '{name}' が {values.get(name)} — 貸し手 {lender} の"
+                f" {lent_values.get(name)} と違う"
+            )
 
 
 def _safetensors_header(path: Path) -> tuple[dict[str, Any], dict[str, str]]:
@@ -1161,8 +1295,11 @@ def wan_plan(
     for role in generation.container_roles:
         container = placements[role]
         assert_component_present(container)
-        assert_storage(role, container, requirements)
-        assert_storage_absent(role, container, forbidden)
+        # 重みを借りる組（ADR 0134）は束縛表を持たないので、格納は貸し手の容器で見る（借りる組が
+        # 貸し手から全部を借りることは下の {@link assert_shared_decoder} が見る）。
+        stored = placements[WAN_VAE_LENDER_ROLES.get(role, role)]
+        assert_storage(role, stored, requirements)
+        assert_storage_absent(role, stored, forbidden)
         if role == WAN_TEXT_ENCODER_ROLE:
             # umT5 の容器の上流は Wan ではなく本家 `google/umt5-xxl`（ADR 0122 決定 1）— 出所は
             # 下の umT5 の門（`wan.sources.UMT5_SOURCES` の行）が突き合わせる。
@@ -1183,6 +1320,20 @@ def wan_plan(
             placements[WAN_VAE_NEXT_I8_ROLE],
             generation.vae_writer,
         )
+    # The pairs at another tile (ADR 0134 decision 5) pass the same pair gate per storage label,
+    # and every container of them borrows all its weights from the same-label default-tile one.
+    for tile in generation.vae_tiles[1:]:
+        first_roles, next_roles = WAN_VAE_SHARED_LABEL_ROLES[tile]
+        for label in generation.vae_labels:
+            assert_vae_chunk_pair(
+                placements[first_roles[label]],
+                placements[next_roles[label]],
+                f"{generation.vae_writer} --tile {tile} --shared",
+            )
+    for role in generation.vae_decoder_roles:
+        lender = WAN_VAE_LENDER_ROLES.get(role)
+        if lender is not None:
+            assert_shared_decoder(placements[role], placements[lender])
     # umT5 の容器は umT5 の配布形と同じ門（出所・束縛表・入出力の契約）を通す（越境参照の先は
     # この容器とバイト同一 — `karume.dist.external_refs` が見る）。モデル名は umT5 のリポの側の
     # 名前。

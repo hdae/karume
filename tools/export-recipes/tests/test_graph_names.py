@@ -80,6 +80,7 @@ ENTRIES: tuple[tuple[str, str, str, str], ...] = (
     ),
     ("wan/export_dit.py", "emit", "TARGET", "TARGET"),
     ("wan/export_vae.py", "emit_targets", "target", "TARGETS"),
+    ("wan/export_vae.py", "emit_shared_targets", "name", "SHARED_TARGETS"),
     ("wan/export_vae_encoder.py", "emit_series", "target", "TARGETS"),
     ("wan/umt5_export.py", "write_container", "GRAPH_NAME", "GRAPH_NAME"),
     ("wan/ti2v_export_dit.py", "write_container", "TARGET", "TARGET"),
