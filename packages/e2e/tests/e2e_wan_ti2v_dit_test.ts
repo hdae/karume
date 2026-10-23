@@ -1900,6 +1900,9 @@ describe.skipIf(!LONG_CLIP || !SMALL_AVAILABLE || !PRACTICAL_DECLARED || !GPU_AV
       ropeBase = await readRopeBase(opened);
       const gpu = await acquireTestGpu({
         gpuTiming: true,
+        // The online seat's kernel takes its subgroup form here as in production (the Wan family
+        // acquires with "available" — ADR 0132 decision 5); the other seats do not read it.
+        subgroups: "available",
         onDeviceLost: (info) => {
           deviceLost = `${info.reason}: ${info.message}`;
         },
@@ -1983,6 +1986,9 @@ describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE)(
       // 計測モード（timestamp-query）: submit ごとの GPU 時間は既存の回収に相乗りして測る（2.1 の実寸の照合と同じ）。
       const gpu = await acquireTestGpu({
         gpuTiming: true,
+        // The online seat's kernel takes its subgroup form here as in production (the Wan family
+        // acquires with "available" — ADR 0132 decision 5); the other seats do not read it.
+        subgroups: "available",
         onDeviceLost: (info) => {
           deviceLost = `${info.reason}: ${info.message}`;
         },
