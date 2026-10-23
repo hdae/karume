@@ -109,6 +109,32 @@ export const WAN_TI2V_VAE_FIRST_CACHE_BYTES = 457_277_440;
 export const ti2vVaeModelUrl = (component: string): URL =>
   new URL(`${component}/${WAN_TI2V_VAE_MODEL_FILE}`, WAN_TI2V_VAE_ROOT);
 
+// ---- The int8 decoder (ADR 0133 decision 7 — the same two chunk graphs with int8 weights) ----------
+
+/** The int8 series (shared with the DiT's int8 container — `wan2.2-ti2v-5b-i8-dyn`). */
+export const WAN_TI2V_VAE_I8_SERIES = "wan2.2-ti2v-5b-i8-dyn";
+export const WAN_TI2V_VAE_I8_ROOT = new URL(
+  `../../../../outputs/series/${WAN_TI2V_VAE_I8_SERIES}/`,
+  import.meta.url,
+);
+/** The command that writes the int8 decoder (no fixtures — the f16 series' fixtures are the reference). */
+export const WAN_TI2V_VAE_I8_GENERATE =
+  "cd tools/export-recipes && uv run --group wan --inexact " +
+  "python -m wan.export_vae --model ti2v-5b --dtype i8";
+
+export const ti2vVaeI8ModelUrl = (component: string): URL =>
+  new URL(`${component}/${WAN_TI2V_VAE_MODEL_FILE}`, WAN_TI2V_VAE_I8_ROOT);
+
+/** Presence of the int8 decoder's two containers (checked on each call, never at module evaluation). */
+export const ti2vVaeI8Assets = (): readonly {
+  readonly path: string;
+  readonly present: boolean;
+}[] =>
+  [WAN_TI2V_VAE_FIRST, WAN_TI2V_VAE_NEXT].map((component) => {
+    const url = ti2vVaeI8ModelUrl(component);
+    return { path: url.pathname, present: modelPresent(url) };
+  });
+
 export const ti2vVaeFixtureUrl = (name: Ti2vVaeCase["name"]): URL =>
   new URL(`vae_chunks.${name}.safetensors`, WAN_TI2V_VAE_ROOT);
 

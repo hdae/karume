@@ -686,6 +686,23 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     session: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "none" },
     census: { transformer: { pass: { linearCompute: WAN22_DIT_LINEARS } } },
   },
+  {
+    // Wan2.2's conv8 preset `i8-a8-attn8-online-conv8` (ADR 0133 decision 6): the online bundle plus
+    // the VAE decoder's conv knob. The transformer has no conv3d, so its passes carry exactly 0
+    // conv3d w8a8 keys (the knob reaches the decoder Sessions — `e2e_wan_ti2v_vae_a8_test.ts` checks
+    // them).
+    family: "wan-ti2v",
+    models: ["ti2v-5b"],
+    session: {
+      linearCompute: "a8",
+      attentionCompute: "a8",
+      attentionScoreStorage: "none",
+      convCompute: "a8",
+    },
+    census: {
+      transformer: { pass: { linearCompute: WAN22_DIT_LINEARS, convCompute: { variant: 0 } } },
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------

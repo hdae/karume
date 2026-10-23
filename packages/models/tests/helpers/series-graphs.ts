@@ -67,7 +67,13 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
     vae_encoder_attn: "vae_encoder_attn",
     vae_encoder_post: "vae_encoder_post",
   },
-  "wan2.2-ti2v-5b-i8-dyn": { transformer: "transformer" },
+  // The int8 series also holds the VAE decoder's two chunk graphs (ADR 0133 decision 7 — written
+  // by `wan.export_vae --model ti2v-5b --dtype i8` into the same series root as the DiT).
+  "wan2.2-ti2v-5b-i8-dyn": {
+    transformer: "transformer",
+    vae_decoder_first: "vae_decoder_first",
+    vae_decoder_next: "vae_decoder_next",
+  },
 };
 
 /**

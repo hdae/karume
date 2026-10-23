@@ -162,6 +162,7 @@ import {
   readWanTi2vDistributionManifestText,
   WAN_TI2V_ASSEMBLE_COMMAND,
   WAN_TI2V_DIST_ROOT,
+  WAN_TI2V_CONV8_QUANT,
   WAN_TI2V_ONLINE_QUANT,
   WAN_TI2V_PRACTICAL_QUANT,
   WAN_TI2V_REFERENCE_QUANT,
@@ -302,10 +303,24 @@ const ONLINE_SEED_CASE_ID = caseIdOf(
   FRAMES,
 );
 
+/**
+ * The conv8 preset's seed case (ADR 0133 decision 6): the online bundle with the int8 VAE decoder on int8 activations
+ * — a practical row of its own under the same floor against the reference preset (its decoder differs in storage and
+ * compute, so the floor holds by construction; the same-weights floor of ADR 0110 §5, against the `i8` preset's
+ * decoder, is the decoder's own A/B in `e2e_wan_ti2v_vae_a8_test.ts`).
+ */
+const CONV8_SEED_CASE_ID = caseIdOf(
+  `${WAN_TI2V_CONV8_QUANT}-2step-${SEED_PROMPT}-seed${SEED}`,
+  WIDTH,
+  HEIGHT,
+  FRAMES,
+);
+
 /** The practical presets' seed cases, run in this order after the reference preset's (the s16 preset first). */
 const PRACTICAL_SEED_CASES: readonly { readonly id: string; readonly quant: string }[] = [
   { id: PRACTICAL_SEED_CASE_ID, quant: WAN_TI2V_PRACTICAL_QUANT },
   { id: ONLINE_SEED_CASE_ID, quant: WAN_TI2V_ONLINE_QUANT },
+  { id: CONV8_SEED_CASE_ID, quant: WAN_TI2V_CONV8_QUANT },
 ];
 
 /**

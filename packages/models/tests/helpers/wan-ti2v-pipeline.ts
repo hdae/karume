@@ -24,6 +24,10 @@ export const WAN_TI2V_PRACTICAL_QUANT = "f16+dit8-a8-attn8-s16";
  * `attentionScoreStorage: "none"`; a sibling of the practical preset until its A/B check makes it the default).
  */
 export const WAN_TI2V_ONLINE_QUANT = "f16+dit8-a8-attn8-online";
+/** The int8 VAE decoder's reference preset (ADR 0133 decision 6 — the control of the decoder's A/B). */
+export const WAN_TI2V_I8_QUANT = "i8";
+/** The conv8 preset (ADR 0133 decision 6 — the online bundle plus the VAE decoder on int8 activations). */
+export const WAN_TI2V_CONV8_QUANT = "i8-a8-attn8-online-conv8";
 
 /** 配布形ミラー（`dist.py --pipeline wan-ti2v` の既定の出力先）。 */
 export const WAN_TI2V_DIST_ROOT = new URL("../../../../models/karume-wan2.2/", import.meta.url);
