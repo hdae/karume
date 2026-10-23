@@ -68,3 +68,13 @@ source code is copied.
 
 Not promoted for M2: decode 34.899 → 35.081 tok/s (about 0.52%, inside the repeat spread), same TTFT;
 the option stays. Data: [M2 40 generations](../research/2026-09-13-gemv-subgroup.md).
+
+## Addendum (2026-10-23) — `subgroups: "available"` (ADR 0132 decision 5)
+
+`AcquireGpuOptions.subgroups` also takes `"available"`: the features are requested when the adapter
+advertises `subgroups`, `subgroup-size-control` and the WGSL feature `subgroup_id`, and the device is
+acquired without them otherwise (no error). The known-answer check of decision 1 still runs whenever
+the features were requested and still rejects a failing device. The acquisition also measures whether
+the device maps `local_invocation_index` linearly onto subgroups (`GpuContext.subgroupLanesLinear`);
+the online attention's subgroup form depends on it and is chosen only where it holds. `true` keeps its
+rejecting meaning; the three options of this ADR are unchanged.

@@ -30,6 +30,18 @@ measurements in `docs/research/`.
 
 ### Added
 
+- Online int8 attention (`@karume/runtime`, ADR 0132): `attentionScoreStorage: "none"` (with
+  `attentionCompute: "a8"`) runs fused attention as one kernel per block of query rows that never
+  stores the score matrix. Heads of width 64 or 128 and key lengths that are multiples of 4; other
+  shapes fall back to the three dispatches. On devices with subgroups the kernel uses a subgroup
+  reduction that is bit-identical to its portable form. `acquireGpu({ subgroups: "available" })`
+  requests the subgroup features only when the adapter has them (`true` still rejects their
+  absence). The manifest vocabulary (`@karume/hub`) accepts the value; the preset name token is
+  `online`.
+- Wan2.2 ships a third preset, `f16+dit8-a8-attn8-online` (same weights as the s16 preset), and it
+  is the default: at 1280×704×121 one DiT forward on an RTX 3080 Ti takes about 22 s instead of
+  24–29 s, with the same step-1 error against the reference preset as the s16 preset (relRMS 0.042
+  vs 0.044 at 33 frames). `quant: "f16+dit8-a8-attn8-s16"` still selects the previous default.
 - bf16 weight storage is executed (`@karume/runtime`). A weight stored as bf16 stays resident
   packed two per 32-bit word and is expanded in the kernel by a bit cast, under the same eligibility
   rule as f16 (the weight slot of the fused kernels; everything else is expanded to f32 at load).

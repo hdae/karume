@@ -1,6 +1,6 @@
 # 0132: Online int8 attention — `attentionScoreStorage: "none"` (S never materialised)
 
-- Status: proposed (2026-10-23; to be accepted by the maintainer after the Wan2.2 A/B check)
+- Status: accepted (2026-10-23 — the Wan2.2 A/B check and the timing of decision 6 are below)
 - Date: 2026-10-23
 - Related: ADR [0023](0023-fused-attention.md) (fused attention: the three dispatches ①QK / ②
   stats / ③PV and their bit identity with the decomposed path — unchanged, the default path) /
@@ -134,9 +134,31 @@ and ADR 0100 decision 1 (`subgroups: true` rejects a device without them).
 - Keeping the three dispatches and optimising ③PV's tile fill and ②'s reads (K-69): both are made
   redundant by the online kernel for this preset.
 
+## Results (2026-10-23, RTX 3080 Ti, Node + Dawn)
+
+- Kernel check (`gpu_attention_online_i8a8_test.ts`): the output uses at most 33% of the error
+  model (a single 64-key tile), 8–20% on the other shapes; P̃ read out through an identity V matched
+  the ③PV reference on every element; both reduction forms, dp4a and its emulation, repeated
+  dispatches and row windows are bit-identical; both fault injections leave the model.
+- Wan2.2 A/B at 1280×704×33 (`e2e_wan_ti2v_ab_test.ts`): relRMS 4.23e-2 against the reference
+  preset (the s16 preset: 4.4e-2; band 8.8e-2), census 240 online dispatches and no three-pass
+  kernel. The 121-frame A/B could not run: the reference preset's 121-frame step does not fit the
+  12 GiB device under Node + Dawn (both practical presets fail in `beforeAll` — docs/known-issues.md).
+- DiT measured mode at S = 27,280 (one forward, the second run of the same input, each seat in a
+  fresh process after cooling the GPU to 60 °C): attention 18.4 → 12.5 s (×1.47; 180 dispatches of
+  `attention_online:…:sg32`), forward 29.3 → 21.7 s. Against the morning's s16 baseline on the
+  same machine (attention 15.6 s, forward 24.2 s) the gain is ×1.25 / −10%: the s16 run above was
+  throttled (its linear took 8.9 s against 6.8–7.3 s). Two corrections were needed to get there:
+  the subgroup form must address its tiles by `local_invocation_index` (16% faster than by the
+  subgroup builtins — hence the lane-mapping probe), and the windows must be large enough for the
+  machine (768-row windows ran 15% slower than one dispatch; 2⁴⁰ gives 6,528 rows).
+- The default of Wan2.2 switched to `f16+dit8-a8-attn8-online` on this evidence (decision 6).
+
 ## Open points
 
-- The error band of the four-point check and the Wan2.2 A/B result (the acceptance condition of
-  decision 6) are filled in when measured.
+- The visual check of the online preset (12 clips, 50 steps, 33 frames — the ruling of ADR 0128
+  decision 1 for a default) was done for the s16 preset only; the online preset's quality is held
+  by the kernel error model and the 33-frame A/B.
+- The 121-frame A/B waits for the reference preset's step to fit under Node (known-issues).
 - Bc = 128 on 48 KiB devices, double-buffered tiles and `exp2` are unmeasured headroom (the spike
   sits at 26–29 TOPS, under half the dp4a ceiling).

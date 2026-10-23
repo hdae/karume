@@ -65,7 +65,8 @@ turbo → anima direction), and the pair in which `karume-wan2.2` references the
 If the referenced repository is uploaded again later, its SHA changes, and the extra manifest **keeps pointing at the old revision**
 (the bytes are protected by the double pin, so nothing wrong is served, but the two repositories' contents become different generations) —
 **when the referenced repository is uploaded again, rebuild and re-upload extra too** (the same for Wan — when `karume-umt5-xxl` is uploaded again,
-rebuild and re-upload `karume-wan2.2` too).
+rebuild and re-upload `karume-wan2.2` too). **0.15.0: `karume-wan2.2` must be re-uploaded in any case — its manifest gained the
+`f16+dit8-a8-attn8-online` preset and the default moved to it (ADR 0132); the containers are unchanged.**
 
 **The placeholder-SHA check**: a development mirror for the time the referenced repository is unpublished is built by passing a placeholder SHA (40 zeros) to
 `--ref-revision` and passing `--allow-placeholder-ref` **explicitly** (`PLACEHOLDER_REVISION` in `tools/export-recipes/dist.py`

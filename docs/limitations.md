@@ -245,6 +245,19 @@ compensate for the dropped mass (the contract family of [decisions/0044](decisio
 an opt-in option). The CPU reference uses the same grid, so comparison does not detect this cut-off —
 the ruling on the accuracy impact rests on the measured tolerance of the E2E tests.
 
+## The online attention (`attentionScoreStorage: "none"`) runs only for head widths 64 and 128 and key lengths that are multiples of 4, and needs 29 KiB of workgroup storage
+
+The online kernel (ADR [0132](decisions/0132-online-int8-attention.md)) holds its q, k, Vᵀ and P̃
+tiles in workgroup storage: 29,440 B in the subgroup form and 33,536 B in the portable form at
+D = 128 (a head width of 256 would need 58 KiB and is not built). Shapes outside D ∈ {64, 128} or
+with `N % 4 != 0`, and devices that offer neither form (no subgroups and a 32 KiB limit — today
+Firefox and Safari on D3D12 / Metal; any device at the 16 KiB core default) run the three
+dispatches of `attentionCompute: "a8"` with S in f32 instead — the route shows it in the
+pipeline keys and the full-eligibility check of the census turns red. The mask and GQA are rejected
+as for a8. The weights are quantised against a running row maximum, so the output is not the
+three-pass a8 output bit for bit (class Q: within the P̃-lattice error model — the same 1/127 grid
+as the ③PV above).
+
 ## Fused attention a8 / s16 store ③PV and S in f32 for shapes whose key length N is not a multiple of 4 (in Anima, resolutions whose sides are not multiples of 32 px)
 
 `attentionCompute: "a8"` and `attentionScoreStorage: "f16"` (half-precision storage of S) run as

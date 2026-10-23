@@ -159,3 +159,12 @@ descriptor's `encoding.codec` (codec ledger — 0108 decisions 12 / 13, [contain
 `karume dist` still checks that the three spellings agree (`storage_dtypes` in
 `tools/exporter/src/karume/dist.py`). Manifest `karume/5` keeps the same field (`quants[].weights`
 dtype label — ADR [0109](0109-manifest-v5-container.md) decision 2).
+
+## Addendum (2026-10-23) — the `online` token (ADR 0132)
+
+| Token    | Axis                                           | Session value                   |
+| -------- | ---------------------------------------------- | ------------------------------- |
+| `online` | attention scores never stored (online kernel) | `attentionScoreStorage: "none"` |
+
+It takes the slot of `s16` (both are the score-storage axis): `f16+dit8-a8-attn8-online`, the Wan2.2
+default since 2026-10-23.

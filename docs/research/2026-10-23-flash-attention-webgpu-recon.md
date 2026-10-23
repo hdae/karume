@@ -279,3 +279,35 @@ Reading:
 - Whether the subgroup-matrix GEMM reaches its 91 TOPS inside an attention loop (the S → workgroup memory → P̃ → reload
   detour, §5) — not built.
 - The 5070 Ti (Chrome, 32 KiB) was not measured for either spike.
+
+## 11. In the runtime (2026-10-23, after productising — ADR 0132)
+
+The first Session-path measurement of the productised kernel was slower than the three dispatches
+(20.5 s against 16.3 s of attention per forward at S = 27,280). Two causes, both found by running
+the production WGSL in the spike's harness on the same inputs:
+
+| variant (one dispatch, S = 27,280 × 24 heads) | ms / layer |
+| --- | --: |
+| spike v2 (subgroup reduce) | 352 |
+| production, lanes identified by `subgroup_invocation_id` / `subgroup_id` | 407 |
+| production, lanes by `local_invocation_index` | 350 |
+| production, inlined dot product / branch-free gather (no effect) | 407 / 415 |
+| spike, 768-row windows (36 dispatches of 288 workgroups) | 403 |
+| spike, 6,528-row windows (5 dispatches) | 357 |
+
+The lane identification costs 16% (the tile addresses no longer derive from the thread index), the
+small windows 15% (1.2 waves on 80 SMs). After both corrections, and with the measured-mode device
+acquired with subgroups as the Wan family does, each seat in a fresh process after cooling the GPU to
+60 °C, the DiT e2e at S = 27,280 gives:
+
+| seat | attention | linear | forward (2nd run) |
+| --- | --: | --: | --: |
+| `f16+dit8-a8-attn8-s16` (three dispatches) | 18.4 s | 8.9 s | 29.3 s |
+| `f16+dit8-a8-attn8-online` (`:sg32`, 180 dispatches) | 12.5 s | 7.3 s | 21.7 s |
+
+The s16 run was throttled (its linear is 8.9 s against 6.8–7.3 s in other runs); against the
+morning's cold s16 baseline (attention 15.6 s, forward 24.2 s) the gain is ×1.25 on attention and
+−10% on the forward. The 33-frame A/B of the online preset is relRMS 4.23e-2 (s16: 4.4e-2). The
+121-frame A/B could not run (the reference preset's step runs out of device memory under Node —
+known-issues). The machine's thermal state moves these numbers by 20–30% between runs; compare seats
+only within one cold run each.
