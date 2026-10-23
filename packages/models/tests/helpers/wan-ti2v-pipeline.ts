@@ -19,6 +19,11 @@ import { readTextIfPresent } from "./read-if-present.ts";
 export const WAN_TI2V_REFERENCE_QUANT = "f16+dit8";
 /** 実用席（ADR 0121 決定 2 — 2.1 の実用席と同じ名前と束）。 */
 export const WAN_TI2V_PRACTICAL_QUANT = "f16+dit8-a8-attn8-s16";
+/**
+ * The online-attention preset (ADR 0132 decision 6 — the practical preset's weights with the scores never stored,
+ * `attentionScoreStorage: "none"`; a sibling of the practical preset until its A/B check makes it the default).
+ */
+export const WAN_TI2V_ONLINE_QUANT = "f16+dit8-a8-attn8-online";
 
 /** 配布形ミラー（`dist.py --pipeline wan-ti2v` の既定の出力先）。 */
 export const WAN_TI2V_DIST_ROOT = new URL("../../../../models/karume-wan2.2/", import.meta.url);

@@ -391,6 +391,8 @@ _TI2V_CARD_LIMITS_FIXTURE = REPO_ROOT / "packages/models/tests/fixtures/wan-ti2v
 #: Wan2.2 の参照席・実用席。
 _REFERENCE = "f16+dit8"
 _PRACTICAL = "f16+dit8-a8-attn8-s16"
+#: Wan2.2's online-attention preset (ADR 0132 decision 6 — a sibling of the practical preset).
+_ONLINE = "f16+dit8-a8-attn8-online"
 
 
 def _pin(model: str) -> dict[str, str]:
@@ -1562,10 +1564,13 @@ class TestTheWan22Distribution:
         assert list(out_dir.rglob("pipeline_steps.*")) == []
         assert list(out_dir.rglob("vae_encoder.*")) == []
 
-    def test_the_manifest_declares_the_two_seats(self, assembled22) -> None:
-        """席は参照席と実用席の 2 つ・f16 席は無い・既定は実用席（視認の裁定 2026-10-06 —
-        ADR 0121 追記「段 8a の結果」）。どの席も VAE の encoder の f16 を取る（T2V だけの利用でも
-        取る — 追記「段 9 の計画の裁定と段 9a の結果」の裁定）。weights の並びは I2V の段の順。"""
+    def test_the_manifest_declares_the_three_seats(self, assembled22) -> None:
+        """Three presets: the reference, the practical (s16) and the online-attention preset (ADR
+        0132 decision 6); no f16 preset; the default stays the practical preset (the visual ruling
+        of 2026-10-06 — ADR 0121 addendum "results of step 8a"; the online preset becomes the
+        default only after its A/B check). Every preset takes the f16 VAE encoder (even for T2V
+        alone — the ruling in the addendum on step 9's plan and step 9a's results). The weights
+        are ordered as the I2V stages."""
         _, manifest = assembled22
         model = manifest["models"][_TI2V]
         assert manifest["defaultModel"] == _TI2V
@@ -1592,7 +1597,7 @@ class TestTheWan22Distribution:
         assert model["assets"][WAN_TOKENIZER_ROLE]["path"] == (
             f"{_TI2V}/{WAN_TOKENIZER_ROLE}/{umt5_tokenizer.ASSET_FILE}"
         )
-        assert list(model["quants"]) == [_REFERENCE, _PRACTICAL]
+        assert list(model["quants"]) == [_REFERENCE, _PRACTICAL, _ONLINE]
         assert model["defaultQuant"] == _PRACTICAL
         seat = {
             **dict.fromkeys(WAN_VAE_ENCODER_ROLES, "f16"),
@@ -1603,12 +1608,26 @@ class TestTheWan22Distribution:
         }
         assert model["quants"][_REFERENCE]["weights"] == seat
         assert model["quants"][_PRACTICAL]["weights"] == seat
+        assert model["quants"][_ONLINE]["weights"] == seat
         assert model["quants"][_REFERENCE]["session"] == {}
         assert model["quants"][_PRACTICAL]["session"] == {
             "linearCompute": "a8",
             "attentionCompute": "a8",
             "attentionScoreStorage": "f16",
         }
+        assert model["quants"][_ONLINE]["session"] == {
+            "linearCompute": "a8",
+            "attentionCompute": "a8",
+            "attentionScoreStorage": "none",
+        }
+        assert model["quants"][_ONLINE]["label"] == (
+            "int8 transformer, int8 activations, online attention"
+        )
+        assert model["quants"][_ONLINE]["description"] == (
+            "The int8 transformer with per-token int8 activations and attention computed online:"
+            " the scores are never stored, so the long clips run faster on the same weights as the"
+            " s16 preset."
+        )
 
     def test_the_pipeline_config_is_the_official_720p_setting(self, assembled22) -> None:
         _, manifest = assembled22
@@ -1970,7 +1989,10 @@ class TestTheWan22ModelCard:
         assert "the 49-frame runs drove the same pipeline stages from a development script" in prose
         assert "4.36 GiB at 33 frames and 4.51 GiB at 49 frames with either quant" in prose
         assert "4.52" not in prose
-        assert "have not been measured yet" not in prose
+        # The online-attention preset (ADR 0132 decision 6) has no row yet, so the card names it as
+        # the only unmeasured quant instead of filling a row with estimates.
+        assert f"The other quants (`{_ONLINE}`) have not been measured yet." in prose
+        assert f"| `{_ONLINE}` |" not in card.split("### Quants")[0]
         assert "has been measured with this distribution only in the 121-frame run above" in prose
         assert "`maxStorageBufferBindingSize` (128 MiB)" in card
 
@@ -2090,7 +2112,7 @@ class TestTheWan22ModelCard:
         quants = changed["models"][_TI2V]["quants"]
         quants["f16+other"] = quants[_REFERENCE]
         card = _card22(changed)
-        assert "The other quants (`f16+other`) have not been measured yet." in card
+        assert f"The other quants (`{_ONLINE}` / `f16+other`) have not been measured yet." in card
         assert "| `f16+other` |" not in card.split("### Quants")[0]
 
     def test_it_refuses_a_manifest_without_a_measured_seat(self, assembled22) -> None:

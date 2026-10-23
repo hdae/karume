@@ -142,6 +142,7 @@ import {
   WAN_TI2V_ASSEMBLE_COMMAND,
   WAN_TI2V_DIST_MODEL,
   WAN_TI2V_DIST_ROOT,
+  WAN_TI2V_ONLINE_QUANT as ONLINE_QUANT,
   WAN_TI2V_PRACTICAL_QUANT as PRACTICAL_QUANT,
   WAN_TI2V_REFERENCE_QUANT as REFERENCE_QUANT,
 } from "../../models/tests/helpers/wan-ti2v-pipeline.ts";
@@ -236,6 +237,16 @@ const SCALE_FAULT_WEIGHT = "blocks.15.attn1.to_v.weight";
 type Seat = typeof REFERENCE_QUANT | typeof PRACTICAL_QUANT;
 
 /**
+ * The presets whose `session` the distribution manifest declares — the seats of the measured-mode gate
+ * ({@link practicalSubmitGate}): the practical preset (s16) and the online-attention preset (ADR 0132 decision 6). The
+ * online preset never stores S, so it is not a {@link Seat}: it has no score width ({@link SEAT_SCORE_BYTES}) and no
+ * row-block expectation.
+ */
+type DeclaredSeat = typeof PRACTICAL_QUANT | typeof ONLINE_QUANT;
+/** The measured-mode gate's seats in run order (the s16 preset first, as before the online preset existed). */
+const DECLARED_SEATS: readonly DeclaredSeat[] = [PRACTICAL_QUANT, ONLINE_QUANT];
+
+/**
  * 配布形の manifest のテキスト（実用席の束の正本 — 無ければ実用席のケースを SKIP する）。parse は
  * {@link practicalSessionOptions} の中で行う — 壊れた manifest が赤にするのを実用席のケースだけに留め、配布形に依らない
  * 参照席の r 門や容量のケースをモジュールのロードで巻き込まない（2.1 の DiT の e2e と同じ置き方）。
@@ -248,18 +259,14 @@ const PRACTICAL_DECLARED = distManifestText !== undefined;
  * 実用席の実効 SessionOptions（配布形の manifest の席の `session` を家族の受理表で通した値 — 束の正本は manifest の quant 席
  * だけ・ADR 0110 決定 1。テストに束の値を書き写さない）。
  */
-const practicalSessionOptions = (): SessionOptions => {
+const practicalSessionOptions = (seat: DeclaredSeat): SessionOptions => {
   if (distManifestText === undefined) {
     throw new Error(
       `${WAN_TI2V_DIST_ROOT.pathname}karume.json が無い（ignore の条件と食い違っている）`,
     );
   }
-  const where = `wan-ti2v ${WAN_TI2V_DIST_MODEL}/${PRACTICAL_QUANT}`;
-  const declared = quantOf(
-    parseManifest(distManifestText),
-    WAN_TI2V_DIST_MODEL,
-    PRACTICAL_QUANT,
-  ).session;
+  const where = `wan-ti2v ${WAN_TI2V_DIST_MODEL}/${seat}`;
+  const declared = quantOf(parseManifest(distManifestText), WAN_TI2V_DIST_MODEL, seat).session;
   return effectiveSessionOptions("wan", declared, {}, where);
 };
 
@@ -664,6 +671,15 @@ const qkDispatchesOf = (diagnostics: SessionDiagnostics): QkDispatches => {
       .reduce((total, { dispatchCount }) => total + dispatchCount, 0);
   return { windowed: count(true), unwindowed: count(false) };
 };
+
+/**
+ * The online kernel's dispatches in the last run (`attention_online:` — ADR 0132 decision 2: one per window of query rows
+ * per node). The online preset's record names these in place of the row blocks, which it does not have.
+ */
+const onlineDispatchesOf = (diagnostics: SessionDiagnostics): number =>
+  (diagnostics.lastRunPipelines ?? [])
+    .filter(({ key }) => key.startsWith("attention_online:"))
+    .reduce((total, { dispatchCount }) => total + dispatchCount, 0);
 
 /** 1 submit の GPU 時間の観測を ms に直した記録（門は {@link SUBMIT_GPU_LIMIT_MS}）。 */
 const submitGpuNote = (
@@ -1467,6 +1483,13 @@ const twoRuns = async (
 const practicalSubmitGate = (
   shared: Shared,
   target: {
+    /**
+     * The preset under the gate. For the online preset the record carries no row-block count: it stores no S, so there
+     * are no row blocks, and {@link rowBlocksOf} would fail on its census (it counts ①QK dispatches, which an online
+     * run has none of). Its census check is {@link assertAttentionSeatsComplete} with the `"none"` seat — the online
+     * kernel ran and none of ①QK / ② / ③PV did.
+     */
+    readonly seat: DeclaredSeat;
     readonly tokens: number;
     /** 結果の席の id の S の部分（実寸の照合は `full-s<S>`・golden を持たない S は `s<S>`）。 */
     readonly scope: string;
@@ -1477,19 +1500,19 @@ const practicalSubmitGate = (
   },
   deviceLost: () => string | undefined,
 ): void => {
-  const { tokens, scope, inputsLabel, loadInputs } = target;
+  const { seat, tokens, scope, inputsLabel, loadInputs } = target;
   // 束は配布形の manifest から読む（無い機は実用席だけ明示 SKIP — 参照席の門は回す・モジュールの警告）。
   it.skipIf(!PRACTICAL_DECLARED)(
-    `${PRACTICAL_QUANT}/S = ${tokens} の 1 submit の GPU 時間・所要・確保`,
+    `${seat}/S = ${tokens} の 1 submit の GPU 時間・所要・確保`,
     async () => {
       const gpu = shared.gpu();
       const prepared = shared.prepared();
       let note = "";
       await runRecordedCase(
         results,
-        { id: `${PRACTICAL_QUANT}/${scope}/submit`, failureNote: () => note },
+        { id: `${seat}/${scope}/submit`, failureNote: () => note },
         async () => {
-          const options = practicalSessionOptions();
+          const options = practicalSessionOptions(seat);
           const observed = await twoRuns(prepared, gpu, await loadInputs(), options);
           // 換算の表はここでだけ引く（表に無い環境で落ちるのは時間門だけ — 参照席の 1 submit の step と同じ）。
           const unitNs = timestampUnitNs(ENVIRONMENT.key);
@@ -1500,19 +1523,19 @@ const practicalSubmitGate = (
             `構築 ${(observed.buildMs / 1000).toFixed(1)} s`,
             ...observed.runs.map((run) => formatRun(run, unitNs)),
             ...observed.vram,
-            `行ブロック ${observed.rowBlocks()} 枚`,
+            seat === ONLINE_QUANT
+              ? `online attention dispatches ${onlineDispatchesOf(observed.diagnostics)}`
+              : `行ブロック ${observed.rowBlocks()} 枚`,
             `融合 ${JSON.stringify(observed.diagnostics.lastRunFusions)}`,
             `非有限 ${observed.nonFinite}`,
           ].join(" / ");
-          console.log(
-            `[wan-ti2v-dit] 実用席 ${PRACTICAL_QUANT} S = ${tokens} の計測モード: ${note}`,
-          );
+          console.log(`[wan-ti2v-dit] 実用席 ${seat} S = ${tokens} の計測モード: ${note}`);
           assertEquals(observed.nonFinite, 0, `${inputsLabel}: 非有限`);
           // 2 本目の run の census（GPU の追加なし）— 測った dispatch の並びが実用席の束のものであること。
           assertSeatsApplied(
             observed.diagnostics.lastRunPipelines,
             options,
-            `${PRACTICAL_QUANT}/S = ${tokens}: 実用席の束`,
+            `${seat}/S = ${tokens}: 実用席の束`,
           );
           // 完全適格の検査（ADR 0058 追記 2026-10-10）は、宣言どおりの経路になる形にだけ掛ける。
           // golden の S = 8,190（832×480 × 81 フレーム — 受理集合の外）は N % 4 != 0 で、self の ③PV と
@@ -1531,7 +1554,7 @@ const practicalSubmitGate = (
             assertAttentionSeatsComplete(
               observed.diagnostics.lastRunPipelines,
               options,
-              `${PRACTICAL_QUANT}/S = ${tokens}: 実用席の束（完全適格）`,
+              `${seat}/S = ${tokens}: 実用席の束（完全適格）`,
             );
           }
           assert(
@@ -1592,7 +1615,7 @@ const budgetAbGate = (
   const { tokens } = target;
   for (const [seat, optionsOf] of [
     [REFERENCE_QUANT, (): SessionOptions => ({})],
-    [PRACTICAL_QUANT, practicalSessionOptions],
+    [PRACTICAL_QUANT, (): SessionOptions => practicalSessionOptions(PRACTICAL_QUANT)],
   ] as const) {
     // 実用席の束は配布形の manifest から読む（無い機は実用席だけ SKIP — 参照席は回す）。
     it.skipIf(seat === PRACTICAL_QUANT && !PRACTICAL_DECLARED)(
@@ -1859,7 +1882,7 @@ const openForLongInputs = async (): Promise<{
 
 // 入力の文脈は S = 192 の golden から借りる（SMALL_AVAILABLE）・束は配布形の manifest から読む（PRACTICAL_DECLARED）。
 describe.skipIf(!LONG_CLIP || !SMALL_AVAILABLE || !PRACTICAL_DECLARED || !GPU_AVAILABLE)(
-  `Wan2.2 TI2V DiT 実用席 ${PRACTICAL_QUANT} S = ${LONG_CLIP_TOKENS}（1280×704・121 フレーム・実 GPU・計測モード・` +
+  `Wan2.2 TI2V DiT 実用席 ${DECLARED_SEATS.join(" / ")} S = ${LONG_CLIP_TOKENS}（1280×704・121 フレーム・実 GPU・計測モード・` +
     `opt-in ${LONG_CLIP_ENV}=1）: 1 submit の GPU 時間 ≤ 1 s・非有限 0・束が届く`,
   () => {
     let preparedModel: PreparedModel | undefined;
@@ -1885,25 +1908,30 @@ describe.skipIf(!LONG_CLIP || !SMALL_AVAILABLE || !PRACTICAL_DECLARED || !GPU_AV
       assertAdapterMatchesEnvironment(gpu);
     });
     afterAll(() => releaseGpu(gpuContext));
-    practicalSubmitGate(
-      {
-        gpu: () => assigned(gpuContext, "the device"),
-        prepared: () => assigned(preparedModel, "the prepared model"),
-      },
-      {
-        tokens: LONG_CLIP_TOKENS,
-        scope: `s${LONG_CLIP_TOKENS}`,
-        inputsLabel: `乱数の潜在（seed ${LONG_SEED}）・${LONG_CONTEXT_CASE} の文脈`,
-        loadInputs: () =>
-          longInputs(
-            assigned(ropeBase, "the RoPE base"),
-            assigned(inputWidth, "the timestep width"),
-            LONG_CLIP_LATENT_SHAPE,
-            LONG_CLIP_TOKENS,
-          ),
-      },
-      () => deviceLost,
-    );
+    // Both declared seats on the one device, one Session at a time (the s16 preset first) — the records of the two
+    // seats are what the forward-time comparison of ADR 0132 decision 6 reads.
+    for (const seat of DECLARED_SEATS) {
+      practicalSubmitGate(
+        {
+          gpu: () => assigned(gpuContext, "the device"),
+          prepared: () => assigned(preparedModel, "the prepared model"),
+        },
+        {
+          seat,
+          tokens: LONG_CLIP_TOKENS,
+          scope: `s${LONG_CLIP_TOKENS}`,
+          inputsLabel: `乱数の潜在（seed ${LONG_SEED}）・${LONG_CONTEXT_CASE} の文脈`,
+          loadInputs: () =>
+            longInputs(
+              assigned(ropeBase, "the RoPE base"),
+              assigned(inputWidth, "the timestep width"),
+              LONG_CLIP_LATENT_SHAPE,
+              LONG_CLIP_TOKENS,
+            ),
+        },
+        () => deviceLost,
+      );
+    }
   },
 );
 
@@ -1943,7 +1971,7 @@ describe.skipIf(!LONG_CLIP || !SMALL_AVAILABLE || !GPU_AVAILABLE)(
 describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE)(
   `Wan2.2 TI2V DiT 参照席 ${REFERENCE_QUANT} 実寸（実 GPU・計測モード）: S = 8,190 / 7,920 の 1 forward の非有限 0・` +
     "融合の件数・行ブロック・1 submit の GPU 時間 ≤ 1 s。" +
-    `実用席 ${PRACTICAL_QUANT} も同じ S で 1 submit の GPU 時間 ≤ 1 s（配布形が無い機は実用席だけ SKIP）`,
+    `実用席 ${DECLARED_SEATS.join(" / ")} も同じ S で 1 submit の GPU 時間 ≤ 1 s（配布形が無い機は実用席だけ SKIP）`,
   () => {
     let preparedModel: PreparedModel | undefined;
     let gpuContext: GpuContext | undefined;
@@ -1974,22 +2002,25 @@ describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE)(
         full: { tokens, deviceLost: () => deviceLost },
         normalModeCase,
       });
-      practicalSubmitGate(
-        shared,
-        {
-          tokens,
-          scope: `full-s${tokens}`,
-          inputsLabel: normalModeCase,
-          // 入力は参照席の golden の io（入力は席に依らない）。
-          loadInputs: async () =>
-            graphInputs(
-              await loadTi2vGolden(normalModeCase),
-              shared.prepared().graph.inputs,
-              normalModeCase,
-            ),
-        },
-        () => deviceLost,
-      );
+      for (const seat of DECLARED_SEATS) {
+        practicalSubmitGate(
+          shared,
+          {
+            seat,
+            tokens,
+            scope: `full-s${tokens}`,
+            inputsLabel: normalModeCase,
+            // 入力は参照席の golden の io（入力は席に依らない）。
+            loadInputs: async () =>
+              graphInputs(
+                await loadTi2vGolden(normalModeCase),
+                shared.prepared().graph.inputs,
+                normalModeCase,
+              ),
+          },
+          () => deviceLost,
+        );
+      }
     }
   },
 );

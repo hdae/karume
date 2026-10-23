@@ -676,6 +676,16 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     session: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "f16" },
     census: { transformer: { pass: { linearCompute: WAN22_DIT_LINEARS } } },
   },
+  {
+    // Wan2.2's online-attention preset `f16+dit8-a8-attn8-online` (ADR 0132 decision 6): the same
+    // linears as the s16 row (only the attention route differs). attentionCompute /
+    // attentionScoreStorage stay underived as in the s16 row (top of the file); the e2e checks the
+    // online route through `assertAttentionSeatsComplete` with the "none" seat.
+    family: "wan-ti2v",
+    models: ["ti2v-5b"],
+    session: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "none" },
+    census: { transformer: { pass: { linearCompute: WAN22_DIT_LINEARS } } },
+  },
 ];
 
 // ---------------------------------------------------------------------------

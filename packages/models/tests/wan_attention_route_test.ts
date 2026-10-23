@@ -129,3 +129,60 @@ describe("Wan の受理集合 × 実用席の attention の経路", () => {
     });
   }
 });
+
+/** The online-attention preset's attention seats (`f16+dit8-a8-attn8-online` — ADR 0132 decision 6). */
+const ONLINE_SEATS: AttentionSeats = { attentionCompute: "a8", attentionScoreStorage: "none" };
+
+/**
+ * The online seats over Wan2.2's whole accepted set (Wan2.1 has no online preset — ADR 0132 decision 6).
+ * The route depends on the device facts (ADR 0132 decision 5): `sg32` with subgroups, `wg` without them when the
+ * workgroup-storage limit holds the portable form's scratch (D = 128: 33,536 B), and otherwise the three dispatches
+ * of a8 with S in f32 — never `"none"`, which the three kernels cannot store.
+ */
+const ONLINE_DEVICES: readonly {
+  readonly name: string;
+  readonly device: AttentionDeviceFacts;
+  readonly route: AttentionRoute;
+}[] = [
+  {
+    name: "subgroups, 32 KiB of workgroup storage",
+    device: { subgroups: true, maxComputeWorkgroupStorageSize: 32768 },
+    route: { qk: "i8a8", pv: "i8a8", score: "none", online: "sg32" },
+  },
+  {
+    name: "no subgroups, 48 KiB of workgroup storage",
+    device: { subgroups: false, maxComputeWorkgroupStorageSize: 49152 },
+    route: { qk: "i8a8", pv: "i8a8", score: "none", online: "wg" },
+  },
+  {
+    name: "no subgroups, 32 KiB of workgroup storage (falls back)",
+    device: { subgroups: false, maxComputeWorkgroupStorageSize: 32768 },
+    route: { qk: "i8a8", pv: "i8a8", score: "f32" },
+  },
+];
+
+describe("Wan2.2's accepted set × the online preset's attention route", () => {
+  const wan22 = GENERATIONS.find(({ generation }) => generation === WAN22_TI2V_GENERATION);
+  if (wan22 === undefined) throw new Error("GENERATIONS has no Wan2.2 entry");
+  const { generation, layout } = wan22;
+  for (const { name, device, route } of ONLINE_DEVICES) {
+    describe(name, () => {
+      it("self takes the same route over every accepted shape", () => {
+        const shapes = acceptedSelfKeys(generation, layout);
+        const frameCount = (generation.maxFrames - generation.minFrames) / TEMPORAL_COMPRESSION + 1;
+        assertEquals(shapes.length, generation.acceptedSizes.length * frameCount);
+        for (const { shape, keys } of shapes) {
+          assertEquals(
+            attentionRoute(ONLINE_SEATS, HEAD_DIM, keys, device),
+            route,
+            `${shape} (S=${keys})`,
+          );
+        }
+      });
+
+      it("cross (512 keys) takes the same route", () => {
+        assertEquals(attentionRoute(ONLINE_SEATS, HEAD_DIM, CROSS_KEYS, device), route);
+      });
+    });
+  }
+});

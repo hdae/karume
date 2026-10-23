@@ -418,7 +418,8 @@ WAN22_PIPELINE = "wan-ti2v/1"
 WAN22_SERIES = "wan2.2-ti2v-5b-f16-dyn"
 WAN22_I8_SERIES = "wan2.2-ti2v-5b-i8-dyn"
 
-#: Wan2.2 の quant 表（ADR 0121 決定 2 — 参照席と実用席の 2 席・f16 席は作らない）。transformer は
+#: Wan2.2 の quant 表（ADR 0121 決定 2 — 参照席と実用席・f16 席は作らない。実用席は s16 と online の
+#: 2 つ — ADR 0132）。transformer は
 #: 格納ラベルが i8 の 1 つなので、weights は書かない（{@link complete_quant_weights} が完全写像へ
 #: 埋める — 書くと導出できる状態の二重化になる）。実用席の `session` / `label` / `description` は
 #: 2.1 の同名の席と同じ 1 つを引く（ADR 0121 決定 2「2.1 の実用席と同じ名前と束」）。参照席の
@@ -432,6 +433,24 @@ WAN22_QUANTS: Mapping[str, Any] = {
         " computed in f32; the VAE stays f16.",
     },
     "f16+dit8-a8-attn8-s16": {**WAN_QUANTS["f16+dit8-a8-attn8-s16"], "weights": {}},
+    # The online-attention preset (ADR 0132 decision 6): the same int8 weights as the s16 preset
+    # (no new download — `weights` is the same complete-mapping filler) with attention computed by
+    # the online kernel, which never stores the scores (`attentionScoreStorage: "none"` — ADR 0132
+    # decision 1; the name token `online` takes the slot of `s16` — ADR 0074 §3). Wan2.2 only:
+    # Wan2.1's table is not changed. A sibling, not the default — the default moves only after the
+    # A/B check (ADR 0132 decision 6), so `WAN22_DEFAULT_QUANT` stays on the s16 preset.
+    "f16+dit8-a8-attn8-online": {
+        "weights": {},
+        "session": {
+            "linearCompute": "a8",
+            "attentionCompute": "a8",
+            "attentionScoreStorage": "none",
+        },
+        "label": "int8 transformer, int8 activations, online attention",
+        "description": "The int8 transformer with per-token int8 activations and attention"
+        " computed online: the scores are never stored, so the long clips run faster on the same"
+        " weights as the s16 preset.",
+    },
 }
 
 #: Wan2.2 の既定席 — 実用席。利用者の視認の裁定（2026-10-06）: 1280×704×33・50 ステップの

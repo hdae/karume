@@ -2,7 +2,8 @@
  * Wan2.2 TI2V-5B の**自機 A/B 門**（実 GPU・ADR 0121 段 7 — 規則は ADR 0110 決定 4〜7 と ADR 0120 決定 4 の形のまま）。実用席
  * `f16+dit8-a8-attn8-s16`（既定席 — `session` に linear a8 / attention a8 / S の f16 格納を束ねた席）を、**同じ機・同じ i8 重み**
  * で `session` が空の参照席（manifest から導く — `referencePartnerOf`。今の配布形では `f16+dit8`）と比べる。比較相手は同機の
- * 参照層で、torch golden は使わない（ADR 0110 決定 5 ②）。
+ * 参照層で、torch golden は使わない（ADR 0110 決定 5 ②）。実用席は s16 と online（`f16+dit8-a8-attn8-online` — ADR 0132）の
+ * 2 つを同じ帯で見る（T2V のケースごとに 2 席分の describe・故障注入と I2V は s16 だけ）。
  *
  * 手順・判定・故障注入は 2.1（`e2e_wan_ab_test.ts`）と共有の 1 本（`helpers/wan-ab-gate.ts` の {@link registerWanAbCase}）:
  * 参照席で step 1 の潜在（2 ステップの通しの 1 step 目）を採って打ち切る → 実用席で同じことを独立に 2 回 → 決定性（2 回が
@@ -97,6 +98,7 @@ import {
   WAN_TI2V_ASSEMBLE_COMMAND,
   WAN_TI2V_DIST_MODEL,
   WAN_TI2V_DIST_ROOT,
+  WAN_TI2V_ONLINE_QUANT,
   WAN_TI2V_PRACTICAL_QUANT,
 } from "../../models/tests/helpers/wan-ti2v-pipeline.ts";
 
@@ -181,6 +183,23 @@ const CASES: readonly {
 /** 故障注入を回すフレーム数（既定のレーンの 33 — 門の空振りを示すのに長さは要らない）。 */
 const FAULT_FRAMES = 33;
 
+/**
+ * The practical presets the T2V cases run, each against the same reference preset and under the same band: the s16
+ * preset, and the online-attention preset (ADR 0132 decision 6 — it must stay inside the band derived for the a8
+ * preset, so the band is not re-derived for it). The case id carries the preset name, so the two presets never share
+ * a row of the results.
+ *
+ * The fault injections run for the s16 preset only ({@link FAULT_PRESET}): they show that the gate's steps are not
+ * blind, which the shared steps of {@link registerWanAbCase} establish once per machine whatever the preset; and
+ * fault ③ (dropping `attentionCompute`) has no meaning for the online preset — `attentionScoreStorage: "none"`
+ * without `attentionCompute: "a8"` is rejected at Session construction (ADR 0132 decision 1), so it would fail before
+ * the census it is meant to exercise.
+ */
+const T2V_PRESETS: readonly string[] = [WAN_TI2V_PRACTICAL_QUANT, WAN_TI2V_ONLINE_QUANT];
+
+/** The preset the fault injections run for (see {@link T2V_PRESETS}). */
+const FAULT_PRESET = WAN_TI2V_PRACTICAL_QUANT;
+
 const manifestText = await readWanTi2vDistributionManifestText();
 if (manifestText === undefined) {
   console.warn(
@@ -197,6 +216,7 @@ const RUNNABLE = GPU_AVAILABLE && manifestText !== undefined;
  * MUST: 呼ぶのは {@link RUNNABLE} のテストの中だけ（配布形が無いのにここへ来たら ignore の判定の破れなので落とす）。
  */
 const subjectOf = (
+  practical: string,
   caseResults: Results,
   request: NonNullable<WanAbSubject["request"]> = REQUEST,
 ): WanAbSubject => {
@@ -209,7 +229,7 @@ const subjectOf = (
     label: "wan-ti2v",
     family: "wan-ti2v",
     model: WAN_TI2V_DIST_MODEL,
-    practical: WAN_TI2V_PRACTICAL_QUANT,
+    practical,
     assetsRoot: WAN_TI2V_DIST_ROOT,
     manifestText,
     results: caseResults,
@@ -254,35 +274,39 @@ const readI2vImage = async (): Promise<Rgb8Image> => {
 };
 
 for (const { frames, band, optIn } of CASES) {
-  const id = `${WAN_TI2V_PRACTICAL_QUANT}-${frames}f`;
-  const faults = frames === FAULT_FRAMES;
-  describe.skipIf(!RUNNABLE || (optIn && !LONG_CLIP))(
-    `e2e(実GPU): Wan2.2 ${id} の step 1 の潜在が参照席と決定性・census・帯で釣り合う（自機 A/B）` +
-      (faults ? "・故障注入 5 件は赤" : "") +
-      (optIn ? "（opt-in KARUME_WAN_TI2V_121F=1）" : ""),
-    () => {
-      // One device per case, shared by the case's its (acquired before, released after them all).
-      let gpu: GpuContext | undefined;
-      let subject: WanAbSubject | undefined;
-      beforeAll(async () => {
-        gpu = await acquireTestGpu();
-        assertAdapterMatchesEnvironment(gpu);
-        subject = subjectOf(optIn ? longClipResults : results);
-      });
-      afterAll(async () => {
-        if (gpu === undefined) return;
-        await settleReleases(gpu);
-        gpu.destroy();
-      });
-      const scope: WanAbScope = {
-        gpu: () => assigned(gpu, "gpu"),
-        subject: () => assigned(subject, "subject"),
-      };
-      registerWanAbCase(scope, { id, frames, band, faults });
-    },
-  );
+  for (const practical of T2V_PRESETS) {
+    const id = `${practical}-${frames}f`;
+    const faults = frames === FAULT_FRAMES && practical === FAULT_PRESET;
+    describe.skipIf(!RUNNABLE || (optIn && !LONG_CLIP))(
+      `e2e(実GPU): Wan2.2 ${id} の step 1 の潜在が参照席と決定性・census・帯で釣り合う（自機 A/B）` +
+        (faults ? "・故障注入 5 件は赤" : "") +
+        (optIn ? "（opt-in KARUME_WAN_TI2V_121F=1）" : ""),
+      () => {
+        // One device per case, shared by the case's its (acquired before, released after them all).
+        let gpu: GpuContext | undefined;
+        let subject: WanAbSubject | undefined;
+        beforeAll(async () => {
+          gpu = await acquireTestGpu();
+          assertAdapterMatchesEnvironment(gpu);
+          subject = subjectOf(practical, optIn ? longClipResults : results);
+        });
+        afterAll(async () => {
+          if (gpu === undefined) return;
+          await settleReleases(gpu);
+          gpu.destroy();
+        });
+        const scope: WanAbScope = {
+          gpu: () => assigned(gpu, "gpu"),
+          subject: () => assigned(subject, "subject"),
+        };
+        registerWanAbCase(scope, { id, frames, band, faults });
+      },
+    );
+  }
 }
 
+// The I2V case runs for the s16 preset only: the online preset's acceptance (ADR 0132 decision 6) is measured on
+// text to video, and the I2V band was derived for the s16 preset.
 {
   const id = `${WAN_TI2V_PRACTICAL_QUANT}-i2v-crop-${I2V_FRAMES}f`;
   describe.skipIf(!RUNNABLE || !I2V_FULL || !I2V_FIXTURE_PRESENT)(
@@ -295,7 +319,11 @@ for (const { frames, band, optIn } of CASES) {
         const image = await readI2vImage();
         gpu = await acquireTestGpu();
         assertAdapterMatchesEnvironment(gpu);
-        subject = subjectOf(i2vResults, { ...REQUEST, image, fit: "crop" });
+        subject = subjectOf(WAN_TI2V_PRACTICAL_QUANT, i2vResults, {
+          ...REQUEST,
+          image,
+          fit: "crop",
+        });
       });
       afterAll(async () => {
         if (gpu === undefined) return;

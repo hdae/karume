@@ -40,9 +40,9 @@
  *   guidance 5.0 → 5.05・shift 5.0 → 3.0（shift の結線）。どれも DiT の段の `end` のイベントで打ち切って VAE を回さない。T2V では
  *   条件マスクと条件側の時刻は原理的に値に出ない（2 本が同じ値・マスクは全て偽 — 段 2 と同じ理由）ので注入に入れない。
  * - **sha256 の環境行**（ADR 0106 — `fixtures/references/wan-ti2v.json`。2.1 の `wan.json` には触らない）: 出力フレーム（uint8 の
- *   RGB を全フレーム連結したバイト列 — `wanFrameToRgba` の規則）。既定のレーンは 7 本 = 参照席の 6 本（帯のケース 3 本・seed
+ *   RGB を全フレーム連結したバイト列 — `wanFrameToRgba` の規則）。既定のレーンは 8 本 = 参照席の 6 本（帯のケース 3 本・seed
  *   経路の 1280×704 と 704×1280・GPU 経路〈umT5 を GPU で回す — umT5 のミラー `models/karume-umt5-xxl/` が無い機は明示 SKIP〉）
- *   と、実用席の seed 経路の 1280×704 の 1 本（{@link PRACTICAL_SEED_CASE_ID} — 参照席の seed 経路の 1280×704 と同じ要求で席だけ
+ *   と、実用席 2 つ（s16 と online — ADR 0132）の seed 経路の 1280×704 の 1 本ずつ（{@link PRACTICAL_SEED_CASES} — 参照席の seed 経路の 1280×704 と同じ要求で席だけ
  *   違う）。opt-in の 50 ステップと 121 フレームの行は下の節。ID は席・経路・step 数・
  *   ケース・寸法・フレーム数・shift を全て持つ（{@link caseIdOf} — 裁定 F12）。行が無い機はそのケースの sha の突合を飛ばし
  *   （実物と実測の sha は残す）、参照門が赤になる（既存の規律）。行は帯が緑になった後に `KARUME_REFERENCE=write` をこのファイル
@@ -162,6 +162,7 @@ import {
   readWanTi2vDistributionManifestText,
   WAN_TI2V_ASSEMBLE_COMMAND,
   WAN_TI2V_DIST_ROOT,
+  WAN_TI2V_ONLINE_QUANT,
   WAN_TI2V_PRACTICAL_QUANT,
   WAN_TI2V_REFERENCE_QUANT,
 } from "../../models/tests/helpers/wan-ti2v-pipeline.ts";
@@ -290,6 +291,24 @@ const PRACTICAL_SEED_CASE_ID = caseIdOf(
 );
 
 /**
+ * The online-attention preset's seed case (ADR 0132 decision 6): the same request as {@link PRACTICAL_SEED_CASE_ID} with
+ * the preset `f16+dit8-a8-attn8-online` — a practical row of its own, written fresh (the reference rows do not move),
+ * under the same floor (it differs from the reference preset's output for the same request by at least one bit).
+ */
+const ONLINE_SEED_CASE_ID = caseIdOf(
+  `${WAN_TI2V_ONLINE_QUANT}-2step-${SEED_PROMPT}-seed${SEED}`,
+  WIDTH,
+  HEIGHT,
+  FRAMES,
+);
+
+/** The practical presets' seed cases, run in this order after the reference preset's (the s16 preset first). */
+const PRACTICAL_SEED_CASES: readonly { readonly id: string; readonly quant: string }[] = [
+  { id: PRACTICAL_SEED_CASE_ID, quant: WAN_TI2V_PRACTICAL_QUANT },
+  { id: ONLINE_SEED_CASE_ID, quant: WAN_TI2V_ONLINE_QUANT },
+];
+
+/**
  * GPU 経路のケース（umT5 i8 を GPU で回す — 固定プロンプトの原文・seed 42・2 ステップ・1280×704）。CPU の参照は持たない（umT5 の
  * 数値の門は `e2e_wan_umt5_test.ts`）。資産の経路の seed のケースと同じ文字列で、経路だけが違う。
  */
@@ -317,6 +336,7 @@ const FULL_STEPS = 50;
 const FULL_CASES: readonly { readonly id: string; readonly quant: string }[] = [
   WAN_TI2V_REFERENCE_QUANT,
   WAN_TI2V_PRACTICAL_QUANT,
+  WAN_TI2V_ONLINE_QUANT,
 ].map((quant) => ({
   id: caseIdOf(`${quant}-50step-${SEED_PROMPT}-seed${SEED}`, WIDTH, HEIGHT, FULL_FRAMES),
   quant,
@@ -762,6 +782,8 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
      * `beforeSettle`）の比べる相手。
      */
     let referenceSeedRgb: Uint8Array<ArrayBuffer> | undefined;
+    /** The practical seats' outputs seen so far (the online seat must also differ from the s16 seat). */
+    const practicalSeedRgb: Uint8Array<ArrayBuffer>[] = [];
     /**
      * seed 経路の 2 ステップ 1 本（完走・非有限 0・sha256 の環境行）。席は `seatPipeline` を組んだ席で、参照席の 2 寸法と実用席の
      * 1280×704 が同じ本体を通る（席ごとに検査が割れないように）。`beforeSettle` は sha の突合と行の書き込み
@@ -1084,33 +1106,42 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
     }
 
     // 実用席の seed 経路（参照席の pipeline を畳んでから席の pipeline を組む — 構築では Session を張らない）。
-    it(`${PRACTICAL_SEED_CASE_ID}（実用席・seed 経路・sha256 の環境行）`, async () => {
-      // The reference-seat its above are done: dispose that pipeline before building this seat's
-      // (afterAll disposes it again, idempotently, for runs where this it does not run).
-      await referencePipeline?.dispose();
-      await using practical = await loadPipeline(
-        assigned(gpuContext, "gpuContext"),
-        diagnostics,
-        "precomputed",
-        WAN_TI2V_PRACTICAL_QUANT,
-      );
-      await runSeedCase(practical, PRACTICAL_SEED_CASE_ID, WIDTH, HEIGHT, (bytes) => {
-        // 床（ADR 0110 決定 5 — 実用席は同じ要求の参照席と 1 bit 以上違う）: 配布形の経路で席の `session` が Session に届かない
-        // 退行では、実用席は参照席と同じバイトを出す。その実物を実用行として書くと、参照行と同じ sha が凍結され、以後この行は
-        // 実用層の退行も決定性も縛らない。行を書く前（`settleOrObserve` の前）に落とす。
-        if (referenceSeedRgb === undefined) {
-          throw new Error(
-            `${PRACTICAL_SEED_CASE_ID}: 同じ要求の参照席の実物が無い（参照席の seed 経路の 1280×704 が回っていない — 床を確かめられない）`,
-          );
-        }
-        const reference = referenceSeedRgb;
-        assert(
-          bytes.length !== reference.length ||
-            bytes.some((value, index) => value !== reference[index]),
-          `${PRACTICAL_SEED_CASE_ID}: 実用席の出力が参照席の同じ要求とバイト単位で一致した（席の session が届いていない）`,
+    for (const { id: seedCaseId, quant } of PRACTICAL_SEED_CASES) {
+      it(`${seedCaseId}（実用席・seed 経路・sha256 の環境行）`, async () => {
+        // The reference-seat its above are done: dispose that pipeline before building this seat's
+        // (afterAll disposes it again, idempotently, for runs where this it does not run).
+        await referencePipeline?.dispose();
+        await using practical = await loadPipeline(
+          assigned(gpuContext, "gpuContext"),
+          diagnostics,
+          "precomputed",
+          quant,
         );
+        await runSeedCase(practical, seedCaseId, WIDTH, HEIGHT, (bytes) => {
+          // 床（ADR 0110 決定 5 — 実用席は同じ要求の参照席と 1 bit 以上違う）: 配布形の経路で席の `session` が Session に届かない
+          // 退行では、実用席は参照席と同じバイトを出す。その実物を実用行として書くと、参照行と同じ sha が凍結され、以後この行は
+          // 実用層の退行も決定性も縛らない。行を書く前（`settleOrObserve` の前）に落とす。
+          if (referenceSeedRgb === undefined) {
+            throw new Error(
+              `${seedCaseId}: 同じ要求の参照席の実物が無い（参照席の seed 経路の 1280×704 が回っていない — 床を確かめられない）`,
+            );
+          }
+          const reference = referenceSeedRgb;
+          const differs = (other: Uint8Array<ArrayBuffer>): boolean =>
+            bytes.length !== other.length || bytes.some((value, index) => value !== other[index]);
+          assert(
+            differs(reference),
+            `${seedCaseId}: 実用席の出力が参照席の同じ要求とバイト単位で一致した（席の session が届いていない）`,
+          );
+          // The practical seats differ from each other too (the online seat replaces the three
+          // dispatches; a route that silently kept them would reproduce the s16 bytes).
+          for (const earlier of practicalSeedRgb) {
+            assert(differs(earlier), `${seedCaseId}: the output equals another practical seat's`);
+          }
+          practicalSeedRgb.push(bytes);
+        });
       });
-    });
+    }
 
     // GPU 経路（umT5 の text 段を畳んでから DiT・VAE の段を張る）。
     it.skipIf(!GPU_TEXT_PRESENT)(`${GPU_TEXT_CASE_ID}（GPU 経路・sha256 の環境行）`, async () => {
@@ -1175,7 +1206,7 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
 // 取る（B570 の `destroy()` が VRAM を返さない件に当たる）。`--filter "50 ステップ"` で単独のプロセスとして回す（モジュール doc
 // 「device の使い方」）。
 describe.skipIf(!FULL_PIPELINE || !DIST_PRESENT || !GPU_AVAILABLE)(
-  "Wan2.2 通し 50 ステップ（実 GPU・opt-in KARUME_WAN_TI2V_FULL_PIPELINE=1）: 1280×704・33 フレーム（参照席と実用席）が" +
+  "Wan2.2 通し 50 ステップ（実 GPU・opt-in KARUME_WAN_TI2V_FULL_PIPELINE=1）: 1280×704・33 フレーム（参照席・実用席 s16・online）が" +
     "完走し非有限 0・所要と段の切り替えの VRAM・PNG 全フレーム + 一覧図・sha256 の環境行",
   () => {
     let deviceLost: string | undefined;
@@ -1335,7 +1366,9 @@ test.skipIf(!LONG_CLIP || !DIST_PRESENT || !GPU_AVAILABLE)(
  */
 const CASE_IDS = [
   ...(DIST_PRESENT && ANY_FIXTURE ? CASES.map(({ name }) => bandCaseId(name)) : []),
-  ...(DIST_PRESENT ? [...SEED_CASES.map(({ id }) => id), PRACTICAL_SEED_CASE_ID] : []),
+  ...(DIST_PRESENT
+    ? [...SEED_CASES.map(({ id }) => id), ...PRACTICAL_SEED_CASES.map(({ id }) => id)]
+    : []),
   ...(GPU_TEXT_PRESENT ? [GPU_TEXT_CASE_ID] : []),
   ...(DIST_PRESENT && FULL_PIPELINE ? FULL_CASES.map(({ id }) => id) : []),
   ...(DIST_PRESENT && LONG_CLIP ? [LONG_CLIP_CASE_ID] : []),
