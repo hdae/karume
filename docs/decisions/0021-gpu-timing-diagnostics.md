@@ -68,3 +68,26 @@ without timing, on `run` and on the resident path's `enqueue` (ADR 0054), derive
 run's recipe list — so a fallback (ADR 0058 decision 3) is visible where timing cannot be used.
 The counts are planned values (a zero-work states-shaped dispatch is counted but not issued), so
 they can exceed the timing breakdown's `dispatchCount`.
+
+## Addendum (2026-10-24) — a batch on a timing device is untimed instead of refused
+
+`GpuContext.beginBatch` refused a timing device, because per-pass timestamps are collected only by a
+run's flush and would pile up during a batch. That also made every pipeline whose stages use batches
+(the Wan VAE decoder: one tile = one batch) unusable with timing, so a real generation could not be
+broken down per kernel in a browser — the case that mattered for Chrome on the RTX 5070 Ti.
+
+- Decision: a batch section on a timing device runs **untimed**. `GpuContext` records that a batch
+  holds its section (set inside the scope lock before the first enqueue, cleared in a `finally` before
+  the lock is returned), and `SubmitScheduler` encodes plain chunks while it is set. Runs never
+  overlap a batch on one device (the scope lock), so they keep their per-pass breakdown, and no
+  batch timestamp reaches a later run's totals.
+- The Wan pipelines accept a timing device: the text, encoder and DiT runs report `lastRunTiming`;
+  the VAE decoder reports none. Timed runs are slower (one pass per dispatch), so their wall times
+  are not compared with untimed ones.
+- Not taken: timing batches (collecting per enqueue would add a fence or unbounded query sets per
+  batch); a DiT-only mode in models (new public surface for a diagnostic).
+- Checks: `gpu_resident_batch_test.ts` (a batch on a timing device returns the right values, and the
+  run after it counts exactly the dispatches of the run before — red with the scheduler condition
+  removed). On the RTX 3080 Ti a 2-step 1280×704×17 Wan2.2 generation on a timing device completes
+  with 0 non-finite values and the DiT's breakdown (linear 4,287 ms, attention_online 1,388 ms over
+  4 forwards).

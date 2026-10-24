@@ -27,6 +27,9 @@ measurements in `docs/research/`.
   each kernel's WGSL without its comments and whitespace, so a comment edit in a kernel no longer
   invalidates saved tables. Tables saved by earlier versions mismatch once on the fingerprint and
   need one re-sweep; the two embedded tables carry the new value.
+- `GpuContext.beginBatch` on a device acquired with `gpuTiming: true` no longer throws: the batch runs
+  untimed, and runs before and after it keep their per-kernel breakdown (ADR 0021 addendum of
+  2026-10-24). The Wan pipelines accept such a device; their VAE decoder (batches) reports no timing.
 
 ### Added
 
