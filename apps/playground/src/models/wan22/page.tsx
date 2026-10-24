@@ -5,9 +5,9 @@
  */
 
 import { clearHubCache, type HubRepoRef, loadManifest } from "@karume/hub";
-import { wanFrameToRgba } from "@karume/models/wan";
+import { type WanPrompt, wanFrameToRgba } from "@karume/models/wan";
 import type { AcquireGpuOptions } from "@karume/runtime";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 
 import { ChoiceSelect } from "@/components/choice-select";
 import { ErrorAlert, thrownText } from "@/components/error-alert";
@@ -46,6 +46,15 @@ import {
 } from "@/lib/record";
 import { zipStored } from "@/lib/zip";
 
+import {
+  matchingScenario,
+  type ScenarioContext,
+  type ScenarioId,
+  SCENARIOS,
+  type ScenarioSettings,
+  scenarioSettings,
+  ScenarioUnavailableError,
+} from "./scenarios";
 import {
   buildRequest,
   FRAME_CHOICES,
@@ -87,6 +96,16 @@ type CacheState =
   | { readonly kind: "ready"; readonly inventory: CacheInventory }
   | { readonly kind: "error"; readonly error: unknown };
 
+/**
+ * The scenario control. `waiting`: "Run this scenario" applied the settings and the run starts once
+ * the pipeline for them is open (applying can rebuild it).
+ */
+type ScenarioRunState =
+  | { readonly kind: "idle" }
+  | { readonly kind: "waiting"; readonly id: ScenarioId }
+  | { readonly kind: "refused"; readonly message: string }
+  | { readonly kind: "cancelled"; readonly id: ScenarioId; readonly reason: string };
+
 type ManifestState =
   | { readonly kind: "loading" }
   | { readonly kind: "missing"; readonly directory: string }
@@ -109,6 +128,8 @@ type WanRecord = {
   /** `cached` = the HF-compatible route through the hub's CacheStorage; `direct` = plain fetch. */
   readonly source: { readonly kind: "direct" } | ({ readonly kind: "cached" } & HubRepoRef);
   readonly preset: { readonly quant: string; readonly label: string; readonly isDefault: boolean };
+  /** The scenario the run's settings equal, or `custom`. */
+  readonly scenario: ScenarioId | "custom";
   readonly textEncoder: TextEncoderPath;
   readonly prompt: string;
   readonly negativePrompt?: string;
@@ -191,8 +212,17 @@ export const Wan22Page = () => {
   const summary = manifest.kind === "ready" ? manifest.summary : undefined;
 
   const [form, setForm] = useState<WanForm>(() => initialForm(""));
-  const update = (patch: Partial<WanForm>): void =>
+  const [scenarioId, setScenarioId] = useState<ScenarioId>("quick-check");
+  const [scenarioRun, setScenarioRun] = useState<ScenarioRunState>({ kind: "idle" });
+  /** A pending scenario run does not survive an edit by the user. */
+  const cancelPendingRun = (reason: string): void =>
+    setScenarioRun((current) =>
+      current.kind === "waiting" ? { kind: "cancelled", id: current.id, reason } : current,
+    );
+  const update = (patch: Partial<WanForm>): void => {
+    cancelPendingRun("the form was edited");
     setForm((current) => ({ ...current, ...patch }));
+  };
   // Preselect the manifest's default preset once it is known.
   useEffect(() => {
     if (summary !== undefined) {
@@ -231,9 +261,13 @@ export const Wan22Page = () => {
   });
   const prompts = pipeline.kind === "ready" ? pipeline.prompts : [];
   const positives = prompts.filter(({ role }) => role === "positive");
+  // The text embedding asset belongs to the model (the same rows for every preset and path), so the
+  // last opened pipeline's list still holds while the next one builds: the scenarios read it.
+  const [assetPrompts, setAssetPrompts] = useState<readonly WanPrompt[]>([]);
   // Fill the prompt fields from the asset's examples once they are known.
   useEffect(() => {
     if (pipeline.kind !== "ready") return;
+    setAssetPrompts(pipeline.prompts);
     const first = pipeline.prompts.find(({ role }) => role === "positive");
     if (first === undefined) return;
     setForm((current) => ({
@@ -298,9 +332,32 @@ export const Wan22Page = () => {
     requestError = error;
   }
 
+  const scenarioContextOf = (
+    manifestSummary: WanManifestSummary,
+    assetRows: readonly WanPrompt[],
+  ): ScenarioContext => ({
+    defaultQuant: manifestSummary.defaultQuant,
+    prompts: assetRows,
+    cachedSource: hfRef !== undefined,
+    // The same condition the pipeline's GPU path fails early on.
+    gpuTextEncoder: manifestSummary.textEncoderRepo === undefined || umt5?.available === true,
+  });
+  const scenarioContext =
+    summary === undefined ? undefined : scenarioContextOf(summary, assetPrompts);
+  const matchedScenario =
+    scenarioContext === undefined
+      ? "custom"
+      : matchingScenario(form, pipelineSource.kind, scenarioContext);
+
   const generate = async (): Promise<void> => {
     if (pipeline.kind !== "ready" || gpu === undefined || manifest.kind !== "ready") return;
     const parts = buildRequest(form, pipeline.prompts);
+    // What the run uses: the open pipeline's preset, path and source, the form's request.
+    const scenario = matchingScenario(
+      { ...form, quant: pipeline.quant, textEncoder: pipeline.textEncoder },
+      pipeline.source.kind,
+      scenarioContextOf(manifest.summary, pipeline.prompts),
+    );
     const controller = new AbortController();
     controllerRef.current = controller;
     const diagnostics = new Map<string, ComponentRecord>();
@@ -381,6 +438,7 @@ export const Wan22Page = () => {
           label: preset?.label ?? pipeline.quant,
           isDefault: pipeline.quant === manifest.summary.defaultQuant,
         },
+        scenario,
         textEncoder: pipeline.textEncoder,
         prompt: parts.prompt,
         ...(parts.negativePrompt === undefined ? {} : { negativePrompt: parts.negativePrompt }),
@@ -467,6 +525,56 @@ export const Wan22Page = () => {
     pipeline.kind === "ready" &&
     requestError === undefined;
 
+  // Scenarios. Applying one can rebuild the pipeline, so "Run this scenario" does not call generate()
+  // itself: it leaves a pending run that the effect below starts once the open pipeline is the one
+  // built for the applied settings (or cancels when that build fails).
+  const builtForForm = (built: {
+    readonly source: PipelineSource;
+    readonly quant: string;
+    readonly textEncoder: TextEncoderPath;
+  }): boolean =>
+    built.source === pipelineSource &&
+    built.quant === form.quant &&
+    built.textEncoder === form.textEncoder;
+  const pendingFailed =
+    scenarioRun.kind === "waiting" && pipeline.kind === "error" && builtForForm(pipeline);
+  const pendingStarts =
+    scenarioRun.kind === "waiting" &&
+    matchedScenario === scenarioRun.id &&
+    pipeline.kind === "ready" &&
+    builtForForm(pipeline) &&
+    canRun;
+  const settlePendingRun = useEffectEvent(() => {
+    if (pendingFailed) {
+      cancelPendingRun("the pipeline failed to build");
+    } else if (pendingStarts) {
+      setScenarioRun({ kind: "idle" });
+      void generate();
+    }
+  });
+  useEffect(() => {
+    settlePendingRun();
+  }, [pendingFailed, pendingStarts]);
+
+  const scenarioDisabled = manifest.kind !== "ready" || running;
+  const chosenScenario = SCENARIOS.find(({ id }) => id === scenarioId);
+  const labelOf = (id: ScenarioId): string =>
+    SCENARIOS.find((scenario) => scenario.id === id)?.label ?? id;
+  const applyScenario = (andRun: boolean): void => {
+    if (chosenScenario === undefined || scenarioContext === undefined) return;
+    let settings: ScenarioSettings;
+    try {
+      settings = scenarioSettings(chosenScenario, scenarioContext);
+    } catch (error) {
+      if (!(error instanceof ScenarioUnavailableError)) throw error;
+      setScenarioRun({ kind: "refused", message: error.message });
+      return;
+    }
+    setForm(settings.form);
+    setChosenSource(settings.source);
+    setScenarioRun(andRun ? { kind: "waiting", id: chosenScenario.id } : { kind: "idle" });
+  };
+
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-baseline gap-3">
@@ -499,6 +607,71 @@ export const Wan22Page = () => {
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2">
+            <div className="flex flex-col gap-2 sm:col-span-2">
+              <Field
+                id="wan22-scenario"
+                label="Scenario"
+                hint={
+                  <>
+                    {chosenScenario?.hint} Default preset, GPU text encoder, prompt "boxing-cats",
+                    seed 42, 1280×704, cached source. The form now:{" "}
+                    <span id="wan22-scenario-match" className="font-medium text-foreground">
+                      {matchedScenario === "custom" ? "custom" : labelOf(matchedScenario)}
+                    </span>
+                    .
+                  </>
+                }
+              >
+                <ChoiceSelect
+                  id="wan22-scenario"
+                  value={scenarioId}
+                  choices={SCENARIOS.map(({ id, label }) => ({ value: id, label }))}
+                  onChange={(id) => {
+                    setScenarioId(id);
+                    // A refusal or cancellation names the previous choice; a pending run stays.
+                    setScenarioRun((current) =>
+                      current.kind === "waiting" ? current : { kind: "idle" },
+                    );
+                  }}
+                  disabled={scenarioDisabled}
+                />
+              </Field>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  id="wan22-scenario-load"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => applyScenario(false)}
+                  disabled={scenarioDisabled}
+                >
+                  Load
+                </Button>
+                <Button
+                  id="wan22-scenario-run"
+                  size="sm"
+                  onClick={() => applyScenario(true)}
+                  disabled={scenarioDisabled}
+                >
+                  Run this scenario
+                </Button>
+              </div>
+              {scenarioRun.kind === "waiting" ? (
+                <p id="wan22-scenario-state" className="text-sm text-muted-foreground">
+                  Waiting for the pipeline… "{labelOf(scenarioRun.id)}" starts once the pipeline for
+                  its settings is open.
+                </p>
+              ) : null}
+              {scenarioRun.kind === "cancelled" ? (
+                <p id="wan22-scenario-state" className="text-sm text-muted-foreground">
+                  "{labelOf(scenarioRun.id)}" did not start: {scenarioRun.reason}.
+                </p>
+              ) : null}
+              {scenarioRun.kind === "refused" ? (
+                <p id="wan22-scenario-state" className="text-sm text-destructive">
+                  {scenarioRun.message}.
+                </p>
+              ) : null}
+            </div>
             <div className="sm:col-span-2">
               <Field
                 id="wan22-quant"
@@ -533,7 +706,10 @@ export const Wan22Page = () => {
                   value={[pipelineSource.kind]}
                   onValueChange={(value) => {
                     const [next] = value;
-                    if (next === "cached" || next === "direct") setChosenSource(next);
+                    if (next === "cached" || next === "direct") {
+                      cancelPendingRun("the source was changed");
+                      setChosenSource(next);
+                    }
                   }}
                   disabled={disabled}
                 >
@@ -594,7 +770,10 @@ export const Wan22Page = () => {
                   variant="link"
                   size="sm"
                   className="h-auto p-0"
-                  onClick={() => setForm(quickCheck)}
+                  onClick={() => {
+                    cancelPendingRun("the form was edited");
+                    setForm(quickCheck);
+                  }}
                   disabled={disabled}
                 >
                   Quick 2-step check (2 steps, 17 frames)
@@ -704,8 +883,11 @@ export const Wan22Page = () => {
               <Button
                 id="wan22-cancel"
                 variant="outline"
-                onClick={() => controllerRef.current?.abort(new Error("Cancelled by the user"))}
-                disabled={!running}
+                onClick={() => {
+                  cancelPendingRun("cancelled by the user");
+                  controllerRef.current?.abort(new Error("Cancelled by the user"));
+                }}
+                disabled={!running && scenarioRun.kind !== "waiting"}
               >
                 Cancel
               </Button>
@@ -957,6 +1139,7 @@ const RecordTable = ({ record }: { record: WanRecord }) => (
           : "direct",
       ],
       ["Preset", `${record.preset.quant}${record.preset.isDefault ? " (default)" : ""}`],
+      ["Scenario", record.scenario],
       ["VAE tile", String(record.vaeTile)],
       ["Size", `${record.width}×${record.height}`],
       ["Frames", String(record.frames)],

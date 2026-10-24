@@ -74,16 +74,50 @@ starts with **Run**). One generation runs at a time.
 
 | Control | What it does |
 | --- | --- |
+| Scenario | A fixed set of settings for runs that are compared with each other (below): **Load** fills the form and the source, **Run this scenario** fills them and runs. |
 | Preset | The manifest's `quants` (`quant` of `fromPretrained`); the manifest's `defaultQuant` is preselected and marked "(default)". Changing it rebuilds the pipeline. |
 | Source | **Cached** (default): the HF-compatible route (`/hf/`) through the hub's CacheStorage — the first run stores the weights in the browser, later runs read them from its disk instead of the network (or the SSH tunnel). **Direct**: `localDirectory` over plain `fetch` from `/models/` on every run, nothing cached. Changing it rebuilds the pipeline. |
 | VAE tile | `vaeTile` of the request: 16 (default) or 32. 32 decodes in 32-latent tiles (fewer, larger tiles) and needs about 9.4 GiB on the device during the decode; the 10 GB class keeps 16. |
 | Size | 1280×704 or 704×1280. |
 | Frames | 4n+1 from 5 to 121 (default 33). The video plays at 24 fps. |
-| Steps | Denoise steps (default 50). **Quick 2-step check** sets 2 steps and 17 frames — enough to run every stage, VAE tiles included. |
+| Steps | Denoise steps (default 50). **Quick 2-step check** sets 2 steps and 17 frames on the current settings — enough to run every stage, VAE tiles included (the **Quick check** scenario does the same on the scenarios' fixed settings). |
 | Seed | The seed of the initial noise (default 42). |
 | Shift | The flow-matching shift; empty = the manifest's default (5). |
 | Text encoder | `precomputed`: the text embedding asset's fixed prompts (choose one by name), no umT5. `gpu`: umT5 on the GPU (about 5.3 GiB of weights) with a free prompt and negative prompt (empty negative = the official default). Changing it rebuilds the pipeline. |
-| Run / Cancel | Run one generation; Cancel stops at the next stage boundary, step or VAE tile. |
+| Run / Cancel | Run one generation; Cancel stops at the next stage boundary, step or VAE tile (or drops a scenario run that is still waiting for its pipeline). |
+
+### Scenarios
+
+A scenario is a complete set of settings fixed in code (`src/models/wan22/scenarios.ts`), so runs
+recorded on different days or machines differ only where they are meant to. "Scenario", not
+"preset": on this page a preset is a quant of the manifest.
+
+All four use the manifest's `defaultQuant`, the GPU text encoder, the prompt of the text embedding
+asset's positive row `boxing-cats` (its text goes into the free-text prompt), an empty negative
+prompt (the official default), seed 42, the manifest's shift, 1280×704 and the **Cached** source.
+
+| Id | Label | Frames | Steps | VAE tile |
+| --- | --- | --- | --- | --- |
+| `quick-check` | Quick check | 17 | 2 | 16 |
+| `bench-33f` | 33 frames, 50 steps (tile 16) — the comparison point with the earlier records | 33 | 50 | 16 |
+| `bench-33f-tile32` | 33 frames, 50 steps (tile 32) | 33 | 50 | 32 |
+| `bench-121f` | 121 frames, 50 steps (tile 32) | 121 | 50 | 32 |
+
+A scenario is refused (the page says why, nothing changes) when the dev server serves no
+HF-compatible route for the distribution, when the umT5 distribution is missing, or when the text
+embedding asset has no positive `boxing-cats` row (the prompt list is known once a pipeline has
+opened). **Load** and **Run this scenario** are disabled while a generation runs or the manifest is
+not loaded.
+
+**Run this scenario** does not start at once: applying the settings can rebuild the pipeline (a
+different preset, text encoder or source). It shows "Waiting for the pipeline…" and starts the
+generation when the open pipeline was built for the applied source, preset and text encoder and the
+form still equals the scenario. The waiting run is dropped (and the page says why) when the form is
+edited, the source is changed, Cancel is pressed, or the pipeline for the scenario fails to build.
+
+After **Load** the form is an ordinary form: any edit makes it a custom one. The hint under the
+select shows which scenario the form equals now, or "custom", worked out from the form and the source
+on every render (the precomputed prompt choice is not compared — the GPU path does not read it).
 
 The status card also shows the **cache**: how much of the distribution the hub has stored (files and
 GiB over every preset, a file shared by presets counted once). **Refresh cache size** reads it again
@@ -114,6 +148,7 @@ The JSON keeps the full detail; the page shows only the summary above.
 | `format` | `karume-playground-wan22/2` (records without it are the first version) |
 | `device` | enabled `features` and `wgslLanguageFeatures` (sorted), `subgroupLanesLinear`, `gpuTimingEnabled`, and `limits` (`maxComputeWorkgroupStorageSize`, `maxStorageBufferBindingSize`, `maxBufferSize`) |
 | `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
+| `scenario` | the id of the scenario the run's settings equal (its pipeline's preset, text encoder and source, and the form's request), or `custom`; records without it predate the scenarios |
 | `timeline.denoiseStepSeconds` | seconds of every denoise step in order; the first is measured from the transformer stage start, so it also holds the Session creation and the weight upload |
 | `timeline.vaeTileSeconds` | seconds of every VAE tile in order; the first holds the VAE Sessions' creation |
 | `diagnostics.<component>.build` | the Session build cost of the component's latest report (`buildStats`): `partCount`, `supplyWaitMs`, `decodeMs`, `bufferCreateMs`, `writeBufferIssueMs`, `uploadFenceMs`, `uploadedBytes`. The GPU transfer itself cannot be told apart from the host clock; it lands in `uploadFenceMs` |
@@ -178,7 +213,7 @@ Absolute times compare only on one machine; across machines, compare the ratios.
 ## Develop
 
 ```sh
-pnpm --filter @karume/playground test        # vp test: the server's request handling (/models/ and /hf/), record and cache helpers, zip writer, attention bench table
+pnpm --filter @karume/playground test        # vp test: the server's request handling (/models/ and /hf/), record and cache helpers, zip writer, attention bench table, Wan2.2 scenarios
 pnpm --filter @karume/playground typecheck
 pnpm --filter @karume/playground check       # vp check: format + lint + types
 pnpm --filter @karume/playground build

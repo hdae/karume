@@ -41,7 +41,14 @@ export type PipelineState =
       readonly textEncoder: TextEncoderPath;
       readonly loadSeconds: number;
     }
-  | { readonly kind: "error"; readonly error: unknown };
+  | {
+      readonly kind: "error";
+      readonly error: unknown;
+      /** The inputs the failed build was for (a page tells a stale failure from the current one). */
+      readonly source: PipelineSource;
+      readonly quant: string;
+      readonly textEncoder: TextEncoderPath;
+    };
 
 export type DiagnosticsSink = (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
 
@@ -128,7 +135,9 @@ export const useWanPipeline = (input: {
         });
       },
       (error: unknown) => {
-        if (!controller.signal.aborted) setState({ kind: "error", error });
+        if (!controller.signal.aborted) {
+          setState({ kind: "error", error, source, quant, textEncoder });
+        }
       },
     );
     return () => {
