@@ -64,34 +64,41 @@ const irodoriDitShapes = (sequence: number): Readonly<Record<string, readonly nu
 });
 
 /**
- * Irodori DiT（12 ブロック）。**rope も adaln も 0** で、これは退行ではなく matcher の受理集合が
- * この綴りを含まないことの記録:
+ * The Irodori DiT (12 blocks). The record of what the matchers' accepted sets cover in this
+ * spelling:
  *
- * - rope 0: DiT の RoPE は**偶奇形**（`[1,S,H·D/2,2]` へ view して最終軸を slice / neg / cat し
- *   reshape で戻す）。`runtime/fusion.ts` の ROPE_RULE は `[1,H,S,D]` の半割り形だけを受理し、
- *   偶奇形は「式が似ている」で広げない MUST を掲げている（掴めなければ素の列で値は正しい）。
- * - adaln 0: ADALN_RULE の先頭 op は `layer_norm` だが、DiT の正規化は `rms_norm` 87 本で
- *   `layer_norm` は 1 本も無い。
- * - silu 17: 前段の timestep MLP 5 本 + 12 ブロック × 1 本。残る sigmoid 12 本は
- *   `mul(v, sigmoid(u))` のゲート（自分自身に掛からないので SiLU ではない）。
- * - **rowBlockAttention 12**: 12 ブロックの分解 attention（`bmm → reshape → add(mask) →
- *   safe_softmax → expand → reshape → expand → reshape → bmm`）を全て掴む。この綴りを出すのは
- *   実資産では DiT だけで、他の 7 パートは `attention` op（ADR 0023）を持つ。
- * - identityExpand 24: 12 ブロック × 4 本のうち、窓の内側の 2 本（P 側と V 側）は融合ステップに
- *   飲まれるので別名化として数えられなくなる。**48 → 24 は退行ではなくこの移動**で、
- *   `rowBlockAttention` が 0 に戻れば 48 に戻る（片方だけ動いたら受理集合の事故）。
+ * - **rope 23**: the DiT's RoPE is the **pair form** (view as `[1,S,H·D/2,2]`, slice / neg / cat
+ *   on the last axis, reshape back — on the first 10 of the 20 heads), the same spelling as Wan's
+ *   DiT, which ROPE_RULE accepts exactly as its second form (2026-10-24). 12 blocks × q / k = 24
+ *   sites; the first use of the shared cos / sin tables puts their two `sym_prefix_slice`s inside
+ *   the window, which the pair form does not accept, so that one site stays plain (23 = 24 − 1).
+ *   The fused kernel performs the same f32 operations in the same order (the WAV sha256 rows of
+ *   `e2e_irodori_wav_test.ts` held on the RTX 3080 Ti with it — 2026-10-24).
+ * - adaln 0: ADALN_RULE's leading op is `layer_norm`, but the DiT normalises with `rms_norm` (87)
+ *   and has no `layer_norm` at all.
+ * - silu 17: the timestep MLP's 5 + one per block (12). The remaining 12 sigmoids are the gates of
+ *   `mul(v, sigmoid(u))` (not applied to themselves, so not SiLU).
+ * - **rowBlockAttention 12**: every decomposed attention of the 12 blocks (`bmm → reshape →
+ *   add(mask) → safe_softmax → expand → reshape → expand → reshape → bmm`). Among the real assets
+ *   only the DiT emits this spelling; the other 7 parts carry the `attention` op (ADR 0023).
+ * - identityExpand 24: of the 12 blocks × 4, the two inside the window (P side and V side) are
+ *   swallowed by the fused step and no longer count as aliases. **48 → 24 is that move, not a
+ *   regression**; if `rowBlockAttention` went back to 0 it would be 48 again (only one of the two
+ *   moving means an accident in an accepted set).
  *
- * したがってこの門が守るのは「掴めている 3 種が外れないこと」と「**受理集合を広げたとき
- * ここが動く**こと」の両方。0 が非 0 に変わったら、まず ROPE_RULE / ADALN_RULE の受理集合が
- * 意図せず広がっていないかを見る（広げた瞬間 fallback の正しさ保証が消える）。
+ * So this gate guards both "the grabbed kinds do not drop out" and "**it moves when an accepted
+ * set widens**". If a count changes, first check whether ROPE_RULE / ADALN_RULE accepted something
+ * unintentionally (the moment a set widens past an exact form, the fallback's correctness
+ * guarantee is gone).
  */
 test.skipIf(!IRODORI_AVAILABLE)(
-  "実資産の Irodori DiT は run 1 回で rowBlockAttention 12 / silu 17 / identityExpand 24 を掴む（rope / adaln は綴りが違って 0）",
+  "the real Irodori DiT grabs rope 23 / rowBlockAttention 12 / silu 17 / identityExpand 24 per run (adaln is a different spelling: 0)",
   async () => {
     const graph = await readIrodoriGraph("dit");
     const expected: FusionCounts = {
       ...NONE,
       silu: 17,
+      rope: 23,
       rowBlockAttention: 12,
       identityExpand: 24,
     };
@@ -111,9 +118,9 @@ test.skipIf(!IRODORI_AVAILABLE)(
 );
 
 test.skipIf(!IRODORI_AVAILABLE)("実資産の Irodori 条件経路と codec の融合ヒット数", async () => {
-  // backbone（ModernBERT-ja 25 層）だけは半割り形の RoPE なので、25 層 × q/k = 50 を掴む。
-  // Irodori 自前のブロック（dit / speaker）が 0 なのと対になる観測点で、**片方だけ外れたら
-  // どちらの綴りが変わったのか**がここで割れる。
+  // The backbone (ModernBERT-ja, 25 layers) is the only half-split RoPE: 25 layers × q / k = 50.
+  // It is the counterpart of Irodori's own blocks (dit / speaker — the pair form): **if only one
+  // side drops out, this tells which spelling changed**.
   assertEquals(
     fusionCounts(await readIrodoriGraph("backbone"), { input_ids: [1, 256] }),
     { ...NONE, rope: 50 },
@@ -129,10 +136,12 @@ test.skipIf(!IRODORI_AVAILABLE)("実資産の Irodori 条件経路と codec の�
     { ...NONE, silu: 1 },
     "caption_proj",
   );
-  // speaker は 8 ブロック（silu 8 + ゲート 8）。RoPE は DiT と同じ偶奇形なので 0。
+  // speaker has 8 blocks (silu 8 + 8 gates). Its RoPE is the DiT's pair form on all 12 heads:
+  // 8 blocks × q / k = 16 sites, of which the first use of the tables stays plain (its two
+  // sym_prefix_slices sit inside the window) — 15.
   assertEquals(
     fusionCounts(await readIrodoriGraph("speaker"), { latent: [1, 750, 128] }),
-    { ...NONE, silu: 8 },
+    { ...NONE, silu: 8, rope: 15 },
     "speaker",
   );
   assertEquals(

@@ -1,0 +1,110 @@
+/**
+ * Fusion hit counts of the Wan2.2 TI2V-5B distribution graphs (no GPU — `planFusions` on part 0
+ * only; the shared planning side and the rationale live in `helpers/fusion-counts.ts`).
+ *
+ * MUST: the asset is `models/karume-wan2.2/` (untracked local asset); where it is missing the case
+ * SKIPs explicitly with a reason (ADR 0005).
+ */
+
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "vite-plus/test";
+import { assertEquals } from "@std/assert";
+import type { IrGraph } from "../../runtime/src/format/ir.ts";
+import type { FusionCounts } from "../../runtime/src/runtime/fusion.ts";
+import type { ContainerManifest } from "../../runtime/tests/helpers/container-graph.ts";
+import { exists, fusionCounts, NONE, readDistributionGraph } from "./helpers/fusion-counts.ts";
+
+const WAN22_DIR = new URL("../../../models/karume-wan2.2/", import.meta.url);
+const WAN22_AVAILABLE = await exists(new URL("karume.json", WAN22_DIR));
+if (!WAN22_AVAILABLE) {
+  console.warn(`[karume] SKIP the Wan2.2 fusion hit counts: ${WAN22_DIR.pathname} is missing`);
+}
+
+/**
+ * Only the DiT and the VAE graphs are read: the text encoder is a cross-repo reference to the umT5
+ * distribution, and this gate knows no mirror for it (a cross-repo reference fails loudly instead
+ * of being read from somewhere else).
+ */
+const NO_MIRRORS: ReadonlyMap<string, URL> = new Map();
+
+/** A component graph of the default model (`ti2v-5b`) at one seat. */
+const readWan22Graph = async (component: string, dtype: string): Promise<IrGraph> => {
+  const manifest: ContainerManifest = JSON.parse(
+    await readTextFile(new URL("karume.json", WAN22_DIR)),
+  );
+  return await readDistributionGraph(
+    WAN22_DIR,
+    manifest,
+    manifest.defaultModel,
+    component,
+    dtype,
+    NO_MIRRORS,
+  );
+};
+
+/**
+ * The input shapes with every symbolic dimension solved to `extent` (the DiT's `S`; the VAE
+ * encoder's `8h` / `8w` / `h` / `w` / `S` — each graph is bound on its own, so one value per graph
+ * is consistent).
+ */
+const solvedShapes = (
+  graph: IrGraph,
+  extent: number,
+): Readonly<Record<string, readonly number[]>> =>
+  Object.fromEntries(
+    graph.inputs.map((spec) => [
+      spec.name,
+      spec.shape.map((dim) => (typeof dim === "number" ? dim : extent)),
+    ]),
+  );
+
+/**
+ * The Wan2.2 DiT (30 blocks + the head), measured 2026-10-24:
+ *
+ * - **rope 60**: the pair-form RoPE of q and k in the 30 self-attention blocks.
+ * - **adaln 61**: the per-token adaLN (`where` picks the condition / generation vector per token)
+ *   before the self-attention and before the FFN of the 30 blocks, plus the head's.
+ * - **gatedResidual 60**: the per-token gated residual after the self-attention output projection
+ *   and after the FFN of the 30 blocks (the cross-attention residual has no gate).
+ * - **silu 4**: the time-embedding MLP's two SiLUs, run once per timestep stream (generation and
+ *   condition — ADR 0121 decision 3).
+ *
+ * The counts do not depend on S (S = 192 and the 1280×704×121 size 7,920 are both checked). If a
+ * count moves, the exporter's node order or a rule's accepted set changed: the values stay correct
+ * (an unmatched window runs as plain nodes) and only the speed changes, so this is the only place
+ * that notices.
+ */
+test.skipIf(!WAN22_AVAILABLE)(
+  "the real Wan2.2 DiT grabs rope 60 / adaln 61 / gatedResidual 60 / silu 4 per run, and the VAE chunk graphs keep their counts",
+  async () => {
+    const transformer = await readWan22Graph("transformer", "i8");
+    for (const sequence of [192, 7920]) {
+      assertEquals(
+        fusionCounts(transformer, solvedShapes(transformer, sequence)),
+        { ...NONE, silu: 4, rope: 60, adaln: 61, gatedResidual: 60 },
+        `transformer S=${sequence}`,
+      );
+    }
+    // The VAE graphs have none of the DiT forms: SiLU everywhere, the spatial nearest ×2 in the
+    // decoder chunks. Both seats of the decoder carry the same node order.
+    const vae: readonly (readonly [string, readonly string[], Partial<FusionCounts>])[] = [
+      ["vae_encoder_pre", ["f16"], { silu: 18 }],
+      ["vae_encoder_attn", ["f16"], {}],
+      ["vae_encoder_post", ["f16"], { silu: 3 }],
+      ["vae_decoder_first", ["f16", "i8"], { silu: 29, upsample2x: 3 }],
+      ["vae_decoder_next", ["f16", "i8"], { silu: 29, upsample2x: 3 }],
+      ["vae_decoder_first_32", ["f16", "i8"], { silu: 29, upsample2x: 3 }],
+      ["vae_decoder_next_32", ["f16", "i8"], { silu: 29, upsample2x: 3 }],
+    ];
+    for (const [component, seats, counts] of vae) {
+      for (const seat of seats) {
+        const graph = await readWan22Graph(component, seat);
+        assertEquals(
+          fusionCounts(graph, solvedShapes(graph, 64)),
+          { ...NONE, ...counts },
+          `${component}/${seat}`,
+        );
+      }
+    }
+  },
+);

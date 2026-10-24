@@ -218,14 +218,25 @@ const expectedRowBlocks = (tokens: number, bindingLimit: number): number =>
 const B570_STORAGE_BINDING_LIMIT = 2_147_483_644;
 
 /**
- * この IR で計画時に掛かる融合。MUST: 値が動いたら赤にする（融合はエクスポータのノード順 1 つで黙って外れる — 唯一の観測点）。
+ * The fusions this IR gets at plan time. MUST: a moved value is red (a fusion silently drops out
+ * with one change of the exporter's node order — this is the only observation point). The same
+ * counts are checked without a GPU against the distribution in `e2e_wan_ti2v_fusion_counts_test.ts`.
  *
- * - `adaln` 0 / `rope` 0: 2.1 と同じ理由（変調ベクトルを layer_norm の前に切り出す・RoPE は interleave 形）
- * - `silu` 4: 時刻の MLP の SiLU 2 本（`time_embedder` の中と `act_fn`）を M = 1 で 2 回回す（決定 3）ので 2.1 の 2 本の倍。
- *   IR で `sigmoid` の直後に、その出力を受ける `mul` が来る並び（ルール `silu` の形）を GPU なしで数えた値（4 本）で、
- *   最初の GPU の実走で確かめる
+ * - `adaln` 61: the per-token adaLN (`where(condition_mask, …)` picks the condition / generation
+ *   vector per token — decision 3) before the self-attention and the FFN of the 30 blocks, plus
+ *   the head's — ADALN_RULE's per-token form (2026-10-24).
+ * - `rope` 60: the pair-form RoPE of q and k in the 30 self-attention blocks (2026-10-24).
+ * - `gatedResidual` 60: the per-token gated residual after the self-attention output projection
+ *   and after the FFN of the 30 blocks (2026-10-24).
+ * - `silu` 4: the time MLP's two SiLUs (inside `time_embedder` and `act_fn`) run twice at M = 1
+ *   (decision 3), twice 2.1's two.
  */
-const EXPECTED_FUSIONS: Partial<FusionCounts> = { adaln: 0, rope: 0, silu: 4 };
+const EXPECTED_FUSIONS: Partial<FusionCounts> = {
+  adaln: 61,
+  rope: 60,
+  gatedResidual: 60,
+  silu: 4,
+};
 
 /**
  * scale × 2 の故障注入の linear（中ほどのブロックの self-attention の V — q / k は直後の RMS norm が倍率を打ち消して値に

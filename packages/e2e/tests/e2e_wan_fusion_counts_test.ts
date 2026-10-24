@@ -54,31 +54,37 @@ const wanShapes = (graph: IrGraph, sequence: number): Readonly<Record<string, re
   );
 
 /**
- * Wan2.1 の 3 部品。実測（2026-10-03）の値を凍結する:
+ * The three Wan2.1 components. The counts are frozen from measurements (2026-10-03; rope from
+ * 2026-10-24):
  *
- * - **transformer: silu 2 だけ**。`sigmoid` 2 本は時刻埋め込みの MLP（`time_embedder` の SiLU と
- *   `time_proj` の前の SiLU）で、両方 SiLU として掴む。
- *   - rope 0: RoPE は複素形を「隣接対の入れ替え + cos / sin の要素積」に実数化した**対の形**
- *     （`recipe wan/dit_patch.py`）で、ROPE_RULE が受理する `[1,H,S,D]` の半割り形ではない。
- *   - adaln 0: 変調ベクトルを layer_norm の**前**に切り出す並びで、ADALN_RULE が要求する layer_norm
- *     直後の reshape 2〜3 本が無い（perf-ledger K-73）。
- *   - rowBlockAttention / identityExpand 0: attention は融合 op（`attention` 60 本）で、分解の綴りを
- *     持たない。
- * - **VAE の chunk グラフ（first / next）: silu 29 + upsample2x 3**。`sigmoid` 29 本は全て SiLU
- *   （resnet の活性と head の前）で、upsample2x は空間 ×2 の 3 段（nearest ×2 + conv2d）。時間方向の
- *   upsample（next の `time_conv`）は upsample2x の形ではない。
+ * - **transformer: silu 2 and rope 60**. The two `sigmoid`s are the time-embedding MLP's (the SiLU
+ *   inside `time_embedder` and the one before `time_proj`); both are grabbed as SiLU.
+ *   - rope 60: the RoPE of q and k in the 30 self-attention blocks, written as the complex
+ *     rotation in real numbers (the **pair form** — swap of adjacent pairs + elementwise products
+ *     with cos / sin; `recipe wan/dit_patch.py`). ROPE_RULE accepts it exactly as its second form
+ *     (the pair rotation of `kernels/rope.ts`).
+ *   - adaln 0: the modulation vectors are sliced **before** the layer_norm, so the 2–3 reshapes
+ *     right after the layer_norm that ADALN_RULE's broadcast form requires are absent, and there is
+ *     no `where` of the per-token form (perf-ledger K-73).
+ *   - gatedResidual 0: the gate is a broadcast vector (no per-token `where`).
+ *   - rowBlockAttention / identityExpand 0: attention is the fused op (`attention`, 60 of them),
+ *     with no decomposed spelling.
+ * - **The VAE chunk graphs (first / next): silu 29 + upsample2x 3**. All 29 `sigmoid`s are SiLU
+ *   (the resnet activations and before the head), and upsample2x is the three spatial ×2 stages
+ *   (nearest ×2 + conv2d). The temporal upsample (`time_conv` of next) is not the upsample2x form.
  *
- * ヒット数は S に依存しない（DiT は S = 192 と実寸 14,040 の 2 点）。0 が非 0 に変わったら、まず
- * ROPE_RULE / ADALN_RULE の受理集合が意図せず広がっていないかを見る（Irodori DiT の門と同じ読み方）。
+ * The counts do not depend on S (the DiT is checked at S = 192 and the full size 14,040). If a
+ * count moves, first check whether a rule's accepted set widened or narrowed unintentionally (the
+ * same reading as the Irodori DiT gate).
  */
 test.skipIf(!WAN_AVAILABLE)(
-  "実資産の Wan2.1 は run 1 回で DiT silu 2・VAE の chunk グラフ silu 29 / upsample2x 3 を掴む（rope / adaln は綴りが違って 0）",
+  "the real Wan2.1 grabs DiT silu 2 / rope 60 and the VAE chunk graphs' silu 29 / upsample2x 3 per run (adaln is a different spelling: 0)",
   async () => {
     const transformer = await readWanGraph("transformer");
     for (const sequence of [192, 14040]) {
       assertEquals(
         fusionCounts(transformer, wanShapes(transformer, sequence)),
-        { ...NONE, silu: 2 },
+        { ...NONE, silu: 2, rope: 60 },
         `transformer S=${sequence}`,
       );
     }

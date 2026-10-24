@@ -472,18 +472,27 @@ const expectedRowBlocks = (tokens: number, bindingLimit: number): number =>
 const B570_STORAGE_BINDING_LIMIT = 2_147_483_644;
 
 /**
- * この IR で計画時に掛かる融合（実測 — `lastRunFusions`）。MUST: 値が動いたら赤にする（融合は
- * エクスポータのノード順 1 つで黙って外れ、値は正しいまま性能だけが変わる — 唯一の観測点）。
+ * The fusions this IR gets at plan time (measured — `lastRunFusions`). MUST: a moved value is red
+ * (a fusion silently drops out with one change of the exporter's node order, and the values stay
+ * correct while only the speed changes — this is the only observation point).
  *
- * - `adaln` 0: Wan の変調は `layer_norm → add(scale, one) → mul → add(shift)` で計算 4 本の並びはルールと
- *   同じだが、ルールは layer_norm の直後に reshape 2〜3 本（変調ベクトルの unsqueeze）を要求する。Wan は
- *   変調ベクトルを layer_norm の**前**に表から切り出すので、間に reshape が 0 本で掴まれない（ADR 0118
- *   決定 3 の推測どおり。ルールの拡張は perf の別起票）。
- * - `rope` 0: 融合ルールは half-split 形だけを掴む。Wan は interleave 形（実数化パッチ — 非融合の
- *   primitive 列で走る）。
- * - `silu` 2: 時刻埋め込みの MLP の SiLU 2 本（`time_embedder` の中と `act_fn`）。
+ * - `adaln` 0: Wan's modulation is `layer_norm → add(scale, one) → mul → add(shift)`, the same four
+ *   computations as the rule, but the rule's broadcast form requires 2–3 reshapes (the modulation
+ *   vectors' unsqueeze) right after the layer_norm. Wan slices the modulation vectors from the table
+ *   **before** the layer_norm, so there are 0 reshapes in between and it is not grabbed (as ADR
+ *   0118 decision 3 guessed; widening the rule is a separate perf item, perf-ledger K-73). 2.1 has
+ *   no per-token `where` either, so the per-token form does not apply.
+ * - `rope` 60: the pair-form RoPE (the complex rotation in real numbers) of q and k in the 30
+ *   self-attention blocks — ROPE_RULE's second exact form (2026-10-24).
+ * - `gatedResidual` 0: 2.1's gates are broadcast vectors (no per-token `where`).
+ * - `silu` 2: the two SiLUs of the time-embedding MLP (inside `time_embedder` and `act_fn`).
  */
-const EXPECTED_FUSIONS: Partial<FusionCounts> = { adaln: 0, rope: 0, silu: 2 };
+const EXPECTED_FUSIONS: Partial<FusionCounts> = {
+  adaln: 0,
+  rope: 60,
+  gatedResidual: 0,
+  silu: 2,
+};
 
 const readBuffer = async (url: URL): Promise<ArrayBuffer> => {
   const bytes = await readFile(url);
