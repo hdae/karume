@@ -417,6 +417,42 @@
     ],
     "./tune": [
       {
+        "name": "ATTENTION_BENCH_FORMAT",
+        "kind": "variable"
+      },
+      {
+        "name": "AttentionBenchOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AttentionBenchProgress",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AttentionBenchReport",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AttentionBenchRoute",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AttentionBenchShape",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AttentionBenchShapeResult",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AttentionBenchStage",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AttentionBenchVariants",
+        "kind": "typeAlias"
+      },
+      {
         "name": "DeriveGeometryProfileOptions",
         "kind": "typeAlias"
       },
@@ -473,6 +509,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "WAN22_ATTENTION_SHAPES",
+        "kind": "variable"
+      },
+      {
         "name": "deriveGeometryProfile",
         "kind": "function"
       },
@@ -486,6 +526,10 @@
       },
       {
         "name": "parseGeometryProfileJson",
+        "kind": "function"
+      },
+      {
+        "name": "runAttentionRouteBench",
         "kind": "function"
       },
       {

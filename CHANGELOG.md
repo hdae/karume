@@ -98,6 +98,11 @@ measurements in `docs/research/`.
   automatically. Default presets are unchanged; the rule for choosing them and the three manifest
   constraints the distribution gate now checks are in ADR 0128.
 
+- `runAttentionRouteBench` (`@karume/runtime/tune`): times the two a8 routes of fused attention — S stored
+  in f16 over three dispatches, and the online kernel — at given shapes (default: Wan2.2 TI2V-5B self- and
+  cross-attention) with the kernels, row blocks and variants production picks on the caller's device, and
+  returns a JSON record (`karume-attention-bench/1`). A diagnostic; it chooses nothing and changes no profile.
+
 ### Fixed
 
 - `Session.run` waits for the device to return released memory before it builds a slot backing (the

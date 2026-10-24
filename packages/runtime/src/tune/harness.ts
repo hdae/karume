@@ -214,17 +214,24 @@ export type Fill = "f32" | "f16" | "i8" | "scale" | "none";
  * One resource. The name is its identifier within the resource table (the same name across kernels
  * is the same buffer — aligned with the WGSL binding names).
  */
-type ResourceSpec = {
+export type ResourceSpec = {
   readonly name: string;
   readonly bytes: number;
   readonly fill: Fill;
 };
 
 /** The generated artifacts and sizes of one dispatch. */
-type Launch = {
+export type Launch = {
   readonly key: string;
   readonly wgsl: string;
   readonly params: Uint32Array<ArrayBuffer>;
+  /**
+   * The params buffer's usage at binding 0 (default `uniform`). `storage` is for the kernels that
+   * read their params as `var<storage, read>` (the strided copy family — recipe-builders pass
+   * `PARAMS_STORAGE_USAGE` for them); the binding-role check then expects binding 0 among the
+   * reads.
+   */
+  readonly paramsUsage?: "uniform" | "storage";
   /**
    * The names of the resources passed from binding 1 on (a table copying the order of
    * recipe-builders' `binds` — positional binding as in production). `bindings[i]` is binding
@@ -713,11 +720,14 @@ const sortedList = (values: Iterable<number>): string =>
  * so the row fails instead of binding by guesswork.
  */
 export const assertBindingRoles = (
-  launch: Pick<Launch, "key" | "bindings" | "writes">,
+  launch: Pick<Launch, "key" | "bindings" | "writes" | "paramsUsage">,
   roles: StorageRoles,
 ): void => {
   const declared = sortedList([...roles.reads, ...roles.writes]);
-  const expected = sortedList(launch.bindings.map((_, index) => index + 1));
+  const expected = sortedList([
+    ...(launch.paramsUsage === "storage" ? [0] : []),
+    ...launch.bindings.map((_, index) => index + 1),
+  ]);
   if (declared !== expected) {
     throw new Error(
       `${launch.key}: the WGSL storage bindings [${declared}] differ from the positions in the mirrored table [${expected}] (${launch.bindings.join(
@@ -928,7 +938,7 @@ export const destroySweepContext = (context: SweepContext): void => {
  * Allocates the resources and fills them with deterministic values (on failure, releases what was
  * allocated, then throws).
  */
-const createResources = async (
+export const createResources = async (
   context: SweepContext,
   specs: readonly ResourceSpec[],
 ): Promise<Map<string, GPUBuffer>> => {
@@ -968,14 +978,14 @@ const createResources = async (
 };
 
 /** A dispatch resolved down to pipeline, params and bind group. */
-type ReadyLaunch = {
+export type ReadyLaunch = {
   readonly launch: Launch;
   readonly pipeline: GPUComputePipeline;
   readonly bindGroup: GPUBindGroup;
   readonly params: GPUBuffer;
 };
 
-const prepareLaunch = async (
+export const prepareLaunch = async (
   context: SweepContext,
   launch: Launch,
   resources: ReadonlyMap<string, GPUBuffer>,
@@ -992,7 +1002,9 @@ const prepareLaunch = async (
     const buffer = gpu.device.createBuffer({
       label: `geometry-sweep-params`,
       size: Math.max(16, launch.params.byteLength),
-      usage: BUFFER_USAGE.UNIFORM | BUFFER_USAGE.COPY_DST,
+      usage:
+        (launch.paramsUsage === "storage" ? BUFFER_USAGE.STORAGE : BUFFER_USAGE.UNIFORM) |
+        BUFFER_USAGE.COPY_DST,
     });
     gpu.device.queue.writeBuffer(buffer, 0, launch.params);
     return buffer;
@@ -1146,7 +1158,7 @@ const warmUp = async (context: SweepContext, ready: ReadyLaunch, reps: number): 
 };
 
 /** The time record of one geometry (the measurement fields of a row). */
-type Timing = {
+export type Timing = {
   readonly reps: number;
   readonly rounds: readonly number[];
   readonly wallRounds: readonly number[];
@@ -1160,7 +1172,7 @@ type Timing = {
  * Measures one geometry: reset the output to 0 and run once → estimate `reps` → idle runs →
  * `rounds` measurements (protocol rules 1–3).
  */
-const timeLaunch = async (
+export const timeLaunch = async (
   context: SweepContext,
   ready: ReadyLaunch,
   output: GPUBuffer,

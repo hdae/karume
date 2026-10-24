@@ -53,6 +53,12 @@
  * per distinct browser; it is not part of the match, so an application can compare it with the
  * current `navigator.userAgent` and suggest a new sweep after a browser update.
  *
+ * {@link runAttentionRouteBench} is a separate diagnostic, not part of the profile flow: it times
+ * the two a8 routes of fused attention (S stored in f16 over three dispatches, and the online
+ * kernel) at given shapes with the kernels, row blocks and variants production would use on the
+ * caller's device, and returns a JSON-serializable record. It chooses nothing and changes no
+ * profile. The same rule applies: do not run it while inference runs on the same GPU.
+ *
  * @module
  */
 
@@ -103,3 +109,25 @@ export { geometryProfileMismatch } from "./src/tune/mismatch.ts";
  * a 16-digit hexadecimal string.
  */
 export { sweepCaseSetId } from "./src/tune/fingerprint.ts";
+
+/**
+ * Times the s16 and online routes of a8 fused attention at given shapes (default: Wan2.2 TI2V-5B's
+ * self- and cross-attention) on the caller's device and returns the record
+ * (`karume-attention-bench/1`). Uses GPU timestamps when the device was acquired with
+ * `gpuTiming: true`.
+ */
+export {
+  ATTENTION_BENCH_FORMAT,
+  runAttentionRouteBench,
+  WAN22_ATTENTION_SHAPES,
+} from "./src/tune/attention-bench.ts";
+export type {
+  AttentionBenchOptions,
+  AttentionBenchProgress,
+  AttentionBenchReport,
+  AttentionBenchRoute,
+  AttentionBenchShape,
+  AttentionBenchShapeResult,
+  AttentionBenchStage,
+  AttentionBenchVariants,
+} from "./src/tune/attention-bench.ts";
