@@ -8,7 +8,7 @@
  * imports the rules, so that would be a cycle).
  */
 
-import { outputCountOf } from "../ops.ts";
+import { outputCountOf, WHERE_OP } from "../ops.ts";
 import type { LinearGemvReduce } from "./session-types.ts";
 import { ExecutionError, type NodePlan } from "./plan.ts";
 
@@ -23,6 +23,7 @@ type FusionRuleName =
   | "upsample2x"
   | "rope"
   | "adaln"
+  | "gatedResidual"
   | "rowBlockAttention";
 
 /**
@@ -113,9 +114,9 @@ export type FusedTemp = {
  * dispatches).
  *
  * A step **may have several** dispatches. A rule whose folded result is not one dispatch
- * (`ROW_BLOCK_ATTENTION_RULE` in {@link "./fusion-rules/row-block-attention.ts"}) lines up several
- * of them with temporaries closed inside the step ({@link FusedStep.temps})
- * in between. MUST: even then, the release bookkeeping rests on the one total-use list
+ * (`ROW_BLOCK_ATTENTION_RULE` in {@link "./fusion-rules/row-block-attention.ts"}, and the
+ * per-token form of `ADALN_RULE` in {@link "./fusion-rules/adaln.ts"}) lines up several of them
+ * with temporaries closed inside the step ({@link FusedStep.temps}) in between. MUST: even then, the release bookkeeping rests on the one total-use list
  * {@link FusedStep.ins}, and not a single temporary leaks past the step boundary.
  */
 export type FusedStep = {
@@ -281,6 +282,19 @@ export const allF32 = (chain: readonly NodePlan[]): boolean =>
       step.outputs.every((out) => out.dtype === "f32") &&
       step.inputDtypes.every((dtype) => dtype === "f32"),
   );
+
+/**
+ * Whether a node is a `where` that selects between f32 values under a bool condition — the only
+ * non-f32 input a fused kernel reads (the condition as the u32 0 / 1 of ADR 0009, tested `!= 0u`
+ * as the plain where does). Every other node of a chain still goes through {@link allF32}.
+ */
+export const isF32Where = (step: NodePlan): boolean =>
+  step.node.op === WHERE_OP &&
+  step.inputDtypes.length === 3 &&
+  step.inputDtypes[0] === "bool" &&
+  step.inputDtypes[1] === "f32" &&
+  step.inputDtypes[2] === "f32" &&
+  step.outputs.every((out) => out.dtype === "f32");
 
 /**
  * Whether every internal value of the chain (the outputs of every node but the last) has "exactly

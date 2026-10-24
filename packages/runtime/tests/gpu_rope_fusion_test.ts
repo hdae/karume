@@ -4,7 +4,7 @@
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
-import { ROPE_BSHD_KEY, ROPE_KEY } from "../src/kernels/rope.ts";
+import { ROPE_BSHD_KEY, ROPE_KEY, ROPE_PAIR_BSHD_KEY } from "../src/kernels/rope.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
@@ -475,3 +475,193 @@ test.skipIf(!GPU_AVAILABLE)("BSHD RoPEは専用キーだけで走る（実GPU）
     gpu.destroy();
   }
 });
+
+// ------------------------------------------------------------ pair form (Wan's DiT)
+
+/**
+ * The pair-form RoPE as the exporter writes it for Wan's DiT: `x` `[1,S,H,D]` is viewed as pairs
+ * `[1,S,H·D/2,2]`, `slice(1..2), neg, slice(0..1), cat`, viewed back and combined with the
+ * `[1,S,1,D]` tables.
+ *
+ * `interpose=true` puts a zero-dispatch reshape between `cat` and the reshape back: the values and
+ * the physical dispatches stay the same, but the exact matcher no longer matches, so it is the
+ * unfused reference on the same backend.
+ * `separatePairs=true` makes `pairs` a graph input of its own, so the kernel's `pairs` binding is a
+ * different buffer from `x` (the rotation must come from `pairs`, not from `x`).
+ */
+const ropePairGraph = (
+  heads: number,
+  headDim: number,
+  interpose: boolean,
+  separatePairs = false,
+): DeclarationJson => {
+  const full = [1, "S", heads, headDim];
+  const pairs = [1, "S", (heads * headDim) / 2, 2];
+  const half = [1, "S", (heads * headDim) / 2, 1];
+  const values: DeclarationJson["values"] = {
+    odd: { dtype: "f32", shape: half },
+    negative: { dtype: "f32", shape: half },
+    even: { dtype: "f32", shape: half },
+    rotated: { dtype: "f32", shape: pairs },
+    rot: { dtype: "f32", shape: full },
+    direct: { dtype: "f32", shape: full },
+    cross: { dtype: "f32", shape: full },
+    y: { dtype: "f32", shape: full },
+  };
+  const nodes: DeclarationJson["nodes"] = [];
+  if (!separatePairs) {
+    values.pairs = { dtype: "f32", shape: pairs };
+    nodes.push({ op: "reshape", ins: ["x"], outs: ["pairs"], attrs: {} });
+  }
+  nodes.push(
+    { op: "slice", ins: ["pairs"], outs: ["odd"], attrs: { dim: 3, start: 1, end: 2 } },
+    { op: "neg", ins: ["odd"], outs: ["negative"], attrs: {} },
+    { op: "slice", ins: ["pairs"], outs: ["even"], attrs: { dim: 3, start: 0, end: 1 } },
+    { op: "cat", ins: ["negative", "even"], outs: ["rotated"], attrs: { dim: 3 } },
+  );
+  if (interpose) {
+    values.rotated_alias = { dtype: "f32", shape: pairs };
+    nodes.push({ op: "reshape", ins: ["rotated"], outs: ["rotated_alias"], attrs: {} });
+  }
+  nodes.push(
+    { op: "reshape", ins: [interpose ? "rotated_alias" : "rotated"], outs: ["rot"], attrs: {} },
+    { op: "mul", ins: ["x", "cos"], outs: ["direct"], attrs: {} },
+    { op: "mul", ins: ["rot", "sin"], outs: ["cross"], attrs: {} },
+    { op: "add", ins: ["direct", "cross"], outs: ["y"], attrs: {} },
+  );
+  return {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: [...new Set(nodes.map((node) => node.op))] },
+    symbols: ["S"],
+    inputs: [
+      { name: "x", dtype: "f32", shape: full },
+      ...(separatePairs ? [{ name: "pairs", dtype: "f32", shape: pairs }] : []),
+      { name: "cos", dtype: "f32", shape: [1, "S", 1, headDim] },
+      { name: "sin", dtype: "f32", shape: [1, "S", 1, headDim] },
+    ],
+    outputs: ["y"],
+    initializers: {},
+    values,
+    nodes,
+  };
+};
+
+/** ±0 / subnormals / ±Inf / NaN payloads at the head of a tensor (both signs, both pair slots). */
+const SPECIAL_WORDS = [
+  0x00000000, 0x80000000, 0x00000001, 0x80000001, 0x007fffff, 0x807fffff, 0x7f800000, 0xff800000,
+  0x7fc01234, 0xff801234,
+];
+
+const ropePairInputs = (
+  heads: number,
+  sequence: number,
+  headDim: number,
+  separatePairs: boolean,
+): Readonly<Record<string, Tensor>> => {
+  const x = fill([1, sequence, heads, headDim], (i) => Math.sin(i * 0.37) * 3.1 + i / 997);
+  new Uint32Array(x.data.buffer).set(SPECIAL_WORDS.slice(0, x.data.length));
+  const inputs: Record<string, Tensor> = {
+    x,
+    cos: fill([1, sequence, 1, headDim], (i) => Math.cos(i * 0.19 + 0.3)),
+    sin: fill([1, sequence, 1, headDim], (i) => Math.sin(i * 0.23 - 0.2)),
+  };
+  if (separatePairs) {
+    // Different values from x (and the special words shifted by one slot), so a kernel that
+    // rotated x instead of pairs would differ.
+    const pairs = fill([1, sequence, (heads * headDim) / 2, 2], (i) => Math.cos(i * 0.41) * -2.3);
+    new Uint32Array(pairs.data.buffer).set(SPECIAL_WORDS.slice(0, pairs.data.length - 1), 1);
+    inputs.pairs = pairs;
+  }
+  return inputs;
+};
+
+test.skipIf(!GPU_AVAILABLE)(
+  "pair-form RoPE fusion matches the unfused primitive sequence bit for bit (finite) / by NaN class across heads, widths and tails, and folds 8 dispatches into 1 (real GPU)",
+  async () => {
+    const gpu = await acquireGpu();
+    try {
+      // Wan2.2 (24 × 128), Irodori (10 × 64 / 12 × 64), a narrow width, one token, a wide head,
+      // and lengths that leave a partial last workgroup.
+      for (const [heads, sequence, headDim, separatePairs] of [
+        [24, 5, 128, false],
+        [10, 17, 64, false],
+        [12, 3, 64, false],
+        [3, 17, 6, false],
+        [4, 1, 128, false],
+        [2, 9, 256, false],
+        [3, 7, 128, true],
+      ] as const) {
+        const label = `H=${heads} S=${sequence} D=${headDim}${separatePairs ? " separate pairs" : ""}`;
+        const inputs = ropePairInputs(heads, sequence, headDim, separatePairs);
+        const fused = await createSessionFromContainer(
+          gpu,
+          await openModelBytes(ropePairGraph(heads, headDim, false, separatePairs), []),
+          GRAPH_NAME,
+        );
+        const split = await createSessionFromContainer(
+          gpu,
+          await openModelBytes(ropePairGraph(heads, headDim, true, separatePairs), []),
+          GRAPH_NAME,
+        );
+        try {
+          const actual = (await fused.run(inputs)).y;
+          const expected = (await split.run(inputs)).y;
+          assertEquals(actual.shape, [1, sequence, heads, headDim], label);
+          assertFloatParity(bits(actual), bits(expected));
+          assertEquals(fused.diagnostics().lastRunFusions?.rope, 1, `${label}: fused counter`);
+          assertEquals(split.diagnostics().lastRunFusions?.rope, 0, `${label}: reference counter`);
+          assertEquals(fused.diagnostics().submit.dispatchCount, 1, `${label}: one pass`);
+          assertEquals(
+            split.diagnostics().submit.dispatchCount,
+            8,
+            `${label}: slice + neg + slice + cat×2 + mul×2 + add`,
+          );
+          assertEquals(
+            requireCensus(fused.diagnostics().lastRunPipelines, label).map((row) => row.key),
+            [ROPE_PAIR_BSHD_KEY],
+            `${label}: census`,
+          );
+        } finally {
+          await fused.dispose();
+          await split.dispose();
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+);
+
+test.skipIf(!GPU_AVAILABLE)(
+  "pair-form RoPE matches the unfused sequence over several grid-stride passes (real GPU)",
+  async () => {
+    const gpu = await acquireGpu({ [LIMIT_CAPS]: { maxComputeWorkgroupsPerDimension: 2 } });
+    const heads = 8;
+    const sequence = 17;
+    const headDim = 128;
+    try {
+      assertEquals(gpu.limits.maxComputeWorkgroupsPerDimension, 2);
+      const inputs = ropePairInputs(heads, sequence, headDim, false);
+      const fused = await createSessionFromContainer(
+        gpu,
+        await openModelBytes(ropePairGraph(heads, headDim, false), []),
+        GRAPH_NAME,
+      );
+      const split = await createSessionFromContainer(
+        gpu,
+        await openModelBytes(ropePairGraph(heads, headDim, true), []),
+        GRAPH_NAME,
+      );
+      try {
+        assertFloatParity(bits((await fused.run(inputs)).y), bits((await split.run(inputs)).y));
+        assertEquals(fused.diagnostics().lastRunFusions?.rope, 1);
+      } finally {
+        await fused.dispose();
+        await split.dispose();
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+);

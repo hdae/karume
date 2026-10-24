@@ -9,9 +9,15 @@
 import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { elementwiseKey } from "../src/codegen/elementwise.ts";
-import { ADALN_NORM_KEY, adalnNormParams } from "../src/kernels/adaln-norm.ts";
+import {
+  ADALN_MODULATION_PACK_KEY,
+  ADALN_NORM_KEY,
+  ADALN_NORM_TOKEN_KEY,
+  adalnNormParams,
+} from "../src/kernels/adaln-norm.ts";
 import { bmmKey } from "../src/kernels/bmm.ts";
-import { ROPE_BSHD_KEY, ROPE_KEY } from "../src/kernels/rope.ts";
+import { GATED_RESIDUAL_KEY } from "../src/kernels/gated-residual.ts";
+import { ROPE_BSHD_KEY, ROPE_KEY, ROPE_PAIR_BSHD_KEY } from "../src/kernels/rope.ts";
 import { siluKey } from "../src/kernels/silu.ts";
 import { SAFE_SOFTMAX_KEY } from "../src/kernels/softmax.ts";
 import { UPSAMPLE_2X_KEY } from "../src/kernels/upsample2x.ts";
@@ -71,6 +77,7 @@ test("ルール表の先頭 op は互いに素で、適用順が結果に効か�
       "upsample2x",
       "rope",
       "adaln",
+      "gatedResidual",
       "rowBlockAttention",
     ],
   );
@@ -90,6 +97,7 @@ test("ルール表の先頭 op は互いに素で、適用順が結果に効か�
     "rms_norm",
     "sigmoid",
     "slice",
+    "where",
   ]);
 });
 
@@ -795,6 +803,217 @@ test("adaLN の反例（gap の本数 / gap が norm を消費 / 内部 output /
   }
 });
 
+type AdalnTokenOptions = {
+  /** The shift `where` reads a different mask from the scale `where`. */
+  readonly separateMasks?: boolean;
+  /** The mask is `[1,1,1]` (one flag for every row — not one per token). */
+  readonly broadcastMask?: boolean;
+  /** The mask is `[1,rows,dim]` (per element — not one per token). */
+  readonly fullMask?: boolean;
+  /** The condition-side scale is `[1,rows,dim]` (per row — not a broadcast vector). */
+  readonly perRowVector?: boolean;
+  /** `mul(s, t)` instead of `mul(t, s)`. */
+  readonly swappedMul?: boolean;
+  /** `add(one, sel_scale)` instead of `add(sel_scale, one)`. */
+  readonly swappedModulate?: boolean;
+  /** `add(sel_shift, p)` instead of `add(p, sel_shift)`. */
+  readonly swappedOffset?: boolean;
+  /** `one` as `[dim]` (the kernel reads `one[0]` only). */
+  readonly wideOne?: boolean;
+  /** The layer_norm output is a graph output. */
+  readonly normOutput?: boolean;
+  /** The selected scale gets a second consumer. */
+  readonly selectExtraConsumer?: boolean;
+  /** `where(mask, scale_c, scale_c)` (the same value in two bind slots). */
+  readonly sharedVector?: boolean;
+  /** A zero-dispatch reshape of the selected scale between the `where` and its `add`. */
+  readonly gap?: boolean;
+};
+
+/**
+ * Wan2.2's per-token adaLN: the modulation vectors are picked per token by
+ * `where(mask, condition, generation)` and the window is the 6 contiguous nodes.
+ */
+const adalnTokenGraph = (options: AdalnTokenOptions = {}): DeclarationJson => {
+  const dtype = "f32";
+  const row = [1, ROWS, DIM];
+  const vector = [1, 1, DIM];
+  const mask = options.broadcastMask ? [1, 1, 1] : options.fullMask ? row : [1, ROWS, 1];
+  const selected = options.broadcastMask ? vector : row;
+  const values: DeclarationJson["values"] = {
+    t: { dtype, shape: row },
+    sel_scale: { dtype, shape: selected },
+    s: { dtype, shape: selected },
+    p: { dtype, shape: row },
+    sel_shift: { dtype, shape: selected },
+    y: { dtype, shape: row },
+  };
+  const inputs: DeclarationJson["inputs"] = [
+    { name: "x", dtype, shape: row },
+    { name: "ln_weight", dtype, shape: [DIM] },
+    { name: "ln_bias", dtype, shape: [DIM] },
+    { name: "mask", dtype: "bool", shape: mask },
+    ...(options.separateMasks ? [{ name: "mask2", dtype: "bool", shape: mask }] : []),
+    { name: "one", dtype, shape: options.wideOne ? [DIM] : [1] },
+    { name: "scale_c", dtype, shape: options.perRowVector ? row : vector },
+    { name: "scale_g", dtype, shape: vector },
+    { name: "shift_c", dtype, shape: vector },
+    { name: "shift_g", dtype, shape: vector },
+  ];
+  const extraOutputs: string[] = [];
+  const nodes: DeclarationJson["nodes"] = [
+    {
+      op: "layer_norm",
+      ins: ["x", "ln_weight", "ln_bias"],
+      outs: ["t"],
+      attrs: { normalized_shape: [DIM], eps: 0.000001 },
+    },
+    {
+      op: "where",
+      ins: ["mask", "scale_c", options.sharedVector ? "scale_c" : "scale_g"],
+      outs: ["sel_scale"],
+      attrs: {},
+    },
+  ];
+  let selectedScale = "sel_scale";
+  if (options.gap) {
+    values.sel_scale_alias = { dtype, shape: selected };
+    nodes.push({ op: "reshape", ins: ["sel_scale"], outs: ["sel_scale_alias"], attrs: {} });
+    selectedScale = "sel_scale_alias";
+  }
+  nodes.push(
+    {
+      op: "add",
+      ins: options.swappedModulate ? ["one", selectedScale] : [selectedScale, "one"],
+      outs: ["s"],
+      attrs: {},
+    },
+    { op: "mul", ins: options.swappedMul ? ["s", "t"] : ["t", "s"], outs: ["p"], attrs: {} },
+    {
+      op: "where",
+      ins: [options.separateMasks ? "mask2" : "mask", "shift_c", "shift_g"],
+      outs: ["sel_shift"],
+      attrs: {},
+    },
+    {
+      op: "add",
+      ins: options.swappedOffset ? ["sel_shift", "p"] : ["p", "sel_shift"],
+      outs: ["y"],
+      attrs: {},
+    },
+  );
+  if (options.selectExtraConsumer) {
+    values.sel_copy = { dtype, shape: selected };
+    nodes.push({ op: "neg", ins: ["sel_scale"], outs: ["sel_copy"], attrs: {} });
+    extraOutputs.push("sel_copy");
+  }
+  return {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: [...new Set(nodes.map((node) => node.op))] },
+    symbols: [],
+    inputs,
+    outputs: [...(options.normOutput ? ["t"] : []), "y", ...extraOutputs],
+    initializers: {},
+    values,
+    nodes,
+  };
+};
+
+const fuseAdalnToken = (options: AdalnTokenOptions = {}): FusionPlan => {
+  const graph = adalnTokenGraph(options);
+  return fuse(graph, adalnInputs(graph));
+};
+
+test("per-token adaLN folds the 6 contiguous nodes into a pack dispatch and the shared staged body", () => {
+  const plan = fuseAdalnToken();
+  assertEquals(outline(plan.steps), ["fused:adaln"]);
+  const step = fusedAt(plan, 0);
+  // MUST: the total-use list follows the actual node order (the mask is used by both wheres).
+  assertEquals(step.ins, [
+    "x",
+    "ln_weight",
+    "ln_bias",
+    "mask",
+    "scale_c",
+    "scale_g",
+    "one",
+    "mask",
+    "shift_c",
+    "shift_g",
+  ]);
+  assertEquals(step.binds, [
+    "x",
+    "ln_weight",
+    "ln_bias",
+    "mask",
+    "scale_c",
+    "scale_g",
+    "one",
+    "shift_c",
+    "shift_g",
+  ]);
+  assertEquals(step.nodeCount, 6);
+  assertEquals(step.outputName, "y");
+  // The packed table `[scale_c, scale_g, shift_c, shift_g]` lives across the two dispatches only.
+  assertEquals(step.temps, [{ byteLength: 4 * DIM * 4, allocBefore: 0, releaseAfter: 1 }]);
+  const [pack, body] = step.dispatches;
+  assertEquals(step.dispatches.length, 2);
+  assertEquals(pack.key, ADALN_MODULATION_PACK_KEY);
+  assertEquals([...pack.params], [DIM, 0, 0, 0]);
+  assertEquals(pack.operands, [
+    { kind: "bind", index: 4 },
+    { kind: "bind", index: 5 },
+    { kind: "bind", index: 7 },
+    { kind: "bind", index: 8 },
+    { kind: "temp", id: 0 },
+  ]);
+  assertEquals(pack.workgroups, { kind: "gridStride", items: DIM, size: 256 });
+  assertEquals(body.key, ADALN_NORM_TOKEN_KEY);
+  assertEquals([...body.params], [...adalnNormParams(ROWS, DIM, 1e-6)]);
+  // x, weight, bias, mask, table, one, out = 7 storage bindings (the WebGPU default is 8).
+  assertEquals(body.operands, [
+    { kind: "bind", index: 0 },
+    { kind: "bind", index: 1 },
+    { kind: "bind", index: 2 },
+    { kind: "bind", index: 3 },
+    { kind: "temp", id: 0 },
+    { kind: "bind", index: 6 },
+    { kind: "output" },
+  ]);
+  assertEquals(body.workgroups, { kind: "gridStride", items: ROWS, size: 1 });
+  assertEquals(plan.counts.adaln, 1);
+  assertEquals(plan.counts.gatedResidual, 0);
+});
+
+test("per-token adaLN counterexamples (two masks / mask and vector shapes / input orders / one's shape / internal output / extra consumer / bind duplicate / gap) are not grabbed", () => {
+  const cases: readonly (readonly [string, AdalnTokenOptions])[] = [
+    ["two different masks", { separateMasks: true }],
+    ["mask [1,1,1]", { broadcastMask: true }],
+    ["mask per element", { fullMask: true }],
+    ["per-row scale vector", { perRowVector: true }],
+    ["mul(s, t)", { swappedMul: true }],
+    ["add(one, sel_scale)", { swappedModulate: true }],
+    ["add(sel_shift, p)", { swappedOffset: true }],
+    ["one as [dim]", { wideOne: true }],
+    ["layer_norm output is a graph output", { normOutput: true }],
+    ["selected scale has another consumer", { selectExtraConsumer: true }],
+    ["where(mask, v, v)", { sharedVector: true }],
+    ["reshape between where and add", { gap: true }],
+  ];
+  for (const [label, options] of cases) {
+    const plan = fuseAdalnToken(options);
+    assertEquals(plan.counts.adaln, 0, `${label}: adaln counter`);
+    // Neither `where` of the window may be taken by the gated-residual rule instead.
+    assertEquals(plan.counts.gatedResidual, 0, `${label}: gatedResidual counter`);
+    assertEquals(
+      plan.steps.every((step) => step.kind === "node"),
+      true,
+      `${label}: ${outline(plan.steps).join(",")}`,
+    );
+  }
+});
+
 test("カウンタは融合が並んだグラフでルール別に積み上がる", () => {
   const graph = ropeGraph({ heads: 2 });
   // RoPE 鎖の直後に SiLU 鎖を継ぎ足す（先頭 op が互いに素なので順に掴まれる）。
@@ -814,6 +1033,7 @@ test("カウンタは融合が並んだグラフでルール別に積み上が�
     upsample2x: 0,
     rope: 1,
     adaln: 0,
+    gatedResidual: 0,
     rmsNormAdd: 0,
     linearStaticQuantize: 0,
     rowBlockAttention: 0,
@@ -1242,4 +1462,409 @@ test("BSHD RoPEはcos/sinの軸が別なら掴まず、共通の位置表のslic
   const plan = fuse(ropeGraph(sliced), ropeInputs(sliced));
   assertEquals(outline(plan.steps), ["sym_prefix_slice", "fused:rope"]);
   assertEquals(fusedAt(plan, 1).dispatches[0].key, ROPE_BSHD_KEY);
+});
+
+// ------------------------------------------------------------ RoPE (pair form)
+
+type RopePairOptions = {
+  readonly heads?: number;
+  readonly headDim?: number;
+  /** `pairs` is a graph input of its own instead of the reshape of `x` (the kernel binds both). */
+  readonly separatePairs?: boolean;
+  /** A zero-dispatch reshape between `cat` and the reshape back (breaks the exact wiring only). */
+  readonly interpose?: boolean;
+  /** `odd` is a graph output (an internal value must stay private). */
+  readonly internalOutput?: boolean;
+  /** `negative` gets a second consumer. */
+  readonly extraConsumer?: boolean;
+  /** The two slices swap their boundaries (`0..1` is negated — the opposite rotation). */
+  readonly swappedSlices?: boolean;
+  /** `cat(even, negative)` instead of `cat(negative, even)`. */
+  readonly swappedCat?: boolean;
+  /** `add(cross, direct)` instead of `add(direct, cross)`. */
+  readonly swappedAdd?: boolean;
+  /** cos / sin as `[1,1,S,D]` (the BHSD broadcast) while x stays `[1,S,H,D]`. */
+  readonly bhsdTables?: boolean;
+  /** cos / sin as `[1,S,H,D]` (per-head tables — no broadcast). */
+  readonly perHeadTables?: boolean;
+  /**
+   * Irodori's first use of the shared tables: a `sym_prefix_slice` of each table sits between the
+   * reshape back and its `mul` (two in-window nodes the pair form does not accept).
+   */
+  readonly prefixSlicedTables?: boolean;
+  /** Batch 2 (the accepted form is B=1). */
+  readonly batch2?: boolean;
+};
+
+/**
+ * Wan's DiT RoPE (the complex rotation in real numbers): `x` `[1,S,H,D]` is viewed as pairs
+ * `[1,S,H·D/2,2]`, the pair is swapped with the second element negated, viewed back and combined
+ * with the `[1,S,1,D]` tables. S = 5.
+ */
+const ropePairGraph = (options: RopePairOptions = {}): DeclarationJson => {
+  const heads = options.heads ?? 2;
+  const headDim = options.headDim ?? 128;
+  const batch = options.batch2 ? 2 : 1;
+  const sequence = 5;
+  const pairCount = (heads * headDim) / 2;
+  const full = [batch, sequence, heads, headDim];
+  const pairs = [batch, sequence, pairCount, 2];
+  const half = [batch, sequence, pairCount, 1];
+  const table = options.perHeadTables
+    ? full
+    : options.bhsdTables
+      ? [1, 1, sequence, headDim]
+      : [1, sequence, 1, headDim];
+  const values: DeclarationJson["values"] = {
+    odd: { dtype: "f32", shape: half },
+    negative: { dtype: "f32", shape: half },
+    even: { dtype: "f32", shape: half },
+    rotated: { dtype: "f32", shape: pairs },
+    rot: { dtype: "f32", shape: full },
+    direct: { dtype: "f32", shape: full },
+    cross: { dtype: "f32", shape: full },
+    y: { dtype: "f32", shape: full },
+  };
+  const inputs: DeclarationJson["inputs"] = [{ name: "x", dtype: "f32", shape: full }];
+  const nodes: DeclarationJson["nodes"] = [];
+  if (options.separatePairs) {
+    inputs.push({ name: "pairs", dtype: "f32", shape: pairs });
+  } else {
+    values.pairs = { dtype: "f32", shape: pairs };
+    nodes.push({ op: "reshape", ins: ["x"], outs: ["pairs"], attrs: {} });
+  }
+  const [oddRange, evenRange] = options.swappedSlices
+    ? [
+        { start: 0, end: 1 },
+        { start: 1, end: 2 },
+      ]
+    : [
+        { start: 1, end: 2 },
+        { start: 0, end: 1 },
+      ];
+  nodes.push(
+    { op: "slice", ins: ["pairs"], outs: ["odd"], attrs: { dim: 3, ...oddRange } },
+    { op: "neg", ins: ["odd"], outs: ["negative"], attrs: {} },
+    { op: "slice", ins: ["pairs"], outs: ["even"], attrs: { dim: 3, ...evenRange } },
+    {
+      op: "cat",
+      ins: options.swappedCat ? ["even", "negative"] : ["negative", "even"],
+      outs: ["rotated"],
+      attrs: { dim: 3 },
+    },
+  );
+  let rotatedForView = "rotated";
+  if (options.interpose) {
+    values.rotated_alias = { dtype: "f32", shape: pairs };
+    nodes.push({ op: "reshape", ins: ["rotated"], outs: ["rotated_alias"], attrs: {} });
+    rotatedForView = "rotated_alias";
+  }
+  nodes.push({ op: "reshape", ins: [rotatedForView], outs: ["rot"], attrs: {} });
+  const prefixSlice = (name: string): void => {
+    values[`${name}_table`] = { dtype: "f32", shape: [1, 8, 1, headDim] };
+    values[name] = { dtype: "f32", shape: [1, "T", 1, headDim] };
+    nodes.push({
+      op: "sym_prefix_slice",
+      ins: [`${name}_table`],
+      outs: [name],
+      attrs: { sym: "T", slices: [{ dim: 1, coeff: 1, offset: 0 }] },
+    });
+  };
+  if (options.prefixSlicedTables) prefixSlice("cos");
+  nodes.push({ op: "mul", ins: ["x", "cos"], outs: ["direct"], attrs: {} });
+  if (options.prefixSlicedTables) prefixSlice("sin");
+  nodes.push(
+    { op: "mul", ins: ["rot", "sin"], outs: ["cross"], attrs: {} },
+    {
+      op: "add",
+      ins: options.swappedAdd ? ["cross", "direct"] : ["direct", "cross"],
+      outs: ["y"],
+      attrs: {},
+    },
+  );
+  if (options.extraConsumer) {
+    values.negative_copy = { dtype: "f32", shape: half };
+    nodes.push({ op: "neg", ins: ["negative"], outs: ["negative_copy"], attrs: {} });
+  }
+  return {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: [...new Set(nodes.map((node) => node.op))] },
+    symbols: options.prefixSlicedTables ? ["T"] : [],
+    inputs: [
+      ...inputs,
+      ...(options.prefixSlicedTables
+        ? [{ name: "bind", dtype: "f32", shape: ["T"] }]
+        : [
+            { name: "cos", dtype: "f32", shape: table },
+            { name: "sin", dtype: "f32", shape: table },
+          ]),
+    ],
+    outputs: [
+      ...(options.internalOutput ? ["odd"] : []),
+      "y",
+      ...(options.extraConsumer ? ["negative_copy"] : []),
+    ],
+    initializers: options.prefixSlicedTables ? { cos_table: {}, sin_table: {} } : {},
+    values,
+    nodes,
+  };
+};
+
+const ropePairInputs = (graph: DeclarationJson): Readonly<Record<string, readonly number[]>> =>
+  Object.fromEntries(
+    graph.inputs.map((spec) => [spec.name, spec.name === "bind" ? [5] : (spec.shape as number[])]),
+  );
+
+const fuseRopePair = (options: RopePairOptions = {}): FusionPlan => {
+  const graph = ropePairGraph(options);
+  return fuse(graph, ropePairInputs(graph));
+};
+
+test("pair-form RoPE folds the 8-node window into one step that binds x and its pair view separately", () => {
+  for (const [heads, headDim] of [
+    [2, 128],
+    [24, 128],
+    [10, 64],
+    [3, 6],
+  ] as const) {
+    const label = `H=${heads} D=${headDim}`;
+    const plan = fuseRopePair({ heads, headDim });
+    // The reshape x → pairs lies before the window and stays a zero-dispatch alias.
+    assertEquals(outline(plan.steps), ["reshape", "fused:rope"], label);
+    const step = fusedAt(plan, 1);
+    // MUST: the total-use list follows the actual node order (slice, slice, then the direct mul).
+    assertEquals(step.ins, ["pairs", "pairs", "x", "cos", "sin"], `${label}: total uses`);
+    assertEquals(step.binds, ["x", "pairs", "cos", "sin"], `${label}: bind order`);
+    assertEquals(step.nodeCount, 8, label);
+    assertEquals(step.outputName, "y", label);
+    assertEquals(step.dispatches.length, 1, label);
+    assertEquals(step.dispatches[0].key, ROPE_PAIR_BSHD_KEY, label);
+    // params are [element count, heads (the table divisor), head_dim, half_dim].
+    assertEquals(
+      [...step.dispatches[0].params],
+      [5 * heads * headDim, heads, headDim, headDim / 2],
+      label,
+    );
+    assertEquals(plan.counts.rope, 1, label);
+  }
+  // The kernel reads the rotation from `pairs` itself, so a pair view that is not a reshape of x
+  // (here a graph input of its own) is folded as well — the window's semantics, not the producer.
+  const separate = fuseRopePair({ separatePairs: true });
+  assertEquals(outline(separate.steps), ["fused:rope"]);
+  assertEquals(fusedAt(separate, 0).binds, ["x", "pairs", "cos", "sin"]);
+});
+
+test("pair-form RoPE counterexamples (alias / internal output / extra consumer / slice boundaries / cat order / add order / table shapes / batch / Irodori's first use) are not grabbed", () => {
+  const cases: readonly (readonly [string, RopePairOptions])[] = [
+    ["interposed alias", { interpose: true }],
+    ["internal output", { internalOutput: true }],
+    ["extra consumer", { extraConsumer: true }],
+    ["swapped slice boundaries", { swappedSlices: true }],
+    ["cat(even, negative)", { swappedCat: true }],
+    ["add(cross, direct)", { swappedAdd: true }],
+    // H = S so that the `[1,1,S,D]` table broadcasts at all (a legal mul, not this rotation).
+    ["BHSD tables with BSHD x", { bhsdTables: true, heads: 5 }],
+    ["per-head tables", { perHeadTables: true }],
+    ["batch 2", { batch2: true }],
+    // Irodori's DiT / speaker: the first use of the shared tables slices them inside the window.
+    // Only the later uses (exactly the Wan spelling) are folded.
+    ["two sym_prefix_slice in the window", { prefixSlicedTables: true }],
+  ];
+  for (const [label, options] of cases) {
+    const plan = fuseRopePair(options);
+    assertEquals(plan.counts.rope, 0, `${label}: fusion counter`);
+    assertEquals(
+      plan.steps.every((step) => step.kind === "node"),
+      true,
+      `${label}: ${outline(plan.steps).join(",")}`,
+    );
+  }
+});
+
+test("pair-form RoPE does not take the half-split window and the half split does not take the pair form", () => {
+  // The two forms share the leading `slice`; the second op decides. A half-split window keeps
+  // its own key, and a pair window never becomes a half-split step.
+  const half = fuse(
+    ropeGraph({ layout: "bshd", heads: 4 }),
+    ropeInputs({ layout: "bshd", heads: 4 }),
+  );
+  assertEquals(fusedAt(half, 0).dispatches[0].key, ROPE_BSHD_KEY);
+  const pair = fuseRopePair({ heads: 4 });
+  assertEquals(fusedAt(pair, 1).dispatches[0].key, ROPE_PAIR_BSHD_KEY);
+});
+
+// ------------------------------------------------------------ gated residual (gatedResidual)
+
+type GatedResidualOptions = {
+  /** `mul(g, y)` instead of `mul(y, g)`. */
+  readonly swappedMul?: boolean;
+  /** `add(p, residual)` instead of `add(residual, p)`. */
+  readonly swappedAdd?: boolean;
+  /** The mask is `[1,1,1]` (one flag for every row). */
+  readonly broadcastMask?: boolean;
+  /** The mask is `[1,rows,dim]` (per element). */
+  readonly fullMask?: boolean;
+  /** The condition-side gate is `[1,rows,dim]` (not a broadcast vector). */
+  readonly perRowGate?: boolean;
+  /** `y` is a broadcast `[1,1,dim]` vector. */
+  readonly broadcastY?: boolean;
+  /** The selected gate is a graph output. */
+  readonly gateOutput?: boolean;
+  /** The product gets a second consumer. */
+  readonly productExtraConsumer?: boolean;
+  /** `where(mask, gate_c, gate_c)`. */
+  readonly sharedGate?: boolean;
+  /** The residual is `y` itself (`add(y, mul(y, g))` — one value in two bind slots). */
+  readonly residualIsY?: boolean;
+  /** A zero-dispatch reshape of the selected gate between the `where` and the `mul`. */
+  readonly gap?: boolean;
+};
+
+/** Wan2.2's gated residual: `add(residual, mul(y, where(mask, gate_c, gate_g)))`. */
+const gatedResidualGraph = (options: GatedResidualOptions = {}): DeclarationJson => {
+  const dtype = "f32";
+  const row = [1, ROWS, DIM];
+  const vector = [1, 1, DIM];
+  const mask = options.broadcastMask ? [1, 1, 1] : options.fullMask ? row : [1, ROWS, 1];
+  const gate = options.broadcastMask && !options.perRowGate ? vector : row;
+  const values: DeclarationJson["values"] = {
+    g: { dtype, shape: gate },
+    p: { dtype, shape: row },
+    out: { dtype, shape: row },
+  };
+  const inputs: DeclarationJson["inputs"] = [
+    { name: "mask", dtype: "bool", shape: mask },
+    { name: "gate_c", dtype, shape: options.perRowGate ? row : vector },
+    { name: "gate_g", dtype, shape: vector },
+    { name: "y", dtype, shape: options.broadcastY ? vector : row },
+    ...(options.residualIsY ? [] : [{ name: "residual", dtype, shape: row }]),
+  ];
+  const nodes: DeclarationJson["nodes"] = [
+    {
+      op: "where",
+      ins: ["mask", "gate_c", options.sharedGate ? "gate_c" : "gate_g"],
+      outs: ["g"],
+      attrs: {},
+    },
+  ];
+  let selected = "g";
+  if (options.gap) {
+    values.g_alias = { dtype, shape: gate };
+    nodes.push({ op: "reshape", ins: ["g"], outs: ["g_alias"], attrs: {} });
+    selected = "g_alias";
+  }
+  const residual = options.residualIsY ? "y" : "residual";
+  nodes.push(
+    {
+      op: "mul",
+      ins: options.swappedMul ? [selected, "y"] : ["y", selected],
+      outs: ["p"],
+      attrs: {},
+    },
+    {
+      op: "add",
+      ins: options.swappedAdd ? ["p", residual] : [residual, "p"],
+      outs: ["out"],
+      attrs: {},
+    },
+  );
+  const extraOutputs: string[] = [];
+  if (options.productExtraConsumer) {
+    values.p_copy = { dtype, shape: row };
+    nodes.push({ op: "neg", ins: ["p"], outs: ["p_copy"], attrs: {} });
+    extraOutputs.push("p_copy");
+  }
+  return {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: [...new Set(nodes.map((node) => node.op))] },
+    symbols: [],
+    inputs,
+    outputs: [...(options.gateOutput ? ["g"] : []), "out", ...extraOutputs],
+    initializers: {},
+    values,
+    nodes,
+  };
+};
+
+const fuseGatedResidual = (options: GatedResidualOptions = {}): FusionPlan => {
+  const graph = gatedResidualGraph(options);
+  return fuse(graph, adalnInputs(graph));
+};
+
+test("the gated residual folds where → mul → add into one step that reads the gate per token", () => {
+  const plan = fuseGatedResidual();
+  assertEquals(outline(plan.steps), ["fused:gatedResidual"]);
+  const step = fusedAt(plan, 0);
+  assertEquals(step.ins, ["mask", "gate_c", "gate_g", "y", "residual"]);
+  assertEquals(step.binds, ["mask", "gate_c", "gate_g", "y", "residual"]);
+  assertEquals(step.nodeCount, 3);
+  assertEquals(step.outputName, "out");
+  assertEquals(step.temps, []);
+  assertEquals(step.dispatches.length, 1);
+  assertEquals(step.dispatches[0].key, GATED_RESIDUAL_KEY);
+  assertEquals([...step.dispatches[0].params], [ROWS * DIM, DIM, 0, 0]);
+  assertEquals(step.dispatches[0].workgroups, {
+    kind: "gridStride",
+    items: ROWS * DIM,
+    size: 256,
+  });
+  assertEquals(plan.counts.gatedResidual, 1);
+});
+
+test("gated residual counterexamples (input orders / mask, gate and y shapes / internal output / extra consumer / bind duplicates / gap) are not grabbed", () => {
+  const cases: readonly (readonly [string, GatedResidualOptions])[] = [
+    ["mul(g, y)", { swappedMul: true }],
+    ["add(p, residual)", { swappedAdd: true }],
+    ["mask [1,1,1]", { broadcastMask: true }],
+    ["mask per element", { fullMask: true }],
+    ["per-row gate", { perRowGate: true }],
+    ["broadcast y", { broadcastY: true }],
+    ["selected gate is a graph output", { gateOutput: true }],
+    ["product has another consumer", { productExtraConsumer: true }],
+    ["where(mask, g, g)", { sharedGate: true }],
+    ["residual is y", { residualIsY: true }],
+    ["reshape between where and mul", { gap: true }],
+  ];
+  for (const [label, options] of cases) {
+    const plan = fuseGatedResidual(options);
+    assertEquals(plan.counts.gatedResidual, 0, `${label}: fusion counter`);
+    assertEquals(
+      plan.steps.every((step) => step.kind === "node"),
+      true,
+      `${label}: ${outline(plan.steps).join(",")}`,
+    );
+  }
+});
+
+test("a Wan2.2-like block folds the gated residual and the per-token adaLN next to each other", () => {
+  // where → mul → add (the attention's gated residual) feeds the next layer_norm of the per-token
+  // adaLN (the FFN's modulation), as in Wan2.2's DiT blocks.
+  const graph = gatedResidualGraph();
+  const token = adalnTokenGraph();
+  const rename = (name: string): string =>
+    name === "x" ? "out" : name === "mask" ? "mask" : `ffn_${name}`;
+  graph.inputs.push(
+    ...token.inputs
+      .filter((spec) => spec.name !== "x" && spec.name !== "mask")
+      .map((spec) => ({ ...spec, name: rename(spec.name) })),
+  );
+  for (const [name, spec] of Object.entries(token.values)) graph.values[rename(name)] = spec;
+  graph.nodes.push(
+    ...token.nodes.map((node) => ({
+      ...node,
+      ins: node.ins.map(rename),
+      outs: node.outs.map(rename),
+    })),
+  );
+  graph.requires.ops = [...new Set(graph.nodes.map((node) => node.op))];
+  graph.outputs = ["ffn_y"];
+  const plan = fuse(graph, adalnInputs(graph));
+  assertEquals(outline(plan.steps), ["fused:gatedResidual", "fused:adaln"]);
+  assertEquals(plan.counts.gatedResidual, 1);
+  assertEquals(plan.counts.adaln, 1);
+  // The mask is consumed by both steps (1 + 2 total uses), and the residual output feeds the
+  // adaLN step.
+  assertEquals(fusedAt(plan, 1).ins.slice(0, 1), ["out"]);
 });

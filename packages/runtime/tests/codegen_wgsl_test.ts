@@ -171,11 +171,22 @@ import {
   layerNormParams,
 } from "../src/kernels/layer-norm.ts";
 import {
+  ADALN_MODULATION_PACK_KEY,
+  ADALN_MODULATION_PACK_WGSL,
   ADALN_NORM_KEY,
+  ADALN_NORM_TOKEN_KEY,
   ADALN_NORM_WGSL,
   ADALN_NORM_WORKGROUP_SIZE,
+  adalnModulationPackParams,
   adalnNormParams,
+  adalnNormWgsl,
 } from "../src/kernels/adaln-norm.ts";
+import {
+  GATED_RESIDUAL_KEY,
+  GATED_RESIDUAL_WGSL,
+  GATED_RESIDUAL_WORKGROUP_SIZE,
+  gatedResidualParams,
+} from "../src/kernels/gated-residual.ts";
 import {
   RMS_NORM_128_KEY,
   RMS_NORM_128_WGSL,
@@ -188,6 +199,7 @@ import {
 import {
   ROPE_BSHD_KEY,
   ROPE_KEY,
+  ROPE_PAIR_BSHD_KEY,
   ROPE_WORKGROUP_SIZE,
   ropeParams,
   ropeWgsl,
@@ -499,6 +511,9 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["flip.wgsl", FLIP_WGSL],
     ["rope.wgsl", ropeWgsl("bhsd")],
     ["rope_bshd.wgsl", ropeWgsl("bshd")],
+    // The pair rotation (Wan's DiT) is a third variant of the same template: the two half-split
+    // snapshots above stay byte-identical next to it.
+    ["rope_pair_bshd.wgsl", ropeWgsl("bshd", "pair")],
     ["linear.wgsl", LINEAR_WGSL],
     ["linear_v4.wgsl", linearWgsl("f32", true)],
     // skinny-M 幾何（M ≤ 64 → M16N16 — src/kernels/gemm-geometry.ts の掃引確定値）の代表
@@ -509,6 +524,11 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     // adaLN 融合（ADR 0040 の 4 本目）。**素の layer_norm と対で置く**のが条件で、
     // 行統計と affine の文字列を共有しているぶん、片方だけバイト列が動くのが最大の事故。
     ["adaln_norm.wgsl", ADALN_NORM_WGSL],
+    // The per-token variant (Wan2.2) comes from the same template as adaln_norm.wgsl; the pair
+    // pins both byte sequences, and the pack dispatch that feeds it sits next to them.
+    ["adaln_norm_token.wgsl", adalnNormWgsl("token")],
+    ["adaln_modulation_pack.wgsl", ADALN_MODULATION_PACK_WGSL],
+    ["gated_residual.wgsl", GATED_RESIDUAL_WGSL],
     ["rms_norm.wgsl", RMS_NORM_WGSL],
     ["rms_norm_128.wgsl", RMS_NORM_128_WGSL],
     // RMS→add 融合（ADR 0099）。**素の rms_norm と対で置く**のが条件で、2 順序とも丸め障壁
@@ -1058,6 +1078,8 @@ test("同じ生成入力からは常に同一の WGSL が出る（全 op × dtyp
   for (const order of ["x-sigmoid", "sigmoid-x"] as const) {
     assertEquals(siluWgsl(order), siluWgsl(order), `silu:${order}`);
   }
+  assertEquals(ropeWgsl("bshd", "pair"), ropeWgsl("bshd", "pair"), "rope:pair");
+  assertEquals(adalnNormWgsl("token"), adalnNormWgsl("token"), "adaln_norm:token");
   for (const order of ["norm-residual", "residual-norm"] as const) {
     assertEquals(rmsNormAddWgsl(order), rmsNormAddWgsl(order), `rms_norm_add:${order}`);
   }
@@ -1176,6 +1198,15 @@ test("パイプラインキーは生成入力ごとに一意（別カーネル�
       attentionPvI8a8Key(v4, true),
     ]),
     QUANTIZE_ROWS_KEY,
+    // The fusion kernels of the DiT rules: each variant (rotation / modulation source) has its own
+    // key, so a pipeline built for one form is never handed the other form's bind surface.
+    ROPE_KEY,
+    ROPE_BSHD_KEY,
+    ROPE_PAIR_BSHD_KEY,
+    ADALN_NORM_KEY,
+    ADALN_NORM_TOKEN_KEY,
+    ADALN_MODULATION_PACK_KEY,
+    GATED_RESIDUAL_KEY,
   ];
   for (const [op, dtype] of elementwiseDtypes()) {
     for (const rank of [1, 2, 3, 4]) {
@@ -5313,4 +5344,103 @@ describe("embeddingParams: 重み [V, H] の論理要素数", () => {
   it("V·H = 2^32 − 1 は受理する", () => {
     assertEquals(embeddingParams(1, 1, 0xffff_ffff)[2], 0xffff_ffff);
   });
+});
+
+/** The storage bindings a WGSL declares (the WebGPU default per stage is 8). */
+const storageBindingCount = (wgsl: string): number => wgsl.match(/var<storage,/g)?.length ?? 0;
+
+test("pair-form RoPE reads the rotation from its own pairs binding and keeps the shared rounding barrier", () => {
+  const wgsl = ropeWgsl("bshd", "pair");
+  assertEquals(ROPE_PAIR_BSHD_KEY, `rope:v1:pair:bshd:f32:wg${ROPE_WORKGROUP_SIZE}`);
+  assertEquals(wgsl.includes("@group(0) @binding(2) var<storage, read> pairs: array<f32>;"), true);
+  assertEquals(wgsl.includes("@binding(5) var<storage, read_write> out"), true);
+  assertEquals(storageBindingCount(wgsl), 5);
+  // rot[2p] = -pairs[2p+1], rot[2p+1] = pairs[2p] (the parity of the flat index is the slot).
+  assertEquals(wgsl.includes("if ((i & 1u) == 0u) {"), true);
+  assertEquals(wgsl.includes("rotated_bits = bitcast<u32>(pairs[i + 1u]) ^ 0x80000000u;"), true);
+  assertEquals(wgsl.includes("rotated_bits = bitcast<u32>(pairs[i - 1u]);"), true);
+  assertEquals(wgsl.includes("half_dim]"), false, "the pair rotation never reads half_dim");
+  assertEquals(wgsl.includes("let token = row / params.heads;"), true);
+  // The same barrier as the half split: both products through workgroup u32, then the add.
+  assertEquals(wgsl.includes("products[lid] = vec2<u32>(direct_bits, cross_bits);"), true);
+  assertEquals(wgsl.match(/workgroupBarrier\(\);/g)?.length, 2);
+  assertEquals(wgsl.includes("out[i] = bitcast<f32>(pair.x) + bitcast<f32>(pair.y);"), true);
+  // Only the measured layout exists.
+  assertThrows(() => ropeWgsl("bhsd", "pair"), CodegenError, "only for bshd");
+});
+
+test("per-token adaLN shares the staged body with the broadcast variant and stays at 7 storage bindings", () => {
+  const token = adalnNormWgsl("token");
+  assertEquals(
+    ADALN_NORM_TOKEN_KEY,
+    `adaln_norm:v1:lastdim:token:f32:wg${ADALN_NORM_WORKGROUP_SIZE}`,
+  );
+  assertEquals(adalnNormWgsl("broadcast"), ADALN_NORM_WGSL);
+  assertEquals(token.includes(LAYER_NORM_ROW_STATS_WGSL), true, "shared row statistics");
+  assertEquals(token.includes(`(${LAYER_NORM_AFFINE_WGSL}) * modulation`), true, "shared affine");
+  // The where of the plain sequence: true → condition (row 0 of the table half), false → generation.
+  assertEquals(token.includes("let scale_base = select(dim, 0u, mask[row] != 0u);"), true);
+  assertEquals(token.includes("let shift_base = scale_base + 2u * dim;"), true);
+  assertEquals(
+    token.includes("staged[lid] = bitcast<u32>(modulation_table[scale_base + o] + one[0u]);"),
+    true,
+  );
+  assertEquals(
+    token.includes("out[base + o] = bitcast<f32>(staged[lid]) + modulation_table[shift_base + o];"),
+    true,
+  );
+  assertEquals(
+    token.match(/workgroupBarrier\(\);/g)?.length,
+    ADALN_NORM_WGSL.match(/workgroupBarrier\(\);/g)?.length,
+  );
+  assertEquals(storageBindingCount(token), 7);
+  assertEquals(storageBindingCount(ADALN_NORM_WGSL), 7);
+});
+
+test("the adaLN modulation pack copies four vectors as raw u32 words over a grid-stride loop", () => {
+  assertEquals(ADALN_MODULATION_PACK_KEY, "adaln_modulation_pack:v1:u32:wg256");
+  assertEquals(storageBindingCount(ADALN_MODULATION_PACK_WGSL), 5);
+  // u32 bindings only: a copy with no f32 arithmetic keeps every bit pattern.
+  assertEquals(ADALN_MODULATION_PACK_WGSL.includes("f32"), false);
+  for (const line of [
+    "modulation_table[o] = scale_condition[o];",
+    "modulation_table[dim + o] = scale_generation[o];",
+    "modulation_table[2u * dim + o] = shift_condition[o];",
+    "modulation_table[3u * dim + o] = shift_generation[o];",
+    "o = o + stride;",
+  ]) {
+    assertEquals(ADALN_MODULATION_PACK_WGSL.includes(line), true, line);
+  }
+  assertEquals([...adalnModulationPackParams(3072)], [3072, 0, 0, 0]);
+  assertEquals(adalnModulationPackParams(3072).byteLength, 16);
+  assertThrows(() => adalnModulationPackParams(0), CodegenError, "dim");
+  // The body indexes the table up to 4 · dim - 1.
+  assertThrows(() => adalnModulationPackParams(0x4000_0000), CodegenError, "u32");
+});
+
+test("the gated residual stages the product through workgroup u32 before adding the residual", () => {
+  assertEquals(
+    GATED_RESIDUAL_KEY,
+    `gated_residual:v1:token:f32:wg${GATED_RESIDUAL_WORKGROUP_SIZE}`,
+  );
+  assertEquals(GATED_RESIDUAL_WORKGROUP_SIZE, 256);
+  assertEquals(storageBindingCount(GATED_RESIDUAL_WGSL), 6);
+  assertEquals(
+    GATED_RESIDUAL_WGSL.includes(
+      "let gate = select(gate_generation[o], gate_condition[o], mask[row] != 0u);",
+    ),
+    true,
+  );
+  // mul(y, g) then add(residual, p), with the product rounded through workgroup memory.
+  assertEquals(GATED_RESIDUAL_WGSL.includes("products[lid] = bitcast<u32>(y[i] * gate);"), true);
+  assertEquals(
+    GATED_RESIDUAL_WGSL.includes("out[i] = residual[i] + bitcast<f32>(products[lid]);"),
+    true,
+  );
+  assertEquals(GATED_RESIDUAL_WGSL.match(/workgroupBarrier\(\);/g)?.length, 2);
+  assertEquals([...gatedResidualParams(5 * 257, 257)], [1285, 257, 0, 0]);
+  assertEquals(gatedResidualParams(1285, 257).byteLength, 16);
+  assertThrows(() => gatedResidualParams(1285, 0), CodegenError, "dim");
+  assertThrows(() => gatedResidualParams(1286, 257), CodegenError, "whole number of rows");
+  assertThrows(() => gatedResidualParams(0x1_0000_0000, 1), CodegenError, "u32");
 });

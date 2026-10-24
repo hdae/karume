@@ -11,7 +11,7 @@
  *
  * **This file is the entry of the fusion pass**; the implementation is split three ways: the shared
  * types, the eligibility conditions shared by every rule and `defineRule` in
- * {@link "./fusion-rule.ts"}; the seven rules under `fusion-rules/` (one rule = one file); and here
+ * {@link "./fusion-rule.ts"}; the eight rules under `fusion-rules/` (one rule = one file); and here
  * the declaration table {@link FUSION_RULES}, aliasing
  * ({@link planAliases}), the scan ({@link planFusions}) and candidate enumeration
  * ({@link enumerateUnfusedWindows}).
@@ -44,20 +44,23 @@
  *
  * ## The fold target is not always one dispatch
  *
- * linearStaticQuantize / rmsNormAdd / silu / upsample2x / rope / adaln are "N nodes → one dispatch
- * of a private kernel" ({@link LINEAR_STATIC_QUANTIZE_RULE} folds the parallel GEMV and the fixed
- * requantization into one dispatch), but
+ * linearStaticQuantize / rmsNormAdd / silu / upsample2x / rope / adaln / gatedResidual are "N nodes
+ * → one dispatch of a private kernel" ({@link LINEAR_STATIC_QUANTIZE_RULE} folds the parallel GEMV
+ * and the fixed requantization into one dispatch), but
  * {@link ROW_BLOCK_ATTENTION_RULE} folds **the materialised width of an intermediate, not the
  * ops**, so it becomes a list of dispatches with temporaries closed inside the step
- * ({@link FusedStep.temps}) in between. Either way one {@link FusedStep} = one execution step, and
+ * ({@link FusedStep.temps}) in between. adaln's per-token form is two dispatches as well (a pack
+ * of the four modulation vectors into a step temporary, then the body — the body alone would need
+ * more storage bindings than the WebGPU default, and fusion does not depend on device limits).
+ * Either way one {@link FusedStep} = one execution step, and
  * the point where the release bookkeeping joins does not change.
  *
  * ## Application order
  *
  * The **declaration order** of {@link FUSION_RULES} (linearStaticQuantize → rmsNormAdd → silu →
- * upsample2x → rope → adaln → rowBlockAttention).
- * The leading ops of the seven rules are `linear` / `rms_norm` / `sigmoid` / `reshape` /
- * `mul|slice` / `layer_norm` / `bmm`, pairwise disjoint,
+ * upsample2x → rope → adaln → gatedResidual → rowBlockAttention).
+ * The leading ops of the eight rules are `linear` / `rms_norm` / `sigmoid` / `reshape` /
+ * `mul|slice` / `layer_norm` / `where` / `bmm`, pairwise disjoint,
  * so the order does not affect the result (the order matters only when leading ops overlap —
  * tests/runtime_fusion_test.ts checks mechanically from {@link FusionRule.heads} that no overlap
  * arises). A form where another rule's leading op appears **inside** a window (rowBlockAttention's
@@ -70,8 +73,9 @@
  *
  * ## In-window passthrough
  *
- * A chain is **not always contiguous**. For adaLN the exporter puts 2–3 `reshape`s of the
- * modulation vector between `layer_norm` and `mul` (all 85 measured chains). For RoPE, a
+ * A chain is **not always contiguous**. For adaLN's broadcast form the exporter puts 2–3
+ * `reshape`s of the modulation vector between `layer_norm` and `mul` (all 85 measured chains;
+ * the per-token form is contiguous). For RoPE's half split, a
  * `sym_prefix_slice` of the cos / sin table sits between `cat` and the following `mul` **only at
  * the first use of the table**.
  * A rule declares a consecutive window
@@ -84,6 +88,7 @@
 import { linearGemvPackedEligible } from "../kernels/linear-gemv.ts";
 import { numel, permuteDims, STATIC_QUANTIZE_OP, staticQuantizeScale } from "../ops.ts";
 import { ADALN_RULE } from "./fusion-rules/adaln.ts";
+import { GATED_RESIDUAL_RULE } from "./fusion-rules/gated-residual.ts";
 import { LINEAR_STATIC_QUANTIZE_RULE } from "./fusion-rules/linear-static-quantize.ts";
 import { RMS_NORM_ADD_RULE } from "./fusion-rules/rms-norm-add.ts";
 import { ROPE_RULE } from "./fusion-rules/rope.ts";
@@ -141,6 +146,7 @@ export const FUSION_RULES: readonly FusionRule[] = [
   UPSAMPLE_2X_RULE,
   ROPE_RULE,
   ADALN_RULE,
+  GATED_RESIDUAL_RULE,
   ROW_BLOCK_ATTENTION_RULE,
 ];
 
@@ -230,6 +236,7 @@ const scanFusions = (
     upsample2x: 0,
     rope: 0,
     adaln: 0,
+    gatedResidual: 0,
     rowBlockAttention: 0,
     identityExpand: 0,
     packedStaticQuantize: packed.size,
@@ -322,7 +329,7 @@ const readsPackedActivation = (plan: NodePlan, name: string, context: FusionCont
  * MUST: 5 is an invariant for **future rules**. Only the linearStaticQuantize fusion has a
  * spelling that reads packed, so the moment another rule puts a linear into its window, that
  * fused kernel reads the packed words as f32 (a silent wrong value with no exception). No window of
- * the current seven rules contains a `linear`, so it does not fire today; but without it on the
+ * the current eight rules contains a `linear`, so it does not fire today; but without it on the
  * accepting side, only the added rule would break, silently.
  */
 const packedStaticQuantizeValues = (
