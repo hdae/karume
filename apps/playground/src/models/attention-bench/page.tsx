@@ -1,8 +1,8 @@
 /**
  * The attention route bench: times the two a8 attention routes (S stored in f16 over three
  * dispatches, and the online int8 kernel) at Wan2.2's shapes with the production kernels on this
- * browser's GPU, and saves the record. Per-kernel GPU time is what the Wan2.2 page cannot give (its
- * pipeline refuses a timing device), so this page acquires its own GPU with timestamps.
+ * browser's GPU, and saves the record. The routes are timed on their own, apart from a generation,
+ * so this page acquires its own GPU with timestamps.
  */
 
 import type { AcquireGpuOptions } from "@karume/runtime";

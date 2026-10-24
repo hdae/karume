@@ -1,7 +1,7 @@
 /**
  * The Wan2.2 text → video check: pick a preset and the VAE tile, run one generation on the page's
  * GPU, watch the stages, play the frames and save a record of the run (timeline, build cost and
- * pipelines per component, device facts).
+ * pipelines per component, device facts, and GPU time per kernel when "GPU timing" is on).
  */
 
 import { clearHubCache, type HubRepoRef, loadManifest } from "@karume/hub";
@@ -19,10 +19,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useDistributionIndex } from "@/hooks/use-distribution-index";
 import { useGpu } from "@/hooks/use-gpu";
+import { useTimestampQuery } from "@/hooks/use-timestamp-query";
 import { distributionSource, hfRepoRef } from "@/lib/distributions";
 import { downloadBlob, downloadJson, fileStamp } from "@/lib/download";
 import { type CacheInventory, queryCacheInventory } from "@/lib/hub-cache";
@@ -30,6 +33,7 @@ import {
   attentionPipelines,
   type BuildCost,
   type ComponentRecord,
+  type ComponentTiming,
   countNonFinite,
   type DeviceFacts,
   foldComponentDiagnostics,
@@ -42,6 +46,10 @@ import {
   summarizeAdapter,
   summarizeDevice,
   summarizeIntervals,
+  tallyTiming,
+  timingOf,
+  type TimingTally,
+  topOpShares,
   totalBuildCost,
 } from "@/lib/record";
 import { zipStored } from "@/lib/zip";
@@ -69,8 +77,18 @@ import {
 } from "./settings";
 import { type DiagnosticsSink, type PipelineSource, useWanPipeline } from "./use-wan-pipeline";
 
-/** Subgroups when the adapter has them (the online-attention presets use them). */
-const GPU_OPTIONS: Omit<AcquireGpuOptions, "onDeviceLost"> = { subgroups: "available" };
+/**
+ * Module constants (useGpu needs stable options): subgroups when the adapter has them (the
+ * online-attention presets use them), and GPU timestamps when the "GPU timing" switch is on.
+ */
+const UNTIMED_GPU: Omit<AcquireGpuOptions, "onDeviceLost"> = { subgroups: "available" };
+const TIMED_GPU: Omit<AcquireGpuOptions, "onDeviceLost"> = {
+  subgroups: "available",
+  gpuTiming: true,
+};
+
+/** How many ops the summary names per timed component. */
+const TOP_OPS = 5;
 
 type StageName = "vae_encoder" | "text_encoder" | "transformer" | "vae_decoder";
 type StageTimes = Partial<Record<StageName, { readonly start: number; readonly end?: number }>>;
@@ -178,7 +196,11 @@ export const Wan22Page = () => {
   const index = useDistributionIndex();
   const wan22 = index.kind === "ready" ? index.index["wan22"] : undefined;
   const umt5 = index.kind === "ready" ? index.index["umt5"] : undefined;
-  const { state: gpuState, reacquire } = useGpu(GPU_OPTIONS);
+  // A device setting, not a form field: turning it on or off re-acquires the GPU (which rebuilds the
+  // pipeline) and leaves the scenario matching alone.
+  const [gpuTiming, setGpuTiming] = useState(false);
+  const timestampQuery = useTimestampQuery();
+  const { state: gpuState, reacquire } = useGpu(gpuTiming ? TIMED_GPU : UNTIMED_GPU);
   const gpu = gpuState.kind === "ready" ? gpuState.gpu : undefined;
 
   // The manifest (once the dev server says the distribution is there).
@@ -361,8 +383,12 @@ export const Wan22Page = () => {
     const controller = new AbortController();
     controllerRef.current = controller;
     const diagnostics = new Map<string, ComponentRecord>();
-    diagnosticsRef.current = (component, report) =>
+    const timings = new Map<string, TimingTally>();
+    diagnosticsRef.current = (component, report) => {
       diagnostics.set(component, foldComponentDiagnostics(diagnostics.get(component), report));
+      const tally = tallyTiming(timings.get(component), report.lastRunTiming);
+      if (tally !== undefined) timings.set(component, tally);
+    };
     const stepMarks: number[] = [];
     const tileMarks: number[] = [];
     const startedAt = performance.now();
@@ -464,7 +490,15 @@ export const Wan22Page = () => {
         },
         wallSeconds: seconds(wall),
         output: { fps: video.fps, nonFinite, rgbaSha256 },
-        diagnostics: Object.fromEntries(diagnostics),
+        diagnostics: Object.fromEntries(
+          [...diagnostics].map(([component, summary]) => {
+            const tally = timings.get(component);
+            return [
+              component,
+              tally === undefined ? summary : { ...summary, timing: timingOf(tally) },
+            ];
+          }),
+        ),
       };
       runIdRef.current += 1;
       setResult({ id: runIdRef.current, record, ...(stack === undefined ? {} : { stack }) });
@@ -930,6 +964,35 @@ export const Wan22Page = () => {
                 ...(hfRef === undefined ? [] : [["Cache", cacheText(cache)] as const]),
               ]}
             />
+            <div className="flex flex-col gap-1.5">
+              <Label className="flex items-center gap-2">
+                <Switch
+                  id="wan22-gpu-timing"
+                  checked={gpuTiming}
+                  onCheckedChange={(checked) => setGpuTiming(checked)}
+                  disabled={
+                    running ||
+                    gpuState.kind === "acquiring" ||
+                    timestampQuery.kind !== "ready" ||
+                    !timestampQuery.available
+                  }
+                />
+                GPU timing
+              </Label>
+              <p id="wan22-gpu-timing-hint" className="text-xs text-muted-foreground">
+                {timestampQuery.kind === "probing" ? "Looking at the adapter… " : null}
+                {timestampQuery.kind === "error"
+                  ? `Unavailable: the adapter could not be probed (${thrownText(timestampQuery.error)}). `
+                  : null}
+                {timestampQuery.kind === "ready" && !timestampQuery.available
+                  ? "Unavailable: this adapter has no timestamp-query. "
+                  : null}
+                Times every kernel of the text encoder and the DiT on the GPU. Every dispatch
+                becomes its own pass, so a timed run is slower and its wall time is not comparable
+                with untimed records. The VAE decode stage is not timed (each tile runs as one
+                batch). Switching acquires the GPU again and rebuilds the pipeline.
+              </p>
+            </div>
             {hfRef === undefined ? null : (
               <div className="flex flex-col gap-2">
                 <div className="flex flex-wrap gap-2">
@@ -1139,7 +1202,10 @@ const RecordTable = ({ record }: { record: WanRecord }) => (
           : "direct",
       ],
       ["Preset", `${record.preset.quant}${record.preset.isDefault ? " (default)" : ""}`],
-      ["Scenario", record.scenario],
+      [
+        "Scenario",
+        record.device.gpuTimingEnabled ? `${record.scenario} · GPU timing on` : record.scenario,
+      ],
       ["VAE tile", String(record.vaeTile)],
       ["Size", `${record.width}×${record.height}`],
       ["Frames", String(record.frames)],
@@ -1178,6 +1244,39 @@ const RecordTable = ({ record }: { record: WanRecord }) => (
               ] as const,
             ];
       }),
+      ...Object.entries(record.diagnostics).flatMap(([component, summary]) =>
+        summary.timing === undefined
+          ? []
+          : [
+              [
+                `${component} GPU time`,
+                timingText(summary.timing, record.stageSeconds, component),
+              ] as const,
+            ],
+      ),
     ]}
   />
 );
+
+/** The stage a component runs in (`vae_decoder_first_32` → `vae_decoder`). */
+const stageOf = (component: string): StageName | undefined =>
+  STAGES.find((stage) => component === stage || component.startsWith(`${stage}_`));
+
+/** The timed total beside the stage's wall seconds, then the most expensive ops with their share. */
+const timingText = (
+  timing: ComponentTiming,
+  stageSeconds: WanRecord["stageSeconds"],
+  component: string,
+): string => {
+  const stage = stageOf(component);
+  const wall = stage === undefined ? undefined : stageSeconds[stage];
+  return [
+    `${timing.totalMs.toFixed(1)} ms timed over ${timing.runs} runs${wall === undefined ? "" : ` (stage ${wall} s wall)`}`,
+    ...topOpShares(timing, TOP_OPS).map(
+      ({ op, ms, share }) => `${op} ${ms.toFixed(1)} ms ${(share * 100).toFixed(1)}%`,
+    ),
+    ...(timing.clampedNegativeSamples === 0
+      ? []
+      : [`${timing.clampedNegativeSamples} samples clamped to 0`]),
+  ].join(" · ");
+};

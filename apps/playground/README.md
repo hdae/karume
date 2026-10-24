@@ -68,9 +68,10 @@ WebGPU and cross-origin isolation need a secure context, and loopback counts as 
 
 ## The Wan2.2 page
 
-The page acquires the GPU once (`acquireGpu({ subgroups: "available" })`) and builds the pipeline
-for the chosen source, preset and text encoder path (construction creates no Session; the GPU work
-starts with **Run**). One generation runs at a time.
+The page acquires the GPU once (`acquireGpu({ subgroups: "available" })`, plus `gpuTiming: true`
+while **GPU timing** is on) and builds the pipeline for the chosen source, preset and text encoder
+path (construction creates no Session; the GPU work starts with **Run**). One generation runs at a
+time.
 
 | Control | What it does |
 | --- | --- |
@@ -85,6 +86,7 @@ starts with **Run**). One generation runs at a time.
 | Shift | The flow-matching shift; empty = the manifest's default (5). |
 | Text encoder | `precomputed`: the text embedding asset's fixed prompts (choose one by name), no umT5. `gpu`: umT5 on the GPU (about 5.3 GiB of weights) with a free prompt and negative prompt (empty negative = the official default). Changing it rebuilds the pipeline. |
 | Run / Cancel | Run one generation; Cancel stops at the next stage boundary, step or VAE tile (or drops a scenario run that is still waiting for its pipeline). |
+| GPU timing | Off by default; the switch sits in the status card. On: the GPU is acquired again with `gpuTiming: true` (which rebuilds the pipeline) and every run records its GPU time per kernel (below). Disabled while a generation runs, and with the reason when the adapter has no `timestamp-query`. |
 
 ### Scenarios
 
@@ -153,10 +155,27 @@ The JSON keeps the full detail; the page shows only the summary above.
 | `timeline.vaeTileSeconds` | seconds of every VAE tile in order; the first holds the VAE Sessions' creation |
 | `diagnostics.<component>.build` | the Session build cost of the component's latest report (`buildStats`): `partCount`, `supplyWaitMs`, `decodeMs`, `bufferCreateMs`, `writeBufferIssueMs`, `uploadFenceMs`, `uploadedBytes`. The GPU transfer itself cannot be told apart from the host clock; it lands in `uploadFenceMs` |
 | `diagnostics.<component>.lastRunPipelines` | `{ key, dispatchCount }` of every pipeline the component's last run planned |
+| `diagnostics.<component>.timing` | only with GPU timing on, for a component with at least one timed run: `runs` (timed runs), `totalMs`, `dispatchCount`, `clampedNegativeSamples` (samples the runtime clamped to 0 — non-zero means the breakdown is questionable), `ops` (`{ op, ms, dispatchCount }` per op — the key's text before the first `:`) and `keys` (`{ key, ms, dispatchCount }` per pipeline key), each summed over every timed run, most expensive first, ms at 0.1 ms (rounded once, after summing the nanoseconds) |
 
-Per-kernel GPU time is not recorded: `WanTi2vPipeline` refuses a device acquired with
-`gpuTiming: true` (its VAE stage runs one tile as one batch, and the runtime opens no batch on a
-timing device), so the page cannot offer a timing toggle.
+### GPU timing
+
+With **GPU timing** on, the text encoder (umT5) and the DiT report the GPU time of every kernel of
+every run (`lastRunTiming` through `onRunDiagnostics`). The record sums them per component over all
+runs; the result card shows, per timed component, the timed total next to its stage's wall seconds
+and the five most expensive ops with their share of that total.
+
+- **What is not timed**: the VAE decode stage. Each tile runs as one batch, and a batch section on a
+  timing device runs untimed (the runtime collects per-pass timestamps only at a run's flush). The
+  VAE decoder components carry no `timing`.
+- **Timed runs are slower**: on a timing device every dispatch becomes its own pass, so the stage
+  seconds, step seconds and wall seconds of a timed run are not comparable with untimed records.
+  Compare timed records with timed records.
+- **Scenarios**: timing is a device setting, not a form field, so a run with timing on still records
+  the scenario its settings equal. `device.gpuTimingEnabled` tells a timed run of a scenario from an
+  untimed one (the result card shows "· GPU timing on" next to the scenario).
+- Chrome without developer flags rounds timestamps to 100 µs. Each dispatch is its own pass, so a
+  dispatch shorter than that reads as 0 or 0.1 ms: the totals of ops made of many short dispatches
+  are coarse, the ones made of long dispatches (`linear`, `attention_online`) much less so.
 
 ### Where records land
 
@@ -170,9 +189,9 @@ machine running Chrome:
 
 ## The attention route bench page
 
-The Wan2.2 page cannot time kernels (its pipeline refuses a timing device), so this page times the
-two attention routes on their own, with the kernels, keys, binding order, row blocks and variants
-production would use on this device (`runAttentionRouteBench` of `@karume/runtime/tune`):
+This page times the two attention routes on their own, apart from a generation, with the kernels,
+keys, binding order, row blocks and variants production would use on this device
+(`runAttentionRouteBench` of `@karume/runtime/tune`):
 
 - **s16** — the a8 route with S stored in f16: ①QK, ② row statistics and ③PV, each timed on its own
   and summed;
@@ -242,6 +261,7 @@ The shared pieces a page builds on:
 | What the hub's cache holds of a distribution, over every preset | `src/lib/hub-cache.ts` |
 | Which mounts exist (`/models/index.json`) | `src/hooks/use-distribution-index.ts` |
 | One GPU per page, released on unmount, re-acquire after device loss | `src/hooks/use-gpu.ts` |
-| Record helpers (non-finite count, RGBA stack + sha256, diagnostics and build cost per component, attention route, device facts, timeline) | `src/lib/record.ts` |
+| Whether the adapter lists `timestamp-query` (a device acquired without timing cannot say) | `src/hooks/use-timestamp-query.ts` |
+| Record helpers (non-finite count, RGBA stack + sha256, diagnostics and build cost per component, attention route, GPU time per key and per op, device facts, timeline) | `src/lib/record.ts` |
 | Downloads and the zip writer | `src/lib/download.ts`, `src/lib/zip.ts` |
 | Error alert, labelled fields, select, key-value table, frame player | `src/components/` |

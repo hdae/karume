@@ -14,6 +14,10 @@ import {
   summarizeDevice,
   summarizeDiagnostics,
   summarizeIntervals,
+  tallyTiming,
+  timingOf,
+  type TimingTally,
+  topOpShares,
   totalBuildCost,
 } from "../src/lib/record.ts";
 
@@ -192,6 +196,99 @@ describe("the attention route", () => {
 
   it("reads a key without a colon as its own op", () => {
     expect(pipelineOp("copy")).toBe("copy");
+  });
+});
+
+describe("GPU time per component", () => {
+  // One run's `lastRunTiming` (ns, as the runtime reports them).
+  const run = (
+    entries: readonly { key: string; ns: number; dispatchCount: number }[],
+    clampedNegativeSamples = 0,
+  ) => ({
+    entries: entries.map((entry) => ({ ...entry, workgroupCount: entry.dispatchCount * 64 })),
+    totalNs: entries.reduce((total, { ns }) => total + ns, 0),
+    dispatchCount: entries.reduce((total, { dispatchCount }) => total + dispatchCount, 0),
+    clampedNegativeSamples,
+  });
+  const tallyOf = (runs: readonly ReturnType<typeof run>[]): TimingTally | undefined =>
+    runs.reduce<TimingTally | undefined>((tally, timing) => tallyTiming(tally, timing), undefined);
+  const forward = run([
+    { key: "linear:v1:i8a8:n3072", ns: 1_000_040, dispatchCount: 30 },
+    { key: "linear:v1:i8a8:n9216", ns: 2_000_030, dispatchCount: 30 },
+    { key: "attention_online:v1:i8a8:d128", ns: 700_000, dispatchCount: 30 },
+    { key: "ew", ns: 300_000, dispatchCount: 90 },
+  ]);
+
+  describe("when every run is timed", () => {
+    const tally = tallyOf([forward, forward, forward]);
+    const timing = tally === undefined ? undefined : timingOf(tally);
+
+    it("sums each pipeline key over the runs, in ms at 0.1 ms, most expensive first", () => {
+      expect(timing?.runs).toBe(3);
+      expect(timing?.keys).toEqual([
+        { key: "linear:v1:i8a8:n9216", ms: 6, dispatchCount: 90 },
+        { key: "linear:v1:i8a8:n3072", ms: 3, dispatchCount: 90 },
+        { key: "attention_online:v1:i8a8:d128", ms: 2.1, dispatchCount: 90 },
+        { key: "ew", ms: 0.9, dispatchCount: 270 },
+      ]);
+    });
+
+    it("folds the keys per op (the text before the first ':')", () => {
+      expect(timing?.ops).toEqual([
+        { op: "linear", ms: 9, dispatchCount: 180 },
+        { op: "attention_online", ms: 2.1, dispatchCount: 90 },
+        { op: "ew", ms: 0.9, dispatchCount: 270 },
+      ]);
+      expect(timing?.totalMs).toBe(12);
+      expect(timing?.dispatchCount).toBe(540);
+    });
+
+    it("rounds once, after summing: 0.04 ms a run still adds up over three runs", () => {
+      const small = tallyOf(
+        [1, 2, 3].map(() => run([{ key: "copy", ns: 40_000, dispatchCount: 1 }])),
+      );
+      const summed = small === undefined ? undefined : timingOf(small);
+      expect(summed?.totalMs).toBe(0.1);
+      expect(summed?.keys).toEqual([{ key: "copy", ms: 0.1, dispatchCount: 3 }]);
+    });
+  });
+
+  describe("when a run reports no breakdown", () => {
+    it("has no tally on a device without timing", () => {
+      expect(tallyTiming(undefined, undefined)).toBeUndefined();
+    });
+
+    it("has no tally for runs with nothing timed (a batch section on a timing device)", () => {
+      expect(tallyOf([run([]), run([])])).toBeUndefined();
+    });
+
+    it("keeps the earlier runs and does not count the untimed ones", () => {
+      const tally = tallyOf([forward, run([])]);
+      expect(tally?.runs).toBe(1);
+      expect(tallyTiming(tally, undefined)).toBe(tally);
+    });
+  });
+
+  it("adds up the clamped samples so a questionable breakdown stays visible", () => {
+    const tally = tallyOf([run(forward.entries, 2), run(forward.entries, 1)]);
+    expect(tally === undefined ? undefined : timingOf(tally).clampedNegativeSamples).toBe(3);
+  });
+
+  it("does not change the tally it folds into", () => {
+    const first = tallyTiming(undefined, forward);
+    tallyTiming(first, forward);
+    expect(first?.keys.get("ew")).toEqual({ ns: 300_000, dispatchCount: 90 });
+  });
+
+  it("names the most expensive ops with their share of the component's total", () => {
+    const tally = tallyTiming(undefined, forward);
+    const shares = tally === undefined ? [] : topOpShares(timingOf(tally), 2);
+    expect(shares.map(({ op, ms }) => [op, ms])).toEqual([
+      ["linear", 3],
+      ["attention_online", 0.7],
+    ]);
+    expect(shares[0].share).toBeCloseTo(0.75, 6);
+    expect(shares[1].share).toBeCloseTo(0.175, 6);
   });
 });
 

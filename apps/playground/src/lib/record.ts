@@ -1,8 +1,9 @@
 /**
  * Helpers for the run record a model page shows and saves: counting non-finite values, turning
  * frames into one RGBA buffer and hashing it, summarizing Session diagnostics (build cost, the
- * pipelines of the last run), the device facts and the per-step timeline. Pure functions (WebCrypto
- * is the only platform API), so they run the same in the browser and in `vp test`.
+ * pipelines of the last run, GPU time per kernel), the device facts and the per-step timeline. Pure
+ * functions (WebCrypto is the only platform API), so they run the same in the browser and in
+ * `vp test`.
  */
 
 import type { SessionBuildStats, SessionDiagnostics } from "@karume/runtime";
@@ -169,12 +170,17 @@ export const totalBuildCost = (costs: Iterable<BuildCost>): BuildCost => {
 /** Planned dispatches of one pipeline key in a run (`lastRunPipelines`). */
 export type PipelineCount = { readonly key: string; readonly dispatchCount: number };
 
-/** One component's record: the diagnostics summary, its build cost and its last run's pipelines. */
+/**
+ * One component's record: the diagnostics summary, its build cost, its last run's pipelines and,
+ * on a timing device, its GPU time over every timed run.
+ */
 export type ComponentRecord = DiagnosticsSummary & {
   /** From the latest report (the Session that ran last). */
   readonly build: BuildCost;
   /** Absent only when the last run failed while planning (the runtime reports none then). */
   readonly lastRunPipelines?: readonly PipelineCount[];
+  /** Absent when no run of the component was timed ({@link tallyTiming}). */
+  readonly timing?: ComponentTiming;
 };
 
 /** Folds one more report of a component into its record (`previous` = earlier reports). */
@@ -210,6 +216,117 @@ export const pipelineOp = (key: string): string => {
  */
 export const attentionPipelines = (pipelines: readonly PipelineCount[]): readonly PipelineCount[] =>
   pipelines.filter(({ key }) => pipelineOp(key).startsWith("attention"));
+
+/** GPU time of one pipeline key, summed over a component's timed runs. */
+export type KeyTiming = {
+  readonly key: string;
+  readonly ms: number;
+  readonly dispatchCount: number;
+};
+
+/** The same, folded per op ({@link pipelineOp}). */
+export type OpTiming = { readonly op: string; readonly ms: number; readonly dispatchCount: number };
+
+/** A component's GPU time (`lastRunTiming`) summed over its timed runs, in ms at 0.1 ms. */
+export type ComponentTiming = {
+  /** Runs that reported a breakdown. */
+  readonly runs: number;
+  readonly totalMs: number;
+  readonly dispatchCount: number;
+  /** Samples the runtime clamped to 0 (begin > end); non-zero = the breakdown itself is questionable. */
+  readonly clampedNegativeSamples: number;
+  /** Descending by time (ties by name), like the runtime's table. */
+  readonly ops: readonly OpTiming[];
+  readonly keys: readonly KeyTiming[];
+};
+
+type TimeSum = { readonly ns: number; readonly dispatchCount: number };
+
+/**
+ * The running sums behind {@link ComponentTiming}, in the runtime's nanoseconds: they are rounded to
+ * 0.1 ms once, by {@link timingOf}, so the rounding does not pile up over hundreds of runs.
+ */
+export type TimingTally = {
+  readonly runs: number;
+  readonly clampedNegativeSamples: number;
+  readonly keys: ReadonlyMap<string, TimeSum>;
+};
+
+/**
+ * Folds one run's `lastRunTiming` into a component's tally (`previous` = earlier runs). A report
+ * with no breakdown leaves the tally as it is: `undefined` comes from a device without timing, an
+ * empty table from a run with nothing timed (a batch section on a timing device — Wan's VAE decoder).
+ */
+export const tallyTiming = (
+  previous: TimingTally | undefined,
+  timing: SessionDiagnostics["lastRunTiming"],
+): TimingTally | undefined => {
+  if (timing === undefined || timing.entries.length === 0) return previous;
+  const keys = new Map(previous?.keys);
+  for (const { key, ns, dispatchCount } of timing.entries) {
+    const sum = keys.get(key);
+    keys.set(key, {
+      ns: (sum?.ns ?? 0) + ns,
+      dispatchCount: (sum?.dispatchCount ?? 0) + dispatchCount,
+    });
+  }
+  return {
+    runs: (previous?.runs ?? 0) + 1,
+    clampedNegativeSamples: (previous?.clampedNegativeSamples ?? 0) + timing.clampedNegativeSamples,
+    keys,
+  };
+};
+
+const NS_PER_MS = 1e6;
+
+const descendingTime = (
+  [leftName, left]: readonly [string, TimeSum],
+  [rightName, right]: readonly [string, TimeSum],
+): number => right.ns - left.ns || (leftName < rightName ? -1 : leftName > rightName ? 1 : 0);
+
+/** The record of a tally: per key and per op, the total from the exact sum (not from rounded rows). */
+export const timingOf = (tally: TimingTally): ComponentTiming => {
+  const ops = new Map<string, TimeSum>();
+  let totalNs = 0;
+  let dispatchCount = 0;
+  for (const [key, sum] of tally.keys) {
+    const op = pipelineOp(key);
+    const opSum = ops.get(op);
+    ops.set(op, {
+      ns: (opSum?.ns ?? 0) + sum.ns,
+      dispatchCount: (opSum?.dispatchCount ?? 0) + sum.dispatchCount,
+    });
+    totalNs += sum.ns;
+    dispatchCount += sum.dispatchCount;
+  }
+  return {
+    runs: tally.runs,
+    totalMs: milliseconds(totalNs / NS_PER_MS),
+    dispatchCount,
+    clampedNegativeSamples: tally.clampedNegativeSamples,
+    ops: [...ops].toSorted(descendingTime).map(([op, sum]) => ({
+      op,
+      ms: milliseconds(sum.ns / NS_PER_MS),
+      dispatchCount: sum.dispatchCount,
+    })),
+    keys: [...tally.keys].toSorted(descendingTime).map(([key, sum]) => ({
+      key,
+      ms: milliseconds(sum.ns / NS_PER_MS),
+      dispatchCount: sum.dispatchCount,
+    })),
+  };
+};
+
+/** The `limit` most expensive ops with their share (0–1) of the component's timed total. */
+export const topOpShares = (
+  timing: ComponentTiming,
+  limit: number,
+): readonly { readonly op: string; readonly ms: number; readonly share: number }[] =>
+  timing.ops.slice(0, limit).map(({ op, ms }) => ({
+    op,
+    ms,
+    share: timing.totalMs === 0 ? 0 : ms / timing.totalMs,
+  }));
 
 /** The device limits a record names (the ones the attention and GEMM routes depend on). */
 export const DEVICE_LIMITS = [
