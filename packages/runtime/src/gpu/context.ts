@@ -192,6 +192,19 @@ type GpuContextInternals = {
    */
   warnOnce(key: string, message: string): void;
   /**
+   * Whether GPU timing is suspended — true while a batch holds the device's section (one at a time:
+   * the scope lock). `SubmitScheduler` then encodes plain chunks, so enqueues are not timed and no
+   * per-pass timestamps wait for a flush the batch never runs. Runs never overlap a batch on the
+   * same device, so they stay timed (ADR 0021 addendum of 2026-10-24).
+   */
+  timingSuspended(): boolean;
+  /**
+   * Marks the start of a batch section and returns the function that marks its end.
+   * MUST: called only by `BatchScope` inside its scope-lock section, with the end in a `finally`
+   * before the lock is returned — a section left open would leave every later run untimed.
+   */
+  openBatchSection(): () => void;
+  /**
    * The GEMM geometry profile injected with `acquireGpu({ geometryProfile })` (DECIDED: ADR 0115).
    * undefined without an injection, in which case Session construction picks an embedded table from
    * the adapter.
@@ -294,6 +307,8 @@ export class GpuContext {
   readonly subgroupLanesLinear: boolean;
   readonly limits: RequiredLimits;
   #lost: GPUDeviceLostInfo | undefined;
+  /** A batch holds the section ({@link GpuContextInternals.timingSuspended}). */
+  #batchSectionOpen = false;
   #destroyRequested = false;
   readonly #lostListeners = new Set<DeviceLostHandler>();
   /**
@@ -366,6 +381,18 @@ export class GpuContext {
         console.warn(message);
       },
       geometryProfile,
+      timingSuspended: (): boolean => this.#batchSectionOpen,
+      openBatchSection: (): (() => void) => {
+        if (this.#batchSectionOpen) {
+          throw new Error(
+            "A batch section is already open on this device (broken scope-lock discipline)",
+          );
+        }
+        this.#batchSectionOpen = true;
+        return () => {
+          this.#batchSectionOpen = false;
+        };
+      },
     };
     if (onDeviceLost !== undefined) {
       this.onLost((info) => {
@@ -588,9 +615,10 @@ export class GpuContext {
    * `attentionCompute: "a8"` goes for the section lock in the canary
    * ({@link GpuContextInternals.attentionI8a8Dot}), so constructing during the section does not
    * return until `finish()`.
-   * MUST: it cannot be opened on a device with measurement enabled. Timestamps opened as 1 dispatch
-   * = 1 pass are collected only by flush, so N runs' worth would pile up uncollected during the
-   * batch (to get a breakdown, measure with ordinary runs — ADR 0021).
+   * NOTE: on a device with measurement enabled the section is **not timed** — its enqueues are
+   * encoded as plain chunks ({@link GpuContextInternals.timingSuspended}), because per-pass
+   * timestamps are collected only by a run's flush and would pile up uncollected during the batch.
+   * Runs before and after the section keep their breakdown (ADR 0021 addendum of 2026-10-24).
    * NOTE: trying to open a second one on the same device waits here until the first returns the
    * lock in {@link BatchScope.finish} (sections are exclusive per device — they do not nest).
    * MUST: do not open on a lost or destroy-requested device ({@link assertDeviceUsable}). Opening
@@ -602,13 +630,6 @@ export class GpuContext {
    */
   async beginBatch(): Promise<BatchScope> {
     assertDeviceUsable(this, "batch start");
-    if (this.gpuTimingEnabled) {
-      throw new BatchScopeError(
-        "Cannot open a batch on a device with gpuTiming enabled (the timestamps opened per pass at 1 dispatch = 1 pass " +
-          "are not collected until flush and pile up by the number of runs during the batch). " +
-          "Measure the GPU time breakdown with ordinary runs",
-      );
-    }
     const batch = new BatchScope(this);
     await batch[RUNTIME_INTERNAL].entered;
     return batch;
@@ -1145,101 +1166,107 @@ export class BatchScope {
     const entered = Promise.withResolvers<void>();
     this.#release = hold.resolve;
     this.#completion = gpu[RUNTIME_INTERNAL].withScopeLock(async () => {
+      // MUST: the section is untimed from before the first enqueue until the lock is returned.
+      const closeSection = gpu[RUNTIME_INTERNAL].openBatchSection();
       try {
-        // MUST: recheck that the device is alive once the lock is acquired (before the push). The
-        // check at the entrance of `beginBatch` comes before waiting for an earlier section to
-        // release the lock, so it has not seen a loss during the wait. Opening would keep holding
-        // the section lock on a lost device and make later sections wait until the user's finish. A
-        // throw makes the catch below reject the beginBatch wait and return the lock without
-        // waiting for hold.
-        assertDeviceUsable(gpu, "batch start");
-        pushFailureScopes(gpu.device);
-      } catch (cause) {
-        // MUST: always tell the beginBatch wait that opening failed (otherwise it hangs).
-        entered.reject(cause);
-        throw cause;
-      }
-      entered.resolve();
-      await hold.promise;
-      // MUST: settle every in-flight enqueue before setting the fence. `finish()` only sets
-      // `#finished` synchronously, so without this, with "finish() right after queuing un-awaited
-      // enqueues", ① every enqueue whose body has not run yet rejects and the section **settles as
-      // a success** with 0 dispatches ② enqueues that had started submit after the fence and the
-      // pop, and finish returns with GPU execution still incomplete (a read right after returns a
-      // stale value).
-      await this.#drained.promise;
-      const device = gpu.device;
-      let outputs: Readonly<Record<string, ArrayBuffer>> | undefined;
-      let popped = false;
-      /**
-       * Whether the completion fence (the readback's `mapAsync` or `onSubmittedWorkDone`) was
-       * reached.
-       */
-      let fenced = false;
-      const checkFailureScopes = async (): Promise<void> => {
-        const pending = popFailureScopes(
-          device,
-          this.#readbackBytes() === 0 ? "batch encoding" : "batch encoding and readback",
-        );
-        popped = true;
-        const failure = await pending;
-        if (failure !== undefined) throw failure;
-      };
-      try {
-        // enqueue always submits at its end, so normally this is a no-op. It drains anyway to close
-        // "no unsubmitted encode exists once the batch closes" as the section's responsibility (no
-        // extra party carrying the disposal path — ADR 0004).
-        for (const member of this.#members) member.submitPending();
-        // MUST: an implementation may never resolve onSubmittedWorkDone after a loss (measurements
-        // in the doc of raceCanaryDeviceLost), so race it.
-        // MUST: accept no registrations from here on (every lease has been returned, so none should
-        // come, but if one does, failing loudly beats returning a Promise that never resolves).
-        this.#readbackStarted = true;
-        if (this.#readbackBytes() > 0) {
-          outputs = await this.#readOutputs(
-            this.#readback ?? [],
-            this.#graphReads,
-            checkFailureScopes,
-            () => {
-              fenced = true;
-            },
-          );
-        } else {
-          // A registration with no copy source at all (0 graph outputs) closes with the usual
-          // completion fence.
-          for (const read of this.#graphReads) read.result = [];
-          await gpu[RUNTIME_INTERNAL].raceDeviceLost(
-            device.queue.onSubmittedWorkDone(),
-            "batch completion",
-          );
-          fenced = true;
+        try {
+          // MUST: recheck that the device is alive once the lock is acquired (before the push). The
+          // check at the entrance of `beginBatch` comes before waiting for an earlier section to
+          // release the lock, so it has not seen a loss during the wait. Opening would keep holding
+          // the section lock on a lost device and make later sections wait until the user's finish. A
+          // throw makes the catch below reject the beginBatch wait and return the lock without
+          // waiting for hold.
+          assertDeviceUsable(gpu, "batch start");
+          pushFailureScopes(gpu.device);
+        } catch (cause) {
+          // MUST: always tell the beginBatch wait that opening failed (otherwise it hangs).
+          entered.reject(cause);
+          throw cause;
         }
-      } catch (cause) {
-        if (!popped) await discardFailureScopes(device);
-        throw cause;
+        entered.resolve();
+        await hold.promise;
+        // MUST: settle every in-flight enqueue before setting the fence. `finish()` only sets
+        // `#finished` synchronously, so without this, with "finish() right after queuing un-awaited
+        // enqueues", ① every enqueue whose body has not run yet rejects and the section **settles as
+        // a success** with 0 dispatches ② enqueues that had started submit after the fence and the
+        // pop, and finish returns with GPU execution still incomplete (a read right after returns a
+        // stale value).
+        await this.#drained.promise;
+        const device = gpu.device;
+        let outputs: Readonly<Record<string, ArrayBuffer>> | undefined;
+        let popped = false;
+        /**
+         * Whether the completion fence (the readback's `mapAsync` or `onSubmittedWorkDone`) was
+         * reached.
+         */
+        let fenced = false;
+        const checkFailureScopes = async (): Promise<void> => {
+          const pending = popFailureScopes(
+            device,
+            this.#readbackBytes() === 0 ? "batch encoding" : "batch encoding and readback",
+          );
+          popped = true;
+          const failure = await pending;
+          if (failure !== undefined) throw failure;
+        };
+        try {
+          // enqueue always submits at its end, so normally this is a no-op. It drains anyway to close
+          // "no unsubmitted encode exists once the batch closes" as the section's responsibility (no
+          // extra party carrying the disposal path — ADR 0004).
+          for (const member of this.#members) member.submitPending();
+          // MUST: an implementation may never resolve onSubmittedWorkDone after a loss (measurements
+          // in the doc of raceCanaryDeviceLost), so race it.
+          // MUST: accept no registrations from here on (every lease has been returned, so none should
+          // come, but if one does, failing loudly beats returning a Promise that never resolves).
+          this.#readbackStarted = true;
+          if (this.#readbackBytes() > 0) {
+            outputs = await this.#readOutputs(
+              this.#readback ?? [],
+              this.#graphReads,
+              checkFailureScopes,
+              () => {
+                fenced = true;
+              },
+            );
+          } else {
+            // A registration with no copy source at all (0 graph outputs) closes with the usual
+            // completion fence.
+            for (const read of this.#graphReads) read.result = [];
+            await gpu[RUNTIME_INTERNAL].raceDeviceLost(
+              device.queue.onSubmittedWorkDone(),
+              "batch completion",
+            );
+            fenced = true;
+          }
+        } catch (cause) {
+          if (!popped) await discardFailureScopes(device);
+          throw cause;
+        } finally {
+          // The measurement window closes with the batch's single fence. With N enqueues in the
+          // window the estimate comes out coarse (too large), but too large = smaller chunks = the
+          // safe side for TDR ("attribution of measurements" in src/gpu/submit.ts).
+          // MUST: close only on paths that reached the fence. A window whose readback failed at the
+          // errorScope check before `mapAsync` is in the middle of GPU execution; closing it would
+          // put a too-small measurement into the estimate and open the chunk limit permanently (the
+          // dangerous side). That window is discarded and the existing estimate is kept.
+          for (const member of this.#members) {
+            if (fenced) member.closeMeasurementWindowAfterFence();
+            else member.discardMeasurementWindow();
+          }
+        }
+        if (!popped) {
+          await checkFailureScopes();
+          // MUST: a loss while waiting for the pop is not caught by the fence race (`raceDeviceLost`
+          // unsubscribes as soon as its wait ends). A pop after a loss settles with null
+          // (docs/research 2026-08-16-device-lost-wait-settlement), so without checking here a finish
+          // that crossed a loss would return a success and be misread as "the section closed
+          // cleanly".
+          assertDeviceUsable(gpu, "batch completion");
+        }
+        return outputs;
       } finally {
-        // The measurement window closes with the batch's single fence. With N enqueues in the
-        // window the estimate comes out coarse (too large), but too large = smaller chunks = the
-        // safe side for TDR ("attribution of measurements" in src/gpu/submit.ts).
-        // MUST: close only on paths that reached the fence. A window whose readback failed at the
-        // errorScope check before `mapAsync` is in the middle of GPU execution; closing it would
-        // put a too-small measurement into the estimate and open the chunk limit permanently (the
-        // dangerous side). That window is discarded and the existing estimate is kept.
-        for (const member of this.#members) {
-          if (fenced) member.closeMeasurementWindowAfterFence();
-          else member.discardMeasurementWindow();
-        }
+        closeSection();
       }
-      if (!popped) {
-        await checkFailureScopes();
-        // MUST: a loss while waiting for the pop is not caught by the fence race (`raceDeviceLost`
-        // unsubscribes as soon as its wait ends). A pop after a loss settles with null
-        // (docs/research 2026-08-16-device-lost-wait-settlement), so without checking here a finish
-        // that crossed a loss would return a success and be misread as "the section closed
-        // cleanly".
-        assertDeviceUsable(gpu, "batch completion");
-      }
-      return outputs;
     });
     // Do not let the settlement become an unhandled rejection until finish receives it (finish
     // returns the rejection as is).

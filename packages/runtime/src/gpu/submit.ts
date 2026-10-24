@@ -926,7 +926,8 @@ export class SubmitScheduler {
     const chunkWork = this.#pendingWork;
     this.#pendingWork = 0;
     const encoder = this.#device.createCommandEncoder();
-    if (this.#timingEnabled) {
+    // A batch section suspends timing (GpuContextInternals.timingSuspended): its chunks go plain.
+    if (this.#timingEnabled && !this.#gpu[RUNTIME_INTERNAL].timingSuspended()) {
       // Whether there is evidence is the state when the boundary was decided (the estimate moves
       // only when a window closes, and the closing paths drain unsubmitted work first, so it does
       // not change while a chunk is being assembled).
