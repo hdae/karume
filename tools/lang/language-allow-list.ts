@@ -109,6 +109,11 @@ export const ALLOW_LIST: readonly Allowance[] = [
     why: "a fixture payload (a stray file)",
     maxLines: 1,
   },
+  {
+    path: "apps/playground/tests/zip_test.ts",
+    why: "a test payload (a non-ASCII entry name for the UTF-8 flag)",
+    maxLines: 1,
+  },
   { path: "tools/lang/scan-japanese.ts", why: "the JAPANESE character class", maxLines: 1 },
   { path: "tools/lang/py_skeleton.py", why: "the JAPANESE character class", maxLines: 1 },
   {
