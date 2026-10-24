@@ -1,9 +1,10 @@
 /**
- * Builds a `WanTi2vPipeline` for the chosen (preset, text encoder path) on the page's GPU, and
- * rebuilds it when either changes. Construction creates no Session (it opens the containers and
- * reads the small assets), so building eagerly costs little and gives the page the prompt list.
+ * Builds a `WanTi2vPipeline` for the chosen (source, preset, text encoder path) on the page's GPU,
+ * and rebuilds it when any of them changes. Construction creates no Session (it opens the containers
+ * and reads the small assets), so building eagerly costs little and gives the page the prompt list.
  */
 
+import type { HubRepoRef } from "@karume/hub";
 import type { GpuContext } from "@karume/runtime";
 import { type WanPrompt, type WanRunComponent, WanTi2vPipeline } from "@karume/models/wan";
 import type { SessionDiagnostics } from "@karume/runtime";
@@ -13,6 +14,21 @@ import { distributionSource } from "@/lib/distributions";
 
 import type { TextEncoderPath } from "./settings";
 
+/**
+ * Where the pipeline reads the distribution: `cached` = the HF-compatible route through the hub's
+ * CacheStorage (the second generation reads the weights from the browser's disk); `direct` =
+ * `localDirectory` over plain `fetch`, nothing cached. MUST be stable (memoized): a new object
+ * rebuilds the pipeline.
+ */
+export type PipelineSource =
+  | { readonly kind: "direct" }
+  | {
+      readonly kind: "cached";
+      readonly ref: HubRepoRef;
+      /** Bumped when the cache is cleared, so the pipeline (and the readers it holds) is rebuilt. */
+      readonly cacheGeneration: number;
+    };
+
 export type PipelineState =
   | { readonly kind: "idle" }
   | { readonly kind: "loading"; readonly detail: string }
@@ -20,6 +36,7 @@ export type PipelineState =
       readonly kind: "ready";
       readonly pipeline: WanTi2vPipeline;
       readonly prompts: readonly WanPrompt[];
+      readonly source: PipelineSource;
       readonly quant: string;
       readonly textEncoder: TextEncoderPath;
       readonly loadSeconds: number;
@@ -30,6 +47,7 @@ export type DiagnosticsSink = (component: WanRunComponent, diagnostics: SessionD
 
 export const useWanPipeline = (input: {
   readonly gpu: GpuContext | undefined;
+  readonly source: PipelineSource;
   readonly quant: string | undefined;
   readonly textEncoder: TextEncoderPath;
   /** `crossRepo` key for the umT5 mount (from the manifest); `gpu` path only. */
@@ -39,7 +57,7 @@ export const useWanPipeline = (input: {
   /** Where `onRunDiagnostics` goes; the page points it at the running generation's record. */
   readonly diagnostics: RefObject<DiagnosticsSink | undefined>;
 }): PipelineState => {
-  const { gpu, quant, textEncoder, textEncoderRepo, umt5Directory, diagnostics } = input;
+  const { gpu, source, quant, textEncoder, textEncoderRepo, umt5Directory, diagnostics } = input;
   const [state, setState] = useState<PipelineState>({ kind: "idle" });
 
   useEffect(() => {
@@ -50,21 +68,29 @@ export const useWanPipeline = (input: {
     const controller = new AbortController();
     let built: WanTi2vPipeline | undefined;
     const started = performance.now();
-    setState({ kind: "loading", detail: `opening ${quant} (${textEncoder} text encoder)` });
+    setState({
+      kind: "loading",
+      detail: `opening ${quant} (${textEncoder} text encoder, ${source.kind} source)`,
+    });
 
     const build = async (): Promise<WanTi2vPipeline> => {
-      let source = distributionSource("wan22");
-      if (textEncoder === "gpu" && textEncoderRepo !== undefined) {
-        if (umt5Directory?.available !== true) {
-          throw new Error(
-            `The GPU text encoder needs the umT5 distribution (${textEncoderRepo}), but ${
-              umt5Directory?.directory ?? "its directory"
-            } is missing — use the precomputed text encoder or add the distribution`,
-          );
-        }
-        source = distributionSource("wan22", { [textEncoderRepo]: distributionSource("umt5") });
+      const needsUmt5 = textEncoder === "gpu" && textEncoderRepo !== undefined;
+      if (needsUmt5 && umt5Directory?.available !== true) {
+        throw new Error(
+          `The GPU text encoder needs the umT5 distribution (${textEncoderRepo}), but ${
+            umt5Directory?.directory ?? "its directory"
+          } is missing — use the precomputed text encoder or add the distribution`,
+        );
       }
-      return await WanTi2vPipeline.fromPretrained(source, {
+      // The cached source reaches umT5 through the cross-repo reference of the manifest (the dev
+      // server serves it on the same route); the direct source maps it to the umT5 mount.
+      const ref =
+        source.kind === "cached"
+          ? source.ref
+          : needsUmt5 && textEncoderRepo !== undefined
+            ? distributionSource("wan22", { [textEncoderRepo]: distributionSource("umt5") })
+            : distributionSource("wan22");
+      return await WanTi2vPipeline.fromPretrained(ref, {
         gpu,
         quant,
         // MUST: name the path explicitly (the pipeline's default is "gpu").
@@ -95,6 +121,7 @@ export const useWanPipeline = (input: {
           kind: "ready",
           pipeline,
           prompts: pipeline.prompts,
+          source,
           quant,
           textEncoder,
           loadSeconds: (performance.now() - started) / 1000,
@@ -110,7 +137,7 @@ export const useWanPipeline = (input: {
       // generation first).
       void built?.dispose();
     };
-  }, [gpu, quant, textEncoder, textEncoderRepo, umt5Directory, diagnostics]);
+  }, [gpu, source, quant, textEncoder, textEncoderRepo, umt5Directory, diagnostics]);
 
   return state;
 };

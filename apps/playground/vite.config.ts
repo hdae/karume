@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
+import { WAN_SOURCES } from "@karume/models/wan";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite-plus";
@@ -19,8 +20,13 @@ export default defineConfig({
     react(),
     tailwindcss(),
     // Paths are relative to the repository root (`models/` is the local asset root — docs/assets-layout.md).
+    // Wan2.2 is also served on the HF-compatible route under its public repo name, so the page can
+    // read it through the hub's cache; umT5 is served there as the cross-repo reference of its manifest.
     distributionsPlugin({
-      distributions: { wan22: "models/karume-wan2.2", umt5: "models/karume-umt5-xxl" },
+      distributions: {
+        wan22: { directory: "models/karume-wan2.2", hfRepo: WAN_SOURCES["wan2.2"].repo },
+        umt5: "models/karume-umt5-xxl",
+      },
     }),
   ],
   resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) } },

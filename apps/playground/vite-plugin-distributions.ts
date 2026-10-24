@@ -14,12 +14,30 @@
  * A missing distribution directory does not stop the server: it logs a warning at startup, answers
  * 404 for that prefix, and `/models/index.json` reports it as unavailable so the page can show a
  * disabled state that names the directory.
+ *
+ * ## The HF-compatible route (`/hf/`)
+ *
+ * A mount with an `hfRepo` is also served under `/hf/` in the two shapes the HF source of
+ * `@karume/hub` requests (`resolveHfRevision` / `hfResolveUrl` of `@hdae/fetch-cache/hf`):
+ * `/hf/api/models/{repo}/revision/{ref}` and `/hf/{repo}/resolve/{revision}/{path}`. With
+ * `hubUrl = <origin>/hf` the page then reads the distribution through the hub's CacheStorage, so a
+ * second generation does not move the weights over the network again.
+ *
+ * The revision of such a repo is the first 40 hex digits of the sha256 of its `karume.json`
+ * ({@link hfRevisionOf}), recomputed on every request. Re-assembling the mirror therefore changes the
+ * revision at once, and the hub's manifest cache entry (keyed by the revision-pinned URL) can never
+ * hand out a stale manifest. Asset entries are keyed by content (repo + path + sha256) and stay valid
+ * across revisions. Cross-repo references of the manifest (umT5 for Wan) are served at the
+ * (repo, revision) the manifest declares, from the mount whose directory is named after the last
+ * element of the repo name (`hdae/karume-umt5-xxl` → `models/karume-umt5-xxl`).
  */
 
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, realpath, stat } from "node:fs/promises";
+import { access, readFile, realpath, stat } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { type FileRef, MANIFEST_FILENAME, type Manifest, parseManifest } from "@karume/hub";
 import type { Plugin } from "vite-plus";
 
 /** One served distribution: `/models/<name>/…` → files under `root`. */
@@ -29,6 +47,8 @@ export type DistributionMount = {
   readonly root: string;
   /** What the page and the logs show for the directory (relative to the repository root). */
   readonly label: string;
+  /** Also serve the mount on the HF-compatible route under this repo name (`owner/name`). */
+  readonly hfRepo?: string;
 };
 
 export type DistributionRequest = {
@@ -40,7 +60,15 @@ export type DistributionRequest = {
 
 /** What `/models/index.json` returns: one entry per mount. */
 export type DistributionIndex = Readonly<
-  Record<string, { readonly directory: string; readonly available: boolean }>
+  Record<
+    string,
+    {
+      readonly directory: string;
+      readonly available: boolean;
+      /** Only for an available mount with an `hfRepo`: what the page passes as its `HubRepoRef`. */
+      readonly hf?: { readonly repo: string; readonly revision: string };
+    }
+  >
 >;
 
 export type DistributionResponse =
@@ -75,6 +103,11 @@ const RESOURCE_HEADERS: Readonly<Record<string, string>> = {
 
 const PREFIX = "/models/";
 export const INDEX_PATH = "/models/index.json";
+export const HF_PREFIX = "/hf/";
+/** `{hubUrl}/api/models/{repo}/revision/{ref}` (`resolveHfRevision`). */
+const HF_REVISION_ROUTE = /^\/hf\/api\/models\/(.+)\/revision\/([^/]+)$/;
+/** `{hubUrl}/{repo}/resolve/{revision}/{path}` (`hfResolveUrl`). */
+const HF_RESOLVE_ROUTE = /^\/hf\/(.+?)\/resolve\/([^/]+)\/(.+)$/;
 
 const contentType = (path: string): string => {
   if (path.endsWith(".json")) return "application/json";
@@ -159,26 +192,197 @@ const parseRange = (
 };
 
 /**
+ * Serves one file below `root` (GET / HEAD, with `Range`). `segments` went through
+ * {@link safeSegments}; the real path is checked again because a symlink inside the directory could
+ * point anywhere.
+ */
+const serveFile = async (
+  root: string,
+  segments: readonly string[],
+  request: DistributionRequest,
+  cacheControl: string,
+): Promise<DistributionResponse> => {
+  let file: string;
+  try {
+    file = await realpath(join(root, ...segments));
+  } catch (error) {
+    if (isMissing(error)) return notFound("Asset not found");
+    throw error;
+  }
+  // MUST: check the real path (a symlink inside the mount could point anywhere).
+  if (!file.startsWith(`${root}${sep}`)) return notFound("Asset outside the distribution");
+  const info = await stat(file);
+  if (!info.isFile()) return notFound("Not a file");
+
+  const size = info.size;
+  const base = {
+    "Content-Type": contentType(file),
+    "Accept-Ranges": "bytes",
+    "Cache-Control": cacheControl,
+  };
+  const rangeHeader = request.headers["range"];
+  let start = 0;
+  let end = size - 1;
+  let status = 200;
+  const extra: Record<string, string> = { ...base };
+  if (rangeHeader !== undefined) {
+    const range = parseRange(rangeHeader, size);
+    if (range === undefined) return respond(416, { ...base, "Content-Range": `bytes */${size}` });
+    ({ start, end } = range);
+    status = 206;
+    extra["Content-Range"] = `bytes ${start}-${end}/${size}`;
+  }
+  // MUST: declare the length. The hub's received-byte check needs it to match the manifest's `size`.
+  extra["Content-Length"] = String(end - start + 1);
+  if (request.method === "HEAD" || size === 0) return respond(status, extra);
+  return respond(status, extra, { kind: "file", path: file, start, end });
+};
+
+/** The revision a mirror is served at: the first 40 hex digits of the sha256 of its `karume.json`. */
+export const hfRevisionOf = (manifestBytes: Uint8Array): string =>
+  createHash("sha256").update(manifestBytes).digest("hex").slice(0, 40);
+
+/** One repo of the HF-compatible route: the revision it answers and the directory it reads. */
+type HfServedRepo = {
+  readonly revision: string;
+  readonly mount: DistributionMount;
+  /** The real path of the mount's directory. */
+  readonly root: string;
+};
+
+/** The HF-compatible serving table, plus the cross-repo references no mount holds. */
+export type HfServingTable = {
+  readonly repos: ReadonlyMap<string, HfServedRepo>;
+  /** `repo@revision` of each cross-repo reference without a mount (requests for it answer 404). */
+  readonly unserved: readonly string[];
+};
+
+/** Every file reference of the manifest (all models × weights × dtypes, plus the assets). */
+const allFileRefs = (manifest: Manifest): readonly FileRef[] =>
+  Object.values(manifest.models).flatMap((model) => [
+    ...Object.values(model.weights).flatMap((entry) =>
+      Object.values(entry).flatMap((dtype) => dtype.container.parts),
+    ),
+    ...Object.values(model.assets),
+  ]);
+
+/**
+ * Builds the serving table from the mounts as they are on disk now (called per request, so a
+ * re-assembled mirror is picked up at once). Each available mount with an `hfRepo` is served under
+ * that name at {@link hfRevisionOf}; each cross-repo reference of its manifest is served at the
+ * declared (repo, revision) from the mount whose directory is named after the last element of the
+ * repo name.
+ *
+ * MUST: two different revisions for one repo fail loudly — one directory holds one revision, and
+ * answering both would serve the wrong bytes under one of them.
+ */
+export const hfServingTable = async (
+  mounts: readonly DistributionMount[],
+): Promise<HfServingTable> => {
+  const repos = new Map<string, HfServedRepo>();
+  const manifests: Manifest[] = [];
+  for (const mount of mounts) {
+    if (mount.hfRepo === undefined) continue;
+    const root = await realRoot(mount);
+    if (root === undefined) continue;
+    if (repos.has(mount.hfRepo)) {
+      throw new Error(`Two distribution mounts claim the HF repo ${mount.hfRepo}`);
+    }
+    const bytes = await readFile(join(root, MANIFEST_FILENAME));
+    repos.set(mount.hfRepo, { revision: hfRevisionOf(bytes), mount, root });
+    manifests.push(parseManifest(new TextDecoder().decode(bytes)));
+  }
+  const unserved = new Set<string>();
+  for (const ref of manifests.flatMap(allFileRefs)) {
+    if (ref.repo === undefined || ref.revision === undefined) continue;
+    const known = repos.get(ref.repo);
+    if (known !== undefined) {
+      if (known.revision !== ref.revision) {
+        throw new Error(
+          `HF repo ${ref.repo} is referenced at ${ref.revision} but served at ${known.revision} — one directory holds one revision`,
+        );
+      }
+      continue;
+    }
+    const directory = ref.repo.slice(ref.repo.lastIndexOf("/") + 1);
+    const mount = mounts.find(({ root }) => basename(root) === directory);
+    const root = mount === undefined ? undefined : await realRoot(mount);
+    if (mount === undefined || root === undefined) unserved.add(`${ref.repo}@${ref.revision}`);
+    else repos.set(ref.repo, { revision: ref.revision, mount, root });
+  }
+  return { repos, unserved: [...unserved] };
+};
+
+const decodeComponent = (text: string): string | undefined => {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * `/hf/…`: the revision API answers `{ "sha": <revision> }` for any ref of a served repo, and the
+ * resolve URL serves a file only at the repo's current revision. Responses are `no-store`: the hub
+ * keeps its own copy in CacheStorage, and a browser HTTP-cache copy of several GiB would only double
+ * the disk use.
+ */
+const handleHfRequest = async (
+  path: string,
+  request: DistributionRequest,
+  mounts: readonly DistributionMount[],
+): Promise<DistributionResponse> => {
+  const { repos } = await hfServingTable(mounts);
+  const revisionRoute = HF_REVISION_ROUTE.exec(path);
+  if (revisionRoute !== null) {
+    const served = repos.get(decodeComponent(revisionRoute[1] ?? "") ?? "");
+    if (served === undefined) return notFound("Unknown repository");
+    const text = JSON.stringify({ sha: served.revision });
+    return respond(
+      200,
+      { "Content-Type": "application/json", "Cache-Control": "no-store" },
+      request.method === "HEAD" ? undefined : { kind: "text", text },
+    );
+  }
+  const resolveRoute = HF_RESOLVE_ROUTE.exec(path);
+  if (resolveRoute === null) return notFound("Unknown route");
+  const [, repo = "", revision = "", rest = ""] = resolveRoute;
+  const served = repos.get(decodeComponent(repo) ?? "");
+  if (served === undefined) return notFound("Unknown repository");
+  if (decodeComponent(revision) !== served.revision) return notFound("Unknown revision");
+  const segments = safeSegments(rest);
+  if (segments === undefined) return notFound("Invalid asset path");
+  return await serveFile(served.root, segments, request, "no-store");
+};
+
+/**
  * The whole request policy. `/models/index.json` lists the mounts; `/models/<name>/<path>` serves a
- * file of that mount (GET / HEAD, with `Range`); everything else passes to Vite with the isolation
- * headers.
+ * file of that mount (GET / HEAD, with `Range`); `/hf/…` is the HF-compatible route
+ * ({@link handleHfRequest}); everything else passes to Vite with the isolation headers.
  */
 export const handleDistributionRequest = async (
   request: DistributionRequest,
   mounts: readonly DistributionMount[],
 ): Promise<DistributionResponse> => {
   const path = request.url.split(/[?#]/, 1)[0] ?? "";
-  if (!path.startsWith(PREFIX)) return { kind: "pass", headers: ISOLATION_HEADERS };
+  const hf = path.startsWith(HF_PREFIX);
+  if (!hf && !path.startsWith(PREFIX)) return { kind: "pass", headers: ISOLATION_HEADERS };
   if (request.method !== "GET" && request.method !== "HEAD") {
     return respond(405, { Allow: "GET, HEAD" });
   }
+  if (hf) return await handleHfRequest(path, request, mounts);
 
   if (path === INDEX_PATH) {
-    const index: Record<string, { directory: string; available: boolean }> = {};
+    const { repos } = await hfServingTable(mounts);
+    const index: Record<string, DistributionIndex[string]> = {};
     for (const mount of mounts) {
+      const served = mount.hfRepo === undefined ? undefined : repos.get(mount.hfRepo);
       index[mount.name] = {
         directory: mount.label,
         available: (await realRoot(mount)) !== undefined,
+        ...(mount.hfRepo === undefined || served === undefined
+          ? {}
+          : { hf: { repo: mount.hfRepo, revision: served.revision } }),
       };
     }
     const text = JSON.stringify(index);
@@ -198,39 +402,7 @@ export const handleDistributionRequest = async (
 
   const root = await realRoot(mount);
   if (root === undefined) return notFound(`Distribution directory ${mount.label} is missing`);
-  let file: string;
-  try {
-    file = await realpath(join(root, ...segments));
-  } catch (error) {
-    if (isMissing(error)) return notFound("Asset not found");
-    throw error;
-  }
-  // MUST: check the real path (a symlink inside the mount could point anywhere).
-  if (!file.startsWith(`${root}${sep}`)) return notFound("Asset outside the distribution");
-  const info = await stat(file);
-  if (!info.isFile()) return notFound("Not a file");
-
-  const size = info.size;
-  const base = {
-    "Content-Type": contentType(file),
-    "Accept-Ranges": "bytes",
-    "Cache-Control": "no-cache",
-  };
-  const rangeHeader = request.headers["range"];
-  let start = 0;
-  let end = size - 1;
-  let status = 200;
-  const extra: Record<string, string> = { ...base };
-  if (rangeHeader !== undefined) {
-    const range = parseRange(rangeHeader, size);
-    if (range === undefined) return respond(416, { ...base, "Content-Range": `bytes */${size}` });
-    ({ start, end } = range);
-    status = 206;
-    extra["Content-Range"] = `bytes ${start}-${end}/${size}`;
-  }
-  extra["Content-Length"] = String(end - start + 1);
-  if (request.method === "HEAD" || size === 0) return respond(status, extra);
-  return respond(status, extra, { kind: "file", path: file, start, end });
+  return await serveFile(root, segments, request, "no-cache");
 };
 
 /** The nearest ancestor of `from` (inclusive) that holds `pnpm-workspace.yaml`. */
@@ -251,8 +423,13 @@ const findRepoRoot = async (from: string): Promise<string> => {
 };
 
 export type DistributionsPluginOptions = {
-  /** `/models/<name>/` → directory relative to the repository root (the `pnpm-workspace.yaml`). */
-  readonly distributions: Readonly<Record<string, string>>;
+  /**
+   * `/models/<name>/` → directory relative to the repository root (the `pnpm-workspace.yaml`). The
+   * object form also serves the mount on the HF-compatible route as `hfRepo` (module doc).
+   */
+  readonly distributions: Readonly<
+    Record<string, string | { readonly directory: string; readonly hfRepo: string }>
+  >;
 };
 
 /** Serves {@link DistributionsPluginOptions.distributions} on the dev and preview servers. */
@@ -295,17 +472,32 @@ export const distributionsPlugin = (options: DistributionsPluginOptions): Plugin
 
   const resolveMounts = async (appRoot: string, log: (message: string) => void): Promise<void> => {
     const repoRoot = await findRepoRoot(appRoot);
-    mounts = Object.entries(options.distributions).map(([name, directory]) => ({
-      name,
-      root: resolve(repoRoot, directory),
-      label: relative(repoRoot, resolve(repoRoot, directory)),
-    }));
+    mounts = Object.entries(options.distributions).map(([name, entry]) => {
+      const directory = typeof entry === "string" ? entry : entry.directory;
+      return {
+        name,
+        root: resolve(repoRoot, directory),
+        label: relative(repoRoot, resolve(repoRoot, directory)),
+        ...(typeof entry === "string" ? {} : { hfRepo: entry.hfRepo }),
+      };
+    });
     for (const mount of mounts) {
       if ((await realRoot(mount)) === undefined) {
         log(
           `[distributions] ${mount.label} has no karume.json — /models/${mount.name}/ answers 404 and the pages that need it are disabled`,
         );
       }
+    }
+    // The table is rebuilt per request; this pass only reports problems early. A broken manifest
+    // does not stop the server (the requests that need the table answer the error).
+    try {
+      for (const reference of (await hfServingTable(mounts)).unserved) {
+        log(
+          `[distributions] no mount holds the cross-repo reference ${reference} — its ${HF_PREFIX} requests answer 404`,
+        );
+      }
+    } catch (error) {
+      log(`[distributions] the ${HF_PREFIX} serving table cannot be built: ${String(error)}`);
     }
   };
 

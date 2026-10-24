@@ -1,13 +1,34 @@
 /**
  * Reading the distributions the dev server mounts under `/models/<name>/`
  * (`vite-plugin-distributions.ts`). URLs are relative, so the page works behind any base path.
+ *
+ * Two ways to read one: {@link distributionSource} (`localDirectory` over plain `fetch`, nothing
+ * cached) and {@link hfRepoRef} (the HF-compatible route `/hf/`, read by the hub's HF source into
+ * its CacheStorage).
  */
 
-import { type DistributionSource, localDirectory } from "@karume/hub";
+import { type DistributionSource, type HubRepoRef, localDirectory } from "@karume/hub";
+
+/** The HF-compatible coordinates of a mount (the revision follows its `karume.json`). */
+export type HfCoordinates = { readonly repo: string; readonly revision: string };
 
 /** One mount as `/models/index.json` reports it. */
-export type DistributionStatus = { readonly directory: string; readonly available: boolean };
+export type DistributionStatus = {
+  readonly directory: string;
+  readonly available: boolean;
+  /** Present when the mount is also served on the HF-compatible route. */
+  readonly hf?: HfCoordinates;
+};
 export type DistributionIndex = Readonly<Record<string, DistributionStatus>>;
+
+const isHfCoordinates = (value: unknown): value is HfCoordinates =>
+  typeof value === "object" &&
+  value !== null &&
+  "repo" in value &&
+  typeof value.repo === "string" &&
+  "revision" in value &&
+  typeof value.revision === "string" &&
+  /^[0-9a-f]{40}$/.test(value.revision);
 
 const isStatus = (value: unknown): value is DistributionStatus =>
   typeof value === "object" &&
@@ -15,7 +36,8 @@ const isStatus = (value: unknown): value is DistributionStatus =>
   "directory" in value &&
   typeof value.directory === "string" &&
   "available" in value &&
-  typeof value.available === "boolean";
+  typeof value.available === "boolean" &&
+  (!("hf" in value) || isHfCoordinates(value.hf));
 
 /** Fetches `/models/index.json` (which mounts exist and whether their directory is there). */
 export const fetchDistributionIndex = async (signal?: AbortSignal): Promise<DistributionIndex> => {
@@ -73,3 +95,13 @@ export const distributionSource = (
     },
     { label: `/models/${name}/`, crossRepo },
   );
+
+/**
+ * The `HubRepoRef` of a mount on the HF-compatible route: `hubUrl` is the page's `/hf` and the
+ * revision is passed explicitly (a commit-shaped revision issues no resolution request).
+ */
+export const hfRepoRef = (hf: HfCoordinates, base: string): HubRepoRef => ({
+  repo: hf.repo,
+  revision: hf.revision,
+  hubUrl: new URL("hf", base).href,
+});

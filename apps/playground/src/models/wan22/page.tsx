@@ -1,12 +1,13 @@
 /**
  * The Wan2.2 text → video check: pick a preset and the VAE tile, run one generation on the page's
- * GPU, watch the stages, play the frames and save a record of the run.
+ * GPU, watch the stages, play the frames and save a record of the run (timeline, build cost and
+ * pipelines per component, device facts).
  */
 
-import { loadManifest } from "@karume/hub";
+import { clearHubCache, type HubRepoRef, loadManifest } from "@karume/hub";
 import { wanFrameToRgba } from "@karume/models/wan";
 import type { AcquireGpuOptions } from "@karume/runtime";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ChoiceSelect } from "@/components/choice-select";
 import { ErrorAlert, thrownText } from "@/components/error-alert";
@@ -22,17 +23,26 @@ import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useDistributionIndex } from "@/hooks/use-distribution-index";
 import { useGpu } from "@/hooks/use-gpu";
-import { distributionSource } from "@/lib/distributions";
+import { distributionSource, hfRepoRef } from "@/lib/distributions";
 import { downloadBlob, downloadJson, fileStamp } from "@/lib/download";
+import { type CacheInventory, queryCacheInventory } from "@/lib/hub-cache";
 import {
+  attentionPipelines,
+  type BuildCost,
+  type ComponentRecord,
   countNonFinite,
-  type DiagnosticsSummary,
+  type DeviceFacts,
+  foldComponentDiagnostics,
+  intervalSeconds,
   type RgbaStack,
   seconds,
   sha256Hex,
+  type Spread,
   stackRgbaFrames,
   summarizeAdapter,
-  summarizeDiagnostics,
+  summarizeDevice,
+  summarizeIntervals,
+  totalBuildCost,
 } from "@/lib/record";
 import { zipStored } from "@/lib/zip";
 
@@ -48,7 +58,7 @@ import {
   type WanForm,
   type WanManifestSummary,
 } from "./settings";
-import { type DiagnosticsSink, useWanPipeline } from "./use-wan-pipeline";
+import { type DiagnosticsSink, type PipelineSource, useWanPipeline } from "./use-wan-pipeline";
 
 /** Subgroups when the adapter has them (the online-attention presets use them). */
 const GPU_OPTIONS: Omit<AcquireGpuOptions, "onDeviceLost"> = { subgroups: "available" };
@@ -71,20 +81,33 @@ type RunState =
   | { readonly kind: "cancelled" }
   | { readonly kind: "error"; readonly error: unknown };
 
+type CacheState =
+  | { readonly kind: "idle" }
+  | { readonly kind: "busy"; readonly detail: string }
+  | { readonly kind: "ready"; readonly inventory: CacheInventory }
+  | { readonly kind: "error"; readonly error: unknown };
+
 type ManifestState =
   | { readonly kind: "loading" }
   | { readonly kind: "missing"; readonly directory: string }
   | { readonly kind: "ready"; readonly summary: WanManifestSummary; readonly sha256: string }
   | { readonly kind: "error"; readonly error: unknown };
 
-/** The saved record of one run (JSON; also shown as a table). */
+/** The version of the saved record; bump it when a field changes meaning or goes away. */
+const RECORD_FORMAT = "karume-playground-wan22/2";
+
+/** The saved record of one run (JSON; the page shows a summary of it). */
 type WanRecord = {
+  readonly format: typeof RECORD_FORMAT;
   readonly page: "wan22";
   readonly recordedAt: string;
   readonly userAgent: string;
   readonly crossOriginIsolated: boolean;
   readonly adapter: ReturnType<typeof summarizeAdapter>;
+  readonly device: DeviceFacts;
   readonly distribution: { readonly directory: string; readonly manifestSha256: string };
+  /** `cached` = the HF-compatible route through the hub's CacheStorage; `direct` = plain fetch. */
+  readonly source: { readonly kind: "direct" } | ({ readonly kind: "cached" } & HubRepoRef);
   readonly preset: { readonly quant: string; readonly label: string; readonly isDefault: boolean };
   readonly textEncoder: TextEncoderPath;
   readonly prompt: string;
@@ -99,6 +122,14 @@ type WanRecord = {
   readonly shift: number | "manifest default";
   readonly pipelineLoadSeconds: number;
   readonly stageSeconds: Partial<Record<StageName, number>>;
+  /**
+   * Seconds per denoise step and per VAE tile, in order. The first of each is measured from its
+   * stage start, so it also holds the Session creation and the weight upload.
+   */
+  readonly timeline: {
+    readonly denoiseStepSeconds: readonly number[];
+    readonly vaeTileSeconds: readonly number[];
+  };
   readonly wallSeconds: number;
   readonly output: {
     readonly fps: number;
@@ -106,7 +137,7 @@ type WanRecord = {
     /** sha256 of the RGBA bytes of all frames in order; null when non-finite values stop the conversion. */
     readonly rgbaSha256: string | null;
   };
-  readonly diagnostics: Readonly<Record<string, DiagnosticsSummary>>;
+  readonly diagnostics: Readonly<Record<string, ComponentRecord>>;
 };
 
 type RunResult = { readonly id: number; readonly record: WanRecord; readonly stack?: RgbaStack };
@@ -171,9 +202,27 @@ export const Wan22Page = () => {
     }
   }, [summary]);
 
+  // Where the pipeline reads the distribution. "cached" needs the HF-compatible route of the mount.
+  const [chosenSource, setChosenSource] = useState<PipelineSource["kind"]>("cached");
+  const hf = wan22?.hf;
+  const hfRef = useMemo(
+    () => (hf === undefined ? undefined : hfRepoRef(hf, document.baseURI)),
+    [hf],
+  );
+  // Bumped when the cache is cleared: a pipeline built before holds readers of the deleted entries.
+  const [cacheGeneration, setCacheGeneration] = useState(0);
+  const pipelineSource = useMemo<PipelineSource>(
+    () =>
+      chosenSource === "cached" && hfRef !== undefined
+        ? { kind: "cached", ref: hfRef, cacheGeneration }
+        : { kind: "direct" },
+    [chosenSource, hfRef, cacheGeneration],
+  );
+
   const diagnosticsRef = useRef<DiagnosticsSink | undefined>(undefined);
   const pipeline = useWanPipeline({
     gpu,
+    source: pipelineSource,
     quant: summary === undefined || form.quant === "" ? undefined : form.quant,
     textEncoder: form.textEncoder,
     textEncoderRepo: summary?.textEncoderRepo,
@@ -203,6 +252,35 @@ export const Wan22Page = () => {
   const runIdRef = useRef(0);
   const running = run.kind === "running";
 
+  // What the hub's cache holds of the distribution (re-read after each run and after clearing).
+  const [cache, setCache] = useState<CacheState>({ kind: "idle" });
+  const [cacheVersion, setCacheVersion] = useState(0);
+  useEffect(() => {
+    if (hfRef === undefined) return undefined;
+    const controller = new AbortController();
+    setCache({ kind: "busy", detail: "reading the cache inventory…" });
+    queryCacheInventory(hfRef, controller.signal).then(
+      (inventory) => {
+        if (!controller.signal.aborted) setCache({ kind: "ready", inventory });
+      },
+      (error: unknown) => {
+        if (!controller.signal.aborted) setCache({ kind: "error", error });
+      },
+    );
+    return () => controller.abort();
+  }, [hfRef, cacheVersion]);
+  const clearCache = async (): Promise<void> => {
+    setCache({ kind: "busy", detail: "clearing…" });
+    try {
+      await clearHubCache();
+    } catch (error) {
+      setCache({ kind: "error", error });
+      return;
+    }
+    setCacheGeneration((count) => count + 1);
+    setCacheVersion((count) => count + 1);
+  };
+
   // Elapsed-time ticker while a run is in flight.
   const [now, setNow] = useState(() => performance.now());
   useEffect(() => {
@@ -225,9 +303,11 @@ export const Wan22Page = () => {
     const parts = buildRequest(form, pipeline.prompts);
     const controller = new AbortController();
     controllerRef.current = controller;
-    const diagnostics = new Map<string, DiagnosticsSummary>();
+    const diagnostics = new Map<string, ComponentRecord>();
     diagnosticsRef.current = (component, report) =>
-      diagnostics.set(component, summarizeDiagnostics(diagnostics.get(component), report));
+      diagnostics.set(component, foldComponentDiagnostics(diagnostics.get(component), report));
+    const stepMarks: number[] = [];
+    const tileMarks: number[] = [];
     const startedAt = performance.now();
     let progress: Progress = { startedAt, stages: {} };
     const show = (next: Progress): void => {
@@ -256,8 +336,10 @@ export const Wan22Page = () => {
                   };
             show({ ...progress, stages, current: event.component });
           } else if (event.kind === "denoise-step") {
+            stepMarks.push(at);
             show({ ...progress, step: { step: event.step, steps: event.steps } });
           } else {
+            tileMarks.push(at);
             show({ ...progress, tile: { tile: event.tile, tiles: event.tiles } });
           }
         },
@@ -280,13 +362,20 @@ export const Wan22Page = () => {
         if (times?.end !== undefined) stageSeconds[name] = seconds(times.end - times.start);
       }
       const preset = manifest.summary.quants.find(({ name }) => name === pipeline.quant);
+      const { stages } = progress;
       const record: WanRecord = {
+        format: RECORD_FORMAT,
         page: "wan22",
         recordedAt: new Date().toISOString(),
         userAgent: navigator.userAgent,
         crossOriginIsolated: globalThis.crossOriginIsolated,
         adapter: summarizeAdapter(gpu.adapterInfo),
+        device: summarizeDevice(gpu),
         distribution: { directory: wan22?.directory ?? "", manifestSha256: manifest.sha256 },
+        source:
+          pipeline.source.kind === "cached"
+            ? { kind: "cached", ...pipeline.source.ref }
+            : { kind: "direct" },
         preset: {
           quant: pipeline.quant,
           label: preset?.label ?? pipeline.quant,
@@ -305,6 +394,16 @@ export const Wan22Page = () => {
         shift: parts.shift ?? "manifest default",
         pipelineLoadSeconds: seconds(pipeline.loadSeconds * 1000),
         stageSeconds,
+        timeline: {
+          denoiseStepSeconds:
+            stages.transformer === undefined
+              ? []
+              : intervalSeconds(stages.transformer.start, stepMarks),
+          vaeTileSeconds:
+            stages.vae_decoder === undefined
+              ? []
+              : intervalSeconds(stages.vae_decoder.start, tileMarks),
+        },
         wallSeconds: seconds(wall),
         output: { fps: video.fps, nonFinite, rgbaSha256 },
         diagnostics: Object.fromEntries(diagnostics),
@@ -318,6 +417,8 @@ export const Wan22Page = () => {
     } finally {
       diagnosticsRef.current = undefined;
       controllerRef.current = undefined;
+      // The run may have filled the cache (or failed partway through filling it).
+      setCacheVersion((count) => count + 1);
     }
   };
 
@@ -411,6 +512,36 @@ export const Wan22Page = () => {
                   onChange={(quant) => update({ quant })}
                   disabled={disabled}
                 />
+              </Field>
+            </div>
+            <div className="sm:col-span-2">
+              <Field
+                id="wan22-source"
+                label="Source"
+                hint={
+                  hfRef === undefined
+                    ? "Direct only: the dev server serves no HF-compatible route for this distribution."
+                    : pipelineSource.kind === "cached"
+                      ? "Through the hub's cache (/hf/): the first run stores the weights in this browser, later runs read them from its disk."
+                      : "Plain fetch from /models/ on every run; nothing is cached."
+                }
+              >
+                <ToggleGroup
+                  id="wan22-source"
+                  variant="outline"
+                  spacing={0}
+                  value={[pipelineSource.kind]}
+                  onValueChange={(value) => {
+                    const [next] = value;
+                    if (next === "cached" || next === "direct") setChosenSource(next);
+                  }}
+                  disabled={disabled}
+                >
+                  <ToggleGroupItem value="cached" disabled={hfRef === undefined}>
+                    Cached
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="direct">Direct</ToggleGroupItem>
+                </ToggleGroup>
               </Field>
             </div>
             <Field
@@ -609,13 +740,43 @@ export const Wan22Page = () => {
                 [
                   "Pipeline",
                   pipeline.kind === "ready"
-                    ? `${pipeline.quant} · ${pipeline.textEncoder} (${pipeline.loadSeconds.toFixed(1)} s to open)`
+                    ? `${pipeline.quant} · ${pipeline.textEncoder} · ${pipeline.source.kind} (${pipeline.loadSeconds.toFixed(1)} s to open)`
                     : pipeline.kind === "loading"
                       ? pipeline.detail
                       : pipeline.kind,
                 ],
+                ...(hfRef === undefined ? [] : [["Cache", cacheText(cache)] as const]),
               ]}
             />
+            {hfRef === undefined ? null : (
+              <div className="flex flex-col gap-2">
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    id="cache-refresh"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCacheVersion((count) => count + 1)}
+                    disabled={cache.kind === "busy" || running}
+                  >
+                    Refresh cache size
+                  </Button>
+                  <Button
+                    id="cache-clear"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void clearCache()}
+                    disabled={cache.kind === "busy" || running || pipeline.kind === "loading"}
+                  >
+                    Clear cache
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Clearing deletes everything the hub stored for this origin; the next cached run
+                  reads the weights over the network again.
+                </p>
+                {cache.kind === "error" ? <ErrorAlert title="Cache" error={cache.error} /> : null}
+              </div>
+            )}
             {gpuState.kind === "error" ? <ErrorAlert title="GPU" error={gpuState.error} /> : null}
             {gpuState.kind === "lost" ? (
               <Alert variant="destructive">
@@ -739,6 +900,44 @@ const RunProgress = ({ progress, now }: { progress: Progress; now: number }) => 
   </div>
 );
 
+const GIB = 2 ** 30;
+
+const gibibytes = (bytes: number): string => (bytes / GIB).toFixed(2);
+
+const cacheText = (cache: CacheState): string => {
+  if (cache.kind === "idle") return "—";
+  if (cache.kind === "busy") return cache.detail;
+  if (cache.kind === "error") return "failed";
+  const { inventory } = cache;
+  return `${gibibytes(inventory.cachedBytes)} of ${gibibytes(inventory.totalBytes)} GiB (${inventory.cachedFiles} / ${inventory.totalFiles} files, every preset)`;
+};
+
+const spreadText = (spread: Spread | undefined): string =>
+  spread === undefined ? "—" : `${spread.min} / ${spread.median} / ${spread.max} (${spread.count})`;
+
+const buildText = (cost: BuildCost): string =>
+  [
+    `supply wait ${seconds(cost.supplyWaitMs)} s`,
+    `decode ${seconds(cost.decodeMs)} s`,
+    `buffer create ${seconds(cost.bufferCreateMs)} s`,
+    `write issue ${seconds(cost.writeBufferIssueMs)} s`,
+    `upload fence ${seconds(cost.uploadFenceMs)} s`,
+    `${gibibytes(cost.uploadedBytes)} GiB in ${cost.partCount} parts`,
+  ].join(" · ");
+
+/** First interval and the spread of the rest, as two rows. */
+const intervalRows = (
+  name: string,
+  values: readonly number[],
+): readonly (readonly [string, string])[] => {
+  const summary = summarizeIntervals(values);
+  if (summary === undefined) return [];
+  return [
+    [`${name} 1 s (with Session build)`, String(summary.first)],
+    [`${name}s 2–${values.length} s (min / median / max, n)`, spreadText(summary.rest)],
+  ];
+};
+
 const RecordTable = ({ record }: { record: WanRecord }) => (
   <KeyValueTable
     rows={[
@@ -747,6 +946,16 @@ const RecordTable = ({ record }: { record: WanRecord }) => (
         `${record.adapter.vendor} · ${record.adapter.architecture} · ${record.adapter.device}`,
       ],
       ["Driver", record.adapter.description],
+      [
+        "Device",
+        `subgroups ${record.device.features.includes("subgroups")} · lanes linear ${record.device.subgroupLanesLinear} · GPU timing ${record.device.gpuTimingEnabled}`,
+      ],
+      [
+        "Source",
+        record.source.kind === "cached"
+          ? `cached (${record.source.repo} @ ${record.source.revision?.slice(0, 12) ?? "main"})`
+          : "direct",
+      ],
       ["Preset", `${record.preset.quant}${record.preset.isDefault ? " (default)" : ""}`],
       ["VAE tile", String(record.vaeTile)],
       ["Size", `${record.width}×${record.height}`],
@@ -760,15 +969,32 @@ const RecordTable = ({ record }: { record: WanRecord }) => (
         return value === undefined ? [] : [[`${STAGE_LABELS[name]} s`, String(value)] as const];
       }),
       ["Wall s", String(record.wallSeconds)],
+      ...intervalRows("Step", record.timeline.denoiseStepSeconds),
+      ...intervalRows("VAE tile", record.timeline.vaeTileSeconds),
+      [
+        "Build, all components",
+        buildText(totalBuildCost(Object.values(record.diagnostics).map(({ build }) => build))),
+      ],
       ["Non-finite", String(record.output.nonFinite)],
       ["RGBA sha256", record.output.rgbaSha256 ?? "—"],
       ...Object.entries(record.diagnostics).map(
         ([component, summary]) =>
           [
             component,
-            `${summary.runs} runs · weights ${summary.weightsAllocatedGiB} GiB · ${summary.submitCount} submits`,
+            `${summary.runs} runs · weights ${summary.weightsAllocatedGiB} GiB · ${summary.submitCount} submits · build: ${buildText(summary.build)}`,
           ] as const,
       ),
+      ...Object.entries(record.diagnostics).flatMap(([component, summary]) => {
+        const attention = attentionPipelines(summary.lastRunPipelines ?? []);
+        return attention.length === 0
+          ? []
+          : [
+              [
+                `${component} attention`,
+                attention.map(({ key, dispatchCount }) => `${key} ×${dispatchCount}`).join(" · "),
+              ] as const,
+            ];
+      }),
     ]}
   />
 );
