@@ -280,6 +280,9 @@ test.skipIf(!QAT_PRESENT || !GPU_AVAILABLE)(
     // GPU 常駐席が host 経路より余分に払う queue 待ちは prefill chunk 1 本ぶんの gather batch
     // だけで、decode の 16 token は 1 本も払わない（同じ batch の終端 map で読み戻す）。
     // 席の残件 ① の前は decode ごとに 1 本増えていた（= 16 + 1）。
-    assertEquals(resident.fences - host.fences, 1, `host ${host.fences} / gpu ${resident.fences}`);
+    // The host path also pays one wait: its decode run builds a slot backing, and a run that builds
+    // one first waits for released memory (ADR 0095 addendum of 2026-10-24). The resident path
+    // builds its backings through enqueue, which never waits, so the two counts now match.
+    assertEquals(resident.fences - host.fences, 0, `host ${host.fences} / gpu ${resident.fences}`);
   },
 );
