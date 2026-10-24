@@ -10,11 +10,17 @@
 
 import { Route as rootRouteImport } from "./routes/__root";
 import { Route as IndexRouteImport } from "./routes/index";
+import { Route as AttentionBenchRouteImport } from "./routes/attention-bench";
 import { Route as Wan22RouteImport } from "./routes/wan22";
 
 const IndexRoute = IndexRouteImport.update({
   id: "/",
   path: "/",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const AttentionBenchRoute = AttentionBenchRouteImport.update({
+  id: "/attention-bench",
+  path: "/attention-bench",
   getParentRoute: () => rootRouteImport,
 } as any);
 const Wan22Route = Wan22RouteImport.update({
@@ -25,27 +31,31 @@ const Wan22Route = Wan22RouteImport.update({
 
 export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
+  "/attention-bench": typeof AttentionBenchRoute;
   "/wan22": typeof Wan22Route;
 }
 export interface FileRoutesByTo {
   "/": typeof IndexRoute;
+  "/attention-bench": typeof AttentionBenchRoute;
   "/wan22": typeof Wan22Route;
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   "/": typeof IndexRoute;
+  "/attention-bench": typeof AttentionBenchRoute;
   "/wan22": typeof Wan22Route;
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
-  fullPaths: "/" | "/wan22";
+  fullPaths: "/" | "/attention-bench" | "/wan22";
   fileRoutesByTo: FileRoutesByTo;
-  to: "/" | "/wan22";
-  id: "__root__" | "/" | "/wan22";
+  to: "/" | "/attention-bench" | "/wan22";
+  id: "__root__" | "/" | "/attention-bench" | "/wan22";
   fileRoutesById: FileRoutesById;
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute;
+  AttentionBenchRoute: typeof AttentionBenchRoute;
   Wan22Route: typeof Wan22Route;
 }
 
@@ -56,6 +66,13 @@ declare module "@tanstack/react-router" {
       path: "/";
       fullPath: "/";
       preLoaderRoute: typeof IndexRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/attention-bench": {
+      id: "/attention-bench";
+      path: "/attention-bench";
+      fullPath: "/attention-bench";
+      preLoaderRoute: typeof AttentionBenchRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/wan22": {
@@ -70,6 +87,7 @@ declare module "@tanstack/react-router" {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AttentionBenchRoute: AttentionBenchRoute,
   Wan22Route: Wan22Route,
 };
 export const routeTree = rootRouteImport

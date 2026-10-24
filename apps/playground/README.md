@@ -4,11 +4,12 @@ A browser application that runs Karume pipelines on the browser's own GPU, readi
 distributions under `models/` through the dev server. It replaces the Deno-era `tools/gpu-lab` page
 (ADR 0127 decision 5) and is the first slice of the common shell for such pages.
 
-Today it has one model page: **Wan2.2 TI2V 5B** (`/wan22`), for checking the presets and the
-32-latent VAE tile (`vaeTile: 32`, ADR 0134) on a real GPU.
+Today it has two pages: **Wan2.2 TI2V 5B** (`/wan22`), for checking the presets and the
+32-latent VAE tile (`vaeTile: 32`, ADR 0134) on a real GPU, and the **attention route bench**
+(`/attention-bench`), which times the two a8 attention routes per kernel at Wan2.2's shapes.
 
 The app is private (not published) and imports only the public surfaces of the workspace packages:
-`@karume/runtime`, `@karume/hub`, `@karume/models/wan` (and `encodePng` from the `@karume/models`
+`@karume/runtime` (and its `/tune` subpath), `@karume/hub`, `@karume/models/wan` (and `encodePng` from the `@karume/models`
 barrel, loaded only when frames are saved).
 
 ## Run
@@ -23,7 +24,7 @@ The dev server listens on **http://127.0.0.1:8790** (loopback only). It serves:
 
 | URL | What |
 | --- | --- |
-| `/`, `/wan22` | the pages (with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`, so the page is cross-origin isolated) |
+| `/`, `/wan22`, `/attention-bench` | the pages (with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`, so the page is cross-origin isolated) |
 | `/models/wan22/…` | `models/karume-wan2.2` (read-only, HTTP `Range`, `Cross-Origin-Resource-Policy: same-origin`) |
 | `/models/umt5/…` | `models/karume-umt5-xxl` (the umT5 text encoder Wan's manifest references) |
 | `/models/index.json` | which mounts exist, whether their directory is there, and the HF repo / revision of a mount served under `/hf/` |
@@ -132,10 +133,52 @@ machine running Chrome:
   `frame_000.png` …, lossless RGB from the same RGBA bytes the sha256 covers)
 - **Copy record** → the clipboard (paste into an issue or a research note)
 
+## The attention route bench page
+
+The Wan2.2 page cannot time kernels (its pipeline refuses a timing device), so this page times the
+two attention routes on their own, with the kernels, keys, binding order, row blocks and variants
+production would use on this device (`runAttentionRouteBench` of `@karume/runtime/tune`):
+
+- **s16** — the a8 route with S stored in f16: ①QK, ② row statistics and ③PV, each timed on its own
+  and summed;
+- **online** — the online int8 kernel (`attention_online`, ADR 0132), one dispatch;
+- **quantization** (optional) — the four dispatches both routes share (q and k per token, the
+  permute to Vᵀ and its quantization), once per node and outside the route totals.
+
+The page probes the adapter first and acquires its GPU with `subgroups: "available"` and, when the
+adapter lists `timestamp-query`, `gpuTiming: true`. Without timestamp-query it says so and the
+times are wall-clock (per pass, divided by the repetitions — they include the submit overhead).
+Chrome without developer flags rounds timestamps to 100 µs; the bench stacks repetitions until one
+pass is about 80 ms, so that rounding stays below 0.2%.
+
+| Control | What it does |
+| --- | --- |
+| Shapes | Wan2.2 TI2V-5B (24 heads, D = 128): self-attention at 33 frames (N = 7,920), self-attention at 121 frames (N = 27,280), cross-attention over the 512 text tokens at 121 frames (M = 27,280). |
+| Rows per dispatch | Empty (default) = the first row block production would dispatch: for s16 the first block of the even split under the device's `maxStorageBufferBindingSize`, for online the first window of its work budget. A number overrides both (capped at the shape's query count; the online kernel rounds up to whole 64-row workgroups). |
+| Rounds | Measurement rounds per dispatch (default 5); the min is kept. |
+| Quantization | Also time the shared quantization dispatches (default on). |
+| Run / Cancel | Run the bench; Cancel stops before the next dispatch (the record keeps the finished shapes). |
+
+The result table has one row per shape and route: rows per dispatch, the production split, ms per
+dispatch, ms per 1,000 query rows, integer TOPS (`4 · heads · rows · N · D` operations per dispatch),
+the node estimate (ms per row × the node's query rows, quantization excluded), the **online / s16**
+ratio of the per-row times (below 1 = online faster), the s16 stages and the variant (the online
+reduction form `sg32` / `wg` with its workgroup storage bytes, or the s16 row window). A route
+production would not run on this device or shape shows the reason instead. The status card shows the
+device facts: geometry profile, the dp4a variant (and the canary's verdict), the subgroup features
+and the linear lane mapping, and the limits.
+
+**Download record (JSON)** saves `attention-bench_<UTC timestamp>.json` (`format:
+"karume-playground-attention-bench/1"`): the adapter, the device facts (as on the Wan2.2 page), the
+settings, and under `bench` the runtime's record (`karume-attention-bench/1`) with every stage's
+key, workgroups, reps, raw rounds and wall-clock rounds. **Copy record** copies the same JSON.
+
+Absolute times compare only on one machine; across machines, compare the ratios.
+
 ## Develop
 
 ```sh
-pnpm --filter @karume/playground test        # vp test: the server's request handling (/models/ and /hf/), record and cache helpers, zip writer
+pnpm --filter @karume/playground test        # vp test: the server's request handling (/models/ and /hf/), record and cache helpers, zip writer, attention bench table
 pnpm --filter @karume/playground typecheck
 pnpm --filter @karume/playground check       # vp check: format + lint + types
 pnpm --filter @karume/playground build
