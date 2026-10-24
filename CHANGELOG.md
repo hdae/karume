@@ -27,6 +27,10 @@ measurements in `docs/research/`.
   each kernel's WGSL without its comments and whitespace, so a comment edit in a kernel no longer
   invalidates saved tables. Tables saved by earlier versions mismatch once on the fingerprint and
   need one re-sweep; the two embedded tables carry the new value.
+- The Wan DiT's small ops are fused: the pair-form RoPE, the per-token adaLN and the gated residual
+  each run in one or two dispatches instead of three to eight (ADR 0040 addendum of 2026-10-24). Outputs
+  are bit-identical. `FusionCounts` (`lastRunFusions`) gains the counter `gatedResidual`; the pair-form
+  RoPE also fires on Irodori, so its `rope` count is no longer 0.
 - `GpuContext.beginBatch` on a device acquired with `gpuTiming: true` no longer throws: the batch runs
   untimed, and runs before and after it keep their per-kernel breakdown (ADR 0021 addendum of
   2026-10-24). The Wan pipelines accept such a device; their VAE decoder (batches) reports no timing.

@@ -80,7 +80,8 @@ guarantee. Therefore:
   256), table `[1,1,S,D]`, and the half split `0..D/2` / `D/2..D` on dim 3 (head width derived from the
   split since 2026-08-11; BSHD added 2026-09-12, see addenda). SiLU accepts only f32 with the same
   shape in every slot; upsample2x accepts only f32 rank-4 NCHW with each spatial axis exactly doubled.
-  There is no generalisation to interleaved RoPE, broadcast SiLU or general resize.
+  Interleaved (pair-form) RoPE is accepted only in the exact node sequence of the addendum of
+  2026-10-24; there is no generalisation to broadcast SiLU or general resize.
 - **Every internal value of a chain must have exactly one consumer and must not be a graph output**
   (`internalsArePrivate`, common to all rules). A fused step creates no internal buffer, so any
   external consumer or readback would lose the value.
@@ -255,3 +256,23 @@ the zero-side-effect invariant (no execution at import), and the mechanical disj
 ops in `tests/runtime_fusion_test.ts` reads **this array**. Decision 1's property that order does not
 affect the result is unchanged. Matching, generated output and the public surface did not change by a
 byte (lines moved only).
+
+## Addendum (2026-10-24) — three accepted forms for the Wan DiT
+
+Only `silu` fired on the Wan DiT, whose small ops took about 17% of a forward in Chrome
+([research](../research/2026-10-24-wan22-chrome-kernel-breakdown.md)). Three forms are added, each matched exactly (op sequence, wiring, shapes,
+dtypes, private internals) and computed with the same f32 operations in the same order:
+
+- `rope`, pair form: `slice(odd), neg, slice(even), cat, reshape, mul(x, cos), mul(rot, sin), add` on
+  BSHD with tables `[1,S,1,D]` becomes one dispatch (`rope:v1:pair:bshd`); rot[2p] = −x[2p+1],
+  rot[2p+1] = x[2p]. It fires on Wan2.1 / 2.2 (60 each) and on the Irodori sites with the same sequence
+  (DiT 23, speaker 15); the first Irodori site, which slices its tables inside the window, does not match.
+- `adaln`, per-token form: `layer_norm, where(mask, scale_c, scale_g), add(+1), mul, where(mask, shift_c,
+  shift_g), add` becomes a pack step (the four vectors into one table) plus the body, so no kernel needs
+  more than 8 storage bindings and fusion does not depend on device limits.
+- `gatedResidual` (new rule, first op `where`): `where(mask, gate_c, gate_g), mul(y, g), add(residual, p)`
+  becomes one dispatch.
+
+The rounding points are kept with the workgroup-memory barrier described above (measured, not a WGSL
+guarantee); per-rule GPU tests compare fused and plain runs bit for bit. The existing keys' WGSL is
+unchanged, and the Wan sha256 rows did not move.
