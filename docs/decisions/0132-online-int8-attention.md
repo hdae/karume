@@ -159,6 +159,7 @@ and ADR 0100 decision 1 (`subgroups: true` rejects a device without them).
 - The visual check of the online preset (12 clips, 50 steps, 33 frames — the ruling of ADR 0128
   decision 1 for a default) was done for the s16 preset only; the online preset's quality is held
   by the kernel error model and the 33-frame A/B.
-- The 121-frame A/B waits for the reference preset's step to fit under Node (known-issues).
+- The 121-frame A/B under Node (2026-10-24, after the release wait of ADR 0095's addendum of the same
+  day): relRMS 4.675e-2 (s16 4.915e-2), inside the 9.9e-2 band.
 - Bc = 128 on 48 KiB devices, double-buffered tiles and `exp2` are unmeasured headroom (the spike
   sits at 26–29 TOPS, under half the dp4a ceiling).

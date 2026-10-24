@@ -200,3 +200,29 @@ their allocation hits a non-fatal OOM; without rollback, a retry after memory fr
   `diagnostics().weights.allocCount` and the plan) and `gpu_state_execution_test.ts` (repeating a miss
   run that fails in `assertGenerationRun` keeps the allocation count; if the errorScope discarded in the
   same run caught a non-fatal OOM, the plan and params are removed and rebuilt on the next run).
+
+## Addendum (2026-10-24) — the run that builds a backing first waits for released memory
+
+Wan2.2 at 1280×704×121 ran out of device memory under Node + Dawn on the 12 GiB RTX 3080 Ti in the DiT
+stage's second forward — the hit run that builds the backing. The preceding miss run had destroyed its
+arena (4.45 GiB), but Dawn still held it while the new regions (1.6 + 2.1 + 0.6 GiB) were allocated on
+top of 4.7 GiB of weights.
+
+- Dawn returns a destroyed buffer's memory only when a **later** submit completes. Probe (4 GiB
+  destroyed after its last submit): still held with no wait, after a 2 s sleep and after
+  `onSubmittedWorkDone` alone; returned after `queue.submit([])` + `onSubmittedWorkDone`.
+- Decision: a run whose key has no retained backing issues an empty submit and waits for it (raced with
+  device loss) before `#activateBacking` allocates. Once per built backing; miss runs and runs on a
+  retained backing keep H-1's single `mapAsync` fence. The same shape as the fence after the weight
+  upload (ADR 0108 decision 9) and the models-side `settleReleasedMemory`.
+- Not taken: a wait only in Wan's DiT loop (every family builds backings the same way); a wait in every
+  `RunArena.destroy` (a fence per run, against H-1); building on miss runs (one-shot runs pay no slot
+  memory — decision 1); waiting only after an out-of-memory error (Chrome's D3D12 pages to system memory
+  instead of failing, so the overlap would stay and turn into a slowdown).
+- Unchanged: decision 4's overlap of backings evicted within the same run (destroyed after that run's
+  flush), and `enqueue`, which builds without the wait (a batch issues no fence).
+- Checks: `gpu_plan_backing_test.ts` (the empty submit settles before the first region is allocated; no
+  empty submit in a miss run or on a retained backing — red with the wait removed); the fence counts of
+  `gpu_run_fence_test.ts` / `gpu_submit_backpressure_test.ts` count the one wait of the building run.
+  On the RTX 3080 Ti: the default preset's 2-step 1280×704×121 completes (peak 9,300 MiB), the 121-frame
+  A/B passes (relRMS s16 4.915e-2, online 4.675e-2, band 9.9e-2) and the 121-frame pipeline case passes.

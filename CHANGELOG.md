@@ -98,6 +98,14 @@ measurements in `docs/research/`.
   automatically. Default presets are unchanged; the rule for choosing them and the three manifest
   constraints the distribution gate now checks are in ADR 0128.
 
+### Fixed
+
+- `Session.run` waits for the device to return released memory before it builds a slot backing (the
+  second run of a signature, `@karume/runtime`). Dawn returns the memory of destroyed buffers only when
+  a later submit completes, so the previous run's buffers and the new backing were held at once; Wan2.2
+  at 1280×704×121 ran out of memory on 12 GiB under Node + Dawn and now completes. The wait happens once
+  per built backing; other runs keep a single fence.
+
 ## [0.14.0] - 2026-10-16
 
 ### Added

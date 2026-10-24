@@ -115,8 +115,8 @@ names stay); the band is derived for tile 32 as for 16 (band × 5). The pipeline
   The expected −30% is reached only on the best sample; the samples spread by up to 19% on this display-shared GPU.
 - 121 frames: not measured. A 2-step 1280×704×121 request with `i8-a8-attn8-online-conv8` runs out of device
   memory (`VK_ERROR_OUT_OF_DEVICE_MEMORY` on `CreateBuffer`) under Node + Dawn on the 12 GiB RTX 3080 Ti at tile 16
-  as well as at tile 32, in a fresh process each (nvidia-smi 9.3 GiB sampled at the failure) — a sibling of the
-  121-frame known issue of the A/B check, not a property of the tile (known-issues).
+  as well as at tile 32, in a fresh process each (nvidia-smi 9.3 GiB sampled at the failure) — not a property of
+  the tile: the backing-build overlap fixed on 2026-10-24 (ADR 0095 addendum of that day).
 
 ## Consequences
 
