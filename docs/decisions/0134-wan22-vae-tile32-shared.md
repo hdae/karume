@@ -2,8 +2,8 @@
 
 - Status: accepted (2026-10-23 — the maintainer's ruling 20 a; the gates of decision 7 are in Results. The kill line of
   decision 7.4 was ruled on the 17-frame case and is missed there by 1–3% (0.81–0.83×); the 33-frame clip meets it
-  (0.70–0.83×). Kept as the opt-in knob on the maintainer's standing instruction to proceed on the recommended option
-  and report; the reading of the kill line is the maintainer's to confirm)
+  (0.70–0.83×). Kept as the opt-in knob; the maintainer confirmed that reading on 2026-10-24 after viewing the clips
+  (the default stays 16 — decision 2))
 - Date: 2026-10-23
 - Related: ADR [0121](0121-wan22-ti2v-5b.md) decision 6 (tile 16 / overlap 4 — unchanged as the default) /
   [0096](0096-speculative-decoding.md) decision 2 (shared initializers — the mechanism this reuses) / [0133](0133-conv3d-w8a8.md)
