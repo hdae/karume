@@ -205,9 +205,11 @@ export class RunArena {
    * dispatches riding on the same scheduler never run, silently leaving wrong values behind.
    *
    * NOTE: destroying here ends ownership. The VRAM of a destroyed buffer returns to the budget at
-   * the next device poll (`onSubmittedWorkDone` and the like) (measured on the B570 —
-   * docs/research/2026-09-27-h35-oom-device-lost.md §5). Returning everything the device holds is
-   * `device.destroy()`.
+   * the next device poll on wgpu (`onSubmittedWorkDone` and the like — measured on the B570,
+   * docs/research/2026-09-27-h35-oom-device-lost.md §5), but on Dawn only when a **later** submit
+   * completes (a completion wait alone does not return it — measured on the RTX 3080 Ti,
+   * 2026-10-24). A run that builds a slot backing waits for that release first (`Session.run`).
+   * Returning everything the device holds is `device.destroy()`.
    */
   destroy(): Promise<void> {
     // MUST: a second destroy waits for the same completion. Returning before the earlier flush

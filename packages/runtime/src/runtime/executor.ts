@@ -1741,6 +1741,23 @@ export class Session {
               const data = graph.inputs.map((spec) =>
                 this.#checkInput(spec.name, captured.values.get(spec.name), shapes),
               );
+              // MUST: before **building** a backing, let the device return the VRAM of the buffers
+              // destroyed so far (an empty submit, then its completion). The preceding miss run's
+              // arena (GiB-scale for a DiT) is destroyed, but destroy() ends only ownership: Dawn
+              // returns the memory when the **next** submit completes — neither a completion wait
+              // alone nor elapsed time does (4 GiB measured on the RTX 3080 Ti, 2026-10-24). This
+              // run allocates its regions before its first submit, so without the wait the old
+              // arena and the new regions overlap (Wan2.2 121 frames on 12 GiB went out of memory
+              // exactly here). The same shape as the fence after the weight upload
+              // (session-build.ts). Only when building: once per signature, so the backed fast path
+              // keeps no fence.
+              if (!this.#backings.has(preparedKey)) {
+                device.queue.submit([]);
+                await gpu[RUNTIME_INTERNAL].raceDeviceLost(
+                  device.queue.onSubmittedWorkDone(),
+                  "the release wait before building a slot backing",
+                );
+              }
               // MUST: backings are built **only by hit runs**. This is the only guard that keeps
               // one-shot runs (workloads that run once) from paying slot memory, and it leaves the
               // behaviour and ArenaStats of miss runs completely unchanged.

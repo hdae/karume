@@ -163,6 +163,100 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
+describe("the release wait before building a backing", () => {
+  // Dawn returns a destroyed buffer's VRAM only when a later submit completes, so a run that
+  // allocates the slot regions right after the previous run's arena was destroyed holds both at once
+  // (Wan2.2 121 frames went out of memory there on 12 GiB). The detector is the order of the calls
+  // the device sees: the building run must issue an empty submit and see it complete before it
+  // allocates the first region.
+  type Event = "storage-buffer" | "empty-submit" | "settled";
+
+  const recordDevice = (device: GPUDevice): { readonly events: Event[]; restore(): void } => {
+    const events: Event[] = [];
+    const createBuffer = device.createBuffer.bind(device);
+    const submit = device.queue.submit.bind(device.queue);
+    const onSubmittedWorkDone = device.queue.onSubmittedWorkDone.bind(device.queue);
+    device.createBuffer = (descriptor) => {
+      if ((descriptor.usage & BUFFER_USAGE.STORAGE) !== 0) events.push("storage-buffer");
+      return createBuffer(descriptor);
+    };
+    device.queue.submit = (buffers) => {
+      if ([...buffers].length === 0) events.push("empty-submit");
+      submit(buffers);
+    };
+    device.queue.onSubmittedWorkDone = () =>
+      onSubmittedWorkDone().then(() => {
+        events.push("settled");
+        return undefined;
+      });
+    return {
+      events,
+      restore: () => {
+        device.createBuffer = createBuffer;
+        device.queue.submit = submit;
+        device.queue.onSubmittedWorkDone = onSubmittedWorkDone;
+      },
+    };
+  };
+
+  it.skipIf(!GPU_AVAILABLE)(
+    "settles an empty submit before the first region of a new backing is allocated",
+    async () => {
+      const gpu = await acquireGpu();
+      const session = await createSessionFromContainer(gpu, await openedModel(), "model");
+      try {
+        await session.run({ x: input(4, 0) });
+        const recorder = recordDevice(gpu.device);
+        try {
+          await session.run({ x: input(4, 1) });
+        } finally {
+          recorder.restore();
+        }
+        assertEquals(session.diagnostics().planBacking.buildCount, 1, "this run built the backing");
+        const firstRegion = recorder.events.indexOf("storage-buffer");
+        assert(firstRegion >= 0, `no region was allocated: ${recorder.events.join(", ")}`);
+        assertEquals(
+          recorder.events.slice(0, firstRegion).slice(-2),
+          ["empty-submit", "settled"],
+          `the empty submit did not settle before the regions: ${recorder.events.join(", ")}`,
+        );
+      } finally {
+        await session.dispose();
+        gpu.destroy();
+      }
+    },
+  );
+
+  it.skipIf(!GPU_AVAILABLE)(
+    "adds no empty submit to a miss run or to a run on a retained backing",
+    async () => {
+      const gpu = await acquireGpu();
+      const session = await createSessionFromContainer(gpu, await openedModel(), "model");
+      try {
+        const missRun = recordDevice(gpu.device);
+        try {
+          await session.run({ x: input(4, 0) });
+        } finally {
+          missRun.restore();
+        }
+        await session.run({ x: input(4, 1) });
+        const backedRun = recordDevice(gpu.device);
+        try {
+          await session.run({ x: input(4, 2) });
+        } finally {
+          backedRun.restore();
+        }
+        assertEquals(session.diagnostics().planBacking.buildCount, 1, "the backing was retained");
+        assert(!missRun.events.includes("empty-submit"), missRun.events.join(", "));
+        assert(!backedRun.events.includes("empty-submit"), backedRun.events.join(", "));
+      } finally {
+        await session.dispose();
+        gpu.destroy();
+      }
+    },
+  );
+});
+
 test.skipIf(!GPU_AVAILABLE)(
   "同一 signature の並行 run は共有入力バッファでも取り違えない（実 GPU）",
   async () => {
