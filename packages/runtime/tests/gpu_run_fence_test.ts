@@ -1,7 +1,8 @@
 // 通常 run のフェンス構成（H-1）の門。
 //
 // 狙いは「run 1 本の待ちを mapAsync の 1 本に畳む」ことなので、この門が固定するのは
-// ①gpuTiming OFF の run が `onSubmittedWorkDone` を **1 本も張らない**こと ②それでも値が
+// ①gpuTiming OFF の run が `onSubmittedWorkDone` を **1 本も張らない**こと（例外は backing を新しく作る
+// run の確保前の解放待ち 1 本だけ — signature ごとに 1 回）②それでも値が
 // 二段待ち経路とビット単位で一致すること ③二段待ちへ落ちる 2 条件（gpuTiming ON / グラフ出力
 // 0 本）では**黙って無フェンスにしない**こと ④submit だけして待たないアリーナ後始末が
 // 「未 submit を残して destroy」に退化していないこと。
@@ -80,22 +81,24 @@ test.skipIf(!GPU_AVAILABLE)(
     // 計数は Session 構築（重みアップロードの 1 本）の**後**から始める。
     const fences = countFences(gpu);
     try {
-      // 1 run 目は非 backed（アリーナ経路）、2 run 目は backed。どちらもフェンスは 0 本。
-      for (const phase of [0, 1]) {
+      // 1 run 目は非 backed（アリーナ経路）、2 run 目は backing を作る run、3 run 目は保持済みの backing。
+      // run のフェンスは 0 本で、張られるのは 2 run 目の確保前の解放待ち 1 本だけ（累計で数える）。
+      const waits = [0, 1, 1];
+      for (const phase of [0, 1, 2]) {
         const outputs = await target.run({ x: input(phase) });
         const reference = expected(phase);
         assertEquals(bits(outputs["y"].data), bits(reference.y), `phase ${phase} の y`);
         assertEquals(bits(outputs["s"].data), bits(reference.s), `phase ${phase} の s`);
         assertEquals(
           fences.count(),
-          0,
-          `run ${phase + 1} 本目で onSubmittedWorkDone が張られている（二段待ちへ退化）`,
+          waits[phase],
+          `run ${phase + 1} 本目までの onSubmittedWorkDone の本数（二段待ちへの退化 / 解放待ちの欠落）`,
         );
       }
-      assertEquals(target.diagnostics().lastRunPrepared?.hit, true, "2 run 目は導出済み計画");
+      assertEquals(target.diagnostics().lastRunPrepared?.hit, true, "3 run 目は導出済み計画");
       assertEquals(target.diagnostics().lastRunTiming, undefined, "計測は無効な device");
       // 計測窓は run ごとに 1 本閉じている（フェンスを畳んでも適応制御の材料は生きている）。
-      assertEquals(target.diagnostics().submit.measuredCount, 2, "run ごとに窓が 1 本閉じる");
+      assertEquals(target.diagnostics().submit.measuredCount, 3, "run ごとに窓が 1 本閉じる");
     } finally {
       fences.restore();
       await target.dispose();

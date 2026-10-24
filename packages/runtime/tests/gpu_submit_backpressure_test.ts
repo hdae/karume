@@ -116,8 +116,9 @@ test.skipIf(!GPU_AVAILABLE)(
     const chain = await session(gpu, CHAIN_GRAPH, ONE_PER_SUBMIT);
     const fences = countFences(gpu);
     try {
-      // 1 run 目は非 backed（アリーナ経路）、2 run 目は backed。どちらもステップの間で待つ。
-      for (const phase of [0, 1]) {
+      // 1 run 目は非 backed（アリーナ経路）、2 run 目は backing を作る run、3 run 目は保持済みの backing。
+      // どれもステップの間で待つ。
+      for (const phase of [0, 1, 2]) {
         const before = { fences: fences.count(), submits: chain.diagnostics().submit.submitCount };
         const outputs = await chain.run({ x: input(phase) });
         assertEquals(bits(outputs["y"].data), bits(expectedChain(phase)), `phase ${phase}`);
@@ -126,11 +127,12 @@ test.skipIf(!GPU_AVAILABLE)(
           submits > IN_FLIGHT_MARKER_INTERVAL * (IN_FLIGHT_MAX_MARKERS + 1),
           `上限を超える長さの run になっていない（submit ${submits} 回 — 門が空振りする）`,
         );
-        // run のフェンスは mapAsync の 1 本（H-1）なので、onSubmittedWorkDone は完了印だけ。印はステップの
-        // 間でだけ置くので、最後のステップの後に積む読み戻しの写し（1 本 = 1 submit）は数えない。
+        // run のフェンスは mapAsync の 1 本（H-1）なので、onSubmittedWorkDone は完了印だけ（backing を作る
+        // 2 run 目だけは確保前の解放待ちの 1 本が加わる）。印はステップの間でだけ置くので、最後のステップの
+        // 後に積む読み戻しの写し（1 本 = 1 submit）は数えない。
         assertEquals(
           fences.count() - before.fences,
-          Math.floor((submits - 1) / IN_FLIGHT_MARKER_INTERVAL),
+          Math.floor((submits - 1) / IN_FLIGHT_MARKER_INTERVAL) + (phase === 1 ? 1 : 0),
           `phase ${phase}: submit ${submits} 回に対する完了印の本数`,
         );
       }
@@ -241,7 +243,9 @@ test.skipIf(!GPU_AVAILABLE)(
     let gate: ReturnType<typeof gateWorkDone> | undefined;
     let entered: ReturnType<typeof watch<BatchScope>> | undefined;
     try {
-      // 導出済み計画 + backing にしておく（パイプラインの生成の待ちを外す）。
+      // 導出済み計画 + backing にしておく（パイプラインの生成の待ちと、backing を作る run の確保前の
+      // 解放待ちを外す — backing はヒット run でしか作らないので 2 run 要る）。
+      await chain.run({ x: input(0) });
       await chain.run({ x: input(0) });
 
       gate = gateWorkDone(gpu);
