@@ -344,10 +344,11 @@ export type WanPipelineOptions = {
    * Shares an existing GPU (the passing side keeps ownership — the class's `dispose` does not destroy
    * it). When omitted the pipeline calls `acquireGpu` and destroys it in `dispose`.
    *
-   * MUST: a timing device (`acquireGpu({ gpuTiming: true })`) cannot be passed — the VAE stage runs one
-   * tile = one batch, and the runtime does not open a batch on a timing device (the MUST of
-   * `GpuContext.beginBatch`). It fails at construction (not as a failure in the VAE stage after the
-   * DiT stage has finished). The DiT's GPU time is measured by the e2e that runs only the DiT (step 3).
+   * NOTE: a timing device (`acquireGpu({ gpuTiming: true })`) is accepted. The runs of the text,
+   * encoder and DiT stages report their per-kernel breakdown (`lastRunTiming` through
+   * {@link WanPipelineOptions.onRunDiagnostics}); the VAE decoder runs one tile = one batch, and a
+   * batch is not timed (`GpuContext.beginBatch`), so its Sessions report none. Timing makes every
+   * dispatch its own pass, so a timed generation is slower than an untimed one.
    */
   readonly gpu?: GpuContext;
   /**

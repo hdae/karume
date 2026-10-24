@@ -525,12 +525,6 @@ const admitWan = async (
   );
   const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
 
-  if (options.gpu?.gpuTimingEnabled === true) {
-    throw new Error(
-      `${spec.owner}: cannot run the VAE stage (1 tile = 1 batch) on a device with gpuTiming enabled` +
-        " (the runtime does not open a batch on a timing device) — pass a device without timing",
-    );
-  }
   // MUST: a shared GPU's missing capabilities (feature / device limit) fail here — the only family
   // check that knows before the weights are downloaded (the later checks call the same functions).
   if (options.gpu !== undefined) {
