@@ -551,12 +551,33 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE)(
-  "計測が有効な device では batch を開けない（実 GPU・timestamp-query 必須）",
+  "a batch on a timing device runs untimed, and the runs around it keep only their own breakdown (real GPU, timestamp-query)",
   async () => {
     const gpu = await acquireGpu({ gpuTiming: true });
+    const session = await producerSession(gpu);
+    const sink = await gpu.createResident(BYTES, "sink");
     try {
-      await assertRejects(() => gpu.beginBatch(), BatchScopeError, "gpuTiming");
+      await session.run({ x: input(0) });
+      const before = session.diagnostics().lastRunTiming;
+      assert(before !== undefined && before.entries.length > 0, "the run before has a breakdown");
+
+      const batch = await gpu.beginBatch();
+      for (const phase of [1, 2, 3]) {
+        await session.enqueue({ x: input(phase) }, { batch, copyOutputs: { y: sink } });
+      }
+      const read = await batch.finishAndRead({ sink });
+      const doubled = Float32Array.from(input(3).data, (value) => Math.fround(value + value));
+      assertEquals(bits(read["sink"]), bits(doubled), "the batch's values (y = x + x)");
+
+      await session.run({ x: input(4) });
+      const after = session.diagnostics().lastRunTiming;
+      assert(after !== undefined, "the run after has a breakdown");
+      // A timed batch chunk would leave timestamps that the next run's flush collects into that
+      // run's totals, so the run after the batch would count more dispatches than the run before.
+      assertEquals(after.dispatchCount, before.dispatchCount, "the run after counts only its own");
     } finally {
+      await session.dispose();
+      sink.dispose();
       gpu.destroy();
     }
   },
