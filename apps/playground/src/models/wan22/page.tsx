@@ -1,0 +1,774 @@
+/**
+ * The Wan2.2 text → video check: pick a preset and the VAE tile, run one generation on the page's
+ * GPU, watch the stages, play the frames and save a record of the run.
+ */
+
+import { loadManifest } from "@karume/hub";
+import { wanFrameToRgba } from "@karume/models/wan";
+import type { AcquireGpuOptions } from "@karume/runtime";
+import { useEffect, useRef, useState } from "react";
+
+import { ChoiceSelect } from "@/components/choice-select";
+import { ErrorAlert, thrownText } from "@/components/error-alert";
+import { Field } from "@/components/field";
+import { FramePlayer } from "@/components/frame-player";
+import { KeyValueTable } from "@/components/key-value-table";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { useDistributionIndex } from "@/hooks/use-distribution-index";
+import { useGpu } from "@/hooks/use-gpu";
+import { distributionSource } from "@/lib/distributions";
+import { downloadBlob, downloadJson, fileStamp } from "@/lib/download";
+import {
+  countNonFinite,
+  type DiagnosticsSummary,
+  type RgbaStack,
+  seconds,
+  sha256Hex,
+  stackRgbaFrames,
+  summarizeAdapter,
+  summarizeDiagnostics,
+} from "@/lib/record";
+import { zipStored } from "@/lib/zip";
+
+import {
+  buildRequest,
+  FRAME_CHOICES,
+  initialForm,
+  quickCheck,
+  SIZES,
+  summarizeManifest,
+  type TextEncoderPath,
+  type VaeTile,
+  type WanForm,
+  type WanManifestSummary,
+} from "./settings";
+import { type DiagnosticsSink, useWanPipeline } from "./use-wan-pipeline";
+
+/** Subgroups when the adapter has them (the online-attention presets use them). */
+const GPU_OPTIONS: Omit<AcquireGpuOptions, "onDeviceLost"> = { subgroups: "available" };
+
+type StageName = "vae_encoder" | "text_encoder" | "transformer" | "vae_decoder";
+type StageTimes = Partial<Record<StageName, { readonly start: number; readonly end?: number }>>;
+
+type Progress = {
+  readonly startedAt: number;
+  readonly stages: StageTimes;
+  readonly current?: StageName;
+  readonly step?: { readonly step: number; readonly steps: number };
+  readonly tile?: { readonly tile: number; readonly tiles: number };
+  readonly note?: string;
+};
+
+type RunState =
+  | { readonly kind: "idle" }
+  | { readonly kind: "running"; readonly progress: Progress }
+  | { readonly kind: "cancelled" }
+  | { readonly kind: "error"; readonly error: unknown };
+
+type ManifestState =
+  | { readonly kind: "loading" }
+  | { readonly kind: "missing"; readonly directory: string }
+  | { readonly kind: "ready"; readonly summary: WanManifestSummary; readonly sha256: string }
+  | { readonly kind: "error"; readonly error: unknown };
+
+/** The saved record of one run (JSON; also shown as a table). */
+type WanRecord = {
+  readonly page: "wan22";
+  readonly recordedAt: string;
+  readonly userAgent: string;
+  readonly crossOriginIsolated: boolean;
+  readonly adapter: ReturnType<typeof summarizeAdapter>;
+  readonly distribution: { readonly directory: string; readonly manifestSha256: string };
+  readonly preset: { readonly quant: string; readonly label: string; readonly isDefault: boolean };
+  readonly textEncoder: TextEncoderPath;
+  readonly prompt: string;
+  readonly negativePrompt?: string;
+  readonly promptName?: string;
+  readonly vaeTile: VaeTile;
+  readonly width: number;
+  readonly height: number;
+  readonly frames: number;
+  readonly steps: number;
+  readonly seed: number;
+  readonly shift: number | "manifest default";
+  readonly pipelineLoadSeconds: number;
+  readonly stageSeconds: Partial<Record<StageName, number>>;
+  readonly wallSeconds: number;
+  readonly output: {
+    readonly fps: number;
+    readonly nonFinite: number;
+    /** sha256 of the RGBA bytes of all frames in order; null when non-finite values stop the conversion. */
+    readonly rgbaSha256: string | null;
+  };
+  readonly diagnostics: Readonly<Record<string, DiagnosticsSummary>>;
+};
+
+type RunResult = { readonly id: number; readonly record: WanRecord; readonly stack?: RgbaStack };
+
+const STAGE_LABELS: Readonly<Record<StageName, string>> = {
+  vae_encoder: "VAE encoder",
+  text_encoder: "Text encoder (umT5)",
+  transformer: "Transformer (DiT)",
+  vae_decoder: "VAE decoder",
+};
+
+const STAGES: readonly StageName[] = ["vae_encoder", "text_encoder", "transformer", "vae_decoder"];
+
+const nextTick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+export const Wan22Page = () => {
+  const index = useDistributionIndex();
+  const wan22 = index.kind === "ready" ? index.index["wan22"] : undefined;
+  const umt5 = index.kind === "ready" ? index.index["umt5"] : undefined;
+  const { state: gpuState, reacquire } = useGpu(GPU_OPTIONS);
+  const gpu = gpuState.kind === "ready" ? gpuState.gpu : undefined;
+
+  // The manifest (once the dev server says the distribution is there).
+  const [manifest, setManifest] = useState<ManifestState>({ kind: "loading" });
+  useEffect(() => {
+    if (wan22 === undefined) return undefined;
+    if (!wan22.available) {
+      setManifest({ kind: "missing", directory: wan22.directory });
+      return undefined;
+    }
+    const controller = new AbortController();
+    const load = async (): Promise<ManifestState> => {
+      const loaded = await loadManifest(distributionSource("wan22"), {
+        signal: controller.signal,
+      });
+      const response = await fetch("models/wan22/karume.json", { signal: controller.signal });
+      if (!response.ok) throw new Error(`models/wan22/karume.json: HTTP ${response.status}`);
+      const sha256 = await sha256Hex(new Uint8Array(await response.arrayBuffer()));
+      return { kind: "ready", summary: summarizeManifest(loaded.manifest), sha256 };
+    };
+    load().then(
+      (state) => {
+        if (!controller.signal.aborted) setManifest(state);
+      },
+      (error: unknown) => {
+        if (!controller.signal.aborted) setManifest({ kind: "error", error });
+      },
+    );
+    return () => controller.abort();
+  }, [wan22]);
+  const summary = manifest.kind === "ready" ? manifest.summary : undefined;
+
+  const [form, setForm] = useState<WanForm>(() => initialForm(""));
+  const update = (patch: Partial<WanForm>): void =>
+    setForm((current) => ({ ...current, ...patch }));
+  // Preselect the manifest's default preset once it is known.
+  useEffect(() => {
+    if (summary !== undefined) {
+      setForm((current) =>
+        current.quant === "" ? { ...current, quant: summary.defaultQuant } : current,
+      );
+    }
+  }, [summary]);
+
+  const diagnosticsRef = useRef<DiagnosticsSink | undefined>(undefined);
+  const pipeline = useWanPipeline({
+    gpu,
+    quant: summary === undefined || form.quant === "" ? undefined : form.quant,
+    textEncoder: form.textEncoder,
+    textEncoderRepo: summary?.textEncoderRepo,
+    umt5Directory: umt5,
+    diagnostics: diagnosticsRef,
+  });
+  const prompts = pipeline.kind === "ready" ? pipeline.prompts : [];
+  const positives = prompts.filter(({ role }) => role === "positive");
+  // Fill the prompt fields from the asset's examples once they are known.
+  useEffect(() => {
+    if (pipeline.kind !== "ready") return;
+    const first = pipeline.prompts.find(({ role }) => role === "positive");
+    if (first === undefined) return;
+    setForm((current) => ({
+      ...current,
+      promptName: pipeline.prompts.some(({ name }) => name === current.promptName)
+        ? current.promptName
+        : first.name,
+      prompt: current.prompt === "" ? first.prompt : current.prompt,
+    }));
+  }, [pipeline]);
+
+  const [run, setRun] = useState<RunState>({ kind: "idle" });
+  const [result, setResult] = useState<RunResult | undefined>(undefined);
+  const [saving, setSaving] = useState<string | undefined>(undefined);
+  const controllerRef = useRef<AbortController | undefined>(undefined);
+  const runIdRef = useRef(0);
+  const running = run.kind === "running";
+
+  // Elapsed-time ticker while a run is in flight.
+  const [now, setNow] = useState(() => performance.now());
+  useEffect(() => {
+    if (!running) return undefined;
+    const timer = setInterval(() => setNow(performance.now()), 250);
+    return () => clearInterval(timer);
+  }, [running]);
+  // Leaving the page cancels a run.
+  useEffect(() => () => controllerRef.current?.abort(), []);
+
+  let requestError: unknown;
+  try {
+    buildRequest(form, prompts);
+  } catch (error) {
+    requestError = error;
+  }
+
+  const generate = async (): Promise<void> => {
+    if (pipeline.kind !== "ready" || gpu === undefined || manifest.kind !== "ready") return;
+    const parts = buildRequest(form, pipeline.prompts);
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    const diagnostics = new Map<string, DiagnosticsSummary>();
+    diagnosticsRef.current = (component, report) =>
+      diagnostics.set(component, summarizeDiagnostics(diagnostics.get(component), report));
+    const startedAt = performance.now();
+    let progress: Progress = { startedAt, stages: {} };
+    const show = (next: Progress): void => {
+      progress = next;
+      setRun({ kind: "running", progress });
+    };
+    // Drop the previous video before allocating the next one.
+    setResult(undefined);
+    show(progress);
+    try {
+      const video = await pipeline.pipeline.generate({
+        ...parts,
+        signal: controller.signal,
+        onEvent: (event) => {
+          const at = performance.now();
+          if (event.kind === "stage") {
+            const stages: StageTimes =
+              event.at === "start"
+                ? { ...progress.stages, [event.component]: { start: at } }
+                : {
+                    ...progress.stages,
+                    [event.component]: {
+                      start: progress.stages[event.component]?.start ?? at,
+                      end: at,
+                    },
+                  };
+            show({ ...progress, stages, current: event.component });
+          } else if (event.kind === "denoise-step") {
+            show({ ...progress, step: { step: event.step, steps: event.steps } });
+          } else {
+            show({ ...progress, tile: { tile: event.tile, tiles: event.tiles } });
+          }
+        },
+      });
+      const wall = performance.now() - startedAt;
+      show({ ...progress, note: "converting frames to RGBA and hashing" });
+      await nextTick();
+      const nonFinite = countNonFinite(video.data);
+      // `wanFrameToRgba` refuses non-finite values; the record keeps the count instead.
+      const stack =
+        nonFinite === 0
+          ? stackRgbaFrames(video.frames, video.width, video.height, (frame) =>
+              wanFrameToRgba(video, frame),
+            )
+          : undefined;
+      const rgbaSha256 = stack === undefined ? null : await sha256Hex(stack.bytes);
+      const stageSeconds: Partial<Record<StageName, number>> = {};
+      for (const name of STAGES) {
+        const times = progress.stages[name];
+        if (times?.end !== undefined) stageSeconds[name] = seconds(times.end - times.start);
+      }
+      const preset = manifest.summary.quants.find(({ name }) => name === pipeline.quant);
+      const record: WanRecord = {
+        page: "wan22",
+        recordedAt: new Date().toISOString(),
+        userAgent: navigator.userAgent,
+        crossOriginIsolated: globalThis.crossOriginIsolated,
+        adapter: summarizeAdapter(gpu.adapterInfo),
+        distribution: { directory: wan22?.directory ?? "", manifestSha256: manifest.sha256 },
+        preset: {
+          quant: pipeline.quant,
+          label: preset?.label ?? pipeline.quant,
+          isDefault: pipeline.quant === manifest.summary.defaultQuant,
+        },
+        textEncoder: pipeline.textEncoder,
+        prompt: parts.prompt,
+        ...(parts.negativePrompt === undefined ? {} : { negativePrompt: parts.negativePrompt }),
+        ...(pipeline.textEncoder === "precomputed" ? { promptName: form.promptName } : {}),
+        vaeTile: parts.vaeTile,
+        width: video.width,
+        height: video.height,
+        frames: video.frames,
+        steps: parts.steps,
+        seed: parts.seed,
+        shift: parts.shift ?? "manifest default",
+        pipelineLoadSeconds: seconds(pipeline.loadSeconds * 1000),
+        stageSeconds,
+        wallSeconds: seconds(wall),
+        output: { fps: video.fps, nonFinite, rgbaSha256 },
+        diagnostics: Object.fromEntries(diagnostics),
+      };
+      runIdRef.current += 1;
+      setResult({ id: runIdRef.current, record, ...(stack === undefined ? {} : { stack }) });
+      setRun({ kind: "idle" });
+    } catch (error) {
+      // The pipeline rethrows our own cancellation reason unwrapped.
+      setRun(error === controller.signal.reason ? { kind: "cancelled" } : { kind: "error", error });
+    } finally {
+      diagnosticsRef.current = undefined;
+      controllerRef.current = undefined;
+    }
+  };
+
+  const saveFrames = async (current: RunResult): Promise<void> => {
+    const { stack } = current;
+    if (stack === undefined) return;
+    try {
+      // The PNG encoder lives in the models barrel; load it only when saving.
+      const { encodePng } = await import("@karume/models");
+      const entries = [];
+      for (let frame = 0; frame < stack.frames; frame += 1) {
+        setSaving(`encoding PNG ${frame + 1} / ${stack.frames}`);
+        entries.push({
+          name: `frame_${String(frame).padStart(3, "0")}.png`,
+          data: await encodePng(stack.frame(frame), stack.width, stack.height),
+        });
+      }
+      const stamp = fileStamp(new Date(current.record.recordedAt));
+      downloadBlob(
+        new Blob(zipStored(entries, new Date()), { type: "application/zip" }),
+        `wan22_${stamp}_frames.zip`,
+      );
+    } finally {
+      setSaving(undefined);
+    }
+  };
+
+  const status = (() => {
+    if (index.kind === "loading" || (wan22?.available === true && manifest.kind === "loading")) {
+      return "loading manifest…";
+    }
+    if (manifest.kind === "missing") return `disabled: ${manifest.directory} is missing`;
+    if (manifest.kind === "ready") return `ready: ${manifest.summary.quants.length} presets`;
+    return "manifest failed to load";
+  })();
+  const disabled = manifest.kind !== "ready" || running;
+  const quantChoices = (summary?.quants ?? []).map(({ name, label }) => ({
+    value: name,
+    label: `${name} — ${label}${name === summary?.defaultQuant ? " (default)" : ""}`,
+  }));
+  const chosenPreset = summary?.quants.find(({ name }) => name === form.quant);
+  const canRun =
+    !running &&
+    manifest.kind === "ready" &&
+    gpu !== undefined &&
+    pipeline.kind === "ready" &&
+    requestError === undefined;
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-wrap items-baseline gap-3">
+        <h1 className="text-2xl font-semibold">Wan2.2 TI2V 5B — text → video</h1>
+        <Badge id="wan22-status" variant={manifest.kind === "ready" ? "secondary" : "outline"}>
+          {status}
+        </Badge>
+      </div>
+
+      {index.kind === "error" ? (
+        <ErrorAlert title="Distribution index" error={index.error} />
+      ) : null}
+      {manifest.kind === "missing" ? (
+        <Alert>
+          <AlertTitle>The Wan2.2 distribution is missing</AlertTitle>
+          <AlertDescription>
+            The dev server has no <code>{manifest.directory}</code> (a directory with a{" "}
+            <code>karume.json</code>). Put the distribution there and reload.
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      {manifest.kind === "error" ? <ErrorAlert title="Manifest" error={manifest.error} /> : null}
+
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <Card>
+          <CardHeader>
+            <CardTitle>Request</CardTitle>
+            <CardDescription>
+              Changing the preset or the text encoder rebuilds the pipeline (no GPU work until Run).
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-4 sm:grid-cols-2">
+            <div className="sm:col-span-2">
+              <Field
+                id="wan22-quant"
+                label="Preset"
+                hint={chosenPreset?.description === "" ? undefined : chosenPreset?.description}
+              >
+                <ChoiceSelect
+                  id="wan22-quant"
+                  value={form.quant}
+                  choices={quantChoices}
+                  onChange={(quant) => update({ quant })}
+                  disabled={disabled}
+                />
+              </Field>
+            </div>
+            <Field
+              id="wan22-vae-tile"
+              label="VAE tile"
+              hint="32 needs about 9.4 GiB on the device during decode; the 10 GB class keeps 16."
+            >
+              <ToggleGroup
+                id="wan22-vae-tile"
+                variant="outline"
+                spacing={0}
+                value={[String(form.vaeTile)]}
+                onValueChange={(value) => {
+                  const [next] = value;
+                  if (next === "16" || next === "32") update({ vaeTile: next === "16" ? 16 : 32 });
+                }}
+                disabled={disabled}
+              >
+                <ToggleGroupItem value="16">16</ToggleGroupItem>
+                <ToggleGroupItem value="32">32</ToggleGroupItem>
+              </ToggleGroup>
+            </Field>
+            <Field id="wan22-size" label="Size">
+              <ChoiceSelect
+                id="wan22-size"
+                value={form.size}
+                choices={SIZES}
+                onChange={(size) => update({ size })}
+                disabled={disabled}
+              />
+            </Field>
+            <Field id="wan22-frames" label="Frames" hint="4n+1; the video plays at 24 fps.">
+              <ChoiceSelect
+                id="wan22-frames"
+                value={String(form.frames)}
+                choices={FRAME_CHOICES.map((frames) => ({
+                  value: String(frames),
+                  label: String(frames),
+                }))}
+                onChange={(frames) => update({ frames: Number(frames) })}
+                disabled={disabled}
+              />
+            </Field>
+            <Field
+              id="wan22-steps"
+              label="Steps"
+              hint={
+                <Button
+                  id="wan22-quick"
+                  variant="link"
+                  size="sm"
+                  className="h-auto p-0"
+                  onClick={() => setForm(quickCheck)}
+                  disabled={disabled}
+                >
+                  Quick 2-step check (2 steps, 17 frames)
+                </Button>
+              }
+            >
+              <Input
+                id="wan22-steps"
+                inputMode="numeric"
+                value={form.steps}
+                placeholder={String(summary?.defaultSteps ?? 50)}
+                onChange={(event) => update({ steps: event.target.value })}
+                disabled={disabled}
+              />
+            </Field>
+            <Field id="wan22-seed" label="Seed">
+              <Input
+                id="wan22-seed"
+                inputMode="numeric"
+                value={form.seed}
+                onChange={(event) => update({ seed: event.target.value })}
+                disabled={disabled}
+              />
+            </Field>
+            <Field id="wan22-shift" label="Shift" hint="Empty = the manifest's default.">
+              <Input
+                id="wan22-shift"
+                inputMode="decimal"
+                value={form.shift}
+                placeholder={
+                  summary?.defaultShift === undefined
+                    ? "default"
+                    : `default (${summary.defaultShift})`
+                }
+                onChange={(event) => update({ shift: event.target.value })}
+                disabled={disabled}
+              />
+            </Field>
+            <Field
+              id="wan22-text-encoder"
+              label="Text encoder"
+              hint={
+                form.textEncoder === "gpu"
+                  ? "umT5 on the GPU (about 5.3 GiB of weights), any prompt."
+                  : "The asset's precomputed embeddings: fixed prompts only, no umT5."
+              }
+            >
+              <ChoiceSelect
+                id="wan22-text-encoder"
+                value={form.textEncoder}
+                choices={[
+                  { value: "precomputed", label: "precomputed" },
+                  {
+                    value: "gpu",
+                    label: umt5?.available === false ? `gpu (${umt5.directory} is missing)` : "gpu",
+                    disabled: umt5?.available === false,
+                  },
+                ]}
+                onChange={(textEncoder) => update({ textEncoder })}
+                disabled={disabled}
+              />
+            </Field>
+            <div className="flex flex-col gap-4 sm:col-span-2">
+              {form.textEncoder === "precomputed" ? (
+                <Field
+                  id="wan22-prompt-name"
+                  label="Prompt"
+                  hint={positives.find(({ name }) => name === form.promptName)?.prompt}
+                >
+                  <ChoiceSelect
+                    id="wan22-prompt-name"
+                    value={form.promptName}
+                    choices={positives.map(({ name }) => ({ value: name, label: name }))}
+                    onChange={(promptName) => update({ promptName })}
+                    disabled={disabled || positives.length === 0}
+                  />
+                </Field>
+              ) : (
+                <>
+                  <Field id="wan22-prompt" label="Prompt">
+                    <Textarea
+                      id="wan22-prompt"
+                      value={form.prompt}
+                      onChange={(event) => update({ prompt: event.target.value })}
+                      disabled={disabled}
+                    />
+                  </Field>
+                  <Field
+                    id="wan22-negative"
+                    label="Negative prompt"
+                    hint="Empty = the official default negative prompt."
+                  >
+                    <Textarea
+                      id="wan22-negative"
+                      value={form.negativePrompt}
+                      onChange={(event) => update({ negativePrompt: event.target.value })}
+                      disabled={disabled}
+                    />
+                  </Field>
+                </>
+              )}
+            </div>
+            <div className="flex gap-3 sm:col-span-2">
+              <Button id="wan22-run" onClick={() => void generate()} disabled={!canRun}>
+                Run
+              </Button>
+              <Button
+                id="wan22-cancel"
+                variant="outline"
+                onClick={() => controllerRef.current?.abort(new Error("Cancelled by the user"))}
+                disabled={!running}
+              >
+                Cancel
+              </Button>
+            </div>
+            {requestError !== undefined &&
+            manifest.kind === "ready" &&
+            pipeline.kind === "ready" ? (
+              <p className="text-sm text-destructive sm:col-span-2">{thrownText(requestError)}</p>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Status</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            <KeyValueTable
+              rows={[
+                [
+                  "GPU",
+                  gpuState.kind === "ready"
+                    ? Object.values(summarizeAdapter(gpuState.gpu.adapterInfo))
+                        .filter((value) => value !== "")
+                        .join(" · ")
+                    : gpuState.kind,
+                ],
+                [
+                  "Cross-origin isolated",
+                  String(typeof crossOriginIsolated === "boolean" && crossOriginIsolated),
+                ],
+                [
+                  "Pipeline",
+                  pipeline.kind === "ready"
+                    ? `${pipeline.quant} · ${pipeline.textEncoder} (${pipeline.loadSeconds.toFixed(1)} s to open)`
+                    : pipeline.kind === "loading"
+                      ? pipeline.detail
+                      : pipeline.kind,
+                ],
+              ]}
+            />
+            {gpuState.kind === "error" ? <ErrorAlert title="GPU" error={gpuState.error} /> : null}
+            {gpuState.kind === "lost" ? (
+              <Alert variant="destructive">
+                <AlertTitle>GPU device lost ({gpuState.reason})</AlertTitle>
+                <AlertDescription className="flex flex-col gap-2">
+                  <span>{gpuState.message}</span>
+                  <Button id="gpu-reacquire" variant="outline" size="sm" onClick={reacquire}>
+                    Acquire the GPU again
+                  </Button>
+                </AlertDescription>
+              </Alert>
+            ) : null}
+            {pipeline.kind === "error" ? (
+              <ErrorAlert title="Pipeline" error={pipeline.error} />
+            ) : null}
+            {run.kind === "running" ? <RunProgress progress={run.progress} now={now} /> : null}
+            {run.kind === "cancelled" ? (
+              <Alert>
+                <AlertTitle>Cancelled</AlertTitle>
+                <AlertDescription>The run stopped at the next stage boundary.</AlertDescription>
+              </Alert>
+            ) : null}
+            {run.kind === "error" ? (
+              <ErrorAlert title="Generation failed" error={run.error} />
+            ) : null}
+          </CardContent>
+        </Card>
+      </div>
+
+      {result === undefined ? null : (
+        <Card>
+          <CardHeader>
+            <CardTitle>Result</CardTitle>
+            <CardDescription>
+              {result.record.width}×{result.record.height} · {result.record.frames} frames ·{" "}
+              {result.record.output.fps} fps · {result.record.wallSeconds} s
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-6 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+            {result.stack === undefined ? (
+              <Alert variant="destructive">
+                <AlertTitle>{result.record.output.nonFinite} non-finite values</AlertTitle>
+                <AlertDescription>
+                  The frames are not converted to pixels (the conversion refuses NaN / Infinity).
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <FramePlayer key={result.id} stack={result.stack} fps={result.record.output.fps} />
+            )}
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  id="record-json"
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    downloadJson(
+                      result.record,
+                      `wan22_${fileStamp(new Date(result.record.recordedAt))}.json`,
+                    )
+                  }
+                >
+                  Download record (JSON)
+                </Button>
+                <Button
+                  id="record-zip"
+                  variant="outline"
+                  size="sm"
+                  disabled={result.stack === undefined || saving !== undefined}
+                  onClick={() => void saveFrames(result)}
+                >
+                  {saving ?? "Download frames (zip of PNGs)"}
+                </Button>
+                <Button
+                  id="record-copy"
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    void navigator.clipboard.writeText(JSON.stringify(result.record, null, 2))
+                  }
+                >
+                  Copy record
+                </Button>
+              </div>
+              <RecordTable record={result.record} />
+            </div>
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+};
+
+const RunProgress = ({ progress, now }: { progress: Progress; now: number }) => (
+  <div className="flex flex-col gap-2 text-sm">
+    <div className="font-medium">
+      Running — {((now - progress.startedAt) / 1000).toFixed(1)} s
+      {progress.note === undefined ? "" : ` · ${progress.note}`}
+    </div>
+    <KeyValueTable
+      rows={[
+        ...STAGES.flatMap((name) => {
+          const times = progress.stages[name];
+          if (times === undefined) return [];
+          const label =
+            times.end === undefined
+              ? `running ${((now - times.start) / 1000).toFixed(1)} s`
+              : `${((times.end - times.start) / 1000).toFixed(2)} s`;
+          return [[STAGE_LABELS[name], label] as const];
+        }),
+        [
+          "Denoise step",
+          progress.step === undefined ? "—" : `${progress.step.step} / ${progress.step.steps}`,
+        ],
+        [
+          "VAE tile",
+          progress.tile === undefined ? "—" : `${progress.tile.tile} / ${progress.tile.tiles}`,
+        ],
+      ]}
+    />
+  </div>
+);
+
+const RecordTable = ({ record }: { record: WanRecord }) => (
+  <KeyValueTable
+    rows={[
+      [
+        "Adapter",
+        `${record.adapter.vendor} · ${record.adapter.architecture} · ${record.adapter.device}`,
+      ],
+      ["Driver", record.adapter.description],
+      ["Preset", `${record.preset.quant}${record.preset.isDefault ? " (default)" : ""}`],
+      ["VAE tile", String(record.vaeTile)],
+      ["Size", `${record.width}×${record.height}`],
+      ["Frames", String(record.frames)],
+      ["Steps", String(record.steps)],
+      ["Seed", String(record.seed)],
+      ["Shift", String(record.shift)],
+      ["Text encoder", record.textEncoder],
+      ...STAGES.flatMap((name) => {
+        const value = record.stageSeconds[name];
+        return value === undefined ? [] : [[`${STAGE_LABELS[name]} s`, String(value)] as const];
+      }),
+      ["Wall s", String(record.wallSeconds)],
+      ["Non-finite", String(record.output.nonFinite)],
+      ["RGBA sha256", record.output.rgbaSha256 ?? "—"],
+      ...Object.entries(record.diagnostics).map(
+        ([component, summary]) =>
+          [
+            component,
+            `${summary.runs} runs · weights ${summary.weightsAllocatedGiB} GiB · ${summary.submitCount} submits`,
+          ] as const,
+      ),
+    ]}
+  />
+);

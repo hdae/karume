@@ -1,0 +1,42 @@
+{
+  "name": "@karume/playground",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Browser playground for Karume model pipelines (local distributions, real GPU).",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vp dev",
+    "build": "vp build",
+    "check": "vp check",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vp test"
+  },
+  "dependencies": {
+    "@base-ui/react": "catalog:",
+    "@fontsource-variable/geist": "catalog:",
+    "@karume/hub": "workspace:*",
+    "@karume/models": "workspace:*",
+    "@karume/runtime": "workspace:*",
+    "@tanstack/react-router": "catalog:",
+    "class-variance-authority": "catalog:",
+    "cn": "catalog:",
+    "lucide-react": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "catalog:",
+    "@tanstack/router-plugin": "catalog:",
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@vitejs/plugin-react": "catalog:",
+    "@webgpu/types": "catalog:",
+    "shadcn": "catalog:",
+    "tailwindcss": "catalog:",
+    "tw-animate-css": "catalog:",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}
