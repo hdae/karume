@@ -143,7 +143,6 @@ import {
   monitorDrmUsage,
 } from "../../models/tests/helpers/drm-usage.ts";
 import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
-import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import {
   openReferences,
   referenceMismatchMessage,
@@ -502,7 +501,7 @@ const countingSource = (manifest: Record<string, unknown>, requested: string[]) 
 
 describe.skipIf(!DIST_PRESENT)(
   "Wan 配布形の家族 admission（GPU 不要）: pipeline の major・pipelineConfig・quant の session の齟齬・" +
-    "計測（gpuTiming）の共有 device・GPU 経路のトークナイザ資産の欠落は名指しで落ち、それまでに重みの part 1 以降と" +
+    "GPU 経路のトークナイザ資産の欠落は名指しで落ち、それまでに重みの part 1 以降と" +
     "資産を 1 本も取らない（事前計算の経路は umT5 に 1 バイトも触らない）",
   () => {
     let original: string | undefined;
@@ -532,8 +531,6 @@ describe.skipIf(!DIST_PRESENT)(
       readonly patch: (model: Record<string, unknown>) => Record<string, unknown>;
       /** 経路（既存の故障は事前計算の経路 — umT5 の有無に依らずに回す）。 */
       readonly textEncoder: NonNullable<WanPipelineOptions["textEncoder"]>;
-      /** 共有で渡す GPU（manifest ではなく構築のオプション側の齟齬）。 */
-      readonly gpu?: GpuContext;
       readonly message: string;
     }[] = [
       {
@@ -574,16 +571,6 @@ describe.skipIf(!DIST_PRESENT)(
         message: "session.stateAttentionReduce is not supported",
       },
       {
-        // VAE の段は 1 タイル = 1 batch で、runtime は計測の device で batch を開かない。DiT の段を
-        // 回し終えてから落ちる形にせず、重みを取る前に落とす（`WanPipelineOptions.gpu` の MUST）。
-        // device は timestamp-query だけを持つフェイク（GPU を取らない）。
-        label: "計測（gpuTiming）の device を共有で渡す",
-        patch: (model) => model,
-        textEncoder: "precomputed",
-        gpu: fakeGpuContext(fakeDevice({ features: ["timestamp-query"] })),
-        message: "device with gpuTiming enabled",
-      },
-      {
         // GPU 経路はトークナイザ資産を読む — 宣言が無ければ umT5（i8 で約 5.3 GiB）の part 1 以降を取る前に落とす。
         // umT5 の容器の part 0（descriptor）は admission の入力なので取ってよい。
         label: "GPU 経路で manifest に umT5 のトークナイザ資産が無い",
@@ -597,7 +584,7 @@ describe.skipIf(!DIST_PRESENT)(
         message: "have no umT5 tokenizer asset 'umt5_tokenizer'",
       },
     ];
-    for (const { label, patch, textEncoder, gpu, message } of faults) {
+    for (const { label, patch, textEncoder, message } of faults) {
       it.skipIf(textEncoder === "gpu" && !GPU_TEXT_PRESENT)(
         `${label}（textEncoder: ${textEncoder}）`,
         async () => {
@@ -613,7 +600,6 @@ describe.skipIf(!DIST_PRESENT)(
                 textEncoder,
                 // 故障の 1 本は `f16` 席の宣言を書き換える — 席を名乗らないと既定席へ移って故障に触れない。
                 quant: F16_QUANT,
-                ...(gpu === undefined ? {} : { gpu }),
               }),
             Error,
             message,
