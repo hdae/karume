@@ -1,9 +1,10 @@
 // The per-token quantize with an elementwise prologue (perf-ledger F-4 — `quantizeRowsPrologueWgsl`
 // in src/kernels/quantize-rows.ts) against the pair it replaces in an a8 linear's step ①,
-// "elementwise gelu_tanh → quantize_rows", both from the production generators (the same keys and
-// WGSL a Session compiles): `xq` and `xs` are compared as u32 words.
+// "elementwise op → quantize_rows", both from the production generators (the same keys and WGSL a
+// Session compiles), for each op the fusion pass accepts (`gelu_tanh` and the erf `gelu`): `xq`
+// and `xs` are compared as u32 words.
 //
-// The fused kernel keeps `y = gelu_tanh(x)` in registers and quantizes it without a rounding barrier,
+// The fused kernel keeps `y = op(x)` in registers and quantizes it without a rounding barrier,
 // with a different element-to-lane assignment for the row maximum. Whether that leaves every bit of
 // the pair in place is a measured fact on a real backend, not a WGSL guarantee, so it is visible
 // only here. No adapter = explicit SKIP.
@@ -17,6 +18,7 @@ import {
   elementwiseParams,
   type ElementwiseSpec,
   elementwiseWgsl,
+  type PrologueUnaryOp,
 } from "../src/codegen/elementwise.ts";
 import { RunArena } from "../src/gpu/arena.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
@@ -61,13 +63,17 @@ const readback = async (
   return new Uint32Array(copy, 0, words);
 };
 
+/** The ops the fusion pass folds into the linear's step ① (`LINEAR_PROLOGUE_OPS`). */
+const OPS = ["gelu_tanh", "gelu"] as const satisfies readonly PrologueUnaryOp[];
+
 /**
- * Runs `x [1, rows, dim]` through either the pair (the elementwise gelu_tanh the DiT's FFN runs at
- * rank 3, then the quantize_rows geometry the i8a8 linear picks for `dim`) or the prologue form
- * (one row per workgroup; `groups` clamps the workgroup count to walk the grid-stride row loop).
+ * Runs `x [1, rows, dim]` through either the pair (the elementwise `op` the DiT's FFN runs at rank
+ * 3, then the quantize_rows geometry the i8a8 linear picks for `dim`) or the prologue form (one row
+ * per workgroup; `groups` clamps the workgroup count to walk the grid-stride row loop).
  */
 const quantize = async (
   gpu: GpuContext,
+  op: PrologueUnaryOp,
   x: Float32Array<ArrayBuffer>,
   rows: number,
   dim: number,
@@ -104,7 +110,7 @@ const quantize = async (
     };
     const quantizeParams = quantizeRowsParams(rows, dim);
     if (form.kind === "pair") {
-      const spec: ElementwiseSpec = { op: "gelu_tanh", rank: 3, dtype: "f32" };
+      const spec: ElementwiseSpec = { op, rank: 3, dtype: "f32" };
       const shape = [1, rows, dim];
       const y = arena.allocRegion(Math.max(4, x.byteLength));
       await run(
@@ -126,8 +132,8 @@ const quantize = async (
       );
     } else {
       await run(
-        quantizeRowsPrologueKey("gelu_tanh", dim),
-        quantizeRowsPrologueWgsl("gelu_tanh", dim),
+        quantizeRowsPrologueKey(op, dim),
+        quantizeRowsPrologueWgsl(op, dim),
         quantizeParams,
         UNIFORM_IN,
         [src, xq, xs],
@@ -159,8 +165,8 @@ const firstDifference = (actual: Uint32Array, expected: Uint32Array): string | u
  * Every word of `xq` and `xs` matches exactly, NaN scales included.
  *
  * NOTE: the NaN scales are compared exactly because they matched exactly where measured (Vulkan /
- * NVIDIA, 2026-10-25): gelu_tanh's arithmetic turns every input NaN payload into the backend's
- * canonical NaN (0x7fffffff), so the `nan_max` fold — whose element-to-lane assignment the fused
+ * NVIDIA, 2026-10-25): the arithmetic of both ops (`0.5 · x · (…)` in each) turns every input NaN
+ * payload into the backend's canonical NaN (0x7fffffff), so the `nan_max` fold — whose element-to-lane assignment the fused
  * kernel changes — has only one payload to keep. The contract of the fused kernels is NaN by
  * classification (`adaln-norm.ts`); on a backend that keeps payloads through the arithmetic, compare
  * the NaN scales by classification (never the codes).
@@ -191,40 +197,43 @@ const normals = (count: number, seed: number): Float32Array<ArrayBuffer> => {
 };
 
 /** The row lengths: K 4 (one quad), a remainder of one quad past four lanes' slots, Wan2.2's
- * up-projection input (3072) and down-projection input (14,336), Wan2.1's (8960), and the bound. */
-const DIMS = [4, 1028, 3072, 8960, 14336, 16384] as const;
+ * up-projection input (3072) and down-projection input (14,336), DeBERTa's (4096), anima's (8192),
+ * Wan2.1's (8960), and the bound. */
+const DIMS = [4, 1028, 3072, 4096, 8192, 8960, 14336, 16384] as const;
 const ROWS = [1, 7, 300] as const;
 
 test.skipIf(!GPU_AVAILABLE)(
-  "the gelu_tanh prologue quantize matches elementwise gelu_tanh → quantize_rows word for word on normal()·2 rows (real GPU)",
+  "the gelu_tanh / erf gelu prologue quantize matches elementwise op → quantize_rows word for word on normal()·2 rows (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
-      for (const dim of DIMS) {
-        for (const rows of ROWS) {
-          const x = normals(rows * dim, dim * 1000 + rows).map((value) => value * 2);
-          const label = `K=${dim} rows=${rows}`;
-          const pair = await quantize(gpu, x, rows, dim, { kind: "pair" });
-          const fused = await quantize(gpu, x, rows, dim, { kind: "prologue" });
-          assertSameWords(fused, pair, label);
-          // The rows are not degenerate (otherwise every word could agree trivially).
-          assertEquals(new Set(pair.xs).size, rows, `${label}: one scale per row`);
-          assertEquals(
-            pair.xq.some((word) => word !== 0),
-            true,
-            `${label}: non-zero codes`,
-          );
+      for (const op of OPS) {
+        for (const dim of DIMS) {
+          for (const rows of ROWS) {
+            const x = normals(rows * dim, dim * 1000 + rows).map((value) => value * 2);
+            const label = `${op} K=${dim} rows=${rows}`;
+            const pair = await quantize(gpu, op, x, rows, dim, { kind: "pair" });
+            const fused = await quantize(gpu, op, x, rows, dim, { kind: "prologue" });
+            assertSameWords(fused, pair, label);
+            // The rows are not degenerate (otherwise every word could agree trivially).
+            assertEquals(new Set(pair.xs).size, rows, `${label}: one scale per row`);
+            assertEquals(
+              pair.xq.some((word) => word !== 0),
+              true,
+              `${label}: non-zero codes`,
+            );
+          }
         }
+        // The grid-stride row loop: two workgroups walk 300 rows (150 each).
+        const dim = 14336;
+        const rows = 300;
+        const x = normals(rows * dim, 7).map((value) => value * 2);
+        assertSameWords(
+          await quantize(gpu, op, x, rows, dim, { kind: "prologue", groups: 2 }),
+          await quantize(gpu, op, x, rows, dim, { kind: "pair" }),
+          `${op} K=14336 rows=300 over 2 workgroups`,
+        );
       }
-      // The grid-stride row loop: two workgroups walk 300 rows (150 each).
-      const dim = 14336;
-      const rows = 300;
-      const x = normals(rows * dim, 7).map((value) => value * 2);
-      assertSameWords(
-        await quantize(gpu, x, rows, dim, { kind: "prologue", groups: 2 }),
-        await quantize(gpu, x, rows, dim, { kind: "pair" }),
-        "K=14336 rows=300 over 2 workgroups",
-      );
     } finally {
       gpu.destroy();
     }
@@ -233,18 +242,37 @@ test.skipIf(!GPU_AVAILABLE)(
 
 const bits = (word: number): number => new Float32Array(new Uint32Array([word]).buffer)[0];
 
+/** Row indices of {@link specialRows} that an assertion below names. */
+const ERF_UNDERFLOW_ROW = 11;
+
 /**
  * Rows of special values, each placed at the start of the row, at a lane-slot boundary (quad 256 =
- * element 1024, slot 1 of lane 0) when the row has one, and at the end:
+ * element 1024, slot 1 of lane 0) when the row has one, and at the end. What each value does differs
+ * per op — `gelu_tanh(x) = 0.5·x·(1 + tanh_stable(√(2/π)·(x + 0.044715·x³)))`, the erf
+ * `gelu(x) = 0.5·x·(1 + erf_approx(x·(1/√2)))` with `erf_approx = s·(1 − p(t)·t·exp(−a²))`,
+ * `a = |x|/√2`, `t = 1/(1 + 0.3275911·a)` (codegen/elementwise.ts):
  *
- * - an all-zero row (s = f32 tiny, every code 0) and a row of −0;
- * - subnormals of both signs among normal values;
- * - ±2e19, where `x³` overflows inside gelu_tanh (the stable tanh must still give 1 / −1);
- * - rounding ties of `y / s`: for x ≥ 10 gelu_tanh(x) = x exactly (tanh saturates to 1), and with
- *   amax 127 the scale is exactly 1, with amax 254 exactly 2, so 63.5 / 10.5 / 127 / 21 land on
- *   half-integers (the lattice rounds them to even);
- * - NaN, +inf (y = inf, s = inf), −inf (gelu_tanh(−inf) = −inf · 0 = NaN), and two different NaN
- *   payloads in one row.
+ * - an all-zero row and a row of −0: both ops give ±0 (`0.5·(±0)·(…)`; erf_approx(±0) is
+ *   `sign(±0)·(…) = 0`), so amax is 0 and s = f32 tiny, every code 0;
+ * - subnormals of both signs among normal values (the inner products may flush; the pair and the
+ *   fused form must flush alike);
+ * - ±2e19, which overflows inside both ops: gelu_tanh's `x³` is inf and the stable tanh clamps it to
+ *   ±1; the erf form's `a²` is inf, so `exp(−a²) = 0` and erf_approx = ±1 exactly. Either way
+ *   op(2e19) = 2e19 and op(−2e19) = −0, so the row's scale is finite;
+ * - rounding ties of `y / s`: both ops are the identity at x ≥ 10 — gelu_tanh because tanh saturates
+ *   to 1, the erf form because `p(t)·t·exp(−a²) < 2^−25` there (already from x ≈ 6), so
+ *   `1 − …` rounds to 1 and `0.5·x·2 = x`. With amax 127 the scale is exactly 1, with amax 254
+ *   exactly 2, so 63.5 / 10.5 / 127 / 21 land on half-integers (the lattice rounds them to even);
+ * - NaN (both ops keep the factor `x` outside, so `0.5·NaN·(…)` is NaN); +inf (gelu_tanh: tanh 1;
+ *   erf: `t = 0`, so erf_approx = 1 — y = inf, s = inf in both); −inf (gelu_tanh: `−inf·0`; erf:
+ *   erf_approx = −1, `1 + erf = 0`, `−inf·0` — NaN in both); two different NaN payloads in one row;
+ * - the erf form's negative tail, every element in −5.5..−2.5: `1 + erf_approx` cancels from about
+ *   `2^−6` down to a few ulps of 1 (`2^−24`), the region where the erf form is least accurate
+ *   (gelu_tanh's `1 + tanh` cancels the same way); a row of non-trivial small codes;
+ * - every element in −15..−6: there the erf form's `p(t)·t·exp(−a²)` is at most 2e-9 (< 2^−25), so
+ *   erf_approx = −1 exactly and y = −0 for the whole row (s = f32 tiny — asserted for the erf form
+ *   only: gelu_tanh's value there rests on the backend's `tanh` reaching −1, which WGSL does not
+ *   fix).
  */
 const specialRows = (
   dim: number,
@@ -260,13 +288,25 @@ const specialRows = (
     [Number.POSITIVE_INFINITY, 3.5, -2],
     [Number.NEGATIVE_INFINITY, 0.75, 2],
     [bits(0x7fc01234), bits(0xffc00001), 0.5],
+    [-2.5, -4, -5.5],
+    [-6, -10, -15],
   ];
+  /** The rows that sweep a range instead of sitting on a normal() background. */
+  const sweeps: ReadonlyMap<number, readonly [number, number]> = new Map([
+    [10, [-5.5, -2.5]],
+    [ERF_UNDERFLOW_ROW, [-15, -6]],
+  ]);
   const x = new Float32Array(rows.length * dim);
   const positions = [0, ...(dim > 1024 ? [1024] : []), dim - 1];
   rows.forEach((values, row) => {
     const base = row * dim;
-    // A background of small finite values (zero for the all-zero / −0 rows).
-    if (row >= 2) {
+    const sweep = sweeps.get(row);
+    if (sweep !== undefined) {
+      // Spread over the range in a scrambled order, so neighbouring lanes see different values.
+      const [lo, hi] = sweep;
+      for (let i = 0; i < dim; i += 1) x[base + i] = lo + ((hi - lo) * ((i * 37) % dim)) / dim;
+    } else if (row >= 2) {
+      // A background of small finite values (zero for the all-zero / −0 rows).
       const background = normals(dim, row + dim).map((value) => value * 0.25);
       x.set(background, base);
     } else if (row === 1) {
@@ -284,27 +324,39 @@ const specialRows = (
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "the gelu_tanh prologue quantize matches the pair on special values (zero / −0 / subnormal / ±2e19 / ties / NaN / ±inf), NaN scales included (real GPU)",
+  "the gelu_tanh / erf gelu prologue quantize matches the pair on special values (zero / −0 / subnormal / ±2e19 / ties / NaN / ±inf / erf's negative tail and underflow), NaN scales included (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
-      for (const dim of DIMS) {
-        const { x, rows } = specialRows(dim);
-        const label = `special K=${dim}`;
-        const pair = await quantize(gpu, x, rows, dim, { kind: "pair" });
-        const fused = await quantize(gpu, x, rows, dim, { kind: "prologue" });
-        assertSameWords(fused, pair, label);
-        // The rows hit what they are meant to: the zero rows have scale f32 tiny, the tie rows have
-        // scale exactly 1 and 2, and the NaN / ±inf rows have a non-finite scale.
-        const scale = new Float32Array(pair.xs.buffer);
-        assertEquals(scale[0], 1.1754943508222875e-38, `${label}: zero row scale`);
-        assertEquals(scale[1], 1.1754943508222875e-38, `${label}: −0 row scale`);
-        assertEquals(scale[4], 1, `${label}: amax 127 row scale`);
-        assertEquals(scale[5], 2, `${label}: amax 254 row scale`);
-        for (const row of [6, 8, 9]) {
-          assertEquals(Number.isNaN(scale[row]), true, `${label}: NaN scale of row ${row}`);
+      for (const op of OPS) {
+        for (const dim of DIMS) {
+          const { x, rows } = specialRows(dim);
+          const label = `${op} special K=${dim}`;
+          const pair = await quantize(gpu, op, x, rows, dim, { kind: "pair" });
+          const fused = await quantize(gpu, op, x, rows, dim, { kind: "prologue" });
+          assertSameWords(fused, pair, label);
+          // The rows hit what they are meant to: the zero rows have scale f32 tiny, the ±2e19 row a
+          // finite scale, the tie rows scale exactly 1 and 2, and the NaN / ±inf rows a non-finite
+          // scale.
+          const scale = new Float32Array(pair.xs.buffer);
+          const tiny = 1.1754943508222875e-38;
+          assertEquals(scale[0], tiny, `${label}: zero row scale`);
+          assertEquals(scale[1], tiny, `${label}: −0 row scale`);
+          assertEquals(
+            Number.isFinite(scale[3]) && scale[3] > 1e17,
+            true,
+            `${label}: ±2e19 row scale ${scale[3]}`,
+          );
+          assertEquals(scale[4], 1, `${label}: amax 127 row scale`);
+          assertEquals(scale[5], 2, `${label}: amax 254 row scale`);
+          for (const row of [6, 8, 9]) {
+            assertEquals(Number.isNaN(scale[row]), true, `${label}: NaN scale of row ${row}`);
+          }
+          assertEquals(scale[7], Number.POSITIVE_INFINITY, `${label}: +inf row scale`);
+          if (op === "gelu") {
+            assertEquals(scale[ERF_UNDERFLOW_ROW], tiny, `${label}: the underflow row is all −0`);
+          }
         }
-        assertEquals(scale[7], Number.POSITIVE_INFINITY, `${label}: +inf row scale`);
       }
     } finally {
       gpu.destroy();

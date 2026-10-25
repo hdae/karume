@@ -729,6 +729,8 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     // lane) and the bound's edge (16 per lane). The plain forms above must not move with it.
     ["quantize_rows_gelu_tanh_reg14.wgsl", quantizeRowsPrologueWgsl("gelu_tanh", 14336)],
     ["quantize_rows_gelu_tanh_reg16.wgsl", quantizeRowsPrologueWgsl("gelu_tanh", 16384)],
+    // The erf form at anima's DiT FFN down projection (K 8,192 = 8 vec4 per lane).
+    ["quantize_rows_gelu_reg8.wgsl", quantizeRowsPrologueWgsl("gelu", 8192)],
     ["linear_i8a8.wgsl", linearI8a8Wgsl(false, true)],
     ["linear_i8a8_v4.wgsl", linearI8a8Wgsl(true, true)],
     ["linear_i8a8_emu.wgsl", linearI8a8Wgsl(false, false)],
