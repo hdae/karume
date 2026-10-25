@@ -29,8 +29,11 @@ if (!WAN_AVAILABLE) {
  */
 const NO_MIRRORS: ReadonlyMap<string, URL> = new Map();
 
-/** 既定モデル（`t2v-1.3b`）の部品のグラフ（f16 席だけの配布形）。 */
-const readWanGraph = async (component: string): Promise<IrGraph> => {
+/**
+ * A component graph of the default model (`t2v-1.3b`). Every component has an f16 seat; the
+ * transformer also has the i8 seat the a8 presets run.
+ */
+const readWanGraph = async (component: string, dtype = "f16"): Promise<IrGraph> => {
   const manifest: ContainerManifest = JSON.parse(
     await readTextFile(new URL("karume.json", WAN_DIR)),
   );
@@ -39,7 +42,7 @@ const readWanGraph = async (component: string): Promise<IrGraph> => {
     manifest,
     manifest.defaultModel,
     component,
-    "f16",
+    dtype,
     NO_MIRRORS,
   );
 };
@@ -69,6 +72,10 @@ const wanShapes = (graph: IrGraph, sequence: number): Readonly<Record<string, re
  *   - gatedResidual 0: the gate is a broadcast vector (no per-token `where`).
  *   - rowBlockAttention / identityExpand 0: attention is the fused op (`attention`, 60 of them),
  *     with no decomposed spelling.
+ *   - **linearPrologue 31 on the i8 seat under `linearCompute: "a8"`** (counted 2026-10-25): the
+ *     gelu_tanh folded into the step ① of the i8 linear that reads it (perf-ledger F-4) — the FFN
+ *     down projection of the 30 blocks (K 8,960) and the text embedder's second linear (K 1,536).
+ *     The f16 seat has no i8a8 linear (0 under a8 too), and the default f32 linear has no step ①.
  * - **The VAE chunk graphs (first / next): silu 29 + upsample2x 3**. All 29 `sigmoid`s are SiLU
  *   (the resnet activations and before the head), and upsample2x is the three spatial ×2 stages
  *   (nearest ×2 + conv2d). The temporal upsample (`time_conv` of next) is not the upsample2x form.
@@ -78,14 +85,22 @@ const wanShapes = (graph: IrGraph, sequence: number): Readonly<Record<string, re
  * same reading as the Irodori DiT gate).
  */
 test.skipIf(!WAN_AVAILABLE)(
-  "the real Wan2.1 grabs DiT silu 2 / rope 60 and the VAE chunk graphs' silu 29 / upsample2x 3 per run (adaln is a different spelling: 0)",
+  "the real Wan2.1 grabs DiT silu 2 / rope 60 (plus linearPrologue 31 on the i8 seat under a8) and the VAE chunk graphs' silu 29 / upsample2x 3 per run (adaln is a different spelling: 0)",
   async () => {
     const transformer = await readWanGraph("transformer");
+    const transformerI8 = await readWanGraph("transformer", "i8");
     for (const sequence of [192, 14040]) {
+      const counts = { ...NONE, silu: 2, rope: 60 };
+      const f32 = (graph: IrGraph) => fusionCounts(graph, wanShapes(graph, sequence));
+      const a8 = (graph: IrGraph) =>
+        fusionCounts(graph, wanShapes(graph, sequence), undefined, false, false, false, "a8");
+      assertEquals(f32(transformer), counts, `transformer S=${sequence}`);
+      assertEquals(a8(transformer), counts, `transformer S=${sequence} f16 seat a8`);
+      assertEquals(f32(transformerI8), counts, `transformer S=${sequence} i8 seat`);
       assertEquals(
-        fusionCounts(transformer, wanShapes(transformer, sequence)),
-        { ...NONE, silu: 2, rope: 60 },
-        `transformer S=${sequence}`,
+        a8(transformerI8),
+        { ...counts, linearPrologue: 31 },
+        `transformer S=${sequence} i8 seat a8`,
       );
     }
     for (const name of ["vae_decoder_first", "vae_decoder_next"]) {
