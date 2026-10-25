@@ -43,7 +43,13 @@ import type { RunArena } from "../gpu/arena.ts";
 import type { GpuContext } from "../gpu/device.ts";
 import type { SessionPipelines } from "../gpu/pipeline-cache.ts";
 import { CAST_OP, numel, stateReadonly, WEIGHT_SLOTS, WHERE_OP } from "../ops.ts";
-import type { ExecStep, FusedOperand, FusedStep, PackedActivations } from "./fusion.ts";
+import type {
+  ExecStep,
+  FusedOperand,
+  FusedStep,
+  LinearPrologue,
+  PackedActivations,
+} from "./fusion.ts";
 import { ExecutionError, type NodePlan } from "./plan.ts";
 import {
   type BindingRecipe,
@@ -437,6 +443,7 @@ export class RecipeBuilder {
         builder,
         states,
         step.packedActivations,
+        step.prologue,
       );
     } else {
       await this.#buildFused(step, binds, outs, builder);
@@ -570,7 +577,16 @@ export class RecipeBuilder {
     states: StateBuildContext,
     /** The role of packed int8 activations (ADR 0105 — acceptance was settled in one place, fusion.ts). */
     packed: PackedActivations | undefined,
+    /** The producer folded into a linear's step ① (perf-ledger F-4 — accepted in one place, fusion.ts). */
+    prologue: LinearPrologue | undefined,
   ): Promise<void> {
+    // MUST: only a linear executes a folded producer. Any other kind would run without the folded op
+    // (its input is the producer's input) — a silent wrong value, so it fails loudly.
+    if (prologue !== undefined && step.contract.kind !== "linear") {
+      throw new ExecutionError(
+        `${step.node.op}: carries a ${prologue.op} prologue (perf-ledger F-4), which only a linear executes`,
+      );
+    }
     switch (step.contract.kind) {
       case "unary":
       case "binary":
@@ -651,7 +667,7 @@ export class RecipeBuilder {
         await buildFlip(this.#face, step, binds, outs, builder);
         break;
       case "linear":
-        await buildLinear(this.#face, step, binds, outs, builder, packed);
+        await buildLinear(this.#face, step, binds, outs, builder, packed, prologue);
         break;
       case "layerNorm":
         await buildLayerNorm(this.#face, step, binds, outs, builder);

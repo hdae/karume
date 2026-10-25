@@ -290,3 +290,47 @@ test("窓幅の上限が 2 未満なら fail loudly", () => {
     );
   }
 });
+
+test("a linear with a folded producer (perf-ledger F-4) is a grabbed pair: no window crosses it, and the node index advances by its two nodes", () => {
+  const dtype = "f32";
+  const shape = [1, 4, 8];
+  const graph: DeclarationJson = {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["gelu_tanh", "linear", "neg"] },
+    symbols: [],
+    inputs: [shaped("x", shape)],
+    outputs: ["d"],
+    initializers: { w: {}, b: {} },
+    values: {
+      w: { dtype, shape: [8, 8] },
+      b: { dtype, shape: [8] },
+      a: { dtype, shape },
+      n: { dtype, shape },
+      g: { dtype, shape },
+      y: { dtype, shape },
+      c: { dtype, shape },
+      d: { dtype, shape },
+    },
+    nodes: [
+      { op: "neg", ins: ["x"], outs: ["a"], attrs: {} },
+      { op: "neg", ins: ["a"], outs: ["n"], attrs: {} },
+      { op: "gelu_tanh", ins: ["n"], outs: ["g"], attrs: {} },
+      { op: "linear", ins: ["g", "w", "b"], outs: ["y"], attrs: {} },
+      { op: "neg", ins: ["y"], outs: ["c"], attrs: {} },
+      { op: "neg", ins: ["c"], outs: ["d"], attrs: {} },
+    ],
+  };
+  const { nodes, context } = plan(graph, { x: shape });
+  const a8: Parameters<typeof planFusions>[1] = {
+    ...context,
+    linearCompute: "a8",
+    weightLayouts: new Map([["w", { storage: "i8" }]]),
+  };
+  const fused = planFusions(nodes, a8);
+  assertEquals(fused.counts.linearPrologue, 1, "precondition: the pair is folded");
+  assertEquals(outline(enumerateUnfusedWindows(fused.steps, a8, 3)), [
+    "neg,neg@0+2=n",
+    "neg,neg@4+2=d",
+  ]);
+});

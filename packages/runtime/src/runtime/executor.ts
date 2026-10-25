@@ -2336,9 +2336,12 @@ export class Session {
     // The instances are not passed to the fusion pure function; only at plan derivation are they
     // projected to storage descriptions.
     // The pairing of packed activations (ADR 0105) also looks at the storage format of the
-    // consuming linear, so the projection is made when either option is on.
+    // consuming linear, so the projection is made when either option is on. The linear prologue
+    // (perf-ledger F-4) decides the linear's i8a8 route from the same storage, so a8 needs it too.
     const weightLayouts =
-      this.#state.fuseLinearStaticQuantize || this.#state.packedStaticQuantize
+      this.#state.fuseLinearStaticQuantize ||
+      this.#state.packedStaticQuantize ||
+      this.#state.linearCompute === "a8"
         ? new Map(
             [...this.#state.residentWeights].map(([name, weight]): [string, FusionWeightLayout] => [
               name,

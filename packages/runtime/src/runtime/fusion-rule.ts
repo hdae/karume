@@ -8,6 +8,7 @@
  * imports the rules, so that would be a cycle).
  */
 
+import type { PrologueUnaryOp } from "../codegen/elementwise.ts";
 import { outputCountOf, WHERE_OP } from "../ops.ts";
 import type { LinearGemvReduce } from "./session-types.ts";
 import { ExecutionError, type NodePlan } from "./plan.ts";
@@ -29,10 +30,15 @@ type FusionRuleName =
 /**
  * The diagnostic counter names. Besides the fusion rules, they count the identity expands among the
  * zero-dispatch aliases that **can drop out conditionally** (`aliasesInput` of {@link ExecStep}),
- * and the fixed SRQs handed over as packed int8 activations (ADR 0105). Reshape aliasing is
- * unconditional and is not counted (it cannot drop out = nothing to observe).
+ * the fixed SRQs handed over as packed int8 activations (ADR 0105), and the producers folded into a
+ * linear's step ① ({@link LinearPrologue} — one per folded pair). Reshape aliasing is unconditional
+ * and is not counted (it cannot drop out = nothing to observe).
  */
-export type FusionCounterName = FusionRuleName | "identityExpand" | "packedStaticQuantize";
+export type FusionCounterName =
+  | FusionRuleName
+  | "identityExpand"
+  | "packedStaticQuantize"
+  | "linearPrologue";
 
 /**
  * Application count per rule. The only observation point for "a fusion silently dropped out and
@@ -158,6 +164,25 @@ export type PackedActivations = {
   readonly scale: number;
 };
 
+/**
+ * A producer folded into a linear's step ① (perf-ledger F-4): the linear's i8a8 path quantizes
+ * `op(x)` directly instead of the stored output of an elementwise `op` node, so that output is never
+ * written or read.
+ *
+ * The node step's `plan` is the linear's with its first input **re-pointed to the producer's input**
+ * (the same shape and dtype), and the producer has no step of its own. The release bookkeeping
+ * therefore stays on the one path of a plain node (`plan.node.ins`): the producer's input loses the
+ * producer's use and gains the linear's, and the folded value (one use, not a graph output) is
+ * never defined.
+ * MUST: acceptance is decided in one place, `planFusions` in {@link "./fusion.ts"}, with the same
+ * route predicate as the recipe (`linearTakesI8a8` in {@link "./linear-route.ts"}). A linear that
+ * carries it but does not take the i8a8 path would run without the folded op — a silent wrong
+ * value — so the recipe checks the same predicate again and fails loudly.
+ */
+export type LinearPrologue = {
+  readonly op: PrologueUnaryOp;
+};
+
 type NodeStep = {
   readonly kind: "node";
   readonly plan: NodePlan;
@@ -170,6 +195,12 @@ type NodeStep = {
   readonly aliasesInput: boolean;
   /** The packed int8 activation pair (ADR 0105). `undefined` = handed over as f32, as before. */
   readonly packedActivations?: PackedActivations;
+  /**
+   * The producer folded into this linear's step ① (perf-ledger F-4). `undefined` = the input is
+   * read as stored, as before. One node step then stands for **two** original nodes (the producer
+   * and the linear, adjacent in node order).
+   */
+  readonly prologue?: LinearPrologue;
 };
 
 export type ExecStep = NodeStep | FusedStep;

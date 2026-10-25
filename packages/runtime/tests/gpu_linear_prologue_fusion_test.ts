@@ -1,0 +1,216 @@
+// gelu_tanh folded into the step ① of the a8 linear that reads it (perf-ledger F-4 — the linear
+// prologue of src/runtime/fusion.ts, executed by `buildLinearI8a8`): bit parity with the unfused
+// pair on the same backend, the counter, and the dispatch reduction, for both integer dot forms.
+//
+// The fused Session never stores `gelu_tanh(x)`; its quantize reads `x` and applies the op in
+// registers. The reference is the same graph with a zero-dispatch reshape between the two nodes:
+// the values and the physical kernels stay the production pair, only the exact match stops
+// matching.
+
+import { test } from "vite-plus/test";
+import { assertEquals } from "@std/assert";
+import { elementwiseKey } from "../src/codegen/elementwise.ts";
+import { perChannelGroupSize } from "../src/format/container/codecs.ts";
+import { acquireGpu } from "../src/gpu/device.ts";
+import { linearI8a8Key, linearI8a8UsesVec4 } from "../src/kernels/linear-i8a8.ts";
+import {
+  quantizeRowsGeometry,
+  quantizeRowsKey,
+  quantizeRowsPrologueKey,
+} from "../src/kernels/quantize-rows.ts";
+import {
+  createSessionFromContainer,
+  I8A8_DOT,
+  type I8a8Dot,
+  type Tensor,
+} from "../src/runtime/executor.ts";
+import { deviceGeometryProfile } from "./helpers/geometry.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { quantizeI8 } from "./helpers/i8.ts";
+import {
+  type DeclarationJson,
+  f32Bytes,
+  fill,
+  GRAPH_NAME,
+  openModelBytes,
+} from "./helpers/model-fixture.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
+
+/**
+ * `y = linear(gelu_tanh(x), w, b)` with `w` resident as i8. `interpose = true` puts a zero-dispatch
+ * reshape on the gelu output (the unfused reference on the same backend).
+ */
+const geluLinearGraph = (
+  rows: number,
+  k: number,
+  n: number,
+  interpose: boolean,
+): DeclarationJson => {
+  const row = [1, rows, k];
+  const values: DeclarationJson["values"] = {
+    w: { dtype: "f32", shape: [n, k] },
+    b: { dtype: "f32", shape: [n] },
+    g: { dtype: "f32", shape: row },
+    y: { dtype: "f32", shape: [1, rows, n] },
+  };
+  const nodes: DeclarationJson["nodes"] = [{ op: "gelu_tanh", ins: ["x"], outs: ["g"], attrs: {} }];
+  if (interpose) {
+    values.g_alias = { dtype: "f32", shape: row };
+    nodes.push({ op: "reshape", ins: ["g"], outs: ["g_alias"], attrs: {} });
+  }
+  nodes.push({
+    op: "linear",
+    ins: [interpose ? "g_alias" : "g", "w", "b"],
+    outs: ["y"],
+    attrs: {},
+  });
+  return {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: [...new Set(nodes.map((node) => node.op))].sort() },
+    symbols: [],
+    inputs: [{ name: "x", dtype: "f32", shape: row }],
+    outputs: ["y"],
+    initializers: { w: {}, b: {} },
+    values,
+    nodes,
+  };
+};
+
+/** The i8 weight (per-output-channel scales of different sizes) and the bias. */
+const weightTensors = (k: number, n: number) => {
+  const weight = fill([n, k], (i) => Math.sin(i * 0.61) * (1 + (Math.floor(i / k) % 5) * 0.5));
+  const quantized = quantizeI8(weight.data, [n, k], 0);
+  const bias = fill([n], (i) => Math.cos(i * 0.7) * 0.5);
+  return [
+    {
+      graph: GRAPH_NAME,
+      initializer: "b",
+      bytes: new Uint8Array(bias.data.buffer.slice(0)),
+      encoding: { codec: "f32" },
+    },
+    {
+      graph: GRAPH_NAME,
+      initializer: "w",
+      bytes: quantized.bytes,
+      encoding: {
+        codec: "int8-sym",
+        groupSize: perChannelGroupSize(k),
+        scale: { bytes: f32Bytes(quantized.scale), dtype: "f32" },
+      },
+    },
+  ] as const;
+};
+
+const words = (tensor: Tensor): Uint32Array =>
+  new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
+
+const isNanWord = (word: number): boolean => (word & 0x7fffffff) > 0x7f800000;
+
+/** Non-NaN words match exactly; NaN only by classification (payloads are backend-defined). */
+const assertFloatParity = (actual: Uint32Array, expected: Uint32Array, label: string): void => {
+  assertEquals(actual.length, expected.length, `${label}: length`);
+  for (let i = 0; i < actual.length; i++) {
+    if (isNanWord(expected[i])) {
+      assertEquals(isNanWord(actual[i]), true, `${label}: NaN classification index=${i}`);
+    } else {
+      assertEquals(actual[i], expected[i], `${label}: word index=${i}`);
+    }
+  }
+};
+
+/**
+ * Activations of the DiT's pre-gelu magnitude (both signs, a few beyond the tanh saturation at
+ * |x| ≳ 10), one all-zero row and one row with a NaN (its output row is NaN in both forms).
+ */
+const activations = (rows: number, k: number): Tensor => {
+  const x = fill([1, rows, k], (i) => Math.sin(i * 0.37) * 3.1 + ((i % 101) - 50) / 4.3);
+  x.data.fill(0, k, 2 * k);
+  if (rows > 2) x.data[2 * k + 5] = Number.NaN;
+  return x;
+};
+
+/** (rows, K, N): a remainder row length, Wan2.2's text embedder (M 512 → 300 here), the FFN down projection. */
+const SHAPES: readonly (readonly [number, number, number])[] = [
+  [7, 1028, 68],
+  [300, 3072, 16],
+  [5, 14336, 8],
+];
+
+test.skipIf(!GPU_AVAILABLE)(
+  "the gelu_tanh prologue of an a8 linear matches the unfused pair bit for bit (finite) / by NaN class, counts linearPrologue and drops one dispatch, for dp4a and the emulated dot (real GPU)",
+  async () => {
+    const gpu = await acquireGpu();
+    const profile = deviceGeometryProfile(gpu);
+    try {
+      for (const [rows, k, n] of SHAPES) {
+        const tensors = weightTensors(k, n);
+        const x = activations(rows, k);
+        for (const dot of ["dp4a", "emu"] satisfies I8a8Dot[]) {
+          const label = `rows=${rows} K=${k} N=${n} ${dot}`;
+          const options = { linearCompute: "a8", [I8A8_DOT]: dot } as const;
+          const fused = await createSessionFromContainer(
+            gpu,
+            await openModelBytes(geluLinearGraph(rows, k, n, false), tensors),
+            GRAPH_NAME,
+            options,
+          );
+          const primitive = await createSessionFromContainer(
+            gpu,
+            await openModelBytes(geluLinearGraph(rows, k, n, true), tensors),
+            GRAPH_NAME,
+            options,
+          );
+          try {
+            // The submit statistics accumulate over a session's runs, so compare the increments.
+            const fusedBefore = fused.diagnostics().submit.dispatchCount;
+            const primitiveBefore = primitive.diagnostics().submit.dispatchCount;
+            const fusedOut = (await fused.run({ x })).y;
+            const primitiveOut = (await primitive.run({ x })).y;
+            assertFloatParity(words(fusedOut), words(primitiveOut), `${label}: fused vs pair`);
+            assertEquals(
+              fused.diagnostics().submit.dispatchCount - fusedBefore,
+              2,
+              `${label}: the prologue quantize + the GEMM`,
+            );
+            assertEquals(
+              primitive.diagnostics().submit.dispatchCount - primitiveBefore,
+              3,
+              `${label}: gelu_tanh + quantize_rows + the GEMM`,
+            );
+            assertEquals(fused.diagnostics().lastRunFusions?.linearPrologue, 1, `${label}: fused`);
+            assertEquals(
+              primitive.diagnostics().lastRunFusions?.linearPrologue,
+              0,
+              `${label}: reference`,
+            );
+            const gemm = linearI8a8Key(linearI8a8UsesVec4(n), dot === "dp4a", profile.i8a8.linear);
+            assertEquals(
+              requireCensus(fused.diagnostics().lastRunPipelines, label)
+                .map((row) => row.key)
+                .sort(),
+              [gemm, quantizeRowsPrologueKey("gelu_tanh", k)].sort(),
+              `${label}: fused census`,
+            );
+            assertEquals(
+              requireCensus(primitive.diagnostics().lastRunPipelines, label)
+                .map((row) => row.key)
+                .sort(),
+              [
+                gemm,
+                quantizeRowsKey(quantizeRowsGeometry(k)),
+                elementwiseKey({ op: "gelu_tanh", rank: 3, dtype: "f32" }),
+              ].sort(),
+              `${label}: reference census`,
+            );
+          } finally {
+            await fused.dispose();
+            await primitive.dispose();
+          }
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+);

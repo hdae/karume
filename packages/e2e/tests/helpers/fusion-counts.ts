@@ -173,4 +173,5 @@ export const NONE: FusionCounts = {
   rowBlockAttention: 0,
   identityExpand: 0,
   packedStaticQuantize: 0,
+  linearPrologue: 0,
 };

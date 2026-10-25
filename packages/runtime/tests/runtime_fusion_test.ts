@@ -18,6 +18,7 @@ import {
 import { bmmKey } from "../src/kernels/bmm.ts";
 import { GATED_RESIDUAL_KEY } from "../src/kernels/gated-residual.ts";
 import { ROPE_BSHD_KEY, ROPE_KEY, ROPE_PAIR_BSHD_KEY } from "../src/kernels/rope.ts";
+import { QUANTIZE_ROWS_PROLOGUE_MAX_DIM } from "../src/kernels/quantize-rows.ts";
 import { siluKey } from "../src/kernels/silu.ts";
 import { SAFE_SOFTMAX_KEY } from "../src/kernels/softmax.ts";
 import { UPSAMPLE_2X_KEY } from "../src/kernels/upsample2x.ts";
@@ -25,6 +26,7 @@ import {
   type ExecStep,
   FUSION_RULES,
   type FusionPlan,
+  LINEAR_PROLOGUE_OPS,
   planFusions,
   planRowBlocks,
 } from "../src/runtime/fusion.ts";
@@ -1039,6 +1041,7 @@ test("カウンタは融合が並んだグラフでルール別に積み上が�
     rowBlockAttention: 0,
     identityExpand: 0,
     packedStaticQuantize: 0,
+    linearPrologue: 0,
   });
 });
 
@@ -1867,4 +1870,292 @@ test("a Wan2.2-like block folds the gated residual and the per-token adaLN next 
   // The mask is consumed by both steps (1 + 2 total uses), and the residual output feeds the
   // adaLN step.
   assertEquals(fusedAt(plan, 1).ins.slice(0, 1), ["out"]);
+});
+
+// ------------------------------------------------ linear prologue (perf-ledger F-4)
+
+/** Wan2.2's FFN down-projection row (K 14,336). N is shrunk: only K enters the decision. */
+const PROLOGUE_K = 14336;
+const PROLOGUE_N = 16;
+const PROLOGUE_ROWS = 7;
+
+type ProloguePairOptions = {
+  /** The producer op (default `gelu_tanh`). */
+  readonly op?: string;
+  /** The rows S of the activation `[1, S, K]` (default 7). */
+  readonly rows?: number;
+  /** The reduction length K (default {@link PROLOGUE_K}). */
+  readonly k?: number;
+  /** The producer's output gets a second consumer. */
+  readonly extraConsumer?: boolean;
+  /** The producer's output is a graph output. */
+  readonly producerOutput?: boolean;
+  /** The consumer is a `matmul` reading the output as its activation (rank 2). */
+  readonly matmulConsumer?: boolean;
+  /** The linear reads the producer's output in its bias slot (the activation is another input). */
+  readonly biasSlot?: boolean;
+  /** An unrelated node between the producer and the linear. */
+  readonly gap?: boolean;
+};
+
+/** `y = linear(gelu_tanh(x), w, b)` — the shape of the Wan DiT's FFN down projection. */
+const prologuePairGraph = (options: ProloguePairOptions = {}): DeclarationJson => {
+  const dtype = "f32";
+  const k = options.k ?? PROLOGUE_K;
+  const n = PROLOGUE_N;
+  const rows = options.rows ?? PROLOGUE_ROWS;
+  const matmul = options.matmulConsumer === true;
+  const row = matmul ? [rows, k] : [1, rows, k];
+  const produced = options.biasSlot ? [n] : row;
+  const inputs: DeclarationJson["inputs"] = [{ name: "x", dtype, shape: produced }];
+  const values: DeclarationJson["values"] = {
+    g: { dtype, shape: produced },
+    w: { dtype, shape: matmul ? [k, n] : [n, k] },
+    y: { dtype, shape: matmul ? [rows, n] : [1, rows, n] },
+  };
+  const initializers: DeclarationJson["initializers"] = { w: {} };
+  const nodes: DeclarationJson["nodes"] = [
+    { op: options.op ?? "gelu_tanh", ins: ["x"], outs: ["g"], attrs: {} },
+  ];
+  const outputs = options.producerOutput ? ["g"] : [];
+  if (options.gap) {
+    inputs.push({ name: "z", dtype, shape: [4] });
+    values.z_neg = { dtype, shape: [4] };
+    nodes.push({ op: "neg", ins: ["z"], outs: ["z_neg"], attrs: {} });
+    outputs.push("z_neg");
+  }
+  if (matmul) {
+    nodes.push({ op: "matmul", ins: ["g", "w"], outs: ["y"], attrs: {} });
+  } else if (options.biasSlot) {
+    inputs.push({ name: "a", dtype, shape: row });
+    nodes.push({ op: "linear", ins: ["a", "w", "g"], outs: ["y"], attrs: {} });
+  } else {
+    values.b = { dtype, shape: [n] };
+    initializers.b = {};
+    nodes.push({ op: "linear", ins: ["g", "w", "b"], outs: ["y"], attrs: {} });
+  }
+  outputs.push("y");
+  if (options.extraConsumer) {
+    values.g_neg = { dtype, shape: produced };
+    nodes.push({ op: "neg", ins: ["g"], outs: ["g_neg"], attrs: {} });
+    outputs.push("g_neg");
+  }
+  return {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: [...new Set(nodes.map((node) => node.op))] },
+    symbols: [],
+    inputs,
+    outputs,
+    initializers,
+    values,
+    nodes,
+  };
+};
+
+type PrologueContext = Partial<Parameters<typeof planFusions>[1]>;
+
+/** The a8 Session's facts: `linearCompute: "a8"` and the weight resident as i8. */
+const A8_I8: PrologueContext = {
+  linearCompute: "a8",
+  weightLayouts: new Map([["w", { storage: "i8" }]]),
+};
+
+const fusePrologue = (
+  options: ProloguePairOptions = {},
+  context: PrologueContext = A8_I8,
+): FusionPlan => {
+  const graph = prologuePairGraph(options);
+  const ir = parse(graph);
+  return planFusions(planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes, {
+    useCounts: countUses(ir),
+    outputNames: new Set(ir.outputs),
+    limits: TEST_LIMITS,
+    ...context,
+  });
+};
+
+const NO_FUSIONS = {
+  silu: 0,
+  upsample2x: 0,
+  rope: 0,
+  adaln: 0,
+  gatedResidual: 0,
+  rmsNormAdd: 0,
+  linearStaticQuantize: 0,
+  rowBlockAttention: 0,
+  identityExpand: 0,
+  packedStaticQuantize: 0,
+  linearPrologue: 0,
+} as const;
+
+/** A node step's `prologue` (undefined for fused steps and plain nodes). */
+const prologueOf = (step: ExecStep) => (step.kind === "node" ? step.prologue : undefined);
+
+test("the linear prologue folds gelu_tanh into the a8 linear that reads it: one node step whose input is the producer's input", () => {
+  const cases: readonly (readonly [string, ProloguePairOptions, PrologueContext])[] = [
+    ["Wan2.2 down projection (K 14,336, i8)", {}, A8_I8],
+    [
+      "i4 residency (w4a8)",
+      {},
+      { linearCompute: "a8", weightLayouts: new Map([["w", { storage: "i4", groupSize: 32 }]]) },
+    ],
+    ["the prologue bound (K 16,384)", { k: QUANTIZE_ROWS_PROLOGUE_MAX_DIM }, A8_I8],
+    ["the smallest row (K 4)", { k: 4 }, A8_I8],
+    ["one row", { rows: 1 }, A8_I8],
+  ];
+  for (const [label, options, context] of cases) {
+    const plan = fusePrologue(options, context);
+    assertEquals(outline(plan.steps), ["linear"], label);
+    const [step] = plan.steps;
+    assertEquals(prologueOf(step), { op: "gelu_tanh" }, label);
+    if (step.kind !== "node") throw new Error(`${label}: not a node step`);
+    assertEquals(step.plan.node.ins, ["x", "w", "b"], `${label}: re-pointed input`);
+    assertEquals(
+      step.plan.outputs.map((out) => out.name),
+      ["y"],
+      label,
+    );
+    assertEquals(step.aliasesInput, false, label);
+    assertEquals(plan.counts, { ...NO_FUSIONS, linearPrologue: 1 }, label);
+  }
+});
+
+test("the linear prologue keeps the total-use accounting exact: the producer's input trades the producer's use for the linear's, and the folded value is never consumed or defined", () => {
+  // up projection → gelu_tanh → down projection, with the up projection's output `h` also read by
+  // a residual add after the down projection (so `h` has two uses before and after the fold).
+  const dtype = "f32";
+  const row = [1, 4, 8];
+  const graph: DeclarationJson = {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["add", "gelu_tanh", "linear"] },
+    symbols: [],
+    inputs: [{ name: "x", dtype, shape: row }],
+    outputs: ["out"],
+    initializers: { w_up: {}, b_up: {}, w: {}, b: {} },
+    values: {
+      w_up: { dtype, shape: [8, 8] },
+      b_up: { dtype, shape: [8] },
+      w: { dtype, shape: [8, 8] },
+      b: { dtype, shape: [8] },
+      h: { dtype, shape: row },
+      g: { dtype, shape: row },
+      y: { dtype, shape: row },
+      out: { dtype, shape: row },
+    },
+    nodes: [
+      { op: "linear", ins: ["x", "w_up", "b_up"], outs: ["h"], attrs: {} },
+      { op: "gelu_tanh", ins: ["h"], outs: ["g"], attrs: {} },
+      { op: "linear", ins: ["g", "w", "b"], outs: ["y"], attrs: {} },
+      { op: "add", ins: ["y", "h"], outs: ["out"], attrs: {} },
+    ],
+  };
+  const ir = parse(graph);
+  const uses = countUses(ir);
+  const plan = planFusions(planGraph(ir, bindSymbols(ir, { x: row })).nodes, {
+    useCounts: uses,
+    outputNames: new Set(ir.outputs),
+    limits: TEST_LIMITS,
+    linearCompute: "a8",
+    weightLayouts: new Map([
+      ["w_up", { storage: "i8" }],
+      ["w", { storage: "i8" }],
+    ]),
+  });
+  assertEquals(outline(plan.steps), ["linear", "linear", "add"]);
+  assertEquals(plan.steps.map(prologueOf), [undefined, { op: "gelu_tanh" }, undefined]);
+  // The release bookkeeping reads `plan.node.ins` of a node step and `ins` of a fused step.
+  const consumed = new Map<string, number>();
+  const defined = new Set<string>();
+  for (const step of plan.steps) {
+    const names = step.kind === "node" ? step.plan.node.ins : step.ins;
+    for (const name of names) consumed.set(name, (consumed.get(name) ?? 0) + 1);
+    if (step.kind === "node") for (const out of step.plan.outputs) defined.add(out.name);
+    else defined.add(step.outputName);
+  }
+  assertEquals(uses.get("g"), 1, "the folded value had exactly one use");
+  assertEquals(consumed.get("g"), undefined, "the folded value is never consumed");
+  assertEquals(defined.has("g"), false, "the folded value is never defined");
+  for (const [name, count] of uses) {
+    if (name === "g") continue;
+    assertEquals(consumed.get(name), count, `total uses of '${name}'`);
+  }
+  assertEquals(consumed.get("h"), 2, "h: the down projection and the residual add");
+});
+
+test("linear prologue counterexamples (use count 2 / graph output / not a linear / another slot / a gap / K / erf gelu / no rows) keep both nodes as they are", () => {
+  const cases: readonly (readonly [string, ProloguePairOptions])[] = [
+    ["the output has a second consumer", { extraConsumer: true }],
+    ["the output is a graph output", { producerOutput: true }],
+    ["the consumer is a matmul", { matmulConsumer: true }],
+    ["the linear reads it in the bias slot", { biasSlot: true }],
+    ["an unrelated node between the two", { gap: true }],
+    ["K % 4 != 0", { k: PROLOGUE_K - 2 }],
+    ["K above the prologue bound", { k: QUANTIZE_ROWS_PROLOGUE_MAX_DIM + 4 }],
+    ["erf gelu (not accepted yet)", { op: "gelu" }],
+    ["no rows", { rows: 0 }],
+  ];
+  for (const [label, options] of cases) {
+    const plan = fusePrologue(options);
+    assertEquals(plan.counts.linearPrologue, 0, `${label}: counter`);
+    assertEquals(
+      outline(plan.steps),
+      prologuePairGraph(options).nodes.map((node) => node.op),
+      `${label}: plain nodes`,
+    );
+    assertEquals(
+      plan.steps.map(prologueOf),
+      plan.steps.map(() => undefined),
+      label,
+    );
+  }
+});
+
+test("the linear prologue needs the a8 Session's i8a8 route: f32 / f16 / bf16 weights and linearCompute f32 / f16 / unset do not fold", () => {
+  const cases: readonly (readonly [string, PrologueContext])[] = [
+    ["f32 weight (not resident compressed)", { linearCompute: "a8", weightLayouts: new Map() }],
+    ["no weight layouts", { linearCompute: "a8" }],
+    ["f16 weight", { linearCompute: "a8", weightLayouts: new Map([["w", { storage: "f16" }]]) }],
+    ["bf16 weight", { linearCompute: "a8", weightLayouts: new Map([["w", { storage: "bf16" }]]) }],
+    ["linearCompute f32", { ...A8_I8, linearCompute: "f32" }],
+    ["linearCompute f16", { ...A8_I8, linearCompute: "f16" }],
+    ["linearCompute unset", { weightLayouts: A8_I8.weightLayouts }],
+  ];
+  for (const [label, context] of cases) {
+    const plan = fusePrologue({}, context);
+    assertEquals(plan.counts.linearPrologue, 0, `${label}: counter`);
+    assertEquals(outline(plan.steps), ["gelu_tanh", "linear"], label);
+  }
+});
+
+test("the linear prologue rejects a producer that is not f32 in and out", () => {
+  // The contract runs gelu_tanh on f32 only, so a planned graph cannot carry another dtype; the
+  // matcher's own check is exercised on a plan with the producer's dtypes replaced.
+  const graph = prologuePairGraph();
+  const ir = parse(graph);
+  const nodes = planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes;
+  const [producer, linear] = nodes;
+  for (const [label, replaced] of [
+    ["input i32", { ...producer, inputDtypes: ["i32"] }],
+    ["output i32", { ...producer, outputs: [{ ...producer.outputs[0], dtype: "i32" }] }],
+  ] as const) {
+    const plan = planFusions([replaced, linear], {
+      useCounts: countUses(ir),
+      outputNames: new Set(ir.outputs),
+      limits: TEST_LIMITS,
+      ...A8_I8,
+    });
+    assertEquals(plan.counts.linearPrologue, 0, label);
+    assertEquals(outline(plan.steps), ["gelu_tanh", "linear"], label);
+  }
+});
+
+test("no fusion rule's head is a prologue op (the rules are tried first at each index, so the order cannot change the result)", () => {
+  const heads = new Set(FUSION_RULES.flatMap((rule) => rule.heads));
+  assertEquals(
+    LINEAR_PROLOGUE_OPS.filter((op) => heads.has(op)),
+    [],
+  );
+  assertEquals(LINEAR_PROLOGUE_OPS, ["gelu_tanh"]);
 });

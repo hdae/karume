@@ -55,6 +55,17 @@
  * Either way one {@link FusedStep} = one execution step, and
  * the point where the release bookkeeping joins does not change.
  *
+ * ## A consumer that absorbs its producer (linear prologue)
+ *
+ * One fusion is not a {@link FusedStep}: an elementwise {@link LINEAR_PROLOGUE_OPS} producer folded
+ * into the step ① of the linear that consumes it (perf-ledger F-4 — {@link linearPrologueAt}). The
+ * consumer absorbs its producer **through an annotation on its node step** ({@link LinearPrologue},
+ * like the packed activations of ADR 0105): the decision is made here with the consumer's own
+ * eligibility predicate, and the consumer's recipe executes it (its i8a8 step ① quantizes `op(x)`
+ * directly). The linear's input is re-pointed to the producer's input and the producer has no step,
+ * so the bookkeeping stays the one path of a plain node. It is tried after the rules at each index
+ * and counted as `linearPrologue`.
+ *
  * ## Application order
  *
  * The **declaration order** of {@link FUSION_RULES} (linearStaticQuantize → rmsNormAdd → silu →
@@ -85,7 +96,9 @@
  * {@link passthroughIsIndependent} checks mechanically.
  */
 
+import type { PrologueUnaryOp } from "../codegen/elementwise.ts";
 import { linearGemvPackedEligible } from "../kernels/linear-gemv.ts";
+import { quantizeRowsPrologueEligible } from "../kernels/quantize-rows.ts";
 import { numel, permuteDims, STATIC_QUANTIZE_OP, staticQuantizeScale } from "../ops.ts";
 import { ADALN_RULE } from "./fusion-rules/adaln.ts";
 import { GATED_RESIDUAL_RULE } from "./fusion-rules/gated-residual.ts";
@@ -105,12 +118,14 @@ import {
   type FusionRule,
   type FusionScanContext,
   internalsArePrivate,
+  type LinearPrologue,
   type PackedActivations,
   passthroughIsIndependent,
   sameShape,
   windowIsSingleOutput,
   windowTouchesState,
 } from "./fusion-rule.ts";
+import { linearTakesI8a8 } from "./linear-route.ts";
 import { ExecutionError, type NodePlan } from "./plan.ts";
 
 /**
@@ -126,6 +141,7 @@ export type {
   FusionLimits,
   FusionPlan,
   FusionWeightLayout,
+  LinearPrologue,
   PackedActivations,
 } from "./fusion-rule.ts";
 /**
@@ -220,6 +236,80 @@ const packedRole = (
   return scale === undefined ? {} : { packedActivations: { role: "read", scale } };
 };
 
+/**
+ * The producers a linear's step ① may absorb (perf-ledger F-4 — the `op` of {@link LinearPrologue}).
+ *
+ * MUST: an op enters here only once its fused form (`quantizeRowsPrologueWgsl` in
+ * kernels/quantize-rows.ts) has been measured bit-identical to the pair "elementwise op →
+ * quantize_rows" (ADR 0040 decision 2). The erf `gelu` has the kernel text (`PrologueUnaryOp`) but no
+ * measurement yet; adding it is this one edit plus its tests.
+ */
+export const LINEAR_PROLOGUE_OPS: readonly PrologueUnaryOp[] = ["gelu_tanh"];
+
+/**
+ * The linear prologue (perf-ledger F-4) at `index`: an elementwise {@link LINEAR_PROLOGUE_OPS} node
+ * directly followed by the linear that reads its output. The linear's i8a8 step ① then quantizes
+ * `op(x)` itself and the producer disappears, so its f32 output is never written or read.
+ *
+ * The decision is the fusion pass's, the execution the linear recipe's (the same split as packed
+ * activations — ADR 0105): the hit is a plain node step of the linear whose first input is
+ * re-pointed to the producer's input, annotated with {@link LinearPrologue}.
+ *
+ * Accepted only on an exact match (ADR 0040 decision 2):
+ *
+ * 1. `nodes[index]` is an op of {@link LINEAR_PROLOGUE_OPS}, f32 in and out.
+ * 2. Its output has exactly one use and is not a graph output ({@link internalsArePrivate}).
+ * 3. That use is the activation slot (`ins[0]`) of the **next** node, a `linear` — a two-node window
+ *    like every other fusion, so the re-pointed input lives exactly as long as the folded value
+ *    would have.
+ * 4. The linear takes the i8a8 path by the recipe's own predicate ({@link linearTakesI8a8} on the
+ *    weight's resident storage), and its row length fits the prologue kernel
+ *    ({@link quantizeRowsPrologueEligible}).
+ * 5. At least one row: the prologue kernel binds `x` as `array<vec4<f32>>`, whose 16-byte minimum
+ *    binding size the 4-byte buffer of an empty tensor does not meet.
+ *
+ * Anything else returns `undefined` and both nodes stay as they are (byte-identical behaviour).
+ * NOTE: `linearStaticQuantize` (head `linear`) and packed activations require `linearCompute: "f32"`
+ * and this requires `"a8"`, so they never compete for the same linear.
+ */
+const linearPrologueAt = (
+  nodes: readonly NodePlan[],
+  index: number,
+  context: FusionContext,
+): { readonly plan: NodePlan; readonly prologue: LinearPrologue } | undefined => {
+  const producer = nodes[index];
+  const linear = nodes[index + 1];
+  if (linear === undefined || linear.node.op !== "linear") return undefined;
+  const op = LINEAR_PROLOGUE_OPS.find((accepted) => accepted === producer.node.op);
+  if (op === undefined) return undefined;
+  const window = [producer, linear];
+  if (!windowIsSingleOutput(window) || windowTouchesState(window)) return undefined;
+  if (!allF32([producer]) || !internalsArePrivate(window, context)) return undefined;
+  if (linear.node.ins[0] !== producer.outputs[0].name) return undefined;
+  const [x, weight] = linear.inputShapes;
+  const k = weight[1];
+  const storage = context.weightLayouts?.get(linear.node.ins[1])?.storage ?? "f32";
+  if (!linearTakesI8a8(context.linearCompute, storage, k) || !quantizeRowsPrologueEligible(k)) {
+    return undefined;
+  }
+  if (numel(x.slice(0, -1)) < 1) return undefined;
+  // MUST: the re-pointed input is read in the folded value's place, so it has the same shape and
+  // dtype (an elementwise unary op changes neither; a mismatch is a broken plan, not a non-match).
+  if (!sameShape(producer.inputShapes[0], x) || producer.inputDtypes[0] !== linear.inputDtypes[0]) {
+    throw new ExecutionError(
+      `linear prologue: ${op} input [${producer.inputShapes[0].join(",")}] (${producer.inputDtypes[0]})` +
+        ` does not match the linear's input [${x.join(",")}] (${linear.inputDtypes[0]})`,
+    );
+  }
+  return {
+    plan: {
+      ...linear,
+      node: { ...linear.node, ins: [producer.node.ins[0], ...linear.node.ins.slice(1)] },
+    },
+    prologue: { op },
+  };
+};
+
 /** Scans the node list once and folds it into fused steps. Nodes not grabbed stay plain. */
 const scanFusions = (
   nodes: readonly NodePlan[],
@@ -240,6 +330,7 @@ const scanFusions = (
     rowBlockAttention: 0,
     identityExpand: 0,
     packedStaticQuantize: packed.size,
+    linearPrologue: 0,
   };
   const pushNode = (plan: NodePlan): void => {
     const alias = aliases.has(plan);
@@ -257,6 +348,20 @@ const scanFusions = (
       steps.push(hit.step);
       counts[hit.step.rule] += 1;
       index += hit.advance;
+      continue;
+    }
+    const folded = linearPrologueAt(nodes, index, context);
+    if (folded !== undefined) {
+      // The producer gets no step; the linear's step stands for both nodes. A linear never aliases
+      // (planAliases), and packed activations need linearCompute "f32" (never with a prologue).
+      steps.push({
+        kind: "node",
+        plan: folded.plan,
+        aliasesInput: false,
+        prologue: folded.prologue,
+      });
+      counts.linearPrologue += 1;
+      index += 2;
       continue;
     }
     pushNode(nodes[index]);
@@ -468,8 +573,9 @@ const chainWithinWindow = (
  * fusion decision but also the spelling of the eligibility conditions. Putting the enumerator
  * outside the layer and taking the predicates along would leave the candidate table behind when
  * the accepted set changes (the table alone keeps saying "foldable" by the old criterion).
- * MUST: do not build windows across a fused step (a chain already grabbed is not counted twice as a
- * candidate). The scan closes per **consecutive run** of plain nodes.
+ * MUST: do not build windows across a fused step or a linear with a folded producer
+ * ({@link LinearPrologue}) — a chain already grabbed is not counted twice as a candidate. The scan
+ * closes per **consecutive run** of plain nodes.
  *
  * NOTE: what comes back is candidates, not a design. Prefixes of a long window also come out as
  * separate candidates (a property of n-gram enumeration), so read the longest window with the same
@@ -508,14 +614,15 @@ export const enumerateUnfusedWindows = (
     run = [];
   };
   for (const step of steps) {
-    if (step.kind === "node") {
+    if (step.kind === "node" && step.prologue === undefined) {
       if (run.length === 0) runStart = nodeIndex;
       run.push(step.plan);
       nodeIndex += 1;
       continue;
     }
     sweepRun();
-    nodeIndex += step.nodeCount;
+    // A linear with a folded producer is a grabbed pair of two original nodes (like a fused step).
+    nodeIndex += step.kind === "node" ? 2 : step.nodeCount;
   }
   sweepRun();
   return found;

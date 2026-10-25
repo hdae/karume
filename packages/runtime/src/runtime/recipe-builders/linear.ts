@@ -46,7 +46,7 @@ import {
   linearGemvWgsl,
 } from "../../kernels/linear-gemv.ts";
 import { LINEAR_SCALE_BINDING, linearKey, linearParams, linearWgsl } from "../../kernels/linear.ts";
-import type { PackedActivations } from "../fusion.ts";
+import type { LinearPrologue, PackedActivations } from "../fusion.ts";
 import { linearTakesI8a8 } from "../linear-route.ts";
 import type { WeightStorage } from "../../kernels/weight-storage.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../../kernels/bmm.ts";
@@ -60,6 +60,9 @@ import {
   quantizeRowsGeometry,
   quantizeRowsKey,
   quantizeRowsParams,
+  quantizeRowsPrologueEligible,
+  quantizeRowsPrologueKey,
+  quantizeRowsPrologueWgsl,
   quantizeRowsWgsl,
 } from "../../kernels/quantize-rows.ts";
 import type { RecipeBuildFace } from "../recipe-builder.ts";
@@ -168,6 +171,8 @@ export const buildLinear = async (
   outs: readonly BindingSource[],
   builder: StepRecipeBuilder,
   packed: PackedActivations | undefined,
+  /** The producer folded into step ① of the i8a8 path (perf-ledger F-4); `binds[0]` is its input. */
+  prologue: LinearPrologue | undefined,
 ): Promise<void> => {
   const [x, weight] = step.inputShapes;
   const n = weight[0];
@@ -202,8 +207,19 @@ export const buildLinear = async (
   }
   // The integer dot-product path (opt-in × integer residency × k > 0 × k % 4 == 0). The predicate
   // and its MUSTs live in one function shared with the fusion pass (src/runtime/linear-route.ts).
-  if (linearTakesI8a8(face.state.linearCompute, weightStorage, k)) {
-    await buildLinearI8a8(face, step, binds, outs, builder, m, n, k, weightStorage);
+  const i8a8 = linearTakesI8a8(face.state.linearCompute, weightStorage, k);
+  // If a linear declared to absorb its producer (perf-ledger F-4) does not take the i8a8 path with
+  // a row the prologue kernel accepts, the producer's op would never run = a silent wrong value. The
+  // fold is accepted in one place, fusion.ts, but it is checked here too **with the same predicate**
+  // (fail loudly).
+  if (prologue !== undefined && !(i8a8 && quantizeRowsPrologueEligible(k))) {
+    throw new ExecutionError(
+      `linear [${x.join(",")}] × [${weight.join(",")}]: declared with a ${prologue.op} prologue` +
+        " (perf-ledger F-4) but does not take the i8a8 path with a prologue-eligible row",
+    );
+  }
+  if (i8a8) {
+    await buildLinearI8a8(face, step, binds, outs, builder, m, n, k, weightStorage, prologue);
     return;
   }
   // The f16 compute variant (ADR 0028). **It cannot be combined with i8-resident weights** (w8a16
@@ -457,13 +473,39 @@ const buildLinearGemv = async (
 };
 
 /**
+ * The kernel of the i8a8 path's step ①: the plain per-token quantization (one row = one workgroup,
+ * or the small-row geometry), or — when the fusion pass folded a producer into this linear — the
+ * prologue form, which keeps one row per workgroup in registers (perf-ledger F-4).
+ */
+const quantizeStep = (
+  k: number,
+  prologue: LinearPrologue | undefined,
+): { readonly key: string; readonly wgsl: string; readonly rowsPerGroup: number } => {
+  if (prologue !== undefined) {
+    return {
+      key: quantizeRowsPrologueKey(prologue.op, k),
+      wgsl: quantizeRowsPrologueWgsl(prologue.op, k),
+      rowsPerGroup: 1,
+    };
+  }
+  const geometry = quantizeRowsGeometry(k);
+  return {
+    key: quantizeRowsKey(geometry),
+    wgsl: quantizeRowsWgsl(geometry),
+    rowsPerGroup: geometry.rowsPerGroup,
+  };
+};
+
+/**
  * linear's **w8a8 / w4a8 variant** (opt-in — {@link SessionOptions.linearCompute}).
  * **One node = two dispatches** (the same "one node in several dispatches" treatment as fused
  * attention):
  *
  * ① `quantize_rows` (activations to per-token i8, grid-stride over rows) → ② the integer
  * dot-product GEMM (one workgroup = one output tile, so exceeding the limit fails loudly). ① is the
- * same whatever the weights' storage form.
+ * same whatever the weights' storage form. With a {@link LinearPrologue} (the producer folded by the
+ * fusion pass — perf-ledger F-4), ① quantizes `op(x)` of the re-pointed input instead (same bindings
+ * and params, and the same values as "elementwise op → quantize_rows").
  *
  * MUST: the temporary buffers (`xq` / `xs`) are declared → released at the end of the node. That
  * closes the plan's reference counting, and even on a failure path `arena.destroy()` collects the
@@ -484,6 +526,7 @@ const buildLinearI8a8 = async (
   n: number,
   k: number,
   weightStorage: WeightStorage,
+  prologue: LinearPrologue | undefined,
 ): Promise<void> => {
   const [x, weight] = step.inputShapes;
   const where = `linear i8a8 [${x.join(",")}] × [${weight.join(",")}]`;
@@ -502,16 +545,17 @@ const buildLinearI8a8 = async (
   const xq = builder.allocTemp(Math.max(4, m * (k / 4) * 4));
   const xs = builder.allocTemp(Math.max(4, m * 4));
 
-  // ① Per-token quantization of the activations (one row = one workgroup, grid-stride over rows)
-  const quantizeGeometry = quantizeRowsGeometry(k);
-  const quantizeKey = quantizeRowsKey(quantizeGeometry);
+  // ① Per-token quantization of the activations (grid-stride over rows). With a prologue the same
+  // quantization of `op(x)`, `x` being the folded producer's input (`binds[0]`); the bindings and
+  // params are the plain form's.
+  const quantize = quantizeStep(k, prologue);
   const {
     pipeline: quantizePipeline,
     layout: quantizeLayout,
     roles: quantizeRoles,
-  } = await face.state.cache.get(quantizeKey, quantizeRowsWgsl(quantizeGeometry));
+  } = await face.state.cache.get(quantize.key, quantize.wgsl);
   builder.dispatch({
-    key: quantizeKey,
+    key: quantize.key,
     pipeline: quantizePipeline,
     layout: quantizeLayout,
     roles: quantizeRoles,
@@ -521,7 +565,7 @@ const buildLinearI8a8 = async (
       { binding: 2, source: xq },
       { binding: 3, source: xs },
     ],
-    workgroups: [gridStrideWorkgroups(m, quantizeGeometry.rowsPerGroup, limit), 1, 1],
+    workgroups: [gridStrideWorkgroups(m, quantize.rowsPerGroup, limit), 1, 1],
   });
 
   // ② The integer dot-product GEMM. The tile geometry is the per-op field of the adapter's profile
