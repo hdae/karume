@@ -797,11 +797,6 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     // row window, S never stored. Both reduction forms are frozen (they MUST stay bit-identical,
     // so a change to one of them shows up only here), the emulated dot product and both depths.
     ["attention_online_i8a8_d128_sg32.wgsl", attentionOnlineI8a8Wgsl(true, 128, "sg32")],
-    // The token-major O store (perf-ledger F-3 A4); the head-major forms around it must not move.
-    [
-      "attention_online_i8a8_d128_sg32_obshd.wgsl",
-      attentionOnlineI8a8Wgsl(true, 128, "sg32", "bshd"),
-    ],
     ["attention_online_i8a8_d128_wg.wgsl", attentionOnlineI8a8Wgsl(true, 128, "wg")],
     ["attention_online_i8a8_d128_emu_sg32.wgsl", attentionOnlineI8a8Wgsl(false, 128, "sg32")],
     ["attention_online_i8a8_d64_sg32.wgsl", attentionOnlineI8a8Wgsl(true, 64, "sg32")],

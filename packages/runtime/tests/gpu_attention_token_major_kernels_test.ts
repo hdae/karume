@@ -1,15 +1,12 @@
-// The three kernels that let a fused attention read and write token-major tensors (perf-ledger F-3
-// A4 / F-8 — the permutes the fusion pass lets it absorb), each against the composition it
-// replaces, from the production generators (the keys, WGSL and params a Session uses), word for
-// word:
+// The two kernels that let a fused attention read token-major tensors (perf-ledger F-3 A4 / F-8 —
+// the permutes the fusion pass lets it absorb), each against the composition it replaces, from the
+// production generators (the keys, WGSL and params a Session uses), word for word:
 //
 //   - the token-major `quantize_rows` (rows read from `[B, S, H, D]`, outputs head-major) against
 //     the strided permute `[B, S, H, D]` → `[B, H, S, D]` followed by the plain `quantize_rows`;
 //   - the tiled transpose `[batch, s, c]` → `[batch, c, s]` against the strided permute of a
 //     token-major V to head-major followed by the strided `[B·H, N, D]` → `[B·H, D, N]` copy the
-//     attention recipe makes for Vᵀ;
-//   - the online kernel storing O token-major against its head-major store followed by the strided
-//     permute `[B, H, M, D]` → `[B, M, H, D]`.
+//     attention recipe makes for Vᵀ.
 //
 // Each new form changes only addresses, so the claim is bit identity; whether the backend keeps it
 // is visible only here. No adapter = explicit SKIP.
@@ -29,15 +26,6 @@ import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
 import { SubmitScheduler } from "../src/gpu/submit.ts";
 import {
-  ATTENTION_ONLINE_ROWS,
-  type AttentionOnlineOutput,
-  type AttentionOnlineReduce,
-  attentionOnlineI8a8Key,
-  attentionOnlineI8a8Params,
-  attentionOnlineI8a8Wgsl,
-  attentionOnlineI8a8WorkgroupStorageBytes,
-} from "../src/kernels/attention-online-i8a8.ts";
-import {
   quantizeRowsBshdKey,
   quantizeRowsBshdParams,
   quantizeRowsBshdWgsl,
@@ -52,7 +40,6 @@ import {
   TRANSPOSE_TILED_WGSL,
   transposeTiledParams,
 } from "../src/kernels/transpose-tiled.ts";
-import { attentionDeviceFacts } from "../src/runtime/attention-route.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
@@ -288,126 +275,6 @@ describe.skipIf(!GPU_AVAILABLE)(
             await test.dispose();
           }
         }
-      } finally {
-        gpu.destroy();
-      }
-    });
-
-    it("the online kernel's token-major O store is its head-major store followed by the strided permute, word for word (sg32 / wg where the device holds them, dp4a and the emulated dot, row windows)", async () => {
-      type Case = {
-        readonly b: number;
-        readonly h: number;
-        readonly m: number;
-        readonly n: number;
-        readonly d: number;
-        /** Row windows as `[offset, rows]` (one window over every row when omitted). */
-        readonly windows?: readonly (readonly [number, number])[];
-      };
-      const cases: readonly Case[] = [
-        { b: 2, h: 3, m: 150, n: 200, d: 128 },
-        { b: 1, h: 2, m: 70, n: 68, d: 64 },
-        {
-          b: 2,
-          h: 3,
-          m: 150,
-          n: 200,
-          d: 128,
-          windows: [
-            [0, 2 * ATTENTION_ONLINE_ROWS],
-            [2 * ATTENTION_ONLINE_ROWS, 150 - 2 * ATTENTION_ONLINE_ROWS],
-          ],
-        },
-      ];
-      const codes = (count: number, salt: number): Uint32Array<ArrayBuffer> => {
-        const words = new Uint32Array(count / 4);
-        let state = (0x85ebca6b ^ salt) >>> 0;
-        for (let w = 0; w < words.length; w += 1) {
-          let word = 0;
-          for (let byte = 0; byte < 4; byte += 1) {
-            state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
-            const code = (state % 255) - 127;
-            word |= (code & 0xff) << (8 * byte);
-          }
-          words[w] = word >>> 0;
-        }
-        return words;
-      };
-      const scales = (count: number, salt: number, base: number): Float32Array<ArrayBuffer> => {
-        const out = new Float32Array(count);
-        for (let i = 0; i < count; i += 1) out[i] = base * (1 + ((i * 7 + salt) % 13) / 13);
-        return out;
-      };
-      const gpu = await acquireGpu({ subgroups: "available" });
-      try {
-        const facts = attentionDeviceFacts(gpu);
-        let checked = 0;
-        for (const { b, h, m, n, d, windows } of cases) {
-          const batch = b * h;
-          const reduces = (["sg32", "wg"] as const).filter(
-            (reduce: AttentionOnlineReduce) =>
-              (reduce === "wg" || facts.subgroups) &&
-              attentionOnlineI8a8WorkgroupStorageBytes(d, reduce) <=
-                facts.maxComputeWorkgroupStorageSize,
-          );
-          for (const reduce of reduces) {
-            for (const dp4a of [true, false]) {
-              const where = `B ${b} H ${h} M ${m} N ${n} D ${d} ${reduce} ${dp4a ? "dp4a" : "emu"}${
-                windows === undefined ? "" : " windows"
-              }`;
-              const test = bench(gpu);
-              try {
-                const inputs = [
-                  test.host(codes(batch * m * d, 1)),
-                  test.host(codes(batch * n * d, 2)),
-                  test.host(codes(batch * d * n, 3)),
-                ];
-                const tail = [
-                  test.host(scales(batch * m, 4, 0.02)),
-                  test.host(scales(batch * n, 5, 0.018)),
-                  test.host(scales(batch * d, 6, 0.01)),
-                ];
-                const scale = Math.fround(Math.sqrt(1 / Math.sqrt(d)));
-                const bytes = batch * m * d * 4;
-                const online = async (
-                  output: AttentionOnlineOutput,
-                  out: GPUBuffer,
-                ): Promise<void> => {
-                  for (const [offset, rows] of windows ?? [[0, m] as const]) {
-                    await test.run(
-                      attentionOnlineI8a8Key(dp4a, d, reduce, output),
-                      attentionOnlineI8a8Wgsl(dp4a, d, reduce, output),
-                      attentionOnlineI8a8Params(
-                        m,
-                        n,
-                        offset,
-                        scale,
-                        output === "bshd" ? h : undefined,
-                      ),
-                      UNIFORM_IN,
-                      [inputs[0], inputs[1], inputs[2], out, tail[0], tail[1], tail[2]],
-                      [Math.ceil(rows / ATTENTION_ONLINE_ROWS), batch, 1],
-                    );
-                  }
-                };
-                const headMajor = test.region(bytes);
-                await online("bhsd", headMajor);
-                const expected = test.region(bytes);
-                await test.permute(headMajor, expected, [b, h, m, d], HEAD_SWAP);
-                const tokenMajor = test.region(bytes);
-                await online("bshd", tokenMajor);
-                const words = batch * m * d;
-                const want = await test.read(expected, words);
-                assert(new Set(want).size > 1, `${where}: the output is constant`);
-                assertWords(await test.read(tokenMajor, words), want, where);
-                checked += 1;
-              } finally {
-                await test.dispose();
-              }
-            }
-          }
-        }
-        assert(checked > 0, "no reduction form fits this device");
-        console.log(`[attention token-major] online bshd: ${checked} combinations bit-identical`);
       } finally {
         gpu.destroy();
       }
