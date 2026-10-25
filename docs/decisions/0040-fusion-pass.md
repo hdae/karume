@@ -345,90 +345,112 @@ per FFN) is never written or read.
   alone (the GPU tests above) hardly detects a gelu mismatch; the end-to-end check is the models'
   per-environment sha256 rows.
 
-### The second instance: an attention that absorbs the permutes around it (perf-ledger F-3 A4 / F-8)
+### The second instance: an attention that absorbs the permutes of its q / k / v (perf-ledger F-3 A4 / F-8)
 
-The Wan DiTs project q / k / v token-major (`[B, S, H·D]` reshaped to `[B, S, H, D]`), permute each to
-head-major `[B, H, S, D]` with a materialised strided copy right before the fused `attention`, and
-permute O back right after it. The attention now **absorbs those permutes as their consumer** (q / k /
-v) **and producer's consumer** (O): it reads and writes the token-major tensors itself, so none of the
-four copies is a node output.
+The Wan DiTs project q / k / v token-major (`[B, S, H·D]` reshaped to `[B, S, H, D]`) and permute each
+to head-major `[B, H, S, D]` with a materialised strided copy right before the fused `attention` (and
+permute O back right after it). On an a8 attention seat the attention **absorbs the input permutes as
+their consumer**: its a8 quantisation reads the token-major tensors itself, so none of those three
+copies is a node output. The permute after the attention stays a node.
 
-- **The annotation**: `NodeStep.tokenMajor = { q, k, v, o }` (`AttentionTokenMajor` in
+- **The annotation**: `NodeStep.tokenMajor = { q, k, v }` (`AttentionTokenMajor` in
   `packages/runtime/src/runtime/fusion-rule.ts`). The attention's `NodePlan` in that step has each
-  absorbed operand re-pointed to the permute's input (name, token-major shape and dtype) and, with
-  `o`, its output re-pointed to the output permute's output (name and `[B, M, H, D]` shape); the
-  absorbed permutes produce no step. Release bookkeeping stays decision 1's one path, as for the
-  linear prologue: each permute's input trades the permute's use for the attention's, and the
-  absorbed values are never defined. `nodeStepSpan` gives the number of original nodes a node step
-  stands for (the candidate enumeration and the estimate read it).
-- **The exact match** (decision 2 — `attentionPermutesAt` in `packages/runtime/src/runtime/fusion.ts`),
-  on the window from the scan index: (1) a run of `p ≥ 0` nodes directly followed by a fused
-  `attention` (no states field — the states form is another kernel family), f32, one output, where
-  **every** node of the run is a permute the attention may absorb: dims `[0, 2, 1, 3]` on a rank-4
-  f32 tensor, materialised (a permute that aliases its input — an axis of length 1 — costs nothing,
-  and absorbing it would put the copy back on the routes that make it themselves), its output with one
-  use, not a graph output, consumed in the attention's q, k or v slot (never the mask). A run holding
-  anything else does not match at that index, and its tail is tried again from the next one, so the
-  absorbed input permutes are the longest such run that ends at the attention — contiguous, so each
-  re-pointed input lives only across the other absorbed permutes. (2) The output permute: the
-  attention's output has one use, is not a graph output, and that use is the **next** node, a permute
-  of the same kind. (3) At least one permute is absorbed. Anything else leaves every node as it is.
-- **Why the decision needs no route**: `attentionRoute` (`packages/runtime/src/runtime/attention-route.ts`)
-  stays the one decision of which kernels run, and the recipe (`buildAttention` in
-  `packages/runtime/src/runtime/recipe-builders/attention.ts`) honours every flag on **every** route.
-  A route-aware match would have to copy that decision (the device facts of the online kernel, the
-  per-stage eligibility of a8, the score storage) into the fusion pass — the second spelling
-  `attentionRoute`'s module doc forbids — or let a fallback route meet an annotation it cannot honour.
+  absorbed operand re-pointed to the permute's input (name, token-major shape and dtype); its output
+  stays the declared head-major O. The absorbed permutes produce no step. Release bookkeeping stays
+  decision 1's one path, as for the linear prologue: each permute's input trades the permute's use for
+  the attention's, and the absorbed values are never defined. `nodeStepSpan` gives the number of
+  original nodes a node step stands for (the candidate enumeration and the estimate read it).
+- **The gate is the a8 attention seat** (`FusionContext.attentionCompute`: the executor passes
+  `SessionOptions.attentionCompute`, the estimate `EstimateOptions.attentionCompute` — a session knob,
+  no device facts). Only the a8 quantisation reads a token-major operand natively: the token-major
+  `quantize_rows` writes the head-major outputs of "permute → quantize_rows", and one tiled transpose
+  per batch builds Vᵀ from a token-major V in place of "permute → the strided Vᵀ copy". A dense seat
+  (f32 / f16) reads q / k / v as stored, so an absorbed permute would come back as the same strided
+  copy inside the attention step — no dispatch saved — while the token-major input stays live next to
+  its copy for the whole step (estimated for the Wan2.2 DiT, `linearCompute` `"a8"`: the live peak
+  would rise 2,385.1 → 2,663.5 MiB at S 7,920 and 3,610.4 → 4,569.4 MiB at S 27,280). So a dense seat
+  absorbs nothing.
+- **The seat, not the route**: `attentionRoute` (`packages/runtime/src/runtime/attention-route.ts`)
+  stays the one decision of which kernels run. Inside an a8 seat a stage the shape keeps off i8a8 (①QK
+  at D % 4 ≠ 0, ③PV at N % 4 ≠ 0) reads a head-major copy the recipe makes with the absorbed node's own
+  strided permute, into a node temporary (`attentionHeadMajorCopies` in
+  `packages/runtime/src/runtime/recipe-builders/attention.ts`, shared with the estimate), so that
+  stage's work and values are the graph's byte for byte. A route-aware match would have to copy the
+  per-stage eligibility and the online kernel's device facts into the fusion pass — the second
+  spelling `attentionRoute`'s module doc forbids.
 
-  | Route | q / k token-major | V token-major | O token-major |
-  | --- | --- | --- | --- |
-  | online (a8 + `"none"`) | the a8 quantisation reads them (`quantizeRowsBshd*`) | Vᵀ by the tiled transpose (`transpose_tiled`) | the kernel stores it (`:obshd`, `heads` in the uniform) |
-  | three a8 dispatches (S in f32 / f16) | the a8 quantisation reads them | Vᵀ by the tiled transpose | ③PV stores head-major into a node temporary, then the absorbed node's strided permute into the output |
-  | a stage on the dense path (f32 / f16 presets, or ①QK / ③PV the shape keeps off i8a8) | the absorbed node's strided permute into a node temporary, before the first stage | the same | the same as the row above |
+  | Route of an a8 seat | q / k token-major | V token-major |
+  | --- | --- | --- |
+  | online (`"none"`) and the three a8 dispatches (S in f32 / f16) | the a8 quantisation reads them (`quantizeRowsBshd*`) | Vᵀ by the tiled transpose (`transpose_tiled`) |
+  | ①QK kept on f32 by the shape (D % 4 ≠ 0) | the absorbed node's strided permute into a node temporary, before ①QK | Vᵀ by the tiled transpose |
+  | ③PV kept on f32 by the shape (N % 4 ≠ 0) | the a8 quantisation reads them | the absorbed node's strided permute into a node temporary, before ③PV |
 
   The quantisation stays the a8 path's own dispatches (`quantizeAttentionQk` / `quantizeAttentionPv`,
-  shared by the online and the three-dispatch routes), so both routes switch together. The copies the
-  recipe makes (`attentionHeadMajorCopies`) are byte for byte the work the graph did, so the dense
-  routes' values cannot move; on the a8 routes only addresses change (the token-major `quantize_rows`
-  writes the head-major outputs of "permute → quantize_rows", the transpose is a copy, the online
-  store moves each 4·D-byte row), so the values are bit-identical too.
+  shared by the online and the three-dispatch routes), so both routes switch together. Only addresses
+  change (the transpose is a copy), so the values are bit-identical to the permutes as nodes.
+- **The output permute stays a node.** On the three a8 dispatches ③PV stores O head-major, so absorbing
+  the permute after it would only move the same strided copy into the attention step and add an O
+  temporary. On the online route the kernel could store O token-major (one dispatch less, the same live
+  bytes), but the first-fit placement of the transient plan (`planTransients`, ADR
+  [0093](0093-transient-liveness-packing.md) decision 1) turns the removal of that node into a larger
+  backing: the Wan2.2 DiT's region total — what the slot backing allocates — is 888.0 MiB with the
+  permute as a node and 1,042.7 MiB with it absorbed at S 7,920 (3,043.3 / 3,576.1 MiB at S 27,280),
+  the live peak unchanged at 634.2 / 2,169.2 MiB. The output permute stays a node until the transient
+  placement no longer turns its removal into a larger backing.
+- **The exact match** (decision 2 — `attentionPermutesAt` in `packages/runtime/src/runtime/fusion.ts`),
+  on an a8 seat, on the window from the scan index: a run of `p ≥ 1` nodes directly followed by a
+  fused `attention` (no states field — the states form is another kernel family), f32, one output,
+  where **every** node of the run is a permute the attention may absorb: dims `[0, 2, 1, 3]` on a
+  rank-4 f32 tensor, materialised (a permute that aliases its input — an axis of length 1 — costs
+  nothing, and absorbing it would put the copy back on the stages that make it themselves), its output
+  with one use, not a graph output, consumed in the attention's q, k or v slot (never the mask). A run
+  holding anything else does not match at that index, and its tail is tried again from the next one,
+  so the absorbed permutes are the longest such run that ends at the attention — contiguous, so each
+  re-pointed input lives only across the other absorbed permutes. Anything else leaves every node as
+  it is.
 - **Fail loudly**: a node other than a fused attention that carries the annotation throws
   `ExecutionError` in the recipe builder and in the estimate (it would read the re-pointed inputs in
   the wrong layout).
-- **The counter**: `attentionPermute`, once per absorbed permute (up to four per attention), in the
-  public `FusionCounts` (`lastRunFusions`). Counted 2026-10-25 from the distribution graphs (any seat,
-  any `linearCompute`): the Wan2.2 and Wan2.1 DiTs 240 each (q, k, v and O of 60 attentions); anima's
-  DiT 112 (v and O of 56 attentions — its q / k reach the attention through the per-head `rms_norm`
-  and the RoPE); Irodori's backbone 25 (O of 25 attentions — its v permute sits 15–18 nodes before)
-  and its speaker 32 (q, k, v and O of 8); EmbeddingGemma 24 (O); of the series graphs without a
-  gate, gemma4 E2B's full-sequence graph 55 (O of 35 attentions, q of 20 of them) and MiniCPM5 1B's
-  24 (O). The states-form attentions of gemma4's distributions and the decode graphs absorb nothing,
-  nor do the VAE attentions (their operands come from slices). Of the families, only Wan and anima run a8 attention; the others run the dense path, where
-  the absorbed permute is the same strided copy inside the attention step.
-- **The estimate** sees the same decision (`postFusionSteps` maps the node step back over
-  `nodeStepSpan` nodes) and counts the attention step's own temporaries from the same pure function
-  as execution (`attentionHeadMajorCopies`, with `attentionI8a8TempBytes` unchanged).
-- **Memory**: the token-major inputs and the output stay live for the whole attention step. On the
-  online route that is the same live set as before (the token-major inputs replace the permuted
-  copies, O′ replaces O); on the three a8 dispatches one O-sized temporary is added; on a dense route
-  the inputs and O′ are live next to the copies. Estimated for the Wan2.2 DiT (i8 seat, `linearCompute`
-  `"a8"`, the WebGPU workspace of the slot table): live peak 634.2 → 634.2 MiB online, 2,070.6 →
-  2,163.4 MiB on s16, 2,385.1 → 2,756.3 MiB dense at 33 frames (S 7,920). The region total, which the
-  first-fit placement of `planTransients` derives from the live intervals, moved 888.0 → 1,065.9 MiB
-  online, 2,325.1 → 2,256.2 MiB on s16 and 2,570.7 → 2,849.1 MiB dense; at 121 frames (S 27,280)
-  3,043.3 → 3,656.0 MiB online with the live peak unchanged at 2,169.2 MiB. The online growth is
-  placement, not live bytes (the longer intervals of the token-major inputs move a residual buffer
-  behind the FFN's largest buffer in the first region).
+- **The counter**: `attentionPermute`, once per absorbed permute (up to three per attention), in the
+  public `FusionCounts` (`lastRunFusions`). Counted 2026-10-25 from the distribution graphs on the a8
+  attention seat (`packages/e2e/tests/e2e_*_fusion_counts_test.ts`): the Wan2.2 and Wan2.1 DiTs 180
+  each (q, k and v of 60 attentions); anima's DiT 56 (v of 56 attentions — its q / k reach the
+  attention through the per-head `rms_norm` and the RoPE). On their f32 / f16 attention seats they
+  count 0, and so does every other family: only the Wan and anima presets set `attentionCompute`
+  `"a8"`.
+- **The estimate** sees the same decision (`EstimateOptions.attentionCompute` goes into the same
+  `planFusions`; `postFusionSteps` maps the node step back over `nodeStepSpan` nodes) and counts the
+  attention step's own temporaries from the same pure functions as execution
+  (`attentionHeadMajorCopies`, with `attentionI8a8TempBytes` unchanged).
+- **Memory**: where the a8 quantisation reads an operand natively, its token-major input replaces the
+  head-major copy in the live set and the copy step (input and output live together) is gone, so the
+  live peak does not rise; a stage the shape keeps on f32 holds the token-major input next to its copy
+  for the whole step. Estimated (i8 seat, `linearCompute` `"a8"`, 2 GiB − 4 B binding limit; live
+  peak / region total, MiB, with the permutes as nodes → absorbed):
+
+  | DiT, seat | S | live peak | region total |
+  | --- | --- | --- | --- |
+  | Wan2.2, online | 7,920 / 27,280 | 634.2 → 634.2 / 2,169.2 → 2,169.2 | 888.0 → 880.3 / 3,043.3 → 3,016.7 |
+  | Wan2.2, s16 | 7,920 / 27,280 | 2,070.6 → 2,070.6 / 4,173.7 → 4,173.7 | 2,325.1 → 2,163.4 / 5,052.6 → 4,493.4 |
+  | Wan2.1, s16 | 14,040 / 32,760 | 2,064.0 → 2,064.0 / 3,349.0 → 3,349.0 | 2,411.9 → 2,247.8 / 4,161.5 → 3,777.9 |
+  | anima, s16 (v only) | 4,096 / 9,216 | 729.0 → 729.0 / 1,783.7 → 1,783.7 | 880.5 → 896.6 / 2,124.6 → 2,160.6 |
+
+  The region total is first-fit placement over the live intervals, so it can move either way while
+  the live peak stays put: anima's DiT, which absorbs only v, grows by 16.1 / 36.0 MiB (the same on
+  its S-in-f32 a8 seat), the same placement effect as the output permute's.
+  `packages/e2e/tests/e2e_wan_ti2v_attention_permute_estimate_test.ts` holds the Wan2.2 rows: on the
+  online and s16 seats at S 7,920 / 27,280 the region total of the distributed graph is at most that
+  of the same graph with a zero-dispatch reshape between each input permute and its attention.
 - **Measured** (2026-10-25, RTX 3080 Ti, Node 24.22 + Dawn, Vulkan):
-  `packages/runtime/tests/gpu_attention_token_major_kernels_test.ts` compares each new kernel form with
-  the composition it replaces, from the production generators — the token-major `quantize_rows` with
+  `packages/runtime/tests/gpu_attention_token_major_kernels_test.ts` compares each kernel form with the
+  composition it replaces, from the production generators — the token-major `quantize_rows` with
   "strided permute → quantize_rows" (D 64 / 128 / 1024, H 12 / 24, S with tails, B 1 / 2, a zero and a
   NaN row, a clamped grid), the tiled transpose with "the graph's permute → the recipe's strided Vᵀ
-  copy" (tails in both axes, batch 2), the online kernel's token-major store with "head-major store →
-  strided permute" (sg32 and wg, dp4a and the emulated dot, two row windows) — 0 differing words;
+  copy" (tails in both axes, batch 2) — 0 differing words;
   `packages/runtime/tests/gpu_attention_permute_fusion_test.ts` compares Sessions with and without the
-  absorption (a zero-dispatch reshape breaks the match) — bit-identical outputs on the online, the
-  three-dispatch s16, the dense f32 and the mixed a8 route (①QK on f32 at D 14), with 9 → 5, 11 → 8,
-  7 → 7 and 9 → 8 dispatches; `packages/runtime/tests/gpu_estimate_test.ts` checks that the estimate
-  equals the slot table on those routes. Not measured here: other backends (D3D12, Metal), the
-  timings, and the models' per-environment sha256 rows (bit identity predicts them unchanged).
+  absorption (a zero-dispatch reshape breaks the match) — bit-identical outputs on the online route,
+  the three-dispatch s16 route, and the a8 shapes whose ①QK (D 14) or ③PV (N 43) stays on f32, with
+  9 → 6, 11 → 8, 9 → 8 and 9 → 7 dispatches; on the f32 seat nothing is absorbed (7 → 7);
+  `packages/runtime/tests/gpu_estimate_test.ts` checks that the estimate equals the slot table on the
+  four a8 routes. Not measured here: other backends (D3D12, Metal), the timings, and the models'
+  per-environment sha256 rows (bit identity predicts them unchanged).

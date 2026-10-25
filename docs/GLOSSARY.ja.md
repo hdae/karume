@@ -164,7 +164,7 @@
 | fusion | 融合 | 隣接する複数 op を 1 回の GPU 起動へまとめる変換 | — | ADR 0040 |
 | linear prologue △ | linear のプロローグ融合 | a8 の linear が入力を作る elementwise op を自分の量子化（手順 ①）に取り込み、その op の出力を格納しない融合 | — | ADR 0040 追記 2026-10-25 |
 | token-major / head-major △ | トークン順 / ヘッド順（の配置） | attention の被演算子の 2 つの並び。トークン順 `[B, S, H, D]`（射影の出力をそのまま reshape した形）とヘッド順 `[B, H, S, D]`（融合 attention op の宣言形） | — | ADR 0040 追記 2026-10-25 |
-| attention permute absorption △ | attention の permute 吸収 | 融合 attention が直前の q / k / v と直後の出力の `[0, 2, 1, 3]` permute を取り込み、トークン順のまま読み書きする融合（経路を見ずに決め、`attentionPermute` で数える） | — | ADR 0040 追記 2026-10-25 |
+| attention permute absorption △ | attention の permute 吸収 | `attentionCompute: "a8"` のとき、融合 attention が直前の q / k / v の `[0, 2, 1, 3]` permute を取り込み、トークン順のまま読む融合（直後の出力の permute はノードのまま。経路は見ずにこのオプションだけで決め、`attentionPermute` で数える） | — | ADR 0040 追記 2026-10-25 |
 | geometry profile | 幾何プロファイル（会話では「プロファイル」でもよい） | GEMM の幾何を op × 行数バケットごとに決めた静的な表 | — | ADR 0115 |
 | `./tune` (runtime subpath) | tune のサブパス / 掃引の面 | 掃引・生成器・表の直列化と照合を出す `@karume/runtime/tune` | — | ADR 0117 決定 1 / 2 |
 | kernel fingerprint (`provenance.kernels`) | カーネルの指紋 | 保存した表がどのカーネルで測った物かを見分けるハッシュ | — | ADR 0117 決定 4 |
