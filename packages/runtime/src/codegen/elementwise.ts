@@ -387,6 +387,28 @@ const usedHelpers = (value: string): readonly string[] => {
   }
 };
 
+/** The scalar-free unary ops a fused kernel may apply as a prologue (perf-ledger F-4). */
+export type PrologueUnaryOp = "gelu" | "gelu_tanh";
+
+/**
+ * The value expression of a {@link PrologueUnaryOp} on one f32 operand, and the helper functions it
+ * calls (closed over their dependencies, in {@link HELPERS} order).
+ *
+ * MUST: a fused kernel that applies one of these ops takes its text from here, never a copy. The
+ * fused value is bit-identical to the plain elementwise kernel's only while both compile the same
+ * string — the contraction decisions inside the expression are the compiler's, not the
+ * specification's (the reason `adaln-norm.ts` shares the layer_norm text).
+ */
+export const prologueUnaryWgsl = (
+  op: PrologueUnaryOp,
+  operand: string,
+): { readonly value: string; readonly helpers: readonly string[] } => {
+  const value = UNARY_WGSL[op](operand, () => {
+    throw new CodegenError(`${op} takes no scalar operand`);
+  });
+  return { value, helpers: usedHelpers(value) };
+};
+
 /**
  * MUST: every generation parameter baked into the WGSL goes into the key. The workgroup size is
  * baked into `@workgroup_size` and the grid-stride stride expression, so changing the constant

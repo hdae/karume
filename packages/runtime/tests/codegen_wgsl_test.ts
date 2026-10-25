@@ -235,6 +235,7 @@ import {
   quantizeRowsGeometry,
   quantizeRowsKey,
   quantizeRowsParams,
+  quantizeRowsPrologueWgsl,
   quantizeRowsWgsl,
 } from "../src/kernels/quantize-rows.ts";
 import { WEIGHT_STORAGES } from "../src/kernels/weight-storage.ts";
@@ -724,6 +725,10 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["quantize_rows_r256w1.wgsl", quantizeRowsWgsl(quantizeRowsGeometry(4))],
     ["quantize_rows_r4w64.wgsl", quantizeRowsWgsl(quantizeRowsGeometry(256))],
     ["quantize_rows_r2w128.wgsl", quantizeRowsWgsl(quantizeRowsGeometry(512))],
+    // The prologue form (perf-ledger F-4): the Wan2.2 down projection's row (K 14,336 = 14 vec4 per
+    // lane) and the bound's edge (16 per lane). The plain forms above must not move with it.
+    ["quantize_rows_gelu_tanh_reg14.wgsl", quantizeRowsPrologueWgsl("gelu_tanh", 14336)],
+    ["quantize_rows_gelu_tanh_reg16.wgsl", quantizeRowsPrologueWgsl("gelu_tanh", 16384)],
     ["linear_i8a8.wgsl", linearI8a8Wgsl(false, true)],
     ["linear_i8a8_v4.wgsl", linearI8a8Wgsl(true, true)],
     ["linear_i8a8_emu.wgsl", linearI8a8Wgsl(false, false)],

@@ -57,6 +57,7 @@
  *   difference (one reason the E2E tolerances are derived from measurements).
  */
 
+import { type PrologueUnaryOp, prologueUnaryWgsl } from "../codegen/elementwise.ts";
 import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/numerics-wgsl.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
@@ -76,6 +77,13 @@ const F32_TINY = 1.1754943508222875e-38;
  * (the MUST above).
  */
 const INV_ABS_MAX = 1 / QUANTIZE_ROWS_ABS_MAX;
+
+/** The per-token scale from the row's absolute maximum `amax` (the MUSTs above) — shared by every form. */
+const SCALE_WGSL = `select(max(amax * ${INV_ABS_MAX}, ${F32_TINY}), amax, is_nan_bits(amax))`;
+
+/** Rounds a vec4 of `x / s` onto the lattice closed at ±127 (the MUST above) — shared by every form. */
+const latticeWgsl = (v: string): string =>
+  `clamp(round(${v}), vec4<f32>(-${QUANTIZE_ROWS_ABS_MAX}.0), vec4<f32>(${QUANTIZE_ROWS_ABS_MAX}.0))`;
 
 export const QUANTIZE_ROWS_KEY = `quantize_rows:v1:f32>i8:pertoken:wg${QUANTIZE_ROWS_WORKGROUP_SIZE}`;
 
@@ -131,7 +139,7 @@ fn main(
     // select passes it.
     // MUST: **multiplication by 1/127**, not division by 127 (only multiplication is correctly
     // rounded — the MUST above)
-    let s = select(max(amax * ${INV_ABS_MAX}, ${F32_TINY}), amax, is_nan_bits(amax));
+    let s = ${SCALE_WGSL};
     if (lid == 0u) {
       xs[row] = s;
     }
@@ -142,7 +150,7 @@ fn main(
     while (q < quads) {
       let e = base + q * 4u;
       let v = vec4<f32>(x[e], x[e + 1u], x[e + 2u], x[e + 3u]) / s;
-      let r = clamp(round(v), vec4<f32>(-${QUANTIZE_ROWS_ABS_MAX}.0), vec4<f32>(${QUANTIZE_ROWS_ABS_MAX}.0));
+      let r = ${latticeWgsl("v")};
       xq[qbase + q] = pack4xI8(vec4<i32>(r));
       q = q + ${QUANTIZE_ROWS_WORKGROUP_SIZE}u;
     }
@@ -292,7 +300,7 @@ fn main(
     // select passes it.
     // MUST: **multiplication by 1/127**, not division by 127 (only multiplication is correctly
     // rounded — the MUST above)
-    let s = select(max(amax * ${INV_ABS_MAX}, ${F32_TINY}), amax, is_nan_bits(amax));
+    let s = ${SCALE_WGSL};
     if (has_row && lane == 0u) {
       xs[row] = s;
     }
@@ -304,7 +312,7 @@ fn main(
       while (q < quads) {
         let e = base + q * 4u;
         let v = vec4<f32>(x[e], x[e + 1u], x[e + 2u], x[e + 3u]) / s;
-        let r = clamp(round(v), vec4<f32>(-${QUANTIZE_ROWS_ABS_MAX}.0), vec4<f32>(${QUANTIZE_ROWS_ABS_MAX}.0));
+        let r = ${latticeWgsl("v")};
         xq[qbase + q] = pack4xI8(vec4<i32>(r));
         q = q + ${lanesPerRow}u;
       }
@@ -316,3 +324,144 @@ fn main(
   }
 }
 `;
+
+/**
+ * The largest row length of the prologue form ({@link quantizeRowsPrologueWgsl}): 16 vec4 per lane
+ * kept in registers. Longer rows keep the pair "elementwise op → {@link QUANTIZE_ROWS_WGSL}".
+ */
+export const QUANTIZE_ROWS_PROLOGUE_MAX_DIM = 16 * 4 * QUANTIZE_ROWS_WORKGROUP_SIZE;
+
+/** Whether a row of `dim` elements can take the prologue form (`dim % 4 == 0`, within the bound). */
+export const quantizeRowsPrologueEligible = (dim: number): boolean =>
+  Number.isSafeInteger(dim) && dim >= 4 && dim % 4 === 0 && dim <= QUANTIZE_ROWS_PROLOGUE_MAX_DIM;
+
+/** The vec4 values each lane keeps for a row of `dim` elements. */
+const prologueSlots = (dim: number): number => {
+  if (!quantizeRowsPrologueEligible(dim)) {
+    throw new CodegenError(
+      `quantize_rows prologue: dim must be a multiple of 4 in 4..${QUANTIZE_ROWS_PROLOGUE_MAX_DIM} (${dim})`,
+    );
+  }
+  return Math.ceil(dim / 4 / QUANTIZE_ROWS_WORKGROUP_SIZE);
+};
+
+/**
+ * Pipeline key of the prologue form. The slot count is baked into the WGSL (the row length itself
+ * is read from Params), so rows with the same slot count share one pipeline.
+ */
+export const quantizeRowsPrologueKey = (op: PrologueUnaryOp, dim: number): string =>
+  `${QUANTIZE_ROWS_KEY}:${op}:reg${prologueSlots(dim)}`;
+
+/**
+ * **Per-token quantization with an elementwise prologue** (perf-ledger F-4): `y = op(x)` is
+ * computed once per element and quantized exactly as {@link QUANTIZE_ROWS_WGSL} quantizes a stored
+ * `y`, without ever storing the f32 `y`. It is step ① of an a8 linear whose input the fusion pass
+ * folded with its `op` producer (the bindings are the plain form's: Params, x, xq, xs).
+ *
+ * The row is held in registers: lane `lid` keeps the quads `lid + 256·j` (`j` below the slot
+ * count) as named vec4 values, so `x` is read once. One row = one workgroup, grid-stride over rows,
+ * as in the plain form.
+ *
+ * Bit identity with the pair (measured on Vulkan / NVIDIA and D3D12 / NVIDIA — research
+ * 2026-10-25-speed-recon-3080ti §6, 2026-10-25-speed-recon-5070ti §8):
+ * - `y` is {@link prologueUnaryWgsl}'s expression per component, the same string the elementwise
+ *   kernel compiles (its MUST).
+ * - amax is a `nan_max` fold (exact, associative and commutative), so the different element-to-lane
+ *   assignment does not change it; the scale and the lattice are the shared {@link SCALE_WGSL} and
+ *   {@link latticeWgsl}.
+ * - No rounding barrier sits between `y` and the quantization: the next operations are `abs` and
+ *   `y / s` (a multiplication by `rcp(s)` after lowering), so no contraction `a·b+c` spans the
+ *   boundary. WGSL also allows reassociation, so this is a fact measured at adoption, not a
+ *   specification guarantee (the argument for `t` in `adaln-norm.ts`); the per-environment sha256
+ *   rows are the check.
+ *
+ * MUST: only for {@link quantizeRowsPrologueEligible} row lengths — the register count grows with
+ * the slot count.
+ */
+export const quantizeRowsPrologueWgsl = (op: PrologueUnaryOp, dim: number): string => {
+  const slots = prologueSlots(dim);
+  const lanes = QUANTIZE_ROWS_WORKGROUP_SIZE;
+  const valueOf = (j: number): string =>
+    `vec4<f32>(${["x", "y", "z", "w"].map((c) => prologueUnaryWgsl(op, `x${j}.${c}`).value).join(", ")})`;
+  // The prologue's helpers first (in the elementwise generator's order), then what the
+  // quantization needs and the prologue did not bring.
+  const helpers = [...prologueUnaryWgsl(op, "v").helpers];
+  for (const helper of [IS_NAN_BITS_WGSL, NAN_MAX_WGSL]) {
+    if (!helpers.includes(helper)) helpers.push(helper);
+  }
+  const loads = Array.from(
+    { length: slots },
+    (_, j) => `    let q${j} = lid + ${j * lanes}u;
+    var y${j} = vec4<f32>(0.0);
+    if (q${j} < quads) {
+      let x${j} = x[base + q${j}];
+      y${j} = ${valueOf(j)};
+      acc = nan_max(acc, nan_max(nan_max(abs(y${j}.x), abs(y${j}.y)), nan_max(abs(y${j}.z), abs(y${j}.w))));
+    }`,
+  ).join("\n");
+  const stores = Array.from(
+    { length: slots },
+    (_, j) => `    if (q${j} < quads) {
+      let r${j} = ${latticeWgsl(`y${j} / s`)};
+      xq[qbase + q${j}] = pack4xI8(vec4<i32>(r${j}));
+    }`,
+  ).join("\n");
+  return `// karume quantize_rows with a ${op} prologue (per-row per-token symmetric i8 of y = ${op}(x); y is never stored) — the row in registers, ${slots} vec4 per lane
+struct Params {
+  rows: u32,
+  dim: u32,
+}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> x: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> xq: array<u32>;
+@group(0) @binding(3) var<storage, read_write> xs: array<f32>;
+
+${helpers.join("\n\n")}
+
+var<workgroup> scratch: array<f32, ${lanes}>;
+
+@compute @workgroup_size(${lanes})
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid3: vec3<u32>,
+  @builtin(num_workgroups) nwg: vec3<u32>,
+) {
+  let lid = lid3.x;
+  // The caller guarantees dim % 4 == 0 and dim <= ${lanes * 4 * slots} (quantizeRowsPrologueEligible)
+  let quads = params.dim / 4u;
+  var row = wid.x;
+  while (row < params.rows) {
+    let base = row * quads;
+
+    // ① y = ${op}(x) once per element, kept in registers, and the absolute maximum of y (NaN
+    // propagates by a bit-pattern check — plain max swallows it)
+    var acc = 0.0;
+${loads}
+    scratch[lid] = acc;
+    workgroupBarrier();
+    var stride = ${lanes / 2}u;
+    while (stride > 0u) {
+      if (lid < stride) {
+        scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);
+      }
+      workgroupBarrier();
+      stride = stride / 2u;
+    }
+    let amax = scratch[0u];
+    // MUST: **multiplication by 1/127** (the MUST above), and NaN passes through the outer select
+    let s = ${SCALE_WGSL};
+    if (lid == 0u) {
+      xs[row] = s;
+    }
+
+    // ② Quantize the kept quads (the plain form's pass ② on y)
+    let qbase = row * quads;
+${stores}
+
+    // Make sure scratch[0] has been read before the next row overwrites scratch[lid]
+    workgroupBarrier();
+    row = row + nwg.x;
+  }
+}
+`;
+};
