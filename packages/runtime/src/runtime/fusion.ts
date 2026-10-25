@@ -66,12 +66,12 @@
  * so the bookkeeping stays the one path of a plain node. It is tried after the rules at each index
  * and counted as `linearPrologue`.
  *
- * The same kind of fusion lets a fused attention absorb the `[0, 2, 1, 3]` permutes around it
- * (perf-ledger F-3 A4 / F-8 — {@link attentionPermutesAt}): its node step carries
- * {@link AttentionTokenMajor}, its operands and output are re-pointed to the permutes' token-major
- * inputs / output, and the permutes have no step. The decision needs no route — the attention recipe
- * honours the annotation on every route. It is tried after the linear prologue and counted as
- * `attentionPermute` (one per absorbed permute).
+ * The same kind of fusion lets a fused attention on an a8 seat absorb the `[0, 2, 1, 3]` permutes
+ * that feed its q / k / v (perf-ledger F-3 A4 / F-8 — {@link attentionPermutesAt}): its node step
+ * carries {@link AttentionTokenMajor}, its operands are re-pointed to the permutes' token-major
+ * inputs, and the permutes have no step. The decision reads the seat, not the route — the attention
+ * recipe honours the annotation on every route an a8 seat can take. It is tried after the linear
+ * prologue and counted as `attentionPermute` (one per absorbed permute).
  *
  * ## Application order
  *
@@ -345,20 +345,31 @@ const isHeadSwap = (plan: NodePlan, aliases: ReadonlySet<NodePlan>): boolean =>
 
 /**
  * The permutes a fused attention absorbs at `index` (perf-ledger F-3 A4 / F-8): the Wan DiTs project
- * q / k / v token-major (`[B, S, H·D]` reshaped to `[B, S, H, D]`), permute each to head-major
- * `[B, H, S, D]` right before the attention, and permute O back right after it. The attention then
- * reads and writes the token-major tensors itself and the permutes' copies are never materialised.
+ * q / k / v token-major (`[B, S, H·D]` reshaped to `[B, S, H, D]`) and permute each to head-major
+ * `[B, H, S, D]` right before the attention. On an a8 seat the attention then reads the token-major
+ * tensors itself (the a8 quantisation reads q / k token-major and builds Vᵀ from a token-major V),
+ * and the permutes' copies are never materialised.
  *
  * The decision is the fusion pass's, the execution the attention recipe's (the split of the linear
  * prologue): the hit is a plain node step of the attention whose absorbed operands are re-pointed to
- * the permutes' inputs and whose output, with `o`, is the output permute's, annotated with
- * {@link AttentionTokenMajor}. It needs **no route**: the recipe honours the annotation on every
- * route (`buildAttention` in recipe-builders/attention.ts), so whether a8 quantises an operand or a
- * dense kernel reads it never enters this decision.
+ * the permutes' inputs, annotated with {@link AttentionTokenMajor}.
+ *
+ * MUST: accept only on an a8 attention seat ({@link FusionContext.attentionCompute} — the session
+ * knob, no device facts). On a dense seat (f32 / f16) every absorbed permute comes back as the same
+ * strided copy inside the attention step: no dispatch is saved, and the token-major input stays live
+ * next to its copy for the whole step. The gate is the seat, not the route: inside an a8 seat a stage
+ * the shape keeps off i8a8 makes the head-major copy itself (`buildAttention` in
+ * recipe-builders/attention.ts), so `attentionRoute` stays the one decision of which kernels run.
+ * MUST NOT absorb the permute after the attention (O back to token-major). On the three a8 dispatches
+ * ③PV stores O head-major, so the absorbed permute would come back as an O temporary plus the same
+ * strided copy; on the online route the kernel could store O token-major with the live bytes
+ * unchanged, but the first-fit placement of the transient plan (`planTransients`) turns the removal
+ * of that node into a larger backing (ADR 0040 addendum of 2026-10-25). The output permute stays a
+ * node until the placement no longer does so.
  *
  * Accepted only on an exact match (ADR 0040 decision 2). The window is `nodes[index]` onwards:
  *
- * 1. A run of `p ≥ 0` nodes, **every one** a permute an attention may absorb ({@link isHeadSwap}),
+ * 1. A run of `p ≥ 1` nodes, **every one** a permute an attention may absorb ({@link isHeadSwap}),
  *    directly followed by an `attention` without a states field (the fused form — the states form is
  *    another kernel family), f32, with one output.
  * 2. Each permute's output has exactly one use and is not a graph output ({@link internalsArePrivate}),
@@ -366,9 +377,6 @@ const isHeadSwap = (plan: NodePlan, aliases: ReadonlySet<NodePlan>): boolean =>
  *    `undefined` here; its tail is tried again from the next index, so the absorbed permutes are the
  *    longest such run that ends at the attention — contiguous, so each re-pointed input lives only
  *    across the other absorbed permutes.
- * 3. The output permute (`o`): the attention's output has exactly one use and is not a graph output,
- *    and that use is the **next** node, a permute it may absorb.
- * 4. At least one permute is absorbed (otherwise both sides stay as they are).
  *
  * Anything else returns `undefined` and every node stays as it is (byte-identical behaviour).
  */
@@ -384,6 +392,7 @@ const attentionPermutesAt = (
       readonly advance: number;
     }
   | undefined => {
+  if (context.attentionCompute !== "a8") return undefined;
   let at = index;
   while (at - index < ATTENTION_OPERANDS.length && nodes[at]?.node.op === "permute") at += 1;
   const attention = nodes[at];
@@ -399,15 +408,7 @@ const attentionPermutesAt = (
     if (slot < 0 || slot >= ATTENTION_OPERANDS.length) return undefined;
     sources.set(slot, permute);
   }
-  const after = nodes[at + 1];
-  const output =
-    after !== undefined &&
-    isHeadSwap(after, aliases) &&
-    after.node.ins[0] === attention.outputs[0].name &&
-    internalsArePrivate([attention, after], context)
-      ? after
-      : undefined;
-  if (sources.size === 0 && output === undefined) return undefined;
+  if (sources.size === 0) return undefined;
   // MUST: a re-pointed operand is the permute's input, which holds the operand's elements with the
   // two middle axes swapped (the permute's shape rule — a mismatch is a broken plan, not a non-match).
   const swapped = (shape: readonly number[]): readonly number[] =>
@@ -420,26 +421,15 @@ const attentionPermutesAt = (
       );
     }
   }
-  if (
-    output !== undefined &&
-    !sameShape(swapped(attention.outputs[0].shape), output.outputs[0].shape)
-  ) {
-    throw new ExecutionError(
-      `attention permute: output [${output.outputs[0].shape.join(",")}] is not the head swap of` +
-        ` the attention's [${attention.outputs[0].shape.join(",")}]`,
-    );
-  }
   const tokenMajor: AttentionTokenMajor = {
     q: sources.has(0),
     k: sources.has(1),
     v: sources.has(2),
-    o: output !== undefined,
   };
   const operand = <T>(slot: number, own: T, absorbed: (permute: NodePlan) => T): T => {
     const permute = sources.get(slot);
     return permute === undefined ? own : absorbed(permute);
   };
-  const outputs = output === undefined ? attention.outputs : output.outputs;
   return {
     plan: {
       ...attention,
@@ -448,7 +438,6 @@ const attentionPermutesAt = (
         ins: attention.node.ins.map((name, slot) =>
           operand(slot, name, (permute) => permute.node.ins[0]),
         ),
-        outs: outputs.map((out) => out.name),
       },
       inputShapes: attention.inputShapes.map((shape, slot) =>
         operand(slot, shape, (permute) => permute.inputShapes[0]),
@@ -456,10 +445,9 @@ const attentionPermutesAt = (
       inputDtypes: attention.inputDtypes.map((dtype, slot) =>
         operand(slot, dtype, (permute) => permute.inputDtypes[0]),
       ),
-      outputs,
     },
     tokenMajor,
-    advance: at - index + 1 + (output === undefined ? 0 : 1),
+    advance: at - index + 1,
   };
 };
 

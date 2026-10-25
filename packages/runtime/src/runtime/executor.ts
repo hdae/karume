@@ -2358,6 +2358,7 @@ export class Session {
       packedStaticQuantize: this.#state.packedStaticQuantize,
       linearGemvReduce: this.#state.linearGemvReduce,
       linearCompute: this.#state.linearCompute,
+      attentionCompute: this.#state.attentionCompute,
       ...(weightLayouts === undefined ? {} : { weightLayouts }),
       rmsNormReduce: this.#state.rmsNormReduce,
       outputNames: this.#state.outputNames,

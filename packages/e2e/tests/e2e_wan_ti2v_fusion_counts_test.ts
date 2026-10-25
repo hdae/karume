@@ -68,9 +68,10 @@ const solvedShapes = (
  *   and after the FFN of the 30 blocks (the cross-attention residual has no gate).
  * - **silu 4**: the time-embedding MLP's two SiLUs, run once per timestep stream (generation and
  *   condition — ADR 0121 decision 3).
- * - **attentionPermute 240**, whatever linearCompute is (counted 2026-10-25): each of the 60
- *   attentions (30 self, 30 cross) absorbs the `[0, 2, 1, 3]` permutes of q, k and v right before it
- *   and of O right after it (perf-ledger F-3 A4 / F-8 — the decision needs no route).
+ * - **attentionPermute 180, under `attentionCompute: "a8"` only** (counted 2026-10-25): each of
+ *   the 60 attentions (30 self, 30 cross) absorbs the `[0, 2, 1, 3]` permutes of q, k and v right
+ *   before it (perf-ledger F-3 A4 / F-8); the permute of O after it stays a node. The f32 attention
+ *   seat absorbs nothing.
  * - **linearPrologue 31, under `linearCompute: "a8"` only** (counted 2026-10-25): the gelu_tanh
  *   folded into the step ① of the i8 linear that reads it (perf-ledger F-4) — the FFN down
  *   projection of the 30 blocks (K 14,336) and the text embedder's second linear (K 3,072). The
@@ -82,24 +83,23 @@ const solvedShapes = (
  * that notices.
  */
 test.skipIf(!WAN22_AVAILABLE)(
-  "the real Wan2.2 DiT grabs rope 60 / adaln 61 / gatedResidual 60 / silu 4 / attentionPermute 240 per run (plus linearPrologue 31 under a8), and the VAE chunk graphs keep their counts",
+  "the real Wan2.2 DiT grabs rope 60 / adaln 61 / gatedResidual 60 / silu 4 per run (plus linearPrologue 31 under a8, and attentionPermute 180 under the a8 attention seat), and the VAE chunk graphs keep their counts",
   async () => {
     const transformer = await readWan22Graph("transformer", "i8");
     for (const sequence of [192, 7920]) {
       const shapes = solvedShapes(transformer, sequence);
-      const counts = {
-        ...NONE,
-        silu: 4,
-        rope: 60,
-        adaln: 61,
-        gatedResidual: 60,
-        attentionPermute: 240,
-      };
+      const counts = { ...NONE, silu: 4, rope: 60, adaln: 61, gatedResidual: 60 };
       assertEquals(fusionCounts(transformer, shapes), counts, `transformer S=${sequence}`);
       assertEquals(
         fusionCounts(transformer, shapes, undefined, false, false, false, "a8"),
         { ...counts, linearPrologue: 31 },
         `transformer S=${sequence} a8`,
+      );
+      // The attn8 presets (s16 and online): linearCompute and attentionCompute "a8".
+      assertEquals(
+        fusionCounts(transformer, shapes, undefined, false, false, false, "a8", "a8"),
+        { ...counts, linearPrologue: 31, attentionPermute: 180 },
+        `transformer S=${sequence} a8 attention`,
       );
     }
     // The VAE graphs have none of the DiT forms: SiLU everywhere, the spatial nearest ×2 in the

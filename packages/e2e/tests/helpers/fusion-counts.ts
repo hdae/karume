@@ -103,6 +103,9 @@ export const fusionCounts = (
   // The a8 Session's linear prologue (perf-ledger F-4) fires only under "a8": with the default the
   // gate cannot see it at all.
   linearCompute: "f32" | "a8" = "f32",
+  // Likewise the attention's absorbed permutes (perf-ledger F-3 / F-8) fire only on the a8
+  // attention seat.
+  attentionCompute: "f32" | "a8" = "f32",
 ): FusionCounts =>
   planFusions(planGraph(graph, bindSymbols(graph, inputShapes), stateShapes).nodes, {
     useCounts: countUses(graph),
@@ -111,6 +114,7 @@ export const fusionCounts = (
     packedStaticQuantize,
     linearGemvReduce: "parallel",
     linearCompute,
+    attentionCompute,
     weightLayouts: new Map(
       [...planWeightResidency(graph)].flatMap(([name, weight]): [string, FusionWeightLayout][] => {
         // group 長は席が持つ（合流後の宣言からは常駐プランナが導く — 同じ値を 2 度導かない）。

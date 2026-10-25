@@ -29,17 +29,12 @@ if (!GEMMA_AVAILABLE) {
  *
  * identityExpand は **0**。SDPA を保存した資産（ADR 0023 改訂 — mask 付き attention）では
  * 分解由来の恒等 expand が IR ごと消える（決定 6 と同じ機序。分解資産の頃は 96 だった）。
- *
- * attentionPermute 24 (counted 2026-10-25): each of the 24 masked fused attentions absorbs the
- * `[0, 2, 1, 3]` permute of O right after it (perf-ledger F-3 A4). Its q / k come from the RoPE, so
- * no input permute is adjacent; the attention runs on the dense f32 route, where the absorbed
- * permute is the same strided copy inside the attention step.
  */
 test.skipIf(!GEMMA_AVAILABLE)(
-  "実資産の EmbeddingGemma は rope 48（head 幅 256・窓内 passthrough 込み）/ attentionPermute 24 を掴む",
+  "実資産の EmbeddingGemma は rope 48（head 幅 256・窓内 passthrough 込み）を掴む",
   async () => {
     const graph = await readContainerGraph(GEMMA_MODEL.part0, GEMMA_MODEL.graph);
-    const expected: FusionCounts = { ...NONE, rope: 48, attentionPermute: 24 };
+    const expected: FusionCounts = { ...NONE, rope: 48 };
     // ヒット数は T に依存しない（Tmax = 512 の内側で 2 点）。
     for (const sequence of [12, 318]) {
       assertEquals(

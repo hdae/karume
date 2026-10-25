@@ -412,10 +412,11 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * `permute ×3 → attention → permute` on token-major q / k / v `[B, S, H, D]` (the Wan DiT form): every
- * permute is absorbed by the attention (perf-ledger F-3 A4 / F-8), so the workspace is the
- * attention step's alone — its output, the token-major inputs it now reads and the temporaries of
- * its route (the head-major copies of `attentionHeadMajorCopies` included).
+ * `permute ×3 → attention → permute` on token-major q / k / v `[B, S, H, D]` (the Wan DiT form): on an
+ * a8 seat the three input permutes are absorbed by the attention (perf-ledger F-3 A4 / F-8), so the
+ * workspace is the attention step's — its output, the token-major inputs it now reads and the
+ * temporaries of its route (the head-major copies of `attentionHeadMajorCopies` included) — and the
+ * output permute's.
  */
 const permutedAttentionModel = (shape: {
   readonly b: number;
@@ -457,22 +458,26 @@ const permutedAttentionModel = (shape: {
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "an attention that absorbed its permutes (perf-ledger F-3 / F-8) has the workspace of its slot table on the dense, mixed a8, s16 and online routes (real GPU)",
+  "an attention that absorbed its permutes (perf-ledger F-3 / F-8) has the workspace of its slot table on the a8 routes: online, s16 and either stage on f32 (real GPU)",
   async () => {
     const variants: readonly {
       readonly name: string;
       readonly options: SessionOptions;
       readonly shape: Parameters<typeof permutedAttentionModel>[0];
     }[] = [
-      // every permute made by the attention itself (four head-major copies)
-      { name: "dense f32", options: {}, shape: { b: 2, h: 3, s: 37, n: 44, d: 16 } },
-      // ①QK on f32 (D % 4 != 0): copies of q / k, the transposed V, the O copy
+      // ①QK on f32 (D % 4 != 0): copies of q / k, the transposed V
       {
         name: "a8, ①QK on f32",
         options: { attentionCompute: "a8" },
         shape: { b: 2, h: 3, s: 37, n: 44, d: 14 },
       },
-      // the quantisation reads q / k / v token-major; only O goes through a copy
+      // ③PV on f32 (N % 4 != 0): the token-major q / k quantised, a copy of V
+      {
+        name: "a8, ③PV on f32",
+        options: { attentionCompute: "a8" },
+        shape: { b: 2, h: 3, s: 37, n: 43, d: 16 },
+      },
+      // the quantisation reads q / k / v token-major; no copy
       {
         name: "a8 + s16",
         options: { attentionCompute: "a8", attentionScoreStorage: "f16" },
@@ -508,7 +513,7 @@ test.skipIf(!GPU_AVAILABLE)(
           const diagnostics = session.diagnostics();
           assertEquals(
             diagnostics.lastRunFusions?.attentionPermute,
-            4,
+            3,
             `${variant.name}: absorbed`,
           );
           assertEquals(

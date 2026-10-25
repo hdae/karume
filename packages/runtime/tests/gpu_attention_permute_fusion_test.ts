@@ -1,12 +1,14 @@
-// A fused attention that absorbs the [0, 2, 1, 3] permutes around it (perf-ledger F-3 A4 / F-8 —
-// `attentionPermutesAt` of src/runtime/fusion.ts, honoured by `buildAttention` on every route): bit
-// parity with the same graph where the permutes stay nodes, the counter, and the dispatches each
-// route saves, on the online route, the three-dispatch a8 route with S in f16 (s16), the dense f32
-// route and the mixed a8 route whose ①QK falls back to f32 (D % 4 != 0).
+// A fused attention on an a8 seat that absorbs the [0, 2, 1, 3] permutes of its q / k / v
+// (perf-ledger F-3 A4 / F-8 — `attentionPermutesAt` of src/runtime/fusion.ts, honoured by
+// `buildAttention` on every route an a8 seat can take): bit parity with the same graph where the
+// permutes stay nodes, the counter, and the dispatches each route saves, on the online route, the
+// three-dispatch a8 route with S in f16 (s16), and the two a8 shapes whose stage falls back to f32
+// (①QK at D % 4 != 0, ③PV at N % 4 != 0 — the head-major copy path). The f32 seat absorbs nothing.
+// The output permute stays a node on every route.
 //
-// The reference is the same graph with a zero-dispatch reshape between each permute and the
-// attention and between the attention and the output permute: the values and the physical kernels
-// stay the graph's, only the exact match stops matching.
+// The reference is the same graph with a zero-dispatch reshape between each input permute and the
+// attention: the values and the physical kernels stay the graph's, only the exact match stops
+// matching.
 
 import { describe, it } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
@@ -34,7 +36,7 @@ type Shape = {
 
 /**
  * Token-major q / k / v → permute to head-major → attention → permute O back (the Wan DiT form).
- * `interpose` puts a zero-dispatch reshape after each input permute and after the attention.
+ * `interpose` puts a zero-dispatch reshape after each input permute.
  */
 const permutedAttentionGraph = (shape: Shape, interpose: boolean): DeclarationJson => {
   const { b, h, s, n, d } = shape;
@@ -64,8 +66,7 @@ const permutedAttentionGraph = (shape: Shape, interpose: boolean): DeclarationJs
   const ins = (["q", "k", "v"] as const).map((operand) => read(operand, head[operand]));
   const scale = Math.fround(1 / Math.sqrt(d));
   nodes.push({ op: "attention", ins, outs: ["o"], attrs: { scale } });
-  const o = read("o", [b, h, s, d]);
-  nodes.push({ op: "permute", ins: [o], outs: ["ot"], attrs: { dims: [0, 2, 1, 3] } });
+  nodes.push({ op: "permute", ins: ["o"], outs: ["ot"], attrs: { dims: [0, 2, 1, 3] } });
   return {
     format: "karume-ir",
     version: 2,
@@ -158,6 +159,8 @@ type Route = {
   readonly name: string;
   readonly options: SessionOptions;
   readonly shape: Shape;
+  /** The attentionPermute count of the graph without the reshapes. */
+  readonly absorbedPermutes: number;
   /** The census of the absorbed graph. */
   readonly absorbed: Dispatches;
   /** The census of the reference (the permutes as nodes). */
@@ -168,49 +171,62 @@ const WAN_LIKE: Shape = { b: 2, h: 3, s: 150, n: 200, d: 128 };
 
 const ROUTES: readonly Route[] = [
   {
-    // a8 + "none": q / k read token-major by the quantisation, Vᵀ by the tiled transpose, O
-    // stored token-major — no strided copy left. The reference: the three input permutes, the
+    // a8 + "none": q / k read token-major by the quantisation, Vᵀ by the tiled transpose; the one
+    // strided copy left is the output permute node. The reference: the three input permutes, the
     // strided Vᵀ, the output permute.
     name: "online",
     options: { attentionCompute: "a8", attentionScoreStorage: "none" },
     shape: WAN_LIKE,
-    absorbed: { strided: 0, transpose: 1, quantizeBshd: 2, quantizeRows: 1, total: 5 },
+    absorbedPermutes: 3,
+    absorbed: { strided: 1, transpose: 1, quantizeBshd: 2, quantizeRows: 1, total: 6 },
     reference: { strided: 5, transpose: 0, quantizeBshd: 0, quantizeRows: 3, total: 9 },
   },
   {
-    // a8 + S in f16 (the three dispatches): the same quantisation; ③PV writes a head-major O
-    // temporary that the output permute's copy moves into the output.
+    // a8 + S in f16 (the three dispatches): the same quantisation, ③PV writes O head-major for the
+    // output permute node.
     name: "three-dispatch s16",
     options: { attentionCompute: "a8", attentionScoreStorage: "f16" },
     shape: WAN_LIKE,
+    absorbedPermutes: 3,
     absorbed: { strided: 1, transpose: 1, quantizeBshd: 2, quantizeRows: 1, total: 8 },
     reference: { strided: 5, transpose: 0, quantizeBshd: 0, quantizeRows: 3, total: 11 },
   },
   {
-    // The f32 reference preset: every absorbed permute is made by the attention itself — the
-    // same four copies, the same dispatch count.
-    name: "dense f32",
-    options: {},
-    shape: WAN_LIKE,
-    absorbed: { strided: 4, transpose: 0, quantizeBshd: 0, quantizeRows: 0, total: 7 },
-    reference: { strided: 4, transpose: 0, quantizeBshd: 0, quantizeRows: 0, total: 7 },
-  },
-  {
     // a8 with D = 14 (D % 4 != 0): ①QK falls back to f32 and reads head-major copies of q / k,
-    // ③PV stays i8a8 and transposes the token-major V; O goes through the temporary.
+    // ③PV stays i8a8 and transposes the token-major V.
     name: "a8 with ①QK on f32 (D = 14)",
     options: { attentionCompute: "a8" },
     shape: { b: 2, h: 3, s: 37, n: 44, d: 14 },
+    absorbedPermutes: 3,
     absorbed: { strided: 3, transpose: 1, quantizeBshd: 0, quantizeRows: 1, total: 8 },
     reference: { strided: 5, transpose: 0, quantizeBshd: 0, quantizeRows: 1, total: 9 },
+  },
+  {
+    // a8 with N = 43 (N % 4 != 0): ③PV falls back to f32 and reads a head-major copy of V, ①QK
+    // stays i8a8 and quantises the token-major q / k.
+    name: "a8 with ③PV on f32 (N = 43)",
+    options: { attentionCompute: "a8" },
+    shape: { b: 2, h: 3, s: 37, n: 43, d: 16 },
+    absorbedPermutes: 3,
+    absorbed: { strided: 2, transpose: 0, quantizeBshd: 2, quantizeRows: 0, total: 7 },
+    reference: { strided: 4, transpose: 0, quantizeBshd: 0, quantizeRows: 2, total: 9 },
+  },
+  {
+    // The f32 seat absorbs nothing: both graphs run the four permutes as nodes.
+    name: "f32 seat",
+    options: {},
+    shape: WAN_LIKE,
+    absorbedPermutes: 0,
+    absorbed: { strided: 4, transpose: 0, quantizeBshd: 0, quantizeRows: 0, total: 7 },
+    reference: { strided: 4, transpose: 0, quantizeBshd: 0, quantizeRows: 0, total: 7 },
   },
 ];
 
 describe.skipIf(!GPU_AVAILABLE)(
-  "a fused attention that absorbs its permutes (perf-ledger F-3 / F-8)",
+  "a fused attention that absorbs the permutes of its q / k / v (perf-ledger F-3 / F-8)",
   () => {
     for (const route of ROUTES) {
-      it(`${route.name}: bit-identical to the permutes as nodes, attentionPermute 4, and the route's own dispatches`, async (context) => {
+      it(`${route.name}: bit-identical to the permutes as nodes, attentionPermute ${route.absorbedPermutes}, and the route's own dispatches`, async (context) => {
         const gpu = await acquireGpu({ subgroups: "available" });
         try {
           const { d, n } = route.shape;
@@ -229,7 +245,11 @@ describe.skipIf(!GPU_AVAILABLE)(
           }
           const absorbed = await runGraph(gpu, route.shape, false, route.options);
           const reference = await runGraph(gpu, route.shape, true, route.options);
-          assertEquals(absorbed.absorbed, 4, `${route.name}: absorbed counter`);
+          assertEquals(
+            absorbed.absorbed,
+            route.absorbedPermutes,
+            `${route.name}: absorbed counter`,
+          );
           assertEquals(reference.absorbed, 0, `${route.name}: reference counter`);
           assert(new Set(reference.output).size > 1, `${route.name}: the output is constant`);
           assertSameWords(
@@ -251,10 +271,8 @@ describe.skipIf(!GPU_AVAILABLE)(
           );
           if (route.options.attentionScoreStorage === "none") {
             assert(
-              absorbed.census.some(
-                (row) => row.key.startsWith("attention_online:") && row.key.endsWith(":obshd"),
-              ),
-              `${route.name}: the online kernel stores O token-major — ${keys(absorbed.census)}`,
+              absorbed.census.some((row) => row.key.startsWith("attention_online:")),
+              `${route.name}: the online kernel runs — ${keys(absorbed.census)}`,
             );
           }
           console.log(

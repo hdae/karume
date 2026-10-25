@@ -335,7 +335,7 @@ test("a linear with a folded producer (perf-ledger F-4) is a grabbed pair: no wi
   ]);
 });
 
-test("an attention that absorbed its permutes (perf-ledger F-3 / F-8) is a grabbed window: no window crosses it, and the node index advances by its five nodes", () => {
+test("an attention that absorbed its permutes (perf-ledger F-3 / F-8) is a grabbed window: no window crosses it, and the node index advances by its four nodes (the output permute stays a plain node)", () => {
   const dtype = "f32";
   const token = [1, 5, 2, 8];
   const head = [1, 2, 5, 8];
@@ -371,10 +371,14 @@ test("an attention that absorbed its permutes (perf-ledger F-3 / F-8) is a grabb
     ],
   };
   const { nodes, context } = plan(graph, { x: token, kt: token, vt: token });
-  const fused = planFusions(nodes, context);
-  assertEquals(fused.counts.attentionPermute, 4, "precondition: the permutes are absorbed");
-  assertEquals(outline(enumerateUnfusedWindows(fused.steps, context, 3)), [
+  const a8: Parameters<typeof planFusions>[1] = { ...context, attentionCompute: "a8" };
+  const fused = planFusions(nodes, a8);
+  assertEquals(fused.counts.attentionPermute, 3, "precondition: the input permutes are absorbed");
+  // The output permute (node 6) opens the next run of plain nodes.
+  assertEquals(outline(enumerateUnfusedWindows(fused.steps, a8, 3)), [
     "neg,neg@0+2=qt",
+    "permute,neg@6+2=c",
+    "permute,neg,neg@6+3=d",
     "neg,neg@7+2=d",
   ]);
 });

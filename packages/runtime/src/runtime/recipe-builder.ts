@@ -591,7 +591,7 @@ export class RecipeBuilder {
         `${step.node.op}: carries a ${prologue.op} prologue (perf-ledger F-4), which only a linear executes`,
       );
     }
-    // MUST: only a fused attention (no states field) reads and writes token-major operands. Any other
+    // MUST: only a fused attention (no states field) reads token-major operands. Any other
     // node would read the re-pointed inputs in the wrong layout — a silent wrong value, so it fails
     // loudly.
     if (

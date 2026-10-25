@@ -121,12 +121,9 @@ test.skipIf(!IRODORI_AVAILABLE)("実資産の Irodori 条件経路と codec の�
   // The backbone (ModernBERT-ja, 25 layers) is the only half-split RoPE: 25 layers × q / k = 50.
   // It is the counterpart of Irodori's own blocks (dit / speaker — the pair form): **if only one
   // side drops out, this tells which spelling changed**.
-  // attentionPermute 25 (counted 2026-10-25): each layer's fused attention absorbs the
-  // `[0, 2, 1, 3]` permute of O right after it (perf-ledger F-3 A4); its q / k come from the RoPE
-  // and its v permute sits 15–18 nodes before it, so no input permute is adjacent.
   assertEquals(
     fusionCounts(await readIrodoriGraph("backbone"), { input_ids: [1, 256] }),
-    { ...NONE, rope: 50, attentionPermute: 25 },
+    { ...NONE, rope: 50 },
     "backbone",
   );
   assertEquals(
@@ -142,12 +139,9 @@ test.skipIf(!IRODORI_AVAILABLE)("実資産の Irodori 条件経路と codec の�
   // speaker has 8 blocks (silu 8 + 8 gates). Its RoPE is the DiT's pair form on all 12 heads:
   // 8 blocks × q / k = 16 sites, of which the first use of the tables stays plain (its two
   // sym_prefix_slices sit inside the window) — 15.
-  // attentionPermute 32 (counted 2026-10-25): each of the 8 fused attentions absorbs the
-  // `[0, 2, 1, 3]` permutes of q, k and v right before it and of O right after it (perf-ledger F-3
-  // A4 / F-8 — the Wan DiT form).
   assertEquals(
     fusionCounts(await readIrodoriGraph("speaker"), { latent: [1, 750, 128] }),
-    { ...NONE, silu: 8, rope: 15, attentionPermute: 32 },
+    { ...NONE, silu: 8, rope: 15 },
     "speaker",
   );
   assertEquals(
