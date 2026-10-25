@@ -241,10 +241,12 @@ const packedRole = (
  *
  * MUST: an op enters here only once its fused form (`quantizeRowsPrologueWgsl` in
  * kernels/quantize-rows.ts) has been measured bit-identical to the pair "elementwise op →
- * quantize_rows" (ADR 0040 decision 2). The erf `gelu` has the kernel text (`PrologueUnaryOp`) but no
- * measurement yet; adding it is this one edit plus its tests.
+ * quantize_rows" (ADR 0040 decision 2). Both entries were measured so (the ADR 0040 addendum of
+ * 2026-10-25 records each): `gelu_tanh` (the Wan DiTs' FFN) and the erf `gelu` (anima's DiT FFN,
+ * DeBERTa's intermediate), with 0 differing words in `xq` and `xs` on Vulkan / NVIDIA. A new
+ * {@link PrologueUnaryOp} enters with its own measurement and tests.
  */
-export const LINEAR_PROLOGUE_OPS: readonly PrologueUnaryOp[] = ["gelu_tanh"];
+export const LINEAR_PROLOGUE_OPS: readonly PrologueUnaryOp[] = ["gelu_tanh", "gelu"];
 
 /**
  * The linear prologue (perf-ledger F-4) at `index`: an elementwise {@link LINEAR_PROLOGUE_OPS} node

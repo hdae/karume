@@ -1,15 +1,16 @@
-// gelu_tanh folded into the step ① of the a8 linear that reads it (perf-ledger F-4 — the linear
-// prologue of src/runtime/fusion.ts, executed by `buildLinearI8a8`): bit parity with the unfused
-// pair on the same backend, the counter, and the dispatch reduction, for both integer dot forms.
+// gelu_tanh and the erf gelu folded into the step ① of the a8 linear that reads them (perf-ledger
+// F-4 — the linear prologue of src/runtime/fusion.ts, executed by `buildLinearI8a8`): bit parity
+// with the unfused pair on the same backend, the counter, and the dispatch reduction, for both
+// integer dot forms.
 //
-// The fused Session never stores `gelu_tanh(x)`; its quantize reads `x` and applies the op in
+// The fused Session never stores `op(x)`; its quantize reads `x` and applies the op in
 // registers. The reference is the same graph with a zero-dispatch reshape between the two nodes:
 // the values and the physical kernels stay the production pair, only the exact match stops
 // matching.
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
-import { elementwiseKey } from "../src/codegen/elementwise.ts";
+import { elementwiseKey, type PrologueUnaryOp } from "../src/codegen/elementwise.ts";
 import { perChannelGroupSize } from "../src/format/container/codecs.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { linearI8a8Key, linearI8a8UsesVec4 } from "../src/kernels/linear-i8a8.ts";
@@ -37,10 +38,11 @@ import {
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
 /**
- * `y = linear(gelu_tanh(x), w, b)` with `w` resident as i8. `interpose = true` puts a zero-dispatch
- * reshape on the gelu output (the unfused reference on the same backend).
+ * `y = linear(op(x), w, b)` with `w` resident as i8. `interpose = true` puts a zero-dispatch
+ * reshape on the op's output (the unfused reference on the same backend).
  */
 const geluLinearGraph = (
+  op: PrologueUnaryOp,
   rows: number,
   k: number,
   n: number,
@@ -53,7 +55,7 @@ const geluLinearGraph = (
     g: { dtype: "f32", shape: row },
     y: { dtype: "f32", shape: [1, rows, n] },
   };
-  const nodes: DeclarationJson["nodes"] = [{ op: "gelu_tanh", ins: ["x"], outs: ["g"], attrs: {} }];
+  const nodes: DeclarationJson["nodes"] = [{ op, ins: ["x"], outs: ["g"], attrs: {} }];
   if (interpose) {
     values.g_alias = { dtype: "f32", shape: row };
     nodes.push({ op: "reshape", ins: ["g"], outs: ["g_alias"], attrs: {} });
@@ -120,8 +122,9 @@ const assertFloatParity = (actual: Uint32Array, expected: Uint32Array, label: st
 };
 
 /**
- * Activations of the DiT's pre-gelu magnitude (both signs, a few beyond the tanh saturation at
- * |x| ≳ 10), one all-zero row and one row with a NaN (its output row is NaN in both forms).
+ * Activations of the DiT's pre-gelu magnitude (both signs, up to |x| ≈ 14.7: past the point where
+ * both ops saturate to x and to −0), one all-zero row and one row with a NaN (its output row is NaN
+ * in both forms).
  */
 const activations = (rows: number, k: number): Tensor => {
   const x = fill([1, rows, k], (i) => Math.sin(i * 0.37) * 3.1 + ((i % 101) - 50) / 4.3);
@@ -130,15 +133,23 @@ const activations = (rows: number, k: number): Tensor => {
   return x;
 };
 
-/** (rows, K, N): a remainder row length, Wan2.2's text embedder (M 512 → 300 here), the FFN down projection. */
+/**
+ * (rows, K, N): a remainder row length, Wan2.2's text embedder (M 512 → 300 here), DeBERTa's
+ * intermediate (K 4096), anima's FFN down projection (K 8192), Wan2.2's FFN down projection.
+ */
 const SHAPES: readonly (readonly [number, number, number])[] = [
   [7, 1028, 68],
   [300, 3072, 16],
+  [11, 4096, 24],
+  [9, 8192, 16],
   [5, 14336, 8],
 ];
 
+/** The ops the fusion pass folds into the linear's step ① (`LINEAR_PROLOGUE_OPS`). */
+const OPS = ["gelu_tanh", "gelu"] as const satisfies readonly PrologueUnaryOp[];
+
 test.skipIf(!GPU_AVAILABLE)(
-  "the gelu_tanh prologue of an a8 linear matches the unfused pair bit for bit (finite) / by NaN class, counts linearPrologue and drops one dispatch, for dp4a and the emulated dot (real GPU)",
+  "the gelu_tanh / erf gelu prologue of an a8 linear matches the unfused pair bit for bit (finite) / by NaN class, counts linearPrologue and drops one dispatch, for dp4a and the emulated dot (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const profile = deviceGeometryProfile(gpu);
@@ -146,18 +157,20 @@ test.skipIf(!GPU_AVAILABLE)(
       for (const [rows, k, n] of SHAPES) {
         const tensors = weightTensors(k, n);
         const x = activations(rows, k);
-        for (const dot of ["dp4a", "emu"] satisfies I8a8Dot[]) {
-          const label = `rows=${rows} K=${k} N=${n} ${dot}`;
+        for (const [op, dot] of OPS.flatMap((op) =>
+          (["dp4a", "emu"] satisfies I8a8Dot[]).map((dot) => [op, dot] as const),
+        )) {
+          const label = `${op} rows=${rows} K=${k} N=${n} ${dot}`;
           const options = { linearCompute: "a8", [I8A8_DOT]: dot } as const;
           const fused = await createSessionFromContainer(
             gpu,
-            await openModelBytes(geluLinearGraph(rows, k, n, false), tensors),
+            await openModelBytes(geluLinearGraph(op, rows, k, n, false), tensors),
             GRAPH_NAME,
             options,
           );
           const primitive = await createSessionFromContainer(
             gpu,
-            await openModelBytes(geluLinearGraph(rows, k, n, true), tensors),
+            await openModelBytes(geluLinearGraph(op, rows, k, n, true), tensors),
             GRAPH_NAME,
             options,
           );
@@ -176,7 +189,7 @@ test.skipIf(!GPU_AVAILABLE)(
             assertEquals(
               primitive.diagnostics().submit.dispatchCount - primitiveBefore,
               3,
-              `${label}: gelu_tanh + quantize_rows + the GEMM`,
+              `${label}: ${op} + quantize_rows + the GEMM`,
             );
             assertEquals(fused.diagnostics().lastRunFusions?.linearPrologue, 1, `${label}: fused`);
             assertEquals(
@@ -189,7 +202,7 @@ test.skipIf(!GPU_AVAILABLE)(
               requireCensus(fused.diagnostics().lastRunPipelines, label)
                 .map((row) => row.key)
                 .sort(),
-              [gemm, quantizeRowsPrologueKey("gelu_tanh", k)].sort(),
+              [gemm, quantizeRowsPrologueKey(op, k)].sort(),
               `${label}: fused census`,
             );
             assertEquals(
@@ -199,7 +212,7 @@ test.skipIf(!GPU_AVAILABLE)(
               [
                 gemm,
                 quantizeRowsKey(quantizeRowsGeometry(k)),
-                elementwiseKey({ op: "gelu_tanh", rank: 3, dtype: "f32" }),
+                elementwiseKey({ op, rank: 3, dtype: "f32" }),
               ].sort(),
               `${label}: reference census`,
             );

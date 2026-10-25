@@ -1886,6 +1886,8 @@ type ProloguePairOptions = {
   readonly rows?: number;
   /** The reduction length K (default {@link PROLOGUE_K}). */
   readonly k?: number;
+  /** The output width N (default {@link PROLOGUE_N}). */
+  readonly n?: number;
   /** The producer's output gets a second consumer. */
   readonly extraConsumer?: boolean;
   /** The producer's output is a graph output. */
@@ -1898,11 +1900,11 @@ type ProloguePairOptions = {
   readonly gap?: boolean;
 };
 
-/** `y = linear(gelu_tanh(x), w, b)` — the shape of the Wan DiT's FFN down projection. */
+/** `y = linear(op(x), w, b)` — the shape of a DiT's FFN down projection (default: Wan2.2's). */
 const prologuePairGraph = (options: ProloguePairOptions = {}): DeclarationJson => {
   const dtype = "f32";
   const k = options.k ?? PROLOGUE_K;
-  const n = PROLOGUE_N;
+  const n = options.n ?? PROLOGUE_N;
   const rows = options.rows ?? PROLOGUE_ROWS;
   const matmul = options.matmulConsumer === true;
   const row = matmul ? [rows, k] : [1, rows, k];
@@ -1992,7 +1994,7 @@ const NO_FUSIONS = {
 /** A node step's `prologue` (undefined for fused steps and plain nodes). */
 const prologueOf = (step: ExecStep) => (step.kind === "node" ? step.prologue : undefined);
 
-test("the linear prologue folds gelu_tanh into the a8 linear that reads it: one node step whose input is the producer's input", () => {
+test("the linear prologue folds gelu_tanh and the erf gelu into the a8 linear that reads it: one node step whose input is the producer's input", () => {
   const cases: readonly (readonly [string, ProloguePairOptions, PrologueContext])[] = [
     ["Wan2.2 down projection (K 14,336, i8)", {}, A8_I8],
     [
@@ -2003,12 +2005,14 @@ test("the linear prologue folds gelu_tanh into the a8 linear that reads it: one 
     ["the prologue bound (K 16,384)", { k: QUANTIZE_ROWS_PROLOGUE_MAX_DIM }, A8_I8],
     ["the smallest row (K 4)", { k: 4 }, A8_I8],
     ["one row", { rows: 1 }, A8_I8],
+    // anima's DiT FFN down projection: gelu [S, 8192] → linear with the i8 weight [2048, 8192].
+    ["erf gelu, anima's down projection", { op: "gelu", rows: 4096, k: 8192, n: 2048 }, A8_I8],
   ];
   for (const [label, options, context] of cases) {
     const plan = fusePrologue(options, context);
     assertEquals(outline(plan.steps), ["linear"], label);
     const [step] = plan.steps;
-    assertEquals(prologueOf(step), { op: "gelu_tanh" }, label);
+    assertEquals(prologueOf(step), { op: options.op ?? "gelu_tanh" }, label);
     if (step.kind !== "node") throw new Error(`${label}: not a node step`);
     assertEquals(step.plan.node.ins, ["x", "w", "b"], `${label}: re-pointed input`);
     assertEquals(
@@ -2084,7 +2088,7 @@ test("the linear prologue keeps the total-use accounting exact: the producer's i
   assertEquals(consumed.get("h"), 2, "h: the down projection and the residual add");
 });
 
-test("linear prologue counterexamples (use count 2 / graph output / not a linear / another slot / a gap / K / erf gelu / no rows) keep both nodes as they are", () => {
+test("linear prologue counterexamples (use count 2 / graph output / not a linear / another slot / a gap / K / an op outside the list / no rows) keep both nodes as they are", () => {
   const cases: readonly (readonly [string, ProloguePairOptions])[] = [
     ["the output has a second consumer", { extraConsumer: true }],
     ["the output is a graph output", { producerOutput: true }],
@@ -2093,7 +2097,9 @@ test("linear prologue counterexamples (use count 2 / graph output / not a linear
     ["an unrelated node between the two", { gap: true }],
     ["K % 4 != 0", { k: PROLOGUE_K - 2 }],
     ["K above the prologue bound", { k: QUANTIZE_ROWS_PROLOGUE_MAX_DIM + 4 }],
-    ["erf gelu (not accepted yet)", { op: "gelu" }],
+    // Elementwise f32 unary ops that are not prologue ops (sigmoid is also the silu rule's head).
+    ["relu (not a prologue op)", { op: "relu" }],
+    ["sigmoid (not a prologue op)", { op: "sigmoid" }],
     ["no rows", { rows: 0 }],
   ];
   for (const [label, options] of cases) {
@@ -2157,5 +2163,5 @@ test("no fusion rule's head is a prologue op (the rules are tried first at each 
     LINEAR_PROLOGUE_OPS.filter((op) => heads.has(op)),
     [],
   );
-  assertEquals(LINEAR_PROLOGUE_OPS, ["gelu_tanh"]);
+  assertEquals(LINEAR_PROLOGUE_OPS, ["gelu_tanh", "gelu"]);
 });
