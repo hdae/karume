@@ -58,7 +58,7 @@ const wanShapes = (graph: IrGraph, sequence: number): Readonly<Record<string, re
 
 /**
  * The three Wan2.1 components. The counts are frozen from measurements (2026-10-03; rope from
- * 2026-10-24):
+ * 2026-10-24; attentionPermute from 2026-10-25):
  *
  * - **transformer: silu 2 and rope 60**. The two `sigmoid`s are the time-embedding MLP's (the SiLU
  *   inside `time_embedder` and the one before `time_proj`); both are grabbed as SiLU.
@@ -72,6 +72,9 @@ const wanShapes = (graph: IrGraph, sequence: number): Readonly<Record<string, re
  *   - gatedResidual 0: the gate is a broadcast vector (no per-token `where`).
  *   - rowBlockAttention / identityExpand 0: attention is the fused op (`attention`, 60 of them),
  *     with no decomposed spelling.
+ *   - **attentionPermute 240** on both seats, whatever linearCompute is: each of the 60 attentions
+ *     (30 self, 30 cross) absorbs the `[0, 2, 1, 3]` permutes of q, k and v right before it and of
+ *     O right after it (perf-ledger F-3 A4 / F-8 — the decision needs no route; H = 12, D = 128).
  *   - **linearPrologue 31 on the i8 seat under `linearCompute: "a8"`** (counted 2026-10-25): the
  *     gelu_tanh folded into the step ① of the i8 linear that reads it (perf-ledger F-4) — the FFN
  *     down projection of the 30 blocks (K 8,960) and the text embedder's second linear (K 1,536).
@@ -85,12 +88,12 @@ const wanShapes = (graph: IrGraph, sequence: number): Readonly<Record<string, re
  * same reading as the Irodori DiT gate).
  */
 test.skipIf(!WAN_AVAILABLE)(
-  "the real Wan2.1 grabs DiT silu 2 / rope 60 (plus linearPrologue 31 on the i8 seat under a8) and the VAE chunk graphs' silu 29 / upsample2x 3 per run (adaln is a different spelling: 0)",
+  "the real Wan2.1 grabs DiT silu 2 / rope 60 / attentionPermute 240 (plus linearPrologue 31 on the i8 seat under a8) and the VAE chunk graphs' silu 29 / upsample2x 3 per run (adaln is a different spelling: 0)",
   async () => {
     const transformer = await readWanGraph("transformer");
     const transformerI8 = await readWanGraph("transformer", "i8");
     for (const sequence of [192, 14040]) {
-      const counts = { ...NONE, silu: 2, rope: 60 };
+      const counts = { ...NONE, silu: 2, rope: 60, attentionPermute: 240 };
       const f32 = (graph: IrGraph) => fusionCounts(graph, wanShapes(graph, sequence));
       const a8 = (graph: IrGraph) =>
         fusionCounts(graph, wanShapes(graph, sequence), undefined, false, false, false, "a8");

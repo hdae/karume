@@ -97,6 +97,14 @@ const ditShapes = (sequence: number): Readonly<Record<string, readonly number[]>
 });
 
 /**
+ * The DiT's attentionPermute (counted 2026-10-25, every seat and linearCompute alike): each of the
+ * 56 attentions (28 self, 28 cross) absorbs the `[0, 2, 1, 3]` permute of v right before it and of O
+ * right after it (perf-ledger F-3 A4 / F-8). Its q / k reach it through the per-head rms_norm and
+ * the RoPE (self) or the per-head rms_norm alone (cross), so their permutes are not adjacent.
+ */
+const DIT_ATTENTION_PERMUTES = 112;
+
+/**
  * The DiT's counts under `linearCompute: "a8"` (the `f16+dit8-a8*` presets; counted 2026-10-25):
  * the f32 counts plus **linearPrologue 28 on the i8 seat** — the erf gelu folded into the step ① of
  * the i8 linear that reads it (perf-ledger F-4), the FFN down projection of the 28 blocks (gelu
@@ -108,15 +116,22 @@ const ditA8 = (quant: "i8" | "f16"): FusionCounts => ({
   rope: 56,
   adaln: 85,
   linearPrologue: quant === "i8" ? 28 : 0,
+  attentionPermute: DIT_ATTENTION_PERMUTES,
 });
 
 const a8Counts = (graph: IrGraph, shapes: Readonly<Record<string, readonly number[]>>) =>
   fusionCounts(graph, shapes, undefined, false, false, false, "a8");
 
 test.skipIf(!ASSETS_AVAILABLE)(
-  "実資産の DiT は run 1 回で adaln 85 / rope 56 / silu 2 を掴む（w8a8 と f16 で同一。a8 では i8 席だけ linearPrologue 28）",
+  "実資産の DiT は run 1 回で adaln 85 / rope 56 / silu 2 / attentionPermute 112 を掴む（w8a8 と f16 で同一。a8 では i8 席だけ linearPrologue 28）",
   async () => {
-    const expected: FusionCounts = { ...NONE, silu: 2, rope: 56, adaln: 85 };
+    const expected: FusionCounts = {
+      ...NONE,
+      silu: 2,
+      rope: 56,
+      adaln: 85,
+      attentionPermute: DIT_ATTENTION_PERMUTES,
+    };
     for (const quant of ["i8", "f16"] as const) {
       const graph = await readAnimaGraph("transformer", quant);
       // 融合は f32 の計算経路だけを見るので、重みの格納形が変わってもヒット数は動かない。
@@ -209,7 +224,13 @@ for (const model of EXTRA_MODELS) {
       const manifest = EXTRA_MANIFEST as ContainerManifest;
       const read = (component: string, dtype: string): Promise<IrGraph> =>
         readDistributionGraph(EXTRA_DIR, manifest, model, component, dtype, MIRRORS);
-      const dit: FusionCounts = { ...NONE, silu: 2, rope: 56, adaln: 85 };
+      const dit: FusionCounts = {
+        ...NONE,
+        silu: 2,
+        rope: 56,
+        adaln: 85,
+        attentionPermute: DIT_ATTENTION_PERMUTES,
+      };
       for (const quant of ["i8", "f16"] as const) {
         const graph = await read("transformer", quant);
         assertEquals(fusionCounts(graph, ditShapes(4096)), dit, `${quant}: 1024px（S=4096）`);
