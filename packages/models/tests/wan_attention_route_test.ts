@@ -136,7 +136,7 @@ const ONLINE_SEATS: AttentionSeats = { attentionCompute: "a8", attentionScoreSto
 /**
  * The online seats over Wan2.2's whole accepted set (Wan2.1 has no online preset — ADR 0132 decision 6).
  * The route depends on the device facts (ADR 0132 decision 5): `sg32` with subgroups, `wg` without them when the
- * workgroup-storage limit holds the portable form's scratch (D = 128: 33,536 B), and otherwise the three dispatches
+ * workgroup-storage limit holds the portable form's scratch (D = 128: 35,328 B), and otherwise the three dispatches
  * of a8 with S in f32 — never `"none"`, which the three kernels cannot store.
  */
 const ONLINE_DEVICES: readonly {

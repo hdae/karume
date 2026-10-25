@@ -103,7 +103,7 @@ describe("attentionRoute: the online kernel (attentionScoreStorage 'none' — AD
     subgroups: true,
     maxComputeWorkgroupStorageSize: 49152,
   };
-  /** A device without subgroups that still holds the workgroup-memory form (D = 128 needs 33,536 B). */
+  /** A device without subgroups that still holds the workgroup-memory form (D = 128 needs 35,328 B). */
   const PORTABLE_48K: AttentionDeviceFacts = {
     subgroups: false,
     maxComputeWorkgroupStorageSize: 49152,
@@ -131,26 +131,27 @@ describe("attentionRoute: the online kernel (attentionScoreStorage 'none' — AD
     }
   });
 
-  it("decides the form from the workgroup-storage limit at its boundary (D = 128: sg32 29,440 B, wg 33,536 B)", () => {
+  it("decides the form from the workgroup-storage limit at its boundary (D = 128: sg32 31,232 B, wg 35,328 B)", () => {
     // Without subgroups, one byte below the workgroup-memory form: the three dispatches.
-    // (64·33 + 64·33 + 16·128 + 64·17 + 64·16 words = 8,384 words — the kernel test's arithmetic.)
+    // ((64·9 + 64·9 + 16·33 + 16·17) vec4 = 7,808 words, plus 64·16 words of scratch = 8,832 words
+    // — the kernel test's arithmetic.)
     assertEquals(
       attentionRoute(A8_NONE, 128, 512, {
         subgroups: false,
-        maxComputeWorkgroupStorageSize: 33535,
+        maxComputeWorkgroupStorageSize: 35327,
       }),
       FALLBACK,
     );
     assertEquals(
       attentionRoute(A8_NONE, 128, 512, {
         subgroups: false,
-        maxComputeWorkgroupStorageSize: 33536,
+        maxComputeWorkgroupStorageSize: 35328,
       }),
       { qk: "i8a8", pv: "i8a8", score: "none", online: "wg" },
     );
-    // With subgroups the scratch is not needed: 32 KiB holds the subgroup form, 29,439 B does not.
+    // With subgroups the scratch is not needed: 32 KiB holds the subgroup form, 31,231 B does not.
     assertEquals(
-      attentionRoute(A8_NONE, 128, 512, { subgroups: true, maxComputeWorkgroupStorageSize: 29439 }),
+      attentionRoute(A8_NONE, 128, 512, { subgroups: true, maxComputeWorkgroupStorageSize: 31231 }),
       FALLBACK,
     );
     assertEquals(
