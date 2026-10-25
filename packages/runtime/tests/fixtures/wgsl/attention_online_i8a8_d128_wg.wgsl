@@ -1,4 +1,4 @@
-// karume attention_online (O = softmax((q·scale)(k·scale)ᵀ) · v with S never stored — ADR 0132; q / k per-token i8, v per-column i8, P̃ = round(127·exp(S − m)) against the running max, D = 128, 64 rows × 64-key tiles, 256 threads, workgroup memory reductions)
+// karume attention_online (O = softmax((q·scale)(k·scale)ᵀ) · v with S never stored — ADR 0132; q / k per-token i8, v per-column i8, P̃ = round(127·exp(S − m)) against the running max, D = 128, 64 rows × 64-key tiles, 256 threads, vec4 tiles, workgroup memory reductions)
 struct Dims {
   m: u32,
   n: u32,
@@ -6,25 +6,25 @@ struct Dims {
   scale: f32,
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
-@group(0) @binding(1) var<storage, read> qq: array<u32>;
-@group(0) @binding(2) var<storage, read> kq: array<u32>;
+@group(0) @binding(1) var<storage, read> qq: array<vec4<u32>>;
+@group(0) @binding(2) var<storage, read> kq: array<vec4<u32>>;
 @group(0) @binding(3) var<storage, read> vq: array<u32>;
-@group(0) @binding(4) var<storage, read_write> o: array<f32>;
+@group(0) @binding(4) var<storage, read_write> o: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> qs: array<f32>;
 @group(0) @binding(6) var<storage, read> ks: array<f32>;
-@group(0) @binding(7) var<storage, read> vs: array<f32>;
+@group(0) @binding(7) var<storage, read> vs: array<vec4<f32>>;
 // integer dot product (WGSL language extension packed_4x8_integer_dot_product); returns **the same integer** as the emulated variant
 fn idot(a: u32, b: u32) -> i32 {
   return dot4I8Packed(a, b);
 }
-// q tile: 64 rows × 32 words, padded to 33 per row (loaded once per workgroup)
-var<workgroup> qt: array<u32, 2112>;
-// k tile: 64 keys × 32 words, padded to 33 per key
-var<workgroup> kt: array<u32, 2112>;
-// Vᵀ tile: [pack 0..15][d 0..127]; word w of a column packs the keys {w, w+16, w+32, w+48}
-var<workgroup> vt: array<u32, 2048>;
-// P̃ tile: 64 rows × 16 words, padded to 17 per row
-var<workgroup> pt: array<u32, 1088>;
+// q tile: 64 rows × 8 vec4 words, padded to 9 per row (loaded once per workgroup)
+var<workgroup> qt: array<vec4<u32>, 576>;
+// k tile: 64 keys × 8 vec4 words, padded to 9 per key
+var<workgroup> kt: array<vec4<u32>, 576>;
+// Vᵀ tile: [pack 0..15][column quad 0..31], padded to 33 per pack; word w of a column packs the keys {w, w+16, w+32, w+48}
+var<workgroup> vt: array<vec4<u32>, 528>;
+// P̃ tile, transposed: [word 0..15][row group 0..15] = that word of the rows ty·4..+3, padded to 17 per word
+var<workgroup> pt: array<vec4<u32>, 272>;
 var<workgroup> red: array<f32, 1024>;
 const INV_P: f32 = 0.007874015748031496;
 const NEG: f32 = -3.0e38;
@@ -39,9 +39,11 @@ fn main(
   let tx = t % 16u;
   let ty = t / 16u;
   let n4 = dims.n / 4u;
-  let q_bh = bh * dims.m * 32u;
-  let k_bh = bh * dims.n * 32u;
+  // this head's offsets: q / k in vec4 words, Vᵀ in words, the k scales in elements
+  let q_bh = bh * dims.m * 8u;
+  let k_bh = bh * dims.n * 8u;
   let v_bh = bh * 128u * n4;
+  let ks_bh = bh * dims.n;
   let qrow0 = row0 + ty * 4u + 0u;
   // the half scale on the q side (the scale of a row beyond M is never used — clamp keeps the read in range)
   let qsc0 = qs[bh * dims.m + min(qrow0, dims.m - 1u)] * dims.scale;
@@ -54,10 +56,10 @@ fn main(
   let qrow3 = row0 + ty * 4u + 3u;
   // the half scale on the q side (the scale of a row beyond M is never used — clamp keeps the read in range)
   let qsc3 = qs[bh * dims.m + min(qrow3, dims.m - 1u)] * dims.scale;
-  for (var w = t; w < 2048u; w = w + 256u) {
-    let r = w / 32u;
-    let pk = w % 32u;
-    qt[r * 33u + pk] = select(0u, qq[q_bh + (row0 + r) * 32u + pk], row0 + r < dims.m);
+  for (var w = t; w < 512u; w = w + 256u) {
+    let r = w / 8u;
+    let pk = w % 8u;
+    qt[r * 9u + pk] = select(vec4<u32>(0u), qq[q_bh + (row0 + r) * 8u + pk], row0 + r < dims.m);
   }
   var m0: f32 = NEG;
   var l0: f32 = 0.0;
@@ -75,58 +77,69 @@ fn main(
   var o2_1: vec4<f32> = vec4<f32>(0.0);
   var o3_0: vec4<f32> = vec4<f32>(0.0);
   var o3_1: vec4<f32> = vec4<f32>(0.0);
+  var kr0: vec4<u32>;
+  var kr1: vec4<u32>;
+  var vr0: vec4<u32>;
+  var vr1: vec4<u32>;
   let tiles = (dims.n + 63u) / 64u;
   for (var tile = 0u; tile < tiles; tile = tile + 1u) {
     let key0 = tile * 64u;
-    for (var w = t; w < 2048u; w = w + 256u) {
-      let r = w / 32u;
-      let pk = w % 32u;
-      kt[r * 33u + pk] = select(0u, kq[k_bh + (key0 + r) * 32u + pk], key0 + r < dims.n);
-    }
-    // Vᵀ: word (pk, d) = the bytes of keys key0 + pk + 16·i (i = 0..3), each in the global word
-    // (key0 + pk)/4 + 4·i at byte (key0 + pk) % 4 (key0 is a multiple of 64, so the byte is pk % 4)
-    for (var w = t; w < 2048u; w = w + 256u) {
-      let pk = w / 128u;
-      let d = w % 128u;
-      let kg = key0 + pk;
-      let shift = (kg % 4u) * 8u;
-      let base = v_bh + d * n4 + kg / 4u;
-      var word = 0u;
-      if (kg / 4u + 0u < n4) { word = word | (((vq[base + 0u] >> shift) & 0xffu) << 0u); }
-      if (kg / 4u + 4u < n4) { word = word | (((vq[base + 4u] >> shift) & 0xffu) << 8u); }
-      if (kg / 4u + 8u < n4) { word = word | (((vq[base + 8u] >> shift) & 0xffu) << 16u); }
-      if (kg / 4u + 12u < n4) { word = word | (((vq[base + 12u] >> shift) & 0xffu) << 24u); }
-      vt[w] = word;
-    }
+    // every load of the tile into registers first, then every store (the loads overlap)
+    { let w = t + 0u; let r = w / 8u; let pk = w % 8u; kr0 = select(vec4<u32>(0u), kq[k_bh + (key0 + r) * 8u + pk], key0 + r < dims.n); }
+    { let w = t + 256u; let r = w / 8u; let pk = w % 8u; kr1 = select(vec4<u32>(0u), kq[k_bh + (key0 + r) * 8u + pk], key0 + r < dims.n); }
+    // Vᵀ owner (pk, d4): consecutive lanes take consecutive keys of the same four columns
+    { let w = t + 0u; let pk = w % 16u; let d4 = w / 16u; let kg = key0 + pk; let shift = (kg % 4u) * 8u; let gw = kg / 4u;
+      var vw0 = 0u;
+      { let base = v_bh + (d4 * 4u + 0u) * n4 + gw; if (gw + 0u < n4) { vw0 = vw0 | (((vq[base + 0u] >> shift) & 0xffu) << 0u); } if (gw + 4u < n4) { vw0 = vw0 | (((vq[base + 4u] >> shift) & 0xffu) << 8u); } if (gw + 8u < n4) { vw0 = vw0 | (((vq[base + 8u] >> shift) & 0xffu) << 16u); } if (gw + 12u < n4) { vw0 = vw0 | (((vq[base + 12u] >> shift) & 0xffu) << 24u); } }
+      var vw1 = 0u;
+      { let base = v_bh + (d4 * 4u + 1u) * n4 + gw; if (gw + 0u < n4) { vw1 = vw1 | (((vq[base + 0u] >> shift) & 0xffu) << 0u); } if (gw + 4u < n4) { vw1 = vw1 | (((vq[base + 4u] >> shift) & 0xffu) << 8u); } if (gw + 8u < n4) { vw1 = vw1 | (((vq[base + 8u] >> shift) & 0xffu) << 16u); } if (gw + 12u < n4) { vw1 = vw1 | (((vq[base + 12u] >> shift) & 0xffu) << 24u); } }
+      var vw2 = 0u;
+      { let base = v_bh + (d4 * 4u + 2u) * n4 + gw; if (gw + 0u < n4) { vw2 = vw2 | (((vq[base + 0u] >> shift) & 0xffu) << 0u); } if (gw + 4u < n4) { vw2 = vw2 | (((vq[base + 4u] >> shift) & 0xffu) << 8u); } if (gw + 8u < n4) { vw2 = vw2 | (((vq[base + 8u] >> shift) & 0xffu) << 16u); } if (gw + 12u < n4) { vw2 = vw2 | (((vq[base + 12u] >> shift) & 0xffu) << 24u); } }
+      var vw3 = 0u;
+      { let base = v_bh + (d4 * 4u + 3u) * n4 + gw; if (gw + 0u < n4) { vw3 = vw3 | (((vq[base + 0u] >> shift) & 0xffu) << 0u); } if (gw + 4u < n4) { vw3 = vw3 | (((vq[base + 4u] >> shift) & 0xffu) << 8u); } if (gw + 8u < n4) { vw3 = vw3 | (((vq[base + 8u] >> shift) & 0xffu) << 16u); } if (gw + 12u < n4) { vw3 = vw3 | (((vq[base + 12u] >> shift) & 0xffu) << 24u); } }
+      vr0 = vec4<u32>(vw0, vw1, vw2, vw3); }
+    // Vᵀ owner (pk, d4): consecutive lanes take consecutive keys of the same four columns
+    { let w = t + 256u; let pk = w % 16u; let d4 = w / 16u; let kg = key0 + pk; let shift = (kg % 4u) * 8u; let gw = kg / 4u;
+      var vw0 = 0u;
+      { let base = v_bh + (d4 * 4u + 0u) * n4 + gw; if (gw + 0u < n4) { vw0 = vw0 | (((vq[base + 0u] >> shift) & 0xffu) << 0u); } if (gw + 4u < n4) { vw0 = vw0 | (((vq[base + 4u] >> shift) & 0xffu) << 8u); } if (gw + 8u < n4) { vw0 = vw0 | (((vq[base + 8u] >> shift) & 0xffu) << 16u); } if (gw + 12u < n4) { vw0 = vw0 | (((vq[base + 12u] >> shift) & 0xffu) << 24u); } }
+      var vw1 = 0u;
+      { let base = v_bh + (d4 * 4u + 1u) * n4 + gw; if (gw + 0u < n4) { vw1 = vw1 | (((vq[base + 0u] >> shift) & 0xffu) << 0u); } if (gw + 4u < n4) { vw1 = vw1 | (((vq[base + 4u] >> shift) & 0xffu) << 8u); } if (gw + 8u < n4) { vw1 = vw1 | (((vq[base + 8u] >> shift) & 0xffu) << 16u); } if (gw + 12u < n4) { vw1 = vw1 | (((vq[base + 12u] >> shift) & 0xffu) << 24u); } }
+      var vw2 = 0u;
+      { let base = v_bh + (d4 * 4u + 2u) * n4 + gw; if (gw + 0u < n4) { vw2 = vw2 | (((vq[base + 0u] >> shift) & 0xffu) << 0u); } if (gw + 4u < n4) { vw2 = vw2 | (((vq[base + 4u] >> shift) & 0xffu) << 8u); } if (gw + 8u < n4) { vw2 = vw2 | (((vq[base + 8u] >> shift) & 0xffu) << 16u); } if (gw + 12u < n4) { vw2 = vw2 | (((vq[base + 12u] >> shift) & 0xffu) << 24u); } }
+      var vw3 = 0u;
+      { let base = v_bh + (d4 * 4u + 3u) * n4 + gw; if (gw + 0u < n4) { vw3 = vw3 | (((vq[base + 0u] >> shift) & 0xffu) << 0u); } if (gw + 4u < n4) { vw3 = vw3 | (((vq[base + 4u] >> shift) & 0xffu) << 8u); } if (gw + 8u < n4) { vw3 = vw3 | (((vq[base + 8u] >> shift) & 0xffu) << 16u); } if (gw + 12u < n4) { vw3 = vw3 | (((vq[base + 12u] >> shift) & 0xffu) << 24u); } }
+      vr1 = vec4<u32>(vw0, vw1, vw2, vw3); }
+    { let w = t + 0u; let r = w / 8u; let pk = w % 8u; kt[r * 9u + pk] = kr0; }
+    { let w = t + 256u; let r = w / 8u; let pk = w % 8u; kt[r * 9u + pk] = kr1; }
+    { let w = t + 0u; let pk = w % 16u; let d4 = w / 16u; vt[pk * 33u + d4] = vr0; }
+    { let w = t + 256u; let pk = w % 16u; let d4 = w / 16u; vt[pk * 33u + d4] = vr1; }
     workgroupBarrier();
     // ---- scores: my 4 rows × the keys {tx, tx+16, tx+32, tx+48} ----
     var acc0: vec4<i32> = vec4<i32>(0);
     var acc1: vec4<i32> = vec4<i32>(0);
     var acc2: vec4<i32> = vec4<i32>(0);
     var acc3: vec4<i32> = vec4<i32>(0);
-    for (var pk = 0u; pk < 32u; pk = pk + 1u) {
-      let qw0 = qt[(ty * 4u + 0u) * 33u + pk];
-      let qw1 = qt[(ty * 4u + 1u) * 33u + pk];
-      let qw2 = qt[(ty * 4u + 2u) * 33u + pk];
-      let qw3 = qt[(ty * 4u + 3u) * 33u + pk];
-      let kw = vec4<u32>(
-        kt[tx * 33u + pk],
-        kt[(tx + 16u) * 33u + pk],
-        kt[(tx + 32u) * 33u + pk],
-        kt[(tx + 48u) * 33u + pk],
-      );
-      acc0 = acc0 + vec4<i32>(idot(qw0, kw.x), idot(qw0, kw.y), idot(qw0, kw.z), idot(qw0, kw.w));
-      acc1 = acc1 + vec4<i32>(idot(qw1, kw.x), idot(qw1, kw.y), idot(qw1, kw.z), idot(qw1, kw.w));
-      acc2 = acc2 + vec4<i32>(idot(qw2, kw.x), idot(qw2, kw.y), idot(qw2, kw.z), idot(qw2, kw.w));
-      acc3 = acc3 + vec4<i32>(idot(qw3, kw.x), idot(qw3, kw.y), idot(qw3, kw.z), idot(qw3, kw.w));
+    for (var p4 = 0u; p4 < 8u; p4 = p4 + 1u) {
+      let qv0 = qt[(ty * 4u + 0u) * 9u + p4];
+      let qv1 = qt[(ty * 4u + 1u) * 9u + p4];
+      let qv2 = qt[(ty * 4u + 2u) * 9u + p4];
+      let qv3 = qt[(ty * 4u + 3u) * 9u + p4];
+      let kv0 = kt[(tx + 0u) * 9u + p4];
+      let kv1 = kt[(tx + 16u) * 9u + p4];
+      let kv2 = kt[(tx + 32u) * 9u + p4];
+      let kv3 = kt[(tx + 48u) * 9u + p4];
+      acc0 = acc0 + vec4<i32>(idot(qv0.x, kv0.x) + idot(qv0.y, kv0.y) + idot(qv0.z, kv0.z) + idot(qv0.w, kv0.w), idot(qv0.x, kv1.x) + idot(qv0.y, kv1.y) + idot(qv0.z, kv1.z) + idot(qv0.w, kv1.w), idot(qv0.x, kv2.x) + idot(qv0.y, kv2.y) + idot(qv0.z, kv2.z) + idot(qv0.w, kv2.w), idot(qv0.x, kv3.x) + idot(qv0.y, kv3.y) + idot(qv0.z, kv3.z) + idot(qv0.w, kv3.w));
+      acc1 = acc1 + vec4<i32>(idot(qv1.x, kv0.x) + idot(qv1.y, kv0.y) + idot(qv1.z, kv0.z) + idot(qv1.w, kv0.w), idot(qv1.x, kv1.x) + idot(qv1.y, kv1.y) + idot(qv1.z, kv1.z) + idot(qv1.w, kv1.w), idot(qv1.x, kv2.x) + idot(qv1.y, kv2.y) + idot(qv1.z, kv2.z) + idot(qv1.w, kv2.w), idot(qv1.x, kv3.x) + idot(qv1.y, kv3.y) + idot(qv1.z, kv3.z) + idot(qv1.w, kv3.w));
+      acc2 = acc2 + vec4<i32>(idot(qv2.x, kv0.x) + idot(qv2.y, kv0.y) + idot(qv2.z, kv0.z) + idot(qv2.w, kv0.w), idot(qv2.x, kv1.x) + idot(qv2.y, kv1.y) + idot(qv2.z, kv1.z) + idot(qv2.w, kv1.w), idot(qv2.x, kv2.x) + idot(qv2.y, kv2.y) + idot(qv2.z, kv2.z) + idot(qv2.w, kv2.w), idot(qv2.x, kv3.x) + idot(qv2.y, kv3.y) + idot(qv2.z, kv3.z) + idot(qv2.w, kv3.w));
+      acc3 = acc3 + vec4<i32>(idot(qv3.x, kv0.x) + idot(qv3.y, kv0.y) + idot(qv3.z, kv0.z) + idot(qv3.w, kv0.w), idot(qv3.x, kv1.x) + idot(qv3.y, kv1.y) + idot(qv3.z, kv1.z) + idot(qv3.w, kv1.w), idot(qv3.x, kv2.x) + idot(qv3.y, kv2.y) + idot(qv3.z, kv2.z) + idot(qv3.w, kv2.w), idot(qv3.x, kv3.x) + idot(qv3.y, kv3.y) + idot(qv3.z, kv3.z) + idot(qv3.w, kv3.w));
     }
     let kidx = key0 + tx;
     let kok = vec4<bool>(kidx < dims.n, kidx + 16u < dims.n, kidx + 32u < dims.n, kidx + 48u < dims.n);
     let ksc = vec4<f32>(
-      ks[k_bh / 32u + min(kidx, dims.n - 1u)],
-      ks[k_bh / 32u + min(kidx + 16u, dims.n - 1u)],
-      ks[k_bh / 32u + min(kidx + 32u, dims.n - 1u)],
-      ks[k_bh / 32u + min(kidx + 48u, dims.n - 1u)],
+      ks[ks_bh + min(kidx, dims.n - 1u)],
+      ks[ks_bh + min(kidx + 16u, dims.n - 1u)],
+      ks[ks_bh + min(kidx + 32u, dims.n - 1u)],
+      ks[ks_bh + min(kidx + 48u, dims.n - 1u)],
     ) * dims.scale;
     // MUST: fold (qs·scale)·(ks·scale) into one f32 first (the dequant order of ①QK)
     let sv0 = select(vec4<f32>(NEG), vec4<f32>(acc0) * (qsc0 * ksc), kok);
@@ -178,7 +191,7 @@ fn main(
     // MUST: exp per component (vector transcendentals are implementation-dependent)
     let pe0 = vec4<f32>(exp(sv0.x - mn0), exp(sv0.y - mn0), exp(sv0.z - mn0), exp(sv0.w - mn0));
     l0 = l0 + pe0.x + pe0.y + pe0.z + pe0.w;
-    pt[(ty * 4u + 0u) * 17u + tx] = pack4xI8(vec4<i32>(round(pe0 * 127.0)));
+    let pq0 = pack4xI8(vec4<i32>(round(pe0 * 127.0)));
     let mn1 = max(m1, tm1);
     let alpha1 = exp(m1 - mn1);
     m1 = mn1;
@@ -188,7 +201,7 @@ fn main(
     // MUST: exp per component (vector transcendentals are implementation-dependent)
     let pe1 = vec4<f32>(exp(sv1.x - mn1), exp(sv1.y - mn1), exp(sv1.z - mn1), exp(sv1.w - mn1));
     l1 = l1 + pe1.x + pe1.y + pe1.z + pe1.w;
-    pt[(ty * 4u + 1u) * 17u + tx] = pack4xI8(vec4<i32>(round(pe1 * 127.0)));
+    let pq1 = pack4xI8(vec4<i32>(round(pe1 * 127.0)));
     let mn2 = max(m2, tm2);
     let alpha2 = exp(m2 - mn2);
     m2 = mn2;
@@ -198,7 +211,7 @@ fn main(
     // MUST: exp per component (vector transcendentals are implementation-dependent)
     let pe2 = vec4<f32>(exp(sv2.x - mn2), exp(sv2.y - mn2), exp(sv2.z - mn2), exp(sv2.w - mn2));
     l2 = l2 + pe2.x + pe2.y + pe2.z + pe2.w;
-    pt[(ty * 4u + 2u) * 17u + tx] = pack4xI8(vec4<i32>(round(pe2 * 127.0)));
+    let pq2 = pack4xI8(vec4<i32>(round(pe2 * 127.0)));
     let mn3 = max(m3, tm3);
     let alpha3 = exp(m3 - mn3);
     m3 = mn3;
@@ -208,42 +221,98 @@ fn main(
     // MUST: exp per component (vector transcendentals are implementation-dependent)
     let pe3 = vec4<f32>(exp(sv3.x - mn3), exp(sv3.y - mn3), exp(sv3.z - mn3), exp(sv3.w - mn3));
     l3 = l3 + pe3.x + pe3.y + pe3.z + pe3.w;
-    pt[(ty * 4u + 3u) * 17u + tx] = pack4xI8(vec4<i32>(round(pe3 * 127.0)));
+    let pq3 = pack4xI8(vec4<i32>(round(pe3 * 127.0)));
+    pt[tx * 17u + ty] = vec4<u32>(pq0, pq1, pq2, pq3);
     workgroupBarrier();
-    // ---- PV: my 4 rows × the columns {tx + 16·j} ----
-    var p0_0: vec4<i32> = vec4<i32>(0);
-    var p0_1: vec4<i32> = vec4<i32>(0);
-    var p1_0: vec4<i32> = vec4<i32>(0);
-    var p1_1: vec4<i32> = vec4<i32>(0);
-    var p2_0: vec4<i32> = vec4<i32>(0);
-    var p2_1: vec4<i32> = vec4<i32>(0);
-    var p3_0: vec4<i32> = vec4<i32>(0);
-    var p3_1: vec4<i32> = vec4<i32>(0);
-    for (var pk = 0u; pk < 16u; pk = pk + 1u) {
-      let pw0 = pt[(ty * 4u + 0u) * 17u + pk];
-      let pw1 = pt[(ty * 4u + 1u) * 17u + pk];
-      let pw2 = pt[(ty * 4u + 2u) * 17u + pk];
-      let pw3 = pt[(ty * 4u + 3u) * 17u + pk];
-      let vb = pk * 128u;
-      let vw0 = vec4<u32>(vt[vb + tx], vt[vb + tx + 16u], vt[vb + tx + 32u], vt[vb + tx + 48u]);
-      let vw1 = vec4<u32>(vt[vb + tx + 64u], vt[vb + tx + 80u], vt[vb + tx + 96u], vt[vb + tx + 112u]);
-      p0_0 = p0_0 + vec4<i32>(idot(pw0, vw0.x), idot(pw0, vw0.y), idot(pw0, vw0.z), idot(pw0, vw0.w));
-      p0_1 = p0_1 + vec4<i32>(idot(pw0, vw1.x), idot(pw0, vw1.y), idot(pw0, vw1.z), idot(pw0, vw1.w));
-      p1_0 = p1_0 + vec4<i32>(idot(pw1, vw0.x), idot(pw1, vw0.y), idot(pw1, vw0.z), idot(pw1, vw0.w));
-      p1_1 = p1_1 + vec4<i32>(idot(pw1, vw1.x), idot(pw1, vw1.y), idot(pw1, vw1.z), idot(pw1, vw1.w));
-      p2_0 = p2_0 + vec4<i32>(idot(pw2, vw0.x), idot(pw2, vw0.y), idot(pw2, vw0.z), idot(pw2, vw0.w));
-      p2_1 = p2_1 + vec4<i32>(idot(pw2, vw1.x), idot(pw2, vw1.y), idot(pw2, vw1.z), idot(pw2, vw1.w));
-      p3_0 = p3_0 + vec4<i32>(idot(pw3, vw0.x), idot(pw3, vw0.y), idot(pw3, vw0.z), idot(pw3, vw0.w));
-      p3_1 = p3_1 + vec4<i32>(idot(pw3, vw1.x), idot(pw3, vw1.y), idot(pw3, vw1.z), idot(pw3, vw1.w));
+    // ---- PV: my 4 rows × the columns {64·g + 4·tx + c}, one column group at a time ----
+    {
+      var p0_0: vec4<i32> = vec4<i32>(0);
+      var p1_0: vec4<i32> = vec4<i32>(0);
+      var p2_0: vec4<i32> = vec4<i32>(0);
+      var p3_0: vec4<i32> = vec4<i32>(0);
+      for (var p4 = 0u; p4 < 4u; p4 = p4 + 1u) {
+        {
+          let pw = pt[(p4 * 4u + 0u) * 17u + ty];
+          let vv = vt[(p4 * 4u + 0u) * 33u + tx];
+          p0_0 = p0_0 + vec4<i32>(idot(pw.x, vv.x), idot(pw.x, vv.y), idot(pw.x, vv.z), idot(pw.x, vv.w));
+          p1_0 = p1_0 + vec4<i32>(idot(pw.y, vv.x), idot(pw.y, vv.y), idot(pw.y, vv.z), idot(pw.y, vv.w));
+          p2_0 = p2_0 + vec4<i32>(idot(pw.z, vv.x), idot(pw.z, vv.y), idot(pw.z, vv.z), idot(pw.z, vv.w));
+          p3_0 = p3_0 + vec4<i32>(idot(pw.w, vv.x), idot(pw.w, vv.y), idot(pw.w, vv.z), idot(pw.w, vv.w));
+        }
+        {
+          let pw = pt[(p4 * 4u + 1u) * 17u + ty];
+          let vv = vt[(p4 * 4u + 1u) * 33u + tx];
+          p0_0 = p0_0 + vec4<i32>(idot(pw.x, vv.x), idot(pw.x, vv.y), idot(pw.x, vv.z), idot(pw.x, vv.w));
+          p1_0 = p1_0 + vec4<i32>(idot(pw.y, vv.x), idot(pw.y, vv.y), idot(pw.y, vv.z), idot(pw.y, vv.w));
+          p2_0 = p2_0 + vec4<i32>(idot(pw.z, vv.x), idot(pw.z, vv.y), idot(pw.z, vv.z), idot(pw.z, vv.w));
+          p3_0 = p3_0 + vec4<i32>(idot(pw.w, vv.x), idot(pw.w, vv.y), idot(pw.w, vv.z), idot(pw.w, vv.w));
+        }
+        {
+          let pw = pt[(p4 * 4u + 2u) * 17u + ty];
+          let vv = vt[(p4 * 4u + 2u) * 33u + tx];
+          p0_0 = p0_0 + vec4<i32>(idot(pw.x, vv.x), idot(pw.x, vv.y), idot(pw.x, vv.z), idot(pw.x, vv.w));
+          p1_0 = p1_0 + vec4<i32>(idot(pw.y, vv.x), idot(pw.y, vv.y), idot(pw.y, vv.z), idot(pw.y, vv.w));
+          p2_0 = p2_0 + vec4<i32>(idot(pw.z, vv.x), idot(pw.z, vv.y), idot(pw.z, vv.z), idot(pw.z, vv.w));
+          p3_0 = p3_0 + vec4<i32>(idot(pw.w, vv.x), idot(pw.w, vv.y), idot(pw.w, vv.z), idot(pw.w, vv.w));
+        }
+        {
+          let pw = pt[(p4 * 4u + 3u) * 17u + ty];
+          let vv = vt[(p4 * 4u + 3u) * 33u + tx];
+          p0_0 = p0_0 + vec4<i32>(idot(pw.x, vv.x), idot(pw.x, vv.y), idot(pw.x, vv.z), idot(pw.x, vv.w));
+          p1_0 = p1_0 + vec4<i32>(idot(pw.y, vv.x), idot(pw.y, vv.y), idot(pw.y, vv.z), idot(pw.y, vv.w));
+          p2_0 = p2_0 + vec4<i32>(idot(pw.z, vv.x), idot(pw.z, vv.y), idot(pw.z, vv.z), idot(pw.z, vv.w));
+          p3_0 = p3_0 + vec4<i32>(idot(pw.w, vv.x), idot(pw.w, vv.y), idot(pw.w, vv.z), idot(pw.w, vv.w));
+        }
+      }
+      o0_0 = o0_0 + vec4<f32>(p0_0);
+      o1_0 = o1_0 + vec4<f32>(p1_0);
+      o2_0 = o2_0 + vec4<f32>(p2_0);
+      o3_0 = o3_0 + vec4<f32>(p3_0);
     }
-    o0_0 = o0_0 + vec4<f32>(p0_0);
-    o0_1 = o0_1 + vec4<f32>(p0_1);
-    o1_0 = o1_0 + vec4<f32>(p1_0);
-    o1_1 = o1_1 + vec4<f32>(p1_1);
-    o2_0 = o2_0 + vec4<f32>(p2_0);
-    o2_1 = o2_1 + vec4<f32>(p2_1);
-    o3_0 = o3_0 + vec4<f32>(p3_0);
-    o3_1 = o3_1 + vec4<f32>(p3_1);
+    {
+      var p0_1: vec4<i32> = vec4<i32>(0);
+      var p1_1: vec4<i32> = vec4<i32>(0);
+      var p2_1: vec4<i32> = vec4<i32>(0);
+      var p3_1: vec4<i32> = vec4<i32>(0);
+      for (var p4 = 0u; p4 < 4u; p4 = p4 + 1u) {
+        {
+          let pw = pt[(p4 * 4u + 0u) * 17u + ty];
+          let vv = vt[(p4 * 4u + 0u) * 33u + 16u + tx];
+          p0_1 = p0_1 + vec4<i32>(idot(pw.x, vv.x), idot(pw.x, vv.y), idot(pw.x, vv.z), idot(pw.x, vv.w));
+          p1_1 = p1_1 + vec4<i32>(idot(pw.y, vv.x), idot(pw.y, vv.y), idot(pw.y, vv.z), idot(pw.y, vv.w));
+          p2_1 = p2_1 + vec4<i32>(idot(pw.z, vv.x), idot(pw.z, vv.y), idot(pw.z, vv.z), idot(pw.z, vv.w));
+          p3_1 = p3_1 + vec4<i32>(idot(pw.w, vv.x), idot(pw.w, vv.y), idot(pw.w, vv.z), idot(pw.w, vv.w));
+        }
+        {
+          let pw = pt[(p4 * 4u + 1u) * 17u + ty];
+          let vv = vt[(p4 * 4u + 1u) * 33u + 16u + tx];
+          p0_1 = p0_1 + vec4<i32>(idot(pw.x, vv.x), idot(pw.x, vv.y), idot(pw.x, vv.z), idot(pw.x, vv.w));
+          p1_1 = p1_1 + vec4<i32>(idot(pw.y, vv.x), idot(pw.y, vv.y), idot(pw.y, vv.z), idot(pw.y, vv.w));
+          p2_1 = p2_1 + vec4<i32>(idot(pw.z, vv.x), idot(pw.z, vv.y), idot(pw.z, vv.z), idot(pw.z, vv.w));
+          p3_1 = p3_1 + vec4<i32>(idot(pw.w, vv.x), idot(pw.w, vv.y), idot(pw.w, vv.z), idot(pw.w, vv.w));
+        }
+        {
+          let pw = pt[(p4 * 4u + 2u) * 17u + ty];
+          let vv = vt[(p4 * 4u + 2u) * 33u + 16u + tx];
+          p0_1 = p0_1 + vec4<i32>(idot(pw.x, vv.x), idot(pw.x, vv.y), idot(pw.x, vv.z), idot(pw.x, vv.w));
+          p1_1 = p1_1 + vec4<i32>(idot(pw.y, vv.x), idot(pw.y, vv.y), idot(pw.y, vv.z), idot(pw.y, vv.w));
+          p2_1 = p2_1 + vec4<i32>(idot(pw.z, vv.x), idot(pw.z, vv.y), idot(pw.z, vv.z), idot(pw.z, vv.w));
+          p3_1 = p3_1 + vec4<i32>(idot(pw.w, vv.x), idot(pw.w, vv.y), idot(pw.w, vv.z), idot(pw.w, vv.w));
+        }
+        {
+          let pw = pt[(p4 * 4u + 3u) * 17u + ty];
+          let vv = vt[(p4 * 4u + 3u) * 33u + 16u + tx];
+          p0_1 = p0_1 + vec4<i32>(idot(pw.x, vv.x), idot(pw.x, vv.y), idot(pw.x, vv.z), idot(pw.x, vv.w));
+          p1_1 = p1_1 + vec4<i32>(idot(pw.y, vv.x), idot(pw.y, vv.y), idot(pw.y, vv.z), idot(pw.y, vv.w));
+          p2_1 = p2_1 + vec4<i32>(idot(pw.z, vv.x), idot(pw.z, vv.y), idot(pw.z, vv.z), idot(pw.z, vv.w));
+          p3_1 = p3_1 + vec4<i32>(idot(pw.w, vv.x), idot(pw.w, vv.y), idot(pw.w, vv.z), idot(pw.w, vv.w));
+        }
+      }
+      o0_1 = o0_1 + vec4<f32>(p0_1);
+      o1_1 = o1_1 + vec4<f32>(p1_1);
+      o2_1 = o2_1 + vec4<f32>(p2_1);
+      o3_1 = o3_1 + vec4<f32>(p3_1);
+    }
     workgroupBarrier(); // the next tile overwrites kt / vt / pt
   }
   red[(ty * 4u + 0u) * 16u + tx] = l0;
@@ -299,66 +368,34 @@ fn main(
     let c0 = b0 + b2; let c1 = b1 + b3;
     l3 = c0 + c1;
   }
-  let vs0 = vec4<f32>(vs[bh * 128u + tx], vs[bh * 128u + tx + 16u], vs[bh * 128u + tx + 32u], vs[bh * 128u + tx + 48u]);
-  let vs1 = vec4<f32>(vs[bh * 128u + tx + 64u], vs[bh * 128u + tx + 80u], vs[bh * 128u + tx + 96u], vs[bh * 128u + tx + 112u]);
+  let vs0 = vs[bh * 32u + tx];
+  let vs1 = vs[bh * 32u + 16u + tx];
   if (qrow0 < dims.m) {
     // MUST: 1/127 by multiplication; O · vs[d] first, then the row factor
     let f0 = INV_P / l0;
-    let ob0 = (bh * dims.m + qrow0) * 128u;
-    let ov0_0 = (o0_0 * vs0) * f0;
-    o[ob0 + tx] = ov0_0.x;
-    o[ob0 + tx + 16u] = ov0_0.y;
-    o[ob0 + tx + 32u] = ov0_0.z;
-    o[ob0 + tx + 48u] = ov0_0.w;
-    let ov0_1 = (o0_1 * vs1) * f0;
-    o[ob0 + tx + 64u] = ov0_1.x;
-    o[ob0 + tx + 80u] = ov0_1.y;
-    o[ob0 + tx + 96u] = ov0_1.z;
-    o[ob0 + tx + 112u] = ov0_1.w;
+    let ob0 = (bh * dims.m + qrow0) * 32u;
+    o[ob0 + tx] = (o0_0 * vs0) * f0;
+    o[ob0 + 16u + tx] = (o0_1 * vs1) * f0;
   }
   if (qrow1 < dims.m) {
     // MUST: 1/127 by multiplication; O · vs[d] first, then the row factor
     let f1 = INV_P / l1;
-    let ob1 = (bh * dims.m + qrow1) * 128u;
-    let ov1_0 = (o1_0 * vs0) * f1;
-    o[ob1 + tx] = ov1_0.x;
-    o[ob1 + tx + 16u] = ov1_0.y;
-    o[ob1 + tx + 32u] = ov1_0.z;
-    o[ob1 + tx + 48u] = ov1_0.w;
-    let ov1_1 = (o1_1 * vs1) * f1;
-    o[ob1 + tx + 64u] = ov1_1.x;
-    o[ob1 + tx + 80u] = ov1_1.y;
-    o[ob1 + tx + 96u] = ov1_1.z;
-    o[ob1 + tx + 112u] = ov1_1.w;
+    let ob1 = (bh * dims.m + qrow1) * 32u;
+    o[ob1 + tx] = (o1_0 * vs0) * f1;
+    o[ob1 + 16u + tx] = (o1_1 * vs1) * f1;
   }
   if (qrow2 < dims.m) {
     // MUST: 1/127 by multiplication; O · vs[d] first, then the row factor
     let f2 = INV_P / l2;
-    let ob2 = (bh * dims.m + qrow2) * 128u;
-    let ov2_0 = (o2_0 * vs0) * f2;
-    o[ob2 + tx] = ov2_0.x;
-    o[ob2 + tx + 16u] = ov2_0.y;
-    o[ob2 + tx + 32u] = ov2_0.z;
-    o[ob2 + tx + 48u] = ov2_0.w;
-    let ov2_1 = (o2_1 * vs1) * f2;
-    o[ob2 + tx + 64u] = ov2_1.x;
-    o[ob2 + tx + 80u] = ov2_1.y;
-    o[ob2 + tx + 96u] = ov2_1.z;
-    o[ob2 + tx + 112u] = ov2_1.w;
+    let ob2 = (bh * dims.m + qrow2) * 32u;
+    o[ob2 + tx] = (o2_0 * vs0) * f2;
+    o[ob2 + 16u + tx] = (o2_1 * vs1) * f2;
   }
   if (qrow3 < dims.m) {
     // MUST: 1/127 by multiplication; O · vs[d] first, then the row factor
     let f3 = INV_P / l3;
-    let ob3 = (bh * dims.m + qrow3) * 128u;
-    let ov3_0 = (o3_0 * vs0) * f3;
-    o[ob3 + tx] = ov3_0.x;
-    o[ob3 + tx + 16u] = ov3_0.y;
-    o[ob3 + tx + 32u] = ov3_0.z;
-    o[ob3 + tx + 48u] = ov3_0.w;
-    let ov3_1 = (o3_1 * vs1) * f3;
-    o[ob3 + tx + 64u] = ov3_1.x;
-    o[ob3 + tx + 80u] = ov3_1.y;
-    o[ob3 + tx + 96u] = ov3_1.z;
-    o[ob3 + tx + 112u] = ov3_1.w;
+    let ob3 = (bh * dims.m + qrow3) * 32u;
+    o[ob3 + tx] = (o3_0 * vs0) * f3;
+    o[ob3 + 16u + tx] = (o3_1 * vs1) * f3;
   }
 }
