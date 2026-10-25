@@ -23,8 +23,8 @@
  * tx+48}` of the tile, in the PV phase the output columns `{64·g + 4·tx + c}` (column group `g`,
  * component `c`). All four tiles are arrays of `vec4<u32>`, so every shared-memory access of the
  * two dot-product loops is one 16-byte load. Measured against the first layout (key `v1`) on the
- * RTX 3080 Ti: self-attention ×1.48, cross-attention ×2.29, bit-identical (research
- * 2026-10-25-speed-recon-3080ti §4):
+ * RTX 3080 Ti: self-attention ×1.44–1.46, cross-attention ×2.0, bit-identical (ADR 0132 addendum
+ * of 2026-10-25):
  *
  * - the `q` and `k` tiles hold a row as `D/16` vec4 words padded by one (`qkStride`), so the 16
  *   lanes of a row read 16 different 16-byte bank groups;
@@ -32,7 +32,7 @@
  *   word `w` of a column packs the keys `{w, w+16, w+32, w+48}` (gathered byte-wise from the
  *   quantised Vᵀ, whose words pack four consecutive keys). It is filled by **owner** threads: a
  *   thread owns one whole vec4 `(pk, d4)`, consecutive lanes take consecutive `pk` of the same
- *   columns (so each byte load of a half-warp reads one 64-byte row segment), and the vec4 is
+ *   columns (so a half-warp's four byte loads of a column cover one 64-byte row segment), and the vec4 is
  *   stored at once. The row stride `D/4 + 1` breaks the conflicts of those stores;
  * - the P̃ tile is **transposed**: vec4 `(w, ty)` holds word `w` of the four rows of `ty`, one
  *   whole-vector store per thread; the PV loop reads one vec4 per key word and takes component

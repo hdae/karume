@@ -49,7 +49,7 @@ measurements in `docs/research/`.
   absence). The manifest vocabulary (`@karume/hub`) accepts the value; the preset name token is
   `online`.
 - Wan2.2 ships a third preset, `f16+dit8-a8-attn8-online` (same weights as the s16 preset): at
-  1280×704×121 one DiT forward on an RTX 3080 Ti takes about 22 s instead of 24–29 s, with the same
+  1280×704×121 one DiT forward on an RTX 3080 Ti takes about 16–19 s instead of 24–29 s, with the same
   step-1 error against the reference preset as the s16 preset (relRMS 0.042 vs 0.044 at 33 frames).
   Its transformer and attention are what the new default preset (below) runs; `quant:
   "f16+dit8-a8-attn8-s16"` still selects the previous default.
