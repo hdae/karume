@@ -200,8 +200,9 @@ storage of decision 5 is given under "Workgroup storage" below.
   and cross shapes. A fault injected into v2 (two rows of P̃ swapped) was caught at 6.1 M words.
   Every Wan sha256 row is unchanged. These checks ran on Vulkan / NVIDIA (RTX 3080 Ti). On D3D12
   only the recon's spike of these layouts was compared with v1 (0 differing words on the RTX 5070
-  Ti); v2 itself is checked there by the playground's 17-frame quick-check hash of the default
-  preset (runbook step 01), compared before and after the switch. The f32 operations keep v1's
+  Ti). After the switch v2 itself was checked there: the playground's 17-frame quick-check hash
+  of the default preset (runbook step 01) is unchanged, and runbook step 02 (run 3) times the spike
+  against v2 at ×1.004–1.005 with 0 differing words. The f32 operations keep v1's
   order, but a driver compiler may contract a multiply and a later add into an FMA differently in
   the two kernels, so those end-to-end hashes are the check, not this argument.
 - **MUST compliance**: every workgroup store is a whole `vec4` or a whole scalar. No component is
@@ -215,4 +216,6 @@ storage of decision 5 is given under "Workgroup storage" below.
 - **Landing condition** (the maintainer's ruling of 2026-10-25): v2 replaces v1 when the recon's
   spike of these layouts (`bestC-split`, runbook step 02a) runs at least as fast as v1 on the RTX
   5070 Ti (Chrome, D3D12); otherwise both stay, chosen per adapter. Met on 2026-10-25 with the
-  figures under "Why" (one run of the two the runbook asks for; the margin over ×1.0 is wide).
+  figures under "Why" (two runs agree). After the landing the production route bench on the RTX
+  5070 Ti reads online ×1.66 (self, 33 frames), ×1.69 (121 frames) and ×2.15 (cross) over v1, and
+  online / s16 0.80 / 0.69 / 0.70 (v1: 1.31 / 1.18 / 1.50).
