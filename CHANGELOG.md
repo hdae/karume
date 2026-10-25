@@ -34,6 +34,13 @@ measurements in `docs/research/`.
 - `GpuContext.beginBatch` on a device acquired with `gpuTiming: true` no longer throws: the batch runs
   untimed, and runs before and after it keep their per-kernel breakdown (ADR 0021 addendum of
   2026-10-24). The Wan pipelines accept such a device; their VAE decoder (batches) reports no timing.
+- The Wan DiTs fuse more small ops (ADR 0040 addendum of 2026-10-25): an a8 linear quantizes its gelu input
+  directly (the gelu output is never stored; also anima's a8 presets), the fused attention reads q / k / v token-major
+  under an a8 attention seat (no permute copies; Vᵀ from one tiled transpose), and rms_norm → pair RoPE runs as one kernel.
+  Outputs are bit-identical. One 33-frame Wan2.2 DiT forward of the default preset takes 2,825 ms of GPU time instead of
+  2,927 ms on an RTX 3080 Ti (2,043 → 1,772 dispatches). `FusionCounts` gains `linearPrologue`, `attentionPermute` and
+  `rmsNormRope`; on the Wan DiTs the 60 `rope` fusions are now counted as `rmsNormRope`. `EstimateOptions` takes
+  `linearCompute` so the estimate sees the folded gelu.
 
 ### Added
 
