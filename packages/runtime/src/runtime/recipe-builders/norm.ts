@@ -15,6 +15,7 @@ import {
   RMS_NORM_128_WGSL,
   RMS_NORM_KEY,
   RMS_NORM_WGSL,
+  rmsNormKernel,
   rmsNormParams,
 } from "../../kernels/rms-norm.ts";
 import {
@@ -137,10 +138,19 @@ export const buildRmsNorm = async (
   const dim = shape[shape.length - 1];
   const rows = numel(shape.slice(0, -1));
   const eps = rmsNormEps(step.node.attrs, `nodes (${step.node.op})`);
-  const narrow = dim > 0 && dim <= 128;
-  const subgroup = !narrow && face.state.rmsNormReduce === "subgroup32";
-  const key = narrow ? RMS_NORM_128_KEY : subgroup ? rmsNormSubgroupKey() : RMS_NORM_KEY;
-  const wgsl = narrow ? RMS_NORM_128_WGSL : subgroup ? rmsNormSubgroupWgsl() : RMS_NORM_WGSL;
+  const kernel = rmsNormKernel(dim, face.state.rmsNormReduce);
+  const key =
+    kernel === "workgroup128"
+      ? RMS_NORM_128_KEY
+      : kernel === "subgroup32"
+        ? rmsNormSubgroupKey()
+        : RMS_NORM_KEY;
+  const wgsl =
+    kernel === "workgroup128"
+      ? RMS_NORM_128_WGSL
+      : kernel === "subgroup32"
+        ? rmsNormSubgroupWgsl()
+        : RMS_NORM_WGSL;
   const { pipeline, layout, roles } = await face.state.cache.get(key, wgsl);
   const params = face.writeParams(rmsNormParams(rows, dim, eps), PARAMS_UNIFORM_USAGE);
   const groups = gridStrideWorkgroups(

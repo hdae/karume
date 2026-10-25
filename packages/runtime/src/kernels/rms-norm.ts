@@ -134,6 +134,24 @@ export const RMS_NORM_WGSL: string = rmsNormWgsl(RMS_NORM_WORKGROUP_SIZE);
 export const RMS_NORM_128_KEY = "rms_norm:v1:f32:lastdim:wg128";
 export const RMS_NORM_128_WGSL: string = rmsNormWgsl(128);
 
+/** The plain rms_norm kernels (the 128- / 256-wide workgroup forms here, the subgroup form of ADR 0100). */
+export type RmsNormKernel = "workgroup128" | "workgroup256" | "subgroup32";
+
+/**
+ * The plain rms_norm kernel a row of `dim` elements runs: the 128-wide workgroup form for dim ≤ 128,
+ * else the subgroup form when the Session asks for it (`rmsNormReduce: "subgroup32"`), else the
+ * 256-wide workgroup form ({@link RMS_NORM_KEY}).
+ *
+ * MUST: this is the one decision — `buildRmsNorm` (runtime/recipe-builders/norm.ts) and the fusion
+ * rule `rmsNormRope` (whose kernel shares the 256-wide form's reduction text and is bit-identical to
+ * it only) both ask it, so the fused form exists exactly where the plain path runs that kernel.
+ */
+export const rmsNormKernel = (
+  dim: number,
+  reduce: "workgroup" | "subgroup32" | undefined,
+): RmsNormKernel =>
+  dim > 0 && dim <= 128 ? "workgroup128" : reduce === "subgroup32" ? "subgroup32" : "workgroup256";
+
 /**
  * Opt-in RMS → add fusion (DECIDED: docs/decisions/0099-rms-norm-add-fusion.md).
  * Connected directly, the last multiply and the add fuse and the rounding changes, so an integer
