@@ -61,7 +61,12 @@ const solvedShapes = (
 /**
  * The Wan2.2 DiT (30 blocks + the head), measured 2026-10-24:
  *
- * - **rope 60**: the pair-form RoPE of q and k in the 30 self-attention blocks.
+ * - **rmsNormRope 60** (counted 2026-10-25): the q and k prologues of the 30 self-attention blocks,
+ *   `rms_norm` over the 3,072-wide token row → two reshapes → the pair-form RoPE, each folded into
+ *   one dispatch (perf-ledger F-3 stage 3). So **rope 0**: every pair-form RoPE of this DiT (60 —
+ *   the `rope` count before 2026-10-25) now folds with its rms_norm; the rms_norm takes the 256-wide
+ *   workgroup kernel here (`rmsNormReduce` is not set), and under `"subgroup32"` the RoPEs would
+ *   fold alone again (rope 60).
  * - **adaln 61**: the per-token adaLN (`where` picks the condition / generation vector per token)
  *   before the self-attention and before the FFN of the 30 blocks, plus the head's.
  * - **gatedResidual 60**: the per-token gated residual after the self-attention output projection
@@ -83,12 +88,12 @@ const solvedShapes = (
  * that notices.
  */
 test.skipIf(!WAN22_AVAILABLE)(
-  "the real Wan2.2 DiT grabs rope 60 / adaln 61 / gatedResidual 60 / silu 4 per run (plus linearPrologue 31 under a8, and attentionPermute 180 under the a8 attention seat), and the VAE chunk graphs keep their counts",
+  "the real Wan2.2 DiT grabs rmsNormRope 60 / adaln 61 / gatedResidual 60 / silu 4 per run (plus linearPrologue 31 under a8, and attentionPermute 180 under the a8 attention seat), and the VAE chunk graphs keep their counts",
   async () => {
     const transformer = await readWan22Graph("transformer", "i8");
     for (const sequence of [192, 7920]) {
       const shapes = solvedShapes(transformer, sequence);
-      const counts = { ...NONE, silu: 4, rope: 60, adaln: 61, gatedResidual: 60 };
+      const counts = { ...NONE, silu: 4, rmsNormRope: 60, adaln: 61, gatedResidual: 60 };
       assertEquals(fusionCounts(transformer, shapes), counts, `transformer S=${sequence}`);
       assertEquals(
         fusionCounts(transformer, shapes, undefined, false, false, false, "a8"),

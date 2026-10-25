@@ -225,7 +225,10 @@ const B570_STORAGE_BINDING_LIMIT = 2_147_483_644;
  * - `adaln` 61: the per-token adaLN (`where(condition_mask, …)` picks the condition / generation
  *   vector per token — decision 3) before the self-attention and the FFN of the 30 blocks, plus
  *   the head's — ADALN_RULE's per-token form (2026-10-24).
- * - `rope` 60: the pair-form RoPE of q and k in the 30 self-attention blocks (2026-10-24).
+ * - `rmsNormRope` 60: the q and k prologues of the 30 self-attention blocks (`rms_norm` over the
+ *   token row → two reshapes → the pair-form RoPE, one dispatch each — 2026-10-25).
+ * - `rope` 0: those 60 pair-form RoPEs (the `rope` count of 2026-10-24) now fold with their
+ *   rms_norm.
  * - `gatedResidual` 60: the per-token gated residual after the self-attention output projection
  *   and after the FFN of the 30 blocks (2026-10-24).
  * - `silu` 4: the time MLP's two SiLUs (inside `time_embedder` and `act_fn`) run twice at M = 1
@@ -233,7 +236,8 @@ const B570_STORAGE_BINDING_LIMIT = 2_147_483_644;
  */
 const EXPECTED_FUSIONS: Partial<FusionCounts> = {
   adaln: 61,
-  rope: 60,
+  rmsNormRope: 60,
+  rope: 0,
   gatedResidual: 60,
   silu: 4,
 };

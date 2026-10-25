@@ -881,7 +881,12 @@ const postFusionSteps = (
   // so the running node count of the step list always points at the start of the next window.
   // Row-block attention windows have no passthrough (window = chain), so this running count is
   // their start in the pre-fusion list as is. A node step that absorbed its neighbours (a folded
-  // producer, absorbed permutes) stands for `nodeStepSpan` contiguous nodes.
+  // producer, absorbed permutes) stands for `nodeStepSpan` contiguous nodes. A window that defers
+  // nodes (rmsNormRope — "Deferred nodes" in fusion.ts) lays out its fused step first and its
+  // deferred nodes after it, so inside that region the count is the position in the scanned list,
+  // and it is the pre-fusion position again once they are laid out. No step kept here starts in
+  // such a region: the deferred nodes are `rms_norm` / `reshape`, which head none of them (the
+  // MUST on `FusionMatch.others`).
   let index = 0;
   for (const step of steps) {
     if (step.kind === "node") {

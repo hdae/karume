@@ -26,7 +26,7 @@ import {
 } from "../fusion-rule.ts";
 import type { NodePlan } from "../plan.ts";
 
-type RopeMatch = FusionMatch & {
+export type RopeMatch = FusionMatch & {
   /**
    * The bind surface in kernel binding order (half: x, cos, sin / pair: x, pairs, cos, sin).
    */
@@ -63,8 +63,11 @@ type RopeMatch = FusionMatch & {
  * accepted (this form has no in-window passthrough), while the later uses have exactly this form.
  *
  * Total uses of external inputs: pairs twice (slice×2), x / cos / sin once each.
+ *
+ * Shared with the rule `rmsNormRope` ({@link "./rms-norm-rope.ts"}), whose window ends in exactly
+ * this form — one matcher, so the two rules cannot disagree on what a pair-form RoPE is.
  */
-const matchPairForm = (
+export const matchRopePairForm = (
   nodes: readonly NodePlan[],
   index: number,
   context: FusionScanContext,
@@ -161,7 +164,7 @@ const matchPairForm = (
 };
 
 /**
- * Two exact forms: the half split below, and the pair form ({@link matchPairForm}).
+ * Two exact forms: the half split below, and the pair form ({@link matchRopePairForm}).
  *
  * half-split RoPE: the **7 consecutive nodes** the exporter produces. Only two orders are
  * accepted: slice-first (attention) and direct-mul-first (text encoders / the Gemma family).
@@ -174,7 +177,7 @@ const matchPairForm = (
  * `0-D/2` / `D/2-D`. The head width D has **two measured values (128 and 256)**, so it is
  * derived from the slice boundaries; but other broadcasts and other cat axes are not admitted
  * because "the formula looks similar", and the pair form (`slice, neg, slice, cat` — a different
- * rotation) is a separate exact matcher ({@link matchPairForm}) with its own kernel variant — the
+ * rotation) is a separate exact matcher ({@link matchRopePairForm}) with its own kernel variant — the
  * moment the accepted set widens, the fallback guarantee ("if it does not match, the existing path
  * is always correct") stops holding. The kernel (kernels/rope.ts) takes `head_dim` / `half_dim` as
  * uniforms, so generalising D needs no WGSL change.
@@ -201,7 +204,7 @@ export const ROPE_RULE = defineRule<RopeMatch>({
     // The pair form shares the leading `slice`; its second op (`neg`) tells it apart from the half
     // split (whose second op is a `slice`) before the cursor walk below.
     if (!directFirst && nodes[index + 1]?.node.op === "neg") {
-      return matchPairForm(nodes, index, context);
+      return matchRopePairForm(nodes, index, context);
     }
     let cursor = index + (directFirst ? 1 : 0);
     const first = nodes[cursor];

@@ -482,14 +482,18 @@ const B570_STORAGE_BINDING_LIMIT = 2_147_483_644;
  *   **before** the layer_norm, so there are 0 reshapes in between and it is not grabbed (as ADR
  *   0118 decision 3 guessed; widening the rule is a separate perf item, perf-ledger K-73). 2.1 has
  *   no per-token `where` either, so the per-token form does not apply.
- * - `rope` 60: the pair-form RoPE (the complex rotation in real numbers) of q and k in the 30
- *   self-attention blocks — ROPE_RULE's second exact form (2026-10-24).
+ * - `rmsNormRope` 60: the q and k prologues of the 30 self-attention blocks — `rms_norm` over the
+ *   token row, two reshapes, then the pair-form RoPE (the complex rotation in real numbers), one
+ *   dispatch each (2026-10-25).
+ * - `rope` 0: those 60 pair-form RoPEs (ROPE_RULE's second exact form, the `rope` count of
+ *   2026-10-24) now fold with their rms_norm.
  * - `gatedResidual` 0: 2.1's gates are broadcast vectors (no per-token `where`).
  * - `silu` 2: the two SiLUs of the time-embedding MLP (inside `time_embedder` and `act_fn`).
  */
 const EXPECTED_FUSIONS: Partial<FusionCounts> = {
   adaln: 0,
-  rope: 60,
+  rmsNormRope: 60,
+  rope: 0,
   gatedResidual: 0,
   silu: 2,
 };

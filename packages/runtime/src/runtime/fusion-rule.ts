@@ -23,6 +23,7 @@ type FusionRuleName =
   | "silu"
   | "upsample2x"
   | "rope"
+  | "rmsNormRope"
   | "adaln"
   | "gatedResidual"
   | "rowBlockAttention";
@@ -399,6 +400,35 @@ export const internalsArePrivate = (chain: readonly NodePlan[], context: FusionC
     );
 
 /**
+ * {@link internalsArePrivate} for a chain that reads an internal value **more than once**: every
+ * use of every internal value (counted with repeats) is an input slot of a node of the chain, there
+ * is at least one, and none is a graph output. The fold loses no value for the same reason (no
+ * consumer outside the chain, no readback).
+ *
+ * MUST: only a matcher that pins **every** slot an internal value may occupy uses this, and its
+ * bind surface holds no internal value. Counted reads alone do not know which slot reads the value:
+ * under this predicate `add(n, n)` after `rms_norm → n` would pass, and the rmsNormAdd matcher would
+ * bind `n` — a value fusion never materialises — as its residual. That is why it does not replace
+ * {@link internalsArePrivate} for every rule (those matchers rely on "one use" to keep an internal
+ * value out of their bind surfaces).
+ */
+export const internalsStayInChain = (
+  chain: readonly NodePlan[],
+  context: FusionContext,
+): boolean => {
+  const reads = new Map<string, number>();
+  for (const step of chain) {
+    for (const name of step.node.ins) reads.set(name, (reads.get(name) ?? 0) + 1);
+  }
+  return chain.slice(0, -1).every((step) =>
+    step.outputs.every((out) => {
+      const uses = context.useCounts.get(out.name) ?? 0;
+      return uses > 0 && uses === reads.get(out.name) && !context.outputNames.has(out.name);
+    }),
+  );
+};
+
+/**
  * The total-use list of the external inputs the chain consumed (duplicates included, in the order
  * of the original node.ins). Internal values are folded away and excluded (every output of those
  * nodes is an internal value).
@@ -427,6 +457,9 @@ const externalIns = (chain: readonly NodePlan[]): readonly string[] => {
  * a window where "the **last** node of the chain comes before the passthrough"; internalsArePrivate
  * does not look at the last output, so it is no substitute. It sits in `defineRule` as an invariant
  * of the window mechanism.
+ * The same check holds for the **deferred** nodes ({@link FusionMatch.others}): they run after the
+ * fused step, but an internal value is never materialised, so they may read none either (the
+ * rmsNormRope rule's {@link internalsStayInChain} rejects such a read first, for the same reason).
  */
 export const passthroughIsIndependent = (
   chain: readonly NodePlan[],
@@ -437,12 +470,39 @@ export const passthroughIsIndependent = (
   return passthrough.every((step) => step.node.ins.every((name) => !defined.has(name)));
 };
 
-/** The result of applying one fusion rule (fused step + in-window passthroughs + scan width). */
+/**
+ * Whether the deferred nodes of a window ({@link FusionMatch.others}) may move **behind** the fused
+ * step: no node of the chain consumes a value they define.
+ *
+ * MUST: the fused step takes the window's place and the deferred nodes follow it, so a chain node
+ * that read a deferred node's output would read a value not yet computed (the same failure as
+ * {@link passthroughIsIndependent}'s, in the other direction). Together the two checks make the
+ * chain and the deferred nodes independent both ways, so their relative order is free.
+ */
+export const deferralIsIndependent = (
+  chain: readonly NodePlan[],
+  deferred: readonly NodePlan[],
+): boolean => {
+  if (deferred.length === 0) return true;
+  const defined = new Set(deferred.flatMap((step) => step.outputs.map((out) => out.name)));
+  return chain.every((step) => step.node.ins.every((name) => !defined.has(name)));
+};
+
+/** The result of applying one fusion rule (fused step + the window's other nodes + scan width). */
 export type FusionHit = {
   /** In-window nodes placed as plain nodes **before** the fused step (original node order). */
   readonly passthrough: readonly NodePlan[];
+  /**
+   * In-window nodes placed **after** the fused step and **scanned again** (original node order) —
+   * the scan writes them into the window's last slots and resumes at the first of them, so one of
+   * them may head another window ({@link FusionMatch.others}).
+   */
+  readonly deferred: readonly NodePlan[];
   readonly step: FusedStep;
-  /** How far the scan advances (= the window's node count = passthroughs + the folded chain). */
+  /**
+   * The window's node count (passthroughs + the folded chain + the deferred nodes). The scan moves
+   * past the window, less the deferred nodes it visits again.
+   */
   readonly advance: number;
 };
 
@@ -463,13 +523,27 @@ export type FusionRule = {
 
 /**
  * The window a rule grabbed. `window` is a run of consecutive nodes, `chain` the subsequence of it
- * that is **folded** (actual node order); the difference is the in-window passthroughs.
+ * that is **folded** (actual node order); the difference is the in-window passthroughs, or the
+ * deferred nodes ({@link FusionMatch.others}).
  */
 export type FusionMatch = {
   /** The consecutive window (the only basis of the scan width). */
   readonly window: readonly NodePlan[];
   /** The folded nodes (a subsequence of `window`). */
   readonly chain: readonly NodePlan[];
+  /**
+   * Where the window's other nodes go. Omitted: **before** the fused step, as in-window
+   * passthroughs (the chain may read them). `"deferred"`: **after** it, where the scan visits them
+   * again ({@link FusionHit.deferred}) — for a chain interleaved with nodes of another chain (the Wan
+   * DiT's q and k prologues), whose head would otherwise be emitted as a plain passthrough and never
+   * fold. Legal only when the chain and those nodes are independent both ways
+   * ({@link passthroughIsIndependent} and {@link deferralIsIndependent}, checked by `defineRule`).
+   * MUST: defer only nodes that cannot head a step the estimate keeps in post-fusion form (a
+   * row-block attention's `bmm`, a linear-prologue producer, a permute an attention absorbs).
+   * `postFusionSteps` in estimate.ts places those steps by the running node count, which inside a
+   * deferred region is the position in the scanned list, not in the declaration order.
+   */
+  readonly others?: "deferred";
 };
 
 /**
@@ -506,8 +580,8 @@ const assertTempLifetimes = (
  * Enforces by type the separation of match (grab) and build (declare binds / kernel key / params).
  *
  * MUST: the basis of the release bookkeeping (the total-use list `ins`), the folded count
- * (`nodeCount`), the scan width (`advance`) and the passthroughs are **derived from the grabbed
- * window and chain**. Having each rule declare them would copy the same fact once per
+ * (`nodeCount`), the scan width (`advance`) and the passthroughs or deferred nodes are **derived
+ * from the grabbed window and chain**. Having each rule declare them would copy the same fact once per
  * rule, and a single drift would raise no exception.
  * MUST: a window containing a multi-output node is rejected here for every rule
  * ({@link windowIsSingleOutput}).
@@ -538,20 +612,23 @@ export const defineRule = <Matched extends FusionMatch>(rule: {
     // op-name spelling.
     if (windowTouchesState(matched.window)) return undefined;
     const folded = new Set(matched.chain);
-    const passthrough = matched.window.filter((step) => !folded.has(step));
+    const others = matched.window.filter((step) => !folded.has(step));
     // MUST: the chain is a subsequence of the window. Otherwise it folded a node outside the window
     // (= the scan width is short, so it runs twice) or missed one inside it (= never runs); both
     // are silent wrong values with no exception.
-    if (passthrough.length + matched.chain.length !== matched.window.length) {
+    if (others.length + matched.chain.length !== matched.window.length) {
       throw new ExecutionError(
         `fusion rule '${rule.name}': the folded chain of ${matched.chain.length} nodes is not a subsequence of the window of ${matched.window.length} nodes`,
       );
     }
-    if (!passthroughIsIndependent(matched.chain, passthrough)) return undefined;
+    if (!passthroughIsIndependent(matched.chain, others)) return undefined;
+    const deferring = matched.others === "deferred";
+    if (deferring && !deferralIsIndependent(matched.chain, others)) return undefined;
     const built = rule.build(matched);
     assertTempLifetimes(rule.name, built.temps, built.dispatches.length);
     return {
-      passthrough,
+      passthrough: deferring ? [] : others,
+      deferred: deferring ? others : [],
       advance: matched.window.length,
       step: {
         kind: "fused",

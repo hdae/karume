@@ -11,7 +11,7 @@
  *
  * **This file is the entry of the fusion pass**; the implementation is split three ways: the shared
  * types, the eligibility conditions shared by every rule and `defineRule` in
- * {@link "./fusion-rule.ts"}; the eight rules under `fusion-rules/` (one rule = one file); and here
+ * {@link "./fusion-rule.ts"}; the nine rules under `fusion-rules/` (one rule = one file); and here
  * the declaration table {@link FUSION_RULES}, aliasing
  * ({@link planAliases}), the scan ({@link planFusions}) and candidate enumeration
  * ({@link enumerateUnfusedWindows}).
@@ -44,8 +44,8 @@
  *
  * ## The fold target is not always one dispatch
  *
- * linearStaticQuantize / rmsNormAdd / silu / upsample2x / rope / adaln / gatedResidual are "N nodes
- * → one dispatch of a private kernel" ({@link LINEAR_STATIC_QUANTIZE_RULE} folds the parallel GEMV
+ * linearStaticQuantize / rmsNormAdd / silu / upsample2x / rope / rmsNormRope / adaln / gatedResidual
+ * are "N nodes → one dispatch of a private kernel" ({@link LINEAR_STATIC_QUANTIZE_RULE} folds the parallel GEMV
  * and the fixed requantization into one dispatch), but
  * {@link ROW_BLOCK_ATTENTION_RULE} folds **the materialised width of an intermediate, not the
  * ops**, so it becomes a list of dispatches with temporaries closed inside the step
@@ -76,14 +76,18 @@
  * ## Application order
  *
  * The **declaration order** of {@link FUSION_RULES} (linearStaticQuantize → rmsNormAdd → silu →
- * upsample2x → rope → adaln → gatedResidual → rowBlockAttention).
- * The leading ops of the eight rules are `linear` / `rms_norm` / `sigmoid` / `reshape` /
- * `mul|slice` / `layer_norm` / `where` / `bmm`, pairwise disjoint,
- * so the order does not affect the result (the order matters only when leading ops overlap —
- * tests/runtime_fusion_test.ts checks mechanically from {@link FusionRule.heads} that no overlap
- * arises). A form where another rule's leading op appears **inside** a window (rowBlockAttention's
- * window contains five `reshape` / `expand`) cannot fire, because once grabbed the scan advances by
- * the window width.
+ * upsample2x → rope → rmsNormRope → adaln → gatedResidual → rowBlockAttention).
+ * The leading ops of the nine rules are `linear` / `rms_norm` / `sigmoid` / `reshape` /
+ * `mul|slice` / `rms_norm` / `layer_norm` / `where` / `bmm`, pairwise disjoint but for one pair,
+ * so the order does not affect the result (the order matters only when two rules can accept the
+ * same index — tests/runtime_fusion_test.ts checks mechanically from {@link FusionRule.heads} that
+ * no other overlap arises). The one shared head, `rms_norm` of rmsNormAdd and rmsNormRope, cannot
+ * accept the same index: rmsNormAdd needs the normalised value's single use to be the next node, an
+ * `add`; rmsNormRope needs every use inside its chain, which reads it only in a `reshape` (the test
+ * applies both rules at every index of a graph holding both forms). A form where another rule's
+ * leading op appears **inside** a window (rowBlockAttention's window contains five `reshape` /
+ * `expand`) cannot fire, because once grabbed the scan advances by the window width (a deferred
+ * node is the exception — it is scanned again by design, see below).
  * MUST: keep {@link FUSION_RULES} as **one hand-written list** (do not replace it with automatic
  * registration at rule import time). The rule that every module is side-effect free bans running
  * code at import time, and tests/runtime_fusion_test.ts reads **this array** to check the
@@ -101,6 +105,21 @@
  * folded ones (`chain`) as a **passthrough**, a plain node **before** the fused step. The
  * reordering is legal only when the passthrough consumes no value the chain defines, which
  * {@link passthroughIsIndependent} checks mechanically.
+ *
+ * ## Deferred nodes (a chain interleaved with another)
+ *
+ * The Wan DiT's q and k prologues interleave (`rms_norm` q, `rms_norm` k, the reshapes of q / k / v,
+ * then q's pair reshape and RoPE, then k's), so q's window holds k's `rms_norm` and reshape. As
+ * passthroughs they would be emitted as plain nodes before q's fused step and k could never fold. A
+ * rule may therefore **defer** its window's other nodes (`FusionMatch.others` — only rmsNormRope
+ * does): the fused step takes the window's place, and the deferred nodes are written into the
+ * window's last slots of the scanned node list, where the scan resumes — so they come after the
+ * fused step and any rule may grab them again. The reordering is legal only when the chain and the
+ * deferred nodes are independent both ways ({@link passthroughIsIndependent} and
+ * `deferralIsIndependent` in {@link "./fusion-rule.ts"}). The step list is then a valid order of the
+ * nodes that differs from the declaration order inside the deferred region only; a consumer that
+ * walks it against the declaration order (the estimate's `postFusionSteps`, the node index of
+ * {@link enumerateUnfusedWindows}) counts positions in the scanned list.
  */
 
 import type { PrologueUnaryOp } from "../codegen/elementwise.ts";
@@ -111,6 +130,7 @@ import { ADALN_RULE } from "./fusion-rules/adaln.ts";
 import { GATED_RESIDUAL_RULE } from "./fusion-rules/gated-residual.ts";
 import { LINEAR_STATIC_QUANTIZE_RULE } from "./fusion-rules/linear-static-quantize.ts";
 import { RMS_NORM_ADD_RULE } from "./fusion-rules/rms-norm-add.ts";
+import { RMS_NORM_ROPE_RULE } from "./fusion-rules/rms-norm-rope.ts";
 import { ROPE_RULE } from "./fusion-rules/rope.ts";
 import { ROW_BLOCK_ATTENTION_RULE } from "./fusion-rules/row-block-attention.ts";
 import { SILU_RULE } from "./fusion-rules/silu.ts";
@@ -173,6 +193,7 @@ export const FUSION_RULES: readonly FusionRule[] = [
   SILU_RULE,
   UPSAMPLE_2X_RULE,
   ROPE_RULE,
+  RMS_NORM_ROPE_RULE,
   ADALN_RULE,
   GATED_RESIDUAL_RULE,
   ROW_BLOCK_ATTENTION_RULE,
@@ -466,6 +487,7 @@ const scanFusions = (
     silu: 0,
     upsample2x: 0,
     rope: 0,
+    rmsNormRope: 0,
     adaln: 0,
     gatedResidual: 0,
     rowBlockAttention: 0,
@@ -479,9 +501,14 @@ const scanFusions = (
     if (alias && plan.contract.kind === "expand") counts.identityExpand += 1;
     steps.push({ kind: "node", plan, aliasesInput: alias, ...packedRole(plan, packed) });
   };
-  for (let index = 0; index < nodes.length;) {
+  // The node list as scanned: a hit that defers nodes writes them into its window's last slots and
+  // the scan resumes at the first of them (the "Deferred nodes" section), so the rules, the linear
+  // prologue and the attention permutes read this list. `aliases` may come from `nodes`: a node's
+  // alias decision reads only its own input, which precedes it in either order.
+  const scanned = [...nodes];
+  for (let index = 0; index < scanned.length;) {
     const hit = FUSION_RULES.reduce<FusionHit | undefined>(
-      (found, rule) => found ?? rule.apply(nodes, index, scanContext),
+      (found, rule) => found ?? rule.apply(scanned, index, scanContext),
       undefined,
     );
     if (hit !== undefined) {
@@ -489,10 +516,14 @@ const scanFusions = (
       for (const plan of hit.passthrough) pushNode(plan);
       steps.push(hit.step);
       counts[hit.step.rule] += 1;
-      index += hit.advance;
+      const resume = index + hit.advance - hit.deferred.length;
+      hit.deferred.forEach((plan, offset) => {
+        scanned[resume + offset] = plan;
+      });
+      index = resume;
       continue;
     }
-    const folded = linearPrologueAt(nodes, index, context);
+    const folded = linearPrologueAt(scanned, index, context);
     if (folded !== undefined) {
       // The producer gets no step; the linear's step stands for both nodes. A linear never aliases
       // (planAliases), and packed activations need linearCompute "f32" (never with a prologue).
@@ -506,7 +537,7 @@ const scanFusions = (
       index += 2;
       continue;
     }
-    const absorbed = attentionPermutesAt(nodes, index, context, aliases);
+    const absorbed = attentionPermutesAt(scanned, index, context, aliases);
     if (absorbed !== undefined) {
       // The absorbed permutes get no step; the attention's step stands for all of them. An attention
       // never aliases (planAliases) and is never a packed producer or consumer.
@@ -520,7 +551,7 @@ const scanFusions = (
       index += absorbed.advance;
       continue;
     }
-    pushNode(nodes[index]);
+    pushNode(scanned[index]);
     index += 1;
   }
   return { steps, counts };
@@ -590,7 +621,7 @@ const readsPackedActivation = (plan: NodePlan, name: string, context: FusionCont
  * MUST: 5 is an invariant for **future rules**. Only the linearStaticQuantize fusion has a
  * spelling that reads packed, so the moment another rule puts a linear into its window, that
  * fused kernel reads the packed words as f32 (a silent wrong value with no exception). No window of
- * the current eight rules contains a `linear`, so it does not fire today; but without it on the
+ * the current nine rules contains a `linear`, so it does not fire today; but without it on the
  * accepting side, only the added rule would break, silently.
  */
 const packedStaticQuantizeValues = (

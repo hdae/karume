@@ -58,14 +58,16 @@ const wanShapes = (graph: IrGraph, sequence: number): Readonly<Record<string, re
 
 /**
  * The three Wan2.1 components. The counts are frozen from measurements (2026-10-03; rope from
- * 2026-10-24; attentionPermute from 2026-10-25):
+ * 2026-10-24; attentionPermute and rmsNormRope from 2026-10-25):
  *
- * - **transformer: silu 2 and rope 60**. The two `sigmoid`s are the time-embedding MLP's (the SiLU
- *   inside `time_embedder` and the one before `time_proj`); both are grabbed as SiLU.
- *   - rope 60: the RoPE of q and k in the 30 self-attention blocks, written as the complex
- *     rotation in real numbers (the **pair form** — swap of adjacent pairs + elementwise products
- *     with cos / sin; `recipe wan/dit_patch.py`). ROPE_RULE accepts it exactly as its second form
- *     (the pair rotation of `kernels/rope.ts`).
+ * - **transformer: silu 2 and rmsNormRope 60**. The two `sigmoid`s are the time-embedding MLP's
+ *   (the SiLU inside `time_embedder` and the one before `time_proj`); both are grabbed as SiLU.
+ *   - rmsNormRope 60: the q and k prologues of the 30 self-attention blocks — `rms_norm` over the
+ *     1,536-wide token row, two reshapes, then the RoPE written as the complex rotation in real
+ *     numbers (the **pair form** — swap of adjacent pairs + elementwise products with cos / sin;
+ *     `recipe wan/dit_patch.py`) — each folded into one dispatch (perf-ledger F-3 stage 3).
+ *   - rope 0: those 60 pair-form RoPEs (ROPE_RULE's second form, the `rope` count of 2026-10-24)
+ *     now fold with their rms_norm; with `rmsNormReduce: "subgroup32"` they would fold alone again.
  *   - adaln 0: the modulation vectors are sliced **before** the layer_norm, so the 2–3 reshapes
  *     right after the layer_norm that ADALN_RULE's broadcast form requires are absent, and there is
  *     no `where` of the per-token form (perf-ledger K-73).
@@ -89,12 +91,12 @@ const wanShapes = (graph: IrGraph, sequence: number): Readonly<Record<string, re
  * same reading as the Irodori DiT gate).
  */
 test.skipIf(!WAN_AVAILABLE)(
-  "the real Wan2.1 grabs DiT silu 2 / rope 60 (plus linearPrologue 31 on the i8 seat under a8, and attentionPermute 180 under the a8 attention seat) and the VAE chunk graphs' silu 29 / upsample2x 3 per run (adaln is a different spelling: 0)",
+  "the real Wan2.1 grabs DiT silu 2 / rmsNormRope 60 (plus linearPrologue 31 on the i8 seat under a8, and attentionPermute 180 under the a8 attention seat) and the VAE chunk graphs' silu 29 / upsample2x 3 per run (adaln is a different spelling: 0)",
   async () => {
     const transformer = await readWanGraph("transformer");
     const transformerI8 = await readWanGraph("transformer", "i8");
     for (const sequence of [192, 14040]) {
-      const counts = { ...NONE, silu: 2, rope: 60 };
+      const counts = { ...NONE, silu: 2, rmsNormRope: 60 };
       const f32 = (graph: IrGraph) => fusionCounts(graph, wanShapes(graph, sequence));
       const a8 = (graph: IrGraph) =>
         fusionCounts(graph, wanShapes(graph, sequence), undefined, false, false, false, "a8");

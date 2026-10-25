@@ -19,6 +19,11 @@ import { bmmKey } from "../src/kernels/bmm.ts";
 import { GATED_RESIDUAL_KEY } from "../src/kernels/gated-residual.ts";
 import { ROPE_BSHD_KEY, ROPE_KEY, ROPE_PAIR_BSHD_KEY } from "../src/kernels/rope.ts";
 import { QUANTIZE_ROWS_PROLOGUE_MAX_DIM } from "../src/kernels/quantize-rows.ts";
+import {
+  RMS_NORM_ROPE_KEY,
+  RMS_NORM_ROPE_WGSL,
+  rmsNormRopeParams,
+} from "../src/kernels/rms-norm-rope.ts";
 import { siluKey } from "../src/kernels/silu.ts";
 import { SAFE_SOFTMAX_KEY } from "../src/kernels/softmax.ts";
 import { UPSAMPLE_2X_KEY } from "../src/kernels/upsample2x.ts";
@@ -30,9 +35,20 @@ import {
   planFusions,
   planRowBlocks,
 } from "../src/runtime/fusion.ts";
-import { bindSymbols, countUses, ExecutionError, planGraph } from "../src/runtime/plan.ts";
+import {
+  bindSymbols,
+  countUses,
+  ExecutionError,
+  type NodePlan,
+  planGraph,
+} from "../src/runtime/plan.ts";
 import type { DeclarationJson } from "./helpers/model-fixture.ts";
 import { mergeGraph } from "./helpers/merged-graph.ts";
+import {
+  rmsNormRopeGraph,
+  type RmsNormRopeGraphOptions,
+  rmsNormRopeInputShapes,
+} from "./helpers/rms-norm-rope-graph.ts";
 
 const parse = mergeGraph;
 
@@ -78,18 +94,23 @@ test("ルール表の先頭 op は互いに素で、適用順が結果に効か�
       "silu",
       "upsample2x",
       "rope",
+      "rmsNormRope",
       "adaln",
       "gatedResidual",
       "rowBlockAttention",
     ],
   );
-  const seen = new Set<string>();
+  const owners = new Map<string, string[]>();
   for (const rule of FUSION_RULES) {
-    for (const head of rule.heads) {
-      assertEquals(seen.has(head), false, `先頭 op '${head}' が複数ルールで重なっている`);
-      seen.add(head);
-    }
+    for (const head of rule.heads) owners.set(head, [...(owners.get(head) ?? []), rule.name]);
   }
+  // The one shared head: rmsNormAdd and rmsNormRope never accept the same index ("rmsNormAdd and
+  // rmsNormRope share the head rms_norm but never accept the same index" below checks it).
+  assertEquals(
+    [...owners].filter(([, names]) => names.length > 1),
+    [["rms_norm", ["rmsNormAdd", "rmsNormRope"]]],
+  );
+  const seen = new Set(owners.keys());
   assertEquals([...seen].sort(), [
     "bmm",
     "layer_norm",
@@ -1034,6 +1055,7 @@ test("カウンタは融合が並んだグラフでルール別に積み上が�
     silu: 1,
     upsample2x: 0,
     rope: 1,
+    rmsNormRope: 0,
     adaln: 0,
     gatedResidual: 0,
     rmsNormAdd: 0,
@@ -1982,6 +2004,7 @@ const NO_FUSIONS = {
   silu: 0,
   upsample2x: 0,
   rope: 0,
+  rmsNormRope: 0,
   adaln: 0,
   gatedResidual: 0,
   rmsNormAdd: 0,
@@ -2602,4 +2625,267 @@ test("no fusion rule's head and no prologue op is permute or attention (the rule
     ["permute", "attention"].filter((op) => heads.has(op)),
     [],
   );
+});
+
+// ------------------------------- rms_norm → pair RoPE (rmsNormRope — perf-ledger F-3 stage 3)
+
+const RMS_NORM_ROPE_SEQUENCE = 5;
+
+type RmsNormRopeContext = {
+  readonly rmsNormReduce?: "workgroup" | "subgroup32";
+  readonly fuseRmsNormAdd?: boolean;
+};
+
+/** The planned nodes of {@link rmsNormRopeGraph} and the fusion context the executor would pass. */
+const planRmsNormRope = (graph: DeclarationJson, context: RmsNormRopeContext = {}) => {
+  const ir = parse(graph);
+  const nodes = planGraph(
+    ir,
+    bindSymbols(ir, rmsNormRopeInputShapes(graph, RMS_NORM_ROPE_SEQUENCE)),
+  ).nodes;
+  return {
+    nodes,
+    context: {
+      useCounts: countUses(ir),
+      outputNames: new Set(ir.outputs),
+      limits: TEST_LIMITS,
+      ...context,
+    },
+  };
+};
+
+const fuseRmsNormRope = (
+  options: RmsNormRopeGraphOptions = {},
+  context: RmsNormRopeContext = {},
+): FusionPlan => {
+  const planned = planRmsNormRope(rmsNormRopeGraph(options), context);
+  return planFusions(planned.nodes, planned.context);
+};
+
+/**
+ * The step list is a valid execution order and its release bookkeeping is exact: every value a
+ * step reads is a graph input or the output of an earlier step, and every value that exists (an
+ * input or a step's output) is read by the steps exactly as often as the graph reads it.
+ */
+const assertStepOrder = (plan: FusionPlan, graph: DeclarationJson, label: string): void => {
+  const uses = countUses(parse(graph));
+  const defined = new Set(graph.inputs.map((spec) => spec.name));
+  const reads = new Map<string, number>();
+  for (const step of plan.steps) {
+    const ins = step.kind === "fused" ? step.ins : step.plan.node.ins;
+    for (const name of ins) {
+      assertEquals(defined.has(name), true, `${label}: '${name}' is read before it is defined`);
+      reads.set(name, (reads.get(name) ?? 0) + 1);
+    }
+    const outs = step.kind === "fused" ? [step.outputName] : step.plan.outputs.map((o) => o.name);
+    for (const name of outs) defined.add(name);
+  }
+  for (const name of defined) {
+    assertEquals(reads.get(name) ?? 0, uses.get(name) ?? 0, `${label}: uses of '${name}'`);
+  }
+};
+
+test("rmsNormRope folds the Wan DiT's interleaved q and k prologues into one step each: the deferred nodes follow q's step and are scanned again", () => {
+  // Wan2.2 (24 × 128), Wan2.1 (12 × 128), the smallest 256-wide row, a narrower head.
+  for (const [heads, headDim] of [
+    [24, 128],
+    [12, 128],
+    [2, 128],
+    [3, 64],
+  ] as const) {
+    const label = `H=${heads} D=${headDim}`;
+    const dim = heads * headDim;
+    const graph = rmsNormRopeGraph({ heads, headDim });
+    const plan = fuseRmsNormRope({ heads, headDim });
+    // q's window holds k's rms_norm and reshape and v's reshape; deferred behind q's step, k's
+    // rms_norm heads k's window, and v's reshape (deferred again) is the only plain node left.
+    assertEquals(
+      outline(plan.steps),
+      ["fused:rmsNormRope", "fused:rmsNormRope", "reshape", "neg"],
+      label,
+    );
+    const v = plan.steps[2];
+    assertEquals(v.kind === "node" && v.plan.outputs[0].name, "v4", `${label}: v's reshape`);
+    assertEquals(v.kind === "node" && v.aliasesInput, true, `${label}: still an alias`);
+    for (const [at, p] of [
+      [0, "q"],
+      [1, "k"],
+    ] as const) {
+      const step = fusedAt(plan, at);
+      assertEquals(step.ins, [`${p}_x`, `${p}_w`, "cos", "sin"], `${label} ${p}: total uses`);
+      assertEquals(step.binds, [`${p}_x`, `${p}_w`, "cos", "sin"], `${label} ${p}: binds`);
+      assertEquals(step.nodeCount, 11, `${label} ${p}: rms_norm + 2 reshapes + 8 RoPE nodes`);
+      assertEquals(step.outputName, `${p}_y`, label);
+      assertEquals(step.outputShape, [1, RMS_NORM_ROPE_SEQUENCE, heads, headDim], label);
+      assertEquals(step.temps, [], label);
+      assertEquals(step.dispatches.length, 1, label);
+      const [dispatch] = step.dispatches;
+      assertEquals(dispatch.key, RMS_NORM_ROPE_KEY, label);
+      assertEquals(dispatch.wgsl(), RMS_NORM_ROPE_WGSL, label);
+      assertEquals(
+        [...dispatch.params],
+        [...rmsNormRopeParams(RMS_NORM_ROPE_SEQUENCE, dim, 1e-6, headDim)],
+        `${label} ${p}: params {rows, dim, eps, head_dim}`,
+      );
+      // One workgroup per token row (the plain rms_norm's geometry), operands in bind order.
+      assertEquals(dispatch.workgroups, {
+        kind: "gridStride",
+        items: RMS_NORM_ROPE_SEQUENCE,
+        size: 1,
+      });
+      assertEquals(dispatch.operands, undefined, label);
+    }
+    assertEquals(plan.counts, { ...NO_FUSIONS, rmsNormRope: 2 }, label);
+    assertStepOrder(plan, graph, label);
+  }
+  // One chain alone folds the same way (no deferred node).
+  const single = fuseRmsNormRope({ form: "single" });
+  assertEquals(outline(single.steps), ["fused:rmsNormRope"]);
+  assertStepOrder(single, rmsNormRopeGraph({ form: "single" }), "single");
+});
+
+test("rmsNormRope counterexamples (bias / per-head norm / half split / interposed alias / values used outside the window or as graph outputs / a foreign op in the window / a table made inside the window) leave the nodes, and the pair RoPE folds alone", () => {
+  const cases: readonly (readonly [string, RmsNormRopeGraphOptions])[] = [
+    ["rms_norm with a bias", { bias: true }],
+    // A row of 256 per head (the 256-wide form), so only the axis differs.
+    ["rms_norm over each head", { perHead: true, headDim: 256 }],
+    ["an interposed alias of the normalised value", { interpose: true }],
+    ["the normalised value used outside the window", { extraConsumer: "normalised" }],
+    ["its reshape alias used outside the window", { extraConsumer: "view" }],
+    ["the pair view used outside the window", { extraConsumer: "pairs" }],
+    ["the normalised value as a graph output", { graphOutput: "normalised" }],
+    ["its reshape alias as a graph output", { graphOutput: "view" }],
+    ["the pair view as a graph output", { graphOutput: "pairs" }],
+    ["a neg between the reshapes", { foreignGap: true }],
+    // The chain reads a node it would defer, so the fused step cannot move ahead of it.
+    ["cos reshaped inside the window", { tableInWindow: true }],
+  ];
+  for (const [label, options] of cases) {
+    const graph = rmsNormRopeGraph({ form: "single", ...options });
+    const plan = fuseRmsNormRope({ form: "single", ...options });
+    assertEquals(plan.counts.rmsNormRope, 0, `${label}: rmsNormRope counter`);
+    assertEquals(
+      plan.steps.flatMap((step) => (step.kind === "fused" ? [step.dispatches[0].key] : [])),
+      [ROPE_PAIR_BSHD_KEY],
+      `${label}: the pair RoPE alone (${outline(plan.steps).join(",")})`,
+    );
+    assertStepOrder(plan, graph, label);
+  }
+  // A half-split RoPE is not the pair form: the half split folds alone.
+  const half = fuseRmsNormRope({ form: "single", halfSplit: true });
+  assertEquals(half.counts.rmsNormRope, 0, "half split");
+  assertEquals(
+    half.steps.flatMap((step) => (step.kind === "fused" ? [step.dispatches[0].key] : [])),
+    [ROPE_BSHD_KEY],
+  );
+  // An odd head width (H·D = 258 still pairs up, but a pair would straddle two heads): neither the
+  // pair RoPE nor this rule folds.
+  const odd = fuseRmsNormRope({ form: "single", heads: 2, headDim: 129 });
+  assertEquals([odd.counts.rmsNormRope, odd.counts.rope], [0, 0], "odd head_dim");
+});
+
+test("rmsNormRope folds only where the plain path runs the 256-wide workgroup rms_norm: the subgroup reduction and a row of at most 128 keep the rms_norm, and the pair RoPEs fold alone", () => {
+  const subgroup = fuseRmsNormRope({}, { rmsNormReduce: "subgroup32" });
+  assertEquals(
+    [subgroup.counts.rmsNormRope, subgroup.counts.rope],
+    [0, 2],
+    "rmsNormReduce subgroup32",
+  );
+  // Nothing defers, so the node order is the declaration order.
+  assertEquals(outline(subgroup.steps), [
+    "rms_norm",
+    "rms_norm",
+    "reshape",
+    "reshape",
+    "reshape",
+    "reshape",
+    "fused:rope",
+    "reshape",
+    "fused:rope",
+    "neg",
+  ]);
+  const workgroup = fuseRmsNormRope({}, { rmsNormReduce: "workgroup" });
+  assertEquals(workgroup.counts.rmsNormRope, 2, "rmsNormReduce workgroup (the default, explicit)");
+  for (const [heads, headDim] of [
+    [1, 128],
+    [2, 64],
+  ] as const) {
+    const narrow = fuseRmsNormRope({ heads, headDim });
+    assertEquals(
+      [narrow.counts.rmsNormRope, narrow.counts.rope],
+      [0, 2],
+      `H=${heads} D=${headDim}: the 128-wide rms_norm`,
+    );
+  }
+});
+
+test("rmsNormRope rejects a non-f32 rms_norm or reshape in its chain", () => {
+  // The contracts run these nodes on f32 only here, so the matcher's own check is exercised on a
+  // plan with one node's dtypes replaced.
+  const { nodes, context } = planRmsNormRope(rmsNormRopeGraph({ form: "single" }));
+  const at = (op: string, out: string): number =>
+    nodes.findIndex((plan) => plan.node.op === op && plan.outputs[0].name === out);
+  const norm = at("rms_norm", "q_n");
+  const view = at("reshape", "q_v");
+  const pairs = at("reshape", "q_pairs");
+  const i32Output = (plan: NodePlan): NodePlan => ({
+    ...plan,
+    outputs: [{ ...plan.outputs[0], dtype: "i32" }],
+  });
+  const i32Input = (plan: NodePlan): NodePlan => ({ ...plan, inputDtypes: ["i32", "f32"] });
+  for (const [label, index, replace] of [
+    ["rms_norm input i32", norm, i32Input],
+    ["rms_norm output i32", norm, i32Output],
+    ["first reshape output i32", view, i32Output],
+    ["pair reshape output i32", pairs, i32Output],
+  ] as const) {
+    const replaced = nodes.map((plan, position) => (position === index ? replace(plan) : plan));
+    assertEquals(planFusions(replaced, context).counts.rmsNormRope, 0, label);
+  }
+  assertEquals(planFusions(nodes, context).counts.rmsNormRope, 1, "the f32 control");
+});
+
+test("rmsNormAdd and rmsNormRope share the head rms_norm but never accept the same index", () => {
+  // Both forms in one graph (with rmsNormAdd opted in), and a normalised value that feeds both an
+  // add and the RoPE's reshape. At every index at most one rule of the table accepts, so their
+  // order in FUSION_RULES cannot change the result.
+  const both = rmsNormRopeGraph({ form: "single" });
+  both.inputs.push(
+    { name: "a_x", dtype: "f32", shape: [1, "S", 256] },
+    { name: "a_w", dtype: "f32", shape: [256] },
+    { name: "a_r", dtype: "f32", shape: [1, "S", 256] },
+  );
+  both.values.a_n = { dtype: "f32", shape: [1, "S", 256] };
+  both.values.a_y = { dtype: "f32", shape: [1, "S", 256] };
+  both.nodes.unshift(
+    { op: "rms_norm", ins: ["a_x", "a_w"], outs: ["a_n"], attrs: { eps: 1e-6 } },
+    { op: "add", ins: ["a_n", "a_r"], outs: ["a_y"], attrs: {} },
+  );
+  both.outputs.push("a_y");
+  const shared = rmsNormRopeGraph({ form: "single" });
+  shared.inputs.push({ name: "a_r", dtype: "f32", shape: [1, "S", 256] });
+  shared.values.a_y = { dtype: "f32", shape: [1, "S", 256] };
+  // The add right after the rms_norm (rmsNormAdd's adjacency), the reshape after it.
+  shared.nodes.splice(1, 0, { op: "add", ins: ["q_n", "a_r"], outs: ["a_y"], attrs: {} });
+  shared.outputs.push("a_y");
+  for (const [label, graph, expected] of [
+    ["both forms", both, { rmsNormAdd: 1, rmsNormRope: 1, rope: 0 }],
+    ["one normalised value, both consumers", shared, { rmsNormAdd: 0, rmsNormRope: 0, rope: 1 }],
+  ] as const) {
+    graph.requires.ops = [...new Set(graph.nodes.map((step) => step.op))].sort();
+    const { nodes, context } = planRmsNormRope(graph, { fuseRmsNormAdd: true });
+    const scan = { ...context, packedValues: new Map<string, number>() };
+    for (let index = 0; index < nodes.length; index += 1) {
+      const accepting = FUSION_RULES.filter(
+        (rule) => rule.apply(nodes, index, scan) !== undefined,
+      ).map((rule) => rule.name);
+      assertEquals(accepting.length <= 1, true, `${label} @${index}: ${accepting.join(", ")}`);
+    }
+    const { counts } = planFusions(nodes, context);
+    assertEquals(
+      { rmsNormAdd: counts.rmsNormAdd, rmsNormRope: counts.rmsNormRope, rope: counts.rope },
+      expected,
+      label,
+    );
+  }
 });

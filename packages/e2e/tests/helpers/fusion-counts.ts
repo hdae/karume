@@ -173,6 +173,7 @@ export const NONE: FusionCounts = {
   silu: 0,
   upsample2x: 0,
   rope: 0,
+  rmsNormRope: 0,
   adaln: 0,
   gatedResidual: 0,
   rmsNormAdd: 0,
