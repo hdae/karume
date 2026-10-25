@@ -163,3 +163,41 @@ and ADR 0100 decision 1 (`subgroups: true` rejects a device without them).
   day): relRMS 4.675e-2 (s16 4.915e-2), inside the 9.9e-2 band.
 - Bc = 128 on 48 KiB devices, double-buffered tiles and `exp2` are unmeasured headroom (the spike
   sits at 26–29 TOPS, under half the dp4a ceiling).
+
+## Addendum (2026-10-25) — decision 3's layouts replaced by vec4 tiles (key `v2`, perf-ledger K-84)
+
+Decision 3 names the tile layouts as part of the kernel's definition. They are replaced; everything
+else in this ADR holds (the algorithm, the numerics of decision 4, the two reduction forms of
+decision 5, the windows of decision 2, the route and the presets).
+
+- **Layouts** (`attention_online:v2:…`): the `q` and `k` tiles are `vec4<u32>` rows of `D/16`
+  words padded by one (stride 9 at D = 128, 5 at D = 64). The Vᵀ tile is `[pack][d/4]` in `vec4`:
+  word `w` of a column still packs the keys `{w, w+16, w+32, w+48}`. It is filled by owner threads:
+  a thread owns one whole `vec4` (`pk`, `d4`), consecutive lanes take consecutive keys of the same
+  four columns, and the row stride is `D/4 + 1`. The P̃ tile is transposed (`[word][row group]`,
+  one `vec4` holding a word of the four rows of a thread). In the PV phase a lane owns the columns
+  `{64·g + 4·tx + c}`, and the phase runs once per 64-column group. The q, k, O and vs bindings
+  are `array<vec4<…>>`.
+- **Why**: the speed recon of 2026-10-24/25
+  ([research](../research/2026-10-25-speed-recon-3080ti.md) §4) found the v1 kernel at about 25 TOPS
+  against a dp4a ceiling of about 65 TOPS on the RTX 3080 Ti. The Vᵀ fill with lanes along `d`
+  touched 32 cache lines per load, and the scalar shared loads limited both dot-product loops. On
+  the RTX 3080 Ti, v2 runs self-attention ×1.48 and cross-attention ×2.29 faster than v1 (Node and
+  Chromium 156 agree).
+- **Bit identity**: v2 changes which thread computes which element, never the value. The integer
+  sums are exact, and every f32 operation keeps v1's operands and order. Checked at the switch:
+  0 differing u32 words between v1 and v2 over D ∈ {64, 128}, dp4a and its emulation, both reduction
+  forms, partial key and row tiles, a row window, adversarial input regimes and the full Wan2.2 self
+  and cross shapes. A fault injected into v2 (two rows of P̃ swapped) was caught at 6.1 M words.
+  Every Wan sha256 row is unchanged.
+- **MUST compliance**: every workgroup store is a whole `vec4` or a whole scalar. No component is
+  written through a dynamic index (the naga/Metal silent drop of gemm.ts `storeBTransposed`). The
+  register count drops by running the PV phase per column group: 118–121 on the proxy compile paths
+  (Tint → SPIR-V → NVIDIA Vulkan, and DXC → dxil-spirv), below the 128-register occupancy step. The
+  D3D12 driver's own count is unobserved.
+- **Workgroup storage**: `sg32` 31,232 B at D = 128 (still under the 32 KiB of D3D12 and Metal),
+  `wg` 35,328 B. The `wg` form already exceeded 32 KiB in v1 (33,536 B), so devices without
+  subgroups and with 32 KiB run the three dispatches as before.
+- **Landing condition** (the maintainer's ruling of 2026-10-25): v2 replaces v1 when the RTX 5070
+  Ti (Chrome, D3D12) measures it at least as fast as v1. Otherwise both stay, chosen per adapter,
+  and this addendum is revised.
