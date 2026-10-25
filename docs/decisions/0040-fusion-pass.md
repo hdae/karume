@@ -298,8 +298,8 @@ per FFN) is never written or read.
   the producer's input loses the producer's use and gains the linear's, and the folded value, which
   had exactly one use and is not a graph output, is never defined.
 - **The exact match** (decision 2 — `linearPrologueAt` in `packages/runtime/src/runtime/fusion.ts`),
-  on a two-node window: (1) the producer's op is in `LINEAR_PROLOGUE_OPS`, which holds only
-  `gelu_tanh` (the erf `gelu` is one edit plus its tests away, once measured), f32 in and out; (2)
+  on a two-node window: (1) the producer's op is in `LINEAR_PROLOGUE_OPS` (`gelu_tanh` and, since the
+  measurement below, the erf `gelu`), f32 in and out; (2)
   its output has one use and is not a graph output (`internalsArePrivate`); (3) the next node is a
   `linear` that reads it in `ins[0]`; (4) that linear takes the i8a8 path by the **same predicate as
   the recipe** — `linearTakesI8a8` (`packages/runtime/src/runtime/linear-route.ts`: linearCompute
@@ -314,6 +314,9 @@ per FFN) is never written or read.
   (`lastRunFusions`). The Wan2.2 and Wan2.1 DiTs fold 31 pairs each under `linearCompute: "a8"` on
   their i8 seats — the FFN down projection of the 30 blocks (k 14,336 / 8,960) and the text
   embedder's second linear (k 3,072 / 1,536); `packages/e2e/tests/e2e_wan*_fusion_counts_test.ts`.
+  anima's DiT folds 28 erf `gelu` pairs on its i8 seat under `"a8"` (the FFN down projection of the
+  28 blocks, k 8,192); its text conditioner's 6 gelu → linear pairs stay unfolded, because that
+  component's weights are f16 / bf16 on every preset; `packages/e2e/tests/e2e_anima_fusion_counts_test.ts`.
 - **The estimate** sees the same decision: `EstimateOptions.linearCompute` and the weight storage of
   the residency plan go into the same `planFusions`, and a folded producer's output is not counted.
 - **No rounding barrier** sits between `y = gelu_tanh(x)` and the quantization. The kernel's
@@ -323,7 +326,21 @@ per FFN) is never written or read.
   not a specification guarantee (the argument for `t` in `adaln-norm.ts`); the per-environment sha256
   rows are the check."
 - **Measured**: `packages/runtime/tests/gpu_quantize_rows_prologue_test.ts` compares the kernel with
-  the pair "elementwise gelu_tanh → quantize_rows" word for word (`xq` and `xs`, NaN scales included)
+  the pair "elementwise op → quantize_rows" word for word for both ops (`xq` and `xs`, NaN scales included)
   and `packages/runtime/tests/gpu_linear_prologue_fusion_test.ts` compares Sessions with and without
   the fold (both dot product forms), on Vulkan / NVIDIA; the D3D12 / NVIDIA spike measurement is in
   [research 2026-10-25-speed-recon-5070ti](../research/2026-10-25-speed-recon-5070ti.md) §8.
+- **The erf form (`gelu`) — measured 2026-10-25 before it entered `LINEAR_PROLOGUE_OPS`** (RTX 3080 Ti,
+  Node 24.22 + Dawn and Chromium 156, both Vulkan; the production WGSL of `gelu`, `quantize_rows` and
+  the prologue kernel): 0 differing 32-bit words in `xq`, `xs` and the f32 `y = gelu(x)` (read from a
+  variant of the fused kernel that also stores `y`) against the pair, in two Node runs and one
+  Chromium run, at anima's row (K 8,192, M 4,096 / 1,024) and DeBERTa's (K 4,096, M 256 / 64), on
+  normal()·2 rows and on special values (subnormals, ±0 rows, 2e19, erf's negative tail −5.5..−2.5
+  and the underflow to −0 at −15..−6, NaN, ±inf — the NaN payloads matched as well). The fused form
+  takes 0.29–0.30 of the pair's time at anima's shapes (×3.3–3.4; −479 µs per call at M 4,096) and
+  0.31 / 0.45 at K 4,096, M 256 / 64; it runs at the memory bound, and per element it stays within
+  1.3% of the gelu-free register quantize up to K 14,336 (no register step below the kernel's bound
+  of 16,384). **What this check does not see**: a fault of 1e-7 in one erf constant changed 24% of
+  `y`'s words but only 1–3 of 2 M `xq` words and no `xs` word, so a comparison of `xq` / `xs`
+  alone (the GPU tests above) hardly detects a gelu mismatch; the end-to-end check is the models'
+  per-environment sha256 rows.
