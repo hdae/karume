@@ -49,7 +49,14 @@ import { toSizeClass } from "../gpu/arena.ts";
 import { parseStorageRoles } from "../gpu/pipeline-cache.ts";
 import { numel, RUNTIME_SUPPORT, stateReadonly, stateWindow, topkK } from "../ops.ts";
 import { assertRuntimeSupport } from "../ops/support.ts";
-import { type FusedStep, planAliases, planFusions, rowBlockLimit } from "./fusion.ts";
+import {
+  type ExecStep,
+  type FusedStep,
+  type FusionWeightLayout,
+  planAliases,
+  planFusions,
+  rowBlockLimit,
+} from "./fusion.ts";
 import {
   allowedChunkRows,
   assertChunkBuckets,
@@ -180,8 +187,10 @@ export type AdmissionScenario = {
    * **Row-block attention (ADR 0060) windows are included in their post-fusion form** — a window
    * claimed by the same fusion plan as execution is counted as one row block's temporaries plus the
    * output, not as the full width of the scores, mask-added scores and softmax output (ADR 0093
-   * addendum of 2026-10-10). Other in-node temporaries and intermediates folded away by other fusions
-   * are not accounted for ({@link AdmissionReport.unaccounted}).
+   * addendum of 2026-10-10). **So is the linear prologue** (perf-ledger F-4 — with
+   * {@link EstimateOptions.linearCompute} `"a8"`, a producer folded into an i8a8 linear's step ①
+   * has no output, as in execution). Other in-node temporaries and intermediates folded away by
+   * other fusions are not accounted for ({@link AdmissionReport.unaccounted}).
    */
   readonly workspaceBytes: number;
 };
@@ -412,6 +421,18 @@ export type EstimateOptions = {
     readonly subgroups: boolean;
     readonly maxComputeWorkgroupStorageSize: number;
   };
+  /**
+   * The execution form of linear (the same value as `SessionOptions.linearCompute`; omitted =
+   * `"f32"`, the runtime default).
+   *
+   * With `"a8"` the estimate sees the same linear-prologue decision as execution (perf-ledger F-4 —
+   * the same `planFusions`, on the weights' storage from the residency plan): an elementwise producer
+   * folded into an i8a8 linear's step ① has no output, so its bytes are not counted. A borrowed
+   * weight's storage (`seat: "shared"`) is the lender's and unknown here, so its linear is counted
+   * unfolded (on the large side). The i8a8 linear's quantized intermediates stay unaccounted.
+   * MUST: the spelling goes through the same check as `sessionOptionsViolation`.
+   */
+  readonly linearCompute?: "f32" | "a8" | "f16";
 };
 
 /**
@@ -422,7 +443,7 @@ export type EstimateOptions = {
  * field).
  */
 const UNACCOUNTED: readonly string[] = Object.freeze([
-  "Intermediates that fusions other than row-block attention fold away, and the in-node temporaries their fusion rules declare (both depend on the device limits and on whether the fusion applies; aliased values and the temporaries of row-block attention are counted)",
+  "Intermediates that fusions other than row-block attention and the linear prologue fold away, and the in-node temporaries their fusion rules declare (both depend on the device limits and on whether the fusion applies; aliased values and the temporaries of row-block attention are counted, and a producer folded into an i8a8 linear is counted as absent when linearCompute is passed)",
   "Quantized intermediates of linear i8a8 (depend on the numeric variant and the device limits). The in-node temporaries of attention are counted — the score S of states-form attention and the row statistics stateAttentionReduce needs, and the score S, row statistics and i8a8 quantized intermediates of the fused attention op (counted with the runtime default f32 unless attentionCompute / attentionScoreStorage is passed; without maxStorageBufferBindingSize only the shapes whose block count is the same on every device are counted [shapes that fit in one block under the WebGPU core default, and shapes whose attentionRowBlockMaxBytes is at most the core default], and no number is returned for the others)",
   "params buffers (kernel constants — resident for the Session's lifetime, content-addressed cache)",
   "The implementation staging of queue.writeBuffer (not released until the submit completes)",
@@ -800,10 +821,15 @@ const stateAttentionTemps = (
  * those the estimate counts **in post-fusion form**, as "index of the window's first node → step"
  * (ADR 0093 addendum of 2026-10-10).
  *
- * Only row-block attention. Counted in the pre-fusion list, the binding limit would hit the full
- * width of the scores, mask-added scores and softmax output that fusion never materialises, and only
- * the estimate of shapes that do run would throw (the demand shape of ADR 0060).
+ * Row-block attention and the linear prologue. Counted in the pre-fusion list, the binding limit
+ * would hit the full width of the scores, mask-added scores and softmax output that fusion never
+ * materialises, and only the estimate of shapes that do run would throw (the demand shape of ADR
+ * 0060). A linear with a folded producer (perf-ledger F-4) is a plain node step that stands for the
+ * producer at the key and the linear right after it; counted in the pre-fusion list, the producer's
+ * output (454 MB at the Wan2.2 33-frame FFN) would stay in a peak execution never has.
  * Other rules are still counted in the pre-fusion list (the `unaccounted` side).
+ * MUST: pass the same `linearCompute` and weight storage as execution (`linear`) — the prologue is
+ * decided from them, and the estimate would otherwise count the pair unfolded.
  *
  * MUST: pass the same binding limit as the limit check of the allocation program (the row-block
  * count is decided only by this value and the budget — dividing by another value would make the
@@ -815,13 +841,14 @@ const stateAttentionTemps = (
  * not move bytes. The estimate checks no dispatch counts even for plain nodes (it has no field for
  * it either), so a value that checks nothing is passed here too.
  */
-const rowBlockAttentionSteps = (
+const postFusionSteps = (
   nodes: readonly NodePlan[],
   uses: ReadonlyMap<string, number>,
   outputNames: ReadonlySet<string>,
   bindingLimit: number,
   budget: number | undefined,
-): ReadonlyMap<number, FusedStep> => {
+  linear: LinearKnobs,
+): ReadonlyMap<number, ExecStep> => {
   const { steps } = planFusions(nodes, {
     useCounts: uses,
     outputNames,
@@ -830,16 +857,30 @@ const rowBlockAttentionSteps = (
       maxComputeWorkgroupsPerDimension: Number.MAX_SAFE_INTEGER,
     },
     ...(budget === undefined ? {} : { attentionRowBlockMaxBytes: budget }),
+    linearCompute: linear.linearCompute,
+    weightLayouts: linear.weightLayouts,
   });
-  const found = new Map<number, FusedStep>();
+  const found = new Map<number, ExecStep>();
   // The scan lays out "passthrough nodes → fused step" per window and advances by the window width,
   // so the running node count of the step list always points at the start of the next window.
   // Row-block attention windows have no passthrough (window = chain), so this running count is
-  // their start in the pre-fusion list as is.
+  // their start in the pre-fusion list as is. A linear with a folded producer stands for two nodes.
   let index = 0;
   for (const step of steps) {
     if (step.kind === "node") {
-      index += 1;
+      if (step.prologue === undefined) {
+        index += 1;
+        continue;
+      }
+      // MUST: the pair is "the producer at index, the linear at index + 1" in the unfused list (the
+      // same bookkeeping-break check as row-block attention's below).
+      if (nodes[index + 1]?.outputs[0]?.name !== step.plan.outputs[0].name) {
+        throw new ExecutionError(
+          `Estimate: the linear prologue '${step.plan.outputs[0].name}' does not match the unfused node list at index ${index}`,
+        );
+      }
+      found.set(index, step);
+      index += 2;
       continue;
     }
     if (step.rule === "rowBlockAttention") {
@@ -958,7 +999,43 @@ type TransientKnobs = {
   readonly seats: AttentionSeats;
   /** The device facts of the online kernel's route (`EstimateOptions.attentionDevice` — `undefined` when not passed). */
   readonly attentionDevice: AttentionDeviceFacts | undefined;
+  /** What the linear-prologue decision reads ({@link postFusionSteps}). */
+  readonly linear: LinearKnobs;
 };
+
+/** The facts the linear prologue (perf-ledger F-4) is decided from, as in execution. */
+type LinearKnobs = {
+  /** `EstimateOptions.linearCompute` with the runtime default filled in. */
+  readonly linearCompute: "f32" | "a8" | "f16";
+  /** The weights' resident storage ({@link fusionWeightLayouts}). */
+  readonly weightLayouts: ReadonlyMap<string, FusionWeightLayout>;
+};
+
+/**
+ * The resident storage per initializer that the fusion decision reads — from the residency plan,
+ * the same projection the executor makes from its resident weights (`#planSteps` in executor.ts).
+ * Uncompressed (`raw`) and expanded weights are f32 and absent, as in execution. A borrowed weight's
+ * storage (`shared`) is the lender's, decided at construction and unknown here, so it is absent too
+ * (its linear is counted unfolded — on the large side).
+ */
+const fusionWeightLayouts = (
+  residency: ReadonlyMap<string, WeightResidency>,
+): ReadonlyMap<string, FusionWeightLayout> =>
+  new Map(
+    [...residency].flatMap(([name, weight]): [string, FusionWeightLayout][] => {
+      switch (weight.seat) {
+        case "i4":
+          return [[name, { storage: "i4", groupSize: weight.groupSize }]];
+        case "f16":
+        case "bf16":
+        case "i8":
+        case "i2":
+          return [[name, { storage: weight.seat }]];
+        default:
+          return [];
+      }
+    }),
+  );
 
 /**
  * The device facts passed to `attentionRoute` for one fused attention node.
@@ -1144,7 +1221,8 @@ const fusedAttentionProgram = (
  *
  * MUST: build the allocation program from the pre-fusion node list and replace only the windows of
  * row-block attention with the same fused steps as the execution phase (ADR 0093 addendum of
- * 2026-10-10 — {@link rowBlockAttentionSteps}). Intermediates folded by other fusions and fusion-rule
+ * 2026-10-10), and each linear-prologue pair with its linear's re-pointed plain node (perf-ledger
+ * F-4) — both from {@link postFusionSteps}. Intermediates folded by other fusions and fusion-rule
  * temporaries are on the `unaccounted` side. Plain nodes' dispatches are approximated as one per
  * node (reads = `ins`, writes = `outs`), giving the usage-scope rule for separate regions the same
  * counterparts in the same direction as the execution phase. States-form attention and fused
@@ -1271,12 +1349,13 @@ const transientSlotBytes = (
     // repeats.
     return { outputs, temps, dispatches, releases: node.node.ins };
   };
-  const fused = rowBlockAttentionSteps(
+  const fused = postFusionSteps(
     nodes,
     uses,
     outputNames,
     bindingLimit,
     attentionRowBlockMaxBytes,
+    knobs.linear,
   );
   const program: TransientStepSpec[] = [];
   for (let index = 0; index < nodes.length;) {
@@ -1284,6 +1363,13 @@ const transientSlotBytes = (
     if (step === undefined) {
       program.push(nodeStep(nodes[index]));
       index += 1;
+      continue;
+    }
+    if (step.kind === "node") {
+      // The linear with its folded producer: the linear's program on the re-pointed plan (it reads
+      // the producer's input), and no step for the producer, whose output never exists.
+      program.push(nodeStep(step.plan));
+      index += 2;
       continue;
     }
     program.push(fusedTransientStep(step, uses, outputNames));
@@ -1348,6 +1434,9 @@ const transientSlotBytes = (
  *   `SessionOptions` — ADR 0124). The row-block count is decided by the same derivation as
  *   execution, and a budget smaller than a single row fails loudly with the same message as
  *   execution (the way to learn of a budget violation before the weights are loaded).
+ * @param options.linearCompute the execution form of linear (the same value as `SessionOptions`).
+ *   With `"a8"` a producer folded into an i8a8 linear (perf-ledger F-4) is not counted, as in
+ *   execution.
  */
 export const estimateGraphMemory = (
   graph: IrGraph,
@@ -1415,14 +1504,20 @@ export const estimateGraphMemory = (
   // The compute form of fused attention and the storage form of S go through the same check as
   // Session construction (spelling, the c16 × s16 pair) (ADR 0124 decision 7 — the estimate alone
   // returns no numbers for options with which no Session can be built).
+  // The execution form of linear goes through the same check (it decides the linear prologue).
   const seatViolation = sessionOptionsViolation({
     attentionCompute: options.attentionCompute,
     attentionScoreStorage: options.attentionScoreStorage,
+    linearCompute: options.linearCompute,
   });
   if (seatViolation !== undefined) throw new ExecutionError(seatViolation);
   const seats: AttentionSeats = {
     attentionCompute: options.attentionCompute ?? "f32",
     attentionScoreStorage: options.attentionScoreStorage ?? "f32",
+  };
+  const linear: LinearKnobs = {
+    linearCompute: options.linearCompute ?? "f32",
+    weightLayouts: fusionWeightLayouts(residency),
   };
   // The device facts are range-checked here regardless of the graph's shape (the rule of
   // {@link assertLimitOption}); whether they are required depends on the nodes (routeDevice).
@@ -1548,7 +1643,7 @@ export const estimateGraphMemory = (
         state.shapes,
         options.maxStorageBufferBindingSize,
         options.maxBufferSize,
-        { stateAttentionReduce, attentionRowBlockMaxBytes, seats, attentionDevice },
+        { stateAttentionReduce, attentionRowBlockMaxBytes, seats, attentionDevice, linear },
       ),
     };
   };

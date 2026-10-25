@@ -505,3 +505,88 @@ test.skipIf(!GPU_AVAILABLE)(
     }
   },
 );
+
+/**
+ * `linear(gelu_tanh(x), w, b)` (`gelu = true`) or `linear(x, w, b)` with `w` resident as i8 — the
+ * pair the linear prologue (perf-ledger F-4) folds under `linearCompute: "a8"`, and the graph the
+ * fold leaves behind.
+ */
+const geluLinearModel = (gelu: boolean): PreparedModel => {
+  const [rows, k, n] = [4, 64, 16];
+  const row = [1, rows, k];
+  const quantized = quantizeI8(fill([n, k], (i) => Math.sin(i * 0.61)).data, [n, k], 0);
+  const graph: DeclarationJson = {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: gelu ? ["gelu_tanh", "linear"] : ["linear"] },
+    symbols: [],
+    inputs: [{ name: "x", dtype: "f32", shape: row }],
+    outputs: ["y"],
+    initializers: { w: {}, b: {} },
+    values: {
+      w: { dtype: "f32", shape: [n, k] },
+      b: { dtype: "f32", shape: [n] },
+      ...(gelu ? { g: { dtype: "f32", shape: row } } : {}),
+      y: { dtype: "f32", shape: [1, rows, n] },
+    },
+    nodes: [
+      ...(gelu ? [{ op: "gelu_tanh", ins: ["x"], outs: ["g"], attrs: {} }] : []),
+      { op: "linear", ins: [gelu ? "g" : "x", "w", "b"], outs: ["y"], attrs: {} },
+    ],
+  };
+  return openGraph(graph, [
+    weight("b", f32Bytes(new Array(n).fill(0.5))),
+    weight("w", quantized.bytes, {
+      codec: "int8-sym",
+      groupSize: k,
+      scale: { bytes: f32Bytes([...quantized.scale]), dtype: "f32" },
+    }),
+  ]);
+};
+
+test.skipIf(!GPU_AVAILABLE)(
+  "a gelu_tanh folded into an a8 linear (perf-ledger F-4) leaves no output in the estimate or in the slot table: both equal the linear alone (real GPU)",
+  async () => {
+    const gpu = await acquireGpu();
+    try {
+      const limits = {
+        maxStorageBufferBindingSize: gpu.limits.maxStorageBufferBindingSize,
+        maxBufferSize: gpu.limits.maxBufferSize,
+      };
+      const pair = geluLinearModel(true);
+      const alone = geluLinearModel(false);
+      const workspace = (model: PreparedModel, options: SessionOptions): number =>
+        model.estimate({ ...limits, ...options }).scenarios[0].workspaceBytes;
+      // The estimate sees the fold only with the Session's linearCompute.
+      assertEquals(
+        workspace(pair, { linearCompute: "a8" }),
+        workspace(alone, { linearCompute: "a8" }),
+      );
+      assertEquals(
+        workspace(pair, {}) > workspace(pair, { linearCompute: "a8" }),
+        true,
+        "without a8 the gelu output is counted",
+      );
+      // The real plan: the slot table of the folded pair is the linear's alone (xq, xs and y).
+      const residentBytes = async (model: PreparedModel): Promise<number> => {
+        const session = await model.createContainerSession(gpu, { linearCompute: "a8" });
+        try {
+          const x = fill([1, 4, 64], (i) => Math.cos(i * 0.3) * 2);
+          // The slot backing is built on the second run of one signature (the first runs on the arena).
+          for (let step = 0; step < 2; step += 1) await session.run({ x });
+          assertEquals(
+            session.diagnostics().lastRunFusions?.linearPrologue,
+            model === pair ? 1 : 0,
+            "linearPrologue",
+          );
+          return session.diagnostics().planBacking.residentBytes;
+        } finally {
+          await session.dispose();
+        }
+      };
+      assertEquals(await residentBytes(pair), await residentBytes(alone));
+    } finally {
+      gpu.destroy();
+    }
+  },
+);

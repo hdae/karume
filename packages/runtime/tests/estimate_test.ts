@@ -1414,6 +1414,12 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
         "cannot be given together",
       );
     });
+
+    it("linearCompute (it decides the linear prologue) goes through the same spelling check", () => {
+      const options: EstimateOptions = {};
+      Object.defineProperty(options, "linearCompute", { value: "i8a8", enumerable: true });
+      assertThrows(() => fusedAttentionModel().estimate(options), ExecutionError, "linearCompute");
+    });
   });
 
   describe("束縛上限を渡さない見積りは、枚数がどの device でも同じ形だけを数える", () => {
