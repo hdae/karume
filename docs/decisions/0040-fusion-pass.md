@@ -64,7 +64,8 @@ the GPU, `planFusions`. The execution side receives the step sequence and holds 
 - Rules are applied in the order of `FUSION_RULES`. Their head ops are pairwise disjoint, so the order
   does not change the result; **a test checks the disjointness mechanically from each rule's `heads`**
   (`packages/runtime/tests/runtime_fusion_test.ts`), because order starts to matter the moment heads
-  overlap.
+  overlap. (One declared exception since 2026-10-25, `rms_norm` of rmsNormAdd and rmsNormRope, which
+  never accept the same index — the addendum of 2026-10-25, stage 3.)
 - Identity `expand` (input and output shapes identical after binding, rank included) becomes a buffer
   alias with zero dispatches, like `reshape` (ADR 0011). A non-identity expand keeps the strided copy.
 
@@ -84,7 +85,9 @@ guarantee. Therefore:
   2026-10-24; there is no generalisation to broadcast SiLU or general resize.
 - **Every internal value of a chain must have exactly one consumer and must not be a graph output**
   (`internalsArePrivate`, common to all rules). A fused step creates no internal buffer, so any
-  external consumer or readback would lose the value.
+  external consumer or readback would lose the value. (The rmsNormRope rule, whose chain reads two
+  internal values twice, uses the sibling `internalsStayInChain` — every use inside the chain; the
+  addendum of 2026-10-25, stage 3.)
 - **MUST: use counts and release bookkeeping follow the actual node order.** RoPE accepts two orders
   (slice-first and direct-mul-first); a sequence reordered by role would shift the set of internal
   values for direct-first only.
@@ -454,3 +457,104 @@ copies is a node output. The permute after the attention stays a node.
   `packages/runtime/tests/gpu_estimate_test.ts` checks that the estimate equals the slot table on the
   four a8 routes. Not measured here: other backends (D3D12, Metal), the timings, and the models'
   per-environment sha256 rows (bit identity predicts them unchanged).
+
+### Stage 3 of the same wave: rms_norm → pair RoPE in one kernel (rule `rmsNormRope`, perf-ledger F-3)
+
+Not a consumer annotation: a `FusedStep` rule like those of decision 1, `rmsNormRope`
+(`packages/runtime/src/runtime/fusion-rules/rms-norm-rope.ts`), f32 in and out. The Wan DiTs normalise
+each token row of the self-attention q and k (`rms_norm` over H·D) and rotate it with the pair-form
+RoPE through two reshape aliases — two dispatches and one stored f32 row per projection. The rule
+folds the chain into one dispatch of `RMS_NORM_ROPE_WGSL` (`packages/runtime/src/kernels/rms-norm-rope.ts`,
+key `rms_norm_rope:v1:pair:bshd:f32:wg256`), which never stores the normalised row; the attention's own
+a8 quantize still reads the RoPE output token-major.
+
+- **The exact match** (decision 2), from the scan index: `rms_norm(x, weight) → n` with x
+  `[1,S,H·D]` f32 (last-dim and weight-only by its contract, ADR 0017); `reshape(n) → v`
+  `[1,S,H,D]`; `reshape(v) → pairs` `[1,S,H·D/2,2]`; then, directly after, exactly what the rope rule
+  accepts for the pair / BSHD form of the addendum of 2026-10-24 — the same matcher
+  (`matchRopePairForm`), so D is even and a pair never straddles a head. All f32, no graph output and
+  no other consumer inside, no state, bind surface x / weight / cos / sin without duplicates. Between
+  the chain's nodes only `rms_norm` and `reshape` nodes may sit (the other projections'); anything
+  else, a bias `add` after the norm, a per-head norm (`[1,S,H,D]` rows — anima's spelling, which also
+  feeds the half split in BHSD), a half-split RoPE, an odd D or one more consumer of `n`, `v` or
+  `pairs` leaves the nodes (and the RoPE then folds alone under `rope`).
+- **Only where the plain path runs the kernel it is bit-identical to**: the 256-wide workgroup
+  `rms_norm` (`rms_norm:v1:f32:lastdim:wg256`). The choice is one predicate, `rmsNormKernel` in
+  `packages/runtime/src/kernels/rms-norm.ts`, which `buildRmsNorm` and the rule both call: a row of at
+  most 128 (the 128-wide form) or `rmsNormReduce: "subgroup32"` (another summation order, ADR
+  [0100](0100-rms-subgroup-reduction.md)) keeps the nodes.
+- **Internal values read twice.** `v` feeds the pair reshape and the RoPE's direct `mul`; `pairs`
+  feeds both slices. Decision 2's `internalsArePrivate` (exactly one consumer) rejects that, so the
+  rule uses a sibling, `internalsStayInChain` (`packages/runtime/src/runtime/fusion-rule.ts`): every
+  use of every internal value is an input slot of a chain node, there is at least one, and none is a
+  graph output — the fold loses no value for the same reason. It does **not** replace
+  `internalsArePrivate` for every rule: counted reads do not know which slot reads the value, so
+  under it `add(n, n)` after `rms_norm → n` would pass and the rmsNormAdd matcher would bind `n`, a
+  value fusion never materialises, as its residual. Only a matcher that pins every slot an internal
+  value may occupy, with a bind surface of external values only, uses it.
+- **Deferred nodes — a change to the window mechanism.** In the Wan IR the q and k chains
+  interleave: `rms_norm` q, `rms_norm` k, the reshapes of q / k / v, q's pair reshape and its 8 RoPE
+  nodes, k's pair reshape and its 8 RoPE nodes. q's window therefore holds k's `rms_norm` and reshape;
+  as in-window passthroughs (the addendum of 2026-08-10, placed before the fused step) they would be
+  emitted as plain nodes and k could never fold. A rule may now **defer** its window's other nodes
+  (`FusionMatch.others: "deferred"`; only this rule does): the fused step takes the window's place,
+  and the deferred nodes are written into the window's last slots of the scanned list, where the scan
+  resumes, so they come after the fused step and any rule may grab them again — k's `rms_norm` heads
+  k's window, with only v's reshape between its nodes (deferred once more, then a plain alias).
+  - MUST: legal only when the chain and the deferred nodes are independent both ways —
+    `passthroughIsIndependent` (they read no chain value) and `deferralIsIndependent` (the chain
+    reads none of their outputs), both checked by `defineRule`. A table reshaped inside the window
+    and read by the RoPE is rejected by the second.
+  - The step list is then a valid order that differs from the declaration order only inside the
+    deferred region. The estimate's `postFusionSteps` places the steps it keeps in post-fusion form
+    by the running node count, which is the position in the scanned list there; MUST: a rule defers
+    only nodes that cannot head such a step (a row-block attention's `bmm`, a linear-prologue
+    producer, a permute an attention absorbs) — `rms_norm` and `reshape` head none.
+  - Checked once on the distribution graphs without a GPU (2026-10-25): every step of the Wan2.2 and
+    Wan2.1 DiTs reads only values defined before it, and every value that exists is read exactly as
+    often as the graph reads it (the release bookkeeping of decision 1), with the rule and under
+    `"subgroup32"`; `runtime_fusion_test.ts` checks the same on its test graphs.
+- **Decision 1's disjoint heads gain one declared exception.** `rmsNormRope` and `rmsNormAdd` share
+  the head `rms_norm`. They never accept the same index: rmsNormAdd needs the normalised value's single
+  use to be the next node, an `add`; rmsNormRope needs every use inside its chain, which reads it only
+  in a `reshape`. The mechanical head check of `packages/runtime/tests/runtime_fusion_test.ts` now
+  allows exactly this pair, and a test applies every rule of `FUSION_RULES` at every index of graphs
+  holding both forms (and one normalised value feeding both) and finds at most one accepting rule, so
+  the order still cannot change the result.
+- **Why it is bit-identical** — the kernel's docstring: "Bit identity with the pair "rms_norm →
+  rope:v1:pair:bshd" (measured at adoption on Vulkan / NVIDIA, Node + Dawn and Chromium: 0 differing
+  words at the Wan2.2 and Wan2.1 shapes, special values and NaN payloads included — research of
+  2026-10-25, wave a stage 3): the reduction, the normalised value and the RoPE products are the plain
+  kernels' strings, so the compiler's contraction decisions are theirs; the normalised value is
+  parenthesised where it feeds the products, the form the adoption measurement compiled; the
+  normalised value meets only multiplications before the products are staged, so no contraction spans
+  the stored-then-read boundary the pair had; the staging itself is the RoPE rounding barrier (its
+  MUST — without it 19–25% of the words move by one ulp on this backend); the backend measured flushes
+  subnormals in both kernels alike; a backend that keeps them is unchecked."
+- **The counter**: `rmsNormRope`, once per folded chain, in the public `FusionCounts`
+  (`lastRunFusions`). Counted 2026-10-25 from the distribution graphs
+  (`packages/e2e/tests/e2e_wan*_fusion_counts_test.ts`, and the GPU lanes' `EXPECTED_FUSIONS` of
+  `e2e_wan_ti2v_dit_test.ts` / `e2e_wan_dit_test.ts`): the Wan2.2 DiT 60 (q and k of 30 blocks, row
+  3,072) and the Wan2.1 DiT 60 (row 1,536) on every seat and S checked, and `rope` drops 60 → 0 on
+  both — each pair-form RoPE of those DiTs now folds with its `rms_norm` (under `"subgroup32"` the
+  counts are `rope` 60, `rmsNormRope` 0). Every other family counts 0 and keeps its `rope` count:
+  anima's q / k reach the half split through a per-head `rms_norm` in BHSD, and Irodori's pair RoPE
+  (DiT 23, speaker 15) is fed by `rms_norm → mul(weight) → slice` of the heads, not by two reshapes.
+- **The estimate does not replay it** (the precedent of the addendum of 2026-10-24: only row-block
+  attention, the linear prologue and the absorbed permutes are counted in post-fusion form). It counts
+  the chain in its pre-fusion form, so besides the RoPE intermediates it already over-counted it now
+  also over-counts the normalised row (`S · H · D · 4` bytes per chain — 93 MiB at the Wan2.2 S 7,920,
+  only where that row is live at the peak).
+- **Measured** (2026-10-25, RTX 3080 Ti, Node 24.22 + Dawn, Vulkan):
+  `packages/runtime/tests/gpu_rms_norm_rope_test.ts` compares the kernel with the pair "rms_norm
+  (`rms_norm:v1:f32:lastdim:wg256`) → `rope:v1:pair:bshd`", the normalised row bound as both `x` and
+  `pairs`, from the production generators — H·D 24·128 / 12·128 / 3·128 (a partial last chunk), S 1 /
+  7 / 300, a two-workgroup grid over 301 rows, normal()·2 rows, special rows (zero, −0, subnormals,
+  ±2e19, underflowing squares, NaN, ±inf, two NaN payloads) and special weights and tables — 0
+  differing words, NaN words included; `packages/runtime/tests/gpu_rms_norm_rope_fusion_test.ts`
+  compares Sessions on the interleaved q / k form with and without the match (a zero-dispatch reshape
+  after each `rms_norm` breaks it) — bit-identical outputs at H 24 / 12 / 3 (D 128) and over a
+  two-workgroup grid, `rmsNormRope` 2 / `rope` 0 against 0 / 2, and 3 against 5 dispatches. Not
+  measured here: Chromium and other backends (the adoption spike covered Chromium on Vulkan), the
+  timings (the spike: 0.57–0.61 of the pair's time), and the models' per-environment sha256 rows (bit
+  identity predicts them unchanged).

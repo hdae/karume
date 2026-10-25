@@ -165,6 +165,8 @@
 | linear prologue △ | linear のプロローグ融合 | a8 の linear が入力を作る elementwise op を自分の量子化（手順 ①）に取り込み、その op の出力を格納しない融合 | — | ADR 0040 追記 2026-10-25 |
 | token-major / head-major △ | トークン順 / ヘッド順（の配置） | attention の被演算子の 2 つの並び。トークン順 `[B, S, H, D]`（射影の出力をそのまま reshape した形）とヘッド順 `[B, H, S, D]`（融合 attention op の宣言形） | — | ADR 0040 追記 2026-10-25 |
 | attention permute absorption △ | attention の permute 吸収 | `attentionCompute: "a8"` のとき、融合 attention が直前の q / k / v の `[0, 2, 1, 3]` permute を取り込み、トークン順のまま読む融合（直後の出力の permute はノードのまま。経路は見ずにこのオプションだけで決め、`attentionPermute` で数える） | — | ADR 0040 追記 2026-10-25 |
+| rmsNormRope（rms_norm → pair RoPE fusion）△ | rms_norm と RoPE の融合 | Wan DiT の self-attention の q / k の前処理（トークン行の `rms_norm` → reshape 2 本 → ペア形の RoPE）を、正規化した行を格納しない f32 カーネル 1 本へ畳む融合（素の経路が 256 幅の workgroup の `rms_norm` を使うときだけ。`rmsNormRope` で数える） | — | ADR 0040 追記 2026-10-25 |
+| deferred node △ | 後ろへ回すノード | 融合の窓の中で畳まないノードのうち、融合ステップの**後ろ**へ置いて走査し直すもの（窓内 passthrough は前に置き、走査し直さない）。q と k の鎖が入り組むときに使う | — | ADR 0040 追記 2026-10-25 |
 | geometry profile | 幾何プロファイル（会話では「プロファイル」でもよい） | GEMM の幾何を op × 行数バケットごとに決めた静的な表 | — | ADR 0115 |
 | `./tune` (runtime subpath) | tune のサブパス / 掃引の面 | 掃引・生成器・表の直列化と照合を出す `@karume/runtime/tune` | — | ADR 0117 決定 1 / 2 |
 | kernel fingerprint (`provenance.kernels`) | カーネルの指紋 | 保存した表がどのカーネルで測った物かを見分けるハッシュ | — | ADR 0117 決定 4 |
