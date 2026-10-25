@@ -235,6 +235,7 @@ import {
   quantizeRowsGeometry,
   quantizeRowsKey,
   quantizeRowsParams,
+  quantizeRowsBshdWgsl,
   quantizeRowsPrologueWgsl,
   quantizeRowsWgsl,
 } from "../src/kernels/quantize-rows.ts";
@@ -280,6 +281,7 @@ import {
   attentionQkI8a8Wgsl,
 } from "../src/kernels/attention-i8a8.ts";
 import { attentionOnlineI8a8Wgsl } from "../src/kernels/attention-online-i8a8.ts";
+import { TRANSPOSE_TILED_WGSL } from "../src/kernels/transpose-tiled.ts";
 import { conv3dI8a8Wgsl } from "../src/kernels/conv3d-i8a8.ts";
 import {
   defaultI8a8Geometry,
@@ -731,6 +733,12 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["quantize_rows_gelu_tanh_reg16.wgsl", quantizeRowsPrologueWgsl("gelu_tanh", 16384)],
     // The erf form at anima's DiT FFN down projection (K 8,192 = 8 vec4 per lane).
     ["quantize_rows_gelu_reg8.wgsl", quantizeRowsPrologueWgsl("gelu", 8192)],
+    // The token-major read of the attention's q / k (perf-ledger F-3): the D = 128 geometry the
+    // attention uses, and the one-row-per-workgroup end. The plain forms above must not move.
+    ["quantize_rows_r8w32_bshd.wgsl", quantizeRowsBshdWgsl(quantizeRowsGeometry(128))],
+    ["quantize_rows_r1w256_bshd.wgsl", quantizeRowsBshdWgsl(quantizeRowsGeometry(1024))],
+    // The tiled transpose that builds Vᵀ from a token-major V (perf-ledger F-8).
+    ["transpose_tiled.wgsl", TRANSPOSE_TILED_WGSL],
     ["linear_i8a8.wgsl", linearI8a8Wgsl(false, true)],
     ["linear_i8a8_v4.wgsl", linearI8a8Wgsl(true, true)],
     ["linear_i8a8_emu.wgsl", linearI8a8Wgsl(false, false)],
@@ -789,6 +797,11 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     // row window, S never stored. Both reduction forms are frozen (they MUST stay bit-identical,
     // so a change to one of them shows up only here), the emulated dot product and both depths.
     ["attention_online_i8a8_d128_sg32.wgsl", attentionOnlineI8a8Wgsl(true, 128, "sg32")],
+    // The token-major O store (perf-ledger F-3 A4); the head-major forms around it must not move.
+    [
+      "attention_online_i8a8_d128_sg32_obshd.wgsl",
+      attentionOnlineI8a8Wgsl(true, 128, "sg32", "bshd"),
+    ],
     ["attention_online_i8a8_d128_wg.wgsl", attentionOnlineI8a8Wgsl(true, 128, "wg")],
     ["attention_online_i8a8_d128_emu_sg32.wgsl", attentionOnlineI8a8Wgsl(false, 128, "sg32")],
     ["attention_online_i8a8_d64_sg32.wgsl", attentionOnlineI8a8Wgsl(true, 64, "sg32")],

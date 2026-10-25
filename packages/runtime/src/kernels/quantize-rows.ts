@@ -232,17 +232,48 @@ export const quantizeRowsWgsl = (geometry: QuantizeRowsGeometry): string =>
   geometry.rowsPerGroup === 1 ? QUANTIZE_ROWS_WGSL : quantizeRowsGroupedWgsl(geometry);
 
 /**
+ * Where the rows of the input sit. `rows` = contiguous `[rows, dim]` (every form so far). `bshd` =
+ * the attention's q / k as the projections write them, token-major `[B, S, H, D]`, read so that the
+ * outputs (`xq`, `xs`) come out head-major `[B·H, S]` exactly as the plain form writes them from a
+ * materialised `[B, H, S, D]` permute (the attention absorbs that permute — perf-ledger F-3).
+ *
+ * Only the read address changes, the per-row arithmetic is the plain form's, so the outputs are
+ * bit-identical to "permute → quantize_rows".
+ */
+export type QuantizeRowsLayout = "rows" | "bshd";
+
+/** The text a layout adds to the lined-up form (`rows` adds nothing: its bytes stay as they were). */
+const BSHD_TEXT: Readonly<
+  Record<
+    QuantizeRowsLayout,
+    { readonly header: string; readonly params: string; readonly base: string }
+  >
+> = {
+  rows: { header: "", params: "", base: "    let base = row * dim;" },
+  bshd: {
+    header: ", rows read from a token-major [B, S, H, D] input",
+    params: "\n  seq: u32,\n  heads: u32,",
+    base: `    // Output row (b·H + h)·S + s reads token s, head h of batch b
+    let bh = row / params.seq;
+    let base = ((bh / params.heads * params.seq + row % params.seq) * params.heads + bh % params.heads) * dim;`,
+  },
+};
+
+/**
  * WGSL of the lined-up shape. One workgroup (256) is cut into R lane groups of width W, and group
  * `slot` handles row `rowBase + slot`. The row loop (`rowBase`) is workgroup-uniform, so the
  * barriers sit at the same places as in the old shape — a group without a row (at the tail) only
  * joins the barriers without touching memory. The tree reduce stays inside the group (width W,
  * log2(W) levels).
  */
-const quantizeRowsGroupedWgsl = ({ lanesPerRow, rowsPerGroup }: QuantizeRowsGeometry): string =>
-  `// karume quantize_rows (per-row per-token symmetric i8: s = max(amax/127, tiny), q = clamp(round(x/s), ±127)) — ${rowsPerGroup} rows × ${lanesPerRow} lanes / workgroup
+const quantizeRowsGroupedWgsl = (
+  { lanesPerRow, rowsPerGroup }: QuantizeRowsGeometry,
+  layout: QuantizeRowsLayout = "rows",
+): string =>
+  `// karume quantize_rows (per-row per-token symmetric i8: s = max(amax/127, tiny), q = clamp(round(x/s), ±127)) — ${rowsPerGroup} rows × ${lanesPerRow} lanes / workgroup${BSHD_TEXT[layout].header}
 struct Params {
   rows: u32,
-  dim: u32,
+  dim: u32,${BSHD_TEXT[layout].params}
 }
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> x: array<f32>;
@@ -274,7 +305,7 @@ fn main(
     // A group without a row at the tail does not read or write and only joins the barriers (the
     // row loop is workgroup-uniform)
     let has_row = row < params.rows;
-    let base = row * dim;
+${BSHD_TEXT[layout].base}
 
     // ① Absolute maximum of the row (NaN propagates by a bit-pattern check — plain max swallows it)
     var acc = 0.0;
@@ -464,4 +495,38 @@ ${stores}
   }
 }
 `;
+};
+
+/**
+ * Key of the token-major read ({@link QuantizeRowsLayout} `bshd`). It always uses the lined-up
+ * generator (one row per workgroup when the row needs all 256 lanes), so the form does not branch
+ * on the geometry.
+ */
+export const quantizeRowsBshdKey = (geometry: QuantizeRowsGeometry): string =>
+  `${QUANTIZE_ROWS_KEY}:r${geometry.rowsPerGroup}w${geometry.lanesPerRow}:bshd`;
+
+/** WGSL of the token-major read (Params `{rows, dim, seq, heads}`). */
+export const quantizeRowsBshdWgsl = (geometry: QuantizeRowsGeometry): string =>
+  quantizeRowsGroupedWgsl(geometry, "bshd");
+
+/**
+ * Uniform Params of the token-major read: `rows` = B·H·S output rows, `dim` = D, `seq` = S, `heads`
+ * = H (one 16-byte block).
+ */
+export const quantizeRowsBshdParams = (
+  rows: number,
+  dim: number,
+  seq: number,
+  heads: number,
+): Uint32Array<ArrayBuffer> => {
+  const params = quantizeRowsParams(rows, dim);
+  assertU32Params("quantize_rows bshd params", { seq, heads });
+  if (seq < 1 || heads < 1 || rows % (seq * heads) !== 0) {
+    throw new CodegenError(
+      `quantize_rows bshd params: rows (${rows}) must be a positive multiple of seq·heads (${seq}·${heads})`,
+    );
+  }
+  params[2] = seq;
+  params[3] = heads;
+  return params;
 };
