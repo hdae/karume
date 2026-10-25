@@ -30,15 +30,17 @@ type FusionRuleName =
 /**
  * The diagnostic counter names. Besides the fusion rules, they count the identity expands among the
  * zero-dispatch aliases that **can drop out conditionally** (`aliasesInput` of {@link ExecStep}),
- * the fixed SRQs handed over as packed int8 activations (ADR 0105), and the producers folded into a
- * linear's step ① ({@link LinearPrologue} — one per folded pair). Reshape aliasing is unconditional
- * and is not counted (it cannot drop out = nothing to observe).
+ * the fixed SRQs handed over as packed int8 activations (ADR 0105), the producers folded into a
+ * linear's step ① ({@link LinearPrologue} — one per folded pair), and the permutes an attention
+ * absorbs ({@link AttentionTokenMajor} — one per absorbed permute, so up to four per attention).
+ * Reshape aliasing is unconditional and is not counted (it cannot drop out = nothing to observe).
  */
 export type FusionCounterName =
   | FusionRuleName
   | "identityExpand"
   | "packedStaticQuantize"
-  | "linearPrologue";
+  | "linearPrologue"
+  | "attentionPermute";
 
 /**
  * Application count per rule. The only observation point for "a fusion silently dropped out and
@@ -183,6 +185,35 @@ export type LinearPrologue = {
   readonly op: PrologueUnaryOp;
 };
 
+/**
+ * The operands of a fused attention that are read or written **token-major** (perf-ledger F-3 A4 /
+ * F-8): the attention absorbed the `[0, 2, 1, 3]` permute that turned a token-major `[B, S, H, D]`
+ * tensor into its head-major `[B, H, S, D]` operand (`q` / `k` / `v`), or the one that turned its
+ * head-major output back (`o`), so the permute's copy is never materialised as a node output.
+ *
+ * The node step's `plan` is the attention's with each absorbed operand **re-pointed to the permute's
+ * input** (name, token-major shape and dtype) and, with `o`, its output re-pointed to the output
+ * permute's output (name and `[B, M, H, D]` shape). The absorbed permutes have no step, so the release
+ * bookkeeping stays the one path of a plain node (`plan.node.ins`): each permute's input trades the
+ * permute's use for the attention's, and the absorbed values (one use, not graph outputs) are never
+ * defined.
+ * MUST: acceptance is decided in one place, `planFusions` in {@link "./fusion.ts"}, and it needs no
+ * route: the attention recipe honours every flag on every route (the a8 quantisation reads a
+ * token-major q / k / v itself, the online kernel stores O token-major, and any other route makes the
+ * head-major copy the permute made, as a node temporary). A node other than a fused attention that
+ * carries it would read the operands in the wrong layout — a silent wrong value — so it fails loudly.
+ */
+export type AttentionTokenMajor = {
+  readonly q: boolean;
+  readonly k: boolean;
+  readonly v: boolean;
+  readonly o: boolean;
+};
+
+/** The number of permutes an attention absorbed (the `attentionPermute` counter's increment). */
+export const absorbedPermutes = (tokenMajor: AttentionTokenMajor): number =>
+  [tokenMajor.q, tokenMajor.k, tokenMajor.v, tokenMajor.o].filter(Boolean).length;
+
 type NodeStep = {
   readonly kind: "node";
   readonly plan: NodePlan;
@@ -201,7 +232,24 @@ type NodeStep = {
    * and the linear, adjacent in node order).
    */
   readonly prologue?: LinearPrologue;
+  /**
+   * The permutes this attention absorbed (perf-ledger F-3 A4 / F-8). `undefined` = every operand is
+   * read and written head-major as declared, as before. One node step then stands for the absorbed
+   * input permutes (the run immediately before it in node order), the attention and, with `o`, the
+   * output permute right after it.
+   */
+  readonly tokenMajor?: AttentionTokenMajor;
 };
+
+/**
+ * The number of original (pre-fusion) nodes a plain node step stands for: 1, plus the producer a
+ * linear folded ({@link LinearPrologue}) or the permutes an attention absorbed
+ * ({@link AttentionTokenMajor}). The nodes are contiguous in node order.
+ */
+export const nodeStepSpan = (step: NodeStep): number =>
+  1 +
+  (step.prologue === undefined ? 0 : 1) +
+  (step.tokenMajor === undefined ? 0 : absorbedPermutes(step.tokenMajor));
 
 export type ExecStep = NodeStep | FusedStep;
 

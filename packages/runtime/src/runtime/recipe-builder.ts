@@ -44,6 +44,7 @@ import type { GpuContext } from "../gpu/device.ts";
 import type { SessionPipelines } from "../gpu/pipeline-cache.ts";
 import { CAST_OP, numel, stateReadonly, WEIGHT_SLOTS, WHERE_OP } from "../ops.ts";
 import type {
+  AttentionTokenMajor,
   ExecStep,
   FusedOperand,
   FusedStep,
@@ -444,6 +445,7 @@ export class RecipeBuilder {
         states,
         step.packedActivations,
         step.prologue,
+        step.tokenMajor,
       );
     } else {
       await this.#buildFused(step, binds, outs, builder);
@@ -579,12 +581,25 @@ export class RecipeBuilder {
     packed: PackedActivations | undefined,
     /** The producer folded into a linear's step ① (perf-ledger F-4 — accepted in one place, fusion.ts). */
     prologue: LinearPrologue | undefined,
+    /** The permutes a fused attention absorbed (perf-ledger F-3 A4 / F-8 — accepted in one place, fusion.ts). */
+    tokenMajor: AttentionTokenMajor | undefined,
   ): Promise<void> {
     // MUST: only a linear executes a folded producer. Any other kind would run without the folded op
     // (its input is the producer's input) — a silent wrong value, so it fails loudly.
     if (prologue !== undefined && step.contract.kind !== "linear") {
       throw new ExecutionError(
         `${step.node.op}: carries a ${prologue.op} prologue (perf-ledger F-4), which only a linear executes`,
+      );
+    }
+    // MUST: only a fused attention (no states field) reads and writes token-major operands. Any other
+    // node would read the re-pointed inputs in the wrong layout — a silent wrong value, so it fails
+    // loudly.
+    if (
+      tokenMajor !== undefined &&
+      (step.contract.kind !== "attention" || Object.keys(step.node.states).length > 0)
+    ) {
+      throw new ExecutionError(
+        `${step.node.op}: carries absorbed permutes (perf-ledger F-3 / F-8), which only a fused attention executes`,
       );
     }
     switch (step.contract.kind) {
@@ -692,7 +707,7 @@ export class RecipeBuilder {
         // the **readonly** form that reads only the past (ADR 0096 stage 2 addendum — ins is q alone,
         // a separate kernel with the bindings packed one by one).
         if (Object.keys(step.node.states).length === 0) {
-          await buildAttention(this.#face, step, binds, outs, builder);
+          await buildAttention(this.#face, step, binds, outs, builder, tokenMajor);
         } else if (stateReadonly(step.node.attrs, `nodes (${step.node.op})`)) {
           await buildReadonlyStateAttention(this.#face, step, binds, outs, builder, states);
         } else {

@@ -21,6 +21,7 @@ import {
 } from "../../kernels/attention-i8a8.ts";
 import {
   ATTENTION_ONLINE_ROWS,
+  type AttentionOnlineOutput,
   type AttentionOnlineReduce,
   attentionOnlineI8a8Key,
   attentionOnlineI8a8Params,
@@ -57,19 +58,33 @@ import {
   stridedWgsl,
 } from "../../codegen/strided.ts";
 import { type MaterialisedScoreStorage, scoreStorageBytes } from "../../kernels/score-storage.ts";
-import { attentionRoute, type AttentionSeats } from "../attention-route.ts";
-import { attentionScale, stateWindow } from "../../ops.ts";
+import { type AttentionRoute, attentionRoute, type AttentionSeats } from "../attention-route.ts";
+import { attentionScale, numel, stateWindow } from "../../ops.ts";
 import { gemmTileM, gemmTileN } from "../../kernels/gemm-geometry.ts";
 import { type I8a8Geometry, i8a8TileM, i8a8TileN } from "../../kernels/i8a8-geometry.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../../codegen/dispatch.ts";
-import { planRowBlocks, type RowBlockLimit, rowBlockLimit } from "../fusion.ts";
+import {
+  type AttentionTokenMajor,
+  planRowBlocks,
+  type RowBlockLimit,
+  rowBlockLimit,
+} from "../fusion.ts";
 import { planStateAttention } from "../state-attention-plan.ts";
 import {
+  quantizeRowsBshdKey,
+  quantizeRowsBshdParams,
+  quantizeRowsBshdWgsl,
   quantizeRowsGeometry,
   quantizeRowsKey,
   quantizeRowsParams,
   quantizeRowsWgsl,
 } from "../../kernels/quantize-rows.ts";
+import {
+  TRANSPOSE_TILED_KEY,
+  TRANSPOSE_TILED_TILE,
+  TRANSPOSE_TILED_WGSL,
+  transposeTiledParams,
+} from "../../kernels/transpose-tiled.ts";
 import {
   stateAppendKey,
   stateAppendParams,
@@ -167,6 +182,20 @@ type AttentionPvStage =
       readonly vq: TempSource;
       readonly vs: TempSource;
     });
+
+/**
+ * Which operands the a8 quantisation reads token-major (the absorbed permutes it honours itself —
+ * perf-ledger F-3 / F-8, {@link attentionHeadMajorCopies} for the rest), with the head count those
+ * reads need and the node's label for failures.
+ */
+type AttentionLayout = {
+  readonly q: boolean;
+  readonly k: boolean;
+  readonly v: boolean;
+  /** `H` (the q side's — a8 rejects GQA, so k / v have the same head count). */
+  readonly heads: number;
+  readonly where: string;
+};
 
 /** The temporaries of one row block of plain attention (allocation order — released in reverse). */
 export type AttentionBlock = {
@@ -316,13 +345,127 @@ export const attentionI8a8TempBytes = (
       kq: Math.max(4, batch * cols * depth),
       ks: Math.max(4, batch * cols * 4),
     },
-    // Vᵀ (f32, the materialised permute) and its quantization result.
+    // Vᵀ (f32 — the strided permute of a head-major V, or the tiled transpose of a token-major one)
+    // and its quantization result.
     pv: {
       vt: Math.max(4, batch * depth * cols * 4),
       vq: Math.max(4, batch * depth * cols),
       vs: Math.max(4, batch * depth * 4),
     },
   };
+};
+
+/**
+ * The permutation between a token-major `[B, S, H, D]` tensor and its head-major `[B, H, S, D]` form
+ * (its own inverse) — the `[0, 2, 1, 3]` permute a fused attention absorbs (perf-ledger F-3 A4 /
+ * F-8, {@link AttentionTokenMajor}).
+ */
+const HEAD_SWAP: readonly number[] = [0, 2, 1, 3];
+
+/** A shape with its two middle axes swapped (token-major ↔ head-major). */
+const swapHeads = (shape: readonly number[]): readonly number[] =>
+  HEAD_SWAP.map((axis) => shape[axis]);
+
+/** The token-major flags of q / k / v, by operand slot (`undefined` = all head-major). */
+const tokenMajorOperands = (
+  tokenMajor: AttentionTokenMajor | undefined,
+): readonly [boolean, boolean, boolean] => [
+  tokenMajor?.q === true,
+  tokenMajor?.k === true,
+  tokenMajor?.v === true,
+];
+
+/**
+ * The head-major shapes of a fused attention node's q / k / v (a pure function): a token-major
+ * operand ({@link AttentionTokenMajor}) arrives with the absorbed permute's input shape `[B, S, H, D]`,
+ * and every derivation of the node (B·H, M, N, D, the guards and the estimate) reads the operand's
+ * `[B, H, S, D]`.
+ */
+export const attentionHeadMajorShapes = (
+  inputShapes: readonly (readonly number[])[],
+  tokenMajor: AttentionTokenMajor | undefined,
+): readonly [readonly number[], readonly number[], readonly number[]] => {
+  const [q, k, v] = tokenMajorOperands(tokenMajor).map((swapped, slot) =>
+    swapped ? swapHeads(inputShapes[slot]) : inputShapes[slot],
+  );
+  return [q, k, v];
+};
+
+/**
+ * The head-major copies a fused attention node makes as node temporaries for its token-major operands
+ * (the permutes the fusion pass let it absorb — {@link AttentionTokenMajor}), in bytes per operand
+ * (`undefined` = no copy). A pure function.
+ *
+ * The a8 quantisation reads a token-major q / k (①QK on `i8a8`) or V (③PV on `i8a8`) itself, and the
+ * online kernel stores O token-major; every other token-major operand — a dense stage (the f32 / f16
+ * presets, or a stage the shape keeps off i8a8) and O on the three-dispatch route — is copied with
+ * the strided permute the absorbed node ran, so that route's work and values are the graph's byte for
+ * byte (the copy of an input before the first stage reads it, the copy of O after the last ③PV).
+ *
+ * MUST: execution ({@link buildAttention}) and the estimate (estimate.ts — ADR 0124 decision 7) take
+ * them from this one function.
+ */
+export const attentionHeadMajorCopies = (
+  tokenMajor: AttentionTokenMajor | undefined,
+  route: AttentionRoute,
+  shapes: {
+    /** The node's bound inputs (a token-major operand has its token-major shape). */
+    readonly inputs: readonly (readonly number[])[];
+    /** The node's bound output (token-major with `o`). */
+    readonly output: readonly number[];
+  },
+): Readonly<Record<"q" | "k" | "v" | "o", number | undefined>> => {
+  const [q, k, v] = tokenMajorOperands(tokenMajor);
+  const bytes = (copied: boolean, shape: readonly number[]): number | undefined =>
+    copied ? Math.max(4, numel(shape) * 4) : undefined;
+  return {
+    q: bytes(q && route.qk !== "i8a8", shapes.inputs[0]),
+    k: bytes(k && route.qk !== "i8a8", shapes.inputs[1]),
+    v: bytes(v && route.pv !== "i8a8", shapes.inputs[2]),
+    o: bytes(tokenMajor?.o === true && route.online === undefined, shapes.output),
+  };
+};
+
+/**
+ * The strided `[0, 2, 1, 3]` permute of an `srcShape` tensor from `source` into `target` — the same
+ * key, params and workgroups as `buildStridedCopy` (recipe-builders/layout.ts) gives the permute node
+ * a fused attention absorbed, so a route that cannot read or write token-major makes the very copy
+ * the graph made.
+ */
+const permuteHeads = async (
+  face: RecipeBuildFace,
+  builder: StepRecipeBuilder,
+  source: BindingSource,
+  target: BindingSource,
+  srcShape: readonly number[],
+): Promise<void> => {
+  const spec = { dtype: "f32" } as const;
+  const key = stridedKey(spec);
+  const { pipeline, layout, roles } = await face.state.cache.get(key, stridedWgsl(spec));
+  const outShape = swapHeads(srcShape);
+  builder.dispatch({
+    key,
+    pipeline,
+    layout,
+    roles,
+    params: face.writeParams(
+      stridedParams(outShape, permuteSrcStrides(srcShape, HEAD_SWAP), 0),
+      PARAMS_STORAGE_USAGE,
+    ),
+    bindings: [
+      { binding: 1, source },
+      { binding: 2, source: target },
+    ],
+    workgroups: [
+      gridStrideWorkgroups(
+        numel(outShape),
+        STRIDED_WORKGROUP_SIZE,
+        face.state.gpu.limits.maxComputeWorkgroupsPerDimension,
+      ),
+      1,
+      1,
+    ],
+  });
 };
 
 /**
@@ -472,6 +615,22 @@ export const stateAttentionVariantViolation = (
  * node is instead the same four quantization dispatches plus one online-kernel dispatch per window
  * of query rows ({@link buildAttentionOnline}) — no S, no row statistics, no row blocks.
  *
+ * ## Token-major operands (the absorbed permutes — perf-ledger F-3 A4 / F-8)
+ *
+ * When the fusion pass let the node absorb the `[0, 2, 1, 3]` permutes around it
+ * ({@link AttentionTokenMajor} — decided without the route), the absorbed operands arrive token-major
+ * `[B, S, H, D]` and, with `o`, O leaves token-major `[B, M, H, D]`. Every route honours it, so the
+ * decision never needs the route (`attentionRoute` stays the one decision):
+ *
+ * - the a8 quantisation (shared by the online and the three-dispatch routes — the MUST of
+ *   {@link buildAttentionOnline}) reads a token-major q / k with the token-major `quantize_rows`
+ *   and builds Vᵀ from a token-major V with the tiled transpose (one transpose per batch,
+ *   `[N, H·D]` → `[H·D, N]`), instead of the strided copy;
+ * - the online kernel stores O token-major;
+ * - anything else (a dense stage, O on the three-dispatch route) gets the strided permute the absorbed
+ *   node ran, into a node temporary ({@link attentionHeadMajorCopies}) — the graph's work byte for
+ *   byte.
+ *
  * MUST: ① and ③ are one workgroup = one tile, so exceeding the limit fails loudly on all three axes
  * ({@link tiledWorkgroups}). Clamping would drop tiles and leave part of O unwritten (with a
  * reallocated buffer, the previous values) with no exception. Only ② is grid-stride over rows.
@@ -487,8 +646,12 @@ export const buildAttention = async (
   binds: readonly BindingSource[],
   outs: readonly BindingSource[],
   builder: StepRecipeBuilder,
+  /** The permutes the node absorbed (perf-ledger F-3 A4 / F-8 — accepted in one place, fusion.ts). */
+  tokenMajor: AttentionTokenMajor | undefined,
 ): Promise<void> => {
-  const [q, k, v] = step.inputShapes;
+  // The operands' head-major shapes (a token-major operand is the absorbed permute's input).
+  const tokenMajorIns = tokenMajorOperands(tokenMajor);
+  const [q, k, v] = attentionHeadMajorShapes(step.inputShapes, tokenMajor);
   // B and H fold into one batch axis (the contract is rank-4 head-first; B matches across all
   // three, H is the q side's).
   const batch = q[0] * q[1];
@@ -545,6 +708,19 @@ export const buildAttention = async (
   // The online kernel (`attentionScoreStorage: "none"` — ADR 0132): the route chose it for this
   // shape and device, so S is never materialised and none of the three dispatches below run. The
   // guards above apply unchanged (the requested mode is a8).
+  // The token-major operands this route cannot read or write itself, copied to and from head-major
+  // node temporaries (the one function shared with the estimate). The online route has none.
+  const copies = attentionHeadMajorCopies(tokenMajor, route, {
+    inputs: step.inputShapes,
+    output: step.outputs[0].shape,
+  });
+  const layout: AttentionLayout = {
+    q: tokenMajorIns[0] && copies.q === undefined,
+    k: tokenMajorIns[1] && copies.k === undefined,
+    v: tokenMajorIns[2] && copies.v === undefined,
+    heads: q[1],
+    where,
+  };
   if (route.online !== undefined) {
     await buildAttentionOnline(
       face,
@@ -552,11 +728,31 @@ export const buildAttention = async (
       binds,
       outs[0],
       { batch, rows, cols, depth },
-      { scale, reduce: route.online, where },
+      { scale, reduce: route.online, where, output: tokenMajor?.o === true ? "bshd" : "bhsd" },
+      layout,
     );
     return;
   }
   const scoreStorage = route.score;
+  // The head-major copies of the token-major inputs the stages below read as stored (before the first
+  // stage — the permute the absorbed node ran), and the head-major O that ③PV writes before the
+  // permute out. MUST: allocated before the stage temporaries and released after them, at the end of
+  // the node (reverse allocation order — ADR 0004).
+  const inputCopies = [copies.q, copies.k, copies.v].map((byteLength, slot) => {
+    return byteLength === undefined ? undefined : { byteLength, source: binds[slot], slot };
+  });
+  const headMajorIns: (TempSource | undefined)[] = [];
+  for (const copy of inputCopies) {
+    if (copy === undefined) {
+      headMajorIns.push(undefined);
+      continue;
+    }
+    const temp = builder.allocTemp(copy.byteLength);
+    await permuteHeads(face, builder, copy.source, temp, step.inputShapes[copy.slot]);
+    headMajorIns.push(temp);
+  }
+  // What the dense stages bind for q / k / v (the copy when one was made).
+  const operands = binds.map((source, slot) => headMajorIns[slot] ?? source);
 
   // Block split over query rows (the same pure function as ADR 0060 — the same manner as the
   // states-form attention). An even split into the smallest count where one S block = `B·H · block
@@ -613,6 +809,7 @@ export const buildAttention = async (
           scoreStorage,
           { batch, rows, cols, depth },
           windowed,
+          layout,
         )
       : {
           kind: "dense",
@@ -633,6 +830,7 @@ export const buildAttention = async (
           scoreStorage,
           { batch, rows, cols, depth },
           windowed,
+          layout,
         )
       : {
           kind: "dense",
@@ -653,6 +851,10 @@ export const buildAttention = async (
     statsKey,
     attentionStatsWgsl(compute, scoreStorage, statsRegCache),
   );
+  // Where ③PV writes O: the node's output, or the head-major temporary a token-major O is permuted
+  // out of after the loop.
+  const headMajorOut = copies.o === undefined ? undefined : builder.allocTemp(copies.o);
+  const pvOut = headMajorOut ?? outs[0];
 
   for (const block of blocks) {
     // S[batch, block, N] and row statistics [batch·block, 2]. O is already allocated by the
@@ -704,8 +906,8 @@ export const buildAttention = async (
           PARAMS_UNIFORM_USAGE,
         ),
         bindings: [
-          { binding: 1, source: binds[0] },
-          { binding: 2, source: binds[1] },
+          { binding: 1, source: operands[0] },
+          { binding: 2, source: operands[1] },
           { binding: 3, source: scores },
           ...(mask === undefined ? [] : [{ binding: ATTENTION_QK_MASK_BINDING, source: mask }]),
         ],
@@ -752,7 +954,7 @@ export const buildAttention = async (
           { binding: 1, source: scores },
           { binding: 2, source: pv.vq },
           { binding: 3, source: rowStats },
-          { binding: 4, source: outs[0] },
+          { binding: 4, source: pvOut },
           { binding: ATTENTION_PV_V_SCALE_BINDING, source: pv.vs },
         ],
         workgroups: [
@@ -773,9 +975,9 @@ export const buildAttention = async (
         ),
         bindings: [
           { binding: 1, source: scores },
-          { binding: 2, source: binds[2] },
+          { binding: 2, source: operands[2] },
           { binding: 3, source: rowStats },
-          { binding: 4, source: outs[0] },
+          { binding: 4, source: pvOut },
         ],
         workgroups: [
           tiledWorkgroups(depth, gemmTileN(pvGeometry), limit, `${where} ③PV`),
@@ -792,6 +994,11 @@ export const buildAttention = async (
     builder.releaseTemp(scores);
   }
 
+  // A token-major O: the permute the absorbed output node ran, from the head-major temporary.
+  if (headMajorOut !== undefined) {
+    await permuteHeads(face, builder, headMajorOut, outs[0], swapHeads(step.outputs[0].shape));
+    builder.releaseTemp(headMajorOut);
+  }
   // MUST: the quantization temporaries are also returned in reverse allocation order (this closes
   // what `#prepare*` took — allocation and destruction pair up inside the node. ADR 0004).
   if (pv.kind === "i8a8") {
@@ -804,6 +1011,9 @@ export const buildAttention = async (
     builder.releaseTemp(qk.kq);
     builder.releaseTemp(qk.qs);
     builder.releaseTemp(qk.qq);
+  }
+  for (const temp of [...headMajorIns].reverse()) {
+    if (temp !== undefined) builder.releaseTemp(temp);
   }
 };
 
@@ -1338,8 +1548,9 @@ const prepareAttentionQkI8a8 = async (
   scoreStorage: MaterialisedScoreStorage,
   shape: AttentionShape,
   rowWindow: boolean,
+  operandLayout: AttentionLayout,
 ): Promise<AttentionQkStage> => {
-  const quantized = await quantizeAttentionQk(face, builder, binds, shape);
+  const quantized = await quantizeAttentionQk(face, builder, binds, shape, operandLayout);
 
   // (c) The integer dot-product GEMM (the half scales go to both q and k on the dequant side —
   // design §2.1). The geometry is chosen **separately** from ③PV (only ③ wins with a single N = D
@@ -1369,12 +1580,17 @@ type AttentionQkQuantized = {
  * (a)(b) of {@link prepareAttentionQkI8a8}: allocates `qq` / `qs` / `kq` / `ks` and dispatches the
  * per-token quantization of q and k. Shared with the online kernel ({@link buildAttentionOnline} —
  * ADR 0132 keeps the a8 quantization), so both forms read the same dispatches.
+ *
+ * A token-major q / k (`layout` — the node absorbed its permute, perf-ledger F-3) is read with the
+ * token-major form of `quantize_rows` (rows from `[B, S, H, D]`, outputs head-major exactly as
+ * "permute → quantize_rows" writes them), so the outputs and everything downstream are unchanged.
  */
 const quantizeAttentionQk = async (
   face: RecipeBuildFace,
   builder: StepRecipeBuilder,
   binds: readonly BindingSource[],
   shape: AttentionShape,
+  layout: AttentionLayout,
 ): Promise<AttentionQkQuantized> => {
   const { batch, rows, cols, depth } = shape;
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
@@ -1393,24 +1609,37 @@ const quantizeAttentionQk = async (
   // the small-D variant that packs several rows into one workgroup — `quantizeRowsGeometry`,
   // perf-ledger P-1)
   const quantizeGeometry = quantizeRowsGeometry(depth);
-  const quantizeKey = quantizeRowsKey(quantizeGeometry);
-  const {
-    pipeline: quantizePipeline,
-    layout: quantizeLayout,
-    roles: quantizeRoles,
-  } = await face.state.cache.get(quantizeKey, quantizeRowsWgsl(quantizeGeometry));
-  const quantize = (
+  // `seq` = the token axis of a token-major operand (`undefined` = head-major rows, the plain form).
+  const quantize = async (
     source: BindingSource,
     payload: TempSource,
     scales: TempSource,
     count: number,
-  ): void => {
+    seq: number | undefined,
+  ): Promise<void> => {
+    const quantizeKey =
+      seq === undefined ? quantizeRowsKey(quantizeGeometry) : quantizeRowsBshdKey(quantizeGeometry);
+    const {
+      pipeline: quantizePipeline,
+      layout: quantizeLayout,
+      roles: quantizeRoles,
+    } = await face.state.cache.get(
+      quantizeKey,
+      seq === undefined
+        ? quantizeRowsWgsl(quantizeGeometry)
+        : quantizeRowsBshdWgsl(quantizeGeometry),
+    );
     builder.dispatch({
       key: quantizeKey,
       pipeline: quantizePipeline,
       layout: quantizeLayout,
       roles: quantizeRoles,
-      params: face.writeParams(quantizeRowsParams(count, depth), PARAMS_UNIFORM_USAGE),
+      params: face.writeParams(
+        seq === undefined
+          ? quantizeRowsParams(count, depth)
+          : quantizeRowsBshdParams(count, depth, seq, layout.heads),
+        PARAMS_UNIFORM_USAGE,
+      ),
       bindings: [
         { binding: 1, source },
         { binding: 2, source: payload },
@@ -1419,8 +1648,8 @@ const quantizeAttentionQk = async (
       workgroups: [gridStrideWorkgroups(count, quantizeGeometry.rowsPerGroup, limit), 1, 1],
     });
   };
-  quantize(binds[0], qq, qs, batch * rows);
-  quantize(binds[1], kq, ks, batch * cols);
+  await quantize(binds[0], qq, qs, batch * rows, layout.q ? rows : undefined);
+  await quantize(binds[1], kq, ks, batch * cols, layout.k ? cols : undefined);
   return { qq, qs, kq, ks };
 };
 
@@ -1461,8 +1690,9 @@ const prepareAttentionPvI8a8 = async (
   scoreStorage: MaterialisedScoreStorage,
   shape: AttentionShape,
   rowWindow: boolean,
+  operandLayout: AttentionLayout,
 ): Promise<AttentionPvStage> => {
-  const quantized = await quantizeAttentionPv(face, builder, binds, shape);
+  const quantized = await quantizeAttentionPv(face, builder, binds, shape, operandLayout);
 
   // (c) The integer dot-product GEMM (P̃ is produced by filling the A tile = stays unmaterialised).
   // The geometry is the per-op field of the profile. The dispatch is per block, so this only
@@ -1489,50 +1719,59 @@ type AttentionPvQuantized = {
  * (a)(b) of {@link prepareAttentionPvI8a8}: allocates `vt` / `vq` / `vs` and dispatches the permute
  * to Vᵀ and its quantization. Shared with the online kernel ({@link buildAttentionOnline} — ADR 0132
  * keeps the a8 quantization), so both forms read the same dispatches.
+ *
+ * A token-major V (`layout` — the node absorbed its permute, perf-ledger F-8) is `[N, H·D]` per batch,
+ * whose transpose `[H·D, N]` is Vᵀ `[B·H, D, N]` as is: (a) is then one tiled transpose per batch
+ * instead of the strided copy (both are copies, so Vᵀ is the same bits).
  */
 const quantizeAttentionPv = async (
   face: RecipeBuildFace,
   builder: StepRecipeBuilder,
   binds: readonly BindingSource[],
   shape: AttentionShape,
+  layout: AttentionLayout,
 ): Promise<AttentionPvQuantized> => {
   const { batch, cols, depth } = shape;
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
 
-  // Vᵀ (f32, the materialised permute) and its quantization result. All are temporary regions
-  // closed inside the node.
+  // Vᵀ (f32, the materialised permute or transpose) and its quantization result. All are temporary
+  // regions closed inside the node.
   // The sizes come from the formula shared with the estimate ({@link attentionI8a8TempBytes}).
   const bytes = attentionI8a8TempBytes(shape).pv;
   const vt = builder.allocTemp(bytes.vt);
   const vq = builder.allocTemp(bytes.vq);
   const vs = builder.allocTemp(bytes.vs);
 
-  // (a) v[B·H,N,D] → Vᵀ[B·H,D,N] (the existing strided-read copy family — the permute itself).
-  // MUST: build the strides from the contiguous strides of the **input** `[B·H,N,D]` (building them
-  // from the output shape matches only when D == N. The measured shapes have D != N, so it would
-  // show, but the unit test is the proper detector).
-  const stridedSpec = { dtype: "f32" } as const;
-  const permuteKey = stridedKey(stridedSpec);
-  const {
-    pipeline: permutePipeline,
-    layout: permuteLayout,
-    roles: permuteRoles,
-  } = await face.state.cache.get(permuteKey, stridedWgsl(stridedSpec));
-  builder.dispatch({
-    key: permuteKey,
-    pipeline: permutePipeline,
-    layout: permuteLayout,
-    roles: permuteRoles,
-    params: face.writeParams(
-      stridedParams([batch, depth, cols], permuteSrcStrides([batch, cols, depth], [0, 2, 1]), 0),
-      PARAMS_STORAGE_USAGE,
-    ),
-    bindings: [
-      { binding: 1, source: binds[2] },
-      { binding: 2, source: vt },
-    ],
-    workgroups: [gridStrideWorkgroups(batch * depth * cols, STRIDED_WORKGROUP_SIZE, limit), 1, 1],
-  });
+  if (layout.v) {
+    // (a) A token-major v[B,N,H·D] → Vᵀ[B,H·D,N] = Vᵀ[B·H,D,N]: one 32×32 tile per workgroup, the
+    // batch on z. MUST: tiled on every axis (one workgroup = one block — clamping would leave part of
+    // Vᵀ unwritten without an exception).
+    const {
+      pipeline,
+      layout: bindLayout,
+      roles,
+    } = await face.state.cache.get(TRANSPOSE_TILED_KEY, TRANSPOSE_TILED_WGSL);
+    const channels = layout.heads * depth;
+    const where = `${layout.where} Vᵀ transpose`;
+    builder.dispatch({
+      key: TRANSPOSE_TILED_KEY,
+      pipeline,
+      layout: bindLayout,
+      roles,
+      params: face.writeParams(transposeTiledParams(cols, channels), PARAMS_UNIFORM_USAGE),
+      bindings: [
+        { binding: 1, source: binds[2] },
+        { binding: 2, source: vt },
+      ],
+      workgroups: [
+        tiledWorkgroups(channels, TRANSPOSE_TILED_TILE, limit, where),
+        tiledWorkgroups(cols, TRANSPOSE_TILED_TILE, limit, where),
+        tiledWorkgroups(batch / layout.heads, 1, limit, where),
+      ],
+    });
+  } else {
+    await transposeHeadMajorValues(face, builder, binds[2], vt, shape);
+  }
 
   // (b) Quantize Vᵀ (row = (b,h,d), row length N — the per-column scale and the N-contiguous
   // packing come out together)
@@ -1559,6 +1798,44 @@ const quantizeAttentionPv = async (
   return { vt, vq, vs };
 };
 
+/** (a) of {@link quantizeAttentionPv} for a head-major V: the strided permute to Vᵀ. */
+const transposeHeadMajorValues = async (
+  face: RecipeBuildFace,
+  builder: StepRecipeBuilder,
+  source: BindingSource,
+  vt: TempSource,
+  shape: AttentionShape,
+): Promise<void> => {
+  const { batch, cols, depth } = shape;
+  const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
+  // (a) v[B·H,N,D] → Vᵀ[B·H,D,N] (the existing strided-read copy family — the permute itself).
+  // MUST: build the strides from the contiguous strides of the **input** `[B·H,N,D]` (building them
+  // from the output shape matches only when D == N. The measured shapes have D != N, so it would
+  // show, but the unit test is the proper detector).
+  const stridedSpec = { dtype: "f32" } as const;
+  const permuteKey = stridedKey(stridedSpec);
+  const {
+    pipeline: permutePipeline,
+    layout: permuteLayout,
+    roles: permuteRoles,
+  } = await face.state.cache.get(permuteKey, stridedWgsl(stridedSpec));
+  builder.dispatch({
+    key: permuteKey,
+    pipeline: permutePipeline,
+    layout: permuteLayout,
+    roles: permuteRoles,
+    params: face.writeParams(
+      stridedParams([batch, depth, cols], permuteSrcStrides([batch, cols, depth], [0, 2, 1]), 0),
+      PARAMS_STORAGE_USAGE,
+    ),
+    bindings: [
+      { binding: 1, source },
+      { binding: 2, source: vt },
+    ],
+    workgroups: [gridStrideWorkgroups(batch * depth * cols, STRIDED_WORKGROUP_SIZE, limit), 1, 1],
+  });
+};
+
 /**
  * The online kernel's node (ADR 0132 decision 2 — the `online` route of {@link buildAttention}):
  * the four quantization dispatches of a8 (q and k per token, Vᵀ through the permute) followed by
@@ -1572,6 +1849,8 @@ const quantizeAttentionPv = async (
  * on the dequant side — ADR 0023).
  * MUST: the temporaries are released at the end of the node in reverse allocation order (ADR 0004 —
  * the same closure as the a8 path).
+ * With a token-major O (`run.output` `bshd` — the node absorbed the permute after it, perf-ledger F-3
+ * A4) the kernel stores O token-major directly; only the store address changes.
  */
 const buildAttentionOnline = async (
   face: RecipeBuildFace,
@@ -1579,29 +1858,42 @@ const buildAttentionOnline = async (
   binds: readonly BindingSource[],
   out: BindingSource,
   shape: AttentionShape,
-  run: { readonly scale: number; readonly reduce: AttentionOnlineReduce; readonly where: string },
+  run: {
+    readonly scale: number;
+    readonly reduce: AttentionOnlineReduce;
+    readonly where: string;
+    readonly output: AttentionOnlineOutput;
+  },
+  layout: AttentionLayout,
 ): Promise<void> => {
   const { batch, rows, cols, depth } = shape;
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
   const where = `${run.where} online`;
-  const qk = await quantizeAttentionQk(face, builder, binds, shape);
-  const pv = await quantizeAttentionPv(face, builder, binds, shape);
+  const qk = await quantizeAttentionQk(face, builder, binds, shape, layout);
+  const pv = await quantizeAttentionPv(face, builder, binds, shape, layout);
   // The integer dot-product variant follows the same decision as the a8 kernels (the per-device
   // canary — SessionState.attentionI8a8Dot); both variants are bit-identical.
   const dp4a = face.state.attentionI8a8Dot === "dp4a";
-  const key = attentionOnlineI8a8Key(dp4a, depth, run.reduce);
-  const { pipeline, layout, roles } = await face.state.cache.get(
-    key,
-    attentionOnlineI8a8Wgsl(dp4a, depth, run.reduce),
-  );
+  const key = attentionOnlineI8a8Key(dp4a, depth, run.reduce, run.output);
+  const {
+    pipeline,
+    layout: bindLayout,
+    roles,
+  } = await face.state.cache.get(key, attentionOnlineI8a8Wgsl(dp4a, depth, run.reduce, run.output));
   for (const window of planAttentionOnlineWindows(rows, { batch, cols, depth })) {
     builder.dispatch({
       key,
       pipeline,
-      layout,
+      layout: bindLayout,
       roles,
       params: face.writeParams(
-        attentionOnlineI8a8Params(rows, cols, window.offset, run.scale),
+        attentionOnlineI8a8Params(
+          rows,
+          cols,
+          window.offset,
+          run.scale,
+          run.output === "bshd" ? layout.heads : undefined,
+        ),
         PARAMS_UNIFORM_USAGE,
       ),
       bindings: [

@@ -177,4 +177,5 @@ export const NONE: FusionCounts = {
   identityExpand: 0,
   packedStaticQuantize: 0,
   linearPrologue: 0,
+  attentionPermute: 0,
 };

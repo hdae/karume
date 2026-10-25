@@ -138,6 +138,7 @@ test.skipIf(!GPU_AVAILABLE)(
           identityExpand: 0,
           packedStaticQuantize: 0,
           linearPrologue: 0,
+          attentionPermute: 0,
         });
         assertEquals(diagnostics.pipelineCount, 3);
         // 重みアリーナは initializer 2 本に加えて params キャッシュ（Session 常駐）の実体も

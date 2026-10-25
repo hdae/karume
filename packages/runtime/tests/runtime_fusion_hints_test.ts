@@ -334,3 +334,47 @@ test("a linear with a folded producer (perf-ledger F-4) is a grabbed pair: no wi
     "neg,neg@4+2=d",
   ]);
 });
+
+test("an attention that absorbed its permutes (perf-ledger F-3 / F-8) is a grabbed window: no window crosses it, and the node index advances by its five nodes", () => {
+  const dtype = "f32";
+  const token = [1, 5, 2, 8];
+  const head = [1, 2, 5, 8];
+  const graph: DeclarationJson = {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["attention", "neg", "permute"] },
+    symbols: [],
+    inputs: [shaped("x", token), shaped("kt", token), shaped("vt", token)],
+    outputs: ["d"],
+    initializers: {},
+    values: {
+      a: { dtype, shape: token },
+      qt: { dtype, shape: token },
+      q: { dtype, shape: head },
+      k: { dtype, shape: head },
+      v: { dtype, shape: head },
+      o: { dtype, shape: head },
+      ot: { dtype, shape: token },
+      c: { dtype, shape: token },
+      d: { dtype, shape: token },
+    },
+    nodes: [
+      { op: "neg", ins: ["x"], outs: ["a"], attrs: {} },
+      { op: "neg", ins: ["a"], outs: ["qt"], attrs: {} },
+      { op: "permute", ins: ["qt"], outs: ["q"], attrs: { dims: [0, 2, 1, 3] } },
+      { op: "permute", ins: ["kt"], outs: ["k"], attrs: { dims: [0, 2, 1, 3] } },
+      { op: "permute", ins: ["vt"], outs: ["v"], attrs: { dims: [0, 2, 1, 3] } },
+      { op: "attention", ins: ["q", "k", "v"], outs: ["o"], attrs: { scale: 0.125 } },
+      { op: "permute", ins: ["o"], outs: ["ot"], attrs: { dims: [0, 2, 1, 3] } },
+      { op: "neg", ins: ["ot"], outs: ["c"], attrs: {} },
+      { op: "neg", ins: ["c"], outs: ["d"], attrs: {} },
+    ],
+  };
+  const { nodes, context } = plan(graph, { x: token, kt: token, vt: token });
+  const fused = planFusions(nodes, context);
+  assertEquals(fused.counts.attentionPermute, 4, "precondition: the permutes are absorbed");
+  assertEquals(outline(enumerateUnfusedWindows(fused.steps, context, 3)), [
+    "neg,neg@0+2=qt",
+    "neg,neg@7+2=d",
+  ]);
+});

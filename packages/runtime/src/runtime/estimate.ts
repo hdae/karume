@@ -50,9 +50,11 @@ import { parseStorageRoles } from "../gpu/pipeline-cache.ts";
 import { numel, RUNTIME_SUPPORT, stateReadonly, stateWindow, topkK } from "../ops.ts";
 import { assertRuntimeSupport } from "../ops/support.ts";
 import {
+  type AttentionTokenMajor,
   type ExecStep,
   type FusedStep,
   type FusionWeightLayout,
+  nodeStepSpan,
   planAliases,
   planFusions,
   rowBlockLimit,
@@ -108,6 +110,8 @@ import {
   type AttentionSeats,
 } from "./attention-route.ts";
 import {
+  attentionHeadMajorCopies,
+  attentionHeadMajorShapes,
   attentionI8a8TempBytes,
   attentionScoreElementBytes,
   fusedAttentionViolation,
@@ -189,8 +193,10 @@ export type AdmissionScenario = {
    * output, not as the full width of the scores, mask-added scores and softmax output (ADR 0093
    * addendum of 2026-10-10). **So is the linear prologue** (perf-ledger F-4 — with
    * {@link EstimateOptions.linearCompute} `"a8"`, a producer folded into an i8a8 linear's step ①
-   * has no output, as in execution). Other in-node temporaries and intermediates folded away by
-   * other fusions are not accounted for ({@link AdmissionReport.unaccounted}).
+   * has no output, as in execution), **and so are the permutes a fused attention absorbs**
+   * (perf-ledger F-3 A4 / F-8 — counted as absent, with the head-major copies the attention makes in
+   * their place on the routes that need them). Other in-node temporaries and intermediates folded
+   * away by other fusions are not accounted for ({@link AdmissionReport.unaccounted}).
    */
   readonly workspaceBytes: number;
 };
@@ -443,7 +449,7 @@ export type EstimateOptions = {
  * field).
  */
 const UNACCOUNTED: readonly string[] = Object.freeze([
-  "Intermediates that fusions other than row-block attention and the linear prologue fold away, and the in-node temporaries their fusion rules declare (both depend on the device limits and on whether the fusion applies; aliased values and the temporaries of row-block attention are counted, and a producer folded into an i8a8 linear is counted as absent when linearCompute is passed)",
+  "Intermediates that fusions other than row-block attention, the linear prologue and the attention's absorbed permutes fold away, and the in-node temporaries their fusion rules declare (both depend on the device limits and on whether the fusion applies; aliased values and the temporaries of row-block attention are counted, a producer folded into an i8a8 linear is counted as absent when linearCompute is passed, and a permute absorbed by a fused attention is counted as absent with the head-major copies that attention makes in its place)",
   "Quantized intermediates of linear i8a8 (depend on the numeric variant and the device limits). The in-node temporaries of attention are counted — the score S of states-form attention and the row statistics stateAttentionReduce needs, and the score S, row statistics and i8a8 quantized intermediates of the fused attention op (counted with the runtime default f32 unless attentionCompute / attentionScoreStorage is passed; without maxStorageBufferBindingSize only the shapes whose block count is the same on every device are counted [shapes that fit in one block under the WebGPU core default, and shapes whose attentionRowBlockMaxBytes is at most the core default], and no number is returned for the others)",
   "params buffers (kernel constants — resident for the Session's lifetime, content-addressed cache)",
   "The implementation staging of queue.writeBuffer (not released until the submit completes)",
@@ -821,12 +827,16 @@ const stateAttentionTemps = (
  * those the estimate counts **in post-fusion form**, as "index of the window's first node → step"
  * (ADR 0093 addendum of 2026-10-10).
  *
- * Row-block attention and the linear prologue. Counted in the pre-fusion list, the binding limit
- * would hit the full width of the scores, mask-added scores and softmax output that fusion never
- * materialises, and only the estimate of shapes that do run would throw (the demand shape of ADR
- * 0060). A linear with a folded producer (perf-ledger F-4) is a plain node step that stands for the
- * producer at the key and the linear right after it; counted in the pre-fusion list, the producer's
- * output (454 MB at the Wan2.2 33-frame FFN) would stay in a peak execution never has.
+ * Row-block attention, the linear prologue and the attention's absorbed permutes. Counted in the
+ * pre-fusion list, the binding limit would hit the full width of the scores, mask-added scores and
+ * softmax output that fusion never materialises, and only the estimate of shapes that do run would
+ * throw (the demand shape of ADR 0060). A linear with a folded producer (perf-ledger F-4) is a plain
+ * node step that stands for the producer at the key and the linear right after it; counted in the
+ * pre-fusion list, the producer's output (454 MB at the Wan2.2 33-frame FFN) would stay in a peak
+ * execution never has. An attention that absorbed its permutes (perf-ledger F-3 A4 / F-8) is a plain
+ * node step that stands for the absorbed input permutes at the key, the attention and the output
+ * permute ({@link nodeStepSpan} nodes); the permutes' copies never exist as node outputs, and the
+ * copies the attention makes itself are its own temporaries ({@link fusedAttentionProgram}).
  * Other rules are still counted in the pre-fusion list (the `unaccounted` side).
  * MUST: pass the same `linearCompute` and weight storage as execution (`linear`) — the prologue is
  * decided from them, and the estimate would otherwise count the pair unfolded.
@@ -864,23 +874,26 @@ const postFusionSteps = (
   // The scan lays out "passthrough nodes → fused step" per window and advances by the window width,
   // so the running node count of the step list always points at the start of the next window.
   // Row-block attention windows have no passthrough (window = chain), so this running count is
-  // their start in the pre-fusion list as is. A linear with a folded producer stands for two nodes.
+  // their start in the pre-fusion list as is. A node step that absorbed its neighbours (a folded
+  // producer, absorbed permutes) stands for `nodeStepSpan` contiguous nodes.
   let index = 0;
   for (const step of steps) {
     if (step.kind === "node") {
-      if (step.prologue === undefined) {
+      const span = nodeStepSpan(step);
+      if (span === 1) {
         index += 1;
         continue;
       }
-      // MUST: the pair is "the producer at index, the linear at index + 1" in the unfused list (the
-      // same bookkeeping-break check as row-block attention's below).
-      if (nodes[index + 1]?.outputs[0]?.name !== step.plan.outputs[0].name) {
+      // MUST: the step's output is the last of its nodes in the unfused list (the linear after its
+      // producer, the attention or its output permute) — the same bookkeeping-break check as
+      // row-block attention's below.
+      if (nodes[index + span - 1]?.outputs[0]?.name !== step.plan.outputs[0].name) {
         throw new ExecutionError(
-          `Estimate: the linear prologue '${step.plan.outputs[0].name}' does not match the unfused node list at index ${index}`,
+          `Estimate: the node step '${step.plan.outputs[0].name}' that absorbed ${span - 1} node(s) does not match the unfused node list at index ${index}`,
         );
       }
       found.set(index, step);
-      index += 2;
+      index += span;
       continue;
     }
     if (step.rule === "rowBlockAttention") {
@@ -1108,6 +1121,12 @@ const fusedAttentionBlocks = (
  * The online route (`route.online` — ADR 0132) replaces step 3 with one dispatch per row window
  * reading every quantisation temporary; it has no S and no row statistics.
  *
+ * With absorbed permutes (`tokenMajor` — perf-ledger F-3 A4 / F-8) the quantisation dispatches read
+ * the token-major inputs (same reads and writes), the head-major copies of
+ * `attentionHeadMajorCopies` come first (one dispatch each, before step 1) and, for O, the ③PV
+ * dispatches write a temporary that one last dispatch permutes into the output; every temporary lives
+ * until the end of the node, as in execution.
+ *
  * MUST: take sizes and counts only from the same pure functions as execution (`attentionRoute`,
  * `attentionScoreElementBytes`, `planAttentionBlocks`, `planAttentionOnlineWindows`,
  * `attentionI8a8TempBytes`, `rowBlockLimit`).
@@ -1123,8 +1142,9 @@ const fusedAttentionProgram = (
   outputRefs: readonly TransientRef[],
   limit: number | undefined,
   knobs: TransientKnobs,
+  tokenMajor: AttentionTokenMajor | undefined,
 ): { readonly temps: TransientTempSpec[]; readonly dispatches: TransientDispatchSpec[] } => {
-  const [q, k, v] = node.inputShapes;
+  const [q, k, v] = attentionHeadMajorShapes(node.inputShapes, tokenMajor);
   const shape = { batch: q[0] * q[1], rows: q[2], cols: k[2], depth: q[3] };
   const where = `attention [${q.join(",")}] × [${k.join(",")}] × [${v.join(",")}]`;
   const { seats } = knobs;
@@ -1188,9 +1208,31 @@ const fusedAttentionProgram = (
   );
   const qkI8a8 = route.qk === "i8a8";
   const pvI8a8 = route.pv === "i8a8";
-  const last = (qkI8a8 ? 2 : 0) + (pvI8a8 ? 2 : 0) + blocks.length * 3 - 1;
+  const copies = attentionHeadMajorCopies(tokenMajor, route, {
+    inputs: node.inputShapes,
+    output: node.outputs[0].shape,
+  });
+  const inputCopies = [copies.q, copies.k, copies.v];
+  const last =
+    inputCopies.filter((bytes) => bytes !== undefined).length +
+    (qkI8a8 ? 2 : 0) +
+    (pvI8a8 ? 2 : 0) +
+    blocks.length * 3 +
+    (copies.o === undefined ? 0 : 1) -
+    1;
+  // The head-major copies of the token-major inputs the stages read as stored (before them).
+  const [qOperand, kOperand, vOperand] = [qRef, kRef, vRef].map((ref, slot) => {
+    const bytes = inputCopies[slot];
+    if (bytes === undefined) return ref;
+    const copy = alloc(bytes, last);
+    dispatches.push({ reads: [ref], writes: [copy] });
+    return copy;
+  });
   const qk = qkI8a8 ? quantizeQk(last) : undefined;
   const pv = pvI8a8 ? quantizePv(last) : undefined;
+  // The head-major O that ③PV writes before the last dispatch permutes it into the output.
+  const headMajorOut = copies.o === undefined ? undefined : alloc(copies.o, last);
+  const pvWrites = headMajorOut === undefined ? outputRefs : [headMajorOut];
   for (const block of blocks) {
     const end = dispatches.length + 2;
     const scores = alloc(block.scoreBytes, end);
@@ -1199,17 +1241,18 @@ const fusedAttentionProgram = (
       reads:
         qk === undefined
           ? maskRef === undefined
-            ? [qRef, kRef]
-            : [qRef, kRef, maskRef]
+            ? [qOperand, kOperand]
+            : [qOperand, kOperand, maskRef]
           : [qk.qq, qk.kq, qk.qs, qk.ks],
       writes: [scores],
     });
     dispatches.push({ reads: [scores], writes: [rowStats] });
     dispatches.push({
-      reads: pv === undefined ? [scores, vRef, rowStats] : [scores, pv.vq, rowStats, pv.vs],
-      writes: outputRefs,
+      reads: pv === undefined ? [scores, vOperand, rowStats] : [scores, pv.vq, rowStats, pv.vs],
+      writes: pvWrites,
     });
   }
+  if (headMajorOut !== undefined) dispatches.push({ reads: [headMajorOut], writes: outputRefs });
   return { temps, dispatches };
 };
 
@@ -1221,8 +1264,9 @@ const fusedAttentionProgram = (
  *
  * MUST: build the allocation program from the pre-fusion node list and replace only the windows of
  * row-block attention with the same fused steps as the execution phase (ADR 0093 addendum of
- * 2026-10-10), and each linear-prologue pair with its linear's re-pointed plain node (perf-ledger
- * F-4) — both from {@link postFusionSteps}. Intermediates folded by other fusions and fusion-rule
+ * 2026-10-10), each linear-prologue pair with its linear's re-pointed plain node (perf-ledger F-4)
+ * and each attention with its absorbed permutes with the attention's re-pointed plain node
+ * (perf-ledger F-3 A4 / F-8) — all from {@link postFusionSteps}. Intermediates folded by other fusions and fusion-rule
  * temporaries are on the `unaccounted` side. Plain nodes' dispatches are approximated as one per
  * node (reads = `ins`, writes = `outs`), giving the usage-scope rule for separate regions the same
  * counterparts in the same direction as the execution phase. States-form attention and fused
@@ -1258,7 +1302,18 @@ const transientSlotBytes = (
   const outputNames = new Set(graph.outputs);
   const aliases = planAliases(nodes);
   const bindingLimit = limit ?? CORE_TRANSIENT_LIMITS.maxStorageBufferBindingSize;
-  const nodeStep = (node: NodePlan): TransientStepSpec => {
+  const nodeStep = (node: NodePlan, tokenMajor?: AttentionTokenMajor): TransientStepSpec => {
+    // MUST: absorbed permutes reach only a fused attention (the same check as execution's
+    // recipe-builder — counting another node with them would return a number for a plan execution
+    // rejects).
+    if (
+      tokenMajor !== undefined &&
+      (node.contract.kind !== "attention" || isStateAttention(node))
+    ) {
+      throw new ExecutionError(
+        `Estimate: ${node.node.op} carries absorbed permutes (perf-ledger F-3 / F-8), which only a fused attention executes`,
+      );
+    }
     const isAlias = aliases.has(node);
     const outputs: TransientOutputSpec[] = node.outputs.map((out) => ({
       name: out.name,
@@ -1325,7 +1380,7 @@ const transientSlotBytes = (
     } else if (node.contract.kind === "attention") {
       // In-node temporaries of a fused attention op (no states field): S, row statistics, i8a8
       // quantisation temporaries.
-      const program = fusedAttentionProgram(node, reads, outputRefs, limit, knobs);
+      const program = fusedAttentionProgram(node, reads, outputRefs, limit, knobs, tokenMajor);
       temps.push(...program.temps);
       dispatches.push(...program.dispatches);
     } else if (!isAlias && selectionSplitTempBytes(node) > 0) {
@@ -1366,10 +1421,11 @@ const transientSlotBytes = (
       continue;
     }
     if (step.kind === "node") {
-      // The linear with its folded producer: the linear's program on the re-pointed plan (it reads
-      // the producer's input), and no step for the producer, whose output never exists.
-      program.push(nodeStep(step.plan));
-      index += 2;
+      // The node step that absorbed its neighbours (the linear with its folded producer, the
+      // attention with its permutes): its own program on the re-pointed plan (it reads the absorbed
+      // nodes' inputs), and no step for the absorbed nodes, whose outputs never exist.
+      program.push(nodeStep(step.plan, step.tokenMajor));
+      index += nodeStepSpan(step);
       continue;
     }
     program.push(fusedTransientStep(step, uses, outputNames));

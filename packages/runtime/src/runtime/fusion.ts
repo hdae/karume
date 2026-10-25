@@ -66,6 +66,13 @@
  * so the bookkeeping stays the one path of a plain node. It is tried after the rules at each index
  * and counted as `linearPrologue`.
  *
+ * The same kind of fusion lets a fused attention absorb the `[0, 2, 1, 3]` permutes around it
+ * (perf-ledger F-3 A4 / F-8 — {@link attentionPermutesAt}): its node step carries
+ * {@link AttentionTokenMajor}, its operands and output are re-pointed to the permutes' token-major
+ * inputs / output, and the permutes have no step. The decision needs no route — the attention recipe
+ * honours the annotation on every route. It is tried after the linear prologue and counted as
+ * `attentionPermute` (one per absorbed permute).
+ *
  * ## Application order
  *
  * The **declaration order** of {@link FUSION_RULES} (linearStaticQuantize → rmsNormAdd → silu →
@@ -109,7 +116,9 @@ import { ROW_BLOCK_ATTENTION_RULE } from "./fusion-rules/row-block-attention.ts"
 import { SILU_RULE } from "./fusion-rules/silu.ts";
 import { UPSAMPLE_2X_RULE } from "./fusion-rules/upsample2x.ts";
 import {
+  absorbedPermutes,
   allF32,
+  type AttentionTokenMajor,
   type ExecStep,
   type FusionContext,
   type FusionCounterName,
@@ -119,6 +128,7 @@ import {
   type FusionScanContext,
   internalsArePrivate,
   type LinearPrologue,
+  nodeStepSpan,
   type PackedActivations,
   passthroughIsIndependent,
   sameShape,
@@ -134,6 +144,7 @@ import { ExecutionError, type NodePlan } from "./plan.ts";
  * is an implementation convenience.
  */
 export type {
+  AttentionTokenMajor,
   ExecStep,
   FusedOperand,
   FusedStep,
@@ -144,6 +155,7 @@ export type {
   LinearPrologue,
   PackedActivations,
 } from "./fusion-rule.ts";
+export { absorbedPermutes, nodeStepSpan } from "./fusion-rule.ts";
 /**
  * Row-block splitting and the derivation of its limit (defined in
  * {@link "./fusion-rules/row-block-attention.ts"}).
@@ -312,6 +324,145 @@ const linearPrologueAt = (
   };
 };
 
+/** The permutation an attention absorbs: token-major `[B, S, H, D]` ↔ head-major `[B, H, S, D]`. */
+const HEAD_SWAP = [0, 2, 1, 3] as const;
+
+/** The operand slots of a fused attention that may be token-major (the mask, slot 3, never is). */
+const ATTENTION_OPERANDS = ["q", "k", "v"] as const;
+
+/**
+ * Whether `plan` is a permute an attention may absorb: `[0, 2, 1, 3]` on a rank-4 f32 tensor, and a
+ * materialised copy (a permute that aliases its input — an axis of length 1 — costs nothing, and
+ * absorbing it would add the copy back on the routes that make the head-major copy themselves).
+ */
+const isHeadSwap = (plan: NodePlan, aliases: ReadonlySet<NodePlan>): boolean =>
+  plan.node.op === "permute" &&
+  plan.contract.kind === "permute" &&
+  plan.inputShapes[0]?.length === HEAD_SWAP.length &&
+  sameShape(permuteDims(plan.node.attrs, "attention permute"), HEAD_SWAP) &&
+  allF32([plan]) &&
+  !aliases.has(plan);
+
+/**
+ * The permutes a fused attention absorbs at `index` (perf-ledger F-3 A4 / F-8): the Wan DiTs project
+ * q / k / v token-major (`[B, S, H·D]` reshaped to `[B, S, H, D]`), permute each to head-major
+ * `[B, H, S, D]` right before the attention, and permute O back right after it. The attention then
+ * reads and writes the token-major tensors itself and the permutes' copies are never materialised.
+ *
+ * The decision is the fusion pass's, the execution the attention recipe's (the split of the linear
+ * prologue): the hit is a plain node step of the attention whose absorbed operands are re-pointed to
+ * the permutes' inputs and whose output, with `o`, is the output permute's, annotated with
+ * {@link AttentionTokenMajor}. It needs **no route**: the recipe honours the annotation on every
+ * route (`buildAttention` in recipe-builders/attention.ts), so whether a8 quantises an operand or a
+ * dense kernel reads it never enters this decision.
+ *
+ * Accepted only on an exact match (ADR 0040 decision 2). The window is `nodes[index]` onwards:
+ *
+ * 1. A run of `p ≥ 0` nodes, **every one** a permute an attention may absorb ({@link isHeadSwap}),
+ *    directly followed by an `attention` without a states field (the fused form — the states form is
+ *    another kernel family), f32, with one output.
+ * 2. Each permute's output has exactly one use and is not a graph output ({@link internalsArePrivate}),
+ *    and that use is the attention's q, k or v slot. A run that holds anything else returns
+ *    `undefined` here; its tail is tried again from the next index, so the absorbed permutes are the
+ *    longest such run that ends at the attention — contiguous, so each re-pointed input lives only
+ *    across the other absorbed permutes.
+ * 3. The output permute (`o`): the attention's output has exactly one use and is not a graph output,
+ *    and that use is the **next** node, a permute it may absorb.
+ * 4. At least one permute is absorbed (otherwise both sides stay as they are).
+ *
+ * Anything else returns `undefined` and every node stays as it is (byte-identical behaviour).
+ */
+const attentionPermutesAt = (
+  nodes: readonly NodePlan[],
+  index: number,
+  context: FusionContext,
+  aliases: ReadonlySet<NodePlan>,
+):
+  | {
+      readonly plan: NodePlan;
+      readonly tokenMajor: AttentionTokenMajor;
+      readonly advance: number;
+    }
+  | undefined => {
+  let at = index;
+  while (at - index < ATTENTION_OPERANDS.length && nodes[at]?.node.op === "permute") at += 1;
+  const attention = nodes[at];
+  if (attention === undefined || attention.contract.kind !== "attention") return undefined;
+  if (windowTouchesState([attention]) || !windowIsSingleOutput([attention])) return undefined;
+  if (!allF32([attention])) return undefined;
+  const sources = new Map<number, NodePlan>();
+  for (const permute of nodes.slice(index, at)) {
+    if (!isHeadSwap(permute, aliases) || !internalsArePrivate([permute, attention], context)) {
+      return undefined;
+    }
+    const slot = attention.node.ins.indexOf(permute.outputs[0].name);
+    if (slot < 0 || slot >= ATTENTION_OPERANDS.length) return undefined;
+    sources.set(slot, permute);
+  }
+  const after = nodes[at + 1];
+  const output =
+    after !== undefined &&
+    isHeadSwap(after, aliases) &&
+    after.node.ins[0] === attention.outputs[0].name &&
+    internalsArePrivate([attention, after], context)
+      ? after
+      : undefined;
+  if (sources.size === 0 && output === undefined) return undefined;
+  // MUST: a re-pointed operand is the permute's input, which holds the operand's elements with the
+  // two middle axes swapped (the permute's shape rule — a mismatch is a broken plan, not a non-match).
+  const swapped = (shape: readonly number[]): readonly number[] =>
+    HEAD_SWAP.map((axis) => shape[axis]);
+  for (const [slot, permute] of sources) {
+    if (!sameShape(swapped(permute.inputShapes[0]), attention.inputShapes[slot])) {
+      throw new ExecutionError(
+        `attention permute: ${ATTENTION_OPERANDS[slot]} input [${permute.inputShapes[0].join(",")}]` +
+          ` is not the head swap of the operand [${attention.inputShapes[slot].join(",")}]`,
+      );
+    }
+  }
+  if (
+    output !== undefined &&
+    !sameShape(swapped(attention.outputs[0].shape), output.outputs[0].shape)
+  ) {
+    throw new ExecutionError(
+      `attention permute: output [${output.outputs[0].shape.join(",")}] is not the head swap of` +
+        ` the attention's [${attention.outputs[0].shape.join(",")}]`,
+    );
+  }
+  const tokenMajor: AttentionTokenMajor = {
+    q: sources.has(0),
+    k: sources.has(1),
+    v: sources.has(2),
+    o: output !== undefined,
+  };
+  const operand = <T>(slot: number, own: T, absorbed: (permute: NodePlan) => T): T => {
+    const permute = sources.get(slot);
+    return permute === undefined ? own : absorbed(permute);
+  };
+  const outputs = output === undefined ? attention.outputs : output.outputs;
+  return {
+    plan: {
+      ...attention,
+      node: {
+        ...attention.node,
+        ins: attention.node.ins.map((name, slot) =>
+          operand(slot, name, (permute) => permute.node.ins[0]),
+        ),
+        outs: outputs.map((out) => out.name),
+      },
+      inputShapes: attention.inputShapes.map((shape, slot) =>
+        operand(slot, shape, (permute) => permute.inputShapes[0]),
+      ),
+      inputDtypes: attention.inputDtypes.map((dtype, slot) =>
+        operand(slot, dtype, (permute) => permute.inputDtypes[0]),
+      ),
+      outputs,
+    },
+    tokenMajor,
+    advance: at - index + 1 + (output === undefined ? 0 : 1),
+  };
+};
+
 /** Scans the node list once and folds it into fused steps. Nodes not grabbed stay plain. */
 const scanFusions = (
   nodes: readonly NodePlan[],
@@ -333,6 +484,7 @@ const scanFusions = (
     identityExpand: 0,
     packedStaticQuantize: packed.size,
     linearPrologue: 0,
+    attentionPermute: 0,
   };
   const pushNode = (plan: NodePlan): void => {
     const alias = aliases.has(plan);
@@ -364,6 +516,20 @@ const scanFusions = (
       });
       counts.linearPrologue += 1;
       index += 2;
+      continue;
+    }
+    const absorbed = attentionPermutesAt(nodes, index, context, aliases);
+    if (absorbed !== undefined) {
+      // The absorbed permutes get no step; the attention's step stands for all of them. An attention
+      // never aliases (planAliases) and is never a packed producer or consumer.
+      steps.push({
+        kind: "node",
+        plan: absorbed.plan,
+        aliasesInput: false,
+        tokenMajor: absorbed.tokenMajor,
+      });
+      counts.attentionPermute += absorbedPermutes(absorbed.tokenMajor);
+      index += absorbed.advance;
       continue;
     }
     pushNode(nodes[index]);
@@ -575,9 +741,10 @@ const chainWithinWindow = (
  * fusion decision but also the spelling of the eligibility conditions. Putting the enumerator
  * outside the layer and taking the predicates along would leave the candidate table behind when
  * the accepted set changes (the table alone keeps saying "foldable" by the old criterion).
- * MUST: do not build windows across a fused step or a linear with a folded producer
- * ({@link LinearPrologue}) — a chain already grabbed is not counted twice as a candidate. The scan
- * closes per **consecutive run** of plain nodes.
+ * MUST: do not build windows across a fused step, a linear with a folded producer
+ * ({@link LinearPrologue}) or an attention that absorbed permutes ({@link AttentionTokenMajor}) — a
+ * chain already grabbed is not counted twice as a candidate. The scan closes per **consecutive run**
+ * of plain nodes.
  *
  * NOTE: what comes back is candidates, not a design. Prefixes of a long window also come out as
  * separate candidates (a property of n-gram enumeration), so read the longest window with the same
@@ -616,15 +783,16 @@ export const enumerateUnfusedWindows = (
     run = [];
   };
   for (const step of steps) {
-    if (step.kind === "node" && step.prologue === undefined) {
+    if (step.kind === "node" && nodeStepSpan(step) === 1) {
       if (run.length === 0) runStart = nodeIndex;
       run.push(step.plan);
       nodeIndex += 1;
       continue;
     }
     sweepRun();
-    // A linear with a folded producer is a grabbed pair of two original nodes (like a fused step).
-    nodeIndex += step.kind === "node" ? 2 : step.nodeCount;
+    // A node step that absorbed its neighbours (a folded producer, absorbed permutes) is a grabbed
+    // window of several original nodes, like a fused step.
+    nodeIndex += step.kind === "node" ? nodeStepSpan(step) : step.nodeCount;
   }
   sweepRun();
   return found;

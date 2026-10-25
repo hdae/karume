@@ -1042,6 +1042,7 @@ test("カウンタは融合が並んだグラフでルール別に積み上が�
     identityExpand: 0,
     packedStaticQuantize: 0,
     linearPrologue: 0,
+    attentionPermute: 0,
   });
 });
 
@@ -1989,6 +1990,7 @@ const NO_FUSIONS = {
   identityExpand: 0,
   packedStaticQuantize: 0,
   linearPrologue: 0,
+  attentionPermute: 0,
 } as const;
 
 /** A node step's `prologue` (undefined for fused steps and plain nodes). */
@@ -2164,4 +2166,421 @@ test("no fusion rule's head is a prologue op (the rules are tried first at each 
     [],
   );
   assertEquals(LINEAR_PROLOGUE_OPS, ["gelu_tanh", "gelu"]);
+});
+
+// ------------------------------- the permutes a fused attention absorbs (perf-ledger F-3 / F-8)
+
+type Operand = "q" | "k" | "v";
+
+type AttentionPermuteOptions = {
+  /** The operands that reach the attention through a permute, in node order (default q, k, v). */
+  readonly permuted?: readonly Operand[];
+  /** O leaves through the output permute (default true). */
+  readonly outputPermute?: boolean;
+  /** The q permute's dims (default [0, 2, 1, 3]; its input is shaped so the output is still q). */
+  readonly qDims?: readonly number[];
+  /** The permuted q gets a second consumer. */
+  readonly qExtraConsumer?: boolean;
+  /** The permuted q is a graph output. */
+  readonly qGraphOutput?: boolean;
+  /** An unrelated node between the last input permute and the attention. */
+  readonly gapBefore?: boolean;
+  /** An unrelated node between the first and the second input permute. */
+  readonly gapBetween?: boolean;
+  /** An unrelated node between the attention and the output permute. */
+  readonly gapAfter?: boolean;
+  /** O gets a second consumer. */
+  readonly oExtraConsumer?: boolean;
+  /** O is a graph output. */
+  readonly oGraphOutput?: boolean;
+  /** The additive mask input; `permuted` puts a permute in front of it, `first` / `last` in the run. */
+  readonly mask?: "plain" | "first" | "last";
+  /** Each token-major input is computed (a `neg`) instead of a graph input — internal storage. */
+  readonly internalInputs?: boolean;
+  /** Head count H (default 2 — H = 1 makes the permutes element-order-preserving). */
+  readonly heads?: number;
+};
+
+const ATTENTION_PERMUTE = { b: 1, s: 5, n: 6, d: 8 } as const;
+
+/**
+ * The Wan DiT form: token-major q / k / v `[B, S, H, D]` permuted to head-major, the attention, and
+ * O permuted back — each piece switchable for the counterexamples.
+ */
+const attentionPermuteGraph = (options: AttentionPermuteOptions = {}): DeclarationJson => {
+  const dtype = "f32";
+  const { b, s, n, d } = ATTENTION_PERMUTE;
+  const h = options.heads ?? 2;
+  const permuted = options.permuted ?? ["q", "k", "v"];
+  const outputPermute = options.outputPermute ?? true;
+  const headMajor: Readonly<Record<Operand, readonly number[]>> = {
+    q: [b, h, s, d],
+    k: [b, h, n, d],
+    v: [b, h, n, d],
+  };
+  const inputs: DeclarationJson["inputs"] = [];
+  const values: DeclarationJson["values"] = {};
+  const nodes: DeclarationJson["nodes"] = [];
+  const permutes: DeclarationJson["nodes"] = [];
+  const outputs: string[] = [];
+  // The input of a permute with `dims` whose output is `out` (out[i] = in[dims[i]]).
+  const permuteInput = (out: readonly number[], dims: readonly number[]): number[] => {
+    const shape = new Array<number>(out.length);
+    dims.forEach((axis, i) => {
+      shape[axis] = out[i];
+    });
+    return shape;
+  };
+  const source = (name: string, shape: readonly number[]): string => {
+    if (!options.internalInputs) {
+      inputs.push({ name, dtype, shape: [...shape] });
+      return name;
+    }
+    inputs.push({ name: `${name}_in`, dtype, shape: [...shape] });
+    values[name] = { dtype, shape: [...shape] };
+    nodes.push({ op: "neg", ins: [`${name}_in`], outs: [name], attrs: {} });
+    return name;
+  };
+  for (const operand of ["q", "k", "v"] as const) {
+    if (!permuted.includes(operand)) {
+      inputs.push({ name: operand, dtype, shape: [...headMajor[operand]] });
+      continue;
+    }
+    const dims = operand === "q" ? (options.qDims ?? [0, 2, 1, 3]) : [0, 2, 1, 3];
+    const tokenMajor = source(`${operand}t`, permuteInput(headMajor[operand], dims));
+    values[operand] = { dtype, shape: [...headMajor[operand]] };
+    permutes.push({
+      op: "permute",
+      ins: [tokenMajor],
+      outs: [operand],
+      attrs: { dims: [...dims] },
+    });
+  }
+  const ordered = permuted.map((operand) => {
+    const found = permutes.find((node) => node.outs[0] === operand);
+    if (found === undefined) throw new Error(`no permute for ${operand}`);
+    return found;
+  });
+  const gap = (name: string): DeclarationJson["nodes"][number] => {
+    inputs.push({ name: `${name}_in`, dtype, shape: [4] });
+    values[name] = { dtype, shape: [4] };
+    outputs.push(name);
+    return { op: "neg", ins: [`${name}_in`], outs: [name], attrs: {} };
+  };
+  const attentionIns = ["q", "k", "v"];
+  if (options.mask !== undefined) {
+    if (options.mask === "plain") {
+      inputs.push({ name: "mask", dtype, shape: [1, 1, s, n] });
+    } else {
+      inputs.push({ name: "mask_t", dtype, shape: [1, s, 1, n] });
+      values.mask = { dtype, shape: [1, 1, s, n] };
+      const node = {
+        op: "permute",
+        ins: ["mask_t"],
+        outs: ["mask"],
+        attrs: { dims: [0, 2, 1, 3] },
+      };
+      if (options.mask === "first") ordered.unshift(node);
+      else ordered.push(node);
+    }
+    attentionIns.push("mask");
+  }
+  ordered.forEach((node, index) => {
+    if (index === 1 && options.gapBetween) nodes.push(gap("gap_between"));
+    nodes.push(node);
+  });
+  if (options.gapBefore) nodes.push(gap("gap_before"));
+  values.o = { dtype, shape: [b, h, s, d] };
+  nodes.push({ op: "attention", ins: attentionIns, outs: ["o"], attrs: { scale: 0.125 } });
+  if (options.gapAfter) nodes.push(gap("gap_after"));
+  if (outputPermute) {
+    values.ot = { dtype, shape: [b, s, h, d] };
+    nodes.push({ op: "permute", ins: ["o"], outs: ["ot"], attrs: { dims: [0, 2, 1, 3] } });
+    outputs.push("ot");
+  } else {
+    outputs.push("o");
+  }
+  if (options.qExtraConsumer) {
+    values.q_neg = { dtype, shape: [...headMajor.q] };
+    nodes.push({ op: "neg", ins: ["q"], outs: ["q_neg"], attrs: {} });
+    outputs.push("q_neg");
+  }
+  if (options.qGraphOutput) outputs.push("q");
+  if (options.oExtraConsumer) {
+    values.o_neg = { dtype, shape: [b, h, s, d] };
+    nodes.push({ op: "neg", ins: ["o"], outs: ["o_neg"], attrs: {} });
+    outputs.push("o_neg");
+  }
+  if (options.oGraphOutput) outputs.push("o");
+  return {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: [...new Set(nodes.map((node) => node.op))] },
+    symbols: [],
+    inputs,
+    outputs: [...new Set(outputs)],
+    initializers: {},
+    values,
+    nodes,
+  };
+};
+
+const fuseAttentionPermutes = (options: AttentionPermuteOptions = {}): FusionPlan => {
+  const graph = attentionPermuteGraph(options);
+  return fuse(graph, adalnInputs(graph));
+};
+
+/** A node step's absorbed permutes (undefined for fused steps and plain nodes). */
+const tokenMajorOf = (step: ExecStep) => (step.kind === "node" ? step.tokenMajor : undefined);
+
+/** The attention's node step of a plan (exactly one). */
+const attentionStepOf = (plan: FusionPlan, label: string) => {
+  const found = plan.steps.filter(
+    (step) => step.kind === "node" && step.plan.node.op === "attention",
+  );
+  assertEquals(found.length, 1, `${label}: one attention step`);
+  const [step] = found;
+  if (step.kind !== "node") throw new Error(`${label}: not a node step`);
+  return step;
+};
+
+test("a fused attention absorbs the [0, 2, 1, 3] permutes of q / k / v before it and of O after it (the Wan DiT form): one node step on the token-major tensors", () => {
+  const { b, s, n, d } = ATTENTION_PERMUTE;
+  const plan = fuseAttentionPermutes();
+  assertEquals(outline(plan.steps), ["attention"]);
+  const step = attentionStepOf(plan, "Wan form");
+  assertEquals(step.tokenMajor, { q: true, k: true, v: true, o: true });
+  assertEquals(step.plan.node.ins, ["qt", "kt", "vt"], "re-pointed to the permutes' inputs");
+  assertEquals(step.plan.inputShapes, [
+    [b, s, 2, d],
+    [b, n, 2, d],
+    [b, n, 2, d],
+  ]);
+  assertEquals(step.plan.outputs, [{ name: "ot", shape: [b, s, 2, d], dtype: "f32" }]);
+  assertEquals(step.plan.node.outs, ["ot"]);
+  assertEquals(step.aliasesInput, false);
+  assertEquals(plan.counts, { ...NO_FUSIONS, attentionPermute: 4 });
+});
+
+test("the attention absorbs any subset of its permutes that qualifies: each operand alone, the anima form (v and O) and inputs without O", () => {
+  const cases: readonly (readonly [string, AttentionPermuteOptions, readonly string[]])[] = [
+    ["q alone", { permuted: ["q"], outputPermute: false }, ["qt", "k", "v"]],
+    ["k alone", { permuted: ["k"], outputPermute: false }, ["q", "kt", "v"]],
+    ["v alone", { permuted: ["v"], outputPermute: false }, ["q", "k", "vt"]],
+    ["O alone", { permuted: [] }, ["q", "k", "v"]],
+    ["anima: v and O", { permuted: ["v"] }, ["q", "k", "vt"]],
+    ["q and v (k from elsewhere)", { permuted: ["q", "v"] }, ["qt", "k", "vt"]],
+    ["q / k / v without O", { outputPermute: false }, ["qt", "kt", "vt"]],
+    ["the permutes in another order", { permuted: ["v", "q", "k"] }, ["qt", "kt", "vt"]],
+    ["with a mask (never re-pointed)", { mask: "plain" }, ["qt", "kt", "vt", "mask"]],
+  ];
+  for (const [label, options, ins] of cases) {
+    const permuted = options.permuted ?? ["q", "k", "v"];
+    const o = options.outputPermute ?? true;
+    const plan = fuseAttentionPermutes(options);
+    assertEquals(outline(plan.steps), ["attention"], label);
+    const step = attentionStepOf(plan, label);
+    assertEquals(
+      step.tokenMajor,
+      { q: permuted.includes("q"), k: permuted.includes("k"), v: permuted.includes("v"), o },
+      label,
+    );
+    assertEquals(step.plan.node.ins, ins, `${label}: ins`);
+    assertEquals(step.plan.outputs[0].name, o ? "ot" : "o", `${label}: output`);
+    assertEquals(plan.counts.attentionPermute, permuted.length + (o ? 1 : 0), `${label}: counter`);
+  }
+});
+
+test("the absorbed permutes keep the total-use accounting exact: each permute's input trades the permute's use for the attention's, and the absorbed values are never consumed or defined", () => {
+  // The token-major q is also read by a residual add after the output permute (two uses before and
+  // after), and O's permuted form feeds that add.
+  const graph = attentionPermuteGraph();
+  graph.values.res = { dtype: "f32", shape: [1, 5, 2, 8] };
+  graph.nodes.push({ op: "add", ins: ["ot", "qt"], outs: ["res"], attrs: {} });
+  graph.outputs = ["res"];
+  graph.requires.ops = [...new Set(graph.nodes.map((node) => node.op))];
+  const ir = parse(graph);
+  const uses = countUses(ir);
+  const plan = planFusions(planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes, {
+    useCounts: uses,
+    outputNames: new Set(ir.outputs),
+    limits: TEST_LIMITS,
+  });
+  assertEquals(outline(plan.steps), ["attention", "add"]);
+  const consumed = new Map<string, number>();
+  const defined = new Set<string>();
+  for (const step of plan.steps) {
+    const names = step.kind === "node" ? step.plan.node.ins : step.ins;
+    for (const name of names) consumed.set(name, (consumed.get(name) ?? 0) + 1);
+    if (step.kind === "node") for (const out of step.plan.outputs) defined.add(out.name);
+    else defined.add(step.outputName);
+  }
+  for (const absorbed of ["q", "k", "v", "o"]) {
+    assertEquals(uses.get(absorbed), 1, `${absorbed}: the absorbed value had exactly one use`);
+    assertEquals(consumed.get(absorbed), undefined, `${absorbed}: never consumed`);
+    assertEquals(defined.has(absorbed), false, `${absorbed}: never defined`);
+  }
+  for (const [name, count] of uses) {
+    if (["q", "k", "v", "o"].includes(name)) continue;
+    assertEquals(consumed.get(name), count, `total uses of '${name}'`);
+  }
+  assertEquals(consumed.get("qt"), 2, "qt: the attention and the residual add");
+  assertEquals(defined.has("ot"), true, "the attention step defines the output permute's value");
+});
+
+test("attention permute counterexamples keep the permute that does not qualify as a plain node (and only that one)", () => {
+  const cases: readonly (readonly [
+    string,
+    AttentionPermuteOptions,
+    readonly string[],
+    { readonly q: boolean; readonly k: boolean; readonly v: boolean; readonly o: boolean },
+  ])[] = [
+    [
+      "q permuted by [0, 3, 2, 1]",
+      { qDims: [0, 3, 2, 1] },
+      ["permute", "attention"],
+      { q: false, k: true, v: true, o: true },
+    ],
+    [
+      "the permuted q has a second consumer",
+      { qExtraConsumer: true },
+      ["permute", "attention", "neg"],
+      { q: false, k: true, v: true, o: true },
+    ],
+    [
+      "the permuted q is a graph output",
+      { qGraphOutput: true },
+      ["permute", "attention"],
+      { q: false, k: true, v: true, o: true },
+    ],
+    [
+      "a node between the q permute and the rest of the run",
+      { gapBetween: true },
+      ["permute", "neg", "attention"],
+      { q: false, k: true, v: true, o: true },
+    ],
+    [
+      "a node between the input permutes and the attention",
+      { gapBefore: true },
+      ["permute", "permute", "permute", "neg", "attention"],
+      { q: false, k: false, v: false, o: true },
+    ],
+    [
+      "a node between the attention and the output permute",
+      { gapAfter: true },
+      ["attention", "neg", "permute"],
+      { q: true, k: true, v: true, o: false },
+    ],
+    [
+      "O has a second consumer",
+      { oExtraConsumer: true },
+      ["attention", "permute", "neg"],
+      { q: true, k: true, v: true, o: false },
+    ],
+    [
+      "O is a graph output",
+      { oGraphOutput: true },
+      ["attention", "permute"],
+      { q: true, k: true, v: true, o: false },
+    ],
+    [
+      "a permute feeding the mask, first in the run",
+      { mask: "first" },
+      ["permute", "attention"],
+      { q: true, k: true, v: true, o: true },
+    ],
+    [
+      "a permute feeding the mask, last in the run (it breaks the run before it)",
+      { mask: "last" },
+      ["permute", "permute", "permute", "permute", "attention"],
+      { q: false, k: false, v: false, o: true },
+    ],
+  ];
+  for (const [label, options, steps, tokenMajor] of cases) {
+    const plan = fuseAttentionPermutes(options);
+    assertEquals(outline(plan.steps), steps, `${label}: steps`);
+    assertEquals(attentionStepOf(plan, label).tokenMajor, tokenMajor, label);
+    assertEquals(
+      plan.counts.attentionPermute,
+      Object.values(tokenMajor).filter(Boolean).length,
+      `${label}: counter`,
+    );
+  }
+});
+
+test("a permute that keeps the element order (H = 1 on internal storage) is an alias, not absorbed; the same graph with H = 2 is", () => {
+  const aliased = fuseAttentionPermutes({ internalInputs: true, heads: 1 });
+  assertEquals(outline(aliased.steps), [
+    "neg",
+    "neg",
+    "neg",
+    "permute",
+    "permute",
+    "permute",
+    "attention",
+    "permute",
+  ]);
+  assertEquals(
+    aliased.steps.map(tokenMajorOf),
+    aliased.steps.map(() => undefined),
+  );
+  assertEquals(aliased.counts.attentionPermute, 0);
+  const copied = fuseAttentionPermutes({ internalInputs: true });
+  assertEquals(outline(copied.steps), ["neg", "neg", "neg", "attention"]);
+  assertEquals(copied.counts.attentionPermute, 4);
+});
+
+test("nothing around a states-form attention or a non-f32 permute is absorbed", () => {
+  const graph = attentionPermuteGraph();
+  const ir = parse(graph);
+  const nodes = planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes;
+  const context = {
+    useCounts: countUses(ir),
+    outputNames: new Set(ir.outputs),
+    limits: TEST_LIMITS,
+  };
+  // The states form is another kernel family (and the window guard of every rule rejects state).
+  const states = nodes.map((plan) =>
+    plan.node.op === "attention"
+      ? { ...plan, node: { ...plan.node, states: { k: "slot_k", v: "slot_v" } } }
+      : plan,
+  );
+  const withStates = planFusions(states, context);
+  assertEquals(outline(withStates.steps), [
+    "permute",
+    "permute",
+    "permute",
+    "attention",
+    "permute",
+  ]);
+  assertEquals(withStates.counts.attentionPermute, 0, "states form");
+  // A permute is a layout op of any dtype; the planned graph is f32, so the matcher's own check is
+  // exercised on a plan with the q permute's dtypes replaced.
+  for (const [label, replace] of [
+    ["input i32", (plan: (typeof nodes)[number]) => ({ ...plan, inputDtypes: ["i32" as const] })],
+    [
+      "output i32",
+      (plan: (typeof nodes)[number]) => ({
+        ...plan,
+        outputs: [{ ...plan.outputs[0], dtype: "i32" as const }],
+      }),
+    ],
+  ] as const) {
+    const replaced = nodes.map((plan, index) => (index === 0 ? replace(plan) : plan));
+    const fused = planFusions(replaced, context);
+    assertEquals(outline(fused.steps), ["permute", "attention"], label);
+    assertEquals(
+      attentionStepOf(fused, label).tokenMajor,
+      { q: false, k: true, v: true, o: true },
+      label,
+    );
+  }
+});
+
+test("no fusion rule's head and no prologue op is permute or attention (the rules and the linear prologue are tried first at each index, so the order cannot change the result)", () => {
+  const heads = new Set([...FUSION_RULES.flatMap((rule) => rule.heads), ...LINEAR_PROLOGUE_OPS]);
+  assertEquals(
+    ["permute", "attention"].filter((op) => heads.has(op)),
+    [],
+  );
 });
