@@ -96,8 +96,25 @@ const ditShapes = (sequence: number): Readonly<Record<string, readonly number[]>
   rope_sin: [1, 1, sequence, 128],
 });
 
+/**
+ * The DiT's counts under `linearCompute: "a8"` (the `f16+dit8-a8*` presets; counted 2026-10-25):
+ * the f32 counts plus **linearPrologue 28 on the i8 seat** — the erf gelu folded into the step ① of
+ * the i8 linear that reads it (perf-ledger F-4), the FFN down projection of the 28 blocks (gelu
+ * [S, 8192] → linear [2048, 8192]). The f16 seat has no i8a8 linear, so it stays at 0 under a8.
+ */
+const ditA8 = (quant: "i8" | "f16"): FusionCounts => ({
+  ...NONE,
+  silu: 2,
+  rope: 56,
+  adaln: 85,
+  linearPrologue: quant === "i8" ? 28 : 0,
+});
+
+const a8Counts = (graph: IrGraph, shapes: Readonly<Record<string, readonly number[]>>) =>
+  fusionCounts(graph, shapes, undefined, false, false, false, "a8");
+
 test.skipIf(!ASSETS_AVAILABLE)(
-  "実資産の DiT は run 1 回で adaln 85 / rope 56 / silu 2 を掴む（w8a8 と f16 で同一）",
+  "実資産の DiT は run 1 回で adaln 85 / rope 56 / silu 2 を掴む（w8a8 と f16 で同一。a8 では i8 席だけ linearPrologue 28）",
   async () => {
     const expected: FusionCounts = { ...NONE, silu: 2, rope: 56, adaln: 85 };
     for (const quant of ["i8", "f16"] as const) {
@@ -105,6 +122,13 @@ test.skipIf(!ASSETS_AVAILABLE)(
       // 融合は f32 の計算経路だけを見るので、重みの格納形が変わってもヒット数は動かない。
       assertEquals(fusionCounts(graph, ditShapes(4096)), expected, `${quant}: 1024px（S=4096）`);
       assertEquals(fusionCounts(graph, ditShapes(1024)), expected, `${quant}: 512px（S=1024）`);
+      for (const sequence of [4096, 1024]) {
+        assertEquals(
+          a8Counts(graph, ditShapes(sequence)),
+          ditA8(quant),
+          `${quant} a8: S=${sequence}`,
+        );
+      }
     }
   },
 );
@@ -118,15 +142,25 @@ test.skipIf(!ASSETS_AVAILABLE)(
       { ...NONE, silu: 28, rope: 56, identityExpand: 112 },
       "text encoder",
     );
+    const conditionerShapes = {
+      source_hidden_states: [1, 64, 1024],
+      target_input_ids: [1, 512],
+    };
     const conditioner = await readAnimaGraph("text_conditioner", "f16");
     assertEquals(
-      fusionCounts(conditioner, {
-        source_hidden_states: [1, 64, 1024],
-        target_input_ids: [1, 512],
-      }),
+      fusionCounts(conditioner, conditionerShapes),
       { ...NONE, rope: 24, identityExpand: 48 },
       "conditioner（BSHD の q/k 各12鎖も融合）",
     );
+    // Its 6 erf gelu → linear pairs do not fold even under a8: the conditioner's weights are f16 /
+    // bf16 on every preset (no i8a8 linear to absorb them; the quant's session reaches only the DiT).
+    for (const quant of ["f16", "bf16"] as const) {
+      assertEquals(
+        a8Counts(await readAnimaGraph("text_conditioner", quant), conditionerShapes),
+        { ...NONE, rope: 24, identityExpand: 48 },
+        `conditioner ${quant} a8: no linearPrologue`,
+      );
+    }
     const vae = await readAnimaGraph("vae_decoder", "f16");
     assertEquals(
       fusionCounts(vae, { latents: [1, 16, 64, 64] }),
@@ -180,6 +214,7 @@ for (const model of EXTRA_MODELS) {
         const graph = await read("transformer", quant);
         assertEquals(fusionCounts(graph, ditShapes(4096)), dit, `${quant}: 1024px（S=4096）`);
         assertEquals(fusionCounts(graph, ditShapes(1024)), dit, `${quant}: 512px（S=1024）`);
+        assertEquals(a8Counts(graph, ditShapes(4096)), ditA8(quant), `${quant} a8: S=4096`);
       }
       assertEquals(
         fusionCounts(await read("text_encoder", "f16"), { input_ids: [1, 64] }),
