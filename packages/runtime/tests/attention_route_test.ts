@@ -155,6 +155,10 @@ describe("attentionRoute: the online kernel (attentionScoreStorage 'none' — AD
       FALLBACK,
     );
     assertEquals(
+      attentionRoute(A8_NONE, 128, 512, { subgroups: true, maxComputeWorkgroupStorageSize: 31232 }),
+      { qk: "i8a8", pv: "i8a8", score: "none", online: "sg32" },
+    );
+    assertEquals(
       attentionRoute(A8_NONE, 128, 512, { subgroups: true, maxComputeWorkgroupStorageSize: 32768 }),
       { qk: "i8a8", pv: "i8a8", score: "none", online: "sg32" },
     );

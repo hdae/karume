@@ -425,21 +425,25 @@ test("eligibility and workgroup storage of the online kernel", () => {
 
 test("the declared workgroup storage is what the WGSL declares (the route decides from it)", () => {
   const elementBytes: Record<string, number> = { "vec4<u32>": 16, f32: 4, u32: 4 };
-  for (const depth of [64, 128]) {
-    for (const reduce of ["sg32", "wg"] as const) {
-      const wgsl = attentionOnlineI8a8Wgsl(true, depth, reduce);
-      const declarations = [
-        ...wgsl.matchAll(/var<workgroup> \w+: array<(vec4<u32>|f32|u32), (\d+)>;/g),
-      ];
-      assert(declarations.length >= 4, `d${depth} ${reduce}: the tiles are declared`);
-      const declared = declarations
-        .map(([, type, count]) => Math.ceil((elementBytes[type] * Number(count)) / 16) * 16)
-        .reduce((sum, bytes) => sum + bytes, 0);
-      assertEquals(
-        attentionOnlineI8a8WorkgroupStorageBytes(depth, reduce),
-        declared,
-        `d${depth} ${reduce}`,
-      );
+  for (const dp4a of [true, false]) {
+    for (const depth of [64, 128]) {
+      for (const reduce of ["sg32", "wg"] as const) {
+        const where = `${dp4a ? "dp4a" : "emu"} d${depth} ${reduce}`;
+        const wgsl = attentionOnlineI8a8Wgsl(dp4a, depth, reduce);
+        const declarations = [
+          ...wgsl.matchAll(/var<workgroup> \w+: array<(vec4<u32>|f32|u32), (\d+)>;/g),
+        ];
+        // Every workgroup declaration must be one the sum below understands.
+        assertEquals(
+          declarations.length,
+          (wgsl.match(/var<workgroup>/g) ?? []).length,
+          `${where}: every workgroup declaration is counted`,
+        );
+        const declared = declarations
+          .map(([, type, count]) => Math.ceil((elementBytes[type] * Number(count)) / 16) * 16)
+          .reduce((sum, bytes) => sum + bytes, 0);
+        assertEquals(attentionOnlineI8a8WorkgroupStorageBytes(depth, reduce), declared, where);
+      }
     }
   }
 });
