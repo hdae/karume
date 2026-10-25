@@ -44,6 +44,45 @@ export const RMS_NORM_KEY = `rms_norm:v1:f32:lastdim:wg${RMS_NORM_WORKGROUP_SIZE
 /** Input order of the following add. Code generation keeps the left / right of the addition too. */
 export type RmsNormAddOrder = "norm-residual" | "residual-norm";
 
+/**
+ * The reduction of one row, from the sum of squares to `inv` and the barrier that ends the reads of
+ * `scratch[0]` (inside the row loop; it reads `x`, `base`, `dim`, `scale`, `lid` and `params.eps`).
+ *
+ * MUST: a fused kernel that normalises a row takes this text, never a copy. The bit identity of the
+ * plain kernel rests on the driver contracting `acc + v * v` exactly as here (research
+ * 2026-10-25-speed-recon-3080ti §6: a register-array rewrite of the same loop moved 2,317 scales on
+ * Vulkan), so only the same string compiles to the same arithmetic.
+ */
+export const rmsNormInvWgsl = (workgroupSize: 128 | 256): string => `    // sum of squares (1 pass)
+    var acc = 0.0;
+    var i = lid;
+    while (i < dim) {
+      let v = x[base + i];
+      acc = acc + v * v;
+      i = i + ${workgroupSize}u;
+    }
+    scratch[lid] = acc;
+    workgroupBarrier();
+    var stride = ${workgroupSize / 2}u;
+    while (stride > 0u) {
+      if (lid < stride) {
+        scratch[lid] = scratch[lid] + scratch[lid + stride];
+      }
+      workgroupBarrier();
+      stride = stride / 2u;
+    }
+    let inv = inverseSqrt(scratch[0u] * scale + params.eps);
+    // make every read of scratch[0] finish before the next row overwrites scratch[lid]
+    workgroupBarrier();
+`;
+
+/**
+ * The normalised value of element `index` of the row (`x · inv · weight`, left to right) — shared by
+ * every form that writes or uses it, under the MUST of {@link rmsNormInvWgsl}.
+ */
+export const rmsNormValueWgsl = (index: string): string =>
+  `x[base + ${index}] * inv * weight[${index}]`;
+
 const rmsNormWgsl = (workgroupSize: 128 | 256, addOrder?: RmsNormAddOrder): string =>
   `// karume rms_norm (last dim, weight only, f32, sum of squares in 1 pass)
 struct Params {
@@ -73,36 +112,15 @@ fn main(
   while (row < params.rows) {
     let base = row * dim;
 
-    // sum of squares (1 pass)
-    var acc = 0.0;
-    var i = lid;
-    while (i < dim) {
-      let v = x[base + i];
-      acc = acc + v * v;
-      i = i + ${workgroupSize}u;
-    }
-    scratch[lid] = acc;
-    workgroupBarrier();
-    var stride = ${workgroupSize / 2}u;
-    while (stride > 0u) {
-      if (lid < stride) {
-        scratch[lid] = scratch[lid] + scratch[lid + stride];
-      }
-      workgroupBarrier();
-      stride = stride / 2u;
-    }
-    let inv = inverseSqrt(scratch[0u] * scale + params.eps);
-    // make every read of scratch[0] finish before the next row overwrites scratch[lid]
-    workgroupBarrier();
-
+${rmsNormInvWgsl(workgroupSize)}
     var o = lid;
     while (o < dim) {
       ${
         addOrder === undefined
-          ? "out[base + o] = x[base + o] * inv * weight[o];"
+          ? `out[base + o] = ${rmsNormValueWgsl("o")};`
           : addOrder === "norm-residual"
-            ? "out[base + o] = bitcast<f32>(bitcast<u32>(x[base + o] * inv * weight[o]) ^ params.rounding_mask) + residual[base + o];"
-            : "out[base + o] = residual[base + o] + bitcast<f32>(bitcast<u32>(x[base + o] * inv * weight[o]) ^ params.rounding_mask);"
+            ? `out[base + o] = bitcast<f32>(bitcast<u32>(${rmsNormValueWgsl("o")}) ^ params.rounding_mask) + residual[base + o];`
+            : `out[base + o] = residual[base + o] + bitcast<f32>(bitcast<u32>(${rmsNormValueWgsl("o")}) ^ params.rounding_mask);`
       }
       o = o + ${workgroupSize}u;
     }

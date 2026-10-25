@@ -55,6 +55,33 @@ const ROPE_INPUTS: Readonly<Record<RopeRotation, readonly string[]>> = {
   pair: ["x", "pairs", "cos_table", "sin_table"],
 };
 
+/**
+ * The pair rotation's read of `rotate(x)[i]` as f32 bits, given the partner element's value as an
+ * expression of its offset (`+ 1u` for an even `i`, `- 1u` for an odd one). Shared with the fused
+ * rms_norm → RoPE kernel (kernels/rms-norm-rope.ts), whose partner is a normalised value.
+ */
+export const ropePairRotationWgsl = (partner: (offset: "+ 1u" | "- 1u") => string): string =>
+  `      var rotated_bits: u32;
+      if ((i & 1u) == 0u) {
+        rotated_bits = bitcast<u32>(${partner("+ 1u")}) ^ 0x80000000u;
+      } else {
+        rotated_bits = bitcast<u32>(${partner("- 1u")});
+      }`;
+
+/**
+ * The two products of element `i` (its value given as an expression) staged into the workgroup
+ * array — the rounding barrier of the MUST above; the sum ({@link ROPE_SUM_WGSL}) runs after the
+ * barrier. Shared with the fused rms_norm → RoPE kernel: the same text is what keeps it bit-identical.
+ */
+export const ropeProductsWgsl = (value: string): string =>
+  `      let table_index = token * params.head_dim + d;
+      let direct_bits = bitcast<u32>(${value} * cos_table[table_index]);
+      let cross_bits = bitcast<u32>(bitcast<f32>(rotated_bits) * sin_table[table_index]);
+      products[lid] = vec2<u32>(direct_bits, cross_bits);`;
+
+/** The sum of the staged products (after the barrier). */
+export const ROPE_SUM_WGSL = "bitcast<f32>(pair.x) + bitcast<f32>(pair.y)";
+
 /** The read of `rotate(x)[i]` as f32 bits per rotation (the only other difference). */
 const ROPE_ROTATION_WGSL: Readonly<Record<RopeRotation, string>> = {
   half: `      let row_base = i - d;
@@ -64,12 +91,7 @@ const ROPE_ROTATION_WGSL: Readonly<Record<RopeRotation, string>> = {
       } else {
         rotated_bits = bitcast<u32>(x[row_base + d - params.half_dim]);
       }`,
-  pair: `      var rotated_bits: u32;
-      if ((i & 1u) == 0u) {
-        rotated_bits = bitcast<u32>(pairs[i + 1u]) ^ 0x80000000u;
-      } else {
-        rotated_bits = bitcast<u32>(pairs[i - 1u]);
-      }`,
+  pair: ropePairRotationWgsl((offset) => `pairs[i ${offset}]`),
 };
 
 /**
@@ -116,17 +138,14 @@ fn main(
       let row = i / params.head_dim;
       let token = ${layout === "bhsd" ? "row % params.sequence" : "row / params.heads"};
 ${ROPE_ROTATION_WGSL[rotation]}
-      let table_index = token * params.head_dim + d;
-      let direct_bits = bitcast<u32>(x[i] * cos_table[table_index]);
-      let cross_bits = bitcast<u32>(bitcast<f32>(rotated_bits) * sin_table[table_index]);
-      products[lid] = vec2<u32>(direct_bits, cross_bits);
+${ropeProductsWgsl("x[i]")}
     } else {
       products[lid] = vec2<u32>(0u);
     }
     workgroupBarrier();
     if (i < params.n) {
       let pair = products[lid];
-      out[i] = bitcast<f32>(pair.x) + bitcast<f32>(pair.y);
+      out[i] = ${ROPE_SUM_WGSL};
     }
     workgroupBarrier();
     base = base + stride;

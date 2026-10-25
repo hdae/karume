@@ -204,6 +204,7 @@ import {
   ropeParams,
   ropeWgsl,
 } from "../src/kernels/rope.ts";
+import { RMS_NORM_ROPE_WGSL } from "../src/kernels/rms-norm-rope.ts";
 import { linearKey, linearParams, linearWgsl } from "../src/kernels/linear.ts";
 import {
   linearGemvKey,
@@ -517,6 +518,9 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     // The pair rotation (Wan's DiT) is a third variant of the same template: the two half-split
     // snapshots above stay byte-identical next to it.
     ["rope_pair_bshd.wgsl", ropeWgsl("bshd", "pair")],
+    // rms_norm → pair RoPE in one kernel (perf-ledger F-3); it shares the rms_norm and RoPE text, so
+    // the plain forms around it must not move.
+    ["rms_norm_rope.wgsl", RMS_NORM_ROPE_WGSL],
     ["linear.wgsl", LINEAR_WGSL],
     ["linear_v4.wgsl", linearWgsl("f32", true)],
     // skinny-M 幾何（M ≤ 64 → M16N16 — src/kernels/gemm-geometry.ts の掃引確定値）の代表
