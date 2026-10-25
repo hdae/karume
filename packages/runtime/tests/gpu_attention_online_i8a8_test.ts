@@ -408,19 +408,40 @@ test("eligibility and workgroup storage of the online kernel", () => {
   assert(!attentionOnlineI8a8Eligible(256, 1000), "D above the maximum (the tiles exceed 48 KiB)");
   assert(!attentionOnlineI8a8Eligible(96, 64), "D % 64 != 0");
   assert(!attentionOnlineI8a8Eligible(128, 66), "N % 4 != 0");
-  // D = 128: q 64 × 33 + k 64 × 33 + Vᵀ 16 × 128 + P̃ 64 × 17 words (+ the reduce scratch)
+  // D = 128, in vec4 words: q 64 × 9 + k 64 × 9 + Vᵀ 16 × 33 + P̃ 16 × 17 (+ the reduce scratch, 64 × 16 f32)
   assertEquals(
     attentionOnlineI8a8WorkgroupStorageBytes(128, "sg32"),
-    (64 * 33 + 64 * 33 + 16 * 128 + 64 * 17) * 4,
+    (64 * 9 + 64 * 9 + 16 * 33 + 16 * 17) * 16,
   );
   assertEquals(
     attentionOnlineI8a8WorkgroupStorageBytes(128, "wg"),
-    (64 * 33 + 64 * 33 + 16 * 128 + 64 * 17 + 64 * 16) * 4,
+    (64 * 9 + 64 * 9 + 16 * 33 + 16 * 17) * 16 + 64 * 16 * 4,
   );
   assert(
     attentionOnlineI8a8WorkgroupStorageBytes(128, "sg32") < 32768,
     "the subgroup form fits 32 KiB",
   );
+});
+
+test("the declared workgroup storage is what the WGSL declares (the route decides from it)", () => {
+  const elementBytes: Record<string, number> = { "vec4<u32>": 16, f32: 4, u32: 4 };
+  for (const depth of [64, 128]) {
+    for (const reduce of ["sg32", "wg"] as const) {
+      const wgsl = attentionOnlineI8a8Wgsl(true, depth, reduce);
+      const declarations = [
+        ...wgsl.matchAll(/var<workgroup> \w+: array<(vec4<u32>|f32|u32), (\d+)>;/g),
+      ];
+      assert(declarations.length >= 4, `d${depth} ${reduce}: the tiles are declared`);
+      const declared = declarations
+        .map(([, type, count]) => Math.ceil((elementBytes[type] * Number(count)) / 16) * 16)
+        .reduce((sum, bytes) => sum + bytes, 0);
+      assertEquals(
+        attentionOnlineI8a8WorkgroupStorageBytes(depth, reduce),
+        declared,
+        `d${depth} ${reduce}`,
+      );
+    }
+  }
 });
 
 describe.skipIf(!GPU_AVAILABLE)("online int8 attention (ADR 0132) — the four-point check", () => {
