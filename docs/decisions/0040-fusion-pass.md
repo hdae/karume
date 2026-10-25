@@ -276,3 +276,54 @@ dtypes, private internals) and computed with the same f32 operations in the same
 The rounding points are kept with the workgroup-memory barrier described above (measured, not a WGSL
 guarantee); per-rule GPU tests compare fused and plain runs bit for bit. The existing keys' WGSL is
 unchanged, and the Wan sha256 rows did not move.
+
+## Addendum (2026-10-25) — a consumer that absorbs its producer (linear prologue, perf-ledger F-4)
+
+A new kind of fusion: **a consumer absorbs its producer through an annotation on its `NodeStep`;
+decided by `planFusions` with the consumer's own eligibility predicate; executed by the consumer's
+recipe.** It is not a `FusedStep`: the fused form is the consumer's own dispatch list with one kernel
+swapped, so the consumer's choices (here the i8a8 route, the dot product form, the geometry, the i32
+guard and the step temporaries of `buildLinearI8a8`) stay on its one path. It is the same split as the
+packed activations of ADR [0105](0105-packed-static-quantize-activations.md).
+
+The first instance: an elementwise `gelu_tanh` that feeds an a8 linear. The linear's step ① quantizes
+`gelu_tanh(x)` directly (`quantizeRowsPrologueWgsl` in `packages/runtime/src/kernels/quantize-rows.ts`)
+and the gelu node disappears, so its f32 output (33 frames of Wan2.2: `[7920, 14336]` f32 = 454 MB
+per FFN) is never written or read.
+
+- **The annotation**: `NodeStep.prologue = { op }` (`LinearPrologue` in
+  `packages/runtime/src/runtime/fusion-rule.ts`). The linear's `NodePlan` in that step has its first
+  input re-pointed to the producer's input (same shape and dtype — asserted), and the producer
+  produces no step. Release bookkeeping stays decision 1's one path (`plan.node.ins` of a node step):
+  the producer's input loses the producer's use and gains the linear's, and the folded value, which
+  had exactly one use and is not a graph output, is never defined.
+- **The exact match** (decision 2 — `linearPrologueAt` in `packages/runtime/src/runtime/fusion.ts`),
+  on a two-node window: (1) the producer's op is in `LINEAR_PROLOGUE_OPS`, which holds only
+  `gelu_tanh` (the erf `gelu` is one edit plus its tests away, once measured), f32 in and out; (2)
+  its output has one use and is not a graph output (`internalsArePrivate`); (3) the next node is a
+  `linear` that reads it in `ins[0]`; (4) that linear takes the i8a8 path by the **same predicate as
+  the recipe** — `linearTakesI8a8` (`packages/runtime/src/runtime/linear-route.ts`: linearCompute
+  `"a8"`, weight resident as i8 or i4, k > 0, k % 4 == 0) on the weight storage the executor projects
+  for the fusion pass — and k fits the prologue kernel (`quantizeRowsPrologueEligible`: k % 4 == 0,
+  k ≤ 16,384); (5) at least one row (the kernel binds `x` as `array<vec4<f32>>`, whose 16-byte minimum
+  binding size an empty tensor does not meet). Anything else leaves both nodes as they are.
+- **Fail loudly on the execution side**: a linear that carries a prologue but does not take the i8a8
+  path with a prologue-eligible row, and any non-linear node that carries one, throw
+  `ExecutionError` (the producer's op would otherwise never run).
+- **The counter**: `linearPrologue`, once per folded pair, in the public `FusionCounts`
+  (`lastRunFusions`). The Wan2.2 and Wan2.1 DiTs fold 31 pairs each under `linearCompute: "a8"` on
+  their i8 seats — the FFN down projection of the 30 blocks (k 14,336 / 8,960) and the text
+  embedder's second linear (k 3,072 / 1,536); `packages/e2e/tests/e2e_wan*_fusion_counts_test.ts`.
+- **The estimate** sees the same decision: `EstimateOptions.linearCompute` and the weight storage of
+  the residency plan go into the same `planFusions`, and a folded producer's output is not counted.
+- **No rounding barrier** sits between `y = gelu_tanh(x)` and the quantization. The kernel's
+  docstring holds the argument: "No rounding barrier sits between `y` and the quantization: the next
+  operations are `abs` and `y / s` (a multiplication by `rcp(s)` after lowering), so no contraction
+  `a·b+c` spans the boundary. WGSL also allows reassociation, so this is a fact measured at adoption,
+  not a specification guarantee (the argument for `t` in `adaln-norm.ts`); the per-environment sha256
+  rows are the check."
+- **Measured**: `packages/runtime/tests/gpu_quantize_rows_prologue_test.ts` compares the kernel with
+  the pair "elementwise gelu_tanh → quantize_rows" word for word (`xq` and `xs`, NaN scales included)
+  and `packages/runtime/tests/gpu_linear_prologue_fusion_test.ts` compares Sessions with and without
+  the fold (both dot product forms), on Vulkan / NVIDIA; the D3D12 / NVIDIA spike measurement is in
+  [research 2026-10-25-speed-recon-5070ti](../research/2026-10-25-speed-recon-5070ti.md) §8.

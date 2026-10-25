@@ -162,6 +162,7 @@
 | MTP (Multi-Token Prediction) | MTP | drafter が複数 token をまとめて提案する仕組み | — | ADR 0096 |
 | speculative decoding | 投機デコード | drafter の k token を本体が 1 run で検証して一致した分を確定する実行形 | speculative（「投機デコード」と混ぜない） | ADR 0096 |
 | fusion | 融合 | 隣接する複数 op を 1 回の GPU 起動へまとめる変換 | — | ADR 0040 |
+| linear prologue △ | linear のプロローグ融合 | a8 の linear が入力を作る elementwise op を自分の量子化（手順 ①）に取り込み、その op の出力を格納しない融合 | — | ADR 0040 追記 2026-10-25 |
 | geometry profile | 幾何プロファイル（会話では「プロファイル」でもよい） | GEMM の幾何を op × 行数バケットごとに決めた静的な表 | — | ADR 0115 |
 | `./tune` (runtime subpath) | tune のサブパス / 掃引の面 | 掃引・生成器・表の直列化と照合を出す `@karume/runtime/tune` | — | ADR 0117 決定 1 / 2 |
 | kernel fingerprint (`provenance.kernels`) | カーネルの指紋 | 保存した表がどのカーネルで測った物かを見分けるハッシュ | — | ADR 0117 決定 4 |
