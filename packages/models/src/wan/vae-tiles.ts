@@ -31,8 +31,8 @@
  *
  * ## Tiles outside, chunks inside
  *
- * The cache is rebuilt from zero per tile ({@link decodeWanVaeTile} writes zeros at the head of each
- * tile — the same as `clear_cache` in upstream `tiled_decode`). The reverse nesting would hold as many
+ * The cache is rebuilt from zero per tile ({@link decodeWanVaeTile} clears the caches on the GPU at
+ * the head of each tile — the same as `clear_cache` in upstream `tiled_decode`). The reverse nesting would hold as many
  * caches as there are tiles at once (decision 2). The one tile = one batch, read-back-frames-only
  * procedure is in the doc of `vae-chunks.ts`.
  *

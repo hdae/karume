@@ -862,6 +862,58 @@ export class ResidentTensor {
   }
 
   /**
+   * Sets the whole range to zero on the GPU (its own command encoder → `clearBuffer` → submit). For
+   * resetting a state carried between runs, such as a causal cache at the head of a tile, without a
+   * host write: no host array and no `writeBuffer` staging.
+   *
+   * It is a method of the already-exported `ResidentTensor` type, so the public surface gains no new
+   * export (mod.ts stays thin — ADR 0008).
+   *
+   * MUST: the clear lands on the queue timeline in issue order, so it **does not overtake
+   * dispatches already submitted**, and later submits do not overtake it. Only unsubmitted encodes
+   * would be overtaken, and a settled run / enqueue leaves none (`enqueue` always submits at its end
+   * — ADR 0054 decision 2, which extends ADR 0004 buffer-management invariant ④). It is the same
+   * queue-order claim as {@link ResidentTensor.write}.
+   * MUST: **fail loudly while a use reservation is held** ({@link ResidentTensor.useReferences} >
+   * 0): an issued (unsettled) run / enqueue that uses this backing as an input or as the destination
+   * of `copyOutputs`, or a pending {@link BatchScope.finishAndRead} that has it as a member. The
+   * execution body runs one microtask or more later, so a clear in the same tick right after issue
+   * would land before that run's dispatches and zero its input, or its copy target before the copy;
+   * a clear before the batch's readback copy would read back zeros. Clear after the returned Promise
+   * settles — for an `enqueue` run without await, after {@link BatchScope.finish}. NOTE: this is an
+   * asymmetry with `write`, which leaves the same window as a caller contract (its MUST NOT): a
+   * clear carries no host data, so the guard is an O(1) counter check with nothing to copy.
+   * MUST: the same guards as `write` — a disposed resident and a lost device fail loudly ({@link
+   * assertDeviceUsable}: commands on a destroyed device are silent no-ops). The size needs no
+   * runtime check: the clear covers exactly {@link ResidentTensor.byteLength}, which
+   * `createResident` keeps a positive multiple of 4 (`clearBuffer`'s alignment), and the backing is
+   * always created with `COPY_DST`.
+   *
+   * Unscoped like `write` (no errorScope pair): with the guards above no validation failure is
+   * reachable, and staying synchronous avoids one await per resident. As with `write`, the submit
+   * can land while another operation's errorScope is pushed (a run waiting inside its section lock,
+   * or an open batch), and a failure would then be attributed to it — the window ADR 0123 names for
+   * unscoped operations. Each clear is one small submit of its own, outside the Session scheduler's
+   * in-flight window (ADR 0123 bounds only run / enqueue dispatches), so a loop over many residents
+   * without a fence is not bounded by it.
+   */
+  clear(): void {
+    this.#assertUsable("clear");
+    assertDeviceUsable(this.#gpu, `resident '${this.label}' clear`);
+    if (this.#useRefs > 0) {
+      throw new ResidentTensorError(
+        `resident '${this.label}': in use by an issued run / enqueue (an input or a copy destination)` +
+          ` or a pending finishAndRead (${this.#useRefs} uses), so it cannot be cleared. ` +
+          "Await the settlement of that run / enqueue / batch before clearing it",
+      );
+    }
+    const device = this.#gpu.device;
+    const encoder = device.createCommandEncoder();
+    encoder.clearBuffer(this.#buffer, 0, this.byteLength);
+    device.queue.submit([encoder.finish()]);
+  }
+
+  /**
    * Reads the whole range back to the host (copy to staging → `mapAsync`). **This is the only
    * fence**, placed to take the latent out once at the end of a generation loop.
    *

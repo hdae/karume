@@ -610,10 +610,10 @@ describe.skipIf(!CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE)(
       assertEquals(layout.next.frameShape, [SAMPLE_CHANNELS, 4, SAMPLE_TILE, SAMPLE_TILE]);
     });
 
-    it("観測: タイルの頭の cache のゼロ化（ホストからの書き込み）の量と時間", () => {
+    it("observation: bytes and host time of zeroing the caches at the tile head (GPU-side clear)", () => {
       const { caches: liveCaches } = chunkRun();
-      // 2.1 と同じ記録（GPU 側でゼロを書く口が runtime に無い — `vae-chunks.ts` の doc）。段 5 で 1 生成あたり
-      // タイル数ぶん払う。
+      // The same record as 2.1 (`ResidentTensor.clear` per cache — `vae-chunks.ts` doc). The tiled
+      // decode pays it once per tile.
       const started = performance.now();
       liveCaches.zero();
       const hostMs = performance.now() - started;

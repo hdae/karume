@@ -310,6 +310,102 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
+// clear() replaces a host write of zeros (`write(new Float32Array(n))`) for state reset between
+// runs. A no-op clear would leave the previous contents, so every case starts from non-zero data.
+test.skipIf(!GPU_AVAILABLE)(
+  "clear() zeroes every byte of a resident that held data and keeps its size (real GPU)",
+  async () => {
+    const gpu = await acquireGpu();
+    const resident = await gpu.createResident(BYTES, "state");
+    try {
+      // Every word non-zero, so a clear that skipped any range shows up in the read-back.
+      const pattern = Float32Array.from({ length: COUNT }, (_, i) => i + 1);
+      resident.write(pattern);
+      assertEquals(bits(await resident.read()), bits(pattern), "the write did not land (vacuous)");
+
+      resident.clear();
+      assertEquals(bits(await resident.read()), new Array<number>(COUNT).fill(0));
+      assertEquals(resident.byteLength, BYTES, "clear changed the size");
+
+      // The resident stays writable after a clear (it is a content reset, not a lifetime event).
+      resident.write(pattern);
+      assertEquals(bits(await resident.read()), bits(pattern));
+    } finally {
+      resident.dispose();
+      gpu.destroy();
+    }
+  },
+);
+
+test.skipIf(!GPU_AVAILABLE)(
+  "clear() between settled enqueues lands in queue order: after the earlier copy, before the later dispatch (real GPU)",
+  async () => {
+    const gpu = await acquireGpu();
+    const producer = await producerSession(gpu);
+    const consumer = await consumerSession(gpu);
+    const carrier = await gpu.createResident(BYTES, "carrier");
+    const sink = await gpu.createResident(BYTES, "sink");
+    const zeros = (): readonly number[] => new Array<number>(COUNT).fill(0);
+    try {
+      // Detector check: without the clear the consumer sees the producer's non-zero output.
+      assert(
+        JSON.stringify(bits(expectedChain(0))) !== JSON.stringify(zeros()),
+        "the chain's expected value is zero (the detector is vacuous)",
+      );
+      const batch = await gpu.beginBatch();
+      await producer.enqueue({ x: input(0) }, { batch, copyOutputs: { y: carrier } });
+      // If the clear overtook the producer's copy, carrier would end as 2x and the consumer would
+      // read it; if the consumer's dispatch overtook the clear, the same. Only queue order gives 0.
+      carrier.clear();
+      await consumer.enqueue({ z: carrier }, { batch, copyOutputs: { w: sink } });
+      await batch.finish();
+      assertEquals(
+        bits(await sink.read()),
+        zeros(),
+        "the consumer did not read the cleared carrier",
+      );
+      assertEquals(bits(await carrier.read()), zeros());
+    } finally {
+      await producer.dispose();
+      await consumer.dispose();
+      carrier.dispose();
+      sink.dispose();
+      gpu.destroy();
+    }
+  },
+);
+
+// finishAndRead takes a use reservation on each member until the batch settles (ADR 0054 addendum
+// 2026-09-12); clear() checks the same counter as for an issued run / enqueue.
+test.skipIf(!GPU_AVAILABLE)(
+  "clear() refuses a resident held by a pending finishAndRead and goes through after the batch settles (real GPU)",
+  async () => {
+    const gpu = await acquireGpu();
+    const state = await gpu.createResident(BYTES, "state");
+    try {
+      const pattern = Float32Array.from({ length: COUNT }, (_, i) => i + 1);
+      state.write(pattern);
+      const batch = await gpu.beginBatch();
+      const reading = batch.finishAndRead({ state });
+      assertEquals(state.useReferences, 1, "finishAndRead took no use reservation (vacuous)");
+      // A clear here would be submitted before the batch's readback copy, which would read zeros.
+      assertThrows(() => state.clear(), ResidentTensorError, "cannot be cleared");
+      assertEquals(
+        bits((await reading)["state"]),
+        bits(pattern),
+        "the refused clear changed the data",
+      );
+      assertEquals(state.useReferences, 0);
+
+      state.clear();
+      assertEquals(bits(await state.read()), new Array<number>(COUNT).fill(0));
+    } finally {
+      state.dispose();
+      gpu.destroy();
+    }
+  },
+);
+
 test.skipIf(!GPU_AVAILABLE)(
   "常駐入力の識別子は導出済み計画のキーに効く（差し替えで再導出・戻すとヒット・実 GPU）",
   async () => {
@@ -408,6 +504,7 @@ test.skipIf(!GPU_AVAILABLE)(
         "a disposed resident tensor",
       );
       await assertRejects(() => dead.read(), ResidentTensorError, "a disposed resident tensor");
+      assertThrows(() => dead.clear(), ResidentTensorError, "cannot be used (clear)");
       await assertRejects(() => session.run({ x: dead }), ExecutionError, "disposed");
 
       const batch = await gpu.beginBatch();
@@ -453,6 +550,9 @@ test.skipIf(!GPU_AVAILABLE)(
     // 消失後の popErrorScope は null で resolve するので失敗が捕まらない（この 1 本だけが
     // 門の証拠 — 下の lost 記録後は raceDeviceLost が既に同じ型で落としている）。
     await assertRejects(() => resident.read(), GpuDeviceLostError, "device was lost");
+    // clear() takes the same guard: commands on a destroyed device are silent no-ops, so the state
+    // would silently keep its previous contents.
+    assertThrows(() => resident.clear(), GpuDeviceLostError, "device was lost");
     await assertRejects(
       () => gpu.createResident(BYTES, "after-destroy"),
       GpuDeviceLostError,
@@ -462,6 +562,7 @@ test.skipIf(!GPU_AVAILABLE)(
     await gpu.device.lost;
     assert(gpu.lost !== undefined, "消失が記録されていない（門が空振りする）");
     assertThrows(() => resident.write(new Float32Array(COUNT)), GpuDeviceLostError);
+    assertThrows(() => resident.clear(), GpuDeviceLostError);
     await assertRejects(() => resident.read(), GpuDeviceLostError);
     await assertRejects(() => gpu.createResident(BYTES, "after-lost"), GpuDeviceLostError);
   },
@@ -862,6 +963,9 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(fresh.boundReferences, 0, "束縛予約は本体まで立たない（この窓の証拠）");
       assertThrows(() => fresh.dispose(), ResidentTensorError, "in use");
       assertEquals(fresh.disposed, false, "拒否した破棄で状態を壊さない");
+      // clear() refuses in the same window (unlike write, which leaves it as a caller contract): a
+      // clear here would land before the run's dispatch and zero the input it reads.
+      assertThrows(() => fresh.clear(), ResidentTensorError, "cannot be cleared");
 
       // 拒否した dispose は run を壊さない（受理済みの実行はそのまま完走する）。
       assertEquals(bits((await pending)["y"].data), bits(doubled(0)));
@@ -872,12 +976,18 @@ test.skipIf(!GPU_AVAILABLE)(
       const queued = session.enqueue({ x: input(1) }, { batch, copyOutputs: { y: sink } });
       assertEquals(sink.useReferences, 1, "写し先に使用予約が立っていない");
       assertThrows(() => sink.dispose(), ResidentTensorError, "in use");
+      assertThrows(() => sink.clear(), ResidentTensorError, "cannot be cleared");
       await queued;
       await batch.finish();
       assertEquals(sink.useReferences, 0);
       assertEquals(bits(await sink.read()), bits(doubled(1)));
 
       // 決着後は通る（予約が返っていることの裏 — 検査が恒真になっていない）。
+      // The refused clears left the values intact (the run read input(0), the copy wrote doubled(1)),
+      // and a clear after settlement goes through.
+      fresh.clear();
+      sink.clear();
+      assertEquals(bits(await sink.read()), new Array<number>(COUNT).fill(0));
       fresh.dispose();
       sink.dispose();
       assertEquals(fresh.disposed, true);

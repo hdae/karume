@@ -1,15 +1,19 @@
-// Wan2.1 の動画 VAE の chunk グラフ 2 本のホスト側（`src/wan/vae-chunks.ts` の GPU 不要の部分）—
-// グラフ宣言から chunk 列の取り決めを導く門・潜在の chunk の切り出し・フレームの連結。
+// The host side of the Wan video VAE's two chunk graphs (`src/wan/vae-chunks.ts`, shared by Wan2.1 and
+// Wan2.2): the check that derives the chunk-sequence contract from the graph declarations, cutting the
+// latent into chunks, concatenating the frames, and the cache residents with their tile-head zeroing
+// (`ResidentTensor.clear` on mock residents, and across two tiles on stub chunk graphs on a real GPU).
 //
-// 実 GPU と実資産での chunk 列の照合は `e2e_wan_vae_tiles_test.ts`。e2e は正常系の資産だけを通すので、
-// 宣言の故障形（取り決めから外れた資産を名指しで落とす分岐）はここが唯一の門になる。宣言は
-// `helpers/stub-model.ts` の流儀で、正しい形を 1 つ書いてから 1 点だけ壊す。
+// The chunk sequence on a real GPU with real assets is checked by `e2e_wan_vae_tiles_test.ts` and
+// `e2e_wan_ti2v_vae_tiles_test.ts`. The e2e tests only pass well-formed assets, so the declaration's
+// failure shapes (the branches that reject an asset off the contract by name) are checked only here.
+// Declarations follow `helpers/stub-model.ts`: write one correct form, then break one point.
 
-import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
-import type { ResidentTensor } from "@karume/runtime";
+import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
+import { acquireGpu, prepareContainer, type ResidentTensor } from "@karume/runtime";
 import { describe, it } from "vite-plus/test";
 import {
   concatWanVaeFrames,
+  decodeWanVaeTile,
   WanVaeChunkCaches,
   wanVaeChunkCount,
   WanVaeChunkError,
@@ -20,6 +24,13 @@ import {
 import type { GraphOwner } from "../src/hub/components.ts";
 import { type StubDim, stubModel } from "./helpers/stub-model.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
+import {
+  type DeclarationJson,
+  GRAPH_NAME,
+  openGraphModel,
+} from "../../runtime/tests/helpers/model-fixture.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { decodeWithFault } from "./helpers/wan-vae-chunk-loop.ts";
 
 /** 潜在タイルの辺・潜在のチャネル数・出力フレームの辺（`8t`）。 */
 const TILE = 4;
@@ -394,31 +405,161 @@ describe("潜在の chunk の切り出しとフレームの連結", () => {
   });
 });
 
-describe("WanVaeChunkCaches.create（常駐の確保と失敗時の後始末）", () => {
-  it("ホスト側のゼロ配列が確保できなければ、元の RangeError を投げ、確保した GPU の常駐を 1 本も残さない", async () => {
-    // cache 1 本が 2^36 要素（256 GiB 相当）の宣言。GPU 側の確保は模擬で必ず成功させ、ホストの
-    // `new Float32Array` だけが実際に失敗する形（数十 MB のホスト配列だけが落ちる現実の形の拡大）。
-    const huge = [1 << 12, 2, 1 << 12, 1 << 11];
-    const layout = layoutOf(
-      FIRST,
-      patched(NEXT, {
-        inputs: { 2: { name: "cache_01", shape: huge } },
-        outputs: { 2: { name: "cache_01_out", shape: huge } },
-      }),
-    );
+describe("WanVaeChunkCaches (the cache residents and their tile-head zeroing)", () => {
+  /**
+   * A GpuContext whose `createResident` hands out mock residents (only `byteLength` / `clear` /
+   * `write` / `dispose` — a fake device cannot back a real one, so the boundary casts). Allocation
+   * number `failAt` (0-based) rejects with `failure`.
+   */
+  const mockResidents = (options: { readonly failAt?: number; readonly failure?: Error } = {}) => {
     const gpu = fakeGpuContext(fakeDevice());
     const created: string[] = [];
     const disposed: string[] = [];
-    // 模擬の常駐（`dispose` と `byteLength` だけを持つ — 実体は fake device に作れないのでテストの境界で cast する）。
+    const cleared: string[] = [];
+    const written: string[] = [];
     // oxlint-disable-next-line typescript/no-useless-default-assignment -- false positive: GpuContext.createResident declares `label = "resident"`, so `label` is optional for callers; dropping the default types it `string | undefined`
     gpu.createResident = (byteLength: number, label = "resident") => {
+      if (created.length === options.failAt) return Promise.reject(options.failure);
       created.push(label);
       return Promise.resolve({
         byteLength,
+        clear: () => cleared.push(label),
+        write: () => written.push(label),
         dispose: () => disposed.push(label),
       } as unknown as ResidentTensor);
     };
-    await assertRejects(() => WanVaeChunkCaches.create(gpu, layout), RangeError);
-    assertEquals(disposed.toSorted(), created.toSorted(), "確保した常駐が解放されずに残った");
+    return { gpu, created, disposed, cleared, written };
+  };
+
+  it("a resident allocation failing partway rethrows that failure and leaves no resident behind", async () => {
+    const failure = new Error("out of memory on the third cache");
+    const { gpu, created, disposed } = mockResidents({ failAt: 2, failure });
+    const rejected = await assertRejects(() => WanVaeChunkCaches.create(gpu, layoutOf()), Error);
+    assertStrictEquals(rejected, failure, "the allocation failure was not rethrown as is");
+    assertEquals(created.length, 2, "the failure did not hit partway (the check would be vacuous)");
+    assertEquals(disposed.toSorted(), created.toSorted(), "an allocated resident was left behind");
+  });
+
+  it("zero() clears every cache on the GPU, the time_conv cache first never writes included, without a host write", async () => {
+    const { gpu, cleared, written } = mockResidents();
+    const caches = await WanVaeChunkCaches.create(gpu, layoutOf());
+    caches.zero();
+    // NEXT's caches: cache_01 is the time_conv cache FIRST does not have (the module doc).
+    assertEquals(cleared.toSorted(), ["cache_00", "cache_01", "cache_02"]);
+    assertEquals(written, [], "zeroing went through a host write");
   });
 });
+
+/**
+ * A GPU-cheap stand-in for the two chunk graphs (every value a few floats): the frame and the updated
+ * caches depend on the incoming caches, so caches left over from an earlier tile change the output.
+ * first: `s = cache_00 + latent`, frame = `s` as `[2,1,1,1]`, `cache_00 ← s + latent`. next: `t =
+ * cache_00 + cache_01 + latent`, frame = `t` repeated over 4 frames, `cache_00 ← t + latent`,
+ * `cache_01 ← cache_01 + latent` (cache_01 is the time_conv-like cache first never writes).
+ */
+const CACHE_SHAPE = [1, 2, 1, 1];
+const LATENT_SHAPE = [1, 1, 1, 1];
+const stubChunk = (head: boolean): DeclarationJson => {
+  const value = (shape: number[]) => ({ dtype: "f32", shape });
+  const caches = head ? ["cache_00"] : ["cache_00", "cache_01"];
+  return {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: head ? ["add", "reshape"] : ["add", "reshape", "expand"] },
+    symbols: [],
+    inputs: [
+      { name: "latent", dtype: "f32", shape: LATENT_SHAPE },
+      ...caches.map((name) => ({ name, dtype: "f32", shape: CACHE_SHAPE })),
+    ],
+    outputs: ["frame", ...caches.map((name) => `${name}_out`)],
+    initializers: {},
+    values: head
+      ? {
+          s: value(CACHE_SHAPE),
+          frame: value([2, 1, 1, 1]),
+          cache_00_out: value(CACHE_SHAPE),
+        }
+      : {
+          s: value(CACHE_SHAPE),
+          t: value(CACHE_SHAPE),
+          r: value([2, 1, 1, 1]),
+          frame: value([2, 4, 1, 1]),
+          cache_00_out: value(CACHE_SHAPE),
+          cache_01_out: value(CACHE_SHAPE),
+        },
+    nodes: head
+      ? [
+          { op: "add", ins: ["cache_00", "latent"], outs: ["s"], attrs: {} },
+          { op: "reshape", ins: ["s"], outs: ["frame"], attrs: {} },
+          { op: "add", ins: ["s", "latent"], outs: ["cache_00_out"], attrs: {} },
+        ]
+      : [
+          { op: "add", ins: ["cache_00", "cache_01"], outs: ["s"], attrs: {} },
+          { op: "add", ins: ["s", "latent"], outs: ["t"], attrs: {} },
+          { op: "reshape", ins: ["t"], outs: ["r"], attrs: {} },
+          { op: "expand", ins: ["r"], outs: ["frame"], attrs: {} },
+          { op: "add", ins: ["t", "latent"], outs: ["cache_00_out"], attrs: {} },
+          { op: "add", ins: ["cache_01", "latent"], outs: ["cache_01_out"], attrs: {} },
+        ],
+  };
+};
+
+describe.skipIf(!GPU_AVAILABLE)(
+  "decodeWanVaeTile across tiles (stub chunk graphs, real GPU)",
+  () => {
+    it("the second tile on the same caches starts from zeros: bit-identical to fresh caches and to a host write of zeros", async () => {
+      const gpu = await acquireGpu();
+      const first = prepareContainer(await openGraphModel(stubChunk(true)), GRAPH_NAME);
+      const next = prepareContainer(await openGraphModel(stubChunk(false)), GRAPH_NAME);
+      const sessions = {
+        first: await first.createContainerSession(gpu),
+        next: await next.createContainerSession(gpu),
+      };
+      const layout = wanVaeChunkLayout({ graph: first.graph }, { graph: next.graph });
+      const reused = await WanVaeChunkCaches.create(gpu, layout);
+      const fresh = await WanVaeChunkCaches.create(gpu, layout);
+      // Latents `[1, F=3, 1, 1]`; tile A leaves non-zero caches behind for tile B.
+      const tileA = Float32Array.from([1, 2, 3]);
+      const tileB = Float32Array.from([5, 7, 11]);
+      const bits = (values: Float32Array<ArrayBuffer>): number[] => [
+        ...new Uint32Array(values.buffer),
+      ];
+      try {
+        // The reference is a tile on fresh caches. It also goes through `zero()` = `clear()`, so it is
+        // independent of clear() only against a clear that does nothing (a new WebGPU buffer starts as
+        // zeros). A clear that wrote non-zero values would corrupt the reference and the reused tile
+        // alike; the comparison with host-written zeros and no clear (skip-zero) below catches that.
+        const reference = bits(await decodeWanVaeTile(gpu, sessions, fresh, tileB));
+
+        await decodeWanVaeTile(gpu, sessions, reused, tileA);
+        // Detector check: without zeroing, tile A's caches leak into tile B's output.
+        const leaked = bits(
+          await decodeWithFault(gpu, sessions, reused, tileB, { kind: "skip-zero" }),
+        );
+        assert(
+          JSON.stringify(leaked) !== JSON.stringify(reference),
+          "leftover caches do not change the output (the check is vacuous)",
+        );
+
+        await decodeWanVaeTile(gpu, sessions, reused, tileA);
+        assertEquals(bits(await decodeWanVaeTile(gpu, sessions, reused, tileB)), reference);
+
+        // The host-write path clear() replaced (`write` of a zero array) gives the same bits.
+        await decodeWanVaeTile(gpu, sessions, reused, tileA);
+        for (const resident of Object.values(reused.inputs(layout.next))) {
+          resident.write(new Float32Array(resident.byteLength / 4));
+        }
+        const hostZeroed = await decodeWithFault(gpu, sessions, reused, tileB, {
+          kind: "skip-zero",
+        });
+        assertEquals(bits(hostZeroed), reference);
+      } finally {
+        await sessions.first.dispose();
+        await sessions.next.dispose();
+        reused.dispose();
+        fresh.dispose();
+        gpu.destroy();
+      }
+    });
+  },
+);

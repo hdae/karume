@@ -143,3 +143,43 @@ out-of-memory). `finish()` throwing `ExecutionError` and similar is a **breaking
 - Checks: `packages/runtime/tests/gpu_batch_enqueue_read_test.ts`,
   `packages/runtime/tests/gpu_batch_generation_test.ts`, `packages/e2e/tests/e2e_gemma4_ple_gpu_test.ts`
   (the sampler route's id sequence matches the host route; the only extra fences are prefill's).
+
+## Addendum (2026-10-26) — `ResidentTensor.clear()`: zeroing a resident on the GPU
+
+- **The maintainer's ruling (2026-10-26)**: a new resident operation, `ResidentTensor.clear(): void`, on the
+  already-exported type (no new export — the thin surface of [0008](0008-public-api.md) reviewed by
+  hand; the `public_surface_test.ts` snapshot lists symbol names only and does not see it). It replaces host
+  writes of zero arrays for resetting state between runs (perf-ledger K-72 — the Wan VAE causal caches at each
+  tile head, [0118](0118-wan21-video-generation.md) addendum of the same date).
+- **Form**: synchronous; its own command encoder → `clearBuffer(buffer, 0, byteLength)` → `queue.submit`. One
+  submit per resident. A batched `GpuContext.clearResidents(list)` was not taken because the most it could save
+  is small. Measured on the RTX 3080 Ti (Node + Dawn, Wan2.2 tile 16, one submit per cache resident), one `zero()`
+  call took 2.2 ms of host time (median) at the production call site, the head of each tile. Called in an
+  isolated loop right after a queue drain, it took 8.3 ms (median, 3.2–10.5 ms); the gap is not explained. Even
+  the isolated figure is under 0.4% of a ~2.9 s tile and far below the 110 ms of the host write it replaced
+  ([0118](0118-wan21-video-generation.md) addendum of the same date). Not part of a `BatchScope` (a batch has no
+  encoder of its own, so it would still be a separate submit). **Unscoped** like `write` (no error-scope pair):
+  the usage always has `COPY_DST` (`STORAGE_USAGE`) and `createResident` keeps the size a positive multiple of
+  4, so no validation failure is reachable behind the guards, and a pop per call would add an await per resident.
+  As with `write`, the submit can land while another operation's error scope is pushed (a run waiting inside its
+  section lock, or an open batch), and a failure would be attributed to it — the window
+  [0123](0123-submit-inflight-bound.md) names for unscoped operations. The submits are outside the Session
+  scheduler's in-flight window (0123 bounds only run / enqueue dispatches): one small submit per resident.
+- **Ordering** (the same claim as `write` in decision 2): the clear lands on the queue timeline in issue order,
+  after every dispatch already submitted and before anything submitted later; only unsubmitted encodes could be
+  overtaken, and enqueue's eager submit leaves none once it settles.
+- **Guards**: a disposed resident and a lost or destroy-requested device fail loudly, as for `write`. **It also
+  fails loudly (`ResidentTensorError`) while a use reservation is held** (`useReferences > 0`). The counter holds
+  two kinds: the reservation an issued but unsettled run / enqueue takes on its resident inputs and `copyOutputs`
+  destinations in the synchronous part of the issue (`retainUsedResidents` in
+  `packages/runtime/src/runtime/executor.ts`, rationale in the `ResidentInternals.retainUse` doc in
+  `packages/runtime/src/gpu/context.ts`; it came with commit 212b3ad4 and no addendum here records it), and the
+  member reservations of a pending `finishAndRead` (the 2026-09-12 addendum). This is a deliberate
+  asymmetry with `write`, which leaves the same window — a same-tick write landing before the issued run's
+  dispatches — as a caller contract: a clear carries no host data, so the guard is an O(1) counter check. Adding
+  the guard to `write` is a separate question (not decided here).
+- Checks: `packages/runtime/tests/gpu_resident_batch_test.ts` (the whole range reads back as zero after
+  non-zero data and the size is kept; a clear between two settled enqueues lands after the earlier copy and
+  before the later dispatch; refused when disposed, after `destroy()` and after the loss is recorded, in the
+  same tick as an issued run or enqueue that uses the resident, and while a `finishAndRead` holds it, then
+  accepted after settlement).

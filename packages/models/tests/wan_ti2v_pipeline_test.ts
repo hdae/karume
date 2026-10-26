@@ -753,6 +753,7 @@ const mockTi2v = (
     byteLength,
     label,
     write: () => {},
+    clear: () => {},
     dispose: () => {
       log.push(`release:${label}`);
     },

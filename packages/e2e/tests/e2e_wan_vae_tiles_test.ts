@@ -631,10 +631,10 @@ describe.skipIf(!CHUNK_ANY_PRESENT || !GPU_AVAILABLE)(
       );
     });
 
-    it("観測: タイルの頭の cache のゼロ化（ホストからの書き込み）の量と時間", () => {
+    it("observation: bytes and host time of zeroing the caches at the tile head (GPU-side clear)", () => {
       const { caches } = vaeRun();
-      // GPU 側でゼロを書く口（clearBuffer）が runtime に無いので、ゼロ化は `queue.writeBuffer`
-      // （ホストの memcpy + staging）になる。門ではなく記録 — 段 5 で 1 生成あたりタイル数ぶん払う。
+      // Zeroing is `ResidentTensor.clear` (one clearBuffer submit per cache — no host memcpy or
+      // staging). A record, not a gate — the tiled decode pays it once per tile.
       const started = performance.now();
       caches.zero();
       const hostMs = performance.now() - started;

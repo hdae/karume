@@ -1,7 +1,8 @@
 /**
- * The host side that runs Wan2.1's video VAE as **two chunk graphs** (`vae_decoder_first` /
+ * The host side that runs the Wan video VAE decoder as **two chunk graphs** (`vae_decoder_first` /
  * `vae_decoder_next`) with a resident causal cache (ADR 0118 decision 2 and the addendum of
- * 2026-10-02). It covers up to the chunk sequence of one tile — tile planning, blending, pasting and
+ * 2026-10-02). The same code serves Wan2.1 and Wan2.2 (TI2V-5B, tile 16 and the ADR 0134 tile-32
+ * pair). It covers up to the chunk sequence of one tile — tile planning, blending, pasting and
  * the clamp are the step 5 layer.
  *
  * ## Graph contract (the form written by recipe `tools/export-recipes/wan/vae_patch.py`)
@@ -21,9 +22,10 @@
  *
  * ## One tile = one batch, read back only the frames (the procedure of the 2026-10-02 addendum)
  *
- * `Session.run` / `enqueueRead` read back every graph output (30–32 caches, about 0.56–0.58 GiB), so
- * they MUST NOT be used. The procedure is `beginBatch` → first with `enqueue({ copyOutputs })` → next
- * (chunk count − 1) times → `finishAndRead({ frame residents })`. The cache outputs are copied to the
+ * `Session.run` / `enqueueRead` read back every graph output (30–32 caches: next's are 0.58 GiB on
+ * Wan2.1, 446 MiB on Wan2.2 at tile 16), so they MUST NOT be used. The procedure is `beginBatch` →
+ * first with `enqueue({ copyOutputs })` → next (chunk count − 1) times →
+ * `finishAndRead({ frame residents })`. The cache outputs are copied to the
  * same residents with `copyOutputs` (the residents bound as inputs are also the copy targets — the
  * copies are queued in FIFO after all dispatches of the run, so read-then-overwrite order is kept. ADR
  * 0054 decision 3). The frame residents are held separately per chunk (copies are queued in the span's
@@ -34,11 +36,14 @@
  *
  * The cache inputs of first (being zero is what causal padding means) and the two of `time_conv`
  * (first does not write them, the first run of next reads them) **all** need to be zero — there is
- * nothing to narrow down. The runtime's `ResidentTensor` has no entry point for writing zeros on the
- * GPU side (`clearBuffer`), so zeros are written from the host with `ResidentTensor.write`
- * (`queue.writeBuffer`). With tile 32 that is 0.58 GiB of host writes per tile, and on the B570 (ReBAR)
- * the staging sits in the VRAM heap (the form ADR 0118 decision 2 wanted to avoid). Whether to add a
- * GPU-side zeroing entry point is a decision about the runtime's public surface (open).
+ * nothing to narrow down. They are zeroed on the GPU with `ResidentTensor.clear` (`clearBuffer`,
+ * one submit per resident — ADR 0054 and ADR 0118 addenda of 2026-10-26). The bytes per tile are
+ * every cache of next: 0.58 GiB on Wan2.1, 446 MiB on Wan2.2 at tile 16 and about 1.74 GiB for the
+ * tile-32 pair (each cache `[Cin,2,h,w]` scales with the tile area). The host write this replaced
+ * (`ResidentTensor.write` of a zero array — `queue.writeBuffer`) cost about 110 ms of host time and
+ * about 164 ms of tile wall per tile (median paired difference) at Wan2.2 tile 16 on the RTX 3080 Ti
+ * (ADR 0118 addendum of 2026-10-26), held a host array as large as the largest cache, and its
+ * staging sits in the VRAM heap on ReBAR (the form ADR 0118 decision 2 wanted to avoid).
  */
 
 import type { BatchScope, GpuContext, ResidentTensor, Session, Tensor } from "@karume/runtime";
@@ -274,36 +279,27 @@ export const wanVaeFrameCount = (chunks: number): number =>
  * across tiles.
  *
  * MUST: call {@link WanVaeChunkCaches.zero} and `dispose` only after the batches that use these
- * residents have settled (`ResidentTensor.write` can overtake an enqueue already issued — the
- * runtime's contract).
+ * residents have settled (`ResidentTensor.clear` and `dispose` fail loudly while an issued enqueue
+ * still uses a resident — the runtime's contract).
  */
 export class WanVaeChunkCaches {
   readonly layout: WanVaeChunkLayout;
   readonly #gpu: GpuContext;
   readonly #caches: ReadonlyMap<string, ResidentTensor>;
-  readonly #zeros: Float32Array<ArrayBuffer>;
   readonly #frames: ResidentTensor[] = [];
 
   private constructor(
     gpu: GpuContext,
     layout: WanVaeChunkLayout,
     caches: ReadonlyMap<string, ResidentTensor>,
-    zeros: Float32Array<ArrayBuffer>,
   ) {
     this.#gpu = gpu;
     this.layout = layout;
     this.#caches = caches;
-    this.#zeros = zeros;
   }
 
   /** Allocates the cache residents (a new WebGPU buffer starts as zeros). */
   static async create(gpu: GpuContext, layout: WanVaeChunkLayout): Promise<WanVaeChunkCaches> {
-    // MUST: allocate the host zero array before the GPU residents — afterwards, if only the host array
-    // failed with a RangeError after the residents (about 0.58 GiB) were allocated, nobody could
-    // release the allocated residents (the caller has not received the return value, so it cannot
-    // close them). Placed first, the failure point moves before touching the GPU and needs no cleanup.
-    const largest = Math.max(...[...layout.cacheShapes.values()].map(elements));
-    const zeros = new Float32Array(largest);
     const caches = new Map<string, ResidentTensor>();
     try {
       for (const [name, shape] of layout.cacheShapes) {
@@ -313,7 +309,7 @@ export class WanVaeChunkCaches {
       for (const resident of caches.values()) resident.dispose();
       throw cause;
     }
-    return new WanVaeChunkCaches(gpu, layout, caches, zeros);
+    return new WanVaeChunkCaches(gpu, layout, caches);
   }
 
   /** The total bytes of the cache residents. */
@@ -326,11 +322,9 @@ export class WanVaeChunkCaches {
     return this.#frames.reduce((sum, resident) => sum + resident.byteLength, 0);
   }
 
-  /** Writes zeros to every cache (at the tile head — why nothing can be narrowed: the module doc). */
+  /** Zeroes every cache on the GPU (at the tile head — why nothing can be narrowed: the module doc). */
   zero(): void {
-    for (const resident of this.#caches.values()) {
-      resident.write(this.#zeros.subarray(0, resident.byteLength / BYTES_PER_ELEMENT));
-    }
+    for (const resident of this.#caches.values()) resident.clear();
   }
 
   /** The cache inputs of that graph (name → resident). */
@@ -463,7 +457,7 @@ export const concatWanVaeFrames = (
  * Runs the chunk sequence of one tile (one tile = one batch, read back only the frames — module doc).
  *
  * `latents` is the de-normalized `[C,F,t,t]`. Returns the **pre-clamp** `[Cs, 1 + 4(F−1), 8t, 8t]`.
- * Writes zeros to the caches at the tile head ({@link WanVaeChunkCaches.zero}).
+ * Zeroes the caches at the tile head ({@link WanVaeChunkCaches.zero}).
  *
  * MUST: do not issue another batch or run on the same device concurrently (the batch holds the
  * device's span lock).

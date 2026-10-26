@@ -1248,7 +1248,12 @@ const mockPipeline = (options: {
   /** DiT の run が受けた入力の全体（run の順）。 */
   const ditRuns: Record<string, Tensor>[] = [];
   const { first, next } = vaeChunkGraphs(32);
-  const resident = (byteLength: number) => ({ byteLength, write: () => {}, dispose: () => {} });
+  const resident = (byteLength: number) => ({
+    byteLength,
+    write: () => {},
+    clear: () => {},
+    dispose: () => {},
+  });
   const vaeSession = (name: string) => ({
     createSession: () => {
       log.push(`create:${name}`);

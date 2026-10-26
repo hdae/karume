@@ -978,3 +978,48 @@ and Codex (12 findings, all held) — were worked off in 37 fix commits; records
   so 2.1 need not be uploaded"). The repository name of decision 7 remains the name of the local distribution,
   and `WanPipeline` stays in the package (usable through `fromPretrained` with an explicit source — `WAN_SOURCES`
   has no `wan2.1` key). The distribution is built locally with `dist.py --pipeline wan`.
+
+## Addendum (2026-10-26) — the VAE caches are zeroed on the GPU (ruling b superseded)
+
+- **The maintainer's ruling (2026-10-26)** supersedes ruling b of the step 2 / 4 addendum ("cache zeroing is a
+  host write for now") and the hand-over note of decision 2: `WanVaeChunkCaches.zero()` calls
+  `ResidentTensor.clear()` (`clearBuffer`, [0054](0054-resident-loop-and-fence.md) addendum of the same date) on
+  every cache resident at each tile head. The host zero array (as large as the largest cache: 64 MiB at Wan2.2
+  tile 16) and its allocation are gone. Perf-ledger K-72 is revived and landed.
+- **Why the kill line was met**: K-72 was killed at 1.3% of the Wan2.1 832×480 VAE stage on the B570. On Wan2.2
+  at 1280×704 (28 tiles of 1 first + 8 next chunks at tile 16) the 446 MiB `writeBuffer` per tile was about 5%
+  of a tile on the RTX 3080 Ti and 5.6% on the RTX 5070 Ti (Chrome, −98.8 ms per tile), and its share grows as
+  the conv kernels get faster.
+- **Measured at landing** (one Node process on the RTX 3080 Ti, default preset `i8-a8-attn8-online-conv8`'s
+  decoder, tile 16, 9 chunks per tile, 28 tiles × 2 passes alternating `clear()` and the old `write(zeros)` per
+  tile with the pattern flipped in the second pass):
+  - Inputs: the decoder weights come from the local i8 series' containers (not the published distribution). The
+    latent of each tile is the f16 series' `band` chunk fixture (`[48,9,16,16]`) rotated along W by the tile
+    index modulo 16, so neighbouring tiles differ and leftover caches would change the output (16 distinct
+    latents).
+  - Thermal state: the GPU was not in a steady state. It went from 65 °C / 1,935 MHz at the start of pass 1 to
+    92 °C / 1,365 MHz at its end, started pass 2 at 90 °C / 1,365 MHz and ended it at 92 °C / 1,755 MHz. The
+    tile wall rose through pass 1 (from 2.35 s to about 3 s) and stayed at 2.9–3.2 s in pass 2. The absolute tile times are therefore not steady-state figures; the
+    comparison rests on the interleaving, the medians per pass and the paired differences.
+  - The zero call took 2.2 ms of host time (median) instead of 110.3 ms. Tile wall median per pass: 2,503.8 vs
+    2,695.9 ms (pass 1) and 2,948.6 vs 3,121.8 ms (pass 2), `clear()` first. Every one of the 54 adjacent tile
+    pairs within a pass was faster with `clear()` (median −163.9 ms, smallest −43.9 ms); a pair holds one tile of
+    each variant next to each other, so a drift that is linear over the pass cancels. The minima are not used:
+    both come from the first, coldest slots of pass 1, and the very first slot always ran `clear()`.
+  - Isolated (`zero()` right after a queue drain, then the drain again; 20 calls each, alternating), the zeroing
+    until the queue was done took 9.2 ms vs 159.2 ms (median).
+  - The decoded frames of all 28 tile indices are bit-identical between the two paths (sha256).
+  - Record and script: `outputs/diag/wave-b-2026-10-26/c4/ab-28x2.json`, `ab-clear.ts`.
+- **Bit identity holds by construction**: `clearBuffer` writes 0x00 bytes and the host array held +0.0
+  (0x00000000), at the same call point (before `beginBatch`, after the previous tile's fence). The sha256 rows
+  of both Wan lanes stay unchanged.
+- **Side effect**: the per-tile `writeBuffer` staging (0.58 GiB on Wan2.1, 446 MiB on Wan2.2 at tile 16, about
+  1.74 GiB for the [0134](0134-wan22-vae-tile32-shared.md) tile-32 pair — computed from the cache shapes)
+  no longer exists, which removes the VRAM-heap staging on ReBAR that decision 2 wanted to avoid.
+- Checks: `packages/models/tests/wan_vae_chunks_test.ts` (`zero()` calls `clear()` on every cache and never
+  writes, on mock residents; on stub chunk graphs on a real GPU, a second tile on the same caches gives the same
+  bits as fresh caches and as host-written zeros, and skipping the zeroing changes them),
+  `packages/e2e/tests/e2e_wan_vae_tiles_test.ts` and `packages/e2e/tests/e2e_wan_ti2v_vae_tiles_test.ts` (real
+  assets; the chunk-loop identity with the product path, and the skip-zero fault injection in the opt-in upstream
+  parity suites), and the `ResidentTensor.clear()` checks of the [0054](0054-resident-loop-and-fence.md)
+  addendum.
