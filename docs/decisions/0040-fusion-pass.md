@@ -650,5 +650,7 @@ k / v on the a8 seat) is unchanged.
   total); `packages/e2e/tests/e2e_wan_ti2v_attention_permute_estimate_test.ts` checks that the Wan2.2
   DiT's region total with every absorbed permute is at most that of the graph with the permutes as
   nodes, on the online and s16 seats at S 7,920 / 27,280, and on the online seat at most that of the
-  graph with only O's permute as a node. Not measured here: other backends (D3D12,
-  Metal) and the models' per-environment sha256 rows (bit identity predicts them unchanged).
+  graph with only O's permute as a node. The models' sha256 rows of the Wan2.2, Wan2.1 and anima
+  lanes are unchanged on this machine. Speed (in-process kernel A/B, [research](../research/2026-10-26-a4-output-permute.md)):
+  −14.8 / −14.9 ms per 33-frame forward and −44 / −49 ms per 121-frame forward; the token-major store
+  itself costs nothing measurable. Not measured here: other backends (D3D12, Metal).

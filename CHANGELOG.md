@@ -17,6 +17,16 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- On the online attention route (`attentionCompute: "a8"` × `attentionScoreStorage: "none"`, where
+  the shape and device admit the online kernel) the fused attention also absorbs the permute after it
+  and stores O token-major itself (ADR 0040 addendum of 2026-10-26): one dispatch fewer per attention,
+  outputs unchanged. The Wan2.2 DiT on its default preset saves about 15 ms of GPU time per 33-frame
+  forward and about 45 ms per 121-frame forward; its slot backing does not grow.
+  `FusionCounts.attentionPermute` counts the absorbed output permute too (Wan2.2 online presets 180 →
+  240).
+- The estimate (`estimateGraphMemory`, `PreparedModel.estimate`) with `attentionScoreStorage: "none"`
+  and no `attentionDevice` now fails for every graph, not only for graphs with an attention that could
+  take the online kernel.
 - Intermediate buffers are packed by least region growth instead of first-fit (ADR 0093 addendum of
   2026-10-26): each slot goes to the region it grows least, and the placement is tried in two orders
   and the smaller kept. The slot backing and `workspaceBytes` shrink — 30.26 → 24.18 GiB summed over
