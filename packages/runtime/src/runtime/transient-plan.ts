@@ -27,11 +27,13 @@
  * in a region ≤ `maxBufferSize`) are **listed in full before placement** and fail (ADR 0093
  * decision 5 — a deterministic check ahead of the errorScope).
  *
- * Cost: for n slots, one placement is O(n · slots placed so far) — each slot scans every region for
- * the least growth — and it runs in two orders; 100–150 ms for the largest real assets (n ≈ 2,500).
+ * Cost: O(n²) at worst for n slots — per order, each slot excludes its conflict partners' regions and
+ * reads the placed slots of the other regions; the live peak is computed the same way. The second
+ * order is skipped when the first meets the live peak. 30–110 ms for the largest real graphs
+ * (2,000–4,300 slots), once per planning call.
  * Determinism: both orders are total (real size descending, then allocation event or lifetime, then
- * allocation event) and a tie between the two totals keeps the first, so the same input always gives
- * the same plan.
+ * the allocation event, which is unique per slot) and a tie between the two totals keeps the first,
+ * so the same input always gives the same plan.
  */
 
 import { toSizeClass } from "../gpu/arena.ts";
@@ -144,8 +146,6 @@ type Interval = {
 
 const overlaps = (a: Interval, b: Interval): boolean => a.start < b.end && b.start < a.end;
 
-const pairKey = (a: number, b: number): number => (a < b ? a * 0x100000 + b : b * 0x100000 + a);
-
 const assertLimits = (limits: TransientLimits): void => {
   for (const [name, value] of Object.entries(limits)) {
     if (!Number.isSafeInteger(value) || value < 4) {
@@ -171,28 +171,37 @@ type Placement = {
  * lowest offset that fits there. First-fit took the first region that could hold the slot even when
  * that region had to grow and a later one had room, so removing one node could stack a long-lived
  * tensor on a large one and grow the total with the live peak unchanged.
- * A new region opens when every candidate would grow by the slot's full size: the bytes are the same,
- * and the new region carries no read / write conflicts, so later slots keep more places to go
- * (growing the existing region instead sums to about 20% more over the shipped models — ADR 0093
- * addendum 2026-10-26).
+ * A new region opens when every candidate would grow by at least the slot's size (the full size, or
+ * more where the offset alignment pads): the bytes are the same or fewer, and the new region carries
+ * no read / write conflicts, so later slots keep more places to go (growing the existing region
+ * instead sums to about 20% more over the shipped models — ADR 0093 addendum 2026-10-26).
+ * `partners[id]` lists the slots that `id` may not share a region with (either direction, repeats
+ * allowed); a region is excluded through the regions of the partners placed so far, so the check
+ * costs the partners, not every placed slot.
  */
 const placeInOrder = (
   order: readonly number[],
   intervals: readonly Interval[],
-  conflicts: ReadonlySet<number>,
+  partners: readonly (readonly number[])[],
   limits: TransientLimits,
 ): Placement => {
   const regions: { placed: number[]; size: number }[] = [];
   const slots: TransientSlot[] = new Array(intervals.length);
+  const regionOf: number[] = new Array<number>(intervals.length).fill(-1);
+  // excludedFor[region] === id: a partner of slot `id` is in that region.
+  const excludedFor: number[] = [];
   let sharedSlots = 0;
   const align = (value: number): number =>
     Math.ceil(value / limits.offsetAlignment) * limits.offsetAlignment;
   for (const id of order) {
     const iv = intervals[id];
+    for (const other of partners[id]) {
+      if (regionOf[other] >= 0) excludedFor[regionOf[other]] = id;
+    }
     let best: { region: number; offset: number; growth: number } | undefined;
     for (let region = 0; region < regions.length; region += 1) {
       const entry = regions[region];
-      if (entry.placed.some((other) => conflicts.has(pairKey(id, other)))) continue;
+      if (excludedFor[region] === id) continue;
       const busy = entry.placed
         .filter((other) => overlaps(iv, intervals[other]))
         .map((other) => slots[other])
@@ -208,12 +217,14 @@ const placeInOrder = (
       if (best === undefined || growth < best.growth) best = { region, offset, growth };
     }
     if (best === undefined || best.growth >= iv.byteLength) {
+      regionOf[id] = regions.length;
       slots[id] = { region: regions.length, offset: 0, byteLength: iv.byteLength };
       regions.push({ placed: [id], size: iv.byteLength });
       continue;
     }
     const { region, offset } = best;
     const entry = regions[region];
+    regionOf[id] = region;
     slots[id] = { region, offset, byteLength: iv.byteLength };
     // Shares a byte range with an earlier slot (legal because the lifetimes do not overlap) = one reassignment.
     const end = offset + iv.byteLength;
@@ -251,7 +262,7 @@ export const planTransients = (
   const intervals: Interval[] = [];
   const refs = new Map<number, number>();
   const env = new Map<string, number>();
-  const conflicts = new Set<number>();
+  const partners: number[][] = [];
   const steps: TransientStepSlots[] = [];
   let clock = 0;
 
@@ -264,6 +275,7 @@ export const planTransients = (
       label,
       pinned: false,
     });
+    partners.push([]);
     clock += 1;
     return id;
   };
@@ -318,7 +330,13 @@ export const planTransients = (
       const writes = dispatch.writes
         .map((ref) => resolve(ref, temps))
         .filter((s): s is number => s !== undefined);
-      for (const r of reads) for (const w of writes) if (r !== w) conflicts.add(pairKey(r, w));
+      for (const r of reads) {
+        for (const w of writes) {
+          if (r === w) continue;
+          partners[r].push(w);
+          partners[w].push(r);
+        }
+      }
       for (let id = step.temps.length - 1; id >= 0; id -= 1) {
         if (step.temps[id].releaseAfter === index) release(temps[id]);
       }
@@ -355,12 +373,23 @@ export const planTransients = (
     );
   }
 
+  // Live peak (lower bound).
+  let peakLiveBytes = 0;
+  for (const iv of intervals) {
+    let live = 0;
+    for (const other of intervals) {
+      if (other.start <= iv.start && iv.start < other.end) live += other.byteLength;
+    }
+    peakLiveBytes = Math.max(peakLiveBytes, live);
+  }
+
   // Placement runs in two orders of the slots and keeps the smaller region total (the first order
   // on a tie). Both orders take the slots in descending real size; equal sizes go in allocation order
   // in the first, the longer-lived first in the second. A single greedy order is sensitive to how
-  // equal sizes are ordered — a DiT repeats the same sizes in every block — and two graphs with the
-  // same live intervals in another order then land on different totals: taking the better of the two
-  // keeps the total from moving with an unrelated node (ADR 0093 addendum 2026-10-26).
+  // equal sizes are ordered — a DiT repeats the same sizes in every block — so two graphs with the
+  // same live peak can land on different totals; the better of the two orders narrows that (on the
+  // Wan2.2 DiT with and without its absorbed permutes it removes the difference — ADR 0093 addendum
+  // 2026-10-26). It is a heuristic: nothing makes the total independent of the node order.
   const bySize = (a: number, b: number): number =>
     intervals[b].byteLength - intervals[a].byteLength;
   // A pinned slot lives to the end: `clock` is past every finite end.
@@ -370,34 +399,25 @@ export const planTransients = (
   const inAllocationOrder = placeInOrder(
     [...ids].sort((a, b) => bySize(a, b) || intervals[a].start - intervals[b].start || a - b),
     intervals,
-    conflicts,
+    partners,
     limits,
   );
-  const longerLivedFirst = placeInOrder(
-    [...ids].sort(
-      (a, b) =>
-        bySize(a, b) ||
-        lifetime(b) - lifetime(a) ||
-        intervals[a].start - intervals[b].start ||
-        a - b,
-    ),
-    intervals,
-    conflicts,
-    limits,
-  );
-  const placement =
-    longerLivedFirst.totalBytes < inAllocationOrder.totalBytes
-      ? longerLivedFirst
-      : inAllocationOrder;
-
-  // Live peak (lower bound).
-  let peakLiveBytes = 0;
-  for (const iv of intervals) {
-    let live = 0;
-    for (const other of intervals) {
-      if (other.start <= iv.start && iv.start < other.end) live += other.byteLength;
-    }
-    peakLiveBytes = Math.max(peakLiveBytes, live);
+  let placement = inAllocationOrder;
+  // At the live peak no placement is smaller, so the second order could only tie (and lose the tie).
+  if (placement.totalBytes > peakLiveBytes) {
+    const longerLivedFirst = placeInOrder(
+      [...ids].sort(
+        (a, b) =>
+          bySize(a, b) ||
+          lifetime(b) - lifetime(a) ||
+          intervals[a].start - intervals[b].start ||
+          a - b,
+      ),
+      intervals,
+      partners,
+      limits,
+    );
+    if (longerLivedFirst.totalBytes < placement.totalBytes) placement = longerLivedFirst;
   }
 
   return {
