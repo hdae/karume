@@ -1,11 +1,14 @@
 // 見積りの中間バッファ規則（`src/runtime/estimate.ts` の `transientSlotBytes`）の門。
 // GPU を 1 つも触らない純関数テスト。
 //
-// 縛るのは 1 点 —— 中間の総量は**計画の領域の総和**（ADR 0093: 生存区間の first-fit 配置・
-// 256 バイト整列・同じ dispatch で読み書きされる 2 本は別領域）であって「同時生存バイトの最大」
-// では**ない**こと。規則の正本は `planTransients` 1 本だが、見積りが組む確保プログラム（1 ノード
-// 1 dispatch の近似）が実行相とずれたときの症状は沈黙（例外も警告も出ず、数字だけがずれる）
-// なので、算式そのものを手計算の定数で押さえる。
+// It pins one point: the intermediate total is the **sum of the plan's regions** (ADR 0093:
+// live-interval packing — each slot, largest first, goes to the conflict-free region it grows least,
+// a new region when every candidate would grow by the slot's full size, best total of two orders —
+// with 256-byte offset alignment, and two slots read and written by the same dispatch in different
+// regions), **not** the maximum of simultaneously live bytes. The rule's source of truth is the one
+// `planTransients`, but when the allocation program the estimate builds (one dispatch per node)
+// drifts from the execution phase the symptom is silent (no exception, no warning, only the number
+// moves), so the formula itself is pinned with hand-derived constants.
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
@@ -65,8 +68,7 @@ test("中間の総量は領域の総和（読み書きの同居禁止で領域�
 });
 
 /**
- * `relu` の鎖（形が動かないので中間は全て同じサイズクラス）。`outputs` を差し替えて
- * 「pinned が 1 本増えると slot が 1 本増える」を対にして見る。
+ * A `relu` chain (the shape does not change, so every intermediate is in the same size class).
  */
 const reluChainModel = (outputs: readonly string[]): PreparedModel =>
   openGraph({
@@ -95,18 +97,62 @@ test("生存を終えた区間は配り直され、総量が増えない", () =>
   assertEquals(workspaceBytes(reluChainModel(["h3"])), 16);
 });
 
+/**
+ * The relu chain behind a dead 260-byte slot, with `h1` and `h3` as graph outputs:
+ * `x[1,65] → relu → b[1,65] → slice(0..2) → a[1,2] → relu → h1 → relu → h2 → relu → h3`.
+ * `b` (260 B) ends its life before `h1` is allocated and only the slice reads it, so later slots can
+ * be placed over its bytes. That region is larger than one 256-byte alignment step, which is what
+ * lets a slot sit at the next aligned offset without growing the region by its full size.
+ */
+const pinnedNeighbourModel = (): PreparedModel =>
+  openGraph({
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["relu", "slice"] },
+    symbols: [],
+    inputs: [{ name: "x", dtype: "f32", shape: [1, 65] }],
+    outputs: ["h1", "h3"],
+    initializers: {},
+    values: {
+      b: { dtype: "f32", shape: [1, 65] },
+      a: { dtype: "f32", shape: [1, 2] },
+      h1: { dtype: "f32", shape: [1, 2] },
+      h2: { dtype: "f32", shape: [1, 2] },
+      h3: { dtype: "f32", shape: [1, 2] },
+    },
+    nodes: [
+      { op: "relu", ins: ["x"], outs: ["b"], attrs: {} },
+      { op: "slice", ins: ["b"], outs: ["a"], attrs: { dim: 1, start: 0, end: 2 } },
+      { op: "relu", ins: ["a"], outs: ["h1"], attrs: {} },
+      { op: "relu", ins: ["h1"], outs: ["h2"], attrs: {} },
+      { op: "relu", ins: ["h2"], outs: ["h3"], attrs: {} },
+    ],
+  });
+
 test("グラフ出力（pinned）は生存を終えず、後続は整列した次の区間へ回る", () => {
-  // h1 も出力にすると、その区間は refs が 0 になっても生存を終えない。h3 は h1 側の領域で
-  // h1 と重なるので 256 整列の次の offset（256）へ置かれ、領域は 264 + h2 の 8 = 272
-  // （offset 整列は device の minStorageBufferOffsetAlignment・仕様既定 256 — ADR 0093 決定 1）。
-  assertEquals(workspaceBytes(reluChainModel(["h1", "h3"])), 272);
+  // Slots by allocation clock, [start, end): b 260 B [0, 2), a 8 B [1, 4), h1 8 B [3, end) pinned,
+  // h2 8 B [5, 7), h3 8 B [6, end) pinned. Read / write pairs (never in one region): b–a, a–h1,
+  // h1–h2, h2–h3.
+  // Order 1 (size, then start: b, a, h1, h2, h3): b opens region 0 (260). a conflicts with b and
+  // opens region 1 (8). h1 goes to region 0 at offset 0 (b is dead: growth 0; region 1 holds a).
+  // h2 conflicts with h1 and goes to region 1 over the dead a (offset 0, growth 0). h3 conflicts with
+  // h2, so only region 0 is a candidate, where the pinned h1 still overlaps it at [0, 8): h3 takes
+  // the next aligned offset 256 and grows the region 260 → 264 by 4 B, less than its own 8 B, so it
+  // stays there = 264 + 8 = 272.
+  // Order 2 (size, then lifetime: b, h1 5, a 3, h2 2, h3 2) puts every slot in the same region at
+  // the same offset = 272; the tie keeps order 1.
+  // Had h1 ended its life, h3 would take offset 0 and the total would be 260 + 8 = 268 (offset
+  // alignment is the device's minStorageBufferOffsetAlignment, spec default 256 — ADR 0093
+  // decision 1).
+  assertEquals(workspaceBytes(pinnedNeighbourModel()), 272);
 });
 
 test("渡された maxBufferSize を中間の領域の上限に使う（実行相と同じ granted 値 — ADR 0093 決定 4）", () => {
-  // 上と同じ形。無指定なら領域の上限は束縛上限と core 既定の大きいほう（256 MiB）なので、h3 は h1 の
-  // 領域の offset 256 に入る = 272。maxBufferSize 256 を渡すと offset 256 + 8 が領域の上限を超え、
-  // h3 は h2 の領域（読む相手なので置けない）でもない 3 本目の領域へ回る = 8 × 3 = 24。
-  const model = reluChainModel(["h1", "h3"]);
+  // The same graph as above. Without maxBufferSize the region limit is the larger of the binding
+  // limit and the core default (256 MiB), so h3 sits at offset 256 of region 0 = 272. With
+  // maxBufferSize 260, offset 256 + 8 = 264 exceeds the region limit; region 1 holds h2, which h3
+  // reads, so h3 opens a third region = 260 + 8 + 8 = 276 (the same in both orders).
+  const model = pinnedNeighbourModel();
   const scenario = (options: Parameters<PreparedModel["estimate"]>[0]) => {
     const report = model.estimate(options);
     assertEquals(
@@ -115,9 +161,9 @@ test("渡された maxBufferSize を中間の領域の上限に使う（実行�
     );
     return report.scenarios[0];
   };
-  assertEquals(scenario({ maxStorageBufferBindingSize: 256 }).workspaceBytes, 272);
+  assertEquals(scenario({ maxStorageBufferBindingSize: 260 }).workspaceBytes, 272);
   assertEquals(
-    scenario({ maxStorageBufferBindingSize: 256, maxBufferSize: 256 }).workspaceBytes,
-    24,
+    scenario({ maxStorageBufferBindingSize: 260, maxBufferSize: 260 }).workspaceBytes,
+    276,
   );
 });

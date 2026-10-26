@@ -160,8 +160,9 @@ test("予算 0 の peakAccountedBytes は常駐の総和 + シナリオ側の最
       scenario.ioBytes +
       scenario.workspaceBytes,
   );
-  // 116（非圧縮常駐）+ 0（state）+ 220（io）+ 280（workspace — 下の「generation なし」参照）
-  assertEquals(report.peakAccountedBytes, 616);
+  // 116 (uncompressed resident) + 0 (state) + 220 (io) + 108 (workspace — see the generation-less
+  // estimate below)
+  assertEquals(report.peakAccountedBytes, 444);
 });
 
 // ---------------------------------------------------------------------------
@@ -171,8 +172,9 @@ test("予算 0 の peakAccountedBytes は常駐の総和 + シナリオ側の最
 test("既定予算の peakAccountedBytes は常駐 + 予算（シナリオが予算に収まる形）", () => {
   const report = plainModel().estimate({ bindings: { T: 7 } });
   assertEquals(report.planBackingBudgetBytes, DEFAULT_PLAN_BACKING_BUDGET_BYTES);
-  // 最大シナリオ 500（io 220 + workspace 280）は 256 MiB の予算に収まるので、勘定側に立つのは
-  // 予算のほう（保持集合はこの量を超えない = 過大側に倒した「勘定に入れた分のピーク」）。
+  // The largest scenario, 328 (io 220 + workspace 108), fits in the 256 MiB budget, so the budget is
+  // what stands on the accounted side (the retained set never exceeds it = an accounted peak that
+  // errs on the large side).
   assertEquals(report.peakAccountedBytes, 116 + DEFAULT_PLAN_BACKING_BUDGET_BYTES);
   assertEquals(report.auxiliaryBytes, undefined, "単体Sessionは補助資源を報告しない");
 });
@@ -188,13 +190,14 @@ test("予算はシナリオごとの数字を動かさない（効くのはピ�
 test("予算が最大シナリオより小さいときは最大シナリオが立つ（max の切り替わり）", () => {
   const peak = (planBackingBudgetBytes: number): number =>
     plainModel().estimate({ bindings: { T: 7 }, planBackingBudgetBytes }).peakAccountedBytes;
-  // 最大シナリオは 500（io 220 + workspace 280）。新規 1 本だけで予算を超える形は他を全て
-  // 退役させて 1 本だけ持つので、予算より大きいシナリオはそのまま勘定側に立つ。
-  assertEquals(peak(0), 616);
-  assertEquals(peak(499), 616);
-  assertEquals(peak(500), 616);
-  // 500 を超えた予算からは予算側が立つ（境界の 1 バイトで切り替わる）。
-  assertEquals(peak(501), 116 + 501);
+  // The largest scenario is 328 (io 220 + workspace 108). A new backing that alone exceeds the
+  // budget retires all the others and is kept alone, so a scenario larger than the budget stands on
+  // the accounted side as it is.
+  assertEquals(peak(0), 444);
+  assertEquals(peak(327), 444);
+  assertEquals(peak(328), 444);
+  // From a budget above 328 the budget stands (it switches at the boundary byte).
+  assertEquals(peak(329), 116 + 329);
 });
 
 test("報告は使った予算をそのまま載せる（呼び手が組み直さずに読める）", () => {
@@ -225,7 +228,7 @@ test("予算の値域は createSessionFromContainer と同じ門（非負の安�
   // 対照: 0 は正当値（従来の容量 1）— 上の 4 本が「何を渡しても落ちる」ではないことの証明。
   assertEquals(
     plainModel().estimate({ bindings: { T: 7 }, planBackingBudgetBytes: 0 }).peakAccountedBytes,
-    616,
+    444,
   );
 });
 
@@ -709,9 +712,10 @@ test("数値で固定した chunk 行が context の許す行数に無い形は�
 
 test("generation なしの見積りはシナリオ 1 本（io / 中間の導出は従来と同じ）", () => {
   const report = plainModel().estimate({ bindings: { T: 7 } });
-  // x[7,4]=112 + h[7,3]=84 + g[2,3]=24 = 220 / 中間は h と g が同時生存（どちらもグラフ出力）で
-  // 1 領域に h [0,84) + g [256,280)（offset は 256 整列 — ADR 0093 決定 1）= 280
-  assertEquals(report.scenarios, [{ name: "run", ioBytes: 220, workspaceBytes: 280 }]);
+  // x[7,4]=112 + h[7,3]=84 + g[2,3]=24 = 220 / the intermediates h and g live together (both are
+  // graph outputs). Behind h, g would sit at offset 256 (256-aligned — ADR 0093 decision 1) and grow
+  // h's region by 196 B, not less than g's own 24 B, so g opens a region of its own: 84 + 24 = 108.
+  assertEquals(report.scenarios, [{ name: "run", ioBytes: 220, workspaceBytes: 108 }]);
 });
 
 test("chunk 行の記号を options.bindings で受けない（束縛点は chunkLength と decode の 1）", () => {
@@ -930,14 +934,21 @@ const chainGraph = (outputs: readonly string[]): DeclarationJson => ({
   ],
 });
 
-/** 3 本に分岐してから畳む形（同時生存が 4 本になる）。 */
+/**
+ * 3 本に分岐してから畳む形（同時生存が 4 本になる）。
+ * A second graph output z (1,024 B) is written after the fan-out: its region is free before z is
+ * born, so the fan-out's slots can stack in it — this is where the read / write rule costs a slot.
+ */
 const fanOutGraph = (): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
   requires: { ops: ["neg", "add"] },
   symbols: [],
-  inputs: [{ name: "x", dtype: "f32", shape: [64] }],
-  outputs: ["y"],
+  inputs: [
+    { name: "x", dtype: "f32", shape: [64] },
+    { name: "w", dtype: "f32", shape: [256] },
+  ],
+  outputs: ["y", "z"],
   initializers: {},
   values: {
     t1: { dtype: "f32", shape: [64] },
@@ -945,6 +956,7 @@ const fanOutGraph = (): DeclarationJson => ({
     t3: { dtype: "f32", shape: [64] },
     s: { dtype: "f32", shape: [64] },
     y: { dtype: "f32", shape: [64] },
+    z: { dtype: "f32", shape: [256] },
   },
   nodes: [
     { op: "neg", ins: ["x"], outs: ["t1"], attrs: {} },
@@ -952,6 +964,7 @@ const fanOutGraph = (): DeclarationJson => ({
     { op: "neg", ins: ["x"], outs: ["t3"], attrs: {} },
     { op: "add", ins: ["t1", "t2"], outs: ["s"], attrs: {} },
     { op: "add", ins: ["s", "t3"], outs: ["y"], attrs: {} },
+    { op: "neg", ins: ["w"], outs: ["z"], attrs: {} },
   ],
 });
 
@@ -961,10 +974,14 @@ test("直列チェーンのピークは同時生存 2 本ぶん（消費が尽�
 });
 
 test("幅広 fan-out は同時生存 4 本ぶんに、読み書きの同居禁止で 1 本が上乗せされる", () => {
-  // s を確保した時点で t1 / t2 / t3 / s の 4 本が同時生存（生存ピーク 1024）。加えて s は
-  // t1 / t2 を読む dispatch が書くので同じ領域に置けず、y も s と t3 を読むので両方の領域を
-  // 避ける = 領域 3 本（768 + 256 + 256）= 1280（usage scope の制約 — ADR 0093 決定 1）。
-  assertEquals(runScenario(openGraph(fanOutGraph()).estimate()).workspaceBytes, 1280);
+  // Intervals: t1 [0,4) / t2 [1,5) / t3 [2,8) / s [3,7) / y [6,end) / z [9,end), 256 B each but z
+  // 1,024 B. When s is allocated, t1 / t2 / t3 / s live together (4 × 256 = 1,024); the live peak
+  // is y + z = 1,280. Both orders place z first (region 0, 1,024 B), and t1 / t2 / t3 stack in it at
+  // 0 / 256 / 512 without growing it (z is not born yet). s would fit at 768, but the dispatch that
+  // writes s reads t1 / t2, so s opens region 1; y reads s and t3, so it avoids both regions and
+  // opens region 2: 1,024 + 256 + 256 = 1,536 — one slot over the live peak (the usage-scope rule,
+  // ADR 0093 decision 1; without it s takes 768 and the total is 1,280).
+  assertEquals(runScenario(openGraph(fanOutGraph()).estimate()).workspaceBytes, 1536);
 });
 
 test("グラフ出力は消費が尽きても pinned のまま（解放されない）", () => {
@@ -974,10 +991,10 @@ test("グラフ出力は消費が尽きても pinned のまま（解放されな
 });
 
 test("initializer とグラフ入力は中間ピークに数えない（重み・io 側の勘定）", () => {
-  // matmul の h（T=7 → 84）と embedding の g（24 — 256 整列の次の区間）だけが中間。
-  // x / w / emb / idx は数えない
+  // Only matmul's h (T=7 → 84) and embedding's g (24, in a region of its own — see the
+  // generation-less estimate) are intermediates. x / w / emb / idx are not counted.
   const report = plainModel().estimate({ bindings: { T: 7 } });
-  assertEquals(runScenario(report).workspaceBytes, 280);
+  assertEquals(runScenario(report).workspaceBytes, 108);
 });
 
 test("配り直しはサイズに依らない（解放済みの 8 バイトの区間を 4 バイトの出力が掴む）", () => {
@@ -1295,8 +1312,9 @@ describe("分解 attention の中間（融合後に束縛するバッファで�
       // 1 行 = 4×4200×4 = 67,200B → 上限に 1,997 行入るので 2 枚（1024 + 1024 行）に等分。
       // 一時 S / mask 加算後 / P は各 4×1024×4200×4 = 68,812,800B で、同時生存は 2 本まで
       // （読む側と書く側は同じ dispatch なので別領域 — 2 枚目は 1 枚目の区間を配り直す）。
-      // 出力 y = 4×2048×8×4 = 262,144B は P と同じ dispatch で書かれるので P と別領域
-      // （mask 加算後の領域の 256B 整列した後ろ）。
+      // The output y = 4×2048×8×4 = 262,144B is written by the dispatch that reads P, so it avoids
+      // P's region; behind the masked scores (at 68,812,800B, already 256B-aligned) it would grow that
+      // region by its full size, so it opens a region of its own.
       assertEquals(scenario.workspaceBytes, 68_812_800 * 2 + 262_144);
     });
   });
@@ -1360,12 +1378,14 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
 
   it("a8 は ①QK の量子化の一時（qq / qs / kq / ks）をノード末尾まで数える", () => {
     // qq 2×8×4 = 64・qs 2×8×4 = 64・kq 2×6×4 = 48・ks 2×6×4 = 48（③PV は N % 4 != 0 で f32 のまま）。
-    // ①QK がこの 4 本を読んで S を書くので S とは別の領域。行統計・y とは衝突しないので y の領域の後ろへ
-    // 256B 整列で並ぶ: y 256 + qq（256〜）+ qs（512〜）+ kq（768〜）+ ks（1,024〜1,072）= 1,072B。
-    // S の領域 384B と行統計の領域 128B を足して 1,584B。
+    // All seven slots (y, S, row statistics and the four) live together until the node's last
+    // dispatch, so the total is their sum. ①QK reads the four and writes S, so they cannot share S's
+    // region. Behind y or the row statistics each would sit at a 256 B-aligned offset and grow that
+    // region by at least its own size, so each opens a region of its own (both orders):
+    // S 384 + y 256 + row statistics 128 + qq 64 + qs 64 + kq 48 + ks 48 = 992 B.
     assertEquals(
       runScenario(fusedAttentionModel().estimate({ attentionCompute: "a8" })).workspaceBytes,
-      384 + 1072 + 128,
+      384 + 256 + 128 + 64 + 64 + 48 + 48,
     );
   });
 
@@ -1499,17 +1519,18 @@ describe("the online attention kernel counts the a8 quantisation temporaries and
   const NONE = { attentionCompute: "a8", attentionScoreStorage: "none" } as const;
   const SUBGROUPS = { subgroups: true, maxComputeWorkgroupStorageSize: 49152 };
 
-  it("one window: y 4,096 B + Vᵀ 4,096 B in one region, the six quantised inputs of the kernel in another", () => {
+  it("one window: y 4,096 B, Vᵀ 4,096 B and each quantised input of the kernel in a region of its own", () => {
     // Temporaries: qq 2×8×64 = 1,024 / qs 2×8×4 = 64 / kq 1,024 / ks 64 / vt 2×64×8×4 = 4,096 /
     // vq 2×64×8 = 1,024 / vs 2×64×4 = 512; output y 2×8×64×4 = 4,096. No S, no row statistics.
     // The kernel reads qq / kq / vq / qs / ks / vs and writes y, so those six cannot share y's
     // region; vt is read by Vᵀ's quantisation, which writes vq / vs, so it cannot share theirs.
-    // Region 0: y [0, 4,096) + vt [4,096, 8,192) = 8,192 B. Region 1 (size order, 256 B aligned):
-    // qq [0, 1,024) + kq [1,024, 2,048) + vq [2,048, 3,072) + vs [3,072, 3,584) + qs [3,584, 3,648)
-    // + ks [3,840, 3,904) = 3,904 B.
+    // All eight live together until the kernel's dispatch. In size order (both orders agree) each
+    // slot could only stack behind a live one, growing that region by at least its own size, so each
+    // opens a region of its own: the total is the live peak,
+    // y 4,096 + vt 4,096 + qq 1,024 + kq 1,024 + vq 1,024 + vs 512 + qs 64 + ks 64 = 11,904 B.
     assertEquals(
       runScenario(onlineModel().estimate({ ...NONE, attentionDevice: SUBGROUPS })).workspaceBytes,
-      8192 + 3904,
+      4096 + 4096 + 1024 + 1024 + 1024 + 512 + 64 + 64,
     );
   });
 
@@ -1566,9 +1587,12 @@ describe("行ブロックの予算（attentionRowBlockMaxBytes）は実行と同
       );
       // 1 行 = 4×4200×4 = 67,200B → 予算 67,108,864B に 998 行入るので ceil(2048 / 998) = 3 枚
       // （683 + 683 + 682 行）。一時は最大 4×683×4200×4 = 45,897,600B で、同時生存は 2 本（2 領域）。
-      // 出力 y 262,144B は mask 加算後の領域の 256B 整列した後ろ（45,897,600B は 256 の倍数でないので
-      // 45,897,728B から）に置かれる。予算なしの 68,812,800 × 2 + 262,144 = 137,887,744B から縮む。
-      assertEquals(scenario.workspaceBytes, 45_897_600 + 45_897_728 + 262_144);
+      // The output y 262,144B is written by the dispatch that reads P, so it avoids P's region; behind
+      // the masked scores it would start at the 256B-aligned 45,897,728B (45,897,600B is not a
+      // multiple of 256) and grow that region by 262,272B, more than its own size, so it opens a
+      // region of its own (both orders). Down from 68,812,800 × 2 + 262,144 = 137,887,744B without
+      // the budget.
+      assertEquals(scenario.workspaceBytes, 45_897_600 * 2 + 262_144);
     });
 
     it("予算なしの値は予算の欄を足す前と同じ（既定は不変）", () => {

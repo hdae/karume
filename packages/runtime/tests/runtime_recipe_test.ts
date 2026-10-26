@@ -6,8 +6,13 @@
  * 見ているのは「{@link StepRecipe.outputs} の列と dispatch の束縛から、確保・retain・解放と
  * 読み書きの役割が計画（src/runtime/transient-plan.ts — ADR 0093）へ正しく写るか」— 実 GPU の
  * footprint 門（tests/gpu_plan_backing_test.ts が「backed の領域総和 = ミス run の領域確保」を
- * 突き合わせる）とは別の角度で、**期待値を手計算で固定する**。配置そのものの性質（first-fit・
- * usage scope の別領域・上限）は tests/runtime_transient_plan_test.ts が持つ。
+ * 突き合わせる）とは別の角度で、**期待値を手計算で固定する**。
+ * The placement rule itself (least region growth in two orders, usage scope in separate regions,
+ * limits) is covered by tests/runtime_transient_plan_test.ts. The hand derivations here follow it:
+ * each slot (real size descending) goes to the conflict-free region it grows least (equal growth ->
+ * lower region index), a new region opens when every candidate would grow by the slot's full size,
+ * and of the two orders (equal sizes by allocation start / by longer lifetime) the smaller total wins
+ * (order 1 on a tie).
  *
  * ADR 0068 決定 1 の受入条件「単一出力ノードのレシピ表現は列化前と同値」がここの 1 本目。
  */
@@ -118,8 +123,11 @@ test("単一出力ステップの確保簿記（alloc / alias / pin / 消費）�
     [[], [], ["a"], [], []],
   );
 
-  // 計画（256 整列）: a は c の確保より後（c を書く dispatch が a を読む）に生存を終えるので
-  // a と c は重なり、c が掴めるのは消費者ゼロで先に生存を終えた b の区間（offset 256）。
+  // Plan (offsets aligned to 256): a ends its life after c is allocated (step 2 releases a after
+  // allocating c), so a and c overlap, while b (no consumer) has already ended. Stacking on a would
+  // grow region 0 by 256 + 64 >= 64, so the second slot opens region 1 and the third takes its bytes
+  // with growth 0. Order 1 (a, b, c): b opens region 1, c lands on b's range. Order 2 (a, c, b by
+  // lifetime 4 / 2 / 1): c opens region 1, b lands on c. Both total 128; the tie keeps order 1.
   const plan = planRecipes(
     [
       step([alloc("a", 64, 1)]),
@@ -129,14 +137,18 @@ test("単一出力ステップの確保簿記（alloc / alias / pin / 消費）�
     ],
     CORE_TRANSIENT_LIMITS,
   );
-  assertEquals(plan.regions, [256 + 64]);
+  assertEquals(plan.regions, [64, 64]);
   assertEquals(
     plan.steps.map((assigned) => assigned.outputs),
     [[0], [1], [2], [undefined]],
   );
   assertEquals(
-    plan.slots.map((slot) => slot.offset),
-    [0, 256, 256],
+    plan.slots.map((slot) => [slot.region, slot.offset]),
+    [
+      [0, 0],
+      [1, 0],
+      [1, 0],
+    ],
   );
   assertEquals(plan.pinned, new Set([2]));
   assertEquals(plan.sharedSlots, 1, "c が b のバイトを配り直されている");
@@ -153,9 +165,10 @@ test("単一出力ステップの確保簿記（alloc / alias / pin / 消費）�
  * exp(nv) → e[3,2]（グラフ出力）
  * ```
  *
- * MUST: 2 本の出力は**同じバイト数**（どちらも 3·2 語の 4 バイト要素 = 24）— 総バイト数では
- * 取り違えに気づけない。だから **どの offset を掴むか**まで期待値に置く（`e` が掴むのは消費済みの
- * `v` の区間で、pin された添字 `i` の区間ではない）。
+ * MUST: the two outputs have the **same byte count** (both 3·2 words of 4-byte elements = 24) — the
+ * byte total cannot tell them apart. So the expectation pins **which byte range (region, offset)
+ * each slot takes** (`e` takes the range of the consumed `v`, not the range of the pinned index
+ * `i`).
  */
 test("topk の実形（値 + 添字・同一サイズ）の計画が手計算どおり", () => {
   const bytes = 3 * 2 * 4;
@@ -168,10 +181,20 @@ test("topk の実形（値 + 添字・同一サイズ）の計画が手計算ど
     CORE_TRANSIENT_LIMITS,
   );
 
-  // 実寸 24 は 256 整列の offset で並ぶ: v 0 / i 256 / nv 512（v が生きている間）/ e 0（v の跡）。
+  // Intervals: v [0, 3), i [1, end), nv [2, 5), e [4, end). Stacking a 24-byte slot on a live one
+  // grows a region by 256 + 24 - 24 = 256 >= 24, so v, i and nv each open a region; e starts after
+  // v ends, so it takes v's range in region 0 with growth 0 (i and nv are still live).
+  // Order 1 (v, i, nv, e) gives v 0 / i 1 / nv 2 / e 0 (regions, all at offset 0); order 2 (i, v,
+  // nv, e by lifetime 5 / 3 / 3 / 2) puts e on v as well. Both total 3 · 24 = 72; the tie keeps
+  // order 1.
   assertEquals(
-    plan.slots.map((slot) => slot.offset),
-    [0, 256, 512, 0],
+    plan.slots.map((slot) => [slot.region, slot.offset]),
+    [
+      [0, 0],
+      [1, 0],
+      [2, 0],
+      [0, 0],
+    ],
   );
   assertEquals(
     plan.steps.map((assigned) => assigned.outputs),
@@ -487,7 +510,17 @@ test("同時生存する入れ子寿命の一時は 3 本とも別区間を掴�
   // 確保順は「境界ごとに宣言順」— 境界 0 で id 0 / id 2 が区間 0 / 1 を取り、境界 1 で
   // 生える id 1 が区間 2 になる（宣言順 = 区間順ではない）。
   assertEquals(plan.steps[0].temps, [0, 2, 1]);
-  assertEquals(new Set(plan.slots.map((slot) => slot.offset)).size, 3, "offset が全て異なる");
+  // Intervals [0, 5) / [1, 4) / [2, 3): stacking on a live slot grows a region by 256 + 64 - 64 =
+  // 256 >= 64, so each slot opens its own region (both orders give the same order and total 192).
+  assertEquals(
+    plan.slots.map((slot) => [slot.region, slot.offset]),
+    [
+      [0, 0],
+      [1, 0],
+      [2, 0],
+    ],
+    "each temporary holds its own byte range",
+  );
 });
 
 test("同一境界で解放された一時のバイトは、次のステップの一時が配り直される", () => {
@@ -506,10 +539,17 @@ test("同一境界で解放された一時のバイトは、次のステップ�
   );
 
   // 2 本目のステップは新しいバイトを生やさない（領域は 2 本ぶんのまま）。
-  assertEquals(plan.regions, [64 + 256]);
+  // Intervals [0, 3) / [1, 2) / [4, 5): the second temporary of step 0 overlaps the first (stacking
+  // grows by 256 >= 64) and opens region 1; step 1's temporary overlaps neither, both regions give
+  // growth 0 and the lower index wins. Both orders take the slots in the same order (total 128).
+  assertEquals(plan.regions, [64, 64]);
   assertEquals(plan.steps[0].temps, [0, 1]);
   assertEquals(plan.steps[1].temps, [2]);
-  assertEquals(plan.slots[2].offset, 0, "first-fit は空いた先頭の区間を配る");
+  assertEquals(
+    [plan.slots[2].region, plan.slots[2].offset],
+    [0, 0],
+    "equal growth hands out the freed range of the lowest region",
+  );
   assertEquals(plan.sharedSlots, 1);
 });
 
@@ -534,8 +574,10 @@ test("出力と一時は同じ領域を共有し、pin された区間だけが�
     ],
     CORE_TRANSIENT_LIMITS,
   );
-  assertEquals(pinnedPlan.regions, [64 + 256]);
-  assertEquals(pinnedPlan.slots[1].offset, 256);
+  // y [0, end) is still live when the temporary [2, 3) comes: stacking on it grows region 0 by
+  // 256 >= 64, so the temporary opens region 1 (both orders: y first, total 128).
+  assertEquals(pinnedPlan.regions, [64, 64]);
+  assertEquals([pinnedPlan.slots[1].region, pinnedPlan.slots[1].offset], [1, 0]);
   assertEquals(pinnedPlan.pinned, new Set([0]));
 });
 

@@ -146,10 +146,17 @@ test("同じ dispatch で読まれる入力と書かれる出力は別の領域�
 });
 
 test("読み同士は同じ領域を共有できる（3 入力の add でも領域は 2 本で足りる）", () => {
+  // a, b and c (8 B each, all read by d) are born after x (24 B) is dead, so they fit into x's bytes
+  // at offsets 0 / 8 / 16 without growing its region. d conflicts with a, b and c and opens a second
+  // region; y (4 B, written while x is read and read while a / b / c are written) joins d's region
+  // (their lifetimes do not overlap). Both orders place x, a, b, c, d, y and give [24, 8] = the live
+  // peak at d's allocation. Two regions are possible only when a, b and c share one.
   const program: TransientProgram = [
-    node("a", 8, [], 1),
-    node("b", 8, [], 1),
-    node("c", 8, [], 1),
+    node("x", 24, [], 1),
+    node("y", 4, ["x"], 3),
+    node("a", 8, ["y"], 1),
+    node("b", 8, ["y"], 1),
+    node("c", 8, ["y"], 1),
     node("d", 8, ["a", "b", "c"], 0, { pinned: true }),
   ];
   const plan = planTransients(program, LOOSE);
