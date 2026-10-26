@@ -353,8 +353,8 @@ export type EstimateOptions = {
    * Used for the per-slot limit check of state slots (**paired** with `maxStorageBufferBindingSize`
    * — the real construction checks both: ADR 0066 addendum 5) and for the region limit of
    * intermediate packing (packed with the same granted value as the execution phase — ADR 0093
-   * decision 4). The latter can move `workspaceBytes` (how first-fit splits regions depends on the
-   * limit). There is no field for a device value of the offset alignment, so it packs with the
+   * decision 4). The latter can move `workspaceBytes` (how the placement splits regions depends on
+   * the limit). There is no field for a device value of the offset alignment, so it packs with the
    * WebGPU core default (256).
    *
    * The field is optional so as not to break callers without a device (estimates that hold only a
@@ -1289,7 +1289,7 @@ const fusedAttentionProgram = (
  * region limit is `maxBufferSize` (`EstimateOptions.maxBufferSize`). Only when the latter is
  * unspecified is it filled with the larger of the binding limit and the core default (binding limit
  * ≤ `maxBufferSize` is an invariant of the spec). The granted values passed in are used because
- * how first-fit splits regions changes with the limit, and the sum would disagree with the execution
+ * how the placement splits regions changes with the limit, and the sum would disagree with the execution
  * phase (which plans with the granted values) (ADR 0093 decision 4).
  * MUST: the bookkeeping unit is **the slot, not the value name** (an alias extends its root's live
  * range).

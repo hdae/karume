@@ -157,6 +157,69 @@ test("読み同士は同じ領域を共有できる（3 入力の add でも領�
   assertEquals(plan.regions.length, 2);
 });
 
+test("a slot goes to the region it grows least, using a later region's free bytes instead of growing an earlier one", () => {
+  // a (100 B) lives to the end. b (60 B) is written while a is read, so it gets its own region. c (40 B)
+  // is born after b is released and lives with a: a's region would grow by 40 (offset 100), b's region
+  // holds it at offset 0 without growing. First-fit grew a's region (total 204 = 140 + 60 + 4).
+  const program: TransientProgram = [
+    node("a", 100, [], 2),
+    node("b", 60, ["a"], 1),
+    node("d", 4, ["b"], 1),
+    node("c", 40, ["d"], 1),
+    node("e", 4, ["a", "c"], 0, { pinned: true }),
+  ];
+  const plan = planTransients(program, LOOSE);
+  assertWellFormed(plan, program, LOOSE);
+  const [a] = plan.steps[0].outputs,
+    [b] = plan.steps[1].outputs,
+    [c] = plan.steps[3].outputs;
+  assert(a !== undefined && b !== undefined && c !== undefined);
+  assertEquals(plan.slots[c], { region: plan.slots[b].region, offset: 0, byteLength: 40 });
+  // The live peak is at d's allocation (a, b and d live together: 100 + 60 + 4); the total meets it.
+  assertEquals(plan.peakLiveBytes, 164);
+  assertEquals(plan.regions, [100, 60, 4]);
+});
+
+test("a slot that would grow every region by its full size opens a new region instead of growing one", () => {
+  // a and b (8 B each) live together and c reads both. Stacking b at offset 8 of a's region and opening
+  // a new region both cost 8 bytes, so the planner takes the new region, which has no read / write
+  // conflicts.
+  const program: TransientProgram = [
+    node("a", 8, [], 1),
+    node("b", 8, [], 1),
+    node("c", 4, ["a", "b"], 0, { pinned: true }),
+  ];
+  const plan = planTransients(program, LOOSE);
+  assertWellFormed(plan, program, LOOSE);
+  const [a] = plan.steps[0].outputs,
+    [b] = plan.steps[1].outputs;
+  assert(a !== undefined && b !== undefined);
+  assert(plan.slots[a].region !== plan.slots[b].region, "b was stacked in a's region");
+  assertEquals(plan.regions, [8, 8, 4]);
+  assertEquals(plan.totalBytes, plan.peakLiveBytes);
+});
+
+test("when the order of equal sizes changes the total, the smaller placement (longer-lived first) is kept", () => {
+  // a → b → c (8 B each; neighbours are read and written together, so they never share a region) →
+  // d (12 B, a graph output). Intervals: a [0,2), b [1,4), c [3,6), d [5,end). In allocation order
+  // (d, a, b, c) a joins d's region and b and c open one region each: 28. Longer-lived first
+  // (d, b, c, a) puts b in d's region and a in c's region: 20 = the live peak (c + d).
+  const program: TransientProgram = [
+    node("a", 8, [], 1),
+    node("b", 8, ["a"], 1),
+    node("c", 8, ["b"], 1),
+    node("d", 12, ["c"], 0, { pinned: true }),
+  ];
+  const plan = planTransients(program, LOOSE);
+  assertWellFormed(plan, program, LOOSE);
+  const [a, b, c, d] = program.map((_, index) => plan.steps[index].outputs[0]);
+  assert(a !== undefined && b !== undefined && c !== undefined && d !== undefined);
+  assertEquals(plan.slots[b].region, plan.slots[d].region);
+  assertEquals(plan.slots[a].region, plan.slots[c].region);
+  assertEquals(plan.regions, [12, 8]);
+  assertEquals(plan.totalBytes, plan.peakLiveBytes);
+});
+
 test("別名（reshape）は確保を出さず、根の slot の生存を延ばす", () => {
   const program: TransientProgram = [
     node("a", 8, [], 1),

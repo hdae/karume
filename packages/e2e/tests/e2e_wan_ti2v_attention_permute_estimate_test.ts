@@ -7,9 +7,10 @@
  * is at most that of the same graph with a zero-dispatch reshape between each of those permutes and
  * its attention (the match broken, the permutes back as nodes; the values and the kernels stay the
  * graph's). The region total is what the slot backing allocates (the estimate equals the slot table —
- * packages/runtime/tests/gpu_estimate_test.ts) and comes from the first-fit placement of
- * `planTransients`, which other live intervals can move either way while the live peak stays put —
- * the reason the permute after the attention stays a node (ADR 0040 addendum of 2026-10-25).
+ * packages/runtime/tests/gpu_estimate_test.ts) and comes from the placement of `planTransients`
+ * (ADR 0093 addendum 2026-10-26), which other live intervals can move either way while the live
+ * peak stays put — the reason the permute after the attention stays a node (ADR 0040 addendum of
+ * 2026-10-25).
  *
  * MUST: the asset is `models/karume-wan2.2/` (untracked local asset); where it is missing the case
  * SKIPs explicitly with a reason (ADR 0005).
