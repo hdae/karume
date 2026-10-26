@@ -973,14 +973,16 @@ test("直列チェーンのピークは同時生存 2 本ぶん（消費が尽�
   assertEquals(runScenario(openGraph(chainGraph(["y"])).estimate()).workspaceBytes, 512);
 });
 
-test("幅広 fan-out は同時生存 4 本ぶんに、読み書きの同居禁止で 1 本が上乗せされる", () => {
+test("a wide fan-out totals 1,536 B: the read / write rule costs one 256 B slot over the live peak of 1,280 B", () => {
   // Intervals: t1 [0,4) / t2 [1,5) / t3 [2,8) / s [3,7) / y [6,end) / z [9,end), 256 B each but z
   // 1,024 B. When s is allocated, t1 / t2 / t3 / s live together (4 × 256 = 1,024); the live peak
-  // is y + z = 1,280. Both orders place z first (region 0, 1,024 B), and t1 / t2 / t3 stack in it at
-  // 0 / 256 / 512 without growing it (z is not born yet). s would fit at 768, but the dispatch that
-  // writes s reads t1 / t2, so s opens region 1; y reads s and t3, so it avoids both regions and
-  // opens region 2: 1,024 + 256 + 256 = 1,536 — one slot over the live peak (the usage-scope rule,
-  // ADR 0093 decision 1; without it s takes 768 and the total is 1,280).
+  // is y + z = 1,280. Both orders place z first (region 0, 1,024 B), and t1 / t2 / t3 stack in it
+  // without growing it (z is not born yet): at 0 / 256 / 512 in order 1, and with t3 (the longest
+  // lived) first at 0, then t1 / t2 at 256 / 512, in order 2. s would fit at 768, but the dispatch
+  // that writes s reads t1 / t2, so s opens region 1; y reads s and t3, so it avoids both regions
+  // and opens region 2: 1,024 + 256 + 256 = 1,536 in both orders (the tie keeps order 1) — one slot
+  // over the live peak (the usage-scope rule, ADR 0093 decision 1; without it s takes 768 and the
+  // total is 1,280).
   assertEquals(runScenario(openGraph(fanOutGraph()).estimate()).workspaceBytes, 1536);
 });
 
@@ -1378,10 +1380,9 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
 
   it("a8 は ①QK の量子化の一時（qq / qs / kq / ks）をノード末尾まで数える", () => {
     // qq 2×8×4 = 64・qs 2×8×4 = 64・kq 2×6×4 = 48・ks 2×6×4 = 48（③PV は N % 4 != 0 で f32 のまま）。
-    // All seven slots (y, S, row statistics and the four) live together until the node's last
-    // dispatch, so the total is their sum. ①QK reads the four and writes S, so they cannot share S's
-    // region. Behind y or the row statistics each would sit at a 256 B-aligned offset and grow that
-    // region by at least its own size, so each opens a region of its own (both orders):
+    // All seven slots (y, S, row statistics and the four) are live at once (nested lifetimes inside
+    // the node), so the live peak is their sum and no placement is smaller; the estimate shows only
+    // the total, which meets it:
     // S 384 + y 256 + row statistics 128 + qq 64 + qs 64 + kq 48 + ks 48 = 992 B.
     assertEquals(
       runScenario(fusedAttentionModel().estimate({ attentionCompute: "a8" })).workspaceBytes,
@@ -1519,14 +1520,13 @@ describe("the online attention kernel counts the a8 quantisation temporaries and
   const NONE = { attentionCompute: "a8", attentionScoreStorage: "none" } as const;
   const SUBGROUPS = { subgroups: true, maxComputeWorkgroupStorageSize: 49152 };
 
-  it("one window: y 4,096 B, Vᵀ 4,096 B and each quantised input of the kernel in a region of its own", () => {
+  it("one window: the total is the live peak of y 4,096 B, Vᵀ 4,096 B and the kernel's six quantised inputs", () => {
     // Temporaries: qq 2×8×64 = 1,024 / qs 2×8×4 = 64 / kq 1,024 / ks 64 / vt 2×64×8×4 = 4,096 /
     // vq 2×64×8 = 1,024 / vs 2×64×4 = 512; output y 2×8×64×4 = 4,096. No S, no row statistics.
     // The kernel reads qq / kq / vq / qs / ks / vs and writes y, so those six cannot share y's
     // region; vt is read by Vᵀ's quantisation, which writes vq / vs, so it cannot share theirs.
-    // All eight live together until the kernel's dispatch. In size order (both orders agree) each
-    // slot could only stack behind a live one, growing that region by at least its own size, so each
-    // opens a region of its own: the total is the live peak,
+    // All eight are live at once (nested lifetimes inside the node), so the live peak is their sum
+    // and no placement is smaller; the estimate shows only the total, which meets it:
     // y 4,096 + vt 4,096 + qq 1,024 + kq 1,024 + vq 1,024 + vs 512 + qs 64 + ks 64 = 11,904 B.
     assertEquals(
       runScenario(onlineModel().estimate({ ...NONE, attentionDevice: SUBGROUPS })).workspaceBytes,

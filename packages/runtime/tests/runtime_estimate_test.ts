@@ -60,24 +60,28 @@ const chainModel = (): PreparedModel =>
     ],
   );
 
-test("中間の総量は領域の総和（読み書きの同居禁止で領域が割れ、配り直しはサイズに依らない）", () => {
-  // 8（h1）+ 12（h2）+ 4（h3）。h2 は h1 を読む dispatch が書くので別領域（12 / 8）。h3 は h2 を
-  // 読むので h2 の領域には置けず、生存を終えた h1 の区間（8 バイト）を掴む = 12 + 8 = 20
-  // （旧 exact-size プールでは 3 本累積の 24 だった）。
+test("the intermediate total is the sum of the regions, and a freed range is handed out regardless of size", () => {
+  // 8 (h1) + 12 (h2) + 4 (h3); intervals h1 [0,2), h2 [1,4), h3 [3,end). h2 (largest) opens
+  // region 0. h1 overlaps h2, and behind h2 it would start at the aligned offset 256 and grow
+  // region 0 by 256 + 8 - 12 = 252, more than its own 8 B, so it opens region 1 (growth decides;
+  // the read / write rule would also keep it out). h3 reads h2 and takes h1's dead 8-byte range in
+  // region 1 (growth 0; behind h2 it would grow region 0 by 248) = 12 + 8 = 20, the live peak (the
+  // old exact-size pool summed all three to 24).
   assertEquals(workspaceBytes(chainModel()), 20);
 });
 
 /**
- * A `relu` chain (the shape does not change, so every intermediate is in the same size class).
+ * A `relu` chain with `h3` as the graph output (the shape does not change, so every intermediate is
+ * in the same size class).
  */
-const reluChainModel = (outputs: readonly string[]): PreparedModel =>
+const reluChainModel = (): PreparedModel =>
   openGraph({
     format: "karume-ir",
     version: 2,
     requires: { ops: ["relu"] },
     symbols: [],
     inputs: [{ name: "x", dtype: "f32", shape: [1, 2] }],
-    outputs: [...outputs],
+    outputs: ["h3"],
     initializers: {},
     values: {
       h1: { dtype: "f32", shape: [1, 2] },
@@ -92,9 +96,10 @@ const reluChainModel = (outputs: readonly string[]): PreparedModel =>
   });
 
 test("生存を終えた区間は配り直され、総量が増えない", () => {
-  // 中間 3 本（8B × 3）。h2 は h1 を読むので別領域、h3 は h2 を読むので h1 側の領域へ戻り、
-  // 生存を終えた h1 の区間を掴む = 領域 2 本 × 8 = 16。
-  assertEquals(workspaceBytes(reluChainModel(["h3"])), 16);
+  // Three 8 B intermediates; intervals h1 [0,2), h2 [1,4), h3 [3,end). h2 overlaps h1, and behind
+  // it would grow region 0 by 256 + 8 - 8 = 256, not less than its own 8 B, so it opens region 1.
+  // h3 reads h2 and takes h1's dead range in region 0 (growth 0) = 2 regions × 8 = 16.
+  assertEquals(workspaceBytes(reluChainModel()), 16);
 });
 
 /**

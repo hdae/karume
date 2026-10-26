@@ -104,10 +104,48 @@ const assertWellFormed = (
       );
     }
   }
+  // Usage scope, resolved from the program through the plan's per-step slots (not from the
+  // planner's conflict lists): a slot read and a slot written by the same dispatch never share a
+  // region. An alias output resolves to its source's slot, a name without a slot (graph input,
+  // weight) to nothing.
+  const env = new Map<string, number>();
+  program.forEach((step, index) => {
+    step.outputs.forEach((output, position) => {
+      const slot =
+        output.kind === "alias"
+          ? output.source === undefined
+            ? undefined
+            : env.get(output.source)
+          : plan.steps[index].outputs[position];
+      if (slot === undefined) env.delete(output.name);
+      else env.set(output.name, slot);
+    });
+    const slotOf = (ref: TransientRef): number | undefined =>
+      ref.kind === "temp" ? plan.steps[index].temps[ref.id] : env.get(ref.name);
+    step.dispatches.forEach((d, dispatchIndex) => {
+      for (const read of d.reads) {
+        for (const write of d.writes) {
+          const r = slotOf(read),
+            w = slotOf(write);
+          if (r === undefined || w === undefined || r === w) continue;
+          assert(
+            plan.slots[r].region !== plan.slots[w].region,
+            `step ${index} dispatch ${dispatchIndex} reads slot ${r} and writes slot ${w} in region ${plan.slots[r].region}`,
+          );
+        }
+      }
+    });
+  });
   for (const slot of plan.slots) {
     assertEquals(slot.offset % limits.offsetAlignment, 0, "offset は整列済み");
     assert(slot.offset + slot.byteLength <= plan.regions[slot.region], "領域からはみ出さない");
     assert(slot.byteLength <= limits.maxStorageBufferBindingSize, "束縛上限の内側");
+  }
+  for (const [region, size] of plan.regions.entries()) {
+    assert(
+      size <= limits.maxBufferSize,
+      `region ${region} (${size} B) exceeds maxBufferSize ${limits.maxBufferSize}`,
+    );
   }
   assertEquals(
     plan.totalBytes,
@@ -126,7 +164,11 @@ test("鎖 8 → 12 → 4 バイト: 厳密一致プールでは 24 だが、パ�
   assertWellFormed(plan, program, LOOSE);
   assertEquals(plan.peakLiveBytes, 20);
   assertEquals(plan.totalBytes, 20);
-  // a は b の dispatch で読まれながら b が書かれる → 別領域。c は a の領域（a は既に解放済み）へ入る。
+  // Intervals a [0,2), b [1,4), c [3,end). b (largest) opens region 0. a overlaps b, and behind b it
+  // would grow region 0 by its full 8 B, so it opens region 1 (growth decides; the read / write rule
+  // would also keep it out). c reads b, so it avoids region 0 and takes a's dead bytes in region 1
+  // (growth 0 there, 4 behind b, so it would land there anyway). The total meets the live peak, so
+  // only order 1 runs.
   assertEquals(plan.regions, [12, 8]);
   const [c] = plan.steps[2].outputs;
   assert(c !== undefined);
@@ -134,15 +176,26 @@ test("鎖 8 → 12 → 4 バイト: 厳密一致プールでは 24 だが、パ�
 });
 
 test("同じ dispatch で読まれる入力と書かれる出力は別の領域へ置かれる（usage scope の制約）", () => {
-  // a（8B）を読みながら b（8B）を書く。時間は重なる（a は b の後で解放）ので同じ領域なら別 offset で
-  // 置けるが、read + read_write の同居は validation で落ちるため別領域が要る。
-  const program: TransientProgram = [node("a", 8, [], 1), node("b", 8, ["a"], 0, { pinned: true })];
+  // b (8 B) is written while a (8 B) is read. x (24 B, no consumer) is dead before either is born,
+  // so both fit into x's bytes (a at 0, b at 8) without growing its region: only the usage-scope
+  // rule keeps them apart (read + read_write on one GPUBuffer fails validation). Intervals x [0,1),
+  // a [2,4), b [3,end); both orders place x, a, b. a takes offset 0 of x's region (growth 0); b may
+  // not share it and opens region 1 = [24, 8]. Without the rule b sits at offset 8 and the total is
+  // 24.
+  const program: TransientProgram = [
+    node("x", 24, [], 0),
+    node("a", 8, [], 1),
+    node("b", 8, ["a"], 0, { pinned: true }),
+  ];
   const plan = planTransients(program, LOOSE);
   assertWellFormed(plan, program, LOOSE);
-  const [a] = plan.steps[0].outputs,
-    [b] = plan.steps[1].outputs;
-  assert(a !== undefined && b !== undefined);
+  const [x] = plan.steps[0].outputs,
+    [a] = plan.steps[1].outputs,
+    [b] = plan.steps[2].outputs;
+  assert(x !== undefined && a !== undefined && b !== undefined);
+  assertEquals(plan.slots[a].region, plan.slots[x].region);
   assert(plan.slots[a].region !== plan.slots[b].region, "読み側と書き側が同じ領域に居る");
+  assertEquals(plan.regions, [24, 8]);
 });
 
 test("読み同士は同じ領域を共有できる（3 入力の add でも領域は 2 本で足りる）", () => {
@@ -187,6 +240,34 @@ test("a slot goes to the region it grows least, using a later region's free byte
   assertEquals(plan.regions, [100, 60, 4]);
 });
 
+test("among regions that would each grow by less than the slot's size, the slot takes the one that grows least", () => {
+  // Intervals: a0 100 B [0,3), a1 100 B [1,4), k 4 B [2,6), b0 80 B [5,10), b1 72 B [7,11),
+  // s 40 B [8,12), e 4 B [9,end). Read / write pairs: k–a0, k–a1, b0–k, b1–b0, e–b0, e–b1, e–s.
+  // Sizes are distinct but for the 4 B pair, so both orders place a0, a1, b0, b1, s, k, e:
+  // a0 opens region 0; a1 overlaps a0 (growth 100 = its size) and opens region 1; b0 lands on a0's
+  // dead bytes (region 0, offset 0); b1 may not share b0's region and lands on a1's (region 1,
+  // offset 0). s overlaps b0 and b1: region 0 grows by 80 + 40 - 100 = 20, region 1 by
+  // 72 + 40 - 100 = 12, both below 40, so s takes region 1 at offset 72. k and e share region 2.
+  // Taking the first region that grows by less than 40 (or first-fit) puts s at offset 80 of region
+  // 0 instead: [120, 100, 4] = 224.
+  const program: TransientProgram = [
+    node("a0", 100, [], 1),
+    node("a1", 100, [], 1),
+    node("k", 4, ["a0", "a1"], 1),
+    node("b0", 80, ["k"], 2),
+    node("b1", 72, ["b0"], 1),
+    node("s", 40, [], 1),
+    node("e", 4, ["b0", "b1", "s"], 0, { pinned: true }),
+  ];
+  const plan = planTransients(program, LOOSE);
+  assertWellFormed(plan, program, LOOSE);
+  const [b1] = plan.steps[4].outputs,
+    [s] = plan.steps[5].outputs;
+  assert(b1 !== undefined && s !== undefined);
+  assertEquals(plan.slots[s], { region: plan.slots[b1].region, offset: 72, byteLength: 40 });
+  assertEquals(plan.regions, [100, 112, 4]);
+});
+
 test("a slot that would grow every region by its full size opens a new region instead of growing one", () => {
   // a and b (8 B each) live together and c reads both. Stacking b at offset 8 of a's region and opening
   // a new region both cost 8 bytes, so the planner takes the new region, which has no read / write
@@ -227,6 +308,61 @@ test("when the order of equal sizes changes the total, the smaller placement (lo
   assertEquals(plan.totalBytes, plan.peakLiveBytes);
 });
 
+test("when allocation order gives the smaller total, it is kept over the longer-lived-first order", () => {
+  // Intervals: a 16 B [0,4), b 4 B [1,2), c 8 B [3,6), d 8 B [5,9), e 12 B [7,11), f 8 B [8,end)
+  // (graph output), z 4 B [10,end) (graph output); the final clock is 12. Read / write pairs: b–a,
+  // c–a, d–c, e–d, f–d, z–e. Live peak 28 (d + e + f when f is allocated).
+  // Order 1 (a, e, c, d, f, b, z): a opens region 0 (16); e lands on a's dead bytes (region 0,
+  // offset 0); c reads a and opens region 1 (8); d may share neither c's nor e's region and opens
+  // region 2 (8); f grows region 0 by 12 + 8 - 16 = 4 but region 1 by 0 (c is dead), so it takes
+  // region 1; b and z land on dead bytes in regions 1 and 2 = [16, 8, 8] = 32.
+  // Order 2 (lifetimes d 4 / f 4 / c 3, z 2 / b 1: a, e, d, f, c, z, b): d opens region 1; f may not
+  // share d's region and grows region 0 by 4 (offset 12, less than its 8 B); c may share neither
+  // a's nor d's region and opens region 2 = [20, 8, 8] = 36. 32 < 36 keeps order 1.
+  const program: TransientProgram = [
+    node("a", 16, [], 2),
+    node("b", 4, ["a"], 0),
+    node("c", 8, ["a"], 1),
+    node("d", 8, ["c"], 2),
+    node("e", 12, ["d"], 1),
+    node("f", 8, ["d"], 0, { pinned: true }),
+    node("z", 4, ["e"], 0, { pinned: true }),
+  ];
+  const plan = planTransients(program, LOOSE);
+  assertWellFormed(plan, program, LOOSE);
+  const [c] = plan.steps[2].outputs,
+    [f] = plan.steps[5].outputs;
+  assert(c !== undefined && f !== undefined);
+  assertEquals(plan.slots[f], { region: plan.slots[c].region, offset: 0, byteLength: 8 });
+  assertEquals(plan.regions, [16, 8, 8]);
+  assertEquals(plan.peakLiveBytes, 28);
+});
+
+test("order 2 measures a graph output's lifetime to the final clock, not as infinite", () => {
+  // Intervals: a 16 B [0,2), b 16 B [1,6), c 4 B [3,7), d 4 B [4,end) and z 4 B [5,end) (graph
+  // outputs); the final clock is 8, so the lifetimes are b 5 / a 2 and c 4 / d 4 / z 3. Read / write
+  // pairs: b–a, d–c, z–b, z–c. Live peak 32 (a + b).
+  // Order 1 (a, b, c, d, z): b reads a and opens region 1; c lands on a's dead bytes (region 0);
+  // d may not share c's region and behind b would grow region 1 by its full 4 B, so it opens region
+  // 2; z may share neither b's nor c's region and behind d grows region 2 by 4, so it opens region 3
+  // = [16, 16, 4, 4] = 40. Order 2 (b, a, c, d, z — c and d tie at 4 and go by allocation) places
+  // the 4 B slots the same way = 40, and the tie keeps order 1.
+  // Taken as infinite, d and z would come before c: d lands on a's dead bytes, z fits behind it at
+  // offset 4 without growing region 1 (16 B), and c, which may not share d's region, opens region 2
+  // = [16, 16, 4] = 36, which order 2 would win.
+  const program: TransientProgram = [
+    node("a", 16, [], 1),
+    node("b", 16, ["a"], 1),
+    node("c", 4, [], 2),
+    node("d", 4, ["c"], 0, { pinned: true }),
+    node("z", 4, ["b", "c"], 0, { pinned: true }),
+  ];
+  const plan = planTransients(program, LOOSE);
+  assertWellFormed(plan, program, LOOSE);
+  assertEquals(plan.peakLiveBytes, 32);
+  assertEquals(plan.regions, [16, 16, 4, 4]);
+});
+
 test("別名（reshape）は確保を出さず、根の slot の生存を延ばす", () => {
   const program: TransientProgram = [
     node("a", 8, [], 1),
@@ -242,7 +378,8 @@ test("別名（reshape）は確保を出さず、根の slot の生存を延ば�
   assertWellFormed(plan, program, LOOSE);
   assertEquals(plan.slots.length, 2, "別名は slot を作らない");
   assertEquals(plan.steps[1].outputs[0], undefined);
-  // a は v 越しに b が読むまで生きる → b と別領域（読み書きの分離）。
+  // a lives until b reads it through v, so the two overlap: b is written while a is read, and
+  // stacking b on a would grow the region by b's full size anyway — different regions.
   const [a] = plan.steps[0].outputs,
     [b] = plan.steps[2].outputs;
   assert(a !== undefined && b !== undefined && plan.slots[a].region !== plan.slots[b].region);

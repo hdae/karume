@@ -125,9 +125,9 @@ test("単一出力ステップの確保簿記（alloc / alias / pin / 消費）�
 
   // Plan (offsets aligned to 256): a ends its life after c is allocated (step 2 releases a after
   // allocating c), so a and c overlap, while b (no consumer) has already ended. Stacking on a would
-  // grow region 0 by 256 + 64 >= 64, so the second slot opens region 1 and the third takes its bytes
-  // with growth 0. Order 1 (a, b, c): b opens region 1, c lands on b's range. Order 2 (a, c, b by
-  // lifetime 4 / 2 / 1): c opens region 1, b lands on c. Both total 128; the tie keeps order 1.
+  // grow region 0 by 256 + 64 - 64 = 256 >= 64, so the second slot opens region 1 and the third
+  // takes its bytes with growth 0. Order 1 (a, b, c): b opens region 1, c lands on b's range —
+  // 128 = the live peak (a + c), so the second order does not run (it would also give 128).
   const plan = planRecipes(
     [
       step([alloc("a", 64, 1)]),
@@ -185,8 +185,8 @@ test("topk の実形（値 + 添字・同一サイズ）の計画が手計算ど
   // grows a region by 256 + 24 - 24 = 256 >= 24, so v, i and nv each open a region; e starts after
   // v ends, so it takes v's range in region 0 with growth 0 (i and nv are still live).
   // Order 1 (v, i, nv, e) gives v 0 / i 1 / nv 2 / e 0 (regions, all at offset 0); order 2 (i, v,
-  // nv, e by lifetime 5 / 3 / 3 / 2) puts e on v as well. Both total 3 · 24 = 72; the tie keeps
-  // order 1.
+  // nv, e by lifetime 5 / 3 / 3 / 2) would put e on v as well; order 1 already totals 3 · 24 = 72 =
+  // the live peak (v, i and nv together), so the second order does not run.
   assertEquals(
     plan.slots.map((slot) => [slot.region, slot.offset]),
     [
@@ -511,7 +511,7 @@ test("同時生存する入れ子寿命の一時は 3 本とも別区間を掴�
   // 生える id 1 が区間 2 になる（宣言順 = 区間順ではない）。
   assertEquals(plan.steps[0].temps, [0, 2, 1]);
   // Intervals [0, 5) / [1, 4) / [2, 3): stacking on a live slot grows a region by 256 + 64 - 64 =
-  // 256 >= 64, so each slot opens its own region (both orders give the same order and total 192).
+  // 256 >= 64, so each slot opens its own region (192 = the live peak, so the second order does not run).
   assertEquals(
     plan.slots.map((slot) => [slot.region, slot.offset]),
     [
@@ -541,7 +541,7 @@ test("同一境界で解放された一時のバイトは、次のステップ�
   // 2 本目のステップは新しいバイトを生やさない（領域は 2 本ぶんのまま）。
   // Intervals [0, 3) / [1, 2) / [4, 5): the second temporary of step 0 overlaps the first (stacking
   // grows by 256 >= 64) and opens region 1; step 1's temporary overlaps neither, both regions give
-  // growth 0 and the lower index wins. Both orders take the slots in the same order (total 128).
+  // growth 0 and the lower index wins. 128 = the live peak, so the second order does not run.
   assertEquals(plan.regions, [64, 64]);
   assertEquals(plan.steps[0].temps, [0, 1]);
   assertEquals(plan.steps[1].temps, [2]);
@@ -574,8 +574,8 @@ test("出力と一時は同じ領域を共有し、pin された区間だけが�
     ],
     CORE_TRANSIENT_LIMITS,
   );
-  // y [0, end) is still live when the temporary [2, 3) comes: stacking on it grows region 0 by
-  // 256 >= 64, so the temporary opens region 1 (both orders: y first, total 128).
+  // y [0, end) is still live when the temporary [1, 2) comes: stacking on it grows region 0 by
+  // 256 >= 64, so the temporary opens region 1 (128 = the live peak, so the second order does not run).
   assertEquals(pinnedPlan.regions, [64, 64]);
   assertEquals([pinnedPlan.slots[1].region, pinnedPlan.slots[1].offset], [1, 0]);
   assertEquals(pinnedPlan.pinned, new Set([0]));
