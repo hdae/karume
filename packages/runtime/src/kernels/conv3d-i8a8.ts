@@ -15,9 +15,10 @@
  * out[co, n] = fma(accf, wscale[co], bias[co])             // + 1
  * ```
  *
- * The activation is quantised **once per input pixel over its channels** (`quantize_rows` on the
- * transposed `[T·H·W, Cin]` layout — the recipe builder does the transposed copy), so one input
- * pixel's packed channels serve every tap that reads it. The scale changes along K at every tap,
+ * The activation is quantised **once per input pixel over its channels** (the channel-major form of
+ * `quantize_rows`, which reads the conv input `[Cin, T·H·W]` in place and writes the `[T·H·W, Cin]`
+ * layout below — {@link CONV3D_I8A8_QUANTIZE_GEOMETRY}), so one input pixel's packed channels serve
+ * every tap that reads it. The scale changes along K at every tap,
  * which is why the flush is per tap: the form of w4a8's per-group flush (src/kernels/linear-i8a8.ts)
  * with the roles swapped — there the per-row activation scale goes into the final fma, here the
  * per-channel weight scale does.
@@ -78,6 +79,7 @@ import {
   i8a8TileN,
 } from "./i8a8-geometry.ts";
 import { i8a8IdotWgsl, LINEAR_ACT_SCALE_BINDING, LINEAR_I8A8_MAX_K } from "./linear-i8a8.ts";
+import type { QuantizeRowsChannelMajorGeometry } from "./quantize-rows.ts";
 import type { WeightStorage } from "./weight-storage.ts";
 
 /** Binding of the per-pixel activation scale (the same slot as linear's per-token scale). */
@@ -94,6 +96,15 @@ export const CONV3D_I8A8_MAX_CHANNELS_IN = LINEAR_I8A8_MAX_K;
  * decision 5 — a sweep with the decoder's shapes adds one), so it is linear's default.
  */
 export const conv3dI8a8Geometry = (): I8a8Geometry => defaultI8a8Geometry("linear");
+
+/**
+ * The geometry of the activation quantiser (the channel-major form of `quantize_rows` — ADR 0133
+ * addendum 2026-10-26). One constant for every shape: on the RTX 3080 Ti (Node + Dawn) 16 pixels
+ * per workgroup was never slower by median than the transposing copy + `quantize_rows` it replaced
+ * on any conv3d activation shape of the Wan2.2 decoder graphs (tile 16 and tile 32). The geometry
+ * is bit-neutral (the form's MUST) and is in the pipeline key.
+ */
+export const CONV3D_I8A8_QUANTIZE_GEOMETRY: QuantizeRowsChannelMajorGeometry = { pixels: 16 };
 
 /**
  * The shape side of the eligibility (the part Session construction decides from the graph alone

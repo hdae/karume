@@ -21,14 +21,14 @@ import type { BoundContainer } from "../src/format/container/bind.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { type Conv3dDims, conv3dIgemmKey, conv3dUsesVec4 } from "../src/kernels/conv3d.ts";
 import {
+  CONV3D_I8A8_QUANTIZE_GEOMETRY,
   conv3dI8a8Eligible,
   conv3dI8a8Geometry,
   conv3dI8a8Key,
   conv3dI8a8UsesVec4,
 } from "../src/kernels/conv3d-i8a8.ts";
 import { conv2dIgemmMTile } from "../src/kernels/conv2d.ts";
-import { quantizeRowsGeometry, quantizeRowsKey } from "../src/kernels/quantize-rows.ts";
-import { stridedKey } from "../src/codegen/strided.ts";
+import { quantizeRowsChannelMajorKey } from "../src/kernels/quantize-rows.ts";
 import { referenceConv3dI8a8 } from "../src/reference/conv3d-i8a8.ts";
 import { quantizeRowsTieMargin } from "../src/reference/i8a8.ts";
 import {
@@ -342,11 +342,13 @@ const run = async (
   }
 };
 
-/** 走るべき 3 本のキー（転置 → 画素ごとの量子化 → 整数内積の implicit GEMM）。 */
+/**
+ * The two keys that must run (per-pixel quantisation read straight from the channel-major input →
+ * the integer dot-product implicit GEMM; no transposing copy — ADR 0133 addendum 2026-10-26).
+ */
 const expectedKeys = (dims: Conv3dDims, dp4a: boolean): string[] =>
   [
-    stridedKey({ dtype: "f32" }),
-    quantizeRowsKey(quantizeRowsGeometry(dims.channelsIn)),
+    quantizeRowsChannelMajorKey(CONV3D_I8A8_QUANTIZE_GEOMETRY),
     conv3dI8a8Key(
       conv3dI8a8UsesVec4(dims.timeOut * dims.heightOut * dims.widthOut),
       dp4a,

@@ -16,7 +16,9 @@
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, type AcquireGpuOptions } from "../src/gpu/device.ts";
-import { referenceLinearI8a8 } from "../src/reference/i8a8.ts";
+import type { Conv3dDims } from "../src/kernels/conv3d.ts";
+import { referenceConv3dI8a8 } from "../src/reference/conv3d-i8a8.ts";
+import { quantizeRowsTieMargin, referenceLinearI8a8 } from "../src/reference/i8a8.ts";
 import {
   createSessionFromContainer,
   type SessionOptions,
@@ -650,6 +652,155 @@ test.skipIf(!GPU_AVAILABLE)(
           assertEquals([...outputs["y"].data], [...expected], `${testCase.name}: atol=0 突合`);
           // 恒真化の門: 出力が定数なら突合は何も検証していない
           assert(new Set([...outputs["y"].data]).size > 1, `${testCase.name}: 出力が定数`);
+        } finally {
+          await session.dispose();
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+);
+
+/**
+ * The node-local temporaries `xq` / `xs` of conv3d w8a8 (one node = two dispatches — the
+ * channel-major `quantize_rows` reads the conv input in place and writes them; perf-ledger V-6).
+ * As for linear's i8a8 temporaries above, a word the quantiser leaves unwritten is eaten by the
+ * integer GEMM as a different integer or scale, so the detector is the atol = 0 match against the
+ * TS reference.
+ *
+ * MUST: the poison buffer's size matches only the temporary under test (x = 384 B, y = 240 B,
+ * xq = Cin·P = 96 B, xs = 4·P = 48 B — four distinct size classes).
+ */
+const conv3dI8a8PoisonGraph = (poisonCount: number): DeclarationJson => ({
+  format: "karume-ir",
+  version: 2,
+  requires: { ops: ["cast", "conv3d"] },
+  symbols: [],
+  inputs: [
+    { name: "seed", dtype: "f32", shape: [poisonCount] },
+    { name: "x", dtype: "f32", shape: [8, 1, 3, 4] },
+  ],
+  outputs: ["y"],
+  initializers: { w: {}, b: {} },
+  values: {
+    poison: { dtype: "f32", shape: [poisonCount] },
+    w: { dtype: "f32", shape: [5, 8, 1, 1, 1] },
+    b: { dtype: "f32", shape: [5] },
+    y: { dtype: "f32", shape: [5, 1, 3, 4] },
+  },
+  nodes: [
+    { op: "cast", ins: ["seed"], outs: ["poison"], attrs: { to: "f32" } },
+    {
+      op: "conv3d",
+      ins: ["x", "w", "b"],
+      outs: ["y"],
+      attrs: { stride: [1, 1, 1], padding: [0, 0, 0], dilation: [1, 1, 1], groups: 1 },
+    },
+  ],
+});
+
+test.skipIf(!GPU_AVAILABLE)(
+  "conv3d w8a8's temporaries (xq / xs) keep no poisoned word (full-write / real GPU)",
+  async () => {
+    const channelsIn = 8;
+    const channelsOut = 5;
+    const pixels = 12;
+    const cases: readonly { readonly name: string; readonly poisonCount: number }[] = [
+      { name: "xq (quantised activation)", poisonCount: (pixels * channelsIn) / 4 },
+      { name: "xs (per-pixel scale)", poisonCount: pixels },
+    ];
+    const dims: Conv3dDims = {
+      channelsIn,
+      channelsOut,
+      timeIn: 1,
+      heightIn: 3,
+      widthIn: 4,
+      timeOut: 1,
+      heightOut: 3,
+      widthOut: 4,
+      kernelT: 1,
+      kernelH: 1,
+      kernelW: 1,
+      strideT: 1,
+      strideH: 1,
+      strideW: 1,
+      paddingT: 0,
+      paddingH: 0,
+      paddingW: 0,
+      dilationT: 1,
+      dilationH: 1,
+      dilationW: 1,
+      groups: 1,
+    };
+    const weight = fill(
+      [channelsOut, channelsIn, 1, 1, 1],
+      (i) => ((i * 7) % 23) * 0.0625 - 0.6875,
+    );
+    assert(weight.dtype === "f32");
+    const quantized = quantizeI8(weight.data, [channelsOut, channelsIn, 1, 1, 1], 0);
+    const bias = fill([channelsOut], (i) => ((i % 7) - 3) * 0.25);
+    assert(bias.dtype === "f32");
+    // Per-pixel channel ratios of 127·{1, 0.8, −0.6, 0.4}: far from the rounding boundaries (the
+    // condition of the atol = 0 claim — tests/gpu_conv3d_i8a8_test.ts)
+    const fractions = [1, 0.8, -0.6, 0.4];
+    const x = fill(
+      [channelsIn, 1, 3, 4],
+      (i) =>
+        (0.5 + ((i % pixels) % 13) * 0.37) *
+        fractions[(Math.floor(i / pixels) + (i % pixels)) % fractions.length],
+    );
+    assert(x.dtype === "f32");
+    const transposed = new Float32Array(pixels * channelsIn);
+    for (let c = 0; c < channelsIn; c += 1) {
+      for (let p = 0; p < pixels; p += 1) transposed[p * channelsIn + c] = x.data[c * pixels + p];
+    }
+    assert(quantizeRowsTieMargin(transposed, pixels, channelsIn) > 1e-3, "rounding margin");
+    const weightInts = new Float32Array(quantized.values.length);
+    for (let i = 0; i < weightInts.length; i += 1) {
+      weightInts[i] = Math.round(quantized.values[i] / quantized.scale[Math.floor(i / channelsIn)]);
+    }
+    const expected = referenceConv3dI8a8({
+      x: x.data,
+      weight: weightInts,
+      weightScale: quantized.scale,
+      bias: bias.data,
+      dims,
+    });
+    const gpu = await acquireGpu();
+    try {
+      for (const testCase of cases) {
+        const model = await openModelBytes(conv3dI8a8PoisonGraph(testCase.poisonCount), [
+          {
+            graph: GRAPH_NAME,
+            initializer: "b",
+            bytes: f32Bytes(bias.data),
+            encoding: { codec: "f32" },
+          },
+          {
+            graph: GRAPH_NAME,
+            initializer: "w",
+            bytes: quantized.bytes,
+            encoding: {
+              codec: "int8-sym",
+              groupSize: channelsIn,
+              scale: { dtype: "f32", bytes: f32Bytes(quantized.scale) },
+            },
+          },
+        ]);
+        const session = await createSessionFromContainer(gpu, model, GRAPH_NAME, {
+          convCompute: "a8",
+        });
+        try {
+          const outputs = await session.run({
+            seed: fill([testCase.poisonCount], () => POISON),
+            x,
+          });
+          const reuseCount = session.diagnostics().lastRun?.reuseCount ?? 0;
+          assert(reuseCount >= 1, `${testCase.name}: no pool reuse happened`);
+          assertEquals([...outputs["y"].data], [...expected], `${testCase.name}: atol = 0 match`);
+          // The tautology gate: a constant output would make the match say nothing
+          assert(new Set([...outputs["y"].data]).size > 1, `${testCase.name}: constant output`);
         } finally {
           await session.dispose();
         }

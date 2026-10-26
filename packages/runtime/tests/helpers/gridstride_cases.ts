@@ -109,11 +109,14 @@ import { SOFTMAX_KEY, SOFTMAX_WGSL, softmaxParams } from "../../src/kernels/soft
 import {
   QUANTIZE_ROWS_KEY,
   QUANTIZE_ROWS_WGSL,
+  quantizeRowsChannelMajorKey,
+  quantizeRowsChannelMajorWgsl,
   quantizeRowsGeometry,
   quantizeRowsKey,
   quantizeRowsParams,
   quantizeRowsWgsl,
 } from "../../src/kernels/quantize-rows.ts";
+import { CONV3D_I8A8_QUANTIZE_GEOMETRY } from "../../src/kernels/conv3d-i8a8.ts";
 import { quantizeRowsReference } from "../../src/reference/i8a8.ts";
 import {
   ATTENTION_STATS_KEY,
@@ -951,6 +954,38 @@ export const quantizeRowsGroupedCase = (): DegenerateCase => {
     sideOutputBytes: rows * dim,
     expected: refTensor([rows], quantizeRowsReference(input.data, rows, dim).scale),
     natural: Math.ceil(rows / geometry.rowsPerGroup),
+    groups: 2,
+  };
+};
+
+/**
+ * The channel-major form of `quantize_rows` (conv3d w8a8's activation quantiser — perf-ledger V-6)
+ * at the production geometry. It walks blocks of pixels with a grid stride, and every pass of that
+ * loop runs the word-block loop with its barriers, so a collapsed dispatch covers both. The input
+ * is `x[C][P]`; the compared output is the per-pixel scale `xs` (`xq` is the side output).
+ *
+ * MUST: every pixel has its own magnitude (with one scale for all pixels, reading another pixel's
+ * channels would not show in the values). C = 200 gives four word blocks per pixel, the last partial.
+ */
+export const quantizeRowsChannelMajorCase = (): DegenerateCase => {
+  const pixels = 5_003;
+  const channels = 200;
+  const geometry = CONV3D_I8A8_QUANTIZE_GEOMETRY;
+  const input = fill([channels, pixels], (i) => SIGNED(i) * (1 + ((i % pixels) % 7) * 0.5));
+  const transposed = new Float32Array(pixels * channels);
+  for (let c = 0; c < channels; c += 1) {
+    for (let p = 0; p < pixels; p += 1) transposed[p * channels + c] = input.data[c * pixels + p];
+  }
+  return {
+    name: quantizeRowsChannelMajorKey(geometry),
+    key: quantizeRowsChannelMajorKey(geometry),
+    wgsl: quantizeRowsChannelMajorWgsl(geometry),
+    params: quantizeRowsParams(pixels, channels),
+    uniformParams: true,
+    inputs: [input],
+    sideOutputBytes: pixels * channels,
+    expected: refTensor([pixels], quantizeRowsReference(transposed, pixels, channels).scale),
+    natural: Math.ceil(pixels / geometry.pixels),
     groups: 2,
   };
 };

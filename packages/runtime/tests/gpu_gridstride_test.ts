@@ -59,6 +59,7 @@ import {
   maskedFillCase,
   padCase,
   quantizeRowsCase,
+  quantizeRowsChannelMajorCase,
   quantizeRowsGroupedCase,
   reduceCase,
   rmsNormCase,
@@ -193,6 +194,8 @@ const CASES: readonly DegenerateCase[] = [
   // w8a8 の活性量子化（1 ノード 2 dispatch の前段 — i8a8 GEMM 側はタイル系でカテゴリ違い）
   quantizeRowsCase(),
   quantizeRowsGroupedCase(),
+  // The channel-major form conv3d w8a8 reads its input with (perf-ledger V-6)
+  quantizeRowsChannelMajorCase(),
   layerNormCase(),
   rmsNormCase(),
   rmsNormCase(true),

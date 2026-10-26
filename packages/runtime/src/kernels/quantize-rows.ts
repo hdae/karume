@@ -57,6 +57,7 @@
  *   difference (one reason the E2E tolerances are derived from measurements).
  */
 
+import { gridStrideWorkgroups } from "../codegen/dispatch.ts";
 import { type PrologueUnaryOp, prologueUnaryWgsl } from "../codegen/elementwise.ts";
 import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/numerics-wgsl.ts";
 import { CodegenError } from "../codegen/errors.ts";
@@ -530,3 +531,159 @@ export const quantizeRowsBshdParams = (
   params[3] = heads;
   return params;
 };
+
+/**
+ * The channel-major form (perf-ledger V-6): the per-pixel quantisation of conv3d w8a8's activation
+ * read straight from `x[C][P]` (channel-major, the conv's input as stored), writing the same
+ * `xq[P][C/4]` / `xs[P]` as "transpose to `[P][C]` → quantize_rows over rows = P". The transposing
+ * copy (a strided f32 read at about 100 GB/s and a 4·C·P-byte temporary) disappears.
+ *
+ * One workgroup = `pixels` pixels × `256 / pixels` channel lanes (consecutive lanes take
+ * consecutive pixels, so the reads of one channel row coalesce). It walks blocks of pixels with a
+ * grid stride. Pass ① folds `nan_max(·, abs(x))` from 0.0 per lane over the channels `lane, lane +
+ * lanes, …`, then across the lanes; pass ② quantises blocks of `blockWords` words per pixel into a
+ * workgroup stage and writes each pixel's words contiguously.
+ *
+ * Bit identity with the row form (MUST — the basis): for finite values `max` is exact,
+ * associative and commutative, so the lane partials folded in any order give the row form's amax
+ * (the same argument as the lined-up form); `s` and every word are built from the very same
+ * {@link SCALE_WGSL} and {@link latticeWgsl} text over the same `vec4(x[c..c+3]) / s` in the same
+ * channel order. Only the order of memory accesses changes, so the geometry is free to vary (it is
+ * in the key). Caveat: for a pixel with a NaN, which NaN payload reaches `xs` can depend on the
+ * fold order (the value is NaN either way), as in the lined-up form.
+ * MUST: every barrier sits in workgroup-uniform control flow (the pixel-block loop and the word
+ * blocks are bounded by uniform params; the per-pixel guard never encloses a barrier).
+ */
+export type QuantizeRowsChannelMajorGeometry = {
+  /** Pixels per workgroup (a power of two from 4 to 64); the channel lanes are `256 / pixels`. */
+  readonly pixels: number;
+};
+
+/** The geometry's derived shape (lanes per pixel, words per stage block) — rejected when invalid. */
+const channelMajorShape = (
+  geometry: QuantizeRowsChannelMajorGeometry,
+): { readonly pixels: number; readonly lanes: number; readonly blockWords: number } => {
+  const { pixels } = geometry;
+  if (!Number.isInteger(Math.log2(pixels)) || pixels < 4 || pixels > 64) {
+    throw new CodegenError(
+      `quantize_rows channel-major: pixels per workgroup ${pixels} is not a power of 2 in [4, 64]`,
+    );
+  }
+  const lanes = QUANTIZE_ROWS_WORKGROUP_SIZE / pixels;
+  // Every lane quantises at least one word of a block (16 words = 64 channels at 64 pixels).
+  return { pixels, lanes, blockWords: Math.max(16, lanes) };
+};
+
+export const quantizeRowsChannelMajorKey = (geometry: QuantizeRowsChannelMajorGeometry): string => {
+  const { pixels, lanes, blockWords } = channelMajorShape(geometry);
+  return `${QUANTIZE_ROWS_KEY}:cm:p${pixels}l${lanes}b${blockWords}`;
+};
+
+/** WGSL of the channel-major form (Params {@link quantizeRowsParams} with `rows` = P, `dim` = C). */
+export const quantizeRowsChannelMajorWgsl = (
+  geometry: QuantizeRowsChannelMajorGeometry,
+): string => {
+  const { pixels, lanes, blockWords } = channelMajorShape(geometry);
+  const stage = pixels * blockWords;
+  return `// karume quantize_rows channel-major (x[C][P] → xq[P][C/4], xs[P]; ${pixels} pixels × ${lanes} lanes, ${blockWords}-word blocks)
+struct Params {
+  rows: u32,
+  dim: u32,
+}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read_write> xq: array<u32>;
+@group(0) @binding(3) var<storage, read_write> xs: array<f32>;
+
+${IS_NAN_BITS_WGSL}
+
+${NAN_MAX_WGSL}
+
+var<workgroup> partial: array<f32, ${QUANTIZE_ROWS_WORKGROUP_SIZE}>;
+var<workgroup> staged: array<u32, ${stage}>;
+
+@compute @workgroup_size(${QUANTIZE_ROWS_WORKGROUP_SIZE})
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid3: vec3<u32>,
+  @builtin(num_workgroups) nwg: vec3<u32>,
+) {
+  let lid = lid3.x;
+  let px = lid % ${pixels}u;
+  let lane = lid / ${pixels}u;
+  let pixelCount = params.rows;
+  let dim = params.dim;
+  // The caller guarantees dim % 4 == 0 (the i8 payload packs 4 per word)
+  let quads = dim / 4u;
+  var block = wid.x * ${pixels}u;
+  while (block < pixelCount) {
+    let p = block + px;
+    let inside = p < pixelCount;
+
+    // ① Absolute maximum of the pixel over its channels (NaN propagates by a bit-pattern check)
+    var acc = 0.0;
+    if (inside) {
+      var c = lane;
+      while (c < dim) {
+        acc = nan_max(acc, abs(x[c * pixelCount + p]));
+        c = c + ${lanes}u;
+      }
+    }
+    partial[lid] = acc;
+    workgroupBarrier();
+    var amax = partial[px];
+    for (var l = 1u; l < ${lanes}u; l = l + 1u) {
+      amax = nan_max(amax, partial[l * ${pixels}u + px]);
+    }
+    // MUST: the same scale text as the row form (multiplication by 1/127, the tiny floor, NaN kept)
+    let s = ${SCALE_WGSL};
+    if (inside && lane == 0u) {
+      xs[p] = s;
+    }
+
+    // ② Quantise ${blockWords} words per pixel at a time into the stage, then write each pixel's words
+    // contiguously
+    var w0 = 0u;
+    while (w0 < quads) {
+      var j = lane;
+      while (j < ${blockWords}u) {
+        let q = w0 + j;
+        if (inside && q < quads) {
+          let c = q * 4u;
+          let v = vec4<f32>(
+            x[c * pixelCount + p],
+            x[(c + 1u) * pixelCount + p],
+            x[(c + 2u) * pixelCount + p],
+            x[(c + 3u) * pixelCount + p],
+          ) / s;
+          let r = ${latticeWgsl("v")};
+          staged[px * ${blockWords}u + j] = pack4xI8(vec4<i32>(r));
+        }
+        j = j + ${lanes}u;
+      }
+      workgroupBarrier();
+      var t = lid;
+      while (t < ${stage}u) {
+        let wp = block + t / ${blockWords}u;
+        let wq = w0 + t % ${blockWords}u;
+        if (wp < pixelCount && wq < quads) {
+          xq[wp * quads + wq] = staged[t];
+        }
+        t = t + ${QUANTIZE_ROWS_WORKGROUP_SIZE}u;
+      }
+      // The stage and the partials are rewritten by the next block
+      workgroupBarrier();
+      w0 = w0 + ${blockWords}u;
+    }
+    block = block + nwg.x * ${pixels}u;
+  }
+}
+`;
+};
+
+/** Workgroups of the channel-major form (grid stride over blocks of pixels). */
+export const quantizeRowsChannelMajorWorkgroups = (
+  pixelCount: number,
+  geometry: QuantizeRowsChannelMajorGeometry,
+  limit: number,
+): number => gridStrideWorkgroups(pixelCount, channelMajorShape(geometry).pixels, limit);

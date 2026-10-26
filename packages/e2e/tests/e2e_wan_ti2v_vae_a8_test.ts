@@ -14,7 +14,8 @@
  *
  * 1. **Census**: in the subject every conv3d dispatch of both graphs runs the w8a8 key (33 nodes in first,
  *    35 in next — the counts of the chunk graphs), and no f32 conv3d key remains; the control runs no w8a8
- *    key. Each w8a8 conv3d brings its two preludes (the strided transpose and `quantize_rows`).
+ *    key. Each w8a8 conv3d brings its one prelude (the channel-major `quantize_rows`, which reads the conv
+ *    input in place).
  * 2. **Difference floor**: the subject's frames differ from the control's by at least one bit (`accept`).
  * 3. **Collapse ceiling**: the relative RMS of the subject against the control at the observation point —
  *    **the first chunk's output frame** (the first value the knob changes) — is under {@link A8_CEILING};

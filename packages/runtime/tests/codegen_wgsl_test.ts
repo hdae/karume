@@ -239,6 +239,8 @@ import {
   quantizeRowsKey,
   quantizeRowsParams,
   quantizeRowsBshdWgsl,
+  quantizeRowsChannelMajorKey,
+  quantizeRowsChannelMajorWgsl,
   quantizeRowsPrologueWgsl,
   quantizeRowsWgsl,
 } from "../src/kernels/quantize-rows.ts";
@@ -285,7 +287,7 @@ import {
 } from "../src/kernels/attention-i8a8.ts";
 import { attentionOnlineI8a8Wgsl } from "../src/kernels/attention-online-i8a8.ts";
 import { TRANSPOSE_TILED_WGSL } from "../src/kernels/transpose-tiled.ts";
-import { conv3dI8a8Wgsl } from "../src/kernels/conv3d-i8a8.ts";
+import { CONV3D_I8A8_QUANTIZE_GEOMETRY, conv3dI8a8Wgsl } from "../src/kernels/conv3d-i8a8.ts";
 import {
   defaultI8a8Geometry,
   type I8a8Geometry,
@@ -744,6 +746,12 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     // attention uses, and the one-row-per-workgroup end. The plain forms above must not move.
     ["quantize_rows_r8w32_bshd.wgsl", quantizeRowsBshdWgsl(quantizeRowsGeometry(128))],
     ["quantize_rows_r1w256_bshd.wgsl", quantizeRowsBshdWgsl(quantizeRowsGeometry(1024))],
+    // The channel-major read of conv3d w8a8's activation (perf-ledger V-6) at the production
+    // geometry. The plain forms above must not move.
+    [
+      "quantize_rows_cm_p16l16b16.wgsl",
+      quantizeRowsChannelMajorWgsl(CONV3D_I8A8_QUANTIZE_GEOMETRY),
+    ],
     // The tiled transpose that builds Vᵀ from a token-major V (perf-ledger F-8).
     ["transpose_tiled.wgsl", TRANSPOSE_TILED_WGSL],
     ["linear_i8a8.wgsl", linearI8a8Wgsl(false, true)],
@@ -1050,6 +1058,13 @@ test("同じ生成入力からは常に同一の WGSL が出る（全 op × dtyp
       `quantize_rows:dim=${dim}`,
     );
   }
+  for (const pixels of [4, 8, 16, 32, 64]) {
+    assertEquals(
+      quantizeRowsChannelMajorWgsl({ pixels }),
+      quantizeRowsChannelMajorWgsl({ pixels }),
+      `quantize_rows channel-major:p${pixels}`,
+    );
+  }
   for (const sliding of [false, true]) {
     assertEquals(
       stateStatsWgsl(sliding),
@@ -1225,6 +1240,8 @@ test("パイプラインキーは生成入力ごとに一意（別カーネル�
       attentionPvI8a8Key(v4, true),
     ]),
     QUANTIZE_ROWS_KEY,
+    // Every geometry of the channel-major form is its own WGSL, so its own key
+    ...[4, 8, 16, 32, 64].map((pixels) => quantizeRowsChannelMajorKey({ pixels })),
     // The fusion kernels of the DiT rules: each variant (rotation / modulation source) has its own
     // key, so a pipeline built for one form is never handed the other form's bind surface.
     ROPE_KEY,

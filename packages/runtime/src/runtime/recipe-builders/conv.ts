@@ -44,6 +44,7 @@ import {
 } from "../../kernels/conv3d.ts";
 import {
   CONV3D_ACT_SCALE_BINDING,
+  CONV3D_I8A8_QUANTIZE_GEOMETRY,
   conv3dI8a8Eligible,
   conv3dI8a8Geometry,
   conv3dI8a8Key,
@@ -53,18 +54,11 @@ import {
   conv3dI8a8Workgroups,
 } from "../../kernels/conv3d-i8a8.ts";
 import {
-  quantizeRowsGeometry,
-  quantizeRowsKey,
+  quantizeRowsChannelMajorKey,
+  quantizeRowsChannelMajorWgsl,
+  quantizeRowsChannelMajorWorkgroups,
   quantizeRowsParams,
-  quantizeRowsWgsl,
 } from "../../kernels/quantize-rows.ts";
-import {
-  permuteSrcStrides,
-  STRIDED_WORKGROUP_SIZE,
-  stridedKey,
-  stridedParams,
-  stridedWgsl,
-} from "../../codegen/strided.ts";
 import {
   CONV_TRANSPOSE1D_SCALE_BINDING,
   CONV_TRANSPOSE1D_WORKGROUP_SIZE,
@@ -94,7 +88,7 @@ import { conv2dProfileGeometry } from "../../kernels/geometry-profile.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../../codegen/dispatch.ts";
 import { gruScanKey, gruScanParams, gruScanWgsl } from "../../kernels/gru-scan.ts";
 import type { RecipeBuildFace } from "../recipe-builder.ts";
-import { PARAMS_STORAGE_USAGE, PARAMS_UNIFORM_USAGE } from "./params-usage.ts";
+import { PARAMS_UNIFORM_USAGE } from "./params-usage.ts";
 
 /**
  * deform_conv2d (DCNv2 — ADR 0055). A single grid-stride kernel with one output element = one
@@ -553,12 +547,12 @@ export const buildConv3d = async (
 
 /**
  * conv3d's **w8a8 variant** (opt-in — {@link SessionOptions.convCompute}; ADR 0133).
- * **One node = three dispatches**: ① a strided copy that transposes `x[Cin, T·H·W]` to
- * `[T·H·W, Cin]` (the permute of ADR 0011) → ② `quantize_rows` over the pixels (one row = one input
- * pixel, per-pixel i8 + scale) → ③ the integer dot-product implicit GEMM.
+ * **One node = two dispatches**: ① the channel-major form of `quantize_rows`, which reads
+ * `x[Cin, T·H·W]` in place and writes per-pixel i8 + scale in the `[T·H·W, Cin]` layout (one row =
+ * one input pixel) → ② the integer dot-product implicit GEMM.
  *
- * MUST: the temporary buffers (the transposed copy, `xq`, `xs`) are declared → released at the end
- * of the node (the arena's invariant — the same discipline as linear's i8a8 path).
+ * MUST: the temporary buffers (`xq`, `xs`) are declared → released at the end of the node (the
+ * arena's invariant — the same discipline as linear's i8a8 path).
  */
 const buildConv3dI8a8 = async (
   face: RecipeBuildFace,
@@ -576,35 +570,17 @@ const buildConv3dI8a8 = async (
   // Build params first: shapes outside the contract are rejected before any pipeline lookup.
   const convParams = conv3dI8a8Params(dims);
 
-  const transposed = builder.allocTemp(Math.max(4, pixelsIn * channels * 4));
   const xq = builder.allocTemp(Math.max(4, pixelsIn * (channels / 4) * 4));
   const xs = builder.allocTemp(Math.max(4, pixelsIn * 4));
 
-  // ① x[Cin, P] → xt[P, Cin] (a permute of the two axes — the time, height and width axes are
-  // already contiguous as one pixel axis)
-  const stridedSpec = { dtype: "f32" } as const;
-  const stridedKeyValue = stridedKey(stridedSpec);
-  const strided = await face.state.cache.get(stridedKeyValue, stridedWgsl(stridedSpec));
-  builder.dispatch({
-    key: stridedKeyValue,
-    pipeline: strided.pipeline,
-    layout: strided.layout,
-    roles: strided.roles,
-    params: face.writeParams(
-      stridedParams([pixelsIn, channels], permuteSrcStrides([channels, pixelsIn], [1, 0]), 0),
-      PARAMS_STORAGE_USAGE,
-    ),
-    bindings: [
-      { binding: 1, source: binds[0] },
-      { binding: 2, source: transposed },
-    ],
-    workgroups: [gridStrideWorkgroups(pixelsIn * channels, STRIDED_WORKGROUP_SIZE, limit), 1, 1],
-  });
-
-  // ② Per-pixel quantisation (one row = one input pixel, grid-stride over rows)
-  const quantizeGeometry = quantizeRowsGeometry(channels);
-  const quantizeKeyValue = quantizeRowsKey(quantizeGeometry);
-  const quantize = await face.state.cache.get(quantizeKeyValue, quantizeRowsWgsl(quantizeGeometry));
+  // ① Per-pixel quantisation straight from x[Cin, P] (the time, height and width axes are already
+  // contiguous as one pixel axis; grid-stride over blocks of pixels)
+  const quantizeGeometry = CONV3D_I8A8_QUANTIZE_GEOMETRY;
+  const quantizeKeyValue = quantizeRowsChannelMajorKey(quantizeGeometry);
+  const quantize = await face.state.cache.get(
+    quantizeKeyValue,
+    quantizeRowsChannelMajorWgsl(quantizeGeometry),
+  );
   builder.dispatch({
     key: quantizeKeyValue,
     pipeline: quantize.pipeline,
@@ -612,14 +588,14 @@ const buildConv3dI8a8 = async (
     roles: quantize.roles,
     params: face.writeParams(quantizeRowsParams(pixelsIn, channels), PARAMS_UNIFORM_USAGE),
     bindings: [
-      { binding: 1, source: transposed },
+      { binding: 1, source: binds[0] },
       { binding: 2, source: xq },
       { binding: 3, source: xs },
     ],
-    workgroups: [gridStrideWorkgroups(pixelsIn, quantizeGeometry.rowsPerGroup, limit), 1, 1],
+    workgroups: [quantizeRowsChannelMajorWorkgroups(pixelsIn, quantizeGeometry, limit), 1, 1],
   });
 
-  // ③ The integer dot-product implicit GEMM (the geometry is in the key — ADR 0133 decision 5)
+  // ② The integer dot-product implicit GEMM (the geometry is in the key — ADR 0133 decision 5)
   const v4 = conv3dI8a8UsesVec4(pixelsOut);
   const geometry = conv3dI8a8Geometry();
   const dp4a = face.state.linearI8a8Dot === "dp4a";
@@ -648,7 +624,6 @@ const buildConv3dI8a8 = async (
   // MUST: return the temporary buffers at the node boundary (the arena's invariant).
   builder.releaseTemp(xs);
   builder.releaseTemp(xq);
-  builder.releaseTemp(transposed);
 };
 
 /**
