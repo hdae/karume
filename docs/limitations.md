@@ -415,17 +415,19 @@ bilinear upsample at the end of the decoder, `[1,192,2048,2048]` 3.2GB, and of c
 preflight (ADR 0093 decision 5) failed them with the node name). What resolved it was the combination
 of recipe-side patch ⑨ (`birefnet.patch` — swapping the order of the 1×1 conv and the bilinear
 upsample removes `cat`) and runtime-side static liveness packing (ADR 0093); the measurement for the
-f32 preset (Lucida's default) (RTX 3080 Ti 12 GiB, 2026-10-16) is weights 843MiB + intermediate
-region 2,948MiB (live peak 2,560MiB) + input and output readback 64MiB =
-**total GPU allocation 3,854MiB (about 3.8GiB — 1 GiB = 1,024 MiB), run 6.7–6.9 s**. 2048² entered the
+f32 preset (Lucida's default) (RTX 3080 Ti 12 GiB, 2026-10-16; the memory numbers re-measured
+2026-10-26 from the runtime's estimate after the transient placement moved from first-fit to least
+region growth — perf-ledger H-42) is weights 843MiB + intermediate
+region 2,725MiB (live peak 2,560MiB) + input and output readback 64MiB =
+**total GPU allocation 3,632MiB (about 3.5GiB — 1 GiB = 1,024 MiB), run 6.7–6.9 s**. 2048² entered the
 distribution on 2026-09-05, alongside 1024² (default 1024²).
 (It used to also be listed as a reason that "the decoder's 1×1 conv hits the conv2d dispatch limit
 above", but since `d0afc22`, when the default geometry became M128N128, the n tiles of 2048² are
 32,768, inside the limit — the only remaining reason was on the resource side.)
 The distributed 1024² is not light either: the measurement for the f32 preset (Lucida's default) needs
-weights 843MiB + intermediate region 751MiB (after ADR 0093's packing and patch ⑨; 6,283MiB with the
+weights 843MiB + intermediate region 689MiB (after ADR 0093's packing and patch ⑨; 6,283MiB with the
 old pool + old tail) + input and output readback 16MiB = **total GPU allocation
-1,609MiB (about 1.6GiB), run about 1.4 s** (measured 2026-10-16),
+1,547MiB (about 1.5GiB), run about 1.4 s** (memory measured 2026-10-26, run time 2026-10-16),
 and the largest binding is the decoder's `cat_211` `[1,1280,256,256]` 320MiB (followed by
 `[1,64,1024,1024]` 256MiB inside the ipt branch and the attention score S at 230MiB), so it is in
 practice **limited to desktop-class GPUs**. **Even when the distribution's `requiredLimits` field is
@@ -451,15 +453,15 @@ window-mask tables); the weights of deform_conv2d (19 MiB — they have no weigh
 2026-10-16 — the window masks are intermediates built at run time from tables for the 4 window kinds
 and per-window indices, and the zero pad is an `expand` of a single zero element. Until then the
 window masks (65 MiB at 1024², 248 MiB at 2048²) and the zero-pad constants (14 / 28 MiB) were kept
-resident in f32 — ADR 0113 addendum 2026-10-16). At 2048² the intermediate region (2,948 MiB) is the
+resident in f32 — ADR 0113 addendum 2026-10-16). At 2048² the intermediate region (2,725 MiB) is the
 dominant term, so the effect on the total allocation is small. The quant presets are derived per
 checkpoint from the upstream storage type (ADR 0113 addendum 2026-10-11): BiRefNet_HR has only the
 `f16` preset (the upstream weights are f16 — an f32 preset would only hold the same values at twice
 the residency, so it is not offered), and Lucida has the `f32` default + `f16`. The total GPU
 allocation of HR's `f16` preset (weights + intermediate region + input + output readback) is
-1,198 MiB (about 1.2 GiB) at 1024² and 3,443 MiB (about 3.4 GiB) at 2048² (measured 2026-10-16,
-RTX 3080 Ti, 1 GiB = 1,024 MiB. The intermediate region and the largest binding are the same as for
-the f32 preset — activations are f32 even with the f16 preset).
+1,136 MiB (about 1.1 GiB) at 1024² and 3,220 MiB (about 3.1 GiB) at 2048² (measured 2026-10-26
+from the runtime's estimate under the H-42 placement, 1 GiB = 1,024 MiB. The intermediate region and the
+largest binding are the same as for the f32 preset — activations are f32 even with the f16 preset).
 
 **2048² does not run on the Intel Arc B570 (Linux xe driver) — one dispatch exceeds the 5-second job
 limit** (measured 2026-09-20, ruling 2026-09-26 = explicit SKIP under that machine's environment key).
@@ -686,9 +688,13 @@ limit for everything else (the same reason as for the states form — dividing b
 let the estimate alone claim a block count that no device produces).
 There is one more difference not listed in `unaccounted`: **padding at region boundaries** — the
 estimate's placement drifts from the real build's packer by a few hundred bytes.
+Where the estimate's allocation program differs from the execution's (one dispatch per plain node,
+fusion temporaries left out), the placement can also keep a different one of its two orders, because
+the second order compares lifetimes counted in allocation events (ADR 0093 addendum 2026-10-26); the
+drift can then exceed a few hundred bytes (not measured on the shipped models).
 `EstimateOptions.maxBufferSize` affects both the limit check of a single state slot and the limit of
-the intermediate packing regions, and can move `workspaceBytes` (how first-fit splits regions changes
-with the limit). The remaining difference is offset alignment: there is no field that receives the
+the intermediate packing regions, and can move `workspaceBytes` (how the placement splits regions
+changes with the limit). The remaining difference is offset alignment: there is no field that receives the
 device value, and it packs with the WebGPU core default of 256 (the JSDoc of `estimate.ts`).
 The final check of feasibility remains the out-of-memory errorScope as before, and
 `peakAccountedBytes` is, as its name says, "the peak of what was counted" = not an upper-bound

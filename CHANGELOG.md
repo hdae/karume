@@ -17,6 +17,13 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- Intermediate buffers are packed by least region growth instead of first-fit (ADR 0093 addendum of
+  2026-10-26): each slot goes to the region it grows least, and the placement is tried in two orders
+  and the smaller kept. The slot backing and `workspaceBytes` shrink — 30.26 → 24.18 GiB summed over
+  the default presets of the shipped models, none of them larger (a heuristic: a graph can still pack
+  a few bytes worse than first-fit did); the Wan2.2 DiT 880.3 → 717.8 MiB at 33 frames and 3,016.7 →
+  2,457.2 MiB at 121 — and a plan holds more, smaller region buffers (up to 33). Outputs are
+  unchanged, and planning is faster than before on the largest graphs.
 - Every message the packages print — errors, warnings, diagnostics, labels and the notes in generated
   WGSL headers — is English (ADR 0130). Code that matched the Japanese wording of an error message
   must be re-keyed; the error classes and the structure of each message are unchanged. The same

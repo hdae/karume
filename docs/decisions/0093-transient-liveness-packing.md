@@ -42,7 +42,8 @@ the exact size**. The exact-size guarantee can be a property of the bound range,
 - Replay the allocation and release events of the recipe list (`StepRecipe[]`) in order to obtain each
   logical tensor's (node output, temporary) **live interval** `[alloc, release)` and exact size
   (`toSizeClass`), then place tensors whose intervals do not overlap into shared bytes by **first-fit
-  in decreasing size** at offsets of region buffers. Event order (allocate → retain → release of what
+  in decreasing size** at offsets of region buffers (revised to least region growth, best of two
+  orders — see the addendum of 2026-10-26). Event order (allocate → retain → release of what
   the step defines) is the same as before (the MUST order of `executeStepRecipe`). Aliases (reshape,
   identity expand) merge into the interval of their root; pinned tensors (graph outputs) live to the
   end.
@@ -178,3 +179,69 @@ Effect on `workspaceBytes`:
 The user's budget (`EstimateOptions.attentionRowBlockMaxBytes`) also bounds the block size (the smaller
 of it and the binding limit, derived as in execution). Per-node temporaries of the fused attention op
 are counted in the estimate too — ADR [0124](0124-attention-row-block-budget.md) decision 7.
+
+## Addendum (2026-10-26) — decision 1 revised: least region growth, best of two orders, instead of first-fit
+
+Decision 1's placement rule changes; the rest of decision 1 (the replay, the usage-scope rule, the
+limits) and decisions 2–8 are unchanged (perf-ledger H-42).
+
+- **Least growth.** Each slot goes to **the region it grows least** among the regions that hold no read
+  / write conflict with it, at the lowest offset that fits there (as before). Equal growth keeps the
+  lower region index. **A new region opens when every candidate would grow by at least the slot's
+  size** (its full size, or more where the offset alignment pads; and when there is no candidate): the
+  new region costs the same bytes or fewer, and the new region carries no
+  conflicts, so the slots placed after it keep more places to go.
+- **Best of two orders.** The placement runs twice — slots in decreasing real size, equal sizes in
+  allocation order (as before) and equal sizes longer-lived first — and keeps the smaller region total
+  (the first order on a tie). Both orders are total, so the plan stays deterministic.
+
+Why least growth: first-fit took the first region that could hold the slot even when that region had
+to grow and a later region had room. Removing one node then changed which region the following
+tensors landed in, and a long-lived tensor could stack on a large one — the region total grew while the
+live peak did not move. Wave a hit this when the attention absorbed its output permute (Wan2.2 online
+route, 33 frames: 888.0 → 1,042.7 MiB with the output permute alone absorbed, the live peak 634.2
+unchanged — [research](../research/2026-10-25-wave-a-dit-fusions.md) §5).
+
+Why two orders: least growth in one order still depends on how equal sizes are ordered, and a DiT
+repeats the same sizes in every block. The Wan2.2 DiT with the q / k / v permutes absorbed and the same
+graph with them as nodes (the check of `e2e_wan_ti2v_attention_permute_estimate_test`) swap places
+between the orders — 717.8 vs 788.9 MiB at 33 frames in allocation order, 810.6 vs 717.8 MiB with the
+longer-lived first — with the same live peak (634.2 MiB). Taking the better of the two gives both 717.8
+MiB (2,457.2 MiB at 121 frames). Running several fast greedy placements and keeping the best is also what
+TensorFlow Lite's GPU delegate does (`MemoryStrategy::GREEDY_BEST`).
+
+Measured with the estimate (the execution's own `planTransients`), 2026-10-26, on every family's
+default preset with a local container (46 graphs, 49 scenarios; raw data and bindings in
+`outputs/diag/h42-2026-10-26/sweep/`, not tracked):
+
+| Placement | Sum of region totals | Against first-fit | Regions per plan |
+| --- | ---: | --- | --- |
+| first-fit (decision 1 as written) | 30.26 GiB | — | 2–4 |
+| least growth, one order | 24.48 GiB | 37 smaller, 12 equal, 0 larger | up to 33 |
+| **least growth, best of two orders (adopted)** | **24.18 GiB** | 39 smaller, 10 equal, 0 larger | up to 33 |
+| least growth, new region only when no region is a candidate | 29.29 GiB | 23 smaller, 24 equal, 2 larger | 2–4 |
+| least growth, best of five orders (adds area, lifetime and start orders) | 23.86 GiB | 40 smaller, 9 equal, 0 larger | up to 33 |
+
+The live peaks sum to 22.81 GiB (the lower bound); the adopted rule reaches it exactly in 25 of the 49
+scenarios, for example the anima DiT (896.6 → 729.0 MiB), the Wan2.1 DiT at S 14,040 (2,247.8 →
+2,064.0 MiB), the UMT5-XXL encoder (272.0 → 208.0 MiB) and the Irodori codec decoder (4,500.0 → 2,880.0
+MiB). The Wan2.2 DiT goes 880.3 → 717.8 MiB at 33 frames (live peak 634.2) and 3,016.7 → 2,457.2 MiB at
+121 frames (live peak 2,169.2). Taking the smallest fitting gap inside a region instead of the lowest
+offset changed no scenario, so the offset rule stays. Five orders save 0.32 GiB more for five placements
+instead of two; three of the added orders are worse than first-fit on their own (8–22 scenarios).
+
+Consequences:
+
+- More regions per plan (many under 1 MiB). Each region is one `createBuffer` (`executor.ts`, the miss
+  run and `#activateBacking`); nothing else in the runtime is per region. That small buffers cost no
+  extra device memory is the drivers' sub-allocation behaviour (observed on Dawn), not a WebGPU guarantee.
+- Placement costs O(n²) at worst for n slots and runs in up to two orders; each slot excludes the
+  regions of its read / write partners, and the second order is skipped when the first meets the live
+  peak. The whole estimate of the Wan2.2 DiT's dense route at 121 frames (4,321 slots) takes 89–137 ms
+  against 271–296 ms under first-fit (placement 68–106 ms), and about 60 ms for the anima and Wan2.2
+  DiTs on their default presets. It runs on every planning call: the first (miss) run and the backing
+  build of a signature, each rebuild after a backing is retired, and each scenario of an estimate.
+- The results do not change: placement only decides which bytes are reused, and every kernel writes its
+  whole output before reading it (ADR [0014](0014-layout-ops-full-write.md)). The sha256 rows are the check.
+- Tests that fixed first-fit's layout by hand were re-derived for the new rule; the invariants checks
+  (no overlap in time and space, the usage-scope split, alignment, total ≥ live peak) are unchanged.

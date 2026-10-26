@@ -384,9 +384,10 @@ const isHeadSwap = (plan: NodePlan, aliases: ReadonlySet<NodePlan>): boolean =>
  * MUST NOT absorb the permute after the attention (O back to token-major). On the three a8 dispatches
  * ③PV stores O head-major, so the absorbed permute would come back as an O temporary plus the same
  * strided copy; on the online route the kernel could store O token-major with the live bytes
- * unchanged, but the first-fit placement of the transient plan (`planTransients`) turns the removal
- * of that node into a larger backing (ADR 0040 addendum of 2026-10-25). The output permute stays a
- * node until the placement no longer does so.
+ * unchanged, but the first-fit placement the transient plan (`planTransients`) used then turned the
+ * removal of that node into a larger backing (ADR 0040 addendum of 2026-10-25). The placement has
+ * changed since (least region growth — ADR 0093 addendum of 2026-10-26); the output permute stays a
+ * node until its absorption is measured again under it (perf-ledger F-3).
  *
  * Accepted only on an exact match (ADR 0040 decision 2). The window is `nodes[index]` onwards:
  *
