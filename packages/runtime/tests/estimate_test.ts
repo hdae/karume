@@ -1555,6 +1555,64 @@ describe("the online attention kernel counts the a8 quantisation temporaries and
     );
   });
 
+  /**
+   * `attention → permute [0, 2, 1, 3]` on head-major q `[1, 2, M, 64]` and k / v `[1, 2, N, 64]`,
+   * the permute's token-major output `[1, M, 2, 64]` the graph output: on the online route the
+   * attention absorbs the permute and writes the token-major output itself (perf-ledger F-3 A4).
+   */
+  const outputPermuteModel = (rows: number, cols: number): PreparedModel =>
+    openGraph({
+      format: "karume-ir",
+      version: 2,
+      requires: { ops: ["attention", "permute"] },
+      symbols: [],
+      inputs: [
+        { name: "q", dtype: "f32", shape: [1, 2, rows, 64] },
+        { name: "k", dtype: "f32", shape: [1, 2, cols, 64] },
+        { name: "v", dtype: "f32", shape: [1, 2, cols, 64] },
+      ],
+      outputs: ["ot"],
+      initializers: {},
+      values: {
+        o: { dtype: "f32", shape: [1, 2, rows, 64] },
+        ot: { dtype: "f32", shape: [1, rows, 2, 64] },
+      },
+      nodes: [
+        { op: "attention", ins: ["q", "k", "v"], outs: ["o"], attrs: { scale: 0.125 } },
+        { op: "permute", ins: ["o"], outs: ["ot"], attrs: { dims: [0, 2, 1, 3] } },
+      ],
+    });
+
+  it("with the output permute absorbed, the total is the attention step's live peak (M 64 ≫ N 4: O outgrows the temporaries)", () => {
+    // B·H = 2, M = 64, N = 4, D = 64. Temporaries: qq 2×64×64 = 8,192 / qs 2×64×4 = 512 /
+    // kq 2×4×64 = 512 / ks 2×4×4 = 32 / vt 2×64×4×4 = 2,048 / vq 2×64×4 = 512 / vs 2×64×4 = 512;
+    // the output ot 64×2×64×4 = 32,768, written token-major by the online kernel. As in the case
+    // above all eight are live at once, so the total is their sum: 45,088 B.
+    // An estimate that does not replay the absorption keeps a head-major O (32,768 B) as the
+    // attention's output and adds the permute's step, where O and ot (32,768 B each) are live
+    // together — at least 65,536 B.
+    assertEquals(
+      runScenario(outputPermuteModel(64, 4).estimate({ ...NONE, attentionDevice: SUBGROUPS }))
+        .workspaceBytes,
+      32_768 + 8192 + 2048 + 512 + 512 + 512 + 512 + 32,
+    );
+  });
+
+  it("fails loudly without attentionDevice with the estimate's own message whatever the graph (an absorbable output permute, no attention at all)", () => {
+    // The check is at the estimate's entry: the fusion pass, which also needs the device facts to
+    // decide the output permute, never runs first with a message of its own.
+    assertThrows(
+      () => outputPermuteModel(64, 4).estimate(NONE),
+      ExecutionError,
+      "attentionScoreStorage 'none' needs options.attentionDevice",
+    );
+    assertThrows(
+      () => plainModel().estimate({ ...NONE, bindings: { T: 7 } }),
+      ExecutionError,
+      "attentionScoreStorage 'none' needs options.attentionDevice",
+    );
+  });
+
   it("rejects 'none' without a8 with the Session's message, and malformed device facts", () => {
     assertThrows(
       () => onlineModel().estimate({ attentionScoreStorage: "none", attentionDevice: SUBGROUPS }),

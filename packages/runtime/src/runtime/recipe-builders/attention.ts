@@ -21,6 +21,7 @@ import {
 } from "../../kernels/attention-i8a8.ts";
 import {
   ATTENTION_ONLINE_ROWS,
+  type AttentionOnlineOutput,
   type AttentionOnlineReduce,
   attentionOnlineI8a8Key,
   attentionOnlineI8a8Params,
@@ -400,6 +401,12 @@ export const attentionHeadMajorShapes = (
  * absorbs only on an a8 seat) is copied with the strided permute the absorbed node ran, before the
  * first stage reads it, so that stage's work and values are the graph's byte for byte.
  *
+ * O never has a copy. A token-major O (`o`) is stored by the online kernel itself, and the fusion
+ * pass absorbs the output permute only where `attentionRoute` chooses that kernel. MUST: any other
+ * route that receives `o` fails loudly here. Its head-major O would need a temporary plus the
+ * permute's strided copy, which adds live bytes and saves no dispatch, so that path is deliberately
+ * not built (ADR 0040 addendum of 2026-10-26).
+ *
  * MUST: execution ({@link buildAttention}) and the estimate (estimate.ts — ADR 0124 decision 7) take
  * them from this one function.
  */
@@ -408,7 +415,16 @@ export const attentionHeadMajorCopies = (
   route: AttentionRoute,
   /** The node's bound inputs (a token-major operand has its token-major shape). */
   inputs: readonly (readonly number[])[],
+  /** The node's label for the failure. */
+  where: string,
 ): Readonly<Record<"q" | "k" | "v", number | undefined>> => {
+  if (tokenMajor?.o === true && route.online === undefined) {
+    throw new ExecutionError(
+      `${where}: carries a token-major O (the absorbed output permute — perf-ledger F-3 A4) on a` +
+        ` route other than the online kernel (①QK ${route.qk} / ③PV ${route.pv} / S ${route.score});` +
+        " only the online kernel stores O token-major (fusion.ts absorbs the permute only there)",
+    );
+  }
   const [q, k, v] = tokenMajorOperands(tokenMajor);
   const bytes = (copied: boolean, shape: readonly number[]): number | undefined =>
     copied ? Math.max(4, numel(shape) * 4) : undefined;
@@ -612,8 +628,8 @@ export const stateAttentionVariantViolation = (
  *
  * When the fusion pass let the node absorb the `[0, 2, 1, 3]` permutes that feed its q / k / v
  * ({@link AttentionTokenMajor} — decided from the a8 seat, not the route), the absorbed operands
- * arrive token-major `[B, S, H, D]`; O is written head-major as declared. Every route an a8 seat can
- * take honours it, so the decision never needs the route (`attentionRoute` stays the one decision):
+ * arrive token-major `[B, S, H, D]`. Every route an a8 seat can take honours them, so that decision
+ * never needs the route (`attentionRoute` stays the one decision):
  *
  * - the a8 quantisation (shared by the online and the three-dispatch routes — the MUST of
  *   {@link buildAttentionOnline}) reads a token-major q / k with the token-major `quantize_rows`
@@ -621,6 +637,12 @@ export const stateAttentionVariantViolation = (
  *   `[N, H·D]` → `[H·D, N]`), instead of the strided copy;
  * - a stage the shape keeps off i8a8 gets the strided permute the absorbed node ran, into a node
  *   temporary ({@link attentionHeadMajorCopies}) — the graph's work byte for byte.
+ *
+ * O is written head-major as declared, except where the node also absorbed the permute after it
+ * (`o`). The fusion pass decides that from this same `attentionRoute`, only for the online kernel,
+ * which then stores O token-major `[B, M, H, D]` itself (the `bshd` store — only the address
+ * changes). MUST: `o` on any other route fails loudly ({@link attentionHeadMajorCopies}); no O
+ * temporary or copy path exists.
  *
  * MUST: ① and ③ are one workgroup = one tile, so exceeding the limit fails loudly on all three axes
  * ({@link tiledWorkgroups}). Clamping would drop tiles and leave part of O unwritten (with a
@@ -700,8 +722,9 @@ export const buildAttention = async (
   // shape and device, so S is never materialised and none of the three dispatches below run. The
   // guards above apply unchanged (the requested mode is a8).
   // The token-major operands this route cannot read itself, copied to head-major node temporaries
-  // (the one function shared with the estimate). The online route has none.
-  const copies = attentionHeadMajorCopies(tokenMajor, route, step.inputShapes);
+  // (the one function shared with the estimate, which also rejects a token-major O off the online
+  // route). The online route has none.
+  const copies = attentionHeadMajorCopies(tokenMajor, route, step.inputShapes, where);
   const layout: AttentionLayout = {
     q: tokenMajorIns[0] && copies.q === undefined,
     k: tokenMajorIns[1] && copies.k === undefined,
@@ -716,7 +739,7 @@ export const buildAttention = async (
       binds,
       outs[0],
       { batch, rows, cols, depth },
-      { scale, reduce: route.online, where },
+      { scale, reduce: route.online, where, output: tokenMajor?.o === true ? "bshd" : "bhsd" },
       layout,
     );
     return;
@@ -1827,6 +1850,9 @@ const transposeHeadMajorValues = async (
  * on the dequant side — ADR 0023).
  * MUST: the temporaries are released at the end of the node in reverse allocation order (ADR 0004 —
  * the same closure as the a8 path).
+ * With a token-major O (`run.output` `bshd` — the node absorbed the permute after it, perf-ledger F-3
+ * A4) the kernel stores O token-major directly, with H (`layout.heads`) in its uniform; only the store
+ * address changes.
  */
 const buildAttentionOnline = async (
   face: RecipeBuildFace,
@@ -1834,7 +1860,12 @@ const buildAttentionOnline = async (
   binds: readonly BindingSource[],
   out: BindingSource,
   shape: AttentionShape,
-  run: { readonly scale: number; readonly reduce: AttentionOnlineReduce; readonly where: string },
+  run: {
+    readonly scale: number;
+    readonly reduce: AttentionOnlineReduce;
+    readonly where: string;
+    readonly output: AttentionOnlineOutput;
+  },
   layout: AttentionLayout,
 ): Promise<void> => {
   const { batch, rows, cols, depth } = shape;
@@ -1845,12 +1876,12 @@ const buildAttentionOnline = async (
   // The integer dot-product variant follows the same decision as the a8 kernels (the per-device
   // canary — SessionState.attentionI8a8Dot); both variants are bit-identical.
   const dp4a = face.state.attentionI8a8Dot === "dp4a";
-  const key = attentionOnlineI8a8Key(dp4a, depth, run.reduce);
+  const key = attentionOnlineI8a8Key(dp4a, depth, run.reduce, run.output);
   const {
     pipeline,
     layout: bindLayout,
     roles,
-  } = await face.state.cache.get(key, attentionOnlineI8a8Wgsl(dp4a, depth, run.reduce));
+  } = await face.state.cache.get(key, attentionOnlineI8a8Wgsl(dp4a, depth, run.reduce, run.output));
   for (const window of planAttentionOnlineWindows(rows, { batch, cols, depth })) {
     builder.dispatch({
       key,
@@ -1858,7 +1889,13 @@ const buildAttentionOnline = async (
       layout: bindLayout,
       roles,
       params: face.writeParams(
-        attentionOnlineI8a8Params(rows, cols, window.offset, run.scale),
+        attentionOnlineI8a8Params(
+          rows,
+          cols,
+          window.offset,
+          run.scale,
+          run.output === "bshd" ? layout.heads : undefined,
+        ),
         PARAMS_UNIFORM_USAGE,
       ),
       bindings: [

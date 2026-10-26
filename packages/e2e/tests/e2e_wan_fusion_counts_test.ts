@@ -57,6 +57,12 @@ const wanShapes = (graph: IrGraph, sequence: number): Readonly<Record<string, re
   );
 
 /**
+ * Device facts that hold the online kernel at the DiT's D 128 (subgroups and 48 KiB of workgroup
+ * storage — the sg32 form needs 31,232 B).
+ */
+const ONLINE_DEVICE = { subgroups: true, maxComputeWorkgroupStorageSize: 48 * 1024 } as const;
+
+/**
  * The three Wan2.1 components. The counts are frozen from measurements (2026-10-03; rope from
  * 2026-10-24; attentionPermute and rmsNormRope from 2026-10-25):
  *
@@ -76,8 +82,13 @@ const wanShapes = (graph: IrGraph, sequence: number): Readonly<Record<string, re
  *     with no decomposed spelling.
  *   - **attentionPermute 180 under `attentionCompute: "a8"` only**, on both weight seats: each of
  *     the 60 attentions (30 self, 30 cross) absorbs the `[0, 2, 1, 3]` permutes of q, k and v right
- *     before it (perf-ledger F-3 A4 / F-8 — H = 12, D = 128); the permute of O after it stays a
- *     node. The f32 attention seat absorbs nothing.
+ *     before it (perf-ledger F-3 A4 / F-8 — H = 12, D = 128). On the seats that store S (s16, and S
+ *     in f32) the permute of O after it stays a node. The f32 attention seat absorbs nothing.
+ *   - **attentionPermute 240 on a user-chosen online seat** (`attentionScoreStorage: "none"` on a
+ *     device that holds the online kernel; counted 2026-10-26), on both weight seats: every
+ *     attention takes the online route (D 128; the key count — S for self-attention, the 512 text
+ *     tokens for cross-attention — is a multiple of 4 at every S checked here), so it also absorbs
+ *     the permute of O (perf-ledger F-3 A4).
  *   - **linearPrologue 31 on the i8 seat under `linearCompute: "a8"`** (counted 2026-10-25): the
  *     gelu_tanh folded into the step ① of the i8 linear that reads it (perf-ledger F-4) — the FFN
  *     down projection of the 30 blocks (K 8,960) and the text embedder's second linear (K 1,536).
@@ -91,7 +102,7 @@ const wanShapes = (graph: IrGraph, sequence: number): Readonly<Record<string, re
  * same reading as the Irodori DiT gate).
  */
 test.skipIf(!WAN_AVAILABLE)(
-  "the real Wan2.1 grabs DiT silu 2 / rmsNormRope 60 (plus linearPrologue 31 on the i8 seat under a8, and attentionPermute 180 under the a8 attention seat) and the VAE chunk graphs' silu 29 / upsample2x 3 per run (adaln is a different spelling: 0)",
+  "the real Wan2.1 grabs DiT silu 2 / rmsNormRope 60 (plus linearPrologue 31 on the i8 seat under a8, and attentionPermute 180 on the a8 attention seats that store S, 240 on the online seat) and the VAE chunk graphs' silu 29 / upsample2x 3 per run (adaln is a different spelling: 0)",
   async () => {
     const transformer = await readWanGraph("transformer");
     const transformerI8 = await readWanGraph("transformer", "i8");
@@ -120,6 +131,30 @@ test.skipIf(!WAN_AVAILABLE)(
         attn8(transformer),
         { ...counts, attentionPermute: 180 },
         `transformer S=${sequence} f16 seat a8 attention`,
+      );
+      // A user-chosen online seat: attentionCompute "a8" × attentionScoreStorage "none".
+      const online = (graph: IrGraph) =>
+        fusionCounts(
+          graph,
+          wanShapes(graph, sequence),
+          undefined,
+          false,
+          false,
+          false,
+          "a8",
+          "a8",
+          "none",
+          ONLINE_DEVICE,
+        );
+      assertEquals(
+        online(transformerI8),
+        { ...counts, linearPrologue: 31, attentionPermute: 240 },
+        `transformer S=${sequence} i8 seat a8 attention, online`,
+      );
+      assertEquals(
+        online(transformer),
+        { ...counts, attentionPermute: 240 },
+        `transformer S=${sequence} f16 seat a8 attention, online`,
       );
     }
     for (const name of ["vae_decoder_first", "vae_decoder_next"]) {

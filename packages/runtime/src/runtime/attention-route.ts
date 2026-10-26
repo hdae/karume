@@ -144,3 +144,17 @@ export const attentionRoute = (
       seats.attentionScoreStorage === "f16" && attentionScoreUsesF16(depth, cols) ? "f16" : "f32",
   };
 };
+
+/**
+ * The device facts to pass to {@link attentionRoute} on a seat whose route never reads them: a device
+ * with neither subgroups nor workgroup storage.
+ *
+ * MUST: only on a seat other than `attentionCompute` `"a8"` × `attentionScoreStorage` `"none"`.
+ * `attentionRoute` reads the device facts only on that seat (to choose the online kernel's reduction
+ * form), so elsewhere this stand-in cannot change the route. On that seat the route depends on the
+ * device, so a caller without the real facts fails loudly instead of passing this.
+ */
+export const UNREAD_ATTENTION_DEVICE: AttentionDeviceFacts = {
+  subgroups: false,
+  maxComputeWorkgroupStorageSize: 0,
+};

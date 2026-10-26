@@ -2359,6 +2359,10 @@ export class Session {
       linearGemvReduce: this.#state.linearGemvReduce,
       linearCompute: this.#state.linearCompute,
       attentionCompute: this.#state.attentionCompute,
+      // The output permute is absorbed only on the online route, decided by the same attentionRoute
+      // buildAttention calls on these seats and device facts (perf-ledger F-3 A4).
+      attentionScoreStorage: this.#state.attentionScoreStorage,
+      attentionDevice: this.#state.attentionDevice,
       ...(weightLayouts === undefined ? {} : { weightLayouts }),
       rmsNormReduce: this.#state.rmsNormReduce,
       outputNames: this.#state.outputNames,

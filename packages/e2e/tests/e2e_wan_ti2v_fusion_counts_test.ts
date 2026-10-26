@@ -59,6 +59,12 @@ const solvedShapes = (
   );
 
 /**
+ * Device facts that hold the online kernel at the DiT's D 128 (subgroups and 48 KiB of workgroup
+ * storage — the sg32 form needs 31,232 B).
+ */
+const ONLINE_DEVICE = { subgroups: true, maxComputeWorkgroupStorageSize: 48 * 1024 } as const;
+
+/**
  * The Wan2.2 DiT (30 blocks + the head), measured 2026-10-24:
  *
  * - **rmsNormRope 60** (counted 2026-10-25): the q and k prologues of the 30 self-attention blocks,
@@ -75,8 +81,12 @@ const solvedShapes = (
  *   condition — ADR 0121 decision 3).
  * - **attentionPermute 180, under `attentionCompute: "a8"` only** (counted 2026-10-25): each of
  *   the 60 attentions (30 self, 30 cross) absorbs the `[0, 2, 1, 3]` permutes of q, k and v right
- *   before it (perf-ledger F-3 A4 / F-8); the permute of O after it stays a node. The f32 attention
- *   seat absorbs nothing.
+ *   before it (perf-ledger F-3 A4 / F-8). On the seats that store S (s16, and S in f32) the permute
+ *   of O after it stays a node. The f32 attention seat absorbs nothing.
+ * - **attentionPermute 240 on the online seat** (`attentionScoreStorage: "none"` on a device that
+ *   holds the online kernel; counted 2026-10-26): every attention takes the online route (D 128,
+ *   and its key count — S for self-attention, the text tokens for cross-attention — is a multiple of
+ *   4 in every case checked here), so it also absorbs the permute of O (perf-ledger F-3 A4).
  * - **linearPrologue 31, under `linearCompute: "a8"` only** (counted 2026-10-25): the gelu_tanh
  *   folded into the step ① of the i8 linear that reads it (perf-ledger F-4) — the FFN down
  *   projection of the 30 blocks (K 14,336) and the text embedder's second linear (K 3,072). The
@@ -88,7 +98,7 @@ const solvedShapes = (
  * that notices.
  */
 test.skipIf(!WAN22_AVAILABLE)(
-  "the real Wan2.2 DiT grabs rmsNormRope 60 / adaln 61 / gatedResidual 60 / silu 4 per run (plus linearPrologue 31 under a8, and attentionPermute 180 under the a8 attention seat), and the VAE chunk graphs keep their counts",
+  "the real Wan2.2 DiT grabs rmsNormRope 60 / adaln 61 / gatedResidual 60 / silu 4 per run (plus linearPrologue 31 under a8, and attentionPermute 180 on the a8 attention seats that store S, 240 on the online seat), and the VAE chunk graphs keep their counts",
   async () => {
     const transformer = await readWan22Graph("transformer", "i8");
     for (const sequence of [192, 7920]) {
@@ -100,12 +110,30 @@ test.skipIf(!WAN22_AVAILABLE)(
         { ...counts, linearPrologue: 31 },
         `transformer S=${sequence} a8`,
       );
-      // The attn8 presets (s16 and online): linearCompute and attentionCompute "a8".
-      assertEquals(
-        fusionCounts(transformer, shapes, undefined, false, false, false, "a8", "a8"),
-        { ...counts, linearPrologue: 31, attentionPermute: 180 },
-        `transformer S=${sequence} a8 attention`,
-      );
+      // The attn8 presets (s16 and online) and the a8 seat with S in f32: linearCompute and
+      // attentionCompute "a8".
+      for (const [seat, storage, absorbed] of [
+        ["S in f32", "f32", 180],
+        ["s16", "f16", 180],
+        ["online", "none", 240],
+      ] as const) {
+        assertEquals(
+          fusionCounts(
+            transformer,
+            shapes,
+            undefined,
+            false,
+            false,
+            false,
+            "a8",
+            "a8",
+            storage,
+            ONLINE_DEVICE,
+          ),
+          { ...counts, linearPrologue: 31, attentionPermute: absorbed },
+          `transformer S=${sequence} a8 attention, ${seat}`,
+        );
+      }
     }
     // The VAE graphs have none of the DiT forms: SiLU everywhere, the spatial nearest ×2 in the
     // decoder chunks. Both seats of the decoder carry the same node order.

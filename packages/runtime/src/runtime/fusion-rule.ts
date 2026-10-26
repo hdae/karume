@@ -9,7 +9,9 @@
  */
 
 import type { PrologueUnaryOp } from "../codegen/elementwise.ts";
+import type { ScoreStorage } from "../kernels/score-storage.ts";
 import { outputCountOf, WHERE_OP } from "../ops.ts";
+import type { AttentionDeviceFacts } from "./attention-route.ts";
 import type { LinearGemvReduce } from "./session-types.ts";
 import { ExecutionError, type NodePlan } from "./plan.ts";
 
@@ -33,7 +35,7 @@ type FusionRuleName =
  * zero-dispatch aliases that **can drop out conditionally** (`aliasesInput` of {@link ExecStep}),
  * the fixed SRQs handed over as packed int8 activations (ADR 0105), the producers folded into a
  * linear's step ① ({@link LinearPrologue} — one per folded pair), and the permutes an attention
- * absorbs ({@link AttentionTokenMajor} — one per absorbed permute, so up to three per attention).
+ * absorbs ({@link AttentionTokenMajor} — one per absorbed permute, so up to four per attention).
  * Reshape aliasing is unconditional and is not counted (it cannot drop out = nothing to observe).
  */
 export type FusionCounterName =
@@ -187,33 +189,36 @@ export type LinearPrologue = {
 };
 
 /**
- * The operands of a fused attention that are read **token-major** (perf-ledger F-3 A4 / F-8): the
- * attention absorbed the `[0, 2, 1, 3]` permute that turned a token-major `[B, S, H, D]` tensor into
- * its head-major `[B, H, S, D]` operand (`q` / `k` / `v`), so the permute's copy is never
- * materialised as a node output. The output is always written head-major as declared (the permute
- * after the attention stays a node — `attentionPermutesAt` in {@link "./fusion.ts"} gives the reason).
+ * The operands of a fused attention that are read or written **token-major** (perf-ledger F-3 A4 /
+ * F-8): the attention absorbed the `[0, 2, 1, 3]` permute that turned a token-major `[B, S, H, D]`
+ * tensor into its head-major `[B, H, S, D]` operand (`q` / `k` / `v`), or the one that turned its
+ * head-major output back (`o`), so the permute's copy is never materialised as a node output.
  *
  * The node step's `plan` is the attention's with each absorbed operand **re-pointed to the permute's
- * input** (name, token-major shape and dtype). The absorbed permutes have no step, so the release
+ * input** (name, token-major shape and dtype) and, with `o`, its output re-pointed to the output
+ * permute's output (name and `[B, M, H, D]` shape). The absorbed permutes have no step, so the release
  * bookkeeping stays the one path of a plain node (`plan.node.ins`): each permute's input trades the
  * permute's use for the attention's, and the absorbed values (one use, not graph outputs) are never
  * defined.
- * MUST: acceptance is decided in one place, `planFusions` in {@link "./fusion.ts"}, from the
- * attention seat alone ({@link FusionContext.attentionCompute} `"a8"`), not from the route: the
- * attention recipe honours every flag on every route an a8 seat can take (the a8 quantisation reads a
+ * MUST: acceptance is decided in one place, `planFusions` in {@link "./fusion.ts"}. `q` / `k` / `v`
+ * from the attention seat alone ({@link FusionContext.attentionCompute} `"a8"`), not from the route:
+ * the attention recipe honours them on every route an a8 seat can take (the a8 quantisation reads a
  * token-major q / k / v itself, and a stage the shape keeps off i8a8 makes the head-major copy the
- * permute made, as a node temporary). A node other than a fused attention that carries it would read
- * the operands in the wrong layout — a silent wrong value — so it fails loudly.
+ * permute made, as a node temporary). `o` only where `attentionRoute` chooses the online kernel for
+ * the node, the one route that stores O token-major itself; any other route that receives `o` fails
+ * loudly (no O temporary or copy path exists). A node other than a fused attention that carries the
+ * annotation would read the operands in the wrong layout — a silent wrong value — so it fails loudly.
  */
 export type AttentionTokenMajor = {
   readonly q: boolean;
   readonly k: boolean;
   readonly v: boolean;
+  readonly o: boolean;
 };
 
 /** The number of permutes an attention absorbed (the `attentionPermute` counter's increment). */
 export const absorbedPermutes = (tokenMajor: AttentionTokenMajor): number =>
-  [tokenMajor.q, tokenMajor.k, tokenMajor.v].filter(Boolean).length;
+  [tokenMajor.q, tokenMajor.k, tokenMajor.v, tokenMajor.o].filter(Boolean).length;
 
 type NodeStep = {
   readonly kind: "node";
@@ -235,8 +240,9 @@ type NodeStep = {
   readonly prologue?: LinearPrologue;
   /**
    * The permutes this attention absorbed (perf-ledger F-3 A4 / F-8). `undefined` = every operand is
-   * read head-major as declared, as before. One node step then stands for the absorbed input
-   * permutes (the run immediately before it in node order) and the attention.
+   * read and written head-major as declared, as before. One node step then stands for the absorbed
+   * input permutes (the run immediately before it in node order), the attention and, with `o`, the
+   * output permute right after it.
    */
   readonly tokenMajor?: AttentionTokenMajor;
 };
@@ -312,6 +318,24 @@ export type FusionContext = {
    * ({@link AttentionTokenMajor}); omitted, nothing is absorbed.
    */
   readonly attentionCompute?: "f32" | "f16" | "a8";
+  /**
+   * The storage form of S (`SessionOptions.attentionScoreStorage` — a session knob; omitted =
+   * `"f32"`). With {@link attentionCompute} and {@link attentionDevice} it is what `attentionRoute`
+   * reads to decide whether a fused attention takes the online kernel, the only route on which it
+   * absorbs the permute after it (`o` of {@link AttentionTokenMajor}).
+   */
+  readonly attentionScoreStorage?: ScoreStorage;
+  /**
+   * The device facts of the online kernel's route (ADR 0132 decision 5 — the executor passes the ones
+   * it fixes once per Session for `buildAttention`, the estimate `EstimateOptions.attentionDevice`).
+   * Device facts in the context have a precedent in {@link limits}: they are inputs that decide the
+   * plan, fixed per device, not measurements.
+   * MUST: present when the seat is `attentionCompute` `"a8"` × `attentionScoreStorage` `"none"`, the
+   * only seat on which the route reads them; a decision that needs them fails loudly without them
+   * (guessing a device would decide the output permute for a route the device may not take). Not
+   * read otherwise.
+   */
+  readonly attentionDevice?: AttentionDeviceFacts;
   readonly weightLayouts?: ReadonlyMap<string, FusionWeightLayout>;
   readonly rmsNormReduce?: "workgroup" | "subgroup32";
 };

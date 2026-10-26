@@ -27,7 +27,9 @@ import {
 import { siluKey } from "../src/kernels/silu.ts";
 import { SAFE_SOFTMAX_KEY } from "../src/kernels/softmax.ts";
 import { UPSAMPLE_2X_KEY } from "../src/kernels/upsample2x.ts";
+import { type AttentionDeviceFacts, attentionRoute } from "../src/runtime/attention-route.ts";
 import {
+  type AttentionTokenMajor,
   type ExecStep,
   FUSION_RULES,
   type FusionPlan,
@@ -2216,6 +2218,18 @@ type AttentionPermuteOptions = {
   readonly internalInputs?: boolean;
   /** Head count H (default 2 — H = 1 makes the permutes element-order-preserving). */
   readonly heads?: number;
+  /** Head width D (default 8). */
+  readonly d?: number;
+  /** Key count N (default 6). */
+  readonly n?: number;
+  /** The output permute's dims (default [0, 2, 1, 3]; its output is shaped from them). */
+  readonly oDims?: readonly number[];
+  /** The attention's output gets a second consumer. */
+  readonly oExtraConsumer?: boolean;
+  /** The attention's output is a graph output too. */
+  readonly oGraphOutput?: boolean;
+  /** An unrelated node between the attention and the output permute. */
+  readonly gapAfter?: boolean;
 };
 
 const ATTENTION_PERMUTE = { b: 1, s: 5, n: 6, d: 8 } as const;
@@ -2226,7 +2240,9 @@ const ATTENTION_PERMUTE = { b: 1, s: 5, n: 6, d: 8 } as const;
  */
 const attentionPermuteGraph = (options: AttentionPermuteOptions = {}): DeclarationJson => {
   const dtype = "f32";
-  const { b, s, n, d } = ATTENTION_PERMUTE;
+  const { b, s } = ATTENTION_PERMUTE;
+  const n = options.n ?? ATTENTION_PERMUTE.n;
+  const d = options.d ?? ATTENTION_PERMUTE.d;
   const h = options.heads ?? 2;
   const permuted = options.permuted ?? ["q", "k", "v"];
   const outputPermute = options.outputPermute ?? true;
@@ -2309,13 +2325,22 @@ const attentionPermuteGraph = (options: AttentionPermuteOptions = {}): Declarati
   if (options.gapBefore) nodes.push(gap("gap_before"));
   values.o = { dtype, shape: [b, h, s, d] };
   nodes.push({ op: "attention", ins: attentionIns, outs: ["o"], attrs: { scale: 0.125 } });
+  if (options.gapAfter) nodes.push(gap("gap_after"));
   if (outputPermute) {
-    values.ot = { dtype, shape: [b, s, h, d] };
-    nodes.push({ op: "permute", ins: ["o"], outs: ["ot"], attrs: { dims: [0, 2, 1, 3] } });
+    const oDims = options.oDims ?? [0, 2, 1, 3];
+    const headMajorO = [b, h, s, d];
+    values.ot = { dtype, shape: oDims.map((axis) => headMajorO[axis]) };
+    nodes.push({ op: "permute", ins: ["o"], outs: ["ot"], attrs: { dims: [...oDims] } });
     outputs.push("ot");
   } else {
     outputs.push("o");
   }
+  if (options.oExtraConsumer) {
+    values.o_neg = { dtype, shape: [b, h, s, d] };
+    nodes.push({ op: "neg", ins: ["o"], outs: ["o_neg"], attrs: {} });
+    outputs.push("o_neg");
+  }
+  if (options.oGraphOutput) outputs.push("o");
   if (options.qExtraConsumer) {
     values.q_neg = { dtype, shape: [...headMajor.q] };
     nodes.push({ op: "neg", ins: ["q"], outs: ["q_neg"], attrs: {} });
@@ -2335,8 +2360,15 @@ const attentionPermuteGraph = (options: AttentionPermuteOptions = {}): Declarati
   };
 };
 
-/** The attention seat the fusion context carries (as the executor passes `attentionCompute`). */
-type AttentionSeat = { readonly attentionCompute?: "f32" | "f16" | "a8" };
+/**
+ * The attention seat the fusion context carries (as the executor passes `attentionCompute`,
+ * `attentionScoreStorage` and the Session's device facts).
+ */
+type AttentionSeat = {
+  readonly attentionCompute?: "f32" | "f16" | "a8";
+  readonly attentionScoreStorage?: "f32" | "f16" | "none";
+  readonly attentionDevice?: AttentionDeviceFacts;
+};
 
 /** The a8 attention seat — the only one on which the attention absorbs permutes. */
 const A8_SEAT: AttentionSeat = { attentionCompute: "a8" };
@@ -2374,7 +2406,7 @@ test("on an a8 attention seat a fused attention absorbs the [0, 2, 1, 3] permute
   const plan = fuseAttentionPermutes();
   assertEquals(outline(plan.steps), ["attention", "permute"]);
   const step = attentionStepOf(plan, "Wan form");
-  assertEquals(step.tokenMajor, { q: true, k: true, v: true });
+  assertEquals(step.tokenMajor, { q: true, k: true, v: true, o: false });
   assertEquals(step.plan.node.ins, ["qt", "kt", "vt"], "re-pointed to the permutes' inputs");
   assertEquals(step.plan.inputShapes, [
     [b, s, 2, d],
@@ -2407,7 +2439,7 @@ test("only the a8 attention seat absorbs: on an f32, an f16 or an unset seat eve
   }
 });
 
-test("the permute after the attention is never absorbed, even on an a8 seat: it stays the next node, reading the attention's head-major output", () => {
+test("on an a8 seat whose route stores S (the three a8 dispatches), the permute after the attention is not absorbed: it stays the next node, reading the attention's head-major output", () => {
   for (const [label, permuted] of [
     ["no input permute", []],
     ["the anima form (v only)", ["v"]],
@@ -2445,7 +2477,12 @@ test("the attention absorbs any subset of its input permutes that qualifies: eac
     const step = attentionStepOf(plan, label);
     assertEquals(
       step.tokenMajor,
-      { q: permuted.includes("q"), k: permuted.includes("k"), v: permuted.includes("v") },
+      {
+        q: permuted.includes("q"),
+        k: permuted.includes("k"),
+        v: permuted.includes("v"),
+        o: false,
+      },
       label,
     );
     assertEquals(step.plan.node.ins, ins, `${label}: ins`);
@@ -2496,31 +2533,31 @@ test("attention permute counterexamples keep the permute that does not qualify a
     string,
     AttentionPermuteOptions,
     readonly string[],
-    { readonly q: boolean; readonly k: boolean; readonly v: boolean } | undefined,
+    AttentionTokenMajor | undefined,
   ])[] = [
     [
       "q permuted by [0, 3, 2, 1]",
       { qDims: [0, 3, 2, 1] },
       ["permute", "attention", "permute"],
-      { q: false, k: true, v: true },
+      { q: false, k: true, v: true, o: false },
     ],
     [
       "the permuted q has a second consumer",
       { qExtraConsumer: true },
       ["permute", "attention", "permute", "neg"],
-      { q: false, k: true, v: true },
+      { q: false, k: true, v: true, o: false },
     ],
     [
       "the permuted q is a graph output",
       { qGraphOutput: true },
       ["permute", "attention", "permute"],
-      { q: false, k: true, v: true },
+      { q: false, k: true, v: true, o: false },
     ],
     [
       "a node between the q permute and the rest of the run",
       { gapBetween: true },
       ["permute", "neg", "attention", "permute"],
-      { q: false, k: true, v: true },
+      { q: false, k: true, v: true, o: false },
     ],
     [
       "a node between the input permutes and the attention",
@@ -2532,7 +2569,7 @@ test("attention permute counterexamples keep the permute that does not qualify a
       "a permute feeding the mask, first in the run",
       { mask: "first" },
       ["permute", "attention", "permute"],
-      { q: true, k: true, v: true },
+      { q: true, k: true, v: true, o: false },
     ],
     [
       "a permute feeding the mask, last in the run (it breaks the run before it)",
@@ -2615,8 +2652,262 @@ test("nothing around a states-form attention or a non-f32 permute is absorbed", 
     const replaced = nodes.map((plan, index) => (index === 0 ? replace(plan) : plan));
     const fused = planFusions(replaced, context);
     assertEquals(outline(fused.steps), ["permute", "attention", "permute"], label);
-    assertEquals(attentionStepOf(fused, label).tokenMajor, { q: false, k: true, v: true }, label);
+    assertEquals(
+      attentionStepOf(fused, label).tokenMajor,
+      { q: false, k: true, v: true, o: false },
+      label,
+    );
   }
+});
+
+// The output permute on the online route (perf-ledger F-3 A4): the online kernel's workgroup storage
+// is 18,944 / 31,232 B (sg32) and 23,040 / 35,328 B (wg) at D 64 / 128.
+
+/** Subgroups and 32 KiB of workgroup storage: the sg32 form at D 64 and 128. */
+const SG32_DEVICE: AttentionDeviceFacts = {
+  subgroups: true,
+  maxComputeWorkgroupStorageSize: 32768,
+};
+/** No subgroups and 48 KiB: the wg form only. */
+const WG_DEVICE: AttentionDeviceFacts = { subgroups: false, maxComputeWorkgroupStorageSize: 49152 };
+/** No subgroups and 16 KiB: neither form fits, so the route is the three a8 dispatches. */
+const NO_ONLINE_DEVICE: AttentionDeviceFacts = {
+  subgroups: false,
+  maxComputeWorkgroupStorageSize: 16384,
+};
+
+/** The online seat (`attentionCompute` "a8" × `attentionScoreStorage` "none") on `device`. */
+const onlineSeat = (device: AttentionDeviceFacts): AttentionSeat => ({
+  attentionCompute: "a8",
+  attentionScoreStorage: "none",
+  attentionDevice: device,
+});
+
+/** An online-eligible shape: D 64 or 128, N 8 (N % 4 == 0). */
+const onlineShape = (d: 64 | 128): AttentionPermuteOptions => ({ d, n: 8 });
+
+test("on the online route (a8 × 'none', D 64 / 128, N % 4 == 0, a device with the sg32 or only the wg form) the attention also absorbs the permute after it: one node step writes the token-major output and the permute has no step", () => {
+  const { b, s } = ATTENTION_PERMUTE;
+  for (const [label, d, device, reduce] of [
+    ["D 64, sg32", 64, SG32_DEVICE, "sg32"],
+    ["D 128, sg32", 128, SG32_DEVICE, "sg32"],
+    ["D 64, wg only", 64, WG_DEVICE, "wg"],
+    ["D 128, wg only", 128, WG_DEVICE, "wg"],
+  ] as const) {
+    // Precondition: the case takes the online kernel in the form its label names.
+    assertEquals(
+      attentionRoute({ attentionCompute: "a8", attentionScoreStorage: "none" }, d, 8, device)
+        .online,
+      reduce,
+      `${label}: route`,
+    );
+    const plan = fuseAttentionPermutes(onlineShape(d), onlineSeat(device));
+    assertEquals(outline(plan.steps), ["attention"], label);
+    const step = attentionStepOf(plan, label);
+    assertEquals(step.tokenMajor, { q: true, k: true, v: true, o: true }, label);
+    assertEquals(step.plan.node.ins, ["qt", "kt", "vt"], `${label}: ins`);
+    assertEquals(step.plan.node.outs, ["ot"], `${label}: re-pointed to the permute's output`);
+    assertEquals(
+      step.plan.outputs,
+      [{ name: "ot", shape: [b, s, 2, d], dtype: "f32" }],
+      `${label}: token-major output`,
+    );
+    assertEquals(plan.counts, { ...NO_FUSIONS, attentionPermute: 4 }, `${label}: counters`);
+  }
+});
+
+test("on the online route the output permute is absorbed on its own too (no input permute), and with any subset of the input permutes", () => {
+  for (const [label, permuted, ins] of [
+    ["no input permute", [], ["q", "k", "v"]],
+    ["the anima form (v only)", ["v"], ["q", "k", "vt"]],
+    ["q and k", ["q", "k"], ["qt", "kt", "v"]],
+  ] as const) {
+    const plan = fuseAttentionPermutes({ ...onlineShape(128), permuted }, onlineSeat(SG32_DEVICE));
+    assertEquals(outline(plan.steps), ["attention"], label);
+    const step = attentionStepOf(plan, label);
+    assertEquals(
+      step.tokenMajor,
+      {
+        q: permuted.some((operand) => operand === "q"),
+        k: permuted.some((operand) => operand === "k"),
+        v: permuted.some((operand) => operand === "v"),
+        o: true,
+      },
+      label,
+    );
+    assertEquals(step.plan.node.ins, ins, `${label}: ins`);
+    assertEquals(step.plan.node.outs, ["ot"], `${label}: outs`);
+    assertEquals(plan.counts.attentionPermute, permuted.length + 1, `${label}: counter`);
+  }
+});
+
+test("off the online route the permute after the attention stays a node, and the input permutes are absorbed as before: the three a8 dispatches (S in f32 / f16), the f32 / f16 seats, and an online seat whose shape (D 96, N % 4 != 0) or device (neither form) makes the route fall back", () => {
+  const cases: readonly (readonly [string, AttentionPermuteOptions, AttentionSeat, boolean])[] = [
+    [
+      "a8, S in f32",
+      onlineShape(64),
+      { attentionCompute: "a8", attentionScoreStorage: "f32", attentionDevice: SG32_DEVICE },
+      true,
+    ],
+    [
+      "a8, S in f16 (s16)",
+      onlineShape(128),
+      { attentionCompute: "a8", attentionScoreStorage: "f16", attentionDevice: SG32_DEVICE },
+      true,
+    ],
+    [
+      "f32 seat",
+      onlineShape(64),
+      { attentionCompute: "f32", attentionScoreStorage: "f32", attentionDevice: SG32_DEVICE },
+      false,
+    ],
+    [
+      "f16 seat, S in f16",
+      onlineShape(64),
+      { attentionCompute: "f16", attentionScoreStorage: "f16", attentionDevice: SG32_DEVICE },
+      false,
+    ],
+    ["online seat, D 96", { d: 96, n: 8 }, onlineSeat(SG32_DEVICE), true],
+    ["online seat, N 6 (N % 4 != 0)", { d: 64, n: 6 }, onlineSeat(SG32_DEVICE), true],
+    [
+      "online seat, a device with neither form",
+      onlineShape(64),
+      onlineSeat(NO_ONLINE_DEVICE),
+      true,
+    ],
+  ];
+  for (const [label, options, seat, inputsAbsorbed] of cases) {
+    const plan = fuseAttentionPermutes(options, seat);
+    assertEquals(
+      outline(plan.steps),
+      inputsAbsorbed
+        ? ["attention", "permute"]
+        : ["permute", "permute", "permute", "attention", "permute"],
+      label,
+    );
+    const last = plan.steps.at(-1);
+    if (last?.kind !== "node") throw new Error(`${label}: the last step is not a node step`);
+    assertEquals(last.plan.node.ins, ["o"], `${label}: the permute reads the attention's output`);
+    assertEquals(last.tokenMajor, undefined, label);
+    const step = attentionStepOf(plan, label);
+    assertEquals(
+      step.tokenMajor,
+      inputsAbsorbed ? { q: true, k: true, v: true, o: false } : undefined,
+      label,
+    );
+    assertEquals(step.plan.outputs[0].name, "o", `${label}: head-major output`);
+    assertEquals(plan.counts.attentionPermute, inputsAbsorbed ? 3 : 0, `${label}: counter`);
+  }
+});
+
+test("on the online route an output permute that does not match exactly stays a node: other dims, a second use or a graph output of O, a node in between, and a permute that aliases O (H = 1)", () => {
+  for (const [label, options, steps] of [
+    ["the permute's dims are [0, 3, 2, 1]", { oDims: [0, 3, 2, 1] }, ["attention", "permute"]],
+    ["O has a second consumer", { oExtraConsumer: true }, ["attention", "permute", "neg"]],
+    ["O is a graph output", { oGraphOutput: true }, ["attention", "permute"]],
+    [
+      "a node between the attention and the permute",
+      { gapAfter: true },
+      ["attention", "neg", "permute"],
+    ],
+    [
+      "H = 1: the permute keeps the element order of O (an alias)",
+      { heads: 1 },
+      ["attention", "permute"],
+    ],
+  ] as const) {
+    const plan = fuseAttentionPermutes({ ...onlineShape(64), ...options }, onlineSeat(SG32_DEVICE));
+    assertEquals(outline(plan.steps), steps, label);
+    const step = attentionStepOf(plan, label);
+    assertEquals(step.tokenMajor, { q: true, k: true, v: true, o: false }, label);
+    assertEquals(step.plan.outputs[0].name, "o", `${label}: head-major output`);
+    assertEquals(plan.counts.attentionPermute, 3, `${label}: counter`);
+  }
+});
+
+test("on the online route an absorbable [0, 2, 1, 3] permute right after the attention that does not read O is not absorbed, and O's own permute later stays a node", () => {
+  // The unrelated permute has O's head-major shape, so it is the head swap O's permute would be:
+  // only the check that it reads O keeps the attention's output from being re-pointed to it.
+  const graph = attentionPermuteGraph(onlineShape(64));
+  const { b, s } = ATTENTION_PERMUTE;
+  graph.inputs.push({ name: "x", dtype: "f32", shape: [b, 2, s, 64] });
+  graph.values.xt = { dtype: "f32", shape: [b, s, 2, 64] };
+  const attention = graph.nodes.findIndex((node) => node.op === "attention");
+  graph.nodes.splice(attention + 1, 0, {
+    op: "permute",
+    ins: ["x"],
+    outs: ["xt"],
+    attrs: { dims: [0, 2, 1, 3] },
+  });
+  graph.outputs.push("xt");
+  const ir = parse(graph);
+  const plan = planFusions(planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes, {
+    useCounts: countUses(ir),
+    outputNames: new Set(ir.outputs),
+    limits: TEST_LIMITS,
+    ...onlineSeat(SG32_DEVICE),
+  });
+  assertEquals(outline(plan.steps), ["attention", "permute", "permute"]);
+  const step = attentionStepOf(plan, "unrelated permute");
+  assertEquals(step.tokenMajor, { q: true, k: true, v: true, o: false });
+  assertEquals(step.plan.node.outs, ["o"], "head-major output");
+  assertEquals(
+    plan.steps.slice(1).map((next) => (next.kind === "node" ? next.plan.node.ins : [])),
+    [["x"], ["o"]],
+    "both permutes stay nodes on their own inputs",
+  );
+  assertEquals(plan.counts.attentionPermute, 3);
+});
+
+test("the absorbed output permute keeps the total-use accounting exact: O is never consumed or defined, and the attention step defines the permute's output", () => {
+  const graph = attentionPermuteGraph(onlineShape(64));
+  graph.values.res = { dtype: "f32", shape: [1, 5, 2, 64] };
+  graph.nodes.push({ op: "add", ins: ["ot", "qt"], outs: ["res"], attrs: {} });
+  graph.outputs = ["res"];
+  graph.requires.ops = [...new Set(graph.nodes.map((node) => node.op))];
+  const ir = parse(graph);
+  const uses = countUses(ir);
+  const plan = planFusions(planGraph(ir, bindSymbols(ir, adalnInputs(graph))).nodes, {
+    useCounts: uses,
+    outputNames: new Set(ir.outputs),
+    limits: TEST_LIMITS,
+    ...onlineSeat(SG32_DEVICE),
+  });
+  assertEquals(outline(plan.steps), ["attention", "add"]);
+  const consumed = new Map<string, number>();
+  const defined = new Set<string>();
+  for (const step of plan.steps) {
+    const names = step.kind === "node" ? step.plan.node.ins : step.ins;
+    for (const name of names) consumed.set(name, (consumed.get(name) ?? 0) + 1);
+    if (step.kind === "node") for (const out of step.plan.outputs) defined.add(out.name);
+    else defined.add(step.outputName);
+  }
+  for (const absorbed of ["q", "k", "v", "o"]) {
+    assertEquals(uses.get(absorbed), 1, `${absorbed}: the absorbed value had exactly one use`);
+    assertEquals(consumed.get(absorbed), undefined, `${absorbed}: never consumed`);
+    assertEquals(defined.has(absorbed), false, `${absorbed}: never defined`);
+  }
+  for (const [name, count] of uses) {
+    if (["q", "k", "v", "o"].includes(name)) continue;
+    assertEquals(consumed.get(name), count, `total uses of '${name}'`);
+  }
+  assertEquals(defined.has("ot"), true, "the attention step defines the permute's output");
+});
+
+test("on a8 × 'none' the output permute's decision needs the device facts: without attentionDevice it fails loudly, and without an output permute to decide nothing reads them", () => {
+  const seat: AttentionSeat = { attentionCompute: "a8", attentionScoreStorage: "none" };
+  assertThrows(
+    () => fuseAttentionPermutes(onlineShape(64), seat),
+    ExecutionError,
+    "attentionScoreStorage 'none' needs attentionDevice",
+  );
+  const plan = fuseAttentionPermutes({ ...onlineShape(64), outputPermute: false }, seat);
+  assertEquals(attentionStepOf(plan, "no output permute").tokenMajor, {
+    q: true,
+    k: true,
+    v: true,
+    o: false,
+  });
 });
 
 test("no fusion rule's head and no prologue op is permute or attention (the rules and the linear prologue are tried first at each index, so the order cannot change the result)", () => {

@@ -16,6 +16,8 @@
 
 import { isNotFound, stat } from "@karume/test-support/fs";
 import type { IrGraph } from "../../../runtime/src/format/ir.ts";
+import type { ScoreStorage } from "../../../runtime/src/kernels/score-storage.ts";
+import type { AttentionDeviceFacts } from "../../../runtime/src/runtime/attention-route.ts";
 import {
   type FusionCounts,
   type FusionWeightLayout,
@@ -106,6 +108,10 @@ export const fusionCounts = (
   // Likewise the attention's absorbed permutes (perf-ledger F-3 / F-8) fire only on the a8
   // attention seat.
   attentionCompute: "f32" | "a8" = "f32",
+  // The output permute is absorbed only where the route is the online kernel (perf-ledger F-3 A4),
+  // which reads the storage form of S and the device facts.
+  attentionScoreStorage: ScoreStorage = "f32",
+  attentionDevice?: AttentionDeviceFacts,
 ): FusionCounts =>
   planFusions(planGraph(graph, bindSymbols(graph, inputShapes), stateShapes).nodes, {
     useCounts: countUses(graph),
@@ -115,6 +121,8 @@ export const fusionCounts = (
     linearGemvReduce: "parallel",
     linearCompute,
     attentionCompute,
+    attentionScoreStorage,
+    ...(attentionDevice === undefined ? {} : { attentionDevice }),
     weightLayouts: new Map(
       [...planWeightResidency(graph)].flatMap(([name, weight]): [string, FusionWeightLayout][] => {
         // group 長は席が持つ（合流後の宣言からは常駐プランナが導く — 同じ値を 2 度導かない）。

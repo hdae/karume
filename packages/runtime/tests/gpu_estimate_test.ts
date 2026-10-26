@@ -8,12 +8,13 @@
 // の unaccounted 欄が認めている差）。アダプタ無しは明示 SKIP。
 
 import { test } from "vite-plus/test";
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
+import { attentionOnlineI8a8Eligible } from "../src/kernels/attention-online-i8a8.ts";
 import type { PreparedModel, SessionOptions } from "../src/runtime/executor.ts";
 import { planRowBlocks } from "../src/runtime/fusion.ts";
 import { planStateAttention } from "../src/runtime/state-attention-plan.ts";
-import { attentionDeviceFacts } from "../src/runtime/attention-route.ts";
+import { attentionDeviceFacts, attentionRoute } from "../src/runtime/attention-route.ts";
 import {
   bothScenarios,
   decomposedAttentionGraph,
@@ -413,10 +414,11 @@ test.skipIf(!GPU_AVAILABLE)(
 
 /**
  * `permute ×3 → attention → permute` on token-major q / k / v `[B, S, H, D]` (the Wan DiT form): on an
- * a8 seat the three input permutes are absorbed by the attention (perf-ledger F-3 A4 / F-8), so the
- * workspace is the attention step's — its output, the token-major inputs it now reads and the
- * temporaries of its route (the head-major copies of `attentionHeadMajorCopies` included) — and the
- * output permute's.
+ * a8 seat the three input permutes are absorbed by the attention (perf-ledger F-3 A4 / F-8), and on
+ * the online route the output permute too, so the workspace is the attention step's — its output
+ * (token-major where it absorbed the output permute), the token-major inputs it now reads and the
+ * temporaries of its route (the head-major copies of `attentionHeadMajorCopies` included) — and,
+ * off the online route, the output permute's.
  */
 const permutedAttentionModel = (shape: {
   readonly b: number;
@@ -464,6 +466,8 @@ test.skipIf(!GPU_AVAILABLE)(
       readonly name: string;
       readonly options: SessionOptions;
       readonly shape: Parameters<typeof permutedAttentionModel>[0];
+      /** The variant must take the online route (and absorb the output permute) on this device. */
+      readonly online?: true;
     }[] = [
       // ①QK on f32 (D % 4 != 0): copies of q / k, the transposed V
       {
@@ -483,16 +487,45 @@ test.skipIf(!GPU_AVAILABLE)(
         options: { attentionCompute: "a8", attentionScoreStorage: "f16" },
         shape: { b: 2, h: 3, s: 37, n: 44, d: 16 },
       },
-      // no copy at all
+      // no copy at all, and O stored token-major (the output permute absorbed)
       {
         name: "online",
         options: { attentionCompute: "a8", attentionScoreStorage: "none" },
         shape: { b: 2, h: 3, s: 70, n: 68, d: 64 },
+        online: true,
+      },
+      // M ≫ N: O (256 KiB) outgrows the attention's temporaries (74.6 KiB), so a head-major O
+      // next to the permute's output would raise the region total — the estimate has to replay the
+      // absorbed output permute to meet the slot table
+      {
+        name: "online, O larger than the temporaries",
+        options: { attentionCompute: "a8", attentionScoreStorage: "none" },
+        shape: { b: 1, h: 2, s: 512, n: 8, d: 64 },
+        online: true,
       },
     ];
     const gpu = await acquireGpu({ subgroups: "available" });
     try {
       for (const variant of variants) {
+        const { d, n } = variant.shape;
+        const route = attentionRoute(
+          {
+            attentionCompute: variant.options.attentionCompute ?? "f32",
+            attentionScoreStorage: variant.options.attentionScoreStorage ?? "f32",
+          },
+          d,
+          n,
+          attentionDeviceFacts(gpu),
+        );
+        if (variant.online && route.online === undefined) {
+          // The shape is one the online kernel admits, so only the device rules it out.
+          assert(attentionOnlineI8a8Eligible(d, n), `${variant.name}: an online-eligible shape`);
+          console.warn(
+            `[karume] SKIP ${variant.name}: the device holds neither form of the online kernel (sg32 / wg) at D ${d}`,
+          );
+          continue;
+        }
+        assertEquals(route.online !== undefined, variant.online === true, `${variant.name}: route`);
         const model = permutedAttentionModel(variant.shape);
         const { scenarios } = model.estimate({
           maxStorageBufferBindingSize: gpu.limits.maxStorageBufferBindingSize,
@@ -502,7 +535,7 @@ test.skipIf(!GPU_AVAILABLE)(
         });
         const session = await model.createContainerSession(gpu, variant.options);
         try {
-          const { b, h, s, n, d } = variant.shape;
+          const { b, h, s } = variant.shape;
           const inputs = {
             qt: fill([b, s, h, d], (i) => Math.sin(i * 0.3)),
             kt: fill([b, n, h, d], (i) => Math.cos(i * 0.2)),
@@ -511,9 +544,10 @@ test.skipIf(!GPU_AVAILABLE)(
           // The slot backing is built on the second run of one signature (the first runs on the arena).
           for (let step = 0; step < 2; step += 1) await session.run(inputs);
           const diagnostics = session.diagnostics();
+          // The output permute is absorbed where the route is the online kernel (perf-ledger F-3 A4).
           assertEquals(
             diagnostics.lastRunFusions?.attentionPermute,
-            3,
+            variant.online ? 4 : 3,
             `${variant.name}: absorbed`,
           );
           assertEquals(

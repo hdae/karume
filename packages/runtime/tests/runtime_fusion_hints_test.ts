@@ -335,11 +335,15 @@ test("a linear with a folded producer (perf-ledger F-4) is a grabbed pair: no wi
   ]);
 });
 
-test("an attention that absorbed its permutes (perf-ledger F-3 / F-8) is a grabbed window: no window crosses it, and the node index advances by its four nodes (the output permute stays a plain node)", () => {
+/**
+ * `neg → neg` into q, the q / k / v permutes, the attention, O permuted back, then `neg → neg`: the
+ * Wan DiT form between plain chains, at sequence length `s` (S = N) and head width `d` (H = 2).
+ */
+const attentionHintsGraph = (s: number, d: number): DeclarationJson => {
   const dtype = "f32";
-  const token = [1, 5, 2, 8];
-  const head = [1, 2, 5, 8];
-  const graph: DeclarationJson = {
+  const token = [1, s, 2, d];
+  const head = [1, 2, s, d];
+  return {
     format: "karume-ir",
     version: 2,
     requires: { ops: ["attention", "neg", "permute"] },
@@ -370,7 +374,11 @@ test("an attention that absorbed its permutes (perf-ledger F-3 / F-8) is a grabb
       { op: "neg", ins: ["c"], outs: ["d"], attrs: {} },
     ],
   };
-  const { nodes, context } = plan(graph, { x: token, kt: token, vt: token });
+};
+
+test("an attention that absorbed its permutes (perf-ledger F-3 / F-8) is a grabbed window: no window crosses it, and the node index advances by its four nodes (the output permute stays a plain node)", () => {
+  const token = [1, 5, 2, 8];
+  const { nodes, context } = plan(attentionHintsGraph(5, 8), { x: token, kt: token, vt: token });
   const a8: Parameters<typeof planFusions>[1] = { ...context, attentionCompute: "a8" };
   const fused = planFusions(nodes, a8);
   assertEquals(fused.counts.attentionPermute, 3, "precondition: the input permutes are absorbed");
@@ -379,6 +387,24 @@ test("an attention that absorbed its permutes (perf-ledger F-3 / F-8) is a grabb
     "neg,neg@0+2=qt",
     "permute,neg@6+2=c",
     "permute,neg,neg@6+3=d",
+    "neg,neg@7+2=d",
+  ]);
+});
+
+test("an attention that also absorbed its output permute (the online route, perf-ledger F-3 A4) advances the node index by its five nodes", () => {
+  const token = [1, 8, 2, 64];
+  const { nodes, context } = plan(attentionHintsGraph(8, 64), { x: token, kt: token, vt: token });
+  const online: Parameters<typeof planFusions>[1] = {
+    ...context,
+    attentionCompute: "a8",
+    attentionScoreStorage: "none",
+    attentionDevice: { subgroups: true, maxComputeWorkgroupStorageSize: 32768 },
+  };
+  const fused = planFusions(nodes, online);
+  assertEquals(fused.counts.attentionPermute, 4, "precondition: all four permutes are absorbed");
+  // The attention step stands for nodes 2..6; the next run starts at node 7.
+  assertEquals(outline(enumerateUnfusedWindows(fused.steps, online, 3)), [
+    "neg,neg@0+2=qt",
     "neg,neg@7+2=d",
   ]);
 });

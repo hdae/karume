@@ -67,11 +67,12 @@
  * and counted as `linearPrologue`.
  *
  * The same kind of fusion lets a fused attention on an a8 seat absorb the `[0, 2, 1, 3]` permutes
- * that feed its q / k / v (perf-ledger F-3 A4 / F-8 — {@link attentionPermutesAt}): its node step
- * carries {@link AttentionTokenMajor}, its operands are re-pointed to the permutes' token-major
- * inputs, and the permutes have no step. The decision reads the seat, not the route — the attention
- * recipe honours the annotation on every route an a8 seat can take. It is tried after the linear
- * prologue and counted as `attentionPermute` (one per absorbed permute).
+ * that feed its q / k / v and, on the online route, the one after it (perf-ledger F-3 A4 / F-8 —
+ * {@link attentionPermutesAt}): its node step carries {@link AttentionTokenMajor}, its operands and
+ * output are re-pointed to the permutes' token-major inputs / output, and the permutes have no step.
+ * The input permutes are decided from the seat — the attention recipe honours them on every route an
+ * a8 seat can take; the output permute from `attentionRoute`, the recipe's own route decision. It is
+ * tried after the linear prologue and counted as `attentionPermute` (one per absorbed permute).
  *
  * ## Application order
  *
@@ -126,6 +127,7 @@ import type { PrologueUnaryOp } from "../codegen/elementwise.ts";
 import { linearGemvPackedEligible } from "../kernels/linear-gemv.ts";
 import { quantizeRowsPrologueEligible } from "../kernels/quantize-rows.ts";
 import { numel, permuteDims, STATIC_QUANTIZE_OP, staticQuantizeScale } from "../ops.ts";
+import { attentionRoute, UNREAD_ATTENTION_DEVICE } from "./attention-route.ts";
 import { ADALN_RULE } from "./fusion-rules/adaln.ts";
 import { GATED_RESIDUAL_RULE } from "./fusion-rules/gated-residual.ts";
 import { LINEAR_STATIC_QUANTIZE_RULE } from "./fusion-rules/linear-static-quantize.ts";
@@ -365,33 +367,67 @@ const isHeadSwap = (plan: NodePlan, aliases: ReadonlySet<NodePlan>): boolean =>
   !aliases.has(plan);
 
 /**
+ * Whether `attention` (the declared head-major node) takes the online kernel: the same
+ * `attentionRoute` that `buildAttention` calls, on the Session's seats and device facts, at its D and
+ * key count N.
+ *
+ * MUST: on `"a8"` × `"none"` the route depends on the device, so without
+ * {@link FusionContext.attentionDevice} this fails loudly instead of guessing one (the same reason as
+ * the estimate's entry check of `EstimateOptions.attentionDevice`).
+ */
+const takesOnlineRoute = (attention: NodePlan, context: FusionContext): boolean => {
+  const seats = {
+    attentionCompute: context.attentionCompute ?? "f32",
+    attentionScoreStorage: context.attentionScoreStorage ?? "f32",
+  } as const;
+  const [q, k] = attention.inputShapes;
+  let device = context.attentionDevice;
+  if (device === undefined) {
+    if (seats.attentionCompute === "a8" && seats.attentionScoreStorage === "none") {
+      throw new ExecutionError(
+        `attention permute: attention [${q.join(",")}] × [${k.join(",")}]: attentionScoreStorage 'none'` +
+          " needs attentionDevice (whether the attention takes the online kernel, the one route that" +
+          " stores O token-major, depends on the device's subgroups and workgroup-storage limit — ADR 0132)",
+      );
+    }
+    device = UNREAD_ATTENTION_DEVICE;
+  }
+  return attentionRoute(seats, q[3], k[2], device).online !== undefined;
+};
+
+/**
  * The permutes a fused attention absorbs at `index` (perf-ledger F-3 A4 / F-8): the Wan DiTs project
- * q / k / v token-major (`[B, S, H·D]` reshaped to `[B, S, H, D]`) and permute each to head-major
- * `[B, H, S, D]` right before the attention. On an a8 seat the attention then reads the token-major
- * tensors itself (the a8 quantisation reads q / k token-major and builds Vᵀ from a token-major V),
- * and the permutes' copies are never materialised.
+ * q / k / v token-major (`[B, S, H·D]` reshaped to `[B, S, H, D]`), permute each to head-major
+ * `[B, H, S, D]` right before the attention, and permute O back right after it. On an a8 seat the
+ * attention then reads the token-major tensors itself (the a8 quantisation reads q / k token-major
+ * and builds Vᵀ from a token-major V), on the online route it also stores O token-major, and the
+ * permutes' copies are never materialised.
  *
  * The decision is the fusion pass's, the execution the attention recipe's (the split of the linear
  * prologue): the hit is a plain node step of the attention whose absorbed operands are re-pointed to
- * the permutes' inputs, annotated with {@link AttentionTokenMajor}.
+ * the permutes' inputs and whose output, with `o`, is the output permute's, annotated with
+ * {@link AttentionTokenMajor}.
  *
  * MUST: accept only on an a8 attention seat ({@link FusionContext.attentionCompute} — the session
  * knob, no device facts). On a dense seat (f32 / f16) every absorbed permute comes back as the same
  * strided copy inside the attention step: no dispatch is saved, and the token-major input stays live
- * next to its copy for the whole step. The gate is the seat, not the route: inside an a8 seat a stage
- * the shape keeps off i8a8 makes the head-major copy itself (`buildAttention` in
- * recipe-builders/attention.ts), so `attentionRoute` stays the one decision of which kernels run.
- * MUST NOT absorb the permute after the attention (O back to token-major). On the three a8 dispatches
- * ③PV stores O head-major, so the absorbed permute would come back as an O temporary plus the same
- * strided copy; on the online route the kernel could store O token-major with the live bytes
- * unchanged, but the first-fit placement the transient plan (`planTransients`) used then turned the
- * removal of that node into a larger backing (ADR 0040 addendum of 2026-10-25). The placement has
- * changed since (least region growth — ADR 0093 addendum of 2026-10-26); the output permute stays a
- * node until its absorption is measured again under it (perf-ledger F-3).
+ * next to its copy for the whole step. For the input permutes the gate is the seat, not the route:
+ * inside an a8 seat a stage the shape keeps off i8a8 makes the head-major copy itself
+ * (`buildAttention` in recipe-builders/attention.ts).
+ * MUST: absorb the permute after the attention (O back to token-major) **only where the route is the
+ * online kernel** ({@link takesOnlineRoute} — `attentionRoute`, the recipe's own route decision, so
+ * the pass and the recipe cannot disagree). That kernel stores O token-major itself: one dispatch
+ * less, and under the least-growth transient placement (ADR 0093 addendum of 2026-10-26) the backing
+ * does not grow (the Wan2.2 DiT 717.8 / 2,457.2 MiB at S 7,920 / 27,280 either way). MUST NOT absorb
+ * it on any other route: the three a8 dispatches and the dense stages store O head-major (③PV), so
+ * the permute would come back as an O temporary plus the same strided copy — live bytes added (one
+ * O: +92.8 / +319.7 MiB on the Wan2.2 DiT at S 7,920 / 27,280) for no dispatch saved. That path is
+ * deliberately not built, and the recipe and the estimate fail loudly on an `o` that reaches it
+ * (ADR 0040 addendum of 2026-10-26).
  *
  * Accepted only on an exact match (ADR 0040 decision 2). The window is `nodes[index]` onwards:
  *
- * 1. A run of `p ≥ 1` nodes, **every one** a permute an attention may absorb ({@link isHeadSwap}),
+ * 1. A run of `p ≥ 0` nodes, **every one** a permute an attention may absorb ({@link isHeadSwap}),
  *    directly followed by an `attention` without a states field (the fused form — the states form is
  *    another kernel family), f32, with one output.
  * 2. Each permute's output has exactly one use and is not a graph output ({@link internalsArePrivate}),
@@ -399,6 +435,9 @@ const isHeadSwap = (plan: NodePlan, aliases: ReadonlySet<NodePlan>): boolean =>
  *    `undefined` here; its tail is tried again from the next index, so the absorbed permutes are the
  *    longest such run that ends at the attention — contiguous, so each re-pointed input lives only
  *    across the other absorbed permutes.
+ * 3. The output permute (`o`): the attention's output has exactly one use and is not a graph output,
+ *    that use is the **next** node, a permute it may absorb, and the attention takes the online route.
+ * 4. At least one permute is absorbed (otherwise both sides stay as they are).
  *
  * Anything else returns `undefined` and every node stays as it is (byte-identical behaviour).
  */
@@ -430,7 +469,16 @@ const attentionPermutesAt = (
     if (slot < 0 || slot >= ATTENTION_OPERANDS.length) return undefined;
     sources.set(slot, permute);
   }
-  if (sources.size === 0) return undefined;
+  const after = nodes[at + 1];
+  const output =
+    after !== undefined &&
+    isHeadSwap(after, aliases) &&
+    after.node.ins[0] === attention.outputs[0].name &&
+    internalsArePrivate([attention, after], context) &&
+    takesOnlineRoute(attention, context)
+      ? after
+      : undefined;
+  if (sources.size === 0 && output === undefined) return undefined;
   // MUST: a re-pointed operand is the permute's input, which holds the operand's elements with the
   // two middle axes swapped (the permute's shape rule — a mismatch is a broken plan, not a non-match).
   const swapped = (shape: readonly number[]): readonly number[] =>
@@ -443,15 +491,26 @@ const attentionPermutesAt = (
       );
     }
   }
+  if (
+    output !== undefined &&
+    !sameShape(swapped(attention.outputs[0].shape), output.outputs[0].shape)
+  ) {
+    throw new ExecutionError(
+      `attention permute: output [${output.outputs[0].shape.join(",")}] is not the head swap of` +
+        ` the attention's [${attention.outputs[0].shape.join(",")}]`,
+    );
+  }
   const tokenMajor: AttentionTokenMajor = {
     q: sources.has(0),
     k: sources.has(1),
     v: sources.has(2),
+    o: output !== undefined,
   };
   const operand = <T>(slot: number, own: T, absorbed: (permute: NodePlan) => T): T => {
     const permute = sources.get(slot);
     return permute === undefined ? own : absorbed(permute);
   };
+  const outputs = output === undefined ? attention.outputs : output.outputs;
   return {
     plan: {
       ...attention,
@@ -460,6 +519,7 @@ const attentionPermutesAt = (
         ins: attention.node.ins.map((name, slot) =>
           operand(slot, name, (permute) => permute.node.ins[0]),
         ),
+        outs: outputs.map((out) => out.name),
       },
       inputShapes: attention.inputShapes.map((shape, slot) =>
         operand(slot, shape, (permute) => permute.inputShapes[0]),
@@ -467,9 +527,10 @@ const attentionPermutesAt = (
       inputDtypes: attention.inputDtypes.map((dtype, slot) =>
         operand(slot, dtype, (permute) => permute.inputDtypes[0]),
       ),
+      outputs,
     },
     tokenMajor,
-    advance: at - index + 1,
+    advance: at - index + 1 + (output === undefined ? 0 : 1),
   };
 };
 

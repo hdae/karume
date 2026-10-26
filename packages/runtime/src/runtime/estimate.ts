@@ -108,6 +108,7 @@ import {
   type AttentionDeviceFacts,
   attentionRoute,
   type AttentionSeats,
+  UNREAD_ATTENTION_DEVICE,
 } from "./attention-route.ts";
 import {
   attentionHeadMajorCopies,
@@ -412,8 +413,9 @@ export type EstimateOptions = {
    * `SessionOptions.attentionScoreStorage`; omitted = `"f32"`).
    * Eligibility (`attentionRoute`) is the same single function as in execution; ineligible shapes
    * are counted with f32 storage. `"none"` (the online kernel — ADR 0132) counts no S and no row
-   * statistics for the nodes whose route takes it, only the a8 quantisation temporaries; it needs
-   * {@link attentionDevice}.
+   * statistics for the nodes whose route takes it, only the a8 quantisation temporaries, and on those
+   * nodes the estimate sees the same absorbed output permute as execution (perf-ledger F-3 A4 — the
+   * same `planFusions`); it needs {@link attentionDevice}.
    */
   readonly attentionScoreStorage?: ScoreStorage;
   /**
@@ -421,8 +423,8 @@ export type EstimateOptions = {
    * subgroups (`subgroups` and `subgroup-size-control` enabled and WGSL `subgroup_id` present) and
    * its granted `maxComputeWorkgroupStorageSize`.
    *
-   * MUST: required when `attentionScoreStorage` is `"none"` and the graph has a fused attention op —
-   * without it the estimate fails loudly instead of guessing a route (a device without subgroups and
+   * MUST: required when `attentionScoreStorage` is `"none"`, whatever the graph — without it the
+   * estimate fails loudly at its entry instead of guessing a route (a device without subgroups and
    * with a 32 KiB limit runs the three dispatches with S, the others the online kernel without it).
    * Not read otherwise.
    */
@@ -837,13 +839,16 @@ const stateAttentionTemps = (
  * node step that stands for the producer at the key and the linear right after it; counted in the
  * pre-fusion list, the producer's output (454 MB at the Wan2.2 33-frame FFN) would stay in a peak
  * execution never has. An attention that absorbed its permutes (perf-ledger F-3 A4 / F-8) is a plain
- * node step that stands for the absorbed input permutes at the key and the attention right after
- * them ({@link nodeStepSpan} nodes); the permutes' copies never exist as node outputs, and the
- * copies the attention makes itself are its own temporaries ({@link fusedAttentionProgram}).
+ * node step that stands for the absorbed input permutes at the key, the attention right after them
+ * and, with `o`, the output permute after it ({@link nodeStepSpan} nodes); the permutes' copies
+ * never exist as node outputs, and the copies the attention makes itself are its own temporaries
+ * ({@link fusedAttentionProgram}).
  * Other rules are still counted in the pre-fusion list (the `unaccounted` side).
  * MUST: pass the same `linearCompute` and weight storage as execution (`linear`) — the prologue is
  * decided from them, and the estimate would otherwise count the pair unfolded. Likewise the same
- * `attentionCompute` (`seats`) — the absorbed permutes are decided from it.
+ * seats (`seats`) and device facts (`device`) — the input permutes are decided from the attention
+ * seat, the output permute from `attentionRoute` on the seats and the device (only the online
+ * kernel absorbs it).
  *
  * MUST: pass the same binding limit as the limit check of the allocation program (the row-block
  * count is decided only by this value and the budget — dividing by another value would make the
@@ -863,6 +868,7 @@ const postFusionSteps = (
   budget: number | undefined,
   linear: LinearKnobs,
   seats: AttentionSeats,
+  device: AttentionDeviceFacts,
 ): ReadonlyMap<number, ExecStep> => {
   const { steps } = planFusions(nodes, {
     useCounts: uses,
@@ -874,6 +880,8 @@ const postFusionSteps = (
     ...(budget === undefined ? {} : { attentionRowBlockMaxBytes: budget }),
     linearCompute: linear.linearCompute,
     attentionCompute: seats.attentionCompute,
+    attentionScoreStorage: seats.attentionScoreStorage,
+    attentionDevice: device,
     weightLayouts: linear.weightLayouts,
   });
   const found = new Map<number, ExecStep>();
@@ -896,8 +904,8 @@ const postFusionSteps = (
         continue;
       }
       // MUST: the step's output is the last of its nodes in the unfused list (the linear after its
-      // producer, the attention after its permutes) — the same bookkeeping-break check as
-      // row-block attention's below.
+      // producer, the attention after its input permutes or its output permute) — the same
+      // bookkeeping-break check as row-block attention's below.
       if (nodes[index + span - 1]?.outputs[0]?.name !== step.plan.outputs[0].name) {
         throw new ExecutionError(
           `Estimate: the node step '${step.plan.outputs[0].name}' that absorbed ${span - 1} node(s) does not match the unfused node list at index ${index}`,
@@ -1020,12 +1028,17 @@ type TransientKnobs = {
   /** The budget per row-block temporary (`undefined` = no budget — ADR 0124). */
   readonly attentionRowBlockMaxBytes: number | undefined;
   /**
-   * The compute form of fused attention and the storage form of S (defaults already filled in). The
-   * compute form also decides the absorbed permutes ({@link postFusionSteps}).
+   * The compute form of fused attention and the storage form of S (defaults already filled in). They
+   * also decide the absorbed permutes ({@link postFusionSteps}: the compute form the input ones, the
+   * route on both and {@link attentionDevice} the output one).
    */
   readonly seats: AttentionSeats;
-  /** The device facts of the online kernel's route (`EstimateOptions.attentionDevice` — `undefined` when not passed). */
-  readonly attentionDevice: AttentionDeviceFacts | undefined;
+  /**
+   * The device facts of the online kernel's route: `EstimateOptions.attentionDevice`, or
+   * {@link UNREAD_ATTENTION_DEVICE} on a seat whose route never reads them (the entry of
+   * {@link estimateGraphMemory} rejects `"none"` without the facts).
+   */
+  readonly attentionDevice: AttentionDeviceFacts;
   /** What the linear-prologue decision reads ({@link postFusionSteps}). */
   readonly linear: LinearKnobs;
 };
@@ -1063,26 +1076,6 @@ const fusionWeightLayouts = (
       }
     }),
   );
-
-/**
- * The device facts passed to `attentionRoute` for one fused attention node.
- *
- * MUST: with `attentionScoreStorage: "none"` and no `EstimateOptions.attentionDevice`, fail loudly —
- * the route (and with it whether S exists) depends on the device, and assuming one would let the
- * estimate claim temporaries the device does not produce (the same reason as the binding-limit
- * requirement of {@link stateAttentionTemps}). Any other seat never reads the facts (attentionRoute
- * consults them only for `"none"`), so a device with neither capability stands in.
- */
-const routeDevice = (knobs: TransientKnobs, where: string): AttentionDeviceFacts => {
-  if (knobs.attentionDevice !== undefined) return knobs.attentionDevice;
-  if (knobs.seats.attentionScoreStorage === "none") {
-    throw new ExecutionError(
-      `${where}: attentionScoreStorage 'none' needs options.attentionDevice` +
-        " (the online kernel's route is decided by the device's subgroups and workgroup-storage limit — ADR 0132)",
-    );
-  }
-  return { subgroups: false, maxComputeWorkgroupStorageSize: 0 };
-};
 
 /**
  * The row blocks of one fused attention op node (the same `planAttentionBlocks` × `rowBlockLimit` as
@@ -1133,7 +1126,10 @@ const fusedAttentionBlocks = (
  * 4. Release the quantisation temporaries at the end of the node (after the last ③PV)
  *
  * The online route (`route.online` — ADR 0132) replaces step 3 with one dispatch per row window
- * reading every quantisation temporary; it has no S and no row statistics.
+ * reading every quantisation temporary; it has no S and no row statistics. With an absorbed output
+ * permute (`o`) those dispatches write the token-major output itself (the node's re-pointed output —
+ * the same bytes); `o` on any other route fails loudly (`attentionHeadMajorCopies`, as in
+ * execution).
  *
  * With absorbed permutes (`tokenMajor` — perf-ledger F-3 A4 / F-8) the quantisation dispatches read
  * the token-major inputs (same reads and writes), and the head-major copies of
@@ -1161,7 +1157,7 @@ const fusedAttentionProgram = (
   const shape = { batch: q[0] * q[1], rows: q[2], cols: k[2], depth: q[3] };
   const where = `attention [${q.join(",")}] × [${k.join(",")}] × [${v.join(",")}]`;
   const { seats } = knobs;
-  const route = attentionRoute(seats, shape.depth, shape.cols, routeDevice(knobs, where));
+  const route = attentionRoute(seats, shape.depth, shape.cols, knobs.attentionDevice);
   const [qRef, kRef, vRef, maskRef] = reads;
   const violation = fusedAttentionViolation(
     where,
@@ -1221,7 +1217,7 @@ const fusedAttentionProgram = (
   );
   const qkI8a8 = route.qk === "i8a8";
   const pvI8a8 = route.pv === "i8a8";
-  const copies = attentionHeadMajorCopies(tokenMajor, route, node.inputShapes);
+  const copies = attentionHeadMajorCopies(tokenMajor, route, node.inputShapes, where);
   const inputCopies = [copies.q, copies.k, copies.v];
   const last =
     inputCopies.filter((bytes) => bytes !== undefined).length +
@@ -1417,6 +1413,7 @@ const transientSlotBytes = (
     attentionRowBlockMaxBytes,
     knobs.linear,
     knobs.seats,
+    knobs.attentionDevice,
   );
   const program: TransientStepSpec[] = [];
   for (let index = 0; index < nodes.length;) {
@@ -1581,20 +1578,32 @@ export const estimateGraphMemory = (
     linearCompute: options.linearCompute ?? "f32",
     weightLayouts: fusionWeightLayouts(residency),
   };
-  // The device facts are range-checked here regardless of the graph's shape (the rule of
-  // {@link assertLimitOption}); whether they are required depends on the nodes (routeDevice).
-  const attentionDevice = options.attentionDevice;
-  if (attentionDevice !== undefined) {
-    if (typeof attentionDevice.subgroups !== "boolean") {
+  // The device facts are checked here regardless of the graph's shape (the rule of
+  // {@link assertLimitOption}), before the fusion pass reads them.
+  // MUST: "none" without them fails loudly with this message whatever the graph — the route (and
+  // with it whether S exists and whether the output permute is absorbed) depends on the device, and
+  // assuming one would let the estimate claim temporaries the device does not produce (the same
+  // reason as the binding-limit requirement of {@link stateAttentionTemps}). Any other seat never
+  // reads the facts, so the stand-in passes.
+  const passedDevice = options.attentionDevice;
+  if (passedDevice === undefined && seats.attentionScoreStorage === "none") {
+    throw new ExecutionError(
+      "attentionScoreStorage 'none' needs options.attentionDevice" +
+        " (the online kernel's route is decided by the device's subgroups and workgroup-storage limit — ADR 0132)",
+    );
+  }
+  if (passedDevice !== undefined) {
+    if (typeof passedDevice.subgroups !== "boolean") {
       throw new ExecutionError(
-        `options.attentionDevice.subgroups must be a boolean (${typeof attentionDevice.subgroups})`,
+        `options.attentionDevice.subgroups must be a boolean (${typeof passedDevice.subgroups})`,
       );
     }
     assertLimitOption(
       "attentionDevice.maxComputeWorkgroupStorageSize",
-      attentionDevice.maxComputeWorkgroupStorageSize,
+      passedDevice.maxComputeWorkgroupStorageSize,
     );
   }
+  const attentionDevice = passedDevice ?? UNREAD_ATTENTION_DEVICE;
   const chunkDims = chunkRowDims(graph);
   const chunkSymbols = new Set(chunkDims.map((dim) => parseDim(dim).sym));
   const bindings = planBindings(graph, options.bindings, chunkSymbols);

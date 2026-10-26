@@ -118,16 +118,37 @@ const a8Counts = (graph: IrGraph, shapes: Readonly<Record<string, readonly numbe
  * attentionCompute "a8"; counted 2026-10-25): the a8 counts plus **attentionPermute 56** — each of
  * the 56 attentions (28 self, 28 cross) absorbs the `[0, 2, 1, 3]` permute of v right before it
  * (perf-ledger F-3 A4 / F-8). Its q / k reach it through the per-head rms_norm and the RoPE (self) or
- * the per-head rms_norm alone (cross), so their permutes are not adjacent; the permute of O after it
- * stays a node.
+ * the per-head rms_norm alone (cross), so their permutes are not adjacent. On these seats, which store
+ * S, the permute of O after it stays a node.
  */
 const ditAttn8 = (quant: "i8" | "f16"): FusionCounts => ({ ...ditA8(quant), attentionPermute: 56 });
 
 const attn8Counts = (graph: IrGraph, shapes: Readonly<Record<string, readonly number[]>>) =>
   fusionCounts(graph, shapes, undefined, false, false, false, "a8", "a8");
 
+/**
+ * Device facts that hold the online kernel at the DiT's D 128 (subgroups and 48 KiB of workgroup
+ * storage — the sg32 form needs 31,232 B).
+ */
+const ONLINE_DEVICE = { subgroups: true, maxComputeWorkgroupStorageSize: 48 * 1024 } as const;
+
+/**
+ * The DiT's counts on a user-chosen online seat (attentionCompute "a8" × attentionScoreStorage
+ * "none" on a device that holds the online kernel; counted 2026-10-26): **attentionPermute 112**.
+ * Every attention takes the online route (D 128; the key count — S for self-attention, the 512 text
+ * tokens for cross-attention — is a multiple of 4 at every S checked here), so each of the 56 also
+ * absorbs the permute of O right after it (perf-ledger F-3 A4).
+ */
+const ditOnline = (quant: "i8" | "f16"): FusionCounts => ({
+  ...ditA8(quant),
+  attentionPermute: 112,
+});
+
+const onlineCounts = (graph: IrGraph, shapes: Readonly<Record<string, readonly number[]>>) =>
+  fusionCounts(graph, shapes, undefined, false, false, false, "a8", "a8", "none", ONLINE_DEVICE);
+
 test.skipIf(!ASSETS_AVAILABLE)(
-  "実資産の DiT は run 1 回で adaln 85 / rope 56 / silu 2 を掴む（w8a8 と f16 で同一。a8 では i8 席だけ linearPrologue 28; attentionPermute 56 on the a8 attention seat）",
+  "the real DiT grabs adaln 85 / rope 56 / silu 2 per run (the same on w8a8 and f16; under a8, linearPrologue 28 on the i8 seat only; attentionPermute 56 on the a8 attention seat that stores S, 112 on the online seat)",
   async () => {
     const expected: FusionCounts = { ...NONE, silu: 2, rope: 56, adaln: 85 };
     for (const quant of ["i8", "f16"] as const) {
@@ -145,6 +166,11 @@ test.skipIf(!ASSETS_AVAILABLE)(
           attn8Counts(graph, ditShapes(sequence)),
           ditAttn8(quant),
           `${quant} a8 attention: S=${sequence}`,
+        );
+        assertEquals(
+          onlineCounts(graph, ditShapes(sequence)),
+          ditOnline(quant),
+          `${quant} a8 attention, online: S=${sequence}`,
         );
       }
     }
@@ -237,6 +263,11 @@ for (const model of EXTRA_MODELS) {
           attn8Counts(graph, ditShapes(4096)),
           ditAttn8(quant),
           `${quant} a8 attention: S=4096`,
+        );
+        assertEquals(
+          onlineCounts(graph, ditShapes(4096)),
+          ditOnline(quant),
+          `${quant} a8 attention, online: S=4096`,
         );
       }
       assertEquals(
