@@ -558,3 +558,97 @@ a8 quantize still reads the RoPE output token-major.
   measured here: Chromium and other backends (the adoption spike covered Chromium on Vulkan), the
   timings (the spike: 0.57–0.61 of the pair's time), and the models' per-environment sha256 rows (bit
   identity predicts them unchanged).
+
+## Addendum (2026-10-26) — the attention absorbs its output permute on the online route (perf-ledger F-3 A4)
+
+This revises the bullet "The output permute stays a node" of the addendum of 2026-10-25 (its second
+instance). **A fused attention without states absorbs the `[0, 2, 1, 3]` permute that directly follows
+it only when `attentionRoute` chooses the online kernel for that node** (ADR
+[0132](0132-online-int8-attention.md)). The online kernel then stores O token-major `[B, M, H, D]`
+itself, so the permute's strided copy is never a dispatch. The absorption of the input permutes (q /
+k / v on the a8 seat) is unchanged.
+
+- **The annotation**: `AttentionTokenMajor` regains `o`. With `o`, the attention's `NodePlan` in its
+  node step has its output re-pointed to the output permute's output (name and token-major shape), and
+  the permute produces no step. Release bookkeeping stays decision 1's one path, as in the 2026-10-25
+  addendum: the attention's head-major output had exactly one use and is not a graph output, so it is
+  never defined. `nodeStepSpan` and the `attentionPermute` counter include the output permute.
+- **The exact match** (decision 2 — `attentionPermutesAt` in `packages/runtime/src/runtime/fusion.ts`),
+  on an a8 seat: the attention's output has one use and is not a graph output, that use is the next
+  node, and that node is a permute the attention may absorb (dims `[0, 2, 1, 3]` on a rank-4 f32
+  tensor, materialised). In addition the route must be the online kernel: `attentionRoute` on the
+  Session's seats (`attentionCompute` `"a8"` × `attentionScoreStorage` `"none"`), the node's D and key
+  count N, and the device's facts (D ∈ {64, 128}, N % 4 == 0, and a device that holds the `sg32` or
+  the `wg` reduction form). The output permute is also absorbed when no input permute is (at least one
+  permute of the four is absorbed). Anything else leaves the permute as a node.
+- **The kernel form**: the online kernel's token-major store (`AttentionOnlineOutput` `"bshd"` in
+  `packages/runtime/src/kernels/attention-online-i8a8.ts`, key suffix `:obshd`, H in a second uniform
+  block). Only the store address changes, so O is bit-identical to "head-major store → strided permute".
+  `buildAttention` passes `"bshd"` with H only on the online route.
+- **Why the online route only.** The addendum of 2026-10-25 kept the output permute as a node because
+  the first-fit placement turned its removal into a larger backing. The least-growth placement (ADR
+  [0093](0093-transient-liveness-packing.md) addendum of 2026-10-26) removes that effect on the online
+  route: the Wan2.2 DiT's region total is 717.8 MiB at S 7,920 and 2,457.2 MiB at S 27,280 with or
+  without the output permute absorbed (live peak 634.2 / 2,169.2 MiB). On every other route ③PV stores
+  O head-major. There, absorbing the permute would need an O temporary plus the same strided copy
+  inside the attention step. That adds one O of live bytes (+92.8 / +319.7 MiB on the Wan2.2 DiT at S
+  7,920 / 27,280) and saves no dispatch. So those routes keep the permute as a node.
+- **Why the gate is the route, decided in the pass.** For the input permutes the 2026-10-25 addendum
+  chose the seat, because every route an a8 seat can take honours a token-major q / k / v. That does
+  not hold for O:
+  - **No fallback path.** The token-major O exists only in the online kernel. The recipe builds no O
+    temporary and no copy for the other routes. Instead `attentionHeadMajorCopies`
+    (`packages/runtime/src/runtime/recipe-builders/attention.ts`, shared with the estimate) fails
+    loudly when `o` reaches a route other than the online kernel. A seat-only gate would hand `o` to
+    the shapes and devices whose `"none"` seat falls back to the three a8 dispatches.
+  - **One decision function.** The pass calls the same `attentionRoute` as `buildAttention`, with the
+    same seats, device facts, D and N. The route is not written a second time, so the pass and the
+    recipe cannot disagree. The objection of the 2026-10-25 addendum to a route-aware match was a
+    second spelling of the per-stage eligibility and the device facts inside the pass; calling the
+    function itself avoids that.
+  - **Device facts in the fusion context have a precedent**: `FusionContext.limits`, inputs that
+    decide the plan and are fixed per device (ADR 0022 forbids measuring and choosing again).
+    `FusionContext` gains `attentionScoreStorage` (the session knob) and `attentionDevice` (the
+    `AttentionDeviceFacts` the executor fixes once per Session for `buildAttention`; the estimate
+    passes `EstimateOptions.attentionDevice`, already required with `"none"` and now checked at the
+    estimate's entry whatever the graph). On `"a8"` × `"none"` without the device facts the decision
+    fails loudly instead of guessing a device.
+- **The estimate** replays the same decision: `postFusionSteps` passes the seats and the device
+  facts to the same `planFusions`. On the online route the attention step writes the token-major
+  output itself, so `workspaceBytes` still equals the slot table.
+- **Effect on dispatches**: on the online route each attention runs one dispatch fewer (the output
+  permute's strided copy). Where q / k / v are absorbed too and the online kernel takes one row window,
+  an attention goes from 6 dispatches to 5: the quantisation of q and of k, the tiled Vᵀ transpose and
+  Vᵀ's quantisation, and the online kernel (the counts move with the absorbed input permutes and the
+  row windows). On the Wan2.2 DiT this removes the 60 strided copies after `attention_online` per
+  33-frame forward (30 self- and 30 cross-attentions): 15.20 ms of GPU time in wave a's final
+  per-kernel trace on the RTX 3080 Ti (the 60 strided copies after `attention_online` in one 33-frame
+  forward; research [2026-10-25-wave-a-dit-fusions](../research/2026-10-25-wave-a-dit-fusions.md)).
+- **Blast radius**: Sessions on `attentionCompute` `"a8"` × `attentionScoreStorage` `"none"` whose
+  attentions take the online route and are followed by such a permute. By default that is the Wan2.2
+  DiT's online presets: `attentionPermute` 180 → 240, the region total unchanged (717.8 / 2,457.2 MiB
+  at S 7,920 / 27,280). Any other family takes it only where its user picks `"a8"` × `"none"` and the
+  route is online. On the transformer i8 containers, on a device with subgroups and 48 KiB of
+  workgroup storage, every attention of the anima DiT (56) and of the Wan2.1 DiT (60) takes the online
+  route (`sg32`, D 128): `attentionPermute` 56 → 112 and 180 → 240, and the estimate's region total
+  is the same with O absorbed and with O kept as a node (anima 224.0 / 504.0 MiB at S 4,096 / 9,216;
+  Wan2.1 729.7 / 1,698.7 MiB at S 14,040 / 32,760; measured 2026-10-26 with `linearCompute` `"a8"`).
+  The s16 seat and the a8 seat with S in f32 stay as before (Wan2.2 180, Wan2.1 180, anima 56), and
+  so does every other seat (`packages/e2e/tests/e2e_*_fusion_counts_test.ts`).
+- **Measured** (2026-10-26, RTX 3080 Ti, Node 24.22 + Dawn, Vulkan):
+  `packages/runtime/tests/gpu_attention_token_major_kernels_test.ts` compares the token-major O store
+  with "head-major store → strided permute" word for word (sg32 / wg, dp4a and the emulated dot, row
+  windows); `packages/runtime/tests/gpu_attention_permute_fusion_test.ts` compares Sessions with and
+  without the absorption (a zero-dispatch reshape before the attention's inputs and after its output
+  breaks the match) — bit-identical outputs on the online route at D 128 (`sg32` and `wg`) and D 64
+  (`sg32`), 9 → 5 dispatches (6 before this addendum), and the other routes keep their counts (s16
+  11 → 8, an online seat whose shape falls back at D 96 11 → 8 with the census of a8 × `"f32"`, ①QK
+  on f32 9 → 8, ③PV on f32 9 → 7, f32 seat 7 → 7);
+  `packages/runtime/tests/gpu_estimate_test.ts` checks that the estimate equals the slot table on the
+  online route with the output permute absorbed, including a shape whose O is larger than the
+  attention's temporaries (there a head-major O next to the permute's output would raise the region
+  total); `packages/e2e/tests/e2e_wan_ti2v_attention_permute_estimate_test.ts` checks that the Wan2.2
+  DiT's region total with every absorbed permute is at most that of the graph with the permutes as
+  nodes, on the online and s16 seats at S 7,920 / 27,280, and on the online seat at most that of the
+  graph with only O's permute as a node. Not measured here: other backends (D3D12,
+  Metal) and the models' per-environment sha256 rows (bit identity predicts them unchanged).
