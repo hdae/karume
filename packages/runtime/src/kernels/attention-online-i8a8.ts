@@ -144,35 +144,47 @@ export const attentionOnlineI8a8WorkgroupStorageBytes = (
   workgroupVariableBytes(V_WORDS * P_STRIDE * 16) +
   (reduce === "wg" ? workgroupVariableBytes(ATTENTION_ONLINE_ROWS * LANES * 4) : 0);
 
+/**
+ * Where the kernel writes O. `bhsd` = head-major `[B·H, M, D]`, the attention node's own output.
+ * `bshd` = token-major `[B, M, H, D]`: the attention absorbed the permute that follows it, so the
+ * output projection reads O as stored (perf-ledger F-3 A4). Only the store address differs (each
+ * row is still 4·D contiguous bytes), so the values are bit-identical to "store → permute".
+ */
+export type AttentionOnlineOutput = "bhsd" | "bshd";
+
 export const attentionOnlineI8a8Key = (
   dp4a: boolean,
   depth: number,
   reduce: AttentionOnlineReduce,
+  output: AttentionOnlineOutput = "bhsd",
 ): string =>
   `attention_online:v2:i8a8:d${depth}:r${ATTENTION_ONLINE_ROWS}k${ATTENTION_ONLINE_KEYS}:${
     dp4a ? "dp4a" : "emu"
-  }:${reduce}`;
+  }:${reduce}${output === "bshd" ? ":obshd" : ""}`;
 
 /**
  * The uniform: `m` = query rows of the whole node, `n` = keys, `row_offset` = the first row of this
  * dispatch's window (the dispatch covers `ceil(windowRows / 64)` workgroups along x and B·H along
- * y), `scale` = the half scale (`√scale_factor` of ADR 0023, applied to both q and k).
+ * y), `scale` = the half scale (`√scale_factor` of ADR 0023, applied to both q and k). With a token-major
+ * output ({@link AttentionOnlineOutput} `bshd`), `heads` = H follows in a second 16-byte block.
  */
 export const attentionOnlineI8a8Params = (
   m: number,
   n: number,
   rowOffset: number,
   scale: number,
+  heads?: number,
 ): Uint32Array<ArrayBuffer> => {
-  assertU32Params("attention_online i8a8", { m, n, row_offset: rowOffset });
+  assertU32Params("attention_online i8a8", { m, n, row_offset: rowOffset, heads: heads ?? 1 });
   if (!Number.isFinite(scale)) {
     throw new CodegenError(`attention_online i8a8: scale must be finite (${scale})`);
   }
-  const words = new Uint32Array(4);
+  const words = new Uint32Array(heads === undefined ? 4 : 8);
   words[0] = m;
   words[1] = n;
   words[2] = rowOffset;
   new Float32Array(words.buffer, 12, 1)[0] = scale;
+  if (heads !== undefined) words[4] = heads;
   return words;
 };
 
@@ -266,7 +278,9 @@ export const attentionOnlineI8a8Wgsl = (
   dp4a: boolean,
   depth: number,
   reduce: AttentionOnlineReduce,
+  output: AttentionOnlineOutput = "bhsd",
 ): string => {
+  const bshd = output === "bshd";
   assertDepth(depth);
   const quads = qkQuads(depth);
   const qkS = qkStride(depth);
@@ -291,7 +305,7 @@ struct Dims {
   m: u32,
   n: u32,
   row_offset: u32,
-  scale: f32,
+  scale: f32,${bshd ? "\n  heads: u32," : ""}
 }
 @group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read> qq: array<vec4<u32>>;
@@ -452,16 +466,16 @@ ${rows.map((r) => `      o${r}_${g} = o${r}_${g} + vec4<f32>(p${r}_${g});`).join
   }
 ${finalRowSum(reduce)}
 ${groupIds.map((g) => `  let vs${g} = vs[bh * ${columnQuads}u + ${plus(g * LANES)}tx];`).join("\n")}
-${rows
-  .map(
-    (r) => `  if (qrow${r} < dims.m) {
+${bshd ? "  // Token-major O: row qrow of batch b, head h sits at ((b·M + qrow)·H + h)·D\n  let ob_b = bh / dims.heads;\n  let ob_h = bh % dims.heads;\n" : ""}${rows
+    .map(
+      (r) => `  if (qrow${r} < dims.m) {
     // MUST: 1/127 by multiplication; O · vs[d] first, then the row factor
     let f${r} = INV_P / l${r};
-    let ob${r} = (bh * dims.m + qrow${r}) * ${columnQuads}u;
+    let ob${r} = ${bshd ? `((ob_b * dims.m + qrow${r}) * dims.heads + ob_h)` : `(bh * dims.m + qrow${r})`} * ${columnQuads}u;
 ${groupIds.map((g) => `    o[ob${r} + ${plus(g * LANES)}tx] = (o${r}_${g} * vs${g}) * f${r};`).join("\n")}
   }`,
-  )
-  .join("\n")}
+    )
+    .join("\n")}
 }
 `;
 };
