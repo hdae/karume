@@ -241,6 +241,7 @@ import {
   quantizeRowsBshdWgsl,
   quantizeRowsChannelMajorKey,
   quantizeRowsChannelMajorWgsl,
+  quantizeRowsChannelMajorWorkgroups,
   quantizeRowsPrologueWgsl,
   quantizeRowsWgsl,
 } from "../src/kernels/quantize-rows.ts";
@@ -1730,6 +1731,122 @@ test("axis reduce rejects a split that is not a power of 2 up to the workgroup s
       `${split}`,
     );
     assertThrows(() => axisReduceOutputsPerGroup(split), CodegenError, undefined, `${split}`);
+  }
+});
+
+describe("quantize_rows channel-major geometry", () => {
+  it("rejects pixels per workgroup that are not a power of 2 in [4, 64], on every entry point", () => {
+    for (const pixels of [0, 1, 2, 3, 12, 24, 48, 128, 256, -4, 0.5, 16.5, Number.NaN]) {
+      const geometry = { pixels };
+      assertThrows(
+        () => quantizeRowsChannelMajorKey(geometry),
+        CodegenError,
+        undefined,
+        `${pixels}`,
+      );
+      assertThrows(
+        () => quantizeRowsChannelMajorWgsl(geometry),
+        CodegenError,
+        undefined,
+        `${pixels}`,
+      );
+      assertThrows(
+        () => quantizeRowsChannelMajorWorkgroups(1024, geometry, 65535),
+        CodegenError,
+        undefined,
+        `${pixels}`,
+      );
+    }
+  });
+
+  it("derives lanes = 256 / pixels and blockWords = max(16, lanes) into the key and the stage", () => {
+    const expected: readonly (readonly [number, number, number])[] = [
+      [4, 64, 64],
+      [8, 32, 32],
+      [16, 16, 16],
+      [32, 8, 16],
+      [64, 4, 16],
+    ];
+    for (const [pixels, lanes, blockWords] of expected) {
+      assertEquals(
+        quantizeRowsChannelMajorKey({ pixels }),
+        `quantize_rows:v1:f32>i8:pertoken:wg256:cm:p${pixels}l${lanes}b${blockWords}`,
+      );
+      const wgsl = quantizeRowsChannelMajorWgsl({ pixels });
+      assert(wgsl.includes(`let px = lid % ${pixels}u;`), `p${pixels}: pixel index`);
+      assert(wgsl.includes(`c = c + ${lanes}u;`), `p${pixels}: lane stride`);
+      assert(
+        wgsl.includes(`var<workgroup> staged: array<u32, ${pixels * blockWords}>;`),
+        `p${pixels}: stage size`,
+      );
+      assert(wgsl.includes(`w0 = w0 + ${blockWords}u;`), `p${pixels}: word block step`);
+    }
+  });
+});
+
+/**
+ * The barriers of the channel-major quantiser and the shared-memory accesses around them, in order.
+ * Lane `l` of pixel `px` folds the partials the other lanes wrote, and the stage written by one
+ * thread is drained by another, so a barrier MUST separate the partials store from their fold, the
+ * stage fill from its drain, and the drain from the next word block's fill (or the next pixel
+ * block's partials store). A value comparison can miss a dropped one when the threads involved
+ * happen to sit in one warp, so the order is checked on the generated text.
+ */
+const channelMajorBarrierSequence = (wgsl: string): readonly string[] =>
+  wgsl.split("\n").flatMap((line) => {
+    const statement = line.trim();
+    if (statement === "workgroupBarrier();") return ["barrier"];
+    if (statement === "partial[lid] = acc;") return ["partials store"];
+    if (statement === "var amax = partial[px];") return ["partials fold"];
+    if (statement.startsWith("staged[px * ")) return ["stage fill"];
+    if (statement === "xq[wp * quads + wq] = staged[t];") return ["stage drain"];
+    if (statement.startsWith("w0 = w0 + ")) return ["next word block"];
+    return [];
+  });
+
+test("quantize_rows channel-major: a barrier follows the partials store, the stage fill and every word block", () => {
+  const expected = [
+    "partials store",
+    "barrier",
+    "partials fold",
+    "stage fill",
+    "barrier",
+    "stage drain",
+    "barrier",
+    "next word block",
+  ];
+  for (const pixels of [4, 8, 16, 32, 64]) {
+    assertEquals(
+      channelMajorBarrierSequence(quantizeRowsChannelMajorWgsl({ pixels })),
+      expected,
+      `p${pixels}`,
+    );
+  }
+  // The check fails when any one of the three barriers is dropped.
+  const wgsl = quantizeRowsChannelMajorWgsl(CONV3D_I8A8_QUANTIZE_GEOMETRY);
+  for (const [name, withBarrier, without] of [
+    [
+      "after the partials store",
+      "    partial[lid] = acc;\n    workgroupBarrier();\n",
+      "    partial[lid] = acc;\n",
+    ],
+    [
+      "after the stage fill",
+      "      }\n      workgroupBarrier();\n      var t = lid;\n",
+      "      }\n      var t = lid;\n",
+    ],
+    [
+      "at the end of the word block",
+      "      workgroupBarrier();\n      w0 = w0 + ",
+      "      w0 = w0 + ",
+    ],
+  ] as const) {
+    assertEquals(wgsl.split(withBarrier).length, 2, `${name}: the layout moved (no fault)`);
+    assertNotEquals(
+      channelMajorBarrierSequence(wgsl.replace(withBarrier, without)),
+      expected,
+      `dropping the barrier ${name} is not detected`,
+    );
   }
 });
 

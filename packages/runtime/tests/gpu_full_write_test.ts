@@ -669,25 +669,40 @@ test.skipIf(!GPU_AVAILABLE)(
  * integer GEMM as a different integer or scale, so the detector is the atol = 0 match against the
  * TS reference.
  *
- * MUST: the poison buffer's size matches only the temporary under test (x = 384 B, y = 240 B,
- * xq = Cin·P = 96 B, xs = 4·P = 48 B — four distinct size classes).
+ * How the poison reaches them: the liveness packer (src/runtime/transient-plan.ts, ADR 0093) places
+ * slots largest first, each in the region it grows least, and keeps a slot out of every region that
+ * holds a partner (a slot read in a dispatch where it is written, or the reverse). The GEMM reads
+ * `xq` / `xs` and writes `y`, so `y` never shares their region. With the poison (512 B) the
+ * largest slot, then `xq` (96 B), `y` (48 B) and `xs` (48 B): the poison opens region 0, `xq` takes
+ * its first bytes, `y` is kept out and opens region 1, and `xs` goes after `xq` in region 0 (at
+ * most 256 + 48 B — the offset alignment), still inside the poison's bytes.
+ * MUST: the poison is the largest slot and `y` is smaller than `xq` — a `y` placed before `xq` has
+ * no partner placed yet and takes the poison's bytes (as a poison smaller than `y` would land on
+ * `y`'s), and the temporaries get fresh, zeroed bytes. The run checks the result: exactly two slots
+ * share bytes with an earlier one (`xq` and `xs` on the poison).
+ * MUST: the poison word is a scale and a packed word that change the output when left in place —
+ * the file's {@link POISON} is about −6e-18 as an f32, so a poisoned scale times the integer sum
+ * would round to the bias, the same output as a zeroed scale.
  */
-const conv3dI8a8PoisonGraph = (poisonCount: number): DeclarationJson => ({
+const CONV3D_TEMP_POISON = new Float32Array(new Uint32Array([0x41424344]).buffer)[0];
+const CONV3D_TEMP_POISON_COUNT = 128;
+
+const conv3dI8a8PoisonGraph = (): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
   requires: { ops: ["cast", "conv3d"] },
   symbols: [],
   inputs: [
-    { name: "seed", dtype: "f32", shape: [poisonCount] },
+    { name: "seed", dtype: "f32", shape: [CONV3D_TEMP_POISON_COUNT] },
     { name: "x", dtype: "f32", shape: [8, 1, 3, 4] },
   ],
   outputs: ["y"],
   initializers: { w: {}, b: {} },
   values: {
-    poison: { dtype: "f32", shape: [poisonCount] },
-    w: { dtype: "f32", shape: [5, 8, 1, 1, 1] },
-    b: { dtype: "f32", shape: [5] },
-    y: { dtype: "f32", shape: [5, 1, 3, 4] },
+    poison: { dtype: "f32", shape: [CONV3D_TEMP_POISON_COUNT] },
+    w: { dtype: "f32", shape: [1, 8, 1, 1, 1] },
+    b: { dtype: "f32", shape: [1] },
+    y: { dtype: "f32", shape: [1, 1, 3, 4] },
   },
   nodes: [
     { op: "cast", ins: ["seed"], outs: ["poison"], attrs: { to: "f32" } },
@@ -704,12 +719,8 @@ test.skipIf(!GPU_AVAILABLE)(
   "conv3d w8a8's temporaries (xq / xs) keep no poisoned word (full-write / real GPU)",
   async () => {
     const channelsIn = 8;
-    const channelsOut = 5;
+    const channelsOut = 1;
     const pixels = 12;
-    const cases: readonly { readonly name: string; readonly poisonCount: number }[] = [
-      { name: "xq (quantised activation)", poisonCount: (pixels * channelsIn) / 4 },
-      { name: "xs (per-pixel scale)", poisonCount: pixels },
-    ];
     const dims: Conv3dDims = {
       channelsIn,
       channelsOut,
@@ -769,41 +780,39 @@ test.skipIf(!GPU_AVAILABLE)(
     });
     const gpu = await acquireGpu();
     try {
-      for (const testCase of cases) {
-        const model = await openModelBytes(conv3dI8a8PoisonGraph(testCase.poisonCount), [
-          {
-            graph: GRAPH_NAME,
-            initializer: "b",
-            bytes: f32Bytes(bias.data),
-            encoding: { codec: "f32" },
+      const model = await openModelBytes(conv3dI8a8PoisonGraph(), [
+        {
+          graph: GRAPH_NAME,
+          initializer: "b",
+          bytes: f32Bytes(bias.data),
+          encoding: { codec: "f32" },
+        },
+        {
+          graph: GRAPH_NAME,
+          initializer: "w",
+          bytes: quantized.bytes,
+          encoding: {
+            codec: "int8-sym",
+            groupSize: channelsIn,
+            scale: { dtype: "f32", bytes: f32Bytes(quantized.scale) },
           },
-          {
-            graph: GRAPH_NAME,
-            initializer: "w",
-            bytes: quantized.bytes,
-            encoding: {
-              codec: "int8-sym",
-              groupSize: channelsIn,
-              scale: { dtype: "f32", bytes: f32Bytes(quantized.scale) },
-            },
-          },
-        ]);
-        const session = await createSessionFromContainer(gpu, model, GRAPH_NAME, {
-          convCompute: "a8",
+        },
+      ]);
+      const session = await createSessionFromContainer(gpu, model, GRAPH_NAME, {
+        convCompute: "a8",
+      });
+      try {
+        const outputs = await session.run({
+          seed: fill([CONV3D_TEMP_POISON_COUNT], () => CONV3D_TEMP_POISON),
+          x,
         });
-        try {
-          const outputs = await session.run({
-            seed: fill([testCase.poisonCount], () => POISON),
-            x,
-          });
-          const reuseCount = session.diagnostics().lastRun?.reuseCount ?? 0;
-          assert(reuseCount >= 1, `${testCase.name}: no pool reuse happened`);
-          assertEquals([...outputs["y"].data], [...expected], `${testCase.name}: atol = 0 match`);
-          // The tautology gate: a constant output would make the match say nothing
-          assert(new Set([...outputs["y"].data]).size > 1, `${testCase.name}: constant output`);
-        } finally {
-          await session.dispose();
-        }
+        // xq and xs on the poison's bytes, y alone (a poison on y's bytes would count 1)
+        assertEquals(session.diagnostics().lastRun?.reuseCount, 2, "slots sharing the poison");
+        assertEquals([...outputs["y"].data], [...expected], "atol = 0 match");
+        // The tautology gate: a constant output would make the match say nothing
+        assert(new Set([...outputs["y"].data]).size > 1, "constant output");
+      } finally {
+        await session.dispose();
       }
     } finally {
       gpu.destroy();

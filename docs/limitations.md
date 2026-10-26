@@ -286,15 +286,15 @@ dot product, and S in VRAM has f32 width. The canonical source of the decision i
   diagnostic pipeline keys contain dense ones such as `attention_pv:v1:f32`.
 - A change that handles the remainders on the declared path is in the later section of the backlog.
 
-## conv3d w8a8 (`convCompute: "a8"`) transposes the input to a per-pixel layout per node; 1×1×1 nodes come out slower than f32
+## conv3d w8a8 (`convCompute: "a8"`) is decided per node; whether its 1×1×1 nodes beat f32 is not measured
 
-- The activation quantisation of ADR [0133](decisions/0133-conv3d-w8a8.md) reuses `quantize_rows`
-  on a transposed copy of the input (`x[Cin, T·H·W]` → `[T·H·W, Cin]`, one strided copy per conv3d
-  node). On the RTX 3080 Ti the copy costs 0.2–3.1 ms per node against 5.6–11.9 ms for the
-  integer GEMM on the Wan2.2 decoder's 3×3×3 layers (up to 20% of the path on the 256-channel
-  layer at 128²), and on the 1×1×1 layers (1% of the decoder's work) it exceeds the GEMM, so those
-  nodes run slower than on the f32 path (3.2 ms against 2.5 ms). A fused per-pixel quantiser is the
-  open point of the ADR.
+- The activation quantisation of ADR [0133](decisions/0133-conv3d-w8a8.md) (addendum of
+  2026-10-26) is one channel-major quantiser dispatch per conv3d node: it reads `x[Cin, T·H·W]` in
+  place and writes the per-pixel words and scales, so a node is two dispatches (quantiser, integer
+  GEMM) and there is no transposed copy. On the RTX 3080 Ti the quantiser of a Wan2.2 next chunk at
+  tile 16 takes 4.8 ms in all against 28.8 ms for the strided transpose + `quantize_rows` it
+  replaced. The 1×1×1 nodes, which ran slower than on the f32 path with the copy (3.2 ms against
+  2.5 ms), are estimated at about 2.0 ms now; no per-node A/B against f32 has been run.
 - The eligibility is per node (int8 weight, `groups == 1`, `Cin % 4 == 0`); a node outside it runs
   the f32 implicit GEMM and shows it by its pipeline key — the census of the decoder's A/B
   (`e2e_wan_ti2v_vae_a8_test.ts`) pins that every conv3d of the Wan2.2 decoder qualifies.

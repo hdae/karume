@@ -14,8 +14,9 @@
  *
  * 1. **Census**: in the subject every conv3d dispatch of both graphs runs the w8a8 key (33 nodes in first,
  *    35 in next — the counts of the chunk graphs), and no f32 conv3d key remains; the control runs no w8a8
- *    key. Each w8a8 conv3d brings its one prelude (the channel-major `quantize_rows`, which reads the conv
- *    input in place).
+ *    key. Each w8a8 conv3d brings exactly one prelude, the channel-major `quantize_rows` at the production
+ *    geometry (its key is counted), and the subject runs no more strided dispatches than the control (the
+ *    cat nodes run strided keys in both, so a transposing prelude shows as the excess).
  * 2. **Difference floor**: the subject's frames differ from the control's by at least one bit (`accept`).
  * 3. **Collapse ceiling**: the relative RMS of the subject against the control at the observation point —
  *    **the first chunk's output frame** (the first value the knob changes) — is under {@link A8_CEILING};
@@ -233,9 +234,19 @@ describe.skipIf(!I8_PRESENT || !FIXTURES_PRESENT || !GPU_AVAILABLE)(
         assertEquals(subjectCensus.w8a8, expected, `${graph}: subject の w8a8 conv3d の本数`);
         assertEquals(subjectCensus.f32, 0, `${graph}: subject に f32 の conv3d が残った`);
         assertEquals(subjectCensus.preludes, expected, `${graph}: subject の quantize_rows の本数`);
+        assertEquals(
+          subjectCensus.channelMajorPreludes,
+          expected,
+          `${graph}: subject preludes on the channel-major key`,
+        );
         const controlCensus = conv3dCensus(graph, control[graph].diagnostics());
         assertEquals(controlCensus.w8a8, 0, `${graph}: control に w8a8 の conv3d が走った`);
         assertEquals(controlCensus.f32, expected, `${graph}: control の f32 conv3d の本数`);
+        assertEquals(
+          subjectCensus.strided,
+          controlCensus.strided,
+          `${graph}: strided dispatches the subject runs beyond the control (a transposing prelude)`,
+        );
       }
     });
 

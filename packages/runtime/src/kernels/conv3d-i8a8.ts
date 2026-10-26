@@ -99,10 +99,12 @@ export const conv3dI8a8Geometry = (): I8a8Geometry => defaultI8a8Geometry("linea
 
 /**
  * The geometry of the activation quantiser (the channel-major form of `quantize_rows` — ADR 0133
- * addendum 2026-10-26). One constant for every shape: on the RTX 3080 Ti (Node + Dawn) 16 pixels
- * per workgroup was never slower by median than the transposing copy + `quantize_rows` it replaced
- * on any conv3d activation shape of the Wan2.2 decoder graphs (tile 16 and tile 32). The geometry
- * is bit-neutral (the form's MUST) and is in the pipeline key.
+ * addendum 2026-10-26). One constant for every shape: 16 pixels per workgroup was never slower by
+ * median than the transposing copy + `quantize_rows` it replaced on any conv3d activation shape of
+ * the Wan2.2 decoder graphs (tile 16 and tile 32). The rule rests on a tie at Cin 1024 / P 768
+ * (48 workgroups; median ratios 1.0008–1.018 over three runs, within the timer's noise), so a
+ * re-measurement can flip that shape. The evidence is one device and backend only: the RTX 3080 Ti
+ * on Vulkan (Node + Dawn). The geometry is bit-neutral (the form's MUST) and is in the pipeline key.
  */
 export const CONV3D_I8A8_QUANTIZE_GEOMETRY: QuantizeRowsChannelMajorGeometry = { pixels: 16 };
 

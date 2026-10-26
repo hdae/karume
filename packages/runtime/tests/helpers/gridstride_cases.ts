@@ -964,8 +964,12 @@ export const quantizeRowsGroupedCase = (): DegenerateCase => {
  * loop runs the word-block loop with its barriers, so a collapsed dispatch covers both. The input
  * is `x[C][P]`; the compared output is the per-pixel scale `xs` (`xq` is the side output).
  *
- * MUST: every pixel has its own magnitude (with one scale for all pixels, reading another pixel's
- * channels would not show in the values). C = 200 gives four word blocks per pixel, the last partial.
+ * MUST: neighbouring pixels have different scales (with one scale for all pixels, reading another
+ * pixel's channels would not show in the values). Every pixel reaches |SIGNED| = 4.5 over its 200
+ * channels, so its scale is 4.5·(1 + (p % 7)·0.5) / 127: seven values, and a read of a pixel a
+ * multiple of 7 away would not show in `xs`. C = 200 is 50 words per pixel; at the production
+ * geometry's 16-word blocks that is four word blocks, the last partial (another geometry changes the
+ * count — p8 has 32-word blocks, so two).
  */
 export const quantizeRowsChannelMajorCase = (): DegenerateCase => {
   const pixels = 5_003;
