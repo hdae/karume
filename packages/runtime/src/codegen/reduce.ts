@@ -4,9 +4,10 @@
  * - **Row reduce** (last dimension): treats the input as the contiguous layout `[rows, dim]` with
  *   the leading dimensions flattened. One row = one workgroup (256) + a 256-wide bit-reversed
  *   binary tree.
- * - **Axis reduce** (any dimension but the last): one thread = one output. The reduced axis is
- *   stepped by `inner` (= the product of the dimensions after the reduced axis), so **adjacent
- *   threads read contiguous addresses** (coalesced).
+ * - **Axis reduce** (any dimension but the last): `split` threads share one output, each folding an
+ *   aligned subtree of its 256 leaves ({@link AXIS_REDUCE_SPLIT}). The reduced axis is stepped by
+ *   `inner` (= the product of the dimensions after the reduced axis), so **adjacent threads read
+ *   contiguous addresses** (coalesced).
  *
  * MUST: the axis variant's **reduction order matches the row reduce exactly** (design and symbolic
  * verification in docs/research/2026-08-04-vae-axis-reduce-recon.md §5.2). That the output stays
@@ -194,9 +195,9 @@ export const reduceParams = (rows: number, dim: number): Uint32Array<ArrayBuffer
 };
 
 /**
- * The parallel shape of axis reduce (one thread = one output). **Being the same size as the row
- * reduce** is the condition for the reduction orders to match, so it is defined from
- * {@link REDUCE_WORKGROUP_SIZE} rather than written as a separate number.
+ * The workgroup size of axis reduce. **Being the same size as the row reduce** is the condition for
+ * the reduction orders to match (the 256 leaves of one output are the row reduce's 256 lanes), so it
+ * is defined from {@link REDUCE_WORKGROUP_SIZE} rather than written as a separate number.
  */
 export const AXIS_REDUCE_WORKGROUP_SIZE = REDUCE_WORKGROUP_SIZE;
 
@@ -219,18 +220,49 @@ const workgroupSizeBits = (size: number): number => {
 };
 
 /**
- * Key of the axis reduce variant. It is **a separate pipeline** from the row reduce
- * ({@link reduceKey}), and the existing key strings do not change by a single byte (a separate
- * variant so that the default path's WGSL / keys do not move).
+ * The number of threads that share one output of axis reduce (perf-ledger V-7). The 256 leaves of
+ * an output are split into this many aligned subtrees, one per thread, so one workgroup covers
+ * `256 / split` outputs. With one thread per output the decoder's channel norms (as few as 256
+ * outputs) ran on a single workgroup.
  */
-export const axisReduceKey = (spec: ReduceSpec): string => {
+export const AXIS_REDUCE_SPLIT = 16;
+
+/**
+ * log2 of a split (rejected at generation when it is not a power of two up to the workgroup size).
+ * MUST: a thread's leaf range is aligned only for such a split — any other split would make a
+ * thread's partial result a different subtree from the row reduce's tree (a silent wrong value).
+ */
+const axisReduceSplitBits = (split: number): number => {
+  const bits = Math.log2(split);
+  // `bits < 0` rejects the fractional powers of 2 (0.5 → 0 outputs per group)
+  if (!Number.isInteger(bits) || bits < 0 || split > AXIS_REDUCE_WORKGROUP_SIZE) {
+    throw new CodegenError(
+      `reduce codegen: axis split ${split} is not a power of 2 up to ${AXIS_REDUCE_WORKGROUP_SIZE}`,
+    );
+  }
+  return bits;
+};
+
+/** The outputs one axis-reduce workgroup covers (the dispatch unit of {@link axisReduceWgsl}). */
+export const axisReduceOutputsPerGroup = (split: number = AXIS_REDUCE_SPLIT): number =>
+  AXIS_REDUCE_WORKGROUP_SIZE >>> axisReduceSplitBits(split);
+
+/**
+ * Key of the axis reduce variant. It is **a separate pipeline** from the row reduce
+ * ({@link reduceKey}), whose key strings do not change by a single byte. The split is in the key
+ * (it changes the WGSL and the dispatch, not the values).
+ */
+export const axisReduceKey = (spec: ReduceSpec, split: number = AXIS_REDUCE_SPLIT): string => {
   const { op, from, to } = canonicalize(spec);
-  return `reduce:v2:${op}:${from}>${to}:axis:wg${AXIS_REDUCE_WORKGROUP_SIZE}`;
+  axisReduceSplitBits(split);
+  return `reduce:v2:${op}:${from}>${to}:axis:s${split}:wg${AXIS_REDUCE_WORKGROUP_SIZE}`;
 };
 
 /**
- * The variant that reduces an axis other than the last one. One thread owns one output and scans
- * the reduced axis in steps of `inner`.
+ * The variant that reduces an axis other than the last one. `split` threads share one output: lane
+ * `lid = s · (256 / split) + o` takes output `o` of the workgroup's `256 / split` outputs and subtree `s`
+ * (consecutive lanes take consecutive outputs, so the reads along `inner` coalesce), and scans the
+ * reduced axis in steps of `inner` for its subtree's leaves.
  *
  * Reproducing the reduction order (**MUST** — the basis of bit identity):
  *
@@ -241,13 +273,23 @@ export const axisReduceKey = (spec: ReduceSpec): string => {
  * 2. The row reduce's tree is `scratch[lid] = combine(scratch[lid], scratch[lid + stride])`
  *    (stride = 128 → 1), so the first pairs formed are (0,128) / (1,129) … = **the leaf order is
  *    bit-reversed**. Pushing the slots onto a carry-stack (a binary counter) in `reverseBits` order
- *    makes the symbolic expression match this tree exactly (verified on 21 cases with dim 1–512 —
- *    recon §5.2).
- * 3. The combine argument order is "the side pushed first is the first argument" (the tree's
+ *    over `m = 0 … 255` makes the symbolic expression match this tree exactly (verified on 21 cases with
+ *    dim 1–512 — recon §5.2).
+ * 3. That tree over `m` is a perfect binary tree, so the carry stack restricted to an aligned range
+ *    `m ∈ [s·L, (s+1)·L)` (`L = 256 / split` leaves) ends holding exactly that subtree's root, built by the
+ *    same operations (the low bits of `m` are the thread's own counter `j`). The levels above it
+ *    combine adjacent roots, `combine(root[s], root[s + w])` for `w = 1, 2, 4, …` — the carry stack's
+ *    upper levels in the same argument order, through workgroup memory (which keeps the bits).
+ * 4. The combine argument order is "the side pushed first is the first argument" (the tree's
  *    `scratch[lid]` is the first argument). NaN propagation in `amax` / `amin` is symmetric so the
  *    value does not change, but `sum`'s rounding depends on the order.
+ *
+ * MUST: every barrier sits in workgroup-uniform control flow — the grid-stride loop walks
+ * workgroup blocks (`tb` from `workgroup_id` and `num_workgroups`, the bound from the uniform
+ * params), and the per-output guard `t < out_count` never encloses a barrier. A lane past the end
+ * contributes the identity to roots no output reads.
  */
-export const axisReduceWgsl = (spec: ReduceSpec): string => {
+export const axisReduceWgsl = (spec: ReduceSpec, split: number = AXIS_REDUCE_SPLIT): string => {
   const { op, from, to } = canonicalize(spec);
   const combine = COMBINE[op];
   const identity = IDENTITY[op][to];
@@ -260,10 +302,22 @@ export const axisReduceWgsl = (spec: ReduceSpec): string => {
   const helpers = propagate === undefined ? [] : [IS_NAN_BITS_WGSL, propagate];
   const size = AXIS_REDUCE_WORKGROUP_SIZE;
   const bits = workgroupSizeBits(size);
-  // After `size` pushes only the top level is valid, so `log2(size) + 1` levels are needed.
-  const stackDepth = bits + 1;
+  const splitBits = axisReduceSplitBits(split);
+  const outputs = size >>> splitBits;
+  const leaves = outputs;
+  // After `leaves` pushes only the top level is valid, so `log2(leaves) + 1` levels are needed.
+  const stackDepth = bits - splitBits + 1;
+  const levels: string[] = [];
+  for (let width = 1; width < split; width *= 2) {
+    levels.push(
+      `    if (s % ${2 * width}u == 0u) {`,
+      `      roots[lid.x] = ${combine("roots[lid.x]", `roots[lid.x + ${width * outputs}u]`)};`,
+      "    }",
+      "    workgroupBarrier();",
+    );
+  }
   return [
-    `// karume axis reduce ${op} (non-last dim, ${label}, generated)`,
+    `// karume axis reduce ${op} (non-last dim, ${label}, split ${split}, generated)`,
     "struct Params {",
     "  out_count: u32,",
     "  axis_len: u32,",
@@ -273,38 +327,52 @@ export const axisReduceWgsl = (spec: ReduceSpec): string => {
     `@group(0) @binding(1) var<storage, read> x: array<${WGSL_SCALAR[from]}>;`,
     `@group(0) @binding(2) var<storage, read_write> out: array<${accumulator}>;`,
     "",
+    `var<workgroup> roots: array<${accumulator}, ${size}>;`,
+    "",
     ...helpers.flatMap((fn) => [fn, ""]),
     `@compute @workgroup_size(${size})`,
     "fn main(",
-    "  @builtin(global_invocation_id) gid: vec3<u32>,",
+    "  @builtin(workgroup_id) wid: vec3<u32>,",
+    "  @builtin(local_invocation_id) lid: vec3<u32>,",
     "  @builtin(num_workgroups) nwg: vec3<u32>,",
     ") {",
+    `  let o = lid.x % ${outputs}u;`,
+    `  let s = lid.x / ${outputs}u;`,
     "  let inner = params.inner;",
     "  let axis_len = params.axis_len;",
-    `  let stride = nwg.x * ${size}u;`,
-    "  var t = gid.x;",
-    "  while (t < params.out_count) {",
-    "    // output index t = outer·inner + i; back to the base address with only the reduced axis removed",
-    "    let base = (t / inner) * axis_len * inner + (t % inner);",
-    `    var acc: array<${accumulator}, ${stackDepth}>;`,
-    `    for (var m = 0u; m < ${size}u; m = m + 1u) {`,
-    "      // reproduce the leaf order of the row reduce (bit reversal) in one thread",
-    `      let slot = reverseBits(m) >> ${32 - bits}u;`,
-    `      var v = ${identity};`,
-    "      var c = slot;",
-    "      while (c < axis_len) {",
-    `        v = ${combine("v", load("x[base + c * inner]", from))};`,
-    `        c = c + ${size}u;`,
+    `  var tb = wid.x * ${outputs}u;`,
+    "  while (tb < params.out_count) {",
+    "    let t = tb + o;",
+    `    var root = ${identity};`,
+    "    if (t < params.out_count) {",
+    "      // output index t = outer·inner + i; back to the base address with only the reduced axis removed",
+    "      let base = (t / inner) * axis_len * inner + (t % inner);",
+    `      var acc: array<${accumulator}, ${stackDepth}>;`,
+    `      for (var j = 0u; j < ${leaves}u; j = j + 1u) {`,
+    "        // the row reduce's leaf order (bit reversal), restricted to this subtree's aligned range",
+    `        let slot = reverseBits(s * ${leaves}u + j) >> ${32 - bits}u;`,
+    `        var v = ${identity};`,
+    "        var c = slot;",
+    "        while (c < axis_len) {",
+    `          v = ${combine("v", load("x[base + c * inner]", from))};`,
+    `          c = c + ${size}u;`,
+    "        }",
+    "        var k = 0u;",
+    "        while ((j & (1u << k)) != 0u) {",
+    `          v = ${combine("acc[k]", "v")};`,
+    "          k = k + 1u;",
+    "        }",
+    "        acc[k] = v;",
     "      }",
-    "      var k = 0u;",
-    "      while ((m & (1u << k)) != 0u) {",
-    `        v = ${combine("acc[k]", "v")};`,
-    "        k = k + 1u;",
-    "      }",
-    "      acc[k] = v;",
+    `      root = acc[${stackDepth - 1}u];`,
     "    }",
-    `    out[t] = acc[${stackDepth - 1}u];`,
-    "    t = t + stride;",
+    "    roots[lid.x] = root;",
+    "    workgroupBarrier();",
+    ...levels,
+    "    if (s == 0u && t < params.out_count) {",
+    "      out[t] = roots[o];",
+    "    }",
+    `    tb = tb + nwg.x * ${outputs}u;`,
     "  }",
     "}",
     "",

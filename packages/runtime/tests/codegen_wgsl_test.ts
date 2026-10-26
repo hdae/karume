@@ -18,8 +18,10 @@ import { CodegenError } from "../src/codegen/errors.ts";
 import { GRU_SCAN_MAX_HIDDEN } from "../src/codegen/limits.ts";
 import { IS_NAN_BITS_WGSL, TANH_SATURATION } from "../src/codegen/numerics-wgsl.ts";
 import {
+  AXIS_REDUCE_SPLIT,
   AXIS_REDUCE_WORKGROUP_SIZE,
   axisReduceKey,
+  axisReduceOutputsPerGroup,
   axisReduceParams,
   axisReduceWgsl,
   reduceKey,
@@ -420,9 +422,10 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["reduce_amax.wgsl", reduceWgsl({ op: "amax", dtype: "f32" })],
     // amax / amin は畳み込み関数だけが違う（NaN 伝播の形を両方とも凍結する）
     ["reduce_amin.wgsl", reduceWgsl({ op: "amin", dtype: "f32" })],
-    // 軸 reduce（最終次元以外）の別変種。行 reduce の縮約順序を 1 スレッドの bitrev
-    // carry-stack で再現する形をバイト単位で凍結する（順序が動けばビット同一が崩れる）。
-    // dtype 変種（bool → i32）と NaN 伝播形（amax）も並べる。
+    // The axis reduce (any dimension but the last), a separate variant at the production split.
+    // It reproduces the row reduce's order with per-thread bit-reversed carry stacks over aligned
+    // subtrees plus pairwise root combines; the bytes are frozen because a moved order breaks the
+    // bit identity. The dtype variant (bool → i32) and the NaN-propagating form (amax) sit beside it.
     ["reduce_axis_sum.wgsl", axisReduceWgsl({ op: "sum", dtype: "f32" })],
     ["reduce_axis_sum_bool.wgsl", axisReduceWgsl({ op: "sum", dtype: "bool" })],
     ["reduce_axis_amax.wgsl", axisReduceWgsl({ op: "amax", dtype: "f32" })],
@@ -1248,6 +1251,10 @@ test("パイプラインキーは生成入力ごとに一意（別カーネル�
       // 軸変種は行 reduce と**別のパイプライン**（衝突すると片方の WGSL がもう片方の
       // dispatch に割り当たり、縮約軸を取り違えたまま例外なしで通る）
       keys.push(axisReduceKey({ op, dtype }));
+      // every split is its own WGSL, so its own key (a split missing from the key would hand one
+      // split's pipeline to another split's dispatch grid)
+      for (const split of [1, 2, 4, 8, 32, 64, 128, 256])
+        keys.push(axisReduceKey({ op, dtype }, split));
     }
   }
   for (const dtype of SEMANTIC_DTYPES) {
@@ -1577,37 +1584,136 @@ test("clamp / clamp_min / relu / amax / amin は NaN を比較ではなくビッ
       true,
       op,
     );
-    // 軸変種も 2 段（スレッド内の走査 + carry-stack）とも同じ関数を通る
+    // The axis variant has three stages (the per-slot scan, the carry stack, the cross-subtree
+    // combine) and every one goes through the same function.
     const axis = axisReduceWgsl({ op, dtype: "f32" });
     assertEquals(axis.includes(bits), true, `${op}:axis`);
     assertEquals(axis.includes(`v = ${fn}(v, x[base + c * inner]);`), true, `${op}:axis`);
     assertEquals(axis.includes(`v = ${fn}(acc[k], v);`), true, `${op}:axis`);
+    const outputs = axisReduceOutputsPerGroup();
+    assertEquals(
+      axis.includes(`roots[lid.x] = ${fn}(roots[lid.x], roots[lid.x + ${outputs}u]);`),
+      true,
+      `${op}:axis`,
+    );
   }
   assertEquals(reduceWgsl({ op: "sum", dtype: "f32" }).includes("is_nan_bits"), false);
   assertEquals(axisReduceWgsl({ op: "sum", dtype: "f32" }).includes("is_nan_bits"), false);
 });
 
 /**
- * 軸 reduce が行 reduce とビット同一になる条件は 3 つの数の同時成立 —「workgroup サイズが
- * 両変種で同じ」「carry-stack が log2(size) + 1 段」「ビット反転の shift が 32 − log2(size)」。
- * どれか 1 つがずれても**例外は出ない**（段が足りなければ一度も書かれていない段を読み、
- * shift がずれれば葉の並びが木と食い違って sum の丸め列だけが静かに変わる）ので、生成物の
- * 側から算術で突き合わせる。GPU パリティ門（tests/gpu_reduce_axis_parity_test.ts）と違い
- * アダプタ無し環境でも走ることがこの門の目的。
+ * The axis reduce is bit-identical to the row reduce only while several numbers hold together: the
+ * same workgroup size in both variants, leaves × split = 256, a carry stack of log2(leaves) + 1
+ * levels, a bit-reversal shift of 32 − log2(256), and log2(split) cross-subtree levels whose left
+ * operand is the lower subtree. None of them raises an exception when it drifts (too few levels
+ * read a level never written; a wrong shift or a swapped operand only changes the rounding of sum),
+ * so they are checked arithmetically on the generated text. Unlike the GPU parity test
+ * (tests/gpu_reduce_axis_parity_test.ts) this runs without an adapter; the full tree is replayed in
+ * tests/reduce_axis_tree_test.ts.
  */
-test("軸 reduce の段数とビット反転幅は workgroup サイズから導かれる", () => {
+test("axis reduce: thread mapping, stack depth, shift and combine levels follow from size and split", () => {
   const size = AXIS_REDUCE_WORKGROUP_SIZE;
   const bits = Math.log2(size);
-  assertEquals(Number.isInteger(bits), true, "2 冪でないと行 reduce の木も成立しない");
-  const axis = axisReduceWgsl({ op: "sum", dtype: "f32" });
-  assertEquals(axis.includes(`for (var m = 0u; m < ${size}u;`), true);
-  assertEquals(axis.includes(`let slot = reverseBits(m) >> ${32 - bits}u;`), true);
-  assertEquals(axis.includes(`var acc: array<f32, ${bits + 1}>;`), true);
-  assertEquals(axis.includes(`out[t] = acc[${bits}u];`), true);
-  // 行 reduce 側が同じサイズであること（葉の並びの一致はサイズ一致が前提）
+  assertEquals(Number.isInteger(bits), true, "the row reduce's tree needs a power of 2 too");
+  for (const split of [1, 2, 4, 8, 16, 32, 64, 128, 256]) {
+    const axis = axisReduceWgsl({ op: "sum", dtype: "f32" }, split);
+    const leaves = size / split;
+    const leafBits = Math.log2(leaves);
+    const where = `split ${split}`;
+    assertEquals(leaves * split, size, where);
+    assertEquals(axisReduceOutputsPerGroup(split), leaves, where);
+    assertEquals(axis.includes(`@workgroup_size(${size})`), true, where);
+    assertEquals(axis.includes(`let o = lid.x % ${leaves}u;`), true, where);
+    assertEquals(axis.includes(`let s = lid.x / ${leaves}u;`), true, where);
+    assertEquals(axis.includes(`for (var j = 0u; j < ${leaves}u;`), true, where);
+    assertEquals(
+      axis.includes(`let slot = reverseBits(s * ${leaves}u + j) >> ${32 - bits}u;`),
+      true,
+      where,
+    );
+    assertEquals(axis.includes(`c = c + ${size}u;`), true, where);
+    assertEquals(axis.includes(`var acc: array<f32, ${leafBits + 1}>;`), true, where);
+    assertEquals(axis.includes(`root = acc[${leafBits}u];`), true, where);
+    // log2(split) levels, w = 1, 2, 4, …: subtree s (s % 2w == 0) adds subtree s + w on its right
+    const levels = [...axis.matchAll(/if \(s % (\d+)u == 0u\) \{\n\s*(.*)\n/g)].map((match) => [
+      Number(match[1]),
+      match[2],
+    ]);
+    assertEquals(levels.length, Math.log2(split), where);
+    for (const [index, [modulus, line]] of levels.entries()) {
+      const width = 2 ** index;
+      assertEquals(modulus, 2 * width, where);
+      assertEquals(line, `roots[lid.x] = roots[lid.x] + roots[lid.x + ${width * leaves}u];`, where);
+    }
+    assertEquals(axis.includes(`tb = tb + nwg.x * ${leaves}u;`), true, where);
+  }
+  // the row reduce has the same size (the leaf order matches only at equal sizes)
   const row = reduceWgsl({ op: "sum", dtype: "f32" });
   assertEquals(row.includes(`@workgroup_size(${size})`), true);
   assertEquals(row.includes(`i = i + ${size}u;`), true);
+});
+
+/**
+ * The barriers of the axis kernel, in order. Level `w` reads `roots[lid.x + w·outputs]`, a slot
+ * another lane wrote, so the roots store and every combine level MUST be followed by a barrier
+ * before the next cross-lane read. A value comparison can miss a dropped one on a GPU whose
+ * subgroups happen to cover both lanes (a 32-wide warp holds both lanes of the first level at the
+ * production split), so the order is checked on the generated text. After the last level only lanes with `s == 0` read
+ * `roots[o]`, their own slot, so the block ends without a barrier.
+ */
+const axisBarrierSequence = (wgsl: string): readonly string[] =>
+  wgsl.split("\n").flatMap((line) => {
+    const statement = line.trim();
+    if (statement === "workgroupBarrier();") return ["barrier"];
+    if (statement === "roots[lid.x] = root;") return ["store"];
+    if (statement.startsWith("if (s % ")) return ["level"];
+    if (statement === "out[t] = roots[o];") return ["out"];
+    return [];
+  });
+
+test("axis reduce: a barrier follows the roots store and every combine level, and only those", () => {
+  const expected = (split: number): readonly string[] => [
+    "store",
+    "barrier",
+    ...Array.from({ length: Math.log2(split) }, () => ["level", "barrier"]).flat(),
+    "out",
+  ];
+  for (const split of [2, AXIS_REDUCE_SPLIT, 256]) {
+    const wgsl = axisReduceWgsl({ op: "sum", dtype: "f32" }, split);
+    assertEquals(axisBarrierSequence(wgsl), expected(split), `split ${split}`);
+  }
+  // The check fails when the barrier after the store, or one after a level, is dropped.
+  const wgsl = axisReduceWgsl({ op: "sum", dtype: "f32" }, AXIS_REDUCE_SPLIT);
+  const store = "    roots[lid.x] = root;\n    workgroupBarrier();\n";
+  assertEquals(wgsl.split(store).length, 2, "the store line moved (the fault would not apply)");
+  assertNotEquals(
+    axisBarrierSequence(wgsl.replace(store, "    roots[lid.x] = root;\n")),
+    expected(AXIS_REDUCE_SPLIT),
+  );
+  const level = "    }\n    workgroupBarrier();\n    if (s % ";
+  assert(wgsl.includes(level), "the level layout moved (the fault would not apply)");
+  assertNotEquals(
+    axisBarrierSequence(wgsl.replace(level, "    }\n    if (s % ")),
+    expected(AXIS_REDUCE_SPLIT),
+  );
+});
+
+test("axis reduce rejects a split that is not a power of 2 up to the workgroup size", () => {
+  for (const split of [0, 3, 6, 24, 0.5, 512, -2, Number.NaN]) {
+    assertThrows(
+      () => axisReduceWgsl({ op: "sum", dtype: "f32" }, split),
+      CodegenError,
+      undefined,
+      `${split}`,
+    );
+    assertThrows(
+      () => axisReduceKey({ op: "sum", dtype: "f32" }, split),
+      CodegenError,
+      undefined,
+      `${split}`,
+    );
+    assertThrows(() => axisReduceOutputsPerGroup(split), CodegenError, undefined, `${split}`);
+  }
 });
 
 // MUST: 素朴な log(1 + x) は |x| ≪ 1 で有効桁が消える。補正式が入っていることを生成物で

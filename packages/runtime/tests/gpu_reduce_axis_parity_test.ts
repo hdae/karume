@@ -1,17 +1,21 @@
-// 軸 reduce 変種の**ビット同一の門**。本波で最重要のテスト。
+// The **bit-identity check** of the axis reduce variant.
 //
-// 同じ入力バッファに対し、
+// On the same input buffer it runs
 //
-//   ① 現行の表現（`permute` で縮約軸を最終次元へ回す → 行 reduce `reduce:v2:…:wg256`）
-//   ② 軸 reduce 変種（`reduce:v2:…:axis:wg256` — 1 スレッド 1 出力・permute 無し）
+//   ① the old form (a `permute` moves the reduced axis to the last dimension → row reduce
+//      `reduce:v2:…:wg256`)
+//   ② the axis reduce variant at the production split (`reduce:v2:…:axis:s<split>:wg256` —
+//      `AXIS_REDUCE_SPLIT` threads share one output, no permute)
 //
-// を**同じ実 GPU**で流し、出力を **f32 のビット列**で突き合わせる。allclose ではなく
-// `Uint32Array` の完全一致で見るのが要点で、tolerance に隠れる**縮約順序の変化**は
-// ここでしか検出できない（数 ulp なので tolerance は素通りする）。
+// on **the same real GPU** and compares the outputs as **f32 bit patterns**. The point is exact
+// `Uint32Array` equality rather than allclose: a **change of the reduction order** is a few ulp, which
+// a tolerance lets through, so only this check sees it.
 //
-// 成立の根拠（設計 recon §5.2）: 行 reduce の縮約順序は「256 レーンの grid-stride 走査 +
-// 256 幅のビット反転二分木」で、これを 1 スレッドの **bitrev carry-stack** で厳密再現できる
-// ことを記号式で確認済み。`+0.0`（identity）の畳み込みも省略していない。
+// Why it holds: the row reduce's order is "a 256-lane grid-stride fold + a 256-wide bit-reversed
+// binary tree". Each axis thread rebuilds one aligned subtree of that tree with its own bit-reversed
+// carry stack, and `log2(split)` levels in workgroup memory combine the subtree roots in the tree's
+// operand order. The `+0.0` (identity) fold is not skipped. The tree itself is checked symbolically,
+// without a GPU, in tests/reduce_axis_tree_test.ts (ADR 0035 addendum 2026-10-26).
 //
 // MUST: 恒真化しないこと。①② は**別のパイプライン・別の WGSL**で、生成関数も別。
 // MUST: **巡回長 3 以上の軸ケース**を必ず 1 本持つ（ACTIVE_DESIGN の落とし穴「実測グラフの
@@ -26,8 +30,9 @@ import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { gridStrideWorkgroups } from "../src/codegen/dispatch.ts";
 import {
-  AXIS_REDUCE_WORKGROUP_SIZE,
+  AXIS_REDUCE_SPLIT,
   axisReduceKey,
+  axisReduceOutputsPerGroup,
   axisReduceParams,
   axisReduceWgsl,
   reduceKey,
@@ -47,7 +52,7 @@ import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
 import { SubmitScheduler } from "../src/gpu/submit.ts";
 import type { IrDtype } from "../src/format/ir.ts";
 import { numel, type ReduceOpName } from "../src/ops.ts";
-import { allclose } from "../src/reference/allclose.ts";
+import { allclose, type Tolerance } from "../src/reference/allclose.ts";
 import { referenceRowReduce, refTensor } from "../src/reference/ops.ts";
 import { createSessionFromContainer } from "../src/runtime/executor.ts";
 import { fill, GRAPH_NAME, openModelBytes, singleOpDeclaration } from "./helpers/model-fixture.ts";
@@ -68,6 +73,17 @@ const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
  * 桁が大きく離れている。
  */
 const CPU_REFERENCE_TOLERANCE = { atol: 5e-6, rtol: 2e-5 } as const;
+
+/**
+ * The CPU tolerance of the `[1024,2,32,32]` case. Its columns of `SIGNED` nearly cancel (the
+ * reference is near 0 for many outputs, so rtol does not help) while f32 partial sums over 1024
+ * terms carry rounding of a few ulp of values in the tens. Measured on 2026-10-26
+ * (`atol = rtol = 0`): `[1024,2,32,32]` maxAbs 1.24e-5, past the default atol; atol 1e-4 is about 8
+ * times that. `[1024,1,16,16]` (maxAbs 1.43e-6) fits {@link CPU_REFERENCE_TOLERANCE} and keeps it.
+ * An implementation bug is still O(1). The bit comparison with the row reduce, not this check, is
+ * the gate.
+ */
+const C1024_CPU_REFERENCE_TOLERANCE: Tolerance = { atol: 1e-4, rtol: 2e-5 };
 
 /** 決定的なデータ列（乱数は使わない — 失敗が再現しないため）。 */
 const SIGNED = (i: number): number => (((i * 7) % 23) - 11) * 0.17;
@@ -126,6 +142,8 @@ type ParityCase = {
   readonly nan?: true;
   /** 縮約列を丸ごと ±Infinity にする（{@link infAlongAxis} — identity の門）。 */
   readonly inf?: -1 | 1;
+  /** The CPU-reference tolerance when it is not {@link CPU_REFERENCE_TOLERANCE}. */
+  readonly tolerance?: Tolerance;
 };
 
 const readbackBits = async (
@@ -258,17 +276,18 @@ const runBoth = async (
       rowKey,
     );
 
-    // ② 軸 reduce 変種（permute 無し・1 スレッド 1 出力）
-    const axisKey = axisReduceKey({ op, dtype });
+    // ② the axis reduce variant (no permute). The split is passed explicitly, as `buildRowReduce`
+    // does, so the key, the WGSL and the grid are the production ones, not the parameter defaults.
+    const axisKey = axisReduceKey({ op, dtype }, AXIS_REDUCE_SPLIT);
     const { pipeline: axisPipeline, layout: axisLayout } = await cache.get(
       axisKey,
-      axisReduceWgsl({ op, dtype }),
+      axisReduceWgsl({ op, dtype }, AXIS_REDUCE_SPLIT),
     );
     const axisOut = allocOut();
     scheduler.dispatch(
       axisPipeline,
       bind(axisLayout, axisReduceParams(outCount, axisLen, inner), UNIFORM_IN, xBuffer, axisOut),
-      [gridStrideWorkgroups(outCount, AXIS_REDUCE_WORKGROUP_SIZE, limit), 1, 1],
+      [gridStrideWorkgroups(outCount, axisReduceOutputsPerGroup(AXIS_REDUCE_SPLIT), limit), 1, 1],
       axisKey,
     );
 
@@ -336,6 +355,33 @@ const CASES: readonly ParityCase[] = [
     // 先頭軸の縮約（outer = 1）も同時に踏む。
     name: "縮約長 300 > 256 [300,7] axis=0（slot 走査が 2 周）",
     shape: [300, 7],
+    axis: 0,
+    op: "sum",
+    dtype: "f32",
+  },
+  {
+    // The Wan2.2 decoder's smallest channel norm: P = 256 outputs (exactly one workgroup of the
+    // single-thread form, several at the production split), C = 1024 (4 sweeps per slot).
+    name: "[1024,1,16,16] axis=0 (P 256 / C 1024)",
+    shape: [1024, 1, 16, 16],
+    axis: 0,
+    op: "sum",
+    dtype: "f32",
+  },
+  {
+    // The Wan2.2 next chunk's 32×32 stage: P = 2,048, C = 1024, a time axis of 2 inside P.
+    name: "[1024,2,32,32] axis=0 (P 2,048 / C 1024)",
+    shape: [1024, 2, 32, 32],
+    axis: 0,
+    op: "sum",
+    dtype: "f32",
+    tolerance: C1024_CPU_REFERENCE_TOLERANCE,
+  },
+  {
+    // P = 1,023 is not a multiple of the outputs per group (the last workgroup has idle lanes that
+    // still take part in the barriers), and C = 300 > 256 (some slots sweep twice).
+    name: "[300,33,31] axis=0 (P 1,023, odd / C 300)",
+    shape: [300, 33, 31],
     axis: 0,
     op: "sum",
     dtype: "f32",
@@ -424,6 +470,20 @@ const CASES: readonly ParityCase[] = [
   },
 ];
 
+/**
+ * The I2V encoder's C = 4 shortcut sum (outer > 1): P = 40·167·167 = 1,115,560 outputs. At the
+ * production split its natural axis grid is past 65,535 workgroups, so on an adapter with that
+ * per-dimension limit the grid clamps and some workgroups run the grid-stride loop (with its
+ * barriers) for more than one block. The row reduce side clamps as well.
+ */
+const CLAMPED_CASE: ParityCase = {
+  name: "[40,4,167,167] axis=1 (P 1,115,560, the axis grid clamps / C 4)",
+  shape: [40, 4, 167, 167],
+  axis: 1,
+  op: "sum",
+  dtype: "f32",
+};
+
 /** ビット列の食い違い（先頭 4 件）を人が読める形にする。 */
 const firstMismatches = (a: Uint32Array, b: Uint32Array): readonly string[] => {
   const found: string[] = [];
@@ -481,7 +541,7 @@ test.skipIf(!GPU_AVAILABLE)(
             `${testCase.name}: 非 NaN の値`,
           );
         } else {
-          const report = allclose(values, reference, CPU_REFERENCE_TOLERANCE);
+          const report = allclose(values, reference, testCase.tolerance ?? CPU_REFERENCE_TOLERANCE);
           assert(
             report.pass,
             `${testCase.name}: CPU 参照と食い違う（maxAbs ${report.maxAbsError} @${report.worstIndex} / 破り ${report.failCount}）`,
@@ -492,6 +552,42 @@ test.skipIf(!GPU_AVAILABLE)(
         if (inverse.some((value, index) => value !== permuteDims[index])) sawNonInvolution = true;
       }
       assert(sawNonInvolution, "permute が全て対合のケースしか無い（軸取り違えが空振りする）");
+    } finally {
+      gpu.destroy();
+    }
+  },
+);
+
+// The clamp is a property of the adapter's limit, not of the shape: an adapter that grants more than
+// the natural grid would run the case unclamped, so it is skipped there with the reason instead of
+// failing (or passing without the clamp it exists for).
+test.skipIf(!GPU_AVAILABLE)(
+  "the axis reduce matches permute + row reduce bit for bit when its grid clamps (real GPU)",
+  async (context) => {
+    const gpu = await acquireGpu();
+    try {
+      const { shape, axis } = CLAMPED_CASE;
+      const natural = Math.ceil(
+        numel(shape) / shape[axis] / axisReduceOutputsPerGroup(AXIS_REDUCE_SPLIT),
+      );
+      const limit = gpu.limits.maxComputeWorkgroupsPerDimension;
+      context.skip(
+        natural <= limit,
+        `maxComputeWorkgroupsPerDimension ${limit} admits the natural grid of ${natural} workgroups, so the case would not clamp`,
+      );
+      const { viaPermute, viaAxis, reference } = await runBoth(gpu, CLAMPED_CASE);
+      assertEquals(
+        firstMismatches(viaPermute, viaAxis),
+        [],
+        "bits differ from permute + row reduce",
+      );
+      assert(new Set(viaAxis).size > 1, "the output is constant (the bit match is vacuous)");
+      const values = new Float32Array(viaAxis.buffer, viaAxis.byteOffset, viaAxis.length);
+      const report = allclose(values, reference, CPU_REFERENCE_TOLERANCE);
+      assert(
+        report.pass,
+        `differs from the CPU reference (maxAbs ${report.maxAbsError} @${report.worstIndex} / ${report.failCount} failing)`,
+      );
     } finally {
       gpu.destroy();
     }
@@ -536,11 +632,11 @@ test.skipIf(!GPU_AVAILABLE)(
     );
     assertEquals(
       await reduceKeysUsed([4, 6, 8], 1),
-      new Set([axisReduceKey({ op: "sum", dtype: "f32" })]),
+      new Set([axisReduceKey({ op: "sum", dtype: "f32" }, AXIS_REDUCE_SPLIT)]),
     );
     assertEquals(
       await reduceKeysUsed([4, 6, 8], 0),
-      new Set([axisReduceKey({ op: "sum", dtype: "f32" })]),
+      new Set([axisReduceKey({ op: "sum", dtype: "f32" }, AXIS_REDUCE_SPLIT)]),
     );
   },
 );

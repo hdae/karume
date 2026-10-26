@@ -22,8 +22,9 @@ import {
   topkOneSplitMergeWgsl,
 } from "../../kernels/argmax.ts";
 import {
-  AXIS_REDUCE_WORKGROUP_SIZE,
+  AXIS_REDUCE_SPLIT,
   axisReduceKey,
+  axisReduceOutputsPerGroup,
   axisReduceParams,
   axisReduceWgsl,
   reduceKey,
@@ -133,13 +134,19 @@ export const buildElementwise = async (
  * The reduce family (sum / amax / amin). **Two variants, chosen by the reduction axis**:
  *
  * - last dimension → row reduce (the existing kernel, one row = one workgroup + a 256-wide tree)
- * - any other → axis reduce (one thread = one output, coalesced reads. The reduction order
- *   matches the row reduce exactly = bit-identical output — {@link axisReduceWgsl} in
- *   src/codegen/reduce.ts)
+ * - any other → axis reduce (`AXIS_REDUCE_SPLIT` threads share one output, coalesced reads. The
+ *   reduction order matches the row reduce exactly = bit-identical output — {@link axisReduceWgsl}
+ *   in src/codegen/reduce.ts)
  *
  * MUST: the branch is decided **by the axis only**. Leaving room to choose by speed would allow the
  * axis variant to run even on the last dimension, and the default path's bit stability (the PNG
- * sha256 check) would depend on run-time conditions.
+ * sha256 check) would depend on run-time conditions. The axis variant's split is a different matter:
+ * every split computes the same summation tree (tests/reduce_axis_tree_test.ts), so the bits do not
+ * depend on it. It is a constant today because the only evidence is one GPU (perf-ledger V-7 — ADR
+ * 0035 addendum 2026-10-26), not because of a principle. A per-shape split, or a per-GPU field of
+ * the adapter profile fixed per Session (as the conv2d implicit-GEMM geometry is), is a possible later
+ * step once there is evidence for it; either way the split MUST be carried in the pipeline key, and
+ * it MUST NOT come from timing (the key would not be reproducible).
  */
 export const buildRowReduce = async (
   face: RecipeBuildFace,
@@ -156,10 +163,11 @@ export const buildRowReduce = async (
   const spec = { op, dtype: step.inputDtypes[0] };
   const lastDim = axis === inputShape.length - 1;
   const outCount = numel(step.outputs[0].shape);
-  const key = lastDim ? reduceKey(spec) : axisReduceKey(spec);
+  const split = AXIS_REDUCE_SPLIT;
+  const key = lastDim ? reduceKey(spec) : axisReduceKey(spec, split);
   const { pipeline, layout, roles } = await face.state.cache.get(
     key,
-    lastDim ? reduceWgsl(spec) : axisReduceWgsl(spec),
+    lastDim ? reduceWgsl(spec) : axisReduceWgsl(spec, split),
   );
   const inner = numel(inputShape.slice(axis + 1));
   const params = face.writeParams(
@@ -168,11 +176,11 @@ export const buildRowReduce = async (
       : axisReduceParams(outCount, inputShape[axis], inner),
     PARAMS_UNIFORM_USAGE,
   );
-  // Row reduce is one row = one workgroup, axis reduce one thread = one output. Both are clamped
-  // beyond the limit, and the kernel's grid-stride loop covers the rest.
+  // Row reduce is one row = one workgroup, axis reduce `256 / split` outputs = one workgroup. Both
+  // are clamped beyond the limit, and the kernel's grid-stride loop covers the rest.
   const groups = gridStrideWorkgroups(
     outCount,
-    lastDim ? 1 : AXIS_REDUCE_WORKGROUP_SIZE,
+    lastDim ? 1 : axisReduceOutputsPerGroup(split),
     face.state.gpu.limits.maxComputeWorkgroupsPerDimension,
   );
   builder.dispatch({

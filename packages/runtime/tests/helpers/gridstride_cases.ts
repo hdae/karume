@@ -9,8 +9,9 @@ import {
   elementwiseWgsl,
 } from "../../src/codegen/elementwise.ts";
 import {
-  AXIS_REDUCE_WORKGROUP_SIZE,
+  AXIS_REDUCE_SPLIT,
   axisReduceKey,
+  axisReduceOutputsPerGroup,
   axisReduceParams,
   axisReduceWgsl,
   reduceKey,
@@ -736,8 +737,9 @@ export const topkCase = (): DegenerateCase => {
 };
 
 /**
- * 軸 reduce 変種（最終次元以外）。行方向ではなく **`gid.x` の 1 次元 grid-stride**（1 スレッド =
- * 1 出力）なので、必要数は出力要素数 ÷ workgroup サイズ。
+ * The axis reduce variant (any dimension but the last). Its grid-stride loop walks blocks of
+ * `256 / split` outputs (one block = one workgroup), so the natural count is the output count ÷ the
+ * outputs per group.
  */
 export const axisReduceCase = (): DegenerateCase => {
   const shape = [40, 3, 500];
@@ -745,14 +747,14 @@ export const axisReduceCase = (): DegenerateCase => {
   const input = fill(shape, POSITIVE);
   return {
     name: "軸 reduce sum",
-    key: axisReduceKey({ op: "sum", dtype: "f32" }),
-    wgsl: axisReduceWgsl({ op: "sum", dtype: "f32" }),
+    key: axisReduceKey({ op: "sum", dtype: "f32" }, AXIS_REDUCE_SPLIT),
+    wgsl: axisReduceWgsl({ op: "sum", dtype: "f32" }, AXIS_REDUCE_SPLIT),
     // out_count = 40·500 = 20,000 / axis_len = 3 / inner = 500
     params: axisReduceParams(20_000, shape[axis], 500),
     uniformParams: true,
     inputs: [input],
     expected: applyReferenceOp("sum", [input], { dim: axis }, [40, 500]),
-    natural: Math.ceil(20_000 / AXIS_REDUCE_WORKGROUP_SIZE),
+    natural: Math.ceil(20_000 / axisReduceOutputsPerGroup(AXIS_REDUCE_SPLIT)),
     groups: 2,
   };
 };
