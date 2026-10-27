@@ -2,8 +2,11 @@ import { assert, assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import type { SessionSpec } from "@karume/hub";
 import { ModelInputError } from "../src/errors.ts";
+import { DEFAULT_SUBMIT_POLICY } from "@karume/runtime";
 import {
   assertGemmaSessionOverrides,
+  GEMMA_MAX_CHUNK_SIZE,
+  gemmaSubmitPolicy,
   resolveGemmaSessionOptions as resolve,
 } from "../src/gemma/session-options.ts";
 
@@ -288,5 +291,17 @@ describe("Gemmaのquant実行設定（明示指定だけの門）", () => {
       const viaResolve = inputViolationOf(() => resolve({}, overrides, "test"));
       assertEquals(viaGate, viaResolve);
     }
+  });
+});
+
+describe("gemmaSubmitPolicy (perf-ledger H-40)", () => {
+  it("caps submits at 128 dispatches and otherwise keeps the runtime default when the caller passes none", () => {
+    assertEquals(GEMMA_MAX_CHUNK_SIZE, 128);
+    assertEquals(gemmaSubmitPolicy(undefined), { ...DEFAULT_SUBMIT_POLICY, maxChunkSize: 128 });
+  });
+
+  it("passes the caller's own policy through unchanged", () => {
+    const own = { timeBudgetMs: 50, initialChunkSize: 8, minChunkSize: 2, maxChunkSize: 512 };
+    assertEquals(gemmaSubmitPolicy(own), own);
   });
 });

@@ -40,7 +40,11 @@
  * No import-time execution and no global mutable state (CLAUDE.md).
  */
 
-import { assertGemmaSessionOverrides, resolveGemmaSessionOptions } from "./session-options.ts";
+import {
+  assertGemmaSessionOverrides,
+  gemmaSubmitPolicy,
+  resolveGemmaSessionOptions,
+} from "./session-options.ts";
 import { createGemmaGreedyOutput, type GemmaGreedyOutput } from "./greedy-output.ts";
 import { admitGemma4Qat, assertGemma4QatPle } from "./qat.ts";
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
@@ -372,8 +376,8 @@ export type Gemma4PipelineOptions = {
    */
   readonly rmsNormReduce?: SessionOptions["rmsNormReduce"];
   /**
-   * The GPU submission policy. The same value goes to target / drafter; when omitted, the runtime
-   * default is used.
+   * The GPU submission policy. The same value goes to target / drafter; when omitted,
+   * {@link gemmaSubmitPolicy} (the runtime default with at most 128 dispatches per submit — H-40).
    */
   readonly submitPolicy?: SessionOptions["submitPolicy"];
   /**
@@ -1345,7 +1349,7 @@ class GemmaPipeline {
         ? {}
         : { packedStaticQuantize: options.packedStaticQuantize }),
       ...(options.rmsNormReduce === undefined ? {} : { rmsNormReduce: options.rmsNormReduce }),
-      ...(options.submitPolicy === undefined ? {} : { submitPolicy: options.submitPolicy }),
+      submitPolicy: gemmaSubmitPolicy(options.submitPolicy),
       ...(options.stateAttentionReduce === undefined
         ? {}
         : { stateAttentionReduce: options.stateAttentionReduce }),

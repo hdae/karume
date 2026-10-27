@@ -1,6 +1,6 @@
 /** Overrides Gemma's quant execution settings with the caller's explicit options (ADR 0104). */
 import type { SessionSpec } from "@karume/hub";
-import type { SessionOptions } from "@karume/runtime";
+import { DEFAULT_SUBMIT_POLICY, type SessionOptions, type SubmitPolicy } from "@karume/runtime";
 
 import {
   assertSessionOverrides,
@@ -68,3 +68,22 @@ export const resolveGemmaSessionOptions = (
   overrides: GemmaSessionOptions,
   where: string,
 ): GemmaSessionOptions => resolveSessionOptions(GEMMA_SESSION_POLICY, quant, overrides, where);
+
+/** The dispatch cap per submit of Gemma's default submission policy ({@link gemmaSubmitPolicy}). */
+export const GEMMA_MAX_CHUNK_SIZE = 128;
+
+/**
+ * The submission policy of Gemma's Sessions (perf-ledger H-40): the caller's own policy, otherwise
+ * the runtime default with at most {@link GEMMA_MAX_CHUNK_SIZE} dispatches per submit. A decode token
+ * is about 900 short dispatches; sent as one submit, the GPU waits for the whole host encode and
+ * Dawn's command recording, while 128-dispatch chunks let it start on the first one. The commands
+ * and their order do not change, so the output is bit-identical. Measured 2026-10-25 (gemma4 E2B
+ * `i4-fast`): Node 10.1 → 7.4 ms per token, Chromium-Linux 10.0 → 8.0, Chrome on the RTX 5070 Ti
+ * 11.73 → 10.03; prefill at short prompts and speculative decoding were not slower.
+ *
+ * Derived from `DEFAULT_SUBMIT_POLICY` at each call, so a change of the runtime default still
+ * reaches this family (only the cap differs). It is a host policy, not a quant knob, so it is not in
+ * {@link GEMMA_SESSION_POLICY}.
+ */
+export const gemmaSubmitPolicy = (requested: SubmitPolicy | undefined): SubmitPolicy =>
+  requested ?? { ...DEFAULT_SUBMIT_POLICY, maxChunkSize: GEMMA_MAX_CHUNK_SIZE };
