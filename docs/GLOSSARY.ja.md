@@ -137,6 +137,9 @@
 | perturbation ensemble | 摂動アンサンブル | 埋め込みの出口に微小な乱数を入れて回した別標本の束 | — | ADR 0026 追記 2026-10-07 |
 | census table (per bundle) | census 表 | 束ごとに変種の期待本数（ちょうど）を持つ表 | — | `packages/models/tests/helpers/census-table.ts` |
 | timing mode (`gpuTiming`) | 計測モード | timestamp-query を要求した device での実行 | — | ADR 0021 決定 1・2 |
+| split-pass timing △ | dispatch ごとの計測 | dispatch を 1 つずつ計時つきの pass に分けて測る。kernel ごとの時間が出るが、pass ごとの固定費（約 4 µs）が乗る | — | research 2026-10-27 §3 |
+| grouped-pass timing △ | まとめた pass での計測 | 製品の pass を、ある種類の kernel の前後でだけ分けて測る。その種類の時間を直接測れる | — | research 2026-10-27 §3 |
+| burst-free composite △ | 遅い区間を除いた合成値 | prefill の chunk の位置ごとに最速のサンプルを足したもの | — | research 2026-10-27 §3 |
 | poison values (fault injection) | 毒値 | 書かれずに残った要素を見つけるため、実行前に NaN などで埋める故障注入の手法 | — | ADR 0004・0014 |
 
 ## op の語彙
