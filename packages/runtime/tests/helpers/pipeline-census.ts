@@ -159,8 +159,9 @@ const ATTENTION_I8A8_FAMILIES: ReadonlySet<string> = new Set(
 // The online kernel's family (ADR 0132 — `attentionScoreStorage: "none"`). Its keys carry the i8a8
 // dtype too: the kernel is the a8 compute with S never stored.
 const ATTENTION_ONLINE_FAMILY = familyOf(attentionOnlineI8a8Key(true, 128, "sg32"));
-// The folded ①' (perf-ledger K-55) is ①' on the measured full GQA classes (F = r = 4 / 8) — the
-// same evidence of "parallel", outside the (sliding, gqa) grid because its key carries F.
+// The folded ①' (perf-ledger K-55) is ①' on selected full GQA classes (F = r = 8 today; F = 4 is
+// still generated, for perf-ledger K-95) — the same evidence of "parallel", outside the
+// (sliding, gqa) grid because its key carries F.
 const STATE_PARALLEL_KEYS: ReadonlySet<string> = new Set([
   ...stateVariants(
     stateQkParallelKey,

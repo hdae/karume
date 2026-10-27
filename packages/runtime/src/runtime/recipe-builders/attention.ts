@@ -1147,10 +1147,11 @@ export const buildStateAttention = async (
   // at a different pipeline per run.
   const qkParallel = parallel && stateQkParallelEligible(chunkRows);
   // The folded ①' (perf-ledger K-55): on full-attention plans whose (r = kv_repeat, D, M) is a
-  // measured class (Gemma 4 E2B / E4B at M = 1 / 4 / 8, MiniCPM5 at M = 1), one workgroup serves
-  // the F = r query heads of one kv plane and reads each K element once. It is **bit-identical to
-  // ①'** (the same terms in the same order — the section "①' folded over the query heads of one kv
-  // plane" of src/kernels/state-attention.ts), so it rides on ①''s selection without an option,
+  // selected class (Gemma 4 E2B at M = 1 / 4 / 8, MiniCPM5 at M = 1), one workgroup serves the
+  // F = r query heads of one kv plane and reads each K element once. On those classes it was
+  // observed **bit-identical to ①'** on every backend checked (the same terms in the same order —
+  // the section "①' folded over the query heads of one kv plane" of
+  // src/kernels/state-attention.ts), so it rides on ①''s selection without an option,
   // and plans of one model may differ in the choice (verify vs decode) without moving a word; the
   // condition and the WHY are in `stateQkFoldHeads`. The inputs are plan-time static values like
   // the rest of this selection.

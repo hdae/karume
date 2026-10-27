@@ -1015,16 +1015,14 @@ test("①' の適用条件は M（chunkRows）≤ 8 — 実測した範囲の外
 
 describe("the folded ①' — the F query heads of one kv plane per workgroup (perf-ledger K-55)", () => {
   it("is selected with F = r only on the measured full-attention classes (r, D, M)", () => {
-    // [r, D, M, F]. The classes measured not slower than ①' at P = 1,024 / 4,000 / 16,000
-    // (2026-10-27): Gemma 4 E2B (r = 8) and E4B (r = 4) full layers at decode M = 1 and verify
-    // M = 4 / 8, and the MiniCPM5 full layer (r = 8, D = 128) at M = 1
+    // [r, D, M, F]. The classes measured not slower than ①' at P = 1,024 / 4,000 / 16,000 and
+    // observed bit-identical to ①' on every backend checked (Vulkan RTX 3080 Ti, D3D12 RTX 5070 Ti
+    // — 2026-10-27): the Gemma 4 E2B full layer (r = 8) at decode M = 1 and verify M = 4 / 8, and
+    // the MiniCPM5 full layer (r = 8, D = 128) at M = 1
     const folded: readonly (readonly [number, number, number, number])[] = [
       [8, 512, 1, 8],
       [8, 512, 4, 8],
       [8, 512, 8, 8],
-      [4, 512, 1, 4],
-      [4, 512, 4, 4],
-      [4, 512, 8, 4],
       [8, 128, 1, 8],
     ];
     for (const [kvRepeat, depth, chunkRows, heads] of folded) {
@@ -1052,6 +1050,11 @@ describe("the folded ①' — the F query heads of one kv plane per workgroup (p
       [8, 256, 1],
       [4, 128, 1],
       [8, 64, 1],
+      // The Gemma 4 E4B full layer (r = 4) was measured faster, but its F = 4 kernel differs from
+      // ①' on D3D12 (perf-ledger K-95), so it keeps ①'
+      [4, 512, 1],
+      [4, 512, 4],
+      [4, 512, 8],
     ];
     for (const [kvRepeat, depth, chunkRows] of plain) {
       assertEquals(

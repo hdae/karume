@@ -846,8 +846,9 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * Shapes for the folded ①' census: the measured classes fold on full layers (r = 8 / 4 at D = 512,
- * r = 8 at D = 128 — at decode M = 1); an unmeasured D, r = 3 / 16 and sliding do not.
+ * Shapes for the folded ①' census: the selected classes fold on full layers (r = 8 at D = 512 and
+ * D = 128 — at decode M = 1); r = 4 at D = 512 (E4B — excluded, perf-ledger K-95), an unmeasured D,
+ * r = 3 / 16 and sliding do not.
  */
 const R8: StateModel = { heads: 8, kvHeads: 1, depth: 512, capacity: 32 };
 const R4: StateModel = { heads: 8, kvHeads: 2, depth: 512, capacity: 32 };
@@ -859,7 +860,7 @@ const R8_SLIDING: StateModel = { heads: 8, kvHeads: 1, depth: 16, capacity: 12, 
 
 /**
  * **census + values** of the folded ①' (perf-ledger K-55) through a Session: a full-attention plan
- * of a measured class (r, D, M) that takes ①' runs the folded key in its place (and no other ①QK
+ * of a selected class (r, D, M) that takes ①' runs the folded key in its place (and no other ①QK
  * key), every other plan keeps its ①QK path, and the outputs still match the CPU reference along a prefill → decode
  * chain. The word-for-word identity with ①' is held by gpu_state_attention_fold_test.ts; this test
  * is about the wiring of the single selection site (key, WGSL, params and the per-step workgroup
@@ -868,13 +869,14 @@ const R8_SLIDING: StateModel = { heads: 8, kvHeads: 1, depth: 16, capacity: 12, 
  * wrong together with the implementation).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "full-attention plans of the measured classes run the folded ①' and every other plan its own ①QK (census + values, real GPU)",
+  "full-attention plans of the selected classes run the folded ①' and every other plan its own ①QK (census + values, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       for (const [label, model, reduce, expected] of [
         ["full r=8 D=512 parallel", R8, "parallel", stateQkFoldedKey(8)],
-        ["full r=4 D=512 parallel", R4, "parallel", stateQkFoldedKey(4)],
+        // E4B's r = 4 was measured faster but differs from ①' on D3D12 (perf-ledger K-95)
+        ["full r=4 D=512 parallel", R4, "parallel", stateQkParallelKey(false, true)],
         // The fused option keeps ①' on the QK side, so the fold applies there too
         ["full r=8 D=512 parallel-fused", R8, "parallel-fused", stateQkFoldedKey(8)],
         // The MiniCPM5 class folds at decode M = 1 only (its M = 4 prefill plan keeps ①', and the

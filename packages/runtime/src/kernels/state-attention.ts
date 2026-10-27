@@ -148,9 +148,11 @@
  * inside the live range, nothing for `cl ≥ live` or pad rows), with lane `f` writing head `f`'s word.
  * That is why it rides on ①''s selection without an option of its own. Writing `fma()` or
  * reassociating the product changes the rounding.
- * NOTE: the identity rests on the backend compiling the same expression the same way (observed on
- * Dawn / Vulkan / NVIDIA). WGSL does not guarantee it, so it is checked word for word on each backend
- * against ①' (tests/gpu_state_attention_fold_test.ts).
+ * NOTE: the identity rests on the backend compiling the same expression the same way. WGSL does not
+ * guarantee it, so it is checked word for word on each backend against ①'
+ * (tests/gpu_state_attention_fold_test.ts). Observed for F = 8 on Dawn / Vulkan / RTX 3080 Ti and on
+ * Chrome / D3D12 / RTX 5070 Ti; F = 4 matched on Vulkan but differed on D3D12 (2026-10-27,
+ * perf-ledger K-95), so the identity is a per-backend, per-F observation.
  * MUST: `F | r` ({@link assertStateQkFold}, checked by the host before the folded pipeline is
  * selected). The kv plane of the whole group is the first head's ({@link kvPlaneWgsl}, the single
  * source of the head → kv plane mapping); with `F ∤ r` the heads past a plane boundary would read
@@ -158,12 +160,14 @@
  * MUST: F is in the key (`:fold<F>`). `r` travels in the uniform and is deliberately not in the key
  * ({@link stateVariantKeyPart}), but F changes the WGSL (accumulators, shared storage, the writers).
  * SHOULD: the fold is selected only on **full-attention** plans of a **measured class (r, D, M)**
- * ({@link stateQkFoldHeads}) — the measured range (ADR 0082 decision 4). Measured 2026-10-27 (RTX
- * 3080 Ti / Dawn / Vulkan): at M = 1, E2B (r = 8, F = 8) ×1.81 / ×3.24 / ×6.12 and E4B (r = 4,
- * F = 4) ×1.38 / ×1.90 / ×3.65 per dispatch at P = 1K / 4K / 16K; at verify M = 4 / 8 (P = 1,024 /
- * 4,000 / 16,000) E2B ×3.42–7.28 and E4B ×2.42–4.04; MiniCPM5 (r = 8, D = 128) at M = 1 ×1.70 /
- * ×2.67 / ×4.68. On the sliding layers (live ≤ 511 + M) the fold was neutral to slower (≤ ×1.07,
- * F ≥ 4 slower), so they keep ①'. Plans outside the classes keep ①' without moving a word.
+ * ({@link stateQkFoldHeads}) — the measured range (ADR 0082 decision 4) on which it was also observed
+ * bit-identical to ①' on every backend checked. Measured 2026-10-27 (RTX 3080 Ti / Dawn / Vulkan): at
+ * M = 1, E2B (r = 8, F = 8) ×1.81 / ×3.24 / ×6.12 and E4B (r = 4, F = 4) ×1.38 / ×1.90 / ×3.65 per
+ * dispatch at P = 1K / 4K / 16K; at verify M = 4 / 8 (P = 1,024 / 4,000 / 16,000) E2B ×3.42–7.28 and
+ * E4B ×2.42–4.04; MiniCPM5 (r = 8, D = 128) at M = 1 ×1.70 / ×2.67 / ×4.68. E4B is faster but not
+ * selected: its F = 4 kernel differs from ①' on D3D12 (perf-ledger K-95). On the sliding layers
+ * (live ≤ 511 + M) the fold was neutral to slower (≤ ×1.07, F ≥ 4 slower), so they keep ①'. Plans
+ * outside the classes keep ①'.
  *
  * ## ①ₜ K row-tile sharing variant (**the default path regardless of the option** — perf-ledger K-13)
  *
@@ -416,18 +420,20 @@ type StateQkFoldClass = {
 };
 
 /**
- * The classes on which the folded ①' is selected with `F = r`: the measured ones where the fold was
- * not slower than ①' (median per dispatch) at any measured P (1,024 / 4,000 / 16,000 — 2026-10-27,
- * docs/research/2026-10-27-k55-head-fold-spike.md). Gemma 4 E2B (r = 8) and E4B (r = 4) full layers
- * (D = 512) at decode M = 1 and verify M = 4 / 8; the MiniCPM5 full layer (r = 8, D = 128) at M = 1.
+ * The classes on which the folded ①' is selected with `F = r`. A class is selected only where the
+ * fold was measured not slower than ①' (median per dispatch) at every measured P (1,024 / 4,000 /
+ * 16,000 — 2026-10-27, docs/research/2026-10-27-k55-head-fold-spike.md) **and** observed
+ * bit-identical to ①' on every backend checked (Dawn / Vulkan / RTX 3080 Ti and Chrome / D3D12 /
+ * RTX 5070 Ti, 2026-10-27): the Gemma 4 E2B full layer (r = 8, D = 512) at decode M = 1 and verify
+ * M = 4 / 8, and the MiniCPM5 full layer (r = 8, D = 128) at M = 1. The Gemma 4 E4B full layer
+ * (r = 4, D = 512) was measured faster at M = 1 / 4 / 8 but is excluded: its F = 4 kernel differs
+ * from ①' on D3D12 (perf-ledger K-95), and a choice that moves numbers is not made automatically
+ * (ADR 0058 decision 2).
  */
 const STATE_QK_FOLD_CLASSES: readonly StateQkFoldClass[] = [
   { kvRepeat: 8, depth: 512, chunkRows: 1 },
   { kvRepeat: 8, depth: 512, chunkRows: 4 },
   { kvRepeat: 8, depth: 512, chunkRows: 8 },
-  { kvRepeat: 4, depth: 512, chunkRows: 1 },
-  { kvRepeat: 4, depth: 512, chunkRows: 4 },
-  { kvRepeat: 4, depth: 512, chunkRows: 8 },
   { kvRepeat: 8, depth: 128, chunkRows: 1 },
 ];
 
@@ -436,14 +442,17 @@ const STATE_QK_FOLD_CLASSES: readonly StateQkFoldClass[] = [
  * plain ①'). The section "①' folded over the query heads of one kv plane" at the top of the file.
  * A pure function of plan-time values (the plan key MUST NOT depend on the run-time length).
  *
- * SHOULD: `F = r` only on full-attention plans whose `(r, D, M)` is one of the measured classes
- * {@link STATE_QK_FOLD_CLASSES}; every other plan (other `r`, `D` or `M`, and the sliding layers,
- * where the fold measured neutral to slower) keeps ①' — the same rule as ADR 0082 decision 4: do not
- * widen the condition by extrapolation. The live length is not an input; the classes were measured at
- * P = 1,024 / 4,000 / 16,000 only.
- * NOTE: the fold is bit-identical to ①', so plans of one model may take different ones of the two (for
- * example a MiniCPM5 decode plan folds and its M = 4 plan does not) without moving a word: the
- * speculative verify-vs-decode u32 gate and the sha256 reference rows do not see the choice.
+ * SHOULD: `F = r` only on full-attention plans whose `(r, D, M)` is one of the classes
+ * {@link STATE_QK_FOLD_CLASSES} — measured faster **and** observed bit-identical to ①' on every
+ * backend checked; every other plan (other `r`, `D` or `M`, the sliding layers, where the fold
+ * measured neutral to slower, and E4B's r = 4, whose F = 4 kernel differs on D3D12 — perf-ledger
+ * K-95) keeps ①' — the same rule as ADR 0082 decision 4: do not widen the condition by
+ * extrapolation, and a backend not yet checked runs the identity check before it relies on it. The
+ * live length is not an input; the classes were measured at P = 1,024 / 4,000 / 16,000 only.
+ * NOTE: on the selected classes the fold was observed bit-identical to ①' on Vulkan and on D3D12, so
+ * plans of one model may take different ones of the two (for example a MiniCPM5 decode plan folds and
+ * its M = 4 plan does not) without moving a word: the speculative verify-vs-decode u32 gate and the
+ * sha256 reference rows do not see the choice.
  * NOTE: `F = r` (rather than the best F per length) loses at most 2 µs per dispatch at P = 1K in the
  * measurements, while a per-step choice would need two pipelines for one plan.
  */

@@ -1,7 +1,8 @@
 // Word-for-word identity gates of two bit-identical rewrites of the states-form decode attention
 // kernels (ADR 0067 addendum of 2026-10-27):
 //   - the folded ①' (F = r query heads of one kv plane per workgroup — perf-ledger K-55) against
-//     ①' (F = 1, still in the product for every other plan)
+//     ①' (F = 1, still in the product for every other plan). F = 8 is selected in the product;
+//     F = 4 (E4B) is not — it differs on D3D12 — and stays here as the check perf-ledger K-95 needs
 //   - the unrolled ③' and fused stats + PV (`attention_state_pv:v2` / `attention_state_stats_pv:v2`
 //     — perf-ledger K-91) against their v1 WGSL, kept test-only in fixtures/wgsl-baseline/ (the
 //     generators no longer emit it)
@@ -11,6 +12,9 @@
 // compiling the same expression the same way, which WGSL does not guarantee — this file is the check
 // to run on each backend. Order-only mutants (a reassociated product, two terms swapped) must
 // mismatch on the same harness, or a zero-mismatch result proves nothing.
+// NOTE: F = 8 matched on Dawn / Vulkan / RTX 3080 Ti and on Chrome / D3D12 / RTX 5070 Ti; F = 4
+// matched on Vulkan and differed on D3D12 (2026-10-27 — perf-ledger K-95), so on D3D12 this test
+// fails on the E4B cases until K-95 lands.
 // NOTE: on Dawn / Vulkan / NVIDIA (2026-10-27) NaN payloads come out canonical and no output word is
 // subnormal, consistent with flush-to-zero on this driver (observed by the independent check; not
 // isolated), so the comparison cannot tell payloads or subnormal orderings apart there.
@@ -242,11 +246,12 @@ describe.skipIf(!GPU_AVAILABLE)(
       let cases = 0;
       try {
         for (const shape of [E2B_FULL, E4B_FULL, MINICPM5_FULL]) {
-          // The shapes this gate exists for are the ones the selection folds (at decode M = 1 on all
-          // three; the identity is checked on every row shape below, folded by the selection or not)
+          // E2B and MiniCPM5 are the shapes the selection folds (at decode M = 1); E4B is excluded
+          // (it differs on D3D12 — perf-ledger K-95) and stays as the check K-95 needs. The identity
+          // is checked on every row shape below, folded by the selection or not
           assertEquals(
             stateQkFoldHeads(false, shape.heads / shape.kvHeads, shape.depth, 1) > 1,
-            true,
+            shape !== E4B_FULL,
             shape.name,
           );
           for (const past of FULL_PASTS) {

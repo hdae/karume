@@ -856,8 +856,9 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["attention_state_qk_par_sliding.wgsl", stateQkParallelWgsl(true, false)],
     ["attention_state_qk_par_sliding_gqa.wgsl", stateQkParallelWgsl(true, true)],
     // The folded ①' (perf-ledger K-55 — the F = r query heads of one kv plane per workgroup, full GQA
-    // only). Both selected F are frozen: F changes the accumulators, the shared storage and the
-    // writers, so one F passing says nothing about the other.
+    // only). Both generated F are frozen (F = 8 is selected; F = 4 is kept for perf-ledger K-95): F
+    // changes the accumulators, the shared storage and the writers, so one F passing says nothing
+    // about the other.
     ["attention_state_qk_par_fold4_gqa.wgsl", stateQkFoldedWgsl(4)],
     ["attention_state_qk_par_fold8_gqa.wgsl", stateQkFoldedWgsl(8)],
     // ①ₜ K 行タイル共有変種（**既定経路**・perf-ledger K-13）。GEMM 骨格に states の断片を
