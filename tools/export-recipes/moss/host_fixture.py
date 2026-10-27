@@ -26,6 +26,17 @@ here transcribes upstream's formulas — each value is produced by upstream code
   `MOSSImageScheduler.set_timesteps` are kept). The TS port of `torch.linspace` and of the grid
   formula is checked against `requested` at Uint32 and its snapping against `nearest` (plan
   step 4); the snapped values alone would hide a 1-ULP slip anywhere but near a midpoint.
+- `shift.<i>.steps.<n>.{requested,nearest,grid,sigmas,timesteps}`: the same five, from upstream
+  `set_timesteps(n)` on the pinned config with `shift` replaced by `SHIFTS[i]` (the metadata's
+  `shift_cases`), for the counts {@link SHIFT_STEP_COUNTS} (two of them above the 1,000 training
+  points). The shift enters the requested grid three times (`lower`, the f32 scale and `shift − 1`),
+  and the pinned config holds only one value of it.
+- `cfg.cond` / `cfg.uncond` `[1, C, H, W]` and `cfg.<i>.combined`: one step of upstream
+  `MOSSImagePipeline.__call__` at `guidance_scale = CFG_SCALES[i]` (the metadata's `cfg`) on a tiny
+  DiT — the positive sample, the negative sample (one block skipped, so the two differ) and the
+  prediction upstream hands to `scheduler.step`, i.e. its own CFG line `uncond + guidance_scale ·
+  (prediction − uncond)`. The scales are mostly not representable in f32, so the record fixes how
+  the Python float meets the f32 tensors. The samples are the same at every scale (checked).
 - `time_sinusoid` `[1000, 256]`: row i is what `MOSSImageTransformer.forward` feeds its time MLP
   for the timestep `training.timesteps[i]` (the float64 sinusoid cast to f32), taken with a forward
   pre-hook on `time_embedding[0]` of a tiny `MOSSImageTransformer` (only `freq_dim` reaches that
@@ -80,6 +91,23 @@ ROPE_CASES: tuple[tuple[int, int, int], ...] = (
 
 #: The requested step counts whose sequences are recorded.
 STEP_COUNTS: tuple[int, ...] = (*range(1, 201), 500, 1000)
+
+#: Shifts other than the pinned config's whose sequences are recorded too — around 1 (where
+#: `shift − 1` changes sign), small, large and not representable in f32.
+SHIFTS: tuple[float, ...] = (0.1, 0.35, 0.9999, 1.0, 1.0001, 2.2, 3.0, 3.7, 7.25, 12.0, 50.0)
+
+#: The step counts recorded for each of {@link SHIFTS}.
+SHIFT_STEP_COUNTS: tuple[int, ...] = (2, 7, 30, 50, 77, 199, 1024, 5000)
+
+#: The guidance scales of the CFG record (upstream accepts any finite scale ≥ 0; 1 runs no CFG).
+CFG_SCALES: tuple[float, ...] = (0.0, 0.1, 0.35, 1.7, 2.9, 3.0, 3.3, 4.0001, 7.5)
+
+#: The CFG record's tiny DiT depth, the negative's skipped block, the latent grid (cells per side)
+#: and the seed of its inputs.
+CFG_LAYERS = 4
+CFG_SKIP_LAYERS: tuple[int, ...] = (2,)
+CFG_CELLS = 64
+CFG_SEED = 3
 
 #: The single metadata key of `host.safetensors`.
 METADATA_KEY = "karume.moss.host_fixture"
@@ -233,6 +261,123 @@ def step_sequence(module: ModuleType, scheduler: Any, steps: int) -> StepSequenc
     )
 
 
+def shifted_scheduler(snapshot: Path, module: ModuleType, shift: float) -> Any:
+    """`MOSSImageScheduler` of the pinned config with `shift` replaced (everything else kept)."""
+    scheduler = module.MOSSImageScheduler.from_config(
+        scheduler_config(snapshot, module), shift=shift
+    )
+    if float(scheduler.config.shift) != shift:
+        raise HostFixtureError(f"the scheduler took shift {scheduler.config.shift}, not {shift}")
+    return scheduler
+
+
+def guidance_step(
+    pipe: Any, scale: float, inputs: Mapping[str, torch.Tensor]
+) -> list[torch.Tensor]:
+    """One step of upstream `pipe(...)` at guidance `scale`: `[positive sample, negative sample,
+    the prediction handed to scheduler.step]` (module docstring). The samples are read with a
+    forward hook on the transformer, the prediction from the argument of `scheduler.step` (an
+    instance attribute shadowing the method for the call); the call must make exactly two forwards
+    and one step."""
+    scheduler, transformer = pipe.scheduler, pipe.transformer
+    samples: list[torch.Tensor] = []
+    predictions: list[torch.Tensor] = []
+    step = scheduler.step
+
+    def recording_step(*args: Any, **kwargs: Any) -> Any:
+        predictions.append(args[0].detach().clone())
+        return step(*args, **kwargs)
+
+    hook = transformer.register_forward_hook(
+        lambda _module, _args, output: samples.append(output.sample.detach().clone())
+    )
+    scheduler.step = recording_step
+    try:
+        with torch.no_grad():
+            pipe(
+                prompt_embeds=inputs["positive"],
+                negative_prompt_embeds=inputs["negative"],
+                height=CFG_CELLS * 16,
+                width=CFG_CELLS * 16,
+                num_inference_steps=1,
+                guidance_scale=scale,
+                uncond_skip_layers=CFG_SKIP_LAYERS,
+                latents=inputs["latents"].clone(),
+                output_type="latent",
+            )
+    finally:
+        hook.remove()
+        del scheduler.step
+    if len(samples) != 2 or len(predictions) != 1:
+        raise HostFixtureError(
+            f"guidance {scale}: {len(samples)} forwards and {len(predictions)} steps (2 and 1)"
+        )
+    found = [*samples, *predictions]
+    if any(tensor.dtype != torch.float32 for tensor in found):
+        raise HostFixtureError(f"guidance {scale}: a sample or the prediction is not f32")
+    return found
+
+
+def guidance_samples(module: ModuleType, config: Mapping[str, Any]) -> dict[str, torch.Tensor]:
+    """{@link guidance_step} per scale of {@link CFG_SCALES} on a tiny DiT with fixed inputs
+    (module docstring): `cfg.cond`, `cfg.uncond` and each scale's `cfg.<i>.combined`. Every call
+    must give the same two samples, and the skipped block must change the negative one."""
+    transformer = tiny_transformer(module, 256, num_layers=CFG_LAYERS)
+    scheduler = module.MOSSImageScheduler.from_config(config)
+    pipe = pipeline_ref.build_pipeline(module, transformer=transformer, scheduler=scheduler)
+    pipe.set_progress_bar_config(disable=True)
+    generator = torch.Generator().manual_seed(CFG_SEED)
+    text_dim = transformer.config.text_dim
+    channels = transformer.config.latent_channels
+    inputs = {
+        "positive": torch.randn(1, 3, text_dim, generator=generator),
+        "negative": torch.randn(1, 2, text_dim, generator=generator),
+        "latents": torch.randn(1, channels, CFG_CELLS, CFG_CELLS, generator=generator),
+    }
+    tensors: dict[str, torch.Tensor] = {}
+    for index, scale in enumerate(CFG_SCALES):
+        cond, uncond, combined = guidance_step(pipe, scale, inputs)
+        if index == 0:
+            if records.bits_equal(cond, uncond):
+                raise HostFixtureError("the skipped block did not change the negative sample")
+            tensors["cfg.cond"], tensors["cfg.uncond"] = cond, uncond
+        elif not (
+            records.bits_equal(cond, tensors["cfg.cond"])
+            and records.bits_equal(uncond, tensors["cfg.uncond"])
+        ):
+            raise HostFixtureError(f"guidance {scale}: the samples moved between the calls")
+        tensors[f"cfg.{index}.combined"] = combined
+    return tensors
+
+
+def sequence_tensors(
+    steps: int, sequence: StepSequence, sigmas: torch.Tensor, timesteps: torch.Tensor
+) -> dict[str, torch.Tensor]:
+    """The five recorded tensors of one `set_timesteps(steps)` call, after the checks that tie
+    them to the training grid (module docstring)."""
+    total = sigmas.shape[0]
+    seq_sigmas, seq_timesteps = sequence.sigmas, sequence.timesteps
+    if float(seq_sigmas[-1]) != 0.0 or seq_sigmas.shape[0] != seq_timesteps.shape[0] + 1:
+        raise HostFixtureError(f"{steps} steps: the sigmas do not end with the terminal 0")
+    index = grid_indices(sigmas, seq_sigmas[:-1])
+    if not records.bits_equal(timesteps[index.long()], seq_timesteps):
+        raise HostFixtureError(f"{steps} steps: a timestep is not the training grid's")
+    # The snapping went through this table and these indices
+    # (descending index = total − 1 − ascending index).
+    if not records.bits_equal(sequence.training_ascending.flip(0), sigmas):
+        raise HostFixtureError(f"{steps} steps: upstream snapped to another training grid")
+    nearest = (total - 1 - sequence.nearest_ascending).to(torch.int32)
+    if not records.bits_equal(torch.unique_consecutive(nearest), index):
+        raise HostFixtureError(f"{steps} steps: the snapped indices do not give the sequence")
+    return {
+        "sigmas": seq_sigmas,
+        "timesteps": seq_timesteps,
+        "grid": index,
+        "requested": sequence.requested,
+        "nearest": nearest,
+    }
+
+
 def grid_indices(table: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
     """The index of each value in `table` (bit-identical members only; anything else fails)."""
     table_bits = table.contiguous().view(torch.int32)
@@ -255,27 +400,17 @@ def compute(snapshot: Path, module: ModuleType) -> dict[str, torch.Tensor]:
     sigmas, timesteps = training_grid(module, config)
     tensors["training.sigmas"], tensors["training.timesteps"] = sigmas, timesteps
     scheduler = pipeline_ref.load_scheduler(snapshot, module)
-    total = sigmas.shape[0]
     for steps in STEP_COUNTS:
         sequence = step_sequence(module, scheduler, steps)
-        seq_sigmas, seq_timesteps = sequence.sigmas, sequence.timesteps
-        if float(seq_sigmas[-1]) != 0.0 or seq_sigmas.shape[0] != seq_timesteps.shape[0] + 1:
-            raise HostFixtureError(f"{steps} steps: the sigmas do not end with the terminal 0")
-        index = grid_indices(sigmas, seq_sigmas[:-1])
-        if not records.bits_equal(timesteps[index.long()], seq_timesteps):
-            raise HostFixtureError(f"{steps} steps: a timestep is not the training grid's")
-        # The snapping went through this table and these indices
-        # (descending index = total − 1 − ascending index).
-        if not records.bits_equal(sequence.training_ascending.flip(0), sigmas):
-            raise HostFixtureError(f"{steps} steps: upstream snapped to another training grid")
-        nearest = (total - 1 - sequence.nearest_ascending).to(torch.int32)
-        if not records.bits_equal(torch.unique_consecutive(nearest), index):
-            raise HostFixtureError(f"{steps} steps: the snapped indices do not give the sequence")
-        tensors[f"steps.{steps}.sigmas"] = seq_sigmas
-        tensors[f"steps.{steps}.timesteps"] = seq_timesteps
-        tensors[f"steps.{steps}.grid"] = index
-        tensors[f"steps.{steps}.requested"] = sequence.requested
-        tensors[f"steps.{steps}.nearest"] = nearest
+        for name, tensor in sequence_tensors(steps, sequence, sigmas, timesteps).items():
+            tensors[f"steps.{steps}.{name}"] = tensor
+    for shift_index, shift in enumerate(SHIFTS):
+        shifted = shifted_scheduler(snapshot, module, shift)
+        for steps in SHIFT_STEP_COUNTS:
+            sequence = step_sequence(module, shifted, steps)
+            for name, tensor in sequence_tensors(steps, sequence, sigmas, timesteps).items():
+                tensors[f"shift.{shift_index}.steps.{steps}.{name}"] = tensor
+    tensors.update(guidance_samples(module, config))
     model = tiny_transformer(module, int(dit["freq_dim"]))
     tensors["time_sinusoid"] = torch.cat([time_sinusoid(model, t) for t in timesteps])
     return tensors
@@ -324,6 +459,14 @@ def generate(out: Path) -> dict[str, Any]:
         "rope_cases": [list(case) for case in ROPE_CASES],
         "step_counts": list(STEP_COUNTS),
         "steps_taken": steps_taken,
+        "shift_cases": {"shifts": list(SHIFTS), "step_counts": list(SHIFT_STEP_COUNTS)},
+        "cfg": {
+            "scales": list(CFG_SCALES),
+            "layers": CFG_LAYERS,
+            "skip_layers": list(CFG_SKIP_LAYERS),
+            "cells": CFG_CELLS,
+            "seed": CFG_SEED,
+        },
         "scheduler_config": scheduler_config(snapshot, module),
         "versions": records.versions(),
         "thread_counts": list(thread_counts),

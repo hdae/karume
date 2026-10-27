@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from moss import host_fixture, records
+from moss import host_fixture, pipeline_ref, records
 
 
 def _next_after(value: torch.Tensor) -> torch.Tensor:
@@ -106,6 +106,50 @@ class TestUpstreamValues:
 
         assert (torch.searchsorted, torch.where) == before
 
+    def test_a_shifted_scheduler_changes_only_the_shift_and_its_requested_grid(
+        self, moss_snapshot, module
+    ):
+        config = host_fixture.scheduler_config(moss_snapshot, module)
+
+        shifted = host_fixture.shifted_scheduler(moss_snapshot, module, 3.7)
+        pinned = module.MOSSImageScheduler.from_config(config)
+
+        assert {**shifted.config, "shift": config["shift"]} == dict(pinned.config)
+        moved = host_fixture.step_sequence(module, shifted, 7).requested
+        kept = host_fixture.step_sequence(module, pinned, 7).requested
+        assert float(moved[0]) == float(kept[0]) == 1.0
+        assert not records.bits_equal(moved, kept)
+
+    def test_a_guidance_step_reads_both_samples_and_upstreams_combination(
+        self, moss_snapshot, module
+    ):
+        """Two forwards and one step per call; the skipped block moves the negative sample; scale 0
+        hands the negative sample on (`uncond + 0 · …`); the step wrapper is gone afterwards."""
+        config = host_fixture.scheduler_config(moss_snapshot, module)
+        transformer = host_fixture.tiny_transformer(module, 256, num_layers=host_fixture.CFG_LAYERS)
+        pipe = pipeline_ref.build_pipeline(
+            module,
+            transformer=transformer,
+            scheduler=module.MOSSImageScheduler.from_config(config),
+        )
+        generator = torch.Generator().manual_seed(1)
+        text_dim = transformer.config.text_dim
+        cells = host_fixture.CFG_CELLS
+        inputs = {
+            "positive": torch.randn(1, 3, text_dim, generator=generator),
+            "negative": torch.randn(1, 2, text_dim, generator=generator),
+            "latents": torch.randn(1, 4, cells, cells, generator=generator),
+        }
+
+        cond, uncond, combined = host_fixture.guidance_step(pipe, 0.0, inputs)
+        _, _, guided = host_fixture.guidance_step(pipe, 3.3, inputs)
+
+        assert cond.shape == uncond.shape == combined.shape == (1, 4, cells, cells)
+        assert not records.bits_equal(cond, uncond)
+        assert torch.equal(combined, uncond)
+        assert not torch.equal(guided, uncond)
+        assert "step" not in vars(pipe.scheduler)
+
     def test_the_image_rows_of_the_rope_table_move_with_the_text_length(
         self, moss_snapshot, module
     ):
@@ -160,3 +204,32 @@ class TestGeneratedRecord:
             assert records.bits_equal(torch.unique_consecutive(nearest), grid), steps
             snapped = torch.unique_consecutive(training[nearest.long()])
             assert records.bits_equal(snapped, tensors[f"steps.{steps}.sigmas"][:-1]), steps
+
+    def test_every_shift_case_carries_its_sequence_on_the_same_training_grid(self, record):
+        tensors, metadata = record
+        training = tensors["training.sigmas"]
+        cases = metadata["shift_cases"]
+
+        assert cases == {
+            "shifts": list(host_fixture.SHIFTS),
+            "step_counts": list(host_fixture.SHIFT_STEP_COUNTS),
+        }
+        for index, _shift in enumerate(cases["shifts"]):
+            for steps in cases["step_counts"]:
+                where = f"shift.{index}.steps.{steps}"
+                requested, nearest = tensors[f"{where}.requested"], tensors[f"{where}.nearest"]
+                assert requested.shape == nearest.shape == (steps,), where
+                assert records.bits_equal(
+                    torch.unique_consecutive(nearest), tensors[f"{where}.grid"]
+                )
+                snapped = torch.unique_consecutive(training[nearest.long()])
+                assert records.bits_equal(snapped, tensors[f"{where}.sigmas"][:-1]), where
+
+    def test_the_cfg_record_has_one_combination_per_scale(self, record):
+        tensors, metadata = record
+        scales = metadata["cfg"]["scales"]
+
+        assert scales == list(host_fixture.CFG_SCALES)
+        assert tensors["cfg.cond"].shape == tensors["cfg.uncond"].shape
+        for index in range(len(scales)):
+            assert tensors[f"cfg.{index}.combined"].shape == tensors["cfg.cond"].shape
