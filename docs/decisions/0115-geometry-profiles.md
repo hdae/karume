@@ -95,6 +95,7 @@ export type GeometryProfile = {
     readonly linear: I8a8Geometry;
     readonly attentionQk: I8a8Geometry;
     readonly attentionPv: I8a8Geometry;
+    readonly conv3d: I8a8Geometry; // addendum decision 11 (2026-10-26)
   };
   readonly provenance?: {/* sweep records, sha256, dates, adapter, kernels, caseSet, … */};
 };
@@ -202,26 +203,29 @@ one or more `karume-geometry-sweep/2` records and combines them into one profile
 | `gemmRows`  | `GEMM_ROWS_BUCKETS`, the three buckets of `gemmGeometryForRows` (≤ 64 → `M16N16 r1×4 wg4×16`, ≤ 512 → `M64N32 r4×4 wg8×16`, above → `defaultGemmGeometry`) |
 | `attention` | `defaultGemmGeometry` for ①QK and ③PV (`M128N128 r8×8 wg16×16`)                                                                                              |
 | `conv2d`    | `gemmMTileGeometry(64)` / `gemmMTileGeometry(32)`                                                                                                            |
-| `i8a8`      | `defaultI8a8Geometry` (linear / ①QK = `M128N64`, ③PV = `M64N128`)                                                                                            |
+| `i8a8`      | `defaultI8a8Geometry` (linear / ①QK = `M128N64`, ③PV = `M64N128`; conv3d = `M128N64`, added 2026-10-26 — the geometry conv3d w8a8 ran before)                |
 
 `match` is empty. On a machine that gets the default profile, the generated WGSL and pipeline keys
 are byte for byte what they were before this ADR; the unchanged codegen snapshots detect a drift.
 
 ### 6. Scope
 
-| Path                                      | Profile field       |
-| ----------------------------------------- | ------------------- |
-| linear / matmul / bmm (row-count buckets) | `gemmRows`          |
-| fused attention f32 ①QK / ③PV (ADR 0023)  | `attention.qk / pv` |
-| conv2d implicit GEMM (ADR 0024)           | `conv2d`            |
-| i8a8 linear / fused attention ①QK / ③PV   | `i8a8`              |
+| Path                                      | Profile field                    |
+| ----------------------------------------- | -------------------------------- |
+| linear / matmul / bmm (row-count buckets) | `gemmRows`                       |
+| fused attention f32 ①QK / ③PV (ADR 0023)  | `attention.qk / pv`              |
+| conv2d implicit GEMM (ADR 0024)           | `conv2d`                         |
+| i8a8 linear / fused attention ①QK / ③PV   | `i8a8`                           |
+| conv3d w8a8 implicit GEMM (ADR 0133)      | `i8a8.conv3d` (added 2026-10-26) |
 
 Measured coverage:
 
 - `gemmRows` is decided by linear / matmul / bmm cases (addendum decision 1; ADR 0116 decision 4);
   all three ops read the same table (only the B-side fill differs).
-- The three `i8a8` fields are decided from M ≥ 1024 measurements only and apply to every row count
-  (the default does not split by row count either).
+- The three `i8a8` fields of linear and attention are decided from M ≥ 1024 measurements only and
+  apply to every row count (the default does not split by row count either).
+- `i8a8.conv3d` is one geometry for every conv3d shape, decided from the Wan2.2 VAE decoder's
+  heavy shapes at tile 16 and tile 32 plus two edge guards (addendum decision 11).
 
 **Paths that keep the default for now** (they do not read the profile):
 
@@ -495,11 +499,13 @@ bucket refinement approved here is ADR 0116. Details: research K-70 §13–§14.
 
 ### Addendum decision 10: generate and register `nvidia-ampere` (Node + Dawn on RTX 3080 Ti = `nvidia` / `ampere`; 2026-10-23)
 
-- Input: one `quick+` sweep on the RTX 3080 Ti taken one case per process with the GPU cooled to
-  56 °C before each case (a single-process sweep throttles within a minute and loses most cases to
-  the re-measurement band of addendum decision 8); 57 cases, 521 rows, no failure, no mismatch,
-  one case dropped from the ratio material. The merged record's `candidateKernels` is recomputed
-  over the merged rows with the sweep's own function. Rules of decision 4 (×1.050).
+- Input: one `quick+` sweep on the RTX 3080 Ti taken one case at a time with the GPU cooled to
+  56 °C before each case (corrected 2026-10-27: `runGeometrySweep` ran once per case inside one
+  Node process, not one process per case; a sweep of every case in one call throttles within a
+  minute and loses most cases to the re-measurement band of addendum decision 8); 57 cases,
+  521 rows, no failure, no mismatch, one case dropped from the ratio material. The merged
+  record's `candidateKernels` is recomputed over the merged rows with the sweep's own function.
+  Rules of decision 4 (×1.050).
 - Adopted: `gemmRows` 129–256 `reg64x64r4x4w16` ×1.118, attention ③PV `reg64x64r4x4w16`
   ×1.095, i8a8 linear `tile64x64r8x4w16x8k16` ×1.160; every other class keeps the default. The
   generated file is the source of truth for its values.
@@ -508,3 +514,57 @@ bucket refinement approved here is ADR 0116. Details: research K-70 §13–§14.
   linear and ×1.009 on the forward — small, because the DiT's rows lie past the sweep's largest
   case and the online attention kernel is not profile-selected; the two f32 adoptions apply to
   other families. Record and A/B: [research](../research/2026-10-23-ampere-geometry-sweep.md).
+
+### Addendum decision 11: conv3d w8a8 reads a required field `i8a8.conv3d` (perf-ledger V-5; 2026-10-26 — the design is the maintainer's ruling 9 a of 2026-10-26, the adoption of the re-derived table its ruling 11 a of 2026-10-27)
+
+- **What.** `GeometryProfile.i8a8` gains a required field `conv3d: I8a8Geometry`, the tile geometry
+  of the w8a8 implicit GEMM of conv3d (`convCompute: "a8"`, ADR [0133](0133-conv3d-w8a8.md)). The
+  recipe builder passes this one value to the key, the WGSL and the dispatch grid; the generator
+  functions (`conv3dI8a8Key` / `conv3dI8a8Wgsl`) no longer have a default geometry. The field is
+  validated, frozen, parsed and fingerprinted like the other i8a8 fields (both dp4a variants).
+  `DEFAULT_GEOMETRY_PROFILE.i8a8.conv3d` is `defaultI8a8Geometry("conv3d")` =
+  `M128N64 r8×8 wg8×16 K16`, the geometry conv3d ran before, so a machine with the default profile
+  keeps its keys and WGSL byte for byte (the codegen snapshots are unchanged).
+- **Breaking.** The public `GeometryProfile` type and `parseGeometryProfileJson` require the field
+  (a stored table from before is rejected, naming `i8a8.conv3d`); `GeometrySweepOp` gains
+  `"i8a8-conv3d"`; the case-set version moves, so every saved table mismatches once
+  (`geometryProfileMismatch`) and needs one re-sweep.
+- **Why a field of its own** (not `i8a8.linear`): on the RTX 5070 Ti (2026-10-25 recon,
+  [research](../research/2026-10-25-speed-recon-5070ti.md) §9) two facts separate them. Kernel
+  total: the Blackwell linear geometry is 12.7% (next chunk) / 18.2% (first chunk) short of the
+  recon's best conv3d geometry. Per shape: the recon's best geometry was faster on 21 / 21 decoder
+  shapes. And conv3d would otherwise follow linear's planned row-count buckets (K-85).
+- **One geometry for every conv3d shape** (no buckets): in the 2026-10-26 sweep the adopted geometry
+  is the fastest `quick+` geometry on 10 of 14 cases by the two-run mean and ties on two more; the
+  two shapes a smaller tile wins carry 13.9% of the tile-16 cases' default time weighted by node
+  count, and the best geometry per shape would save 1.3% of that time at the adopted geometry
+  ([research](../research/2026-10-26-conv3d-geometry-sweep.md) §3).
+- **Cases** (sweep op `i8a8-conv3d`, 14 cases from the Wan2.2 TI2V-5B decoder at 1280×704): the six
+  heavy 3×3×3 shapes of the tile-16 decoder (98.2% of the next chunk's conv3d FLOPs), `conv_out`
+  (Cout 12) and one 1×1×1 shortcut as edge guards, and the six heavy 3×3×3 shapes of the tile-32
+  pair (ADR [0134](0134-wan22-vae-tile32-shared.md)). The rules of decision 4 apply unchanged
+  (bit-identical and ×1.05 or more on every case of the class, the best geometric mean).
+- **The tables' provenance.** A record that carries `caseSet` / `defaultKernels` is rejected once
+  the case set moves, so `nvidia-ampere` (2026-10-23 record) needs a new sweep; the Chrome records
+  of `nvidia-blackwell` and `apple-metal-3` carry neither and re-derive. Two re-sweeps of all 71 cases
+  with the `quick+` set on the RTX 3080 Ti (one process per case, cooled to 56 °C) choose `tile64x64r8x4w16x8k16` for
+  `i8a8.conv3d` (×1.339 by the two-run mean, ×1.139–2.472 per case, bit-identical on every row). On
+  the default preset's VAE chunk graphs that table is ×1.342 (first) / ×1.204 (next) at tile 16 with
+  equal output hashes, measured against the default profile (`DEFAULT_GEOMETRY_PROFILE`, not the
+  2026-10-23 `nvidia-ampere`); the default profile with only `i8a8.conv3d` changed is ×1.342 (first)
+  / ×1.205 (next). The re-derived table differs from the 2026-10-23 table in two fields,
+  `i8a8.conv3d` and `i8a8.attentionQk`: `i8a8.attentionQk` takes the same geometry (×1.103 by the
+  two-run mean over its four cases, ×1.110 / ×1.096 per run; the 2026-10-23 table kept the default
+  because one of the four cases had been dropped from the ratio material). Every other field is
+  unchanged. The 2026-10-26 ruling holds back a table that changes a field other than `i8a8.conv3d`
+  until it is ruled on.
+- **Decision (the maintainer's ruling 2026-10-27).** The re-derived `nvidia-ampere` is adopted as
+  generated: both changed fields, `i8a8.conv3d` (×1.339) and `i8a8.attentionQk` (×1.103), take
+  `tile64x64r8x4w16x8k16`, with the provenance of the two new records. `nvidia-blackwell` and
+  `apple-metal-3` are re-derived from their records and written with every field unchanged except
+  `i8a8.conv3d` (the default) and `provenance.kernels` / `provenance.caseSet`.
+- **Caveat: an equal `caseSet` does not mean every class was measured.** `nvidia-blackwell` and
+  `apple-metal-3` carry the new `caseSet` although their records contain no conv3d case; their
+  `i8a8.conv3d` is the default by absence. Scoping the `caseSet` per op family (ADR
+  [0117](0117-app-geometry-tuning.md) decisions 4 / 8) is filed in the [backlog](../backlog.md) (later).
+  A conv3d-only sweep on the RTX 5070 Ti is prepared (perf-ledger V-15).

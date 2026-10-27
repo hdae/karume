@@ -1,6 +1,12 @@
 > This document is a point-in-time snapshot (2026-10-23) of the geometry sweep on the RTX 3080 Ti (Node + Dawn on
 > Vulkan) that produced the embedded profile `nvidia-ampere`, and of the one measurement that checked it on the Wan2.2
 > DiT; it is not a design source of truth (the rules are ADR 0115 / 0116 / 0117, the values are the generated file).
+> Three of its statements were corrected on 2026-10-26 / 2026-10-27, in the
+> [2026-10-26 note](2026-10-26-conv3d-geometry-sweep.md): the i8a8 ①QK class was not decided by its other three cases
+> (§2) — it kept the default because the dropped case left every candidate unmeasured there; its nearest miss was not
+> "nothing above ×0.95" (§3) — on those three cases `tile64x64r8x4w16x8k16` read ×1.095 / ×1.102 / ×1.088 and
+> `tile128x64r8x4w16x16k16` ×1.052 / ×1.066 / ×1.091 (for ③PV the statement holds: its nearest miss is ×0.944); and
+> the sweep ran `runGeometrySweep` once per case inside one Node process, not one process per case (§2).
 
 # `nvidia-ampere` — the geometry sweep on the RTX 3080 Ti and what it bought
 

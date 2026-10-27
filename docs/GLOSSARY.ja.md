@@ -39,6 +39,7 @@
 | PLE (Per-Layer Embedding) | PLE | 層ごとに足し込む補助 embedding。グラフの外の表からホストが行を読む | — | ADR 0085 |
 | SRQ (Static Range Quantization) | SRQ | 学習時に決めた固定 scale で活性を int8 の格子へ丸めて戻す処理（計算は f32 のまま） | — | ADR 0097 追記 2 |
 | w8a8 | w8a8（重み 8bit × 活性 8bit 整数内積） | 重み i8 × 活性 per-token i8 の整数内積の経路（`linearCompute: "a8"`） | — | ADR 0025 |
+| channel-major quantiser (per-pixel quantiser of conv3d w8a8) △ | conv3d w8a8 の画素ごとの量子化（チャネル順の形） | conv3d の入力 `x[Cin, P]` を格納の並びのまま 1 dispatch で読み、画素ごとにチャネル方向の amax を取って `quantize_rows` と同じ語と scale を書く量子化（ビット同一・2026-10-26 に転置コピー + `quantize_rows` から置き換え） | — | ADR 0133 追記 2026-10-26（channel-major quantiser の節） |
 | w4a8 | w4a8 | 重み i4 × 活性 per-token i8 の整数内積の経路 | — | ADR 0076 |
 | integer dot product | 整数内積 | 量子化した整数どうしを int32 累算で掛け合わせる実行形 | — | ADR 0025 / 0076 |
 | packed int8 activations | packed 活性 | 固定 SRQ の int8 コード 4 個を u32 1 語に詰めて並列 GEMV へ渡す形 | — | ADR 0105 |
@@ -167,6 +168,7 @@
 | attention permute absorption △ | attention の permute 吸収 | `attentionCompute: "a8"` のとき、融合 attention が直前の q / k / v の `[0, 2, 1, 3]` permute を取り込み、トークン順のまま読む融合（直後の出力の permute はノードのまま。経路は見ずにこのオプションだけで決め、`attentionPermute` で数える） | — | ADR 0040 追記 2026-10-25 |
 | rmsNormRope（rms_norm → pair RoPE fusion）△ | rms_norm と RoPE の融合 | Wan DiT の self-attention の q / k の前処理（トークン行の `rms_norm` → reshape 2 本 → ペア形の RoPE）を、正規化した行を格納しない f32 カーネル 1 本へ畳む融合（素の経路が 256 幅の workgroup の `rms_norm` を使うときだけ。`rmsNormRope` で数える） | — | ADR 0040 追記 2026-10-25 |
 | deferred node △ | 後ろへ回すノード | 融合の窓の中で畳まないノードのうち、融合ステップの**後ろ**へ置いて走査し直すもの（窓内 passthrough は前に置き、走査し直さない）。q と k の鎖が入り組むときに使う | — | ADR 0040 追記 2026-10-25 |
+| split-tree axis reduce △ | 部分木分割の軸 reduce | 末尾以外の軸の reduce で 1 出力を 16 スレッドが分け持ち、同じ加算木の揃った部分木を各自が畳んでから根を順に合わせる形（加算の順序が同じなのでビット同一・分割数はパイプラインキーに入る） | — | ADR 0035 追記 2026-10-26 |
 | geometry profile | 幾何プロファイル（会話では「プロファイル」でもよい） | GEMM の幾何を op × 行数バケットごとに決めた静的な表 | — | ADR 0115 |
 | `./tune` (runtime subpath) | tune のサブパス / 掃引の面 | 掃引・生成器・表の直列化と照合を出す `@karume/runtime/tune` | — | ADR 0117 決定 1 / 2 |
 | kernel fingerprint (`provenance.kernels`) | カーネルの指紋 | 保存した表がどのカーネルで測った物かを見分けるハッシュ | — | ADR 0117 決定 4 |

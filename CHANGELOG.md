@@ -17,6 +17,19 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- Reductions over a non-last axis (`sum` / `amax` / `amin`) split each output over 16 threads that
+  walk aligned subtrees of the same summation tree (ADR 0035 addendum of 2026-10-26). Outputs are
+  bit-identical; the pipeline key gains the split (`reduce:v2:<op>:<from>><to>:axis:s16:wg256`). On
+  an RTX 3080 Ti under Node the axis reductions of one Wan2.2 VAE decoder chunk at tile 16 take
+  0.62 ms (first) / 1.50 ms (next) of GPU time instead of 5.91 / 7.10 ms, and those of anima's VAE
+  decoder 2.90 ms instead of 5.28 ms.
+- The Wan VAE decoders (Wan2.1 and Wan2.2) zero their causal caches at each tile on the GPU with
+  `ResidentTensor.clear()` instead of host writes of zero arrays (ADR 0118 addendum of 2026-10-26):
+  the per-tile `writeBuffer` (about 446 MiB on Wan2.2 at tile 16, 0.58 GiB on Wan2.1) and its staging
+  are gone. Outputs are bit-identical. On an RTX 3080 Ti under Node (Wan2.2 default preset, tile 16;
+  28 tiles × 2 passes in one process, the two paths alternating tile by tile) a tile takes about
+  164 ms less (the median difference of adjacent tile pairs; faster in 54 / 54 pairs), and the zero
+  call 2.2 ms of host time instead of 110.3 ms (median).
 - On the online attention route (`attentionCompute: "a8"` × `attentionScoreStorage: "none"`, where
   the shape and device admit the online kernel) the fused attention also absorbs the permute after it
   and stores O token-major itself (ADR 0040 addendum of 2026-10-26): one dispatch fewer per attention,
@@ -61,9 +74,30 @@ measurements in `docs/research/`.
 
 ### Added
 
+- `ResidentTensor.clear()` (`@karume/runtime`): sets a resident tensor to zero on the GPU
+  (`clearBuffer` in its own submit, in queue order like `write`; ADR 0054 addendum of 2026-10-26).
+  Besides the disposed and device-lost guards of `write`, it throws `ResidentTensorError` while an
+  issued run / enqueue or a pending `finishAndRead` uses the resident.
+- The geometry sweep (`@karume/runtime/tune`) measures conv3d on int8 activations: 14 cases from the
+  Wan2.2 TI2V-5B decoder at tile 16 and 32 under a new sweep op (see **Breaking**), from which
+  `deriveGeometryProfile` fills `i8a8.conv3d`. The default sweep (`runGeometrySweep` without `ops`)
+  runs these cases too, so it takes longer. Two of the tile-32 cases bind about 256 MiB each: on a
+  device whose `maxStorageBufferBindingSize` is lower, every candidate fails on them and
+  `i8a8.conv3d` stays the default.
 - A third embedded geometry profile, `nvidia-ampere` (adapters `nvidia` / `ampere`, swept on an RTX 3080 Ti
-  under Node + Dawn): the i8a8 linear, the fused f32 attention ③PV and 129–256-row GEMMs take a faster tile
-  geometry on those adapters; outputs are bit-identical to the default (ADR 0115 addendum decision 10).
+  under Node + Dawn; ADR 0115 addendum decisions 10 and 11). On those adapters five classes take a
+  faster tile geometry than the default (geometric mean over each class's sweep cases): the i8a8
+  linear ×1.170, the fused f32 attention ③PV ×1.113 and 129–256-row GEMMs ×1.114 (decision 10), and
+  conv3d on int8 activations (`i8a8.conv3d`) ×1.339 over its 14 cases and the ①QK stage of the i8a8
+  fused attention (`i8a8.attentionQk`) ×1.103 over its four cases (decision 11); every other class
+  keeps the default, and outputs are bit-identical to the default. On that GPU the Wan2.2 default
+  preset's VAE decoder chunks at tile 16 run ×1.342 (first) / ×1.204 (next) faster by median GPU
+  time than with the default profile (74.66 vs 100.17 ms / 212.79 vs 256.15 ms). The ①QK geometry
+  acts on the three-dispatch fused attention that stores its scores — `attentionScoreStorage` other
+  than `"none"` (as in anima's and Wan2.1's practical presets), and `"none"` on shapes the online
+  kernel does not take — and on the dp4a canary's compile, not on Wan2.2's online route; no
+  end-to-end run was measured with it. `nvidia-blackwell` and `apple-metal-3` take the default
+  `i8a8.conv3d` (their sweeps have no conv3d case).
 - Online int8 attention (`@karume/runtime`, ADR 0132): `attentionScoreStorage: "none"` (with
   `attentionCompute: "a8"`) runs fused attention as one kernel per block of query rows that never
   stores the score matrix. Heads of width 64 or 128 and key lengths that are multiples of 4; other
@@ -77,13 +111,15 @@ measurements in `docs/research/`.
   step-1 error against the reference preset as the s16 preset (relRMS 0.042 vs 0.044 at 33 frames).
   Its transformer and attention are what the new default preset (below) runs; `quant:
   "f16+dit8-a8-attn8-s16"` still selects the previous default.
-- conv3d on int8 activations (`@karume/runtime`, ADR 0133): `convCompute: "a8"` quantises the input
-  of a conv3d once per input pixel over its channels and reduces each tap with an integer dot
-  product against int8-resident weights (the conv counterpart of `linearCompute: "a8"`; a TS mirror
-  reproduces the GPU at atol = 0). It applies to conv3d nodes with int8 weights, `groups == 1` and
-  `Cin % 4 == 0`; other nodes keep the f32 path and their pipeline key shows it. The manifest
-  vocabulary (`@karume/hub`) accepts the key; the Wan family hands it to the VAE decoder Sessions;
-  the preset name token is `conv8`.
+- conv3d on int8 activations (`@karume/runtime`, ADR 0133 and its addenda of 2026-10-26 (channel-major
+  quantiser, conv3d geometry)): `convCompute: "a8"` quantises the input of a conv3d once per input
+  pixel over its channels, in one dispatch that reads the input channel-major as stored, and reduces
+  each tap with an integer dot product against int8-resident weights (the conv counterpart of
+  `linearCompute: "a8"`; a TS mirror reproduces the GPU at atol = 0). The GEMM takes its tile
+  geometry from the adapter profile's `i8a8.conv3d`. It applies to conv3d nodes with int8 weights,
+  `groups == 1` and `Cin % 4 == 0`; other nodes keep the f32 path and their pipeline key shows it.
+  The manifest vocabulary (`@karume/hub`) accepts the key; the Wan family hands it to the VAE
+  decoder Sessions; the preset name token is `conv8`.
 - Wan2.2 ships two more presets with the VAE decoder in int8 storage: `i8` (f32 compute — the
   reference of the int8 decoder) and `i8-a8-attn8-online-conv8` (the online bundle with the
   decoder's 3-D convolutions on per-pixel int8 activations). **`i8-a8-attn8-online-conv8` is the
@@ -141,6 +177,17 @@ measurements in `docs/research/`.
   a later submit completes, so the previous run's buffers and the new backing were held at once; Wan2.2
   at 1280×704×121 ran out of memory on 12 GiB under Node + Dawn and now completes. The wait happens once
   per built backing; other runs keep a single fence.
+
+### Breaking
+
+- `@karume/runtime`: `GeometryProfile` gains the required field `i8a8.conv3d`, the tile geometry of
+  conv3d on int8 activations (ADR 0115 addendum decision 11). A stored or hand-written profile
+  without it is rejected by `acquireGpu({ geometryProfile })`'s validation and by
+  `parseGeometryProfileJson` (which names the field): re-derive the table from a new sweep, or add
+  the field (`DEFAULT_GEOMETRY_PROFILE.i8a8.conv3d` is the geometry conv3d ran before). The new
+  sweep cases move the case-set version (`provenance.caseSet`), so every saved table mismatches once
+  (`geometryProfileMismatch`) and needs one re-sweep. `GeometrySweepOp` (`@karume/runtime/tune`)
+  gains `"i8a8-conv3d"`.
 
 ## [0.14.0] - 2026-10-16
 

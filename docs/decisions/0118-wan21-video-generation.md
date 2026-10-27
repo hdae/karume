@@ -13,7 +13,9 @@
   ([0129](0129-test-layout-and-lanes.md) decision 4, ruling of 2026-10-18). Re-graded 2026-10-18: the
   separate umT5 process (decision 4) to MAY. Withdrawn 2026-10-18: the B570 timestamp conversion
   (decision 6) and the conditional release wait between the DiT and VAE stages (decision 7). Wan2.1 is
-  not published on Hugging Face (addendum 2026-10-15).
+  not published on Hugging Face (addendum 2026-10-15). Superseded 2026-10-26: ruling b of the step 2 / 4
+  addendum (the cache zeroing is a host write of zeros for now) and the matching note of decision 2's
+  hand-over, by the addendum of 2026-10-26 (the caches are zeroed on the GPU).
 - Date: 2026-10-02
 - Related: research [2026-10-02-video-gen-recon](../research/2026-10-02-video-gen-recon.md) (below
   "recon §n") / [the pre-study of 2026-09-10](../research/2026-09-10-codex-mtp-optimization.md)

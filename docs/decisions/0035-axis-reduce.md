@@ -139,10 +139,10 @@ of the fixed 256 iterations per thread, as risk R3 foresaw). VAE wall time 1.6�
 
   - **Why 16 and not 8.** The gate does not separate them, so the choice was weighted by graph.
     Split 16 is ahead on the default Wan2.2 decode (tile 16: 35% on first, 17% on next) and on
-    first @32, Wan2.1 first and encoder_post. Split 8 is ahead by 3–5% on next @32, Wan2.1 next,
+    first @32, Wan2.1 first and encoder_post. Split 8 is ahead by 3–6% on next @32, Wan2.1 next,
     anima and encoder_pre. Per shape, split 8 is 3–15% faster than split 16 on 16 of the 33 shapes,
     all at P ≥ 8,192 (the largest gap is C 1024, P 8,192). That is recorded as a later candidate (a
-    per-shape split), not taken now.
+    per-shape split, perf-ledger V-12), not taken now.
   - Split 32 is slower than the single-thread form on the largest shapes (×0.65–0.97: C ≥ 512 at
     P ≥ 65,536, C 256 at P 262,144, C 160 at P 225,280).
   - Data and scripts: `outputs/diag/wave-b-2026-10-26/v7/` (`axis-reduce-ab.ts`, `ab-1.json`,
