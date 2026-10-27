@@ -345,8 +345,8 @@ scales block made resident by a wide prompt, a values block and the scales block
 free budget, the 256-row LRU bound, budget 0, abort, a failed row read and dispose; reverting change 1
 or change 2 fails those checks. The regular and QAT gemma4 lanes ran on a real GPU.
 
-Measured on a local-directory source (RTX 3080 Ti, Node + Dawn, E2B default preset, 3 warm chats ×
-128 tokens, 2 runs per arm): with a prompt of 32 or more distinct ids, warm decode medians 32.5–43.2 →
+Measured on a local-directory source (RTX 3080 Ti, Node + Dawn, E2B default preset, a cold chat + 3
+warm chats of up to 128 new tokens — the wide prompt's generations stop at 95 — 2 runs per arm): with a prompt of 32 or more distinct ids, warm decode medians 32.5–43.2 →
 6.8 ms/token and warm TTFT 502–923 → 56–85 ms (PLE re-reads per warm chat 144 → 0); with a short
 prompt of fewer than 32 distinct ids no block becomes resident and nothing changes (6.7–6.8 ms/token
 in both arms). The generated text is identical in both arms.
