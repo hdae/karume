@@ -46,6 +46,9 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
   },
   "minicpm5-1b": { "": "model" },
   "minicpm5-1b-decode": { "": "model" },
+  // MOSS-Image's DiT (ADR NNNN decisions 2–4 — `moss.export_dit write`; `dit_skip22` borrows
+  // every weight of `dit`).
+  "moss-image-sft-i8-dyn": { dit: "dit", dit_skip22: "dit_skip22", dit_text: "dit_text" },
   "qwen3.5-9b-text-moss-image-sft-i8-dyn": { text_encoder: "text_encoder" },
   "sbv2-F1": { dp: "dp", front: "front", flow: "flow", dec: "dec", voice: "voice" },
   "sbv2-F1-f16": { dp: "dp", front: "front", flow: "flow", dec: "dec", voice: "voice" },

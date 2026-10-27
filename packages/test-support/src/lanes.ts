@@ -56,6 +56,7 @@ export const FAMILY_LANES: readonly Lane[] = [
   family("wan-ti2v", both("wan_ti2v")),
   family("umt5", both("umt5"), both("wan")),
   family("qwen3_5", both("qwen3_5")),
+  family("moss", both("moss")),
 ];
 
 /** Every test file of the workspace. */
