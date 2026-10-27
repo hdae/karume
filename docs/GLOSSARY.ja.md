@@ -141,6 +141,7 @@
 | grouped-pass timing △ | まとめた pass での計測 | 製品の pass を、ある種類の kernel の前後でだけ分けて測る。その種類の時間を直接測れる | — | research 2026-10-27 §3 |
 | burst-free composite △ | 遅い区間を除いた合成値 | prefill の chunk の位置ごとに最速のサンプルを足したもの | — | research 2026-10-27 §3 |
 | poison values (fault injection) | 毒値 | 書かれずに残った要素を見つけるため、実行前に NaN などで埋める故障注入の手法 | — | ADR 0004・0014 |
+| upstream-error band △ | 上流誤差の許容帯 | f64 のオラクルに対し、同じ入力での上流自身の f32 誤差の倍数で決める許容帯（gated_delta_scan では上流 2 関数の大きい方の 2 倍） | — | ADR 0135 決定 6 |
 
 ## op の語彙
 
@@ -150,6 +151,12 @@
 | export-eliminated layer △ | export で消える op | export 時の畳み込み・分解で消え、ランタイムに届かない op（旧第 0 層） | export 消滅層 | ADR 0059 決定 1 |
 | extended atomic layer △ | 分解できない追加 op | 語彙内の合成で厳密同値に書けない非 core の op（旧第 1' 層） | 拡張原子層 | ADR 0059 決定 1・3 |
 | extended composite layer △ | 分解できるが残す追加 op | 書けるが性能・意味のために残す非 core の op（旧第 2 層の残り） | 拡張分子層 | ADR 0059 決定 1・3・5 |
+| Gated DeltaNet (GDN) △ | Gated DeltaNet（GDN） | value head ごとの dk × dv 行列を状態に持ち、token ごとに exp(g) で減衰させてから beta の強さで v へ向けて rank-1 補正する線形 attention の層。Qwen3.5 系で使う（MOSS-Image のテキストエンコーダは 32 層中 24 層） | — | ADR 0135 Context |
+| `gated_delta_scan` △ | gated_delta_scan（GDN の走査 op） | GDN の再帰を担う提案中の op。`(q, k, v, g, beta) → o`・arity 5・f32・attrs 空。decode はその states 形 | — | ADR 0135 決定 1・4 |
+| sequential scan (GDN) △ | 逐次スキャン | token を 1 つずつ進め、状態をレジスタに置く kernel の形。(a2) は value の列 1 本を key 方向に 8 スレッドへ分ける（この分け方は数値の一部）。全ての T でこの op の kernel | — | ADR 0135 決定 3 |
+| blocked scan (GDN) △ | ブロック化スキャン | (a3)。逐次スキャンの状態を 8 / 16 token ずつ UT 変換で進める形。長い T で速いが丸めが逐次スキャンと違う。性能の候補に留める | — | ADR 0135 決定 3 |
+| chunked scan (WY / UT form) △ | チャンク形式（WY / UT 形式） | 上流の prefill の算法（64 token の chunk・3 dispatch）。RTX 3080 Ti ではどの T でも遅く不採用 | — | ADR 0135 決定 3 |
+| accurate exp △ | 高精度 exp | 組み込みの exp の代わりに使う、範囲縮小つき多項式の exp。組み込みの偏りが減衰の積で溜まるのを防ぐ。GDN の走査では MUST | — | ADR 0135 決定 3 |
 
 ## 生成と文脈
 
