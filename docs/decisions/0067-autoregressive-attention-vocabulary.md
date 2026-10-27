@@ -265,3 +265,47 @@ K tiles of 16 — ADR 0022 decision 3) and are **selected for M ≥ 16 regardles
   row writes) is capacity-based too; a window-based guard would silently drop rows when capacity >
   window.
 - Decision 5 was unchanged in step 1; step 2 added read-only external slots (ADR 0096 decision 1).
+
+## Addendum (2026-10-27) — ①′ folded over the query heads of one kv plane; the unrolled KV loop of ③′ and the fused stats + PV (perf-ledger K-55 / K-91)
+
+In ①′ and ③′ one workgroup serves one query head, so with GQA every head of a kv plane re-reads the same K / V
+rows (for Gemma 4 E2B 8 × 32.8 MB (P = 16,000) of K per full layer, beyond the 6 MB L2 of the RTX 3080 Ti). Two
+bit-identical rewrites ([research](../research/2026-10-27-k55-head-fold-spike.md)):
+
+- **Fold of ①′ (K-55)**: on plans that take ①′ (option `"parallel"` / `"parallel-fused"`, M ≤ 8) and are **full
+  attention of a measured class (r, D, M)** — Gemma 4 E2B / E4B (r = 8 / 4, D = 512) at M = 1 / 4 / 8 and MiniCPM5
+  (r = 8, D = 128) at M = 1 — one workgroup serves the F = r query heads of one kv plane over 8 columns and loads
+  each K element once (`attention_state_qk:v1:f32:wg8x16:par:fold<F>:gqa`, dispatch `[⌈live / 8⌉, valid rows,
+  B·H / F]`). The rule is `stateQkFoldHeads`, a pure function of plan-time values; it stays inside the measured
+  range (the discipline of ADR 0082 decision 4) — the classes where the fold was not slower than ①′ at any measured
+  P (1,024 / 4,000 / 16,000): other r, D or M, non-GQA plans, sliding layers (the fold measured ≤ ×1.07 there, F ≥ 4
+  slower) and the readonly drafter kernels keep ①′. Being bit-identical, the plans of one model may take different
+  ones of the two (verify and decode) without moving a word of the verify-vs-decode u32 check. The 8-column tile
+  halves the live length at which the column axis hits `maxComputeWorkgroupsPerDimension` (524,280 columns at
+  65,535, against 1,048,560 for ①′); past it the dispatch fails loudly, and today's models stay far below. F is in
+  the key (r travels in the uniform and stays out), and the host asserts F | r before selecting
+  (`assertStateQkFold` — a group straddling two kv planes would read another plane's K with neither an exception
+  nor NaN). The selection stays at the single site of `buildStateAttention`, from plan-time static values; the M 1–8
+  row of the geometry table reads "①′ (folded on the measured full-attention classes) / ①".
+- **Unroll of the PV loop (K-91)**: every live-form ③′ variant (the readonly `:ro` excluded) and the fused stats +
+  PV (ADR 0102) scan each lane's columns in batches of 8, issuing the batch's V loads before its multiply-adds,
+  then a single-column tail; the workgroup and the dispatch are unchanged. The keys moved to
+  `attention_state_pv:v2:…:par…` and `attention_state_stats_pv:v2:…` (one key MUST map to byte-identical WGSL); ③,
+  ③ₜ and the readonly ③′ keep v1. Folding the PV heads measured at most ×1.07 over the unroll and is not done.
+- **Contract — bit identity, not a band**: per output word the expression and the order of operations are those of
+  the kernel replaced. QK: `acc + (q·scale)·kd` with `kd = k·scale`, d ascending per lane, the stride 8 → 4 → 2 → 1
+  tree. PV: `acc + (exp(s − amax)·inv)·v`, col ascending per lane, the same tree; the fused statistics unchanged.
+  The −inf / NaN / empty-row guards and the write predicates are unchanged; no `fma()` and no reassociation. Being
+  bit-identical to the kernels they replace, neither needs an option (ADR 0058 governs paths that change numbers);
+  the A/B tolerance checks of ①′ / ③′, the speculative verify-vs-decode u32 check, the e2e goldens and the Gemma
+  sha256 rows do not move.
+- **The identity is the backend's, not WGSL's**: it rests on the backend compiling the same expression the same way
+  (for example contracting `acc + a·b` into an FMA in both kernels) — the class of caveat of ADR
+  [0082](0082-linear-gemv-decode.md) addendum 1. It is checked word for word per backend by
+  `packages/runtime/tests/gpu_state_attention_fold_test.ts` (the folded ①′ against ①′; ③′ / fused against their v1
+  WGSL kept in `packages/runtime/tests/fixtures/wgsl-baseline/`), with order-only mutants that must mismatch.
+  Observed on Dawn / Vulkan / NVIDIA (2026-10-27); a new backend runs that check before it relies on the identity.
+- **Measured** (RTX 3080 Ti, Node + Dawn, M = 1, per dispatch at P = 1K / 4K / 16K): ①′ fold E2B ×1.81 / ×3.24 /
+  ×6.12, E4B ×1.38 / ×1.90 / ×3.65; ③′ unroll E2B ×1.94 / ×2.46 / ×2.51; sliding fused ×1.60–1.69. The fold at
+  verify M = 4 / 8 (P = 1,024 / 4,000 / 16,000): E2B ×3.42–7.28, E4B ×2.42–4.04; MiniCPM5 at M = 1 ×1.70 / ×2.67 /
+  ×4.68. About 0.49 / 1.15 / 4.74 ms per E2B decode token (an estimate from per-dispatch medians).

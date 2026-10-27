@@ -41,6 +41,19 @@ measurements in `docs/research/`.
   once per lane. Outputs are bit-identical; the pipeline key of those shapes gains the suffix
   `:staged-x`, and the existing kernels' WGSL is unchanged. On an RTX 3080 Ti under Node the E2B
   `i4-fast` decode takes 5.62–5.72 ms of GPU time per token instead of 6.12–6.19 ms.
+- The decode kernels of states-form attention run faster with outputs unchanged (`@karume/runtime`,
+  Sessions with `stateAttentionReduce: "parallel"` or `"parallel-fused"`, such as the gemma4 /
+  gemma4-qat presets that declare it — ADR 0067 addendum of 2026-10-27). On the full-attention
+  layers of the measured shapes (Gemma 4 E2B / E4B in decode and speculative verify, MiniCPM5 in
+  decode), the D-parallel QK kernel serves all the query heads of one kv head in one workgroup and
+  reads each K element once; the KV-parallel PV kernel and the fused row statistics + PV
+  kernel issue the V loads of 8 columns before their multiply-adds. Outputs are bit-identical;
+  the folded QK has its own pipeline keys
+  (`attention_state_qk:v1:f32:wg8x16:par:fold4:gqa` / `…:fold8:gqa`), and the PV keys moved to
+  `attention_state_pv:v2:…` / `attention_state_stats_pv:v2:…`. On an RTX 3080 Ti under Node, per
+  dispatch on the E2B full layers the QK kernel is ×1.81 / ×3.24 / ×6.12 and the PV kernel ×1.94 /
+  ×2.46 / ×2.51 faster at 1K / 4K / 16K tokens of context — an estimated 0.5 / 1.2 / 4.7 ms less GPU
+  time per decode token (decode time per token was not re-measured).
 - Reductions over a non-last axis (`sum` / `amax` / `amin`) split each output over 16 threads that
   walk aligned subtrees of the same summation tree (ADR 0035 addendum of 2026-10-26). Outputs are
   bit-identical; the pipeline key gains the split (`reduce:v2:<op>:<from>><to>:axis:s16:wg256`). On
