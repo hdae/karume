@@ -114,7 +114,8 @@ landing test covers B = 2. Generalising the dims needs a measured geometry per d
 
 `karume::gated_delta_scan` is Karume's own name (outside aten), and the recurrence **can** be written
 exactly as a composition of existing ops (per token: `exp`, `mul`, `sum`, `sub`, `add`; T times), so
-it is composite: the extended composite layer, which needs measurements for entry conditions ① to ④.
+it is composite: the extended composite layer, which needs a measurement for at least one of entry
+conditions ① to ④ (each is addressed below).
 
 - **① Semantic information is lost when restoring from the decomposition — expected to apply as for
   `gru_scan`, not measured yet.** Both upstream functions loop in Python, over T tokens or over T/64
