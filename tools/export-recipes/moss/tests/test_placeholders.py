@@ -1,8 +1,10 @@
-"""No ADR-number placeholder is left under `tools/export-recipes/moss/` once the ADR is merged.
+"""No ADR-number placeholder and no reference to the untracked plan is left under
+`tools/export-recipes/moss/` once the ADR is merged.
 
 The MOSS-Image ADR gets its number when it is merged; until then the recipe cites it with a
-placeholder. This check is skipped until then — remove the mark in the commit that assigns the
-number, and it fails for every placeholder still left.
+placeholder, and cites the working plan (an untracked file) by its item, step and question numbers.
+Both are replaced in the commit that assigns the number. This check is skipped until then — remove
+the mark in that commit, and it fails for every placeholder or plan reference still left.
 """
 
 from __future__ import annotations
@@ -15,23 +17,28 @@ import pytest
 #: The recipe directory (`moss/`).
 RECIPE = Path(__file__).resolve().parent.parent
 
-#: The placeholder, also when a line break falls inside it (a pattern, so this file does not hold
-#: the literal).
-PLACEHOLDER = re.compile(r"ADR\s+N{4}\b")
+#: The ADR placeholder and the plan references ("plan item(s)", "plan step", "plan question",
+#: "plan §"), also when a line break falls inside one (patterns, so this file does not hold the
+#: literals).
+PLACEHOLDERS = (
+    re.compile(r"ADR\s+N{4}\b"),
+    re.compile(r"\bplan\s+(?:(?:items?|step|question)\b|§)", re.IGNORECASE),
+)
 
 #: The text files that can cite an ADR.
 SUFFIXES = frozenset({".py", ".md", ".toml", ".json", ".txt"})
 
 
 def placeholder_sites(root: Path) -> list[str]:
-    """`<path>:<line>` of every placeholder under `root` (this file excluded)."""
+    """`<path>:<line>` of every placeholder under `root` (this file excluded), in file order."""
     sites = []
     for path in sorted(root.rglob("*")):
         if path.suffix not in SUFFIXES or path.resolve() == Path(__file__).resolve():
             continue
         text = path.read_text(encoding="utf-8")
-        for match in PLACEHOLDER.finditer(text):
-            number = text.count("\n", 0, match.start()) + 1
+        starts = sorted(m.start() for pattern in PLACEHOLDERS for m in pattern.finditer(text))
+        for start in starts:
+            number = text.count("\n", 0, start) + 1
             sites.append(f"{path.relative_to(root).as_posix()}:{number}")
     return sites
 
@@ -42,6 +49,24 @@ def test_the_scan_finds_a_placeholder(tmp_path):
     (tmp_path / "b.md").write_text("ADR 0065\n\nsee ADR\n" + "N" * 4 + "\n", encoding="utf-8")
 
     assert placeholder_sites(tmp_path) == ["a.py:1", "b.md:3"]
+
+
+@pytest.mark.parametrize(
+    "reference",
+    ["plan item 15-5", "plan items 15-1 to 15-3", "plan step 1", "Plan\nquestion 18", "plan §1.4"],
+)
+def test_the_scan_finds_a_plan_reference(tmp_path, reference):
+    (tmp_path / "a.py").write_text(f"x = 1\n# see the {reference}\n", encoding="utf-8")
+
+    assert placeholder_sites(tmp_path) == ["a.py:2"]
+
+
+def test_the_scan_leaves_other_uses_of_plan_alone(tmp_path):
+    """A storage plan or the word "planned" is no reference to the working plan."""
+    text = "plan = build_plan(steps)  # the planned items\n"
+    (tmp_path / "a.py").write_text(text, encoding="utf-8")
+
+    assert placeholder_sites(tmp_path) == []
 
 
 @pytest.mark.skip(

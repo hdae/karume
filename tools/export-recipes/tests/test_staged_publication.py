@@ -53,6 +53,10 @@ WRITER_CALLS = frozenset(
         # Wan2.2 TI2V の DiT の台本（`wan/ti2v_export_dit.py`）の容器と golden の書き手。
         "write_container",
         "golden_case",
+        # MOSS-Image's DiT script (`moss/export_dit.py`) writes its three containers through this
+        # function, which `write_series` calls inside the staged seat (the tests call it on a tiny
+        # model).
+        "write_graphs",
     }
 )
 
@@ -89,6 +93,7 @@ EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("wan/export_vae.py", "emit_shared_targets"),
     ("wan/export_vae_encoder.py", "emit_series"),
     ("wan/ti2v_export_dit.py", "write_series"),
+    ("moss/export_dit.py", "write_series"),
 )
 
 
