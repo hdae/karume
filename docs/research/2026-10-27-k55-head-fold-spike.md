@@ -1,4 +1,4 @@
-> Point-in-time record (2026-10-27) of the K-55 spike, its independent check, the follow-up measurement that chose the ③′ unroll factor and the timing of the fold on the verify and MiniCPM5 shapes, on the RTX 3080 Ti under Node + Dawn (Vulkan). Not a design source of truth (that is [ADR 0067](../decisions/0067-autoregressive-attention-vocabulary.md), addendum of 2026-10-27). Raw material (spike kernels and harness, raw JSON, logs) is under `outputs/diag/k55-fold-2026-10-27/` of the main checkout (not tracked): `spike/`, `check/`, `impl/` and `fix/`.
+> Point-in-time record (2026-10-27) of the K-55 spike, its independent check, the follow-up measurement that chose the ③′ unroll factor and the timing of the fold on the verify and MiniCPM5 shapes, on the RTX 3080 Ti under Node + Dawn (Vulkan), plus the identity check on the RTX 5070 Ti under Chrome (D3D12, §6.1). Not a design source of truth (that is [ADR 0067](../decisions/0067-autoregressive-attention-vocabulary.md), addendum of 2026-10-27). Raw material (spike kernels and harness, raw JSON, logs) is under `outputs/diag/k55-fold-2026-10-27/` of the main checkout (not tracked): `spike/`, `check/`, `impl/` and `fix/`.
 
 # K-55: folding the GQA query heads of one kv plane in the states-form decode attention
 
@@ -18,7 +18,9 @@ unrolled KV loop, not the fold.
 
 Implemented 2026-10-27 (perf-ledger K-55 and K-91): the full-layer ①′ folds with F = r on the measured classes
 (r, D, M) — Gemma 4 E2B / E4B (D = 512) at M = 1 / 4 / 8 and MiniCPM5 (r = 8, D = 128) at M = 1, where the fold was
-faster than ①′ at every measured P (§4.3); every live-form ③′ variant (the readonly `:ro` excluded) and the fused
+faster than ①′ at every measured P (§4.3) — narrowed the same day to E2B and MiniCPM5 after the E4B fold (F = 4)
+differed from ①′ on D3D12 (§6.1; E4B keeps ①′ — perf-ledger K-95); every live-form ③′ variant (the readonly `:ro`
+excluded) and the fused
 kernel take the unrolled loop with 8 columns per batch. Estimated saving per decode token
 (differences of per-dispatch medians × layers — 7 full layers, 28 sliding for E2B / 35 for E4B; the fused kernel
 from §4.2, ③′ from §5):
@@ -26,7 +28,7 @@ from §4.2, ③′ from §5):
 | Model | P = 1K | 4K | 16K |
 | --- | --- | --- | --- |
 | E2B | 0.49 ms (7.7%) | 1.15 ms (15.8%) | 4.74 ms (37.4%) |
-| E4B | 0.49 ms | 1.07 ms | 4.45 ms |
+| E4B | 0.49 ms | 1.07 ms | 4.45 ms (before E4B was excluded from the fold — §6.1) |
 
 Percentages are of the E2B decode GPU time per token at HEAD `55fd3db8` (6.35 / 7.29 / 12.67 ms —
 [decode attribution](2026-10-27-gemma4-decode-attribution.md) §4). Decode wall and GPU time per token were not
@@ -106,9 +108,10 @@ runs: all 30,800 samples on the 1,024 ns grid, the per-run ratios agree, and the
   passes per token rather than one pass each (speculation: small differences only).
 - B > 1 and r = 1 were not compared in the spike. The product gate (§6) runs B = 2 for every shape and r = 1 shapes
   for ③′ and the fused kernel; the fold itself is selected only on the measured classes (§4.3), all GQA.
-- One backend only (Dawn / Vulkan / NVIDIA). The identity is not checked yet on D3D12 (the RTX 5070 Ti under Node +
-  Dawn), in Chrome, or on Metal; `gpu_state_attention_fold_test.ts` (§6) must pass on each of them before a release
-  relies on the identity there.
+- One backend only (Dawn / Vulkan / NVIDIA) for §3.2–§6. The identity was checked afterwards on D3D12 in Chrome on
+  the RTX 5070 Ti (§6.1: the E4B fold differs there); not on D3D12 under Node + Dawn, nor on Metal.
+  `gpu_state_attention_fold_test.ts` (§6), or the browser runbook in a browser, must pass on each of them before a
+  release relies on the identity there.
 - E4B at P = 8,192: run 1 sat in the slow mode of this machine for that case (current 324.6 vs 256.0 µs in run 2,
   every configuration raised alike); the pooled median lies between the two.
 
@@ -194,7 +197,9 @@ ratios agree within 10% (the widest, E2B M = 1 at P = 1,024: ×1.65 / ×1.81). O
 
 Resulting rule (`stateQkFoldHeads`, a pure function of plan-time values): fold with F = r exactly on the measured
 classes (r, D, M) where the fold was not slower at any measured P — (8, 512, 1 / 4 / 8), (4, 512, 1 / 4 / 8) and
-(8, 128, 1). Every other class keeps ①′: MiniCPM5 at M = 4 / 8, other head dims, M ∈ {2, 3, 5, 6, 7}, other r, the
+(8, 128, 1). Narrowed the same day (§6.1): (4, 512, 1 / 4 / 8) left the list after the D3D12 check, so the rule
+now also requires the fold to be observed bit-identical to ①′ on every backend checked. Every other class keeps ①′:
+MiniCPM5 at M = 4 / 8, other head dims, M ∈ {2, 3, 5, 6, 7}, other r, the
 sliding layers. The fold is bit-identical to ①′, so plans of one model may take different ones of the two (a
 MiniCPM5 decode plan folds while its M = 4 plan does not) without moving a word: the speculative verify-vs-decode
 u32 check and the sha256 reference rows do not see the choice. The live length is not an input; P below 1,024 or
@@ -234,6 +239,62 @@ unwritten (poison) words. Order-only mutants mismatch: the F8 fold with one head
 words, the F4 fold with the k-side scale reassociated 11,588 of 16,096, ③′ with two batch terms swapped 2,098 of
 8,192 O words, ③′ with one term reassociated 1,445 of 8,192, the fused kernel with two terms swapped 733 of 4,096.
 
+### 6.1 D3D12 in Chrome on the RTX 5070 Ti (2026-10-27)
+
+The maintainer ran the browser runbook (`outputs/diag/k55-fold-2026-10-27/runbook/`, steps in `STEPS.ja.md`; it
+runs the node test's full case set with the product generators and the same mutants) in Chrome 156 on Windows:
+D3D12, NVIDIA GeForce RTX 5070 Ti (Blackwell, device `0x2c05`), driver 32.0.16.1088, shader model 6.8. Two runs,
+the second with per-case data: `outputs/bench-browser/karume-k55-bitcheck_nvidia-geforce-rtx-5070-ti.json` (format
+`karume-k55-bitcheck/1`, 17:52 UTC) and
+`outputs/bench-browser/karume-k55-bitcheck_nvidia-geforce-rtx-5070-ti (1).json` (format `karume-k55-bitcheck/2`,
+18:14 UTC). Both runs give the same counts.
+
+| Comparison | Cases | Mismatching cases | Mismatching words |
+| --- | --- | --- | --- |
+| folded ①′ vs ①′ (S words) | 252 | 84 (every e4b-full case) | 2,722,774 |
+| ③′ v2 vs v1 (O words) | 546 | 0 | 0 |
+| fused stats + PV v2 vs v1 (O words) | 490 | 0 | 0 |
+
+Every e2b-full case (F = 8, one kv plane per batch row) and every minicpm5-full case (F = 8, D = 128, two kv planes)
+matched word for word. The e4b-full mismatches (F = 4) by row shape, from the second run (a case is one P × row shape
+× finite / non-finite inputs; the maximum is over the cases of the row):
+
+| M | Cases | Mismatching words | Largest per-case ULP distance |
+| --- | --- | --- | --- |
+| 1 | 12 | 87,659 | 16,384 (2¹⁴) |
+| 4 | 24 | 558,339 | 1,048,576 (2²⁰) |
+| 8 | 48 | 2,076,776 | 1,048,576 (2²⁰) |
+
+Every P (0 to 4,095) mismatches, with finite and with non-finite inputs alike. The first mismatch is e4b-full P = 0,
+M = 1, word 6: `0x3e62d640` against ①′'s `0x3e62d650` (16 ULP). The record keeps ULP distances only, not absolute
+errors, so how large the large distances are in value is not known from it (between two words near zero a large
+ULP distance can be a small absolute difference).
+
+The checks that the run is valid held: the WGSL sha256 prefixes equal the dev machine's (`fold8`
+`876afdd6404bdfca`, `fold4` `f0099bee5a0941a2`, and every ③′ / fused v1 and v2), the census met every word
+class, and every mutant mismatched on all the cases it acts on (84 / 84, 84 / 84, 28 / 28, 56 / 56, 42 / 42). The
+"contraction-only" cases of the ③′ swap mutant (113 ≤ live < 241, where the swapped term starts from `acc = 0`)
+mismatched 0 of 28 on D3D12 against 28 of 28 on Vulkan — consistent with the two backends contracting the
+multiply-adds of that kernel differently (an inference from the mutant, not isolated).
+
+**[speculation]** The D3D12 compiler (through Dawn's HLSL / DXC path) chooses where to contract `acc + a·b` into a
+multiply-add differently for the F = 4 kernel than for ①′, while it happens to choose alike for F = 8. WGSL does not
+promise the same contraction across different kernels, so cross-kernel bit identity is a per-backend, per-kernel
+observation. Not isolated: why F = 4 and not F = 8 is open (perf-ledger K-95).
+
+End to end, the Gemma 4 E2B decode of the perf-recon runbook step 07
+(`outputs/bench-browser/karume-recon-5070ti_07-llm-decode_3.json`, 18:28 UTC, HEAD `62baab55` — the E2B fold, K-91,
+K-90, H-40, H-41, H-38 and L-26 in) reproduced the 2026-10-25 RTX 5070 Ti record
+(`karume-recon-5070ti_07-llm-decode.json`) exactly: the digest of every readback word (`readDigest`) and the generated
+text (`textSha`) are equal on all four arms × five rounds (`7c74cd7fe8c9e25a` / `04c5e19f2869768d` on prod, mc128 and
+mc128+sx; `ffdd0a86d3f7c824` / `ef0aeab59e116b89` on mc128-greedy). E2B decode is therefore bit-identical on D3D12
+across those changes.
+
+Ruling (the maintainer, 21 a): keep the fold only on the classes identical on both measured backends — E2B (r = 8,
+D = 512) at M = 1 / 4 / 8 and MiniCPM5 (r = 8, D = 128) at M = 1; E4B (r = 4) returns to ①′, to be checked later
+(K-95). The F = 4 kernel and its gate stay, as the check K-95 needs; on D3D12 the gate fails on the E4B cases until
+then.
+
 ## 7. Kill line (×1.3 at P = 16K, as K-14)
 
 - Full-layer ①′ QK fold (K-55): **passes** — E2B ×6.12, E4B ×3.65; still ×1.81 / ×1.38 at P = 1K.
@@ -248,4 +309,5 @@ words, the F4 fold with the k-side scale reassociated 11,588 of 16,096, ③′ w
 - The sliding ①′ with the lanes along D in `lid.x` (×1.07–1.14, 1–2 µs per dispatch) — not taken.
 - The readonly drafter kernels (`:ro`) have the same per-head re-reads and the same loop; not measured, unchanged.
 - The fold on MiniCPM5 at M = 4 / 8, at M ∈ {2, 3, 5, 6, 7} and on other head dims (not selected — §4.3).
-- Decode wall and GPU time per token after the change; other backends (D3D12, Metal, browsers).
+- Decode wall and GPU time per token after the change; other backends (D3D12 under Node + Dawn, Metal, other
+  browsers). The fold timing on the RTX 5070 Ti.

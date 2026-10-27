@@ -273,13 +273,17 @@ rows (for Gemma 4 E2B 8 × 32.8 MB (P = 16,000) of K per full layer, beyond the 
 bit-identical rewrites ([research](../research/2026-10-27-k55-head-fold-spike.md)):
 
 - **Fold of ①′ (K-55)**: on plans that take ①′ (option `"parallel"` / `"parallel-fused"`, M ≤ 8) and are **full
-  attention of a measured class (r, D, M)** — Gemma 4 E2B / E4B (r = 8 / 4, D = 512) at M = 1 / 4 / 8 and MiniCPM5
-  (r = 8, D = 128) at M = 1 — one workgroup serves the F = r query heads of one kv plane over 8 columns and loads
-  each K element once (`attention_state_qk:v1:f32:wg8x16:par:fold<F>:gqa`, dispatch `[⌈live / 8⌉, valid rows,
-  B·H / F]`). The rule is `stateQkFoldHeads`, a pure function of plan-time values; it stays inside the measured
-  range (the discipline of ADR 0082 decision 4) — the classes where the fold was not slower than ①′ at any measured
-  P (1,024 / 4,000 / 16,000): other r, D or M, non-GQA plans, sliding layers (the fold measured ≤ ×1.07 there, F ≥ 4
-  slower) and the readonly drafter kernels keep ①′. Being bit-identical, the plans of one model may take different
+  attention of a selected class (r, D, M)** — Gemma 4 E2B (r = 8, D = 512) at M = 1 / 4 / 8 and MiniCPM5 (r = 8,
+  D = 128) at M = 1 — one workgroup serves the F = r query heads of one kv plane over 8 columns and loads each K
+  element once (`attention_state_qk:v1:f32:wg8x16:par:fold<F>:gqa`, dispatch `[⌈live / 8⌉, valid rows, B·H / F]`).
+  The rule is `stateQkFoldHeads`, a pure function of plan-time values: a class is selected only where the fold was
+  measured not slower than ①′ at every measured P (1,024 / 4,000 / 16,000) **and** observed bit-identical to ①′ on
+  every backend checked (Vulkan / RTX 3080 Ti and D3D12 / RTX 5070 Ti). It stays inside the measured range (the
+  discipline of ADR 0082 decision 4): other r, D or M, non-GQA plans, sliding layers (the fold measured ≤ ×1.07
+  there, F ≥ 4 slower) and the readonly drafter kernels keep ①′. Gemma 4 E4B (r = 4, F = 4, D = 512) was measured
+  faster at M = 1 / 4 / 8 but keeps ①′: its F = 4 kernel differs from ①′ on D3D12 (below), so selecting it would be
+  an automatic choice that moves numbers there (ADR 0058 decision 2); making it identical is perf-ledger K-95. Being
+  bit-identical, the plans of one model may take different
   ones of the two (verify and decode) without moving a word of the verify-vs-decode u32 check. The 8-column tile
   halves the live length at which the column axis hits `maxComputeWorkgroupsPerDimension` (524,280 columns at
   65,535, against 1,048,560 for ①′); past it the dispatch fails loudly, and today's models stay far below. F is in
@@ -303,8 +307,15 @@ bit-identical rewrites ([research](../research/2026-10-27-k55-head-fold-spike.md
   (for example contracting `acc + a·b` into an FMA in both kernels) — the class of caveat of ADR
   [0082](0082-linear-gemv-decode.md) addendum 1. It is checked word for word per backend by
   `packages/runtime/tests/gpu_state_attention_fold_test.ts` (the folded ①′ against ①′; ③′ / fused against their v1
-  WGSL kept in `packages/runtime/tests/fixtures/wgsl-baseline/`), with order-only mutants that must mismatch.
-  Observed on Dawn / Vulkan / NVIDIA (2026-10-27); a new backend runs that check before it relies on the identity.
+  WGSL kept in `packages/runtime/tests/fixtures/wgsl-baseline/`), with order-only mutants that must mismatch;
+  the browser runbook `outputs/diag/k55-fold-2026-10-27/runbook/` of the main checkout (not tracked) runs the same
+  case set in Chrome. Observed 2026-10-27: on Dawn / Vulkan / RTX 3080 Ti every case matched (F = 8 and F = 4, ③′,
+  fused); on Chrome 156 / D3D12 / RTX 5070 Ti (Blackwell) the E2B (F = 8) and MiniCPM5 (F = 8) folds, ③′ (546 cases)
+  and the fused kernel (490 cases) matched word for word, while the E4B fold (F = 4) differed on all 84 of its cases
+  (M = 1 / 4 / 8; 2,722,774 S words; per-case ULP distances up to 2²⁰; the same WGSL bytes as on the dev machine,
+  every mutant detected — [research](../research/2026-10-27-k55-head-fold-spike.md) §6.1). So the identity is a
+  per-backend, per-kernel observation, and only classes observed identical on every checked backend are selected.
+  A new backend runs that check (the GPU test, or the runbook in a browser) before it relies on the identity.
 - **Measured** (RTX 3080 Ti, Node + Dawn, M = 1, per dispatch at P = 1K / 4K / 16K): ①′ fold E2B ×1.81 / ×3.24 /
   ×6.12, E4B ×1.38 / ×1.90 / ×3.65; ③′ unroll E2B ×1.94 / ×2.46 / ×2.51; sliding fused ×1.60–1.69. The fold at
   verify M = 4 / 8 (P = 1,024 / 4,000 / 16,000): E2B ×3.42–7.28, E4B ×2.42–4.04; MiniCPM5 at M = 1 ×1.70 / ×2.67 /
