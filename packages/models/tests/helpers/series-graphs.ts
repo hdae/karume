@@ -49,6 +49,12 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
   // MOSS-Image's DiT (ADR NNNN decisions 2–4 — `moss.export_dit write`; `dit_skip22` borrows
   // every weight of `dit`).
   "moss-image-sft-i8-dyn": { dit: "dit", dit_skip22: "dit_skip22", dit_text: "dit_text" },
+  // MOSS-Image's VAE decoder (ADR NNNN decision 8 — `moss.export_vae write`; a VAE-only series).
+  "moss-image-sft-f32-dyn": {
+    vae_decoder_pre: "vae_decoder_pre",
+    vae_decoder_attn: "vae_decoder_attn",
+    vae_decoder_post: "vae_decoder_post",
+  },
   "qwen3.5-9b-text-moss-image-sft-i8-dyn": { text_encoder: "text_encoder" },
   "sbv2-F1": { dp: "dp", front: "front", flow: "flow", dec: "dec", voice: "voice" },
   "sbv2-F1-f16": { dp: "dp", front: "front", flow: "flow", dec: "dec", voice: "voice" },

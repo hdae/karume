@@ -8,8 +8,13 @@
  *   — an explicit acceptance limit: the RoPE base tables' `h` / `w` axes hold one row per position of
  *   a side of up to 4,096 cells (2·4,096 − 1 rows; `./dit-rope.ts`). Upstream has no ceiling, but
  *   with the area cap of the VAE binding (plan step 3) a longer side would leave a short side under
- *   about 43 px. MUST: a longer side is rejected with an error that names the limit. The area cap
- *   itself is the VAE's (step 3).
+ *   about 43 px. MUST: a longer side is rejected with an error that names the limit.
+ * - **Area** ({@link assertMossImageArea}, plan item 15-9 — per device): the untiled VAE's largest
+ *   intermediate must fit one storage binding, so the area is capped by the device's binding limit
+ *   over the decoder's bytes per pixel (`./vae-contract.ts` derives both from the graphs — about
+ *   2.80M pixels at 2 GiB). MUST: a larger area is rejected with an error that names the limit.
+ *   Whether the DiT pair and the VAE fit the device's VRAM is not an acceptance limit: each stage
+ *   checks it before it opens (`fitsHeadroom`).
  * - **Text**: the internal entry takes encoder outputs only — a `Float32Array` `[T, 4096]` with
  *   1 ≤ T ≤ {@link MOSS_MAX_TEXT_TOKENS} (upstream requires at least one token and truncates at
  *   `max_sequence_length` 4,096), every value finite (a non-finite embedding would surface as
@@ -26,6 +31,7 @@
 
 import { ModelInputError } from "../errors.ts";
 import type { MossCells } from "./dit-rope.ts";
+import type { MossAreaLimit } from "./vae-contract.ts";
 
 /** Pixels per latent cell (the VAE's 8× and the DiT's 2×2 patch — upstream's `height // 16`). */
 export const MOSS_PIXELS_PER_CELL = 16;
@@ -75,6 +81,21 @@ export const assertMossImageSize = (width: number, height: number): MossCells =>
     );
   }
   return { rows: height / MOSS_PIXELS_PER_CELL, cols: width / MOSS_PIXELS_PER_CELL };
+};
+
+/**
+ * Checks the image area against a device's area limit (module doc "Area"). Run after
+ * {@link assertMossImageSize} (the sides are positive multiples of 16).
+ */
+export const assertMossImageArea = (width: number, height: number, limit: MossAreaLimit): void => {
+  const area = width * height;
+  if (area > limit.maxPixels) {
+    throw new ModelInputError(
+      `${OWNER}: ${width}×${height} px (${area} px) exceeds this device's area limit of` +
+        ` ${limit.maxPixels} px — the untiled VAE's largest tensor (${limit.bytesPerPixel} B per pixel)` +
+        ` must fit one storage binding of ${limit.bindingBytes} B`,
+    );
+  }
 };
 
 /**

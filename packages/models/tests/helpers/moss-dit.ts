@@ -307,7 +307,7 @@ export type MossSeries = {
  * A {@link ModelComponent} over an opened series container (the fields `hub/components.ts`'s
  * `containerComponent` builds from a fetched one; the largest weight part is part 1 onward).
  */
-const componentOf = (opened: OpenedContainer, graph: string): ModelComponent => {
+export const componentOf = (opened: OpenedContainer, graph: string): ModelComponent => {
   const prepared = prepareContainer(opened, graph);
   let maxPartBytes = 0;
   for (let index = 1; index < opened.source.partCount; index += 1) {
