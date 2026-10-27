@@ -24,7 +24,7 @@
  * (`attentionDeviceFacts`), the combination guard (`fusedAttentionViolation`), the row blocks of
  * the s16 route (`planAttentionBlocks` under the device's binding limit, ADR 0124) and the windows
  * of the online route (`planAttentionOnlineWindows`) are the production functions themselves. The
- * i8a8 geometry is the one Session construction selects (src/runtime/session-build.ts:600-601) and
+ * i8a8 geometry is the one Session construction selects (`sessionGeometryProfile`, called here) and
  * the integer dot-product variant is decided the way Session construction does
  * (`resolveAttentionI8a8Dot`, src/runtime/session-build.ts:301-321): emulated when the WGSL
  * language feature is not listed, otherwise the verdict of the attention canary.
@@ -52,7 +52,7 @@
  * responsibility, as for `runGeometrySweep`.
  */
 
-import { type GpuContext, RUNTIME_INTERNAL } from "../gpu/device.ts";
+import type { GpuContext } from "../gpu/device.ts";
 import {
   type AttentionI8a8Decision,
   decideAttentionI8a8Dot,
@@ -94,7 +94,7 @@ import {
   attentionStatsRegCache,
   attentionStatsWgsl,
 } from "../kernels/attention.ts";
-import { type GeometryProfile, selectGeometryProfile } from "../kernels/geometry-profile.ts";
+import type { GeometryProfile } from "../kernels/geometry-profile.ts";
 import { type I8a8Geometry, i8a8TileM, i8a8TileN } from "../kernels/i8a8-geometry.ts";
 import { dp4aAvailable } from "../kernels/linear-i8a8.ts";
 import {
@@ -115,6 +115,7 @@ import {
   planAttentionBlocks,
   planAttentionOnlineWindows,
 } from "../runtime/recipe-builders/attention.ts";
+import { sessionGeometryProfile } from "../runtime/geometry-selection.ts";
 import type { I8a8Dot } from "../runtime/session-types.ts";
 import {
   createResources,
@@ -877,8 +878,7 @@ export const runAttentionRouteBench = async (
   const quantization = options.quantization ?? true;
   const startedAt = new Date().toISOString();
   const notify = options.onProgress;
-  // session-build.ts:600-601 — the injected profile, or the embedded table for this adapter
-  const profile = gpu[RUNTIME_INTERNAL].geometryProfile ?? selectGeometryProfile(gpu.adapterInfo);
+  const profile = sessionGeometryProfile(gpu);
   notify?.({ kind: "status", message: "deciding the integer dot-product variant (canary)" });
   const dp4a = await chooseDot(gpu, profile);
   const device = attentionDeviceFacts(gpu);

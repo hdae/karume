@@ -29,12 +29,13 @@ import { discardFailureScopes, popFailureScopes, pushFailureScopes } from "../gp
 import { SessionPipelines } from "../gpu/pipeline-cache.ts";
 import { copySubmitPolicy, SubmitScheduler } from "../gpu/submit.ts";
 import { BUFFER_USAGE } from "../gpu/webgpu-constants.ts";
-import { type GeometryProfile, selectGeometryProfile } from "../kernels/geometry-profile.ts";
+import type { GeometryProfile } from "../kernels/geometry-profile.ts";
 import { dp4aAvailable } from "../kernels/linear-i8a8.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
 import { A8_EMULATION_WARNING_KEY, a8EmulationWarning } from "./a8-emulation-warning.ts";
 import { type AttentionDeviceFacts, attentionDeviceFacts } from "./attention-route.ts";
 import type { FusionCounts } from "./fusion.ts";
+import { sessionGeometryProfile } from "./geometry-selection.ts";
 import { conv3dTapMajorInitializers, countUses, declaredDtypes, ExecutionError } from "./plan.ts";
 import type { GenerationLimits, StepRecipe } from "./recipe.ts";
 import type { TransientLimits } from "./transient-plan.ts";
@@ -272,16 +273,6 @@ export type PreparedPlan = {
 };
 
 /**
- * The GEMM geometry profile a Session on `gpu` runs with: the table injected with
- * `acquireGpu({ geometryProfile })`, otherwise the embedded table {@link selectGeometryProfile}
- * picks for the adapter. Session construction calls this once (the one selection point); tests that
- * must name the geometry a Session ran call the same function instead of re-deriving it.
- * NOTE: internal — not on the public mod.ts surface.
- */
-export const sessionGeometryProfile = (gpu: GpuContext): GeometryProfile =>
-  gpu[RUNTIME_INTERNAL].geometryProfile ?? selectGeometryProfile(gpu.adapterInfo);
-
-/**
  * Decides the integer dot-product variant of fused attention (the entry of
  * {@link SessionState.attentionI8a8Dot}).
  *
@@ -305,7 +296,7 @@ export const sessionGeometryProfile = (gpu: GpuContext): GeometryProfile =>
  * The canary fires with the i8a8 attention geometry of `profile` (the geometry production's ①QK /
  * ③PV actually run). The memo can stay per device because the profile is either the table injected
  * into the same {@link GpuContext} (`acquireGpu({ geometryProfile })`) or, absent that, a pure
- * function of `adapterInfo` ({@link selectGeometryProfile}); both are invariant over the device's
+ * function of `adapterInfo` (`selectGeometryProfile`); both are invariant over the device's
  * lifetime — the same device gives the same geometry for every Session.
  */
 const resolveAttentionI8a8Dot = async (

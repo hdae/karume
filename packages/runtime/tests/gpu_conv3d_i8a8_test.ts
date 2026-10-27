@@ -38,7 +38,7 @@ import {
   type SessionOptions,
   type Tensor,
 } from "../src/runtime/executor.ts";
-import { sessionGeometryProfile } from "../src/runtime/session-build.ts";
+import { sessionGeometryProfile } from "../src/runtime/geometry-selection.ts";
 import type { TensorInput } from "./helpers/container-write.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
