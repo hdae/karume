@@ -161,7 +161,8 @@ type ProfileSlot = { readonly field: string; readonly candidate: GeometryCandida
 /**
  * The geometry the table applies to a case (the same selection functions as the Session path —
  * `gemmRowsGeometry(profile, m)` in src/runtime/recipe-builders/linear.ts, `conv2dProfileGeometry`
- * in conv.ts, the fields in attention.ts). bmm's M is the row count of one matrix (as in buildBmm).
+ * and `i8a8.conv3d` in conv.ts, the fields in attention.ts). bmm's M is the row count of one matrix
+ * (as in buildBmm).
  */
 const profileSlot = (profile: GeometryProfile, sweepCase: SweepCase): ProfileSlot => {
   switch (sweepCase.op) {
@@ -192,6 +193,8 @@ const profileSlot = (profile: GeometryProfile, sweepCase: SweepCase): ProfileSlo
       return sweepCase.stage === "qk"
         ? { field: "i8a8.attentionQk", candidate: i8a8Candidate(profile.i8a8.attentionQk) }
         : { field: "i8a8.attentionPv", candidate: i8a8Candidate(profile.i8a8.attentionPv) };
+    case "i8a8-conv3d":
+      return { field: "i8a8.conv3d", candidate: i8a8Candidate(profile.i8a8.conv3d) };
   }
 };
 
@@ -202,7 +205,11 @@ const profileSlot = (profile: GeometryProfile, sweepCase: SweepCase): ProfileSlo
  * cases put both variants into the fingerprint. The WGSL of other ops does not depend on dp4a.
  */
 const dp4aVariants = (sweepCase: SweepCase): readonly boolean[] =>
-  sweepCase.op === "i8a8-linear" || sweepCase.op === "i8a8-attention" ? [false, true] : [false];
+  sweepCase.op === "i8a8-linear" ||
+  sweepCase.op === "i8a8-attention" ||
+  sweepCase.op === "i8a8-conv3d"
+    ? [false, true]
+    : [false];
 
 /** The sweep's case plan (harness.ts's `casePlan` — tests inject a replacement for the default). */
 export type CasePlanner = (sweepCase: SweepCase, limit: number, dp4a: boolean) => CasePlan;
@@ -422,7 +429,8 @@ type SweepCaseField = SweepCase extends infer Case
  * dispatch). The included fields are those harness.ts's `casePlan` reads — `id` (the case's name,
  * which ties the sweep record's rows to the table's verdicts), `op`, the shape (`m` / `n` / `k` /
  * `batch`, attention's `stage` / `batchHeads` / `d`, conv2d's `channelsIn` / `channelsOut` /
- * `height` / `width`) and the attrs that affect the dispatch (attention's `scale` goes into params,
+ * `height` / `width`, conv3d's `dims` — every field of the kernel's dims) and the attrs that affect
+ * the dispatch (attention's `scale` goes into params,
  * `score` into the WGSL as the storage format of S). The excluded fields are information for humans
  * (`source` = description, `censusCount` = census count, `mirrorOf` = the mirrored case) — fixing a
  * description does not make every saved table mismatch.
@@ -447,6 +455,7 @@ const CASE_SET_FIELDS = {
   channelsOut: true,
   height: true,
   width: true,
+  dims: true,
   censusCount: false,
   source: false,
   mirrorOf: false,

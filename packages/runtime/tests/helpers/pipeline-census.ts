@@ -23,6 +23,7 @@ import {
 import { attentionPvI8a8Key, attentionQkI8a8Key } from "../../src/kernels/attention-i8a8.ts";
 import { attentionOnlineI8a8Key } from "../../src/kernels/attention-online-i8a8.ts";
 import { conv3dI8a8Key } from "../../src/kernels/conv3d-i8a8.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../../src/kernels/geometry-profile.ts";
 import { gemmComputeKeyPart } from "../../src/kernels/gemm.ts";
 import { linearKey } from "../../src/kernels/linear.ts";
 import {
@@ -142,8 +143,9 @@ const stateVariants = (
 const GEMV_PARALLEL_SAMPLE = linearGemvParallelKey("i8", undefined, 4);
 
 const LINEAR_FAMILY = familyOf(linearKey("f32", true));
-// The conv3d w8a8 family (ADR 0133) — its keys carry the i8a8 dtype like linear's.
-const CONV3D_FAMILY = familyOf(conv3dI8a8Key(true, true));
+// The conv3d w8a8 family (ADR 0133) — its keys carry the i8a8 dtype like linear's (any geometry
+// gives the same family).
+const CONV3D_FAMILY = familyOf(conv3dI8a8Key(true, true, DEFAULT_GEOMETRY_PROFILE.i8a8.conv3d));
 const I8A8_DTYPE = dtypeOf(linearI8a8Key(true, true));
 const C16 = gemmComputeKeyPart("f16");
 const S16 = scoreKeyPart("f16");

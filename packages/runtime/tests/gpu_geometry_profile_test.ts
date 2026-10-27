@@ -264,6 +264,78 @@ const linearI8a8Case = (): ProfileCase => {
   };
 };
 
+/**
+ * conv3d w8a8 (`convCompute: "a8"` with an i8-resident weight — ADR 0133): the GEMM runs the profile's
+ * `i8a8.conv3d` (ADR 0115 addendum 2026-10-26). Cout 96 over P = 96 output pixels, Cin 32, 3×3×3 with
+ * spatial padding.
+ */
+const conv3dI8a8Case = (): ProfileCase => {
+  const [channelsIn, channelsOut] = [32, 96];
+  const input = [3, 8, 12] as const;
+  const output = [1, 8, 12] as const;
+  const rowLength = channelsIn * 27;
+  const weight = fill(
+    [channelsOut, channelsIn, 3, 3, 3],
+    (i) => WEIGHT(i) * (1 + (Math.floor(i / rowLength) % 7) * 0.25),
+  );
+  const quantized = quantizeI8(weight.data, [channelsOut, rowLength], 0);
+  const bias = fill([channelsOut], BIAS);
+  return {
+    name: "conv3d i8a8",
+    model: () =>
+      openModelBytes(
+        {
+          format: "karume-ir",
+          version: 2,
+          requires: { ops: ["conv3d"] },
+          symbols: [],
+          inputs: [{ name: "x0", dtype: "f32", shape: [channelsIn, ...input] }],
+          outputs: ["y"],
+          initializers: { w: {}, b: {} },
+          values: {
+            w: { dtype: "f32", shape: [channelsOut, channelsIn, 3, 3, 3] },
+            b: { dtype: "f32", shape: [channelsOut] },
+            y: { dtype: "f32", shape: [channelsOut, ...output] },
+          },
+          nodes: [
+            {
+              op: "conv3d",
+              ins: ["x0", "w", "b"],
+              outs: ["y"],
+              attrs: { stride: [1, 1, 1], padding: [0, 1, 1], dilation: [1, 1, 1], groups: 1 },
+            },
+          ],
+        },
+        [
+          {
+            graph: GRAPH_NAME,
+            initializer: "b",
+            bytes: f32Bytes(bias.data),
+            encoding: { codec: "f32" },
+          },
+          {
+            graph: GRAPH_NAME,
+            initializer: "w",
+            bytes: quantized.bytes,
+            encoding: {
+              codec: "int8-sym",
+              groupSize: perChannelGroupSize(rowLength),
+              scale: { bytes: f32Bytes(quantized.scale), dtype: "f32" },
+            },
+          },
+        ],
+      ),
+    inputs: { x0: fill([channelsIn, ...input], SIGNED) },
+    options: { convCompute: "a8" },
+    expected: (profile) => [
+      {
+        prefix: "conv3d:v1:i8a8:",
+        parts: [i8a8GeometryKeyPart(profile.i8a8.conv3d, false)],
+      },
+    ],
+  };
+};
+
 /** linear の行数バケット以外のケース（per-profile 検査は linear を表の規則から作る — `gemmRowsCases`）。 */
 const OTHER_CASES: readonly ProfileCase[] = [
   {
@@ -304,6 +376,7 @@ const OTHER_CASES: readonly ProfileCase[] = [
   conv2dCase(96, "rows32"),
   conv2dCase(128, "rows64"),
   linearI8a8Case(),
+  conv3dI8a8Case(),
 ];
 
 const CASES: readonly ProfileCase[] = [

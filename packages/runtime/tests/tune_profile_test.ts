@@ -356,6 +356,128 @@ describe("deriveProfile: 規則の抽出", () => {
   });
 });
 
+// The conv3d w8a8 class (ADR 0115 addendum 2026-10-26): one geometry for every conv3d case, chosen
+// by the same rule as every other class.
+describe("deriveProfile: the conv3d w8a8 class (i8a8.conv3d)", () => {
+  const conv3dDefault = i8a8Candidate(defaultI8a8Geometry("conv3d"));
+  const conv3dCase = (name: string): CaseRef => ({
+    caseId: `i8a8-conv3d-${name}`,
+    op: "i8a8-conv3d",
+    shape: `Cin64 Cout64 3x3x3 in3x8x8 out1x8x8 ${name}`,
+  });
+  /** One conv3d case: the default row and one row per candidate (bit-equal unless stated). */
+  const conv3dRows = (
+    ref: CaseRef,
+    candidates: readonly (readonly [I8a8Geometry, { speedup: number; identical?: boolean }])[],
+  ): Record<string, unknown>[] => [
+    row(ref, conv3dDefault, true),
+    ...candidates.map(([geometry, measured]) =>
+      row(ref, i8a8Candidate(geometry), false, { identical: true, ...measured }),
+    ),
+  ];
+  const WIDE: I8a8Geometry = { regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 16 };
+  const NARROW: I8a8Geometry = { regM: 4, regN: 4, wgX: 16, wgY: 16, tileK: 16 };
+  const FASTEST: I8a8Geometry = { regM: 4, regN: 4, wgX: 8, wgY: 8, tileK: 16 };
+  const MISMATCH: I8a8Geometry = { regM: 4, regN: 8, wgX: 8, wgY: 16, tileK: 16 };
+
+  it("adopts only a geometry bit-equal and at least ×1.05 on every conv3d case, the best geometric mean among those", () => {
+    const [a, b, c] = ["a", "b", "c"].map(conv3dCase);
+    const verdict = verdictOf(
+      deriveProfile(
+        [
+          source([
+            ...conv3dRows(a, [
+              [WIDE, { speedup: 1.5 }],
+              [NARROW, { speedup: 1.3 }],
+              [FASTEST, { speedup: 3 }],
+              [MISMATCH, { speedup: 4 }],
+            ]),
+            ...conv3dRows(b, [
+              [WIDE, { speedup: 1.4 }],
+              [NARROW, { speedup: 1.3 }],
+              [FASTEST, { speedup: 2 }],
+              [MISMATCH, { speedup: 4, identical: false }],
+            ]),
+            // The edge guard: FASTEST is slower than ×1.05 on one case
+            ...conv3dRows(c, [
+              [WIDE, { speedup: 1.1 }],
+              [NARROW, { speedup: 1.3 }],
+              [FASTEST, { speedup: 1.04 }],
+              [MISMATCH, { speedup: 4 }],
+            ]),
+          ]),
+        ],
+        OPTIONS,
+      ),
+      "i8a8.conv3d",
+    );
+    assertEquals(verdict.cases, [a.caseId, b.caseId, c.caseId]);
+    assert(verdict.outcome.kind === "adopted");
+    // WIDE: (1.5 · 1.4 · 1.1)^(1/3) = 1.3221 > NARROW 1.3
+    assertEquals(verdict.outcome.geometry, WIDE);
+    assertEquals(verdict.outcome.geomean.toFixed(4), Math.cbrt(1.5 * 1.4 * 1.1).toFixed(4));
+    const reason = (geometry: I8a8Geometry): string =>
+      verdict.rejected.find(({ name }) => name === i8a8Candidate(geometry).name)?.reason ?? "";
+    assertStringIncludes(reason(FASTEST), `${c.caseId}: ×1.040 < ×1.050`);
+    assertStringIncludes(reason(MISMATCH), `output differs from the default in ${b.caseId}`);
+    assertStringIncludes(reason(NARROW), "geometric mean ×1.300 (below the adopted ×1.322)");
+  });
+
+  it("keeps the default geometry when the sweeps have no conv3d case, even when other i8a8 classes adopt one", () => {
+    const linear: CaseRef = { caseId: "i8a8-linear-m64", op: "i8a8-linear", shape: "M64 N64 K64" };
+    const verdicts = deriveProfile(
+      [
+        source([
+          row(linear, i8a8Candidate(defaultI8a8Geometry("linear")), true),
+          row(linear, i8a8Candidate(WIDE), false, { speedup: 1.5, identical: true }),
+        ]),
+      ],
+      OPTIONS,
+    );
+    assertEquals(verdictOf(verdicts, "i8a8.linear").outcome.geometry, WIDE);
+    const conv3d = verdictOf(verdicts, "i8a8.conv3d");
+    assert(conv3d.outcome.kind === "default");
+    assertEquals(conv3d.outcome.geometry, defaultI8a8Geometry("conv3d"));
+    assertEquals(conv3d.outcome.reason, "the sweeps have no case of this class");
+    assertEquals(conv3d.scope, "i8a8 conv3d (w8a8 implicit GEMM)");
+  });
+
+  it("conv3d rows decide only i8a8.conv3d (a conv3d winner does not move i8a8.linear), and the table carries it", () => {
+    const ref = conv3dCase("a");
+    const sources = [source(conv3dRows(ref, [[WIDE, { speedup: 1.2 }]]))];
+    const verdicts = deriveProfile(sources, OPTIONS);
+    assertEquals(verdictOf(verdicts, "i8a8.conv3d").outcome.geometry, WIDE);
+    assertEquals(
+      verdictOf(verdicts, "i8a8.linear").outcome.geometry,
+      defaultI8a8Geometry("linear"),
+    );
+    const profile = buildGeometryProfile(
+      { id: "conv3d-only", vendor: "apple", architecture: "metal-3" },
+      sources,
+      verdicts,
+    );
+    assertEquals(profile.i8a8, { ...DEFAULT_GEOMETRY_PROFILE.i8a8, conv3d: WIDE });
+  });
+
+  it("a conv3d default row that is not the runtime's conv3d default stops the generation", () => {
+    const ref = conv3dCase("a");
+    assertThrows(
+      () =>
+        deriveProfile(
+          [
+            source([
+              row(ref, i8a8Candidate(WIDE), true),
+              row(ref, conv3dDefault, false, { speedup: 1.2, identical: true }),
+            ]),
+          ],
+          OPTIONS,
+        ),
+      Error,
+      "i8a8.conv3d: the sweep's default row",
+    );
+  });
+});
+
 describe("deriveProfile: 既定の再測定比が範囲外のケースは、その掃引の材料から外す", () => {
   const ref = linearCase(1024);
   const wide = linearCase(4096);
@@ -823,7 +945,7 @@ describe("deriveProfile: description で adapter の機種まで揃える", () =
 });
 
 describe("deriveProfile: runtime の既定プロファイルとの整合", () => {
-  it("ケースが無いクラスに書く既定: gemmRows の段はその範囲を覆う既定の段の幾何、他の欄は DEFAULT_GEOMETRY_PROFILE と同じ（14 欄・この順）", () => {
+  it("the default written for a class without cases: a gemmRows bucket gets the geometry of the default bucket covering its range, every other field DEFAULT_GEOMETRY_PROFILE's (15 fields, in this order)", () => {
     const profile = DEFAULT_GEOMETRY_PROFILE;
     // 既定の表は 3 段のまま（≤ 64 / 65〜512 / > 512 — ADR 0116 決定 3）
     assertEquals(
@@ -846,6 +968,7 @@ describe("deriveProfile: runtime の既定プロファイルとの整合", () =>
       "i8a8.linear": profile.i8a8.linear,
       "i8a8.attentionQk": profile.i8a8.attentionQk,
       "i8a8.attentionPv": profile.i8a8.attentionPv,
+      "i8a8.conv3d": profile.i8a8.conv3d,
     };
     const verdicts = deriveProfile([source([])], OPTIONS);
     assertEquals(
@@ -1227,6 +1350,7 @@ describe("buildGeometryProfile", () => {
       ["i8a8.linear", profile.i8a8.linear],
       ["i8a8.attentionQk", profile.i8a8.attentionQk],
       ["i8a8.attentionPv", profile.i8a8.attentionPv],
+      ["i8a8.conv3d", profile.i8a8.conv3d],
     ] as const;
     for (const [slot, geometry] of slots) {
       assertEquals(geometry, verdictOf(verdicts, slot).outcome.geometry, slot);

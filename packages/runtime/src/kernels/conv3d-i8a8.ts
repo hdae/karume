@@ -63,7 +63,6 @@ import { type Conv3dDims, conv3dIgemmParams } from "./conv3d.ts";
 import { CONV3D_DIMS_EXTRA, LINEAR_SCALE_BINDING } from "./gemm.ts";
 import {
   assertI8a8Geometry,
-  defaultI8a8Geometry,
   I8A8_PACK,
   i8a8AccumulatorInit,
   i8a8ASlots,
@@ -90,12 +89,6 @@ export const CONV3D_ACT_SCALE_BINDING = LINEAR_ACT_SCALE_BINDING;
  * ADR 0025's K limit applies to `Cin` — `|acci| ≤ Cin · 127 · 128`).
  */
 export const CONV3D_I8A8_MAX_CHANNELS_IN = LINEAR_I8A8_MAX_K;
-
-/**
- * The geometry this kernel runs with. The adapter profile has no conv3d field yet (ADR 0133
- * decision 5 — a sweep with the decoder's shapes adds one), so it is linear's default.
- */
-export const conv3dI8a8Geometry = (): I8a8Geometry => defaultI8a8Geometry("linear");
 
 /**
  * The geometry of the activation quantiser (the channel-major form of `quantize_rows` — ADR 0133
@@ -154,12 +147,13 @@ export const reorderConv3dWeightTapMajor = (
 /** Whether the output is written as `vec4<f32>` (four consecutive pixels of one output channel). */
 export const conv3dI8a8UsesVec4 = (pixelsOut: number): boolean => pixelsOut % I8A8_PACK === 0;
 
-/** Pipeline key (the geometry discriminator and the dot-product variant, as linear's). */
-export const conv3dI8a8Key = (
-  v4: boolean,
-  dp4a: boolean,
-  geometry: I8a8Geometry = conv3dI8a8Geometry(),
-): string => `conv3d:v1:i8a8:${i8a8GeometryKeyPart(geometry, v4)}:${dp4a ? "dp4a" : "dp4aEmu"}`;
+/**
+ * Pipeline key (the geometry discriminator and the dot-product variant, as linear's). The geometry
+ * is the adapter profile's `i8a8.conv3d` (src/kernels/geometry-profile.ts); there is no default
+ * argument, so a caller cannot run a geometry the profile did not choose.
+ */
+export const conv3dI8a8Key = (v4: boolean, dp4a: boolean, geometry: I8a8Geometry): string =>
+  `conv3d:v1:i8a8:${i8a8GeometryKeyPart(geometry, v4)}:${dp4a ? "dp4a" : "dp4aEmu"}`;
 
 /** Additive index offset (0 is omitted — keeps the output readable). */
 const at = (offset: number): string => (offset === 0 ? "" : ` + ${offset}u`);
@@ -354,11 +348,7 @@ ${writes}
   }).join("\n");
 };
 
-export const conv3dI8a8Wgsl = (
-  v4: boolean,
-  dp4a: boolean,
-  geometry: I8a8Geometry = conv3dI8a8Geometry(),
-): string => {
+export const conv3dI8a8Wgsl = (v4: boolean, dp4a: boolean, geometry: I8a8Geometry): string => {
   assertI8a8Geometry(geometry, "conv3d i8a8");
   const kPacks = i8a8KPacks(geometry);
   return `// karume conv3d (x[Cin,T,H,W] * W[Cout,Cin,Kt,Kh,Kw] + b[Cout], integer dot product of per-pixel i8 activations × i8 weights${
@@ -434,6 +424,28 @@ ${flush(geometry)}
 ${store(geometry, v4)}
 }
 `;
+};
+
+/** The GEMM kernel a conv3d i8a8 node dispatches: its store variant, pipeline key and WGSL. */
+export type Conv3dI8a8Kernel = {
+  readonly v4: boolean;
+  readonly key: string;
+  readonly wgsl: string;
+};
+
+/**
+ * The ② GEMM kernel for `dims` with `geometry` — the one place the store variant (vec4 when the
+ * output pixel count is a multiple of 4) is chosen and key and WGSL are built from it.
+ * MUST: the runtime builder (recipe-builders/conv.ts) and the sweep harness (tune/harness.ts) both
+ * take the kernel from here, so the sweep measures exactly the kernel production dispatches.
+ */
+export const conv3dI8a8Kernel = (
+  dims: Conv3dDims,
+  dp4a: boolean,
+  geometry: I8a8Geometry,
+): Conv3dI8a8Kernel => {
+  const v4 = conv3dI8a8UsesVec4(dims.timeOut * dims.heightOut * dims.widthOut);
+  return { v4, key: conv3dI8a8Key(v4, dp4a, geometry), wgsl: conv3dI8a8Wgsl(v4, dp4a, geometry) };
 };
 
 /**

@@ -20,7 +20,14 @@
  * matmul cases are **counterparts** of one linear case per bucket (same M / N / K, B side `[K,N]`);
  * `censusCount: 0` and `mirrorOf` (the case id of the linear case it mirrors) mark that they do not
  * come from the census.
+ *
+ * The conv3d w8a8 cases have another source: the VAE decoder chunk graphs of Wan2.2 TI2V-5B at
+ * 1280×704 (the containers `vae_decoder_first` / `vae_decoder_next` at tile 16 and
+ * `vae_decoder_first_32` / `vae_decoder_next_32` at tile 32 — ADR 0134), read from the graphs'
+ * static shapes. They too are copied and not read at run time ({@link CONV3D_I8A8_CASES}).
  */
+
+import type { Conv3dDims } from "../kernels/conv3d.ts";
 
 /**
  * The op families of the sweep (the vocabulary of the CLI's `--op` and the page's checkboxes — both
@@ -33,7 +40,8 @@ export type SweepOp =
   | "i8a8-linear"
   | "attention"
   | "i8a8-attention"
-  | "conv2d";
+  | "conv2d"
+  | "i8a8-conv3d";
 
 export const SWEEP_OPS: readonly SweepOp[] = [
   "linear",
@@ -43,6 +51,7 @@ export const SWEEP_OPS: readonly SweepOp[] = [
   "attention",
   "i8a8-attention",
   "conv2d",
+  "i8a8-conv3d",
 ];
 
 /**
@@ -134,7 +143,27 @@ export type Conv2dCase = {
   readonly source: string;
 };
 
-export type SweepCase = LinearCase | MatmulCase | BmmCase | AttentionCase | Conv2dCase;
+/**
+ * conv3d's w8a8 implicit GEMM (the ② dispatch of the `convCompute: "a8"` path — ADR 0133): i8
+ * tap-major weights × per-pixel i8 activations, `M = Cout`, `N = Tout·Hout·Wout`, reduced over Cin
+ * per tap. `dims` are the kernel's dims as the recipe builder passes them (B = 1).
+ */
+export type Conv3dI8a8Case = {
+  readonly id: string;
+  readonly op: "i8a8-conv3d";
+  readonly dims: Conv3dDims;
+  /** The node count of the shape in the chunk graph named by `source`. */
+  readonly censusCount: number;
+  readonly source: string;
+};
+
+export type SweepCase =
+  | LinearCase
+  | MatmulCase
+  | BmmCase
+  | AttentionCase
+  | Conv2dCase
+  | Conv3dI8a8Case;
 
 /**
  * The bucket boundaries of the geometry profile's `gemmRows` (the `maxRows` column, ADR 0116
@@ -368,6 +397,107 @@ const CONV2D_CASES: readonly Conv2dCase[] = [
   source: `vae_decoder conv2d [1,${channels},${size},${size}] × [${channels},${channels},3,3]`,
 }));
 
+/**
+ * One conv3d w8a8 shape of the Wan2.2 VAE decoder: a `k`×`k`×`k` kernel (3×3×3 with spatial
+ * padding 1 and no time padding — the causal cache frames are part of the input — or the 1×1×1
+ * shortcut), stride 1, dilation 1, groups 1.
+ */
+const conv3dCase = (shape: {
+  readonly channelsIn: number;
+  readonly channelsOut: number;
+  readonly kernel: 1 | 3;
+  readonly input: readonly [number, number, number];
+  readonly count: number;
+  readonly source: string;
+}): Conv3dI8a8Case => {
+  const { channelsIn, channelsOut, kernel, input, count, source } = shape;
+  const [timeIn, heightIn, widthIn] = input;
+  const padding = (kernel - 1) / 2;
+  const dims: Conv3dDims = {
+    channelsIn,
+    channelsOut,
+    timeIn,
+    heightIn,
+    widthIn,
+    timeOut: timeIn - kernel + 1,
+    heightOut: heightIn,
+    widthOut: widthIn,
+    kernelT: kernel,
+    kernelH: kernel,
+    kernelW: kernel,
+    strideT: 1,
+    strideH: 1,
+    strideW: 1,
+    paddingT: 0,
+    paddingH: padding,
+    paddingW: padding,
+    dilationT: 1,
+    dilationH: 1,
+    dilationW: 1,
+    groups: 1,
+  };
+  const k = `${kernel}${kernel}${kernel}`;
+  return {
+    id: `i8a8-conv3d-cin${channelsIn}-cout${channelsOut}-k${k}-in${timeIn}x${heightIn}x${widthIn}`,
+    op: "i8a8-conv3d",
+    dims,
+    censusCount: count,
+    source: `${source} conv3d [${channelsIn},${timeIn},${heightIn},${widthIn}] × [${channelsOut},${channelsIn},${kernel},${kernel},${kernel}] (${count} nodes)`,
+  };
+};
+
+/** The six heavy 3×3×3 shapes of one decoder tile edge (16 or 32 latent pixels). */
+const heavyConv3dShapes = (tile: 16 | 32) => {
+  const next = tile === 16 ? "vae_decoder_next" : "vae_decoder_next_32";
+  const both =
+    tile === 16
+      ? "vae_decoder_first / vae_decoder_next"
+      : "vae_decoder_first_32 / vae_decoder_next_32";
+  return [
+    { channelsIn: 256, channelsOut: 256, input: [6, 8 * tile, 8 * tile], count: 5, source: next },
+    { channelsIn: 512, channelsOut: 512, input: [6, 4 * tile, 4 * tile], count: 5, source: next },
+    { channelsIn: 1024, channelsOut: 1024, input: [4, 2 * tile, 2 * tile], count: 6, source: next },
+    { channelsIn: 1024, channelsOut: 1024, input: [3, tile, tile], count: 10, source: both },
+    { channelsIn: 1024, channelsOut: 512, input: [6, 4 * tile, 4 * tile], count: 1, source: next },
+    { channelsIn: 512, channelsOut: 256, input: [6, 8 * tile, 8 * tile], count: 1, source: next },
+  ] as const;
+};
+
+/**
+ * The conv3d w8a8 cases (ADR 0115 addendum 2026-10-26). One geometry serves every conv3d shape, so
+ * the cases are the shapes that decide its time plus the edges that could hide a regression:
+ *
+ * - The six heavy 3×3×3 shapes of the default tile-16 decoder — about 93% of its conv3d time per
+ *   tile (a recon tally at the default geometry, one first chunk and eight next chunks).
+ * - Two edge guards of the tile-16 decoder: the 12-channel `conv_out` (the smallest Cout) and one
+ *   1×1×1 shortcut (the 512×1024 one at 4×64², where the recon's best geometry had its smallest
+ *   gain).
+ * - The six heavy 3×3×3 shapes of the tile-32 pair (ADR 0134 — 4× the pixels per tile).
+ *
+ * Where the first and next chunks differ, the shape is the next chunk's (it runs for every chunk
+ * after the first). `censusCount` is the node count in that graph.
+ */
+const CONV3D_I8A8_CASES: readonly Conv3dI8a8Case[] = [
+  ...heavyConv3dShapes(16).map((shape) => conv3dCase({ ...shape, kernel: 3 })),
+  conv3dCase({
+    channelsIn: 256,
+    channelsOut: 12,
+    kernel: 3,
+    input: [6, 128, 128],
+    count: 1,
+    source: "vae_decoder_next",
+  }),
+  conv3dCase({
+    channelsIn: 1024,
+    channelsOut: 512,
+    kernel: 1,
+    input: [4, 64, 64],
+    count: 1,
+    source: "vae_decoder_next",
+  }),
+  ...heavyConv3dShapes(32).map((shape) => conv3dCase({ ...shape, kernel: 3 })),
+];
+
 /** Every case (in op-family order = {@link SWEEP_OPS}). */
 export const SWEEP_CASES: readonly SweepCase[] = [
   ...LINEAR_CASES.filter((c) => c.op === "linear"),
@@ -378,6 +508,7 @@ export const SWEEP_CASES: readonly SweepCase[] = [
   ...ATTENTION_CASES.filter((c) => c.op === "attention"),
   ...ATTENTION_CASES.filter((c) => c.op === "i8a8-attention"),
   ...CONV2D_CASES,
+  ...CONV3D_I8A8_CASES,
 ];
 
 /**
@@ -401,6 +532,14 @@ export const caseFlops = (sweepCase: SweepCase): number => {
       return (
         2 * sweepCase.channelsOut * sweepCase.height * sweepCase.width * sweepCase.channelsIn * 9
       );
+    case "i8a8-conv3d": {
+      // As implicit GEMM (M = Cout, N = Tout·Hout·Wout, K = Cin·Kt·Kh·Kw — out-of-range taps are
+      // counted too)
+      const { dims } = sweepCase;
+      const pixelsOut = dims.timeOut * dims.heightOut * dims.widthOut;
+      const taps = dims.kernelT * dims.kernelH * dims.kernelW;
+      return 2 * dims.channelsOut * pixelsOut * dims.channelsIn * taps;
+    }
   }
 };
 
@@ -422,5 +561,12 @@ export const caseShape = (sweepCase: SweepCase): string => {
       return `${sweepCase.stage} BH${sweepCase.batchHeads} M${sweepCase.m} N${sweepCase.n} D${sweepCase.d}`;
     case "conv2d":
       return `Cin${sweepCase.channelsIn} Cout${sweepCase.channelsOut} ${sweepCase.height}x${sweepCase.width} 3x3`;
+    case "i8a8-conv3d": {
+      const { dims } = sweepCase;
+      const kernel = `${dims.kernelT}x${dims.kernelH}x${dims.kernelW}`;
+      const input = `in${dims.timeIn}x${dims.heightIn}x${dims.widthIn}`;
+      const output = `out${dims.timeOut}x${dims.heightOut}x${dims.widthOut}`;
+      return `Cin${dims.channelsIn} Cout${dims.channelsOut} ${kernel} ${input} ${output}`;
+    }
   }
 };

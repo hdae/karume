@@ -6,12 +6,23 @@
  * count (a different geometry's, or one workgroup per 256 pixels) gives the same values on every
  * GPU test and shows only in timing — the small-P starvation the geometry rule exists to avoid.
  * This pins the count to the geometry in the key.
+ *
+ * The GEMM's tile geometry is the Session's profile's `i8a8.conv3d` (ADR 0115 addendum 2026-10-26).
+ * A geometry that only one of key, WGSL and grid followed would give a key that lies about the
+ * kernel, or output tiles left unwritten, so the three are checked against an injected profile.
  */
 
 import { describe, it } from "vite-plus/test";
 import { assertEquals, assertNotEquals } from "@std/assert";
 import { gridStrideWorkgroups } from "../src/codegen/dispatch.ts";
-import { CONV3D_I8A8_QUANTIZE_GEOMETRY } from "../src/kernels/conv3d-i8a8.ts";
+import {
+  CONV3D_I8A8_QUANTIZE_GEOMETRY,
+  conv3dI8a8Key,
+  conv3dI8a8UsesVec4,
+  conv3dI8a8Wgsl,
+} from "../src/kernels/conv3d-i8a8.ts";
+import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../src/kernels/geometry-profile.ts";
+import type { I8a8Geometry } from "../src/kernels/i8a8-geometry.ts";
 import {
   QUANTIZE_ROWS_WORKGROUP_SIZE,
   quantizeRowsChannelMajorKey,
@@ -25,8 +36,11 @@ import { mergeGraph } from "./helpers/merged-graph.ts";
 import type { DeclarationJson } from "./helpers/model-fixture.ts";
 
 /** One `conv3d(x, w, b)` node, 1×1×1, `x` = [channelsIn, ...input]. */
-const conv3dNode = (channelsIn: number, input: readonly [number, number, number]): NodePlan => {
-  const channelsOut = 8;
+const conv3dNode = (
+  channelsIn: number,
+  input: readonly [number, number, number],
+  channelsOut = 8,
+): NodePlan => {
   const xShape = [channelsIn, ...input];
   const declaration: DeclarationJson = {
     format: "karume-ir",
@@ -57,18 +71,27 @@ const conv3dNode = (channelsIn: number, input: readonly [number, number, number]
 
 /**
  * The surface the conv3d builder reads, with the weight flagged tap-major (the w8a8 path). GPU
- * objects are opaque placeholders: the builder only passes them through to the recipe.
+ * objects are opaque placeholders: the builder only passes them through to the recipe. The pipeline
+ * cache records the WGSL of every key it is asked for in `compiled`.
  */
-const w8a8Face = (limit: number): RecipeBuildFace => {
+const w8a8Face = (
+  limit: number,
+  geometryProfile: GeometryProfile = DEFAULT_GEOMETRY_PROFILE,
+  compiled: Map<string, string> = new Map(),
+): RecipeBuildFace => {
   const opaque = {};
   const face = {
     state: {
       gpu: { limits: { maxComputeWorkgroupsPerDimension: limit } },
       cache: {
-        get: async () => ({ pipeline: opaque, layout: opaque, roles: opaque }),
+        get: async (key: string, wgsl: string) => {
+          compiled.set(key, wgsl);
+          return { pipeline: opaque, layout: opaque, roles: opaque };
+        },
       },
       convCompute: "a8",
       linearI8a8Dot: "dp4a",
+      geometryProfile,
     },
     writeParams: () => opaque,
     weightStorage: () => "i8",
@@ -133,5 +156,69 @@ describe("conv3d w8a8 recipe: the quantiser's workgroup count", () => {
   it("clamps to the device's per-dimension limit (the kernel grid-strides over the rest)", async () => {
     const { workgroups } = await quantiserWorkgroups(1024, [3, 16, 16], 40);
     assertEquals(workgroups, [40, 1, 1]);
+  });
+});
+
+/** The integer dot-product GEMM (the second dispatch) of one node under `profile`. */
+const gemmUnder = async (
+  profile: GeometryProfile,
+  channelsIn: number,
+  input: readonly [number, number, number],
+  channelsOut: number,
+): Promise<{
+  readonly key: string;
+  readonly wgsl: string | undefined;
+  readonly workgroups: unknown;
+}> => {
+  const builder = new StepRecipeBuilder();
+  const compiled = new Map<string, string>();
+  await buildConv3d(
+    w8a8Face(65535, profile, compiled),
+    conv3dNode(channelsIn, input, channelsOut),
+    [
+      { kind: "value", name: "x" },
+      { kind: "value", name: "w" },
+      { kind: "value", name: "b" },
+    ],
+    [{ kind: "value", name: "y" }],
+    builder,
+  );
+  assertEquals(builder.dispatches.length, 2, "one node = quantiser + GEMM");
+  const gemm = builder.dispatches[1];
+  return { key: gemm.key, wgsl: compiled.get(gemm.key), workgroups: gemm.workgroups };
+};
+
+const profileWith = (conv3d: I8a8Geometry): GeometryProfile => ({
+  ...DEFAULT_GEOMETRY_PROFILE,
+  id: "conv3d-injected",
+  i8a8: { ...DEFAULT_GEOMETRY_PROFILE.i8a8, conv3d },
+});
+
+describe("conv3d w8a8 recipe: the GEMM's geometry is the profile's i8a8.conv3d", () => {
+  // Cout 200 over P = 3·16·16 = 768 output pixels: every geometry below gives another grid
+  const [channelsIn, input, channelsOut] = [64, [3, 16, 16], 200] as const;
+  const pixels = input[0] * input[1] * input[2];
+
+  it("key, WGSL and grid all follow the injected geometry (two non-default geometries and the default)", async () => {
+    for (const [geometry, grid] of [
+      // The default (tile 128×64): [ceil(768 / 64), ceil(200 / 128), 1]
+      [DEFAULT_GEOMETRY_PROFILE.i8a8.conv3d, [12, 2, 1]],
+      // tile 64×64 (r8×4 wg16×8 — nvidia-ampere's i8a8.linear)
+      [{ regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 16 }, [12, 4, 1]],
+      // tile 32×32 (r4×4 wg8×8)
+      [{ regM: 4, regN: 4, wgX: 8, wgY: 8, tileK: 16 }, [24, 7, 1]],
+    ] as const) {
+      const where = JSON.stringify(geometry);
+      const v4 = conv3dI8a8UsesVec4(pixels);
+      const gemm = await gemmUnder(profileWith(geometry), channelsIn, input, channelsOut);
+      assertEquals(gemm.key, conv3dI8a8Key(v4, true, geometry), where);
+      assertEquals(gemm.wgsl, conv3dI8a8Wgsl(v4, true, geometry), where);
+      assertEquals(gemm.workgroups, grid, where);
+    }
+  });
+
+  it("DEFAULT_GEOMETRY_PROFILE in the build face gives the default-geometry key a default machine has always had", async () => {
+    const gemm = await gemmUnder(DEFAULT_GEOMETRY_PROFILE, channelsIn, input, channelsOut);
+    assertEquals(gemm.key, "conv3d:v1:i8a8:tile128x64r8x8w8x16k16v4:dp4a");
   });
 });

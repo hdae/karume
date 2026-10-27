@@ -69,7 +69,7 @@
  * `PROFILE_GEMM_ROWS_BOUNDS` of the sweep's shape table = ≤ 16 / 17–32 / 33–64 / 65–128 / 129–256 /
  * 257–512 / > 512 — seven buckets refining the default table `GEMM_ROWS_BUCKETS`'s 64 / 512 / ∞,
  * ADR 0116), fused attention's ①QK / ③PV, conv2d's m tile of 64 / 32 rows (the default row's
- * tileM), and i8a8's linear / ①QK / ③PV. A class with no case in the sweep gets the runtime's
+ * tileM), and i8a8's linear / ①QK / ③PV / conv3d. A class with no case in the sweep gets the runtime's
  * default as is (the reason is left in the generated file's comment). A gemmRows bucket's default
  * is the geometry of the default table's bucket covering its range ({@link profileRowsSegments}).
  */
@@ -257,7 +257,8 @@ const isRounds = (value: unknown): value is readonly number[] =>
 const isSweepOp = (value: unknown): value is SweepOp =>
   typeof value === "string" && (SWEEP_OPS as readonly string[]).includes(value);
 
-const isI8a8Op = (op: SweepOp): boolean => op === "i8a8-linear" || op === "i8a8-attention";
+const isI8a8Op = (op: SweepOp): boolean =>
+  op === "i8a8-linear" || op === "i8a8-attention" || op === "i8a8-conv3d";
 
 /**
  * The geometry fields (4 values for the f32 family, 5 including tileK for the i8a8 family — a wrong
@@ -560,7 +561,8 @@ export type ProfileSlot =
   | "conv2d.rows32"
   | "i8a8.linear"
   | "i8a8.attentionQk"
-  | "i8a8.attentionPv";
+  | "i8a8.attentionPv"
+  | "i8a8.conv3d";
 
 type SlotSpec = {
   readonly slot: ProfileSlot;
@@ -701,6 +703,11 @@ const FIXED_SLOTS: readonly SlotSpec[] = [
     scope: "i8a8 attention ③PV",
     fallback: () => i8a8Candidate(defaultI8a8Geometry("attention_pv")),
   },
+  {
+    slot: "i8a8.conv3d",
+    scope: "i8a8 conv3d (w8a8 implicit GEMM)",
+    fallback: () => i8a8Candidate(defaultI8a8Geometry("conv3d")),
+  },
 ];
 
 /**
@@ -774,6 +781,8 @@ const slotOf = (
       return "i8a8.linear";
     case "i8a8-attention":
       return attentionStage(row, where) === "qk" ? "i8a8.attentionQk" : "i8a8.attentionPv";
+    case "i8a8-conv3d":
+      return "i8a8.conv3d";
   }
 };
 
@@ -1378,6 +1387,7 @@ export const buildGeometryProfile = (
       linear: i8a8Slot(verdicts, "i8a8.linear"),
       attentionQk: i8a8Slot(verdicts, "i8a8.attentionQk"),
       attentionPv: i8a8Slot(verdicts, "i8a8.attentionPv"),
+      conv3d: i8a8Slot(verdicts, "i8a8.conv3d"),
     },
   };
   const { vendor, architecture, device, description } = sources[0].adapter;

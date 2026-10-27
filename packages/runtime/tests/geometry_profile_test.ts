@@ -83,6 +83,7 @@ import {
 } from "../src/kernels/attention.ts";
 import { conv2dIgemmKey, conv2dIgemmWgsl } from "../src/kernels/conv2d.ts";
 import { linearI8a8Key, linearI8a8Wgsl } from "../src/kernels/linear-i8a8.ts";
+import { conv3dI8a8Key, conv3dI8a8Wgsl } from "../src/kernels/conv3d-i8a8.ts";
 import {
   attentionPvI8a8Key,
   attentionPvI8a8Wgsl,
@@ -451,7 +452,96 @@ describe("DEFAULT_GEOMETRY_PROFILE は既存の選択と同じ値", () => {
       linear: defaultI8a8Geometry("linear"),
       attentionQk: defaultI8a8Geometry("attention_qk"),
       attentionPv: defaultI8a8Geometry("attention_pv"),
+      conv3d: defaultI8a8Geometry("conv3d"),
     });
+  });
+});
+
+// The conv3d w8a8 field (ADR 0115 addendum 2026-10-26). Before it existed, conv3d ran linear's
+// default geometry whatever the adapter; the default profile keeps that geometry, so a machine
+// without a matching table sees the same key and WGSL as before.
+describe("i8a8.conv3d: the conv3d w8a8 geometry is a required profile field", () => {
+  it("the default profile's conv3d is the geometry conv3d ran before the field (M128N64 r8×8 wg8×16 K16) — key and WGSL unchanged", () => {
+    const geometry = DEFAULT_GEOMETRY_PROFILE.i8a8.conv3d;
+    assertEquals(geometry, { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 16 });
+    assertEquals(geometry, defaultI8a8Geometry("linear"));
+    assertEquals(
+      conv3dI8a8Key(true, true, geometry),
+      "conv3d:v1:i8a8:tile128x64r8x8w8x16k16v4:dp4a",
+    );
+    assertEquals(
+      conv3dI8a8Key(false, false, geometry),
+      "conv3d:v1:i8a8:tile128x64r8x8w8x16k16:dp4aEmu",
+    );
+    // The WGSL of the default profile is the one built from linear's default geometry (the
+    // codegen snapshots conv3d_i8a8*.wgsl freeze its bytes)
+    assertEquals(
+      conv3dI8a8Wgsl(true, true, geometry),
+      conv3dI8a8Wgsl(true, true, defaultI8a8Geometry("linear")),
+    );
+  });
+
+  it("a table without i8a8.conv3d, or with a broken one, is rejected naming the field (selection and injection)", async () => {
+    const { conv3d: _conv3d, ...withoutConv3d } = DEFAULT_GEOMETRY_PROFILE.i8a8;
+    const missing = { ...OPT_IN, id: "no-conv3d", i8a8: withoutConv3d };
+    assertThrows(
+      () => assertGeometryProfile(missing),
+      CodegenError,
+      "i8a8.conv3d is not an object",
+    );
+    const broken = profileOf(
+      "conv3d-hole",
+      { vendor: "test" },
+      {
+        i8a8: {
+          ...DEFAULT_GEOMETRY_PROFILE.i8a8,
+          conv3d: { regM: 8, regN: 8, wgX: 16, wgY: 8, tileK: 6 },
+        },
+      },
+    );
+    assertThrows(
+      () => selectGeometryProfile({ vendor: "test", architecture: "" }, [broken]),
+      CodegenError,
+      "i8a8.conv3d",
+    );
+    const requests = await withCountingGpu(async () => {
+      await assertRejects(
+        () => acquireGpu({ geometryProfile: broken }),
+        GpuFeatureError,
+        "i8a8.conv3d",
+      );
+    });
+    assertEquals(requests, 0, "a broken conv3d geometry reached requestDevice");
+  });
+
+  it("the limit guard checks i8a8.conv3d and names it", () => {
+    const profile = profileOf("conv3d-storage", undefined, {
+      i8a8: { ...DEFAULT_GEOMETRY_PROFILE.i8a8, conv3d: I8A8_STORAGE_32K },
+    });
+    assertThrows(
+      () => assertGeometryProfileWithinLimits(profile, WEBGPU_DEFAULT_LIMITS),
+      CodegenError,
+      "i8a8.conv3d (regM=8 regN=8 wgX=16 wgY=16 tileK=128): shared memory (bytes) 32768 exceeds maxComputeWorkgroupStorageSize 16384",
+    );
+    assertGeometryProfileWithinLimits(profile, {
+      ...WEBGPU_DEFAULT_LIMITS,
+      maxComputeWorkgroupStorageSize: 32_768,
+    });
+  });
+
+  it("every embedded table carries i8a8.conv3d, and selection returns it", () => {
+    for (const source of [APPLE_METAL_3, NVIDIA_AMPERE, NVIDIA_BLACKWELL]) {
+      const { match } = source;
+      assert(match?.vendor !== undefined, source.id);
+      const selected = selectGeometryProfile({
+        vendor: match.vendor,
+        architecture: match.architecture ?? "",
+        ...(match.description === undefined ? {} : { description: match.description }),
+      });
+      assertEquals(selected.id, source.id);
+      assertEquals(selected.i8a8.conv3d, source.i8a8.conv3d, source.id);
+      assert(Object.isFrozen(selected.i8a8.conv3d), `${source.id}: conv3d is not frozen`);
+    }
   });
 });
 
@@ -1582,12 +1672,13 @@ describe("共有メモリの導出（純関数）は codegen の var<workgroup> 
     }
   });
 
-  it("i8a8（linear・融合 attention ①QK / ③PV — 変数ごとの 16 バイト切り上げを含む）", () => {
+  it("i8a8 (linear, fused attention ①QK / ③PV and conv3d — including the per-variable 16-byte round-up)", () => {
     for (const geometry of SAMPLE_I8A8) {
       for (const [name, wgsl] of [
         ["linear", linearI8a8Wgsl(true, true, geometry)],
         ["attention_qk", attentionQkI8a8Wgsl(true, true, "f32", geometry)],
         ["attention_pv", attentionPvI8a8Wgsl(true, true, "f32", geometry)],
+        ["conv3d", conv3dI8a8Wgsl(true, true, geometry)],
       ] as const) {
         assertEquals(
           i8a8WorkgroupStorageBytes(geometry),

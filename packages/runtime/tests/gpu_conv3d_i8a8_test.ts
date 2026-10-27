@@ -23,11 +23,12 @@ import { type Conv3dDims, conv3dIgemmKey, conv3dUsesVec4 } from "../src/kernels/
 import {
   CONV3D_I8A8_QUANTIZE_GEOMETRY,
   conv3dI8a8Eligible,
-  conv3dI8a8Geometry,
   conv3dI8a8Key,
   conv3dI8a8UsesVec4,
 } from "../src/kernels/conv3d-i8a8.ts";
 import { conv2dIgemmMTile } from "../src/kernels/conv2d.ts";
+import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../src/kernels/geometry-profile.ts";
+import type { I8a8Geometry } from "../src/kernels/i8a8-geometry.ts";
 import { quantizeRowsChannelMajorKey } from "../src/kernels/quantize-rows.ts";
 import { referenceConv3dI8a8 } from "../src/reference/conv3d-i8a8.ts";
 import { quantizeRowsTieMargin } from "../src/reference/i8a8.ts";
@@ -37,6 +38,7 @@ import {
   type SessionOptions,
   type Tensor,
 } from "../src/runtime/executor.ts";
+import { sessionGeometryProfile } from "../src/runtime/session-build.ts";
 import type { TensorInput } from "./helpers/container-write.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
@@ -327,7 +329,7 @@ const run = async (
   gpu: GpuContext,
   prepared: Prepared,
   options: SessionOptions,
-): Promise<{ readonly y: Tensor; readonly keys: string[] }> => {
+): Promise<{ readonly y: Tensor; readonly keys: string[]; readonly profile: string }> => {
   const session = await createSessionFromContainer(gpu, await prepared.model, GRAPH_NAME, options);
   try {
     const outputs = await session.run({ x: prepared.x });
@@ -336,6 +338,7 @@ const run = async (
       keys: requireCensus(session.diagnostics().lastRunPipelines, "conv3d")
         .map((row) => row.key)
         .sort(),
+      profile: session.diagnostics().geometryProfile,
     };
   } finally {
     await session.dispose();
@@ -344,17 +347,30 @@ const run = async (
 
 /**
  * The two keys that must run (per-pixel quantisation read straight from the channel-major input →
- * the integer dot-product implicit GEMM; no transposing copy — ADR 0133 addendum 2026-10-26).
+ * the integer dot-product implicit GEMM; no transposing copy — ADR 0133 addendum 2026-10-26). The
+ * GEMM's geometry is the Session's profile's `i8a8.conv3d` (ADR 0115 addendum 2026-10-26).
  */
-const expectedKeys = (dims: Conv3dDims, dp4a: boolean): string[] =>
+const expectedKeys = (dims: Conv3dDims, dp4a: boolean, geometry: I8a8Geometry): string[] =>
   [
     quantizeRowsChannelMajorKey(CONV3D_I8A8_QUANTIZE_GEOMETRY),
     conv3dI8a8Key(
       conv3dI8a8UsesVec4(dims.timeOut * dims.heightOut * dims.widthOut),
       dp4a,
-      conv3dI8a8Geometry(),
+      geometry,
     ),
   ].sort();
+
+/**
+ * The conv3d geometry the Session behind `ran` used: taken from the one selection path
+ * (`sessionGeometryProfile` — the injected table, otherwise the embedded one for the adapter), and
+ * checked against the profile id that Session reports, so the expected key follows whatever table
+ * the Session actually ran.
+ */
+const ranConv3dGeometry = (gpu: GpuContext, ran: { readonly profile: string }): I8a8Geometry => {
+  const profile = sessionGeometryProfile(gpu);
+  assertEquals(ran.profile, profile.id, "the profile the Session reports");
+  return profile.i8a8.conv3d;
+};
 
 test.skipIf(!GPU_AVAILABLE)(
   "convCompute:'a8' の conv3d が TS 鏡像と atol=0 で一致する（chunk の縮小形 / タイル端 / K 端数 / 3 軸 padding / stride / dilation・実 GPU）",
@@ -379,7 +395,11 @@ test.skipIf(!GPU_AVAILABLE)(
         assertExact(actual.y.data, prepared.expected, testCase.name);
         // 恒真化の門: 出力が定数なら「一致」は何も検証していない
         assert(new Set([...actual.y.data]).size > 1, `${testCase.name}: 出力が定数`);
-        assertEquals(actual.keys, expectedKeys(dims, true), `${testCase.name}: 走ったキー`);
+        assertEquals(
+          actual.keys,
+          expectedKeys(dims, true, ranConv3dGeometry(gpu, actual)),
+          `${testCase.name}: the keys that ran`,
+        );
       }
     } finally {
       gpu.destroy();
@@ -399,7 +419,7 @@ test.skipIf(!GPU_AVAILABLE)(
           const actual = await run(gpu, prepared, { convCompute: "a8", [I8A8_DOT]: dot });
           assertEquals(
             actual.keys,
-            expectedKeys(prepared.dims, dot === "dp4a"),
+            expectedKeys(prepared.dims, dot === "dp4a", ranConv3dGeometry(gpu, actual)),
             `${testCase.name}: ${dot} のキー`,
           );
           results[dot] = actual.y;
@@ -409,6 +429,43 @@ test.skipIf(!GPU_AVAILABLE)(
       }
     } finally {
       gpu.destroy();
+    }
+  },
+);
+
+/**
+ * A non-default conv3d geometry: K tile 32 (so Cin % 32 != 0 leaves a K tail inside a tap) and a
+ * 64×64 tile with 4×8 outputs per thread — differs from the default and from every embedded table.
+ */
+const ALTERNATE_CONV3D: I8a8Geometry = { regM: 4, regN: 8, wgX: 8, wgY: 16, tileK: 32 };
+
+const withConv3d = (geometry: I8a8Geometry): GeometryProfile => ({
+  ...DEFAULT_GEOMETRY_PROFILE,
+  id: "conv3d-alternate",
+  i8a8: { ...DEFAULT_GEOMETRY_PROFILE.i8a8, conv3d: geometry },
+});
+
+test.skipIf(!GPU_AVAILABLE)(
+  "conv3d i8a8 runs the injected profile's i8a8.conv3d: the default and a non-default geometry both match the TS mirror at atol=0 under their own key (real GPU)",
+  async () => {
+    for (const profile of [DEFAULT_GEOMETRY_PROFILE, withConv3d(ALTERNATE_CONV3D)]) {
+      const gpu = await acquireGpu({ geometryProfile: profile });
+      try {
+        for (const testCase of CASES) {
+          const prepared = prepare(testCase);
+          const where = `${profile.id} ${testCase.name}`;
+          const actual = await run(gpu, prepared, { convCompute: "a8" });
+          assertExact(actual.y.data, prepared.expected, where);
+          assertEquals(actual.profile, profile.id, `${where}: the profile the Session reports`);
+          assertEquals(
+            actual.keys,
+            expectedKeys(prepared.dims, true, profile.i8a8.conv3d),
+            `${where}: the keys that ran`,
+          );
+        }
+      } finally {
+        gpu.destroy();
+      }
     }
   },
 );

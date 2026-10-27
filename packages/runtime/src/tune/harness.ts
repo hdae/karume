@@ -119,6 +119,11 @@ import {
   conv2dIgemmWgsl,
   conv2dUsesVec4,
 } from "../kernels/conv2d.ts";
+import {
+  conv3dI8a8Kernel,
+  conv3dI8a8Params,
+  conv3dI8a8Workgroups,
+} from "../kernels/conv3d-i8a8.ts";
 import { scoreStorageBytes } from "../kernels/score-storage.ts";
 import { calibrateReps, TARGET_PASS_MS, WARMUP_MIN_RUNS, WARMUP_NS } from "./measurement.ts";
 import {
@@ -127,6 +132,7 @@ import {
   caseFlops,
   caseShape,
   type Conv2dCase,
+  type Conv3dI8a8Case,
   type LinearCase,
   type MatmulCase,
   type SweepCase,
@@ -668,6 +674,52 @@ const conv2dPlan = (sweepCase: Conv2dCase, limit: number): CasePlan => {
 };
 
 /**
+ * conv3d's w8a8 implicit GEMM (i8 tap-major weights, per-channel scale) — the ② GEMM of
+ * src/runtime/recipe-builders/conv.ts buildConv3dI8a8.
+ */
+const i8a8Conv3dPlan = (sweepCase: Conv3dI8a8Case, limit: number, dp4a: boolean): CasePlan => {
+  const { dims } = sweepCase;
+  const pixelsIn = dims.timeIn * dims.heightIn * dims.widthIn;
+  const pixelsOut = dims.timeOut * dims.heightOut * dims.widthOut;
+  const taps = dims.kernelT * dims.kernelH * dims.kernelW;
+  return {
+    resources: [
+      // The per-pixel quantised activations xq ([P_in][Cin/4] words, four i8 packed per word) and
+      // the per-pixel scale xs (the temporaries of conv.ts buildConv3dI8a8). In production the
+      // channel-major quantize_rows makes them — here values of the same format (±127) are written
+      // directly (① has no geometry, so it is outside the sweep)
+      { name: "xq", bytes: pixelsIn * (dims.channelsIn / 4) * 4, fill: "i8" },
+      { name: "xscale", bytes: pixelsIn * F32, fill: "scale" },
+      // The i8 tap-major weights [Cout][taps][Cin] (a raw-byte class — the order inside a row does
+      // not change the timing or the bits) and the per-channel scale [Cout]
+      { name: "w", bytes: rawWeightBytes(dims.channelsOut * taps * dims.channelsIn), fill: "i8" },
+      { name: "wscale", bytes: dims.channelsOut * F32, fill: "scale" },
+      { name: "bias", bytes: dims.channelsOut * F32, fill: "f32" },
+      { name: "out", bytes: dims.channelsOut * pixelsOut * F32, fill: "none" },
+    ],
+    prelude: [],
+    output: "out",
+    // The sweep's default = the default profile's conv3d geometry (the ratio baseline)
+    defaultCandidate: i8a8Candidate(defaultI8a8Geometry("conv3d")),
+    launch: (candidate) => {
+      const geometry = i8a8Of(candidate, sweepCase.id);
+      // The kernel conv.ts buildConv3dI8a8 dispatches (store variant, key and WGSL from one place)
+      const { key, wgsl } = conv3dI8a8Kernel(dims, dp4a, geometry);
+      return {
+        key,
+        wgsl,
+        params: conv3dI8a8Params(dims),
+        // conv.ts buildConv3dI8a8: xq, w, bias, out, wscale (CONV3D_SCALE_BINDING), xs
+        // (CONV3D_ACT_SCALE_BINDING)
+        bindings: ["xq", "w", "bias", "out", "wscale", "xscale"],
+        writes: ["out"],
+        workgroups: conv3dI8a8Workgroups(dims, geometry, limit, sweepCase.id),
+      };
+    },
+  };
+};
+
+/**
  * A case's resource table, prelude and per-candidate dispatch (the tests take the resource order
  * and contents from here).
  */
@@ -687,6 +739,8 @@ export const casePlan = (sweepCase: SweepCase, limit: number, dp4a: boolean): Ca
       return i8a8AttentionPlan(sweepCase, limit, dp4a);
     case "conv2d":
       return conv2dPlan(sweepCase, limit);
+    case "i8a8-conv3d":
+      return i8a8Conv3dPlan(sweepCase, limit, dp4a);
   }
 };
 
@@ -705,6 +759,7 @@ export const candidatesFor = (sweepCase: SweepCase, set: CandidateSet): Geometry
       return conv2dCandidatesIn(set);
     case "i8a8-linear":
     case "i8a8-attention":
+    case "i8a8-conv3d":
       return i8a8CandidatesIn(set);
   }
 };

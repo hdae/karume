@@ -52,6 +52,12 @@ describe("parseGeometryProfileJson: geometryProfileJson との往復", () => {
     ["生成器の表", generated],
     ["注入専用の表（match 無し）", optIn],
   ];
+  it("i8a8.conv3d survives the round trip with its own value (not the default)", () => {
+    const conv3d = { regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 16 };
+    const profile = { ...BASE, i8a8: { ...BASE.i8a8, conv3d } };
+    assertEquals(parseGeometryProfileJson(geometryProfileJson(profile)).i8a8.conv3d, conv3d);
+  });
+
   for (const [name, profile] of cases) {
     it(`${name}は同じ構造に戻り、末尾の maxRows は Infinity`, () => {
       const parsed = parseGeometryProfileJson(geometryProfileJson(profile));
@@ -196,6 +202,18 @@ describe("parseGeometryProfileJson: 型の誤りと欠落", () => {
       "i8a8 is missing fields attentionQk, attentionPv",
     ],
     [
+      "a table from before i8a8.conv3d (the field is required — ADR 0115 addendum 2026-10-26)",
+      {
+        ...BASE,
+        i8a8: {
+          linear: BASE.i8a8.linear,
+          attentionQk: BASE.i8a8.attentionQk,
+          attentionPv: BASE.i8a8.attentionPv,
+        },
+      },
+      "i8a8 is missing fields conv3d",
+    ],
+    [
       "表の欄が無い",
       { id: "x", gemmRows: BASE.gemmRows },
       "top level is missing fields attention, conv2d, i8a8",
@@ -260,6 +278,11 @@ describe("parseGeometryProfileJson: 最後に runtime の注入の門（assertGe
       "description must be given together with both vendor and architecture",
     ],
     ["空の id", { ...BASE, id: "" }, "id is empty"],
+    [
+      "a conv3d geometry that breaks the divisibility conditions",
+      { ...BASE, i8a8: { ...BASE.i8a8, conv3d: { regM: 8, regN: 6, wgX: 16, wgY: 8, tileK: 16 } } },
+      "i8a8.conv3d",
+    ],
   ];
   for (const [name, value, message] of cases) {
     it(`${name}は門の文言のまま GeometryProfileParseError で拒む（cause は門の CodegenError）`, () => {

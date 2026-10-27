@@ -1,12 +1,12 @@
 /**
- * The **tile-geometry parameter surface** shared by the i8a8 GEMM family (linear and ①QK / ③PV of
- * fused attention).
+ * The **tile-geometry parameter surface** shared by the i8a8 GEMM family (linear, ①QK / ③PV of
+ * fused attention, and the w8a8 implicit GEMM of conv3d).
  *
- * The 3 kernels do not share a generator (their differences are scattered in places that fragment
+ * The kernels do not share a generator (their differences are scattered in places that fragment
  * insertion cannot absorb — the docstring of src/kernels/linear-i8a8.ts), but **the geometry
  * arithmetic and the inner-product loop live only here, in one place**. Copying the geometry into
  * constants in each file would let the index arithmetic of `sa` / `sb` (pack stride, thread
- * assignment of the fill) diverge three ways, so that one of them breaks silently.
+ * assignment of the fill) diverge between the kernels, so that one of them breaks silently.
  *
  * ```
  * tileM = regM · wgY   (rows of output one workgroup holds)
@@ -46,7 +46,7 @@ export const I8A8_PACK = 4;
  * The unit a geometry is chosen for. **Matches the op field of the key** (so that a reader of
  * diagnostics can map one to the other).
  */
-type I8a8GemmOp = "linear" | "attention_qk" | "attention_pv";
+type I8a8GemmOp = "linear" | "attention_qk" | "attention_pv" | "conv3d";
 
 /**
  * Generation parameters. The output tile edges are **derived** as `regM · wgY` × `regN · wgX`
@@ -98,7 +98,7 @@ const U32_BYTES = 4;
 /**
  * Bytes of workgroup storage used by the shared tiles sa (`kPacks · tileM` words) + sb
  * (`kPacks · tileN` words) (the amount WebGPU compares with `maxComputeWorkgroupStorageSize` —
- * {@link workgroupVariableBytes}). linear and ①QK / ③PV of fused attention all have the same 2
+ * {@link workgroupVariableBytes}). linear, ①QK / ③PV of fused attention and conv3d all have the same 2
  * declarations, so it does not depend on the op.
  * MUST: the same expression as the generator's `var<workgroup>` declarations
  * (tests/geometry_profile_test.ts compares it with the total counted from the WGSL declarations) —
@@ -189,7 +189,11 @@ export const i8a8GeometryKeyPart = (geometry: I8a8Geometry, v4: boolean): string
   `tile${i8a8TileM(geometry)}x${i8a8TileN(geometry)}r${geometry.regM}x${geometry.regN}` +
   `w${geometry.wgX}x${geometry.wgY}k${geometry.tileK}${v4 ? "v4" : ""}`;
 
-/** Default for linear / ①QK (the only variant all 3 shapes picked as their best in measurement). */
+/**
+ * Default for linear / ①QK (the only variant all 3 shapes picked as their best in measurement) and
+ * for conv3d (the value conv3d ran with before the profile had a field for it — ADR 0133 decision 5,
+ * ADR 0115 addendum 2026-10-26).
+ */
 const GEOMETRY_M128N64: I8a8Geometry = { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 16 };
 
 /** Default for ③PV (the shape that covers N = D = 128 with one tile wins for both self and cross). */
@@ -229,7 +233,7 @@ export const i8a8AccumulatorInit = (geometry: I8a8Geometry): string => {
  * shared tiles (`sa` = `[pack][row]` / `sb` = `[pack][column]`) and runs `regM · regN` integer inner
  * products.
  *
- * MUST: the 3 kernels use this one loop (copying the geometry's index arithmetic would let one of
+ * MUST: the kernels use this one loop (copying the geometry's index arithmetic would let one of
  * them get the pack stride wrong). The addition order per output is "K tiles ascending, 4 words of a
  * pack together"; whatever the geometry, it is exact i32 addition, so the result is
  * order-independent.

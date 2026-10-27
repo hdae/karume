@@ -17,6 +17,7 @@ import {
 } from "../src/kernels/i8a8-geometry.ts";
 import { gemmMTileGeometry } from "../src/kernels/gemm.ts";
 import { conv2dIgemmKey } from "../src/kernels/conv2d.ts";
+import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../src/kernels/geometry-profile.ts";
 import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/index.ts";
 import {
   conv2dCandidate,
@@ -153,8 +154,35 @@ describe("候補集合 quick+（quick ∪ 登録済みプロファイルの採�
           i8a8Candidate(profile.i8a8.linear).name,
           i8a8Candidate(profile.i8a8.attentionQk).name,
           i8a8Candidate(profile.i8a8.attentionPv).name,
+          i8a8Candidate(profile.i8a8.conv3d).name,
         ],
         `${profile.id} i8a8`,
+      );
+    }
+  });
+
+  it("i8a8 quick+ adds each of the four i8a8 fields of a profile it is given (distinct, all outside quick)", () => {
+    // Four distinct geometries from the full grid that quick does not hold, one per field — so a
+    // field missing from quick+ cannot be hidden by quick or by another field carrying the same value.
+    const quick = new Set(names(quickI8a8Candidates()));
+    const outside = i8a8Candidates().filter(({ name }) => !quick.has(name));
+    assert(outside.length >= 4, "the full grid holds at least four geometries outside quick");
+    const [linear, attentionQk, attentionPv, conv3d] = outside;
+    const profile: GeometryProfile = {
+      ...DEFAULT_GEOMETRY_PROFILE,
+      id: "synthetic-i8a8",
+      i8a8: {
+        linear: linear.geometry,
+        attentionQk: attentionQk.geometry,
+        attentionPv: attentionPv.geometry,
+        conv3d: conv3d.geometry,
+      },
+    };
+    const listed = new Set(names(quickPlusI8a8Candidates([profile])));
+    for (const [field, candidate] of Object.entries({ linear, attentionQk, attentionPv, conv3d })) {
+      assert(
+        listed.has(candidate.name),
+        `i8a8.${field} (${candidate.name}) is missing from quick+`,
       );
     }
   });

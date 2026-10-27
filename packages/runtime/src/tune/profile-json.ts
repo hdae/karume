@@ -231,7 +231,7 @@ export const parseGeometryProfileJson = (text: string): GeometryProfile => {
   );
   const attention = readRecord(fields.attention, "attention", ["qk", "pv"]);
   const conv2d = readRecord(fields.conv2d, "conv2d", ["rows64", "rows32"]);
-  const i8a8 = readRecord(fields.i8a8, "i8a8", ["linear", "attentionQk", "attentionPv"]);
+  const i8a8 = readRecord(fields.i8a8, "i8a8", ["linear", "attentionQk", "attentionPv", "conv3d"]);
   const profile: GeometryProfile = {
     id: readString(fields.id, "id"),
     ...(fields.match === undefined ? {} : { match: readMatch(fields.match, "match") }),
@@ -248,6 +248,7 @@ export const parseGeometryProfileJson = (text: string): GeometryProfile => {
       linear: readI8a8Geometry(i8a8.linear, "i8a8.linear"),
       attentionQk: readI8a8Geometry(i8a8.attentionQk, "i8a8.attentionQk"),
       attentionPv: readI8a8Geometry(i8a8.attentionPv, "i8a8.attentionPv"),
+      conv3d: readI8a8Geometry(i8a8.conv3d, "i8a8.conv3d"),
     },
     ...(fields.provenance === undefined
       ? {}

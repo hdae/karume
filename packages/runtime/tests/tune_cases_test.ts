@@ -5,6 +5,7 @@ import { GEMM_ROWS_BUCKETS } from "../src/kernels/gemm-geometry.ts";
 import { LINEAR_I8A8_MAX_K } from "../src/kernels/linear-i8a8.ts";
 import { attentionScoreUsesF16 } from "../src/kernels/score-storage.ts";
 import { conv2dIgemmMTile, conv2dUsesVec4 } from "../src/kernels/conv2d.ts";
+import { conv3dI8a8EligibleShape, conv3dI8a8UsesVec4 } from "../src/kernels/conv3d-i8a8.ts";
 import { caseFlops, PROFILE_GEMM_ROWS_BOUNDS, SWEEP_CASES, SWEEP_OPS } from "../src/tune/cases.ts";
 
 /** M が入るプロファイルの段の添字（`rows <= maxRows` で最初に当たる段 — runtime の表引きと同じ）。 */
@@ -145,7 +146,65 @@ describe("形状表", () => {
         case "conv2d":
           assert(conv2dUsesVec4(sweepCase.channelsIn * 9, sweepCase.width, 1), sweepCase.id);
           break;
+        case "i8a8-conv3d": {
+          // The w8a8 path's eligibility (Cin % 4, the i32 bound, groups 1) and the v4 store
+          const { dims } = sweepCase;
+          assert(conv3dI8a8EligibleShape(dims.channelsIn, dims.groups), sweepCase.id);
+          assert(conv3dI8a8UsesVec4(dims.timeOut * dims.heightOut * dims.widthOut), sweepCase.id);
+          break;
+        }
       }
+    }
+  });
+
+  it("conv3d w8a8 operation count is 2 · Cout · Cin · taps · P_out (a 3×3×3 case and the 1×1×1 case, exact)", () => {
+    const flopsOf = (id: string): number => {
+      const sweepCase = SWEEP_CASES.find((candidate) => candidate.id === id);
+      assert(sweepCase !== undefined, id);
+      return caseFlops(sweepCase);
+    };
+    // Cout 1024 · Cin 1024 · taps 3·3·3 = 27 · P_out = 1 (T: 3 in, no padding) · 16 · 16
+    assertEquals(flopsOf("i8a8-conv3d-cin1024-cout1024-k333-in3x16x16"), 14_495_514_624);
+    // Cout 512 · Cin 1024 · taps 1 · P_out = 4 · 64 · 64 = 16,384
+    assertEquals(flopsOf("i8a8-conv3d-cin1024-cout512-k111-in4x64x64"), 17_179_869_184);
+  });
+
+  it("conv3d w8a8: the six heavy 3×3×3 shapes of tile 16, conv_out and one 1×1×1 shortcut, and the six heavy 3×3×3 shapes of tile 32 (ADR 0115 addendum 2026-10-26)", () => {
+    const conv3d = SWEEP_CASES.flatMap((sweepCase) =>
+      sweepCase.op === "i8a8-conv3d" ? [sweepCase] : [],
+    );
+    const heavy = (tile: number): string[] => [
+      `i8a8-conv3d-cin256-cout256-k333-in6x${8 * tile}x${8 * tile}`,
+      `i8a8-conv3d-cin512-cout512-k333-in6x${4 * tile}x${4 * tile}`,
+      `i8a8-conv3d-cin1024-cout1024-k333-in4x${2 * tile}x${2 * tile}`,
+      `i8a8-conv3d-cin1024-cout1024-k333-in3x${tile}x${tile}`,
+      `i8a8-conv3d-cin1024-cout512-k333-in6x${4 * tile}x${4 * tile}`,
+      `i8a8-conv3d-cin512-cout256-k333-in6x${8 * tile}x${8 * tile}`,
+    ];
+    assertEquals(
+      conv3d.map((sweepCase) => sweepCase.id),
+      [
+        ...heavy(16),
+        "i8a8-conv3d-cin256-cout12-k333-in6x128x128",
+        "i8a8-conv3d-cin1024-cout512-k111-in4x64x64",
+        ...heavy(32),
+      ],
+    );
+    // The decoder's attrs: stride 1, dilation 1, groups 1, no time padding (the cache frames are
+    // in the input), spatial padding (k - 1) / 2; the output extents follow the conv formula
+    const extent = (input: number, kernel: number, padding: number): number =>
+      input + 2 * padding - (kernel - 1);
+    for (const { id, dims } of conv3d) {
+      assertEquals([dims.strideT, dims.strideH, dims.strideW], [1, 1, 1], id);
+      assertEquals([dims.dilationT, dims.dilationH, dims.dilationW], [1, 1, 1], id);
+      assertEquals(dims.groups, 1, id);
+      assertEquals(dims.kernelT, dims.kernelH, id);
+      assertEquals(dims.kernelH, dims.kernelW, id);
+      assertEquals(dims.paddingT, 0, id);
+      assertEquals([dims.paddingH, dims.paddingW], Array(2).fill((dims.kernelH - 1) / 2), id);
+      assertEquals(dims.timeOut, extent(dims.timeIn, dims.kernelT, dims.paddingT), id);
+      assertEquals(dims.heightOut, extent(dims.heightIn, dims.kernelH, dims.paddingH), id);
+      assertEquals(dims.widthOut, extent(dims.widthIn, dims.kernelW, dims.paddingW), id);
     }
   });
 

@@ -4,6 +4,7 @@ import { acquireGpu } from "../mod.ts";
 import { parseStorageRoles } from "../src/gpu/pipeline-cache.ts";
 import { gemmMTileGeometry } from "../src/kernels/gemm.ts";
 import { defaultGemmGeometry } from "../src/kernels/gemm-geometry.ts";
+import { conv3dI8a8Kernel, conv3dI8a8Key } from "../src/kernels/conv3d-i8a8.ts";
 import { defaultI8a8Geometry } from "../src/kernels/i8a8-geometry.ts";
 import { linearWgsl } from "../src/kernels/linear.ts";
 import { calibrateReps, TARGET_PASS_MS } from "../src/tune/measurement.ts";
@@ -11,6 +12,7 @@ import {
   type AttentionCase,
   type BmmCase,
   type Conv2dCase,
+  type Conv3dI8a8Case,
   type LinearCase,
   type MatmulCase,
   SWEEP_CASES,
@@ -76,6 +78,69 @@ const CONV2D: Conv2dCase = {
   width: 16,
   censusCount: 1,
   source: "test",
+};
+
+/**
+ * A small conv3d w8a8 case: Cout 80 (not a multiple of any tile edge), Cin 36 (Cin % 16 != 0 — a
+ * K tail in each tap), 3×3×3 with spatial padding 1 over [3, 9, 10] → [1, 9, 10] (P = 90, the scalar
+ * store).
+ */
+const CONV3D: Conv3dI8a8Case = {
+  id: "test-i8a8-conv3d-cin36-cout80-k333-in3x9x10",
+  op: "i8a8-conv3d",
+  dims: {
+    channelsIn: 36,
+    channelsOut: 80,
+    timeIn: 3,
+    heightIn: 9,
+    widthIn: 10,
+    timeOut: 1,
+    heightOut: 9,
+    widthOut: 10,
+    kernelT: 3,
+    kernelH: 3,
+    kernelW: 3,
+    strideT: 1,
+    strideH: 1,
+    strideW: 1,
+    paddingT: 0,
+    paddingH: 1,
+    paddingW: 1,
+    dilationT: 1,
+    dilationH: 1,
+    dilationW: 1,
+    groups: 1,
+  },
+  censusCount: 1,
+  source: "test",
+};
+
+/**
+ * CONV3D without padding over [3, 5, 6] → [1, 3, 4]: P_out = 12 (a multiple of 4, not of 8) and
+ * P_in = 90 (not a multiple of 4) — the store is vec4, decided by the output pixels.
+ */
+const CONV3D_VEC4_OUT: Conv3dI8a8Case = {
+  ...CONV3D,
+  id: "test-i8a8-conv3d-cin36-cout80-k333-in3x5x6",
+  dims: {
+    ...CONV3D.dims,
+    heightIn: 5,
+    widthIn: 6,
+    heightOut: 3,
+    widthOut: 4,
+    paddingH: 0,
+    paddingW: 0,
+  },
+};
+
+/**
+ * CONV3D without padding over [3, 5, 4] → [1, 3, 2]: P_in = 60 (a multiple of 4) and P_out = 6
+ * (not) — the store is scalar, decided by the output pixels.
+ */
+const CONV3D_SCALAR_OUT: Conv3dI8a8Case = {
+  ...CONV3D_VEC4_OUT,
+  id: "test-i8a8-conv3d-cin36-cout80-k333-in3x5x4",
+  dims: { ...CONV3D_VEC4_OUT.dims, widthIn: 4, widthOut: 2 },
 };
 
 /** 64×64 / 256 スレッド（quick の 2 番目）。 */
@@ -162,6 +227,69 @@ test("matmul / bmm の全ケースの束縛表は、既定幾何の WGSL の sto
     const names = new Set(plan.resources.map((spec) => spec.name));
     for (const name of launch.bindings) assert(names.has(name), `${target.id}: ${name}`);
     assert(launch.writes.includes(plan.output), target.id);
+  }
+});
+
+test("every conv3d w8a8 case's binding table fits the WGSL's storage roles (both dp4a variants), and the resources are the dims' sizes", () => {
+  const conv3d = SWEEP_CASES.flatMap((target) => (target.op === "i8a8-conv3d" ? [target] : []));
+  assert(conv3d.length > 0);
+  for (const target of [...conv3d, CONV3D]) {
+    const { dims } = target;
+    for (const dp4a of [false, true]) {
+      const plan = casePlan(target, 65535, dp4a);
+      const launch = plan.launch(plan.defaultCandidate);
+      assertBindingRoles(launch, parseStorageRoles(launch.wgsl));
+      assertEquals(launch.bindings, ["xq", "w", "bias", "out", "wscale", "xscale"], target.id);
+      assertEquals(launch.writes, ["out"], target.id);
+      assertEquals(plan.output, "out", target.id);
+    }
+    const pixelsIn = dims.timeIn * dims.heightIn * dims.widthIn;
+    const pixelsOut = dims.timeOut * dims.heightOut * dims.widthOut;
+    const taps = dims.kernelT * dims.kernelH * dims.kernelW;
+    const sizes = Object.fromEntries(
+      casePlan(target, 65535, true).resources.map((spec) => [spec.name, spec.bytes]),
+    );
+    assertEquals(
+      sizes,
+      {
+        xq: pixelsIn * dims.channelsIn,
+        xscale: pixelsIn * 4,
+        w: Math.ceil((dims.channelsOut * taps * dims.channelsIn) / 4) * 4,
+        wscale: dims.channelsOut * 4,
+        bias: dims.channelsOut * 4,
+        out: dims.channelsOut * pixelsOut * 4,
+      },
+      target.id,
+    );
+  }
+});
+
+test("every conv3d w8a8 case launches the shared kernel function's variant, which is vec4 exactly when P_out is a multiple of 4 (store variant against an independent rule, key against conv3dI8a8Key)", () => {
+  const conv3d = SWEEP_CASES.flatMap((target) => (target.op === "i8a8-conv3d" ? [target] : []));
+  assert(conv3d.length > 0);
+  // CONV3D has 90 output pixels (not a multiple of 4), so the scalar store is covered too. The
+  // sweep cases all have P_out % 8 == 0, so CONV3D_VEC4_OUT (P_out % 8 != 0, P_in % 4 != 0) and
+  // CONV3D_SCALAR_OUT (P_in % 4 == 0, P_out % 4 != 0) separate the output pixel count from the
+  // input's and the multiple of 4 from that of 8
+  const targets = [...conv3d, CONV3D, CONV3D_VEC4_OUT, CONV3D_SCALAR_OUT];
+  assert(targets.some(({ dims }) => (dims.timeOut * dims.heightOut * dims.widthOut) % 4 !== 0));
+  const candidates = [
+    i8a8Candidate(defaultI8a8Geometry("conv3d")),
+    i8a8Candidate({ regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 16 }),
+  ];
+  for (const target of targets) {
+    const { dims } = target;
+    // The store variant derived here independently: vec4 exactly when P_out is a multiple of 4
+    const v4 = (dims.timeOut * dims.heightOut * dims.widthOut) % 4 === 0;
+    for (const dp4a of [false, true]) {
+      const plan = casePlan(target, 65535, dp4a);
+      for (const candidate of candidates) {
+        const where = `${target.id} ${candidate.name} dp4a=${dp4a}`;
+        const launch = plan.launch(candidate);
+        assertEquals(conv3dI8a8Kernel(dims, dp4a, candidate.geometry).v4, v4, where);
+        assertEquals(launch.key, conv3dI8a8Key(v4, dp4a, candidate.geometry), where);
+      }
+    }
   }
 });
 
@@ -254,6 +382,17 @@ test.skipIf(adapter === null)(
     assertMeasuredPair(
       await sweepPair(attentionCase("i8a8-attention", "pv"), I8A8_64X64),
       i8a8Candidate(defaultI8a8Geometry("attention_pv")).name,
+      I8A8_64X64.name,
+    );
+  },
+);
+
+test.skipIf(adapter === null)(
+  "real GPU: conv3d w8a8 measured with the default and 64×64/256 gives positive times and the same output",
+  async () => {
+    assertMeasuredPair(
+      await sweepPair(CONV3D, I8A8_64X64),
+      i8a8Candidate(defaultI8a8Geometry("conv3d")).name,
       I8A8_64X64.name,
     );
   },
@@ -443,6 +582,71 @@ const assertDenseMatchesReference = async (target: MatmulCase | BmmCase): Promis
     gpu.destroy();
   }
 };
+
+/** One i8 lane of a packed word (lane j = byte j, sign-extended — the order of `unpack4xI8`). */
+const i8Lane = (words: Uint32Array<ArrayBuffer>, index: number): number =>
+  ((words[index >> 2] >>> ((index & 3) * 8)) << 24) >> 24;
+
+test.skipIf(adapter === null)(
+  "real GPU: the conv3d w8a8 default geometry's output is bit-identical to a CPU reference over the harness's inputs (per-tap exact i32, fma flush per tap in tap order, final fma)",
+  async () => {
+    const target = CONV3D;
+    const { dims } = target;
+    const xq = resourceWords(target, "xq");
+    const xscale = new Float32Array(resourceWords(target, "xscale").buffer);
+    const w = resourceWords(target, "w");
+    const wscale = new Float32Array(resourceWords(target, "wscale").buffer);
+    const bias = new Float32Array(resourceWords(target, "bias").buffer);
+    const taps = dims.kernelT * dims.kernelH * dims.kernelW;
+    const pixelsOut = dims.timeOut * dims.heightOut * dims.widthOut;
+    const expected = new Float32Array(dims.channelsOut * pixelsOut);
+    for (let co = 0; co < dims.channelsOut; co += 1) {
+      for (let n = 0; n < pixelsOut; n += 1) {
+        const ot = Math.floor(n / (dims.heightOut * dims.widthOut));
+        const oy = Math.floor(n / dims.widthOut) % dims.heightOut;
+        const ox = n % dims.widthOut;
+        let accf = 0;
+        for (let tap = 0; tap < taps; tap += 1) {
+          const kt = Math.floor(tap / (dims.kernelH * dims.kernelW));
+          const kh = Math.floor(tap / dims.kernelW) % dims.kernelH;
+          const kw = tap % dims.kernelW;
+          const it = ot + kt - dims.paddingT;
+          const iy = oy + kh - dims.paddingH;
+          const ix = ox + kw - dims.paddingW;
+          if (it < 0 || it >= dims.timeIn || iy < 0 || iy >= dims.heightIn) continue;
+          if (ix < 0 || ix >= dims.widthIn) continue;
+          const pixel = (it * dims.heightIn + iy) * dims.widthIn + ix;
+          // The tap-major weight [Cout][taps][Cin] and the pixel-major activation [P][Cin]
+          let acci = 0;
+          for (let ci = 0; ci < dims.channelsIn; ci += 1) {
+            acci +=
+              i8Lane(xq, pixel * dims.channelsIn + ci) *
+              i8Lane(w, (co * taps + tap) * dims.channelsIn + ci);
+          }
+          accf = fmaF32(Math.fround(acci), xscale[pixel], accf);
+        }
+        expected[co * pixelsOut + n] = fmaF32(accf, wscale[co], bias[co]);
+      }
+    }
+    const reference = await digestOf(expected);
+    const gpu = await acquireGpu(timestampQuery ? { gpuTiming: true } : {});
+    const context = await createSweepContext(gpu, "deno-raw-tick");
+    try {
+      const { rows } = await sweepCase(context, target, [I8A8_64X64], { rounds: 1 });
+      assertEquals(rows.length, 2);
+      for (const row of rows) assertEquals(row.error, undefined, row.error);
+      assertEquals(
+        rows[0].outputSha256,
+        reference,
+        "the default geometry's output differs from the CPU reference (a binding, params or dispatch is wrong)",
+      );
+      assertEquals(rows[1].identicalToDefault, true);
+    } finally {
+      destroySweepContext(context);
+      gpu.destroy();
+    }
+  },
+);
 
 test.skipIf(adapter === null)(
   "実 GPU: f32 matmul の出力は CPU 参照（K 昇順の逐次積和・非融合か fma 縮約のどちらか）とビット同一",

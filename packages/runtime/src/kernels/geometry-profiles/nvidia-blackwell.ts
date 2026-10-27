@@ -713,6 +713,12 @@
  *   - tile64x64r8x4w16x8k32: geometric mean ×1.104 (short of the adopted ×1.210)
  *   - tile64x64r8x8w8x8k16: ×0.939 < ×1.050 on i8a8-attention-pv-cross-m4096-n512
  *   - tile64x64r8x8w8x8k32: ×0.836 < ×1.050 on i8a8-attention-pv-cross-m4096-n512
+ * - i8a8.conv3d (i8a8 conv3d (w8a8 implicit GEMM), 0 cases): keeps the default tile128x64r8x8w8x16k16 (the sweeps have no case of this class)
+ *
+ * Re-derived on 2026-10-26 from the same records with `deriveGeometryProfile` when the profile gained
+ * `i8a8.conv3d` (ADR 0115 addendum 2026-10-26; the scripts are kept, untracked, in
+ * `outputs/diag/wave-b-2026-10-26/v5/`). Every other field is unchanged; `i8a8.conv3d` keeps the default
+ * because no record has a conv3d case, and `provenance.kernels` / `caseSet` are the current runtime's.
  */
 import type { GeometryProfile } from "../geometry-profile.ts";
 
@@ -740,6 +746,7 @@ export const NVIDIA_BLACKWELL: GeometryProfile = {
     linear: { regM: 8, regN: 4, wgX: 16, wgY: 16, tileK: 16 },
     attentionQk: { regM: 8, regN: 4, wgX: 16, wgY: 16, tileK: 16 },
     attentionPv: { regM: 8, regN: 4, wgX: 16, wgY: 16, tileK: 16 },
+    conv3d: { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 16 },
   },
   provenance: {
     sweep:
@@ -758,7 +765,7 @@ export const NVIDIA_BLACKWELL: GeometryProfile = {
       device: "0x2c05",
       description: "NVIDIA GeForce RTX 5070 Ti",
     },
-    kernels: "27067d014c2f3b30",
-    caseSet: "c1060d8829f3b9de",
+    kernels: "d2fd6a2e029c8678",
+    caseSet: "0c9e4c7b7202eb2a",
   },
 };

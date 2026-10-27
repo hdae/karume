@@ -272,6 +272,16 @@ export type PreparedPlan = {
 };
 
 /**
+ * The GEMM geometry profile a Session on `gpu` runs with: the table injected with
+ * `acquireGpu({ geometryProfile })`, otherwise the embedded table {@link selectGeometryProfile}
+ * picks for the adapter. Session construction calls this once (the one selection point); tests that
+ * must name the geometry a Session ran call the same function instead of re-deriving it.
+ * NOTE: internal — not on the public mod.ts surface.
+ */
+export const sessionGeometryProfile = (gpu: GpuContext): GeometryProfile =>
+  gpu[RUNTIME_INTERNAL].geometryProfile ?? selectGeometryProfile(gpu.adapterInfo);
+
+/**
  * Decides the integer dot-product variant of fused attention (the entry of
  * {@link SessionState.attentionI8a8Dot}).
  *
@@ -597,8 +607,7 @@ export const buildSessionState = async (
   // MUST: the selection happens in this one place. The dp4a canary (`resolveAttentionI8a8Dot`) and
   // the diagnostic id (`SessionState.geometryProfile`) use this return value — choosing separately
   // could make the geometry the canary verified differ from the geometry actually run.
-  const geometryProfile =
-    gpu[RUNTIME_INTERNAL].geometryProfile ?? selectGeometryProfile(gpu.adapterInfo);
+  const geometryProfile = sessionGeometryProfile(gpu);
 
   // MUST: before allocating weights, compare the allocation size of each residency class with the
   // device's absolute limits (before the batch loop = before a single byte is uploaded). Detecting

@@ -20,10 +20,11 @@
  * means a different key, and the device-lifetime pipeline cache cannot mix them up.
  *
  * The scope (the paths that read the profile) is only the row-count buckets of matmul / bmm /
- * linear, ①QK / ③PV of fused attention f32, the implicit GEMM of conv2d, and the i8a8 linear / fused
- * attention ①QK / ③PV. The row-count bucket table is shared by the 3 paths matmul / bmm / linear
- * (the same GEMM skeleton — the same meaning of geometry and the same K reduction order; only the
- * B-side fill differs). The sweep has cases for all 3 paths, and the generator adopts only
+ * linear, ①QK / ③PV of fused attention f32, the implicit GEMM of conv2d, the i8a8 linear / fused
+ * attention ①QK / ③PV, and the w8a8 implicit GEMM of conv3d (one geometry for every conv3d shape —
+ * ADR 0115 addendum 2026-10-26). The row-count bucket table is shared by the 3 paths matmul / bmm /
+ * linear (the same GEMM skeleton — the same meaning of geometry and the same K reduction order; only
+ * the B-side fill differs). The sweep has cases for all 3 paths, and the generator adopts only
  * geometries that are faster on all of them (the `profile` command of tools/geometry-sweep (removed
  * in 0.15); now `deriveGeometryProfile` of `@karume/runtime/tune`). States-shaped attention (①ₜ /
  * ③ₜ), the row blocks of decomposed attention and the implicit GEMM of conv1d keep the default
@@ -101,6 +102,11 @@ export type GeometryProfile = {
     readonly linear: I8a8Geometry;
     readonly attentionQk: I8a8Geometry;
     readonly attentionPv: I8a8Geometry;
+    /**
+     * The w8a8 implicit GEMM of conv3d (`convCompute: "a8"` — ADR 0133). One geometry for every
+     * conv3d shape (no shape buckets — ADR 0115 addendum 2026-10-26).
+     */
+    readonly conv3d: I8a8Geometry;
   };
   /**
    * Provenance and matching material held only by profiles generated from a sweep (DECIDED: ADR 0117
@@ -171,6 +177,7 @@ export const DEFAULT_GEOMETRY_PROFILE: GeometryProfile = {
     linear: defaultI8a8Geometry("linear"),
     attentionQk: defaultI8a8Geometry("attention_qk"),
     attentionPv: defaultI8a8Geometry("attention_pv"),
+    conv3d: defaultI8a8Geometry("conv3d"),
   },
 };
 
@@ -383,6 +390,7 @@ export const assertGeometryProfile: (profile: unknown) => asserts profile is Geo
     ["i8a8.linear", i8a8.linear],
     ["i8a8.attentionQk", i8a8.attentionQk],
     ["i8a8.attentionPv", i8a8.attentionPv],
+    ["i8a8.conv3d", i8a8.conv3d],
   ] as const) {
     assertI8a8Geometry(i8a8GeometryOf(geometry, where, name), `${where}: ${name}`);
   }
@@ -475,6 +483,7 @@ export const assertGeometryProfileWithinLimits = (
   i8a8("i8a8.linear", profile.i8a8.linear);
   i8a8("i8a8.attentionQk", profile.i8a8.attentionQk);
   i8a8("i8a8.attentionPv", profile.i8a8.attentionPv);
+  i8a8("i8a8.conv3d", profile.i8a8.conv3d);
   if (violations.length > 0) {
     throw new CodegenError(
       `Geometry profile '${profile.id}': geometry exceeds the device limits (${violations.join(" / ")})`,

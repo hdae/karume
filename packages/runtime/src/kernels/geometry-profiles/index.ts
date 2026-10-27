@@ -55,6 +55,7 @@ const freezeGeometryProfile = (profile: GeometryProfile): GeometryProfile => {
       linear: geometry(profile.i8a8.linear),
       attentionQk: geometry(profile.i8a8.attentionQk),
       attentionPv: geometry(profile.i8a8.attentionPv),
+      conv3d: geometry(profile.i8a8.conv3d),
     }),
     ...(profile.provenance === undefined
       ? {}

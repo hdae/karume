@@ -21,6 +21,7 @@ import {
   linearGemvSubgroupKey,
 } from "../src/kernels/linear-gemv.ts";
 import { conv3dI8a8Key } from "../src/kernels/conv3d-i8a8.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import { linearI8a8Key } from "../src/kernels/linear-i8a8.ts";
 import type { MaterialisedScoreStorage } from "../src/kernels/score-storage.ts";
 import { QUANTIZE_ROWS_KEY } from "../src/kernels/quantize-rows.ts";
@@ -75,7 +76,10 @@ const REPRESENTATIVES: {
     f16: [linearKey("f32", true, "f16"), linearKey("f16", false, "f16", 64)],
   },
   convCompute: {
-    a8: [conv3dI8a8Key(true, true), conv3dI8a8Key(false, false)],
+    a8: [
+      conv3dI8a8Key(true, true, DEFAULT_GEOMETRY_PROFILE.i8a8.conv3d),
+      conv3dI8a8Key(false, false, DEFAULT_GEOMETRY_PROFILE.i8a8.conv3d),
+    ],
   },
   attentionCompute: {
     f16: [attentionQkKey(true, "f16"), attentionPvKey(false, "f16"), attentionStatsKey("f16")],

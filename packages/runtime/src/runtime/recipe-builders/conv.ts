@@ -46,11 +46,8 @@ import {
   CONV3D_ACT_SCALE_BINDING,
   CONV3D_I8A8_QUANTIZE_GEOMETRY,
   conv3dI8a8Eligible,
-  conv3dI8a8Geometry,
-  conv3dI8a8Key,
+  conv3dI8a8Kernel,
   conv3dI8a8Params,
-  conv3dI8a8UsesVec4,
-  conv3dI8a8Wgsl,
   conv3dI8a8Workgroups,
 } from "../../kernels/conv3d-i8a8.ts";
 import {
@@ -565,7 +562,6 @@ const buildConv3dI8a8 = async (
   const where = `conv3d i8a8 [${step.inputShapes[0].join(",")}] * [${step.inputShapes[1].join(",")}]`;
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
   const pixelsIn = dims.timeIn * dims.heightIn * dims.widthIn;
-  const pixelsOut = dims.timeOut * dims.heightOut * dims.widthOut;
   const channels = dims.channelsIn;
   // Build params first: shapes outside the contract are rejected before any pipeline lookup.
   const convParams = conv3dI8a8Params(dims);
@@ -595,15 +591,14 @@ const buildConv3dI8a8 = async (
     workgroups: [quantizeRowsChannelMajorWorkgroups(pixelsIn, quantizeGeometry, limit), 1, 1],
   });
 
-  // ② The integer dot-product implicit GEMM (the geometry is in the key — ADR 0133 decision 5)
-  const v4 = conv3dI8a8UsesVec4(pixelsOut);
-  const geometry = conv3dI8a8Geometry();
+  // ② The integer dot-product implicit GEMM. The geometry is the adapter profile's conv3d field
+  // (ADR 0115 addendum 2026-10-26) and is in the key (ADR 0133 decision 5).
+  // MUST: key, WGSL and dispatch take this one value (a different geometry in one of them would
+  // leave output tiles unwritten without any exception)
+  const geometry = face.state.geometryProfile.i8a8.conv3d;
   const dp4a = face.state.linearI8a8Dot === "dp4a";
-  const key = conv3dI8a8Key(v4, dp4a, geometry);
-  const { pipeline, layout, roles } = await face.state.cache.get(
-    key,
-    conv3dI8a8Wgsl(v4, dp4a, geometry),
-  );
+  const { key, wgsl } = conv3dI8a8Kernel(dims, dp4a, geometry);
+  const { pipeline, layout, roles } = await face.state.cache.get(key, wgsl);
   builder.dispatch({
     key,
     pipeline,

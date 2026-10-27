@@ -1,15 +1,19 @@
-// 保存した表の照合キー（src/tune/fingerprint.ts — ADR 0117 決定 4）の門: カーネルの指紋
-// （geometryProfileKernelsId）とケース集合の版（sweepCaseSetId）。公開の関数（sweepCaseSetId）は公開面
-// （../tune.ts）から、公開しない指紋（照合 geometryProfileMismatch が内部で導く — ADR 0117 決定 2）と注入できる
-// 本体・道具の関数は src から引く。GPU を使わない。
+// The matching keys of a saved table (src/tune/fingerprint.ts — ADR 0117 decision 4): the kernel
+// fingerprint (geometryProfileKernelsId) and the case-set version (sweepCaseSetId). The public
+// function (sweepCaseSetId) comes from the public surface (../tune.ts); the fingerprint, which is not
+// public (geometryProfileMismatch derives it internally — ADR 0117 decision 2), and the injectable
+// bodies and tool functions come from src. No GPU.
 //
-// 固定するのは ① ハッシュが FNV-1a 64 bit そのもの ② 指紋は表の 14 欄・既定の幾何・dp4a の両変種・dispatch の
-// params と workgroups に効き、id / match / provenance と WGSL のコメント・空白に効かない（ADR 0117 追記
-// 2026-10-19）③ 組めない dispatch はケース・欄・幾何を
-// 名指して投げる ④ 埋め込みの 2 表の provenance が今の runtime の値と一致する（GEMM のカーネルを変える変更は
-// 2 表の再生成を伴う）⑤ ケース集合の版はケースの増減・dispatch を決める欄・境界に効き、説明などの情報の欄と
-// キーの並びに効かない ⑥ 記録の `candidateKernels`（測った候補の指紋）は、既定を変えず候補の WGSL だけ変えた
-// runtime で値が変わり（`defaultKernels` は変わらない）、失敗した行を数えず、記録の dp4a の変種で組む。
+// Pinned: (1) the hash is FNV-1a 64 bit itself; (2) the fingerprint moves with each of the table's
+// 15 fields, the default geometry, both dp4a variants and a dispatch's params and workgroups, and not
+// with id / match / provenance or the WGSL's comments and whitespace (ADR 0117 addendum 2026-10-19);
+// (3) a dispatch that cannot be built throws naming the case, the field and the geometry; (4) the
+// embedded tables' provenance equals the current runtime's values (a change to a GEMM kernel or to
+// the cases re-bakes the tables); (5) the case-set version moves with added or removed cases, the
+// dispatch-deciding fields and the bounds, and not with informational fields or key order; (6) a
+// record's `candidateKernels` (the fingerprint of the measured candidates) moves on a runtime that
+// changed only a candidate's WGSL (`defaultKernels` does not), skips failed rows and builds with the
+// record's dp4a variant.
 
 import {
   assert,
@@ -88,7 +92,7 @@ const another = <T extends GeometryCandidate["geometry"]>(
   return found.geometry;
 };
 
-/** 表の 14 欄それぞれを 1 つだけ変えた表（欄名 → 表）。 */
+/** One table per field of the 15, with only that field changed (field name → table). */
 const singleFieldVariants = (base: GeometryProfile): ReadonlyMap<string, GeometryProfile> => {
   const gemm = quickGemmCandidates();
   const conv2d = quickConv2dCandidates();
@@ -131,6 +135,10 @@ const singleFieldVariants = (base: GeometryProfile): ReadonlyMap<string, Geometr
     ...base,
     i8a8: { ...integer, attentionPv: another(integer.attentionPv, i8a8) },
   });
+  variants.set("i8a8.conv3d", {
+    ...base,
+    i8a8: { ...integer, conv3d: another(integer.conv3d, i8a8) },
+  });
   return variants;
 };
 
@@ -166,17 +174,17 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
     );
   });
 
-  it("表の 14 欄のどれを 1 つ変えても値が変わり、14 通りの値は互いに違う", () => {
+  it("changing any one of the table's 15 fields changes the value, and the 15 values differ from each other", () => {
     const base = geometryProfileKernelsId(APPLE_METAL_3);
     const variants = singleFieldVariants(APPLE_METAL_3);
-    assertEquals(variants.size, 14);
+    assertEquals(variants.size, 15);
     const values = new Set([base]);
     for (const [field, profile] of variants) {
       const value = geometryProfileKernelsId(profile);
       assertNotEquals(value, base, field);
       values.add(value);
     }
-    assertEquals(values.size, 15);
+    assertEquals(values.size, 16);
   });
 
   it("gemmRows の段の境界が違う表（既定の 3 段）も、runtime の選択関数でケースに幾何を当てて導ける", () => {
@@ -231,7 +239,9 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
         };
       };
       const isI8a8 = (sweepCase: SweepCase): boolean =>
-        sweepCase.op === "i8a8-linear" || sweepCase.op === "i8a8-attention";
+        sweepCase.op === "i8a8-linear" ||
+        sweepCase.op === "i8a8-attention" ||
+        sweepCase.op === "i8a8-conv3d";
       assertNotEquals(
         profileKernelsId(APPLE_METAL_3, SWEEP_CASES.filter(isI8a8), marked),
         profileKernelsId(APPLE_METAL_3, SWEEP_CASES.filter(isI8a8), casePlan),
@@ -239,6 +249,46 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
       );
       assertNotEquals(profileKernelsId(APPLE_METAL_3, SWEEP_CASES, marked), base);
     }
+  });
+
+  it("the conv3d w8a8 cases count both dp4a variants and read the table's i8a8.conv3d (not another i8a8 field)", () => {
+    const conv3dCases = SWEEP_CASES.filter((sweepCase) => sweepCase.op === "i8a8-conv3d");
+    assert(conv3dCases.length > 0);
+    const plain = profileKernelsId(APPLE_METAL_3, conv3dCases, casePlan);
+    for (const variant of [false, true]) {
+      const marked: CasePlanner = (sweepCase, limit, dp4a) => {
+        const plan = casePlan(sweepCase, limit, dp4a);
+        if (dp4a !== variant) return plan;
+        return {
+          ...plan,
+          launch: (candidate) => {
+            const launch = plan.launch(candidate);
+            return { ...launch, wgsl: `${launch.wgsl}\nfn changed() {}` };
+          },
+        };
+      };
+      assertNotEquals(
+        profileKernelsId(APPLE_METAL_3, conv3dCases, marked),
+        plain,
+        `dp4a ${variant}`,
+      );
+    }
+    const { i8a8 } = APPLE_METAL_3;
+    const conv3d = quickI8a8Candidates().find(
+      ({ geometry }) =>
+        ![i8a8.linear, i8a8.attentionQk, i8a8.attentionPv, i8a8.conv3d].some(
+          (field) => JSON.stringify(field) === JSON.stringify(geometry),
+        ),
+    );
+    assert(conv3d !== undefined);
+    // Only conv3d moves: the conv3d cases see it, the other cases do not
+    const moved = { ...APPLE_METAL_3, i8a8: { ...i8a8, conv3d: conv3d.geometry } };
+    assertNotEquals(profileKernelsId(moved, conv3dCases, casePlan), plain);
+    const others = SWEEP_CASES.filter((sweepCase) => sweepCase.op !== "i8a8-conv3d");
+    assertEquals(
+      profileKernelsId(moved, others, casePlan),
+      profileKernelsId(APPLE_METAL_3, others, casePlan),
+    );
   });
 
   it("dispatch の params だけ・workgroups だけが変わっても値が変わる（キーと WGSL が同じでも別のカーネル）", () => {
@@ -433,10 +483,15 @@ describe("candidateKernelsId: 測った候補のカーネルの指紋（記録�
 });
 
 describe("埋め込みの表の provenance は今の runtime の値と一致する", () => {
-  // 落ちたら: GEMM のカーネル（キー・params・WGSL のトークン・dispatch 数 — コメントと空白は数えない）か
-  // 既定の幾何、または掃引のケースか gemmRows の段の境界が変わった。各表の冒頭コメントの再生成コマンドで 2 表を再生成する（幾何の値は変わらない —
-  // 掃引の記録が同じなので採否は同じ）。再生成を伴うのは、カーネルが変わったことを機械が告げ、per-profile の
-  // GPU テスト（gpu_geometry_profile_test.ts）が新しいカーネルで出力一致を確かめ直すため（ADR 0117 決定 4）
+  // On failure: a GEMM kernel (key, params, WGSL tokens, dispatch count — comments and whitespace do
+  // not count), the default geometry, the sweep cases or the gemmRows bounds changed. Re-derive every
+  // embedded table with the current runtime (ADR 0117 decision 4: the regeneration makes the machine
+  // say that the kernels changed, and the per-profile GPU test gpu_geometry_profile_test.ts re-checks
+  // output identity on the new kernels). A record without caseSet / defaultKernels (the 2026-09/10
+  // Chrome records of nvidia-blackwell and apple-metal-3) is still accepted, so those tables re-derive
+  // with unchanged values. A record that carries them (nvidia-ampere's) is rejected once they move:
+  // that table needs a new sweep, which can re-pick other fields (the 2026-10-26 conv3d re-sweep also
+  // moved i8a8.attentionQk — docs/research/2026-10-26-conv3d-geometry-sweep.md §4).
   for (const profile of BUILTIN_GEOMETRY_PROFILES) {
     it(`${profile.id}: provenance.kernels = 今の runtime の指紋・provenance.caseSet = 今のケース集合の版`, () => {
       const provenance = profile.provenance;
@@ -496,6 +551,13 @@ describe("sweepCaseSetId: ケース集合の版", () => {
     assertNotEquals(replaced(attention, { ...attentionCase, scale: 0.5 }), base, "scale");
     assertNotEquals(replaced(attention, { ...attentionCase, score: "f16" }), base, "score");
     assertNotEquals(replaced(conv2d, { ...conv2dCase, width: 64 }), base, "width");
+    const conv3d = indexOf("i8a8-conv3d");
+    const conv3dCase = SWEEP_CASES[conv3d];
+    assert(conv3dCase.op === "i8a8-conv3d");
+    for (const field of ["timeIn", "paddingH", "kernelT", "channelsOut"] as const) {
+      const dims = { ...conv3dCase.dims, [field]: conv3dCase.dims[field] + 1 };
+      assertNotEquals(replaced(conv3d, { ...conv3dCase, dims }), base, `dims.${field}`);
+    }
     assertNotEquals(caseSetId(SWEEP_CASES, [16, 32, 64, 512, Number.POSITIVE_INFINITY]), base);
     // 末尾の Infinity も値として数える（素の JSON.stringify は null に落とし、別の値と区別しない）
     assertNotEquals(caseSetId(SWEEP_CASES, [...PROFILE_GEMM_ROWS_BOUNDS.slice(0, -1), 1024]), base);

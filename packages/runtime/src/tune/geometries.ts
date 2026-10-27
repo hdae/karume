@@ -33,6 +33,7 @@ import {
   i8a8GeometryKeyPart,
 } from "../kernels/i8a8-geometry.ts";
 import { CodegenError } from "../codegen/errors.ts";
+import type { GeometryProfile } from "../kernels/geometry-profile.ts";
 import { BUILTIN_GEOMETRY_PROFILES } from "../kernels/geometry-profiles/index.ts";
 
 /** One candidate for the f32 skeleton (linear / fused attention / conv2d's implicit GEMM). */
@@ -47,7 +48,7 @@ export type GemmCandidate = {
   readonly geometry: GemmGeometry;
 };
 
-/** One candidate for the i8a8 family (linear / fused attention's ①QK and ③PV). */
+/** One candidate for the i8a8 family (linear / fused attention's ①QK and ③PV / conv3d w8a8). */
 export type I8a8Candidate = {
   readonly family: "i8a8";
   /**
@@ -243,14 +244,20 @@ export const quickPlusConv2dCandidates = (): GemmCandidate[] =>
     ]),
   ]);
 
-/** The i8a8 set of `quick+` = quick ∪ the three `i8a8` fields of the registered profiles. */
-export const quickPlusI8a8Candidates = (): I8a8Candidate[] =>
+/**
+ * The i8a8 set of `quick+` = quick ∪ the four `i8a8` fields of the registered profiles
+ * (`profiles` — the embedded tables unless a test passes its own list).
+ */
+export const quickPlusI8a8Candidates = (
+  profiles: readonly GeometryProfile[] = BUILTIN_GEOMETRY_PROFILES,
+): I8a8Candidate[] =>
   unique([
     ...quickI8a8Candidates(),
-    ...BUILTIN_GEOMETRY_PROFILES.flatMap((profile) => [
+    ...profiles.flatMap((profile) => [
       i8a8Candidate(profile.i8a8.linear),
       i8a8Candidate(profile.i8a8.attentionQk),
       i8a8Candidate(profile.i8a8.attentionPv),
+      i8a8Candidate(profile.i8a8.conv3d),
     ]),
   ]);
 
