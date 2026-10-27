@@ -211,6 +211,7 @@ import { linearKey, linearParams, linearWgsl } from "../src/kernels/linear.ts";
 import {
   linearGemvKey,
   linearGemvParallelPackedWgsl,
+  linearGemvParallelStagedWgsl,
   linearGemvParallelWgsl,
   linearGemvRowsKey,
   type LinearGemvRowsVariant,
@@ -593,6 +594,10 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["linear_gemv_parallel_packed_wi2_l2.wgsl", linearGemvParallelPackedWgsl("i2", undefined, 2)],
     ["linear_gemv_parallel_packed_g512_l4.wgsl", linearGemvParallelPackedWgsl("i4", 512, 4)],
     ["linear_gemv_parallel_packed_wi8_l16.wgsl", linearGemvParallelPackedWgsl("i8", undefined, 16)],
+    // The staged-activation variant (K-90): the same K loop in rounds, x read from workgroup memory.
+    ["linear_gemv_parallel_staged_g32_l32.wgsl", linearGemvParallelStagedWgsl("i4", 32, 32)],
+    ["linear_gemv_parallel_staged_wi8_l32.wgsl", linearGemvParallelStagedWgsl("i8", undefined, 32)],
+    ["linear_gemv_parallel_staged_wi2_l4.wgsl", linearGemvParallelStagedWgsl("i2", undefined, 4)],
     [
       "linear_gemv_static_quantize_packed_wi2_l2.wgsl",
       linearGemvStaticQuantizePackedWgsl("i2", undefined, 2),
