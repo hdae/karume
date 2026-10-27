@@ -200,6 +200,9 @@
 | pre-emptive / reactive eviction | 先回りの退避 / 反応の退避 | 常駐 DiT を試し確保の結果で先に手放す線 / OOM の後に手放す線 | — | ADR 0112 追記 2026-09-27 |
 | context K/V projection (`dit_context`, context K/V) | 条件側 K/V 射影（役割名は `dit_context`・観測名は `dit-context`） | irodori の DiT が条件 3 本から作る cross-attention の K / V | — | ADR 0114 |
 | input error (`ModelInputError`) | 入力起因エラー | 渡した要求そのものが受理できない失敗（入力を直せば通る） | バリデーションエラー（と混ぜない） | ADR 0107 |
+| folded ①′ (head fold) △ | head をまとめた ①′ | states 形の decode の ①QK で、1 workgroup が同じ kv plane を使う F = r 本の query head を受け持ち、K の各要素を 1 回だけ読む形。①′ とビット一致。計測した (r, D, M) の組の full attention でだけ選ぶ | — | ADR 0067 追記 2026-10-27・perf-ledger K-55 |
+| unrolled KV loop △ | KV ループの展開 | ③′ PV と融合 stats + PV で、各 lane が自分の担当列 8 本分の V を先に読んでから積和する形。式と順序は v1 と同じでビット一致 | — | ADR 0067 追記 2026-10-27・perf-ledger K-91 |
+| baseline WGSL (`fixtures/wgsl-baseline/`) △ | 書き換え前の WGSL の控え | ビット一致の書き換えの前の生成 WGSL を残したもの。GPU テストで新旧の kernel を同じ入力で回し、出力を 1 語ずつ比べる | — | `gpu_state_attention_fold_test.ts`・perf-ledger K-91 |
 
 ## 動画生成
 
