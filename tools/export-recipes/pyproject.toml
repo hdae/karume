@@ -81,6 +81,27 @@ wan = [
   "pillow==12.3.0",
   "transformers==5.14.1",
 ]
+# MOSS-Image (OpenMOSS-Team/MOSS-Image-SFT) export and reference scripts (`uv sync --group moss`).
+# Not part of the default sync. What each entry is for:
+#   diffusers — the upstream `pipeline_moss_image.py` (pinned by revision and sha256 in
+#     `moss.sources`) builds on `DiffusionPipeline`, `FlowMatchEulerDiscreteScheduler` and
+#     `AutoencoderKLFlux2`; the references run that code as it is.
+#   transformers — `moss.text_embeds` reads the Qwen3.5 text encoder and its tokenizer in bf16 and
+#     calls upstream `encode_prompt`, which renders the chat template.
+#   accelerate — diffusers' from_pretrained needs it (low_cpu_mem_usage=True by default).
+#   huggingface-hub — `moss.sources` fetches the pinned revision (it also arrives as a dependency of
+#     diffusers, but what is imported directly is declared).
+# MUST: diffusers and transformers are pinned with `==` at the versions the other groups use (one
+# venv holds all groups; a second pin would split it). The references are values of these versions'
+# code (the scheduler's `set_timesteps`, the VAE, the Qwen3.5 implementation and its chat template
+# rendering); a minor update can move them silently. Changing a version means regenerating the
+# stage-0 records (`moss.reference`, `moss.host_fixture`, `moss.vae_reference`, `moss.text_embeds`).
+moss = [
+  "accelerate>=1.0",
+  "diffusers==0.39.0",
+  "huggingface-hub>=1.26.0",
+  "transformers==5.14.1",
+]
 # SBV2 の実重み export 用（`uv sync --group sbv2`）。既定の sync には入れない — base deps
 # だけで tiny golden と pytest が回る状態を保つ。
 # MUST: style-bert-vits2 は `==` でピンする — SBV2 のエクスポータは後続の波でパッケージ内部

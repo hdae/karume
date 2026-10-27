@@ -80,6 +80,11 @@ export const ALLOW_LIST: readonly Allowance[] = [
     maxLines: 4,
   },
   {
+    path: "tools/export-recipes/moss/prompts.py",
+    why: "the fixed prompts of MOSS-Image, quoted verbatim from upstream (Chinese text in them)",
+    maxLines: 11,
+  },
+  {
     path: "packages/models/src/irodori/text/normalize.ts",
     why: "the normalisation tables of the Japanese TTS",
     maxLines: 3,
