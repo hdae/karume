@@ -384,7 +384,9 @@ test("Gemma4Ple.gather: block の全行を触る gather は全量読みへ倒れ
   assertEquals(stats.loads, 2, "values / scales の block を 1 本ずつ全量で読む");
   assertEquals(stats.rowReads, 0);
   assertEquals(stats.resident, 2);
-  assertEquals(stats.residentBytes, 2 * BLOCK_BYTES);
+  // Two blocks + copies of the two rows looked up (the row cache is outside the block budget —
+  // ADR 0085 addendum 2026-10-27).
+  assertEquals(stats.residentBytes, 2 * BLOCK_BYTES + 2 * ROW_BYTES);
   assertEquals(
     rig.reads.map((read) => read.offset),
     [0, 0],
@@ -461,12 +463,16 @@ test("Gemma4Ple.gather: 行読みの同時発行は上限を超えない（fd �
 
 // ---- 行キャッシュ ----------------------------------------------------------
 
-test("Gemma4Ple.gather: 行読みで引いた行は予算の空きぶん再利用される", async () => {
+test("Gemma4Ple.gather: a row read by row reads stays in the row cache (headroom outside the block budget)", async () => {
   const rig = fixture();
   const ple = pleOf(rig);
   await ple.gather([0]);
   const first = rig.reads.length;
-  assertEquals(ple.stats().residentBytes, ROW_BYTES, "行キャッシュが予算に計上されていない");
+  assertEquals(
+    ple.stats().residentBytes,
+    ROW_BYTES,
+    "the kept row is not counted in residentBytes",
+  );
   await ple.gather([0]);
   assertEquals(rig.reads.length, first, "行キャッシュに当たらず読み直している");
   assertEquals(ple.stats().rowReads, 2);
@@ -494,36 +500,88 @@ test("Gemma4Ple: 常駐バイトは索引だけから決まる（block 幅に依
 });
 
 test("Gemma4Ple: 追い出しは LRU（前の gather が載せた block から落ちる）", async () => {
-  const rig = fixture();
-  const ple = pleOf(rig, 2 * BLOCK_BYTES);
-  await ple.gather([0, 1]);
+  // Rows looked up stay in the row cache (ADR 0085 addendum 2026-10-27), so the block LRU is only
+  // observable through rows not looked up yet. Blocks have 96 rows (three times the whole-read
+  // threshold of 32), and the re-read uses another 32 rows of the same block.
+  const spec: PleFixtureSpec = {
+    tokens: 192,
+    layers: 1,
+    dim: 4,
+    embedScale: 4,
+    valueRows: 96,
+    scaleRows: 96,
+  };
+  const block = 96 * 4;
+  const rig = pleFixture(spec);
+  const ple = createGemma4Ple({
+    index: rig.index,
+    openBlock: rig.openBlock,
+    vocabSize: spec.tokens,
+    maxResidentBytes: 2 * block,
+  });
+  const range = (from: number) => Array.from({ length: 32 }, (_row, row) => from + row);
+  await ple.gather(range(0));
   assertEquals(ple.stats().resident, 2);
   // 別の block 対を全量で載せると、前の対が落ちる（予算は 2 本ぶん）。
-  await ple.gather([2, 3]);
+  await ple.gather(range(96));
   assertEquals(ple.stats().resident, 2);
-  assertEquals(ple.stats().residentBytes, 2 * BLOCK_BYTES);
+  assertEquals(
+    ple.stats().residentBytes,
+    2 * block + 64 * (4 + 4),
+    "two blocks + the 64 rows looked up",
+  );
   const loads = ple.stats().loads;
   // 落ちたのは古い方 — 引き直すと読みが増える。
-  await ple.gather([0, 1]);
+  await ple.gather(range(32));
   assertEquals(ple.stats().loads, loads + 2, "追い出された block が読み直されていない");
   // 直前に触った block は生きている。
   const after = ple.stats().loads;
-  await ple.gather([0, 1]);
+  const rowReads = ple.stats().rowReads;
+  await ple.gather(range(64));
   assertEquals(ple.stats().loads, after, "常駐している block を読み直している");
+  assertEquals(ple.stats().rowReads, rowReads, "rows of a resident block were read by row reads");
 });
 
 test("Gemma4Ple.gather: 1 回の gather は自分の hit を追い出さない", async () => {
-  const rig = fixture();
-  const ple = pleOf(rig, 2 * BLOCK_BYTES);
-  await ple.gather([0, 1]);
+  // Rows looked up stay in the row cache (ADR 0085 addendum 2026-10-27), so the block hit has to
+  // come from a row not looked up yet. Blocks have 33 rows, and the first gather takes only 32 (the
+  // whole-read threshold).
+  const spec: PleFixtureSpec = {
+    tokens: 66,
+    layers: 1,
+    dim: 4,
+    embedScale: 4,
+    valueRows: 33,
+    scaleRows: 33,
+  };
+  const rig = pleFixture(spec);
+  const ple = createGemma4Ple({
+    index: rig.index,
+    openBlock: rig.openBlock,
+    vocabSize: spec.tokens,
+    maxResidentBytes: 2 * 33 * 4,
+  });
+  await ple.gather(Array.from({ length: 32 }, (_row, row) => row));
   const loads = ple.stats().loads;
-  // hit（block 対 0）と miss（block 対 1）を同じ gather で触る。予算は 2 本ぶんしかないので、
-  // miss を全量で載せると hit が落ちる — 方針表は hit のぶんを先に数えるのでそうならない。
-  const ids = [0, 1, 2, 3];
-  assertRows(await tensorOf(ple, ids), ids);
+  const rowReads = ple.stats().rowReads;
+  // One gather touches a hit (row 32 of block pair 0, not looked up yet) and a miss (the 33 rows of
+  // block pair 1). The budget holds two blocks, so loading the miss whole would evict the hit — the
+  // policy counts the hits first, so it does not.
+  const ids = Array.from({ length: 34 }, (_row, row) => 32 + row);
+  const tensor = await ple.gather(ids);
+  assert("data" in tensor && tensor.data instanceof Float32Array);
+  for (const [position, id] of ids.entries()) {
+    for (let column = 0; column < spec.dim; column += 1) {
+      assertEquals(
+        tensor.data[position * spec.dim + column],
+        expectedValue(spec, id, 0, column),
+        `position ${position} (token ${id}) / column ${column}`,
+      );
+    }
+  }
   assertEquals(ple.stats().loads, loads, "hit のはずの block を読み直している");
   assertEquals(ple.stats().resident, 2);
-  assertEquals(ple.stats().rowReads, 2 * 2, "載らなかった miss は行読みへ倒れる");
+  assertEquals(ple.stats().rowReads, rowReads + 33 * 2, "載らなかった miss は行読みへ倒れる");
 });
 
 test("Gemma4Ple: block 1 本すら載らない予算は構築時に fail loudly", () => {

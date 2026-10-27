@@ -5,7 +5,9 @@
   hub" by the 2026-09-07 addendum and ADR [0086](0086-distribution-source.md) capability ⑧
   (2026-09-07); the shard width, the shard-based default budget, the cost-type policy table and the
   manifest-asset check by [0108](0108-container-format.md) decision 5 and the 2026-09-22 addendum
-  (2026-09-22); the GPU-resident load mechanism of 2026-09-19 by the 2026-09-24 addendum
+  (2026-09-22); the GPU-resident load mechanism of 2026-09-19 by the 2026-09-24 addendum; the
+  row cache's admission rule and its share of the budget (2026-09-12 addendum) by the 2026-10-27
+  addendum
 - Date: 2026-08-31
 - Scope: `tools/export-recipes/gemma4/` (moving PLE out of the graph, writing the sidecar) /
   `packages/models/src/gemma/` (host-side loader). IR, runtime and hub **unchanged**.
@@ -304,3 +306,47 @@ no longer exist in the code.
   by `embedding`'s weight slot, so it loads compressed. Only the carried scale of an expanded weight's
   piece list copies scales, and PLE does not go through it. Accounting: [container-v1](../container-v1.md)
   §11.
+
+## Addendum (2026-10-27) — the row cache keeps rows from whole blocks, as headroom outside the budget
+
+perf-ledger H-41 (a defect in the row cache of the 2026-09-12 addendum,
+[research 2026-10-25](../research/2026-10-25-speed-recon-3080ti.md) §9.1).
+
+- **Defect:** a row was kept only when both its values and its scales came from row reads, and only
+  while the budget had a row's worth of free space. With the E2B layout, the first gather with 32 or
+  more distinct ids loads scales block 0 (91% of the vocabulary) whole, so from then on every row has
+  its scales from a block view and is refused. Once a values block is whole too, the default budget
+  (two of the largest blocks) leaves 8,120 B, less than one 9,100 B row. Decode then re-reads every
+  row that is not in a resident block: on Node + HF decode medians were 20.4–21.2 ms/token, against
+  10.3–10.6 ms/token measured with an equivalent fix in
+  [research 2026-10-25](../research/2026-10-25-speed-recon-3080ti.md) §9.1 (not with this change),
+  and local-directory sources re-read a whole 33.5 MB part per row miss (this change's own
+  measurement is below).
+- **Change 1 — rows from whole blocks are kept as copies.** When a row's values or scales come from
+  a resident whole block, the row's slice (`rowBytes` of values, `layers` f32 of scales) is copied
+  into its own buffer and kept like a row-read row. A view is never kept, so an evicted block is not
+  kept alive by a row.
+- **Change 2 — the row cache is headroom outside the block budget.** Its capacity is 256 rows on top
+  of `maxResidentPleBytes`, not the budget's free space. Whole blocks are bounded by the budget alone,
+  and reserving a block no longer evicts rows. Copying alone (change 1 without change 2) keeps
+  nothing once a values block and the scales block are resident.
+- **Memory bound:** resident blocks ≤ budget, plus at most 256 rows — 2,329,600 B for regular E2B and
+  1,182,720 B for QAT E2B, the maximum payload the 2026-09-12 addendum already states. The internal
+  diagnostic `residentBytes` covers both, so it can exceed the budget by at most that payload. Budget
+  0 still keeps nothing resident, rows included.
+- **Unchanged:** a row is kept only after both tables succeeded, and never from a gather that was
+  aborted or ran into dispose; row-cache hits are served first in a gather; LRU order; dispose empties
+  the cache. Numerics are unchanged: a kept row holds the same quantized bytes and scales the block
+  holds, and every path goes through the same `writeRow`, so gathered values stay bit-identical
+  (decision 4). Public arguments, graphs and stored assets do not change.
+
+Checked on the CPU with synthetic indexes (`packages/models/tests/gemma4_ple_row_cache_test.ts`): a
+scales block made resident by a wide prompt, a values block and the scales block resident with no
+free budget, the 256-row LRU bound, budget 0, abort, a failed row read and dispose; reverting change 1
+or change 2 fails those checks. The regular and QAT gemma4 lanes ran on a real GPU.
+
+Measured on a local-directory source (RTX 3080 Ti, Node + Dawn, E2B default preset, 3 warm chats ×
+128 tokens, 2 runs per arm): with a prompt of 32 or more distinct ids, warm decode medians 32.5–43.2 →
+6.8 ms/token and warm TTFT 502–923 → 56–85 ms (PLE re-reads per warm chat 144 → 0); with a short
+prompt of fewer than 32 distinct ids no block becomes resident and nothing changes (6.7–6.8 ms/token
+in both arms). The generated text is identical in both arms.

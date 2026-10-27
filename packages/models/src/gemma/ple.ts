@@ -2,8 +2,9 @@
  * The **host-side gather** of Gemma 4's PLE (per-layer embeddings) (ADR 0085).
  *
  * The codec and constants of the index (the container asset `ple_index`) live in `./ple-index.ts`;
- * this file holds only the **owner** — the block / row / budget trio shares one `residentBytes`, a
- * relation that cannot be split, so it lives in one function.
+ * this file holds only the **owner** — whole blocks stay at or below the budget and kept rows sit on
+ * top of it as headroom (a budget of 0 keeps neither); that relation between blocks, rows and the
+ * budget cannot be split, so one function owns it.
  *
  * ## Why the host gathers
  *
@@ -56,10 +57,12 @@
  * outside {@link Gemma4PleOptions.maxResidentBytes}. Residency is represented only by "the
  * ArrayBuffer that was read", and the reader is dropped on the spot.
  *
- * Quantized rows that were read are reused through an LRU of at most {@link ROW_CACHE_CAPACITY}
- * rows. Whole blocks take priority, and rows use only the free space of the existing host RAM
- * budget. A budget of 0 keeps no rows either (ADR 0085 addendum 2026-09-12). The same bytes go
- * through the same two-step rounding, so decision 4's bit identity does not depend on the path.
+ * Quantized rows that were looked up are reused through an LRU of at most {@link ROW_CACHE_CAPACITY}
+ * rows. A row taken from a resident whole block is **copied** into its own buffer first, so a kept
+ * row never keeps a block alive. The row cache is headroom **outside** the block budget (blocks ≤
+ * budget, plus at most {@link ROW_CACHE_CAPACITY} rows); a budget of 0 keeps no rows either (ADR
+ * 0085 addenda 2026-09-12 and 2026-10-27). The same bytes go through the same two-step rounding, so
+ * decision 4's bit identity does not depend on the path.
  *
  * ## Gather order (hits first) and duplicate ids
  *
@@ -131,8 +134,11 @@ export type Gemma4PleOptions = {
    */
   readonly vocabSize: number;
   /**
-   * The **host RAM limit (bytes)** for resident blocks and quantized rows (LRU — ADR 0085
-   * decision 3).
+   * The **host RAM limit (bytes)** for resident whole blocks (LRU — ADR 0085 decision 3).
+   *
+   * The row cache sits on top of it: at most {@link ROW_CACHE_CAPACITY} quantized rows (E2B:
+   * 2,329,600 B regular / 1,182,720 B QAT), kept only while the budget is above 0 (ADR 0085
+   * addendum 2026-10-27).
    *
    * Defaults to {@link defaultGemma4PleResidentBytes} (= two of the largest blocks). `0` means
    * "keep nothing resident" = the gather drops each block as soon as it is done with it, and is a
@@ -168,9 +174,11 @@ export type Gemma4PleStats = {
    * Host RAM taken by resident blocks and the row cache (the same unit as
    * {@link Gemma4PleOptions.maxResidentBytes}).
    *
-   * A whole block is reserved when its read **starts**; a row adds its bytes once read and kept.
-   * Rows are evicted when a block is reserved, so the sum of both never exceeds the existing
-   * budget. Temporary buffers during reads and bookkeeping objects such as Maps are not counted.
+   * A whole block is reserved when its read **starts**; a row adds the bytes of the buffers it keeps
+   * once kept (measured from the kept arrays, so a row that aliased a block would show up here).
+   * Blocks stay at or below the budget and rows at or below {@link ROW_CACHE_CAPACITY} × one row, so
+   * the sum is at most `budget + ROW_CACHE_CAPACITY × rowBytes` (0 when the budget is 0). Temporary
+   * buffers during reads and bookkeeping objects such as Maps are not counted.
    */
   readonly residentBytes: number;
 };
@@ -240,12 +248,20 @@ const fullBlockRows = (block: Gemma4PleBlock): number =>
 const ROW_READ_CONCURRENCY = 16;
 
 /**
- * Limit for skipping re-reads of the same token. Uses only the budget left after resident blocks
- * (ADR 0085).
+ * Row count of the LRU that skips re-reads of the same token (ADR 0085 addenda 2026-09-12 and
+ * 2026-10-27).
+ *
+ * MUST: it is headroom **outside** the block budget, not the budget's free space. With the default
+ * budget (two of the largest blocks) one resident values block and the scales block leave less than
+ * one row of free space, so a row cache bounded by that space keeps nothing and decode re-reads
+ * every row (perf-ledger H-41).
  */
 const ROW_CACHE_CAPACITY = 256;
 
-/** One row that was read (kept as quantized bytes, so the dequantization order does not change). */
+/**
+ * One row that was looked up (kept as quantized bytes, so the dequantization order does not
+ * change). Both arrays occupy their own buffers of exactly one row.
+ */
 type CachedRow = {
   readonly values: Int8Array<ArrayBuffer> | Uint8Array<ArrayBuffer>;
   readonly scales: Float32Array<ArrayBuffer>;
@@ -261,8 +277,8 @@ type Supply<T> = {
   readonly array: T;
   readonly from: number;
   /**
-   * true when obtained by a row read (= it occupies its own buffer). Only these go into the row
-   * cache.
+   * true when obtained by a row read (= it occupies its own buffer of one row). Otherwise
+   * `array` is a view of a whole block, and the row cache keeps a copy of the row instead.
    */
   readonly owned: boolean;
 };
@@ -331,7 +347,6 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   const rowValueBytes = index.values.rowBytes;
   /** **Element count** of one row of `scales` (f32 × layers). */
   const scaleStride = index.layers;
-  const rowBytes = rowValueBytes + index.scales.rowBytes;
   /**
    * Rows are kept as quantized bytes too, so the dequantization order does not change. Insertion
    * order = LRU.
@@ -346,23 +361,13 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     { readonly bytes: number; readonly data: Promise<ArrayBuffer> }
   >();
   /**
-   * Total bytes resident (including reads already started). Always moves together with `resident`.
+   * Total bytes of resident blocks (including reads already started). Always moves together with
+   * `resident`; the row cache is outside it.
    */
   let residentBytes = 0;
   let loads = 0;
   let rowReads = 0;
   let disposed = false;
-
-  const trimRows = (): void => {
-    const limit = Math.min(
-      ROW_CACHE_CAPACITY,
-      Math.floor(Math.max(0, budget - residentBytes) / rowBytes),
-    );
-    for (const oldest of rowCache.keys()) {
-      if (rowCache.size <= limit) break;
-      rowCache.delete(oldest);
-    }
-  };
 
   const release = (asset: string): void => {
     const entry = resident.get(asset);
@@ -407,8 +412,6 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
       if (residentBytes <= budget) break;
       release(oldest);
     }
-    // Whole blocks take priority; resident rows are not added on top of the existing budget.
-    trimRows();
     return data;
   };
 
@@ -631,6 +634,17 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     index.storage === "i8" ? new Int8Array(buffer) : new Uint8Array(buffer);
   const scalesView = (buffer: ArrayBuffer): Float32Array<ArrayBuffer> => new Float32Array(buffer);
 
+  /**
+   * The row of a supply in its own buffer: a row read as is, a view of a whole block copied out.
+   *
+   * MUST: copy (`slice`, not `subarray`) — keeping a view would keep the whole block alive outside
+   * the budget after its LRU eviction.
+   */
+  const ownedRow = <T extends { slice(start: number, end: number): T }>(
+    supply: Supply<T>,
+    rowUnits: number,
+  ): T => (supply.owned ? supply.array : supply.array.slice(supply.from, supply.from + rowUnits));
+
   return {
     async gather(ids: readonly number[], options: Gemma4PleReadOptions = {}): Promise<Tensor> {
       if (disposed) {
@@ -697,38 +711,45 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
         // MUST: reject only after every started read has settled (do not overlap old reads with a
         // retry or dispose after the failure).
         if (failure.cause !== undefined) throw failure.cause.error;
-        // (4) Match the two tables and write.
-        for (const id of missing) {
+        // (4) Match the two tables and write. Only the last ROW_CACHE_CAPACITY missing ids are
+        // admitted to the row cache: earlier ones would be evicted later in this same loop, so
+        // copying them is wasted work (a 768-row prefill would copy ≈ 7 MB), and the final cache
+        // contents are the same as admitting every id in order.
+        const admitFrom = missing.length - ROW_CACHE_CAPACITY;
+        for (const [at, id] of missing.entries()) {
           const positions = rows.get(id) as number[];
           const values = supplyOf(valuePlan, id, valueBlocks, valuesView, rowValueBytes);
           const scales = supplyOf(scalePlan, id, scaleBlocks, scalesView, scaleStride);
           const first = positions[0] * stride;
           writeRow(data, first, values.array, values.from, scales.array, scales.from);
           copyDuplicates(data, positions, first);
-          // Only rows read **by row reads from both tables** go into the row cache (keeping a view
-          // of a whole block would let the block itself survive outside the budget). Nothing is
-          // revived after abort or dispose.
-          if (
-            values.owned &&
-            scales.owned &&
-            !disposed &&
-            options.signal?.aborted !== true &&
-            budget - residentBytes >= rowBytes
-          ) {
+          // Every admitted row goes into the row cache, whichever path supplied it. Nothing is
+          // kept with a budget of 0, and nothing is revived after abort or dispose.
+          if (at >= admitFrom && budget > 0 && !disposed && options.signal?.aborted !== true) {
             rowCache.delete(id);
-            rowCache.set(id, { values: values.array, scales: scales.array });
-            trimRows();
+            rowCache.set(id, {
+              values: ownedRow(values, rowValueBytes),
+              scales: ownedRow(scales, scaleStride),
+            });
+            for (const oldest of rowCache.keys()) {
+              if (rowCache.size <= ROW_CACHE_CAPACITY) break;
+              rowCache.delete(oldest);
+            }
           }
         }
       }
       return { dtype: "f32", shape: [1, ids.length, index.layers, index.dim], data };
     },
     stats(): Gemma4PleStats {
+      let rowCacheBytes = 0;
+      for (const row of rowCache.values()) {
+        rowCacheBytes += row.values.buffer.byteLength + row.scales.buffer.byteLength;
+      }
       return {
         loads,
         rowReads,
         resident: resident.size,
-        residentBytes: residentBytes + rowCache.size * rowBytes,
+        residentBytes: residentBytes + rowCacheBytes,
       };
     },
     dispose(): void {

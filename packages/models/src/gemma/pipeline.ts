@@ -210,7 +210,7 @@ export type Gemma4PipelineOptions = {
    */
   readonly gpu?: GpuContext;
   /**
-   * The **upper limit of host RAM (bytes)** that PLE residency may use (LRU — ADR 0085 decision 3).
+   * The **host RAM limit (bytes)** for PLE's resident whole blocks (LRU — ADR 0085 decision 3).
    *
    * Default: two of the largest blocks (`defaultGemma4PleResidentBytes` in `ple-index.ts`). `0`
    * keeps neither whole blocks nor quantized rows. The budget changes neither values nor token
@@ -218,9 +218,10 @@ export type Gemma4PipelineOptions = {
    *
    * NOTE: taken in bytes, not as a count — the block width changes with the asset generation, so
    * "N blocks" would mean different RAM per generation (ADR 0085 addendum 2026-09-02).
-   * NOTE: whole blocks that fit the free space and quantized rows in the space still left (at most
-   * 256 rows) share the budget. Whole blocks take priority, and storing rows never evicts a block.
-   * Tightening the budget reduces row reuse and increases block re-reads (ADR 0085).
+   * NOTE: the budget bounds whole blocks only. On top of it sits a row cache of at most 256
+   * quantized rows (regular E2B 2,329,600 B, QAT E2B 1,182,720 B), kept only while the budget is
+   * above 0, so the host RAM PLE holds is at most the budget plus that headroom (ADR 0085 addendum
+   * 2026-10-27). Tightening the budget increases block re-reads (ADR 0085).
    */
   readonly maxResidentPleBytes?: number;
   /**
@@ -1944,9 +1945,9 @@ class GemmaPipeline {
    * calls return the same completion.
    *
    * MUST: PLE is released as well. Unlike GPU residency it is **host RAM**
-   * ({@link Gemma4PipelineOptions.maxResidentPleBytes} worth = by default two of the largest blocks),
-   * so without a release point "keeping one disposed handle" alone would keep that RAM for the life of
-   * the process.
+   * ({@link Gemma4PipelineOptions.maxResidentPleBytes} worth of blocks = by default two of the
+   * largest blocks, plus the row cache of at most 256 rows), so without a release point "keeping one
+   * disposed handle" alone would keep that RAM for the life of the process.
    *
    * MUST: even when one step throws, **proceed to the remaining steps**. `#disposal` keeps one promise
    * including failures (a second call returns the same rejection = there is no retry), so stopping at

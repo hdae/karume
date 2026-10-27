@@ -102,10 +102,24 @@ for (const dtype of ["i2", "i4"] as const) {
     assertEquals(blocks.stats().loads, loaded);
     assertEquals(blocks.stats().rowReads, 0);
     assertEquals(blocks.stats().resident, loaded);
-    assertEquals(blocks.stats().residentBytes, gemma4PleTotalBytes(index));
+    // Resident = every block + the row cache (the distinct rows looked up, in the 256-row headroom
+    // outside the block budget — ADR 0085 addendum 2026-10-27).
+    assertEquals(
+      blocks.stats().residentBytes,
+      gemma4PleTotalBytes(index) +
+        Math.min(256, distinct) * (index.values.rowBytes + index.scales.rowBytes),
+    );
     // 常駐しているので引き直しても読みは増えない。
-    await blocks.gather(ids);
+    const again = await blocks.gather(ids);
     assertEquals(blocks.stats().loads, loaded, "常駐している block を読み直している");
+    // The second gather is answered from the row cache (rows copied out of the packed blocks), so
+    // a packed-specific copy offset error shows up here, not in the first gather.
+    assert(again.dtype === "f32");
+    assertEquals(
+      new Uint32Array(again.data.buffer),
+      expected,
+      "a gather answered from the row cache differs from the reference",
+    );
     blocks.dispose();
     assertEquals(blocks.stats().residentBytes, 0);
     await assertRejects(() => blocks.gather(ids));
