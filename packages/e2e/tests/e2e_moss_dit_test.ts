@@ -63,7 +63,14 @@
  * The r gates and their fault injections compare with a torch reference, so they run only with
  * `KARUME_UPSTREAM_PARITY=1` (parity is proven when the family is implemented). The default run
  * keeps the checks that read no reference: `dit_text` at T = 1 (the graph was traced with T ≥ 2,
- * and nothing but the GPU runs the IR at T = 1 — plan step 2 MUST); one plan backing per Session
+ * and nothing but the GPU runs the IR at T = 1 — plan step 2 MUST), finite and pinned by a sha256
+ * row (ADR 0106 — `fixtures/references/moss.json`; the r gate is opt-in, so the row is the default
+ * lane's only check of its values — plan step 4; MUST: with `KARUME_REFERENCE` the row is written
+ * only after the r gate of the text cases, T = 1 among them, passed earlier in the same run — that
+ * gate is declared before the default run (Vitest runs a file's tests in declaration order), and
+ * otherwise the case fails before writing, naming the gate that did not pass,
+ * `assertMossRowWritable`; compare mode reads no gate); one
+ * plan backing per Session
  * over several predictions, both for a backing inside the plan backing budget (256²) and for one
  * over it (768² — the runtime keeps such a backing alone); the borrower holding no weight of its
  * own; finite outputs; and the lifetimes — `dit_text` closed before the pair opens, everything
@@ -80,7 +87,6 @@ import {
   DEFAULT_PLAN_BACKING_BUDGET_BYTES,
   type GpuContext,
   parseSafetensors,
-  type ResidentTensor,
   type Session,
   type SessionDiagnostics,
 } from "@karume/runtime";
@@ -104,6 +110,16 @@ import {
 } from "../../models/src/moss/dit-stage.ts";
 import type { MossTextEmbeddings } from "../../models/src/moss/request.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
+import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
+import {
+  f32ArtifactBytes,
+  openReferences,
+  type ReferenceSettlement,
+  referenceMismatchMessage,
+  registerReferenceGate,
+  settleOrObserve,
+} from "../../runtime/tests/helpers/reference.ts";
+import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 import {
   containerDigests,
   filePresent,
@@ -115,7 +131,9 @@ import {
   MOSS_GENERATE_GOLDENS,
   MOSS_GENERATE_SERIES,
   MOSS_TEXT_CASES,
+  assertMossRowWritable,
   MOSS_TEXT_EMBEDS,
+  withResidentLog,
   type MossDitCase,
   type MossGolden,
   mossSeriesPresent,
@@ -181,11 +199,23 @@ const FULL_BAND: number | undefined = 25;
 /** How far outside its band a fault must land (module doc "Fault injections"). */
 const FAULT_MARGIN = 2;
 
+/** The sha256 rows (environment rows — ADR 0106; shared with `e2e_moss_generate_test.ts`). */
+const references = openReferences(
+  new URL("../../models/tests/fixtures/references/moss.json", import.meta.url),
+);
+/** Artifacts and verdicts (`outputs/verify/<environment key>/<date>_moss-dit/` — safe to delete). */
+const results = openResults("moss-dit");
+
+/** The row of `dit_text` at T = 1 (the reference path: i8 weights × f32 compute; fridge-note's first token). */
+const TEXT_T1_CASE = "i8-dit_text-fridge-note-t1";
+
 const SERIES_PRESENT = mossSeriesPresent();
 const EMBEDS_PRESENT = filePresent(MOSS_TEXT_EMBEDS);
 const present = (cases: readonly { readonly name: string }[]): boolean =>
   cases.every(({ name }) => filePresent(goldenUrl(name)));
 const SMALL = MOSS_DIT_CASES.filter(({ group }) => group === "small");
+/** The id of the text cases' r gate (T = 1 among them) — the T = 1 row's write needs it passed. */
+const TEXT_PARITY_ID = "dit_text";
 const FULL = MOSS_DIT_CASES.filter(({ group }) => group === "full");
 
 const skipped = (ok: boolean, what: string, command: string): string =>
@@ -472,32 +502,6 @@ const observed = (
   };
 };
 
-/**
- * Runs `body` with every resident tensor `gpu.createResident` makes collected into the list it is
- * given (an instance property shadowing the class's method, removed afterwards).
- */
-const withResidentLog = async <T>(
-  gpu: GpuContext,
-  body: (residents: readonly ResidentTensor[]) => Promise<T>,
-): Promise<T> => {
-  assert(!Object.hasOwn(gpu, "createResident"), "createResident is already shadowed");
-  const residents: ResidentTensor[] = [];
-  const create = gpu.createResident.bind(gpu);
-  Object.defineProperty(gpu, "createResident", {
-    configurable: true,
-    value: async (byteLength: number, label?: string) => {
-      const resident = await create(byteLength, label);
-      residents.push(resident);
-      return resident;
-    },
-  });
-  try {
-    return await body(residents);
-  } finally {
-    Reflect.deleteProperty(gpu, "createResident");
-  }
-};
-
 /** The backing bytes the plan backing budget counts (`PlanBackingStats`). */
 const budgetedBytes = (diagnostics: SessionDiagnostics): number =>
   diagnostics.planBacking.residentBytes + diagnostics.planBacking.inputBytes;
@@ -521,7 +525,8 @@ describe.skipIf(!GPU_AVAILABLE || !SERIES_PRESENT || !EMBEDS_PRESENT)(
       base = { components: series.components, contract };
       embeds = await readEmbeddings();
       digests = await containerDigests();
-      gpu = await acquireTestGpu();
+      // The sha rows may be written: the adapter that runs must be the one the row key names.
+      gpu = verifyRunningGpu(await acquireTestGpu());
     });
     afterAll(async () => {
       if (gpu === undefined) return;
@@ -559,21 +564,111 @@ describe.skipIf(!GPU_AVAILABLE || !SERIES_PRESENT || !EMBEDS_PRESENT)(
         positive: embeddingsOf(allEmbeddings(), "fridge-note"),
         negative: embeddingsOf(allEmbeddings(), "negative"),
       });
+    /** The r gates that passed in this run (the text gate adds {@link TEXT_PARITY_ID} last). */
+    const parityPassed = new Set<string>();
+
+    describe.skipIf(!UPSTREAM_PARITY || !present(MOSS_TEXT_CASES))(
+      `dit_text against the f64 reference${UPSTREAM_PARITY_OPT_IN}${skipped(present(MOSS_TEXT_CASES), "text goldens", MOSS_GENERATE_GOLDENS)}`,
+      () => {
+        const runText = async (
+          testCase: MossTextCase,
+          contract?: MossDitContract,
+          edit: (data: Float32Array<ArrayBuffer>) => void = () => {},
+        ) => {
+          const loaded = await golden(testCase);
+          const data = floatsOf(loaded.file, "text_embeds", testCase.name).slice();
+          edit(data);
+          const plan = planMossDit({
+            width: 256,
+            height: 256,
+            positive: { data, shape: [testCase.tokens, 4096] },
+            negative: undefined,
+          });
+          const refined = await runMossTextStage(stateOf(contract), plan);
+          return { loaded, output: refined.positive.data };
+        };
+
+        it("each case within both bands of the six band cases (T = 1 included); the three faults leave them", async () => {
+          const rows: Row[] = [];
+          const channelRows: Row[] = [];
+          const faults: Fault[] = [];
+          const channelFaults: Fault[] = [];
+          const contract = stateOf().contract;
+          const doubled = { ...contract, ropeBase: doubledPositions(contract.ropeBase) };
+          const measure = (output: Float32Array, loaded: MossGolden, name: string) => ({
+            ratio: ratioOf(output, loaded, name),
+            channel: channelRatioOf(output, loaded, name, TEXT_OUTPUT_WIDTH),
+          });
+          const fault = (name: string, measured: ReturnType<typeof measure>) => {
+            faults.push({ name, ratio: measured.ratio });
+            channelFaults.push({ name, ratio: measured.channel });
+          };
+          for (const testCase of MOSS_TEXT_CASES) {
+            const { name, role, tokens } = testCase;
+            const { loaded, output } = await runText(testCase);
+            const measured = measure(output, loaded, name);
+            rows.push({ name, role, ratio: measured.ratio });
+            channelRows.push({ name, role, ratio: measured.channel });
+            if (role === "accept" && tokens >= 2) {
+              const positions = await runText(testCase, doubled);
+              fault(`${name} positions×2`, measure(positions.output, loaded, name));
+              const last = {
+                ...contract,
+                ropeBase: lastTokenOneFurther(contract.ropeBase, tokens),
+              };
+              const moved = await runText(testCase, last);
+              fault(`${name} last-token+1`, measure(moved.output, loaded, name));
+              const width = 4096;
+              const layout = await runText(testCase, undefined, (data) =>
+                data.copyWithin(data.length - width, data.length - 2 * width, data.length - width),
+              );
+              fault(`${name} last-row`, measure(layout.output, loaded, name));
+            }
+          }
+          assertJudged([
+            ...judge("dit_text", TEXT_BAND, rows, faults),
+            ...judge("dit_text per channel", TEXT_CHANNEL_BAND, channelRows, channelFaults),
+          ]);
+          parityPassed.add(TEXT_PARITY_ID);
+        });
+      },
+    );
 
     describe("default run (no reference read)", () => {
-      it("runs dit_text at T = 1 (the graph was traced with T ≥ 2) to a finite [1, 3072]", async () => {
+      it("runs dit_text at T = 1 (the graph was traced with T ≥ 2) to a finite [1, 3072], pinned by its sha256 row", async () => {
         const plan = planMossDit({
           width: 256,
           height: 256,
           positive: embeddingsOf(allEmbeddings(), "fridge-note", 1),
           negative: undefined,
         });
+        let settlement: ReferenceSettlement | undefined;
 
-        const refined = await runMossTextStage(stateOf(), plan);
+        await runRecordedCase(results, { id: TEXT_T1_CASE }, async () => {
+          const refined = await runMossTextStage(stateOf(), plan);
 
-        expect(refined.positive.tokens).toBe(1);
-        expect(refined.positive.data.length).toBe(TEXT_OUTPUT_WIDTH);
-        assert(refined.positive.data.every(Number.isFinite));
+          expect(refined.positive.tokens).toBe(1);
+          expect(refined.positive.data.length).toBe(TEXT_OUTPUT_WIDTH);
+          assert(refined.positive.data.every(Number.isFinite));
+          // The row is settled only after the checks above held (no row from a broken output),
+          // and written only after the text cases' r gate passed earlier in this run (module doc).
+          assertMossRowWritable(
+            references.mode,
+            { expected: [TEXT_PARITY_ID], passed: parityPassed },
+            TEXT_T1_CASE,
+          );
+          const outcome = await settleOrObserve(references, results, {
+            id: TEXT_T1_CASE,
+            artifact: `${TEXT_T1_CASE}.safetensors`,
+            bytes: f32ArtifactBytes("dit_text", [1, 1, TEXT_OUTPUT_WIDTH], refined.positive.data),
+          });
+          settlement = outcome.settlement;
+          return outcome.fields;
+        });
+
+        if (settlement?.check.status === "fail") {
+          throw new Error(referenceMismatchMessage(TEXT_T1_CASE, settlement, references));
+        }
       });
 
       it("keeps one plan backing per Session over three steps (inside the budget), the borrower holding no weight", async () => {
@@ -787,72 +882,6 @@ describe.skipIf(!GPU_AVAILABLE || !SERIES_PRESENT || !EMBEDS_PRESENT)(
       });
     });
 
-    describe.skipIf(!UPSTREAM_PARITY || !present(MOSS_TEXT_CASES))(
-      `dit_text against the f64 reference${UPSTREAM_PARITY_OPT_IN}${skipped(present(MOSS_TEXT_CASES), "text goldens", MOSS_GENERATE_GOLDENS)}`,
-      () => {
-        const runText = async (
-          testCase: MossTextCase,
-          contract?: MossDitContract,
-          edit: (data: Float32Array<ArrayBuffer>) => void = () => {},
-        ) => {
-          const loaded = await golden(testCase);
-          const data = floatsOf(loaded.file, "text_embeds", testCase.name).slice();
-          edit(data);
-          const plan = planMossDit({
-            width: 256,
-            height: 256,
-            positive: { data, shape: [testCase.tokens, 4096] },
-            negative: undefined,
-          });
-          const refined = await runMossTextStage(stateOf(contract), plan);
-          return { loaded, output: refined.positive.data };
-        };
-
-        it("each case within both bands of the six band cases (T = 1 included); the three faults leave them", async () => {
-          const rows: Row[] = [];
-          const channelRows: Row[] = [];
-          const faults: Fault[] = [];
-          const channelFaults: Fault[] = [];
-          const contract = stateOf().contract;
-          const doubled = { ...contract, ropeBase: doubledPositions(contract.ropeBase) };
-          const measure = (output: Float32Array, loaded: MossGolden, name: string) => ({
-            ratio: ratioOf(output, loaded, name),
-            channel: channelRatioOf(output, loaded, name, TEXT_OUTPUT_WIDTH),
-          });
-          const fault = (name: string, measured: ReturnType<typeof measure>) => {
-            faults.push({ name, ratio: measured.ratio });
-            channelFaults.push({ name, ratio: measured.channel });
-          };
-          for (const testCase of MOSS_TEXT_CASES) {
-            const { name, role, tokens } = testCase;
-            const { loaded, output } = await runText(testCase);
-            const measured = measure(output, loaded, name);
-            rows.push({ name, role, ratio: measured.ratio });
-            channelRows.push({ name, role, ratio: measured.channel });
-            if (role === "accept" && tokens >= 2) {
-              const positions = await runText(testCase, doubled);
-              fault(`${name} positions×2`, measure(positions.output, loaded, name));
-              const last = {
-                ...contract,
-                ropeBase: lastTokenOneFurther(contract.ropeBase, tokens),
-              };
-              const moved = await runText(testCase, last);
-              fault(`${name} last-token+1`, measure(moved.output, loaded, name));
-              const width = 4096;
-              const layout = await runText(testCase, undefined, (data) =>
-                data.copyWithin(data.length - width, data.length - 2 * width, data.length - width),
-              );
-              fault(`${name} last-row`, measure(layout.output, loaded, name));
-            }
-          }
-          assertJudged([
-            ...judge("dit_text", TEXT_BAND, rows, faults),
-            ...judge("dit_text per channel", TEXT_CHANNEL_BAND, channelRows, channelFaults),
-          ]);
-        });
-      },
-    );
-
     const ditGate = (
       group: "small" | "full",
       cases: readonly MossDitCase[],
@@ -986,3 +1015,10 @@ describe.skipIf(!GPU_AVAILABLE || !SERIES_PRESENT || !EMBEDS_PRESENT)(
     ditGate("full", FULL, FULL_BAND);
   },
 );
+
+/** The sha rows this file settles (the default run's `dit_text` at T = 1). */
+const CASE_IDS: readonly string[] = [TEXT_T1_CASE];
+const RUNNABLE = GPU_AVAILABLE && SERIES_PRESENT && EMBEDS_PRESENT;
+if (RUNNABLE) references.warnMissing(CASE_IDS);
+// A missing row of this environment is not a silent pass (ADR 0005's gatekeeper form).
+registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });

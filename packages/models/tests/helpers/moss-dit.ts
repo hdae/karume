@@ -8,11 +8,14 @@
  * disappear silently — the Wan rule, `wan-ti2v-dit.ts`).
  */
 
+import { assert } from "@std/assert";
 import { isNotFound, readDirSync, readFile, readRange, statSync } from "@karume/test-support/fs";
 import {
+  type GpuContext,
   type OpenedContainer,
   parseSafetensors,
   prepareContainer,
+  type ResidentTensor,
   type SafetensorsFile,
   type TensorView,
 } from "@karume/runtime";
@@ -24,6 +27,7 @@ import {
 } from "../../../runtime/tests/helpers/container-files.ts";
 import type { ModelComponent } from "../../src/hub/components.ts";
 import type { MossDitComponents } from "../../src/moss/dit-stage.ts";
+import type { MossTrainingGrid } from "../../src/moss/dit-timestep.ts";
 import { seriesGraph } from "./series-graphs.ts";
 
 export const MOSS_SERIES_NAME = "moss-image-sft-i8-dyn";
@@ -340,6 +344,74 @@ export const openMossSeries = async (): Promise<MossSeries> => {
       ditText: componentOf(opened.dit_text, seriesGraph(MOSS_SERIES_NAME, "dit_text")),
     },
   };
+};
+
+/**
+ * A strictly descending training grid of `points` from 1 (σ_i = 1 − i·(1 − 1/points)/(points − 1),
+ * timesteps σ × points) for the tests that need a grid's structure but not upstream's values.
+ */
+export const syntheticTrainingGrid = (points: number): MossTrainingGrid => {
+  const sigmas = Float32Array.from({ length: points }, (_, index) =>
+    Math.fround(1 - (index * (1 - 1 / points)) / (points - 1)),
+  );
+  return {
+    points,
+    width: 1,
+    sigmas,
+    timesteps: sigmas.map((sigma) => Math.fround(sigma * points)),
+    sinusoid: new Float32Array(points),
+  };
+};
+
+/**
+ * Runs `body` with every resident tensor `gpu.createResident` makes collected into the list it is
+ * given (an instance property shadowing the class's method, removed afterwards).
+ */
+export const withResidentLog = async <T>(
+  gpu: GpuContext,
+  body: (residents: readonly ResidentTensor[]) => Promise<T>,
+): Promise<T> => {
+  assert(!Object.hasOwn(gpu, "createResident"), "createResident is already shadowed");
+  const residents: ResidentTensor[] = [];
+  const create = gpu.createResident.bind(gpu);
+  Object.defineProperty(gpu, "createResident", {
+    configurable: true,
+    value: async (byteLength: number, label?: string) => {
+      const resident = await create(byteLength, label);
+      residents.push(resident);
+      return resident;
+    },
+  });
+  try {
+    return await body(residents);
+  } finally {
+    Reflect.deleteProperty(gpu, "createResident");
+  }
+};
+
+/**
+ * MUST: a run that writes this family's sha rows (`KARUME_REFERENCE=write` or `rewrite` — `mode`)
+ * settles a row only after every upstream parity case of the same test file (`parity.expected`) has
+ * passed earlier in the same run (`parity.passed` — a parity test adds its id only after all its
+ * assertions held, and the file declares its parity before its row-settling tests). A row is
+ * written the moment it is settled and the default lane checks only the shape and finiteness of an
+ * output, so a broken but finite build would otherwise be pinned. Compare mode (`mode` undefined)
+ * does not depend on the parity.
+ */
+export const assertMossRowWritable = (
+  mode: string | undefined,
+  parity: { readonly expected: readonly string[]; readonly passed: ReadonlySet<string> },
+  caseId: string,
+): void => {
+  if (mode === undefined) return;
+  const failed = parity.expected.filter((id) => !parity.passed.has(id));
+  if (failed.length === 0) return;
+  throw new Error(
+    `${caseId}: KARUME_REFERENCE=${mode} writes MOSS-Image sha rows only after every upstream` +
+      " parity case of this file passed earlier in the same run — not passed:" +
+      ` ${failed.join(", ")} (rerun the whole file with KARUME_UPSTREAM_PARITY=1 and the parity` +
+      " goldens present, so that a finite but wrong output is not pinned)",
+  );
 };
 
 /** The newest stage-0 record directory (`<date>_stage0-reference`), or undefined. */

@@ -8,10 +8,12 @@
  * disappear silently — the Wan rule).
  */
 
+import { readFile } from "@karume/test-support/fs";
 import { parseSafetensors, type SafetensorsFile } from "@karume/runtime";
 import {
   modelPresent,
   openSeriesContainer,
+  resolveParts,
 } from "../../../runtime/tests/helpers/container-files.ts";
 import {
   MOSS_VAE_DECODER_ATTN,
@@ -47,6 +49,23 @@ const modelUrl = (component: ComponentDir): URL => new URL(`${component}/model.k
 /** Every container of the series is written. */
 export const mossVaeSeriesPresent = (): boolean =>
   MOSS_VAE_COMPONENTS.every((c) => modelPresent(modelUrl(c)));
+
+/**
+ * The sha256 of each VAE container's part 0 (the two documents — they name every block's sha256),
+ * as the end-to-end goldens of `moss.few_step_ref` record them beside the DiT's
+ * (`containerDigests` of `./moss-dit.ts`).
+ */
+export const mossVaeContainerDigests = async (): Promise<Readonly<Record<string, string>>> => {
+  const digests: Record<string, string> = {};
+  for (const component of MOSS_VAE_COMPONENTS) {
+    const [part0] = resolveParts(modelUrl(component));
+    const digest = await crypto.subtle.digest("SHA-256", await readFile(part0));
+    digests[component] = [...new Uint8Array(digest)]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+  }
+  return digests;
+};
 
 export type MossVaeRole = "band" | "accept" | "cap";
 
