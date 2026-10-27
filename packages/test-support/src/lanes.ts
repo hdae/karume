@@ -10,7 +10,8 @@
  * name carries the family's token, in `packages/models/tests` (host-side tests of the family) and in
  * `packages/e2e/tests` (real-weight end-to-end tests). Lanes may overlap with each other (the QAT
  * lane shares one file with gemma4) but never with `core`; `verify_lanes_test.ts` checks the
- * coverage, the disjointness and that no lane is empty.
+ * coverage, the disjointness, that no lane is empty, and that no family row is dropped (core holds
+ * only the GPU-free end-to-end gates; a family lane without end-to-end tests is named there).
  */
 
 export type Lane = {

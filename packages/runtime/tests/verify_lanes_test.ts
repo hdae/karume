@@ -16,6 +16,11 @@
 //   `*.test.ts` / `test.ts` の綴りは**収集されないまま**緑に見える。母集団を広げるのではなく
 //   拒否側で止める。
 //
+// Two more checks guard the lane table itself. Coverage and disjointness still hold when a family
+// row is dropped from `FAMILY_LANES` (its files fall back into core), so core may hold no
+// end-to-end test but the GPU-free gates of `CORE_E2E_TESTS`, and a family lane that claims no
+// end-to-end test is named in `HOST_ONLY_FAMILY_LANES` and must exist.
+//
 // 真実源は `LANES` そのもの（`vite.config.ts` の projects は `laneProjects()` で同じ表から作る）。
 // glob の展開はこの門が自前で行う（`*` は `/` を跨がず、区切りを伴う `**` は 0 個以上のディレクトリ）。
 
@@ -178,6 +183,52 @@ test("レーンの門: テストの綴りは *_test.ts だけ", () => {
     [],
     "テストに見えるのに Vitest の include（*_test.ts）に入らない綴りのファイルがある" +
       "（収集されないまま緑に見える）。ファイル名を <name>_test.ts へ揃えること。",
+  );
+});
+
+const E2E_DIR = "packages/e2e/tests/";
+
+/**
+ * The end-to-end tests that belong in core: gates over pure functions and manifests that need
+ * neither a GPU nor real weights. Every other file of `packages/e2e/tests` runs real weights and
+ * belongs to a family lane, so a dropped family row or a new e2e file whose name misses its
+ * family's token turns the gate red instead of moving real-weight runs into core.
+ */
+const CORE_E2E_TESTS = [
+  "packages/e2e/tests/e2e_ab_gate_test.ts",
+  "packages/e2e/tests/e2e_assets_gate_test.ts",
+  "packages/e2e/tests/e2e_session_options_mirror_test.ts",
+];
+
+/**
+ * Family lanes that claim no end-to-end test (their real-asset tests are host-side ones in
+ * `packages/models/tests`): dropping such a row moves no e2e file into core, so the lane is named
+ * here and must exist in `LANES`.
+ */
+const HOST_ONLY_FAMILY_LANES = ["models:umt5"];
+
+test("lane gate: core holds no end-to-end test but the GPU-free gates", () => {
+  assertEquals(
+    sorted(core).filter((file) => file.startsWith(E2E_DIR)),
+    CORE_E2E_TESTS,
+    "core collects an end-to-end test that is not a GPU-free gate (a family row was dropped from " +
+      "FAMILY_LANES, or the file name misses its family's token): restore the lane or rename the file",
+  );
+});
+
+test("lane gate: every family lane claims an end-to-end test or is a named host-only lane", () => {
+  const names = new Set(lanes.map((lane) => lane.name));
+  for (const name of HOST_ONLY_FAMILY_LANES) {
+    assert(names.has(name), `${name} is missing from LANES (its tests fall back into core)`);
+  }
+  const withoutE2e = lanes
+    .filter((lane) => ![...lane.files].some((file) => file.startsWith(E2E_DIR)))
+    .map((lane) => lane.name);
+  assertEquals(
+    sorted(withoutE2e),
+    sorted(HOST_ONLY_FAMILY_LANES),
+    "a family lane claims no end-to-end test: name it in HOST_ONLY_FAMILY_LANES so that dropping " +
+      "its row is caught",
   );
 });
 
