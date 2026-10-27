@@ -377,6 +377,12 @@
       "attrs": ["output_size"]
     },
     {
+      "op": "group_norm",
+      "arity": 3,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["eps", "num_groups"]
+    },
+    {
       "op": "gru_scan",
       "arity": 4,
       "dtypes": { "kind": "uniform", "accept": ["f32"] },
@@ -877,6 +883,20 @@
         null,
         []
       ]
+    },
+    {
+      "op": "group_norm",
+      "attr": "num_groups",
+      "why": "a positive integer (dividing the channels is the shape rule's check, where the input is known)",
+      "accept": [1, 3, 32],
+      "reject": [0, -1, 1.5, "32", true, null, [32]]
+    },
+    {
+      "op": "group_norm",
+      "attr": "eps",
+      "why": "finite positive number that rounds to a normal f32 (the normalization ops' rule)",
+      "accept": [0.000001, 0.00001, 0.5],
+      "reject": [0, -0.000001, "1e-6", null, true, [0.000001]]
     },
     {
       "op": "static_quantize",
@@ -3261,6 +3281,63 @@
       "attrs": { "output_size": [7, 9] },
       "throws": true,
       "why": "a length-0 spatial axis cannot be interpolated (scale becomes negative as (0-1)/(out-1))"
+    },
+    {
+      "op": "group_norm",
+      "ins": [[2, 6, 3, 5], [6], [6]],
+      "attrs": { "num_groups": 3, "eps": 0.000001 },
+      "outs": [[2, 6, 3, 5]],
+      "why": "NCHW with several samples and groups: the shape passes through"
+    },
+    {
+      "op": "group_norm",
+      "ins": [[1, 384, "S"], [384], [384]],
+      "attrs": { "num_groups": 32, "eps": 0.000001 },
+      "bindings": { "S": 1024 },
+      "outs": [[1, 384, "S"]],
+      "why": "a symbolic trailing axis (the VAE mid attention's [1,C,S] form)"
+    },
+    {
+      "op": "group_norm",
+      "ins": [[4, 8], [8], [8]],
+      "attrs": { "num_groups": 2, "eps": 0.00001 },
+      "outs": [[4, 8]],
+      "why": "rank 2 (no trailing axis — a group is C/G elements of one sample)"
+    },
+    {
+      "op": "group_norm",
+      "ins": [[1, 6, 4], [6], [6]],
+      "attrs": { "num_groups": 4, "eps": 0.00001 },
+      "throws": true,
+      "why": "the groups do not divide the channels (C/G would truncate and shift each group's band)"
+    },
+    {
+      "op": "group_norm",
+      "ins": [[1, 6, 4], [3], [6]],
+      "attrs": { "num_groups": 3, "eps": 0.00001 },
+      "throws": true,
+      "why": "the weight is not [C]"
+    },
+    {
+      "op": "group_norm",
+      "ins": [[1, 6, 4], [6], [2, 3]],
+      "attrs": { "num_groups": 3, "eps": 0.00001 },
+      "throws": true,
+      "why": "the bias is not rank-1 [C]"
+    },
+    {
+      "op": "group_norm",
+      "ins": [[6], [6], [6]],
+      "attrs": { "num_groups": 3, "eps": 0.00001 },
+      "throws": true,
+      "why": "rank 1 has no channel axis"
+    },
+    {
+      "op": "group_norm",
+      "ins": [[1, 6, 0], [6], [6]],
+      "attrs": { "num_groups": 3, "eps": 0.00001 },
+      "throws": true,
+      "why": "an axis of length 0 (a group of 0 elements has the mean 0/0)"
     },
 
     {

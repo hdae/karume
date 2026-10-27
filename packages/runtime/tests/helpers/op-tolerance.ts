@@ -96,6 +96,7 @@ const OP_TOLERANCE: Readonly<Record<string, Tolerance>> = {
   gelu_tanh: COMPOSITE,
   silu: COMPOSITE,
   layer_norm: COMPOSITE,
+  group_norm: COMPOSITE,
   rms_norm: COMPOSITE,
   gru_scan: COMPOSITE,
   gru_scan_reverse: COMPOSITE,

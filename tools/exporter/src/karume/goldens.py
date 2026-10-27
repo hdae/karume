@@ -62,6 +62,7 @@ from karume.golden_models import (
     FusedAttention,
     GatedDeltaScanBlock,
     GatherLastDim,
+    GroupNormBlock,
     GruScanBlock,
     Int8Weights,
     IntCast,
@@ -287,7 +288,7 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
         name="fused_attention",
         build=lambda _: FusedAttention(),
         example_inputs=_fused_attention_inputs,
-        # Only this golden preserves SDPA (adding it to the default 12 ops of
+        # Only this golden preserves SDPA (adding it to the default 13 ops of
         # `PRESERVED_OP_PREFIXES` would make graphs with masked SDPA unexportable — ADR 0023).
         preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
     ),
@@ -476,6 +477,18 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
             _uniform(g, 1, 3, 4, 5, low=-1.5, high=1.5),
             _uniform(g, 1, 2, 1, 6, low=-1.5, high=1.5),
         ),
+    ),
+    GoldenSpec(
+        name="group_norm_block",
+        build=GroupNormBlock,
+        # x straddles 0 with a symbolic third axis; narrow sits at a mean offset of 3 (a one-pass
+        # variance would lose digits there) with 520 elements per channel (its group spans two
+        # partial chunks).
+        example_inputs=lambda g: (
+            _uniform(g, 2, GroupNormBlock.CHANNELS, GOLDEN_T, 5, low=-1.5, high=1.5),
+            _uniform(g, 1, GroupNormBlock.NARROW_CHANNELS, 520, low=2.0, high=4.0),
+        ),
+        dynamic_shapes=({2: _DYNAMIC_T}, None),
     ),
     GoldenSpec(
         name="i8_weights",

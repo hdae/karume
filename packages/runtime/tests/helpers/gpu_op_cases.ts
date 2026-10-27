@@ -1446,6 +1446,37 @@ export const FUSED_CASES: readonly OpCase[] = [
   },
 ];
 
+/**
+ * group_norm (ADR NNNN decision 7): several samples and groups (a group indexed without its
+ * sample, or a channel without its group, reads another group's statistics or affine), a rank-3
+ * input whose groups span two partial chunks (2 × 600 = 1,200 > 1,024 elements), and a rank-2
+ * input (no trailing axis). The four-point check and the large group are
+ * `gpu_group_norm_test.ts`.
+ */
+export const GROUP_NORM_CASES: readonly OpCase[] = [
+  {
+    name: "group_norm [2,6,3,5] 3 groups affine",
+    op: "group_norm",
+    inputs: [fill([2, 6, 3, 5], SIGNED), fill([6], POSITIVE), fill([6], SIGNED)],
+    outShapes: [[2, 6, 3, 5]],
+    attrs: { num_groups: 3, eps: 1e-6 },
+  },
+  {
+    name: "group_norm [1,4,600] 2 groups spanning two chunks",
+    op: "group_norm",
+    inputs: [fill([1, 4, 600], SIGNED), fill([4], NONZERO), fill([4], SIGNED)],
+    outShapes: [[1, 4, 600]],
+    attrs: { num_groups: 2, eps: 1e-5 },
+  },
+  {
+    name: "group_norm [5,8] rank 2, 4 groups",
+    op: "group_norm",
+    inputs: [fill([5, 8], SIGNED), fill([8], POSITIVE), fill([8], SIGNED)],
+    outShapes: [[5, 8]],
+    attrs: { num_groups: 4, eps: 1e-5 },
+  },
+];
+
 // 双線形 resample（第 1 層 op）。新規原子なので A/B オラクルが無く、ここでの CPU 参照突合と
 // golden の torch 突合が主門になる。MUST: 拡大 / 縮小 / 端の潰し / scale 0 の軸を全て踏み、
 // B·C > 1 で**平面添字の畳み方**（N·C を 1 本へ潰す形）も踏む。

@@ -911,6 +911,29 @@ export const UPSAMPLE_BILINEAR2D_ATTRS: AttrSchema = {
   },
 };
 
+/**
+ * The attrs of group_norm (Core ATen layer — ADR NNNN decision 7): `num_groups` (a positive
+ * integer; dividing the channel count is the shape rule's check, where the input is known) and
+ * `eps` (the normalisation ops' rule — a finite positive number that rounds to a normal f32).
+ */
+export const GROUP_NORM_ATTRS: AttrSchema = {
+  eps: (value, where) => {
+    assertEps(value, where, "group_norm");
+  },
+  num_groups: (value, where) => {
+    assertIntegerAttr(value, where, 1);
+  },
+};
+
+/** The attrs of a group_norm node (assumes {@link assertNodeContract} has already checked them). */
+export const groupNormAttrs = (
+  attrs: Readonly<Record<string, unknown>>,
+  where: string,
+): { readonly groups: number; readonly eps: number } => ({
+  groups: assertIntegerAttr(attrValue(attrs, "num_groups"), `${where} attrs.num_groups`, 1),
+  eps: assertEps(attrValue(attrs, "eps"), `${where} attrs.eps`, "group_norm"),
+});
+
 /** The output spatial size (`[Hout, Wout]`) of an upsample_bilinear2d node. */
 export type UpsampleBilinear2dAttrs = {
   readonly outputSize: readonly [number, number];

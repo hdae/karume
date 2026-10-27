@@ -386,6 +386,25 @@ export const DEFORM_CONV2D_OP = "deform_conv2d";
 export const UPSAMPLE_BILINEAR2D_OP = "upsample_bilinear2d";
 
 /**
+ * Group normalisation over channel groups of NCHW-like layouts (a Core ATen layer op —
+ * `aten.native_group_norm`; the exporter takes the preserved `aten.group_norm` — ADR NNNN
+ * decision 7). `x[N,C,…] → [N,C,…]` (rank ≥ 2, any trailing extent), with `weight[C]` /
+ * `bias[C]` and attrs `num_groups` / `eps`:
+ *
+ * ```
+ * group g of sample n = channels g·C/G … (g+1)·C/G − 1, every trailing element (contiguous)
+ * out = (x − mean_ng) / sqrt(var_ng + eps) · weight[c] + bias[c]
+ * ```
+ *
+ * MUST: **the population variance** (divide by the group's element count — the normalisation-layer
+ * convention, as for layer_norm) and **two passes** (mean, then the sum of squared deviations — a
+ * group holds millions of elements in a VAE at full resolution, where `E[x²] − E[x]²` cancels).
+ * MUST: the affine is always present (**arity fixed at 3**, as layer_norm); the exporter synthesises
+ * ones / zeros for a module without affine. `C` divisible by `num_groups` is a shape-rule check.
+ */
+export const GROUP_NORM_OP = "group_norm";
+
+/**
  * The **hidden-side scan** of a GRU (extended composite layer — ADR 0056). Folds only the sequential
  * recurrence over time into one node and **has no input-side GEMM** (the caller prepares
  * `gi = x·W_ihᵀ + b_ih` with the existing `linear`).

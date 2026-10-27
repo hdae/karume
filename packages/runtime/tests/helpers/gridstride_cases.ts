@@ -71,6 +71,17 @@ import {
 } from "../../src/kernels/gather.ts";
 import { LAYER_NORM_KEY, LAYER_NORM_WGSL, layerNormParams } from "../../src/kernels/layer-norm.ts";
 import {
+  GROUP_NORM_APPLY_KEY,
+  GROUP_NORM_APPLY_WGSL,
+  GROUP_NORM_CHUNK,
+  GROUP_NORM_PARTIAL_KEY,
+  GROUP_NORM_PARTIAL_WGSL,
+  GROUP_NORM_WORKGROUP_SIZE,
+  groupNormApplyParams,
+  groupNormLayout,
+  groupNormPartialParams,
+} from "../../src/kernels/group-norm.ts";
+import {
   RMS_NORM_128_KEY,
   RMS_NORM_128_WGSL,
   RMS_NORM_KEY,
@@ -1020,6 +1031,69 @@ export const layerNormCase = (): DegenerateCase => {
       [rows, dim],
     ),
     natural: rows,
+    groups: 2,
+  };
+};
+
+/**
+ * group_norm's partial stage (pass 1 — the squared deviations from a given mean), one dispatch of
+ * the node's five: 4 rows × 25 chunks of 1,024. The total stage writes only every other statistic
+ * per pass, so it is not a full-write kernel for this harness; its wrap is
+ * `gpu_group_norm_test.ts`'s (a device with 3 workgroups per dimension, bit-identical).
+ */
+export const groupNormPartialCase = (): DegenerateCase => {
+  const shape = [1, 8, 12_800];
+  const layout = groupNormLayout(shape, 4);
+  const x = fill(shape, (i) => ((i * 5) % 17) * 0.5 - 4 + (i % 3));
+  const means = [0.25, -1.5, 2, 0.75];
+  const stats = Float32Array.from(means.flatMap((mean) => [mean, 0]));
+  const partials = new Float32Array(layout.rows * layout.chunks);
+  for (let row = 0; row < layout.rows; row += 1) {
+    for (let i = 0; i < layout.length; i += 1) {
+      const deviation = x.data[row * layout.length + i] - stats[2 * row];
+      partials[row * layout.chunks + Math.floor(i / GROUP_NORM_CHUNK)] += deviation * deviation;
+    }
+  }
+  return {
+    name: "group_norm partial (pass 1)",
+    key: GROUP_NORM_PARTIAL_KEY,
+    wgsl: GROUP_NORM_PARTIAL_WGSL,
+    params: groupNormPartialParams(layout, 1),
+    uniformParams: true,
+    inputs: [x, { dtype: "f32", shape: [stats.length], data: stats }],
+    expected: { dtype: "f32", shape: [partials.length], data: partials },
+    natural: layout.rows * layout.chunks,
+    groups: 2,
+  };
+};
+
+/** group_norm's apply stage (the grid-stride over every element, given the row statistics). */
+export const groupNormApplyCase = (): DegenerateCase => {
+  const shape = [2, 6, 50, 40];
+  const layout = groupNormLayout(shape, 3);
+  const x = fill(shape, SIGNED);
+  const stats = Float32Array.from({ length: layout.rows * 2 }, (_, i) =>
+    i % 2 === 0 ? 0.25 * (i - 5) : 0.5 + 0.125 * i,
+  );
+  const weight = fill([6], POSITIVE);
+  const bias = fill([6], SIGNED);
+  const out = new Float32Array(layout.count);
+  for (let e = 0; e < layout.count; e += 1) {
+    const row = Math.floor(e / layout.length);
+    const channel =
+      (row % layout.groups) * layout.perGroup + Math.floor((e % layout.length) / layout.inner);
+    out[e] =
+      (x.data[e] - stats[2 * row]) * stats[2 * row + 1] * weight.data[channel] + bias.data[channel];
+  }
+  return {
+    name: "group_norm apply",
+    key: GROUP_NORM_APPLY_KEY,
+    wgsl: GROUP_NORM_APPLY_WGSL,
+    params: groupNormApplyParams(layout),
+    uniformParams: true,
+    inputs: [x, { dtype: "f32", shape: [stats.length], data: stats }, weight, bias],
+    expected: { dtype: "f32", shape: [...shape], data: out },
+    natural: Math.ceil(layout.count / GROUP_NORM_WORKGROUP_SIZE),
     groups: 2,
   };
 };

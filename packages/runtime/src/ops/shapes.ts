@@ -10,6 +10,7 @@ import {
   cumsumDim,
   deformConv2dAttrs,
   flipDim,
+  groupNormAttrs,
   layerNormAttrs,
   padAttrs,
   permuteDims,
@@ -1339,6 +1340,41 @@ export const computeOutputShape = (
         }
       }
       return sole([x[0], x[1], outputSize[0], outputSize[1]]);
+    }
+    case "groupNorm": {
+      const [x, weight, bias] = inputShapes;
+      const { groups } = groupNormAttrs(context.attrs ?? {}, where);
+      if (x.length < 2) {
+        throw new OpContractError(
+          `${where}: group_norm expects x[N,C,…] (rank 2 or more): [${x.join(",")}]`,
+        );
+      }
+      // MUST: an axis of length 0 does not pass — a group of 0 elements has the mean 0/0 = NaN
+      // (the same narrowing as rms_norm), and the kernel's group length would be 0.
+      if (x.some((dim) => dim === 0)) {
+        throw new OpContractError(
+          `${where}: group_norm cannot normalise an input with an axis of length 0 ([${x.join(",")}])`,
+        );
+      }
+      const channels = x[1];
+      // MUST: the groups divide the channels — otherwise the kernel's `C/G` truncates and the
+      // channel band of each group silently shifts (the conv groups discipline).
+      if (channels % groups !== 0) {
+        throw new OpContractError(
+          `${where}: group_norm num_groups ${groups} does not divide the channels ${channels} ([${x.join(",")}])`,
+        );
+      }
+      for (const [name, shape] of [
+        ["weight", weight],
+        ["bias", bias],
+      ] as const) {
+        if (shape.length !== 1 || shape[0] !== channels) {
+          throw new OpContractError(
+            `${where}: group_norm ${name} [${shape.join(",")}] is not [C] for input [${x.join(",")}]`,
+          );
+        }
+      }
+      return sole([...x]);
     }
     case "gruScan": {
       const [gi, initial, weight, bias] = inputShapes;

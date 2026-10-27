@@ -47,7 +47,15 @@ import { parseDim, solveDim } from "../format/dims.ts";
 import type { IrDim, IrGraph } from "../format/ir.ts";
 import { toSizeClass } from "../gpu/arena.ts";
 import { parseStorageRoles } from "../gpu/pipeline-cache.ts";
-import { numel, RUNTIME_SUPPORT, stateReadonly, stateWindow, topkK } from "../ops.ts";
+import {
+  groupNormAttrs,
+  numel,
+  RUNTIME_SUPPORT,
+  stateReadonly,
+  stateWindow,
+  topkK,
+} from "../ops.ts";
+import { groupNormLayout, groupNormTempBytes } from "../kernels/group-norm.ts";
 import { assertRuntimeSupport } from "../ops/support.ts";
 import {
   type AttentionTokenMajor,
@@ -1384,6 +1392,22 @@ const transientSlotBytes = (
       const program = fusedAttentionProgram(node, reads, outputRefs, limit, knobs, tokenMajor);
       temps.push(...program.temps);
       dispatches.push(...program.dispatches);
+    } else if (node.contract.kind === "groupNorm") {
+      // The two in-node temporaries of group_norm (partial sums, per-row mean / rstd) over its
+      // five dispatches, with the lifetimes `buildGroupNorm` declares (the same layout function
+      // — kernels/group-norm.ts).
+      const { groups } = groupNormAttrs(node.node.attrs, `nodes (${node.node.op})`);
+      const bytes = groupNormTempBytes(groupNormLayout(node.outputs[0].shape, groups));
+      const partials: TransientRef = { kind: "temp", id: temps.length };
+      const stats: TransientRef = { kind: "temp", id: temps.length + 1 };
+      temps.push({ byteLength: bytes.partials, allocBefore: 0, releaseAfter: 3 });
+      temps.push({ byteLength: bytes.stats, allocBefore: 0, releaseAfter: 4 });
+      const [x] = reads;
+      for (let pass = 0; pass < 2; pass += 1) {
+        dispatches.push({ reads: [x, stats], writes: [partials] });
+        dispatches.push({ reads: [partials], writes: [stats] });
+      }
+      dispatches.push({ reads: [x, stats, ...reads.slice(1)], writes: outputRefs });
     } else if (!isAlias && selectionSplitTempBytes(node) > 0) {
       // Reduce from the partial maxima to the smallest index. topk's merge also reads the value
       // bits of the original input.

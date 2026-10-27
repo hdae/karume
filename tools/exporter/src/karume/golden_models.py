@@ -1021,6 +1021,44 @@ class BilinearResize(nn.Module):
         )
 
 
+class GroupNormBlock(nn.Module):
+    """torch comparison of group_norm (Core ATen layer — ADR NNNN decision 7).
+
+    A new atomic op has no existing path to pair with, so this golden (torch's values baked in) is
+    the end-to-end check; the kernel's own four-point check is the runtime's GPU test. The shapes:
+
+    MUST: **two samples and several groups** (x is `[2, 6, T, 5]` with 3 groups of 2 channels): a
+    kernel that indexes groups without the sample, or channels without the group, reads another
+    group's statistics or affine.
+    MUST: **a symbolic spatial axis** (T) — the group length is `2·T·5`, known at binding only.
+    MUST: the affine is away from ones / zeros and differs per channel, and `narrow` is
+    `[1, 2, 520]` rank 3 in one group without affine (ones / zeros synthesized — ADR 0016) with a
+    **group length above one chunk of the partial stage** (2 × 520 = 1,040 > 1,024 — the first
+    workgroup of a row is not its only one) and a mean offset. (Sizes kept under the 16 KiB per
+    fixture file.)
+    """
+
+    CHANNELS = 6
+    GROUPS = 3
+    EPS = 1e-6
+    NARROW_CHANNELS = 2
+    NARROW_GROUPS = 1
+    NARROW_EPS = 1e-5
+
+    def __init__(self, generator: torch.Generator) -> None:
+        super().__init__()
+        self.norm = nn.GroupNorm(self.GROUPS, self.CHANNELS, eps=self.EPS)
+        with torch.no_grad():
+            self.norm.weight.copy_(_uniform(generator, self.CHANNELS, low=0.4, high=1.6))
+            self.norm.bias.copy_(_uniform(generator, self.CHANNELS, low=-0.5, high=0.5))
+        self.plain = nn.GroupNorm(
+            self.NARROW_GROUPS, self.NARROW_CHANNELS, eps=self.NARROW_EPS, affine=False
+        )
+
+    def forward(self, x: torch.Tensor, narrow: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        return self.norm(x), self.plain(narrow)
+
+
 class Int8Weights(nn.Module):
     """The golden that exercises, with i8 storage (per-channel scale), 5 of the 6 ops of
     `WEIGHT_SLOTS`, all but conv3d (ADR 0019; i8 conv3d is held by the runtime's GPU tests).

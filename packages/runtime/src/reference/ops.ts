@@ -39,6 +39,7 @@ import {
   describeArity,
   flipDim,
   type GruScanOpName,
+  groupNormAttrs,
   layerNormAttrs,
   maskedFillValue,
   numel,
@@ -1015,6 +1016,57 @@ export const referenceLayerNorm = (
     const inv = 1 / Math.sqrt(squares / dim + Math.fround(eps));
     for (let i = 0; i < dim; i += 1) {
       out[base + i] = Math.fround((x.data[base + i] - mean) * inv * weight.data[i] + bias.data[i]);
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
+ * group_norm (channel groups of `x[N,C,…]`, per-channel affine — ADR NNNN decision 7). Group g of
+ * sample n is the contiguous run of channels `g·C/G … (g+1)·C/G − 1` with every trailing element;
+ * the variance is the population variance, as layer_norm's.
+ *
+ * MUST: two passes (mean → sum of squared deviations) accumulated in f64, rounded once when the
+ * output is stored. The GPU side sums in f32 through a fixed two-stage tree; a reference with the
+ * same shortcut (or the one-pass `E[x²] − E[x]²`) would let the errors cancel.
+ * MUST: write the reciprocal square root as `1 / Math.sqrt(…)` (the same discipline as rms_norm).
+ */
+export const referenceGroupNorm = (
+  x: RefTensor,
+  weight: RefTensor,
+  bias: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("group_norm");
+  for (const input of [x, weight, bias]) assertDtype(contract, input.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape, weight.shape, bias.shape], "reference", {
+    attrs,
+  })[0];
+  const { groups, eps } = groupNormAttrs(attrs, "reference");
+  const channels = shape[1];
+  const inner = numel(shape.slice(2));
+  const perGroup = channels / groups;
+  const length = perGroup * inner;
+  const rows = shape[0] * groups;
+  const out = new Float32Array(numel(shape));
+  for (let row = 0; row < rows; row += 1) {
+    const base = row * length;
+    let sum = 0;
+    for (let i = 0; i < length; i += 1) sum += x.data[base + i];
+    const mean = sum / length;
+    let squares = 0;
+    for (let i = 0; i < length; i += 1) {
+      const deviation = x.data[base + i] - mean;
+      squares += deviation * deviation;
+    }
+    // eps is a scalar attr carried as an f32 word (the layer_norm discipline)
+    const inv = 1 / Math.sqrt(squares / length + Math.fround(eps));
+    const firstChannel = (row % groups) * perGroup;
+    for (let i = 0; i < length; i += 1) {
+      const channel = firstChannel + Math.floor(i / inner);
+      out[base + i] = Math.fround(
+        (x.data[base + i] - mean) * inv * weight.data[channel] + bias.data[channel],
+      );
     }
   }
   return { dtype: "f32", shape, data: out };
@@ -2030,6 +2082,8 @@ export const applyReferenceOpOutputs = (
       );
     case "upsampleBilinear2d":
       return sole(referenceUpsampleBilinear2d(inputs[0], attrs));
+    case "groupNorm":
+      return sole(referenceGroupNorm(inputs[0], inputs[1], inputs[2], attrs));
     case "gruScan":
       return sole(referenceGruScan(contract.name, inputs[0], inputs[1], inputs[2], inputs[3]));
     case "gatedDeltaScan":

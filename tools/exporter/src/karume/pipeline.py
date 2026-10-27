@@ -47,7 +47,7 @@ def export_module(
 ) -> tuple[IrGraph, dict[str, torch.Tensor]]:
     """Convert an nn.Module to an IR graph + stored tensors.
 
-    `preserved` is the set of prefixes of high-level ops that stop decomposition (12 ops by
+    `preserved` is the set of prefixes of high-level ops that stop decomposition (13 ops by
     default). It can be replaced **per target** for fused attention (ADR 0023): only targets that
     pass `PRESERVED_OP_PREFIXES_WITH_ATTENTION` keep SDPA — widening the table globally would make
     graphs with a masked SDPA impossible to export through the fail-loudly of `_h_attention`.

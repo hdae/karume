@@ -89,7 +89,8 @@ either). It will be resolved from M1-P2 on, when the per-op assignment is fixed 
   `scaled_dot_product_attention` took it from 11 to 12 in ADR 0023).
   **Only SDPA (the 12th) is not on the default preservation list** (`PRESERVED_OP_PREFIXES` holds
   the 12 above without SDPA (the earlier 11, `leaky_relu` among them) plus `conv3d` of the
-  extended composite layer(ADR 0118), 12 in all — the same count of 12, but a different set) —
+  extended composite layer(ADR 0118) and `group_norm` of the Core ATen layer (ADR NNNN — the NOTE
+  of 2026-10-27 below), 13 in all) —
   SDPA can express mask / causal through its arguments, so preserving it globally would make shapes
   outside the contract (a bool mask passed by kwargs, `[B,1,M,N]` and so on) hit the fail-loudly of
   `_h_attention`, and the export would no longer work. Only an additive f32 `[1,1,M,N]` mask entered
@@ -457,6 +458,29 @@ No geometry profile is looked up (the same default geometry as conv1d).
 full-range write of resident tensors (a rank-5 initializer is a first, but the rank limit of the
 strided family applies to values, not to initializers).
 
+NOTE: 2026-10-27 added `group_norm` to the **Core ATen layer** (`aten.native_group_norm`; ledger
+entry — the ADR of the family that needs it holds the design: ADR NNNN (MOSS-Image's DiT and VAE)
+decision 7). Grounds = the FLUX.2 small decoder of MOSS-Image runs **untiled** (its upstream
+default — tiling would change every GroupNorm's statistics), with 30 GroupNorms (32 groups) over
+symbolic spatial axes. It does not stop at step 2: the group reshape `[N, G, C/G·h·w]` is a
+product of symbols (no IR form — one symbol per dimension), and the decomposed form streams every
+full-size intermediate several times (the `batch_norm` counter-example above). The exporter takes
+the **preserved** `aten.group_norm` (decomposed it is `native_group_norm`'s three outputs with
+`HxW` = the product of the spatial symbols), added to `PRESERVED_OP_PREFIXES` (12 → 13 — no
+export changes by it: a GroupNorm failed before as an unsupported `native_group_norm`).
+**Contract**: `x[N,C,…]` (rank ≥ 2; C static — a symbolic C fails in the shape rule and in the
+handler; any trailing extent, symbolic allowed), `weight[C]` / `bias[C]` (arity fixed at 3 — the
+exporter synthesises ones / zeros for a module without affine; the bias-only form fails), attrs
+`num_groups` (C divisible — a shape-rule check) and `eps` (the normalisation ops' rule),
+population variance, f32 only, not in `WEIGHT_SLOTS`. **Kernel**: five
+dispatches over two node temporaries — per 1,024-element chunk partial sums, a fixed-tree total per
+group, in **two passes** (mean, then squared deviations — the layer_norm discipline), then the
+grid-stride affine; the tree depends on the shape only (determinism, geometry invariance). Its
+four-point check (ADR 0110 decision 3) and the large-group check at 16.8M elements per group are
+`packages/runtime/tests/gpu_group_norm_test.ts`. The `group_norm` row of the counter-examples
+("delegate to layer_norm — partly") stays true: the A/B check of the kernel uses exactly that
+decomposition on small static shapes.
+
 NOTE: 2026-10-31 added `gated_delta_scan` (the value form) to the **extended composite layer**
 (outside aten — Karume's own `karume::gated_delta_scan`). ADR
 [0135](decisions/0135-gated-delta-rule-scan.md) is the source of truth (accepted 2026-10-31, after the
@@ -531,7 +555,8 @@ The general inputs of the sweep (around ±4.5) do not reach the hazard band eith
    exactly between the two variants =
    bit-identical output (research/2026-08-04-vae-axis-reduce-recon.md))
 5. Concentrated exporter decomposition passes (≈25 ops, 0 new kernels)
-6. Dedicated native_group_norm kernel
+6. Dedicated native_group_norm kernel — **done (2026-10-27)**: `group_norm` (the NOTE of
+   2026-10-27 above — ADR NNNN decision 7)
 7. Extend the conv contract (relax B=1 and the like)
 8. pooling / upsample
 9. scatter_add (presumes an ADR)

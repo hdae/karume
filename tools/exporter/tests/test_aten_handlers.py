@@ -17,7 +17,8 @@ from torchvision.ops import deform_conv2d
 from karume.aten_handlers import ATEN_HANDLERS
 from karume.convert import UnsupportedAtenOpsError, convert, curated_decompositions
 from karume.normalize import normalize_graph
-from karume.ops import EMITTABLE_OPS
+from karume.ops import EMITTABLE_OPS, OpContractError, resolve_op_contract
+from karume.shapes import compute_output_shape
 
 
 def _gelu_tanh_reference(x: torch.Tensor) -> torch.Tensor:
@@ -1823,6 +1824,154 @@ class TestUpsampleBilinear2d:
             convert_module(Nearest(), (torch.randn(1, 3, 4, 5),))
 
         assert "upsample_nearest2d" in str(err.value)
+
+
+class TestGroupNorm:
+    """Core ATen layer — group_norm (ADR NNNN decision 7). The preserved `aten.group_norm` lowers
+    to one node with `num_groups` / `eps`, the affine normalized to arity 3."""
+
+    def test_group_norm_over_symbolic_spatial_axes_is_one_node(self, convert_module):
+        """MUST: decomposed, it would be native_group_norm (3 outputs) + getitem with `HxW` the
+        product of the two spatial symbols — preservation keeps one node and nothing symbolic in
+        the attrs."""
+
+        class Normed(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.norm = nn.GroupNorm(4, 8, eps=1e-6)
+
+            def forward(self, x):
+                return self.norm(x)
+
+        height, width = Dim("h", min=2, max=SYM_MAX), Dim("w", min=2, max=SYM_MAX)
+        graph, _ = convert_module(
+            Normed(), (torch.randn(1, 8, 3, 5),), ({2: height, 3: width},), ("h", "w")
+        )
+
+        assert node_ops(graph) == ["group_norm"]
+        node = only_node(graph, "group_norm")
+        assert node.attrs == {"num_groups": 4, "eps": 1e-6}
+        assert graph.values[node.outs[0]].shape == [1, 8, "h", "w"]
+        assert graph.values[node.ins[1]].shape == [8]
+
+    def test_an_affine_free_group_norm_gets_ones_and_zeros(self, convert_module):
+        """The contents are checked (the order ones → zeros — swapped it would be `×0 +1`)."""
+
+        class NoAffine(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.norm = nn.GroupNorm(2, 6, affine=False)
+
+            def forward(self, x):
+                return self.norm(x)
+
+        graph, tensors = convert_module(NoAffine(), (torch.randn(2, 6, 7),))
+
+        node = only_node(graph, "group_norm")
+        weight = tensors[graph.initializers[node.ins[1]].tensor]
+        bias = tensors[graph.initializers[node.ins[2]].tensor]
+        assert torch.equal(weight, torch.ones(6))
+        assert torch.equal(bias, torch.zeros(6))
+        assert node.attrs == {"num_groups": 2, "eps": 1e-5}
+
+    def test_a_weight_only_group_norm_keeps_the_weight_in_its_slot(self, convert_module):
+        class WeightOnly(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.randn(6))
+
+            def forward(self, x):
+                return nn.functional.group_norm(x, 3, self.weight, None)
+
+        module = WeightOnly()
+        graph, tensors = convert_module(module, (torch.randn(1, 6, 4),))
+
+        node = only_node(graph, "group_norm")
+        assert torch.equal(tensors[graph.initializers[node.ins[1]].tensor], module.weight.detach())
+        assert torch.equal(tensors[graph.initializers[node.ins[2]].tensor], torch.zeros(6))
+
+    def test_a_bias_only_group_norm_is_rejected(self, convert_module):
+        """Synthesis appends in order, so the bias would slide into the weight's slot."""
+
+        class BiasOnly(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.bias = nn.Parameter(torch.randn(6))
+
+            def forward(self, x):
+                return nn.functional.group_norm(x, 3, None, self.bias)
+
+        with pytest.raises(NotImplementedError, match="only a bias"):
+            convert_module(BiasOnly(), (torch.randn(1, 6, 4),))
+
+    def test_a_non_f32_group_norm_is_rejected(self, convert_module):
+        class Normed(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.norm = nn.GroupNorm(2, 4).double()
+
+            def forward(self, x):
+                return self.norm(x)
+
+        with pytest.raises(NotImplementedError, match="dtype"):
+            convert_module(Normed(), (torch.randn(1, 4, 3, dtype=torch.float64),))
+
+    def test_the_converted_node_matches_torch_on_the_reference_ops(self, convert_module):
+        """The attrs carry what `nn.GroupNorm` computes: a population-variance group norm over
+        contiguous channel bands, built here in f64 from the node's own `num_groups` / `eps` and
+        its weight / bias slots, against torch on a non-square, multi-sample input (a wrong group
+        count, eps or slot moves the values far past the tolerance)."""
+
+        class Normed(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.norm = nn.GroupNorm(3, 6, eps=1e-6)
+
+            def forward(self, x):
+                return self.norm(x)
+
+        torch.manual_seed(0)
+        module = Normed()
+        with torch.no_grad():
+            module.norm.weight.copy_(torch.randn(6))
+            module.norm.bias.copy_(torch.randn(6))
+        # Centred: torch's own f32 group norm loses digits at a mean offset (measured 1.6e-5 at
+        # +100), which would hide eps. Measured here: 5.4e-7; eps × 10 moves the values by 2.1e-5,
+        # num_groups 1 by 0.56.
+        x = torch.randn(2, 6, 3, 5)
+        graph, tensors = convert_module(module, (x,))
+
+        node = only_node(graph, "group_norm")
+        weight = tensors[graph.initializers[node.ins[1]].tensor]
+        bias = tensors[graph.initializers[node.ins[2]].tensor]
+        rows = x.double().reshape(2, node.attrs["num_groups"], -1)
+        mean = rows.mean(-1, keepdim=True)
+        variance = ((rows - mean) ** 2).mean(-1, keepdim=True)
+        normed = ((rows - mean) / torch.sqrt(variance + node.attrs["eps"])).reshape(x.shape)
+        expected = normed * weight.double().view(1, 6, 1, 1) + bias.double().view(1, 6, 1, 1)
+        assert torch.allclose(module(x).double(), expected, rtol=0, atol=2e-6)
+
+    def test_a_symbolic_channel_axis_is_rejected_by_the_handler(self, convert_module):
+        """The groups split C, and the synthesized ones / zeros need its length: a symbolic C
+        fails loudly at the conversion (C = 2k, so torch itself can prove the division)."""
+
+        class NoAffine(nn.Module):
+            def forward(self, x):
+                return nn.functional.group_norm(x, 2)
+
+        channels = 2 * Dim("k", min=1, max=SYM_MAX // 2)
+        with pytest.raises(NotImplementedError, match="channel axis is a symbolic dimension"):
+            convert_module(NoAffine(), (torch.randn(1, 8, 5),), ({1: channels},), ("C",))
+
+    def test_a_symbolic_channel_axis_is_rejected_by_the_shape_rule(self):
+        """The IR-side check of the same rule (a graph that did not come through the handler)."""
+        contract = resolve_op_contract("group_norm")
+        attrs = {"num_groups": 2, "eps": 1e-6}
+        assert compute_output_shape(contract, [[1, 8, "h"], [8], [8]], "t", attrs=attrs) == [
+            [1, 8, "h"]
+        ]
+        with pytest.raises(OpContractError, match="channel axis must be static"):
+            compute_output_shape(contract, [[1, "C", "h"], ["C"], ["C"]], "t", attrs=attrs)
 
 
 class TestGruScan:

@@ -90,7 +90,12 @@ import {
   buildUpsampleBilinear2d,
 } from "./recipe-builders/layout.ts";
 import { buildBmm, buildEmbedding, buildLinear, buildMatmul } from "./recipe-builders/linear.ts";
-import { buildLayerNorm, buildRmsNorm, buildStaticQuantize } from "./recipe-builders/norm.ts";
+import {
+  buildGroupNorm,
+  buildLayerNorm,
+  buildRmsNorm,
+  buildStaticQuantize,
+} from "./recipe-builders/norm.ts";
 import {
   buildAttention,
   buildReadonlyStateAttention,
@@ -738,6 +743,9 @@ export class RecipeBuilder {
         break;
       case "upsampleBilinear2d":
         await buildUpsampleBilinear2d(this.#face, step, binds, outs, builder);
+        break;
+      case "groupNorm":
+        await buildGroupNorm(this.#face, step, binds, outs, builder);
         break;
       case "gruScan":
         await buildGruScan(this.#face, step, binds, outs, builder);

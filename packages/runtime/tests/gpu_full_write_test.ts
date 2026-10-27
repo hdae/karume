@@ -197,6 +197,38 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
+  "group_norm leaves no poison word (full-write / real GPU)",
+  async () => {
+    // The apply stage writes one element per thread over the flat index and splits it into
+    // (row, offset, channel); a wrong split leaves whole groups or samples unwritten. Two samples ×
+    // two groups, 240 elements — the poison buffer has the output's size class, the node's two
+    // temporaries (4 partials, 8 statistics) do not.
+    const shape = [2, 4, 6, 5];
+    const graph = poisonGraph(
+      shape,
+      [
+        { name: "x", shape },
+        { name: "w", shape: [4] },
+        { name: "b", shape: [4] },
+      ],
+      { op: "group_norm", attrs: { num_groups: 2, eps: 1e-5 } },
+    );
+    const { output, reuseCount } = await runPoisoned(graph, {
+      x: fill(shape, (i) => ((i * 7) % 13) - 6),
+      w: fill([4], (i) => 1 + i),
+      b: fill([4], (i) => 0.5 * i),
+    });
+    assert(reuseCount >= 1, `no pool reuse happened (reuseCount=${reuseCount})`);
+    assertEquals(output.shape, shape);
+    assertEquals(
+      [...output.data].filter((value) => value === POISON),
+      [],
+      "poison left in the output",
+    );
+  },
+);
+
+test.skipIf(!GPU_AVAILABLE)(
   "deform_conv2d は毒値を 1 語も残さない（full-write / 実 GPU）",
   async () => {
     // 出力 1 要素 = 1 スレッドだが、平坦添字を B / Cout / Hout / Wout の 4 段へ分解するので、

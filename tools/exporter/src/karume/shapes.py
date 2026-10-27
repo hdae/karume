@@ -59,6 +59,7 @@ from karume.ops import (
     cumsum_dim,
     deform_conv2d_attrs,
     describe_arity,
+    group_norm_attrs,
     layer_norm_attrs,
     pad_attrs,
     permute_dims,
@@ -393,6 +394,8 @@ def _compute(
         return _sole(_deform_conv2d(ins, where, attrs))
     if kind == "upsample_bilinear2d":
         return _sole(_upsample_bilinear2d(ins, where, attrs))
+    if kind == "group_norm":
+        return _sole(_group_norm(ins, where, attrs))
     # The op name carries the scan direction, but the shape rule is identical for both
     # directions (the time order of the output does not change either).
     if kind == "gru_scan":
@@ -1637,6 +1640,44 @@ def _upsample_bilinear2d(
         Extent(coeff=0, sym=None, offset=output_size[0]),
         Extent(coeff=0, sym=None, offset=output_size[1]),
     ]
+
+
+def _group_norm(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
+    """The output shape of group_norm (Core ATen layer — ADR NNNN decision 7): `x` passes
+    through, the trailing extents may be symbolic.
+
+    MUST: the channel axis is static and divisible by `num_groups` (otherwise the kernel's
+    `C/G` truncates and each group's channel band silently shifts — the conv groups discipline),
+    and `weight` / `bias` are `[C]`. An axis of length 0 does not pass (a group of 0 elements
+    has the mean 0/0; a symbolic length depends on the binding, so the TS side checks it before
+    execution).
+    """
+    x, weight, bias = ins
+    groups, _ = group_norm_attrs(attrs, where)
+    if len(x) < 2:
+        raise OpContractError(
+            f"{where}: group_norm expects x[N,C,...] (rank 2 or more): [{_show(x)}]"
+        )
+    if any(extent.is_value(0) for extent in x):
+        raise OpContractError(
+            f"{where}: group_norm cannot normalise an input with an axis of length 0 ([{_show(x)}])"
+        )
+    channels = x[1]
+    if not channels.is_const:
+        raise OpContractError(
+            f"{where}: group_norm channel axis must be static ([{_show(x)}] — the groups split it)"
+        )
+    if channels.offset % groups != 0:
+        raise OpContractError(
+            f"{where}: group_norm num_groups {groups} does not divide the channels"
+            f" {channels.offset} ([{_show(x)}])"
+        )
+    for name, shape in (("weight", weight), ("bias", bias)):
+        if len(shape) != 1 or shape[0] != channels:
+            raise OpContractError(
+                f"{where}: group_norm {name} [{_show(shape)}] is not [C] for input [{_show(x)}]"
+            )
+    return list(x)
 
 
 # ---- Matching the whole graph ---------------------------------------------

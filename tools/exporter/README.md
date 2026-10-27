@@ -253,6 +253,7 @@ Current models and coverage:
 | `gru_scan_block`           | `T`          | gru_scan / gru_scan_reverse (both directions over a symbolic time axis; the forward branch starts from a folded zero `h0`, the reverse one from a graph input), linear |
 | `gated_delta_scan_block`   | `T`          | gated_delta_scan (symbolic length axis, dk = dv = 128, head broadcast r = 2 — v built from q / k with cat on the head axis), neg, mul |
 | `bilinear_resize`          | none         | upsample_bilinear2d (non-integer upscale 4×5→7×9, shrink 4×5→2×3, and a height-1 input whose H scale is 0)                                                             |
+| `group_norm_block`         | `T`          | group_norm ×2 (2 samples × 3 groups over a symbolic axis with a per-channel affine; a rank-3 one-group input without affine — ones/zeros synthesized — spanning two partial chunks) |
 | `i8_weights`               | `T`          | **i8 storage** for linear, conv1d, conv2d, conv_transpose1d, embedding (5 of the 6 `WEIGHT_SLOTS` ops; conv3d's i8 is in the runtime GPU parity test), tanh            |
 
 The second output of `attention_block` is a **softmax over large negative values (−205..−180)**, the
@@ -534,15 +535,16 @@ conformance table is the correct one.
   row-range pieces, and rejects simultaneous automatic quantization options or real f32 values. The
   model recipe remains responsible for validating the upstream quantization and activation rounding
   (ADR 0097).
-- The IR vocabulary has **63** ops, of which the exporter can emit **61**: `topk` and `state_append`
+- The IR vocabulary has **64** ops, of which the exporter can emit **62**: `topk` and `state_append`
   are in the vocabulary but no `torch.export` graph produces them (`topk` waits on the multi-output
   getitem wiring, and `state_append` is the effect op the decode-graph script emits — ADR 0067
-  decision 5). The list below is those 61 (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`,
+  decision 5). The list below is those 62 (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`,
   ADR 0023 added `attention`, `gelu_tanh` was added for EmbeddingGemma, `sin` for the Snake
   activation, `safe_softmax` for runtime attention masks — ADR 0044 — `upsample_bilinear2d` for
   the segmentation / depth family, `deform_conv2d` for the BiRefNet family — ADR 0055 — and
   `gru_scan` / `gru_scan_reverse` for recurrent models — ADR 0056 — `conv3d` for the causal 3D
-  VAE of video models — ADR 0118 — and `gated_delta_scan` for Gated DeltaNet layers — ADR 0135):
+  VAE of video models — ADR 0118 — `gated_delta_scan` for Gated DeltaNet layers — ADR 0135 — and
+  `group_norm` for the untiled FLUX.2 decoder — ADR NNNN):
   - unary `neg abs exp log log1p sqrt sin tanh sigmoid relu gelu gelu_tanh` (f32) / `bitwise_not`
     (bool) / unary with attrs `clamp` / `clamp_min` / `leaky_relu` (f32). `sin` is the **only**
     trigonometric op: constant tables (RoPE) are still folded away at export time, so only the
@@ -577,6 +579,15 @@ conformance table is the correct one.
     area / antialias and factor-based sizing all fail loudly at the exporter boundary. Shrinking
     goes through the same op (torch does too — reading only 2 taps is the specified behaviour, and
     is not `area`)
+  - group normalisation (a Core ATen layer atom, ADR NNNN decision 7): **`group_norm`** —
+    `x[N,C,…] → [N,C,…]` (rank ≥ 2, a static C, the trailing axes may be symbolic),
+    `weight[C]` / `bias[C]`, arity 3, attrs `num_groups` / `eps`. Group g of sample n is the
+    contiguous band of `C/num_groups` channels with every trailing element; the variance is the
+    population variance. The preserved
+    `aten.group_norm` is taken (decomposed it would be `native_group_norm`'s three outputs with a
+    product of spatial symbols as its `HxW`). A module without affine gets ones/zeros; a bias-only
+    form, a non-f32 input, a symbolic C and a channel count that the groups do not divide fail
+    loudly
   - deformable convolution (a layer-1' atom, ADR 0055): **`deform_conv2d`** — DCNv2 with arity 5
     (`x[B,Cin,H,W]` / `W[Cout,Cin,Kh,Kw]` / `offset[B,2·Kh·Kw,Hout,Wout]` /
     `mask[B,Kh·Kw,Hout,Wout]` / `b[Cout]`), attrs `padding` only. The offset channels are nested as
@@ -609,13 +620,14 @@ conformance table is the correct one.
     `karume::gated_delta_scan`, whose eager body is a copy of upstream's `torch_chunk_gated_delta_rule`
     (transformers 5.14.1). The runtime GPU implements head dims 128 only and rejects others when
     the Session is built
-- **31 emittable ops carry attrs** (`sum.dim` / `amax.dim` / `amin.dim` / `attention.scale` /
+- **32 emittable ops carry attrs** (`sum.dim` / `amax.dim` / `amin.dim` / `attention.scale` /
   `clamp.{min,max}` / `clamp_min.min` / `rms_norm.eps` / `static_quantize.scale` /
   `conv2d.{stride,padding,dilation,groups}` / `conv3d.{stride,padding,dilation,groups}` /
   `leaky_relu.negative_slope` / `ge_scalar.value` / `le_scalar.value` / `gt_scalar.value` /
   `cumsum.dim` / `cast.to` / `permute.dims` / `slice.{dim,start,end}` / `cat.dim` /
   `pad.{left,right}` / `flip.dim` / `sym_prefix_slice.{sym,slices}` /
-  `layer_norm.{normalized_shape,eps}` / `softmax.dim` / `safe_softmax.dim` /
+  `layer_norm.{normalized_shape,eps}` / `group_norm.{num_groups,eps}` / `softmax.dim` /
+  `safe_softmax.dim` /
   `embedding.padding_idx` /
   `masked_fill.value` / `conv1d.{stride,padding,dilation,groups}` /
   `conv_transpose1d.{stride,padding}` / `upsample_bilinear2d.output_size` /
@@ -627,12 +639,12 @@ conformance table is the correct one.
   (ADR 0015). `gelu(approximate="tanh")` has no field to record it either, so it is carried by its
   own op (`gelu_tanh`) rather than by an attr (never silently approximating with a different
   formula).
-- The default set of decomposition stops (preserved) is **12 ops** (`PRESERVED_OP_PREFIXES` — the
-  9 ops of ADR 0007 plus `leaky_relu` from ADR 0015, `rms_norm` from ADR 0017 and `conv3d` from
-  ADR 0118): linear / layer_norm / rms_norm / softmax / gelu / leaky_relu / conv1d / conv2d /
-  conv3d / conv_transpose1d / embedding / masked_fill. An unbatched `F.conv3d` stays
-  `aten.conv3d.default` with its rank-4 input in the trace (measured on torch 2.13.0), so no
-  normalization pass is needed.
+- The default set of decomposition stops (preserved) is **13 ops** (`PRESERVED_OP_PREFIXES` — the
+  9 ops of ADR 0007 plus `leaky_relu` from ADR 0015, `rms_norm` from ADR 0017, `conv3d` from
+  ADR 0118 and `group_norm` from ADR NNNN): linear / layer_norm / group_norm / rms_norm / softmax /
+  gelu / leaky_relu / conv1d / conv2d / conv3d / conv_transpose1d / embedding / masked_fill. An
+  unbatched `F.conv3d` stays `aten.conv3d.default` with its rank-4 input in the trace (measured
+  on torch 2.13.0), so no normalization pass is needed.
   - **`scaled_dot_product_attention` (the 12th fused op of ADR 0007) is not in the default set**
     (ADR 0023). SDPA can express mask / causal / GQA through its arguments, and adding it to the
     default would make Anima's text_encoder (a causal mask with −inf folded in) hit the fail loudly

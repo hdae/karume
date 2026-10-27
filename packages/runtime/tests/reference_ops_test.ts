@@ -26,6 +26,7 @@ import {
   referenceExpand,
   referenceFlip,
   referenceGather,
+  referenceGroupNorm,
   referenceGruScan,
   referenceLayerNorm,
   referenceLinear,
@@ -655,6 +656,64 @@ test("layer_norm は母分散（correction=0）で正規化する", () => {
     { normalized_shape: [4], eps: 1e-7 },
   );
   assertEquals([...constant.data], [1, 2, 3, 4]);
+});
+
+// group_norm: a group is a contiguous channel band of one sample (population variance, per-channel
+// affine) — hand-computed on two samples × two groups, plus the cancellation case.
+test("group_norm normalises each sample's channel bands and applies the per-channel affine", () => {
+  // x[2, 4, 2]: groups of 2 channels × 2 elements. Sample 0 group 0 = [1, 2, 3, 4] (mean 2.5,
+  // population variance 1.25), group 1 = [10, 10, 10, 10] (variance 0 → the bias).
+  const x = t([2, 4, 2], [1, 2, 3, 4, 10, 10, 10, 10, -1, -2, -3, -4, 0, 4, 0, 4]);
+  const weight = t([4], [1, 2, 3, 4]);
+  const bias = t([4], [0, 0.5, -1, 2]);
+  const out = referenceGroupNorm(x, weight, bias, { num_groups: 2, eps: 1e-12 });
+  const inv = 1 / Math.sqrt(1.25);
+  // channel 0 = elements 0, 1; channel 1 = elements 2, 3 (weight 2, bias 0.5)
+  assertAlmostEquals(out.data[0], -1.5 * inv * 1 + 0, 1e-6);
+  assertAlmostEquals(out.data[3], 1.5 * inv * 2 + 0.5, 1e-6);
+  assertEquals([...out.data.slice(4, 8)], [-1, -1, 2, 2]);
+  // sample 1 has its own statistics: group 0 = [-1, -2, -3, -4] (mean -2.5)
+  assertAlmostEquals(out.data[8], 1.5 * inv * 1 + 0, 1e-6);
+  // group 1 = [0, 4, 0, 4] (mean 2, variance 4): element 15 is channel 3
+  assertAlmostEquals(out.data[15], (2 / 2) * 4 + 2, 1e-6);
+  assertThrows(
+    () => referenceGroupNorm(x, weight, bias, { num_groups: 3, eps: 1e-6 }),
+    OpContractError,
+  );
+});
+
+test("group_norm keeps its variance at a mean offset of 2^30 (two passes in f64)", () => {
+  // x = 2^30 + 128·k with k = (5i mod 7) − 3 (every value an f32). Mean / spread ≈ 2^23, where
+  // even an f64 one-pass E[x²] − E[x]² loses the variance's leading digits (Σx² ≈ 2^66 has an
+  // ulp of 2^14 against n·variance ≈ 2^22); the two-pass form is exact here. The expected values
+  // come from the k alone (the offset and the factor 128 cancel; eps is negligible).
+  const ks = Array.from({ length: 64 }, (_, i) => ((5 * i) % 7) - 3);
+  const values = ks.map((k) => 2 ** 30 + 128 * k);
+  const out = referenceGroupNorm(t([1, 1, 64], values), t([1], [1]), t([1], [0]), {
+    num_groups: 1,
+    eps: 1e-12,
+  });
+  const mean = ks.reduce((sum, k) => sum + k, 0) / 64;
+  const deviation = Math.sqrt(ks.reduce((sum, k) => sum + (k - mean) ** 2, 0) / 64);
+  for (let i = 0; i < 64; i += 1) {
+    assertAlmostEquals(out.data[i], (ks[i] - mean) / deviation, 1e-6);
+  }
+});
+
+test("group_norm puts eps inside the square root (a group variance of the order of eps)", () => {
+  // Group [−a, a, −a, a] with a = f32(1e-3): variance a² ≈ 1e-6 = eps, so 1 / sqrt(var + eps)
+  // (≈ 0.707 / a), 1 / (sqrt(var) + eps) (≈ 0.999 / a) and a missing eps (1 / a) differ by far
+  // more than the tolerance.
+  const a = Math.fround(1e-3);
+  const out = referenceGroupNorm(t([1, 1, 4], [-a, a, -a, a]), t([1], [1]), t([1], [0]), {
+    num_groups: 1,
+    eps: 1e-6,
+  });
+  const expected = a / Math.sqrt(a * a + Math.fround(1e-6));
+  assertAlmostEquals(expected, Math.SQRT1_2, 1e-3);
+  for (let i = 0; i < 4; i += 1) {
+    assertAlmostEquals(out.data[i], i % 2 === 0 ? -expected : expected, 1e-6);
+  }
 });
 
 // MUST: rms_norm は**平均を引かない**（layer_norm の写し間違いを手計算で押さえる）。

@@ -845,6 +845,57 @@ def _h_layer_norm(node: Node) -> Emitted:
     return Emitted("layer_norm", 3, attrs, synth_consts=((1.0, dims[0]), (0.0, dims[0])))
 
 
+def _h_group_norm(node: Node) -> Emitted:
+    """aten.group_norm → group_norm (attrs `num_groups` / `eps` — ADR NNNN decision 7).
+
+    MUST: preserved (`convert.PRESERVED_OP_PREFIXES`). Decomposed it becomes native_group_norm
+    (3 outputs) + getitem, with `HxW` the product of the spatial symbols — neither has an IR form.
+    MUST: the input is f32 `[N,C,...]` with a static C divisible by num_groups (the shape rule
+    checks it again on the IR). The affine is accepted in the forms "both", "neither" and "weight
+    only"; missing slots are synthesized as ones / zeros of length C (the layer_norm move — ADR
+    0016). The bias-only form fails (synthesis appends in order, so the bias would slide into the
+    weight's slot — the element counts match, a silent wrong value). `cudnn_enabled` is a backend
+    hint without effect on the values and is not carried.
+    """
+    _expect(not node.kwargs, node, f"group_norm with kwargs {sorted(node.kwargs)} is not supported")
+    src = node.args[0].meta["val"]
+    _expect(src.dtype == torch.float32, node, f"group_norm of dtype {src.dtype} is not supported")
+    _expect(src.dim() >= 2, node, f"group_norm of rank {src.dim()} is not supported ([N,C,...])")
+    channels = _static_size_or_fail(node, src.shape[1], "group_norm channel axis")
+    groups = node.args[1]
+    _expect(
+        isinstance(groups, int) and not isinstance(groups, bool) and groups >= 1,
+        node,
+        f"group_norm num_groups={groups!r} is not a positive integer",
+    )
+    _expect(
+        channels % groups == 0,
+        node,
+        f"group_norm num_groups {groups} does not divide the channels {channels}",
+    )
+    weight = node.args[2] if len(node.args) > 2 else None
+    bias = node.args[3] if len(node.args) > 3 else None
+    eps = float(node.args[4]) if len(node.args) > 4 else 1e-5
+    _expect(
+        math.isfinite(eps) and eps > 0,
+        node,
+        f"eps={eps} is not supported (finite positive numbers only)",
+    )
+    attrs = {"num_groups": groups, "eps": eps}
+    if isinstance(weight, Node) and isinstance(bias, Node):
+        return Emitted("group_norm", 3, attrs)
+    if isinstance(weight, Node):
+        _expect(bias is None, node, f"group_norm bias={bias!r} is neither a tensor nor None")
+        return Emitted("group_norm", 3, attrs, synth_consts=((0.0, channels),))
+    _expect(weight is None, node, f"group_norm weight={weight!r} is neither a tensor nor None")
+    _expect(
+        bias is None,
+        node,
+        f"group_norm with only a bias and no weight (bias={bias!r}) is not supported",
+    )
+    return Emitted("group_norm", 3, attrs, synth_consts=((1.0, channels), (0.0, channels)))
+
+
 def _h_rms_norm(node: Node) -> Emitted:
     """aten.rms_norm → rms_norm (attrs `eps`, **arity 2** — ADR 0017).
 
@@ -1781,6 +1832,9 @@ ATEN_HANDLERS = {
     # `.vec` overload, and `.default` (the form taking scales_h / scales_w separately) does not
     # appear in measurements (add one line when it shows up).
     aten.upsample_bilinear2d.vec: _h_upsample_bilinear2d,
+    # Group normalisation (Core ATen layer — ADR NNNN decision 7): the preserved composite
+    # `aten.group_norm` (`native_group_norm` + getitem is not wired — the layer_norm case).
+    aten.group_norm.default: _h_group_norm,
     # DCNv2 (layer 1' — now the extended atomic layer — the front-line blocker of the BiRefNet
     # family; ADR 0055). A custom op in the `torchvision::` namespace, so it is not registered in
     # the Core ATen decomposition table and stays one node after the curated decomp.

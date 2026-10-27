@@ -40,6 +40,7 @@ import {
   cumsumDim,
   describeArity,
   IO_DTYPES,
+  groupNormAttrs,
   layerNormAttrs,
   maskedFillValue,
   OP_CONTRACTS,
@@ -585,14 +586,14 @@ const node = (
 // MUST: doc は読まない（書式依存の抽出突合は脆く、恒真化の温床にもなる）。ここは**期待値
 // リテラル**で op 集合を固定するだけで、docs/ir-v2.md の一覧との同期は op 追加時の人手仕事
 // （契約 1 セット — ops.ts / ops.py / shapes.py / fixtures / CPU 参照 / golden / ir-v2.md）。
-test("契約表の op 集合が期待値リテラル 63 本と一致する", () => {
+test("the contract table holds exactly the 64 ops of the expected literal", () => {
   // The op names themselves are pinned by the ops section of fixtures/op-contracts.json; the
   // family lists below are not in the table.
   assertEquals(UNARY_OPS.length, 19);
   assertEquals(BINARY_OPS.length, 6);
   // argmax は reduce 族に**入らない**（attrs も出力 dtype も rank の扱いも別 — ADR 0068 決定 2）
   assertEquals(REDUCE_OPS.length, 3);
-  assertEquals(OP_CONTRACTS.size, 63);
+  assertEquals(OP_CONTRACTS.size, 64);
 });
 
 test("ランタイム対応表と capability 照会は契約表から導かれる", () => {
@@ -1276,6 +1277,24 @@ test("reshape / expand は宣言 shape を目標形に取り、permute は dims 
   // MUST: 目標形を渡さずに黙って推測しない
   assertThrows(() => shape("expand", [[2, 3]], {}), OpContractError);
   assertThrows(() => shape("permute", [[2, 3]], {}), OpContractError);
+});
+
+test("group_norm attrs: num_groups and eps are required, eps as an f32 normal (node level)", () => {
+  // The value ranges are table rows (fixtures/op-contracts.json); this keeps the node-level checks
+  // and the eps values that only the TS side rejects (they round to 0 / a subnormal in f32).
+  const accept = (attrs: Record<string, unknown>) =>
+    assertNodeContract(node("group_norm", ["x", "w", "b"], attrs), "t");
+  const reject = (attrs: Record<string, unknown>, ins: readonly string[] = ["x", "w", "b"]) =>
+    assertThrows(() => assertNodeContract(node("group_norm", ins, attrs), "t"), OpContractError);
+  assertEquals(accept({ num_groups: 32, eps: 1e-6 }).kind, "groupNorm");
+  assertEquals(groupNormAttrs({ num_groups: 32, eps: 1e-6 }, "t"), { groups: 32, eps: 1e-6 });
+  reject({ num_groups: 32 });
+  reject({ eps: 1e-6 });
+  reject({ num_groups: 32, eps: 1e-50 });
+  reject({ num_groups: 32, eps: 1e-40 });
+  reject({ num_groups: 32, eps: 1e6, extra: 1 });
+  // arity fixed at 3 (the affine is always present — the exporter synthesizes ones / zeros)
+  reject({ num_groups: 32, eps: 1e-6 }, ["x", "w"]);
 });
 
 // ADR 0012: 融合 op の attrs スキーマ（許容キー + 型 + 値域）。

@@ -247,6 +247,15 @@ DEFORM_CONV2D_OP = "deform_conv2d"
 #: same op too).
 UPSAMPLE_BILINEAR2D_OP = "upsample_bilinear2d"
 
+#: Group normalisation over channel groups (a Core ATen layer op — `aten.native_group_norm`; the
+#: exporter takes the preserved `aten.group_norm` — ADR NNNN decision 7). `x[N,C,...] ->
+#: [N,C,...]` (rank >= 2), `weight[C]` / `bias[C]`, attrs `num_groups` / `eps`. Group g of
+#: sample n is channels `g*C/G ... (g+1)*C/G - 1` with every trailing element; the variance is
+#: the population variance, computed in two passes on the runtime side.
+#: MUST: **fixed arity 3** (the affine always present, as layer_norm — the handler synthesizes
+#: ones / zeros for a module without affine). `C` divisible by `num_groups` is a shape-rule check.
+GROUP_NORM_OP = "group_norm"
+
 #: GRU **hidden-side scan** (layer 2 — now the extended composite layer — ADR 0056). Folds only
 #: the sequential time direction into one node and **has no input-side GEMM** (the caller prepares
 #: gi = x·W_ih^T + b_ih with the existing `linear`). **Fixed arity 4**: takes gi[T,N,3H] / h0[N,H]
@@ -389,6 +398,7 @@ OpKind = Literal[
     "conv_transpose1d",
     "deform_conv2d",
     "upsample_bilinear2d",
+    "group_norm",
     "gru_scan",
     "gated_delta_scan",
 ]
@@ -660,6 +670,14 @@ def _assert_fill_value(value: Any, where: str) -> float:
 LAYER_NORM_ATTRS: AttrSchema = {
     "normalized_shape": lambda value, where: _assert_normalized_shape(value, where),
     "eps": lambda value, where: _assert_eps(value, where, "layer_norm"),
+}
+
+#: group_norm's attrs (ADR NNNN decision 7): `num_groups` (a positive integer — dividing the
+#: channel count is the shape rule's check, where the input is known) and `eps` (the
+#: normalization ops' rule).
+GROUP_NORM_ATTRS: AttrSchema = {
+    "num_groups": lambda value, where: _assert_integer_attr(value, where, 1),
+    "eps": lambda value, where: _assert_eps(value, where, "group_norm"),
 }
 
 
@@ -944,6 +962,15 @@ def layer_norm_attrs(attrs: Mapping[str, Any], where: str) -> tuple[list[int], f
     return (
         _assert_normalized_shape(attrs.get("normalized_shape"), f"{where} attrs.normalized_shape"),
         _assert_eps(attrs.get("eps"), f"{where} attrs.eps", "layer_norm"),
+    )
+
+
+def group_norm_attrs(attrs: Mapping[str, Any], where: str) -> tuple[int, float]:
+    """The group_norm node's (num_groups, eps) (assumes assert_node_contract has done the
+    checks)."""
+    return (
+        _assert_integer_attr(attrs.get("num_groups"), f"{where} attrs.num_groups", 1),
+        _assert_eps(attrs.get("eps"), f"{where} attrs.eps", "group_norm"),
     )
 
 
@@ -1458,6 +1485,9 @@ OP_CONTRACTS: dict[str, OpContract] = {
     UPSAMPLE_BILINEAR2D_OP: _contract(
         UPSAMPLE_BILINEAR2D_OP, "upsample_bilinear2d", 1, UPSAMPLE_BILINEAR2D_ATTRS
     ),
+    # Group normalisation (Core ATen layer — ADR NNNN decision 7). All 3 slots f32 of the same
+    # type; its affine is per channel like layer_norm's, so it is not in WEIGHT_SLOTS.
+    GROUP_NORM_OP: _contract(GROUP_NORM_OP, "group_norm", 3, GROUP_NORM_ATTRS),
     # GRU hidden-side scan, 2 directions (layer 2 — now the extended composite layer — ADR 0056).
     # All 4 slots f32 of the same type, empty attrs.
     # w_hh is a slot inside the op, so it is **not eligible for low-precision storage** (not in

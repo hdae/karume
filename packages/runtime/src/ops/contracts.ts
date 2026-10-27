@@ -17,6 +17,7 @@ import {
   CUMSUM_ATTRS,
   DEFORM_CONV2D_ATTRS,
   EMBEDDING_ATTRS,
+  GROUP_NORM_ATTRS,
   LAYER_NORM_ATTRS,
   LEAKY_RELU_ATTRS,
   MASKED_FILL_ATTRS,
@@ -55,6 +56,7 @@ import {
   FLIP_OP,
   GATED_DELTA_SCAN_OP,
   GATHER_OP,
+  GROUP_NORM_OP,
   GRU_SCAN_OPS,
   type GruScanOpName,
   LAYER_NORM_OP,
@@ -371,6 +373,13 @@ export type OpContract =
       readonly kind: "upsampleBilinear2d";
       readonly name: typeof UPSAMPLE_BILINEAR2D_OP;
       readonly arity: 1;
+    })
+  // Group normalisation (Core ATen layer — ADR NNNN decision 7). x / weight / bias, the affine always
+  // present (arity fixed at 3, as layer_norm).
+  | (ContractBase & {
+      readonly kind: "groupNorm";
+      readonly name: typeof GROUP_NORM_OP;
+      readonly arity: 3;
     })
   // The hidden-side GRU scan (ADR 0056). One kind holds the 2 ops that differ only in scan direction
   // (as for the reduce family and gelu / gelu_tanh — the contract is fully identical, and consumers
@@ -816,6 +825,17 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
       kind: "upsampleBilinear2d",
       name: UPSAMPLE_BILINEAR2D_OP,
       arity: 1,
+    },
+  ],
+  // Group normalisation (Core ATen layer). Its weight / bias are per-channel affine slots like
+  // layer_norm's, so it is not in WEIGHT_SLOTS (f32 only).
+  [
+    GROUP_NORM_OP,
+    {
+      ...contract(GROUP_NORM_OP, GROUP_NORM_ATTRS),
+      kind: "groupNorm",
+      name: GROUP_NORM_OP,
+      arity: 3,
     },
   ],
   // The two directions of the hidden-side GRU scan (extended composite layer, ADR 0056). All 4

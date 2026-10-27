@@ -26,6 +26,7 @@ import {
   DTYPE_CASES,
   FUSED_CASES,
   GATHER_CASES,
+  GROUP_NORM_CASES,
   GRU_SCAN_CASES,
   INTEGERS,
   LAYOUT2_CASES,
@@ -1449,6 +1450,11 @@ test.skipIf(!GPU_AVAILABLE)(
 test.skipIf(!GPU_AVAILABLE)(
   "融合 op 10 種（linear / layer_norm / rms_norm / softmax / safe_softmax / embedding / masked_fill / conv1d / conv2d / conv_transpose1d）が CPU 参照と一致する（実 GPU）",
   () => checkAll(FUSED_CASES),
+);
+
+test.skipIf(!GPU_AVAILABLE)(
+  "group_norm (samples, groups, two chunks, rank 2) matches the CPU reference (real GPU)",
+  () => checkAll(GROUP_NORM_CASES),
 );
 
 test.skipIf(!GPU_AVAILABLE)(

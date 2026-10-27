@@ -139,6 +139,21 @@ import {
   upsampleBilinear2dParams,
 } from "../src/kernels/upsample-bilinear2d.ts";
 import {
+  GROUP_NORM_APPLY_KEY,
+  GROUP_NORM_APPLY_WGSL,
+  GROUP_NORM_CHUNK,
+  GROUP_NORM_PARTIAL_KEY,
+  GROUP_NORM_PARTIAL_WGSL,
+  GROUP_NORM_TOTAL_KEY,
+  GROUP_NORM_TOTAL_WGSL,
+  GROUP_NORM_WORKGROUP_SIZE,
+  groupNormApplyParams,
+  groupNormLayout,
+  groupNormPartialParams,
+  groupNormTempBytes,
+  groupNormTotalParams,
+} from "../src/kernels/group-norm.ts";
+import {
   DEFORM_CONV2D_KEY,
   DEFORM_CONV2D_OOB_BITS,
   DEFORM_CONV2D_WGSL,
@@ -521,6 +536,10 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     // とは別カーネル・別キーで、**両方を並べる**のが条件 — 片方だけを直したときに、もう
     // 一方のバイト列が動いていないことがこの列挙で機械確認される。
     ["upsample_bilinear2d.wgsl", UPSAMPLE_BILINEAR2D_WGSL],
+    // group_norm (Core ATen layer — ADR NNNN decision 7): the three kernels of its five dispatches.
+    ["group_norm_partial.wgsl", GROUP_NORM_PARTIAL_WGSL],
+    ["group_norm_total.wgsl", GROUP_NORM_TOTAL_WGSL],
+    ["group_norm_apply.wgsl", GROUP_NORM_APPLY_WGSL],
     // DCNv2（第 1' 層 op — ADR 0055）。**conv2d の直接カーネル（下の conv2d_*.wgsl）と対で
     // 並べる**のが条件で、退化ビット一致（offset 0・mask 1 → conv2d）は両者の縮約順が
     // 厳密に一致していることに依存する — 片方だけバイト列が動くのが最大の事故。
@@ -5799,4 +5818,102 @@ test("the gated residual stages the product through workgroup u32 before adding 
   assertThrows(() => gatedResidualParams(1285, 0), CodegenError, "dim");
   assertThrows(() => gatedResidualParams(1286, 257), CodegenError, "whole number of rows");
   assertThrows(() => gatedResidualParams(0x1_0000_0000, 1), CodegenError, "u32");
+});
+
+describe("group_norm kernels (ADR NNNN decision 7)", () => {
+  it("keys name the version, the chunk and the workgroup size", () => {
+    assertEquals(GROUP_NORM_WORKGROUP_SIZE, 256);
+    assertEquals(GROUP_NORM_CHUNK, 1024);
+    assertEquals(GROUP_NORM_PARTIAL_KEY, "group_norm_partial:v1:f32:chunk1024:wg256");
+    assertEquals(GROUP_NORM_TOTAL_KEY, "group_norm_total:v1:f32:wg256");
+    assertEquals(GROUP_NORM_APPLY_KEY, "group_norm_apply:v1:f32:wg256");
+    assertEquals(storageBindingCount(GROUP_NORM_PARTIAL_WGSL), 3);
+    assertEquals(storageBindingCount(GROUP_NORM_TOTAL_WGSL), 2);
+    assertEquals(storageBindingCount(GROUP_NORM_APPLY_WGSL), 5);
+  });
+
+  it("sums in two passes: the values, then the squared deviations from the stored mean", () => {
+    // Pass 0 adds x, pass 1 adds (x - mean)^2 with the mean of the total stage — never x * x
+    // (the one-pass E[x^2] - E[x]^2 form cancels for groups with a large mean).
+    assertEquals(GROUP_NORM_PARTIAL_WGSL.includes("acc = acc + v;"), true);
+    assertEquals(GROUP_NORM_PARTIAL_WGSL.includes("let d = v - mean;"), true);
+    assertEquals(GROUP_NORM_PARTIAL_WGSL.includes("acc = acc + d * d;"), true);
+    assertEquals(GROUP_NORM_PARTIAL_WGSL.includes("v * v"), false);
+    assertEquals(GROUP_NORM_PARTIAL_WGSL.includes("mean = stats[2u * row];"), true);
+    assertEquals(
+      GROUP_NORM_TOTAL_WGSL.includes("stats[2u * row] = scratch[0u] * params.inv_length;"),
+      true,
+    );
+    assertEquals(
+      GROUP_NORM_TOTAL_WGSL.includes(
+        "stats[2u * row + 1u] = 1.0 / sqrt(scratch[0u] * params.inv_length + params.eps);",
+      ),
+      true,
+    );
+    // No division by the element count in the shader (the host rounds 1/length once).
+    assertEquals(/f32\(params\.length\)/.test(GROUP_NORM_TOTAL_WGSL), false);
+  });
+
+  it("reduces with one fixed tree shape and grid-strides every loop", () => {
+    for (const wgsl of [GROUP_NORM_PARTIAL_WGSL, GROUP_NORM_TOTAL_WGSL]) {
+      assertEquals(wgsl.includes("var stride = 128u;"), true);
+      assertEquals(wgsl.includes("scratch[lid] = scratch[lid] + scratch[lid + stride];"), true);
+      assertEquals(wgsl.includes("+ nwg.x;"), true);
+    }
+    assertEquals(GROUP_NORM_PARTIAL_WGSL.includes("for (var k = 0u; k < 4u; k = k + 1u) {"), true);
+    assertEquals(GROUP_NORM_TOTAL_WGSL.includes("j = j + 256u;"), true);
+    assertEquals(GROUP_NORM_APPLY_WGSL.includes("let step = nwg.x * 256u;"), true);
+    assertEquals(
+      GROUP_NORM_APPLY_WGSL.includes(
+        "out[e] = (x[e] - stats[2u * row]) * stats[2u * row + 1u] * weight[c] + bias[c];",
+      ),
+      true,
+    );
+    assertEquals(
+      GROUP_NORM_APPLY_WGSL.includes(
+        "let c = (row % params.groups) * params.per_group + o / params.inner;",
+      ),
+      true,
+    );
+  });
+
+  it("lays out x[N,C,...] as N·G rows of (C/G)·inner elements", () => {
+    const layout = groupNormLayout([2, 192, 3, 5], 32);
+    assertEquals(layout, {
+      rows: 64,
+      length: 90,
+      inner: 15,
+      groups: 32,
+      perGroup: 6,
+      chunks: 1,
+      count: 5760,
+    });
+    // The MOSS decoder's largest group at the area cap: 6 channels × 1696·1648 pixels.
+    const cap = groupNormLayout([1, 192, 1696, 1648], 32);
+    assertEquals(cap.length, 16_770_048);
+    assertEquals(cap.chunks, Math.ceil(16_770_048 / 1024));
+    assertEquals(cap.rows * cap.chunks > 65_535, true);
+    assertEquals(groupNormTempBytes(cap), { partials: 32 * 16_377 * 4, stats: 32 * 2 * 4 });
+    assertEquals(groupNormLayout([4, 8], 2).inner, 1);
+    assertThrows(() => groupNormLayout([1, 6, 4], 4), CodegenError, "divide");
+    assertThrows(() => groupNormLayout([1, 6, 0], 3), CodegenError, "positive");
+    assertThrows(() => groupNormLayout([6], 3), CodegenError, "[N,C");
+    assertThrows(() => groupNormLayout([1, 4, 65_536, 65_536], 1), CodegenError, "u32");
+  });
+
+  it("writes the uniforms with eps and 1/length as f32 bit patterns", () => {
+    const layout = groupNormLayout([1, 6, 700], 3);
+    assertEquals([...groupNormPartialParams(layout, 1)], [3, 1400, 2, 1]);
+    assertEquals(groupNormPartialParams(layout, 0).byteLength, 16);
+    const total = groupNormTotalParams(layout, 1, 1e-6);
+    assertEquals(total.byteLength, 32);
+    assertEquals([...total.slice(0, 3)], [3, 2, 1]);
+    const floats = new Float32Array(total.buffer);
+    assertEquals(floats[3], Math.fround(1 / 1400));
+    assertEquals(floats[4], Math.fround(1e-6));
+    assertEquals([...groupNormApplyParams(layout)], [4200, 1400, 700, 3, 2, 0, 0, 0]);
+    for (const eps of [0, -1e-6, 1e-50, 1e-40, 1e39, Number.NaN]) {
+      assertThrows(() => groupNormTotalParams(layout, 0, eps), CodegenError, "eps");
+    }
+  });
 });

@@ -54,6 +54,8 @@ import {
   embeddingCase,
   flipCase,
   gatherCase,
+  groupNormApplyCase,
+  groupNormPartialCase,
   gruScanCase,
   layerNormCase,
   maskedFillCase,
@@ -198,6 +200,9 @@ const CASES: readonly DegenerateCase[] = [
   // The channel-major form conv3d w8a8 reads its input with (perf-ledger V-6)
   quantizeRowsChannelMajorCase(),
   layerNormCase(),
+  // group_norm: the partial stage (chunks over rows) and the apply stage (elements)
+  groupNormPartialCase(),
+  groupNormApplyCase(),
   rmsNormCase(),
   rmsNormCase(true),
   rmsNormPrefetchCase(),

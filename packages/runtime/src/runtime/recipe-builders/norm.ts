@@ -1,5 +1,5 @@
 /**
- * Per-op-family derivation — row normalisation and fixed quantization (layer_norm,
+ * Per-op-family derivation — row normalisation and fixed quantization (layer_norm, group_norm,
  * static_quantize, rms_norm).
  *
  * The entry is `RecipeBuilder` in {@link "../recipe-builder.ts"}; the shared services (Session
@@ -8,6 +8,20 @@
 
 import type { BindingSource, StepRecipeBuilder } from "../recipe.ts";
 import { ExecutionError, type NodePlan } from "../plan.ts";
+import {
+  GROUP_NORM_APPLY_KEY,
+  GROUP_NORM_APPLY_WGSL,
+  GROUP_NORM_PARTIAL_KEY,
+  GROUP_NORM_PARTIAL_WGSL,
+  GROUP_NORM_TOTAL_KEY,
+  GROUP_NORM_TOTAL_WGSL,
+  GROUP_NORM_WORKGROUP_SIZE,
+  groupNormApplyParams,
+  groupNormLayout,
+  groupNormPartialParams,
+  groupNormTempBytes,
+  groupNormTotalParams,
+} from "../../kernels/group-norm.ts";
 import { LAYER_NORM_KEY, LAYER_NORM_WGSL, layerNormParams } from "../../kernels/layer-norm.ts";
 import type { PackedActivations } from "../fusion.ts";
 import {
@@ -28,7 +42,13 @@ import {
   staticQuantizeParams,
 } from "../../kernels/static-quantize.ts";
 import { gridStrideWorkgroups } from "../../codegen/dispatch.ts";
-import { layerNormAttrs, numel, rmsNormEps, staticQuantizeScale } from "../../ops.ts";
+import {
+  groupNormAttrs,
+  layerNormAttrs,
+  numel,
+  rmsNormEps,
+  staticQuantizeScale,
+} from "../../ops.ts";
 import { rmsNormSubgroupKey, rmsNormSubgroupWgsl } from "../../kernels/rms-norm-subgroup.ts";
 import type { RecipeBuildFace } from "../recipe-builder.ts";
 import { PARAMS_UNIFORM_USAGE } from "./params-usage.ts";
@@ -64,6 +84,73 @@ export const buildLayerNorm = async (
     ],
     workgroups: [groups, 1, 1],
   });
+};
+
+/**
+ * group_norm (channel groups, per-channel affine — ADR NNNN decision 7). Five dispatches over two
+ * node temporaries — the partial sums and the per-row (mean, rstd) pairs (the stage table of
+ * {@link "../../kernels/group-norm.ts"}). Every dispatch is grid-stride, so a node whose partial
+ * stage needs more than the per-dimension workgroup limit loops instead of failing.
+ */
+export const buildGroupNorm = async (
+  face: RecipeBuildFace,
+  step: NodePlan,
+  binds: readonly BindingSource[],
+  outs: readonly BindingSource[],
+  builder: StepRecipeBuilder,
+): Promise<void> => {
+  const [x, weight, bias] = binds;
+  const { groups, eps } = groupNormAttrs(step.node.attrs, `nodes (${step.node.op})`);
+  const layout = groupNormLayout(step.outputs[0].shape, groups);
+  const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
+  const [partial, total, apply] = await Promise.all([
+    face.state.cache.get(GROUP_NORM_PARTIAL_KEY, GROUP_NORM_PARTIAL_WGSL),
+    face.state.cache.get(GROUP_NORM_TOTAL_KEY, GROUP_NORM_TOTAL_WGSL),
+    face.state.cache.get(GROUP_NORM_APPLY_KEY, GROUP_NORM_APPLY_WGSL),
+  ]);
+  const bytes = groupNormTempBytes(layout);
+  const partials = builder.allocTemp(bytes.partials);
+  const stats = builder.allocTemp(bytes.stats);
+  const partialGroups = gridStrideWorkgroups(layout.rows * layout.chunks, 1, limit);
+  const totalGroups = gridStrideWorkgroups(layout.rows, 1, limit);
+  for (const pass of [0, 1] as const) {
+    builder.dispatch({
+      key: GROUP_NORM_PARTIAL_KEY,
+      ...partial,
+      params: face.writeParams(groupNormPartialParams(layout, pass), PARAMS_UNIFORM_USAGE),
+      bindings: [
+        { binding: 1, source: x },
+        { binding: 2, source: stats },
+        { binding: 3, source: partials },
+      ],
+      workgroups: [partialGroups, 1, 1],
+    });
+    builder.dispatch({
+      key: GROUP_NORM_TOTAL_KEY,
+      ...total,
+      params: face.writeParams(groupNormTotalParams(layout, pass, eps), PARAMS_UNIFORM_USAGE),
+      bindings: [
+        { binding: 1, source: partials },
+        { binding: 2, source: stats },
+      ],
+      workgroups: [totalGroups, 1, 1],
+    });
+  }
+  builder.releaseTemp(partials);
+  builder.dispatch({
+    key: GROUP_NORM_APPLY_KEY,
+    ...apply,
+    params: face.writeParams(groupNormApplyParams(layout), PARAMS_UNIFORM_USAGE),
+    bindings: [
+      { binding: 1, source: x },
+      { binding: 2, source: stats },
+      { binding: 3, source: weight },
+      { binding: 4, source: bias },
+      { binding: 5, source: outs[0] },
+    ],
+    workgroups: [gridStrideWorkgroups(layout.count, GROUP_NORM_WORKGROUP_SIZE, limit), 1, 1],
+  });
+  builder.releaseTemp(stats);
 };
 
 /**
