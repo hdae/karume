@@ -40,8 +40,12 @@ built from this recipe is published yet (plan question 18).
   `MossDitText.forward` — `MOSSImageTransformer.forward` / `_TextProjection.forward`
   for a batch of one with the host-side steps moved out — and the `RopePair`
   branch of the patched `_rotate`) from `pipeline_moss_image.py`; `reference.py`
-  (`euler` — the update line of `FlowMatchEulerDiscreteScheduler.step`) from
-  diffusers. `cfg` and `euler` are one-line formulas, listed here all the same
+  (`euler` — the update line of `FlowMatchEulerDiscreteScheduler.step`) and
+  `vae_patch.py` (`upsample_2d` — `Upsample2D.forward` with the nearest ×2 written
+  as a repetition — and the three decoder graphs' `forward` — the statements of
+  `AutoencoderKLFlux2._decode`, `Decoder.forward`, `UNetMidBlock2D.forward`,
+  `UpDecoderBlock2D.forward` and `AttnProcessor2_0.__call__` split across them)
+  from diffusers. `cfg` and `euler` are one-line formulas, listed here all the same
   so the inventory does not depend on a judgement of how short a copy may be.
 - **Fixed prompts** — `prompts.py` quotes three prompt texts verbatim from the
   HF model card and the upstream user guide; the fourth (the negative) is the

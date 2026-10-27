@@ -72,6 +72,17 @@ def nearest_exact_2x(upsample: nn.Module, x: torch.Tensor) -> torch.Tensor:
     )
     if scale != (float(UPSAMPLE_SCALE), float(UPSAMPLE_SCALE)):
         raise NotImplementedError(f"×{UPSAMPLE_SCALE} 以外の nearest-exact は未対応: {scale}")
+    return repeat_2x(x)
+
+
+def repeat_2x(x: torch.Tensor) -> torch.Tensor:
+    """Each spatial element repeated 2×2 (`[B,C,H,W]` → `[B,C,2H,2W]` — data movement only, in the
+    reshape / expand form the runtime's fusion rule `upsample2x` recognises).
+
+    The common body of nearest-exact ×2 ({@link nearest_exact_2x}) and nearest ×2 (output index o →
+    `floor(o/2)`, the same index as `floor((o+0.5)/2)` for every integer o — `moss.vae_patch`).
+    MUST: the caller checks the scale and the mode first (this function checks no mapping).
+    """
     batch, channels, height, width = x.shape
     wide = x.reshape(batch * channels * height, width, 1)
     wide = wide.expand(batch * channels * height, width, UPSAMPLE_SCALE)

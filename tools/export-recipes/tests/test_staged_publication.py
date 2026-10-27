@@ -55,7 +55,8 @@ WRITER_CALLS = frozenset(
         "golden_case",
         # MOSS-Image's DiT script (`moss/export_dit.py`) writes its three containers through this
         # function, which `write_series` calls inside the staged seat (the tests call it on a tiny
-        # model).
+        # model). The VAE script (`moss/export_vae.py`) has a `write_graphs` of its own, called the
+        # same way.
         "write_graphs",
     }
 )
@@ -94,6 +95,7 @@ EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("wan/export_vae_encoder.py", "emit_series"),
     ("wan/ti2v_export_dit.py", "write_series"),
     ("moss/export_dit.py", "write_series"),
+    ("moss/export_vae.py", "write_series"),
 )
 
 

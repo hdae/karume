@@ -86,6 +86,7 @@ ENTRIES: tuple[tuple[str, str, str, str], ...] = (
     ("wan/umt5_export.py", "write_container", "GRAPH_NAME", "GRAPH_NAME"),
     ("wan/ti2v_export_dit.py", "write_container", "TARGET", "TARGET"),
     ("moss/export_dit.py", "write_container", "name", "GRAPHS"),
+    ("moss/export_vae.py", "write_graphs", "name", "GRAPHS"),
 )
 
 #: `minicpm5/export_decode.py` のように、値の定数が**別モジュール**に在る台本の引き先。
@@ -288,11 +289,19 @@ class TestTheNamesAreTheWeightsKeys:
 
         assert self._named("gemma4_qat") == {GEMMA4_ROLE}
 
-    def test_moss_names_its_three_dit_graphs(self) -> None:
+    def test_moss_names_its_dit_and_vae_graphs(self) -> None:
         """MOSS-Image has no distribution plan yet: the DiT script names the
         three graphs of the MOSS-Image ADR (`dit` / `dit_skip22`, which borrows every weight of
-        `dit` / `dit_text` — `moss.dit_patch`)."""
-        assert self._named("moss") == {"dit", "dit_skip22", "dit_text"}
+        `dit` / `dit_text` — `moss.dit_patch`), and the VAE script its three decoder graphs
+        (`moss.vae_patch`)."""
+        assert self._named("moss") == {
+            "dit",
+            "dit_skip22",
+            "dit_text",
+            "vae_decoder_pre",
+            "vae_decoder_attn",
+            "vae_decoder_post",
+        }
 
     @pytest.mark.parametrize("family", ["embeddinggemma", "minicpm5"])
     def test_the_solo_families_name_the_single_part_convention(self, family: str) -> None:
