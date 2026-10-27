@@ -1,11 +1,15 @@
 """Export of the MOSS-Image DiT as an i8 series — the graphs `dit`, `dit_skip22`, `dit_text` and
-the asset `rope_base` (ADR NNNN decisions 2–4, plan step 1, plan items 15-1 to 15-3, 15-5, 15-11,
-15-14, 15-15).
+the assets `rope_base` and `training_grid` (ADR NNNN decisions 2–4 and 11, plan steps 1 and 2, plan
+items 15-1 to 15-3, 15-5, 15-11, 15-14, 15-15).
 
     uv run --group moss --inexact python -m moss.export_dit inspect  # traces + structure only
     uv run --group moss --inexact python -m moss.export_dit write    # the series, behind both gates
     uv run --group moss --inexact python -m moss.export_dit eager    # the eager gate on the series
     uv run --group moss --inexact python -m moss.export_dit eager --without-series  # before one
+
+`write` reads the stage-0 host record (`moss.host_fixture`; default
+`outputs/bench/karume-moss-image/<today>_stage0-reference/host.safetensors`, another one by
+`--host-record`) for gate 3.
 
 Each command prints a JSON summary and writes it to `--out` (default
 `outputs/bench/karume-moss-image/<date>_dit-export/<command>.json`); a failed gate exits non-zero.
@@ -14,17 +18,30 @@ Each command prints a JSON summary and writes it to `--out` (default
 
 One part directory per graph, each with its container `model.krm` (graph name = part name):
 
-| Part         | Symbol | Weights                                              | Asset       |
-| ------------ | ------ | ---------------------------------------------------- | ----------- |
-| `dit`        | S      | 258 linears i8 (per-row scale), norms and biases f32 | `rope_base` |
-| `dit_skip22` | S      | none — every initializer declared shared with `dit`  | —           |
-| `dit_text`   | T      | 11 linears i8, norms and biases f32                  | —           |
+| Part         | Symbol | Weights                                             | Assets            |
+| ------------ | ------ | --------------------------------------------------- | ----------------- |
+| `dit`        | S      | 258 linears i8 (per-row scale), norms, biases f32   | `rope_base`,      |
+|              |        |                                                     | `training_grid`   |
+| `dit_skip22` | S      | none — every initializer declared shared with `dit` | —                 |
+| `dit_text`   | T      | 11 linears i8, norms and biases f32                 | —                 |
 
 `dit_text` runs with f32 compute in every preset (plan item 15-11 — a session setting of step 5;
 the weights are i8 like the rest).
 
-The graphs and their inputs are {@link moss.dit_patch}. `rope_base` is the per-axis sin / cos base
-tables ({@link moss.dit_patch.rope_base_tables}; safetensors bytes, role `rope-base`).
+The graphs and their inputs are {@link moss.dit_patch}. Both assets are safetensors bytes of
+upstream outputs, which the host only reorders or indexes (ADR 0034 decision 3, plan item 15-14):
+
+- `rope_base` (role `rope-base`): the per-axis sin / cos base tables
+  ({@link moss.dit_patch.rope_base_tables}).
+- `training_grid` (role `training-grid`, {@link training_grid_tables}): the 1,000-point training
+  grid of `MOSSImageScheduler` — `sigmas` and `timesteps` `[1000]` f32 (descending, the grid every
+  requested schedule snaps to) and `time_sinusoid` `[1000, freq_dim]` f32 (row i = what
+  `MOSSImageTransformer.forward` feeds its time MLP at `timesteps[i]`, the graph input
+  `timesteps_proj`). A timestep is always one of these 1,000 values (upstream snaps σ to the grid
+  and the timestep is σ × 1000), so the host indexes the table by the training-grid index and
+  never evaluates the sinusoid. The values come from upstream code exactly as `moss.host_fixture`
+  takes them (its own functions are called — one path), and gate 3 checks them against that
+  record.
 
 ## Export (the ADR 0121 decision 7 form — no exporter-core change)
 
@@ -69,6 +86,13 @@ whether the final norm splits by row count (its image rows on N rows vs on S row
 written series, the gate also checks that every i8 weight of the containers dequantizes to the
 fake-quant weight the comparison ran with (packed × scale in f32, bit for bit).
 
+## Gate 3 — the host tables ({@link host_tables_gate})
+
+The `training_grid` asset read back from the written `dit` container is bit-identical to the
+stage-0 host record (`host.safetensors` of `moss.host_fixture`: `training.sigmas`,
+`training.timesteps`, `time_sinusoid` — computed there at two torch thread counts). The record is
+required: without it `write` fails loudly.
+
 RAM: `write` runs gate 2 in the same process, so it peaks with gate 2's f32 DiT (20.3 GB) plus the
 comparison's work space — measured 28.54 GiB peak RSS (`write.json`, 2026-10-27; `eager
 --without-series` alone 27.93 GiB). `inspect` only traces on the meta device and is light.
@@ -93,11 +117,11 @@ from typing import Any
 
 import torch
 from safetensors import safe_open
-from safetensors.torch import save
+from safetensors.torch import load, save
 from torch import nn
 from torch.export import Dim
 
-from _shared.container_read import open_container
+from _shared.container_read import open_container, read_asset
 from _shared.paths import BENCH_ROOT, SERIES_ROOT
 from karume.artifacts import staged_publication
 from karume.container import AssetInput, Provenance, codec_entry, container_parts
@@ -115,7 +139,7 @@ from karume.quantize import (
     quantize_to_int8,
 )
 from karume.verify import ir_graph_from_container, verify_container
-from moss import dit_patch, pipeline_ref, records, sources, text_embeds
+from moss import dit_patch, host_fixture, pipeline_ref, records, sources, text_embeds
 from moss.dit_patch import DIT, DIT_SKIP22, DIT_TEXT, SKIP_BLOCK
 from moss.prompts import NEGATIVE, POSITIVE
 from moss.records import bits_equal
@@ -131,6 +155,18 @@ MODEL_FILE = "model.krm"
 #: The asset of the `dit` container (ADR 0034 decision 3; the role the TS side reads it by).
 ROPE_BASE_ASSET = "rope_base"
 ROPE_BASE_ROLE = "rope-base"
+
+#: The second asset of the `dit` container: the training grid's tables (module docstring; plan
+#: item 15-14).
+TRAINING_GRID_ASSET = "training_grid"
+TRAINING_GRID_ROLE = "training-grid"
+
+#: The tables of `training_grid` → their names in the stage-0 host record (gate 3).
+TRAINING_GRID_RECORD_KEYS: Mapping[str, str] = {
+    "sigmas": "training.sigmas",
+    "timesteps": "training.timesteps",
+    "time_sinusoid": "time_sinusoid",
+}
 
 #: torch.export's bounds of the symbols. They bound the trace only — IR symbols carry no bounds and
 #: the accepted sizes are the host's (ADR 0121 decision 3's note). S: above the area a 4 GiB binding
@@ -555,6 +591,53 @@ def rope_base_asset(module: ModuleType, config: Mapping[str, Any]) -> AssetInput
     return AssetInput(ROPE_BASE_ROLE, len(payload), payload)
 
 
+def training_grid_tables(
+    module: ModuleType, config: Mapping[str, Any], scheduler_config: Mapping[str, Any]
+) -> dict[str, torch.Tensor]:
+    """The tables of the asset `training_grid` (module docstring), from upstream code through
+    `moss.host_fixture`'s own functions: the training grid of upstream `set_timesteps` and, per
+    grid timestep, the input of `time_embedding[0]` of an upstream `MOSSImageTransformer` with the
+    DiT's `freq_dim` (the sinusoid depends on `freq_dim` and the timestep only)."""
+    sigmas, timesteps = host_fixture.training_grid(module, scheduler_config)
+    model = host_fixture.tiny_transformer(module, int(config["freq_dim"]))
+    sinusoid = torch.cat([host_fixture.time_sinusoid(model, t) for t in timesteps])
+    return {"sigmas": sigmas, "timesteps": timesteps, "time_sinusoid": sinusoid}
+
+
+def training_grid_asset(
+    module: ModuleType, config: Mapping[str, Any], scheduler_config: Mapping[str, Any]
+) -> AssetInput:
+    """The asset `training_grid` ({@link training_grid_tables})."""
+    payload = save(training_grid_tables(module, config, scheduler_config))
+    return AssetInput(TRAINING_GRID_ROLE, len(payload), payload)
+
+
+def host_tables_gate(container: Path, record: Path) -> dict[str, Any]:
+    """Gate 3: the `training_grid` asset of a written `dit` container ≡ the stage-0 host record
+    (bit for bit; `failures` empty = passed). A missing record fails loudly."""
+    if not record.is_file():
+        raise DitExportError(
+            f"no stage-0 host record at {record} — run `python -m moss.host_fixture` or pass"
+            " `--host-record`"
+        )
+    expected, _metadata = records.read_record(record, key=host_fixture.METADATA_KEY)
+    tables = load(read_asset(container, TRAINING_GRID_ASSET))
+    failures = []
+    if set(tables) != set(TRAINING_GRID_RECORD_KEYS):
+        failures.append(f"training_grid tables {sorted(tables)}")
+    for name, key in TRAINING_GRID_RECORD_KEYS.items():
+        if key not in expected:
+            failures.append(f"the host record has no '{key}'")
+        elif name in tables and not bits_equal(tables[name], expected[key]):
+            failures.append(f"training_grid '{name}' differs from the host record's '{key}'")
+    return {
+        "record": str(record),
+        "record_sha256": sources.sha256_of(record),
+        "tables": {name: list(value.shape) for name, value in sorted(tables.items())},
+        "failures": failures,
+    }
+
+
 def write_container(
     path: Path,
     graph: IrGraph,
@@ -876,16 +959,17 @@ def write_graphs(
     directory: Path,
     module: ModuleType,
     config: Mapping[str, Any],
+    scheduler_config: Mapping[str, Any],
     checkpoint: Checkpoint,
     *,
     clock: records.Clock,
     sym_max: int | None = None,
     expected: Mapping[str, Mapping[str, int]] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Trace the three graphs on a meta model of `config`, write `dit` (with the asset `rope_base`)
-    and `dit_text` with the checkpoint's weights and `dit_skip22` borrowing every weight of `dit`,
-    into `directory` ({@link container_paths}); returns gate 1's report per graph (`failures` empty
-    = passed).
+    """Trace the three graphs on a meta model of `config`, write `dit` (with the assets `rope_base`
+    and `training_grid` — the latter from `scheduler_config`) and `dit_text` with the checkpoint's
+    weights and `dit_skip22` borrowing every weight of `dit`, into `directory`
+    ({@link container_paths}); returns gate 1's report per graph (`failures` empty = passed).
 
     `sym_max` / `expected` default to the real configuration's ({@link SYM_MAX} / {@link EXPECTED});
     the tests pass their tiny model's.
@@ -905,7 +989,15 @@ def write_graphs(
         material = materialize(traced, checkpoint)
         clock.lap(f"quantize {name}")
         paths[name].parent.mkdir()
-        assets = {ROPE_BASE_ASSET: rope_base_asset(module, config)} if name == DIT else {}
+        # Asset order = layout order (`rope_base` first keeps its block id `a.0`).
+        assets = (
+            {
+                ROPE_BASE_ASSET: rope_base_asset(module, config),
+                TRAINING_GRID_ASSET: training_grid_asset(module, config, scheduler_config),
+            }
+            if name == DIT
+            else {}
+        )
         graph = write_container(paths[name], traced.graph, material, name=name, assets=assets)
         del material
         gc.collect()
@@ -939,9 +1031,14 @@ def write_graphs(
     return graphs
 
 
-def write_series() -> dict[str, Any]:
-    """Export the three graphs into a staging directory, run both gates, then move the series into
-    place (module docstring). A failed gate discards the staging directory."""
+def default_host_record() -> Path:
+    """The stage-0 host record of today's reference directory (`moss.host_fixture`)."""
+    return records.default_reference_dir() / host_fixture.RECORD_NAME
+
+
+def write_series(host_record: Path) -> dict[str, Any]:
+    """Export the three graphs into a staging directory, run the three gates, then move the series
+    into place (module docstring). A failed gate discards the staging directory."""
     clock = records.Clock()
     snapshot, module = pipeline_ref.upstream()
     sources.check_snapshot(snapshot, ("transformer",))
@@ -952,11 +1049,23 @@ def write_series() -> dict[str, Any]:
     summary: dict[str, Any] = {"series": str(SERIES)}
     with staged_publication(SERIES) as staged:
         staged.mkdir(parents=True)
-        summary["graphs"] = write_graphs(staged, module, config, checkpoint, clock=clock)
+        summary["graphs"] = write_graphs(
+            staged,
+            module,
+            config,
+            host_fixture.scheduler_config(snapshot, module),
+            checkpoint,
+            clock=clock,
+        )
         failures = {n: g["failures"] for n, g in summary["graphs"].items() if g["failures"]}
         if failures:
             raise DitExportError(f"gate 1 (structure) failed: {failures}")
         paths = container_paths(staged)
+        summary["host_tables"] = host_tables_gate(paths[DIT], host_record)
+        if summary["host_tables"]["failures"]:
+            failed = summary["host_tables"]["failures"]
+            raise DitExportError(f"gate 3 (host tables) failed: {failed}")
+        clock.lap("host tables")
         gate = eager_gate(
             snapshot, module, containers={n: paths[n] for n in (DIT, DIT_TEXT)}, clock=clock
         )
@@ -997,7 +1106,7 @@ def eager_only(*, series: bool = True) -> dict[str, Any]:
 
 COMMANDS: Mapping[str, Callable[[argparse.Namespace], dict[str, Any]]] = {
     "inspect": lambda _args: inspect_only(),
-    "write": lambda _args: write_series(),
+    "write": lambda args: write_series(args.host_record or default_host_record()),
     "eager": lambda args: eager_only(series=not args.without_series),
 }
 
@@ -1009,9 +1118,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--without-series", action="store_true", help="eager: no container check (no series yet)"
     )
+    parser.add_argument(
+        "--host-record", type=Path, default=None, help="write: the stage-0 host record (gate 3)"
+    )
     args = parser.parse_args(argv)
     if args.without_series and args.command != "eager":
         parser.error("--without-series applies to eager only")
+    if args.host_record is not None and args.command != "write":
+        parser.error("--host-record applies to write only")
     summary = COMMANDS[args.command](args)
     document = {"command": args.command, "result": summary, "versions": records.versions()}
     text = json.dumps(document, ensure_ascii=False, indent=1)

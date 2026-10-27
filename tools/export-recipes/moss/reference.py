@@ -16,7 +16,8 @@ and the step's check).
 
 - per step i: `step<i>.latents_in`, `.timestep`, `.video_tokens` (the patchified latents — the
   input of `video_embedder`), `.video_embedded`, `.time_sinusoid` (the input of the time MLP),
-  `.time_embedding`, `.modulation`, `.head_modulation`, `.prediction` (after CFG), `.latents_out`;
+  `.time_embedding`, `.modulation`, `.head_modulation`, `.prediction` (after CFG — the
+  `model_output` upstream passed to `scheduler.step`), `.latents_out`;
   and per branch b ∈ {positive, negative}: `step<i>.<b>.block<j>` (the output of every block that
   ran, `[1, S, 3072]`) and `step<i>.<b>.sample` (the DiT's output).
 - per branch: `<b>.text_context` (the `text_embedder` output — what `dit_text` must produce) and
@@ -41,9 +42,12 @@ steps, so the gate itself is tested on a tiny pipeline with perturbed recordings
    takes block 21's in the negative). This shows the records are wired in upstream's order; it does
    not recompute any block — the block arithmetic is verified at step 1, against these records.
 3. The head: the last block's output through upstream's head modules gives the recorded `sample`.
-4. The trajectory: CFG and the Euler update written here (the host functions of plan step 4), fed
-   the recorded samples and the scheduler's sigmas, give every step's input latents and finally the
-   decode input `vae.z` (through `moss.pipeline_ref.denormalize` / `unpatchify`).
+4. The trajectory: CFG written here, fed the recorded samples, gives the prediction upstream passed
+   to `scheduler.step` (recorded by wrapping it — {@link record_case}), and the Euler update written
+   here (the host functions of plan step 4), fed that prediction and the scheduler's sigmas, gives
+   every step's input latents and finally the decode input `vae.z` (through
+   `moss.pipeline_ref.denormalize` / `unpatchify`). The Euler update can absorb a one-ULP change
+   of the prediction in its rounding, so the prediction is checked on its own.
 5. The image: `vae.decode` of the re-assembled `z`, clamped and post-processed as upstream does,
    equals the image `pipe(...)` returned.
 6. The host functions: the recorded `rope` and `time_sinusoid` equal `moss.host_fixture`'s functions
@@ -209,6 +213,8 @@ class Recording:
     sigmas: torch.Tensor
     timesteps: torch.Tensor
     forwards: list[Forward]
+    #: The `model_output` of every `scheduler.step` call, in order (the CFG prediction).
+    model_outputs: list[torch.Tensor]
     #: What `moss.pipeline_ref.VaeRecorder` kept (`vae.z`, …, `vae.decoded`).
     vae: dict[str, torch.Tensor]
     #: What `pipe(...)` returned (`output_type="pt"`).
@@ -267,6 +273,18 @@ def record_case(
     """Run upstream `pipe(...)` once with the hooks (the recording half of the gate)."""
     recorder = DitRecorder(pipe.transformer, embeds[POSITIVE], embeds[NEGATIVE])
     vae_recorder = pipeline_ref.VaeRecorder(pipe.vae)
+    scheduler = pipe.scheduler
+    model_outputs: list[torch.Tensor] = []
+    step = scheduler.step
+
+    def recording_step(model_output: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
+        model_outputs.append(model_output.detach().clone())
+        return step(model_output, *args, **kwargs)
+
+    # An instance attribute shadows the class's method for the call (removed afterwards).
+    if "step" in vars(scheduler):
+        raise DitReferenceError("the scheduler already has an instance-level step")
+    scheduler.step = recording_step
     try:
         image = pipe(
             prompt_embeds=embeds[POSITIVE][None],
@@ -280,6 +298,7 @@ def record_case(
             output_type="pt",
         ).images
     finally:
+        del scheduler.step
         recorder.close()
         vae_recorder.close()
     return Recording(
@@ -290,6 +309,7 @@ def record_case(
         sigmas=pipe.scheduler.sigmas.clone(),
         timesteps=pipe.scheduler.timesteps.clone(),
         forwards=recorder.forwards,
+        model_outputs=model_outputs,
         vae=vae_recorder.tensors,
         image=image,
     )
@@ -304,7 +324,8 @@ def gate_items(layers: int, skip_layers: Sequence[int]) -> list[str]:
         " ran before it (block 0: cat(video_embedded, text_context)); the block arithmetic is not"
         " recomputed here - it is verified at step 1",
         "head: last block output -> upstream head modules == recorded sample",
-        "trajectory: CFG + Euler re-assembled == every step's latents in and the decode input",
+        "prediction: CFG re-assembled == the model_output upstream passed to scheduler.step",
+        "trajectory: Euler re-assembled == every step's latents in and the decode input",
         "image: decode(z) -> clamp -> postprocess == pipe(...) images",
         "host functions: rope == fresh _RoPE, time sinusoid == tiny transformer",
     ]
@@ -413,9 +434,18 @@ def check_recording(
         if positive.sample is None or negative.sample is None:
             break
         prediction = cfg(positive.sample.float(), negative.sample.float(), guidance_scale)
+        if step >= len(recording.model_outputs):
+            failures.append(f"step {step}: scheduler.step was not called")
+            break
+        check(
+            bits_equal(prediction, recording.model_outputs[step]),
+            failures,
+            f"step {step}: CFG ≠ the prediction upstream passed to scheduler.step",
+        )
         tensors[f"step{step}.latents_in"] = latents
         tensors[f"step{step}.timestep"] = timesteps[step].reshape(1)
-        tensors[f"step{step}.prediction"] = prediction
+        # Upstream's own value (equal to `prediction` when the item above holds).
+        tensors[f"step{step}.prediction"] = recording.model_outputs[step]
         latents = euler(latents, prediction, sigmas[step], sigmas[step + 1])
         tensors[f"step{step}.latents_out"] = latents
     for branch in (POSITIVE, NEGATIVE):

@@ -138,6 +138,26 @@ class TestGate:
         with pytest.raises(reference.DitReferenceError, match="step 1 negative: head"):
             reference.check_recording(tiny_pipe, module, recording, skip_layers=TINY_SKIP)
 
+    def test_the_scheduler_received_each_steps_prediction(self, tiny_pipe, module, recording):
+        tensors, _gate = reference.check_recording(
+            tiny_pipe, module, recording, skip_layers=TINY_SKIP
+        )
+
+        assert len(recording.model_outputs) == reference.STEPS
+        for step in range(reference.STEPS):
+            assert bits_equal(tensors[f"step{step}.prediction"], recording.model_outputs[step])
+        assert "step" not in vars(tiny_pipe.scheduler)
+
+    def test_a_prediction_one_ulp_off_fails(self, tiny_pipe, module, recording):
+        """The CFG item on its own: the Euler update may round a one-ULP change away."""
+        moved = recording.model_outputs[0].clone()
+        flat = moved.view(-1)
+        flat[0] = torch.nextafter(flat[0], torch.tensor(math.inf))
+        recording.model_outputs[0] = moved
+
+        with pytest.raises(reference.DitReferenceError, match="step 0: CFG ≠ the prediction"):
+            reference.check_recording(tiny_pipe, module, recording, skip_layers=TINY_SKIP)
+
     def test_two_swapped_block_outputs_fail(self, tiny_pipe, module, recording):
         blocks = _forward(recording, 0, POSITIVE).tensors
         blocks["block1"], blocks["block2"] = blocks["block2"], blocks["block1"]

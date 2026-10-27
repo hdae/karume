@@ -1,7 +1,7 @@
 """`moss/export_dit.py` — gate 1 (structure) on tiny traces and its fault injections, the shared
 declarations of `dit_skip22`, the bf16 checkpoint reader and the per-row i8, the write path of
-`write_series` on a tiny bf16 checkpoint, and the container weight check of gate 2 (the real-size
-run is the script itself).
+`write_series` on a tiny bf16 checkpoint (with both assets of `dit`), gate 3 (the host tables) and
+the container weight check of gate 2 (the real-size run is the script itself).
 
 The pipeline code comes from the pinned snapshot ({@link moss_snapshot}; SKIP when not cached).
 """
@@ -20,20 +20,10 @@ from _shared.container_read import read_asset, read_asset_declarations
 from karume.emit import FixedQuantizedWeight
 from karume.ir import IrGraph
 from karume.quantize import channel_scale, fake_quant_int8, quantize_to_int8
-from moss import dit_patch, export_dit, records
+from moss import dit_patch, export_dit, host_fixture, records
 from moss.dit_patch import DIT, DIT_SKIP22, DIT_TEXT
 from moss.records import bits_equal
-from moss.tests.tiny import TINY, tiny_model
-
-#: The trace's symbol maximum in the tests (no tiny weight has this extent).
-SYM_MAX = 512
-
-#: The tiny DiT's census (24 blocks; the skip graph has 23).
-TINY_EXPECTED = {
-    DIT: {"linear": 24 * 6 + 6, "where": 1, "attention": 24, "div": 48},
-    DIT_SKIP22: {"linear": 23 * 6 + 6, "where": 1, "attention": 23, "div": 46},
-    DIT_TEXT: {"linear": 11, "where": 0, "attention": 2, "div": 4},
-}
+from moss.tests.tiny import SYM_MAX, TINY, TINY_EXPECTED, tiny_model
 
 
 @pytest.fixture(scope="module")
@@ -195,7 +185,13 @@ class TestCheckpointAndQuantize:
 
 
 @pytest.fixture(scope="module")
-def series(module, tmp_path_factory):
+def scheduler_config(moss_snapshot, module):
+    """The pinned scheduler config (the training grid of the tiny series is the real one)."""
+    return host_fixture.scheduler_config(moss_snapshot, module)
+
+
+@pytest.fixture(scope="module")
+def series(module, scheduler_config, tmp_path_factory):
     """The tiny series written by `write_graphs` from a bf16 checkpoint of the tiny DiT, its gate 1
     reports, and the reference gate 2 compares with (the checkpoint's values in f32, fake-quant)."""
     root = tmp_path_factory.mktemp("write-path")
@@ -218,6 +214,7 @@ def series(module, tmp_path_factory):
         directory,
         module,
         TINY,
+        scheduler_config,
         checkpoint,
         clock=records.Clock(),
         sym_max=SYM_MAX,
@@ -256,6 +253,37 @@ class TestWritePath:
         assert tables.keys() == expected.keys()
         assert all(bits_equal(tables[key], expected[key]) for key in expected)
 
+    def test_dit_carries_the_training_grid_tables(self, module, scheduler_config, series):
+        """Upstream's training grid and, per grid timestep, the sinusoid upstream's forward feeds
+        its time MLP (`freq_dim` of the tiny config)."""
+        root, _graphs, _reference = series
+        path = export_dit.container_paths(root)[DIT]
+        sigmas, timesteps = host_fixture.training_grid(module, scheduler_config)
+        model = host_fixture.tiny_transformer(module, TINY["freq_dim"])
+
+        declarations = read_asset_declarations(path)
+        tables = load(read_asset(path, export_dit.TRAINING_GRID_ASSET))
+
+        assert declarations[export_dit.TRAINING_GRID_ASSET][0] == export_dit.TRAINING_GRID_ROLE
+        assert sorted(tables) == ["sigmas", "time_sinusoid", "timesteps"]
+        assert bits_equal(tables["sigmas"], sigmas)
+        assert bits_equal(tables["timesteps"], timesteps)
+        assert tables["time_sinusoid"].shape == (1000, TINY["freq_dim"])
+        for row in (0, 1, 500, 999):
+            expected = host_fixture.time_sinusoid(model, timesteps[row])
+            assert bits_equal(tables["time_sinusoid"][row : row + 1], expected), row
+
+    def test_rope_base_keeps_the_first_asset_block(self, series):
+        """The assets are laid out in the order passed: `rope_base` stays block `a.0`, so adding
+        `training_grid` leaves its bytes where they were."""
+        from _shared.container_read import open_container
+
+        root, _graphs, _reference = series
+        model = open_container(export_dit.container_paths(root)[DIT]).read.model
+
+        assert model.assets[export_dit.ROPE_BASE_ASSET].block == "a.0"
+        assert model.assets[export_dit.TRAINING_GRID_ASSET].block == "a.1"
+
     @pytest.mark.parametrize("name", [DIT, DIT_TEXT])
     def test_the_written_weights_are_the_fake_quant_weights(self, series, name):
         root, _graphs, reference = series
@@ -264,6 +292,91 @@ class TestWritePath:
 
         assert report["differing"] == []
         assert report["counts"]["i8"] == TINY_EXPECTED[name]["linear"]
+
+
+class TestHostTablesGate:
+    """Gate 3 against host records written the way `moss.host_fixture` writes them."""
+
+    @staticmethod
+    def _record(path, tables):
+        records.write_record(
+            path,
+            {key: tables[name] for name, key in export_dit.TRAINING_GRID_RECORD_KEYS.items()},
+            {"note": "test"},
+            key=host_fixture.METADATA_KEY,
+        )
+
+    @pytest.fixture
+    def dit_and_tables(self, series):
+        root, _graphs, _reference = series
+        path = export_dit.container_paths(root)[DIT]
+        return path, load(read_asset(path, export_dit.TRAINING_GRID_ASSET))
+
+    def test_the_tables_of_the_record_pass(self, dit_and_tables, tmp_path):
+        path, tables = dit_and_tables
+        self._record(tmp_path / "host.safetensors", tables)
+
+        report = export_dit.host_tables_gate(path, tmp_path / "host.safetensors")
+
+        assert report["failures"] == []
+        assert report["tables"]["time_sinusoid"] == [1000, TINY["freq_dim"]]
+
+    def test_a_sinusoid_one_ulp_off_is_named(self, dit_and_tables, tmp_path):
+        path, tables = dit_and_tables
+        moved = dict(tables)
+        moved["time_sinusoid"] = tables["time_sinusoid"].clone()
+        value = moved["time_sinusoid"][7, 3]
+        moved["time_sinusoid"][7, 3] = torch.nextafter(value, torch.tensor(2.0))
+        self._record(tmp_path / "host.safetensors", moved)
+
+        report = export_dit.host_tables_gate(path, tmp_path / "host.safetensors")
+
+        assert report["failures"] == [
+            "training_grid 'time_sinusoid' differs from the host record's 'time_sinusoid'"
+        ]
+
+    def test_a_record_without_a_table_is_named(self, dit_and_tables, tmp_path):
+        path, tables = dit_and_tables
+        keys = export_dit.TRAINING_GRID_RECORD_KEYS
+        records.write_record(
+            tmp_path / "host.safetensors",
+            {key: tables[name] for name, key in keys.items() if name != "timesteps"},
+            {"note": "test"},
+            key=host_fixture.METADATA_KEY,
+        )
+
+        report = export_dit.host_tables_gate(path, tmp_path / "host.safetensors")
+
+        assert report["failures"] == [f"the host record has no '{keys['timesteps']}'"]
+
+    def test_a_container_without_a_table_is_named(self, dit_and_tables, tmp_path, monkeypatch):
+        """Fault injection: the asset read back lacks `timesteps`."""
+        path, tables = dit_and_tables
+        self._record(tmp_path / "host.safetensors", tables)
+        monkeypatch.setattr(
+            export_dit,
+            "load",
+            lambda raw: {name: value for name, value in load(raw).items() if name != "timesteps"},
+        )
+
+        report = export_dit.host_tables_gate(path, tmp_path / "host.safetensors")
+
+        assert report["failures"] == ["training_grid tables ['sigmas', 'time_sinusoid']"]
+
+    def test_the_host_record_option_is_refused_outside_write(self, capsys, tmp_path):
+        # `--out`: were the option accepted, the summary would land in tmp_path.
+        with pytest.raises(SystemExit):
+            export_dit.main(
+                ["inspect", "--host-record", "host.safetensors", "--out", str(tmp_path)]
+            )
+
+        assert "--host-record applies to write only" in capsys.readouterr().err
+
+    def test_a_missing_record_fails_loudly(self, dit_and_tables, tmp_path):
+        path, _tables = dit_and_tables
+
+        with pytest.raises(export_dit.DitExportError, match="no stage-0 host record"):
+            export_dit.host_tables_gate(path, tmp_path / "host.safetensors")
 
 
 class TestContainerWeights:
