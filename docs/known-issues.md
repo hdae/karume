@@ -565,3 +565,44 @@ The acquisition of the actual run is not matched.
 - **User ruling (2026-10-11): filed, not fixed** (the remainder of Codex deep review R8-003). Reasons: it happens only on
   multi-GPU machines. Injection risks moving the sha rows if it diverges from the pipeline's internal acquisition. An
   adapter-reading entry point would add public surface for this problem alone.
+
+## `gpu_full_write_test.ts`: the linear i8a8 case never puts its poison into `xq` / `xs` (filed 2026-10-27; tests only)
+
+The full-write case for linear i8a8's temporaries (`packages/runtime/tests/gpu_full_write_test.ts:594-663`) sizes its
+poison buffer to the temporary under test (`poisonCount` = m·k/4 for `xq`, m for `xs` — `:602-605`); its comment
+(`:563-564`) reasons in size classes, which the liveness packer (ADR [0093](decisions/0093-transient-liveness-packing.md),
+least region growth since its addendum of 2026-10-26) does not place by. The packer takes slots largest first: the node
+output `y` (80 B) opens region 0; the poison (32 B or 16 B) shares `y`'s bytes there (their lifetimes do not overlap, so
+the growth is 0); `xq` (32 B) and `xs` (16 B) are kept out of `y`'s region (the GEMM reads them and writes `y`) and open
+fresh regions. Replaying the case's allocation program through `planTransients` gives, in both cases, the poison and `y`
+at region 0 offset 0, `xq` and `xs` alone in regions 1 and 2, and one shared slot.
+
+- So the GEMM's full write of `y` covers the poison, and the temporaries the case names start zeroed; `reuseCount >= 1`
+  (`:650-651`) passes on the poison sharing `y`. A word the quantiser left unwritten would still read as 0 (an int8 0 or
+  a zero scale), which the atol = 0 match catches unless the reference has a 0 there too, but the poisoned-temporary check
+  the case describes does not happen.
+- The conv3d case below it had the same gap and was rebuilt in `21ec9fa8` (a poison larger than every slot, `y` smaller
+  than `xq`, `reuseCount` asserted to be exactly 2); the same construction fits here.
+- Impact: tests only (the runtime is unchanged).
+
+## The memory estimate does not count conv3d w8a8's in-node temporaries, nor list them as unaccounted (filed 2026-10-27; estimate callers on conv8 Sessions)
+
+With `convCompute: "a8"` an eligible conv3d node allocates two temporaries between its two dispatches
+(`buildConv3dI8a8`, `packages/runtime/src/runtime/recipe-builders/conv.ts:569-570`): `xq` = P·Cin bytes (the per-pixel
+int8 words) and `xs` = 4·P bytes (the per-pixel scales), P = T·H·W of the conv input, alive from the quantiser to the
+GEMM. `EstimateOptions` has no `convCompute` (`packages/runtime/src/runtime/estimate.ts:302`), the estimate counts
+neither, and its `UNACCOUNTED` list (`estimate.ts:456-462`) names linear i8a8's quantized intermediates but not
+conv3d's — against that list's own MUST (list every item known to be not included). ADR
+[0133](decisions/0133-conv3d-w8a8.md)'s addendum of 2026-10-26 (channel-major quantiser) notes the gap as pre-existing.
+
+- Sizes on the Wan2.2 TI2V-5B decoder (every conv3d runs the w8a8 key — `e2e_wan_ti2v_vae_a8_test.ts`; conv input
+  shapes from the local containers' graph descriptors, `outputs/diag/wave-b-2026-10-26/v6/census.json`, not tracked): at
+  tile 16 the largest pair is `xq` 24 MiB + `xs` 192 KiB on the first chunk (Cin 512, P 49,152 = 3×128×128) and
+  48 MiB + 384 KiB on the next chunk (Cin 512, P 98,304 = 6×128×128); at tile 32 it is 96 MiB + 768 KiB (first, Cin 512,
+  P 196,608) and 192 MiB + 1.5 MiB (next, Cin 512, P 393,216). Arithmetic from the shapes, not measured.
+- The pair lives inside one node, so the live peak misses at most the largest pair; how the region total moves depends
+  on the placement. No family calls the estimate on the Wan decoder today (`packages/models/src`); a caller of
+  `PreparedModel.estimate` / `estimateGraphMemory` on a conv8 preset gets the under-count without a note.
+- Impact: callers of `PreparedModel.estimate` / `estimateGraphMemory` on Sessions with `convCompute: "a8"`; no shipped family pipeline today (execution is unaffected).
+- Fix candidates: `EstimateOptions.convCompute`, counting the pair under the same eligibility as execution
+  (`conv3dI8a8Eligible`, `packages/runtime/src/kernels/conv3d-i8a8.ts:114`), or at least an `UNACCOUNTED` item.

@@ -595,6 +595,21 @@
   (through `tools/export-recipes/_shared/upstream.py`), so irodori and the others **fill it at their next re-export** (on the same occasion as the `sym_max` field of W-G4-4)
 - Re-ruling on the policy of "separating the semantic surface from the implemented subset" (attention / deform_conv2d /
   gather / conv_transpose1d / upsample_bilinear2d — a unified rule that does not turn the observed subset into op semantics)
+- **Consolidate CHANGELOG.md's `[Unreleased]` before 0.15.0 (filed 2026-10-27)**: the section has to describe the change from
+  0.14.0, not the history of features that were added and then changed again while unreleased. Entries known now:
+  ① Changed, the online route absorbing the output permute: the online route itself is unreleased (Added, online int8
+  attention), so its "`FusionCounts.attentionPermute` … 180 → 240" compares two unreleased states — fold it into the Added
+  entries. ② Changed, the estimate with `attentionScoreStorage: "none"` and no `attentionDevice` "now fails for every graph,
+  not only …": `"none"` is unreleased, so only the current rule belongs in the Added entry. ③ Timings measured before later
+  unreleased speed-ups: the Wan2.2 conv8 preset's VAE stage 87 s against the online preset's 168 s and clip 533 s /
+  611 s and `vaeTile: 32`'s
+  0.70–0.83× of tile 16 (both 2026-10-23, before the VAE wave b), and the Wan DiT fusion entry's 2,825 / 2,927 ms (2026-10-25,
+  before A4) — re-measure on the release tree or state the date. ④ "about 45 ms" per 121-frame forward for A4, where ADR
+  [0040](decisions/0040-fusion-pass.md)'s addendum of 2026-10-26 gives −44 / −49 ms. ⑤ The kernel-fingerprint entry's "the two
+  embedded tables" — three are embedded now (`nvidia-ampere` was added). ⑥ The house word "seat" in a user-facing entry (the
+  2026-10-25 DiT fusion entry: "under an a8 attention seat"). ⑦ A stray blank line inside the Added list (before the
+  `runAttentionRouteBench` entry). ⑧ The Fixed entry (the release wait before a slot backing is built) is framed on Node +
+  Dawn — say what it changes for a 0.14.0 user.
 
 ## parked (with revival conditions)
 
