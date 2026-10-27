@@ -90,6 +90,7 @@
 | merge layer | 合流層 | グラフ宣言と束縛表を重み取得前に合わせ、格納の規則を 1 か所で掛ける層 | — | container-v1 §13.3 |
 | admission | admission | 重みを 1 バイトも取る前に、宣言だけで Session を作れるかを判定すること | — | container-v1 §13.3 |
 | sequential block upload (lazy items) | block の逐次転送 | Session 構築が block を 1 本ずつ GPU へ上げて手放す形 | — | container-v1 §11 |
+| supply read-ahead (Session build) △ | 供給の先読み | Session 構築が、上げている item の先の block を最大 2 本読んでおくこと。供給の順番全体で数えるので part の境界をまたぎ、今の part のフェンスを待つ間に次の part を読む | — | ADR 0108 追記 14・`READ_AHEAD_BLOCKS`（executor.ts） |
 | migration CLI | 移行 CLI | 旧形式を新コンテナへ変換する Python の道具 | — | ADR 0108 決定 18 |
 | three hash roles | ハッシュの役割 3 分離 | 期待ハッシュ・派生キャッシュキー・内容ハッシュを同じ欄で兼ねない規律 | — | ADR 0108 決定 8 |
 | piece | piece | 上限を超えるテンソルの行範囲分割（束縛表の `pieces[]`） | — | container-v1 §5 |

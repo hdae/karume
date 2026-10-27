@@ -1,28 +1,42 @@
-// 重みの供給は block を 1 本ずつ読んで上げる（lazy — `WeightBatch.items`）。
+// The weight supply uploads one block at a time and reads at most 2 blocks ahead of it, across part
+// boundaries (lazy `WeightBatch.items` — ADR 0108 decision 9, addendum 14).
 //
-// Session 構築（`createSessionFromContainer` → `containerBatches` → `buildSessionState`）は part を
-// 読み切ってから上げるのではなく、「block を 1 本読む → writeBuffer → 次の block を読む」と交互に
-// 進み、フェンス（空 submit + 完了待ち）は part ごとに 1 回だけ張る。交互であることが、JS 側に
-// 生きる重みのバイト列を part 1 本から block 1 本へ下げる成立条件そのもの（GC で実際に何バイト
-// 解放されるかは単体では観測できないので、ここは順序で固定する — 実測は tools/ram-peak）。
+// Session construction (`createSessionFromContainer` → `containerBatches` → `buildSessionState`)
+// does not read a whole part before uploading it: each block is written as soon as it is taken,
+// while the next 2 blocks — also those of the next parts — are read meanwhile, and the fence (an
+// empty submit + waiting for completion) comes once per part. The bound is what keeps the weight
+// bytes alive on the JS side at one item + 2 blocks instead of one part (how many bytes GC actually
+// frees cannot be observed in a unit test, so the order is pinned here — measured with
+// tools/ram-peak).
 //
-// 併せて固定するもの:
-// - `SessionBuildStats.supplyWaitMs` が block の読みを待った時間と、列の終わりを知るまでの待ちを
-//   含む（読みが batch の本体へ移っても、供給側の費用が統計から消えない）
-// - part の途中で読みが落ちたら、上げ済みの重みごとアリーナを破棄し、以後の block を 1 本も
-//   読まない（transaction 境界 — lazy で初めて生じる「part の前半だけ上げた」状態）
+// Also pinned:
+// - `SessionBuildStats.supplyWaitMs` includes the wait for block reads and the wait until the end
+//   of the sequence is known (the supply's cost does not vanish from the stats)
+// - when a read fails mid-part, the arena is destroyed with the uploaded weights, and no read is
+//   issued beyond the read-ahead bound (the transaction boundary — the "first half of a part
+//   uploaded" state that only lazy items create)
+// - a read failing ahead of its turn is reported when its block is reached, after the earlier
+//   blocks' failures; a failed or abandoned build settles the reads in flight before it returns
 //
 // 実 GPU は使わない。順序と回数は、確保・書き込み・フェンスを記録するフェイク device で
 // 決定論的に固定できる。writeBuffer が「呼んだ時点で写す」こと自体は実機でしか固定できないので
 // tests/gpu_write_buffer_copy_test.ts が持つ。
 
-import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertInstanceOf,
+  assertRejects,
+  assertStrictEquals,
+} from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import type { BoundContainer } from "../src/format/container/bind.ts";
 import { openMemoryContainer } from "../src/format/container/memory.ts";
 import { parseIrDeclarationValue } from "../src/format/ir.ts";
 import { GpuContext, readAdapterInfo, type RequiredLimits } from "../src/gpu/device.ts";
-import { createSessionFromContainer, Session } from "../src/runtime/executor.ts";
+import { GpuOutOfMemoryError } from "../src/gpu/error-scope.ts";
+import { containerBatches, createSessionFromContainer, Session } from "../src/runtime/executor.ts";
+import { ExecutionError } from "../src/runtime/plan.ts";
 import type { ReadyInitializer } from "../src/runtime/session-build.ts";
 import { mergeGraph } from "./helpers/merged-graph.ts";
 import { f32Bytes, GRAPH_NAME } from "./helpers/model-fixture.ts";
@@ -118,8 +132,13 @@ type BeforeRead = (id: string) => Promise<void>;
  * DOM 型全体は再現しないので cast で渡す（tests/helpers/fake-gpu.ts と同じテスト専用の境界）。
  * GpuContext 自体は本物を使う（消失購読と errorScope の経路は本番実装のまま通す）。
  */
-const recorder = () => {
+const recorder = (
+  // What the n-th `popErrorScope` (0-based, over the whole build) resolves with — the injection
+  // point of a scope failure (default: every pop resolves with null).
+  popResult: (pop: number) => Promise<GPUError | null> = () => Promise.resolve(null),
+) => {
   const events: string[] = [];
+  let pops = 0;
   const blockOf = new Map<ArrayBufferLike, string>();
   const counts = { created: 0, destroyed: 0, openScopes: 0 };
   const device = {
@@ -133,7 +152,9 @@ const recorder = () => {
     popErrorScope: (): Promise<GPUError | null> => {
       events.push("pop");
       counts.openScopes -= 1;
-      return Promise.resolve(null);
+      const pop = pops;
+      pops += 1;
+      return popResult(pop);
     },
     createBuffer: (descriptor: GPUBufferDescriptor): GPUBuffer => {
       counts.created += 1;
@@ -183,8 +204,8 @@ const sleep = async (ms: number): Promise<void> => {
 
 // ---------------------------------------------------------------------------
 
-describe("重みの供給は block を 1 本ずつ読んで上げる", () => {
-  it("読みと writeBuffer が block ごとに交互に並び、errorScope は block ごと・フェンスは part ごとに 1 回だけ張る", async () => {
+describe("the weight supply uploads one block at a time", () => {
+  it("writes each block as it is taken with the reads 2 blocks ahead, an errorScope pair per block and one fence per part", async () => {
     const { events, gpu, trace } = recorder();
     const session = await createSessionFromContainer(gpu, trace(container()), GRAPH_NAME);
     // 破棄の flush も完了待ちを 1 回呼ぶので、構築が終わった時点の列を写しておく。
@@ -196,14 +217,18 @@ describe("重みの供給は block を 1 本ずつ読んで上げる", () => {
     // 2 本 pop）。part 単位へ粗くなると確保失敗の帰属が block から part へ落ちる。空 submit の
     // 周りには張らない（確保も検証も伴わない — session-build.ts のフェンスの NOTE）。
     assertEquals(built, [
-      // part 1 本目（丸ごと供給 b / c）: part を読み切らずに 1 本ずつ上げる。
+      // The first part (whole supplies b / c): uploaded one at a time without reading the part
+      // through. Taking b reads b and the next 2 blocks, c and piece 1 of the next part.
       "read model/b",
+      "read model/c",
+      "read model/w#piece1",
       "push",
       "push",
       "write model/b",
       "pop",
       "pop",
-      "read model/c",
+      // Taking c reads 2 ahead of it: piece 2, two parts on.
+      "read model/w#piece2",
       "push",
       "push",
       "write model/c",
@@ -211,8 +236,7 @@ describe("重みの供給は block を 1 本ずつ読んで上げる", () => {
       "pop",
       "submit",
       "fence",
-      // 次の part の読みはフェンスの後。
-      "read model/w#piece1",
+      // The next parts' blocks were read before the fence (the read-ahead crosses part boundaries).
       "push",
       "push",
       "write model/w#piece1",
@@ -220,7 +244,6 @@ describe("重みの供給は block を 1 本ずつ読んで上げる", () => {
       "pop",
       "submit",
       "fence",
-      "read model/w#piece2",
       "push",
       "push",
       "write model/w#piece2",
@@ -233,7 +256,7 @@ describe("重みの供給は block を 1 本ずつ読んで上げる", () => {
     assertEquals(partCount, 3, "消費した batch の本数 = part の本数");
   });
 
-  it("supplyWaitMs は block の読みを待った時間を含む（読みの遅い取得元）", async () => {
+  it("supplyWaitMs includes the wait for block reads (a slow source)", async () => {
     const DELAY_MS = 20;
     const { gpu, trace } = recorder();
     let readMs = 0;
@@ -250,12 +273,15 @@ describe("重みの供給は block を 1 本ずつ読んで上げる", () => {
 
     assertEquals(reads, 4, "block 4 本（b / c / w の piece 2 本）を 1 回ずつ読む");
     assert(readMs >= DELAY_MS, `読みの遅延が効いていない（${readMs} ms — 検出器が空振りする）`);
-    // 読み 1 回の区間は、同じ時計で測る反復待ちの区間の内側に入れ子で収まる。したがって下限は
-    // 読みの時間の総和そのもの（許すのは浮動小数の足し算の順序差だけ）。
+    // The lower bound on supplyWaitMs is one read's delay: the read-ahead keeps up to 3 reads in
+    // flight at once, so their delays overlap with one another and with the uploads, and the wait
+    // can be shorter than their sum. The first read cannot be hidden behind anything (nothing has
+    // been uploaded yet), and its whole interval lies inside the first iteration wait, measured on
+    // the same clock.
     const SUM_ORDER_EPSILON_MS = 1e-6;
     assert(
-      supplyWaitMs >= readMs - SUM_ORDER_EPSILON_MS,
-      `supplyWaitMs ${supplyWaitMs} ms が読みを待った時間 ${readMs} ms を含んでいない`,
+      supplyWaitMs >= DELAY_MS - SUM_ORDER_EPSILON_MS,
+      `supplyWaitMs ${supplyWaitMs} ms does not include the first read's wait of ${DELAY_MS} ms`,
     );
   });
 
@@ -306,7 +332,7 @@ describe("重みの供給は block を 1 本ずつ読んで上げる", () => {
     );
   });
 
-  it("part の途中で読みが落ちたら、上げ済みの重みごとアリーナを破棄し、以後の block を読まない", async () => {
+  it("when a read fails mid-part, destroys the arena with the uploaded weights and reads nothing beyond the read-ahead bound", async () => {
     const { events, counts, gpu, trace } = recorder();
     const injected = new Error("注入: block の取得に失敗");
     // part 1 本目の 2 本目（b を上げた後・フェンスの前）で落とす。
@@ -318,12 +344,452 @@ describe("重みの供給は block を 1 本ずつ読んで上げる", () => {
     assertStrictEquals(error, injected, "読みの失敗は包み直さずにそのまま抜ける");
     assertEquals(
       events.filter((event) => event.startsWith("read ") || event.startsWith("write ")),
-      ["read model/b", "write model/b", "read model/c"],
-      "失敗の後に次の block を読んでいる（供給の列が閉じていない）",
+      // Taking c (the failing block) read 2 ahead of it, up to piece 2 — the last block here. The
+      // bound itself is pinned on a longer supply below.
+      [
+        "read model/b",
+        "read model/c",
+        "read model/w#piece1",
+        "write model/b",
+        "read model/w#piece2",
+      ],
+      "the reads around the failure differ (the supply was not closed at the bound)",
     );
     assertEquals(events.includes("submit"), false, "失敗した part のフェンスを張っている");
     assert(counts.created > 0, "上げ済みの重みが無い（part の前半を上げた状態を作れていない）");
     assertEquals(counts.destroyed, counts.created, "上げ済みの重みのバッファが破棄されていない");
     assertEquals(counts.openScopes, 0, "errorScope を積み残している");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Read-ahead: up to 2 blocks beyond the item being uploaded, across part boundaries (ADR 0108
+// addendum 14 — perf-ledger L-26)
+// ---------------------------------------------------------------------------
+
+/** Pieces of `w` in the wide model — one part each, so every piece read crosses a part boundary. */
+const WIDE_PIECES = 6;
+/** Rows of `w` per piece. */
+const WIDE_PIECE_ROWS = 2;
+
+/**
+ * The same graph as {@link declaration} with a taller `w` (y = x·w + b + c, w: [12, 3]), split
+ * into {@link WIDE_PIECES} pieces: parts `{b, c}` → `w` piece 1 → … → `w` piece 6 — 7 parts and 8
+ * blocks, enough to see the read-ahead stop at its bound.
+ */
+const wideContainer = (): BoundContainer => {
+  const rows = WIDE_PIECES * WIDE_PIECE_ROWS;
+  const w = f32Bytes(Array.from({ length: rows * 3 }, (_, i) => i * 0.125));
+  const graph = parseIrDeclarationValue({
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["add", "matmul"] },
+    symbols: [],
+    inputs: [{ name: "x", dtype: "f32", shape: [2, rows] }],
+    outputs: ["y"],
+    initializers: { w: {}, b: {}, c: {} },
+    values: {
+      w: { dtype: "f32", shape: [rows, 3] },
+      b: { dtype: "f32", shape: [3] },
+      c: { dtype: "f32", shape: [3] },
+      h: { dtype: "f32", shape: [2, 3] },
+      t: { dtype: "f32", shape: [2, 3] },
+      y: { dtype: "f32", shape: [2, 3] },
+    },
+    nodes: [
+      { op: "matmul", ins: ["x", "w"], outs: ["h"], attrs: {} },
+      { op: "add", ins: ["h", "b"], outs: ["t"], attrs: {} },
+      { op: "add", ins: ["t", "c"], outs: ["y"], attrs: {} },
+    ],
+  });
+  return openMemoryContainer({
+    graphs: { [GRAPH_NAME]: graph },
+    tensors: {
+      [GRAPH_NAME]: {
+        w: {
+          encoding: { codec: "f32" },
+          // A fresh copy per read, so the recorder can tell the blocks apart by their buffer.
+          pieces: Array.from({ length: WIDE_PIECES }, (_, piece) => {
+            const start = piece * WIDE_PIECE_ROWS;
+            const stop = start + WIDE_PIECE_ROWS;
+            return {
+              rows: [start, stop] as const,
+              read: () => Promise.resolve(w.slice(start * W_ROW_BYTES, stop * W_ROW_BYTES)),
+            };
+          }),
+        },
+        b: { encoding: { codec: "f32" }, bytes: f32Bytes([1, 2, 3]) },
+        c: { encoding: { codec: "f32" }, bytes: f32Bytes([4, 5, 6]) },
+      },
+    },
+  });
+};
+
+/** The blocks of the wide model in supply order. */
+const WIDE_BLOCKS = [
+  "model/b",
+  "model/c",
+  ...Array.from({ length: WIDE_PIECES }, (_, piece) => `model/w#piece${piece + 1}`),
+];
+
+/** Rows of each int8 weight of the quantized model, and its pieces (2 rows = 32 B each). */
+const Q_ROWS = 6;
+const Q_ROW_LENGTH = 16;
+const Q_PIECES = 3;
+
+/**
+ * Two int8 linears whose weights ride a scale on piece 1: y = linear(x, u, bu) + linear(x, v, bv),
+ * u and v int8-sym `[6, 16]` in 3 pieces each. Parts: `{bu, bv}` → u piece 1 (+ its scale) → u
+ * piece 2 → u piece 3 → v piece 1 (+ its scale) → …, so taking piece 1 takes two blocks.
+ */
+const quantizedContainer = (): BoundContainer => {
+  const graph = parseIrDeclarationValue({
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["add", "linear"] },
+    symbols: [],
+    inputs: [{ name: "x", dtype: "f32", shape: [2, Q_ROW_LENGTH] }],
+    outputs: ["y"],
+    initializers: { u: {}, bu: {}, v: {}, bv: {} },
+    values: {
+      u: { dtype: "f32", shape: [Q_ROWS, Q_ROW_LENGTH] },
+      bu: { dtype: "f32", shape: [Q_ROWS] },
+      v: { dtype: "f32", shape: [Q_ROWS, Q_ROW_LENGTH] },
+      bv: { dtype: "f32", shape: [Q_ROWS] },
+      hu: { dtype: "f32", shape: [2, Q_ROWS] },
+      hv: { dtype: "f32", shape: [2, Q_ROWS] },
+      y: { dtype: "f32", shape: [2, Q_ROWS] },
+    },
+    nodes: [
+      { op: "linear", ins: ["x", "u", "bu"], outs: ["hu"], attrs: {} },
+      { op: "linear", ins: ["x", "v", "bv"], outs: ["hv"], attrs: {} },
+      { op: "add", ins: ["hu", "hv"], outs: ["y"], attrs: {} },
+    ],
+  });
+  const rowsPerPiece = Q_ROWS / Q_PIECES;
+  const quantized = (seed: number) => {
+    const payload = Uint8Array.from({ length: Q_ROWS * Q_ROW_LENGTH }, (_, i) => (i + seed) % 7);
+    return {
+      encoding: {
+        codec: "int8-sym" as const,
+        rowAxis: 0 as const,
+        groupSize: Q_ROW_LENGTH,
+        scale: f32Bytes(new Array(Q_ROWS).fill(0.5)),
+      },
+      pieces: Array.from({ length: Q_PIECES }, (_, piece) => {
+        const start = piece * rowsPerPiece;
+        const stop = start + rowsPerPiece;
+        return {
+          rows: [start, stop] as const,
+          read: () => Promise.resolve(payload.slice(start * Q_ROW_LENGTH, stop * Q_ROW_LENGTH)),
+        };
+      }),
+    };
+  };
+  return openMemoryContainer({
+    graphs: { [GRAPH_NAME]: graph },
+    tensors: {
+      [GRAPH_NAME]: {
+        u: quantized(0),
+        bu: { encoding: { codec: "f32" }, bytes: f32Bytes(new Array(Q_ROWS).fill(0.25)) },
+        v: quantized(3),
+        bv: { encoding: { codec: "f32" }, bytes: f32Bytes(new Array(Q_ROWS).fill(0.75)) },
+      },
+    },
+  });
+};
+
+/** The items of the quantized model in supply order, with the blocks each one takes. */
+const QUANTIZED_ITEMS: readonly (readonly string[])[] = [
+  ["model/bu"],
+  ["model/bv"],
+  ...["u", "v"].flatMap((name) =>
+    Array.from({ length: Q_PIECES }, (_, piece) =>
+      piece === 0
+        ? [`model/${name}#piece1`, `model/${name}#scale`]
+        : [`model/${name}#piece${piece + 1}`],
+    ),
+  ),
+];
+
+/** Counts the reads of `inner` that have settled (fulfilled or rejected). */
+const countSettled = (inner: BoundContainer) => {
+  const counts = { started: 0, settled: 0 };
+  const source: BoundContainer = {
+    graphs: inner.graphs,
+    readBlock: (id) => {
+      counts.started += 1;
+      const read = inner.readBlock(id);
+      read.then(
+        () => (counts.settled += 1),
+        () => (counts.settled += 1),
+      );
+      return read;
+    },
+  };
+  return { counts, source };
+};
+
+const onlyReadsAndWrites = (events: readonly string[]): string[] =>
+  events.filter((event) => event.startsWith("read ") || event.startsWith("write "));
+
+describe("Session build reads up to 2 blocks ahead of the item it uploads, across part boundaries", () => {
+  it("starts reading the next parts' blocks before the current part's fence", async () => {
+    const { events, gpu, trace } = recorder();
+    const session = await createSessionFromContainer(gpu, trace(wideContainer()), GRAPH_NAME);
+    const built = [...events];
+    await session.dispose();
+
+    const firstSubmit = built.indexOf("submit");
+    assert(firstSubmit >= 0, "no part was fenced");
+    // Part `{b, c}`: taking b reads b, c and piece 1; taking c reads piece 2 — both in later parts.
+    assertEquals(
+      built.slice(0, firstSubmit).filter((event) => event.startsWith("read ")),
+      ["read model/b", "read model/c", "read model/w#piece1", "read model/w#piece2"],
+    );
+    // Every block is still read once and written once, in supply order.
+    assertEquals(
+      built.filter((event) => event.startsWith("read ")),
+      WIDE_BLOCKS.map((id) => `read ${id}`),
+    );
+    assertEquals(
+      built.filter((event) => event.startsWith("write ")),
+      WIDE_BLOCKS.map((id) => `write ${id}`),
+    );
+  });
+
+  it("never has more than 2 blocks read or in flight beyond the block being uploaded", async () => {
+    const { events, gpu, trace } = recorder();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const slow = trace(wideContainer(), async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await sleep(2);
+      inFlight -= 1;
+    });
+    const session = await createSessionFromContainer(gpu, slow, GRAPH_NAME);
+    const built = [...events];
+    await session.dispose();
+
+    let reads = 0;
+    let writes = 0;
+    let maxAhead = 0;
+    for (const event of built) {
+      if (event.startsWith("read ")) reads += 1;
+      if (!event.startsWith("write ")) continue;
+      // At the upload of the block in supply position `writes`, the reads beyond it.
+      writes += 1;
+      maxAhead = Math.max(maxAhead, reads - writes);
+    }
+    assertEquals(maxAhead, 2, `reads ran more or less than 2 blocks ahead: ${built.join(", ")}`);
+    assertEquals(maxInFlight, 3, "at most the block being taken + 2 ahead may be in flight");
+  });
+
+  it("counts the riding scale as a block: 4 blocks alive on piece 1, still at most 3 reads in flight", async () => {
+    const { events, gpu, trace } = recorder();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const slow = trace(quantizedContainer(), async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await sleep(2);
+      inFlight -= 1;
+    });
+    const session = await createSessionFromContainer(gpu, slow, GRAPH_NAME);
+    const built = [...events];
+    await session.dispose();
+
+    assertEquals(
+      built.filter((event) => event.startsWith("read ")),
+      QUANTIZED_ITEMS.flat().map((id) => `read ${id}`),
+    );
+    // At the start of each item's upload (its first scope push), the blocks read and not yet let go:
+    // the item's own blocks + those read ahead (the earlier items were let go in their iteration).
+    let reads = 0;
+    let pushes = 0;
+    let released = 0;
+    const alive: number[] = [];
+    for (const event of built) {
+      if (event.startsWith("read ")) reads += 1;
+      if (event !== "push") continue;
+      pushes += 1;
+      if (pushes % 2 === 0) continue;
+      const item = (pushes - 1) / 2;
+      alive.push(reads - released);
+      released += QUANTIZED_ITEMS[item].length;
+    }
+    // bu, bv: 1 + 2; piece 1 with its scale: 2 + 2; other pieces: 1 + 2 (the last ones: fewer left).
+    assertEquals(alive, [3, 3, 4, 3, 3, 4, 2, 1], `blocks alive per item: ${built.join(", ")}`);
+    assertEquals(maxInFlight, 3, "at most the block being taken + 2 ahead may be in flight");
+  });
+
+  it("reports a failing read in the next part only when its block is reached, after the current part is fenced", async () => {
+    const { events, counts, gpu, trace } = recorder();
+    const injected = new Error("injected read failure on w piece 1");
+    const failing = trace(wideContainer(), (id) =>
+      id === "model/w#piece1" ? Promise.reject(injected) : Promise.resolve(),
+    );
+    const error = await assertRejects(() => createSessionFromContainer(gpu, failing, GRAPH_NAME));
+
+    assertStrictEquals(error, injected, "the read failure is wrapped or replaced");
+    const fence = events.indexOf("fence");
+    assert(fence >= 0, "the part before the failing block was not fenced");
+    assertEquals(
+      events.slice(fence).filter((event) => event.startsWith("write ")),
+      [],
+      "a block after the failing one was uploaded",
+    );
+    assertEquals(
+      events.filter((event) => event.startsWith("write ")),
+      ["write model/b", "write model/c"],
+    );
+    // Taking piece 1 read up to piece 3; nothing further.
+    assertEquals(
+      events.filter((event) => event.startsWith("read ")),
+      WIDE_BLOCKS.slice(0, 5).map((id) => `read ${id}`),
+    );
+    assertEquals(counts.destroyed, counts.created, "uploaded weights are not destroyed");
+  });
+
+  it("reports an earlier block's failing read even when a later block's read failed first", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const { events, gpu, trace } = recorder();
+      const earlier = new Error("injected late read failure on c");
+      const later = new Error("injected early read failure on w piece 1");
+      let laterFailedAt = Number.NaN;
+      let earlierFailedAt = Number.NaN;
+      const failing = trace(wideContainer(), async (id) => {
+        if (id === "model/c") {
+          await sleep(20);
+          earlierFailedAt = performance.now();
+          throw earlier;
+        }
+        if (id === "model/w#piece1") {
+          laterFailedAt = performance.now();
+          throw later;
+        }
+      });
+      const error = await assertRejects(() => createSessionFromContainer(gpu, failing, GRAPH_NAME));
+
+      assertStrictEquals(error, earlier, "the later block's failure was reported first");
+      assert(laterFailedAt < earlierFailedAt, "the later read did not fail first");
+      assertEquals(
+        events.filter((event) => event.startsWith("write ")),
+        ["write model/b"],
+      );
+      // Unhandled rejections are reported after the microtask queue drains; give it a few turns.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    assertEquals(unhandled, [], "a read failure ahead of its turn went unhandled");
+  });
+
+  it("reports a part's scope failure over a slower read failure in a later part, once that read has settled", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      // Pops 0 / 1 are b's pair; pop 3 is c's out-of-memory scope (validation first, then OOM).
+      const injectedOom = (pop: number): Promise<GPUError | null> =>
+        pop === 3
+          ? sleep(5).then(() => ({ message: "injected OOM on c" }) as GPUError)
+          : Promise.resolve(null);
+      const { events, counts: device, gpu, trace } = recorder(injectedOom);
+      // Piece 2 (two parts on) is read ahead when c is taken, and fails long after c's scope.
+      const slowFailure = new Error("injected slow read failure on w piece 2");
+      const traced = trace(wideContainer(), async (id) => {
+        if (id !== "model/w#piece2") return;
+        await sleep(30);
+        throw slowFailure;
+      });
+      const { counts, source } = countSettled(traced);
+      const error = await assertRejects(() => createSessionFromContainer(gpu, source, GRAPH_NAME));
+      const settledAtRejection = counts.settled;
+
+      assertInstanceOf(error, GpuOutOfMemoryError);
+      // The memory container stacks whole supplies from part 2 (`WHOLE_PART` in memory.ts).
+      assertEquals(error.message, "part 2 weight upload for initializer 'c': injected OOM on c");
+      assert(events.includes("read model/w#piece2"), "the later part's read was not in flight");
+      assertEquals(events.includes("submit"), false, "the failed part's fence was issued");
+      const stillRunning = "the build rejected with reads still running";
+      assertEquals(settledAtRejection, counts.started, stillRunning);
+      assertEquals(device.destroyed, device.created, "uploaded weights are not destroyed");
+      assertEquals(device.openScopes, 0, "error scopes are left on the stack");
+      // Unhandled rejections are reported after the microtask queue drains; give it a few turns.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    assertEquals(unhandled, [], "the later part's read failure went unhandled");
+  });
+
+  it("stops reading when the build fails, and rejects only after the reads in flight have settled", async () => {
+    const { events, counts: device, gpu, trace } = recorder();
+    const injected = new Error("injected read failure on c");
+    const traced = trace(wideContainer(), async (id) => {
+      if (id === "model/c") throw injected;
+      // The reads ahead of the failure are still running when it is reported.
+      if (id !== "model/b") await sleep(30);
+    });
+    const { counts, source } = countSettled(traced);
+    const error = await assertRejects(() => createSessionFromContainer(gpu, source, GRAPH_NAME));
+    const settledAtRejection = counts.settled;
+
+    assertStrictEquals(error, injected);
+    // Taking c read up to piece 2; no read was issued after the failure.
+    assertEquals(
+      onlyReadsAndWrites(events).filter((event) => event.startsWith("read ")),
+      WIDE_BLOCKS.slice(0, 4).map((id) => `read ${id}`),
+    );
+    assertEquals(counts.started, 4);
+    assertEquals(settledAtRejection, counts.started, "the build rejected with reads still running");
+    assertEquals(device.destroyed, device.created, "uploaded weights are not destroyed");
+    assertEquals(device.openScopes, 0, "error scopes are left on the stack");
+  });
+
+  it("stops reading when the consumer stops early, and returns only after the reads in flight have settled", async () => {
+    const inner = wideContainer();
+    const { counts, source } = countSettled({
+      graphs: inner.graphs,
+      readBlock: async (id) => {
+        await sleep(10);
+        return await inner.readBlock(id);
+      },
+    });
+    const batches = containerBatches(source, GRAPH_NAME);
+    for await (const batch of batches) {
+      for await (const _item of batch.items) break;
+      break;
+    }
+
+    // Taking b read b, c and piece 1; breaking out issues nothing more and waits for c and piece 1.
+    assertEquals(counts.started, 3);
+    assertEquals(counts.settled, counts.started, "the iterator returned with reads still running");
+  });
+});
+
+describe("the read-ahead after the supply is closed", () => {
+  it("fails a pull loudly instead of issuing a read", async () => {
+    const { counts, source } = countSettled(wideContainer());
+    const batches = containerBatches(source, GRAPH_NAME);
+    const first = await batches.next();
+    assert(first.done !== true, "the supply has no part");
+    await batches.return(undefined);
+
+    await assertRejects(
+      () => first.value.items[Symbol.asyncIterator]().next(),
+      ExecutionError,
+      "taken after the supply was closed",
+    );
+    assertEquals(counts.started, 0, "a read was issued after the supply was closed");
   });
 });

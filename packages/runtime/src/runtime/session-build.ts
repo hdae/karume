@@ -210,18 +210,21 @@ const assertRowScale = (
 export type WeightBatch = {
   readonly origin: string | undefined;
   /**
-   * The list of objects of the part's blocks. Each pull reads one block (lazy), so the consumer
-   * uploads them one at a time and lets go — `queue.writeBuffer` copies the bytes at the call (the
-   * WebGPU spec), so they are not held until the fence. The weight bytes alive on the JS side are
-   * not one part but one item (one block + on piece 1 the scale block that rides along + on the
-   * expanded class its f32 decode result), plus the copy of the carried scale that lives only during
-   * a piece list of the expanded class (the whole scale of that initializer — copied on piece 1 and
-   * released on the last piece). With a scan-type source (hub) the block and the riding scale are
-   * views into the retention slot's container, so one retention slot + containers waiting for GC
-   * stack on top (the carried scale copy and the decode result are values, so even with scan-type
-   * sources they sit outside the retention slot). The number of containers waiting for GC is not
-   * bounded by the declaration — measured external maximum was about 1.5 to 4.4 times the largest
-   * part (container-v1 §11).
+   * The list of objects of the part's blocks. Each pull hands over one item as soon as its blocks are
+   * read (lazy), so the consumer uploads them one at a time and lets go — `queue.writeBuffer` copies
+   * the bytes at the call (the WebGPU spec), so they are not held until the fence. The container
+   * supply reads up to 2 blocks ahead of the item, across part boundaries (`READ_AHEAD_BLOCKS` in
+   * {@link "./executor.ts"} — ADR 0108 addendum 14). The weight bytes alive on the JS side are
+   * therefore not one part but one item (one block + on piece 1 the scale block that rides along + on
+   * the expanded class its f32 decode result) plus the 2 blocks read ahead, plus the copy of the
+   * carried scale that lives only during a piece list of the expanded class (the whole scale of that
+   * initializer — copied on piece 1 and released on the last piece). With a scan-type source (hub)
+   * the block and the riding scale are views into the retention slot's container, so one retention
+   * slot + containers waiting for GC stack on top — while the read-ahead crosses a part boundary,
+   * the parts its blocks fall in (up to 3) are alive (the carried scale copy and the decode result
+   * are values, so even with scan-type sources they sit outside the retention slot). The number of
+   * containers waiting for GC is not bounded by the declaration — measured external maximum was
+   * about 1.5 to 4.4 times the largest part (container-v1 §11).
    *
    * MUST: iterate once, to the end, before pulling the next batch. A scan-type source (hub) keeps
    * only one part on the premise of reading parts sequentially in order, so pulling the next part

@@ -287,6 +287,8 @@ of 4**.
   stays one slot + buffers awaiting GC. The fence stays once per part.
   `packages/runtime/tests/gpu_write_buffer_copy_test.ts` pins it (bytes poisoned right after the
   call still give bit-identical output); ADR 0070 decision 3 was amended the same day.
+  **Extended by addendum 14 (2026-10-27):** the supply now reads up to 2 blocks ahead of the item
+  being uploaded, across part boundaries; the live JS weight bytes are one item + those 2 blocks.
 
 ### 10. `encoding` vocabulary — bit width is derived
 
@@ -1044,7 +1046,8 @@ summed over the two components. Single pairs range from −2.1 to +1.5 s per com
 −2.5 to +1.4 s per request (the two components' deltas of one pair summed), both in the sha256 run;
 the run without sha256 stays inside both ranges. Its harness reads through its own positional-read
 source with one persistent file handle per part (`measure.ts`), not
-through the hub's `nodeDirectory`.
+through the hub's `nodeDirectory`, so its absolute build times are not comparable with addendum
+14's Node row.
 
 The bytes on the GPU do not change (bit-identical): the same buffers receive the same
 `writeBuffer` calls in the same order; only the point where the build waits for the scopes moves.
@@ -1076,3 +1079,81 @@ publishes no partial Session. Pinned by `packages/runtime/tests/runtime_weight_u
 reported failure, the deferral itself — every block's pops are issued before the first block's
 scopes settle — and the early stop); the order of push → write → pop per block and of the fence
 per part stays pinned by `runtime_weight_supply_test.ts`.
+
+## Addendum 14 (2026-10-27) — the supply reads 2 blocks ahead, across part boundaries (perf-ledger L-26)
+
+**What changes.** Session construction no longer reads a block only when its item is pulled. The
+container supply (`containerBatches` in `packages/runtime/src/runtime/executor.ts`) walks one fixed
+read order over the whole supply — parts ascending, then each item's payload block and, on piece 1
+or a whole initializer, its scale block — and keeps up to **2 reads in flight beyond the last read
+of the item being uploaded** (`READ_AHEAD_BLOCKS`). The order is global, so the read-ahead crosses
+part boundaries: the next part's first blocks are read while the current part's error scopes and
+fence are awaited (addendum 13). Uploads are unchanged: one item at a time, the same `writeBuffer`
+calls with the same bytes in the same order, one fence per part (bit-identical).
+
+**Why across parts.** A read-ahead confined to a part has nothing in flight while the part's fence
+is awaited, which is where most of the remaining supply wait sits once the scopes are awaited at the
+fence. Measured beyond H-38:
+
+| Environment | Per Wan2.2 request (DiT + umT5 builds) | Source |
+| --- | --- | --- |
+| Chromium-Linux, RTX 3080 Ti | −1.0 s across parts; −0.6 s if confined to a part | [research 2026-10-25 (3080 Ti)](../research/2026-10-25-speed-recon-3080ti.md) §9.2, SP-1 |
+| Chrome 155 / D3D12, RTX 5070 Ti | −0.59 s across parts; −0.50 s confined to a part | [research 2026-10-25 (5070 Ti)](../research/2026-10-25-speed-recon-5070ti.md) §10 |
+| Node + Dawn (Vulkan), RTX 3080 Ti, local mirror through `nodeDirectory` | −3.09 s with per-block sha256 (the Node local-directory path: DiT −1.24 s, umT5 −1.85 s); −1.61 s without it (the browser's shape: DiT −0.55 s, umT5 −1.07 s); every pair faster (8 of 8 per component) | `outputs/diag/session-build-2026-10-27/` (not tracked) |
+
+The Node row uses the statistic of addendum 13's Node row — the **median of the paired deltas** (8
+pairs per component: depth 0, the read on pull, and depth 2 interleaved in one process on one
+device, the leading arm alternating per pair; H-38 in both arms), summed over the two components.
+Its harness reads through the hub's `nodeDirectory`, which opens one file handle per range read,
+while addendum 13's harness keeps one handle per part, so the absolute build times of the two rows
+are not comparable.
+
+On the sha256 path the read-ahead also overlaps the per-block digests (the same digests as before —
+one per block, no extra digest work), which is why the gain there is larger.
+
+**Invariants (MUST).**
+
+1. **Order and bytes.** Items, their bytes and their order are the same as with one read per pull;
+   the cursor fails loudly if the takes ever drift from the planned read order.
+2. **Attribution.** A read that fails ahead of its turn is held (a handler is attached when it is
+   issued, so it is never an unhandled rejection) and surfaces only when its block is taken. A read
+   failure is therefore reported for the block it belongs to and only after every earlier block —
+   an earlier block's read failure, host-side failure or (addendum 13) scope failure still wins.
+3. **Bound.** At most the item being uploaded (its block, plus its scale block on piece 1 or a whole
+   initializer) plus 2 blocks are alive on the JS side — 3 or 4 blocks. For a `krm` (blocks within
+   the 32 MiB limit of decision 5) on a seek-type source that is at most 128 MiB, whatever the part
+   length. The in-memory container does not check its pieces' lengths against the block limit, so
+   there the bound is 3 or 4 of the caller's pieces (and scales), whatever their length. On a
+   scan-type source each block is a view of its whole part, so near a part boundary up to 3 parts
+   can be alive (when parts hold one block each). A source sees up to 3 concurrent reads, and what
+   they hold depends on the source — two separate limits: on a local directory each read opens its
+   own file handle, so up to 3 file handles are open at once; on the hub's network path a read that
+   misses the cache downloads its part, and those network fetches stay within the hub's own cap of
+   4 concurrent fetches (decision 6), which the read-ahead depth does not change.
+   `BlockSource.read` and `MemoryPiece.read` MUST take concurrent calls and MUST NOT overwrite bytes
+   they returned earlier (stated on both types).
+4. **Stop.** When the build fails or the consumer stops early, the supply's iterator is returned:
+   no read is issued after that, and the build rejects only once the reads in flight have settled
+   (`readBlock` has no abort, so they are waited for, not cancelled; their bytes and errors are
+   dropped). The cost: the time to reject is bounded by the slowest read in flight, which is
+   unbounded when a fetch stalls — `BlockSource.read` takes no signal, and on the hub's scan path
+   `openFile` may download the part on a cache miss. The success path already had the same
+   exposure (a stalled read stalls the build), so no abort is added here; that would be an API
+   change of `BlockSource`.
+
+**Residual (an analysis, not observed).** The hub's scan path keeps one holding slot and decides it
+after an asynchronous `openFile` per part (`packages/hub/src/container.ts`). If the plans of two
+parts the read-ahead reads at once settle out of order, a part of at most 2 blocks can take the slot
+back from the next part, whose later blocks then read it in full again — correct bytes, but one
+extra part read, and the next part is briefly held twice (the evicted buffer stays alive while the
+views already cut from it are being uploaded), so host RAM rises by one part for that moment. The
+affected route is HF on Deno / Node, where `openFile` returns a scan-type source. Wan's parts hold
+many blocks; ordering the slot decisions by call order would close it on the hub side.
+
+Pinned by `packages/runtime/tests/runtime_weight_supply_test.ts` (crossing a part boundary, the bound
+of 2 blocks and 3 concurrent reads — also with a riding scale, where 4 blocks are alive — failure
+order and attribution, a scope failure that wins over a slow read failure of a later part, stopping
+on failure and on an early return, no pull after close); the per-block scope attribution of
+addendum 13 stays pinned by `runtime_weight_upload_scope_test.ts`, whose fake device attributes
+calls by the scope pushes, because with the read-ahead a read no longer identifies the item being
+uploaded.

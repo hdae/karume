@@ -46,9 +46,10 @@
  * addendum). The in-memory container puts one piece in one part, so a fence is raised once per
  * part, but the fence governs only staging, not host RAM. The bytes of a piece are allocated only
  * for that one read (no buffer is reused; each piece gets its own), so the host RAM taken by
- * `values` stays within "one largest block". Even with a scan-type source, a PLE block is a
- * dedicated part with 1 block = 1 part (container-v1 §4.2), so the holding window holds only that
- * block's part (if the range is not exactly the part, the copy in `readAssetRange` adds one more).
+ * `values` stays within 3 blocks — the piece being uploaded + up to 2 read ahead (ADR 0108
+ * addendum 14). Even with a scan-type source, a PLE block is a dedicated part with 1 block = 1 part
+ * (container-v1 §4.2), so each read holds only its block's part (if the range is not exactly the
+ * part, the copy in `readAssetRange` adds one more).
  *
  * The companion scale lives in the same part as piece 1 by contract (container-v1 §5, rule ③), and
  * the runtime writes the whole scale into one GPU buffer at piece 1, so **only the scale is
@@ -57,10 +58,10 @@
  * The container holds that buffer as is for the duration of construction (no copy). `ple` is
  * consumed only by `embedding`'s weight slot, so it loads compressed, and the "copy of the carried
  * scale" that an expanded weight's piece list takes (container-v1 §11) is not made either. So the
- * host RAM peak is "the whole scale table + one largest block" (no copy, so the scale counts once).
- * Estimating with "one largest block" alone drops the dominant term entirely. The scale table is
- * not subject to the `krm` block limit (32 MiB) — the in-memory container does not compare the
- * length of a synthesized block with the limit.
+ * host RAM peak is "the whole scale table + up to 3 blocks" (the piece being uploaded + 2 read
+ * ahead; no copy, so the scale counts once). Estimating with the blocks alone drops the dominant
+ * term entirely. The scale table is not subject to the `krm` block limit (32 MiB) — the in-memory
+ * container does not compare the length of a synthesized block with the limit.
  *
  * MUST: **do not hold a reader longer than one read** (the same MUST as `./ple.ts`). The
  * `AssetReader` of an unverified source keeps the block for the reader's lifetime, so holding

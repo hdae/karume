@@ -946,6 +946,10 @@ Until a real need appears, **the writer stops with fail loudly**.
   piece 1 also bring along the scale blocks that ride with them. `queue.writeBuffer` copies the bytes
   at the time of the call, so the reference to the item ends within that iteration (it is not held
   until the fence — "GPU transfer" below).
+- **The supply reads at most 2 blocks ahead of the item being uploaded, across part boundaries**
+  (`READ_AHEAD_BLOCKS` in `packages/runtime/src/runtime/executor.ts` — ADR 0108 addendum 14), so
+  the next part is read while the current part's fence is awaited. A source sees up to 3 reads at
+  once.
 
 **How it is counted**: host RAM derived from weights during Session construction is counted as the
 sum of the following 3 terms. Staging (what `writeBuffer` accumulates) is a separate axis, governed
@@ -955,7 +959,7 @@ by "GPU transfer" below.
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | ① the caller's holdings    | 0 for `krm`. For the in-memory container (`openMemoryContainer`), the `bytes` and companion scales the caller passed as whole supplies (the container holds them without copying). If the `read()` of `pieces` goes through a source, ③ follows the type of that source | same as the seek type                                                                                                                                               |
 | ② the item being processed | 1 block + the riding scale + under decoded residency its f32 decoded result (inversely proportional to the storage bit width — 8× the block for i4, 16× for i2) + for a piece sequence under decoded residency, the copy of the carried-over scale                      | the f32 decoded result under decoded residency + the copy of the carried-over scale (the block and the riding scale are views of ③'s buffer, so they are not added) |
-| ③ fetch retention          | 0 (the block of ② is itself the tight view of the range)                                                                                                                                                                                                                | 1 hub holding slot (the part length) + buffers waiting for GC                                                                                                       |
+| ③ fetch retention          | the 2 blocks read ahead (each a tight view of its range — at most 2 × 32 MiB for a `krm`)                                                                                                                                                                                 | 1 hub holding slot (the part length) + buffers waiting for GC; while the read-ahead crosses a part boundary, the parts its blocks fall in (up to 3)                 |
 | Closed by the declaration  | yes                                                                                                                                                                                                                                                                     | no (the number of buffers in ③ waiting for GC)                                                                                                                      |
 
 - **The copy of the carried-over scale**: in a piece sequence under decoded residency (the weight is

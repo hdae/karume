@@ -3315,12 +3315,107 @@ export class PreparedModel {
 }
 
 /**
+ * The number of block reads Session construction keeps in flight **beyond the last read of the
+ * item being uploaded**, counted over the whole supply order and therefore across part boundaries
+ * (ADR 0108 addendum 14 — perf-ledger L-26).
+ *
+ * Why across parts: the build waits on each part's fence (an empty submit + `onSubmittedWorkDone`)
+ * and, since H-38, on the part's error scopes there too. A read-ahead confined to a part has nothing
+ * in flight during that wait, so the next part's first reads start only after it; reading on across
+ * the boundary overlaps them with the fence (measured: −1.0 s per Wan2.2 request on Chromium-Linux
+ * across parts against −0.6 s confined to a part — research 2026-10-25 (3080 Ti) §9.2).
+ *
+ * Memory bound (MUST hold — the depth trades host RAM for overlap): the block bytes alive on the JS
+ * side are at most the item being uploaded (its block + on piece 1 / a whole initializer its riding
+ * scale block) plus `READ_AHEAD_BLOCKS` further blocks — 3 or 4 blocks. For a `krm` on a seek-type
+ * source each block is within the 32 MiB block limit (ADR 0108 decision 5), so that is at most
+ * 128 MiB whatever the part length. The in-memory container (`openMemoryContainer`) does not check
+ * its pieces against that limit, so there the bound is 3 or 4 of the caller's pieces (and scales),
+ * whatever their length. On a scan-type source (hub via HF on Deno / Node) every block is a view of
+ * its whole part, so near a part boundary up to 3 parts can be alive (the reads fall in up to 3
+ * different parts when parts hold one block each). Raising the depth raises these bounds and the
+ * number of concurrent reads a source sees (1 + depth — a local directory opens one file handle per
+ * read).
+ */
+const READ_AHEAD_BLOCKS = 2;
+
+/**
+ * A cursor over the supply's block reads in their fixed order that keeps at most
+ * {@link READ_AHEAD_BLOCKS} reads in flight beyond the one being taken.
+ *
+ * MUST: a read that fails ahead of its turn is not reported early — its rejection is held (a handler
+ * is attached when it is issued, so it is never unhandled) and surfaces only when its block is taken,
+ * in supply order. A failure therefore stays attributed to the block it belongs to, and an earlier
+ * block's failure is still reported first, as when blocks were read one at a time.
+ * MUST: `close` stops issuing reads and waits for the ones in flight (`readBlock` has no abort, so
+ * a read cannot be cancelled; waiting keeps a failed or abandoned build from leaving reads running
+ * against the source after it has returned). Their bytes and errors are dropped.
+ */
+const readAheadCursor = (
+  readBlock: BoundContainer["readBlock"],
+  order: readonly string[],
+): {
+  readonly take: (id: string) => Promise<Uint8Array<ArrayBuffer>>;
+  readonly close: () => Promise<void>;
+} => {
+  /**
+   * Issued reads not yet taken, by position in `order`. A taken read is dropped from here, so the
+   * cursor never keeps a block alive past its upload.
+   */
+  const inFlight = new Map<number, Promise<Uint8Array<ArrayBuffer>>>();
+  let issued = 0;
+  let taken = 0;
+  let closed = false;
+  const issueThrough = (last: number): void => {
+    while (!closed && issued <= last && issued < order.length) {
+      let read: Promise<Uint8Array<ArrayBuffer>>;
+      try {
+        read = readBlock(order[issued]);
+      } catch (cause) {
+        // A synchronous throw is held like a rejection (reported when its block is taken).
+        read = Promise.reject(cause);
+      }
+      read.catch(() => undefined);
+      inFlight.set(issued, read);
+      issued += 1;
+    }
+  };
+  return {
+    take: (id) => {
+      if (closed) throw new ExecutionError(`block '${id}' was taken after the supply was closed`);
+      // MUST: the plan and the takes walk the same order — a drift would hand one block's bytes to
+      // another initializer, so it fails loudly instead.
+      if (order[taken] !== id) {
+        throw new ExecutionError(
+          `supply order broken: read ${taken} is block '${order[taken]}', but '${id}' was taken`,
+        );
+      }
+      const index = taken;
+      taken += 1;
+      issueThrough(index + READ_AHEAD_BLOCKS);
+      const read = inFlight.get(index);
+      inFlight.delete(index);
+      if (read === undefined) throw new ExecutionError(`block '${id}' was never read`);
+      return read;
+    },
+    close: async () => {
+      closed = true;
+      const pending = [...inFlight.values()];
+      inFlight.clear();
+      await Promise.allSettled(pending);
+    },
+  };
+};
+
+/**
  * Streams the container's supply plan as one {@link WeightBatch} per part. Within a part, in the
  * declaration order of the initializers (= the order of the binding table), and pieces in index
  * order. The scale is in the same part as piece 1 (rule ③), so it rides along with piece 1's item.
  *
- * Blocks are not handed over after reading the whole part; one block is read each time one `items`
- * entry is pulled (lazy — {@link WeightBatch.items}).
+ * Blocks are not handed over after reading the whole part; each `items` entry is handed over as soon
+ * as its own blocks are read (lazy — {@link WeightBatch.items}), while up to
+ * {@link READ_AHEAD_BLOCKS} later blocks — also those of the next parts — are read in the meantime.
+ * The items, their bytes and their order are the same as without the read-ahead.
  *
  * It is exported for package-internal use by tests (items can be pulled without touching the GPU,
  * so the scale shapes passed to Session construction can be checked even in an environment without
@@ -3343,20 +3438,31 @@ export const containerBatches = async function* (
       byPart.set(block.part, list);
     });
   }
-  /** Builds the items of one part, reading one block each time one is pulled. */
+  const parts = [...byPart.keys()].sort((a, b) => a - b);
+  // The read order over the whole supply: what `partItems` takes, in the order it takes it (the
+  // payload block, then on piece 1 / a whole initializer its scale block).
+  const order: string[] = [];
+  for (const part of parts) {
+    for (const { supply, index } of byPart.get(part) ?? []) {
+      order.push(supply.blocks[index].id);
+      if (index === 0 && supply.scale !== undefined) order.push(supply.scale.id);
+    }
+  }
+  const reads = readAheadCursor((id) => opened.readBlock(id), order);
+  /** Builds the items of one part, taking each item's blocks from the read-ahead when it is pulled. */
   const partItems = async function* (
     part: number,
   ): AsyncGenerator<ReadyInitializer, void, unknown> {
     for (const { name, supply, index } of byPart.get(part) ?? []) {
       const block = supply.blocks[index];
       const where = `graph '${graphName}' initializer '${name}'`;
-      const payload = (await opened.readBlock(block.id)).subarray(0, block.payloadBytes);
+      const payload = (await reads.take(block.id)).subarray(0, block.payloadBytes);
       if (supply.encoding.codec === "ternary") assertTernaryCodes(payload, where);
       let scale: ReadyScale | undefined;
       if (index === 0 && supply.scale !== undefined) {
         const shape = bound.declaration.values[name].shape.map(Number);
         scale = {
-          bytes: (await opened.readBlock(supply.scale.id)).subarray(0, supply.scale.payloadBytes),
+          bytes: (await reads.take(supply.scale.id)).subarray(0, supply.scale.payloadBytes),
           shape: groupScaleShape(
             shape,
             supply.encoding.rowAxis ?? 0,
@@ -3381,8 +3487,14 @@ export const containerBatches = async function* (
       };
     }
   };
-  for (const part of [...byPart.keys()].sort((a, b) => a - b)) {
-    yield { origin: `part ${part}`, items: partItems(part) };
+  try {
+    for (const part of parts) {
+      yield { origin: `part ${part}`, items: partItems(part) };
+    }
+  } finally {
+    // Reached when the consumer stops early (a failed build returns the iterator) as well as at the
+    // end: no read is issued after this, and the build settles only once the reads in flight have.
+    await reads.close();
   }
 };
 

@@ -632,11 +632,13 @@ export type SessionBuildStats = {
   /**
    * The total time spent **waiting for the next item** of the supply (the iteration wait of
    * `for await`). There are two levels of wait, and both are added — the next part in the part
-   * sequence, and the next block within a part. Blocks are read one at a time as they are pulled
-   * (lazy), so nearly all of the cost of fetching and verification (sha256 for an unverified
-   * source, the sign check of ternary values) lands in the block-level wait. Network / disk cost
-   * collects here, so this field is the only point that separates that attribution from the
-   * construction cost (if it is large, the slow part is the supply side, not Karume).
+   * sequence, and the next block within a part. Blocks are read as they are pulled (lazy), with up
+   * to 2 blocks read ahead across part boundaries (ADR 0108 addendum 14), so the cost of fetching
+   * and verification (sha256 for an unverified source, the sign check of ternary values) lands in
+   * the block-level wait for the share the read-ahead did not hide behind the upload and the fence.
+   * Network / disk cost collects here, so this field is the only point that separates that
+   * attribution from the construction cost (if it is large, the slow part is the supply side, not
+   * Karume).
    */
   readonly supplyWaitMs: number;
   /**

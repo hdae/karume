@@ -166,9 +166,10 @@ export const openContainerSource = (
    * The holding slot of the scan path. **It holds one part at a time** (reading another part
    * releases the previous one). Slices are views into the buffer, so no host RAM is added beyond
    * the buffer of the part the slot holds — the weight reader (the runtime's `containerBatches`)
-   * pulls blocks one at a time and releases each in the iteration that uploaded it (the views it
-   * pulled also point into this buffer). At a part boundary, two parts are alive for a while until
-   * the released buffer is garbage-collected.
+   * reads blocks in order, at most 2 ahead of the one it uploads (across part boundaries — ADR 0108
+   * addendum 14), and releases each in the iteration that uploaded it (the views it pulled also
+   * point into this buffer). At a part boundary, two parts are alive for a while (three when the
+   * read-ahead spans parts of one block each) until the released buffers are garbage-collected.
    *
    * MUST: **put the in-flight full read in the same slot as well** — if the slot held only "settled
    * bytes", concurrent reads of the same part would all enter readFile, and part length × count
@@ -178,12 +179,18 @@ export const openContainerSource = (
    *       alive at once grow up to "the number of different parts read concurrently", and hub does
    *       not cap that number (reading an evicted part again repeats the full read). The buffer of
    *       an evicted part survives while the caller holds views sliced from it.
-   *       The weight reader reads parts serially in order, so it never takes this shape. Row reads
-   *       of assets (the PLE in models — reading different parts concurrently) do, and during
-   *       prefill full reads of parts are alive at once up to the limit of concurrently issued row
-   *       reads (`ROW_READ_CONCURRENCY` = 16 in models). `readAssetRange` copies the range, so
-   *       finished buffers are not held (an asset exactly one part long is held without copying,
-   *       but the amount held equals the copy).
+   *       The weight reader reads parts in order and overlaps only the reads at a part boundary,
+   *       which are issued in order, so the slot moves forward only (no part is evicted while its
+   *       later blocks are still to come) — except when the plans of two parts it reads at once
+   *       settle out of order (`planFor` is asynchronous with `openFile`): a part of at most 2
+   *       blocks can then take the slot back from the next part, whose later blocks read it in full
+   *       again (correct bytes, one extra part read, and the next part briefly held twice — an
+   *       analysis, not observed: ADR 0108 addendum 14, "Residual").
+   *       Row reads of assets (the PLE in models — reading different parts concurrently) do, and
+   *       during prefill full reads of parts are alive at once up to the limit of concurrently
+   *       issued row reads (`ROW_READ_CONCURRENCY` = 16 in models). `readAssetRange` copies the
+   *       range, so finished buffers are not held (an asset exactly one part long is held without
+   *       copying, but the amount held equals the copy).
    */
   let held: HeldPart | undefined;
   const readWhole = (index: number, ref: FileRef): Promise<Uint8Array<ArrayBuffer>> => {
@@ -245,11 +252,13 @@ export const openContainerSource = (
       //    and block starts are 64 B aligned (enforced by descriptor parsing). That satisfies the
       //    4 B alignment a scale Float32Array view needs — removing `assertTightView` would leave
       //    this alignment to chance.
-      //  - Lifetime: the weight reader uses up a batch's views by the fence, and only after that
-      //    starts reading the next part (= the slot releases the buffer), so the views stay within
-      //    the period the slot holds the buffer. The asset reader keeps a range only after
-      //    `readAssetRange` (models) copied it (an asset exactly one part long shares the buffer
-      //    without copying, but the amount held equals the copy).
+      //  - Lifetime: a view keeps its own part's buffer alive, so it stays valid after the slot has
+      //    moved on. The weight reader starts reading the next part while the last views of the
+      //    current one are still being uploaded (its read-ahead crosses part boundaries — ADR 0108
+      //    addendum 14); those views pin the previous buffer until they are dropped, right after
+      //    their upload. The asset reader keeps a range only after `readAssetRange` (models)
+      //    copied it (an asset exactly one part long shares the buffer without copying, but the
+      //    amount held equals the copy).
       return (await readWhole(part, ref)).subarray(offset, offset + length);
     },
   };

@@ -992,18 +992,21 @@ A sequence whose indices do not start at `[0]` or are not contiguous, or a mix o
 (`transformer`) and split keys (`transformer[0]`), fails loudly **with a diagnostic that names the
 component and the part index** (it does not silently take one of them).
 
-## The host RAM peak at load time is decided by the source type (seek type: one item; scan type: one part + waiting for GC)
+## The host RAM peak at load time is decided by the source type (seek type: one item + 2 blocks read ahead; scan type: up to 3 parts near a part boundary + waiting for GC)
 
-Session construction reads one block at a time, uploads it to the GPU and lets it go
-(`queue.writeBuffer` copies the bytes at the moment it is called, so the CPU-side release does not wait
-for a fence). For **seek-type** sources that can read by position (the local `denoDirectory` /
-`nodeDirectory`, the browser's lazy Blob — Chrome not measured), the weights alive on the JS side are
-one item (a block of 32 MiB or less + its accompanying scale + the f32 expansion result of an expanded
-slot and a copy of the carried-over scale), independent of the part length. For **scan-type** sources
+Session construction uploads one block at a time to the GPU and lets it go, reading at most 2 blocks
+ahead of it across part boundaries (`queue.writeBuffer` copies the bytes at the moment it is called, so
+the CPU-side release does not wait for a fence — ADR 0108 addendum 14). For **seek-type** sources that
+can read by position (the local `denoDirectory` / `nodeDirectory`, the browser's lazy Blob — Chrome not
+measured), the weights alive on the JS side are one item (a block of 32 MiB or less + its accompanying
+scale + the f32 expansion result of an expanded slot and a copy of the carried-over scale) + the 2
+blocks read ahead, independent of the part length. For **scan-type** sources
 that cannot read by position (via HF on Deno / Node), hub reads the whole part into a holding buffer and cuts
-blocks out as views of that buffer, so the peak grows roughly with the part length, and the number of
-buffers waiting for GC is not decided by the declaration (in measurements, the maximum of external was
-about 1.5–4.4 times the largest part).
+blocks out as views of that buffer, so the peak grows roughly with the part length. While the read-ahead
+crosses a part boundary, the parts its blocks fall in are alive at once (up to 3 when parts hold one block
+each; a part of at most 2 blocks can briefly hold the next part twice — ADR 0108 addendum 14,
+"Residual"), and the number of buffers waiting for GC is not decided by the declaration (in
+measurements, the maximum of external was about 1.5–4.4 times the largest part).
 Which of the two an externally implemented `DistributionSource` becomes is decided by whether it has
 `openFile` and by the `cost` (`seek` / `scan`) of the reader it returns
 (`packages/hub/src/container.ts`). The canonical counting is [container-v1](container-v1.md) §11;

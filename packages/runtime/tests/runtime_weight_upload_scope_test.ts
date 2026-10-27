@@ -122,7 +122,9 @@ const itemOf = (blockId: string): Item => {
 
 /**
  * A fake device that attributes every call to the item being uploaded, counted from the scope pushes
- * (each item pushes its pair before its upload, in item order).
+ * (each item pushes its pair before its upload, in item order). The reads cannot attribute it: the
+ * supply reads up to 2 blocks ahead of the item it uploads (ADR 0108 addendum 14 —
+ * runtime_weight_supply_test.ts pins that order).
  *
  * Events: `read <item>`, `pop <item>` (one per issued pop), `settled <item>` (the item's pops have
  * settled), `submit`, `fence`. DOM types are not reproduced, so it is passed with a cast (the same
@@ -439,7 +441,8 @@ describe("Session build awaits each initializer's error scopes at the part fence
         built.lastIndexOf("pop d") < built.indexOf("settled a"),
         `an item's pops waited for an earlier item's scopes: ${built.join(", ")}`,
       );
-      // Blocks are read and each item's two pops are issued in item order.
+      // Blocks are read and each item's two pops are issued in item order (the reads run ahead of
+      // the uploads, so the two sequences interleave by timing, not by item).
       assertEquals(
         built.filter((event) => event.startsWith("read ")),
         ITEMS.map((item) => `read ${item}`),

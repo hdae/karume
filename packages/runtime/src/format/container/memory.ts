@@ -63,7 +63,13 @@ export type MemoryEncoding = {
 export type MemoryPiece = {
   /** Half-open range of the first dimension. */
   readonly rows: readonly [number, number];
-  /** The payload of that piece (no padding). */
+  /**
+   * The payload of that piece (no padding).
+   *
+   * MUST: return bytes that later calls do not overwrite (no buffer reused across calls). Session
+   * construction reads up to 2 blocks ahead, so up to 3 pieces' reads can be in flight or held at
+   * once (`READ_AHEAD_BLOCKS` in `runtime/executor.ts` — ADR 0108 addendum 14).
+   */
   read(): Promise<Uint8Array<ArrayBuffer>>;
 };
 
@@ -72,8 +78,10 @@ export type MemoryPiece = {
  * exclusively.
  *
  * Split values are "readers", not data: {@link openMemoryContainer} holds no bytes and calls
- * `read()` on every `readBlock`. A supply that uses only one buffer's worth of RAM (a caller that
- * reads a file partially, for example) is passed in this form.
+ * `read()` on every `readBlock`. A supply that keeps only a few pieces' worth of RAM alive (a caller
+ * that reads a file partially, for example) is passed in this form: Session construction holds the
+ * piece being uploaded + up to 2 read ahead, besides a quantized supply's scale, which the container
+ * holds whole (ADR 0108 addendum 14).
  */
 export type MemoryTensor =
   | {

@@ -45,6 +45,10 @@ import { HEADER_BYTES, MAX_SINGLE_CONTAINER_BYTES } from "./limits.ts";
  * The accessor from part → byte range. The fetch layer (hub / local file / memory) implements only
  * this interface. `read` may return **copied bytes** or a view of the source's buffer — callers do
  * not modify the returned bytes.
+ *
+ * MUST: `read` takes concurrent calls, and bytes it returned stay unchanged after later calls (do
+ * not reuse one buffer across calls). Session construction keeps up to 3 block reads in flight,
+ * across part boundaries (`READ_AHEAD_BLOCKS` in `runtime/executor.ts` — ADR 0108 addendum 14).
  */
 export type BlockSource = {
   readonly partCount: number;
