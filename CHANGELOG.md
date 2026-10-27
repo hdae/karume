@@ -17,6 +17,30 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- Session construction (`createSessionFromContainer`, `@karume/runtime`) waits less while it uploads
+  the weights (ADR 0108 addenda 13 and 14). Each initializer's error scopes are awaited at the end of
+  its part, in initializer order, instead of before the next block is read — the first failing
+  initializer is still the one reported, and a part stops uploading once a failure is known — and
+  the weight supply reads up to 2 blocks ahead of the block being uploaded, across part boundaries,
+  so the next part is read while the current one is fenced. The GPU receives the same writes in the
+  same order (bit-identical). On an RTX 3080 Ti under Node + Dawn, from a local mirror, the two
+  builds of a Wan2.2 request (DiT + umT5) take about 0.4 s less from the deferred scopes and about
+  3.1 s less from the read-ahead (with per-block sha256; 0.7 s and 1.6 s without it — the median of
+  8 paired runs per build). `SessionBuildStats.uploadFenceMs` now includes the wait for the error
+  scopes at the end of each part. The read-ahead changes what a custom source must accept and what
+  host RAM the build holds (see **Breaking**).
+- Gemma Sessions (gemma4 / gemma4-qat, `@karume/models`) submit at most 128 dispatches per chunk by
+  default: without a `submitPolicy` option they take the runtime's default policy with
+  `maxChunkSize: 128`; a `submitPolicy` passed by the caller still overrides it, and the runtime's
+  own default is unchanged. Outputs are bit-identical. On an RTX 3080 Ti under Node the E2B
+  `i4-fast` decode takes 6.73–6.85 ms of wall time per token instead of 9.27–9.45 ms (with the GEMV
+  change below in both).
+- The parallel GEMV of the gemma4 decode stages its activation in workgroup memory on the shapes
+  where that measured faster — 32 lanes with K ≥ 2048 (E2B's `o`, `o_full` and `down` projections
+  and E4B's of the same role) — so each run of the activation is loaded once per workgroup instead of
+  once per lane. Outputs are bit-identical; the pipeline key of those shapes gains the suffix
+  `:staged-x`, and the existing kernels' WGSL is unchanged. On an RTX 3080 Ti under Node the E2B
+  `i4-fast` decode takes 5.62–5.72 ms of GPU time per token instead of 6.12–6.19 ms.
 - Reductions over a non-last axis (`sum` / `amax` / `amin`) split each output over 16 threads that
   walk aligned subtrees of the same summation tree (ADR 0035 addendum of 2026-10-26). Outputs are
   bit-identical; the pipeline key gains the split (`reduce:v2:<op>:<from>><to>:axis:s16:wg256`). On
@@ -172,6 +196,14 @@ measurements in `docs/research/`.
 
 ### Fixed
 
+- gemma4 / gemma4-qat (`@karume/models`): the PLE row cache stopped admitting rows after the
+  first prompt with 32 or more distinct token ids, which makes a PLE block resident; decode then
+  re-read every row that was not in a resident block. Rows that come from a resident block are now
+  kept as copies, and the row cache no longer competes with the resident blocks for the budget
+  (what `maxResidentPleBytes` bounds now is under **Breaking**; ADR 0085 addendum of 2026-10-27).
+  Outputs are bit-identical. On an RTX 3080 Ti under Node with a local mirror, warm decode after such
+  a prompt takes about 6.8 ms per token instead of 32.5–43.2 ms; prompts with fewer distinct ids are
+  unaffected.
 - `Session.run` waits for the device to return released memory before it builds a slot backing (the
   second run of a signature, `@karume/runtime`). Dawn returns the memory of destroyed buffers only when
   a later submit completes, so the previous run's buffers and the new backing were held at once; Wan2.2
@@ -180,6 +212,23 @@ measurements in `docs/research/`.
 
 ### Breaking
 
+- `@karume/runtime`: a custom `BlockSource.read` (the source behind
+  `openContainer({ kind: "source" })`) and a `MemoryPiece.read` of `openMemoryContainer` MUST accept
+  concurrent calls and MUST NOT reuse or overwrite a buffer they returned earlier (ADR 0108 addendum
+  14). One Session build keeps up to 3 reads in flight and up to 4 returned buffers in use at once:
+  the block being uploaded and the scale block that rides with it, plus 2 blocks read ahead (a
+  `MemoryPiece.read` sees at most 3 in use, since the container holds the scales itself). A source
+  that reads into reused buffers has to copy out of them. A pool that recycled them instead would
+  need at least 4 buffers handed out in call order — a buffer written again no earlier than by the
+  4th call after the one that returned it (3 for `MemoryPiece.read`) — plus whatever the source
+  holds for itself besides, and that size follows the current read-ahead depth, which the contract
+  above does not fix. Host RAM during the build now includes up to 2 blocks read ahead besides the
+  block being uploaded (at most 2 × 32 MiB more for a `krm` on a local or seek-type source; on the
+  hub's scan-type path up to 3 parts near a part boundary — `docs/limitations.md`).
+- `@karume/models`: `maxResidentPleBytes` (gemma4 / gemma4-qat) now bounds the resident whole PLE
+  blocks only. The row cache (at most 256 rows — 2,329,600 B for regular E2B, 1,182,720 B for QAT
+  E2B) sits outside it as headroom, so the host RAM PLE holds is at most that budget plus the row
+  cache; a budget of 0 still keeps nothing, rows included (ADR 0085 addendum of 2026-10-27).
 - `@karume/runtime`: `GeometryProfile` gains the required field `i8a8.conv3d`, the tile geometry of
   conv3d on int8 activations (ADR 0115 addendum decision 11). A stored or hand-written profile
   without it is rejected by `acquireGpu({ geometryProfile })`'s validation and by
