@@ -25,7 +25,13 @@ import {
   formatAttentionI8a8Decision,
 } from "../gpu/attention-dp4a-canary.ts";
 import { assertDeviceUsable, type GpuContext, RUNTIME_INTERNAL } from "../gpu/device.ts";
-import { discardFailureScopes, popFailureScopes, pushFailureScopes } from "../gpu/error-scope.ts";
+import {
+  discardFailureScopes,
+  type GpuOutOfMemoryError,
+  type GpuValidationError,
+  popFailureScopes,
+  pushFailureScopes,
+} from "../gpu/error-scope.ts";
 import { SessionPipelines } from "../gpu/pipeline-cache.ts";
 import { copySubmitPolicy, SubmitScheduler } from "../gpu/submit.ts";
 import { BUFFER_USAGE } from "../gpu/webgpu-constants.ts";
@@ -247,6 +253,56 @@ const attributeToOrigin = (origin: string | undefined, cause: unknown): unknown 
     cause.message = `${origin}: ${cause.message}`;
   }
   return cause;
+};
+
+/**
+ * The settled result of one initializer's error-scope pair: a failure (a typed scope failure, or
+ * the pop's own rejection as is) or none.
+ */
+type ScopeOutcome = { readonly failed: false } | { readonly failed: true; readonly error: unknown };
+
+/**
+ * Turns one initializer's issued pop pair into a promise that never rejects, and calls `onFailed`
+ * when the pair settles as a failure (what the build's early stop reads — the part loop in
+ * {@link buildSessionState}).
+ *
+ * MUST: attach the handlers when the pop is issued. The outcomes are awaited later and in item
+ * order ({@link firstScopeFailure}); a later item's rejection that settles while an earlier
+ * failure is being thrown would otherwise surface as an unhandled rejection.
+ */
+const settleScopes = (
+  pop: Promise<GpuValidationError | GpuOutOfMemoryError | undefined>,
+  onFailed: () => void,
+): Promise<ScopeOutcome> =>
+  pop.then(
+    (failure): ScopeOutcome => {
+      if (failure === undefined) return { failed: false };
+      onFailed();
+      return { failed: true, error: failure };
+    },
+    (cause: unknown): ScopeOutcome => {
+      onFailed();
+      return { failed: true, error: cause };
+    },
+  );
+
+/**
+ * The first failure **in item order** among the outcomes (not the first to settle).
+ *
+ * MUST: await in item order. The contract (ADR 0108 addendum 13) is the error the per-item await
+ * used to report — the first failing item — so a later item that settles earlier MUST NOT win.
+ * Failures after the first are discarded: the per-item await never reached them (the build stopped
+ * at the first), and a later one (another allocation on a device that has already run out, for
+ * example) adds nothing to the first.
+ */
+const firstScopeFailure = async (
+  outcomes: readonly Promise<ScopeOutcome>[],
+): Promise<ScopeOutcome> => {
+  for (const outcome of outcomes) {
+    const settled = await outcome;
+    if (settled.failed) return settled;
+  }
+  return { failed: false };
 };
 
 /**
@@ -965,31 +1021,61 @@ export const buildSessionState = async (
       // Interval granularity: per block (item) (ADR 0108 decision 9 — push / pop costs 1.81 µs each,
       // nearly free. The main cost is the fence, so the fence stays at once per batch = part). The
       // read of the next item (the iteration wait of `for await`) comes outside the interval.
+      // Each item's pop pair is issued inside its interval but **awaited at the part fence**, in item
+      // order (ADR 0108 addendum 13). Awaiting it per item serialises the supply behind a GPU-process
+      // round trip on Dawn / Chromium (about −1.5 to −3 s per Wan2.2 request); the attribution stays
+      // per item because the scope itself is still per item.
+      // MUST: the error reported is the first failing item in item order — the one the per-item
+      // await reported — and it wins over a host-side or supply failure of a later item, which the
+      // per-item await never reached.
+      const scopeOutcomes: Promise<ScopeOutcome>[] = [];
+      // Early stop: once any item's scopes have settled as a failure the part is lost, so the loop
+      // leaves before uploading the next item instead of allocating and writing the rest of the part
+      // after an OOM. The failure is still reported in item order, after the loop.
+      let failureSettled = false;
+      const onScopeFailure = (): void => {
+        failureSettled = true;
+      };
       supplyBoundary = performance.now();
-      for await (const item of batch.items) {
-        supplyWaitMs += performance.now() - supplyBoundary;
-        pushFailureScopes(gpu.device);
-        try {
-          uploadItem(item);
-        } catch (cause) {
-          // MUST: always pop the two pushed scopes and leave none behind (leftovers would swallow
-          // later validation results into the wrong scope and make errors permanently invisible).
-          // Disposal is held in one place by the outer transaction boundary.
-          await discardFailureScopes(gpu.device);
-          throw attributeToOrigin(batch.origin, cause);
+      try {
+        for await (const item of batch.items) {
+          // This item's pull wait is counted with the wait for the end of the list, below.
+          if (failureSettled) break;
+          supplyWaitMs += performance.now() - supplyBoundary;
+          pushFailureScopes(gpu.device);
+          try {
+            uploadItem(item);
+          } catch (cause) {
+            // MUST: always pop the two pushed scopes and leave none behind (leftovers would swallow
+            // later validation results into the wrong scope and make errors permanently invisible).
+            // Disposal is held in one place by the outer transaction boundary.
+            await discardFailureScopes(gpu.device);
+            throw attributeToOrigin(batch.origin, cause);
+          }
+          scopeOutcomes.push(
+            settleScopes(
+              popFailureScopes(gpu.device, `${label} for initializer '${item.name}'`),
+              onScopeFailure,
+            ),
+          );
+          // The reference to the item ends with this iteration (releasing the CPU-side bytes does
+          // not wait for the fence — the NOTE on the fence below).
+          supplyBoundary = performance.now();
         }
-        const failure = await popFailureScopes(
-          gpu.device,
-          `${label} for initializer '${item.name}'`,
-        );
-        if (failure !== undefined) throw failure;
-        // The reference to the item ends with this iteration (releasing the CPU-side bytes does not
-        // wait for the fence — the NOTE on the fence below).
-        supplyBoundary = performance.now();
+      } catch (cause) {
+        const earlier = await firstScopeFailure(scopeOutcomes);
+        throw earlier.failed ? earlier.error : cause;
       }
       // The wait until the end of the list is known (the iteration after the last item) is also a
       // cost of the supply side.
       supplyWaitMs += performance.now() - supplyBoundary;
+      // MUST: every item's scopes are settled before the fence and before the part counts as
+      // uploaded — a failure that settles late still fails the build (no failure is dropped).
+      // The wait is a wait for the GPU at the part's end, so it is counted with the fence.
+      const scopesStart = performance.now();
+      const failure = await firstScopeFailure(scopeOutcomes);
+      uploadFenceMs += performance.now() - scopesStart;
+      if (failure.failed) throw failure.error;
 
       // MUST: per batch (container part), issue **one real submit** and wait for completion (ADR 0108
       // decision 9). queue.writeBuffer allocates and accumulates staging and does not release it

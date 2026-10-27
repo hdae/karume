@@ -267,6 +267,9 @@ of 4**.
   `onSubmittedWorkDone` costs **13.0 ms**. Pop and fence per block (32 MiB × 8): 127.4 ms (1.73× the
   73.8 ms of the old shape); pop per block with one fence per 256 MiB: **56.5 ms (0.77×)**. Failures
   are attributed per block without a wall-clock penalty.
+  **Corrected by addendum 13 (2026-10-27):** the penalty-free claim holds for the push/pop issue
+  cost on Deno / wgpu only. Awaiting each block's pop before reading the next one serialises the supply
+  on Dawn / Chromium, so the pops are now awaited at the part fence, in block order.
 - Overlap is limited by **both count and total bytes** (for example "1 in transfer + 1 being
   received / verified"). Expansion (1 bit → f32 is 32×) has its own processing unit.
 - Limits are **kept separately** (none derived from another): descriptor length / nesting depth /
@@ -1004,3 +1007,72 @@ Owners of each axis:
   entry on the runtime side (decision 13 — the exporter's quantizer is separate).
 - The spec was corrected at the same time: [container-v1](../container-v1.md) §6.2 / §6.3 / §13.5,
   [ir-v2](../ir-v2.md) "values and types", [glossary](../glossary.md) "codec ledger".
+
+## Addendum 13 (2026-10-27) — the error scopes are awaited at the part fence (perf-ledger H-38)
+
+**What changes.** Session construction still pushes and pops one error-scope pair per block (item)
+inside the block's synchronous section, so a failure is still caught by the scope of the block that
+caused it. What moves is the **await**: the pop pair's promise is kept and settled at the part
+fence, in item order, instead of being awaited before the next block is read
+(`packages/runtime/src/runtime/session-build.ts` — `settleScopes` / `firstScopeFailure` and the
+part loop). The fence itself is unchanged (one empty submit + `onSubmittedWorkDone` per part). The
+wait for the scopes at the end of a part is counted in `SessionBuildStats.uploadFenceMs` together
+with the fence (both are waits for the GPU).
+
+**Early stop.** The part loop does not upload further blocks once a failure is known: as soon as
+one block's scopes settle as a failure, the loop stops before uploading the next block and the
+failure is reported (in item order — invariant 1). This bounds the extra work after an OOM (the
+allocations and writes of the rest of the part) without bringing back the per-block round trip;
+the success path never takes it.
+
+**Why decision 9's "no wall-clock penalty" does not carry over.** Decision 9 measured the cost of
+issuing a push/pop pair (1.81 µs) on Deno / wgpu, where the pop's promise settles almost at once. It
+did not measure what the per-block **await** costs when the next block's read waits behind it. On
+Dawn in Chromium the pop's result comes back from the GPU process, so each block waits one round
+trip before its successor's read even starts: supply and upload run strictly in series, and
+`SessionBuildStats` sees none of the wait (it falls between the counters). Measured:
+
+| Environment | Per Wan2.2 request (the builds each row covers) | Source |
+| --- | --- | --- |
+| Chromium-Linux, RTX 3080 Ti | −3.0 to −3.2 s over all three builds (umT5 −1.2 to −1.3 s, DiT −1.5 to −1.6 s, the two VAE builds −0.24 to −0.30 s; three A/B runs) | [research 2026-10-25 (3080 Ti)](../research/2026-10-25-speed-recon-3080ti.md) §9.2, HB-1 (the total); `outputs/diag/perf-recon-2026-10-24/ledger-host/ROUND1-digest.txt`, HB-1 (the split per build; not tracked) |
+| Chrome 155 / D3D12, RTX 5070 Ti | −1.52 s over the DiT + umT5 builds (DiT −0.79 s, umT5 −0.73 s) | [research 2026-10-25 (5070 Ti)](../research/2026-10-25-speed-recon-5070ti.md) §10 |
+| Node + Dawn (Vulkan), RTX 3080 Ti, local mirror | Over the DiT + umT5 builds: −0.37 s with per-block sha256 (the Node local-directory path: DiT −0.06 s, within the noise — 5 of 8 pairs faster; umT5 −0.31 s, 7 of 8); −0.74 s without it (the browser's shape: DiT −0.17 s, 7 of 8; umT5 −0.57 s, 8 of 8) | `outputs/diag/session-build-2026-10-27/` (not tracked) |
+
+The Node row is the **median of the paired deltas** (8 pairs per component: per-block await and
+part-fence await interleaved in one process on one device, the leading arm alternating per pair),
+summed over the two components. Single pairs range from −2.1 to +1.5 s per component and from
+−2.5 to +1.4 s per request (the two components' deltas of one pair summed), both in the sha256 run;
+the run without sha256 stays inside both ranges. Its harness reads through its own positional-read
+source with one persistent file handle per part (`measure.ts`), not
+through the hub's `nodeDirectory`.
+
+The bytes on the GPU do not change (bit-identical): the same buffers receive the same
+`writeBuffer` calls in the same order; only the point where the build waits for the scopes moves.
+
+**Invariant (MUST).** The per-block attribution decision 9 bought stays exactly as it was:
+
+1. When one or more blocks of a part fail, the build fails with the error of the **first failing
+   block in item order** — the same error type (`GpuOutOfMemoryError` / `GpuValidationError`, or a
+   rejected pop as is) and the same message (`<part> weight upload for initializer '<name>': …`)
+   the per-block await reported. A later block that settles first does not win.
+2. A scope failure of an earlier block also wins over a host-side failure or a block-read failure
+   of a later block (the per-block await stopped before reaching that later block).
+3. No failure is dropped: every block's scopes are settled before the part's fence and before the
+   part counts as uploaded, so a failure that settles after the last block still fails the build.
+   Failures after the first are discarded on purpose — the per-block await never reached them.
+4. No failure is reported twice and none escapes as an unhandled rejection: each pop's promise gets
+   its handlers when it is issued.
+5. Device loss and validation keep their classification: a block's scopes catch what they caught
+   before, and the fence still races `onSubmittedWorkDone` against the loss. This rests on the
+   WebGPU spec's ordering — which scope an error lands in is fixed when the call is issued, and a
+   pop resolves on the device timeline before the work issued after it — so awaiting the pop later
+   moves no error to another scope. It was not observed on Dawn: no test raises a real GPU error
+   there, and the fake device of the tests reproduces this ordering rather than checking it. The
+   early stop changes only how soon the loop ends, not which error is reported.
+
+The transaction boundary of decision 9 is unchanged: a failed part destroys the weights arena and
+publishes no partial Session. Pinned by `packages/runtime/tests/runtime_weight_upload_scope_test.ts`
+(a fake device injects per-block scope failures, settle delays and read delays: the order of the
+reported failure, the deferral itself — every block's pops are issued before the first block's
+scopes settle — and the early stop); the order of push → write → pop per block and of the fence
+per part stays pinned by `runtime_weight_supply_test.ts`.

@@ -661,9 +661,10 @@ export type SessionBuildStats = {
    */
   readonly uploadedBytes: number;
   /**
-   * The total time spent waiting for the explicit submit per supply unit (part) to complete (the
-   * fence of ADR 0108 decision 9). The real GPU transfer time is absorbed here ("Limits of
-   * attribution" above).
+   * The total time spent at the end of each supply unit (part) waiting for the GPU: first for the
+   * part's error scopes to settle (each item's pair is awaited there, not per item — ADR 0108
+   * addendum 13), then for the explicit submit to complete (the fence of ADR 0108 decision 9). The
+   * real GPU transfer time is absorbed here ("Limits of attribution" above).
    */
   readonly uploadFenceMs: number;
 };
