@@ -1078,6 +1078,56 @@ describe("deriveProfile: ケースが 1 本の段", () => {
   });
 });
 
+describe("deriveProfile: the reasons that compare two ratios print them so they read differently", () => {
+  const verdictWithSpeedup = (speedup: number, minSpeedup: number = OPTIONS.minSpeedup) =>
+    verdictOf(
+      deriveProfile([source(caseRows(linearCase(32), SMALL, [[A, { speedup }]]))], {
+        ...OPTIONS,
+        minSpeedup,
+      }),
+      "gemmRows 17〜32",
+    );
+
+  it("prints a ratio that rounds to the minSpeedup bar at 3 decimals, and the bar, with as many decimals as tell them apart", () => {
+    const verdict = verdictWithSpeedup(1.0498);
+    assertEquals(verdict.outcome.kind, "default");
+    assertStringIncludes(rejectionOf(verdict, A), "linear-m32: ×1.0498 < ×1.0500");
+  });
+
+  it("does the same for a bar with more than 3 decimals", () => {
+    const verdict = verdictWithSpeedup(1.0501, 1.0504);
+    assertEquals(verdict.outcome.kind, "default");
+    assertStringIncludes(rejectionOf(verdict, A), "linear-m32: ×1.0501 < ×1.0504");
+  });
+
+  it("keeps the 3-decimal spelling for a ratio that already reads below the bar", () => {
+    const verdict = verdictWithSpeedup(1.04);
+    assertEquals(verdict.outcome.kind, "default");
+    assertStringIncludes(rejectionOf(verdict, A), "linear-m32: ×1.040 < ×1.050");
+  });
+
+  it("prints a losing geometric mean and the adopted one with as many decimals as tell them apart", () => {
+    const verdict = verdictOf(
+      deriveProfile(
+        [
+          source(
+            caseRows(linearCase(32), SMALL, [
+              [A, { speedup: 1.2341 }],
+              [B, { speedup: 1.2343 }],
+            ]),
+          ),
+        ],
+        OPTIONS,
+      ),
+      "gemmRows 17〜32",
+    );
+    assertStringIncludes(
+      rejectionOf(verdict, A),
+      "geometric mean ×1.2341 (below the adopted ×1.2343)",
+    );
+  });
+});
+
 describe("deriveProfile: 掃引の既定の行は今の runtime の既定であること", () => {
   // 比の土台（既定の行）を 1 つずらした fixture — どの欄でも生成を止める
   const shifted: readonly {

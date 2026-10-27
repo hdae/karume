@@ -799,6 +799,29 @@ const geometricMean = (values: readonly number[]): number =>
  */
 export const formatRatio = (value: number): string => `×${value.toFixed(3)}`;
 
+/**
+ * The display of two ratios a rejection reason compares (`<value> < <bar>`, `<geomean> (below the
+ * adopted <geomean>)`): both at the fewest decimals (3 or more) at which they read differently. At 3
+ * decimals a value just under the bar (1.0498 against 1.05) would print as the bar itself
+ * (`×1.050 < ×1.050`); more decimals only where needed keep every other reason in the
+ * {@link formatRatio} spelling, so the generated headers of values not at the bar do not change.
+ * Equal ratios (a tie broken by name) keep 3 decimals.
+ */
+const formatRatioPair = (left: number, right: number): readonly [string, string] => {
+  let digits = 3;
+  // Two distinct doubles read differently by 17 decimals; 100 is the largest `toFixed` accepts.
+  while (left !== right && digits < 100 && left.toFixed(digits) === right.toFixed(digits)) {
+    digits += 1;
+  }
+  return [`×${left.toFixed(digits)}`, `×${right.toFixed(digits)}`];
+};
+
+/** The reason of an eligible candidate whose geometric mean is short of the adopted one's. */
+const belowAdopted = (geomean: number, adopted: number): string => {
+  const [mine, theirs] = formatRatioPair(geomean, adopted);
+  return `geometric mean ${mine} (below the adopted ${theirs})`;
+};
+
 export type SlotVerdict = {
   readonly slot: ProfileSlot;
   readonly scope: string;
@@ -995,10 +1018,8 @@ const judgeCandidate = (
   }
   const worst = perCase.reduce((low, entry) => (entry.speedup < low.speedup ? entry : low));
   if (worst.speedup < minSpeedup) {
-    return {
-      eligible: false,
-      reason: `${worst.caseId}: ${formatRatio(worst.speedup)} < ${formatRatio(minSpeedup)}`,
-    };
+    const [value, bar] = formatRatioPair(worst.speedup, minSpeedup);
+    return { eligible: false, reason: `${worst.caseId}: ${value} < ${bar}` };
   }
   const speedups = perCase.map((entry) => entry.speedup);
   return {
@@ -1094,9 +1115,7 @@ const judgeSlot = (
     .map((candidate) => ({
       name: candidate.name,
       reason: candidate.eligibility.eligible
-        ? `geometric mean ${formatRatio(candidate.eligibility.geomean)} (below the adopted ${formatRatio(
-            winner.geomean,
-          )})`
+        ? belowAdopted(candidate.eligibility.geomean, winner.geomean)
         : candidate.eligibility.reason,
     }));
   return {
