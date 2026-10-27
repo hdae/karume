@@ -62,6 +62,7 @@ import {
   statePvParallelReadonlyWgsl,
   statePvParallelWgsl,
   statePvWgsl,
+  stateQkFoldedWgsl,
   stateQkParallelReadonlyWgsl,
   stateQkParallelWgsl,
   stateQkWgsl,
@@ -854,6 +855,11 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["attention_state_qk_par_gqa.wgsl", stateQkParallelWgsl(false, true)],
     ["attention_state_qk_par_sliding.wgsl", stateQkParallelWgsl(true, false)],
     ["attention_state_qk_par_sliding_gqa.wgsl", stateQkParallelWgsl(true, true)],
+    // The folded ①' (perf-ledger K-55 — the F = r query heads of one kv plane per workgroup, full GQA
+    // only). Both selected F are frozen: F changes the accumulators, the shared storage and the
+    // writers, so one F passing says nothing about the other.
+    ["attention_state_qk_par_fold4_gqa.wgsl", stateQkFoldedWgsl(4)],
+    ["attention_state_qk_par_fold8_gqa.wgsl", stateQkFoldedWgsl(8)],
     // ①ₜ K 行タイル共有変種（**既定経路**・perf-ledger K-13）。GEMM 骨格に states の断片を
     // 差した唯一のカーネルなので、ここが「骨格へ断片を足しても既存 6 op の生成バイト列が
     // 1 バイトも動かない」の検出器になる（上の attention_* / bmm_* / linear_* / conv*_ が正）。
@@ -865,6 +871,10 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["attention_state_qk_tiled_sliding_gqa.wgsl", stateQkTiledWgsl(true, true, 16)],
     ["attention_state_qk_tiled_m768.wgsl", stateQkTiledWgsl(false, false, 768)],
     ["attention_state_qk_tiled_m768_sliding_gqa.wgsl", stateQkTiledWgsl(true, true, 768)],
+    // The fused stats + PV (ADR 0102) and ③' below are v2 (the unrolled KV loop — perf-ledger K-91).
+    // The v1 WGSL they must stay word-for-word identical to is kept in fixtures/wgsl-baseline/ for
+    // the GPU identity test (gpu_state_attention_fold_test.ts); it is not a snapshot of a generator,
+    // so it is outside this enumeration and its directory check.
     ["attention_state_stats_pv.wgsl", stateStatsPvWgsl(false, false)],
     ["attention_state_stats_pv_gqa.wgsl", stateStatsPvWgsl(false, true)],
     ["attention_state_stats_pv_sliding.wgsl", stateStatsPvWgsl(true, false)],
@@ -1073,6 +1083,9 @@ test("同じ生成入力からは常に同一の WGSL が出る（全 op × dtyp
       `quantize_rows channel-major:p${pixels}`,
     );
   }
+  for (const heads of [4, 8]) {
+    assertEquals(stateQkFoldedWgsl(heads), stateQkFoldedWgsl(heads), `state_qk_fold:F=${heads}`);
+  }
   for (const sliding of [false, true]) {
     assertEquals(
       stateStatsWgsl(sliding),
@@ -1097,6 +1110,11 @@ test("同じ生成入力からは常に同一の WGSL が出る（全 op × dtyp
         stateQkParallelWgsl(sliding, gqa),
         stateQkParallelWgsl(sliding, gqa),
         `state_qk_par:${where}`,
+      );
+      assertEquals(
+        stateStatsPvWgsl(sliding, gqa),
+        stateStatsPvWgsl(sliding, gqa),
+        `state_stats_pv:${where}`,
       );
       for (const rows of [16, 100, 768]) {
         assertEquals(

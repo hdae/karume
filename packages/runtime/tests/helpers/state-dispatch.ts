@@ -21,6 +21,8 @@ import {
   statePvTiledWorkgroups,
   statePvWgsl,
   statePvWorkgroups,
+  stateQkFoldedWgsl,
+  stateQkFoldedWorkgroups,
   stateQkParallelReadonlyWgsl,
   stateQkParallelReadonlyWorkgroups,
   stateQkParallelWgsl,
@@ -381,8 +383,10 @@ export const runStateAttention = async (
  * ①QK の 3 経路（`sequential` = ① 参照経路 / `parallel` = ①' D 並列縮約 /
  * `tiled` = ①ₜ K 行タイル共有）。束縛番号は 3 経路とも同じで、替わるのは WGSL・params・
  * workgroup 算出の 3 点だけ。
+ * `folded` is ①' with the F = r query heads of one kv plane per workgroup (perf-ledger K-55 — GQA
+ * full-attention cases only; the same bindings and params as ①').
  */
-export type StateQkVariant = "sequential" | "parallel" | "tiled";
+export type StateQkVariant = "sequential" | "parallel" | "tiled" | "folded";
 
 /**
  * ①QK **だけ**を行ブロックごとに撃ち、各ブロックの S を**語（u32）のまま**返す。
@@ -408,12 +412,15 @@ export const runStateQk = async (
   const rowsBlock = spec.rowsBlock ?? spec.chunkRows;
   const batchHeads = spec.batch * spec.heads;
   const cache = options.cache ?? new Map<string, GPUComputePipeline>();
+  const kvRepeat = spec.heads / spec.kvHeads;
   const source =
     variant === "parallel"
       ? stateQkParallelWgsl(sliding, gqa)
       : variant === "tiled"
         ? stateQkTiledWgsl(sliding, gqa, spec.chunkRows)
-        : stateQkWgsl(sliding, gqa);
+        : variant === "folded"
+          ? stateQkFoldedWgsl(kvRepeat)
+          : stateQkWgsl(sliding, gqa);
   const buffers: GPUBuffer[] = [];
   const track = <T extends GPUBuffer>(buffer: T): T => {
     buffers.push(buffer);
@@ -444,7 +451,7 @@ export const runStateQk = async (
         rowOffset,
         chunkRows: spec.chunkRows,
         depth: spec.depth,
-        kvRepeat: spec.heads / spec.kvHeads,
+        kvRepeat,
         window: spec.window,
         capacity: spec.capacity,
         colCap,
@@ -481,7 +488,16 @@ export const runStateQk = async (
                 limit,
                 spec.name,
               )
-            : stateQkWorkgroups(dispatchGeometry, spec.past, spec.query, limit, spec.name);
+            : variant === "folded"
+              ? stateQkFoldedWorkgroups(
+                  dispatchGeometry,
+                  kvRepeat,
+                  spec.past,
+                  spec.query,
+                  limit,
+                  spec.name,
+                )
+              : stateQkWorkgroups(dispatchGeometry, spec.past, spec.query, limit, spec.name);
       const encoder = device.createCommandEncoder();
       const pass = encoder.beginComputePass();
       pass.setPipeline(pipeline);

@@ -2,6 +2,13 @@
  * Fusion of the row statistics and PV of states-form attention (ADR 0102).
  * The row statistics are recomputed per depth tile, so it is used only for few rows and a short
  * column cap.
+ *
+ * v2 (perf-ledger K-91): the PV loop is the unrolled scan shared with ③' (`statePvScanWgsl` — the
+ * section "The unrolled KV loop" of state-attention.ts). MUST: bit-identical to v1 word for word;
+ * the statistics part is v1's unchanged (the 256 flat lanes, the `nan_max` loop, the 128 → 1 trees,
+ * the `maximum != neg_inf` guards and `1/Σ`). NOTE: the identity rests on the backend compiling the
+ * same expression the same way; it is checked word for word against the v1 WGSL on each backend
+ * (tests/gpu_state_attention_fold_test.ts).
  */
 import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/numerics-wgsl.ts";
 import {
@@ -12,6 +19,7 @@ import {
   STATE_PV_KV_LANES,
   stateEffectiveRowsWgsl,
   stateLiveWgsl,
+  statePvScanWgsl,
   stateSlotRowWgsl,
   stateVariantKeyPart,
 } from "./state-attention.ts";
@@ -20,8 +28,10 @@ import {
 export const stateStatsPvEligible = (chunkRows: number, colCap: number): boolean =>
   chunkRows <= 8 && colCap <= 1024;
 
+// v2: the PV loop is unrolled (bit-identical to v1; the WGSL bytes changed, and one key MUST map to
+// byte-identical WGSL)
 export const stateStatsPvKey = (sliding: boolean, gqa: boolean): string =>
-  "attention_state_stats_pv:v1:f32:wg16x16" + stateVariantKeyPart(sliding, gqa);
+  "attention_state_stats_pv:v2:f32:wg16x16" + stateVariantKeyPart(sliding, gqa);
 
 /** The binding numbers and geometry of the existing parallel PV, minus binding 2 (row statistics). */
 export const stateStatsPvWgsl = (sliding: boolean, gqa: boolean): string =>
@@ -117,17 +127,7 @@ fn main(
   // scan and contributes 0 (it does not return, so that it takes part in the barrier)
   var acc = 0.0;
   if (in_depth) {
-    for (var cl = lane; cl < live; cl = cl + ${STATE_PV_KV_LANES}u) {
-      let col = base_col + cl;
-      let p = exp(s[s_base + cl] - amax) * inv;
-      var value = 0.0;
-      if (col < past) {
-        value = slot_v[(kv_plane * params.capacity + slot_row(col)) * params.depth + d];
-      } else {
-        value = ins_v[(kv_plane * params.chunk_rows + (col - past)) * params.depth + d];
-      }
-      acc = acc + p * value;
-    }
+${statePvScanWgsl()}
   }
   scratch[lane * ${STATE_ATTENTION_TILE_X}u + lid.x] = acc;
   workgroupBarrier();

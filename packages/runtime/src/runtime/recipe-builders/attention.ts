@@ -92,6 +92,7 @@ import {
   stateAppendWorkgroups,
 } from "../../kernels/state-append.ts";
 import {
+  assertStateQkFold,
   stateAttentionParams,
   statePvKey,
   statePvParallelKey,
@@ -106,6 +107,10 @@ import {
   statePvTiledWorkgroups,
   statePvWgsl,
   statePvWorkgroups,
+  stateQkFoldedKey,
+  stateQkFoldedWgsl,
+  stateQkFoldedWorkgroups,
+  stateQkFoldHeads,
   stateQkKey,
   stateQkParallelEligible,
   stateQkParallelKey,
@@ -1141,13 +1146,26 @@ export const buildStateAttention = async (
   // declared shape) — branching on the run-time logical length would make the same plan key point
   // at a different pipeline per run.
   const qkParallel = parallel && stateQkParallelEligible(chunkRows);
+  // The folded ①' (perf-ledger K-55): on full-attention plans whose (r = kv_repeat, D, M) is a
+  // measured class (Gemma 4 E2B / E4B at M = 1 / 4 / 8, MiniCPM5 at M = 1), one workgroup serves
+  // the F = r query heads of one kv plane and reads each K element once. It is **bit-identical to
+  // ①'** (the same terms in the same order — the section "①' folded over the query heads of one kv
+  // plane" of src/kernels/state-attention.ts), so it rides on ①''s selection without an option,
+  // and plans of one model may differ in the choice (verify vs decode) without moving a word; the
+  // condition and the WHY are in `stateQkFoldHeads`. The inputs are plan-time static values like
+  // the rest of this selection.
+  // MUST: `F | r` is checked before the folded pipeline is selected — r travels in the uniform and
+  // F in the key, and a workgroup whose heads span two kv planes reads another plane's K for the
+  // heads past the boundary with neither an exception nor NaN.
+  const qkFold = qkParallel ? stateQkFoldHeads(sliding, kvRepeat, depth, chunkRows) : 1;
+  if (qkFold > 1) assertStateQkFold(qkFold, kvRepeat, where);
   // ①ₜ (K row-tile sharing in the GEMM skeleton — perf-ledger K-13) is **bit-identical to ①**, so
   // it does not depend on the option and is chosen by default for plans with `M ≥ 16` (the
   // eligibility condition and the WHY are in `stateQkTiledEligible`). The two eligibility
   // conditions do not overlap (1 < 16), so this priority order exists only for readability.
-  // MUST: **this is the only place** that holds the priority order of the three ①QK paths (the four
-  // points key, WGSL, params and workgroups line up here). Scattering it would allow pairs like
-  // "key is ①ₜ, dispatch uses ①'s edges", with tiles missing and no exception.
+  // MUST: **this is the only place** that holds the priority order of the three ①QK paths and ①''s
+  // fold (the four points key, WGSL, params and workgroups line up here). Scattering it would allow
+  // pairs like "key is ①ₜ, dispatch uses ①'s edges", with tiles missing and no exception.
   const qkTiled = !qkParallel && stateQkTiledEligible(chunkRows);
   // ③ₜ (V row-tile sharing in the GEMM skeleton — perf-ledger K-13 step 2) is also **bit-identical
   // to ③**, so it does not depend on the option and is chosen by default for plans with `M ≥ 16`.
@@ -1161,7 +1179,9 @@ export const buildStateAttention = async (
   const pvTiled = statePvTiledEligible(chunkRows);
   const pvParallel = parallel && !pvTiled;
   const qkKey = qkParallel
-    ? stateQkParallelKey(sliding, gqa)
+    ? qkFold > 1
+      ? stateQkFoldedKey(qkFold)
+      : stateQkParallelKey(sliding, gqa)
     : qkTiled
       ? stateQkTiledKey(sliding, gqa, chunkRows)
       : stateQkKey(sliding, gqa);
@@ -1176,7 +1196,9 @@ export const buildStateAttention = async (
   const qk = await face.state.cache.get(
     qkKey,
     qkParallel
-      ? stateQkParallelWgsl(sliding, gqa)
+      ? qkFold > 1
+        ? stateQkFoldedWgsl(qkFold)
+        : stateQkParallelWgsl(sliding, gqa)
       : qkTiled
         ? stateQkTiledWgsl(sliding, gqa, chunkRows)
         : stateQkWgsl(sliding, gqa),
@@ -1251,7 +1273,9 @@ export const buildStateAttention = async (
       ],
       workgroups: (past, query) =>
         qkParallel
-          ? stateQkParallelWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`)
+          ? qkFold > 1
+            ? stateQkFoldedWorkgroups(dispatchGeometry, qkFold, past, query, limit, `${where} ①QK`)
+            : stateQkParallelWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`)
           : qkTiled
             ? stateQkTiledWorkgroups(
                 dispatchGeometry,

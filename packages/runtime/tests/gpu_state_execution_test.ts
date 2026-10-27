@@ -31,6 +31,7 @@ import {
   statePvKey,
   statePvParallelKey,
   statePvTiledKey,
+  stateQkFoldedKey,
   stateQkKey,
   stateQkParallelKey,
   stateQkTiledKey,
@@ -831,6 +832,92 @@ test.skipIf(!GPU_AVAILABLE)(
               `${label}: 席と計画から期待されない ${stage} のキーが混ざっている（${keys.join(
                 " / ",
               )}）`,
+            );
+          }
+        } finally {
+          await context.dispose();
+          await session.dispose();
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+);
+
+/**
+ * Shapes for the folded ①' census: the measured classes fold on full layers (r = 8 / 4 at D = 512,
+ * r = 8 at D = 128 — at decode M = 1); an unmeasured D, r = 3 / 16 and sliding do not.
+ */
+const R8: StateModel = { heads: 8, kvHeads: 1, depth: 512, capacity: 32 };
+const R4: StateModel = { heads: 8, kvHeads: 2, depth: 512, capacity: 32 };
+const R8_D128: StateModel = { heads: 16, kvHeads: 2, depth: 128, capacity: 32 };
+const R8_D16: StateModel = { heads: 8, kvHeads: 1, depth: 16, capacity: 32 };
+const R3: StateModel = { heads: 6, kvHeads: 2, depth: 16, capacity: 32 };
+const R16: StateModel = { heads: 16, kvHeads: 1, depth: 16, capacity: 32 };
+const R8_SLIDING: StateModel = { heads: 8, kvHeads: 1, depth: 16, capacity: 12, window: 8 };
+
+/**
+ * **census + values** of the folded ①' (perf-ledger K-55) through a Session: a full-attention plan
+ * of a measured class (r, D, M) that takes ①' runs the folded key in its place (and no other ①QK
+ * key), every other plan keeps its ①QK path, and the outputs still match the CPU reference along a prefill → decode
+ * chain. The word-for-word identity with ①' is held by gpu_state_attention_fold_test.ts; this test
+ * is about the wiring of the single selection site (key, WGSL, params and the per-step workgroup
+ * count of `buildStateAttention`).
+ * MUST: the expectation is written per row (importing the selection rule would let the test be
+ * wrong together with the implementation).
+ */
+test.skipIf(!GPU_AVAILABLE)(
+  "full-attention plans of the measured classes run the folded ①' and every other plan its own ①QK (census + values, real GPU)",
+  async () => {
+    const gpu = await acquireGpu();
+    try {
+      for (const [label, model, reduce, expected] of [
+        ["full r=8 D=512 parallel", R8, "parallel", stateQkFoldedKey(8)],
+        ["full r=4 D=512 parallel", R4, "parallel", stateQkFoldedKey(4)],
+        // The fused option keeps ①' on the QK side, so the fold applies there too
+        ["full r=8 D=512 parallel-fused", R8, "parallel-fused", stateQkFoldedKey(8)],
+        // The MiniCPM5 class folds at decode M = 1 only (its M = 4 prefill plan keeps ①', and the
+        // decode values still follow the reference across the two)
+        ["full r=8 D=128 parallel", R8_D128, "parallel", stateQkFoldedKey(8)],
+        // An unmeasured head dim keeps ①'
+        ["full r=8 D=16 parallel", R8_D16, "parallel", stateQkParallelKey(false, true)],
+        ["full r=2 parallel", GQA, "parallel", stateQkParallelKey(false, true)],
+        ["full r=3 parallel", R3, "parallel", stateQkParallelKey(false, true)],
+        ["full r=16 parallel", R16, "parallel", stateQkParallelKey(false, true)],
+        ["sliding r=8 parallel", R8_SLIDING, "parallel", stateQkParallelKey(true, true)],
+        // The fold rides on ①' only — the reference path stays ①
+        ["full r=8 sequential", R8, "sequential", stateQkKey(false, true)],
+      ] as const) {
+        const capacity = model.capacity;
+        if (typeof capacity !== "number") throw new Error(`${label}: needs a numeric capacity`);
+        const session = await stateSession(gpu, model, { stateAttentionReduce: reduce });
+        const context = await session.createGenerationContext({ chunkLength: 4 });
+        const state = newOracle(model, capacity);
+        try {
+          await assertStep(session, context, model, capacity, state, 4, 4, 5, `${label} prefill`);
+          for (const [step, salt] of [
+            ["decode 1", 13],
+            ["decode 2", 29],
+          ] as const) {
+            await assertStep(
+              session,
+              context,
+              model,
+              capacity,
+              state,
+              1,
+              1,
+              salt,
+              `${label} ${step}`,
+            );
+            const keys = requireCensus(session.diagnostics().lastRunPipelines, label).map(
+              (row) => row.key,
+            );
+            assertEquals(
+              keys.filter((key) => key.startsWith("attention_state_qk")),
+              [expected],
+              `${label} ${step}: the ①QK keys that ran (${keys.join(" / ")})`,
             );
           }
         } finally {

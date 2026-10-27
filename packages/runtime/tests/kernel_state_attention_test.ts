@@ -6,7 +6,7 @@
 // 同じ誤りを共有していても両方緑になる）。窓の集合が値に出る形（in-window の V を col 番号に
 // して平均を作る）で、述語の上限・下限・リング写像の 3 つが 1 つの数値に畳まれる。
 
-import { test } from "vite-plus/test";
+import { describe, it, test } from "vite-plus/test";
 import { assertAlmostEquals, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { CodegenError } from "../src/codegen/errors.ts";
 import { DispatchLimitError } from "../src/codegen/errors.ts";
@@ -31,6 +31,14 @@ import {
   statePvTiledWorkgroups,
   statePvWgsl,
   statePvWorkgroups,
+  STATE_PV_UNROLL,
+  STATE_QK_FOLD_TILE_X,
+  assertStateQkFold,
+  statePvScanWgsl,
+  stateQkFoldedKey,
+  stateQkFoldedWgsl,
+  stateQkFoldedWorkgroups,
+  stateQkFoldHeads,
   stateQkKey,
   stateQkParallelEligible,
   stateQkParallelKey,
@@ -85,10 +93,11 @@ test("states 形のキーは :sliding / :gqa の 2 ビットだけで分かれ�
   assertEquals(stateStatsKey(true), "attention_state_stats:v2:f32:wg256:sliding");
   // 融合 ②+③'（ADR 0102）も同じ 2 ビットで分かれる。キャッシュの identity なので、
   // 綴りが動けば「同じ形なのに別パイプライン」になる面を他の変種と同じ水準で固定する。
-  assertEquals(stateStatsPvKey(false, false), "attention_state_stats_pv:v1:f32:wg16x16");
-  assertEquals(stateStatsPvKey(true, false), "attention_state_stats_pv:v1:f32:wg16x16:sliding");
-  assertEquals(stateStatsPvKey(false, true), "attention_state_stats_pv:v1:f32:wg16x16:gqa");
-  assertEquals(stateStatsPvKey(true, true), "attention_state_stats_pv:v1:f32:wg16x16:sliding:gqa");
+  // v2 = the unrolled PV loop (perf-ledger K-91 — the WGSL bytes changed, so the key moved).
+  assertEquals(stateStatsPvKey(false, false), "attention_state_stats_pv:v2:f32:wg16x16");
+  assertEquals(stateStatsPvKey(true, false), "attention_state_stats_pv:v2:f32:wg16x16:sliding");
+  assertEquals(stateStatsPvKey(false, true), "attention_state_stats_pv:v2:f32:wg16x16:gqa");
+  assertEquals(stateStatsPvKey(true, true), "attention_state_stats_pv:v2:f32:wg16x16:sliding:gqa");
   assertEquals(stateAppendKey(false), "state_append:v1:f32:wg256");
   assertEquals(stateAppendKey(true), "state_append:v1:f32:wg256:sliding");
   // 幾何の定数がキーに出ている（workgroup を動かせばキーが動く = 別パイプライン）
@@ -135,8 +144,10 @@ test("readonly 形のキーは live 形と別の綴りで、states 形の全キ�
     ...[false, true].flatMap((sliding) => [stateStatsKey(sliding), stateStatsReadonlyKey(sliding)]),
     stateAppendKey(false),
     stateAppendKey(true),
+    stateQkFoldedKey(4),
+    stateQkFoldedKey(8),
   ];
-  assertEquals(keys.length, 4 * 7 + 2 * 2 + 2);
+  assertEquals(keys.length, 4 * 7 + 2 * 2 + 2 + 2);
   assertEquals(new Set(keys).size, keys.length);
 });
 
@@ -1000,6 +1011,199 @@ test("①' の適用条件は M（chunkRows）≤ 8 — 実測した範囲の外
   for (const chunkRows of [9, 16, 768]) {
     assertEquals(stateQkParallelEligible(chunkRows), false, `M=${chunkRows} は ① のまま`);
   }
+});
+
+describe("the folded ①' — the F query heads of one kv plane per workgroup (perf-ledger K-55)", () => {
+  it("is selected with F = r only on the measured full-attention classes (r, D, M)", () => {
+    // [r, D, M, F]. The classes measured not slower than ①' at P = 1,024 / 4,000 / 16,000
+    // (2026-10-27): Gemma 4 E2B (r = 8) and E4B (r = 4) full layers at decode M = 1 and verify
+    // M = 4 / 8, and the MiniCPM5 full layer (r = 8, D = 128) at M = 1
+    const folded: readonly (readonly [number, number, number, number])[] = [
+      [8, 512, 1, 8],
+      [8, 512, 4, 8],
+      [8, 512, 8, 8],
+      [4, 512, 1, 4],
+      [4, 512, 4, 4],
+      [4, 512, 8, 4],
+      [8, 128, 1, 8],
+    ];
+    for (const [kvRepeat, depth, chunkRows, heads] of folded) {
+      const label = `full r=${kvRepeat} D=${depth} M=${chunkRows}`;
+      assertEquals(stateQkFoldHeads(false, kvRepeat, depth, chunkRows), heads, label);
+      // The fold was neutral to slower on the sliding layers, so they never fold
+      assertEquals(stateQkFoldHeads(true, kvRepeat, depth, chunkRows), 1, `sliding ${label}`);
+    }
+    // MUST: no extrapolation — every unmeasured class keeps the plain ①' (F = 1)
+    const plain: readonly (readonly [number, number, number])[] = [
+      // other repeat counts
+      [1, 512, 1],
+      [2, 512, 1],
+      [3, 512, 1],
+      [16, 512, 1],
+      // chunk row counts between the measured ones
+      [8, 512, 2],
+      [8, 512, 3],
+      [4, 512, 5],
+      [8, 512, 7],
+      // MiniCPM5 verify-sized plans (only M = 1 was measured at D = 128)
+      [8, 128, 4],
+      [8, 128, 8],
+      // other head dims
+      [8, 256, 1],
+      [4, 128, 1],
+      [8, 64, 1],
+    ];
+    for (const [kvRepeat, depth, chunkRows] of plain) {
+      assertEquals(
+        stateQkFoldHeads(false, kvRepeat, depth, chunkRows),
+        1,
+        `full r=${kvRepeat} D=${depth} M=${chunkRows}`,
+      );
+    }
+  });
+
+  it("fails loudly when F does not divide kv_repeat or has no lane to write it", () => {
+    assertStateQkFold(8, 8, "t");
+    assertStateQkFold(4, 4, "t");
+    assertStateQkFold(4, 8, "t");
+    // A group of F heads straddling two kv planes would read another plane's K silently
+    assertThrows(() => assertStateQkFold(8, 4, "t"), CodegenError, "divide kv_repeat");
+    assertThrows(() => assertStateQkFold(3, 8, "t"), CodegenError, "divide kv_repeat");
+    assertThrows(() => assertStateQkFold(4, 6.5, "t"), CodegenError, "divide kv_repeat");
+    // Lane f writes head f, so F is at most D_LANES; F = 1 is the plain ①', not a fold
+    assertThrows(() => assertStateQkFold(1, 8, "t"), CodegenError, "heads per workgroup");
+    assertThrows(() => assertStateQkFold(32, 32, "t"), CodegenError, "heads per workgroup");
+    // Every F the selection returns passes the check for its own r
+    for (let kvRepeat = 1; kvRepeat <= 32; kvRepeat += 1) {
+      for (const depth of [128, 512]) {
+        for (let chunkRows = 1; chunkRows <= 8; chunkRows += 1) {
+          const heads = stateQkFoldHeads(false, kvRepeat, depth, chunkRows);
+          if (heads > 1)
+            assertStateQkFold(heads, kvRepeat, `r=${kvRepeat} D=${depth} M=${chunkRows}`);
+        }
+      }
+    }
+  });
+
+  it("carries F in the key and keeps the `:par` census marker and the `:gqa` bit", () => {
+    assertEquals(stateQkFoldedKey(8), "attention_state_qk:v1:f32:wg8x16:par:fold8:gqa");
+    assertEquals(stateQkFoldedKey(4), "attention_state_qk:v1:f32:wg8x16:par:fold4:gqa");
+    assertEquals(STATE_QK_FOLD_TILE_X, 8);
+    // r travels in the uniform, so one key per F: two F must not share a key, nor F with ①'
+    assertNotEquals(stateQkFoldedKey(4), stateQkFoldedKey(8));
+    for (const [sliding, gqa] of VARIANTS) {
+      assertNotEquals(stateQkFoldedKey(8), stateQkParallelKey(sliding, gqa));
+    }
+    assertEquals(`${stateQkFoldedKey(8)}:`.includes(":par:"), true, "census marker");
+  });
+
+  it("builds every head's terms from ①''s one-term expression and keeps ①''s write guards", () => {
+    // The term ①' sums, in the score function the folded kernel must match
+    const parallel = stateQkParallelWgsl(false, true);
+    assertEquals(
+      parallel.includes(
+        "acc = acc + (q[q_base + d] * params.scale) * (slot_k[k_base + d] * params.scale);",
+      ),
+      true,
+      "①' term",
+    );
+    for (const heads of [4, 8]) {
+      const wgsl = stateQkFoldedWgsl(heads);
+      assertEquals(stateQkFoldedWgsl(heads), wgsl, "determinism");
+      // One K load per d, the same half-scaled k as ①'
+      assertEquals(wgsl.includes("let kd = slot_k[k_base + d] * params.scale;"), true, "slot k");
+      assertEquals(wgsl.includes("let kd = ins_k[k_base + d] * params.scale;"), true, "ins k");
+      for (let f = 0; f < heads; f += 1) {
+        assertEquals(
+          wgsl.includes(`acc${f} = acc${f} + (q[q_base${f} + d] * params.scale) * kd;`),
+          true,
+          `F=${heads}: the term of head ${f}`,
+        );
+      }
+      assertEquals(wgsl.includes(`var acc${heads} =`), false, `F=${heads}: exactly F heads`);
+      // MUST: no fused multiply-add written by hand (it would change the rounding against ①')
+      assertEquals(wgsl.includes("fma("), false, `F=${heads}: no fma`);
+      // The same per-lane step and tree as ①'
+      assertEquals(wgsl.includes("d = d + 16u"), true, `F=${heads}: lane step`);
+      assertEquals(wgsl.includes("var stride = 8u;"), true, `F=${heads}: tree`);
+      // The plane of the group (the shared head → kv plane fragment on z = the group's first head)
+      // and ①''s write predicates (lane f writes head f)
+      assertEquals(wgsl.includes(`let z = wid.z * ${heads}u;`), true, "first head");
+      assertEquals(wgsl.includes("let kv_plane = z / params.kv_repeat;"), true, "kv plane");
+      assertEquals(wgsl.includes(`if (lane < ${heads}u && cl < live) {`), true, "writers");
+      assertEquals(wgsl.includes("bitcast<f32>(params.neg_inf)"), true, "-inf outside");
+      assertEquals(wgsl.includes(stateSlotRowWgsl(false)), true, "slot_row");
+      assertEquals(wgsl.includes("fn effective_rows(query: u32) -> u32 {"), true, "rows");
+      assertEquals(wgsl.includes("@workgroup_size(8, 16)"), true, "workgroup");
+      assertEquals(wgsl.includes(`array<f32, ${heads * 16 * 8}>`), true, "shared storage");
+    }
+    assertThrows(() => stateQkFoldedWgsl(1), CodegenError, "heads per workgroup");
+    assertThrows(() => stateQkFoldedWgsl(17), CodegenError, "heads per workgroup");
+  });
+
+  it("dispatches ⌈live / 8⌉ columns × valid rows × B·H / F workgroups", () => {
+    const geometry = { batchHeads: 16, rowsBlock: 4, rowOffset: 0, depth: 512, window: 0 };
+    // Column axis: the live columns in tiles of 8 (①' uses 16); z axis: one workgroup per F heads
+    assertEquals(stateQkFoldedWorkgroups(geometry, 8, 1000, 1, LIMIT, "t"), [126, 1, 2]);
+    assertEquals(stateQkParallelWorkgroups(geometry, 1000, 1, LIMIT, "t"), [63, 1, 16]);
+    assertEquals(stateQkFoldedWorkgroups(geometry, 4, 1000, 1, LIMIT, "t"), [126, 1, 4]);
+    assertEquals(stateQkFoldedWorkgroups(geometry, 8, 0, 1, LIMIT, "t"), [1, 1, 2]);
+    // Row axis: one workgroup per valid row; a block of pad rows only gets 0 (no dispatch)
+    assertEquals(stateQkFoldedWorkgroups(geometry, 8, 0, 4, LIMIT, "t")[1], 4);
+    const second = { ...geometry, rowOffset: 4 };
+    assertEquals(stateQkFoldedWorkgroups(second, 8, 0, 4, LIMIT, "t")[1], 0);
+    // MUST: B·H not a multiple of F fails loudly (a partial group would leave heads unwritten)
+    assertThrows(
+      () => stateQkFoldedWorkgroups({ ...geometry, batchHeads: 12 }, 8, 0, 1, LIMIT, "t"),
+      CodegenError,
+      "multiple",
+    );
+    // MUST: exceeding the limit fails loudly (tiled, as ①')
+    assertThrows(() => stateQkFoldedWorkgroups(geometry, 8, 4096, 1, 8, "t"), DispatchLimitError);
+  });
+});
+
+describe("the unrolled KV loop of ③' and the fused stats + PV (perf-ledger K-91)", () => {
+  it("keys ③' and the fused kernel as v2 while ③ and the readonly ③' stay v1", () => {
+    assertEquals(statePvParallelKey(false, false), "attention_state_pv:v2:f32:wg16x16:par");
+    assertEquals(
+      statePvParallelKey(true, true),
+      "attention_state_pv:v2:f32:wg16x16:par:sliding:gqa",
+    );
+    assertEquals(statePvKey(false, false), "attention_state_pv:v1:f32:wg16x4");
+    assertEquals(
+      statePvParallelReadonlyKey(false, false),
+      "attention_state_pv:v1:f32:wg16x16:par:ro",
+    );
+    assertEquals(stateStatsPvKey(false, false), "attention_state_stats_pv:v2:f32:wg16x16");
+  });
+
+  it("shares one scan, built from v1's one-term expression, between ③' and the fused kernel", () => {
+    const scan = statePvScanWgsl();
+    assertEquals(STATE_PV_UNROLL, 8);
+    for (const [sliding, gqa] of VARIANTS) {
+      assertEquals(statePvParallelWgsl(sliding, gqa).includes(scan), true, "③'");
+      assertEquals(stateStatsPvWgsl(sliding, gqa).includes(scan), true, "fused");
+      // The readonly ③' keeps its single-column loop (not part of this change)
+      assertEquals(statePvParallelReadonlyWgsl(sliding, gqa).includes(scan), false, "readonly");
+    }
+    // A batch of 8 columns of one lane (cl, cl + 16, …, cl + 112), then the single-column tail
+    assertEquals(scan.includes("while (cl + 112u < live) {"), true, "batch bound");
+    assertEquals(scan.includes("cl = cl + 128u;"), true, "batch step");
+    assertEquals(scan.includes("cl = cl + 16u;"), true, "tail step");
+    // MUST: one addition per column with v1's expression, in ascending column order
+    const terms = Array.from({ length: 8 }, (_, u) => {
+      const at = u === 0 ? "cl" : `cl + ${16 * u}u`;
+      return `acc = acc + (exp(s[s_base + ${at}] - amax) * inv) * v${u};`;
+    });
+    let from = 0;
+    for (const term of terms) {
+      const index = scan.indexOf(term, from);
+      assertNotEquals(index, -1, `term in order: ${term}`);
+      from = index + term.length;
+    }
+    assertEquals(scan.includes("fma("), false, "no fma");
+  });
 });
 
 const TILED_DISPATCH = { batchHeads: 6, rowsBlock: 40, rowOffset: 0, depth: 32, window: 0 };

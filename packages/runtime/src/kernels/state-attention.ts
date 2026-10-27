@@ -5,10 +5,11 @@
  * | ---- | ---------------------------------------- | ------------------------------------------------------- |
  * | ①    | `attention_state_qk:v1:f32:wg16x4`       | **materialises** `S` over logical cols in row-block windows |
  * | ①'   | `attention_state_qk:v1:f32:wg16x16:par`  | **D-parallel reduction** variant of ① (opt-in — below)  |
+ * | ①' fold | `attention_state_qk:v1:f32:wg8x16:par:fold<F>:gqa` | ①' with **F query heads per workgroup** (below) |
  * | ①ₜ   | `attention_state_qk:v1:f32:reg<geometry>` | **K row-tile sharing** variant of ① (default — below)   |
  * | ②    | `attention_state_stats:v2:f32:wg256`     | per-row `m = amax S` and `inv = 1/Σexp(S−m)`            |
  * | ③    | `attention_state_pv:v1:f32:wg16x4`       | `O = P @ V` (`P = exp(S−m)·inv` is **not materialised**) |
- * | ③'   | `attention_state_pv:v1:f32:wg16x16:par`  | **KV-parallel reduction** variant of ③ (opt-in — below) |
+ * | ③'   | `attention_state_pv:v2:f32:wg16x16:par`  | **KV-parallel reduction** variant of ③ (opt-in — below) |
  * | ③ₜ   | `attention_state_pv:v1:f32:reg<geometry>` | **V row-tile sharing** variant of ③ (default — below)   |
  *
  * A **separate family** from the existing fused attention (src/kernels/attention.ts + the GEMM
@@ -69,6 +70,29 @@
  * not return — they run an empty scan and contribute `0.0`). A WGSL barrier cannot sit outside
  * uniform control flow.
  *
+ * ### The unrolled KV loop of ③' and the fused stats + PV (`attention_state_pv:v2` — perf-ledger K-91)
+ *
+ * Each lane scans its columns `cl, cl + KV_LANES, …` in batches of {@link STATE_PV_UNROLL}: the V
+ * loads of a batch are issued before its multiply-adds, and a tail loop takes the last columns one at
+ * a time ({@link statePvScanWgsl}, shared by ③' and the fused kernel of state-attention-stats-pv.ts).
+ * In the v1 loop every step waited on its own V load before its dependent add. Measured 2026-10-27
+ * (RTX 3080 Ti / Dawn / Vulkan, M = 1 — docs/research/2026-10-27-k55-head-fold-spike.md): ③' on the
+ * Gemma 4 E2B full layer 31.7 → 16.4 µs at P = 1K, 103.4 → 42.0 at 4K, 386.0 → 153.6 at 16K; the
+ * fused kernel on the sliding layer 24.6 → 15.4 µs.
+ *
+ * MUST: **bit-identical to the v1 loop** (word for word, NaN and −inf included). Per output element
+ * the expression is v1's (`acc + (exp(s − amax)·inv)·v`), the additions stay one per column in
+ * ascending col per lane, and the tree, the pad-row zero and the write predicate are unchanged; only
+ * the order of the loads moves. Writing `fma()` or reassociating the product changes the rounding.
+ * NOTE: the identity rests on the backend compiling the same expression the same way (for example
+ * contracting `acc + a·b` into an FMA in both loops). WGSL does not guarantee it, so it is checked
+ * word for word on each backend against the v1 WGSL (tests/gpu_state_attention_fold_test.ts).
+ * WHY the query heads are not folded here as in ①' (below): measured, the fold adds ×0.96–1.07 over
+ * the unrolled one-head kernel on the full layers and is slower on the sliding ones. The PV chains
+ * are long (`live / KV_LANES` dependent adds) and fixed in number, so fewer threads with F chains
+ * each stay latency-bound, while the other heads' re-reads of V mostly hit L2 (speculation consistent
+ * with the numbers).
+ *
  * ## ①' D-parallel reduction variant (**the same option value as ③'**, `stateAttentionReduce: "parallel"` — perf-ledger K-14)
  *
  * `"parallel-fused"` selects ①' as the same option value (the fusion is on the ③ side only — ADR
@@ -105,6 +129,41 @@
  * the barrier is allowed, but columns with `cl ≥ live` and lanes with `d ≥ D` do not return and
  * **contribute 0 through an empty run** (the same reason as ③' — a WGSL barrier cannot sit outside
  * uniform control flow).
+ *
+ * ## ①' folded over the query heads of one kv plane (`…:par:fold<F>:gqa` — perf-ledger K-55)
+ *
+ * In ①' one workgroup serves one query head, so with GQA every head of a kv plane re-reads the same
+ * K rows: on a Gemma 4 E2B full layer (r = 8) that is 8 × 32.8 MB (P = 16,000) of K per layer, which
+ * does not fit the 6 MB L2 of the RTX 3080 Ti. The folded variant gives one workgroup the F query
+ * heads `z … z + F − 1` (`z = workgroup_id.z · F`, the group's first head) of one kv plane and
+ * {@link STATE_QK_FOLD_TILE_X} = 8 columns; each lane loads a K element once (`kd = k·scale`) and adds
+ * it into F accumulators, and the F trees fold in one shared array. Bindings, params, the S layout
+ * and the row axis are ①''s; the dispatch is `[⌈live / 8⌉, valid rows, B·H / F]`
+ * ({@link stateQkFoldedWorkgroups}).
+ *
+ * MUST: **bit-identical to ①'** (word for word, NaN and −inf included). Per S word the terms and
+ * their order are ①''s: lane `l` sums `acc + (q·scale)·kd` with `kd = k·scale` for `d = l, l +
+ * D_LANES, …` ascending (the term comes from the same fragment as ①''s {@link stateScoreFn}), then
+ * the same stride 8 → 4 → 2 → 1 tree per head; the writes are ①''s (−inf outside the predicate
+ * inside the live range, nothing for `cl ≥ live` or pad rows), with lane `f` writing head `f`'s word.
+ * That is why it rides on ①''s selection without an option of its own. Writing `fma()` or
+ * reassociating the product changes the rounding.
+ * NOTE: the identity rests on the backend compiling the same expression the same way (observed on
+ * Dawn / Vulkan / NVIDIA). WGSL does not guarantee it, so it is checked word for word on each backend
+ * against ①' (tests/gpu_state_attention_fold_test.ts).
+ * MUST: `F | r` ({@link assertStateQkFold}, checked by the host before the folded pipeline is
+ * selected). The kv plane of the whole group is the first head's ({@link kvPlaneWgsl}, the single
+ * source of the head → kv plane mapping); with `F ∤ r` the heads past a plane boundary would read
+ * another plane's K with neither an exception nor NaN.
+ * MUST: F is in the key (`:fold<F>`). `r` travels in the uniform and is deliberately not in the key
+ * ({@link stateVariantKeyPart}), but F changes the WGSL (accumulators, shared storage, the writers).
+ * SHOULD: the fold is selected only on **full-attention** plans of a **measured class (r, D, M)**
+ * ({@link stateQkFoldHeads}) — the measured range (ADR 0082 decision 4). Measured 2026-10-27 (RTX
+ * 3080 Ti / Dawn / Vulkan): at M = 1, E2B (r = 8, F = 8) ×1.81 / ×3.24 / ×6.12 and E4B (r = 4,
+ * F = 4) ×1.38 / ×1.90 / ×3.65 per dispatch at P = 1K / 4K / 16K; at verify M = 4 / 8 (P = 1,024 /
+ * 4,000 / 16,000) E2B ×3.42–7.28 and E4B ×2.42–4.04; MiniCPM5 (r = 8, D = 128) at M = 1 ×1.70 /
+ * ×2.67 / ×4.68. On the sliding layers (live ≤ 511 + M) the fold was neutral to slower (≤ ×1.07,
+ * F ≥ 4 slower), so they keep ①'. Plans outside the classes keep ①' without moving a word.
  *
  * ## ①ₜ K row-tile sharing variant (**the default path regardless of the option** — perf-ledger K-13)
  *
@@ -344,6 +403,101 @@ export const stateQkParallelKey = (sliding: boolean, gqa: boolean): string =>
 export const stateQkParallelEligible = (chunkRows: number): boolean => chunkRows <= 8;
 
 /**
+ * Columns per workgroup of the folded ①' (workgroup = `FOLD_TILE_X × D_LANES` = 128 threads). The
+ * spike measured 16 / 8 / 4 columns per workgroup; 8 was the best and 4 added nothing (2026-10-27).
+ */
+export const STATE_QK_FOLD_TILE_X = 8;
+
+/** One measured class of full-attention ①' plans: GQA repeat `r`, head dim `D` and chunk rows `M`. */
+type StateQkFoldClass = {
+  readonly kvRepeat: number;
+  readonly depth: number;
+  readonly chunkRows: number;
+};
+
+/**
+ * The classes on which the folded ①' is selected with `F = r`: the measured ones where the fold was
+ * not slower than ①' (median per dispatch) at any measured P (1,024 / 4,000 / 16,000 — 2026-10-27,
+ * docs/research/2026-10-27-k55-head-fold-spike.md). Gemma 4 E2B (r = 8) and E4B (r = 4) full layers
+ * (D = 512) at decode M = 1 and verify M = 4 / 8; the MiniCPM5 full layer (r = 8, D = 128) at M = 1.
+ */
+const STATE_QK_FOLD_CLASSES: readonly StateQkFoldClass[] = [
+  { kvRepeat: 8, depth: 512, chunkRows: 1 },
+  { kvRepeat: 8, depth: 512, chunkRows: 4 },
+  { kvRepeat: 8, depth: 512, chunkRows: 8 },
+  { kvRepeat: 4, depth: 512, chunkRows: 1 },
+  { kvRepeat: 4, depth: 512, chunkRows: 4 },
+  { kvRepeat: 4, depth: 512, chunkRows: 8 },
+  { kvRepeat: 8, depth: 128, chunkRows: 1 },
+];
+
+/**
+ * F (query heads per workgroup) of the folded ①' for a plan that takes ①', or `1` = no fold (the
+ * plain ①'). The section "①' folded over the query heads of one kv plane" at the top of the file.
+ * A pure function of plan-time values (the plan key MUST NOT depend on the run-time length).
+ *
+ * SHOULD: `F = r` only on full-attention plans whose `(r, D, M)` is one of the measured classes
+ * {@link STATE_QK_FOLD_CLASSES}; every other plan (other `r`, `D` or `M`, and the sliding layers,
+ * where the fold measured neutral to slower) keeps ①' — the same rule as ADR 0082 decision 4: do not
+ * widen the condition by extrapolation. The live length is not an input; the classes were measured at
+ * P = 1,024 / 4,000 / 16,000 only.
+ * NOTE: the fold is bit-identical to ①', so plans of one model may take different ones of the two (for
+ * example a MiniCPM5 decode plan folds and its M = 4 plan does not) without moving a word: the
+ * speculative verify-vs-decode u32 gate and the sha256 reference rows do not see the choice.
+ * NOTE: `F = r` (rather than the best F per length) loses at most 2 µs per dispatch at P = 1K in the
+ * measurements, while a per-step choice would need two pipelines for one plan.
+ */
+export const stateQkFoldHeads = (
+  sliding: boolean,
+  kvRepeat: number,
+  depth: number,
+  chunkRows: number,
+): number =>
+  !sliding &&
+  STATE_QK_FOLD_CLASSES.some(
+    (c) => c.kvRepeat === kvRepeat && c.depth === depth && c.chunkRows === chunkRows,
+  )
+    ? kvRepeat
+    : 1;
+
+/** Range check of F alone (generation and the workgroup count do not see `r`). */
+const assertFoldHeads = (heads: number, where: string): void => {
+  if (!Number.isInteger(heads) || heads < 2 || heads > STATE_QK_D_LANES) {
+    throw new CodegenError(
+      `${where}: the folded ①' needs 2 to ${STATE_QK_D_LANES} heads per workgroup (${heads})`,
+    );
+  }
+};
+
+/**
+ * The host-side check of the folded ①': F is an integer in `[2, D_LANES]` and divides `r`.
+ *
+ * MUST: called before the folded pipeline is selected. The kv plane of a workgroup is its first
+ * head's for all of its F heads, so with `F ∤ r` the heads past a plane boundary read another
+ * plane's K, and with `F > D_LANES` heads have no lane to write them — both silent, with neither an
+ * exception nor NaN.
+ */
+export const assertStateQkFold = (heads: number, kvRepeat: number, where: string): void => {
+  assertFoldHeads(heads, where);
+  if (!Number.isInteger(kvRepeat) || kvRepeat % heads !== 0) {
+    throw new CodegenError(
+      `${where}: the folded ①' needs F to divide kv_repeat (F = ${heads}, kv_repeat = ${kvRepeat})`,
+    );
+  }
+};
+
+/**
+ * Key of the folded ①' (`:par` stays the census marker; `:fold<F>` carries F — the WGSL differs per
+ * F, while `r` stays out of the key as for every states kernel). Only the full GQA variant exists,
+ * so the variant bits are always `:gqa`.
+ */
+export const stateQkFoldedKey = (heads: number): string =>
+  `attention_state_qk:v1:f32:wg${STATE_QK_FOLD_TILE_X}x${STATE_QK_D_LANES}:par:fold${heads}${stateVariantKeyPart(
+    false,
+    true,
+  )}`;
+
+/**
  * Key of ①ₜ (the tiled path of the GEMM skeleton — perf-ledger K-13). The geometry is spelled with
  * the same fragment as on the gemm side ({@link gemmGeometryTileKeyPart}), so the `M` bucket goes in
  * as is.
@@ -400,9 +554,15 @@ export const statePvKey = (sliding: boolean, gqa: boolean): string =>
  */
 export const STATE_PV_KV_LANES = 16;
 
-/** Key of ③' (`:par` is the marker for the census check — followed by the same variant bits as ③). */
+/**
+ * Key of ③' (`:par` is the marker for the census check — followed by the same variant bits as ③).
+ *
+ * v2: the KV loop is unrolled ({@link statePvScanWgsl} — bit-identical to v1, but the WGSL bytes
+ * changed, and one key MUST map to byte-identical WGSL). The readonly ③' and ③ keep v1 (their WGSL
+ * did not change).
+ */
 export const statePvParallelKey = (sliding: boolean, gqa: boolean): string =>
-  `attention_state_pv:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_PV_KV_LANES}:par${stateVariantKeyPart(
+  `attention_state_pv:v2:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_PV_KV_LANES}:par${stateVariantKeyPart(
     sliding,
     gqa,
   )}`;
@@ -588,6 +748,16 @@ export const stateEffectiveRowsWgsl = (uniform = STATE_UNIFORM, rows = "rows_blo
   return min(${uniform}.${rows}, query - ${uniform}.row_offset);
 }`;
 
+/** The k side of ①QK's one-term expression: the half-scaled k element `k·scale` at `k_base + d`. */
+const stateScaledKeyWgsl = (array: string): string => `${array}[k_base + d] * params.scale`;
+
+/**
+ * One term of ①QK's dot product added into `acc`: `acc + (q·scale)·k`, with `k` the half-scaled k
+ * element ({@link stateScaledKeyWgsl} — inline in ① / ①', bound once to `kd` in the folded ①').
+ */
+const stateScoreTermWgsl = (acc: string, qBase: string, scaledKey: string): string =>
+  `${acc} = ${acc} + (q[${qBase} + d] * params.scale) * ${scaledKey};`;
+
 /**
  * Dot product of ①QK (**the half-scale contract** — `scale` is applied to **both** the q side and
  * the k side before multiplying).
@@ -600,6 +770,9 @@ export const stateEffectiveRowsWgsl = (uniform = STATE_UNIFORM, rows = "rows_blo
  * single place too. Writing the product expression separately for ① and ①' would, when only one is
  * changed to fold the half scale, silently break the basis of the A/B tolerance ("the same products
  * summed in a different order"). Only the **start and step** of the scan change.
+ * MUST: the folded ①' builds its terms from the same two fragments ({@link stateScaledKeyWgsl} /
+ * {@link stateScoreTermWgsl}). Its bit identity with ①' rests on the term being the same expression;
+ * a copy would let one side's rounding move alone.
  */
 const stateScoreFn = (name: string, array: string, lanes?: number): string =>
   `fn ${name}(q_base: u32, k_base: u32${lanes === undefined ? "" : ", lane: u32"}) -> f32 {
@@ -607,7 +780,7 @@ const stateScoreFn = (name: string, array: string, lanes?: number): string =>
   for (var d = ${lanes === undefined ? "0u" : "lane"}; d < params.depth; d = d + ${
     lanes === undefined ? "1u" : `${lanes}u`
   }) {
-    acc = acc + (q[q_base + d] * params.scale) * (${array}[k_base + d] * params.scale);
+    ${stateScoreTermWgsl("acc", "q_base", `(${stateScaledKeyWgsl(array)})`)}
   }
   return acc;
 }`;
@@ -891,6 +1064,124 @@ fn main(
 `;
 
 /**
+ * The folded ①' (the section "①' folded over the query heads of one kv plane" at the top of the
+ * file). Bindings and params are **the same** as ①' (swappable — the caller switches only the key,
+ * the WGSL and the workgroup computation, {@link stateQkFoldedWorkgroups}). Only the full GQA variant
+ * is generated ({@link stateQkFoldHeads} never folds a sliding plan).
+ *
+ * 1 workgroup = 1 local row × `FOLD_TILE_X` columns `cl` × the F query heads of one kv plane. Lane
+ * `lane` of column `x` loads `kd = k·scale` for `d = lane, lane + D_LANES, …` once and adds it into
+ * the F accumulators, puts head `f`'s partial sum in `scratch[f][lane][x]`, the F fixed-order trees
+ * fold side by side, and **lane `f` writes head `f`'s word**.
+ *
+ * MUST: the write conditions are ①''s — with `cl < live`, `-inf` is written even outside the
+ * predicate, and for `cl ≥ live` and pad rows not a single word is written. `cl ≥ live` is not
+ * workgroup-uniform (the edge tile), so those lanes **do not return**; they run the dot product
+ * empty and take part in the barriers.
+ */
+export const stateQkFoldedWgsl = (heads: number): string => {
+  assertFoldHeads(heads, "attention_state_qk (folded)");
+  const tile = STATE_QK_FOLD_TILE_X;
+  const lanes = STATE_QK_D_LANES;
+  const eachHead = (line: (f: number) => string): string =>
+    Array.from({ length: heads }, (_, f) => line(f)).join("\n");
+  const scan = (
+    array: string,
+  ): string => `      for (var d = lane; d < params.depth; d = d + ${lanes}u) {
+        let kd = ${stateScaledKeyWgsl(array)};
+${eachHead((f) => `        ${stateScoreTermWgsl(`acc${f}`, `q_base${f}`, "kd")}`)}
+      }`;
+  return `// karume attention_state_qk (states-form S materialisation, f32, D-parallel reduction, ${heads} query heads per workgroup, GQA)
+${STATE_PARAMS_STRUCT}
+${STATE_LENGTHS_STRUCT}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> q: array<f32>;
+@group(0) @binding(2) var<storage, read> ins_k: array<f32>;
+@group(0) @binding(3) var<storage, read> slot_k: array<f32>;
+@group(0) @binding(4) var<storage, read_write> s: array<f32>;
+@group(0) @binding(5) var<uniform> lengths: Lengths;
+
+${stateSlotRowWgsl(false)}
+
+${stateLiveWgsl(false)}
+
+${stateWindowFn(false)}
+
+${stateEffectiveRowsWgsl()}
+
+// The partial sum of head f, lane l, column x lives at (f * D_LANES + l) * FOLD_TILE_X + x
+var<workgroup> scratch: array<f32, ${heads * lanes * tile}>;
+
+@compute @workgroup_size(${tile}, ${lanes})
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+  let local_row = wid.y;
+  // No one reads the S of pad rows (③ writes 0 and returns), so return without writing a word. The
+  // local row is workgroup-uniform, so returning before the barrier is allowed
+  if (local_row >= effective_rows(lengths.query)) {
+    return;
+  }
+  let past = lengths.past;
+  let live = live_columns(past, lengths.query);
+  let cl = wid.x * ${tile}u + lid.x;
+  let lane = lid.y;
+  // The heads z .. z + ${heads - 1} of this workgroup (z = the group's first head). ${heads} divides
+  // kv_repeat (checked by the host), so the kv plane of z is the kv plane of every one of them
+  let z = wid.z * ${heads}u;
+  let col = column_base(past) + cl;
+  let row = params.row_offset + local_row;
+${eachHead((f) => `  let q_base${f} = ((z + ${f}u) * params.chunk_rows + row) * params.depth;`)}
+  let kv_plane = ${kvPlaneWgsl(true)};
+  // Edge-tile columns (cl ≥ live) and columns outside the predicate do not run the dot product.
+  // **No return** — this branch is not workgroup-uniform, and the barrier below can sit only inside
+  // uniform control flow (contributes 0.0)
+  let inside = cl < live && in_window(col, past + row);
+${eachHead((f) => `  var acc${f} = 0.0;`)}
+  if (inside) {
+    // Each K element is loaded once and multiplied into the ${heads} heads. Per head the terms and
+    // their order are ①''s (d ascending from lane, step D_LANES — the same one-term expression)
+    if (col < past) {
+      // past (col < P) comes from the slot. The physical row is slot_row (same formula for reads
+      // and writes)
+      let k_base = (kv_plane * params.capacity + slot_row(col)) * params.depth;
+${scan("slot_k")}
+    } else {
+      // current (col ≥ P) comes from row col − P of this step's ins
+      let k_base = (kv_plane * params.chunk_rows + (col - past)) * params.depth;
+${scan("ins_k")}
+    }
+  }
+${eachHead((f) => `  scratch[(${f * lanes}u + lane) * ${tile}u + lid.x] = acc${f};`)}
+  workgroupBarrier();
+  // Fixed-order tree reduction per head (stride 8 → 4 → 2 → 1) — the same tree as ①'
+  var stride = ${lanes / 2}u;
+  while (stride > 0u) {
+    if (lane < stride) {
+${eachHead(
+  (f) => `      let mine${f} = (${f * lanes}u + lane) * ${tile}u + lid.x;
+      scratch[mine${f}] = scratch[mine${f}] + scratch[mine${f} + stride * ${tile}u];`,
+)}
+    }
+    workgroupBarrier();
+    stride = stride / 2u;
+  }
+  // -inf outside the predicate. The live range is **always written, even outside the predicate**
+  // (otherwise ② consumes the previous leftovers). Lane f writes head f's word, the root of head f's
+  // tree (its lane-0 slot)
+  if (lane < ${heads}u && cl < live) {
+    var value = bitcast<f32>(params.neg_inf);
+    if (inside) {
+      value = scratch[lane * ${lanes * tile}u + lid.x];
+    }
+    s[((z + lane) * params.rows_block + local_row) * params.col_cap + cl] = value;
+  }
+}
+`;
+};
+
+/**
  * The fragments swapped by the two entry points of ② row statistics (states form
  * {@link stateStatsWgsl} / readonly {@link stateStatsReadonlyWgsl}). Bindings, params, reduction
  * order and barrier positions do not differ by a single byte between the two; the only differences
@@ -1146,13 +1437,67 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 /**
+ * Columns per batch of the unrolled KV loop of ③' and the fused stats + PV (the section "The unrolled
+ * KV loop" at the top of the file). Chosen from {4, 8} on the Gemma 4 E2B full layer (2026-10-27,
+ * M = 1, the 16 × 16 workgroup): against v1, 8 gave ×1.94 / ×2.46 / ×2.51 and 4 gave ×1.82 / ×2.35 /
+ * ×2.48 at P = 1K / 4K / 16K (on E4B, 4 was 3% faster at 16K and slower at 1K / 4K).
+ */
+export const STATE_PV_UNROLL = 8;
+
+/**
+ * The per-lane KV scan of ③' and the fused stats + PV: the body of `if (in_depth) { … }`. It reads
+ * `lane`, `live`, `past`, `base_col`, `kv_plane`, `s_base`, `amax`, `inv` and `d` and accumulates
+ * into `acc`.
+ *
+ * Lane `lane` accumulates `cl = lane, lane + KV_LANES, …` in ascending order: a batch of
+ * {@link STATE_PV_UNROLL} columns loads its V values first and then adds its terms in column order,
+ * and a tail loop takes the remaining columns one at a time.
+ *
+ * MUST: the term is v1's one expression `acc + (exp(s − amax)·inv)·v`, with one addition per column
+ * in ascending col — the bit identity with the v1 loop rests on it (the section at the top of the
+ * file).
+ * MUST: one fragment for both kernels. A copy would let them drift apart; the fused kernel's u32
+ * equality with ③' (gpu_state_attention_parallel_test.ts) depends on the same scan.
+ */
+export const statePvScanWgsl = (): string => {
+  const lanes = STATE_PV_KV_LANES;
+  const unroll = STATE_PV_UNROLL;
+  const offset = (u: number): string => (u === 0 ? "" : ` + ${u * lanes}u`);
+  const load = (u: number): string => `      let col${u} = base_col + cl${offset(u)};
+      var v${u} = 0.0;
+      if (col${u} < past) {
+        v${u} = slot_v[(kv_plane * params.capacity + slot_row(col${u})) * params.depth + d];
+      } else {
+        v${u} = ins_v[(kv_plane * params.chunk_rows + (col${u} - past)) * params.depth + d];
+      }`;
+  const term = (u: number): string =>
+    `      acc = acc + (exp(s[s_base + cl${offset(u)}] - amax) * inv) * v${u};`;
+  const batch = Array.from({ length: unroll }, (_, u) => u);
+  return `    // Batches of ${unroll} columns of this lane: the V loads of a batch are issued before its
+    // multiply-adds (the single-column loop waited on one V load per dependent step). The additions
+    // stay one per column in ascending col, so the sum is the one the single-column loop builds
+    var cl = lane;
+    while (cl + ${(unroll - 1) * lanes}u < live) {
+${batch.map(load).join("\n")}
+${batch.map(term).join("\n")}
+      cl = cl + ${unroll * lanes}u;
+    }
+    // The last columns of this lane (fewer than ${unroll}), one at a time
+    while (cl < live) {
+${load(0)}
+${term(0)}
+      cl = cl + ${lanes}u;
+    }`;
+};
+
+/**
  * ③' KV-parallel reduction variant (the section "③' KV-parallel reduction variant" at the top of
  * the file). Bindings and params are **the same** as ③ (swappable — the caller switches only the
  * key and the workgroup computation).
  *
  * 1 workgroup = 1 local row × `TILE_X` values of `d`. Lane `lane` accumulates `cl = lane, lane +
- * KV_LANES, …` in ascending order, puts the result in `scratch[lane][x]`, and folds it with the
- * fixed-order tree.
+ * KV_LANES, …` in ascending order ({@link statePvScanWgsl}), puts the result in `scratch[lane][x]`,
+ * and folds it with the fixed-order tree.
  */
 export const statePvParallelWgsl = (sliding: boolean, gqa: boolean): string =>
   `// karume attention_state_pv (states-form O = P @ V, f32, KV-parallel reduction${
@@ -1209,17 +1554,7 @@ fn main(
   // scan and contributes 0 (it does not return, so that it takes part in the barrier)
   var acc = 0.0;
   if (in_depth) {
-    for (var cl = lane; cl < live; cl = cl + ${STATE_PV_KV_LANES}u) {
-      let col = base_col + cl;
-      let p = exp(s[s_base + cl] - amax) * inv;
-      var value = 0.0;
-      if (col < past) {
-        value = slot_v[(kv_plane * params.capacity + slot_row(col)) * params.depth + d];
-      } else {
-        value = ins_v[(kv_plane * params.chunk_rows + (col - past)) * params.depth + d];
-      }
-      acc = acc + p * value;
-    }
+${statePvScanWgsl()}
   }
   scratch[lane * ${STATE_ATTENTION_TILE_X}u + lid.x] = acc;
   workgroupBarrier();
@@ -1581,6 +1916,44 @@ export const stateQkParallelWorkgroups = (
     tiledWorkgroups(live, STATE_ATTENTION_TILE_X, limit, `${where} ①'QK`),
     tiledWorkgroups(rows, 1, limit, `${where} ①'QK`),
     tiledWorkgroups(geometry.batchHeads, 1, limit, `${where} ①'QK`),
+  ];
+};
+
+/**
+ * Workgroup count of the folded ①' `[⌈live / FOLD_TILE_X⌉, valid rows, B·H / F]`.
+ *
+ * The column and row axes are ①''s (the live column count and the valid row count — the workload
+ * acceptance condition); only the column tile is `FOLD_TILE_X` and one workgroup covers F heads.
+ * MUST: a `B·H` that is not a multiple of F fails loudly (a partial last group would leave the S of
+ * the remaining heads unwritten). `F | r`, which implies `F | B·H`, is the host's check
+ * ({@link assertStateQkFold}).
+ * MUST: exceeding the limit fails loudly (tiled, as ①').
+ * NOTE: the 8-column x tile halves the live length at which the column axis hits
+ * `maxComputeWorkgroupsPerDimension`: 524,280 columns at a limit of 65,535, against 1,048,560 for
+ * ①''s 16 columns. Past it the dispatch fails loudly (above); today's models stay far below it
+ * (Gemma 4 at 128K context needs 16,384 workgroups on this axis).
+ */
+export const stateQkFoldedWorkgroups = (
+  geometry: StateDispatchGeometry,
+  heads: number,
+  past: number,
+  query: number,
+  limit: number,
+  where: string,
+): [number, number, number] => {
+  const at = `${where} ①'QK(fold)`;
+  assertDispatchGeometry(at, geometry);
+  assertLengths(at, past, query);
+  assertFoldHeads(heads, at);
+  if (geometry.batchHeads % heads !== 0) {
+    throw new CodegenError(`${at}: B·H ${geometry.batchHeads} is not a multiple of F = ${heads}`);
+  }
+  const live = stateLiveColumns(geometry.window, past, query);
+  const rows = stateEffectiveRows(geometry.rowsBlock, geometry.rowOffset, query);
+  return [
+    tiledWorkgroups(live, STATE_QK_FOLD_TILE_X, limit, at),
+    tiledWorkgroups(rows, 1, limit, at),
+    tiledWorkgroups(geometry.batchHeads / heads, 1, limit, at),
   ];
 };
 

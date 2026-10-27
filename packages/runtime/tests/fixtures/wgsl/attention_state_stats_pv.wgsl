@@ -119,16 +119,88 @@ fn main(
   // scan and contributes 0 (it does not return, so that it takes part in the barrier)
   var acc = 0.0;
   if (in_depth) {
-    for (var cl = lane; cl < live; cl = cl + 16u) {
-      let col = base_col + cl;
-      let p = exp(s[s_base + cl] - amax) * inv;
-      var value = 0.0;
-      if (col < past) {
-        value = slot_v[(kv_plane * params.capacity + slot_row(col)) * params.depth + d];
+    // Batches of 8 columns of this lane: the V loads of a batch are issued before its
+    // multiply-adds (the single-column loop waited on one V load per dependent step). The additions
+    // stay one per column in ascending col, so the sum is the one the single-column loop builds
+    var cl = lane;
+    while (cl + 112u < live) {
+      let col0 = base_col + cl;
+      var v0 = 0.0;
+      if (col0 < past) {
+        v0 = slot_v[(kv_plane * params.capacity + slot_row(col0)) * params.depth + d];
       } else {
-        value = ins_v[(kv_plane * params.chunk_rows + (col - past)) * params.depth + d];
+        v0 = ins_v[(kv_plane * params.chunk_rows + (col0 - past)) * params.depth + d];
       }
-      acc = acc + p * value;
+      let col1 = base_col + cl + 16u;
+      var v1 = 0.0;
+      if (col1 < past) {
+        v1 = slot_v[(kv_plane * params.capacity + slot_row(col1)) * params.depth + d];
+      } else {
+        v1 = ins_v[(kv_plane * params.chunk_rows + (col1 - past)) * params.depth + d];
+      }
+      let col2 = base_col + cl + 32u;
+      var v2 = 0.0;
+      if (col2 < past) {
+        v2 = slot_v[(kv_plane * params.capacity + slot_row(col2)) * params.depth + d];
+      } else {
+        v2 = ins_v[(kv_plane * params.chunk_rows + (col2 - past)) * params.depth + d];
+      }
+      let col3 = base_col + cl + 48u;
+      var v3 = 0.0;
+      if (col3 < past) {
+        v3 = slot_v[(kv_plane * params.capacity + slot_row(col3)) * params.depth + d];
+      } else {
+        v3 = ins_v[(kv_plane * params.chunk_rows + (col3 - past)) * params.depth + d];
+      }
+      let col4 = base_col + cl + 64u;
+      var v4 = 0.0;
+      if (col4 < past) {
+        v4 = slot_v[(kv_plane * params.capacity + slot_row(col4)) * params.depth + d];
+      } else {
+        v4 = ins_v[(kv_plane * params.chunk_rows + (col4 - past)) * params.depth + d];
+      }
+      let col5 = base_col + cl + 80u;
+      var v5 = 0.0;
+      if (col5 < past) {
+        v5 = slot_v[(kv_plane * params.capacity + slot_row(col5)) * params.depth + d];
+      } else {
+        v5 = ins_v[(kv_plane * params.chunk_rows + (col5 - past)) * params.depth + d];
+      }
+      let col6 = base_col + cl + 96u;
+      var v6 = 0.0;
+      if (col6 < past) {
+        v6 = slot_v[(kv_plane * params.capacity + slot_row(col6)) * params.depth + d];
+      } else {
+        v6 = ins_v[(kv_plane * params.chunk_rows + (col6 - past)) * params.depth + d];
+      }
+      let col7 = base_col + cl + 112u;
+      var v7 = 0.0;
+      if (col7 < past) {
+        v7 = slot_v[(kv_plane * params.capacity + slot_row(col7)) * params.depth + d];
+      } else {
+        v7 = ins_v[(kv_plane * params.chunk_rows + (col7 - past)) * params.depth + d];
+      }
+      acc = acc + (exp(s[s_base + cl] - amax) * inv) * v0;
+      acc = acc + (exp(s[s_base + cl + 16u] - amax) * inv) * v1;
+      acc = acc + (exp(s[s_base + cl + 32u] - amax) * inv) * v2;
+      acc = acc + (exp(s[s_base + cl + 48u] - amax) * inv) * v3;
+      acc = acc + (exp(s[s_base + cl + 64u] - amax) * inv) * v4;
+      acc = acc + (exp(s[s_base + cl + 80u] - amax) * inv) * v5;
+      acc = acc + (exp(s[s_base + cl + 96u] - amax) * inv) * v6;
+      acc = acc + (exp(s[s_base + cl + 112u] - amax) * inv) * v7;
+      cl = cl + 128u;
+    }
+    // The last columns of this lane (fewer than 8), one at a time
+    while (cl < live) {
+      let col0 = base_col + cl;
+      var v0 = 0.0;
+      if (col0 < past) {
+        v0 = slot_v[(kv_plane * params.capacity + slot_row(col0)) * params.depth + d];
+      } else {
+        v0 = ins_v[(kv_plane * params.chunk_rows + (col0 - past)) * params.depth + d];
+      }
+      acc = acc + (exp(s[s_base + cl] - amax) * inv) * v0;
+      cl = cl + 16u;
     }
   }
   scratch[lane * 16u + lid.x] = acc;

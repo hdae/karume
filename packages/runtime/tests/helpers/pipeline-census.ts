@@ -39,6 +39,7 @@ import { scoreKeyPart } from "../../src/kernels/score-storage.ts";
 import {
   statePvParallelKey,
   statePvParallelReadonlyKey,
+  stateQkFoldedKey,
   stateQkParallelKey,
   stateQkParallelReadonlyKey,
 } from "../../src/kernels/state-attention.ts";
@@ -158,12 +159,18 @@ const ATTENTION_I8A8_FAMILIES: ReadonlySet<string> = new Set(
 // The online kernel's family (ADR 0132 — `attentionScoreStorage: "none"`). Its keys carry the i8a8
 // dtype too: the kernel is the a8 compute with S never stored.
 const ATTENTION_ONLINE_FAMILY = familyOf(attentionOnlineI8a8Key(true, 128, "sg32"));
-const STATE_PARALLEL_KEYS = stateVariants(
-  stateQkParallelKey,
-  statePvParallelKey,
-  stateQkParallelReadonlyKey,
-  statePvParallelReadonlyKey,
-);
+// The folded ①' (perf-ledger K-55) is ①' on the measured full GQA classes (F = r = 4 / 8) — the
+// same evidence of "parallel", outside the (sliding, gqa) grid because its key carries F.
+const STATE_PARALLEL_KEYS: ReadonlySet<string> = new Set([
+  ...stateVariants(
+    stateQkParallelKey,
+    statePvParallelKey,
+    stateQkParallelReadonlyKey,
+    statePvParallelReadonlyKey,
+  ),
+  stateQkFoldedKey(4),
+  stateQkFoldedKey(8),
+]);
 const STATE_STATS_PV_KEYS = stateVariants(stateStatsPvKey);
 const GEMV_PARALLEL_FAMILY = familyOf(GEMV_PARALLEL_SAMPLE);
 const GEMV_SUBGROUP = suffixOf(linearGemvSubgroupKey("i8", undefined, 4), GEMV_PARALLEL_SAMPLE);

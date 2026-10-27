@@ -422,6 +422,13 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
+/** Replaces each `[from, to]` once; an anchor missing from the WGSL fails the test (no silent no-op). */
+const replaceEach = (wgsl: string, ...pairs: readonly (readonly [string, string])[]): string =>
+  pairs.reduce((text, [from, to]) => {
+    assert(text.includes(from), `mutation anchor not found: ${from}`);
+    return text.replace(from, to);
+  }, wgsl);
+
 /** 故障注入 — 各変異が①の帯で落ちること（門が空振りでない証明）。 */
 test.skipIf(!GPU_AVAILABLE)(
   "states 形 ③' の故障注入（木縮約を潰す / レーン幅を変える）は参照との帯で落ちる（実 GPU）",
@@ -438,8 +445,16 @@ test.skipIf(!GPU_AVAILABLE)(
           (wgsl) => wgsl.replace("var stride = 8u;", "var stride = 0u;"),
         ],
         [
-          "レーンの走査幅を 32 にする（列の半分を落とす）",
-          (wgsl) => wgsl.replace("cl = cl + 16u", "cl = cl + 32u"),
+          "double the lane scan's batch and tail strides (drops half of the columns)",
+          // The scan is unrolled (attention_state_pv:v2 — perf-ledger K-91): a batch of 8 columns
+          // steps 128 and the tail steps 16, so doubling the lane's stride doubles both steps. Each
+          // anchor must exist, or the mutation would silently touch one loop only.
+          (wgsl) =>
+            replaceEach(
+              wgsl,
+              ["cl = cl + 128u;", "cl = cl + 256u;"],
+              ["cl = cl + 16u;", "cl = cl + 32u;"],
+            ),
         ],
       ];
       for (const [label, mutate] of mutations) {
