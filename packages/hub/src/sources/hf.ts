@@ -74,7 +74,7 @@ const warnImplicitMain = (repo: string, revisionSha: string): void => {
     `@karume/hub: resolved 'main' because no revision was given (repo ${repo} → ${revisionSha}).\n` +
       `main can be moved, so the same code may read different weights on the next start. Pin it in one of these ways:\n` +
       `  ① pass revision: "${revisionSha}" (copying this one line completes the pin)\n` +
-      `  ② use *_SOURCES of @karume/models (the table of published distribution repos — pins verified by the package)`,
+      `  ② use the SOURCES table of the family's @karume/models subpath (e.g. SOURCES["sbv2-jvnv"] from @karume/models/sbv2), or KARUME_SOURCES (the tables of published distribution repos — pins verified by the package)`,
   );
 };
 

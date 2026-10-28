@@ -162,7 +162,11 @@ describe("loadManifest: revision 未指定の main 解決だけを 1 回 warn �
     assert(warning.includes(SHA), `${warning} が解決した commit SHA を印字していない`);
     assert(warning.includes(REPO), `${warning} がどのリポの話か示していない`);
     assert(warning.includes(`revision: "${SHA}"`), `${warning} が pin の書き方を出していない`);
-    assert(warning.includes("_SOURCES"), `${warning} が models の対応表へ誘導していない`);
+    // The bare table name on a subpath (0.15 spelling), not a prefixed `<FAMILY>_SOURCES`.
+    assert(
+      /(?<![\w.])SOURCES\[/.test(warning) && warning.includes("@karume/models/"),
+      `${warning} が models の対応表へ誘導していない`,
+    );
   });
 
   it("'main' の明示指定では出さない（可変 ref でよいという意思表示）", async () => {
