@@ -14,9 +14,9 @@
  * torch's `randn`) and the `latents` themselves (how the parity checks inject upstream's noise).
  *
  * The preset (`./preset.ts`) is part of the state, not of the request, and has no default either
- * (no manifest owns one yet — ADR NNNN decision 13; the default is chosen after the maintainer's
- * visual check): it sets the knobs of the DiT pair and of its headroom estimates; `dit_text` and
- * the VAE run in f32 in every preset.
+ * (no manifest owns one yet — ADR NNNN decision 13; the family's default
+ * `f32+dit8-a8-attn8-online` is applied by the manifest when it comes): it sets the knobs of the
+ * DiT pair and of its headroom estimates; `dit_text` and the VAE run in f32 in every preset.
  *
  * ## Acceptance ({@link planMossGenerate} — every rejection a `ModelInputError`, before GPU work)
  *

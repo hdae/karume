@@ -3,7 +3,9 @@
 - Status: proposed (2026-10-27; the results of stages 2–5 recorded 2026-10-28). The design and
   decisions 8, 10 and 12 are ruled (see Rulings); the points settled during implementation were
   taken as the recommended option and reported to the maintainer, and are listed there apart from
-  the rulings. Open: the default preset, chosen after the maintainer's visual check (decision 13).
+  the rulings. The default preset is the practical preset `f32+dit8-a8-attn8-online` (the
+  maintainer's visual review passed — Rulings), carried by the manifest when it comes; there is no
+  default in code (decision 13).
 - Date: 2026-10-27
 - Scope: branch `wip/moss-image`, its own branch: MOSS-Image is not part of the 0.15 release (it
   has no text encoder yet), so the branch is not merged into `wip/0.15`. The number of this ADR is
@@ -402,7 +404,7 @@ forwards would never run the declared route at square sizes.
 | End to end (2 steps)       | upstream `pipe(...)` on CPU in f32 with the DiT's weights rounded to the series' i8 values (checked bit-identical to the containers) and upstream's f32 VAE (`moss.few_step_ref` — the Wan2.2 precedent) | m of the final latents and of the clamped image, per size (256², 384×256), the worst of three band cases × 5, held by two acceptance cases; faults (prompts swapped, guidance 3.3 and 3.003, shift 3, another seed, the first step at the next training-grid point) outside 2 × the band. Deviation from ADR 0118's addendum: the band cases and the acceptance cases are measured in one run; the rule leaves nothing to adjust |
 | Practical preset           | the reference preset, same machine, same weights                                                           | self A/B check (ADR 0110 decision 5) per branch and per graph: the step-1 outputs of `dit` and `dit_skip22` and the latent after step 1 of upstream's 50-step request; ceilings = measured relRMS × 2 per size and point; floor 0 and at least one bit different; census exactly the i8a8 linears (258 / 252), exactly the online dispatches (attention nodes × query-row windows), none of the three dispatches, `:kpad` exactly where S % 4 ≠ 0; `dit_text` bit-identical between the presets; two practical runs bit-identical; faults: no knob → floor, another seed → determinism and ceiling, `attentionScoreStorage` dropped → census, the linear or attention node count ± 1 → census |
 | Regression                 | —                                                                                                          | sha256 rows per environment key (ADR 0106) of the seed path's clamped f32 image, the row ID led by the preset's name: the default lane at 256² and 384×256 × 2 steps at guidance 3 for both presets, guidance 1 at 256² for the reference preset, and `dit_text` at T = 1; 1024² × 50 steps opt-in for both presets |
-| Quality                    | —                                                                                                          | the maintainer's visual review of `f32+dit8` against `f32+dit8-a8-attn8-online` (seeds 42–45 × 4 prompts, 1024², 50 steps) |
+| Quality                    | —                                                                                                          | the maintainer's visual review of `f32+dit8` against `f32+dit8-a8-attn8-online` side by side (seeds 42–45 × 4 prompts, 1024², 50 steps, guidance 3, shift 5): passed — the practical preset's quality acceptable (Rulings; [research](../research/2026-10-28-moss-image-dit-vae.md) §5.9) |
 
 - The two upstream tables of the host functions — the training-grid σ and the time sinusoid — are
   the asset `training_grid` of the `dit` container (role `training-grid`; safetensors with
@@ -479,8 +481,11 @@ storage and the DiT overrides it to i8 — the name `i8` alone would claim an i8
   preset `f32+dit8` the provisional default and the practical preset the default once the self A/B
   check and the visual review pass. This family holds no provisional default instead, because no
   manifest exists yet whose `defaultQuant` would own it (decision 12) — a default in code now would
-  be a second owner to retire. The self A/B check passes (Results); the visual review is pending.
-  The departure is an implementation decision and is open together with the default (Open points).
+  be a second owner to retire. The self A/B check passes (Results) and the visual review passed
+  (Rulings), so under ADR 0128 decision 1 the family's default is the practical preset
+  `f32+dit8-a8-attn8-online`; the manifest carries it as its `defaultQuant` when it comes with the
+  text encoder and publication. Until then no default is in code — the standing departure, an
+  implementation decision (Open points).
 - ADR 0128's C1–C3 are checked from a manifest, and there is none, so they cannot be checked yet.
   What holds in `preset.ts` already: C2's sibling relation (`f32+dit8` has the practical preset's
   weights and no activation quantization) and C1's premise (neither preset requires a feature —
@@ -500,7 +505,7 @@ storage and the DiT overrides it to i8 — the name `i8` alone would claim an i8
 | 2     | DiT stage in `packages/models/src/moss/`, lane `moss`, the asset `training_grid`                                                               | host functions Uint32-identical; r bands; `dit_text` at T = 1 on the GPU (MUST — decision 3); `planBacking.buildCount` one per Session per generation | done  |
 | 3     | op inventory; `Upsample2D` rewrite; `group_norm` op; three VAE graphs; host BatchNorm restoration and unpatchify                                 | census of `upsample2x`; kernel four-point check with offset inputs; GroupNorm values at a group near the cap; VAE band vs upstream; VAE-stage peak at the cap | done  |
 | 4     | sampler and end-to-end                                                                                                                          | σ columns bit-identical; host CFG + Euler bit-identical from recorded DiT outputs; 2-step parity bands; sha rows; 1024² × 50 steps completes (opt-in) | done  |
-| 5     | presets, a8, key valid length (decision 10), VRAM and speed on the 3080 Ti                                                                     | key-valid-length check against f64 and the TS mirror, pad-content atol 0, fault injection; self A/B check per branch and graph with the existing census check; timing before and after decision 10; VRAM at 1024², 2M pixels and the cap; visual review | done except the visual review |
+| 5     | presets, a8, key valid length (decision 10), VRAM and speed on the 3080 Ti                                                                     | key-valid-length check against f64 and the TS mirror, pad-content atol 0, fault injection; self A/B check per branch and graph with the existing census check; timing before and after decision 10; VRAM at 1024², 2M pixels and the cap; visual review | done  |
 | 6     | docs; when the branch is taken in: rebase, ADR number                                                                                           | `vp check`, the language gate, the family and core lanes; after the rebase the full verification                                              | docs done; the rebase and the ADR number when the branch is taken in |
 
 ## Results (stages 2–5, 2026-10-27 to 2026-10-28, RTX 3080 Ti 12 GiB, Node + Dawn)
@@ -615,7 +620,8 @@ unchanged, and the full verification after the rebase that takes the branch in.
 2. A new GroupNorm kernel over groups of up to about 17 million elements (held by its four-point
    check and the large-group case).
 3. a8 accuracy on this model is checked against the reference preset only (the self A/B check);
-   whether the difference is visible is the pending visual review.
+   the visual review found the practical preset's quality acceptable at 1024² × 50 steps for the
+   four prompts reviewed; other sizes and step counts were not reviewed.
 4. The requested-grid σ reproduces bit for bit with one rounding per linspace element — an
    implementation fact of the torch build the records were taken with, not a torch guarantee. A
    build without the contraction would still give upstream's snapped schedule for every count
@@ -637,6 +643,11 @@ The maintainer ruled on these, each with its recommended option:
   the cap now.
 - **Decision 12 — publication**: no public subpath and no HF publication before the text encoder;
   the family stays out of the models barrel and exports. Rejected: the Wan2.1 stage-1 form.
+- **Decision 13 — the default preset** (2026-10-28): the visual review of `f32+dit8` against
+  `f32+dit8-a8-attn8-online` (seeds 42–45 × 4 prompts, 1024², 50 steps, guidance 3, shift 5)
+  found the practical preset's quality acceptable, so under ADR 0128 decision 1 the family's
+  default is `f32+dit8-a8-attn8-online`. The manifest's `defaultQuant` applies it; no default is
+  in code until then (the departure below).
 
 Taken as the recommended option during implementation and reported to the maintainer (recorded in
 the decisions; not rulings):
@@ -657,14 +668,14 @@ the decisions; not rulings):
   (decision 11);
 - the tiny-shift refusal, a negative embedding refused at guidance 1, no step cap and no request
   defaults (decision 9);
-- no default preset in code (decision 13 — open with the default, below).
+- no default preset in code until a manifest exists (decision 13 — the standing departure, Open
+  points).
 
 ## Open points
 
-- **The default preset** (decision 13, ADR 0128 decision 1): after the maintainer's visual check of
-  `f32+dit8` against `f32+dit8-a8-attn8-online` (seeds 42–45 × 4 prompts, 1024², 50 steps). With
-  it, whether the family keeps no default in code until a manifest exists (decision 13's departure
-  from ADR 0128 decision 1).
+- **No default in code until a manifest exists** (decision 13's departure from ADR 0128 decision
+  1): the default `f32+dit8-a8-attn8-online` (Rulings) is applied by the manifest's `defaultQuant`
+  when it comes with the text encoder and publication; ADR 0128's C1–C3 are checked then.
 - When the branch is taken in (stage 6): the rebase onto `wip/0.15`, the number of this ADR and the
   full verification. The number replaces `NNNN` by a count-asserted script in every tracked file
   that `git grep -l 'ADR NNNN\|NNNN-moss'` finds (run from the repository root), in this file's

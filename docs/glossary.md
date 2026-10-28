@@ -294,7 +294,7 @@
 | Latent BatchNorm restoration (`latent_batch_norm`) | The step before the VAE: `z · std + mean` per DiT channel with the VAE's BatchNorm running statistics (`std = (running_var + eps).sqrt()` as upstream computes it, an asset of `vae_decoder_pre`). The unpatchify (128 → 32 channels at 2×) that follows is a separate host step | ADR NNNN decision 8 |
 | Untiled decoder (MOSS-Image VAE) | The FLUX.2 decoder over the whole image as three symbolic-length graphs `vae_decoder_pre` / `vae_decoder_attn` / `vae_decoder_post` handed over through resident tensors, so every GroupNorm sees the whole image (upstream's default decode) | ADR NNNN decision 8 |
 | Area cap (MOSS-Image) | The largest accepted image area: the untiled decoder's largest intermediate `[1,192,H,W]` f32 must fit one storage binding, so the cap is ⌊binding ÷ 49,152⌋ × 64 px — 2,796,160 px at a 2 GiB binding. Per device; whether the stages fit VRAM is the stages' headroom check, not this cap | ADR NNNN decision 8, [limitations](limitations.md) |
-| Reference preset / practical preset (MOSS-Image) | `f32+dit8` (the i8 DiT weights × f32 compute) is the reference partner of `f32+dit8-a8-attn8-online` (the same weights with a8 linears and the online attention on `dit` / `dit_skip22`). Neither is the default yet | ADR NNNN decision 13 |
+| Reference preset / practical preset (MOSS-Image) | `f32+dit8` (the i8 DiT weights × f32 compute) is the reference partner of `f32+dit8-a8-attn8-online` (the same weights with a8 linears and the online attention on `dit` / `dit_skip22`). The practical preset is the family's default, applied by the manifest (none in code) | ADR NNNN decision 13 |
 
 ## Image post-processing (ADR 0125)
 

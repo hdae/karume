@@ -13,8 +13,8 @@
  *   (upstream decodes in f32), so their Sessions take no preset knob.
  * - **No default.** Every entry takes the preset explicitly: no manifest exists yet whose
  *   `defaultQuant` would own it (ADR NNNN decision 12), so a default here would be a second owner to
- *   retire — a departure from ADR 0128 decision 1 (ADR NNNN decision 13). The default is chosen
- *   after the maintainer's visual check.
+ *   retire — a departure from ADR 0128 decision 1 (ADR NNNN decision 13). The family's default is
+ *   `f32+dit8-a8-attn8-online` (the visual review passed), applied by the manifest when it comes.
  * - The knobs reach the Sessions and the headroom estimates as one value ({@link MossPreset.dit}),
  *   so a stage's check sizes the Sessions it opens (`./dit-stage.ts` "Headroom"). The online kernel's
  *   route depends on the device (ADR 0132 decision 5), so its estimate also takes the device's

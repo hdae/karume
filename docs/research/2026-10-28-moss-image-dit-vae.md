@@ -401,6 +401,22 @@ The reference rows were first written in stage 4 as `i8-…` and renamed with va
 renaming run compared them equal). The images are the clamped f32 `[3, H, W]`; the `dit_text` row is
 its output `[1,1,3072]` at T = 1.
 
+### 5.9 Visual review (2026-10-28)
+
+The maintainer compared `f32+dit8` (reference) and `f32+dit8-a8-attn8-online` (practical) side by
+side at 1024², 50 steps, guidance 3, shift 5, seeds 42–45 × 4 prompts (`fridge-note`,
+`guide-whiteboard`, `extra-cat-window`, `extra-cafe-sign`) and judged the practical preset's quality
+acceptable for practical use — the Quality tier of ADR NNNN's Results passes. Observations:
+
+- every seed gives the same composition in both presets, and the text is drawn as prompted;
+- `guide-whiteboard` seed 44 carries an element not in the prompt in both presets: garbled text in
+  the reference, a sketch in the practical;
+- with seed 45 the practical preset numbers two list items `2.`;
+- the mean absolute pixel difference between the two images of a pair is 4.6–18.3 of 255.
+
+The images are under `outputs/misc/moss-image-visual-2026-10-27/` of the main checkout (not
+tracked).
+
 ## 6. Per-op profile of one practical forward at 1024² (2026-10-28)
 
 `f32+dit8-a8-attn8-online`, measured mode (`gpuTiming`), three runs per graph after the text stage,

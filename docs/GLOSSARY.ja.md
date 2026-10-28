@@ -310,7 +310,7 @@
 | latent BatchNorm restoration (`latent_batch_norm`) △ | BatchNorm の復元 | VAE の前に BatchNorm の running 統計で `z · std + mean` に戻す手順（とその資産）。その後の unpatchify（128 → 32 チャネル・2 倍）は別のホスト側の手順 | — | ADR NNNN 決定 8 |
 | untiled decoder (MOSS-Image VAE) △ | タイルなしの decoder | FLUX.2 の decoder を画像全体で回す形。記号長の 3 グラフに割り、resident tensor で受け渡す | — | ADR NNNN 決定 8 |
 | area cap (MOSS-Image) △ | 受理の面積の上限 | タイルなしの decoder の最大の中間テンソルが binding 1 本に収まる面積（2 GiB で 2,796,160 画素）。device ごとの値 | — | ADR NNNN 決定 8・limitations |
-| reference preset / practical preset (MOSS-Image) △ | 参照側のプリセット / 実用プリセット | `f32+dit8`（i8 の DiT の重み × f32 の計算）は `f32+dit8-a8-attn8-online`（同じ重みで `dit` / `dit_skip22` に a8 の linear と online の attention）の参照側のプリセット。どちらもまだ既定ではない | — | ADR NNNN 決定 13 |
+| reference preset / practical preset (MOSS-Image) △ | 参照側のプリセット / 実用プリセット | `f32+dit8`（i8 の DiT の重み × f32 の計算）は `f32+dit8-a8-attn8-online`（同じ重みで `dit` / `dit_skip22` に a8 の linear と online の attention）の参照側のプリセット。既定は実用プリセット（manifest が持つ・コードには既定なし） | — | ADR NNNN 決定 13 |
 
 ## 画像の後処理
 

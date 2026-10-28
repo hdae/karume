@@ -33,8 +33,9 @@ A refusal fails loudly with the stage, the bytes and the size:
    image), and its mid attention runs in row blocks of at most 256 MiB.
 
 The preset is part of the state and has **no default** — not even ADR 0128 decision 1's provisional
-one, since no manifest owns a default yet (ADR NNNN decision 13); the default is chosen after the
-maintainer's visual check:
+one, since no manifest owns a default yet (ADR NNNN decision 13); the family's default is
+`f32+dit8-a8-attn8-online` (the maintainer's visual review passed), applied by the manifest when
+it comes:
 
 | Preset                     | DiT (`dit`, `dit_skip22`)                                                                   | `dit_text`  | VAE |
 | -------------------------- | ------------------------------------------------------------------------------------------- | ----------- | --- |

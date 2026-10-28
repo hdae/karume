@@ -1695,7 +1695,8 @@ input-caused rejection is a `ModelInputError` before any GPU work.
 - **No defaults**: steps, guidance, shift, the initial noise (`seed` or `latents`) and the preset are all explicit.
   Upstream's defaults (1024², 50 steps, guidance 3, shift 5) wait for a manifest's `pipelineConfig`. **No default
   preset** either: `f32+dit8` or `f32+dit8-a8-attn8-online` is passed explicitly, since no manifest owns a default yet
-  (ADR NNNN decision 13 — a departure from ADR 0128 decision 1); it is chosen after the maintainer's visual check.
+  (ADR NNNN decision 13 — a departure from ADR 0128 decision 1); the family's default is `f32+dit8-a8-attn8-online`,
+  applied by the manifest when it comes.
 - **Accepted sizes**: positive multiples of 16, the longest side at most 65,536 px (the rope base tables' rows), and the
   area at most the cap of the untiled VAE: its largest intermediate `[1,192,H,W]` f32 must fit one storage binding, so
   the cap is ⌊binding ÷ 49,152⌋ × 64 px — **2,796,160 px** at the 2 GiB binding of the RTX 3080 Ti (1696×1648 and
