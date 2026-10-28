@@ -114,6 +114,21 @@ export const ALLOW_LIST: readonly Allowance[] = [
     why: "a test payload (a non-ASCII entry name for the UTF-8 flag)",
     maxLines: 1,
   },
+  {
+    path: "apps/playground/src/models/irodori/samples.ts",
+    why: "the Japanese TTS inputs of the Irodori page (default text and voice-design examples)",
+    maxLines: 8,
+  },
+  {
+    path: "apps/playground/src/models/sbv2/samples.ts",
+    why: "the Japanese TTS inputs of the SBV2 page (the regression sentence and demo sentences)",
+    maxLines: 3,
+  },
+  {
+    path: "apps/playground/src/models/gemma4/samples.ts",
+    why: "a Japanese sample chat message (checks multi-byte streaming detokenization by eye)",
+    maxLines: 1,
+  },
   { path: "tools/lang/scan-japanese.ts", why: "the JAPANESE character class", maxLines: 1 },
   { path: "tools/lang/py_skeleton.py", why: "the JAPANESE character class", maxLines: 1 },
   {

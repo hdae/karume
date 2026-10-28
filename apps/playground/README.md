@@ -9,21 +9,26 @@ A left sidebar switches between the pages, grouped by kind:
 | Group | Page | Route | State |
 | --- | --- | --- | --- |
 | Video | Wan2.2 TI2V 5B — the presets and the 32-latent VAE tile (`vaeTile: 32`, ADR 0134) on a real GPU | `/wan22` | done |
-| Image | Anima — the official models and the third-party fine-tunes | `/anima` | placeholder |
-| Vision | BiRefNet (HR / Lucida) | `/birefnet` | placeholder |
-| Vision | Depth Anything V2 | `/depth-anything` | placeholder |
-| Vision | SigLIP 2 | `/siglip2` | placeholder |
-| Audio | Irodori-TTS (v4 / v4.1 small) | `/irodori` | placeholder |
-| Audio | Style-Bert-VITS2 (JVNV) | `/sbv2` | placeholder |
-| Text | Gemma 4 chat (`gemma4` and the `gemma4-qat` distribution) | `/gemma4` | placeholder |
+| Image | Anima — the official models and the third-party fine-tunes | `/anima` | done |
+| Vision | BiRefNet (HR / Lucida) | `/birefnet` | done |
+| Vision | Depth Anything V2 | `/depth-anything` | done |
+| Vision | SigLIP 2 | `/siglip2` | done |
+| Audio | Irodori-TTS (v4 / v4.1 small) | `/irodori` | done |
+| Audio | Style-Bert-VITS2 (JVNV) | `/sbv2` | done |
+| Text | Gemma 4 chat (`gemma4` and the `gemma4-qat` distribution) | `/gemma4` | done |
 | Benchmarks | Attention route bench — the two a8 attention routes per kernel at Wan2.2's shapes | `/attention-bench` | done |
 
-A placeholder shows the page's title and whether its mounts are there.
+Every page reads its distributions from the mounts below, runs on a GPU the page acquires itself, and
+saves a JSON record of each run (the environment, the request, timings and Session diagnostics,
+plus the output's sha256 where there is one) for comparing runs across presets, sources and machines.
 
 The app is private (not published) and imports only the public surfaces of the workspace packages:
 `@karume/runtime` (and its `/tune` subpath), `@karume/hub` and the family subpaths of
-`@karume/models` (the barrel only for `encodePng` / `encodeWav`, loaded when a PNG or a WAV is
-made).
+`@karume/models` (the barrel only for `encodePng` / `encodeWav` / `decodeWav`, loaded when a PNG or
+a WAV is made or read, and for type-only imports). Besides the UI libraries, the one outside package
+a pipeline input comes from is `@hdae/yomi`, a dependency of the app: the caller-side Japanese
+analyser whose `Sbv2Utterance` the Style-Bert-VITS2 page hands to `Sbv2Pipeline` (the same analyser
+the SBV2 WAV regression test uses).
 
 ## Run
 
@@ -238,6 +243,679 @@ machine running Chrome:
   `frame_000.png` …, lossless RGB from the same RGBA bytes the sha256 covers)
 - **Copy record** → the clipboard (paste into an issue or a research note)
 
+## The Anima page
+
+Text → image with `AnimaPipeline` (`@karume/models/anima`), over both Anima distributions: the five
+official models of `karume-anima` (mount `anima`) and the two third-party fine-tunes of
+`karume-anima-extra` (mount `anima-extra`). The fine-tunes take their text encoder, VAE and
+tokenizers from the official repository. On the cached route the hub follows that cross-repo
+reference on `/hf/` (the alias revision above). On the direct route the page maps every repository
+the manifest references to the mount that holds it (`hdae/karume-anima` → `anima`), and fails loudly
+when that mount is missing.
+
+**When the GPU and the pipeline are set up.** The page acquires its GPU without optional features.
+While a preset that computes in f16 is chosen (`f16-c16`, the manifest's `gpuFeatures.shaderF16`),
+it acquires the GPU with `shaderF16: true` instead. A feature can be requested only when the device
+is created, and the runtime runs an f16 check at acquisition. A device that fails that check
+therefore only blocks `f16-c16`, never the other presets. Switching to or from `f16-c16` acquires
+the GPU again: the open pipeline (and a resident DiT) is disposed through `track` in the same
+commit, so the old device is destroyed only after that dispose. Run is disabled until the new GPU is
+ready. The pipeline is **opened on Run**, not when a select changes: on the cached route, opening
+stores the weights in the hub's cache (several GiB for `bf16`), so browsing the selects must not
+download them. The open pipeline stays for the next run while the GPU, source, model and preset stay
+the same. It is disposed when one of them changes, on **Release pipeline**, and when the page is
+left. One generation runs at a time.
+
+| Control | What it does |
+| --- | --- |
+| Model | Every model of both manifests ("Official · …" / "Fine-tune · …"), each mount's `defaultModel` marked "(default)". The official default (`anima-turbo-v1.1`) is preselected; without the official distribution, the fine-tunes' default. |
+| Preset | The model's `quants`, `defaultQuant` preselected and marked, the manifest's description as the hint: f16, the int8 presets, `f16-c16` (computes in f16: choosing it acquires the GPU with shader-f16, and a hint says so, or shows that the acquisition failed) and `bf16` (the upstream weights bit for bit, same size as f16). |
+| Source | **Cached** (default, the HF-compatible route through the hub's CacheStorage) or **Direct** (`localDirectory` over plain fetch, nothing cached). |
+| Prompt | Free text (Danbooru-style tags work best), with four sample prompts. |
+| Negative prompt | Empty = the manifest's default. Disabled and not sent when the guidance in use is 1: the pipeline never computes the uncond side there and refuses a negative prompt. |
+| Guidance | `guidanceScale`; empty = the manifest's default (1 for the Turbo models, 4 for the others). 1 = no CFG. |
+| Steps | 2–1000; empty = the manifest's default (8 for Turbo, 20–30 for the others). |
+| Resolution | `WxH` or one number for a square (`parseResolution`: each side a multiple of 16 from 512 to 2048), with quick choices; empty = the manifest's default (1024×1024). |
+| Sampler | Manifest default (`euler`) or `euler` / `dpmpp-2m` (`ANIMA_SAMPLER_TYPES`). Choosing one departs from the distributor's recommendation. |
+| Seed | Integer ≥ 0 (default 42); **Random** draws one. |
+| DiT residency | `residency` of the request. `per-stage` (default): every stage opens and closes its Session, and the peak is the largest stage. `transformer`: the DiT Session stays after the run, so the next run with the same open pipeline skips the DiT load. The text and VAE stages then stack on it (about +2.6 GiB at 1024² with the default preset), and the pipeline evicts it when a stage would not fit. A later `per-stage` run, **Release pipeline**, or changing the selection releases it. |
+| Live preview | On by default: after every denoise step, `approximatePreview` of the step's latent (a linear projection to RGB at 1/8 of the image, not the VAE decode), drawn scaled up and blocky. |
+| Run / Cancel | Run one generation (opening the pipeline first when needed). `generate` takes no signal: Cancel throws from the generation's `onEvent`, the API's way to stop it, so it takes effect at the next stage boundary, denoise step or VAE tile; a stage that is loading weights or encoding the prompt finishes first. While the pipeline opens, Cancel aborts `fromPretrained`. |
+| Release pipeline | In the status card: disposes the open pipeline (and a resident DiT). A failed dispose (for example on a lost device) is shown in full under the button. |
+
+The status card shows:
+- the GPU and cross-origin isolation;
+- whether shader-f16 is requested and enabled ("—" while the GPU is being acquired);
+- the open pipeline: model · preset · source, seconds to open, and "DiT resident" while a DiT kept
+  by `transformer` residency sits on the device;
+- the run: the stage (`Text encoder (Qwen3)`, `Text conditioner`, `Transformer (DiT)`, `VAE decoder`),
+  the step or VAE tile counter with the step's sigma, residency events, and MiB read while opening.
+
+Errors are shown in full. If the GPU changes while the pipeline is opening (a device loss during a
+long download), the new pipeline is released and the run fails with an error saying to press Run
+again.
+
+The result card shows the image (**Download PNG** — lossless, from the same RGBA bytes the sha256
+covers) and a summary of the record.
+
+### The record (`format: "karume-playground-anima/1"`)
+
+| Field | What |
+| --- | --- |
+| `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device` | `recordEnvironment(gpu)`; `device.features` lists `shader-f16` only for an f16 preset's run |
+| `distribution` | `mount` (`anima` / `anima-extra`), `directory`, `manifestSha256` (sha256 of the mount's `karume.json`) |
+| `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
+| `model` | `name`, `isDefault` (the mount's `defaultModel`) |
+| `preset` | `quant`, `label`, `isDefault` |
+| `request` | exactly the fields sent to `generate` (`prompt`, `seed`, `residency`, plus the fields the form set: `negativePrompt`, `guidanceScale`, `steps`, `resolution`, `sampler`) |
+| `effective` | the values the run used once the manifest's defaults filled the rest: `steps`, `guidanceScale`, `resolution` (`WxH`), `sampler`, `negativePrompt` (`null` when not used) |
+| `livePreview` | whether the preview was computed (it runs on the main thread between steps) |
+| `pipeline` | `reused` (an earlier run's pipeline ran this one) and `openSeconds` (`null` when reused) |
+| `residency.requested` / `residency.events` | the request's residency, and `{ action, reason }` of every `residency` event, in order (also the ones a cancelled run reports) |
+| `residency.residentAtStart` | the open pipeline held a DiT kept resident by an earlier run when this run started |
+| `residency.transformerBuildCarriedOver` | the DiT stage ran on that carried-over DiT (no eviction before the stage ended). Then `diagnostics.transformer.build` is the earlier run's build (a Session's build stats are fixed for its lifetime), not a cost of this run; the page's build total leaves it out |
+| `stageSeconds` | start → end of `text_encoder`, `text_conditioner`, `transformer`, `vae_decoder` (a stage's Session build and release fall inside it) |
+| `timeline.denoiseStepSeconds` / `timeline.vaeTileSeconds` | seconds of every step / tile; the first is measured from its stage start, so it holds the Session creation and the weight upload (unless the DiT was carried over) |
+| `generateSeconds` | `generate` alone |
+| `output` | `width`, `height`, `rgbaSha256` (sha256 of the RGBA bytes the pipeline returned; alpha is always 255) |
+| `diagnostics.<component>` | per component: runs, weight GiB, submits, dispatches, geometry profile and the Session build cost (`build`) of its latest report |
+
+**Download record (JSON)** saves `anima_<UTC timestamp>.json`, **Download PNG** saves `anima_<UTC timestamp>.png`,
+**Copy record** copies the JSON.
+
+### Caveats
+
+- The page has no GPU-timing switch, so records carry no per-kernel `timing`.
+- The page has no cache size or **Clear cache** controls. To compare a cold and a warm cached run,
+  clear the cache from the Wan2.2 page (`clearHubCache` clears everything for this origin).
+- When the pipeline re-runs a stage after evicting a resident DiT on an out-of-memory, it emits no
+  second `stage` start. That stage's seconds, and its first step (or tile) interval, therefore also
+  hold the failed attempt and the eviction.
+- If the f16 check fails at acquisition, `f16-c16` cannot run on that machine (the error is shown);
+  choosing any other preset acquires the GPU without the feature.
+
+## The BiRefNet page
+
+The page cuts the background out of one image with `BirefnetPipeline` (`@karume/models/birefnet`) on
+the page's GPU. The GPU is acquired with `acquireGpu({})`, since the family's presets declare no
+features, and with `gpuTiming: true` while **GPU timing** is on.
+
+The pipeline keeps one Session from construction to `dispose`. Construction reads the weights: about
+432 MiB for HR's `f16` and 843 MiB for Lucida's `f32`. So the **first Run builds it**, and later
+runs on the same selection reuse it. Changing the checkpoint, model, preset or source (or the GPU)
+releases it, and so does leaving the page. A build that finishes after the GPU changed is disposed,
+and the run fails saying so. One run at a time.
+
+Before any weight is read, every selection is **estimated** on the page's GPU from the graph
+descriptor alone (see "Estimate" below).
+
+| Control | What it does |
+| --- | --- |
+| Checkpoint | **HR** (mount `birefnet-hr`, photos) or **Lucida** (mount `lucida`, illustrations, transparent objects, logos). Each is its own distribution. A missing one is disabled and marked "(missing)". |
+| Model (input size) | The manifest's `models` (`model` of `fromPretrained`): `1024` (default) or `2048`. `segment` resizes the image to this square, and the matte comes back at the image's own size. |
+| Preset | The model's `quants` (`quant` of `fromPretrained`), with `defaultQuant` preselected and marked "(default)". HR has `f16` only. Lucida has `f32` (default) and `f16`. |
+| Source | **Cached** (default, the hub's cache over `/hf/`) or **Direct** (plain fetch from `/models/`), as on the Wan2.2 page. On Direct the load counter fills at once (nothing is downloaded into a cache), and the weights are read while the Session is built. |
+| Image | Any format the browser decodes. Alpha is dropped, so a fully transparent pixel reads as black. The page does not resize it; the pipeline does. |
+| Run / Cancel | Run builds the pipeline if needed, then segments. Run is enabled once the estimate has passed. Cancel works while the manifest loads and, on Cached, while the weights download into the cache. **The Session build is not cancellable**: it reads every weight block (from the cache, or from `/models/` on Direct) and uploads it, and takes no signal. The status shows it as "building the Session", with Cancel disabled and the reason under it. **The segmentation is not cancellable** either (`segment` takes no signal): Cancel stays disabled until it ends, with the reason under it; a Cancel during the hashing that follows still stops the run. |
+| Estimate again | Shown only when the estimate failed. It runs the estimate again (for example after a network error). |
+| GPU timing | Off by default, in the status card. When on, the GPU is acquired again with `gpuTiming: true` (which releases the pipeline), and the record keeps the matte Session's GPU time per kernel. Disabled while running and when the adapter has no `timestamp-query`. |
+
+The status card shows:
+
+- the GPU and cross-origin isolation
+- whether the pipeline is resident (for which selection, seconds to open, number of runs)
+- **Reads**: the bytes the selection reads (the manifest's parts for that model and preset, each
+  file once)
+- **Declared limits**: the preset's `requiredLimits` against the device
+- **Estimate**
+- the device's binding limits (`maxStorageBufferBindingSize` per binding, `maxBufferSize` per
+  buffer)
+
+**Estimate.** For every build (GPU, checkpoint, model, preset, source) the page runs these public
+calls, which fetch only part 0 of the matte container (the header and the graph and model
+descriptors, under 1 MiB):
+
+1. `loadManifest` on the chosen source
+2. `resolveSelection`
+3. `prefetchAssets` on part 0 of the matte container
+4. `openContainerSource` and `openContainer`
+5. `prepareContainer(opened, "matte").estimate({ maxStorageBufferBindingSize, maxBufferSize })` with
+   the GPU's limits
+
+The estimate plans the intermediate buffers with the same planner as the Session (ADR 0093 decision
+5).
+
+- If an intermediate exceeds the binding limit, or a region exceeds the buffer limit, the estimate
+  throws, naming every node. The page shows the error in full and keeps Run disabled.
+- Without this check, the Session plans its intermediates when it first runs, so the same failure
+  would come on the first segmentation, after the weights were read and uploaded.
+- The largest intermediate binding is 320 MiB at 1024² and 1,280 MiB at 2048² (docs/limitations.md,
+  "The BiRefNet family's distribution…").
+- When it passes, the row shows the peak the runtime accounts for (`peakAccountedBytes`, not an
+  upper bound), the resident weights and the largest run shape (its input and readback buffers plus
+  its intermediates).
+
+The **Declared limits** row compares the preset's `requiredLimits` with the device. A shortfall
+lists every short limit and also disables Run. Both current distributions declare none, so the row
+reads "the preset declares no device limits".
+
+The result card has three tabs:
+
+- **Cut-out**: the image with the matte as straight alpha, over a checkerboard. Display only, since
+  `encodePng` refuses translucent pixels.
+- **Matte**: opaque grayscale, white = foreground, with **Download PNG**.
+- **On white**: the cut-out composited on white, `round(c · a + 255 · (1 − a))` with `a = α / 255`,
+  opaque, with **Download PNG**.
+
+Beside the tabs it shows a summary of the record.
+
+### The record (`format: "karume-playground-birefnet/1"`)
+
+| Field | What |
+| --- | --- |
+| `format`, `page` | `karume-playground-birefnet/1`, `birefnet` |
+| `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device` | `recordEnvironment(gpu)`, as on every page (`device.gpuTimingEnabled` tells a timed run apart) |
+| `distribution` | `checkpoint` (`birefnet-hr` / `lucida`), `directory`, `manifestSha256` (sha256 of the mount's `karume.json`) |
+| `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
+| `model` | `name` (the input size) and `isDefault` |
+| `preset` | `quant`, `label` (the manifest's label, else the name), `isDefault` |
+| `request.image` | `name`, `width`, `height` and `rgbSha256`: sha256 of the decoded RGB bytes the pipeline received, so two records show whether they ran on the same input |
+| `pipeline` | `reused` (false = this run built it), `loadSeconds` (`fromPretrained`: manifest, weights from network or cache, Session build), `segmentRun` (1 = the pipeline's first segmentation, which also compiles the GPU pipelines and plans the intermediates; then 2, 3…) |
+| `timings` | `segmentSeconds` (`segment`: preprocess, the Session run, readback, sigmoid, resize to the input size) and `wallSeconds` (from Run to the matte; when `pipeline.reused` is false it also holds the release of a previous pipeline, if any, and the load) |
+| `output` | `width`, `height` and `matteSha256`: sha256 of the matte's raw bytes (one 8-bit alpha per pixel, row-major, at the input size) |
+| `diagnostics.matte` | the Session's report of this run: `runs`, `weightsAllocatedGiB`, `submitCount`, `dispatchCount`, `geometryProfile`, `build` (as on the Wan2.2 page), `lastRunPipelines`, and with GPU timing on `timing` (`totalMs`, `ops`, `keys`, `clampedNegativeSamples`). Absent when the run reported none. |
+
+### Where records land
+
+- **Download record (JSON)** → `birefnet_<UTC timestamp>.json`
+- **Download PNG** on the Matte tab → `birefnet_<checkpoint>-<model>-<preset>_<UTC timestamp>_matte.png`
+- **Download PNG** on the On white tab → `birefnet_<checkpoint>-<model>-<preset>_<UTC timestamp>_white.png`
+- **Copy record** → the clipboard
+
+### Caveats
+
+- Matte sha256 values match across machines only for the same input, checkpoint, model and preset.
+  Even then, f32 rounding can differ by GPU (the repository's sha reference rows are per environment
+  — ADR 0106). A mismatch between machines is a finding to look at, not a failure by itself.
+- `segmentRun: 1` includes compiling the GPU pipelines. Compare speed on `segmentRun ≥ 2`.
+- The estimate reads part 0 of the selection's container on every selection change, about 0.7 MiB.
+  On Cached it lands in the hub's cache, as `fromPretrained` would do anyway.
+- 2048² needs about 3.5 GiB on the device (Lucida `f32`; about 3.1 GiB for HR `f16`). It does not
+  run on the Intel Arc B570 (Linux xe driver job timeout — docs/limitations.md).
+
+## The Depth Anything V2 page
+
+Monocular relative depth with `DepthAnythingPipeline` (`@karume/models/depth-anything`). Pick an
+image, estimate its depth on the page's GPU, look at the map, save it as a PNG, and save a record of
+the run.
+
+The page acquires its GPU once. Untimed it calls `acquireGpu({})`: the family's presets declare no
+GPU features, so this is the device the pipeline would acquire itself. With **GPU timing** on it
+calls `acquireGpu({ gpuTiming: true })`.
+
+The pipeline is **built on the first Run**, not when the page opens. Construction fetches the
+weights and creates the one Session, which uploads them (about 99 MB for Small). Later runs reuse
+the open pipeline: one Session stays loaded on the GPU and serves many images, as the family
+intends. When the model, preset, source or GPU changes, the open pipeline is disposed at once, and
+the next Run builds the new one. The pipeline is owned by a small slot outside React state
+(`pipeline-slot.ts`). The slot also disposes a build that finishes after the settings changed or
+after the page was left. One run at a time.
+
+The image goes in at its own size. The pipeline resizes it to the model's input (518×518 for Small,
+bicubic, aspect not kept). It returns raw f32 relative depth at the input size: larger = nearer,
+with no unit and no origin. Every value is finite: `estimate` throws on a non-finite value instead
+of returning it.
+
+| Control | What it does |
+| --- | --- |
+| Model | The manifest's `models` (`model` of `fromPretrained`). `defaultModel` is preselected and marked "(default)". Choosing another model selects its `defaultQuant`. |
+| Preset | The model's `quants` (`quant` of `fromPretrained`). `defaultQuant` is preselected and marked "(default)". |
+| Source | **Cached** (default): the HF-compatible route (`/hf/`) through the hub's CacheStorage. **Direct**: `localDirectory` over plain `fetch` from `/models/`. |
+| Image | Any format the browser decodes; alpha is dropped. The preview shows the decoded pixels. |
+| Estimate depth | Builds the pipeline if needed, then runs `estimate` once. The hint next to it says why it is disabled. |
+| Cancel | Stops the manifest and weight fetch (the signal reaches only the hub's fetch layer). The Session build (weight upload) and `estimate()` take no signal, so Cancel is disabled during both, with the reason under it. |
+| GPU timing | In the Status card; off by default. When on, the GPU is acquired again with `gpuTiming: true`, which drops the open pipeline, and the record carries the GPU time per op and per key. Disabled while running. When the adapter has no `timestamp-query`, it is disabled with that reason. |
+| Coloring | **Inferno** (default): matplotlib's perceptually uniform map, dark = far, light yellow = near. **Grayscale**: black = far, white = near. It recolours the current result without running again. |
+| Download PNG | The map as shown (the current coloring) → `depth-anything_<UTC timestamp>_<coloring>.png`. |
+
+The map is min-max normalized. Relative depth has no fixed scale, so the shades of two images do not
+compare. A flat map draws as one colour.
+
+The Status card shows:
+
+- the GPU and cross-origin isolation;
+- the manifest;
+- the open pipeline: model · preset · source · build seconds, or "not built";
+- the model's input size.
+
+While running it also shows the stage:
+
+1. `loading the pipeline`: manifest and admission checks; Cancel stops it.
+2. `fetching the weights`: MiB read and the file path; Cancel stops it.
+3. `building the Session`: not cancellable. The page switches to this stage once the hub's progress
+   reports every file in.
+4. `estimating`: not cancellable.
+5. `hashing the output`.
+
+### The record (`format: "karume-playground-depth-anything/1"`)
+
+| Field | What |
+| --- | --- |
+| `format`, `page` | `karume-playground-depth-anything/1`, `depth-anything` |
+| `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device` | `recordEnvironment` (the device facts as on the Wan2.2 page) |
+| `distribution` | `directory` and `manifestSha256` (sha256 of the mount's `karume.json`) |
+| `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
+| `model`, `preset` | `{ name, isDefault }` and `{ quant, label, isDefault }` |
+| `request.image` | `name`, `width`, `height` and `rgbSha256`: the sha256 of the RGB8 bytes given to `estimate` (only the image's own bytes; the same file gives the same hash on every machine) |
+| `request.modelInput` | the square size the graph runs at (`pipelineConfig.imageWidth` / `imageHeight`), or `null` |
+| `timings.pipelineLoadSeconds` | building the pipeline (fetch, checks, Session creation, weight upload) when this run built it; `null` when the run reused one an earlier run built |
+| `timings.estimateSeconds` | the `estimate` call: host preprocessing, the one `depth` run, the resize back to the input size |
+| `timings.postprocessSeconds`, `timings.wallSeconds` | the output range and the two sha256; the whole run |
+| `output` | `width`, `height` (the input size), `min` / `max` of the raw depth, and `depthSha256`: the sha256 of the raw f32 depth (little-endian bytes, row-major). This is the value to compare across machines. |
+| `diagnostics.depth` | The Session diagnostics of this run (one report per estimate, so `runs` is 1). It holds the weight GiB and `submitCount` / `dispatchCount` **of this run**: the Session counts over its whole life, and the page subtracts the previous run's counts. It also holds the geometry profile, `build` (`buildStats`), `lastRunPipelines`, and, with GPU timing on, `timing` (per op and per key, as on the Wan2.2 page). |
+
+**Download record (JSON)** → `depth-anything_<UTC timestamp>.json`; **Copy record** copies the same
+JSON.
+
+### Caveats
+
+- `diagnostics.depth.build` is fixed when the Session is built. A run that reused the pipeline
+  therefore repeats the build of the run that built it; `pipelineLoadSeconds: null` tells them
+  apart.
+- The first run's submit / dispatch counts are counted from the Session's creation. Later runs count
+  from the previous run.
+- The first run's `estimateSeconds` includes creating the pipelines (shaders) on the device; compare
+  the second and later runs.
+- A timed run is slower (every dispatch is its own pass); compare timed records with timed records.
+- `depthSha256` covers the raw f32 values, not the PNG: the PNG depends on the coloring and the
+  min-max normalization.
+
+## The SigLIP 2 page
+
+The distribution holds only SigLIP 2's **vision tower**. `Siglip2Pipeline.embed` turns an image into
+its raw `pooler_output` vector, which is not L2-normalized; the base vector has a norm of about 13.
+There is no text tower, so there are no candidate labels and no zero-shot scores. The page embeds
+one or two images. With two, it also gives their **cosine similarity**. That is an image-to-image
+measure, not SigLIP's text-image score: that score needs the text tower's `logit_scale` /
+`logit_bias`.
+
+The page acquires the GPU once (`acquireGpu({ subgroups: "available" })`, plus `gpuTiming: true`
+while **GPU timing** is on). `fromPretrained` creates the vision Session and uploads the weights
+while it builds (base 372 MB, so400m 1.71 GB). So the page builds the pipeline on the **first Run**,
+not when the page opens. It keeps the pipeline for later runs with the same GPU, source, model and
+preset (`canReuse` in `request.ts`). A run with a different choice first disposes the old pipeline,
+then builds the new one, so at most one Session is open at a time. A new GPU (device loss, or
+switching GPU timing) and leaving the page dispose it too. A build that finishes after the GPU
+changed is disposed, and the run fails saying so. One run happens at a time.
+
+| Control | What it does |
+| --- | --- |
+| Model | The manifest's `models` (`model` of `fromPretrained`): `base` (224×224 input, 768-dim) and `so400m` (384×384, 1152-dim). The manifest's `defaultModel` is preselected and marked "(default)". The hint shows the input size and the embedding width the model's `pipelineConfig` declares. |
+| Preset | The chosen model's `quants`. Its `defaultQuant` is preselected and marked "(default)". A preset the newly chosen model lacks falls back to that model's default. |
+| Source | **Cached** (default): the HF-compatible route (`/hf/`) through the hub's CacheStorage. **Direct**: `localDirectory` over plain `fetch` from `/models/`. |
+| Image A | Required. Any format the browser decodes; alpha is dropped. Every image is stretched to the model's input size, with no crop or pad, so the aspect ratio is not kept (SigLIP 2's preprocessing does the same). |
+| Image B | Optional. With B, the run embeds both and compares them. **Remove image B** goes back to a single image and resets the file field, so the same file can be chosen again. |
+| Run / Cancel | Run builds the pipeline if needed, then embeds A (and B). Cancel stops the **fetch** at once (the signal goes to `fromPretrained`'s manifest and weight fetches). The **Session build** (reading the cached parts and uploading the weights) and **each embedding** take no signal: Cancel is disabled during the Session build and during the last embedding, with the reason under it. During Image A of two, a Cancel takes effect when that embedding ends: Image B is skipped, the run ends as cancelled with no result, and the pipeline is kept. |
+| GPU timing | Off by default; the switch sits in the status card. On: the GPU is acquired again with `gpuTiming: true`, so the next run rebuilds the pipeline, and every embedding records its GPU time per kernel. A timed run is slower; compare timed records only with timed records. Disabled while running and when the adapter has no `timestamp-query`. |
+
+The status card shows the held pipeline (model · preset · source, or "none (built on Run)") and the
+sha256 of `karume.json`. While running, it shows the stage:
+
+- "releasing the previous pipeline"
+- "fetching the weights": the file being read with its own MiB, then the load's total MiB
+  (`fileLoaded / fileTotal` · `loaded / total`)
+- "building the Session": once every file is fetched; not cancellable. No progress streams during
+  the upload.
+- "embedding Image A / B", with a counter; the last embedding is not cancellable
+- "hashing"
+
+The result card shows the cosine (with two images) and a table with one column per image: input
+(name and size), dimension, non-finite count, L2 norm, min, max, mean, the first 8 values, the
+sha256 of the embedding's f32 bytes and the sha256 of the input RGB8 pixels. Below the table come
+the buttons, then a summary: adapter, source, model, preset, build seconds, embed seconds per image,
+wall seconds, the vision Session's runs, weights, this run's submits and dispatches (with the
+Session's totals), geometry profile, build cost, and GPU time per op when timed.
+
+### The record (`format: "karume-playground-siglip2/1"`)
+
+| Field | What |
+| --- | --- |
+| `format`, `page` | `karume-playground-siglip2/1`, `siglip2` |
+| `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device` | `recordEnvironment(gpu)`, as on the other pages |
+| `distribution` | `directory` and `manifestSha256` (the sha256 of `karume.json`) |
+| `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
+| `model` | `name`, `isDefault`, and the `imageWidth` / `imageHeight` / `hiddenDim` its `pipelineConfig` declares |
+| `preset` | `quant`, `label`, `isDefault` |
+| `request.images` | per image in order (A, then B): `slot`, `name`, `width`, `height`, `rgbSha256` (the sha256 of the RGB8 pixels the pipeline was given) |
+| `timings.pipelineReused` | true when an earlier run's pipeline (and Session) was used as is |
+| `timings.buildSeconds` | `fromPretrained`: manifest, weight download or cache read, Session build and weight upload; `null` when reused |
+| `timings.embedSeconds` | one per image: preprocessing, one vision run and the readback (the first embedding of a fresh pipeline also creates the kernels) |
+| `timings.wallSeconds` | from Run to the last embedding (hashing excluded) |
+| `output.embeddings` | per image: `slot`, `dimension`, `nonFinite`, `first` (8 values at 6 decimals; a non-finite value is the string `"NaN"`, `"Infinity"` or `"-Infinity"`, since JSON has no such numbers), `summary` (`l2Norm`, `min`, `max`, `mean`; absent when there are non-finite values) and `sha256` of the raw f32 bytes (little-endian) |
+| `output.comparison` | two images only: `{ "cosineSimilarity" }` (6 decimals, accumulated in f64), or `{ "cosineSimilarity": null, "reason" }` when it cannot be taken (non-finite values, a zero vector) |
+| `diagnostics.vision` | the vision Session over this run's embeddings, one report per `embed`: `runs`, `weightsAllocatedGiB`, `submitCount` / `dispatchCount` (**this run's** share: the latest report minus the Session's counters when the run started, so fresh and reused runs compare), `sessionSubmitCount` / `sessionDispatchCount` (the Session's totals since it was built), `geometryProfile`, `build` (`buildStats`; from the run that built the Session when `pipelineReused`), `lastRunPipelines`, and `timing` with GPU timing on (as on the Wan2.2 page) |
+
+**Download record (JSON)** saves `siglip2_<UTC timestamp>.json`. **Download Image A / B embedding
+(raw f32)** saves `siglip2_<UTC timestamp>_<a|b>.f32`: the same bytes the sha256 covers, for a
+value-level diff when two machines' hashes differ. **Copy record** copies the JSON.
+
+### Caveats
+
+- The vector is `pooler_output` itself. Normalize it yourself for cosine search; keep it raw as
+  linear-probe input.
+- The embedding sha256 compares runs exactly. Two GPUs, drivers or browsers can differ in the last
+  bits while the cosine and the norm agree to many digits. When the hashes differ, compare the
+  downloaded `.f32` files.
+- A canvas keeps pixels premultiplied, so a fully transparent pixel reaches the pipeline as black.
+  `rgbSha256` names exactly what was embedded.
+- The per-run counts assume that the runtime's submit and dispatch counters start at 0 when the
+  Session is built and only grow. That is implementation behavior, not a documented guarantee. If
+  the counters ever go down, the page fails the record loudly instead of writing a negative count.
+- The "building the Session" stage is inferred from the hub's progress: `loaded` reaches `total`
+  once every file of the load is fetched. The upload itself streams no progress.
+
+## The Irodori-TTS page
+
+The page speaks Japanese text with `IrodoriPipeline` on the page's GPU. It reads one of two
+distributions: v4.1-small (default; upstream retrained only the duration predictor) or v4-small. It
+acquires the GPU once (`acquireGpu({})`, plus `gpuTiming: true` while **GPU timing** is on). The
+first **Run** builds the pipeline. Later runs reuse it until the model, preset, linear compute,
+source or GPU changes. A new GPU (switching GPU timing, a device loss) and leaving the page dispose
+it at once; a build that finishes after the GPU changed is disposed, and the run fails saying so. The status card's **Pipeline** row compares the open pipeline with the current choices
+on every render: "the next Run reuses it", or "the next Run rebuilds it (… changed)". Building opens
+no Session: every stage opens and closes its own Session during a generation, so the held pipeline
+keeps no weights on the GPU. One synthesis runs at a time.
+
+| Control | What it does |
+| --- | --- |
+| Model | The mount: `irodori-v4.1` (v4.1-small, default) or `irodori-v4` (v4-small). The hint names its directory, with "(missing)" when it is absent. A switch keeps the chosen preset when the other manifest has it (both declare the same five), and keeps the decoded reference audio while the new manifest loads. |
+| Preset | The manifest's `quants`; `defaultQuant` is preselected and marked "(default)". |
+| Source | **Cached** (default): `/hf/` through the hub's CacheStorage. **Direct**: `localDirectory` over plain fetch from `/models/`. |
+| Linear compute | `linearCompute` of `fromPretrained`, applied to the DiT and its context projection only. Choices: the preset's declaration (default), `f32`, or `a8`. The hint names the preset's DiT weights label, its declaration and the value the DiT is asked for. `a8` runs only on int8 / int4 weights: with weights labelled `f32` / `f16` the page shows a note, because the runtime sends float weights to the f32 path without an error. `f16` is not offered: it needs a device with `shaderF16: true`. |
+| Text | The Japanese text, sent as typed (the pipeline normalizes it). It starts with the first voice-design example's text (`src/models/irodori/samples.ts`). Only the first `maxTextLen − 1` tokens after normalization are read (255 on the small distributions). The pipeline cuts the rest without an error (upstream behaviour). |
+| Voice | Two exclusive tabs; only the active tab is sent. **Voice design**: a Japanese caption (`caption`) plus four example buttons, each filling the caption and a text that suits it. An empty caption means no voice design. The caption is cut at `maxCaptionLen − 1` tokens the same way. **Voice clone**: a reference audio file (`speaker.audio`), decoded to the distribution's `sampleRate` (below). The panel stays mounted, so the file input keeps its file across tab switches. The hint gives the minimum length and the first N seconds the model reads, both from `pipelineConfig`. |
+| Seed | `seed` (default 0). |
+| Duration (s) | `durationSeconds`. Empty = the duration predictor decides. A number skips the predictor, and the pipeline clamps it to the distribution's `minSeconds`–`maxSeconds`. |
+| Codec tile (latent frames) | `codecTileFrames`. Empty = the pipeline's default. It only trades memory; the waveform does not change. |
+| Steps | Read-only: `pipelineConfig.steps` (40). The API has no step knob. |
+| Stage events | On (default): subscribes to `onEvent`. This gives per-stage seconds, the step counter, and **Cancel** at the next stage or step. The DiT loop then runs on the host path (one readback per step); the waveform is bit-identical. Off: no `onEvent`, so there are no stage seconds, and once synthesis starts the run cannot be cancelled. The status card's Cancel is then disabled, with the reason under it. The DiT loop is resident (one GPU batch, the fastest path) unless GPU timing is on, which forces the host loop. |
+| Run / Cancel | Run one synthesis. Cancel stops a pipeline build at once, and a synthesis at its next stage or step (only with stage events on). A Cancel pressed while the finished run's record is being assembled still ends the run as cancelled. |
+| GPU timing | As on the Wan2.2 page: times every kernel of every stage. A timed run uses the host DiT loop and is slower. Switching acquires the GPU again, so the next run rebuilds the pipeline. Disabled while running and when the adapter has no `timestamp-query`. |
+
+**The reference audio.** The pipeline has no resampler, so the page decodes the file to the
+distribution's `sampleRate` (48 kHz):
+
+- A PCM-16 or float-32 WAV already at that rate goes through `decodeWav` of the models barrel
+  (loaded on the first file). The samples are the file's own, so they compare across machines and
+  browsers.
+- Any other file (another rate, another format) is decoded by the browser's `decodeAudioData` on an
+  `AudioContext` at that rate, which resamples it. The channels are averaged with `decodeWav`'s
+  arithmetic.
+
+The page shows the decoder (and why the browser was used), the length, the sha256 of the samples,
+and a player with Download WAV for the decoded audio.
+
+The result card plays the audio (AudioClip: player and **Download WAV**). It also shows a summary of
+the record:
+
+- adapter, source, model, preset, and linear compute (choice → resolved value)
+- the DiT's linear dispatches (i8a8 / other), with a note when `a8` was asked for but no linear ran
+  int8
+- voice, and seed / duration / steps
+- the DiT loop, and whether the pipeline was built (and how long it took) or reused
+- length, samples, latent frames S and forwards
+- generate and wall seconds, and the real-time factor
+- per-stage seconds, the first denoise step, and the min / median / max of the rest
+- the f32 sha256
+- per component: the runs, weight GiB and build cost; with GPU timing on, also the five most
+  expensive ops
+
+### The record (`format: "karume-playground-irodori/1"`)
+
+| Field | What |
+| --- | --- |
+| `format`, `page` | `karume-playground-irodori/1`, `irodori` |
+| `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device` | `recordEnvironment(gpu)` |
+| `distribution` | `mount`, `directory`, `manifestSha256` (sha256 of the mount's `karume.json`) |
+| `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
+| `model`, `preset`, `linearCompute` | the manifest model (`v4.1-small` / `v4-small`); `{ quant, label, isDefault }`; the page's choice `preset` / `f32` / `a8` |
+| `linearComputeResolved` | what the DiT Sessions were asked for: the choice, else the preset's `session.linearCompute`, else `f32` |
+| `ditLinearDispatches` | `{ i8a8, other }`: planned dispatches of linear kernels in the `dit` component's last run, counted from its pipeline keys (a runtime diagnostic label, outside semver). `null` when no `dit` diagnostics came. `a8` with `i8a8: 0` = float weights on the f32 path. |
+| `request` | `text` (as typed, before truncation); `voice` = `{ kind: "caption", caption }` (`""` = no voice design) or `{ kind: "reference", file, decoder, sampleRate, samples, seconds, f32Sha256 }`; `seed`; `durationSeconds` (a number or `"predicted"`); `codecTileFrames` (a number or `"default"`); `steps` (from `pipelineConfig`) |
+| `ditLoop`, `stageEvents` | `host` (stage events or GPU timing on) or `resident`; whether `onEvent` was subscribed |
+| `pipeline` | `{ built: true, loadSeconds }` when this run built it, `{ built: false }` when it reused the open one |
+| `stageSeconds` | seconds per stage (`backbone`, `text-proj`, `caption-proj`, `codec-encoder`, `speaker`, `duration`, `dit-context`, `dit`, `codec-decoder`), from each stage's start event (before its Session) to its end event (after release). Empty with stage events off. |
+| `timeline.denoiseStepSeconds` | seconds of every DiT step. The first is measured from the `dit` stage start, so it also holds the Session creation and the weight upload. |
+| `generateSeconds`, `wallSeconds` | the `generate` call alone; from Run to the end of `generate` (the pipeline build included when this run built it) |
+| `output` | `sampleRate`, `samples`, `seconds`, `latentFrames` (S), `forwards`, `seed`, `realTimeFactor` (`generateSeconds / seconds`; below 1 = faster than real time), `f32Sha256` (sha256 of the output samples as little-endian f32 bytes) |
+| `diagnostics.<component>` | as on the Wan2.2 page: runs, weight GiB, submit / dispatch counts, geometry profile, `build`, `lastRunPipelines`, and `timing` with GPU timing on |
+
+### Caveats
+
+- Seconds from runs with stage events on, off, or with GPU timing on are not comparable with each
+  other (host vs resident DiT loop). Compare records with the same `ditLoop` and
+  `device.gpuTimingEnabled`. The waveform, and so `output.f32Sha256`, is the same on both loops.
+- A reference that went through the browser decoder depends on the browser's resampler. Compare
+  `request.voice.f32Sha256` before comparing outputs across machines.
+- Text past `maxTextLen − 1` tokens (and a caption past `maxCaptionLen − 1`) is cut without warning.
+  A record of a long input keeps the full text, so its `request.text` can say more than the audio
+  does.
+- The page reads only these `pipelineConfig` numbers: `sampleRate`, `maxTextLen`, `maxCaptionLen`,
+  `hopLength`, `speakerPatchSize`, `speakerRows`, `codecHaloFrames`, `minSeconds`, `maxSeconds` and
+  `steps`. They are used for decoding and hints. The pipeline still checks every request (seed
+  range, codec tile, reference rate and length) and throws a `ModelInputError`, shown in full.
+
+**Download record (JSON)** saves `irodori_<UTC timestamp>.json`. **Download WAV** saves
+`irodori_<UTC timestamp>.wav`: 16-bit PCM from `encodeWav`, so its bytes are not the f32 samples the
+sha256 covers. **Copy record** copies the JSON.
+
+## The Style-Bert-VITS2 page
+
+The page acquires the GPU once (`acquireGpu({ subgroups: "available" })`, plus `gpuTiming: true`
+while **GPU timing** is on). It builds `Sbv2Pipeline.fromPretrained` for the chosen source, model
+and preset. Building reads the manifest, the three graphs' descriptors and the small assets. With
+the **Cached** source it also downloads every weight part of the model / preset into Cache Storage,
+so the first build of a model / preset fetches all of its weights and later builds find them there.
+The **Direct** source has no such step. Building creates no Session. Every **Run** creates the three
+graphs' Sessions one after another (`text_encoder` → `front` → `voice`), reads their weights from
+the source (the cache the build filled, or plain fetch), and destroys them again. One synthesis runs
+at a time.
+
+Text analysis is the caller's job: since 0.6.0, `generate` takes an analysed `Sbv2Utterance`, so the
+page does the analysis itself. `@hdae/yomi` (`analyzeWithWords`) turns the text into accent phrases
+and the word alignment, and `toSbv2Utterance` lowers them to the utterance. This is the same
+analyser the SBV2 WAV regression test uses. The analyser is a caller-side dependency of this page,
+not a workspace package. The analyser's dictionary (JTD1, about 6.4 MB gzip) is **not in a
+distribution**. It is fetched from the analyser's Hugging Face dataset at the revision its version
+pins, on first use only, and kept in this origin's Cache Storage (`yomi-dict`). The page starts
+loading it when it opens.
+
+Every list comes from the distribution:
+- The speakers are the manifest's models (a jvnv model holds one speaker).
+- The styles and the starting values come from the model's `pipelineConfig` (`styles`, `speakers`,
+  `defaults`).
+- The input limits come from `maxTokens` and `maxFrames`.
+
+| Control | What it does |
+| --- | --- |
+| Speaker | The manifest's models with the speakers each holds (`F1 — jvnv-F1-jp` …). `defaultModel` is preselected and marked "(default)". Changing it rebuilds the pipeline and switches to that model's speaker; the style stays when the model has it. A **Speaker name** select appears only for a model with more than one speaker. |
+| Preset | The model's `quants`. `defaultQuant` is preselected and marked. Changing it rebuilds the pipeline. |
+| Source | **Cached** (default: `/hf/` through the hub's CacheStorage; the build downloads the weights) or **Direct** (`/models/sbv2/` over plain fetch, read again on every run). Changing it rebuilds the pipeline. |
+| Sample text | Fills the text with the regression-test sentence (default), an expressive one or a longer narration (`samples.ts`). |
+| Text (Japanese) | The text to synthesize. The hint gives its length and both limits of one synthesis: `maxTokens` (tokens and phonemes) and `maxFrames` (total predicted frames, which grow with the length scale). The pipeline rejects a request over either limit. |
+| Reading | Live: the moras the analyser reads, with high tones overlined, and the mora count. |
+| Style | `pipelineConfig.styles` in table-row order; the default is marked. |
+| Style weight / Length scale / SDP ratio / Noise scale / Noise scale W | Sliders for `styleWeight` (0–2), `lengthScale` (0.5–2, larger is slower), `sdpRatio` (0–1), and `noiseScale` and `noiseScaleW` (0–1.5). They start at `pipelineConfig.defaults`. |
+| Seed | `seed` (default 0). The page refuses a seed that is not a number. An out-of-range seed is rejected by the pipeline with `Sbv2InputError`. |
+| Run | Analyses the text and synthesizes it. **Not cancellable**: `Sbv2Pipeline.generate` takes no AbortSignal, so the status card's Cancel stays disabled, with the reason under it. |
+| Reset options to the distribution's defaults | Sets speaker, style, every knob and the seed back to `pipelineConfig.defaults` / 0. The text stays. |
+| GPU timing | Off by default, in the status card (as on the Wan2.2 page). Turning it on acquires the GPU again with `gpuTiming: true`, and every graph records its GPU time per kernel. Timed runs are slower, so compare timed records only with timed records. The switch is disabled while a run is in flight. Switching while the pipeline is being built is fine: the abandoned build is disposed before the old device is destroyed. |
+
+Every option is passed to `generate` explicitly, the defaults too, so the record is the full
+request. The page refuses only an empty text and a seed that is not a number. Acceptance belongs to
+the pipeline. An input it refuses shows as **Input rejected — Sbv2InputError**, with the message,
+the stack and a hint that quotes both limits. A frame-limit rejection comes only after the
+`text_encoder` and `front` graphs have run. Any other failure shows in full as **Run failed**.
+
+While running, the status card shows the elapsed seconds and the graph being run (`n / 3 graphs`,
+advanced by `onRunDiagnostics`). While the pipeline is being built, the **Pipeline** row shows
+`fetching x / y MiB in total · <latest file>`. The result card plays the clip (**Download WAV**) and
+summarizes the record:
+- the adapter, source, model, preset, speaker, style × weight, knobs and reading
+- the duration and the real-time factor
+- analysis, per-stage, synthesis and wall seconds
+- the sha256 of the f32 samples and of the WAV
+- per graph: the weight memory, submits, dispatches and build cost (plus GPU time when timed)
+
+### The record (`format: "karume-playground-sbv2/1"`)
+
+`buildSbv2Record` in `src/models/sbv2/record.ts` assembles the record (CPU-tested).
+
+| Field | What |
+| --- | --- |
+| `format`, `page` | `karume-playground-sbv2/1`, `sbv2` |
+| `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device` | `recordEnvironment(gpu)` (as on the other pages) |
+| `distribution` | `directory` and `manifestSha256` (sha256 of `karume.json`) |
+| `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
+| `model`, `preset` | the manifest's model; `{ quant, label, isDefault }` (`isDefault` = the model's `defaultQuant`) |
+| `request` | `{ text, options }`: `speaker`, `style`, `styleWeight`, `sdpRatio`, `noiseScale`, `noiseScaleW`, `lengthScale`, `seed`, exactly as passed to `generate` |
+| `analysis` | `analyzer` / `analyzerVersion` (`@hdae/yomi` and its version, which pins the dictionary revision); `reading` (moras, high tones in brackets); `utterance` (the exact `Sbv2Utterance` that `generate` received) |
+| `timings.pipelineLoadSeconds` | building the pipeline: manifest, descriptors, small assets and, with Cached, the weight download into Cache Storage (no Session) |
+| `timings.analysisSeconds` | `analyzeWithWords` + `toSbv2Utterance` on the host |
+| `timings.stageSeconds` | Seconds per graph. Each graph is measured up to its diagnostics report, which comes after its run and before its Session is destroyed, starting from the previous graph's report (the first from the `generate` call). So a stage holds the previous graph's Session destruction, the host glue, its own Session creation (reading and uploading the weights) and its run. |
+| `timings.synthesisSeconds`, `timings.wallSeconds` | the whole `generate` call, which also holds the last Session's destruction and the output check; analysis + synthesis + hashing |
+| `output` | `sampleRate`, `samples`, `durationSeconds`; `realTimeFactor` (synthesis seconds / audio seconds; below 1 = faster than real time); `f32Sha256` (sha256 of the f32 samples' bytes as they sit in memory, little-endian in practice); `wavSha256` (sha256 of the 16-bit WAV that `encodeWav` makes, the hash the SBV2 regression test pins in `packages/models/tests/fixtures/references/sbv2.json`) |
+| `diagnostics.<graph>` | per `text_encoder` / `front` / `voice`: the diagnostics summary, `build` (`buildStats`), `lastRunPipelines`, and with GPU timing `timing` (only for graphs that were timed, as on the Wan2.2 page) |
+
+**Download record (JSON)** saves `sbv2_<UTC timestamp>.json`, **Download WAV** saves `sbv2_<UTC timestamp>.wav`,
+and **Copy record** copies the JSON.
+
+### Caveats
+
+- **Not cancellable.** Once started, a synthesis runs to its end (`generate` has no AbortSignal).
+  The speaker, preset, source and GPU timing controls are disabled while it runs. Leaving the page
+  during a run drops its result; the GPU is destroyed only after the synthesis has finished.
+- **The analyser decides the input.** The same text can give a different utterance with another
+  `@hdae/yomi` version (another dictionary revision). When two runs' hashes differ, compare
+  `analysis.utterance` first. To fix a wrong reading, write it in kana in the text.
+- **The dictionary needs the network once** (Hugging Face, with CORS). Later visits read it from
+  Cache Storage. Its download takes no AbortSignal.
+- **The first Cached build downloads all weights** of the model / preset, and `pipelineLoadSeconds`
+  includes that download. Later builds and every run read from Cache Storage. **Direct** downloads
+  nothing at build and reads the weights over plain fetch on every run.
+  `diagnostics.<graph>.build.supplyWaitMs` is where the per-run weight read shows. Which source is
+  faster is not fixed: compare the two records.
+- **Hashes compare one environment.** `f32Sha256` / `wavSha256` are bit-exact only on the same GPU,
+  driver and browser back end. The regression test's reference rows are per environment key (Linux /
+  Vulkan for the RTX 3080 Ti row), so a Chrome D3D12 run is not expected to match them. Compare it
+  with other runs on the same machine.
+- The regression test's request is model F1, preset `i8`, the regression-test sample text, seed 0
+  and the distribution's defaults.
+
+## The Gemma 4 chat page
+
+A multi-turn chat with regular Gemma 4 (`Gemma4Pipeline`, mount `gemma4`) or a mobile QAT model
+(`Gemma4QatPipeline`, mount `gemma4-qat`: E2B / E4B, experimental, direct route only). The page
+acquires the GPU once (`acquireGpu({ subgroups: "available" })`). **Load** builds the pipeline:
+`fromPretrained` reads every weight and builds the Session (gigabytes), so nothing is read until
+Load is pressed. The conversation is one `Gemma4ChatSession`. It carries the KV between turns that
+close with the distribution's EOS. After any other stop it re-renders the history on the next send.
+One turn runs at a time.
+
+| Control | What it does |
+| --- | --- |
+| Model | Every model of both manifests (`Gemma 4 — e2b`, `Gemma 4 QAT — e2b` / `e4b`), each manifest's `defaultModel` marked "(default)". Applies on the next Load. |
+| Preset | The model's `quants`; `defaultQuant` is preselected and marked "(default)". Applies on the next Load. |
+| Source | **Cached** (the hub's cache over `/hf/`) or **Direct** (`/models/`). The QAT distribution has no public repo, so it is Direct only. Applies on the next Load. |
+| MTP drafter | Regular Gemma 4 with drafter weights only: builds the drafter (`speculative: {}`). The session then speculates with the self-tuning gate. Off by default. Applies on the next Load. |
+| Collect Session diagnostics | Passes `onRunDiagnostics` to `fromPretrained`. The record then gets per-run counts and the Session diagnostics. **It changes the decode path**: without it the pipeline picks greedy (temperature 0) tokens on the GPU (an 8-byte readback per token). With it every greedy token reads the whole logits row back and is picked on the CPU. Off by default; leave it off to measure decode rates. Applies on the next Load. |
+| Load / Load again | Builds the pipeline for the selection and starts a new chat. A note says when the selection differs from the loaded pipeline. |
+| Cancel load | Shown while loading, in place of Load. Aborts the download (the `signal` of `fromPretrained`). Building the Session after the download cannot be interrupted: a pipeline that finishes after Cancel is released at once. |
+| System prompt | The session's system message (empty = none). Applies on New chat. |
+| Capacity | KV positions the chat allocates (`capacity` of the session). Empty = the distribution's (4096). It must be from `chunkLength` to `maxPosition`. Applies on New chat. |
+| When a turn does not fit | **Drop the oldest turns** (`dropOldestTurns`: the oldest user / assistant pair goes, the system message stays; checked before sending), or **Refuse the turn**: the policy returns the history unchanged, so the session fails the turn with `GenerationCapacityError` and the history stays as it was. Applies on New chat. |
+| New chat | Disposes the session and builds a new one with the chat settings (the record starts over). |
+| Temperature, Top-k, Top-p, Seed, Max new tokens | The turn's sampler and `maxNewTokens`, passed with every send. The form starts from the distribution's sampler (temperature 1, top-k 64, top-p 0.95), seed 0, 512 tokens. Empty top-k / top-p = no narrowing. **Distribution's sampler** resets the form; **Greedy** sets temperature 0. |
+| Sample messages | Fill the input (one is Japanese, to exercise multi-byte streaming). |
+| Send / Stop | Enter sends (Shift+Enter is a new line). Stop aborts the turn through the request's `signal`. A partial reply stays in the history and the turn shows "stopped". The status card's Cancel does the same. |
+
+The transcript is rebuilt from the session's own history (`session.turns`) after every turn, so the
+bubbles always show what the session will send next. Entries that `dropOldestTurns` removed stay
+visible, dimmed, marked "dropped from the context". A turn the session does not keep is one that
+produced no text and did not close with EOS: a Stop during prefill, or a failure. It leaves no
+entry. The page says so in a notice and puts the message back into the input. Each assistant
+bubble's footer shows how the turn stopped, the generated tokens, the prefill tokens with their
+rate, the time to first token (TTFT), the decode tokens/s and the total seconds. The status card
+shows the loaded pipeline, the chat settings and the **context**:
+
+- after a turn that closed with EOS: the positions the session's KV holds, over the capacity;
+- after any other stop: the token count of the history the session will re-render on the next send.
+
+While a turn streams, the reply is drawn at most once per animation frame, and the status card's
+counter updates every 250 ms. Page re-renders run on the thread that runs the decode loop, so they
+are kept out of the window being measured.
+
+How the figures are measured (from `performance.now()` in the page):
+
+- **Prefill tokens**: the prompt the session passed to the sequence. That is the delta when the KV
+  is carried, the whole history otherwise. A carried turn also prefills the previous turn's closing
+  token (the sequence's pending token), which is not counted.
+- **Prefill seconds**: from `send` to the last committed chunk (`onPrefill`). It includes the
+  overflow check and, on a fresh sequence, its allocation.
+- **TTFT**: from `send` to the first generated token (`onToken`).
+- **Decode tokens/s**: (`tokens` − 1) / (decode end − first token). The first token is sampled from
+  the prefill's logits. The decode end depends on the diagnostics switch:
+  - with diagnostics: the last decode / verify / draft run's `onRunDiagnostics`, which includes the
+    run that drew the stop token;
+  - without: the end of the text stream.
+
+### The record (`format: "karume-playground-gemma4/1"`)
+
+| Field | What |
+| --- | --- |
+| `format`, `page` | `karume-playground-gemma4/1`, `gemma4` |
+| `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device` | `recordEnvironment` |
+| `distribution` | `mount`, `directory`, `manifestSha256` (sha256 of `karume.json`) |
+| `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
+| `pipeline` | `Gemma4Pipeline` or `Gemma4QatPipeline` |
+| `model`, `preset` | the model name; `{ quant, label, isDefault }` |
+| `speculative` | whether the MTP drafter was built |
+| `loadSeconds` | from Load to the pipeline being ready |
+| `diagnosticsCollected` | whether the pipeline was loaded with `onRunDiagnostics`. When true, greedy turns ran without the on-GPU greedy selection, so their decode rates are not those of an app without diagnostics. |
+| `chat` | `system` (absent = none), `capacity`, `overflow` (`drop-oldest` / `refuse`) |
+| `turns[].index`, `userText`, `replyText` | the turn's number (failed and not-kept turns included), the message, the streamed reply |
+| `turns[].request` | `maxNewTokens` and the `sampler` exactly as passed |
+| `turns[].outcome` | `{ kind: "stopped", stop: { reason, tokens, token?, stopString?, speculation? } }` or `{ kind: "failed", error }` |
+| `turns[].prefill` | `promptTokens`, `carriedPositions` (positions the carried KV already held; 0 = rendered from the start), `chunks` |
+| `turns[].timing` | `totalSeconds`, `prefillSeconds`, `prefillTokensPerSecond`, `ttftSeconds`, `decodeTokens`, `decodeSeconds`, `decodeTokensPerSecond` (a figure that could not be measured is absent) |
+| `turns[].generatedTokenIds` | every generated token id except the stop token (`outcome.stop.token` holds that). Compare these across machines (temperature 0 or the same seed). |
+| `turns[].droppedEntries` | history entries the overflow policy dropped before the turn was sent |
+| `turns[].inHistory` | whether the session kept the turn (its message and reply) in its history |
+| `turns[].kvUsedAfter` | positions the session holds after the turn; absent when it released the sequence |
+| `turns[].runs` | with diagnostics only: runs reported by `onRunDiagnostics` during the turn (`prefill`, `decode`, `draft`, `verify`) |
+| `diagnostics.target`, `diagnostics.drafter` | with diagnostics only: the Session diagnostics folded over the chat's runs, as on the Wan2.2 page (runs, weight GiB, submit / dispatch counts, geometry profile, `build` cost, `lastRunPipelines`). `drafter` is present only with the MTP drafter. |
+
+**Download record (JSON)** saves `gemma4_<UTC timestamp>.json`; **Copy record** copies the same
+JSON.
+
+### Caveats
+
+- Decode rates are comparable only between records with the same `diagnosticsCollected`. For
+  production-like rates, leave diagnostics off. Speculative turns (MTP) do not use the GPU greedy
+  path either way.
+- No GPU timing switch. On a timing device every dispatch becomes its own pass, which would distort
+  the decode rate this page exists to show. GPU-resident PLE also refuses timing. The record carries
+  no per-kernel times.
+- Only one turn can run at a time. Changing the model, preset, source, MTP or diagnostics needs
+  Load. The system prompt, capacity and overflow policy need New chat. Both clear the chat.
+- Load is not a `useRunTask` run (the status card's run is the chat turn). It has its own Cancel
+  load button.
+- A failed release of the previous pipeline or session is shown as an error on the page and logged
+  to the console.
+- The QAT entry point is experimental (ADR 0097): fixed int2/int4/int8 with SRQ, no MTP.
+- After a device loss, **Acquire the GPU again** rebuilds the pipeline for the same Load and starts
+  an empty chat.
+
 ## The attention route bench page
 
 This page times the two attention routes on their own, apart from a generation, with the kernels,
@@ -283,7 +961,7 @@ Absolute times compare only on one machine; across machines, compare the ratios.
 ## Develop
 
 ```sh
-pnpm --filter @karume/playground test        # vp test: the server's request handling (/models/ and /hf/, aliases included), the page registry, record / cache / preset / image helpers, pretrainedRef, zip writer, attention bench table, Wan2.2 scenarios
+pnpm --filter @karume/playground test        # vp test: the server's request handling (/models/ and /hf/, aliases included), the page registry, useGpu's teardown order, record / cache / preset / image helpers, pretrainedRef, zip writer, attention bench table, every page's pure helpers (settings, records, progress, pipeline slots)
 pnpm --filter @karume/playground typecheck
 pnpm --filter @karume/playground check       # vp check: format + lint + types
 pnpm --filter @karume/playground build
@@ -332,12 +1010,12 @@ The kit a page builds on:
 | `pretrainedRef` | `src/lib/distributions.ts` | The first argument of `fromPretrained` for a `PipelineSource`: the `HubRepoRef`, or the mount over plain fetch with `crossRepo` mapped to other mounts. |
 | `distributionSource`, `hfRepoRef` | `src/lib/distributions.ts` | The two sources underneath (`localDirectory` with range reads; the `HubRepoRef` of `/hf/`). |
 | `queryCacheInventory` | `src/lib/hub-cache.ts` | What the hub's cache holds of a distribution, over every preset. |
-| `useGpu` | `src/hooks/use-gpu.ts` | One GPU per page, released on unmount, re-acquired after a device loss. |
+| `useGpu` | `src/hooks/use-gpu.ts` | One GPU per page, released on unmount, re-acquired after a device loss (`reacquire`) or an options change (GPU timing). `track(work)` holds the device until `work` settles: the destroy waits one macrotask after the release and then for every tracked promise, and the next acquisition — of any page, through the app-wide queue the root layout provides (`GpuQueueContext`) — waits for that destroy (flush before destroy). A device released while still acquiring holds no work: it is destroyed when it arrives, and the next acquisition does not wait for it. A page MUST pass every pipeline / Session disposal and every build or run on the device through `track`, started no later than the effects of the commit that releases the device. `lease` names one acquisition (a new one on every options or attempt change, also back to earlier options); `state` shows a device only for the lease it was acquired for, so in the render that changes the lease it is already `acquiring` and effects keyed on the device dispose in the same commit. |
 | `useTimestampQuery` | `src/hooks/use-timestamp-query.ts` | Whether the adapter lists `timestamp-query`. |
-| `useRunTask` | `src/hooks/use-run-task.ts` | One cancellable run: state (`idle` / `running` with stage and counter / `done` / `cancelled` / `error`), the elapsed-time ticker, Cancel, an abort when the page is left. |
-| `RunStatusCard`, `RunStatus`, `GpuAlerts` | `src/components/run-status-card.tsx` | The Status card: GPU, cross-origin isolation, the page's rows and controls, the GPU's failure states, and the run (elapsed, stage, progress bar, Cancel, error in full). |
+| `useRunTask` | `src/hooks/use-run-task.ts` | One cancellable run: state (`idle` / `running` with stage and counter / `done` / `cancelled` / `error`), the elapsed-time ticker, Cancel, and an abort when the GPU lease ends (the page is left or the GPU is acquired again). Takes the page GPU's `{ track, lease }`, so every run holds the device until it settles. A report with `cancellable: false` and its required `cancelNote` marks a stage that takes no signal. |
+| `RunStatusCard`, `RunStatus`, `GpuAlerts` | `src/components/run-status-card.tsx` | The Status card: GPU, cross-origin isolation, the page's rows and controls, the GPU's failure states, and the run (elapsed, stage, progress bar, Cancel — disabled with the stage's `cancelNote` while it is not cancellable — error in full). |
 | `recordEnvironment` | `src/lib/environment.ts` | The fields every record starts with: `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device`. |
-| Record helpers | `src/lib/record.ts` | Non-finite count, RGBA stack + sha256, diagnostics and build cost per component, attention route, GPU time per key and per op, device facts, `adapterText`, timeline. |
+| Record helpers | `src/lib/record.ts` | Non-finite count, RGBA stack + sha256, `f32Sha256` (raw f32 bytes), `rgb8Sha256` (the RGB8 input), `sourceRecord`, diagnostics and build cost per component, a run's share of a kept Session's submit / dispatch counts (`submitCountsSince`, `perRunSubmitCounts`), attention route, GPU time per key and per op, device facts, `adapterText`, the stage clock (`foldStageEvent`, `stageSecondsOf`), timeline. |
 | `RecordActions` | `src/components/record-actions.tsx` | Download record (JSON) and Copy record, with room for the page's own buttons. |
 | `downloadBlob`, `downloadJson`, `fileStamp`, `zipStored` | `src/lib/download.ts`, `src/lib/zip.ts` | Downloads and the zip writer. |
 | `ImageInput`, `decodeImageFile`, `rgbaToRgb8` | `src/components/image-input.tsx`, `src/lib/image.ts` | An image file field with a preview; the decoded RGBA and the pipelines' `Rgb8Image` (alpha dropped; a canvas keeps pixels premultiplied, so a fully transparent pixel reads as black). |
