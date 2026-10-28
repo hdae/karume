@@ -22,7 +22,7 @@ import { type Manifest, parseManifest } from "@karume/hub";
 import * as birefnet from "../birefnet.ts";
 import * as depthAnything from "../depth-anything.ts";
 import * as siglip2 from "../siglip2.ts";
-import { VowelDetectorPipeline } from "../src/vowel-detector/pipeline.ts";
+import * as vowelDetector from "../vowel-detector.ts";
 import { FEATURE_DIM, MEL_BINS, N_MELS, SAMPLE_RATE } from "../src/vowel-detector/features.ts";
 import { LIPSYNC_CLASSES } from "../src/vowel-detector/postprocess.ts";
 import {
@@ -130,9 +130,9 @@ const families: readonly Family[] = [
       }),
   },
   {
-    name: "VowelDetectorPipeline",
+    name: "vowelDetector.Pipeline",
     build: async () =>
-      await VowelDetectorPipeline.fromAssets({
+      await vowelDetector.Pipeline.fromAssets({
         manifest: manifestOf(
           "vowel-detector/1",
           "crnn",

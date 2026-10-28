@@ -779,6 +779,14 @@
     ],
     "./vowel-detector": [
       {
+        "name": "Assets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
         "name": "LabSegment",
         "kind": "typeAlias"
       },
@@ -787,23 +795,15 @@
         "kind": "class"
       },
       {
-        "name": "VowelDetectorAssets",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "VowelDetectorFromPretrainedOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "VowelDetectorPipeline",
+        "name": "Pipeline",
         "kind": "class"
       },
       {
-        "name": "VowelDetectorPipelineOptions",
+        "name": "PipelineOptions",
         "kind": "typeAlias"
       },
       {
-        "name": "VowelDetectorResult",
+        "name": "Result",
         "kind": "typeAlias"
       }
     ],

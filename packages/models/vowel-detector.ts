@@ -4,7 +4,7 @@
  *
  * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
  * wholesale. The surface follows the user's stories — build
- * ({@link VowelDetectorPipeline.fromPretrained} / {@link VowelDetectorPipeline.fromAssets}) / detect
+ * ({@link Pipeline.fromPretrained} / {@link Pipeline.fromAssets}) / detect
  * (`detect`) / release (`dispose`).
  *
  * Decoding and resampling the WAV are the user's responsibility (the input is a 16 kHz mono
@@ -15,12 +15,12 @@
  * CLAUDE.md). Tree-shaking through the barrel (`mod.ts`) works only on top of this invariant.
  */
 
-export { VowelDetectorPipeline } from "./src/vowel-detector/pipeline.ts";
+export { Pipeline } from "./src/vowel-detector/pipeline.ts";
 export type {
-  VowelDetectorAssets,
-  VowelDetectorFromPretrainedOptions,
-  VowelDetectorPipelineOptions,
-  VowelDetectorResult,
+  Assets,
+  FromPretrainedOptions,
+  PipelineOptions,
+  Result,
 } from "./src/vowel-detector/pipeline.ts";
 export type { LabSegment } from "./src/vowel-detector/postprocess.ts";
 

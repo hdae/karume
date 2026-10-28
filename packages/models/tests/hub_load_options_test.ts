@@ -25,7 +25,7 @@ import * as irodori from "../irodori.ts";
 import * as sbv2 from "../sbv2.ts";
 import * as siglip2 from "../siglip2.ts";
 import * as umt5 from "../umt5.ts";
-import type { VowelDetectorFromPretrainedOptions } from "../src/vowel-detector/pipeline.ts";
+import * as vowelDetector from "../vowel-detector.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
 const noopRetry = (diagnostic: RetryDiagnostic): void => void diagnostic;
@@ -89,7 +89,7 @@ test("型の門: 9 家族の fromPretrained オプションが onRetry を受け
     { onRetry: noopRetry } satisfies sbv2.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies siglip2.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies umt5.FromPretrainedOptions,
-    { onRetry: noopRetry } satisfies VowelDetectorFromPretrainedOptions,
+    { onRetry: noopRetry } satisfies vowelDetector.FromPretrainedOptions,
   ];
   assertEquals(perFamily.length, 9, "家族が 9 つ並んでいない");
   // 写しの入口（`hubLoadOptions`）が 9 家族の型を**そのまま**受けることも同じ 1 本で見る。

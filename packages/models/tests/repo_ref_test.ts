@@ -51,13 +51,13 @@ test("toRepoRef: 取得元が無ければ『repo が必須』+ 記述例 2 択�
 test("toRepoRef: 公開配布リポを持たないファミリには対応表を案内しない", () => {
   // 存在しない識別子を案内すると、読んだ人は import できないものを探しに行く。
   const error = assertThrows(
-    () => toRepoRef(undefined, "VowelDetectorPipeline.fromPretrained"),
+    () => toRepoRef(undefined, "vowelDetector.Pipeline.fromPretrained"),
     Error,
     "repo is required",
   );
   assertStringIncludes(error.message, '{ repo: "owner/name", revision: "<40-digit commit SHA>" }');
   assertStringIncludes(error.message, "repo name string");
-  assertEquals(error.message.includes("_SOURCES"), false);
+  assertEquals(error.message.includes("SOURCES"), false);
 });
 
 test("toRepoRef: 空の repo も同じ門で落ちる（空文字の URL を組み立てない）", () => {

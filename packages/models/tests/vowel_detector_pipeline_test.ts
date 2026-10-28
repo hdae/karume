@@ -1,4 +1,4 @@
-// `VowelDetectorPipeline` の**構築ガード**と、運用上限 / mel 基底資産の結線。GPU も実資産も
+// `Pipeline` の**構築ガード**と、運用上限 / mel 基底資産の結線。GPU も実資産も
 // 要らない範囲だけを見る（実 GPU の突合は `packages/e2e/tests/e2e_vowel_detector_chain_test.ts`
 //〈合成 golden のロジット〉と `e2e_vowel_detector_chain_test.ts`〈実音声の全鎖 → `.lab`〉が
 // 持つ — 重複させない。ホスト層の Python 正本とのパリティは
@@ -48,7 +48,7 @@ import {
   assertFrameLimit,
   assertGraph,
   parseMelBasis,
-  VowelDetectorPipeline,
+  Pipeline,
 } from "../src/vowel-detector/pipeline.ts";
 import {
   extractFeatures,
@@ -122,7 +122,7 @@ const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }, { model: "nope" }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENT }, { model: "nope" }),
     Error,
     "model 'nope' is not in the manifest",
   );
@@ -131,7 +131,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
 test("fromAssets: pipeline の契約名が vowel-detector でない manifest を落とす", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "sbv2/1" }));
   await assertRejects(
-    () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "the manifest pipeline is 'sbv2/1'",
   );
@@ -141,7 +141,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門。hub は major を検査しない。
   const manifest = parseManifest(manifestText({ pipeline: "vowel-detector/2" }));
   await assertRejects(
-    () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "has an unsupported major",
   );
@@ -150,7 +150,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
 test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }, { quant: "nope" }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENT }, { quant: "nope" }),
     Error,
     "quant 'nope' is not in the manifest",
   );
@@ -162,7 +162,7 @@ test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async
     manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, max_frames: 200 } }),
   );
   await assertRejects(
-    () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "pipelineConfig: unknown key 'max_frames'",
   );
@@ -173,7 +173,7 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   // 文言では落ちない）= 上のケースが資産の不在に巻き添えられていないことの対偶。
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => VowelDetectorPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => Pipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
     "component 'crnn' has no container",
   );
@@ -184,7 +184,7 @@ test("fromAssets: 容器が揃っていれば資産（mel_basis）の不在ま�
   // `mel_basis` の不在が見える（門の順序が資産の解析より前であることの対偶）。
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "asset 'mel_basis' is missing",
   );
@@ -233,7 +233,7 @@ test("assertGraph: 長さを固定して焼いた古い形は記号次元で落�
         graphConfig,
       ),
     Error,
-    "VowelDetectorPipeline: the graph's symbolic dimensions are []",
+    "vowelDetector.Pipeline: the graph's symbolic dimensions are []",
   );
 });
 
@@ -242,7 +242,7 @@ test("assertGraph: 入力の時間軸から 2 倍の係数が抜けたら落と�
   assertThrows(
     () => assertGraph(crnnGraph({ inputShape: [1, "T", FEATURE_DIM] }), graphConfig),
     Error,
-    "VowelDetectorPipeline: the graph input shape is [1, T, 83], expected [1, 2T, 83]",
+    "vowelDetector.Pipeline: the graph input shape is [1, T, 83], expected [1, 2T, 83]",
   );
 });
 
@@ -250,7 +250,7 @@ test("assertGraph: 入力名が features でなければ落とす", () => {
   assertThrows(
     () => assertGraph(crnnGraph({ inputName: "input" }), graphConfig),
     Error,
-    "VowelDetectorPipeline: the graph input is 'input'",
+    "vowelDetector.Pipeline: the graph input is 'input'",
   );
 });
 
@@ -259,7 +259,7 @@ test("assertGraph: 出力のクラス数が宣言と違えば落とす", () => {
   assertThrows(
     () => assertGraph(crnnGraph({ outputShape: [1, "T", 5] }), graphConfig),
     Error,
-    "VowelDetectorPipeline: the graph output shape is [1, T, 5]",
+    "vowelDetector.Pipeline: the graph output shape is [1, T, 5]",
   );
 });
 
@@ -481,7 +481,7 @@ const ONE_SECOND = Float32Array.from(
 /** 偽の Session を張る CRNN で組んだパイプラインと、解放の呼び出し回数。 */
 const pipelineWithFakeSession = (
   plan: FakeRunPlan,
-): { readonly pipeline: VowelDetectorPipeline; readonly disposeCalls: () => number } => {
+): { readonly pipeline: Pipeline; readonly disposeCalls: () => number } => {
   let disposeCalls = 0;
   const state = {
     gpu: fakeGpuContext(fakeDevice()),
@@ -515,7 +515,7 @@ const pipelineWithFakeSession = (
     melBasis: plan.melBasis ?? new Float32Array(N_MELS * MEL_BINS),
     ...(plan.onRunDiagnostics === undefined ? {} : { onRunDiagnostics: plan.onRunDiagnostics }),
   };
-  const pipeline: VowelDetectorPipeline = Reflect.construct(VowelDetectorPipeline, [state]);
+  const pipeline: Pipeline = Reflect.construct(Pipeline, [state]);
   return { pipeline, disposeCalls: () => disposeCalls };
 };
 

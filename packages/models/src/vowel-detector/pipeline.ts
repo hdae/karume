@@ -1,5 +1,5 @@
 /**
- * `VowelDetectorPipeline` — the one surface for 16kHz mono audio → a vowel sequence for lip sync
+ * `Pipeline` — the one surface for 16kHz mono audio → a vowel sequence for lip sync
  * (`.lab`).
  *
  * Pipeline (every step is Karume, no torch):
@@ -161,10 +161,10 @@ const GRAPH_ROLE = "crnn";
 const COMPONENT_KEYS = [GRAPH_ROLE] as const;
 
 /**
- * The result of {@link VowelDetectorPipeline.detect} (upstream `@hdae/vowel-detector`'s
+ * The result of {@link Pipeline.detect} (upstream `@hdae/vowel-detector`'s
  * `DetectResult`).
  */
-export type VowelDetectorResult = {
+export type Result = {
   /**
    * Segment sequence in seconds (a/i/u/e/o/N/pau — cons is already absorbed by post-processing).
    */
@@ -176,11 +176,11 @@ export type VowelDetectorResult = {
   readonly lab: string;
 };
 
-/** Construction options (shared by {@link VowelDetectorPipeline.fromAssets} / `fromPretrained`). */
-export type VowelDetectorPipelineOptions = {
+/** Construction options (shared by {@link Pipeline.fromAssets} / `fromPretrained`). */
+export type PipelineOptions = {
   /**
    * Shares an existing GPU. **The passing side owns it**, so
-   * {@link VowelDetectorPipeline.dispose} does not destroy it. When omitted, the pipeline calls
+   * {@link Pipeline.dispose} does not destroy it. When omitted, the pipeline calls
    * `acquireGpu` internally and destroys it in `dispose()`.
    */
   readonly gpu?: GpuContext;
@@ -202,13 +202,13 @@ export type VowelDetectorPipelineOptions = {
 };
 
 /**
- * Fetch-layer options used only by {@link VowelDetectorPipeline.fromPretrained} (passed through to
+ * Fetch-layer options used only by {@link Pipeline.fromPretrained} (passed through to
  * hub).
  *
  * NOTE: the description of the fetch-layer knobs, including that `headers` / `fetch` / `caches` /
  * `onRetry` are **for the HTTP source only**, is consolidated in {@link FromPretrainedHubOptions}.
  */
-export type VowelDetectorFromPretrainedOptions = VowelDetectorPipelineOptions &
+export type FromPretrainedOptions = PipelineOptions &
   FromPretrainedHubOptions &
   FromPretrainedComponentOptions & {
     readonly signal?: AbortSignal;
@@ -218,7 +218,7 @@ export type VowelDetectorFromPretrainedOptions = VowelDetectorPipelineOptions &
  * Input for building directly from fetched assets (pass the return value of hub's `fetchAssets` as
  * is).
  */
-export type VowelDetectorAssets = {
+export type Assets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
@@ -238,7 +238,7 @@ const assetBuffer = (
  * form `krm` as one entry (`crnn`), or the part sequence of the split form (`crnn[0]` / `crnn[1]`
  * / …).
  */
-const assetOpener = (assets: VowelDetectorAssets["assets"]): Promise<ComponentOpener> =>
+const assetOpener = (assets: Assets["assets"]): Promise<ComponentOpener> =>
   assetComponentOpener("vowel-detector", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 /**
@@ -289,13 +289,13 @@ export const parseMelBasis = (buffer: ArrayBuffer): Float32Array<ArrayBuffer> =>
 export const assertGraph = (model: GraphOwner, config: VowelDetectorPipelineConfig): string => {
   if (model.graph.inputs.length !== 1 || model.graph.outputs.length !== 1) {
     throw new Error(
-      `VowelDetectorPipeline: the graph has ${model.graph.inputs.length} inputs /` +
+      `vowelDetector.Pipeline: the graph has ${model.graph.inputs.length} inputs /` +
         ` ${model.graph.outputs.length} outputs (a CRNN with one of each is required)`,
     );
   }
   if (model.graph.symbols.length !== 1) {
     throw new Error(
-      `VowelDetectorPipeline: the graph's symbolic dimensions are [${model.graph.symbols.join(", ")}]` +
+      `vowelDetector.Pipeline: the graph's symbolic dimensions are [${model.graph.symbols.join(", ")}]` +
         " (only the one time axis may be symbolic)",
     );
   }
@@ -303,7 +303,7 @@ export const assertGraph = (model: GraphOwner, config: VowelDetectorPipelineConf
   const [input] = model.graph.inputs;
   if (input.name !== INPUT_NAME) {
     throw new Error(
-      `VowelDetectorPipeline: the graph input is '${input.name}' ('${INPUT_NAME}' is required)`,
+      `vowelDetector.Pipeline: the graph input is '${input.name}' ('${INPUT_NAME}' is required)`,
     );
   }
   // The canonical notation is `coeff·sym` (a coefficient of 1 is omitted — `formatDim` in
@@ -314,14 +314,14 @@ export const assertGraph = (model: GraphOwner, config: VowelDetectorPipelineConf
     input.shape.some((dim, axis) => dim !== expectedInput[axis])
   ) {
     throw new Error(
-      `VowelDetectorPipeline: the graph input shape is ` +
+      `vowelDetector.Pipeline: the graph input shape is ` +
         `[${input.shape.map(String).join(", ")}], expected [${expectedInput.join(", ")}]`,
     );
   }
   const name = model.graph.outputs[0];
   const value = model.graph.values[name];
   if (value === undefined) {
-    throw new Error(`VowelDetectorPipeline: graph output '${name}' is not declared`);
+    throw new Error(`vowelDetector.Pipeline: graph output '${name}' is not declared`);
   }
   const expectedOutput = [1, symbol, config.classes.length];
   if (
@@ -329,7 +329,7 @@ export const assertGraph = (model: GraphOwner, config: VowelDetectorPipelineConf
     value.shape.some((dim, axis) => dim !== expectedOutput[axis])
   ) {
     throw new Error(
-      `VowelDetectorPipeline: the graph output shape is ` +
+      `vowelDetector.Pipeline: the graph output shape is ` +
         `[${value.shape.map(String).join(", ")}], expected [${expectedOutput.join(", ")}]`,
     );
   }
@@ -360,7 +360,7 @@ export const assertFrameLimit = (config: VowelDetectorPipelineConfig, frames: nu
   // The length comes from the caller's waveform, so it is input-caused (ADR 0107 decision 2 —
   // passing it in pieces works).
   throw new ModelInputError(
-    `VowelDetectorPipeline: the audio is too long (${frames} frames of 10ms = ` +
+    `vowelDetector.Pipeline: the audio is too long (${frames} frames of 10ms = ` +
       `${seconds(frames)} s) — the maximum this distribution was built with is ` +
       `${config.maxFrames} frames (${seconds(config.maxFrames)} s). ` +
       "Truncating would silently drop the end, so split the audio on the caller side",
@@ -382,7 +382,7 @@ export const assertFrameFloor = (config: VowelDetectorPipelineConfig, frames: nu
   if (frames >= config.minFrames) return;
   // Like the upper side, a dimension of the caller's waveform (ADR 0107 decision 2).
   throw new ModelInputError(
-    `VowelDetectorPipeline: the audio is too short (${frames} frames of 10ms = ` +
+    `vowelDetector.Pipeline: the audio is too short (${frames} frames of 10ms = ` +
       `${seconds(frames)} s) — the minimum length this distribution was built with is ` +
       `${config.minFrames} frames (${seconds(config.minFrames)} s). ` +
       "Filling the shortfall with zero padding on the right makes the backward GRU carry state back from the padding, " +
@@ -390,7 +390,7 @@ export const assertFrameFloor = (config: VowelDetectorPipelineConfig, frames: nu
   );
 };
 
-/** The internal state of {@link VowelDetectorPipeline} (not exposed on the public surface). */
+/** The internal state of {@link Pipeline} (not exposed on the public surface). */
 type VowelDetectorState = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
@@ -468,12 +468,12 @@ type VowelDetectorAdmission = {
 const admitVowelDetector = (
   manifest: Manifest,
   open: ComponentOpener,
-  options: VowelDetectorPipelineOptions,
+  options: PipelineOptions,
 ): VowelDetectorAdmission => {
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
-      `VowelDetectorPipeline: model '${modelName}' is not in the manifest` +
+      `vowelDetector.Pipeline: model '${modelName}' is not in the manifest` +
         ` (available: ${manifest.available.models.join(" / ")})`,
     );
   }
@@ -481,7 +481,7 @@ const admitVowelDetector = (
   const { name, major } = entry.pipeline;
   if (name !== VOWEL_DETECTOR_PIPELINE_NAME) {
     throw new Error(
-      `VowelDetectorPipeline: the manifest pipeline is '${name}/${major}'` +
+      `vowelDetector.Pipeline: the manifest pipeline is '${name}/${major}'` +
         ` ('${VOWEL_DETECTOR_PIPELINE_NAME}/${VOWEL_DETECTOR_PIPELINE_MAJOR}' is required)`,
     );
   }
@@ -489,7 +489,7 @@ const admitVowelDetector = (
     // The only check that stops the silent degradation "old implementation × new repository" (ADR
     // 0038 §6).
     throw new Error(
-      `VowelDetectorPipeline: pipeline '${name}/${major}' has an unsupported major` +
+      `vowelDetector.Pipeline: pipeline '${name}/${major}' has an unsupported major` +
         ` (this implementation reads ` +
         `${VOWEL_DETECTOR_PIPELINE_NAME}/${VOWEL_DETECTOR_PIPELINE_MAJOR})`,
     );
@@ -499,7 +499,7 @@ const admitVowelDetector = (
   const quantName = options.quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quantName)) {
     throw new Error(
-      `VowelDetectorPipeline: quant '${quantName}' is not in the manifest` +
+      `vowelDetector.Pipeline: quant '${quantName}' is not in the manifest` +
         ` (available: ${entry.available.quants.join(" / ")})`,
     );
   }
@@ -510,7 +510,7 @@ const admitVowelDetector = (
     VOWEL_DETECTOR_SESSION_POLICY,
     quant.session,
     {},
-    `VowelDetectorPipeline: quant '${quantName}'`,
+    `vowelDetector.Pipeline: quant '${quantName}'`,
   );
   const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
 
@@ -526,12 +526,12 @@ const admitVowelDetector = (
     assertGpuFeaturesGranted(
       gpuFeatures,
       options.gpu,
-      `VowelDetectorPipeline: quant '${quantName}'`,
+      `vowelDetector.Pipeline: quant '${quantName}'`,
     );
     assertRequiredLimitsSatisfied(
       quant.requiredLimits,
       options.gpu.limits,
-      `VowelDetectorPipeline: quant '${quantName}'`,
+      `vowelDetector.Pipeline: quant '${quantName}'`,
     );
   }
 
@@ -548,9 +548,9 @@ const admitVowelDetector = (
  */
 const openVowelDetectorState = async (
   admitted: VowelDetectorAdmission,
-  assets: VowelDetectorAssets["assets"],
+  assets: Assets["assets"],
   open: ComponentOpener,
-  options: VowelDetectorPipelineOptions = {},
+  options: PipelineOptions = {},
 ): Promise<VowelDetectorState> => {
   const { config, quantName, quant, symbol, sessionOptions, gpuFeatures } = admitted;
   // The supplier is **the same one** admission looked at (`open` only looks up the opened
@@ -565,7 +565,7 @@ const openVowelDetectorState = async (
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
-    assertGpuFeaturesGranted(gpuFeatures, gpu, `VowelDetectorPipeline: quant '${quantName}'`);
+    assertGpuFeaturesGranted(gpuFeatures, gpu, `vowelDetector.Pipeline: quant '${quantName}'`);
     // Also check the limits of a device acquired here — `fromAssets` has no pre-fetch check
     // (`fromPretrained` checks with the adapter's values), and without this a shortfall of the
     // declaration would be delayed until Session construction, and when the declaration is stricter
@@ -575,7 +575,7 @@ const openVowelDetectorState = async (
       assertRequiredLimitsSatisfied(
         quant.requiredLimits,
         gpu.limits,
-        `VowelDetectorPipeline: quant '${quantName}'`,
+        `vowelDetector.Pipeline: quant '${quantName}'`,
       );
     }
   } catch (error) {
@@ -643,7 +643,7 @@ const runGraph = (
 const detectAudio = async (
   state: VowelDetectorState,
   audio: Float32Array<ArrayBufferLike>,
-): Promise<VowelDetectorResult> => {
+): Promise<Result> => {
   const { config } = state;
   // The output is a 20ms grid, so the one leftover frame of an odd frame count is dropped
   // (**truncation, not pad** — adding one half frame would make that one output carry only one
@@ -689,12 +689,12 @@ const detectAudio = async (
 /**
  * The vowel-detection pipeline (audio → `.lab`).
  *
- * Construction enters only through {@link VowelDetectorPipeline.fromPretrained} (fetch from HF) or
- * {@link VowelDetectorPipeline.fromAssets} (fetched bytes) — the constructor is private so that a
+ * Construction enters only through {@link Pipeline.fromPretrained} (fetch from HF) or
+ * {@link Pipeline.fromAssets} (fetched bytes) — the constructor is private so that a
  * half-built state that bypasses the manifest check and the asset comparison cannot be made (ADR
  * 0008).
  */
-export class VowelDetectorPipeline {
+export class Pipeline {
   readonly #state: VowelDetectorState;
   /**
    * Serialization chain of detect and dispose (keeps "one at a time" on the public API side — the
@@ -724,13 +724,13 @@ export class VowelDetectorPipeline {
    * A local distribution is passed as a **source handle** (`localDirectory` / `denoDirectory` of
    * `@karume/hub/deno` / `nodeDirectory` of `@karume/hub/node`). It goes through neither the
    * spelling check of the HF `owner/name`, nor the network, nor CacheStorage (the HTTP-only knobs
-   * of {@link VowelDetectorFromPretrainedOptions} have no effect).
+   * of {@link FromPretrainedOptions} have no effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
-    options: VowelDetectorFromPretrainedOptions = {},
-  ): Promise<VowelDetectorPipeline> {
-    const source = toManifestSource(ref, "VowelDetectorPipeline.fromPretrained");
+    options: FromPretrainedOptions = {},
+  ): Promise<Pipeline> {
+    const source = toManifestSource(ref, "vowelDetector.Pipeline.fromPretrained");
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
     const choice = {
@@ -738,7 +738,7 @@ export class VowelDetectorPipeline {
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     const selection = resolveSelection(loaded.manifest, choice);
-    const buildOptions: VowelDetectorPipelineOptions = {
+    const buildOptions: PipelineOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       ...choice,
       ...(options.onRunDiagnostics === undefined
@@ -748,7 +748,7 @@ export class VowelDetectorPipeline {
     // The family's checks run in the admission hook (before fetching the weight parts —
     // `hub/components.ts`).
     const { admitted, assets, open } = await loadContainerComponents(
-      "VowelDetectorPipeline.fromPretrained",
+      "vowelDetector.Pipeline.fromPretrained",
       loaded,
       selection,
       COMPONENT_KEYS,
@@ -760,7 +760,7 @@ export class VowelDetectorPipeline {
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
           buildOptions.gpu,
-          `VowelDetectorPipeline: quant '${admitted.quantName}'`,
+          `vowelDetector.Pipeline: quant '${admitted.quantName}'`,
         );
         return admitted;
       },
@@ -770,9 +770,7 @@ export class VowelDetectorPipeline {
         ...(options.components === undefined ? {} : { components: options.components }),
       },
     );
-    return new VowelDetectorPipeline(
-      await openVowelDetectorState(admitted, assets, open, buildOptions),
-    );
+    return new Pipeline(await openVowelDetectorState(admitted, assets, open, buildOptions));
   }
 
   /**
@@ -786,15 +784,10 @@ export class VowelDetectorPipeline {
    * Missing indices and mixing with a single-form key fail loudly (the receiving implementation is
    * the one in `src/hub/components.ts`).
    */
-  static async fromAssets(
-    input: VowelDetectorAssets,
-    options: VowelDetectorPipelineOptions = {},
-  ): Promise<VowelDetectorPipeline> {
+  static async fromAssets(input: Assets, options: PipelineOptions = {}): Promise<Pipeline> {
     const open = await assetOpener(input.assets);
     const admitted = admitVowelDetector(input.manifest, open, options);
-    return new VowelDetectorPipeline(
-      await openVowelDetectorState(admitted, input.assets, open, options),
-    );
+    return new Pipeline(await openVowelDetectorState(admitted, input.assets, open, options));
   }
 
   /**
@@ -812,11 +805,11 @@ export class VowelDetectorPipeline {
    * When called concurrently, calls **wait and run in order** (GPU destruction and an in-flight
    * run do not interleave).
    */
-  async detect(audio: Float32Array<ArrayBufferLike>): Promise<VowelDetectorResult> {
+  async detect(audio: Float32Array<ArrayBufferLike>): Promise<Result> {
     // The disposed check is made at call time (checked inside the chain, it would also take down
     // detections accepted before the dispose).
     if (this.#disposal !== undefined) {
-      throw new Error("VowelDetectorPipeline: cannot detect after dispose");
+      throw new Error("vowelDetector.Pipeline: cannot detect after dispose");
     }
     return await this.#chain(() => detectAudio(this.#state, audio));
   }

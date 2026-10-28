@@ -46,7 +46,7 @@
 //   `assets/feature_config.json` そのまま）。配布形は同じ行列を `assets` 席の safetensors で
 //   配る（`dist.py --pipeline vowel-detector`）が、この門は配布形を経由しない。
 // - Distribution form: `models/karume-vowel-detector/` (untracked). Only step ②' reads it, through
-//   `VowelDetectorPipeline.fromAssets` → `detect`. The direct path keeps the fixture mel basis, so
+//   `Pipeline.fromAssets` → `detect`. The direct path keeps the fixture mel basis, so
 //   ②' also pins that the distributed mel basis yields the same `.lab`. When it is missing, ②'
 //   alone is skipped with a warning (the direct-path gates still run).
 //
@@ -68,7 +68,7 @@ import {
   SAMPLE_RATE,
 } from "../../models/src/vowel-detector/features.ts";
 import { logitsToSegments, toLab } from "../../models/src/vowel-detector/postprocess.ts";
-import { VowelDetectorPipeline } from "../../models/src/vowel-detector/pipeline.ts";
+import { Pipeline } from "../../models/src/vowel-detector/pipeline.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { openResults, recordFailure } from "../../runtime/tests/helpers/results.ts";
@@ -514,7 +514,7 @@ for (const entry of CASES) {
         // in the pipeline, or `pipelineConfig` drifting from the graph).
         if (distManifestText !== undefined) {
           const manifest = parseManifest(distManifestText);
-          await using pipeline = await VowelDetectorPipeline.fromAssets({
+          await using pipeline = await Pipeline.fromAssets({
             manifest,
             assets: await loadDistAssets(manifest),
           });
