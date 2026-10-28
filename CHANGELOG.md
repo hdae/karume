@@ -112,6 +112,10 @@ measurements in `docs/research/`.
 
 ### Added
 
+- `geometrySweepCases()` (with its element type `GeometrySweepCase`) and `sweepCandidateKernelsId(rows, dp4a)`
+  (`@karume/runtime/tune`): the sweep cases as id and op, and the candidate fingerprint of a record
+  merged from per-case `runGeometrySweep` calls, recomputed over the merged rows so that
+  `deriveGeometryProfile` accepts it (ADR 0117 addendum of 2026-10-28).
 - `ResidentTensor.clear()` (`@karume/runtime`): sets a resident tensor to zero on the GPU
   (`clearBuffer` in its own submit, in queue order like `write`; ADR 0054 addendum of 2026-10-26).
   Besides the disposed and device-lost guards of `write`, it throws `ResidentTensorError` while an

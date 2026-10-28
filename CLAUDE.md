@@ -44,6 +44,8 @@ design's source of truth is [docs/decisions/](docs/decisions/). The current focu
   The only runtime-specific subpaths are `hub/node` (`nodeDirectory`) and `hub/deno` (`denoDirectory`)
 - `packages/models/` — **both a barrel (mod.ts) and per-family subpath exports**
 - `packages/e2e/` (private) — real-weight e2e (local assets + GPU). Run per-family lanes before a release (ADR 0129)
+- `packages/kernel-checks/` (private) — the kernel identity checks (subgroup GEMV / RMS, the state-attention rewrites) shared by
+  the runtime GPU tests and the playground `/kernel-check` page; it drives runtime internals, so only those two may import it
 - `packages/test-support/` (private) — the test harness (Dawn injection, fs helpers, the lane table, the port codemod).
   The porting rules are in the README of the same directory
 - `tools/exporter/` — PyPI `karume` = **the general-purpose core only** (src layout; the boundary is a machine gate —
