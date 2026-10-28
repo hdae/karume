@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -416,15 +417,15 @@ class TestTheModelCard:
         assert "has not been checked" not in prose
 
     def test_the_usage_is_the_standalone_encoder(self, assembled) -> None:
-        """Usage は単体の `Umt5Encoder`（`@karume/models/umt5`）— source は他の家族と同じ object
+        """Usage は単体の `Encoder`（`@karume/models/umt5`）— source は他の家族と同じ object
         ref 形 + pin の席。"""
         out_dir, _ = assembled
         lines = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").splitlines()
-        start = lines.index('import { Umt5Encoder } from "jsr:@karume/models/umt5";')
+        start = lines.index('import { Encoder } from "jsr:@karume/models/umt5";')
         assert lines[start : start + 12] == [
-            'import { Umt5Encoder } from "jsr:@karume/models/umt5";',
+            'import { Encoder } from "jsr:@karume/models/umt5";',
             "",
-            "const encoder = await Umt5Encoder.fromPretrained({",
+            "const encoder = await Encoder.fromPretrained({",
             f'  repo: "hdae/{UMT5_REPO_NAME}",',
             *REVISION_PIN_COMMENT,
             "});",
@@ -455,10 +456,10 @@ class TestTheModelCard:
         card = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
         assert "### Used by" in card
         assert f"[`hdae/{UMT5_CONSUMER_REPO_NAME}`]" in card
-        assert "`WanTi2vPipeline.fromPretrained`" in card
+        assert "`Ti2vPipeline.fromPretrained` (`@karume/models/wan`)" in card
         assert "its own tokenizer asset adds Wan's prompt cleaning" in card
         assert "karume-wan2.1" not in card
-        assert "WanPipeline.fromPretrained" not in card
+        assert re.search(r"(?<!\w)Pipeline\.fromPretrained", card) is None
 
     def test_the_card_describes_the_tokenizer_and_the_buckets(self, assembled) -> None:
         out_dir, _ = assembled

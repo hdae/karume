@@ -459,26 +459,26 @@ class TestFromPretrained:
 
     def test_it_passes_the_repository_as_an_object_and_keeps_the_options_second(self) -> None:
         lines = from_pretrained(
-            "AnimaPipeline", "hdae/karume-anima-turbo", ['  // quant: "f16",'], disposable="using"
+            "Pipeline", "hdae/karume-anima-turbo", ['  // quant: "f16",'], disposable="using"
         )
 
-        assert lines[0] == "using pipeline = await AnimaPipeline.fromPretrained({"
+        assert lines[0] == "using pipeline = await Pipeline.fromPretrained({"
         assert lines[1] == '  repo: "hdae/karume-anima-turbo",'
         assert lines[-3:] == ["}, {", '  // quant: "f16",', "});"]
 
     def test_it_offers_the_pin_as_a_commented_out_line(self) -> None:
         """The default stays following `main` — uncommenting alone pins it (not split into two
         samples)."""
-        lines = from_pretrained("AnimaPipeline", "hdae/x", [], disposable="using")
+        lines = from_pretrained("Pipeline", "hdae/x", [], disposable="using")
 
         assert '  // revision: "<full commit sha>",' in lines
         assert any("Pin a commit for reproducible builds" in line for line in lines)
 
     def test_the_disposable_spelling_is_the_callers_fact(self) -> None:
         """Synchronous or asynchronous dispose is a per-pipeline fact (not chosen here)."""
-        lines = from_pretrained("Siglip2Pipeline", "hdae/x", [], disposable="await using")
+        lines = from_pretrained("Pipeline", "hdae/x", [], disposable="await using")
 
-        assert lines[0].startswith("await using pipeline = await Siglip2Pipeline")
+        assert lines[0].startswith("await using pipeline = await Pipeline")
 
     def test_the_disposable_spelling_has_no_default(self) -> None:
         """A call that does not name the spelling fails.
@@ -487,7 +487,7 @@ class TestFromPretrained:
         code.
         """
         with pytest.raises(TypeError, match="disposable"):
-            from_pretrained("Siglip2Pipeline", "hdae/x", [])  # type: ignore[call-arg]
+            from_pretrained("Pipeline", "hdae/x", [])  # type: ignore[call-arg]
 
 
 class TestRequirePipeline:

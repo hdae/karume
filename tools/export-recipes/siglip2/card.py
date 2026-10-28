@@ -155,7 +155,7 @@ def _siglip2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     コメントアウトで併記**する（選べる値も同じ行のコメントに列挙 — manifest から機械導出する
     ので、系列 / quant が増えれば列挙も追従する）。読者がコメントを外すだけで次の一歩へ進める形。
 
-    `embed()` は画像 1 枚しか受けない（前処理は配布形の定数で固定 — `Siglip2Pipeline` の
+    `embed()` は画像 1 枚しか受けない（前処理は配布形の定数で固定 — `siglip2.Pipeline` の
     公開面）ので、この pipeline の optional ノブは model / quant の 2 つだけである。
 
     NOTE: `fromAssets` は**案内しない**（2026-08-29 裁定）。分割配布形も読めるようになった
@@ -172,10 +172,10 @@ def _siglip2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "## Usage",
         "",
         "```ts",
-        'import { Siglip2Pipeline } from "jsr:@karume/models";',
+        'import { Pipeline } from "jsr:@karume/models/siglip2";',
         "",
         *from_pretrained(
-            "Siglip2Pipeline",
+            "Pipeline",
             repo,
             [
                 f'  // model: "{model_name}", // default — available: {model_names}',

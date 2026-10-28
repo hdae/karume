@@ -3,7 +3,7 @@
 配るのはグラフ 1 本（`text_encoder` — 系列 `umt5-xxl-i8-dyn` の i8 の S 形容器）と、本家の
 トークナイザを 1 本の表に焼いた資産 `tokenizer`（系列 `umt5-xxl-tokenizer` — 形式
 `karume-umt5-tokenizer/1`・書き手は `wan.umt5_xxl_tokenizer`）。トークナイザを持つので Wan なしで
-単体で使える（TS の `@karume/models/umt5` の `Umt5Encoder`）。Wan の前処理の表と束ねた
+単体で使える（TS の `@karume/models/umt5` の `Encoder`）。Wan の前処理の表と束ねた
 トークナイザ資産（`karume-wan-umt5-tokenizer/1`）は従来どおり Wan のリポの資産（同 C）。Wan の配布形
 `karume-wan2.2` はこのリポの容器を越境参照する（同 A — ADR 0109 決定 3。Wan2.1 は公開しない）。
 
@@ -77,7 +77,7 @@ from wan.umt5_intake import (
 )
 
 #: パイプライン契約（ADR 0041 §2 — モデル単位）。読む TS の家族は `@karume/models/umt5` の
-#: `Umt5Encoder`（ADR 0119 追記 D の時点では部品の役を名乗るだけだった）。Wan の読み手は越境参照の
+#: `umt5.Encoder`（ADR 0119 追記 D の時点では部品の役を名乗るだけだった）。Wan の読み手は越境参照の
 #: 先の `karume.json` を読まない。
 UMT5_PIPELINE = "umt5-encoder/1"
 
@@ -99,7 +99,7 @@ UMT5_MODEL_FILE = "model.krm"
 #: 同じキーで越境参照する（`wan.distribution.WAN_TEXT_ENCODER_ROLE`）。
 UMT5_ROLE = "text_encoder"
 
-#: トークナイザ資産の役割名 = manifest の `assets` のキー（TS の `Umt5Encoder` が読む名前）。
+#: トークナイザ資産の役割名 = manifest の `assets` のキー（TS の `umt5.Encoder` が読む名前）。
 UMT5_TOKENIZER_ROLE = "tokenizer"
 
 #: 出力の相対 path（**モデルサブツリー内**）。格納ラベルを path に入れるのは Wan の DiT と同じ理由
@@ -627,7 +627,7 @@ def _consumer_link() -> str:
 
 
 def _umt5_usage(repo: str) -> list[str]:
-    """Usage: 単体の公開クラス `Umt5Encoder`（`@karume/models/umt5`）の使い方・入力の規則・
+    """Usage: 単体の公開クラス `Encoder`（`@karume/models/umt5`）の使い方・入力の規則・
     この encoder を越境参照する Wan の配布形。
 
     `fromPretrained` の source は他の家族のカードと同じ object ref 形 + pin の席
@@ -641,9 +641,9 @@ def _umt5_usage(repo: str) -> list[str]:
         "## Usage",
         "",
         "```ts",
-        'import { Umt5Encoder } from "jsr:@karume/models/umt5";',
+        'import { Encoder } from "jsr:@karume/models/umt5";',
         "",
-        "const encoder = await Umt5Encoder.fromPretrained({",
+        "const encoder = await Encoder.fromPretrained({",
         f'  repo: "{repo}",',
         *REVISION_PIN_COMMENT,
         "});",
@@ -678,14 +678,15 @@ def _umt5_usage(repo: str) -> list[str]:
         "",
         f"{_consumer_link()} (Wan2.2 TI2V 5B) references this encoder from its own `karume.json`",
         "at a pinned commit of this repository (the size and the SHA-256 of every part are",
-        "declared there too), so `WanTi2vPipeline.fromPretrained` on that repository fetches the",
-        "`text_encoder` from here — you do not pass this repository yourself. It does not use this",
-        "repository's tokenizer: its own tokenizer asset adds Wan's prompt cleaning.",
+        "declared there too), so `Ti2vPipeline.fromPretrained` (`@karume/models/wan`) on that",
+        "repository fetches the `text_encoder` from here — you do not pass this repository",
+        "yourself. It does not use this repository's tokenizer: its own tokenizer asset adds",
+        "Wan's prompt cleaning.",
         "",
         "To run Wan2.2 with a compatible umT5-XXL encoder instead of this one (for example a",
         "fine-tune converted with the Karume export recipe), pass it through the component swap",
         "seat: `components: { text_encoder: { source: { repo, revision } } }` in the options of",
-        "`WanTi2vPipeline.fromPretrained`. Pin the replacement with a commit — a bare repository",
+        "`Ti2vPipeline.fromPretrained`. Pin the replacement with a commit — a bare repository",
         "name follows `main`, so the encoder would move with every push while the Wan manifest",
         'pins this one. The swap needs the GPU text encoder: `textEncoder: "precomputed"` never',
         "loads umT5, so a swap has no effect there. The replacement is admitted only if its graph",
@@ -722,7 +723,7 @@ def render_umt5_model_card(
 ) -> str:
     """umT5-XXL encoder の配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
 
-    `repo` は Usage の `Umt5Encoder.fromPretrained` に綴るこのリポの HF リポ ID。
+    `repo` は Usage の `Encoder.fromPretrained` に綴るこのリポの HF リポ ID。
     """
     require_pipeline(manifest, UMT5_SUPPORTED_PIPELINE)
     return render(

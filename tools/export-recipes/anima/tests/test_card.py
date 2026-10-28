@@ -505,19 +505,19 @@ class TestSections:
             ]
 
     def test_it_shows_the_minimal_typescript_entry_point(self, card: str) -> None:
-        assert "AnimaPipeline.fromPretrained({" in card
+        assert "await Pipeline.fromPretrained({" in card
         assert f'  repo: "{REPO}",' in card
         assert "@karume/models" in card
         assert "using pipeline" in card
 
     def test_the_usage_snippet_declares_the_pipeline_with_await_using(self, card: str) -> None:
-        """`AnimaPipeline` は `[Symbol.asyncDispose]` だけを持つ — 同期の `using` は宣言で落ちる。
+        """`anima.Pipeline` は `[Symbol.asyncDispose]` だけを持つ — 同期の `using` は宣言で落ちる。
 
         部分一致（`"using pipeline" in card`）は `await using` でも `using` でも通るので、
         宣言行を丸ごと突き合わせる。
         """
         lines = card.splitlines()
-        assert "await using pipeline = await AnimaPipeline.fromPretrained({" in lines
+        assert "await using pipeline = await Pipeline.fromPretrained({" in lines
         assert not any(line.startswith("using pipeline") for line in lines)
 
     def test_the_usage_snippet_offers_the_revision_pin(self, card: str) -> None:

@@ -1201,7 +1201,7 @@ class TestTheModelCard:
         out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert f'repo: "hdae/{WAN_REPO_NAME}"' in card
-        assert "WanPipeline.fromPretrained(" in card
+        assert "await Pipeline.fromPretrained(" in card
         assert "fromAssets" not in card
 
     def test_the_defaults_come_from_the_manifest(self, assembled) -> None:
@@ -2186,8 +2186,9 @@ class TestTheWan22ModelCard:
         assert f"base_model: {upstream.repo}" in card
         assert f"at commit `{upstream.revision}`" in card
         assert f'repo: "hdae/{WAN22_REPO_NAME}"' in card
-        assert "WanTi2vPipeline.fromPretrained(" in card
-        assert "import { encodePng, wanFrameToRgba, WanTi2vPipeline }" in card
+        assert "await Ti2vPipeline.fromPretrained(" in card
+        assert 'import { encodePng } from "jsr:@karume/models";' in card
+        assert 'import { frameToRgba, Ti2vPipeline } from "jsr:@karume/models/wan";' in card
         assert "- **size**: 1280 × 704 or 704 × 1280." in card
         assert "- **frames**: 4n+1 from 5 to 121." in card
         assert "  // width: 1280, height: 704, // or 704 × 1280" in card
@@ -2255,7 +2256,7 @@ class TestTheWan22ModelCard:
         # 2.2 にも Chrome の通しはある（121 フレーム）が、2.1 のブラウザの通しの文は写さない。
         assert "46.1 minutes" not in card
         assert "`f16` quant with the precomputed embeddings" not in " ".join(card.split())
-        assert "WanPipeline.fromPretrained(" not in card
+        assert re.search(r"(?<!\w)Pipeline\.fromPretrained\(", card) is None
 
     def test_it_attributes_the_text_assets_to_the_wan21_checkpoint(self, assembled22) -> None:
         out_dir, _ = assembled22
@@ -2302,7 +2303,7 @@ class TestTheWan22ModelCard:
         # 1 forward は段 2（2026-10-04）・通しは 2026-10-05。49 フレームは製品の class でない。
         assert "timed on its own on 2026-10-04" in prose
         assert "on 2026-10-05, at 1280 × 704 with 50 steps" in prose
-        assert "The 33-frame runs went through `WanTi2vPipeline`" in prose
+        assert "The 33-frame runs went through `Ti2vPipeline`" in prose
         assert "the 49-frame runs drove the same pipeline stages from a development script" in prose
         assert "4.36 GiB at 33 frames and 4.51 GiB at 49 frames with either quant" in prose
         assert "4.52" not in prose
@@ -2521,7 +2522,7 @@ def _frontmatter(card: str) -> str:
 class TestTheWan22ImageToVideoCard:
     """Wan2.2 のカードの I2V の記述（ADR 0121 段 9c）: 入力（`image` / `fit`）・使い方・検証の
     数値（追記「段 9a の結果」「段 9b の結果」とテストの定数の写し）・品質の数の範囲（T2V で
-    測った）。Wan2.1 のカードには I2V の行が 1 つも出ない（2.1 の `WanPipeline` は `image` を
+    測った）。Wan2.1 のカードには I2V の行が 1 つも出ない（2.1 の `wan.Pipeline` は `image` を
     拒む）。"""
 
     def test_it_tags_image_to_video_and_keeps_the_single_pipeline_tag(self, assembled22) -> None:

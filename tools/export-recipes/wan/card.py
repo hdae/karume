@@ -72,7 +72,7 @@ WAN_FRAMES = (5, 81)
 WAN_DEFAULT_SIZE = (832, 480)
 WAN_DEFAULT_FRAMES = 33
 
-#: テキストの経路を選ぶ構築時のオプション（TS 側 `WanPipeline.fromPretrained` の第 2 引数 —
+#: テキストの経路を選ぶ構築時のオプション（TS 側 `wan.Pipeline.fromPretrained` の第 2 引数 —
 #: ADR 0119 追記 B。manifest に無い事実）。既定は GPU 経路（決定 7）。
 WAN_TEXT_ENCODER_OPTION = "textEncoder"
 WAN_TEXT_ENCODER_PATHS = ("gpu", "precomputed")
@@ -145,7 +145,7 @@ WAN22_DEFAULT_FRAMES = 33
 #: VAE の段 / 壁）。33 / 49 フレームの行は B570・Deno 2.9.6・2026-10-05・precomputed の経路
 #: （VRAM の山は fdinfo の DiT の段）。121 フレームの行だけは GPU も測り方も違う（下の項）。
 #:
-#: - 33 フレームの行は 2 席とも**製品の class**（`WanTi2vPipeline`）の opt-in の通し（ADR 0121 追記
+#: - 33 フレームの行は 2 席とも**製品の class**（`wan.Ti2vPipeline`）の opt-in の通し（ADR 0121 追記
 #:   「段 6 の結果」の「50 ステップの通し」— 参照席 2,142.9 / 439.2 / 2,582.5 s・7.859 GiB、実用席
 #:   959.9 / 438.5 / 1,398.8 s・7.843 GiB）。
 #: - 49 フレームの行は、製品の class ではなく同じ製品部品を呼ぶ**生成スクリプト**の通し（追記
@@ -187,9 +187,9 @@ WAN22_RESOURCES: Mapping[str, tuple[tuple[int, str, str, str, str, str], ...]] =
     "f16+dit8-a8-attn8-online": ((121, "21.7 s", "9.01 GiB", "not run", "not run", "not run"),),
 }
 
-#: Wan2.2 の Usage が呼ぶ公開 class（`@karume/models`）。資源の注も名指しする（33 フレームの通しを
-#: 回した class）。
-WAN22_PIPELINE_CLASS = "WanTi2vPipeline"
+#: Wan2.2 の Usage が呼ぶ公開 class（`@karume/models/wan`）。資源の注も名指しする（33 フレームの
+#: 通しを回した class）。
+WAN22_PIPELINE_CLASS = "Ti2vPipeline"
 
 #: Wan2.2 の実用席の step 1 の潜在の相対 RMS 誤差（参照席 `f16+dit8` に対して — ADR 0121 段 7 の
 #: 自機 A/B 門の実測・RTX 3080 Ti・2026-10-09）。`(席, 参照席, 33 フレーム, 121 フレーム)`。
@@ -254,7 +254,7 @@ class WanCard:
     #: 「Resources」節（実測の表と注 — ADR 0089 決定 3）。
     resources: Callable[[Mapping[str, Any]], list[str]]
     #: 以下は I2V を受ける世代（Wan2.2）だけが持つ行。既定は空 — Wan2.1 のカードはバイト不変
-    #: （2.1 の `WanPipeline` は `image` を `ModelInputError` で拒む — ADR 0121 段 9b）。
+    #: （2.1 の `wan.Pipeline` は `image` を `ModelInputError` で拒む — ADR 0121 段 9b）。
     #: frontmatter の tags のうち pipeline tag の後に足すもの（pipeline tag は HF では 1 つなので
     #: text-to-video のまま — I2V は tag で名乗る）。
     extra_tags: tuple[str, ...] = ()
@@ -581,7 +581,8 @@ def _wan_usage(manifest: Mapping[str, Any], repo: str, card: WanCard) -> list[st
         "## Usage",
         "",
         "```ts",
-        f'import {{ encodePng, wanFrameToRgba, {card.pipeline_class} }} from "jsr:@karume/models";',
+        'import { encodePng } from "jsr:@karume/models";',
+        f'import {{ frameToRgba, {card.pipeline_class} }} from "jsr:@karume/models/wan";',
         "",
         *from_pretrained(
             card.pipeline_class,
@@ -604,7 +605,7 @@ def _wan_usage(manifest: Mapping[str, Any], repo: str, card: WanCard) -> list[st
         "});",
         "",
         "for (let frame = 0; frame < video.frames; frame += 1) {",
-        "  const rgba = wanFrameToRgba(video, frame);",
+        "  const rgba = frameToRgba(video, frame);",
         "  const png = await encodePng(rgba, video.width, video.height);",
         '  await Deno.writeFile(`frame-${String(frame).padStart(2, "0")}.png`, png);',
         "}",
@@ -833,7 +834,7 @@ _WAN22_VERIFICATION = (
 )
 
 #: Wan2.2 の受理する入力のうち I2V の項（`image` / `fit` —
-#: `packages/models/src/wan/ti2v-pipeline.ts` の `WanTi2vGenerateRequest`・門 `plan.ts` の
+#: `packages/models/src/wan/ti2v-pipeline.ts` の `Ti2vGenerateRequest`・門 `plan.ts` の
 #: `planWanRequest`・前処理 `i2v-preprocess.ts`）。寸法の選択は受理集合から公式の比較式
 #: `max(r / rc, rc / r)`・同点は横長（`selectWanI2vSize`）— 受理集合が 2 寸法なら「幅 ≥ 高さ →
 #: 1280×704」と同じ。明示した欄は受理集合に合う寸法でなければ `ModelInputError`。公式は受理集合の
@@ -1305,7 +1306,7 @@ WAN21_CARD = WanCard(
     title="Wan2.1 T2V 1.3B",
     supported_pipeline=WAN_SUPPORTED_PIPELINE,
     models=WAN21_MODELS,
-    pipeline_class="WanPipeline",
+    pipeline_class="Pipeline",
     paper=WAN_PAPER,
     accepted_sizes=WAN_ACCEPTED_SIZES,
     frames=WAN_FRAMES,

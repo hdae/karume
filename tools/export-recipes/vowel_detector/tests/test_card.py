@@ -86,7 +86,7 @@ class TestVowelDetectorEntryPoint:
         """
         card = render_vowel_detector_model_card(_vowel_detector_manifest(), REPO)
         assert "fromAssets" not in card
-        assert "VowelDetectorPipeline.fromPretrained" in card
+        assert "await Pipeline.fromPretrained" in card
 
 
 class TestVowelDetectorLengthRange:

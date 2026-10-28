@@ -511,7 +511,7 @@ def _birefnet_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     進める形。
 
     `segment()` は画像 1 枚しか受けない（解像度はグラフに焼かれていて実行時に選べない —
-    `BirefnetPipeline` の公開面）ので、この pipeline の optional ノブは model / quant の
+    `birefnet.Pipeline` の公開面）ので、この pipeline の optional ノブは model / quant の
     2 つだけである。
 
     NOTE: `fromAssets` は**案内しない**（2026-08-29 裁定）。分割配布形も読めるようになった
@@ -528,10 +528,10 @@ def _birefnet_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "## Usage",
         "",
         "```ts",
-        'import { BirefnetPipeline } from "jsr:@karume/models";',
+        'import { Pipeline } from "jsr:@karume/models/birefnet";',
         "",
         *from_pretrained(
-            "BirefnetPipeline",
+            "Pipeline",
             repo,
             [
                 f'  // model: "{model_name}", // default — available: {model_names}',

@@ -231,10 +231,11 @@ def _irodori_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "## Usage",
         "",
         "```ts",
-        'import { decodeWav, encodeWav, IrodoriPipeline } from "jsr:@karume/models";',
+        'import { decodeWav, encodeWav } from "jsr:@karume/models";',
+        'import { Pipeline } from "jsr:@karume/models/irodori";',
         "",
         *from_pretrained(
-            "IrodoriPipeline",
+            "Pipeline",
             repo,
             [
                 f'  // model: "{model_name}", // default — available: {model_names}',

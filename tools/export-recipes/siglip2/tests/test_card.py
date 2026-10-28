@@ -139,4 +139,4 @@ class TestSiglip2EntryPoint:
         """
         card = render_siglip2_model_card(_siglip2_manifest(), REPO)
         assert "fromAssets" not in card
-        assert "Siglip2Pipeline.fromPretrained" in card
+        assert "await Pipeline.fromPretrained" in card

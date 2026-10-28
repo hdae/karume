@@ -230,10 +230,10 @@ def _gemma4_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "## Usage",
         "",
         "```ts",
-        'import { Gemma4Pipeline } from "jsr:@karume/models/gemma";',
+        'import { Pipeline } from "jsr:@karume/models/gemma";',
         "",
         *from_pretrained(
-            "Gemma4Pipeline",
+            "Pipeline",
             repo,
             [
                 f'  // model: "{model_name}", // default — available: {model_names}',

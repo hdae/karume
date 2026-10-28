@@ -289,10 +289,11 @@ def _usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "## Usage",
         "",
         "```ts",
-        'import { AnimaPipeline, encodePng } from "jsr:@karume/models";',
+        'import { encodePng } from "jsr:@karume/models";',
+        'import { Pipeline } from "jsr:@karume/models/anima";',
         "",
         *from_pretrained(
-            "AnimaPipeline",
+            "Pipeline",
             repo,
             [
                 f'  // model: "{model_name}", // default — available: {model_names}',

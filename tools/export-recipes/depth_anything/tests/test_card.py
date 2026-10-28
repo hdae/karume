@@ -131,4 +131,4 @@ class TestDepthAnythingEntryPoint:
         """
         card = render_depth_anything_model_card(_depth_anything_manifest(), REPO)
         assert "fromAssets" not in card
-        assert "DepthAnythingPipeline.fromPretrained" in card
+        assert "await Pipeline.fromPretrained" in card

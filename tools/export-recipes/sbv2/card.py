@@ -375,10 +375,11 @@ def _sbv2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "```ts",
         'import { analyzeWithWords } from "jsr:@hdae/yomi";',
         'import { getDictionary } from "jsr:@hdae/yomi/loader";',
-        'import { encodeWav, Sbv2Pipeline, toSbv2Utterance } from "jsr:@karume/models";',
+        'import { encodeWav } from "jsr:@karume/models";',
+        'import { Pipeline, toUtterance } from "jsr:@karume/models/sbv2";',
         "",
         *from_pretrained(
-            "Sbv2Pipeline",
+            "Pipeline",
             repo,
             [
                 f'  // model: "{model_name}", // default — available: {model_names}',
@@ -388,7 +389,7 @@ def _sbv2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         ),
         "",
         "// Text analysis (readings and accents) is the caller's job:",
-        "const utterance = toSbv2Utterance(analyzeWithWords(await getDictionary(),"
+        "const utterance = toUtterance(analyzeWithWords(await getDictionary(),"
         f' "{SBV2_DEMO_TEXT}"));',
         "",
         "const audio = await pipeline.generate(utterance, {",

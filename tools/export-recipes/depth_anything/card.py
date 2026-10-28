@@ -191,7 +191,7 @@ def _depth_anything_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     進める形。
 
     `estimate()` は画像 1 枚しか受けない（解像度は事前学習の正方形でグラフに焼かれていて実行時
-    に選べない — `DepthAnythingPipeline` の公開面）ので、この pipeline の optional ノブは
+    に選べない — `depthAnything.Pipeline` の公開面）ので、この pipeline の optional ノブは
     model / quant の 2 つだけである。
 
     NOTE: `fromAssets` は**案内しない**（2026-08-29 裁定）。分割配布形も読めるようになった
@@ -208,10 +208,10 @@ def _depth_anything_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "## Usage",
         "",
         "```ts",
-        'import { DepthAnythingPipeline } from "jsr:@karume/models";',
+        'import { Pipeline } from "jsr:@karume/models/depth-anything";',
         "",
         *from_pretrained(
-            "DepthAnythingPipeline",
+            "Pipeline",
             repo,
             [
                 f'  // model: "{model_name}", // default — available: {model_names}',

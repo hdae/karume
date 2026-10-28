@@ -170,7 +170,7 @@ def _vowel_detector_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     進める形。
 
     `detect()` は波形 1 本しか受けない（後処理の閾値も含めて実行時に選べる欄が無い —
-    `VowelDetectorPipeline` の公開面）ので、この pipeline の optional ノブは model / quant の
+    `vowelDetector.Pipeline` の公開面）ので、この pipeline の optional ノブは model / quant の
     2 つだけである。
 
     NOTE: `fromAssets` は**案内しない**（2026-08-29 裁定）。分割配布形も読めるようになった
@@ -187,10 +187,10 @@ def _vowel_detector_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "## Usage",
         "",
         "```ts",
-        'import { VowelDetectorPipeline } from "jsr:@karume/models";',
+        'import { Pipeline } from "jsr:@karume/models/vowel-detector";',
         "",
         *from_pretrained(
-            "VowelDetectorPipeline",
+            "Pipeline",
             repo,
             [
                 f'  // model: "{model_name}", // default — available: {model_names}',

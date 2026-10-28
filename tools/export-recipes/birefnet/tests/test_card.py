@@ -246,7 +246,7 @@ class TestBirefnetEntryPoint:
         """
         card = render_birefnet_model_card(_birefnet_manifest(), REPO, CHECKPOINT)
         assert "fromAssets" not in card
-        assert "BirefnetPipeline.fromPretrained" in card
+        assert "await Pipeline.fromPretrained" in card
 
 
 #: checkpoint × 実測した解像度（実行資源の注記のパラメータ）。

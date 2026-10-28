@@ -242,8 +242,9 @@ class TestSbv2Sections:
         assert "cc-by-sa-4.0" in sbv2_card
 
     def test_it_shows_the_minimal_typescript_entry_point(self, sbv2_card: str) -> None:
-        """実在する公開面だけを綴る（`packages/models/mod.ts` の 3 名 + 実シグネチャ）。"""
-        assert "Sbv2Pipeline.fromPretrained({" in sbv2_card
+        """実在する公開面だけを綴る（`packages/models/mod.ts` の `encodeWav` +
+        `packages/models/sbv2.ts` の 2 名 + 実シグネチャ）。"""
+        assert "await Pipeline.fromPretrained({" in sbv2_card
         assert f'  repo: "{REPO}",' in sbv2_card
         assert '  // revision: "<full commit sha>",' in sbv2_card
         assert "@karume/models" in sbv2_card
@@ -252,9 +253,9 @@ class TestSbv2Sections:
         assert "const audio = await pipeline.generate(utterance, {" in sbv2_card
 
     def test_the_usage_snippet_declares_the_pipeline_with_await_using(self, sbv2_card: str) -> None:
-        """`Sbv2Pipeline` は `[Symbol.asyncDispose]` だけを持つ — 同期の `using` は宣言で落ちる。"""
+        """`sbv2.Pipeline` は `[Symbol.asyncDispose]` だけを持つ — 同期 `using` は宣言で落ちる。"""
         lines = sbv2_card.splitlines()
-        assert "await using pipeline = await Sbv2Pipeline.fromPretrained({" in lines
+        assert "await using pipeline = await Pipeline.fromPretrained({" in lines
         assert not any(line.startswith("using pipeline") for line in lines)
 
     def test_the_usage_snippet_hands_generate_an_analyzed_utterance(self, sbv2_card: str) -> None:
@@ -263,12 +264,10 @@ class TestSbv2Sections:
         生テキストを options に入れる形（`generate({ text })`）は型が通らない。
         """
         lines = sbv2_card.splitlines()
+        assert 'import { encodeWav } from "jsr:@karume/models";' in lines
+        assert 'import { Pipeline, toUtterance } from "jsr:@karume/models/sbv2";' in lines
         assert (
-            'import { encodeWav, Sbv2Pipeline, toSbv2Utterance } from "jsr:@karume/models";'
-            in lines
-        )
-        assert (
-            "const utterance = toSbv2Utterance(analyzeWithWords(await getDictionary(),"
+            "const utterance = toUtterance(analyzeWithWords(await getDictionary(),"
             f' "{SBV2_DEMO_TEXT}"));' in lines
         )
         assert not any(line.lstrip().startswith("text:") for line in lines)
@@ -674,4 +673,4 @@ class TestSbv2EntryPoint:
         """
         card = _profile_card(SBV2_CARD_PROFILES[name])
         assert "fromAssets" not in card
-        assert "Sbv2Pipeline.fromPretrained" in card
+        assert "await Pipeline.fromPretrained" in card

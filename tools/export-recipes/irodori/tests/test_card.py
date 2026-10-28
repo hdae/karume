@@ -113,15 +113,15 @@ class TestIrodoriEntryPoint:
         """
         card = render_irodori_model_card(_irodori_manifest(), REPO)
         assert "fromAssets" not in card
-        assert "IrodoriPipeline.fromPretrained" in card
+        assert "await Pipeline.fromPretrained" in card
 
     def test_the_usage_snippet_declares_the_pipeline_with_await_using(self) -> None:
-        """`IrodoriPipeline` は `[Symbol.asyncDispose]` だけを持つ（同期 `using` は宣言で落ちる）。
+        """`irodori.Pipeline` は `[Symbol.asyncDispose]` だけを持つ（同期 `using` は宣言で落ちる）。
 
         部分一致は `await using` でも `using` でも通るので、宣言行を丸ごと突き合わせる。
         """
         lines = render_irodori_model_card(_irodori_manifest(), REPO).splitlines()
-        assert "await using pipeline = await IrodoriPipeline.fromPretrained({" in lines
+        assert "await using pipeline = await Pipeline.fromPretrained({" in lines
         assert not any(line.startswith("using pipeline") for line in lines)
 
 
