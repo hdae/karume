@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-/** What a running task reports (all optional; the status card shows what is there). */
+import type { GpuHandle } from "@/hooks/use-gpu";
+
+/**
+ * What a running task reports (all optional; the status card shows what is there). `cancellable:
+ * false` marks a stage that takes no signal (a Session build, a GPU run): Cancel is disabled until
+ * the next report, and `cancelNote` — required with it — says why and when a cancel would work.
+ */
 export type RunProgress = {
   /** What runs now: a stage, "loading", "prefill"… */
   readonly stage?: string;
@@ -8,7 +14,10 @@ export type RunProgress = {
   readonly count?: { readonly done: number; readonly total: number; readonly unit: string };
   /** One more line of detail. */
   readonly note?: string;
-};
+} & (
+  | { readonly cancellable?: undefined; readonly cancelNote?: never }
+  | { readonly cancellable: false; readonly cancelNote: string }
+);
 
 export type RunTaskState<Result> =
   | { readonly kind: "idle" }
@@ -17,7 +26,10 @@ export type RunTaskState<Result> =
   | { readonly kind: "cancelled" }
   | { readonly kind: "error"; readonly error: unknown };
 
-/** What a task gets: the signal to pass on (Cancel and leaving the page abort it) and the reporter. */
+/**
+ * What a task gets: the signal to pass on (Cancel, leaving the page and re-acquiring the GPU abort
+ * it) and the reporter.
+ */
 export type RunTaskContext = {
   readonly signal: AbortSignal;
   readonly report: (progress: RunProgress) => void;
@@ -47,8 +59,13 @@ const isCancellation = (error: unknown, signal: AbortSignal): boolean =>
  * ticker, Cancel, and an abort when the page is left. A rejection after Cancel is `cancelled` only
  * when it is the cancellation itself (the signal's reason or an `AbortError`); anything else stays an
  * error, so a real failure is never hidden behind a Cancel.
+ *
+ * `gpu` is the page's GPU (useGpu): every run goes through its `track`, so the device outlives it,
+ * and a run is aborted when its lease ends (the page is left, or the GPU is acquired again), so a
+ * stalled run does not hold up the destroy and the next acquisition until someone presses Cancel.
  */
-export const useRunTask = <Result>(): RunTask<Result> => {
+export const useRunTask = <Result>(gpu: Pick<GpuHandle, "track" | "lease">): RunTask<Result> => {
+  const { track, lease } = gpu;
   const [state, setState] = useState<RunTaskState<Result>>({ kind: "idle" });
   const [now, setNow] = useState(() => performance.now());
   const controllerRef = useRef<AbortController | undefined>(undefined);
@@ -59,8 +76,15 @@ export const useRunTask = <Result>(): RunTask<Result> => {
     const timer = setInterval(() => setNow(performance.now()), 250);
     return () => clearInterval(timer);
   }, [running]);
-  // Leaving the page cancels a run.
-  useEffect(() => () => controllerRef.current?.abort(new Error("The page was left")), []);
+  // The end of the lease (leaving the page, re-acquiring the GPU) cancels a run, in the same commit
+  // as useGpu's release: before the destroy waits for the run.
+  useEffect(
+    () => () =>
+      controllerRef.current?.abort(
+        new Error("The GPU was released (the page was left or the GPU is acquired again)"),
+      ),
+    [lease],
+  );
 
   const start = useCallback(
     async (task: (context: RunTaskContext) => Promise<Result>): Promise<void> => {
@@ -75,7 +99,7 @@ export const useRunTask = <Result>(): RunTask<Result> => {
         setState({ kind: "running", startedAt, progress });
       };
       try {
-        const result = await task({ signal: controller.signal, report });
+        const result = await track(task({ signal: controller.signal, report }));
         setState({ kind: "done", result, seconds: (performance.now() - startedAt) / 1000 });
       } catch (error) {
         setState(
@@ -87,7 +111,7 @@ export const useRunTask = <Result>(): RunTask<Result> => {
         controllerRef.current = undefined;
       }
     },
-    [],
+    [track],
   );
   const cancel = useCallback(
     () => controllerRef.current?.abort(new Error("Cancelled by the user")),

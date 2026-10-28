@@ -1,12 +1,16 @@
 /**
  * Helpers for the run record a model page shows and saves: counting non-finite values, turning
- * frames into one RGBA buffer and hashing it, summarizing Session diagnostics (build cost, the
- * pipelines of the last run, GPU time per kernel), the device facts and the per-step timeline. Pure
- * functions (WebCrypto is the only platform API), so they run the same in the browser and in
- * `vp test`.
+ * frames into one RGBA buffer and hashing it (and the sha256 of f32 values and RGB8 input), the
+ * source a run read, summarizing Session diagnostics (build cost, the pipelines of the last run, a
+ * run's share of the submit counts, GPU time per kernel), the device facts, the stage clock and the
+ * per-step timeline. Pure functions (WebCrypto is the only platform API), so they run the same in
+ * the browser and in `vp test`.
  */
 
+import type { HubRepoRef } from "@karume/hub";
 import type { SessionBuildStats, SessionDiagnostics } from "@karume/runtime";
+
+import type { PipelineSource } from "@/lib/distributions";
 
 /** The number of NaN / ±Infinity elements. */
 export const countNonFinite = (data: Float32Array): number => {
@@ -60,6 +64,31 @@ export const sha256Hex = async (
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
 };
 
+/**
+ * The bytes of an f32 array as they sit in memory (a view, no copy). Every platform WebGPU runs on
+ * is little-endian, so these are the little-endian bytes and their sha256 compares across machines.
+ */
+export const f32Bytes = (values: Float32Array<ArrayBuffer>): Uint8Array<ArrayBuffer> =>
+  new Uint8Array(values.buffer, values.byteOffset, values.byteLength);
+
+/** sha256 of the f32 values ({@link f32Bytes}). */
+export const f32Sha256 = (values: Float32Array<ArrayBuffer>): Promise<string> =>
+  sha256Hex(f32Bytes(values));
+
+/**
+ * sha256 of an RGB8 image's bytes as handed to a pipeline. Copied once: the families type the pixels
+ * over any `ArrayBufferLike`, and WebCrypto takes no shared buffer.
+ */
+export const rgb8Sha256 = (image: { readonly data: Uint8Array }): Promise<string> =>
+  sha256Hex(new Uint8Array(image.data));
+
+/** The `source` field of a record: the cached route's repo reference, or `direct`. */
+export type SourceRecord = { readonly kind: "direct" } | ({ readonly kind: "cached" } & HubRepoRef);
+
+/** The cache generation is the page's rebuild counter, not a fact of the run, so it is left out. */
+export const sourceRecord = (source: PipelineSource): SourceRecord =>
+  source.kind === "cached" ? { kind: "cached", ...source.ref } : { kind: "direct" };
+
 /** What the record keeps of one component's Session diagnostics. */
 export type DiagnosticsSummary = {
   /** How many runs reported diagnostics (one Session run = one report). */
@@ -89,6 +118,51 @@ export const summarizeDiagnostics = (
   dispatchCount: diagnostics.submit.dispatchCount,
   geometryProfile: diagnostics.geometryProfile,
 });
+
+/** Submit and dispatch counts as a Session diagnostics report carries them (totals over its life). */
+export type SubmitCounts = { readonly submitCount: number; readonly dispatchCount: number };
+
+/** The counts of a Session that has not run yet (the runtime's counters start at 0). */
+export const NO_SUBMITS: SubmitCounts = { submitCount: 0, dispatchCount: 0 };
+
+/**
+ * The submits and dispatches between two reports of one Session. The Session's scheduler counts them
+ * over its whole life (it never resets them; only the GPU timing is per run), so a page that keeps
+ * one Session for many runs records a run's share as the difference. Throws when a count went down:
+ * the two reports came from different Sessions.
+ */
+export const submitCountsSince = (before: SubmitCounts, after: SubmitCounts): SubmitCounts => {
+  const submitCount = after.submitCount - before.submitCount;
+  const dispatchCount = after.dispatchCount - before.dispatchCount;
+  if (submitCount < 0 || dispatchCount < 0) {
+    throw new Error(
+      `A Session's submit counts went down (submits ${before.submitCount} → ${after.submitCount}, dispatches ${before.dispatchCount} → ${after.dispatchCount}): the two reports are not from one Session`,
+    );
+  }
+  return { submitCount, dispatchCount };
+};
+
+/**
+ * Turns the reports of one Session (one report per Session run) into per-run reports: the returned
+ * function replaces the counts with {@link submitCountsSince} the previous report it saw; the first
+ * report counts from the Session's creation. Make one per Session.
+ */
+export const perRunSubmitCounts = (): (<Report extends { readonly submit: SubmitCounts }>(
+  report: Report,
+) => Report) => {
+  let previous = NO_SUBMITS;
+  return (report) => {
+    const run = {
+      ...report,
+      submit: { ...report.submit, ...submitCountsSince(previous, report.submit) },
+    };
+    previous = {
+      submitCount: report.submit.submitCount,
+      dispatchCount: report.submit.dispatchCount,
+    };
+    return run;
+  };
+};
 
 /** The adapter fields a record names (`GPUAdapterInfo` — `description` is the driver on Dawn). */
 export type AdapterSummary = {
@@ -361,6 +435,38 @@ export const summarizeDevice = (gpu: {
     maxBufferSize: gpu.limits.maxBufferSize,
   },
 });
+
+/** `performance.now()` readings of each stage's start and end (from a pipeline's `stage` events). */
+export type StageTimes<Stage extends string> = Partial<
+  Record<Stage, { readonly start: number; readonly end?: number }>
+>;
+
+/**
+ * Folds one `stage` event into the clock: a start sets the stage's start, an end its end (an end
+ * without a start counts from the end itself).
+ */
+export const foldStageEvent = <Stage extends string>(
+  times: StageTimes<Stage>,
+  stage: Stage,
+  at: "start" | "end",
+  now: number,
+): StageTimes<Stage> =>
+  at === "start"
+    ? { ...times, [stage]: { start: now } }
+    : { ...times, [stage]: { start: times[stage]?.start ?? now, end: now } };
+
+/** Seconds of every stage that ended, in `order`. */
+export const stageSecondsOf = <Stage extends string>(
+  times: StageTimes<Stage>,
+  order: readonly Stage[],
+): Partial<Record<Stage, number>> => {
+  const result: Partial<Record<Stage, number>> = {};
+  for (const stage of order) {
+    const clock = times[stage];
+    if (clock?.end !== undefined) result[stage] = seconds(clock.end - clock.start);
+  }
+  return result;
+};
 
 /**
  * Seconds between consecutive marks (`performance.now()` milliseconds), the first measured from

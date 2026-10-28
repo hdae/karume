@@ -155,7 +155,7 @@ export const AttentionBenchPage = () => {
 };
 
 const BenchBody = ({ timestamps }: { timestamps: boolean }) => {
-  const { state: gpuState, reacquire } = useGpu(timestamps ? TIMED_GPU : UNTIMED_GPU);
+  const { state: gpuState, lease, reacquire, track } = useGpu(timestamps ? TIMED_GPU : UNTIMED_GPU);
   const gpu = gpuState.kind === "ready" ? gpuState.gpu : undefined;
   const [form, setForm] = useState<Form>(INITIAL_FORM);
   const [run, setRun] = useState<RunState>({ kind: "idle" });
@@ -169,8 +169,15 @@ const BenchBody = ({ timestamps }: { timestamps: boolean }) => {
     const timer = setInterval(() => setNow(performance.now()), 500);
     return () => clearInterval(timer);
   }, [running]);
-  // Leaving the page aborts a run (the GPU is destroyed on unmount by useGpu).
-  useEffect(() => () => controllerRef.current?.abort(new Error("The page was left")), []);
+  // Leaving the page or re-acquiring the GPU (the lease ends) aborts a run; useGpu destroys the GPU
+  // once the tracked run has settled.
+  useEffect(
+    () => () =>
+      controllerRef.current?.abort(
+        new Error("The GPU was released (the page was left or the GPU is acquired again)"),
+      ),
+    [lease],
+  );
 
   const rowsOverride = form.rows.trim() === "" ? undefined : positiveInteger(form.rows);
   const rounds = positiveInteger(form.rounds);
@@ -193,20 +200,22 @@ const BenchBody = ({ timestamps }: { timestamps: boolean }) => {
     setNow(startedAt);
     setRun({ kind: "running", startedAt, status: "starting", done: [], total: shapes.length });
     try {
-      const bench = await runAttentionRouteBench(gpu, {
-        shapes,
-        rounds,
-        quantization: form.quantization,
-        signal: controller.signal,
-        onProgress: (progress) =>
-          setRun((current) =>
-            current.kind !== "running"
-              ? current
-              : progress.kind === "status"
-                ? { ...current, status: progress.message }
-                : { ...current, done: [...current.done, progress.result] },
-          ),
-      });
+      const bench = await track(
+        runAttentionRouteBench(gpu, {
+          shapes,
+          rounds,
+          quantization: form.quantization,
+          signal: controller.signal,
+          onProgress: (progress) =>
+            setRun((current) =>
+              current.kind !== "running"
+                ? current
+                : progress.kind === "status"
+                  ? { ...current, status: progress.message }
+                  : { ...current, done: [...current.done, progress.result] },
+            ),
+        }),
+      );
       setRecord({
         format: RECORD_FORMAT,
         page: "attention-bench",

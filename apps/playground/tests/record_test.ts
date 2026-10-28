@@ -2,15 +2,26 @@ import { createHash } from "node:crypto";
 import { wanFrameToRgba } from "@karume/models/wan";
 import { describe, expect, it } from "vite-plus/test";
 
+import type { PipelineSource } from "../src/lib/distributions.ts";
 import {
   attentionPipelines,
   buildCostOf,
   countNonFinite,
+  f32Bytes,
+  f32Sha256,
   foldComponentDiagnostics,
+  foldStageEvent,
   intervalSeconds,
+  NO_SUBMITS,
+  perRunSubmitCounts,
   pipelineOp,
+  rgb8Sha256,
   sha256Hex,
+  sourceRecord,
   stackRgbaFrames,
+  type StageTimes,
+  stageSecondsOf,
+  submitCountsSince,
   summarizeDevice,
   summarizeDiagnostics,
   summarizeIntervals,
@@ -343,5 +354,171 @@ describe("the timeline", () => {
   it("has no spread for a single interval and no summary for none", () => {
     expect(summarizeIntervals([7])).toEqual({ first: 7 });
     expect(summarizeIntervals([])).toBeUndefined();
+  });
+});
+
+describe("f32Bytes / f32Sha256", () => {
+  it("views exactly the values' bytes, even inside a larger buffer", () => {
+    const backing = new Float32Array([9, 1.5, -2, 9]);
+    const bytes = f32Bytes(backing.subarray(1, 3));
+    expect(bytes.byteLength).toBe(8);
+    expect(Array.from(new Float32Array(bytes.slice().buffer))).toEqual([1.5, -2]);
+  });
+
+  it("hashes the little-endian bytes of the f32 values, not the whole buffer", async () => {
+    const view = new Float32Array([9, 1, 0.5, 9]).subarray(1, 3);
+    expect(Array.from(f32Bytes(view))).toEqual([0, 0, 0x80, 0x3f, 0, 0, 0, 0x3f]);
+    // sha256 of 0000803f0000003f (Node's crypto as the oracle).
+    expect(await f32Sha256(view)).toBe(
+      createHash("sha256")
+        .update(Uint8Array.of(0, 0, 0x80, 0x3f, 0, 0, 0, 0x3f))
+        .digest("hex"),
+    );
+  });
+
+  it("writes little-endian f32 (1.0 = 00 00 80 3f, -2 = 00 00 00 c0)", () => {
+    expect([...f32Bytes(new Float32Array([1, -2]))]).toEqual([
+      0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0xc0,
+    ]);
+  });
+
+  it("gives the empty sha256 for no values", async () => {
+    expect(await f32Sha256(new Float32Array(0))).toBe(
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    );
+  });
+
+  it("tells one changed sample apart", async () => {
+    const left = await f32Sha256(new Float32Array([0.1, 0.2]));
+    const right = await f32Sha256(new Float32Array([0.1, 0.2000001]));
+    expect(left).not.toBe(right);
+  });
+
+  it("tells -0 from 0 (the bytes differ, so a sign flip shows in the hash)", async () => {
+    expect(await f32Sha256(new Float32Array([0]))).not.toBe(
+      await f32Sha256(new Float32Array([-0])),
+    );
+  });
+});
+
+describe("rgb8Sha256", () => {
+  it("hashes only the image's bytes when its data is a view into a larger buffer", async () => {
+    // A 2×1 image (6 bytes) in the middle of a 10-byte buffer.
+    const data = new Uint8Array([9, 9, 0, 0, 0x80, 0x3f, 0, 0, 9, 9]).subarray(2, 8);
+    expect(await rgb8Sha256({ data })).toBe(
+      createHash("sha256")
+        .update(Uint8Array.of(0, 0, 0x80, 0x3f, 0, 0))
+        .digest("hex"),
+    );
+  });
+});
+
+describe("sourceRecord", () => {
+  it("keeps the cached route's repo reference (not the cache generation), and nothing for direct", () => {
+    const cached: PipelineSource = {
+      kind: "cached",
+      ref: {
+        repo: "hdae/karume-depth-anything-v2",
+        revision: "a".repeat(40),
+        hubUrl: "http://x/hf",
+      },
+      cacheGeneration: 3,
+    };
+    expect(sourceRecord(cached)).toEqual({
+      kind: "cached",
+      repo: "hdae/karume-depth-anything-v2",
+      revision: "a".repeat(40),
+      hubUrl: "http://x/hf",
+    });
+    expect(sourceRecord({ kind: "direct" })).toEqual({ kind: "direct" });
+  });
+});
+
+describe("submitCountsSince", () => {
+  it("is the submits and dispatches between two reports of one Session", () => {
+    expect(
+      submitCountsSince(
+        { submitCount: 3, dispatchCount: 120 },
+        { submitCount: 5, dispatchCount: 200 },
+      ),
+    ).toEqual({ submitCount: 2, dispatchCount: 80 });
+    expect(submitCountsSince(NO_SUBMITS, { submitCount: 2, dispatchCount: 60 })).toEqual({
+      submitCount: 2,
+      dispatchCount: 60,
+    });
+  });
+
+  it("throws when a count went down (the reports came from different Sessions)", () => {
+    expect(() =>
+      submitCountsSince(
+        { submitCount: 30, dispatchCount: 1200 },
+        { submitCount: 2, dispatchCount: 60 },
+      ),
+    ).toThrow(/went down/);
+  });
+});
+
+describe("perRunSubmitCounts", () => {
+  const report = (submitCount: number, dispatchCount: number) => ({
+    submit: { submitCount, dispatchCount, measuredCount: submitCount },
+    geometryProfile: "default",
+  });
+
+  it("gives each report of one Session the counts of its own run, not the Session's totals", () => {
+    const perRun = perRunSubmitCounts();
+    // A Session that submits 2 and dispatches 300 per run reports 2/300, 4/600, 6/900 over its life.
+    expect([perRun(report(2, 300)), perRun(report(4, 600)), perRun(report(6, 900))]).toEqual([
+      report(2, 300),
+      { ...report(2, 300), submit: { submitCount: 2, dispatchCount: 300, measuredCount: 4 } },
+      { ...report(2, 300), submit: { submitCount: 2, dispatchCount: 300, measuredCount: 6 } },
+    ]);
+  });
+
+  it("keeps a separate count per Session (a new pipeline starts from zero)", () => {
+    const first = perRunSubmitCounts();
+    first(report(5, 500));
+    expect(perRunSubmitCounts()(report(2, 300)).submit).toMatchObject({
+      submitCount: 2,
+      dispatchCount: 300,
+    });
+  });
+
+  it("throws when a report's counts go down (reports of two Sessions mixed)", () => {
+    const perRun = perRunSubmitCounts();
+    perRun(report(5, 500));
+    expect(() => perRun(report(2, 300))).toThrow(/went down/);
+  });
+});
+
+describe("foldStageEvent / stageSecondsOf", () => {
+  type Stage = "encode" | "denoise" | "decode";
+  const ORDER: readonly Stage[] = ["encode", "denoise", "decode"];
+
+  it("records a stage's start and end, and leaves the other stages alone", () => {
+    let times: StageTimes<Stage> = { encode: { start: 0, end: 5 } };
+    times = foldStageEvent(times, "denoise", "start", 10);
+    times = foldStageEvent(times, "denoise", "end", 250);
+    expect(times).toEqual({ encode: { start: 0, end: 5 }, denoise: { start: 10, end: 250 } });
+  });
+
+  it("gives the seconds of the stages that ended, in the given order, at millisecond precision", () => {
+    let times: StageTimes<Stage> = {};
+    times = foldStageEvent(times, "decode", "start", 2000);
+    times = foldStageEvent(times, "decode", "end", 3234.5678);
+    times = foldStageEvent(times, "encode", "start", 0);
+    times = foldStageEvent(times, "encode", "end", 1500);
+    const stages = stageSecondsOf(times, ORDER);
+    expect(stages).toEqual({ encode: 1.5, decode: 1.235 });
+    expect(Object.keys(stages)).toEqual(["encode", "decode"]);
+  });
+
+  it("counts an end without a start from the end itself (zero seconds)", () => {
+    const times = foldStageEvent<Stage>({}, "decode", "end", 50);
+    expect(times).toEqual({ decode: { start: 50, end: 50 } });
+    expect(stageSecondsOf(times, ORDER)).toEqual({ decode: 0 });
+  });
+
+  it("leaves out a stage that has not ended", () => {
+    expect(stageSecondsOf(foldStageEvent<Stage>({}, "denoise", "start", 10), ORDER)).toEqual({});
   });
 });

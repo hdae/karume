@@ -12,8 +12,9 @@ import type { RunTaskView } from "@/hooks/use-run-task";
 import { adapterText } from "@/lib/record";
 
 /**
- * A run's state: while running the elapsed seconds, the stage, the counter (with a bar) and Cancel;
- * afterwards "Cancelled" or the error in full. Nothing while idle or done (the page shows the result).
+ * A run's state: while running the elapsed seconds, the stage, the counter (with a bar) and Cancel
+ * (disabled, with the stage's `cancelNote`, while the stage is not cancellable); afterwards
+ * "Cancelled" or the error in full. Nothing while idle or done (the page shows the result).
  */
 export const RunStatus = ({ task }: { task: RunTaskView }) => {
   const { state, now } = task;
@@ -29,7 +30,7 @@ export const RunStatus = ({ task }: { task: RunTaskView }) => {
   }
   if (state.kind === "error") return <ErrorAlert title="Run failed" error={state.error} />;
   if (state.kind !== "running") return null;
-  const { stage, count, note } = state.progress;
+  const { stage, count, note, cancellable, cancelNote } = state.progress;
   return (
     <div className="flex flex-col gap-2 text-sm">
       <div className="flex items-center gap-2 font-medium">
@@ -56,9 +57,15 @@ export const RunStatus = ({ task }: { task: RunTaskView }) => {
         size="sm"
         className="self-start"
         onClick={task.cancel}
+        disabled={cancellable === false}
       >
         Cancel
       </Button>
+      {cancellable === false ? (
+        <span id="run-cancel-note" className="text-xs text-muted-foreground">
+          {cancelNote}
+        </span>
+      ) : null}
     </div>
   );
 };

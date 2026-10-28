@@ -9,6 +9,7 @@ import { type WanPrompt, type WanRunComponent, WanTi2vPipeline } from "@karume/m
 import type { SessionDiagnostics } from "@karume/runtime";
 import { type RefObject, useEffect, useState } from "react";
 
+import type { TrackGpuWork } from "@/hooks/use-gpu";
 import { type PipelineSource, pretrainedRef } from "@/lib/distributions";
 
 import type { TextEncoderPath } from "./settings";
@@ -47,8 +48,11 @@ export const useWanPipeline = (input: {
   readonly umt5Directory: { readonly directory: string; readonly available: boolean } | undefined;
   /** Where `onRunDiagnostics` goes; the page points it at the running generation's record. */
   readonly diagnostics: RefObject<DiagnosticsSink | undefined>;
+  /** The page GPU's `track`: the build and every dispose hold the device until they settle. */
+  readonly track: TrackGpuWork;
 }): PipelineState => {
-  const { gpu, source, quant, textEncoder, textEncoderRepo, umt5Directory, diagnostics } = input;
+  const { gpu, source, quant, textEncoder, textEncoderRepo, umt5Directory, diagnostics, track } =
+    input;
   const [state, setState] = useState<PipelineState>({ kind: "idle" });
 
   useEffect(() => {
@@ -100,12 +104,18 @@ export const useWanPipeline = (input: {
       });
     };
 
-    build().then(
-      (pipeline) => {
+    // Tracked with its dispose-on-abort, so the device outlives a build the cleanup abandoned.
+    void track(
+      build().then(async (pipeline) => {
         if (controller.signal.aborted) {
-          void pipeline.dispose();
-          return;
+          await pipeline.dispose();
+          return undefined;
         }
+        return pipeline;
+      }),
+    ).then(
+      (pipeline) => {
+        if (pipeline === undefined) return;
         built = pipeline;
         setState({
           kind: "ready",
@@ -126,10 +136,14 @@ export const useWanPipeline = (input: {
     return () => {
       controller.abort();
       // The GPU belongs to the page; dispose only drops the pipeline (it waits for a running
-      // generation first).
-      void built?.dispose();
+      // generation first). A failure (a flush on a lost device) has no page left to show it on.
+      if (built !== undefined) {
+        track(built.dispose()).catch((error: unknown) => {
+          console.error("Wan2.2: releasing the pipeline failed", error);
+        });
+      }
     };
-  }, [gpu, source, quant, textEncoder, textEncoderRepo, umt5Directory, diagnostics]);
+  }, [gpu, source, quant, textEncoder, textEncoderRepo, umt5Directory, diagnostics, track]);
 
   return state;
 };

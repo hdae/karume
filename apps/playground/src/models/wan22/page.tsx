@@ -206,7 +206,7 @@ export const Wan22Page = () => {
   // pipeline) and leaves the scenario matching alone.
   const [gpuTiming, setGpuTiming] = useState(false);
   const timestampQuery = useTimestampQuery();
-  const { state: gpuState, reacquire } = useGpu(gpuTiming ? TIMED_GPU : UNTIMED_GPU);
+  const { state: gpuState, lease, reacquire, track } = useGpu(gpuTiming ? TIMED_GPU : UNTIMED_GPU);
   const gpu = gpuState.kind === "ready" ? gpuState.gpu : undefined;
 
   // The manifest (once the dev server says the distribution is there).
@@ -279,6 +279,7 @@ export const Wan22Page = () => {
     textEncoderRepo: summary?.textEncoderRepo,
     umt5Directory: umt5,
     diagnostics: diagnosticsRef,
+    track,
   });
   const prompts = pipeline.kind === "ready" ? pipeline.prompts : [];
   const positives = prompts.filter(({ role }) => role === "positive");
@@ -343,8 +344,9 @@ export const Wan22Page = () => {
     const timer = setInterval(() => setNow(performance.now()), 250);
     return () => clearInterval(timer);
   }, [running]);
-  // Leaving the page cancels a run.
-  useEffect(() => () => controllerRef.current?.abort(), []);
+  // The end of the GPU lease (leaving the page, re-acquiring the GPU) cancels a run, in the same
+  // commit as the release: the destroy then waits only for the run to stop.
+  useEffect(() => () => controllerRef.current?.abort(), [lease]);
 
   let requestError: unknown;
   try {
@@ -400,32 +402,34 @@ export const Wan22Page = () => {
     setResult(undefined);
     show(progress);
     try {
-      const video = await pipeline.pipeline.generate({
-        ...parts,
-        signal: controller.signal,
-        onEvent: (event) => {
-          const at = performance.now();
-          if (event.kind === "stage") {
-            const stages: StageTimes =
-              event.at === "start"
-                ? { ...progress.stages, [event.component]: { start: at } }
-                : {
-                    ...progress.stages,
-                    [event.component]: {
-                      start: progress.stages[event.component]?.start ?? at,
-                      end: at,
-                    },
-                  };
-            show({ ...progress, stages, current: event.component });
-          } else if (event.kind === "denoise-step") {
-            stepMarks.push(at);
-            show({ ...progress, step: { step: event.step, steps: event.steps } });
-          } else {
-            tileMarks.push(at);
-            show({ ...progress, tile: { tile: event.tile, tiles: event.tiles } });
-          }
-        },
-      });
+      const video = await track(
+        pipeline.pipeline.generate({
+          ...parts,
+          signal: controller.signal,
+          onEvent: (event) => {
+            const at = performance.now();
+            if (event.kind === "stage") {
+              const stages: StageTimes =
+                event.at === "start"
+                  ? { ...progress.stages, [event.component]: { start: at } }
+                  : {
+                      ...progress.stages,
+                      [event.component]: {
+                        start: progress.stages[event.component]?.start ?? at,
+                        end: at,
+                      },
+                    };
+              show({ ...progress, stages, current: event.component });
+            } else if (event.kind === "denoise-step") {
+              stepMarks.push(at);
+              show({ ...progress, step: { step: event.step, steps: event.steps } });
+            } else {
+              tileMarks.push(at);
+              show({ ...progress, tile: { tile: event.tile, tiles: event.tiles } });
+            }
+          },
+        }),
+      );
       const wall = performance.now() - startedAt;
       show({ ...progress, note: "converting frames to RGBA and hashing" });
       await nextTick();
