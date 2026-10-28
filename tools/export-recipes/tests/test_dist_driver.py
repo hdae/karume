@@ -11,10 +11,14 @@ core は綴りを持たないので、{@link dist.default_out_dir} の規則は�
 
 from __future__ import annotations
 
+import http.client
+import io
 import re
 import subprocess
 import sys
+import urllib.error
 from pathlib import Path
+from typing import Any, ClassVar
 
 import pytest
 
@@ -29,7 +33,13 @@ from gemma4.distribution import PIPELINE as GEMMA4_PIPELINE
 from gemma4_qat.distribution import PIPELINE as GEMMA4_QAT_PIPELINE
 from irodori.distribution import PIPELINE as IRODORI_PIPELINE
 from karume.dist import PIPELINES as CORE_PIPELINES
-from karume.dist import DistError, resolve_repo
+from karume.dist import (
+    CrossRepoReference,
+    DistError,
+    ExternalComponents,
+    declared_references,
+    resolve_repo,
+)
 from sbv2.distribution import FN_PIPELINE as SBV2_FN_PIPELINE
 from sbv2.distribution import PIPELINE as SBV2_PIPELINE
 from siglip2.distribution import PIPELINE as SIGLIP2_PIPELINE
@@ -261,6 +271,302 @@ class TestReleaseRepositories:
         }
 
         assert {f"hdae/{directory}" for *_, directory in RELEASE_REPOSITORIES} == declared
+
+
+class TestDeclaredReferencesOfThePublishedRepositories:
+    """The cross-repository references the recipes declare, read against the published set
+    ({@link RELEASE_REPOSITORIES}) — ADR 0038 §7 addendum 2026-10-28."""
+
+    @pytest.mark.parametrize(("pipeline", "models", "repo", "directory"), RELEASE_REPOSITORIES)
+    def test_every_reference_points_at_another_published_repository(
+        self, pipeline: str, models: list[str], repo: str | None, directory: str
+    ) -> None:
+        """A referenced repository must be uploaded first (release-runbook §0), so it is one of
+        the published ones — and never the repository being built."""
+        published = {name for *_, name in RELEASE_REPOSITORIES}
+        for reference in declared_references(dist.PIPELINES[pipeline], models):
+            assert reference.repo_name in published - {directory}, reference
+
+    def test_the_three_referencing_repositories(self) -> None:
+        referencing = {
+            directory: sorted(
+                reference.repo_name
+                for reference in declared_references(dist.PIPELINES[pipeline], models)
+            )
+            for pipeline, models, _, directory in RELEASE_REPOSITORIES
+        }
+        assert {name: repos for name, repos in referencing.items() if repos} == {
+            "karume-anima-extra": ["karume-anima"],
+            "karume-irodori-v4.1-small": ["karume-irodori-v4-small"],
+            "karume-wan2.2": ["karume-umt5-xxl"],
+        }
+
+
+#: A reference of the synthetic cases below.
+_REFERENCE = CrossRepoReference("karume-source", "m", ("w",))
+_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _no_hub(url: str) -> tuple[Any, str | None]:
+    raise AssertionError(f"no Hub access expected: {url}")
+
+
+class TestReferencePins:
+    """The revision source of a build ({@link dist.reference_pins}) — one per build."""
+
+    def test_explicit_revisions_are_left_to_the_core(self) -> None:
+        assert dist.reference_pins(
+            (_REFERENCE,),
+            {"karume-source": _SHA},
+            resolve=None,
+            allow_placeholder=False,
+            get=_no_hub,
+        ) == ({}, None)
+
+    def test_the_placeholder_flag_pins_every_reference_at_the_placeholder(self) -> None:
+        assert dist.reference_pins(
+            (_REFERENCE,), {}, resolve=None, allow_placeholder=True, get=_no_hub
+        ) == ({"karume-source": dist.PLACEHOLDER_REVISION}, None)
+
+    def test_an_explicit_placeholder_is_refused(self) -> None:
+        with pytest.raises(DistError, match=dist.ALLOW_PLACEHOLDER_FLAG):
+            dist.reference_pins(
+                (_REFERENCE,),
+                {"karume-source": dist.PLACEHOLDER_REVISION},
+                resolve=None,
+                allow_placeholder=False,
+                get=_no_hub,
+            )
+
+    def test_an_explicit_placeholder_with_the_flag_is_told_the_sources_exclude_each_other(
+        self,
+    ) -> None:
+        """Not "use the flag instead" — the caller already passed it."""
+        with pytest.raises(DistError, match="exclude each other"):
+            dist.reference_pins(
+                (_REFERENCE,),
+                {"karume-source": dist.PLACEHOLDER_REVISION},
+                resolve=None,
+                allow_placeholder=True,
+                get=_no_hub,
+            )
+
+    def test_a_declared_reference_without_a_source_is_refused(self) -> None:
+        with pytest.raises(DistError, match=r"reference \['karume-source'\] across repositories"):
+            dist.reference_pins(
+                (_REFERENCE,), {}, resolve=None, allow_placeholder=False, get=_no_hub
+            )
+
+    @pytest.mark.parametrize(
+        ("explicit", "resolve", "allow_placeholder"),
+        [
+            ({"karume-source": _SHA}, "hf", False),
+            ({"karume-source": _SHA}, None, True),
+            ({}, "hf", True),
+        ],
+    )
+    def test_two_sources_exclude_each_other(
+        self, explicit: dict[str, str], resolve: str | None, allow_placeholder: bool
+    ) -> None:
+        with pytest.raises(DistError, match="exclude each other"):
+            dist.reference_pins(
+                (_REFERENCE,),
+                explicit,
+                resolve=resolve,
+                allow_placeholder=allow_placeholder,
+                get=_no_hub,
+            )
+
+    @pytest.mark.parametrize(
+        ("resolve", "allow_placeholder", "flag"),
+        [("hf", False, "--resolve-refs"), (None, True, "--allow-placeholder-ref")],
+    )
+    def test_a_flag_for_a_build_that_references_nothing_is_refused(
+        self, resolve: str | None, allow_placeholder: bool, flag: str
+    ) -> None:
+        with pytest.raises(DistError, match=f"{flag} was given, but the models built declare no"):
+            dist.reference_pins(
+                (), {}, resolve=resolve, allow_placeholder=allow_placeholder, get=_no_hub
+            )
+
+    def test_the_hub_pins_the_main_of_every_referenced_repository(self, tmp_path: Path) -> None:
+        requested: list[str] = []
+
+        def get(url: str) -> tuple[Any, str | None]:
+            requested.append(url)
+            return ({"sha": _SHA}, None) if url.endswith("/revision/main") else ([], None)
+
+        revisions, check = dist.reference_pins(
+            (_REFERENCE,), {}, resolve="hf", allow_placeholder=False, get=get
+        )
+
+        assert revisions == {"karume-source": _SHA}
+        assert check is not None
+        assert requested == [
+            "https://huggingface.co/api/models/hdae/karume-source/revision/main",
+            f"https://huggingface.co/api/models/hdae/karume-source/tree/{_SHA}?recursive=true",
+        ]
+
+
+class TestReadingTheHub:
+    """The HF API side of `--resolve-refs hf` — mocked; the tests read no network."""
+
+    def test_it_reads_every_page_of_the_tree_at_the_resolved_commit(self) -> None:
+        api = "https://huggingface.co/api/models/hdae/karume-source"
+        pages = {
+            f"{api}/revision/main": ({"sha": _SHA}, None),
+            f"{api}/tree/{_SHA}?recursive=true": (
+                [{"type": "directory", "path": "m"}, {"type": "file", "path": "m/a", "oid": "1"}],
+                f"{api}/tree/{_SHA}?recursive=true&cursor=2",
+            ),
+            f"{api}/tree/{_SHA}?recursive=true&cursor=2": (
+                [{"type": "file", "path": "m/b", "oid": "2"}],
+                None,
+            ),
+        }
+
+        commit = dist.read_hub_main("hdae/karume-source", pages.__getitem__)
+
+        assert commit.revision == _SHA
+        assert sorted(commit.files) == ["m/a", "m/b"]
+
+    @pytest.mark.parametrize("body", [{}, {"sha": "main"}, [], {"sha": "A" * 40}])
+    def test_a_main_without_a_commit_sha_fails(self, body: Any) -> None:
+        with pytest.raises(DistError, match="gave no commit sha"):
+            dist.read_hub_main("hdae/karume-source", lambda _url: (body, None))
+
+    def test_the_real_reader_follows_the_link_header_and_reports_failures(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class Response(io.BytesIO):
+            headers: ClassVar[dict[str, str]] = {
+                "Link": '<https://huggingface.co/api/next?cursor=x>; rel="next"'
+            }
+
+        monkeypatch.setattr(
+            dist.urllib.request, "urlopen", lambda _request, timeout: Response(b"[1]")
+        )
+        assert dist.hf_get("https://huggingface.co/api/x") == (
+            [1],
+            "https://huggingface.co/api/next?cursor=x",
+        )
+
+        def offline(_request: object, timeout: float) -> io.BytesIO:
+            raise urllib.error.URLError("unreachable")
+
+        monkeypatch.setattr(dist.urllib.request, "urlopen", offline)
+        with pytest.raises(DistError, match=r"could not read .* offline, pin the revision"):
+            dist.hf_get("https://huggingface.co/api/x")
+
+    def test_a_connection_dropped_while_reading_the_body_fails_the_same_way(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`http.client.IncompleteRead` is not an `OSError` — it still gets the offline advice."""
+
+        class Dropped(io.BytesIO):
+            headers: ClassVar[dict[str, str]] = {}
+
+            def read(self, size: int | None = -1) -> bytes:
+                raise http.client.IncompleteRead(b"[1", 10)
+
+        monkeypatch.setattr(dist.urllib.request, "urlopen", lambda _request, timeout: Dropped())
+        with pytest.raises(DistError, match=r"could not read .* offline, pin the revision"):
+            dist.hf_get("https://huggingface.co/api/x")
+
+    def test_the_git_blob_id_matches_git(self, tmp_path: Path) -> None:
+        """The values `git hash-object` gives for an empty file and for `hello\\n`."""
+        (tmp_path / "empty").write_bytes(b"")
+        (tmp_path / "hello").write_bytes(b"hello\n")
+
+        assert dist.git_blob_id(tmp_path / "empty") == "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+        assert dist.git_blob_id(tmp_path / "hello") == "ce013625030ba8dba906f756967f9e9ca394464a"
+
+
+class TestConfirmingOnTheHub:
+    """{@link dist.confirm_on_hub} — every borrowed file is in the pinned commit with the local
+    bytes."""
+
+    def _case(self, tmp_path: Path) -> tuple[ExternalComponents, list[dict[str, Any]]]:
+        (tmp_path / "m").mkdir()
+        (tmp_path / "m" / "large.krm").write_bytes(b"large")
+        (tmp_path / "m" / "small.krm").write_bytes(b"hello\n")
+        components = ExternalComponents(
+            repo="hdae/karume-source", revision=_SHA, dist=tmp_path, model="m", roles=("w",)
+        )
+        refs = [
+            {
+                "repo": components.repo,
+                "revision": _SHA,
+                "path": "m/large.krm",
+                "size": 5,
+                "sha256": "a" * 64,
+            },
+            {
+                "repo": components.repo,
+                "revision": _SHA,
+                "path": "m/small.krm",
+                "size": 6,
+                "sha256": "b" * 64,
+            },
+        ]
+        return components, refs
+
+    def _commit(self, files: dict[str, dict[str, Any]]) -> dict[str, dist.HubCommit]:
+        return {"hdae/karume-source": dist.HubCommit("hdae/karume-source", _SHA, files)}
+
+    _LARGE: ClassVar[dict[str, Any]] = {"oid": "1" * 40, "lfs": {"oid": "a" * 64, "size": 5}}
+    _SMALL: ClassVar[dict[str, Any]] = {"oid": "ce013625030ba8dba906f756967f9e9ca394464a"}
+
+    def test_an_lfs_oid_and_a_git_blob_that_match_pass(self, tmp_path: Path) -> None:
+        components, refs = self._case(tmp_path)
+        commit = self._commit({"m/large.krm": self._LARGE, "m/small.krm": self._SMALL})
+
+        dist.confirm_on_hub(commit, components, refs)
+
+    @pytest.mark.parametrize(
+        ("files", "message"),
+        [
+            (
+                {"m/large.krm": {"oid": "1" * 40, "lfs": {"oid": "c" * 64}}},
+                rf"m/large.krm: LFS oid {'c' * 64} ≠ local sha256 {'a' * 64}",
+            ),
+            ({"m/large.krm": {"oid": "1" * 40, "lfs": {"oid": "a" * 64}}}, "m/small.krm: not in"),
+            (
+                {
+                    "m/large.krm": {"oid": "1" * 40, "lfs": {"oid": "a" * 64}},
+                    "m/small.krm": {"oid": "2" * 40},
+                },
+                "m/small.krm: git blob 2{40} ≠ local ce0136",
+            ),
+        ],
+    )
+    def test_a_missing_or_different_file_fails_naming_it(
+        self, tmp_path: Path, files: dict[str, dict[str, Any]], message: str
+    ) -> None:
+        components, refs = self._case(tmp_path)
+
+        with pytest.raises(DistError, match=message):
+            dist.confirm_on_hub(self._commit(files), components, refs)
+
+
+class TestCoreArguments:
+    """The driver-only options never reach the core's parser."""
+
+    def test_the_driver_options_are_removed_with_their_values(self) -> None:
+        assert dist.core_arguments(
+            [
+                "--pipeline",
+                "irodori",
+                "--resolve-refs",
+                "hf",
+                "--resolve-refs=hf",
+                "--allow-placeholder-ref",
+                "--intake",
+                "x",
+                "--ref-revision",
+                "a=b",
+            ]
+        ) == ["--pipeline", "irodori", "--ref-revision", "a=b"]
 
 
 #: README の受理集合を綴る 1 文（`--pipeline` の引数として叩ける名前がバッククォートで並ぶ）。

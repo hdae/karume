@@ -57,6 +57,7 @@ from karume.dist import (
     SHARED_DIRNAME,
     STORAGE_DTYPE_LABELS,
     Artifact,
+    CrossRepoReference,
     DistError,
     ExternalComponents,
     ModelPlan,
@@ -68,13 +69,14 @@ from karume.dist import (
     assert_quant_presentation,
     build_parser,
     complete_quant_weights,
+    declared_references,
     is_external_ref,
     main,
     manifest_text,
     materialize,
+    parse_reference_revisions,
     preprocessor_channels,
     resolve_card_renderer,
-    resolve_external_components,
     resolve_repo,
     verify_dist,
 )
@@ -1456,7 +1458,7 @@ class TestExternalComponents:
             [self._plan("borrower", tmp_path / "series")],
             out_dir,
             "borrower",
-            external=self._components(source),
+            external=(self._components(source),),
         )
 
         entry = manifest["models"]["borrower"]["weights"]["text_encoder"]["f16"]
@@ -1474,7 +1476,7 @@ class TestExternalComponents:
             [self._plan("borrower", tmp_path / "series")],
             out_dir,
             "borrower",
-            external=self._components(source),
+            external=(self._components(source),),
         )
 
         assert not (out_dir / "borrower" / "text_encoder").exists()
@@ -1516,7 +1518,7 @@ class TestExternalComponents:
                 [self._plan("borrower", tmp_path / "series")],
                 out_dir,
                 "borrower",
-                external=self._components(source),
+                external=(self._components(source),),
             )
         assert not out_dir.exists()
 
@@ -1543,7 +1545,7 @@ class TestExternalComponents:
                 [self._plan("borrower", tmp_path / "series")],
                 out_dir,
                 "borrower",
-                external=self._components(source),
+                external=(self._components(source),),
             )
         assert not out_dir.exists()
 
@@ -1564,7 +1566,7 @@ class TestExternalComponents:
                 [self._plan("borrower", tmp_path / "series")],
                 out_dir,
                 "borrower",
-                external=self._components(source),
+                external=(self._components(source),),
             )
         assert not out_dir.exists()
 
@@ -1584,7 +1586,7 @@ class TestExternalComponents:
             [self._plan("A", series), self._plan("B", series)],
             out_dir,
             "A",
-            external=self._components(source),
+            external=(self._components(source),),
         )
 
         expected = self._pinned(
@@ -1627,7 +1629,7 @@ class TestExternalComponents:
                 [self._plan("A", series), divergent],
                 out_dir,
                 "A",
-                external=self._components(source),
+                external=(self._components(source),),
             )
         assert not out_dir.exists()
 
@@ -1696,56 +1698,360 @@ class TestExternalComponents:
                 [self._plan("A", series), elsewhere],
                 out_dir,
                 "A",
-                external=self._components(source),
+                external=(self._components(source),),
             )
         assert not out_dir.exists()
 
-    def test_the_cli_stays_inert_until_every_flag_is_given(self, tmp_path: Path) -> None:
-        """Silently ignoring a partial spec would quietly produce a self-contained assembly where a
-        reference was intended."""
-        assert (
-            resolve_external_components(repo=None, revision=None, dist=None, model=None, roles=None)
-            is None
-        )
-        with pytest.raises(DistError, match="--ref-model, --ref-revision, --ref-role"):
-            resolve_external_components(
-                repo="hdae/karume-source", revision=None, dist=tmp_path, model=None, roles=None
-            )
+    def _other_source_dist(self, tmp_path: Path) -> Path:
+        """A second referenced repository, holding the bytes of this repository's `transformer`."""
+        other = tmp_path / "models" / "karume-other"
+        assemble_family([self._plan("other", tmp_path / "series")], other, "other")
+        return other
 
-    def test_the_cli_wires_the_five_flags_through(self, tmp_path: Path) -> None:
-        """End to end through `main` (the synthetic pipeline returns a plan with the one role
-        `w`)."""
-        source = tmp_path / "models" / "karume-source"
-        assemble_family([_synthetic_plan(tmp_path, "m", "w/model.krm", "w")], source, "m")
+    def test_one_build_references_several_repositories(self, tmp_path: Path) -> None:
+        """Each target pins its own roles — `text_encoder` from one repository, `transformer` from
+        another — and neither is stored here."""
+        source = self._source_dist(tmp_path)
+        other = self._other_source_dist(tmp_path)
         out_dir = tmp_path / "models" / "karume-borrower"
 
+        manifest = assemble_family(
+            [self._plan("borrower", tmp_path / "series")],
+            out_dir,
+            "borrower",
+            external=(
+                self._components(source),
+                self._components(
+                    other, repo="hdae/karume-other", model="other", roles=("transformer",)
+                ),
+            ),
+        )
+
+        weights = manifest["models"]["borrower"]["weights"]
+        assert {ref["repo"] for ref in weights["text_encoder"]["f16"]["container"]["parts"]} == {
+            "hdae/karume-source"
+        }
+        assert {ref["repo"] for ref in weights["transformer"]["f16"]["container"]["parts"]} == {
+            "hdae/karume-other"
+        }
+        assert verify_dist(out_dir) == {}
+
+    def test_it_refuses_a_role_named_by_two_references(self, tmp_path: Path) -> None:
+        """One role points at one place — merging two claims would silently keep one of them."""
+        source = self._source_dist(tmp_path)
+        other = self._other_source_dist(tmp_path)
+        out_dir = tmp_path / "models" / "karume-borrower"
+
+        with pytest.raises(
+            DistError,
+            match="Role 'text_encoder' is named by two cross-repository references"
+            r" \(hdae/karume-source and hdae/karume-other\)",
+        ):
+            assemble_family(
+                [self._plan("borrower", tmp_path / "series")],
+                out_dir,
+                "borrower",
+                external=(
+                    self._components(source),
+                    self._components(other, repo="hdae/karume-other", model="other"),
+                ),
+            )
+        assert not out_dir.exists()
+
+    def test_the_callers_check_sees_every_borrowed_file_before_anything_is_written(
+        self, tmp_path: Path
+    ) -> None:
+        """The check receives each target with the file references resolved for it — the same
+        `{repo, revision, path, size, sha256}` the manifest then declares — while the output does
+        not exist yet."""
+        source = self._source_dist(tmp_path)
+        out_dir = tmp_path / "models" / "karume-borrower"
+        seen: list[tuple[str, list[Mapping[str, Any]], bool]] = []
+
+        def check(components: ExternalComponents, refs: Sequence[Mapping[str, Any]]) -> None:
+            seen.append((components.repo, list(refs), out_dir.exists()))
+
+        manifest = assemble_family(
+            [self._plan("borrower", tmp_path / "series")],
+            out_dir,
+            "borrower",
+            external=(self._components(source),),
+            check_references=check,
+        )
+
+        parts = manifest["models"]["borrower"]["weights"]["text_encoder"]["f16"]["container"]
+        assert seen == [("hdae/karume-source", parts["parts"], False)]
+
+    def test_each_target_is_checked_with_its_own_borrowed_files(self, tmp_path: Path) -> None:
+        """With several targets, a target's check sees exactly the files pinned to it — the Hub
+        check looks each path up in that target's commit, so another target's paths would fail it
+        (or, merged the other way, escape it)."""
+        source = self._source_dist(tmp_path)
+        other = self._other_source_dist(tmp_path)
+        out_dir = tmp_path / "models" / "karume-borrower"
+        seen: list[tuple[str, list[Mapping[str, Any]]]] = []
+
+        def check(components: ExternalComponents, refs: Sequence[Mapping[str, Any]]) -> None:
+            seen.append((components.repo, list(refs)))
+
+        manifest = assemble_family(
+            [self._plan("borrower", tmp_path / "series")],
+            out_dir,
+            "borrower",
+            external=(
+                self._components(source),
+                self._components(
+                    other, repo="hdae/karume-other", model="other", roles=("transformer",)
+                ),
+            ),
+            check_references=check,
+        )
+
+        weights = manifest["models"]["borrower"]["weights"]
+        assert seen == [
+            ("hdae/karume-source", weights["text_encoder"]["f16"]["container"]["parts"]),
+            ("hdae/karume-other", weights["transformer"]["f16"]["container"]["parts"]),
+        ]
+
+    def test_it_refuses_to_build_into_the_referenced_distribution(self, tmp_path: Path) -> None:
+        """The wholesale replacement would delete the very files the build borrows — refused
+        before a byte is written, the referenced mirror left as it was."""
+        source = self._source_dist(tmp_path)
+        before = sorted(path.name for path in source.rglob("*"))
+
+        with pytest.raises(DistError, match="is the local distribution of hdae/karume-source"):
+            assemble_family(
+                [self._plan("borrower", tmp_path / "series")],
+                tmp_path / "models" / "." / "karume-source",
+                "borrower",
+                external=(self._components(source),),
+            )
+        assert sorted(path.name for path in source.rglob("*")) == before
+
+    def test_a_failing_check_stops_the_build_before_anything_is_written(
+        self, tmp_path: Path
+    ) -> None:
+        source = self._source_dist(tmp_path)
+        out_dir = tmp_path / "models" / "karume-borrower"
+
+        def check(components: ExternalComponents, refs: Sequence[Mapping[str, Any]]) -> None:
+            raise DistError(f"{components.repo} does not hold {len(refs)} files")
+
+        with pytest.raises(DistError, match="hdae/karume-source does not hold"):
+            assemble_family(
+                [self._plan("borrower", tmp_path / "series")],
+                out_dir,
+                "borrower",
+                external=(self._components(source),),
+                check_references=check,
+            )
+        assert not out_dir.exists()
+
+
+class TestDeclaredReferences:
+    """Cross-repository references declared by the pipeline ({@link Pipeline.references}) and
+    pinned per build (`--ref-revision NAME=SHA`) — ADR 0038 §7 addendum 2026-10-28.
+
+    The synthetic pipeline builds the one role `w` from `--series`; the referenced repository
+    `karume-source` is assembled from the same series, so its bytes are identical.
+    """
+
+    _REVISION = "0123456789abcdef0123456789abcdef01234567"
+    _REFERENCE = CrossRepoReference("karume-source", "m", ("w",))
+
+    def _pipeline(self, *references: CrossRepoReference) -> Pipeline:
+        return replace(_ONE_PROFILE_PIPELINE, references=lambda _model: references)
+
+    def _source(self, tmp_path: Path) -> Path:
+        source = tmp_path / "models" / "karume-source"
+        assemble_family([_synthetic_plan(tmp_path, "m", "w/model.krm", "w")], source, "m")
+        return source
+
+    def _main(self, tmp_path: Path, pipeline: Pipeline, *extra: str, **hooks: Any) -> Path:
+        out_dir = tmp_path / "models" / "karume-borrower"
         main(
-            [
-                "--pipeline",
-                "solo",
-                "--series",
-                str(tmp_path),
-                "--out",
-                str(out_dir),
-                "--ref-repo",
-                "hdae/karume-source",
-                "--ref-revision",
-                self._REVISION,
-                "--ref-dist",
-                str(source),
-                "--ref-model",
-                "m",
-                "--ref-role",
-                "w",
-            ],
-            pipelines=_CALLER_REGISTRY,
+            ["--pipeline", "solo", "--series", str(tmp_path), "--out", str(out_dir), *extra],
+            pipelines={"solo": pipeline},
+            referenced_dist=lambda name: tmp_path / "models" / name,
+            **hooks,
+        )
+        return out_dir
+
+    def test_a_pipeline_is_self_contained_unless_it_declares_references(self) -> None:
+        assert _ONE_PROFILE_PIPELINE.references("m") == ()
+
+    def test_main_pins_the_declared_roles_at_the_given_revision(self, tmp_path: Path) -> None:
+        self._source(tmp_path)
+
+        out_dir = self._main(
+            tmp_path,
+            self._pipeline(self._REFERENCE),
+            "--ref-revision",
+            f"karume-source={self._REVISION}",
         )
 
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
         refs = manifest["models"]["m"]["weights"]["w"]["f16"]["container"]["parts"]
-        assert [ref["repo"] for ref in refs] == ["hdae/karume-source"] * len(refs)
+        assert {(ref["repo"], ref["revision"]) for ref in refs} == {
+            ("hdae/karume-source", self._REVISION)
+        }
         assert [ref["path"] for ref in refs] == _part_paths("m", "w/model.krm", "w")
         assert verify_dist(out_dir) == {}
+
+    def test_main_hands_the_borrowed_files_to_the_callers_check(self, tmp_path: Path) -> None:
+        self._source(tmp_path)
+        seen: list[str] = []
+
+        def check(components: ExternalComponents, refs: Sequence[Mapping[str, Any]]) -> None:
+            seen.extend(ref["path"] for ref in refs)
+
+        self._main(
+            tmp_path,
+            self._pipeline(self._REFERENCE),
+            "--ref-revision",
+            f"karume-source={self._REVISION}",
+            check_references=check,
+        )
+
+        assert seen == _part_paths("m", "w/model.krm", "w")
+
+    def test_a_declared_reference_without_a_revision_fails_before_anything_is_written(
+        self, tmp_path: Path
+    ) -> None:
+        """It never falls back to a self-contained distribution silently."""
+        self._source(tmp_path)
+
+        with pytest.raises(DistError, match=r"references \['karume-source'\] across repositories"):
+            self._main(tmp_path, self._pipeline(self._REFERENCE))
+        assert not (tmp_path / "models" / "karume-borrower").exists()
+
+    def test_a_declared_role_the_model_does_not_have_fails_before_anything_is_written(
+        self, tmp_path: Path
+    ) -> None:
+        """Role coverage: a declaration left behind when a recipe's table changed fails loudly."""
+        self._source(tmp_path)
+
+        with pytest.raises(DistError, match="points at an unknown role: 'nope'"):
+            self._main(
+                tmp_path,
+                self._pipeline(CrossRepoReference("karume-source", "m", ("nope",))),
+                "--ref-revision",
+                f"karume-source={self._REVISION}",
+            )
+        assert not (tmp_path / "models" / "karume-borrower").exists()
+
+    def test_a_revision_for_a_repository_the_build_does_not_reference_fails(
+        self, tmp_path: Path
+    ) -> None:
+        with pytest.raises(DistError, match=r"does not reference: \['karume-elsewhere'\]"):
+            self._main(
+                tmp_path,
+                _ONE_PROFILE_PIPELINE,
+                "--ref-revision",
+                f"karume-elsewhere={self._REVISION}",
+            )
+        assert not (tmp_path / "models" / "karume-borrower").exists()
+
+    @pytest.mark.parametrize("revision", ["main", "0123456789abcdef", "A" * 40])
+    def test_a_revision_that_is_not_a_full_commit_sha_fails(
+        self, tmp_path: Path, revision: str
+    ) -> None:
+        with pytest.raises(DistError, match="is not a 40-digit commit sha"):
+            self._main(
+                tmp_path,
+                self._pipeline(self._REFERENCE),
+                "--ref-revision",
+                f"karume-source={revision}",
+            )
+
+    def test_a_reference_to_the_repository_being_built_fails(self, tmp_path: Path) -> None:
+        """The hub rejects it only when loading from that HF repository, i.e. after upload."""
+        own = CrossRepoReference("karume-solo-m", "m", ("w",))
+
+        with pytest.raises(
+            DistError, match=r"points at the repository being built \(hdae/karume-solo-m\)"
+        ):
+            self._main(
+                tmp_path,
+                self._pipeline(own),
+                "--ref-revision",
+                f"karume-solo-m={self._REVISION}",
+            )
+        assert not (tmp_path / "models" / "karume-borrower").exists()
+
+    def test_the_own_repository_follows_an_explicit_repo_override(self, tmp_path: Path) -> None:
+        with pytest.raises(DistError, match="points at the repository being built"):
+            self._main(
+                tmp_path,
+                self._pipeline(self._REFERENCE),
+                "--repo",
+                "hdae/karume-source",
+                "--ref-revision",
+                f"karume-source={self._REVISION}",
+            )
+
+    def test_the_core_alone_cannot_locate_a_referenced_distribution(self, tmp_path: Path) -> None:
+        """Where mirrors live is the caller's knowledge (ADR 0065) — without the hook it fails."""
+        with pytest.raises(DistError, match="no location for their local distributions"):
+            main(
+                [
+                    "--pipeline",
+                    "solo",
+                    "--series",
+                    str(tmp_path),
+                    "--out",
+                    str(tmp_path / "out"),
+                    "--ref-revision",
+                    f"karume-source={self._REVISION}",
+                ],
+                pipelines={"solo": self._pipeline(self._REFERENCE)},
+            )
+
+    def test_models_of_one_build_must_declare_the_same_references(self) -> None:
+        """One build applies one set of references to every model."""
+        pipeline = replace(
+            _ONE_PROFILE_PIPELINE,
+            references=lambda model: (self._REFERENCE,) if model == "a" else (),
+        )
+
+        assert declared_references(pipeline, ["a", "a"]) == (self._REFERENCE,)
+        with pytest.raises(DistError, match="Models 'a' and 'b' declare different"):
+            declared_references(pipeline, ["a", "b"])
+
+    @pytest.mark.parametrize(
+        ("arguments", "message"),
+        [
+            (("karume x", "m", ("w",)), "does not spell a repository"),
+            (("karume-source", "../m", ("w",)), "allowed characters"),
+            (("karume-source", "m", ()), "names not a single role"),
+            (("karume-source", "m", ("w", "v", "w")), r"names roles twice: \['w'\]"),
+        ],
+    )
+    def test_a_malformed_declaration_fails_where_it_is_written(
+        self, arguments: tuple[str, str, tuple[str, ...]], message: str
+    ) -> None:
+        with pytest.raises(DistError, match=message):
+            CrossRepoReference(*arguments)
+
+    def test_the_declaration_names_the_repository_under_the_distribution_owner(self) -> None:
+        assert self._REFERENCE.repo == "hdae/karume-source"
+
+    def test_revisions_are_read_as_name_sha_pairs(self) -> None:
+        assert parse_reference_revisions(None) == {}
+        assert parse_reference_revisions(["a=1", "b=2"]) == {"a": "1", "b": "2"}
+
+    @pytest.mark.parametrize(
+        ("values", "message"),
+        [
+            (["karume-source"], "is not of the form NAME=SHA"),
+            (["=abc"], "is not of the form NAME=SHA"),
+            (["karume-source="], "is not of the form NAME=SHA"),
+            (["a=1", "a=2"], "names 'a' twice"),
+        ],
+    )
+    def test_a_malformed_revision_fails(self, values: list[str], message: str) -> None:
+        with pytest.raises(DistError, match=message):
+            parse_reference_revisions(values)
 
 
 #: A synthetic pipeline with a single attribution (a subject that has only "the form of the
@@ -2599,7 +2905,7 @@ class TestExternalPartitionedComponents:
             [self._plan("borrower", series)],
             out_dir,
             "borrower",
-            external=self._components(source),
+            external=(self._components(source),),
         )
 
         entry = manifest["models"]["borrower"]["weights"]["text_encoder"]["f16"]
@@ -2625,7 +2931,7 @@ class TestExternalPartitionedComponents:
             [self._plan("borrower", series)],
             out_dir,
             "borrower",
-            external=self._components(source),
+            external=(self._components(source),),
         )
 
         assert not (out_dir / "borrower" / "text_encoder").exists()
@@ -2652,7 +2958,7 @@ class TestExternalPartitionedComponents:
                 [self._plan("borrower", series)],
                 out_dir,
                 "borrower",
-                external=self._components(source),
+                external=(self._components(source),),
             )
         assert not out_dir.exists()
 
@@ -2668,7 +2974,7 @@ class TestExternalPartitionedComponents:
             [self._plan("borrower", series)],
             out_dir,
             "borrower",
-            external=self._components(source),
+            external=(self._components(source),),
         )
 
         entry = manifest["models"]["borrower"]["weights"]["text_encoder"]["f16"]
@@ -2711,7 +3017,7 @@ class TestExternalPartitionedComponents:
         with pytest.raises(
             DistError, match="A cross-repository reference cannot apply to a split-form container"
         ):
-            assemble_family([borrower], out_dir, "borrower", external=self._components(source))
+            assemble_family([borrower], out_dir, "borrower", external=(self._components(source),))
         assert not out_dir.exists()
 
 

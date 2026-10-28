@@ -55,6 +55,9 @@ from irodori.distribution import (
     IRODORI_SERIES_DIRS,
     IRODORI_STORAGE_FORBIDDEN,
     IRODORI_STORAGE_REQUIREMENTS,
+    IRODORI_V4_MODEL,
+    IRODORI_V41_MODEL,
+    IRODORI_V41_SHARED_ROLES,
     IRODORI_WEIGHT_DTYPES,
     IRODORI_WEIGHTS,
     PIPELINE,
@@ -62,6 +65,7 @@ from irodori.distribution import (
     irodori_calib_floor,
     irodori_license_markdown,
     irodori_plan,
+    irodori_references,
     irodori_repo_name,
     irodori_series_name,
     irodori_sources,
@@ -103,6 +107,14 @@ def _placed_paths() -> list[str]:
     tokenizer は assets の席（1 ファイル参照）なので分割されない。
     """
     return placed_paths(IRODORI_OUTPUT_PATHS, IRODORI_WEIGHTS)
+
+
+def _stored_paths(model: str) -> list[str]:
+    """The relative paths `model`'s own repository stores: {@link _placed_paths} without the roles
+    it references in another repository ({@link irodori_references})."""
+    borrowed = {role for reference in irodori_references(model) for role in reference.roles}
+    stored = {role: path for role, path in IRODORI_OUTPUT_PATHS.items() if role not in borrowed}
+    return placed_paths(stored, IRODORI_WEIGHTS)
 
 
 def _present(out_dir: Path) -> list[str]:
@@ -359,6 +371,27 @@ def _assemble_irodori(
     sources: IrodoriSources, out_dir: Path, model: str = IRODORI_DEFAULT_MODEL
 ) -> dict[str, Any]:
     return assemble_family([irodori_plan(sources, model)], out_dir, model)
+
+
+def _v4_mirror_for(model: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """What a build of `model` through the driver needs for its cross-repository references.
+
+    v4.1-small references v4-small's repository ({@link irodori_references}): this places
+    v4-small's distribution where the driver reads referenced mirrors (`dist.DIST_ROOT`), built
+    from the same synthetic series (so the shared roles are byte-identical), and returns the
+    revision source — the placeholder (no Hub in the tests). Nothing for v4-small.
+    """
+    if model != IRODORI_V41_MODEL:
+        return []
+    import dist
+
+    _assemble_irodori(
+        _build_irodori_sources(tmp_path, model=IRODORI_V4_MODEL),
+        tmp_path / "models" / irodori_repo_name(IRODORI_V4_MODEL),
+        IRODORI_V4_MODEL,
+    )
+    monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
+    return [dist.ALLOW_PLACEHOLDER_FLAG]
 
 
 @pytest.fixture
@@ -1237,6 +1270,7 @@ class TestIrodoriLegalText:
                 str(sources.series.parent),
                 "--out",
                 str(out_dir),
+                *_v4_mirror_for(model, tmp_path, monkeypatch),
             ]
         )
         return out_dir
@@ -1303,7 +1337,7 @@ class TestIrodoriLegalText:
 
         assert sorted(LEGAL_PATHS) == ["LICENSE.md", "NOTICE.md"]
         assert all((out_dir / name).is_file() for name in LEGAL_PATHS)
-        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree(model, _placed_paths()))
+        assert sorted(verify_dist(out_dir)) == sorted(_in_subtree(model, _stored_paths(model)))
 
     def test_the_notice_names_the_bundled_upstreams_and_every_graph(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1395,6 +1429,7 @@ class TestIrodoriCli:
                 "v4.1-small",
                 "--series",
                 str(sources.series.parent),
+                *_v4_mirror_for("v4.1-small", tmp_path, monkeypatch),
             ]
         )
 
@@ -1402,3 +1437,102 @@ class TestIrodoriCli:
         manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
         assert list(manifest["models"]) == ["v4.1-small"]
         assert verify_dist(out_dir)
+
+
+class TestIrodoriCrossRepoReferences:
+    """v4.1-small references the components it shares with v4-small in v4-small's repository
+    instead of storing them a second time (ADR 0038 §7 addendum 2026-10-28)."""
+
+    #: The 26 roles, spelled out (not derived like the recipe's table — so a change of the
+    #: dtype tables cannot move the declaration silently).
+    _SHARED = frozenset(
+        {
+            *(
+                f"{role}_{dtype}"
+                for role in (
+                    "backbone",
+                    "text_proj",
+                    "caption_proj",
+                    "speaker",
+                    "dit",
+                    "dit_context",
+                    "codec_decoder",
+                    "codec_encoder",
+                )
+                for dtype in ("f32", "f16", "i8")
+            ),
+            "dit_context_i4",
+            "tokenizer",
+        }
+    )
+
+    _REVISION = "485bbee5f0331db555d465955fef48a183bc46e0"
+
+    def test_v41_declares_exactly_the_shared_roles_at_v4_small(self) -> None:
+        (reference,) = irodori_references(IRODORI_V41_MODEL)
+
+        assert reference.repo == "hdae/karume-irodori-v4-small"
+        assert reference.model == IRODORI_V4_MODEL
+        assert len(reference.roles) == 26
+        assert set(reference.roles) == self._SHARED
+
+    def test_the_containers_whose_bytes_differ_stay_local(self) -> None:
+        """References are per container: `duration_*` (retrained upstream) and `dit_i4`
+        (calibrated per model) are stored in v4.1-small's own repository."""
+        local = set(IRODORI_OUTPUT_PATHS) - set(IRODORI_V41_SHARED_ROLES)
+
+        assert local == {"duration_f32", "duration_f16", "duration_i8", "dit_i4"}
+
+    def test_v4_small_is_self_contained(self) -> None:
+        assert irodori_references(IRODORI_V4_MODEL) == ()
+
+    def test_the_pipeline_carries_the_declaration(self) -> None:
+        assert PIPELINE.references is irodori_references
+
+    def test_v41_stores_only_what_differs_and_borrows_every_part_of_the_rest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from irodori import distribution
+
+        sources = _build_irodori_sources(tmp_path, model=IRODORI_V41_MODEL)
+        _v4_mirror_for(IRODORI_V41_MODEL, tmp_path, monkeypatch)
+        monkeypatch.setattr(distribution, "INPUTS_ROOT", tmp_path / "inputs")
+        out_dir = tmp_path / "dist"
+
+        main(
+            [
+                "--pipeline",
+                "irodori",
+                "--model",
+                IRODORI_V41_MODEL,
+                "--series",
+                str(sources.series.parent),
+                "--out",
+                str(out_dir),
+                "--ref-revision",
+                f"{irodori_repo_name(IRODORI_V4_MODEL)}={self._REVISION}",
+            ]
+        )
+
+        manifest = json.loads((out_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        model = manifest["models"][IRODORI_V41_MODEL]
+        borrowed = {
+            (name, label): {
+                (ref.get("repo"), ref.get("revision")) for ref in entry["container"]["parts"]
+            }
+            for name, labels in model["weights"].items()
+            for label, entry in labels.items()
+        }
+        local = {("duration", "f32"), ("duration", "f16"), ("duration", "i8"), ("dit", "i4")}
+        pinned = {("hdae/karume-irodori-v4-small", self._REVISION)}
+        for key, sources_of_parts in borrowed.items():
+            assert sources_of_parts == ({(None, None)} if key in local else pinned), key
+        tokenizer = model["assets"]["tokenizer"]
+        assert (tokenizer["repo"], tokenizer["revision"]) == next(iter(pinned))
+        # Only the four differing containers are files of this repository.
+        stored = {path.split("/")[1] for path in verify_dist(out_dir)}
+        assert stored == {"duration", "dit"}
+        assert all(
+            path.startswith((f"{IRODORI_V41_MODEL}/duration/", f"{IRODORI_V41_MODEL}/dit/model.i4"))
+            for path in verify_dist(out_dir)
+        )

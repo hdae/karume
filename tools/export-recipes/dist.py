@@ -5,8 +5,13 @@
 終わった今、core の表は**空**なので、受理集合の正本はこの辞書だけになった。
 
     uv run python dist.py                                  # 既定 = anima（公式 5 変種 — ADR 0087）
-    uv run python dist.py --pipeline anima-extra           # 追加学習系（越境参照 — リリース時）
-    uv run python dist.py --pipeline irodori
+    uv run python dist.py --pipeline anima-extra \\
+        --model anima-wai-v1.0 --model anima-copycat-20260610 \\
+        --out ../../models/karume-anima-extra \\
+        --resolve-refs hf                                  # fine-tunes (reference karume-anima)
+    uv run python dist.py --pipeline irodori               # v4-small (self-contained)
+    uv run python dist.py --pipeline irodori --model v4.1-small \\
+        --resolve-refs hf                                  # references karume-irodori-v4-small
     uv run python dist.py --pipeline sbv2-fn               # FN 系（HF 公開は保留）
     uv run python dist.py --pipeline sbv2 \\
         --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
@@ -14,30 +19,41 @@
         --model base --model so400m --out ../../models/karume-siglip2
     uv run python dist.py --pipeline lucida                # BiRefNet_HR の派生（別リポ）
     uv run python dist.py --pipeline umt5                  # umT5-XXL encoder（Wan の参照先）
-    uv run python dist.py --pipeline wan \\
-        --ref-repo hdae/karume-umt5-xxl --ref-revision <karume-umt5-xxl の main の SHA> \\
-        --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder
-                                                           # Wan2.1 T2V 1.3B（HF 公開は未）
-    uv run python dist.py --pipeline wan-ti2v \\
-        --ref-repo hdae/karume-umt5-xxl --ref-revision <karume-umt5-xxl の main の SHA> \\
-        --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder
-                                                           # Wan2.2 TI2V 5B（HF 公開は未）
+    uv run python dist.py --pipeline wan --allow-placeholder-ref
+                                                           # Wan2.1 T2V 1.3B (not published)
+    uv run python dist.py --pipeline wan-ti2v --resolve-refs hf
+                                                           # Wan2.2 TI2V 5B (references umT5)
 
 置き場の既定（`--series` / `--out`）もここが渡す — リポの `outputs/series/` と `models/` は
 repo topology で、core は綴りを持たない（ADR 0065 Consequences・`karume.dist` の同 MUST）。
 
-## 仮の SHA の門（ADR 0119 追記「段 10d の設計」E）
+## Cross-repository references (ADR 0038 §7, addendum 2026-10-28)
 
-越境参照の参照先が未公開の間は、開発用のミラーを仮の commit SHA {@link PLACEHOLDER_REVISION}
-（40 桁の 0）で焼く（ローカルの取得元は `crossRepo` の明示 mapping で解き、revision を見ない）。
-仮の SHA は形の上では正当な 40 桁 hex なので、hub の parse も core の組み立ても通す — 公開へ漏れると
-HF からの取得が存在しない commit を引きに行く。そこでこのドライバは `--ref-revision` が仮の SHA の
-ときに {@link ALLOW_PLACEHOLDER_FLAG} の明示を要求し、無ければ 1 バイトも書く前に落とす。公開の
-焼き直し（docs/release-runbook.md §0 — bump の後に必ず焼き直す）は明示を付けないので、参照先の
-実 SHA を渡さない限り通らない:
+Which roles of a model are borrowed from another distribution repository is the pipeline's
+declaration (`karume.dist.Pipeline.references`). This driver supplies what the core does not know:
+the local mirror of each referenced repository (`DIST_ROOT/<repository name>` — the bytes a
+reference is reconciled against) and the commit it is pinned at, from **exactly one** revision
+source per build:
 
-    uv run python dist.py --pipeline wan --ref-revision 0000000000000000000000000000000000000000 \\
-        --allow-placeholder-ref --ref-repo … --ref-dist … --ref-model xxl --ref-role text_encoder
+- `--resolve-refs hf` reads the referenced repository's main from the HF API and, before a byte is
+  written, requires every borrowed file to be in that commit with the bytes reconciled locally
+  (the LFS oid = the local sha256; a file stored without LFS: its git blob id) —
+  {@link confirm_on_hub}. A stale SHA, a referenced mirror rebuilt but not uploaded, or a renamed
+  path then fails at build time instead of at a user's fetch. This is the only network access of
+  distribution assembly, and it lives in this driver (the core wheel has none);
+- `--ref-revision NAME=SHA` (the core's option) pins it explicitly and offline — nothing is
+  checked against the Hub;
+- {@link ALLOW_PLACEHOLDER_FLAG} pins every reference at the placeholder {@link
+  PLACEHOLDER_REVISION} (40 zeros — ADR 0119 addendum "design of step 10d" E), for a development
+  mirror while the referenced repository is unpublished (a local source resolves the reference
+  through an explicit `crossRepo` mapping and does not look at the revision). The placeholder has
+  the shape of a real sha, so the hub's parse, the core's assembly and `verify_dist` all accept it
+  — published, it would point at a commit that does not exist. It is therefore only reachable
+  through this explicit flag; `--ref-revision NAME=<40 zeros>` is refused before a byte is
+  written, and the publication rebuild (docs/release-runbook.md §0) never passes the flag.
+
+A model that declares references and gets no source fails before a byte is written — there is no
+silent self-contained build.
 
 ## 取り込み由来の手元の実験用ミラー（ADR 0122 決定 5 / 6）
 
@@ -59,9 +75,17 @@ NOTE: `**CORE_PIPELINES` の展開は残す — core が「表を受け取る側
 from __future__ import annotations
 
 import argparse
+import hashlib
+import http.client
+import json
+import re
 import sys
+import urllib.request
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
+from typing import Any
 
 from _shared.paths import DIST_ROOT, MISC_ROOT, SERIES_ROOT
 from anima import distribution as anima_distribution
@@ -71,7 +95,18 @@ from gemma4 import distribution as gemma4_distribution
 from gemma4_qat import distribution as gemma4_qat_distribution
 from irodori import distribution as irodori_distribution
 from karume.dist import PIPELINES as CORE_PIPELINES
-from karume.dist import DistError, Pipeline, build_parser
+from karume.dist import (
+    REVISION_RE,
+    CrossRepoReference,
+    DistError,
+    ExternalComponents,
+    Pipeline,
+    ReferenceCheck,
+    build_parser,
+    declared_references,
+    parse_reference_revisions,
+    selected_models,
+)
 from karume.dist import main as dist_main
 from sbv2 import distribution as sbv2_distribution
 from siglip2 import distribution as siglip2_distribution
@@ -108,25 +143,213 @@ PIPELINES: Mapping[str, Pipeline] = {
 #: 旧 `karume dist`（引数なし）の UX をドライバ側で維持する。
 DEFAULT_PIPELINE = "anima"
 
-#: 越境参照の参照先が未公開の間に焼く仮の commit SHA（ADR 0119 追記 E — 40 桁の 0）。
+#: The placeholder commit sha a development mirror is pinned at while the referenced repository is
+#: unpublished (ADR 0119 addendum E — 40 zeros).
 PLACEHOLDER_REVISION = "0" * 40
 
-#: 仮の SHA で焼くことの明示（開発用のミラーだけが付ける — モジュール doc の「仮の SHA の門」）。
+#: The explicit statement that a build is a development mirror pinned at the placeholder (module
+#: doc, "Cross-repository references").
 ALLOW_PLACEHOLDER_FLAG = "--allow-placeholder-ref"
 
+#: Resolve the references' revisions from the Hub and confirm the borrowed files there (module doc).
+RESOLVE_REFS_FLAG = "--resolve-refs"
 
-def assert_placeholder_intent(revision: str | None, *, allowed: bool) -> None:
-    """`--ref-revision` が仮の SHA なら、明示（{@link ALLOW_PLACEHOLDER_FLAG}）を要求する。
+#: The core's explicit revision option (spelled here only for the messages).
+REF_REVISION_FLAG = "--ref-revision"
 
-    MUST: 明示が無ければ fail loudly — 仮の SHA は 40 桁 hex の形を満たすので、hub の parse も
-    core の組み立ても `verify_dist` も通し、公開した配布形が存在しない commit を指したまま据わる。
-    """
-    if revision == PLACEHOLDER_REVISION and not allowed:
+#: The Hugging Face Hub {@link RESOLVE_REFS_FLAG} reads (the HF API under `/api/`).
+HF_ENDPOINT = "https://huggingface.co"
+
+#: Seconds one HF API request may take before the build fails.
+HF_TIMEOUT_SECONDS = 60
+
+#: One GET of the HF API: URL → (the decoded JSON body, the URL of the next page or `None` — the
+#: tree listing is paginated through the `Link: <…>; rel="next"` header). Injected so that the
+#: tests read no network.
+HfGet = Callable[[str], tuple[Any, str | None]]
+
+_NEXT_PAGE_RE = re.compile(r'<([^>]+)>\s*;\s*rel="next"')
+
+
+def hf_get(url: str) -> tuple[Any, str | None]:
+    """The real {@link HfGet} (`urllib`). A network, HTTP or JSON failure fails the build naming
+    the URL and the offline alternative."""
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=HF_TIMEOUT_SECONDS) as response:
+            body = json.load(response)
+            link = response.headers.get("Link")
+    # `http.client.HTTPException` (e.g. `IncompleteRead` — the connection dropped while the body
+    # was read) is not an `OSError`; `ValueError` covers the JSON decode.
+    except (OSError, ValueError, http.client.HTTPException) as cause:
         raise DistError(
-            f"--ref-revision が仮の SHA（{PLACEHOLDER_REVISION}）— 公開する配布形は参照先の main の"
-            f" 実 SHA で焼く。開発用のミラーとして焼くなら {ALLOW_PLACEHOLDER_FLAG} を明示する"
-            "（docs/release-runbook.md §0）"
+            f"{RESOLVE_REFS_FLAG} hf could not read {url}: {cause} — it needs the Hugging Face"
+            f" API; offline, pin the revision with {REF_REVISION_FLAG} NAME=SHA"
+        ) from cause
+    match = _NEXT_PAGE_RE.search(link or "")
+    return body, match.group(1) if match else None
+
+
+@dataclass(frozen=True)
+class HubCommit:
+    """The main of one referenced repository as the HF API reported it: its commit and the files of
+    that commit (path → tree entry; `oid` = the git blob id, `lfs.oid` = the sha256 of an LFS
+    file)."""
+
+    repo: str
+    revision: str
+    files: Mapping[str, Mapping[str, Any]]
+
+
+def read_hub_main(repo: str, get: HfGet) -> HubCommit:
+    """Read `repo`'s main: the commit sha (`/api/models/<repo>/revision/main`), then the files of
+    **that sha** (`/api/models/<repo>/tree/<sha>?recursive=true`, every page) — so the listing
+    cannot drift from the revision written into the manifest."""
+    body, _ = get(f"{HF_ENDPOINT}/api/models/{repo}/revision/main")
+    revision = body.get("sha") if isinstance(body, dict) else None
+    if not isinstance(revision, str) or not REVISION_RE.fullmatch(revision):
+        raise DistError(
+            f"{RESOLVE_REFS_FLAG} hf: the HF API gave no commit sha for the main of {repo}"
+            f" (got {revision!r})"
         )
+    files: dict[str, Mapping[str, Any]] = {}
+    url: str | None = f"{HF_ENDPOINT}/api/models/{repo}/tree/{revision}?recursive=true"
+    while url is not None:
+        page, url = get(url)
+        if not isinstance(page, list):
+            raise DistError(
+                f"{RESOLVE_REFS_FLAG} hf: the HF API's tree of {repo}@{revision} is not a list"
+            )
+        for entry in page:
+            if (
+                isinstance(entry, dict)
+                and entry.get("type") == "file"
+                and isinstance(entry.get("path"), str)
+            ):
+                files[entry["path"]] = entry
+    return HubCommit(repo=repo, revision=revision, files=files)
+
+
+def git_blob_id(path: Path) -> str:
+    """The git object id of a file stored without LFS (sha1 over `blob <size>\\0` + the bytes) —
+    what the HF tree lists as its `oid`."""
+    digest = hashlib.sha1(f"blob {path.stat().st_size}\0".encode(), usedforsecurity=False)
+    with path.open("rb") as stream:
+        while chunk := stream.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def confirm_on_hub(
+    commits: Mapping[str, HubCommit],
+    components: ExternalComponents,
+    refs: Sequence[Mapping[str, Any]],
+) -> None:
+    """`karume.dist.ReferenceCheck` against the Hub: every file the build borrows from
+    `components.repo` is in the pinned commit, with the bytes the core reconciled in the local
+    mirror (an LFS file: `lfs.oid` = its sha256; a file stored without LFS: its git blob id, taken
+    from the local mirror's file).
+
+    MUST: every borrowed file is checked, not a sample — a referenced mirror rebuilt locally and
+    not uploaded differs in some parts only, and a renamed path is missing for that one file.
+    """
+    commit = commits[components.repo]
+    problems: list[str] = []
+    for ref in refs:
+        path = str(ref["path"])
+        entry = commit.files.get(path)
+        if entry is None:
+            problems.append(f"{path}: not in the commit")
+            continue
+        lfs = entry.get("lfs")
+        if isinstance(lfs, dict):
+            if lfs.get("oid") != ref["sha256"]:
+                problems.append(f"{path}: LFS oid {lfs.get('oid')} ≠ local sha256 {ref['sha256']}")
+            continue
+        local = git_blob_id(components.dist / path)
+        if entry.get("oid") != local:
+            problems.append(f"{path}: git blob {entry.get('oid')} ≠ local {local}")
+    if problems:
+        listing = "\n  ".join(problems)
+        raise DistError(
+            f"{components.repo}@{commit.revision} does not hold the bytes this build references"
+            f" ({len(problems)} of {len(refs)} files):\n  {listing}\n— upload the referenced"
+            " repository first, or rebuild against the mirror its main was uploaded from"
+            " (docs/release-runbook.md §0)"
+        )
+
+
+def reference_pins(
+    references: Sequence[CrossRepoReference],
+    explicit: Mapping[str, str],
+    *,
+    resolve: str | None,
+    allow_placeholder: bool,
+    get: HfGet,
+) -> tuple[dict[str, str], ReferenceCheck | None]:
+    """The revision source of a build's cross-repository references (module doc).
+
+    Returns the revisions this driver adds to the core's arguments (`--ref-revision NAME=SHA` —
+    empty when the caller pinned them explicitly, the core reading those itself) and the check the
+    core runs before writing ({@link confirm_on_hub} for `--resolve-refs hf`).
+
+    MUST: exactly one source per build, settled before a byte is written. Combining two would let
+    one silently override the other; none, for a build that declares references, would assemble a
+    self-contained distribution nobody asked for; a flag for a build that references nothing means
+    the build is not the one the caller had in mind. The placeholder is reachable only through its
+    explicit flag (module doc).
+    """
+    sources = [
+        flag
+        for flag, given in (
+            (REF_REVISION_FLAG, bool(explicit)),
+            (RESOLVE_REFS_FLAG, resolve is not None),
+            (ALLOW_PLACEHOLDER_FLAG, allow_placeholder),
+        )
+        if given
+    ]
+    if len(sources) > 1:
+        raise DistError(
+            f"{' and '.join(sources)} exclude each other — a build takes the revisions of its"
+            " cross-repository references from one source"
+        )
+    # After the exclusivity check, so that its advice (use the flag instead) is never given to a
+    # caller who already passed the flag.
+    placeholder = sorted(
+        name for name, revision in explicit.items() if revision == PLACEHOLDER_REVISION
+    )
+    if placeholder:
+        raise DistError(
+            f"{REF_REVISION_FLAG} pins {placeholder} at the placeholder ({PLACEHOLDER_REVISION})"
+            f" — a published distribution is built with the real commit ({RESOLVE_REFS_FLAG} hf,"
+            f" or the SHA of the referenced main); a development mirror says so with"
+            f" {ALLOW_PLACEHOLDER_FLAG} instead (docs/release-runbook.md §0)"
+        )
+    repos = {reference.repo_name: reference.repo for reference in references}
+    if not repos:
+        if sources and sources[0] != REF_REVISION_FLAG:
+            raise DistError(
+                f"{sources[0]} was given, but the models built declare no cross-repository"
+                " reference"
+            )
+        # An explicit revision for an undeclared repository fails in the core (one place).
+        return {}, None
+    if not sources:
+        raise DistError(
+            f"The models built reference {sorted(repos)} across repositories — pin the revision"
+            f" with {RESOLVE_REFS_FLAG} hf (the referenced main, checked file by file on the"
+            f" Hub), {REF_REVISION_FLAG} NAME=SHA, or {ALLOW_PLACEHOLDER_FLAG} for a development"
+            " mirror"
+        )
+    if explicit:
+        return {}, None
+    if allow_placeholder:
+        return {name: PLACEHOLDER_REVISION for name in repos}, None
+    commits = {repo: read_hub_main(repo, get) for repo in sorted(set(repos.values()))}
+    return (
+        {name: commits[repo].revision for name, repo in repos.items()},
+        partial(confirm_on_hub, commits),
+    )
 
 
 #: 取り込み由来の手元の実験用ミラーの既定の置き場の親（`<LOCAL_DIST_ROOT>/<名前>/` — `models/`
@@ -179,10 +402,14 @@ def intake_pipelines(
     return pipelines, lambda _pipeline, _models: LOCAL_DIST_ROOT / intake.name
 
 
+#: The driver-only options that take a value (removed with it before the core reads the arguments).
+_DRIVER_VALUE_FLAGS = (INTAKE_FLAG, RESOLVE_REFS_FLAG)
+
+
 def core_arguments(arguments: Sequence[str]) -> list[str]:
-    """ドライバだけが読む引数（{@link ALLOW_PLACEHOLDER_FLAG}・
-    {@link ALLOW_UNDECLARED_LICENSE_FLAG}・{@link INTAKE_FLAG} とその値）を取り除いた、core へ
-    渡す引数。"""
+    """The arguments passed to the core: without the ones only the driver reads
+    ({@link ALLOW_PLACEHOLDER_FLAG}, {@link ALLOW_UNDECLARED_LICENSE_FLAG}, and
+    {@link INTAKE_FLAG} / {@link RESOLVE_REFS_FLAG} with their values)."""
     remaining: list[str] = []
     skip_value = False
     for argument in arguments:
@@ -191,10 +418,10 @@ def core_arguments(arguments: Sequence[str]) -> list[str]:
             continue
         if argument in (ALLOW_PLACEHOLDER_FLAG, ALLOW_UNDECLARED_LICENSE_FLAG):
             continue
-        if argument == INTAKE_FLAG:
+        if argument in _DRIVER_VALUE_FLAGS:
             skip_value = True
             continue
-        if argument.startswith(f"{INTAKE_FLAG}="):
+        if argument.startswith(tuple(f"{flag}=" for flag in _DRIVER_VALUE_FLAGS)):
             continue
         remaining.append(argument)
     return remaining
@@ -215,11 +442,14 @@ def default_out_dir(pipeline: Pipeline, models: Sequence[str]) -> Path:
 
 
 def build_driver_parser() -> argparse.ArgumentParser:
-    """core の parser に {@link ALLOW_PLACEHOLDER_FLAG} を足したもの（門が引数を読むための 1 本）。
+    """The core's parser plus the driver-only options ({@link ALLOW_PLACEHOLDER_FLAG},
+    {@link RESOLVE_REFS_FLAG} and the intake options) — one parser, so the driver and the core
+    read the same arguments.
 
-    省略形は受けない（`allow_abbrev`）。明示の綴りは文字列の一致で取り除いてから core へ渡すので、
-    省略形（`--allow-placeholder` など）を門だけが受けると、core が知らない引数として落とす —
-    綴り切らせて、門と core が同じ引数を 1 通りに読む形にする。
+    Abbreviations are not accepted (`allow_abbrev`). The driver-only options are removed by exact
+    spelling before the core reads the arguments, so an abbreviation (`--allow-placeholder` and the
+    like) accepted here only would reach the core as an unknown argument — they are spelled out,
+    and both read the arguments one way.
     """
     parser = build_parser(
         PIPELINES, DEFAULT_PIPELINE, default_series=SERIES_ROOT, has_default_out_dir=True
@@ -229,8 +459,18 @@ def build_driver_parser() -> argparse.ArgumentParser:
         ALLOW_PLACEHOLDER_FLAG,
         dest="allow_placeholder_ref",
         action="store_true",
-        help=f"--ref-revision に仮の SHA（{PLACEHOLDER_REVISION}）を許す — 参照先が未公開の間の"
-        "開発用ミラーだけ（公開する配布形には付けない）",
+        help=f"pin every cross-repository reference at the placeholder ({PLACEHOLDER_REVISION})"
+        " — development mirrors only, while the referenced repository is unpublished (never for a"
+        " distribution that is uploaded)",
+    )
+    parser.add_argument(
+        RESOLVE_REFS_FLAG,
+        dest="resolve_refs",
+        choices=("hf",),
+        default=None,
+        help="hf: pin every cross-repository reference at the referenced repository's main on"
+        f" {HF_ENDPOINT}, and require every borrowed file to be in that commit with the local"
+        " bytes (read-only network access)",
     )
     parser.add_argument(
         INTAKE_FLAG,
@@ -250,23 +490,44 @@ def build_driver_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> None:
+def referenced_dist(name: str) -> Path:
+    """The local mirror of the referenced repository `name` (`models/<name>/` — the same place
+    {@link default_out_dir} builds it into; read at call time like that one)."""
+    return DIST_ROOT / name
+
+
+def main(argv: Sequence[str] | None = None, *, get: HfGet = hf_get) -> None:
+    """Assemble one distribution. `get` is the HF API access of {@link RESOLVE_REFS_FLAG}
+    (injected by the tests only — they read no network)."""
     arguments = list(sys.argv[1:] if argv is None else argv)
     args = build_driver_parser().parse_args(arguments)
-    # 1 バイトも書く前に落とす（core の組み立ては staging を経て out_dir を丸ごと差し替える）。
-    assert_placeholder_intent(args.ref_revision, allowed=args.allow_placeholder_ref)
     pipelines: Mapping[str, Pipeline] = PIPELINES
     out_dir_hook: Callable[[Pipeline, Sequence[str]], Path] = default_out_dir
     if args.intake is not None:
         pipelines, out_dir_hook = intake_pipelines(args)
     elif args.allow_undeclared_license:
         raise DistError(f"{ALLOW_UNDECLARED_LICENSE_FLAG} は {INTAKE_FLAG} と組むときだけ効く")
+    # Settled before a byte is written (the core's assembly replaces out_dir wholesale through
+    # staging) and before the plans read several GB of series.
+    pipeline = pipelines[args.pipeline]
+    revisions, check = reference_pins(
+        declared_references(pipeline, selected_models(pipeline, args.models)),
+        parse_reference_revisions(args.ref_revisions),
+        resolve=args.resolve_refs,
+        allow_placeholder=args.allow_placeholder_ref,
+        get=get,
+    )
     dist_main(
-        core_arguments(arguments),
+        [
+            *core_arguments(arguments),
+            *(f"{REF_REVISION_FLAG}={name}={revision}" for name, revision in revisions.items()),
+        ],
         pipelines=pipelines,
         default_pipeline=DEFAULT_PIPELINE,
         default_out_dir=out_dir_hook,
         default_series=SERIES_ROOT,
+        referenced_dist=referenced_dist,
+        check_references=check,
     )
 
 

@@ -14,11 +14,13 @@ Wan2.1 の pin を名乗る（ADR 0121 決定 9 — 出所の門の分割）。
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -44,6 +46,7 @@ from karume.dist import (
     MANIFEST_FILENAME,
     MODEL_CARD_FILENAME,
     NOTICE_FILENAME,
+    CrossRepoReference,
     DistError,
     ExternalComponents,
     assemble_family,
@@ -128,6 +131,7 @@ from wan.distribution import (
     assert_shared_decoder,
     wan_placements,
     wan_plan,
+    wan_references,
     wan_sources,
 )
 from wan.prompts import FIXED_PROMPTS
@@ -397,13 +401,15 @@ def _assemble_umt5(root: Path, sources: WanSources) -> Path:
 
 
 def _reference(umt5_dir: Path, revision: str = _UMT5_REVISION) -> ExternalComponents:
-    """`--ref-*` 5 指定と同じ越境参照（text_encoder を umT5 のリポへ向ける）。"""
+    """The reference the recipe declares ({@link wan_references} — the text encoder in the umT5
+    repository), resolved against a local umT5 distribution."""
+    (declared,) = wan_references(DEFAULT_MODEL)
     return ExternalComponents(
-        repo=_UMT5_REPO,
+        repo=declared.repo,
         revision=revision,
         dist=umt5_dir,
-        model=UMT5_DEFAULT_MODEL,
-        roles=(WAN_TEXT_ENCODER_ROLE,),
+        model=declared.model,
+        roles=declared.roles,
     )
 
 
@@ -424,7 +430,7 @@ def assembled(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
         DEFAULT_MODEL,
         render_card=_render,
         root_files=PIPELINE.root_files,
-        external=_reference(_assemble_umt5(tmp_path, sources)),
+        external=(_reference(_assemble_umt5(tmp_path, sources)),),
     )
     return out_dir, manifest
 
@@ -522,7 +528,7 @@ def assembled22(tmp_path: Path, wan22_provenance: None) -> tuple[Path, dict[str,
         _TI2V,
         render_card=_render22,
         root_files=TI2V_PIPELINE.root_files,
-        external=_reference(_assemble_umt5(tmp_path, sources)),
+        external=(_reference(_assemble_umt5(tmp_path, sources)),),
     )
     return out_dir, manifest
 
@@ -710,7 +716,7 @@ class TestTheTextEncoderReference:
                 [wan_plan(sources)],
                 tmp_path / "models" / WAN_REPO_NAME,
                 DEFAULT_MODEL,
-                external=_reference(umt5_dir),
+                external=(_reference(umt5_dir),),
             )
 
     def test_the_output_paths_match_the_umt5_repository(self) -> None:
@@ -1365,16 +1371,20 @@ class TestTheModelCardOnTheTextEncoder:
             _card(changed)
 
 
-class TestThePlaceholderRevisionGate:
-    """仮の SHA（40 桁の 0）の門 — ドライバ `dist.py` が明示なしの焼きを書く前に拒む
-    （ADR 0119 追記 E）。
+class TestReferenceRevisionSources:
+    """Where the driver `dist.py` takes the umT5 reference's revision from (module doc of
+    `dist.py`, "Cross-repository references") — exactly one source per build, settled before a
+    byte is written.
 
-    公開の焼き直し（release-runbook §0 — bump の後に必ず焼き直す）は明示を付けないので、参照先の
-    実 SHA を渡さない限り通らない。
+    The placeholder (40 zeros) is reachable only through its explicit flag (ADR 0119 addendum E):
+    the publication rebuild (release-runbook §0) never passes it, so it cannot ship a commit that
+    does not exist. The Hub is mocked — the tests read no network.
     """
 
+    _HUB_REVISION = "fedcba9876543210fedcba9876543210fedcba98"
+
     @staticmethod
-    def _argv(root: Path, umt5_dir: Path, revision: str) -> list[str]:
+    def _argv(root: Path, *extra: str) -> list[str]:
         return [
             "--pipeline",
             "wan",
@@ -1382,65 +1392,178 @@ class TestThePlaceholderRevisionGate:
             str(root / "outputs" / "series"),
             "--out",
             str(root / "models" / WAN_REPO_NAME),
-            "--ref-repo",
-            _UMT5_REPO,
-            "--ref-revision",
-            revision,
-            "--ref-dist",
-            str(umt5_dir),
-            "--ref-model",
-            UMT5_DEFAULT_MODEL,
-            "--ref-role",
-            WAN_TEXT_ENCODER_ROLE,
+            *extra,
         ]
 
-    def _ready(self, tmp_path: Path) -> Path:
+    @staticmethod
+    def _ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """The umT5 distribution where the driver reads referenced mirrors (`models/<name>/`)."""
+        monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
         return _assemble_umt5(tmp_path, _build_sources(tmp_path))
 
+    def _hub(
+        self, umt5_dir: Path, *, oids: Mapping[str, str] | None = None
+    ) -> Callable[[str], tuple[Any, str | None]]:
+        """A mocked HF API whose main of the umT5 repository holds the local mirror's files (every
+        file as LFS, its oid = the sha256), with `oids` overriding some."""
+        tree = [
+            {
+                "type": "file",
+                "path": str(path.relative_to(umt5_dir)),
+                "oid": "0" * 40,
+                "lfs": {
+                    "oid": (oids or {}).get(
+                        str(path.relative_to(umt5_dir)),
+                        hashlib.sha256(path.read_bytes()).hexdigest(),
+                    ),
+                    "size": path.stat().st_size,
+                },
+            }
+            for path in sorted(umt5_dir.rglob("*"))
+            if path.is_file()
+        ]
+        api = f"https://huggingface.co/api/models/{_UMT5_REPO}"
+
+        def get(url: str) -> tuple[Any, str | None]:
+            if url == f"{api}/revision/main":
+                return {"sha": self._HUB_REVISION}, None
+            assert url == f"{api}/tree/{self._HUB_REVISION}?recursive=true", url
+            return tree, None
+
+        return get
+
+    def _text_encoder_refs(self, root: Path) -> list[Mapping[str, Any]]:
+        manifest = json.loads(
+            (root / "models" / WAN_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
+        )
+        return _model(manifest)["weights"][WAN_TEXT_ENCODER_ROLE]["i8"]["container"]["parts"]
+
+    def test_both_generations_declare_the_umt5_text_encoder(self) -> None:
+        """The reference the runbook used to spell as options: `hdae/karume-umt5-xxl`, model
+        `xxl`, role `text_encoder`."""
+        expected = (CrossRepoReference("karume-umt5-xxl", "xxl", ("text_encoder",)),)
+
+        assert PIPELINE.references(DEFAULT_MODEL) == expected
+        assert TI2V_PIPELINE.references(WAN22.default_model) == expected
+
     def test_publishing_with_the_placeholder_is_refused_before_anything_is_written(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        umt5_dir = self._ready(tmp_path)
-        argv = self._argv(tmp_path, umt5_dir, dist.PLACEHOLDER_REVISION)
+        self._ready(tmp_path, monkeypatch)
+        argv = self._argv(
+            tmp_path, "--ref-revision", f"{UMT5_REPO_NAME}={dist.PLACEHOLDER_REVISION}"
+        )
 
         with pytest.raises(DistError, match=dist.ALLOW_PLACEHOLDER_FLAG):
             dist.main(argv)
         assert not (tmp_path / "models" / WAN_REPO_NAME).exists()
 
-    def test_a_development_mirror_declares_the_placeholder_explicitly(self, tmp_path: Path) -> None:
-        umt5_dir = self._ready(tmp_path)
-        argv = self._argv(tmp_path, umt5_dir, dist.PLACEHOLDER_REVISION)
+    def test_a_development_mirror_declares_the_placeholder_explicitly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._ready(tmp_path, monkeypatch)
 
-        dist.main([*argv, dist.ALLOW_PLACEHOLDER_FLAG])
+        dist.main(self._argv(tmp_path, dist.ALLOW_PLACEHOLDER_FLAG))
 
-        manifest = json.loads(
-            (tmp_path / "models" / WAN_REPO_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
-        )
-        parts = _model(manifest)["weights"][WAN_TEXT_ENCODER_ROLE]["i8"]["container"]["parts"]
+        parts = self._text_encoder_refs(tmp_path)
         assert {ref["revision"] for ref in parts} == {dist.PLACEHOLDER_REVISION}
 
-    def test_a_real_revision_needs_no_declaration(self, tmp_path: Path) -> None:
-        umt5_dir = self._ready(tmp_path)
+    def test_a_real_revision_needs_no_declaration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._ready(tmp_path, monkeypatch)
 
-        dist.main(self._argv(tmp_path, umt5_dir, _UMT5_REVISION))
+        dist.main(self._argv(tmp_path, "--ref-revision", f"{UMT5_REPO_NAME}={_UMT5_REVISION}"))
 
         assert verify_dist(tmp_path / "models" / WAN_REPO_NAME)
+        assert {ref["revision"] for ref in self._text_encoder_refs(tmp_path)} == {_UMT5_REVISION}
 
-    def test_an_abbreviated_declaration_is_not_read(self, tmp_path: Path) -> None:
+    def test_a_build_without_a_revision_source_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No silent self-contained build of a pipeline that declares a reference."""
+        self._ready(tmp_path, monkeypatch)
+
+        with pytest.raises(DistError, match=r"reference \['karume-umt5-xxl'\] across"):
+            dist.main(self._argv(tmp_path))
+        assert not (tmp_path / "models" / WAN_REPO_NAME).exists()
+
+    def test_the_hub_pins_the_referenced_main_and_confirms_the_borrowed_files(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        umt5_dir = self._ready(tmp_path, monkeypatch)
+
+        dist.main(self._argv(tmp_path, "--resolve-refs", "hf"), get=self._hub(umt5_dir))
+
+        assert {ref["revision"] for ref in self._text_encoder_refs(tmp_path)} == {
+            self._HUB_REVISION
+        }
+
+    def test_a_borrowed_file_with_other_bytes_on_the_hub_is_refused_before_anything_is_written(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A referenced mirror rebuilt locally but not uploaded: one part differs on the Hub."""
+        umt5_dir = self._ready(tmp_path, monkeypatch)
+        parts = sorted((umt5_dir / UMT5_DEFAULT_MODEL / WAN_TEXT_ENCODER_ROLE).glob("*.krm"))
+        stale = str(parts[1].relative_to(umt5_dir))
+
+        with pytest.raises(DistError, match=rf"1 of \d+ files\):\n  {re.escape(stale)}: LFS oid"):
+            dist.main(
+                self._argv(tmp_path, "--resolve-refs", "hf"),
+                get=self._hub(umt5_dir, oids={stale: "f" * 64}),
+            )
+        assert not (tmp_path / "models" / WAN_REPO_NAME).exists()
+
+    def test_the_sources_exclude_each_other(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        umt5_dir = self._ready(tmp_path, monkeypatch)
+
+        with pytest.raises(DistError, match="exclude each other"):
+            dist.main(
+                self._argv(tmp_path, "--resolve-refs", "hf", dist.ALLOW_PLACEHOLDER_FLAG),
+                get=self._hub(umt5_dir),
+            )
+        with pytest.raises(DistError, match="exclude each other"):
+            dist.main(
+                self._argv(
+                    tmp_path,
+                    "--resolve-refs=hf",
+                    "--ref-revision",
+                    f"{UMT5_REPO_NAME}={_UMT5_REVISION}",
+                ),
+                get=self._hub(umt5_dir),
+            )
+        assert not (tmp_path / "models" / WAN_REPO_NAME).exists()
+
+    def test_an_abbreviated_declaration_is_not_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """省略形は門も core も受けない（明示は綴り切る — `build_driver_parser` の doc）。"""
-        umt5_dir = self._ready(tmp_path)
-        argv = self._argv(tmp_path, umt5_dir, dist.PLACEHOLDER_REVISION)
+        self._ready(tmp_path, monkeypatch)
 
         with pytest.raises(SystemExit):
-            dist.main([*argv, "--allow-placeholder"])
+            dist.main(self._argv(tmp_path, "--allow-placeholder"))
         assert not (tmp_path / "models" / WAN_REPO_NAME).exists()
 
     def test_the_placeholder_is_forty_zeros(self) -> None:
         """hub の parse（40 桁の小文字 hex）を通る形 — だから形の門では止まらない。"""
         assert dist.PLACEHOLDER_REVISION == "0" * 40
-        dist.assert_placeholder_intent(dist.PLACEHOLDER_REVISION, allowed=True)
-        dist.assert_placeholder_intent(None, allowed=False)
-        dist.assert_placeholder_intent(_UMT5_REVISION, allowed=False)
+        declared = wan_references(DEFAULT_MODEL)
+        pins = partial(dist.reference_pins, resolve=None, get=self._unreachable)
+        assert pins(declared, {}, allow_placeholder=True) == (
+            {UMT5_REPO_NAME: dist.PLACEHOLDER_REVISION},
+            None,
+        )
+        assert pins((), {}, allow_placeholder=False) == ({}, None)
+        assert pins(declared, {UMT5_REPO_NAME: _UMT5_REVISION}, allow_placeholder=False) == (
+            {},
+            None,
+        )
+
+    @staticmethod
+    def _unreachable(url: str) -> tuple[Any, str | None]:
+        raise AssertionError(f"no Hub access expected: {url}")
 
 
 class TestTheWritersSpellTheSameNames:

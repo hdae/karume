@@ -31,6 +31,7 @@ from container_series import (
 )
 from ir_fixtures import ir_container
 
+import dist
 from _shared.container_read import read_asset
 from anima.card import ATTRIBUTION_NOTICE, RIGHTS_GRANT_STATEMENT
 from anima.distribution import (
@@ -53,6 +54,7 @@ from anima.distribution import (
     OFFICIAL_MODELS,
     OFFICIAL_NOTICE_MARKDOWN,
     OFFICIAL_PIPELINE,
+    OFFICIAL_REPO_NAME,
     OUTPUT_PATHS,
     ROPE_BASE_ASSET,
     ROPE_BASE_ROLE,
@@ -1905,7 +1907,12 @@ class TestLegalTexts:
     LICENSE_SHA256 = "ee956174133d7c2cdcf220440c7726187eaf4b50e8e48ee32194353a22164d15"
 
     def _run(
-        self, tmp_path: Path, *, pipeline: str = "anima", model: str = ANIMA_TURBO_MODEL_NAME
+        self,
+        tmp_path: Path,
+        *,
+        pipeline: str = "anima",
+        model: str = ANIMA_TURBO_MODEL_NAME,
+        extra: Iterable[str] = (),
     ) -> Path:
         """`dist.py` の CLI を 1 周させる（既定は公式リポ = `--pipeline anima`）。
 
@@ -1924,9 +1931,24 @@ class TestLegalTexts:
                 str(tmp_path / "series"),
                 "--out",
                 str(out_dir),
+                *extra,
             ]
         )
         return out_dir
+
+    @staticmethod
+    def _official_mirror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        """What an extra-repository build needs: the official repository's mirror it references
+        (where the driver reads referenced mirrors, from the same synthetic text stack) and a
+        revision source — the placeholder (no Hub in the tests)."""
+        sources = _build_series(tmp_path / "official-series", model=ANIMA_BASE_MODEL_NAME)
+        assemble_family(
+            [anima_plan(sources, ANIMA_BASE_MODEL_NAME)],
+            tmp_path / "models" / OFFICIAL_REPO_NAME,
+            ANIMA_BASE_MODEL_NAME,
+        )
+        monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
+        return [dist.ALLOW_PLACEHOLDER_FLAG]
 
     @staticmethod
     def _flat(text: str) -> str:
@@ -1949,9 +1971,16 @@ class TestLegalTexts:
         for sentence in ATTRIBUTION_NOTICE.split("\n"):
             assert sentence in notice
 
-    def test_the_extra_repository_ships_its_own_notice(self, tmp_path: Path) -> None:
+    def test_the_extra_repository_ships_its_own_notice(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """追加学習リポの直下には**そのリポの**改変告知が入る（取り違えると告知が嘘になる）。"""
-        out_dir = self._run(tmp_path, pipeline="anima-extra", model="anima-wai-v1.0")
+        out_dir = self._run(
+            tmp_path,
+            pipeline="anima-extra",
+            model="anima-wai-v1.0",
+            extra=self._official_mirror(tmp_path, monkeypatch),
+        )
 
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
         assert notice == EXTRA_NOTICE_MARKDOWN
@@ -1959,7 +1988,7 @@ class TestLegalTexts:
         assert ATTRIBUTION_NOTICE in notice
 
     def test_the_notice_specifies_that_the_rights_are_granted_directly_by_the_company(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """§3(a) 後段 — 使用権は Company から受領者へ直接付与されると明示する（逐語の 1 定数）。
 
@@ -1968,7 +1997,12 @@ class TestLegalTexts:
         """
         assert RIGHTS_GRANT_STATEMENT in notice_markdown(("- A modification.",))
         official = (self._run(tmp_path / "official") / "NOTICE.md").read_text(encoding="utf-8")
-        extra_out = self._run(tmp_path / "extra", pipeline="anima-extra", model="anima-wai-v1.0")
+        extra_out = self._run(
+            tmp_path / "extra",
+            pipeline="anima-extra",
+            model="anima-wai-v1.0",
+            extra=self._official_mirror(tmp_path / "extra", monkeypatch),
+        )
         extra = (extra_out / "NOTICE.md").read_text(encoding="utf-8")
         assert RIGHTS_GRANT_STATEMENT in official
         assert RIGHTS_GRANT_STATEMENT in extra
@@ -2050,6 +2084,24 @@ class TestPipelineEntry:
         """
         assert {OFFICIAL_PIPELINE.repo_name(model) for model in OFFICIAL_MODELS} == {"karume-anima"}
         assert {EXTRA_PIPELINE.repo_name(model) for model in EXTRA_MODELS} == {"karume-anima-extra"}
+
+    def test_the_extra_repository_references_the_official_text_stack(self) -> None:
+        """The six roles the release runbook used to pass as options (ADR 0038 §7 addendum
+        2026-10-28); the official repository is self-contained."""
+        for model in EXTRA_MODELS:
+            (reference,) = EXTRA_PIPELINE.references(model)
+            assert reference.repo == "hdae/karume-anima"
+            assert reference.model == ANIMA_BASE_MODEL_NAME
+            assert sorted(reference.roles) == [
+                "text_encoder",
+                "text_encoder_bf16",
+                "tokenizer",
+                "tokenizer_2",
+                "vae_decoder",
+                "vae_decoder_bf16",
+            ]
+        for model in OFFICIAL_MODELS:
+            assert OFFICIAL_PIPELINE.references(model) == ()
 
     def test_one_attribution_needs_no_choice(self) -> None:
         """帰属は 1 リポにつき 1 通りしかない（選びようがないものを聞かない）。"""

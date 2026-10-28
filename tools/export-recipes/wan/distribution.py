@@ -64,6 +64,7 @@ from _shared.licenses import apache_license_2_0
 from _shared.upstream import assert_upstream_provenance
 from karume.dist import (
     Artifact,
+    CrossRepoReference,
     DistError,
     ModelPlan,
     Pipeline,
@@ -84,6 +85,7 @@ from wan.sources import DEFAULT_MODEL, SOURCES, WAN22_TEXT_MODEL
 from wan.umt5_distribution import (
     UMT5_DEFAULT_MODEL,
     UMT5_OUTPUT_PATHS,
+    UMT5_REPO_NAME,
     UMT5_ROLE,
     assert_umt5_encoder,
     umt5_container,
@@ -1382,6 +1384,19 @@ def wan_dist_plan(series_dir: Path, model: str, generation: WanGeneration = WAN2
     return wan_plan(wan_sources(series_dir, generation), model, generation)
 
 
+#: The text encoder every Wan model borrows from the umT5 repository instead of storing it (ADR
+#: 0119 addendum "design of step 10d" / ADR 0121 decision 9 — the container is byte-identical to
+#: `karume-umt5-xxl`'s, and {@link wan_plan} passes it through the same gate as that repository).
+WAN_TEXT_ENCODER_REFERENCE = CrossRepoReference(
+    repo_name=UMT5_REPO_NAME, model=UMT5_DEFAULT_MODEL, roles=(WAN_TEXT_ENCODER_ROLE,)
+)
+
+
+def wan_references(_model: str) -> tuple[CrossRepoReference, ...]:
+    """`Pipeline.references` of both generations: the text encoder lives in the umT5 repository."""
+    return (WAN_TEXT_ENCODER_REFERENCE,)
+
+
 #: 上流ライセンス（Apache 2.0）の原文。再配布条件 §4 は配布リポ 1 つに掛かり、Wan2.1 / Wan2.2 の
 #: どちらの配布リポも同じ原文を置くので、読みは組み立ての回数・世代の数によらずここで 1 回
 #: （ADR 0092 決定 7）。
@@ -1403,6 +1418,7 @@ PIPELINE = Pipeline(
         "LICENSE.md": _APACHE_LICENSE,
         "NOTICE.md": WAN21.notice,
     },
+    references=wan_references,
 )
 
 #: `--pipeline wan-ti2v` の 1 行（Wan2.2 TI2V 5B → `karume-wan2.2`）。形は {@link PIPELINE} と
@@ -1421,4 +1437,5 @@ TI2V_PIPELINE = Pipeline(
         "LICENSE.md": _APACHE_LICENSE,
         "NOTICE.md": WAN22.notice,
     },
+    references=wan_references,
 )

@@ -42,6 +42,7 @@ from _shared.licenses import apache_license_2_0, mit_license
 from _shared.paths import INPUTS_ROOT
 from karume.dist import (
     Artifact,
+    CrossRepoReference,
     DistError,
     ModelPlan,
     Pipeline,
@@ -950,6 +951,46 @@ def irodori_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     return irodori_plan(irodori_sources(series_dir, model), model)
 
 
+#: The two published models, one repository each (ADR 0092 decision 1).
+IRODORI_V4_MODEL = "v4-small"
+IRODORI_V41_MODEL = "v4.1-small"
+
+#: Roles of v4.1-small that are byte-identical to v4-small, so v4.1-small's distribution
+#: references them in v4-small's repository instead of storing them a second time (ADR 0038 §7
+#: addendum 2026-10-28; 26 roles = 90 files, 5,637 MiB, measured 2026-10-28).
+#:
+#: Derived from the dtype tables, minus the containers whose bytes differ between the two models:
+#: upstream v4.1 retrained only the duration predictor (`duration_*`), and the i4 DiT (`dit_i4`)
+#: is GPTQ-calibrated through each model's own reference loop — its parts differ too (measured
+#: 2026-10-28; `dit_context_i4` is identical). MUST: a container stays local **whole** when any of
+#: its parts differs — a reference covers every part of a container or none (ADR 0109 decision 3),
+#: and a role declared here whose bytes differ fails the build (`karume.dist.external_refs`).
+IRODORI_V41_SHARED_ROLES: tuple[str, ...] = (
+    *(
+        irodori_role(role, dtype)
+        for dtype, roles in IRODORI_DTYPE_ROLES.items()
+        for role in roles
+        if role != "duration" and (role, dtype) != ("dit", "i4")
+    ),
+    *IRODORI_ASSETS.values(),
+)
+
+
+def irodori_references(model: str) -> tuple[CrossRepoReference, ...]:
+    """`Pipeline.references` of Irodori: v4.1-small borrows {@link IRODORI_V41_SHARED_ROLES} from
+    v4-small's repository (the base model stays self-contained — it is the one upstream retrained
+    from, and the e2e checks read its mirror file by file)."""
+    if model == IRODORI_V41_MODEL:
+        return (
+            CrossRepoReference(
+                repo_name=irodori_repo_name(IRODORI_V4_MODEL),
+                model=IRODORI_V4_MODEL,
+                roles=IRODORI_V41_SHARED_ROLES,
+            ),
+        )
+    return ()
+
+
 #: MIT の著作権行（配布リポ直下の `LICENSE.md`）。上流の HF リポ 3 本（本体 2 版とコーデック）は
 #: `license: mit` を名乗るだけで原文を同梱していないので、原文は共有テンプレートから組む。
 #:
@@ -1083,4 +1124,5 @@ PIPELINE = Pipeline(
     # 上流ライセンス（MIT・コーデックの元の重みの Apache 2.0）の再配布条件は配布リポ 1 つに
     # 掛かるので、組み立ての回数によらずここで 1 回（ADR 0092 決定 7）。
     root_files=irodori_root_files(),
+    references=irodori_references,
 )

@@ -346,6 +346,20 @@ measurements in `docs/research/`.
   lists `CacheStorage` on entry; the migration period from those versions ends here (ADR 0080
   addendum of 2026-10-28). A cache they left behind stays until it is reclaimed by hand:
   `caches.delete("karume/1")`, plus every name from `caches.keys()` that starts with `karume/1:`.
+- exporter (`karume dist`): the five cross-repository reference options `--ref-repo` /
+  `--ref-revision SHA` / `--ref-dist` / `--ref-model` / `--ref-role` are removed (ADR 0038 §7
+  addendum of 2026-10-28). Which roles a model borrows from which repository is now the pipeline's
+  declaration (`Pipeline.references` — per model, a tuple of `CrossRepoReference(repo_name, model,
+  roles)`), and a build supplies only the commit: `--ref-revision NAME=SHA`, once per referenced
+  repository (NAME = the repository name without the owner). The caller of `karume.dist.main`
+  passes where the referenced distributions are (`referenced_dist`) and may confirm the borrowed
+  files before anything is written (`check_references`); `assemble_family(external=…)` takes a
+  sequence of `ExternalComponents`, so one build can reference several repositories (a single
+  `ExternalComponents` is no longer accepted — wrap it in a tuple), and
+  `resolve_external_components` (which turned the five options into one `ExternalComponents`) is
+  removed. A declared reference without a revision, a revision for a repository the build does not
+  reference, a reference to the repository being built, and an output location that is a
+  referenced distribution fail before anything is written.
 
 ## [0.14.0] - 2026-10-16
 

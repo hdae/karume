@@ -1542,7 +1542,8 @@ def assemble_family(
     default_model: str,
     render_card: Callable[..., str] | None = None,
     root_files: Mapping[str, str] | None = None,
-    external: ExternalComponents | None = None,
+    external: Sequence[ExternalComponents] = (),
+    check_references: ReferenceCheck | None = None,
 ) -> dict[str, Any]:
     """Assemble the planned models into one repository and **replace `out_dir` wholesale** with
     that form.
@@ -1568,14 +1569,20 @@ def assemble_family(
     distribution repository itself). Like `karume.json` / `README.md`, they are on the exempt side
     of {@link verify_dist}'s undeclared-file check.
 
-    Passing `external` ({@link ExternalComponents}) declares only the named roles as **references
-    to a pinned revision of another repository**, not placed in this repository (ADR 0038 §7). An
-    assembly without it is fully self-contained and does not change by a single byte.
+    Passing `external` ({@link ExternalComponents} — one per referenced target, any number)
+    declares only the named roles as **references to a pinned revision of another repository**,
+    not placed in this repository (ADR 0038 §7). An assembly without it is fully self-contained and
+    does not change by a single byte. A role named by two targets fails — one role points at one
+    place.
+
+    `check_references` ({@link ReferenceCheck}) is the caller's confirmation that each target's
+    revision really holds the referenced bytes; it runs once per target, after the references are
+    resolved and before the first byte is written.
 
     MUST: the checks over all of `plans` are all settled **before the first byte is written** (not
     even staging is created) — a failure midway would mean laying out several GB again. Resolving
-    cross-repository references (reading the referenced manifest, hashing the files) is placed
-    here for the same reason.
+    cross-repository references (reading the referenced manifest, hashing the files) and the
+    caller's confirmation are placed here for the same reason.
     """
     if not plans:
         raise DistError("There is not a single model to assemble")
@@ -1619,10 +1626,18 @@ def assemble_family(
     # expansion ({@link expand_weight_parts}) split the representative role into part roles, so
     # {@link external_refs} matches the target's files part by part.
     references: dict[str, dict[str, Any]] = {}
-    if external is not None:
-        resolved = [(item.plan.name, external_refs(external, item)) for item in partitioned]
-        first_model, references = resolved[0]
-        for model_name, refs in resolved[1:]:
+    if external:
+        assert_distinct_reference_roles(external)
+        assert_out_dir_is_not_referenced(out_dir, external)
+        resolved = [
+            (item.plan.name, [external_refs(components, item) for components in external])
+            for item in partitioned
+        ]
+        first_model, first_targets = resolved[0]
+        # The roles of different targets are disjoint (checked above), so merging cannot hide one.
+        references = {role: ref for refs in first_targets for role, ref in refs.items()}
+        for model_name, targets in resolved[1:]:
+            refs = {role: ref for target in targets for role, ref in target.items()}
             differing = sorted(
                 role
                 for role in set(references) | set(refs)
@@ -1635,6 +1650,10 @@ def assemble_family(
                     " — the same role name pointing at different bytes cannot be declared with"
                     " one reference"
                 )
+        # Every model resolved to the same references, so the first model's are the whole set.
+        if check_references is not None:
+            for components, refs in zip(external, first_targets, strict=True):
+                check_references(components, list(refs.values()))
 
     try:
         with staged_publication(out_dir) as staging:
@@ -1878,15 +1897,63 @@ def verify_dist(out_dir: Path) -> dict[str, int]:
 
 
 @dataclass(frozen=True)
+class CrossRepoReference:
+    """A recipe's declaration that the named roles of the model being built are byte-identical to
+    model `model` of the distribution repository `repo_name`, and are **referenced there instead
+    of stored** (the optional `repo` / `revision` fields of ADR 0038 §7 — addendum 2026-10-28).
+
+    It holds only what a recipe knows: which repository, which model and which roles. Where the
+    referenced distribution lives locally and which commit it is pinned at belong to the caller
+    ({@link main}'s `referenced_dist` hook and `--ref-revision`) — the repository's `models/`
+    layout and the Hub are not knowledge of the core (ADR 0065).
+    """
+
+    #: Name of the referenced distribution repository **without `HF_OWNER`** — the same spelling
+    #: as {@link Pipeline.repo_name} (`--ref-revision NAME=SHA` names it this way too).
+    repo_name: str
+    #: Model name inside the referenced distribution.
+    model: str
+    #: Role names (artifact keys) replaced by references. A split-form container's role expands
+    #: into one reference per part ({@link external_refs}).
+    roles: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not REPO_RE.fullmatch(self.repo):
+            raise DistError(
+                f"Cross-repository reference repository name '{self.repo_name}' does not spell"
+                f" a repository ('{self.repo}' is not of the form '<owner>/<name>')"
+            )
+        assert_model_name(self.model)
+        if not self.roles:
+            raise DistError(
+                f"The cross-repository reference to '{self.repo_name}' names not a single role"
+            )
+        repeated = sorted(role for role, count in Counter(self.roles).items() if count > 1)
+        if repeated:
+            raise DistError(
+                f"The cross-repository reference to '{self.repo_name}' names roles twice:"
+                f" {repeated}"
+            )
+
+    @property
+    def repo(self) -> str:
+        """The referenced HF repository (`<owner>/<name>` — the owner is {@link HF_OWNER}, the
+        same rule as {@link resolve_repo})."""
+        return f"{HF_OWNER}/{self.repo_name}"
+
+
+@dataclass(frozen=True)
 class ExternalComponents:
-    """An opt-in that declares the named roles as **references to a pinned revision of another
-    repository** instead of storing them in this repository (the optional `repo` / `revision`
-    fields of ADR 0038 §7).
+    """One **resolved** cross-repository reference: the named roles point at a pinned revision of
+    another repository instead of being stored in this repository (the optional `repo` /
+    `revision` fields of ADR 0038 §7). {@link main} builds it from a recipe's
+    {@link CrossRepoReference}, the caller's local mirror and the revision.
 
     It has exactly one use: "not uploading the same bytes twice to two repositories" — for
-    example, the text encoder of the turbo repository is byte-identical to the one in the plain
-    repository, so a reference saves re-uploading several GB. **Without it the distribution is
-    fully self-contained** (the default assembly does not change by a single byte).
+    example, the text encoder of the fine-tune repository is byte-identical to the one in the
+    official repository, so a reference saves re-uploading several GB. **Without it the
+    distribution is fully self-contained** (the default assembly does not change by a single
+    byte).
 
     MUST: `revision` is **a 40-digit commit sha** ({@link REVISION_RE}). Allowing branch names or
     tags would let the target move later, and the `size` / `sha256` declared here would disagree
@@ -1932,6 +1999,52 @@ class ExternalComponents:
         assert_model_name(self.model)
         if not self.roles:
             raise DistError("There is not a single role to reference across repositories")
+
+
+#: The caller's confirmation that a target's revision really holds the bytes a build references
+#: (taken by {@link assemble_family}): one call per {@link ExternalComponents} with the file
+#: references `{repo, revision, path, size, sha256}` resolved for it, before the first byte is
+#: written; it raises {@link DistError} to stop the build. The core holds only the shape —
+#: confirming a revision needs the Hub, and the core does no network access (the repository's
+#: driver confirms against the HF API — `tools/export-recipes/dist.py`).
+ReferenceCheck = Callable[[ExternalComponents, Sequence[Mapping[str, Any]]], None]
+
+
+def assert_distinct_reference_roles(external: Sequence[ExternalComponents]) -> None:
+    """Fail when one role is named by two cross-repository references.
+
+    MUST: a role points at one place — merging two claims would keep whichever came last and
+    silently drop the other target's check.
+    """
+    claimed: dict[str, str] = {}
+    for components in external:
+        for role in components.roles:
+            other = claimed.get(role)
+            if other is not None:
+                raise DistError(
+                    f"Role '{role}' is named by two cross-repository references ({other} and"
+                    f" {components.repo}) — one role can point at one place only"
+                )
+            claimed[role] = components.repo
+
+
+def assert_out_dir_is_not_referenced(out_dir: Path, external: Sequence[ExternalComponents]) -> None:
+    """Fail when the output location is the local distribution a reference is reconciled against.
+
+    MUST: compared as real paths, before a byte is written — the wholesale replacement of
+    `out_dir` ({@link assemble_family}) would delete the referenced mirror after reading it, leaving
+    a distribution whose borrowed files exist nowhere locally. The check on repository names
+    ({@link assert_not_self_referencing}) cannot see it: the card's repository comes from the
+    pipeline, not from `--out`.
+    """
+    target = out_dir.resolve()
+    for components in external:
+        if components.dist.resolve() == target:
+            raise DistError(
+                f"The output location {out_dir} is the local distribution of {components.repo},"
+                " which this build references — building into it would replace the files it"
+                " borrows; choose another --out"
+            )
 
 
 def assert_external_ref(where: str, ref: Mapping[str, Any]) -> None:
@@ -2069,38 +2182,74 @@ def external_refs(
     return refs
 
 
-def resolve_external_components(
-    *,
-    repo: str | None,
-    revision: str | None,
-    dist: Path | None,
-    model: str | None,
-    roles: Sequence[str] | None,
-) -> ExternalComponents | None:
-    """Resolve the 5 CLI options into {@link ExternalComponents} (`None` when none is given).
+#: The hook that names the local distribution of a referenced repository (repository name without
+#: `HF_OWNER` → its assembled directory; taken by {@link main}). Only the caller knows where the
+#: mirrors live (the repository's `models/<name>/`), so the core holds only the shape.
+ReferencedDist = Callable[[str], Path]
 
-    MUST: only two cases, **all or none**. Silently ignoring a partial set would quietly produce a
-    self-contained distribution from an assembly meant to reference (noticed only after uploading
-    several GB again).
+
+def parse_reference_revisions(values: Sequence[str] | None) -> dict[str, str]:
+    """`--ref-revision NAME=SHA` (repeatable) → {repository name: commit sha}.
+
+    The sha's spelling is checked where it is used ({@link ExternalComponents} — 40 lowercase hex
+    digits). A name given twice fails rather than letting the last one win silently.
     """
-    given = {
-        "--ref-repo": repo,
-        "--ref-revision": revision,
-        "--ref-dist": dist,
-        "--ref-model": model,
-        "--ref-role": roles,
-    }
-    if all(value is None for value in given.values()):
-        return None
-    missing = sorted(name for name, value in given.items() if value is None)
+    revisions: dict[str, str] = {}
+    for value in values or ():
+        name, separator, revision = value.partition("=")
+        if not separator or not name or not revision:
+            raise DistError(
+                f"--ref-revision '{value}' is not of the form NAME=SHA (NAME = the referenced"
+                " repository's name without the owner, as the pipeline declares it)"
+            )
+        if name in revisions:
+            raise DistError(f"--ref-revision names '{name}' twice")
+        revisions[name] = revision
+    return revisions
+
+
+def external_components(
+    references: Sequence[CrossRepoReference],
+    revisions: Mapping[str, str],
+    referenced_dist: ReferencedDist | None,
+) -> tuple[ExternalComponents, ...]:
+    """Resolve a build's declared references with a revision per repository and the caller's
+    local mirrors.
+
+    MUST: every declared repository gets a revision, and every revision names a declared
+    repository. A missing one fails instead of quietly assembling a self-contained distribution
+    from a build meant to reference (noticed only after uploading several GB again); an extra one
+    fails because it means the build is not the one the caller had in mind.
+    """
+    declared = {reference.repo_name for reference in references}
+    unknown = sorted(set(revisions) - declared)
+    if unknown:
+        raise DistError(
+            f"--ref-revision names repositories this build does not reference: {unknown}"
+            f" (declared: {sorted(declared) if declared else 'none'})"
+        )
+    missing = sorted(declared - set(revisions))
     if missing:
         raise DistError(
-            f"A cross-repository reference needs all 5 options (missing: {', '.join(missing)})"
+            f"This build references {missing} across repositories but has no pinned revision"
+            " for them — pass --ref-revision NAME=SHA (the referenced repository's commit)"
         )
-    assert repo is not None and revision is not None  # missing is empty = all are given
-    assert dist is not None and model is not None and roles is not None
-    return ExternalComponents(
-        repo=repo, revision=revision, dist=dist, model=model, roles=tuple(roles)
+    if not references:
+        return ()
+    if referenced_dist is None:
+        raise DistError(
+            "This build references other repositories, but the caller passed no location for"
+            " their local distributions (the repository's dist driver passes it)"
+        )
+    return tuple(
+        ExternalComponents(
+            repo=reference.repo,
+            revision=revisions[reference.repo_name],
+            dist=referenced_dist(reference.repo_name),
+            model=reference.model,
+            roles=reference.roles,
+        )
+        for reference in references
     )
 
 
@@ -2117,14 +2266,20 @@ def resolve_external_components(
 CardRenderer = Callable[[Mapping[str, Any], str, Mapping[FileRefKey, int]], str]
 
 
+def self_contained(_model: str) -> tuple[CrossRepoReference, ...]:
+    """The default of {@link Pipeline.references}: the model's distribution references nothing."""
+    return ()
+
+
 @dataclass(frozen=True)
 class Pipeline:
     """One row of the dispatch table, holding only what differs per pipeline.
 
     The shared part (placement, shared folding, sha256, reconciling declarations with files)
-    belongs to the generic functions above, so only four things are listed here: "the default
-    model name / the distribution repository name a model belongs to / the procedure that builds a
-    plan from a series and a model name / the model card renderer".
+    belongs to the generic functions above, so only these are listed here: "the default model
+    name / the distribution repository name a model belongs to / the procedure that builds a plan
+    from a series and a model name / the model card renderer", plus the legal texts and the
+    cross-repository references a distribution declares.
     """
 
     default_model: str
@@ -2143,6 +2298,57 @@ class Pipeline:
     #: licence requires a copy of the licence text or an Attribution Notice as a condition of
     #: redistribution (empty by default = nothing is placed).
     root_files: Mapping[str, str] = field(default_factory=dict)
+    #: Model name → the cross-repository references that model's distribution declares
+    #: ({@link CrossRepoReference}; empty = self-contained, the default). The roles are a recipe
+    #: fact (which components are byte-identical to another repository's), so they live here and
+    #: not in a release command; the revision is supplied per build ({@link main}). A build of a
+    #: model that declares references fails without a revision for each of them — it never falls
+    #: back to a self-contained distribution silently.
+    references: Callable[[str], tuple[CrossRepoReference, ...]] = self_contained
+
+
+def selected_models(pipeline: Pipeline, models: Sequence[str] | None) -> list[str]:
+    """The models a build assembles: the `--model` values in order, else the pipeline's default
+    (the first one is `defaultModel`). One function, so the caller and {@link main} read the same
+    list."""
+    return list(models) if models else [pipeline.default_model]
+
+
+def declared_references(
+    pipeline: Pipeline, models: Sequence[str]
+) -> tuple[CrossRepoReference, ...]:
+    """The cross-repository references a build declares ({@link Pipeline.references} of its
+    models).
+
+    MUST: every model of one build declares the same references — assembly applies each reference
+    to every model ({@link assemble_family}), so a family build whose models declare different
+    ones would either borrow for a model that declared itself self-contained or store what another
+    model declared borrowed. It fails naming both models instead.
+    """
+    first = pipeline.references(models[0])
+    for model in models[1:]:
+        if pipeline.references(model) != first:
+            raise DistError(
+                f"Models '{models[0]}' and '{model}' declare different cross-repository"
+                " references — one build applies one set of references to every model, so build"
+                " them into separate repositories"
+            )
+    return first
+
+
+def assert_not_self_referencing(references: Sequence[CrossRepoReference], repo: str) -> None:
+    """Fail when a declared reference points at the repository being built.
+
+    MUST: checked at build time — the hub rejects such a manifest only when it is loaded from the
+    HF repository itself (a local mirror and the distribution gate parse it without the owning
+    repository), so it would otherwise first fail after upload.
+    """
+    own = sorted(reference.repo_name for reference in references if reference.repo == repo)
+    if own:
+        raise DistError(
+            f"A cross-repository reference points at the repository being built ({repo}):"
+            f" {own} — a repository cannot borrow its own files"
+        )
 
 
 def resolve_card_renderer(pipeline: Pipeline, profile: str | None) -> CardRenderer:
@@ -2290,46 +2496,19 @@ def build_parser(
         " when built into a directory with another name. When overriding, give --out explicitly"
         " too",
     )
-    # Cross-repository references (ADR 0038 §7) — **an opt-in that holds only with all 5
-    # options** (with none, the distribution is fully self-contained as before; a partial set
-    # fails in {@link resolve_external_components}).
-    parser.add_argument(
-        "--ref-repo",
-        dest="ref_repo",
-        metavar="OWNER/NAME",
-        default=None,
-        help="HF repository to reference across repositories (the named roles point here"
-        " instead of being stored in this repository)",
-    )
+    # Cross-repository references (ADR 0038 §7, addendum 2026-10-28): which roles are borrowed
+    # from which repository is the pipeline's declaration ({@link Pipeline.references}); the
+    # build supplies only the commit each referenced repository is pinned at.
     parser.add_argument(
         "--ref-revision",
-        dest="ref_revision",
-        metavar="SHA",
-        default=None,
-        help="likewise, the target's commit sha (40 hex digits — branch names and tags are not"
-        " a pin and are rejected)",
-    )
-    parser.add_argument(
-        "--ref-dist",
-        dest="ref_dist",
-        type=Path,
-        default=None,
-        help="likewise, the referenced distribution assembled locally (source of size / sha256)",
-    )
-    parser.add_argument(
-        "--ref-model",
-        dest="ref_model",
-        metavar="NAME",
-        default=None,
-        help="likewise, the model name inside the referenced dist",
-    )
-    parser.add_argument(
-        "--ref-role",
         action="append",
-        dest="ref_roles",
-        metavar="ROLE",
+        dest="ref_revisions",
+        metavar="NAME=SHA",
         default=None,
-        help="likewise, a role name to replace with a reference (repeatable)",
+        help="commit sha (40 hex digits — branch names and tags are not a pin) at which the"
+        " referenced repository NAME (its name without the owner, as the pipeline declares it)"
+        " is pinned; repeat once per referenced repository. Required for every repository the"
+        " models built reference",
     )
     return parser
 
@@ -2341,7 +2520,16 @@ def main(
     default_pipeline: str | None = None,
     default_out_dir: DefaultOutDir | None = None,
     default_series: Path | None = None,
+    referenced_dist: ReferencedDist | None = None,
+    check_references: ReferenceCheck | None = None,
 ) -> None:
+    """Assemble one distribution from the parsed command line.
+
+    `referenced_dist` names the local distribution of each repository the pipeline's models
+    reference ({@link Pipeline.references}); `check_references` confirms that each pinned
+    revision holds the referenced bytes ({@link assemble_family}). Both come from the caller —
+    the repository's driver knows where the mirrors live and reads the Hub; the core does neither.
+    """
     args = build_parser(
         pipelines,
         default_pipeline,
@@ -2361,7 +2549,7 @@ def main(
             "--series is required (parent of the series directories) — the caller passed no default"
         )
     pipeline = pipelines[args.pipeline]
-    models = args.models if args.models else [pipeline.default_model]
+    models = selected_models(pipeline, args.models)
     if args.out is not None:
         out_dir = args.out
     elif args.repo is not None:
@@ -2380,15 +2568,14 @@ def main(
         )
     # The attribution profile and the card's repository ID are resolved **before assembly** — a
     # wrong / missing option must not fail at the last file after laying out several GB. The
-    # cross-repository options are checked for shape here for the same reason.
+    # cross-repository references (declaration, own repository, revisions) are settled here for
+    # the same reason.
     render_card = resolve_card_renderer(pipeline, args.card_profile)
     repo = resolve_repo(pipeline, models, args.repo)
-    external = resolve_external_components(
-        repo=args.ref_repo,
-        revision=args.ref_revision,
-        dist=args.ref_dist,
-        model=args.ref_model,
-        roles=args.ref_roles,
+    references = declared_references(pipeline, models)
+    assert_not_self_referencing(references, repo)
+    external = external_components(
+        references, parse_reference_revisions(args.ref_revisions), referenced_dist
     )
     # MUST: the plans of every model (= checks and reads) are settled **before** placement — even
     # when the second model fails, a distribution holding only the first model is not shown to
@@ -2404,6 +2591,7 @@ def main(
         render_card=partial(render_card, repo=repo),
         root_files=pipeline.root_files,
         external=external,
+        check_references=check_references,
     )
     verified = verify_dist(out_dir)
     for rel_path, size in sorted(verified.items()):

@@ -29,6 +29,7 @@ from anima.card import (
 )
 from karume.dist import (
     Artifact,
+    CrossRepoReference,
     DistError,
     ModelPlan,
     Pipeline,
@@ -85,11 +86,12 @@ ANIMA_TEXT_STACK_SERIES: Mapping[str, str] = {"f16": ANIMA_BASE_SERIES, "bf16": 
 
 
 def text_stack_role(component: str, storage: str) -> str:
-    """text stack の配置の役割名（{@link OUTPUT_PATHS} のキー）。
+    """The role name of a text-stack placement (a key of {@link OUTPUT_PATHS}).
 
-    MUST: f16 は**素の部品名**のまま（`text_encoder` 等）— 追加学習リポの越境参照
-    （dist の `--ref-role`）がこの綴りで名指ししているので、格納を足しても動かさない。
-    他の格納は `<部品>_<格納>`（transformer の `transformer_<格納>` と同じ形）。
+    f16 keeps the **bare component name** (`text_encoder` and the like), so adding a storage does
+    not rename an existing role; the other storages are `<component>_<storage>` (the same form as
+    the transformer's `transformer_<storage>`). The extra repository's cross-repository references
+    are derived through this function ({@link ANIMA_EXTRA_SHARED_ROLES}).
     """
     return component if storage == "f16" else f"{component}_{storage}"
 
@@ -986,6 +988,33 @@ def _extra_repo_name(_model: str) -> str:
     return EXTRA_REPO_NAME
 
 
+#: Roles every fine-tune of the extra repository borrows from the official repository instead of
+#: storing them (ADR 0087; ADR 0038 §7 addendum 2026-10-28): the text encoder and the VAE decoder
+#: in every text-stack storage, and both tokenizers — the official text stack, byte-identical. Not
+#: `text_conditioner`: every extra model has its own (`own_text_conditioner=True`).
+ANIMA_EXTRA_SHARED_ROLES: tuple[str, ...] = (
+    *(
+        text_stack_role(component, storage)
+        for storage in ANIMA_TEXT_STACK_SERIES
+        for component in (ANIMA_TEXT_ENCODER_ROLE, ANIMA_VAE_DECODER_ROLE)
+    ),
+    *ANIMA_ASSETS.values(),
+)
+
+
+def _extra_references(_model: str) -> tuple[CrossRepoReference, ...]:
+    """`Pipeline.references` of the extra repository: every model borrows the official text
+    stack. The referenced model is the base (`anima-v1.0`) — the text stack is built from the base
+    series, and the official repository folds it into `shared/` for all five variants."""
+    return (
+        CrossRepoReference(
+            repo_name=OFFICIAL_REPO_NAME,
+            model=ANIMA_BASE_MODEL_NAME,
+            roles=ANIMA_EXTRA_SHARED_ROLES,
+        ),
+    )
+
+
 #: `--pipeline anima` の 1 行（公式リポ karume-anima — CircleStone の 5 変種同居・既定 =
 #: Turbo〈上流 README の推奨・2026-09-01 裁定〉）。
 #:
@@ -1002,7 +1031,8 @@ OFFICIAL_PIPELINE = Pipeline(
 )
 
 #: `--pipeline anima-extra` の 1 行（追加学習リポ karume-anima-extra — 第三者 fine-tune。
-#: text stack は公式リポへ越境参照して組む: dist の `--ref-*` 5 指定・runbook の公開順序）。
+#: The text stack is referenced in the official repository ({@link _extra_references}; the
+#: publication order is docs/release-runbook.md §0).
 EXTRA_PIPELINE = Pipeline(
     default_model="anima-wai-v1.0",
     repo_name=_extra_repo_name,
@@ -1011,4 +1041,5 @@ EXTRA_PIPELINE = Pipeline(
         "anima-extra": partial(render_extra_card, abbreviations=ANIMA_QUANT_ABBREVIATIONS)
     },
     root_files=root_files(EXTRA_NOTICE_MARKDOWN),
+    references=_extra_references,
 )
