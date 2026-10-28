@@ -96,11 +96,16 @@ How to handle the published repository (deprecation notice, replacing the README
       "green even with 0 rows in a recording mode" (`packages/runtime/tests/helpers/reference.ts`), so
       leaving `KARUME_REFERENCE` on the release machine makes **every sha256 check green as
       `written` without comparing anything**. Only a green run with both unset is used for the release decision
-- [ ] In a release that changes the WGSL or the selection condition of the subgroup variants (`rmsNormReduce: "subgroup32"` / `linearGemvReduce: "parallel-subgroup32"`),
-      run the round-trip comparisons of Chrome's `/check.html` (GEMV) and of RMS.
-      In `vp test` this real-run check is always SKIP, and there is no check that turns the SKIP red (the
-      "The real-execution checks of the subgroup variants do not run automatically" section of limitations — the procedure is `tools/llm-speed/browser/README.md` of 0.14.0 (main).
-      Use that until the browser tools are rebuilt — ADR 0127)
+- [ ] In a release that changes the WGSL or the selection condition of the subgroup variants (`rmsNormReduce: "subgroup32"` / `linearGemvReduce: "parallel-subgroup32"`)
+      or a bit-identical states-attention rewrite (the folded ①′ / unrolled ③′ — perf-ledger K-55 / K-91),
+      run the playground's `/kernel-check` page (**Run all**) in Chrome on the D3D12 machine (and on Metal when one is at hand) and keep its record
+      ([apps/playground/README.md](../apps/playground/README.md#the-kernel-check-page) "The kernel-check page").
+      The node lanes run the same checks only on Dawn / Vulkan, and a device without the subgroup features SKIPs the subgroup ones; there is no check
+      that turns that SKIP red (the "The real-execution checks of the subgroup variants do not run automatically" section of limitations).
+      "not available" on the page is not a PASS, and neither is a page where a check was not run (the overall verdict then reads INCOMPLETE).
+      Until K-95 lands, the states-attention check FAILs on D3D12 in the e4b-full classes only (shown as "kept for K-95"; the product does not fold them);
+      its verdict "outside the K-95 classes" (`productVerdict` in the record) must read PASS — any failure there is a regression on that backend.
+      Before 0.15 the procedure was Chrome's `/check.html` (GEMV) and the RMS round-trip comparison (`tools/llm-speed/browser/README.md` of 0.14.0 — ADR 0127)
 - [ ] exporter: `uv run --no-sync pytest` + `uv run --no-sync ruff check` +
       `uv run --no-sync ruff format --check` green
       **in both tools/exporter and tools/export-recipes** (CI runs lint and format as

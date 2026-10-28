@@ -316,6 +316,9 @@ bit-identical rewrites ([research](../research/2026-10-27-k55-head-fold-spike.md
   every mutant detected — [research](../research/2026-10-27-k55-head-fold-spike.md) §6.1). So the identity is a
   per-backend, per-kernel observation, and only classes observed identical on every checked backend are selected.
   A new backend runs that check (the GPU test, or the runbook in a browser) before it relies on the identity.
+  (Superseded on 2026-10-28 for the browser: the playground's `/kernel-check` page runs the GPU test's own
+  implementation, the private package `@karume/kernel-checks`, in place of the runbook —
+  [apps/playground/README.md](../../apps/playground/README.md#the-kernel-check-page).)
 - **Measured** (RTX 3080 Ti, Node + Dawn, M = 1, per dispatch at P = 1K / 4K / 16K): ①′ fold E2B ×1.81 / ×3.24 /
   ×6.12, E4B ×1.38 / ×1.90 / ×3.65; ③′ unroll E2B ×1.94 / ×2.46 / ×2.51; sliding fused ×1.60–1.69. The fold at
   verify M = 4 / 8 (P = 1,024 / 4,000 / 16,000): E2B ×3.42–7.28, E4B ×2.42–4.04; MiniCPM5 at M = 1 ×1.70 / ×2.67 /

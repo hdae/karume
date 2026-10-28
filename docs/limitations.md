@@ -2475,9 +2475,11 @@ Deno 2.9.6 did not provide the required features; on Node + Dawn (0.15) they are
 They are not included in the stored vocabulary of quant.session. The existing workgroup / parallel can be chosen again.
 For the numbers, target shapes and the range not yet accepted, see [ADR 0100](decisions/0100-rms-subgroup-reduction.md) and [0101](decisions/0101-linear-gemv-subgroup.md).
 
-## The real-execution checks of the subgroup variants do not run automatically (Chrome's /check.html and the round-trip comparison are the manual check)
+## The real-execution checks of the subgroup variants do not run automatically (the playground's /kernel-check page is the manual check)
 
 > Resolved in 0.15 (2026-10-16): on Node + Dawn the development machine exposes `subgroups`, so the real-execution cases below run in the core lane ([research 2026-10-16](research/2026-10-16-node-port-results.md) item 12). The text below records the Deno-era state; the manual check still applies to a machine whose adapter lacks the features.
+
+> Manual procedure since 2026-10-28: the playground's `/kernel-check` page ([apps/playground/README.md](../apps/playground/README.md#the-kernel-check-page)). It runs the same checks as the node GPU tests (one implementation, the private package `@karume/kernel-checks`) on the browser's backend — D3D12 in Chrome, Metal — which the node lanes (Dawn / Vulkan) do not reach: the GEMV and RMS subgroup32 checks below (RMS now with its full test criteria rather than the round trip) and the K-55 / K-91 states-attention rewrites. A device without the subgroup features shows those two as "not available", never PASS. The `/check.html` and round-trip procedure below is the 0.14.0 record.
 
 The real-execution checks of `rmsNormReduce: "subgroup32"` and `linearGemvReduce: "parallel-subgroup32"`
 (the cases of `gpu_rms_norm_subgroup_test.ts` / `gpu_linear_gemv_subgroup_test.ts` that actually run the subgroup instructions) SKIP explicitly
@@ -2487,11 +2489,11 @@ What the automatic checks see is only WGSL generation (snapshots) and the accept
 The real-execution check is manual: run the following 2 in Chrome (the procedure is `tools/llm-speed/browser/README.md` (removed in 0.15)).
 
 - GEMV: the measurement page's `/check.html` checks u32 equality of parallel and `parallel-subgroup32` and outputs `PASS` / `FAIL`
-  (the same check as `packages/runtime/tests/helpers/gemv-subgroup-check.ts`).
+  (the same check as `packages/runtime/tests/helpers/gemv-subgroup-check.ts` of 0.14.0 — now `checkGemvSubgroup` of `@karume/kernel-checks`).
 - RMS: outside the scope of `/check.html`. Use the measurement page's "round-trip comparison of the 2 RMS paths" (`fused → subgroup32 → subgroup32 → fused`) to
   see that generation does not break. The reduction order changes, so the generated text can change.
 
-When the WGSL or the selection conditions of the subgroup variants change, treat real execution as unverified until these 2 have been run.
+When the WGSL or the selection conditions of the subgroup variants change, treat real execution on a backend as unverified until the `/kernel-check` page has run there (until 2026-10-28: these 2).
 
 ## The public-surface snapshot check looks only at exports added or removed — signature compatibility is not guaranteed
 

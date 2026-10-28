@@ -81,7 +81,7 @@ GPUs. Data: [M2 adoption record](../research/2026-09-13-m2-gemv-subgroup-adoptio
 When addendum 4 (2026-09-20) of [ADR 0105](0105-packed-static-quantize-activations.md) changed the
 parallel family to `acc = fma(x, d, acc)`, `subgroup32` kept `acc = acc + x * d`. Metal contracts to
 fma per expression form, so decision 3 ("the same multiply-accumulate as `parallel`") did not hold
-literally and the u32 identity check (`packages/runtime/tests/helpers/gemv-subgroup-check.ts`) had no
+literally and the u32 identity check (`packages/runtime/tests/helpers/gemv-subgroup-check.ts`; since 2026-10-28 `checkGemvSubgroup` of `packages/kernel-checks`) had no
 guarantee on Metal (full review of 2026-09-24, W-RT6-1 / W-AD3-2). `subgroup32` computes the same sum
 as `parallel` through value exchange; it is not the reference path.
 
