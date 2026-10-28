@@ -1,0 +1,285 @@
+/**
+ * The Gemma 4 chat page's settings: the models of the two mounts (regular Gemma 4 and the mobile QAT
+ * distribution), the per-turn form (sampler and max new tokens) and the chat form (the settings a
+ * `Gemma4ChatSession` takes at construction), with their parsing. Pure, so `vp test` covers it.
+ */
+
+import type { Manifest } from "@karume/hub";
+import {
+  dropOldestTurns,
+  type Gemma4ChatOverflowPolicy,
+  type Gemma4DefaultSampler,
+  type Gemma4PipelineConfig,
+  parseGemma4PipelineConfig,
+  type SamplerSpec,
+} from "@karume/models/gemma";
+
+import type { Choice } from "@/components/choice-select";
+
+/** The mounts this page reads; each one is built with its own family entry point. */
+export const GEMMA_MOUNTS = ["gemma4", "gemma4-qat"] as const;
+export type GemmaMount = (typeof GEMMA_MOUNTS)[number];
+
+/** `Gemma4Pipeline` for `gemma4`, `Gemma4QatPipeline` for `gemma4-qat`. */
+export const MOUNT_LABELS: Readonly<Record<GemmaMount, string>> = {
+  gemma4: "Gemma 4",
+  "gemma4-qat": "Gemma 4 QAT",
+};
+
+/** One model of one mount (the select's value is `<mount>/<model>`). */
+export type ModelKey = { readonly mount: GemmaMount; readonly model: string };
+
+export const modelKeyValue = ({ mount, model }: ModelKey): string => `${mount}/${model}`;
+
+const isGemmaMount = (value: string): value is GemmaMount =>
+  GEMMA_MOUNTS.some((mount) => mount === value);
+
+export const parseModelKey = (value: string): ModelKey | undefined => {
+  const slash = value.indexOf("/");
+  if (slash < 0) return undefined;
+  const mount = value.slice(0, slash);
+  const model = value.slice(slash + 1);
+  return isGemmaMount(mount) && model !== "" ? { mount, model } : undefined;
+};
+
+/** The models `Gemma4QatPipeline.fromPretrained` accepts (`model` is typed `"e2b" | "e4b"`). */
+export type QatModel = "e2b" | "e4b";
+export const isQatModel = (model: string): model is QatModel => model === "e2b" || model === "e4b";
+
+/** The manifests that have loaded, by mount (a missing or failed one is absent). */
+export type GemmaManifests = Partial<Record<GemmaMount, Manifest>>;
+
+/**
+ * Every model of every loaded manifest, in mount order then manifest order, each manifest's
+ * `defaultModel` marked "(default)". A QAT model the entry point does not accept is listed disabled
+ * (choosing it could only fail at load).
+ */
+export const gemmaModelChoices = (manifests: GemmaManifests): readonly Choice<string>[] =>
+  GEMMA_MOUNTS.flatMap((mount) => {
+    const manifest = manifests[mount];
+    if (manifest === undefined) return [];
+    return Object.keys(manifest.models).map((model) => {
+      const unsupported = mount === "gemma4-qat" && !isQatModel(model);
+      return {
+        value: modelKeyValue({ mount, model }),
+        label: `${MOUNT_LABELS[mount]} — ${model}${model === manifest.defaultModel ? " (default)" : ""}${
+          unsupported ? " (not accepted by Gemma4QatPipeline)" : ""
+        }`,
+        ...(unsupported ? { disabled: true } : {}),
+      };
+    });
+  });
+
+/**
+ * The model the page starts with: regular Gemma 4's default model when its manifest is there, else
+ * the QAT distribution's.
+ */
+export const defaultModelKey = (manifests: GemmaManifests): ModelKey | undefined => {
+  for (const mount of GEMMA_MOUNTS) {
+    const manifest = manifests[mount];
+    if (manifest !== undefined) return { mount, model: manifest.defaultModel };
+  }
+  return undefined;
+};
+
+/** The chosen model when the manifests still hold it, else the default. */
+export const effectiveModelKey = (
+  chosen: ModelKey | undefined,
+  manifests: GemmaManifests,
+): ModelKey | undefined =>
+  chosen !== undefined && manifests[chosen.mount]?.models[chosen.model] !== undefined
+    ? chosen
+    : defaultModelKey(manifests);
+
+/** The model's static wiring as the distribution declares it (`pipelineConfig`, validated). */
+export const modelConfig = (manifest: Manifest, model: string): Gemma4PipelineConfig => {
+  const entry = manifest.models[model];
+  if (entry === undefined) throw new Error(`The manifest has no model '${model}'`);
+  return parseGemma4PipelineConfig(entry.pipelineConfig);
+};
+
+/**
+ * Whether the model has drafter weights, i.e. whether the MTP drafter (`speculative` of
+ * `Gemma4Pipeline.fromPretrained`) can be built (every preset then maps them — a quant is a complete
+ * mapping of the model's weights). Regular Gemma 4 only: `Gemma4QatPipeline` takes no drafter.
+ */
+export const hasDrafter = (manifest: Manifest, { mount, model }: ModelKey): boolean =>
+  mount === "gemma4" && manifest.models[model]?.weights["drafter"] !== undefined;
+
+/** The per-turn form, as typed (parsed by {@link parseTurnForm}). */
+export type TurnForm = {
+  readonly temperature: string;
+  readonly topK: string;
+  readonly topP: string;
+  readonly seed: string;
+  readonly maxNewTokens: string;
+};
+
+export const DEFAULT_MAX_NEW_TOKENS = 512;
+
+/**
+ * The form filled from the distribution's declared sampler (greedy when it declares none), seed 0
+ * and {@link DEFAULT_MAX_NEW_TOKENS}. The page always passes the sampler it shows, so the form is
+ * where the distribution's default enters.
+ */
+export const turnFormOf = (sampler: Gemma4DefaultSampler | undefined): TurnForm => ({
+  temperature: String(sampler?.temperature ?? 0),
+  topK: sampler === undefined ? "" : String(sampler.topK),
+  topP: sampler === undefined ? "" : String(sampler.topP),
+  seed: "0",
+  maxNewTokens: String(DEFAULT_MAX_NEW_TOKENS),
+});
+
+/** What one turn is sent with. */
+export type TurnSettings = { readonly maxNewTokens: number; readonly sampler: SamplerSpec };
+
+export type Parsed<Value> =
+  | { readonly ok: true; readonly value: Value }
+  | { readonly ok: false; readonly errors: readonly string[] };
+
+const integerOf = (text: string): number | undefined => {
+  const trimmed = text.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  const value = Number(trimmed);
+  return Number.isSafeInteger(value) ? value : undefined;
+};
+
+const numberOf = (text: string): number | undefined => {
+  const trimmed = text.trim();
+  if (trimmed === "") return undefined;
+  const value = Number(trimmed);
+  return Number.isFinite(value) ? value : undefined;
+};
+
+/**
+ * The per-turn form → the turn's `maxNewTokens` and sampler, or every problem at once. The ranges
+ * are the sampler's own (`SamplerSpec`): temperature ≥ 0, top-k an integer ≥ 1, 0 < top-p ≤ 1, seed
+ * a non-negative safe integer. An empty top-k / top-p is left out (no narrowing) — never silently
+ * replaced by a default, so the record names exactly what ran.
+ */
+export const parseTurnForm = (form: TurnForm): Parsed<TurnSettings> => {
+  const errors: string[] = [];
+  const temperature = numberOf(form.temperature);
+  if (temperature === undefined || temperature < 0) {
+    errors.push("Temperature must be a number ≥ 0.");
+  }
+  let topK: number | undefined;
+  if (form.topK.trim() !== "") {
+    topK = integerOf(form.topK);
+    if (topK === undefined || topK < 1) errors.push("Top-k must be an integer ≥ 1 (or empty).");
+  }
+  let topP: number | undefined;
+  if (form.topP.trim() !== "") {
+    topP = numberOf(form.topP);
+    if (topP === undefined || topP <= 0 || topP > 1) {
+      errors.push("Top-p must be in (0, 1] (or empty).");
+    }
+  }
+  const seed = integerOf(form.seed);
+  if (seed === undefined) errors.push("Seed must be a non-negative integer.");
+  const maxNewTokens = integerOf(form.maxNewTokens);
+  if (maxNewTokens === undefined || maxNewTokens < 1) {
+    errors.push("Max new tokens must be an integer ≥ 1.");
+  }
+  if (
+    errors.length > 0 ||
+    temperature === undefined ||
+    seed === undefined ||
+    maxNewTokens === undefined
+  ) {
+    return { ok: false, errors };
+  }
+  return {
+    ok: true,
+    value: {
+      maxNewTokens,
+      sampler: {
+        temperature,
+        ...(topK === undefined ? {} : { topK }),
+        ...(topP === undefined ? {} : { topP }),
+        seed,
+      },
+    },
+  };
+};
+
+/**
+ * What the session does when a turn does not fit the capacity: drop the oldest user / assistant pair
+ * until it fits (`dropOldestTurns`, the session's default), or refuse the turn with
+ * `GenerationCapacityError`.
+ */
+export type OverflowMode = "drop-oldest" | "refuse";
+
+export const OVERFLOW_CHOICES: readonly Choice<OverflowMode>[] = [
+  { value: "drop-oldest", label: "Drop the oldest turns (dropOldestTurns)" },
+  { value: "refuse", label: "Refuse the turn (GenerationCapacityError)" },
+];
+
+/**
+ * The session's overflow policy for a mode, reporting how many history entries it removed (its input
+ * length minus its output length — the page reads this to tell which entries left the context).
+ * Refusing returns the history unchanged: the session then fails the turn with
+ * `GenerationCapacityError` (its documented contract for a policy that cannot shrink the history).
+ */
+export const overflowPolicy =
+  (mode: OverflowMode, onDropped: (count: number) => void): Gemma4ChatOverflowPolicy =>
+  async (context) => {
+    const next = mode === "refuse" ? context.turns : await dropOldestTurns(context);
+    onDropped(context.turns.length - next.length);
+    return next;
+  };
+
+/** The chat form, as typed (parsed by {@link parseChatForm}). */
+export type ChatForm = {
+  readonly system: string;
+  /** Empty = the distribution's capacity. */
+  readonly capacity: string;
+  readonly overflow: OverflowMode;
+};
+
+export const INITIAL_CHAT_FORM: ChatForm = { system: "", capacity: "", overflow: "drop-oldest" };
+
+/** What one `Gemma4ChatSession` is built with (fixed for the session's life). */
+export type ChatSettings = {
+  /** `undefined` = no system message. */
+  readonly system?: string;
+  readonly capacity: number;
+  readonly overflow: OverflowMode;
+};
+
+/** The limits a capacity is checked against (from the model's `pipelineConfig`). */
+export type CapacityLimits = Pick<Gemma4PipelineConfig, "capacity" | "chunkLength" | "maxPosition">;
+
+/**
+ * The chat form → the session's settings. A whitespace-only system prompt means none. The capacity
+ * must satisfy what the session checks at construction: an integer with `chunkLength ≤ capacity ≤
+ * maxPosition`.
+ */
+export const parseChatForm = (form: ChatForm, limits: CapacityLimits): Parsed<ChatSettings> => {
+  let capacity = limits.capacity;
+  if (form.capacity.trim() !== "") {
+    const parsed = integerOf(form.capacity);
+    if (parsed === undefined || parsed < limits.chunkLength || parsed > limits.maxPosition) {
+      return {
+        ok: false,
+        errors: [
+          `Capacity must be an integer from ${limits.chunkLength} (the chunk length) to ${limits.maxPosition} (the position limit), or empty for the distribution's ${limits.capacity}.`,
+        ],
+      };
+    }
+    capacity = parsed;
+  }
+  return {
+    ok: true,
+    value: {
+      ...(form.system.trim() === "" ? {} : { system: form.system }),
+      capacity,
+      overflow: form.overflow,
+    },
+  };
+};
+
+export const sameChatSettings = (left: ChatSettings, right: ChatSettings): boolean =>
+  left.system === right.system &&
+  left.capacity === right.capacity &&
+  left.overflow === right.overflow;
