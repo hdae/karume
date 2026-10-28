@@ -113,7 +113,7 @@ export const reflectPadToHop = (
   }
   if (samples.length < hopLength) {
     // The length comes from the reference audio the caller passed (the wav of
-    // `IrodoriSpeakerInput`), so the 400 side (the "audio dimensions" of ADR 0107 decision 5). The
+    // `SpeakerInput`), so the 400 side (the "audio dimensions" of ADR 0107 decision 5). The
     // `hopLength` just above is a number the distribution declares, which the caller cannot fix,
     // so it stays a `RangeError`.
     throw new ModelInputError(

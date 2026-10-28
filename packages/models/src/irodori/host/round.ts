@@ -108,7 +108,7 @@ export const sequenceLengthFromLogFrames = (
  * waveform to this length (otherwise the audio comes out longer than the requested seconds).
  */
 export const sequenceLengthFromSeconds = (seconds: number, bounds: SampleBounds): SequencePlan => {
-  // `seconds` is the caller's request knob (`IrodoriGenerateRequest.durationSeconds`), so the 400
+  // `seconds` is the caller's request knob (`GenerateRequest.durationSeconds`), so the 400
   // side (ADR 0107). There is also a path where the distribution's `maxSeconds` enters through
   // `maxSequenceLength`, but it comes after `config.ts` confirmed finiteness at parse time, so it
   // never reaches here.

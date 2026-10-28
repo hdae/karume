@@ -599,56 +599,56 @@
     ],
     "./irodori": [
       {
+        "name": "Assets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerateEvent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerateRequest",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeneratedAudio",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GeneratedLatent",
         "kind": "typeAlias"
       },
       {
-        "name": "IRODORI_SOURCES",
-        "kind": "variable"
-      },
-      {
-        "name": "IrodoriAssets",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "IrodoriFromPretrainedOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "IrodoriGenerateEvent",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "IrodoriGenerateRequest",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "IrodoriGeneratedAudio",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "IrodoriLatentSnapshot",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "IrodoriPipeline",
-        "kind": "class"
-      },
-      {
-        "name": "IrodoriPipelineOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "IrodoriRunComponent",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "IrodoriSpeakerInput",
+        "name": "LatentSnapshot",
         "kind": "typeAlias"
       },
       {
         "name": "ModelInputError",
         "kind": "class"
+      },
+      {
+        "name": "Pipeline",
+        "kind": "class"
+      },
+      {
+        "name": "PipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RunComponent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SOURCES",
+        "kind": "variable"
+      },
+      {
+        "name": "SpeakerInput",
+        "kind": "typeAlias"
       }
     ],
     "./sbv2": [

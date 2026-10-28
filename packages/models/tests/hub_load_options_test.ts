@@ -21,7 +21,7 @@ import * as anima from "../anima.ts";
 import * as birefnet from "../birefnet.ts";
 import * as depthAnything from "../depth-anything.ts";
 import * as gemma from "../gemma.ts";
-import type { IrodoriFromPretrainedOptions } from "../src/irodori/pipeline.ts";
+import * as irodori from "../irodori.ts";
 import type { Sbv2FromPretrainedOptions } from "../src/sbv2/pipeline.ts";
 import type { Siglip2FromPretrainedOptions } from "../src/siglip2/pipeline.ts";
 import type { Umt5EncoderFromPretrainedOptions } from "../src/umt5/encoder.ts";
@@ -85,7 +85,7 @@ test("型の門: 9 家族の fromPretrained オプションが onRetry を受け
     { onRetry: noopRetry } satisfies birefnet.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies depthAnything.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies gemma.FromPretrainedOptions,
-    { onRetry: noopRetry } satisfies IrodoriFromPretrainedOptions,
+    { onRetry: noopRetry } satisfies irodori.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies Sbv2FromPretrainedOptions,
     { onRetry: noopRetry } satisfies Siglip2FromPretrainedOptions,
     { onRetry: noopRetry } satisfies Umt5EncoderFromPretrainedOptions,

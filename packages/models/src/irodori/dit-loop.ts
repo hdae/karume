@@ -47,7 +47,7 @@ import {
   eulerGraph,
 } from "./host/sampler-graph.ts";
 import { timestepEmbedding } from "./host/t-embed.ts";
-import type { GeneratedLatent, IrodoriLatentSnapshot, IrodoriState } from "./pipeline.ts";
+import type { GeneratedLatent, LatentSnapshot, IrodoriState } from "./pipeline.ts";
 import {
   asF32,
   type EmitEvent,
@@ -75,15 +75,15 @@ import { withSession } from "../session/with-session.ts";
  * MUST: copy `shape` as well as `data`. Returned by reference, two copies taken in the same step
  * would share one array, and if the subscriber rewrote the first `shape`, the second copy would
  * silently claim a different shape. An alignment that makes the contract of the public event
- * surface (`IrodoriGenerateEvent.copyLatents` / `anima.GenerateEvent.copyLatents`) one across
+ * surface (`irodori.GenerateEvent.copyLatents` / `anima.GenerateEvent.copyLatents`) one across
  * families (the same form as the same-named function on the anima side, `src/anima/pipeline.ts`).
  *
  * NOTE: `export` is for the test that pins the independence without a GPU (not exposed on `mod.ts`
  * / the subpath surface — ADR 0008).
  */
 export const latentSnapshot =
-  (latent: Float32Array<ArrayBuffer>, shape: readonly number[]): (() => IrodoriLatentSnapshot) =>
-  (): IrodoriLatentSnapshot => ({ data: new Float32Array(latent), shape: [...shape] });
+  (latent: Float32Array<ArrayBuffer>, shape: readonly number[]): (() => LatentSnapshot) =>
+  (): LatentSnapshot => ({ data: new Float32Array(latent), shape: [...shape] });
 
 /**
  * Result of the latent step. `plan.targetSamples` is needed to cut the waveform, so it is **carried

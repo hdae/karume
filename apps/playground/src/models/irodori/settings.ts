@@ -6,7 +6,7 @@
  */
 
 import type { LinearCompute, Manifest } from "@karume/hub";
-import type { IrodoriGenerateRequest } from "@karume/models/irodori";
+import type { GenerateRequest } from "@karume/models/irodori";
 
 import type { Choice } from "@/components/choice-select";
 
@@ -210,7 +210,7 @@ export type ReferenceSamples = {
 };
 
 /** The request without `onEvent` (the page adds it when stage events are on). */
-export type IrodoriRequestParts = Omit<IrodoriGenerateRequest, "onEvent">;
+export type IrodoriRequestParts = Omit<GenerateRequest, "onEvent">;
 
 const parseOptionalNumber = (text: string, what: string): number | undefined => {
   const trimmed = text.trim();
@@ -242,7 +242,7 @@ export const buildRequest = (
   if (seed === undefined) throw new FormError("Enter a seed");
   const durationSeconds = parseOptionalNumber(form.durationSeconds, "Duration");
   const codecTileFrames = parseOptionalInteger(form.codecTileFrames, "Codec tile");
-  let voice: Pick<IrodoriGenerateRequest, "caption" | "speaker">;
+  let voice: Pick<GenerateRequest, "caption" | "speaker">;
   if (form.voice === "caption") {
     voice = form.caption.trim() === "" ? {} : { caption: form.caption };
   } else {

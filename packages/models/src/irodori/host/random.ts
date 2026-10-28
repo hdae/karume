@@ -14,7 +14,7 @@
  *
  * MUST: it is not bit-identical to torch's `randn`. A comparison that needs the same sequence as
  * upstream (golden-like) is done by **injecting the noise from outside**
- * (`IrodoriGenerateRequest.initialNoise`).
+ * (`GenerateRequest.initialNoise`).
  */
 
 import { assertAcceptableSeed } from "../../request-gates.ts";

@@ -40,7 +40,7 @@ import { ModelInputError } from "../errors.ts";
  * A size that goes through even on a machine whose `maxStorageBufferBindingSize` is only the
  * default 128MiB (one below the measured S = 183 where allocation fails). On a machine with a high
  * allocation ceiling S ≤ 750 goes through in one pass, so there passing a large value as
- * {@link IrodoriGenerateRequest.codecTileFrames} collapses the tiles to one.
+ * {@link GenerateRequest.codecTileFrames} collapses the tiles to one.
  */
 export const DEFAULT_CODEC_TILE_FRAMES = 182;
 
@@ -79,7 +79,7 @@ export const assertCodecTileFrames = (tileFrames: number, haloFrames: number): v
     throw new Error(`planCodecTiles: haloFrames ${haloFrames} is not a non-negative integer`);
   }
   if (!Number.isInteger(tileFrames) || tileFrames <= 2 * haloFrames) {
-    // `tileFrames` is the caller's request knob (`IrodoriGenerateRequest.codecTileFrames`), so
+    // `tileFrames` is the caller's request knob (`GenerateRequest.codecTileFrames`), so
     // fixing the input makes it pass = the 400 side in ADR 0107's classification. The `haloFrames`
     // just above is a number the distribution declares, which the caller cannot fix, so it stays a
     // plain `Error`.

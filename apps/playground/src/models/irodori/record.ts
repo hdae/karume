@@ -4,7 +4,7 @@
  */
 
 import type { LinearCompute } from "@karume/hub";
-import type { IrodoriRunComponent } from "@karume/models/irodori";
+import type { RunComponent } from "@karume/models/irodori";
 
 import type { RecordEnvironment } from "@/lib/environment";
 import {
@@ -26,7 +26,7 @@ import type { IrodoriMount, IrodoriRequestParts, LinearChoice } from "./settings
 export const RECORD_FORMAT = "karume-playground-irodori/1";
 
 /** The stages in the order a generation runs them (`codec-encoder` only with a reference audio). */
-export const STAGE_ORDER: readonly IrodoriRunComponent[] = [
+export const STAGE_ORDER: readonly RunComponent[] = [
   "backbone",
   "text-proj",
   "caption-proj",
@@ -158,7 +158,7 @@ export type IrodoriRecord = RecordEnvironment & {
     | { readonly built: true; readonly loadSeconds: number }
     | { readonly built: false };
   /** Empty with stage events off (the resident loop reports no stages). */
-  readonly stageSeconds: Partial<Record<IrodoriRunComponent, number>>;
+  readonly stageSeconds: Partial<Record<RunComponent, number>>;
   readonly timeline: {
     /** Seconds of every denoise step; the first is measured from the `dit` stage start. */
     readonly denoiseStepSeconds: readonly number[];
@@ -199,7 +199,7 @@ export type RecordInput = Pick<
 > & {
   readonly environment: RecordEnvironment;
   /** From the `stage` events (start before a stage's Session, end after). */
-  readonly stages: StageTimes<IrodoriRunComponent>;
+  readonly stages: StageTimes<RunComponent>;
   readonly stepMarks: readonly number[];
   /** `performance.now()` marks: the run's start, and the `generate` call's start and end. */
   readonly runStart: number;

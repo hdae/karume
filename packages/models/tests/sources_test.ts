@@ -23,7 +23,7 @@ import { test } from "vite-plus/test";
 import { assert, assertEquals, assertMatch, assertRejects } from "@std/assert";
 import type { HubRepoRef } from "@karume/hub";
 import * as anima from "../anima.ts";
-import { IRODORI_SOURCES } from "../src/irodori/config.ts";
+import * as irodori from "../irodori.ts";
 import { SBV2_SOURCES } from "../src/sbv2/config.ts";
 import * as gemma from "../gemma.ts";
 import { SIGLIP2_SOURCES } from "../src/siglip2/config.ts";
@@ -32,7 +32,6 @@ import * as birefnet from "../birefnet.ts";
 import { UMT5_SOURCES } from "../src/umt5/config.ts";
 import { WAN_SOURCES } from "../src/wan/config.ts";
 import { KARUME_SOURCES } from "../src/sources.ts";
-import { IrodoriPipeline } from "../src/irodori/pipeline.ts";
 import { Sbv2Pipeline } from "../src/sbv2/pipeline.ts";
 import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
 import { Umt5Encoder } from "../src/umt5/encoder.ts";
@@ -91,11 +90,11 @@ const FAMILIES: readonly Family[] = [
     load: (ref, options) => anima.Pipeline.fromPretrained(ref, options),
   },
   {
-    name: "IRODORI_SOURCES",
-    sources: IRODORI_SOURCES,
+    name: "irodori.SOURCES",
+    sources: irodori.SOURCES,
     // 世代・版が変わるものは別リポ（ADR 0092 決定 1）— v4 と v4.1 が並ぶ。
     keys: ["irodori-v4-small", "irodori-v4.1-small"],
-    load: (ref, options) => IrodoriPipeline.fromPretrained(ref, options),
+    load: (ref, options) => irodori.Pipeline.fromPretrained(ref, options),
   },
   {
     name: "SBV2_SOURCES",
@@ -166,7 +165,7 @@ test("取得元対応表を持つのは 9 家族・公開リポは 12 本", () =
     FAMILIES.map(({ name }) => name),
     [
       "anima.SOURCES",
-      "IRODORI_SOURCES",
+      "irodori.SOURCES",
       "SBV2_SOURCES",
       "gemma.SOURCES",
       "SIGLIP2_SOURCES",

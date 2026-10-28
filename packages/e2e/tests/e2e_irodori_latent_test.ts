@@ -1,5 +1,5 @@
 /**
- * Irodori の**移植の門**（実 GPU）。配布形 → `IrodoriPipeline.fromAssets` → `generateLatent`
+ * Irodori の**移植の門**（実 GPU）。配布形 → `Pipeline.fromAssets` → `generateLatent`
  * まで通し、出た latent を **full-loop golden の `z` と全要素突合**する（SBV2 の WAV sha256 門
  * `e2e_sbv2_wav_test.ts` の latent 版 — こちらは codec がまだ無いので波形では閉じられない）。
  *
@@ -53,7 +53,7 @@
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
-import { IrodoriPipeline } from "../../models/irodori.ts";
+import { Pipeline } from "../../models/irodori.ts";
 import { parseIrodoriPipelineConfig } from "../../models/src/irodori/config.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import {
@@ -242,7 +242,7 @@ const SERIES: readonly IrodoriSeries[] = [
  */
 const runCase = async (
   series: IrodoriSeries,
-  pipeline: IrodoriPipeline,
+  pipeline: Pipeline,
   name: string,
   expected: GoldenCase,
 ): Promise<void> => {
@@ -314,7 +314,7 @@ for (const series of SERIES) {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, series.name);
       // `await using` は [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
-      await using pipeline = await IrodoriPipeline.fromAssets(
+      await using pipeline = await Pipeline.fromAssets(
         { manifest, assets },
         {
           model: MODEL,
@@ -330,7 +330,7 @@ for (const series of SERIES) {
     async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, series.name);
-      await using pipeline = await IrodoriPipeline.fromAssets(
+      await using pipeline = await Pipeline.fromAssets(
         { manifest, assets },
         {
           model: MODEL,
@@ -347,7 +347,7 @@ for (const series of SERIES) {
     async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, series.name);
-      await using pipeline = await IrodoriPipeline.fromAssets(
+      await using pipeline = await Pipeline.fromAssets(
         { manifest, assets },
         {
           model: MODEL,

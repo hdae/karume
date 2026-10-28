@@ -31,7 +31,7 @@ import { assert, assertEquals, assertThrows } from "@std/assert";
 import { type DistributionSource, type Manifest, parseManifest } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
 import type { SessionDiagnostics } from "@karume/runtime";
-import { IrodoriPipeline, type IrodoriRunComponent } from "../../models/irodori.ts";
+import { Pipeline, type RunComponent } from "../../models/irodori.ts";
 import {
   assertSeatsApplied,
   type CensusRow,
@@ -139,7 +139,7 @@ const observeStep1 = async (
 ): Promise<Observation> => {
   const where = `${quant} / ${input.name} / seed ${seed}`;
   const runs: SessionDiagnostics["lastRunPipelines"][] = [];
-  await using pipeline = await IrodoriPipeline.fromPretrained(source, {
+  await using pipeline = await Pipeline.fromPretrained(source, {
     model: MODEL,
     quant,
     onRunDiagnostics: (component, diagnostics) => {
@@ -204,10 +204,10 @@ for (const input of CASES) {
 const CENSUS_SECONDS = 1;
 
 /** census を採る部品（quant の `session` が降りる 2 本 — 観測席の綴り）。 */
-type CensusComponent = Extract<IrodoriRunComponent, "dit" | "dit-context">;
+type CensusComponent = Extract<RunComponent, "dit" | "dit-context">;
 const CENSUS_COMPONENTS: readonly CensusComponent[] = ["dit", "dit-context"];
-const isCensusComponent = (component: IrodoriRunComponent): component is CensusComponent =>
-  (CENSUS_COMPONENTS as readonly IrodoriRunComponent[]).includes(component);
+const isCensusComponent = (component: RunComponent): component is CensusComponent =>
+  (CENSUS_COMPONENTS as readonly RunComponent[]).includes(component);
 /** census 表の相（`dit` は denoise の step ごと・`dit_context` は生成 1 回の run）。 */
 const PHASE_OF: Readonly<Record<CensusComponent, string>> = { dit: "step", "dit-context": "run" };
 
@@ -284,7 +284,7 @@ test.skipIf(!RUNNABLE)(
     // No `onEvent` and no timing device: the DiT loop takes the resident path (the production
     // path), whose diagnostics arrive once per `enqueue` — the A/B cases above observe the host
     // path instead.
-    await using pipeline = await IrodoriPipeline.fromPretrained(nodeDirectory(ASSETS_DIR), {
+    await using pipeline = await Pipeline.fromPretrained(nodeDirectory(ASSETS_DIR), {
       model: MODEL,
       quant: PRACTICAL,
       onRunDiagnostics: (component, diagnostics) => {

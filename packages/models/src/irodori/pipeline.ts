@@ -1,12 +1,12 @@
 /**
- * `IrodoriPipeline` — one surface from text (+ caption + reference speaker) to a **waveform**.
+ * `Pipeline` — one surface from text (+ caption + reference speaker) to a **waveform**.
  *
- * It has two exits: {@link IrodoriPipeline.generate} (waveform) and
- * {@link IrodoriPipeline.generateLatent} (patched latent `[S,32]` — the codec does not run).
+ * It has two exits: {@link Pipeline.generate} (waveform) and
+ * {@link Pipeline.generateLatent} (patched latent `[S,32]` — the codec does not run).
  * The latter is the basis of the latent check (`e2e_irodori_latent_test.ts`) and the entry point
  * for uses that need only the embedding.
  *
- * The reference speaker can be given in three ways (`IrodoriSpeakerInput`) — the reference audio
+ * The reference speaker can be given in three ways (`SpeakerInput`) — the reference audio
  * itself (`audio` — stage 0 below) / its DACVAE latent (`latent`) / a ready-made speaker state
  * (`stateOverride`).
  *
@@ -32,9 +32,9 @@
  *
  * ## MUST: graphs are opened and closed per stage (only `dit` and `codec_decoder` run several times)
  *
- * {@link IrodoriPipeline.fromAssets} **opens no Session at all** — it goes as far as opening the
+ * {@link Pipeline.fromAssets} **opens no Session at all** — it goes as far as opening the
  * containers (`openContainer` = parsing the 2 documents only), and GPU residency is set up and torn
- * down stage by stage inside {@link IrodoriPipeline.generate}. `backbone` alone is 1.26GB, so the
+ * down stage by stage inside {@link Pipeline.generate}. `backbone` alone is 1.26GB, so the
  * condition encoders and the DiT are never alive at the same time. For the same reason the codec is
  * opened after the DiT is closed. `dit_context` is also closed **before** `dit` is opened (the
  * weights and output slots of the condition-side linears do not stay during the DiT loop — only the
@@ -201,11 +201,11 @@ export type GeneratedLatent = {
  * Generation result (waveform). `data` is **already cut** mono f32 (can be passed to `encodeWav`
  * as is).
  *
- * The name carries a prefix because the barrel (`mod.ts`) already exports SBV2's `GeneratedAudio`
- * (that one has the 2 fields `{ sampleRate, data }`; this one also returns observations from the
- * latent side).
+ * Same name as SBV2's `GeneratedAudio` (`sbv2.GeneratedAudio`), a different type: that one has the
+ * 2 fields `{ sampleRate, data }`; this one also returns observations from the latent side. The
+ * family namespaces keep the two apart.
  */
-export type IrodoriGeneratedAudio = {
+export type GeneratedAudio = {
   readonly data: Float32Array<ArrayBuffer>;
   readonly sampleRate: number;
   /** Number of generated latent frames S. **The tail trim can make the waveform shorter**. */
@@ -234,19 +234,19 @@ export type IrodoriGeneratedAudio = {
  *   condition as is, **bypassing** the `speaker` graph, `speaker_norm` and the mean-token prepend
  *   (upstream's `speaker_state_override` — the entry point for distributing embeddings).
  */
-export type IrodoriSpeakerInput =
+export type SpeakerInput =
   | { readonly audio: { readonly data: Float32Array<ArrayBuffer>; readonly sampleRate: number } }
   | { readonly latent: Float32Array<ArrayBuffer> }
   | { readonly stateOverride: Float32Array<ArrayBuffer> };
 
 /** One generation request. */
-export type IrodoriGenerateRequest = {
+export type GenerateRequest = {
   readonly text: string;
   /**
    * Voice instruction text (Voice Design). Empty / unset gives a zero caption condition + CFG off.
    */
   readonly caption?: string;
-  readonly speaker?: IrodoriSpeakerInput;
+  readonly speaker?: SpeakerInput;
   /** Random seed (default 0 — the same seed gives the same latent). */
   readonly seed?: number;
   /**
@@ -269,7 +269,7 @@ export type IrodoriGenerateRequest = {
    */
   readonly codecTileFrames?: number;
   /**
-   * Hook for generation events ({@link IrodoriGenerateEvent}) — called at the start / end of each
+   * Hook for generation events ({@link GenerateEvent}) — called at the start / end of each
    * step and at the completion of each DiT step.
    *
    * **It is awaited** (the firing order becomes deterministic, and the consumer can thin out /
@@ -289,15 +289,15 @@ export type IrodoriGenerateRequest = {
    * MUST: inside `onEvent`, do not await `generate` / `generateLatent` / `dispose` of the same
    * pipeline (a self-deadlock on the serialization chain — abort by throwing).
    */
-  readonly onEvent?: (event: IrodoriGenerateEvent) => void | Promise<void>;
+  readonly onEvent?: (event: GenerateEvent) => void | Promise<void>;
 };
 
 /**
- * The component names that {@link IrodoriPipelineOptions.onRunDiagnostics} receives.
- * The stage names of the `stage` event ({@link IrodoriGenerateEvent}) are the same 9 names. The
+ * The component names that {@link PipelineOptions.onRunDiagnostics} receives.
+ * The stage names of the `stage` event ({@link GenerateEvent}) are the same 9 names. The
  * spelling is the weights role name with `_` turned into `-` (`dit_context` → `dit-context`).
  */
-export type IrodoriRunComponent =
+export type RunComponent =
   | "backbone"
   | "text-proj"
   | "caption-proj"
@@ -309,27 +309,27 @@ export type IrodoriRunComponent =
   | "codec-decoder";
 
 /** Copy of an intermediate latent returned by `copyLatents()` of `denoise-step`. */
-export type IrodoriLatentSnapshot = {
+export type LatentSnapshot = {
   readonly data: Float32Array<ArrayBuffer>;
   /** Shape of the latent `[frames, latentDim]`. */
   readonly shape: readonly number[];
 };
 
 /**
- * Generation events received by {@link IrodoriGenerateRequest.onEvent}.
+ * Generation events received by {@link GenerateRequest.onEvent}.
  *
  * NOTE: same shape as anima's `GenerateEvent`, but there is no counterpart of `vae-tile` —
  * the codec decode tiles are **a performance and memory knob** (`codecTileFrames`), and as a step
  * they are covered by the `stage` of `codec-decoder`.
  */
-export type IrodoriGenerateEvent =
+export type GenerateEvent =
   /**
    * **Before** the step's Session is built (`start`) and **after** it is released (`end`) — shows
    * the progress of GB-class loads.
    */
   | {
       readonly kind: "stage";
-      readonly component: IrodoriRunComponent;
+      readonly component: RunComponent;
       readonly at: "start" | "end";
     }
   | {
@@ -343,16 +343,16 @@ export type IrodoriGenerateEvent =
        * Copies and returns the intermediate latent only when called (`latentSnapshot` in
        * {@link "./dit-loop.ts"}).
        */
-      readonly copyLatents: () => IrodoriLatentSnapshot;
+      readonly copyLatents: () => LatentSnapshot;
     };
 
 /**
- * Construction options (shared by {@link IrodoriPipeline.fromAssets} /
- * {@link IrodoriPipeline.fromPretrained}).
+ * Construction options (shared by {@link Pipeline.fromAssets} /
+ * {@link Pipeline.fromPretrained}).
  */
-export type IrodoriPipelineOptions = {
+export type PipelineOptions = {
   /**
-   * Shares an existing GPU. **The caller keeps ownership**, so {@link IrodoriPipeline.dispose} does
+   * Shares an existing GPU. **The caller keeps ownership**, so {@link Pipeline.dispose} does
    * not destroy it. When omitted, the pipeline calls `acquireGpu` internally and destroys it in
    * `dispose()`.
    */
@@ -375,17 +375,14 @@ export type IrodoriPipelineOptions = {
    *
    * Exceptions from the callback are not swallowed (fail loudly — the whole generation fails).
    */
-  readonly onRunDiagnostics?: (
-    component: IrodoriRunComponent,
-    diagnostics: SessionDiagnostics,
-  ) => void;
+  readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
   /**
-   * Aborts construction. {@link IrodoriPipeline.fromAssets} checks it at stage boundaries (entry /
+   * Aborts construction. {@link Pipeline.fromAssets} checks it at stage boundaries (entry /
    * between components / tokenizer parsing / before and after acquiring the GPU). At every boundary
    * except the entry it **yields to the event loop once before** checking, so an abort that arrives
    * during synchronous parsing takes effect at the next boundary (the same holds on a path with no
    * await at all, when `options.gpu` is given).
-   * {@link IrodoriPipeline.fromPretrained} passes the same signal to the fetch layer, so the same
+   * {@link Pipeline.fromPretrained} passes the same signal to the fetch layer, so the same
    * knob aborts **both during download and during assembly** (no abort button that goes dead only
    * after the download finishes).
    *
@@ -406,14 +403,14 @@ export type IrodoriPipelineOptions = {
 };
 
 /**
- * Additional fetch-layer options that {@link IrodoriPipeline.fromPretrained} accepts (passed
- * through to the hub). `signal` is shared with construction, so {@link IrodoriPipelineOptions}
+ * Additional fetch-layer options that {@link Pipeline.fromPretrained} accepts (passed
+ * through to the hub). `signal` is shared with construction, so {@link PipelineOptions}
  * holds it.
  *
  * NOTE: the per-field descriptions, including that `headers` / `fetch` / `caches` / `onRetry` are
  * **for HTTP sources only**, are kept in one place in {@link FromPretrainedHubOptions}.
  */
-export type IrodoriFromPretrainedOptions = IrodoriPipelineOptions &
+export type FromPretrainedOptions = PipelineOptions &
   FromPretrainedHubOptions &
   FromPretrainedComponentOptions;
 
@@ -421,12 +418,12 @@ export type IrodoriFromPretrainedOptions = IrodoriPipelineOptions &
  * Input for building directly from fetched assets (pass the return value of the hub's
  * `fetchAssets` as is).
  */
-export type IrodoriAssets = {
+export type Assets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
 
-/** Internal state of {@link IrodoriPipeline} (not exposed on the public surface). */
+/** Internal state of {@link Pipeline} (not exposed on the public surface). */
 export type IrodoriState = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
@@ -456,10 +453,7 @@ export type IrodoriState = {
    * the module doc).
    */
   readonly ditSessionOptions: SessionOptions;
-  readonly onRunDiagnostics?: (
-    component: IrodoriRunComponent,
-    diagnostics: SessionDiagnostics,
-  ) => void;
+  readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
 /**
@@ -474,9 +468,9 @@ export type IrodoriState = {
  */
 const buildIrodoriState = async (
   admitted: IrodoriAdmission,
-  assets: IrodoriAssets["assets"],
+  assets: Assets["assets"],
   open: ComponentOpener,
-  options: IrodoriPipelineOptions = {},
+  options: PipelineOptions = {},
 ): Promise<IrodoriState> => {
   const { config, quantName, quant, ditSymbol, ditContextOutputs, ditSessionOptions, gpuFeatures } =
     admitted;
@@ -511,7 +505,7 @@ const buildIrodoriState = async (
     // resolves as a microtask continuation, so an abort task queued by a click during the wait
     // has not run yet.
     await settleAbort(options.signal);
-    assertGpuFeaturesGranted(gpuFeatures, gpu, `IrodoriPipeline: quant '${quantName}'`);
+    assertGpuFeaturesGranted(gpuFeatures, gpu, `irodori.Pipeline: quant '${quantName}'`);
     // The limits of a device acquired here are also checked here — `fromAssets` has no place for a
     // pre-acquisition check (`fromPretrained` checks against the adapter values), and without this
     // a shortfall in the declaration would surface only when the Session is built, and when the
@@ -521,7 +515,7 @@ const buildIrodoriState = async (
       assertRequiredLimitsSatisfied(
         quant.requiredLimits,
         gpu.limits,
-        `IrodoriPipeline: quant '${quantName}'`,
+        `irodori.Pipeline: quant '${quantName}'`,
       );
     }
     return {
@@ -581,7 +575,7 @@ const sampleBounds = (config: IrodoriPipelineConfig): SampleBounds => ({
  * compute time.
  *
  * NOTE (3 changes in public behaviour): (1) `codecTileFrames` is checked even by
- * {@link IrodoriPipeline.generateLatent}, which does not run the codec (an unused value still
+ * {@link Pipeline.generateLatent}, which does not run the codec (an unused value still
  * fails if it is a typo) (2) `seed` is checked even for a generation given `initialNoise`
  * (previously it never went through `Randn`, so an invalid value was silently ignored). (1) and (2)
  * are deliberate changes toward "do not silently accept a knob that has no effect". (3) The checks
@@ -593,7 +587,7 @@ const sampleBounds = (config: IrodoriPipelineConfig): SampleBounds => ({
  * `mod.ts` / the subpath surface — ADR 0008, same convention as `latentSnapshot`).
  */
 export const assertIrodoriRequest = (
-  request: IrodoriGenerateRequest,
+  request: GenerateRequest,
   config: IrodoriPipelineConfig,
 ): void => {
   // The default is checked too — the caller is not obliged to pass `codecTileFrames`, so a
@@ -618,7 +612,7 @@ export const assertIrodoriRequest = (
 const generateLatent = async (
   state: IrodoriState,
   emit: EmitEvent,
-  request: IrodoriGenerateRequest,
+  request: GenerateRequest,
 ): Promise<LatentStage> => {
   const { config } = state;
   const textIds = packIds(state.tokenizer, request.text, config.maxTextLen, "text");
@@ -737,7 +731,7 @@ const generateLatent = async (
   const { frames } = plan;
   if (frames > config.ditSymMax) {
     throw new Error(
-      `IrodoriPipeline: the decided latent length ${frames} exceeds the declared maximum of dit ${config.ditSymMax}`,
+      `irodori.Pipeline: the decided latent length ${frames} exceeds the declared maximum of dit ${config.ditSymMax}`,
     );
   }
 
@@ -801,7 +795,7 @@ const generateLatent = async (
       // uniquely by the request (there is the duration-graph path), so the entry cannot check it
       // and stage 7 stays its owner.
       throw new ModelInputError(
-        `IrodoriPipeline: initialNoise length ${request.initialNoise.length} differs from` +
+        `irodori.Pipeline: initialNoise length ${request.initialNoise.length} differs from` +
           ` ${frames}×${config.latentDim} (the decided latent length is ${frames})`,
       );
     }
@@ -873,8 +867,8 @@ const decodeWaveform = async (
 const generateAudio = async (
   state: IrodoriState,
   emit: EmitEvent,
-  request: IrodoriGenerateRequest,
-): Promise<IrodoriGeneratedAudio> => {
+  request: GenerateRequest,
+): Promise<GeneratedAudio> => {
   const { config } = state;
   const { latent, plan } = await generateLatent(state, emit, request);
   // The tail trim is decided on z (before decode) — the same order as upstream's `_synthesize`.
@@ -908,12 +902,12 @@ const generateAudio = async (
 /**
  * The text → speech pipeline of Irodori-TTS v4.
  *
- * Construction has only two entry points, {@link IrodoriPipeline.fromPretrained} (fetch from HF)
- * and {@link IrodoriPipeline.fromAssets} (already fetched bytes) — the constructor is private so
+ * Construction has only two entry points, {@link Pipeline.fromPretrained} (fetch from HF)
+ * and {@link Pipeline.fromAssets} (already fetched bytes) — the constructor is private so
  * that a half-built state that bypasses the manifest checks and the asset matching cannot be
  * created (ADR 0008).
  */
-export class IrodoriPipeline {
+export class Pipeline {
   readonly #state: IrodoriState;
   /**
    * The serialization chain of generate / generateLatent and dispose (keeps "one at a time" on the
@@ -943,17 +937,17 @@ export class IrodoriPipeline {
    *
    * A local distribution is passed as a **source handle** (`localDirectory` / `denoDirectory` of
    * `@karume/hub/deno`). It skips the spelling check of HF's `owner/name`, and goes through neither
-   * the network nor CacheStorage (the HTTP-only knobs of {@link IrodoriFromPretrainedOptions} have
+   * the network nor CacheStorage (the HTTP-only knobs of {@link FromPretrainedOptions} have
    * no effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
-    options: IrodoriFromPretrainedOptions = {},
-  ): Promise<IrodoriPipeline> {
+    options: FromPretrainedOptions = {},
+  ): Promise<Pipeline> {
     const source = toManifestSource(
       ref,
-      "IrodoriPipeline.fromPretrained",
-      'IRODORI_SOURCES["irodori-v4.1-small"] (@karume/models/irodori)',
+      "irodori.Pipeline.fromPretrained",
+      'SOURCES["irodori-v4.1-small"] (@karume/models/irodori)',
     );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
@@ -964,7 +958,7 @@ export class IrodoriPipeline {
     const selection = resolveSelection(loaded.manifest, choice);
     // The signal goes to **both** the fetch layer and construction (no window where the abort stops
     // working the moment the download ends).
-    const buildOptions: IrodoriPipelineOptions = {
+    const buildOptions: PipelineOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       ...choice,
       ...(options.onRunDiagnostics === undefined
@@ -976,7 +970,7 @@ export class IrodoriPipeline {
     // The family checks run in the admission hook (before the weight parts are fetched —
     // `hub/components.ts`).
     const { admitted, assets, open } = await loadContainerComponents(
-      "IrodoriPipeline.fromPretrained",
+      "irodori.Pipeline.fromPretrained",
       loaded,
       selection,
       COMPONENT_KEYS,
@@ -988,7 +982,7 @@ export class IrodoriPipeline {
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
           buildOptions.gpu,
-          `IrodoriPipeline: quant '${admitted.quantName}'`,
+          `irodori.Pipeline: quant '${admitted.quantName}'`,
         );
         return admitted;
       },
@@ -998,13 +992,13 @@ export class IrodoriPipeline {
         ...(options.components === undefined ? {} : { components: options.components }),
       },
     );
-    return new IrodoriPipeline(await buildIrodoriState(admitted, assets, open, buildOptions));
+    return new Pipeline(await buildIrodoriState(admitted, assets, open, buildOptions));
   }
 
   /**
    * Builds from an already fetched manifest + assets. The contract checks, the interpretation of
    * the assets and `openContainer` all happen here, and **no Session is opened**. Passing
-   * {@link IrodoriPipelineOptions.signal} allows aborting at step boundaries (the NOTE of
+   * {@link PipelineOptions.signal} allows aborting at step boundaries (the NOTE of
    * `admitIrodori`).
    *
    * Component keys **accept both forms** — the bytes of a single-form `krm` as one entry (`dit`),
@@ -1013,10 +1007,7 @@ export class IrodoriPipeline {
    * with a single-form key fails loudly (the receiving implementation is the one in
    * `src/hub/components.ts`).
    */
-  static async fromAssets(
-    input: IrodoriAssets,
-    options: IrodoriPipelineOptions = {},
-  ): Promise<IrodoriPipeline> {
+  static async fromAssets(input: Assets, options: PipelineOptions = {}): Promise<Pipeline> {
     // MUST: the entry abort check comes **before** the containers are opened (the same one as the
     // entry of `admitIrodori`, moved forward). The receiver **opens every component first** in
     // order to return a synchronous supplier, so without this an already aborted call would open
@@ -1024,7 +1015,7 @@ export class IrodoriPipeline {
     options.signal?.throwIfAborted();
     const open = await assetOpener(input.assets);
     const admitted = await admitIrodori(input.manifest, open, options);
-    return new IrodoriPipeline(await buildIrodoriState(admitted, input.assets, open, options));
+    return new Pipeline(await buildIrodoriState(admitted, input.assets, open, options));
   }
 
   /**
@@ -1036,11 +1027,11 @@ export class IrodoriPipeline {
    * Concurrent calls **wait and run in order** (graphs are never resident at the same time —
    * module doc).
    */
-  async generate(request: IrodoriGenerateRequest): Promise<IrodoriGeneratedAudio> {
+  async generate(request: GenerateRequest): Promise<GeneratedAudio> {
     // The disposed check happens at call time (checking inside the chain would also fail
     // generations accepted before the dispose).
     if (this.#disposal !== undefined) {
-      throw new Error("IrodoriPipeline: cannot generate after dispose");
+      throw new Error("irodori.Pipeline: cannot generate after dispose");
     }
     // The request-knob checks also happen at call time (outside the chain) — inside the chain, a
     // typo would fail only after waiting for the preceding generation to settle
@@ -1054,11 +1045,11 @@ export class IrodoriPipeline {
    * for embedding uses).
    *
    * The same seed and the same request give the same latent. It rides on **the same chain** as
-   * {@link IrodoriPipeline.generate}, so even mixed concurrent calls run in order.
+   * {@link Pipeline.generate}, so even mixed concurrent calls run in order.
    */
-  async generateLatent(request: IrodoriGenerateRequest): Promise<GeneratedLatent> {
+  async generateLatent(request: GenerateRequest): Promise<GeneratedLatent> {
     if (this.#disposal !== undefined) {
-      throw new Error("IrodoriPipeline: cannot generate after dispose");
+      throw new Error("irodori.Pipeline: cannot generate after dispose");
     }
     assertIrodoriRequest(request, this.#state.config);
     return await this.#chain(

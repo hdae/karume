@@ -22,11 +22,7 @@
 import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { assert, assertEquals, assertNotEquals } from "@std/assert";
 import type { RunInputs } from "@karume/runtime";
-import {
-  type IrodoriGenerateRequest,
-  IrodoriPipeline,
-  type IrodoriRunComponent,
-} from "../../models/irodori.ts";
+import { type GenerateRequest, Pipeline, type RunComponent } from "../../models/irodori.ts";
 import { encodeWav } from "../../models/mod.ts";
 import {
   DIST_COMMAND,
@@ -56,7 +52,7 @@ const REQUEST = {
   text: "こんにちは、これはテストです。",
   seed: 11,
   durationSeconds: 1,
-} as const satisfies IrodoriGenerateRequest;
+} as const satisfies GenerateRequest;
 
 /** Session への呼び出し 1 本の種別（`dit` だけが `x_t` を、`dit_context` だけが `speaker_state` を受ける）。 */
 const kindOf = (inputs: RunInputs): "context" | "dit" | undefined =>
@@ -68,7 +64,7 @@ const kindOf = (inputs: RunInputs): "context" | "dit" | undefined =>
 
 type Calls = { context: number; dit: number };
 
-const wavSha = async (pipeline: IrodoriPipeline): Promise<string> => {
+const wavSha = async (pipeline: Pipeline): Promise<string> => {
   const audio = await pipeline.generate(REQUEST);
   return await sha256Hex(encodeWav(audio.data, audio.sampleRate));
 };
@@ -76,8 +72,8 @@ const wavSha = async (pipeline: IrodoriPipeline): Promise<string> => {
 describe.skipIf(!RUNNABLE)(
   "e2e(実GPU): dit_context は生成 1 回に 1 回だけ回り、K / V の配線は WAV sha から見える",
   () => {
-    const observed: IrodoriRunComponent[] = [];
-    let pipeline: IrodoriPipeline;
+    const observed: RunComponent[] = [];
+    let pipeline: Pipeline;
     // The originals are kept unbound on purpose: each patch re-invokes them with `.call(this)` and
     // the cleanup puts the same function objects back.
     // oxlint-disable-next-line typescript/unbound-method -- re-invoked with an explicit receiver, restored as-is
@@ -88,7 +84,7 @@ describe.skipIf(!RUNNABLE)(
     beforeAll(async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, QUANT);
-      pipeline = await IrodoriPipeline.fromAssets(
+      pipeline = await Pipeline.fromAssets(
         { manifest, assets },
         {
           model: MODEL,
@@ -114,7 +110,7 @@ describe.skipIf(!RUNNABLE)(
         const kind = kindOf(inputs);
         if (kind !== undefined) calls[via][kind] += 1;
       };
-      const observedCount = (component: IrodoriRunComponent): number =>
+      const observedCount = (component: RunComponent): number =>
         observed.filter((name) => name === component).length;
       try {
         Session.prototype.run = function (inputs, bindings, generation) {

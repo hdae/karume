@@ -1,5 +1,5 @@
 /**
- * Irodori の **WAV sha256 門**（実 GPU）。配布形 → `IrodoriPipeline.fromAssets` → `generate` →
+ * Irodori の **WAV sha256 門**（実 GPU）。配布形 → `Pipeline.fromAssets` → `generate` →
  * `encodeWav` まで通し、出力 WAV の sha256 が参照値と**ビット一致**するかだけを見る
  * （SBV2 の `e2e_sbv2_wav_test.ts` / Anima の PNG 門と同じ哲学の Irodori 版）。
  *
@@ -69,11 +69,11 @@ import { type FileRef, parseManifest, resolveSelection } from "@karume/hub";
 import type { Manifest, ModelEntry } from "@karume/hub";
 import type { SessionDiagnostics } from "@karume/runtime";
 import {
-  type IrodoriGeneratedAudio,
-  type IrodoriGenerateEvent,
-  type IrodoriGenerateRequest,
-  IrodoriPipeline,
-  type IrodoriRunComponent,
+  type GeneratedAudio,
+  type GenerateEvent,
+  type GenerateRequest,
+  Pipeline,
+  type RunComponent,
 } from "../../models/irodori.ts";
 import { type DecodedWav, decodeWav, encodeWav } from "../../models/mod.ts";
 import {
@@ -339,7 +339,7 @@ const describeFirstDifference = async (
 const mismatchReport = async (
   item: WavCase,
   config: IrodoriPipelineConfig,
-  audio: IrodoriGeneratedAudio,
+  audio: GeneratedAudio,
   wav: Uint8Array<ArrayBuffer>,
   expected: string,
   actual: string,
@@ -366,19 +366,19 @@ const mismatchReport = async (
  * 焼き直してから `onEvent` 経路の実測で同じ行を上書きするだけになり、A≠B でも緑で終わる。
  */
 const runCase = async (
-  pipeline: IrodoriPipeline,
+  pipeline: Pipeline,
   config: IrodoriPipelineConfig,
   item: WavCase,
   reference: DecodedWav,
   /** 観測席（`onEvent`）の呼びだけが持つ席。`twinSha` は通常経路の**実測** sha。 */
   observed?: {
-    readonly onEvent: (event: IrodoriGenerateEvent) => void;
+    readonly onEvent: (event: GenerateEvent) => void;
     readonly twinSha: string;
   },
-): Promise<{ readonly audio: IrodoriGeneratedAudio; readonly sha: string }> => {
+): Promise<{ readonly audio: GeneratedAudio; readonly sha: string }> => {
   const onEvent = observed?.onEvent;
   // `initialNoise` もノブも渡さない — 内部 `Randn` と `pipelineConfig` の既定ごと縛る。
-  const request: IrodoriGenerateRequest = {
+  const request: GenerateRequest = {
     text: item.text,
     ...(item.caption === undefined ? {} : { caption: item.caption }),
     ...(item.withReference ? { speaker: { audio: reference } } : {}),
@@ -433,14 +433,14 @@ describe.skipIf(!RUNNABLE)(
     let reference: DecodedWav;
     // run 1 回ごとの観測。`lastRun`（アリーナ実績）の有無が「ホスト経路か常駐経路か」の
     // **独立な証拠**になる — 常駐経路の `enqueue` はアリーナも計測窓も作らないので undefined。
-    const runs: { component: IrodoriRunComponent; hasArena: boolean }[] = [];
+    const runs: { component: RunComponent; hasArena: boolean }[] = [];
     // 3.3GB の資産を 2 度読まないよう、全ケースは 1 本のパイプラインを共有する。
-    let pipeline: IrodoriPipeline | undefined;
+    let pipeline: Pipeline | undefined;
     /** 通常経路の実測 sha（onEvent 経路との経路間ビット同一を、参照行を経由せずに見る相手）。 */
     const plainSha = new Map<string, string>();
 
     // The its below run only after beforeAll succeeded; this narrows the shared pipeline.
-    const opened = (): IrodoriPipeline => {
+    const opened = (): Pipeline => {
       assert(pipeline !== undefined, "パイプラインが開いていない（beforeAll が失敗している）");
       return pipeline;
     };
@@ -455,12 +455,12 @@ describe.skipIf(!RUNNABLE)(
       // 参照音声は 48kHz mono PCM16。周波数が配布形と違えば `generate` が fail loudly（リサンプル
       // は持たない）ので、ここでは読むだけにする。
       reference = decodeWav(referenceBytes as Uint8Array<ArrayBuffer>);
-      pipeline = await IrodoriPipeline.fromAssets(
+      pipeline = await Pipeline.fromAssets(
         { manifest, assets },
         {
           model: MODEL,
           quant: QUANT,
-          onRunDiagnostics: (component: IrodoriRunComponent, diagnostics: SessionDiagnostics) =>
+          onRunDiagnostics: (component: RunComponent, diagnostics: SessionDiagnostics) =>
             runs.push({ component, hasArena: diagnostics.lastRun !== undefined }),
         },
       );
@@ -616,7 +616,7 @@ describe.skipIf(!RUNNABLE)(
 
     // --- dispose の直列化（flush-before-destroy）------------------------------
     //
-    // `concurrency/serial.ts` は `serial_test.ts` が独立に縛っているが、`IrodoriPipeline` が
+    // `concurrency/serial.ts` は `serial_test.ts` が独立に縛っているが、`Pipeline` が
     // その鎖へ正しく載っていることは公開面からしか見えない。**この step は最後に置く**
     // （ここでパイプラインを解放するため）。
     it("dispose は in-flight の完了を待ち、2 度目も同じ完了を返す", async () => {

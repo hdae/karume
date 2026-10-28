@@ -16,7 +16,7 @@ import { test } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { admitIrodori, assetOpener } from "../src/irodori/admission.ts";
-import { IrodoriPipeline, type IrodoriPipelineOptions } from "../src/irodori/pipeline.ts";
+import { Pipeline, type PipelineOptions } from "../src/irodori/pipeline.ts";
 import { ModelInputError } from "../src/errors.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import type { ModelInput } from "../../runtime/tests/helpers/container-write.ts";
@@ -263,7 +263,7 @@ const manifestText = (): string => {
 };
 
 const build = async (patch: Patch = {}): Promise<unknown> =>
-  await IrodoriPipeline.fromAssets({
+  await Pipeline.fromAssets({
     manifest: parseManifest(manifestText()),
     assets: await assetsWith(patch),
   });
@@ -638,7 +638,7 @@ test("fromPretrained: components で差した dit の次元が違えば重みを
 
   const error = await assertRejects(
     () =>
-      IrodoriPipeline.fromPretrained(
+      Pipeline.fromPretrained(
         { repo: REPO, revision: SHA, hubUrl: HUB_URL },
         {
           fetch: mock.fetch,
@@ -665,8 +665,8 @@ test("fromPretrained: components で差した dit の次元が違えば重みを
 // ---- 実行ノブの明示指定（明示 > quant 宣言 > runtime 既定 — ADR 0058 追記 2026-09-26）----------
 
 /** 型の外から来る呼び手（JS の消費者）の構築オプションを再現する。 */
-const optionsWith = (key: string, value: unknown): IrodoriPipelineOptions => {
-  const options: IrodoriPipelineOptions = {};
+const optionsWith = (key: string, value: unknown): PipelineOptions => {
+  const options: PipelineOptions = {};
   Object.defineProperty(options, key, { value, enumerable: true });
   return options;
 };
@@ -676,18 +676,13 @@ test("admitIrodori: 不正な明示値と attention 系のノブはグラフ突�
   const manifest = parseManifest(manifestText());
   const broken = await assetsWith(breakInput("dit", "x_t", 2, CONFIG.latentDim + 1));
   await assertRejects(
-    () =>
-      IrodoriPipeline.fromAssets({ manifest, assets: broken }, optionsWith("linearCompute", null)),
+    () => Pipeline.fromAssets({ manifest, assets: broken }, optionsWith("linearCompute", null)),
     ModelInputError,
     "linearCompute is invalid",
   );
   // dit の attention は融合 attention の契約に載らない（分解経路）ので、効く席が無い。
   await assertRejects(
-    () =>
-      IrodoriPipeline.fromAssets(
-        { manifest, assets: broken },
-        optionsWith("attentionCompute", "f16"),
-      ),
+    () => Pipeline.fromAssets({ manifest, assets: broken }, optionsWith("attentionCompute", "f16")),
     ModelInputError,
     "attentionCompute cannot be specified for this family",
   );
@@ -696,7 +691,7 @@ test("admitIrodori: 不正な明示値と attention 系のノブはグラフ突�
 test("admitIrodori: 受理される linearCompute の明示は突合を通って資産の段まで進む", async () => {
   await assertRejects(
     async () =>
-      await IrodoriPipeline.fromAssets(
+      await Pipeline.fromAssets(
         {
           manifest: parseManifest(manifestText()),
           assets: await assetsWith(),
@@ -713,7 +708,7 @@ test("admitIrodori: 明示の f16 を共有 GPU が持たなければ GPU 取得
   // 重みを上げた後の Session 構築まで遅らせもしない）。
   await assertRejects(
     async () =>
-      await IrodoriPipeline.fromAssets(
+      await Pipeline.fromAssets(
         {
           manifest: parseManifest(manifestText()),
           assets: await assetsWith(),

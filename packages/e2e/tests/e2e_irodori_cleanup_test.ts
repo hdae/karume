@@ -8,7 +8,7 @@
 // して、その順序と解放の本数を同じ 1 回の生成で見る。
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { IrodoriPipeline } from "../../models/irodori.ts";
+import { Pipeline } from "../../models/irodori.ts";
 import {
   DIST_COMMAND,
   hasQuantSeat,
@@ -28,7 +28,7 @@ test.skipIf(!GPU_AVAILABLE || !hasQuantSeat("i8"))(
   async () => {
     const manifest = readManifest();
     const assets = await loadLocalAssets(manifest, "i8");
-    const pipeline = await IrodoriPipeline.fromAssets(
+    const pipeline = await Pipeline.fromAssets(
       { manifest, assets },
       {
         model: MODEL,

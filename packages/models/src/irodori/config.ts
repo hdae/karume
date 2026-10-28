@@ -17,7 +17,7 @@
  * mesh (Tmax of the condition states, speaker row count, latent width, t_embed width, the clamp
  * range of S). Hard-coded in TS, a weight swap would leave only the host with old numbers,
  * producing a silent wrong value in a form where **the shapes still match**.
- * Matching against the real graphs is done on the assets by {@link IrodoriPipeline.fromAssets}.
+ * Matching against the real graphs is done on the assets by {@link Pipeline.fromAssets}.
  *
  * ## MUST: reject unsupported CFG modes at parse time, **keeping no value** (ADR 0047 decision 1)
  *
@@ -27,7 +27,7 @@
  * branching on them they are **not accepted** (the type can express only "mask" / "independent"
  * too).
  *
- * NOTE: the table of public distribution repositories ({@link IRODORI_SOURCES}) lives here too. It
+ * NOTE: the table of public distribution repositories ({@link SOURCES}) lives here too. It
  * is not one of the "model-specific numbers" the MUST above forbids but belongs to "which manifest
  * to fetch", a value a distribution cannot hold in the first place (ADR 0073).
  */
@@ -72,12 +72,12 @@ export const IRODORI_PIPELINE_MAJOR = 1;
  * so the bytes this published package reads would change silently for network-side reasons (an
  * unrecoverable kind of accident). A SHA removes the revision-resolution request itself, so offline
  * startup with a complete cache also works (ADR 0038). A user who needs to follow main explicitly
- * chooses `{ ...IRODORI_SOURCES["irodori-v4.1-small"], revision: "main" }`.
+ * chooses `{ ...SOURCES["irodori-v4.1-small"], revision: "main" }`.
  */
 // NOTE: the revision is updated to the SHA of main after the upload, in §3 of the release runbook
 // (docs/release-runbook.md) (inherits the maintenance duty of ADR 0073 decision 3 — by hand + the
 // runbook check).
-export const IRODORI_SOURCES = {
+export const SOURCES = {
   "irodori-v4-small": {
     repo: "hdae/karume-irodori-v4-small",
     revision: "485bbee5f0331db555d465955fef48a183bc46e0",

@@ -16,7 +16,7 @@ import { ModelInputError } from "../errors.ts";
 import { patchReferenceLatent, SPEAKER_MIN_TOKENS } from "./host/patch.ts";
 import { prependMeanToken } from "./host/pooling.ts";
 import { normalizeReference, reflectPadToHop } from "./host/reference.ts";
-import type { IrodoriSpeakerInput, IrodoriState } from "./pipeline.ts";
+import type { SpeakerInput, IrodoriState } from "./pipeline.ts";
 import { asF32, type EmitEvent, f32, outputAt, withStageSession } from "./stage.ts";
 
 /**
@@ -43,12 +43,12 @@ export const rightPad = (
 ): Float32Array<ArrayBuffer> => {
   if (state.rows > rows) {
     throw new Error(
-      `IrodoriPipeline: ${where} length ${state.rows} exceeds the declared length ${rows}`,
+      `irodori.Pipeline: ${where} length ${state.rows} exceeds the declared length ${rows}`,
     );
   }
   if (state.data.length !== state.rows * width) {
     throw new Error(
-      `IrodoriPipeline: ${where} element count ${state.data.length} differs from ${state.rows}×${width}`,
+      `irodori.Pipeline: ${where} element count ${state.data.length} differs from ${state.rows}×${width}`,
     );
   }
   const padded = new Float32Array(rows * width);
@@ -87,7 +87,7 @@ const referenceMaxSamples = (config: ReferenceAudioShape): number =>
  * it either fails at the patch after the codec encoder ran on the GPU (0 tokens), or delivers S = 1,
  * outside the export minimum, to the speaker graph (1 token).
  *
- * Both violations are the very fields of `IrodoriSpeakerInput.audio` the caller passed, and the
+ * Both violations are the very fields of `SpeakerInput.audio` the caller passed, and the
  * remedy is "convert it / pass a longer reference again", so they are input-caused (ADR 0107
  * decision 2).
  */
@@ -99,7 +99,7 @@ const assertReferenceAudio = (
     // There is no resampling (the convention of ADR 0048 — no silent approximation; conversion is
     // the caller's responsibility).
     throw new ModelInputError(
-      `IrodoriPipeline: the reference audio is ${audio.sampleRate}Hz (the distribution is ${config.sampleRate}Hz)` +
+      `irodori.Pipeline: the reference audio is ${audio.sampleRate}Hz (the distribution is ${config.sampleRate}Hz)` +
         " — there is no resampler, so convert it before passing it",
     );
   }
@@ -108,7 +108,7 @@ const assertReferenceAudio = (
   if (tokens < SPEAKER_MIN_TOKENS) {
     const minSamples = (SPEAKER_MIN_TOKENS * config.speakerPatchSize - 1) * config.hopLength + 1;
     throw new ModelInputError(
-      `IrodoriPipeline: ${audio.data.length} samples of reference audio make only ${tokens} speaker tokens` +
+      `irodori.Pipeline: ${audio.data.length} samples of reference audio make only ${tokens} speaker tokens` +
         ` (the minimum is ${SPEAKER_MIN_TOKENS} tokens = at least ${minSamples} samples)`,
     );
   }
@@ -177,7 +177,7 @@ type SpeakerShape = {
 const assertSpeakerRows = (rows: number, speakerRows: number, where: string): void => {
   if (rows > speakerRows) {
     throw new ModelInputError(
-      `IrodoriPipeline: ${where} makes ${rows} rows of speaker condition, exceeding the declared length ${speakerRows}`,
+      `irodori.Pipeline: ${where} makes ${rows} rows of speaker condition, exceeding the declared length ${speakerRows}`,
     );
   }
 };
@@ -202,7 +202,7 @@ export const conditionFromStateOverride = (
 ): ConditionState => {
   if (stateOverride.length === 0 || stateOverride.length % config.speakerDim !== 0) {
     throw new ModelInputError(
-      `IrodoriPipeline: speaker.stateOverride length ${stateOverride.length} is not a positive` +
+      `irodori.Pipeline: speaker.stateOverride length ${stateOverride.length} is not a positive` +
         ` multiple of speakerDim ${config.speakerDim}`,
     );
   }
@@ -231,7 +231,7 @@ export const patchRequestedLatent = (
     patched = patchReferenceLatent(latent, config.latentDim, config.speakerPatchSize);
   } catch (cause) {
     throw new ModelInputError(
-      `IrodoriPipeline: speaker.latent — ${cause instanceof Error ? cause.message : String(cause)}`,
+      `irodori.Pipeline: speaker.latent — ${cause instanceof Error ? cause.message : String(cause)}`,
       { cause },
     );
   }
@@ -251,7 +251,7 @@ export const patchRequestedLatent = (
  * ({@link assertReferenceAudio} / {@link patchRequestedLatent}) (the return values are discarded).
  */
 export const assertSpeakerReference = (
-  input: IrodoriSpeakerInput | undefined,
+  input: SpeakerInput | undefined,
   config: SpeakerShape & ReferenceAudioShape,
 ): void => {
   if (input === undefined || "stateOverride" in input) return;
@@ -269,7 +269,7 @@ export const assertSpeakerReference = (
 export const encodeSpeaker = async (
   state: IrodoriState,
   emit: EmitEvent,
-  input: IrodoriSpeakerInput | undefined,
+  input: SpeakerInput | undefined,
 ): Promise<ConditionState> => {
   const { config } = state;
   if (input === undefined) {

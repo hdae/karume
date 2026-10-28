@@ -20,7 +20,7 @@
 import type { HubRepoRef } from "@karume/hub";
 
 import * as anima from "./anima/config.ts";
-import { IRODORI_SOURCES } from "./irodori/config.ts";
+import * as irodori from "./irodori/config.ts";
 import { SBV2_SOURCES } from "./sbv2/config.ts";
 import * as gemma from "./gemma/config.ts";
 import { SIGLIP2_SOURCES } from "./siglip2/config.ts";
@@ -31,7 +31,7 @@ import { WAN_SOURCES } from "./wan/config.ts";
 
 export const KARUME_SOURCES = {
   ...anima.SOURCES,
-  ...IRODORI_SOURCES,
+  ...irodori.SOURCES,
   ...SBV2_SOURCES,
   ...gemma.SOURCES,
   ...SIGLIP2_SOURCES,

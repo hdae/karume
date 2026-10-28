@@ -1,4 +1,4 @@
-// `IrodoriPipeline` の**構築ガード**。GPU も実資産も要らない範囲だけを見る（実 GPU の突合は
+// `Pipeline` の**構築ガード**。GPU も実資産も要らない範囲だけを見る（実 GPU の突合は
 // `e2e_irodori_*_test.ts` 群が持つ）。
 //
 // ここで押さえるのは 2 点:
@@ -33,7 +33,7 @@ import { parseManifest } from "@karume/hub";
 import { parseIrodoriPipelineConfig } from "../src/irodori/config.ts";
 import { assetJson } from "../src/irodori/admission.ts";
 import { latentSnapshot } from "../src/irodori/dit-loop.ts";
-import { assertIrodoriRequest, IrodoriPipeline } from "../src/irodori/pipeline.ts";
+import { assertIrodoriRequest, Pipeline } from "../src/irodori/pipeline.ts";
 import { ModelInputError } from "../src/errors.ts";
 import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
 
@@ -136,7 +136,7 @@ const withConfig = (config: Record<string, unknown>): string =>
 test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }, { model: "nope" }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { model: "nope" }),
     Error,
     "model 'nope' is not in the manifest",
   );
@@ -145,7 +145,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
 test("fromAssets: pipeline の契約名が irodori でない manifest を落とす", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "sbv2/1" }));
   await assertRejects(
-    () => IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "the manifest pipeline is 'sbv2/1'",
   );
@@ -155,7 +155,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門。hub は major を検査しない。
   const manifest = parseManifest(manifestText({ pipeline: "irodori/2" }));
   await assertRejects(
-    () => IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "has an unsupported major",
   );
@@ -164,7 +164,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
 test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "nope" }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "nope" }),
     Error,
     "quant 'nope' is not in the manifest",
   );
@@ -174,7 +174,7 @@ test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async
   // 綴り違い（`steps` に対する `step`）が黙って既定へ縮退する経路を作らない（config.ts の MUST）。
   const manifest = parseManifest(withConfig({ ...PIPELINE_CONFIG, step: 40 }));
   await assertRejects(
-    () => IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "pipelineConfig: unknown key 'step'",
   );
@@ -186,7 +186,7 @@ test("fromAssets: pipelineConfig の欄が欠けていれば構築時に落ち�
   const { hopLength: _dropped, ...missing } = PIPELINE_CONFIG;
   const manifest = parseManifest(withConfig(missing));
   await assertRejects(
-    () => IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "pipelineConfig.hopLength: missing",
   );
@@ -197,7 +197,7 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   // 文言では落ちない）= 上のケースが資産の不在に巻き添えられていないことの対偶。
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => IrodoriPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => Pipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
     "component 'backbone' has no container",
   );
@@ -215,7 +215,7 @@ test("fromAssets: 中断済み signal は資産へ触る前に reason そのま�
   const reason = new Error("中止ボタン");
   controller.abort(reason);
   const error = await assertRejects(() =>
-    IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal }),
+    Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal }),
   );
   // 包まない（消費側が `error === controller.signal.reason` で自分の中断を識別できる）。
   assertStrictEquals(error, reason);
@@ -231,7 +231,7 @@ test("fromAssets: 実行開始後に届いた中断も最初の段境界で効�
   const reason = new Error("中止ボタン（実行中）");
   setTimeout(() => controller.abort(reason), 0);
   const error = await assertRejects(() =>
-    IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal }),
+    Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal }),
   );
   assertStrictEquals(error, reason);
 });

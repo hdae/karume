@@ -22,7 +22,7 @@ import type {
   Tensor,
 } from "@karume/runtime";
 
-import type { IrodoriGenerateEvent, IrodoriRunComponent, IrodoriState } from "./pipeline.ts";
+import type { GenerateEvent, RunComponent, IrodoriState } from "./pipeline.ts";
 import type { GraphOwner, ModelComponent } from "../hub/components.ts";
 import { withSession } from "../session/with-session.ts";
 
@@ -30,21 +30,21 @@ import { withSession } from "../session/with-session.ts";
  * Generation-event emitter (folded into a single no-op when nobody subscribes, so the firing points
  * carry no branch).
  */
-export type EmitEvent = (event: IrodoriGenerateEvent) => Promise<void>;
+export type EmitEvent = (event: GenerateEvent) => Promise<void>;
 
 /** The emitter when nobody subscribes. */
 const NO_EVENTS: EmitEvent = () => Promise.resolve();
 
 /**
  * Folds the request's `onEvent` into an emitter (awaited, exceptions not swallowed —
- * `IrodoriGenerateRequest.onEvent` in {@link "./pipeline.ts"}).
+ * `GenerateRequest.onEvent` in {@link "./pipeline.ts"}).
  */
 export const emitter = (
-  onEvent: ((event: IrodoriGenerateEvent) => void | Promise<void>) | undefined,
+  onEvent: ((event: GenerateEvent) => void | Promise<void>) | undefined,
 ): EmitEvent =>
   onEvent === undefined
     ? NO_EVENTS
-    : async (event: IrodoriGenerateEvent) => {
+    : async (event: GenerateEvent) => {
         await onEvent(event);
       };
 
@@ -98,11 +98,11 @@ export const outputAt = (
 
 /**
  * Binds the component name into the diagnostics hook
- * (`IrodoriPipelineOptions.onRunDiagnostics` in {@link "./pipeline.ts"}).
+ * (`PipelineOptions.onRunDiagnostics` in {@link "./pipeline.ts"}).
  */
 export const observer = (
   state: IrodoriState,
-  component: IrodoriRunComponent,
+  component: RunComponent,
 ): ((diagnostics: SessionDiagnostics) => void) | undefined => {
   const listener = state.onRunDiagnostics;
   return listener === undefined ? undefined : (diagnostics) => listener(component, diagnostics);
@@ -115,7 +115,7 @@ export const observer = (
 export const withStageSession = async <T>(
   state: IrodoriState,
   emit: EmitEvent,
-  component: IrodoriRunComponent,
+  component: RunComponent,
   model: ModelComponent,
   sessionOptions: SessionOptions,
   body: (

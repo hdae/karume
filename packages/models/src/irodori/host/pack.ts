@@ -52,7 +52,7 @@ export const packIds = (
 ): Int32Array<ArrayBuffer> => {
   const normalized = normalizeText(text).trim();
   if (normalized.length === 0) {
-    // The body is exactly the `IrodoriGenerateRequest.text` the caller passed, so the 400 side
+    // The body is exactly the `GenerateRequest.text` the caller passed, so the 400 side
     // (ADR 0107). The empty check of `packCaptionIds` just below is an internal premise that is
     // reached only after the pipeline has routed an empty caption to another path, so it stays a
     // plain `Error`.

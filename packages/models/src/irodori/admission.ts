@@ -22,7 +22,7 @@ import {
   type IrodoriPipelineConfig,
   parseIrodoriPipelineConfig,
 } from "./config.ts";
-import type { IrodoriAssets, IrodoriPipelineOptions } from "./pipeline.ts";
+import type { Assets, PipelineOptions } from "./pipeline.ts";
 import { settleAbort } from "../concurrency/abort.ts";
 import {
   assertGpuFeaturesGranted,
@@ -81,7 +81,7 @@ const assetBuffer = (
  * shared by the 8 families — {@link assetComponentOpener}). A component key is either one entry
  * for a single-form `krm` (`dit`) or the part list of the split form (`dit[0]` / `dit[1]` / …).
  */
-export const assetOpener = (assets: IrodoriAssets["assets"]): Promise<ComponentOpener> =>
+export const assetOpener = (assets: Assets["assets"]): Promise<ComponentOpener> =>
   assetComponentOpener("irodori", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 /**
@@ -330,7 +330,7 @@ export type IrodoriAdmission = {
  * is acquired**. If the order slips, on an environment without a GPU the failure turns into a
  * different exception and the reader never learns "what was wrong".
  *
- * NOTE: the check of {@link IrodoriPipelineOptions.signal} sits only at **step boundaries**, where
+ * NOTE: the check of {@link PipelineOptions.signal} sits only at **step boundaries**, where
  * it yields to the event loop once before checking ({@link settleAbort}) — an abort that arrives
  * during synchronous parsing takes effect at the next boundary (likewise when `options.gpu` is
  * given). The matching against the graphs (the `assertStaticDim` group) only reads the declarations
@@ -342,7 +342,7 @@ export type IrodoriAdmission = {
 export const admitIrodori = async (
   manifest: Manifest,
   open: ComponentOpener,
-  options: IrodoriPipelineOptions,
+  options: PipelineOptions,
 ): Promise<IrodoriAdmission> => {
   // Abort checks sit at **step boundaries**. The entry is the first one: when called already
   // aborted, return without touching the manifest or the assets.
@@ -350,7 +350,7 @@ export const admitIrodori = async (
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
-      `IrodoriPipeline: model '${modelName}' is not in the manifest` +
+      `irodori.Pipeline: model '${modelName}' is not in the manifest` +
         ` (available: ${manifest.available.models.join(" / ")})`,
     );
   }
@@ -358,7 +358,7 @@ export const admitIrodori = async (
   const { name, major } = entry.pipeline;
   if (name !== IRODORI_PIPELINE_NAME) {
     throw new Error(
-      `IrodoriPipeline: the manifest pipeline is '${name}/${major}'` +
+      `irodori.Pipeline: the manifest pipeline is '${name}/${major}'` +
         ` ('${IRODORI_PIPELINE_NAME}/${IRODORI_PIPELINE_MAJOR}' is required)`,
     );
   }
@@ -366,7 +366,7 @@ export const admitIrodori = async (
     // The only check that stops the silent degradation of "old implementation × new repository"
     // (ADR 0038 §6).
     throw new Error(
-      `IrodoriPipeline: pipeline '${name}/${major}' has an unsupported major` +
+      `irodori.Pipeline: pipeline '${name}/${major}' has an unsupported major` +
         ` (this implementation reads ${IRODORI_PIPELINE_NAME}/${IRODORI_PIPELINE_MAJOR})`,
     );
   }
@@ -375,7 +375,7 @@ export const admitIrodori = async (
   const quantName = options.quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quantName)) {
     throw new Error(
-      `IrodoriPipeline: quant '${quantName}' is not in the manifest` +
+      `irodori.Pipeline: quant '${quantName}' is not in the manifest` +
         ` (available: ${entry.available.quants.join(" / ")})`,
     );
   }
@@ -388,7 +388,7 @@ export const admitIrodori = async (
     IRODORI_SESSION_POLICY,
     quant.session,
     options,
-    `IrodoriPipeline: quant '${quantName}'`,
+    `irodori.Pipeline: quant '${quantName}'`,
   );
   const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, ditSessionOptions);
 
@@ -462,11 +462,11 @@ export const admitIrodori = async (
   // request and check is the one in `session/gpu-features.ts`, and the later checks call the same
   // functions).
   if (options.gpu !== undefined) {
-    assertGpuFeaturesGranted(gpuFeatures, options.gpu, `IrodoriPipeline: quant '${quantName}'`);
+    assertGpuFeaturesGranted(gpuFeatures, options.gpu, `irodori.Pipeline: quant '${quantName}'`);
     assertRequiredLimitsSatisfied(
       quant.requiredLimits,
       options.gpu.limits,
-      `IrodoriPipeline: quant '${quantName}'`,
+      `irodori.Pipeline: quant '${quantName}'`,
     );
   }
 

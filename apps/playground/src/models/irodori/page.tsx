@@ -5,11 +5,7 @@
  * of the f32 samples).
  */
 
-import {
-  type IrodoriGenerateEvent,
-  IrodoriPipeline,
-  type IrodoriRunComponent,
-} from "@karume/models/irodori";
+import { type GenerateEvent, Pipeline, type RunComponent } from "@karume/models/irodori";
 import type { AcquireGpuOptions, GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -91,7 +87,7 @@ const TIMED_GPU: Omit<AcquireGpuOptions, "onDeviceLost"> = { gpuTiming: true };
 /** How many ops the result names per timed component. */
 const TOP_OPS = 5;
 
-const STAGE_LABELS: Readonly<Record<IrodoriRunComponent, string>> = {
+const STAGE_LABELS: Readonly<Record<RunComponent, string>> = {
   backbone: "Backbone (ModernBERT)",
   "text-proj": "Text projection",
   "caption-proj": "Caption projection",
@@ -133,12 +129,12 @@ type IrodoriRun = {
 type IrodoriKey = PipelineKey<GpuContext, PipelineSource>;
 
 /** The pipeline the page keeps between runs (reused while its key holds). */
-type HeldPipeline = Held<IrodoriKey, IrodoriPipeline>;
+type HeldPipeline = Held<IrodoriKey, Pipeline>;
 
 const keyLabel = (key: IrodoriKey): string =>
   `${key.model} · ${key.quant} · linear ${key.linearCompute} · ${key.source.kind}`;
 
-type DiagnosticsSink = (component: IrodoriRunComponent, diagnostics: SessionDiagnostics) => void;
+type DiagnosticsSink = (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 
 const mib = (bytes: number): string => (bytes / 2 ** 20).toFixed(0);
 
@@ -238,7 +234,7 @@ export const IrodoriPage = () => {
   // which useGpu destroys only after that dispose (and a run on it) has settled.
   const heldRef = useRef<HeldPipeline | undefined>(undefined);
   const [held, setHeld] = useState<HeldPipeline | undefined>(undefined);
-  const slot: PipelineSlot<IrodoriKey, IrodoriPipeline> = {
+  const slot: PipelineSlot<IrodoriKey, Pipeline> = {
     get: () => heldRef.current,
     set: (next) => {
       heldRef.current = next;
@@ -365,7 +361,7 @@ export const IrodoriPage = () => {
         build: () => {
           report({ stage: "building the pipeline" });
           buildStart = performance.now();
-          return IrodoriPipeline.fromPretrained(pretrainedRef(key.source, key.mount), {
+          return Pipeline.fromPretrained(pretrainedRef(key.source, key.mount), {
             gpu: key.gpu,
             model: key.model,
             quant: key.quant,
@@ -388,7 +384,7 @@ export const IrodoriPage = () => {
 
       const diagnostics = new Map<string, ComponentRecord>();
       const timings = new Map<string, TimingTally>();
-      let stages: StageTimes<IrodoriRunComponent> = {};
+      let stages: StageTimes<RunComponent> = {};
       const stepMarks: number[] = [];
       diagnosticsRef.current = (component, runReport) => {
         diagnostics.set(component, foldComponentDiagnostics(diagnostics.get(component), runReport));
@@ -397,7 +393,7 @@ export const IrodoriPage = () => {
       };
       // Awaited by the pipeline; a throw aborts the generation at the next stage or step (the API's
       // way to cancel — its Session is released on the way out).
-      const onEvent = (event: IrodoriGenerateEvent): void => {
+      const onEvent = (event: GenerateEvent): void => {
         signal.throwIfAborted();
         const now = performance.now();
         if (event.kind === "stage") {
