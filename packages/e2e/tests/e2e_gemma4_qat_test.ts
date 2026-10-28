@@ -4,9 +4,9 @@ import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { gemma4MirrorAssets, mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
 import { nodeDirectory } from "@karume/hub/node";
 import {
-  type Gemma4Assets,
-  Gemma4ChatSession,
-  type Gemma4ChatSessionHost,
+  type Assets,
+  ChatSession,
+  type ChatSessionHost,
   Gemma4QatPipeline,
 } from "../../models/gemma4-qat.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
@@ -27,7 +27,7 @@ for (const model of ["e2b", "e4b"] as const) {
       const states: { contextCount: number; residentBytes: number }[] = [];
       let pipeline: Gemma4QatPipeline;
       let sequenceCount = 0;
-      let host: Gemma4ChatSessionHost;
+      let host: ChatSessionHost;
       beforeAll(async () => {
         pipeline = await Gemma4QatPipeline.fromPretrained(nodeDirectory(root), {
           model,
@@ -64,7 +64,7 @@ for (const model of ["e2b", "e4b"] as const) {
       });
 
       it("EOS後はKVを継続し、全履歴の再描画と同じ応答を出す", async () => {
-        const chat = new Gemma4ChatSession(host, {
+        const chat = new ChatSession(host, {
           maxNewTokens: 8,
           sampler: { temperature: 0 },
         });
@@ -90,7 +90,7 @@ for (const model of ["e2b", "e4b"] as const) {
         }
       });
       it("decode中断と反復の早期終了の後も生成できる", async () => {
-        const chat = new Gemma4ChatSession(host, {
+        const chat = new ChatSession(host, {
           maxNewTokens: 32,
           sampler: { temperature: 0 },
         });
@@ -198,7 +198,7 @@ for (const model of ["e2b", "e4b"] as const) {
  * `fromPretrained` の Session と同時に張ると重みが 2 重に常駐するので、別テストにして
  * 順に走らせる（Deno のテストは既定で直列）。
  */
-const qatAssets = (model: "e2b" | "e4b"): Promise<Gemma4Assets> =>
+const qatAssets = (model: "e2b" | "e4b"): Promise<Assets> =>
   // PLE も `model` 容器の中に在る（ADR 0109 決定 4）ので、渡すのは part 列と tokenizer だけ。
   gemma4MirrorAssets(root, { model });
 

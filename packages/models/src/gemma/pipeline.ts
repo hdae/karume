@@ -1,5 +1,5 @@
 /**
- * `Gemma4Pipeline` — the one surface for **string in → string out** (stage 4 of the generation API
+ * `Pipeline` — the one surface for **string in → string out** (stage 4 of the generation API
  * wave).
  *
  * It ties together four things, each of which already has its source of truth elsewhere:
@@ -18,9 +18,9 @@
  *
  * ## Two entry points (the distribution and bytes in hand)
  *
- * {@link Gemma4Pipeline.fromPretrained} builds from the HF distribution (the `pipelineConfig` of
+ * {@link Pipeline.fromPretrained} builds from the HF distribution (the `pipelineConfig` of
  * `karume.json` declares the static wiring — the writer's source of truth is
- * `tools/export-recipes/gemma4/distribution.py`), and {@link Gemma4Pipeline.fromAssets} builds from
+ * `tools/export-recipes/gemma4/distribution.py`), and {@link Pipeline.fromAssets} builds from
  * bytes already fetched. **No defaults are placed here** — chunk length, capacity and position limit
  * all move with the asset generation, so nothing silently uses a stale number.
  *
@@ -52,7 +52,7 @@ import {
   acquireGpu,
   type AdmissionReport,
   estimateGraphMemory,
-  type EstimateOptions,
+  type EstimateOptions as GraphEstimateOptions,
   type GenerationContext,
   type GpuContext,
   planWeightResidency,
@@ -95,9 +95,9 @@ import {
 } from "../session/gpu-features.ts";
 import {
   GEMMA4_PIPELINE_NAME,
-  type Gemma4DefaultSampler,
-  type Gemma4PipelineConfig,
-  parseGemma4PipelineConfig,
+  type DefaultSampler,
+  type PipelineConfig,
+  parsePipelineConfig,
 } from "./config.ts";
 import {
   createGenerationProgram,
@@ -125,15 +125,15 @@ import { type Gemma4PleIndex, readGemma4PleIndex } from "./ple-index.ts";
 import {
   assertGemma4PleResidency,
   createGemma4PleResident,
-  type Gemma4PleResidency,
+  type PleResidency,
   type Gemma4PleResident,
 } from "./ple-gpu.ts";
-import { gemma4QatRopeInputs, gemma4RopeInputNames, gemma4RopeInputs } from "./rope.ts";
+import { gemma4QatRopeInputs, gemma4RopeInputNames, ropeInputs } from "./rope.ts";
 import { GEMMA4_DRAFT_STEPS, type Gemma4Drafter, openGemma4DraftFace } from "./speculative.ts";
 import { createStopStringFilter } from "../text/detokenizer.ts";
 import { parseGemmaTokenizerAsset } from "./text/asset.ts";
-import { GemmaTokenizer } from "./text/tokenizer.ts";
-import { type Gemma4ChatMessage, gemma4ChatPrompt, gemma4StopTokens } from "./text/chat.ts";
+import { Tokenizer } from "./text/tokenizer.ts";
+import { type ChatMessage, chatPrompt, gemma4StopTokens } from "./text/chat.ts";
 import {
   admitGemma4,
   assertChunkLength,
@@ -148,10 +148,10 @@ import {
   chatStreamOf,
   completeChatTurn,
   decodeChatChunks,
-  type Gemma4ChatStop,
-  type Gemma4ChatStream,
-  type Gemma4PrefillProgress,
-  type Gemma4RunPhase,
+  type ChatStop,
+  type ChatStream,
+  type PrefillProgress,
+  type RunPhase,
   runDiagnosticsHook,
 } from "./chat-turn.ts";
 
@@ -188,8 +188,8 @@ const TOKENIZER_ASSET = "tokenizer";
  * `model` container (ADR 0109 decision 4), so this surface too gets everything down to PLE just by
  * passing the parts of `model`.
  */
-export type Gemma4Assets = {
-  readonly config: Gemma4PipelineConfig;
+export type Assets = {
+  readonly config: PipelineConfig;
   /**
    * The **parts** of the product graph's container (`krm`) (in index order from part 0, including
    * zero-length parts).
@@ -202,10 +202,10 @@ export type Gemma4Assets = {
   readonly tokenizer: Uint8Array<ArrayBuffer>;
 };
 
-export type Gemma4PipelineOptions = {
+export type PipelineOptions = {
   /**
    * Shares an existing GPU. **The side that passed it keeps ownership**, so
-   * {@link Gemma4Pipeline.dispose} does not destroy it. When omitted, the pipeline calls
+   * {@link Pipeline.dispose} does not destroy it. When omitted, the pipeline calls
    * `acquireGpu` internally and destroys it in `dispose()`.
    */
   readonly gpu?: GpuContext;
@@ -237,22 +237,22 @@ export type Gemma4PipelineOptions = {
    * (i2) 672 MiB, and regular Gemma 4 E2B (i8) 2.19 GiB.
    *
    * MUST: it **cannot be combined** with the host-side row cache
-   * ({@link Gemma4PipelineOptions.maxResidentPleBytes}) (under GPU residency that budget would never
-   * be drawn on). Combining it with speculative decoding ({@link Gemma4PipelineOptions.speculative})
+   * ({@link PipelineOptions.maxResidentPleBytes}) (under GPU residency that budget would never
+   * be drawn on). Combining it with speculative decoding ({@link PipelineOptions.speculative})
    * or with GPU timing diagnostics (`acquireGpu({ gpuTiming: true })`) is not supported either; each
    * is refused by failing loudly.
    */
-  readonly pleResidency?: Gemma4PleResidency;
+  readonly pleResidency?: PleResidency;
   /**
    * The row count of a fixed-length prefill chunk (default: the distribution's declaration
-   * {@link Gemma4PipelineConfig.chunkLength}).
+   * {@link PipelineConfig.chunkLength}).
    *
    * Raising it lowers the number of prefill runs (and the number of fence waits in proportion), and
    * raises the transient buffers and the attention score matrix per run. The graph's chunk rows are
    * symbolic, so it can be chosen without rebuilding the assets.
    *
    * MUST: at least 2, at most the distribution's declaration
-   * {@link Gemma4PipelineConfig.maxChunkLength}, and at most `maxPosition` (this pipeline's check). 1
+   * {@link PipelineConfig.maxChunkLength}, and at most `maxPosition` (this pipeline's check). 1
    * is a value reserved for the decode shape, and there is no path that runs it as a prefill shape (a
    * chunk with one valid row is run by `GenerationSequence` in the decode shape). The upper limit is
    * taken from the declaration because the trace range of the symbol `M` cannot be read from the
@@ -264,7 +264,7 @@ export type Gemma4PipelineOptions = {
   readonly chunkLength?: number;
   /**
    * Physical chunk row counts used as prefill shapes **in addition to** `chunkLength` (default: the
-   * entries of {@link GEMMA4_CHUNK_BUCKETS} below `chunkLength`; `[]` disables them).
+   * entries of {@link CHUNK_BUCKETS} below `chunkLength`; `[]` disables them).
    *
    * Padding a short prompt to `chunkLength` (768 by distribution default) rows makes the pad rows
    * contribute nothing to the output or the KV, yet the row-local ops (linear / pointwise / norm)
@@ -298,7 +298,7 @@ export type Gemma4PipelineOptions = {
    * It is called **once per run** (per chunk in prefill, per step in decode, and per cycle one draft
    * + one verify with speculation), in the **synchronous section** after that run's outputs have been
    * read (the diagnostics' `lastRun*` hold "that run's" values only in this section). What the run
-   * was is carried by the second argument {@link Gemma4RunPhase} — do not infer it from the count (in
+   * was is carried by the second argument {@link RunPhase} — do not infer it from the count (in
    * a turn with a multi-chunk prefill, the second and later prefills would be mistaken for decode).
    * The first token right after prefill is only sampled from the last chunk's logits and comes with
    * no run, so there is no call there.
@@ -323,7 +323,7 @@ export type Gemma4PipelineOptions = {
    *
    * Exceptions from the callback are not caught (fail loudly — the whole turn fails).
    */
-  readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics, phase: Gemma4RunPhase) => void;
+  readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics, phase: RunPhase) => void;
   /**
    * The reduction form of states-form attention ①QK / ③PV. Resolved in the order explicit value →
    * the selected quant's session → the runtime's reference path `"sequential"` (the same rule as the
@@ -385,7 +385,7 @@ export type Gemma4PipelineOptions = {
    * The byte budget for slot backings (the bundle of intermediate buffers per run shape) kept at the
    * same time. The runtime's `SessionOptions.planBackingBudgetBytes` is the source of truth for the
    * meaning, default and value range, and this pipeline passes it straight through (the same value
-   * applies to both `createSession` and {@link Gemma4Pipeline.estimateSessionMemory}).
+   * applies to both `createSession` and {@link Pipeline.estimateSessionMemory}).
    * Generation switches between the prefill bucket shapes and the decode shape every turn, so with
    * the default (256 MiB) both are kept and the rebuild on every switch disappears.
    */
@@ -409,7 +409,7 @@ export type Gemma4PipelineOptions = {
    *
    * `chat` / `sequence` of a pipeline with a drafter **speculate by default** (one verify run commits
    * up to `k+1` tokens). The knobs to turn it off per turn / per conversation are
-   * {@link Gemma4ChatOptions.speculative} and {@link Gemma4SequenceOptions.speculative}.
+   * {@link ChatOptions.speculative} and {@link SequenceOptions.speculative}.
    * Speculation runs **regardless of temperature**, and the emitted token sequence is identical to
    * the non-speculative one (acceptance draws once per row, with the same logits and the same history
    * as the sampling the non-speculative decode does at the same position — ADR 0096 decision 7).
@@ -425,7 +425,7 @@ export type Gemma4PipelineOptions = {
     readonly k?: number;
     /**
      * The self-tuning gate's knobs (**static knobs for measurement and acceptance** — the
-     * defaults suffice. Treated like {@link Gemma4PipelineOptions.linearGemvRowsThreadTarget}, and
+     * defaults suffice. Treated like {@link PipelineOptions.linearGemvRowsThreadTarget}, and
      * passed straight through to `GenerationSpeculativeOptions.gate`).
      *
      * They apply **only to turns that have a gate** (`speculative: true` / unspecified =
@@ -442,7 +442,7 @@ export type Gemma4PipelineOptions = {
 };
 
 /**
- * The default prefill buckets of the gemma4 pipeline ({@link Gemma4PipelineOptions.chunkBuckets}) —
+ * The default prefill buckets of the gemma4 pipeline ({@link PipelineOptions.chunkBuckets}) —
  * a power-of-two ladder.
  *
  * The list was settled by measurement (2026-09-07, RTX 3080 Ti / Vulkan, ABBA over 5 ladders × 5
@@ -463,34 +463,34 @@ export type Gemma4PipelineOptions = {
  * buckets also help ordinary generation (follow-up messages of 4 tokens or fewer).
  *
  * NOTE: the default 6 + the prefill shape + the decode shape = **8 shapes per capacity** stay steady
- * (the PreparedPlan count of {@link Gemma4PipelineOptions.chunkBuckets}).
+ * (the PreparedPlan count of {@link PipelineOptions.chunkBuckets}).
  *
  * MUST: frozen — this array is shared at module scope, and a consumer reordering it would change how
  * every pipeline built afterwards chooses its physical row count (`chunkBuckets` assumes ascending
  * order and takes the first match).
  */
-export const GEMMA4_CHUNK_BUCKETS: readonly number[] = Object.freeze([4, 8, 32, 64, 128, 256]);
+export const CHUNK_BUCKETS: readonly number[] = Object.freeze([4, 8, 32, 64, 128, 256]);
 
 /**
  * Trims the default buckets to those that fit the chosen `chunkLength`.
  *
- * `chunkLength` is a runtime knob ({@link Gemma4PipelineOptions.chunkLength}), so passing the default
+ * `chunkLength` is a runtime knob ({@link PipelineOptions.chunkLength}), so passing the default
  * ladder as is would make an option such as `chunkLength: 64` fail on "a conflict between two
  * defaults". **Only the default** is trimmed; buckets the caller gave explicitly are never dropped
  * and fail loudly instead (silently discarding them would leave "a bucket that was declared but has
  * no effect" without an exception).
  */
 const defaultChunkBuckets = (chunkLength: number): readonly number[] =>
-  GEMMA4_CHUNK_BUCKETS.filter((rows) => rows < chunkLength);
+  CHUNK_BUCKETS.filter((rows) => rows < chunkLength);
 
 /**
- * What {@link Gemma4Pipeline.fromPretrained} accepts in addition (the selection axes + knobs passed
+ * What {@link Pipeline.fromPretrained} accepts in addition (the selection axes + knobs passed
  * through to the fetch layer).
  *
  * NOTE: the description of the fetch layer's knobs, including that `headers` / `fetch` / `caches` /
  * `onRetry` are **for HTTP sources only**, lives in one place, {@link FromPretrainedHubOptions}.
  */
-export type Gemma4FromPretrainedOptions = Gemma4PipelineOptions &
+export type FromPretrainedOptions = PipelineOptions &
   FromPretrainedHubOptions &
   FromPretrainedComponentOptions & {
     /** The manifest's model name (default `defaultModel`). */
@@ -505,13 +505,13 @@ export type Gemma4FromPretrainedOptions = Gemma4PipelineOptions &
   };
 
 /**
- * The options of {@link Gemma4Pipeline.sequence} (the only knobs that apply to one conversation's
+ * The options of {@link Pipeline.sequence} (the only knobs that apply to one conversation's
  * lifetime).
  */
-export type Gemma4SequenceOptions = {
+export type SequenceOptions = {
   /**
    * The capacity of the full slots this conversation allocates (default: the distribution's default
-   * — {@link Gemma4PipelineConfig.capacity}).
+   * — {@link PipelineConfig.capacity}).
    *
    * MUST: `chunkLength ≤ capacity ≤ maxPosition` (`createGenerationSequence` fails loudly).
    */
@@ -542,17 +542,17 @@ export type Gemma4SequenceOptions = {
 };
 
 /**
- * The options of {@link Gemma4Pipeline.estimateSessionMemory} (the shape of the generation to
+ * The options of {@link Pipeline.estimateSessionMemory} (the shape of the generation to
  * estimate).
  */
-export type Gemma4EstimateOptions = {
+export type EstimateOptions = {
   /** The capacity to estimate (default: this pipeline's default). */
   readonly capacity?: number;
   /**
    * The chunk length to estimate (default: the value this pipeline uses).
    *
    * The bucket shapes in the estimate are only those of this pipeline's
-   * {@link Gemma4PipelineOptions.chunkBuckets} below this value. Even when it is larger than the
+   * {@link PipelineOptions.chunkBuckets} below this value. Even when it is larger than the
    * pipeline's value, the buckets passed stay this pipeline's ladder; they are not widened to the
    * ladder a pipeline rebuilt with that chunk length would have.
    */
@@ -562,11 +562,11 @@ export type Gemma4EstimateOptions = {
 /**
  * One turn's chat request.
  *
- * MUST: {@link Gemma4Pipeline.chat} **copies** the contents **at issue** (ADR 0083 addendum
+ * MUST: {@link Pipeline.chat} **copies** the contents **at issue** (ADR 0083 addendum
  * 2026-09-02) — rewriting this object or the `sampler` options after the returned stream has started
  * draining has no effect on the running turn.
  */
-export type Gemma4ChatOptions = {
+export type ChatOptions = {
   /**
    * The upper limit of tokens to sample (at least 1). Stop tokens **count** toward it (the same
    * accounting as `GenerationRequest.maxNewTokens`).
@@ -591,19 +591,19 @@ export type Gemma4ChatOptions = {
    * streamed in one go once it stops being a prefix, so a turn that did not stop loses not a single
    * character of output.
    *
-   * NOTE: the low-level surface ({@link Gemma4Pipeline.sequence}) has no such knob —
+   * NOTE: the low-level surface ({@link Pipeline.sequence}) has no such knob —
    * `GenerationSequence` handles only token ids, so when running it yourself, write stops as tokens
    * (`docs/limitations.md`).
    */
   readonly stopStrings?: readonly string[];
-  /** Sampling options (default {@link Gemma4PipelineConfig.sampler}, and failing that greedy). */
+  /** Sampling options (default {@link PipelineConfig.sampler}, and failing that greedy). */
   readonly sampler?: SamplerSpec;
   /**
    * The capacity this turn's sequence allocates (default: the distribution's default —
-   * {@link Gemma4PipelineConfig.capacity}).
+   * {@link PipelineConfig.capacity}).
    *
    * `chat` is one turn = one sequence, so this is "how much KV to take for this turn". To carry a
-   * long conversation, use `Gemma4ChatSession` (capacity per session).
+   * long conversation, use `ChatSession` (capacity per session).
    */
   readonly capacity?: number;
   /**
@@ -615,7 +615,7 @@ export type Gemma4ChatOptions = {
    *
    * Exceptions from the callback are not caught (fail loudly — the whole turn fails).
    */
-  readonly onPrefill?: (progress: Gemma4PrefillProgress) => void;
+  readonly onPrefill?: (progress: PrefillProgress) => void;
   /**
    * Notification of generated tokens excluding stop tokens. Called synchronously, before decoding
    * and before stop-string holding. Includes special tokens that emit no text. Exceptions propagate
@@ -628,7 +628,7 @@ export type Gemma4ChatOptions = {
   readonly signal?: AbortSignal;
   /**
    * Whether this turn uses speculative decoding (default = `true` = gated if the pipeline has a
-   * drafter — the values mean the same as {@link Gemma4SequenceOptions.speculative}).
+   * drafter — the values mean the same as {@link SequenceOptions.speculative}).
    *
    * Whether to speculate does not depend on the sampler options (even at temperature > 0 the token
    * sequence is identical to the non-speculative one). This layer only passes the option down; the
@@ -637,7 +637,7 @@ export type Gemma4ChatOptions = {
   readonly speculative?: boolean | "always";
 };
 
-/** The internal state of {@link Gemma4Pipeline} (not exposed on the public surface). */
+/** The internal state of {@link Pipeline} (not exposed on the public surface). */
 type Gemma4State = {
   /**
    * The name of the entry point used for construction ({@link gemmaEntryName}). The prefix of
@@ -669,7 +669,7 @@ type Gemma4State = {
    */
   readonly wiring: GenerationWiring;
   /**
-   * The public read-out ({@link Gemma4Pipeline.program}).
+   * The public read-out ({@link Pipeline.program}).
    *
    * A field so that the frozen narrow surface is not built on every getter call; it is derived on
    * the spot from the one {@link Gemma4State.wiring} that {@link buildGemma4Program} returned (not a
@@ -677,29 +677,29 @@ type Gemma4State = {
    */
   readonly program: GenerationProgram;
   /**
-   * PLE's host-side cache (**what {@link Gemma4Pipeline.dispose} releases**).
+   * PLE's host-side cache (**what {@link Pipeline.dispose} releases**).
    *
    * MUST: the field exists only for dispose — only the closure of `wiring.derivedInputs.derive`
    * draws on it. Both come from one return of {@link buildGemma4Program}, so "only one of them
    * replaced" cannot be written, and without a release point the residency
-   * ({@link Gemma4PipelineOptions.maxResidentPleBytes}) would remain for the life of the process.
+   * ({@link PipelineOptions.maxResidentPleBytes}) would remain for the life of the process.
    *
-   * Under GPU residency ({@link Gemma4PipelineOptions.pleResidency} = `"gpu"`) it is **not built** —
+   * Under GPU residency ({@link PipelineOptions.pleResidency} = `"gpu"`) it is **not built** —
    * the host-side row cache is never drawn on, so building only the field would leave "an LRU that is
    * never used".
    */
   readonly ple?: Gemma4Ple;
   /**
-   * PLE's GPU residency (only when {@link Gemma4PipelineOptions.pleResidency} = `"gpu"`).
+   * PLE's GPU residency (only when {@link PipelineOptions.pleResidency} = `"gpu"`).
    *
    * MUST: dispose **after the target Session** (the target's bind groups hold this resident tensor —
    * the runtime refuses, by failing loudly, a release while baked references remain).
    */
   readonly pleGpu?: Gemma4PleResident;
-  readonly tokenizer: GemmaTokenizer;
-  readonly config: Gemma4PipelineConfig;
+  readonly tokenizer: Tokenizer;
+  readonly config: PipelineConfig;
   /**
-   * The speculation drafter (only when {@link Gemma4PipelineOptions.speculative} was given).
+   * The speculation drafter (only when {@link PipelineOptions.speculative} was given).
    *
    * MUST: dispose **before the lender (the target Session)** (the runtime refuses, by failing
    * loudly, the lender's `dispose()` while a borrower is alive — the borrower's bind groups hold the
@@ -707,16 +707,16 @@ type Gemma4State = {
    */
   readonly drafter?: Gemma4Drafter;
   /**
-   * The number of drafts used per cycle (only when {@link Gemma4PipelineOptions.speculative} was
+   * The number of drafts used per cycle (only when {@link PipelineOptions.speculative} was
    * given — default {@link GEMMA4_DRAFT_STEPS}).
    *
    * MUST: the field exists so that the two consumers of speculation (generation's `speculative.k`
-   * and the verify scenario of `k+1` rows in {@link Gemma4Pipeline.estimateSessionMemory}) see **the
+   * and the verify scenario of `k+1` rows in {@link Pipeline.estimateSessionMemory}) see **the
    * same value** — if they diverged, "a run of a different shape from the estimated one" would run.
    */
   readonly speculativeK?: number;
   /**
-   * The self-tuning gate's knobs (only when the `gate` of {@link Gemma4PipelineOptions.speculative}
+   * The self-tuning gate's knobs (only when the `gate` of {@link PipelineOptions.speculative}
    * was given — default: the defaults of `speculation-gate.ts`).
    *
    * MUST: the value check is already done at the pipeline-building step ({@link assertSpeculative}) —
@@ -724,16 +724,16 @@ type Gemma4State = {
    */
   readonly speculativeGate?: SpeculationGateOptions;
   /**
-   * The slot-backing budget passed to the Session ({@link Gemma4PipelineOptions.planBackingBudgetBytes};
+   * The slot-backing budget passed to the Session ({@link PipelineOptions.planBackingBudgetBytes};
    * the runtime default when unspecified).
    *
-   * MUST: the field exists so that {@link Gemma4Pipeline.estimateSessionMemory} passes **the same
+   * MUST: the field exists so that {@link Pipeline.estimateSessionMemory} passes **the same
    * value** to the estimate — if the held value and the estimate's premise diverged, the reported peak
    * would name a different budget from the actual held set.
    */
   readonly planBackingBudgetBytes?: number;
-  /** The per-run observation callback ({@link Gemma4PipelineOptions.onRunDiagnostics}). */
-  readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics, phase: Gemma4RunPhase) => void;
+  /** The per-run observation callback ({@link PipelineOptions.onRunDiagnostics}). */
+  readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics, phase: RunPhase) => void;
 };
 
 /**
@@ -774,7 +774,7 @@ const assetBytes = (
 };
 
 /**
- * The check of {@link Gemma4PipelineOptions.speculative} (fails synchronously **before fetching a
+ * The check of {@link PipelineOptions.speculative} (fails synchronously **before fetching a
  * single byte of the assets**) — returns the resolved `k` when it passes.
  *
  * MUST: `1 ≤ k ≤ {@link GEMMA4_DRAFT_STEPS}`. The distribution's drafter graph is built with 3 steps
@@ -789,7 +789,7 @@ const assetBytes = (
  */
 const assertSpeculative = (
   where: string,
-  speculative: NonNullable<Gemma4PipelineOptions["speculative"]>,
+  speculative: NonNullable<PipelineOptions["speculative"]>,
 ): number => {
   const k = speculative.k ?? GEMMA4_DRAFT_STEPS;
   if (!Number.isSafeInteger(k) || k < 1 || k > GEMMA4_DRAFT_STEPS) {
@@ -820,8 +820,8 @@ const assertSpeculative = (
  */
 export const resolveGemma4PleResidency = (
   where: string,
-  options: Gemma4PipelineOptions,
-): Gemma4PleResidency => {
+  options: PipelineOptions,
+): PleResidency => {
   if (options.pleResidency === undefined) return "host";
   const residency = assertGemma4PleResidency(where, options.pleResidency);
   if (residency === "host") return residency;
@@ -844,7 +844,7 @@ export const resolveGemma4PleResidency = (
 
 /**
  * If this conversation speculates, assembles the DI set passed to the generation surface (the
- * resolution of {@link Gemma4SequenceOptions.speculative} / {@link Gemma4ChatOptions.speculative} —
+ * resolution of {@link SequenceOptions.speculative} / {@link ChatOptions.speculative} —
  * the one path shared by chat and sequence).
  *
  * The default is "speculate if there is a drafter", and only `false` explicitly cancels it. The
@@ -853,11 +853,11 @@ export const resolveGemma4PleResidency = (
  * that builds no self-tuning gate (A/B, acceptance checks, measurement), passed straight down to
  * the generation surface's `policy`.
  *
- * The pipeline's gate knobs (the `gate` of {@link Gemma4PipelineOptions.speculative}) go down **only
+ * The pipeline's gate knobs (the `gate` of {@link PipelineOptions.speculative}) go down **only
  * to `"auto"` turns** (`"always"` builds no gate, so nothing would read them). Alternating `false` /
  * `"always"` / `true` on one pipeline was the shape of the A/B script (`tools/mtp-bench`, removed in
  * 0.15), so the combination itself is not a mistake — the range where the knobs apply is stated in
- * the doc of {@link Gemma4PipelineOptions.speculative} (the bench README that also stated it
+ * the doc of {@link PipelineOptions.speculative} (the bench README that also stated it
  * (`config.gate`) was removed with the tool).
  */
 export const speculativeSetup = (
@@ -897,17 +897,17 @@ export const speculativeSetup = (
  */
 export type Gemma4EstimateGenerations = {
   /** The options passed to the estimate of the main model (the lender). */
-  readonly target: NonNullable<EstimateOptions["generation"]>;
+  readonly target: NonNullable<GraphEstimateOptions["generation"]>;
   /**
    * The options passed to the estimate of the drafter (the borrower context) (not read for a
    * pipeline without a drafter).
    */
-  readonly borrower: NonNullable<EstimateOptions["generation"]>;
+  readonly borrower: NonNullable<GraphEstimateOptions["generation"]>;
 };
 
 /**
  * Builds the `generation` options (chunk length, buckets, additional scenarios) that
- * {@link Gemma4Pipeline.estimateSessionMemory} passes to `estimateGraphMemory`, for both the main
+ * {@link Pipeline.estimateSessionMemory} passes to `estimateGraphMemory`, for both the main
  * model and the drafter.
  *
  * It is a separate function because this wiring cannot be observed from the estimate values of the
@@ -981,12 +981,12 @@ const buildGemma4Program = (
   admitted: Gemma4Admission,
   open: ComponentOpener,
   assets: Gemma4SidecarAssets,
-  options: Gemma4PipelineOptions,
+  options: PipelineOptions,
   admission: GemmaFamilyAdmission,
-  residency: Gemma4PleResidency,
+  residency: PleResidency,
 ): {
   readonly wiring: GenerationWiring;
-  readonly tokenizer: GemmaTokenizer;
+  readonly tokenizer: Tokenizer;
   readonly ple?: Gemma4Ple;
 } => {
   const { config, vocabSize, capacitySymbol } = admitted;
@@ -997,8 +997,8 @@ const buildGemma4Program = (
     // The model name is the value admission settled, used as is (not re-derived from the layer count).
     assertGemma4QatPle(admission.model, model.graph, assets.pleIndex);
   }
-  const ropeInputs = admission.family === "gemma4-qat" ? gemma4QatRopeInputs : gemma4RopeInputs;
-  const tokenizer = new GemmaTokenizer(parseGemmaTokenizerAsset(assets.tokenizer));
+  const familyRopeInputs = admission.family === "gemma4-qat" ? gemma4QatRopeInputs : ropeInputs;
+  const tokenizer = new Tokenizer(parseGemmaTokenizerAsset(assets.tokenizer));
   // ① the ids the tokenizer can produce and ② the vocab rows of the main embedding.
   if (tokenizer.maxTokenId >= vocabSize) {
     throw new Error(
@@ -1053,13 +1053,13 @@ const buildGemma4Program = (
       ple === undefined
         ? {
             names: gemma4RopeInputNames(),
-            derive: (_ids, positions) => Promise.resolve(ropeInputs(config.rope, positions)),
+            derive: (_ids, positions) => Promise.resolve(familyRopeInputs(config.rope, positions)),
           }
         : {
             names: [PER_LAYER_INPUTS, ...gemma4RopeInputNames()],
             derive: async (ids, positions, deriveOptions) => ({
               [PER_LAYER_INPUTS]: await ple.gather(ids, deriveOptions),
-              ...ropeInputs(config.rope, positions),
+              ...familyRopeInputs(config.rope, positions),
             }),
           },
     ...(ple === undefined ? { residentInputs: [PER_LAYER_INPUTS] } : {}),
@@ -1070,8 +1070,8 @@ const buildGemma4Program = (
 /**
  * The gemma4 chat pipeline (one product graph + host PLE + tokenizer).
  *
- * The only construction entry points are {@link Gemma4Pipeline.fromPretrained} (fetching from HF) and
- * {@link Gemma4Pipeline.fromAssets} (bytes already fetched) — the constructor is private so that no
+ * The only construction entry points are {@link Pipeline.fromPretrained} (fetching from HF) and
+ * {@link Pipeline.fromAssets} (bytes already fetched) — the constructor is private so that no
  * half-built state that bypasses the asset checks can be created (ADR 0008).
  */
 class GemmaPipeline {
@@ -1082,7 +1082,7 @@ class GemmaPipeline {
    */
   readonly #chain = createOperationChain();
   /**
-   * The objects {@link Gemma4Pipeline.sequence} handed out (closes the gap of a missed dispose).
+   * The objects {@link Pipeline.sequence} handed out (closes the gap of a missed dispose).
    */
   readonly #handed = new Set<GenerationSequence>();
   /** The one dispose. **Not undefined means "disposed"** (no separate derived state). */
@@ -1096,7 +1096,7 @@ class GemmaPipeline {
   protected static async loadPretrained(
     family: GemmaFamily,
     ref: string | HubRepoRef | DistributionSource,
-    options: Gemma4FromPretrainedOptions = {},
+    options: FromPretrainedOptions = {},
   ): Promise<Gemma4State> {
     const entry = gemmaEntryName(family);
     const where = `${entry}.fromPretrained`;
@@ -1113,7 +1113,7 @@ class GemmaPipeline {
       ref,
       where,
       family === "gemma4"
-        ? 'GEMMA4_SOURCES["gemma4"] (@karume/models/gemma)'
+        ? 'SOURCES["gemma4"] (@karume/models/gemma)'
         : "an explicitly given source of a QAT distribution",
     );
     const hubOptions: FetchAssetsOptions = hubLoadOptions(options);
@@ -1220,17 +1220,17 @@ class GemmaPipeline {
   /** Assembly for the shared factory. Checks the family's contract and returns the state. */
   protected static async loadAssets(
     family: GemmaFamily,
-    input: Gemma4Assets,
-    options: Gemma4PipelineOptions = {},
+    input: Assets,
+    options: PipelineOptions = {},
   ): Promise<Gemma4State> {
     const where = `${gemmaEntryName(family)}.fromAssets`;
-    // MUST: this surface has no place for a drafter ({@link Gemma4Assets} holds one product graph).
+    // MUST: this surface has no place for a drafter ({@link Assets} holds one product graph).
     // Silently building without speculation would be "specified but no effect", so it is refused by
     // failing loudly.
     if (options.speculative !== undefined) {
       throw new Error(
         `${where}: speculative is not accepted` +
-          ` (Gemma4Assets has no drafter container — build speculation from fromPretrained)`,
+          ` (gemma.Assets has no drafter container — build speculation from fromPretrained)`,
       );
     }
     // The placement option is checked before opening a single byte of the assets (the same position
@@ -1241,7 +1241,7 @@ class GemmaPipeline {
     // travel down to Session construction and turn into the runtime's `ExecutionError` = the
     // classification would split per entry point (ADR 0107 decision 2).
     assertGemmaSessionOverrides(options, where);
-    const config = parseGemma4PipelineConfig(input.config);
+    const config = parsePipelineConfig(input.config);
     if (input.model.length === 0) {
       throw new Error(
         `${where}: the product graph's part list is empty (list them in index order from part 0)`,
@@ -1256,7 +1256,7 @@ class GemmaPipeline {
     const open = await assetComponentOpener(where, parts, (key) => assetBuffer(where, parts, key), [
       MODEL,
     ]);
-    // NOTE: this surface has no `requiredLimits` check — {@link Gemma4Assets} has no manifest (only
+    // NOTE: this surface has no `requiredLimits` check — {@link Assets} has no manifest (only
     // bytes and `config`), so the declaration itself cannot be reached. The check against actual sizes
     // is done by `assertWeightsWithinLimits` at Session construction (ADR 0089 decision 1).
     const model = open(MODEL);
@@ -1310,7 +1310,7 @@ class GemmaPipeline {
     requested: { readonly gpuFeatures: GpuFeaturesSpec | undefined; readonly where: string },
     open: ComponentOpener,
     assets: Gemma4SidecarAssets,
-    options: Gemma4PipelineOptions,
+    options: PipelineOptions,
   ): Promise<Gemma4State> {
     const entry = gemmaEntryName(admission.family);
     const residency = resolveGemma4PleResidency(entry, options);
@@ -1327,7 +1327,7 @@ class GemmaPipeline {
     const speculativeK =
       options.speculative === undefined
         ? undefined
-        : assertSpeculative("Gemma4Pipeline", options.speculative);
+        : assertSpeculative("gemma.Pipeline", options.speculative);
     const gpu =
       options.gpu ??
       (await acquireGpu({
@@ -1503,20 +1503,20 @@ class GemmaPipeline {
    * Runs one conversation turn and streams **committed text pieces** (the streaming decode of ADR
    * 0084 decision 4).
    *
-   * Rendering and encoding the conversation is `gemma4ChatPrompt` (out-of-scope input fails loudly
+   * Rendering and encoding the conversation is `chatPrompt` (out-of-scope input fails loudly
    * here, **synchronously**), and generation is one `GenerationSequence`; whether drained, `break`-ed
    * or interrupted, the sequence is returned. **One turn = one sequence**, so past turns do not
-   * remain — to run a multi-turn conversation yourself, use {@link Gemma4Pipeline.sequence}.
+   * remain — to run a multi-turn conversation yourself, use {@link Pipeline.sequence}.
    *
-   * If incremental display is not needed, {@link Gemma4ChatStream.text} gives one string (mixing it
+   * If incremental display is not needed, {@link ChatStream.text} gives one string (mixing it
    * with iteration throws synchronously — a stream is consumed in only one way).
    *
    * Stop conditions have two layers and can be added per request (the distribution's EOS set always
-   * applies): {@link Gemma4ChatOptions.stopTokens} is checked by the sequence layer (token ids), and
-   * {@link Gemma4ChatOptions.stopStrings} by this layer (the decoded text).
+   * applies): {@link ChatOptions.stopTokens} is checked by the sequence layer (token ids), and
+   * {@link ChatOptions.stopStrings} by this layer (the decoded text).
    *
    * A pipeline with a drafter loaded **speculates by default** (it can be turned off per turn with
-   * {@link Gemma4ChatOptions.speculative}). A speculating turn carries the accounting in the
+   * {@link ChatOptions.speculative}). A speculating turn carries the accounting in the
    * `speculation` of `done`. It speculates even with the distribution's recommended sampler
    * (temperature 1), and the text is the same sequence as without speculation. The default comes
    * with the self-tuning gate, so in a context where speculation loses it drops to the decode
@@ -1525,12 +1525,12 @@ class GemmaPipeline {
    * When called concurrently, calls **wait and run in order** (one Session is not pushed by two
    * conversations at once).
    */
-  chat(messages: readonly Gemma4ChatMessage[], options: Gemma4ChatOptions): Gemma4ChatStream {
+  chat(messages: readonly ChatMessage[], options: ChatOptions): ChatStream {
     if (this.#disposal !== undefined) {
       throw new Error(`${this.#state.entry}: cannot generate after dispose`);
     }
     // The accepted set fails synchronously (before entering the GPU or the queue).
-    const prompt = gemma4ChatPrompt(this.#state.tokenizer, messages);
+    const prompt = chatPrompt(this.#state.tokenizer, messages);
     const chosen = options.sampler ?? this.#state.config.sampler;
     // MUST: the request is **copied at issue** (ADR 0083 addendum 2026-09-02). The body (an async
     // generator) does not run until the first `next()`, so without reading `options` through here,
@@ -1540,7 +1540,7 @@ class GemmaPipeline {
     // (`GenerationSequence.generate` / `createSampler`) happen in the body of the async generator =
     // the first `next()`, so relying on them alone would silently apply a stop set or sampling
     // options rewritten in the window "from issue until draining starts". The copy point is the one
-    // {@link snapshotSpec} in `sampler.ts`, shared (the same as `Gemma4ChatSession.send`).
+    // {@link snapshotSpec} in `sampler.ts`, shared (the same as `ChatSession.send`).
     const sampler = chosen === undefined ? undefined : snapshotSpec(chosen);
     const request: GenerationRequest = {
       prompt,
@@ -1566,9 +1566,9 @@ class GemmaPipeline {
     const speculative = speculativeSetup(this.#state, options.speculative);
     const onRun = runDiagnosticsHook(this.#state);
 
-    let settle!: (stop: Gemma4ChatStop) => void;
+    let settle!: (stop: ChatStop) => void;
     let fail!: (error: unknown) => void;
-    const done = new Promise<Gemma4ChatStop>((resolve, reject) => {
+    const done = new Promise<ChatStop>((resolve, reject) => {
       settle = resolve;
       fail = reject;
     });
@@ -1621,7 +1621,7 @@ class GemmaPipeline {
         throw error;
       } finally {
         await completeChatTurn({
-          where: "Gemma4Pipeline.chat",
+          where: "gemma.Pipeline.chat",
           stream,
           matched,
           failure,
@@ -1649,14 +1649,14 @@ class GemmaPipeline {
    * 0083 decisions 1–4).
    *
    * `prompt` is a token id sequence, so the caller renders the conversation (the `./gemma` subpath) —
-   * the first turn with {@link gemma4ChatPrompt} (the whole, including `<bos>`), the second and later
-   * with `gemma4ChatTurn` (**only that turn's delta**; the `<turn|>` that closes the previous turn is
+   * the first turn with {@link chatPrompt} (the whole, including `<bos>`), the second and later
+   * with `chatTurn` (**only that turn's delta**; the `<turn|>` that closes the previous turn is
    * prepended by `GenerationSequence`'s `pendingToken`, so it is not included — ADR 0083 decision 4).
    * **The caller calls `dispose()` on the returned object** — returning it when the conversation ends
-   * is right, and if it is missed {@link Gemma4Pipeline.dispose} collects it (so that the Session is
+   * is right, and if it is missed {@link Pipeline.dispose} collects it (so that the Session is
    * not closed with a live context).
    *
-   * MUST: no serialization with {@link Gemma4Pipeline.chat} (another conversation is another context,
+   * MUST: no serialization with {@link Pipeline.chat} (another conversation is another context,
    * so the runtime accepts it). Running them at the same time keeps two KVs resident.
    *
    * `capacity` is the capacity this conversation allocates (default: the distribution's default). The
@@ -1664,11 +1664,11 @@ class GemmaPipeline {
    * capacity for a short conversation / take only what a long conversation needs".
    *
    * A pipeline with a drafter loaded **speculates by default** (it can be turned off per conversation
-   * with {@link Gemma4SequenceOptions.speculative}). The borrower context is bound to this sequence's
+   * with {@link SequenceOptions.speculative}). The borrower context is bound to this sequence's
    * lifetime, and `dispose()` closes it before the lender. The self-tuning gate's state also lives
    * as long as the sequence (it keeps measuring across turns).
    */
-  async sequence(options: Gemma4SequenceOptions = {}): Promise<GenerationSequence> {
+  async sequence(options: SequenceOptions = {}): Promise<GenerationSequence> {
     if (this.#disposal !== undefined) {
       throw new Error(`${this.#state.entry}: cannot create a sequence after dispose`);
     }
@@ -1688,7 +1688,7 @@ class GemmaPipeline {
 
   /**
    * Hands a sequence out in a thin tracking wrapper (the one path shared by
-   * {@link Gemma4Pipeline.sequence} and its branches (`GenerationSequence.fork`)).
+   * {@link Pipeline.sequence} and its branches (`GenerationSequence.fork`)).
    *
    * A thin wrapper rather than the object itself is handed out so that `GenerationSequence` gets no
    * field that would let it know about the pipeline (the generation surface stays pipeline-independent
@@ -1751,7 +1751,7 @@ class GemmaPipeline {
    * memory nor decides feasibility (same, decision 5). The final check remains the out-of-memory
    * errorScope; this estimate is an advance diagnostic.
    *
-   * NOTE: each shape of {@link Gemma4PipelineOptions.chunkBuckets} enters the max of
+   * NOTE: each shape of {@link PipelineOptions.chunkBuckets} enters the max of
    * `peakAccountedBytes` but is not listed in `scenarios` (ADR 0095 addendum 2026-10-10). The prefill
    * shape of the largest `M` is not used as the representative because the row-block split of
    * attention creates, at block-count boundaries, "a shape with fewer rows having larger transients",
@@ -1760,7 +1760,7 @@ class GemmaPipeline {
    * `chunkLength` are passed (the accepted set of buckets is below `chunkLength` — the same rule as
    * trimming the default ladder). The amount by which bucket-shape backings **stay resident at the
    * same time** as other shapes is bounded from above by
-   * {@link Gemma4PipelineOptions.planBackingBudgetBytes} as one term of `peakAccountedBytes` (ADR
+   * {@link PipelineOptions.planBackingBudgetBytes} as one term of `peakAccountedBytes` (ADR
    * 0095 decision 4).
    *
    * The auxiliary Session and resident inputs / outputs of small-output decode are counted separately
@@ -1770,7 +1770,7 @@ class GemmaPipeline {
    * NOTE: `AdmissionReport` is a runtime type, and `@karume/models` does not re-export it (the thin
    * surface of ADR 0008 — consumers that read the estimate use the runtime type as is).
    *
-   * ## Speculation (a pipeline given {@link Gemma4PipelineOptions.speculative})
+   * ## Speculation (a pipeline given {@link PipelineOptions.speculative})
    *
    * Three things are added (ADR 0096 stage 3 §3.3):
    *
@@ -1787,7 +1787,7 @@ class GemmaPipeline {
    * run never runs at the same time as a verify run, and the requirement of that shape is a small
    * constant that depends on neither `k` nor `capacity`.
    */
-  estimateSessionMemory(options: Gemma4EstimateOptions = {}): AdmissionReport {
+  estimateSessionMemory(options: EstimateOptions = {}): AdmissionReport {
     const { wiring, graph, gpu, drafter, entry } = this.#state;
     const capacity = options.capacity ?? wiring.capacity;
     const chunkLength = assertChunkLength(
@@ -1796,7 +1796,7 @@ class GemmaPipeline {
       entry,
     );
     // MUST: the integer condition and the ordering are reported as **separate diagnostics** (the same
-    // three as `createGenerationSequence` / `Gemma4ChatSession`). Folded into one, `capacity: NaN` and
+    // three as `createGenerationSequence` / `ChatSession`). Folded into one, `capacity: NaN` and
     // `1.5` would both be diagnosed as "below", and the same option would look as if it failed for a
     // different reason per entry point.
     if (!Number.isSafeInteger(capacity) || capacity < 1) {
@@ -1917,7 +1917,7 @@ class GemmaPipeline {
    * The tokenizer built from the assets (needed to render and decode chat — a member of the same
    * digest set).
    */
-  get tokenizer(): GemmaTokenizer {
+  get tokenizer(): Tokenizer {
     return this.#state.tokenizer;
   }
 
@@ -1926,13 +1926,13 @@ class GemmaPipeline {
    * when there is no declaration).
    *
    * MUST: the name does not mean "the sampler this generation is using now".
-   * {@link Gemma4Pipeline.chat} uses it only when the request omits `sampler`; if the request passes
-   * one, that wins. When running the low-level surface ({@link Gemma4Pipeline.sequence}) yourself,
+   * {@link Pipeline.chat} uses it only when the request omits `sampler`; if the request passes
+   * one, that wins. When running the low-level surface ({@link Pipeline.sequence}) yourself,
    * **pass it yourself** to `generate`'s `sampler` — `GenerationSequence` does not know the
    * distribution, so without it it runs with the lower layer's default (temperature 0) (the parity
    * check takes that path).
    */
-  get defaultSampler(): Gemma4DefaultSampler | undefined {
+  get defaultSampler(): DefaultSampler | undefined {
     return this.#state.config.sampler;
   }
 
@@ -1945,7 +1945,7 @@ class GemmaPipeline {
    * calls return the same completion.
    *
    * MUST: PLE is released as well. Unlike GPU residency it is **host RAM**
-   * ({@link Gemma4PipelineOptions.maxResidentPleBytes} worth of blocks = by default two of the
+   * ({@link PipelineOptions.maxResidentPleBytes} worth of blocks = by default two of the
    * largest blocks, plus the row cache of at most 256 rows), so without a release point "keeping one
    * disposed handle" alone would keep that RAM for the life of the process.
    *
@@ -2008,7 +2008,7 @@ class GemmaPipeline {
 }
 
 /** Regular Gemma 4. The entry point that keeps the existing fetch, numerics and MTP contracts. */
-export class Gemma4Pipeline extends GemmaPipeline {
+export class Pipeline extends GemmaPipeline {
   private constructor(state: Gemma4State) {
     super(state);
   }
@@ -2022,20 +2022,20 @@ export class Gemma4Pipeline extends GemmaPipeline {
    * {@link FromPretrainedComponentOptions.components} (the roles are `model` and `drafter`).
    *
    * **`ref` is required** (there is no default source — the MUST of `src/hub/repo-ref.ts`). The source
-   * the package release verified is `"gemma4"` of {@link GEMMA4_SOURCES} (`./config.ts`) — to pin
+   * the package release verified is `"gemma4"` of {@link SOURCES} (`./config.ts`) — to pin
    * reproducibility yourself, the caller gives `{ repo, revision }` explicitly. A string `ref` reads as
    * `{ repo }` (= follows `main`).
    *
    * A distribution in hand is passed as a **source handle** (`localDirectory`, `denoDirectory` of
    * `@karume/hub/deno`, or `nodeDirectory` of `@karume/hub/node`). It does not go through the check of
    * HF's `owner/name` spelling, nor through the network or CacheStorage (the HTTP-only knobs of
-   * {@link Gemma4FromPretrainedOptions} have no effect).
+   * {@link FromPretrainedOptions} have no effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
-    options: Gemma4FromPretrainedOptions = {},
-  ): Promise<Gemma4Pipeline> {
-    return new Gemma4Pipeline(await super.loadPretrained(GEMMA4_PIPELINE_NAME, ref, options));
+    options: FromPretrainedOptions = {},
+  ): Promise<Pipeline> {
+    return new Pipeline(await super.loadPretrained(GEMMA4_PIPELINE_NAME, ref, options));
   }
   /**
    * Builds from fetched assets. Interpreting the assets, matching them against the graph and
@@ -2049,25 +2049,22 @@ export class Gemma4Pipeline extends GemmaPipeline {
    * tokenizer (ADR 0109 decision 4).
    *
    * MUST: `config` goes through **the same check** as {@link fromPretrained}
-   * ({@link parseGemma4PipelineConfig}). TS types check neither unknown keys nor value ranges, so
+   * ({@link parsePipelineConfig}). TS types check neither unknown keys nor value ranges, so
    * without the check a declaration such as `temperature: -1` would first fail at the first `chat`
    * after reading 3.7 GiB. The declaration is checked **before opening a single one of the byte
    * arrays**.
    */
-  static async fromAssets(
-    input: Gemma4Assets,
-    options: Gemma4PipelineOptions = {},
-  ): Promise<Gemma4Pipeline> {
-    return new Gemma4Pipeline(await super.loadAssets(GEMMA4_PIPELINE_NAME, input, options));
+  static async fromAssets(input: Assets, options: PipelineOptions = {}): Promise<Pipeline> {
+    return new Pipeline(await super.loadAssets(GEMMA4_PIPELINE_NAME, input, options));
   }
 }
 
 /** The initial implementation of fixed mobile QAT does not accept a drafter. */
-export type Gemma4QatPipelineOptions = Omit<Gemma4PipelineOptions, "speculative"> & {
+export type Gemma4QatPipelineOptions = Omit<PipelineOptions, "speculative"> & {
   readonly speculative?: never;
 };
 export type Gemma4QatFromPretrainedOptions = Omit<
-  Gemma4FromPretrainedOptions,
+  FromPretrainedOptions,
   "speculative" | "model"
 > & {
   readonly speculative?: never;
@@ -2097,7 +2094,7 @@ export class Gemma4QatPipeline extends GemmaPipeline {
    * PLE configuration.
    */
   static async fromAssets(
-    input: Gemma4Assets,
+    input: Assets,
     options: Gemma4QatPipelineOptions = {},
   ): Promise<Gemma4QatPipeline> {
     return new Gemma4QatPipeline(await super.loadAssets("gemma4-qat", input, options));

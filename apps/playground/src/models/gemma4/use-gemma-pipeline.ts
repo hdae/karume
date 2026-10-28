@@ -1,5 +1,5 @@
 /**
- * Builds the Gemma 4 pipeline the page asked for (**Load**) on the page's GPU: `Gemma4Pipeline` for
+ * Builds the Gemma 4 pipeline the page asked for (**Load**) on the page's GPU: `gemma.Pipeline` for
  * the `gemma4` mount, `Gemma4QatPipeline` for `gemma4-qat`. Construction reads every weight and
  * builds the Session (gigabytes), so it runs only on an explicit request, and again when the GPU is
  * re-acquired after a device loss. The previous pipeline is disposed when the request changes or the
@@ -10,7 +10,7 @@
  * destroyed only after them.
  */
 
-import { Gemma4Pipeline, type Gemma4RunPhase } from "@karume/models/gemma";
+import { Pipeline, type RunPhase } from "@karume/models/gemma";
 import { Gemma4QatPipeline } from "@karume/models/gemma4-qat";
 import type { GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { type RefObject, useEffect, useState } from "react";
@@ -35,7 +35,7 @@ export type LoadRequest = {
   readonly diagnostics: boolean;
 };
 
-export type GemmaPipeline = Gemma4Pipeline | Gemma4QatPipeline;
+export type GemmaPipeline = Pipeline | Gemma4QatPipeline;
 
 export type GemmaPipelineState =
   | { readonly kind: "idle" }
@@ -49,7 +49,7 @@ export type GemmaPipelineState =
   | { readonly kind: "error"; readonly request: LoadRequest; readonly error: unknown };
 
 /** Where `onRunDiagnostics` goes (when the request asks for it); the page folds it per Session. */
-export type DiagnosticsSink = (diagnostics: SessionDiagnostics, phase: Gemma4RunPhase) => void;
+export type DiagnosticsSink = (diagnostics: SessionDiagnostics, phase: RunPhase) => void;
 
 const MIB = 2 ** 20;
 
@@ -101,7 +101,7 @@ export const useGemmaPipeline = (input: {
         signal: controller.signal,
         ...(request.diagnostics
           ? {
-              onRunDiagnostics: (report: SessionDiagnostics, phase: Gemma4RunPhase) =>
+              onRunDiagnostics: (report: SessionDiagnostics, phase: RunPhase) =>
                 diagnostics.current?.(report, phase),
             }
           : {}),
@@ -117,7 +117,7 @@ export const useGemmaPipeline = (input: {
         },
       };
       if (request.mount === "gemma4") {
-        return await Gemma4Pipeline.fromPretrained(ref, {
+        return await Pipeline.fromPretrained(ref, {
           ...common,
           model: request.model,
           ...(request.speculative ? { speculative: {} } : {}),

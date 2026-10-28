@@ -27,12 +27,7 @@
 
 import { readTextFileSync } from "@karume/test-support/fs";
 import { assert } from "@std/assert";
-import type {
-  Gemma4ChatMessage,
-  Gemma4ChatOptions,
-  Gemma4ChatStop,
-  Gemma4ChatStream,
-} from "../../gemma.ts";
+import type { ChatMessage, ChatOptions, ChatStop, ChatStream } from "../../gemma.ts";
 import { parseManifest } from "@karume/hub";
 import { assertRunningAdapter } from "../../../runtime/tests/helpers/environment.ts";
 import {
@@ -51,12 +46,12 @@ import { mirrorAvailable } from "./gemma-mirror.ts";
  */
 export const REFERENCE_PROMPT = "Explain in about five sentences why the sky is blue.";
 
-/** 抽選する token 数の上限（停止 token もこの数に含まれる — `Gemma4ChatOptions.maxNewTokens`）。 */
+/** 抽選する token 数の上限（停止 token もこの数に含まれる — `ChatOptions.maxNewTokens`）。 */
 export const REFERENCE_MAX_NEW_TOKENS = 64;
 
-/** 走行に要る pipeline の面（`Gemma4Pipeline` / `Gemma4QatPipeline` の共通部分）。 */
+/** 走行に要る pipeline の面（`Pipeline` / `Gemma4QatPipeline` の共通部分）。 */
 export type ChatPipeline = {
-  chat(messages: readonly Gemma4ChatMessage[], options: Gemma4ChatOptions): Gemma4ChatStream;
+  chat(messages: readonly ChatMessage[], options: ChatOptions): ChatStream;
   dispose(): Promise<void>;
 };
 
@@ -101,7 +96,7 @@ export const mirrorSeats = (mirror: URL): readonly Seat[] => {
 export type SeatRun = {
   /** 生成 token の id 列（停止 token は含まない — `onToken` が受けた順）。 */
   readonly ids: readonly number[];
-  readonly stop: Gemma4ChatStop;
+  readonly stop: ChatStop;
   /** 復号後の本文（`note` に載せるだけ — 実物には入れない）。 */
   readonly text: string;
 };

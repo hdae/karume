@@ -21,20 +21,18 @@ import {
   GEMMA4_ROPE_LAYER_TYPES,
   gemma4RopeInputName,
   gemma4RopeInputNames,
-  gemma4RopeInputs,
+  ropeInputs,
   gemma4RopeInverseFrequencies,
-  type Gemma4RopeLayerSpec,
-  type Gemma4RopeLayerType,
+  type RopeLayerSpec,
+  type RopeLayerType,
   gemma4RopeRows,
-  type Gemma4RopeSpec,
+  type RopeSpec,
 } from "../src/gemma/rope.ts";
 
 type Fixture = {
   readonly positions: readonly number[];
-  readonly spec: Gemma4RopeSpec;
-  readonly tables: Readonly<
-    Record<Gemma4RopeLayerType, { readonly cos: string; readonly sin: string }>
-  >;
+  readonly spec: RopeSpec;
+  readonly tables: Readonly<Record<RopeLayerType, { readonly cos: string; readonly sin: string }>>;
 };
 
 const FIXTURE_URL = new URL("./fixtures/gemma4-rope-upstream.json", import.meta.url);
@@ -81,7 +79,7 @@ const maxAbsDiffPerRow = (
 
 /** 上流 fixture との突合（行ごとの最悪差が位置比例の帯に収まるか）。 */
 const passesParity = (
-  spec: Gemma4RopeLayerSpec,
+  spec: RopeLayerSpec,
   positions: readonly number[],
   expected: { readonly cos: Float32Array; readonly sin: Float32Array },
 ): { readonly pass: boolean; readonly worst: number } => {
@@ -181,7 +179,7 @@ test("故障注入 — NaN を含む行と、NaN と大誤差が同居する行�
 });
 
 test("回さない次元は cos = 1 / sin = 0 が厳密で、前半と後半は同値・位置 0 は恒等", () => {
-  const spec: Gemma4RopeLayerSpec = { theta: 1e6, headDim: 512, rotaryDim: 128 };
+  const spec: RopeLayerSpec = { theta: 1e6, headDim: 512, rotaryDim: 128 };
   const invFreq = gemma4RopeInverseFrequencies(spec);
   assertEquals(invFreq.length, 256);
   assertEquals(invFreq[0], 1);
@@ -201,7 +199,7 @@ test("回さない次元は cos = 1 / sin = 0 が厳密で、前半と後半は�
 });
 
 test("同じ入力の 2 回生成はビット同一（決定性）", () => {
-  const spec: Gemma4RopeLayerSpec = { theta: 1e4, headDim: 256, rotaryDim: 256 };
+  const spec: RopeLayerSpec = { theta: 1e4, headDim: 256, rotaryDim: 256 };
   const positions = [0, 1, 2, 511, 4096, 131071];
   const a = gemma4RopeRows(spec, positions);
   const b = gemma4RopeRows(spec, positions);
@@ -210,12 +208,12 @@ test("同じ入力の 2 回生成はビット同一（決定性）", () => {
 });
 
 test("グラフ入力は 4 本・名前は層種 × 部の固定形・shape [1, rows, headDim]・f32", () => {
-  const spec: Gemma4RopeSpec = {
+  const spec: RopeSpec = {
     sliding_attention: { theta: 1e4, headDim: 256, rotaryDim: 256 },
     full_attention: { theta: 1e6, headDim: 512, rotaryDim: 128 },
   };
   const positions = Int32Array.of(5, 6, 0, 0);
-  const inputs = gemma4RopeInputs(spec, positions);
+  const inputs = ropeInputs(spec, positions);
   assertEquals(Object.keys(inputs).sort(), gemma4RopeInputNames().sort());
   assertEquals(gemma4RopeInputName("full_attention", "sin"), "rope_full_attention_sin");
   for (const layerType of GEMMA4_ROPE_LAYER_TYPES) {
@@ -232,7 +230,7 @@ test("グラフ入力は 4 本・名前は層種 × 部の固定形・shape [1, 
 });
 
 test("パラメータの値域門 — 奇数 / 範囲外 / 非有限は fail loudly・負の位置も落ちる", () => {
-  const ok: Gemma4RopeLayerSpec = { theta: 1e4, headDim: 256, rotaryDim: 256 };
+  const ok: RopeLayerSpec = { theta: 1e4, headDim: 256, rotaryDim: 256 };
   assertThrows(() => gemma4RopeInverseFrequencies({ ...ok, headDim: 255 }), Error, "headDim");
   assertThrows(() => gemma4RopeInverseFrequencies({ ...ok, rotaryDim: 258 }), Error, "rotaryDim");
   assertThrows(() => gemma4RopeInverseFrequencies({ ...ok, rotaryDim: 3 }), Error, "rotaryDim");

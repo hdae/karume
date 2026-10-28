@@ -255,120 +255,72 @@
     ],
     "./gemma": [
       {
-        "name": "GEMMA4_CHUNK_BUCKETS",
+        "name": "Assets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "CHUNK_BUCKETS",
         "kind": "variable"
       },
       {
-        "name": "GEMMA4_SOURCES",
-        "kind": "variable"
-      },
-      {
-        "name": "Gemma4Assets",
+        "name": "ChatMessage",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4ChatMessage",
+        "name": "ChatOptions",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4ChatOptions",
+        "name": "ChatOverflow",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4ChatOverflow",
+        "name": "ChatOverflowPolicy",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4ChatOverflowPolicy",
+        "name": "ChatRole",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4ChatRole",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4ChatSession",
+        "name": "ChatSession",
         "kind": "class"
       },
       {
-        "name": "Gemma4ChatSessionHost",
+        "name": "ChatSessionHost",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4ChatSessionOptions",
+        "name": "ChatSessionOptions",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4ChatStop",
+        "name": "ChatStop",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4ChatStream",
+        "name": "ChatStream",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4ChatTurnOptions",
+        "name": "ChatTurnOptions",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4DefaultSampler",
+        "name": "DecodeOptions",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4EstimateOptions",
+        "name": "DefaultSampler",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4FromPretrainedOptions",
+        "name": "EstimateOptions",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4Pipeline",
-        "kind": "class"
-      },
-      {
-        "name": "Gemma4PipelineConfig",
+        "name": "FromPretrainedOptions",
         "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4PipelineOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4PleResidency",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4PrefillProgress",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4RopeLayerSpec",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4RopeLayerType",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4RopeSpec",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4RunPhase",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4SequenceOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "GemmaDecodeOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "GemmaTokenizer",
-        "kind": "class"
       },
       {
         "name": "GenerationCapacityConstraint",
@@ -423,7 +375,51 @@
         "kind": "class"
       },
       {
+        "name": "Pipeline",
+        "kind": "class"
+      },
+      {
+        "name": "PipelineConfig",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "PipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "PleResidency",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "PrefillProgress",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RopeLayerSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RopeLayerType",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RopeSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RunPhase",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SOURCES",
+        "kind": "variable"
+      },
+      {
         "name": "SamplerSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SequenceOptions",
         "kind": "typeAlias"
       },
       {
@@ -435,93 +431,85 @@
         "kind": "class"
       },
       {
+        "name": "Tokenizer",
+        "kind": "class"
+      },
+      {
+        "name": "chatPrompt",
+        "kind": "function"
+      },
+      {
+        "name": "chatTurn",
+        "kind": "function"
+      },
+      {
         "name": "dropOldestTurns",
         "kind": "function"
       },
       {
-        "name": "gemma4ChatPrompt",
+        "name": "parsePipelineConfig",
         "kind": "function"
       },
       {
-        "name": "gemma4ChatTurn",
-        "kind": "function"
-      },
-      {
-        "name": "gemma4RopeInputs",
-        "kind": "function"
-      },
-      {
-        "name": "parseGemma4PipelineConfig",
+        "name": "ropeInputs",
         "kind": "function"
       }
     ],
     "./gemma4-qat": [
       {
-        "name": "GEMMA4_CHUNK_BUCKETS",
+        "name": "Assets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "CHUNK_BUCKETS",
         "kind": "variable"
       },
       {
-        "name": "Gemma4Assets",
+        "name": "ChatMessage",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4ChatMessage",
+        "name": "ChatOptions",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4ChatOptions",
+        "name": "ChatOverflow",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4ChatOverflow",
+        "name": "ChatOverflowPolicy",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4ChatOverflowPolicy",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4ChatSession",
+        "name": "ChatSession",
         "kind": "class"
       },
       {
-        "name": "Gemma4ChatSessionHost",
+        "name": "ChatSessionHost",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4ChatSessionOptions",
+        "name": "ChatSessionOptions",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4ChatStop",
+        "name": "ChatStop",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4ChatStream",
+        "name": "ChatStream",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4ChatTurnOptions",
+        "name": "ChatTurnOptions",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4DefaultSampler",
+        "name": "DefaultSampler",
         "kind": "typeAlias"
       },
       {
-        "name": "Gemma4EstimateOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4PipelineConfig",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4PleResidency",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4PrefillProgress",
+        "name": "EstimateOptions",
         "kind": "typeAlias"
       },
       {
@@ -534,26 +522,6 @@
       },
       {
         "name": "Gemma4QatPipelineOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4RopeLayerSpec",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4RopeLayerType",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4RopeSpec",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4RunPhase",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Gemma4SequenceOptions",
         "kind": "typeAlias"
       },
       {
@@ -573,19 +541,51 @@
         "kind": "class"
       },
       {
+        "name": "PipelineConfig",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "PleResidency",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "PrefillProgress",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RopeLayerSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RopeLayerType",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RopeSpec",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RunPhase",
+        "kind": "typeAlias"
+      },
+      {
         "name": "SamplerSpec",
         "kind": "typeAlias"
       },
       {
+        "name": "SequenceOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "chatPrompt",
+        "kind": "function"
+      },
+      {
+        "name": "chatTurn",
+        "kind": "function"
+      },
+      {
         "name": "dropOldestTurns",
-        "kind": "function"
-      },
-      {
-        "name": "gemma4ChatPrompt",
-        "kind": "function"
-      },
-      {
-        "name": "gemma4ChatTurn",
         "kind": "function"
       },
       {
@@ -593,7 +593,7 @@
         "kind": "function"
       },
       {
-        "name": "parseGemma4PipelineConfig",
+        "name": "parsePipelineConfig",
         "kind": "function"
       }
     ],

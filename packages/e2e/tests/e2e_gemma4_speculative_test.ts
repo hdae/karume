@@ -63,17 +63,10 @@ import {
   type Tensor,
 } from "@karume/runtime";
 import { afterAll, beforeAll, describe, it } from "vite-plus/test";
-import {
-  Gemma4Pipeline,
-  type GenerationRunPhase,
-  type GenerationStop,
-} from "../../models/gemma.ts";
-import {
-  type Gemma4PipelineConfig,
-  parseGemma4PipelineConfig,
-} from "../../models/src/gemma/config.ts";
+import { Pipeline, type GenerationRunPhase, type GenerationStop } from "../../models/gemma.ts";
+import { type PipelineConfig, parsePipelineConfig } from "../../models/src/gemma/config.ts";
 import { createGemma4Ple, type Gemma4Ple } from "../../models/src/gemma/ple.ts";
-import { gemma4RopeInputs, type Gemma4RopeSpec } from "../../models/src/gemma/rope.ts";
+import { ropeInputs, type RopeSpec } from "../../models/src/gemma/rope.ts";
 import { GEMMA4_DRAFT_STEPS } from "../../models/src/gemma/speculative.ts";
 import type { SamplerSpec } from "../../models/src/generation/sampler.ts";
 import {
@@ -212,7 +205,7 @@ const mirrorManifest = (): Manifest =>
 
 const pipelineConfig = () => {
   const manifest = mirrorManifest();
-  return parseGemma4PipelineConfig(manifest.models[manifest.defaultModel].pipelineConfig);
+  return parsePipelineConfig(manifest.models[manifest.defaultModel].pipelineConfig);
 };
 
 // ---------------------------------------------------------------------------
@@ -228,7 +221,7 @@ type Turn = {
 };
 
 const runTurn = async (
-  pipeline: Gemma4Pipeline,
+  pipeline: Pipeline,
   prompt: readonly number[],
   options: {
     /**
@@ -270,7 +263,7 @@ const runTurn = async (
 };
 
 /** この会話が要る容量（`chunkLength` 未満は指定できないので下限で持ち上げる）。 */
-const capacityFor = (pipeline: Gemma4Pipeline, promptLength: number): number =>
+const capacityFor = (pipeline: Pipeline, promptLength: number): number =>
   Math.max(pipeline.program.chunkLength, promptLength + MAX_NEW_TOKENS);
 
 /** 2 列の先頭一致長。 */
@@ -316,11 +309,11 @@ const tokensPerCycle = (stop: GenerationStop): number => {
 describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
   "gemma4 投機①: sequential 席で投機 / 非投機の token 列が厳密一致する（実 GPU）",
   () => {
-    let pipeline: Gemma4Pipeline;
+    let pipeline: Pipeline;
 
     beforeAll(async () => {
       const started = performance.now();
-      pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
+      pipeline = await Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
         speculative: { k: GEMMA4_DRAFT_STEPS },
         // 参照経路（runtime の既定）— decode も verify も同じ縮約カーネルを通る席。
         stateAttentionReduce: "sequential",
@@ -503,12 +496,12 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
   () => {
     /** 観測を集める窓（step が開けている間だけ積む）。 */
     let records: PhaseRecord[] | undefined;
-    let pipeline: Gemma4Pipeline;
+    let pipeline: Pipeline;
     const k = GEMMA4_DRAFT_STEPS;
 
     beforeAll(async () => {
       const started = performance.now();
-      pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
+      pipeline = await Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
         speculative: { k: GEMMA4_DRAFT_STEPS },
         maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
         onRunDiagnostics: (diagnostics, phase) => {
@@ -790,8 +783,8 @@ type RowPair = {
 describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
   "gemma4 投機⑤: verify の行 0 と decode 1 行の logits が u32 一致する（実 GPU）",
   () => {
-    let config: Gemma4PipelineConfig;
-    let rope: Gemma4RopeSpec;
+    let config: PipelineConfig;
+    let rope: RopeSpec;
     let golden: GoldenCase;
     let prompt: number[];
     let ple: Gemma4Ple;
@@ -850,7 +843,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
         {
           [INPUT_IDS]: { dtype: "i32", shape: [1, spec.rows], data: tokens },
           [PER_LAYER_INPUTS]: await ple.gather([...tokens]),
-          ...gemma4RopeInputs(rope, positions),
+          ...ropeInputs(rope, positions),
           [LAST_ROW]: {
             dtype: "i32",
             shape: [spec.lastRow.length],

@@ -1,5 +1,5 @@
 /**
- * 配布形ミラー（`karume/5`）から gemma の全量面の入力（`Gemma4Assets`）と PLE の読み口を組む
+ * 配布形ミラー（`karume/5`）から gemma の全量面の入力（`Assets`）と PLE の読み口を組む
  * — **実資産 e2e が共有する 1 本**。
  *
  * ## なぜ系列出力ではなくミラーなのか
@@ -26,7 +26,7 @@ import {
   prepareContainer,
   type PreparedModel,
 } from "@karume/runtime";
-import { type Gemma4Assets, parseGemma4PipelineConfig } from "../../gemma.ts";
+import { type Assets, parsePipelineConfig } from "../../gemma.ts";
 import {
   gemma4PleAssetSource,
   type Gemma4PleIndex,
@@ -137,7 +137,7 @@ export const openGemma4Ple = async (
 export const gemma4MirrorAssets = async (
   mirror: URL,
   choice: MirrorChoice = {},
-): Promise<Gemma4Assets> => {
+): Promise<Assets> => {
   const { loaded, selection, container } = await selectionOf(mirror, choice);
   const modelName = choice.model ?? loaded.manifest.defaultModel;
   const tokenizer = selection.assets["tokenizer"];
@@ -145,7 +145,7 @@ export const gemma4MirrorAssets = async (
     throw new Error(`test: ${mirror.pathname} の manifest に資産 'tokenizer' が無い`);
   }
   return {
-    config: parseGemma4PipelineConfig(loaded.manifest.models[modelName].pipelineConfig),
+    config: parsePipelineConfig(loaded.manifest.models[modelName].pipelineConfig),
     model: await Promise.all(container.parts.map((part) => readFile(new URL(part.path, mirror)))),
     tokenizer: await readFile(new URL(tokenizer.path, mirror)),
   };

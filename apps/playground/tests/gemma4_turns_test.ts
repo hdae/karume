@@ -1,4 +1,4 @@
-import type { Gemma4ChatMessage } from "@karume/models/gemma";
+import type { ChatMessage } from "@karume/models/gemma";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -14,8 +14,8 @@ import {
   turnTiming,
 } from "../src/models/gemma4/turns.ts";
 
-const user = (content: string): Gemma4ChatMessage => ({ role: "user", content });
-const assistant = (content: string): Gemma4ChatMessage => ({ role: "assistant", content });
+const user = (content: string): ChatMessage => ({ role: "user", content });
+const assistant = (content: string): ChatMessage => ({ role: "assistant", content });
 
 /** Ids from 100 up, for history entries that line up with nothing the page sent. */
 const idSource = () => {

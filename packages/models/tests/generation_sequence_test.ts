@@ -1001,7 +1001,7 @@ test("GenerationSequence: 受理集合は同期に落ちる（順番待ちにも
 });
 
 describe("受理集合の値域検査は 1 本の純関数（高レベル面と generate が同じ式を見る）", () => {
-  // 高レベル面（`Gemma4Pipeline.chat` / `Gemma4ChatSession.send`）は `generate` を async
+  // 高レベル面（`gemma.Pipeline.chat` / `gemma.ChatSession.send`）は `generate` を async
   // generator の本体で呼ぶので、発行時に落とすにはこの関数を自分で呼ぶしかない。式を写して
   // 2 本持つと片方だけが古くなるので、正本が 1 本であること自体をここで縛る。
   it("受理される要求は通る（門が恒真に落ちていないことの対）", () => {

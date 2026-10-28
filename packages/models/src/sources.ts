@@ -22,7 +22,7 @@ import type { HubRepoRef } from "@karume/hub";
 import * as anima from "./anima/config.ts";
 import { IRODORI_SOURCES } from "./irodori/config.ts";
 import { SBV2_SOURCES } from "./sbv2/config.ts";
-import { GEMMA4_SOURCES } from "./gemma/config.ts";
+import * as gemma from "./gemma/config.ts";
 import { SIGLIP2_SOURCES } from "./siglip2/config.ts";
 import * as depthAnything from "./depth-anything/config.ts";
 import * as birefnet from "./birefnet/config.ts";
@@ -33,7 +33,7 @@ export const KARUME_SOURCES = {
   ...anima.SOURCES,
   ...IRODORI_SOURCES,
   ...SBV2_SOURCES,
-  ...GEMMA4_SOURCES,
+  ...gemma.SOURCES,
   ...SIGLIP2_SOURCES,
   ...depthAnything.SOURCES,
   ...birefnet.SOURCES,

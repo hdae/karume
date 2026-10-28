@@ -12,7 +12,7 @@
  * would differ unnoticed).
  * MUST: maps are read only through `Object.hasOwn` (cross-cutting invariant).
  *
- * NOTE: the public distribution repository table ({@link GEMMA4_SOURCES}) also lives here. It is
+ * NOTE: the public distribution repository table ({@link SOURCES}) also lives here. It is
  * not a value derivable from the manifest but the "which manifest to fetch" side, so a distribution
  * cannot carry it (ADR 0073).
  */
@@ -23,9 +23,9 @@ import { assertAllowedKeys, isRecord } from "../config/readers.ts";
 import {
   assertGemma4RopeSpec,
   GEMMA4_ROPE_LAYER_TYPES,
-  type Gemma4RopeLayerSpec,
-  type Gemma4RopeLayerType,
-  type Gemma4RopeSpec,
+  type RopeLayerSpec,
+  type RopeLayerType,
+  type RopeSpec,
 } from "./rope.ts";
 
 /** The contract name of `pipeline` and the major this implementation accepts (ADR 0038 §1). */
@@ -50,12 +50,12 @@ export const GEMMA4_PIPELINE_MAJOR = 1;
  * side, so the bytes this published package reads would change silently at the network's
  * convenience (an accident on the unrecoverable side). A SHA removes the revision-resolution
  * request itself, so offline start-up with a full cache works at the same time (ADR 0038). A user
- * who needs to follow main explicitly chooses `{ ...GEMMA4_SOURCES["gemma4"], revision: "main" }`.
+ * who needs to follow main explicitly chooses `{ ...SOURCES["gemma4"], revision: "main" }`.
  */
 // NOTE: the revision is updated to main's SHA after the upload, in §3 of the release runbook
 // (docs/release-runbook.md) (inheriting the maintenance duty of ADR 0073 decision 3 — hand-written
 // + runbook gate).
-export const GEMMA4_SOURCES = {
+export const SOURCES = {
   gemma4: {
     repo: "hdae/karume-gemma4",
     revision: "6495175541701064fa98953988e45c21b320f7c0",
@@ -71,11 +71,11 @@ export const GEMMA4_SOURCES = {
  * acceptance set**, growing fields on the public surface that "pass the type but fail the parser as
  * unknown keys". Add fields when a real need appears.
  *
- * MUST: all three fields are required ({@link parseGemma4PipelineConfig} rejects a missing field).
+ * MUST: all three fields are required ({@link parsePipelineConfig} rejects a missing field).
  * Allowing partial declarations would create combinations found **nowhere upstream**, such as
  * "temperature recommended, top-k left at the low-level default".
  */
-export type Gemma4DefaultSampler = {
+export type DefaultSampler = {
   /** Temperature dividing the logits before softmax (a finite number ≥ 0). */
   readonly temperature: number;
   /** Narrows the candidates to the top `topK` by probability (an integer ≥ 1). */
@@ -95,12 +95,12 @@ export type Gemma4DefaultSampler = {
  * from the graph in the declaration as well lets one copy go stale (`capacitySymbolOf` in
  * `./admission.ts`).
  */
-export type Gemma4PipelineConfig = {
+export type PipelineConfig = {
   /**
    * The **default** row count of a fixed-length prefill chunk (ADR 0066 decision 4 — a plan-time
    * constant of the context).
    *
-   * It is also a runtime option (`Gemma4PipelineOptions.chunkLength`) — the graph's chunk rows are
+   * It is also a runtime option (`PipelineOptions.chunkLength`) — the graph's chunk rows are
    * the symbol `M`, so it can be chosen without re-baking the asset (limited by
    * {@link maxChunkLength}).
    */
@@ -131,7 +131,7 @@ export type Gemma4PipelineConfig = {
    * The **default** capacity of the full slots (the maximum logical length a conversation can use).
    *
    * It is also a runtime option (`capacity` of `createGenerationSequence` /
-   * `Gemma4Pipeline.sequence`) — the capacity is the physical allocation of the state slots itself,
+   * `Pipeline.sequence`) — the capacity is the physical allocation of the state slots itself,
    * so the caller chooses the trade between long conversations and VRAM.
    */
   readonly capacity: number;
@@ -143,7 +143,7 @@ export type Gemma4PipelineConfig = {
    * source of position encoding** (running without it would run attention without rotation, with no
    * exception). The canonical formula and value ranges live in `./rope.ts`.
    */
-  readonly rope: Gemma4RopeSpec;
+  readonly rope: RopeSpec;
   /**
    * The sampler defaults the distribution declares (ADR 0083 decision 7).
    *
@@ -151,7 +151,7 @@ export type Gemma4PipelineConfig = {
    * = greedy) stays, positioned as "no sampler declared = the degenerate temperature-0 form" (the
    * parity check keeps living on this path).
    */
-  readonly sampler?: Gemma4DefaultSampler;
+  readonly sampler?: DefaultSampler;
 };
 
 const ROOT_KEYS: readonly string[] = [
@@ -164,13 +164,13 @@ const ROOT_KEYS: readonly string[] = [
 ];
 
 /**
- * Accepted sampler fields (the type's canonical source is {@link Gemma4DefaultSampler} — so is the
+ * Accepted sampler fields (the type's canonical source is {@link DefaultSampler} — so is the
  * reason to add any).
  */
 const SAMPLER_KEYS: readonly string[] = ["temperature", "topK", "topP"];
 
 /**
- * Accepted fields per rope layer type (the type's canonical source is {@link Gemma4RopeLayerSpec}
+ * Accepted fields per rope layer type (the type's canonical source is {@link RopeLayerSpec}
  * in `./rope.ts`).
  */
 const ROPE_LAYER_KEYS: readonly string[] = ["theta", "headDim", "rotaryDim"];
@@ -202,7 +202,7 @@ const readNumber = (
  * The value ranges are the same as `assertSpec` in `generation/sampler.ts` — rejected when the
  * distribution is read, instead of the shape "found out only after generating once".
  */
-const parseSampler = (raw: unknown, where: string): Gemma4DefaultSampler => {
+const parseSampler = (raw: unknown, where: string): DefaultSampler => {
   const record = isRecord(raw) ? raw : undefined;
   if (record === undefined) throw new Error(`${where}: missing / not an object`);
   assertAllowedKeys(record, SAMPLER_KEYS, where);
@@ -239,7 +239,7 @@ const parseSampler = (raw: unknown, where: string): Gemma4DefaultSampler => {
  * and with the same formula in two implementations one goes stale. This function holds only **the
  * shape of the declaration** (unknown keys, missing fields, types).
  */
-const parseRopeLayer = (raw: unknown, where: string): Gemma4RopeLayerSpec => {
+const parseRopeLayer = (raw: unknown, where: string): RopeLayerSpec => {
   if (!isRecord(raw)) throw new Error(`${where}: not an object (${String(raw)})`);
   assertAllowedKeys(raw, ROPE_LAYER_KEYS, where);
   return {
@@ -250,14 +250,14 @@ const parseRopeLayer = (raw: unknown, where: string): Gemma4RopeLayerSpec => {
 };
 
 /** Reads both layer types and leaves the value ranges to the check in `./rope.ts`. */
-const parseRope = (raw: unknown, where: string): Gemma4RopeSpec => {
+const parseRope = (raw: unknown, where: string): RopeSpec => {
   if (!isRecord(raw)) throw new Error(`${where}: not an object (${String(raw)})`);
   assertAllowedKeys(raw, GEMMA4_ROPE_LAYER_TYPES, where);
-  const layer = (layerType: Gemma4RopeLayerType): Gemma4RopeLayerSpec => {
+  const layer = (layerType: RopeLayerType): RopeLayerSpec => {
     if (!Object.hasOwn(raw, layerType)) throw new Error(`${where}.${layerType}: missing`);
     return parseRopeLayer(raw[layerType], `${where}.${layerType}`);
   };
-  const spec: Gemma4RopeSpec = {
+  const spec: RopeSpec = {
     sliding_attention: layer("sliding_attention"),
     full_attention: layer("full_attention"),
   };
@@ -267,7 +267,7 @@ const parseRope = (raw: unknown, where: string): Gemma4RopeSpec => {
 
 /**
  * Checks an `unknown` (the raw declaration hub passed through) and turns it into a
- * {@link Gemma4PipelineConfig}.
+ * {@link PipelineConfig}.
  *
  * MUST: check the numeric relations as well — `chunkLength ≤ maxChunkLength` and `chunkLength ≤
  * capacity ≤ maxPosition`. A conversation that fills the capacity reaches position `capacity - 1`,
@@ -279,14 +279,14 @@ const parseRope = (raw: unknown, where: string): Gemma4RopeSpec => {
  *
  * ## Why it is public — the entry for consumers of `fromAssets`
  *
- * `Gemma4Pipeline.fromPretrained` runs this internally, so there is no need to call it. It is
- * needed by callers who pass their own bytes to `Gemma4Pipeline.fromAssets`: reading `karume.json`
+ * `Pipeline.fromPretrained` runs this internally, so there is no need to call it. It is
+ * needed by callers who pass their own bytes to `Pipeline.fromAssets`: reading `karume.json`
  * themselves, what they hold is hub's `ModelEntry.pipelineConfig` (`Record<string, unknown>`).
- * Without this entry a consumer could only cast with `as Gemma4PipelineConfig` or keep the three
+ * Without this entry a consumer could only cast with `as PipelineConfig` or keep the three
  * numbers both in the distribution and in their own code (either silently diverges when the
  * distribution moves).
  */
-export const parseGemma4PipelineConfig = (raw: unknown): Gemma4PipelineConfig => {
+export const parsePipelineConfig = (raw: unknown): PipelineConfig => {
   const where = "pipelineConfig";
   if (!isRecord(raw)) throw new Error(`${where}: not an object (${String(raw)})`);
   assertAllowedKeys(raw, ROOT_KEYS, where);

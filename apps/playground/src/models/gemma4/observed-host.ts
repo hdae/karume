@@ -1,5 +1,5 @@
 /**
- * A `Gemma4ChatSessionHost` that passes everything through to the pipeline and observes the
+ * A `ChatSessionHost` that passes everything through to the pipeline and observes the
  * sequences the session allocates: the prompt each turn sends (its token count, and how many
  * positions the carried KV already held), and how many positions the held sequence occupies between
  * turns.
@@ -10,7 +10,7 @@
  * hand-out wrapper: `used` stays a getter (it is a derived value), everything else delegates.
  */
 
-import type { Gemma4ChatSessionHost, GenerationSequence } from "@karume/models/gemma";
+import type { ChatSessionHost, GenerationSequence } from "@karume/models/gemma";
 
 /** What one `generate` call of the session sends. */
 export type GenerateObservation = {
@@ -22,8 +22,8 @@ export type GenerateObservation = {
 };
 
 export type ObservedHost = {
-  /** Pass this to `new Gemma4ChatSession(...)` in place of the pipeline. */
-  readonly host: Gemma4ChatSessionHost;
+  /** Pass this to `new ChatSession(...)` in place of the pipeline. */
+  readonly host: ChatSessionHost;
   /**
    * Positions the session's sequence occupies now; `undefined` while it holds none (before the first
    * turn, and after a turn that did not close with EOS — its next send re-renders the history).
@@ -32,11 +32,11 @@ export type ObservedHost = {
 };
 
 export const observeHost = (
-  inner: Gemma4ChatSessionHost,
+  inner: ChatSessionHost,
   onGenerate: (observation: GenerateObservation) => void,
 ): ObservedHost => {
   let held: GenerationSequence | undefined;
-  const host: Gemma4ChatSessionHost = {
+  const host: ChatSessionHost = {
     get tokenizer() {
       return inner.tokenizer;
     },

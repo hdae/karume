@@ -1,16 +1,16 @@
 /**
  * The Gemma 4 chat page's settings: the models of the two mounts (regular Gemma 4 and the mobile QAT
  * distribution), the per-turn form (sampler and max new tokens) and the chat form (the settings a
- * `Gemma4ChatSession` takes at construction), with their parsing. Pure, so `vp test` covers it.
+ * `ChatSession` takes at construction), with their parsing. Pure, so `vp test` covers it.
  */
 
 import type { Manifest } from "@karume/hub";
 import {
   dropOldestTurns,
-  type Gemma4ChatOverflowPolicy,
-  type Gemma4DefaultSampler,
-  type Gemma4PipelineConfig,
-  parseGemma4PipelineConfig,
+  type ChatOverflowPolicy,
+  type DefaultSampler,
+  type PipelineConfig,
+  parsePipelineConfig,
   type SamplerSpec,
 } from "@karume/models/gemma";
 
@@ -20,7 +20,7 @@ import type { Choice } from "@/components/choice-select";
 export const GEMMA_MOUNTS = ["gemma4", "gemma4-qat"] as const;
 export type GemmaMount = (typeof GEMMA_MOUNTS)[number];
 
-/** `Gemma4Pipeline` for `gemma4`, `Gemma4QatPipeline` for `gemma4-qat`. */
+/** `Pipeline` for `gemma4`, `Gemma4QatPipeline` for `gemma4-qat`. */
 export const MOUNT_LABELS: Readonly<Record<GemmaMount, string>> = {
   gemma4: "Gemma 4",
   "gemma4-qat": "Gemma 4 QAT",
@@ -92,15 +92,15 @@ export const effectiveModelKey = (
     : defaultModelKey(manifests);
 
 /** The model's static wiring as the distribution declares it (`pipelineConfig`, validated). */
-export const modelConfig = (manifest: Manifest, model: string): Gemma4PipelineConfig => {
+export const modelConfig = (manifest: Manifest, model: string): PipelineConfig => {
   const entry = manifest.models[model];
   if (entry === undefined) throw new Error(`The manifest has no model '${model}'`);
-  return parseGemma4PipelineConfig(entry.pipelineConfig);
+  return parsePipelineConfig(entry.pipelineConfig);
 };
 
 /**
  * Whether the model has drafter weights, i.e. whether the MTP drafter (`speculative` of
- * `Gemma4Pipeline.fromPretrained`) can be built (every preset then maps them — a quant is a complete
+ * `Pipeline.fromPretrained`) can be built (every preset then maps them — a quant is a complete
  * mapping of the model's weights). Regular Gemma 4 only: `Gemma4QatPipeline` takes no drafter.
  */
 export const hasDrafter = (manifest: Manifest, { mount, model }: ModelKey): boolean =>
@@ -122,7 +122,7 @@ export const DEFAULT_MAX_NEW_TOKENS = 512;
  * and {@link DEFAULT_MAX_NEW_TOKENS}. The page always passes the sampler it shows, so the form is
  * where the distribution's default enters.
  */
-export const turnFormOf = (sampler: Gemma4DefaultSampler | undefined): TurnForm => ({
+export const turnFormOf = (sampler: DefaultSampler | undefined): TurnForm => ({
   temperature: String(sampler?.temperature ?? 0),
   topK: sampler === undefined ? "" : String(sampler.topK),
   topP: sampler === undefined ? "" : String(sampler.topP),
@@ -222,7 +222,7 @@ export const OVERFLOW_CHOICES: readonly Choice<OverflowMode>[] = [
  * `GenerationCapacityError` (its documented contract for a policy that cannot shrink the history).
  */
 export const overflowPolicy =
-  (mode: OverflowMode, onDropped: (count: number) => void): Gemma4ChatOverflowPolicy =>
+  (mode: OverflowMode, onDropped: (count: number) => void): ChatOverflowPolicy =>
   async (context) => {
     const next = mode === "refuse" ? context.turns : await dropOldestTurns(context);
     onDropped(context.turns.length - next.length);
@@ -239,7 +239,7 @@ export type ChatForm = {
 
 export const INITIAL_CHAT_FORM: ChatForm = { system: "", capacity: "", overflow: "drop-oldest" };
 
-/** What one `Gemma4ChatSession` is built with (fixed for the session's life). */
+/** What one `ChatSession` is built with (fixed for the session's life). */
 export type ChatSettings = {
   /** `undefined` = no system message. */
   readonly system?: string;
@@ -248,7 +248,7 @@ export type ChatSettings = {
 };
 
 /** The limits a capacity is checked against (from the model's `pipelineConfig`). */
-export type CapacityLimits = Pick<Gemma4PipelineConfig, "capacity" | "chunkLength" | "maxPosition">;
+export type CapacityLimits = Pick<PipelineConfig, "capacity" | "chunkLength" | "maxPosition">;
 
 /**
  * The chat form → the session's settings. A whitespace-only system prompt means none. The capacity

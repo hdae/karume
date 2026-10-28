@@ -25,7 +25,7 @@
 //    骨格が切り替わる）ので**ビット同一は契約しない** — 実重みで token 列が動かないことがこの
 //    最適化の合格線であり、外れても値は正しいまま（pad 行は 0 で無害）なので他に門が無い。
 // ⑥ **分岐の独立**（`fork` — ADR 0066 / 0083 の追記 2026-10-11・裁定 8）: 公開面
-//    （`Gemma4Pipeline.sequence().fork()`）で分岐した 2 本が KV を共有しないこと。投機なし /
+//    （`Pipeline.sequence().fork()`）で分岐した 2 本が KV を共有しないこと。投機なし /
 //    `"always"` / ゲートつきの 3 系統で、fork を使わない同じ操作列（基準）と token 列が一致する。
 //    順序が要（下の節の doc）。
 //
@@ -61,11 +61,7 @@ import {
   type Session,
 } from "@karume/runtime";
 import { createGemma4Ple, type Gemma4Ple } from "../../models/src/gemma/ple.ts";
-import {
-  gemma4RopeInputNames,
-  gemma4RopeInputs,
-  type Gemma4RopeSpec,
-} from "../../models/src/gemma/rope.ts";
+import { gemma4RopeInputNames, ropeInputs, type RopeSpec } from "../../models/src/gemma/rope.ts";
 import {
   createGenerationProgram,
   type GenerationWiring,
@@ -83,9 +79,9 @@ import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { seriesPleHandle } from "../../models/tests/helpers/ple-series.ts";
 import { gemma4PleTotalBytes } from "../../models/src/gemma/ple-index.ts";
 import {
-  gemma4ChatPrompt,
-  gemma4ChatTurn,
-  Gemma4Pipeline,
+  chatPrompt,
+  chatTurn,
+  Pipeline,
   type GenerationStop,
   type SamplerSpec,
 } from "../../models/gemma.ts";
@@ -157,9 +153,9 @@ const MAX_POSITION = 131072;
 
 /**
  * RoPE のパラメータ（配布形の宣言と同じ値）。表は資産から外れ、cos / sin は位置列から
- * `gemma4RopeInputs` が作る（式の正本は `src/gemma/rope.ts`）。
+ * `ropeInputs` が作る（式の正本は `src/gemma/rope.ts`）。
  */
-const ROPE: Gemma4RopeSpec = {
+const ROPE: RopeSpec = {
   sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
   full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
 };
@@ -284,7 +280,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
           names: [PER_LAYER_INPUTS, ...gemma4RopeInputNames()],
           derive: async (ids, positions) => ({
             [PER_LAYER_INPUTS]: await ple.gather(ids),
-            ...gemma4RopeInputs(ROPE, positions),
+            ...ropeInputs(ROPE, positions),
           }),
         },
       });
@@ -620,19 +616,19 @@ describe.skipIf(!MIRROR_WITH_DRAFTER || !GPU_AVAILABLE)(
   "Gemma 4 E2B sequence 検収 ⑥: fork した 2 本は KV を共有しない（投機なし / always / ゲートつき・実 GPU）",
   () => {
     // Undefined until beforeAll loads it: afterAll releases only what was created.
-    let loaded: Gemma4Pipeline | undefined;
+    let loaded: Pipeline | undefined;
     let p0: number[];
     let x: number[];
     let y: number[];
     let z: number[];
-    const pipelineOf = (): Gemma4Pipeline => {
+    const pipelineOf = (): Pipeline => {
       assert(loaded !== undefined, "the pipeline is loaded in beforeAll");
       return loaded;
     };
 
     beforeAll(async () => {
       const started = performance.now();
-      loaded = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
+      loaded = await Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
         speculative: { k: GEMMA4_DRAFT_STEPS },
         maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
       });
@@ -643,18 +639,18 @@ describe.skipIf(!MIRROR_WITH_DRAFTER || !GPU_AVAILABLE)(
       // P0 は全体描画、X / Y / Z は差分（前のターンが EOS で止まれば、閉じる札は pendingToken が
       // 前置する — 上限で止まって閉じていない場合もある〈{@link FORK_TURN_TOKENS}〉）。X と Y は
       // 違う内容で、Z は直前のターンの中身に依る問い（X の行を読む）にする。
-      p0 = gemma4ChatPrompt(tokenizer, [
+      p0 = chatPrompt(tokenizer, [
         { role: "user", content: "Write one short sentence about the sea." },
       ]);
-      x = gemma4ChatTurn(tokenizer, {
+      x = chatTurn(tokenizer, {
         role: "user",
         content: "Now write one about mountains.",
       });
-      y = gemma4ChatTurn(tokenizer, {
+      y = chatTurn(tokenizer, {
         role: "user",
         content: "Now write one about a desert at night.",
       });
-      z = gemma4ChatTurn(tokenizer, {
+      z = chatTurn(tokenizer, {
         role: "user",
         content: "Repeat your previous sentence word for word.",
       });
@@ -738,7 +734,7 @@ describe.skipIf(!MIRROR_WITH_DRAFTER || !GPU_AVAILABLE)(
       });
     }
 
-    // 最後に置く（pipeline を畳む）。分岐は Gemma4Pipeline.sequence の包みが `#handed` に載せ、
+    // 最後に置く（pipeline を畳む）。分岐は Pipeline.sequence の包みが `#handed` に載せ、
     // pipeline の dispose が巻き取る — Session の dispose は context を畳まないので、ここが
     // 漏れると分岐の KV と drafter の借り手が pipeline の寿命の後まで残る。包みのこの性質は
     // pipeline の構築に実 Session と GPU が要るので、GPU 無しの門を組めずここで見る。

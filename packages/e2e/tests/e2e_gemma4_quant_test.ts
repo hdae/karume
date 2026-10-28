@@ -13,7 +13,7 @@ import { describe, it } from "vite-plus/test";
 import { localDirectory, parseManifest } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
 import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
-import { gemma4ChatPrompt, Gemma4Pipeline, type Gemma4RunPhase } from "../../models/gemma.ts";
+import { chatPrompt, Pipeline, type RunPhase } from "../../models/gemma.ts";
 import { type Gemma4QatFromPretrainedOptions, Gemma4QatPipeline } from "../../models/gemma4-qat.ts";
 import { assertSeatsApplied, mergeCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
 import type { SessionOverrides } from "../../models/src/session/options.ts";
@@ -191,7 +191,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 chunkLength: 32,
                 maxResidentPleBytes: 0,
                 ...mode.options,
-                onRunDiagnostics: (d: SessionDiagnostics, phase: Gemma4RunPhase) => {
+                onRunDiagnostics: (d: SessionDiagnostics, phase: RunPhase) => {
                   census.push(d.lastRunPipelines);
                   byPhase.set(phase.kind, [...(byPhase.get(phase.kind) ?? []), d.lastRunPipelines]);
                 },
@@ -199,7 +199,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               const source = nodeDirectory(temp);
               const pipeline =
                 family === "gemma4"
-                  ? await Gemma4Pipeline.fromPretrained(source, options)
+                  ? await Pipeline.fromPretrained(source, options)
                   : await Gemma4QatPipeline.fromPretrained(source, options);
               try {
                 const stream = pipeline.chat(
@@ -258,7 +258,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
             const gpu = await acquireGpu();
             const phaseCensus = new Map<string, SessionDiagnostics["lastRunPipelines"][]>();
             try {
-              const pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(temp), {
+              const pipeline = await Pipeline.fromPretrained(nodeDirectory(temp), {
                 gpu,
                 model: "e2b",
                 chunkLength: 32,
@@ -275,7 +275,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 },
               });
               try {
-                const prompt = gemma4ChatPrompt(pipeline.tokenizer, [
+                const prompt = chatPrompt(pipeline.tokenizer, [
                   {
                     role: "user",
                     content: "Write a numbered list of twenty tips for learning a new language.",
@@ -378,7 +378,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
           );
           const loadUnsupported = () =>
             family === "gemma4"
-              ? Gemma4Pipeline.fromPretrained(noWeightsSource, { quant: "unsupported" })
+              ? Pipeline.fromPretrained(noWeightsSource, { quant: "unsupported" })
               : Gemma4QatPipeline.fromPretrained(noWeightsSource, { quant: "unsupported" });
           await assertRejects(loadUnsupported, Error, "session.linearCompute is not supported");
           if (family === "gemma4-qat") {
@@ -430,7 +430,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 },
               });
               try {
-                const prompt = gemma4ChatPrompt(pipeline.tokenizer, [
+                const prompt = chatPrompt(pipeline.tokenizer, [
                   {
                     role: "user",
                     content: "Write a numbered list of twenty tips for learning a new language.",

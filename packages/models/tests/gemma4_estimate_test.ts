@@ -1,4 +1,4 @@
-// gemma4 の見積り（`Gemma4Pipeline.estimateSessionMemory`）が `estimateGraphMemory` へ渡す
+// gemma4 の見積り（`Pipeline.estimateSessionMemory`）が `estimateGraphMemory` へ渡す
 // generation の指定（`gemma4EstimateGenerations`）の配線。GPU は使わない。
 //
 // 実資産の gemma4 E2B ではバケット形がピークを支配しないので、`peakAccountedBytes` を見る門

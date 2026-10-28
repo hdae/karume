@@ -25,7 +25,7 @@ import type { HubRepoRef } from "@karume/hub";
 import * as anima from "../anima.ts";
 import { IRODORI_SOURCES } from "../src/irodori/config.ts";
 import { SBV2_SOURCES } from "../src/sbv2/config.ts";
-import { GEMMA4_SOURCES } from "../src/gemma/config.ts";
+import * as gemma from "../gemma.ts";
 import { SIGLIP2_SOURCES } from "../src/siglip2/config.ts";
 import * as depthAnything from "../depth-anything.ts";
 import * as birefnet from "../birefnet.ts";
@@ -34,7 +34,6 @@ import { WAN_SOURCES } from "../src/wan/config.ts";
 import { KARUME_SOURCES } from "../src/sources.ts";
 import { IrodoriPipeline } from "../src/irodori/pipeline.ts";
 import { Sbv2Pipeline } from "../src/sbv2/pipeline.ts";
-import { Gemma4Pipeline } from "../src/gemma/pipeline.ts";
 import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
 import { Umt5Encoder } from "../src/umt5/encoder.ts";
 import { WanTi2vPipeline } from "../src/wan/ti2v-pipeline.ts";
@@ -105,11 +104,11 @@ const FAMILIES: readonly Family[] = [
     load: (ref, options) => Sbv2Pipeline.fromPretrained(ref, options),
   },
   {
-    name: "GEMMA4_SOURCES",
-    sources: GEMMA4_SOURCES,
+    name: "gemma.SOURCES",
+    sources: gemma.SOURCES,
     // 単一リポの家族もキーは家族名（ADR 0092 決定 3 — 1 本でも表の形を崩さない）。
     keys: ["gemma4"],
-    load: (ref, options) => Gemma4Pipeline.fromPretrained(ref, options),
+    load: (ref, options) => gemma.Pipeline.fromPretrained(ref, options),
   },
   {
     name: "SIGLIP2_SOURCES",
@@ -169,7 +168,7 @@ test("取得元対応表を持つのは 9 家族・公開リポは 12 本", () =
       "anima.SOURCES",
       "IRODORI_SOURCES",
       "SBV2_SOURCES",
-      "GEMMA4_SOURCES",
+      "gemma.SOURCES",
       "SIGLIP2_SOURCES",
       "depthAnything.SOURCES",
       "birefnet.SOURCES",

@@ -2,7 +2,7 @@ import { readTextFile } from "@karume/test-support/fs";
 import { describe, it } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { admitGemma4Qat, assertGemma4QatModel, assertGemma4QatPle } from "../src/gemma/qat.ts";
-import { gemma4QatRopeInputs, gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
+import { gemma4QatRopeInputs, ropeInputs, type RopeSpec } from "../src/gemma/rope.ts";
 import { Gemma4QatPipeline } from "../gemma4-qat.ts";
 import type { Gemma4PleIndex } from "../src/gemma/ple-index.ts";
 import { pleFixture } from "./helpers/ple-fixture.ts";
@@ -260,7 +260,7 @@ describe("QAT のホスト RoPE", () => {
   const spec = {
     sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
     full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
-  } satisfies Gemma4RopeSpec;
+  } satisfies RopeSpec;
   it("pad と回転しない次元を厳密に保存し、入力4本を返す", () => {
     const input = gemma4QatRopeInputs(spec, [0, 17, 127]);
     assertEquals(Object.keys(input).length, 4);
@@ -291,7 +291,7 @@ describe("QAT のホスト RoPE", () => {
     // theta=10000、次元32/256は逆周波数1/10。べき乗そのものは厳密なので角度の丸めだけを検査する。
     const key = "rope_sliding_attention_sin";
     assertEquals(gemma4QatRopeInputs(spec, [127])[key].data[32], 0.13323184847831726);
-    assertEquals(gemma4RopeInputs(spec, [127])[key].data[32], 0.13323204219341278);
+    assertEquals(ropeInputs(spec, [127])[key].data[32], 0.13323204219341278);
   });
   it("両層種別 × 位置 5 点の cos / sin を golden とビット単位で突合する", async () => {
     // 1 要素だけの検査では、逆周波数が厳密に表せる次元を選んだときに「べき乗段の丸めが
@@ -303,7 +303,7 @@ describe("QAT のホスト RoPE", () => {
       await readTextFile(new URL("./fixtures/gemma4-qat-rope-golden.json", import.meta.url)),
     ) as {
       readonly positions: readonly number[];
-      readonly spec: Gemma4RopeSpec;
+      readonly spec: RopeSpec;
       readonly tables: Readonly<Record<string, string>>;
     };
     assertEquals(golden.spec, spec);

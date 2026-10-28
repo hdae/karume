@@ -259,7 +259,7 @@ export type GenerationWiring = Omit<GenerationProgramSpec, "graph" | "chunkBucke
 };
 
 /**
- * The **read surface** of the verified static wiring (public — `Gemma4Pipeline.program`).
+ * The **read surface** of the verified static wiring (public — `gemma.Pipeline.program`).
  *
  * It exposes only "the numbers you need to read when running `sequence()` yourself". Graph input /
  * output names, the capacity symbol and `derivedInputs` are **internal wiring**

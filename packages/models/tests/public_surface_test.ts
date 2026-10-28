@@ -3,7 +3,7 @@
 //
 // 同じディレクトリの `models_barrel_surface_test.ts` とは役割が違う:
 //
-// - 名指しの門（あちら）= **意図の宣言**。「`Gemma4Pipeline` は出す」「`createGemma4Ple` は
+// - 名指しの門（あちら）= **意図の宣言**。「`gemma.Pipeline` は出す」「`createGemma4Ple` は
 //   出さない」を人が書く。書いていない綴りの増減は素通りする。
 // - この門 = **増減の検出**。何が正しいかは言わず、barrel（`.`）と 11 サブパスそれぞれについて
 //   前回との差だけを見る。型 export も採るので、`Object.keys` では観測できない

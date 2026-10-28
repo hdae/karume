@@ -3,7 +3,7 @@
  * product graph and the runtime options can run on this implementation, and the material those
  * checks settle.
  *
- * MUST: the family's checks are gathered here. Scattered into {@link Gemma4Pipeline}, on the fetch
+ * MUST: the family's checks are gathered here. Scattered into {@link Pipeline}, on the fetch
  * surface they would fail only **after** GB-scale weights were downloaded — each function's doc
  * states at which point (before acquiring the GPU / before reading assets / before fetching weight
  * parts) it is called.
@@ -21,11 +21,7 @@ import type { Manifest, ModelEntry, Quant } from "@karume/hub";
 import { ModelInputError } from "../errors.ts";
 import type { GraphOwner } from "../hub/components.ts";
 import type { GenerationGraph } from "../generation/program.ts";
-import {
-  GEMMA4_PIPELINE_MAJOR,
-  type Gemma4PipelineConfig,
-  parseGemma4PipelineConfig,
-} from "./config.ts";
+import { GEMMA4_PIPELINE_MAJOR, type PipelineConfig, parsePipelineConfig } from "./config.ts";
 import { assertGemma4QatModel, type Gemma4QatModel } from "./qat.ts";
 import { GEMMA4_ROPE_LAYER_TYPES, GEMMA4_ROPE_PARTS, gemma4RopeInputName } from "./rope.ts";
 import { admitGemma4Drafter, type Gemma4DrafterAdmission } from "./speculative.ts";
@@ -37,11 +33,11 @@ export type GemmaFamily = "gemma4" | "gemma4-qat";
  * **this one place**).
  *
  * MUST: messages thrown by the shared base also carry the family's name — a user who called
- * `Gemma4QatPipeline.fromPretrained` and receives `Gemma4Pipeline: ...` cannot tell which entry it
+ * `Gemma4QatPipeline.fromPretrained` and receives `gemma.Pipeline: ...` cannot tell which entry it
  * is about.
  */
 export const gemmaEntryName = (family: GemmaFamily): string =>
-  family === "gemma4" ? "Gemma4Pipeline" : "Gemma4QatPipeline";
+  family === "gemma4" ? "gemma.Pipeline" : "Gemma4QatPipeline";
 
 /**
  * The family, and the model name only QAT has (the value {@link admitGemma4Qat} **settles from the
@@ -76,7 +72,7 @@ const GRAPH_OUTPUTS = 2;
  * the only reference, and two fields would make "only one of them was replaced" expressible.
  */
 export type Gemma4Admission = {
-  readonly config: Gemma4PipelineConfig;
+  readonly config: PipelineConfig;
   /**
    * Vocabulary size of the last-row logits exit (the basis of the id-space cross-check — ADR 0085
    * decision 5).
@@ -188,7 +184,7 @@ const capacitySymbolOf = (graph: GenerationGraph, entry: string): string => {
  */
 export const assertRopeInputShapes = (
   graph: GenerationGraph,
-  config: Gemma4PipelineConfig,
+  config: PipelineConfig,
   // NOTE: the default is regular Gemma's name for the same reason as {@link assertChunkLength}
   // (checks that call this directly have no entry). The real path ({@link admitGemma4}) always
   // passes the family's name.
@@ -231,14 +227,14 @@ export const assertRopeInputShapes = (
  * `./ple-index.ts`).
  *
  * NOTE: there is no check of `config` **alone** here — **both** entries pass it through
- * {@link parseGemma4PipelineConfig} before calling this (that is the canonical place for the checks
+ * {@link parsePipelineConfig} before calling this (that is the canonical place for the checks
  * of ranges, relations and unknown keys; the same check is not implemented twice). What this
  * function checks is only the cross-check **of the declaration against the graph**, and
  * {@link assertRopeInputShapes} is that one (the graph first becomes available at this point).
  */
 export const admitGemma4 = (
   component: GraphOwner,
-  config: Gemma4PipelineConfig,
+  config: PipelineConfig,
   drafter: GraphOwner | undefined,
   // MUST: the family's entry name ({@link gemmaEntryName}) — both families go through this one
   // function, so if the messages of the checks below carried a fixed name, they would reach QAT
@@ -273,11 +269,11 @@ export const admitGemma4 = (
 
 /**
  * Checks and returns the runtime option `chunkLength` (the check of
- * {@link Gemma4PipelineOptions.chunkLength}).
+ * {@link PipelineOptions.chunkLength}).
  *
  * MUST: at least 2 (the graph's chunk symbol was baked with prefill shapes of at least 2, and a
  * one-row chunk runs as the decode shape), at most the `maxChunkLength` the distribution declares,
- * and at most `maxPosition`. The declaration (`parseGemma4PipelineConfig`) checks the same
+ * and at most `maxPosition`. The declaration (`parsePipelineConfig`) checks the same
  * relations against the defaults, so what this checks is **the value the caller overrode**.
  *
  * MUST: the `maxChunkLength` check cannot be dropped — the trace range of the symbol `M` is not
@@ -297,7 +293,7 @@ export const admitGemma4 = (
  */
 export const assertChunkLength = (
   chunkLength: number,
-  config: Gemma4PipelineConfig,
+  config: PipelineConfig,
   // NOTE: the default is regular Gemma's name because **checks that call this directly** have no
   // entry. The real paths (`buildGemma4Program` / `estimateSessionMemory`) always pass the family's
   // name.
@@ -322,12 +318,12 @@ export const assertChunkLength = (
 
 /**
  * Checks and returns the runtime option `chunkBuckets` (the check of
- * {@link Gemma4PipelineOptions.chunkBuckets}).
+ * {@link PipelineOptions.chunkBuckets}).
  *
  * MUST: the rules of the acceptance set (at least 2, below `chunkLength`, strictly ascending) are
  * **not copied** — the canonical one is the runtime's `assertChunkBuckets`, and it is run here
  * first so that a setting it rejects does not get as far as context creation. All this layer adds
- * is the entry name, so that a caller who passed it to `Gemma4PipelineOptions` can read "which of
+ * is the entry name, so that a caller who passed it to `PipelineOptions` can read "which of
  * my settings failed" (the same approach as `assertChunkLength`).
  *
  * NOTE: no `maxChunkLength` check is needed (buckets are below `chunkLength`, and that
@@ -361,7 +357,7 @@ export const assertGemma4ChunkBuckets = (
  *
  * MUST: **return the selected `Quant` instead of discarding it** — the pre-download check of
  * `requiredLimits` (ADR 0089 decision 5) is run by the caller (the admission closure of
- * {@link Gemma4Pipeline.fromPretrained}). Checking only that the name exists and dropping the
+ * {@link Pipeline.fromPretrained}). Checking only that the name exists and dropping the
  * content here would go back to downloading 3.7 GiB without anyone reading the declared GPU
  * prerequisites.
  */
@@ -370,7 +366,7 @@ export const gemma4ManifestConfig = (
   selection: { readonly model?: string; readonly quant?: string },
   family: GemmaFamily,
 ): {
-  readonly config: Gemma4PipelineConfig;
+  readonly config: PipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
 } => {
@@ -405,7 +401,7 @@ export const gemma4ManifestConfig = (
     );
   }
   return {
-    config: parseGemma4PipelineConfig(entry.pipelineConfig),
+    config: parsePipelineConfig(entry.pipelineConfig),
     quantName,
     quant: entry.quants[quantName],
   };

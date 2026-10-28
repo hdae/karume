@@ -24,7 +24,7 @@ import { assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { createBpeModel } from "../src/text/bpe.ts";
 import { type GemmaTokenizerAssets, parseGemmaTokenizerAsset } from "../src/gemma/text/asset.ts";
-import { GemmaTokenizer } from "../src/gemma/text/tokenizer.ts";
+import { Tokenizer } from "../src/gemma/text/tokenizer.ts";
 import { readFileIfPresent } from "./helpers/read-if-present.ts";
 
 type EncodeCase = {
@@ -301,7 +301,7 @@ for (const { family, fixtureName, series } of [
   },
 ]) {
   const fixture = await readFixture(fixtureName);
-  const tokenizer = new GemmaTokenizer(assetsOf(fixture));
+  const tokenizer = new Tokenizer(assetsOf(fixture));
 
   describe(`${family} 符号化パリティ: 上流 tokenizers と id 列がビット一致`, () => {
     for (const testCase of fixture.encode) {
@@ -367,9 +367,9 @@ for (const { family, fixtureName, series } of [
 
   const seriesBytes = await readSeriesAsset(series);
   // 実資産 1 本の解釈は 0.6 秒級（併合 514,906 本の組み立て）。門ごとに組み直さない。
-  let fullTokenizer: GemmaTokenizer | undefined;
-  const full = (): GemmaTokenizer =>
-    (fullTokenizer ??= new GemmaTokenizer(
+  let fullTokenizer: Tokenizer | undefined;
+  const full = (): Tokenizer =>
+    (fullTokenizer ??= new Tokenizer(
       parseGemmaTokenizerAsset(seriesBytes as Uint8Array<ArrayBuffer>),
     ));
 

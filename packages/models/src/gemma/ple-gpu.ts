@@ -98,10 +98,10 @@ import {
   packFactor,
 } from "./ple-index.ts";
 
-/** Where PLE is placed (the value range of {@link Gemma4PipelineOptions.pleResidency}). */
-export type Gemma4PleResidency = "host" | "gpu";
+/** Where PLE is placed (the value range of {@link PipelineOptions.pleResidency}). */
+export type PleResidency = "host" | "gpu";
 
-const PLE_RESIDENCIES: readonly Gemma4PleResidency[] = ["host", "gpu"];
+const PLE_RESIDENCIES: readonly PleResidency[] = ["host", "gpu"];
 
 /**
  * Checks and returns the option value (fails synchronously **before a single asset byte is read**).
@@ -110,13 +110,13 @@ const PLE_RESIDENCIES: readonly Gemma4PleResidency[] = ["host", "gpu"];
  * silently ran on the host path, "GPU residency did not make it faster" would remain with neither
  * an exception nor a warning.
  */
-export const assertGemma4PleResidency = (where: string, value: unknown): Gemma4PleResidency => {
-  if (typeof value !== "string" || !PLE_RESIDENCIES.includes(value as Gemma4PleResidency)) {
+export const assertGemma4PleResidency = (where: string, value: unknown): PleResidency => {
+  if (typeof value !== "string" || !PLE_RESIDENCIES.includes(value as PleResidency)) {
     throw new Error(
       `${where}: pleResidency ${JSON.stringify(value)} is not ${PLE_RESIDENCIES.join(" / ")}`,
     );
   }
-  return value as Gemma4PleResidency;
+  return value as PleResidency;
 };
 
 /**
@@ -289,7 +289,7 @@ export type Gemma4PleResidentOptions = {
    * chunk length).
    */
   readonly rows: readonly number[];
-  /** The subject of diagnostics (`Gemma4Pipeline` / `Gemma4QatPipeline`). */
+  /** The subject of diagnostics (`Pipeline` / `Gemma4QatPipeline`). */
   readonly entry: string;
 };
 

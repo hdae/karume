@@ -138,7 +138,7 @@ export type SpeculationDecision = "speculate" | "plain";
  * The gate's knobs (all have defaults — **the defaults suffice**).
  *
  * They are on the public surface as a static pipeline knob (`gate` of
- * `Gemma4PipelineOptions.speculative`), but the option is meant for measurement and acceptance
+ * `gemma.PipelineOptions.speculative`), but the option is meant for measurement and acceptance
  * (the same treatment as `linearGemvRowsThreadTarget` — it exists only to run A/B of the knobs with
  * the same script).
  */

@@ -611,7 +611,7 @@ export const samplerDistribution = (
  * and `bias[0][1] = -Infinity` would reach the running draw. **This is the only place the array is
  * copied** ({@link samplerDistribution} reads the spec only within one call, so it need not copy).
  *
- * NOTE: it is exported so the upper layers (`Gemma4Pipeline.chat` / `Gemma4ChatSession.send`) take
+ * NOTE: it is exported so the upper layers (`gemma.Pipeline.chat` / `gemma.ChatSession.send`) take
  * the same copy **at issue**. Those two layers promise "requests are copied at issue" in their type
  * docs, and if the copy were delayed to {@link createSampler} (= the first `next()`), rewrites in
  * between would silently take effect. The export keeps a single copy point and is not on the

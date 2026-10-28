@@ -477,8 +477,8 @@ export type GenerationRequest = {
  * source of truth for the check**.
  *
  * MUST: do not keep two copies of the same expressions. Both the synchronous section of
- * {@link GenerationSequence.generate} and the high-level surfaces (`Gemma4Pipeline.chat` /
- * `Gemma4ChatSession.send`) **at issue** call this. The high-level surfaces call `generate` in an
+ * {@link GenerationSequence.generate} and the high-level surfaces (`gemma.Pipeline.chat` /
+ * `gemma.ChatSession.send`) **at issue** call this. The high-level surfaces call `generate` in an
  * async generator body, so without calling this themselves an invalid request would "not fail until
  * the first `next()`" (the diagnosis moves away from the issuer).
  *
@@ -1021,7 +1021,7 @@ export const createGenerationSequence = async <C extends ForkableContextFace<C>>
     throw new ModelInputError(`capacity ${capacity} is not a positive integer`);
   }
   // The capacity relations are checked before the context is allocated (the same two expressions
-  // `parseGemma4PipelineConfig` checks against the declaration, applied to the run-time knob too).
+  // `gemma.parsePipelineConfig` checks against the declaration, applied to the run-time knob too).
   if (capacity < program.chunkLength) {
     throw new ModelInputError(
       `capacity ${capacity} is below chunkLength ${program.chunkLength} (not even one chunk fits)`,

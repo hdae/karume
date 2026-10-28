@@ -34,7 +34,7 @@ import type {
   gemma,
   Rgb8Image,
 } from "../mod.ts";
-import type { Gemma4FromPretrainedOptions as SubpathFromPretrained } from "../gemma.ts";
+import type { FromPretrainedOptions as SubpathFromPretrained } from "../gemma.ts";
 
 /** The barrel's flat values (the shared surface); every other barrel value is a family namespace. */
 const SHARED_VALUES = [
@@ -124,12 +124,12 @@ test("barrel: the shared types are exported flat", () => {
   assertEquals([image.width, wav.sampleRate], [1, 16_000]);
 });
 
-// Type access through a namespace (`gemma.Gemma4FromPretrainedOptions`) and the component
+// Type access through a namespace (`gemma.FromPretrainedOptions`) and the component
 // replacement option (ADR 0108 decision 19 / ADR 0109 decision 10) must agree with the subpath's
 // type. Only the type check of the test lane can fail here.
 test("barrel: types through a namespace are the subpath's types", () => {
   const source: ComponentSource = { source: "owner/name", quant: "i4" };
-  const options: gemma.Gemma4FromPretrainedOptions = {
+  const options: gemma.FromPretrainedOptions = {
     components: { model: source },
   } satisfies SubpathFromPretrained;
   assertEquals(Object.keys(options.components ?? {}), ["model"]);
@@ -172,31 +172,31 @@ test("barrel: generateGreedy remains as an internal helper (only the public surf
 
 /** The gemma / generation-API **values** of `./gemma` (and so of the barrel's `gemma`). */
 const GEMMA_VALUES = [
-  "Gemma4Pipeline",
-  "gemma4ChatPrompt",
+  "Pipeline",
+  "chatPrompt",
   // The entry point for consumers that run several turns with `sequence`. Without it they guess
   // ("render everything and strip the leading `<bos>`") — the turn-local contract is not public.
-  "gemma4ChatTurn",
+  "chatTurn",
   "GenerationCapacityError",
   // How a `fromAssets` consumer builds the config from the hub's `Record<string, unknown>`.
   // Without it they cast with `as`, or keep the three numbers in both the distribution and the
   // consumer.
-  "parseGemma4PipelineConfig",
+  "parsePipelineConfig",
   // RoPE cos / sin are not baked into the graph; the host builds them per chunk (ADR 0091
   // decision 1). Low-level consumers (`fromAssets` / their own generation loop) would have to
   // build the tables themselves.
-  "gemma4RopeInputs",
+  "ropeInputs",
   // The high-level surface for multi-turn conversations that carry the KV over (ADR 0083 addendum
   // 2026-09-02).
-  "Gemma4ChatSession",
+  "ChatSession",
   // The default overflow policy. Consumers **replace it by name**, so it must be public (otherwise
   // the only way is to rewrite the default).
   "dropOldestTurns",
   // The table of sources verified with this package version (ADR 0073 / 0092). Its values are
   // checked by `sources_test.ts`; here only that it is public.
-  "GEMMA4_SOURCES",
+  "SOURCES",
   // The default prefill buckets. Consumers **start from it and add or remove entries**.
-  "GEMMA4_CHUNK_BUCKETS",
+  "CHUNK_BUCKETS",
 ];
 
 /** Spellings that must not be public (internal assembly). */
@@ -210,9 +210,9 @@ const INTERNAL_VALUES = [
   "renderGemma4Chat",
   "renderGemma4ChatTurn",
   "gemma4StopTokens",
-  "GemmaTokenizer",
+  "Tokenizer",
   // The chat layer's internals (`gemma4_chat_test.ts` takes them from `src/` directly). The public
-  // surface is `Gemma4Pipeline.chat` / `Gemma4ChatSession`; the streaming-decode parts stay
+  // surface is `gemma.Pipeline.chat` / `gemma.ChatSession`; the streaming-decode parts stay
   // private — exporting them would make "wire the stop-string filter to the detokenizer yourself"
   // the consumers' normal path. `StreamingDetokenizer` is re-exported with `export type`, so it is
   // not public **as a value**.
@@ -252,7 +252,7 @@ const SOURCE_TABLES: Readonly<Record<string, string>> = {
   "./anima": "SOURCES",
   "./irodori": "IRODORI_SOURCES",
   "./sbv2": "SBV2_SOURCES",
-  "./gemma": "GEMMA4_SOURCES",
+  "./gemma": "SOURCES",
   "./siglip2": "SIGLIP2_SOURCES",
   "./depth-anything": "SOURCES",
   "./birefnet": "SOURCES",
@@ -314,7 +314,17 @@ test("gemma4-qat: exports its own entry points and not Gemma's pipeline", async 
   for (const name of ["Gemma4QatPipeline", "gemma4QatRopeInputs"]) {
     assert(Object.hasOwn(qat, name), `./gemma4-qat has no ${name}`);
   }
-  for (const name of ["GemmaPipeline", "admitGemma4Qat", "Gemma4Pipeline", "GEMMA4_SOURCES"]) {
+  for (const name of ["GemmaPipeline", "admitGemma4Qat"]) {
     assertEquals(Object.hasOwn(qat, name), false, `./gemma4-qat exports ${name}`);
+  }
+  // By identity, not by name: Gemma's bare names (`Pipeline`, `SOURCES`) are names the QAT surface
+  // may spell for its own values.
+  // Widened to plain values so the comparison compiles whatever the QAT surface exports today
+  // (the checker rejects comparing types that do not overlap).
+  const exported: Readonly<Record<string, unknown>> = qat;
+  const regular = await import("../gemma.ts");
+  for (const [name, value] of Object.entries(exported)) {
+    assert(value !== regular.Pipeline, `./gemma4-qat exports Gemma's Pipeline as ${name}`);
+    assert(value !== regular.SOURCES, `./gemma4-qat exports Gemma's SOURCES as ${name}`);
   }
 });

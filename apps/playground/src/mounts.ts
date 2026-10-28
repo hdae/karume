@@ -13,7 +13,7 @@
 import * as anima from "@karume/models/anima";
 import * as birefnet from "@karume/models/birefnet";
 import * as depthAnything from "@karume/models/depth-anything";
-import { GEMMA4_SOURCES } from "@karume/models/gemma";
+import * as gemma from "@karume/models/gemma";
 import { IRODORI_SOURCES } from "@karume/models/irodori";
 import { SBV2_SOURCES } from "@karume/models/sbv2";
 import { SIGLIP2_SOURCES } from "@karume/models/siglip2";
@@ -56,8 +56,8 @@ export const MOUNTS = {
     hfRepo: IRODORI_SOURCES["irodori-v4.1-small"].repo,
   },
   sbv2: { directory: "models/karume-sbv2-jvnv", hfRepo: SBV2_SOURCES["sbv2-jvnv"].repo },
-  gemma4: { directory: "models/karume-gemma4", hfRepo: GEMMA4_SOURCES["gemma4"].repo },
-  // No public repo (GEMMA4_SOURCES holds only `gemma4`): the direct route only.
+  gemma4: { directory: "models/karume-gemma4", hfRepo: gemma.SOURCES["gemma4"].repo },
+  // No public repo (gemma.SOURCES holds only `gemma4`): the direct route only.
   "gemma4-qat": "models/karume-gemma4-qat",
 } as const satisfies DistributionsPluginOptions["distributions"];
 

@@ -16,7 +16,7 @@
  *
  * ## MUST: this module owns `<bos>`
  *
- * `GemmaTokenizer.encode` does not add `<bos>` (matching the measured gemma4 post_processor). Only
+ * `Tokenizer.encode` does not add `<bos>` (matching the measured gemma4 post_processor). Only
  * {@link renderGemma4Chat} adds it; without the split, introducing chat would produce a double BOS
  * (the MUST of ADR 0084 decision 5). Upstream has the same shape — the template renders
  * `bos_token`, and `apply_chat_template` encodes with `add_special_tokens=False`.
@@ -33,10 +33,10 @@
  */
 
 import { ModelInputError } from "../../errors.ts";
-import type { GemmaTokenizer } from "./tokenizer.ts";
+import type { Tokenizer } from "./tokenizer.ts";
 
 /** The roles in the first scope (`assistant` is mapped to `model` when rendered). */
-export type Gemma4ChatRole = "system" | "developer" | "user" | "assistant";
+export type ChatRole = "system" | "developer" | "user" | "assistant";
 
 /**
  * One message of a conversation.
@@ -45,8 +45,8 @@ export type Gemma4ChatRole = "system" | "developer" | "user" | "assistant";
  * rejected by {@link renderGemma4Chat} **with an allow list** (the type protects only TS callers; a
  * value that came from JSON passes straight through).
  */
-export type Gemma4ChatMessage = {
-  readonly role: Gemma4ChatRole;
+export type ChatMessage = {
+  readonly role: ChatRole;
   readonly content: string;
 };
 
@@ -105,7 +105,7 @@ const trim = (text: string): string => {
  * `where` is the location prefixed to the diagnostic (it differs per caller — `… messages[i]` for
  * a conversation).
  */
-const assertPlainMessage = (message: Gemma4ChatMessage, where: string): void => {
+const assertPlainMessage = (message: ChatMessage, where: string): void => {
   if (typeof message !== "object" || message === null) {
     throw new ModelInputError(`${where} is not an object`);
   }
@@ -149,14 +149,14 @@ const assertPlainMessage = (message: Gemma4ChatMessage, where: string): void => 
  * MUST: also reject an empty conversation — upstream `apply_chat_template` rejects it with a
  * `ValueError`, so the accepted set is not made wider than upstream's.
  */
-const assertPlainConversation = (messages: readonly Gemma4ChatMessage[]): void => {
+const assertPlainConversation = (messages: readonly ChatMessage[]): void => {
   if (messages.length === 0) {
     throw new ModelInputError(
-      "gemma4ChatPrompt: the conversation is empty (the upstream apply_chat_template rejects it too)",
+      "gemma.chatPrompt: the conversation is empty (the upstream apply_chat_template rejects it too)",
     );
   }
   messages.forEach((message, index) => {
-    assertPlainMessage(message, `gemma4ChatPrompt: messages[${index}]`);
+    assertPlainMessage(message, `gemma.chatPrompt: messages[${index}]`);
   });
 };
 
@@ -176,10 +176,10 @@ const assertPlainConversation = (messages: readonly Gemma4ChatMessage[]): void =
  *    entry to generation; it has no form for "rendering a closed conversation for training").
  *
  * NOTE: not exposed on the public surface (the thin surface of ADR 0008 — the consumer's entry is
- * {@link gemma4ChatPrompt}). `export` is so that the fixture comparison looks at "rendering" and
+ * {@link chatPrompt}). `export` is so that the fixture comparison looks at "rendering" and
  * "encoding" separately — when they diverge, the reader learns which step it was.
  */
-export const renderGemma4Chat = (messages: readonly Gemma4ChatMessage[]): string => {
+export const renderGemma4Chat = (messages: readonly ChatMessage[]): string => {
   assertPlainConversation(messages);
   let out = BOS;
   let index = 0;
@@ -189,7 +189,7 @@ export const renderGemma4Chat = (messages: readonly Gemma4ChatMessage[]): string
   }
   // Continuation is decided on the role **before mapping** (after mapping to `model`, an assistant
   // right after the system block would look like a "continuation").
-  let previousRole: Gemma4ChatRole | undefined;
+  let previousRole: ChatRole | undefined;
   for (; index < messages.length; index += 1) {
     const message = messages[index];
     const role = message.role === "assistant" ? MODEL_ROLE : message.role;
@@ -215,10 +215,8 @@ export const renderGemma4Chat = (messages: readonly Gemma4ChatMessage[]): string
  * the fixtures are taken independently from upstream by `tools/export-recipes/gemma4/chat.py`
  * (ADR 0084 decision 7).
  */
-export const gemma4ChatPrompt = (
-  tokenizer: GemmaTokenizer,
-  messages: readonly Gemma4ChatMessage[],
-): number[] => tokenizer.encode(renderGemma4Chat(messages));
+export const chatPrompt = (tokenizer: Tokenizer, messages: readonly ChatMessage[]): number[] =>
+  tokenizer.encode(renderGemma4Chat(messages));
 
 /**
  * One new message → **the delta rendered as the continuation of the conversation** (containing
@@ -235,9 +233,9 @@ export const gemma4ChatPrompt = (
  * So the identity that holds is (`⧺` is token-sequence concatenation):
  *
  * ```text
- * gemma4ChatPrompt(whole conversation)
- *   = gemma4ChatPrompt(up to the first turn) ⧺ generated body ⧺ [<turn|>]
- *     ⧺ gemma4ChatTurn(next message) ⧺ …
+ * chatPrompt(whole conversation)
+ *   = chatPrompt(up to the first turn) ⧺ generated body ⧺ [<turn|>]
+ *     ⧺ chatTurn(next message) ⧺ …
  * ```
  *
  * The check in `gemma4_chat_test.ts` verifies this identity over arbitrary splits (it breaks there
@@ -251,15 +249,15 @@ export const gemma4ChatPrompt = (
  * MUST: reject `assistant`. The model turn is the slot generation fills, and the upstream template
  * also folds consecutive assistants into one turn (branch 2 of `renderGemma4Chat`), so "appending an
  * assistant after a closed model turn" cannot be rendered as a delta. To insert one into a
- * conversation, re-render the whole of it with {@link gemma4ChatPrompt}.
+ * conversation, re-render the whole of it with {@link chatPrompt}.
  */
-export const renderGemma4ChatTurn = (message: Gemma4ChatMessage): string => {
-  assertPlainMessage(message, "gemma4ChatTurn: message");
+export const renderGemma4ChatTurn = (message: ChatMessage): string => {
+  assertPlainMessage(message, "gemma.chatTurn: message");
   if (message.role === "assistant") {
     throw new ModelInputError(
-      `gemma4ChatTurn: role 'assistant' cannot be a delta` +
+      `gemma.chatTurn: role 'assistant' cannot be a delta` +
         ` (the model turn is the slot generation fills, and the template folds consecutive assistant turns into one — ` +
-        `to insert one into the conversation, re-render the whole conversation with gemma4ChatPrompt)`,
+        `to insert one into the conversation, re-render the whole conversation with gemma.chatPrompt)`,
     );
   }
   // The leading newline is the one character "right after the `<turn|>` that closed the previous
@@ -276,11 +274,11 @@ export const renderGemma4ChatTurn = (message: Gemma4ChatMessage): string => {
  * doc of {@link renderGemma4ChatTurn} is the source of truth for the turn-local contract — the
  * `<turn|>` that closes the previous turn is not included).
  *
- * This is the entry for running a multi-turn conversation with `Gemma4Pipeline.sequence()`. Past
+ * This is the entry for running a multi-turn conversation with `Pipeline.sequence()`. Past
  * turns are in the context's KV, so there is no need to re-render the whole conversation every turn
  * (= an O(n²) prefill).
  */
-export const gemma4ChatTurn = (tokenizer: GemmaTokenizer, message: Gemma4ChatMessage): number[] =>
+export const chatTurn = (tokenizer: Tokenizer, message: ChatMessage): number[] =>
   tokenizer.encode(renderGemma4ChatTurn(message));
 
 /**
@@ -295,7 +293,7 @@ export const gemma4ChatTurn = (tokenizer: GemmaTokenizer, message: Gemma4ChatMes
  * MUST: an asset missing a spelling fails loudly. Passing a thinned set would end up "not stopping
  * at `<turn|>` and starting to write the next turn itself", and not a single exception would occur.
  */
-export const gemma4StopTokens = (tokenizer: GemmaTokenizer): number[] => {
+export const gemma4StopTokens = (tokenizer: Tokenizer): number[] => {
   const stops = [tokenizer.eosId];
   for (const spelling of [END_OF_TURN, TOOL_RESPONSE]) {
     const id = tokenizer.addedTokenId(spelling);

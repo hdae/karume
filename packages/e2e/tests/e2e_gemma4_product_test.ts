@@ -55,11 +55,7 @@ import {
   type Gemma4PleTable,
   PLE_INDEX_ASSET,
 } from "../../models/src/gemma/ple-index.ts";
-import {
-  gemma4RopeInputNames,
-  gemma4RopeInputs,
-  type Gemma4RopeSpec,
-} from "../../models/src/gemma/rope.ts";
+import { gemma4RopeInputNames, ropeInputs, type RopeSpec } from "../../models/src/gemma/rope.ts";
 import { planPrefillChunks } from "../../models/src/generation/greedy.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
@@ -112,7 +108,7 @@ const CAPACITY = 4096;
 const MAX_POSITION = 131072;
 
 /** RoPE のパラメータ（配布形の宣言と同じ値 — 表は資産に無く cos / sin はホストが作る）。 */
-const ROPE: Gemma4RopeSpec = {
+const ROPE: RopeSpec = {
   sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
   full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
 };
@@ -686,7 +682,7 @@ const generate = async (
         {
           [INPUT_IDS]: i32Row(chunkLength, ids),
           [PER_LAYER_INPUTS]: perLayer,
-          ...gemma4RopeInputs(ROPE, positions),
+          ...ropeInputs(ROPE, positions),
           [LAST_ROW]: lastRowInput(chunk.queryLength - 1),
         },
         undefined,
@@ -704,7 +700,7 @@ const generate = async (
         {
           [INPUT_IDS]: i32Row(1, Int32Array.of(current)),
           [PER_LAYER_INPUTS]: perLayer,
-          ...gemma4RopeInputs(ROPE, [prompt.length + index]),
+          ...ropeInputs(ROPE, [prompt.length + index]),
           [LAST_ROW]: lastRowInput(0),
         },
         undefined,

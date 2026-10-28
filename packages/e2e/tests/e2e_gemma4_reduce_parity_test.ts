@@ -1,6 +1,6 @@
 // 実重み Gemma 4 E2B の **③PV 縮約順 A/B**（K-12・ADR 0058 決定 4 ②のモデル面）。
 //
-// [limitations](../../../docs/limitations.md) は「`Gemma4Pipeline` の既定は KV 並列縮約
+// [limitations](../../../docs/limitations.md) は「`Pipeline` の既定は KV 並列縮約
 // （`"parallel"`）で、runtime の参照経路 `"sequential"` とは縮約順が違うが、**gemma4 の golden は
 // 両者で同一**」と書く。K-12 を既定へ昇格した根拠がこの主張なので、機械で守る門をここに置く。
 //
@@ -24,7 +24,7 @@ import { isNotFound, readTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals } from "@std/assert";
 import { nodeDirectory } from "@karume/hub/node";
 import { beforeAll, describe, it } from "vite-plus/test";
-import { Gemma4Pipeline } from "../../models/gemma.ts";
+import { Pipeline } from "../../models/gemma.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budget.ts";
 import { mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
@@ -93,7 +93,7 @@ type Run = {
  * 縮約順しかない。
  */
 const runCase = async (
-  pipeline: Gemma4Pipeline,
+  pipeline: Pipeline,
   prompt: readonly number[],
   maxNewTokens: number,
 ): Promise<Run> => {
@@ -123,7 +123,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 
     for (const reduce of REDUCERS) {
       it(`stateAttentionReduce = ${reduce}`, async () => {
-        const pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
+        const pipeline = await Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
           maxResidentPleBytes,
           stateAttentionReduce: reduce,
         });

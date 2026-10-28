@@ -1,12 +1,12 @@
 /**
- * The Gemma 4 chat: load regular Gemma 4 (`Gemma4Pipeline`) or a mobile QAT model
+ * The Gemma 4 chat: load regular Gemma 4 (`gemma.Pipeline`) or a mobile QAT model
  * (`Gemma4QatPipeline`) on the page's GPU, hold one multi-turn conversation in a
- * `Gemma4ChatSession` (the KV is carried between turns that close with EOS), stream each reply, and
+ * `ChatSession` (the KV is carried between turns that close with EOS), stream each reply, and
  * save a record of the chat: settings, per-turn statistics and generated token ids, and the Session
  * diagnostics when the pipeline was loaded with them.
  */
 
-import { Gemma4ChatSession, type Gemma4ChatStop, gemma4ChatPrompt } from "@karume/models/gemma";
+import { ChatSession, type ChatStop, chatPrompt } from "@karume/models/gemma";
 import type { AcquireGpuOptions } from "@karume/runtime";
 import { SendIcon, SquareIcon } from "lucide-react";
 import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -110,12 +110,12 @@ type ReadyPipeline = Extract<GemmaPipelineState, { kind: "ready" }>;
 /** What **Load** / **New chat** ask the session to be built with (a new object per press). */
 type ChatRequest = { readonly settings: ChatSettings };
 
-/** The conversation of the loaded pipeline (one `Gemma4ChatSession`). */
+/** The conversation of the loaded pipeline (one `ChatSession`). */
 type ChatState =
   | { readonly kind: "none" }
   | {
       readonly kind: "ready";
-      readonly session: Gemma4ChatSession;
+      readonly session: ChatSession;
       readonly observed: ObservedHost;
       readonly settings: ChatSettings;
       /** The pipeline state and the request the session was built for (stale once either changes). */
@@ -293,7 +293,7 @@ export const Gemma4Page = () => {
   const turnCount = useRef(0);
   const diagnosticsAcc = useRef<DiagnosticsRecord>({});
   /** The session the conversation state belongs to (a turn that outlives it drops its results). */
-  const liveSession = useRef<Gemma4ChatSession | undefined>(undefined);
+  const liveSession = useRef<ChatSession | undefined>(undefined);
 
   // With diagnostics, every run of the pipeline reports here: folded per Session (the drafter's runs
   // are `draft`), and counted for the running turn.
@@ -338,9 +338,9 @@ export const Gemma4Page = () => {
     const observed = observeHost(pipeline.pipeline, (observation) =>
       turnSink.current?.onGenerate(observation),
     );
-    let session: Gemma4ChatSession;
+    let session: ChatSession;
     try {
-      session = new Gemma4ChatSession(observed.host, {
+      session = new ChatSession(observed.host, {
         ...(settings.system === undefined ? {} : { system: settings.system }),
         // Every turn passes its own maxNewTokens and sampler; this is only the session's fallback.
         maxNewTokens: DEFAULT_MAX_NEW_TOKENS,
@@ -486,7 +486,7 @@ export const Gemma4Page = () => {
         const endAt = performance.now();
         // After Stop, `done` resolves `aborted` (the iteration threw the signal's reason); after a
         // failure it rejects with the iteration's error.
-        let stop: Gemma4ChatStop | undefined;
+        let stop: ChatStop | undefined;
         try {
           stop = await stream.done;
         } catch (error) {
@@ -589,9 +589,7 @@ export const Gemma4Page = () => {
     if (used !== undefined) return { kind: "kv", used, capacity };
     const turns = readyChat.session.turns;
     const tokens =
-      turns.length === 0
-        ? 0
-        : gemma4ChatPrompt(readyChat.pipeline.pipeline.tokenizer, turns).length;
+      turns.length === 0 ? 0 : chatPrompt(readyChat.pipeline.pipeline.tokenizer, turns).length;
     return { kind: "history", tokens, capacity };
     // turnRecords: a finished turn changes the KV or the history.
   }, [readyChat, running, turnRecords]);
@@ -695,7 +693,7 @@ export const Gemma4Page = () => {
                 hint={
                   modelKey?.mount === "gemma4-qat"
                     ? "Mobile QAT (Gemma4QatPipeline): experimental, fixed int2/int4/int8 with SRQ, no MTP; direct route only."
-                    : "Regular Gemma 4 (Gemma4Pipeline)."
+                    : "Regular Gemma 4 (gemma.Pipeline)."
                 }
               >
                 <ChoiceSelect

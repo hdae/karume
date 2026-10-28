@@ -57,17 +57,10 @@ import {
 import { nodeDirectory } from "@karume/hub/node";
 import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 // MUST: 入口は**公開面**から取る（`src/...` を直に掴むと、面が痩せていても門が緑のままになる）。
-import { type Gemma4ChatMessage, Gemma4Pipeline } from "../../models/gemma.ts";
-import {
-  type Gemma4PipelineConfig,
-  parseGemma4PipelineConfig,
-} from "../../models/src/gemma/config.ts";
+import { type ChatMessage, Pipeline } from "../../models/gemma.ts";
+import { type PipelineConfig, parsePipelineConfig } from "../../models/src/gemma/config.ts";
 import { createGemma4Ple, type Gemma4Ple } from "../../models/src/gemma/ple.ts";
-import {
-  gemma4RopeInputNames,
-  gemma4RopeInputs,
-  type Gemma4RopeSpec,
-} from "../../models/src/gemma/rope.ts";
+import { gemma4RopeInputNames, ropeInputs, type RopeSpec } from "../../models/src/gemma/rope.ts";
 import {
   admitGemma4Drafter,
   draftOnce,
@@ -96,7 +89,7 @@ const ASSEMBLE_COMMAND =
   "cd tools/export-recipes && uv run python dist.py --pipeline gemma4" +
   "（drafter 系列と golden は … python -m gemma4.export_drafter）";
 
-/** 配布形の役割名（`Gemma4Pipeline` の同名定数と同じ綴り — 焼く側は `distribution.py`）。 */
+/** 配布形の役割名（`Pipeline` の同名定数と同じ綴り — 焼く側は `distribution.py`）。 */
 const MODEL = "model";
 const DRAFTER = "drafter";
 /** golden のケース（正本は `export_drafter.py` の GOLDEN_CASES）。 */
@@ -245,7 +238,7 @@ const drafterComponent = () => openMirrorComponent(MIRROR_DIR, DRAFTER);
 /** ミラーの `pipelineConfig`（RoPE の宣言と容量の出どころ）。 */
 const pipelineConfig = () => {
   const entry = mirrorManifest().models[mirrorManifest().defaultModel];
-  return parseGemma4PipelineConfig(entry.pipelineConfig);
+  return parsePipelineConfig(entry.pipelineConfig);
 };
 
 /** 部品 1 本ずつの記述文書から宣言を取り出す（データ節は 1 バイトも要らない）。 */
@@ -290,7 +283,7 @@ test.skipIf(!MIRROR_PRESENT)(
     );
     assertEquals(shared[0], SHARED_WEIGHT, "共有 initializer が名乗る貸し手の initializer 名");
 
-    // 門そのもの（`Gemma4Pipeline` が admission で通す 1 本）。貸し手の initializer 名まで解決する。
+    // 門そのもの（`Pipeline` が admission で通す 1 本）。貸し手の initializer 名まで解決する。
     const admitted = admitGemma4Drafter("test", drafter, {
       graph: target,
       rope: config.rope,
@@ -413,7 +406,7 @@ type DrafterPair = {
  * case.
  */
 const openDrafterPair = async (): Promise<DrafterPair> => {
-  const rope: Gemma4RopeSpec = pipelineConfig().rope;
+  const rope: RopeSpec = pipelineConfig().rope;
   const { target: targetGraph, drafter: drafterGraph } = await readGraphs();
   const admitted = admitGemma4Drafter("test", drafterGraph, {
     graph: targetGraph,
@@ -517,7 +510,7 @@ type MatchCounts = { readonly perStep: number[]; readonly total: number; readonl
 describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
   `gemma4 drafter 検収: draft が torch golden と 99% 以上一致する（実 GPU）${UPSTREAM_PARITY_OPT_IN}`,
   () => {
-    let config: Gemma4PipelineConfig;
+    let config: PipelineConfig;
     let ple: Gemma4Ple | undefined;
     let pair: DrafterPair | undefined;
     const counts: MatchCounts[] = [];
@@ -560,7 +553,7 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
         {
           [INPUT_IDS]: { dtype: "i32", shape: [1, ids.length], data: ids },
           [PER_LAYER_INPUTS]: perLayer,
-          ...gemma4RopeInputs(config.rope, positions),
+          ...ropeInputs(config.rope, positions),
           [LAST_ROW]: { dtype: "i32", shape: [1], data: Int32Array.of(queryLength - 1) },
         },
         undefined,
@@ -705,14 +698,14 @@ const CHAT_CASE = {
 } as const;
 
 type ChatFixture = {
-  readonly chat: { readonly name: string; readonly messages: Gemma4ChatMessage[] }[];
+  readonly chat: { readonly name: string; readonly messages: ChatMessage[] }[];
 };
 
 describe.skipIf(!MIRROR_PRESENT || !GPU_AVAILABLE)(
-  "Gemma4Pipeline: speculative を渡すと drafter も載り、chat の golden は動かない（実 GPU）",
+  "gemma.Pipeline: speculative を渡すと drafter も載り、chat の golden は動かない（実 GPU）",
   () => {
     let chatCase: ChatFixture["chat"][number];
-    let pipeline: Gemma4Pipeline | undefined;
+    let pipeline: Pipeline | undefined;
 
     beforeAll(async () => {
       const fixture: ChatFixture = JSON.parse(
@@ -725,7 +718,7 @@ describe.skipIf(!MIRROR_PRESENT || !GPU_AVAILABLE)(
       chatCase = found;
 
       const started = performance.now();
-      pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
+      pipeline = await Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
         speculative: { k: GEMMA4_DRAFT_STEPS },
         maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
       });

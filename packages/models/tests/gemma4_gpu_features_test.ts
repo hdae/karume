@@ -19,7 +19,7 @@ import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import type { ModelInput } from "../../runtime/tests/helpers/container-write.ts";
-import { Gemma4Pipeline } from "../gemma.ts";
+import { Pipeline } from "../gemma.ts";
 import { parseIrDeclarationValue } from "./helpers/container-fixture.ts";
 import {
   HUB_URL,
@@ -38,7 +38,7 @@ const ROPE = {
   full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
 } as const;
 
-/** `parseGemma4PipelineConfig` を通る最小の宣言（`gemma4_config_test.ts` の `MINIMAL`）。 */
+/** `parsePipelineConfig` を通る最小の宣言（`gemma4_config_test.ts` の `MINIMAL`）。 */
 const PIPELINE_CONFIG = {
   chunkLength: 32,
   maxChunkLength: 128,
@@ -114,7 +114,7 @@ const gemmaComponent = (): ModelInput => {
 };
 
 /** gemma4 の配布形（容器 1 本）を疑似 HF に載せ、`quant` 欄だけを差し替える。 */
-const loadWithQuant = async (quant: Record<string, unknown>): Promise<Gemma4Pipeline> => {
+const loadWithQuant = async (quant: Record<string, unknown>): Promise<Pipeline> => {
   const served = await serveContainer(`${MODEL}/model.f32`, gemmaComponent());
   const rig = await serveRepo(
     {
@@ -130,7 +130,7 @@ const loadWithQuant = async (quant: Record<string, unknown>): Promise<Gemma4Pipe
     new Map(served.files),
     { [MODEL]: served.parts },
   );
-  return await Gemma4Pipeline.fromPretrained(
+  return await Pipeline.fromPretrained(
     { repo: REPO, revision: SHA, hubUrl: HUB_URL },
     {
       fetch: rig.mock.fetch,
@@ -141,13 +141,13 @@ const loadWithQuant = async (quant: Record<string, unknown>): Promise<Gemma4Pipe
   );
 };
 
-describe("Gemma4Pipeline.fromPretrained の gpuFeatures（共有 GPU）", () => {
+describe("gemma.Pipeline.fromPretrained の gpuFeatures（共有 GPU）", () => {
   it("shader-f16 を宣言した quant は、共有 GPU に無ければ admission で quant 名つきで落ちる", async () => {
     const error = await assertRejects(
       () => loadWithQuant({ gpuFeatures: { shaderF16: true } }),
       Error,
     );
-    assertStringIncludes(error.message, "Gemma4Pipeline: quant 'f32' requires shader-f16, but");
+    assertStringIncludes(error.message, "gemma.Pipeline: quant 'f32' requires shader-f16, but");
   });
 
   it("宣言しない quant は同じ共有 GPU でこの門を抜け、PLE 索引の段まで進む（対照）", async () => {

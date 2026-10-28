@@ -8,11 +8,11 @@
  * (shown dimmed).
  */
 
-import type { Gemma4ChatMessage, Gemma4ChatStop } from "@karume/models/gemma";
+import type { ChatMessage, ChatStop } from "@karume/models/gemma";
 
 export type TranscriptEntry = {
   readonly id: number;
-  readonly role: Gemma4ChatMessage["role"];
+  readonly role: ChatMessage["role"];
   readonly text: string;
   /** Whether the session's history still holds the entry (false = dropped by the overflow policy). */
   readonly inContext: boolean;
@@ -31,7 +31,7 @@ export type SentTurn = {
 };
 
 /** The session's history without the system message (the transcript does not show it). */
-export const historyOf = (turns: readonly Gemma4ChatMessage[]): readonly Gemma4ChatMessage[] =>
+export const historyOf = (turns: readonly ChatMessage[]): readonly ChatMessage[] =>
   turns.filter((turn) => turn.role !== "system");
 
 /**
@@ -48,7 +48,7 @@ export const historyOf = (turns: readonly Gemma4ChatMessage[]): readonly Gemma4C
  */
 export const deriveTranscript = (input: {
   readonly previous: readonly TranscriptEntry[];
-  readonly history: readonly Gemma4ChatMessage[];
+  readonly history: readonly ChatMessage[];
   readonly sent: SentTurn;
   readonly dropped: number;
   /** A fresh id, for a history entry that lines up with nothing the page sent. */
@@ -162,7 +162,7 @@ export const turnTiming = (
 
 /** How a turn stopped, as the stop record keeps it (the reason, and the matched stop string). */
 export type StopFacts = {
-  readonly reason: Gemma4ChatStop["reason"];
+  readonly reason: ChatStop["reason"];
   readonly tokens: number;
   readonly stopString?: string;
 };

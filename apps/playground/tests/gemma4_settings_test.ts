@@ -1,5 +1,5 @@
 import { type Manifest, parseManifest } from "@karume/hub";
-import type { Gemma4ChatMessage } from "@karume/models/gemma";
+import type { ChatMessage } from "@karume/models/gemma";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -263,7 +263,7 @@ describe("the chat form", () => {
 });
 
 describe("overflowPolicy", () => {
-  const turns: readonly Gemma4ChatMessage[] = [
+  const turns: readonly ChatMessage[] = [
     { role: "system", content: "Be brief." },
     { role: "user", content: "Hi" },
     { role: "assistant", content: "Hello." },

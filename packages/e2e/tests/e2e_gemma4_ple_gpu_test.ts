@@ -30,7 +30,7 @@ import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { acquireGpu, parseSafetensors, type Tensor } from "@karume/runtime";
 import { nodeDirectory } from "@karume/hub/node";
-import { Gemma4Pipeline } from "../../models/gemma.ts";
+import { Pipeline } from "../../models/gemma.ts";
 import { Gemma4QatPipeline } from "../../models/gemma4-qat.ts";
 import { createGemma4Ple } from "../../models/src/gemma/ple.ts";
 import { createGemma4PleResident, gemma4PleGpuBytes } from "../../models/src/gemma/ple-gpu.ts";
@@ -166,7 +166,7 @@ test.skipIf(!PRODUCT_PRESENT || !GPU_AVAILABLE)(
 
 /** 1 ターンの greedy 生成 id 列（停止 token も含めて観測席で拾う）。 */
 const generateIds = async (
-  open: () => Promise<{ chat: Gemma4Pipeline["chat"]; dispose: () => Promise<void> }>,
+  open: () => Promise<{ chat: Pipeline["chat"]; dispose: () => Promise<void> }>,
 ): Promise<number[]> => {
   const pipeline = await open();
   try {
@@ -219,20 +219,20 @@ test.skipIf(!GEMMA_PRESENT || !GPU_AVAILABLE)(
     if (!fits) {
       // MUST: 黙ってホスト経路へ退避しない（席を要求した利用者に不足を返す）。
       await assertRejects(
-        () => Gemma4Pipeline.fromPretrained(source, { pleResidency: "gpu" }),
+        () => Pipeline.fromPretrained(source, { pleResidency: "gpu" }),
         Error,
         "maxStorageBufferBindingSize",
       );
       return;
     }
-    const expected = await generateIds(() => Gemma4Pipeline.fromPretrained(source, {}));
+    const expected = await generateIds(() => Pipeline.fromPretrained(source, {}));
     assertEquals(
       expected.length,
       GREEDY_STEPS,
       "host 経路が刻みぶん生成していない（parity が空振りする）",
     );
     const actual = await generateIds(() =>
-      Gemma4Pipeline.fromPretrained(source, { pleResidency: "gpu" }),
+      Pipeline.fromPretrained(source, { pleResidency: "gpu" }),
     );
     assertEquals(actual, expected, "GPU 常駐席の生成 id 列");
   },

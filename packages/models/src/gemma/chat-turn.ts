@@ -1,6 +1,6 @@
 /**
- * The **conversion and cleanup** of one chat turn (the parts {@link Gemma4Pipeline.chat} and
- * `Gemma4ChatSession.send` share) — generation events → committed text pieces, building the stop
+ * The **conversion and cleanup** of one chat turn (the parts {@link Pipeline.chat} and
+ * `ChatSession.send` share) — generation events → committed text pieces, building the stop
  * reason, closing the turn, and shaping the per-run observation callback.
  *
  * This module **owns** no Session, no serialization chain and no GPU (ownership and queueing live in
@@ -28,14 +28,14 @@ import type { StopStringFilter, StreamingDetokenizer } from "../text/detokenizer
  * as the `prefill` of `GenerationEvent` (this layer is the text surface, so it does not expose the
  * event type itself).
  */
-export type Gemma4PrefillProgress = {
+export type PrefillProgress = {
   readonly chunk: number;
   readonly chunks: number;
 };
 
 /**
  * "Which run this notification is" as received by the observation callback
- * ({@link Gemma4PipelineOptions.onRunDiagnostics}).
+ * ({@link PipelineOptions.onRunDiagnostics}).
  *
  * The callback receives **one notification per run**, and this value says what that run was (it is
  * not a count of the order). All numbers are 1-based — the `chunk` / `chunks` of `prefill` are the
@@ -49,18 +49,18 @@ export type Gemma4PrefillProgress = {
  * would keep type-checking when only one side gains a branch). All this layer adds is "which
  * Session's diagnostics to read".
  */
-export type Gemma4RunPhase = GenerationRunPhase;
+export type RunPhase = GenerationRunPhase;
 
 /**
  * The stop reason of one chat turn.
  *
  * The sequence layer's reasons (`eos` / `stop-token` / `max-tokens` / `aborted` / `closed`) plus the
- * one only this layer can decide (a match of {@link Gemma4ChatOptions.stopStrings}). `tokens` means
+ * one only this layer can decide (a match of {@link ChatOptions.stopStrings}). `tokens` means
  * the same as in the sequence layer (the number of tokens the turn generated — a stop token counts
  * as 1); for `stop-string` it counts **up to the token that emitted the piece containing the stop
  * string**.
  */
-export type Gemma4ChatStop =
+export type ChatStop =
   | GenerationStop
   | {
       readonly reason: "stop-string";
@@ -85,7 +85,7 @@ export type Gemma4ChatStop =
  * `decode(all token ids)` (except for a turn cut by a stop string, which ends just before it).
  *
  * MUST: **a stream can be consumed in only one way** — mixing iteration (`for await`) with
- * {@link Gemma4ChatStream.text}, or iterating twice, throws synchronously. Generation runs only once,
+ * {@link ChatStream.text}, or iterating twice, throws synchronously. Generation runs only once,
  * so a second consumer would receive only "the rest" (only the side that drained first has the
  * body) — a mix-up that raises no exception, so the entry point blocks it.
  *
@@ -93,15 +93,15 @@ export type Gemma4ChatStop =
  * `GenerationStream.done`) — the primary path for a failure is the iterable throwing; `done` only
  * rejects with the same exception.
  */
-export type Gemma4ChatStream = AsyncIterable<string> & {
-  readonly done: Promise<Gemma4ChatStop>;
+export type ChatStream = AsyncIterable<string> & {
+  readonly done: Promise<ChatStop>;
   /**
    * The whole text, drained and concatenated (the entry point for callers that do not need
    * incremental display).
    *
    * It drains the same stream in the same order as iteration, so the result of `text()` equals
    * "all pieces concatenated". When the stop reason is needed, also read
-   * {@link Gemma4ChatStream.done} (after `text()` is fine).
+   * {@link ChatStream.done} (after `text()` is fine).
    */
   text(): Promise<string>;
 };
@@ -121,14 +121,14 @@ export type Gemma4ChatStream = AsyncIterable<string> & {
  * 2026-09-02).
  *
  * NOTE: this is an **internal entry point** not exposed in the barrel (`mod.ts` / `./gemma`) (the
- * public entry is {@link Gemma4Pipeline.chat} only). It is exported because at this unit the
+ * public entry is {@link Pipeline.chat} only). It is exported because at this unit the
  * stop-string contract can be pinned without a real GPU (`tests/gemma4_chat_test.ts`).
  */
 export const decodeChatChunks = async function* (
   events: AsyncIterable<GenerationEvent>,
   detokenizer: StreamingDetokenizer,
   stopStrings: StopStringFilter,
-  onPrefill?: (progress: Gemma4PrefillProgress) => void,
+  onPrefill?: (progress: PrefillProgress) => void,
   onToken?: (id: number) => void,
 ): AsyncGenerator<string, string | undefined, undefined> {
   for await (const event of events) {
@@ -157,10 +157,10 @@ export const decodeChatChunks = async function* (
 };
 
 /**
- * A piece generator + a stop reason → the public {@link Gemma4ChatStream} (an entry point that can
+ * A piece generator + a stop reason → the public {@link ChatStream} (an entry point that can
  * be **consumed in only one way**).
  *
- * MUST: iteration and {@link Gemma4ChatStream.text} drain **the same generator** (no second path) —
+ * MUST: iteration and {@link ChatStream.text} drain **the same generator** (no second path) —
  * generation runs only once, so if the whole-text entry point had its own loop, "the result depends
  * on which way it was read" could be written. The second consumer would silently get an empty
  * result without an exception, so the entry point blocks it.
@@ -169,13 +169,13 @@ export const decodeChatChunks = async function* (
  */
 export const chatStreamOf = (
   chunks: AsyncGenerator<string, void, undefined>,
-  done: Promise<Gemma4ChatStop>,
-): Gemma4ChatStream => {
+  done: Promise<ChatStop>,
+): ChatStream => {
   let claimed: "iteration" | "text()" | undefined;
   const claim = (how: "iteration" | "text()"): void => {
     if (claimed !== undefined) {
       throw new Error(
-        `Gemma4ChatStream: one stream can be consumed in only one way` +
+        `gemma.ChatStream: one stream can be consumed in only one way` +
           ` (already consumed by ${claimed} — ${how} tries to read the same generation again)`,
       );
     }
@@ -197,7 +197,7 @@ export const chatStreamOf = (
 };
 
 /**
- * Shapes the observation callback ({@link Gemma4PipelineOptions.onRunDiagnostics}) into the
+ * Shapes the observation callback ({@link PipelineOptions.onRunDiagnostics}) into the
  * generation surface's `onRun` hook.
  *
  * The callback lives in the pipeline layer because `GenerationSequence` is **pipeline-independent**
@@ -228,11 +228,11 @@ export const chatStreamOf = (
 export const runDiagnosticsHook = <D>(state: {
   readonly session: { diagnostics: () => D };
   readonly drafter?: { readonly session: { diagnostics: () => D } };
-  readonly onRunDiagnostics?: (diagnostics: D, phase: Gemma4RunPhase) => void;
-}): ((phase: Gemma4RunPhase) => void) | undefined => {
+  readonly onRunDiagnostics?: (diagnostics: D, phase: RunPhase) => void;
+}): ((phase: RunPhase) => void) | undefined => {
   const listener = state.onRunDiagnostics;
   if (listener === undefined) return undefined;
-  return (phase: Gemma4RunPhase): void => {
+  return (phase: RunPhase): void => {
     if (phase.kind !== "draft") {
       listener(state.session.diagnostics(), phase);
       return;
@@ -243,7 +243,7 @@ export const runDiagnosticsHook = <D>(state: {
     // draft name).
     if (drafter === undefined) {
       throw new Error(
-        "Gemma4Pipeline: a draft run observation arrived although there is no drafter",
+        "gemma.Pipeline: a draft run observation arrived although there is no drafter",
       );
     }
     listener(drafter.session.diagnostics(), phase);
@@ -252,13 +252,13 @@ export const runDiagnosticsHook = <D>(state: {
 
 /**
  * The stop reason of a turn closed by a stop string (the one builder shared by `chat` and
- * `Gemma4ChatSession.send`).
+ * `ChatSession.send`).
  *
  * The reason and its spelling are this layer's decision, but `tokens` and `speculation` **copy the
  * inner values as is** (this layer does not recount). The construction is kept on one path so that,
  * when a copied field is added, one entry point does not stay stale.
  */
-export const stopStringOf = (stopString: string, inner: GenerationStop): Gemma4ChatStop => ({
+export const stopStringOf = (stopString: string, inner: GenerationStop): ChatStop => ({
   reason: "stop-string",
   stopString,
   tokens: inner.tokens,
@@ -266,7 +266,7 @@ export const stopStringOf = (stopString: string, inner: GenerationStop): Gemma4C
 });
 
 /**
- * The one turn cleanup (shared by `chat` and `Gemma4ChatSession.send`).
+ * The one turn cleanup (shared by `chat` and `ChatSession.send`).
  *
  * MUST: call `release` **unconditionally**. If a throw from `cleanup` (returning the sequence,
  * closing the session) skipped returning the lease, the serialization chain would never get the
@@ -308,17 +308,17 @@ export const completeChatTurn = async (options: {
   readonly stream?: GenerationStream;
   readonly matched?: string;
   readonly failure?: { readonly error: unknown };
-  readonly cleanup: (stop: Gemma4ChatStop | undefined) => Promise<void>;
+  readonly cleanup: (stop: ChatStop | undefined) => Promise<void>;
   readonly release?: () => void;
-  readonly settle: (stop: Gemma4ChatStop) => void;
+  readonly settle: (stop: ChatStop) => void;
   readonly fail: (error: unknown) => void;
 }): Promise<void> => {
   let failure = options.failure;
-  let stop: Gemma4ChatStop | undefined;
+  let stop: ChatStop | undefined;
   try {
     const inner =
       options.stream === undefined
-        ? ({ reason: "closed", tokens: 0 } satisfies Gemma4ChatStop)
+        ? ({ reason: "closed", tokens: 0 } satisfies ChatStop)
         : await options.stream.done;
     // Keep the existing contract for an interruption: the iterable throws the reason and done
     // returns aborted.
@@ -341,7 +341,7 @@ export const completeChatTurn = async (options: {
   options.settle(stop ?? { reason: "closed", tokens: 0 });
 };
 
-/** Drains and concatenates the pieces (the body of {@link Gemma4ChatStream.text}). */
+/** Drains and concatenates the pieces (the body of {@link ChatStream.text}). */
 const joinChunks = async (chunks: AsyncIterable<string>): Promise<string> => {
   let text = "";
   for await (const chunk of chunks) text += chunk;

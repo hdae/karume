@@ -85,7 +85,7 @@ test("toRepoRef: パスにしか見えない綴りは HF へ投げる前に落�
   ];
   for (const repo of paths) {
     assertThrows(
-      () => toRepoRef(repo, "Gemma4Pipeline.fromPretrained"),
+      () => toRepoRef(repo, "gemma.Pipeline.fromPretrained"),
       Error,
       "is not an HF 'owner/name'",
       repo,
@@ -96,7 +96,7 @@ test("toRepoRef: パスにしか見えない綴りは HF へ投げる前に落�
 test("toRepoRef: `owner/name` に見えるローカルパスは救えない（仕様）", () => {
   // 綴りとして完全に合法な HF repo 名なので、この引数の中に区別できる情報が無い。
   // 「実在するか」は取得層の仕事で、ここが見るのは綴りだけである。
-  assertEquals(toRepoRef("models/karume-gemma4", "Gemma4Pipeline.fromPretrained"), {
+  assertEquals(toRepoRef("models/karume-gemma4", "gemma.Pipeline.fromPretrained"), {
     repo: "models/karume-gemma4",
   });
 });
@@ -121,7 +121,7 @@ test("toManifestSource: 取得元ハンドルは綴りの門を通さずその�
     },
     { label: "./models/karume-test" },
   );
-  assertStrictEquals(toManifestSource(source, "Gemma4Pipeline.fromPretrained"), source);
+  assertStrictEquals(toManifestSource(source, "gemma.Pipeline.fromPretrained"), source);
 });
 
 test("toManifestSource: 取得元ハンドルでない値は従来どおり綴りの門を通る", () => {

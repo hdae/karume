@@ -44,7 +44,7 @@ import { nodeCacheStorage, nodeDirectory } from "@karume/hub/node";
 import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
 // MUST: 入口は**公開面**（`./gemma` サブパス）から取る — `src/...` を直に掴むと、面が痩せていても
 // 門が緑のままになる（消費者が書けない経路で検収したことになる）。
-import { type Gemma4ChatMessage, Gemma4Pipeline } from "../../models/gemma.ts";
+import { type ChatMessage, Pipeline } from "../../models/gemma.ts";
 import { type LocalDistServer, serveLocalDist } from "@karume/test-support/local-dist-server";
 import { mergeCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
 import type { SessionOverrides } from "../../models/src/session/options.ts";
@@ -104,7 +104,7 @@ const DIRECTORY_CASES = [
 type ChatFixture = {
   readonly chat: {
     readonly name: string;
-    readonly messages: Gemma4ChatMessage[];
+    readonly messages: ChatMessage[];
     readonly ids: number[];
   }[];
 };
@@ -161,13 +161,13 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
   () => {
     let server: LocalDistServer;
     let cacheDir: string;
-    let pipeline: Gemma4Pipeline;
+    let pipeline: Pipeline;
     beforeAll(async () => {
       server = await serveLocalDist(new URL(".", MIRROR_DIR).pathname);
       // The HTTP source prefetches through a CacheStorage; the real on-disk one in a temporary
       // directory keeps the distribution out of RAM and out of any user cache.
       cacheDir = await makeTempDir({ prefix: "karume-gemma4-cache-" });
-      pipeline = await Gemma4Pipeline.fromPretrained(server.source, {
+      pipeline = await Pipeline.fromPretrained(server.source, {
         caches: nodeCacheStorage(cacheDir),
         maxResidentPleBytes: await maxResidentPleBytes(),
       });
@@ -294,7 +294,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
         const runs: SessionDiagnostics["lastRunPipelines"][] = [];
         const byPhase = new Map<string, SessionDiagnostics["lastRunPipelines"][]>();
         try {
-          const pipeline = await Gemma4Pipeline.fromPretrained(server.source, {
+          const pipeline = await Pipeline.fromPretrained(server.source, {
             gpu,
             caches,
             maxResidentPleBytes: await maxResidentPleBytes(),
@@ -402,9 +402,9 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
     const cacheDiagnostics: string[] = [];
     const retryDiagnostics: string[] = [];
 
-    let pipeline: Gemma4Pipeline;
+    let pipeline: Pipeline;
     beforeAll(async () => {
-      pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
+      pipeline = await Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
         maxResidentPleBytes: await maxResidentPleBytes(),
         // HTTP 取得元専用のノブ。ローカル取得元では 1 つも効かない = 触られない。
         fetch: fetchStub,

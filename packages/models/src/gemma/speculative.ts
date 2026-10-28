@@ -35,8 +35,8 @@ import {
   GEMMA4_ROPE_PARTS,
   gemma4RopeInputName,
   gemma4RopeInputNames,
-  gemma4RopeInputs,
-  type Gemma4RopeSpec,
+  ropeInputs,
+  type RopeSpec,
 } from "./rope.ts";
 
 /**
@@ -85,7 +85,7 @@ export type Gemma4Drafter = {
   readonly session: Session;
   /**
    * The graph declaration of the drafter container (**for estimates only** —
-   * `Gemma4Pipeline.estimateSessionMemory` derives the drafter's resident weights and the borrowing
+   * `Pipeline.estimateSessionMemory` derives the drafter's resident weights and the borrowing
    * context's state from it).
    *
    * MUST: hold only the graph, not the `PreparedModel` (the same MUST as `Gemma4State.graph` — do
@@ -97,7 +97,7 @@ export type Gemma4Drafter = {
   /**
    * The declaration that builds one position's cos / sin row (the lender's `pipelineConfig.rope`).
    */
-  readonly rope: Gemma4RopeSpec;
+  readonly rope: RopeSpec;
   /** Width of the input `hidden` (= the width of the lender's final-norm hidden). */
   readonly hiddenSize: number;
 };
@@ -138,7 +138,7 @@ const showShape = (shape: readonly (number | string)[]): string => `[${shape.joi
 const assertDrafterInputs = (
   where: string,
   graph: DrafterGraph,
-  rope: Gemma4RopeSpec,
+  rope: RopeSpec,
   hiddenSize: number,
 ): void => {
   const names = graph.inputs.map((input) => input.name);
@@ -282,14 +282,14 @@ const resolveSharedWeights = (
  * NOTE: `requiredLimits` is not checked — the drafter is in **the same quant preset** as the target
  * (the manifest's `quants.<name>.weights` points at both), so there is only one declaration
  * (checking it before download is the job of the admission closure of
- * `Gemma4Pipeline.fromPretrained`).
+ * `Pipeline.fromPretrained`).
  */
 export const admitGemma4Drafter = (
   where: string,
   graph: DrafterGraph,
   target: {
     readonly graph: DrafterGraph;
-    readonly rope: Gemma4RopeSpec;
+    readonly rope: RopeSpec;
     readonly hiddenSize: number;
     readonly capacitySymbol: string;
   },
@@ -394,7 +394,7 @@ export const draftOnce = async (
     [HIDDEN_INPUT]: { dtype: "f32", shape: [1, drafter.hiddenSize], data: hidden },
     // The one row at position P (no PLE needed — the drafter reads neither the main table nor the
     // per-layer table).
-    ...gemma4RopeInputs(drafter.rope, [position]),
+    ...ropeInputs(drafter.rope, [position]),
   };
   const outputs = await drafter.session.run(inputs, {}, { context: borrowed, queryLength: 1 });
   const draft = new Int32Array(new ArrayBuffer(drafter.outputs.length * 4));

@@ -6,7 +6,7 @@
  * environment is passed in), so `vp test` covers it.
  */
 
-import type { Gemma4ChatStop, GenerationSpeculation, SamplerSpec } from "@karume/models/gemma";
+import type { ChatStop, GenerationSpeculation, SamplerSpec } from "@karume/models/gemma";
 
 import type { RecordEnvironment } from "@/lib/environment";
 import type { ComponentRecord, SourceRecord } from "@/lib/record";
@@ -19,7 +19,7 @@ export const RECORD_FORMAT = "karume-playground-gemma4/1";
 
 /** How a turn stopped (the stop of the turn's stream, flattened for JSON). */
 export type StopRecord = {
-  readonly reason: Gemma4ChatStop["reason"];
+  readonly reason: ChatStop["reason"];
   /** Generated tokens, a stop token counted as one. */
   readonly tokens: number;
   /** The stop token (`eos` / `stop-token`). */
@@ -29,7 +29,7 @@ export type StopRecord = {
   readonly speculation?: GenerationSpeculation;
 };
 
-export const stopRecordOf = (stop: Gemma4ChatStop): StopRecord => ({
+export const stopRecordOf = (stop: ChatStop): StopRecord => ({
   reason: stop.reason,
   tokens: stop.tokens,
   ...("token" in stop ? { token: stop.token } : {}),
@@ -96,8 +96,8 @@ export type GemmaRecord = RecordEnvironment & {
     readonly manifestSha256: string;
   };
   readonly source: SourceRecord;
-  /** The entry point: `Gemma4Pipeline` (gemma4) or `Gemma4QatPipeline` (gemma4-qat). */
-  readonly pipeline: "Gemma4Pipeline" | "Gemma4QatPipeline";
+  /** The entry point: `Pipeline` (gemma4) or `Gemma4QatPipeline` (gemma4-qat). */
+  readonly pipeline: "gemma.Pipeline" | "Gemma4QatPipeline";
   readonly model: string;
   readonly preset: { readonly quant: string; readonly label: string; readonly isDefault: boolean };
   /** Whether the MTP drafter was built (`speculative` of `fromPretrained`). */
@@ -139,7 +139,7 @@ export const buildGemmaRecord = (input: {
     manifestSha256: input.manifestSha256,
   },
   source: input.source,
-  pipeline: input.mount === "gemma4" ? "Gemma4Pipeline" : "Gemma4QatPipeline",
+  pipeline: input.mount === "gemma4" ? "gemma.Pipeline" : "Gemma4QatPipeline",
   model: input.model,
   preset: input.preset,
   speculative: input.speculative,

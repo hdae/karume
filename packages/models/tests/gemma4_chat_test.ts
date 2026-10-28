@@ -16,7 +16,7 @@
 //    直接叩くしかない
 // ④ **停止 token 集合**が資産の追加語彙から導出でき、上流の `generation_config.json` の宣言と
 //    一致する（ADR 0083 決定 8 / 0084 決定 5 — chat 形式と EOS 集合は同じ digest set）
-// ⑤ **増分描画の turn-local 契約**（`gemma4ChatTurn`）— 「初回の全体描画 + 生成された本文 +
+// ⑤ **増分描画の turn-local 契約**（`chatTurn`）— 「初回の全体描画 + 生成された本文 +
 //    `<turn|>` + 以後の差分」の連結が、全会話を 1 度に描いたものと token 単位で一致する
 // ⑥ **ターンの後始末**（`closeChatTurn`）— 後始末が失敗しても直列化席は返り、本体の失敗と
 //    後始末の失敗はどちらも消えない（席が返らないと以後の `chat` / `dispose` が永久に待つ）
@@ -38,12 +38,12 @@ import {
   chatStreamOf,
   closeChatTurn,
   decodeChatChunks,
-  type Gemma4ChatStop,
-  type Gemma4RunPhase,
+  type ChatStop,
+  type RunPhase,
   runDiagnosticsHook,
   stopStringOf,
 } from "../src/gemma/chat-turn.ts";
-import { Gemma4Pipeline, speculativeSetup } from "../src/gemma/pipeline.ts";
+import { Pipeline, speculativeSetup } from "../src/gemma/pipeline.ts";
 import type { Gemma4Drafter } from "../src/gemma/speculative.ts";
 import {
   createGenerationSequence,
@@ -61,11 +61,11 @@ import {
   runShape,
 } from "./helpers/generation-fake.ts";
 import { type GemmaTokenizerAssets, parseGemmaTokenizerAsset } from "../src/gemma/text/asset.ts";
-import { GemmaTokenizer } from "../src/gemma/text/tokenizer.ts";
+import { Tokenizer } from "../src/gemma/text/tokenizer.ts";
 import {
-  type Gemma4ChatMessage,
-  gemma4ChatPrompt,
-  gemma4ChatTurn,
+  type ChatMessage,
+  chatPrompt,
+  chatTurn,
   gemma4StopTokens,
   renderGemma4Chat,
   renderGemma4ChatTurn,
@@ -75,7 +75,7 @@ import { readFileIfPresent } from "./helpers/read-if-present.ts";
 type ChatCase = {
   readonly name: string;
   readonly why: string;
-  readonly messages: Gemma4ChatMessage[];
+  readonly messages: ChatMessage[];
   readonly rendered: string;
   readonly ids: number[];
 };
@@ -115,7 +115,7 @@ const assetsOf = (source: Fixture): GemmaTokenizerAssets => ({
   eosId: source.asset.eosId,
 });
 
-const tokenizer = new GemmaTokenizer(assetsOf(fixture));
+const tokenizer = new Tokenizer(assetsOf(fixture));
 
 /** 系列側の実資産（無ければ undefined = compile していない）。 */
 const seriesBytes = await readFileIfPresent(
@@ -140,7 +140,7 @@ describe("gemma4 chat 描画: 上流 apply_chat_template と文字列がビッ�
 describe("gemma4 chat 符号化: 上流 apply_chat_template(tokenize=True) と id 列が一致", () => {
   for (const testCase of fixture.chat) {
     it(`${testCase.name} — ${testCase.why}`, () => {
-      assertEquals(gemma4ChatPrompt(tokenizer, testCase.messages), testCase.ids);
+      assertEquals(chatPrompt(tokenizer, testCase.messages), testCase.ids);
     });
   }
 });
@@ -150,7 +150,7 @@ test("gemma4 chat: `<bos>` の所有者は chat 関数だけ（double-BOS を作
   // ことを対で見る。片方だけだと「両方が付ける」形が通る。
   const bos = fixture.asset.bosId;
   assertEquals(tokenizer.encode("hello").includes(bos), false, "encode は付けない");
-  const ids = gemma4ChatPrompt(tokenizer, [{ role: "user", content: "hello" }]);
+  const ids = chatPrompt(tokenizer, [{ role: "user", content: "hello" }]);
   assertEquals(ids[0], bos, "chat は先頭に付ける");
   assertEquals(ids.filter((id) => id === bos).length, 1, "付けるのは 1 個だけ");
 });
@@ -159,7 +159,7 @@ describe("gemma4 chat 射程: 素の会話の外は fail loudly（黙って無�
   const reject = (label: string, messages: readonly unknown[], expected: string): void => {
     it(label, () => {
       assertThrows(
-        () => renderGemma4Chat(messages as readonly Gemma4ChatMessage[]),
+        () => renderGemma4Chat(messages as readonly ChatMessage[]),
         ModelInputError,
         expected,
       );
@@ -198,11 +198,11 @@ describe("gemma4 chat 射程: 素の会話の外は fail loudly（黙って無�
 
 // ---- 増分描画（turn-local 契約） ----------------------------------------
 //
-// `gemma4ChatTurn` は「新しい発話 1 つ」を**次の `generate` へ渡す差分 token 列**として描く。
+// `chatTurn` は「新しい発話 1 つ」を**次の `generate` へ渡す差分 token 列**として描く。
 // 成立させたい等式は（`⧺` は連結）:
 //
-//   gemma4ChatPrompt(全会話)
-//     = gemma4ChatPrompt(先頭 turn まで) ⧺ 生成された本文 ⧺ [<turn|>] ⧺ gemma4ChatTurn(次の発話) ⧺ …
+//   chatPrompt(全会話)
+//     = chatPrompt(先頭 turn まで) ⧺ 生成された本文 ⧺ [<turn|>] ⧺ chatTurn(次の発話) ⧺ …
 //
 // `<turn|>` は `GenerationSequence` の `pendingToken`（未 commit frontier）が前置するので差分には
 // 入らない。この門が無いと、消費者は「全体を描いて先頭の `<bos>` を剥がす」当て推量を書くしかなく、
@@ -212,11 +212,11 @@ describe("gemma4 chat 射程: 素の会話の外は fail loudly（黙って無�
 /** 会話を「先頭ブロック + (生成された応答, 次の発話) の並び」で書いた形。 */
 type TurnCase = {
   readonly name: string;
-  /** 最初の `gemma4ChatPrompt` に渡す発話（system 等 + 最初の user）。 */
-  readonly head: readonly Gemma4ChatMessage[];
+  /** 最初の `chatPrompt` に渡す発話（system 等 + 最初の user）。 */
+  readonly head: readonly ChatMessage[];
   readonly turns: readonly {
     readonly answer: string;
-    readonly next: Gemma4ChatMessage;
+    readonly next: ChatMessage;
   }[];
 };
 
@@ -232,8 +232,8 @@ const END_OF_TURN = "<turn|>";
  * この代役が成り立たないので、門が黙って別の意味になるのを防ぐ）。
  */
 const modelAnswerTokens = (
-  tokenizer: GemmaTokenizer,
-  prefix: readonly Gemma4ChatMessage[],
+  tokenizer: Tokenizer,
+  prefix: readonly ChatMessage[],
   answer: string,
 ): { readonly body: string; readonly ids: number[] } => {
   const head = renderGemma4Chat(prefix);
@@ -254,7 +254,7 @@ const fromFixture = (name: string): TurnCase => {
   assert(found !== undefined, `フィクスチャに chat ケース '${name}' が無い`);
   const first = found.messages.findIndex((message) => message.role === "assistant");
   assert(first > 0, `${name}: assistant を挟まないケースは増分の門に使えない`);
-  const turns: { answer: string; next: Gemma4ChatMessage }[] = [];
+  const turns: { answer: string; next: ChatMessage }[] = [];
   for (let index = first; index + 1 < found.messages.length; index += 2) {
     assertEquals(found.messages[index].role, "assistant", `${name}: 交互になっていない`);
     turns.push({ answer: found.messages[index].content, next: found.messages[index + 1] });
@@ -303,10 +303,10 @@ const TURN_CASES: readonly TurnCase[] = [
 describe("gemma4 chat 増分: 差分の積み上げが全会話の描画と文字列一致（turn-local）", () => {
   for (const testCase of TURN_CASES) {
     it(testCase.name, () => {
-      let prefix: Gemma4ChatMessage[] = [...testCase.head];
+      let prefix: ChatMessage[] = [...testCase.head];
       for (const turn of testCase.turns) {
         const { body } = modelAnswerTokens(tokenizer, prefix, turn.answer);
-        const grown: Gemma4ChatMessage[] = [
+        const grown: ChatMessage[] = [
           ...prefix,
           { role: "assistant", content: turn.answer },
           turn.next,
@@ -332,17 +332,17 @@ describe("gemma4 chat 増分: 差分 token 列の連結が全会話の id 列と
   });
   for (const testCase of TURN_CASES) {
     it(testCase.name, () => {
-      let prefix: Gemma4ChatMessage[] = [...testCase.head];
+      let prefix: ChatMessage[] = [...testCase.head];
       // 実運用の経路をそのまま写す: 初回だけ全体を描き、以後は「本文 + pendingToken + 差分」。
-      let rebuilt = gemma4ChatPrompt(tokenizer, prefix);
+      let rebuilt = chatPrompt(tokenizer, prefix);
       for (const turn of testCase.turns) {
         const answer = modelAnswerTokens(tokenizer, prefix, turn.answer);
-        rebuilt = [...rebuilt, ...answer.ids, stopId, ...gemma4ChatTurn(tokenizer, turn.next)];
+        rebuilt = [...rebuilt, ...answer.ids, stopId, ...chatTurn(tokenizer, turn.next)];
         prefix = [...prefix, { role: "assistant", content: turn.answer }, turn.next];
       }
       assertEquals(
         rebuilt,
-        gemma4ChatPrompt(tokenizer, prefix),
+        chatPrompt(tokenizer, prefix),
         "積み上げた id 列が全会話の描画・符号化と一致しない（turn-local 契約が壊れている）",
       );
     });
@@ -363,11 +363,7 @@ test("gemma4 chat 増分: 差分に `<turn|>` を含めない（pendingToken と
 describe("gemma4 chat 増分 射程: 素の発話の外は fail loudly", () => {
   const reject = (label: string, message: unknown, expected: string): void => {
     it(label, () => {
-      assertThrows(
-        () => renderGemma4ChatTurn(message as Gemma4ChatMessage),
-        ModelInputError,
-        expected,
-      );
+      assertThrows(() => renderGemma4ChatTurn(message as ChatMessage), ModelInputError, expected);
     });
   };
 
@@ -395,7 +391,7 @@ test("gemma4 chat 停止 token: 綴りが欠けた資産は fail loudly", () => 
   const thinned = new Map(assets.addedTokens);
   thinned.delete("<|tool_response>");
   assertThrows(
-    () => gemma4StopTokens(new GemmaTokenizer({ ...assets, addedTokens: thinned })),
+    () => gemma4StopTokens(new Tokenizer({ ...assets, addedTokens: thinned })),
     Error,
     "<|tool_response>",
   );
@@ -425,7 +421,7 @@ describe("gemma4 chat の失敗の型（呼び手の分岐先で分ける）", (
     const thinned = new Map(assets.addedTokens);
     thinned.delete("<|tool_response>");
     const error = assertThrows(
-      () => gemma4StopTokens(new GemmaTokenizer({ ...assets, addedTokens: thinned })),
+      () => gemma4StopTokens(new Tokenizer({ ...assets, addedTokens: thinned })),
       Error,
       "<|tool_response>",
     );
@@ -562,7 +558,7 @@ test("chat 停止文字列: 複数の停止文字列は本文に先に現れた�
 });
 
 describe("chat 停止文字列: 停止理由を差し替えても内側の勘定を写す（stopStringOf）", () => {
-  // `chat` と `Gemma4ChatSession.#finish` は、停止文字列で閉じたターンだけ `GenerationStop` を
+  // `chat` と `ChatSession.#finish` は、停止文字列で閉じたターンだけ `GenerationStop` を
   // **別の object へ組み直す**。組み直しで欄が 1 つ落ちても型は通る（`speculation` は optional）
   // ので、「停止文字列で閉じたターンだけ投機の勘定が消える」形は例外にならない。
   const speculation: GenerationSpeculation = {
@@ -639,7 +635,7 @@ test("投機のゲートのノブ: 不正な値は重みを読む前に落ちる
   // 値域の判断そのものはゲート側（`speculation-gate.ts`）の門で、ここは素通しを確かめる。
   await assertRejects(
     () =>
-      Gemma4Pipeline.fromPretrained("karume/gemma4-e2b", {
+      Pipeline.fromPretrained("karume/gemma4-e2b", {
         speculative: { gate: { burstAbort: 0 } },
       }),
     ModelInputError,
@@ -647,7 +643,7 @@ test("投機のゲートのノブ: 不正な値は重みを読む前に落ちる
   );
   await assertRejects(
     () =>
-      Gemma4Pipeline.fromPretrained("karume/gemma4-e2b", {
+      Pipeline.fromPretrained("karume/gemma4-e2b", {
         speculative: { gate: { burst: 8, burstMin: 9 } },
       }),
     ModelInputError,
@@ -655,7 +651,7 @@ test("投機のゲートのノブ: 不正な値は重みを読む前に落ちる
   );
   // 段数 `k` も同じ束の呼び手指定なので同じ型で落ちる（ADR 0107 決定 2）。
   await assertRejects(
-    () => Gemma4Pipeline.fromPretrained("karume/gemma4-e2b", { speculative: { k: 0 } }),
+    () => Pipeline.fromPretrained("karume/gemma4-e2b", { speculative: { k: 0 } }),
     ModelInputError,
     "speculative.k 0 is outside 1..",
   );
@@ -694,7 +690,7 @@ test("chat prefill: 進捗は onPrefill が受け、本文の列は 1 文字も�
 });
 
 test("chat 一括: text() は片の連結と一致し、done も併せて読める", async () => {
-  const stop: Gemma4ChatStop = { reason: "max-tokens", tokens: 3 };
+  const stop: ChatStop = { reason: "max-tokens", tokens: 3 };
   const chunks = (async function* (): AsyncGenerator<string, void, undefined> {
     yield "Hel";
     yield "lo ";
@@ -706,7 +702,7 @@ test("chat 一括: text() は片の連結と一致し、done も併せて読め�
 });
 
 test("chat 一括: 1 つのストリームは 1 通りにしか消費できない（同期に落ちる）", async () => {
-  const stop: Gemma4ChatStop = { reason: "max-tokens", tokens: 1 };
+  const stop: ChatStop = { reason: "max-tokens", tokens: 1 };
   const streamOf = () =>
     chatStreamOf(
       (async function* (): AsyncGenerator<string, void, undefined> {
@@ -732,7 +728,7 @@ test("chat 一括: 1 つのストリームは 1 通りにしか消費できな�
 
 // ---- ターンの後始末（`closeChatTurn`）---------------------------------------
 //
-// `Gemma4Pipeline.chat` の直列化席は「後始末が失敗したら返らない」形だと、鎖が前段の決着を
+// `Pipeline.chat` の直列化席は「後始末が失敗したら返らない」形だと、鎖が前段の決着を
 // 得られないまま以後の `chat` / `dispose` を永久に待つ（device 消失で `context.dispose` が
 // `flush` の失敗を伝播させる経路が実在する = 例外 1 つで二度と動かないパイプライン）。
 // 席の返却と例外の畳み方はこの 1 本に集めてあるので、故障注入もここで書ける（GPU 不要）。
@@ -796,11 +792,9 @@ describe("chat 後始末: 席は無条件に返り、後始末の失敗は本体
 test.skipIf(seriesBytes === undefined)(
   "gemma4 chat 実資産突合: 全語彙でもフィクスチャと同じ id 列（部分集合の穴を塞ぐ）",
   () => {
-    const full = new GemmaTokenizer(
-      parseGemmaTokenizerAsset(seriesBytes as Uint8Array<ArrayBuffer>),
-    );
+    const full = new Tokenizer(parseGemmaTokenizerAsset(seriesBytes as Uint8Array<ArrayBuffer>));
     for (const testCase of fixture.chat) {
-      assertEquals(gemma4ChatPrompt(full, testCase.messages), testCase.ids, testCase.name);
+      assertEquals(chatPrompt(full, testCase.messages), testCase.ids, testCase.name);
     }
     assertEquals(
       [...gemma4StopTokens(full)].sort((a, b) => a - b),
@@ -812,7 +806,7 @@ test.skipIf(seriesBytes === undefined)(
 
 // ---- 観測席の呼び出し規則（`runDiagnosticsHook`）------------------------------
 //
-// 観測席（`Gemma4PipelineOptions.onRunDiagnostics`）は run 1 本につき 1 通で、その run の出力を
+// 観測席（`PipelineOptions.onRunDiagnostics`）は run 1 本につき 1 通で、その run の出力を
 // 読み終えた同期区間に届く。通知を出すのは**生成面**（`createGenerationSequence` の `onRun`）で、
 // この層が足すのは「どちらの Session の診断を引くか」だけである。
 //
@@ -834,7 +828,7 @@ test.skipIf(seriesBytes === undefined)(
  */
 const diagnosticsSeat = (options: { readonly drafter?: boolean } = {}) => {
   const seen: number[] = [];
-  const phases: Gemma4RunPhase[] = [];
+  const phases: RunPhase[] = [];
   let lender = 0;
   let borrower = 0;
   const state = {
@@ -856,7 +850,7 @@ const diagnosticsSeat = (options: { readonly drafter?: boolean } = {}) => {
           },
         }
       : {}),
-    onRunDiagnostics: (diagnostics: number, phase: Gemma4RunPhase): void => {
+    onRunDiagnostics: (diagnostics: number, phase: RunPhase): void => {
       seen.push(diagnostics);
       phases.push(phase);
     },
@@ -865,12 +859,12 @@ const diagnosticsSeat = (options: { readonly drafter?: boolean } = {}) => {
 };
 
 /** `phase` の期待値を 1 行で書くための短縮（`prefillPhase(1, 3)` / `decodePhase(2)`）。 */
-const prefillPhase = (chunk: number, chunks: number): Gemma4RunPhase => ({
+const prefillPhase = (chunk: number, chunks: number): RunPhase => ({
   kind: "prefill",
   chunk,
   chunks,
 });
-const decodePhase = (step: number): Gemma4RunPhase => ({ kind: "decode", step });
+const decodePhase = (step: number): RunPhase => ({ kind: "decode", step });
 
 /** 観測席を挿した sequence を 1 ターン回す（fake Session なので run は即座に返る）。 */
 const runTurn = async (

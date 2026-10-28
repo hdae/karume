@@ -1,25 +1,25 @@
 /**
- * `Gemma4ChatSession` — the middle layer for carrying **an ordinary multi-turn chat**.
+ * `ChatSession` — the middle layer for carrying **an ordinary multi-turn chat**.
  *
  * The surface has three layers. From the lowest:
  *
- * 1. `Gemma4Pipeline.sequence()` (ADR 0083 decisions 1–4) — the caller runs token ids and the KV
+ * 1. `Pipeline.sequence()` (ADR 0083 decisions 1–4) — the caller runs token ids and the KV
  *    lifetime itself
- * 2. **this** — holds the mapping between the conversation (a list of `Gemma4ChatMessage`) and the
+ * 2. **this** — holds the mapping between the conversation (a list of `ChatMessage`) and the
  *    KV, and truncates with an injected policy on overflow
- * 3. `Gemma4Pipeline.chat()` — one turn = one sequence (past turns are re-rendered every time)
+ * 3. `Pipeline.chat()` — one turn = one sequence (past turns are re-rendered every time)
  *
  * With only 3, prefill becomes O(n²) as the conversation grows, and avoiding that drops straight
  * into the world of 1 (token ids / `<bos>` / the uncommitted frontier). This layer holds **only that
  * gap**: generation itself rides on 1, and rendering, decoding and stop strings ride on the same
  * implementation as `chat()` ({@link decodeChatChunks} / {@link chatStreamOf}) — the
- * `Gemma4ChatStream` that `send` returns has the same type and the same contract as the return value
+ * `ChatStream` that `send` returns has the same type and the same contract as the return value
  * of `chat()`.
  *
  * ## When the KV is carried over
  *
  * Only when the previous turn **closed with the distribution's EOS** (`GenerationStop.reason ===
- * "eos"`) does the next turn carry on with a delta ({@link gemma4ChatTurn}). The closing token was
+ * "eos"`) does the next turn carry on with a delta ({@link chatTurn}). The closing token was
  * emitted by generation and is held by the sequence as the uncommitted frontier (`pendingToken`);
  * the next `generate` prepends it to the prompt (ADR 0083 decision 4). After a turn cut off by
  * max-tokens / a stop string / an interruption the model turn is not closed, so the sequence is
@@ -35,16 +35,16 @@
  * The low-level surface still says "truncation is the host's job" and ends by throwing
  * `GenerationCapacityError`. This layer has a default policy ({@link dropOldestTurns} = drop the
  * oldest user / assistant pair, keep system), replaceable as a whole through
- * {@link Gemma4ChatSessionOptions.onOverflow}. A host that passes a throwing function can handle it
+ * {@link ChatSessionOptions.onOverflow}. A host that passes a throwing function can handle it
  * on its side as before.
  *
- * ## Branching ({@link Gemma4ChatSession.fork} — ADR 0083 addendum 2026-10-11, ruling 8)
+ * ## Branching ({@link ChatSession.fork} — ADR 0083 addendum 2026-10-11, ruling 8)
  *
  * Returns an independent session with the same settings and the same history. A conversation that
  * carries its KV is copied KV and all with `GenerationSequence.fork`; a conversation with an empty KV
  * (nothing sent yet, or the previous turn did not close with EOS) copies only the history (no GPU
  * copy — the branch's first `send` re-renders the whole, like the original). Regeneration is written
- * as this use rather than a `regenerate` (the doc of {@link Gemma4ChatSession.fork}).
+ * as this use rather than a `regenerate` (the doc of {@link ChatSession.fork}).
  *
  * MUST: every module is side-effect free (no import-time execution, no global mutable state —
  * CLAUDE.md).
@@ -62,32 +62,32 @@ import {
   type GenerationStream,
 } from "../generation/sequence.ts";
 import { createStopStringFilter } from "../text/detokenizer.ts";
-import type { Gemma4DefaultSampler } from "./config.ts";
+import type { DefaultSampler } from "./config.ts";
 import {
   chatStreamOf,
   completeChatTurn,
   decodeChatChunks,
-  type Gemma4ChatStop,
-  type Gemma4ChatStream,
-  type Gemma4PrefillProgress,
+  type ChatStop,
+  type ChatStream,
+  type PrefillProgress,
 } from "./chat-turn.ts";
-import type { Gemma4SequenceOptions } from "./pipeline.ts";
-import { type Gemma4ChatMessage, gemma4ChatPrompt, gemma4ChatTurn } from "./text/chat.ts";
-import type { GemmaTokenizer } from "./text/tokenizer.ts";
+import type { SequenceOptions } from "./pipeline.ts";
+import { type ChatMessage, chatPrompt, chatTurn } from "./text/chat.ts";
+import type { Tokenizer } from "./text/tokenizer.ts";
 
 /**
- * The surface the session reads from the pipeline ({@link Gemma4Pipeline} satisfies it as is).
+ * The surface the session reads from the pipeline ({@link Pipeline} satisfies it as is).
  *
  * The surface is narrowed to show in the type that this layer **uses nothing inside the public
  * surface** (a consumer could write the same thing — its value as a copyable example lies here).
  * That tests can look at the conversation assembly alone without a real GPU follows from the same
  * property.
  */
-export type Gemma4ChatSessionHost = {
-  readonly tokenizer: GemmaTokenizer;
+export type ChatSessionHost = {
+  readonly tokenizer: Tokenizer;
   readonly program: GenerationProgram;
-  readonly defaultSampler: Gemma4DefaultSampler | undefined;
-  sequence(options?: Gemma4SequenceOptions): Promise<GenerationSequence>;
+  readonly defaultSampler: DefaultSampler | undefined;
+  sequence(options?: SequenceOptions): Promise<GenerationSequence>;
 };
 
 /**
@@ -98,9 +98,9 @@ export type Gemma4ChatSessionHost = {
  * bit first** (the smaller of the state capacity this session allocated and the position limit the
  * model declares); either way the remedy is the same (shorten the conversation).
  */
-export type Gemma4ChatOverflow = {
+export type ChatOverflow = {
   /** The current history (if a system message is declared, it comes first). */
-  readonly turns: readonly Gemma4ChatMessage[];
+  readonly turns: readonly ChatMessage[];
   /** The system message the session declared (`undefined` = none declared). */
   readonly system: string | undefined;
   /** The upper limit of logical positions this conversation can use. */
@@ -118,16 +118,16 @@ export type Gemma4ChatOverflow = {
  * fit". A throw reaches the caller as is.
  *
  * MUST: **keep the last entry (the message being answered now)**. A history that dropped it passes
- * into rendering without an exception (`gemma4ChatPrompt` does not constrain the last role), and an
+ * into rendering without an exception (`chatPrompt` does not constrain the last role), and an
  * answer gets attached to "a conversation with no question". An implementation that returns copies
  * (`turns.map((turn) => ({ ...turn }))`) is legitimate; the check compares values.
  */
-export type Gemma4ChatOverflowPolicy = (
-  context: Gemma4ChatOverflow,
-) => readonly Gemma4ChatMessage[] | Promise<readonly Gemma4ChatMessage[]>;
+export type ChatOverflowPolicy = (
+  context: ChatOverflow,
+) => readonly ChatMessage[] | Promise<readonly ChatMessage[]>;
 
-/** The settings of one session (per-turn options are {@link Gemma4ChatTurnOptions}). */
-export type Gemma4ChatSessionOptions = {
+/** The settings of one session (per-turn options are {@link ChatTurnOptions}). */
+export type ChatSessionOptions = {
   /** The system message placed at the start of the conversation (none when omitted). */
   readonly system?: string;
   /** The upper limit of tokens generated in one turn (can be overridden per turn). */
@@ -137,7 +137,7 @@ export type Gemma4ChatSessionOptions = {
    * `host.program.capacity`).
    *
    * One session = one conversation, so this is "how much KV to take for this conversation". The
-   * overflow decision (the line at which {@link Gemma4ChatSessionOptions.onOverflow} is called) uses
+   * overflow decision (the line at which {@link ChatSessionOptions.onOverflow} is called) uses
    * this value too — if the truncation criterion and the capacity actually allocated were different
    * numbers, a turn that should pass would be dropped, or the reverse.
    *
@@ -147,15 +147,15 @@ export type Gemma4ChatSessionOptions = {
   readonly capacity?: number;
   /**
    * This session's sampling options. When omitted, the distribution's declaration
-   * ({@link Gemma4ChatSessionHost.defaultSampler}), and failing that temperature 0 (greedy).
+   * ({@link ChatSessionHost.defaultSampler}), and failing that temperature 0 (greedy).
    */
   readonly sampler?: SamplerSpec;
   /** Rebuilds the history when capacity runs out (default {@link dropOldestTurns}). */
-  readonly onOverflow?: Gemma4ChatOverflowPolicy;
+  readonly onOverflow?: ChatOverflowPolicy;
   /**
    * Whether this conversation uses speculative decoding (default = `true` if the pipeline has a
    * drafter = with the self-tuning gate; the values mean the same as
-   * {@link Gemma4SequenceOptions.speculative}, and `"always"` speculates always, with no gate).
+   * {@link SequenceOptions.speculative}, and `"always"` speculates always, with no gate).
    *
    * This is a **per-session** option, not per-turn — this layer reuses one sequence across many
    * turns, and the speculation borrower context is bound to the sequence's lifetime (switching per
@@ -167,14 +167,14 @@ export type Gemma4ChatSessionOptions = {
 
 /**
  * Options that apply to one turn only (the same vocabulary and meaning as the request of
- * {@link Gemma4Pipeline.chat}).
+ * {@link Pipeline.chat}).
  *
- * MUST: {@link Gemma4ChatSession.send} **copies** the contents **at issue** (ADR 0083 addendum
+ * MUST: {@link ChatSession.send} **copies** the contents **at issue** (ADR 0083 addendum
  * 2026-09-02) — rewriting them after the returned stream has started draining has no effect on the
  * running turn.
  */
-export type Gemma4ChatTurnOptions = {
-  /** Defaults to the session's {@link Gemma4ChatSessionOptions.maxNewTokens}. */
+export type ChatTurnOptions = {
+  /** Defaults to the session's {@link ChatSessionOptions.maxNewTokens}. */
   readonly maxNewTokens?: number;
   /** Additional stop tokens for this turn only (unioned with the distribution's EOS set). */
   readonly stopTokens?: readonly number[];
@@ -184,12 +184,12 @@ export type Gemma4ChatTurnOptions = {
   readonly sampler?: SamplerSpec;
   /**
    * Prefill progress (each time one chunk is committed — the same meaning as
-   * `Gemma4ChatOptions.onPrefill`).
+   * `ChatOptions.onPrefill`).
    *
    * The longer the conversation, the longer the prefill of "a turn that cannot carry the KV and
    * re-renders the whole", so an entry point that reports the silent time is needed.
    */
-  readonly onPrefill?: (progress: Gemma4PrefillProgress) => void;
+  readonly onPrefill?: (progress: PrefillProgress) => void;
   /**
    * Notification of generated tokens excluding stop tokens. Called synchronously, before decoding
    * and before stop-string holding. Includes special tokens that emit no text. Exceptions propagate
@@ -209,10 +209,7 @@ export type Gemma4ChatTurnOptions = {
  * nothing can be dropped, `turns` is returned as is (= the session fails with
  * `GenerationCapacityError` — this one message alone does not fit).
  */
-export const dropOldestTurns: Gemma4ChatOverflowPolicy = ({
-  turns,
-  system,
-}): readonly Gemma4ChatMessage[] => {
+export const dropOldestTurns: ChatOverflowPolicy = ({ turns, system }): readonly ChatMessage[] => {
   const floor = system === undefined ? 0 : 1;
   // The last entry (= the message being answered now) is never dropped.
   const droppable = turns.length - floor - 1;
@@ -263,7 +260,7 @@ const overflowOf = (
 };
 
 /**
- * The number of logical positions the conversation occupies ({@link Gemma4ChatOverflow.needed}).
+ * The number of logical positions the conversation occupies ({@link ChatOverflow.needed}).
  */
 const neededOf = (detail: GenerationCapacityDetail): number =>
   detail.pastLength + detail.promptLength + detail.requestedNewTokens - 1;
@@ -278,15 +275,15 @@ const neededOf = (detail: GenerationCapacityDetail): number =>
  * "judged to have dropped the last entry while keeping it" (the check side) or "silently disable the
  * rewind of a turn that emitted no character" (the `#finish` side).
  */
-const sameTurn = (left: Gemma4ChatMessage, right: Gemma4ChatMessage): boolean =>
+const sameTurn = (left: ChatMessage, right: ChatMessage): boolean =>
   left.role === right.role && left.content === right.content;
 
 /**
  * A session holding one conversation (history + KV).
  *
  * ```ts
- * await using pipeline = await Gemma4Pipeline.fromPretrained(ref);
- * await using session = new Gemma4ChatSession(pipeline, { maxNewTokens: 256 });
+ * await using pipeline = await Pipeline.fromPretrained(ref);
+ * await using session = new ChatSession(pipeline, { maxNewTokens: 256 });
  * for await (const chunk of session.send("Name a color.")) Deno.stdout.write(encode(chunk));
  * console.log(await session.send("Another one.").text());
  * ```
@@ -300,12 +297,12 @@ const sameTurn = (left: Gemma4ChatMessage, right: Gemma4ChatMessage): boolean =>
  * history, deciding whether to carry the KV, accepting the next `send`) runs at the end of the
  * stream, so a stream discarded without draining leaves the session stuck in that turn.
  */
-export class Gemma4ChatSession {
-  readonly #host: Gemma4ChatSessionHost;
+export class ChatSession {
+  readonly #host: ChatSessionHost;
   readonly #system: string | undefined;
   readonly #maxNewTokens: number;
   readonly #sampler: SamplerSpec | undefined;
-  readonly #onOverflow: Gemma4ChatOverflowPolicy;
+  readonly #onOverflow: ChatOverflowPolicy;
   /**
    * The capacity this session allocates (unchanged when the sequence is rebuilt — also the measure
    * of the overflow decision).
@@ -319,7 +316,7 @@ export class Gemma4ChatSession {
   /**
    * The conversation history (this layer's only mutable state — the sequence holds no transcript).
    */
-  #turns: Gemma4ChatMessage[];
+  #turns: ChatMessage[];
   /** The current sequence (`undefined` = rebuild on the next turn). */
   #sequence: GenerationSequence | undefined;
   /** The number of history entries in that sequence's KV (0 = empty = re-render the whole). */
@@ -329,7 +326,7 @@ export class Gemma4ChatSession {
   /** The one dispose. **Not undefined means "disposed"** (no separate derived state). */
   #disposal: Promise<void> | undefined;
 
-  constructor(host: Gemma4ChatSessionHost, options: Gemma4ChatSessionOptions) {
+  constructor(host: ChatSessionHost, options: ChatSessionOptions) {
     this.#host = host;
     this.#system = options.system;
     this.#maxNewTokens = options.maxNewTokens;
@@ -345,18 +342,18 @@ export class Gemma4ChatSession {
     // diagnostic.
     if (!Number.isSafeInteger(this.#capacity) || this.#capacity < 1) {
       throw new ModelInputError(
-        `Gemma4ChatSession: capacity ${this.#capacity} is not a positive integer`,
+        `gemma.ChatSession: capacity ${this.#capacity} is not a positive integer`,
       );
     }
     if (this.#capacity < host.program.chunkLength) {
       throw new ModelInputError(
-        `Gemma4ChatSession: capacity ${this.#capacity} is below chunkLength ` +
+        `gemma.ChatSession: capacity ${this.#capacity} is below chunkLength ` +
           `${host.program.chunkLength} (not even one chunk fits)`,
       );
     }
     if (this.#capacity > host.program.maxPosition) {
       throw new ModelInputError(
-        `Gemma4ChatSession: capacity ${this.#capacity} exceeds maxPosition ` +
+        `gemma.ChatSession: capacity ${this.#capacity} exceeds maxPosition ` +
           `${host.program.maxPosition} (a conversation filling the capacity would look up positions beyond the model's position limit)`,
       );
     }
@@ -368,27 +365,27 @@ export class Gemma4ChatSession {
    *
    * Returns a frozen **copy** — exposing the internal array as is would let the consumer's `push` /
    * `splice` silently break the mapping to the KV ("When the KV is carried over" of
-   * {@link Gemma4ChatSession}).
+   * {@link ChatSession}).
    */
-  get turns(): readonly Gemma4ChatMessage[] {
+  get turns(): readonly ChatMessage[] {
     return Object.freeze(this.#turns.map((turn) => Object.freeze({ ...turn })));
   }
 
   /**
    * Sends one message and streams **committed text pieces** (the same stream, the same stop reason
-   * and the same `text()` as {@link Gemma4Pipeline.chat}).
+   * and the same `text()` as {@link Pipeline.chat}).
    *
    * If the previous turn closed with EOS, the KV is carried over and **only the delta** is streamed;
    * otherwise the sequence is rebuilt and the history re-rendered. A turn that does not fit goes to
-   * overflow handling **before sending** ({@link Gemma4ChatSessionOptions.onOverflow}).
+   * overflow handling **before sending** ({@link ChatSessionOptions.onOverflow}).
    */
-  send(text: string, options: Gemma4ChatTurnOptions = {}): Gemma4ChatStream {
+  send(text: string, options: ChatTurnOptions = {}): ChatStream {
     if (this.#disposal !== undefined) {
-      throw new Error("Gemma4ChatSession: cannot generate after dispose");
+      throw new Error("gemma.ChatSession: cannot generate after dispose");
     }
     if (this.#busy) {
       throw new Error(
-        "Gemma4ChatSession: the previous turn has not finished yet" +
+        "gemma.ChatSession: the previous turn has not finished yet" +
           " (1 session = 1 generation — drain the issued stream or close it with break)",
       );
     }
@@ -419,13 +416,13 @@ export class Gemma4ChatSession {
       ...(sampler === undefined ? {} : { sampler }),
     });
 
-    const asked: Gemma4ChatMessage = { role: "user", content: text };
+    const asked: ChatMessage = { role: "user", content: text };
     this.#turns.push(asked);
     this.#busy = true;
 
-    let settle!: (stop: Gemma4ChatStop) => void;
+    let settle!: (stop: ChatStop) => void;
     let fail!: (error: unknown) => void;
-    const done = new Promise<Gemma4ChatStop>((resolve, reject) => {
+    const done = new Promise<ChatStop>((resolve, reject) => {
       settle = resolve;
       fail = reject;
     });
@@ -473,7 +470,7 @@ export class Gemma4ChatSession {
         throw error;
       } finally {
         await completeChatTurn({
-          where: "Gemma4ChatSession.send",
+          where: "gemma.ChatSession.send",
           stream,
           matched,
           failure,
@@ -552,13 +549,13 @@ export class Gemma4ChatSession {
    * message onto the original history first, and "a question without an answer" would mix into the
    * branch (a mix-up that raises no exception).
    */
-  fork(): Promise<Gemma4ChatSession> {
+  fork(): Promise<ChatSession> {
     if (this.#disposal !== undefined) {
-      throw new Error("Gemma4ChatSession: cannot fork after dispose");
+      throw new Error("gemma.ChatSession: cannot fork after dispose");
     }
     if (this.#busy) {
       throw new Error(
-        "Gemma4ChatSession: the previous turn has not finished yet" +
+        "gemma.ChatSession: the previous turn has not finished yet" +
           " (fork only between turns — drain the issued stream or close it with break)",
       );
     }
@@ -567,7 +564,7 @@ export class Gemma4ChatSession {
     const turns = this.#turns.map((turn) => ({ ...turn }));
     const committed = this.#committed;
     const copying = this.#sequence?.fork();
-    const branch = new Gemma4ChatSession(this.#host, {
+    const branch = new ChatSession(this.#host, {
       maxNewTokens: this.#maxNewTokens,
       capacity: this.#capacity,
       onOverflow: this.#onOverflow,
@@ -606,7 +603,7 @@ export class Gemma4ChatSession {
       // Draining an issued stream after disposing only the session would otherwise take a sequence
       // with fresh capacity from a live pipeline.
       if (this.#disposal !== undefined) {
-        throw new Error("Gemma4ChatSession: cannot generate after dispose");
+        throw new Error("gemma.ChatSession: cannot generate after dispose");
       }
       const held = this.#sequence;
       // Carry on with a delta only when "exactly the last message is uncommitted". Streaming a delta
@@ -614,7 +611,7 @@ export class Gemma4ChatSession {
       // over is itself a check.
       if (this.#committed !== 0 && this.#committed !== this.#turns.length - 1) {
         throw new Error(
-          `Gemma4ChatSession internal inconsistency: the KV holds ${this.#committed} turns but the history holds ` +
+          `gemma.ChatSession internal inconsistency: the KV holds ${this.#committed} turns but the history holds ` +
             `${this.#turns.length}`,
         );
       }
@@ -625,19 +622,19 @@ export class Gemma4ChatSession {
       if (this.#committed !== 0) {
         if (held === undefined) {
           throw new Error(
-            `Gemma4ChatSession internal inconsistency: the KV holds ${this.#committed} turns but there is no sequence`,
+            `gemma.ChatSession internal inconsistency: the KV holds ${this.#committed} turns but there is no sequence`,
           );
         }
         used = held.used;
       } else if (held !== undefined && held.used !== 0) {
         throw new Error(
-          `Gemma4ChatSession internal inconsistency: the KV is empty but the sequence's used is ${held.used}`,
+          `gemma.ChatSession internal inconsistency: the KV is empty but the sequence's used is ${held.used}`,
         );
       }
       const prompt =
         this.#committed === 0
-          ? gemma4ChatPrompt(this.#host.tokenizer, this.#turns)
-          : gemma4ChatTurn(this.#host.tokenizer, this.#turns[this.#turns.length - 1]);
+          ? chatPrompt(this.#host.tokenizer, this.#turns)
+          : chatTurn(this.#host.tokenizer, this.#turns[this.#turns.length - 1]);
       const detail = overflowOf(
         this.#host.program,
         this.#capacity,
@@ -653,13 +650,13 @@ export class Gemma4ChatSession {
           // speculate if there is a drafter).
           ...(this.#speculative === undefined ? {} : { speculative: this.#speculative }),
         });
-        // MUST: check once more after `await` (the same shape as `Gemma4Pipeline.sequence`). An
+        // MUST: check once more after `await` (the same shape as `Pipeline.sequence`). An
         // instance disposed mid-allocation is closed neither by `dispose()` (`#sequence` is still
         // undefined) nor by the eos branch of `#finish` (which does not go through
         // `#releaseSequence`) — this re-check is the only thing that closes the window.
         if (this.#disposal !== undefined) {
           await created.dispose();
-          throw new Error("Gemma4ChatSession: cannot generate after dispose");
+          throw new Error("gemma.ChatSession: cannot generate after dispose");
         }
         this.#sequence = created;
         this.#committed = 0;
@@ -667,7 +664,7 @@ export class Gemma4ChatSession {
       }
       if (attempt >= attempts) {
         throw new Error(
-          `Gemma4ChatSession internal inconsistency: overflow handling did not converge in ${attempts} attempts`,
+          `gemma.ChatSession internal inconsistency: overflow handling did not converge in ${attempts} attempts`,
         );
       }
       await this.#shrink(detail);
@@ -690,13 +687,13 @@ export class Gemma4ChatSession {
     });
     // MUST: the message being answered now (the last entry) remains. Letting it through dropped
     // would make `#prepare` re-render "a conversation with no question", and since
-    // `gemma4ChatPrompt` does not constrain the last role either, only an answer would be committed
+    // `chatPrompt` does not constrain the last role either, only an answer would be committed
     // with **zero exceptions**. The comparison is by value ({@link sameTurn}) — a legitimate policy
     // that returns copies is not rejected.
     const last = next.at(-1);
     if (last === undefined || !sameTurn(last, asked)) {
       throw new Error(
-        `Gemma4ChatSession: overflow handling dropped the current utterance (the last one)` +
+        `gemma.ChatSession: overflow handling dropped the current utterance (the last one)` +
           ` (history ${before} turns → ${next.length} — keep the utterance being answered now)`,
       );
     }
@@ -717,11 +714,7 @@ export class Gemma4ChatSession {
    * The turn's wrap-up (appending to the history, deciding whether to carry the KV, accepting the
    * next `send`).
    */
-  async #finish(
-    asked: Gemma4ChatMessage,
-    reply: string,
-    stop: Gemma4ChatStop | undefined,
-  ): Promise<void> {
+  async #finish(asked: ChatMessage, reply: string, stop: ChatStop | undefined): Promise<void> {
     try {
       if (stop?.reason === "eos") {
         // Closed with the distribution's EOS = the model turn is closed. The entry is pushed even

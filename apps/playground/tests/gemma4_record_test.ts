@@ -1,4 +1,4 @@
-import type { Gemma4ChatStop } from "@karume/models/gemma";
+import type { ChatStop } from "@karume/models/gemma";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -46,7 +46,7 @@ const turn: TurnRecord = {
 
 describe("stopRecordOf", () => {
   it("keeps the stop token of an EOS / stop-token stop", () => {
-    const stop: Gemma4ChatStop = { reason: "eos", token: 106, tokens: 3 };
+    const stop: ChatStop = { reason: "eos", token: 106, tokens: 3 };
     expect(stopRecordOf(stop)).toEqual({ reason: "eos", tokens: 3, token: 106 });
   });
 
@@ -59,7 +59,7 @@ describe("stopRecordOf", () => {
       delivered: 6,
       acceptedHistogram: [0, 0, 2, 0],
     };
-    const stop: Gemma4ChatStop = {
+    const stop: ChatStop = {
       reason: "stop-string",
       stopString: "END",
       tokens: 7,
@@ -106,7 +106,7 @@ describe("buildGemmaRecord", () => {
     expect(record.format).toBe("karume-playground-gemma4/1");
     expect(record.page).toBe("gemma4");
     expect(record.recordedAt).toBe(environment.recordedAt);
-    expect(record.pipeline).toBe("Gemma4Pipeline");
+    expect(record.pipeline).toBe("gemma.Pipeline");
     expect(buildGemmaRecord({ ...input, mount: "gemma4-qat" }).pipeline).toBe("Gemma4QatPipeline");
   });
 

@@ -58,13 +58,13 @@ import type { Tensor } from "@karume/runtime";
 /** Layer type names (upstream's `layer_types` spelling as is — part of the graph input names). */
 export const GEMMA4_ROPE_LAYER_TYPES = ["sliding_attention", "full_attention"] as const;
 
-export type Gemma4RopeLayerType = (typeof GEMMA4_ROPE_LAYER_TYPES)[number];
+export type RopeLayerType = (typeof GEMMA4_ROPE_LAYER_TYPES)[number];
 
 /**
  * RoPE parameters of one layer type (declared by the distribution's
  * `pipelineConfig.rope.<layerType>`).
  */
-export type Gemma4RopeLayerSpec = {
+export type RopeLayerSpec = {
   /** Frequency base (upstream `rope_theta`). */
   readonly theta: number;
   /** Head dimension `D` (= the width of the generated row). */
@@ -77,8 +77,8 @@ export type Gemma4RopeLayerSpec = {
 };
 
 /** Both layer types. */
-export type Gemma4RopeSpec = {
-  readonly [layerType in Gemma4RopeLayerType]: Gemma4RopeLayerSpec;
+export type RopeSpec = {
+  readonly [layerType in RopeLayerType]: RopeLayerSpec;
 };
 
 /** The two generated parts, cos / sin. */
@@ -93,7 +93,7 @@ export type Gemma4RopePart = (typeof GEMMA4_ROPE_PARTS)[number];
  * MUST: this is the only place that generates it (the distribution side's check
  * `GEMMA4_GRAPH_INPUTS` and the TS derived-input names come from the same string).
  */
-export const gemma4RopeInputName = (layerType: Gemma4RopeLayerType, part: Gemma4RopePart): string =>
+export const gemma4RopeInputName = (layerType: RopeLayerType, part: Gemma4RopePart): string =>
   `rope_${layerType}_${part}`;
 
 /** The four graph input names (in the fixed order layer type × part). */
@@ -110,7 +110,7 @@ export const gemma4RopeInputNames = (): string[] =>
  * upstream's. `theta` is a positive finite value (rejecting the shape where `theta ** negative`
  * falls to 0 / Inf).
  */
-const assertGemma4RopeLayerSpec = (where: string, spec: Gemma4RopeLayerSpec): void => {
+const assertGemma4RopeLayerSpec = (where: string, spec: RopeLayerSpec): void => {
   const { theta, headDim, rotaryDim } = spec;
   if (!Number.isFinite(theta) || theta <= 0) {
     throw new Error(`${where}: theta must be a positive finite number (${theta})`);
@@ -125,7 +125,7 @@ const assertGemma4RopeLayerSpec = (where: string, spec: Gemma4RopeLayerSpec): vo
   }
 };
 
-export const assertGemma4RopeSpec = (where: string, spec: Gemma4RopeSpec): void => {
+export const assertGemma4RopeSpec = (where: string, spec: RopeSpec): void => {
   for (const layerType of GEMMA4_ROPE_LAYER_TYPES) {
     assertGemma4RopeLayerSpec(`${where}.${layerType}`, spec[layerType]);
   }
@@ -138,10 +138,7 @@ export const assertGemma4RopeSpec = (where: string, spec: Gemma4RopeSpec): void 
  * NOTE: `theta ** x` is `Math.pow` in f64. Upstream computes `1 / base ** t` in f32, so there is a
  * relative difference around 1e-7, but this difference is intended (the numerics contract above).
  */
-const ropeInverseFrequencies = (
-  spec: Gemma4RopeLayerSpec,
-  qat: boolean,
-): Float64Array<ArrayBuffer> => {
+const ropeInverseFrequencies = (spec: RopeLayerSpec, qat: boolean): Float64Array<ArrayBuffer> => {
   assertGemma4RopeLayerSpec("gemma4 rope", spec);
   const half = spec.headDim / 2;
   const rotated = spec.rotaryDim / 2;
@@ -170,7 +167,7 @@ export type Gemma4RopeRows = {
  * leave the formula undefined, so they fail loudly.
  */
 const ropeRows = (
-  spec: Gemma4RopeLayerSpec,
+  spec: RopeLayerSpec,
   positions: ArrayLike<number>,
   qat: boolean,
 ): Gemma4RopeRows => {
@@ -209,8 +206,8 @@ const ropeRows = (
  * `positions` has one entry per physical row (pad rows are 0 — `sequence.ts` fills them by the same
  * convention as `input_ids`).
  */
-const ropeInputs = (
-  spec: Gemma4RopeSpec,
+const buildRopeInputs = (
+  spec: RopeSpec,
   positions: ArrayLike<number>,
   qat: boolean,
 ): Record<string, Tensor> => {
@@ -234,25 +231,20 @@ const ropeInputs = (
 };
 
 /** Regular Gemma's inverse frequencies (f64). Dimensions not rotated are 0. */
-export const gemma4RopeInverseFrequencies = (
-  spec: Gemma4RopeLayerSpec,
-): Float64Array<ArrayBuffer> => ropeInverseFrequencies(spec, false);
+export const gemma4RopeInverseFrequencies = (spec: RopeLayerSpec): Float64Array<ArrayBuffer> =>
+  ropeInverseFrequencies(spec, false);
 /** Builds cos / sin rows from regular Gemma's positions, computed in f64 and stored as f32. */
-export const gemma4RopeRows = (
-  spec: Gemma4RopeLayerSpec,
-  positions: ArrayLike<number>,
-): Gemma4RopeRows => ropeRows(spec, positions, false);
+export const gemma4RopeRows = (spec: RopeLayerSpec, positions: ArrayLike<number>): Gemma4RopeRows =>
+  ropeRows(spec, positions, false);
 /** The four RoPE inputs for a physical chunk of regular Gemma. Pad positions are 0. */
-export const gemma4RopeInputs = (
-  spec: Gemma4RopeSpec,
-  positions: ArrayLike<number>,
-): Record<string, Tensor> => ropeInputs(spec, positions, false);
+export const ropeInputs = (spec: RopeSpec, positions: ArrayLike<number>): Record<string, Tensor> =>
+  buildRopeInputs(spec, positions, false);
 /**
  * Per-step f32 rounding, for fixed QAT only. Builds the four RoPE inputs of a physical chunk
  * including pad.
  * DECIDED: [ADR 0097 addendum 5](../../../../docs/decisions/0097-gemma4-qat-integration.md#addendum-5-2026-09-11--fixed-qat-recipe-and-how-numeric-comparisons-are-treated).
  */
 export const gemma4QatRopeInputs = (
-  spec: Gemma4RopeSpec,
+  spec: RopeSpec,
   positions: ArrayLike<number>,
-): Record<string, Tensor> => ropeInputs(spec, positions, true);
+): Record<string, Tensor> => buildRopeInputs(spec, positions, true);

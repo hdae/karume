@@ -20,7 +20,7 @@ import { hubLoadOptions } from "../src/hub/load-options.ts";
 import * as anima from "../anima.ts";
 import * as birefnet from "../birefnet.ts";
 import * as depthAnything from "../depth-anything.ts";
-import type { Gemma4FromPretrainedOptions } from "../src/gemma/pipeline.ts";
+import * as gemma from "../gemma.ts";
 import type { IrodoriFromPretrainedOptions } from "../src/irodori/pipeline.ts";
 import type { Sbv2FromPretrainedOptions } from "../src/sbv2/pipeline.ts";
 import type { Siglip2FromPretrainedOptions } from "../src/siglip2/pipeline.ts";
@@ -84,7 +84,7 @@ test("型の門: 9 家族の fromPretrained オプションが onRetry を受け
     { onRetry: noopRetry } satisfies anima.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies birefnet.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies depthAnything.FromPretrainedOptions,
-    { onRetry: noopRetry } satisfies Gemma4FromPretrainedOptions,
+    { onRetry: noopRetry } satisfies gemma.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies IrodoriFromPretrainedOptions,
     { onRetry: noopRetry } satisfies Sbv2FromPretrainedOptions,
     { onRetry: noopRetry } satisfies Siglip2FromPretrainedOptions,

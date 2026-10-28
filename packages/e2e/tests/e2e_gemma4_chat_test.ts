@@ -1,7 +1,7 @@
 // 実重み Gemma 4 E2B の **文字列 in → 文字列 out** の検収門 — 段 4 の合格線。
 //
-// 検収するのは `src/gemma/pipeline.ts`（`Gemma4Pipeline`）と `src/gemma/text/chat.ts`
-// （`gemma4ChatPrompt`）の結線で、門は 7 本:
+// 検収するのは `src/gemma/pipeline.ts`（`Pipeline`）と `src/gemma/text/chat.ts`
+// （`chatPrompt`）の結線で、門は 7 本:
 //
 // ① **完走**: `fromAssets` → `chat([...])` が実重みで回り、温度 0（この層の既定）の出力が
 //    固定した greedy golden と文字単位で一致する。golden は**この経路自身で採った**もので、
@@ -15,10 +15,10 @@
 //    「finish() まで全部溜める偽 streaming」になっても①は緑のままなので、この門が要る
 // ④ **停止集合**が上流の `generation_config.json` の宣言（`[1, 106, 50]`）と一致する
 // ⑤ **射程外は GPU に触る前に落ちる**（tools / 未知 role — `chat` は同期に throw する）
-// ⑥ **増分描画の多ターン**（`gemma4ChatTurn` + `sequence()`）が、同じ会話を毎ターン全体描画で
+// ⑥ **増分描画の多ターン**（`chatTurn` + `sequence()`）が、同じ会話を毎ターン全体描画で
 //    回した `chat()` と**逐語一致**する。turn-local 契約（`gemma4_chat_test.ts` の門）が id 列の
 //    等式で、こちらは同じ等式を**実重みの出力**で見る門である
-// ⑦ **`Gemma4ChatSession` の 2 ターン**が⑥と同じ文字列になる。⑥は「差分描画を手で回せば一致
+// ⑦ **`ChatSession` の 2 ターン**が⑥と同じ文字列になる。⑥は「差分描画を手で回せば一致
 //    する」を、⑦は「中間層に任せても同じ会話になる」を見る（KV の継続条件と履歴の積み方は
 //    セッションの中にあるので、実重みで見る門はここにしかない — `gemma4_chat_session_test.ts`
 //    は偽 sequence で組み立てだけを見る）
@@ -43,14 +43,14 @@ import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 // MUST: 入口は**公開面**（`./gemma` サブパス）から取る — 消費者が書けない import で検収すると、
 // 「面が痩せていること」に門が気づけない（`src/...` を直に掴めば何でも見える）。
 import {
-  type Gemma4ChatMessage,
-  gemma4ChatPrompt,
-  Gemma4ChatSession,
-  type Gemma4ChatStream,
-  gemma4ChatTurn,
-  Gemma4Pipeline,
-  type Gemma4PipelineOptions,
-  type Gemma4RunPhase,
+  type ChatMessage,
+  chatPrompt,
+  ChatSession,
+  type ChatStream,
+  chatTurn,
+  Pipeline,
+  type PipelineOptions,
+  type RunPhase,
 } from "../../models/gemma.ts";
 // 予算の既定は runtime の**公開面**から取る（写すと家族側だけ古い値を名乗れる）。
 import {
@@ -59,7 +59,7 @@ import {
   type SessionDiagnostics,
 } from "@karume/runtime";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
-// ミラーから `Gemma4Assets` を組む helper（系列出力は manifest を持たないので使えない —
+// ミラーから `Assets` を組む helper（系列出力は manifest を持たないので使えない —
 // 冒頭の NOTE）。
 import { gemma4MirrorAssets, mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
 import { allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budget.ts";
@@ -114,14 +114,14 @@ const CASES = [
 ] as const;
 
 /** ⑥ の 2 ターン目（1 ターン目は `CASES[0]` の会話をそのまま使う）。 */
-const FOLLOW_UP: Gemma4ChatMessage = { role: "user", content: "And of Japan?" };
+const FOLLOW_UP: ChatMessage = { role: "user", content: "And of Japan?" };
 const FOLLOW_UP_TOKENS = 24;
 
 type ChatFixture = {
   readonly stopTokens: number[];
   readonly chat: {
     readonly name: string;
-    readonly messages: Gemma4ChatMessage[];
+    readonly messages: ChatMessage[];
     readonly ids: number[];
   }[];
 };
@@ -147,8 +147,8 @@ if (!AVAILABLE) {
   );
 }
 
-const openPipeline = async (options: Gemma4PipelineOptions = {}): Promise<Gemma4Pipeline> =>
-  await Gemma4Pipeline.fromAssets(
+const openPipeline = async (options: PipelineOptions = {}): Promise<Pipeline> =>
+  await Pipeline.fromAssets(
     {
       ...(await gemma4MirrorAssets(MIRROR_DIR)),
       // 宣言は配布形のものではなく**この門が固定した値**を使う（chunk 長・容量・rope の既定が
@@ -173,9 +173,9 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
   "Gemma 4 E2B chat 検収: 文字列 in → 文字列 out・逐次と一括の一致（実 GPU）",
   () => {
     // Assigned in beforeAll; the its below run sequentially against this one pipeline.
-    let pipeline: Gemma4Pipeline;
+    let pipeline: Pipeline;
     /** dispose の**前**に発行し、汲み始めるのは**後**にする stream（下の寿命の門で使う）。 */
-    let issuedBeforeDispose: Gemma4ChatStream | undefined;
+    let issuedBeforeDispose: ChatStream | undefined;
     /** ⑥ が採った 2 ターン目の参照（⑦ が同じ会話をセッションで組んで突き合わせる）。 */
     let followUpAnswer: string | undefined;
 
@@ -211,7 +211,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
     it("② パイプラインが握る資産の chat id 列がフィクスチャと一致", () => {
       for (const { fixture: name } of CASES) {
         const { messages, ids } = caseOf(name);
-        assertEquals(gemma4ChatPrompt(pipeline.tokenizer, messages), ids, name);
+        assertEquals(chatPrompt(pipeline.tokenizer, messages), ids, name);
       }
     });
 
@@ -245,16 +245,15 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
     it("⑤ 射程外の会話は GPU に触る前に落ちる（同期の throw）", () => {
       assertThrows(
         () =>
-          pipeline.chat(
-            [{ role: "user", content: "hi", tools: [] }] as unknown as Gemma4ChatMessage[],
-            { maxNewTokens: 4 },
-          ),
+          pipeline.chat([{ role: "user", content: "hi", tools: [] }] as unknown as ChatMessage[], {
+            maxNewTokens: 4,
+          }),
         Error,
         "out-of-scope fields",
       );
       assertThrows(
         () =>
-          pipeline.chat([{ role: "tool", content: "…" }] as unknown as Gemma4ChatMessage[], {
+          pipeline.chat([{ role: "tool", content: "…" }] as unknown as ChatMessage[], {
             maxNewTokens: 4,
           }),
         Error,
@@ -267,10 +266,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       const first = caseOf(name).messages;
 
       /** 高レベル面（毎ターン会話全体を描き直す）で 1 ターン汲む。 */
-      const viaChat = async (
-        messages: readonly Gemma4ChatMessage[],
-        limit: number,
-      ): Promise<string> => {
+      const viaChat = async (messages: readonly ChatMessage[], limit: number): Promise<string> => {
         const parts: string[] = [];
         for await (const chunk of pipeline.chat(messages, { maxNewTokens: limit })) {
           parts.push(chunk);
@@ -280,11 +276,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 
       const answer1 = await viaChat(first, maxNewTokens);
       // 2 ターン目の参照は「1 ターン目の応答を会話へ入れて全体を描き直した」もの。
-      const grown: Gemma4ChatMessage[] = [
-        ...first,
-        { role: "assistant", content: answer1 },
-        FOLLOW_UP,
-      ];
+      const grown: ChatMessage[] = [...first, { role: "assistant", content: answer1 }, FOLLOW_UP];
       const answer2 = await viaChat(grown, FOLLOW_UP_TOKENS);
       followUpAnswer = answer2;
 
@@ -299,13 +291,13 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
           return { text: pipeline.tokenizer.decode(ids), stop: await stream.done };
         };
 
-        const prompt1 = gemma4ChatPrompt(pipeline.tokenizer, first);
+        const prompt1 = chatPrompt(pipeline.tokenizer, first);
         const first1 = await turn(prompt1, maxNewTokens);
         assertEquals(first1.text, answer1, "1 ターン目（全体描画は chat と同じ経路）");
         // `used` は「会話が占めている論理位置」— prompt + 生成（停止 token 込み）で説明が付く。
         assertEquals(sequence.used, prompt1.length + first1.stop.tokens, "1 ターン目の後の used");
 
-        const delta = gemma4ChatTurn(pipeline.tokenizer, FOLLOW_UP);
+        const delta = chatTurn(pipeline.tokenizer, FOLLOW_UP);
         const second = await turn(delta, FOLLOW_UP_TOKENS);
         console.log(
           `[e2e] gemma4 増分ターン: ${JSON.stringify(second.text)} / ` +
@@ -334,7 +326,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       assertEquals(first.length, 1, `${name}: 1 発話のケースでないと send に写せない`);
       assert(followUpAnswer !== undefined, "⑥ が 2 ターン目の参照を採っていない");
 
-      await using session = new Gemma4ChatSession(pipeline, { maxNewTokens });
+      await using session = new ChatSession(pipeline, { maxNewTokens });
       // 1 ターン目は golden そのもの（`chat()` と同じ全体描画から始まる）。
       assertEquals(await session.send(first[0].content).text(), expected, "1 ターン目");
       // 2 ターン目は差分描画 + KV の継続。セッションが継ぐ条件（前ターンが EOS で閉じた）と
@@ -432,7 +424,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
         `chunkLength ${MAX_CHUNK_LENGTH + 1} exceeds the distribution's declared maxChunkLength`,
       );
       // 安全整数でない容量は「1 以上の整数でない」の門が受ける（大小関係の診断とは分ける —
-      // `createGenerationSequence` / `Gemma4ChatSession` と同じ 3 本・値域の穴を作らない）。
+      // `createGenerationSequence` / `ChatSession` と同じ 3 本・値域の穴を作らない）。
       assertThrows(
         () => pipeline.estimateSessionMemory({ capacity: 1.5 }),
         Error,
@@ -474,7 +466,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
             }
           },
           Error,
-          "Gemma4Pipeline: cannot generate after dispose",
+          "gemma.Pipeline: cannot generate after dispose",
         );
       });
 
@@ -564,7 +556,7 @@ test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
  * `createSession` へ降り、生成の run 診断にそのまま現れること。
  *
  * 上の門が見るのは見積り側（報告に載る数）だけで、Session に効いているかは見ていない。こちらは
- * 観測席（{@link Gemma4PipelineOptions.onRunDiagnostics}）から run ごとの `planBacking` を直接
+ * 観測席（{@link PipelineOptions.onRunDiagnostics}）から run ごとの `planBacking` を直接
  * 読む。見るのは 2 通の対:
  *
  * ① **予算 0**（従来の容量 1）: どの run でも保持は 1 本きりで、prefill → decode の切替で
@@ -578,7 +570,7 @@ test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
  * ためだけに使う。
  */
 type ObservedRun = {
-  readonly kind: Gemma4RunPhase["kind"];
+  readonly kind: RunPhase["kind"];
   readonly retainedCount: number;
   readonly buildCount: number;
 };
@@ -587,12 +579,12 @@ type ObservedRun = {
 const OBSERVED_NEW_TOKENS = 4;
 
 /** 同じ会話を 2 ターン回し、**2 ターン目**の run だけを拾う。 */
-const observeSecondTurn = async (options: Gemma4PipelineOptions): Promise<ObservedRun[]> => {
+const observeSecondTurn = async (options: PipelineOptions): Promise<ObservedRun[]> => {
   const { messages } = caseOf("single-user");
   const runs: ObservedRun[] = [];
   const pipeline = await openPipeline({
     ...options,
-    onRunDiagnostics: (diagnostics: SessionDiagnostics, phase: Gemma4RunPhase) => {
+    onRunDiagnostics: (diagnostics: SessionDiagnostics, phase: RunPhase) => {
       runs.push({
         kind: phase.kind,
         retainedCount: diagnostics.planBacking.retainedCount,

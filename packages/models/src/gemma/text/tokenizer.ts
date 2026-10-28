@@ -14,10 +14,10 @@
  * `bpeEncode` is written with a merge queue (ADR 0084 decision 3). The scan itself is not ported
  * because it would always be the identity.
  *
- * MUST: {@link GemmaTokenizer.encode} does not add `<bos>` (matching the measured gemma4
+ * MUST: {@link Tokenizer.encode} does not add `<bos>` (matching the measured gemma4
  * post_processor). Only the chat function adds it — without that split, chat would produce a double
  * BOS (ADR 0084 decision 5). When the asset declares that they are added, as EmbeddingGemma does,
- * {@link GemmaTokenizer.encodeWithSpecialTokens} adds them.
+ * {@link Tokenizer.encodeWithSpecialTokens} adds them.
  *
  * MUST: **do not build tables at module scope** (the cross-cutting invariant "zero module side
  * effects"). Both the added-vocabulary order and the decoding hooks are built once per instance.
@@ -34,7 +34,7 @@ import {
 import { type GemmaTokenizerAssets, METASPACE } from "./asset.ts";
 
 /** Decoding behaviour. */
-export type GemmaDecodeOptions = {
+export type DecodeOptions = {
   /**
    * Whether to drop special tokens (`<bos>` / `<eos>` / `<|turn>` …) from the output. Default
    * `true` (the same as the reference `Tokenizer.decode`'s default; the form that shows generated
@@ -46,7 +46,7 @@ export type GemmaDecodeOptions = {
   readonly skipSpecialTokens?: boolean;
 };
 
-export class GemmaTokenizer {
+export class Tokenizer {
   readonly #assets: GemmaTokenizerAssets;
   readonly #added: AddedTokenMatcher;
   readonly #tokenOfAdded: Map<number, string>;
@@ -144,7 +144,7 @@ export class GemmaTokenizer {
    * The same string as `tokenizer.decode(ids, …)` (goes through the same state machine as streaming
    * decoding).
    */
-  decode(ids: Iterable<number>, options: GemmaDecodeOptions = {}): string {
+  decode(ids: Iterable<number>, options: DecodeOptions = {}): string {
     return detokenize(this.#decoderSource(options), ids);
   }
 
@@ -152,11 +152,11 @@ export class GemmaTokenizer {
    * Builds a streaming decoder `push(id) → settled string` (one iteration of ADR 0083 decision 2 =
    * one push).
    */
-  createDetokenizer(options: GemmaDecodeOptions = {}): StreamingDetokenizer {
+  createDetokenizer(options: DecodeOptions = {}): StreamingDetokenizer {
     return new StreamingDetokenizer(this.#decoderSource(options));
   }
 
-  #decoderSource(options: GemmaDecodeOptions): DetokenizerSource {
+  #decoderSource(options: DecodeOptions): DetokenizerSource {
     const skipSpecialTokens = options.skipSpecialTokens ?? true;
     const { model, specialIds } = this.#assets;
     return {

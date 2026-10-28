@@ -1,5 +1,5 @@
 import type {
-  Gemma4ChatSessionHost,
+  ChatSessionHost,
   GenerationRequest,
   GenerationSequence,
   GenerationStream,
@@ -44,7 +44,7 @@ const fakeHost = () => {
     defaultSampler: { temperature: 1, topK: 64, topP: 0.95 },
     sequence: (options?: { capacity?: number }) =>
       Promise.resolve(sequence(options?.capacity ?? 4096)),
-  } as unknown as Gemma4ChatSessionHost;
+  } as unknown as ChatSessionHost;
   return { host, disposed };
 };
 

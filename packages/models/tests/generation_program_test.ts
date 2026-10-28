@@ -420,7 +420,7 @@ test("GenerationGraph: 実 IrGraph がこの面を満たす（綴りのドリフ
 
 // ---- 公開の読み口（`generationProgramFace`）----------------------------------
 //
-// `GenerationProgram` は `Gemma4Pipeline.program` としてパッケージの公開面に出る値なので、
+// `GenerationProgram` は `gemma.Pipeline.program` としてパッケージの公開面に出る値なので、
 // 守る先は消費者側である。これを叩く門は実資産 + 実 GPU の e2e 1 箇所にしか無く、
 // `Object.freeze` を外す / `[...wiring.stopTokens]` を `wiring.stopTokens` に戻す変更が、
 // 資産の無い環境（CI・多くの開発機）では全部緑のまま通っていた。

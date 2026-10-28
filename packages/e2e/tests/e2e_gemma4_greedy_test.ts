@@ -67,7 +67,7 @@ import {
   type Tensor,
 } from "@karume/runtime";
 import { generateGreedy } from "../../models/src/generation/greedy.ts";
-import { gemma4RopeInputs, type Gemma4RopeSpec } from "../../models/src/gemma/rope.ts";
+import { ropeInputs, type RopeSpec } from "../../models/src/gemma/rope.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { requireCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
@@ -199,7 +199,7 @@ const FULL_HEAD_DIM = 512;
  *
  * 幅（`headDim`）が層種別の head_dim と食い違えば①の D 軸検査ではなく run が形で落ちる。
  */
-const ROPE_SPEC: Gemma4RopeSpec = {
+const ROPE_SPEC: RopeSpec = {
   sliding_attention: { theta: 10_000, headDim: SLIDING_HEAD_DIM, rotaryDim: SLIDING_HEAD_DIM },
   full_attention: { theta: 1_000_000, headDim: FULL_HEAD_DIM, rotaryDim: 128 },
 };
@@ -340,7 +340,7 @@ const loadGreedy = async (caseName: string): Promise<GreedyGolden> => {
  * `io.<case>.safetensors`（無 pad 全長 1 回の入出力）。
  *
  * RoPE 派生入力 4 本も記録されているが、こちらは**読まない** — Deno 側は同じ位置列から
- * `gemma4RopeInputs` で組み直す（台本が組んだ表をそのまま食わせると、TS 実装の式が壊れても
+ * `ropeInputs` で組み直す（台本が組んだ表をそのまま食わせると、TS 実装の式が壊れても
  * ③が緑になる）。表そのものの突合は `gemma4_rope_test.ts`（上流モジュールの実出力との parity）
  * が受け持つ。
  */
@@ -533,7 +533,7 @@ const generateCase = async (
     session,
     inputIds: INPUT_IDS,
     // RoPE の cos / sin は chunk ごとにホストが組む（ADR 0091 決定 1）。
-    derive: (_ids, positions) => gemma4RopeInputs(ROPE_SPEC, positions),
+    derive: (_ids, positions) => ropeInputs(ROPE_SPEC, positions),
     token: tokenName,
     chunkLength: CHUNK_LENGTH,
     maxPosition: MAX_POSITION,
@@ -565,7 +565,7 @@ const runSingleChunkPrefill = (
   return session.run(
     {
       [INPUT_IDS]: i32Row(CHUNK_LENGTH, ids),
-      ...gemma4RopeInputs(ROPE_SPEC, positions),
+      ...ropeInputs(ROPE_SPEC, positions),
     },
     undefined,
     { context, queryLength: prompt.length },
@@ -762,7 +762,7 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
           const outputs = await session.run(
             {
               [INPUT_IDS]: i32Row(CHUNK_LENGTH, ids),
-              ...gemma4RopeInputs(ROPE_SPEC, positions),
+              ...ropeInputs(ROPE_SPEC, positions),
             },
             undefined,
             { context, queryLength },
@@ -1005,7 +1005,7 @@ test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       await session.run(
         {
           [INPUT_IDS]: i32Row(1, Int32Array.of(first)),
-          ...gemma4RopeInputs(ROPE_SPEC, Int32Array.of(golden.prompt.length)),
+          ...ropeInputs(ROPE_SPEC, Int32Array.of(golden.prompt.length)),
         },
         undefined,
         { context, queryLength: 1 },
