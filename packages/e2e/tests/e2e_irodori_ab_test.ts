@@ -28,10 +28,16 @@
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { type DistributionSource, type Manifest, parseManifest } from "@karume/hub";
+import {
+  type DistributionSource,
+  type Manifest,
+  parseManifest,
+  resolveSelection,
+  selectionRefs,
+} from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
 import type { SessionDiagnostics } from "@karume/runtime";
-import { Pipeline, type RunComponent } from "../../models/irodori.ts";
+import { Pipeline, type RunComponent, SOURCES } from "../../models/irodori.ts";
 import {
   assertSeatsApplied,
   type CensusRow,
@@ -64,6 +70,16 @@ import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts
 
 /** 配布形の置き場（`karume dist --pipeline irodori` の v4.1 の出力先）。 */
 const ASSETS_DIR = new URL("../../../models/karume-irodori-v4.1-small/", import.meta.url);
+/**
+ * v4.1-small references the components it shares with v4-small in v4-small's repository (ADR 0038
+ * §7 addendum 2026-10-28); a local source reads them from v4-small's mirror through an explicit
+ * mapping. A mirror built before the references declares none, and the mapping goes unused.
+ */
+const V4_REPO = SOURCES["irodori-v4-small"].repo;
+const V4_ASSETS_DIR = new URL("../../../models/karume-irodori-v4-small/", import.meta.url);
+const CROSS_REPO = { crossRepo: { [V4_REPO]: nodeDirectory(V4_ASSETS_DIR) } };
+/** The v4.1-small distribution with its cross-repository mapping. */
+const assetsSource = (): DistributionSource => nodeDirectory(ASSETS_DIR, CROSS_REPO);
 /** 実測と決着の置き場（`outputs/verify/<環境キー>/<日付>_irodori-ab/` — 消して安全）。 */
 const results = openResults("irodori-ab");
 
@@ -115,10 +131,34 @@ const manifestText = await readTextIfPresent(new URL("karume.json", ASSETS_DIR))
 if (manifestText === undefined) {
   console.warn(
     `[karume] ${ASSETS_DIR.pathname} に karume.json が無いため Irodori の自機 A/B 門を SKIP する` +
-      "（cd tools/exporter && uv run karume dist --pipeline irodori）",
+      "（cd tools/export-recipes && uv run python dist.py --pipeline irodori --model v4.1-small --resolve-refs hf）",
   );
 }
-const RUNNABLE = GPU_AVAILABLE && manifestText !== undefined;
+/**
+ * A rebuilt v4.1-small mirror reads its borrowed files from v4-small's mirror: without that mirror
+ * the gate SKIPs explicitly instead of failing on the first file it cannot read (a missing asset,
+ * not a defect).
+ */
+const borrowsFromV4 = (text: string): boolean => {
+  const manifest = parseManifest(text);
+  return Object.keys(manifest.models[MODEL].quants).some((quant) =>
+    selectionRefs(resolveSelection(manifest, { model: MODEL, quant })).some(
+      (ref) => ref.repo === V4_REPO,
+    ),
+  );
+};
+const missingV4 =
+  manifestText !== undefined &&
+  borrowsFromV4(manifestText) &&
+  (await readTextIfPresent(new URL("karume.json", V4_ASSETS_DIR))) === undefined;
+if (missingV4) {
+  console.warn(
+    `[karume] ${ASSETS_DIR.pathname} references ${V4_REPO}, but ${V4_ASSETS_DIR.pathname} has no` +
+      " karume.json — SKIP the Irodori A/B gate (cd tools/export-recipes && uv run python dist.py" +
+      " --pipeline irodori)",
+  );
+}
+const RUNNABLE = GPU_AVAILABLE && manifestText !== undefined && !missingV4;
 
 const readManifest = (): Manifest => parseManifest(manifestText as string);
 
@@ -172,7 +212,7 @@ for (const input of CASES) {
         const manifest = readManifest();
         const reference = referencePartnerOf(manifest, MODEL, PRACTICAL);
         const declared = quantOf(manifest, MODEL, PRACTICAL).session;
-        const source = nodeDirectory(ASSETS_DIR);
+        const source = assetsSource();
         const referenceRun = await observeStep1(source, reference, input, SEED);
         const first = await observeStep1(source, PRACTICAL, input, SEED);
         const second = await observeStep1(source, PRACTICAL, input, SEED);
@@ -284,7 +324,7 @@ test.skipIf(!RUNNABLE)(
     // No `onEvent` and no timing device: the DiT loop takes the resident path (the production
     // path), whose diagnostics arrive once per `enqueue` — the A/B cases above observe the host
     // path instead.
-    await using pipeline = await Pipeline.fromPretrained(nodeDirectory(ASSETS_DIR), {
+    await using pipeline = await Pipeline.fromPretrained(assetsSource(), {
       model: MODEL,
       quant: PRACTICAL,
       onRunDiagnostics: (component, diagnostics) => {
@@ -357,14 +397,12 @@ test.skipIf(!RUNNABLE)(
         PRACTICAL,
         {},
       );
-      const referenceRun = await observeStep1(
-        nodeDirectory(ASSETS_DIR),
-        reference,
-        FAULT_CASE,
-        SEED,
-      );
-      const faulty = await withManifestOverride(ASSETS_DIR, injected, (source) =>
-        observeStep1(source, PRACTICAL, FAULT_CASE, SEED),
+      const referenceRun = await observeStep1(assetsSource(), reference, FAULT_CASE, SEED);
+      const faulty = await withManifestOverride(
+        ASSETS_DIR,
+        injected,
+        (source) => observeStep1(source, PRACTICAL, FAULT_CASE, SEED),
+        CROSS_REPO,
       );
       const measured = measureAb(faulty.latent, referenceRun.latent);
       recorded.comparisons.push(
@@ -383,7 +421,7 @@ test.skipIf(!RUNNABLE)(
 test.skipIf(!RUNNABLE)(
   "e2e(実GPU): 故障注入 ② 実用席の 2 回目だけ別 seed にすると決定性の門が赤になる",
   async () => {
-    const source = nodeDirectory(ASSETS_DIR);
+    const source = assetsSource();
     const first = await observeStep1(source, PRACTICAL, FAULT_CASE, SEED);
     const second = await observeStep1(source, PRACTICAL, FAULT_CASE, SEED + 1);
     assertThrows(

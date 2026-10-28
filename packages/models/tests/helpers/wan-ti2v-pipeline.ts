@@ -39,9 +39,7 @@ export const WAN_TI2V_DIST_MODEL = "ti2v-5b";
  * 取得元の `crossRepo` の mapping で `models/karume-umt5-xxl/` を渡すので、revision は読まない。
  */
 export const WAN_TI2V_ASSEMBLE_COMMAND =
-  "cd tools/export-recipes && uv run python dist.py --pipeline wan-ti2v " +
-  "--ref-repo hdae/karume-umt5-xxl --ref-revision 0000000000000000000000000000000000000000 " +
-  "--ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder --allow-placeholder-ref";
+  "cd tools/export-recipes && uv run python dist.py --pipeline wan-ti2v --allow-placeholder-ref";
 
 /**
  * 配布形の manifest のテキストを読む（`karume.json` が無ければ `undefined` — SKIP の判定の源）。NotFound 以外の失敗は投げる

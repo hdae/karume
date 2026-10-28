@@ -10,6 +10,4 @@
  * 取得元の `crossRepo` の mapping で `models/karume-umt5-xxl/` を渡すので、revision は読まない。
  */
 export const WAN_ASSEMBLE_COMMAND =
-  "cd tools/export-recipes && uv run python dist.py --pipeline wan " +
-  "--ref-repo hdae/karume-umt5-xxl --ref-revision 0000000000000000000000000000000000000000 " +
-  "--ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder --allow-placeholder-ref";
+  "cd tools/export-recipes && uv run python dist.py --pipeline wan --allow-placeholder-ref";

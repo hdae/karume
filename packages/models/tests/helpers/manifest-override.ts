@@ -8,17 +8,21 @@
  */
 
 import { makeTempDir, readDir, remove, symlink, writeTextFile } from "@karume/test-support/fs";
-import type { DistributionSource } from "@karume/hub";
+import type { DistributionSource, LocalDirectoryOptions } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
 
 /**
  * `root` の配布形を `manifest` に差し替えた取得元で `body` を回す（一時ディレクトリは抜けたら
  * 消す — symlink を消すだけで、指す先の実体には触れない）。
+ *
+ * `options` go to the source as they are — a distribution with cross-repository references needs
+ * its `crossRepo` mapping on the overridden source too.
  */
 export const withManifestOverride = async <T>(
   root: URL,
   manifest: unknown,
   body: (source: DistributionSource) => Promise<T>,
+  options: LocalDirectoryOptions = {},
 ): Promise<T> => {
   const temporary = await makeTempDir({ prefix: "karume-ab-manifest-" });
   try {
@@ -29,7 +33,7 @@ export const withManifestOverride = async <T>(
     await writeTextFile(`${temporary}/karume.json`, JSON.stringify(manifest), {
       createNew: true,
     });
-    return await body(nodeDirectory(temporary));
+    return await body(nodeDirectory(temporary, options));
   } finally {
     await remove(temporary, { recursive: true });
   }
