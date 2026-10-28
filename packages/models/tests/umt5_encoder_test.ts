@@ -1,5 +1,5 @@
 /**
- * `Umt5Encoder`（`@karume/models/umt5`）の**構築の門**と umT5 のグラフ宣言の取り決め（`umt5GraphContract`）。
+ * `Encoder`（`@karume/models/umt5`）の**構築の門**と umT5 のグラフ宣言の取り決め（`umt5GraphContract`）。
  * GPU も実資産も要らない範囲だけを見る（実 GPU の符号化は `e2e_wan_umt5_test.ts`）。
  *
  * 押さえるのは 3 点:
@@ -11,7 +11,7 @@
  *    （取ったのは manifest と part 0〈descriptor〉だけ）。正の経路は「トークナイザ資産の解析」で止まる — admission と
  *    重みの part の取得・資産の取得を通り終えた（`wan_components_test.ts` と同じ「次の段の文言で通過を見る」形）。
  *    GPU は共有の模擬 GPU を渡し、アダプタにも触らない。
- * ③ 取得元に既定は無い（`UMT5_SOURCES` は呼び手が渡すオプトインの対応表で、既定ではない — ADR 0073。ref 欠落時の
+ * ③ 取得元に既定は無い（`SOURCES` は呼び手が渡すオプトインの対応表で、既定ではない — ADR 0073。ref 欠落時の
  *    案内の文言は `repo_ref_test.ts`）。
  */
 
@@ -20,7 +20,7 @@ import { describe, it } from "vite-plus/test";
 import { type FileRef, parseManifest } from "@karume/hub";
 import { ModelInputError } from "../src/errors.ts";
 import type { GraphOwner } from "../src/hub/components.ts";
-import { Umt5Encoder, type Umt5EncoderFromPretrainedOptions } from "../src/umt5/encoder.ts";
+import { Encoder, type FromPretrainedOptions } from "../src/umt5/encoder.ts";
 import { umt5GraphContract } from "../src/umt5/graph-contract.ts";
 import { UMT5_TOKENIZER_FORMAT } from "../src/umt5/tokenizer.ts";
 import type { ModelInput, TensorInput } from "../../runtime/tests/helpers/container-write.ts";
@@ -203,7 +203,7 @@ describe("fromAssets: 家族 admission は GPU に触る前に落ちる（容器
     it(label, async () => {
       const error = await assertRejects(
         () =>
-          Umt5Encoder.fromAssets(
+          Encoder.fromAssets(
             {
               manifest: manifestOf(DECLARED, patch),
               assets: { ...COMPONENTS, tokenizer: tokenizerJson() },
@@ -220,12 +220,12 @@ describe("fromAssets: 家族 admission は GPU に触る前に落ちる（容器
   it("model / quant の綴り違いは利用可能な一覧つきで落ちる", async () => {
     const input = { manifest: manifestOf(DECLARED), assets: COMPONENTS };
     await assertRejects(
-      () => Umt5Encoder.fromAssets(input, { model: "base", gpu: fakeGpu() }),
+      () => Encoder.fromAssets(input, { model: "base", gpu: fakeGpu() }),
       Error,
       "model 'base' is not in the manifest (available: xxl)",
     );
     await assertRejects(
-      () => Umt5Encoder.fromAssets(input, { quant: "f16", gpu: fakeGpu() }),
+      () => Encoder.fromAssets(input, { quant: "f16", gpu: fakeGpu() }),
       Error,
       "quant 'f16' is not in the manifest (available: i8)",
     );
@@ -234,7 +234,7 @@ describe("fromAssets: 家族 admission は GPU に触る前に落ちる（容器
   it("グラフ宣言の格納が i8 / f32 でない容器（i4）は落ちる", async () => {
     await assertRejects(
       () =>
-        Umt5Encoder.fromAssets(
+        Encoder.fromAssets(
           {
             manifest: manifestOf(DECLARED),
             assets: { ...partAssets("text_encoder", writtenI4), tokenizer: tokenizerJson() },
@@ -248,7 +248,7 @@ describe("fromAssets: 家族 admission は GPU に触る前に落ちる（容器
 
   it("対照: 容器が無ければ manifest の門ではなく受け口の診断で落ちる", async () => {
     await assertRejects(
-      () => Umt5Encoder.fromAssets({ manifest: manifestOf(DECLARED), assets: {} }),
+      () => Encoder.fromAssets({ manifest: manifestOf(DECLARED), assets: {} }),
       Error,
       "component 'text_encoder' has no container",
     );
@@ -257,7 +257,7 @@ describe("fromAssets: 家族 admission は GPU に触る前に落ちる（容器
 
 describe("fromAssets: トークナイザ資産の中身は GPU に触る前に見る", () => {
   const build = (tokenizer: Uint8Array<ArrayBuffer>) =>
-    Umt5Encoder.fromAssets(
+    Encoder.fromAssets(
       { manifest: manifestOf(DECLARED), assets: { ...COMPONENTS, tokenizer } },
       { gpu: fakeGpu() },
     );
@@ -265,7 +265,7 @@ describe("fromAssets: トークナイザ資産の中身は GPU に触る前に�
   it("宣言はあるが資産のバイト列が無ければ、揃っているキーを添えて落ちる", async () => {
     await assertRejects(
       () =>
-        Umt5Encoder.fromAssets(
+        Encoder.fromAssets(
           { manifest: manifestOf(DECLARED), assets: COMPONENTS },
           { gpu: fakeGpu() },
         ),
@@ -321,8 +321,8 @@ const serveUmt5 = async (patch: Record<string, unknown>, tokenizer: Uint8Array<A
       files: [...served.files, [tokenizerRef.path, tokenizer]],
     },
   ]);
-  const load = (options: Umt5EncoderFromPretrainedOptions = {}) =>
-    Umt5Encoder.fromPretrained(
+  const load = (options: FromPretrainedOptions = {}) =>
+    Encoder.fromPretrained(
       { repo: REPO, revision: SHA, hubUrl: HUB_URL },
       {
         gpu: fakeGpu(),
@@ -364,10 +364,10 @@ describe("fromPretrained: admission の違反は重みの part を 1 本も取�
 describe("fromPretrained: 取得元に既定は無い", () => {
   it("ref を省くと（型検査の外の JS の呼び出し）、repo が必須であることを言って落ちる", async () => {
     await assertRejects(
-      // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply supplies Umt5Encoder as `this`
-      () => Reflect.apply(Umt5Encoder.fromPretrained, Umt5Encoder, []),
+      // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply supplies Encoder as `this`
+      () => Reflect.apply(Encoder.fromPretrained, Encoder, []),
       Error,
-      "Umt5Encoder.fromPretrained: repo is required (there is no default source)",
+      "umt5.Encoder.fromPretrained: repo is required (there is no default source)",
     );
   });
 });
@@ -395,7 +395,7 @@ const ownerOf = (outputShape: readonly (number | string)[]): GraphOwner => ({
 
 describe("umt5GraphContract: 出力の幅", () => {
   it("幅を渡さなければ宣言の静的な幅を読む（単体の encoder）", () => {
-    assertEquals(umt5GraphContract(ownerOf([1, "L", 4096]), "Umt5Encoder"), {
+    assertEquals(umt5GraphContract(ownerOf([1, "L", 4096]), "umt5.Encoder"), {
       output: "out",
       hiddenSize: 4096,
     });
@@ -403,7 +403,7 @@ describe("umt5GraphContract: 出力の幅", () => {
 
   it("宣言の幅が記号次元なら読めないと言って落ちる（ホストは幅を宣言から読む）", () => {
     assertThrows(
-      () => umt5GraphContract(ownerOf([1, "L", "W"]), "Umt5Encoder"),
+      () => umt5GraphContract(ownerOf([1, "L", "W"]), "umt5.Encoder"),
       Error,
       "axis 2 is not a static positive integer",
     );

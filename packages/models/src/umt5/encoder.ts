@@ -1,5 +1,5 @@
 /**
- * `Umt5Encoder` — the one surface for text → the final hidden state of the umT5-XXL encoder
+ * `Encoder` — the one surface for text → the final hidden state of the umT5-XXL encoder
  * (`[L, 4096]`).
  *
  * Pipeline (every stage in Karume, no torch):
@@ -29,16 +29,16 @@
  *
  * ## Cancellation (`signal`)
  *
- * Construction uses {@link Umt5EncoderFromPretrainedOptions.signal} (the fetch layer — the same place
- * as siglip2 / depth-anything); encoding uses {@link Umt5EncodeOptions.signal} (checked after waiting
+ * Construction uses {@link FromPretrainedOptions.signal} (the fetch layer — the same place
+ * as siglip2 / depth-anything); encoding uses {@link EncodeOptions.signal} (checked after waiting
  * for the turn on the serialization chain and before the run, after yielding to the event loop once —
  * a single run is indivisible). Cancellation throws `signal.reason` **as is** (not wrapped — the
  * consumer can identify it with `error === controller.signal.reason`).
  *
  * ## Distribution (`karume-umt5-xxl` — pipeline `umt5-encoder/1`)
  *
- * The first argument of {@link Umt5Encoder.fromPretrained} is required; the source this package
- * version verified is `"umt5-xxl"` in {@link UMT5_SOURCES} (`./config.ts`). A local distribution is
+ * The first argument of {@link Encoder.fromPretrained} is required; the source this package
+ * version verified is `"umt5-xxl"` in {@link SOURCES} (`./config.ts`). A local distribution is
  * passed with `denoDirectory` of `@karume/hub/deno`.
  *
  * ## MUST: numerical correctness is not guaranteed here
@@ -97,7 +97,7 @@ import { umt5HiddenStates, umt5SessionInputs } from "./session-io.ts";
 import { parseUmt5TokenizerAsset, Umt5Tokenizer } from "./tokenizer.ts";
 
 /** The message prefix (the class name). */
-const OWNER = "Umt5Encoder";
+const OWNER = "umt5.Encoder";
 
 /**
  * The component name in the manifest's weights table (also the role name the replacement option
@@ -114,10 +114,10 @@ const COMPONENT_KEYS = [TEXT_ENCODER] as const;
  */
 const TOKENIZER = "tokenizer";
 
-/** Construction options (shared by {@link Umt5Encoder.fromAssets} / {@link Umt5Encoder.fromPretrained}). */
-export type Umt5EncoderOptions = {
+/** Construction options (shared by {@link Encoder.fromAssets} / {@link Encoder.fromPretrained}). */
+export type EncoderOptions = {
   /**
-   * Shares an existing GPU. **The side that passes it owns it**, so {@link Umt5Encoder.dispose} does
+   * Shares an existing GPU. **The side that passes it owns it**, so {@link Encoder.dispose} does
    * not destroy it. When omitted, the encoder calls `acquireGpu` internally and destroys it in
    * `dispose()`.
    */
@@ -140,13 +140,13 @@ export type Umt5EncoderOptions = {
 };
 
 /**
- * Fetch-layer options used only by {@link Umt5Encoder.fromPretrained} (passed through to the hub).
+ * Fetch-layer options used only by {@link Encoder.fromPretrained} (passed through to the hub).
  * The component replacement option (`components`) has the single role `text_encoder`.
  *
  * NOTE: the description of the fetch-layer knobs, including that `headers` / `fetch` / `caches` /
  * `onRetry` are **for HTTP sources only**, lives in one place: {@link FromPretrainedHubOptions}.
  */
-export type Umt5EncoderFromPretrainedOptions = Umt5EncoderOptions &
+export type FromPretrainedOptions = EncoderOptions &
   FromPretrainedHubOptions &
   FromPretrainedComponentOptions & {
     /**
@@ -162,13 +162,13 @@ export type Umt5EncoderFromPretrainedOptions = Umt5EncoderOptions &
  * `text_encoder` of a single-form `krm`, or the part list `text_encoder[0]` / `text_encoder[1]` / …)
  * and the tokenizer asset `tokenizer` of the manifest's `assets` (JSON bytes).
  */
-export type Umt5EncoderAssets = {
+export type Assets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
 
-/** Options for one call of {@link Umt5Encoder.encode}. */
-export type Umt5EncodeOptions = {
+/** Options for one call of {@link Encoder.encode}. */
+export type EncodeOptions = {
   /**
    * Cancels the encoding. Checked after waiting for the turn on the serialization chain and before the
    * run, after yielding to the event loop once (a single run is indivisible). On cancellation it
@@ -179,7 +179,7 @@ export type Umt5EncodeOptions = {
 };
 
 /** The result of one encoding. */
-export type Umt5Encoding = {
+export type Encoding = {
   /** The tokenizer's id sequence (i32, length `length`, ending in `</s>` = 1). */
   readonly inputIds: Int32Array<ArrayBuffer>;
   /** The encoder's final hidden state `[length, hiddenSize]` (f32, row-major — one row per token). */
@@ -226,7 +226,7 @@ type Umt5Admission = {
   readonly contract: Umt5GraphContract;
 };
 
-/** The internal state of {@link Umt5Encoder} (not on the public surface). */
+/** The internal state of {@link Encoder} (not on the public surface). */
 type Umt5State = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
@@ -244,7 +244,7 @@ type Umt5State = {
  * MUST: do not copy with `slice` — the weights are about 5.3 GiB, and a copy doubles the host RAM peak
  * ({@link readAssetBuffer}).
  */
-const assetOpener = (assets: Umt5EncoderAssets["assets"]): Promise<ComponentOpener> =>
+const assetOpener = (assets: Assets["assets"]): Promise<ComponentOpener> =>
   assetComponentOpener(
     OWNER,
     assets,
@@ -267,7 +267,7 @@ const assetOpener = (assets: Umt5EncoderAssets["assets"]): Promise<ComponentOpen
 const admitUmt5 = (
   manifest: Manifest,
   open: ComponentOpener,
-  options: Umt5EncoderOptions,
+  options: EncoderOptions,
 ): Umt5Admission => {
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
@@ -348,9 +348,9 @@ const admitUmt5 = (
  */
 const buildUmt5 = async (
   admitted: Umt5Admission,
-  assets: Umt5EncoderAssets["assets"],
+  assets: Assets["assets"],
   open: ComponentOpener,
-  options: Umt5EncoderOptions,
+  options: EncoderOptions,
 ): Promise<Umt5State> => {
   const { quantName, quant, sessionOptions, gpuFeatures, contract } = admitted;
   const tokenizer = new Umt5Tokenizer(
@@ -407,7 +407,7 @@ const encodeIds = async (
   state: Umt5State,
   inputIds: Int32Array<ArrayBuffer>,
   signal: AbortSignal | undefined,
-): Promise<Umt5Encoding> => {
+): Promise<Encoding> => {
   // A cancellation that arrived while waiting for the turn on the serialization chain also takes
   // effect here (a run is indivisible — cancellation works only before the run).
   await settleAbort(signal);
@@ -441,12 +441,12 @@ const encodeIds = async (
 /**
  * umT5-XXL text → the encoder's final hidden state (one graph, resident Session).
  *
- * Construction has only two entries: {@link Umt5Encoder.fromPretrained} (fetch from the
- * distribution) and {@link Umt5Encoder.fromAssets} (already-fetched bytes) — the constructor is
+ * Construction has only two entries: {@link Encoder.fromPretrained} (fetch from the
+ * distribution) and {@link Encoder.fromAssets} (already-fetched bytes) — the constructor is
  * private so that no half-built state can bypass the manifest check and the asset matching
  * (ADR 0008).
  */
-export class Umt5Encoder {
+export class Encoder {
   readonly #state: Umt5State;
   /** The serialization chain of encode and dispose (the public API enforces "one at a time" — module doc). */
   readonly #chain = createOperationChain();
@@ -469,21 +469,21 @@ export class Umt5Encoder {
    * `text_encoder` — the tokenizer is not replaced).
    *
    * **`ref` is required** (there is no default source — the MUST in `src/hub/repo-ref.ts`). The
-   * source this package version verified is `"umt5-xxl"` in {@link UMT5_SOURCES} (`./config.ts`) —
+   * source this package version verified is `"umt5-xxl"` in {@link SOURCES} (`./config.ts`) —
    * to pin reproducibility yourself, the caller gives `{ repo, revision }` explicitly. A string `ref`
    * is read as `{ repo }` (= following `main`). A local distribution (`models/karume-umt5-xxl`) is
    * passed as a **source handle** (`localDirectory` / `denoDirectory` of `@karume/hub/deno`) — it
    * bypasses the check of the HF `owner/name` spelling, the network and CacheStorage (the HTTP-only
-   * knobs of {@link Umt5EncoderFromPretrainedOptions} have no effect).
+   * knobs of {@link FromPretrainedOptions} have no effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
-    options: Umt5EncoderFromPretrainedOptions = {},
-  ): Promise<Umt5Encoder> {
+    options: FromPretrainedOptions = {},
+  ): Promise<Encoder> {
     const source = toManifestSource(
       ref,
       `${OWNER}.fromPretrained`,
-      'UMT5_SOURCES["umt5-xxl"] (@karume/models/umt5)',
+      'SOURCES["umt5-xxl"] (@karume/models/umt5)',
     );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
@@ -492,7 +492,7 @@ export class Umt5Encoder {
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     const selection = resolveSelection(loaded.manifest, choice);
-    const buildOptions: Umt5EncoderOptions = {
+    const buildOptions: EncoderOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       ...choice,
       ...(options.onRunDiagnostics === undefined
@@ -524,21 +524,18 @@ export class Umt5Encoder {
         ...(options.components === undefined ? {} : { components: options.components }),
       },
     );
-    return new Umt5Encoder(await buildUmt5(admitted, assets, open, buildOptions));
+    return new Encoder(await buildUmt5(admitted, assets, open, buildOptions));
   }
 
   /**
-   * Builds from an already-fetched manifest + assets ({@link Umt5EncoderAssets}). Opens the
+   * Builds from an already-fetched manifest + assets ({@link Assets}). Opens the
    * containers, goes through the same family admission and assembly as the fetching surface, and
    * returns with **one `text_encoder` Session opened** (the MUST in the module doc).
    */
-  static async fromAssets(
-    input: Umt5EncoderAssets,
-    options: Umt5EncoderOptions = {},
-  ): Promise<Umt5Encoder> {
+  static async fromAssets(input: Assets, options: EncoderOptions = {}): Promise<Encoder> {
     const open = await assetOpener(input.assets);
     const admitted = admitUmt5(input.manifest, open, options);
-    return new Umt5Encoder(await buildUmt5(admitted, input.assets, open, options));
+    return new Encoder(await buildUmt5(admitted, input.assets, open, options));
   }
 
   /**
@@ -554,13 +551,13 @@ export class Umt5Encoder {
 
   /**
    * Encodes one string (tokenizer → bucket table → one `text_encoder` run). Returns the id sequence and
-   * the final hidden state `[length, hiddenSize]` ({@link Umt5Encoding}). An input outside the
+   * the final hidden state `[length, hiddenSize]` ({@link Encoding}). An input outside the
    * accepted set is a `ModelInputError` before the GPU is touched (the same rules as
    * {@link tokenize}).
    *
    * Concurrent calls **wait and run in order** (one Session is never shared by two runs).
    */
-  async encode(text: string, options: Umt5EncodeOptions = {}): Promise<Umt5Encoding> {
+  async encode(text: string, options: EncodeOptions = {}): Promise<Encoding> {
     // The disposed check happens at call time (checking inside the chain would also fail encodings
     // accepted before dispose).
     if (this.#disposal !== undefined) {

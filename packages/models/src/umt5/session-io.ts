@@ -1,6 +1,6 @@
 /**
  * Pure functions that build the inputs and read the outputs of the umT5-XXL graph (ADR 0119
- * decisions 3 and 4) on the host (used by the standalone `Umt5Encoder` (`./encoder.ts`) and by Wan's
+ * decisions 3 and 4) on the host (used by the standalone `Encoder` (`./encoder.ts`) and by Wan's
  * text stage (`encodeWanPrompts` in `src/wan/text-stage.ts`)).
  *
  * - Input: bundles the tokenizer's id sequence `[L]` (`Umt5Tokenizer.tokenize` in `./tokenizer.ts`)

@@ -745,36 +745,36 @@
     ],
     "./umt5": [
       {
+        "name": "Assets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "EncodeOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Encoder",
+        "kind": "class"
+      },
+      {
+        "name": "EncoderOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Encoding",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
         "name": "ModelInputError",
         "kind": "class"
       },
       {
-        "name": "UMT5_SOURCES",
+        "name": "SOURCES",
         "kind": "variable"
-      },
-      {
-        "name": "Umt5EncodeOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Umt5Encoder",
-        "kind": "class"
-      },
-      {
-        "name": "Umt5EncoderAssets",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Umt5EncoderFromPretrainedOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Umt5EncoderOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Umt5Encoding",
-        "kind": "typeAlias"
       }
     ],
     "./vowel-detector": [

@@ -3,7 +3,7 @@
  * `wan/umt5_reference.py`）の読み口と、GPU の出力をそれに突き合わせる判定（正規化比 r と帯 — ADR 0119 決定 8 ①）。
  *
  * 2 本の e2e が同じ golden を同じ判定で読む: Wan の umT5 の移植の門（`e2e_wan_umt5_test.ts` — 系列の容器を runtime で
- * 直接回す）と、単体の `Umt5Encoder` の通し（`e2e_wan_umt5_test.ts` — 配布形 `karume-umt5-xxl` を
+ * 直接回す）と、単体の `umt5.Encoder` の通し（`e2e_wan_umt5_test.ts` — 配布形 `karume-umt5-xxl` を
  * `fromPretrained` で組む）。帯・指標・ケースの正本はここ 1 本（2 本へ写すと、片方だけが動く）。
  *
  * golden の中身（1 ケース 1 本）:

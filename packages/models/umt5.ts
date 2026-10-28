@@ -3,9 +3,9 @@
  * (distribution `karume-umt5-xxl` — pipeline `umt5-encoder/1`).
  *
  * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
- * wholesale. The surface follows the user's stories — build ({@link Umt5Encoder.fromPretrained} /
- * {@link Umt5Encoder.fromAssets}) / choose a source ({@link UMT5_SOURCES}) / run only the tokenizer
- * (`tokenize`) / encode (`encode` — {@link Umt5Encoding}) / abort (the `signal` of `encode`) /
+ * wholesale. The surface follows the user's stories — build ({@link Encoder.fromPretrained} /
+ * {@link Encoder.fromAssets}) / choose a source ({@link SOURCES}) / run only the tokenizer
+ * (`tokenize`) / encode (`encode` — {@link Encoding}) / abort (the `signal` of `encode`) /
  * release (`dispose`).
  *
  * The source of truth for the input rules (no preprocessing; rejects out-of-vocabulary characters,
@@ -21,27 +21,27 @@
  * CLAUDE.md). Tree-shaking through the barrel (`mod.ts`) works only on top of this invariant.
  */
 
-export { Umt5Encoder } from "./src/umt5/encoder.ts";
+export { Encoder } from "./src/umt5/encoder.ts";
 export type {
-  Umt5EncodeOptions,
-  Umt5EncoderAssets,
-  Umt5EncoderFromPretrainedOptions,
-  Umt5EncoderOptions,
-  Umt5Encoding,
+  Assets,
+  EncodeOptions,
+  EncoderOptions,
+  Encoding,
+  FromPretrainedOptions,
 } from "./src/umt5/encoder.ts";
 /**
  * **The table of sources verified with this package version** (one table per family; keys are the
  * Hugging Face repository name without `karume-`, values are pinned commit SHAs — ADR 0073 / 0092).
  * One family = one repository, so one entry:
  *
- * - `UMT5_SOURCES["umt5-xxl"]` = `hdae/karume-umt5-xxl` (the encoder of model `"xxl"` and the
+ * - `SOURCES["umt5-xxl"]` = `hdae/karume-umt5-xxl` (the encoder of model `"xxl"` and the
  *   tokenizer assets)
  *
  * **An opt-in for callers who want to follow the package version automatically** — pass an entry as
- * is as the first argument of {@link Umt5Encoder.fromPretrained}. To pin reproducibility yourself,
+ * is as the first argument of {@link Encoder.fromPretrained}. To pin reproducibility yourself,
  * write your own `{ repo, revision }` instead of using this table (`fromPretrained` has no default).
  */
-export { UMT5_SOURCES } from "./src/umt5/config.ts";
+export { SOURCES } from "./src/umt5/config.ts";
 
 /**
  * A failure caused by the input (the request itself cannot be accepted = fixing the input makes it

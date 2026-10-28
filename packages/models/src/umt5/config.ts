@@ -10,7 +10,7 @@
  * rather than passing unread (unknown keys fail loudly — a misspelt declaration must not be ignored
  * silently).
  *
- * The table of public distribution repositories ({@link UMT5_SOURCES}) also lives here (ADR 0092 —
+ * The table of public distribution repositories ({@link SOURCES}) also lives here (ADR 0092 —
  * a family's `config.ts` is where the table lives).
  *
  * MUST: modules are side-effect free (CLAUDE.md).
@@ -46,12 +46,12 @@ export const UMT5_PIPELINE_MAJOR = 1;
  * so the bytes this published package reads would change silently at the network's convenience (an
  * unrecoverable accident). A SHA removes the revision-resolution request itself, so an offline start
  * with a full cache works at the same time (ADR 0038). A user who needs to follow main chooses
- * `{ ...UMT5_SOURCES["umt5-xxl"], revision: "main" }` explicitly.
+ * `{ ...SOURCES["umt5-xxl"], revision: "main" }` explicitly.
  */
 // NOTE: the revision is updated to the SHA of main after the upload, in §3 of the release runbook
 // (docs/release-runbook.md) (inherits the maintenance duty of ADR 0073 decision 3 — by hand + the
 // runbook check).
-export const UMT5_SOURCES = {
+export const SOURCES = {
   "umt5-xxl": {
     repo: "hdae/karume-umt5-xxl",
     revision: "c66a8db12e005ba37027f2afa5b15efee4a681a7",

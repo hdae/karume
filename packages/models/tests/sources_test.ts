@@ -29,10 +29,9 @@ import * as gemma from "../gemma.ts";
 import * as siglip2 from "../siglip2.ts";
 import * as depthAnything from "../depth-anything.ts";
 import * as birefnet from "../birefnet.ts";
-import { UMT5_SOURCES } from "../src/umt5/config.ts";
+import * as umt5 from "../umt5.ts";
 import { WAN_SOURCES } from "../src/wan/config.ts";
 import { KARUME_SOURCES } from "../src/sources.ts";
-import { Umt5Encoder } from "../src/umt5/encoder.ts";
 import { WanTi2vPipeline } from "../src/wan/ti2v-pipeline.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
@@ -130,11 +129,11 @@ const FAMILIES: readonly Family[] = [
     load: (ref, options) => birefnet.Pipeline.fromPretrained(ref, options),
   },
   {
-    name: "UMT5_SOURCES",
-    sources: UMT5_SOURCES,
-    // Wan の text_encoder の越境参照先でもあるが、単体の入口（`Umt5Encoder`）を持つ 1 家族 1 リポ。
+    name: "umt5.SOURCES",
+    sources: umt5.SOURCES,
+    // Wan の text_encoder の越境参照先でもあるが、単体の入口（`umt5.Encoder`）を持つ 1 家族 1 リポ。
     keys: ["umt5-xxl"],
-    load: (ref, options) => Umt5Encoder.fromPretrained(ref, options),
+    load: (ref, options) => umt5.Encoder.fromPretrained(ref, options),
   },
   {
     name: "WAN_SOURCES",
@@ -169,7 +168,7 @@ test("取得元対応表を持つのは 9 家族・公開リポは 12 本", () =
       "siglip2.SOURCES",
       "depthAnything.SOURCES",
       "birefnet.SOURCES",
-      "UMT5_SOURCES",
+      "umt5.SOURCES",
       "WAN_SOURCES",
     ],
   );

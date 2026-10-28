@@ -26,7 +26,7 @@ import * as gemma from "./gemma/config.ts";
 import * as siglip2 from "./siglip2/config.ts";
 import * as depthAnything from "./depth-anything/config.ts";
 import * as birefnet from "./birefnet/config.ts";
-import { UMT5_SOURCES } from "./umt5/config.ts";
+import * as umt5 from "./umt5/config.ts";
 import { WAN_SOURCES } from "./wan/config.ts";
 
 export const KARUME_SOURCES = {
@@ -37,6 +37,6 @@ export const KARUME_SOURCES = {
   ...siglip2.SOURCES,
   ...depthAnything.SOURCES,
   ...birefnet.SOURCES,
-  ...UMT5_SOURCES,
+  ...umt5.SOURCES,
   ...WAN_SOURCES,
 } as const satisfies Record<string, HubRepoRef>;

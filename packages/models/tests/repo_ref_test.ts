@@ -27,7 +27,7 @@ import { localDirectory } from "@karume/hub";
 import { toManifestSource, toRepoRef } from "../src/hub/repo-ref.ts";
 import * as anima from "../anima.ts";
 import * as birefnet from "../birefnet.ts";
-import { Umt5Encoder } from "../src/umt5/encoder.ts";
+import * as umt5 from "../umt5.ts";
 import { WanPipeline } from "../src/wan/pipeline.ts";
 import { WanTi2vPipeline } from "../src/wan/ti2v-pipeline.ts";
 
@@ -170,17 +170,17 @@ test("fromPretrained: birefnet も ref 欠落時に対応表（birefnet.SOURCES�
 });
 
 test("fromPretrained: umT5 と Wan2.2 は ref 欠落時に対応表を案内し、未公開の Wan2.1 は案内しない", async () => {
-  // 0.14.0 で `UMT5_SOURCES` / `WAN_SOURCES` が入った（家族の初公開）。Wan2.1 と 2.2 は取得の本体
+  // 0.14.0 で `umt5.SOURCES` / `WAN_SOURCES` が入った（家族の初公開）。Wan2.1 と 2.2 は取得の本体
   // （`loadWanFromPretrained`）を共有するが、表に Wan2.1 のキーは無い — 2.1 にだけ存在しないキーを
   // 案内しない（③）ことを、共有の本体を通る公開面から見る。
   const fetchStub: typeof globalThis.fetch = (input) =>
     Promise.reject(new Error(`repo_ref_test: 取得層まで進んだ（${describeRequest(input)}）`));
-  const umt5 = await assertRejects(
-    () => Umt5Encoder.fromPretrained({ repo: "" }, { fetch: fetchStub }),
+  const umt5Error = await assertRejects(
+    () => umt5.Encoder.fromPretrained({ repo: "" }, { fetch: fetchStub }),
     Error,
-    "Umt5Encoder.fromPretrained: repo is required",
+    "umt5.Encoder.fromPretrained: repo is required",
   );
-  assertStringIncludes(umt5.message, 'UMT5_SOURCES["umt5-xxl"] (@karume/models/umt5)');
+  assertStringIncludes(umt5Error.message, 'SOURCES["umt5-xxl"] (@karume/models/umt5)');
   const wan22 = await assertRejects(
     () => WanTi2vPipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
     Error,

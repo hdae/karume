@@ -8,7 +8,7 @@
  *
  * 生成は `cd tools/export-recipes && uv run --group wan --inexact python -m wan.umt5_export reference`（容器は
  * 段 10b の書き出し）。golden は 1 ケース 1 本の `reference.<case>.safetensors` で、中身と読み口・帯・判定は
- * `helpers/umt5-golden.ts`（単体の `Umt5Encoder` の通しの e2e と共有の 1 本）。
+ * `helpers/umt5-golden.ts`（単体の `umt5.Encoder` の通しの e2e と共有の 1 本）。
  *
  * ## 門
  *
@@ -34,9 +34,9 @@
  * input / output structure, and each case's TS-input forward having the golden's output shape with no
  * non-finite value.
  *
- * ## Public `Umt5Encoder` through the distribution mirror
+ * ## Public `umt5.Encoder` through the distribution mirror
  *
- * The last two tests of this file drive the public `Umt5Encoder` (`@karume/models/umt5`) built by
+ * The last two tests of this file drive the public `umt5.Encoder` (`@karume/models/umt5`) built by
  * `fromPretrained(nodeDirectory(…))` over the distribution mirror `models/karume-umt5-xxl`, against the same 10
  * goldens and the same band. They cover what the series-level gate above does not: the hub mirror path (manifest
  * selection, tokenizer asset), the encoder's own tokenizer ids, and abort / dispose. Their skip conditions are
@@ -60,7 +60,7 @@ import {
   type SessionDiagnostics,
   type Tensor,
 } from "@karume/runtime";
-import { Umt5Encoder } from "../../models/umt5.ts";
+import * as umt5 from "../../models/umt5.ts";
 import { parseUmt5TokenizerAsset, Umt5Tokenizer } from "../../models/src/umt5/tokenizer.ts";
 import { parseWanTokenizerAsset, WanPromptEncoder } from "../../models/src/wan/text/tokenizer.ts";
 import {
@@ -705,7 +705,7 @@ describe.skipIf(
 );
 
 /**
- * `Umt5Encoder`（`@karume/models/umt5`）の通しの e2e（実 GPU）— 配布形ミラー `models/karume-umt5-xxl` を
+ * `umt5.Encoder`（`@karume/models/umt5`）の通しの e2e（実 GPU）— 配布形ミラー `models/karume-umt5-xxl` を
  * `fromPretrained(nodeDirectory(…))` で組み、Wan の umT5 の移植の門（`e2e_wan_umt5_test.ts`）と**同じ golden 10 本**を
  * **同じ判定**（正規化比 r が帯の内 — `helpers/umt5-golden.ts`）で見る。
  *
@@ -790,18 +790,18 @@ test.skipIf(!DIST_PRESENT || !GOLDENS_PRESENT)(
 );
 
 /**
- * Registers the hooks that build the mirror's `Umt5Encoder` on a test device in the caller's
+ * Registers the hooks that build the mirror's `umt5.Encoder` on a test device in the caller's
  * describe: `beforeAll` acquires the device and runs `fromPretrained`, `afterAll` disposes the
  * encoder (idempotent — an it may already have disposed it), waits for the releases, fails on a
  * device loss and destroys the device. Returns the accessors the its use and the device-lost message (undefined while none).
  */
 const registerMirrorEncoder = (): {
   readonly gpu: () => GpuContext;
-  readonly encoder: () => Umt5Encoder;
+  readonly encoder: () => umt5.Encoder;
   readonly deviceLost: () => string | undefined;
 } => {
   let gpu: GpuContext | undefined;
-  let encoder: Umt5Encoder | undefined;
+  let encoder: umt5.Encoder | undefined;
   let deviceLost: string | undefined;
   beforeAll(async () => {
     gpu = await acquireTestGpu({
@@ -809,7 +809,7 @@ const registerMirrorEncoder = (): {
         deviceLost = `${info.reason}: ${info.message}`;
       },
     });
-    encoder = await Umt5Encoder.fromPretrained(nodeDirectory(DIST_ROOT), {
+    encoder = await umt5.Encoder.fromPretrained(nodeDirectory(DIST_ROOT), {
       gpu,
       model: MIRROR_MODEL,
       quant: MIRROR_QUANT,

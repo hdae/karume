@@ -4,9 +4,9 @@
  * table `[L, L]` — `./session-io.ts`), the output it reads (f32 `[1, L, W]`) and the storage (ADR 0119
  * decisions 3, 4 and 5).
  *
- * Shared by the standalone `Umt5Encoder` (`./encoder.ts`) and Wan's text stage (`umt5Contract` in
+ * Shared by the standalone `Encoder` (`./encoder.ts`) and Wan's text stage (`umt5Contract` in
  * `src/wan/text-stage.ts` — which adds the match against the DiT's context input). `owner` is the
- * message prefix (`"Umt5Encoder"` / `"WanPipeline"` etc.).
+ * message prefix (`"umt5.Encoder"` / `"WanPipeline"` etc.).
  *
  * NOTE: internal only (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  *
