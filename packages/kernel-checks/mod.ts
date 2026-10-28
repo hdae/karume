@@ -18,12 +18,14 @@ export {
 export { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "./src/gemv-subgroup.ts";
 export { checkRmsSubgroup, RMS_SUBGROUP_CASES } from "./src/rms-subgroup.ts";
 export {
+  checkStateAttentionMutantMatrix,
   checkStateAttentionMutants,
   checkStateAttentionRewrites,
   checkStatePvUnroll,
   checkStateQkFold,
   checkStateStatsPvUnroll,
   type FoldClass,
+  type MutantMatrixRow,
   type MutantResult,
   STATE_ATTENTION_CASES,
   STATE_ATTENTION_MUTANTS,

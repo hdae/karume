@@ -19,6 +19,7 @@ import type { GpuContext } from "../../runtime/src/gpu/device.ts";
 import {
   STATE_QK_FOLD_CLASSES,
   stateColumnBase,
+  stateLiveColumns,
   statePvParallelWgsl,
   stateQkFoldHeads,
   stateSliding,
@@ -587,28 +588,56 @@ export type MutantResult = {
   readonly words: number;
 };
 
-type QkMutant = readonly [label: string, shape: Shape, mutate: (wgsl: string) => string];
-type PvMutant = readonly [
-  label: string,
-  shape: Shape,
-  kernel: BaselineKernel,
-  mutate: (wgsl: string) => string,
-];
+/**
+ * Whether a mutant's code path runs on a case: `yes` (it MUST change a word), `no` (it MUST NOT —
+ * a check of the classification itself) or `contraction` (it runs, but changes a word only when the
+ * backend contracts `acc + x * y` into one fused multiply-add: counted, no requirement).
+ */
+type Acts = "yes" | "no" | "contraction";
 
-const QK_MUTANTS: readonly QkMutant[] = [
-  [
-    "F8: head 3 multiplies q · (scale · kd) instead of (q · scale) · kd",
-    E2B_FULL,
-    (wgsl) =>
+type Mutant<Kernel> = {
+  readonly label: string;
+  readonly shape: Shape;
+  readonly kernel: Kernel;
+  readonly mutate: (wgsl: string) => string;
+  /** The mutant matrix's classification of a case of {@link Mutant.shape}. */
+  readonly acts: (spec: StateCase) => Acts;
+  readonly actsWhen: string;
+};
+
+/** Live columns of a case (the scan length of ②③ and the column count ①' writes). */
+const liveOf = (spec: StateCase): number => stateLiveColumns(spec.window, spec.past, spec.query);
+
+/**
+ * A swap of the first two terms of a batch: `acc` is exactly 0 in lane 0's first batch, where
+ * without contraction `(0 + a) + b` equals `(0 + b) + a`, so the swap shows from the second batch on
+ * (column 128 runs when 128 + 112 < live); with the multiply-add contracted the first batch differs
+ * as well.
+ */
+const swapActs = (spec: StateCase): Acts =>
+  liveOf(spec) >= 241 ? "yes" : liveOf(spec) >= 113 ? "contraction" : "no";
+const SWAP_ACTS_WHEN =
+  "yes: live >= 241 (a second 8-column batch on lane 0); contraction: 113 <= live < 241 (one batch, from acc = 0); no: live < 113";
+
+const QK_MUTANTS: readonly Mutant<"qk-fold">[] = [
+  {
+    label: "F8: head 3 multiplies q · (scale · kd) instead of (q · scale) · kd",
+    shape: E2B_FULL,
+    kernel: "qk-fold",
+    mutate: (wgsl) =>
       wgsl.replaceAll(
         "acc3 = acc3 + (q[q_base3 + d] * params.scale) * kd;",
         "acc3 = acc3 + q[q_base3 + d] * (params.scale * kd);",
       ),
-  ],
-  [
-    "F4: every head multiplies ((q · scale) · k) · scale instead of (q · scale) · (k · scale)",
-    E4B_FULL,
-    (wgsl) =>
+    acts: () => "yes",
+    actsWhen: "every case writes live >= 1 column of head 3",
+  },
+  {
+    label:
+      "F4: every head multiplies ((q · scale) · k) · scale instead of (q · scale) · (k · scale)",
+    shape: E4B_FULL,
+    kernel: "qk-fold",
+    mutate: (wgsl) =>
       mustReplace(
         mustReplace(
           mustReplaceAll(wgsl, ") * kd;", ") * kd * params.scale;"),
@@ -618,24 +647,83 @@ const QK_MUTANTS: readonly QkMutant[] = [
         "let kd = ins_k[k_base + d] * params.scale;",
         "let kd = ins_k[k_base + d];",
       ),
-  ],
+    acts: () => "yes",
+    actsWhen: "every case writes live >= 1 column of every head",
+  },
 ];
 
-const PV_MUTANTS: readonly PvMutant[] = [
-  ["③': the first two terms of a batch swapped", E2B_FULL, "pv_par", swapFirstTwoTerms],
-  [
-    "③': the batch's first term as exp · (inv · v)",
-    E4B_FULL,
-    "pv_par",
-    (wgsl) =>
+const PV_MUTANTS: readonly Mutant<BaselineKernel>[] = [
+  {
+    label: "③': the first two terms of a batch swapped",
+    shape: E2B_FULL,
+    kernel: "pv_par",
+    mutate: swapFirstTwoTerms,
+    acts: swapActs,
+    actsWhen: SWAP_ACTS_WHEN,
+  },
+  {
+    label: "③': the batch's first term as exp · (inv · v)",
+    shape: E4B_FULL,
+    kernel: "pv_par",
+    mutate: (wgsl) =>
       mustReplace(
         wgsl,
         "acc = acc + (exp(s[s_base + cl] - amax) * inv) * v0;",
         "acc = acc + exp(s[s_base + cl] - amax) * (inv * v0);",
       ),
-  ],
-  ["fused: the first two terms of a batch swapped", E2B_SLIDING, "stats_pv", swapFirstTwoTerms],
+    acts: (spec) => (liveOf(spec) >= 113 ? "yes" : "no"),
+    actsWhen: "yes: live >= 113 (lane 0 runs at least one 8-column batch); no: live < 113",
+  },
+  {
+    label: "fused: the first two terms of a batch swapped",
+    shape: E2B_SLIDING,
+    kernel: "stats_pv",
+    mutate: swapFirstTwoTerms,
+    acts: swapActs,
+    actsWhen: SWAP_ACTS_WHEN,
+  },
 ];
+
+/** The ①' mutation of a QK mutant; a mutation that changes nothing throws. */
+const qkMutation =
+  ({ label, mutate }: Mutant<"qk-fold">): StateMutation =>
+  (_kernel, wgsl) => {
+    const mutated = mutate(wgsl);
+    if (mutated === wgsl) throw new Error(`${label}: the mutation did not apply`);
+    return mutated;
+  };
+
+/** The v1 WGSL of a PV mutant's kernel for `spec`, checked to really be the other loop. */
+const checkedBaseline = ({ label, kernel }: Mutant<BaselineKernel>, spec: StateCase): string => {
+  const baseline = baselineOf(kernel, spec);
+  const product =
+    kernel === "pv_par"
+      ? statePvParallelWgsl(stateSliding(spec.window), spec.heads !== spec.kvHeads)
+      : stateStatsPvWgsl(stateSliding(spec.window), spec.heads !== spec.kvHeads);
+  // The baseline really is the other loop (a copy of the product would make the identity gates
+  // pass trivially)
+  if (product === baseline) throw new Error(`${label}: the baseline equals the product WGSL`);
+  if (!baseline.includes("for (var cl = lane; cl < live; cl = cl + 16u) {")) {
+    throw new Error(`${label}: the baseline is not the v1 loop`);
+  }
+  return baseline;
+};
+
+/** The O words of a PV mutant's kernel on `spec` with the kernel's WGSL replaced by `pv`. */
+const runPvMutantKernel = (
+  gpu: GpuContext,
+  kernel: BaselineKernel,
+  spec: StateCase,
+  inputs: StateInputs,
+  pv: (wgsl: string) => string,
+  cache?: StatePipelineCache,
+): Promise<Uint32Array<ArrayBuffer>> => {
+  const mutate: StateMutation = (k, wgsl) => (k === "pv" ? pv(wgsl) : wgsl);
+  const run = cache === undefined ? { mutate } : { cache, mutate };
+  return kernel === "pv_par"
+    ? runStatePv(gpu.device, spec, inputs, "parallel", run)
+    : runStatsPv(gpu, spec, inputs, run);
+};
 
 /** Order-only mutants of the rewritten kernels (each MUST mismatch — the word gate is not vacuous). */
 export const checkStateAttentionMutants = async (
@@ -644,15 +732,12 @@ export const checkStateAttentionMutants = async (
 ): Promise<readonly MutantResult[]> => {
   const results: MutantResult[] = [];
   const total = QK_MUTANTS.length + PV_MUTANTS.length;
-  for (const [label, shape, mutate] of QK_MUTANTS) {
+  for (const qkMutant of QK_MUTANTS) {
+    const { label, shape } = qkMutant;
     throwIfAborted(options);
     const spec = caseOf(shape, 1000, [1, 1, 1]);
     const inputs = inputsOf(spec, 5, false);
-    const mutation: StateMutation = (_kernel, wgsl) => {
-      const mutated = mutate(wgsl);
-      if (mutated === wgsl) throw new Error(`${label}: the mutation did not apply`);
-      return mutated;
-    };
+    const mutation = qkMutation(qkMutant);
     const { reference, mutant } = await scopedGpuWork(gpu, label, async () => ({
       reference: await runStateQk(gpu.device, spec, inputs, "parallel"),
       mutant: await runStateQk(gpu.device, spec, inputs, "folded", { mutate: mutation }),
@@ -666,35 +751,15 @@ export const checkStateAttentionMutants = async (
     });
     options.onProgress?.({ part: "state-mutants", done: results.length, total });
   }
-  for (const [label, shape, kernel, mutate] of PV_MUTANTS) {
+  for (const pvMutant of PV_MUTANTS) {
+    const { label, shape, kernel, mutate } = pvMutant;
     throwIfAborted(options);
     const spec = caseOf(shape, stateSliding(shape.window) ? 2047 : 4095, [1, 1, 1]);
     const inputs = inputsOf(spec, 9, false);
-    const baseline = baselineOf(kernel, spec);
-    const product =
-      kernel === "pv_par"
-        ? statePvParallelWgsl(stateSliding(spec.window), true)
-        : stateStatsPvWgsl(stateSliding(spec.window), true);
-    // The baseline really is the other loop (a copy of the product would make the identity gates
-    // pass trivially)
-    if (product === baseline) throw new Error(`${label}: the baseline equals the product WGSL`);
-    if (!baseline.includes("for (var cl = lane; cl < live; cl = cl + 16u) {")) {
-      throw new Error(`${label}: the baseline is not the v1 loop`);
-    }
-    const toV1: StateMutation = (k, wgsl) => (k === "pv" ? baseline : wgsl);
-    const toMutant: StateMutation = (k, wgsl) => (k === "pv" ? mutate(wgsl) : wgsl);
-    const run = (mutation: StateMutation): Promise<Uint32Array<ArrayBuffer>> =>
-      kernel === "pv_par"
-        ? runStatePv(gpu.device, spec, inputs, "parallel", { mutate: mutation })
-        : runStateAttention(gpu.device, spec, inputs, {
-            qkReduce: "parallel",
-            pvReduce: "parallel",
-            statsPvFusion: true,
-            mutate: mutation,
-          }).then((result) => wordsOf(result.out));
+    const baseline = checkedBaseline(pvMutant, spec);
     const { v1, mutant } = await scopedGpuWork(gpu, label, async () => ({
-      v1: await run(toV1),
-      mutant: await run(toMutant),
+      v1: await runPvMutantKernel(gpu, kernel, spec, inputs, () => baseline),
+      mutant: await runPvMutantKernel(gpu, kernel, spec, inputs, mutate),
     }));
     results.push({
       label,
@@ -708,10 +773,137 @@ export const checkStateAttentionMutants = async (
   return results;
 };
 
-/** Check 3 as one run: the three identity parts, the mutants and the fold classes. */
+/**
+ * One mutant run on every case of its shape in its kernel's identity grid. Where the mutated code
+ * path runs, every case MUST mismatch; where it does not, none may (or the classification is
+ * wrong). A mutant that changes words on some cases only would leave the identity comparison
+ * vacuous on the others — the one-case mutant check cannot see that.
+ */
+export type MutantMatrixRow = {
+  readonly label: string;
+  readonly kernel: MutantResult["kernel"];
+  readonly shape: string;
+  readonly actsWhen: string;
+  readonly cases: number;
+  /** Cases the mutated path runs on. */
+  readonly acting: number;
+  /** Acting cases where the mutant matched word for word (MUST be none). */
+  readonly actingMatched: readonly string[];
+  /** Cases the mutated path does not run on. */
+  readonly idle: number;
+  /** Idle cases where the mutant changed a word (MUST be none). */
+  readonly idleMismatched: readonly string[];
+  /** Cases where only a contracted multiply-add makes the mutant change a word. */
+  readonly contraction: number;
+  /** How many of those mismatched (whether this backend contracts; no requirement). */
+  readonly contractionMismatched: number;
+};
+
+type MatrixPlan = {
+  readonly mutant: Mutant<"qk-fold"> | Mutant<BaselineKernel>;
+  readonly grid: readonly GridCase[];
+};
+
+/** Each mutant with the cases of its shape in its kernel's identity grid (same seeds). */
+const matrixPlan = (): readonly MatrixPlan[] => {
+  const ofShape = (grid: readonly GridCase[], shape: Shape): readonly GridCase[] =>
+    grid.filter((entry) => entry.shape === shape);
+  return [
+    ...QK_MUTANTS.map((mutant) => ({ mutant, grid: ofShape(foldGrid(), mutant.shape) })),
+    ...PV_MUTANTS.map((mutant) => ({
+      mutant,
+      grid: ofShape(mutant.kernel === "pv_par" ? pvGrid() : statsPvGrid(), mutant.shape),
+    })),
+  ];
+};
+
+/** The words of a mutant that differ from the unmutated kernel on one case. */
+const mutantDifference = async (
+  gpu: GpuContext,
+  mutant: Mutant<"qk-fold"> | Mutant<BaselineKernel>,
+  spec: StateCase,
+  inputs: StateInputs,
+  cache: StatePipelineCache,
+): Promise<number> => {
+  if (mutant.kernel === "qk-fold") {
+    const reference = await runStateQk(gpu.device, spec, inputs, "parallel", { cache });
+    const mutated = await runStateQk(gpu.device, spec, inputs, "folded", {
+      cache,
+      mutate: qkMutation(mutant),
+    });
+    return reference.reduce(
+      (total, words, block) =>
+        total + compareWords("", mutated[block] ?? new Uint32Array(0), words).failures,
+      0,
+    );
+  }
+  const baseline = checkedBaseline(mutant, spec);
+  const v1 = await runPvMutantKernel(gpu, mutant.kernel, spec, inputs, () => baseline, cache);
+  const mutated = await runPvMutantKernel(gpu, mutant.kernel, spec, inputs, mutant.mutate, cache);
+  return compareWords("", mutated, v1).failures;
+};
+
+/** Runs every mutant on every case of its shape (the browser runbook's matrix; slower than the one-case check). */
+export const checkStateAttentionMutantMatrix = async (
+  gpu: GpuContext,
+  options: CheckOptions = {},
+): Promise<readonly MutantMatrixRow[]> => {
+  const plan = matrixPlan();
+  const total = plan.reduce((sum, { grid }) => sum + grid.length, 0);
+  const rows: MutantMatrixRow[] = [];
+  let done = 0;
+  for (const { mutant, grid } of plan) {
+    // Keyed by the final WGSL, so the mutated pipeline is never served for the unmutated run
+    const cache: StatePipelineCache = new Map();
+    const actingMatched: string[] = [];
+    const idleMismatched: string[] = [];
+    let acting = 0;
+    let idle = 0;
+    let contraction = 0;
+    let contractionMismatched = 0;
+    for (const { spec, nonFinite, seed } of grid) {
+      throwIfAborted(options);
+      const label = labelOf(spec, nonFinite);
+      const inputs = inputsOf(spec, seed, nonFinite);
+      const differing = await scopedGpuWork(gpu, `${mutant.label}: ${label}`, () =>
+        mutantDifference(gpu, mutant, spec, inputs, cache),
+      );
+      const acts = mutant.acts(spec);
+      if (acts === "yes") {
+        acting += 1;
+        if (differing === 0) actingMatched.push(label);
+      } else if (acts === "no") {
+        idle += 1;
+        if (differing > 0) idleMismatched.push(label);
+      } else {
+        contraction += 1;
+        if (differing > 0) contractionMismatched += 1;
+      }
+      done += 1;
+      options.onProgress?.({ part: "state-mutant-matrix", done, total });
+    }
+    rows.push({
+      label: mutant.label,
+      kernel: mutant.kernel,
+      shape: mutant.shape.name,
+      actsWhen: mutant.actsWhen,
+      cases: grid.length,
+      acting,
+      actingMatched,
+      idle,
+      idleMismatched,
+      contraction,
+      contractionMismatched,
+    });
+  }
+  return rows;
+};
+
+/** Check 3 as one run: the three identity parts, the mutants (one case and matrix) and the fold classes. */
 export type StateAttentionRewritesReport = {
   readonly parts: readonly CheckPart[];
   readonly mutants: readonly MutantResult[];
+  readonly mutantMatrix: readonly MutantMatrixRow[];
   readonly foldClasses: readonly FoldClass[];
 };
 
@@ -723,9 +915,11 @@ export const checkStateAttentionRewrites = async (
   const pvUnroll = await checkStatePvUnroll(gpu, options);
   const statsPvUnroll = await checkStateStatsPvUnroll(gpu, options);
   const mutants = await checkStateAttentionMutants(gpu, options);
+  const mutantMatrix = await checkStateAttentionMutantMatrix(gpu, options);
   return {
     parts: [qkFold, pvUnroll, statsPvUnroll],
     mutants,
+    mutantMatrix,
     foldClasses: stateQkFoldClasses(),
   };
 };

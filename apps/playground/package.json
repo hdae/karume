@@ -17,6 +17,7 @@
     "@fontsource-variable/geist": "catalog:",
     "@hdae/yomi": "catalog:",
     "@karume/hub": "workspace:*",
+    "@karume/kernel-checks": "workspace:*",
     "@karume/models": "workspace:*",
     "@karume/runtime": "workspace:*",
     "@shadcn/react": "catalog:",

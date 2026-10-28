@@ -305,6 +305,9 @@ importers:
       '@karume/hub':
         specifier: workspace:*
         version: link:../../packages/hub
+      '@karume/kernel-checks':
+        specifier: workspace:*
+        version: link:../../packages/kernel-checks
       '@karume/models':
         specifier: workspace:*
         version: link:../../packages/models

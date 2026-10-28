@@ -15,7 +15,7 @@ So the page runs exactly the cases and criteria the tests run; there is no copy 
 | --- | --- | --- |
 | Parallel GEMV `linearGemvReduce: "parallel-subgroup32"` vs parallel, u32 identity (ADR 0101) | `checkGemvSubgroup` | `subgroups` + `subgroup-size-control` + WGSL `subgroup_id` (`subgroup32Available`) |
 | RMS `rmsNormReduce: "subgroup32"`: CPU-reference tolerance, row identity across M, fused vs unfused identity, grid-stride (ADR 0100) | `checkRmsSubgroup` | the same |
-| States attention rewrites (perf-ledger K-55 / K-91): folded ①' vs ①', unrolled ③' and fused stats + PV vs their v1 WGSL, u32 identity, plus order-only mutants that must mismatch | `checkStateQkFold`, `checkStatePvUnroll`, `checkStateStatsPvUnroll`, `checkStateAttentionMutants` (all four: `checkStateAttentionRewrites`) | nothing optional |
+| States attention rewrites (perf-ledger K-55 / K-91): folded ①' vs ①', unrolled ③' and fused stats + PV vs their v1 WGSL, u32 identity, plus order-only mutants that must mismatch | `checkStateQkFold`, `checkStatePvUnroll`, `checkStateStatsPvUnroll`, `checkStateAttentionMutants`, and `checkStateAttentionMutantMatrix` (each mutant on every case of its shape — the page runs it, the node test does not; all five: `checkStateAttentionRewrites`) | nothing optional |
 
 A check does not assert. It returns structured results — per case, per criterion, the number of
 failing words and the first (identity) or worst (tolerance band) failing word as u32 — and the

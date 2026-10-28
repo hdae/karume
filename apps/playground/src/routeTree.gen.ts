@@ -17,6 +17,7 @@ import { Route as DepthAnythingRouteImport } from "./routes/depth-anything";
 import { Route as Gemma4RouteImport } from "./routes/gemma4";
 import { Route as GeometrySweepRouteImport } from "./routes/geometry-sweep";
 import { Route as IrodoriRouteImport } from "./routes/irodori";
+import { Route as KernelCheckRouteImport } from "./routes/kernel-check";
 import { Route as Sbv2RouteImport } from "./routes/sbv2";
 import { Route as Siglip2RouteImport } from "./routes/siglip2";
 import { Route as Wan22RouteImport } from "./routes/wan22";
@@ -61,6 +62,11 @@ const IrodoriRoute = IrodoriRouteImport.update({
   path: "/irodori",
   getParentRoute: () => rootRouteImport,
 } as any);
+const KernelCheckRoute = KernelCheckRouteImport.update({
+  id: "/kernel-check",
+  path: "/kernel-check",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const Sbv2Route = Sbv2RouteImport.update({
   id: "/sbv2",
   path: "/sbv2",
@@ -86,6 +92,7 @@ export interface FileRoutesByFullPath {
   "/gemma4": typeof Gemma4Route;
   "/geometry-sweep": typeof GeometrySweepRoute;
   "/irodori": typeof IrodoriRoute;
+  "/kernel-check": typeof KernelCheckRoute;
   "/sbv2": typeof Sbv2Route;
   "/siglip2": typeof Siglip2Route;
   "/wan22": typeof Wan22Route;
@@ -99,6 +106,7 @@ export interface FileRoutesByTo {
   "/gemma4": typeof Gemma4Route;
   "/geometry-sweep": typeof GeometrySweepRoute;
   "/irodori": typeof IrodoriRoute;
+  "/kernel-check": typeof KernelCheckRoute;
   "/sbv2": typeof Sbv2Route;
   "/siglip2": typeof Siglip2Route;
   "/wan22": typeof Wan22Route;
@@ -113,6 +121,7 @@ export interface FileRoutesById {
   "/gemma4": typeof Gemma4Route;
   "/geometry-sweep": typeof GeometrySweepRoute;
   "/irodori": typeof IrodoriRoute;
+  "/kernel-check": typeof KernelCheckRoute;
   "/sbv2": typeof Sbv2Route;
   "/siglip2": typeof Siglip2Route;
   "/wan22": typeof Wan22Route;
@@ -128,6 +137,7 @@ export interface FileRouteTypes {
     | "/gemma4"
     | "/geometry-sweep"
     | "/irodori"
+    | "/kernel-check"
     | "/sbv2"
     | "/siglip2"
     | "/wan22";
@@ -141,6 +151,7 @@ export interface FileRouteTypes {
     | "/gemma4"
     | "/geometry-sweep"
     | "/irodori"
+    | "/kernel-check"
     | "/sbv2"
     | "/siglip2"
     | "/wan22";
@@ -154,6 +165,7 @@ export interface FileRouteTypes {
     | "/gemma4"
     | "/geometry-sweep"
     | "/irodori"
+    | "/kernel-check"
     | "/sbv2"
     | "/siglip2"
     | "/wan22";
@@ -168,6 +180,7 @@ export interface RootRouteChildren {
   Gemma4Route: typeof Gemma4Route;
   GeometrySweepRoute: typeof GeometrySweepRoute;
   IrodoriRoute: typeof IrodoriRoute;
+  KernelCheckRoute: typeof KernelCheckRoute;
   Sbv2Route: typeof Sbv2Route;
   Siglip2Route: typeof Siglip2Route;
   Wan22Route: typeof Wan22Route;
@@ -231,6 +244,13 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof IrodoriRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/kernel-check": {
+      id: "/kernel-check";
+      path: "/kernel-check";
+      fullPath: "/kernel-check";
+      preLoaderRoute: typeof KernelCheckRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/sbv2": {
       id: "/sbv2";
       path: "/sbv2";
@@ -264,6 +284,7 @@ const rootRouteChildren: RootRouteChildren = {
   Gemma4Route: Gemma4Route,
   GeometrySweepRoute: GeometrySweepRoute,
   IrodoriRoute: IrodoriRoute,
+  KernelCheckRoute: KernelCheckRoute,
   Sbv2Route: Sbv2Route,
   Siglip2Route: Siglip2Route,
   Wan22Route: Wan22Route,

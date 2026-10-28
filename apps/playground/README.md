@@ -18,6 +18,7 @@ A left sidebar switches between the pages, grouped by kind:
 | Text | Gemma 4 chat (`gemma4` and the `gemma4-qat` distribution) | `/gemma4` | done |
 | Benchmarks | Attention route bench — the two a8 attention routes per kernel at Wan2.2's shapes | `/attention-bench` | done |
 | Benchmarks | Geometry sweep — the GEMM tile geometries case by case, one merged record for `deriveGeometryProfile` | `/geometry-sweep` | done |
+| Benchmarks | Kernel checks — the subgroup32 GEMV / RMS reductions and the K-55 / K-91 states-attention rewrites, word for word on the browser's backend | `/kernel-check` | done |
 
 Every model page reads its distributions from the mounts below, runs on a GPU the page acquires
 itself, and saves a JSON record of each run (the environment, the request, timings and Session
@@ -32,6 +33,12 @@ a WAV is made or read, and for type-only imports). Besides the UI libraries, the
 a pipeline input comes from is `@hdae/yomi`, a dependency of the app: the caller-side Japanese
 analyser whose `Sbv2Utterance` the Style-Bert-VITS2 page hands to `Sbv2Pipeline` (the same analyser
 the SBV2 WAV regression test uses).
+
+One exception to the public surfaces: the kernel-check page imports `@karume/kernel-checks`, a
+private workspace package (never published) that drives runtime internals — kernel WGSL generators
+and the runtime tests' dispatch harness — so that the page runs the same check implementation as
+the runtime's node GPU tests ([the kernel-check page](#the-kernel-check-page)). No other page may
+import it, and nothing here imports runtime internals directly.
 
 ## Run
 
@@ -1053,10 +1060,81 @@ same JSON.
 - The verdicts on the page are a preview. The table the repository registers comes from the
   derivation on the dev machine over every record of the adapter.
 
+## The kernel-check page
+
+The node lanes run on Dawn / Vulkan; a kernel rewrite that relies on the backend compiling the same
+expression the same way must also be checked on the other backends — D3D12 (Chrome on Windows) and
+Metal (macOS). This page runs those checks on the browser's own GPU. The checks are the shared
+implementations of `@karume/kernel-checks`: the same cases and criteria as the runtime's node GPU
+tests, not a copy.
+
+| Check | Node GPU test | What must hold | Needs |
+| --- | --- | --- | --- |
+| GEMV subgroup32 | `gpu_linear_gemv_subgroup_test.ts` | `linearGemvReduce: "parallel-subgroup32"` equals the parallel reduction word for word (180 cases: i2 / i4 / i8, 5 lane counts, M = 1 / 4 / 8); rows past M stay unwritten; row 0 is the same at every M; outputs within the GEMM band of an FP64 reference (ADR 0101). | `subgroups`, `subgroup-size-control`, WGSL `subgroup_id` |
+| RMS subgroup32 | `gpu_rms_norm_subgroup_test.ts` | `rmsNormReduce: "subgroup32"` through real Sessions: within the `rms_norm` tolerance of the CPU reference and row 0 identical at every M (48 cases); fused rms_norm + add identical to unfused, one fusion per run (12); 19 rows on 2 workgroups within tolerance (1) (ADR 0100). | the same |
+| States attention rewrites (K-55 / K-91) | `gpu_state_attention_fold_test.ts` | The folded ①′ writes the same S words as ①′ (252 cases), the unrolled ③′ and fused stats + PV the same O words as their v1 WGSL (546 / 490); the reference outputs met the word classes the contract covers and no output word was left unwritten; every class the product folds is in the grid; 5 order-only mutants each change at least one word (else a zero-mismatch result would prove nothing). The page also runs each mutant on every case of its shape (the mutant matrix, not in the node test). | nothing optional |
+
+The page probes the adapter's features, then acquires its GPU with `subgroups: "available"`. **Run**
+next to a check runs that check; **Run all** runs the three in order; Cancel stops before the next
+case. A check being run reads as not run until it ends, so a cancelled re-run does not keep its
+earlier verdict. The status card shows the adapter's and the device's features, WGSL `subgroup_id` and the
+linear lane mapping.
+
+Each check gets a verdict:
+
+- **PASS** — every part ran the number of cases its check exports (`GEMV_SUBGROUP_CASES`,
+  `RMS_SUBGROUP_CASES`, `STATE_ATTENTION_CASES`; the counts in the table above) and the
+  states-attention check its `STATE_ATTENTION_MUTANTS` mutants and matrix rows, every criterion of
+  every case has 0 failing words, every requirement is met, every mutant mismatched on its case and
+  every mutant matrix row passed;
+- **FAIL** — anything else; the part table shows cases, failing cases, mismatching words and the
+  unmet requirements, below it any count that differs from the check's (a part with no cases
+  compared nothing), and the first failure of each failing part (case, criterion, word index,
+  expected vs actual as u32 hex — for a tolerance band the worst element, with the report);
+- **not available** — the device lacks a feature the check needs (the subgroup checks without
+  `subgroups` / `subgroup-size-control` / WGSL `subgroup_id`). This is not a pass: the page's
+  overall verdict is then **INCOMPLETE** at best;
+- **ERROR** — the harness itself failed: a WebGPU error caught by the validation, out-of-memory or
+  internal error scope every case runs under, an uncaptured WebGPU error, a lost device, or a
+  mutation anchor that no longer matches the generated WGSL; the error is shown in full.
+
+The overall verdict covers all three checks: a check that was not run counts like one that is not
+available, so running one check alone gives **INCOMPLETE** at best (the result card lists the
+checks not run). The release check is a **Run all**.
+
+For the states-attention check the page also shows the mutant table (each mutant's kernel, case and
+differing words), the mutant matrix and the folded ①′ classes. The matrix runs each mutant on every
+case of its shape in its kernel's grid and classifies each case by whether the mutated code path
+runs there: every acting case must mismatch, no idle case may, and the contraction-only cases (a
+swap of two terms added to an exact 0, which shows only where the backend fuses the multiply-add)
+are counted without a requirement. The folded ①′ classes: for each (shape, M) of the grid, the F the check runs
+and the F the product selects (`stateQkFoldHeads`). The product folds only the classes of
+`STATE_QK_FOLD_CLASSES` (E2B r = 8, D = 512, M = 1 / 4 / 8 and MiniCPM5 r = 8, D = 128, M = 1 —
+observed identical on Vulkan and D3D12); E4B's F = 4 is still checked but **kept for K-95** (it
+differed on D3D12 on 2026-10-27, perf-ledger K-95), so on D3D12 this check FAILs on the e4b-full
+classes until K-95 lands. Next to the check's verdict the page shows its verdict **outside the K-95
+classes** (the same evaluation without the cases of the classes kept only for K-95): it fails on
+anything the product runs, so on D3D12 it is the one that must read PASS.
+
+### The record (`format: "karume-playground-kernel-check/1"`)
+
+**Download record (JSON)** saves `kernel-check_<UTC timestamp>.json` after a run ends — completed,
+cancelled or aborted (it holds every check run on the page so far with the current device; a
+reacquired device starts a new record): the environment fields (as on the other pages — adapter,
+device features, WGSL language features, limits), `adapterFeatures`, the overall `verdict` and
+every check with its `verdict` — `not-run` for one that was not run — and `seconds`, and either
+the reason it was not available, the error, or `countMismatches` (the counts that differ from the
+check's; empty when none do), the parts (summary, requirements and `results`:
+every case with each criterion's word count, failing words and first or worst failing word), the
+mutants, the mutant matrix, the fold classes and, for the states-attention check, `productVerdict`
+(the verdict outside the K-95 classes). While a run is in progress there is no record to download.
+**Copy record** copies the same JSON.
+
 ## Develop
 
 ```sh
 pnpm --filter @karume/playground test        # vp test: the server's request handling (/models/ and /hf/, aliases included), the page registry, useGpu's teardown order, record / cache / preset / image helpers, pretrainedRef, zip writer, attention bench table, the geometry sweep's merge and run order, every page's pure helpers (settings, records, progress, pipeline slots)
+pnpm --filter @karume/playground test        # vp test: the server's request handling (/models/ and /hf/, aliases included), the page registry, useGpu's teardown order, record / cache / preset / image helpers, pretrainedRef, zip writer, attention bench table, kernel-check verdicts and record, every page's pure helpers (settings, records, progress, pipeline slots)
 pnpm --filter @karume/playground typecheck
 pnpm --filter @karume/playground check       # vp check: format + lint + types
 pnpm --filter @karume/playground build
