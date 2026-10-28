@@ -5,7 +5,7 @@
  * page can tell is wrong, naming the field.
  */
 
-import { type Manifest, resolveSelection } from "@karume/hub";
+import type { Manifest } from "@karume/hub";
 import {
   type GenerateRequest,
   type Residency,
@@ -62,42 +62,6 @@ export const defaultModelRef = (manifests: AnimaManifests): ModelRef | undefined
     if (manifest !== undefined) return { mount, model: manifest.defaultModel };
   }
   return undefined;
-};
-
-/**
- * The mount that holds each repository a manifest may reference across repositories: the fine-tunes
- * take the text encoder, the VAE and the tokenizers from the official repository. Keyed by the public
- * repo name (`SOURCES["anima"].repo` — the name the `anima` mount is served under).
- */
-export type RepoHolders = Readonly<Record<string, AnimaMount>>;
-
-/**
- * The `crossRepo` map of the direct route for one selection: every repository its containers and
- * assets reference, mapped to the mount that holds it. Throws when a referenced repository has no
- * mount (the direct route would fail on the first part it cannot read).
- */
-export const crossRepoMounts = (
-  manifest: Manifest,
-  model: string,
-  quant: string,
-  holders: RepoHolders,
-): Readonly<Record<string, AnimaMount>> => {
-  const selection = resolveSelection(manifest, { model, quant });
-  const files = [
-    ...Object.values(selection.containers).flatMap(({ parts }) => parts),
-    ...Object.values(selection.assets),
-  ];
-  const map: Record<string, AnimaMount> = {};
-  for (const { repo } of files) {
-    if (repo === undefined || Object.hasOwn(map, repo)) continue;
-    if (!Object.hasOwn(holders, repo)) {
-      throw new Error(
-        `Model '${model}' (${quant}) references ${repo}, which no mount of this page holds`,
-      );
-    }
-    map[repo] = holders[repo];
-  }
-  return map;
 };
 
 /** What a model's manifest entry declares as the defaults of a request (`pipelineConfig`). */

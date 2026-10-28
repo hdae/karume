@@ -47,9 +47,12 @@ export const MOUNTS = {
     hfRepo: depthAnything.SOURCES["depth-anything-v2"].repo,
   },
   siglip2: { directory: "models/karume-siglip2", hfRepo: siglip2.SOURCES["siglip2"].repo },
+  // karume-irodori-v4.1-small takes the components it shares with v4-small from
+  // karume-irodori-v4-small at the revision its manifest declares (the same opt-in as `anima`).
   "irodori-v4": {
     directory: "models/karume-irodori-v4-small",
     hfRepo: irodori.SOURCES["irodori-v4-small"].repo,
+    aliasReferencedRevisions: true,
   },
   "irodori-v4.1": {
     directory: "models/karume-irodori-v4.1-small",

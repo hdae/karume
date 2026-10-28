@@ -5,7 +5,7 @@
  * of the f32 samples).
  */
 
-import { type GenerateEvent, Pipeline, type RunComponent } from "@karume/models/irodori";
+import { SOURCES, type GenerateEvent, Pipeline, type RunComponent } from "@karume/models/irodori";
 import type { AcquireGpuOptions, GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -35,7 +35,13 @@ import { useManifest } from "@/hooks/use-manifest";
 import { usePipelineSource } from "@/hooks/use-pipeline-source";
 import { useRunTask } from "@/hooks/use-run-task";
 import { useTimestampQuery } from "@/hooks/use-timestamp-query";
-import { mountStatus, type PipelineSource, pretrainedRef } from "@/lib/distributions";
+import {
+  crossRepoMounts,
+  mountStatus,
+  type PipelineSource,
+  pretrainedRef,
+  type RepoHolders,
+} from "@/lib/distributions";
 import { fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
 import { manifestPresets, type Preset } from "@/lib/presets";
@@ -86,6 +92,14 @@ const TIMED_GPU: Omit<AcquireGpuOptions, "onDeviceLost"> = { gpuTiming: true };
 
 /** How many ops the result names per timed component. */
 const TOP_OPS = 5;
+
+/**
+ * v4.1-small references the components it shares with v4-small in v4-small's repository; on the
+ * direct route those files come from the `irodori-v4` mount.
+ */
+const REPO_HOLDERS: RepoHolders<IrodoriMount> = {
+  [SOURCES["irodori-v4-small"].repo]: "irodori-v4",
+};
 
 const STAGE_LABELS: Readonly<Record<RunComponent, string>> = {
   backbone: "Backbone (ModernBERT)",
@@ -348,6 +362,9 @@ export const IrodoriPage = () => {
       manifestSha256: manifest.sha256,
     };
 
+    const referencing = manifest.manifest;
+    const statuses = index.kind === "ready" ? index.index : undefined;
+
     void task.start(async ({ signal, report }) => {
       const runStart = performance.now();
       let buildStart = runStart;
@@ -361,7 +378,24 @@ export const IrodoriPage = () => {
         build: () => {
           report({ stage: "building the pipeline" });
           buildStart = performance.now();
-          return Pipeline.fromPretrained(pretrainedRef(key.source, key.mount), {
+          // The direct route maps the repositories the manifest references to the mounts that
+          // hold them (v4.1-small takes what it shares with v4-small from the v4-small mount); the
+          // cached route follows the references on /hf/. A self-contained manifest maps nothing.
+          const crossRepo =
+            key.source.kind === "direct"
+              ? crossRepoMounts(referencing, key.model, key.quant, REPO_HOLDERS)
+              : {};
+          for (const target of new Set(Object.values(crossRepo))) {
+            const held = mountStatus(statuses, target);
+            if (held?.available !== true) {
+              throw new Error(
+                `${key.model} takes the components it shares with v4-small from the ${target} mount, but ${
+                  held?.directory ?? target
+                } is missing`,
+              );
+            }
+          }
+          return Pipeline.fromPretrained(pretrainedRef(key.source, key.mount, crossRepo), {
             gpu: key.gpu,
             model: key.model,
             quant: key.quant,

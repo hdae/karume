@@ -8,7 +8,13 @@
  * to the family's `fromPretrained`.
  */
 
-import { type DistributionSource, type HubRepoRef, localDirectory } from "@karume/hub";
+import {
+  type DistributionSource,
+  type HubRepoRef,
+  localDirectory,
+  type Manifest,
+  resolveSelection,
+} from "@karume/hub";
 
 import type { MountName } from "@/mounts";
 
@@ -152,3 +158,41 @@ export const pretrainedRef = (
           Object.entries(crossRepo).map(([repo, mount]) => [repo, distributionSource(mount)]),
         ),
       );
+
+/**
+ * The mount that holds each repository a page's manifests may reference across repositories, keyed
+ * by the public repo name (the name the mount is served under on `/hf/` — a family's `*_SOURCES`
+ * entry): `{ "hdae/karume-anima": "anima" }` for the Anima fine-tunes,
+ * `{ "hdae/karume-irodori-v4-small": "irodori-v4" }` for Irodori v4.1-small.
+ */
+export type RepoHolders<M extends MountName = MountName> = Readonly<Record<string, M>>;
+
+/**
+ * The `crossRepo` map of the direct route ({@link pretrainedRef}) for one selection: every
+ * repository its containers and assets reference, mapped to the mount that holds it — empty for a
+ * selection that references none (a self-contained distribution). Throws when a referenced
+ * repository has no mount (the direct route would fail on the first part it cannot read).
+ */
+export const crossRepoMounts = <M extends MountName>(
+  manifest: Manifest,
+  model: string,
+  quant: string,
+  holders: RepoHolders<M>,
+): Readonly<Record<string, M>> => {
+  const selection = resolveSelection(manifest, { model, quant });
+  const files = [
+    ...Object.values(selection.containers).flatMap(({ parts }) => parts),
+    ...Object.values(selection.assets),
+  ];
+  const map: Record<string, M> = {};
+  for (const { repo } of files) {
+    if (repo === undefined || Object.hasOwn(map, repo)) continue;
+    if (!Object.hasOwn(holders, repo)) {
+      throw new Error(
+        `Model '${model}' (${quant}) references ${repo}, which no mount of this page holds`,
+      );
+    }
+    map[repo] = holders[repo];
+  }
+  return map;
+};

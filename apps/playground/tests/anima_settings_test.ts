@@ -5,7 +5,6 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   animaModelChoices,
   buildRequest,
-  crossRepoMounts,
   defaultModelRef,
   effectiveRequest,
   initialForm,
@@ -16,6 +15,7 @@ import {
   usesNegativePrompt,
   type AnimaForm,
 } from "../src/models/anima/settings.ts";
+import { crossRepoMounts } from "../src/lib/distributions.ts";
 
 const hex = (character: string): string => character.repeat(64);
 const OFFICIAL = "hdae/karume-anima";

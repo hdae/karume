@@ -39,7 +39,7 @@ import { useGpu } from "@/hooks/use-gpu";
 import { type ManifestState, useManifest } from "@/hooks/use-manifest";
 import { usePipelineSource } from "@/hooks/use-pipeline-source";
 import { type RunProgress, useRunTask } from "@/hooks/use-run-task";
-import type { DistributionStatus } from "@/lib/distributions";
+import { crossRepoMounts, type DistributionStatus, type RepoHolders } from "@/lib/distributions";
 import { fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
 import type { RgbaPixels } from "@/lib/image";
@@ -76,7 +76,6 @@ import {
   type AnimaMount,
   animaModelChoices,
   buildRequest,
-  crossRepoMounts,
   defaultModelRef,
   effectiveRequest,
   initialForm,
@@ -86,7 +85,6 @@ import {
   MOUNT_LABELS,
   parseModelKey,
   randomSeed,
-  type RepoHolders,
   RESOLUTION_CHOICES,
   resolutionText,
   usesNegativePrompt,
@@ -107,7 +105,7 @@ const GPU_WITH_F16: Omit<AcquireGpuOptions, "onDeviceLost"> = { shaderF16: true 
  * on the direct route its files come from the `anima` mount (the cached route follows the
  * manifest's cross-repo reference on `/hf/`).
  */
-const REPO_HOLDERS: RepoHolders = { [SOURCES["anima"].repo]: "anima" };
+const REPO_HOLDERS: RepoHolders<AnimaMount> = { [SOURCES["anima"].repo]: "anima" };
 
 const MIB = 2 ** 20;
 
