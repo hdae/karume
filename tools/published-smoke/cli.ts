@@ -1,5 +1,6 @@
 /**
- * The pure logic of published-smoke (the argument check and the type guard of a pin entry).
+ * The pure logic of published-smoke (the argument check and the type guards of a pin entry and of
+ * the sbv2 module).
  *
  * `main.ts` dynamically imports the published packages (`@karume/*`) from the registry as soon as it
  * starts, so tests cannot import it (it needs the network and the published packages). Only the
@@ -14,6 +15,35 @@ export const isPinRef = (value: unknown): value is PinRef =>
   value !== null &&
   typeof (value as { repo?: unknown }).repo === "string" &&
   typeof (value as { revision?: unknown }).revision === "string";
+
+/**
+ * The part of `@karume/models/sbv2` the full run uses, spelled with the bare names of 0.15.0 (ADR
+ * 0136). 0.14.x exports `Sbv2Pipeline` / `SBV2_SOURCES` instead.
+ */
+export type Sbv2Module = {
+  readonly Pipeline: {
+    fromPretrained: (ref: PinRef) => Promise<{ dispose: () => Promise<void> }>;
+  };
+  readonly SOURCES: Readonly<Record<string, unknown>>;
+};
+
+/**
+ * Whether a dynamically imported module has the shape of {@link Sbv2Module}. Checked at run time
+ * so that a published version with another surface fails with a message naming the mismatch, not
+ * with a `TypeError` on `undefined` further down.
+ */
+export const isSbv2Module = (value: unknown): value is Sbv2Module => {
+  if (typeof value !== "object" || value === null) return false;
+  if (!("Pipeline" in value) || !("SOURCES" in value)) return false;
+  const { Pipeline: pipeline, SOURCES: sources } = value;
+  return (
+    typeof sources === "object" &&
+    sources !== null &&
+    typeof pipeline === "function" &&
+    "fromPretrained" in pipeline &&
+    typeof pipeline.fromPretrained === "function"
+  );
+};
 
 /** The two ways to run it (spelled as in the README — on Deno, `deno run -A main.ts` takes the same arguments). */
 export const USAGE = "node tools/published-smoke/main.ts [--manifests-only]";

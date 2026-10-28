@@ -24,16 +24,10 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isPinRef, parseSmokeArgs, type PinRef } from "./cli.ts";
+import { isPinRef, isSbv2Module, parseSmokeArgs, type PinRef } from "./cli.ts";
 
 type HubModule = {
   loadManifest: (ref: PinRef) => Promise<{ manifest: { format?: unknown } }>;
-};
-type Sbv2Module = {
-  Pipeline: {
-    fromPretrained: (ref: PinRef) => Promise<{ dispose: () => Promise<void> }>;
-  };
-  SOURCES: Record<string, unknown>;
 };
 type DawnModule = { create: (flags: string[]) => GPU };
 
@@ -154,7 +148,13 @@ if (manifestsOnly) {
   console.log(`published smoke OK: ${pins.length} manifests (fromPretrained skipped)`);
 } else {
   await ensureNavigatorGpu();
-  const { Pipeline, SOURCES } = (await import(MODELS_SBV2)) as Sbv2Module;
+  const sbv2: unknown = await import(MODELS_SBV2);
+  if (!isSbv2Module(sbv2)) {
+    throw new Error(
+      `${MODELS_SBV2} has no Pipeline / SOURCES: the full run uses the bare names of @karume/models 0.15.0 (ADR 0136); run an older version with --manifests-only`,
+    );
+  }
+  const { Pipeline, SOURCES } = sbv2;
   const pin: unknown = SOURCES["sbv2-jvnv"];
   if (!isPinRef(pin)) throw new Error('SOURCES["sbv2-jvnv"] is not a pin entry');
   const started = performance.now();

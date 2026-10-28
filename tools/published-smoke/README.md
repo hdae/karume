@@ -29,6 +29,12 @@ packages are released in lockstep). The run fails if `@karume/hub` or
 Dawn (npm `webgpu`) as `navigator.gpu`, which the published `fromPretrained`
 reads.
 
+`main.ts` on `main` is written against the surface of the next release, not of
+the version its dependencies pin until the post-release bump. From 0.15.0 the
+sbv2 step uses the bare names of `@karume/models/sbv2` (`Pipeline`, `SOURCES` —
+ADR 0136), so a full run against 0.14.x stops with a message naming the missing
+exports; `--manifests-only` reads only `KARUME_SOURCES` and works for both.
+
 ## Where the published packages come from
 
 The packages are imported by bare specifier (`@karume/hub`, `@karume/models`,

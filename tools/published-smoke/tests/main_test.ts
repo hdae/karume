@@ -6,7 +6,7 @@
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
-import { isPinRef, parseSmokeArgs } from "../cli.ts";
+import { isPinRef, isSbv2Module, parseSmokeArgs } from "../cli.ts";
 
 test("isPinRef: accepts as a pin only a value with both repo and revision", () => {
   assertEquals(isPinRef({ repo: "a", revision: "b" }), true);
@@ -16,6 +16,20 @@ test("isPinRef: accepts as a pin only a value with both repo and revision", () =
   assertEquals(isPinRef(null), false);
   assertEquals(isPinRef("x"), false);
   assertEquals(isPinRef(undefined), false);
+});
+
+test("isSbv2Module: accepts the 0.15 surface of the sbv2 subpath and nothing else", () => {
+  const dispose = (): Promise<void> => Promise.resolve();
+  class Pipeline {
+    static fromPretrained = (): Promise<{ dispose: () => Promise<void> }> =>
+      Promise.resolve({ dispose });
+  }
+  assertEquals(isSbv2Module({ Pipeline, SOURCES: {} }), true);
+  // The 0.14 spelling of the same module.
+  assertEquals(isSbv2Module({ Sbv2Pipeline: Pipeline, SBV2_SOURCES: {} }), false);
+  assertEquals(isSbv2Module({ Pipeline: class {}, SOURCES: {} }), false);
+  assertEquals(isSbv2Module({ Pipeline, SOURCES: null }), false);
+  assertEquals(isSbv2Module(null), false);
 });
 
 test("parseSmokeArgs: no argument is the full path, --manifests-only is manifests only", () => {
