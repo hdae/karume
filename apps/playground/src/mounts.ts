@@ -15,7 +15,7 @@ import * as birefnet from "@karume/models/birefnet";
 import * as depthAnything from "@karume/models/depth-anything";
 import * as gemma from "@karume/models/gemma";
 import * as irodori from "@karume/models/irodori";
-import { SBV2_SOURCES } from "@karume/models/sbv2";
+import * as sbv2 from "@karume/models/sbv2";
 import { SIGLIP2_SOURCES } from "@karume/models/siglip2";
 import { WAN_SOURCES } from "@karume/models/wan";
 
@@ -55,7 +55,7 @@ export const MOUNTS = {
     directory: "models/karume-irodori-v4.1-small",
     hfRepo: irodori.SOURCES["irodori-v4.1-small"].repo,
   },
-  sbv2: { directory: "models/karume-sbv2-jvnv", hfRepo: SBV2_SOURCES["sbv2-jvnv"].repo },
+  sbv2: { directory: "models/karume-sbv2-jvnv", hfRepo: sbv2.SOURCES["sbv2-jvnv"].repo },
   gemma4: { directory: "models/karume-gemma4", hfRepo: gemma.SOURCES["gemma4"].repo },
   // No public repo (gemma.SOURCES holds only `gemma4`): the direct route only.
   "gemma4-qat": "models/karume-gemma4-qat",

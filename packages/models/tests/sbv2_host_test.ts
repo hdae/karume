@@ -9,7 +9,7 @@ import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
-import { Sbv2InputError } from "../src/sbv2/errors.ts";
+import { InputError } from "../src/sbv2/errors.ts";
 import { durationsToFrames } from "../src/sbv2/host/duration.ts";
 import { buildZp } from "../src/sbv2/host/latent.ts";
 import { Randn } from "../src/sbv2/host/random.ts";
@@ -83,13 +83,13 @@ test("durationsToFrames: 長さ不一致・全 0 フレームは落とす", () =
     Error,
     "Length mismatch",
   );
-  assert(!(mismatch instanceof Sbv2InputError), "長さ不一致は入力起因ではない");
+  assert(!(mismatch instanceof InputError), "長さ不一致は入力起因ではない");
   const empty = assertThrows(
     () => durationsToFrames(logw, logw, new Float32Array([0, 0]), 0, 1, AMPLE_FRAMES),
     Error,
     "total frame count is 0",
   );
-  assert(!(empty instanceof Sbv2InputError), "総フレーム数 0 は入力起因ではない");
+  assert(!(empty instanceof InputError), "総フレーム数 0 は入力起因ではない");
 });
 
 test("durationsToFrames: 総フレーム数が配布形の上限を超えたら展開列を確保する前に落とす", () => {
@@ -98,11 +98,11 @@ test("durationsToFrames: 総フレーム数が配布形の上限を超えたら�
   const logw = logwFor([1.2, 1.8, 0.3]);
   const mask = new Float32Array([1, 1, 1]);
   assertEquals(durationsToFrames(logw, logw, mask, 0.5, 1, 7).totalFrames, 5);
-  // 型は `Sbv2InputError`（400 相当）— text を短く分けるか lengthScale を下げれば通る要求で、
+  // 型は `InputError`（400 相当）— text を短く分けるか lengthScale を下げれば通る要求で、
   // 内部不変条件の破れ（素の `Error` = 500）とは呼び手の分岐先が違う（`errors.ts` の分類軸）。
   assertThrows(
     () => durationsToFrames(logw, logw, mask, 0.5, 2, 7),
-    Sbv2InputError,
+    InputError,
     "The total frame count 8 exceeds the distribution's maximum maxFrames=7",
   );
 });

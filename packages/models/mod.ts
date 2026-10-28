@@ -17,7 +17,7 @@
  * ```ts
  * import { encodeWav, sbv2 } from "@karume/models";
  * // `sbv2` is the same module object as `import * as sbv2 from "@karume/models/sbv2"`.
- * const tts = await sbv2.Sbv2Pipeline.fromPretrained(sbv2.SBV2_SOURCES["sbv2-jvnv"]);
+ * const tts = await sbv2.Pipeline.fromPretrained(sbv2.SOURCES["sbv2-jvnv"]);
  * ```
  *
  * A **thin surface** in the manner of ADR 0008 — it lists only the user's stories, "build a

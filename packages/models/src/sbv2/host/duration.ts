@@ -23,7 +23,7 @@
  * the f64 path is deterministic.
  */
 
-import { Sbv2InputError } from "../errors.ts";
+import { InputError } from "../errors.ts";
 
 type DurationPlan = {
   /** Frames per phoneme (after ceil and masking). */
@@ -83,11 +83,11 @@ export const durationsToFrames = (
     );
   }
   if (total > maxFrames) {
-    // MUST: only this one is a `Sbv2InputError`. The other throws in this file mean the front
+    // MUST: only this one is an `InputError`. The other throws in this file mean the front
     // output is broken = an internal fault (500), but exceeding the limit means "the given text /
     // lengthScale cannot be accepted" = input-caused (400), which the caller fixes by fixing the
     // request (the classification axis of `errors.ts`).
-    throw new Sbv2InputError(
+    throw new InputError(
       `The total frame count ${total} exceeds the distribution's maximum maxFrames=${maxFrames}` +
         " (split the text into shorter parts or lower lengthScale)",
     );

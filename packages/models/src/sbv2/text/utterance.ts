@@ -5,16 +5,16 @@
  * Responsibility boundary (the re-ruling of 0.6.0): text analysis (dictionary, correction
  * dictionary) is **the caller's responsibility**, and this package accepts only the analysed
  * structure. So every type here is karume-owned and imports no analyser types —
- * {@link Sbv2Phrases} describes "the shape the upstream analysis result satisfies
+ * {@link Phrases} describes "the shape the upstream analysis result satisfies
  * **structurally**", not a dependency on a particular analyser.
  *
  * MUST: the utterance is **flat** (no nested phrases). A phrase is a structure only for deciding
  * "nucleus → tone", and what SBV2 reads is the binary tone of each mora itself, so keeping phrases
  * would create a dual representation of "which is authoritative, the nucleus or the tones".
- * {@link toSbv2Utterance} expands the nucleus fully before handing it over.
+ * {@link toUtterance} expands the nucleus fully before handing it over.
  */
 
-import { Sbv2InputError } from "../errors.ts";
+import { InputError } from "../errors.ts";
 
 /**
  * One element of the word alignment (one word, or one actually present symbol character).
@@ -23,7 +23,7 @@ import { Sbv2InputError } from "../errors.ts";
  * element is one normal form (e.g. `["!"]`), and `surface` is the raw single character in the
  * normalised text (e.g. `"！"`).
  */
-export type Sbv2Word = {
+export type Word = {
   /** The word's surface (the source of DeBERTa's token count and of the BERT input text). */
   readonly surface: string;
   /** The phoneme sequence the word produces (without PAD at either end). */
@@ -38,7 +38,7 @@ export type Sbv2Word = {
  * a fix-and-return round trip would carry the stale derived field along, leaving a choice between
  * "ignore it (silently discard the edit)" and "reject it (a legitimate round trip fails)".
  */
-export type Sbv2Mora = {
+export type Mora = {
   /** One katakana mora (a contracted sound is one mora). For display and comparison. */
   readonly kana: string;
   /** Consonant phoneme (e.g. `"ky"`). Absent for vowel-only, moraic nasal and geminate moras. */
@@ -48,7 +48,7 @@ export type Sbv2Mora = {
    * resolved to the preceding vowel.
    *
    * NOTE: **the phoneme itself** goes here (the geminate is `"q"`). When the upstream analysis
-   * result writes the geminate as `"cl"`, {@link toSbv2Utterance} does the folding.
+   * result writes the geminate as `"cl"`, {@link toUtterance} does the folding.
    */
   readonly vowel: string;
   /** Binary tone (0 = low, 1 = high). Consonant and vowel get the same tone. */
@@ -62,33 +62,33 @@ export type Sbv2Mora = {
 };
 
 /**
- * The utterance passed to one synthesis (the first argument of {@link Sbv2Pipeline.generate}).
+ * The utterance passed to one synthesis (the first argument of {@link Pipeline.generate}).
  *
  * `moras` is the editing surface, and `words` is **read-only** (the source of the BERT input text
  * and word2ph). Rewriting `words` makes the phoneme sequence and the word split disagree, and the
  * synthesis fails at the entry check — to change a reading, redo it from the analysis side (the
  * caller's dictionary / correction dictionary).
  */
-export type Sbv2Utterance = {
+export type Utterance = {
   /**
    * Normal-form sequence of symbols present before the first mora (with symbol-only input, all of
    * them go here).
    */
   readonly leadingPunctuations: readonly string[];
   /** The utterance's mora sequence (phrase boundaries are not kept — the module doc's MUST). */
-  readonly moras: readonly Sbv2Mora[];
+  readonly moras: readonly Mora[];
   /** Word alignment (read-only — the source of the BERT input text and word2ph). */
-  readonly words: readonly Sbv2Word[];
+  readonly words: readonly Word[];
 };
 
 /**
- * The analysis result of the phrase structure (the input of {@link toSbv2Utterance}).
+ * The analysis result of the phrase structure (the input of {@link toUtterance}).
  *
  * It describes the shape that the output of an analyser returning readings as "accent phrases and
  * their nuclei" satisfies **structurally** (extra fields pass). The karume side reads only this
  * subset.
  */
-export type Sbv2Phrases = {
+export type Phrases = {
   readonly result: {
     /** Normal-form sequence of symbols present before the first phrase. */
     readonly leadingPunctuations: readonly string[];
@@ -98,7 +98,7 @@ export type Sbv2Phrases = {
         readonly consonant?: string;
         readonly vowel: string;
       }[];
-      /** Accent nucleus (1-origin, 0 = flat). {@link toSbv2Utterance} clamps the upper end. */
+      /** Accent nucleus (1-origin, 0 = flat). {@link toUtterance} clamps the upper end. */
       readonly accentNucleus: number;
       /**
        * Normal-form sequence of symbols present right after the phrase (in order of appearance).
@@ -110,7 +110,7 @@ export type Sbv2Phrases = {
    * Word alignment taken from the same analysis (the phoneme sequence and the word split must be
    * consistent).
    */
-  readonly words: readonly Sbv2Word[];
+  readonly words: readonly Word[];
 };
 
 /**
@@ -130,7 +130,7 @@ export type Sbv2Phrases = {
  */
 const phraseTones = (accentNucleus: number, moraCount: number, where: string): (0 | 1)[] => {
   if (!Number.isInteger(accentNucleus) || accentNucleus < 0) {
-    throw new Sbv2InputError(
+    throw new InputError(
       `${where}.accentNucleus = ${accentNucleus} is not a non-negative integer` +
         " (0 = flat, a 1-origin nucleus position, the mora count = tail-high)",
     );
@@ -142,7 +142,7 @@ const phraseTones = (accentNucleus: number, moraCount: number, where: string): (
 };
 
 /**
- * Folding for when upstream writes the geminate as `"cl"` (`Sbv2Mora.vowel` is the phoneme itself).
+ * Folding for when upstream writes the geminate as `"cl"` (`Mora.vowel` is the phoneme itself).
  */
 const toVowelPhone = (vowel: string): string => (vowel === "cl" ? "q" : vowel);
 
@@ -152,13 +152,13 @@ const toVowelPhone = (vowel: string): string => (vowel === "cl" ? "q" : vowel);
  * The nucleus is fully expanded here by {@link phraseTones} into a binary tone per mora. Symbols
  * right after a phrase are moved to **the last mora of that phrase** (flattening does not change
  * the order of the phonemes). Symbols before the first phrase move as is to
- * {@link Sbv2Utterance.leadingPunctuations}.
+ * {@link Utterance.leadingPunctuations}.
  *
  * NOTE: symbols of a phrase with no moras are attached to the preceding mora (or, if there is none,
  * to the leading symbol sequence). Their position in the phoneme sequence is the same; only where
  * they are attached changes.
  */
-export const toSbv2Utterance = (phrases: Sbv2Phrases): Sbv2Utterance => {
+export const toUtterance = (phrases: Phrases): Utterance => {
   const leadingPunctuations = [...phrases.result.leadingPunctuations];
   // Symbols are added afterwards, so this is mutable only while building (it is put on the
   // read-only surface before returning).

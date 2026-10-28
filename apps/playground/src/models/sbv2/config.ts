@@ -2,7 +2,7 @@
  * What the page reads from one model's `pipelineConfig` in the SBV2 manifest: the speaker and style
  * names (the selects), the distribution's defaults (the form's starting values) and the limits
  * `maxTokens` / `maxFrames` (the hints on the text and on a rejected input). The distribution owns these sets — the page derives every list from here and
- * hard-codes none. `Sbv2Pipeline` validates the same block again when it is built; this reader only
+ * hard-codes none. `Pipeline` validates the same block again when it is built; this reader only
  * refuses a block it cannot show (fail loudly, never guess).
  */
 

@@ -1,4 +1,4 @@
-// `Sbv2Pipeline` の**構築ガード**。GPU も実資産も要らない範囲だけを見る（実 GPU の突合は
+// `Pipeline` の**構築ガード**。GPU も実資産も要らない範囲だけを見る（実 GPU の突合は
 // example の dump 経路と golden E2E が持つ）。
 //
 // ここで押さえるのは 3 つ:
@@ -25,7 +25,7 @@ import {
   assertTiledBert,
   assertTokenLimit,
   assetJson,
-  Sbv2Pipeline,
+  Pipeline,
   synthesizeSbv2,
 } from "../src/sbv2/pipeline.ts";
 import { parseTokenizerAsset } from "../src/sbv2/text/asset.ts";
@@ -34,7 +34,7 @@ import { DebertaTokenizer } from "../src/sbv2/text/tokenizer.ts";
 import type { ModelComponent } from "../src/hub/components.ts";
 import { stubModel } from "./helpers/stub-model.ts";
 import { ModelInputError } from "../src/errors.ts";
-import { Sbv2InputError } from "../src/sbv2/errors.ts";
+import { InputError } from "../src/sbv2/errors.ts";
 import { Randn } from "../src/sbv2/host/random.ts";
 import { parseSbv2PipelineConfig } from "../src/sbv2/config.ts";
 import { tileBertToPhoneLevel, type TiledBert } from "../src/sbv2/text/bert-tile.ts";
@@ -113,7 +113,7 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   // 下の門が資産の不在に巻き添えられていないことの対偶。
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => Pipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
     "component 'front' has no container",
   );
@@ -122,7 +122,7 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
 test("fromAssets: pipeline の契約名が sbv2 でない manifest を落とす", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "anima/1" }));
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "'anima/1'",
   );
@@ -133,7 +133,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   // hub は `pipeline` の major を検査しない（読めるかどうかはパイプライン実装しか知らない）。
   assertEquals(manifest.models["FN4"].pipeline, { name: "sbv2", major: 2 });
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "has an unsupported major",
   );
@@ -142,7 +142,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
 test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "f16" }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "f16" }),
     Error,
     "available: i8",
   );
@@ -152,7 +152,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
   // v2 で増えた軸（ファミリーリポの別話者を打ち間違えたときの一次情報 — ADR 0041 §8）。
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { model: "FN1" }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { model: "FN1" }),
     Error,
     "available: FN4",
   );
@@ -173,18 +173,15 @@ test("fromAssets: f16 計算を宣言した quant は gpuFeatures を書き落�
   );
   const shared = { gpu: fakeGpuContext(fakeDevice()) };
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest: f16Compute, assets: COMPONENTS }, shared),
+    () => Pipeline.fromAssets({ manifest: f16Compute, assets: COMPONENTS }, shared),
     Error,
-    "Sbv2Pipeline: quant 'i8' requires shader-f16, but",
+    "sbv2.Pipeline: quant 'i8' requires shader-f16, but",
   );
   // 対照: f16 計算を言わない quant は同じ共有 GPU で admission を通り、資産の段まで進む
   // （門が恒真でないことの対）。
   const error = await assertRejects(
     () =>
-      Sbv2Pipeline.fromAssets(
-        { manifest: parseManifest(manifestText()), assets: COMPONENTS },
-        shared,
-      ),
+      Pipeline.fromAssets({ manifest: parseManifest(manifestText()), assets: COMPONENTS }, shared),
     Error,
   );
   assertFalse(error.message.includes("shader-f16"), error.message);
@@ -211,7 +208,7 @@ test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async
     }),
   );
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "pipelineConfig: unknown key 'sampleRate'",
   );
@@ -237,7 +234,7 @@ test("fromAssets: defaults.style が styles に無ければ構築時に落ちる
   );
   // 「生成を 1 回走らせて初めて分かる」を作らない — 既定は受理集合の内側であること。
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "pipelineConfig.defaults.style: 'Angry' is not in styles",
   );
@@ -262,7 +259,7 @@ test("fromAssets: defaults.speaker が speakers に無ければ構築時に落�
     }),
   );
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "pipelineConfig.defaults.speaker: 'jvnv-F1-jp' is not in speakers",
   );
@@ -289,7 +286,7 @@ test("fromAssets: 行番号が順列でない styles は構築時に落ちる（
     }),
   );
   await assertRejects(
-    () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "the row index is not an integer in 0..1",
   );
@@ -431,7 +428,7 @@ test("assertTokenLimit: 上限超過は落とし、ちょうど上限は通る",
   assertThrows(
     () => assertTokenLimit(513, 512),
     Error,
-    "Sbv2Pipeline: token count 513 exceeds the distribution's maximum maxTokens=512",
+    "sbv2.Pipeline: token count 513 exceeds the distribution's maximum maxTokens=512",
   );
 });
 
@@ -442,13 +439,13 @@ test("assertPhonemeLimit: 上限超過は落とし、ちょうど上限は通る
   assertThrows(
     () => assertPhonemeLimit(513, 512),
     Error,
-    "Sbv2Pipeline: phoneme count 513 exceeds the distribution's maximum maxTokens=512",
+    "sbv2.Pipeline: phoneme count 513 exceeds the distribution's maximum maxTokens=512",
   );
   // 文言は T 側と別（診断でどちらの門か分かる形）。
   assertThrows(() => assertTokenLimit(513, 512), Error, "token count 513");
 });
 
-test("assertSeed: 受理集合は非負の安全整数（Randn と同一条件・型は Sbv2InputError）", () => {
+test("assertSeed: 受理集合は非負の安全整数（Randn と同一条件・型は InputError）", () => {
   // `generate` はこの門を他のノブと同じ段（Session を張る前）で呼ぶ。唯一の検査が `Randn`
   // のコンストラクタだけだと、text_encoder（DeBERTa）を 1 run 払ってから落ちる。
   assertSeed(0);
@@ -457,14 +454,14 @@ test("assertSeed: 受理集合は非負の安全整数（Randn と同一条件�
   for (const bad of [-1, 1.5, 2 ** 53, Number.NaN, Number.POSITIVE_INFINITY]) {
     const thrown = assertThrows(
       () => assertSeed(bad),
-      Sbv2InputError,
+      InputError,
       `seed ${bad} is not a non-negative safe integer`,
     );
     // 包み直しは所有者の例外を捨てない（cause が所有者 `request-gates.ts` の送出そのもの）。
     assert(thrown.cause instanceof ModelInputError, "所有者の例外を cause に残していない");
     // 受理集合は `Randn` と 1 ビットも動かさない（緩めれば BigInt 変換が壊れ、締めれば
     // 既存の呼び出しが落ちる）。どちらも所有者 `request-gates.ts` の 1 本を通るので、
-    // 型は入口が `Sbv2InputError`・生成器が親の `ModelInputError` という差だけになる。
+    // 型は入口が `InputError`・生成器が親の `ModelInputError` という差だけになる。
     assertThrows(() => new Randn(bad), ModelInputError);
   }
 });
@@ -476,7 +473,7 @@ test("assertFiniteNoise: f32 で溢れる z_noise は出どころで型を分け
   // 呼び手が渡した値なら入力起因（400）。
   assertThrows(
     () => assertFiniteNoise(overflowing, 1e39, true),
-    Sbv2InputError,
+    InputError,
     "noiseScaleW 1e+39 makes z_noise non-finite in f32",
   );
   // 配布形の既定値なら資産の不正（入力起因の分岐に乗せない）。
@@ -577,7 +574,7 @@ describe("synthesizeSbv2: z_noise の有限性の検査の結線", () => {
     const calls: string[] = [];
     await assertRejects(
       () => synthesizeSbv2(noiseWiringState(calls, 0.8), PUNCTUATION_ONLY, { noiseScaleW: 1e39 }),
-      Sbv2InputError,
+      InputError,
       "noiseScaleW 1e+39 makes z_noise non-finite in f32",
     );
     assertEquals(calls, []);
@@ -655,7 +652,7 @@ test("assertTiledBert: 故障注入 — 走査が取りこぼした tile を確�
 
 describe("SBV2 の throw の分類軸（家族横断の分岐に乗るか）", () => {
   // 複数家族を同じホストに載せた側は `instanceof ModelInputError` だけで 400 / 500 を分ける。
-  // SBV2 の型が `Sbv2InputError` のままでも、親が同じである限りその分岐は成立する。
+  // SBV2 の型が `InputError` のままでも、親が同じである限りその分岐は成立する。
 
   it("入力起因の門は家族横断の ModelInputError で捕まる", () => {
     const seed = assertThrows(() => assertSeed(-1));

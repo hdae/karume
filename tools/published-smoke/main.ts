@@ -30,10 +30,10 @@ type HubModule = {
   loadManifest: (ref: PinRef) => Promise<{ manifest: { format?: unknown } }>;
 };
 type Sbv2Module = {
-  Sbv2Pipeline: {
+  Pipeline: {
     fromPretrained: (ref: PinRef) => Promise<{ dispose: () => Promise<void> }>;
   };
-  SBV2_SOURCES: Record<string, unknown>;
+  SOURCES: Record<string, unknown>;
 };
 type DawnModule = { create: (flags: string[]) => GPU };
 
@@ -154,11 +154,11 @@ if (manifestsOnly) {
   console.log(`published smoke OK: ${pins.length} manifests (fromPretrained skipped)`);
 } else {
   await ensureNavigatorGpu();
-  const { Sbv2Pipeline, SBV2_SOURCES } = (await import(MODELS_SBV2)) as Sbv2Module;
-  const pin: unknown = SBV2_SOURCES["sbv2-jvnv"];
-  if (!isPinRef(pin)) throw new Error('SBV2_SOURCES["sbv2-jvnv"] is not a pin entry');
+  const { Pipeline, SOURCES } = (await import(MODELS_SBV2)) as Sbv2Module;
+  const pin: unknown = SOURCES["sbv2-jvnv"];
+  if (!isPinRef(pin)) throw new Error('SOURCES["sbv2-jvnv"] is not a pin entry');
   const started = performance.now();
-  const pipeline = await Sbv2Pipeline.fromPretrained(pin);
+  const pipeline = await Pipeline.fromPretrained(pin);
   console.log(
     `  fromPretrained OK sbv2-jvnv (${((performance.now() - started) / 1000).toFixed(1)}s)`,
   );

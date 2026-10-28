@@ -16,9 +16,9 @@
 import type { DebertaTokenizer } from "./tokenizer.ts";
 import { toBertText } from "./bert-text.ts";
 import { toSbv2PhoneTone } from "./phone-tone.ts";
-import type { Sbv2Utterance, Sbv2Word } from "./utterance.ts";
+import type { Utterance, Word } from "./utterance.ts";
 import { buildBaseWord2ph } from "./word2ph.ts";
-import { Sbv2InputError } from "../errors.ts";
+import { InputError } from "../errors.ts";
 import {
   addBlankWord2ph,
   type JpExtraRules,
@@ -61,19 +61,19 @@ export type Sbv2ModelInput = {
  * @param phones the output of {@link toSbv2PhoneTone} (including PAD at both ends).
  * @param words word alignment (without PAD).
  */
-export const assertWordPhones = (phones: readonly string[], words: readonly Sbv2Word[]): void => {
+export const assertWordPhones = (phones: readonly string[], words: readonly Word[]): void => {
   const aligned = words.flatMap((word) => word.phones);
   // The PADs at both ends are not "words", so they do not appear in the word alignment.
   const derived = phones.slice(1, -1);
   if (aligned.length !== derived.length) {
-    throw new Sbv2InputError(
+    throw new InputError(
       `The phoneme count ${derived.length} built from moras differs from the phoneme count ${aligned.length} of words` +
         " (pass moras and words taken from the same analysis — to change the reading, redo the analysis)",
     );
   }
   for (const [index, phone] of derived.entries()) {
     if (phone !== aligned[index]) {
-      throw new Sbv2InputError(
+      throw new InputError(
         `Phoneme[${index}] = ${JSON.stringify(phone)} built from moras differs from words'` +
           ` ${JSON.stringify(aligned[index])} (only tone may be changed —` +
           " edits that change phonemes (rewriting vowel / consonant, adding or removing symbols) are not accepted)",
@@ -88,7 +88,7 @@ export const assertWordPhones = (phones: readonly string[], words: readonly Sbv2
  * `word2ph`.
  */
 export const buildSbv2ModelInput = (
-  utterance: Sbv2Utterance,
+  utterance: Utterance,
   tokenizer: DebertaTokenizer,
   rules: JpExtraRules,
 ): Sbv2ModelInput => {
@@ -104,7 +104,7 @@ export const buildSbv2ModelInput = (
     // Reachable only through an utterance whose words' surfaces were rewritten (a symbol word's
     // normal form yielding a different token count, etc.), so it is input-caused = 400. The caller
     // fixes it by restoring words to what the analysis produced.
-    throw new Sbv2InputError(
+    throw new InputError(
       `input_ids length(${inputIds.length}) !== word2ph length(${baseWord2ph.length})` +
         ` (bertText=${JSON.stringify(bertText)})`,
     );

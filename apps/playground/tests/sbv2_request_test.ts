@@ -1,4 +1,4 @@
-import type { Sbv2Utterance } from "@karume/models/sbv2";
+import type { Utterance } from "@karume/models/sbv2";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { Sbv2ModelConfig } from "../src/models/sbv2/config.ts";
@@ -87,7 +87,7 @@ describe("formForModel", () => {
 });
 
 /** konnichiwa, ame!? — kana spelled in romaji (any string is a kana to the grouping). */
-const utterance: Sbv2Utterance = {
+const utterance: Utterance = {
   leadingPunctuations: ["…"],
   moras: [
     { kana: "ko", consonant: "k", vowel: "o", tone: 0 },

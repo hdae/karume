@@ -12,7 +12,7 @@ import { assert, assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { ModelInputError } from "../src/errors.ts";
 import { assertAcceptableSeed } from "../src/request-gates.ts";
-import { Sbv2InputError } from "../src/sbv2/errors.ts";
+import * as sbv2 from "../src/sbv2/errors.ts";
 import { GenerationCapacityError } from "../src/generation/sequence.ts";
 
 describe("ModelInputError", () => {
@@ -36,10 +36,10 @@ describe("ModelInputError", () => {
 });
 
 describe("家族の入力起因エラーをホストから見たとき", () => {
-  it("Sbv2InputError は ModelInputError で捕まる（name は SBV2 のまま）", () => {
-    const error = new Sbv2InputError("スタイル名が配布形に無い");
+  it("sbv2.InputError は ModelInputError で捕まる（name は家族名で修飾した綴り）", () => {
+    const error = new sbv2.InputError("スタイル名が配布形に無い");
     assert(error instanceof ModelInputError);
-    assertEquals(error.name, "Sbv2InputError");
+    assertEquals(error.name, "sbv2.InputError");
   });
 
   it("GenerationCapacityError は ModelInputError で捕まる（切り詰めの欄は保たれる）", () => {

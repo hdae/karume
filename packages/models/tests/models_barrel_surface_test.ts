@@ -251,7 +251,7 @@ test("barrel: the gemma surface (thin — no assembly entry points)", async () =
 const SOURCE_TABLES: Readonly<Record<string, string>> = {
   "./anima": "SOURCES",
   "./irodori": "SOURCES",
-  "./sbv2": "SBV2_SOURCES",
+  "./sbv2": "SOURCES",
   "./gemma": "SOURCES",
   "./siglip2": "SIGLIP2_SOURCES",
   "./depth-anything": "SOURCES",

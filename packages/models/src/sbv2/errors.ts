@@ -18,10 +18,13 @@ import { ModelInputError } from "../errors.ts";
  * the line drawn by ADR 0072 decision 6 (which SBV2 checks are input-caused and which are internal
  * invariants). hub splits into 5 types because the user's branch targets really differ (format /
  * reference / path / integrity / fetch); here there is only one, "fix the input".
+ *
+ * The runtime `name` is `"sbv2.InputError"` — qualified the way the barrel spells it, so a log
+ * line or an `err.name` branch still says which family refused the input.
  */
-export class Sbv2InputError extends ModelInputError {
+export class InputError extends ModelInputError {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
-    this.name = "Sbv2InputError";
+    this.name = "sbv2.InputError";
   }
 }

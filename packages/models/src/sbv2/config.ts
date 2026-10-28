@@ -16,7 +16,7 @@
  * a row number shifts the shapes still match, loading and running pass, and it stays silent with
  * only **the voice of a different style / different speaker** coming out. There is no other means
  * of detection, so the values are checked at parse time to be a **permutation** of `0..rows-1` (the
- * comparison with the tables' row counts is done by `Sbv2Pipeline.fromAssets` against the real
+ * comparison with the tables' row counts is done by `Pipeline.fromAssets` against the real
  * assets).
  *
  * ## MUST: `maxTokens` / `maxFrames` are operating limits declared by the distribution
@@ -34,7 +34,7 @@
  * one** only and ignores `symbols.json`'s `defaults` — so as not to hold the derivation source
  * twice (the same section in `text/symbols.ts` is optional).
  *
- * NOTE: the mapping table of public distribution repositories ({@link SBV2_SOURCES}) also lives
+ * NOTE: the mapping table of public distribution repositories ({@link SOURCES}) also lives
  * here. It is not a value derivable from the manifest but the side of "which manifest to fetch",
  * so the distribution cannot hold it (ADR 0073).
  */
@@ -65,12 +65,12 @@ export const SBV2_PIPELINE_MAJOR = 1;
  * side, so the bytes this published package reads would silently change for reasons on the network
  * side (an unrecoverable kind of accident). Specifying a SHA removes the revision-resolution
  * request itself, so an offline start with a complete cache also holds (ADR 0038). A user who
- * needs to follow main explicitly chooses `{ ...SBV2_SOURCES["sbv2-jvnv"], revision: "main" }`.
+ * needs to follow main explicitly chooses `{ ...SOURCES["sbv2-jvnv"], revision: "main" }`.
  */
 // NOTE: the revision is updated to main's SHA after the upload in §3 of the release runbook
 // (docs/release-runbook.md) (inheriting the maintenance duty of ADR 0073 decision 3 — by hand, plus
 // the runbook check).
-export const SBV2_SOURCES = {
+export const SOURCES = {
   "sbv2-jvnv": {
     repo: "hdae/karume-sbv2-jvnv",
     revision: "101becff45856a0ad477457b54d1c927ca4d5d08",

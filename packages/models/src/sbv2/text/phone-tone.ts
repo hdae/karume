@@ -9,7 +9,7 @@
  * - The phoneme sequence is a complete sequence that always includes PAD (the symbol table's `pad`,
  *   tone 0) at the start and the end.
  * - A mora is `[consonant, vowel]` when it has a `consonant`, otherwise `[vowel]`. The geminate is
- *   one `"q"` and the moraic nasal one `"N"` (`Sbv2Mora.vowel` holds the phoneme itself).
+ *   one `"q"` and the moraic nasal one `"N"` (`Mora.vowel` holds the phoneme itself).
  * - Tone is binary 0/1, and consonant and vowel share the same tone (the per-mora value is spread
  *   to the phonemes).
  * - Symbols are emitted with tone 0 only for punctuation actually present in the text (normal
@@ -22,8 +22,8 @@
  * comparison is owned by `assertWordPhones` in `model-input.ts`.
  */
 
-import { Sbv2InputError } from "../errors.ts";
-import type { Sbv2Utterance } from "./utterance.ts";
+import { InputError } from "../errors.ts";
+import type { Utterance } from "./utterance.ts";
 
 type Sbv2PhoneTone = {
   /** given_phone (including PAD at both ends, before add_blank). */
@@ -39,7 +39,7 @@ type Sbv2PhoneTone = {
  * once `toneStart` is added, values other than 0/1 can still land inside the table's range (looking
  * up a different tone row without an exception).
  */
-export const toSbv2PhoneTone = (utterance: Sbv2Utterance, pad: string): Sbv2PhoneTone => {
+export const toSbv2PhoneTone = (utterance: Utterance, pad: string): Sbv2PhoneTone => {
   const phones: string[] = [pad];
   const tones: number[] = [0];
 
@@ -57,7 +57,7 @@ export const toSbv2PhoneTone = (utterance: Sbv2Utterance, pad: string): Sbv2Phon
   for (const [index, mora] of utterance.moras.entries()) {
     const { tone } = mora;
     if (tone !== 0 && tone !== 1) {
-      throw new Sbv2InputError(
+      throw new InputError(
         `moras[${index}] (${mora.kana}) has tone = ${tone}, not 0/1` +
           " (give it as a raw binary tone)",
       );

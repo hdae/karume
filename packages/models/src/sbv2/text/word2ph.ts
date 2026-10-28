@@ -16,8 +16,8 @@
  */
 
 import type { DebertaTokenizer } from "./tokenizer.ts";
-import type { Sbv2Word } from "./utterance.ts";
-import { Sbv2InputError } from "../errors.ts";
+import type { Word } from "./utterance.ts";
+import { InputError } from "../errors.ts";
 
 /**
  * Distributes n phonemes evenly over `wordLength` characters (the same distribution as
@@ -60,12 +60,12 @@ export const distributePhone = (phoneCount: number, wordLength: number): number[
  * keeps "…" as one symbol, not aligning with the tokenising side makes the length disagree with
  * DeBERTa's real token count (3 for "..." under NFKC).
  *
- * @param words word alignment (`Sbv2Utterance.words` — without PAD at either end).
+ * @param words word alignment (`Utterance.words` — without PAD at either end).
  * @param tokenizer DeBERTa character tokenizer (used to count the tokens of each word surface).
  * @param givenPhoneLength `toSbv2PhoneTone(...).phones.length` (including PAD at both ends).
  */
 export const buildBaseWord2ph = (
-  words: readonly Sbv2Word[],
+  words: readonly Word[],
   tokenizer: DebertaTokenizer,
   givenPhoneLength: number,
 ): number[] => {
@@ -76,9 +76,7 @@ export const buildBaseWord2ph = (
     if (wordLength <= 0) {
       // Reachable only through the surface the caller passed (a whitespace-only word and the like),
       // so it is input-caused = 400.
-      throw new Sbv2InputError(
-        `Word surface normalised to 0 tokens: ${JSON.stringify(word.surface)}`,
-      );
+      throw new InputError(`Word surface normalised to 0 tokens: ${JSON.stringify(word.surface)}`);
     }
     tokenTotal += wordLength;
     for (const count of distributePhone(word.phones.length, wordLength)) word2ph.push(count);

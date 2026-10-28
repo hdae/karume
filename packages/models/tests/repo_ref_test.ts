@@ -61,9 +61,9 @@ test("toRepoRef: 公開配布リポを持たないファミリには対応表を
 });
 
 test("toRepoRef: 空の repo も同じ門で落ちる（空文字の URL を組み立てない）", () => {
-  assertThrows(() => toRepoRef("", "Sbv2Pipeline.fromPretrained"), Error, "repo is required");
+  assertThrows(() => toRepoRef("", "sbv2.Pipeline.fromPretrained"), Error, "repo is required");
   assertThrows(
-    () => toRepoRef({ repo: "" }, "Sbv2Pipeline.fromPretrained"),
+    () => toRepoRef({ repo: "" }, "sbv2.Pipeline.fromPretrained"),
     Error,
     "repo is required",
   );

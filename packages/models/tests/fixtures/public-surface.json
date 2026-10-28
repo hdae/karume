@@ -653,63 +653,63 @@
     ],
     "./sbv2": [
       {
+        "name": "Assets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerateOptions",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GeneratedAudio",
         "kind": "typeAlias"
+      },
+      {
+        "name": "InputError",
+        "kind": "class"
       },
       {
         "name": "ModelInputError",
         "kind": "class"
       },
       {
-        "name": "SBV2_SOURCES",
+        "name": "Mora",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Phrases",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Pipeline",
+        "kind": "class"
+      },
+      {
+        "name": "PipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RunComponent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SOURCES",
         "kind": "variable"
       },
       {
-        "name": "Sbv2Assets",
+        "name": "Utterance",
         "kind": "typeAlias"
       },
       {
-        "name": "Sbv2FromPretrainedOptions",
+        "name": "Word",
         "kind": "typeAlias"
       },
       {
-        "name": "Sbv2GenerateOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Sbv2InputError",
-        "kind": "class"
-      },
-      {
-        "name": "Sbv2Mora",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Sbv2Phrases",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Sbv2Pipeline",
-        "kind": "class"
-      },
-      {
-        "name": "Sbv2PipelineOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Sbv2RunComponent",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Sbv2Utterance",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Sbv2Word",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "toSbv2Utterance",
+        "name": "toUtterance",
         "kind": "function"
       }
     ],

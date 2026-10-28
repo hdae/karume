@@ -1,4 +1,4 @@
-import type { Sbv2RunComponent, Sbv2Utterance } from "@karume/models/sbv2";
+import type { RunComponent, Utterance } from "@karume/models/sbv2";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { ComponentRecord, TimingTally } from "../src/lib/record.ts";
@@ -35,7 +35,7 @@ describe("realTimeFactor", () => {
 });
 
 /** ame — kana spelled in romaji (any string is a kana to the record). */
-const utterance: Sbv2Utterance = {
+const utterance: Utterance = {
   leadingPunctuations: [],
   moras: [
     { kana: "a", vowel: "a", tone: 1 },
@@ -109,12 +109,12 @@ const facts = (overrides: Partial<Sbv2RunFacts> = {}): Sbv2RunFacts => ({
   },
   audio: { sampleRate: 44_100, samples: 44_100 },
   hashes: { f32Sha256: "1".repeat(64), wavSha256: "2".repeat(64) },
-  diagnostics: new Map<Sbv2RunComponent, ComponentRecord>([
+  diagnostics: new Map<RunComponent, ComponentRecord>([
     ["text_encoder", componentRecord(10)],
     ["front", componentRecord(20)],
     ["voice", componentRecord(30)],
   ]),
-  timings: new Map<Sbv2RunComponent, TimingTally>(),
+  timings: new Map<RunComponent, TimingTally>(),
   ...overrides,
 });
 

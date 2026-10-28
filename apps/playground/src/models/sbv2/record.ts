@@ -5,7 +5,7 @@
  * WAV the regression test hashes).
  */
 
-import type { Sbv2RunComponent, Sbv2Utterance } from "@karume/models/sbv2";
+import type { RunComponent, Utterance } from "@karume/models/sbv2";
 
 import type { PipelineSource } from "@/lib/distributions";
 import type { RecordEnvironment } from "@/lib/environment";
@@ -24,7 +24,7 @@ import { readingText, type Sbv2Request } from "./request";
 export const RECORD_FORMAT = "karume-playground-sbv2/1";
 
 /** The three graphs of one synthesis, in the order `generate` runs them. */
-export const SBV2_STAGES: readonly Sbv2RunComponent[] = ["text_encoder", "front", "voice"];
+export const SBV2_STAGES: readonly RunComponent[] = ["text_encoder", "front", "voice"];
 
 export type Sbv2Record = RecordEnvironment & {
   readonly format: typeof RECORD_FORMAT;
@@ -43,7 +43,7 @@ export type Sbv2Record = RecordEnvironment & {
     readonly analyzerVersion: string;
     /** The moras with high tones in brackets (`readingText`). */
     readonly reading: string;
-    readonly utterance: Sbv2Utterance;
+    readonly utterance: Utterance;
   };
   readonly timings: {
     /**
@@ -61,7 +61,7 @@ export type Sbv2Record = RecordEnvironment & {
      * Session creation (reading and uploading the weights) and its run. The last Session's
      * destruction and the check of the output are in `synthesisSeconds` only.
      */
-    readonly stageSeconds: Partial<Record<Sbv2RunComponent, number>>;
+    readonly stageSeconds: Partial<Record<RunComponent, number>>;
     /** The whole `generate` call. */
     readonly synthesisSeconds: number;
     /** Analysis, synthesis and hashing. */
@@ -78,7 +78,7 @@ export type Sbv2Record = RecordEnvironment & {
     /** sha256 of the WAV `encodeWav` makes (16-bit PCM — the hash the regression test pins). */
     readonly wavSha256: string;
   };
-  readonly diagnostics: Readonly<Partial<Record<Sbv2RunComponent, ComponentRecord>>>;
+  readonly diagnostics: Readonly<Partial<Record<RunComponent, ComponentRecord>>>;
 };
 
 /**
@@ -88,9 +88,9 @@ export type Sbv2Record = RecordEnvironment & {
  */
 export const stageSeconds = (
   start: number,
-  marks: Readonly<Partial<Record<Sbv2RunComponent, number>>>,
-): Partial<Record<Sbv2RunComponent, number>> => {
-  const result: Partial<Record<Sbv2RunComponent, number>> = {};
+  marks: Readonly<Partial<Record<RunComponent, number>>>,
+): Partial<Record<RunComponent, number>> => {
+  const result: Partial<Record<RunComponent, number>> = {};
   let previous = start;
   for (const stage of SBV2_STAGES) {
     const mark = marks[stage];
@@ -113,7 +113,7 @@ export type Sbv2RunClock = {
   /** After the analysis — the `generate` call starts here. */
   readonly analysedAt: number;
   /** Each graph's diagnostics report. */
-  readonly marks: Readonly<Partial<Record<Sbv2RunComponent, number>>>;
+  readonly marks: Readonly<Partial<Record<RunComponent, number>>>;
   /** `generate` returned. */
   readonly synthesizedAt: number;
   /** The hashes are done. */
@@ -136,14 +136,14 @@ export type Sbv2RunFacts = {
   readonly pipelineLoadSeconds: number;
   readonly request: Sbv2Request;
   readonly analyzer: { readonly name: string; readonly version: string };
-  readonly utterance: Sbv2Utterance;
+  readonly utterance: Utterance;
   readonly clock: Sbv2RunClock;
   readonly audio: { readonly sampleRate: number; readonly samples: number };
   readonly hashes: { readonly f32Sha256: string; readonly wavSha256: string };
   /** Per graph, the folded diagnostics reports (`foldComponentDiagnostics`). */
-  readonly diagnostics: ReadonlyMap<Sbv2RunComponent, ComponentRecord>;
+  readonly diagnostics: ReadonlyMap<RunComponent, ComponentRecord>;
   /** Per graph, the GPU time tally; absent for a graph no timed run reported. */
-  readonly timings: ReadonlyMap<Sbv2RunComponent, TimingTally>;
+  readonly timings: ReadonlyMap<RunComponent, TimingTally>;
 };
 
 /**

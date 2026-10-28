@@ -1,5 +1,5 @@
 /**
- * Builds an `Sbv2Pipeline` for the chosen (source, model, preset) on the page's GPU and rebuilds it
+ * Builds a `Pipeline` for the chosen (source, model, preset) on the page's GPU and rebuilds it
  * when any of them changes. Construction reads the manifest, the components' descriptors and the
  * small assets, and with the cached source downloads every weight part into Cache Storage (the
  * first build of a model / preset fetches all of its weights; the direct source has no such step).
@@ -8,7 +8,7 @@
  * again.
  */
 
-import { type Sbv2RunComponent, Sbv2Pipeline } from "@karume/models/sbv2";
+import { type RunComponent, Pipeline } from "@karume/models/sbv2";
 import type { GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { type RefObject, useEffect, useState } from "react";
 
@@ -20,7 +20,7 @@ export type Sbv2PipelineState =
   | { readonly kind: "loading"; readonly detail: string }
   | {
       readonly kind: "ready";
-      readonly pipeline: Sbv2Pipeline;
+      readonly pipeline: Pipeline;
       /** The GPU the pipeline was built on (the page runs it only while this is still its GPU). */
       readonly gpu: GpuContext;
       readonly source: PipelineSource;
@@ -30,10 +30,7 @@ export type Sbv2PipelineState =
     }
   | { readonly kind: "error"; readonly error: unknown };
 
-export type DiagnosticsSink = (
-  component: Sbv2RunComponent,
-  diagnostics: SessionDiagnostics,
-) => void;
+export type DiagnosticsSink = (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 
 const MIB = 2 ** 20;
 
@@ -57,11 +54,11 @@ export const useSbv2Pipeline = (input: {
       return undefined;
     }
     const controller = new AbortController();
-    let built: Sbv2Pipeline | undefined;
+    let built: Pipeline | undefined;
     const started = performance.now();
     setState({ kind: "loading", detail: `opening ${model} / ${quant} (${source.kind} source)` });
 
-    const build = Sbv2Pipeline.fromPretrained(pretrainedRef(source, "sbv2"), {
+    const build = Pipeline.fromPretrained(pretrainedRef(source, "sbv2"), {
       gpu,
       model,
       quant,

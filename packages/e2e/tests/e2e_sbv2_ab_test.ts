@@ -18,7 +18,7 @@
  *   （docs/research/2026-08-03-dp4a-w8a8-design.md）、どの出力にどれだけ効くかは実測まで分からない。
  *   1 本に絞ると、効かない出力を選んだときに床が恒常的に赤になる。
  *
- * 公開面（`Sbv2Pipeline.generate`）は front の出力を返さないので、この門は `Sbv2Pipeline` と
+ * 公開面（`Pipeline.generate`）は front の出力を返さないので、この門は `Pipeline` と
  * **同じ合成本体**（`openSbv2State` → `synthesizeSbv2` — dump 経路 `examples/sbv2/dump.ts` と
  * 同じ入口）を回し、`front` の部品だけを「Session の出力を写して渡す」包みに差し替える
  * （{@link capturingOutputs} — 数値には触らない）。quant → SessionOptions → front / voice の
@@ -41,12 +41,12 @@ import { type FileRef, type Manifest, parseManifest, resolveSelection } from "@k
 import type { Session, SessionDiagnostics } from "@karume/runtime";
 import { analyzeWithWords } from "@hdae/yomi";
 import { getDictionary } from "@hdae/yomi/loader";
-import { type Sbv2Utterance, toSbv2Utterance } from "../../models/sbv2.ts";
+import { type Utterance, toUtterance } from "../../models/sbv2.ts";
 import {
   assetOpener,
   closeSbv2State,
   openSbv2State,
-  type Sbv2RunComponent,
+  type RunComponent,
   synthesizeSbv2,
 } from "../../models/src/sbv2/pipeline.ts";
 import type { ComponentOpener, ModelComponent } from "../../models/src/hub/components.ts";
@@ -118,12 +118,12 @@ const readManifest = (): Manifest => parseManifest(manifestText as string);
 
 /** 発話（解析は 1 度きり — 辞書の取得を門ごとに繰り返さない）。 */
 const utteranceOnce = (() => {
-  let cached: Promise<Sbv2Utterance> | undefined;
-  return (): Promise<Sbv2Utterance> => {
+  let cached: Promise<Utterance> | undefined;
+  return (): Promise<Utterance> => {
     // TypeScript 7 does not narrow `cached` after `??=`; keep the single-evaluation semantics explicitly.
     const utterance =
       cached ??
-      getDictionary().then((dictionary) => toSbv2Utterance(analyzeWithWords(dictionary, TEXT)));
+      getDictionary().then((dictionary) => toUtterance(analyzeWithWords(dictionary, TEXT)));
     cached = utterance;
     return utterance;
   };
@@ -213,7 +213,7 @@ const observeFront = async (
   const captured: (readonly Float32Array<ArrayBuffer>[])[] = [];
   const open: ComponentOpener = (key) =>
     key === "front" ? capturingOutputs(base(key), (outputs) => captured.push(outputs)) : base(key);
-  const runs: Record<Sbv2RunComponent, SessionDiagnostics["lastRunPipelines"][]> = {
+  const runs: Record<RunComponent, SessionDiagnostics["lastRunPipelines"][]> = {
     text_encoder: [],
     front: [],
     voice: [],

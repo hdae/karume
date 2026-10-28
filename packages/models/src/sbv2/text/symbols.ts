@@ -20,7 +20,7 @@
 
 import { asPositiveInteger } from "../../text/asset-gates.ts";
 import { assertLogBucketDomain } from "./rel-pos-tables.ts";
-import { Sbv2InputError } from "../errors.ts";
+import { InputError } from "../errors.ts";
 
 /**
  * Bucket rules for building the relative-position index tables (from DeBERTa's config).
@@ -92,7 +92,7 @@ export type JpExtraRules = {
   /**
    * Defaults of the run-time knobs (**optional**).
    *
-   * NOTE: `Sbv2Pipeline` does not read this — the canonical knob defaults are the manifest's
+   * NOTE: `Pipeline` does not read this — the canonical knob defaults are the manifest's
    * `pipelineConfig.defaults`, and deriving the same values from 2 places is duplicate state
    * (`src/sbv2/config.ts`). The distribution still carries both side by side, so this has the form
    * "readable if present".
@@ -184,7 +184,7 @@ export const parseJpExtraRules = (raw: unknown, where: string): JpExtraRules => 
     numLanguages: asPositiveInteger(root["numLanguages"], `${where}.numLanguages`),
     blankId: asInteger(root["blankId"], `${where}.blankId`),
     // MUST: check down to positivity. `samplingRate` **goes out as is in the public result** as
-    // `Sbv2Pipeline.generate`'s `sampleRate` (its only consumer is the caller), so a negative
+    // `Pipeline.generate`'s `sampleRate` (its only consumer is the caller), so a negative
     // value or 0 raises an exception nowhere and becomes "a broken WAV that looks normal".
     // `hopLength` / `bertHiddenFromEnd` fail loudly later, but the checks are aligned here so they
     // fail at construction as an invalid asset.
@@ -235,7 +235,7 @@ export const phonesToIds = (rules: JpExtraRules, phones: readonly string[]): num
     if (id === undefined) {
       // Reachable through the caller's utterance alone (writing an unknown phoneme into moras /
       // words), so it is input-caused = 400.
-      throw new Sbv2InputError(
+      throw new InputError(
         `Phoneme ${JSON.stringify(phone)}, which is not in the symbol table, appears in phones (cannot be mapped to an ID).` +
           " Suspect a mismatch between the phoneme symbols of the utterance (moras / words) and the symbol table of the JP-Extra model.",
       );

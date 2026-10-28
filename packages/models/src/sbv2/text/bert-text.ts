@@ -17,20 +17,20 @@
  * time).
  */
 
-import type { Sbv2Word } from "./utterance.ts";
+import type { Word } from "./utterance.ts";
 
 /**
  * Whether this is a symbol element (a word whose phones are one normal-form punctuation mark).
  * Kana phonemes and normal-form characters do not intersect.
  */
-const isPunctuationWord = (word: Sbv2Word, punctuations: ReadonlySet<string>): boolean =>
+const isPunctuationWord = (word: Word, punctuations: ReadonlySet<string>): boolean =>
   word.phones.length === 1 && punctuations.has(word.phones[0]);
 
 /**
  * Builds the DeBERTa input text from the word alignment. Symbol elements are replaced by the
  * normal-form punctuation; everything else concatenates the surface as is.
  */
-export const toBertText = (words: readonly Sbv2Word[], punctuations: ReadonlySet<string>): string =>
+export const toBertText = (words: readonly Word[], punctuations: ReadonlySet<string>): string =>
   words
     .map((word) => (isPunctuationWord(word, punctuations) ? word.phones[0] : word.surface))
     .join("");

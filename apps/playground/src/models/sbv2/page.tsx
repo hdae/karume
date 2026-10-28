@@ -6,7 +6,7 @@
  */
 
 import type { Manifest } from "@karume/hub";
-import type { Sbv2RunComponent } from "@karume/models/sbv2";
+import type { RunComponent } from "@karume/models/sbv2";
 import type { AcquireGpuOptions } from "@karume/runtime";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -80,7 +80,7 @@ const TIMED_GPU: Omit<AcquireGpuOptions, "onDeviceLost"> = {
 /** How many ops the summary names per timed graph. */
 const TOP_OPS = 5;
 
-const STAGE_LABELS: Readonly<Record<Sbv2RunComponent, string>> = {
+const STAGE_LABELS: Readonly<Record<RunComponent, string>> = {
   text_encoder: "text encoder (DeBERTa)",
   front: "front (encoder + duration predictors)",
   voice: "voice (flow + decoder)",
@@ -93,7 +93,7 @@ const GIB = 2 ** 30;
 const NOT_CANCELLABLE = {
   cancellable: false,
   cancelNote:
-    "A synthesis cannot be cancelled (Sbv2Pipeline.generate takes no AbortSignal); it runs to its end.",
+    "A synthesis cannot be cancelled (sbv2.Pipeline.generate takes no AbortSignal); it runs to its end.",
 } as const satisfies RunProgress;
 
 type Sbv2Result = {
@@ -253,9 +253,9 @@ export const Sbv2Page = () => {
       const utterance = analyzeText(dictionaryNow, request.text);
       const analysedAt = performance.now();
 
-      const diagnostics = new Map<Sbv2RunComponent, ComponentRecord>();
-      const timings = new Map<Sbv2RunComponent, TimingTally>();
-      const marks: Partial<Record<Sbv2RunComponent, number>> = {};
+      const diagnostics = new Map<RunComponent, ComponentRecord>();
+      const timings = new Map<RunComponent, TimingTally>();
+      const marks: Partial<Record<RunComponent, number>> = {};
       const total = SBV2_STAGES.length;
       diagnosticsRef.current = (component, sessionDiagnostics) => {
         marks[component] = performance.now();

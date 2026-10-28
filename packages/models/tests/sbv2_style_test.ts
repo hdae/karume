@@ -24,7 +24,7 @@ import {
   styleVector,
 } from "../src/sbv2/style.ts";
 import { ModelInputError } from "../src/errors.ts";
-import { Sbv2InputError } from "../src/sbv2/errors.ts";
+import { InputError } from "../src/sbv2/errors.ts";
 import { buildSafetensors, f32Bytes } from "./helpers/safetensors.ts";
 
 const COLS = 3;
@@ -225,11 +225,11 @@ describe("行番号・weight・表の食い違いは fail loudly", () => {
 
   it("非有限の weight は落ちる（NaN が波形まで伝播する）", () => {
     for (const weight of [Number.NaN, Number.POSITIVE_INFINITY]) {
-      // 型は `Sbv2InputError`（400 相当）— 呼び手が weight を直せば通る要求で、同じ関数が
+      // 型は `InputError`（400 相当）— 呼び手が weight を直せば通る要求で、同じ関数が
       // 投げる行番号・表の食い違い（素の `Error` = 500）とは分岐先が違う。
       assertThrows(
         () => styleVector(STYLE_TABLE, rows, COLS, 1, weight),
-        Sbv2InputError,
+        InputError,
         "not a finite number",
       );
     }
@@ -242,12 +242,12 @@ describe("styleWeight の受理集合", () => {
   it("表引きと葉側の門が同じ型・同じ診断を出す", () => {
     const viaGate = assertThrows(
       () => assertFiniteStyleWeight(Number.NaN),
-      Sbv2InputError,
+      InputError,
       "styleWeight NaN is not a finite number",
     );
     const viaTable = assertThrows(
       () => styleVector(STYLE_TABLE, rows, COLS, 1, Number.NaN),
-      Sbv2InputError,
+      InputError,
     );
     // 観測できるのは「2 経路の診断が一致する」ことまで（条件と文言を写した実装でもこの
     // assert は通るので、同じ関数を通っている証拠にはならない）。それでも、写しが入って

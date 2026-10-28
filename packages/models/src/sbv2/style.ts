@@ -23,7 +23,7 @@
  */
 
 import { parseSafetensors, type Tensor } from "@karume/runtime";
-import { Sbv2InputError } from "./errors.ts";
+import { InputError } from "./errors.ts";
 
 /**
  * Tensor names of the tables inside the distribution's safetensors (paired with `SBV2_STYLE_KEY` /
@@ -81,7 +81,7 @@ const assertRow = (
 
 /**
  * Check of the acceptance set of `styleWeight` (**a finite number**). It is input-caused, so the
- * type is `Sbv2InputError` (the classification axis of `errors.ts` — NaN / Inf pass once the
+ * type is `InputError` (the classification axis of `errors.ts` — NaN / Inf pass once the
  * caller fixes the value).
  *
  * NOTE: it is `export`ed because **the generation entry** (`synthesizeSbv2` in `pipeline.ts`) fails
@@ -92,7 +92,7 @@ const assertRow = (
  */
 export const assertFiniteStyleWeight = (weight: number): void => {
   if (!Number.isFinite(weight))
-    throw new Sbv2InputError(`styleWeight ${weight} is not a finite number`);
+    throw new InputError(`styleWeight ${weight} is not a finite number`);
 };
 
 /**

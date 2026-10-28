@@ -24,7 +24,7 @@ import { assert, assertEquals, assertMatch, assertRejects } from "@std/assert";
 import type { HubRepoRef } from "@karume/hub";
 import * as anima from "../anima.ts";
 import * as irodori from "../irodori.ts";
-import { SBV2_SOURCES } from "../src/sbv2/config.ts";
+import * as sbv2 from "../sbv2.ts";
 import * as gemma from "../gemma.ts";
 import { SIGLIP2_SOURCES } from "../src/siglip2/config.ts";
 import * as depthAnything from "../depth-anything.ts";
@@ -32,7 +32,6 @@ import * as birefnet from "../birefnet.ts";
 import { UMT5_SOURCES } from "../src/umt5/config.ts";
 import { WAN_SOURCES } from "../src/wan/config.ts";
 import { KARUME_SOURCES } from "../src/sources.ts";
-import { Sbv2Pipeline } from "../src/sbv2/pipeline.ts";
 import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
 import { Umt5Encoder } from "../src/umt5/encoder.ts";
 import { WanTi2vPipeline } from "../src/wan/ti2v-pipeline.ts";
@@ -97,10 +96,10 @@ const FAMILIES: readonly Family[] = [
     load: (ref, options) => irodori.Pipeline.fromPretrained(ref, options),
   },
   {
-    name: "SBV2_SOURCES",
-    sources: SBV2_SOURCES,
+    name: "sbv2.SOURCES",
+    sources: sbv2.SOURCES,
     keys: ["sbv2-jvnv"],
-    load: (ref, options) => Sbv2Pipeline.fromPretrained(ref, options),
+    load: (ref, options) => sbv2.Pipeline.fromPretrained(ref, options),
   },
   {
     name: "gemma.SOURCES",
@@ -166,7 +165,7 @@ test("取得元対応表を持つのは 9 家族・公開リポは 12 本", () =
     [
       "anima.SOURCES",
       "irodori.SOURCES",
-      "SBV2_SOURCES",
+      "sbv2.SOURCES",
       "gemma.SOURCES",
       "SIGLIP2_SOURCES",
       "depthAnything.SOURCES",
@@ -222,7 +221,7 @@ for (const { name, sources, load } of FAMILIES) {
 // commit SHA ではないので、manifest を取る**前に** revision 解決 API を 1 往復する。
 test("sbv2: 文字列 ref は main 追従のまま（revision 解決 API を経由する）", async () => {
   const paths = await requestedPaths((options) =>
-    Sbv2Pipeline.fromPretrained("someone/karume-sbv2-fork", options),
+    sbv2.Pipeline.fromPretrained("someone/karume-sbv2-fork", options),
   );
   assertEquals(paths, ["/api/models/someone/karume-sbv2-fork/revision/main"]);
 });

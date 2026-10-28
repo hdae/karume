@@ -1,15 +1,15 @@
 /**
  * The Style-Bert-VITS2 page's form and the pure step from it to the arguments of
- * `Sbv2Pipeline.generate`. Acceptance belongs to the pipeline: the page refuses only what it cannot
+ * `Pipeline.generate`. Acceptance belongs to the pipeline: the page refuses only what it cannot
  * turn into a request at all (empty text, a seed that is not a number) and passes every number on as
- * written, so an out-of-range value comes back as the pipeline's own `Sbv2InputError`.
+ * written, so an out-of-range value comes back as the pipeline's own `InputError`.
  */
 
-import type { Sbv2GenerateOptions, Sbv2Mora, Sbv2Utterance } from "@karume/models/sbv2";
+import type { GenerateOptions, Mora, Utterance } from "@karume/models/sbv2";
 
 import type { Sbv2Defaults, Sbv2ModelConfig } from "./config";
 
-/** The knobs a slider sets (all of `Sbv2GenerateOptions` that are numbers, except the seed). */
+/** The knobs a slider sets (all of `GenerateOptions` that are numbers, except the seed). */
 export type Sbv2Knob = "styleWeight" | "sdpRatio" | "noiseScale" | "noiseScaleW" | "lengthScale";
 
 export type Sbv2Form = {
@@ -102,12 +102,12 @@ export const formForModel = (form: Sbv2Form, config: Sbv2ModelConfig): Sbv2Form 
 /** The request of one run: the text to analyse and the options of `generate`. */
 export type Sbv2Request = {
   readonly text: string;
-  readonly options: Required<Sbv2GenerateOptions>;
+  readonly options: Required<GenerateOptions>;
 };
 
 /**
  * Form → request. Throws a `RangeError` naming the field for what cannot become a request (the
- * pipeline's `Sbv2InputError` covers everything else, the seed's range included).
+ * pipeline's `InputError` covers everything else, the seed's range included).
  */
 export const buildRequest = (form: Sbv2Form): Sbv2Request => {
   if (form.text.trim() === "") throw new RangeError("The text is empty");
@@ -136,7 +136,7 @@ export type ReadingSegment =
   | { readonly kind: "moras"; readonly kana: string; readonly high: boolean }
   | { readonly kind: "punctuation"; readonly text: string };
 
-const pushMora = (segments: ReadingSegment[], mora: Sbv2Mora): void => {
+const pushMora = (segments: ReadingSegment[], mora: Mora): void => {
   const high = mora.tone === 1;
   const last = segments.at(-1);
   if (last?.kind === "moras" && last.high === high) {
@@ -150,7 +150,7 @@ const pushMora = (segments: ReadingSegment[], mora: Sbv2Mora): void => {
  * The reading of an utterance for display: moras grouped by tone (the page draws the high ones with
  * an overline — the usual pitch-accent notation) and the punctuation where the model reads it.
  */
-export const readingSegments = (utterance: Sbv2Utterance): readonly ReadingSegment[] => {
+export const readingSegments = (utterance: Utterance): readonly ReadingSegment[] => {
   const segments: ReadingSegment[] = utterance.leadingPunctuations.map((text) => ({
     kind: "punctuation",
     text,
@@ -166,7 +166,7 @@ export const readingSegments = (utterance: Sbv2Utterance): readonly ReadingSegme
  * The reading as one line of text, high moras in brackets (`ko[nnichiwa],` in kana) — the same information
  * as {@link readingSegments}, for the record and for comparing two runs' analyses at a glance.
  */
-export const readingText = (utterance: Sbv2Utterance): string =>
+export const readingText = (utterance: Utterance): string =>
   readingSegments(utterance)
     .map((segment) =>
       segment.kind === "punctuation"

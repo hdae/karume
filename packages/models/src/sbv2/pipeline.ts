@@ -1,5 +1,5 @@
 /**
- * `Sbv2Pipeline` — the one surface for text → speech (SBV2 / Style-Bert-VITS2 JP-Extra).
+ * `Pipeline` — the one surface for text → speech (SBV2 / Style-Bert-VITS2 JP-Extra).
  *
  * Pipeline (every NN step is Karume, no torch):
  *
@@ -15,9 +15,9 @@
  *
  * ## MUST: open and close the graphs one at a time
  *
- * {@link Sbv2Pipeline.fromAssets} **creates no Session at all** — it opens only up to the
+ * {@link Pipeline.fromAssets} **creates no Session at all** — it opens only up to the
  * containers (`openContainer` = parsing the 2 documents), and GPU residency is created and torn
- * down step by step inside {@link Sbv2Pipeline.generate}. The 3 graphs (text_encoder / front /
+ * down step by step inside {@link Pipeline.generate}. The 3 graphs (text_encoder / front /
  * voice) are never alive at the same time.
  *
  * MUST: this sequencing is kept **on the public API side too** — `generate` rides the serialization
@@ -42,7 +42,7 @@
  *
  * ## MUST: text analysis is not this package's responsibility (the re-ruling of 0.6.0)
  *
- * The only entry is an analysed {@link Sbv2Utterance} — the dictionary, the correction dictionary
+ * The only entry is an analysed {@link Utterance} — the dictionary, the correction dictionary
  * and the choice of readings belong to the caller (ADR 0072's injection fields (overlay /
  * givenTone / analyzeProsody) were removed). This removes both the fetching of the Japanese
  * dictionary (the only network path not going through hub) and the dependency on an analyser from
@@ -82,9 +82,9 @@ import {
   STYLE_TENSOR,
   styleVector,
 } from "./style.ts";
-import { Sbv2InputError } from "./errors.ts";
+import { InputError } from "./errors.ts";
 import { buildSbv2ModelInput, type Sbv2ModelInput } from "./text/model-input.ts";
-import type { Sbv2Utterance } from "./text/utterance.ts";
+import type { Utterance } from "./text/utterance.ts";
 import { bertHiddenOutput, tileBertToPhoneLevel, type TiledBert } from "./text/bert-tile.ts";
 import { buildRelPosTables } from "./text/rel-pos-tables.ts";
 import { type JpExtraRules, parseJpExtraRules, type Sbv2Knobs } from "./text/symbols.ts";
@@ -156,7 +156,7 @@ export type GeneratedAudio = {
  * Knobs of one generation. Unspecified fields are filled by the manifest's
  * `pipelineConfig.defaults`.
  */
-export type Sbv2GenerateOptions = {
+export type GenerateOptions = {
   /** Speaker name (a key of `pipelineConfig.speakers`). */
   readonly speaker?: string;
   /** Style name (a key of `pipelineConfig.styles`). */
@@ -175,16 +175,16 @@ export type Sbv2GenerateOptions = {
   readonly seed?: number;
 };
 
-/** Component name received by {@link Sbv2PipelineOptions.onRunDiagnostics} (1 Session = 1 name). */
-export type Sbv2RunComponent = "text_encoder" | "front" | "voice";
+/** Component name received by {@link PipelineOptions.onRunDiagnostics} (1 Session = 1 name). */
+export type RunComponent = "text_encoder" | "front" | "voice";
 
 /**
- * Construction options (shared by {@link Sbv2Pipeline.fromAssets} /
- * {@link Sbv2Pipeline.fromPretrained}).
+ * Construction options (shared by {@link Pipeline.fromAssets} /
+ * {@link Pipeline.fromPretrained}).
  */
-export type Sbv2PipelineOptions = {
+export type PipelineOptions = {
   /**
-   * Shares an existing GPU. **The passing side owns it**, so {@link Sbv2Pipeline.dispose} does not
+   * Shares an existing GPU. **The passing side owns it**, so {@link Pipeline.dispose} does not
    * destroy it. When omitted, the pipeline calls `acquireGpu` internally and destroys it in
    * `dispose()`.
    */
@@ -199,19 +199,16 @@ export type Sbv2PipelineOptions = {
    * `acquireGpu({ gpuTiming: true })` as `gpu` (ADR 0021 — no timing by default).
    * Exceptions from the callback are not caught (fail loudly — the whole synthesis fails).
    */
-  readonly onRunDiagnostics?: (
-    component: Sbv2RunComponent,
-    diagnostics: SessionDiagnostics,
-  ) => void;
+  readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
 /**
- * Fetch-layer options used only by {@link Sbv2Pipeline.fromPretrained} (passed through to hub).
+ * Fetch-layer options used only by {@link Pipeline.fromPretrained} (passed through to hub).
  *
  * NOTE: the description of the fetch-layer knobs, including that `headers` / `fetch` / `caches` /
  * `onRetry` are **for the HTTP source only**, is consolidated in {@link FromPretrainedHubOptions}.
  */
-export type Sbv2FromPretrainedOptions = Sbv2PipelineOptions &
+export type FromPretrainedOptions = PipelineOptions &
   FromPretrainedHubOptions &
   FromPretrainedComponentOptions & {
     readonly signal?: AbortSignal;
@@ -221,7 +218,7 @@ export type Sbv2FromPretrainedOptions = Sbv2PipelineOptions &
  * Input for building directly from fetched assets (pass the return value of hub's `fetchAssets` as
  * is).
  */
-export type Sbv2Assets = {
+export type Assets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
@@ -245,7 +242,7 @@ const assetBuffer = (
  * the in-memory surface — `examples/sbv2/dump.ts`, removed in 0.15). Not exposed on `mod.ts` / the
  * subpath surface.
  */
-export const assetOpener = (assets: Sbv2Assets["assets"]): Promise<ComponentOpener> =>
+export const assetOpener = (assets: Assets["assets"]): Promise<ComponentOpener> =>
   assetComponentOpener("sbv2", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 /**
@@ -329,11 +326,11 @@ const outputAt = (
 
 /**
  * Passes the component name, bound in, to the observer hook
- * ({@link Sbv2PipelineOptions.onRunDiagnostics}).
+ * ({@link PipelineOptions.onRunDiagnostics}).
  */
 const observer = (
   state: Sbv2State,
-  component: Sbv2RunComponent,
+  component: RunComponent,
 ): ((diagnostics: SessionDiagnostics) => void) | undefined => {
   const listener = state.onRunDiagnostics;
   return listener === undefined ? undefined : (diagnostics) => listener(component, diagnostics);
@@ -358,13 +355,13 @@ export const assertTableFits = (
 ): void => {
   if (table.rows !== names.size) {
     throw new Error(
-      `Sbv2Pipeline: asset '${key}' has ${table.rows} rows, which differs from the ${names.size} entries of pipelineConfig` +
+      `sbv2.Pipeline: asset '${key}' has ${table.rows} rows, which differs from the ${names.size} entries of pipelineConfig` +
         ` (${[...names.keys()].join(" / ")}) — the row index is the physical row of the table itself`,
     );
   }
   if (table.cols !== cols) {
     throw new Error(
-      `Sbv2Pipeline: asset '${key}' has ${table.cols} columns, which differs from the graph input's ${cols}`,
+      `sbv2.Pipeline: asset '${key}' has ${table.cols} columns, which differs from the graph input's ${cols}`,
     );
   }
 };
@@ -387,7 +384,7 @@ export const assertTableFits = (
 export const assertFrontOutputs = (front: GraphOwner): void => {
   if (front.graph.outputs.length !== FRONT_OUTPUTS) {
     throw new Error(
-      `Sbv2Pipeline: front has ${front.graph.outputs.length} graph outputs` +
+      `sbv2.Pipeline: front has ${front.graph.outputs.length} graph outputs` +
         ` (exactly ${FRONT_OUTPUTS} are required: logw_sdp / logw_dp / m_p / logs_p)`,
     );
   }
@@ -416,25 +413,25 @@ export const assertBertWidth = (
   const name = bertHiddenOutput(textEncoder.graph.outputs, bertHiddenFromEnd);
   const info = textEncoder.graph.values[name];
   if (info === undefined) {
-    throw new Error(`Sbv2Pipeline: text_encoder output '${name}' is not declared in graph.values`);
+    throw new Error(`sbv2.Pipeline: text_encoder output '${name}' is not declared in graph.values`);
   }
   const width = info.shape.at(-1);
   if (typeof width !== "number") {
     throw new Error(
-      `Sbv2Pipeline: the last axis of text_encoder output '${name}' is not a static dimension (${String(width)})`,
+      `sbv2.Pipeline: the last axis of text_encoder output '${name}' is not a static dimension (${String(width)})`,
     );
   }
   const expected = featureWidth(front, "bert");
   if (width !== expected) {
     throw new Error(
-      `Sbv2Pipeline: text_encoder output '${name}' has width ${width}, which differs from the width of front's graph input 'bert',` +
+      `sbv2.Pipeline: text_encoder output '${name}' has width ${width}, which differs from the width of front's graph input 'bert',` +
         ` ${expected} (text_encoder and front assume different BERTs)`,
     );
   }
 };
 
 /**
- * The internal state of {@link Sbv2Pipeline}.
+ * The internal state of {@link Pipeline}.
  *
  * NOTE: not exposed on the public surface (`mod.ts` / `sbv2.ts`). Only the function is `export`ed
  * because the dump path of the torch reference comparison (`examples/sbv2/dump.ts`, removed in
@@ -454,10 +451,7 @@ type Sbv2State = {
   readonly front: ModelComponent;
   readonly voice: ModelComponent;
   readonly sessionOptions: SessionOptions;
-  readonly onRunDiagnostics?: (
-    component: Sbv2RunComponent,
-    diagnostics: SessionDiagnostics,
-  ) => void;
+  readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
 /** Intermediate values of one synthesis (read only by the dump path and diagnostics). */
@@ -479,7 +473,7 @@ type Sbv2Trace = {
 };
 
 /**
- * Return value of {@link synthesizeSbv2}. {@link Sbv2Pipeline.generate} takes only the audio from
+ * Return value of {@link synthesizeSbv2}. {@link Pipeline.generate} takes only the audio from
  * it.
  */
 type Sbv2Synthesis = {
@@ -491,7 +485,7 @@ type Sbv2Synthesis = {
 const resolveRow = (names: ReadonlyMap<string, number>, name: string, where: string): number => {
   const row = names.get(name);
   if (row === undefined) {
-    throw new Sbv2InputError(
+    throw new InputError(
       `${where} '${name}' is not in the manifest (available: ${[...names.keys()].join(" / ")})`,
     );
   }
@@ -499,7 +493,7 @@ const resolveRow = (names: ReadonlyMap<string, number>, name: string, where: str
 };
 
 const finiteKnob = (value: number, name: string): number => {
-  if (!Number.isFinite(value)) throw new Sbv2InputError(`${name} ${value} is not a finite number`);
+  if (!Number.isFinite(value)) throw new InputError(`${name} ${value} is not a finite number`);
   return value;
 };
 
@@ -512,10 +506,10 @@ const finiteKnob = (value: number, name: string): number => {
  * were the `Randn` constructor, a request known from the start to be unrunnable would pay for
  * building text_encoder (DeBERTa) and a whole run before failing (the same reason as the MUST on
  * the position of {@link assertTokenLimit}).
- * MUST: keep the type `Sbv2InputError`. `Randn` now also throws `ModelInputError` in line with the
+ * MUST: keep the type `InputError`. `Randn` now also throws `ModelInputError` in line with the
  * owner, so it is no longer outside the classification axis, but hosts that carry only SBV2 carve
- * out 400 with `instanceof Sbv2InputError` (the line drawn by ADR 0072 decision 6), so loosening
- * this entry's type to the parent is a breaking change. `Sbv2InputError` derives from
+ * out 400 with `instanceof InputError` (the line drawn by ADR 0072 decision 6), so loosening
+ * this entry's type to the parent is a breaking change. `InputError` derives from
  * `ModelInputError`, so it rides the cross-family branching of hosts that carry several families
  * as is.
  *
@@ -528,7 +522,7 @@ export const assertSeed = (seed: number): void => {
   } catch (cause) {
     // The diagnostic carries the owner's message as is (neither the acceptance set nor the message
     // is written in 2 places).
-    if (cause instanceof ModelInputError) throw new Sbv2InputError(cause.message, { cause });
+    if (cause instanceof ModelInputError) throw new InputError(cause.message, { cause });
     throw cause;
   }
 };
@@ -545,8 +539,8 @@ export const assertSeed = (seed: number): void => {
  */
 export const assertTokenLimit = (tokens: number, maxTokens: number): void => {
   if (tokens > maxTokens) {
-    throw new Sbv2InputError(
-      `Sbv2Pipeline: token count ${tokens} exceeds the distribution's maximum maxTokens=${maxTokens}` +
+    throw new InputError(
+      `sbv2.Pipeline: token count ${tokens} exceeds the distribution's maximum maxTokens=${maxTokens}` +
         " (split the text into shorter parts and synthesise each)",
     );
   }
@@ -573,8 +567,8 @@ export const assertTokenLimit = (tokens: number, maxTokens: number): void => {
  */
 export const assertPhonemeLimit = (phonemes: number, maxTokens: number): void => {
   if (phonemes > maxTokens) {
-    throw new Sbv2InputError(
-      `Sbv2Pipeline: phoneme count ${phonemes} exceeds the distribution's maximum maxTokens=${maxTokens}` +
+    throw new InputError(
+      `sbv2.Pipeline: phoneme count ${phonemes} exceeds the distribution's maximum maxTokens=${maxTokens}` +
         " (split the text into shorter parts and synthesise each)",
     );
   }
@@ -589,7 +583,7 @@ export const assertPhonemeLimit = (phonemes: number, maxTokens: number): void =>
  * internal error after wasted GPU work). The random numbers depend only on the length and the
  * seed, so the sequence drawn before running the GPU is scanned once.
  * MUST: the thrown type depends on where the value came from — a `noiseScaleW` the caller passed is
- * input-caused (`Sbv2InputError`); if it was omitted and the distribution's
+ * input-caused (`InputError`); if it was omitted and the distribution's
  * `pipelineConfig.defaults` was used, the asset is invalid.
  * NOTE: a magnitude that is finite in f32 but overflows inside the graph (e.g. 1e30) is a separate
  * problem and is not bounded here.
@@ -603,8 +597,8 @@ export const assertFiniteNoise = (
 ): void => {
   if (noise.every(Number.isFinite)) return;
   const problem = `noiseScaleW ${noiseScaleW} makes z_noise non-finite in f32`;
-  if (fromRequest) throw new Sbv2InputError(`Sbv2Pipeline: ${problem} (pass a smaller value)`);
-  throw new Error(`Sbv2Pipeline: pipelineConfig.defaults: ${problem}`);
+  if (fromRequest) throw new InputError(`sbv2.Pipeline: ${problem} (pass a smaller value)`);
+  throw new Error(`sbv2.Pipeline: pipelineConfig.defaults: ${problem}`);
 };
 
 /**
@@ -696,12 +690,12 @@ type Sbv2Admission = {
 const admitSbv2 = (
   manifest: Manifest,
   open: ComponentOpener,
-  options: Sbv2PipelineOptions,
+  options: PipelineOptions,
 ): Sbv2Admission => {
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
-      `Sbv2Pipeline: model '${modelName}' is not in the manifest` +
+      `sbv2.Pipeline: model '${modelName}' is not in the manifest` +
         ` (available: ${manifest.available.models.join(" / ")})`,
     );
   }
@@ -709,7 +703,7 @@ const admitSbv2 = (
   const { name, major } = entry.pipeline;
   if (name !== SBV2_PIPELINE_NAME) {
     throw new Error(
-      `Sbv2Pipeline: the manifest pipeline is '${name}/${major}'` +
+      `sbv2.Pipeline: the manifest pipeline is '${name}/${major}'` +
         ` ('${SBV2_PIPELINE_NAME}/${SBV2_PIPELINE_MAJOR}' is required)`,
     );
   }
@@ -717,7 +711,7 @@ const admitSbv2 = (
     // The only check that stops the silent degradation "old implementation × new repository" (ADR
     // 0038 §6).
     throw new Error(
-      `Sbv2Pipeline: pipeline '${name}/${major}' has an unsupported major` +
+      `sbv2.Pipeline: pipeline '${name}/${major}' has an unsupported major` +
         ` (this implementation reads ${SBV2_PIPELINE_NAME}/${SBV2_PIPELINE_MAJOR})`,
     );
   }
@@ -726,7 +720,7 @@ const admitSbv2 = (
   const quantName = options.quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quantName)) {
     throw new Error(
-      `Sbv2Pipeline: quant '${quantName}' is not in the manifest` +
+      `sbv2.Pipeline: quant '${quantName}' is not in the manifest` +
         ` (available: ${entry.available.quants.join(" / ")})`,
     );
   }
@@ -737,7 +731,7 @@ const admitSbv2 = (
     SBV2_SESSION_POLICY,
     quant.session,
     {},
-    `Sbv2Pipeline: quant '${quantName}'`,
+    `sbv2.Pipeline: quant '${quantName}'`,
   );
   const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
 
@@ -752,11 +746,11 @@ const admitSbv2 = (
   // request and check is the one in `session/gpu-features.ts`, and the later check calls the same
   // function).
   if (options.gpu !== undefined) {
-    assertGpuFeaturesGranted(gpuFeatures, options.gpu, `Sbv2Pipeline: quant '${quantName}'`);
+    assertGpuFeaturesGranted(gpuFeatures, options.gpu, `sbv2.Pipeline: quant '${quantName}'`);
     assertRequiredLimitsSatisfied(
       quant.requiredLimits,
       options.gpu.limits,
-      `Sbv2Pipeline: quant '${quantName}'`,
+      `sbv2.Pipeline: quant '${quantName}'`,
     );
   }
 
@@ -774,9 +768,9 @@ const admitSbv2 = (
  */
 const buildSbv2State = async (
   admitted: Sbv2Admission,
-  assets: Sbv2Assets["assets"],
+  assets: Assets["assets"],
   open: ComponentOpener,
-  options: Sbv2PipelineOptions = {},
+  options: PipelineOptions = {},
 ): Promise<Sbv2State> => {
   const { config, quantName, quant, sessionOptions, gpuFeatures } = admitted;
   // The supplier is **the same one** admission looked at (`open` only looks up the opened
@@ -797,7 +791,7 @@ const buildSbv2State = async (
   const voiceGin = featureWidth(voice, "g");
   if (voiceGin !== speakers.cols) {
     throw new Error(
-      `Sbv2Pipeline: the width ${voiceGin} of voice's graph input 'g' differs from the speaker table's column count ${speakers.cols}` +
+      `sbv2.Pipeline: the width ${voiceGin} of voice's graph input 'g' differs from the speaker table's column count ${speakers.cols}` +
         " (front / voice require different speaker embeddings)",
     );
   }
@@ -808,7 +802,7 @@ const buildSbv2State = async (
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
-    assertGpuFeaturesGranted(gpuFeatures, gpu, `Sbv2Pipeline: quant '${quantName}'`);
+    assertGpuFeaturesGranted(gpuFeatures, gpu, `sbv2.Pipeline: quant '${quantName}'`);
     // Also check the limits of a device acquired here — `fromAssets` has no pre-fetch check
     // (`fromPretrained` checks with the adapter's values), and without this a shortfall of the
     // declaration would be delayed until Session construction, and when the declaration is stricter
@@ -818,7 +812,7 @@ const buildSbv2State = async (
       assertRequiredLimitsSatisfied(
         quant.requiredLimits,
         gpu.limits,
-        `Sbv2Pipeline: quant '${quantName}'`,
+        `sbv2.Pipeline: quant '${quantName}'`,
       );
     }
   } catch (error) {
@@ -846,15 +840,15 @@ const buildSbv2State = async (
 };
 
 /**
- * Builds the run state from the manifest + assets (the body of {@link Sbv2Pipeline.fromAssets} =
+ * Builds the run state from the manifest + assets (the body of {@link Pipeline.fromAssets} =
  * the one sequence family admission → state construction). Surfaces that have only fetched bytes
  * (`fromAssets` / the dump script) enter here — the fetching surface moves only admission forward
  * into the hook of {@link loadContainerComponents}, so it calls these 2 steps separately.
  */
 export const openSbv2State = async (
-  input: Sbv2Assets,
+  input: Assets,
   open: ComponentOpener,
-  options: Sbv2PipelineOptions = {},
+  options: PipelineOptions = {},
 ): Promise<Sbv2State> =>
   await buildSbv2State(admitSbv2(input.manifest, open, options), input.assets, open, options);
 
@@ -864,7 +858,7 @@ export const closeSbv2State = (state: Sbv2State): void => {
 };
 
 /**
- * Turns one utterance into a waveform (with intermediate values). {@link Sbv2Pipeline.generate}
+ * Turns one utterance into a waveform (with intermediate values). {@link Pipeline.generate}
  * calls this and returns only the audio.
  *
  * MUST: the order in which random numbers are consumed is fixed: `z_noise` (before front) →
@@ -874,12 +868,12 @@ export const closeSbv2State = (state: Sbv2State): void => {
  */
 export const synthesizeSbv2 = async (
   state: Sbv2State,
-  utterance: Sbv2Utterance,
-  options: Sbv2GenerateOptions = {},
+  utterance: Utterance,
+  options: GenerateOptions = {},
 ): Promise<Sbv2Synthesis> => {
   if (utterance.moras.length === 0 && utterance.leadingPunctuations.length === 0) {
-    throw new Sbv2InputError(
-      "Sbv2Pipeline: the utterance is empty (no moras and no leadingPunctuations)",
+    throw new InputError(
+      "sbv2.Pipeline: the utterance is empty (no moras and no leadingPunctuations)",
     );
   }
   const defaults = state.config.defaults;
@@ -896,7 +890,7 @@ export const synthesizeSbv2 = async (
     lengthScale: finiteKnob(options.lengthScale ?? defaults.lengthScale, "lengthScale"),
   };
   if (knobs.lengthScale <= 0) {
-    throw new Sbv2InputError(`lengthScale ${knobs.lengthScale} is not positive`);
+    throw new InputError(`lengthScale ${knobs.lengthScale} is not positive`);
   }
   const seed = options.seed ?? 0;
   assertSeed(seed);
@@ -1081,11 +1075,11 @@ export const synthesizeSbv2 = async (
 /**
  * SBV2's text → speech pipeline.
  *
- * Construction enters only through {@link Sbv2Pipeline.fromPretrained} (fetch from HF) or
- * {@link Sbv2Pipeline.fromAssets} (fetched bytes) — the constructor is private so that a half-built
+ * Construction enters only through {@link Pipeline.fromPretrained} (fetch from HF) or
+ * {@link Pipeline.fromAssets} (fetched bytes) — the constructor is private so that a half-built
  * state that bypasses the manifest check and the asset comparison cannot be made (ADR 0008).
  */
-export class Sbv2Pipeline {
+export class Pipeline {
   readonly #state: Sbv2State;
   /**
    * Serialization chain of generate and dispose (keeps the module doc's "one at a time" on the
@@ -1114,16 +1108,16 @@ export class Sbv2Pipeline {
    * A local distribution is passed as a **source handle** (`localDirectory` / `denoDirectory` of
    * `@karume/hub/deno` / `nodeDirectory` of `@karume/hub/node`). It goes through neither the
    * spelling check of the HF `owner/name`, nor the network, nor CacheStorage (the HTTP-only knobs
-   * of {@link Sbv2FromPretrainedOptions} have no effect).
+   * of {@link FromPretrainedOptions} have no effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
-    options: Sbv2FromPretrainedOptions = {},
-  ): Promise<Sbv2Pipeline> {
+    options: FromPretrainedOptions = {},
+  ): Promise<Pipeline> {
     const source = toManifestSource(
       ref,
-      "Sbv2Pipeline.fromPretrained",
-      'SBV2_SOURCES["sbv2-jvnv"] (@karume/models/sbv2)',
+      "sbv2.Pipeline.fromPretrained",
+      'SOURCES["sbv2-jvnv"] (@karume/models/sbv2)',
     );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
@@ -1132,7 +1126,7 @@ export class Sbv2Pipeline {
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     const selection = resolveSelection(loaded.manifest, choice);
-    const buildOptions: Sbv2PipelineOptions = {
+    const buildOptions: PipelineOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       ...choice,
       ...(options.onRunDiagnostics === undefined
@@ -1142,7 +1136,7 @@ export class Sbv2Pipeline {
     // The family's checks run in the admission hook (before fetching the weight parts —
     // `hub/components.ts`).
     const { admitted, assets, open } = await loadContainerComponents(
-      "Sbv2Pipeline.fromPretrained",
+      "sbv2.Pipeline.fromPretrained",
       loaded,
       selection,
       COMPONENT_KEYS,
@@ -1154,7 +1148,7 @@ export class Sbv2Pipeline {
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
           buildOptions.gpu,
-          `Sbv2Pipeline: quant '${admitted.quantName}'`,
+          `sbv2.Pipeline: quant '${admitted.quantName}'`,
         );
         return admitted;
       },
@@ -1164,7 +1158,7 @@ export class Sbv2Pipeline {
         ...(options.components === undefined ? {} : { components: options.components }),
       },
     );
-    return new Sbv2Pipeline(await buildSbv2State(admitted, assets, open, buildOptions));
+    return new Pipeline(await buildSbv2State(admitted, assets, open, buildOptions));
   }
 
   /**
@@ -1177,16 +1171,13 @@ export class Sbv2Pipeline {
    * bytes. Missing indices and mixing with a single-form key fail loudly (the receiving
    * implementation is the one in `src/hub/components.ts`).
    */
-  static async fromAssets(
-    input: Sbv2Assets,
-    options: Sbv2PipelineOptions = {},
-  ): Promise<Sbv2Pipeline> {
-    return new Sbv2Pipeline(await openSbv2State(input, await assetOpener(input.assets), options));
+  static async fromAssets(input: Assets, options: PipelineOptions = {}): Promise<Pipeline> {
+    return new Pipeline(await openSbv2State(input, await assetOpener(input.assets), options));
   }
 
   /**
    * Generates speech from one utterance. Text analysis (readings, accents) is **the caller's
-   * responsibility**, and this accepts only an analysed {@link Sbv2Utterance} (the module doc's
+   * responsibility**, and this accepts only an analysed {@link Utterance} (the module doc's
    * MUST).
    *
    * The same seed and the same knobs give the same waveform (the random numbers and the host glue
@@ -1195,14 +1186,11 @@ export class Sbv2Pipeline {
    * When called concurrently, calls **wait and run in order** (no simultaneous residency of graphs
    * — the module doc).
    */
-  async generate(
-    utterance: Sbv2Utterance,
-    options: Sbv2GenerateOptions = {},
-  ): Promise<GeneratedAudio> {
+  async generate(utterance: Utterance, options: GenerateOptions = {}): Promise<GeneratedAudio> {
     // The disposed check is made at call time (checked inside the chain, it would also take down
     // generations accepted before the dispose).
     if (this.#disposal !== undefined) {
-      throw new Error("Sbv2Pipeline: cannot generate after dispose");
+      throw new Error("sbv2.Pipeline: cannot generate after dispose");
     }
     return await this.#chain(async () => {
       const { sampleRate, audio } = await synthesizeSbv2(this.#state, utterance, options);

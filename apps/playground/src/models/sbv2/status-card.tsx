@@ -10,7 +10,7 @@ import type { RunTaskView } from "@/hooks/use-run-task";
 import { adapterText } from "@/lib/record";
 
 /**
- * A failed run: an input the pipeline refused (`Sbv2InputError`, a `ModelInputError`) under its own
+ * A failed run: an input the pipeline refused (`InputError`, a `ModelInputError`) under its own
  * title with `inputHint`, anything else as a failure — both in full (message, stack, cause chain).
  */
 const RunFailure = ({ task, inputHint }: { task: RunTaskView; inputHint: ReactNode }) => {

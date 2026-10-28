@@ -1,5 +1,5 @@
 /**
- * SBV2 の**回帰の門**（実 GPU）。配布形 → `Sbv2Pipeline.fromAssets` → `generate` →
+ * SBV2 の**回帰の門**（実 GPU）。配布形 → `Pipeline.fromAssets` → `generate` →
  * `encodeWav` まで通し、出力 WAV の sha256 が参照値と**ビット一致**するかだけを見る
  * （Anima の PNG 門 `e2e_anima_test.ts` と同じ哲学の音声版）。
  *
@@ -77,10 +77,10 @@ import { getDictionary } from "@hdae/yomi/loader";
 import { encodeWav } from "../../models/mod.ts";
 import {
   type GeneratedAudio,
-  Sbv2InputError,
-  Sbv2Pipeline,
-  type Sbv2Utterance,
-  toSbv2Utterance,
+  InputError,
+  Pipeline,
+  type Utterance,
+  toUtterance,
 } from "../../models/sbv2.ts";
 import { parseSbv2PipelineConfig, type Sbv2Defaults } from "../../models/src/sbv2/config.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
@@ -199,12 +199,12 @@ if (RUNNABLE) references.warnMissing(CASE_IDS);
  * MUST: 解析は 1 度きり。辞書の取得（初回だけネットワーク）を門ごとに繰り返さない。
  */
 const utteranceOnce = (() => {
-  let cached: Promise<Sbv2Utterance> | undefined;
-  return (): Promise<Sbv2Utterance> => {
+  let cached: Promise<Utterance> | undefined;
+  return (): Promise<Utterance> => {
     // TypeScript 7 does not narrow `cached` after `??=`; keep the single-evaluation semantics explicitly.
     const utterance =
       cached ??
-      getDictionary().then((dictionary) => toSbv2Utterance(analyzeWithWords(dictionary, TEXT)));
+      getDictionary().then((dictionary) => toUtterance(analyzeWithWords(dictionary, TEXT)));
     cached = utterance;
     return utterance;
   };
@@ -424,7 +424,7 @@ test.skipIf(!RUNNABLE || references.lacksReference(caseIdOf(MODEL, QUANT)))(
     const assets = await loadLocalAssets(manifest);
     const started = performance.now();
     // `await using` は [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
-    await using pipeline = await Sbv2Pipeline.fromAssets(
+    await using pipeline = await Pipeline.fromAssets(
       { manifest, assets },
       {
         model: MODEL,
@@ -452,7 +452,7 @@ test.skipIf(!RUNNABLE || references.lacksReference(caseIdOf(MODEL, BERT4_QUANT))
     const defaults = assertReferenceKnobs(modelEntry(manifest));
     const assets = await loadLocalAssets(manifest, BERT4_QUANT);
     const started = performance.now();
-    await using pipeline = await Sbv2Pipeline.fromAssets(
+    await using pipeline = await Pipeline.fromAssets(
       { manifest, assets },
       {
         model: MODEL,
@@ -487,7 +487,7 @@ test.skipIf(!RUNNABLE || references.lacksReference(caseIdOf(MODEL, W4_QUANT)))(
     const defaults = assertReferenceKnobs(modelEntry(manifest));
     const assets = await loadLocalAssets(manifest, W4_QUANT);
     const started = performance.now();
-    await using pipeline = await Sbv2Pipeline.fromAssets(
+    await using pipeline = await Pipeline.fromAssets(
       { manifest, assets },
       {
         model: MODEL,
@@ -528,7 +528,7 @@ for (const gate of SPEAKER_GATES) {
       const defaults = assertReferenceKnobs(modelEntry(manifest, gate.model), gate.speaker);
       const assets = await loadLocalAssets(manifest, QUANT, gate.model);
       const started = performance.now();
-      await using pipeline = await Sbv2Pipeline.fromAssets(
+      await using pipeline = await Pipeline.fromAssets(
         { manifest, assets },
         {
           model: gate.model,
@@ -571,10 +571,10 @@ describe.skipIf(!RUNNABLE)(
     // Assigned in beforeAll; the its below run sequentially against this one pipeline.
     let manifest: Manifest;
     let assets: Record<string, Uint8Array<ArrayBuffer>>;
-    let pipeline: Sbv2Pipeline;
-    let utterance: Sbv2Utterance;
-    const open = (patch: Record<string, Uint8Array<ArrayBuffer>> = {}): Promise<Sbv2Pipeline> =>
-      Sbv2Pipeline.fromAssets(
+    let pipeline: Pipeline;
+    let utterance: Utterance;
+    const open = (patch: Record<string, Uint8Array<ArrayBuffer>> = {}): Promise<Pipeline> =>
+      Pipeline.fromAssets(
         { manifest, assets: { ...assets, ...patch } },
         {
           model: MODEL,
@@ -641,14 +641,14 @@ describe.skipIf(!RUNNABLE)(
 
     // --- 入口ノブの門（run を 1 回も足さない — 既に開いたパイプラインを使う）-----
     //
-    // `generate` の入口は全て `Sbv2InputError`（= 呼び手が要求を直せば直る 400 側）で、
+    // `generate` の入口は全て `InputError`（= 呼び手が要求を直せば直る 400 側）で、
     // Session を張る前に落とす。`parseSbv2PipelineConfig` 側の同名の門は**配布形の既定値**に
     // 対するもので、実行時ノブは誰も見ていなかった。
 
     it("lengthScale 0 は Session を張る前に入力起因で落ちる", async () => {
       await assertRejects(
         () => pipeline.generate(utterance, { lengthScale: 0 }),
-        Sbv2InputError,
+        InputError,
         "lengthScale 0 is not positive",
       );
     });
@@ -656,7 +656,7 @@ describe.skipIf(!RUNNABLE)(
     it("非有限のノブは値そのものを添えて落ちる", async () => {
       await assertRejects(
         () => pipeline.generate(utterance, { sdpRatio: Number.NaN }),
-        Sbv2InputError,
+        InputError,
         "sdpRatio NaN is not a finite number",
       );
     });
@@ -664,7 +664,7 @@ describe.skipIf(!RUNNABLE)(
     it("空の発話は落ちる（0 音素で front を回さない）", async () => {
       await assertRejects(
         () => pipeline.generate({ leadingPunctuations: [], moras: [], words: [] }),
-        Sbv2InputError,
+        InputError,
         "the utterance is empty",
       );
     });
@@ -673,7 +673,7 @@ describe.skipIf(!RUNNABLE)(
 
 // --- 直列化と寿命（並行 generate / dispose 済み判定）--------------------------
 //
-// `Sbv2Pipeline` は 3 グラフ（text_encoder / front / voice）を同時常駐させない契約で、
+// `Pipeline` は 3 グラフ（text_encoder / front / voice）を同時常駐させない契約で、
 // それを守るのが `generate` の直列化鎖（モジュール doc の MUST）。並行に呼ぶと run が
 // インターリーブする実装へ退行しても**結果の波形は正しい**ので、観測席の component 列で
 // しか捕まらない。gemma4 側には同型の門がある（`e2e_gemma4_chat_test.ts` の
@@ -684,13 +684,13 @@ describe.skipIf(!RUNNABLE)(
   () => {
     // Assigned in beforeAll; the its below run sequentially against this one pipeline.
     const seen: string[] = [];
-    let pipeline: Sbv2Pipeline;
-    let utterance: Sbv2Utterance;
+    let pipeline: Pipeline;
+    let utterance: Utterance;
 
     beforeAll(async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest);
-      pipeline = await Sbv2Pipeline.fromAssets(
+      pipeline = await Pipeline.fromAssets(
         { manifest, assets },
         {
           model: MODEL,
@@ -725,7 +725,7 @@ describe.skipIf(!RUNNABLE)(
       await assertRejects(
         () => pipeline.generate(utterance, { seed: SEED }),
         Error,
-        "Sbv2Pipeline: cannot generate after dispose",
+        "sbv2.Pipeline: cannot generate after dispose",
       );
     });
 
@@ -748,7 +748,7 @@ test.skipIf(!RUNNABLE)(
     const manifest = readManifest();
     const assets = await loadLocalAssets(manifest);
     const seen: { component: string; dispatches: number; ran: boolean; timed: boolean }[] = [];
-    await using pipeline = await Sbv2Pipeline.fromAssets(
+    await using pipeline = await Pipeline.fromAssets(
       { manifest, assets },
       {
         model: MODEL,
@@ -788,7 +788,7 @@ test.skipIf(!RUNNABLE)(
   async () => {
     const manifest = readManifest();
     const assets = await loadLocalAssets(manifest);
-    await using pipeline = await Sbv2Pipeline.fromAssets(
+    await using pipeline = await Pipeline.fromAssets(
       { manifest, assets },
       {
         model: MODEL,

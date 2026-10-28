@@ -27,7 +27,7 @@
  * expectation and the actual value). The type is for branching, the message is for people, and both
  * are needed.
  *
- * NOTE: the only derived types are the 3 of `Sbv2InputError` (`./sbv2/errors.ts`),
+ * NOTE: the only derived types are the 3 of `sbv2.InputError` (`./sbv2/errors.ts`),
  * `GenerationCapacityError` (`./generation/sequence.ts`) and `PromptCleanError`
  * (`./wan/text/prompt-clean.ts`). The first holds the line drawn by ADR 0072 decision 6 as its
  * specification, the second carries in fields the actual values the truncation computation needs,
