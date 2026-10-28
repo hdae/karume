@@ -298,3 +298,23 @@ word). That condition is lifted for the online kernel only; ③PV's i8a8 kernel 
   D = 96 instead. `attentionOnlineI8a8Params` takes the key-axis form, so its test callers pass
   it; the Session test matches the online key's reduce form by suffix with `:kpad` appended at
   `N % 4 != 0`.
+
+## Addendum (2026-10-28) — `attentionDeviceFacts` on the runtime's public surface
+
+- **What changed**: `@karume/runtime` exports `attentionDeviceFacts(gpu)` and its type
+  `AttentionDeviceFacts` — the function Session construction already used to read decision 5's
+  device facts (subgroups and subgroup size control enabled, WGSL `subgroup_id`, the measured
+  linear lane mapping, the granted workgroup storage).
+- **Why**: `EstimateOptions.attentionDevice` is public and required whenever
+  `attentionScoreStorage` is `"none"`, but a caller outside the runtime could build it only by
+  copying the condition (`GpuContext` exposes the features, the WGSL language features, the
+  measured lane mapping and the limits it reads), and a copy would let an estimate count another
+  route than the Session takes the moment the condition changes; the export keeps one derivation.
+  The first caller is a model family's headroom check of a preset with the online kernel
+  (MOSS-Image, `packages/models/src/moss/dit-stage.ts`). Given `"none"` without the facts, that
+  estimate fails (it requires them); estimated without `"none"`, it counts the three-dispatch S:
+  10,070,775,568 B instead of 7,333,404,976 B at 1024², and 12,519,585,664 B instead of
+  10,113,779,296 B at its area cap — a need a 12 GiB device refuses although the pair it sizes
+  fits there.
+- **Surface**: the public-surface snapshot gains the two names (`KARUME_SURFACE=write`); no
+  behaviour of the runtime changes.

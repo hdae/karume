@@ -31,6 +31,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "AttentionDeviceFacts",
+        "kind": "typeAlias"
+      },
+      {
         "name": "BUILTIN_GEOMETRY_PROFILES",
         "kind": "variable"
       },
@@ -360,6 +364,10 @@
       },
       {
         "name": "assertChunkBuckets",
+        "kind": "function"
+      },
+      {
+        "name": "attentionDeviceFacts",
         "kind": "function"
       },
       {
