@@ -277,7 +277,8 @@ They live in the per-family mapping tables of `packages/models` — `SOURCES` of
 A family without a public repository has no mapping table (ADR 0073 decision 1 — the same as `vowel-detector`). In the release that
 creates the table, in addition to "add 1 entry" above, put the checks that bind the table's completeness in the same commit (forgetting one of them
 makes that check fail, or goes green while the table is not on the public surface). In 0.14.0, 2 families were published for the first time at once:
-umT5 (TS entry `umt5.Encoder` — `@karume/models/umt5`) got `umt5.SOURCES`, and Wan got `wan.SOURCES`.
+umT5 (TS entry `Umt5Encoder` — `@karume/models/umt5`) got `UMT5_SOURCES`, and Wan got `WAN_SOURCES` (0.15.0 spells
+them `umt5.Encoder`, `umt5.SOURCES` and `wan.SOURCES` — ADR 0136).
 
 Wan2.1 (`karume-wan2.1`) is not published on HF (the maintainer's ruling 2026-10-15 — ADR
 [0118](decisions/0118-wan21-video-generation.md) addendum (2026-10-15)). The code stays, and the distribution is assembled locally

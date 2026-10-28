@@ -96,8 +96,8 @@
 ## later
 
 - **Barrel imports keep every family's source table (filed 2026-10-28 — found in the naming design of ADR [0136](decisions/0136-models-public-naming.md))**:
-  importing anything from the `@karume/models` barrel, even one shared helper such as `encodeWav`, keeps all twelve
-  `hdae/karume-*` source tables and a few top-level expressions a bundler cannot prove pure — about 1.4–1.7 KB minified
+  importing anything from the `@karume/models` barrel, even one shared helper such as `encodeWav`, keeps all nine
+  source tables (twelve `hdae/karume-*` entries) and a few top-level expressions a bundler cannot prove pure — about 1.4–1.7 KB minified
   (≈0.8 KB gzip) over the same import from a subpath (rolldown 1.2.13, 2026-10-28). Bundle size of barrel consumers only; no
   behaviour change; independent of the naming. The retained expressions: `Object.freeze([...])` in `src/anima/config.ts`,
   `src/anima/residency.ts` and `src/gemma/pipeline.ts`, the spread of a call in `src/gemma/speculative.ts`, the
@@ -610,6 +610,12 @@
   2026-10-25 DiT fusion entry: "under an a8 attention seat"). ⑦ A stray blank line inside the Added list (before the
   `runAttentionRouteBench` entry). ⑧ The Fixed entry (the release wait before a slot backing is built) is framed on Node +
   Dawn — say what it changes for a 0.14.0 user.
+- **0.15.0: regenerate and re-upload the model cards of every published repository (filed 2026-10-28 — ADR
+  [0136](decisions/0136-models-public-naming.md))**: the Usage snippets of the published cards import the 0.14 names
+  (`Sbv2Pipeline`, `toSbv2Utterance`, …) from `jsr:@karume/models` without a version, so they stop compiling once
+  0.15.0 is the latest version. Regenerate the cards with this release's recipes and upload them as card-only commits
+  (manifests, containers and the `SOURCES` pins do not move). Order: right after the JSR publish, in the same session —
+  until both are out, the published cards and the latest package disagree.
 
 ## parked (with revival conditions)
 

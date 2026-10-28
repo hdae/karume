@@ -1,7 +1,7 @@
 # 0136: Public naming of `@karume/models` — bare names on the subpaths, one namespace per family on the barrel
 
 - Status: accepted (2026-10-28, the maintainer's ruling 28 — option A, implemented as A-decl; the
-  open points ruled the same day as recommended). Shipped in 0.15.0.
+  open points ruled the same day as recommended). Ships in 0.15.0.
 - Date: 2026-10-28
 - Scope: the exported names of the eleven subpath entries of `@karume/models` and the shape of its
   barrel (`mod.ts`); the declarations behind them in `packages/models/src`; the runtime `name` of
@@ -17,9 +17,9 @@
 Up to 0.14.0 the barrel re-exported every family's names flat, so every family symbol carried a
 family prefix: 118 of the 148 distinct names the subpaths export (`Sbv2Pipeline`, `ANIMA_SOURCES`,
 `gemma4ChatPrompt`, `Umt5Encoder`, …). Without the prefix the families collide in one scope —
-`Pipeline` names ten different classes, `Assets` and `FromPretrainedOptions` eleven types, `SOURCES`
-nine tables. The prefix also misreads: SBV2's "2" reads as the x2y idiom, which already forced
-`sbv2Utterance` → `toSbv2Utterance` (ADR 0079 decision 2) and left the backlog item "revisit the
+`Pipeline` names ten different classes, `Assets` ten types and `FromPretrainedOptions` eleven,
+`SOURCES` nine tables. The prefix also misreads: SBV2's "2" reads as the x2y idiom, which already
+forced `sbv2Utterance` → `toSbv2Utterance` (ADR 0079 decision 2) and left the backlog item "revisit the
 barrel's family prefixes" open since 2026-08-25. `mod.ts` (416 lines) repeated every subpath's
 export list and JSDoc; only tests held the two in step.
 
@@ -34,9 +34,9 @@ Facts measured before the ruling (2026-10-28, on a copy of the package):
   55,667 / 55,660 B. No other family's pipeline class survives in any namespace case, including when
   the namespace object escapes (`return sbv2`, `sbv2[key]`, `export { sbv2 }`) — then only that
   family's own unused exports are kept (+234 B for SBV2, +6.5 KB for Gemma's larger surface). The
-  ~1.5 KB that every barrel import pays over the subpath is independent of naming: all twelve source
-  tables and a few top-level expressions the bundler cannot prove pure; with
-  `treeshake.moduleSideEffects: false` the barrel is within 5 B of the subpath (the open point of ADR 0037 §4,
+  ~1.5 KB that every barrel import pays over the subpath is independent of naming: all nine source
+  tables (twelve `hdae/karume-*` entries) and a few top-level expressions the bundler cannot prove
+  pure; with `treeshake.moduleSideEffects: false` the barrel is within 5 B of the subpath (the open point of ADR 0037 §4,
   "not verified").
 - **TypeScript prints declaration names, not export aliases** (tsc 7.0.2): with
   `export { Sbv2Pipeline as Pipeline }`, a type error on `sbv2.Pipeline` reports `Sbv2Pipeline`.
@@ -49,17 +49,19 @@ Facts measured before the ruling (2026-10-28, on a copy of the package):
 ## Decision
 
 1. **Each subpath entry exports bare names.** The family prefix is dropped and the rest of the
-   identifier kept: `Sbv2GenerateOptions` → `GenerateOptions`, `gemma4ChatPrompt` → `chatPrompt`,
-   `ANIMA_SAMPLER_TYPES` → `SAMPLER_TYPES`, `WanTi2vPipeline` → `Ti2vPipeline`. Every family's source
-   table is `SOURCES`.
-2. **Exceptions (6)**, where dropping the prefix alone gives a poor or inconsistent name:
-   `toSbv2Utterance` → `toUtterance`, `parseGemma4PipelineConfig` → `parsePipelineConfig`,
-   `wanFrameToRgba` → `frameToRgba`, `animaLatents` → `latentStats` (not `latents`, a local-variable
+   identifier kept, its first letter re-cased when a lowercase prefix led a camelCase name:
+   `Sbv2GenerateOptions` → `GenerateOptions`, `gemma4ChatPrompt` → `chatPrompt`, `wanFrameToRgba`
+   → `frameToRgba`, `ANIMA_SAMPLER_TYPES` → `SAMPLER_TYPES`, `WanTi2vPipeline` → `Ti2vPipeline`.
+   Every family's source table is `SOURCES`.
+2. **Exceptions (5)**, where dropping the prefix alone gives a poor or inconsistent name:
+   `toSbv2Utterance` → `toUtterance`, `parseGemma4PipelineConfig` → `parsePipelineConfig` (the
+   prefix sits inside the name), `animaLatents` → `latentStats` (not `latents`, a local-variable
    name used about 165 times in `src/`), and umT5's `Umt5EncoderAssets` / `Umt5EncoderFromPretrainedOptions`
    → `Assets` / `FromPretrainedOptions` (the names the other ten families use). Names that had no
-   prefix stay (the generation vocabulary `Generation*` / `SamplerSpec` / …, `GeneratedImage`,
-   `DepthMap`, `AlphaMatte`, `LabSegment`, …); `VowelDetectorResult` → `Result` and `GemmaTokenizer`
-   → `Tokenizer` follow the rule.
+   prefix keep their spelling (the generation vocabulary `Generation*` / `SamplerSpec` / …,
+   `GeneratedImage`, `DepthMap`, `AlphaMatte`, `LabSegment`, …) but, being family names, leave the
+   flat barrel like the others (`gemma.GenerationCapacityError`, `anima.GeneratedImage`);
+   `VowelDetectorResult` → `Result` and `GemmaTokenizer` → `Tokenizer` follow the rule.
 3. **The barrel exports the shared surface flat and one namespace per family.** The flat part is
    the twelve symbols that belong to no single family: `FromPretrainedHubOptions`,
    `FromPretrainedComponentOptions`, `ComponentSource`, `ModelInputError`, `KARUME_SOURCES`,
@@ -81,7 +83,8 @@ Facts measured before the ruling (2026-10-28, on a copy of the package):
 5. **Error names and diagnostics name the family.** A renamed error class keeps a qualified runtime
    `name`: `sbv2.InputError` (class `InputError`) has `name === "sbv2.InputError"`, so a log line or
    an `err.name` branch still says which family failed. `ModelInputError` and
-   `GenerationCapacityError` are unchanged. Diagnostic messages spell the public name the way the
+   `GenerationCapacityError` keep their class and runtime names (the latter is reached through the
+   barrel as `gemma.GenerationCapacityError`). Diagnostic messages spell the public name the way the
    barrel does (`"sbv2.Pipeline: quant …"`, `"gemma.ChatSession: …"`), and a missing-source hint reads
    `SOURCES["sbv2-jvnv"] (@karume/models/sbv2)`.
 6. **Style.** Code that uses one family imports bare names from its subpath

@@ -97,6 +97,6 @@ force:
   the shared surface flat (option types, `ModelInputError`, `KARUME_SOURCES`, the PNG / WAV / image
   helpers) and each family as `export * as <namespace> from "./<subpath>.ts"`, and the subpaths
   export bare names (`sbv2.Pipeline` through the barrel, `Pipeline` from `@karume/models/sbv2`).
-  Tree-shaking through a namespace was measured to match the flat barrel byte for byte. The
+  Tree-shaking through a namespace was measured within 7 B of the flat barrel (ADR 0136). The
   `sideEffects: false` point above is still not verified; the cost it would remove (every family's
   source table in a barrel import) is filed in the backlog.

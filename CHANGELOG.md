@@ -171,7 +171,7 @@ measurements in `docs/research/`.
   "f16+dit8-a8-attn8-online"` selects the f16 decoder. The exporter's `wan.export_vae --dtype i8`
   writes the int8 decoder into the model's int8 series.
 - Wan2.2 decodes in 32-latent tiles on request (`@karume/models/wan`, ADR 0134):
-  `WanGenerateRequest.vaeTile: 32` (default 16) runs a second decoder chunk-graph pair that holds
+  `wan.GenerateRequest.vaeTile: 32` (default 16) runs a second decoder chunk-graph pair that holds
   no weight bytes and borrows the 16-tile pair's resident weights, so 1280×704 is decoded in 2×3
   tiles instead of 4×7. The decoder stage then needs about 9.4 GiB on the device (the 10 GB class
   keeps 16; it is never chosen automatically), and its time is 0.70–0.83× of tile 16 on an RTX
@@ -231,14 +231,17 @@ measurements in `docs/research/`.
 ### Breaking
 
 - `@karume/models`: public names lose their family prefix (ADR 0136). Each subpath exports bare
-  names: drop the prefix and keep the rest (`Sbv2Pipeline` → `Pipeline`, `ANIMA_SOURCES` →
-  `SOURCES`, `Sbv2GenerateOptions` → `GenerateOptions`, `WanTi2vPipeline` → `Ti2vPipeline`). Six
+  names: drop the prefix and keep the rest, re-casing its first letter after a lowercase prefix
+  (`Sbv2Pipeline` → `Pipeline`, `ANIMA_SOURCES` → `SOURCES`, `Sbv2GenerateOptions` →
+  `GenerateOptions`, `WanTi2vPipeline` → `Ti2vPipeline`, `wanFrameToRgba` → `frameToRgba`). Five
   names change beyond that: `toSbv2Utterance` → `toUtterance`, `parseGemma4PipelineConfig` →
-  `parsePipelineConfig`, `wanFrameToRgba` → `frameToRgba`, `animaLatents` → `latentStats`, and
-  umT5's `Umt5EncoderAssets` / `Umt5EncoderFromPretrainedOptions` → `Assets` /
-  `FromPretrainedOptions`. Names that had no prefix are unchanged (`GeneratedImage`, `DepthMap`,
-  `AlphaMatte`, `LabSegment`, the `Generation*` vocabulary, …). The barrel (`@karume/models`) no
-  longer exports family names flat: it exports the shared surface (`FromPretrainedHubOptions`,
+  `parsePipelineConfig`, `animaLatents` → `latentStats`, and umT5's `Umt5EncoderAssets` /
+  `Umt5EncoderFromPretrainedOptions` → `Assets` / `FromPretrainedOptions`. Names that had no prefix
+  keep their spelling (`GeneratedImage`, `DepthMap`, `AlphaMatte`, `LabSegment`, the `Generation*`
+  vocabulary, …), but like every family name they leave the flat barrel: a barrel import of
+  `formatResolution` or `GenerationCapacityError` becomes `anima.formatResolution` /
+  `gemma.GenerationCapacityError`, or an import from the subpath. The barrel (`@karume/models`)
+  no longer exports family names flat: it exports the shared surface (`FromPretrainedHubOptions`,
   `FromPretrainedComponentOptions`, `ComponentSource`, `ModelInputError`, `KARUME_SOURCES`,
   `encodePng`, `normalizeToNchw`, `resizeRgb8`, `Rgb8Image`, `decodeWav`, `encodeWav`, `DecodedWav`)
   and one namespace per family, named after the subpath in camelCase — `anima`, `birefnet`,
@@ -252,8 +255,8 @@ measurements in `docs/research/`.
   `"sbv2.InputError"`: re-key code that branches on `err.name` (`instanceof ModelInputError` is
   unaffected). Messages name the public class the same way (`"sbv2.Pipeline: …"`,
   `"wan.Ti2vPipeline: …"`), and the hint for an omitted ref reads
-  `SOURCES["sbv2-jvnv"] (@karume/models/sbv2)`. The full list (0.14 → 0.15; names not listed are
-  unchanged):
+  `SOURCES["sbv2-jvnv"] (@karume/models/sbv2)`. The full list of renamed names (0.14 → 0.15; on the
+  subpaths, names not listed keep their spelling):
   - `./anima`: `AnimaPipeline` → `Pipeline`, `AnimaAssets` → `Assets`, `AnimaFromPretrainedOptions`
     → `FromPretrainedOptions`, `AnimaGenerateEvent` → `GenerateEvent`, `AnimaGenerateRequest` →
     `GenerateRequest`, `AnimaLatentSnapshot` → `LatentSnapshot`, `AnimaPipelineOptions` →

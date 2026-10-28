@@ -73,14 +73,14 @@ exported, were **removed** (a **breaking change** to the public surface of 0.8.0
 replacement is a per-family table whose key is the basename of the HF repository name with `karume-`
 dropped:
 
-| Up to 0.8.0                  | From 0.9.0                              |
-| ---------------------------- | --------------------------------------- |
-| `ANIMA_CURRENT`              | `anima.SOURCES["anima"]`                |
-| `ANIMA_EXTRA_CURRENT`        | `anima.SOURCES["anima-extra"]`          |
-| `IRODORI_V4_SMALL_CURRENT`   | `irodori.SOURCES["irodori-v4-small"]`   |
-| `IRODORI_V4_1_SMALL_CURRENT` | `irodori.SOURCES["irodori-v4.1-small"]` |
-| `SBV2_JVNV_CURRENT`          | `sbv2.SOURCES["sbv2-jvnv"]`             |
-| `GEMMA4_CURRENT`             | `gemma.SOURCES["gemma4"]`              |
+| Up to 0.8.0                  | 0.9.0 – 0.14.x                          | From 0.15.0 (ADR 0136)                  |
+| ---------------------------- | --------------------------------------- | --------------------------------------- |
+| `ANIMA_CURRENT`              | `ANIMA_SOURCES["anima"]`                | `anima.SOURCES["anima"]`                |
+| `ANIMA_EXTRA_CURRENT`        | `ANIMA_SOURCES["anima-extra"]`          | `anima.SOURCES["anima-extra"]`          |
+| `IRODORI_V4_SMALL_CURRENT`   | `IRODORI_SOURCES["irodori-v4-small"]`   | `irodori.SOURCES["irodori-v4-small"]`   |
+| `IRODORI_V4_1_SMALL_CURRENT` | `IRODORI_SOURCES["irodori-v4.1-small"]` | `irodori.SOURCES["irodori-v4.1-small"]` |
+| `SBV2_JVNV_CURRENT`          | `SBV2_SOURCES["sbv2-jvnv"]`             | `sbv2.SOURCES["sbv2-jvnv"]`             |
+| `GEMMA4_CURRENT`             | `GEMMA4_SOURCES["gemma4"]`              | `gemma.SOURCES["gemma4"]`               |
 
 The gemma4 entry **also renamed the repository** — `karume-gemma4-e2b` → `karume-gemma4` (to make it
 a container that E4B / 12B can share — ADR 0092 decision 1. Done at the 0.9.0 publication). HF's
