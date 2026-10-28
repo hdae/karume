@@ -430,7 +430,7 @@ type StateQkFoldClass = {
  * from ①' on D3D12 (perf-ledger K-95), and a choice that moves numbers is not made automatically
  * (ADR 0058 decision 2).
  */
-const STATE_QK_FOLD_CLASSES: readonly StateQkFoldClass[] = [
+export const STATE_QK_FOLD_CLASSES: readonly StateQkFoldClass[] = [
   { kvRepeat: 8, depth: 512, chunkRows: 1 },
   { kvRepeat: 8, depth: 512, chunkRows: 4 },
   { kvRepeat: 8, depth: 512, chunkRows: 8 },

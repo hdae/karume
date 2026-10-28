@@ -1,0 +1,11 @@
+{
+  "name": "@karume/kernel-checks",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Kernel identity checks (subgroup reductions, bit-identical attention rewrites) shared by the runtime GPU tests and the playground.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./mod.ts"
+  }
+}

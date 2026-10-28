@@ -1,4 +1,5 @@
 import { assertEquals, assertRejects } from "@std/assert";
+import { checkRmsSubgroup, RMS_SUBGROUP_CASES } from "@karume/kernel-checks";
 import { beforeAll, describe, it } from "vite-plus/test";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { createSessionFromContainer, type SessionOptions } from "../src/runtime/executor.ts";
@@ -6,7 +7,7 @@ import { ExecutionError } from "../src/runtime/plan.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { rmsNormAddGraph } from "./helpers/rms-norm-add-graph.ts";
-import { checkRmsSubgroup } from "./helpers/rms-subgroup-check.ts";
+import { assertCheckPart } from "./helpers/kernel-check-assert.ts";
 
 describe.skipIf(!GPU_AVAILABLE)("RMS subgroup32の明示指定", () => {
   it("不正な値・必要なdevice機能の不足を重み転送前に拒否する", async () => {
@@ -65,7 +66,14 @@ describe.skipIf(!GPU_AVAILABLE)("RMS subgroup32の明示指定", () => {
       if (!supported) context.skip();
       const gpu = await acquireGpu({ subgroups: true });
       try {
-        await checkRmsSubgroup(gpu);
+        const parts = await checkRmsSubgroup(gpu);
+        // 12 widths × 4 row counts; 3 widths × 2 addition orders × with and without cancellation;
+        // one grid-stride run.
+        assertEquals(
+          parts.map(({ id, cases }) => [id, cases.length]),
+          Object.entries(RMS_SUBGROUP_CASES),
+        );
+        for (const part of parts) assertCheckPart(part);
       } finally {
         gpu.destroy();
       }

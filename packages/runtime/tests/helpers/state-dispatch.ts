@@ -39,6 +39,7 @@ import {
   stateStatsWorkgroups,
 } from "../../src/kernels/state-attention.ts";
 import { statePvTiledWgsl, stateQkTiledWgsl } from "../../src/kernels/gemm.ts";
+import { BUFFER_USAGE, MAP_MODE } from "../../src/gpu/webgpu-constants.ts";
 import {
   stateAppendParams,
   stateAppendWgsl,
@@ -112,8 +113,8 @@ export type StateMutation = (kernel: "qk" | "stats" | "pv" | "append", wgsl: str
  */
 export type StatePipelineCache = Map<string, GPUComputePipeline>;
 
-const STORAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
-const UNIFORM = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
+const STORAGE = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST | BUFFER_USAGE.COPY_SRC;
+const UNIFORM = BUFFER_USAGE.UNIFORM | BUFFER_USAGE.COPY_DST;
 
 const storageBuffer = (device: GPUDevice, data: Float32Array<ArrayBuffer>): GPUBuffer => {
   const buffer = device.createBuffer({ size: Math.max(4, data.byteLength), usage: STORAGE });
@@ -139,12 +140,12 @@ const readRaw = async (
   const size = Math.max(4, count * 4);
   const staging = device.createBuffer({
     size,
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    usage: BUFFER_USAGE.COPY_DST | BUFFER_USAGE.MAP_READ,
   });
   const encoder = device.createCommandEncoder();
   encoder.copyBufferToBuffer(buffer, 0, staging, 0, size);
   device.queue.submit([encoder.finish()]);
-  await staging.mapAsync(GPUMapMode.READ);
+  await staging.mapAsync(MAP_MODE.READ);
   const copy = staging.getMappedRange().slice(0);
   staging.unmap();
   staging.destroy();

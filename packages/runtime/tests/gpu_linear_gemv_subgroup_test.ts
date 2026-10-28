@@ -1,12 +1,13 @@
-import { assertRejects } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
+import { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "@karume/kernel-checks";
 import { beforeAll, describe, it } from "vite-plus/test";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { createSessionFromContainer, type SessionOptions } from "../src/runtime/executor.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { rmsNormAddGraph } from "./helpers/rms-norm-add-graph.ts";
-import { checkGemvSubgroup } from "./helpers/gemv-subgroup-check.ts";
 import { checkGemvSubgroupCensus } from "./helpers/gemv-subgroup-census.ts";
+import { assertCheckPart } from "./helpers/kernel-check-assert.ts";
 
 describe.skipIf(!GPU_AVAILABLE)("並列GEMV subgroup32の明示指定", () => {
   it("不正な値・必要なdevice機能の不足を重み転送前に拒否する", async () => {
@@ -42,7 +43,10 @@ describe.skipIf(!GPU_AVAILABLE)("並列GEMV subgroup32の明示指定", () => {
       context.skip(!supported, "subgroups / subgroup-size-control / subgroup_id unsupported");
       const gpu = await acquireGpu({ subgroups: true });
       try {
-        await checkGemvSubgroup(gpu);
+        const part = await checkGemvSubgroup(gpu);
+        // i2 / i8: 3 shapes, i4: 6 shapes; each × 5 lane counts × M = 1 / 4 / 8.
+        assertEquals(part.cases.length, GEMV_SUBGROUP_CASES["gemv-subgroup32"]);
+        assertCheckPart(part);
         await checkGemvSubgroupCensus(gpu);
       } finally {
         gpu.destroy();

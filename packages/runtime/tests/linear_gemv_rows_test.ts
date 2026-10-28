@@ -480,7 +480,7 @@ describe("GEMV並列加算の選択とコード生成", () => {
 describe("subgroup32変種の積和はparallelと同じ綴り", () => {
   // ADR 0101 決定 3（積和は parallel と同一）を綴りで縛る。parallel 族だけ fma 化して subgroup が
   // `acc + x * d` のまま残ると、Metal では縮約の入れ方が式形で変わり u32 一致が崩れる（ADR 0105 追記 4）。
-  // GPU 実走の u32 一致門（helpers/gemv-subgroup-check.ts）は Deno で SKIP になるので、この門が常設側。
+  // GPU 実走の u32 一致門（@karume/kernel-checks の checkGemvSubgroup）は Deno で SKIP になるので、この門が常設側。
   const macLines = (wgsl: string): string[] =>
     wgsl
       .split("\n")

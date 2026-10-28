@@ -398,6 +398,8 @@ importers:
         specifier: workspace:*
         version: link:../test-support
 
+  packages/kernel-checks: {}
+
   packages/models:
     dependencies:
       '@hdae/yomi':
@@ -419,6 +421,9 @@ importers:
       '@karume/hub':
         specifier: workspace:*
         version: link:../hub
+      '@karume/kernel-checks':
+        specifier: workspace:*
+        version: link:../kernel-checks
       '@karume/test-support':
         specifier: workspace:*
         version: link:../test-support
