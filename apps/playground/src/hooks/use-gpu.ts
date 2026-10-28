@@ -107,10 +107,19 @@ export const createGpuLifecycle = (queue: GpuQueue): GpuLifecycle => {
       disposed = true;
       const gpu = acquired;
       if (gpu === undefined) return;
-      // This device was acquired after the previous `released` settled, so it replaces it.
-      queue.released = nextMacrotask()
+      // Chained on the previous value rather than replacing it: that value settled before this
+      // device was acquired, unless a `runOnGpuQueue` task took the queue since then, and the next
+      // acquisition must wait for that task too.
+      const previous = queue.released;
+      // A destroy that throws is reported here and still lets the queue move on: a rejected
+      // `released` would fail every later acquisition of the app.
+      const destroyed = nextMacrotask()
         .then(() => settleAll(pending))
-        .then(() => gpu.destroy());
+        .then(() => gpu.destroy())
+        .catch((error: unknown) => {
+          console.error("Destroying the GPU device failed", error);
+        });
+      queue.released = Promise.all([previous, destroyed]).then(() => undefined);
     };
   };
 
@@ -140,10 +149,47 @@ export const leaseFor = (previous: GpuLease, options: GpuOptions, attempt: numbe
 export const leaseState = (held: HeldGpuState | undefined, lease: GpuLease): GpuState =>
   held !== undefined && held.lease === lease ? held.state : ACQUIRING;
 
-const useGpuQueue = (): GpuQueue => {
+/**
+ * Runs `task` — work that acquires and destroys a device of its own, such as `runGeometrySweep` —
+ * as the app's GPU user for as long as it runs: `task` starts once the queue's last released device
+ * is destroyed, and the queue's next acquisition waits until `task` has settled (its device is
+ * destroyed before its promise settles). Returns `task`'s promise as is (a caller that drops it MUST
+ * catch it).
+ *
+ * The queue is taken synchronously, in the call itself: a page that calls this from an event
+ * handler holds the queue before any later commit runs, so the next page's `useGpu` — whose `open`
+ * reads `queue.released` in its effect, after the leaving page's cleanups — waits for `task`. The
+ * caller aborts `task` when the page is left (its cleanup), and `task` MUST check its signal before
+ * it acquires: a task that is still waiting for the previous destroy then settles without a device.
+ * Unlike a `useGpu` release there is no macrotask before the queue moves on: `task` owns its device
+ * alone, so no cleanup of the same commit can still start work on it.
+ *
+ * Known limitation: the queue moves on only when `task` settles. A `useGpu` release while acquiring
+ * lets the queue go at once, but this function cannot see inside `task`: if `task` waits on an
+ * adapter or device request that never settles — `runGeometrySweep` consults no signal while it
+ * acquires — the app's GPU queue is held for good, and every later acquisition of any page waits.
+ * Reloading the tab is the only recovery.
+ *
+ * MUST NOT be called while a `useGpu` device of the same queue is live (acquired and not released):
+ * the queue's value already settled when that device was acquired, so `task` would start at once
+ * and two devices would hold work together. (The two writers still compose: that device's release
+ * chains on the queue, so the next acquisition waits for both.) Every `useGpu` caller is a page
+ * route, so a page without `useGpu` meets this.
+ */
+export const runOnGpuQueue = <T>(queue: GpuQueue, task: () => Promise<T>): Promise<T> => {
+  const run = queue.released.then(task);
+  queue.released = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+};
+
+/** The app's device queue (the root layout provides it through {@link GpuQueueContext}). */
+export const useGpuQueue = (): GpuQueue => {
   const queue = useContext(GpuQueueContext);
   if (queue === undefined) {
-    throw new Error("useGpu needs a GpuQueueContext provider (the root layout provides it)");
+    throw new Error("The GPU queue needs a GpuQueueContext provider (the root layout provides it)");
   }
   return queue;
 };
