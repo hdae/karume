@@ -71,11 +71,13 @@ Facts measured before the ruling (2026-10-28, on a copy of the package):
    carries a JSDoc that names the subpath and links its JSR page, since JSR lists the namespace's
    members empty.
 4. **The declarations are renamed (A-decl), not aliased at the boundary**, so TypeScript errors, JSR
-   signatures and stack traces show the names users import. One declaration stays qualified:
-   `Gemma4QatPipeline` shares `src/gemma/pipeline.ts` and its base class with Gemma's `Pipeline`, so
-   `./gemma4-qat` re-exports it as `Pipeline` (its option types and RoPE entry live in
-   `src/gemma/qat.ts` under their public names). Bare names that already existed inside `src/gemma`
-   were renamed out of the way. Internal, unexported names keep their prefixes.
+   signatures and stack traces show the names users import. Where a family's public name would
+   clash with Gemma's in one module, the declaration gets its own module: the QAT class is
+   `Pipeline` in `src/gemma/qat-pipeline.ts` (extending the shared base class of
+   `src/gemma/pipeline.ts`), and its option types and RoPE entry are in `src/gemma/qat.ts`, which
+   refers to Gemma's types as `gemma.PipelineOptions` through a namespace import — JSR prints a type
+   reference as written, so an import alias would reach the docs. Bare names that already existed
+   inside `src/gemma` were renamed out of the way. Internal, unexported names keep their prefixes.
 5. **Error names and diagnostics name the family.** A renamed error class keeps a qualified runtime
    `name`: `sbv2.InputError` (class `InputError`) has `name === "sbv2.InputError"`, so a log line or
    an `err.name` branch still says which family failed. `ModelInputError` and

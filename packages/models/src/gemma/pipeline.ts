@@ -46,13 +46,7 @@ import {
   resolveGemmaSessionOptions,
 } from "./session-options.ts";
 import { createGemmaGreedyOutput, type GemmaGreedyOutput } from "./greedy-output.ts";
-import {
-  admitGemma4Qat,
-  assertGemma4QatPle,
-  type FromPretrainedOptions as QatFromPretrainedOptions,
-  type PipelineOptions as QatPipelineOptions,
-  ropeInputs as qatRopeInputs,
-} from "./qat.ts";
+import { admitGemma4Qat, assertGemma4QatPle, ropeInputs as qatRopeInputs } from "./qat.ts";
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
 import {
   acquireGpu,
@@ -643,8 +637,11 @@ export type ChatOptions = {
   readonly speculative?: boolean | "always";
 };
 
-/** The internal state of {@link Pipeline} (not exposed on the public surface). */
-type Gemma4State = {
+/**
+ * The internal state of {@link Pipeline} (not exposed on the public surface — exported only for the
+ * QAT subclass in `./qat-pipeline.ts`).
+ */
+export type Gemma4State = {
   /**
    * The name of the entry point used for construction ({@link gemmaEntryName}). The prefix of
    * messages thrown after construction comes from here.
@@ -1079,8 +1076,10 @@ const buildGemma4Program = (
  * The only construction entry points are {@link Pipeline.fromPretrained} (fetching from HF) and
  * {@link Pipeline.fromAssets} (bytes already fetched) — the constructor is private so that no
  * half-built state that bypasses the asset checks can be created (ADR 0008).
+ *
+ * Exported only for the QAT subclass in `./qat-pipeline.ts`; no entry re-exports it.
  */
-class GemmaPipeline {
+export class GemmaPipeline {
   readonly #state: Gemma4State;
   /**
    * The serialization chain of chat and dispose (one Session is not pushed by two conversations at
@@ -2062,38 +2061,5 @@ export class Pipeline extends GemmaPipeline {
    */
   static async fromAssets(input: Assets, options: PipelineOptions = {}): Promise<Pipeline> {
     return new Pipeline(await super.loadAssets(GEMMA4_PIPELINE_NAME, input, options));
-  }
-}
-
-/**
- * Fixed QAT E2B/E4B at the experimental stage. Full CPU/GPU bit agreement and broad quality are not
- * guaranteed (ADR 0097).
- *
- * `@karume/models/gemma4-qat` exports it as `Pipeline`. The declaration keeps a qualified name
- * because it shares this module (and the base class) with regular Gemma's {@link Pipeline}.
- */
-export class Gemma4QatPipeline extends GemmaPipeline {
-  private constructor(state: Gemma4State) {
-    super(state);
-  }
-  /**
-   * Builds E2B/E4B from an explicitly given QAT distribution. When model is omitted, the manifest's
-   * default is used.
-   */
-  static async fromPretrained(
-    ref: string | HubRepoRef | DistributionSource,
-    options: QatFromPretrainedOptions = {},
-  ): Promise<Gemma4QatPipeline> {
-    return new Gemma4QatPipeline(await super.loadPretrained("gemma4-qat", ref, options));
-  }
-  /**
-   * Checks and builds from fetched fixed-QAT assets. The model is determined from the graph and the
-   * PLE configuration.
-   */
-  static async fromAssets(
-    input: Assets,
-    options: QatPipelineOptions = {},
-  ): Promise<Gemma4QatPipeline> {
-    return new Gemma4QatPipeline(await super.loadAssets("gemma4-qat", input, options));
   }
 }

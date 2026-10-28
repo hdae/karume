@@ -5,25 +5,24 @@
  *
  * The public declarations carry the names users import (`PipelineOptions`, `FromPretrainedOptions`,
  * `ropeInputs`), so they live here rather than next to regular Gemma's declarations of the same
- * names in `pipeline.ts` / `rope.ts`.
+ * names in `pipeline.ts` / `rope.ts`. Regular Gemma's types are referenced through the namespace
+ * `gemma` (not import aliases), because JSR prints a type reference as written: the docs then read
+ * `gemma.PipelineOptions`, the barrel's spelling, instead of an alias users cannot import.
  */
 import { codecLayout, type Tensor } from "@karume/runtime";
 import type { GraphOwner } from "../hub/components.ts";
 import type { Gemma4PleIndex } from "./ple-index.ts";
-import type {
-  FromPretrainedOptions as GemmaFromPretrainedOptions,
-  PipelineOptions as GemmaPipelineOptions,
-} from "./pipeline.ts";
+import type * as gemma from "./pipeline.ts";
 import { buildRopeInputs, type RopeSpec } from "./rope.ts";
 
 type Graph = GraphOwner["graph"];
 export type Gemma4QatModel = "e2b" | "e4b";
 
 /** The initial implementation of fixed mobile QAT does not accept a drafter. */
-export type PipelineOptions = Omit<GemmaPipelineOptions, "speculative"> & {
+export type PipelineOptions = Omit<gemma.PipelineOptions, "speculative"> & {
   readonly speculative?: never;
 };
-export type FromPretrainedOptions = Omit<GemmaFromPretrainedOptions, "speculative" | "model"> & {
+export type FromPretrainedOptions = Omit<gemma.FromPretrainedOptions, "speculative" | "model"> & {
   readonly speculative?: never;
   readonly model?: "e2b" | "e4b";
 };
