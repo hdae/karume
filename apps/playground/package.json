@@ -15,6 +15,7 @@
   "dependencies": {
     "@base-ui/react": "catalog:",
     "@fontsource-variable/geist": "catalog:",
+    "@hdae/yomi": "catalog:",
     "@karume/hub": "workspace:*",
     "@karume/models": "workspace:*",
     "@karume/runtime": "workspace:*",
