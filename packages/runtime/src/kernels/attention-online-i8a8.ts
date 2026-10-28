@@ -124,14 +124,47 @@ export const ATTENTION_ONLINE_MAX_DEPTH = 128;
 /**
  * Whether the online kernel can run the shape: the PV phase hands each lane `D / 16` columns in
  * vec4 groups (so `D % 64 == 0`), the accumulators are bounded by {@link ATTENTION_ONLINE_MAX_DEPTH},
- * and P̃ / Vᵀ pack four keys per word (`N % 4 == 0`, the ③PV condition). Shapes outside fall back
- * to the three dispatches (ADR 0058 decision 3 — the route shows it).
+ * and there is at least one key (the clamped `ks` reads and `1 / l` need one). Any key length
+ * `N ≥ 1` runs: `N % 4 != 0` takes the {@link AttentionOnlineKeyWords} `padded` form (ADR 0132
+ * addendum 2026-10-27). Shapes outside fall back to the three dispatches (ADR 0058 decision 3 — the
+ * route shows it).
  * NOTE: `D % 64 == 0` also makes every binding the kernel reads as `vec4` (q, k, O, vs) a whole
  * number of 16-byte elements, and the plan places offsets at multiples of
  * `minStorageBufferOffsetAlignment` — the two facts the vec4 bindings rely on.
+ * NOTE: ③PV's i8a8 kernel keeps `N % 4 == 0` (`attentionPvI8a8Eligible`); only this kernel learned
+ * the key valid length, so the three-dispatch routes (Anima's a8 + s16) do not move.
  */
 export const attentionOnlineI8a8Eligible = (depth: number, cols: number): boolean =>
-  depth % 64 === 0 && depth <= ATTENTION_ONLINE_MAX_DEPTH && cols % I8A8_PACK === 0;
+  depth % 64 === 0 && depth <= ATTENTION_ONLINE_MAX_DEPTH && cols >= 1;
+
+/**
+ * How the quantised Vᵀ packs the key axis (ADR 0132 addendum 2026-10-27). `whole`: `N % 4 == 0`,
+ * each row of Vᵀ is `N / 4` words of four keys. `padded`: `N % 4 != 0`, each row is `ceil(N / 4)`
+ * words and the bytes of the keys `N..` in the last word are zero (the producer's padding —
+ * `quantizeRowsPaddedWgsl`). The kernel never weighs those bytes: keys `≥ N` take the score `NEG`
+ * (decision 4), so their P̃ is `round(127 · exp(NEG − m)) = 0` and their products with any byte are
+ * 0. The kernel's only difference is the row length `n4` of its Vᵀ reads.
+ *
+ * MUST: the kernel ({@link attentionOnlineI8a8Wgsl} and its uniform
+ * {@link attentionOnlineI8a8Params}), the Vᵀ producer (recipe-builders/attention.ts
+ * `attentionValueQuantization`) and the size of the quantised Vᵀ (`attentionI8a8TempBytes`, through
+ * {@link attentionOnlineValueRowWords}) take the form from this one function — a row length two of
+ * them disagree on reads the wrong words without an exception.
+ * MUST: `whole` keeps the key and the WGSL of the kernel before the addendum byte for byte, so the
+ * outputs of every `N % 4 == 0` shape (every accepted Wan2.1 / Wan2.2 size) are unchanged by
+ * construction.
+ */
+export type AttentionOnlineKeyWords = "whole" | "padded";
+
+export const attentionOnlineKeyWords = (cols: number): AttentionOnlineKeyWords =>
+  cols % I8A8_PACK === 0 ? "whole" : "padded";
+
+/**
+ * Words per row of the quantised Vᵀ — the row length the kernel's `n4` reads: `N / 4` in the
+ * {@link attentionOnlineKeyWords} `whole` form and `ceil(N / 4)` in the `padded` one, so one
+ * expression serves both.
+ */
+export const attentionOnlineValueRowWords = (cols: number): number => Math.ceil(cols / I8A8_PACK);
 
 /** Bytes of workgroup storage the kernel declares (what the device compares with its limit). */
 export const attentionOnlineI8a8WorkgroupStorageBytes = (
@@ -152,32 +185,43 @@ export const attentionOnlineI8a8WorkgroupStorageBytes = (
  */
 export type AttentionOnlineOutput = "bhsd" | "bshd";
 
+/** The key adds `:kpad` for the {@link AttentionOnlineKeyWords} `padded` form only (`whole` keys are unchanged). */
 export const attentionOnlineI8a8Key = (
   dp4a: boolean,
   depth: number,
   reduce: AttentionOnlineReduce,
   output: AttentionOnlineOutput = "bhsd",
+  keyWords: AttentionOnlineKeyWords = "whole",
 ): string =>
   `attention_online:v2:i8a8:d${depth}:r${ATTENTION_ONLINE_ROWS}k${ATTENTION_ONLINE_KEYS}:${
     dp4a ? "dp4a" : "emu"
-  }:${reduce}${output === "bshd" ? ":obshd" : ""}`;
+  }:${reduce}${output === "bshd" ? ":obshd" : ""}${keyWords === "padded" ? ":kpad" : ""}`;
 
 /**
  * The uniform: `m` = query rows of the whole node, `n` = keys, `row_offset` = the first row of this
  * dispatch's window (the dispatch covers `ceil(windowRows / 64)` workgroups along x and B·H along
  * y), `scale` = the half scale (`√scale_factor` of ADR 0023, applied to both q and k). With a token-major
  * output ({@link AttentionOnlineOutput} `bshd`), `heads` = H follows in a second 16-byte block.
+ * `keyWords` is the key-axis form the pipeline was compiled with: the uniform's `n` must be a key
+ * length of that form, since a `whole` kernel given `N % 4 != 0` (or a `padded` one given
+ * `N % 4 == 0`) reads Vᵀ at the wrong row length without an exception — so a mismatch throws here.
  */
 export const attentionOnlineI8a8Params = (
   m: number,
   n: number,
   rowOffset: number,
   scale: number,
+  keyWords: AttentionOnlineKeyWords,
   heads?: number,
 ): Uint32Array<ArrayBuffer> => {
   assertU32Params("attention_online i8a8", { m, n, row_offset: rowOffset, heads: heads ?? 1 });
   if (!Number.isFinite(scale)) {
     throw new CodegenError(`attention_online i8a8: scale must be finite (${scale})`);
+  }
+  if (keyWords !== attentionOnlineKeyWords(n)) {
+    throw new CodegenError(
+      `attention_online i8a8: N = ${n} takes the '${attentionOnlineKeyWords(n)}' key axis, but the pipeline was compiled for '${keyWords}'`,
+    );
   }
   const words = new Uint32Array(heads === undefined ? 4 : 8);
   words[0] = m;
@@ -279,8 +323,10 @@ export const attentionOnlineI8a8Wgsl = (
   depth: number,
   reduce: AttentionOnlineReduce,
   output: AttentionOnlineOutput = "bhsd",
+  keyWords: AttentionOnlineKeyWords = "whole",
 ): string => {
   const bshd = output === "bshd";
+  const padded = keyWords === "padded";
   assertDepth(depth);
   const quads = qkQuads(depth);
   const qkS = qkStride(depth);
@@ -300,7 +346,9 @@ diagnostic(off, subgroup_uniformity);
     : "";
   return `${header}// karume attention_online (O = softmax((q·scale)(k·scale)ᵀ) · v with S never stored — ADR 0132; q / k per-token i8, v per-column i8, P̃ = round(127·exp(S − m)) against the running max${
     dp4a ? "" : " (emulated)"
-  }, D = ${depth}, 64 rows × 64-key tiles, 256 threads, vec4 tiles, ${sg ? "subgroup shuffle" : "workgroup memory"} reductions)
+  }, D = ${depth}, 64 rows × 64-key tiles, 256 threads, vec4 tiles, ${sg ? "subgroup shuffle" : "workgroup memory"} reductions${
+    padded ? ", Vᵀ rows of ceil(N/4) words" : ""
+  })
 struct Dims {
   m: u32,
   n: u32,
@@ -337,7 +385,13 @@ fn main(
   // the 16 lanes of a row: ${sg ? "one half of a subgroup under the measured linear lane mapping" : "reduced through workgroup memory"}
   let tx = t % ${LANES}u;
   let ty = t / ${LANES}u;
-  let n4 = dims.n / ${I8A8_PACK}u;
+${
+  padded
+    ? `  // Vᵀ rows hold ceil(N/4) words: the producer zero-pads the last one, and its keys from N on
+  // score NEG, so their P̃ is 0 and the padding never weighs in
+  let n4 = (dims.n + ${I8A8_PACK - 1}u) / ${I8A8_PACK}u;`
+    : `  let n4 = dims.n / ${I8A8_PACK}u;`
+}
   // this head's offsets: q / k in vec4 words, Vᵀ in words, the k scales in elements
   let q_bh = bh * dims.m * ${quads}u;
   let k_bh = bh * dims.n * ${quads}u;

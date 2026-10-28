@@ -11,11 +11,21 @@
 //      ±1 step of the ③PV reference (never ±2); the TS mirror within one lattice step
 //   ④ fault injection: dropping the rescale of O and truncating the tile row max turn ① red
 //
+// The key valid length (ADR 0132 addendum 2026-10-27): shapes with N % 4 = 1, 2, 3 run the
+// `padded` key axis (Vᵀ rows of ceil(N/4) words). ① compares them with the exact attention over
+// exactly N keys — a reference without any padding, so it is independent of how the padding is
+// made — and ③ with the TS mirror (which walks any N with −3.0e38). They run on the dense inputs
+// and on two spike-V inputs ({@link spikeInputs}), whose tight band catches a Vᵀ word read from
+// the wrong place at every N (the dense band grows with N). On top: the padding bytes filled with
+// 0 and with 127 give Uint32-identical outputs (the primary detector of a mask bound past N), and
+// three faults — the mask bound at ceil(N/4)·4, the whole form's row length floor(N/4), the last
+// Vᵀ word of each row dropped — turn ① red on the spike-V inputs.
+//
 // The quantised inputs are built on the host with the TS references (the GPU kernels that do it in
 // the Session path have their own tests), so the kernel is the only thing under test here.
 
 import { describe, it, test } from "vite-plus/test";
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { RunArena } from "../src/gpu/arena.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
@@ -28,7 +38,14 @@ import {
   attentionOnlineI8a8Params,
   attentionOnlineI8a8Wgsl,
   attentionOnlineI8a8WorkgroupStorageBytes,
+  attentionOnlineKeyWords,
+  attentionOnlineValueRowWords,
 } from "../src/kernels/attention-online-i8a8.ts";
+import { quantizeRowsGeometry, quantizeRowsKey } from "../src/kernels/quantize-rows.ts";
+import {
+  attentionI8a8TempBytes,
+  attentionValueQuantization,
+} from "../src/runtime/recipe-builders/attention.ts";
 import {
   quantizeRowsReference,
   referenceAttentionPvI8a8Core,
@@ -44,7 +61,10 @@ import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
 const P_LATTICE_MAX = 127;
-/** f32 noise allowed on top of the lattice model (accumulation over up to 1,000 keys of O(1) values). */
+/**
+ * f32 noise allowed on top of the lattice model (accumulation over up to 4,106 keys of O(1)
+ * values). Measured sufficient, not proven: the sharp spike inputs leave under 3% of the bound.
+ */
 const F32_NOISE = 2e-5;
 
 type Shape = {
@@ -66,6 +86,17 @@ const SHAPES: readonly Shape[] = [
   { name: "remainders D128", batch: 3, m: 150, n: 200, d: 128 },
   { name: "cross D128", batch: 2, m: 70, n: 512, d: 128 },
   { name: "long keys D64", batch: 2, m: 100, n: 1000, d: 64 },
+];
+
+/**
+ * Key lengths that are not multiples of 4 (the `padded` key axis): N % 4 = 1 in a two-tile
+ * D = 64 shape, N % 4 = 2 at the MOSS-Image 1024² negative branch's S₋ = 4,096 + 10, N % 4 = 3
+ * with row and key tile remainders.
+ */
+const PADDED_SHAPES: readonly Shape[] = [
+  { name: "N%4=1 D64", batch: 2, m: 70, n: 65, d: 64 },
+  { name: "N%4=2 D128 (S₋ 4,106)", batch: 2, m: 64, n: 4106, d: 128 },
+  { name: "N%4=3 D128", batch: 3, m: 150, n: 203, d: 128 },
 ];
 
 // ---------------------------------------------------------------------------
@@ -109,6 +140,54 @@ const makeInputs = (shape: Shape, seed: number): Inputs => {
   return { q, k, v, scale: Math.sqrt(1 / Math.sqrt(d)) * 1.5 };
 };
 
+/**
+ * Spike-V inputs (the padded shapes): V holds one key per column at ±(0.5 + b) and 0 elsewhere,
+ * so the error model's Σ_j |ṽ_j[d]| is one key's and its band is tight — with the dense V of
+ * {@link makeInputs} the band grows with Σ_j |ṽ_j| over all N keys: at N = 4,106 the whole form's
+ * row length floor(N/4) left it at 1.33× and a dropped last Vᵀ word at 0.15× (2026-10-27), against
+ * 249.6× and 86.3× on the sharp spike. Columns
+ * 0–3 put their spike on the last valid keys N − 1 … N − 4 (the padded last word and the word
+ * before it); the other columns spread theirs over the axis. `sharp` keeps the dense inputs' q / k
+ * and scale (the keys' weights differ, so a key read from the wrong place changes O); `flat` divides
+ * the scale by 10, so every key keeps a P̃ of many lattice steps and a key let in past N weighs in
+ * (a sharp row max would round a padding key's P̃, exp(0 − m), to 0).
+ */
+const spikeInputs = (shape: Shape, softmax: "sharp" | "flat"): Inputs => {
+  const { batch, n, d } = shape;
+  const dense = makeInputs(shape, 7 + d);
+  const v = new Float32Array(batch * n * d);
+  for (let b = 0; b < batch; b += 1) {
+    for (let col = 0; col < d; col += 1) {
+      const key = col < 4 ? Math.max(0, n - 1 - col) : (col * 7919 + b * 31) % n;
+      v[(b * n + key) * d + col] = (col % 2 === 0 ? 1 : -1) * (0.5 + b);
+    }
+  }
+  return { ...dense, v, scale: softmax === "flat" ? dense.scale * 0.1 : dense.scale };
+};
+
+type FourPointCase = {
+  readonly shape: Shape;
+  /** Appended to the shape's name in the test name and the failure messages. */
+  readonly label: string;
+  readonly make: () => Inputs;
+};
+
+/** Every shape on the dense inputs; the padded shapes also on both spike-V inputs. */
+const FOUR_POINT_CASES: readonly FourPointCase[] = [
+  ...[...SHAPES, ...PADDED_SHAPES].map((shape) => ({
+    shape,
+    label: "",
+    make: () => makeInputs(shape, 7 + shape.d),
+  })),
+  ...PADDED_SHAPES.flatMap((shape) =>
+    (["sharp", "flat"] as const).map((softmax) => ({
+      shape,
+      label: ` (spike V, ${softmax} softmax)`,
+      make: () => spikeInputs(shape, softmax),
+    })),
+  ),
+];
+
 /** Pack flat i8 rows four per u32 (component i in byte i — the order of `pack4xI8`). */
 const packWords = (values: Int8Array<ArrayBuffer>): Uint32Array<ArrayBuffer> => {
   const words = new Uint32Array(values.length / 4);
@@ -121,6 +200,25 @@ const packWords = (values: Int8Array<ArrayBuffer>): Uint32Array<ArrayBuffer> => 
       0;
   }
   return words;
+};
+
+/**
+ * Pack `rows` i8 rows of `dim` elements into ceil(dim/4) words each, the bytes past element
+ * `dim − 1` set to `padByte` (the layout of the `padded` key axis; `dim % 4 == 0` is
+ * {@link packWords}).
+ */
+const packPaddedRows = (
+  values: Int8Array<ArrayBuffer>,
+  rows: number,
+  dim: number,
+  padByte: number,
+): Uint32Array<ArrayBuffer> => {
+  const words = Math.ceil(dim / 4);
+  const padded = new Int8Array(rows * words * 4).fill(padByte);
+  for (let row = 0; row < rows; row += 1) {
+    padded.set(values.subarray(row * dim, (row + 1) * dim), row * words * 4);
+  }
+  return packWords(padded);
 };
 
 type Quantised = {
@@ -137,7 +235,8 @@ type Quantised = {
   readonly vtDeq: Float64Array<ArrayBuffer>;
 };
 
-const quantise = (shape: Shape, inputs: Inputs): Quantised => {
+/** `padByte` fills the padding bytes of Vᵀ's last word when N % 4 != 0 (the producer writes 0). */
+const quantise = (shape: Shape, inputs: Inputs, padByte = 0): Quantised => {
   const { batch, m, n, d } = shape;
   const query = quantizeRowsReference(inputs.q, batch * m, d);
   const key = quantizeRowsReference(inputs.k, batch * n, d);
@@ -155,7 +254,7 @@ const quantise = (shape: Shape, inputs: Inputs): Quantised => {
     qs: query.scale,
     kq: packWords(key.q),
     ks: key.scale,
-    vq: packWords(values.q),
+    vq: packPaddedRows(values.q, batch * d, n, padByte),
     vs: values.scale,
     vtInt: values.q,
     qDeq: dequant(query, d),
@@ -287,8 +386,10 @@ const runOnline = async (
     const vq = host(quant.vq);
     const vs = host(quant.vs);
     const out = arena.allocRegion(batch * m * d * 4);
-    let wgsl = attentionOnlineI8a8Wgsl(options.dp4a, d, options.reduce);
-    let key = attentionOnlineI8a8Key(options.dp4a, d, options.reduce);
+    // The key-axis form production takes for this N (`padded` when N % 4 != 0)
+    const keyWords = attentionOnlineKeyWords(n);
+    let wgsl = attentionOnlineI8a8Wgsl(options.dp4a, d, options.reduce, "bhsd", keyWords);
+    let key = attentionOnlineI8a8Key(options.dp4a, d, options.reduce, "bhsd", keyWords);
     if (options.mutate !== undefined) {
       const mutated = options.mutate.apply(wgsl);
       assert(
@@ -302,7 +403,11 @@ const runOnline = async (
     const windows = options.windows ?? [[0, m] as const];
     for (const [offset, rows] of windows) {
       const params = arena.allocHostWritten(16, UNIFORM_IN);
-      gpu.device.queue.writeBuffer(params, 0, attentionOnlineI8a8Params(m, n, offset, scale));
+      gpu.device.queue.writeBuffer(
+        params,
+        0,
+        attentionOnlineI8a8Params(m, n, offset, scale, keyWords),
+      );
       scheduler.dispatch(
         pipeline,
         gpu.device.createBindGroup({
@@ -407,7 +512,16 @@ test("eligibility and workgroup storage of the online kernel", () => {
   assert(attentionOnlineI8a8Eligible(128, 512));
   assert(!attentionOnlineI8a8Eligible(256, 1000), "D above the maximum (the tiles exceed 48 KiB)");
   assert(!attentionOnlineI8a8Eligible(96, 64), "D % 64 != 0");
-  assert(!attentionOnlineI8a8Eligible(128, 66), "N % 4 != 0");
+  // ADR 0132 addendum 2026-10-27: N % 4 != 0 runs with a padded Vᵀ (before it, (128, 66) was not
+  // eligible); a key axis needs at least one key
+  assert(attentionOnlineI8a8Eligible(128, 66), "N % 4 != 0 takes the padded key axis");
+  assert(attentionOnlineI8a8Eligible(64, 4106), "N % 4 != 0 takes the padded key axis");
+  assert(!attentionOnlineI8a8Eligible(128, 0), "no key");
+  assertEquals(attentionOnlineKeyWords(512), "whole");
+  assertEquals(
+    [65, 66, 67].map((n) => attentionOnlineKeyWords(n)),
+    ["padded", "padded", "padded"],
+  );
   // D = 128, in vec4 words: q 64 × 9 + k 64 × 9 + Vᵀ 16 × 33 + P̃ 16 × 17 (+ the reduce scratch, 64 × 16 f32)
   assertEquals(
     attentionOnlineI8a8WorkgroupStorageBytes(128, "sg32"),
@@ -421,6 +535,28 @@ test("eligibility and workgroup storage of the online kernel", () => {
     attentionOnlineI8a8WorkgroupStorageBytes(128, "sg32") < 32768,
     "the subgroup form fits 32 KiB",
   );
+});
+
+test("the key-axis form ties the Vᵀ row length, its producer and the uniform to N", () => {
+  // Words per Vᵀ row (by hand): 512 / 4 = 128, ceil(65 / 4) = 17, ceil(4,106 / 4) = 1,027
+  assertEquals([512, 65, 4106].map(attentionOnlineValueRowWords), [128, 17, 1027]);
+  // vq = B·D·words·4 bytes: 2 · 128 · 51 · 4 at N = 203 (51 = ceil(203 / 4)), B·D·N at N = 512
+  assertEquals(attentionI8a8TempBytes({ batch: 2, rows: 10, cols: 203, depth: 128 }).pv.vq, 52224);
+  assertEquals(attentionI8a8TempBytes({ batch: 2, rows: 10, cols: 512, depth: 128 }).pv.vq, 131072);
+  // The producer: the plain quantize_rows at N % 4 == 0 (its key unchanged), the padded one else
+  assertEquals(
+    attentionValueQuantization(256, 512, "whole").key,
+    quantizeRowsKey(quantizeRowsGeometry(512)),
+  );
+  assert(attentionValueQuantization(256, 203, "padded").key.endsWith(":pad"));
+  // A reader of the other form fails loudly at the producer — ③PV passes "whole" (it needs
+  // N % 4 == 0), so an N it cannot read never gets a padded Vᵀ
+  assertThrows(() => attentionValueQuantization(256, 43, "whole"), Error, "N = 43");
+  assertThrows(() => attentionValueQuantization(256, 512, "padded"), Error, "N = 512");
+  // The uniform: N must be a key length of the form the pipeline was compiled with
+  assertEquals(attentionOnlineI8a8Params(64, 203, 0, 0.5, "padded")[1], 203);
+  assertThrows(() => attentionOnlineI8a8Params(64, 203, 0, 0.5, "whole"), Error, "N = 203");
+  assertThrows(() => attentionOnlineI8a8Params(64, 512, 0, 0.5, "padded"), Error, "N = 512");
 });
 
 test("the declared workgroup storage is what the WGSL declares (the route decides from it)", () => {
@@ -449,25 +585,23 @@ test("the declared workgroup storage is what the WGSL declares (the route decide
 });
 
 describe.skipIf(!GPU_AVAILABLE)("online int8 attention (ADR 0132) — the four-point check", () => {
-  for (const shape of SHAPES) {
-    it(`${shape.name}: ① error model, ② A/B vs three-pass a8, ③ structure (wg)`, async () => {
+  for (const { shape, label, make } of FOUR_POINT_CASES) {
+    const where = `${shape.name}${label}`;
+    it(`${where}: ① error model, ② A/B vs three-pass a8, ③ structure (wg)`, async () => {
       const gpu = await acquireGpu();
       try {
-        const inputs = makeInputs(shape, 7 + shape.d);
+        const inputs = make();
         const quant = quantise(shape, inputs);
         const exact = exactAttention(shape, quant, inputs.scale);
         const dp4a = await runOnline(gpu, shape, quant, inputs.scale, { dp4a: true, reduce: "wg" });
         const model = withinModel(dp4a, exact.o, exact.bound, 1);
         console.log(
-          `[attention_online] ${shape.name}: ${(100 * model.worstRatio).toFixed(1)}% of the error model used`,
+          `[attention_online] ${where}: ${(100 * model.worstRatio).toFixed(1)}% of the error model used`,
         );
-        assertBand(model, `${shape.name} ① vs exact`);
+        assertBand(model, `${where} ① vs exact`);
         // ② both paths carry one lattice step each
         const threePass = threePassA8(shape, inputs, quant);
-        assertBand(
-          withinModel(dp4a, threePass, exact.bound, 2),
-          `${shape.name} ② vs three-pass a8`,
-        );
+        assertBand(withinModel(dp4a, threePass, exact.bound, 2), `${where} ② vs three-pass a8`);
         // ③ the TS mirror (ULP-level differences of exp / division move P̃ by at most one step)
         const mirror = referenceAttentionOnlineI8a8({
           ...inputs,
@@ -476,18 +610,18 @@ describe.skipIf(!GPU_AVAILABLE)("online int8 attention (ADR 0132) — the four-p
           n: shape.n,
           d: shape.d,
         });
-        assertBand(withinModel(dp4a, mirror, exact.bound, 2), `${shape.name} ③ vs the TS mirror`);
+        assertBand(withinModel(dp4a, mirror, exact.bound, 2), `${where} ③ vs the TS mirror`);
         // ③ emulated dot product, a second dispatch, row windows: bit-identical
         const emulated = await runOnline(gpu, shape, quant, inputs.scale, {
           dp4a: false,
           reduce: "wg",
         });
-        assertBitIdentical(emulated, dp4a, `${shape.name} ③ dp4a vs emulation`);
+        assertBitIdentical(emulated, dp4a, `${where} ③ dp4a vs emulation`);
         const again = await runOnline(gpu, shape, quant, inputs.scale, {
           dp4a: true,
           reduce: "wg",
         });
-        assertBitIdentical(again, dp4a, `${shape.name} ③ determinism`);
+        assertBitIdentical(again, dp4a, `${where} ③ determinism`);
         if (shape.m > ATTENTION_ONLINE_ROWS) {
           const split = await runOnline(gpu, shape, quant, inputs.scale, {
             dp4a: true,
@@ -497,7 +631,7 @@ describe.skipIf(!GPU_AVAILABLE)("online int8 attention (ADR 0132) — the four-p
               [ATTENTION_ONLINE_ROWS, shape.m - ATTENTION_ONLINE_ROWS],
             ],
           });
-          assertBitIdentical(split, dp4a, `${shape.name} ③ row windows`);
+          assertBitIdentical(split, dp4a, `${where} ③ row windows`);
         }
       } finally {
         gpu.destroy();
@@ -505,21 +639,22 @@ describe.skipIf(!GPU_AVAILABLE)("online int8 attention (ADR 0132) — the four-p
     });
   }
 
-  it("③ the subgroup form is bit-identical to the workgroup-memory form (skips without subgroups)", async (context) => {
-    if (!(await subgroupsSupported())) context.skip();
-    const gpu = await acquireGpu({ subgroups: true });
-    try {
-      for (const shape of SHAPES) {
-        const inputs = makeInputs(shape, 7 + shape.d);
+  for (const { shape, label, make } of FOUR_POINT_CASES) {
+    const where = `${shape.name}${label}`;
+    it(`${where}: ③ the subgroup form is bit-identical to the workgroup-memory form (skips without subgroups)`, async (context) => {
+      if (!(await subgroupsSupported())) context.skip();
+      const gpu = await acquireGpu({ subgroups: true });
+      try {
+        const inputs = make();
         const quant = quantise(shape, inputs);
         const wg = await runOnline(gpu, shape, quant, inputs.scale, { dp4a: true, reduce: "wg" });
         const sg = await runOnline(gpu, shape, quant, inputs.scale, { dp4a: true, reduce: "sg32" });
-        assertBitIdentical(sg, wg, `${shape.name} ③ sg32 vs wg`);
+        assertBitIdentical(sg, wg, `${where} ③ sg32 vs wg`);
+      } finally {
+        gpu.destroy();
       }
-    } finally {
-      gpu.destroy();
-    }
-  });
+    });
+  }
 
   it("③ P̃ read out through an identity V is within ±1 step of the ③PV reference", async () => {
     // One key tile and D = N: the running max is the row max, so P̃ equals ③PV's lattice up to
@@ -610,4 +745,94 @@ describe.skipIf(!GPU_AVAILABLE)("online int8 attention (ADR 0132) — the four-p
       gpu.destroy();
     }
   });
+
+  for (const shape of PADDED_SHAPES) {
+    it(`${shape.name}: the padded key axis — padding bytes 0 and 127 give Uint32-identical outputs`, async () => {
+      // The primary detector of a mask bound past N (a padding key whose P̃ is not 0 moves O by
+      // its byte): the mask bound at ceil(N/4)·4, patched into the generator, turned it red at every
+      // padded shape (2026-10-27). With the producer's zero bytes a leaked key enters l only, which
+      // this check cannot see: the f64 band sees it where it weighs (N = 65: 1.12× the bound) but
+      // not at N = 4,106 (measured 3.6% of the model on the dense inputs, 8.1% on the flat spike).
+      const gpu = await acquireGpu();
+      try {
+        const inputs = makeInputs(shape, 7 + shape.d);
+        const zero = quantise(shape, inputs, 0);
+        const filled = quantise(shape, inputs, 127);
+        // The two inputs differ exactly in the padding bytes (else this compares a run with itself)
+        const differing = zero.vq.filter((word, i) => word !== filled.vq[i]).length;
+        assertEquals(differing, shape.batch * shape.d, `${shape.name}: one padded word per Vᵀ row`);
+        const a = await runOnline(gpu, shape, zero, inputs.scale, { dp4a: true, reduce: "wg" });
+        const b = await runOnline(gpu, shape, filled, inputs.scale, { dp4a: true, reduce: "wg" });
+        assertBitIdentical(b, a, `${shape.name}: padding 127 vs 0`);
+      } finally {
+        gpu.destroy();
+      }
+    });
+  }
+
+  /**
+   * Faults of the padded key axis, each on the spike-V inputs that expose it (see
+   * {@link spikeInputs}): the mask bound moved from N to ceil(N/4)·4 (the padding keys enter the
+   * softmax — under the fault they score 0, since their k rows load as zero, so they need the flat
+   * softmax; the padding bytes are 127, the value the fault reads into O), and the two row-length
+   * faults of Vᵀ — the whole form's floor(N/4) (every row from the second on read at the wrong
+   * place) and the last word of each row dropped (only the keys from 4·(ceil(N/4) − 1) on lost).
+   */
+  const PADDED_FAULTS: readonly {
+    readonly label: string;
+    readonly softmax: "sharp" | "flat";
+    readonly apply: (wgsl: string) => string;
+  }[] = [
+    {
+      label: "mask-at-padded-length",
+      softmax: "flat",
+      apply: (wgsl) =>
+        wgsl.replace(/let kok = vec4<bool>\([^;]*\);/, (line) =>
+          line.replaceAll("< dims.n", "< n4 * 4u"),
+        ),
+    },
+    {
+      label: "row-length-floor",
+      softmax: "sharp",
+      apply: (wgsl) => wgsl.replace("let n4 = (dims.n + 3u) / 4u;", "let n4 = dims.n / 4u;"),
+    },
+    {
+      label: "last-word-dropped",
+      softmax: "sharp",
+      apply: (wgsl) => wgsl.replaceAll("< n4)", "< n4 - 1u)"),
+    },
+  ];
+  for (const shape of PADDED_SHAPES) {
+    for (const fault of PADDED_FAULTS) {
+      it(`${shape.name}: ④ fault injection '${fault.label}' leaves the model (spike V, ${fault.softmax} softmax)`, async () => {
+        const gpu = await acquireGpu();
+        try {
+          const inputs = spikeInputs(shape, fault.softmax);
+          const quant = quantise(shape, inputs, 127);
+          const exact = exactAttention(shape, quant, inputs.scale);
+          // The control: the kernel itself stays inside the model on these inputs.
+          const clean = await runOnline(gpu, shape, quant, inputs.scale, {
+            dp4a: true,
+            reduce: "wg",
+          });
+          assertBand(withinModel(clean, exact.o, exact.bound, 1), `${shape.name} control`);
+          const o = await runOnline(gpu, shape, quant, inputs.scale, {
+            dp4a: true,
+            reduce: "wg",
+            mutate: fault,
+          });
+          const report = withinModel(o, exact.o, exact.bound, 1);
+          console.log(
+            `[attention_online] ${shape.name}: fault '${fault.label}' uses ${report.worstRatio.toFixed(1)} × the error model`,
+          );
+          assert(
+            report.nonFinite > 0 || report.worstRatio > 1,
+            `fault '${fault.label}' stayed inside the model at ${shape.name} (worst ${report.worstRatio.toFixed(3)}) — the check is vacuous`,
+          );
+        } finally {
+          gpu.destroy();
+        }
+      });
+    }
+  }
 });

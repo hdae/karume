@@ -10,7 +10,10 @@
 //   (iii) a shape outside the kernel (D = 96) falls back to the three a8 dispatches with S in f32
 //         and is bit-identical to the a8 Session;
 //   (iv)  a shape over the work budget of one dispatch runs one dispatch per window of
-//         `planAttentionOnlineWindows`, bit-identical to a single raw dispatch.
+//         `planAttentionOnlineWindows`, bit-identical to a single raw dispatch;
+//   (v)   N % 4 != 0 (the padded key axis — ADR 0132 addendum 2026-10-27) runs the online kernel,
+//         bit-identical to the raw kernel on a host-packed Vᵀ of ceil(N/4) words per row: the
+//         Session's padded Vᵀ quantisation lays the rows out as the kernel reads them.
 //
 // The inputs are built so that their per-token quantisation is exact (every element is an integer
 // multiple of its row's step and every row holds ±127 steps): the host quantisation of the raw run
@@ -28,6 +31,7 @@ import {
   attentionOnlineI8a8Key,
   attentionOnlineI8a8Params,
   attentionOnlineI8a8Wgsl,
+  attentionOnlineKeyWords,
 } from "../src/kernels/attention-online-i8a8.ts";
 import { QUANTIZE_ROWS_KEY } from "../src/kernels/quantize-rows.ts";
 import { stridedKey } from "../src/codegen/strided.ts";
@@ -217,6 +221,13 @@ const runRawKernel = async (
   const query = quantizeRowsReference(inputs.q, batch * m, d);
   const key = quantizeRowsReference(inputs.k, batch * n, d);
   const values = quantizeRowsReference(transposeValues(inputs.v, batch, n, d), batch * d, n);
+  // Vᵀ rows of ceil(N/4) words, the padding bytes 0 (the padded key axis when N % 4 != 0)
+  const words = Math.ceil(n / 4);
+  const valueRows = new Int8Array(batch * d * words * 4);
+  for (let row = 0; row < batch * d; row += 1) {
+    valueRows.set(values.q.subarray(row * n, (row + 1) * n), row * words * 4);
+  }
+  const keyWords = attentionOnlineKeyWords(n);
   const scheduler = new SubmitScheduler(gpu);
   const cache = new PipelineCache(gpu.device);
   const arena = new RunArena(gpu.device, () => scheduler.flush());
@@ -228,18 +239,22 @@ const runRawKernel = async (
     };
     const bytes = batch * m * d * 4;
     const out = arena.allocRegion(bytes);
-    const pipelineKey = attentionOnlineI8a8Key(true, d, reduce);
+    const pipelineKey = attentionOnlineI8a8Key(true, d, reduce, "bhsd", keyWords);
     const { pipeline, layout } = await cache.get(
       pipelineKey,
-      attentionOnlineI8a8Wgsl(true, d, reduce),
+      attentionOnlineI8a8Wgsl(true, d, reduce, "bhsd", keyWords),
     );
     const params = arena.allocHostWritten(16, UNIFORM_IN);
-    gpu.device.queue.writeBuffer(params, 0, attentionOnlineI8a8Params(m, n, 0, inputs.scale));
+    gpu.device.queue.writeBuffer(
+      params,
+      0,
+      attentionOnlineI8a8Params(m, n, 0, inputs.scale, keyWords),
+    );
     const buffers = [
       params,
       host(packWords(query.q)),
       host(packWords(key.q)),
-      host(packWords(values.q)),
+      host(packWords(valueRows)),
       out,
       host(query.scale),
       host(key.scale),
@@ -308,7 +323,8 @@ const assertOnlineCensus = (
   const keys = census.map((row) => `${row.key}×${row.dispatchCount}`).join(" / ");
   const online = census.filter((row) => familyOf(row.key) === ONLINE_FAMILY);
   assertEquals(online.length, 1, `${where}: one online key — ${keys}`);
-  assert(online[0].key.endsWith(`:${reduce}`), `${where}: the ${reduce} form — ${keys}`);
+  const suffix = `:${reduce}${attentionOnlineKeyWords(shape.n) === "padded" ? ":kpad" : ""}`;
+  assert(online[0].key.endsWith(suffix), `${where}: the ${suffix} form — ${keys}`);
   assertEquals(
     online[0].dispatchCount,
     planAttentionOnlineWindows(shape.m, { batch: shape.b * shape.h, cols: shape.n, depth: shape.d })
@@ -449,6 +465,32 @@ describe.skipIf(!GPU_AVAILABLE)("online int8 attention through the Session (ADR 
       assertOnlineCensus(online.census, shape, reduce, "two windows");
       const raw = await runRawKernel(gpu, shape, inputs, "wg");
       assertBitIdentical(online.output, raw, "two windows: Session vs one raw dispatch");
+    } finally {
+      gpu.destroy();
+    }
+  });
+
+  it("(v) N % 4 != 0 runs the online kernel with a padded Vᵀ, bit-identical to the raw kernel", async (context) => {
+    const gpu = await acquireGpu({ subgroups: "available" });
+    try {
+      for (const shape of [
+        { b: 1, h: 2, m: 150, n: 203, d: 128 },
+        { b: 2, h: 1, m: 70, n: 65, d: 64 },
+        { b: 1, h: 2, m: 64, n: 4106, d: 128 },
+      ] satisfies Shape[]) {
+        const where = `N=${shape.n} D=${shape.d}`;
+        const reduce = expectedReduce(gpu, shape);
+        if (reduce === undefined) {
+          context.skip();
+          return;
+        }
+        const inputs = makeInputs(shape);
+        const online = await runSession(gpu, shape, inputs, ONLINE);
+        assertOnlineCensus(online.census, shape, reduce, where);
+        assert(new Set(online.output).size > 1, `${where}: the output is constant`);
+        const raw = await runRawKernel(gpu, shape, inputs, "wg");
+        assertBitIdentical(online.output, raw, `${where}: Session vs raw kernel`);
+      }
     } finally {
       gpu.destroy();
     }

@@ -376,13 +376,14 @@ export type SessionOptions = {
    * contract class Q (ADR 0110: one P̃ lattice step against a running max, the a8 error model).
    * MUST: it needs `attentionCompute: "a8"` — any other compute form fails loudly at Session
    * construction (an unimplemented combination, not a fallback).
-   * **Shapes outside `D ∈ {64, 128}` or with `N % 4 != 0` fall back silently to the three
-   * dispatches of a8 with S in f32** (the fallback shows in the pipeline keys — `attention_online`
-   * against `attention_qk` / `attention_stats` / `attention_pv`). The kernel uses subgroups when the
-   * device has them (`acquireGpu({ subgroups: true | "available" })`) and workgroup memory
-   * otherwise — **the two forms are bit-identical**, so the choice changes speed only; a device
-   * without subgroups whose workgroup-storage limit cannot hold the workgroup-memory form also falls
-   * back to the three dispatches.
+   * **Shapes outside `D ∈ {64, 128}` fall back silently to the three dispatches of a8 with S in
+   * f32** (the fallback shows in the pipeline keys — `attention_online` against `attention_qk` /
+   * `attention_stats` / `attention_pv`); any key length `N ≥ 1` runs online (`N % 4 != 0` with a
+   * padded Vᵀ — ADR 0132 addendum 2026-10-27). The kernel uses subgroups when the device has them
+   * (`acquireGpu({ subgroups: true | "available" })`) and workgroup memory otherwise — **the two
+   * forms are bit-identical**, so the choice changes speed only; a device without subgroups whose
+   * workgroup-storage limit cannot hold the workgroup-memory form also falls back to the three
+   * dispatches.
    */
   readonly attentionScoreStorage?: ScoreStorage;
   /**

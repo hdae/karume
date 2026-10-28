@@ -170,14 +170,37 @@ describe("attentionRoute: the online kernel (attentionScoreStorage 'none' — AD
     // D = 96 (D % 64 != 0) and D = 256 (above the generator's maximum)
     assertEquals(attentionRoute(A8_NONE, 96, 512, SUBGROUPS_48K), FALLBACK);
     assertEquals(attentionRoute(A8_NONE, 256, 512, SUBGROUPS_48K), FALLBACK);
-    // N % 4 != 0: ③PV falls back too (its own eligibility), S stays f32
-    assertEquals(attentionRoute(A8_NONE, 128, 1089, SUBGROUPS_48K), {
+    // A 16 KiB device without subgroups
+    assertEquals(attentionRoute(A8_NONE, 128, 512, CORE_16K), FALLBACK);
+  });
+
+  it("runs N % 4 != 0 on the online kernel (padded Vᵀ — ADR 0132 addendum 2026-10-27); the three-dispatch seats keep ③PV's N % 4", () => {
+    // Before the addendum these shapes fell back to { qk: i8a8, pv: dense, score: f32 }.
+    for (const cols of [65, 203, 1089, 4106]) {
+      assertEquals(
+        attentionRoute(A8_NONE, 128, cols, SUBGROUPS_48K),
+        { qk: "i8a8", pv: "i8a8", score: "none", online: "sg32" },
+        `N=${cols}`,
+      );
+      assertEquals(
+        attentionRoute(A8_NONE, 64, cols, PORTABLE_48K),
+        { qk: "i8a8", pv: "i8a8", score: "none", online: "wg" },
+        `N=${cols}`,
+      );
+      // Only the online kernel learned the key valid length: a8 + s16 (Anima's preset) still runs
+      // ③PV and S in f32 at these shapes.
+      assertEquals(
+        attentionRoute({ attentionCompute: "a8", attentionScoreStorage: "f16" }, 128, cols, DEVICE),
+        { qk: "i8a8", pv: "dense", score: "f32" },
+        `a8 + s16 N=${cols}`,
+      );
+    }
+    // A device that holds neither form falls back as for N % 4 == 0 — ③PV then drops to dense
+    assertEquals(attentionRoute(A8_NONE, 128, 1089, CORE_16K), {
       qk: "i8a8",
       pv: "dense",
       score: "f32",
     });
-    // A 16 KiB device without subgroups
-    assertEquals(attentionRoute(A8_NONE, 128, 512, CORE_16K), FALLBACK);
   });
 
   it("never returns 'none' without attentionCompute 'a8' (the option check rejects it earlier)", () => {

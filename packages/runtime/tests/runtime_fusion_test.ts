@@ -2738,22 +2738,25 @@ const onlineSeat = (device: AttentionDeviceFacts): AttentionSeat => ({
 /** An online-eligible shape: D 64 or 128, N 8 (N % 4 == 0). */
 const onlineShape = (d: 64 | 128): AttentionPermuteOptions => ({ d, n: 8 });
 
-test("on the online route (a8 × 'none', D 64 / 128, N % 4 == 0, a device with the sg32 or only the wg form) the attention also absorbs the permute after it: one node step writes the token-major output and the permute has no step", () => {
+test("on the online route (a8 × 'none', D 64 / 128, any N, a device with the sg32 or only the wg form) the attention also absorbs the permute after it: one node step writes the token-major output and the permute has no step", () => {
   const { b, s } = ATTENTION_PERMUTE;
-  for (const [label, d, device, reduce] of [
-    ["D 64, sg32", 64, SG32_DEVICE, "sg32"],
-    ["D 128, sg32", 128, SG32_DEVICE, "sg32"],
-    ["D 64, wg only", 64, WG_DEVICE, "wg"],
-    ["D 128, wg only", 128, WG_DEVICE, "wg"],
+  for (const [label, d, device, reduce, n] of [
+    ["D 64, sg32", 64, SG32_DEVICE, "sg32", 8],
+    ["D 128, sg32", 128, SG32_DEVICE, "sg32", 8],
+    ["D 64, wg only", 64, WG_DEVICE, "wg", 8],
+    ["D 128, wg only", 128, WG_DEVICE, "wg", 8],
+    // ADR 0132 addendum 2026-10-27: N % 4 != 0 takes the padded key axis (before it, N 6 fell
+    // back and was a case of the next test)
+    ["D 64, N 6 (N % 4 != 0), sg32", 64, SG32_DEVICE, "sg32", 6],
   ] as const) {
     // Precondition: the case takes the online kernel in the form its label names.
     assertEquals(
-      attentionRoute({ attentionCompute: "a8", attentionScoreStorage: "none" }, d, 8, device)
+      attentionRoute({ attentionCompute: "a8", attentionScoreStorage: "none" }, d, n, device)
         .online,
       reduce,
       `${label}: route`,
     );
-    const plan = fuseAttentionPermutes(onlineShape(d), onlineSeat(device));
+    const plan = fuseAttentionPermutes({ d, n }, onlineSeat(device));
     assertEquals(outline(plan.steps), ["attention"], label);
     const step = attentionStepOf(plan, label);
     assertEquals(step.tokenMajor, { q: true, k: true, v: true, o: true }, label);
@@ -2793,7 +2796,7 @@ test("on the online route the output permute is absorbed on its own too (no inpu
   }
 });
 
-test("off the online route the permute after the attention stays a node, and the input permutes are absorbed as before: the three a8 dispatches (S in f32 / f16), the f32 / f16 seats, and an online seat whose shape (D 96, N % 4 != 0) or device (neither form) makes the route fall back", () => {
+test("off the online route the permute after the attention stays a node, and the input permutes are absorbed as before: the three a8 dispatches (S in f32 / f16), the f32 / f16 seats, and an online seat whose shape (D 96) or device (neither form) makes the route fall back", () => {
   const cases: readonly (readonly [string, AttentionPermuteOptions, AttentionSeat, boolean])[] = [
     [
       "a8, S in f32",
@@ -2820,7 +2823,6 @@ test("off the online route the permute after the attention stays a node, and the
       false,
     ],
     ["online seat, D 96", { d: 96, n: 8 }, onlineSeat(SG32_DEVICE), true],
-    ["online seat, N 6 (N % 4 != 0)", { d: 64, n: 6 }, onlineSeat(SG32_DEVICE), true],
     [
       "online seat, a device with neither form",
       onlineShape(64),

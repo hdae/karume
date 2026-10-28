@@ -10,7 +10,10 @@ import {
   attentionStatsKey,
 } from "../src/kernels/attention.ts";
 import { attentionPvI8a8Key, attentionQkI8a8Key } from "../src/kernels/attention-i8a8.ts";
-import { attentionOnlineI8a8Key } from "../src/kernels/attention-online-i8a8.ts";
+import {
+  attentionOnlineI8a8Key,
+  attentionOnlineKeyWords,
+} from "../src/kernels/attention-online-i8a8.ts";
 import { linearKey } from "../src/kernels/linear.ts";
 import {
   linearGemvKey,
@@ -365,11 +368,21 @@ const DEVICE: AttentionDeviceFacts = { subgroups: true, maxComputeWorkgroupStora
 /**
  * 融合 attention 1 ノード × 行ブロック `blocks` 枚の census の行（①②③ が各 `blocks` 本）。経路は
  * `attentionRoute` の戻りをそのまま使う — 実行（buildAttention）と同じ判定から行を作る。
+ * `cols` (N) picks the online kernel's key-axis form, as execution does (`…:kpad` at N % 4 != 0).
  */
-const attentionRows = (route: AttentionRoute, blocks: number): readonly CensusRow[] => {
+const attentionRows = (
+  route: AttentionRoute,
+  blocks: number,
+  cols: number,
+): readonly CensusRow[] => {
   // The online route (ADR 0132): one dispatch per row window, no ①②③.
   if (route.online !== undefined) {
-    return [{ key: attentionOnlineI8a8Key(true, 128, route.online), dispatchCount: blocks }];
+    return [
+      {
+        key: attentionOnlineI8a8Key(true, 128, route.online, "bhsd", attentionOnlineKeyWords(cols)),
+        dispatchCount: blocks,
+      },
+    ];
   }
   const score: MaterialisedScoreStorage = route.score;
   return [
@@ -399,10 +412,11 @@ const ditCensus = (
   selfCols: number,
   blocks: number,
   seats: AttentionSeats = { attentionCompute: "a8", attentionScoreStorage: "f16" },
+  selfDepth = 128,
 ): readonly CensusRow[] => {
   const nodeRows = [
-    ...attentionRows(attentionRoute(seats, 128, selfCols, DEVICE), blocks),
-    ...attentionRows(attentionRoute(seats, 128, 512, DEVICE), 1),
+    ...attentionRows(attentionRoute(seats, selfDepth, selfCols, DEVICE), blocks, selfCols),
+    ...attentionRows(attentionRoute(seats, 128, 512, DEVICE), 1, 512),
   ];
   // 族ごとに束ねる（実物の census と同じく、同じキーは 1 行に畳まれる）。
   const counts = new Map<string, number>();
@@ -426,6 +440,7 @@ describe("assertAttentionSeatsComplete: 宣言どおりの census", () => {
     const census = attentionRows(
       attentionRoute({ attentionCompute: "f32", attentionScoreStorage: "f32" }, 128, 1089, DEVICE),
       1,
+      1089,
     );
     assertAttentionSeatsComplete(census, {}, "席なし");
     assertAttentionSeatsComplete(census, { attentionCompute: "f32" }, "参照値");
@@ -435,6 +450,7 @@ describe("assertAttentionSeatsComplete: 宣言どおりの census", () => {
     const census = attentionRows(
       attentionRoute({ attentionCompute: "a8", attentionScoreStorage: "f32" }, 128, 4096, DEVICE),
       2,
+      4096,
     );
     assertAttentionSeatsComplete(census, { attentionCompute: "a8" }, "a8 だけ");
   });
@@ -496,9 +512,22 @@ describe("the census helpers with attentionScoreStorage 'none' (the online kerne
     assertAttentionSeatsComplete(census, A8_NONE, "online");
   });
 
-  it("a node that fell back to the three dispatches (self N = 1089) is applied but not complete", () => {
-    // The cross attention runs the online kernel, the self attention the three a8 dispatches in f32.
+  it("self N = 1089 (N % 4 != 0, the padded key axis — ADR 0132 addendum 2026-10-27) is complete too", () => {
     const census = ditCensus(1089, 1, seats);
+    // The self node's row is the padded kernel's key, as execution spells it (not the whole form's)
+    assertEquals(
+      census.filter((row) => row.key.endsWith(":kpad")).length,
+      1,
+      "one padded online key",
+    );
+    assertSeatsApplied(census, A8_NONE, "online, N % 4 != 0");
+    assertAttentionSeatsComplete(census, A8_NONE, "online, N % 4 != 0");
+  });
+
+  it("a node that fell back to the three dispatches (self D = 96) is applied but not complete", () => {
+    // The cross attention runs the online kernel, the self attention the three a8 dispatches in f32.
+    // Before the ADR 0132 addendum of 2026-10-27 the fallback came from self N = 1089 (N % 4 != 0).
+    const census = ditCensus(4096, 1, seats, 96);
     assertSeatsApplied(census, A8_NONE, "partly online");
     assertThrows(
       () => assertAttentionSeatsComplete(census, A8_NONE, "partly online"),

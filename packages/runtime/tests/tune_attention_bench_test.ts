@@ -1,6 +1,7 @@
 // The attention route bench (`runAttentionRouteBench` of `@karume/runtime/tune`): the pure helpers,
 // the binding-role check with storage params, and one GPU run on small shapes (both routes timed,
-// a finite ratio, and a shape the online kernel cannot run reported as not eligible).
+// a finite ratio, an N % 4 != 0 shape timed online with its padded Vᵀ quantisation, and a shape the
+// online kernel cannot run reported as not eligible).
 
 import { describe, test } from "vite-plus/test";
 import { assert, assertEquals, assertMatch, assertThrows } from "@std/assert";
@@ -130,7 +131,9 @@ const measured = (route: AttentionBenchRoute, where: string): number => {
 };
 
 describe.skipIf(!GPU_AVAILABLE)("attention route bench on the GPU", () => {
-  test("both routes are timed at small shapes and an N % 4 != 0 shape is not eligible online", async () => {
+  // ADR 0132 addendum 2026-10-27: N % 4 != 0 became eligible online (a padded Vᵀ). Before it, the
+  // ineligible case was N = 1,022 at D = 128; it is now D = 96 (D % 64 != 0) at the same N.
+  test("both routes are timed at small shapes, N % 4 != 0 runs online, and D = 96 is not eligible online", async () => {
     const adapter = await navigator.gpu.requestAdapter();
     const timestamps = adapter?.features.has("timestamp-query") === true;
     const gpu = await acquireGpu({
@@ -143,6 +146,7 @@ describe.skipIf(!GPU_AVAILABLE)("attention route bench on the GPU", () => {
         shapes: [
           shape({ id: "n512", keys: 512 }),
           shape({ id: "n1024", keys: 1024, rowsPerDispatch: 128 }),
+          shape({ id: "d96n1022", keys: 1022, depth: 96 }),
           shape({ id: "n1022", keys: 1022 }),
         ],
         rounds: 1,
@@ -157,7 +161,7 @@ describe.skipIf(!GPU_AVAILABLE)("attention route bench on the GPU", () => {
       assert(statuses.length > 0);
       assertEquals(
         report.shapes.map(({ shape: { id } }) => id),
-        ["n512", "n1024", "n1022"],
+        ["n512", "n1024", "d96n1022", "n1022"],
       );
 
       for (const result of report.shapes.slice(0, 2)) {
@@ -192,11 +196,24 @@ describe.skipIf(!GPU_AVAILABLE)("attention route bench on the GPU", () => {
       assertEquals([windowed.s16.rows, windowed.s16.rowWindow], [128, true]);
       assertEquals(windowed.online.rows, 128);
 
-      const [, , odd] = report.shapes;
+      const [, , odd, padded] = report.shapes;
       assertEquals(odd.online.eligible, false);
       assert(!odd.online.eligible && odd.online.reason.includes("not eligible"));
       assertEquals(odd.onlineVsS16, undefined);
       assertEquals(odd.quantization, undefined);
+      // N % 4 != 0: online with the padded key axis; s16 is not eligible (③PV keeps N % 4 == 0)
+      measured(padded.online, "n1022 online");
+      assertEquals(padded.s16.eligible, false);
+      assertEquals(padded.onlineVsS16, undefined);
+      assertEquals(
+        (padded.quantization?.stages ?? []).map(({ stage, error }) => [stage, error]),
+        [
+          ["quantize_q", undefined],
+          ["quantize_k", undefined],
+          ["permute_v", undefined],
+          ["quantize_vt", undefined],
+        ],
+      );
       // The record is plain JSON (no Infinity / NaN / undefined-only fields lost in meaning)
       assertEquals(JSON.parse(JSON.stringify(report)).format, ATTENTION_BENCH_FORMAT);
     } finally {

@@ -1552,9 +1552,11 @@ const practicalSubmitGate = (
             options,
             `${seat}/S = ${tokens}: 実用席の束`,
           );
-          // 完全適格の検査（ADR 0058 追記 2026-10-10）は、宣言どおりの経路になる形にだけ掛ける。
-          // golden の S = 8,190（832×480 × 81 フレーム — 受理集合の外）は N % 4 != 0 で、self の ③PV と
-          // S の格納が仕様どおり f32 に落ちる（ADR 0058 決定 3）ので、掛けると正当な縮退で赤になる。
+          // The complete-eligibility check (ADR 0058 addendum 2026-10-10) applies only to shapes whose route is the declared
+          // one. The golden S = 8,190 (832×480 × 81 frames — outside the accepted sizes) has N % 4 != 0: on the s16 seat its
+          // self ③PV and S storage fall back to f32 by specification (ADR 0058 decision 3), so the check would go red on a
+          // legitimate fallback; on the online seat it runs the online kernel with a padded Vᵀ (ADR 0132 addendum
+          // 2026-10-27), so the route is the declared one and the check applies.
           const seats = {
             attentionCompute: options.attentionCompute ?? "f32",
             attentionScoreStorage: options.attentionScoreStorage ?? "f32",

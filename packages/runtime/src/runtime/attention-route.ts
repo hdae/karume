@@ -116,10 +116,12 @@ const onlineReduce = (
  *   stage cannot happen (a separate matter from the per-stage independence of i8a8: whether ① is
  *   i8a8 or f32, the storage form of S is decided as one).
  * - Online kernel (`attentionScoreStorage: "none"` × `attentionCompute: "a8"` — ADR 0132): chosen
- *   when the shape is eligible (`D ∈ {64, 128}`, `N % 4 == 0`) and the device holds one of its
- *   reduction forms — `sg32` when the device has subgroups and its tiles fit, otherwise `wg` when
- *   the workgroup-storage limit holds its scratch too. Otherwise the route falls back to the three
- *   dispatches of a8 with S in f32 (never `"none"` — the three kernels cannot store it).
+ *   when the shape is eligible (`D ∈ {64, 128}`, any `N ≥ 1` — `N % 4 != 0` runs with a padded Vᵀ,
+ *   ADR 0132 addendum 2026-10-27, while ③PV's i8a8 above keeps `N % 4 == 0`) and the device
+ *   holds one of its reduction forms — `sg32` when the device has subgroups and its tiles fit,
+ *   otherwise `wg` when the workgroup-storage limit holds its scratch too. Otherwise the route falls
+ *   back to the three dispatches of a8 with S in f32 (never `"none"` — the three kernels cannot
+ *   store it).
  *
  * MUST: the rejections of mask × a8 and GQA × a8 look at the **requested mode**
  * (`attentionCompute === "a8"`), not at this return value (the MUST of buildAttention — looking at

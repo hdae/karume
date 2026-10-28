@@ -30,7 +30,13 @@
 // `vec4<i32>(NaN)` が不定値になるので**契約の外**（突合は scale と最終出力だけ）。
 
 import { test } from "vite-plus/test";
-import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import { gridStrideWorkgroups } from "../src/codegen/dispatch.ts";
 import { perChannelGroupSize } from "../src/format/container/codecs.ts";
 import type { OpenedContainer } from "../src/format/container/open.ts";
@@ -42,6 +48,10 @@ import {
   type QuantizeRowsGeometry,
   quantizeRowsGeometry,
   quantizeRowsKey,
+  quantizeRowsPaddedGeometry,
+  quantizeRowsPaddedKey,
+  quantizeRowsPaddedParams,
+  quantizeRowsPaddedWgsl,
   quantizeRowsParams,
   quantizeRowsWgsl,
 } from "../src/kernels/quantize-rows.ts";
@@ -237,6 +247,154 @@ const runQuantizeRows = async (
     await arena.destroy();
   }
 };
+
+/** One `quantize_rows` launch of any form, read back as raw words (`xq`) and scale bits (`xs`). */
+const runQuantizeLaunch = async (
+  gpu: GpuContext,
+  launch: {
+    readonly key: string;
+    readonly wgsl: string;
+    readonly params: Uint32Array<ArrayBuffer>;
+    readonly rowsPerGroup: number;
+  },
+  x: Float32Array<ArrayBuffer>,
+  rows: number,
+  wordsPerRow: number,
+  groups?: number,
+): Promise<{
+  readonly words: Uint32Array<ArrayBuffer>;
+  readonly scaleBits: Uint32Array<ArrayBuffer>;
+}> => {
+  const scheduler = new SubmitScheduler(gpu);
+  const cache = new PipelineCache(gpu.device);
+  const arena = new RunArena(gpu.device, () => scheduler.flush());
+  try {
+    const { pipeline, layout } = await cache.get(launch.key, launch.wgsl);
+    const params = arena.allocHostWritten(16, UNIFORM_IN);
+    gpu.device.queue.writeBuffer(params, 0, launch.params);
+    const src = arena.allocHostWritten(Math.max(4, x.byteLength), STORAGE_IN);
+    gpu.device.queue.writeBuffer(src, 0, x);
+    const xq = arena.allocRegion(rows * wordsPerRow * 4);
+    const xs = arena.allocRegion(rows * 4);
+    scheduler.dispatch(
+      pipeline,
+      gpu.device.createBindGroup({
+        layout,
+        entries: [
+          { binding: 0, resource: { buffer: params } },
+          { binding: 1, resource: { buffer: src } },
+          { binding: 2, resource: { buffer: xq } },
+          { binding: 3, resource: { buffer: xs } },
+        ],
+      }),
+      [
+        groups ??
+          gridStrideWorkgroups(
+            rows,
+            launch.rowsPerGroup,
+            gpu.limits.maxComputeWorkgroupsPerDimension,
+          ),
+        1,
+        1,
+      ],
+      launch.key,
+    );
+    await scheduler.flush();
+    const words = await readbackBytes(gpu.device, xq, rows * wordsPerRow * 4);
+    const scales = await readbackBytes(gpu.device, xs, rows * 4);
+    return {
+      words: new Uint32Array(words.buffer, 0, rows * wordsPerRow),
+      scaleBits: new Uint32Array(scales.buffer, 0, rows),
+    };
+  } finally {
+    await arena.destroy();
+  }
+};
+
+test.skipIf(!GPU_AVAILABLE)(
+  "quantize_rows padded form (ADR 0132 addendum 2026-10-27): word-for-word the plain form on zero-extended rows",
+  async () => {
+    // Extending a row of `dim` elements with zeros to 4·ceil(dim/4) changes neither its amax (|0|
+    // is the identity of the max) nor the lattice of its elements, and the zeros quantise to the
+    // byte 0. So the padded form over the original rows must write exactly the words and scale bits
+    // of the plain form over the extended rows — a GPU-to-GPU comparison at atol 0 (the same
+    // division on both sides). The padding bytes are then 0 by the word equality; the loop below
+    // states it on its own.
+    const gpu = await acquireGpu();
+    try {
+      for (const dim of [5, 65, 125, 203, 4106]) {
+        const words = Math.ceil(dim / 4);
+        const extended = words * 4;
+        const rows = 1_003;
+        const x = new Float32Array(rows * dim);
+        const xExtended = new Float32Array(rows * extended);
+        for (let row = 0; row < rows; row += 1) {
+          for (let i = 0; i < dim; i += 1) {
+            const value =
+              row % 97 === 3
+                ? 0
+                : SIGNED(row * dim + i) * (1 + (row % 11) * 0.75) * (row % 2 ? -1 : 1);
+            x[row * dim + i] = value;
+            xExtended[row * extended + i] = value;
+          }
+        }
+        const plainGeometry = quantizeRowsGeometry(extended);
+        const plain = await runQuantizeLaunch(
+          gpu,
+          {
+            key: quantizeRowsKey(plainGeometry),
+            wgsl: quantizeRowsWgsl(plainGeometry),
+            params: quantizeRowsParams(rows, extended),
+            rowsPerGroup: plainGeometry.rowsPerGroup,
+          },
+          xExtended,
+          rows,
+          words,
+        );
+        const geometry = quantizeRowsPaddedGeometry(dim);
+        assertEquals(geometry, plainGeometry, `dim ${dim}: the geometry of the extended row`);
+        for (const groups of [undefined, 2]) {
+          const where = `dim ${dim} r${geometry.rowsPerGroup}w${geometry.lanesPerRow} groups ${groups}`;
+          const padded = await runQuantizeLaunch(
+            gpu,
+            {
+              key: quantizeRowsPaddedKey(geometry),
+              wgsl: quantizeRowsPaddedWgsl(geometry),
+              params: quantizeRowsPaddedParams(rows, dim),
+              rowsPerGroup: geometry.rowsPerGroup,
+            },
+            x,
+            rows,
+            words,
+            groups,
+          );
+          assertEquals(
+            Array.from(padded.scaleBits),
+            Array.from(plain.scaleBits),
+            `${where}: scale bits`,
+          );
+          assertEquals(Array.from(padded.words), Array.from(plain.words), `${where}: words`);
+          // The padding bytes of every row's last word are 0
+          const padMask = (0xffffffff << (8 * (dim % 4))) >>> 0;
+          for (let row = 0; row < rows; row += 1) {
+            const last = padded.words[row * words + words - 1];
+            if ((last & padMask) !== 0)
+              throw new Error(`${where}: row ${row} padding bytes ${last.toString(16)}`);
+          }
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+);
+
+test("quantize_rows padded form rejects row lengths the plain form owns", () => {
+  for (const dim of [0, 4, 128, 4096]) {
+    assertThrows(() => quantizeRowsPaddedGeometry(dim), Error, "not a multiple of 4");
+    assertThrows(() => quantizeRowsPaddedParams(1, dim), Error, "not a multiple of 4");
+  }
+});
 
 test.skipIf(!GPU_AVAILABLE)(
   "quantize_rows: WGSL の round は偶数丸め（同点 3 点をカーネル内で実測固定・実 GPU）",

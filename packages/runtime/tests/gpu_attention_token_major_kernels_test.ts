@@ -381,6 +381,8 @@ describe.skipIf(!GPU_AVAILABLE)(
                         n,
                         offset,
                         scale,
+                        // the pipeline above is the whole-word form
+                        "whole",
                         output === "bshd" ? h : undefined,
                       ),
                       UNIFORM_IN,

@@ -267,6 +267,8 @@ import {
   quantizeRowsChannelMajorKey,
   quantizeRowsChannelMajorWgsl,
   quantizeRowsChannelMajorWorkgroups,
+  quantizeRowsPaddedGeometry,
+  quantizeRowsPaddedWgsl,
   quantizeRowsPrologueWgsl,
   quantizeRowsWgsl,
 } from "../src/kernels/quantize-rows.ts";
@@ -792,6 +794,11 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     // attention uses, and the one-row-per-workgroup end. The plain forms above must not move.
     ["quantize_rows_r8w32_bshd.wgsl", quantizeRowsBshdWgsl(quantizeRowsGeometry(128))],
     ["quantize_rows_r1w256_bshd.wgsl", quantizeRowsBshdWgsl(quantizeRowsGeometry(1024))],
+    // The padded form (ADR 0132 addendum 2026-10-27 — the online attention's Vᵀ at N % 4 != 0):
+    // the MOSS-Image 1024² negative branch's N = 4,106 (one row per workgroup) and a short row
+    // (N = 125, 8 rows × 32 lanes). The plain forms above must not move.
+    ["quantize_rows_r1w256_pad.wgsl", quantizeRowsPaddedWgsl(quantizeRowsPaddedGeometry(4106))],
+    ["quantize_rows_r8w32_pad.wgsl", quantizeRowsPaddedWgsl(quantizeRowsPaddedGeometry(125))],
     // The channel-major read of conv3d w8a8's activation (perf-ledger V-6) at the production
     // geometry. The plain forms above must not move.
     [
@@ -866,6 +873,17 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["attention_online_i8a8_d128_wg.wgsl", attentionOnlineI8a8Wgsl(true, 128, "wg")],
     ["attention_online_i8a8_d128_emu_sg32.wgsl", attentionOnlineI8a8Wgsl(false, 128, "sg32")],
     ["attention_online_i8a8_d64_sg32.wgsl", attentionOnlineI8a8Wgsl(true, 64, "sg32")],
+    // The padded key axis (ADR 0132 addendum 2026-10-27 — N % 4 != 0) with the token-major O
+    // (both key fragments in one key). The whole-word forms above must not move.
+    [
+      "attention_online_i8a8_d128_sg32_obshd_kpad.wgsl",
+      attentionOnlineI8a8Wgsl(true, 128, "sg32", "bshd", "padded"),
+    ],
+    // The padded key axis on the other axes of the key: head-major O, the wg form and D = 64.
+    [
+      "attention_online_i8a8_d64_wg_kpad.wgsl",
+      attentionOnlineI8a8Wgsl(true, 64, "wg", "bhsd", "padded"),
+    ],
     // conv3d の w8a8 変種（ADR 0133 — `convCompute: "a8"`）: 書き出し 2 変種 × 内積 2 変種のうち 3 つを
     // 凍結する（スカラ × エミュは組み合わせの差分だけなので省く）。
     // The default profile's conv3d geometry (the geometry has no default argument)
@@ -1113,6 +1131,14 @@ test("同じ生成入力からは常に同一の WGSL が出る（全 op × dtyp
       quantizeRowsWgsl(geometry),
       quantizeRowsWgsl(geometry),
       `quantize_rows:dim=${dim}`,
+    );
+  }
+  for (const dim of [5, 125, 4106]) {
+    const geometry = quantizeRowsPaddedGeometry(dim);
+    assertEquals(
+      quantizeRowsPaddedWgsl(geometry),
+      quantizeRowsPaddedWgsl(geometry),
+      `quantize_rows padded:dim=${dim}`,
     );
   }
   for (const pixels of [4, 8, 16, 32, 64]) {

@@ -26,6 +26,9 @@ import {
   attentionOnlineI8a8Key,
   attentionOnlineI8a8Params,
   attentionOnlineI8a8Wgsl,
+  type AttentionOnlineKeyWords,
+  attentionOnlineKeyWords,
+  attentionOnlineValueRowWords,
 } from "../../kernels/attention-online-i8a8.ts";
 import {
   ATTENTION_QK_MASK_BINDING,
@@ -61,7 +64,7 @@ import { type MaterialisedScoreStorage, scoreStorageBytes } from "../../kernels/
 import { type AttentionRoute, attentionRoute, type AttentionSeats } from "../attention-route.ts";
 import { attentionScale, numel, stateWindow } from "../../ops.ts";
 import { gemmTileM, gemmTileN } from "../../kernels/gemm-geometry.ts";
-import { type I8a8Geometry, i8a8TileM, i8a8TileN } from "../../kernels/i8a8-geometry.ts";
+import { I8A8_PACK, type I8a8Geometry, i8a8TileM, i8a8TileN } from "../../kernels/i8a8-geometry.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../../codegen/dispatch.ts";
 import {
   type AttentionTokenMajor,
@@ -76,8 +79,13 @@ import {
   quantizeRowsBshdWgsl,
   quantizeRowsGeometry,
   quantizeRowsKey,
+  quantizeRowsPaddedGeometry,
+  quantizeRowsPaddedKey,
+  quantizeRowsPaddedParams,
+  quantizeRowsPaddedWgsl,
   quantizeRowsParams,
   quantizeRowsWgsl,
+  type QuantizeRowsGeometry,
 } from "../../kernels/quantize-rows.ts";
 import {
   TRANSPOSE_TILED_KEY,
@@ -351,10 +359,11 @@ export const attentionI8a8TempBytes = (
       ks: Math.max(4, batch * cols * 4),
     },
     // Vᵀ (f32 — the strided permute of a head-major V, or the tiled transpose of a token-major one)
-    // and its quantization result.
+    // and its quantization result: the row length of the key-axis form (N % 4 != 0 reaches here only
+    // on the online route, whose Vᵀ is padded — {@link attentionValueQuantization}).
     pv: {
       vt: Math.max(4, batch * depth * cols * 4),
-      vq: Math.max(4, batch * depth * cols),
+      vq: Math.max(4, batch * depth * attentionOnlineValueRowWords(cols) * I8A8_PACK),
       vs: Math.max(4, batch * depth * 4),
     },
   };
@@ -1718,7 +1727,8 @@ const prepareAttentionPvI8a8 = async (
   rowWindow: boolean,
   operandLayout: AttentionLayout,
 ): Promise<AttentionPvStage> => {
-  const quantized = await quantizeAttentionPv(face, builder, binds, shape, operandLayout);
+  // ③PV reads whole-word Vᵀ rows only (attentionPvI8a8Eligible), so the producer rejects any other N
+  const quantized = await quantizeAttentionPv(face, builder, binds, shape, operandLayout, "whole");
 
   // (c) The integer dot-product GEMM (P̃ is produced by filling the A tile = stays unmaterialised).
   // The geometry is the per-op field of the profile. The dispatch is per block, so this only
@@ -1749,6 +1759,8 @@ type AttentionPvQuantized = {
  * A token-major V (`layout` — the node absorbed its permute, perf-ledger F-8) is `[N, H·D]` per batch,
  * whose transpose `[H·D, N]` is Vᵀ `[B·H, D, N]` as is: (a) is then one tiled transpose per batch
  * instead of the strided copy (both are copies, so Vᵀ is the same bits).
+ * `keyWords` is the Vᵀ form the consumer reads (③PV: `whole` only; online: the form its kernel was
+ * compiled with) — {@link attentionValueQuantization} rejects an N of another form.
  */
 const quantizeAttentionPv = async (
   face: RecipeBuildFace,
@@ -1756,6 +1768,7 @@ const quantizeAttentionPv = async (
   binds: readonly BindingSource[],
   shape: AttentionShape,
   layout: AttentionLayout,
+  keyWords: AttentionOnlineKeyWords,
 ): Promise<AttentionPvQuantized> => {
   const { batch, cols, depth } = shape;
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
@@ -1801,27 +1814,77 @@ const quantizeAttentionPv = async (
 
   // (b) Quantize Vᵀ (row = (b,h,d), row length N — the per-column scale and the N-contiguous
   // packing come out together)
-  const quantizeGeometry = quantizeRowsGeometry(cols);
-  const quantizeKey = quantizeRowsKey(quantizeGeometry);
+  const quantization = attentionValueQuantization(batch * depth, cols, keyWords);
   const {
     pipeline: quantizePipeline,
     layout: quantizeLayout,
     roles: quantizeRoles,
-  } = await face.state.cache.get(quantizeKey, quantizeRowsWgsl(quantizeGeometry));
+  } = await face.state.cache.get(quantization.key, quantization.wgsl);
   builder.dispatch({
-    key: quantizeKey,
+    key: quantization.key,
     pipeline: quantizePipeline,
     layout: quantizeLayout,
     roles: quantizeRoles,
-    params: face.writeParams(quantizeRowsParams(batch * depth, cols), PARAMS_UNIFORM_USAGE),
+    params: face.writeParams(quantization.params, PARAMS_UNIFORM_USAGE),
     bindings: [
       { binding: 1, source: vt },
       { binding: 2, source: vq },
       { binding: 3, source: vs },
     ],
-    workgroups: [gridStrideWorkgroups(batch * depth, quantizeGeometry.rowsPerGroup, limit), 1, 1],
+    workgroups: [
+      gridStrideWorkgroups(batch * depth, quantization.geometry.rowsPerGroup, limit),
+      1,
+      1,
+    ],
   });
   return { vt, vq, vs };
+};
+
+/**
+ * The quantisation launch of Vᵀ (rows = `(b,h,d)`, row length N) — the generator calls of (b) of
+ * {@link quantizeAttentionPv}. `N % 4 == 0` takes the plain `quantize_rows` (key, WGSL and params
+ * as before ADR 0132's addendum of 2026-10-27); `N % 4 != 0` takes the padded form, whose rows are
+ * `ceil(N / 4)` words with zero bytes past key N − 1 — the Vᵀ the online kernel's `padded` key
+ * axis reads. Only the online route reaches `N % 4 != 0` (③PV's i8a8 needs `N % 4 == 0`).
+ * `keyWords` is the form the consumer reads; an N of another form throws here, at the producer
+ * (③PV passes `whole`, so an N it cannot read fails loudly at its producer — where
+ * `quantizeRowsGeometry` threw before the addendum).
+ *
+ * MUST: the form follows `attentionOnlineKeyWords`, the function the kernel's form follows too
+ * (the producer and the reader agree on the row length by construction).
+ * MUST: execution and the route bench (src/tune/attention-bench.ts) take the launch from here.
+ */
+export const attentionValueQuantization = (
+  rows: number,
+  cols: number,
+  keyWords: AttentionOnlineKeyWords,
+): {
+  readonly geometry: QuantizeRowsGeometry;
+  readonly key: string;
+  readonly wgsl: string;
+  readonly params: Uint32Array<ArrayBuffer>;
+} => {
+  if (keyWords !== attentionOnlineKeyWords(cols)) {
+    throw new ExecutionError(
+      `attention Vᵀ quantisation: N = ${cols} takes the '${attentionOnlineKeyWords(cols)}' key axis, but its reader takes '${keyWords}' (③PV's i8a8 reads only 'whole')`,
+    );
+  }
+  if (keyWords === "whole") {
+    const geometry = quantizeRowsGeometry(cols);
+    return {
+      geometry,
+      key: quantizeRowsKey(geometry),
+      wgsl: quantizeRowsWgsl(geometry),
+      params: quantizeRowsParams(rows, cols),
+    };
+  }
+  const geometry = quantizeRowsPaddedGeometry(cols);
+  return {
+    geometry,
+    key: quantizeRowsPaddedKey(geometry),
+    wgsl: quantizeRowsPaddedWgsl(geometry),
+    params: quantizeRowsPaddedParams(rows, cols),
+  };
 };
 
 /** (a) of {@link quantizeAttentionPv} for a head-major V: the strided permute to Vᵀ. */
@@ -1897,16 +1960,22 @@ const buildAttentionOnline = async (
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
   const where = `${run.where} online`;
   const qk = await quantizeAttentionQk(face, builder, binds, shape, layout);
-  const pv = await quantizeAttentionPv(face, builder, binds, shape, layout);
+  // The key axis form (N % 4 != 0: a padded Vᵀ) — one value for the Vᵀ producer, the kernel and its
+  // uniform
+  const keyWords = attentionOnlineKeyWords(cols);
+  const pv = await quantizeAttentionPv(face, builder, binds, shape, layout, keyWords);
   // The integer dot-product variant follows the same decision as the a8 kernels (the per-device
   // canary — SessionState.attentionI8a8Dot); both variants are bit-identical.
   const dp4a = face.state.attentionI8a8Dot === "dp4a";
-  const key = attentionOnlineI8a8Key(dp4a, depth, run.reduce, run.output);
+  const key = attentionOnlineI8a8Key(dp4a, depth, run.reduce, run.output, keyWords);
   const {
     pipeline,
     layout: bindLayout,
     roles,
-  } = await face.state.cache.get(key, attentionOnlineI8a8Wgsl(dp4a, depth, run.reduce, run.output));
+  } = await face.state.cache.get(
+    key,
+    attentionOnlineI8a8Wgsl(dp4a, depth, run.reduce, run.output, keyWords),
+  );
   for (const window of planAttentionOnlineWindows(rows, { batch, cols, depth })) {
     builder.dispatch({
       key,
@@ -1919,6 +1988,7 @@ const buildAttentionOnline = async (
           cols,
           window.offset,
           run.scale,
+          keyWords,
           run.output === "bshd" ? layout.heads : undefined,
         ),
         PARAMS_UNIFORM_USAGE,

@@ -219,3 +219,82 @@ storage of decision 5 is given under "Workgroup storage" below.
   figures under "Why" (two runs agree). After the landing the production route bench on the RTX
   5070 Ti reads online ×1.66 (self, 33 frames), ×1.69 (121 frames) and ×2.15 (cross) over v1, and
   online / s16 0.80 / 0.69 / 0.70 (v1: 1.31 / 1.18 / 1.50).
+
+## Addendum (2026-10-27) — the key valid length: `N % 4 != 0` runs online (a padded Vᵀ)
+
+Decision 3 made `N % 4 != 0` fall back to the three dispatches (Vᵀ and P̃ pack four keys per
+word). That condition is lifted for the online kernel only; ③PV's i8a8 kernel and
+`attentionPvI8a8Eligible` keep it, so the three-dispatch routes (a8, a8 + s16) do not change.
+
+- **Why**: MOSS-Image's DiT attends over `S = N + T` with a constant negative-branch text length
+  (T₋ = 10). On a square resolution `N = k²` is 0 or 1 mod 4, so `S₋` is 2 or 3 mod 4 and never
+  eligible: half of all forwards fell back to the three dispatches with S in f32, and the
+  practical preset's census check (`assertAttentionSeatsComplete`) could not hold.
+- **What changed**: `attentionOnlineI8a8Eligible(D, N)` needs `D % 64 == 0`, `D ≤ 128` and
+  `N ≥ 1`. `attentionOnlineKeyWords(N)` names the key-axis form — `whole` (`N % 4 == 0`) or
+  `padded` — and the kernel, its uniform, the Vᵀ producer and the size of the quantised Vᵀ take it
+  from that one function (the online node computes the form once and hands the same value to the
+  producer, the kernel and `attentionOnlineI8a8Params`, which throws when the uniform's N is of the
+  other form). In the `padded` form each Vᵀ row is `ceil(N/4)` words: the producer is a new form of
+  `quantize_rows` (`…:pad`, rows of any length, the bytes from element N on forced to 0, the scale
+  the amax over exactly N elements), and the kernel (`…:kpad`) differs only in its Vᵀ row length
+  `n4 = ceil(N/4)`. The producer takes the form its reader reads: ③PV passes `whole`, so an
+  `N % 4 != 0` that reached ③PV would still fail loudly at its producer, as before the addendum.
+  The permute or tiled transpose to f32 Vᵀ is unchanged (its rows hold N elements). q and k pack
+  along D, so they need no padding. Keys from N on already score −3.0e38 (decision 4), so their P̃
+  is `round(127 · exp(−3.0e38 − m)) = 0` and the padding bytes never reach O: the kernel's output
+  does not depend on them.
+- **Invariant (MUST)**: the `whole` form keeps the key and the WGSL of every existing codegen key
+  byte for byte, and the same buffers (`vq` stays `B·H·D·N` bytes) and dispatches. So every
+  `N % 4 == 0` shape — every accepted Wan2.1 / Wan2.2 size, the only online users so far — is
+  unchanged by construction; the codegen snapshots of the existing keys did not move. The one Wan
+  shape with `N % 4 != 0` is the Wan2.2 DiT test's golden S = 8,190 (832×480 × 81 frames, outside
+  the accepted sizes): on the online preset it now runs the online kernel (`…:obshd:kpad`) instead
+  of the three dispatches, so the complete-eligibility census check applies to it (measured: 1
+  submit at most 151.1 ms against the 1 s gate, non-finite 0, the check green). Anima does not use
+  the online kernel and its three-dispatch routes are untouched (its `N % 4 != 0` shapes still run
+  ③PV and S in f32 — docs/limitations.md).
+- **Checks** (`gpu_attention_online_i8a8_test.ts`, RTX 3080 Ti, Node + Dawn, 2026-10-27): `N` =
+  65, 4,106 and 203 (`N % 4` = 1, 2, 3; D = 64 and 128; batch 2–3) pass the four-point check — the
+  band against the exact f64 attention over exactly N keys (a reference with no padding at all),
+  the A/B against the three-pass a8 references, the TS mirror within two lattice steps, and the
+  structural bit identities (dp4a / emulation, sg32 / wg, row windows, repeated dispatches) — on
+  three inputs each. On the dense inputs of the `padded` shapes they use 34.6%, 3.6% and 20.4% of
+  the error model (7.6–33.1% on the `whole` shapes). That band grows with Σ|ṽ| over all N keys, so
+  at N = 4,106 it barely sees a wrong Vᵀ row length: the whole form's `floor(N/4)` left it at 1.33×
+  the bound and the last word of each row dropped at 0.15×. The two spike-V inputs (one key per
+  column, four columns on the last valid keys; a sharp softmax and a flat one) make the model one
+  key's half lattice step, and see both faults at every padded shape (`floor(N/4)`: 613.4×,
+  249.6×, 461.0×; last word dropped: 252.4×, 86.3×, 252.7×). They use 97.7–99.3% (sharp) and 7.4–82.9% (flat) of
+  the model: with one key per column the worst row's rounding of that key is almost the whole
+  bound. The half step is a proven bound on that rounding; the f32 term (a fixed 2e-5) is an
+  allowance measured sufficient on this machine, not proven — an adapter whose `exp` or summation
+  order differs may need it revisited before the band is read as a defect.
+- **The mask bound**: the padding bytes filled with 0 and with 127 give Uint32-identical outputs —
+  the primary detector of a mask bound past N (patched into the generator as `ceil(N/4)·4`, it
+  turned red at all three shapes). The fault case of the f64 band — the same bound, padding bytes
+  127, the flat spike (under the fault the padding keys score 0, and a sharp row max rounds their
+  P̃ to 0) — leaves the model at 591.8×, 34.1× and 175.6×. With the producer's zero bytes a leaked
+  padding key enters l only: the 0/127 check cannot see that, and the f64 band sees it only where it
+  weighs (N = 65: 1.12× the bound; N = 4,106: 3.6% of it on the dense inputs, 8.1% on the flat
+  spike — a bias inside the a8 error model there).
+- **The producer and the Session path**: the padded `quantize_rows` writes word for word what the
+  plain form writes over the rows extended with zeros (`gpu_i8a8_test.ts`); the Session path is
+  bit-identical to the raw kernel on host-packed inputs (`gpu_attention_online_session_test.ts`
+  case (v), N = 203, 65 and 4,106 — an undersized `vq` turns it red); and the token-major chain
+  (tiled transpose → padded quantisation → `…:obshd:kpad`) is bit-identical to the head-major one
+  on the online routes at N = 203 (`gpu_attention_permute_fusion_test.ts`, sg32 at D 128 and 64,
+  wg at D 128). The codegen snapshots freeze the padded kernel at `obshd` sg32 D 128 and at `bhsd`
+  wg D 64.
+- **Regression** (same machine and day): the Wan2.2 sha256 rows of the 2-step seed path (reference
+  seat at two sizes, `f16+dit8-a8-attn8-s16`, `f16+dit8-a8-attn8-online`,
+  `i8-a8-attn8-online-conv8` with VAE tiles 16 and 32, the GPU text path) and every Anima sha256 row
+  of `e2e_anima_test.ts` (the default preset `f16+dit8-a8-attn8-s16` at 1024² / 512² included)
+  compare equal; the core lane is green.
+- **Tests whose specification changed**: the assertions that a shape with `N % 4 != 0` is not
+  online-eligible or falls back (the kernel test's eligibility case, `attention_route_test.ts`,
+  `runtime_fusion_test.ts`, `runtime_pipeline_census_helper_test.ts`,
+  `tune_attention_bench_test.ts`) now assert the online route there; their fallback cases use
+  D = 96 instead. `attentionOnlineI8a8Params` takes the key-axis form, so its test callers pass
+  it; the Session test matches the online key's reduce form by suffix with `:kpad` appended at
+  `N % 4 != 0`.

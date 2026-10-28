@@ -86,6 +86,7 @@ import {
   attentionOnlineI8a8Params,
   attentionOnlineI8a8Wgsl,
   attentionOnlineI8a8WorkgroupStorageBytes,
+  attentionOnlineKeyWords,
 } from "../kernels/attention-online-i8a8.ts";
 import {
   ATTENTION_STATS_STRIDE,
@@ -110,7 +111,9 @@ import {
 } from "../runtime/attention-route.ts";
 import { rowBlockLimit } from "../runtime/fusion.ts";
 import {
+  attentionI8a8TempBytes,
   attentionScoreElementBytes,
+  attentionValueQuantization,
   fusedAttentionViolation,
   planAttentionBlocks,
   planAttentionOnlineWindows,
@@ -479,13 +482,17 @@ const sharedResources = (shape: AttentionBenchShape): ResourceSpec[] => {
   const { heads, queries, keys, depth } = shape;
   return [
     // Quantized q / k (four i8 per word) and their per-token scales (attention.ts:1386-1390 via
-    // attentionI8a8TempBytes), the quantized Vᵀ[heads, D, N] and its per-column scales
-    // (attention.ts:1505-1508), and O[heads, M, D] in f32
+    // attentionI8a8TempBytes), the quantized Vᵀ[heads, D, ceil(N/4) words] and its per-column
+    // scales (attention.ts:1505-1508, the same function), and O[heads, M, D] in f32
     { name: "qq", bytes: heads * queries * depth, fill: "i8" },
     { name: "qscale", bytes: heads * queries * F32, fill: "scale" },
     { name: "kq", bytes: heads * keys * depth, fill: "i8" },
     { name: "kscale", bytes: heads * keys * F32, fill: "scale" },
-    { name: "vq", bytes: heads * depth * keys, fill: "i8" },
+    {
+      name: "vq",
+      bytes: attentionI8a8TempBytes({ batch: heads, rows: queries, cols: keys, depth }).pv.vq,
+      fill: "i8",
+    },
     { name: "vscale", bytes: heads * depth * F32, fill: "scale" },
     { name: "o", bytes: heads * queries * depth * F32, fill: "none" },
   ];
@@ -645,7 +652,7 @@ const onlineIneligibleReason = (
       )} B / wg ${attentionOnlineI8a8WorkgroupStorageBytes(shape.depth, "wg")} B against ${
         device.maxComputeWorkgroupStorageSize
       } B)`
-    : `the shape is not eligible (D=${shape.depth}, N=${shape.keys}: needs D % 64 == 0, D ≤ 128, N % 4 == 0)`;
+    : `the shape is not eligible (D=${shape.depth}, N=${shape.keys}: needs D % 64 == 0, D ≤ 128, N ≥ 1)`;
 
 /** The online route at one shape (one dispatch of one window). */
 const benchOnline = async (
@@ -675,12 +682,13 @@ const benchOnline = async (
   const windows = planAttentionOnlineWindows(queries, { batch: heads, cols: keys, depth });
   const rows = onlineDispatchRows(shape.rowsPerDispatch ?? windows[0].rows, queries);
   const dp4a = bench.dot === "dp4a";
+  const keyWords = attentionOnlineKeyWords(keys);
   const launch: Launch = {
     // attention.ts:1591-1596
-    key: attentionOnlineI8a8Key(dp4a, depth, reduce),
-    wgsl: attentionOnlineI8a8Wgsl(dp4a, depth, reduce),
+    key: attentionOnlineI8a8Key(dp4a, depth, reduce, "bhsd", keyWords),
+    wgsl: attentionOnlineI8a8Wgsl(dp4a, depth, reduce, "bhsd", keyWords),
     // attention.ts:1603-1606 (the first window: row_offset 0, m = the node's M)
-    params: attentionOnlineI8a8Params(queries, keys, 0, scale),
+    params: attentionOnlineI8a8Params(queries, keys, 0, scale, keyWords),
     // attention.ts:1607-1615
     bindings: positionalBindings(where, [
       [1, "qq"],
@@ -722,7 +730,6 @@ const benchQuantization = async (
   const { id, heads, queries, keys, depth } = shape;
   const { limit } = bench;
   const tokens = quantizeRowsGeometry(depth);
-  const columns = quantizeRowsGeometry(keys);
   const quantize = (
     geometry: ReturnType<typeof quantizeRowsGeometry>,
     rows: number,
@@ -736,6 +743,23 @@ const benchQuantization = async (
     writes: [names[1], names[2]],
     workgroups: [gridStrideWorkgroups(rows, geometry.rowsPerGroup, limit), 1, 1],
   });
+  const valueQuantize = (rows: number, dim: number): Launch => {
+    // At N % 4 != 0 only the online route quantises (s16 is not eligible there), so the form is
+    // the online kernel's
+    const { geometry, key, wgsl, params } = attentionValueQuantization(
+      rows,
+      dim,
+      attentionOnlineKeyWords(dim),
+    );
+    return {
+      key,
+      wgsl,
+      params,
+      bindings: ["vt", "vq", "vscale"],
+      writes: ["vq", "vscale"],
+      workgroups: [gridStrideWorkgroups(rows, geometry.rowsPerGroup, limit), 1, 1],
+    };
+  };
   const stridedSpec = { dtype: "f32" } as const;
   const launches: readonly (readonly [string, Launch])[] = [
     // attention.ts:1402-1423 (q per token, then k per token)
@@ -762,8 +786,8 @@ const benchQuantization = async (
         ],
       },
     ],
-    // attention.ts:1539-1558 (rows = (head, d), row length N)
-    ["quantize_vt", quantize(columns, heads * depth, keys, ["vt", "vq", "vscale"])],
+    // attention.ts:1539-1558 (rows = (head, d), row length N — the padded form at N % 4 != 0)
+    ["quantize_vt", valueQuantize(heads * depth, keys)],
   ];
   const specs: ResourceSpec[] = [
     { name: "q", bytes: heads * queries * depth * F32, fill: "f32" },

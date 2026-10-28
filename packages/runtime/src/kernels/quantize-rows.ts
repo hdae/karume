@@ -30,7 +30,9 @@
  * MUST: the caller guarantees `dim % 4 == 0` (the i8 payload packs 4 per flat index, and this is
  * exactly the condition for a row to start on a word boundary — eligibility is decided in
  * src/runtime/recipe-builders/linear.ts and src/runtime/attention-route.ts). Here every one of the
- * `dim / 4` words is written on the assumption that there is no remainder (full-write).
+ * `dim / 4` words is written on the assumption that there is no remainder (full-write). The one
+ * exception is the padded form ({@link quantizeRowsPaddedWgsl} — the online attention's Vᵀ at
+ * `N % 4 != 0`), which owns exactly the row lengths that are not multiples of 4.
  *
  * NOTE (measured 2026-08-03 on the development machine, Deno 2.9.4 + RTX 3080 Ti): WGSL `round`
  * **rounds half to even** (`round(0.5) = 0` / `round(1.5) = 2` / `round(-0.5) = -0` /
@@ -260,6 +262,28 @@ const BSHD_TEXT: Readonly<
   },
 };
 
+/** The word count and pass ② of the lined-up form for rows of `dim % 4 == 0` (every form but the padded one). */
+const QUADS_TEXT = `  // The caller guarantees dim % 4 == 0 (the i8 payload packs 4 per flat index)
+  let quads = dim / 4u;`;
+const WORD_TEXT = `        let v = vec4<f32>(x[e], x[e + 1u], x[e + 2u], x[e + 3u]) / s;
+        let r = ${latticeWgsl("v")};`;
+
+/**
+ * The text of the padded form ({@link quantizeRowsPaddedWgsl}): `ceil(dim / 4)` words per row, and
+ * in the last word the elements from `dim` on read a clamped in-row element and are forced to 0
+ * (`select` after the lattice, so a NaN row cannot leave a non-zero padding byte either).
+ */
+const PADDED_TEXT = {
+  header: ", rows of any length (the last word zero-padded)",
+  quads: `  // Rows of any length: ceil(dim / 4) words per row, the bytes from element dim on are 0
+  let quads = (dim + 3u) / 4u;`,
+  word: `        // In the last word the elements from dim on are padding: clamped reads, bytes forced to 0
+        let last = base + dim - 1u;
+        let inside = vec4<u32>(0u, 1u, 2u, 3u) + q * 4u < vec4<u32>(dim);
+        let v = vec4<f32>(x[e], x[min(e + 1u, last)], x[min(e + 2u, last)], x[min(e + 3u, last)]) / s;
+        let r = select(vec4<f32>(0.0), ${latticeWgsl("v")}, inside);`,
+} as const;
+
 /**
  * WGSL of the lined-up shape. One workgroup (256) is cut into R lane groups of width W, and group
  * `slot` handles row `rowBase + slot`. The row loop (`rowBase`) is workgroup-uniform, so the
@@ -270,8 +294,9 @@ const BSHD_TEXT: Readonly<
 const quantizeRowsGroupedWgsl = (
   { lanesPerRow, rowsPerGroup }: QuantizeRowsGeometry,
   layout: QuantizeRowsLayout = "rows",
+  padded = false,
 ): string =>
-  `// karume quantize_rows (per-row per-token symmetric i8: s = max(amax/127, tiny), q = clamp(round(x/s), ±127)) — ${rowsPerGroup} rows × ${lanesPerRow} lanes / workgroup${BSHD_TEXT[layout].header}
+  `// karume quantize_rows (per-row per-token symmetric i8: s = max(amax/127, tiny), q = clamp(round(x/s), ±127)) — ${rowsPerGroup} rows × ${lanesPerRow} lanes / workgroup${BSHD_TEXT[layout].header}${padded ? PADDED_TEXT.header : ""}
 struct Params {
   rows: u32,
   dim: u32,${BSHD_TEXT[layout].params}
@@ -295,8 +320,7 @@ fn main(
 ) {
   let lid = lid3.x;
   let dim = params.dim;
-  // The caller guarantees dim % 4 == 0 (the i8 payload packs 4 per flat index)
-  let quads = dim / 4u;
+${padded ? PADDED_TEXT.quads : QUADS_TEXT}
   // Lane groups: width ${lanesPerRow} × ${rowsPerGroup} groups. lane = position in a group, slot = group
   let lane = lid % ${lanesPerRow}u;
   let slot = lid / ${lanesPerRow}u;
@@ -343,8 +367,7 @@ ${BSHD_TEXT[layout].base}
       var q = lane;
       while (q < quads) {
         let e = base + q * 4u;
-        let v = vec4<f32>(x[e], x[e + 1u], x[e + 2u], x[e + 3u]) / s;
-        let r = ${latticeWgsl("v")};
+${padded ? PADDED_TEXT.word : WORD_TEXT}
         xq[qbase + q] = pack4xI8(vec4<i32>(r));
         q = q + ${lanesPerRow}u;
       }
@@ -529,6 +552,50 @@ export const quantizeRowsBshdParams = (
   }
   params[2] = seq;
   params[3] = heads;
+  return params;
+};
+
+/** Rejects a row length the padded form does not own (`dim % 4 == 0` belongs to the plain forms). */
+const assertPaddedDim = (where: string, dim: number): void => {
+  if (!Number.isSafeInteger(dim) || dim < 1 || dim % 4 === 0) {
+    throw new CodegenError(
+      `${where}: dim must be a positive integer that is not a multiple of 4 (${dim}) — a multiple of 4 takes the plain form`,
+    );
+  }
+};
+
+/**
+ * Geometry of the **padded form** (ADR 0132 addendum 2026-10-27): rows of any length `dim` in a
+ * contiguous `[rows, dim]` layout, each written as `ceil(dim / 4)` words (`xq[row · ceil(dim/4) +
+ * …]`) whose bytes from element `dim` on are 0. It is the Vᵀ quantisation of the online attention
+ * at `N % 4 != 0` (attention-online-i8a8.ts `AttentionOnlineKeyWords`). The scale is the amax over
+ * exactly the row's `dim` elements, and every byte of a real element is the plain form's lattice
+ * of the same value (the same {@link SCALE_WGSL} / {@link latticeWgsl} text) — only the row length
+ * of `xq` and the zero padding are new. The geometry is the one of the row padded to
+ * `4 · ceil(dim / 4)`, always in the lined-up generator (as the token-major read).
+ *
+ * MUST: only for `dim % 4 != 0` — the plain forms own `dim % 4 == 0`, so their keys and bytes (and
+ * every output that uses them) cannot move.
+ */
+export const quantizeRowsPaddedGeometry = (dim: number): QuantizeRowsGeometry => {
+  assertPaddedDim("quantize_rows padded geometry", dim);
+  return quantizeRowsGeometry(Math.ceil(dim / 4) * 4);
+};
+
+export const quantizeRowsPaddedKey = (geometry: QuantizeRowsGeometry): string =>
+  `${QUANTIZE_ROWS_KEY}:r${geometry.rowsPerGroup}w${geometry.lanesPerRow}:pad`;
+
+/** WGSL of the padded form (Params `{rows, dim}` — {@link quantizeRowsPaddedParams}). */
+export const quantizeRowsPaddedWgsl = (geometry: QuantizeRowsGeometry): string =>
+  quantizeRowsGroupedWgsl(geometry, "rows", true);
+
+/** Uniform Params of the padded form: `rows`, `dim` = the row length (not a multiple of 4). */
+export const quantizeRowsPaddedParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
+  assertU32Params("quantize_rows padded params", { rows, dim });
+  assertPaddedDim("quantize_rows padded params", dim);
+  const params = new Uint32Array(4);
+  params[0] = rows;
+  params[1] = dim;
   return params;
 };
 

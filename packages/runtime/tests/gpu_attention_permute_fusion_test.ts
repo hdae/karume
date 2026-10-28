@@ -3,7 +3,8 @@
 // `buildAttention` on every route an a8 seat can take) and, on the online route only, the permute of
 // O after it (the kernel stores O token-major): bit parity with the same graph where the permutes
 // stay nodes, the counter, and the dispatches each route saves, on the online route (sg32 at D 128
-// and 64, wg at D 128), the three-dispatch a8 route with S in f16 (s16), an online seat whose shape
+// and 64, wg at D 128 — each with N = 200 and with N = 203, the padded key axis of the ADR 0132
+// addendum of 2026-10-27: tiled transpose → padded Vᵀ quantisation → the `…:obshd:kpad` kernel), the three-dispatch a8 route with S in f16 (s16), an online seat whose shape
 // (D 96) falls back to the three dispatches with S in f32, and the two a8 shapes whose stage falls
 // back to f32 (①QK at D % 4 != 0, ③PV at N % 4 != 0 — the head-major copy path). The f32 seat
 // absorbs nothing. Off the online route the output permute stays a node.
@@ -16,6 +17,7 @@ import { describe, it } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { stridedKey } from "../src/codegen/strided.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
+import { attentionOnlineKeyWords } from "../src/kernels/attention-online-i8a8.ts";
 import { QUANTIZE_ROWS_KEY } from "../src/kernels/quantize-rows.ts";
 import { TRANSPOSE_TILED_KEY } from "../src/kernels/transpose-tiled.ts";
 import { attentionDeviceFacts, attentionRoute } from "../src/runtime/attention-route.ts";
@@ -185,6 +187,8 @@ type Route = {
 };
 
 const WAN_LIKE: Shape = { b: 2, h: 3, s: 150, n: 200, d: 128 };
+/** N % 4 = 3: the online kernel reads a padded Vᵀ (`…:kpad`), the quantisation is `quantize_rows:…:pad`. */
+const PADDED_KEYS: Shape = { ...WAN_LIKE, n: 203 };
 
 const ROUTES: readonly Route[] = [
   {
@@ -214,6 +218,38 @@ const ROUTES: readonly Route[] = [
     name: "online (wg, D 128)",
     options: { attentionCompute: "a8", attentionScoreStorage: "none" },
     shape: WAN_LIKE,
+    subgroups: false,
+    reduce: "wg",
+    absorbedPermutes: 4,
+    absorbed: { strided: 0, transpose: 1, quantizeBshd: 2, quantizeRows: 1, total: 5 },
+    reference: { strided: 5, transpose: 0, quantizeBshd: 0, quantizeRows: 3, total: 9 },
+  },
+  {
+    // The padded key axis (N % 4 != 0) on the same route: the same dispatches, the padded
+    // Vᵀ quantisation counted among quantizeRows, O stored token-major by the `…:obshd:kpad` kernel.
+    name: "online (sg32, D 128, N 203)",
+    options: { attentionCompute: "a8", attentionScoreStorage: "none" },
+    shape: PADDED_KEYS,
+    reduce: "sg32",
+    absorbedPermutes: 4,
+    absorbed: { strided: 0, transpose: 1, quantizeBshd: 2, quantizeRows: 1, total: 5 },
+    reference: { strided: 5, transpose: 0, quantizeBshd: 0, quantizeRows: 3, total: 9 },
+  },
+  {
+    // The same at D 64.
+    name: "online (sg32, D 64, N 203)",
+    options: { attentionCompute: "a8", attentionScoreStorage: "none" },
+    shape: { ...PADDED_KEYS, d: 64 },
+    reduce: "sg32",
+    absorbedPermutes: 4,
+    absorbed: { strided: 0, transpose: 1, quantizeBshd: 2, quantizeRows: 1, total: 5 },
+    reference: { strided: 5, transpose: 0, quantizeBshd: 0, quantizeRows: 3, total: 9 },
+  },
+  {
+    // The padded key axis on the wg form.
+    name: "online (wg, D 128, N 203)",
+    options: { attentionCompute: "a8", attentionScoreStorage: "none" },
+    shape: PADDED_KEYS,
     subgroups: false,
     reduce: "wg",
     absorbedPermutes: 4,
@@ -358,10 +394,27 @@ describe.skipIf(!GPU_AVAILABLE)(
             const tokenMajorStores = (census: readonly CensusRow[]): number =>
               countDispatches(
                 census,
-                (key) => key.startsWith("attention_online:") && key.endsWith(":obshd"),
+                (key) => key.startsWith("attention_online:") && key.includes(":obshd"),
               );
             assertEquals(tokenMajorStores(absorbed.census), 1, `${route.name}: absorbed O store`);
             assertEquals(tokenMajorStores(reference.census), 0, `${route.name}: reference O store`);
+            // Both runs read Vᵀ in the key-axis form of N (`…:kpad` exactly when N % 4 != 0).
+            const paddedReads = (census: readonly CensusRow[]): number =>
+              countDispatches(
+                census,
+                (key) => key.startsWith("attention_online:") && key.endsWith(":kpad"),
+              );
+            const expectedPadded = attentionOnlineKeyWords(n) === "padded" ? 1 : 0;
+            assertEquals(
+              paddedReads(absorbed.census),
+              expectedPadded,
+              `${route.name}: absorbed key axis`,
+            );
+            assertEquals(
+              paddedReads(reference.census),
+              expectedPadded,
+              `${route.name}: reference key axis`,
+            );
           }
           console.log(
             `[attention permutes] ${route.name}: ${route.reference.total} → ${route.absorbed.total} dispatches, ${absorbed.output.length} words identical`,
