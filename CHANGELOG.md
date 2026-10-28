@@ -251,6 +251,11 @@ measurements in `docs/research/`.
   sweep cases move the case-set version (`provenance.caseSet`), so every saved table mismatches once
   (`geometryProfileMismatch`) and needs one re-sweep. `GeometrySweepOp` (`@karume/runtime/tune`)
   gains `"i8a8-conv3d"`.
+- `@karume/hub`: `loadManifest` and `clearHubCache` no longer delete the cache namespaces that hub
+  0.6 and earlier wrote (`karume/1` and the `karume/1:*` names), and `loadManifest` no longer
+  lists `CacheStorage` on entry; the migration period from those versions ends here (ADR 0080
+  addendum of 2026-10-28). A cache they left behind stays until it is reclaimed by hand:
+  `caches.delete("karume/1")`, plus every name from `caches.keys()` that starts with `karume/1:`.
 
 ## [0.14.0] - 2026-10-16
 

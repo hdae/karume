@@ -6,7 +6,8 @@
   and the source-independent part of §5, the fetch layer `@hdae/fetch-cache`. Correction 2026-09-05:
   the four source-specific points of §5 — the `verifying` phase, the `karume/1` cache namespace with
   credential isolation, the full sha256 on every cache hit, and the `^0.3` pin — were removed or
-  changed by [0080](0080-hub-fetch-cache-050.md), with a note at each place in §5; the
+  changed by [0080](0080-hub-fetch-cache-050.md), with a note at each place in §5 (the purge of the
+  old `karume/1` names that 0080 kept was itself removed on 2026-10-28 — 0080 addendum); the
   source-independent contract (progress and `AbortSignal` pass-through, the concurrency and in-flight
   byte budget, the tight-view check before an asset reaches its reader — `assertTightView` in
   `packages/hub/src/fetch.ts` —, the error shape and availability label, `onCacheError` delivery)
@@ -214,9 +215,11 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
   契約とする。`hubUrl` は manifest からは与えられない（アプリが明示指定した場合のみ有効）。
   **撤去（2026-09-05・ADR [0080](0080-hub-fetch-cache-050.md) 決定 3 / 5）**: 名前空間の所有は
   取得層へ移り、hub 側は固定 1 本（`packages/hub/src/cache.ts`）。`karume/1` 系は purge 対象の
-  旧名（同 `LEGACY_CACHE_NAMESPACE`）で、credential ごとの隔離も撤去された（帰結は
+  旧名で、credential ごとの隔離も撤去された（帰結は
   [limitations](../limitations.md) が by-design として持つ）。これに伴い追記 2026-08-05
   （`clearHubCache` が消す 2 名前空間）と追記 2026-08-13（credential 別分離）の記述も失効。
+  Removed 2026-10-28 (ADR [0080](0080-hub-fetch-cache-050.md) addendum of 2026-10-28): the purge
+  of the `karume/1` names is gone too; hub no longer deletes or lists them.
 - **進捗とキャンセル**: 進捗総量は content-length ではなく manifest の `size` 合計（path
   一意化後）から算出。`AbortSignal` を全取得へ透過する。キャッシュヒットの sha256 検証中
   （3.7GB で数秒）は `verifying` フェーズとして進捗イベントに出す（無言のハングにしない）。

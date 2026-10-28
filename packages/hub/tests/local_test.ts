@@ -63,9 +63,8 @@ class HostileCacheStorage implements CacheStorage {
   delete(): Promise<boolean> {
     throw new Error("test: ローカル取得元が CacheStorage を消した");
   }
-  /** 旧名前空間の回収（hub のセッション入口）だけは通す — 消すものが無いことを答える。 */
   keys(): Promise<string[]> {
-    return Promise.resolve([]);
+    throw new Error("test: ローカル取得元が CacheStorage を引いた");
   }
 }
 

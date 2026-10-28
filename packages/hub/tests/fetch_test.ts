@@ -501,34 +501,6 @@ describe("loadManifest: 渡した HubRepoRef を後から書き換えても取�
   });
 });
 
-test("loadManifest: 旧名前空間（karume/1 系）を入口で回収する", async () => {
-  const caches = new MemoryCacheStorage();
-  // 取得層 0.4 以前が残した写し。新コードは二度と読まないので容量を占めるだけ。
-  await caches.open("karume/1");
-  await caches.open("karume/1:auth:0123456789abcdef");
-  await caches.open("other/1");
-
-  const mock = createMockFetch({ files: serveAll() });
-  await loadManifest(
-    { repo: REPO, hubUrl: HUB_URL, revision: SHA },
-    {
-      fetch: mock.fetch,
-      caches,
-    },
-  );
-
-  const names = [...caches.namespaces.keys()];
-  assertEquals(names.includes("karume/1"), false, "旧名前空間が残っている");
-  assertEquals(
-    names.some((name) => name.startsWith("karume/1:")),
-    false,
-    "旧認証隔離の名前空間が残っている",
-  );
-  assertEquals(names.includes("other/1"), true, "他コードの名前空間まで消している");
-  // 残るのは他コードの 1 つと、取得層が今の manifest を入れた 1 つ。
-  assertEquals(names.length, 2, `名前空間が想定外の構成: ${JSON.stringify(names)}`);
-});
-
 const load = async (routes: MockRoutes, caches: MemoryCacheStorage) => {
   const mock = createMockFetch(routes);
   const loaded = await loadManifest(
@@ -1570,30 +1542,48 @@ test("clearHubCache: 温めた資産を消す（次の取得は network に出�
   assert(after.calls.length > 0, "消した後の取得が network に出ていない");
 });
 
-test("clearHubCache: 旧名前空間（karume/1 系）も残さず消す", async () => {
-  const caches = await populated("karume/1", "karume/1:auth:0123456789abcdef", "other/1");
-  assertEquals(await clearHubCache({ caches }), true);
-  assertEquals([...caches.namespaces.keys()], ["other/1"], "他コードの名前空間まで消している");
-});
-
 test("clearHubCache: 消すものが 1 つも無ければ false", async () => {
   const caches = await populated("other/1");
   assertEquals(await clearHubCache({ caches }), false);
   assertEquals([...caches.namespaces.keys()], ["other/1"]);
 });
 
+test("loadManifest / clearHubCache: leave the namespaces of hub 0.6 and earlier (karume/1 family) alone (reclaiming them is manual)", async () => {
+  const untouched = ["karume/1", "karume/1:auth:0123456789abcdef", "other/1"];
+  const caches = await populated(...untouched);
+  await load({ files: serveAll() }, caches);
+  assertEquals([...caches.namespaces.keys()].slice(0, untouched.length), untouched);
+
+  assertEquals(await clearHubCache({ caches }), true);
+  assertEquals(
+    [...caches.namespaces.keys()],
+    untouched,
+    "cleared more than the fetch layer namespace",
+  );
+  assertEquals(
+    await clearHubCache({ caches }),
+    false,
+    "counted the old namespaces as something to clear",
+  );
+});
+
 test("clearHubCache: caches を渡すとそちらだけを消す（globalThis には触らない）", async () => {
-  const injected = await populated("karume/1");
-  const global = await populated("karume/1");
+  const injected = new MemoryCacheStorage();
+  await load({ files: serveAll() }, injected);
+  const global = new MemoryCacheStorage();
+  await load({ files: serveAll() }, global);
+  const warmed = [...global.namespaces.keys()];
+  assertEquals(warmed.length, 1);
   await withGlobalCaches(global, async () => {
     assertEquals(await clearHubCache({ caches: injected }), true);
   });
   assertEquals([...injected.namespaces.keys()], []);
-  assertEquals([...global.namespaces.keys()], ["karume/1"]);
+  assertEquals([...global.namespaces.keys()], warmed);
 });
 
 test("clearHubCache: caches 省略時は globalThis.caches を消す", async () => {
-  const global = await populated("karume/1", "karume/1:auth");
+  const global = new MemoryCacheStorage();
+  await load({ files: serveAll() }, global);
   await withGlobalCaches(global, async () => {
     assertEquals(await clearHubCache(), true);
   });

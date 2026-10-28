@@ -18,7 +18,6 @@
  * - Adding context to failures (`context.ts` — including restoring the real first failure).
  */
 
-import { purgeLegacyCaches } from "./cache.ts";
 import { createByteAdmission } from "./concurrency.ts";
 import {
   createFetchContext,
@@ -172,10 +171,6 @@ const decodeManifest = (
  * handle returned by `localDirectory(...)` and the like). The former is shorthand for the HF
  * source.
  *
- * This is also the session's entry point, so the legacy namespaces (the `karume/1` family) are
- * reclaimed here, once (regardless of the source — copies left by older hub versions are unneeded
- * whatever source is in use now).
- *
  * NOTE: unlike assets, the manifest **cannot have an expected sha256 in advance** (it is the root
  * of the source of truth). So its key stays the SHA-pinned resolve URL, and `parse` = UTF-8
  * decoding + parsing remains the single conversion point bytes → `Manifest` (only the verification
@@ -187,12 +182,12 @@ export const loadManifest = async (
 ): Promise<LoadedManifest> => {
   // A source is recognised by **identity** (`source.ts` — no brand field, no structural check).
   const isSource = isDistributionSource(ref);
-  // MUST: check the spelling of an HF repo name before touching either the fetch or the reclaiming
-  // of legacy namespaces — the fetch layer writes the repo into the URL without percent-encoding
-  // (`/` is structural), so `?` `#` push `/resolve/<SHA>/...` into the query / fragment, and `../`
-  // or three or more segments point at another path. The accepted set is the same single one as the
-  // cross-repo reference check ({@link isRepoName}). The common layer assembles errors, so the
-  // check lives here, not in the source adapter (`sources/hf.ts`).
+  // MUST: check the spelling of an HF repo name before touching the fetch — the fetch layer writes
+  // the repo into the URL without percent-encoding (`/` is structural), so `?` `#` push
+  // `/resolve/<SHA>/...` into the query / fragment, and `../` or three or more segments point at
+  // another path. The accepted set is the same single one as the cross-repo reference check
+  // ({@link isRepoName}). The common layer assembles errors, so the check lives here, not in the
+  // source adapter (`sources/hf.ts`).
   // A ref without a repo arriving from outside the types (a call from JS, …) would make the split
   // in `isRepoName` fail with a bare TypeError that never reaches users who branch on HubError, so
   // non-strings are refused by the same branch.
@@ -202,7 +197,6 @@ export const loadManifest = async (
         ` (exactly 2 segments, allowed characters [A-Za-z0-9._-], no leading dot)`,
     );
   }
-  await purgeLegacyCaches(options);
   const driver = driverOf(isSource ? ref : createHfSource(ref));
   let generation: string;
   try {

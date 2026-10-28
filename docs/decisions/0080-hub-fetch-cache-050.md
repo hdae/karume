@@ -3,7 +3,8 @@
 - Status: accepted (2026-08-28 — the maintainer's ruling: hand verification to the fetch layer; drop
   the per-credential isolation, since no gated hosting is planned); partly superseded by
   [0086](0086-distribution-source.md) (2026-08-31: verification is decided per source); decision 3's
-  re-isolation path narrowed on 2026-10-10; decision 5's purge re-graded 2026-10-18 to MAY.
+  re-isolation path narrowed on 2026-10-10; decision 5's purge re-graded 2026-10-18 to MAY and
+  removed 2026-10-28.
 - Date: 2026-08-28
 - Related: ADR [0038](0038-manifest-v1.md) (fetch-cache connection contract — this ADR updates its
   decision 5) / [0070](0070-shard-loading-admission.md) (this ADR **changes** decision 2's "the sha256
@@ -65,7 +66,8 @@ pre-release). `fileLoaded` / `fileTotal` still agree at `complete`.
 - **Purge of the old namespaces**: the hub MAY keep deleting `karume/1` and `karume/1:auth:*` at the
   entry of `loadManifest` (the load continues on failure); `clearHubCache` collects them too
   (`packages/hub/src/cache.ts`). The key shape changed, so old entries miss and download once more.
-  (Re-graded 2026-10-18 to MAY: the purge stays, its cost is small.)
+  (Re-graded 2026-10-18 to MAY: the purge stays, its cost is small. Removed 2026-10-28 — addendum
+  below.)
 - **`clearHubCache`** now clears the fixed namespace `"fetch-cache"`, including what an application
   on the same origin cached with fetch-cache directly (stated in the docstring). Fine-grained cleanup
   became `listCachedAssets` / `evictCachedAssets` (ADR 0094).
@@ -113,3 +115,14 @@ This narrows two statements:
 - Consequences: a later caller merged into a concurrent fetch recomputes the full SHA-256 even on a
   cache hit. Correctness is unaffected; CPU time grows for parallel large fetches (not measured).
   Changing that is a redesign of the fetch layer's trust model, not a hub fix.
+
+## Addendum (2026-10-28) — the purge of the old namespaces is removed
+
+The maintainer ruled (2026-10-28) to remove the purge of decision 5 before 0.15.0: `loadManifest` no
+longer deletes `karume/1` and `karume/1:*` on entry, and `clearHubCache` clears only the fetch
+layer's namespace. Those names were written by hub 0.6 and earlier (on `@hdae/fetch-cache` 0.4);
+0.15.0 is a breaking release, and the migration period from those versions, kept open by the
+re-grading of 2026-10-18, closes with it. The purge listed `CacheStorage` on every session start
+whatever the source, a local directory included. A cache those versions left behind is now
+reclaimed by hand (`caches.delete("karume/1")` and each `karume/1:*` name from `caches.keys()`;
+CHANGELOG, 0.15.0 **Breaking**).

@@ -68,7 +68,7 @@ export class MemoryCache implements Cache {
 
 /**
  * メモリ上の CacheStorage。名前空間の名前は**取得層が所有する**（0.5.0 で内部固定 1 個）ので、
- * テストは名前を名指しせず {@link hubCache} で引く。名前をそのまま持つのは、旧名前空間の回収と
+ * テストは名前を名指しせず {@link hubCache} で引く。名前をそのまま持つのは、
  * 「他コードの名前空間に触らない」ことを観測するため。
  */
 export class MemoryCacheStorage implements CacheStorage {
