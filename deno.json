@@ -1,6 +1,7 @@
 {
   "workspace": ["./packages/runtime", "./packages/hub", "./packages/models"],
   "exclude": ["inputs/", "outputs/", "models/", ".claude/reviews/"],
+  "nodeModulesDir": "none",
   "minimumDependencyAge": {
     "exclude": ["jsr:@hdae/*"]
   },

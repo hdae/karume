@@ -3,7 +3,7 @@
 - Status: accepted (2026-08-01); partly superseded by [0009](0009-dtype-i32-bool.md) (2026-08-02:
   the public `Tensor` is a dtype-discriminated union — f32 = `Float32Array` / i32 = `Int32Array` /
   bool = `Uint32Array`) and by the registry decision of [0127](0127-node-dawn-toolchain.md) (the
-  publish dry-run in CI is suspended, recorded 2026-10-18).
+  publish dry-run in CI was suspended, recorded 2026-10-18; restored 2026-10-28).
 - Date: 2026-08-01
 - Related: the prototype recon §9-1 (about 180 internal symbols re-exported, drift undetected) /
   [0129](0129-test-layout-and-lanes.md) decision 3 (the public-surface gate stays mandatory).
@@ -19,11 +19,12 @@
   `packages/runtime/tests/e2e_public_api_test.ts`).
 - A sub-surface, when needed, is added as an entry of the package's `exports` map (for example
   `./tune`); do not add them lightly. Today that map is each package's `package.json` `exports`
-  (`packages/runtime/package.json:12`); the JSR configuration file is open in ADR 0127.
+  (`packages/runtime/package.json:12`); the JSR configuration is each package's `deno.json` (ADR 0127
+  addendum of 2026-10-28).
 - Keep SemVer. A change to the public surface is made after its export diff is stated in review.
   `deno publish --dry-run` runs in CI so the packages stay publishable to JSR (superseded by the
-  registry decision of ADR 0127, Open points, recorded 2026-10-18: the dry-run returns to CI once
-  the 0.15.0 registry is decided — `.github/workflows/ci.yml:6`; the purpose stands).
+  registry decision of ADR 0127, Open points, recorded 2026-10-18; restored 2026-10-28 as the CI job
+  `publish-dry-run` — ADR 0127 addendum of 2026-10-28).
 - Public APIs carry explicit return types (avoids JSR slow types; the global TypeScript convention).
 
 ## Consequences

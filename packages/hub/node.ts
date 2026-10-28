@@ -310,6 +310,15 @@ const nodeCache = (directory: string): Cache => {
       .filter((name) => !name.endsWith(TEMPORARY_SUFFIX))
       .map((name) => `${directory}/${name}`);
   };
+  // Spread into the result rather than written there: the DOM lib's `Cache` requires these members
+  // while Deno's lib `Cache` does not declare them, so as written properties they fail Deno's
+  // excess-property check (`deno publish` type-checks with Deno's lib). Spread members are still
+  // checked against the DOM `Cache`.
+  const unsupportedMembers = {
+    add: () => unsupported("Cache.add"),
+    addAll: () => unsupported("Cache.addAll"),
+    matchAll: () => unsupported("Cache.matchAll"),
+  };
   return {
     match: async (request, options) => {
       rejectQueryOptions(options);
@@ -376,9 +385,7 @@ const nodeCache = (directory: string): Cache => {
       }
       return requests;
     },
-    add: () => unsupported("Cache.add"),
-    addAll: () => unsupported("Cache.addAll"),
-    matchAll: () => unsupported("Cache.matchAll"),
+    ...unsupportedMembers,
   };
 };
 

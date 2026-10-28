@@ -2,8 +2,8 @@ name: CI
 
 # Quality gates. Real-GPU tests do not run on CI runners (ADR 0005: an environment without an
 # adapter skips them explicitly; a release needs a green real-GPU run). Here the GPU cases are
-# skipped with KARUME_ALLOW_NO_GPU=1 so that the non-GPU tests catch regressions. Publishing
-# dry-runs return once the 0.15.0 registry decision (JSR / npm) is made.
+# skipped with KARUME_ALLOW_NO_GPU=1 so that the non-GPU tests catch regressions. The JSR publish
+# is rehearsed with `deno publish --dry-run` (job `publish-dry-run`).
 #
 # The Python side is split in two jobs along the ADR 0065 boundary (core / recipes): the
 # `exporter-core` that ships to PyPI and the repository-only `export-recipes`.
@@ -45,6 +45,19 @@ jobs:
           KARUME_ALLOW_NO_ASSETS: "1"
           KARUME_ALLOW_NO_DISTRIBUTION: "1"
         run: pnpm exec vp test --project core
+
+  publish-dry-run:
+    # `vp check` type-checks with the DOM lib and cannot see where Deno's lib differs (Deno's
+    # `Cache` has no `add`, for one); `deno publish` type-checks with Deno's lib and refuses to
+    # publish on an error. Same Deno version and working directory as publish.yml (ADR 0127,
+    # addendum 2026-10-28).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: "2.9.6"
+      - run: deno publish --dry-run
 
   exporter-core:
     # Check for PyPI `karume` (the generic exporter core). torch comes as a CPU wheel from the pytorch-cpu

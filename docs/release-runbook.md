@@ -338,7 +338,8 @@ publishes the 3 packages (hub / runtime → models) together in dependency order
 (already-published versions are skipped idempotently; OIDC, tokenless).
 
 NOTE: the package README / LICENSE are part of what is published (`packages/*/README.md` and
-`packages/*/LICENSE` — confirmed on 2026-09-20 that they appear for all 3 packages in the output of `deno publish --dry-run --allow-dirty`.
+`packages/*/LICENSE` — confirmed on 2026-09-20 that they appear for all 3 packages in the output of `deno publish --dry-run --allow-dirty`;
+re-confirmed on 2026-10-28 with `"nodeModulesDir": "none"` in the root `deno.json`, on a clean `git archive` copy.
 The `publish` of each `deno.json` is only `exclude: ["tests/"]`; no explicit `include` is
 needed).
 
@@ -357,7 +358,8 @@ needed).
       date (the same `YYYY-MM-DD` as `git log -1 --format=%cs` of that commit) in the heading and a link definition for the version.
       Place it after the pin commit of §3 and before the push (the substance of "breaking changes are stated in the
       CHANGELOG" of ADR [0008](decisions/0008-public-api.md) — if the commit that the Release is cut from has no version section, it disagrees with the content of the published tag)
-- [ ] push (the maintainer) → confirm CI is green (`ci.yml` does not run the publish dry-run today — the publishing dry-runs return once the 0.15.0 registry decision (JSR / npm) is made)
+- [ ] push (the maintainer) → confirm CI is green, **including the `publish-dry-run` job** (`deno publish --dry-run` with the Deno version and
+      directory of `publish.yml` — ADR [0127](decisions/0127-node-dawn-toolchain.md) addendum of 2026-10-28); do not cut the Release while it is red
 - [ ] Create a GitHub Release from the main commit with green CI → published (fires)
 - [ ] Confirm the new version of the 3 packages on JSR
 

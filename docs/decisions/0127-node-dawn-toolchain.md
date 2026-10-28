@@ -233,20 +233,21 @@ differs only where intended (phase 3).
 
 ## Open points
 
-- **Registry for 0.15.0: JSR only, or JSR and npm.** Not decided; it is the first open point of the
-  0.15.0 release. Facts that bear on it: the npm names are unused (`@karume/runtime` returns E404);
+- **Registry for 0.15.0: JSR only, or JSR and npm — resolved 2026-10-28: JSR only (addendum
+  2026-10-28).** Facts that bore on it: the npm names are unused (`@karume/runtime` returns E404);
   Node applications can already install from JSR through its npm compatibility endpoint
   (`published-smoke` does this). Caveat, from Node's documented behaviour rather than a Karume
   measurement: Node does not strip types from files under `node_modules`, so an npm release of the
   `.ts` sources as they are would not load; npm publishing implies a build step (tsdown).
-- **JSR publishing configuration.** `packages/hub/deno.json` lists `./node` now. Which file carries the
-  JSR configuration once the Deno workspace files leave the tree (`deno.json` or `jsr.json`) is not
-  decided; the root `deno.json` keeps only the workspace, the import map and the dependency-age
-  setting until then.
+- **JSR publishing configuration — resolved 2026-10-28 (addendum 2026-10-28).** `packages/*/deno.json`
+  stays the JSR configuration.
 - **When `deno.json` / `deno.lock` leave the development tree**, and what happens to the existing
-  `deno-*` reference rows in the fixtures (kept as history or pruned).
+  `deno-*` reference rows in the fixtures — **resolved 2026-10-28 (addendum 2026-10-28)**: both
+  files stay, for publishing only; the rows stay as history.
 - **Whether a Deno import check runs before publishing** (in CI or the runbook), in addition to the
-  post-release `published-smoke` run.
+  post-release `published-smoke` run — **resolved 2026-10-28 (addendum 2026-10-28)**: CI runs a
+  Deno type check (`deno publish --dry-run`); importing and running the packages on Deno stays
+  with the post-release `published-smoke`.
 - **When Deno support ends altogether**, given the end of Deno runtime development around 2027-10.
 - **Default Dawn timestamp setting in the test harness.** Decided during the port: the setup disables
   Dawn's 65,536 ns quantisation (`disable-dawn-features=timestamp_quantization`); short dispatches
@@ -279,3 +280,27 @@ differs only where intended (phase 3).
   writes (ADR 0106, addendum 2026-10-17); the other artifacts (safetensors, WAV, raw RGB) were
   runtime-independent already. The 33 anima rows were recomputed from the frozen artifacts, and the
   Deno and Node rows on the RTX 3080 Ti are equal for every case.
+
+## Addendum (2026-10-28) — the 0.15.0 registry and the JSR configuration (maintainer rulings)
+
+- **0.15.0 is published to JSR only.** Node applications install it through JSR's npm
+  compatibility endpoint, as `published-smoke` already does. npm can be added in a later release;
+  it needs a build step (Open points, registry).
+- **`packages/*/deno.json` stays the JSR configuration** (name, version, exports, publish
+  exclusions). **The root `deno.json` and `deno.lock` are kept, for publishing only**: the root
+  file is the workspace `deno publish` runs from (`.github/workflows/publish.yml`) and is not a
+  development configuration (its `imports` and `compilerOptions` are left over from Deno
+  development; trimming them is a separate change). It sets `"nodeModulesDir": "none"` so that Deno ignores the pnpm
+  `package.json` and `node_modules`: without it, a fresh checkout fails before type checking
+  (Deno looks for `@types/node` in a `node_modules` folder that only `pnpm install` creates) and
+  Deno rewrites the root `package.json` with the `pnpm-workspace.yaml` settings it migrates.
+- **CI runs `deno publish --dry-run`** (job `publish-dry-run`, same Deno version and working
+  directory as the publish workflow). Why: `vp check` type-checks with TypeScript's DOM lib and
+  cannot see where Deno's lib differs, while `deno publish` type-checks with Deno's lib and
+  refuses to publish on an error. The defect that settled it: the file-backed `Cache` of
+  `nodeCacheStorage` passed `vp check`, but its `add` / `addAll` / `matchAll` members failed
+  Deno's excess-property check (Deno's `Cache` does not declare them), so the 0.15.0 publish would
+  have been refused. The dry run type-checks (with the slow-type and file-list checks); it does
+  not import or run the packages on Deno — that stays with the post-release `published-smoke`.
+- **The `deno-*` sha256 reference rows stay in the fixtures as history.** They are no longer
+  written or checked by the development suite (decision 3).
