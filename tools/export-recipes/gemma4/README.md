@@ -22,7 +22,7 @@ was Gemma 3 knowledge carried over, retracted 2026-09-01). The per-revision lice
 0065 stage 6) was held for this revision on 2026-09-01: distribution is allowed, the model card
 carries the Apache 2.0 attribution and links to the upstream model card for the usage details this
 project does not curate. The distribution is published as `hdae/karume-gemma4`; the pinned
-revision lives in `GEMMA4_SOURCES` (`packages/models/src/gemma/config.ts`), and publication
+revision lives in `gemma.SOURCES` (`packages/models/src/gemma/config.ts`), and publication
 follows `docs/release-runbook.md`.
 
 The authority for the design decisions is the module docstrings (`export.py`, `export_decode.py`,
@@ -519,8 +519,8 @@ Apache 2.0 §4 applies to the redistribution, so the repository root also carrie
 verbatim copy of `../_shared/licenses/apache_license_2_0.txt`) and `NOTICE.md` (the list of modifications). Both are
 `karume.dist`'s legal-text seat, not manifest-declared assets.
 
-Loading it back is `Gemma4Pipeline.fromPretrained` (`packages/models/src/gemma/pipeline.ts`). The
-pinned fetch source for the published repository is `GEMMA4_SOURCES["gemma4"]`
+Loading it back is `gemma.Pipeline.fromPretrained` (`packages/models/src/gemma/pipeline.ts`). The
+pinned fetch source for the published repository is `gemma.SOURCES["gemma4"]`
 (`@karume/models/gemma` — ADR [0073](../../../docs/decisions/0073-models-source-pin.md) /
 [0092](../../../docs/decisions/0092-distribution-repos-and-sources.md)); a locally built
 distribution is spelled out by the caller, since `fromPretrained` has no default source.

@@ -31,7 +31,7 @@ The app is private (not published) and imports only the public surfaces of the w
 `@karume/models` (the barrel only for `encodePng` / `encodeWav` / `decodeWav`, loaded when a PNG or
 a WAV is made or read, and for type-only imports). Besides the UI libraries, the one outside package
 a pipeline input comes from is `@hdae/yomi`, a dependency of the app: the caller-side Japanese
-analyser whose `Sbv2Utterance` the Style-Bert-VITS2 page hands to `Sbv2Pipeline` (the same analyser
+analyser whose `sbv2.Utterance` the Style-Bert-VITS2 page hands to `sbv2.Pipeline` (the same analyser
 the SBV2 WAV regression test uses).
 
 One exception to the public surfaces: the kernel-check page imports `@karume/kernel-checks`, a
@@ -62,7 +62,7 @@ The dev server listens on **http://127.0.0.1:8790** (loopback only). It serves:
 
 The mount table is `src/mounts.ts` (`vite.config.ts` hands it to `distributionsPlugin`; the page
 registry names mounts with its `MountName` type). The directories are relative to the repository
-root. The HF-compatible repo is the public name from the family's `*_SOURCES` table.
+root. The HF-compatible repo is the public name from the family's `SOURCES` table (imported as a namespace, `anima.SOURCES`).
 
 | Mount | Directory | HF-compatible repo (`/hf/`) | Page |
 | --- | --- | --- | --- |
@@ -201,7 +201,7 @@ shown in full (message, stack, `cause` chain).
 The result card plays the frames in a canvas (play / pause, frame scrubber) and shows a summary of the
 record: adapter and device, source, preset, VAE tile, size, frames, steps, seed, shift, per-stage
 seconds, wall seconds, the number of non-finite values in the output, the sha256 of the RGBA pixels of
-all frames (concatenated in order, the `wanFrameToRgba` rule), the first denoise step and the
+all frames (concatenated in order, the `wan.frameToRgba` rule), the first denoise step and the
 min / median / max of the rest (likewise for VAE tiles), the build cost summed over the components,
 and per component the runs, weight memory, submit count, build cost and the attention kernels of its
 last run (`attention_online` for the online route, `attention_qk` / `attention_stats` /
@@ -255,7 +255,7 @@ machine running Chrome:
 
 ## The Anima page
 
-Text → image with `AnimaPipeline` (`@karume/models/anima`), over both Anima distributions: the five
+Text → image with `anima.Pipeline` (`@karume/models/anima`), over both Anima distributions: the five
 official models of `karume-anima` (mount `anima`) and the two third-party fine-tunes of
 `karume-anima-extra` (mount `anima-extra`). The fine-tunes take their text encoder, VAE and
 tokenizers from the official repository. On the cached route the hub follows that cross-repo
@@ -286,7 +286,7 @@ left. One generation runs at a time.
 | Guidance | `guidanceScale`; empty = the manifest's default (1 for the Turbo models, 4 for the others). 1 = no CFG. |
 | Steps | 2–1000; empty = the manifest's default (8 for Turbo, 20–30 for the others). |
 | Resolution | `WxH` or one number for a square (`parseResolution`: each side a multiple of 16 from 512 to 2048), with quick choices; empty = the manifest's default (1024×1024). |
-| Sampler | Manifest default (`euler`) or `euler` / `dpmpp-2m` (`ANIMA_SAMPLER_TYPES`). Choosing one departs from the distributor's recommendation. |
+| Sampler | Manifest default (`euler`) or `euler` / `dpmpp-2m` (`anima.SAMPLER_TYPES`). Choosing one departs from the distributor's recommendation. |
 | Seed | Integer ≥ 0 (default 42); **Random** draws one. |
 | DiT residency | `residency` of the request. `per-stage` (default): every stage opens and closes its Session, and the peak is the largest stage. `transformer`: the DiT Session stays after the run, so the next run with the same open pipeline skips the DiT load. The text and VAE stages then stack on it (about +2.6 GiB at 1024² with the default preset), and the pipeline evicts it when a stage would not fit. A later `per-stage` run, **Release pipeline**, or changing the selection releases it. |
 | Live preview | On by default: after every denoise step, `approximatePreview` of the step's latent (a linear projection to RGB at 1/8 of the image, not the VAE decode), drawn scaled up and blocky. |
@@ -346,7 +346,7 @@ covers) and a summary of the record.
 
 ## The BiRefNet page
 
-The page cuts the background out of one image with `BirefnetPipeline` (`@karume/models/birefnet`) on
+The page cuts the background out of one image with `birefnet.Pipeline` (`@karume/models/birefnet`) on
 the page's GPU. The GPU is acquired with `acquireGpu({})`, since the family's presets declare no
 features, and with `gpuTiming: true` while **GPU timing** is on.
 
@@ -455,7 +455,7 @@ Beside the tabs it shows a summary of the record.
 
 ## The Depth Anything V2 page
 
-Monocular relative depth with `DepthAnythingPipeline` (`@karume/models/depth-anything`). Pick an
+Monocular relative depth with `depthAnything.Pipeline` (`@karume/models/depth-anything`). Pick an
 image, estimate its depth on the page's GPU, look at the map, save it as a PNG, and save a record of
 the run.
 
@@ -542,7 +542,7 @@ JSON.
 
 ## The SigLIP 2 page
 
-The distribution holds only SigLIP 2's **vision tower**. `Siglip2Pipeline.embed` turns an image into
+The distribution holds only SigLIP 2's **vision tower**. `siglip2.Pipeline.embed` turns an image into
 its raw `pooler_output` vector, which is not L2-normalized; the base vector has a norm of about 13.
 There is no text tower, so there are no candidate labels and no zero-shot scores. The page embeds
 one or two images. With two, it also gives their **cosine similarity**. That is an image-to-image
@@ -626,7 +626,7 @@ value-level diff when two machines' hashes differ. **Copy record** copies the JS
 
 ## The Irodori-TTS page
 
-The page speaks Japanese text with `IrodoriPipeline` on the page's GPU. It reads one of two
+The page speaks Japanese text with `irodori.Pipeline` on the page's GPU. It reads one of two
 distributions: v4.1-small (default; upstream retrained only the duration predictor) or v4-small. It
 acquires the GPU once (`acquireGpu({})`, plus `gpuTiming: true` while **GPU timing** is on). The
 first **Run** builds the pipeline. Later runs reuse it until the model, preset, linear compute,
@@ -722,7 +722,7 @@ sha256 covers. **Copy record** copies the JSON.
 ## The Style-Bert-VITS2 page
 
 The page acquires the GPU once (`acquireGpu({ subgroups: "available" })`, plus `gpuTiming: true`
-while **GPU timing** is on). It builds `Sbv2Pipeline.fromPretrained` for the chosen source, model
+while **GPU timing** is on). It builds `sbv2.Pipeline.fromPretrained` for the chosen source, model
 and preset. Building reads the manifest, the three graphs' descriptors and the small assets. With
 the **Cached** source it also downloads every weight part of the model / preset into Cache Storage,
 so the first build of a model / preset fetches all of its weights and later builds find them there.
@@ -731,9 +731,9 @@ graphs' Sessions one after another (`text_encoder` → `front` → `voice`), rea
 the source (the cache the build filled, or plain fetch), and destroys them again. One synthesis runs
 at a time.
 
-Text analysis is the caller's job: since 0.6.0, `generate` takes an analysed `Sbv2Utterance`, so the
+Text analysis is the caller's job: since 0.6.0, `generate` takes an analysed `sbv2.Utterance`, so the
 page does the analysis itself. `@hdae/yomi` (`analyzeWithWords`) turns the text into accent phrases
-and the word alignment, and `toSbv2Utterance` lowers them to the utterance. This is the same
+and the word alignment, and `sbv2.toUtterance` lowers them to the utterance. This is the same
 analyser the SBV2 WAV regression test uses. The analyser is a caller-side dependency of this page,
 not a workspace package. The analyser's dictionary (JTD1, about 6.4 MB gzip) is **not in a
 distribution**. It is fetched from the analyser's Hugging Face dataset at the revision its version
@@ -756,14 +756,14 @@ Every list comes from the distribution:
 | Reading | Live: the moras the analyser reads, with high tones overlined, and the mora count. |
 | Style | `pipelineConfig.styles` in table-row order; the default is marked. |
 | Style weight / Length scale / SDP ratio / Noise scale / Noise scale W | Sliders for `styleWeight` (0–2), `lengthScale` (0.5–2, larger is slower), `sdpRatio` (0–1), and `noiseScale` and `noiseScaleW` (0–1.5). They start at `pipelineConfig.defaults`. |
-| Seed | `seed` (default 0). The page refuses a seed that is not a number. An out-of-range seed is rejected by the pipeline with `Sbv2InputError`. |
-| Run | Analyses the text and synthesizes it. **Not cancellable**: `Sbv2Pipeline.generate` takes no AbortSignal, so the status card's Cancel stays disabled, with the reason under it. |
+| Seed | `seed` (default 0). The page refuses a seed that is not a number. An out-of-range seed is rejected by the pipeline with `sbv2.InputError`. |
+| Run | Analyses the text and synthesizes it. **Not cancellable**: `sbv2.Pipeline.generate` takes no AbortSignal, so the status card's Cancel stays disabled, with the reason under it. |
 | Reset options to the distribution's defaults | Sets speaker, style, every knob and the seed back to `pipelineConfig.defaults` / 0. The text stays. |
 | GPU timing | Off by default, in the status card (as on the Wan2.2 page). Turning it on acquires the GPU again with `gpuTiming: true`, and every graph records its GPU time per kernel. Timed runs are slower, so compare timed records only with timed records. The switch is disabled while a run is in flight. Switching while the pipeline is being built is fine: the abandoned build is disposed before the old device is destroyed. |
 
 Every option is passed to `generate` explicitly, the defaults too, so the record is the full
 request. The page refuses only an empty text and a seed that is not a number. Acceptance belongs to
-the pipeline. An input it refuses shows as **Input rejected — Sbv2InputError**, with the message,
+the pipeline. An input it refuses shows as **Input rejected — sbv2.InputError**, with the message,
 the stack and a hint that quotes both limits. A frame-limit rejection comes only after the
 `text_encoder` and `front` graphs have run. Any other failure shows in full as **Run failed**.
 
@@ -789,9 +789,9 @@ summarizes the record:
 | `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
 | `model`, `preset` | the manifest's model; `{ quant, label, isDefault }` (`isDefault` = the model's `defaultQuant`) |
 | `request` | `{ text, options }`: `speaker`, `style`, `styleWeight`, `sdpRatio`, `noiseScale`, `noiseScaleW`, `lengthScale`, `seed`, exactly as passed to `generate` |
-| `analysis` | `analyzer` / `analyzerVersion` (`@hdae/yomi` and its version, which pins the dictionary revision); `reading` (moras, high tones in brackets); `utterance` (the exact `Sbv2Utterance` that `generate` received) |
+| `analysis` | `analyzer` / `analyzerVersion` (`@hdae/yomi` and its version, which pins the dictionary revision); `reading` (moras, high tones in brackets); `utterance` (the exact `sbv2.Utterance` that `generate` received) |
 | `timings.pipelineLoadSeconds` | building the pipeline: manifest, descriptors, small assets and, with Cached, the weight download into Cache Storage (no Session) |
-| `timings.analysisSeconds` | `analyzeWithWords` + `toSbv2Utterance` on the host |
+| `timings.analysisSeconds` | `analyzeWithWords` + `sbv2.toUtterance` on the host |
 | `timings.stageSeconds` | Seconds per graph. Each graph is measured up to its diagnostics report, which comes after its run and before its Session is destroyed, starting from the previous graph's report (the first from the `generate` call). So a stage holds the previous graph's Session destruction, the host glue, its own Session creation (reading and uploading the weights) and its run. |
 | `timings.synthesisSeconds`, `timings.wallSeconds` | the whole `generate` call, which also holds the last Session's destruction and the output check; analysis + synthesis + hashing |
 | `output` | `sampleRate`, `samples`, `durationSeconds`; `realTimeFactor` (synthesis seconds / audio seconds; below 1 = faster than real time); `f32Sha256` (sha256 of the f32 samples' bytes as they sit in memory, little-endian in practice); `wavSha256` (sha256 of the 16-bit WAV that `encodeWav` makes, the hash the SBV2 regression test pins in `packages/models/tests/fixtures/references/sbv2.json`) |
@@ -824,11 +824,11 @@ and **Copy record** copies the JSON.
 
 ## The Gemma 4 chat page
 
-A multi-turn chat with regular Gemma 4 (`Gemma4Pipeline`, mount `gemma4`) or a mobile QAT model
-(`Gemma4QatPipeline`, mount `gemma4-qat`: E2B / E4B, experimental, direct route only). The page
+A multi-turn chat with regular Gemma 4 (`gemma.Pipeline`, mount `gemma4`) or a mobile QAT model
+(`gemma4Qat.Pipeline`, mount `gemma4-qat`: E2B / E4B, experimental, direct route only). The page
 acquires the GPU once (`acquireGpu({ subgroups: "available" })`). **Load** builds the pipeline:
 `fromPretrained` reads every weight and builds the Session (gigabytes), so nothing is read until
-Load is pressed. The conversation is one `Gemma4ChatSession`. It carries the KV between turns that
+Load is pressed. The conversation is one `gemma.ChatSession`. It carries the KV between turns that
 close with the distribution's EOS. After any other stop it re-renders the history on the next send.
 One turn runs at a time.
 
@@ -887,7 +887,7 @@ How the figures are measured (from `performance.now()` in the page):
 | `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device` | `recordEnvironment` |
 | `distribution` | `mount`, `directory`, `manifestSha256` (sha256 of `karume.json`) |
 | `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
-| `pipeline` | `Gemma4Pipeline` or `Gemma4QatPipeline` |
+| `pipeline` | `gemma.Pipeline` or `gemma4Qat.Pipeline` |
 | `model`, `preset` | the model name; `{ quant, label, isDefault }` |
 | `speculative` | whether the MTP drafter was built |
 | `loadSeconds` | from Load to the pipeline being ready |
@@ -1162,7 +1162,7 @@ a route file has no entry or an entry has no route file.
 ### Adding a model page
 
 1. Add the mount to `src/mounts.ts` (`<name>: "models/<dir>"`, or
-   `{ directory, hfRepo: <FAMILY>_SOURCES[...].repo }` to serve it on the HF-compatible route too).
+   `{ directory, hfRepo: <family>.SOURCES[...].repo }` with `import * as <family> from "@karume/models/<subpath>"` to serve it on the HF-compatible route too).
 2. Add `src/routes/<page>.tsx` (`createFileRoute("/<page>")({ component })`) and put the page's code
    under `src/models/<page>/` (`page.tsx` exports `<Pascal>Page`). Run `pnpm --filter
    @karume/playground build` (or the dev server) once so the router plugin regenerates

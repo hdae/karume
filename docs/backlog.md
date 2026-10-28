@@ -20,7 +20,7 @@
   ②′ **K-82 online int8 attention (ADR 0132) ✅ 2026-10-23** — done before 2-10 at the maintainer's request (the Wan2.2 default preset is `f16+dit8-a8-attn8-online`; the 121-frame A/B passes under Node since the backing-build release wait of 2026-10-24 (relRMS 4.675e-2); **K-84 ✅ 2026-10-25** — the kernel's vec4 tiles (ADR 0132 addendum): self ×1.44–1.46 and cross ×2.0 on the RTX 3080 Ti, the 33-frame DiT forward −9.7%, bit-identical; **wave a ✅ 2026-10-25** — F-4, F-8 and F-3's input side ([research](research/2026-10-25-wave-a-dit-fusions.md)): the 33-frame DiT GPU −3.5%, bit-identical; follow-ups **H-42 ✅ 2026-10-26** (transient placement by least region growth, best of two orders — ADR 0093 addendum: summed region totals 30.26 → 24.18 GiB over 49 scenarios, Wan2.2 DiT 33f 880.3 → 717.8 MiB) → **F-3's output permute ✅ 2026-10-26** (A4 — the online attention stores O token-major: −14.9 ms per 33f DiT forward, −49 ms per 121f, bit-identical), H-43; follow-ups: the host-side Vᵀ key order (+10% in the spike), the subgroup-matrix opt-in for Node; ✅ 2026-10-23 the ampere geometry profile (`nvidia-ampere` registered, K-83 — ×1.03 on the DiT's linear) and the VAE recon (V-1 … V-4 filed; **V-1 conv3d w8a8 ✅ 2026-10-23** — ADR 0133, the Wan2.2 presets `i8` / `i8-a8-attn8-online-conv8`, VAE stage −46% at 1280×704×17; the maintainer's visual check passed and **`i8-a8-attn8-online-conv8` is the Wan2.2 default since 2026-10-23**; **V-2 ✅ 2026-10-23** — ADR 0134, the 32-latent pair that borrows the 16-tile weights, `vaeTile: 32` opt-in: VAE stage 0.70–0.83× of tile 16 (the 17-frame kill line missed by 1–3%, the 33-frame clip meets it — confirmed by the maintainer 2026-10-24); **the VAE wave b ✅ 2026-10-26 to 27** (bit-identical; the RTX 3080 Ti measurements are in the perf-ledger rows) — K-72 revived (`ResidentTensor.clear()` zeroes the tile caches, `8f6b0afb`), V-7 (split-tree axis reduce, `f5c18bad`), V-6 (channel-major quantiser of conv3d w8a8, `7f540580` / `21ec9fa8`), V-5 (the profile field `i8a8.conv3d` and the re-derived `nvidia-ampere`, `fde7f6e2`, [research](research/2026-10-26-conv3d-geometry-sweep.md)); follow-ups filed in the perf-ledger: V-12 … V-14, and V-15 (the Blackwell conv3d sweep, at a later sitting on the RTX 5070 Ti); the sweep case set per op family is in later; next = step 2-10, starting with a browser check page for Wan2.2 on the RTX 5070 Ti)).
   ⑤ ✅ CacheStorage for Node (`nodeCacheStorage` of `@karume/hub/node`, 2026-10-17, step 2-4) ⑥ ✅ PNG sha rows switched to the pixel sha (ADR 0106 addendum 2026-10-17, step 2-5) ⑦ ✅ the lint rule set (331 warnings under the default rules — settled 2026-10-17, step 2-3, `7cb010cf`)
   ⑧ ✅ the `Deno.test`-shaped shim replaced by Vitest's own forms (2026-10-17, step 2-2). ⑨ ✅ bf16 storage (ADR 0131 — runtime / exporter / anima's faithful preset `bf16` (base, 4 roles), 2026-10-17, step 2-6. Follow-up ✅ the same day: the remaining 6 models (turbo / aesthetic × 2 generations, wai / copycat) also get `bf16`; the bf16 conditioner is each model's own except for base; the export matches the upstream checkpoint byte for byte for all 7 models). ⑩ a8 measurement ✅ measured (2026-10-18, [research](research/2026-10-18-a8-umt5-sbv2.md), perf-ledger K-80): umt5's a8 is 2.1 to 2.7 times faster at L ≥ 118 (L 28 to 50 fluctuates; L 8 is 0.4 to 0.5 times), but the added embedding error is 4 to 8 times that of i8 rounding (a few rows of real prompts collapse); on the Wan step 1 latent the effect is smaller than that of the DiT's own a8; sbv2's `i8-a8` re-confirmed to have no speed benefit. Visual check: the maintainer found it "mostly fine"; root-cause investigation ✅ (§6: per-token int8 crushes the rows of function words; the main cause is the input of `wo`; mixing a8 per linear or layer does not remove it). Ruling (2026-10-18, maintainer): **not added even as opt-in — the root fix comes first** (umt5's current speed is not a problem; the root fix is perf-ledger K-81 under later). By-products: a fix of the Qwen3 text encoder export (broken since `a5427e6b`); bf16 rounding drops the non-persistent buffers. **Phase 3**: the 0.15.0 release (JSR only — ADR [0127](decisions/0127-node-dawn-toolchain.md) addendum 2026-10-28).
-  Candidates to ride along (decided before the release): the cross-repository reference for the duplication between the two irodori repositories, a redesign of the sbv2 subpath surface, removal of the glue that reclaims the old namespace of hub ≤ 0.6 (✅ 2026-10-28 — ADR [0080](decisions/0080-hub-fetch-cache-050.md) addendum), HTTP Range fetching.
+  Candidates to ride along (decided before the release): the cross-repository reference for the duplication between the two irodori repositories, a redesign of the sbv2 subpath surface (✅ 2026-10-28 — the family prefixes are gone from every public name of `@karume/models`: bare names on the subpaths, one namespace per family on the barrel, ADR [0136](decisions/0136-models-public-naming.md)), removal of the glue that reclaims the old namespace of hub ≤ 0.6 (✅ 2026-10-28 — ADR [0080](decisions/0080-hub-fetch-cache-050.md) addendum), HTTP Range fetching.
 
 - **Remainder of the speed / memory wave (filed 2026-09-25; maintainer's ruling = split into two tiers, reference tier / practical tier; within-device determinism MUST hold in the practical tier too)**:
   The finished records of iterations 1 to 3 (contract and groundwork, B3 anima DiT residency, B4 irodori context K/V projection, H-35, K-70, E1 stage 1) are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
@@ -94,6 +94,17 @@
 - Re-assessing `err.cause` on Pixel (8 GB class Android Chrome) — [known-issues](known-issues.md).
 
 ## later
+
+- **Barrel imports keep every family's source table (filed 2026-10-28 — found in the naming design of ADR [0136](decisions/0136-models-public-naming.md))**:
+  importing anything from the `@karume/models` barrel, even one shared helper such as `encodeWav`, keeps all twelve
+  `hdae/karume-*` source tables and a few top-level expressions a bundler cannot prove pure — about 1.4–1.7 KB minified
+  (≈0.8 KB gzip) over the same import from a subpath (rolldown 1.2.13, 2026-10-28). Bundle size of barrel consumers only; no
+  behaviour change; independent of the naming. The retained expressions: `Object.freeze([...])` in `src/anima/config.ts`,
+  `src/anima/residency.ts` and `src/gemma/pipeline.ts`, the spread of a call in `src/gemma/speculative.ts`, the
+  `indexOf` / `map` calls in `src/vowel-detector/postprocess.ts` and the object spread of `KARUME_SOURCES` in
+  `src/sources.ts`. Fix: `"sideEffects": false` in `packages/models/package.json` (measured: the barrel then costs
+  within 5 B of the subpath) once its survival through JSR's npm layer is verified (the open point of ADR
+  [0037](decisions/0037-karume-monorepo.md) §4), or `/* @__PURE__ */` on those expressions.
 
 - **gemma4 prefill in w4a8 (perf-ledger K-60, maintainer 2026-10-17 "in the backlog")**: design of an acceptance table that keeps decode on the M=1 GEMV and puts only prefill (chunks of M=768) on `linearCompute: "a8"` × i4 (switching by M). Today's a8 falls to the GEMM skeleton even at M=1 and is 8.45 times slower than the GEMV ([research 2026-09-19](research/2026-09-19-qat-speed-recon.md)), so opening the acceptance table is not enough.
 
@@ -244,7 +255,7 @@
 
 - **Leftovers of the code-quality wave (filed 2026-09-22 — source: the same wave in the
   [archived completed section](research/2026-09-22-backlog-archive-0.5.0-to-0.12.0.md) (after the 0.12.0 release))**:
-  - Where to put the four functions that take `Gemma4PipelineOptions` (`assertSpeculative` / `resolveGemma4PleResidency` /
+  - Where to put the four functions that take `gemma.PipelineOptions` (`assertSpeculative` / `resolveGemma4PleResidency` /
     `buildGemma4Program` / `speculativeSetup`) (creating `pipeline-options.ts` was postponed by the ruling of 2026-09-21).
   - The checks of the Unicode range tables differ in wording and remain in each family (only the binary search was moved to `text/code-ranges.ts`).
   - Splitting `reference/ops.ts` and `ops/shapes.ts` (info — no mutable state and no cycles, zero real harm).
@@ -405,13 +416,6 @@
 - **irodori adaLN i8 A/B on the shipping rig (filed 2026-08-24)**: whether adaLN i8 (+13.1 MiB), which helped in the sim,
   also improves the reading on the shipping rig is unverified (the transfer limit sim → shipping — same research §2).
   Revival = dissatisfaction with the quality of the `i8+dit4` preset (formerly `w4`), or real demand for size optimization.
-- **Revisit the barrel's family prefixes (filed 2026-08-25 — maintainer's intent "want to revisit
-  later")**: symbols get a family-name prefix because `mod.ts` exports every family flat, but
-  in the SBV2 family the "2" is misread as the conversion idiom (x2y), with real harm (`sbv2Utterance` →
-  renamed to `toSbv2Utterance` to avoid it — ADR
-  [0079](decisions/0079-sbv2-two-layer-input.md) decision 2). Redesign across all families the options such as bare-name exports on the subpath surfaces or
-  namespace objects (once the prefix is gone,
-  it can converge on `toUtterance`). It is breaking, so it rides along with the next breaking wave.
 - **Bring measure_quant's distribution estimate up to J-5b** (found during J-3, 2026-08-22): sbv2's
   `project_distribution` still rests on the pre-J-5b premise "only linear weight slots; conv / embedding i4 has neither a storage form
   nor an execution path" (in fact shipped — ADR 0069 addenda 6/7). Harmless for relative
@@ -439,7 +443,7 @@
 - **Rolling generation events out to other families (waiting for demand)**: stage
   events for sbv2 / birefnet / depth / siglip2 / vowel (no step loop, so only stage transitions can be offered), and an AbortSignal cancellation slot in the **generation loop**
   of anima / irodori (today a throw from onEvent is the step-granular means of cancellation — the slot is kept in reserve).
-  **AbortSignal on the construction path is implemented for anima / irodori** (`AnimaPipelineOptions.signal` —
+  **AbortSignal on the construction path is implemented for anima / irodori** (`anima.PipelineOptions.signal` —
   checked at stage boundaries, passed through to the fetch layer, `signal.reason` propagated as is), so that is the precedent for the style
   (the `signal` of the other 6 families is only passed through to the fetch layer, with no checks at stage boundaries). **The generation-loop slot is
   implemented on the LLM surface** (ADR [0083](decisions/0083-generation-api-surface.md) decision 5 —

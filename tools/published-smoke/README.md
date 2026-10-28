@@ -3,7 +3,7 @@
 Runs the post-release check from `docs/release-runbook.md` §5 against the
 **published** `@karume/*` packages: every entry of `KARUME_SOURCES` (the published
 repository table exported by the `@karume/models` barrel — the union of every
-family's `*_SOURCES`) must resolve its manifest through the published
+family's `SOURCES`) must resolve its manifest through the published
 `@karume/hub`, and one family (sbv2) is constructed with `fromPretrained` end to
 end.
 

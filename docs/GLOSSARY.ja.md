@@ -230,7 +230,7 @@
 | text encoder path (gpu / precomputed) | テキストエンコーダの経路 | umT5 を GPU で回すか、事前計算の埋め込み資産を使うかの選択 | — | ADR 0119 追記 |
 | placeholder SHA (cross-repository reference) | 仮の SHA | 参照先のリポが未公開の間に越境参照へ入れる 40 桁の 0 | — | ADR 0119 追記 |
 | `karume-umt5-xxl` / `umt5-encoder/1` | umT5 リポ | umT5-XXL encoder とトークナイザ資産の配布リポと pipeline 名 | — | ADR 0119 追記・ADR 0122 |
-| `Umt5Encoder` (standalone umT5 encoder) | 単体の umT5 encoder | `@karume/models/umt5` の公開面（テキスト → 最終隠れ状態） | — | ADR 0122 追記 2026-10-15 |
+| `umt5.Encoder` (standalone umT5 encoder) | 単体の umT5 encoder | `@karume/models/umt5` の公開面（テキスト → 最終隠れ状態） | — | ADR 0122 追記 2026-10-15 |
 | `karume-umt5-tokenizer/1` (umT5 tokenizer asset) | umT5 のトークナイザ資産 | `karume-umt5-xxl` のトークナイザ資産の形式 | — | ADR 0122 追記 2026-10-15 |
 | TI2V (text-image-to-video) | TI2V | 1 つの重みで T2V と I2V の両方を出す動画生成 | — | ADR 0121 |
 | T2V / I2V (text-to-video / image-to-video) | T2V / I2V | 文章だけから動画 / 文章 + 先頭の画像 1 枚から動画 | — | ADR 0121 |
@@ -266,7 +266,7 @@
 | baseline (moving umT5 provenance) | 基準線 | 出所を切り替える前に今の出所のまま作る比較の起点 | — | ADR 0122 決定 9 |
 | tied alias | tied な別名 | 同じ重みを 2 つの名前で指す形 | — | ADR 0122 決定 2 |
 | RNE (round to nearest even) | RNE | f32 → bf16 の標準の丸め（最近接偶数丸め） | — | ADR 0122 |
-| `UMT5_SOURCES` (TS — table of the umT5 public distribution repositories) | umT5 の取得元の対応表 | `@karume/models/umt5` が出す公開配布リポの対応表 | — | `packages/models/src/umt5/config.ts` |
+| `umt5.SOURCES` (TS — table of the umT5 public distribution repositories) | umT5 の取得元の対応表 | `@karume/models/umt5` が出す公開配布リポの対応表 | — | `packages/models/src/umt5/config.ts` |
 | `wan.sources.UMT5_SOURCES` (umT5 upstream table) | umT5 の上流の表 | umT5 の書き手が読む本家の上流の表（recipe 側） | — | `tools/export-recipes/wan/sources.py` |
 | two axes (`--upstream` / `--model`) | 軸の 2 本 | umT5 の台本の 2 つの選択（重みの出所 / Wan の text 側の snapshot） | — | ADR 0122 決定 3 |
 | `axes` in the golden metadata | golden の axes | golden の各ケースのメタに残す、2 本の軸の上流と pin の記録 | — | ADR 0122 決定 3 |
@@ -295,6 +295,14 @@
 | K columns / overall columns | K 列・総合列 | A/B の数値の列（記録だけで判定には使わない） | — | ADR 0125 決定 9 |
 | pseudo ground truth (A/B) | 擬似正解 | 総合列の基準（2048² のモデルの σ） | — | ADR 0125 決定 9 |
 | Gradient error | Gradient error | α の勾配の大きさの、擬似正解との差の二乗和 | — | ADR 0125 決定 9 |
+
+## パッケージの公開面
+
+| 英語（コード・docs） | 日本語（対話） | 意味 | やめる言い方 | 正本 |
+| --- | --- | --- | --- | --- |
+| bare name | 接頭辞なしの名前 | ファミリー名の接頭辞を外した公開名（`Pipeline` / `SOURCES` / `toUtterance`）。`@karume/models` の各サブパスはこれだけを出す（0.15.0 から） | — | ADR 0136 決定 1 / 2 |
+| family namespace | ファミリーの名前空間 | barrel がファミリーを 1 つずつ出す `export * as <名前空間>`（サブパスのキーの camelCase）。中身はサブパスのモジュールそのもの | — | ADR 0136 決定 3 / 6 |
+| shared surface (models barrel) | 共通の公開面 | どのファミリーにも属さないので barrel が平らに出す 12 個（`fromPretrained` のオプション型・`ModelInputError`・`KARUME_SOURCES`・PNG / WAV / 画像の補助） | — | ADR 0136 決定 3 |
 
 ## 進め方
 

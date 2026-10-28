@@ -19,7 +19,7 @@
   **only the lockstep bump commit of §4 and the venv sync right after it come before §1 to §3** (the rest of §4 =
   moving the CHANGELOG into the version section / push / Release comes last).
 - The pin SHA does not exist until the upload is done (ADR 0073 — the models mapping table
-  `<FAMILY>_SOURCES` is fixed to "the latest commit at publication time". The table shape is ADR
+  (each family's `SOURCES`) is fixed to "the latest commit at publication time". The table shape is ADR
   [0092](decisions/0092-distribution-repos-and-sources.md) decision 3).
 - When the manifest format goes up, old JSR clients cannot read the new repositories (hub parses a single format —
   ADR 0041/0071). Putting the JSR publish last means the release goes out in the state "assets that the new hub can read are
@@ -244,21 +244,21 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
 
 ## 3. Baking the pins (writing into the mapping tables — ADR 0073 / 0092)
 
-They live in the per-family mapping tables `<FAMILY>_SOURCES` of `packages/models` (key = the basename of the HF repository name without
+They live in the per-family mapping tables of `packages/models` — `SOURCES` of each subpath, `<namespace>.SOURCES` through the barrel (key = the basename of the HF repository name without
 `karume-`) and in `KARUME_SOURCES`, into which the barrel folds every family (ADR
 [0092](decisions/0092-distribution-repos-and-sources.md) decision 3).
 
 - [ ] Get the SHA (40 hex) of main of each published repository:
       the `sha` field of `curl -sS "https://huggingface.co/api/models/<owner>/<repo>/revision/main"`
 - [ ] **Write it into the `revision` of the matching key** for each uploaded repository
-      (e.g. `IRODORI_SOURCES["irodori-v4.1-small"].revision`). The key follows mechanically from the repository name,
+      (e.g. `irodori.SOURCES["irodori-v4.1-small"].revision`). The key follows mechanically from the repository name,
       so the repository name determines where to write
 - [ ] **Confirm that `KARUME_SOURCES` is complete**: every repository uploaded this time is in the table.
       The invariants (`"karume-" + key === repo basename`, owner `hdae`, `revision` is 40 hex) are
       checked by tests, so `vp test --project core` fails on them
 - [ ] **Create the entry of a newly published repository at this point** (inheriting the reason of ADR 0073 decision 1 — placing it before publication
-      grows a key on the public surface that can only 404). The procedure is just adding 1 entry to `<FAMILY>_SOURCES` in each family's
-      `config.ts`; the barrel re-exports per table, so nothing else needs to follow
+      grows a key on the public surface that can only 404). The procedure is just adding 1 entry to the `SOURCES` table in each family's
+      `config.ts`; the subpath exports the table and the barrel's namespace is that subpath, so nothing else needs to follow
 - [ ] Updating the pins is **a duty at every bump** (the mapping table = "the sources **verified** by this package version" —
       inheriting the maintenance duty of the ADR 0073 addendum of 2026-08-25). In addition to the connectivity check below, when presets or the default quant moved,
       pass the behaviour tests too before claiming "verified"
@@ -268,7 +268,7 @@ They live in the per-family mapping tables `<FAMILY>_SOURCES` of `packages/model
       so it can only be run after the JSR publish (the order of §0)
 - [ ] **The values of the mapping tables are the only place where the published revisions live**: check with the equivalent of `rg '\b[0-9a-f]{8,40}\b' docs
       .claude/ACTIVE_DESIGN.md` that no SHA was copied into the docs (copies go stale at every
-      rebuild — records are spelled with keys like `ANIMA_SOURCES["anima"]`. To prevent a repeat of the 2026-08-24 / 08-29
+      rebuild — records are spelled with keys like `anima.SOURCES["anima"]`. To prevent a repeat of the 2026-08-24 / 08-29
       mismatch in two releases in a row)
 - [ ] `vp check && vp test` → commit
 
@@ -277,13 +277,13 @@ They live in the per-family mapping tables `<FAMILY>_SOURCES` of `packages/model
 A family without a public repository has no mapping table (ADR 0073 decision 1 — the same as `vowel-detector`). In the release that
 creates the table, in addition to "add 1 entry" above, put the checks that bind the table's completeness in the same commit (forgetting one of them
 makes that check fail, or goes green while the table is not on the public surface). In 0.14.0, 2 families were published for the first time at once:
-umT5 (TS entry `Umt5Encoder` — `@karume/models/umt5`) got `UMT5_SOURCES`, and Wan got `WAN_SOURCES`.
+umT5 (TS entry `umt5.Encoder` — `@karume/models/umt5`) got `umt5.SOURCES`, and Wan got `wan.SOURCES`.
 
 Wan2.1 (`karume-wan2.1`) is not published on HF (the maintainer's ruling 2026-10-15 — ADR
 [0118](decisions/0118-wan21-video-generation.md) addendum (2026-10-15)). The code stays, and the distribution is assembled locally
 with `dist.py --pipeline wan` (the same 5 `--ref-*` options as Wan2.2 below — before umT5 is published, the placeholder SHA of §0 and
 `--allow-placeholder-ref`; after it is published, the SHA of its main. `--out` is the default `models/karume-wan2.1`). Do not add `"wan2.1"`
-to `WAN_SOURCES`, and do not upload `karume-wan2.1`.
+to `wan.SOURCES`, and do not upload `karume-wan2.1`.
 
 - [ ] **Check before publication (Wan2.2)**: the 50-step run (`KARUME_WAN_TI2V_FULL_PIPELINE=1 vp test
       packages/e2e/tests/e2e_wan_ti2v_pipeline_test.ts -t "50 ステップ"` —
@@ -312,29 +312,29 @@ to `WAN_SOURCES`, and do not upload `karume-wan2.1`.
       `--out` is the default `models/karume-wan2.2`) → after confirming that every text_encoder part in `karume.json` points
       at that SHA, `tools/release/hf-upload.zsh upload karume-wan2.2`
 - [ ] Add the tables (key = the basename of the repository name without `karume-`, value = `repo` + the SHA of main):
-      add `UMT5_SOURCES` (key `"umt5-xxl"` → `hdae/karume-umt5-xxl`) to `packages/models/src/umt5/config.ts` and
-      export it from `umt5.ts` and `mod.ts`; add `WAN_SOURCES` (key `"wan2.2"` →
-      `hdae/karume-wan2.2` — read by `WanTi2vPipeline`) to `packages/models/src/wan/config.ts` and export it from `wan.ts` and `mod.ts`. NOTE: the TS
-      `UMT5_SOURCES` is the mapping table of the public distribution repositories, not the same thing as the recipe's `wan.sources.UMT5_SOURCES` (the table of the original's upstream pins)
+      add `umt5.SOURCES` (key `"umt5-xxl"` → `hdae/karume-umt5-xxl`) to `packages/models/src/umt5/config.ts` and
+      export it from `umt5.ts` (the barrel's `umt5` namespace follows); add `wan.SOURCES` (key `"wan2.2"` →
+      `hdae/karume-wan2.2` — read by `wan.Ti2vPipeline`) to `packages/models/src/wan/config.ts` and export it from `wan.ts`. NOTE: the TS
+      `umt5.SOURCES` is the mapping table of the public distribution repositories, not the same thing as the recipe's `wan.sources.UMT5_SOURCES` (the table of the original's upstream pins)
 - [ ] Fold both tables into `KARUME_SOURCES` in `packages/models/src/sources.ts`
-- [ ] Add 2 rows to `FAMILIES` in `packages/models/tests/sources_test.ts` (`load` is `Umt5Encoder.fromPretrained` and
-      `WanTi2vPipeline.fromPretrained`) and update the named counts of families and repositories (7 families, 10 repositories → 9 families, 12 repositories)
-- [ ] Add both tables to the named family table (the list of `*_SOURCES`) in `packages/models/tests/models_barrel_surface_test.ts`
+- [ ] Add 2 rows to `FAMILIES` in `packages/models/tests/sources_test.ts` (`load` is `umt5.Encoder.fromPretrained` and
+      `wan.Ti2vPipeline.fromPretrained`) and update the named counts of families and repositories (7 families, 10 repositories → 9 families, 12 repositories)
+- [ ] Add both subpaths to the table of source-table names (subpath → `SOURCES`) in `packages/models/tests/models_barrel_surface_test.ts`
 - [ ] Add `("umt5", ["xxl"], None, "karume-umt5-xxl")` and `("wan-ti2v", ["ti2v-5b"], None, "karume-wan2.2")` to
       `RELEASE_REPOSITORIES` in `tools/export-recipes/tests/test_dist_driver.py`
       (the check that requires the same set of repositories as the TS tables — it reads the `repo: "hdae/…",` lines of `packages/models/src/*/config.ts`)
-- [ ] Pass the hint for an omitted ref (the third argument of `toManifestSource`): `UMT5_SOURCES["umt5-xxl"] (@karume/models/umt5)` to
-      `Umt5Encoder.fromPretrained` (`packages/models/src/umt5/encoder.ts`), and `WAN_SOURCES["wan2.2"] (@karume/models/wan)` to
-      `WanTi2vPipeline.fromPretrained`. Wan's call shares the single `loadWanFromPretrained` of
-      `packages/models/src/wan/family.ts` with `WanPipeline` (2.1), so
+- [ ] Pass the hint for an omitted ref (the third argument of `toManifestSource`): `SOURCES["umt5-xxl"] (@karume/models/umt5)` to
+      `umt5.Encoder.fromPretrained` (`packages/models/src/umt5/encoder.ts`), and `SOURCES["wan2.2"] (@karume/models/wan)` to
+      `wan.Ti2vPipeline.fromPretrained`. Wan's call shares the single `loadWanFromPretrained` of
+      `packages/models/src/wan/family.ts` with `wan.Pipeline` (2.1), so
       shape it so that 2.1 gets no hint (the table has no 2.1 key)
-- [ ] Fix the docs that say "there is no table yet" or "unpublished, no pin constant either" (pick them up with `rg -n 'UMT5_SOURCES|WAN_SOURCES|未公開|not
+- [ ] Fix the docs that say "there is no table yet" or "unpublished, no pin constant either" (pick them up with `rg -n 'SOURCES|未公開|not
       published' packages/models examples/wan`). Keep the statements that Wan2.1 is unpublished
 - [ ] In the note of `DISTRIBUTIONS` in `packages/runtime/tests/distribution_gate_test.ts`, move `karume-umt5-xxl` and
       `karume-wan2.2` to "published" (the mirrors themselves were on the all-skip guard before publication. `karume-wan2.1`
       stays unpublished and the e2e tests use it as their root, so it stays on the list)
-- [ ] Rewrite the public-surface snapshot (`KARUME_SURFACE=write`) and confirm that the difference is one line each of `UMT5_SOURCES` and `WAN_SOURCES`
-      (the barrel and `./umt5` / `./wan`)
+- [ ] Rewrite the public-surface snapshot (`KARUME_SURFACE=write`) and confirm that the difference is one `SOURCES` line in each of `./umt5` and `./wan`
+      (the barrel's `.` entry lists the namespaces only, so it does not change)
 
 ## 4. JSR publish
 

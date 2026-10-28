@@ -1,10 +1,10 @@
 # Wan2.1 / Wan2.2 (host side)
 
 The `./wan` subpath of `@karume/models` (ADR
-[0118](../../../../docs/decisions/0118-wan21-video-generation.md) decision 7): `WanPipeline` turns a
+[0118](../../../../docs/decisions/0118-wan21-video-generation.md) decision 7): `wan.Pipeline` turns a
 prompt into a clip of `[3, F, H, W]` frames in `[-1, 1]` together with its frame rate (`fps` on
 `GeneratedVideo` — 16 for Wan2.1, a fact of the upstream model rather than a knob or a manifest
-field). `WanTi2vPipeline` does the same for Wan2.2 TI2V 5B (ADR
+field). `wan.Ti2vPipeline` does the same for Wan2.2 TI2V 5B (ADR
 [0121](../../../../docs/decisions/0121-wan22-ti2v-5b.md)): the same stages, the same shared family
 body (`family.ts`) and the same public types, with pipeline `wan-ti2v/1`, 48 latent channels, a VAE
 patch size of 2 and 24 fps. It also runs image-to-video: a request with an `image` (decoded RGB8)
@@ -51,9 +51,9 @@ the addendum on the stage 10c GPU gates and the stage 10d-4 results); Chrome has
    to `[-1, 1]`.
 
 The distributions are `karume-wan2.1` (ADR 0118 stage 7) and `karume-wan2.2` (ADR 0121 stage 8).
-Only `karume-wan2.2` is published on Hugging Face, so the `WAN_SOURCES` table (`config.ts`) has the
+Only `karume-wan2.2` is published on Hugging Face, so the `wan.SOURCES` table (`config.ts`) has the
 single key `"wan2.2"` and no Wan2.1 entry (ADR 0118, addendum of 2026-10-15).
-`WanPipeline.fromPretrained` and `WanTi2vPipeline.fromPretrained` load them through `@karume/hub`
+`wan.Pipeline.fromPretrained` and `wan.Ti2vPipeline.fromPretrained` load them through `@karume/hub`
 (a local mirror is passed as a `denoDirectory` source handle), and `fromAssets` takes the manifest
 and the bytes. Both go through the same admission. The Wan2.2 distribution reuses the Wan2.1 text
 assets byte for byte (the same umT5 embeddings and tokenizer, ADR 0121 decision 9). The
@@ -84,18 +84,18 @@ abort disposes the open sessions and rethrows `signal.reason` unwrapped.
 | `tile-decode.ts`                | 0121 stage 3  | the VAE stage: the tiled decode, and the admission checks of the VAE declaration against the descriptor                                                                                                                                                                                                  |
 | `i2v-preprocess.ts`             | 0121 stage 9a | the image preprocessing for image-to-video: the size choice, the `fit` (Lanczos resize from `../image/lanczos.ts`, center crop or stretch), `[-1, 1]` and the patchify                                                                                                                                   |
 | `vae-encoder.ts`                | 0121 stage 9b | the encoder stage: the three encoder graph contracts, one batched run with tensors handed over on the GPU, the read-back of the latent mean, and the wait for released memory                                                                                                                            |
-| `pipeline.ts`                   | stage 6       | `WanPipeline` (the Wan2.1 class): the public types, and a thin shell (private constructor, serialization chain, `prompts`, `dispose`) passing `WAN21_FAMILY` to `family.ts`                                                                                                                              |
+| `pipeline.ts`                   | stage 6       | `wan.Pipeline` (the Wan2.1 class): the public types, and a thin shell (private constructor, serialization chain, `prompts`, `dispose`) passing `WAN21_FAMILY` to `family.ts`                                                                                                                              |
 | `family.ts`                     | 0121 stage 6  | the shared family body: admission, construction, stage order, session lifetimes, the generate gates and the session policy; per-family values come in a `WanFamilySpec`                                                                                                                                  |
-| `ti2v-pipeline.ts`              | 0121 stage 6  | `WanTi2vPipeline` (the Wan2.2 TI2V class): the same thin shell as `WanPipeline`, passing `WAN22_TI2V_FAMILY` to `family.ts`                                                                                                                                                                              |
+| `ti2v-pipeline.ts`              | 0121 stage 6  | `wan.Ti2vPipeline` (the Wan2.2 TI2V class): the same thin shell as `wan.Pipeline`, passing `WAN22_TI2V_FAMILY` to `family.ts`                                                                                                                                                                              |
 | `config.ts`                     | stage 7       | `pipelineConfig` schema (pipelines `wan/1` and `wan-ti2v/1` share it): default steps, guidance and shift                                                                                                                                                                                                 |
-| `frames.ts`                     | stage 6       | one frame to 8-bit RGBA (`wanFrameToRgba` — the rule the reference hashes use)                                                                                                                                                                                                                           |
+| `frames.ts`                     | stage 6       | one frame to 8-bit RGBA (`wan.frameToRgba` — the rule the reference hashes use)                                                                                                                                                                                                                           |
 | `text/*.ts`                     | 10a           | the `prompt_clean` mirror and the prompt encoder (cleaning, then the shared umT5 tokenizer with its reject rules from `../umt5/tokenizer.ts`)                                                                                                                                                            |
 | `../umt5/*.ts`                  | 10c           | not in this folder: the umT5 host code shared with `@karume/models/umt5` (the tokenizer, the relative-position bucket table, the session inputs / output reading and padding, the graph contract)                                                                                                        |
 
 ## Accepted requests
 
-The sizes and frames depend on the class: `WanPipeline` (Wan2.1) accepts 832×480 or 480×832 with
-4n+1 frames from 5 to 81 (default 832×480, 33 frames); `WanTi2vPipeline` (Wan2.2) accepts 1280×704
+The sizes and frames depend on the class: `wan.Pipeline` (Wan2.1) accepts 832×480 or 480×832 with
+4n+1 frames from 5 to 81 (default 832×480, 33 frames); `wan.Ti2vPipeline` (Wan2.2) accepts 1280×704
 or 704×1280 with 4n+1 frames from 5 to 121 (default 1280×704, 33 frames). Both take `steps` ≥ 1,
 `guidance` ≥ 1 and finite in float32 (1 turns CFG off), `shift` > 0 with a `steps` × `shift` pair
 whose σ column is strictly decreasing, and either a `seed` (default 0) or the initial noise as
@@ -112,8 +112,8 @@ The transformer stage is closed before the VAE stage opens, so the two are never
 non-finite umT5 output, a non-finite latent after any step, or a non-finite VAE output before the
 clamp fails the generation instead of being returned.
 
-Only `WanTi2vPipeline` takes `image` (RGB8 `{ data, width, height }`, any size) and `fit`
-(`"crop"`, the default, or `"stretch"`); `WanPipeline` rejects both with a `ModelInputError`, as
+Only `wan.Ti2vPipeline` takes `image` (RGB8 `{ data, width, height }`, any size) and `fit`
+(`"crop"`, the default, or `"stretch"`); `wan.Pipeline` rejects both with a `ModelInputError`, as
 does `fit` without `image`, while a misspelled `fit` is a plain `Error`. Without `width` / `height`,
 the accepted size closest to the image's aspect ratio is used (1280×704 for an image at least as
 wide as it is tall, 704×1280 otherwise); given ones must be an accepted size. Image-to-video has been

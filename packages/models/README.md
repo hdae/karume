@@ -24,15 +24,16 @@ bunx jsr add @karume/models
 
 ## Minimal usage
 
-Each family has its own subpath export, so importing one pipeline does not pull in the others. The
-`*_SOURCES` table of a family lists the distributions this package version was verified against,
+Each family has its own subpath export, so importing one pipeline does not pull in the others. A
+subpath exports bare names — `Pipeline`, `SOURCES`, `PipelineOptions`, … — with no family prefix.
+The `SOURCES` table of a family lists the distributions this package version was verified against,
 pinned to a commit SHA.
 
 ```ts
-import { BIREFNET_SOURCES, BirefnetPipeline } from "@karume/models/birefnet";
+import { Pipeline, SOURCES } from "@karume/models/birefnet";
 
 // Fetches the manifest, admits the model from the container descriptors, fetches the parts, opens a GPU session.
-const pipeline = await BirefnetPipeline.fromPretrained(BIREFNET_SOURCES["birefnet-hr"]);
+const pipeline = await Pipeline.fromPretrained(SOURCES["birefnet-hr"]);
 
 // `rgb` is a tight RGB8 pixel buffer (width * height * 3), decoded by the caller.
 const matte = await pipeline.segment({ data: rgb, width, height });
@@ -41,8 +42,21 @@ console.log(matte.width, matte.height, matte.data.length);
 await pipeline.dispose();
 ```
 
-The barrel export (`@karume/models`) carries the same API for callers that bundle several families
-at once; it is side-effect free, so a bundler can still drop what you do not import.
+The barrel export (`@karume/models`) is for callers that use several families at once. It exports
+the helpers shared by every family (`encodePng`, `encodeWav`, `decodeWav`, `ModelInputError`,
+`KARUME_SOURCES`, …) and one namespace per family, named after the subpath in camelCase (`anima`,
+`depthAnything`, `gemma4Qat`, `sbv2`, …). A namespace is the subpath module itself, so its members are
+documented on the subpath's page:
+
+```ts
+import { anima, sbv2 } from "@karume/models";
+// or, per family: import * as sbv2 from "@karume/models/sbv2";
+
+const tts = await sbv2.Pipeline.fromPretrained(sbv2.SOURCES["sbv2-jvnv"]);
+const painter = await anima.Pipeline.fromPretrained(anima.SOURCES["anima"]);
+```
+
+The package is side-effect free, so a bundler still drops the families and members you do not use.
 
 ## Families
 

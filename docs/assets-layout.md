@@ -131,7 +131,7 @@ uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-d
   (renamed from `karume-gemma4-e2b` in 0.9.0 — HF redirects the old name). **The recipe's
   `repo_name` = the output directory name of the command above = the repo name in the card's Usage** (the latter two are
   derived from the former), so a rename takes one constant in the recipe. Where the published revision lives: the models table
-  `GEMMA4_SOURCES["gemma4"]` (the same ADR, decision 3 — not copied into docs).
+  `gemma.SOURCES["gemma4"]` (the same ADR, decision 3 — not copied into docs).
 
 - The mirror of `karume-sbv2-fn` is **not kept permanently** (ruling of 2026-08-30 — the e2e checks take `karume-sbv2-jvnv`, whose license statement is
   in order, as canonical). The command above is a record of how to regenerate it; whenever the series (exported from `inputs/sbv2/FN*`

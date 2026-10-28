@@ -62,7 +62,7 @@ wave" was not adopted.
 The replacement is `GenerationSequence` from the generation API wave (ADR 0083 decisions 1–5 —
 `AsyncIterable<GenerationEvent>` / `AbortSignal` / multi-turn), and host-side sampling is
 `src/generation/sampler.ts` (the same ADR, decisions 7–8). The `@karume/models` barrel exports
-`GenerationSequence` as a type, and the implementation is returned by `Gemma4Pipeline.sequence()`.
+`GenerationSequence` as a type, and the implementation is returned by `gemma.Pipeline.sequence()`.
 
 ## The pin constants `*_CURRENT` are gone from the public surface (replaced by per-family source tables, 0.9.0)
 
@@ -75,12 +75,12 @@ dropped:
 
 | Up to 0.8.0                  | From 0.9.0                              |
 | ---------------------------- | --------------------------------------- |
-| `ANIMA_CURRENT`              | `ANIMA_SOURCES["anima"]`                |
-| `ANIMA_EXTRA_CURRENT`        | `ANIMA_SOURCES["anima-extra"]`          |
-| `IRODORI_V4_SMALL_CURRENT`   | `IRODORI_SOURCES["irodori-v4-small"]`   |
-| `IRODORI_V4_1_SMALL_CURRENT` | `IRODORI_SOURCES["irodori-v4.1-small"]` |
-| `SBV2_JVNV_CURRENT`          | `SBV2_SOURCES["sbv2-jvnv"]`             |
-| `GEMMA4_CURRENT`             | `GEMMA4_SOURCES["gemma4"]`              |
+| `ANIMA_CURRENT`              | `anima.SOURCES["anima"]`                |
+| `ANIMA_EXTRA_CURRENT`        | `anima.SOURCES["anima-extra"]`          |
+| `IRODORI_V4_SMALL_CURRENT`   | `irodori.SOURCES["irodori-v4-small"]`   |
+| `IRODORI_V4_1_SMALL_CURRENT` | `irodori.SOURCES["irodori-v4.1-small"]` |
+| `SBV2_JVNV_CURRENT`          | `sbv2.SOURCES["sbv2-jvnv"]`             |
+| `GEMMA4_CURRENT`             | `gemma.SOURCES["gemma4"]`              |
 
 The gemma4 entry **also renamed the repository** — `karume-gemma4-e2b` → `karume-gemma4` (to make it
 a container that E4B / 12B can share — ADR 0092 decision 1. Done at the 0.9.0 publication). HF's
@@ -102,7 +102,7 @@ withdrawal in ADR 0073).
 
 ## The generation API changed in 7 points before publication (breaking changes to the first-edition text of ADR 0083 / 0084)
 
-The generation API (`GenerationSequence` / `Gemma4Pipeline`) reached JSR **for the first time in
+The generation API (`GenerationSequence` / `gemma.Pipeline`) reached JSR **for the first time in
 0.9.0** (`@karume/models` of 0.8.0 does not export `./gemma`). The ADRs, examples and demo scripts
 were written against the surface mid-wave, so the 7 points that changed **before publication** while
 working through the public surface review (2026-08-31 / second wave 2026-09-02) are kept here.
@@ -128,24 +128,24 @@ The canonical record of the addenda is ADR
   collapses a `Map` to `{}`, so a setting saved and restored as configuration had **silently become an
   empty bias**. In addition, **writing the same token twice is a `ModelInputError`** (the
   last-one-wins folding of `Map` is gone).
-- **`Gemma4Pipeline.sampler` was renamed to `defaultSampler`**, and the type of
-  `Gemma4PipelineConfig.sampler` shrank from `SamplerSpec` to `Gemma4DefaultSampler` (the 3 fields
+- **`gemma.Pipeline.sampler` was renamed to `defaultSampler`**, and the type of
+  `gemma.PipelineConfig.sampler` shrank from `SamplerSpec` to `gemma.DefaultSampler` (the 3 fields
   `temperature` / `topK` / `topP` required). In addition, `fromAssets` now runs the same checks as
   `fromPretrained` (unknown keys, value ranges, `chunkLength ≤ maxChunkLength`,
   `chunkLength ≤ capacity ≤ maxPosition`) before opening the bytes, so **an invalid declaration
   fails before the 3.7GiB load finishes** (previously it first became a `RangeError` at the first
   `generate`).
-- **The union of stop reasons gained `stop-token`, and the type of `Gemma4ChatStream.done` widened to
-  `Gemma4ChatStop`** (2026-09-02 — per-request stop conditions). Code that wrote
+- **The union of stop reasons gained `stop-token`, and the type of `gemma.ChatStream.done` widened to
+  `gemma.ChatStop`** (2026-09-02 — per-request stop conditions). Code that wrote
   `switch (stop.reason)` exhaustively has to follow the added branch (the `chat` side additionally
-  gains `stop-string`). In addition, `Gemma4ChatStream` gained `text()`, so **one stream can be
+  gains `stop-string`). In addition, `gemma.ChatStream` gained `text()`, so **one stream can be
   consumed only one way** (mixing iteration with `text()`, or iterating twice, throws synchronously —
   previously the second `for await` silently ended after 0 iterations).
 
 ## Only `chat` can stop on a stop **string** (`sequence()` stops on tokens)
 
-`Gemma4ChatOptions.stopStrings` (stop when it appears in the decoded text) is **a knob of the chat
-layer**. The low-level surface (`Gemma4Pipeline.sequence()` → `GenerationSequence.generate`) does not
+`gemma.ChatOptions.stopStrings` (stop when it appears in the decoded text) is **a knob of the chat
+layer**. The low-level surface (`gemma.Pipeline.sequence()` → `GenerationSequence.generate`) does not
 have it; to stop there, use `GenerationRequest.stopTokens` (token ids, unioned with the
 distribution's EOS set). `GenerationSequence` handles only token ids (it knows neither the tokenizer
 nor the distribution), so string matching can live only in a layer that owns the decoder — the two
@@ -301,7 +301,7 @@ dot product, and S in VRAM has f32 width. The canonical source of the decision i
 
 ## Wan2.2's 32-latent VAE tile (`vaeTile: 32`) is chosen explicitly and needs about 9.4 GiB during the decoder stage; the 10 GB class keeps 16
 
-- ADR [0134](decisions/0134-wan22-vae-tile32-shared.md): `WanGenerateRequest.vaeTile` defaults to 16
+- ADR [0134](decisions/0134-wan22-vae-tile32-shared.md): `wan.GenerateRequest.vaeTile` defaults to 16
   and is never chosen automatically — WebGPU exposes neither the total nor the free device memory
   (ADR 0070 decision 5), so the application decides. At 32 the decoder stage holds the 16-tile pair
   as lenders plus the 32-tile pair, four times the causal caches and frame backings: on the RTX
@@ -744,7 +744,7 @@ by-design properties are as follows.
   no-budget case at budgets of 1 GiB / 512 MiB, and +24.9% at 256 MiB (measured 2026-10-11,
   [research 2026-10-11 (measurements of step 4b)](research/2026-10-11-row-block-budget-stage-4b.md)).
 - **The models pipelines have no knob for it (nor did gpu-lab, removed in 0.15)**: it is a field of
-  the runtime's `SessionOptions` only, and cannot be passed from `WanTi2vPipeline` and the like, or
+  the runtime's `SessionOptions` only, and cannot be passed from `wan.Ti2vPipeline` and the like, or
   from the Wan tab of gpu-lab. It is not put into Wan's default either (ruling 39 = a, the maintainer
   2026-10-11 — the results section of step 4b in ADR 0124). A knob will be added once a problem that
   needs solving appears (the policy of the ADR 0005 addendum of 2026-10-11). Callers that use the
@@ -753,7 +753,7 @@ by-design properties are as follows.
 ## Budgeted retention of slot backings: a shape that does not fit in the budget is held alone, and disposing a resident input is rejected while it is held
 
 Slot backings are kept several at a time within a budget (default 256 MiB,
-`SessionOptions.planBackingBudgetBytes` / the options of `Gemma4Pipeline`) (ADR
+`SessionOptions.planBackingBudgetBytes` / the options of `gemma.Pipeline`) (ADR
 [0095](decisions/0095-plan-backing-budget.md)). 3 by-design constraints:
 
 - **A shape larger than the budget is held alone** (held by retiring all the others = the former
@@ -774,7 +774,7 @@ Slot backings are kept several at a time within a budget (default 256 MiB,
 
 gemma4's prefill runs each chunk with the physical row count of "the smallest bucket ≥ `queryLength`"
 (ADR [0066](decisions/0066-generation-context-state-slots.md) addendum 10, default
-`GEMMA4_CHUNK_BUCKETS`). 2 by-design constraints:
+`gemma.CHUNK_BUCKETS`). 2 by-design constraints:
 
 - **The transient VRAM peak widens outside the estimate**: slot backings (the bundle of a run's
   intermediate buffers) are built only for hit runs, so the **first** bucket run of the last chunk
@@ -794,7 +794,7 @@ gemma4's prefill runs each chunk with the physical row count of "the smallest bu
   only for plans with M ≥ 16, and below that they fall to the reference path ① / ③ (with
   `stateAttentionReduce: "parallel"`, ③′, and for M ≤ 8 also ①′ — K-14). The values are correct but
   slow, and for `parallel` × M ∈ [2, 16) the only measured shapes are the speculative verify shapes
-  (M = 4 / 8). Of gemma4's default buckets (`GEMMA4_CHUNK_BUCKETS` = 4 / 8 / 32 / 64 / 128 / 256),
+  (M = 4 / 8). Of gemma4's default buckets (`gemma.CHUNK_BUCKETS` = 4 / 8 / 32 / 64 / 128 / 256),
   4 and 8 fall into this range.
 
 ## The linear GEMV family (1 ≤ M ≤ 64): the row-block height is chosen with constants of the reference device, and the first turn pays the shader parsing cost
@@ -833,7 +833,7 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 2 by-design 
   `commit(rows)`).
 - gemma4's distribution (the product series) changed to **a physical row count of `window + 8` for the
   sliding slots, 2 outputs (output 0 = logits `[1,R,V]`, output 1 = the hidden state after the final
-  norm `[1,R,H]`), and `last_row` of `[R]`**. An old distribution with 1 output makes `Gemma4Pipeline`
+  norm `[1,R,H]`), and `last_row` of `[R]`**. An old distribution with 1 output makes `gemma.Pipeline`
   fail loudly (no compatibility branch is written — unreleased).
   The local mirror (`models/karume-gemma4`) is rebuilt with `dist.py --pipeline gemma4`. The decode /
   token acceptance series are unchanged (the runtime still reads assets with sliding capacity = window
@@ -862,7 +862,7 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 2 by-design 
   context is alive, and `dispose()` of a lender Session while a borrowing Session is alive, are a
   **Promise.reject** (an intentional departure from the idempotence contract of dispose — the
   borrower's bind groups hold the lender's buffers).
-  `Gemma4Pipeline.dispose()` folds the drafter Session first and then the target Session. Weight lending
+  `gemma.Pipeline.dispose()` folds the drafter Session first and then the target Session. Weight lending
   on the lender side is counted by the borrow count of `Session.exportWeight`.
 - **The sliding columns that readonly attention (the drafter's cross-attention) reads are the 512
   columns `[P−W, P)`**. HF's drafter sees 513 columns because its bidirectional SWA is inclusive, but
@@ -870,7 +870,7 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 2 by-design 
   rejection with kmax = 8 happens, so it is not taken. The impact on the acceptance rate is not measured
   (comparing drafts on identical inputs matched 100% over 3 cases × 200 cycles × 3 steps).
 - **`speculative.k` is 1..3** (the distribution's drafter is baked with a 3-step unroll — increasing k
-  means re-exporting; a dynamic k is stage 4). `fromAssets` does not accept `speculative` (`Gemma4Assets`
+  means re-exporting; a dynamic k is stage 4). `fromAssets` does not accept `speculative` (`gemma.Assets`
   has no field for the drafter).
 - **`estimateSessionMemory`** adds the verify shape (M = R = k+1) to the target's prefill / decode, and
   sums in the drafter's resident weights (excluding the borrowed embedding table) and the 8 bytes of
@@ -957,22 +957,22 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 2 by-design 
   the same time serializes their draft runs (head-of-line waiting). A borrowing context is opened and
   closed per sequence (per turn for `chat()`), so `stateBacking.rebindCount` of the drafter Session
   grows in proportion to the number of turns.
-- **The public type `Gemma4RunPhase` went from 2 → 4 branches** (`draft` / `verify` — an unreleased
+- **The public type `gemma.RunPhase` went from 2 → 4 branches** (`draft` / `verify` — an unreleased
   breaking change). `onRunDiagnostics` still delivers 1 message per run (draft carries the drafter
   Session's diagnostics; the others the target's).
 - **Delivery granularity**: one verify delivers up to k+1 `token` events in a row (position is
   `pastLength + 1 + i`). `GenerationStop.tokens` is the number delivered (including the stop token), and
   the number of runs is `speculation.cycles + draftRuns`.
 
-## gemma4 `fromAssets`: `Gemma4Assets` has the 3 fields `config` / `model` (part sequence) / `tokenizer` — no PLE reader is passed (breaking change in 0.13.0)
+## gemma4 `fromAssets`: `gemma.Assets` has the 3 fields `config` / `model` (part sequence) / `tokenizer` — no PLE reader is passed (breaking change in 0.13.0)
 
 The PLE moved, index (`ple_index`, schema 3) and matrix blocks alike, into the assets of the `model`
 container (ADR [0109](decisions/0109-manifest-v5-container.md) decision 4), so there is no longer a
 place for the caller of `fromAssets` to pass a PLE reader separately (`pleIndex` / `readPleShard` of
-the published `Gemma4Assets` were removed — the Breaking entries of 0.13.0 in the
+the published `gemma.Assets` were removed — the Breaking entries of 0.13.0 in the
 [CHANGELOG](../CHANGELOG.md)). `model` is passed as a part sequence in index order from part 0 — parts
 of length 0 are not skipped either (the index is the id of the part itself, and skipping one makes the
-following ones read as different parts — `Gemma4Assets` in
+following ones read as different parts — `gemma.Assets` in
 `packages/models/src/gemma/pipeline.ts`). Decode's PLE fetches rows by range reads of the container's
 assets (`AssetReader.read`) (`packages/models/src/gemma/ple.ts`).
 
@@ -1261,7 +1261,7 @@ section** (Codex deep review R2B-001).
 - The time axis of the graph input is `2T` (the symbol `T` is the 20ms grid of the output). **Odd
   lengths are not accepted** — `bindSymbols` fails with `actual 285 does not have the declared form '2T'`
   (no rounding). The caller **truncates** the last frame before passing it
-  (`VowelDetectorPipeline.detect` and the real-weight E2E do so).
+  (`vowelDetector.Pipeline.detect` and the real-weight E2E do so).
   Matching the length with right zero padding is **forbidden** (the backward GRU carries state back
   from the pad, and the `.lab` changes anywhere in the utterance — measurements in the ADR 0056
   addendum).
@@ -1291,7 +1291,7 @@ does not cause a shape error).
   (the in-graph construction of front calls the same function).
 - The canonical host side is `packages/models/src/sbv2/relattn-tables.ts` (SBV2-specific, so it is
   not placed in `packages/runtime/src/` — the models package, which holds model-side knowledge, owns
-  it, and `Sbv2Pipeline` calls it for each T). Byte equality with the Python side is pinned by
+  it, and `sbv2.Pipeline` calls it for each T). Byte equality with the Python side is pinned by
   `packages/models/tests/sbv2_relattn_parity_test.ts` with the golden's real data.
 - A mismatch in the window width (measured 4) is in the same silent-wrong-value class, so the Python
   side rejects it with `_assert_window_size` at ckpt load (scanning all of net_g), and on the TS side
@@ -1322,17 +1322,17 @@ the torch reference.
 ## SBV2: utterance editing accepts only "the range that does not change the phoneme sequence" (edits that change the phoneme count are rejected)
 
 Since 0.6.0 (ADR [0079](decisions/0079-sbv2-two-layer-input.md)), text analysis is **the caller's
-responsibility**, and `generate` accepts one analysed utterance `Sbv2Utterance` (the mora layer). There
+responsibility**, and `generate` accepts one analysed utterance `sbv2.Utterance` (the mora layer). There
 are 2 editing surfaces, and the check looks only at **whether the phoneme sequence assembled from
 `moras` matches the phoneme sequence of `words` position by position**
 (`assertWordPhones` in `packages/models/src/sbv2/text/model-input.ts`). Therefore:
 
-- **Passes**: changes to `result.accentPhrases[i].accentNucleus` on the phrase layer `Sbv2Phrases`
-  side and **re-splitting / joining phrases** (just convert again with `toSbv2Utterance` — this is where
+- **Passes**: changes to `result.accentPhrases[i].accentNucleus` on the phrase layer `sbv2.Phrases`
+  side and **re-splitting / joining phrases** (just convert again with `sbv2.toUtterance` — this is where
   VOICEVOX-compatible accent phrase editing goes), and **direct editing of `tone`** on the mora layer
-  `Sbv2Utterance` (arbitrary 0/1 patterns that cannot be written with a nucleus).
+  `sbv2.Utterance` (arbitrary 0/1 patterns that cannot be written with a nucleus).
   The check does not look at the phrase / mora boundaries themselves.
-- **Rejected** (`Sbv2InputError`): edits that change the phoneme sequence, such as rereading a mora
+- **Rejected** (`sbv2.InputError`): edits that change the phoneme sequence, such as rereading a mora
   (rewriting `vowel` / `consonant`) or adding / removing symbols. Utterances that mix `moras` and
   `words` taken from different analyses also stop here.
 
@@ -1361,7 +1361,7 @@ just looks up a row of `front`'s tone embedding (`toneStart` / `numTones` in
 VOICEVOX's `is_interrogative` / `enable_interrogative_upspeak` are operations that raise the mora f0 of
 an AudioQuery afterwards, so this discrete tone has nothing to map them to. A value that goes outside
 the JP tone base only looks up **a tone row of another language** and does not raise anything (which is
-why `toSbv2PhoneTone` rejects `Sbv2Mora.tone` other than 0/1 with `Sbv2InputError` — the type is
+why `toSbv2PhoneTone` rejects `sbv2.Mora.tone` other than 0/1 with `sbv2.InputError` — the type is
 `0 | 1`, but that has no effect on calls from JS).
 
 There is only one path by which the interrogative shows in the sound — a `?` actually present in the
@@ -1410,7 +1410,7 @@ cannot be interrupted.
 
 ## Anima: preview images during generation are not available (intermediate results are raw latents only)
 
-The only intermediate result the `denoise-step` of `AnimaGenerateRequest.onEvent` can hand over is **a
+The only intermediate result the `denoise-step` of `anima.GenerateRequest.onEvent` can hand over is **a
 copy of the latents** (`copyLatents()`); per-step preview images are not offered, by design. In the
 default per-stage mode the VAE decoder can be loaded only **after** the DiT is released (keeping all 4
 resident at once does not fit in VRAM — ADR 0016 / the module doc of `anima/pipeline.ts`), so there is
@@ -1418,7 +1418,7 @@ structurally no path that runs the VAE in the middle of the denoise loop. Consum
 approximate it from the latents — the public helper for that is `approximatePreview`
 (`@karume/models/anima`): passing the 2 fields of `copyLatents()` **as they are** (without
 denormalizing) returns RGBA at latent resolution. The coefficients are calibrated **in the normalized
-space** (measured 2026-08-24), so passing values denormalized with the mean / std of `animaLatents()`
+space** (measured 2026-08-24), so passing values denormalized with the mean / std of `anima.latentStats()`
 gives a different, blown-out image. The coefficients themselves MUST NOT be `export`ed, so there is no
 path for the consumer to copy them on its own
 (it is a linear projection 16ch → 3ch, not an exact decode — the implementation doc is canonical for
@@ -1429,7 +1429,7 @@ of tiled decode.
 
 ## Anima: DiT residency (`residency: "transformer"`) raises the VRAM ceiling and cannot be used on 4 GB-class GPUs
 
-`"transformer"` in `AnimaPipelineOptions.residency` / `AnimaGenerateRequest.residency` is an opt-in that keeps the DiT
+`"transformer"` in `anima.PipelineOptions.residency` / `anima.GenerateRequest.residency` is an opt-in that keeps the DiT
 Session across generate calls (ADR [0112](decisions/0112-anima-transformer-residency.md)); its VRAM assumption differs from the
 default `"per-stage"`. By-design constraints:
 
@@ -1489,7 +1489,7 @@ freedom without a measurement). In practice the upper limit of S and VRAM bind f
 
 ## Wan2.1: accepted sizes are 832×480 / 480×832 only, and frame counts only 4n+1 from 5 to 81 (prompt acceptance depends on the text encoder route — ADR 0118 / 0119)
 
-By-design constraints of `WanPipeline` in `@karume/models/wan`. Every input-caused rejection becomes a `ModelInputError` at
+By-design constraints of `wan.Pipeline` in `@karume/models/wan`. Every input-caused rejection becomes a `ModelInputError` at
 the entry of `generate` (`planWanGeneration` — before touching the GPU) (ADR [0118](decisions/0118-wan21-video-generation.md)
 Consequences).
 
@@ -1503,7 +1503,7 @@ Consequences).
 - **Prompt acceptance depends on the route**: the default `textEncoder: "gpu"` accepts any sentence (umT5 runs on the GPU —
   the acceptance conditions are in "text encoder route" below). `"precomputed"` accepts only the 4 precomputed ones (3
   positive + 1 negative), and only a string that exactly matches the original text or the normalized string of the text
-  embedding asset (listed by `WanPipeline.prompts`).
+  embedding asset (listed by `wan.Pipeline.prompts`).
 - **A timing (`gpuTiming`) device is rejected at construction**: the runtime does not open a batch on a timing device, so
   the VAE stage (1 tile = 1 batch) cannot run. GPU time does not appear in the diagnostics, so look at the elapsed time,
   VRAM (fdinfo and diagnostics) and the submit statistics.
@@ -1517,8 +1517,8 @@ Consequences).
 - **The initial noise of a seed is a different sequence from torch's `randn`** (the same splitmix64 + Box–Muller as Anima —
   ADR 0118 decision 5): the same seed as the official implementation does not give the same video. To match a reference,
   pass `latents` from outside.
-- Abort (`signal`): accepted both at construction (`WanPipelineOptions.signal` — passed to the fetch layer) and in generation
-  (`WanGenerateRequest.signal` — checked at stage boundaries, at every DiT step and at every VAE tile. The open Session is
+- Abort (`signal`): accepted both at construction (`wan.PipelineOptions.signal` — passed to the fetch layer) and in generation
+  (`wan.GenerateRequest.signal` — checked at stage boundaries, at every DiT step and at every VAE tile. The open Session is
   folded and then `signal.reason` is thrown unwrapped) (ADR 0119 decision 9, 2026-10-03). Within one stage (one run) the
   work is indivisible, and an abort takes effect at the next boundary.
 - **sha256 reference values are rows per environment** (ADR [0106](decisions/0106-device-keyed-references.md)): the rows
@@ -1564,7 +1564,7 @@ and the conditions for reviving them, are in ADR 0122 "Alternatives not taken").
 
 ## Wan2.2: accepted sizes are 1280×704 / 704×1280, frame counts 4n+1 from 5 to 121; I2V uses the same 2 sizes; 121 frames confirmed to complete on the 12 GiB class (the 10 GB class was confirmed up to 57 frames — ADR 0121)
 
-By-design constraints of `WanTi2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/wan`. Input-caused rejections become `ModelInputError` at the same entry as Wan2.1 (before touching the GPU)
+By-design constraints of `wan.Ti2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/wan`. Input-caused rejections become `ModelInputError` at the same entry as Wan2.1 (before touching the GPU)
 (outside the accepted set fails loudly).
 
 - **Accepted set**: sizes 1280×704 / 704×1280, frame counts 4n+1 from 5 to 121 (default 1280×704, 33 frames — fixed on 2026-10-09). The sizes and frame counts are
@@ -1607,7 +1607,7 @@ By-design constraints of `WanTi2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/w
     ADR 0121 Context "Capacity and time estimates") does not apply, because the 10 GB class does not support lengths over 57 frames (the concern is at 81 frames or more;
     what ran on the B570 is up to 57 frames (S = 13,200)). No runtime-side measure to shorten submits was adopted.
 - **The row-block budget (ADR [0124](decisions/0124-attention-row-block-budget.md)) does not change this unsupported range**: the runtime's
-  `SessionOptions.attentionRowBlockMaxBytes` shrinks attention's momentary temporaries, but `WanTi2vPipeline` has no option for it, and
+  `SessionOptions.attentionRowBlockMaxBytes` shrinks attention's momentary temporaries, but `wan.Ti2vPipeline` has no option for it, and
   there is no machine to confirm whether 61 frames or more fit on the 10 GB class. With the practical preset at 1280×704×121 on the 12 GiB-class development machine (RTX 3080 Ti, Deno), a budget of
   512 MiB lowered the DiT's backing from 5.97 → 4.51 GiB, and the whole-GPU VRAM peak when running only the DiT from 11,308 → 9,811 MiB (measured
   2026-10-11; output bit-identical to no budget; [research 2026-10-11 (step 4b measurements)](research/2026-10-11-row-block-budget-stage-4b.md)).
@@ -1648,7 +1648,7 @@ By-design constraints of `WanTi2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/w
     band 8.8e-2). maxAbs (2.6× T2V) is in latent frame 0 before replacement by the condition (a frame that does not reach the output). The visual comparison of the 2 presets on I2V
     is stage 9d.
 - **The distribution (`karume-wan2.2`) is not published on Hugging Face** (ADR 0121 stage 8a produced the recipe that assembles the local mirror `models/karume-wan2.2` —
-  `dist.py --pipeline wan-ti2v`). The entries are `WanTi2vPipeline.fromPretrained` (pass the mirror) and `WanTi2vPipeline.fromAssets`, which takes a manifest and assets
+  `dist.py --pipeline wan-ti2v`). The entries are `wan.Ti2vPipeline.fromPretrained` (pass the mirror) and `wan.Ti2vPipeline.fromAssets`, which takes a manifest and assets
   assembled from the series containers.
 
 ## EmbeddingGemma: a run-time attention_mask (in-batch padding) is not supported — single sequence assumed
@@ -1762,7 +1762,7 @@ and the Euler update run as GPU elementwise ops; one batch per fence). 3 by-desi
 
 ## Irodori pipeline (host layer): upstream optional knobs only at their default-equivalent values; reference audio is 48kHz
 
-`IrodoriPipeline` covers the range of phases 3–4 (ADR [0048](decisions/0048-irodori-host-port.md) /
+`irodori.Pipeline` covers the range of phases 3–4 (ADR [0048](decisions/0048-irodori-host-port.md) /
 [0049](decisions/0049-irodori-codec-integration.md)), and the following are by-design constraints. There is no approximation
 or silent fallback:
 
@@ -2004,7 +2004,7 @@ as a requirement) and `requiredLimits` (ADR 0089 decision 5, wired on 2026-09-01
   An intermediate over the limit (slot actual size > `maxStorageBufferBindingSize` / region > `maxBufferSize`) is caught by the plan-time preflight of ADR
   [0093](decisions/0093-transient-liveness-packing.md) decision 5, which **lists all of them with node names and fails before allocation, both at Session construction and in
   the estimate** (`estimateGraphMemory` — `PreparedModel.estimate` is the same implementation) (wired on 2026-09-05).
-- gemma4's `fromAssets` does not take a manifest (`Gemma4Assets` is only byte sequences and the config),
+- gemma4's `fromAssets` does not take a manifest (`gemma.Assets` is only byte sequences and the config),
   so it cannot reach the declaration, and the only guard on this surface is the construction-time check. `fromAssets` in general has no download, so
   there is no place for a prior judgement at all (only when a shared GPU is passed does admission look at it).
 - Totals vs. physical free capacity are not looked at (the section below, "GPU memory pre-checks go up to…").
@@ -2185,17 +2185,17 @@ Deliberate constraints of attention with the `states` field / `state_append` (AD
 ## gemma4: capacity / chunkLength are run-time knobs — changing their values can move the token sequence
 
 The distribution's `pipelineConfig.capacity` / `chunkLength` are **defaults**, and the caller can override them with
-`Gemma4Pipeline.sequence({ capacity })` / the `capacity` of `Gemma4ChatSession` (1 conversation = 1 capacity) and
-`Gemma4PipelineOptions.chunkLength` (per pipeline) (ADR
+`gemma.Pipeline.sequence({ capacity })` / the `capacity` of `gemma.ChatSession` (1 conversation = 1 capacity) and
+`gemma.PipelineOptions.chunkLength` (per pipeline) (ADR
 [0091](decisions/0091-gemma4-host-rope-variable-capacity.md) decision 4). There are 2 checks —
 `chunkLength ≤ maxChunkLength` (the declaration of the trace limit of the symbol `M`; 768 for E2B) and
 `chunkLength ≤ capacity ≤ maxPosition` (the declaration of the exclusive upper limit of positions; 131,072 for E2B).
-`Gemma4ChatSession` checks the relation of these 2 **at construction too** (this layer uses `capacity` as the yardstick for
+`gemma.ChatSession` checks the relation of these 2 **at construction too** (this layer uses `capacity` as the yardstick for
 overflow before the sequence allocates, so leaving it to the sequence side alone would truncate the history on a long turn
 and then give a capacity error, hiding the real cause).
 VRAM grows in proportion to the capacity (full-layer KV
 12,288 B/token + the temporary S of states-form attention = `8 × row-block rows × capacity × 4 B`), so
-`Gemma4Pipeline.estimateSessionMemory({ capacity, chunkLength })` can estimate it before allocation (only the
+`gemma.Pipeline.estimateSessionMemory({ capacity, chunkLength })` can estimate it before allocation (only the
 required total — it does not compare with the free side).
 
 - **Changing `chunkLength` can move the greedy token sequence**: the row statistics of the sliding layers assign the columns of S to 256
@@ -2217,12 +2217,12 @@ required total — it does not compare with the free side).
   The measured range of the band is reduction lengths live 1–16,384 (the check in `gpu_state_attention_parallel_test.ts` — the worst value appears on the side
   of small live) + 65,536 (measured by hand): at live 4,096 / 16,384 / 65,536, ③' vs f64 = 8.6e-9 / 1.5e-8 /
   1.8e-8 (1/100 of the band, measured in the 2026-09-03 review).
-  `Gemma4PipelineOptions.stateAttentionReduce: "sequential"` (or quant `i4`) returns to the reference path.
+  `gemma.PipelineOptions.stateAttentionReduce: "sequential"` (or quant `i4`) returns to the reference path.
   The default of the low-level surface (consumers who call `createSessionFromContainer` / `createContainerSession` themselves) stays the runtime's `"sequential"`.
 - The upper limit of `chunkLength` is the trace limit of the baked symbol `M`, which the distribution declares as `pipelineConfig.maxChunkLength`
   (768 for E2B). A larger value fails at the declaration check (measured 2026-09-03: before the declaration existed,
   `chunkLength: 1024` passed silently, the prefill was split into 2 chunks, and the token sequence was identical to 768).
-- **Breaking change on an unpublished surface**: `Gemma4PipelineConfig` gained `maxChunkLength` as a **required field**.
+- **Breaking change on an unpublished surface**: `gemma.PipelineConfig` gained `maxChunkLength` as a **required field**.
   A caller that writes the `config` passed to `fromAssets` by hand needs to add 1 field (the distribution mirror declares it through a
   re-issue by `dist.py`; the weight shards' sha is unchanged).
 - It is not bit-identical to the upstream RoPE table (TS computes in f64 and rounds to f32 — upstream is f32 on every path).
@@ -2248,8 +2248,8 @@ lower `maxNewTokens`. The runtime side also rejects the same overflow, but that 
 and one would have to tell from the wording whether "truncating would let it pass" or "the wiring is broken" —
 the dedicated type separates out that one case.
 
-**This constraint applies only to the low-level surface (`Gemma4Pipeline.sequence()` / `chat()`)**. The high-level
-surface `Gemma4ChatSession` **has the same remedy as its default policy** — **before** sending each turn it compares
+**This constraint applies only to the low-level surface (`gemma.Pipeline.sequence()` / `chat()`)**. The high-level
+surface `gemma.ChatSession` **has the same remedy as its default policy** — **before** sending each turn it compares
 `used + prompt + maxNewTokens - 1` with the limit, and if it exceeds it, rebuilds the history with `onOverflow` (default
 `dropOldestTurns` = drop the oldest user / assistant pair, keep system) before
 firing. The policy can be replaced wholesale, and passing a function that throws lets the host side handle it as before. When there is nothing
@@ -2270,7 +2270,7 @@ turn keeps only the text that came out in the history, and a sequence whose corr
     event, the first token is sampled from the computed logits and delivered, and no new run
     runs. With `maxNewTokens: 1` it completes normally with `max-tokens` as is; if there is more, it becomes `aborted` before the next
     decode run (pinned by `generation_sequence_test.ts`).
-- **A request runs on a snapshot taken at issue time** (`generate` / `Gemma4Pipeline.chat` — ADR 0083 addendum
+- **A request runs on a snapshot taken at issue time** (`generate` / `gemma.Pipeline.chat` — ADR 0083 addendum
   2026-09-02). The `prompt` array, `maxNewTokens` / `signal`, and the sampler specification (down to the contents of `logitBias`) are
   copied in the synchronous part of issuing, so rewriting the request object after starting to draw from the returned sequence **does not change
   the generation in progress** — to affect the next turn, pass it as the next request. An abort takes effect only when a `signal` is
@@ -2282,7 +2282,7 @@ turn keeps only the text that came out in the history, and a sequence whose corr
 
 ## Conversation fork (`fork`): each branch adds a whole KV; matching guarantees follow the numeric path's checks
 
-`GenerationContext.fork` / `GenerationSequence.fork` / `Gemma4ChatSession.fork` (ADR
+`GenerationContext.fork` / `GenerationSequence.fork` / `gemma.ChatSession.fork` (ADR
 [0066](decisions/0066-generation-context-state-slots.md) and
 [0083](decisions/0083-generation-api-surface.md) addenda 2026-10-11, ruling 8) duplicate the KV of the same capacity
 wholesale and return an independent continuation. Deliberate constraints and properties:
@@ -2297,7 +2297,7 @@ wholesale and return an independent continuation. Deliberate constraints and pro
   A speculative borrowing context adds only the 8 bytes of the logical-length uniform per branch.
 - **There are states that cannot be forked**: a run in progress (including while a borrower's run is running), during a batch's
   use reservation, while waiting for a deferred commit to settle, a borrowing context, after dispose / contamination / device loss, and
-  a disposed Session. `GenerationSequence.fork` and `Gemma4ChatSession.fork` throw synchronously when disposed
+  a disposed Session. `GenerationSequence.fork` and `gemma.ChatSession.fork` throw synchronously when disposed
   (ChatSession also during a running turn), and a sequence's fork runs **after** the generation in progress
   (awaiting `fork()` without closing a stream that is being drained never returns).
 - **Whether the token sequence after a fork matches "the same sequence of operations without fork" follows the determinism of the numeric path**.
@@ -2333,7 +2333,7 @@ The final detection of exceeding the total remains the out-of-memory errorScope,
 silent** (the "does not apply to Metal" note above — wgpu-hal metal's `check_if_oom()` is a no-op;
 the known-issues section on Metal's silent out-of-memory errorScope). So on Metal,
 "single limits reliably fail in advance; physical overruns of the total can still proceed silently" remains. A mitigation candidate is passing the
-pre-estimate of the requirement (`PreparedModel.estimate` / `estimateGraphMemory`, and `Gemma4Pipeline.estimateSessionMemory` for gemma4)
+pre-estimate of the requirement (`PreparedModel.estimate` / `estimateGraphMemory`, and `gemma.Pipeline.estimateSessionMemory` for gemma4)
 to the caller, but the estimate needs every symbolic dimension of the graph inputs to be
 bound, and gemma4 is the only family that has the bound values at load time, so the design of that option comes after the measurements of Phase B
 (ADR 0089 addendum 2026-09-01 — not implemented).

@@ -89,3 +89,14 @@ force:
 - ADR 0108 replaces the "one graph = one safetensors" and "no `.krm`" points of §3 with the dedicated
   `krm` / `krg` container; it took effect on 2026-09-24 when step 3d (`9e905d9f`) removed the reader
   of the old form. Only `karume migrate` still reads the old safetensors form.
+
+## Addendum (2026-10-28) — §4: the barrel holds one namespace per family (ADR 0136)
+
+- §4 still holds — a consumer imports one family through its subpath or imports from the barrel —
+  but the barrel's shape changed in 0.15.0 (ADR [0136](0136-models-public-naming.md)): it exports
+  the shared surface flat (option types, `ModelInputError`, `KARUME_SOURCES`, the PNG / WAV / image
+  helpers) and each family as `export * as <namespace> from "./<subpath>.ts"`, and the subpaths
+  export bare names (`sbv2.Pipeline` through the barrel, `Pipeline` from `@karume/models/sbv2`).
+  Tree-shaking through a namespace was measured to match the flat barrel byte for byte. The
+  `sideEffects: false` point above is still not verified; the cost it would remove (every family's
+  source table in a barrel import) is filed in the backlog.

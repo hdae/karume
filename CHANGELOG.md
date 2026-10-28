@@ -230,6 +230,89 @@ measurements in `docs/research/`.
 
 ### Breaking
 
+- `@karume/models`: public names lose their family prefix (ADR 0136). Each subpath exports bare
+  names: drop the prefix and keep the rest (`Sbv2Pipeline` → `Pipeline`, `ANIMA_SOURCES` →
+  `SOURCES`, `Sbv2GenerateOptions` → `GenerateOptions`, `WanTi2vPipeline` → `Ti2vPipeline`). Six
+  names change beyond that: `toSbv2Utterance` → `toUtterance`, `parseGemma4PipelineConfig` →
+  `parsePipelineConfig`, `wanFrameToRgba` → `frameToRgba`, `animaLatents` → `latentStats`, and
+  umT5's `Umt5EncoderAssets` / `Umt5EncoderFromPretrainedOptions` → `Assets` /
+  `FromPretrainedOptions`. Names that had no prefix are unchanged (`GeneratedImage`, `DepthMap`,
+  `AlphaMatte`, `LabSegment`, the `Generation*` vocabulary, …). The barrel (`@karume/models`) no
+  longer exports family names flat: it exports the shared surface (`FromPretrainedHubOptions`,
+  `FromPretrainedComponentOptions`, `ComponentSource`, `ModelInputError`, `KARUME_SOURCES`,
+  `encodePng`, `normalizeToNchw`, `resizeRgb8`, `Rgb8Image`, `decodeWav`, `encodeWav`, `DecodedWav`)
+  and one namespace per family, named after the subpath in camelCase — `anima`, `birefnet`,
+  `depthAnything`, `gemma`, `gemma4Qat`, `irodori`, `sbv2`, `siglip2`, `umt5`, `vowelDetector`,
+  `wan`. A namespace is the subpath module itself, types included (`sbv2.Pipeline`,
+  `sbv2.SOURCES`, `sbv2.Utterance`). Code that uses one family imports the bare names from its
+  subpath (`import { Pipeline, SOURCES, toUtterance } from "@karume/models/sbv2"`); code that uses
+  several imports namespaces (`import { anima, sbv2 } from "@karume/models"`, or
+  `import * as sbv2 from "@karume/models/sbv2"`). `Sbv2InputError` is now `InputError`
+  (`sbv2.InputError`), and its runtime `name` changes from `"Sbv2InputError"` to
+  `"sbv2.InputError"`: re-key code that branches on `err.name` (`instanceof ModelInputError` is
+  unaffected). Messages name the public class the same way (`"sbv2.Pipeline: …"`,
+  `"wan.Ti2vPipeline: …"`), and the hint for an omitted ref reads
+  `SOURCES["sbv2-jvnv"] (@karume/models/sbv2)`. The full list (0.14 → 0.15; names not listed are
+  unchanged):
+  - `./anima`: `AnimaPipeline` → `Pipeline`, `AnimaAssets` → `Assets`, `AnimaFromPretrainedOptions`
+    → `FromPretrainedOptions`, `AnimaGenerateEvent` → `GenerateEvent`, `AnimaGenerateRequest` →
+    `GenerateRequest`, `AnimaLatentSnapshot` → `LatentSnapshot`, `AnimaPipelineOptions` →
+    `PipelineOptions`, `AnimaRunComponent` → `RunComponent`, `AnimaSamplerType` → `SamplerType`,
+    `ANIMA_SAMPLER_TYPES` → `SAMPLER_TYPES`, `AnimaResidency` → `Residency`, `AnimaResidencyAction`
+    → `ResidencyAction`, `AnimaResidencyReason` → `ResidencyReason`, `ANIMA_SOURCES` → `SOURCES`,
+    `animaLatents` → `latentStats`.
+  - `./birefnet`: `BirefnetPipeline` → `Pipeline`, `BIREFNET_SOURCES` → `SOURCES`, `BirefnetAssets`
+    → `Assets`, `BirefnetFromPretrainedOptions` → `FromPretrainedOptions`, `BirefnetPipelineOptions`
+    → `PipelineOptions`.
+  - `./depth-anything`: `DepthAnythingPipeline` → `Pipeline`, `DepthAnythingAssets` → `Assets`,
+    `DepthAnythingFromPretrainedOptions` → `FromPretrainedOptions`, `DepthAnythingPipelineOptions` →
+    `PipelineOptions`, `DEPTH_ANYTHING_SOURCES` → `SOURCES`.
+  - `./gemma`: `Gemma4Pipeline` → `Pipeline`, `GEMMA4_CHUNK_BUCKETS` → `CHUNK_BUCKETS`,
+    `Gemma4Assets` → `Assets`, `Gemma4ChatOptions` → `ChatOptions`, `Gemma4EstimateOptions` →
+    `EstimateOptions`, `Gemma4FromPretrainedOptions` → `FromPretrainedOptions`,
+    `Gemma4PipelineOptions` → `PipelineOptions`, `Gemma4SequenceOptions` → `SequenceOptions`,
+    `Gemma4ChatStop` → `ChatStop`, `Gemma4ChatStream` → `ChatStream`, `Gemma4PrefillProgress` →
+    `PrefillProgress`, `Gemma4RunPhase` → `RunPhase`, `Gemma4PleResidency` → `PleResidency`,
+    `Gemma4ChatSession` → `ChatSession`, `Gemma4ChatOverflow` → `ChatOverflow`,
+    `Gemma4ChatOverflowPolicy` → `ChatOverflowPolicy`, `Gemma4ChatSessionHost` → `ChatSessionHost`,
+    `Gemma4ChatSessionOptions` → `ChatSessionOptions`, `Gemma4ChatTurnOptions` → `ChatTurnOptions`,
+    `Gemma4DefaultSampler` → `DefaultSampler`, `Gemma4PipelineConfig` → `PipelineConfig`,
+    `GEMMA4_SOURCES` → `SOURCES`, `parseGemma4PipelineConfig` → `parsePipelineConfig`,
+    `Gemma4RopeLayerSpec` → `RopeLayerSpec`, `Gemma4RopeLayerType` → `RopeLayerType`,
+    `Gemma4RopeSpec` → `RopeSpec`, `gemma4RopeInputs` → `ropeInputs`, `gemma4ChatPrompt` →
+    `chatPrompt`, `gemma4ChatTurn` → `chatTurn`, `Gemma4ChatMessage` → `ChatMessage`,
+    `Gemma4ChatRole` → `ChatRole`, `GemmaDecodeOptions` → `DecodeOptions`, `GemmaTokenizer` →
+    `Tokenizer`.
+  - `./gemma4-qat`: `Gemma4QatPipeline` → `Pipeline`, `Gemma4QatFromPretrainedOptions` →
+    `FromPretrainedOptions`, `Gemma4QatPipelineOptions` → `PipelineOptions`, `gemma4QatRopeInputs` →
+    `ropeInputs`; the Gemma names it re-exports as under `./gemma`.
+  - `./irodori`: `IrodoriPipeline` → `Pipeline`, `IrodoriAssets` → `Assets`,
+    `IrodoriFromPretrainedOptions` → `FromPretrainedOptions`, `IrodoriGeneratedAudio` →
+    `GeneratedAudio`, `IrodoriGenerateEvent` → `GenerateEvent`, `IrodoriGenerateRequest` →
+    `GenerateRequest`, `IrodoriLatentSnapshot` → `LatentSnapshot`, `IrodoriPipelineOptions` →
+    `PipelineOptions`, `IrodoriRunComponent` → `RunComponent`, `IrodoriSpeakerInput` →
+    `SpeakerInput`, `IRODORI_SOURCES` → `SOURCES`.
+  - `./sbv2`: `Sbv2Pipeline` → `Pipeline`, `Sbv2Assets` → `Assets`, `Sbv2FromPretrainedOptions` →
+    `FromPretrainedOptions`, `Sbv2GenerateOptions` → `GenerateOptions`, `Sbv2PipelineOptions` →
+    `PipelineOptions`, `Sbv2RunComponent` → `RunComponent`, `toSbv2Utterance` → `toUtterance`,
+    `Sbv2Mora` → `Mora`, `Sbv2Phrases` → `Phrases`, `Sbv2Utterance` → `Utterance`, `Sbv2Word` →
+    `Word`, `Sbv2InputError` → `InputError`, `SBV2_SOURCES` → `SOURCES`.
+  - `./siglip2`: `Siglip2Pipeline` → `Pipeline`, `Siglip2Assets` → `Assets`,
+    `Siglip2FromPretrainedOptions` → `FromPretrainedOptions`, `Siglip2PipelineOptions` →
+    `PipelineOptions`, `SIGLIP2_SOURCES` → `SOURCES`.
+  - `./umt5`: `Umt5Encoder` → `Encoder`, `Umt5EncodeOptions` → `EncodeOptions`, `Umt5EncoderAssets`
+    → `Assets`, `Umt5EncoderFromPretrainedOptions` → `FromPretrainedOptions`, `Umt5EncoderOptions` →
+    `EncoderOptions`, `Umt5Encoding` → `Encoding`, `UMT5_SOURCES` → `SOURCES`.
+  - `./vowel-detector`: `VowelDetectorPipeline` → `Pipeline`, `VowelDetectorAssets` → `Assets`,
+    `VowelDetectorFromPretrainedOptions` → `FromPretrainedOptions`, `VowelDetectorPipelineOptions` →
+    `PipelineOptions`, `VowelDetectorResult` → `Result`.
+  - `./wan`: `WanPipeline` → `Pipeline`, `WanTi2vPipeline` → `Ti2vPipeline`,
+    `WanTi2vGenerateRequest` → `Ti2vGenerateRequest`, `WAN_SOURCES` → `SOURCES`, `WanI2vFit` →
+    `I2vFit`, `WanAssets` → `Assets`, `WanFromPretrainedOptions` → `FromPretrainedOptions`,
+    `WanGenerateEvent` → `GenerateEvent`, `WanGenerateRequest` → `GenerateRequest`,
+    `WanLatentSnapshot` → `LatentSnapshot`, `WanPipelineOptions` → `PipelineOptions`,
+    `WanRunComponent` → `RunComponent`, `WanPrompt` → `Prompt`, `WanPromptRole` → `PromptRole`,
+    `wanFrameToRgba` → `frameToRgba`.
 - `@karume/runtime`: a custom `BlockSource.read` (the source behind
   `openContainer({ kind: "source" })`) and a `MemoryPiece.read` of `openMemoryContainer` MUST accept
   concurrent calls and MUST NOT reuse or overwrite a buffer they returned earlier (ADR 0108 addendum

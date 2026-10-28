@@ -563,7 +563,7 @@ model and runs the whole script on a small synthetic Wan2.2 model. The GPU side 
 
 ### The pipeline these feed (`@karume/models/wan`)
 
-`WanPipeline` (`packages/models/src/wan/`) loads the three containers and the embedding asset from
+`wan.Pipeline` (`packages/models/src/wan/`) loads the three containers and the embedding asset from
 the distribution (stage 7 below) and runs `generate` in three stages: the asset lookup (only the stored prompts are accepted, by original or normalized text), the DiT with
 CFG as two batch-1 passes and the host UniPC, then the tiled VAE decode and the clamp. Measured on
 the B570 (2026-10-02, 832×480, 33 frames, 2 steps):
@@ -616,7 +616,7 @@ uv run --group wan --inexact python -m wan.umt5_export write           # replace
 
 It ships in its own repository, `models/karume-umt5-xxl/` (`wan/umt5_distribution.py`), together
 with the tokenizer of `google/umt5-xxl` converted into one JSON table, so it can be used without Wan
-(`Umt5Encoder` from `@karume/models/umt5`); the Wan2.2 distribution references its encoder (below).
+(`Encoder` from `@karume/models/umt5`); the Wan2.2 distribution references its encoder (below).
 The tokenizer asset (format `karume-umt5-tokenizer/1` — the T5 tables of the Wan asset without the
 prompt cleaning) is built by `wan/umt5_xxl_tokenizer.py` from `tokenizer.json` and
 `tokenizer_config.json` at the pinned commit (their SHA-256 are in `UMT5_SOURCES`), into the series

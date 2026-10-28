@@ -74,3 +74,11 @@ hack that breaks the phrase display (direct tones belong in the mora layer).
   `packages/models/package.json:29` lists `@hdae/yomi` under `dependencies` (`cc22c086`) though only
   tests use it (`packages/models/tests/sbv2_tone_injection_test.ts`): npm consumers install yomi,
   contrary to this decision.
+
+## Addendum (2026-10-28) — decision 2: the conversion is `toUtterance` (ADR 0136)
+
+- The barrel review that decision 2 deferred to was done for 0.15.0 (ADR
+  [0136](0136-models-public-naming.md)): the family prefixes are gone from the public names, so the
+  conversion is `toUtterance` (`sbv2.toUtterance` through the barrel), and the layers are
+  `Phrases` / `Utterance` / `Mora` / `Word`; the input error is `InputError` with the runtime
+  `name` `"sbv2.InputError"`. The body above keeps the names of its time.
