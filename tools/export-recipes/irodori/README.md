@@ -88,3 +88,21 @@ inputs/irodori/v4.1-small` — plus `--model v4.1-small` on step 7 (the output d
 models and its inputs are model-independent, so steps 1 / 5 / 6 are **not** re-run when they
 already exist. `card.py`'s `IRODORI_UPSTREAMS` must know the model name (upstream repository +
 display name), or the card render — and with it step 7 — fails loudly.
+
+v4.1-small does not store what it shares with v4-small: upstream v4.1 retrained only the duration
+predictor, so 26 of its roles (90 files, 5,637 MiB — every graph role in f32 / f16 / i8 except
+`duration`, plus `dit_context` i4 and the tokenizer) are byte-identical to v4-small's, and the
+recipe declares them as a cross-repository reference to `karume-irodori-v4-small`
+(`irodori_references` — ADR 0038 §7 addendum 2026-10-28). `duration_*` and `dit_i4` stay in
+v4.1-small's own repository: references are per container, and the i4 DiT is calibrated through
+each model's own reference loop, so its bytes differ. Step 7 for v4.1-small therefore reads the
+v4-small mirror (`models/karume-irodori-v4-small/`) and needs a revision source — `--resolve-refs
+hf` for the published v4-small (the build checks every borrowed file on the Hub), or
+`--allow-placeholder-ref` for a development mirror:
+
+```sh
+uv run python dist.py --pipeline irodori --model v4.1-small --resolve-refs hf
+```
+
+v4-small stays self-contained. A local reader of v4.1-small (`nodeDirectory`) needs both mirrors
+and a `crossRepo` mapping of `hdae/karume-irodori-v4-small` to the v4-small one.

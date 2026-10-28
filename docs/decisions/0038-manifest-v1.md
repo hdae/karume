@@ -570,6 +570,49 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
   実体を共有し、`evictCachedAssets` の保護が片方の削除で崩れる。`@karume/models` の取得計画の
   一意化キー（取得先の repo・revision・path）と hub の `fileRefKey` の対応もずれる。自リポの
   ファイルは越境の席を使わずに書けるので、用途は無い（手元の配布形 14 本に用例 0 — 2026-10-11 確認）。
+- 2026-10-28: **The recipe declares the §7 cross-repository references; the build supplies only the
+  commit** (maintainer's ruling 2026-10-28, 0.15.0 release preparation). The
+  five options of 2026-08-25 (`--ref-repo` / `--ref-revision` / `--ref-dist` / `--ref-model` /
+  `--ref-role`) are removed. Why: the borrowed roles lived only in release commands (26 roles for
+  irodori v4.1-small, 6 for anima-extra, 1 for Wan) and were retyped per release; a build could
+  reference one repository only; the SHA was pasted by hand and nothing checked that it held the
+  bytes; and nothing rejected a reference to the repository being built until the hub loaded it
+  from HF (the 2026-10-11 addendum). The manifest format and the hub do not change.
+  - **Declaration** (exporter core, `karume.dist`): `Pipeline.references(model)` returns
+    `CrossRepoReference(repo_name, model, roles)` — the referenced repository's name without the
+    owner, the model inside it, and the roles (artifact keys). The roles are a recipe fact derived
+    from its tables. Every model of one build declares the same references (one build applies one
+    set to every model); a build may reference several repositories, and a role named by two
+    references fails. The core rejects a reference to the repository being built (`resolve_repo`)
+    before assembly. It keeps no repo topology and no network access (ADR 0065): the caller passes
+    where the referenced distribution is (`referenced_dist`) and may confirm the borrowed files
+    before the first byte is written (`check_references`). The reconciliation of 2026-08-25 (each
+    referenced file must equal the bytes the build would place, every part of a container — ADR
+    [0109](0109-manifest-v5-container.md) decision 3) is unchanged and is what keeps a reference
+    safe; a container with one differing part stays local whole.
+  - **Revision** (one source per build; a build that declares references and gets none fails
+    before writing): `--ref-revision NAME=SHA` (core, explicit, offline); `--resolve-refs hf` (the
+    repository driver `tools/export-recipes/dist.py`: the referenced repository's main from the HF
+    API, then every borrowed file must be in that commit with the local bytes — the LFS oid equals
+    the sha256, or a small file's git blob id equals the local file's), which turns a stale SHA, a
+    referenced mirror rebuilt but not uploaded, and a renamed path into build-time failures; or
+    `--allow-placeholder-ref` (every reference at the placeholder of ADR
+    [0119](0119-wan-umt5-gpu-text-encoder.md) addendum E — development mirrors only; an explicit
+    placeholder SHA is refused). The driver reads referenced mirrors at `models/<repository
+    name>/`.
+  - **Declared today**: `anima-extra` → `karume-anima` (the six text-stack roles), Wan2.1 / Wan2.2
+    → `karume-umt5-xxl` (`text_encoder`), and irodori v4.1-small → `karume-irodori-v4-small` (26
+    roles = 90 files, 5,637 MiB: upstream v4.1 retrained only the duration predictor, so every
+    graph role in f32 / f16 / i8 except `duration`, plus `dit_context_i4` and the tokenizer; the
+    i4 `dit` is calibrated through each model's own reference loop and its parts differ). v4-small
+    stays self-contained and is referenced at its published pin. Rebuilt with the declarations,
+    the anima-extra and Wan2.2 manifests are byte-identical to those of the five options
+    (2026-10-28).
+  - Considered and not taken: one repeatable `--ref` option spelling all five fields (the role
+    list still typed per release, no help with the SHA); a manifest-level "inherits" declaration
+    expanded by the hub (a `karume/6` format bump for a problem the runtime does not have); one
+    repository for both irodori models (against ADR 0092 decision 1). The publication order is
+    [release-runbook](../release-runbook.md) §0.
 
 ## Gemma高速quantの融合語彙（2026-09-15）
 

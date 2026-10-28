@@ -141,6 +141,16 @@ when a pipeline's upstream weight license requires them (`Pipeline.root_files`; 
 be written there) — and a single-model repository follows the same rule (otherwise adding a second
 model would move every existing path).
 
+**Cross-repository references** (ADR 0038 §7, addendum 2026-10-28): a pipeline may declare that some
+roles of a model are byte-identical to another distribution repository's and are referenced there
+instead of stored (`Pipeline.references` — `CrossRepoReference(repo_name, model, roles)` per model).
+The build then needs `--ref-revision NAME=SHA` once per referenced repository (NAME = its name
+without the owner); a declared reference without one, a revision for a repository the build does
+not reference, and a reference to the repository being built all fail before anything is written.
+The core reads the referenced distribution through the caller's `referenced_dist` hook and checks
+that every referenced file equals the bytes it would have placed; the caller may also confirm the
+borrowed files against the Hub (`check_references`) — the core itself has no network access.
+
 `karume dist` writes a **model card `README.md`** after assembly and `verify_dist`
 (`karume.modelcard` — including the ADR 0037 §3 frontmatter), from a template per pipeline. The
 model list, the numbers, the quant table (with the download size of each quant) and the style /

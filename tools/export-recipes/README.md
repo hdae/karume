@@ -68,15 +68,15 @@ the repository's own spellings for `--series` (`outputs/series/`) and `--out` (`
 ```sh
 cd tools/export-recipes
 uv run python dist.py                                   # default = anima
-uv run python dist.py --pipeline irodori
+uv run python dist.py --pipeline irodori                # v4-small
+uv run python dist.py --pipeline irodori --model v4.1-small \
+    --resolve-refs hf                                   # references karume-irodori-v4-small
 uv run python dist.py --pipeline sbv2-fn                # FN voices (not published)
-uv run python dist.py --pipeline umt5                   # umT5-XXL encoder referenced by Wan2.1 and Wan2.2 (not published yet)
+uv run python dist.py --pipeline umt5                   # umT5-XXL encoder referenced by Wan2.1 and Wan2.2
 uv run python dist.py --pipeline wan \
-    --ref-repo hdae/karume-umt5-xxl --ref-revision <SHA> --ref-dist ../../models/karume-umt5-xxl \
-    --ref-model xxl --ref-role text_encoder             # Wan2.1 T2V 1.3B (not published yet)
+    --allow-placeholder-ref                             # Wan2.1 T2V 1.3B (not published)
 uv run python dist.py --pipeline wan-ti2v \
-    --ref-repo hdae/karume-umt5-xxl --ref-revision <SHA> --ref-dist ../../models/karume-umt5-xxl \
-    --ref-model xxl --ref-role text_encoder             # Wan2.2 TI2V 5B (not published yet)
+    --resolve-refs hf                                   # Wan2.2 TI2V 5B (references karume-umt5-xxl)
 uv run python dist.py --pipeline sbv2 \
     --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
 ```
@@ -86,6 +86,24 @@ The accepted set is `anima` / `anima-extra` / `sbv2` / `sbv2-fn` / `irodori` / `
 assembling several models into one repository, `--card-profile` for attribution, and the model
 card written after `verify_dist` — is the engine's contract and is documented in
 [`../exporter/README.md`](../exporter/README.md).
+
+**Cross-repository references** (ADR [0038](../../docs/decisions/0038-manifest-v1.md) §7, addendum
+2026-10-28). A pipeline declares which roles of a model are byte-identical to another distribution
+repository's and are referenced there instead of stored (`Pipeline.references` — today
+`anima-extra` → `karume-anima`, `wan` / `wan-ti2v` → `karume-umt5-xxl`, and irodori `v4.1-small` →
+`karume-irodori-v4-small`). The driver reads the referenced repository's local mirror
+(`models/<repository name>/`) and takes the commit from exactly one source; a build that declares
+references and gets none fails before writing anything:
+
+- `--resolve-refs hf` — the referenced repository's main, read from the HF API; before anything is
+  written, every borrowed file must be in that commit with the bytes of the local mirror (the LFS
+  oid, or the git blob id of a small file). The build used for publication. This is the only
+  network access of distribution assembly (read-only), and it lives in this driver, not in the core;
+- `--ref-revision NAME=SHA` — the commit given explicitly, offline, without a check against the Hub;
+- `--allow-placeholder-ref` — every reference at the placeholder (40 zeros), for a development
+  mirror while the referenced repository is unpublished. Never uploaded: a local source resolves
+  the reference through an explicit `crossRepo` mapping and ignores the revision, but the Hub would
+  look for a commit that does not exist. `--ref-revision NAME=<40 zeros>` is refused.
 
 ## Series migration driver
 

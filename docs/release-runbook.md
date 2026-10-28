@@ -28,25 +28,35 @@
 ### Publication order for repositories with cross-repository references (MUST)
 
 A cross-repository component reference (ADR [0038](decisions/0038-manifest-v1.md) §7 addendum) **bakes in the
-commit SHA of the referenced repository**, so it cannot be built until the referenced repository has been published. There are two pairs today —
-the pair in which extra (fine-tuned models) references the text stack of the official repository (ADR 0087 — the same shape as the former
-turbo → anima direction), and the pair in which `karume-wan2.2` references the text_encoder of `karume-umt5-xxl` (ADR
-[0119](decisions/0119-wan-umt5-gpu-text-encoder.md) addendum "design of step 10d" and ADR
-[0121](decisions/0121-wan22-ti2v-5b.md) decision 9 — the procedure is the umT5 and Wan2.2 items of "First publication of a family" below).
-`karume-wan2.1` has the same reference but is not published on HF (the maintainer's ruling 2026-10-15). For the anima pair:
+commit SHA of the referenced repository**, so it cannot be built until the referenced repository has been published. Which roles a
+repository borrows is the recipe's declaration (`Pipeline.references` — ADR 0038 §7 addendum 2026-10-28); the build supplies only
+the commit. **The publication build passes `--resolve-refs hf`** (`tools/export-recipes/dist.py`): it reads the referenced
+repository's main from the HF API and, before writing anything, requires every borrowed file to be in that commit with the bytes of
+the local mirror under `models/` — a stale SHA, a referenced mirror rebuilt but not uploaded, or a renamed path fails the build
+instead of a user's fetch. `--ref-revision <name>=<SHA>` pins it explicitly without that check. There are three pairs today:
+
+| Referencing repository | Referenced repository | Borrowed roles (the recipe's declaration) |
+| --- | --- | --- |
+| `karume-anima-extra` (fine-tuned models — ADR 0087, the same shape as the former turbo → anima direction) | `karume-anima` (model `anima-v1.0`) | `text_encoder` / `vae_decoder` / `text_encoder_bf16` / `vae_decoder_bf16` / `tokenizer` / `tokenizer_2` (`ANIMA_EXTRA_SHARED_ROLES`) |
+| `karume-wan2.2` (ADR [0119](decisions/0119-wan-umt5-gpu-text-encoder.md) addendum "design of step 10d", ADR [0121](decisions/0121-wan22-ti2v-5b.md) decision 9) | `karume-umt5-xxl` (model `xxl`) | `text_encoder` (`WAN_TEXT_ENCODER_REFERENCE`) |
+| `karume-irodori-v4.1-small` | `karume-irodori-v4-small` (model `v4-small`) | 26 roles = 90 files, 5,637 MiB: every graph role in f32 / f16 / i8 except `duration`, plus `dit_context_i4` and `tokenizer` (`IRODORI_V41_SHARED_ROLES`) |
+
+`karume-wan2.1` has the same reference as Wan2.2 but is not published on HF (the maintainer's ruling 2026-10-15). The Wan procedure
+is the umT5 and Wan2.2 items of "First publication of a family" below. For the anima pair:
 
 1. **Upload `karume-anima` first** (with the fragmentation countermeasures of §2; the 5 official variants (`anima-turbo-v1.1` (default) /
    `anima-v1.0` / `anima-aesthetic-v1.1` / `anima-turbo-v1.0` / `anima-aesthetic-v1.0`) — ADR 0087)
-2. **Record the commit SHA of its main** (taken the same way as in §3)
-3. Pass that SHA and **build `karume-anima-extra` with the cross-repository reference** — the 5 options of
-   `tools/export-recipes/dist.py` (`--ref-repo` / `--ref-revision` / `--ref-dist` / `--ref-model` / `--ref-role`) come
-   **either all together or not at all**; a partial set fails.
-   **extra holds 2 models, so build the one repository in one run with `--model anima-wai-v1.0 --model anima-copycat-20260610`**
-   (`--model` repeated = family assembly; the first one is `defaultModel`).
-   `--ref-role` is one of the 6 `text_encoder` / `vae_decoder` / `text_encoder_bf16` / `vae_decoder_bf16` / `tokenizer` /
-   `tokenizer_2` (the role name is the artifact key, and the bf16 text stack is a separate role — bf16 was extended to
-   every model on 2026-10-17. `text_conditioner` is not referenced across repositories because both extra models have their own — `own_text_conditioner=True`
-   in `distribution.py`; every model has its own bf16).
+2. (No SHA is recorded by hand: `--resolve-refs hf` reads the commit SHA of its main and checks the borrowed files in it — see the note under 3.)
+3. **Build `karume-anima-extra` with the cross-repository reference**: in `tools/export-recipes`,
+   `uv run python dist.py --pipeline anima-extra --model anima-wai-v1.0 --model anima-copycat-20260610 --out ../../models/karume-anima-extra --resolve-refs hf`.
+   **extra holds 2 models, so the one repository is built in one run** (`--model` repeated = family assembly; the first one is
+   `defaultModel`). The borrowed roles are the table's (the role name is the artifact key, and the bf16 text stack is a separate role — bf16
+   was extended to every model on 2026-10-17. `text_conditioner` is not referenced across repositories because both extra models have
+   their own — `own_text_conditioner=True` in `distribution.py`; every model has its own bf16).
+   **0.15.0**: the published main of `karume-anima` (the `anima.SOURCES["anima"]` pin) has no bf16 text stack, so
+   `--resolve-refs hf` refuses extra until `karume-anima` has been uploaded again (10 of the 22 borrowed files are not in that commit —
+   checked 2026-10-28). **Build extra with `--resolve-refs hf`, never with `--ref-revision`**: an explicit SHA is not checked against
+   the Hub, so `--ref-revision karume-anima=<that pin>` would build a distribution that references 10 files its commit does not hold.
    **The repo name in the card's Usage example is derived from the pipeline's declaration (`Pipeline.repo_name`); the
    directory name of `--out` is not looked at** (the real damage of 0.5.0, where the staging name with `-release` was copied into the public card, disappeared
    structurally with this derivation). For extra the declared `karume-anima-extra` appears as is, so `--repo` is not needed.
@@ -62,18 +72,38 @@ turbo → anima direction), and the pair in which `karume-wan2.2` references the
          `packages/e2e/tests/e2e_*_fusion_counts_test.ts`, and freeze the fusion counts and reference sha of the extra variants anew
          (the check that was emptied once when the official repository became self-contained — the table and the distribution mechanism are kept)
 
-If the referenced repository is uploaded again later, its SHA changes, and the extra manifest **keeps pointing at the old revision**
-(the bytes are protected by the double pin, so nothing wrong is served, but the two repositories' contents become different generations) —
-**when the referenced repository is uploaded again, rebuild and re-upload extra too** (the same for Wan — when `karume-umt5-xxl` is uploaded again,
-rebuild and re-upload `karume-wan2.2` too). **0.15.0: `karume-wan2.2` must be re-uploaded in any case — its manifest gained the
-`f16+dit8-a8-attn8-online` preset and the default moved to it (ADR 0132); the containers are unchanged.**
+For the irodori pair (v4.1-small references v4-small — upstream v4.1 retrained only the duration predictor; v4-small stays
+self-contained):
 
-**The placeholder-SHA check**: a development mirror for the time the referenced repository is unpublished is built by passing a placeholder SHA (40 zeros) to
-`--ref-revision` and passing `--allow-placeholder-ref` **explicitly** (`PLACEHOLDER_REVISION` in `tools/export-recipes/dist.py`
-— the local source is resolved by the `crossRepo` mapping and does not look at the revision). The placeholder SHA satisfies the form of 40 hex
-digits, so it passes hub's parse and `verify_dist` too — the publication rebuild does **not** pass
-`--allow-placeholder-ref`. Without it the driver fails before writing a single byte, so the build cannot happen until the real SHA of the
-referenced repository's main is passed. The rebuild after the bump of §4 is always done (do not upload the development mirror as is —
+1. **`karume-irodori-v4-small` first.** When its bytes and manifest are unchanged since its published pin
+   (`irodori.SOURCES["irodori-v4-small"]`), it need not be uploaded again — v4.1-small references that commit. When it is rebuilt and
+   uploaded (a new generator tag or card text), upload it first and let the next step read its new main.
+2. **Build `karume-irodori-v4.1-small`**: in `tools/export-recipes`,
+   `uv run python dist.py --pipeline irodori --model v4.1-small --resolve-refs hf` (it reads the mirror `models/karume-irodori-v4-small/`).
+   The result holds 16 files: the 12 parts of `duration` f32 / f16 / i8 and `dit` i4, the manifest, the card and the 2 legal texts.
+3. **Upload it with `--delete` for the 90 borrowed paths** — `hf upload` does not delete files that are absent locally, and the
+   self-contained 0.14.0 upload holds them on main: `tools/release/hf-upload.zsh upload karume-irodori-v4.1-small
+   --delete 'v4.1-small/backbone/*' --delete 'v4.1-small/text_proj/*' --delete 'v4.1-small/caption_proj/*'
+   --delete 'v4.1-small/speaker/*' --delete 'v4.1-small/dit_context/*' --delete 'v4.1-small/codec_decoder/*'
+   --delete 'v4.1-small/codec_encoder/*' --delete 'v4.1-small/tokenizer/*' --delete 'v4.1-small/dit/model.f32-*'
+   --delete 'v4.1-small/dit/model.f16-*' --delete 'v4.1-small/dit/model.i8-*'`, then compare HF's main with the mirror as in §2
+   (the 12 kept parts are byte-identical to what is already there). The old revisions keep the full files, so pins of 0.14.0 and earlier
+   keep working.
+4. **Pins**: update `irodori.SOURCES["irodori-v4.1-small"]` (and `"irodori-v4-small"` only when step 1 uploaded it).
+
+If the referenced repository is uploaded again later, its SHA changes, and the referencing manifest **keeps pointing at the old revision**
+(the bytes are protected by the double pin, so nothing wrong is served, but the two repositories' contents become different generations) —
+**when the referenced repository is uploaded again, rebuild and re-upload the referencing one too** (extra for `karume-anima`,
+`karume-wan2.2` for `karume-umt5-xxl`, `karume-irodori-v4.1-small` for `karume-irodori-v4-small`). **0.15.0: `karume-wan2.2` must be
+re-uploaded in any case — its manifest gained the `f16+dit8-a8-attn8-online` preset and the default moved to it (ADR 0132); the containers
+are unchanged.**
+
+**The placeholder-SHA check**: a development mirror for the time the referenced repository is unpublished is built with
+`--allow-placeholder-ref`, which pins every reference at a placeholder SHA (40 zeros — `PLACEHOLDER_REVISION` in
+`tools/export-recipes/dist.py`; the local source is resolved by the `crossRepo` mapping and does not look at the revision). The placeholder
+SHA satisfies the form of 40 hex digits, so it passes hub's parse and `verify_dist` too — the publication rebuild does **not** pass
+`--allow-placeholder-ref`, and `--ref-revision <name>=<40 zeros>` is refused. A build that declares references and gets no revision source
+fails before writing a single byte. The rebuild after the bump of §4 is always done (do not upload the development mirror as is —
 right before uploading, confirm that `rg -c '"revision": "0{40}"' models/<repo>/karume.json` prints nothing (no placeholder SHA
 remains)).
 
@@ -282,8 +312,8 @@ them `umt5.Encoder`, `umt5.SOURCES` and `wan.SOURCES` — ADR 0136).
 
 Wan2.1 (`karume-wan2.1`) is not published on HF (the maintainer's ruling 2026-10-15 — ADR
 [0118](decisions/0118-wan21-video-generation.md) addendum (2026-10-15)). The code stays, and the distribution is assembled locally
-with `dist.py --pipeline wan` (the same 5 `--ref-*` options as Wan2.2 below — before umT5 is published, the placeholder SHA of §0 and
-`--allow-placeholder-ref`; after it is published, the SHA of its main. `--out` is the default `models/karume-wan2.1`). Do not add `"wan2.1"`
+with `dist.py --pipeline wan` (the same umT5 reference as Wan2.2 below — before umT5 is published, `--allow-placeholder-ref` (the
+placeholder of §0); after it is published, `--resolve-refs hf`. `--out` is the default `models/karume-wan2.1`). Do not add `"wan2.1"`
 to `wan.SOURCES`, and do not upload `karume-wan2.1`.
 
 - [ ] **Check before publication (Wan2.2)**: the 50-step run (`KARUME_WAN_TI2V_FULL_PIPELINE=1 vp test
@@ -307,11 +337,10 @@ to `wan.SOURCES`, and do not upload `karume-wan2.1`.
 - [ ] **Upload the umT5 repository first (the cross-repository reference order of §0)**: in `tools/export-recipes`,
       `uv run python dist.py --pipeline umt5` (`--out` is the default `models/karume-umt5-xxl`) → with the script of §2,
       `tools/release/hf-upload.zsh upload karume-umt5-xxl` → record the SHA of its main the same way as in §3
-- [ ] **Rebuild Wan2.2 with that real SHA**: `uv run python dist.py --pipeline wan-ti2v --ref-repo hdae/karume-umt5-xxl
-      --ref-revision <SHA of main of karume-umt5-xxl> --ref-dist ../../models/karume-umt5-xxl --ref-model xxl
-      --ref-role text_encoder` (do **not** pass `--allow-placeholder-ref` — do not upload with the development mirror's placeholder SHA.
-      `--out` is the default `models/karume-wan2.2`) → after confirming that every text_encoder part in `karume.json` points
-      at that SHA, `tools/release/hf-upload.zsh upload karume-wan2.2`
+- [ ] **Rebuild Wan2.2 against umT5's published main**: `uv run python dist.py --pipeline wan-ti2v --resolve-refs hf` (it pins the
+      reference at the main of `karume-umt5-xxl` and checks every borrowed part there; do **not** pass `--allow-placeholder-ref` — do not
+      upload with the development mirror's placeholder SHA. `--out` is the default `models/karume-wan2.2`) → after confirming that every
+      text_encoder part in `karume.json` points at the SHA recorded above, `tools/release/hf-upload.zsh upload karume-wan2.2`
 - [ ] Add the tables (key = the basename of the repository name without `karume-`, value = `repo` + the SHA of main):
       add `umt5.SOURCES` (key `"umt5-xxl"` → `hdae/karume-umt5-xxl`) to `packages/models/src/umt5/config.ts` and
       export it from `umt5.ts` (the barrel's `umt5` namespace follows); add `wan.SOURCES` (key `"wan2.2"` →

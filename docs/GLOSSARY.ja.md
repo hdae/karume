@@ -228,6 +228,7 @@
 | `BADNESS_RE` (mojibake detection) | mojibake 判定 | ftfy の文字化け判定の正規表現（当たる入力は拒む） | — | ADR 0119 決定 2 |
 | unquantized reference | 量子化なしの参照 | pin した checkpoint の F32 の重みをそのまま使う CPU 参照 | — | ADR 0119 追記 2026-10-03 |
 | text encoder path (gpu / precomputed) | テキストエンコーダの経路 | umT5 を GPU で回すか、事前計算の埋め込み資産を使うかの選択 | — | ADR 0119 追記 |
+| revision source (cross-repository reference) | revision の出どころ | レシピが宣言した越境参照の commit をビルドがどこから取るか（`--resolve-refs hf` / `--ref-revision` / `--allow-placeholder-ref` のどれか 1 つ） | — | ADR 0038 §7 追記 2026-10-28 |
 | placeholder SHA (cross-repository reference) | 仮の SHA | 参照先のリポが未公開の間に越境参照へ入れる 40 桁の 0 | — | ADR 0119 追記 |
 | `karume-umt5-xxl` / `umt5-encoder/1` | umT5 リポ | umT5-XXL encoder とトークナイザ資産の配布リポと pipeline 名 | — | ADR 0119 追記・ADR 0122 |
 | `umt5.Encoder` (standalone umT5 encoder) | 単体の umT5 encoder | `@karume/models/umt5` の公開面（テキスト → 最終隠れ状態） | — | ADR 0122 追記 2026-10-15 |

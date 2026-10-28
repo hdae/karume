@@ -751,17 +751,18 @@ deno run --no-config --allow-read ../release/container_license.ts ../../outputs/
 `wan/distribution.py` assembles the series into the distribution `models/karume-wan2.1/` (ADR 0118
 decision 7 — one repository per family generation; not published on Hugging Face yet). `karume dist`
 does the copying, hashing and verification; the recipe only says what goes where. The text encoder
-is a cross-repository reference to `karume-umt5-xxl` (ADR 0119 stage 10d, decision A), so build that
-repository first and pass the five `--ref-*` options:
+is a cross-repository reference to `karume-umt5-xxl` (ADR 0119 stage 10d, decision A) that the
+recipe declares (`wan_references` — model `xxl`, role `text_encoder`; ADR 0038 §7 addendum
+2026-10-28), so build that repository first and give the build the commit it is pinned at (the
+revision sources are in [`../README.md`](../README.md#dist-driver)):
 
 ```bash
 uv run python dist.py --pipeline umt5
-uv run python dist.py --pipeline wan \
-    --ref-repo hdae/karume-umt5-xxl --ref-revision <main SHA of karume-umt5-xxl> \
-    --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder
+uv run python dist.py --pipeline wan --allow-placeholder-ref   # Wan2.1: development mirror only
+uv run python dist.py --pipeline wan-ti2v --resolve-refs hf    # Wan2.2: the publication build
 ```
 
-`--pipeline wan-ti2v` with the same five `--ref-*` options assembles Wan2.2 TI2V 5B into
+`--pipeline wan-ti2v` with the same reference assembles Wan2.2 TI2V 5B into
 `models/karume-wan2.2/` (ADR 0121 stage 8 — model `ti2v-5b`, pipeline `wan-ti2v/1`). The recipe is
 the same plan function with the Wan2.2 table: only the int8 transformer (`wan2.2-ti2v-5b-i8-dyn`),
 the VAE graphs of `wan2.2-ti2v-5b-f16-dyn`, the quants `f16+dit8` and
@@ -779,10 +780,10 @@ decoder's 3-D convolutions on int8 activations). Every other quant selects the f
 default does not change.
 
 Until `karume-umt5-xxl` is published there is no commit SHA. The development mirror uses the
-placeholder `0000000000000000000000000000000000000000` and must say so with
-`--allow-placeholder-ref`; without that flag the driver refuses the placeholder before writing
-anything, so a publishing build has to pass the real SHA (`docs/release-runbook.md` §0). A local
-reader resolves the reference through `crossRepo` and does not look at the revision.
+placeholder `0000000000000000000000000000000000000000`, which only `--allow-placeholder-ref`
+produces; a build without a revision source fails before writing anything, so a publishing build
+has to pass the real SHA or `--resolve-refs hf` (`docs/release-runbook.md` §0). A local reader
+resolves the reference through `crossRepo` and does not look at the revision.
 
 | Manifest entry (`karume/5`) | Value                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

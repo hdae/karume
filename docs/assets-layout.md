@@ -77,21 +77,24 @@ uv run python dist.py --model anima-turbo-v1.1 --model anima-v1.0 \
     --model anima-aesthetic-v1.1 --model anima-turbo-v1.0 \
     --model anima-aesthetic-v1.0 \
     --out ../../models/karume-anima                  # the five official variants (default = Turbo v1.1 — ADR 0087)
-# The fine-tuned ones (wai / copycat) reference the text stack of the official repository across repositories, so the published SHA of the official repository
-# is required = they are assembled at release time (five --ref-* options; procedure: the release-runbook section on repositories with cross-repository references)
-# → models/karume-anima-extra/
+# Repositories that reference another one across repositories (the recipe declares which roles — ADR 0038 §7 addendum 2026-10-28)
+# are built after the referenced mirror under models/, with one revision source: --resolve-refs hf (the referenced repository's
+# main, every borrowed file checked on the Hub — the publication build), --ref-revision <name>=<SHA>, or --allow-placeholder-ref
+# (a development mirror while the referenced repository is unpublished). Procedure: the release-runbook section on
+# repositories with cross-repository references.
+uv run python dist.py --pipeline anima-extra --model anima-wai-v1.0 --model anima-copycat-20260610 \
+    --out ../../models/karume-anima-extra --resolve-refs hf
+                                                     # → models/karume-anima-extra/ (fine-tunes; the text stack is referenced in karume-anima)
 uv run python dist.py --pipeline umt5                # → models/karume-umt5-xxl/ (umT5-XXL encoder; i8 — ADR 0119)
-uv run python dist.py --pipeline wan --ref-repo hdae/karume-umt5-xxl --ref-revision <SHA or a placeholder of 40 zeros> \
-    --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder [--allow-placeholder-ref]
-                                                     # → models/karume-wan2.1/ (text_encoder is a cross-repository reference)
-uv run python dist.py --pipeline wan-ti2v --ref-repo hdae/karume-umt5-xxl --ref-revision <SHA or a placeholder of 40 zeros> \
-    --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder [--allow-placeholder-ref]
-                                                     # → models/karume-wan2.2/ (Wan2.2 TI2V 5B; text_encoder is a cross-repository reference — ADR 0121)
+uv run python dist.py --pipeline wan --allow-placeholder-ref
+                                                     # → models/karume-wan2.1/ (text_encoder is referenced in karume-umt5-xxl; not published)
+uv run python dist.py --pipeline wan-ti2v --resolve-refs hf
+                                                     # → models/karume-wan2.2/ (Wan2.2 TI2V 5B; text_encoder is referenced in karume-umt5-xxl — ADR 0121)
 uv run python dist.py --pipeline umt5 --intake ../../inputs/umt5/<name> [--allow-undeclared-license]
                                                      # → outputs/misc/local-dist/<name>/ (local experimental mirror; repository name umt5-xxl-<name>-local — ADR 0122)
 uv run python dist.py --pipeline irodori             # → models/karume-irodori-v4-small/
 uv run python dist.py --pipeline irodori \
-    --model v4.1-small                               # → models/karume-irodori-v4.1-small/
+    --model v4.1-small --resolve-refs hf             # → models/karume-irodori-v4.1-small/ (references 26 roles in karume-irodori-v4-small)
 uv run python dist.py --pipeline sbv2 \
     --model F1 --model F2 --model M1 --model M2 --out ../../models/karume-sbv2-jvnv   # the pipeline declares the family-level repository name (karume-sbv2-jvnv) (2026-09-25)
 uv run python dist.py --pipeline sbv2-fn \
