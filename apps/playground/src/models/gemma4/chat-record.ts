@@ -1,5 +1,5 @@
 /**
- * The Gemma 4 chat record (`format: "karume-playground-gemma4/1"`): the environment, the
+ * The Gemma 4 chat record (`format: "karume-playground-gemma4/2"`): the environment, the
  * distribution and source, the loaded model and preset, the chat settings, every turn with its
  * request, stop, statistics and generated token ids, and the Session diagnostics when the pipeline was
  * loaded with them. Pure (the
@@ -15,7 +15,7 @@ import type { ChatSettings, GemmaMount } from "./settings";
 import type { TurnTiming } from "./turns";
 
 /** The version of the saved record; bump it when a field changes meaning or goes away. */
-export const RECORD_FORMAT = "karume-playground-gemma4/1";
+export const RECORD_FORMAT = "karume-playground-gemma4/2";
 
 /** How a turn stopped (the stop of the turn's stream, flattened for JSON). */
 export type StopRecord = {

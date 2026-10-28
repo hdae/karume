@@ -103,7 +103,7 @@ describe("buildGemmaRecord", () => {
   it("starts with the format and the environment and names the entry point by mount", () => {
     const record = buildGemmaRecord({ ...input, mount: "gemma4" });
     expect(record.format).toBe(RECORD_FORMAT);
-    expect(record.format).toBe("karume-playground-gemma4/1");
+    expect(record.format).toBe("karume-playground-gemma4/2");
     expect(record.page).toBe("gemma4");
     expect(record.recordedAt).toBe(environment.recordedAt);
     expect(record.pipeline).toBe("gemma.Pipeline");

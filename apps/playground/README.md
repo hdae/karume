@@ -879,11 +879,11 @@ How the figures are measured (from `performance.now()` in the page):
     run that drew the stop token;
   - without: the end of the text stream.
 
-### The record (`format: "karume-playground-gemma4/1"`)
+### The record (`format: "karume-playground-gemma4/2"`)
 
 | Field | What |
 | --- | --- |
-| `format`, `page` | `karume-playground-gemma4/1`, `gemma4` |
+| `format`, `page` | `karume-playground-gemma4/2`, `gemma4` (version 1 spelled `pipeline` with the 0.14 class names `Gemma4Pipeline` / `Gemma4QatPipeline`) |
 | `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device` | `recordEnvironment` |
 | `distribution` | `mount`, `directory`, `manifestSha256` (sha256 of `karume.json`) |
 | `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
