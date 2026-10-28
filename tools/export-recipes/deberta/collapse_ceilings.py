@@ -1,4 +1,5 @@
-"""DeBERTa w8a8 の崩壊上限（`packages/models/tests/helpers/collapse-ceilings.ts` の `COLLAPSE_CEILINGS`）を導き直す。
+"""DeBERTa w8a8 の崩壊上限を導き直す
+（`packages/models/tests/helpers/collapse-ceilings.ts` の `COLLAPSE_CEILINGS`）。
 
 門の第 3 層は output.2〜24 の相対 RMS 誤差 ‖x − golden‖₂ / ‖golden‖₂ を出力ごとの
 上限で見る。上限 = 出力ごと（観測点 = output.k）に、正当な標本（全ケース）の最悪 × 2 を
