@@ -7,13 +7,17 @@
 import { clearHubCache, type HubRepoRef, loadManifest } from "@karume/hub";
 import { type WanPrompt, wanFrameToRgba } from "@karume/models/wan";
 import type { AcquireGpuOptions } from "@karume/runtime";
-import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { ChoiceSelect } from "@/components/choice-select";
 import { ErrorAlert, thrownText } from "@/components/error-alert";
 import { Field } from "@/components/field";
 import { FramePlayer } from "@/components/frame-player";
 import { KeyValueTable } from "@/components/key-value-table";
+import { PresetSelect } from "@/components/preset-select";
+import { RecordActions } from "@/components/record-actions";
+import { GpuAlerts } from "@/components/run-status-card";
+import { SourcePicker } from "@/components/source-picker";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,11 +29,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useDistributionIndex } from "@/hooks/use-distribution-index";
 import { useGpu } from "@/hooks/use-gpu";
+import { usePipelineSource } from "@/hooks/use-pipeline-source";
 import { useTimestampQuery } from "@/hooks/use-timestamp-query";
-import { distributionSource, hfRepoRef } from "@/lib/distributions";
-import { downloadBlob, downloadJson, fileStamp } from "@/lib/download";
+import { distributionSource, type PipelineSource } from "@/lib/distributions";
+import { downloadBlob, fileStamp } from "@/lib/download";
+import { recordEnvironment } from "@/lib/environment";
 import { type CacheInventory, queryCacheInventory } from "@/lib/hub-cache";
 import {
+  adapterText,
   attentionPipelines,
   type BuildCost,
   type ComponentRecord,
@@ -44,7 +51,6 @@ import {
   type Spread,
   stackRgbaFrames,
   summarizeAdapter,
-  summarizeDevice,
   summarizeIntervals,
   tallyTiming,
   timingOf,
@@ -75,7 +81,7 @@ import {
   type WanForm,
   type WanManifestSummary,
 } from "./settings";
-import { type DiagnosticsSink, type PipelineSource, useWanPipeline } from "./use-wan-pipeline";
+import { type DiagnosticsSink, useWanPipeline } from "./use-wan-pipeline";
 
 /**
  * Module constants (useGpu needs stable options): subgroups when the adapter has them (the
@@ -254,22 +260,15 @@ export const Wan22Page = () => {
     }
   }, [summary]);
 
-  // Where the pipeline reads the distribution. "cached" needs the HF-compatible route of the mount.
-  const [chosenSource, setChosenSource] = useState<PipelineSource["kind"]>("cached");
-  const hf = wan22?.hf;
-  const hfRef = useMemo(
-    () => (hf === undefined ? undefined : hfRepoRef(hf, document.baseURI)),
-    [hf],
-  );
-  // Bumped when the cache is cleared: a pipeline built before holds readers of the deleted entries.
-  const [cacheGeneration, setCacheGeneration] = useState(0);
-  const pipelineSource = useMemo<PipelineSource>(
-    () =>
-      chosenSource === "cached" && hfRef !== undefined
-        ? { kind: "cached", ref: hfRef, cacheGeneration }
-        : { kind: "direct" },
-    [chosenSource, hfRef, cacheGeneration],
-  );
+  // Where the pipeline reads the distribution. "cached" needs the HF-compatible route of the mount;
+  // clearing the cache bumps its generation (a pipeline built before holds readers of the deleted
+  // entries).
+  const {
+    source: pipelineSource,
+    hfRef,
+    choose: setChosenSource,
+    cacheCleared,
+  } = usePipelineSource(wan22);
 
   const diagnosticsRef = useRef<DiagnosticsSink | undefined>(undefined);
   const pipeline = useWanPipeline({
@@ -333,7 +332,7 @@ export const Wan22Page = () => {
       setCache({ kind: "error", error });
       return;
     }
-    setCacheGeneration((count) => count + 1);
+    cacheCleared();
     setCacheVersion((count) => count + 1);
   };
 
@@ -449,11 +448,7 @@ export const Wan22Page = () => {
       const record: WanRecord = {
         format: RECORD_FORMAT,
         page: "wan22",
-        recordedAt: new Date().toISOString(),
-        userAgent: navigator.userAgent,
-        crossOriginIsolated: globalThis.crossOriginIsolated,
-        adapter: summarizeAdapter(gpu.adapterInfo),
-        device: summarizeDevice(gpu),
+        ...recordEnvironment(gpu),
         distribution: { directory: wan22?.directory ?? "", manifestSha256: manifest.sha256 },
         source:
           pipeline.source.kind === "cached"
@@ -547,11 +542,6 @@ export const Wan22Page = () => {
     return "manifest failed to load";
   })();
   const disabled = manifest.kind !== "ready" || running;
-  const quantChoices = (summary?.quants ?? []).map(({ name, label }) => ({
-    value: name,
-    label: `${name} — ${label}${name === summary?.defaultQuant ? " (default)" : ""}`,
-  }));
-  const chosenPreset = summary?.quants.find(({ name }) => name === form.quant);
   const canRun =
     !running &&
     manifest.kind === "ready" &&
@@ -707,52 +697,26 @@ export const Wan22Page = () => {
               ) : null}
             </div>
             <div className="sm:col-span-2">
-              <Field
+              <PresetSelect
                 id="wan22-quant"
-                label="Preset"
-                hint={chosenPreset?.description === "" ? undefined : chosenPreset?.description}
-              >
-                <ChoiceSelect
-                  id="wan22-quant"
-                  value={form.quant}
-                  choices={quantChoices}
-                  onChange={(quant) => update({ quant })}
-                  disabled={disabled}
-                />
-              </Field>
+                value={form.quant}
+                presets={summary?.quants ?? []}
+                defaultQuant={summary?.defaultQuant ?? ""}
+                onChange={(quant) => update({ quant })}
+                disabled={disabled}
+              />
             </div>
             <div className="sm:col-span-2">
-              <Field
+              <SourcePicker
                 id="wan22-source"
-                label="Source"
-                hint={
-                  hfRef === undefined
-                    ? "Direct only: the dev server serves no HF-compatible route for this distribution."
-                    : pipelineSource.kind === "cached"
-                      ? "Through the hub's cache (/hf/): the first run stores the weights in this browser, later runs read them from its disk."
-                      : "Plain fetch from /models/ on every run; nothing is cached."
-                }
-              >
-                <ToggleGroup
-                  id="wan22-source"
-                  variant="outline"
-                  spacing={0}
-                  value={[pipelineSource.kind]}
-                  onValueChange={(value) => {
-                    const [next] = value;
-                    if (next === "cached" || next === "direct") {
-                      cancelPendingRun("the source was changed");
-                      setChosenSource(next);
-                    }
-                  }}
-                  disabled={disabled}
-                >
-                  <ToggleGroupItem value="cached" disabled={hfRef === undefined}>
-                    Cached
-                  </ToggleGroupItem>
-                  <ToggleGroupItem value="direct">Direct</ToggleGroupItem>
-                </ToggleGroup>
-              </Field>
+                value={pipelineSource.kind}
+                cachedAvailable={hfRef !== undefined}
+                onChange={(next) => {
+                  cancelPendingRun("the source was changed");
+                  setChosenSource(next);
+                }}
+                disabled={disabled}
+              />
             </div>
             <Field
               id="wan22-vae-tile"
@@ -943,11 +907,7 @@ export const Wan22Page = () => {
               rows={[
                 [
                   "GPU",
-                  gpuState.kind === "ready"
-                    ? Object.values(summarizeAdapter(gpuState.gpu.adapterInfo))
-                        .filter((value) => value !== "")
-                        .join(" · ")
-                    : gpuState.kind,
+                  gpuState.kind === "ready" ? adapterText(gpuState.gpu.adapterInfo) : gpuState.kind,
                 ],
                 [
                   "Cross-origin isolated",
@@ -1022,18 +982,7 @@ export const Wan22Page = () => {
                 {cache.kind === "error" ? <ErrorAlert title="Cache" error={cache.error} /> : null}
               </div>
             )}
-            {gpuState.kind === "error" ? <ErrorAlert title="GPU" error={gpuState.error} /> : null}
-            {gpuState.kind === "lost" ? (
-              <Alert variant="destructive">
-                <AlertTitle>GPU device lost ({gpuState.reason})</AlertTitle>
-                <AlertDescription className="flex flex-col gap-2">
-                  <span>{gpuState.message}</span>
-                  <Button id="gpu-reacquire" variant="outline" size="sm" onClick={reacquire}>
-                    Acquire the GPU again
-                  </Button>
-                </AlertDescription>
-              </Alert>
-            ) : null}
+            <GpuAlerts gpu={gpuState} onReacquire={reacquire} />
             {pipeline.kind === "error" ? (
               <ErrorAlert title="Pipeline" error={pipeline.error} />
             ) : null}
@@ -1072,20 +1021,10 @@ export const Wan22Page = () => {
               <FramePlayer key={result.id} stack={result.stack} fps={result.record.output.fps} />
             )}
             <div className="flex flex-col gap-3">
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  id="record-json"
-                  variant="outline"
-                  size="sm"
-                  onClick={() =>
-                    downloadJson(
-                      result.record,
-                      `wan22_${fileStamp(new Date(result.record.recordedAt))}.json`,
-                    )
-                  }
-                >
-                  Download record (JSON)
-                </Button>
+              <RecordActions
+                record={result.record}
+                filename={`wan22_${fileStamp(new Date(result.record.recordedAt))}.json`}
+              >
                 <Button
                   id="record-zip"
                   variant="outline"
@@ -1095,17 +1034,7 @@ export const Wan22Page = () => {
                 >
                   {saving ?? "Download frames (zip of PNGs)"}
                 </Button>
-                <Button
-                  id="record-copy"
-                  variant="outline"
-                  size="sm"
-                  onClick={() =>
-                    void navigator.clipboard.writeText(JSON.stringify(result.record, null, 2))
-                  }
-                >
-                  Copy record
-                </Button>
-              </div>
+              </RecordActions>
               <RecordTable record={result.record} />
             </div>
           </CardContent>

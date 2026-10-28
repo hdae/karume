@@ -4,30 +4,14 @@
  * and reads the small assets), so building eagerly costs little and gives the page the prompt list.
  */
 
-import type { HubRepoRef } from "@karume/hub";
 import type { GpuContext } from "@karume/runtime";
 import { type WanPrompt, type WanRunComponent, WanTi2vPipeline } from "@karume/models/wan";
 import type { SessionDiagnostics } from "@karume/runtime";
 import { type RefObject, useEffect, useState } from "react";
 
-import { distributionSource } from "@/lib/distributions";
+import { type PipelineSource, pretrainedRef } from "@/lib/distributions";
 
 import type { TextEncoderPath } from "./settings";
-
-/**
- * Where the pipeline reads the distribution: `cached` = the HF-compatible route through the hub's
- * CacheStorage (the second generation reads the weights from the browser's disk); `direct` =
- * `localDirectory` over plain `fetch`, nothing cached. MUST be stable (memoized): a new object
- * rebuilds the pipeline.
- */
-export type PipelineSource =
-  | { readonly kind: "direct" }
-  | {
-      readonly kind: "cached";
-      readonly ref: HubRepoRef;
-      /** Bumped when the cache is cleared, so the pipeline (and the readers it holds) is rebuilt. */
-      readonly cacheGeneration: number;
-    };
 
 export type PipelineState =
   | { readonly kind: "idle" }
@@ -91,12 +75,11 @@ export const useWanPipeline = (input: {
       }
       // The cached source reaches umT5 through the cross-repo reference of the manifest (the dev
       // server serves it on the same route); the direct source maps it to the umT5 mount.
-      const ref =
-        source.kind === "cached"
-          ? source.ref
-          : needsUmt5 && textEncoderRepo !== undefined
-            ? distributionSource("wan22", { [textEncoderRepo]: distributionSource("umt5") })
-            : distributionSource("wan22");
+      const ref = pretrainedRef(
+        source,
+        "wan22",
+        needsUmt5 && textEncoderRepo !== undefined ? { [textEncoderRepo]: "umt5" } : {},
+      );
       return await WanTi2vPipeline.fromPretrained(ref, {
         gpu,
         quant,

@@ -10,7 +10,14 @@
 
 import { Route as rootRouteImport } from "./routes/__root";
 import { Route as IndexRouteImport } from "./routes/index";
+import { Route as AnimaRouteImport } from "./routes/anima";
 import { Route as AttentionBenchRouteImport } from "./routes/attention-bench";
+import { Route as BirefnetRouteImport } from "./routes/birefnet";
+import { Route as DepthAnythingRouteImport } from "./routes/depth-anything";
+import { Route as Gemma4RouteImport } from "./routes/gemma4";
+import { Route as IrodoriRouteImport } from "./routes/irodori";
+import { Route as Sbv2RouteImport } from "./routes/sbv2";
+import { Route as Siglip2RouteImport } from "./routes/siglip2";
 import { Route as Wan22RouteImport } from "./routes/wan22";
 
 const IndexRoute = IndexRouteImport.update({
@@ -18,9 +25,44 @@ const IndexRoute = IndexRouteImport.update({
   path: "/",
   getParentRoute: () => rootRouteImport,
 } as any);
+const AnimaRoute = AnimaRouteImport.update({
+  id: "/anima",
+  path: "/anima",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const AttentionBenchRoute = AttentionBenchRouteImport.update({
   id: "/attention-bench",
   path: "/attention-bench",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const BirefnetRoute = BirefnetRouteImport.update({
+  id: "/birefnet",
+  path: "/birefnet",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const DepthAnythingRoute = DepthAnythingRouteImport.update({
+  id: "/depth-anything",
+  path: "/depth-anything",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const Gemma4Route = Gemma4RouteImport.update({
+  id: "/gemma4",
+  path: "/gemma4",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const IrodoriRoute = IrodoriRouteImport.update({
+  id: "/irodori",
+  path: "/irodori",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const Sbv2Route = Sbv2RouteImport.update({
+  id: "/sbv2",
+  path: "/sbv2",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const Siglip2Route = Siglip2RouteImport.update({
+  id: "/siglip2",
+  path: "/siglip2",
   getParentRoute: () => rootRouteImport,
 } as any);
 const Wan22Route = Wan22RouteImport.update({
@@ -31,31 +73,90 @@ const Wan22Route = Wan22RouteImport.update({
 
 export interface FileRoutesByFullPath {
   "/": typeof IndexRoute;
+  "/anima": typeof AnimaRoute;
   "/attention-bench": typeof AttentionBenchRoute;
+  "/birefnet": typeof BirefnetRoute;
+  "/depth-anything": typeof DepthAnythingRoute;
+  "/gemma4": typeof Gemma4Route;
+  "/irodori": typeof IrodoriRoute;
+  "/sbv2": typeof Sbv2Route;
+  "/siglip2": typeof Siglip2Route;
   "/wan22": typeof Wan22Route;
 }
 export interface FileRoutesByTo {
   "/": typeof IndexRoute;
+  "/anima": typeof AnimaRoute;
   "/attention-bench": typeof AttentionBenchRoute;
+  "/birefnet": typeof BirefnetRoute;
+  "/depth-anything": typeof DepthAnythingRoute;
+  "/gemma4": typeof Gemma4Route;
+  "/irodori": typeof IrodoriRoute;
+  "/sbv2": typeof Sbv2Route;
+  "/siglip2": typeof Siglip2Route;
   "/wan22": typeof Wan22Route;
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   "/": typeof IndexRoute;
+  "/anima": typeof AnimaRoute;
   "/attention-bench": typeof AttentionBenchRoute;
+  "/birefnet": typeof BirefnetRoute;
+  "/depth-anything": typeof DepthAnythingRoute;
+  "/gemma4": typeof Gemma4Route;
+  "/irodori": typeof IrodoriRoute;
+  "/sbv2": typeof Sbv2Route;
+  "/siglip2": typeof Siglip2Route;
   "/wan22": typeof Wan22Route;
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
-  fullPaths: "/" | "/attention-bench" | "/wan22";
+  fullPaths:
+    | "/"
+    | "/anima"
+    | "/attention-bench"
+    | "/birefnet"
+    | "/depth-anything"
+    | "/gemma4"
+    | "/irodori"
+    | "/sbv2"
+    | "/siglip2"
+    | "/wan22";
   fileRoutesByTo: FileRoutesByTo;
-  to: "/" | "/attention-bench" | "/wan22";
-  id: "__root__" | "/" | "/attention-bench" | "/wan22";
+  to:
+    | "/"
+    | "/anima"
+    | "/attention-bench"
+    | "/birefnet"
+    | "/depth-anything"
+    | "/gemma4"
+    | "/irodori"
+    | "/sbv2"
+    | "/siglip2"
+    | "/wan22";
+  id:
+    | "__root__"
+    | "/"
+    | "/anima"
+    | "/attention-bench"
+    | "/birefnet"
+    | "/depth-anything"
+    | "/gemma4"
+    | "/irodori"
+    | "/sbv2"
+    | "/siglip2"
+    | "/wan22";
   fileRoutesById: FileRoutesById;
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute;
+  AnimaRoute: typeof AnimaRoute;
   AttentionBenchRoute: typeof AttentionBenchRoute;
+  BirefnetRoute: typeof BirefnetRoute;
+  DepthAnythingRoute: typeof DepthAnythingRoute;
+  Gemma4Route: typeof Gemma4Route;
+  IrodoriRoute: typeof IrodoriRoute;
+  Sbv2Route: typeof Sbv2Route;
+  Siglip2Route: typeof Siglip2Route;
   Wan22Route: typeof Wan22Route;
 }
 
@@ -68,11 +169,60 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof IndexRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/anima": {
+      id: "/anima";
+      path: "/anima";
+      fullPath: "/anima";
+      preLoaderRoute: typeof AnimaRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/attention-bench": {
       id: "/attention-bench";
       path: "/attention-bench";
       fullPath: "/attention-bench";
       preLoaderRoute: typeof AttentionBenchRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/birefnet": {
+      id: "/birefnet";
+      path: "/birefnet";
+      fullPath: "/birefnet";
+      preLoaderRoute: typeof BirefnetRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/depth-anything": {
+      id: "/depth-anything";
+      path: "/depth-anything";
+      fullPath: "/depth-anything";
+      preLoaderRoute: typeof DepthAnythingRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/gemma4": {
+      id: "/gemma4";
+      path: "/gemma4";
+      fullPath: "/gemma4";
+      preLoaderRoute: typeof Gemma4RouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/irodori": {
+      id: "/irodori";
+      path: "/irodori";
+      fullPath: "/irodori";
+      preLoaderRoute: typeof IrodoriRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/sbv2": {
+      id: "/sbv2";
+      path: "/sbv2";
+      fullPath: "/sbv2";
+      preLoaderRoute: typeof Sbv2RouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/siglip2": {
+      id: "/siglip2";
+      path: "/siglip2";
+      fullPath: "/siglip2";
+      preLoaderRoute: typeof Siglip2RouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/wan22": {
@@ -87,7 +237,14 @@ declare module "@tanstack/react-router" {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AnimaRoute: AnimaRoute,
   AttentionBenchRoute: AttentionBenchRoute,
+  BirefnetRoute: BirefnetRoute,
+  DepthAnythingRoute: DepthAnythingRoute,
+  Gemma4Route: Gemma4Route,
+  IrodoriRoute: IrodoriRoute,
+  Sbv2Route: Sbv2Route,
+  Siglip2Route: Siglip2Route,
   Wan22Route: Wan22Route,
 };
 export const routeTree = rootRouteImport

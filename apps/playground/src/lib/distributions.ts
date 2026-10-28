@@ -4,10 +4,13 @@
  *
  * Two ways to read one: {@link distributionSource} (`localDirectory` over plain `fetch`, nothing
  * cached) and {@link hfRepoRef} (the HF-compatible route `/hf/`, read by the hub's HF source into
- * its CacheStorage).
+ * its CacheStorage). A page picks one with a {@link PipelineSource} and hands {@link pretrainedRef}
+ * to the family's `fromPretrained`.
  */
 
 import { type DistributionSource, type HubRepoRef, localDirectory } from "@karume/hub";
+
+import type { MountName } from "@/mounts";
 
 /** The HF-compatible coordinates of a mount (the revision follows its `karume.json`). */
 export type HfCoordinates = { readonly repo: string; readonly revision: string };
@@ -105,3 +108,47 @@ export const hfRepoRef = (hf: HfCoordinates, base: string): HubRepoRef => ({
   revision: hf.revision,
   hubUrl: new URL("hf", base).href,
 });
+
+/** What `/models/index.json` says about one mount (`undefined` while loading or for an unknown name). */
+export const mountStatus = (
+  index: DistributionIndex | undefined,
+  name: MountName,
+): DistributionStatus | undefined => index?.[name];
+
+/** Where a page reads a distribution: the hub's cache over `/hf/`, or plain fetch from `/models/`. */
+export type SourceKind = "cached" | "direct";
+
+/**
+ * The source a pipeline is built from: `cached` = the HF-compatible route through the hub's
+ * CacheStorage (later runs read the weights from the browser's disk); `direct` = `localDirectory`
+ * over plain `fetch`, nothing cached. MUST be stable (memoized — {@link usePipelineSource} does it):
+ * a page that rebuilds its pipeline when the source changes would rebuild on every render.
+ */
+export type PipelineSource =
+  | { readonly kind: "direct" }
+  | {
+      readonly kind: "cached";
+      readonly ref: HubRepoRef;
+      /** Bumped when the cache is cleared, so the pipeline (and the readers it holds) is rebuilt. */
+      readonly cacheGeneration: number;
+    };
+
+/**
+ * The first argument of a family's `fromPretrained` for `source`: the `HubRepoRef` of the cached
+ * route as is (it reaches cross-repo references on the same route), or the mount `name` over plain
+ * fetch with `crossRepo` mapping each referenced repo to the mount that holds it (the direct route
+ * has no revision to follow — `{ "hdae/karume-anima": "anima" }` for the Anima fine-tunes).
+ */
+export const pretrainedRef = (
+  source: PipelineSource,
+  name: MountName,
+  crossRepo: Readonly<Record<string, MountName>> = {},
+): HubRepoRef | DistributionSource =>
+  source.kind === "cached"
+    ? source.ref
+    : distributionSource(
+        name,
+        Object.fromEntries(
+          Object.entries(crossRepo).map(([repo, mount]) => [repo, distributionSource(mount)]),
+        ),
+      );

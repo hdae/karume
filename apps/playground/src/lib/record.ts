@@ -409,3 +409,9 @@ export const summarizeIntervals = (values: readonly number[]): IntervalSummary |
     },
   };
 };
+
+/** The adapter in one line (`vendor · architecture · device · description`, empty fields left out). */
+export const adapterText = (info: GPUAdapterInfo): string =>
+  Object.values(summarizeAdapter(info))
+    .filter((value) => value !== "")
+    .join(" · ");

@@ -4,13 +4,26 @@ A browser application that runs Karume pipelines on the browser's own GPU, readi
 distributions under `models/` through the dev server. It replaces the Deno-era `tools/gpu-lab` page
 (ADR 0127 decision 5) and is the first slice of the common shell for such pages.
 
-Today it has two pages: **Wan2.2 TI2V 5B** (`/wan22`), for checking the presets and the
-32-latent VAE tile (`vaeTile: 32`, ADR 0134) on a real GPU, and the **attention route bench**
-(`/attention-bench`), which times the two a8 attention routes per kernel at Wan2.2's shapes.
+A left sidebar switches between the pages, grouped by kind:
+
+| Group | Page | Route | State |
+| --- | --- | --- | --- |
+| Video | Wan2.2 TI2V 5B — the presets and the 32-latent VAE tile (`vaeTile: 32`, ADR 0134) on a real GPU | `/wan22` | done |
+| Image | Anima — the official models and the third-party fine-tunes | `/anima` | placeholder |
+| Vision | BiRefNet (HR / Lucida) | `/birefnet` | placeholder |
+| Vision | Depth Anything V2 | `/depth-anything` | placeholder |
+| Vision | SigLIP 2 | `/siglip2` | placeholder |
+| Audio | Irodori-TTS (v4 / v4.1 small) | `/irodori` | placeholder |
+| Audio | Style-Bert-VITS2 (JVNV) | `/sbv2` | placeholder |
+| Text | Gemma 4 chat (`gemma4` and the `gemma4-qat` distribution) | `/gemma4` | placeholder |
+| Benchmarks | Attention route bench — the two a8 attention routes per kernel at Wan2.2's shapes | `/attention-bench` | done |
+
+A placeholder shows the page's title and whether its mounts are there.
 
 The app is private (not published) and imports only the public surfaces of the workspace packages:
-`@karume/runtime` (and its `/tune` subpath), `@karume/hub`, `@karume/models/wan` (and `encodePng` from the `@karume/models`
-barrel, loaded only when frames are saved).
+`@karume/runtime` (and its `/tune` subpath), `@karume/hub` and the family subpaths of
+`@karume/models` (the barrel only for `encodePng` / `encodeWav`, loaded when a PNG or a WAV is
+made).
 
 ## Run
 
@@ -24,35 +37,73 @@ The dev server listens on **http://127.0.0.1:8790** (loopback only). It serves:
 
 | URL | What |
 | --- | --- |
-| `/`, `/wan22`, `/attention-bench` | the pages (with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`, so the page is cross-origin isolated) |
-| `/models/wan22/…` | `models/karume-wan2.2` (read-only, HTTP `Range`, `Cross-Origin-Resource-Policy: same-origin`) |
-| `/models/umt5/…` | `models/karume-umt5-xxl` (the umT5 text encoder Wan's manifest references) |
+| `/` and the page routes | the pages (with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`, so the page is cross-origin isolated) |
+| `/models/<mount>/…` | the mount's directory (read-only, HTTP `Range`, `Cross-Origin-Resource-Policy: same-origin`) — the mounts are below |
 | `/models/index.json` | which mounts exist, whether their directory is there, and the HF repo / revision of a mount served under `/hf/` |
-| `/hf/api/models/<repo>/revision/<ref>` | the HF revision API: `{ "sha": "<revision>" }` for any ref of a served repo |
-| `/hf/<repo>/resolve/<revision>/<path>` | the HF resolve URL: a file of the repo at its current revision (404 for any other revision) |
+| `/hf/api/models/<repo>/revision/<ref>` | the HF revision API: `{ "sha": "<revision>" }` with the repo's computed revision for any ref, except an alias revision, which answers as itself ([the `/hf/` route](#the-hf-compatible-route-hf)) |
+| `/hf/<repo>/resolve/<revision>/<path>` | the HF resolve URL: a file of the repo at its computed revision, a referenced file at an alias revision, or a file of a cross-repo reference at its declared revision; 404 otherwise ([the `/hf/` route](#the-hf-compatible-route-hf)) |
+
+### The mounts
+
+The mount table is `src/mounts.ts` (`vite.config.ts` hands it to `distributionsPlugin`; the page
+registry names mounts with its `MountName` type). The directories are relative to the repository
+root. The HF-compatible repo is the public name from the family's `*_SOURCES` table.
+
+| Mount | Directory | HF-compatible repo (`/hf/`) | Page |
+| --- | --- | --- | --- |
+| `wan22` | `models/karume-wan2.2` | `hdae/karume-wan2.2` | Wan2.2 |
+| `umt5` | `models/karume-umt5-xxl` | — (served as the cross-repo reference of Wan's manifest) | Wan2.2 |
+| `anima` | `models/karume-anima` | `hdae/karume-anima` (plus the revision `anima-extra` references — below) | Anima |
+| `anima-extra` | `models/karume-anima-extra` | `hdae/karume-anima-extra` | Anima |
+| `birefnet-hr` | `models/karume-birefnet-hr` | `hdae/karume-birefnet-hr` | BiRefNet |
+| `lucida` | `models/karume-lucida` | `hdae/karume-lucida` | BiRefNet |
+| `depth-anything` | `models/karume-depth-anything-v2` | `hdae/karume-depth-anything-v2` | Depth Anything V2 |
+| `siglip2` | `models/karume-siglip2` | `hdae/karume-siglip2` | SigLIP 2 |
+| `irodori-v4` | `models/karume-irodori-v4-small` | `hdae/karume-irodori-v4-small` | Irodori-TTS |
+| `irodori-v4.1` | `models/karume-irodori-v4.1-small` | `hdae/karume-irodori-v4.1-small` | Irodori-TTS |
+| `sbv2` | `models/karume-sbv2-jvnv` | `hdae/karume-sbv2-jvnv` | Style-Bert-VITS2 |
+| `gemma4` | `models/karume-gemma4` | `hdae/karume-gemma4` | Gemma 4 chat |
+| `gemma4-qat` | `models/karume-gemma4-qat` | — (no public repo: direct only) | Gemma 4 chat |
+
+A missing directory does not stop the server: it logs a warning, `/models/<name>/` answers 404, and
+the pages show a disabled state naming the directory.
 
 ### The HF-compatible route (`/hf/`)
 
 `/hf/` speaks the two requests the hub's HF source makes, so the page can read a distribution with
-`hubUrl` set to `<page origin>/hf` and get the hub's CacheStorage for free. Two repos are served:
+`hubUrl` set to `<page origin>/hf` and get the hub's CacheStorage for free. It serves:
 
-- `hdae/karume-wan2.2` (the public name, `WAN_SOURCES["wan2.2"].repo`) from `models/karume-wan2.2`.
-  Its revision is the first 40 hex digits of the sha256 of that directory's `karume.json`,
-  recomputed on every request: re-assembling the mirror changes the revision at once, so the hub
-  never serves a stale manifest from its cache (the manifest entry is keyed by the revision-pinned
-  URL; asset entries are keyed by content and stay valid).
-- each cross-repo reference of that manifest, at the (repo, revision) the manifest declares, from the
-  mount whose directory is named after the last element of the repo name (`hdae/karume-umt5-xxl` →
-  `models/karume-umt5-xxl`). A reference no mount holds is logged at startup and answers 404.
+- each mount with an HF-compatible repo, under that name. Its revision is the first 40 hex digits of
+  the sha256 of the directory's `karume.json`, recomputed on every request: re-assembling the mirror
+  changes the revision at once, so the hub never serves a stale manifest from its cache (the
+  manifest entry is keyed by the revision-pinned URL; asset entries are keyed by content and stay
+  valid).
+- each cross-repo reference of those manifests, at the (repo, revision) the manifest declares, from
+  the mount whose directory is named after the last element of the repo name
+  (`hdae/karume-umt5-xxl` → `models/karume-umt5-xxl`). A reference no mount holds is logged at
+  startup and answers 404.
+
+**A referenced revision of a served repo (the Anima rule).** `karume-anima-extra` takes the text
+encoder, the VAE and the tokenizers from `hdae/karume-anima` at the revision its manifest declares,
+while the `anima` mount is served at its own computed revision. One directory holds one revision, so
+by default the server refuses that (the table fails loudly). The `anima` mount opts in with
+`aliasReferencedRevisions: true`, which makes the declared revision an **alias** of the directory:
+
+- every file a manifest takes from the repo at that revision must be listed in the mount's own
+  manifest as its own file with the same path, size and sha256 — otherwise the table still fails
+  loudly (the alias would serve different bytes);
+- the alias serves only those files; anything else at that revision answers 404;
+- the computed revision stays the repo's revision (the revision API answers it for `main`; an alias
+  revision is answered as itself), so the official models read as before;
+- the server logs each alias at startup (repo, revision, directory, how many files, which repo
+  references it).
+
+The direct route needs no alias: `localDirectory` maps cross-repo references to mounts explicitly
+(`pretrainedRef(source, "anima-extra", { "hdae/karume-anima": "anima" })`) and follows no revision.
 
 The same rules as `/models/` apply: loopback only, GET / HEAD only, 404 for traversal and for
 symlinks that leave the directory, COOP / COEP / CORP on every response. Responses are `no-store`
-(the hub keeps its own copy; a browser HTTP-cache copy would double the disk use). Which mount is
-served under which repo is set in `vite.config.ts` (`{ directory, hfRepo }`).
-
-The directories are relative to the repository root and are set in `vite.config.ts`
-(`distributionsPlugin({ distributions })`). A missing directory does not stop the server: it logs a
-warning, `/models/<name>/` answers 404, and the page shows a disabled state naming the directory.
+(the hub keeps its own copy; a browser HTTP-cache copy would double the disk use).
 
 ### From another machine (SSH tunnel)
 
@@ -63,7 +114,7 @@ the Windows PC with the RTX 5070 Ti:
 ssh -N -L 8790:127.0.0.1:8790 <user>@<this-machine>
 ```
 
-Then open http://127.0.0.1:8790/wan22 in Chrome on that machine. Use `127.0.0.1` or `localhost`:
+Then open http://127.0.0.1:8790/ in Chrome on that machine. Use `127.0.0.1` or `localhost`:
 WebGPU and cross-origin isolation need a secure context, and loopback counts as one.
 
 ## The Wan2.2 page
@@ -232,7 +283,7 @@ Absolute times compare only on one machine; across machines, compare the ratios.
 ## Develop
 
 ```sh
-pnpm --filter @karume/playground test        # vp test: the server's request handling (/models/ and /hf/), record and cache helpers, zip writer, attention bench table, Wan2.2 scenarios
+pnpm --filter @karume/playground test        # vp test: the server's request handling (/models/ and /hf/, aliases included), the page registry, record / cache / preset / image helpers, pretrainedRef, zip writer, attention bench table, Wan2.2 scenarios
 pnpm --filter @karume/playground typecheck
 pnpm --filter @karume/playground check       # vp check: format + lint + types
 pnpm --filter @karume/playground build
@@ -244,24 +295,55 @@ The tests need no GPU. The GPU path is checked by hand on the target machine.
 `src/routes/`); do not edit it. UI components under `src/components/ui/` come from the Shadcn CLI
 (Base UI backend): add more with `pnpm dlx shadcn@latest add @shadcn/<name>` in this directory.
 
+### The shell
+
+`src/routes/__root.tsx` is the shell: Shadcn's `SidebarProvider`, the sidebar
+(`src/components/app-sidebar.tsx` — the registry's pages by group, the current route highlighted,
+collapsible to icons on a desktop and a sheet on a phone), a header with the sidebar trigger and the
+current page's title, and the page in the inset. The index route lists the same pages as cards, with
+the state of their mounts.
+
+`src/models/registry.ts` drives both: `MODEL_PAGES` holds one entry per page (`path`, `title`,
+`summary`, `group`, a lucide `icon`, the `mounts` it reads), and `PAGE_GROUPS` the order of
+the groups. `path` is typed from the generated route tree, and `tests/registry_test.ts` fails when
+a route file has no entry or an entry has no route file.
+
 ### Adding a model page
 
-1. Add the distribution mount in `vite.config.ts` (`distributions: { <name>: "models/<dir>" }`, or
-   `{ directory, hfRepo }` to serve it on the HF-compatible route as well).
+1. Add the mount to `src/mounts.ts` (`<name>: "models/<dir>"`, or
+   `{ directory, hfRepo: <FAMILY>_SOURCES[...].repo }` to serve it on the HF-compatible route too).
 2. Add `src/routes/<page>.tsx` (`createFileRoute("/<page>")({ component })`) and put the page's code
-   under `src/models/<page>/`.
-3. Add an entry to `MODEL_PAGES` in `src/models/registry.ts` (the index lists it as a card, the
-   header links it). Widen `ModelPage["path"]` with the new route.
+   under `src/models/<page>/` (`page.tsx` exports `<Pascal>Page`). Run `pnpm --filter
+   @karume/playground build` (or the dev server) once so the router plugin regenerates
+   `src/routeTree.gen.ts`.
+3. Add an entry to `MODEL_PAGES` in `src/models/registry.ts` (the sidebar and the index list it).
 
-The shared pieces a page builds on:
+The kit a page builds on:
 
-| Piece | Where |
-| --- | --- |
-| Distribution source over the dev server (`localDirectory` with range reads, `crossRepo`), and the `HubRepoRef` of the HF-compatible route (`hfRepoRef`) | `src/lib/distributions.ts` |
-| What the hub's cache holds of a distribution, over every preset | `src/lib/hub-cache.ts` |
-| Which mounts exist (`/models/index.json`) | `src/hooks/use-distribution-index.ts` |
-| One GPU per page, released on unmount, re-acquire after device loss | `src/hooks/use-gpu.ts` |
-| Whether the adapter lists `timestamp-query` (a device acquired without timing cannot say) | `src/hooks/use-timestamp-query.ts` |
-| Record helpers (non-finite count, RGBA stack + sha256, diagnostics and build cost per component, attention route, GPU time per key and per op, device facts, timeline) | `src/lib/record.ts` |
-| Downloads and the zip writer | `src/lib/download.ts`, `src/lib/zip.ts` |
-| Error alert, labelled fields, select, key-value table, frame player | `src/components/` |
+| Piece | Where | What it does |
+| --- | --- | --- |
+| `useDistributionIndex`, `mountStatus` | `src/hooks/use-distribution-index.ts`, `src/lib/distributions.ts` | Which mounts exist (`/models/index.json`) and one mount's status. |
+| `MountBadges` | `src/components/mount-badges.tsx` | A badge per mount: its directory, "(missing)" when absent. |
+| `useManifest` | `src/hooks/use-manifest.ts` | The mount's manifest over `/models/` and the sha256 of its `karume.json` (`loading` / `missing` / `ready` / `error`). |
+| `manifestPresets`, `presetChoices`, `modelChoices` | `src/lib/presets.ts` | A model's presets (quants with label and description) and its `defaultQuant`; select choices with "(default)". |
+| `PresetSelect` | `src/components/preset-select.tsx` | The Preset field: the presets, the default marked, the description as the hint. |
+| `usePipelineSource` | `src/hooks/use-pipeline-source.ts` | The cached / direct choice for a mount: a stable `PipelineSource`, the cached route's `HubRepoRef`, `cacheCleared()` after clearing the hub's cache. |
+| `SourcePicker` | `src/components/source-picker.tsx` | The Source field (Cached / Direct, Cached disabled without an HF-compatible route). |
+| `pretrainedRef` | `src/lib/distributions.ts` | The first argument of `fromPretrained` for a `PipelineSource`: the `HubRepoRef`, or the mount over plain fetch with `crossRepo` mapped to other mounts. |
+| `distributionSource`, `hfRepoRef` | `src/lib/distributions.ts` | The two sources underneath (`localDirectory` with range reads; the `HubRepoRef` of `/hf/`). |
+| `queryCacheInventory` | `src/lib/hub-cache.ts` | What the hub's cache holds of a distribution, over every preset. |
+| `useGpu` | `src/hooks/use-gpu.ts` | One GPU per page, released on unmount, re-acquired after a device loss. |
+| `useTimestampQuery` | `src/hooks/use-timestamp-query.ts` | Whether the adapter lists `timestamp-query`. |
+| `useRunTask` | `src/hooks/use-run-task.ts` | One cancellable run: state (`idle` / `running` with stage and counter / `done` / `cancelled` / `error`), the elapsed-time ticker, Cancel, an abort when the page is left. |
+| `RunStatusCard`, `RunStatus`, `GpuAlerts` | `src/components/run-status-card.tsx` | The Status card: GPU, cross-origin isolation, the page's rows and controls, the GPU's failure states, and the run (elapsed, stage, progress bar, Cancel, error in full). |
+| `recordEnvironment` | `src/lib/environment.ts` | The fields every record starts with: `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device`. |
+| Record helpers | `src/lib/record.ts` | Non-finite count, RGBA stack + sha256, diagnostics and build cost per component, attention route, GPU time per key and per op, device facts, `adapterText`, timeline. |
+| `RecordActions` | `src/components/record-actions.tsx` | Download record (JSON) and Copy record, with room for the page's own buttons. |
+| `downloadBlob`, `downloadJson`, `fileStamp`, `zipStored` | `src/lib/download.ts`, `src/lib/zip.ts` | Downloads and the zip writer. |
+| `ImageInput`, `decodeImageFile`, `rgbaToRgb8` | `src/components/image-input.tsx`, `src/lib/image.ts` | An image file field with a preview; the decoded RGBA and the pipelines' `Rgb8Image` (alpha dropped; a canvas keeps pixels premultiplied, so a fully transparent pixel reads as black). |
+| `RgbaImage` | `src/components/rgba-image.tsx` | RGBA pixels in a canvas, with Download PNG for an opaque image (`encodePng` refuses alpha other than 255; a refused encode is shown). |
+| `AudioClip` | `src/components/audio-clip.tsx` | A mono f32 waveform as a WAV: a player and Download WAV. |
+| `ErrorAlert`, `Field`, `ChoiceSelect`, `KeyValueTable`, `FramePlayer` | `src/components/` | Error in full, labelled field, select, key-value table, frame player. |
+
+Chat pieces (`message`, `message-scroller`, `bubble`, `input-group`) and `tabs`, `scroll-area`,
+`spinner`, `empty`, `tooltip` are installed under `src/components/ui/` from the Shadcn CLI.

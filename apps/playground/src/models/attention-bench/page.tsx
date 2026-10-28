@@ -18,6 +18,8 @@ import { useEffect, useRef, useState } from "react";
 import { ErrorAlert } from "@/components/error-alert";
 import { Field } from "@/components/field";
 import { KeyValueTable } from "@/components/key-value-table";
+import { RecordActions } from "@/components/record-actions";
+import { GpuAlerts } from "@/components/run-status-card";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -35,8 +37,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useGpu } from "@/hooks/use-gpu";
-import { downloadJson, fileStamp } from "@/lib/download";
-import { type DeviceFacts, summarizeAdapter, summarizeDevice } from "@/lib/record";
+import { fileStamp } from "@/lib/download";
+import { recordEnvironment } from "@/lib/environment";
+import { adapterText, type DeviceFacts, summarizeAdapter } from "@/lib/record";
 
 import { benchTableRows, formatCount, formatMs, shapeLabel } from "./rows";
 
@@ -207,11 +210,7 @@ const BenchBody = ({ timestamps }: { timestamps: boolean }) => {
       setRecord({
         format: RECORD_FORMAT,
         page: "attention-bench",
-        recordedAt: new Date().toISOString(),
-        userAgent: navigator.userAgent,
-        crossOriginIsolated: typeof crossOriginIsolated === "boolean" && crossOriginIsolated,
-        adapter: summarizeAdapter(gpu.adapterInfo),
-        device: summarizeDevice(gpu),
+        ...recordEnvironment(gpu),
         settings: {
           shapes: shapes.map(({ id }) => id),
           rowsPerDispatch: rowsOverride ?? "production",
@@ -345,14 +344,7 @@ const BenchBody = ({ timestamps }: { timestamps: boolean }) => {
           <CardContent className="flex flex-col gap-4">
             <KeyValueTable
               rows={[
-                [
-                  "GPU",
-                  gpu === undefined
-                    ? gpuState.kind
-                    : Object.values(summarizeAdapter(gpu.adapterInfo))
-                        .filter((value) => value !== "")
-                        .join(" · "),
-                ],
+                ["GPU", gpu === undefined ? gpuState.kind : adapterText(gpu.adapterInfo)],
                 ["Timing", unit === "ns" ? "GPU timestamps (ns)" : `${unit} clock`],
                 ...(gpu === undefined
                   ? []
@@ -387,18 +379,7 @@ const BenchBody = ({ timestamps }: { timestamps: boolean }) => {
                 </AlertDescription>
               </Alert>
             ) : null}
-            {gpuState.kind === "error" ? <ErrorAlert title="GPU" error={gpuState.error} /> : null}
-            {gpuState.kind === "lost" ? (
-              <Alert variant="destructive">
-                <AlertTitle>GPU device lost ({gpuState.reason})</AlertTitle>
-                <AlertDescription className="flex flex-col gap-2">
-                  <span>{gpuState.message}</span>
-                  <Button variant="outline" size="sm" onClick={reacquire}>
-                    Acquire the GPU again
-                  </Button>
-                </AlertDescription>
-              </Alert>
-            ) : null}
+            <GpuAlerts gpu={gpuState} onReacquire={reacquire} />
             {run.kind === "error" ? <ErrorAlert title="Bench failed" error={run.error} /> : null}
             {record === undefined ? null : <VariantFacts report={record.bench} />}
           </CardContent>
@@ -417,31 +398,10 @@ const BenchBody = ({ timestamps }: { timestamps: boolean }) => {
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
             {record === undefined ? null : (
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  id="record-json"
-                  variant="outline"
-                  size="sm"
-                  onClick={() =>
-                    downloadJson(
-                      record,
-                      `attention-bench_${fileStamp(new Date(record.recordedAt))}.json`,
-                    )
-                  }
-                >
-                  Download record (JSON)
-                </Button>
-                <Button
-                  id="record-copy"
-                  variant="outline"
-                  size="sm"
-                  onClick={() =>
-                    void navigator.clipboard.writeText(JSON.stringify(record, null, 2))
-                  }
-                >
-                  Copy record
-                </Button>
-              </div>
+              <RecordActions
+                record={record}
+                filename={`attention-bench_${fileStamp(new Date(record.recordedAt))}.json`}
+              />
             )}
             <ResultTable results={results} />
           </CardContent>

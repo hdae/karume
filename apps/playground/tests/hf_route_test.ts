@@ -246,3 +246,124 @@ describe("the HF-compatible route", () => {
     });
   });
 });
+
+describe("a referenced revision on a mount that opts in to aliases", () => {
+  const ALIAS_MAIN = "owner/karume-alias-main";
+  const ALIAS_TARGET = "owner/karume-alias-target";
+  let aliasMounts: DistributionMount[] = [];
+  let targetRoot = "";
+  let conflictRoot = "";
+
+  beforeAll(async () => {
+    const mainDir = join(dir, "karume-alias-main");
+    targetRoot = join(dir, "karume-alias-target");
+    conflictRoot = join(dir, "karume-alias-conflict");
+    await mkdir(join(mainDir, "sub"), { recursive: true });
+    await mkdir(join(targetRoot, "enc"), { recursive: true });
+    await mkdir(join(conflictRoot, "enc"), { recursive: true });
+    // The main manifest takes both encoder parts from the target repo at CROSS_REVISION; the
+    // target's own manifest lists the same parts (same path, size, sha256) as its own files.
+    await writeFile(
+      join(mainDir, "karume.json"),
+      manifestText({ repo: ALIAS_TARGET, revision: CROSS_REVISION }),
+    );
+    await writeFile(join(targetRoot, "karume.json"), manifestText());
+    await writeFile(join(targetRoot, "enc", "model-00002-of-00002.krm"), CROSS_PART);
+    // The same paths with a different sha256: aliasing would serve other bytes.
+    await writeFile(
+      join(conflictRoot, "karume.json"),
+      manifestText().replaceAll(hex("f"), hex("9")),
+    );
+    aliasMounts = [
+      { name: "alias-main", root: mainDir, label: "models/karume-alias-main", hfRepo: ALIAS_MAIN },
+      {
+        name: "alias-target",
+        root: targetRoot,
+        label: "models/karume-alias-target",
+        hfRepo: ALIAS_TARGET,
+        aliasReferencedRevisions: true,
+      },
+    ];
+  });
+
+  const aliasRequest = (url: string): Promise<DistributionResponse> =>
+    handleDistributionRequest({ method: "GET", url, headers: {} }, aliasMounts);
+
+  const targetRevision = async (): Promise<string> =>
+    createHash("sha256")
+      .update(await readFile(join(targetRoot, "karume.json")))
+      .digest("hex")
+      .slice(0, 40);
+
+  it("serves a referenced file at the declared revision", async () => {
+    const response = responded(
+      await aliasRequest(
+        `/hf/${ALIAS_TARGET}/resolve/${CROSS_REVISION}/enc/model-00002-of-00002.krm`,
+      ),
+    );
+    expect(response.status).toBe(200);
+    expect(await fileBytes(response)).toEqual(CROSS_PART);
+  });
+
+  it("keeps serving the repo at its own revision", async () => {
+    const revision = await targetRevision();
+    expect(jsonBody(await aliasRequest(`/hf/api/models/${ALIAS_TARGET}/revision/main`))).toEqual({
+      sha: revision,
+    });
+    const response = responded(
+      await aliasRequest(`/hf/${ALIAS_TARGET}/resolve/${revision}/karume.json`),
+    );
+    expect(response.status).toBe(200);
+  });
+
+  it("answers the alias revision as itself on the revision API", async () => {
+    expect(
+      jsonBody(await aliasRequest(`/hf/api/models/${ALIAS_TARGET}/revision/${CROSS_REVISION}`)),
+    ).toEqual({ sha: CROSS_REVISION });
+  });
+
+  it("answers 404 at the alias revision for a file no reference names", async () => {
+    expect(
+      responded(await aliasRequest(`/hf/${ALIAS_TARGET}/resolve/${CROSS_REVISION}/karume.json`))
+        .status,
+    ).toBe(404);
+  });
+
+  it("names the alias for the startup log", async () => {
+    expect((await hfServingTable(aliasMounts)).aliases).toEqual([
+      {
+        repo: ALIAS_TARGET,
+        revision: CROSS_REVISION,
+        servedRevision: await targetRevision(),
+        directory: "models/karume-alias-target",
+        referencedBy: [ALIAS_MAIN],
+        files: 2,
+      },
+    ]);
+  });
+
+  it("fails loudly when a referenced file differs from the mount's manifest", async () => {
+    const conflicting = aliasMounts.map((mount) =>
+      mount.name === "alias-target"
+        ? { ...mount, root: conflictRoot, label: "models/karume-alias-conflict" }
+        : mount,
+    );
+    await expect(hfServingTable(conflicting)).rejects.toThrow(/would serve different bytes/);
+  });
+
+  it("fails loudly when a referenced file is not the mount's own", async () => {
+    const strayRoot = join(dir, "karume-alias-stray");
+    await mkdir(strayRoot, { recursive: true });
+    // Its manifest takes the encoder parts from yet another repo: they are not its own files.
+    await writeFile(
+      join(strayRoot, "karume.json"),
+      manifestText({ repo: "owner/elsewhere", revision: "c".repeat(40) }),
+    );
+    const stray = aliasMounts.map((mount) =>
+      mount.name === "alias-target"
+        ? { ...mount, root: strayRoot, label: "models/karume-alias-stray" }
+        : mount,
+    );
+    await expect(hfServingTable(stray)).rejects.toThrow(/does not list that file as its own/);
+  });
+});

@@ -18,6 +18,7 @@
     "@karume/hub": "workspace:*",
     "@karume/models": "workspace:*",
     "@karume/runtime": "workspace:*",
+    "@shadcn/react": "catalog:",
     "@tanstack/react-router": "catalog:",
     "class-variance-authority": "catalog:",
     "cn": "catalog:",

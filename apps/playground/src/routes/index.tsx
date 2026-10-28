@@ -1,14 +1,14 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 
-import { Badge } from "@/components/ui/badge";
+import { MountBadges } from "@/components/mount-badges";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useDistributionIndex } from "@/hooks/use-distribution-index";
-import { MODEL_PAGES } from "@/models/registry";
+import { pagesByGroup } from "@/models/registry";
 
 const IndexPage = () => {
   const index = useDistributionIndex();
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-8">
       <div>
         <h1 className="text-2xl font-semibold">Model pages</h1>
         <p className="text-sm text-muted-foreground">
@@ -16,33 +16,31 @@ const IndexPage = () => {
           server mounts under <code>/models/</code>.
         </p>
       </div>
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {MODEL_PAGES.map((page) => (
-          <Link key={page.path} to={page.path} className="block">
-            <Card className="h-full transition-colors hover:bg-muted/50">
-              <CardHeader>
-                <CardTitle>{page.title}</CardTitle>
-                <CardDescription>{page.summary}</CardDescription>
-                <div className="flex flex-wrap gap-2 pt-2">
-                  {page.distributions.map((name) => {
-                    const status = index.kind === "ready" ? index.index[name] : undefined;
-                    return (
-                      <Badge
-                        key={name}
-                        variant={status?.available === true ? "secondary" : "outline"}
-                      >
-                        {status === undefined
-                          ? name
-                          : `${status.directory}${status.available ? "" : " (missing)"}`}
-                      </Badge>
-                    );
-                  })}
-                </div>
-              </CardHeader>
-            </Card>
-          </Link>
-        ))}
-      </div>
+      {pagesByGroup().map(({ group, pages }) => (
+        <section key={group} className="flex flex-col gap-3">
+          <h2 className="text-sm font-medium text-muted-foreground">{group}</h2>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {pages.map((page) => (
+              <Link key={page.path} to={page.path} className="block">
+                <Card className="h-full transition-colors hover:bg-muted/50">
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <page.icon className="size-4 shrink-0" />
+                      {page.title}
+                    </CardTitle>
+                    <CardDescription>{page.summary}</CardDescription>
+                    {page.mounts.length === 0 ? null : (
+                      <div className="pt-2">
+                        <MountBadges index={index} mounts={page.mounts} />
+                      </div>
+                    )}
+                  </CardHeader>
+                </Card>
+              </Link>
+            ))}
+          </div>
+        </section>
+      ))}
     </div>
   );
 };

@@ -30,6 +30,26 @@
  * across revisions. Cross-repo references of the manifest (umT5 for Wan) are served at the
  * (repo, revision) the manifest declares, from the mount whose directory is named after the last
  * element of the repo name (`hdae/karume-umt5-xxl` → `models/karume-umt5-xxl`).
+ *
+ * ### Referenced revisions (aliases)
+ *
+ * One repo can be both served from its own mount and referenced by another served manifest at a
+ * different revision: `hdae/karume-anima-extra` takes the text encoder, the VAE and the tokenizers
+ * from `hdae/karume-anima` at the revision its manifest declares, while the `karume-anima` mount is
+ * served at its own computed revision. By default that fails loudly (one directory holds one
+ * revision). A mount with `aliasReferencedRevisions` lets each such declared revision **alias** its
+ * directory, under two MUSTs:
+ *
+ * - every file a manifest takes from the repo at that revision is listed in the mount's own manifest
+ *   (as its own file, not a cross-repo one) with the same path, size and sha256 — otherwise the table
+ *   fails loudly, because the alias would serve different bytes under the declared revision;
+ * - the alias serves only those files (anything else at that revision answers 404), so it never
+ *   claims to hold more of the old revision than the references prove.
+ *
+ * The primary revision (the computed one) is unchanged: the revision API answers it for any ref
+ * except an alias revision, which it answers as itself. The aliases are logged at startup. The direct
+ * route (`localDirectory` over `/models/`) needs none of this: it maps cross-repo references to mounts
+ * explicitly (`crossRepo`) and checks no revision.
  */
 
 import { createHash } from "node:crypto";
@@ -49,6 +69,11 @@ export type DistributionMount = {
   readonly label: string;
   /** Also serve the mount on the HF-compatible route under this repo name (`owner/name`). */
   readonly hfRepo?: string;
+  /**
+   * With `hfRepo`: let the revisions other served manifests reference this repo at alias the
+   * directory, for the files they name (module doc, "Referenced revisions").
+   */
+  readonly aliasReferencedRevisions?: boolean;
 };
 
 export type DistributionRequest = {
@@ -248,11 +273,28 @@ type HfServedRepo = {
   readonly mount: DistributionMount;
   /** The real path of the mount's directory. */
   readonly root: string;
+  /** Alias revision → the paths it serves (module doc, "Referenced revisions"). */
+  readonly aliases: ReadonlyMap<string, ReadonlySet<string>>;
 };
 
-/** The HF-compatible serving table, plus the cross-repo references no mount holds. */
+/** A referenced revision served as an alias of a mount's directory (what the startup log names). */
+export type HfAlias = {
+  readonly repo: string;
+  readonly revision: string;
+  /** The revision the repo is served at (sha256 of its `karume.json`). */
+  readonly servedRevision: string;
+  /** The mount's directory as the logs show it. */
+  readonly directory: string;
+  /** The repos whose manifests reference the repo at this revision. */
+  readonly referencedBy: readonly string[];
+  /** How many files the alias serves. */
+  readonly files: number;
+};
+
+/** The HF-compatible serving table, plus the aliases and the cross-repo references no mount holds. */
 export type HfServingTable = {
   readonly repos: ReadonlyMap<string, HfServedRepo>;
+  readonly aliases: readonly HfAlias[];
   /** `repo@revision` of each cross-repo reference without a mount (requests for it answer 404). */
   readonly unserved: readonly string[];
 };
@@ -274,13 +316,23 @@ const allFileRefs = (manifest: Manifest): readonly FileRef[] =>
  * repo name.
  *
  * MUST: two different revisions for one repo fail loudly — one directory holds one revision, and
- * answering both would serve the wrong bytes under one of them.
+ * answering both would serve the wrong bytes under one of them. The one exception is a mount with
+ * `aliasReferencedRevisions`, and only while every referenced file matches its own manifest (module
+ * doc, "Referenced revisions").
  */
 export const hfServingTable = async (
   mounts: readonly DistributionMount[],
 ): Promise<HfServingTable> => {
-  const repos = new Map<string, HfServedRepo>();
-  const manifests: Manifest[] = [];
+  /** A repo being built: `ownFiles` only for a mount served under its own `hfRepo`. */
+  type Building = {
+    readonly revision: string;
+    readonly mount: DistributionMount;
+    readonly root: string;
+    readonly ownFiles?: ReadonlyMap<string, FileRef>;
+    readonly aliases: Map<string, { files: Set<string>; referencedBy: Set<string> }>;
+  };
+  const repos = new Map<string, Building>();
+  const manifests: { readonly repo: string; readonly manifest: Manifest }[] = [];
   for (const mount of mounts) {
     if (mount.hfRepo === undefined) continue;
     const root = await realRoot(mount);
@@ -289,28 +341,80 @@ export const hfServingTable = async (
       throw new Error(`Two distribution mounts claim the HF repo ${mount.hfRepo}`);
     }
     const bytes = await readFile(join(root, MANIFEST_FILENAME));
-    repos.set(mount.hfRepo, { revision: hfRevisionOf(bytes), mount, root });
-    manifests.push(parseManifest(new TextDecoder().decode(bytes)));
+    const manifest = parseManifest(new TextDecoder().decode(bytes));
+    const ownFiles = new Map(
+      allFileRefs(manifest)
+        .filter((ref) => ref.repo === undefined)
+        .map((ref) => [ref.path, ref] as const),
+    );
+    repos.set(mount.hfRepo, {
+      revision: hfRevisionOf(bytes),
+      mount,
+      root,
+      ownFiles,
+      aliases: new Map(),
+    });
+    manifests.push({ repo: mount.hfRepo, manifest });
   }
   const unserved = new Set<string>();
-  for (const ref of manifests.flatMap(allFileRefs)) {
-    if (ref.repo === undefined || ref.revision === undefined) continue;
-    const known = repos.get(ref.repo);
-    if (known !== undefined) {
-      if (known.revision !== ref.revision) {
-        throw new Error(
-          `HF repo ${ref.repo} is referenced at ${ref.revision} but served at ${known.revision} — one directory holds one revision`,
-        );
+  for (const { repo: referrer, manifest } of manifests) {
+    for (const ref of allFileRefs(manifest)) {
+      if (ref.repo === undefined || ref.revision === undefined) continue;
+      const known = repos.get(ref.repo);
+      if (known !== undefined) {
+        if (known.revision === ref.revision) continue;
+        if (known.mount.aliasReferencedRevisions !== true || known.ownFiles === undefined) {
+          throw new Error(
+            `HF repo ${ref.repo} is referenced at ${ref.revision} but served at ${known.revision} — one directory holds one revision`,
+          );
+        }
+        const own = known.ownFiles.get(ref.path);
+        if (own === undefined || own.size !== ref.size || own.sha256 !== ref.sha256) {
+          throw new Error(
+            `HF repo ${ref.repo} is referenced at ${ref.revision} by ${referrer} for ${ref.path} (${ref.size} B, sha256 ${ref.sha256}), but the manifest of ${known.mount.label} ${
+              own === undefined
+                ? "does not list that file as its own"
+                : `lists it as ${own.size} B, sha256 ${own.sha256}`
+            } — aliasing the revision would serve different bytes`,
+          );
+        }
+        const alias = known.aliases.get(ref.revision) ?? {
+          files: new Set(),
+          referencedBy: new Set(),
+        };
+        alias.files.add(ref.path);
+        alias.referencedBy.add(referrer);
+        known.aliases.set(ref.revision, alias);
+        continue;
       }
-      continue;
+      const directory = ref.repo.slice(ref.repo.lastIndexOf("/") + 1);
+      const mount = mounts.find(({ root }) => basename(root) === directory);
+      const root = mount === undefined ? undefined : await realRoot(mount);
+      if (mount === undefined || root === undefined) unserved.add(`${ref.repo}@${ref.revision}`);
+      else repos.set(ref.repo, { revision: ref.revision, mount, root, aliases: new Map() });
     }
-    const directory = ref.repo.slice(ref.repo.lastIndexOf("/") + 1);
-    const mount = mounts.find(({ root }) => basename(root) === directory);
-    const root = mount === undefined ? undefined : await realRoot(mount);
-    if (mount === undefined || root === undefined) unserved.add(`${ref.repo}@${ref.revision}`);
-    else repos.set(ref.repo, { revision: ref.revision, mount, root });
   }
-  return { repos, unserved: [...unserved] };
+  const served = new Map<string, HfServedRepo>();
+  const aliases: HfAlias[] = [];
+  for (const [repo, building] of repos) {
+    served.set(repo, {
+      revision: building.revision,
+      mount: building.mount,
+      root: building.root,
+      aliases: new Map([...building.aliases].map(([revision, { files }]) => [revision, files])),
+    });
+    for (const [revision, { files, referencedBy }] of building.aliases) {
+      aliases.push({
+        repo,
+        revision,
+        servedRevision: building.revision,
+        directory: building.mount.label,
+        referencedBy: [...referencedBy],
+        files: files.size,
+      });
+    }
+  }
+  return { repos: served, aliases, unserved: [...unserved] };
 };
 
 const decodeComponent = (text: string): string | undefined => {
@@ -337,7 +441,8 @@ const handleHfRequest = async (
   if (revisionRoute !== null) {
     const served = repos.get(decodeComponent(revisionRoute[1] ?? "") ?? "");
     if (served === undefined) return notFound("Unknown repository");
-    const text = JSON.stringify({ sha: served.revision });
+    const ref = decodeComponent(revisionRoute[2] ?? "") ?? "";
+    const text = JSON.stringify({ sha: served.aliases.has(ref) ? ref : served.revision });
     return respond(
       200,
       { "Content-Type": "application/json", "Cache-Control": "no-store" },
@@ -349,9 +454,17 @@ const handleHfRequest = async (
   const [, repo = "", revision = "", rest = ""] = resolveRoute;
   const served = repos.get(decodeComponent(repo) ?? "");
   if (served === undefined) return notFound("Unknown repository");
-  if (decodeComponent(revision) !== served.revision) return notFound("Unknown revision");
+  const requested = decodeComponent(revision) ?? "";
+  // An alias revision serves only the files the references name (module doc).
+  const aliasFiles = requested === served.revision ? undefined : served.aliases.get(requested);
+  if (requested !== served.revision && aliasFiles === undefined) {
+    return notFound("Unknown revision");
+  }
   const segments = safeSegments(rest);
   if (segments === undefined) return notFound("Invalid asset path");
+  if (aliasFiles !== undefined && !aliasFiles.has(segments.join("/"))) {
+    return notFound("Not a file the aliased revision is referenced for");
+  }
   return await serveFile(served.root, segments, request, "no-store");
 };
 
@@ -428,7 +541,15 @@ export type DistributionsPluginOptions = {
    * object form also serves the mount on the HF-compatible route as `hfRepo` (module doc).
    */
   readonly distributions: Readonly<
-    Record<string, string | { readonly directory: string; readonly hfRepo: string }>
+    Record<
+      string,
+      | string
+      | {
+          readonly directory: string;
+          readonly hfRepo: string;
+          readonly aliasReferencedRevisions?: boolean;
+        }
+    >
   >;
 };
 
@@ -470,7 +591,11 @@ export const distributionsPlugin = (options: DistributionsPluginOptions): Plugin
     );
   };
 
-  const resolveMounts = async (appRoot: string, log: (message: string) => void): Promise<void> => {
+  const resolveMounts = async (
+    appRoot: string,
+    log: (message: string) => void,
+    info: (message: string) => void,
+  ): Promise<void> => {
     const repoRoot = await findRepoRoot(appRoot);
     mounts = Object.entries(options.distributions).map(([name, entry]) => {
       const directory = typeof entry === "string" ? entry : entry.directory;
@@ -479,6 +604,9 @@ export const distributionsPlugin = (options: DistributionsPluginOptions): Plugin
         root: resolve(repoRoot, directory),
         label: relative(repoRoot, resolve(repoRoot, directory)),
         ...(typeof entry === "string" ? {} : { hfRepo: entry.hfRepo }),
+        ...(typeof entry === "string" || entry.aliasReferencedRevisions !== true
+          ? {}
+          : { aliasReferencedRevisions: true }),
       };
     });
     for (const mount of mounts) {
@@ -491,7 +619,13 @@ export const distributionsPlugin = (options: DistributionsPluginOptions): Plugin
     // The table is rebuilt per request; this pass only reports problems early. A broken manifest
     // does not stop the server (the requests that need the table answer the error).
     try {
-      for (const reference of (await hfServingTable(mounts)).unserved) {
+      const table = await hfServingTable(mounts);
+      for (const alias of table.aliases) {
+        info(
+          `[distributions] ${alias.repo}@${alias.revision} aliases ${alias.directory} (served at ${alias.servedRevision}) for the ${alias.files} files ${alias.referencedBy.join(", ")} references there — each matches its manifest`,
+        );
+      }
+      for (const reference of table.unserved) {
         log(
           `[distributions] no mount holds the cross-repo reference ${reference} — its ${HF_PREFIX} requests answer 404`,
         );
@@ -504,11 +638,19 @@ export const distributionsPlugin = (options: DistributionsPluginOptions): Plugin
   return {
     name: "karume-distributions",
     async configureServer(server) {
-      await resolveMounts(server.config.root, (message) => server.config.logger.warn(message));
+      await resolveMounts(
+        server.config.root,
+        (message) => server.config.logger.warn(message),
+        (message) => server.config.logger.info(message),
+      );
       server.middlewares.use(middleware);
     },
     async configurePreviewServer(server) {
-      await resolveMounts(server.config.root, (message) => server.config.logger.warn(message));
+      await resolveMounts(
+        server.config.root,
+        (message) => server.config.logger.warn(message),
+        (message) => server.config.logger.info(message),
+      );
       server.middlewares.use(middleware);
     },
   };
