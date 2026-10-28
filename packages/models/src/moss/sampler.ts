@@ -1,7 +1,7 @@
 /**
  * The MOSS-Image sampler on the host — upstream's σ schedule (`MOSSImageScheduler.set_timesteps`)
  * and the Euler update of diffusers' `FlowMatchEulerDiscreteScheduler.step` (ADR NNNN decisions 9
- * and 11, plan item 15-14, plan step 4). The CFG combination is `mossClassifierFreeGuidance`
+ * and 11, stage 4). The CFG combination is `mossClassifierFreeGuidance`
  * (`./dit-stage.ts`).
  *
  * ## The schedule of `n` requested steps ({@link mossSchedule})

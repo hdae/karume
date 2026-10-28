@@ -1,5 +1,5 @@
 /**
- * The MOSS-Image presets (`../src/moss/preset.ts` — ADR NNNN decision 13, plan step 5): the table,
+ * The MOSS-Image presets (`../src/moss/preset.ts` — ADR NNNN decision 13, stage 5): the table,
  * the lookup and the acquisition options. CPU only. The presets' effect on the Sessions and the
  * estimates is checked where they are used (`moss_dit_host_test.ts` for the estimates,
  * `packages/e2e/tests/e2e_moss_ab_test.ts` for the census of the Sessions).

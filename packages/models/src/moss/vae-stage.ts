@@ -1,6 +1,6 @@
 /**
  * The MOSS-Image VAE stage — the untiled FLUX.2 decoder as three symbolic-length graphs, opened
- * after the DiT pair is closed (ADR NNNN decisions 5 and 8, plan items 15-8 and 15-9, plan step 3).
+ * after the DiT pair is closed (ADR NNNN decisions 5 and 8, stage 3).
  *
  * ## The run (`./vae-contract.ts` for the graphs)
  *
@@ -12,7 +12,7 @@
  * graphs and there is one read-back, of the image (the Wan2.2 VAE encoder form —
  * `../wan/vae-encoder.ts`). The image is clamped to [-1, 1] as upstream does after `decode`.
  *
- * ## Lifetime (plan item 15-8)
+ * ## Lifetime (ADR NNNN decision 5)
  *
  * The stage runs after the DiT stage has closed its Sessions (the order `dit_text` → DiT pair →
  * VAE, each closed before the next opens — `./dit-stage.ts`). It creates its three Sessions and
@@ -20,7 +20,7 @@
  * waits for the release (`../session/settle-released-memory.ts`), so the next generation's first
  * stage does not see the decoder's allocation.
  *
- * ## Headroom (plan item 15-8 — the Anima form)
+ * ## Headroom (ADR NNNN decision 5 — the Anima form)
  *
  * Before it opens, the stage waits for the release of what the previous stage destroyed and then
  * probes the device with a trial allocation (`fitsHeadroom` — ADR 0112) of: the **sum** of the
@@ -29,11 +29,12 @@
  * graph's input and output buffers as its backing's, but a resident is a separate allocation, so
  * they are added — an upper bound, as for the DiT's text contexts) + the largest weight part (the
  * upload staging) + the margin of `../anima/residency.ts`. A refusal fails loudly naming the stage,
- * the bytes and the size. The plan's hand count — 1,920 B per pixel at the full-resolution resnet
- * 192 → 96 (§1.5) — is a cross-check only (the tests compare it with the estimate and the
- * measurement). The check is a fact of the moment, not a reservation.
+ * the bytes and the size. The design's hand count — 1,920 B per pixel at the full-resolution
+ * resnet 192 → 96 (`docs/research/2026-10-28-moss-image-dit-vae.md` §3.4) — is a cross-check only
+ * (the tests compare it with the estimate and the measurement). The check is a fact of the
+ * moment, not a reservation.
  *
- * ## The mid attention's row blocks (plan question 17, option ④ — step 5)
+ * ## The mid attention's row blocks (ADR NNNN decision 8)
  *
  * The `vae_decoder_attn` Session runs its fused attention in row blocks of at most
  * {@link MOSS_VAE_ATTENTION_ROW_BLOCK_BYTES} (`SessionOptions.attentionRowBlockMaxBytes`), and its
@@ -48,7 +49,7 @@
  * budget is not reached and nothing changes. With the reference preset the DiT pair binds first
  * (refused at the cap on the same device), which this budget does not move.
  *
- * ## Acceptance (plan item 15-9)
+ * ## Acceptance (ADR NNNN decisions 8 and 9)
  *
  * {@link planMossVae} checks the size (`./request.ts`) and the area against this device's area
  * limit (`mossVaeAreaLimit` — the binding over the decoder's bytes per pixel) with an error that

@@ -18,7 +18,7 @@ from moss import pipeline_ref, prompts, text_embeds
 
 TEXT_EMBEDS = SERIES_ROOT / text_embeds.SERIES_NAME / text_embeds.ASSET_NAME
 
-#: The chat template's rendering of an empty user turn (plan §1.4).
+#: The chat template's rendering of an empty user turn (ADR NNNN, Context).
 EMPTY_TURN = "<|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n<think>\n"
 
 FAKE_TOKENS = {"fridge-note": 5, "guide-whiteboard": 7, "guide-fridge-note": 4, "negative": 10}
@@ -138,7 +138,7 @@ class TestEmptyNegative:
             text_embeds.check_tokens(negative, torch.zeros(len(ids), pipeline_ref.TEXT_DIM), ids)
 
     def test_the_pinned_template_and_tokenizer_give_ten_tokens(self, moss_text_snapshot):
-        """T₋ = 10: upstream's chat-template call on '' and the pinned tokenizer (plan §1.4)."""
+        """T₋ = 10: upstream's chat template on '' and the pinned tokenizer (ADR NNNN, Context)."""
         transformers = pytest.importorskip("transformers")
         tokenizer = transformers.Qwen2Tokenizer.from_pretrained(moss_text_snapshot / "tokenizer")
 

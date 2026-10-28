@@ -1,6 +1,6 @@
 /**
  * The host side of the MOSS-Image DiT's S-form graph (S = N + T — one symbol) — the joint-sequence
- * inputs and the head rows (ADR NNNN decision 2, plan item 15-1, plan step 2).
+ * inputs and the head rows (ADR NNNN decision 2, stage 2).
  *
  * Upstream concatenates `[video_embedder(image tokens), refined text]` and keeps the first N rows of
  * the head; the IR has neither a sum of symbols nor a symbolic slice, so `dit` takes S-row inputs

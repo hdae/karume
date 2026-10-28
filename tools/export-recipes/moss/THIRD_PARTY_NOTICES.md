@@ -13,7 +13,7 @@ provenance travels with the code.
 actually used. Checking license compatibility per revision is a human review
 scheduled before release (ADR 0065 decision 7); filling this table in _is_ that
 review, and this file only lays out the questions it has to answer. Nothing
-built from this recipe is published yet (plan question 18).
+built from this recipe is published yet (ADR NNNN decision 12).
 
 ## Upstream sources
 

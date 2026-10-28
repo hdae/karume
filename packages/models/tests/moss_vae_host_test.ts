@@ -1,5 +1,5 @@
 /**
- * The host side of the MOSS-Image VAE stage on the CPU (ADR NNNN decisions 5, 8 and 9, plan step 3):
+ * The host side of the MOSS-Image VAE stage on the CPU (ADR NNNN decisions 5, 8 and 9, stage 3):
  * the BatchNorm restoration, the unpatchify and the clamp against upstream's recorded values
  * (Uint32-identical), the graph contract of the written VAE series with its fault injections, the
  * per-device area limit of the acceptance check, and the headroom arithmetic.
@@ -177,7 +177,7 @@ describe.skipIf(!SERIES_PRESENT)(
         hiddenChannels: 384,
         spatialScale: 8,
         ditChannels: 128,
-        // [1, 192, 8h, 8w] f32: 192 · 64 · 4 B per VAE cell = 768 B per pixel (plan §1.5)
+        // [1, 192, 8h, 8w] f32: 192 · 64 · 4 B per VAE cell = 768 B per pixel (ADR NNNN decision 8)
         bytesPerCell: 49_152,
       });
       expect(contract.batchNorm.std.every((value) => value > 0)).toBe(true);
@@ -268,9 +268,10 @@ describe.skipIf(!SERIES_PRESENT)(
         ) +
         HEADROOM_MARGIN_BYTES;
       expect(mossVaeStageNeeds({ limits: LIMITS_2GIB, components, contract }, plan)).toBe(expected);
-      // The plan's hand count (§1.5): at the full-resolution resnet 192 → 96 its input, its SiLU
-      // output and its conv output (480 channels × 4 B per pixel) are alive together, so the post
-      // graph's accounted peak cannot be below 1,920 B per pixel.
+      // The design's hand count (docs/research/2026-10-28-moss-image-dit-vae.md §3.4): at the
+      // full-resolution resnet 192 → 96 its input, its SiLU output and its conv output (480
+      // channels × 4 B per pixel) are alive together, so the post graph's accounted peak cannot be
+      // below 1,920 B per pixel.
       expect(post).toBeGreaterThanOrEqual(1_920 * 1696 * 1648);
       console.info(
         `[moss vae] estimate at 1696×1648: post ${post} B (${(post / (1696 * 1648)).toFixed(0)} B/px),` +

@@ -1,7 +1,7 @@
 /**
  * The host side of the MOSS-Image VAE stage — the three steps upstream runs around `vae.decode`
  * (`MOSSImagePipeline.__call__`, transcribed in `tools/export-recipes/moss/pipeline_ref.py` as
- * `denormalize` / `unpatchify`; ADR NNNN decision 8, plan step 3):
+ * `denormalize` / `unpatchify`; ADR NNNN decision 8, stage 3):
  *
  * 1. {@link mossDenormalizeLatents}: the latent BatchNorm undone with its running statistics,
  *    `z · std + mean` per DiT channel. `std = (running_var + eps).sqrt()` comes precomputed in the

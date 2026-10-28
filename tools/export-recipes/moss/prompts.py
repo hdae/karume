@@ -1,5 +1,5 @@
 """The fixed prompts of MOSS-Image (the inputs the precomputed text embeddings cover — ADR NNNN
-decision 12, plan item 15-17).
+decision 12).
 
 The embedding script (`moss.text_embeds`) and, later, the card and the assembly checks read this one
 table. Neither torch nor diffusers is imported here, so the readers that must not load torch can

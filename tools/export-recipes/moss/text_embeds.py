@@ -1,5 +1,5 @@
 """The MOSS-Image text-embedding asset (precomputed embeddings of the fixed prompts — ADR NNNN
-decision 12, plan step 0 item 5).
+decision 12, stage 0).
 
 Each fixed prompt ({@link moss.prompts.FIXED_PROMPTS}) goes through upstream
 `MOSSImagePipeline.encode_prompt` unchanged, and its output row `[T, 4096]` is written in f32 to a
@@ -16,7 +16,7 @@ runs each prompt at its true length); the DiT consumes exactly these rows.
   tokenizes without padding and returns `last_hidden_state[0]` (after Qwen3.5's final RMSNorm).
   The token ids it fed the encoder are taken with a forward pre-hook (not re-derived) and written to
   the metadata; `T` must equal their count, and the empty negative must give the 10 ids
-  {@link EMPTY_PROMPT_IDS} (plan §1.4 — T₋ = 10).
+  {@link EMPTY_PROMPT_IDS} (ADR NNNN, Context — T₋ = 10).
 - **CPU, a separate process.** The DiT is not read here (16.8 GB of bf16 text encoder and the
   20.3 GB f32 DiT do not share the host RAM).
 - transformers runs Qwen3.5's Gated DeltaNet layers through its torch implementation on CPU
@@ -80,9 +80,9 @@ TEXT_ENCODER_DTYPE = torch.bfloat16
 
 #: The token ids of the empty prompt under the chat template:
 #: `<|im_start|>`, `user`, `Ċ`, `<|im_end|>`, `Ċ`, `<|im_start|>`, `assistant`, `Ċ`, `<think>`, `Ċ`
-#: (plan §1.4, checked there with a port of the BPE over the pinned `tokenizer.json`). T₋ = 10 makes
-#: the negative branch's sequence N + 10 long, which is why its attention is never a multiple of
-#: four keys at square sizes (plan question 16).
+#: (ADR NNNN, Context; also reproduced with a port of the BPE over the pinned `tokenizer.json`).
+#: T₋ = 10 makes the negative branch's sequence N + 10 long, which is why its attention is never
+#: a multiple of four keys at square sizes (ADR NNNN decision 10).
 EMPTY_PROMPT_IDS: tuple[int, ...] = (248045, 846, 198, 248046, 198, 248045, 74455, 198, 248068, 198)
 
 

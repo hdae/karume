@@ -57,8 +57,8 @@ class TestStructureGate:
         assert report["failures"] == []
         assert report["symbols"] == [export_dit.symbol_of(name)]
 
-    def test_the_real_census_is_the_plans_count(self):
-        """258 / 11 linear weights (plan step 1: 42 × 6 + 6; 1 + 2 × 5)."""
+    def test_the_real_census_is_the_stage_1_count(self):
+        """258 / 11 linear weights (the census of stage 1: 42 × 6 + 6; 1 + 2 × 5)."""
         assert export_dit.EXPECTED[DIT]["linear"] == 42 * 6 + 6
         assert export_dit.EXPECTED[DIT_TEXT]["linear"] == 1 + 2 * 5
         assert export_dit.EXPECTED[DIT_SKIP22]["linear"] == 41 * 6 + 6

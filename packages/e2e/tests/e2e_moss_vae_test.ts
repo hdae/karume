@@ -1,5 +1,5 @@
 /**
- * The MOSS-Image VAE stage on the GPU (ADR NNNN decisions 5 and 8, plan step 3): the untiled FLUX.2
+ * The MOSS-Image VAE stage on the GPU (ADR NNNN decisions 5 and 8, stage 3): the untiled FLUX.2
  * decoder as three Sessions in one batch against upstream's f32 decode, the census, the lifetimes,
  * the headroom check, the per-device area limit and (opt-in) the area-cap decode with its VRAM.
  *
@@ -26,7 +26,8 @@
  * another seed, the unpatchify's 2×2 patch transposed) must land outside the band by a margin of 2
  * (ADR 0118 addendum). The band does not see a one-pass GroupNorm variance (random latents keep
  * the decoder's GroupNorm inputs out of the cancellation range — measured 3.0e-6 … 9.2e-6 with the
- * fault in the kernel, in the step-3 review); that property is held by `gpu_group_norm_test.ts` ① and ④ alone.
+ * fault in the kernel — research 2026-10-28 §3.2); that property is held by
+ * `gpu_group_norm_test.ts` ① and ④ alone.
  *
  * Derivation (2026-10-27, RTX 3080 Ti, Node + Dawn — see {@link BANDS}).
  *
@@ -35,21 +36,21 @@
  * 1696×1648 (2,795,008 px — near the largest area of this device's 2 GiB binding): the stage's
  * headroom need against the device, the decode against upstream's CPU decode (`write --cap`), and
  * the VRAM the three Sessions hold (their plan backings with their input buffers and weights, the
- * residents) — the plan's estimate was 5.37 GB (§1.5); then the largest accepted area of this
- * device decodes finite through the product's own headroom check. The process-level peak is
- * sampled outside the test (nvidia-smi; the raw samples and the test's output are kept in
- * `outputs/bench/karume-moss-image/2026-10-27_vae-cap-vram/`). The stage's peak on the device is
- * max(the trial allocation of the headroom need, what the stage holds) — the trial allocation
- * comes first and is the larger one at the cap.
+ * residents) — the design's hand count was 5.37 GB (research 2026-10-28 §3.4); then the largest
+ * accepted area of this device decodes finite through the product's own headroom check. The
+ * process-level peak is sampled outside the test (nvidia-smi; the raw samples and the test's
+ * output are kept in `outputs/bench/karume-moss-image/2026-10-27_vae-cap-vram/`). The stage's peak
+ * on the device is max(the trial allocation of the headroom need, what the stage holds) — the trial
+ * allocation comes first and is the larger one at the cap.
  *
  * The default run (no opt-in): one 256² decode (finite, the census — the three ×2 upsamples run as
  * `upsample2x`, every GroupNorm as group_norm's five dispatches — and what the stage holds within
  * its estimates), the mid attention's row-block budget at 1024² (it splits the attention into more
- * row blocks than the binding alone and leaves the image bit-identical — ADR 0124; plan question 17,
- * option ④), the lifetimes (every Session and resident closed, the Sessions first, after a
+ * row blocks than the binding alone and leaves the image bit-identical — ADR 0124; ADR NNNN
+ * decision 8), the lifetimes (every Session and resident closed, the Sessions first, after a
  * run, after a failure inside the batch and after a failure while opening; nothing opened when the
  * headroom check refuses) and the area limit's refusal before any GPU work. Its values are not
- * compared with upstream (the parity check is opt-in); the sha256 rows of plan step 4 pin them.
+ * compared with upstream (the parity check is opt-in); the sha256 rows of stage 4 pin them.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";

@@ -1,6 +1,6 @@
 /**
  * Deterministic standard normal random numbers — MOSS-Image's initial noise from a seed (ADR NNNN
- * decision 9, plan step 4).
+ * decision 9, stage 4).
  *
  * Random numbers are not baked into the graph (ADR 0013 — runtime knobs and random numbers live on
  * the host). The generator is seeded so that reproducibility rests on **the same seed giving the
@@ -16,10 +16,10 @@
  *
  * Upstream draws its initial noise with `randn_tensor(shape, generator=…, dtype=float32)` (torch's
  * Philox / mt19937 streams — `MOSSImagePipeline.__call__`). The same seed does not give torch's
- * sequence here: the port takes the seeded noise of its other diffusion families (the plan's step 4,
- * approved with the plan — "splitmix64 + Box–Muller, as Wan, not torch's `randn`"; the Wan
- * precedent ADR 0118 decision 5). Comparisons with upstream never use this generator: they inject
- * the reference's own initial latents through the request's `latents` (`moss.reference` records
+ * sequence here: the port takes the seeded noise of its other diffusion families — splitmix64 +
+ * Box–Muller as in Wan, deliberately not torch's `randn` (ADR NNNN decision 9; the Wan precedent
+ * ADR 0118 decision 5). Comparisons with upstream never use this generator: they inject the
+ * reference's own initial latents through the request's `latents` (`moss.reference` records
  * them as `latents.init` — `tools/export-recipes/moss/pipeline_ref.py`).
  *
  * MUST: every module is side-effect free (no import-time execution, no global mutable state).

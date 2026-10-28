@@ -1,6 +1,6 @@
 /**
  * The self A/B check of MOSS-Image's practical preset `f32+dit8-a8-attn8-online` (ADR 0110 decision
- * 5, ADR 0120 decision 4; ADR NNNN decisions 11 and 13, plan step 5) against the reference preset
+ * 5, ADR 0120 decision 4; ADR NNNN decisions 11 and 13, stage 5) against the reference preset
  * `f32+dit8` — the same i8 weights with no session knob, on the same machine (no torch golden).
  *
  * ## Observations (one per preset and seed — {@link observe})
@@ -20,8 +20,8 @@
  *   uncorrelated, against 2.4677e-4 measured. It carries no information the two branch points do
  *   not; it is kept because decision 5-4 names it.
  *
- * `dit_text` runs with f32 compute in every preset (plan item 15-11), so its two outputs must be
- * **bit-identical** between the presets and its census must hold no variant of a knob.
+ * `dit_text` runs with f32 compute in every preset (ADR NNNN decision 3), so its two outputs must
+ * be **bit-identical** between the presets and its census must hold no variant of a knob.
  *
  * ## The checks (per case = per size — {@link CASES})
  *
@@ -30,7 +30,7 @@
  * 2. **Census** (decision 5-1 MUST), per Session of the pair: every knob's variant ran
  *    (`assertSeatsApplied`), the attention ran the online kernel at every node and the three
  *    dispatches at none (`assertAttentionSeatsComplete` — complete eligibility holds at every MOSS
- *    shape since the online kernel's live key length, ADR 0132's addendum of 2026-10-27), exactly
+ *    shape since the online kernel's key valid length, ADR 0132's addendum of 2026-10-27), exactly
  *    {@link LINEAR_A8} i8a8 linear dispatches, exactly {@link ATTENTION_NODES} × the node's query-row
  *    windows online-kernel dispatches (`planAttentionOnlineWindows` — a pure function of the shape),
  *    and the online kernel in its padded form (`:kpad`) at every dispatch when the branch's
@@ -41,7 +41,7 @@
  *    agreement with the a8 error model). The floor is 0, although one single knob does give clearly
  *    less difference than the bundle: without `linearCompute` (a8 attention and the online kernel
  *    kept) the difference is 54 % (`dit`), 28 % (`dit_skip22`) and 53 % (`latent`) of the bundle's
- *    (1024², 2026-10-28, plan step-5 record — 1.0032e-2 / 4.3333e-3 / 1.3191e-4). ADR 0120
+ *    (1024², 2026-10-28, research 2026-10-28 §5.2 — 1.0032e-2 / 4.3333e-3 / 1.3191e-4). ADR 0120
  *    decision 4 allows a floor above 0 then; it does not require one. The census sees that fault
  *    exactly (the same run: `linearCompute="a8"` has no variant in either Session — red), while a
  *    floor would be one more per-machine value derived from a fault configuration, so single knobs
@@ -65,11 +65,11 @@
  * 1696×1648 (the area cap of a 2 GiB binding — `vae-contract.ts`): S₊ = 10,981 and S₋ = 10,928 (the
  * negative branch's S is a multiple of 4 here, so its online kernel takes the whole form). The
  * practical observations run through the product's headroom check. The reference preset's pair
- * needs 12,519,585,664 B there, which a 12 GiB device refuses (plan step-5 record), although what
- * it holds fits (10,915 MiB measured): its observation runs as a measurement harness with the
- * pair's two estimates replaced by 0 (the stage's own check then probes the text contexts, the
- * part and the margin alone — the form of `e2e_moss_vae_test.ts`'s cap case). MUST: only the
- * partner's observation is taken this way; the practical preset's are the product's.
+ * needs 12,519,585,664 B there, which a 12 GiB device refuses (research 2026-10-28 §5.5), although
+ * what it holds fits (10,915 MiB measured): its observation runs as a measurement harness with the
+ * pair's two estimates replaced by 0 (the stage's own check then probes the text contexts, the part
+ * and the margin alone — the form of `e2e_moss_vae_test.ts`'s cap case). MUST: only the partner's
+ * observation is taken this way; the practical preset's are the product's.
  *
  * Without a GPU adapter, the series or the stage-0 embeddings the file skips explicitly (ADR 0005).
  * Results: `outputs/verify/<environment key>/<date>_moss-ab/` (safe to delete).
@@ -180,7 +180,7 @@ type Point = (typeof POINTS)[number];
  * The i8a8 linear dispatches of one forward per graph (the census's exact count — decision 5-1):
  * every linear of the graph, the four at M = 1 (the time MLP's two and the two modulations)
  * included. `dit`: 42 blocks × 6 + `video_embedder`, the time MLP's two, the two modulations and
- * `final_linear_video` = 258 (the recipe's census of the graph — plan step 1); `dit_skip22`:
+ * `final_linear_video` = 258 (the recipe's census of the graph — stage 1); `dit_skip22`:
  * 41 × 6 + 6 = 252. Measured 2026-10-28 (RTX 3080 Ti): 258 / 252.
  */
 const LINEAR_A8: Readonly<Record<"dit" | "dit_skip22", number>> = { dit: 258, dit_skip22: 252 };

@@ -30,8 +30,8 @@ from safetensors.torch import save_file
 
 from _shared.paths import BENCH_ROOT
 
-#: The local distribution name the bench directories are keyed by (not published — plan question
-#: 18; provisional until the distribution is named).
+#: The local distribution name the bench directories are keyed by (not published — ADR NNNN
+#: decision 12; provisional until the distribution is named).
 BENCH_NAME = "karume-moss-image"
 
 #: The environment variables that steer the CPU kernels' threading and code paths.

@@ -142,7 +142,7 @@ def unpatchify(z: torch.Tensor) -> torch.Tensor:
 
 class VaeRecorder:
     """Forward hooks on the VAE that keep the decode input and the tensors around the mid-block
-    attention (where the decoder is split into three graphs — plan step 3).
+    attention (where the decoder is split into three graphs — ADR NNNN decision 8).
 
     Kept: `vae.z` (the input of `post_quant_conv`, i.e. what `decode` received), `vae.pre_attention`
     (the output of the mid block's first resnet = the attention's input), `vae.post_attention` (the

@@ -1,7 +1,7 @@
 /**
  * The host side of the MOSS-Image DiT's time input — the `dit` container's asset `training_grid`
  * and the lookup of the graph input `timesteps_proj [1,256]` by training-grid index (ADR NNNN
- * decision 11, plan item 15-14, plan step 2).
+ * decision 11, stage 2).
  *
  * ## Why a table, not a formula
  *

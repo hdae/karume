@@ -1,6 +1,6 @@
 """The stage-0 DiT reference of MOSS-Image: upstream `pipe(...)` run on CPU with the DiT in f32,
-recorded block by block through forward hooks, and re-assembled from the hooks (plan step 0 item 6
-and the step's check).
+recorded block by block through forward hooks, and re-assembled from the hooks (ADR NNNN stage 0
+and its check).
 
 ## The run
 
@@ -44,7 +44,7 @@ steps, so the gate itself is tested on a tiny pipeline with perturbed recordings
 3. The head: the last block's output through upstream's head modules gives the recorded `sample`.
 4. The trajectory: CFG written here, fed the recorded samples, gives the prediction upstream passed
    to `scheduler.step` (recorded by wrapping it — {@link record_case}), and the Euler update written
-   here (the host functions of plan step 4), fed that prediction and the scheduler's sigmas, gives
+   here (stage 4's host functions), fed that prediction and the scheduler's sigmas, gives
    every step's input latents and finally the decode input `vae.z` (through
    `moss.pipeline_ref.denormalize` / `unpatchify`). The Euler update can absorb a one-ULP change
    of the prediction in its rounding, so the prediction is checked on its own.

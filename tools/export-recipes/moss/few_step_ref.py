@@ -1,5 +1,5 @@
 """The 2-step end-to-end CPU reference of MOSS-Image: upstream `pipe(...)` itself with the DiT's
-linear weights rounded to the i8 series' values (plan step 4 — the opt-in upstream parity of
+linear weights rounded to the i8 series' values (stage 4 of ADR NNNN — the opt-in upstream parity of
 `packages/e2e/tests/e2e_moss_generate_test.ts`; the Wan precedent `wan.ti2v_few_step_ref`).
 
 ## The run

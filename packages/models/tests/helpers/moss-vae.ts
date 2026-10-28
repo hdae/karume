@@ -1,5 +1,5 @@
 /**
- * What the MOSS-Image VAE tests share (ADR NNNN decision 8, plan step 3): where the VAE series and
+ * What the MOSS-Image VAE tests share (ADR NNNN decision 8, stage 3): where the VAE series and
  * its goldens live, the golden case table, the golden reader and the components and contract opened
  * from the series containers.
  *

@@ -427,7 +427,7 @@ class TestCaseTable:
                 assert branches.count(POSITIVE) == branches.count(NEGATIVE), (case_group, role)
 
     def test_the_text_cases_include_one_token_as_an_acceptance_case(self):
-        """Plan step 2 MUST: `dit_text` was traced with T ≥ 2."""
+        """ADR NNNN decision 3 MUST: `dit_text` was traced with T ≥ 2."""
         assert any(c.length == 1 and c.role == ACCEPT for c in dit_reference.TEXT_CASES)
 
     def test_case_names_are_unique(self):

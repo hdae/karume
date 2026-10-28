@@ -1,7 +1,7 @@
 /**
  * The MOSS-Image DiT stage on a real GPU — the port check of the reference path (i8 weights × f32
  * compute, no session knobs) against the layer-by-layer CPU f64 reference, the Session lifetimes
- * and the plan backing (ADR NNNN decisions 3–5 and 11, plan step 2).
+ * and the plan backing (ADR NNNN decisions 3–5 and 11, stage 2).
  *
  * The goldens are written by `tools/export-recipes/moss/dit_reference.py` from the same series
  * containers (the dequantised i8 weights the GPU reads — ADR 0121 decision 7), one golden per case:
@@ -26,8 +26,8 @@
  * ### A second metric for `dit_text`
  *
  * `dit_text`'s output has one outlier channel (max |value| about 1,800 against a median channel
- * maximum of about 14). Both maxima of r then sit in that channel, and the band (45 × the f32
- * error there) allows an error of about 4e-4 of a typical channel's scale anywhere else, so a small
+ * maximum of about 14). Both maxima of r then sit in that channel, and the band (56 × the f32
+ * error there) allows an error of about 5e-4 of a typical channel's scale anywhere else, so a small
  * defect outside the outlier would not show. The per-channel r divides each channel's error by
  * that channel's scale before taking the maxima:
  *
@@ -63,19 +63,18 @@
  * The r gates and their fault injections compare with a torch reference, so they run only with
  * `KARUME_UPSTREAM_PARITY=1` (parity is proven when the family is implemented). The default run
  * keeps the checks that read no reference: `dit_text` at T = 1 (the graph was traced with T ≥ 2,
- * and nothing but the GPU runs the IR at T = 1 — plan step 2 MUST), finite and pinned by a sha256
- * row (ADR 0106 — `fixtures/references/moss.json`; the r gate is opt-in, so the row is the default
- * lane's only check of its values — plan step 4; MUST: with `KARUME_REFERENCE` the row is written
- * only after the r gate of the text cases, T = 1 among them, passed earlier in the same run — that
- * gate is declared before the default run (Vitest runs a file's tests in declaration order), and
- * otherwise the case fails before writing, naming the gate that did not pass,
- * `assertMossRowWritable`; compare mode reads no gate); one
- * plan backing per Session
- * over several predictions, both for a backing inside the plan backing budget (256²) and for one
- * over it (768² — the runtime keeps such a backing alone); the borrower holding no weight of its
- * own; finite outputs; and the lifetimes — `dit_text` closed before the pair opens, everything
- * closed when the body or the borrower's opening throws, nothing opened when the headroom check
- * refuses.
+ * and nothing but the GPU runs the IR at T = 1 — the MUST of ADR NNNN decision 3), finite and
+ * pinned by a sha256 row (ADR 0106 — `fixtures/references/moss.json`; the r gate is opt-in, so the
+ * row is the default lane's only check of its values — ADR NNNN decision 11; MUST: with
+ * `KARUME_REFERENCE` the row is written only after the r gate of the text cases, T = 1 among them,
+ * passed earlier in the same run — that gate is declared before the default run (Vitest runs a
+ * file's tests in declaration order), and otherwise the case fails before writing, naming the gate
+ * that did not pass, `assertMossRowWritable`; compare mode reads no gate); one plan backing per
+ * Session over several predictions, both for a backing inside the plan backing budget (256²) and
+ * for one over it (768² — the runtime keeps such a backing alone); the borrower holding no weight
+ * of its own; finite outputs; and the lifetimes — `dit_text` closed before the pair opens,
+ * everything closed when the body or the borrower's opening throws, nothing opened when the
+ * headroom check refuses.
  *
  * Without a GPU adapter, the series, the stage-0 embeddings or the goldens, the groups skip
  * explicitly with the command that writes what they lack (ADR 0005).

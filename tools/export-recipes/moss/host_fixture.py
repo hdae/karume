@@ -1,7 +1,7 @@
-"""Fixed values of the MOSS-Image host functions, taken from upstream's own code (plan step 0 items
-7 and 8, plan items 15-14 and 15-16).
+"""Fixed values of the MOSS-Image host functions, taken from upstream's own code (stage 0 and
+decision 11 of ADR NNNN).
 
-The TS host functions (plan step 2 and 4) must reproduce these as Uint32-identical values; nothing
+The TS host functions (stages 2 and 4) must reproduce these as Uint32-identical values; nothing
 here transcribes upstream's formulas — each value is produced by upstream code:
 
 - `rope.<H>x<W>.t<T>` `[1, H·W + T, 128]`: `_RoPE.forward(H, W, T)` of a fresh `_RoPE(head_dim,
@@ -24,8 +24,8 @@ here transcribes upstream's formulas — each value is produced by upstream code
   `set_timesteps(n)` call from upstream's own `torch.searchsorted` argument and `torch.where`
   result ({@link step_sequence} wraps both for the call; only calls made directly by
   `MOSSImageScheduler.set_timesteps` are kept). The TS port of `torch.linspace` and of the grid
-  formula is checked against `requested` at Uint32 and its snapping against `nearest` (plan
-  step 4); the snapped values alone would hide a 1-ULP slip anywhere but near a midpoint.
+  formula is checked against `requested` at Uint32 and its snapping against `nearest` (stage
+  4); the snapped values alone would hide a 1-ULP slip anywhere but near a midpoint.
 - `shift.<i>.steps.<n>.{requested,nearest,grid,sigmas,timesteps}`: the same five, from upstream
   `set_timesteps(n)` on the pinned config with `shift` replaced by `SHIFTS[i]` (the metadata's
   `shift_cases`), for the counts {@link SHIFT_STEP_COUNTS} (two of them above the 1,000 training

@@ -1,20 +1,20 @@
 /**
  * The acceptance check of a MOSS-Image DiT request — image size and text embeddings (ADR NNNN
- * decision 9, plan items 15-9 and 15-10, plan step 2). Everything here is a `ModelInputError`
- * (fixing the input makes it pass — ADR 0107) and runs before any GPU work.
+ * decision 9, stage 2). Everything here is a `ModelInputError` (fixing the input makes it pass —
+ * ADR 0107) and runs before any GPU work.
  *
  * - **Size**: width and height in pixels, positive multiples of 16 (upstream's own check — one latent
  *   cell is 16 px), and the longest side at most {@link MOSS_MAX_SIDE_PX} (65,536 px = 4,096 cells)
  *   — an explicit acceptance limit: the RoPE base tables' `h` / `w` axes hold one row per position of
  *   a side of up to 4,096 cells (2·4,096 − 1 rows; `./dit-rope.ts`). Upstream has no ceiling, but
- *   with the area cap of the VAE binding (plan step 3) a longer side would leave a short side under
- *   about 43 px. MUST: a longer side is rejected with an error that names the limit.
- * - **Area** ({@link assertMossImageArea}, plan item 15-9 — per device): the untiled VAE's largest
- *   intermediate must fit one storage binding, so the area is capped by the device's binding limit
- *   over the decoder's bytes per pixel (`./vae-contract.ts` derives both from the graphs — about
- *   2.80M pixels at 2 GiB). MUST: a larger area is rejected with an error that names the limit.
- *   Whether the DiT pair and the VAE fit the device's VRAM is not an acceptance limit: each stage
- *   checks it before it opens (`fitsHeadroom`).
+ *   with the area cap of the VAE binding (ADR NNNN decision 8) a longer side would leave a short
+ *   side under about 43 px. MUST: a longer side is rejected with an error that names the limit.
+ * - **Area** ({@link assertMossImageArea}, ADR NNNN decision 8 — per device): the untiled VAE's
+ *   largest intermediate must fit one storage binding, so the area is capped by the device's
+ *   binding limit over the decoder's bytes per pixel (`./vae-contract.ts` derives both from the
+ *   graphs — about 2.80M pixels at 2 GiB). MUST: a larger area is rejected with an error that names
+ *   the limit. Whether the DiT pair and the VAE fit the device's VRAM is not an acceptance limit:
+ *   each stage checks it before it opens (`fitsHeadroom`).
  * - **Text**: the internal entry takes encoder outputs only — a `Float32Array` `[T, 4096]` with
  *   1 ≤ T ≤ {@link MOSS_MAX_TEXT_TOKENS} (upstream requires at least one token and truncates at
  *   `max_sequence_length` 4,096), every value finite (a non-finite embedding would surface as
@@ -60,7 +60,7 @@ export type MossTextEmbeddings = {
  * Checks an image size (module doc "Size") and returns its latent grid.
  *
  * NOTE: `export` is for the family entry and its host tests (not on a public surface — the family
- * is not exported, ADR NNNN question 18).
+ * is not exported, ADR NNNN decision 12).
  */
 export const assertMossImageSize = (width: number, height: number): MossCells => {
   for (const [name, side] of [

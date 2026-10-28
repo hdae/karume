@@ -1,6 +1,6 @@
 /**
  * The contract of the MOSS-Image DiT series — the three graphs `dit`, `dit_skip22` and `dit_text`
- * and the two assets of `dit` (ADR NNNN decisions 2–4 and 11, plan step 2).
+ * and the two assets of `dit` (ADR NNNN decisions 2–4 and 11, stage 2).
  *
  * | Graph        | Symbol | Inputs                                                                                         | Output       |
  * | ------------ | ------ | ---------------------------------------------------------------------------------------------- | ------------ |

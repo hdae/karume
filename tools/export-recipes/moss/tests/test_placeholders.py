@@ -2,9 +2,10 @@
 `tools/export-recipes/moss/` once the ADR is merged.
 
 The MOSS-Image ADR gets its number when it is merged; until then the recipe cites it with a
-placeholder, and cites the working plan (an untracked file) by its item, step and question numbers.
-Both are replaced in the commit that assigns the number. This check is skipped until then — remove
-the mark in that commit, and it fails for every placeholder or plan reference still left.
+placeholder, which the commit that assigns the number replaces. The recipe no longer cites the
+working plan (an untracked file); the scan also finds a plan reference that comes back. The check
+is skipped until the number is assigned — remove the mark in that commit, and it fails for every
+placeholder or plan reference still left.
 """
 
 from __future__ import annotations

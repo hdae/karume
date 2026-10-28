@@ -1,8 +1,8 @@
 /**
- * The host side of the MOSS-Image DiT stage on the CPU (ADR NNNN decisions 2, 9 and 11, plan step 2):
+ * The host side of the MOSS-Image DiT stage on the CPU (ADR NNNN decisions 2, 9 and 11, stage 2):
  * the acceptance check, the host functions against upstream's recorded values (Uint32-identical —
- * plan item 15-14), the graph contract of the written series with its fault injections, and the
- * headroom arithmetic with the borrower's estimate.
+ * ADR NNNN decision 11), the graph contract of the written series with its fault injections, and
+ * the headroom arithmetic with the borrower's estimate.
  *
  * Sources of the expected values:
  *
@@ -12,7 +12,7 @@
  *   `pipe(...)` per size, 2 steps: the patchified tokens, the sinusoid and timestep of each step, the
  *   RoPE tables, both branches' samples and the prediction upstream passed to `scheduler.step`; the
  *   non-square size tells H from W);
- * - the step-2 goldens (`outputs/series/moss-image-sft-i8-dyn-reference/` — `moss.dit_reference`):
+ * - the stage-2 goldens (`outputs/series/moss-image-sft-i8-dyn-reference/` — `moss.dit_reference`):
  *   the six graph inputs exactly as the recipe's `dit_patch.dit_inputs` built them (256² cases), the
  *   graph output before and after the recipe's `head_rows`, and `dit_text`'s RoPE inputs;
  * - the series itself (`outputs/series/moss-image-sft-i8-dyn/` — `moss.export_dit write`): the graph
@@ -160,7 +160,7 @@ const assertRopeMatchesUpstream = (
   assertEquals(firstBitMismatch(tables.cos, expectedCos), -1, `${where}: rope_cos bits`);
 };
 
-describe("MOSS-Image acceptance check (plan step 2, ADR NNNN decision 9)", () => {
+describe("MOSS-Image acceptance check (stage 2, ADR NNNN decision 9)", () => {
   describe("the image size", () => {
     it("accepts positive multiples of 16 and returns the latent grid (H/16 × W/16)", () => {
       expect(assertMossImageSize(1024, 768)).toEqual({ rows: 48, cols: 64 });

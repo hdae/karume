@@ -1,7 +1,7 @@
 /**
  * MOSS-Image text-to-image end to end on a real GPU — the generate path (`generateMoss`: the one
  * acceptance check, the first headroom check, `dit_text` → the DiT pair with the sampler → the VAE —
- * ADR NNNN decisions 5 and 9, plan items 15-8 and 15-19, plan step 4) over the i8 DiT series and
+ * ADR NNNN decisions 5, 9 and 11, stage 4) over the i8 DiT series and
  * the f32 VAE series, with the reference preset `f32+dit8` (i8 weights × f32 compute, no session
  * knob) unless a case names the practical preset `f32+dit8-a8-attn8-online`
  * (`../../models/src/moss/preset.ts`; its self A/B check is `e2e_moss_ab_test.ts`). The device asks
@@ -11,8 +11,8 @@
  *
  * ## Default run
  *
- * - **Order and lifetimes** (plan item 15-8; the step-3 review asked for the order to be asserted,
- *   not left to comments): the Sessions open and close as `dit_text` → closed → `dit` + `dit_skip22`
+ * - **Order and lifetimes** (ADR NNNN decision 5 — asserted here, not left to the modules'
+ *   comments): the Sessions open and close as `dit_text` → closed → `dit` + `dit_skip22`
  *   → both closed → the three VAE graphs → closed, so every DiT Session is disposed before the first
  *   VAE Session opens. A dispose is logged when it has **completed** (a dispose started but not
  *   awaited would log after the next stage's open). Every resident tensor the generation made (the
@@ -22,12 +22,12 @@
  *   only on a repeated shape). Guidance 1 opens no `dit_skip22` and still pins its image. A failure
  *   inside the DiT loop has closed every Session and every text context when generate rejects, and
  *   opens no VAE.
- * - **The first headroom check** (plan item 15-8): with the VAE's need — or the pair's — made larger
- *   than any device, generate refuses before any Session opens, naming the first check and the
- *   stage. Without the first check `dit_text` and the whole DiT would run before the VAE stage (or
- *   the pair) refused. The bytes it checks are the largest stage's own need, not the sum of the
+ * - **The first headroom check** (ADR NNNN decision 5): with the VAE's need — or the pair's — made
+ *   larger than any device, generate refuses before any Session opens, naming the first check and
+ *   the stage. Without the first check `dit_text` and the whole DiT would run before the VAE stage
+ *   (or the pair) refused. The bytes it checks are the largest stage's own need, not the sum of the
  *   three stages (the stages never hold their Sessions together).
- * - **sha256 rows** (ADR 0106, plan item 15-19 — `fixtures/references/moss.json`, one row per
+ * - **sha256 rows** (ADR 0106, ADR NNNN decision 11 — `fixtures/references/moss.json`, one row per
  *   environment key): the clamped f32 image `[3, H, W]` (an F32 safetensors without metadata —
  *   `f32ArtifactBytes`) of the seed path at 256² and 384×256, 2 steps, `fridge-note` with the empty
  *   negative, guidance 3, shift 5, seed 42, and at 256² guidance 1 without a negative, for the
@@ -89,7 +89,8 @@
  * VRAM (`nvidia-smi`, outside the test) can miss a transient between two samples and mixes the
  * probes into the stage — and asserts that each stage's peak stays within that stage's headroom
  * need (the estimate leaves the i8a8 linears' quantised intermediates out; the need's margin must
- * cover them). The measurement and its record are in the plan's step-4 and step-5 records.
+ * cover them). The measurements are recorded in `docs/research/2026-10-28-moss-image-dit-vae.md`
+ * §4.3 and §5.5.
  *
  * ## Opt-in VRAM at larger sizes (`KARUME_MOSS_VRAM=1`)
  *
@@ -98,7 +99,7 @@
  * fact of the device and the moment, not of the code: when the largest stage need does not fit the
  * device now, the case asserts the product's refusal instead — loud, at the first headroom check,
  * before any Session opens — and logs it (on the 12 GiB RTX 3080 Ti the reference preset's DiT pair
- * is refused at the cap: plan step-5 record).
+ * is refused at the cap: `docs/research/2026-10-28-moss-image-dit-vae.md` §5.5).
  *
  * Without a GPU adapter, the series or the stage-0 embeddings the file skips explicitly; the parity
  * group also without its goldens, naming the command that writes them (ADR 0005).
@@ -217,8 +218,8 @@ type SeedCase = Size & {
 };
 
 /**
- * The default lane's sha rows (plan item 15-19; guidance 1 — no negative branch — at 256²; the
- * practical preset at the two sizes with guidance 3 — plan step 5).
+ * The default lane's sha rows (ADR NNNN decision 11; guidance 1 — no negative branch — at 256²;
+ * the practical preset at the two sizes with guidance 3 — stage 5).
  */
 const SEED_CASES: readonly SeedCase[] = [
   { width: 256, height: 256, guidance: GUIDANCE, preset: REFERENCE },
@@ -313,8 +314,8 @@ const PARITY_PRESENT = PARITY_CASES.every((testCase) => filePresent(parityGolden
  * The faults on the first acceptance case (latents / image): prompts swapped 1.559 / 2.244 (256²),
  * 1.582 / 2.169 (384×256); guidance 3.3 9.747e-2 / 1.072e-1, 9.544e-2 / 7.561e-2; shift 3
  * 2.324e-2 / 3.580e-2, 2.288e-2 / 1.655e-2; another seed's latents 3.611e-1 / 3.115e-1, 4.077e-1 /
- * 2.492e-1 — the smallest (shift 3) is 191–439 × its band, far outside the margin of 2. Added
- * after the step-4 review (the bands unchanged): the first step at grid index 1 1.255e-1 /
+ * 2.492e-1 — the smallest (shift 3) is 191–439 × its band, far outside the margin of 2. Two more
+ * faults, with the bands unchanged: the first step at grid index 1 1.255e-1 /
  * 1.764e-1, 2.074e-1 / 1.077e-1; guidance 3.003 9.751e-4 / 1.060e-3, 9.556e-4 / 8.329e-4 — 8.0–18.4
  * × its band, the fault closest to it.
  *

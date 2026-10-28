@@ -1,5 +1,5 @@
 /**
- * The MOSS-Image sampler on the CPU (ADR NNNN decisions 9 and 11, plan item 15-14, plan step 4):
+ * The MOSS-Image sampler on the CPU (ADR NNNN decisions 9 and 11, stage 4):
  * the σ schedule against upstream's own `set_timesteps`, upstream's CFG line, the Euler update and
  * the seeded noise.
  *
@@ -224,8 +224,9 @@ describe("MOSS-Image σ schedule structure", () => {
   });
 
   it("takes a step count above the grid's points (5,000): strictly increasing indices, at most the grid's points", () => {
-    // Not a bound for every count: past about 2·10⁶ steps the indices outnumber the points and
-    // stop increasing, as upstream's (sampler.ts "Very large step counts").
+    // Not a bound for every count: past about 2·10⁶ steps the indices stop increasing, and they
+    // outnumber the points only at about 10⁷ (1,099; 989 at 5·10⁶), as upstream's (sampler.ts
+    // "Very large step counts").
     const grid = syntheticTrainingGrid(1000);
 
     const schedule = mossSchedule(grid, 5000, 5);

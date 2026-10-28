@@ -1,6 +1,6 @@
 """The patch layer that turns the MOSS-Image DiT (`MOSSImageTransformer` of the pinned
-`pipeline_moss_image.py`) into three IR graphs with one length symbol each (ADR NNNN decisions 2–4,
-plan step 1, plan items 15-1 to 15-3 and 15-5).
+`pipeline_moss_image.py`) into three IR graphs with one length symbol each (ADR NNNN decisions 2–4
+and 6, stage 1).
 
 ## The graphs
 
@@ -30,8 +30,8 @@ install_rope_pair} replaces upstream's module-level `_rotate` by a version that 
 RopePair} and computes upstream's expression `x * cos + cat((-b, a), -1) * sin` on it. Called with
 upstream's own table (a tensor), the replacement hands over to upstream's `_rotate` unchanged, so
 upstream's forward keeps its values whether or not the patch is installed. Everything else — the
-blocks, `_attention`, `_situ` (so `h / 25` stays a division — plan item 15-5), the RMSNorms, the
-time MLP, the modulations and the head — is upstream's code, called as it is.
+blocks, `_attention`, `_situ` (so `h / 25` stays a division — ADR NNNN decision 6), the RMSNorms,
+the time MLP, the modulations and the head — is upstream's code, called as it is.
 
 The `[1,1,S,128]` input is turned into `[1,S,1,128]` by a transpose of a length-1 axis (no data
 movement), the operand shape upstream's `_rotate` multiplies with.
@@ -43,7 +43,7 @@ different row count here (`video_embedder` on S rows instead of N; `final_linear
 instead of N), and torch's CPU GEMM may round the last bit differently with M. {@link
 padded_rows} swaps exactly those two modules of the upstream model, for the duration of one call,
 for a wrapper that zero-pads the input to S rows, calls the same linear and returns upstream's rows
-(plan item 15-15). Everything else in the comparison runs as upstream's code.
+(ADR NNNN decision 11). Everything else in the comparison runs as upstream's code.
 
 MUST: diffusers is imported inside the functions (`tests/test_optional_group_imports.py`); the
 upstream classes come from the hash-checked pipeline module (`moss.sources.load_pipeline_module`).
@@ -250,7 +250,7 @@ class MossDitText(nn.Module):
 MAX_TEXT_TOKENS = 4096
 
 #: The accepted longest image side: 4,096 latent cells = 65,536 px — an explicit acceptance limit
-#: (ADR NNNN decision 9). MUST: the TS acceptance check (plan step 2) rejects a longer side with a
+#: (ADR NNNN decision 9). MUST: the TS acceptance check (stage 2) rejects a longer side with a
 #: loud error that names this limit; {@link rope_rows} refuses one here.
 #:
 #: Why a limit: the `h` / `w` tables of `rope_base` have one row per position an image token can
@@ -476,7 +476,8 @@ class PaddedRows(nn.Module):
         return self.linear(padded)[:, :count]
 
 
-#: The upstream modules {@link padded_rows} swaps (the two linears whose M differs — plan §1.1).
+#: The upstream modules {@link padded_rows} swaps (the two linears whose M differs — ADR NNNN,
+#: Context).
 PADDED_MODULES = ("video_embedder", "final_linear_video")
 
 
