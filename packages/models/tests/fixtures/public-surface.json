@@ -221,23 +221,7 @@
     ],
     "./depth-anything": [
       {
-        "name": "DEPTH_ANYTHING_SOURCES",
-        "kind": "variable"
-      },
-      {
-        "name": "DepthAnythingAssets",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "DepthAnythingFromPretrainedOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "DepthAnythingPipeline",
-        "kind": "class"
-      },
-      {
-        "name": "DepthAnythingPipelineOptions",
+        "name": "Assets",
         "kind": "typeAlias"
       },
       {
@@ -245,12 +229,28 @@
         "kind": "typeAlias"
       },
       {
+        "name": "FromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
         "name": "ModelInputError",
         "kind": "class"
       },
       {
+        "name": "Pipeline",
+        "kind": "class"
+      },
+      {
+        "name": "PipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
         "name": "Rgb8Image",
         "kind": "typeAlias"
+      },
+      {
+        "name": "SOURCES",
+        "kind": "variable"
       }
     ],
     "./gemma": [

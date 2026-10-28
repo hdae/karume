@@ -27,7 +27,7 @@ import { IRODORI_SOURCES } from "../src/irodori/config.ts";
 import { SBV2_SOURCES } from "../src/sbv2/config.ts";
 import { GEMMA4_SOURCES } from "../src/gemma/config.ts";
 import { SIGLIP2_SOURCES } from "../src/siglip2/config.ts";
-import { DEPTH_ANYTHING_SOURCES } from "../src/depth-anything/config.ts";
+import * as depthAnything from "../depth-anything.ts";
 import * as birefnet from "../birefnet.ts";
 import { UMT5_SOURCES } from "../src/umt5/config.ts";
 import { WAN_SOURCES } from "../src/wan/config.ts";
@@ -36,7 +36,6 @@ import { IrodoriPipeline } from "../src/irodori/pipeline.ts";
 import { Sbv2Pipeline } from "../src/sbv2/pipeline.ts";
 import { Gemma4Pipeline } from "../src/gemma/pipeline.ts";
 import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
-import { DepthAnythingPipeline } from "../src/depth-anything/pipeline.ts";
 import { Umt5Encoder } from "../src/umt5/encoder.ts";
 import { WanTi2vPipeline } from "../src/wan/ti2v-pipeline.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
@@ -120,11 +119,11 @@ const FAMILIES: readonly Family[] = [
     load: (ref, options) => Siglip2Pipeline.fromPretrained(ref, options),
   },
   {
-    name: "DEPTH_ANYTHING_SOURCES",
-    sources: DEPTH_ANYTHING_SOURCES,
+    name: "depthAnything.SOURCES",
+    sources: depthAnything.SOURCES,
     // 世代はリポ名に入る（ADR 0092 決定 1）— V3 は別アーキなので別キーとして並ぶ。
     keys: ["depth-anything-v2"],
-    load: (ref, options) => DepthAnythingPipeline.fromPretrained(ref, options),
+    load: (ref, options) => depthAnything.Pipeline.fromPretrained(ref, options),
   },
   {
     name: "birefnet.SOURCES",
@@ -172,7 +171,7 @@ test("取得元対応表を持つのは 9 家族・公開リポは 12 本", () =
       "SBV2_SOURCES",
       "GEMMA4_SOURCES",
       "SIGLIP2_SOURCES",
-      "DEPTH_ANYTHING_SOURCES",
+      "depthAnything.SOURCES",
       "birefnet.SOURCES",
       "UMT5_SOURCES",
       "WAN_SOURCES",

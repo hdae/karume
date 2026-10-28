@@ -254,7 +254,7 @@ const SOURCE_TABLES: Readonly<Record<string, string>> = {
   "./sbv2": "SBV2_SOURCES",
   "./gemma": "GEMMA4_SOURCES",
   "./siglip2": "SIGLIP2_SOURCES",
-  "./depth-anything": "DEPTH_ANYTHING_SOURCES",
+  "./depth-anything": "SOURCES",
   "./birefnet": "SOURCES",
   "./umt5": "UMT5_SOURCES",
   "./wan": "WAN_SOURCES",

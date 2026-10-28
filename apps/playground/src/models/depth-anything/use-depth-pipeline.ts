@@ -1,5 +1,5 @@
 /**
- * The page's `DepthAnythingPipeline`, built on the first Run for the chosen (GPU, source, model,
+ * The page's `Pipeline`, built on the first Run for the chosen (GPU, source, model,
  * preset) and kept for later runs. Construction fetches the weights and creates the one Session (the
  * weight upload), so it waits for a Run instead of starting when the page opens; keeping it open
  * afterwards is the family's intended shape (one resident Session, many images).
@@ -13,7 +13,7 @@
  */
 
 import type { AssetProgress } from "@karume/hub";
-import { DepthAnythingPipeline } from "@karume/models/depth-anything";
+import { Pipeline } from "@karume/models/depth-anything";
 import type { GpuContext, SessionDiagnostics } from "@karume/runtime";
 import {
   type RefObject,
@@ -39,9 +39,9 @@ export type DepthPipelineKey = {
 };
 
 /** The open pipeline, the settings it was built for and its build time. */
-export type OpenPipeline = SlotEntry<DepthPipelineKey, DepthAnythingPipeline>;
+export type OpenPipeline = SlotEntry<DepthPipelineKey, Pipeline>;
 
-export type ObtainedPipeline = Obtained<DepthPipelineKey, DepthAnythingPipeline>;
+export type ObtainedPipeline = Obtained<DepthPipelineKey, Pipeline>;
 
 export type DepthPipelineHandle = {
   /** The open pipeline (built for the current settings), or `undefined` before the first Run. */
@@ -79,7 +79,7 @@ export const useDepthPipeline = (input: {
 }): DepthPipelineHandle => {
   const { gpu, source, model, quant, diagnostics, track } = input;
   const [slot] = useState(() =>
-    createPipelineSlot<DepthPipelineKey, DepthAnythingPipeline>({
+    createPipelineSlot<DepthPipelineKey, Pipeline>({
       sameKey,
       now: () => performance.now(),
       // The slot drops the promise, so a failed dispose (a flush on a lost device) is logged here.
@@ -113,7 +113,7 @@ export const useDepthPipeline = (input: {
         (buildSignal) => {
           // One per Session: the Session counts submits over its whole life.
           const perRun = perRunSubmitCounts();
-          return DepthAnythingPipeline.fromPretrained(pretrainedRef(key.source, "depth-anything"), {
+          return Pipeline.fromPretrained(pretrainedRef(key.source, "depth-anything"), {
             gpu: key.gpu,
             model: key.model,
             quant: key.quant,

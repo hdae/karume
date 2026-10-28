@@ -20,7 +20,7 @@ import { assertRejects } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { type Manifest, parseManifest } from "@karume/hub";
 import * as birefnet from "../birefnet.ts";
-import { DepthAnythingPipeline } from "../src/depth-anything/pipeline.ts";
+import * as depthAnything from "../depth-anything.ts";
 import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
 import { VowelDetectorPipeline } from "../src/vowel-detector/pipeline.ts";
 import { FEATURE_DIM, MEL_BINS, N_MELS, SAMPLE_RATE } from "../src/vowel-detector/features.ts";
@@ -119,9 +119,9 @@ const families: readonly Family[] = [
       }),
   },
   {
-    name: "DepthAnythingPipeline",
+    name: "depthAnything.Pipeline",
     build: async () =>
-      await DepthAnythingPipeline.fromAssets({
+      await depthAnything.Pipeline.fromAssets({
         manifest: manifestOf("depth-anything/1", "depth", {
           ...IMAGE_CONFIG,
           interpolation: "bicubic",

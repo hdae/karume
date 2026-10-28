@@ -19,7 +19,7 @@ import type { AssetProgress, CacheDiagnostic, RetryDiagnostic } from "@karume/hu
 import { hubLoadOptions } from "../src/hub/load-options.ts";
 import * as anima from "../anima.ts";
 import * as birefnet from "../birefnet.ts";
-import type { DepthAnythingFromPretrainedOptions } from "../src/depth-anything/pipeline.ts";
+import * as depthAnything from "../depth-anything.ts";
 import type { Gemma4FromPretrainedOptions } from "../src/gemma/pipeline.ts";
 import type { IrodoriFromPretrainedOptions } from "../src/irodori/pipeline.ts";
 import type { Sbv2FromPretrainedOptions } from "../src/sbv2/pipeline.ts";
@@ -83,7 +83,7 @@ test("型の門: 9 家族の fromPretrained オプションが onRetry を受け
   const perFamily = [
     { onRetry: noopRetry } satisfies anima.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies birefnet.FromPretrainedOptions,
-    { onRetry: noopRetry } satisfies DepthAnythingFromPretrainedOptions,
+    { onRetry: noopRetry } satisfies depthAnything.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies Gemma4FromPretrainedOptions,
     { onRetry: noopRetry } satisfies IrodoriFromPretrainedOptions,
     { onRetry: noopRetry } satisfies Sbv2FromPretrainedOptions,

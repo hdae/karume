@@ -1,5 +1,5 @@
 /**
- * `DepthAnythingPipeline` — the single surface for image → relative depth map (single-image depth
+ * `Pipeline` — the single surface for image → relative depth map (single-image depth
  * estimation).
  *
  * Pipeline (every step in Karume, no torch):
@@ -34,7 +34,7 @@
  *
  * ## It returns **raw relative depth in f32** (not folded into `[0, 1]`, no PNG)
  *
- * {@link DepthAnythingPipeline.estimate} returns "one f32 per pixel, at the size of the input",
+ * {@link Pipeline.estimate} returns "one f32 per pixel, at the size of the input",
  * with no normalization and no colouring.
  *
  * - **Normalization is a visualization decision, not part of inference.** Folding by min-max makes
@@ -173,13 +173,13 @@ export type DepthMap = {
 };
 
 /**
- * Construction options (shared by {@link DepthAnythingPipeline.fromAssets} /
- * {@link DepthAnythingPipeline.fromPretrained}).
+ * Construction options (shared by {@link Pipeline.fromAssets} /
+ * {@link Pipeline.fromPretrained}).
  */
-export type DepthAnythingPipelineOptions = {
+export type PipelineOptions = {
   /**
    * Shares an existing GPU. **The caller keeps ownership**, so
-   * {@link DepthAnythingPipeline.dispose} does not destroy it. When omitted, the pipeline calls
+   * {@link Pipeline.dispose} does not destroy it. When omitted, the pipeline calls
    * `acquireGpu` internally and destroys it in `dispose()`.
    */
   readonly gpu?: GpuContext;
@@ -201,20 +201,20 @@ export type DepthAnythingPipelineOptions = {
 };
 
 /**
- * Fetch-layer options used only by {@link DepthAnythingPipeline.fromPretrained} (passed through to
+ * Fetch-layer options used only by {@link Pipeline.fromPretrained} (passed through to
  * the hub).
  *
  * NOTE: the description of the fetch-layer knobs, including that `headers` / `fetch` / `caches` /
  * `onRetry` are **for HTTP sources only**, lives in one place, {@link FromPretrainedHubOptions}.
  */
-export type DepthAnythingFromPretrainedOptions = DepthAnythingPipelineOptions &
+export type FromPretrainedOptions = PipelineOptions &
   FromPretrainedHubOptions &
   FromPretrainedComponentOptions & {
     readonly signal?: AbortSignal;
   };
 
 /** Input for building directly from fetched assets (pass the hub's `fetchAssets` result as is). */
-export type DepthAnythingAssets = {
+export type Assets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
@@ -236,7 +236,7 @@ const assetBuffer = (
  * shared by every family — {@link assetComponentOpener}). A component key is either one single-form
  * `krm` (`depth`) or the part sequence of the split form (`depth[0]` / `depth[1]` / …).
  */
-const assetOpener = (assets: DepthAnythingAssets["assets"]): Promise<ComponentOpener> =>
+const assetOpener = (assets: Assets["assets"]): Promise<ComponentOpener> =>
   assetComponentOpener("depth-anything", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 /**
@@ -372,7 +372,7 @@ export const resampleDepth = (
   };
 };
 
-/** Internal state of {@link DepthAnythingPipeline} (not on the public surface). */
+/** Internal state of {@link Pipeline} (not on the public surface). */
 type DepthAnythingState = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
@@ -441,12 +441,12 @@ type DepthAnythingAdmission = {
 const admitDepthAnything = (
   manifest: Manifest,
   open: ComponentOpener,
-  options: DepthAnythingPipelineOptions,
+  options: PipelineOptions,
 ): DepthAnythingAdmission => {
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
-      `DepthAnythingPipeline: model '${modelName}' is not in the manifest` +
+      `depthAnything.Pipeline: model '${modelName}' is not in the manifest` +
         ` (available: ${manifest.available.models.join(" / ")})`,
     );
   }
@@ -454,7 +454,7 @@ const admitDepthAnything = (
   const { name, major } = entry.pipeline;
   if (name !== DEPTH_ANYTHING_PIPELINE_NAME) {
     throw new Error(
-      `DepthAnythingPipeline: the manifest's pipeline is '${name}/${major}'` +
+      `depthAnything.Pipeline: the manifest's pipeline is '${name}/${major}'` +
         ` ('${DEPTH_ANYTHING_PIPELINE_NAME}/${DEPTH_ANYTHING_PIPELINE_MAJOR}' is required)`,
     );
   }
@@ -462,7 +462,7 @@ const admitDepthAnything = (
     // The only check that stops silent degradation from "old implementation × new repository"
     // (ADR 0038 §6).
     throw new Error(
-      `DepthAnythingPipeline: the major of pipeline '${name}/${major}' is not supported` +
+      `depthAnything.Pipeline: the major of pipeline '${name}/${major}' is not supported` +
         ` (this implementation reads ${DEPTH_ANYTHING_PIPELINE_NAME}/` +
         `${DEPTH_ANYTHING_PIPELINE_MAJOR})`,
     );
@@ -472,7 +472,7 @@ const admitDepthAnything = (
   const quantName = options.quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quantName)) {
     throw new Error(
-      `DepthAnythingPipeline: quant '${quantName}' is not in the manifest` +
+      `depthAnything.Pipeline: quant '${quantName}' is not in the manifest` +
         ` (available: ${entry.available.quants.join(" / ")})`,
     );
   }
@@ -483,7 +483,7 @@ const admitDepthAnything = (
     DEPTH_ANYTHING_SESSION_POLICY,
     quant.session,
     {},
-    `DepthAnythingPipeline: quant '${quantName}'`,
+    `depthAnything.Pipeline: quant '${quantName}'`,
   );
   const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
 
@@ -493,7 +493,7 @@ const admitDepthAnything = (
   // mixed in, the later steps that pick by position would silently read other values as depth.
   if (depth.graph.inputs.length !== 1 || depth.graph.outputs.length !== 1) {
     throw new Error(
-      `DepthAnythingPipeline: the depth graph has ${depth.graph.inputs.length} /` +
+      `depthAnything.Pipeline: the depth graph has ${depth.graph.inputs.length} /` +
         ` ${depth.graph.outputs.length} inputs / outputs (one depth map requires exactly 1 of each)`,
     );
   }
@@ -518,12 +518,12 @@ const admitDepthAnything = (
     assertGpuFeaturesGranted(
       gpuFeatures,
       options.gpu,
-      `DepthAnythingPipeline: quant '${quantName}'`,
+      `depthAnything.Pipeline: quant '${quantName}'`,
     );
     assertRequiredLimitsSatisfied(
       quant.requiredLimits,
       options.gpu.limits,
-      `DepthAnythingPipeline: quant '${quantName}'`,
+      `depthAnything.Pipeline: quant '${quantName}'`,
     );
   }
 
@@ -542,7 +542,7 @@ const admitDepthAnything = (
 const openDepthAnythingState = async (
   admitted: DepthAnythingAdmission,
   open: ComponentOpener,
-  options: DepthAnythingPipelineOptions = {},
+  options: PipelineOptions = {},
 ): Promise<DepthAnythingState> => {
   const { config, quantName, quant, sessionOptions, gpuFeatures } = admitted;
   // The supplier is **the same one** admission saw (`open` only looks up components already
@@ -555,7 +555,7 @@ const openDepthAnythingState = async (
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
-    assertGpuFeaturesGranted(gpuFeatures, gpu, `DepthAnythingPipeline: quant '${quantName}'`);
+    assertGpuFeaturesGranted(gpuFeatures, gpu, `depthAnything.Pipeline: quant '${quantName}'`);
     // Also check the limits of a device acquired here — `fromAssets` has no pre-fetch check
     // (`fromPretrained` checks against adapter values); without this a missing declaration surfaces
     // only at Session construction, and a declaration stricter than the real demand is never
@@ -564,7 +564,7 @@ const openDepthAnythingState = async (
       assertRequiredLimitsSatisfied(
         quant.requiredLimits,
         gpu.limits,
-        `DepthAnythingPipeline: quant '${quantName}'`,
+        `depthAnything.Pipeline: quant '${quantName}'`,
       );
     }
     return {
@@ -614,12 +614,12 @@ const estimateImage = async (state: DepthAnythingState, image: Rgb8Image): Promi
 /**
  * Depth Anything V2's image → relative depth map pipeline (one graph).
  *
- * Construction enters only through {@link DepthAnythingPipeline.fromPretrained} (fetch from HF) or
- * {@link DepthAnythingPipeline.fromAssets} (already-fetched bytes) — the constructor is private so
+ * Construction enters only through {@link Pipeline.fromPretrained} (fetch from HF) or
+ * {@link Pipeline.fromAssets} (already-fetched bytes) — the constructor is private so
  * that no half-built state bypassing the manifest checks and the asset matching can be created
  * (ADR 0008).
  */
-export class DepthAnythingPipeline {
+export class Pipeline {
   readonly #state: DepthAnythingState;
   /**
    * Serialization chain for estimate and dispose ("one at a time" kept on the public API side —
@@ -644,23 +644,23 @@ export class DepthAnythingPipeline {
    * another repository use {@link FromPretrainedComponentOptions.components} (one role, `depth`).
    *
    * **`ref` is required** (sources have no default — the MUST of `src/hub/repo-ref.ts`). The source
-   * this package version verified is `"depth-anything-v2"` of {@link DEPTH_ANYTHING_SOURCES}
+   * this package version verified is `"depth-anything-v2"` of {@link SOURCES}
    * (`./config.ts`) — to pin reproducibility yourself, the caller states `{ repo, revision }`
    * explicitly. A string `ref` reads as `{ repo }` (= follows `main`).
    *
    * A local distribution is passed as a **source handle** (`localDirectory` / `denoDirectory` of
    * `@karume/hub/deno`). It skips the check of HF's `owner/name` spelling and touches neither the
-   * network nor CacheStorage (the HTTP-only knobs of {@link DepthAnythingFromPretrainedOptions}
+   * network nor CacheStorage (the HTTP-only knobs of {@link FromPretrainedOptions}
    * have no effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
-    options: DepthAnythingFromPretrainedOptions = {},
-  ): Promise<DepthAnythingPipeline> {
+    options: FromPretrainedOptions = {},
+  ): Promise<Pipeline> {
     const source = toManifestSource(
       ref,
-      "DepthAnythingPipeline.fromPretrained",
-      'DEPTH_ANYTHING_SOURCES["depth-anything-v2"] (@karume/models/depth-anything)',
+      "depthAnything.Pipeline.fromPretrained",
+      'SOURCES["depth-anything-v2"] (@karume/models/depth-anything)',
     );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
@@ -669,7 +669,7 @@ export class DepthAnythingPipeline {
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     const selection = resolveSelection(loaded.manifest, choice);
-    const buildOptions: DepthAnythingPipelineOptions = {
+    const buildOptions: PipelineOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       ...choice,
       ...(options.onRunDiagnostics === undefined
@@ -679,7 +679,7 @@ export class DepthAnythingPipeline {
     // The family checks run in the admission hook (before weight parts are fetched —
     // `hub/components.ts`).
     const { admitted, open } = await loadContainerComponents(
-      "DepthAnythingPipeline.fromPretrained",
+      "depthAnything.Pipeline.fromPretrained",
       loaded,
       selection,
       COMPONENT_KEYS,
@@ -691,7 +691,7 @@ export class DepthAnythingPipeline {
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
           buildOptions.gpu,
-          `DepthAnythingPipeline: quant '${admitted.quantName}'`,
+          `depthAnything.Pipeline: quant '${admitted.quantName}'`,
         );
         return admitted;
       },
@@ -701,7 +701,7 @@ export class DepthAnythingPipeline {
         ...(options.components === undefined ? {} : { components: options.components }),
       },
     );
-    return new DepthAnythingPipeline(await openDepthAnythingState(admitted, open, buildOptions));
+    return new Pipeline(await openDepthAnythingState(admitted, open, buildOptions));
   }
 
   /**
@@ -715,13 +715,10 @@ export class DepthAnythingPipeline {
    * mixing with the single-form key fails loudly (the receiving implementation is the one in
    * `src/hub/components.ts`).
    */
-  static async fromAssets(
-    input: DepthAnythingAssets,
-    options: DepthAnythingPipelineOptions = {},
-  ): Promise<DepthAnythingPipeline> {
+  static async fromAssets(input: Assets, options: PipelineOptions = {}): Promise<Pipeline> {
     const open = await assetOpener(input.assets);
     const admitted = admitDepthAnything(input.manifest, open, options);
-    return new DepthAnythingPipeline(await openDepthAnythingState(admitted, open, options));
+    return new Pipeline(await openDepthAnythingState(admitted, open, options));
   }
 
   /**
@@ -739,7 +736,7 @@ export class DepthAnythingPipeline {
     // The disposed check happens at call time (checking inside the chain would also fail the
     // estimations accepted before dispose).
     if (this.#disposal !== undefined) {
-      throw new Error("DepthAnythingPipeline: cannot estimate after dispose");
+      throw new Error("depthAnything.Pipeline: cannot estimate after dispose");
     }
     return await this.#chain(() => estimateImage(this.#state, image));
   }

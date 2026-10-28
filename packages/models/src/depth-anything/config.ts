@@ -45,7 +45,7 @@
  * ratio has nowhere to go (stretching is the only choice). A declaration alone would read as "it
  * could keep it but does not", so the model card's prose carries the fact.
  *
- * NOTE: the public distribution repository table ({@link DEPTH_ANYTHING_SOURCES}) lives here too.
+ * NOTE: the public distribution repository table ({@link SOURCES}) lives here too.
  * It is not derivable from the manifest but on the "which manifest to fetch" side, so the
  * distribution cannot hold it (ADR 0073).
  */
@@ -90,12 +90,12 @@ export const DEPTH_ANYTHING_PIPELINE_MAJOR = 1;
  * so the bytes this published package reads would change silently for network-side reasons (an
  * unrecoverable accident). A SHA also removes the revision-resolution request itself, so an offline
  * start from a complete cache works at the same time (ADR 0038). A user who needs to follow main
- * explicitly chooses `{ ...DEPTH_ANYTHING_SOURCES["depth-anything-v2"], revision: "main" }`.
+ * explicitly chooses `{ ...SOURCES["depth-anything-v2"], revision: "main" }`.
  */
 // NOTE: the revision is updated to main's SHA after the upload by §3 of the release runbook
 // (docs/release-runbook.md) (inherits the maintenance duty of ADR 0073 decision 3 — by hand +
 // runbook check).
-export const DEPTH_ANYTHING_SOURCES = {
+export const SOURCES = {
   "depth-anything-v2": {
     repo: "hdae/karume-depth-anything-v2",
     revision: "b3969c2e64dba345a4ec996231abd642c06a8efd",

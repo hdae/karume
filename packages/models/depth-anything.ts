@@ -4,8 +4,8 @@
  *
  * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
  * wholesale. The surface follows the user's stories — build
- * ({@link DepthAnythingPipeline.fromPretrained} / {@link DepthAnythingPipeline.fromAssets}) / choose
- * a source ({@link DEPTH_ANYTHING_SOURCES}) / estimate depth (`estimate`) / release (`dispose`).
+ * ({@link Pipeline.fromPretrained} / {@link Pipeline.fromAssets}) / choose
+ * a source ({@link SOURCES}) / estimate depth (`estimate`) / release (`dispose`).
  *
  * Decoding the pixels is the user's responsibility; resize / rescale / normalize are applied inside
  * `estimate` with the distribution's constants. The result is **raw f32 relative depth with the same
@@ -18,11 +18,11 @@
  * CLAUDE.md). Tree-shaking through the barrel (`mod.ts`) works only on top of this invariant.
  */
 
-export { DepthAnythingPipeline } from "./src/depth-anything/pipeline.ts";
+export { Pipeline } from "./src/depth-anything/pipeline.ts";
 export type {
-  DepthAnythingAssets,
-  DepthAnythingFromPretrainedOptions,
-  DepthAnythingPipelineOptions,
+  Assets,
+  FromPretrainedOptions,
+  PipelineOptions,
   DepthMap,
 } from "./src/depth-anything/pipeline.ts";
 /**
@@ -31,15 +31,15 @@ export type {
  * Generations and versions are separate repositories = separate entries (the generation is part of
  * the repository name), so one entry for now:
  *
- * - `DEPTH_ANYTHING_SOURCES["depth-anything-v2"]` = `hdae/karume-depth-anything-v2`
+ * - `SOURCES["depth-anything-v2"]` = `hdae/karume-depth-anything-v2`
  *   (default = Small)
  *
  * **An opt-in for callers who want to follow the package version automatically** — pass an entry as
- * is as the first argument of {@link DepthAnythingPipeline.fromPretrained}. To pin reproducibility
+ * is as the first argument of {@link Pipeline.fromPretrained}. To pin reproducibility
  * yourself, write your own `{ repo, revision }` instead of using this table (`fromPretrained` has no
  * default).
  */
-export { DEPTH_ANYTHING_SOURCES } from "./src/depth-anything/config.ts";
+export { SOURCES } from "./src/depth-anything/config.ts";
 export type { Rgb8Image } from "./src/image/preprocess.ts";
 
 /**

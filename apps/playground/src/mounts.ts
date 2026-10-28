@@ -12,7 +12,7 @@
 
 import * as anima from "@karume/models/anima";
 import * as birefnet from "@karume/models/birefnet";
-import { DEPTH_ANYTHING_SOURCES } from "@karume/models/depth-anything";
+import * as depthAnything from "@karume/models/depth-anything";
 import { GEMMA4_SOURCES } from "@karume/models/gemma";
 import { IRODORI_SOURCES } from "@karume/models/irodori";
 import { SBV2_SOURCES } from "@karume/models/sbv2";
@@ -44,7 +44,7 @@ export const MOUNTS = {
   lucida: { directory: "models/karume-lucida", hfRepo: birefnet.SOURCES["lucida"].repo },
   "depth-anything": {
     directory: "models/karume-depth-anything-v2",
-    hfRepo: DEPTH_ANYTHING_SOURCES["depth-anything-v2"].repo,
+    hfRepo: depthAnything.SOURCES["depth-anything-v2"].repo,
   },
   siglip2: { directory: "models/karume-siglip2", hfRepo: SIGLIP2_SOURCES["siglip2"].repo },
   "irodori-v4": {

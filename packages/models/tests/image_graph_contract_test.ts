@@ -16,7 +16,7 @@ import { describe, it } from "vite-plus/test";
 import { type IrDeclaration, parseIrDeclarationValue } from "@karume/runtime";
 import { type Manifest, parseManifest } from "@karume/hub";
 import * as birefnet from "../birefnet.ts";
-import { DepthAnythingPipeline } from "../src/depth-anything/pipeline.ts";
+import * as depthAnything from "../depth-anything.ts";
 import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
 import { declaredContainer, partAssets, writeContainer } from "./helpers/container-fixture.ts";
 
@@ -146,7 +146,7 @@ describe("画像 3 家族の構築前検査", () => {
     it("Depth Anything は GPU を取る前に入力 dtype を名指しで落とす", async () => {
       await assertRejects(
         async () =>
-          await DepthAnythingPipeline.fromAssets({
+          await depthAnything.Pipeline.fromAssets({
             manifest: manifestOf("depth-anything/1", "depth", {
               ...IMAGE_CONFIG,
               interpolation: "bicubic",
