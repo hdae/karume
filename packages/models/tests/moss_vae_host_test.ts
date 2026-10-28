@@ -34,7 +34,11 @@ import {
   mossUnpatchify,
   mossVaeInput,
 } from "../src/moss/vae-host.ts";
-import { mossVaeStageNeeds, planMossVae } from "../src/moss/vae-stage.ts";
+import {
+  MOSS_VAE_ATTENTION_ROW_BLOCK_BYTES,
+  mossVaeStageNeeds,
+  planMossVae,
+} from "../src/moss/vae-stage.ts";
 import { firstBitMismatch, readRecordTensors, stage0Dir } from "./helpers/moss-dit.ts";
 import {
   loadVaeGolden,
@@ -229,16 +233,31 @@ describe.skipIf(!SERIES_PRESENT)(
       );
     });
 
-    it("needs the three estimates, the residents, the largest part and the margin", async () => {
+    it("needs the three estimates (the attention's with its row-block budget), the residents, the largest part and the margin", async () => {
       const { components, contract } = await openMossVaeSeries();
       const plan = planMossVae({ width: 1648, height: 1696 }, contract, LIMITS_2GIB);
       const bindings = { h: 212, w: 206 };
-      const estimate = (component: typeof components.pre, values: Record<string, number>) =>
-        component.estimate({ ...LIMITS_2GIB, bindings: values }).peakAccountedBytes;
+      const estimate = (
+        component: typeof components.pre,
+        values: Record<string, number>,
+        attentionRowBlockMaxBytes?: number,
+      ) =>
+        component.estimate({
+          ...LIMITS_2GIB,
+          bindings: values,
+          ...(attentionRowBlockMaxBytes === undefined ? {} : { attentionRowBlockMaxBytes }),
+        }).peakAccountedBytes;
       const post = estimate(components.post, bindings);
+      const attention = estimate(
+        components.attn,
+        { S: 212 * 206 },
+        MOSS_VAE_ATTENTION_ROW_BLOCK_BYTES,
+      );
+      // Precondition: at the cap the budget is reached (the attention's estimate is smaller with it).
+      expect(attention).toBeLessThan(estimate(components.attn, { S: 212 * 206 }));
       const expected =
         estimate(components.pre, bindings) +
-        estimate(components.attn, { S: 212 * 206 }) +
+        attention +
         post +
         2 * 384 * 212 * 206 * 4 +
         3 * 1696 * 1648 * 4 +

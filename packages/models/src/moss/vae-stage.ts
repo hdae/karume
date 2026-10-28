@@ -33,6 +33,21 @@
  * 192 → 96 (§1.5) — is a cross-check only (the tests compare it with the estimate and the
  * measurement). The check is a fact of the moment, not a reservation.
  *
+ * ## The mid attention's row blocks (plan question 17, option ④ — step 5)
+ *
+ * The `vae_decoder_attn` Session runs its fused attention in row blocks of at most
+ * {@link MOSS_VAE_ATTENTION_ROW_BLOCK_BYTES} (`SessionOptions.attentionRowBlockMaxBytes`), and its
+ * estimate takes the same value, so the need sizes the Session that opens. The budget changes only
+ * how many row blocks run, never a value (ADR 0124 — the output is bit-identical to the unbudgeted
+ * run). Why: with the practical preset the VAE is the stage that binds a generation on a 12 GiB
+ * device — at the area cap (1696×1648) its need was 11.41 GiB against the practical DiT pair's 9.42 GiB, and
+ * the trial allocation passed on an idle RTX 3080 Ti with about 0.5 GiB to spare. With 256 MiB the
+ * need at the cap is 9.88 GiB (29 row blocks instead of 4 under the 2 GiB binding), the image is
+ * bit-identical and the decode time is unchanged (2.4 s against 2.4–2.5 s — measured 2026-10-28).
+ * Below about 8,200 attention positions (an S × S f32 score of 256 MiB — about 0.52M pixels) the
+ * budget is not reached and nothing changes. With the reference preset the DiT pair binds first
+ * (refused at the cap on the same device), which this budget does not move.
+ *
  * ## Acceptance (plan item 15-9)
  *
  * {@link planMossVae} checks the size (`./request.ts`) and the area against this device's area
@@ -73,6 +88,17 @@ const BYTES_PER_ELEMENT = 4;
 
 /** The RGB channels of the decoded image. */
 const IMAGE_CHANNELS = 3;
+
+/**
+ * The row-block budget of the mid attention (module doc "The mid attention's row blocks") — the
+ * `vae_decoder_attn` Session's `attentionRowBlockMaxBytes` and its estimate's.
+ */
+export const MOSS_VAE_ATTENTION_ROW_BLOCK_BYTES = 256 * 2 ** 20;
+
+/** The Session options (and estimate options) of `vae_decoder_attn`; the other two take none. */
+const ATTENTION_OPTIONS = Object.freeze({
+  attentionRowBlockMaxBytes: MOSS_VAE_ATTENTION_ROW_BLOCK_BYTES,
+});
 
 /** The three components of the VAE series. */
 export type MossVaeComponents = {
@@ -144,16 +170,21 @@ export const mossVaeStageNeeds = (
 ): number => {
   const { limits, components, contract } = input;
   const bindings = bindingsOf(contract, plan);
-  const estimate = (component: ModelComponent, values: Readonly<Record<string, number>>) =>
+  const estimate = (
+    component: ModelComponent,
+    values: Readonly<Record<string, number>>,
+    options: { readonly attentionRowBlockMaxBytes?: number } = {},
+  ) =>
     component.estimate({
       maxStorageBufferBindingSize: limits.maxStorageBufferBindingSize,
       maxBufferSize: limits.maxBufferSize,
       bindings: values,
+      ...options,
     }).peakAccountedBytes;
   const residents = residentBytes(contract, plan);
   return (
     estimate(components.pre, bindings.pre) +
-    estimate(components.attn, bindings.attn) +
+    estimate(components.attn, bindings.attn, ATTENTION_OPTIONS) +
     estimate(components.post, bindings.post) +
     2 * residents.hidden +
     residents.image +
@@ -198,8 +229,11 @@ export const decodeMossVae = async (
   const residents = residentBytes(contract, plan);
   const sessions: Session[] = [];
   const held: ResidentTensor[] = [];
-  const open = async (component: ModelComponent): Promise<Session> => {
-    const session = await component.createSession(gpu, {});
+  const open = async (
+    component: ModelComponent,
+    options: { readonly attentionRowBlockMaxBytes?: number } = {},
+  ): Promise<Session> => {
+    const session = await component.createSession(gpu, { ...options });
     sessions.push(session);
     return session;
   };
@@ -211,7 +245,7 @@ export const decodeMossVae = async (
   let failure: { readonly error: unknown } | undefined;
   try {
     const pre = await open(components.pre);
-    const attn = await open(components.attn);
+    const attn = await open(components.attn, ATTENTION_OPTIONS);
     const post = await open(components.post);
     const hidden = await resident(residents.hidden, `moss ${MOSS_VAE_DECODER_PRE}`);
     const attended = await resident(residents.hidden, `moss ${MOSS_VAE_DECODER_ATTN}`);

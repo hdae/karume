@@ -44,7 +44,9 @@
  *
  * The default run (no opt-in): one 256² decode (finite, the census — the three ×2 upsamples run as
  * `upsample2x`, every GroupNorm as group_norm's five dispatches — and what the stage holds within
- * its estimates), the lifetimes (every Session and resident closed, the Sessions first, after a
+ * its estimates), the mid attention's row-block budget at 1024² (it splits the attention into more
+ * row blocks than the binding alone and leaves the image bit-identical — ADR 0124; plan question 17,
+ * option ④), the lifetimes (every Session and resident closed, the Sessions first, after a
  * run, after a failure inside the batch and after a failure while opening; nothing opened when the
  * headroom check refuses) and the area limit's refusal before any GPU work. Its values are not
  * compared with upstream (the parity check is opt-in); the sha256 rows of plan step 4 pin them.
@@ -65,6 +67,7 @@ import { ModelInputError } from "../../models/src/errors.ts";
 import { mossVaeAreaLimit } from "../../models/src/moss/vae-contract.ts";
 import {
   decodeMossVae,
+  MOSS_VAE_ATTENTION_ROW_BLOCK_BYTES,
   type MossVaeComponent,
   type MossVaeComponents,
   mossVaeStageNeeds,
@@ -280,6 +283,63 @@ describe.skipIf(!GPU_AVAILABLE || !SERIES)(
       for (const diagnostics of census.values()) held += heldBytes(diagnostics);
       console.info(`[moss vae] 256²: held ${held} B within the estimates + residents ${covered} B`);
       expect(held).toBeLessThanOrEqual(covered);
+    });
+
+    it("splits the mid attention by its row-block budget at 1024² and leaves the image bit-identical", async () => {
+      // 1024² is the smallest square of the lane where the budget is reached (S = 16,384 positions:
+      // an S × S f32 score of 1 GiB — one row block under the 2 GiB binding, four under 256 MiB).
+      const plan = planMossVae({ width: 1024, height: 1024 }, state.contract, gpu.limits);
+      const latents = new Float32Array(128 * plan.cells.rows * plan.cells.cols);
+      for (let at = 0; at < latents.length; at += 1) {
+        latents[at] = ((Math.imul(at ^ 0x5eed, 0x9e3779b1) >>> 0) / 2 ** 31 - 1) * 2;
+      }
+      // The same stage with the budget taken out of the attention Session and its estimate.
+      const { attn } = state.components;
+      const unbudgeted: MossVaeStageState = {
+        ...state,
+        components: {
+          ...state.components,
+          attn: {
+            ...attn,
+            createSession: (device, options = {}) => {
+              const { attentionRowBlockMaxBytes: _budget, ...rest } = options;
+              return attn.createSession(device, rest);
+            },
+            estimate: (options) => {
+              const { attentionRowBlockMaxBytes: _budget, ...rest } = options;
+              return attn.estimate(rest);
+            },
+          },
+        },
+      };
+      const attentionDispatches = (diagnostics: SessionDiagnostics | undefined): number =>
+        (diagnostics?.lastRunPipelines ?? [])
+          .filter((row) => row.key.startsWith("attention_"))
+          .reduce((total, row) => total + row.dispatchCount, 0);
+      const runs: { image: Float32Array<ArrayBuffer>; dispatches: number }[] = [];
+      for (const current of [state, unbudgeted]) {
+        let census: SessionDiagnostics | undefined;
+        const image = await decodeMossVae(current, plan, latents, (component, diagnostics) => {
+          if (component === "vae_decoder_attn") census = diagnostics;
+        });
+        runs.push({ image, dispatches: attentionDispatches(census) });
+      }
+      const [budgeted, plain] = runs;
+      console.info(
+        `[moss vae] 1024² mid attention: ${budgeted.dispatches} dispatches with the row-block budget,` +
+          ` ${plain.dispatches} without; need ${mossVaeStageNeeds({ ...state, limits: gpu.limits }, plan)} B` +
+          ` against ${mossVaeStageNeeds({ ...unbudgeted, limits: gpu.limits }, plan)} B`,
+      );
+      // The budget took effect (more row blocks — each block runs the three attention dispatches) …
+      expect(budgeted.dispatches).toBeGreaterThan(plain.dispatches);
+      expect(mossVaeStageNeeds({ ...state, limits: gpu.limits }, plan)).toBeLessThan(
+        mossVaeStageNeeds({ ...unbudgeted, limits: gpu.limits }, plan),
+      );
+      // … and changed no value (ADR 0124).
+      const bits = (values: Float32Array<ArrayBuffer>) =>
+        new Uint32Array(values.buffer, values.byteOffset, values.length);
+      const first = bits(budgeted.image).findIndex((word, at) => word !== bits(plain.image)[at]);
+      expect(first).toBe(-1);
     });
 
     it("closes every Session and resident, the Sessions first, after a run and after a failure", async () => {
@@ -562,15 +622,21 @@ describe.skipIf(!GPU_AVAILABLE || !SERIES)(
               "the VAE stage needs",
             );
           }
-          for (const [name, component, bindings] of [
-            ["pre", state.components.pre, { h: 212, w: 206 }],
-            ["attn", state.components.attn, { S: 212 * 206 }],
-            ["post", state.components.post, { h: 212, w: 206 }],
+          for (const [name, component, bindings, options] of [
+            ["pre", state.components.pre, { h: 212, w: 206 }, {}],
+            [
+              "attn",
+              state.components.attn,
+              { S: 212 * 206 },
+              { attentionRowBlockMaxBytes: MOSS_VAE_ATTENTION_ROW_BLOCK_BYTES },
+            ],
+            ["post", state.components.post, { h: 212, w: 206 }, {}],
           ] as const) {
             const report = component.estimate({
               maxStorageBufferBindingSize: gpu.limits.maxStorageBufferBindingSize,
               maxBufferSize: gpu.limits.maxBufferSize,
               bindings,
+              ...options,
             });
             console.info(
               `[moss vae cap] estimate ${name}: peak ${report.peakAccountedBytes} B,` +
