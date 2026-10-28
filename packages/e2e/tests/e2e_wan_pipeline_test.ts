@@ -1,8 +1,8 @@
 /**
- * Wan2.1 のパイプライン（`WanPipeline` — ADR 0118 段 6 の結線・段 7 の配布形）の通しの照合（実 GPU）。
+ * Wan2.1 のパイプライン（`Pipeline` — ADR 0118 段 6 の結線・段 7 の配布形）の通しの照合（実 GPU）。
  *
  * 配布形ミラー `models/karume-wan2.1/`（`dist.py --pipeline wan` が組む — `krm` 3 本とテキスト埋め込み
- * 資産）を `nodeDirectory` で `WanPipeline.fromPretrained` へ渡して組み、`generate` を通す（公開面の
+ * 資産）を `nodeDirectory` で `Pipeline.fromPretrained` へ渡して組み、`generate` を通す（公開面の
  * 取得面 — manifest の解決・家族 admission・part の逐次読み）。参照（`pipeline_steps.*`）は配布しない
  * golden なので系列 `outputs/series/wan2.1-t2v-1.3b-f16-dyn/` から読む。
  *
@@ -11,7 +11,7 @@
  * `KARUME_ALLOW_NO_DISTRIBUTION=1` — anima / gemma4 の e2e と同じ分担）。
  *
  * 比べる相手は recipe の少ステップの参照（`tools/export-recipes/wan/few_step_ref.py`）: diffusers の
- * `WanPipeline` を CPU f32 で素のまま 2 ステップ（CFG あり・guide 5.0・shift 3.0）回した潜在と、それを
+ * `Pipeline` を CPU f32 で素のまま 2 ステップ（CFG あり・guide 5.0・shift 3.0）回した潜在と、それを
  * 段 5 のタイル decode に通したフレーム（重みは f16 へ丸めた値 — ADR 0006）。初期ノイズは参照の
  * `latents_init`（torch の `randn`）を `latents` で注入する（seed 経路の 1 本 — {@link SEED_CASE} — を除く）。
  *
@@ -36,7 +36,7 @@
  * - **故障注入**（受入れの初期ノイズ）: プロンプトの正負の取り違え・guide の 1% のずれ が帯の外
  *   （床 {@link FAULT_MARGIN} 倍）。
  * - **sha256 の環境行**（ADR 0106）: 出力フレーム（uint8 の RGB を全フレーム連結したバイト列 —
- *   `wanFrameToRgba` の規則）を `fixtures/references/wan.json` の環境キーの行と突き合わせる。
+ *   `frameToRgba` の規則）を `fixtures/references/wan.json` の環境キーの行と突き合わせる。
  *   行は `KARUME_REFERENCE=write` で作る。B570 の行（2026-10-02）は段 6 で**系列を直読み**
  *   （`fromAssets`）して書いた値で、配布形経由（`fromPretrained`）でも同じ行と一致することを
  *   ここで要求する — 配布形は系列の `krm` の独立コピーで、manifest の既定（50 / 5.0 / 3.0）も段 6 の
@@ -95,7 +95,7 @@
  * `drm-total-*` — `helpers/drm-usage.ts`）。DiT の段の `end`（Session を畳んだ直後・VAE の段を張る前）の
  * 値で、B570 の `destroy()` の遅れが DiT と VAE の確保を重ねていないかを見る（2026-10-02 の実測では
  * 段の前の値へ戻っていた — 解放待ちを入れなかった根拠。`src/wan/pipeline.ts` のモジュール doc）。
- * GPU 時間は採らない — 計測の device では VAE の batch を開けない（`WanPipeline` の構築が拒む）。
+ * GPU 時間は採らない — 計測の device では VAE の batch を開けない（`Pipeline` の構築が拒む）。
  *
  * 配布形か参照が無い環境は明示 SKIP、参照が一部だけある環境は FAIL（段 4 / 5 の e2e と同じ規律）。
  */
@@ -119,13 +119,13 @@ import {
 import { encodePng } from "../../models/mod.ts";
 import {
   type GeneratedVideo,
-  wanFrameToRgba,
-  type WanGenerateEvent,
-  type WanGenerateRequest,
-  WanPipeline,
-  type WanPipelineOptions,
-  type WanPrompt,
-  type WanRunComponent,
+  frameToRgba,
+  type GenerateEvent,
+  type GenerateRequest,
+  Pipeline,
+  type PipelineOptions,
+  type Prompt,
+  type RunComponent,
 } from "../../models/wan.ts";
 import { parseWanTextEmbeds } from "../../models/src/wan/text-embeds.ts";
 import {
@@ -395,11 +395,11 @@ const readDistributionEmbeds = async (): Promise<Uint8Array<ArrayBuffer>> => {
  */
 const loadPipeline = (
   gpu: GpuContext,
-  diagnostics: Map<WanRunComponent, SessionDiagnostics>,
-  textEncoder: NonNullable<WanPipelineOptions["textEncoder"]>,
+  diagnostics: Map<RunComponent, SessionDiagnostics>,
+  textEncoder: NonNullable<PipelineOptions["textEncoder"]>,
   quant: string,
-): Promise<WanPipeline> =>
-  WanPipeline.fromPretrained(
+): Promise<Pipeline> =>
+  Pipeline.fromPretrained(
     textEncoder === "gpu"
       ? nodeDirectory(DIST_ROOT, { crossRepo: crossRepoOf(nodeDirectory(UMT5_ROOT)) })
       : nodeDirectory(DIST_ROOT),
@@ -530,7 +530,7 @@ describe.skipIf(!DIST_PRESENT)(
       readonly label: string;
       readonly patch: (model: Record<string, unknown>) => Record<string, unknown>;
       /** 経路（既存の故障は事前計算の経路 — umT5 の有無に依らずに回す）。 */
-      readonly textEncoder: NonNullable<WanPipelineOptions["textEncoder"]>;
+      readonly textEncoder: NonNullable<PipelineOptions["textEncoder"]>;
       readonly message: string;
     }[] = [
       {
@@ -596,7 +596,7 @@ describe.skipIf(!DIST_PRESENT)(
           );
           await assertRejects(
             () =>
-              WanPipeline.fromPretrained(source, {
+              Pipeline.fromPretrained(source, {
                 textEncoder,
                 // 故障の 1 本は `f16` 席の宣言を書き換える — 席を名乗らないと既定席へ移って故障に触れない。
                 quant: F16_QUANT,
@@ -685,7 +685,7 @@ const rgbBytes = (video: GeneratedVideo): Uint8Array<ArrayBuffer> => {
   const plane = video.width * video.height;
   const out = new Uint8Array(video.frames * plane * 3);
   for (let frame = 0; frame < video.frames; frame += 1) {
-    const rgba = wanFrameToRgba(video, frame);
+    const rgba = frameToRgba(video, frame);
     for (let index = 0; index < plane; index += 1) {
       out.set(rgba.subarray(index * 4, index * 4 + 3), (frame * plane + index) * 3);
     }
@@ -701,7 +701,7 @@ type Observed = {
   readonly stageMs: Readonly<Record<string, number>>;
   readonly wallMs: number;
   readonly drm: DrmTimeline;
-  readonly diagnostics: ReadonlyMap<WanRunComponent, SessionDiagnostics>;
+  readonly diagnostics: ReadonlyMap<RunComponent, SessionDiagnostics>;
 };
 
 /**
@@ -709,9 +709,9 @@ type Observed = {
  * （Session を畳んだ後）で投げて VAE の段を飛ばす（故障注入は潜在だけを見る — VAE の 2 分を払わない）。
  */
 const observe = async (
-  pipeline: WanPipeline,
-  diagnostics: Map<WanRunComponent, SessionDiagnostics>,
-  request: Omit<WanGenerateRequest, "onEvent">,
+  pipeline: Pipeline,
+  diagnostics: Map<RunComponent, SessionDiagnostics>,
+  request: Omit<GenerateRequest, "onEvent">,
   options: { readonly abortAfterDenoise?: boolean } = {},
 ): Promise<Observed | { readonly latents: readonly Float32Array[] }> => {
   const latents: Float32Array[] = [];
@@ -721,7 +721,7 @@ const observe = async (
   const abort = new Error("DiT の段の後で止める（故障注入）");
   diagnostics.clear();
   const started = performance.now();
-  const onEvent = (event: WanGenerateEvent): void => {
+  const onEvent = (event: GenerateEvent): void => {
     if (event.kind === "denoise-step") latents.push(event.copyLatents().data);
     if (event.kind !== "stage") return;
     const label = `${event.component} ${event.at}`;
@@ -778,7 +778,7 @@ const formatObserved = (observed: Observed): string[] => {
 };
 
 const textOf = (
-  prompts: readonly WanPrompt[],
+  prompts: readonly Prompt[],
   name: string,
   form: "prompt" | "normalized",
 ): string => {
@@ -857,8 +857,8 @@ describe.skipIf(!ANY_PRESENT || !GPU_AVAILABLE)(
     let deviceLost: string | undefined;
     // One device and one `f16` pipeline shared by the its below (built before them, disposed after them all).
     let gpuContext: GpuContext | undefined;
-    let f16Pipeline: WanPipeline | undefined;
-    const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
+    let f16Pipeline: Pipeline | undefined;
+    const diagnostics = new Map<RunComponent, SessionDiagnostics>();
     beforeAll(async () => {
       gpuContext = verifyRunningGpu(
         await acquireTestGpu({
@@ -966,7 +966,7 @@ describe.skipIf(!ANY_PRESENT || !GPU_AVAILABLE)(
      * seed 経路の 2 ステップ 1 本（完走・非有限 0・sha256 の環境行）。`f16` 席と i8 の 2 席が同じこの 1 本を通る
      * （席ごとに違うのは pipeline と ID と行のクラスの表示だけ）。
      */
-    const seedPath = async (target: WanPipeline, id: string, quant: string): Promise<void> => {
+    const seedPath = async (target: Pipeline, id: string, quant: string): Promise<void> => {
       let settlement: ReferenceSettlement | undefined;
       await runRecordedCase(results, { id }, async () => {
         const observed = await observe(target, diagnostics, {
@@ -1010,7 +1010,7 @@ describe.skipIf(!ANY_PRESENT || !GPU_AVAILABLE)(
       readonly request: (prompts: {
         readonly ferret: string;
         readonly negative: string;
-      }) => Omit<WanGenerateRequest, "onEvent" | "latents" | "steps">;
+      }) => Omit<GenerateRequest, "onEvent" | "latents" | "steps">;
     }[] = [
       {
         label: "プロンプトの正負の取り違え",
@@ -1074,8 +1074,8 @@ describe.skipIf(!GPU_TEXT_PRESENT || !GPU_AVAILABLE)(
     let deviceLost: string | undefined;
     // One device and one GPU-path pipeline shared by the its below (built before them, disposed after them all).
     let gpuContext: GpuContext | undefined;
-    let gpuTextPipeline: WanPipeline | undefined;
-    const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
+    let gpuTextPipeline: Pipeline | undefined;
+    const diagnostics = new Map<RunComponent, SessionDiagnostics>();
     beforeAll(async () => {
       gpuContext = verifyRunningGpu(
         await acquireTestGpu({
@@ -1177,7 +1177,7 @@ const contactSheet = (
   for (let cell = 0; cell < cells; cell += 1) {
     // 先頭と末尾のフレームを含めて等間隔に引く（33 / 81 枚から 32 マス）。
     const frame = Math.round((cell * (video.frames - 1)) / (cells - 1));
-    const source = wanFrameToRgba(video, frame);
+    const source = frameToRgba(video, frame);
     const left = (cell % cols) * cellWidth;
     const top = Math.floor(cell / cols) * cellHeight;
     for (let y = 0; y < cellHeight; y += 1) {
@@ -1206,7 +1206,7 @@ describe.skipIf(!FULL_PIPELINE || !ANY_PRESENT || !GPU_AVAILABLE)(
     let deviceLost: string | undefined;
     // One device shared by the its below (acquired before them, released after them all).
     let gpuContext: GpuContext | undefined;
-    const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
+    const diagnostics = new Map<RunComponent, SessionDiagnostics>();
     beforeAll(async () => {
       gpuContext = verifyRunningGpu(
         await acquireTestGpu({
@@ -1259,7 +1259,7 @@ describe.skipIf(!FULL_PIPELINE || !ANY_PRESENT || !GPU_AVAILABLE)(
             for (let frame = 0; frame < video.frames; frame += 1) {
               await writeFile(
                 fullResults.artifact(`${spec.id}-frame-${String(frame).padStart(2, "0")}.png`),
-                await encodePng(wanFrameToRgba(video, frame), video.width, video.height),
+                await encodePng(frameToRgba(video, frame), video.width, video.height),
               );
             }
             const sheet = contactSheet(video, 4, 8, 4);

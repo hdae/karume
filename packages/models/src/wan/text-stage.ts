@@ -7,9 +7,9 @@
  * The stage order and Session lifetimes (text → DiT → VAE, each created and closed one stage at a
  * time) are defined by the doc at the top of `./pipeline.ts`; this module holds only the text stage's
  * parts. Shared by the Wan2.1 / 2.2 classes (umT5 is the same as 2.1 — ADR 0121 decisions 9 and 10).
- * `owner` is the message prefix (`"WanPipeline"` for Wan2.1, `"WanTi2vPipeline"` for Wan2.2).
+ * `owner` is the message prefix (`"wan.Pipeline"` for Wan2.1, `"wan.Ti2vPipeline"` for Wan2.2).
  *
- * NOTE: the public types (`WanPipelineOptions` / `WanGenerateEvent` / `WanRunComponent` / `WanAssets`)
+ * NOTE: the public types (`PipelineOptions` / `GenerateEvent` / `RunComponent` / `Assets`)
  * are taken from `./pipeline.ts` with `import type` (type-only references are erased, so there is no
  * import cycle).
  *
@@ -28,12 +28,7 @@ import type { ComponentOpener, GraphOwner, ModelComponent } from "../hub/compone
 import { umt5GraphContract } from "../umt5/graph-contract.ts";
 import { buildUmt5RelativePositionBuckets, UMT5_MAX_LENGTH } from "../umt5/relative-position.ts";
 import { padUmt5Context, umt5SessionInputs } from "../umt5/session-io.ts";
-import type {
-  WanAssets,
-  WanGenerateEvent,
-  WanPipelineOptions,
-  WanRunComponent,
-} from "./pipeline.ts";
+import type { Assets, GenerateEvent, PipelineOptions, RunComponent } from "./pipeline.ts";
 import type { PromptGate, WanGenerationPlan } from "./plan.ts";
 import { DIT_CONTEXT, type DitContract, type WanContexts } from "./dit-loop.ts";
 import { firstNonFinite } from "./graph-io.ts";
@@ -52,8 +47,8 @@ import { parseWanTokenizerAsset, WanPromptEncoder } from "./text/tokenizer.ts";
  */
 export const TEXT_ENCODER = "text_encoder";
 
-/** The text encoder path ({@link WanPipelineOptions.textEncoder}). */
-export type WanTextEncoderRoute = NonNullable<WanPipelineOptions["textEncoder"]>;
+/** The text encoder path ({@link PipelineOptions.textEncoder}). */
+export type WanTextEncoderRoute = NonNullable<PipelineOptions["textEncoder"]>;
 
 /**
  * The default path (ADR 0119 decision 7 — no automatic switching, so the path never changes silently
@@ -67,7 +62,7 @@ const DEFAULT_TEXT_ENCODER: WanTextEncoderRoute = "gpu";
  * decision 3). MUST: call before fetching — the components to fetch depend on the path.
  */
 export const textEncoderRouteOf = (
-  options: Pick<WanPipelineOptions, "textEncoder">,
+  options: Pick<PipelineOptions, "textEncoder">,
   owner: string,
 ): WanTextEncoderRoute => {
   const route: unknown = options.textEncoder ?? DEFAULT_TEXT_ENCODER;
@@ -88,7 +83,7 @@ export const textEncoderRouteOf = (
  */
 export const assertTextEncoderDeclared = (
   manifest: Manifest,
-  options: Pick<WanPipelineOptions, "model">,
+  options: Pick<PipelineOptions, "model">,
   route: WanTextEncoderRoute,
   owner: string,
 ): void => {
@@ -107,7 +102,7 @@ export const assertTextEncoderDeclared = (
 /**
  * The key of the text embedding asset (the per-model `assets` of the step 7 manifest — decision 4).
  * Read on both paths — the accepted set of `"precomputed"`, and on `"gpu"` the source of
- * `WanPipeline.prompts` (the list of examples).
+ * `Pipeline.prompts` (the list of examples).
  */
 const TEXT_EMBEDS = "text_embeds";
 
@@ -246,7 +241,7 @@ export type WanTextStage =
  */
 export const loadWanTextStage = async (
   textEncoder: WanTextAdmission,
-  assets: WanAssets["assets"],
+  assets: Assets["assets"],
   open: ComponentOpener,
   dit: DitContract,
   signal: AbortSignal | undefined,
@@ -361,7 +356,7 @@ export const precomputedContexts = (
 type WanTextEncodeState = {
   readonly gpu: GpuContext;
   readonly dit: DitContract;
-  readonly onRunDiagnostics?: (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
+  readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
 /**
@@ -383,7 +378,7 @@ export const encodeWanPrompts = async (
   state: WanTextEncodeState,
   text: Extract<WanTextStage, { readonly kind: "gpu" }>,
   plan: WanGenerationPlan<Int32Array<ArrayBuffer>>,
-  emit: (event: WanGenerateEvent) => Promise<void>,
+  emit: (event: GenerateEvent) => Promise<void>,
   signal: AbortSignal | undefined,
   owner: string,
 ): Promise<WanContexts> => {

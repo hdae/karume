@@ -6,7 +6,7 @@
  *
  * Shared by the standalone `Encoder` (`./encoder.ts`) and Wan's text stage (`umt5Contract` in
  * `src/wan/text-stage.ts` — which adds the match against the DiT's context input). `owner` is the
- * message prefix (`"umt5.Encoder"` / `"WanPipeline"` etc.).
+ * message prefix (`"umt5.Encoder"` / `"wan.Pipeline"` etc.).
  *
  * NOTE: internal only (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  *

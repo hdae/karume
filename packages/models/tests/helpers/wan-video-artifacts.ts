@@ -8,7 +8,7 @@
 import { writeFile } from "@karume/test-support/fs";
 import type { Results } from "../../../runtime/tests/helpers/results.ts";
 import { encodePng } from "../../mod.ts";
-import { type GeneratedVideo, wanFrameToRgba } from "../../wan.ts";
+import { type GeneratedVideo, frameToRgba } from "../../wan.ts";
 
 /** 全フレームを `<id>-frame-NN.png` として結果の席へ書く（NN は 0 始まり・2 桁以上）。 */
 export const writeWanFrames = async (
@@ -19,7 +19,7 @@ export const writeWanFrames = async (
   for (let frame = 0; frame < video.frames; frame += 1) {
     await writeFile(
       results.artifact(`${id}-frame-${String(frame).padStart(2, "0")}.png`),
-      await encodePng(wanFrameToRgba(video, frame), video.width, video.height),
+      await encodePng(frameToRgba(video, frame), video.width, video.height),
     );
   }
 };
@@ -44,7 +44,7 @@ export const contactSheet = (
   for (let cell = 0; cell < cells; cell += 1) {
     // 先頭と末尾のフレームを含めて等間隔に引く（33 / 81 枚から 32 マス）。
     const frame = Math.round((cell * (video.frames - 1)) / (cells - 1));
-    const source = wanFrameToRgba(video, frame);
+    const source = frameToRgba(video, frame);
     const left = (cell % cols) * cellWidth;
     const top = Math.floor(cell / cols) * cellHeight;
     for (let y = 0; y < cellHeight; y += 1) {

@@ -1,11 +1,11 @@
 /**
  * The Wan2.2 page's form: choices, defaults, and the pure step from the form to a generation
- * request. The accepted values mirror `WanTi2vPipeline` (1280×704 / 704×1280, 4n+1 frames from 5 to
+ * request. The accepted values mirror `Ti2vPipeline` (1280×704 / 704×1280, 4n+1 frames from 5 to
  * 121, `vaeTile` 16 or 32); the pipeline still validates every request itself.
  */
 
 import { type Manifest, resolveSelection } from "@karume/hub";
-import type { WanPrompt, WanTi2vGenerateRequest } from "@karume/models/wan";
+import type { Prompt, Ti2vGenerateRequest } from "@karume/models/wan";
 
 export type TextEncoderPath = "precomputed" | "gpu";
 export type SizeChoice = "1280x704" | "704x1280";
@@ -109,7 +109,7 @@ const parseInteger = (text: string, what: string, min: number, max: number): num
 };
 
 /** The request parts the form decides (the page adds `onEvent` / `signal`). */
-export type WanRequestParts = Omit<WanTi2vGenerateRequest, "onEvent" | "signal"> & {
+export type WanRequestParts = Omit<Ti2vGenerateRequest, "onEvent" | "signal"> & {
   readonly steps: number;
   readonly seed: number;
   readonly frames: number;
@@ -122,7 +122,7 @@ export type WanRequestParts = Omit<WanTi2vGenerateRequest, "onEvent" | "signal">
  * Form → request. Throws a `RangeError` naming the field for input the page can reject before
  * touching the GPU (the pipeline's `ModelInputError`s still cover the rest).
  */
-export const buildRequest = (form: WanForm, prompts: readonly WanPrompt[]): WanRequestParts => {
+export const buildRequest = (form: WanForm, prompts: readonly Prompt[]): WanRequestParts => {
   const [width, height] = form.size === "1280x704" ? [1280, 704] : [704, 1280];
   const shiftText = form.shift.trim();
   const shift = Number(shiftText);

@@ -18,11 +18,7 @@ import { describe, it, test } from "vite-plus/test";
 import { parseManifest } from "@karume/hub";
 import type { CodecName, RunInputs, Tensor } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
-import {
-  type WanGenerateRequest,
-  WanPipeline,
-  type WanPipelineOptions,
-} from "../src/wan/pipeline.ts";
+import { type GenerateRequest, Pipeline, type PipelineOptions } from "../src/wan/pipeline.ts";
 import { planWanGeneration, planWanGpuGeneration, WAN21_FAMILY } from "../src/wan/family.ts";
 import { ditContract, ditInputs, wanDitPatch } from "../src/wan/dit-loop.ts";
 import { umt5Contract, WAN_DEFAULT_NEGATIVE_PROMPT } from "../src/wan/text-stage.ts";
@@ -65,7 +61,7 @@ import {
   WanTextEmbedsError,
 } from "../src/wan/text-embeds.ts";
 import { denormalizeWanLatents, WAN_LATENTS_MEAN, WAN_LATENTS_STD } from "../src/wan/latents.ts";
-import { wanFrameToRgba } from "../src/wan/frames.ts";
+import { frameToRgba } from "../src/wan/frames.ts";
 import { WanRandn } from "../src/wan/random.ts";
 import { parseWanPipelineConfig, type WanPipelineConfig } from "../src/wan/config.ts";
 
@@ -144,7 +140,7 @@ const EMBEDS: WanTextEmbeds = parseWanTextEmbeds(buildAsset(ROWS));
 const LAYOUT = { latentChannels: 16, tile: 32, sampleTile: 256, sampleChannels: 3 };
 /** 配布形の `pipelineConfig`（recipe `wan/distribution.py` の `WAN_PIPELINE_CONFIG` — 参照の設定）。 */
 const CONFIG: WanPipelineConfig = { scheduler: { shift: 3 }, defaults: { steps: 50, guidance: 5 } };
-const plan = (request: Partial<WanGenerateRequest>) =>
+const plan = (request: Partial<GenerateRequest>) =>
   planWanGeneration(
     { prompt: "Two cats.", ...request },
     EMBEDS,
@@ -373,7 +369,7 @@ describe("planWanGeneration（generate の入口の門）", () => {
   });
 
   it("受理集合の外の寸法・フレーム数・step 数・shift は ModelInputError", () => {
-    const rejected: readonly [Partial<WanGenerateRequest>, string][] = [
+    const rejected: readonly [Partial<GenerateRequest>, string][] = [
       [{ width: 832, height: 832 }, "accepted set"],
       [{ width: 840, height: 480 }, "accepted set"],
       [{ frames: 32 }, "frames"],
@@ -470,7 +466,7 @@ describe("planWanGeneration（generate の入口の門）", () => {
 
   it("steps × shift の組で σ 列が壊れる要求は ModelInputError（低水準の RangeError は cause に残す）", () => {
     // 単項の門（正の有限の shift・1 以上 1000 以下の整数の steps）は通る組。
-    const rejected: readonly Partial<WanGenerateRequest>[] = [
+    const rejected: readonly Partial<GenerateRequest>[] = [
       { shift: 1e6 }, // σ[0] < σ[1]（shift が大きすぎて 1 へ張り付く）
       { shift: 1e-320 }, // σ[0] が Infinity
     ];
@@ -571,7 +567,7 @@ describe("家族 admission: VAE のグラフ宣言 × 世代の記述子（統�
     assertWanVaeMatchesGeneration(
       layoutOf({ latent: 16, sample: 3 }),
       WAN21_GENERATION,
-      "WanPipeline",
+      "wan.Pipeline",
     );
   });
 
@@ -581,10 +577,10 @@ describe("家族 admission: VAE のグラフ宣言 × 世代の記述子（統�
         assertWanVaeMatchesGeneration(
           layoutOf({ latent: 8, sample: 3 }),
           WAN21_GENERATION,
-          "WanPipeline",
+          "wan.Pipeline",
         ),
       Error,
-      "WanPipeline: the denormalization statistics (mean 16, std 16) do not match the VAE latent's 8 channels",
+      "wan.Pipeline: the denormalization statistics (mean 16, std 16) do not match the VAE latent's 8 channels",
     );
     assert(!(error instanceof ModelInputError), "資産の齟齬を入力起因にしない");
   });
@@ -597,9 +593,9 @@ describe("家族 admission: VAE のグラフ宣言 × 世代の記述子（統�
     };
     assertThrows(
       () =>
-        assertWanVaeMatchesGeneration(layoutOf({ latent: 16, sample: 3 }), stdOnly, "WanPipeline"),
+        assertWanVaeMatchesGeneration(layoutOf({ latent: 16, sample: 3 }), stdOnly, "wan.Pipeline"),
       Error,
-      "WanPipeline: the denormalization statistics (mean 16, std 8) do not match the VAE latent's 16 channels",
+      "wan.Pipeline: the denormalization statistics (mean 16, std 8) do not match the VAE latent's 16 channels",
     );
   });
 
@@ -609,10 +605,10 @@ describe("家族 admission: VAE のグラフ宣言 × 世代の記述子（統�
         assertWanVaeMatchesGeneration(
           layoutOf({ latent: 16, sample: 12 }),
           WAN21_GENERATION,
-          "WanPipeline",
+          "wan.Pipeline",
         ),
       Error,
-      "WanPipeline: VAE output 12 channels differ from RGB 3 × unpatchify 1² = 3",
+      "wan.Pipeline: VAE output 12 channels differ from RGB 3 × unpatchify 1² = 3",
     );
   });
 });
@@ -632,7 +628,7 @@ describe("空間の圧縮（グラフの比 × unpatchify）: 潜在の大きさ
     planWanRequest({ prompt: "p" }, gate, layout, CONFIG, generation);
 
   it("合成の宣言は記述子との照合を通り、空間の圧縮は 8 × 2 = 16", () => {
-    assertWanVaeMatchesGeneration(layout, SYNTHETIC, "WanPipeline");
+    assertWanVaeMatchesGeneration(layout, SYNTHETIC, "wan.Pipeline");
     assertEquals(wanSpatialCompression(layout, SYNTHETIC), 16);
   });
 
@@ -650,7 +646,7 @@ describe("空間の圧縮（グラフの比 × unpatchify）: 潜在の大きさ
       assertEquals(axis.starts.length, Math.ceil(span / (axis.tile - overlap)) + 1);
     }
     // 覆えるかの門も同じ大きさで計画して通る。
-    assertWanVaeTilesCover(layout, SYNTHETIC, "WanPipeline");
+    assertWanVaeTilesCover(layout, SYNTHETIC, "wan.Pipeline");
   });
 
   it("圧縮 16 で割れない寸法（840×480 — グラフの比 8 だけなら割れる）は、門も計画も同じく拒む", () => {
@@ -660,7 +656,7 @@ describe("空間の圧縮（グラフの比 × unpatchify）: 潜在の大きさ
       defaults: { ...SYNTHETIC.defaults, width: 840 },
     };
     assertThrows(
-      () => assertWanVaeTilesCover(layout, wide, "WanPipeline"),
+      () => assertWanVaeTilesCover(layout, wide, "wan.Pipeline"),
       Error,
       "with spatial compression 16 (VAE scale 128 / 16 × unpatchify 2), the latent of 840×480 is not integral",
     );
@@ -716,7 +712,7 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
   };
 
   it("配布形の宣言は通り、文脈と timestep の幅を宣言から引く", () => {
-    assertEquals(ditContract(transformerOf({}), ROPE, DIT_PATCH, "t2v", "WanPipeline"), {
+    assertEquals(ditContract(transformerOf({}), ROPE, DIT_PATCH, "t2v", "wan.Pipeline"), {
       output: "out",
       projWidth: 256,
       contextRows: 512,
@@ -732,7 +728,7 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
 
   it("VAE の潜在のチャネル数が DiT の tokens の幅と合わなければ落ちる（patch は VAE の宣言から組む）", () => {
     assertThrows(
-      () => ditContract(transformerOf({}), ROPE, wanDitPatch(8), "t2v", "WanPipeline"),
+      () => ditContract(transformerOf({}), ROPE, wanDitPatch(8), "t2v", "wan.Pipeline"),
       Error,
       "'tokens' shape",
     );
@@ -766,7 +762,7 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
     ];
     for (const [label, patch, message] of rejected) {
       assertThrows(
-        () => ditContract(transformerOf(patch), ROPE, DIT_PATCH, "t2v", "WanPipeline"),
+        () => ditContract(transformerOf(patch), ROPE, DIT_PATCH, "t2v", "wan.Pipeline"),
         Error,
         message,
         label,
@@ -791,9 +787,9 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
       values: { out: VALID.output },
     });
     assertThrows(
-      () => ditContract(missing, ROPE, DIT_PATCH, "t2v", "WanPipeline"),
+      () => ditContract(missing, ROPE, DIT_PATCH, "t2v", "wan.Pipeline"),
       Error,
-      "WanPipeline: transformer graph input 'rope_sin' is missing",
+      "wan.Pipeline: transformer graph input 'rope_sin' is missing",
     );
   });
 
@@ -812,9 +808,9 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
       values: { out: VALID.output },
     });
     assertThrows(
-      () => ditContract(extra, ROPE, DIT_PATCH, "t2v", "WanPipeline"),
+      () => ditContract(extra, ROPE, DIT_PATCH, "t2v", "wan.Pipeline"),
       Error,
-      `WanPipeline: transformer graph inputs are [${T2V_NAMES}, attention_mask]` +
+      `wan.Pipeline: transformer graph inputs are [${T2V_NAMES}, attention_mask]` +
         ` (expected: [${T2V_NAMES}] — input form 't2v')`,
     );
   });
@@ -827,10 +823,10 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
           ROPE,
           DIT_PATCH,
           "i2v",
-          "WanPipeline",
+          "wan.Pipeline",
         ]),
       Error,
-      `WanPipeline: unknown DiT input form 'i2v' ("t2v" / "ti2v")`,
+      `wan.Pipeline: unknown DiT input form 'i2v' ("t2v" / "ti2v")`,
     );
     // 壊れた資産（入力の欠け）と重なっても、未知の形の文言が先に出る（資産の中身に左右されない）。
     const broken = stubModel({
@@ -840,9 +836,9 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
       values: { out: VALID.output },
     });
     assertThrows(
-      () => Reflect.apply(ditContract, undefined, [broken, ROPE, DIT_PATCH, "i2v", "WanPipeline"]),
+      () => Reflect.apply(ditContract, undefined, [broken, ROPE, DIT_PATCH, "i2v", "wan.Pipeline"]),
       Error,
-      `WanPipeline: unknown DiT input form 'i2v' ("t2v" / "ti2v")`,
+      `wan.Pipeline: unknown DiT input form 'i2v' ("t2v" / "ti2v")`,
     );
   });
 
@@ -873,7 +869,7 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
       );
 
     it("正常形は通り、form を ti2v として返す（数値の欄は t2v と同じく宣言から引く）", () => {
-      assertEquals(ditContract(ti2vOf(TI2V_VALID), ROPE, TI2V_PATCH, "ti2v", "WanTi2vPipeline"), {
+      assertEquals(ditContract(ti2vOf(TI2V_VALID), ROPE, TI2V_PATCH, "ti2v", "wan.Ti2vPipeline"), {
         output: "out",
         projWidth: 256,
         contextRows: 512,
@@ -889,26 +885,26 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
           "condition_mask の欠け",
           replaced("condition_mask"),
           "ti2v",
-          `WanTi2vPipeline: transformer graph inputs are [${T2V_NAMES}, timesteps_proj_condition]` +
+          `wan.Ti2vPipeline: transformer graph inputs are [${T2V_NAMES}, timesteps_proj_condition]` +
             ` (expected: [${TI2V_NAMES}] — input form 'ti2v')`,
         ],
         [
           "condition_mask が f32",
           replaced("condition_mask", { name: "condition_mask", shape: [1, "S", 1] }),
           "ti2v",
-          "WanTi2vPipeline: transformer graph input 'condition_mask' has dtype f32, not bool",
+          "wan.Ti2vPipeline: transformer graph input 'condition_mask' has dtype f32, not bool",
         ],
         [
           "condition_mask が [1, S, 2]",
           replaced("condition_mask", { name: "condition_mask", shape: [1, "S", 2], dtype: "bool" }),
           "ti2v",
-          "WanTi2vPipeline: 'condition_mask' shape [1, S, 2] differs from the host's [1, S, 1]",
+          "wan.Ti2vPipeline: 'condition_mask' shape [1, S, 2] differs from the host's [1, S, 1]",
         ],
         [
           "condition_mask の記号が tokens と別",
           replaced("condition_mask", { name: "condition_mask", shape: [1, "T", 1], dtype: "bool" }),
           "ti2v",
-          "WanTi2vPipeline: 'condition_mask' shape [1, T, 1] differs from the host's [1, S, 1]",
+          "wan.Ti2vPipeline: 'condition_mask' shape [1, T, 1] differs from the host's [1, S, 1]",
         ],
         [
           "条件側の時刻の幅 128",
@@ -917,7 +913,7 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
             shape: [1, 128],
           }),
           "ti2v",
-          "WanTi2vPipeline: 'timesteps_proj_condition' shape [1, 128] differs from the host's [1, 256]",
+          "wan.Ti2vPipeline: 'timesteps_proj_condition' shape [1, 128] differs from the host's [1, 256]",
         ],
         [
           "条件側の時刻が bool",
@@ -927,26 +923,26 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
             dtype: "bool",
           }),
           "ti2v",
-          "WanTi2vPipeline: transformer graph input 'timesteps_proj_condition' has dtype bool, not f32",
+          "wan.Ti2vPipeline: transformer graph input 'timesteps_proj_condition' has dtype bool, not f32",
         ],
         [
           "TI2V の宣言を t2v として開く（余分な 2 本）",
           TI2V_VALID,
           "t2v",
-          `WanTi2vPipeline: transformer graph inputs are [${TI2V_NAMES}]` +
+          `wan.Ti2vPipeline: transformer graph inputs are [${TI2V_NAMES}]` +
             ` (expected: [${T2V_NAMES}] — input form 't2v')`,
         ],
         [
           "2.1 の 5 本の宣言を ti2v として開く",
           TI2V_VALID.slice(0, 5),
           "ti2v",
-          `WanTi2vPipeline: transformer graph inputs are [${T2V_NAMES}]` +
+          `wan.Ti2vPipeline: transformer graph inputs are [${T2V_NAMES}]` +
             ` (expected: [${TI2V_NAMES}] — input form 'ti2v')`,
         ],
       ];
       for (const [label, inputs, form, message] of rejected) {
         assertThrows(
-          () => ditContract(ti2vOf(inputs), ROPE, TI2V_PATCH, form, "WanTi2vPipeline"),
+          () => ditContract(ti2vOf(inputs), ROPE, TI2V_PATCH, form, "wan.Ti2vPipeline"),
           Error,
           message,
           label,
@@ -1143,7 +1139,7 @@ describe("潜在の逆正規化", () => {
 });
 
 describe("フレームの RGBA 化", () => {
-  // fps を持たない手組みの動画（wanFrameToRgba は fps を読まないので要求しない — 型検査が縛る）。
+  // fps を持たない手組みの動画（frameToRgba は fps を読まないので要求しない — 型検査が縛る）。
   const video = {
     frames: 2,
     width: 2,
@@ -1153,14 +1149,14 @@ describe("フレームの RGBA 化", () => {
   };
 
   it("clamp(x/2 + 0.5) を round(·255) で 8bit にし、フレームごとの平面を引く", () => {
-    assertEquals([...wanFrameToRgba(video, 0)], [0, 159, 64, 255, 255, 96, 223, 255]);
-    assertEquals([...wanFrameToRgba(video, 1)], [128, 255, 255, 255, 191, 0, 0, 255]);
+    assertEquals([...frameToRgba(video, 0)], [0, 159, 64, 255, 255, 96, 223, 255]);
+    assertEquals([...frameToRgba(video, 1)], [128, 255, 255, 255, 191, 0, 0, 255]);
   });
 
   it("範囲外のフレームと非有限値は fail loudly", () => {
-    assertThrows(() => wanFrameToRgba(video, 2), RangeError);
+    assertThrows(() => frameToRgba(video, 2), RangeError);
     const broken = { ...video, data: Float32Array.from(video.data).fill(Number.NaN, 3, 4) };
-    assertThrows(() => wanFrameToRgba(broken, 1), Error, "non-finite");
+    assertThrows(() => frameToRgba(broken, 1), Error, "non-finite");
   });
 
   it("寸法とフレーム数が正の整数でなければ、要素数が合っていても RangeError（Anima の imageToRgba と同じ入口契約）", () => {
@@ -1173,7 +1169,7 @@ describe("フレームの RGBA 化", () => {
     ];
     for (const { length, ...dims } of rejected) {
       assertThrows(
-        () => wanFrameToRgba({ ...dims, data: new Float32Array(length) }, 0),
+        () => frameToRgba({ ...dims, data: new Float32Array(length) }, 0),
         RangeError,
         "not a positive integer",
         JSON.stringify(dims),
@@ -1214,7 +1210,7 @@ describe("初期ノイズの乱数", () => {
 });
 
 /**
- * 模擬 Session で回す `WanPipeline`（GPU も資産も要らない — 後始末と非有限の門を `generate` の経路で
+ * 模擬 Session で回す `Pipeline`（GPU も資産も要らない — 後始末と非有限の門を `generate` の経路で
  * 縛る）。DiT の Session は値を `ditValue` で埋めた出力を返し、VAE は 1 タイル = 1 batch の手順
  * （`decodeWanVaeTile`）を偽の GpuContext で回して、読み戻すフレームを `vaeValue` で埋める。
  *
@@ -1375,15 +1371,12 @@ const mockPipeline = (options: {
     textEmbeds: EMBEDS,
     text,
   };
-  const pipeline: WanPipeline = Reflect.construct(WanPipeline, [state]);
+  const pipeline: Pipeline = Reflect.construct(Pipeline, [state]);
   /**
    * 5 フレーム・2 step（DiT 4 回・VAE 12 タイル）の要求で回し、観測したイベントを `log` に積む。プロンプトは
    * 資産の経路が `cats`、GPU 経路がフィクスチャの固定プロンプト `boxing-cats`（28 トークン）。
    */
-  const generate = (
-    onEvent?: WanGenerateRequest["onEvent"],
-    request: Partial<WanGenerateRequest> = {},
-  ) =>
+  const generate = (onEvent?: GenerateRequest["onEvent"], request: Partial<GenerateRequest> = {}) =>
     pipeline.generate({
       prompt: gpuText ? wanParityCase("fixed-boxing-cats").text : "Two cats.",
       frames: 5,
@@ -1403,7 +1396,7 @@ const mockPipeline = (options: {
   return { log, generate, ditContexts, ditRuns };
 };
 
-describe("WanPipeline.generate（模擬 Session）", () => {
+describe("Pipeline.generate（模擬 Session）", () => {
   it("対照: 有限の DiT / VAE の出力なら最後まで回り、フレームを [-1, 1] へクランプして返す", async () => {
     const { log, generate } = mockPipeline({ vaeValue: 2 });
     const video = await generate();
@@ -1468,7 +1461,7 @@ describe("WanPipeline.generate（模擬 Session）", () => {
       await assertRejects(
         () => generate(),
         Error,
-        `WanPipeline: unknown DiT input form 'i2v' ("t2v" / "ti2v")`,
+        `wan.Pipeline: unknown DiT input form 'i2v' ("t2v" / "ti2v")`,
       );
       assert(!log.includes("create:transformer"), `DiT の Session を張った: ${log}`);
     });
@@ -1501,7 +1494,7 @@ describe("WanPipeline.generate（模擬 Session）", () => {
   describe("DiT の段の後始末（本体の失敗を後始末の失敗で上書きしない）", () => {
     const thrown = new Error("A: onEvent の中断");
     const disposeFailure = new Error("B: Session.dispose の失敗");
-    const abort = (event: Parameters<NonNullable<WanGenerateRequest["onEvent"]>>[0]) => {
+    const abort = (event: Parameters<NonNullable<GenerateRequest["onEvent"]>>[0]) => {
       if (event.kind === "denoise-step") throw thrown;
     };
 
@@ -1528,16 +1521,16 @@ describe("WanPipeline.generate（模擬 Session）", () => {
   });
 });
 
-describe("WanPipeline.generate: I2V の欄（Wan2.2 だけの image / fit — JS の呼び手は型をすり抜ける）", () => {
+describe("Pipeline.generate: I2V の欄（Wan2.2 だけの image / fit — JS の呼び手は型をすり抜ける）", () => {
   /** TS の型を通らない欄を 1 つ差した生成の要求（2.1 の要求の型に `image` / `fit` は無い）。 */
-  const requestWith = (key: string, value: unknown): Partial<WanGenerateRequest> => {
-    const request: Partial<WanGenerateRequest> = {};
+  const requestWith = (key: string, value: unknown): Partial<GenerateRequest> => {
+    const request: Partial<GenerateRequest> = {};
     Object.defineProperty(request, key, { value, enumerable: true });
     return request;
   };
   const IMAGE = { data: new Uint8Array(4 * 4 * 3), width: 4, height: 4 };
   const MESSAGE =
-    "image / fit (generation from an image) is not accepted by this generation (Wan2.2's WanTi2vPipeline accepts it)";
+    "image / fit (generation from an image) is not accepted by this generation (Wan2.2's wan.Ti2vPipeline accepts it)";
 
   for (const [key, value] of [
     ["image", IMAGE],
@@ -1558,7 +1551,7 @@ describe("WanPipeline.generate: I2V の欄（Wan2.2 だけの image / fit — JS
   }
 });
 
-describe("WanPipeline.generate: vaeTile (ADR 0134 — Wan2.1 has no 32-latent decoder pair)", () => {
+describe("Pipeline.generate: vaeTile (ADR 0134 — Wan2.1 has no 32-latent decoder pair)", () => {
   it("vaeTile 32 is a ModelInputError naming the preset, before any Session is built", async () => {
     const { log, generate } = mockPipeline({});
     await assertRejects(
@@ -1585,7 +1578,7 @@ describe("WanPipeline.generate: vaeTile (ADR 0134 — Wan2.1 has no 32-latent de
 describe("planWanGpuGeneration（GPU 経路の入口の門）", () => {
   const encoder = wanParityEncoder();
   const BOXING_CATS = wanParityCase("fixed-boxing-cats");
-  const gpuPlan = (request: Partial<WanGenerateRequest>) =>
+  const gpuPlan = (request: Partial<GenerateRequest>) =>
     planWanGpuGeneration(
       { prompt: BOXING_CATS.text, ...request },
       encoder,
@@ -1747,7 +1740,7 @@ describe("家族 admission: umT5 のグラフ宣言 × ホストが組む形（�
   const buckets = VALID.inputs[1];
 
   it("配布形の宣言は通り、出力の名前を宣言から引く", () => {
-    assertEquals(umt5Contract(umt5Of({}), DIT, "WanPipeline"), { output: "out" });
+    assertEquals(umt5Contract(umt5Of({}), DIT, "wan.Pipeline"), { output: "out" });
   });
 
   it("入力名・幅・記号・dtype・本数・格納の食い違いは、umT5 を取る前に名指しで落ちる（素の Error）", () => {
@@ -1804,7 +1797,7 @@ describe("家族 admission: umT5 のグラフ宣言 × ホストが組む形（�
     ];
     for (const [label, patch, message] of rejected) {
       const error = assertThrows(
-        () => umt5Contract(umt5Of(patch), DIT, "WanPipeline"),
+        () => umt5Contract(umt5Of(patch), DIT, "wan.Pipeline"),
         Error,
         message,
         label,
@@ -1815,7 +1808,7 @@ describe("家族 admission: umT5 のグラフ宣言 × ホストが組む形（�
 
   it("有効長の上限 512 が DiT の文脈の行数を超える組は落ちる", () => {
     assertThrows(
-      () => umt5Contract(umt5Of({}), { contextRows: 256, contextWidth: 4096 }, "WanPipeline"),
+      () => umt5Contract(umt5Of({}), { contextRows: 256, contextWidth: 4096 }, "wan.Pipeline"),
       Error,
       "valid-length upper limit 512 exceeds the DiT context row count 256",
     );
@@ -1855,8 +1848,8 @@ const WITH_UMT5 = ["transformer", "vae_decoder_first", "vae_decoder_next", "text
 const WITHOUT_UMT5 = ["transformer", "vae_decoder_first", "vae_decoder_next"];
 
 /** TS の型を通らない値を 1 欄だけ差した構築オプション（JS の呼び手の綴り違いの再現）。 */
-const optionsWith = (key: string, value: unknown): WanPipelineOptions => {
-  const options: WanPipelineOptions = {};
+const optionsWith = (key: string, value: unknown): PipelineOptions => {
+  const options: PipelineOptions = {};
   Object.defineProperty(options, key, { value, enumerable: true });
   return options;
 };
@@ -1880,7 +1873,7 @@ describe("構築の入口（経路の綴り・umT5 の宣言・取る部品・�
   it("textEncoder の未知の綴りは資産に触る前に素の Error（model / quant 名の綴り違いと同じ扱い）", async () => {
     const error = await assertRejects(
       () =>
-        WanPipeline.fromAssets(
+        Pipeline.fromAssets(
           { manifest: wanManifest(WITH_UMT5), assets: {} },
           optionsWith("textEncoder", "cpu"),
         ),
@@ -1892,7 +1885,7 @@ describe("構築の入口（経路の綴り・umT5 の宣言・取る部品・�
 
   it("既定の gpu の経路で umT5 を宣言しない manifest は、容器を開く前に precomputed を案内して落ちる", async () => {
     await assertRejects(
-      () => WanPipeline.fromAssets({ manifest: wanManifest(WITHOUT_UMT5), assets: {} }),
+      () => Pipeline.fromAssets({ manifest: wanManifest(WITHOUT_UMT5), assets: {} }),
       Error,
       "no umT5 component 'text_encoder' (the default textEncoder \"gpu\" takes it",
     );
@@ -1904,14 +1897,11 @@ describe("構築の入口（経路の綴り・umT5 の宣言・取る部品・�
     const manifest = wanManifest(WITH_UMT5);
     await assertRejects(
       () =>
-        WanPipeline.fromAssets(
-          { manifest, assets: SHELL_COMPONENTS },
-          { textEncoder: "precomputed" },
-        ),
+        Pipeline.fromAssets({ manifest, assets: SHELL_COMPONENTS }, { textEncoder: "precomputed" }),
       WanVaeChunkError,
     );
     await assertRejects(
-      () => WanPipeline.fromAssets({ manifest, assets: SHELL_COMPONENTS }),
+      () => Pipeline.fromAssets({ manifest, assets: SHELL_COMPONENTS }),
       Error,
       "component 'text_encoder' has no container",
     );
@@ -1954,7 +1944,7 @@ describe("構築の入口（経路の綴り・umT5 の宣言・取る部品・�
         }),
       );
     const build = async (latent: number, sample: number) =>
-      WanPipeline.fromAssets(
+      Pipeline.fromAssets(
         {
           manifest: wanManifest(WITHOUT_UMT5),
           assets: {
@@ -1970,13 +1960,13 @@ describe("構築の入口（経路の綴り・umT5 の宣言・取る部品・�
         "出口 12",
         16,
         12,
-        "WanPipeline: VAE output 12 channels differ from RGB 3 × unpatchify 1² = 3",
+        "wan.Pipeline: VAE output 12 channels differ from RGB 3 × unpatchify 1² = 3",
       ],
       [
         "潜在 8",
         8,
         3,
-        "WanPipeline: the denormalization statistics (mean 16, std 16) do not match the VAE latent's 8 channels",
+        "wan.Pipeline: the denormalization statistics (mean 16, std 16) do not match the VAE latent's 8 channels",
       ],
     ];
     for (const [label, latent, sample, message] of rejected) {
@@ -1992,7 +1982,7 @@ describe("構築の入口（経路の綴り・umT5 の宣言・取る部品・�
     const reason = new Error("中止ボタン");
     controller.abort(reason);
     const error = await assertRejects(() =>
-      WanPipeline.fromAssets(
+      Pipeline.fromAssets(
         { manifest: wanManifest(WITH_UMT5), assets: {} },
         { signal: controller.signal },
       ),
@@ -2005,7 +1995,7 @@ describe("構築の入口（経路の綴り・umT5 の宣言・取る部品・�
     const reason = new Error("中止ボタン（実行中）");
     setTimeout(() => controller.abort(reason), 0);
     const error = await assertRejects(() =>
-      WanPipeline.fromAssets(
+      Pipeline.fromAssets(
         { manifest: wanManifest(WITH_UMT5), assets: {} },
         { signal: controller.signal },
       ),
@@ -2035,17 +2025,17 @@ test.skipIf(distManifestText === undefined)(
     // requiredLimits（umT5 の語彙埋め込み）で落ち、その文言が解決した席を名指す — 重みも GPU も使わずに席を観測する。
     await assertRejects(
       () =>
-        WanPipeline.fromAssets(
+        Pipeline.fromAssets(
           { manifest: parseManifest(distManifestText), assets: SHELL_COMPONENTS },
           { textEncoder: "precomputed", gpu: fakeGpuContext(fakeDevice()) },
         ),
       Error,
-      `WanPipeline: quant '${PRACTICAL_QUANT}': this GPU does not meet the required device limits`,
+      `wan.Pipeline: quant '${PRACTICAL_QUANT}': this GPU does not meet the required device limits`,
     );
   },
 );
 
-describe("WanPipeline.generate（模擬 Session・GPU 経路の text 段）", () => {
+describe("Pipeline.generate（模擬 Session・GPU 経路の text 段）", () => {
   it("text 段は positive → negative を回して畳み、畳んだ後に DiT の段を張る（Session の実行オプションは {}）", async () => {
     const generated = mockPipeline({ textEncoder: "gpu" });
     await generated.generate();
@@ -2114,7 +2104,7 @@ describe("WanPipeline.generate（模擬 Session・GPU 経路の text 段）", ()
   });
 });
 
-describe("WanPipeline.generate の初期ノイズ（latents）の所有", () => {
+describe("Pipeline.generate の初期ノイズ（latents）の所有", () => {
   /** 5 フレームの潜在 [16, 2, 60, 104]（値は要素ごとに変える — 取り違えが DiT の入力に出る）。 */
   const initialLatents = () =>
     new Float32Array(16 * 2 * 60 * 104).map((_, index) => ((index % 97) - 48) / 64);
@@ -2151,7 +2141,7 @@ describe("WanPipeline.generate の初期ノイズ（latents）の所有", () => 
   });
 });
 
-describe("WanPipeline.generate の中断（模擬 Session — signal.reason を包まず・Session を畳んで・次が回る）", () => {
+describe("Pipeline.generate の中断（模擬 Session — signal.reason を包まず・Session を畳んで・次が回る）", () => {
   it("step 1 の後の中断は step 2 の前で効き、DiT の Session を畳み、VAE の段を張らない・次の generate は回る", async () => {
     const { log, generate } = mockPipeline({});
     const controller = new AbortController();

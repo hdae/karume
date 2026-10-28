@@ -19,8 +19,8 @@
  * moved to the two official sizes").
  *
  * NOTE: the `export`s are for the pipeline internals and the tests (not exposed on `mod.ts` / the
- * subpath surface — ADR 0008). The only exception is the type {@link WanI2vFit}, which is vocabulary
- * of the public request type (`fit` of `WanTi2vGenerateRequest`) and is therefore exported from
+ * subpath surface — ADR 0008). The only exception is the type {@link I2vFit}, which is vocabulary
+ * of the public request type (`fit` of `Ti2vGenerateRequest`) and is therefore exported from
  * `./wan` and the barrel.
  */
 
@@ -30,17 +30,17 @@ import { assertRgb8, type Rgb8Image } from "../image/preprocess.ts";
 import type { WanGenerationDescriptor } from "./descriptor.ts";
 
 /** How the condition image is fitted to the size (the official centre crop / diffusers' direct resize — module doc). */
-export type WanI2vFit = "crop" | "stretch";
+export type I2vFit = "crop" | "stretch";
 
 /**
- * Whether the value is one of the spellings of {@link WanI2vFit} (the request check in `plan.ts`
+ * Whether the value is one of the spellings of {@link I2vFit} (the request check in `plan.ts`
  * rejects misspellings that slipped past the type).
  */
-export const isWanI2vFit = (value: unknown): value is WanI2vFit =>
+export const isWanI2vFit = (value: unknown): value is I2vFit =>
   value === "crop" || value === "stretch";
 
 /** The fit used when omitted (the same as official Wan2.2's I2V). */
-const DEFAULT_FIT: WanI2vFit = "crop";
+const DEFAULT_FIT: I2vFit = "crop";
 
 /** The channel count (RGB). */
 const CHANNELS = 3;
@@ -162,7 +162,7 @@ export const wanI2vCoverSize = (image: Size, target: Size): Size => {
  * rejects it first with the same plain `Error` ({@link isWanI2vFit}), so this is the guard for calls
  * that bypass that check.
  */
-export const fitWanI2vImage = (image: Rgb8Image, size: Size, fit: WanI2vFit): Rgb8Image => {
+export const fitWanI2vImage = (image: Rgb8Image, size: Size, fit: I2vFit): Rgb8Image => {
   if (fit === "stretch") return resizeRgb8Lanczos(image, size.width, size.height);
   if (fit !== "crop") {
     throw new Error(
@@ -285,7 +285,7 @@ export type WanI2vImageInput = {
  */
 export const preprocessWanI2vImage = (
   image: Rgb8Image,
-  request: Partial<Size> & { readonly fit?: WanI2vFit },
+  request: Partial<Size> & { readonly fit?: I2vFit },
   generation: Pick<WanGenerationDescriptor, "acceptedSizes" | "vaePatchSize">,
 ): WanI2vImageInput => {
   const size = selectWanI2vSize(image, request, generation);

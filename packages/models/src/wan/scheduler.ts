@@ -74,7 +74,7 @@ export type WanUniPcConfig = {
  * `scheduler_config`).
  *
  * NOTE: shift (`flow_shift` 3.0) is not kept here — it is a knob of the generation request
- * (`WanGenerateRequest.shift`).
+ * (`GenerateRequest.shift`).
  */
 export const WAN_UNIPC_CONFIG: WanUniPcConfig = {
   numTrainTimesteps: 1000,

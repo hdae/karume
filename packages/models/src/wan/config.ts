@@ -37,7 +37,7 @@ export const WAN_PIPELINE_NAME = "wan";
 export const WAN_PIPELINE_MAJOR = 1;
 
 /**
- * The `pipeline` contract name and major of Wan2.2 TI2V (`WanTi2vPipeline` — ADR 0121 decision 10).
+ * The `pipeline` contract name and major of Wan2.2 TI2V (`Ti2vPipeline` — ADR 0121 decision 10).
  * The `pipelineConfig` schema is the same single one as Wan2.1 ({@link parseWanPipelineConfig}).
  */
 export const WAN_TI2V_PIPELINE_NAME = "wan-ti2v";
@@ -52,12 +52,12 @@ export const WAN_TI2V_PIPELINE_MAJOR = 1;
  * the basename — the check in `tests/sources_test.ts` holds this invariant). Generations are separate
  * repositories (ADR 0092 decision 1):
  *
- * - `"wan2.2"` = `hdae/karume-wan2.2` (Wan2.2 TI2V 5B — read by `WanTi2vPipeline`; umT5's
+ * - `"wan2.2"` = `hdae/karume-wan2.2` (Wan2.2 TI2V 5B — read by `Ti2vPipeline`; umT5's
  *   text_encoder is a cross-repository reference to `karume-umt5-xxl`)
  *
  * Wan2.1 (`karume-wan2.1`) is not published on HF (ADR 0118 addendum (2026-10-15)), so it **has no
  * key** — a key without a public repository can only give a 404 (the reason of ADR 0073 decision 1).
- * Pass a local distribution to `WanPipeline`.
+ * Pass a local distribution to `Pipeline`.
  *
  * Pass it **as an opt-in to follow the package version automatically** — to pin reproducibility
  * yourself, write your own `{ repo, revision }` instead of this table (`fromPretrained` has no
@@ -67,12 +67,12 @@ export const WAN_TI2V_PIPELINE_MAJOR = 1;
  * so the bytes this published package reads would change silently at the network's convenience (an
  * unrecoverable accident). A SHA removes the revision-resolution request itself, so an offline start
  * with a full cache works at the same time (ADR 0038). A user who needs to follow main chooses
- * `{ ...WAN_SOURCES["wan2.2"], revision: "main" }` explicitly.
+ * `{ ...SOURCES["wan2.2"], revision: "main" }` explicitly.
  */
 // NOTE: the revision is updated to the SHA of main after the upload, in §3 of the release runbook
 // (docs/release-runbook.md) (inherits the maintenance duty of ADR 0073 decision 3 — by hand + the
 // runbook check).
-export const WAN_SOURCES = {
+export const SOURCES = {
   "wan2.2": {
     repo: "hdae/karume-wan2.2",
     revision: "791c3e92dedeb7988f6adc739a5139fbfd876823",

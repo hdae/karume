@@ -1,4 +1,4 @@
-// Wan2.2 TI2V 5B の class（`WanTi2vPipeline` — `src/wan/ti2v-pipeline.ts`）の GPU 不要の部分。family.ts が
+// Wan2.2 TI2V 5B の class（`Ti2vPipeline` — `src/wan/ti2v-pipeline.ts`）の GPU 不要の部分。family.ts が
 // class ごとの値（`WanFamilySpec` の owner・pipeline・generation）を本当に通していることを、公開の入口から縛る:
 //
 // - manifest の門（pipeline 名 / major・quant・`pipelineConfig`）— 2.1 と 2.2 の class が互いの manifest を拒む
@@ -7,7 +7,7 @@
 //   退行の縛り）
 // - 取得面（`fromPretrained`）も 2.2 の family を渡す（手元の取得元で `wan/1` を拒み `wan-ti2v/1` を受ける）
 // - 計画の門が 2.2 の受理集合で効く・模擬 Session の生成で patch 2 の記述子が VAE の段の末尾（unpatchify）まで届く
-// - 文言の接頭辞が `WanTi2vPipeline:`（2.1 の文言で取り違えない）
+// - 文言の接頭辞が `wan.Ti2vPipeline:`（2.1 の文言で取り違えない）
 // - I2V（ADR 0121 決定 11）: encoder の部品の admission・段の順と解放（encoder → 畳む → 解放待ち → text → DiT）・
 //   encoder の段の中断と構築途中の失敗の後片付け・encoder の受け渡し（常駐と bindings）・条件の潜在の非有限の門・
 //   DiT の条件づけ（先頭 P トークンのマスク・条件側の時刻 0・モデル入力だけの置き換え・UniPC へは置き換えない潜在・
@@ -31,12 +31,12 @@ import { ModelInputError } from "../src/errors.ts";
 import type { GraphOwner } from "../src/hub/components.ts";
 import type { Rgb8Image } from "../src/image/preprocess.ts";
 import {
-  type WanAssets,
-  type WanGenerateRequest,
-  WanPipeline,
-  type WanPipelineOptions,
+  type Assets,
+  type GenerateRequest,
+  Pipeline,
+  type PipelineOptions,
 } from "../src/wan/pipeline.ts";
-import { type WanTi2vGenerateRequest, WanTi2vPipeline } from "../src/wan/ti2v-pipeline.ts";
+import { type Ti2vGenerateRequest, Ti2vPipeline } from "../src/wan/ti2v-pipeline.ts";
 import { planWanGeneration, WAN22_TI2V_FAMILY } from "../src/wan/family.ts";
 import { ditContract, wanDitPatch, withWanFirstFrameCondition } from "../src/wan/dit-loop.ts";
 import { timestepsProj } from "../src/wan/dit-timestep.ts";
@@ -76,8 +76,8 @@ import { stubModel } from "./helpers/stub-model.ts";
 import type { ModelInput } from "../../runtime/tests/helpers/container-write.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 
-/** 2.2 の class の文言の接頭辞（F3 — 2.1 の `WanPipeline:` で取り違えない）。 */
-const OWNER = "WanTi2vPipeline:";
+/** 2.2 の class の文言の接頭辞（F3 — 2.1 の `wan.Pipeline:` で取り違えない）。 */
+const OWNER = "wan.Ti2vPipeline:";
 
 /** 系列の `pipelineConfig` の形（既定の shift は上流の scheduler の `flow_shift` 5.0）。 */
 const CONFIG: WanPipelineConfig = { scheduler: { shift: 5 }, defaults: { steps: 50, guidance: 5 } };
@@ -335,7 +335,7 @@ const ti2vManifest = (
 };
 
 /** 2.2 の宣言の資産一式（48 ch・出口 12 ch の VAE・7 入力の DiT・encoder 3 本・埋め込み幅 4096）。 */
-const VALID_ASSETS: WanAssets["assets"] = {
+const VALID_ASSETS: Assets["assets"] = {
   ...(await ditAssets(TI2V_DIT_INPUTS)),
   ...(await vaeAssets("vae_decoder_first", 1, { latent: 48, sample: 12 })),
   ...(await vaeAssets("vae_decoder_next", 4, { latent: 48, sample: 12 })),
@@ -343,28 +343,28 @@ const VALID_ASSETS: WanAssets["assets"] = {
   text_embeds: embedsAsset(4096),
 };
 
-/** 資産の一部を差し替えて `WanTi2vPipeline.fromAssets` へ渡す（共有の模擬 GPU — アダプタに触らない）。 */
+/** 資産の一部を差し替えて `Ti2vPipeline.fromAssets` へ渡す（共有の模擬 GPU — アダプタに触らない）。 */
 const buildTi2v = (
   manifest: Manifest,
-  replaced: WanAssets["assets"] = {},
-  options: WanPipelineOptions = {},
+  replaced: Assets["assets"] = {},
+  options: PipelineOptions = {},
 ) =>
-  WanTi2vPipeline.fromAssets(
+  Ti2vPipeline.fromAssets(
     { manifest, assets: { ...VALID_ASSETS, ...replaced } },
     { textEncoder: "precomputed", gpu: fakeGpuContext(fakeDevice()), ...options },
   );
 
 /** TS の型を通らない値を 1 欄だけ差した構築オプション（JS の呼び手の綴り違いの再現）。 */
-const optionsWith = (key: string, value: unknown): WanPipelineOptions => {
-  const options: WanPipelineOptions = {};
+const optionsWith = (key: string, value: unknown): PipelineOptions => {
+  const options: PipelineOptions = {};
   Object.defineProperty(options, key, { value, enumerable: true });
   return options;
 };
 
-describe("WanTi2vPipeline.fromAssets: manifest の門（pipeline 名 / major・quant・pipelineConfig）", () => {
+describe("Ti2vPipeline.fromAssets: manifest の門（pipeline 名 / major・quant・pipelineConfig）", () => {
   it("対照: wan-ti2v/1 の manifest と 2.2 の宣言の資産は構築を終え、prompts を資産の並びで返す", async () => {
     const pipeline = await buildTi2v(ti2vManifest());
-    assert(pipeline instanceof WanTi2vPipeline);
+    assert(pipeline instanceof Ti2vPipeline);
     assertEquals(
       pipeline.prompts.map((prompt) => prompt.name),
       ["cats", "negative"],
@@ -372,7 +372,7 @@ describe("WanTi2vPipeline.fromAssets: manifest の門（pipeline 名 / major・q
     await pipeline.dispose();
   });
 
-  it("wan/1（Wan2.1）の manifest を拒み、文言は WanTi2vPipeline: で始まる", async () => {
+  it("wan/1（Wan2.1）の manifest を拒み、文言は wan.Ti2vPipeline: で始まる", async () => {
     const error = await assertRejects(
       () => buildTi2v(ti2vManifest({ pipeline: "wan/1" })),
       Error,
@@ -382,15 +382,15 @@ describe("WanTi2vPipeline.fromAssets: manifest の門（pipeline 名 / major・q
     assert(!(error instanceof ModelInputError), "資産の齟齬を入力起因にしない");
   });
 
-  it("逆向き: WanPipeline は wan-ti2v/1 の manifest を WanPipeline: の文言で拒む", async () => {
+  it("逆向き: Pipeline は wan-ti2v/1 の manifest を wan.Pipeline: の文言で拒む", async () => {
     const error = await assertRejects(
       () =>
-        WanPipeline.fromAssets(
+        Pipeline.fromAssets(
           { manifest: ti2vManifest(), assets: VALID_ASSETS },
           { textEncoder: "precomputed", gpu: fakeGpuContext(fakeDevice()) },
         ),
       Error,
-      "WanPipeline: the manifest's pipeline is 'wan-ti2v/1' ('wan/1' is required)",
+      "wan.Pipeline: the manifest's pipeline is 'wan-ti2v/1' ('wan/1' is required)",
     );
     assert(!error.message.startsWith(OWNER), error.message);
   });
@@ -424,10 +424,10 @@ describe("WanTi2vPipeline.fromAssets: manifest の門（pipeline 名 / major・q
     );
   });
 
-  it("textEncoder の未知の綴りは資産に触る前に WanTi2vPipeline: の素の Error", async () => {
+  it("textEncoder の未知の綴りは資産に触る前に wan.Ti2vPipeline: の素の Error", async () => {
     const error = await assertRejects(
       () =>
-        WanTi2vPipeline.fromAssets(
+        Ti2vPipeline.fromAssets(
           { manifest: ti2vManifest(), assets: {} },
           optionsWith("textEncoder", "cpu"),
         ),
@@ -438,7 +438,7 @@ describe("WanTi2vPipeline.fromAssets: manifest の門（pipeline 名 / major・q
   });
 });
 
-describe("WanTi2vPipeline.fromAssets: 家族 admission は 2.2 の世代で照合する（48 ch・7 入力）", () => {
+describe("Ti2vPipeline.fromAssets: 家族 admission は 2.2 の世代で照合する（48 ch・7 入力）", () => {
   it("VAE を 2.1 の宣言（潜在 16・出口 3）に差し替えると、統計 48 本との照合で落ちる", async () => {
     const vae = {
       ...(await vaeAssets("vae_decoder_first", 1, { latent: 16, sample: 3 })),
@@ -560,16 +560,16 @@ const ti2vDirectory = async (
   );
 };
 
-describe("WanTi2vPipeline.fromPretrained: 取得面も 2.2 の family を渡す（手元の取得元）", () => {
+describe("Ti2vPipeline.fromPretrained: 取得面も 2.2 の family を渡す（手元の取得元）", () => {
   const fromPretrained = (source: DistributionSource) =>
-    WanTi2vPipeline.fromPretrained(source, {
+    Ti2vPipeline.fromPretrained(source, {
       textEncoder: "precomputed",
       gpu: fakeGpuContext(fakeDevice()),
     });
 
   it("対照: wan-ti2v/1 の配布形は構築を終え、prompts を資産の並びで返す", async () => {
     const pipeline = await fromPretrained(await ti2vDirectory("wan-ti2v/1"));
-    assert(pipeline instanceof WanTi2vPipeline);
+    assert(pipeline instanceof Ti2vPipeline);
     assertEquals(
       pipeline.prompts.map((prompt) => prompt.name),
       ["cats", "negative"],
@@ -577,7 +577,7 @@ describe("WanTi2vPipeline.fromPretrained: 取得面も 2.2 の family を渡す�
     await pipeline.dispose();
   });
 
-  it("wan/1（Wan2.1）の配布形を WanTi2vPipeline: の文言で拒む", async () => {
+  it("wan/1（Wan2.1）の配布形を wan.Ti2vPipeline: の文言で拒む", async () => {
     const error = await assertRejects(
       async () => fromPretrained(await ti2vDirectory("wan/1")),
       Error,
@@ -610,7 +610,7 @@ describe("WAN22_TI2V_FAMILY の世代の値（計画の門）", () => {
   const embeds: WanTextEmbeds = parseWanTextEmbeds(embedsAsset(3).buffer);
   const graphs = vaeChunkGraphs();
   const layout = wanVaeChunkLayout(graphs.first, graphs.next);
-  const plan = (request: Partial<WanGenerateRequest>) =>
+  const plan = (request: Partial<GenerateRequest>) =>
     planWanGeneration(
       { prompt: "Two cats.", ...request },
       embeds,
@@ -701,7 +701,7 @@ const encoderGraphs = (replaced: Readonly<Record<string, EncoderGraph>> = {}) =>
 };
 
 /**
- * 模擬 Session で回す `WanTi2vPipeline`。DiT は定数を返し、VAE は 1 タイル = 1 batch の手順を偽の
+ * 模擬 Session で回す `Ti2vPipeline`。DiT は定数を返し、VAE は 1 タイル = 1 batch の手順を偽の
  * GpuContext で回して、読み戻すフレームを**チャネルごとの値**（{@link patchValue}）で埋める — unpatchify の
  * 並べ方が出力の画素の値に出る。I2V の encoder の段は 3 Session の enqueue を記録し、mu（読み戻しのキー `mu`）を
  * `options.mu` で埋める。偽の GpuContext の解放待ち（空の submit → `onSubmittedWorkDone`）も `log` に積む。
@@ -1007,12 +1007,12 @@ const mockTi2v = (
       diagnosed.push(component);
     },
   };
-  const pipeline: WanTi2vPipeline = Reflect.construct(WanTi2vPipeline, [state]);
+  const pipeline: Ti2vPipeline = Reflect.construct(Ti2vPipeline, [state]);
   /**
    * 5 フレーム・2 step（DiT 4 回）の要求で回し、観測したイベントを `log` に・途中の潜在を `snapshots` に積む。
    * プロンプトは資産の経路が `cats`、GPU 経路がフィクスチャの固定プロンプト `boxing-cats`。
    */
-  const generate = (request: Partial<WanTi2vGenerateRequest> = {}) =>
+  const generate = (request: Partial<Ti2vGenerateRequest> = {}) =>
     pipeline.generate({
       prompt: gpuText ? wanParityCase("fixed-boxing-cats").text : "Two cats.",
       frames: 5,
@@ -1042,7 +1042,7 @@ const mockTi2v = (
   };
 };
 
-describe("WanTi2vPipeline.generate（模擬 Session — 2.2 の世代の値が VAE の段の末尾まで届く）", () => {
+describe("Ti2vPipeline.generate（模擬 Session — 2.2 の世代の値が VAE の段の末尾まで届く）", () => {
   it("出力は [3, F, H, W] で unpatchify 済み（RGB の画素 (y, x) は patch 空間のチャネル c·4 + (x%2)·2 + (y%2)）", async () => {
     const { log, generate } = mockTi2v();
     const video = await generate();
@@ -1114,13 +1114,13 @@ describe("WanTi2vPipeline.generate（模擬 Session — 2.2 の世代の値が V
     );
   });
 
-  it("集合の外のプロンプトの文言は WanTi2vPipeline.prompts を案内する", async () => {
+  it("集合の外のプロンプトの文言は wan.Ti2vPipeline.prompts を案内する", async () => {
     const { generate } = mockTi2v();
     const error = await assertRejects(() => generate({ prompt: "A ferret." }), ModelInputError);
-    assertStringIncludes(error.message, "WanTi2vPipeline.prompts lists them");
+    assertStringIncludes(error.message, "wan.Ti2vPipeline.prompts lists them");
   });
 
-  it("dispose 済みの生成は WanTi2vPipeline: の文言で拒む", async () => {
+  it("dispose 済みの生成は wan.Ti2vPipeline: の文言で拒む", async () => {
     const { pipeline, generate } = mockTi2v();
     await pipeline.dispose();
     await assertRejects(() => generate(), Error, `${OWNER} cannot generate after dispose`);
@@ -1148,8 +1148,8 @@ const I2V_PLANE = 44 * 80;
 const FIRST_FRAME_TOKENS = 880;
 
 /** TS の型を通らない値を 1 欄だけ差した生成の要求（JS の呼び手の綴り違い・型のすり抜けの再現）。 */
-const requestWith = (key: string, value: unknown): Partial<WanTi2vGenerateRequest> => {
-  const request: Partial<WanTi2vGenerateRequest> = {};
+const requestWith = (key: string, value: unknown): Partial<Ti2vGenerateRequest> => {
+  const request: Partial<Ti2vGenerateRequest> = {};
   Object.defineProperty(request, key, { value, enumerable: true });
   return request;
 };
@@ -1193,7 +1193,7 @@ const copyFirstFrame = (
   return out;
 };
 
-describe("WanTi2vPipeline.generate の I2V: 段の順と解放（模擬 Session）", () => {
+describe("Ti2vPipeline.generate の I2V: 段の順と解放（模擬 Session）", () => {
   it("encoder の 3 Session（実行オプション {}）→ 常駐 3 本 → 1 本の batch で pre → attn → post → Session → 常駐の順に畳む → 解放を待つ → encoder の end → DiT", async () => {
     const { log, diagnosed, generate } = mockTi2v();
     await generate({ image: LANDSCAPE });
@@ -1302,7 +1302,7 @@ const ENCODER_TEARDOWN = [
   "settle:done",
 ];
 
-describe("WanTi2vPipeline.generate の I2V: encoder の段の中断と構築途中の失敗（模擬 Session）", () => {
+describe("Ti2vPipeline.generate の I2V: encoder の段の中断と構築途中の失敗（模擬 Session）", () => {
   it("中断済みの signal は encoder の Session を 1 本も張らずに reason を投げる（入口 → encoder の境目）", async () => {
     const { log, generate } = mockTi2v();
     const controller = new AbortController();
@@ -1367,7 +1367,7 @@ describe("WanTi2vPipeline.generate の I2V: encoder の段の中断と構築途�
   });
 });
 
-describe("WanTi2vPipeline.generate の I2V: encoder の受け渡し（模擬 Session）", () => {
+describe("Ti2vPipeline.generate の I2V: encoder の受け渡し（模擬 Session）", () => {
   it("pre は前処理の出力 [12, 1, 352, 640] をそのまま受け、attn は S = 3520・post は h 44 / w 80 を bindings で受け、前段の copyOutputs の常駐が次段の入力（同じ batch）", async () => {
     const { encoderEnqueues, generate } = mockTi2v();
     await generate({ image: LANDSCAPE });
@@ -1435,7 +1435,7 @@ describe("WanTi2vPipeline.generate の I2V: encoder の受け渡し（模擬 Ses
   }
 });
 
-describe("WanTi2vPipeline.generate の I2V: DiT の条件づけ（模擬 Session — diffusers の expand_timesteps の形）", () => {
+describe("Ti2vPipeline.generate の I2V: DiT の条件づけ（模擬 Session — diffusers の expand_timesteps の形）", () => {
   it("条件マスクは先頭の潜在フレームの 880 トークン（1280×704 — (H/32)·(W/32)）だけが真で、ループの前に 1 回だけ作る", async () => {
     const { ditRuns, generate } = mockTi2v();
     await generate({ image: LANDSCAPE });
@@ -1611,9 +1611,9 @@ describe("WanTi2vPipeline.generate の I2V: DiT の条件づけ（模擬 Session
   });
 });
 
-describe("WanTi2vPipeline.generate の I2V: 要求の門（模擬 Session — Session を 1 本も張らずに落ちる）", () => {
+describe("Ti2vPipeline.generate の I2V: 要求の門（模擬 Session — Session を 1 本も張らずに落ちる）", () => {
   const rejects = async (
-    request: Partial<WanTi2vGenerateRequest>,
+    request: Partial<Ti2vGenerateRequest>,
     errorClass: new (message: string) => Error,
     message: string,
   ): Promise<Error> => {
@@ -1697,7 +1697,7 @@ describe("WAN22_TI2V_FAMILY の I2V の計画（計画の門）", () => {
   const embeds: WanTextEmbeds = parseWanTextEmbeds(embedsAsset(3).buffer);
   const graphs = vaeChunkGraphs();
   const layout = wanVaeChunkLayout(graphs.first, graphs.next);
-  const plan = (request: Partial<WanTi2vGenerateRequest>) =>
+  const plan = (request: Partial<Ti2vGenerateRequest>) =>
     planWanGeneration(
       { prompt: "Two cats.", ...request },
       embeds,
@@ -1970,14 +1970,14 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
   });
 });
 
-describe("WanTi2vPipeline.fromAssets: I2V の VAE encoder の部品（家族 admission）", () => {
+describe("Ti2vPipeline.fromAssets: I2V の VAE encoder の部品（家族 admission）", () => {
   it("encoder の部品が無い 2.2 の資産は、部品 'vae_encoder_pre' の容器が無い旨で落ちる（画像を渡さない使い方でも取る）", async () => {
     const assets = Object.fromEntries(
       Object.entries(VALID_ASSETS).filter(([key]) => !key.startsWith("vae_encoder_")),
     );
     await assertRejects(
       () =>
-        WanTi2vPipeline.fromAssets(
+        Ti2vPipeline.fromAssets(
           { manifest: ti2vManifest(), assets },
           { textEncoder: "precomputed", gpu: fakeGpuContext(fakeDevice()) },
         ),
@@ -2020,13 +2020,13 @@ const tile32Assets = async (tile = 32) => ({
 const overlapsOf = (axis: { readonly tile: number; readonly starts: readonly number[] }) =>
   axis.starts.slice(1).map((start, index) => axis.tile - (start - axis.starts[index]));
 
-describe("WanTi2vPipeline: the 32-latent decoder pair in family admission (ADR 0134)", () => {
+describe("Ti2vPipeline: the 32-latent decoder pair in family admission (ADR 0134)", () => {
   it("a preset whose weights carry both _32 roles builds (fromAssets)", async () => {
     const pipeline = await buildTi2v(
       ti2vManifest({ extraComponents: TILE32_ROLES }),
       await tile32Assets(),
     );
-    assert(pipeline instanceof WanTi2vPipeline);
+    assert(pipeline instanceof Ti2vPipeline);
     await pipeline.dispose();
   });
 
@@ -2070,12 +2070,12 @@ describe("WanTi2vPipeline: the 32-latent decoder pair in family admission (ADR 0
 
   it("fromPretrained: a distribution carrying the pair builds; a lone _32 role fails before fetching", async () => {
     const fromPretrained = (source: DistributionSource) =>
-      WanTi2vPipeline.fromPretrained(source, {
+      Ti2vPipeline.fromPretrained(source, {
         textEncoder: "precomputed",
         gpu: fakeGpuContext(fakeDevice()),
       });
     const pipeline = await fromPretrained(await ti2vDirectory("wan-ti2v/1", TILE32_ROLES));
-    assert(pipeline instanceof WanTi2vPipeline);
+    assert(pipeline instanceof Ti2vPipeline);
     await pipeline.dispose();
     await assertRejects(
       async () => fromPretrained(await ti2vDirectory("wan-ti2v/1", [NEXT_32])),
@@ -2115,7 +2115,7 @@ describe("wanVaeTile32Contract: every weight of the 32-latent pair is borrowed f
       lent,
       wanVaeChunkLayout(lent.first, lent.next),
       WAN22_TI2V_FAMILY.generation,
-      "WanTi2vPipeline",
+      "wan.Ti2vPipeline",
     );
 
   it("names every shared initializer of each borrower (the borrower's name is the lender's) and the 32-latent layout", () => {
@@ -2128,7 +2128,7 @@ describe("wanVaeTile32Contract: every weight of the 32-latent pair is borrowed f
     assertThrows(
       () => contract(pair({ ...SHARED, "w.b": { storage: { codec: "f16" } } })),
       Error,
-      `WanTi2vPipeline: ${FIRST_32}: 1 initializers are not shared (w.b…)`,
+      `wan.Ti2vPipeline: ${FIRST_32}: 1 initializers are not shared (w.b…)`,
     );
   });
 
@@ -2136,7 +2136,7 @@ describe("wanVaeTile32Contract: every weight of the 32-latent pair is borrowed f
     assertThrows(
       () => contract(pair(SHARED, { ...SHARED, "w.z": { shared: true } })),
       Error,
-      `WanTi2vPipeline: ${NEXT_32}: 1 shared initializers have no weight of the same name in the lender (w.z…)`,
+      `wan.Ti2vPipeline: ${NEXT_32}: 1 shared initializers have no weight of the same name in the lender (w.z…)`,
     );
   });
 
@@ -2150,10 +2150,10 @@ describe("wanVaeTile32Contract: every weight of the 32-latent pair is borrowed f
           lent,
           { ...lenderLayout, sampleTile: 64 },
           WAN22_TI2V_FAMILY.generation,
-          "WanTi2vPipeline",
+          "wan.Ti2vPipeline",
         ),
       Error,
-      `WanTi2vPipeline: the tile-32 VAE decoder (${FIRST_32} / ${NEXT_32}): scale 256 / 32, 48 → 12 channels` +
+      `wan.Ti2vPipeline: the tile-32 VAE decoder (${FIRST_32} / ${NEXT_32}): scale 256 / 32, 48 → 12 channels` +
         " differ from the tile-16 pair's 64 / 16, 48 → 12",
     );
   });
@@ -2166,7 +2166,7 @@ describe("wanVaeTile32Contract: every weight of the 32-latent pair is borrowed f
           lenders({ "w.a": { shared: true }, "const.0": { storage: { codec: "f32" } } }),
         ),
       Error,
-      `WanTi2vPipeline: ${FIRST_32}: 1 shared initializers have no weight of the same name in the lender (w.a…)`,
+      `wan.Ti2vPipeline: ${FIRST_32}: 1 shared initializers have no weight of the same name in the lender (w.a…)`,
     );
   });
 });
@@ -2182,7 +2182,7 @@ describe("planWanRequest: vaeTile picks the decoder pair's geometry (ADR 0134 de
     return wanVaeChunkLayout(graphs.first, graphs.next);
   })();
   const plan = (
-    request: Partial<WanTi2vGenerateRequest>,
+    request: Partial<Ti2vGenerateRequest>,
     tile32: { readonly layout: typeof layout32 | undefined; readonly quant: string } = {
       layout: layout32,
       quant: "f16",
@@ -2247,7 +2247,7 @@ describe("planWanRequest: vaeTile picks the decoder pair's geometry (ADR 0134 de
   });
 });
 
-describe("WanTi2vPipeline.generate with vaeTile 32 (mock Sessions — the 16 pair lends, the 32 pair borrows and runs)", () => {
+describe("Ti2vPipeline.generate with vaeTile 32 (mock Sessions — the 16 pair lends, the 32 pair borrows and runs)", () => {
   /** The construction, lending and disposal entries of the decoder stage, in order. */
   const decoderLifecycle = (log: readonly string[]) =>
     log.filter(

@@ -5,7 +5,7 @@
  */
 
 import { clearHubCache, type HubRepoRef, loadManifest } from "@karume/hub";
-import { type WanPrompt, wanFrameToRgba } from "@karume/models/wan";
+import { type Prompt, frameToRgba } from "@karume/models/wan";
 import type { AcquireGpuOptions } from "@karume/runtime";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 
@@ -285,7 +285,7 @@ export const Wan22Page = () => {
   const positives = prompts.filter(({ role }) => role === "positive");
   // The text embedding asset belongs to the model (the same rows for every preset and path), so the
   // last opened pipeline's list still holds while the next one builds: the scenarios read it.
-  const [assetPrompts, setAssetPrompts] = useState<readonly WanPrompt[]>([]);
+  const [assetPrompts, setAssetPrompts] = useState<readonly Prompt[]>([]);
   // Fill the prompt fields from the asset's examples once they are known.
   useEffect(() => {
     if (pipeline.kind !== "ready") return;
@@ -357,7 +357,7 @@ export const Wan22Page = () => {
 
   const scenarioContextOf = (
     manifestSummary: WanManifestSummary,
-    assetRows: readonly WanPrompt[],
+    assetRows: readonly Prompt[],
   ): ScenarioContext => ({
     defaultQuant: manifestSummary.defaultQuant,
     prompts: assetRows,
@@ -434,11 +434,11 @@ export const Wan22Page = () => {
       show({ ...progress, note: "converting frames to RGBA and hashing" });
       await nextTick();
       const nonFinite = countNonFinite(video.data);
-      // `wanFrameToRgba` refuses non-finite values; the record keeps the count instead.
+      // `frameToRgba` refuses non-finite values; the record keeps the count instead.
       const stack =
         nonFinite === 0
           ? stackRgbaFrames(video.frames, video.width, video.height, (frame) =>
-              wanFrameToRgba(video, frame),
+              frameToRgba(video, frame),
             )
           : undefined;
       const rgbaSha256 = stack === undefined ? null : await sha256Hex(stack.bytes);

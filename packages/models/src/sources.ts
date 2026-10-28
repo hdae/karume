@@ -27,7 +27,7 @@ import * as siglip2 from "./siglip2/config.ts";
 import * as depthAnything from "./depth-anything/config.ts";
 import * as birefnet from "./birefnet/config.ts";
 import * as umt5 from "./umt5/config.ts";
-import { WAN_SOURCES } from "./wan/config.ts";
+import * as wan from "./wan/config.ts";
 
 export const KARUME_SOURCES = {
   ...anima.SOURCES,
@@ -38,5 +38,5 @@ export const KARUME_SOURCES = {
   ...depthAnything.SOURCES,
   ...birefnet.SOURCES,
   ...umt5.SOURCES,
-  ...WAN_SOURCES,
+  ...wan.SOURCES,
 } as const satisfies Record<string, HubRepoRef>;

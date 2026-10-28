@@ -23,13 +23,13 @@ import { parseSafetensors } from "@karume/runtime";
 export const WAN_TEXT_EMBEDS_METADATA_KEY = "karume.wan.text_embeds";
 
 /** The prompt's role (`negative` is the default for CFG's uncond side — the official `sample_neg_prompt`). */
-export type WanPromptRole = "positive" | "negative";
+export type PromptRole = "positive" | "negative";
 
 /** One row of the accepted set (the asset's metadata — without the embedding values). */
-export type WanPrompt = {
+export type Prompt = {
   /** The asset's tensor name (such as `boxing-cats`). */
   readonly name: string;
-  readonly role: WanPromptRole;
+  readonly role: PromptRole;
   /** The source's original text (verbatim, including line breaks and full-width punctuation). */
   readonly prompt: string;
   /** The string after upstream's `prompt_clean` (ftfy → HTML unescape → whitespace collapsing). */
@@ -37,7 +37,7 @@ export type WanPrompt = {
 };
 
 /** The embedding of one prompt (row-major `[tokens, width]`, f32). */
-export type WanTextEmbedding = WanPrompt & {
+export type WanTextEmbedding = Prompt & {
   /** The valid length `L_valid` (the length over which the tokenizer's mask is 1). */
   readonly tokens: number;
   readonly data: Float32Array<ArrayBuffer>;

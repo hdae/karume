@@ -1,6 +1,6 @@
 /**
  * Wan2.1 の umT5（`text_encoder`）の**部品差し替え**（`components` — ADR 0122 決定 7 の 3・ADR 0108
- * 決定 19）を `WanPipeline.fromPretrained` の入口から踏む。GPU も実資産も要らない（疑似 HF のリポと
+ * 決定 19）を `Pipeline.fromPretrained` の入口から踏む。GPU も実資産も要らない（疑似 HF のリポと
  * メモリ上のディレクトリを立て、叩かれた (リポ, path) を観測する）。
  *
  * 配布形の骨格は実物（`models/karume-wan2.1`）と同じ: Wan のリポの `text_encoder` は umT5 の配布リポへの
@@ -39,7 +39,7 @@ import {
   type HubRepoRef,
   localDirectory,
 } from "@karume/hub";
-import { type WanFromPretrainedOptions, WanPipeline } from "../src/wan/pipeline.ts";
+import { type FromPretrainedOptions, Pipeline } from "../src/wan/pipeline.ts";
 import type { ModelInput, TensorInput } from "../../runtime/tests/helpers/container-write.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import { parseIrDeclarationValue } from "./helpers/container-fixture.ts";
@@ -399,7 +399,7 @@ const nonEmpty = (parts: readonly FileRef[]): readonly FileRef[] =>
   parts.filter((part) => part.size > 0);
 
 /** 構築の共通ノブ（共有の模擬 GPU — アダプタの limits を読みに行かない）。 */
-const BASE_OPTIONS: WanFromPretrainedOptions = { gpu: fakeGpuContext(fakeDevice()) };
+const BASE_OPTIONS: FromPretrainedOptions = { gpu: fakeGpuContext(fakeDevice()) };
 
 /** 疑似 HF の 3 リポを立て、Wan のリポから `fromPretrained` する口。 */
 const overHttp = (rig: WanRig) => {
@@ -410,8 +410,8 @@ const overHttp = (rig: WanRig) => {
     revision: SHA,
     hubUrl: HUB_URL,
   };
-  const load = (options: WanFromPretrainedOptions = {}) =>
-    WanPipeline.fromPretrained(
+  const load = (options: FromPretrainedOptions = {}) =>
+    Pipeline.fromPretrained(
       { repo: WAN_REPO, revision: SHA, hubUrl: HUB_URL },
       { ...BASE_OPTIONS, ...hubOptions, ...options },
     );
@@ -530,7 +530,7 @@ describe("Wan2.1's components carry no 32-latent decoder pair (ADR 0134 — its 
       "'vae_decoder_first_32' in components is not a component of this family" +
         " (replaceable roles: transformer / vae_decoder_first / vae_decoder_next / text_encoder)",
     );
-    assertStringIncludes(error.message, "WanPipeline.fromPretrained");
+    assertStringIncludes(error.message, "wan.Pipeline.fromPretrained");
     assertEquals(http.asked(WAN_REPO), [MANIFEST_PATH]);
     assertEquals(http.asked(REPLACEMENT_REPO), []);
   });
@@ -542,7 +542,7 @@ describe("Wan の text_encoder の差し替え（手元の配布形 — 越境�
     const wan = memoryDirectory(rig.repos.wan);
 
     const error = await assertRejects(
-      () => WanPipeline.fromPretrained(wan.source, BASE_OPTIONS),
+      () => Pipeline.fromPretrained(wan.source, BASE_OPTIONS),
       Error,
       `${rig.parts.umt5[0].path}: prefetch failed (repo ${UMT5_REPO} @ ${UMT5_REVISION})`,
     );
@@ -567,7 +567,7 @@ describe("Wan の text_encoder の差し替え（手元の配布形 — 越境�
 
     await assertRejects(
       () =>
-        WanPipeline.fromPretrained(wan.source, {
+        Pipeline.fromPretrained(wan.source, {
           ...BASE_OPTIONS,
           components: { text_encoder: { source: replacement.source } },
         }),
@@ -592,7 +592,7 @@ describe("Wan の text_encoder の差し替え（手元の配布形 — 越境�
 
     await assertRejects(
       () =>
-        WanPipeline.fromPretrained(wan.source, {
+        Pipeline.fromPretrained(wan.source, {
           ...BASE_OPTIONS,
           fetch: http.fetch,
           caches: new MemoryCacheStorage(),

@@ -15,7 +15,7 @@
  *
  * The same seed does not give torch's sequence. Comparison with the reference does not use latents
  * made by this generator; it injects the fixture's `latents_init` through
- * `WanGenerateRequest.latents`.
+ * `GenerateRequest.latents`.
  */
 
 // The owner of the accepted seed set (non-negative safe integers) is the one cross-family

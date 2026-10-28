@@ -500,7 +500,7 @@ test("unpatchifyWanVaeFrames: 倍率・形・チャネル数・長さの食い�
   );
 });
 
-const OWNER = "WanPipeline";
+const OWNER = "wan.Pipeline";
 
 /**
  * 縮退 1 枚のタイル計画（縮尺 2・出口 `sampleChannels`）。末尾の検査が計画から読むのは出口のチャネル数と

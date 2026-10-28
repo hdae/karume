@@ -1,4 +1,4 @@
-import type { WanPrompt } from "@karume/models/wan";
+import type { Prompt } from "@karume/models/wan";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -11,7 +11,7 @@ import {
 } from "../src/models/wan22/scenarios.ts";
 import { buildRequest, initialForm, type WanForm } from "../src/models/wan22/settings.ts";
 
-const prompts: readonly WanPrompt[] = [
+const prompts: readonly Prompt[] = [
   {
     name: "neon-city",
     role: "positive",
@@ -116,7 +116,7 @@ describe("scenarioSettings", () => {
     });
 
     it("refuses a 'boxing-cats' row that is a negative prompt", () => {
-      const negativeOnly: readonly WanPrompt[] = [
+      const negativeOnly: readonly Prompt[] = [
         { name: "boxing-cats", role: "negative", prompt: "x", normalized: "x" },
       ];
       expect(() => scenarioSettings(quick, { ...context, prompts: negativeOnly })).toThrow(

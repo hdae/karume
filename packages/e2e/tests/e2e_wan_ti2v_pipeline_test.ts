@@ -1,8 +1,8 @@
 /**
- * Wan2.2 TI2V-5B の通し（`WanTi2vPipeline` の T2V — ADR 0121 段 6 の結線・段 8 の配布形）の照合（実 GPU）。
+ * Wan2.2 TI2V-5B の通し（`Ti2vPipeline` の T2V — ADR 0121 段 6 の結線・段 8 の配布形）の照合（実 GPU）。
  *
  * 配布形ミラー `models/karume-wan2.2/`（`dist.py --pipeline wan-ti2v` が組む — `krm` 3 本と 2.1 の系列のテキスト資産 2 本）
- * を `nodeDirectory` で `WanTi2vPipeline.fromPretrained` へ渡して組み、`generate` を通す（公開面の取得面 — manifest の解決・
+ * を `nodeDirectory` で `Ti2vPipeline.fromPretrained` へ渡して組み、`generate` を通す（公開面の取得面 — manifest の解決・
  * 家族 admission・part の逐次読み。2.1 の段 7 と同じ入口）。参照（`pipeline_steps.*`）は配布しない golden なので系列から読む。
  *
  * 配布形が無い機ではこの e2e は明示 SKIP する（理由と組み立てのコマンドを出す）。それで全 SKIP になるのを FAIL にするのは
@@ -10,7 +10,7 @@
  * e2e と同じ分担）。
  *
  * 比べる相手は recipe の 2 ステップの参照（`tools/export-recipes/wan/ti2v_few_step_ref.py` — 置き場は i8 の DiT の系列の根の
- * `pipeline_steps.<case>.safetensors`）: diffusers の `WanPipeline(expand_timesteps=False)` を CPU f32 で素のまま 2 ステップ
+ * `pipeline_steps.<case>.safetensors`）: diffusers の `Pipeline(expand_timesteps=False)` を CPU f32 で素のまま 2 ステップ
  * （CFG あり・guidance 5.0・shift 5.0）回した潜在と、それを段 5 のタイル decode → unpatchify → クランプに通したフレーム（重みは
  * DiT が i8 の RTN の fake-quant・VAE が f16 表現可能値 = 参照席 `f16+dit8` と同じ値）。形は 1280×704・17 フレーム（潜在
  * `[48,5,44,80]`・S = 4,400）で、決定用 2 本と受入れ 1 本は同じ形（受入れの形を変えて帯を外させない — 利用者の裁定 2026-10-05）。
@@ -40,7 +40,7 @@
  *   guidance 5.0 → 5.05・shift 5.0 → 3.0（shift の結線）。どれも DiT の段の `end` のイベントで打ち切って VAE を回さない。T2V では
  *   条件マスクと条件側の時刻は原理的に値に出ない（2 本が同じ値・マスクは全て偽 — 段 2 と同じ理由）ので注入に入れない。
  * - **sha256 の環境行**（ADR 0106 — `fixtures/references/wan-ti2v.json`。2.1 の `wan.json` には触らない）: 出力フレーム（uint8 の
- *   RGB を全フレーム連結したバイト列 — `wanFrameToRgba` の規則）。既定のレーンは 8 本 = 参照席の 6 本（帯のケース 3 本・seed
+ *   RGB を全フレーム連結したバイト列 — `frameToRgba` の規則）。既定のレーンは 8 本 = 参照席の 6 本（帯のケース 3 本・seed
  *   経路の 1280×704 と 704×1280・GPU 経路〈umT5 を GPU で回す — umT5 のミラー `models/karume-umt5-xxl/` が無い機は明示 SKIP〉）
  *   と、実用席 2 つ（s16 と online — ADR 0132）の seed 経路の 1280×704 の 1 本ずつ（{@link PRACTICAL_SEED_CASES} — 参照席の seed 経路の 1280×704 と同じ要求で席だけ
  *   違う）。opt-in の 50 ステップと 121 フレームの行は下の節。ID は席・経路・step 数・
@@ -135,13 +135,13 @@ import {
 import { encodePng } from "../../models/mod.ts";
 import {
   type GeneratedVideo,
-  wanFrameToRgba,
-  type WanGenerateEvent,
-  type WanGenerateRequest,
-  type WanPipelineOptions,
-  type WanPrompt,
-  type WanRunComponent,
-  WanTi2vPipeline,
+  frameToRgba,
+  type GenerateEvent,
+  type GenerateRequest,
+  type PipelineOptions,
+  type Prompt,
+  type RunComponent,
+  Ti2vPipeline,
 } from "../../models/wan.ts";
 import { WAN22_LATENTS_MEAN, WAN22_LATENTS_STD } from "../../models/src/wan/latents.ts";
 import {
@@ -339,7 +339,7 @@ const CONV8_VAE32_SEED_CASE_ID = caseIdOf(
 const PRACTICAL_SEED_CASES: readonly {
   readonly id: string;
   readonly quant: string;
-  /** `WanGenerateRequest.vaeTile` (omitted = the default 16). */
+  /** `GenerateRequest.vaeTile` (omitted = the default 16). */
   readonly vaeTile?: 32;
 }[] = [
   { id: PRACTICAL_SEED_CASE_ID, quant: WAN_TI2V_PRACTICAL_QUANT },
@@ -581,7 +581,7 @@ const rgbBytes = (video: GeneratedVideo): Uint8Array<ArrayBuffer> => {
   const plane = video.width * video.height;
   const out = new Uint8Array(video.frames * plane * 3);
   for (let frame = 0; frame < video.frames; frame += 1) {
-    const rgba = wanFrameToRgba(video, frame);
+    const rgba = frameToRgba(video, frame);
     for (let index = 0; index < plane; index += 1) {
       out.set(rgba.subarray(index * 4, index * 4 + 3), (frame * plane + index) * 3);
     }
@@ -602,7 +602,7 @@ type Observed = {
   readonly drm: DrmTimeline;
   /** GPU-wide nvidia-smi samples per stage (only when `observe` was asked for them). */
   readonly nvidia: NvidiaTimeline;
-  readonly diagnostics: ReadonlyMap<WanRunComponent, SessionDiagnostics>;
+  readonly diagnostics: ReadonlyMap<RunComponent, SessionDiagnostics>;
 };
 
 /**
@@ -610,9 +610,9 @@ type Observed = {
  * VAE の段を飛ばす（故障注入は潜在だけを見る — 28 タイルの VAE を払わない）。
  */
 const observe = async (
-  pipeline: WanTi2vPipeline,
-  diagnostics: Map<WanRunComponent, SessionDiagnostics>,
-  request: Omit<WanGenerateRequest, "onEvent">,
+  pipeline: Ti2vPipeline,
+  diagnostics: Map<RunComponent, SessionDiagnostics>,
+  request: Omit<GenerateRequest, "onEvent">,
   options: { readonly abortAfterDenoise?: boolean; readonly nvidiaSmi?: boolean } = {},
 ): Promise<Observed | { readonly latents: readonly Float32Array[] }> => {
   const latents: Float32Array[] = [];
@@ -626,7 +626,7 @@ const observe = async (
   const abort = new Error("DiT の段の後で止める（故障注入）");
   diagnostics.clear();
   const started = performance.now();
-  const onEvent = (event: WanGenerateEvent): void => {
+  const onEvent = (event: GenerateEvent): void => {
     if (event.kind === "denoise-step") latents.push(event.copyLatents().data);
     if (event.kind !== "stage") return;
     const label = `${event.component} ${event.at}`;
@@ -713,7 +713,7 @@ const conv8VaeLines = (records: ReadonlyMap<16 | 32, Conv8VaeRecord>): string[] 
 };
 
 const textOf = (
-  prompts: readonly WanPrompt[],
+  prompts: readonly Prompt[],
   name: string,
   form: "prompt" | "normalized",
 ): string => {
@@ -729,11 +729,11 @@ const textOf = (
  */
 const loadPipeline = (
   gpu: GpuContext,
-  diagnostics: Map<WanRunComponent, SessionDiagnostics>,
-  textEncoder: NonNullable<WanPipelineOptions["textEncoder"]>,
+  diagnostics: Map<RunComponent, SessionDiagnostics>,
+  textEncoder: NonNullable<PipelineOptions["textEncoder"]>,
   quant: string,
-): Promise<WanTi2vPipeline> =>
-  WanTi2vPipeline.fromPretrained(
+): Promise<Ti2vPipeline> =>
+  Ti2vPipeline.fromPretrained(
     textEncoder === "gpu"
       ? nodeDirectory(WAN_TI2V_DIST_ROOT, { crossRepo: umt5CrossRepo() })
       : nodeDirectory(WAN_TI2V_DIST_ROOT),
@@ -860,8 +860,8 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
     // One device shared by the its below (acquired before them, destroyed after them all), and the
     // reference-seat pipeline the band, fault and seed its run on.
     let gpuContext: GpuContext | undefined;
-    let referencePipeline: WanTi2vPipeline | undefined;
-    const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
+    let referencePipeline: Ti2vPipeline | undefined;
+    const diagnostics = new Map<RunComponent, SessionDiagnostics>();
     /**
      * 参照席の seed 経路の 1280×704 の実物（RGB のバイト列）— 同じ要求の実用席のケースの床（{@link runSeedCase} の
      * `beforeSettle`）の比べる相手。
@@ -877,7 +877,7 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
     /** The conv8 cases' VAE stage by tile (filled in run order — tile 16 first). */
     const conv8Vae = new Map<16 | 32, Conv8VaeRecord>();
     const runSeedCase = async (
-      seatPipeline: WanTi2vPipeline,
+      seatPipeline: Ti2vPipeline,
       id: string,
       width: number,
       height: number,
@@ -1133,7 +1133,7 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
       readonly request: (
         ferret: string,
         negative: string,
-      ) => Omit<WanGenerateRequest, "onEvent" | "latents">;
+      ) => Omit<GenerateRequest, "onEvent" | "latents">;
     }[] = [
       {
         label: "プロンプトの正負の取り違え",
@@ -1338,7 +1338,7 @@ describe.skipIf(!FULL_PIPELINE || !DIST_PRESENT || !GPU_AVAILABLE)(
     let deviceLost: string | undefined;
     // One device shared by the its below (acquired before them, destroyed after them all).
     let gpuContext: GpuContext | undefined;
-    const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
+    const diagnostics = new Map<RunComponent, SessionDiagnostics>();
     beforeAll(async () => {
       gpuContext = verifyRunningGpu(
         await acquireTestGpu({
@@ -1440,7 +1440,7 @@ test.skipIf(!LONG_CLIP || !DIST_PRESENT || !GPU_AVAILABLE)(
         },
       }),
     );
-    const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
+    const diagnostics = new Map<RunComponent, SessionDiagnostics>();
     let settlement: ReferenceSettlement | undefined;
     try {
       await using pipeline = await loadPipeline(

@@ -4,7 +4,7 @@
  * export した IR（f16 席・`outputs/series/wan2.1-t2v-1.3b-f16-dyn/transformer/`）を karume runtime で
  * 回し、ホストの unpatchify（`src/wan/dit-tokens.ts`）を通した潜在を、上流の**素の** diffusers
  * `WanTransformer3DModel`（CPU f32・同じ f16 丸めの重み）の 1 forward と突き合わせる。配布形（段 7）を
- * 通す検証は `WanPipeline` の e2e（`e2e_wan_pipeline_test.ts`）が持ち、ここは DiT 単体の forward を実寸まで
+ * 通す検証は `Pipeline` の e2e（`e2e_wan_pipeline_test.ts`）が持ち、ここは DiT 単体の forward を実寸まで
  * 検証するので、系列の容器（`krm`）を直接開く（計測用の層別グラフも系列にしか無い）。
  *
  * 生成は `cd tools/export-recipes && uv run --group wan --inexact python -m wan.export_dit`（golden の

@@ -29,7 +29,7 @@ export type RgbaStack = {
 };
 
 /**
- * Converts every frame with `toRgba` (the model's own pixel rule, e.g. `wanFrameToRgba`) into one
+ * Converts every frame with `toRgba` (the model's own pixel rule, e.g. `wan.frameToRgba`) into one
  * buffer. The frames are views into that buffer, so the sha256 over all frames needs no second copy.
  */
 export const stackRgbaFrames = (

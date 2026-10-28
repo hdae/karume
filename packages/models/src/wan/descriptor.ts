@@ -115,7 +115,7 @@ export const WAN21_GENERATION: WanGenerationDescriptor = {
  *
  * The limit of 121 frames is the default of the official implementation (the sampler of the official
  * Wan2.2 repository — ADR 0121's upstream study §4.1; distinct from the default 81 of Diffusers'
- * `WanPipeline`). On the development machine (RTX 3080 Ti, 12 GiB, Deno) 1280×704 with 50 steps
+ * `Pipeline`). On the development machine (RTX 3080 Ti, 12 GiB, Deno) 1280×704 with 50 steps
  * completed with the practical preset (VRAM peak of the DiT stage 11,361 MiB (nvidia-smi, whole GPU),
  * about 0.9 GiB below the physical capacity), and it also completed in Chrome on the RTX 5070 Ti
  * (ADR 0121's addenda "RTX 3080 Ti lanes and full verify" and "RTX 5070 Ti Chrome"). The development

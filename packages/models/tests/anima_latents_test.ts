@@ -143,7 +143,7 @@ test("imageToRgba: 要素数とサイズの食い違いを落とす", () => {
   assertThrows(() => imageToRgba(new Float32Array(6), 0, 1), RangeError);
 });
 
-test("imageToRgba: 寸法が正の整数でなければ、要素数が合っていても RangeError（wanFrameToRgba と同じ入口契約）", () => {
+test("imageToRgba: 寸法が正の整数でなければ、要素数が合っていても RangeError（wan.frameToRgba と同じ入口契約）", () => {
   // どれも `image.length === 3·width·height` は満たす（長さの照合だけでは通る形）。
   assertThrows(
     () => imageToRgba(new Float32Array(3), 0.5, 2),

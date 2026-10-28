@@ -1,14 +1,14 @@
 /**
- * `WanTi2vPipeline` — the one surface for text (+ condition image) → video (Wan2.2 TI2V 5B's T2V and
+ * `Ti2vPipeline` — the one surface for text (+ condition image) → video (Wan2.2 TI2V 5B's T2V and
  * I2V) (ADR 0121 decisions 10 and 11).
  *
  * The stage order ((encoder →) text → DiT → VAE, each stage opened and folded in turn), Session
- * lifetimes, cancellation and the public types (`WanGenerateRequest` / `GeneratedVideo` /
- * `WanGenerateEvent` / construction options) are the same single design as Wan2.1's `WanPipeline`;
+ * lifetimes, cancellation and the public types (`GenerateRequest` / `GeneratedVideo` /
+ * `GenerateEvent` / construction options) are the same single design as Wan2.1's `Pipeline`;
  * the source of truth is the doc at the top of `./pipeline.ts`. The family admission and the bodies
  * of construction and generation also live in the shared `family.ts`; this file holds the class
  * shell (private constructor, serialization chain, `dispose`) and the 2.2-only request type
- * ({@link WanTi2vGenerateRequest} — the condition image), and passes `WAN22_TI2V_FAMILY` (pipeline
+ * ({@link Ti2vGenerateRequest} — the condition image), and passes `WAN22_TI2V_FAMILY` (pipeline
  * `wan-ti2v/1`, generation descriptor `WAN22_TI2V_GENERATION`).
  *
  * Every difference from Wan2.1 comes from the generation descriptor and the asset declarations (not
@@ -28,9 +28,9 @@
  * delegation are duplicated).
  *
  * The distribution is `karume-wan2.2` (ADR 0121 stage 8 — built by the recipe
- * `dist.py --pipeline wan-ti2v`; the public HF repository is `WAN_SOURCES["wan2.2"]`). As in 2.1 there
- * are two entries: {@link WanTi2vPipeline.fromPretrained}, which fetches from the distribution, and
- * {@link WanTi2vPipeline.fromAssets}, which builds from already-fetched bytes.
+ * `dist.py --pipeline wan-ti2v`; the public HF repository is `SOURCES["wan2.2"]`). As in 2.1 there
+ * are two entries: {@link Ti2vPipeline.fromPretrained}, which fetches from the distribution, and
+ * {@link Ti2vPipeline.fromAssets}, which builds from already-fetched bytes.
  *
  * MUST: every module is side-effect free (no import-time execution, no global mutable state —
  * CLAUDE.md).
@@ -49,16 +49,16 @@ import {
 import type { Rgb8Image } from "../image/preprocess.ts";
 import type {
   GeneratedVideo,
-  WanAssets,
-  WanFromPretrainedOptions,
-  WanGenerateRequest,
-  WanPipelineOptions,
+  Assets,
+  FromPretrainedOptions,
+  GenerateRequest,
+  PipelineOptions,
 } from "./pipeline.ts";
-import type { WanI2vFit } from "./i2v-preprocess.ts";
-import type { WanPrompt } from "./text-embeds.ts";
+import type { I2vFit } from "./i2v-preprocess.ts";
+import type { Prompt } from "./text-embeds.ts";
 
 /**
- * One Wan2.2 generation request ({@link WanGenerateRequest} + the I2V condition image). Without
+ * One Wan2.2 generation request ({@link GenerateRequest} + the I2V condition image). Without
  * `image` it is text → video (T2V — the same path and the same values as a request without the image
  * field).
  *
@@ -78,7 +78,7 @@ import type { WanPrompt } from "./text-embeds.ts";
  * - The first output frame is the condition image encoded and decoded by the VAE (the first latent
  *   frame is the condition latent itself).
  */
-export type WanTi2vGenerateRequest = WanGenerateRequest & {
+export type Ti2vGenerateRequest = GenerateRequest & {
   /**
    * The I2V condition image (RGB8, interleaved, `data.length = 3·width·height`). Any size (it is
    * fitted to the output size). The pipeline does not modify it. The caller also must not modify
@@ -102,18 +102,18 @@ export type WanTi2vGenerateRequest = WanGenerateRequest & {
    * it is checked before whether `image` is present (a misspelling without `image` is also a plain
    * `Error`).
    */
-  readonly fit?: WanI2vFit;
+  readonly fit?: I2vFit;
 };
 
 /**
  * The text (+ condition image) → video pipeline of Wan2.2 TI2V 5B (T2V and I2V —
- * {@link WanTi2vGenerateRequest}).
+ * {@link Ti2vGenerateRequest}).
  *
- * Construction has only two entries: {@link WanTi2vPipeline.fromPretrained} (fetch from the
- * distribution) and {@link WanTi2vPipeline.fromAssets} (already-fetched bytes) (the constructor is
+ * Construction has only two entries: {@link Ti2vPipeline.fromPretrained} (fetch from the
+ * distribution) and {@link Ti2vPipeline.fromAssets} (already-fetched bytes) (the constructor is
  * private — no half-built state that bypasses the manifest check and the asset matching. ADR 0008).
  */
-export class WanTi2vPipeline {
+export class Ti2vPipeline {
   readonly #state: WanState;
   /** The serialization chain of generate and dispose. */
   readonly #chain = createOperationChain();
@@ -126,12 +126,12 @@ export class WanTi2vPipeline {
 
   /**
    * Fetches from the distribution and builds (the procedure and how `ref` is read are the same single
-   * implementation as `WanPipeline.fromPretrained` — `family.ts`). The fetched components are 2.1's
+   * implementation as `Pipeline.fromPretrained` — `family.ts`). The fetched components are 2.1's
    * plus the three I2V VAE encoder parts (`vae_encoder_pre` / `vae_encoder_attn` /
    * `vae_encoder_post` — fetched even for use without an image). The manifest's pipeline must be
    * `wan-ti2v/1`.
    *
-   * The source this package version verified is `"wan2.2"` in `WAN_SOURCES` (`config.ts`) — to pin
+   * The source this package version verified is `"wan2.2"` in `SOURCES` (`config.ts`) — to pin
    * reproducibility yourself, the caller gives `{ repo, revision }` explicitly. When fetching from
    * HF, umT5's cross-repository target is fetched at the commit the manifest pins, so the caller does
    * not pass it. A local mirror (`models/karume-wan2.2`) is passed as a source handle
@@ -141,29 +141,26 @@ export class WanTi2vPipeline {
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
-    options: WanFromPretrainedOptions = {},
-  ): Promise<WanTi2vPipeline> {
-    return new WanTi2vPipeline(await loadWanFromPretrained(WAN22_TI2V_FAMILY, ref, options));
+    options: FromPretrainedOptions = {},
+  ): Promise<Ti2vPipeline> {
+    return new Ti2vPipeline(await loadWanFromPretrained(WAN22_TI2V_FAMILY, ref, options));
   }
 
   /**
-   * Builds from an already-fetched manifest + assets ({@link WanAssets}). Opens the containers and
+   * Builds from an already-fetched manifest + assets ({@link Assets}). Opens the containers and
    * goes through the same family admission and assembly (`family.ts`) as the fetching surface — the
    * two surfaces differ only in where the components come from.
    */
-  static async fromAssets(
-    input: WanAssets,
-    options: WanPipelineOptions = {},
-  ): Promise<WanTi2vPipeline> {
-    return new WanTi2vPipeline(await loadWanFromAssets(WAN22_TI2V_FAMILY, input, options));
+  static async fromAssets(input: Assets, options: PipelineOptions = {}): Promise<Ti2vPipeline> {
+    return new Ti2vPipeline(await loadWanFromAssets(WAN22_TI2V_FAMILY, input, options));
   }
 
   /**
    * The list of prompts of the text embedding asset (in the asset metadata's order — a copy without
-   * the embedding values). Its meaning per path is the same as `WanPipeline.prompts`
+   * the embedding values). Its meaning per path is the same as `Pipeline.prompts`
    * (`"precomputed"`: the accepted set itself; `"gpu"`: examples).
    */
-  get prompts(): readonly WanPrompt[] {
+  get prompts(): readonly Prompt[] {
     return this.#state.textEmbeds.entries.map(({ name, role, prompt, normalized }) => ({
       name,
       role,
@@ -173,13 +170,13 @@ export class WanTi2vPipeline {
   }
 
   /**
-   * Generates one video from a prompt (and a condition image — {@link WanTi2vGenerateRequest}). The
+   * Generates one video from a prompt (and a condition image — {@link Ti2vGenerateRequest}). The
    * same request (seed or latents, knobs, image) gives the same values. Concurrent calls wait and run
    * in order (no two graphs resident at once — the doc at the top of `./pipeline.ts`).
    */
-  async generate(request: WanTi2vGenerateRequest): Promise<GeneratedVideo> {
+  async generate(request: Ti2vGenerateRequest): Promise<GeneratedVideo> {
     if (this.#disposal !== undefined) {
-      throw new Error("WanTi2vPipeline: cannot generate after dispose");
+      throw new Error("wan.Ti2vPipeline: cannot generate after dispose");
     }
     return await this.#chain(() => generateWanVideo(WAN22_TI2V_FAMILY, this.#state, request));
   }

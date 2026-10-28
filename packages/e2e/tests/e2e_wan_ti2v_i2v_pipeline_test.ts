@@ -1,5 +1,5 @@
 /**
- * Wan2.2 TI2V-5B の I2V の通し（`WanTi2vPipeline` に条件画像を渡す — ADR 0121 決定 11・段 9b）の照合（実 GPU）。
+ * Wan2.2 TI2V-5B の I2V の通し（`Ti2vPipeline` に条件画像を渡す — ADR 0121 決定 11・段 9b）の照合（実 GPU）。
  *
  * 配布形ミラー `models/karume-wan2.2/`（encoder の 3 部品を含む — `dist.py --pipeline wan-ti2v` が組む）を `nodeDirectory` で
  * 読んで組み、条件画像からの生成を通す。参照（`pipeline_steps_i2v.*`）は配布しない golden なので系列から読む。配布形が無い機は
@@ -49,7 +49,7 @@
  *   各注入は帯のほかに、名指しの検査（DiT の入力の結線か条件の潜在の門）が同じ走行の記録で赤になることも見る。VAE の入力の
  *   結線の検査が赤になることは、帯のケースの記録で期待を故障の値に替えて見る（GPU の時間 0）。
  * - **sha256 の環境行**（ADR 0106 — `fixtures/references/wan-ti2v.json` を T2V と共有・ケース ID が別）: 出力フレーム（uint8 の
- *   RGB を全フレーム連結したバイト列 — `wanFrameToRgba` の規則）。既定のレーンは 2 本 = 参照席の既定のケース
+ *   RGB を全フレーム連結したバイト列 — `frameToRgba` の規則）。既定のレーンは 2 本 = 参照席の既定のケース
  *   （{@link DEFAULT_CASE}）と、実用席の同じ要求（{@link PRACTICAL_CASE_ID}）。実用席の行は**実用行**（ADR 0110 決定 7 — 実用層の
  *   数値を意図して変えるコミットで同じコミットの `rewrite`）で、突合と書き込みの前に、同じ要求の参照席の実物と 1 bit 以上違う
  *   こと（床 — ADR 0110 決定 5）を見る。参照席の行は**参照行**（凍結）。ID は席・I2V と fit・step 数・ケース・寸法・フレーム数・
@@ -118,7 +118,7 @@
  * `enqueue` の入力を写す（観測の回は入力のオブジェクトをそのまま渡す — 値は変えない）。故障注入は同じ口で DiT の入力を
  * 書き換えるか（マスク・時刻の入力・モデル入力）、`generateWanVideo` へ渡す家族の値の統計を mean 0・std 1 にする（正規化の
  * 式 `(x − mean)·(1/std)` が mu をそのまま返す — encoder の段だけが読む値で、VAE の段の前で打ち切る）。実用席・縦長・50 ステップ
- * は公開面（`WanTi2vPipeline.fromPretrained` + `generate`）で回す（条件画像を受ける公開の入口の実 GPU の通し）。
+ * は公開面（`Ti2vPipeline.fromPretrained` + `generate`）で回す（条件画像を受ける公開の入口の実 GPU の通し）。
  *
  * ### 最後の潜在の観測
  *
@@ -165,12 +165,12 @@ import { encodePng } from "../../models/mod.ts";
 import {
   type GeneratedVideo,
   type Rgb8Image,
-  wanFrameToRgba,
-  type WanGenerateEvent,
-  type WanPrompt,
-  type WanRunComponent,
-  type WanTi2vGenerateRequest,
-  WanTi2vPipeline,
+  frameToRgba,
+  type GenerateEvent,
+  type Prompt,
+  type RunComponent,
+  type Ti2vGenerateRequest,
+  Ti2vPipeline,
 } from "../../models/wan.ts";
 import type { ModelComponent } from "../../models/src/hub/components.ts";
 import {
@@ -555,7 +555,7 @@ const rgbBytes = (video: GeneratedVideo): Uint8Array<ArrayBuffer> => {
   const plane = video.width * video.height;
   const out = new Uint8Array(video.frames * plane * 3);
   for (let frame = 0; frame < video.frames; frame += 1) {
-    const rgba = wanFrameToRgba(video, frame);
+    const rgba = frameToRgba(video, frame);
     for (let index = 0; index < plane; index += 1) {
       out.set(rgba.subarray(index * 4, index * 4 + 3), (frame * plane + index) * 3);
     }
@@ -618,7 +618,7 @@ const frameMaxAbs = (got: Float32Array, want: Float32Array): string =>
   ).join(", ");
 
 const textOf = (
-  prompts: readonly WanPrompt[],
+  prompts: readonly Prompt[],
   name: string,
   form: "prompt" | "normalized",
 ): string => {
@@ -930,8 +930,8 @@ const assertConditionInBand = (diff: Difference, where: string): void => {
 
 // ---- 生成 1 回の観測 ------------------------------------------------------------------------------------
 
-/** 生成の口（1 層内側の `generateWanVideo` か、公開の `WanTi2vPipeline.generate`）。 */
-type Generate = (request: WanTi2vGenerateRequest) => Promise<GeneratedVideo>;
+/** 生成の口（1 層内側の `generateWanVideo` か、公開の `Ti2vPipeline.generate`）。 */
+type Generate = (request: Ti2vGenerateRequest) => Promise<GeneratedVideo>;
 
 const viaState =
   (state: WanState, spec: WanFamilySpec = WAN22_TI2V_FAMILY): Generate =>
@@ -939,7 +939,7 @@ const viaState =
     generateWanVideo(spec, state, request);
 
 const viaPipeline =
-  (pipeline: WanTi2vPipeline): Generate =>
+  (pipeline: Ti2vPipeline): Generate =>
   (request) =>
     pipeline.generate(request);
 
@@ -951,7 +951,7 @@ type Observed = {
   readonly stageMs: Readonly<Record<string, number>>;
   readonly wallMs: number;
   readonly drm: DrmTimeline;
-  readonly diagnostics: ReadonlyMap<WanRunComponent, SessionDiagnostics>;
+  readonly diagnostics: ReadonlyMap<RunComponent, SessionDiagnostics>;
 };
 
 /**
@@ -961,8 +961,8 @@ type Observed = {
  */
 const observe = async (
   generate: Generate,
-  diagnostics: Map<WanRunComponent, SessionDiagnostics>,
-  request: Omit<WanTi2vGenerateRequest, "onEvent">,
+  diagnostics: Map<RunComponent, SessionDiagnostics>,
+  request: Omit<Ti2vGenerateRequest, "onEvent">,
   options: {
     readonly abortAfterDenoise?: boolean;
     readonly onLatents?: (latents: Float32Array<ArrayBuffer>) => void;
@@ -975,7 +975,7 @@ const observe = async (
   const abort = new Error("DiT の段の後で止める（故障注入）");
   diagnostics.clear();
   const started = performance.now();
-  const onEvent = (event: WanGenerateEvent): void => {
+  const onEvent = (event: GenerateEvent): void => {
     if (event.kind === "denoise-step") {
       const data = event.copyLatents().data;
       latents.push(data);
@@ -1234,10 +1234,10 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE || !ANY_FIXTURE)(
     // One device and one reference-quant inner state shared by the its below (built before them, released after them all).
     let gpuContext: GpuContext | undefined;
     let innerState: WanState | undefined;
-    let statePrompts: readonly WanPrompt[] | undefined;
+    let statePrompts: readonly Prompt[] | undefined;
     let tokenSources: Int32Array<ArrayBuffer> | undefined;
-    const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
-    const onRunDiagnostics = (component: WanRunComponent, diagnosed: SessionDiagnostics): void => {
+    const diagnostics = new Map<RunComponent, SessionDiagnostics>();
+    const onRunDiagnostics = (component: RunComponent, diagnosed: SessionDiagnostics): void => {
       diagnostics.set(component, diagnosed);
     };
     /** 参照席の既定のケースの実物（RGB のバイト列）— 同じ要求の実用席のケースの床の比べる相手。 */
@@ -1248,8 +1248,8 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE || !ANY_FIXTURE)(
       (defaultFixture ??= await readFixture(wanI2vStepsFixtureUrl(DEFAULT_CASE)));
     /** 既定のケースの要求（実用席も同じ要求 — 席だけが違う）。 */
     const defaultRequest = async (
-      prompts: readonly WanPrompt[],
-    ): Promise<Omit<WanTi2vGenerateRequest, "onEvent">> => {
+      prompts: readonly Prompt[],
+    ): Promise<Omit<Ti2vGenerateRequest, "onEvent">> => {
       const fixture = await defaultFixtureOf();
       return {
         ...TWO_STEP,
@@ -1706,7 +1706,7 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE || !ANY_FIXTURE)(
         const gpu = assigned(gpuContext, "gpu");
         let settlement: ReferenceSettlement | undefined;
         try {
-          await using pipeline = await WanTi2vPipeline.fromPretrained(
+          await using pipeline = await Ti2vPipeline.fromPretrained(
             nodeDirectory(WAN_TI2V_DIST_ROOT),
             {
               gpu,
@@ -1754,7 +1754,7 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE || !ANY_FIXTURE)(
       const gpu = assigned(gpuContext, "gpu");
       let settlement: ReferenceSettlement | undefined;
       try {
-        await using practical = await WanTi2vPipeline.fromPretrained(
+        await using practical = await Ti2vPipeline.fromPretrained(
           nodeDirectory(WAN_TI2V_DIST_ROOT),
           {
             gpu,
@@ -1820,7 +1820,7 @@ describe.skipIf(!I2V_FULL || !DIST_PRESENT || !GPU_AVAILABLE || !ANY_FIXTURE)(
     // One device and the default case's fixture shared by the its below (released after them all).
     let gpuContext: GpuContext | undefined;
     let defaultFixture: Fixture | undefined;
-    const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
+    const diagnostics = new Map<RunComponent, SessionDiagnostics>();
     beforeAll(async () => {
       gpuContext = verifyRunningGpu(
         await acquireTestGpu({
@@ -1845,7 +1845,7 @@ describe.skipIf(!I2V_FULL || !DIST_PRESENT || !GPU_AVAILABLE || !ANY_FIXTURE)(
         const fixture = assigned(defaultFixture, "fixture");
         let settlement: ReferenceSettlement | undefined;
         try {
-          await using pipeline = await WanTi2vPipeline.fromPretrained(
+          await using pipeline = await Ti2vPipeline.fromPretrained(
             nodeDirectory(WAN_TI2V_DIST_ROOT),
             {
               gpu,

@@ -46,7 +46,7 @@ import {
   WAN_TI2V_VAE_SERIES as SERIES,
 } from "./helpers/wan-ti2v-vae.ts";
 
-const OWNER = "WanTi2vPipeline";
+const OWNER = "wan.Ti2vPipeline";
 
 /** 2.2 の chunk グラフの宣言（タイル 16・patchify 空間のフレームの辺 128・潜在 48 ch・出口 12 ch）のリテラル。 */
 const LAYOUT = { latentChannels: 48, tile: 16, sampleTile: 128, sampleChannels: 12 } as const;

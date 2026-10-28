@@ -5,9 +5,9 @@
  * The stage order and Session lifetimes (text → DiT → VAE, each created and closed one stage at a
  * time) are defined by the doc at the top of `./pipeline.ts`; this module only runs the one DiT stage.
  * Shared by the Wan2.1 / 2.2 classes (ADR 0121 decision 10).
- * `owner` is the message prefix (`"WanPipeline"` for Wan2.1, `"WanTi2vPipeline"` for Wan2.2).
+ * `owner` is the message prefix (`"wan.Pipeline"` for Wan2.1, `"wan.Ti2vPipeline"` for Wan2.2).
  *
- * NOTE: the public types (`WanGenerateEvent` / `WanRunComponent`) are taken from `./pipeline.ts` with
+ * NOTE: the public types (`GenerateEvent` / `RunComponent`) are taken from `./pipeline.ts` with
  * `import type` (type-only references are erased, so there is no import cycle). Even with the
  * `vae_encoder` stage added at stage 9 (I2V) they stay in `./pipeline.ts` — type-only references cause
  * no cycle, so there is no reason to move them to a separate module.
@@ -21,7 +21,7 @@ import type { GpuContext, RunInputs, SessionDiagnostics, SessionOptions } from "
 import { settleAbort } from "../concurrency/abort.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
 import type { GraphOwner, ModelComponent } from "../hub/components.ts";
-import type { WanGenerateEvent, WanRunComponent } from "./pipeline.ts";
+import type { GenerateEvent, RunComponent } from "./pipeline.ts";
 import type { WanDitInputForm } from "./descriptor.ts";
 import type { WanGenerationKnobs } from "./plan.ts";
 import {
@@ -276,7 +276,7 @@ type WanDenoiseState = {
   readonly transformer: ModelComponent;
   readonly ropeBase: WanRopeBase;
   readonly dit: DitContract;
-  readonly onRunDiagnostics?: (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
+  readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
 /**
@@ -466,7 +466,7 @@ export const runWanDenoise = async (
   plan: WanGenerationKnobs,
   contexts: WanContexts,
   condition: Float32Array<ArrayBuffer> | undefined,
-  emit: (event: WanGenerateEvent) => Promise<void>,
+  emit: (event: GenerateEvent) => Promise<void>,
   signal: AbortSignal | undefined,
   owner: string,
 ): Promise<Float32Array<ArrayBuffer>> => {

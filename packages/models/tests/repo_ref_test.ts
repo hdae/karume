@@ -28,8 +28,7 @@ import { toManifestSource, toRepoRef } from "../src/hub/repo-ref.ts";
 import * as anima from "../anima.ts";
 import * as birefnet from "../birefnet.ts";
 import * as umt5 from "../umt5.ts";
-import { WanPipeline } from "../src/wan/pipeline.ts";
-import { WanTi2vPipeline } from "../src/wan/ti2v-pipeline.ts";
+import * as wan from "../wan.ts";
 
 // Names what a fetch stub was asked for (a `Request` would otherwise print as "[object Request]").
 const describeRequest = (input: RequestInfo | URL): string =>
@@ -170,7 +169,7 @@ test("fromPretrained: birefnet も ref 欠落時に対応表（birefnet.SOURCES�
 });
 
 test("fromPretrained: umT5 と Wan2.2 は ref 欠落時に対応表を案内し、未公開の Wan2.1 は案内しない", async () => {
-  // 0.14.0 で `umt5.SOURCES` / `WAN_SOURCES` が入った（家族の初公開）。Wan2.1 と 2.2 は取得の本体
+  // 0.14.0 で `umt5.SOURCES` / `wan.SOURCES` が入った（家族の初公開）。Wan2.1 と 2.2 は取得の本体
   // （`loadWanFromPretrained`）を共有するが、表に Wan2.1 のキーは無い — 2.1 にだけ存在しないキーを
   // 案内しない（③）ことを、共有の本体を通る公開面から見る。
   const fetchStub: typeof globalThis.fetch = (input) =>
@@ -182,16 +181,16 @@ test("fromPretrained: umT5 と Wan2.2 は ref 欠落時に対応表を案内し�
   );
   assertStringIncludes(umt5Error.message, 'SOURCES["umt5-xxl"] (@karume/models/umt5)');
   const wan22 = await assertRejects(
-    () => WanTi2vPipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
+    () => wan.Ti2vPipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
     Error,
-    "WanTi2vPipeline.fromPretrained: repo is required",
+    "wan.Ti2vPipeline.fromPretrained: repo is required",
   );
-  assertStringIncludes(wan22.message, 'WAN_SOURCES["wan2.2"] (@karume/models/wan)');
+  assertStringIncludes(wan22.message, 'SOURCES["wan2.2"] (@karume/models/wan)');
   const wan21 = await assertRejects(
-    () => WanPipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
+    () => wan.Pipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
     Error,
-    "WanPipeline.fromPretrained: repo is required",
+    "wan.Pipeline.fromPretrained: repo is required",
   );
   assertStringIncludes(wan21.message, "pass a repo name string (= tracks main)");
-  assertEquals(wan21.message.includes("WAN_SOURCES"), false, wan21.message);
+  assertEquals(wan21.message.includes("SOURCES"), false, wan21.message);
 });

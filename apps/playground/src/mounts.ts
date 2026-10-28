@@ -17,12 +17,12 @@ import * as gemma from "@karume/models/gemma";
 import * as irodori from "@karume/models/irodori";
 import * as sbv2 from "@karume/models/sbv2";
 import * as siglip2 from "@karume/models/siglip2";
-import { WAN_SOURCES } from "@karume/models/wan";
+import * as wan from "@karume/models/wan";
 
 import type { DistributionsPluginOptions } from "../vite-plugin-distributions.ts";
 
 export const MOUNTS = {
-  wan22: { directory: "models/karume-wan2.2", hfRepo: WAN_SOURCES["wan2.2"].repo },
+  wan22: { directory: "models/karume-wan2.2", hfRepo: wan.SOURCES["wan2.2"].repo },
   // The cross-repo reference of Wan's manifest (its text encoder).
   umt5: "models/karume-umt5-xxl",
   // karume-anima-extra takes its text encoder and VAE from karume-anima at the revision its manifest

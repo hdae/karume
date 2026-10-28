@@ -7,7 +7,7 @@
  * されるので、ホストテストでは観測できない（ADR 0122 追記「段 d の結果」の残り）。ここで押さえるのは 4 点:
  *
  * ① **構築**: Wan の配布形の取得元に umT5 の越境先の `crossRepo` mapping を 1 本も渡さずに、`text_encoder` を
- *    差し替えた `WanPipeline.fromPretrained` が通る。
+ *    差し替えた `Pipeline.fromPretrained` が通る。
  * ② **出所**: 差し替え先の取得元を、読んだ path と区間を記録する読み口で包む。差し替え先の `text_encoder` の
  *    グラフが束縛する block（実体・scale・zero point — 差し替え先の descriptor から引く）の区間が全部、text 段の
  *    中の差し替え先からの読みで隙間なく覆われ、構築中に差し替え先から読まれたのは manifest と part 0
@@ -64,10 +64,10 @@ import { nodeDirectory } from "@karume/hub/node";
 import { openContainer, type SessionDiagnostics } from "@karume/runtime";
 import {
   type GeneratedVideo,
-  wanFrameToRgba,
-  type WanGenerateEvent,
-  WanPipeline,
-  type WanRunComponent,
+  frameToRgba,
+  type GenerateEvent,
+  Pipeline,
+  type RunComponent,
 } from "../../models/wan.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
@@ -274,12 +274,12 @@ const directoryUrl = (path: string): URL => {
   return url;
 };
 
-/** 出力フレームの uint8 の RGB を全フレーム連結したバイト列（sha256 の実物 — `wanFrameToRgba` の規則）。 */
+/** 出力フレームの uint8 の RGB を全フレーム連結したバイト列（sha256 の実物 — `frameToRgba` の規則）。 */
 const rgbBytes = (video: GeneratedVideo): Uint8Array<ArrayBuffer> => {
   const plane = video.width * video.height;
   const out = new Uint8Array(video.frames * plane * 3);
   for (let frame = 0; frame < video.frames; frame += 1) {
-    const rgba = wanFrameToRgba(video, frame);
+    const rgba = frameToRgba(video, frame);
     for (let index = 0; index < plane; index += 1) {
       out.set(rgba.subarray(index * 4, index * 4 + 3), (frame * plane + index) * 3);
     }
@@ -287,7 +287,7 @@ const rgbBytes = (video: GeneratedVideo): Uint8Array<ArrayBuffer> => {
   return out;
 };
 
-const textOf = (pipeline: WanPipeline, name: string): string => {
+const textOf = (pipeline: Pipeline, name: string): string => {
   const entry = pipeline.prompts.find((candidate) => candidate.name === name);
   assert(entry !== undefined, `埋め込み資産に '${name}' が無い`);
   return entry.prompt;
@@ -302,7 +302,7 @@ test.skipIf(!DIST_PRESENT)(
     const reads: Read[] = [];
     const error = await assertRejects(
       () =>
-        WanPipeline.fromPretrained(
+        Pipeline.fromPretrained(
           recordingDirectory(DIST_ROOT, "wan-swap-control", reads, () => "construction"),
           // 落ちるのは descriptor の事前取得（admission の前）— GPU に触る段まで進まない。
           { gpu: fakeGpuContext(fakeDevice()), textEncoder: "gpu", quant: F16_QUANT },
@@ -371,11 +371,11 @@ test.skipIf(SWAP_DIRECTORY === undefined || !DIST_PRESENT || !GPU_AVAILABLE)(
         const currentPhase = (): Phase => phase;
         const wanReads: Read[] = [];
         const swapReads: Read[] = [];
-        const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
+        const diagnostics = new Map<RunComponent, SessionDiagnostics>();
 
         // ① Wan の取得元に crossRepo を 1 本も渡さない（umT5 の越境先はどこからも開けない）。
         const constructionStarted = performance.now();
-        await using pipeline = await WanPipeline.fromPretrained(
+        await using pipeline = await Pipeline.fromPretrained(
           recordingDirectory(DIST_ROOT, "wan-swap", wanReads, currentPhase),
           {
             gpu,
@@ -393,7 +393,7 @@ test.skipIf(SWAP_DIRECTORY === undefined || !DIST_PRESENT || !GPU_AVAILABLE)(
 
         const stageStarted = new Map<string, number>();
         const stageMs: Record<string, number> = {};
-        const onEvent = (event: WanGenerateEvent): void => {
+        const onEvent = (event: GenerateEvent): void => {
           if (event.kind !== "stage") return;
           if (event.component === TEXT_ENCODER) {
             phase = event.at === "start" ? "text_encoder" : "after_text_encoder";

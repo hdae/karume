@@ -257,7 +257,7 @@ const SOURCE_TABLES: Readonly<Record<string, string>> = {
   "./depth-anything": "SOURCES",
   "./birefnet": "SOURCES",
   "./umt5": "SOURCES",
-  "./wan": "WAN_SOURCES",
+  "./wan": "SOURCES",
 };
 
 /** Whether an export name spells a family source table (bare or prefixed). */

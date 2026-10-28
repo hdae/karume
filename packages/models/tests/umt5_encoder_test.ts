@@ -410,9 +410,9 @@ describe("umt5GraphContract: 出力の幅", () => {
   });
 
   it("幅を渡せば宣言の幅をその値と照合する（Wan は DiT の文脈の幅を渡す）", () => {
-    assertEquals(umt5GraphContract(ownerOf([1, "L", 4096]), "WanPipeline", 4096).hiddenSize, 4096);
+    assertEquals(umt5GraphContract(ownerOf([1, "L", 4096]), "wan.Pipeline", 4096).hiddenSize, 4096);
     assertThrows(
-      () => umt5GraphContract(ownerOf([1, "L", 2048]), "WanPipeline", 4096),
+      () => umt5GraphContract(ownerOf([1, "L", 2048]), "wan.Pipeline", 4096),
       Error,
       "output 'out' shape [1, L, 2048] differs from the host's [1, L, 4096]",
     );

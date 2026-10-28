@@ -121,7 +121,7 @@ const BAND_32: number | undefined = 5.1e-5;
 const CONV3D_NODES = { first: 33, next: 35 } as const;
 
 /** The message prefix of the production checks (the 2.2 pipeline's name). */
-const OWNER = "WanTi2vPipeline";
+const OWNER = "wan.Ti2vPipeline";
 
 /** The tile reference's meta `weights` / `reference` (the writer's spelling — `vae_tiling.write_fixture`). */
 const FIXTURE_WEIGHTS = "f16-rounded";

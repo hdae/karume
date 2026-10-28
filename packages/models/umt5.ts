@@ -11,7 +11,7 @@
  * The source of truth for the input rules (no preprocessing; rejects out-of-vocabulary characters,
  * special tokens in the text, `▁` right after whitespace, whitespace other than U+0020 and trailing
  * whitespace, more than 512 tokens, and the empty string) is the module doc of
- * `src/umt5/tokenizer.ts`. Wan's `WanPipeline` / `WanTi2vPipeline` run the upstream preprocessing
+ * `src/umt5/tokenizer.ts`. Wan's `wan.Pipeline` / `wan.Ti2vPipeline` run the upstream preprocessing
  * (`prompt_clean`) before the same tokenizer.
  *
  * A local distribution is passed to `fromPretrained` with `nodeDirectory` of `@karume/hub/node` or

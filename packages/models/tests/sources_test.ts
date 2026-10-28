@@ -30,9 +30,8 @@ import * as siglip2 from "../siglip2.ts";
 import * as depthAnything from "../depth-anything.ts";
 import * as birefnet from "../birefnet.ts";
 import * as umt5 from "../umt5.ts";
-import { WAN_SOURCES } from "../src/wan/config.ts";
+import * as wan from "../wan.ts";
 import { KARUME_SOURCES } from "../src/sources.ts";
-import { WanTi2vPipeline } from "../src/wan/ti2v-pipeline.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
 /** hub が解決要求を出さずに済む形（`@hdae/fetch-cache` の `isCommitSha` と同じ綴り）。 */
@@ -136,12 +135,12 @@ const FAMILIES: readonly Family[] = [
     load: (ref, options) => umt5.Encoder.fromPretrained(ref, options),
   },
   {
-    name: "WAN_SOURCES",
-    sources: WAN_SOURCES,
+    name: "wan.SOURCES",
+    sources: wan.SOURCES,
     // 世代は別リポ（ADR 0092 決定 1）。Wan2.1（`karume-wan2.1`）は HF に公開しないのでキーが無い
-    // （ADR 0118 追記（2026-10-15））— 表が持つのは `WanTi2vPipeline` が読む Wan2.2 だけ。
+    // （ADR 0118 追記（2026-10-15））— 表が持つのは `wan.Ti2vPipeline` が読む Wan2.2 だけ。
     keys: ["wan2.2"],
-    load: (ref, options) => WanTi2vPipeline.fromPretrained(ref, options),
+    load: (ref, options) => wan.Ti2vPipeline.fromPretrained(ref, options),
   },
 ];
 
@@ -169,7 +168,7 @@ test("取得元対応表を持つのは 9 家族・公開リポは 12 本", () =
       "depthAnything.SOURCES",
       "birefnet.SOURCES",
       "umt5.SOURCES",
-      "WAN_SOURCES",
+      "wan.SOURCES",
     ],
   );
   assertEquals(Object.keys(KARUME_SOURCES).length, 12);

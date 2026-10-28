@@ -23,7 +23,7 @@
  * - `__metadata__`: `image`・`image_sha256`・`width`・`height`・`fit`・`role`・`version_pillow` ほか
  */
 
-import type { WanI2vFit } from "../../src/wan/i2v-preprocess.ts";
+import type { I2vFit } from "../../src/wan/i2v-preprocess.ts";
 import { WAN_TI2V_VAE_ROOT } from "./wan-ti2v-vae.ts";
 
 /** LANCZOS の fixture のケース表（git 追跡 — 画素の safetensors は表の `tensors` が名指す同じディレクトリのファイル）。 */
@@ -44,7 +44,7 @@ export type WanI2vGoldenCase = {
   readonly image: string;
   readonly width: number;
   readonly height: number;
-  readonly fit: WanI2vFit;
+  readonly fit: I2vFit;
 };
 
 /**

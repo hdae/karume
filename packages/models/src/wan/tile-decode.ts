@@ -9,10 +9,10 @@
  * Per-generation values (accepted set, de-normalization statistics, unpatchify factor) are received
  * as arguments from the generation descriptor (`./descriptor.ts`). The latent and exit channel
  * counts, the tile edge and the graph's input / output spatial ratio are read from the graph
- * declarations (`wanVaeChunkLayout`). `owner` is the message prefix (`"WanPipeline"` for Wan2.1,
- * `"WanTi2vPipeline"` for Wan2.2).
+ * declarations (`wanVaeChunkLayout`). `owner` is the message prefix (`"wan.Pipeline"` for Wan2.1,
+ * `"wan.Ti2vPipeline"` for Wan2.2).
  *
- * NOTE: the public types (`WanGenerateEvent` / `WanRunComponent`) are taken from `./pipeline.ts` with
+ * NOTE: the public types (`GenerateEvent` / `RunComponent`) are taken from `./pipeline.ts` with
  * `import type` (type-only references are erased, so there is no import cycle).
  *
  * MUST: every module is side-effect free (no import-time execution, no global mutable state —
@@ -30,7 +30,7 @@ import type {
 import { settleAbort } from "../concurrency/abort.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
 import type { GraphOwner, ModelComponent } from "../hub/components.ts";
-import type { WanGenerateEvent, WanRunComponent } from "./pipeline.ts";
+import type { GenerateEvent, RunComponent } from "./pipeline.ts";
 import type { PlanLayout, WanGenerationKnobs } from "./plan.ts";
 import type { WanGenerationDescriptor } from "./descriptor.ts";
 import { firstNonFinite } from "./graph-io.ts";
@@ -309,7 +309,7 @@ type WanVaeDecodeState = {
   readonly layout: WanVaeChunkLayout;
   /** The 32-latent pair (undefined when the preset has none — a plan never asks for it then). */
   readonly vaeTile32?: WanVaeTile32;
-  readonly onRunDiagnostics?: (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
+  readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
 /**
@@ -418,7 +418,7 @@ export const decodeWanVaeStage = async (
   plan: WanGenerationKnobs,
   latents: Float32Array<ArrayBuffer>,
   generation: WanGenerationDescriptor,
-  emit: (event: WanGenerateEvent) => Promise<void>,
+  emit: (event: GenerateEvent) => Promise<void>,
   signal: AbortSignal | undefined,
   owner: string,
 ): Promise<Float32Array<ArrayBuffer>> => {

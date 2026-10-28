@@ -266,7 +266,7 @@ const registerVaeSessions = (): (() => VaeRun) => {
     const device = gpu;
     // MUST: Session → 常駐 → device の順で畳む（常駐は Session の焼き込みから参照されうるので、
     // Session を先に畳んでから返す）。1 段が落ちても残りの段（device まで）を必ず通す（製品の
-    // `WanPipeline` の VAE の段と同じ形）。Vitest reports an afterAll failure apart from the its, so a
+    // `Pipeline` の VAE の段と同じ形）。Vitest reports an afterAll failure apart from the its, so a
     // teardown failure cannot overwrite a test failure.
     await disposeSteps([
       () => first?.dispose(),

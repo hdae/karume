@@ -4,7 +4,7 @@
  * typed by hand. "Scenario", not "preset": on this page a preset is a quant of the manifest.
  */
 
-import type { WanPrompt } from "@karume/models/wan";
+import type { Prompt } from "@karume/models/wan";
 
 import type { VaeTile, WanForm } from "./settings";
 
@@ -63,7 +63,7 @@ export const SCENARIOS: readonly Scenario[] = [
 export type ScenarioContext = {
   readonly defaultQuant: string;
   /** The text embedding asset's rows (the asset is the model's: the same for every quant and path). */
-  readonly prompts: readonly WanPrompt[];
+  readonly prompts: readonly Prompt[];
   /** Whether the dev server serves the distribution on the HF-compatible route (`/hf/`). */
   readonly cachedSource: boolean;
   /** Whether the umT5 distribution the GPU text encoder needs is there. */

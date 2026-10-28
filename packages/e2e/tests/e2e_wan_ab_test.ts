@@ -36,7 +36,7 @@ import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import type { SessionSpec } from "@karume/hub";
 import type { GpuContext } from "@karume/runtime";
-import { WanPipeline } from "../../models/wan.ts";
+import { Pipeline } from "../../models/wan.ts";
 import { assertSeatsApplied, mergeCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
@@ -168,7 +168,7 @@ const subjectOf = (): WanAbSubject => {
     assetsRoot: ASSETS_DIR,
     manifestText,
     results,
-    fromPretrained: (source, options) => WanPipeline.fromPretrained(source, options),
+    fromPretrained: (source, options) => Pipeline.fromPretrained(source, options),
   };
 };
 

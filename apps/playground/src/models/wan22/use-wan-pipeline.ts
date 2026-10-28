@@ -1,11 +1,11 @@
 /**
- * Builds a `WanTi2vPipeline` for the chosen (source, preset, text encoder path) on the page's GPU,
+ * Builds a `Ti2vPipeline` for the chosen (source, preset, text encoder path) on the page's GPU,
  * and rebuilds it when any of them changes. Construction creates no Session (it opens the containers
  * and reads the small assets), so building eagerly costs little and gives the page the prompt list.
  */
 
 import type { GpuContext } from "@karume/runtime";
-import { type WanPrompt, type WanRunComponent, WanTi2vPipeline } from "@karume/models/wan";
+import { type Prompt, type RunComponent, Ti2vPipeline } from "@karume/models/wan";
 import type { SessionDiagnostics } from "@karume/runtime";
 import { type RefObject, useEffect, useState } from "react";
 
@@ -19,8 +19,8 @@ export type PipelineState =
   | { readonly kind: "loading"; readonly detail: string }
   | {
       readonly kind: "ready";
-      readonly pipeline: WanTi2vPipeline;
-      readonly prompts: readonly WanPrompt[];
+      readonly pipeline: Ti2vPipeline;
+      readonly prompts: readonly Prompt[];
       readonly source: PipelineSource;
       readonly quant: string;
       readonly textEncoder: TextEncoderPath;
@@ -35,7 +35,7 @@ export type PipelineState =
       readonly textEncoder: TextEncoderPath;
     };
 
-export type DiagnosticsSink = (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
+export type DiagnosticsSink = (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 
 export const useWanPipeline = (input: {
   readonly gpu: GpuContext | undefined;
@@ -61,14 +61,14 @@ export const useWanPipeline = (input: {
       return undefined;
     }
     const controller = new AbortController();
-    let built: WanTi2vPipeline | undefined;
+    let built: Ti2vPipeline | undefined;
     const started = performance.now();
     setState({
       kind: "loading",
       detail: `opening ${quant} (${textEncoder} text encoder, ${source.kind} source)`,
     });
 
-    const build = async (): Promise<WanTi2vPipeline> => {
+    const build = async (): Promise<Ti2vPipeline> => {
       const needsUmt5 = textEncoder === "gpu" && textEncoderRepo !== undefined;
       if (needsUmt5 && umt5Directory?.available !== true) {
         throw new Error(
@@ -84,7 +84,7 @@ export const useWanPipeline = (input: {
         "wan22",
         needsUmt5 && textEncoderRepo !== undefined ? { [textEncoderRepo]: "umt5" } : {},
       );
-      return await WanTi2vPipeline.fromPretrained(ref, {
+      return await Ti2vPipeline.fromPretrained(ref, {
         gpu,
         quant,
         // MUST: name the path explicitly (the pipeline's default is "gpu").

@@ -809,7 +809,31 @@
     ],
     "./wan": [
       {
+        "name": "Assets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerateEvent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerateRequest",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GeneratedVideo",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "I2vFit",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "LatentSnapshot",
         "kind": "typeAlias"
       },
       {
@@ -817,67 +841,43 @@
         "kind": "class"
       },
       {
+        "name": "Pipeline",
+        "kind": "class"
+      },
+      {
+        "name": "PipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Prompt",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "PromptRole",
+        "kind": "typeAlias"
+      },
+      {
         "name": "Rgb8Image",
         "kind": "typeAlias"
       },
       {
-        "name": "WAN_SOURCES",
+        "name": "RunComponent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SOURCES",
         "kind": "variable"
       },
       {
-        "name": "WanAssets",
+        "name": "Ti2vGenerateRequest",
         "kind": "typeAlias"
       },
       {
-        "name": "WanFromPretrainedOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "WanGenerateEvent",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "WanGenerateRequest",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "WanI2vFit",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "WanLatentSnapshot",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "WanPipeline",
+        "name": "Ti2vPipeline",
         "kind": "class"
       },
       {
-        "name": "WanPipelineOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "WanPrompt",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "WanPromptRole",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "WanRunComponent",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "WanTi2vGenerateRequest",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "WanTi2vPipeline",
-        "kind": "class"
-      },
-      {
-        "name": "wanFrameToRgba",
+        "name": "frameToRgba",
         "kind": "function"
       }
     ]

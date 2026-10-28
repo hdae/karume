@@ -73,7 +73,7 @@ import { readFile } from "@karume/test-support/fs";
 import { afterAll, beforeAll, describe } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import { type GpuContext, parseSafetensors } from "@karume/runtime";
-import { type Rgb8Image, WanTi2vPipeline } from "../../models/wan.ts";
+import { type Rgb8Image, Ti2vPipeline } from "../../models/wan.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import { sha256Hex } from "../../runtime/tests/helpers/reference.ts";
 import { openResults, type Results } from "../../runtime/tests/helpers/results.ts";
@@ -233,7 +233,7 @@ const subjectOf = (
     assetsRoot: WAN_TI2V_DIST_ROOT,
     manifestText,
     results: caseResults,
-    fromPretrained: (source, options) => WanTi2vPipeline.fromPretrained(source, options),
+    fromPretrained: (source, options) => Ti2vPipeline.fromPretrained(source, options),
     request,
   };
 };

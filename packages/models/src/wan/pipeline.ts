@@ -1,15 +1,15 @@
 /**
- * `WanPipeline` — the single surface for text → video (Wan2.1 T2V 1.3B) (ADR 0118 decision 7).
+ * `Pipeline` — the single surface for text → video (Wan2.1 T2V 1.3B) (ADR 0118 decision 7).
  *
  * Pipeline (every stage runs in Karume, no torch):
  *
  * 0. **vae_encoder** (only for a request that passes a condition image (`image`) to Wan2.2's
- *    `WanTi2vPipeline` — I2V, ADR 0121 decision 11) — after preprocessing (choosing the output size →
+ *    `Ti2vPipeline` — I2V, ADR 0121 decision 11) — after preprocessing (choosing the output size →
  *    crop / stretch → `[-1, 1]` → patchify — `i2v-preprocess.ts`), runs the encoder's three
  *    symbolic-length graphs (pre / attn / post) in one batch and normalizes mu into the condition
  *    latent (`vae-encoder.ts`). At each step the DiT stage replaces the first latent frame of the model
  *    input with it (`dit-loop.ts`)
- * 1. **text** — the path is chosen at construction ({@link WanPipelineOptions.textEncoder} — ADR 0119
+ * 1. **text** — the path is chosen at construction ({@link PipelineOptions.textEncoder} — ADR 0119
  *    decision 7, step 10d design addendum B):
  *    - `"gpu"` (default) — creates a Session for umT5 (i8 per-channel weights, f32 activations — ADR
  *      0119 decision 5), runs positive and negative once each, and closes it. The prompt is any string
@@ -26,7 +26,7 @@
  *    `vae-tiles.ts`) → clamp to `[-1, 1]`
  *
  * Returns the frames `[3, F, H, W]` as f32 (range `[-1, 1]`) and the fps ({@link GeneratedVideo}).
- * Writing PNGs is the caller's job (`wanFrameToRgba` + `encodePng`).
+ * Writing PNGs is the caller's job (`frameToRgba` + `encodePng`).
  *
  * The stage bodies live in modules shared by the Wan2.1 / 2.2 classes (ADR 0121 decision 10 — the entry
  * check is `plan.ts`, the text stage `text-stage.ts`, the DiT stage `dit-loop.ts`, the VAE stage
@@ -34,13 +34,13 @@
  * admission, construction and stage order also live in the shared `family.ts` (one body that takes the
  * generation's values as a `WanFamilySpec`); this file holds the public types and the shell of the
  * Wan2.1 class (serialization chain, `dispose`) and passes `WAN21_FAMILY`. The public types are shared
- * with the Wan2.2 class (`WanTi2vPipeline` in `./ti2v-pipeline.ts`) — values that differ by generation,
+ * with the Wan2.2 class (`Ti2vPipeline` in `./ti2v-pipeline.ts`) — values that differ by generation,
  * such as the accepted set, defaults, latent shape and fps, are decided by which class built the
  * pipeline (that class's generation descriptor).
  *
  * ## MUST: a Session per stage, created and closed one at a time — (encoder →) text → DiT → VAE
  *
- * Construction ({@link WanPipeline.fromPretrained} / {@link WanPipeline.fromAssets}) creates no
+ * Construction ({@link Pipeline.fromPretrained} / {@link Pipeline.fromAssets}) creates no
  * Session at all (it goes as far as opening the containers).
  * `generate` creates a Session per stage and closes it before creating the next (decision 7 — the same
  * as anima's default `"per-stage"`). The text stage (umT5 i8 weights, 5.30 GiB) plus the DiT stage
@@ -81,9 +81,9 @@
  *
  * ## Cancellation (`signal` — ADR 0119 decision 9, step 10d design addendum G)
  *
- * Construction takes {@link WanPipelineOptions.signal} (at the boundaries between the fetch layer and
+ * Construction takes {@link PipelineOptions.signal} (at the boundaries between the fetch layer and
  * the construction steps — the same form as anima / irodori); generation takes
- * {@link WanGenerateRequest.signal} (at stage boundaries, before each run (the two text runs, each DiT
+ * {@link GenerateRequest.signal} (at stage boundaries, before each run (the two text runs, each DiT
  * step) and between VAE tiles — the form of `generation/sequence.ts`). Each check first yields once to
  * the event loop (`settleAbort`). One run is indivisible; the cancellation takes effect at the next
  * boundary. The cancellation exception closes the open Sessions and then throws `signal.reason`
@@ -92,14 +92,14 @@
  *
  * ## Distribution (`karume-wan2.1` — ADR 0118 step 7)
  *
- * There are two entry points: {@link WanPipeline.fromPretrained}, which fetches from the distribution,
- * and {@link WanPipeline.fromAssets}, which builds from already-fetched bytes (manifest + assets); both
+ * There are two entry points: {@link Pipeline.fromPretrained}, which fetches from the distribution,
+ * and {@link Pipeline.fromAssets}, which builds from already-fetched bytes (manifest + assets); both
  * go through the same family admission and assembly (`family.ts`). The generation defaults (step
  * count, guidance, shift) come from the manifest's `pipelineConfig` (`config.ts`); the UniPC structure
  * stays at the upstream values (`WAN_UNIPC_CONFIG`).
  *
  * NOTE: the `karume-wan2.1` distribution is not published on HF (ADR 0118 addendum (2026-10-15)), so
- * the table of public distribution repositories (`WAN_SOURCES` — `config.ts`) has no Wan2.1 key (the
+ * the table of public distribution repositories (`SOURCES` — `config.ts`) has no Wan2.1 key (the
  * table holds only Wan2.2's `"wan2.2"`).
  *
  * ## MUST: the "correctness" of the output is not guaranteed here
@@ -107,7 +107,7 @@
  * Numeric correctness is guaranteed by the e2e against the reference (real GPU —
  * `packages/e2e/tests/e2e_wan_pipeline_test.ts`). The seeded random generator is a different stream
  * from torch's `randn` (`random.ts`), so comparison with the reference injects the initial noise via
- * {@link WanGenerateRequest.latents}.
+ * {@link GenerateRequest.latents}.
  */
 
 import type { GpuContext, SessionDiagnostics } from "@karume/runtime";
@@ -125,7 +125,7 @@ import {
   WAN21_FAMILY,
   type WanState,
 } from "./family.ts";
-import type { WanPrompt } from "./text-embeds.ts";
+import type { Prompt } from "./text-embeds.ts";
 
 /** The generation result. `data` is `[3, frames, height, width]` f32 (range `[-1, 1]` — clamped). */
 export type GeneratedVideo = {
@@ -144,21 +144,21 @@ export type GeneratedVideo = {
  * A copy of the intermediate latent returned by `copyLatents()` of `denoise-step` (the shape is decided
  * by the class's generation — Wan2.1: `[16, F', H/8, W/8]` / Wan2.2: `[48, F', H/16, W/16]`).
  */
-export type WanLatentSnapshot = {
+export type LatentSnapshot = {
   readonly data: Float32Array<ArrayBuffer>;
   readonly shape: readonly number[];
 };
 
 /**
- * The component names that {@link WanPipelineOptions.onRunDiagnostics} receives (one Session = one
+ * The component names that {@link PipelineOptions.onRunDiagnostics} receives (one Session = one
  * name). `text_encoder` is the umT5 of the `"gpu"` path (once each for positive / negative).
  * `vae_encoder_*` are the three graphs of Wan2.2's I2V encoder (once each for a request that passes a
  * condition image). `vae_decoder_first_32` / `vae_decoder_next_32` are the decoder's 32-latent pair
- * that runs for a request with {@link WanGenerateRequest.vaeTile} 32 (in place of
+ * that runs for a request with {@link GenerateRequest.vaeTile} 32 (in place of
  * `vae_decoder_first` / `vae_decoder_next` — the 16-latent pair only lends its weights then and does
  * not run).
  */
-export type WanRunComponent =
+export type RunComponent =
   | "vae_encoder_pre"
   | "vae_encoder_attn"
   | "vae_encoder_post"
@@ -169,8 +169,8 @@ export type WanRunComponent =
   | "vae_decoder_first_32"
   | "vae_decoder_next_32";
 
-/** The generation events that {@link WanGenerateRequest.onEvent} receives. */
-export type WanGenerateEvent =
+/** The generation events that {@link GenerateRequest.onEvent} receives. */
+export type GenerateEvent =
   /**
    * The start of a stage (`start` — before its Session is created) and its end (`end` — after its
    * Session is closed). `vae_encoder` is the stage that encodes Wan2.2's I2V condition image (only for a
@@ -198,7 +198,7 @@ export type WanGenerateEvent =
        * happens once at the end of the DiT stage (the same value as the `latents` that upstream
        * diffusers' `callback_on_step_end` receives).
        */
-      readonly copyLatents: () => WanLatentSnapshot;
+      readonly copyLatents: () => LatentSnapshot;
     }
   /** Completion of the decode of one VAE tile (`tile` is 1-based). */
   | { readonly kind: "vae-tile"; readonly tile: number; readonly tiles: number };
@@ -209,14 +209,14 @@ export type WanGenerateEvent =
  * values are the reference setting — 50 steps, guide 5.0, shift 3.0. Wan2.2's default shift is the
  * upstream scheduler's `flow_shift` 5.0 (the official 720p value), declared by the manifest of the
  * `karume-wan2.2` distribution (ADR 0121 stage 8)). The accepted set and defaults of size and
- * frame count are decided by the class's generation (Wan2.1's `WanPipeline`: 832×480 / 480×832,
- * 5–81 frames, default 832×480, 33 frames / Wan2.2's `WanTi2vPipeline`: 1280×704 / 704×1280, 5–121
+ * frame count are decided by the class's generation (Wan2.1's `Pipeline`: 832×480 / 480×832,
+ * 5–81 frames, default 832×480, 33 frames / Wan2.2's `Ti2vPipeline`: 1280×704 / 704×1280, 5–121
  * frames, default 1280×704, 33 frames).
  */
-export type WanGenerateRequest = {
+export type GenerateRequest = {
   /**
    * The prompt. The accepted set depends on the path chosen at construction
-   * ({@link WanPipelineOptions.textEncoder}):
+   * ({@link PipelineOptions.textEncoder}):
    *
    * - `"gpu"` (default): any string. It passes through the mirror of the upstream preprocessing
    *   (`prompt_clean`) and the tokenizer check; input that does not pass is a `ModelInputError` (ADR
@@ -226,20 +226,20 @@ export type WanGenerateRequest = {
    *   after whitespace, empty or whitespace only (1 token), more than 512 tokens. The rejection
    *   message says how to fix the input.
    * - `"precomputed"`: **only strings in the text embedding asset's set** (an exact match of either the
-   *   original or the normalized string — the class's `prompts` ({@link WanPipeline.prompts} /
-   *   `WanTi2vPipeline.prompts`)). Anything outside the set is a `ModelInputError` (ADR 0118 decision
+   *   original or the normalized string — the class's `prompts` ({@link Pipeline.prompts} /
+   *   `Ti2vPipeline.prompts`)). Anything outside the set is a `ModelInputError` (ADR 0118 decision
    *   4).
    */
   readonly prompt: string;
   /**
-   * The prompt for CFG's uncond side (the same accepted set as {@link WanGenerateRequest.prompt}).
+   * The prompt for CFG's uncond side (the same accepted set as {@link GenerateRequest.prompt}).
    * When omitted, the official `sample_neg_prompt` is used (`"gpu"`: the default string encoded on the
    * GPU; `"precomputed"`: the asset's `negative` row — the same original text). Passing it when
    * `guidance` is 1 (CFG does not run) is a `ModelInputError` (a knob that has no effect is not
    * silently accepted).
    */
   readonly negativePrompt?: string;
-  /** The seed of the initial noise (default 0 — exclusive with {@link WanGenerateRequest.latents}). */
+  /** The seed of the initial noise (default 0 — exclusive with {@link GenerateRequest.latents}). */
   readonly seed?: number;
   /**
    * Passes the initial noise in from outside (f32, `F' = (frames − 1)/4 + 1`. The shape is decided by
@@ -292,14 +292,14 @@ export type WanGenerateRequest = {
    */
   readonly vaeTile?: 16 | 32;
   /**
-   * Observer of generation events ({@link WanGenerateEvent}). **It is awaited** (the firing order is
+   * Observer of generation events ({@link GenerateEvent}). **It is awaited** (the firing order is
    * deterministic). Exceptions are not swallowed — a throw cancels at step granularity (the stage's
    * Session is closed).
    *
    * MUST: do not await `generate` / `dispose` of the same pipeline inside `onEvent` (a self-deadlock on
    * the serialization chain).
    */
-  readonly onEvent?: (event: WanGenerateEvent) => void | Promise<void>;
+  readonly onEvent?: (event: GenerateEvent) => void | Promise<void>;
   /**
    * Cancels the generation. Checked at stage boundaries (text → DiT → VAE), before each run (text
    * positive / negative, each DiT step) and between VAE tiles, each time after yielding once to the
@@ -313,10 +313,10 @@ export type WanGenerateRequest = {
 
 /**
  * Construction options (shared by the classes' `fromAssets` / `fromPretrained` —
- * {@link WanPipeline.fromAssets} / {@link WanPipeline.fromPretrained} and the two of the same name on
- * `WanTi2vPipeline`).
+ * {@link Pipeline.fromAssets} / {@link Pipeline.fromPretrained} and the two of the same name on
+ * `Ti2vPipeline`).
  */
-export type WanPipelineOptions = {
+export type PipelineOptions = {
   /** The model (a key of the manifest's models). Defaults to `defaultModel`. */
   readonly model?: string;
   /** The execution configuration (a key of that model's quants). Defaults to `defaultQuant`. */
@@ -346,7 +346,7 @@ export type WanPipelineOptions = {
    *
    * NOTE: a timing device (`acquireGpu({ gpuTiming: true })`) is accepted. The runs of the text,
    * encoder and DiT stages report their per-kernel breakdown (`lastRunTiming` through
-   * {@link WanPipelineOptions.onRunDiagnostics}); the VAE decoder runs one tile = one batch, and a
+   * {@link PipelineOptions.onRunDiagnostics}); the VAE decoder runs one tile = one batch, and a
    * batch is not timed (`GpuContext.beginBatch`), so its Sessions report none. Timing makes every
    * dispatch its own pass, so a timed generation is slower than an untimed one.
    */
@@ -356,7 +356,7 @@ export type WanPipelineOptions = {
    * / post; umT5: one prompt = once; DiT: one forward = once; VAE: one tile = one each of first /
    * next). Exceptions are not swallowed (fail loudly).
    */
-  readonly onRunDiagnostics?: (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
+  readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
   /**
    * Cancels the construction. The class's `fromPretrained` passes the same signal to the fetch layer,
    * so it takes effect both during the fetch (about 5.3 GiB for umT5 alone) and during assembly. At
@@ -366,20 +366,20 @@ export type WanPipelineOptions = {
    * irodori construction).
    *
    * NOTE: the construction `signal` is not carried over to generation (generation is cancelled by
-   * {@link WanGenerateRequest.signal}) — a construction-lifetime value (such as
+   * {@link GenerateRequest.signal}) — a construction-lifetime value (such as
    * `AbortSignal.timeout`) must not make every later generation fail.
    */
   readonly signal?: AbortSignal;
 };
 
 /**
- * The fetch-layer options that the classes' `fromPretrained` ({@link WanPipeline.fromPretrained} /
- * `WanTi2vPipeline.fromPretrained`) additionally accept (passed through to hub).
+ * The fetch-layer options that the classes' `fromPretrained` ({@link Pipeline.fromPretrained} /
+ * `Ti2vPipeline.fromPretrained`) additionally accept (passed through to hub).
  *
  * NOTE: the per-field description, including that `headers` / `fetch` / `caches` / `onRetry` are
  * **only for HTTP sources**, lives in one place: {@link FromPretrainedHubOptions}.
  */
-export type WanFromPretrainedOptions = WanPipelineOptions &
+export type FromPretrainedOptions = PipelineOptions &
   FromPretrainedHubOptions &
   FromPretrainedComponentOptions;
 
@@ -387,7 +387,7 @@ export type WanFromPretrainedOptions = WanPipelineOptions &
  * An already-fetched manifest + assets (a shape that accepts hub's `fetchAssets` result as is). The
  * components in `assets` are keyed by the single-form `krm` key (`transformer`) or as a part sequence
  * (`transformer[0]` / `transformer[1]` / … — from part 0 in index order): the three
- * `transformer` / `vae_decoder_first` / `vae_decoder_next`; for Wan2.2 (`WanTi2vPipeline`) the three
+ * `transformer` / `vae_decoder_first` / `vae_decoder_next`; for Wan2.2 (`Ti2vPipeline`) the three
  * of the I2V VAE encoder `vae_encoder_pre` / `vae_encoder_attn` / `vae_encoder_post` (needed even for
  * use without an image) and, when the preset's weights carry them, the 32-latent decoder pair
  * `vae_decoder_first_32` / `vae_decoder_next_32` (ADR 0134 — weightless containers that borrow the
@@ -395,7 +395,7 @@ export type WanFromPretrainedOptions = WanPipelineOptions &
  * manifest's `assets` `text_embeds` (the embedding asset's safetensors — both paths) and, on the
  * `"gpu"` path, `umt5_tokenizer` (the tokenizer asset's JSON).
  */
-export type WanAssets = {
+export type Assets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
@@ -403,11 +403,11 @@ export type WanAssets = {
 /**
  * The Wan2.1 text → video pipeline.
  *
- * The only construction entry points are {@link WanPipeline.fromPretrained} (fetch from the
- * distribution) and {@link WanPipeline.fromAssets} (already-fetched bytes) (the constructor is private
+ * The only construction entry points are {@link Pipeline.fromPretrained} (fetch from the
+ * distribution) and {@link Pipeline.fromAssets} (already-fetched bytes) (the constructor is private
  * — no half-built state that bypasses the manifest checks and the asset matching. ADR 0008).
  */
-export class WanPipeline {
+export class Pipeline {
   readonly #state: WanState;
   /** The serialization chain of generate and dispose. */
   readonly #chain = createOperationChain();
@@ -423,18 +423,18 @@ export class WanPipeline {
    * component's descriptor (part 0)** for admission → warm the weight parts → `fetchAssets` for the
    * embedding asset and the tokenizer asset → construction). Blocks are read in part order at the
    * moment their Session is built (ADR 0109 — `src/hub/components.ts`). The components to fetch depend
-   * on the path ({@link WanPipelineOptions.textEncoder}) — `"precomputed"` does not fetch umT5
+   * on the path ({@link PipelineOptions.textEncoder}) — `"precomputed"` does not fetch umT5
    * (`text_encoder`). To replace a component with the same role from another repository, use
    * {@link FromPretrainedComponentOptions.components} (`transformer` / `vae_decoder_first` /
    * `vae_decoder_next`, plus `text_encoder` on the `"gpu"` path and `vae_decoder_first_32` /
    * `vae_decoder_next_32` when the preset carries the 32-latent decoder pair).
    *
    * **`ref` is required** (sources have no default — the MUST of `src/hub/repo-ref.ts`. Wan2.1 has no
-   * public distribution repository, so `WAN_SOURCES` has no key for it either). A string `ref` reads as
+   * public distribution repository, so `SOURCES` has no key for it either). A string `ref` reads as
    * `{ repo }` (= follows `main`). A local distribution (`models/karume-wan2.1`) is passed as a
    * **source handle** (`localDirectory` / `denoDirectory` of `@karume/hub/deno`) — it does not pass
    * the HF `owner/name` spelling check, and goes through neither the network nor CacheStorage (the
-   * HTTP-only knobs of {@link WanFromPretrainedOptions} have no effect). The umT5 cross-repository
+   * HTTP-only knobs of {@link FromPretrainedOptions} have no effect). The umT5 cross-repository
    * target (umT5's distribution repository) is passed as that source's `crossRepo` mapping (for example
    * `denoDirectory("models/karume-wan2.1", { crossRepo:
    * { "<owner>/karume-umt5-xxl": denoDirectory("models/karume-umt5-xxl") } })` — the key is the repo
@@ -442,21 +442,18 @@ export class WanPipeline {
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
-    options: WanFromPretrainedOptions = {},
-  ): Promise<WanPipeline> {
-    return new WanPipeline(await loadWanFromPretrained(WAN21_FAMILY, ref, options));
+    options: FromPretrainedOptions = {},
+  ): Promise<Pipeline> {
+    return new Pipeline(await loadWanFromPretrained(WAN21_FAMILY, ref, options));
   }
 
   /**
-   * Builds from an already-fetched manifest + assets ({@link WanAssets}). Opens the containers and runs
+   * Builds from an already-fetched manifest + assets ({@link Assets}). Opens the containers and runs
    * the same family admission and assembly as the fetch surface (`family.ts`) — the two surfaces differ
    * only in how components are supplied.
    */
-  static async fromAssets(
-    input: WanAssets,
-    options: WanPipelineOptions = {},
-  ): Promise<WanPipeline> {
-    return new WanPipeline(await loadWanFromAssets(WAN21_FAMILY, input, options));
+  static async fromAssets(input: Assets, options: PipelineOptions = {}): Promise<Pipeline> {
+    return new Pipeline(await loadWanFromAssets(WAN21_FAMILY, input, options));
   }
 
   /**
@@ -469,7 +466,7 @@ export class WanPipeline {
    *   any string; passing a row's `prompt` encodes it with umT5 on the GPU (the asset's embeddings are
    *   not used).
    */
-  get prompts(): readonly WanPrompt[] {
+  get prompts(): readonly Prompt[] {
     return this.#state.textEmbeds.entries.map(({ name, role, prompt, normalized }) => ({
       name,
       role,
@@ -482,8 +479,9 @@ export class WanPipeline {
    * Generates one video from a prompt. The same request (seed or latents, knobs) gives the same values.
    * Concurrent calls wait and run in turn (no graphs resident at the same time — module doc).
    */
-  async generate(request: WanGenerateRequest): Promise<GeneratedVideo> {
-    if (this.#disposal !== undefined) throw new Error("WanPipeline: cannot generate after dispose");
+  async generate(request: GenerateRequest): Promise<GeneratedVideo> {
+    if (this.#disposal !== undefined)
+      throw new Error("wan.Pipeline: cannot generate after dispose");
     return await this.#chain(() => generateWanVideo(WAN21_FAMILY, this.#state, request));
   }
 

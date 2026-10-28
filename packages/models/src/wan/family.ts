@@ -2,7 +2,7 @@
  * The body of Wan's family admission, construction and generation (ADR 0121 decision 10 — one body
  * shared by the Wan2.1 / 2.2 classes).
  *
- * The public classes (`WanPipeline` in `./pipeline.ts`, `WanTi2vPipeline` in `./ti2v-pipeline.ts`) are
+ * The public classes (`Pipeline` in `./pipeline.ts`, `Ti2vPipeline` in `./ti2v-pipeline.ts`) are
  * thin shells (private constructor, serialization chain, `dispose`);
  * the manifest checks, component matching, GPU acquisition and the stage order ((encoder →) text → DiT
  * → VAE) live here. The stage order, Session lifetimes and the cancellation MUSTs are defined by the
@@ -86,13 +86,13 @@ import {
 } from "./plan.ts";
 import type {
   GeneratedVideo,
-  WanAssets,
-  WanFromPretrainedOptions,
-  WanGenerateEvent,
-  WanPipelineOptions,
-  WanRunComponent,
+  Assets,
+  FromPretrainedOptions,
+  GenerateEvent,
+  PipelineOptions,
+  RunComponent,
 } from "./pipeline.ts";
-import type { WanTi2vGenerateRequest } from "./ti2v-pipeline.ts";
+import type { Ti2vGenerateRequest } from "./ti2v-pipeline.ts";
 import {
   admitWanText,
   assertTextEncoderDeclared,
@@ -190,7 +190,7 @@ const presetCarriesVaeTile32 = (
  */
 const selectionCarriesVaeTile32 = (
   manifest: Manifest,
-  options: Pick<WanPipelineOptions, "model" | "quant">,
+  options: Pick<PipelineOptions, "model" | "quant">,
   owner: string,
 ): boolean => {
   const modelName = options.model ?? manifest.defaultModel;
@@ -215,25 +215,25 @@ export type WanFamilySpec = {
   /**
    * The spelling of the table that the diagnostic points to when `ref` is omitted (the third argument
    * of `toManifestSource` — `src/hub/repo-ref.ts`). Omitted for a generation without a public
-   * distribution repository (Wan2.1 — `WAN_SOURCES` has no key for it) (no pointing at a key that does
+   * distribution repository (Wan2.1 — `SOURCES` has no key for it) (no pointing at a key that does
    * not exist).
    */
   readonly sourcesExample?: string;
 };
 
-/** Wan2.1 T2V 1.3B (`WanPipeline` — pipeline `wan/1`, {@link WAN21_GENERATION}). */
+/** Wan2.1 T2V 1.3B (`Pipeline` — pipeline `wan/1`, {@link WAN21_GENERATION}). */
 export const WAN21_FAMILY: WanFamilySpec = {
-  owner: "WanPipeline",
+  owner: "wan.Pipeline",
   pipeline: { name: WAN_PIPELINE_NAME, major: WAN_PIPELINE_MAJOR },
   generation: WAN21_GENERATION,
 };
 
-/** Wan2.2 TI2V 5B (`WanTi2vPipeline` — pipeline `wan-ti2v/1`, {@link WAN22_TI2V_GENERATION}). */
+/** Wan2.2 TI2V 5B (`Ti2vPipeline` — pipeline `wan-ti2v/1`, {@link WAN22_TI2V_GENERATION}). */
 export const WAN22_TI2V_FAMILY: WanFamilySpec = {
-  owner: "WanTi2vPipeline",
+  owner: "wan.Ti2vPipeline",
   pipeline: { name: WAN_TI2V_PIPELINE_NAME, major: WAN_TI2V_PIPELINE_MAJOR },
   generation: WAN22_TI2V_GENERATION,
-  sourcesExample: 'WAN_SOURCES["wan2.2"] (@karume/models/wan)',
+  sourcesExample: 'SOURCES["wan2.2"] (@karume/models/wan)',
 };
 
 /**
@@ -247,7 +247,7 @@ export const WAN22_TI2V_FAMILY: WanFamilySpec = {
  * surface — ADR 0008).
  */
 export const planWanGeneration = (
-  request: WanTi2vGenerateRequest,
+  request: Ti2vGenerateRequest,
   embeds: WanTextEmbeds,
   layout: PlanLayout,
   config: WanPipelineConfig,
@@ -272,7 +272,7 @@ export const planWanGeneration = (
  * surface — ADR 0008).
  */
 export const planWanGpuGeneration = (
-  request: WanTi2vGenerateRequest,
+  request: Ti2vGenerateRequest,
   encoder: WanPromptEncoder,
   layout: PlanLayout,
   config: WanPipelineConfig,
@@ -357,17 +357,17 @@ export type WanState = {
   /** The embedding asset (the accepted set of `"precomputed"`, `prompts` on both paths). */
   readonly textEmbeds: WanTextEmbeds;
   readonly text: WanTextStage;
-  readonly onRunDiagnostics?: (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
+  readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
 /**
  * Fetches from the distribution and builds (the body of the class's `fromPretrained` — the procedure
- * and MUSTs are in the doc of `WanPipeline.fromPretrained`).
+ * and MUSTs are in the doc of `Pipeline.fromPretrained`).
  */
 export const loadWanFromPretrained = async (
   spec: WanFamilySpec,
   ref: string | HubRepoRef | DistributionSource,
-  options: WanFromPretrainedOptions,
+  options: FromPretrainedOptions,
 ): Promise<WanState> => {
   // The path is decided before fetching (the components to fetch change) — a misspelling fails
   // without fetching a byte.
@@ -385,7 +385,7 @@ export const loadWanFromPretrained = async (
   };
   const selection = resolveSelection(loaded.manifest, choice);
   const vaeTile32 = selectionCarriesVaeTile32(loaded.manifest, choice, spec.owner);
-  const buildOptions: WanPipelineOptions = {
+  const buildOptions: PipelineOptions = {
     ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
     ...choice,
     textEncoder: route,
@@ -423,14 +423,14 @@ export const loadWanFromPretrained = async (
 };
 
 /**
- * Builds from an already-fetched manifest + assets ({@link WanAssets}). Opens the containers and runs
+ * Builds from an already-fetched manifest + assets ({@link Assets}). Opens the containers and runs
  * the same family admission ({@link admitWan}) and assembly ({@link buildWan}) as the fetch surface —
  * the two surfaces differ only in how components are supplied.
  */
 export const loadWanFromAssets = async (
   spec: WanFamilySpec,
-  input: WanAssets,
-  options: WanPipelineOptions,
+  input: Assets,
+  options: PipelineOptions,
 ): Promise<WanState> => {
   const route = textEncoderRouteOf(options, spec.owner);
   // The entry check (if already cancelled, no container is opened — opening includes validating
@@ -474,7 +474,7 @@ const admitWan = async (
   spec: WanFamilySpec,
   manifest: Manifest,
   open: ComponentOpener,
-  options: WanPipelineOptions,
+  options: PipelineOptions,
 ): Promise<WanAdmission> => {
   // A step boundary (after the containers are opened, before the weight parts are fetched).
   await settleAbort(options.signal);
@@ -606,9 +606,9 @@ const admitWan = async (
 const buildWan = async (
   spec: WanFamilySpec,
   admitted: WanAdmission,
-  assets: WanAssets["assets"],
+  assets: Assets["assets"],
   open: ComponentOpener,
-  options: WanPipelineOptions,
+  options: PipelineOptions,
 ): Promise<WanState> => {
   const { config, quantName, sessionOptions, gpuFeatures, layout, ropeBase, dit } = admitted;
   // A step boundary (after the assets arrive, before parsing).
@@ -701,14 +701,14 @@ const buildWan = async (
 export const generateWanVideo = async (
   spec: WanFamilySpec,
   state: WanState,
-  request: WanTi2vGenerateRequest,
+  request: Ti2vGenerateRequest,
 ): Promise<GeneratedVideo> => {
   const { dit } = state;
   const { onEvent, signal } = request;
   const emit =
     onEvent === undefined
       ? () => Promise.resolve()
-      : async (event: WanGenerateEvent) => {
+      : async (event: GenerateEvent) => {
           await onEvent(event);
         };
   // The entry check is per path (both are pure checks before touching the GPU). The prompt contexts

@@ -164,7 +164,7 @@ test.skipIf(!MODEL_PRESENT)(
       await readRopeBase(opened),
       WAN22_GEOMETRY,
       WAN22_TI2V_GENERATION.ditInputForm,
-      "WanTi2vPipeline",
+      "wan.Ti2vPipeline",
     );
     assertEquals(contract.form, "ti2v");
   },

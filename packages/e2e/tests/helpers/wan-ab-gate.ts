@@ -27,9 +27,9 @@ import { nodeDirectory } from "@karume/hub/node";
 import type { GpuContext, SessionDiagnostics, SessionOptions } from "@karume/runtime";
 import type {
   GeneratedVideo,
-  WanFromPretrainedOptions,
-  WanPrompt,
-  WanTi2vGenerateRequest,
+  FromPretrainedOptions,
+  Prompt,
+  Ti2vGenerateRequest,
 } from "../../../models/wan.ts";
 import {
   assertAttentionSeatsComplete,
@@ -77,12 +77,12 @@ const STEPS = 2;
 const PASSES_TO_STEP1 = 2;
 
 /**
- * A/B に要る pipeline の面（`WanPipeline` と `WanTi2vPipeline` が構造的に満たす）。要求は広い方の型（2.2 の I2V の欄を
- * 含む `WanTi2vGenerateRequest`）で受ける — 2.1 の `generate` は狭い型を受けるが、引数は反変なので面を満たす。
+ * A/B に要る pipeline の面（`Pipeline` と `Ti2vPipeline` が構造的に満たす）。要求は広い方の型（2.2 の I2V の欄を
+ * 含む `Ti2vGenerateRequest`）で受ける — 2.1 の `generate` は狭い型を受けるが、引数は反変なので面を満たす。
  */
 export type WanAbPipeline = AsyncDisposable & {
-  readonly prompts: readonly WanPrompt[];
-  generate(request: WanTi2vGenerateRequest): Promise<GeneratedVideo>;
+  readonly prompts: readonly Prompt[];
+  generate(request: Ti2vGenerateRequest): Promise<GeneratedVideo>;
 };
 
 /** 世代ごとの違い（門の手順と判定は {@link registerWanAbCase} の 1 本）。 */
@@ -101,16 +101,16 @@ export type WanAbSubject = {
   readonly manifestText: string;
   /** 実測と決着の席。 */
   readonly results: Results;
-  /** 世代の pipeline の構築口（`WanPipeline.fromPretrained` / `WanTi2vPipeline.fromPretrained`）。 */
+  /** 世代の pipeline の構築口（`Pipeline.fromPretrained` / `Ti2vPipeline.fromPretrained`）。 */
   readonly fromPretrained: (
     source: DistributionSource,
-    options: WanFromPretrainedOptions,
+    options: FromPretrainedOptions,
   ) => Promise<WanAbPipeline>;
   /**
    * 要求の固定値（寸法と、step 1 の潜在を決める guidance / shift — I2V なら条件画像も）。省けば世代の既定（manifest の
    * `pipelineConfig` と既定の寸法）に乗る — 2.1 は sha 行と同じく既定に乗る。明示する世代は全部を明示する（寸法だけ明示して
    * σ と CFG のパス数を既定に残すと、既定が動いたときに帯の前提が黙って動く）。I2V の step 1 の潜在は `copyLatents` の
-   * スケジューラの状態（先頭の潜在フレームを条件で置き換える前 — `WanGenerateEvent` の doc）。
+   * スケジューラの状態（先頭の潜在フレームを条件で置き換える前 — `GenerateEvent` の doc）。
    */
   readonly request?: {
     readonly width: number;
@@ -123,9 +123,9 @@ export type WanAbSubject = {
      * `ModelInputError` で拒む（fail loudly — 型は 2 世代で共有の 1 本）。渡すと各観測で encoder の 3 グラフの run が
      * 届いたことを見る（画像が黙って落ちて T2V で回る退行を、帯と census の外で掴む）。
      */
-    readonly image?: WanTi2vGenerateRequest["image"];
+    readonly image?: Ti2vGenerateRequest["image"];
     /** 条件画像の寸法の合わせ方（`image` を渡したときだけ — 省けば公式の `"crop"`）。 */
-    readonly fit?: WanTi2vGenerateRequest["fit"];
+    readonly fit?: Ti2vGenerateRequest["fit"];
   };
 };
 

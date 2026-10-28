@@ -34,7 +34,7 @@ import {
   preprocessWanI2vImage,
   selectWanI2vSize,
   wanI2vCoverSize,
-  type WanI2vFit,
+  type I2vFit,
   wanI2vPixels,
 } from "../src/wan/i2v-preprocess.ts";
 import {
@@ -604,7 +604,7 @@ describe("前処理の鎖（寸法の選択 → 寸法合わせ → [-1, 1] → 
 
   it("fit = stretch は crop と別の画素を出す（欄が鎖の中で効いている）", () => {
     const image = coordinateImage(832, 480);
-    const fits: readonly WanI2vFit[] = ["crop", "stretch"];
+    const fits: readonly I2vFit[] = ["crop", "stretch"];
     const [crop, stretch] = fits.map((fit) =>
       preprocessWanI2vImage(image, { fit }, WAN22_TI2V_GENERATION),
     );

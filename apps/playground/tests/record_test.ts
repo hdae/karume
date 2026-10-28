@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { wanFrameToRgba } from "@karume/models/wan";
+import { frameToRgba } from "@karume/models/wan";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { PipelineSource } from "../src/lib/distributions.ts";
@@ -75,7 +75,7 @@ describe("frames → RGBA → sha256", () => {
   );
 
   const stack = stackRgbaFrames(video.frames, video.width, video.height, (frame) =>
-    wanFrameToRgba(video, frame),
+    frameToRgba(video, frame),
   );
 
   it("lays the frames out one after another", () => {

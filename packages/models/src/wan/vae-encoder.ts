@@ -22,7 +22,7 @@
  *
  * The stage order and Session lifetimes (encoder → text → DiT → VAE, each created and closed one stage
  * at a time) are defined by the doc at the top of `./pipeline.ts`; this module only runs the one
- * encoder stage. `owner` is the message prefix (`"WanTi2vPipeline"`).
+ * encoder stage. `owner` is the message prefix (`"wan.Ti2vPipeline"`).
  *
  * NOTE: `export` is for the pipeline internals and for tests that pin the checks without a GPU (not on
  * the `mod.ts` / subpath surface — ADR 0008).
@@ -37,7 +37,7 @@ import { settleAbort } from "../concurrency/abort.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
 import { settleReleasedMemory } from "../session/settle-released-memory.ts";
 import type { GraphOwner, ModelComponent } from "../hub/components.ts";
-import type { WanGenerateEvent, WanRunComponent } from "./pipeline.ts";
+import type { GenerateEvent, RunComponent } from "./pipeline.ts";
 import type { WanGenerationDescriptor } from "./descriptor.ts";
 import type { PlanLayout } from "./plan.ts";
 import { assertDims, firstNonFinite, valueOf } from "./graph-io.ts";
@@ -343,7 +343,7 @@ export const wanVaeEncoderContract = (
 type WanVaeEncodeState = {
   readonly gpu: GpuContext;
   readonly vaeEncoder: WanVaeEncoder;
-  readonly onRunDiagnostics?: (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
+  readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
 /** The stage's three Sessions (in the order they run within the stage). */
@@ -436,7 +436,7 @@ export const encodeWanImageStage = async (
   state: WanVaeEncodeState,
   image: WanI2vImageInput,
   generation: Pick<WanGenerationDescriptor, "latents">,
-  emit: (event: WanGenerateEvent) => Promise<void>,
+  emit: (event: GenerateEvent) => Promise<void>,
   signal: AbortSignal | undefined,
   owner: string,
 ): Promise<Float32Array<ArrayBuffer>> => {

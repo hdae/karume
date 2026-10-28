@@ -16,7 +16,7 @@ import { assertAcceptableSeed } from "../request-gates.ts";
 import type { WanPipelineConfig } from "./config.ts";
 import type { WanGenerationDescriptor } from "./descriptor.ts";
 import { isWanI2vFit, preprocessWanI2vImage, type WanI2vImageInput } from "./i2v-preprocess.ts";
-import type { WanTi2vGenerateRequest } from "./ti2v-pipeline.ts";
+import type { Ti2vGenerateRequest } from "./ti2v-pipeline.ts";
 import { WAN_UNIPC_CONFIG, type WanUniPcSchedule, wanUniPcSchedule } from "./scheduler.ts";
 import type { WanTextEmbedding } from "./text-embeds.ts";
 import { planWanGenerationTiles, wanSpatialCompression } from "./tile-decode.ts";
@@ -75,7 +75,7 @@ export type WanGenerationKnobs = {
    */
   readonly schedule: WanUniPcSchedule;
   /**
-   * The edge of the VAE decoder's latent tile (`WanGenerateRequest.vaeTile` — 16 when omitted). It
+   * The edge of the VAE decoder's latent tile (`GenerateRequest.vaeTile` — 16 when omitted). It
    * picks the decoder's chunk-graph pair (ADR 0134 — 32 runs the pair that borrows the 16 pair's
    * weights).
    */
@@ -97,7 +97,7 @@ export type PlanLayout = Pick<
 >;
 
 /** The VAE decoder's latent tile edges a request can choose (ADR 0134 decision 2). */
-export type WanVaeTile = NonNullable<WanTi2vGenerateRequest["vaeTile"]>;
+export type WanVaeTile = NonNullable<Ti2vGenerateRequest["vaeTile"]>;
 
 /**
  * What the plan knows about the 32-latent decoder pair (ADR 0134 decision 2): its geometry, or
@@ -122,12 +122,12 @@ export type PromptGate<Text> = {
 
 /**
  * The request fields the check reads (the observer and cancellation are read by the stages —
- * `WanGenerateRequest`). The I2V fields (`image` / `fit`) exist only in Wan2.2's request type
- * ({@link WanTi2vGenerateRequest}), but the check reads them in one body regardless of generation — an
+ * `GenerateRequest`). The I2V fields (`image` / `fit`) exist only in Wan2.2's request type
+ * ({@link Ti2vGenerateRequest}), but the check reads them in one body regardless of generation — an
  * `image` that a JS caller passes to the Wan2.1 class, slipping past the type, is rejected here too.
  */
 type WanPlanRequest = Pick<
-  WanTi2vGenerateRequest,
+  Ti2vGenerateRequest,
   | "prompt"
   | "negativePrompt"
   | "seed"
@@ -292,7 +292,7 @@ export const planWanRequest = <Text>(
     (request.image !== undefined || request.fit !== undefined)
   ) {
     throw new ModelInputError(
-      "image / fit (generation from an image) is not accepted by this generation (Wan2.2's WanTi2vPipeline accepts it)",
+      "image / fit (generation from an image) is not accepted by this generation (Wan2.2's wan.Ti2vPipeline accepts it)",
     );
   }
   if (request.fit !== undefined && !isWanI2vFit(request.fit)) {

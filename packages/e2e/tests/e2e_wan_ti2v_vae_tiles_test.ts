@@ -202,7 +202,7 @@ const BAND: number | undefined = 5.0e-5;
 const TOLERANCE: Tolerance = { atol: BAND ?? Number.POSITIVE_INFINITY, rtol: 0 };
 
 /** VAE 段の末尾の文言の持ち主（2.2 の pipeline の名前 — ホストテストと同じ）。 */
-const OWNER = "WanTi2vPipeline";
+const OWNER = "wan.Ti2vPipeline";
 /** RGB のチャネル数（unpatchify の後の `frames_rgb` の先頭の次元）。 */
 const RGB_CHANNELS = 3;
 
