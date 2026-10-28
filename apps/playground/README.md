@@ -17,10 +17,13 @@ A left sidebar switches between the pages, grouped by kind:
 | Audio | Style-Bert-VITS2 (JVNV) | `/sbv2` | done |
 | Text | Gemma 4 chat (`gemma4` and the `gemma4-qat` distribution) | `/gemma4` | done |
 | Benchmarks | Attention route bench — the two a8 attention routes per kernel at Wan2.2's shapes | `/attention-bench` | done |
+| Benchmarks | Geometry sweep — the GEMM tile geometries case by case, one merged record for `deriveGeometryProfile` | `/geometry-sweep` | done |
 
-Every page reads its distributions from the mounts below, runs on a GPU the page acquires itself, and
-saves a JSON record of each run (the environment, the request, timings and Session diagnostics,
-plus the output's sha256 where there is one) for comparing runs across presets, sources and machines.
+Every model page reads its distributions from the mounts below, runs on a GPU the page acquires
+itself, and saves a JSON record of each run (the environment, the request, timings and Session
+diagnostics, plus the output's sha256 where there is one) for comparing runs across presets, sources
+and machines. The benchmark pages read no distribution; the geometry sweep page acquires no GPU of
+its own (`runGeometrySweep` does) and saves the runtime's sweep record as it is.
 
 The app is private (not published) and imports only the public surfaces of the workspace packages:
 `@karume/runtime` (and its `/tune` subpath), `@karume/hub` and the family subpaths of
@@ -958,10 +961,102 @@ key, workgroups, reps, raw rounds and wall-clock rounds. **Copy record** copies 
 
 Absolute times compare only on one machine; across machines, compare the ratios.
 
+## The geometry sweep page
+
+This page measures the GEMM tile geometries on the browser's GPU and writes the record a geometry
+profile is derived from. It is the successor of the sweep tab of the removed `tools/gpu-lab`. It
+calls `runGeometrySweep` of `@karume/runtime/tune` **once per case**, idles between cases (cooling:
+one case takes minutes, and heat moves the default geometry's re-measurement, which the derivation
+checks), and merges the per-case records into **one sweep record** (`karume-geometry-sweep/2`, the
+format `deriveGeometryProfile` reads, with no playground envelope). Its first job is perf-ledger
+V-15: the conv3d-only sweep on the RTX 5070 Ti, from which the derivation chooses `i8a8.conv3d` of
+the `nvidia-blackwell` table.
+
+**Serve the page from the checkout that will derive the table.** The record carries `caseSet`,
+`defaultKernels` and `candidateKernels`, the fingerprints of the case set and of the kernels of the
+runtime the page was built from, and `deriveGeometryProfile` rejects a record whose values differ
+from the deriving code. Do not edit `packages/runtime` of the serving checkout until the record has
+been derived: the dev server reloads edited modules.
+
+**The GPU.** `runGeometrySweep` acquires a dedicated device per call and destroys it before it
+returns, so the page has no `useGpu`. The run joins the app's device queue with `runOnGpuQueue`
+instead:
+
+- it starts only after the previous page's device is destroyed ("waiting for the previous page's GPU
+  device" in the status);
+- the next acquisition of any page waits until the run has settled;
+- leaving the page aborts the run at its next cancel point (below), and the queue stays held until
+  the run has settled.
+
+| Control | What it does |
+| --- | --- |
+| Preset | **V-15: conv3d, full, 5 rounds, 90 s idle** fills the form with every conv3d w8a8 case, the `full` set, 5 rounds and 90 s idle; while the form equals it, a badge next to the title names it. **Every case (reset)** is no preset: it goes back to the initial form (every case, `quick+`, 5 rounds, 90 s). |
+| Op families | Which families are shown and swept (the runtime's `geometrySweepCases()`, grouped by op). |
+| Cases | Every case of the chosen families, with **all** / **none** per family. A ticked case of a family that is not chosen is not swept. |
+| Candidate set | `quick` (a few geometries — a dry run that checks the page and the device), `quick+` (quick plus the registered tables' geometries; the runtime's default), `full` (every geometry — the set a table is derived from). |
+| Rounds | Measurement rounds per geometry (default 5); the min is kept. |
+| Idle between cases (s) | Cooling before every case but the first (default 90; 0 = none). |
+| Run / Cancel | Run sweeps the cases in the table's order. Cancel takes effect at once during the idle wait, before the next case starts, and inside a case once the current geometry is measured (`runGeometrySweep` keeps the rows measured so far, with `aborted: true`). While a case still acquires its device, Cancel waits for the device; that case measured nothing, and its record is dropped. A Cancel after the last case has measured everything leaves the run completed. |
+
+The status card shows the adapter as the browser reports it (read without creating a device), whether
+it lists `timestamp-query` (without it the sweep falls back to the wall clock, and the derivation
+rejects a wall-clock record), cross-origin isolation, the runtime's case set id (`sweepCaseSetId`)
+and, once the first case has started, dp4a and the timing unit. While running it shows the elapsed
+seconds, the cases done, and the current case with its row count and the sweep's status line (the
+geometry measured now), or the seconds left of the idle wait. A device loss stops the run after
+that case.
+
+The **Cases** table has one row per case, filled live: the default geometry's time per dispatch, the
+drift (the default re-measured at the end of the case ÷ the first; outside 0.9–1.1 the derivation
+drops the case's ratios), the fastest candidate whose output matched the default bit for bit, the
+failed rows, the rows whose output differed from the default (never adopted), and the case's
+seconds.
+
+### The record
+
+When the run ends with at least one case (also after Cancel, a device loss or an error), the page
+merges the per-case records into one record in the shape one call over the planned cases writes
+(`gpuTiming.quantized` aside, below):
+
+| Field | What |
+| --- | --- |
+| `rows`, `cases` | every case's rows and summary, in run order |
+| `startedAt`, `date` | the first case's start, the last case's end |
+| `settings.cases` | every planned case (also the ones a cancel left out) |
+| `candidateKernels` | recomputed over the merged rows with `sweepCandidateKernelsId` (each per-case record fingerprints only its own rows) |
+| `aborted` | Cancel stopped a case midway or the run between cases (a run stopped by a device loss or an error has fewer cases than planned and `aborted: false`) |
+| `gpuTiming.quantized` | true when any case's rounds looked quantized: the larger rounding bound, never the smaller. One call judges all the rows together (true only when every round looks quantized); the runtime does not export that judgement, and taking the larger bound only drops more observations from the ratio data |
+| `deviceLost` | the first loss, or `null` |
+| everything else | the per-case records' own values, which must agree (format, case set, default kernels, browser, adapter, dp4a, timing, the other settings) — the merge fails loudly otherwise |
+
+The result card shows the file name, the sha256 of the bytes saved and a summary, then runs
+`deriveGeometryProfile` on those very bytes and shows its verdicts and the derived table
+(`geometryProfileJson`). The table is named `<vendor>-<architecture>` and matches the adapter's
+vendor and architecture (an adapter without a vendor gets an injection-only table). It is derived
+from this record alone: the repository's derivation adds the adapter's earlier records, so only the
+fields this record has cases for (for V-15, `i8a8.conv3d`) say what that derivation will choose. A
+record the derivation rejects shows the reason instead.
+
+**Download record (JSON)** saves `geometry-sweep_<adapter>_<candidate set>_<UTC timestamp>.json`
+(the adapter's description, or its vendor, architecture and device when the description is empty;
+`quick+` is spelled `quick-plus`; the timestamp is the record's `date`). **Copy record** copies the
+same JSON.
+
+### Caveats
+
+- A tab in the background is throttled: keep it in front, with nothing else on the GPU.
+- The per-case records are kept only in the page's memory; a crashed tab loses them.
+- `runGeometrySweep` consults no signal while it acquires its device. If the browser's adapter or
+  device request never settles, the case never starts: Cancel and leaving the page do not end it,
+  and since the run holds the app's GPU queue, no other page acquires a device either. Reload the
+  tab to recover.
+- The verdicts on the page are a preview. The table the repository registers comes from the
+  derivation on the dev machine over every record of the adapter.
+
 ## Develop
 
 ```sh
-pnpm --filter @karume/playground test        # vp test: the server's request handling (/models/ and /hf/, aliases included), the page registry, useGpu's teardown order, record / cache / preset / image helpers, pretrainedRef, zip writer, attention bench table, every page's pure helpers (settings, records, progress, pipeline slots)
+pnpm --filter @karume/playground test        # vp test: the server's request handling (/models/ and /hf/, aliases included), the page registry, useGpu's teardown order, record / cache / preset / image helpers, pretrainedRef, zip writer, attention bench table, the geometry sweep's merge and run order, every page's pure helpers (settings, records, progress, pipeline slots)
 pnpm --filter @karume/playground typecheck
 pnpm --filter @karume/playground check       # vp check: format + lint + types
 pnpm --filter @karume/playground build
@@ -1011,6 +1106,7 @@ The kit a page builds on:
 | `distributionSource`, `hfRepoRef` | `src/lib/distributions.ts` | The two sources underneath (`localDirectory` with range reads; the `HubRepoRef` of `/hf/`). |
 | `queryCacheInventory` | `src/lib/hub-cache.ts` | What the hub's cache holds of a distribution, over every preset. |
 | `useGpu` | `src/hooks/use-gpu.ts` | One GPU per page, released on unmount, re-acquired after a device loss (`reacquire`) or an options change (GPU timing). `track(work)` holds the device until `work` settles: the destroy waits one macrotask after the release and then for every tracked promise, and the next acquisition — of any page, through the app-wide queue the root layout provides (`GpuQueueContext`) — waits for that destroy (flush before destroy). A device released while still acquiring holds no work: it is destroyed when it arrives, and the next acquisition does not wait for it. A page MUST pass every pipeline / Session disposal and every build or run on the device through `track`, started no later than the effects of the commit that releases the device. `lease` names one acquisition (a new one on every options or attempt change, also back to earlier options); `state` shows a device only for the lease it was acquired for, so in the render that changes the lease it is already `acquiring` and effects keyed on the device dispose in the same commit. |
+| `runOnGpuQueue`, `useGpuQueue` | `src/hooks/use-gpu.ts` | Work that acquires and destroys a device of its own (`runGeometrySweep`) as the app's GPU user: it starts after the queue's last released device is destroyed, and the next acquisition waits until it has settled. The queue is taken in the call itself (call it from the event handler). It MUST NOT be called while a `useGpu` device is live (the task would start beside it), so only a page without `useGpu` calls it. |
 | `useTimestampQuery` | `src/hooks/use-timestamp-query.ts` | Whether the adapter lists `timestamp-query`. |
 | `useRunTask` | `src/hooks/use-run-task.ts` | One cancellable run: state (`idle` / `running` with stage and counter / `done` / `cancelled` / `error`), the elapsed-time ticker, Cancel, and an abort when the GPU lease ends (the page is left or the GPU is acquired again). Takes the page GPU's `{ track, lease }`, so every run holds the device until it settles. A report with `cancellable: false` and its required `cancelNote` marks a stage that takes no signal. |
 | `RunStatusCard`, `RunStatus`, `GpuAlerts` | `src/components/run-status-card.tsx` | The Status card: GPU, cross-origin isolation, the page's rows and controls, the GPU's failure states, and the run (elapsed, stage, progress bar, Cancel — disabled with the stage's `cancelNote` while it is not cancellable — error in full). |

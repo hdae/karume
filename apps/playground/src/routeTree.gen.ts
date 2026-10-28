@@ -15,6 +15,7 @@ import { Route as AttentionBenchRouteImport } from "./routes/attention-bench";
 import { Route as BirefnetRouteImport } from "./routes/birefnet";
 import { Route as DepthAnythingRouteImport } from "./routes/depth-anything";
 import { Route as Gemma4RouteImport } from "./routes/gemma4";
+import { Route as GeometrySweepRouteImport } from "./routes/geometry-sweep";
 import { Route as IrodoriRouteImport } from "./routes/irodori";
 import { Route as Sbv2RouteImport } from "./routes/sbv2";
 import { Route as Siglip2RouteImport } from "./routes/siglip2";
@@ -50,6 +51,11 @@ const Gemma4Route = Gemma4RouteImport.update({
   path: "/gemma4",
   getParentRoute: () => rootRouteImport,
 } as any);
+const GeometrySweepRoute = GeometrySweepRouteImport.update({
+  id: "/geometry-sweep",
+  path: "/geometry-sweep",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const IrodoriRoute = IrodoriRouteImport.update({
   id: "/irodori",
   path: "/irodori",
@@ -78,6 +84,7 @@ export interface FileRoutesByFullPath {
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
   "/gemma4": typeof Gemma4Route;
+  "/geometry-sweep": typeof GeometrySweepRoute;
   "/irodori": typeof IrodoriRoute;
   "/sbv2": typeof Sbv2Route;
   "/siglip2": typeof Siglip2Route;
@@ -90,6 +97,7 @@ export interface FileRoutesByTo {
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
   "/gemma4": typeof Gemma4Route;
+  "/geometry-sweep": typeof GeometrySweepRoute;
   "/irodori": typeof IrodoriRoute;
   "/sbv2": typeof Sbv2Route;
   "/siglip2": typeof Siglip2Route;
@@ -103,6 +111,7 @@ export interface FileRoutesById {
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
   "/gemma4": typeof Gemma4Route;
+  "/geometry-sweep": typeof GeometrySweepRoute;
   "/irodori": typeof IrodoriRoute;
   "/sbv2": typeof Sbv2Route;
   "/siglip2": typeof Siglip2Route;
@@ -117,6 +126,7 @@ export interface FileRouteTypes {
     | "/birefnet"
     | "/depth-anything"
     | "/gemma4"
+    | "/geometry-sweep"
     | "/irodori"
     | "/sbv2"
     | "/siglip2"
@@ -129,6 +139,7 @@ export interface FileRouteTypes {
     | "/birefnet"
     | "/depth-anything"
     | "/gemma4"
+    | "/geometry-sweep"
     | "/irodori"
     | "/sbv2"
     | "/siglip2"
@@ -141,6 +152,7 @@ export interface FileRouteTypes {
     | "/birefnet"
     | "/depth-anything"
     | "/gemma4"
+    | "/geometry-sweep"
     | "/irodori"
     | "/sbv2"
     | "/siglip2"
@@ -154,6 +166,7 @@ export interface RootRouteChildren {
   BirefnetRoute: typeof BirefnetRoute;
   DepthAnythingRoute: typeof DepthAnythingRoute;
   Gemma4Route: typeof Gemma4Route;
+  GeometrySweepRoute: typeof GeometrySweepRoute;
   IrodoriRoute: typeof IrodoriRoute;
   Sbv2Route: typeof Sbv2Route;
   Siglip2Route: typeof Siglip2Route;
@@ -204,6 +217,13 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof Gemma4RouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/geometry-sweep": {
+      id: "/geometry-sweep";
+      path: "/geometry-sweep";
+      fullPath: "/geometry-sweep";
+      preLoaderRoute: typeof GeometrySweepRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/irodori": {
       id: "/irodori";
       path: "/irodori";
@@ -242,6 +262,7 @@ const rootRouteChildren: RootRouteChildren = {
   BirefnetRoute: BirefnetRoute,
   DepthAnythingRoute: DepthAnythingRoute,
   Gemma4Route: Gemma4Route,
+  GeometrySweepRoute: GeometrySweepRoute,
   IrodoriRoute: IrodoriRoute,
   Sbv2Route: Sbv2Route,
   Siglip2Route: Siglip2Route,

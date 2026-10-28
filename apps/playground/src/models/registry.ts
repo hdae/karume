@@ -8,6 +8,7 @@ import type { FileRoutesByPath } from "@tanstack/react-router";
 import {
   AudioLinesIcon,
   BoxesIcon,
+  Grid3x3Icon,
   type LucideIcon,
   MessageSquareTextIcon,
   MicVocalIcon,
@@ -113,6 +114,15 @@ export const MODEL_PAGES: readonly ModelPage[] = [
       "Per-kernel GPU time of the two a8 attention routes (S in f16 over three dispatches, and the online kernel) at Wan2.2's shapes. Needs no distribution.",
     group: "Benchmarks",
     icon: TimerIcon,
+    mounts: [],
+  },
+  {
+    path: "/geometry-sweep",
+    title: "Geometry sweep",
+    summary:
+      "Sweeps the GEMM tile geometries case by case on this GPU (runGeometrySweep), merges one record for deriveGeometryProfile and shows the derived table. Needs no distribution.",
+    group: "Benchmarks",
+    icon: Grid3x3Icon,
     mounts: [],
   },
 ];
