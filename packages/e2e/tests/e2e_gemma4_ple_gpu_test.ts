@@ -31,7 +31,7 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import { acquireGpu, parseSafetensors, type Tensor } from "@karume/runtime";
 import { nodeDirectory } from "@karume/hub/node";
 import { Pipeline } from "../../models/gemma.ts";
-import { Gemma4QatPipeline } from "../../models/gemma4-qat.ts";
+import * as gemma4Qat from "../../models/gemma4-qat.ts";
 import { createGemma4Ple } from "../../models/src/gemma/ple.ts";
 import { createGemma4PleResident, gemma4PleGpuBytes } from "../../models/src/gemma/ple-gpu.ts";
 // 系列出力の容器から PLE の索引と block の読み口を組む（ADR 0109 決定 4）。
@@ -137,7 +137,7 @@ test.skipIf(!PRODUCT_PRESENT || !GPU_AVAILABLE)(
         inputName: "per_layer_inputs",
         idsName: "input_ids",
         rows: [1, tokens.length],
-        entry: "Gemma4QatPipeline",
+        entry: "gemma4Qat.Pipeline",
       });
       try {
         assertEquals(resident.residentBytes, bytes.total, "常駐した量子化バイト列");
@@ -190,14 +190,16 @@ for (const model of ["e2b", "e4b"] as const) {
     `PLE GPU 常駐: QAT ${model} の greedy 生成 id 列が host と完全一致（実GPU）`,
     async () => {
       const source = nodeDirectory(QAT_ROOT);
-      const expected = await generateIds(() => Gemma4QatPipeline.fromPretrained(source, { model }));
+      const expected = await generateIds(() =>
+        gemma4Qat.Pipeline.fromPretrained(source, { model }),
+      );
       assertEquals(
         expected.length,
         GREEDY_STEPS,
         "host 経路が刻みぶん生成していない（parity が空振りする）",
       );
       const actual = await generateIds(() =>
-        Gemma4QatPipeline.fromPretrained(source, { model, pleResidency: "gpu" }),
+        gemma4Qat.Pipeline.fromPretrained(source, { model, pleResidency: "gpu" }),
       );
       assertEquals(actual, expected, "GPU 常駐席の生成 id 列");
     },
@@ -250,7 +252,7 @@ test.skipIf(!QAT_PRESENT || !GPU_AVAILABLE)(
     ): Promise<{ ids: number[]; fences: number }> => {
       const gpu = await acquireGpu();
       try {
-        const pipeline = await Gemma4QatPipeline.fromPretrained(source, {
+        const pipeline = await gemma4Qat.Pipeline.fromPretrained(source, {
           model: "e2b",
           pleResidency,
           gpu,

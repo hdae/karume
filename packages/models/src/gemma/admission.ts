@@ -33,11 +33,11 @@ export type GemmaFamily = "gemma4" | "gemma4-qat";
  * **this one place**).
  *
  * MUST: messages thrown by the shared base also carry the family's name — a user who called
- * `Gemma4QatPipeline.fromPretrained` and receives `gemma.Pipeline: ...` cannot tell which entry it
+ * `gemma4Qat.Pipeline.fromPretrained` and receives `gemma.Pipeline: ...` cannot tell which entry it
  * is about.
  */
 export const gemmaEntryName = (family: GemmaFamily): string =>
-  family === "gemma4" ? "gemma.Pipeline" : "Gemma4QatPipeline";
+  family === "gemma4" ? "gemma.Pipeline" : "gemma4Qat.Pipeline";
 
 /**
  * The family, and the model name only QAT has (the value {@link admitGemma4Qat} **settles from the

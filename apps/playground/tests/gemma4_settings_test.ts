@@ -97,7 +97,7 @@ describe("model keys", () => {
     expect(parseModelKey("gemma4")).toBeUndefined();
   });
 
-  it("accepts only the models Gemma4QatPipeline takes", () => {
+  it("accepts only the models gemma4Qat.Pipeline takes", () => {
     expect(isQatModel("e2b")).toBe(true);
     expect(isQatModel("e4b")).toBe(true);
     expect(isQatModel("12b")).toBe(false);
@@ -117,7 +117,7 @@ describe("gemmaModelChoices", () => {
     const odd = gemmaManifest(["e2b", "12b"], { withDrafter: false });
     expect(gemmaModelChoices({ "gemma4-qat": odd }).at(-1)).toEqual({
       value: "gemma4-qat/12b",
-      label: "Gemma 4 QAT — 12b (not accepted by Gemma4QatPipeline)",
+      label: "Gemma 4 QAT — 12b (not accepted by gemma4Qat.Pipeline)",
       disabled: true,
     });
   });

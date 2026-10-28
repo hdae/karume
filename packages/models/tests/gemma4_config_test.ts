@@ -446,7 +446,7 @@ describe("gemma4 家族 admission: 配下の門の文言は呼んだ家族の入
       Error,
       "rope_full_attention_cos",
     );
-    assert(error.message.startsWith("Gemma4QatPipeline: "), error.message);
+    assert(error.message.startsWith("gemma4Qat.Pipeline: "), error.message);
   });
 
   it("出口の本数の食い違い（QAT の入口から）", () => {
@@ -456,7 +456,7 @@ describe("gemma4 家族 admission: 配下の門の文言は呼んだ家族の入
       Error,
       "the graph has 1 outputs",
     );
-    assert(error.message.startsWith("Gemma4QatPipeline: "), error.message);
+    assert(error.message.startsWith("gemma4Qat.Pipeline: "), error.message);
   });
 });
 

@@ -7,7 +7,7 @@ import {
   type Assets,
   ChatSession,
   type ChatSessionHost,
-  Gemma4QatPipeline,
+  Pipeline,
 } from "../../models/gemma4-qat.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 
@@ -25,11 +25,11 @@ for (const model of ["e2b", "e4b"] as const) {
     () => {
       let abortOnDecode: AbortController | undefined;
       const states: { contextCount: number; residentBytes: number }[] = [];
-      let pipeline: Gemma4QatPipeline;
+      let pipeline: Pipeline;
       let sequenceCount = 0;
       let host: ChatSessionHost;
       beforeAll(async () => {
-        pipeline = await Gemma4QatPipeline.fromPretrained(nodeDirectory(root), {
+        pipeline = await Pipeline.fromPretrained(nodeDirectory(root), {
           model,
           maxResidentPleBytes: 0,
           onRunDiagnostics: (d, phase) => {
@@ -206,7 +206,7 @@ for (const model of ["e2b", "e4b"] as const) {
   test.skipIf(!available || !GPU_AVAILABLE)(
     `gemma4-qat ${model}: fromAssets も同じ構築と応答を通る（実GPU）`,
     async () => {
-      const pipeline = await Gemma4QatPipeline.fromAssets(await qatAssets(model), {
+      const pipeline = await Pipeline.fromAssets(await qatAssets(model), {
         maxResidentPleBytes: 0,
       });
       try {

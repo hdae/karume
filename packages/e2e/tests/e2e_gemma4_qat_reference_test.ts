@@ -16,7 +16,7 @@
 
 import { test } from "vite-plus/test";
 import { nodeDirectory } from "@karume/hub/node";
-import { Gemma4QatPipeline } from "../../models/gemma4-qat.ts";
+import { Pipeline } from "../../models/gemma4-qat.ts";
 import { openReferences, registerReferenceGate } from "../../runtime/tests/helpers/reference.ts";
 import { openResults } from "../../runtime/tests/helpers/results.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
@@ -45,7 +45,7 @@ if (!AVAILABLE) {
 }
 const RUNNABLE = AVAILABLE && GPU_AVAILABLE;
 
-/** `Gemma4QatPipeline.fromPretrained` が受ける model（`Gemma4QatFromPretrainedOptions.model`）。 */
+/** `gemma4Qat.Pipeline.fromPretrained` が受ける model（`gemma4Qat.FromPretrainedOptions.model`）。 */
 const QAT_MODELS = ["e2b", "e4b"] as const;
 type QatModel = (typeof QAT_MODELS)[number];
 
@@ -57,7 +57,7 @@ const qatSeat = (seat: Seat): Seat<QatModel> => {
   const model = QAT_MODELS.find((known) => known === seat.model);
   if (model === undefined) {
     throw new Error(
-      `${MIRROR_DIR.pathname} の model '${seat.model}' は Gemma4QatPipeline の選択軸に無い` +
+      `${MIRROR_DIR.pathname} の model '${seat.model}' は gemma4Qat.Pipeline の選択軸に無い` +
         `（受けるもの: ${QAT_MODELS.join(" / ")}）`,
     );
   }
@@ -77,7 +77,7 @@ for (const seat of SEATS) {
         references,
         results,
         seat,
-        open: (choice) => Gemma4QatPipeline.fromPretrained(nodeDirectory(MIRROR_DIR), choice),
+        open: (choice) => Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), choice),
       }),
   );
 }

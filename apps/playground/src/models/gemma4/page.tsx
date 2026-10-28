@@ -1,6 +1,6 @@
 /**
  * The Gemma 4 chat: load regular Gemma 4 (`gemma.Pipeline`) or a mobile QAT model
- * (`Gemma4QatPipeline`) on the page's GPU, hold one multi-turn conversation in a
+ * (`gemma4Qat.Pipeline`) on the page's GPU, hold one multi-turn conversation in a
  * `ChatSession` (the KV is carried between turns that close with EOS), stream each reply, and
  * save a record of the chat: settings, per-turn statistics and generated token ids, and the Session
  * diagnostics when the pipeline was loaded with them.
@@ -692,7 +692,7 @@ export const Gemma4Page = () => {
                 label="Model"
                 hint={
                   modelKey?.mount === "gemma4-qat"
-                    ? "Mobile QAT (Gemma4QatPipeline): experimental, fixed int2/int4/int8 with SRQ, no MTP; direct route only."
+                    ? "Mobile QAT (gemma4Qat.Pipeline): experimental, fixed int2/int4/int8 with SRQ, no MTP; direct route only."
                     : "Regular Gemma 4 (gemma.Pipeline)."
                 }
               >

@@ -289,7 +289,7 @@ export type Gemma4PleResidentOptions = {
    * chunk length).
    */
   readonly rows: readonly number[];
-  /** The subject of diagnostics (`Pipeline` / `Gemma4QatPipeline`). */
+  /** The subject of diagnostics (`gemma.Pipeline` / `gemma4Qat.Pipeline`). */
   readonly entry: string;
 };
 

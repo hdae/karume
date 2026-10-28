@@ -6,12 +6,14 @@
  * supported.
  * DECIDED: [ADR 0097](../../docs/decisions/0097-gemma4-qat-integration.md).
  */
-export { Gemma4QatPipeline } from "./src/gemma/pipeline.ts";
-export type {
-  Gemma4QatFromPretrainedOptions,
-  Gemma4QatPipelineOptions,
-} from "./src/gemma/pipeline.ts";
-export { gemma4QatRopeInputs } from "./src/gemma/rope.ts";
+/**
+ * The QAT pipeline. Its declaration keeps the qualified name `Gemma4QatPipeline` (it shares a module
+ * and a base class with Gemma's `Pipeline`), so TypeScript messages and stack traces spell it that
+ * way.
+ */
+export { Gemma4QatPipeline as Pipeline } from "./src/gemma/pipeline.ts";
+export type { FromPretrainedOptions, PipelineOptions } from "./src/gemma/qat.ts";
+export { ropeInputs } from "./src/gemma/qat.ts";
 export {
   dropOldestTurns,
   CHUNK_BUCKETS,

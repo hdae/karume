@@ -1,5 +1,5 @@
 {
-  "note": "A freeze of karume's own gemma4QatRopeInputs output (not bit identity with upstream Torch — ADR 0097 addendum 5).",
+  "note": "A freeze of karume's own gemma4Qat.ropeInputs output (not bit identity with upstream Torch — ADR 0097 addendum 5).",
   "positions": [0, 1, 17, 127, 4095],
   "spec": {
     "sliding_attention": {

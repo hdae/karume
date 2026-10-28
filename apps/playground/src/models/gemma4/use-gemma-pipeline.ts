@@ -1,6 +1,6 @@
 /**
  * Builds the Gemma 4 pipeline the page asked for (**Load**) on the page's GPU: `gemma.Pipeline` for
- * the `gemma4` mount, `Gemma4QatPipeline` for `gemma4-qat`. Construction reads every weight and
+ * the `gemma4` mount, `gemma4Qat.Pipeline` for `gemma4-qat`. Construction reads every weight and
  * builds the Session (gigabytes), so it runs only on an explicit request, and again when the GPU is
  * re-acquired after a device loss. The previous pipeline is disposed when the request changes or the
  * page is left (dispose waits for a running turn); a dispose that fails is reported, not dropped.
@@ -11,7 +11,7 @@
  */
 
 import { Pipeline, type RunPhase } from "@karume/models/gemma";
-import { Gemma4QatPipeline } from "@karume/models/gemma4-qat";
+import * as gemma4Qat from "@karume/models/gemma4-qat";
 import type { GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { type RefObject, useEffect, useState } from "react";
 
@@ -35,7 +35,7 @@ export type LoadRequest = {
   readonly diagnostics: boolean;
 };
 
-export type GemmaPipeline = Pipeline | Gemma4QatPipeline;
+export type GemmaPipeline = Pipeline | gemma4Qat.Pipeline;
 
 export type GemmaPipelineState =
   | { readonly kind: "idle" }
@@ -126,9 +126,9 @@ export const useGemmaPipeline = (input: {
       if (request.speculative) throw new Error("The QAT distribution has no MTP drafter");
       const { model } = request;
       if (!isQatModel(model)) {
-        throw new Error(`Gemma4QatPipeline accepts the models e2b and e4b, not '${model}'`);
+        throw new Error(`gemma4Qat.Pipeline accepts the models e2b and e4b, not '${model}'`);
       }
-      return await Gemma4QatPipeline.fromPretrained(ref, { ...common, model });
+      return await gemma4Qat.Pipeline.fromPretrained(ref, { ...common, model });
     };
 
     // Tracked with its dispose-on-abort, so the device outlives a build the cleanup abandoned.

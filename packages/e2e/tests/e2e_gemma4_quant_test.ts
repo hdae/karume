@@ -14,7 +14,7 @@ import { localDirectory, parseManifest } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
 import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
 import { chatPrompt, Pipeline, type RunPhase } from "../../models/gemma.ts";
-import { type Gemma4QatFromPretrainedOptions, Gemma4QatPipeline } from "../../models/gemma4-qat.ts";
+import * as gemma4Qat from "../../models/gemma4-qat.ts";
 import { assertSeatsApplied, mergeCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
 import type { SessionOverrides } from "../../models/src/session/options.ts";
 import {
@@ -195,12 +195,12 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                   census.push(d.lastRunPipelines);
                   byPhase.set(phase.kind, [...(byPhase.get(phase.kind) ?? []), d.lastRunPipelines]);
                 },
-              } satisfies Gemma4QatFromPretrainedOptions;
+              } satisfies gemma4Qat.FromPretrainedOptions;
               const source = nodeDirectory(temp);
               const pipeline =
                 family === "gemma4"
                   ? await Pipeline.fromPretrained(source, options)
-                  : await Gemma4QatPipeline.fromPretrained(source, options);
+                  : await gemma4Qat.Pipeline.fromPretrained(source, options);
               try {
                 const stream = pipeline.chat(
                   [
@@ -379,12 +379,12 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
           const loadUnsupported = () =>
             family === "gemma4"
               ? Pipeline.fromPretrained(noWeightsSource, { quant: "unsupported" })
-              : Gemma4QatPipeline.fromPretrained(noWeightsSource, { quant: "unsupported" });
+              : gemma4Qat.Pipeline.fromPretrained(noWeightsSource, { quant: "unsupported" });
           await assertRejects(loadUnsupported, Error, "session.linearCompute is not supported");
           if (family === "gemma4-qat") {
             await assertRejects(
               () =>
-                Gemma4QatPipeline.fromPretrained(noWeightsSource, {
+                gemma4Qat.Pipeline.fromPretrained(noWeightsSource, {
                   linearGemvReduce: "sequential",
                 }),
               Error,
@@ -419,7 +419,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
             const gpu = await acquireGpu();
             try {
               const phases: Record<string, number[]> = {};
-              const pipeline = await Gemma4QatPipeline.fromPretrained(nodeDirectory(root), {
+              const pipeline = await gemma4Qat.Pipeline.fromPretrained(nodeDirectory(root), {
                 gpu,
                 model: "e2b",
                 chunkLength: 32,

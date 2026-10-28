@@ -107,7 +107,7 @@ describe("buildGemmaRecord", () => {
     expect(record.page).toBe("gemma4");
     expect(record.recordedAt).toBe(environment.recordedAt);
     expect(record.pipeline).toBe("gemma.Pipeline");
-    expect(buildGemmaRecord({ ...input, mount: "gemma4-qat" }).pipeline).toBe("Gemma4QatPipeline");
+    expect(buildGemmaRecord({ ...input, mount: "gemma4-qat" }).pipeline).toBe("gemma4Qat.Pipeline");
   });
 
   it("keeps the turns with their token ids", () => {

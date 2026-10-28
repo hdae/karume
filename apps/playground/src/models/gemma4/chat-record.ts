@@ -96,8 +96,8 @@ export type GemmaRecord = RecordEnvironment & {
     readonly manifestSha256: string;
   };
   readonly source: SourceRecord;
-  /** The entry point: `Pipeline` (gemma4) or `Gemma4QatPipeline` (gemma4-qat). */
-  readonly pipeline: "gemma.Pipeline" | "Gemma4QatPipeline";
+  /** The entry point: `Pipeline` (gemma4) or `gemma4Qat.Pipeline` (gemma4-qat). */
+  readonly pipeline: "gemma.Pipeline" | "gemma4Qat.Pipeline";
   readonly model: string;
   readonly preset: { readonly quant: string; readonly label: string; readonly isDefault: boolean };
   /** Whether the MTP drafter was built (`speculative` of `fromPretrained`). */
@@ -139,7 +139,7 @@ export const buildGemmaRecord = (input: {
     manifestSha256: input.manifestSha256,
   },
   source: input.source,
-  pipeline: input.mount === "gemma4" ? "gemma.Pipeline" : "Gemma4QatPipeline",
+  pipeline: input.mount === "gemma4" ? "gemma.Pipeline" : "gemma4Qat.Pipeline",
   model: input.model,
   preset: input.preset,
   speculative: input.speculative,

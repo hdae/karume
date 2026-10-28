@@ -204,9 +204,10 @@ const ropeRows = (
  * Positions of one physical chunk → the four graph inputs (`[1, rows, headDim]` f32).
  *
  * `positions` has one entry per physical row (pad rows are 0 — `sequence.ts` fills them by the same
- * convention as `input_ids`).
+ * convention as `input_ids`). `qat` selects the per-step f32 rounding of fixed QAT (its entry is
+ * `ropeInputs` in `qat.ts`).
  */
-const buildRopeInputs = (
+export const buildRopeInputs = (
   spec: RopeSpec,
   positions: ArrayLike<number>,
   qat: boolean,
@@ -239,12 +240,3 @@ export const gemma4RopeRows = (spec: RopeLayerSpec, positions: ArrayLike<number>
 /** The four RoPE inputs for a physical chunk of regular Gemma. Pad positions are 0. */
 export const ropeInputs = (spec: RopeSpec, positions: ArrayLike<number>): Record<string, Tensor> =>
   buildRopeInputs(spec, positions, false);
-/**
- * Per-step f32 rounding, for fixed QAT only. Builds the four RoPE inputs of a physical chunk
- * including pad.
- * DECIDED: [ADR 0097 addendum 5](../../../../docs/decisions/0097-gemma4-qat-integration.md#addendum-5-2026-09-11--fixed-qat-recipe-and-how-numeric-comparisons-are-treated).
- */
-export const gemma4QatRopeInputs = (
-  spec: RopeSpec,
-  positions: ArrayLike<number>,
-): Record<string, Tensor> => buildRopeInputs(spec, positions, true);

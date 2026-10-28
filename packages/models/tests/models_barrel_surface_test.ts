@@ -311,14 +311,14 @@ test("barrel: KARUME_SOURCES is exactly the union of the family tables", async (
 
 test("gemma4-qat: exports its own entry points and not Gemma's pipeline", async () => {
   const qat = await import("../gemma4-qat.ts");
-  for (const name of ["Gemma4QatPipeline", "gemma4QatRopeInputs"]) {
+  for (const name of ["Pipeline", "ropeInputs"]) {
     assert(Object.hasOwn(qat, name), `./gemma4-qat has no ${name}`);
   }
   for (const name of ["GemmaPipeline", "admitGemma4Qat"]) {
     assertEquals(Object.hasOwn(qat, name), false, `./gemma4-qat exports ${name}`);
   }
-  // By identity, not by name: Gemma's bare names (`Pipeline`, `SOURCES`) are names the QAT surface
-  // may spell for its own values.
+  // By identity, not by name: Gemma's bare names (`Pipeline`, `SOURCES`, `ropeInputs`) are names
+  // the QAT surface spells (or may spell) for its own values.
   // Widened to plain values so the comparison compiles whatever the QAT surface exports today
   // (the checker rejects comparing types that do not overlap).
   const exported: Readonly<Record<string, unknown>> = qat;
@@ -326,5 +326,6 @@ test("gemma4-qat: exports its own entry points and not Gemma's pipeline", async 
   for (const [name, value] of Object.entries(exported)) {
     assert(value !== regular.Pipeline, `./gemma4-qat exports Gemma's Pipeline as ${name}`);
     assert(value !== regular.SOURCES, `./gemma4-qat exports Gemma's SOURCES as ${name}`);
+    assert(value !== regular.ropeInputs, `./gemma4-qat exports Gemma's ropeInputs as ${name}`);
   }
 });

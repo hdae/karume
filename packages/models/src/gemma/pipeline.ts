@@ -46,7 +46,13 @@ import {
   resolveGemmaSessionOptions,
 } from "./session-options.ts";
 import { createGemmaGreedyOutput, type GemmaGreedyOutput } from "./greedy-output.ts";
-import { admitGemma4Qat, assertGemma4QatPle } from "./qat.ts";
+import {
+  admitGemma4Qat,
+  assertGemma4QatPle,
+  type FromPretrainedOptions as QatFromPretrainedOptions,
+  type PipelineOptions as QatPipelineOptions,
+  ropeInputs as qatRopeInputs,
+} from "./qat.ts";
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
 import {
   acquireGpu,
@@ -128,7 +134,7 @@ import {
   type PleResidency,
   type Gemma4PleResident,
 } from "./ple-gpu.ts";
-import { gemma4QatRopeInputs, gemma4RopeInputNames, ropeInputs } from "./rope.ts";
+import { gemma4RopeInputNames, ropeInputs } from "./rope.ts";
 import { GEMMA4_DRAFT_STEPS, type Gemma4Drafter, openGemma4DraftFace } from "./speculative.ts";
 import { createStopStringFilter } from "../text/detokenizer.ts";
 import { parseGemmaTokenizerAsset } from "./text/asset.ts";
@@ -997,7 +1003,7 @@ const buildGemma4Program = (
     // The model name is the value admission settled, used as is (not re-derived from the layer count).
     assertGemma4QatPle(admission.model, model.graph, assets.pleIndex);
   }
-  const familyRopeInputs = admission.family === "gemma4-qat" ? gemma4QatRopeInputs : ropeInputs;
+  const familyRopeInputs = admission.family === "gemma4-qat" ? qatRopeInputs : ropeInputs;
   const tokenizer = new Tokenizer(parseGemmaTokenizerAsset(assets.tokenizer));
   // ① the ids the tokenizer can produce and ② the vocab rows of the main embedding.
   if (tokenizer.maxTokenId >= vocabSize) {
@@ -2059,21 +2065,12 @@ export class Pipeline extends GemmaPipeline {
   }
 }
 
-/** The initial implementation of fixed mobile QAT does not accept a drafter. */
-export type Gemma4QatPipelineOptions = Omit<PipelineOptions, "speculative"> & {
-  readonly speculative?: never;
-};
-export type Gemma4QatFromPretrainedOptions = Omit<
-  FromPretrainedOptions,
-  "speculative" | "model"
-> & {
-  readonly speculative?: never;
-  readonly model?: "e2b" | "e4b";
-};
-
 /**
  * Fixed QAT E2B/E4B at the experimental stage. Full CPU/GPU bit agreement and broad quality are not
  * guaranteed (ADR 0097).
+ *
+ * `@karume/models/gemma4-qat` exports it as `Pipeline`. The declaration keeps a qualified name
+ * because it shares this module (and the base class) with regular Gemma's {@link Pipeline}.
  */
 export class Gemma4QatPipeline extends GemmaPipeline {
   private constructor(state: Gemma4State) {
@@ -2085,7 +2082,7 @@ export class Gemma4QatPipeline extends GemmaPipeline {
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
-    options: Gemma4QatFromPretrainedOptions = {},
+    options: QatFromPretrainedOptions = {},
   ): Promise<Gemma4QatPipeline> {
     return new Gemma4QatPipeline(await super.loadPretrained("gemma4-qat", ref, options));
   }
@@ -2095,7 +2092,7 @@ export class Gemma4QatPipeline extends GemmaPipeline {
    */
   static async fromAssets(
     input: Assets,
-    options: Gemma4QatPipelineOptions = {},
+    options: QatPipelineOptions = {},
   ): Promise<Gemma4QatPipeline> {
     return new Gemma4QatPipeline(await super.loadAssets("gemma4-qat", input, options));
   }

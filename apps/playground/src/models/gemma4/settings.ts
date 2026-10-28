@@ -20,7 +20,7 @@ import type { Choice } from "@/components/choice-select";
 export const GEMMA_MOUNTS = ["gemma4", "gemma4-qat"] as const;
 export type GemmaMount = (typeof GEMMA_MOUNTS)[number];
 
-/** `Pipeline` for `gemma4`, `Gemma4QatPipeline` for `gemma4-qat`. */
+/** `Pipeline` for `gemma4`, `gemma4Qat.Pipeline` for `gemma4-qat`. */
 export const MOUNT_LABELS: Readonly<Record<GemmaMount, string>> = {
   gemma4: "Gemma 4",
   "gemma4-qat": "Gemma 4 QAT",
@@ -42,7 +42,7 @@ export const parseModelKey = (value: string): ModelKey | undefined => {
   return isGemmaMount(mount) && model !== "" ? { mount, model } : undefined;
 };
 
-/** The models `Gemma4QatPipeline.fromPretrained` accepts (`model` is typed `"e2b" | "e4b"`). */
+/** The models `gemma4Qat.Pipeline.fromPretrained` accepts (`model` is typed `"e2b" | "e4b"`). */
 export type QatModel = "e2b" | "e4b";
 export const isQatModel = (model: string): model is QatModel => model === "e2b" || model === "e4b";
 
@@ -63,7 +63,7 @@ export const gemmaModelChoices = (manifests: GemmaManifests): readonly Choice<st
       return {
         value: modelKeyValue({ mount, model }),
         label: `${MOUNT_LABELS[mount]} — ${model}${model === manifest.defaultModel ? " (default)" : ""}${
-          unsupported ? " (not accepted by Gemma4QatPipeline)" : ""
+          unsupported ? " (not accepted by gemma4Qat.Pipeline)" : ""
         }`,
         ...(unsupported ? { disabled: true } : {}),
       };
@@ -101,7 +101,7 @@ export const modelConfig = (manifest: Manifest, model: string): PipelineConfig =
 /**
  * Whether the model has drafter weights, i.e. whether the MTP drafter (`speculative` of
  * `Pipeline.fromPretrained`) can be built (every preset then maps them — a quant is a complete
- * mapping of the model's weights). Regular Gemma 4 only: `Gemma4QatPipeline` takes no drafter.
+ * mapping of the model's weights). Regular Gemma 4 only: `gemma4Qat.Pipeline` takes no drafter.
  */
 export const hasDrafter = (manifest: Manifest, { mount, model }: ModelKey): boolean =>
   mount === "gemma4" && manifest.models[model]?.weights["drafter"] !== undefined;
