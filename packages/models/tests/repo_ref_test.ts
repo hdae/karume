@@ -26,7 +26,7 @@ import {
 import { localDirectory } from "@karume/hub";
 import { toManifestSource, toRepoRef } from "../src/hub/repo-ref.ts";
 import * as anima from "../anima.ts";
-import { BirefnetPipeline } from "../src/birefnet/pipeline.ts";
+import * as birefnet from "../birefnet.ts";
 import { Umt5Encoder } from "../src/umt5/encoder.ts";
 import { WanPipeline } from "../src/wan/pipeline.ts";
 import { WanTi2vPipeline } from "../src/wan/ti2v-pipeline.ts";
@@ -156,17 +156,17 @@ test("fromPretrained: 取得元の綴りが空なら fetch を 1 度も呼ばず
   assertEquals(calls, 0);
 });
 
-test("fromPretrained: birefnet も ref 欠落時に対応表（BIREFNET_SOURCES）を案内する", async () => {
-  // 0.10.0 で公開 pin（`BIREFNET_SOURCES`）が入ったのに、案内だけが「公開リポを持たない」時代の
+test("fromPretrained: birefnet も ref 欠落時に対応表（birefnet.SOURCES）を案内する", async () => {
+  // 0.10.0 で公開 pin（`birefnet.SOURCES`）が入ったのに、案内だけが「公開リポを持たない」時代の
   // ままだった（下流の報告）。他家族と同じ文言に揃っていることを公開面から見る。
   const fetchStub: typeof globalThis.fetch = (input) =>
     Promise.reject(new Error(`repo_ref_test: 取得層まで進んだ（${describeRequest(input)}）`));
   const error = await assertRejects(
-    () => BirefnetPipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
+    () => birefnet.Pipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
     Error,
-    "BirefnetPipeline.fromPretrained: repo is required",
+    "birefnet.Pipeline.fromPretrained: repo is required",
   );
-  assertStringIncludes(error.message, 'BIREFNET_SOURCES["birefnet-hr"] (@karume/models/birefnet)');
+  assertStringIncludes(error.message, 'SOURCES["birefnet-hr"] (@karume/models/birefnet)');
 });
 
 test("fromPretrained: umT5 と Wan2.2 は ref 欠落時に対応表を案内し、未公開の Wan2.1 は案内しない", async () => {

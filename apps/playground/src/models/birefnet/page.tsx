@@ -11,7 +11,7 @@
  * limits are too small for the intermediates is told before any weight is read.
  */
 
-import { type AlphaMatte, BirefnetPipeline } from "@karume/models/birefnet";
+import { type AlphaMatte, Pipeline } from "@karume/models/birefnet";
 import type { AcquireGpuOptions, GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -93,7 +93,7 @@ const sameBuild = (left: Build, right: Build): boolean =>
 /** The resident pipeline: what it was built for, how long it took to open, how many runs it did. */
 type Held = {
   readonly build: Build;
-  readonly pipeline: BirefnetPipeline;
+  readonly pipeline: Pipeline;
   readonly loadMs: number;
   readonly runs: number;
 };
@@ -254,7 +254,7 @@ export const BirefnetPage = () => {
         }
         report({ stage: "loading", note: "reading the manifest" });
         const loadStart = performance.now();
-        const pipeline = await BirefnetPipeline.fromPretrained(
+        const pipeline = await Pipeline.fromPretrained(
           pretrainedRef(target.source, target.checkpoint),
           {
             gpu: target.gpu,

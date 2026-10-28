@@ -1,5 +1,5 @@
 /**
- * `BirefnetPipeline` — the single surface for image → alpha matte (background removal / salient
+ * `Pipeline` — the single surface for image → alpha matte (background removal / salient
  * object segmentation).
  *
  * Pipeline (every step in Karume, no torch):
@@ -32,7 +32,7 @@
  *
  * ## It returns **one alpha matte only** (no RGBA compositing, no PNG)
  *
- * {@link BirefnetPipeline.segment} returns "an α of the same size as the input, one byte per
+ * {@link Pipeline.segment} returns "an α of the same size as the input, one byte per
  * pixel", not an RGBA cut-out of the foreground.
  *
  * - **The compositing policy depends on the use** (pass straight α to a canvas / composite onto
@@ -137,12 +137,12 @@ const CHANNELS = 3;
 const MATTE_CHANNELS = 1;
 
 /**
- * Construction options (shared by {@link BirefnetPipeline.fromAssets} /
- * {@link BirefnetPipeline.fromPretrained}).
+ * Construction options (shared by {@link Pipeline.fromAssets} /
+ * {@link Pipeline.fromPretrained}).
  */
-export type BirefnetPipelineOptions = {
+export type PipelineOptions = {
   /**
-   * Shares an existing GPU. **The caller keeps ownership**, so {@link BirefnetPipeline.dispose}
+   * Shares an existing GPU. **The caller keeps ownership**, so {@link Pipeline.dispose}
    * does not destroy it. When omitted, the pipeline calls `acquireGpu` internally and destroys it
    * in `dispose()`.
    */
@@ -165,20 +165,20 @@ export type BirefnetPipelineOptions = {
 };
 
 /**
- * Fetch-layer options used only by {@link BirefnetPipeline.fromPretrained} (passed through to the
+ * Fetch-layer options used only by {@link Pipeline.fromPretrained} (passed through to the
  * hub).
  *
  * NOTE: the description of the fetch-layer knobs, including that `headers` / `fetch` / `caches` /
  * `onRetry` are **for HTTP sources only**, lives in one place, {@link FromPretrainedHubOptions}.
  */
-export type BirefnetFromPretrainedOptions = BirefnetPipelineOptions &
+export type FromPretrainedOptions = PipelineOptions &
   FromPretrainedHubOptions &
   FromPretrainedComponentOptions & {
     readonly signal?: AbortSignal;
   };
 
 /** Input for building directly from fetched assets (pass the hub's `fetchAssets` result as is). */
-export type BirefnetAssets = {
+export type Assets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
@@ -200,7 +200,7 @@ const assetBuffer = (
  * shared by every family — {@link assetComponentOpener}). A component key is either one single-form
  * `krm` (`matte`) or the part sequence of the split form (`matte[0]` / `matte[1]` / …).
  */
-const assetOpener = (assets: BirefnetAssets["assets"]): Promise<ComponentOpener> =>
+const assetOpener = (assets: Assets["assets"]): Promise<ComponentOpener> =>
   assetComponentOpener("birefnet", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 /**
@@ -287,7 +287,7 @@ export const preprocessPixelValues = (
   );
 
 /**
- * Internal state of {@link BirefnetPipeline} (not on the public surface).
+ * Internal state of {@link Pipeline} (not on the public surface).
  *
  * NOTE: the `export` exists because the A/B tool (`tools/birefnet-ab/`, removed in 0.15) used
  * {@link loadBirefnetState} / {@link matteLogits} (not exposed on `mod.ts` / the subpath surface —
@@ -362,12 +362,12 @@ type BirefnetAdmission = {
 const admitBirefnet = (
   manifest: Manifest,
   open: ComponentOpener,
-  options: BirefnetPipelineOptions,
+  options: PipelineOptions,
 ): BirefnetAdmission => {
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
-      `BirefnetPipeline: model '${modelName}' is not in the manifest` +
+      `birefnet.Pipeline: model '${modelName}' is not in the manifest` +
         ` (available: ${manifest.available.models.join(" / ")})`,
     );
   }
@@ -375,7 +375,7 @@ const admitBirefnet = (
   const { name, major } = entry.pipeline;
   if (name !== BIREFNET_PIPELINE_NAME) {
     throw new Error(
-      `BirefnetPipeline: the manifest's pipeline is '${name}/${major}'` +
+      `birefnet.Pipeline: the manifest's pipeline is '${name}/${major}'` +
         ` ('${BIREFNET_PIPELINE_NAME}/${BIREFNET_PIPELINE_MAJOR}' is required)`,
     );
   }
@@ -383,7 +383,7 @@ const admitBirefnet = (
     // The only check that stops silent degradation from "old implementation × new repository"
     // (ADR 0038 §6).
     throw new Error(
-      `BirefnetPipeline: the major of pipeline '${name}/${major}' is not supported` +
+      `birefnet.Pipeline: the major of pipeline '${name}/${major}' is not supported` +
         ` (this implementation reads ${BIREFNET_PIPELINE_NAME}/${BIREFNET_PIPELINE_MAJOR})`,
     );
   }
@@ -392,7 +392,7 @@ const admitBirefnet = (
   const quantName = options.quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quantName)) {
     throw new Error(
-      `BirefnetPipeline: quant '${quantName}' is not in the manifest` +
+      `birefnet.Pipeline: quant '${quantName}' is not in the manifest` +
         ` (available: ${entry.available.quants.join(" / ")})`,
     );
   }
@@ -403,7 +403,7 @@ const admitBirefnet = (
     BIREFNET_SESSION_POLICY,
     quant.session,
     {},
-    `BirefnetPipeline: quant '${quantName}'`,
+    `birefnet.Pipeline: quant '${quantName}'`,
   );
   const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
 
@@ -414,7 +414,7 @@ const admitBirefnet = (
   // other values as α.
   if (matte.graph.inputs.length !== 1 || matte.graph.outputs.length !== 1) {
     throw new Error(
-      `BirefnetPipeline: the matte graph has ${matte.graph.inputs.length} /` +
+      `birefnet.Pipeline: the matte graph has ${matte.graph.inputs.length} /` +
         ` ${matte.graph.outputs.length} inputs / outputs (one matte requires exactly 1 of each)`,
     );
   }
@@ -430,11 +430,11 @@ const admitBirefnet = (
   // knows before the weights are downloaded (the mapping between request and check is the one
   // function in `session/gpu-features.ts`, and the later check calls the same function).
   if (options.gpu !== undefined) {
-    assertGpuFeaturesGranted(gpuFeatures, options.gpu, `BirefnetPipeline: quant '${quantName}'`);
+    assertGpuFeaturesGranted(gpuFeatures, options.gpu, `birefnet.Pipeline: quant '${quantName}'`);
     assertRequiredLimitsSatisfied(
       quant.requiredLimits,
       options.gpu.limits,
-      `BirefnetPipeline: quant '${quantName}'`,
+      `birefnet.Pipeline: quant '${quantName}'`,
     );
   }
 
@@ -453,7 +453,7 @@ const admitBirefnet = (
 const openBirefnetState = async (
   admitted: BirefnetAdmission,
   open: ComponentOpener,
-  options: BirefnetPipelineOptions = {},
+  options: PipelineOptions = {},
 ): Promise<BirefnetState> => {
   const { config, quantName, quant, sessionOptions, gpuFeatures } = admitted;
   // The supplier is **the same one** admission saw (`open` only looks up components already
@@ -466,7 +466,7 @@ const openBirefnetState = async (
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
-    assertGpuFeaturesGranted(gpuFeatures, gpu, `BirefnetPipeline: quant '${quantName}'`);
+    assertGpuFeaturesGranted(gpuFeatures, gpu, `birefnet.Pipeline: quant '${quantName}'`);
     // Also check the limits of a device acquired here — `fromAssets` has no pre-fetch check
     // (`fromPretrained` checks against adapter values); without this a missing declaration surfaces
     // only at Session construction, and a declaration stricter than the real demand is never
@@ -475,7 +475,7 @@ const openBirefnetState = async (
       assertRequiredLimitsSatisfied(
         quant.requiredLimits,
         gpu.limits,
-        `BirefnetPipeline: quant '${quantName}'`,
+        `birefnet.Pipeline: quant '${quantName}'`,
       );
     }
     return {
@@ -554,28 +554,28 @@ const segmentImage = async (state: BirefnetState, image: Rgb8Image): Promise<Alp
 
 /**
  * Fetches a distribution and builds the execution state (the body of
- * {@link BirefnetPipeline.fromPretrained} — the sequence is described in its doc).
+ * {@link Pipeline.fromPretrained} — the sequence is described in its doc).
  *
  * NOTE: the `export` exists so that the A/B tool (`tools/birefnet-ab/`, removed in 0.15) could take
  * logits through the same checks and the same graph as the pipeline (not exposed on `mod.ts` / the
  * subpath surface — ADR 0008).
  *
- * MUST (caller): the returned state comes without {@link BirefnetPipeline}'s serialization chain
+ * MUST (caller): the returned state comes without {@link Pipeline}'s serialization chain
  * and `dispose`, so the caller takes over both roles — call {@link matteLogits} only after the
  * previous call has finished (do not share one Session between two `run`s). When done, call
  * `state.session.dispose()` yourself (after in-flight runs have finished — flush-before-destroy).
  * If `options.gpu` was omitted and this function acquired the GPU (`state.ownsGpu`), the
  * `state.gpu.destroy()` after tearing down the Session is also the caller's (the shape that always
- * runs both is {@link disposeSteps}, the same as {@link BirefnetPipeline.dispose}).
+ * runs both is {@link disposeSteps}, the same as {@link Pipeline.dispose}).
  */
 export const loadBirefnetState = async (
   ref: string | HubRepoRef | DistributionSource,
-  options: BirefnetFromPretrainedOptions = {},
+  options: FromPretrainedOptions = {},
 ): Promise<BirefnetState> => {
   const source = toManifestSource(
     ref,
-    "BirefnetPipeline.fromPretrained",
-    'BIREFNET_SOURCES["birefnet-hr"] (@karume/models/birefnet)',
+    "birefnet.Pipeline.fromPretrained",
+    'SOURCES["birefnet-hr"] (@karume/models/birefnet)',
   );
   const hubOptions = hubLoadOptions(options);
   const loaded = await loadManifest(source, hubOptions);
@@ -584,7 +584,7 @@ export const loadBirefnetState = async (
     ...(options.quant === undefined ? {} : { quant: options.quant }),
   };
   const selection = resolveSelection(loaded.manifest, choice);
-  const buildOptions: BirefnetPipelineOptions = {
+  const buildOptions: PipelineOptions = {
     ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
     ...choice,
     ...(options.onRunDiagnostics === undefined
@@ -594,7 +594,7 @@ export const loadBirefnetState = async (
   // The family checks run in the admission hook (before weight parts are fetched —
   // `hub/components.ts`).
   const { admitted, open } = await loadContainerComponents(
-    "BirefnetPipeline.fromPretrained",
+    "birefnet.Pipeline.fromPretrained",
     loaded,
     selection,
     COMPONENT_KEYS,
@@ -606,7 +606,7 @@ export const loadBirefnetState = async (
       await assertRequiredLimitsBeforeDownload(
         admitted.quant.requiredLimits,
         buildOptions.gpu,
-        `BirefnetPipeline: quant '${admitted.quantName}'`,
+        `birefnet.Pipeline: quant '${admitted.quantName}'`,
       );
       return admitted;
     },
@@ -622,12 +622,12 @@ export const loadBirefnetState = async (
 /**
  * The BiRefNet family's image → alpha matte pipeline (one graph).
  *
- * Construction enters only through {@link BirefnetPipeline.fromPretrained} (fetch from HF) or
- * {@link BirefnetPipeline.fromAssets} (already-fetched bytes) — the constructor is private so that
+ * Construction enters only through {@link Pipeline.fromPretrained} (fetch from HF) or
+ * {@link Pipeline.fromAssets} (already-fetched bytes) — the constructor is private so that
  * no half-built state bypassing the manifest checks and the asset matching can be created
  * (ADR 0008).
  */
-export class BirefnetPipeline {
+export class Pipeline {
   readonly #state: BirefnetState;
   /**
    * Serialization chain for segment and dispose ("one at a time" kept on the public API side —
@@ -652,19 +652,19 @@ export class BirefnetPipeline {
    * another repository use {@link FromPretrainedComponentOptions.components} (one role, `matte`). A
    * string `ref` reads as `{ repo }` (= follows `main`). **`ref` is required** (sources have no
    * default — the MUST of `src/hub/repo-ref.ts`). The verified pins are `"birefnet-hr"` /
-   * `"lucida"` of {@link BIREFNET_SOURCES} (`./config.ts`) — one repository holds the two
+   * `"lucida"` of {@link SOURCES} (`./config.ts`) — one repository holds the two
    * models 1024² / 2048², and 2048² is chosen with `{ model: "2048" }`.
    *
    * A local distribution is passed as a **source handle** (`localDirectory` / `denoDirectory` of
    * `@karume/hub/deno`). It skips the check of HF's `owner/name` spelling and touches neither the
-   * network nor CacheStorage (the HTTP-only knobs of {@link BirefnetFromPretrainedOptions} have no
+   * network nor CacheStorage (the HTTP-only knobs of {@link FromPretrainedOptions} have no
    * effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
-    options: BirefnetFromPretrainedOptions = {},
-  ): Promise<BirefnetPipeline> {
-    return new BirefnetPipeline(await loadBirefnetState(ref, options));
+    options: FromPretrainedOptions = {},
+  ): Promise<Pipeline> {
+    return new Pipeline(await loadBirefnetState(ref, options));
   }
 
   /**
@@ -678,13 +678,10 @@ export class BirefnetPipeline {
    * mixing with the single-form key fails loudly (the receiving implementation is the one in
    * `src/hub/components.ts`).
    */
-  static async fromAssets(
-    input: BirefnetAssets,
-    options: BirefnetPipelineOptions = {},
-  ): Promise<BirefnetPipeline> {
+  static async fromAssets(input: Assets, options: PipelineOptions = {}): Promise<Pipeline> {
     const open = await assetOpener(input.assets);
     const admitted = admitBirefnet(input.manifest, open, options);
-    return new BirefnetPipeline(await openBirefnetState(admitted, open, options));
+    return new Pipeline(await openBirefnetState(admitted, open, options));
   }
 
   /**
@@ -701,7 +698,7 @@ export class BirefnetPipeline {
     // The disposed check happens at call time (checking inside the chain would also fail the
     // segmentations accepted before dispose).
     if (this.#disposal !== undefined) {
-      throw new Error("BirefnetPipeline: cannot segment after dispose");
+      throw new Error("birefnet.Pipeline: cannot segment after dispose");
     }
     return await this.#chain(() => segmentImage(this.#state, image));
   }

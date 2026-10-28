@@ -25,7 +25,7 @@ import { SBV2_SOURCES } from "./sbv2/config.ts";
 import { GEMMA4_SOURCES } from "./gemma/config.ts";
 import { SIGLIP2_SOURCES } from "./siglip2/config.ts";
 import { DEPTH_ANYTHING_SOURCES } from "./depth-anything/config.ts";
-import { BIREFNET_SOURCES } from "./birefnet/config.ts";
+import * as birefnet from "./birefnet/config.ts";
 import { UMT5_SOURCES } from "./umt5/config.ts";
 import { WAN_SOURCES } from "./wan/config.ts";
 
@@ -36,7 +36,7 @@ export const KARUME_SOURCES = {
   ...GEMMA4_SOURCES,
   ...SIGLIP2_SOURCES,
   ...DEPTH_ANYTHING_SOURCES,
-  ...BIREFNET_SOURCES,
+  ...birefnet.SOURCES,
   ...UMT5_SOURCES,
   ...WAN_SOURCES,
 } as const satisfies Record<string, HubRepoRef>;

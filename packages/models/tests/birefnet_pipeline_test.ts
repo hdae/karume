@@ -1,4 +1,4 @@
-// `BirefnetPipeline` の**構築ガード**と**前後処理の結線**。GPU も実資産も要らない範囲だけを
+// `Pipeline` の**構築ガード**と**前後処理の結線**。GPU も実資産も要らない範囲だけを
 // 見る（実 GPU の突合は `packages/runtime/tests/e2e_birefnet_test.ts`〈golden 入力〉と
 // `e2e_birefnet_real_test.ts`〈実画像の前処理パリティと判別〉が持つ — 重複させない）。
 //
@@ -48,7 +48,7 @@ import { parseBirefnetPipelineConfig } from "../src/birefnet/config.ts";
 import {
   assertMatteShape,
   assertStaticDim,
-  BirefnetPipeline,
+  Pipeline,
   preprocessPixelValues,
 } from "../src/birefnet/pipeline.ts";
 import { MATTE_PROCEDURES, matteFromLogits, type MatteProcedure } from "../src/birefnet/matte.ts";
@@ -101,7 +101,7 @@ const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }, { model: "nope" }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENT }, { model: "nope" }),
     Error,
     "model 'nope' is not in the manifest",
   );
@@ -110,7 +110,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
 test("fromAssets: pipeline の契約名が birefnet でない manifest を落とす", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "siglip2/1" }));
   await assertRejects(
-    () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "the manifest's pipeline is 'siglip2/1'",
   );
@@ -120,7 +120,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門。hub は major を検査しない。
   const manifest = parseManifest(manifestText({ pipeline: "birefnet/3" }));
   await assertRejects(
-    () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "major of pipeline 'birefnet/3' is not supported",
   );
@@ -133,7 +133,7 @@ test("fromAssets: 旧 major（birefnet/1 — 後処理の手順を宣言しな�
   delete legacy.postprocess;
   const manifest = parseManifest(manifestText({ pipeline: "birefnet/1", pipelineConfig: legacy }));
   await assertRejects(
-    () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "the major of pipeline 'birefnet/1' is not supported (this implementation reads birefnet/2)",
   );
@@ -142,7 +142,7 @@ test("fromAssets: 旧 major（birefnet/1 — 後処理の手順を宣言しな�
 test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }, { quant: "nope" }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENT }, { quant: "nope" }),
     Error,
     "quant 'nope' is not in the manifest",
   );
@@ -154,7 +154,7 @@ test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async
     manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, image_mean: [0.5, 0.5, 0.5] } }),
   );
   await assertRejects(
-    () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "pipelineConfig: unknown key 'image_mean'",
   );
@@ -165,7 +165,7 @@ test("fromAssets: bilinear 以外の補間を宣言した配布形は受理し�
     manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, interpolation: "bicubic" } }),
   );
   await assertRejects(
-    () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "pipelineConfig.interpolation: this implementation supports only 'bilinear'",
   );
@@ -176,7 +176,7 @@ test("fromAssets: 後処理の手順を宣言しない pipelineConfig は構築�
   delete missing.postprocess;
   const manifest = parseManifest(manifestText({ pipelineConfig: missing }));
   await assertRejects(
-    () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "pipelineConfig.postprocess: missing",
   );
@@ -187,7 +187,7 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   // 文言では落ちない）= 上のケースが資産の不在に巻き添えられていないことの対偶。
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => BirefnetPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => Pipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
     "component 'matte' has no container",
   );
@@ -486,7 +486,7 @@ const fakeLogits = (): Float32Array<ArrayBuffer> =>
 const pipelineWithFakeSession = (
   logits: Float32Array<ArrayBuffer>,
   postprocess: MatteProcedure,
-): BirefnetPipeline => {
+): Pipeline => {
   const state = {
     gpu: fakeGpuContext(fakeDevice()),
     ownsGpu: false,
@@ -506,7 +506,7 @@ const pipelineWithFakeSession = (
       dispose: () => Promise.resolve(),
     },
   };
-  return Reflect.construct(BirefnetPipeline, [state]);
+  return Reflect.construct(Pipeline, [state]);
 };
 
 test("segment: logit に当てる手順は配布形の宣言どおり（matteFromLogits の明示の手順とビット一致）", async () => {

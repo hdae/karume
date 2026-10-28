@@ -36,10 +36,8 @@ import {
   type BirefnetPipelineConfig,
   parseBirefnetPipelineConfig,
 } from "../src/birefnet/config.ts";
-import {
-  BirefnetPipeline,
-  preprocessPixelValues as birefnetPixelValues,
-} from "../src/birefnet/pipeline.ts";
+import * as birefnet from "../birefnet.ts";
+import { preprocessPixelValues as birefnetPixelValues } from "../src/birefnet/pipeline.ts";
 import { matteFromLogits } from "../src/birefnet/matte.ts";
 import { parseDepthAnythingPipelineConfig } from "../src/depth-anything/config.ts";
 import {
@@ -269,10 +267,10 @@ const siglip2: Family = {
   disposedMessage: "cannot embed after dispose",
 };
 
-const birefnet: Family = {
-  name: "BirefnetPipeline.segment",
+const birefnetFamily: Family = {
+  name: "birefnet.Pipeline.segment",
   build: async (options) => {
-    const pipeline = await BirefnetPipeline.fromAssets(
+    const pipeline = await birefnet.Pipeline.fromAssets(
       {
         manifest: manifestOf("birefnet/2", "matte", BIREFNET_CONFIG),
         assets: await assetsOf(
@@ -390,7 +388,7 @@ const withGpu = async (fn: (gpu: GpuContext) => Promise<void>): Promise<void> =>
   }
 };
 
-for (const family of [siglip2, birefnet, depthAnything]) {
+for (const family of [siglip2, birefnetFamily, depthAnything]) {
   describe.skipIf(!GPU_AVAILABLE)(`${family.name}（実 GPU・小グラフ）`, () => {
     it("前処理 → グラフ 1 回 → 後処理を結線し、診断を 1 回渡す", async () => {
       await withGpu(async (gpu) => {

@@ -8,7 +8,7 @@
  * segmentation, after the weights were read and uploaded. The manifest's `requiredLimits` cannot
  * show it either: they cover the resident part only (and both distributions declare none).
  *
- * The same route as `BirefnetPipeline.fromPretrained` up to its admission step (manifest →
+ * The same route as `birefnet.Pipeline.fromPretrained` up to its admission step (manifest →
  * selection → part 0 → `openContainer` → `prepareContainer`).
  */
 

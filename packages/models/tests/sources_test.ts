@@ -28,7 +28,7 @@ import { SBV2_SOURCES } from "../src/sbv2/config.ts";
 import { GEMMA4_SOURCES } from "../src/gemma/config.ts";
 import { SIGLIP2_SOURCES } from "../src/siglip2/config.ts";
 import { DEPTH_ANYTHING_SOURCES } from "../src/depth-anything/config.ts";
-import { BIREFNET_SOURCES } from "../src/birefnet/config.ts";
+import * as birefnet from "../birefnet.ts";
 import { UMT5_SOURCES } from "../src/umt5/config.ts";
 import { WAN_SOURCES } from "../src/wan/config.ts";
 import { KARUME_SOURCES } from "../src/sources.ts";
@@ -37,7 +37,6 @@ import { Sbv2Pipeline } from "../src/sbv2/pipeline.ts";
 import { Gemma4Pipeline } from "../src/gemma/pipeline.ts";
 import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
 import { DepthAnythingPipeline } from "../src/depth-anything/pipeline.ts";
-import { BirefnetPipeline } from "../src/birefnet/pipeline.ts";
 import { Umt5Encoder } from "../src/umt5/encoder.ts";
 import { WanTi2vPipeline } from "../src/wan/ti2v-pipeline.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
@@ -128,12 +127,12 @@ const FAMILIES: readonly Family[] = [
     load: (ref, options) => DepthAnythingPipeline.fromPretrained(ref, options),
   },
   {
-    name: "BIREFNET_SOURCES",
-    sources: BIREFNET_SOURCES,
+    name: "birefnet.SOURCES",
+    sources: birefnet.SOURCES,
     // checkpoint ごとに 1 リポ（派生 Lucida は別リポ — ADR 0092 決定 1）。各リポには解像度ごとの
     // 別グラフが "1024" / "2048" の 2 モデルとして同居する（決定 9）。
     keys: ["birefnet-hr", "lucida"],
-    load: (ref, options) => BirefnetPipeline.fromPretrained(ref, options),
+    load: (ref, options) => birefnet.Pipeline.fromPretrained(ref, options),
   },
   {
     name: "UMT5_SOURCES",
@@ -174,7 +173,7 @@ test("取得元対応表を持つのは 9 家族・公開リポは 12 本", () =
       "GEMMA4_SOURCES",
       "SIGLIP2_SOURCES",
       "DEPTH_ANYTHING_SOURCES",
-      "BIREFNET_SOURCES",
+      "birefnet.SOURCES",
       "UMT5_SOURCES",
       "WAN_SOURCES",
     ],

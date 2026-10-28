@@ -3,8 +3,8 @@
  * background removal).
  *
  * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
- * wholesale. The surface follows the user's stories — build ({@link BirefnetPipeline.fromPretrained}
- * / {@link BirefnetPipeline.fromAssets}) / cut out (`segment`) / release (`dispose`).
+ * wholesale. The surface follows the user's stories — build ({@link Pipeline.fromPretrained}
+ * / {@link Pipeline.fromAssets}) / cut out (`segment`) / release (`dispose`).
  *
  * Decoding the pixels is the user's responsibility; resize / rescale / normalize are applied inside
  * `segment` with the distribution's constants. The result is one **8-bit alpha with the same size as
@@ -16,13 +16,9 @@
  * CLAUDE.md). Tree-shaking through the barrel (`mod.ts`) works only on top of this invariant.
  */
 
-export { BirefnetPipeline } from "./src/birefnet/pipeline.ts";
-export { BIREFNET_SOURCES } from "./src/birefnet/config.ts";
-export type {
-  BirefnetAssets,
-  BirefnetFromPretrainedOptions,
-  BirefnetPipelineOptions,
-} from "./src/birefnet/pipeline.ts";
+export { Pipeline } from "./src/birefnet/pipeline.ts";
+export { SOURCES } from "./src/birefnet/config.ts";
+export type { Assets, FromPretrainedOptions, PipelineOptions } from "./src/birefnet/pipeline.ts";
 export type { AlphaMatte } from "./src/birefnet/matte.ts";
 export type { Rgb8Image } from "./src/image/preprocess.ts";
 

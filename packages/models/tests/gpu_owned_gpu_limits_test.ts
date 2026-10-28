@@ -19,7 +19,7 @@
 import { assertRejects } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { type Manifest, parseManifest } from "@karume/hub";
-import { BirefnetPipeline } from "../src/birefnet/pipeline.ts";
+import * as birefnet from "../birefnet.ts";
 import { DepthAnythingPipeline } from "../src/depth-anything/pipeline.ts";
 import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
 import { VowelDetectorPipeline } from "../src/vowel-detector/pipeline.ts";
@@ -107,9 +107,9 @@ const families: readonly Family[] = [
       }),
   },
   {
-    name: "BirefnetPipeline",
+    name: "birefnet.Pipeline",
     build: async () =>
-      await BirefnetPipeline.fromAssets({
+      await birefnet.Pipeline.fromAssets({
         manifest: manifestOf("birefnet/2", "matte", {
           ...IMAGE_CONFIG,
           interpolation: "bilinear",

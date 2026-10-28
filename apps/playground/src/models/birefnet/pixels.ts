@@ -2,7 +2,7 @@
  * The three views of a matte: the matte itself (opaque grayscale), the cut-out (the image with the
  * matte as straight alpha, for display over a checkerboard) and the cut-out composited on white
  * (opaque, so `encodePng` accepts it). The pipeline returns the matte only; compositing is the
- * page's choice (the module doc of `BirefnetPipeline`). Pure, so `vp test` covers it.
+ * page's choice (the module doc of `birefnet.Pipeline`). Pure, so `vp test` covers it.
  */
 
 import type { AlphaMatte, Rgb8Image } from "@karume/models/birefnet";
@@ -61,7 +61,7 @@ export const cutoutRgba = (image: Rgb8Image, matte: AlphaMatte): RgbaPixels => {
 
 /**
  * The cut-out composited on white: `round(c · a + 255 · (1 − a))` per channel with `a = α / 255`
- * (the usage example of `BirefnetPipeline`), alpha 255.
+ * (the usage example of `birefnet.Pipeline`), alpha 255.
  */
 export const compositeOnWhite = (image: Rgb8Image, matte: AlphaMatte): RgbaPixels => {
   assertPair(image, matte);

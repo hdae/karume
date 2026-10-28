@@ -191,23 +191,11 @@
         "kind": "typeAlias"
       },
       {
-        "name": "BIREFNET_SOURCES",
-        "kind": "variable"
-      },
-      {
-        "name": "BirefnetAssets",
+        "name": "Assets",
         "kind": "typeAlias"
       },
       {
-        "name": "BirefnetFromPretrainedOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "BirefnetPipeline",
-        "kind": "class"
-      },
-      {
-        "name": "BirefnetPipelineOptions",
+        "name": "FromPretrainedOptions",
         "kind": "typeAlias"
       },
       {
@@ -215,8 +203,20 @@
         "kind": "class"
       },
       {
+        "name": "Pipeline",
+        "kind": "class"
+      },
+      {
+        "name": "PipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
         "name": "Rgb8Image",
         "kind": "typeAlias"
+      },
+      {
+        "name": "SOURCES",
+        "kind": "variable"
       }
     ],
     "./depth-anything": [

@@ -14,7 +14,7 @@ import {
 
 import type { MountName } from "@/mounts";
 
-/** A checkpoint is a mount (and the key of `BIREFNET_SOURCES`): each is its own distribution. */
+/** A checkpoint is a mount (and the key of `birefnet.SOURCES`): each is its own distribution. */
 export type CheckpointId = Extract<MountName, "birefnet-hr" | "lucida">;
 
 export type Checkpoint = {

@@ -1,5 +1,5 @@
 /**
- * The load stages of `BirefnetPipeline.fromPretrained` as the page reports them. The aggregated
+ * The load stages of `birefnet.Pipeline.fromPretrained` as the page reports them. The aggregated
  * progress counts the container parts once each: it ends at `loaded === total` when the parts are
  * in the browser's cache (Cached) or, on Direct, at once (a local source has nothing to warm, so
  * every part reports a single `complete`). The Session is built after that and reads every weight

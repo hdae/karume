@@ -15,7 +15,7 @@ import { assertRejects } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { type IrDeclaration, parseIrDeclarationValue } from "@karume/runtime";
 import { type Manifest, parseManifest } from "@karume/hub";
-import { BirefnetPipeline } from "../src/birefnet/pipeline.ts";
+import * as birefnet from "../birefnet.ts";
 import { DepthAnythingPipeline } from "../src/depth-anything/pipeline.ts";
 import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
 import { declaredContainer, partAssets, writeContainer } from "./helpers/container-fixture.ts";
@@ -130,7 +130,7 @@ describe("画像 3 家族の構築前検査", () => {
     it("BiRefNet は GPU を取る前に入力 dtype を名指しで落とす", async () => {
       await assertRejects(
         async () =>
-          await BirefnetPipeline.fromAssets({
+          await birefnet.Pipeline.fromAssets({
             manifest: manifestOf("birefnet/2", "matte", {
               ...IMAGE_CONFIG,
               interpolation: "bilinear",

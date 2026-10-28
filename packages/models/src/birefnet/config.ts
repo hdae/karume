@@ -93,8 +93,8 @@ export const BIREFNET_PIPELINE_MAJOR = 2;
  *   default `"1024"`)
  *
  * One repository = two models, so 2048² is spelled
- * `fromPretrained(BIREFNET_SOURCES["birefnet-hr"], { model: "2048" })`
- * (`BirefnetPipelineOptions.model` — `./pipeline.ts`). The model name is the input resolution
+ * `fromPretrained(SOURCES["birefnet-hr"], { model: "2048" })`
+ * (`PipelineOptions.model` — `./pipeline.ts`). The model name is the input resolution
  * itself, and the preprocessing resize target is declared per model by `pipelineConfig.imageWidth`
  * / `imageHeight`.
  *
@@ -106,12 +106,12 @@ export const BIREFNET_PIPELINE_MAJOR = 2;
  * so the bytes this published package reads would change silently for network-side reasons (an
  * unrecoverable accident). A SHA also removes the revision-resolution request itself, so an offline
  * start from a complete cache works at the same time (ADR 0038). A user who needs to follow main
- * explicitly chooses `{ ...BIREFNET_SOURCES["birefnet-hr"], revision: "main" }`.
+ * explicitly chooses `{ ...SOURCES["birefnet-hr"], revision: "main" }`.
  */
 // NOTE: the revision is updated to main's SHA after the upload by §3 of the release runbook
 // (docs/release-runbook.md) (inherits the maintenance duty of ADR 0073 decision 3 — by hand +
 // runbook check).
-export const BIREFNET_SOURCES = {
+export const SOURCES = {
   "birefnet-hr": {
     repo: "hdae/karume-birefnet-hr",
     revision: "e0ed9f06843703265aa849477e6be5460ba8a300",

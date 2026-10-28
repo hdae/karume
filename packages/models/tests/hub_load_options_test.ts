@@ -18,7 +18,7 @@ import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/as
 import type { AssetProgress, CacheDiagnostic, RetryDiagnostic } from "@karume/hub";
 import { hubLoadOptions } from "../src/hub/load-options.ts";
 import * as anima from "../anima.ts";
-import type { BirefnetFromPretrainedOptions } from "../src/birefnet/pipeline.ts";
+import * as birefnet from "../birefnet.ts";
 import type { DepthAnythingFromPretrainedOptions } from "../src/depth-anything/pipeline.ts";
 import type { Gemma4FromPretrainedOptions } from "../src/gemma/pipeline.ts";
 import type { IrodoriFromPretrainedOptions } from "../src/irodori/pipeline.ts";
@@ -82,7 +82,7 @@ test("型の門: 9 家族の fromPretrained オプションが onRetry を受け
   // `satisfies` が本体（`deno task check` が門）。1 家族でも共有型から外れると赤くなる。
   const perFamily = [
     { onRetry: noopRetry } satisfies anima.FromPretrainedOptions,
-    { onRetry: noopRetry } satisfies BirefnetFromPretrainedOptions,
+    { onRetry: noopRetry } satisfies birefnet.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies DepthAnythingFromPretrainedOptions,
     { onRetry: noopRetry } satisfies Gemma4FromPretrainedOptions,
     { onRetry: noopRetry } satisfies IrodoriFromPretrainedOptions,
