@@ -74,14 +74,14 @@ import { type FileRef, parseManifest, resolveSelection } from "@karume/hub";
 import type { Manifest, ModelEntry } from "@karume/hub";
 import { analyzeWithWords, VERSION as YOMI_VERSION } from "@hdae/yomi";
 import { getDictionary } from "@hdae/yomi/loader";
+import { encodeWav } from "../../models/mod.ts";
 import {
-  encodeWav,
   type GeneratedAudio,
   Sbv2InputError,
   Sbv2Pipeline,
   type Sbv2Utterance,
   toSbv2Utterance,
-} from "../../models/mod.ts";
+} from "../../models/sbv2.ts";
 import { parseSbv2PipelineConfig, type Sbv2Defaults } from "../../models/src/sbv2/config.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { buildSafetensors, f32Bytes } from "../../models/tests/helpers/safetensors.ts";

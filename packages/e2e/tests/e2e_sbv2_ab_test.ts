@@ -41,7 +41,7 @@ import { type FileRef, type Manifest, parseManifest, resolveSelection } from "@k
 import type { Session, SessionDiagnostics } from "@karume/runtime";
 import { analyzeWithWords } from "@hdae/yomi";
 import { getDictionary } from "@hdae/yomi/loader";
-import { type Sbv2Utterance, toSbv2Utterance } from "../../models/mod.ts";
+import { type Sbv2Utterance, toSbv2Utterance } from "../../models/sbv2.ts";
 import {
   assetOpener,
   closeSbv2State,

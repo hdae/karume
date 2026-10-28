@@ -1,92 +1,205 @@
-// barrel（`mod.ts`）の公開面の門。GPU も実資産も要らない。
+// The named gate of the barrel (`mod.ts`) and the subpaths. Needs neither a GPU nor real assets.
 //
-// ADR [0083](../../../docs/decisions/0083-generation-api-surface.md) 決定 9 で `generateGreedy` /
-// `GreedySpec` を**削除した**（破壊的変更 — 消費側の doc は
-// [limitations](../../../docs/limitations.md)）。実装は `src/generation/greedy.ts` に parity 検収用の
-// 内部ヘルパとして残っているので、`mod.ts` へ 1 行足せば公開面がいつでも戻ってしまう。値の再輸出は
-// 型検査では捕まらない（**増えた** export は誰も咎めない）ので、門はここにしか置けない。
+// The barrel exports two kinds of thing: the shared surface, flat (`SHARED_VALUES` +
+// the five shared types), and one namespace per family that **is** the subpath's module
+// (`export * as sbv2 from "./sbv2.ts"`). The gate holds the shape:
 //
-// NOTE: 型 export（`GreedySpec`）は実行時に観測できないので、ここで見るのは値 export だけ。
-// 型だけを戻した場合は「型はあるのに実装が無い」形になり、消費側の `deno check` が落ちる。
+// ① every `exports` key of `package.json` other than `.` has a namespace in the barrel, named by
+//   the key in camelCase, and that namespace is the very module object of the subpath (identity,
+//   not a member-by-member comparison — the barrel and a subpath cannot drift apart);
+// ② the barrel's own values are exactly the shared values plus those namespaces (a family name
+//   exported flat again, or a new flat export, is red — added exports pass the type checker);
+// ③ the intent per family: what must be public and what must not (the gemma lists, the source
+//   tables, gemma4-qat).
+//
+// It is the declaration of intent. The snapshot gate (`public_surface_test.ts`) detects every
+// change, type exports included; type exports cannot be observed at run time, so the shared types
+// are pinned here by type-level bindings and their exact set by the snapshot.
+//
+// ADR [0083](../../../docs/decisions/0083-generation-api-surface.md) decision 9 **removed**
+// `generateGreedy` / `GreedySpec` (a breaking change — the consumer-facing doc is
+// [limitations](../../../docs/limitations.md)). The implementation stays in
+// `src/generation/greedy.ts` as an internal helper for parity acceptance, so one line in an entry
+// would bring the public surface back.
 
 import { test } from "vite-plus/test";
-import { assert, assertEquals, assertNotEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import config from "../package.json" with { type: "json" };
 import * as models from "../mod.ts";
-import type { Gemma4FromPretrainedOptions as BarrelFromPretrained } from "../mod.ts";
-import type { ComponentSource } from "../mod.ts";
+import type {
+  ComponentSource,
+  DecodedWav,
+  FromPretrainedComponentOptions,
+  FromPretrainedHubOptions,
+  gemma,
+  Rgb8Image,
+} from "../mod.ts";
 import type { Gemma4FromPretrainedOptions as SubpathFromPretrained } from "../gemma.ts";
 
-// 型 export の両建て（`Gemma4FromPretrainedOptions` と、その `components` 欄に現れる
-// `ComponentSource` — 部品差し替え席〈ADR 0108 決定 19 / ADR 0109 決定 10〉の面）。値ではないので
-// `Object.keys` には出ず、実行時のアサートでは縛れない。落とせるのは **`deno test`（`verify` の
-// test 段）の型検査**だけ（`deno task check` はテストを対象に含めない）ので、両面から取った型を
-// 突き合わせる束縛をここに置く（片方の 1 行が消えれば test 段が赤）。値の assert は
-// `noUnusedLocals` に束縛を「読まれない局所」と見なさせないためで、門の実体は型注釈と
-// `satisfies` の側。
-test("barrel: 部品差し替え席の型面は barrel とサブパスで同じ型", () => {
+/** The barrel's flat values (the shared surface); every other barrel value is a family namespace. */
+const SHARED_VALUES = [
+  "KARUME_SOURCES",
+  "ModelInputError",
+  "decodeWav",
+  "encodePng",
+  "encodeWav",
+  "normalizeToNchw",
+  "resizeRgb8",
+];
+
+/** The barrel namespace of a subpath: the `exports` key without `./`, in camelCase. */
+const namespaceOf = (subpath: string): string =>
+  subpath.slice(2).replaceAll(/-([a-z0-9])/g, (_match, next: string) => next.toUpperCase());
+
+/** The subpaths of `package.json` `exports` (everything but `.`), with their entry files. */
+const subpathEntries = (): readonly { subpath: string; file: string }[] =>
+  Object.entries(config.exports)
+    .filter(([subpath]) => subpath !== ".")
+    .map(([subpath, file]) => ({ subpath, file }));
+
+/** Each subpath's module, imported from its entry file (the source of truth is `exports`). */
+const subpathModules = async (): Promise<
+  readonly { subpath: string; module: Record<string, unknown> }[]
+> =>
+  Promise.all(
+    subpathEntries().map(async ({ subpath, file }) => {
+      const module: Record<string, unknown> = await import(
+        new URL(`../${file}`, import.meta.url).href
+      );
+      return { subpath, module };
+    }),
+  );
+
+test("barrel: the namespace names follow the subpath keys", () => {
+  assertEquals(namespaceOf("./sbv2"), "sbv2");
+  assertEquals(namespaceOf("./depth-anything"), "depthAnything");
+  assertEquals(namespaceOf("./gemma4-qat"), "gemma4Qat");
+  assertEquals(namespaceOf("./vowel-detector"), "vowelDetector");
+});
+
+test("barrel: each family namespace is its subpath's module (identity)", async () => {
+  const barrel: Record<string, unknown> = models;
+  const modules = await subpathModules();
+  // Positive control — the scan is not empty and the subpaths are distinct module objects (an
+  // identity check against one shared object would prove nothing).
+  assert(modules.length >= 1, "package.json exports has no subpath");
+  assertEquals(new Set(modules.map(({ module }) => module)).size, modules.length);
+  for (const { subpath, module } of modules) {
+    const namespace = namespaceOf(subpath);
+    assert(
+      Object.hasOwn(barrel, namespace),
+      `the barrel has no namespace ${namespace} (${subpath})`,
+    );
+    assert(
+      barrel[namespace] === module,
+      `barrel.${namespace} is not the module of ${subpath} (export * as ${namespace} from it)`,
+    );
+  }
+});
+
+test("barrel: its own values are exactly the shared values plus the family namespaces", () => {
+  const expected = [
+    ...SHARED_VALUES,
+    ...subpathEntries().map(({ subpath }) => namespaceOf(subpath)),
+  ];
+  assertEquals(
+    Object.keys(models).toSorted(),
+    expected.toSorted(),
+    "the barrel's flat exports changed — family names belong in their namespace, shared ones in SHARED_VALUES",
+  );
+});
+
+// The five shared types (`ComponentSource`, `DecodedWav`, `FromPretrainedComponentOptions`,
+// `FromPretrainedHubOptions`, `Rgb8Image`) cannot be observed at run time. The gate is the
+// annotations below — a missing flat export is a type error in the test lane — and the snapshot
+// gate holds the exact set; the asserts only keep the bindings from reading as unused locals.
+test("barrel: the shared types are exported flat", () => {
+  const hub: FromPretrainedHubOptions = {};
   const source: ComponentSource = { source: "owner/name", quant: "i4" };
-  const options: BarrelFromPretrained = {
+  const components: FromPretrainedComponentOptions = { components: { model: source } };
+  const image: Rgb8Image = { data: new Uint8Array(3), width: 1, height: 1 };
+  const wav: DecodedWav = { data: new Float32Array(1), sampleRate: 16_000 };
+  assertEquals(Object.keys(hub), []);
+  assertEquals(components.components?.["model"], source);
+  assertEquals([image.width, wav.sampleRate], [1, 16_000]);
+});
+
+// Type access through a namespace (`gemma.Gemma4FromPretrainedOptions`) and the component
+// replacement option (ADR 0108 decision 19 / ADR 0109 decision 10) must agree with the subpath's
+// type. Only the type check of the test lane can fail here.
+test("barrel: types through a namespace are the subpath's types", () => {
+  const source: ComponentSource = { source: "owner/name", quant: "i4" };
+  const options: gemma.Gemma4FromPretrainedOptions = {
     components: { model: source },
   } satisfies SubpathFromPretrained;
   assertEquals(Object.keys(options.components ?? {}), ["model"]);
 });
 
-test("barrel: 生成ループは公開面に無い（ADR 0083 決定 9 の格下げ）", () => {
-  const surface = Object.keys(models);
-  // 陽性対照 — この門が「空の名前空間を見て緑になっている」形でないことを先に確かめる。
-  assert(surface.includes("encodePng"), `barrel の import が壊れている（${surface.length} 件）`);
-  assertEquals(
-    surface.filter((name) => name.toLowerCase().includes("greedy")),
-    [],
-    "barrel に greedy 系の export が戻っている",
-  );
+test("barrel: the generation loop is not public (ADR 0083 decision 9)", async () => {
+  const surfaces = [
+    { name: ".", keys: Object.keys(models) },
+    ...(await subpathModules()).map(({ subpath, module }) => ({
+      name: subpath,
+      keys: Object.keys(module),
+    })),
+  ];
+  // Positive control — the gate is not green because it looked at an empty namespace.
+  assert(surfaces[0]?.keys.includes("encodePng"), "the barrel import is broken");
+  for (const { name, keys } of surfaces) {
+    assertEquals(
+      keys.filter((exported) => exported.toLowerCase().includes("greedy")),
+      [],
+      `${name} exports a greedy name again`,
+    );
+  }
 });
 
-test("barrel: 内部ヘルパとしての generateGreedy は残っている（消えたのは公開面だけ）", async () => {
+test("barrel: generateGreedy remains as an internal helper (only the public surface lost it)", async () => {
   const greedy = await import("../src/generation/greedy.ts");
   assertEquals(typeof greedy.generateGreedy, "function");
   assertEquals(typeof greedy.planPrefillChunks, "function");
 });
 
-// ---- gemma（生成 API 波の段 4）--------------------------------------------
+// ---- gemma (step 4 of the generation-API phase) -----------------------------------------------
 //
-// 値 export の集合だけを見る（型は実行時に観測できない）。ここで縛るのは 2 点:
+// Only the value exports (types cannot be observed at run time). Two things are pinned:
 //
-// ① 出すべきものが出ていること — 面が痩せると消費者は内部パスへ直接 import する
-// ② **組み立ての入口を出さないこと** — `createGenerationProgram` / `createGenerationSequence` /
-//    `createGemma4Ple` は静的配線の検証と資産の突合を通す前の半端な実体を作れる面で、
-//    入口はパイプラインだけにする（ADR 0008）。増えた export は型検査では咎められない
+// ① what must be public is public — a thinner surface sends consumers to the internal paths;
+// ② **the assembly entry points stay private** — `createGenerationProgram` /
+//    `createGenerationSequence` / `createGemma4Ple` could build half-made objects before the
+//    static wiring check and the asset reconciliation; the pipeline is the only entry point
+//    (ADR 0008). An added export passes the type checker.
 
-/** barrel と `./gemma` の両方が出す gemma / 生成 API の**値** export。 */
+/** The gemma / generation-API **values** of `./gemma` (and so of the barrel's `gemma`). */
 const GEMMA_VALUES = [
   "Gemma4Pipeline",
   "gemma4ChatPrompt",
-  // 多ターンを `sequence` で回す消費者の入口。無いと「全体を描いて先頭の `<bos>` を剥がす」
-  // 当て推量を書かされる（turn-local 契約が公開面から読めない）。
+  // The entry point for consumers that run several turns with `sequence`. Without it they guess
+  // ("render everything and strip the leading `<bos>`") — the turn-local contract is not public.
   "gemma4ChatTurn",
   "GenerationCapacityError",
-  // `fromAssets` を使う消費者が hub の `Record<string, unknown>` から config を組む口。
-  // 出していないと `as` で被せるか、3 つの数を配布形と消費側で二重持ちすることになる。
+  // How a `fromAssets` consumer builds the config from the hub's `Record<string, unknown>`.
+  // Without it they cast with `as`, or keep the three numbers in both the distribution and the
+  // consumer.
   "parseGemma4PipelineConfig",
-  // RoPE の cos / sin はグラフに焼かれておらずホストが chunk ごとに作る（ADR 0091 決定 1）。
-  // 低レベル面（`fromAssets` / 自前の生成ループ）の消費者はこれが無いと表を自前で組む羽目になる。
+  // RoPE cos / sin are not baked into the graph; the host builds them per chunk (ADR 0091
+  // decision 1). Low-level consumers (`fromAssets` / their own generation loop) would have to
+  // build the tables themselves.
   "gemma4RopeInputs",
-  // 多ターンの会話を KV 継続で回す高レベル面（ADR 0083 追記 2026-09-02）。`mod.ts` の 1 行が
-  // 消えても両建て門（`./gemma` ⊆ barrel）は緑のままなので、名指しで縛るのはここだけ。
+  // The high-level surface for multi-turn conversations that carry the KV over (ADR 0083 addendum
+  // 2026-09-02).
   "Gemma4ChatSession",
-  // 溢れたときの既定ポリシー。消費者が**名指しで差し替える**口なので公開面に要る
-  // （出していないと「既定と同じものを自分で書く」しかなくなる）。
+  // The default overflow policy. Consumers **replace it by name**, so it must be public (otherwise
+  // the only way is to rewrite the default).
   "dropOldestTurns",
-  // このパッケージ版が検証した取得元の対応表（ADR 0073 / 0092）。値の正しさは
-  // `sources_test.ts` の門で、ここで見るのは**両建ての公開面に載っていること**だけ。
+  // The table of sources verified with this package version (ADR 0073 / 0092). Its values are
+  // checked by `sources_test.ts`; here only that it is public.
   "GEMMA4_SOURCES",
-  // prefill バケットの既定。消費者が**起点として足し引きする**値なので両建ての両側に要る
-  // （`./gemma` 側が落ちても「subpath ⊆ barrel」の門は緑のままなので、縛るのはここだけ）。
+  // The default prefill buckets. Consumers **start from it and add or remove entries**.
   "GEMMA4_CHUNK_BUCKETS",
 ];
 
-/** 公開面に出してはならない綴り（内部の組み立て口）。 */
+/** Spellings that must not be public (internal assembly). */
 const INTERNAL_VALUES = [
   "createGenerationProgram",
   "createGenerationSequence",
@@ -98,111 +211,47 @@ const INTERNAL_VALUES = [
   "renderGemma4ChatTurn",
   "gemma4StopTokens",
   "GemmaTokenizer",
-  // chat 層の内部実装（`gemma4_chat_test.ts` が `src/` から直に掴んでいる面）。公開面は
-  // `Gemma4Pipeline.chat` / `Gemma4ChatSession` だけで、逐次復号の部品は出さない
-  // — 出すと「停止文字列フィルタと detokenizer を自分で繋ぐ」形が消費者の正道になってしまう。
-  // `StreamingDetokenizer` は `export type` の再輸出なので**値としては**出ていない（型だけを
-  // 戻した場合は消費側の `deno check` が落ちる — 冒頭の NOTE）。
+  // The chat layer's internals (`gemma4_chat_test.ts` takes them from `src/` directly). The public
+  // surface is `Gemma4Pipeline.chat` / `Gemma4ChatSession`; the streaming-decode parts stay
+  // private — exporting them would make "wire the stop-string filter to the detokenizer yourself"
+  // the consumers' normal path. `StreamingDetokenizer` is re-exported with `export type`, so it is
+  // not public **as a value**.
   "createStopStringFilter",
   "decodeChatChunks",
   "chatStreamOf",
   "StreamingDetokenizer",
 ];
 
-test("barrel: gemma の公開面（薄い面 — 組み立ての入口は出さない）", async () => {
-  const gemma = await import("../gemma.ts");
+test("barrel: the gemma surface (thin — no assembly entry points)", async () => {
+  const subpath = Object.keys(await import("../gemma.ts"));
   const barrel = Object.keys(models);
-  const subpath = Object.keys(gemma);
-
-  for (const name of GEMMA_VALUES) {
-    assert(barrel.includes(name), `barrel に ${name} が無い`);
-    assert(subpath.includes(name), `./gemma に ${name} が無い`);
-  }
+  for (const name of GEMMA_VALUES) assert(subpath.includes(name), `./gemma has no ${name}`);
   for (const name of INTERNAL_VALUES) {
-    assertEquals(barrel.includes(name), false, `barrel に内部の ${name} が出ている`);
-    assertEquals(subpath.includes(name), false, `./gemma に内部の ${name} が出ている`);
-  }
-  // 両建て（ADR 0037）の食い違いを塞ぐ — サブパスの値 export は barrel にも全部載ること。
-  assertEquals(
-    subpath.filter((name) => !barrel.includes(name)),
-    [],
-    "./gemma にあって barrel に無い値 export",
-  );
-});
-
-// ---- 両建て（ADR 0037）と取得元対応表（ADR 0092 — 家族 1 つにつき 1 表）--------
-//
-// 表の**中身**（キーの規則・repo 名・40 桁 hex）を見るのは `sources_test.ts` で、ここで縛るのは
-// 2 点:
-//
-// ① **subpath ⊆ barrel を 11 面すべてで**見る（`package.json` の `exports` は `.` + 11 サブパス —
-//    走査する面の集合は `exports` のキーと突き合わせる）。
-//    `./gemma` 1 面だけに掛けていた頃は、他の面のどの値 export を `mod.ts` から落としても
-//    全テストが緑のままだった。
-// ② `<FAMILY>_SOURCES` の**畳み込み漏れ**（家族表を新設したのに `src/sources.ts` へ足し忘れる）
-//    を落とす。`src/sources.ts` のスプレッドは実行時に列挙できないので、代わりに
-//    「11 サブパスから集めた表のキーの和集合 === `Object.keys(KARUME_SOURCES)`」を突き合わせる。
-//
-// 表を持たない家族（`./vowel-detector` など未配布の家族）は 1 本も出さないのが正しい状態なので、
-// 陽性対照（表が 1 本以上ある）は面ごとではなく**全体で 1 回**置く。
-
-/** `package.json` の `exports` が持つ 11 サブパス（`.` = barrel を除く全部）。 */
-const subpathSurfaces = async (): Promise<readonly { name: string; surface: string[] }[]> => [
-  { name: "./anima", surface: Object.keys(await import("../anima.ts")) },
-  { name: "./birefnet", surface: Object.keys(await import("../birefnet.ts")) },
-  { name: "./depth-anything", surface: Object.keys(await import("../depth-anything.ts")) },
-  { name: "./gemma", surface: Object.keys(await import("../gemma.ts")) },
-  { name: "./gemma4-qat", surface: Object.keys(await import("../gemma4-qat.ts")) },
-  { name: "./irodori", surface: Object.keys(await import("../irodori.ts")) },
-  { name: "./sbv2", surface: Object.keys(await import("../sbv2.ts")) },
-  { name: "./siglip2", surface: Object.keys(await import("../siglip2.ts")) },
-  { name: "./umt5", surface: Object.keys(await import("../umt5.ts")) },
-  { name: "./vowel-detector", surface: Object.keys(await import("../vowel-detector.ts")) },
-  { name: "./wan", surface: Object.keys(await import("../wan.ts")) },
-];
-
-/** `package.json` の `exports` から barrel（`.`）を除いたサブパス名（昇順）。 */
-const exportedSubpaths = (exports: Readonly<Record<string, string>>): string[] =>
-  Object.keys(exports)
-    .filter((name) => name !== ".")
-    .toSorted();
-
-test("barrel: 走査するサブパスは package.json の exports のサブパスちょうど", async () => {
-  const scanned = (await subpathSurfaces()).map(({ name }) => name).toSorted();
-  // 陽性対照 — exports に面が増えれば比較は割れる（hardcoded 同士の恒真な比較にしない）。
-  assertNotEquals(exportedSubpaths({ ...config.exports, "./dummy": "./dummy.ts" }), scanned);
-  assertEquals(
-    exportedSubpaths(config.exports),
-    scanned,
-    "package.json の exports と走査するサブパス（subpathSurfaces）が食い違う — 面が増えたら走査も増やす",
-  );
-});
-
-test("barrel: 11 サブパスの値 export は全部 barrel にも載る（両建ての食い違い）", async () => {
-  const barrel = Object.keys(models);
-  const subpaths = await subpathSurfaces();
-  // 陽性対照 — 空の名前空間を並べて緑になる形にしない。
-  assert(barrel.includes("encodePng"), `barrel の import が壊れている（${barrel.length} 件）`);
-  for (const { name, surface } of subpaths) {
-    assert(surface.length >= 1, `${name} の値 export が 1 つも無い`);
-    assertEquals(
-      surface.filter((exported) => !barrel.includes(exported)),
-      [],
-      `${name} にあって barrel に無い値 export`,
-    );
+    assertEquals(subpath.includes(name), false, `./gemma exports the internal ${name}`);
+    assertEquals(barrel.includes(name), false, `the barrel exports the internal ${name}`);
   }
 });
 
-test("barrel: 取得元対応表はサブパスと barrel の両方から出る", async () => {
-  const barrel = Object.keys(models);
-  const subpaths = await subpathSurfaces();
-  const tables = subpaths.flatMap(({ surface }) =>
-    surface.filter((exported) => exported.endsWith("_SOURCES")),
+// ---- the source tables (ADR 0092 — one table per family) -------------------------------------
+//
+// The tables' **contents** (key rules, repository names, 40-hex revisions) are checked by
+// `sources_test.ts`. Here:
+//
+// ① each family table is exported by its subpath (and therefore by the barrel's namespace);
+// ② `KARUME_SOURCES` is exported by the barrel only, and is exactly the union of the family tables
+//   (a new family table that was not folded into `src/sources.ts` is red — the spread there
+//   cannot be enumerated at run time).
+//
+// A family without a table (`./vowel-detector`, families not distributed yet) exports none, so the
+// positive control (at least one table) is global, not per subpath.
+
+test("barrel: the source tables come from the subpaths; KARUME_SOURCES only from the barrel", async () => {
+  const modules = await subpathModules();
+  const tables = modules.flatMap(({ module }) =>
+    Object.keys(module).filter((exported) => exported.endsWith("_SOURCES")),
   );
-  // 陽性対照は全体で 1 回 — 表を持たない家族（vowel-detector など）は 0 本が正しい。
-  assert(tables.length >= 1, "サブパスに取得元対応表が 1 本も無い");
-  for (const table of tables) assert(barrel.includes(table), `barrel に ${table} が無い`);
-  // サブパス側の足し忘れは上の filter では見えないので、家族の表を名指しでも縛る。
+  assert(tables.length >= 1, "no subpath exports a source table");
+  // A subpath that dropped its table is invisible to the filter above, so name the tables too.
   for (const table of [
     "ANIMA_SOURCES",
     "IRODORI_SOURCES",
@@ -214,60 +263,43 @@ test("barrel: 取得元対応表はサブパスと barrel の両方から出る"
     "UMT5_SOURCES",
     "WAN_SOURCES",
   ]) {
-    assert(tables.includes(table), `サブパス barrel に ${table} が無い`);
+    assert(tables.includes(table), `no subpath exports ${table}`);
   }
-  // 全家族を畳んだ表は barrel だけが出す（サブパスへ漏れると 1 家族の import が全家族を繋ぐ）。
-  assert(barrel.includes("KARUME_SOURCES"), "barrel に KARUME_SOURCES が無い");
-  for (const { name, surface } of subpaths) {
-    assertEquals(surface.includes("KARUME_SOURCES"), false, `${name} に KARUME_SOURCES が出ている`);
+  // The merged table lives in the barrel only (in a subpath, one family's import would pull in
+  // every family).
+  assert(Object.hasOwn(models, "KARUME_SOURCES"), "the barrel has no KARUME_SOURCES");
+  for (const { subpath, module } of modules) {
+    assertEquals(
+      Object.hasOwn(module, "KARUME_SOURCES"),
+      false,
+      `${subpath} exports KARUME_SOURCES`,
+    );
   }
 });
 
-test("barrel: KARUME_SOURCES は家族表の和集合ちょうど（畳み込み漏れ・余りの検出）", async () => {
-  const subpaths = await subpathSurfaces();
-  // 家族表そのものを名前空間から引き、キーの和集合を作る（`src/sources.ts` のスプレッドは
-  // 実行時に列挙できないので、突き合わせ相手はサブパスの走査結果で組む）。
-  const namespaces = await Promise.all([
-    import("../anima.ts"),
-    import("../birefnet.ts"),
-    import("../depth-anything.ts"),
-    import("../gemma.ts"),
-    import("../gemma4-qat.ts"),
-    import("../irodori.ts"),
-    import("../sbv2.ts"),
-    import("../siglip2.ts"),
-    import("../umt5.ts"),
-    import("../vowel-detector.ts"),
-    import("../wan.ts"),
-  ]);
+test("barrel: KARUME_SOURCES is exactly the union of the family tables", async () => {
   const keys = new Set<string>();
-  for (const namespace of namespaces) {
-    const exported: Record<string, unknown> = namespace;
-    for (const name of Object.keys(exported)) {
-      if (!name.endsWith("_SOURCES")) continue;
-      const table = exported[name] as Record<string, unknown>;
+  for (const { module } of await subpathModules()) {
+    for (const [name, table] of Object.entries(module)) {
+      if (!name.endsWith("_SOURCES") || typeof table !== "object" || table === null) continue;
       for (const key of Object.keys(table)) keys.add(key);
     }
   }
-  // 陽性対照 — 走査が空振りしていない（表を 1 本も拾えていない形で緑にしない）。
-  assert(keys.size >= 1, "サブパスから家族表のキーを 1 本も拾えていない");
+  // Positive control — the scan picked up at least one table.
+  assert(keys.size >= 1, "no family table key was found in the subpaths");
   assertEquals(
     [...keys].toSorted(),
     Object.keys(models.KARUME_SOURCES).toSorted(),
-    "KARUME_SOURCES が家族表の和集合と一致しない（src/sources.ts への畳み込み漏れか余り）",
+    "KARUME_SOURCES differs from the union of the family tables (missing from src/sources.ts, or extra)",
   );
-  // 上の名前空間の列は `subpathSurfaces` と同じ面を並べていること（後者は `deno.json` の
-  // exports と突き合わせ済み — 走査するサブパスの門）。
-  assertEquals(subpaths.length, namespaces.length);
 });
 
-test("gemma4-qat: 別ファミリの入口を両建てし、内部構築は公開しない", async () => {
+test("gemma4-qat: exports its own entry points and not Gemma's pipeline", async () => {
   const qat = await import("../gemma4-qat.ts");
   for (const name of ["Gemma4QatPipeline", "gemma4QatRopeInputs"]) {
-    assert(Object.hasOwn(qat, name));
-    assert(Object.hasOwn(models, name));
+    assert(Object.hasOwn(qat, name), `./gemma4-qat has no ${name}`);
   }
   for (const name of ["GemmaPipeline", "admitGemma4Qat", "Gemma4Pipeline", "GEMMA4_SOURCES"]) {
-    assertEquals(Object.hasOwn(qat, name), false);
+    assertEquals(Object.hasOwn(qat, name), false, `./gemma4-qat exports ${name}`);
   }
 });

@@ -53,7 +53,7 @@
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
-import { IrodoriPipeline } from "../../models/mod.ts";
+import { IrodoriPipeline } from "../../models/irodori.ts";
 import { parseIrodoriPipelineConfig } from "../../models/src/irodori/config.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import {

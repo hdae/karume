@@ -8,7 +8,7 @@
 // して、その順序と解放の本数を同じ 1 回の生成で見る。
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { IrodoriPipeline } from "../../models/mod.ts";
+import { IrodoriPipeline } from "../../models/irodori.ts";
 import {
   DIST_COMMAND,
   hasQuantSeat,

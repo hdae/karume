@@ -31,7 +31,7 @@ import { assert, assertEquals, assertThrows } from "@std/assert";
 import { type DistributionSource, type Manifest, parseManifest } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
 import type { SessionDiagnostics } from "@karume/runtime";
-import { IrodoriPipeline, type IrodoriRunComponent } from "../../models/mod.ts";
+import { IrodoriPipeline, type IrodoriRunComponent } from "../../models/irodori.ts";
 import {
   assertSeatsApplied,
   type CensusRow,

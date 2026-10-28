@@ -69,15 +69,13 @@ import { type FileRef, parseManifest, resolveSelection } from "@karume/hub";
 import type { Manifest, ModelEntry } from "@karume/hub";
 import type { SessionDiagnostics } from "@karume/runtime";
 import {
-  type DecodedWav,
-  decodeWav,
-  encodeWav,
   type IrodoriGeneratedAudio,
   type IrodoriGenerateEvent,
   type IrodoriGenerateRequest,
   IrodoriPipeline,
   type IrodoriRunComponent,
-} from "../../models/mod.ts";
+} from "../../models/irodori.ts";
+import { type DecodedWav, decodeWav, encodeWav } from "../../models/mod.ts";
 import {
   type IrodoriPipelineConfig,
   parseIrodoriPipelineConfig,

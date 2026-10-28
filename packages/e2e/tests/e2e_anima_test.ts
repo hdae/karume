@@ -63,11 +63,11 @@ import {
   AnimaPipeline,
   type AnimaResidency,
   type AnimaSamplerType,
-  encodePng,
+  formatResolution,
   type GeneratedImage,
   type ImageSize,
-} from "../../models/mod.ts";
-import { formatResolution } from "../../models/anima.ts";
+} from "../../models/anima.ts";
+import { encodePng } from "../../models/mod.ts";
 import { parseAnimaPipelineConfig } from "../../models/src/anima/config.ts";
 import { sigmaSchedule } from "../../models/src/anima/sampler.ts";
 import { ANIMA_SPATIAL_COMPRESSION } from "../../models/src/anima/dit-tokens.ts";

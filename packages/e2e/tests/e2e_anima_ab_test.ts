@@ -36,8 +36,7 @@ import { assertThrows } from "@std/assert";
 import { type DistributionSource, type Manifest, parseManifest } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
 import type { SessionDiagnostics } from "@karume/runtime";
-import { AnimaPipeline, type ImageSize } from "../../models/mod.ts";
-import { formatResolution } from "../../models/anima.ts";
+import { AnimaPipeline, formatResolution, type ImageSize } from "../../models/anima.ts";
 import {
   assertAttentionSeatsComplete,
   assertSeatsApplied,

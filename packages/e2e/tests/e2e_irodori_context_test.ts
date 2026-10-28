@@ -23,11 +23,11 @@ import { afterAll, beforeAll, describe, it } from "vite-plus/test";
 import { assert, assertEquals, assertNotEquals } from "@std/assert";
 import type { RunInputs } from "@karume/runtime";
 import {
-  encodeWav,
   type IrodoriGenerateRequest,
   IrodoriPipeline,
   type IrodoriRunComponent,
-} from "../../models/mod.ts";
+} from "../../models/irodori.ts";
+import { encodeWav } from "../../models/mod.ts";
 import {
   DIST_COMMAND,
   hasQuantSeat,
