@@ -108,6 +108,7 @@ import {
   runMossTextStage,
   withMossDitPair,
 } from "../../models/src/moss/dit-stage.ts";
+import { MOSS_REFERENCE_PRESET, mossPreset } from "../../models/src/moss/preset.ts";
 import type { MossTextEmbeddings } from "../../models/src/moss/request.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
@@ -522,7 +523,9 @@ describe.skipIf(!GPU_AVAILABLE || !SERIES_PRESENT || !EMBEDS_PRESENT)(
         assets.trainingGrid,
         "MOSS-Image",
       );
-      base = { components: series.components, contract };
+      // The reference path (the port check — module doc); the practical preset's A/B check is
+      // e2e_moss_ab_test.ts.
+      base = { components: series.components, contract, preset: mossPreset(MOSS_REFERENCE_PRESET) };
       embeds = await readEmbeddings();
       digests = await containerDigests();
       // The sha rows may be written: the adapter that runs must be the one the row key names.
@@ -542,6 +545,7 @@ describe.skipIf(!GPU_AVAILABLE || !SERIES_PRESENT || !EMBEDS_PRESENT)(
         gpu,
         contract: contract ?? base.contract,
         components: components ?? base.components,
+        preset: base.preset,
       };
     };
     const baseState = () => {

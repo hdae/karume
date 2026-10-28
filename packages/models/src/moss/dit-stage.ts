@@ -17,10 +17,10 @@
  *    stays 1). The text context of each branch is a resident tensor written once. Without a
  *    negative branch (guidance 1) only `dit` opens.
  *
- * Both stages open their Sessions with the reference path's options (no preset knob): the headroom
- * estimates below take the device limits and the bindings only, so a knob passed to the Sessions
- * alone would make the check size other Sessions than the ones it admits. The preset knobs arrive
- * together with their estimate options (plan step 5).
+ * The preset (`./preset.ts` — explicit, no default) sets the knobs of the pair's two Sessions; the
+ * `dit_text` Session takes none (f32 compute in every preset — plan item 15-11). The same knobs go
+ * to the pair's headroom estimates below (with the device's attention facts, which decide the
+ * online kernel's route), so the check sizes the Sessions it admits.
  *
  * ## Headroom (plan item 15-8 — the Anima form)
  *
@@ -49,10 +49,12 @@
  * Before each probe the stage waits for the release of what the previous stage destroyed (the
  * Anima form — `../session/settle-released-memory.ts`).
  *
- * The estimate leaves out the i8a8 linears' quantised intermediates (`runtime/estimate.ts`); this
- * step runs the reference path only (f32 compute — no a8), and step 5 records the measured peaks
- * beside the estimates. The check is a fact of the moment, not a reservation (another process may
- * take the memory after it).
+ * With the practical preset the estimate leaves out the i8a8 linears' quantised intermediates
+ * (`runtime/estimate.ts`); the margin covers them: measured on an RTX 3080 Ti (2026-10-28, the
+ * WebGPU buffers the process held), the pair held 6.43 / 8.03 / 9.04 GB at 1024² / 1456² /
+ * 1696×1648 against needs of 7.33 / 9.04 / 10.11 GB (the reference preset: 9.17 / 10.26 GB against
+ * 10.07 / 11.27 GB). The check is a fact of the moment, not a reservation (another process may take
+ * the memory after it).
  *
  * ## CFG (host, f32)
  *
@@ -65,6 +67,8 @@
  */
 
 import {
+  type AttentionDeviceFacts,
+  attentionDeviceFacts,
   fitsHeadroom,
   type GpuContext,
   type ResidentTensor,
@@ -89,6 +93,7 @@ import {
 } from "./dit-contract.ts";
 import { type MossCells, mossRopeTables, mossTextRopeTables } from "./dit-rope.ts";
 import { mossTimestepsProj } from "./dit-timestep.ts";
+import { type MossDitKnobs, type MossPreset, requireMossPreset } from "./preset.ts";
 import {
   mossHeadRows,
   mossImageTokens,
@@ -114,13 +119,14 @@ export type MossDitComponents = {
 };
 
 /**
- * What the stage reads (built once per pipeline — the contract settled in admission). No Session
- * options: module doc "Stage order and lifetimes".
+ * What the stage reads (built once per pipeline — the contract settled in admission; the preset
+ * explicit — module doc "Stage order and lifetimes").
  */
 export type MossDitStageState = {
   readonly gpu: GpuContext;
   readonly components: MossDitComponents;
   readonly contract: MossDitContract;
+  readonly preset: MossPreset;
 };
 
 /** One value per CFG branch (`negative` undefined = guidance 1, no negative branch). */
@@ -177,16 +183,32 @@ export type MossDeviceLimits = {
   readonly maxBufferSize: number;
 };
 
+/** The device facts the estimates take (the stage passes `gpu.limits` and `attentionDeviceFacts(gpu)`). */
+export type MossDeviceFacts = {
+  readonly limits: MossDeviceLimits;
+  /** The online kernel's route facts (read by the estimate of a preset with `attentionScoreStorage: "none"`). */
+  readonly attention: AttentionDeviceFacts;
+};
+
 const estimatedPeak = (
-  limits: MossDeviceLimits,
+  device: MossDeviceFacts,
   component: ModelComponent,
   bindings: Readonly<Record<string, number>>,
+  knobs: MossDitKnobs,
 ): number =>
   component.estimate({
-    maxStorageBufferBindingSize: limits.maxStorageBufferBindingSize,
-    maxBufferSize: limits.maxBufferSize,
+    maxStorageBufferBindingSize: device.limits.maxStorageBufferBindingSize,
+    maxBufferSize: device.limits.maxBufferSize,
     bindings,
+    ...knobs,
+    attentionDevice: device.attention,
   }).peakAccountedBytes;
+
+/** The device facts of `gpu` the estimates take (one derivation for every stage and the first check). */
+export const mossDeviceFacts = (gpu: GpuContext): MossDeviceFacts => ({
+  limits: gpu.limits,
+  attention: attentionDeviceFacts(gpu),
+});
 
 /** The graph's one symbol (the contract checked there is exactly one). */
 const symbolOf = (component: ModelComponent): string => component.graph.symbols[0];
@@ -201,33 +223,44 @@ export type MossDitStageNeeds = {
 };
 
 /**
- * The bytes of the two stages of a plan on a device of `limits` (module doc "Headroom"). NOTE:
- * `export` is for the tests that pin the sum (not on a public surface).
+ * The bytes of the two stages of a plan with `preset` on a device of `device` (module doc
+ * "Headroom" — `dit_text` with no knob, the pair with the preset's). NOTE: `export` is for the
+ * tests that pin the sum (not on a public surface).
  */
 export const mossDitStageNeeds = (
   input: {
-    readonly limits: MossDeviceLimits;
+    readonly device: MossDeviceFacts;
     readonly components: MossDitComponents;
     readonly contract: Pick<MossDitContract, "width">;
+    readonly preset: MossPreset;
   },
   plan: MossDitPlan,
 ): MossDitStageNeeds => {
-  const { limits, components, contract } = input;
+  const { device, components, contract } = input;
+  const preset = requireMossPreset(input.preset);
   const { texts } = plan;
   const longest = Math.max(texts.positive.tokens, texts.negative?.tokens ?? 0);
   const text =
-    estimatedPeak(limits, components.ditText, { [symbolOf(components.ditText)]: longest }) +
+    estimatedPeak(device, components.ditText, { [symbolOf(components.ditText)]: longest }, {}) +
     components.ditText.maxPartBytes +
     HEADROOM_MARGIN_BYTES;
   const lengths = sequenceLengths(plan);
   const negative =
     lengths.negative === undefined
       ? 0
-      : estimatedPeak(limits, components.ditSkip22, {
-          [symbolOf(components.ditSkip22)]: lengths.negative,
-        }) + contextBytes(lengths.negative, contract.width);
+      : estimatedPeak(
+          device,
+          components.ditSkip22,
+          { [symbolOf(components.ditSkip22)]: lengths.negative },
+          preset.dit,
+        ) + contextBytes(lengths.negative, contract.width);
   const pair =
-    estimatedPeak(limits, components.dit, { [symbolOf(components.dit)]: lengths.positive }) +
+    estimatedPeak(
+      device,
+      components.dit,
+      { [symbolOf(components.dit)]: lengths.positive },
+      preset.dit,
+    ) +
     contextBytes(lengths.positive, contract.width) +
     negative +
     Math.max(components.dit.maxPartBytes, components.ditSkip22.maxPartBytes) +
@@ -316,11 +349,11 @@ export const runMossTextStage = async (
   const { gpu, components, contract } = state;
   await assertHeadroom(
     gpu,
-    mossDitStageNeeds({ ...state, limits: gpu.limits }, plan).text,
+    mossDitStageNeeds({ ...state, device: mossDeviceFacts(gpu) }, plan).text,
     MOSS_DIT_TEXT,
     plan,
   );
-  // f32 compute in every preset (plan item 15-11): none of the preset's knobs, now or in step 5.
+  // f32 compute in every preset (plan item 15-11): none of the preset's knobs.
   const session = await components.ditText.createSession(gpu, {});
   let failure: { readonly error: unknown } | undefined;
   try {
@@ -397,7 +430,7 @@ export const withMossDitPair = async <T>(
   refined: MossBranches<MossRefinedText>,
   body: (pair: MossDitPair) => Promise<T>,
 ): Promise<T> => {
-  const { gpu, components, contract } = state;
+  const { gpu, components, contract, preset } = state;
   const { cells } = plan;
   if (refined.positive.tokens !== plan.texts.positive.tokens) {
     throw new Error(`${OWNER}: the positive refined text has ${refined.positive.tokens} tokens`);
@@ -410,7 +443,7 @@ export const withMossDitPair = async <T>(
   }
   await assertHeadroom(
     gpu,
-    mossDitStageNeeds({ ...state, limits: gpu.limits }, plan).pair,
+    mossDitStageNeeds({ ...state, device: mossDeviceFacts(gpu) }, plan).pair,
     `${MOSS_DIT} + ${MOSS_DIT_SKIP22}`,
     plan,
   );
@@ -419,7 +452,7 @@ export const withMossDitPair = async <T>(
   const residents: ResidentTensor[] = [];
   let failure: { readonly error: unknown } | undefined;
   try {
-    lender = await components.dit.createSession(gpu, {});
+    lender = await components.dit.createSession(gpu, { ...preset.dit });
     const open = async (
       session: Session,
       output: string,
@@ -450,6 +483,7 @@ export const withMossDitPair = async <T>(
     let negative: BranchRunner | undefined;
     if (refined.negative !== undefined) {
       borrower = await components.ditSkip22.createSession(gpu, {
+        ...preset.dit,
         sharedWeights: lentWeights(lender, contract.borrowed),
       });
       negative = await open(borrower, contract.outputs.ditSkip22, refined.negative, "negative");

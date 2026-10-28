@@ -1,9 +1,12 @@
 /**
  * MOSS-Image text-to-image end to end on a real GPU — the generate path (`generateMoss`: the one
  * acceptance check, the first headroom check, `dit_text` → the DiT pair with the sampler → the VAE —
- * ADR NNNN decisions 5 and 9, plan items 15-8 and 15-19, plan step 4) over the i8 DiT series on the
- * reference path (i8 weights × f32 compute, no session knobs) and the f32 VAE series. Sizes are
- * written width × height here (the recipe's records name them height × width — `dit-256x384` is
+ * ADR NNNN decisions 5 and 9, plan items 15-8 and 15-19, plan step 4) over the i8 DiT series and
+ * the f32 VAE series, with the reference preset `f32+dit8` (i8 weights × f32 compute, no session
+ * knob) unless a case names the practical preset `f32+dit8-a8-attn8-online`
+ * (`../../models/src/moss/preset.ts`; its self A/B check is `e2e_moss_ab_test.ts`). The device asks
+ * for subgroups when available (the practical preset's online kernel takes its subgroup form; no
+ * kernel of the reference preset reads them). Sizes are written width × height here (the recipe's records name them height × width — `dit-256x384` is
  * 384 px wide).
  *
  * ## Default run
@@ -27,8 +30,9 @@
  * - **sha256 rows** (ADR 0106, plan item 15-19 — `fixtures/references/moss.json`, one row per
  *   environment key): the clamped f32 image `[3, H, W]` (an F32 safetensors without metadata —
  *   `f32ArtifactBytes`) of the seed path at 256² and 384×256, 2 steps, `fridge-note` with the empty
- *   negative, guidance 3, shift 5, seed 42, and at 256² guidance 1 without a negative
- *   ({@link SEED_CASES}). A row is settled only after the run's own checks held (shape, finite).
+ *   negative, guidance 3, shift 5, seed 42, and at 256² guidance 1 without a negative, for the
+ *   reference preset; the practical preset's at 256² and 384×256, guidance 3 ({@link SEED_CASES} —
+ *   a row's ID starts with its preset's name). A row is settled only after the run's own checks held (shape, finite).
  *   This machine's rows are written with `KARUME_REFERENCE=write` in this lane; another machine's
  *   rows are never touched. MUST: a writing run settles a row only after both sizes of the upstream
  *   parity below (`KARUME_UPSTREAM_PARITY=1` with its goldens — {@link PARITY_IDS}) passed earlier
@@ -73,8 +77,8 @@
  *
  * ## Opt-in 1024² × 50 steps (`KARUME_MOSS_FULL_PIPELINE=1`)
  *
- * Upstream's default request (1024², 50 steps, guidance 3, shift 5) on the seed path: it runs to
- * completion on this device with a finite image, and its sha256 row is settled (registered with the
+ * Upstream's default request (1024², 50 steps, guidance 3, shift 5) on the seed path, once per
+ * preset: it runs to completion on this device with a finite image, and its sha256 row is settled (registered with the
  * reference gate only under the opt-in, so the default lane's gate does not count it). The test logs
  * each stage's wall time from its Sessions' open and dispose (wall-clock instants, to line up with an
  * outside VRAM sampler), each Session's held bytes (plan backing + input buffers + weights) and each
@@ -83,7 +87,18 @@
  * for the run): per stage the peak of the buffers held (every transient of a run included) and,
  * separately, each headroom probe with what was held when it was made — a sampler of the process
  * VRAM (`nvidia-smi`, outside the test) can miss a transient between two samples and mixes the
- * probes into the stage. The measurement and its record are in the plan's step-4 record.
+ * probes into the stage — and asserts that each stage's peak stays within that stage's headroom
+ * need (the estimate leaves the i8a8 linears' quantised intermediates out; the need's margin must
+ * cover them). The measurement and its record are in the plan's step-4 and step-5 records.
+ *
+ * ## Opt-in VRAM at larger sizes (`KARUME_MOSS_VRAM=1`)
+ *
+ * The same measurement on 2-step generations ({@link VRAM_SIZES}: upstream's 2M-pixel example
+ * 1456², and 1696×1648, the area cap of a 2 GiB binding) for both presets. Whether a size fits is a
+ * fact of the device and the moment, not of the code: when the largest stage need does not fit the
+ * device now, the case asserts the product's refusal instead — loud, at the first headroom check,
+ * before any Session opens — and logs it (on the 12 GiB RTX 3080 Ti the reference preset's DiT pair
+ * is refused at the cap: plan step-5 record).
  *
  * Without a GPU adapter, the series or the stage-0 embeddings the file skips explicitly; the parity
  * group also without its goldens, naming the command that writes them (ADR 0005).
@@ -92,6 +107,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import {
+  fitsHeadroom,
   type GpuContext,
   parseSafetensors,
   type Session,
@@ -103,7 +119,7 @@ import {
   mossDitGraphContract,
   readMossDitAssets,
 } from "../../models/src/moss/dit-contract.ts";
-import { mossDitStageNeeds } from "../../models/src/moss/dit-stage.ts";
+import { mossDeviceFacts, mossDitStageNeeds } from "../../models/src/moss/dit-stage.ts";
 import { type MossTrainingGrid, mossTimestep } from "../../models/src/moss/dit-timestep.ts";
 import {
   generateMoss,
@@ -111,6 +127,13 @@ import {
   type MossGenerateState,
   planMossGenerate,
 } from "../../models/src/moss/generate.ts";
+import {
+  MOSS_PRACTICAL_PRESET,
+  MOSS_REFERENCE_PRESET,
+  mossAcquireGpuOptions,
+  type MossPreset,
+  mossPreset,
+} from "../../models/src/moss/preset.ts";
 import type { MossTextEmbeddings } from "../../models/src/moss/request.ts";
 import { mossVaeStageNeeds } from "../../models/src/moss/vae-stage.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
@@ -158,6 +181,7 @@ const results = openResults("moss-generate");
 const fullResults = openResults("moss-generate-full");
 
 const FULL = process.env.KARUME_MOSS_FULL_PIPELINE === "1";
+const VRAM = process.env.KARUME_MOSS_VRAM === "1";
 
 const SERIES_PRESENT = mossSeriesPresent() && mossVaeSeriesPresent();
 const EMBEDS_PRESENT = filePresent(MOSS_TEXT_EMBEDS);
@@ -174,23 +198,56 @@ const SHIFT = 5;
 
 type Size = { readonly width: number; readonly height: number };
 
-/** A sha row's ID: the path (i8 reference), steps, prompt, noise, size (W×H), guidance, shift. */
-const caseIdOf = (steps: number, { width, height }: Size, guidance = GUIDANCE): string =>
-  `i8-${steps}step-${PROMPT}-seed${SEED}-${width}x${height}-g${guidance}-shift${SHIFT}`;
+const REFERENCE = mossPreset(MOSS_REFERENCE_PRESET);
+const PRACTICAL = mossPreset(MOSS_PRACTICAL_PRESET);
 
-type SeedCase = Size & { readonly id: string; readonly guidance: number };
+/** A sha row's ID: the preset, steps, prompt, noise, size (W×H), guidance, shift. */
+const caseIdOf = (
+  preset: MossPreset,
+  steps: number,
+  { width, height }: Size,
+  guidance = GUIDANCE,
+): string =>
+  `${preset.name}-${steps}step-${PROMPT}-seed${SEED}-${width}x${height}-g${guidance}-shift${SHIFT}`;
 
-/** The default lane's sha rows (plan item 15-19; guidance 1 — no negative branch — at 256²). */
+type SeedCase = Size & {
+  readonly id: string;
+  readonly guidance: number;
+  readonly preset: MossPreset;
+};
+
+/**
+ * The default lane's sha rows (plan item 15-19; guidance 1 — no negative branch — at 256²; the
+ * practical preset at the two sizes with guidance 3 — plan step 5).
+ */
 const SEED_CASES: readonly SeedCase[] = [
-  { width: 256, height: 256, guidance: GUIDANCE },
-  { width: 384, height: 256, guidance: GUIDANCE },
-  { width: 256, height: 256, guidance: 1 },
-].map((testCase) => ({ ...testCase, id: caseIdOf(2, testCase, testCase.guidance) }));
+  { width: 256, height: 256, guidance: GUIDANCE, preset: REFERENCE },
+  { width: 384, height: 256, guidance: GUIDANCE, preset: REFERENCE },
+  { width: 256, height: 256, guidance: 1, preset: REFERENCE },
+  { width: 256, height: 256, guidance: GUIDANCE, preset: PRACTICAL },
+  { width: 384, height: 256, guidance: GUIDANCE, preset: PRACTICAL },
+].map((testCase) => ({
+  ...testCase,
+  id: caseIdOf(testCase.preset, 2, testCase, testCase.guidance),
+}));
 
-/** The opt-in full run (upstream's default request). */
+/** The opt-in full run (upstream's default request), once per preset. */
 const FULL_SIZE: Size = { width: 1024, height: 1024 };
 const FULL_STEPS = 50;
-const FULL_CASE = caseIdOf(FULL_STEPS, FULL_SIZE);
+const FULL_CASES: readonly { readonly preset: MossPreset; readonly id: string }[] = [
+  REFERENCE,
+  PRACTICAL,
+].map((preset) => ({ preset, id: caseIdOf(preset, FULL_STEPS, FULL_SIZE) }));
+
+/**
+ * The opt-in VRAM sizes (module doc): upstream's 2M-pixel example (1456² — the GitHub README's;
+ * upstream recommends 1M / 1.5M / 2M pixels) and the area cap of a 2 GiB binding (1696×1648).
+ */
+const VRAM_SIZES: readonly Size[] = [
+  { width: 1456, height: 1456 },
+  { width: 1696, height: 1648 },
+];
+const VRAM_STEPS = 2;
 
 /** One case of the upstream parity (`few_step_ref.CASES`, fixed here — not enumerated from files). */
 type ParityCase = Size & {
@@ -386,17 +443,23 @@ const withBufferLog = async <T>(
   }
 };
 
+/** One stage's buffers: the peak bytes held and each headroom probe with what was held then. */
+type StageBuffers = {
+  readonly name: string;
+  readonly held: number;
+  readonly probes: readonly { readonly probe: number; readonly held: number }[];
+};
+
 /**
  * Per stage (each ends before the change whose `after` reaches its end): the peak bytes held, and
  * each headroom probe (its pieces together — one probe ends when the probes return to 0) with the
- * bytes held while it existed; then what is held after the last change.
+ * bytes held while it existed.
  */
-const stageBufferLines = (
+const stageBuffers = (
   changes: readonly BufferChange[],
   stages: readonly (readonly [name: string, end: number])[],
-): string[] => {
-  const mib = (bytes: number): string => `${(bytes / 2 ** 20).toFixed(0)} MiB`;
-  const lines = stages.map(([name, end], at) => {
+): StageBuffers[] =>
+  stages.map(([name, end], at) => {
     const start = at === 0 ? 0 : stages[at - 1][1];
     const inStage = changes.filter(({ after }) => after >= start && after < end);
     const held = Math.max(0, ...inStage.map((entry) => entry.held));
@@ -412,6 +475,16 @@ const stageBufferLines = (
       }
     }
     if (open !== undefined) probes.push(open);
+    return { name, held, probes };
+  });
+
+/** The log lines of {@link stageBuffers}, then what is held after the last change. */
+const stageBufferLines = (
+  stages: readonly StageBuffers[],
+  changes: readonly BufferChange[],
+): string[] => {
+  const mib = (bytes: number): string => `${(bytes / 2 ** 20).toFixed(0)} MiB`;
+  const lines = stages.map(({ name, held, probes }) => {
     const probeText = probes
       .map((probe) => `; probe ${probe.probe} B (${mib(probe.probe)}) over ${mib(probe.held)} held`)
       .join("");
@@ -554,10 +627,11 @@ describe.skipIf(!RUNNABLE)(
           "MOSS-Image",
         ),
       };
-      base = { dit, vae: await openMossVaeSeries() };
+      base = { dit, vae: await openMossVaeSeries(), preset: mossPreset(MOSS_REFERENCE_PRESET) };
       embeds = await readEmbeddings();
       // The sha rows may be written: the adapter that runs must be the one the row key names.
-      gpu = verifyRunningGpu(await acquireTestGpu());
+      // Subgroups when available (module doc — the practical preset's online kernel).
+      gpu = verifyRunningGpu(await acquireTestGpu(mossAcquireGpuOptions(PRACTICAL)));
     });
     afterAll(async () => {
       if (gpu === undefined) return;
@@ -997,7 +1071,10 @@ describe.skipIf(!RUNNABLE)(
           await settleImage(results, testCase.id, testCase, async () => {
             const started = performance.now();
             const generated = await settled(() =>
-              generateMoss(state(), seedRequest(testCase, 2, testCase.guidance)),
+              generateMoss(
+                { ...state(), preset: testCase.preset },
+                seedRequest(testCase, 2, testCase.guidance),
+              ),
             );
             const seconds = ((performance.now() - started) / 1000).toFixed(1);
             return { image: generated.image, note: `generate ${seconds} s` };
@@ -1006,76 +1083,142 @@ describe.skipIf(!RUNNABLE)(
       }
     });
 
-    describe.skipIf(!FULL)("1024² × 50 steps (opt-in KARUME_MOSS_FULL_PIPELINE=1)", () => {
-      it(`${FULL_CASE}: runs to completion with a finite image, the stage timeline and held bytes logged, pinned by its sha256 row`, async () => {
-        const current = state();
-        const request = seedRequest(FULL_SIZE, FULL_STEPS);
-        const plan = planMossGenerate(request, {
-          dit: current.dit.contract,
-          vae: current.vae.contract,
-          limits: current.gpu.limits,
-        });
-        const ditNeeds = mossDitStageNeeds(
-          { ...current.dit, limits: current.gpu.limits },
-          plan.dit,
-        );
-        const vaeNeed = mossVaeStageNeeds({ ...current.vae, limits: current.gpu.limits }, plan.vae);
-        console.info(
-          `[moss-generate full] headroom needs: dit_text ${ditNeeds.text} B, pair ${ditNeeds.pair} B,` +
-            ` VAE ${vaeNeed} B; schedule ${plan.schedule.gridIndices.length} steps`,
-        );
-        await settleImage(fullResults, FULL_CASE, FULL_SIZE, async () => {
-          const events: SessionEvent[] = [];
-          const started = Date.now();
-          console.info(`[moss-generate full] generate start ${new Date(started).toISOString()}`);
-          const { result: generated, changes } = await withBufferLog(
-            current.gpu.device,
-            events,
-            () => settled(() => generateMoss(observedState(current, events), request)),
-          );
-          const ended = Date.now();
-          console.info(`[moss-generate full] generate end ${new Date(ended).toISOString()}`);
-          expect(events.map(({ event }) => event)).toEqual(STAGE_ORDER);
-          expect(buildCounts(events)).toEqual(BUILD_COUNTS);
-          const index = (event: string): number => {
-            const found = events.findIndex((entry) => entry.event === event);
-            assert(found !== -1, `no event '${event}'`);
-            return found + 1;
-          };
-          const bufferLines = stageBufferLines(changes, [
-            // A stage ends when its last Session's dispose has completed (`after` counts it).
-            ["text stage (the first check included)", index("dispose dit_text")],
-            ["DiT stage", index("dispose dit")],
-            ["VAE stage", Number.POSITIVE_INFINITY],
-          ]);
-          console.info(`[moss-generate full] WebGPU buffers\n  ${bufferLines.join("\n  ")}`);
-          const at = (event: string): number => {
-            const found = events.find((entry) => entry.event === event);
-            assert(found !== undefined, `no event '${event}'`);
-            return found.at;
-          };
-          const lines = [
-            `wall ${((ended - started) / 1000).toFixed(1)} s`,
-            ...events.map(({ event, at: when }) => `${new Date(when).toISOString()} ${event}`),
-            `text stage ${((at("dispose dit_text") - at("open dit_text")) / 1000).toFixed(1)} s`,
-            `DiT stage (dit opened → dit disposed) ${((at("dispose dit") - at("open dit")) / 1000).toFixed(1)} s`,
-            `VAE stage ${((at("dispose vae_decoder_post") - at("open vae_decoder_pre")) / 1000).toFixed(1)} s`,
-            ...events
-              .filter(({ diagnostics }) => diagnostics !== undefined)
-              .map(({ event, diagnostics }) => {
-                assert(diagnostics !== undefined);
-                return (
-                  `${event.replace("dispose ", "")}: plan backing ${diagnostics.planBacking.residentBytes} B,` +
-                  ` input buffers ${diagnostics.planBacking.inputBytes} B,` +
-                  ` weights ${diagnostics.weights.allocatedBytes} B,` +
-                  ` backing builds ${diagnostics.planBacking.buildCount}`
-                );
-              }),
-          ];
-          console.info(`[moss-generate full]\n  ${lines.join("\n  ")}`);
-          return { image: generated.image, note: lines.slice(0, 1).join(" / ") };
-        });
+    /**
+     * One generation of `preset` at `size` with the stage timeline, the held bytes and the WebGPU
+     * buffer log (module doc "Opt-in 1024² × 50 steps"): asserts the stage order, one backing build
+     * per DiT and VAE Session, and each stage's peak held within its headroom need; returns the
+     * image and the first log line.
+     */
+    const measuredGeneration = async (
+      preset: MossPreset,
+      size: Size,
+      steps: number,
+      label: string,
+    ): Promise<{ readonly image: Float32Array<ArrayBuffer>; readonly note: string }> => {
+      const current = { ...state(), preset };
+      const request = seedRequest(size, steps);
+      const plan = planMossGenerate(request, {
+        dit: current.dit.contract,
+        vae: current.vae.contract,
+        limits: current.gpu.limits,
       });
+      const ditNeeds = mossDitStageNeeds(
+        { ...current.dit, preset, device: mossDeviceFacts(current.gpu) },
+        plan.dit,
+      );
+      const vaeNeed = mossVaeStageNeeds({ ...current.vae, limits: current.gpu.limits }, plan.vae);
+      console.info(
+        `[${label}] ${preset.name} ${sizeKey(size)} headroom needs: dit_text ${ditNeeds.text} B,` +
+          ` pair ${ditNeeds.pair} B, VAE ${vaeNeed} B; schedule ${plan.schedule.gridIndices.length} steps`,
+      );
+      const events: SessionEvent[] = [];
+      const started = Date.now();
+      console.info(`[${label}] generate start ${new Date(started).toISOString()}`);
+      const { result: generated, changes } = await withBufferLog(current.gpu.device, events, () =>
+        settled(() => generateMoss(observedState(current, events), request)),
+      );
+      const ended = Date.now();
+      console.info(`[${label}] generate end ${new Date(ended).toISOString()}`);
+      expect(events.map(({ event }) => event)).toEqual(STAGE_ORDER);
+      expect(buildCounts(events)).toEqual(BUILD_COUNTS);
+      const index = (event: string): number => {
+        const found = events.findIndex((entry) => entry.event === event);
+        assert(found !== -1, `no event '${event}'`);
+        return found + 1;
+      };
+      const stages = stageBuffers(changes, [
+        // A stage ends when its last Session's dispose has completed (`after` counts it).
+        ["text stage (the first check included)", index("dispose dit_text")],
+        ["DiT stage", index("dispose dit")],
+        ["VAE stage", Number.POSITIVE_INFINITY],
+      ]);
+      console.info(
+        `[${label}] WebGPU buffers\n  ${stageBufferLines(stages, changes).join("\n  ")}`,
+      );
+      const at = (event: string): number => {
+        const found = events.find((entry) => entry.event === event);
+        assert(found !== undefined, `no event '${event}'`);
+        return found.at;
+      };
+      const lines = [
+        `wall ${((ended - started) / 1000).toFixed(1)} s`,
+        ...events.map(({ event, at: when }) => `${new Date(when).toISOString()} ${event}`),
+        `text stage ${((at("dispose dit_text") - at("open dit_text")) / 1000).toFixed(1)} s`,
+        `DiT stage (dit opened → dit disposed) ${((at("dispose dit") - at("open dit")) / 1000).toFixed(1)} s`,
+        `VAE stage ${((at("dispose vae_decoder_post") - at("open vae_decoder_pre")) / 1000).toFixed(1)} s`,
+        ...events
+          .filter(({ diagnostics }) => diagnostics !== undefined)
+          .map(({ event, diagnostics }) => {
+            assert(diagnostics !== undefined);
+            return (
+              `${event.replace("dispose ", "")}: plan backing ${diagnostics.planBacking.residentBytes} B,` +
+              ` input buffers ${diagnostics.planBacking.inputBytes} B,` +
+              ` weights ${diagnostics.weights.allocatedBytes} B,` +
+              ` backing builds ${diagnostics.planBacking.buildCount}`
+            );
+          }),
+      ];
+      console.info(`[${label}]\n  ${lines.join("\n  ")}`);
+      // Each stage's peak within its headroom need (module doc — the margin covers what the
+      // estimate leaves out). The text stage's held peak excludes the first check's probe.
+      const [text, dit, vae] = stages;
+      expect(text.held).toBeLessThanOrEqual(ditNeeds.text);
+      expect(dit.held).toBeLessThanOrEqual(ditNeeds.pair);
+      expect(vae.held).toBeLessThanOrEqual(vaeNeed);
+      return { image: generated.image, note: lines.slice(0, 1).join(" / ") };
+    };
+
+    describe.skipIf(!FULL)("1024² × 50 steps (opt-in KARUME_MOSS_FULL_PIPELINE=1)", () => {
+      for (const { preset, id } of FULL_CASES) {
+        it(`${id}: runs to completion with a finite image, the stage timeline and held bytes logged, each stage within its need, pinned by its sha256 row`, async () => {
+          await settleImage(fullResults, id, FULL_SIZE, () =>
+            measuredGeneration(preset, FULL_SIZE, FULL_STEPS, "moss-generate full"),
+          );
+        });
+      }
+    });
+
+    describe.skipIf(!VRAM)("VRAM at 1456² and the area cap (opt-in KARUME_MOSS_VRAM=1)", () => {
+      for (const preset of [REFERENCE, PRACTICAL]) {
+        for (const size of VRAM_SIZES) {
+          it(`${preset.name} ${sizeKey(size)} × ${VRAM_STEPS} steps: each stage within its need, or the product's refusal before any Session opens`, async () => {
+            const current = { ...state(), preset };
+            const request = seedRequest(size, VRAM_STEPS);
+            const plan = planMossGenerate(request, {
+              dit: current.dit.contract,
+              vae: current.vae.contract,
+              limits: current.gpu.limits,
+            });
+            const ditNeeds = mossDitStageNeeds(
+              { ...current.dit, preset, device: mossDeviceFacts(current.gpu) },
+              plan.dit,
+            );
+            const vaeNeed = mossVaeStageNeeds(
+              { ...current.vae, limits: current.gpu.limits },
+              plan.vae,
+            );
+            const largest = Math.max(ditNeeds.text, ditNeeds.pair, vaeNeed);
+            await settleReleases(current.gpu);
+            if (await fitsHeadroom(current.gpu, largest)) {
+              const { image } = await measuredGeneration(preset, size, VRAM_STEPS, "moss-vram");
+              expect(countNonFinite(image)).toBe(0);
+              return;
+            }
+            // A fact of the device and the moment (module doc): the refusal is the product's.
+            console.info(
+              `[moss-vram] ${preset.name} ${sizeKey(size)}: this device refuses the largest stage need` +
+                ` ${largest} B now (pair ${ditNeeds.pair} B, VAE ${vaeNeed} B)`,
+            );
+            const events: SessionEvent[] = [];
+            await assertRejects(
+              () => settled(() => generateMoss(observedState(current, events), request)),
+              Error,
+              "checked before any stage opens",
+            );
+            expect(events).toEqual([]);
+          });
+        }
+      }
     });
   },
 );
@@ -1083,7 +1226,7 @@ describe.skipIf(!RUNNABLE)(
 /** The sha rows this file settles (the full run's only under its opt-in — module doc). */
 const CASE_IDS: readonly string[] = [
   ...SEED_CASES.map(({ id }) => id),
-  ...(FULL ? [FULL_CASE] : []),
+  ...(FULL ? FULL_CASES.map(({ id }) => id) : []),
 ];
 if (RUNNABLE) references.warnMissing(CASE_IDS);
 // A missing row of this environment is not a silent pass (ADR 0005's gatekeeper form).

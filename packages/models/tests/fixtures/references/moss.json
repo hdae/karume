@@ -2,17 +2,26 @@
   "schema": 1,
   "kind": "sha256",
   "cases": {
-    "i8-2step-fridge-note-seed42-256x256-g1-shift5": {
+    "f32+dit8-2step-fridge-note-seed42-256x256-g1-shift5": {
       "node-nvidia-geforce-rtx-3080-ti": "2366d8663efbf0b08d12fc53dc31b81469914b612882c7edbd93bda5077f51f4"
     },
-    "i8-2step-fridge-note-seed42-256x256-g3-shift5": {
+    "f32+dit8-2step-fridge-note-seed42-256x256-g3-shift5": {
       "node-nvidia-geforce-rtx-3080-ti": "6f5685a5da162144aadbfae443085e3f516b90aa153e8d62be709548a90b76ba"
     },
-    "i8-2step-fridge-note-seed42-384x256-g3-shift5": {
+    "f32+dit8-2step-fridge-note-seed42-384x256-g3-shift5": {
       "node-nvidia-geforce-rtx-3080-ti": "c732dddb3653aa5a6abf16c3335aca1b192486b61d091a7b86154ed150e8792b"
     },
-    "i8-50step-fridge-note-seed42-1024x1024-g3-shift5": {
+    "f32+dit8-50step-fridge-note-seed42-1024x1024-g3-shift5": {
       "node-nvidia-geforce-rtx-3080-ti": "052f093ad3446d3f94818bc1a6a3f4774a15448eb0a8b300674c7a05b0b81a30"
+    },
+    "f32+dit8-a8-attn8-online-2step-fridge-note-seed42-256x256-g3-shift5": {
+      "node-nvidia-geforce-rtx-3080-ti": "46c0cfe14667e4310c5f722660a99e366e6372f0a29c6a7b98dc31e60071c80a"
+    },
+    "f32+dit8-a8-attn8-online-2step-fridge-note-seed42-384x256-g3-shift5": {
+      "node-nvidia-geforce-rtx-3080-ti": "112562caced0b04def9662a194cd8599c53f858ecedc6b206b5502d5de082464"
+    },
+    "f32+dit8-a8-attn8-online-50step-fridge-note-seed42-1024x1024-g3-shift5": {
+      "node-nvidia-geforce-rtx-3080-ti": "e2845c3cbf12c82938d55cca95505357dfc52db4e86008ce6ff90a31b2ad2ac9"
     },
     "i8-dit_text-fridge-note-t1": {
       "node-nvidia-geforce-rtx-3080-ti": "2869acc9169f102399bf571cade1e54eb30d5bb32abeec2aecc3402b2f9899bb"

@@ -13,6 +13,10 @@
  * be retired when it comes. The initial noise is exactly one of a `seed` (`./random.ts` — not
  * torch's `randn`) and the `latents` themselves (how the parity checks inject upstream's noise).
  *
+ * The preset (`./preset.ts`) is part of the state, not of the request, and has no default either
+ * (ADR 0128 decision 1 decides the default after the maintainer's visual check): it sets the knobs
+ * of the DiT pair and of its headroom estimates; `dit_text` and the VAE run in f32 in every preset.
+ *
  * ## Acceptance ({@link planMossGenerate} — every rejection a `ModelInputError`, before GPU work)
  *
  * Rejected, each naming the limit or the missing input:
@@ -72,12 +76,14 @@ import {
   type MossDitPair,
   type MossDitPlan,
   mossClassifierFreeGuidance,
+  mossDeviceFacts,
   mossDitStageNeeds,
   planMossDit,
   runMossTextStage,
   withMossDitPair,
 } from "./dit-stage.ts";
 import { mossImageTokens } from "./dit-tokens.ts";
+import { type MossPreset, requireMossPreset } from "./preset.ts";
 import { MossRandn } from "./random.ts";
 import type { MossTextEmbeddings } from "./request.ts";
 import { mossEulerStep, mossSchedule, type MossSchedule } from "./sampler.ts";
@@ -253,9 +259,13 @@ export const planMossGenerate = (
   return { dit, vae, guidance, schedule, initial };
 };
 
-/** The two series opened for one device (built once — the contracts settled in admission). */
+/**
+ * The two series opened for one device (built once — the contracts settled in admission) and the
+ * preset the generation runs (explicit — module doc "The request").
+ */
 export type MossGenerateState = {
   readonly gpu: GpuContext;
+  readonly preset: MossPreset;
   readonly dit: { readonly components: MossDitComponents; readonly contract: MossDitContract };
   readonly vae: { readonly components: MossVaeComponents; readonly contract: MossVaeContract };
 };
@@ -279,7 +289,14 @@ const assertFirstHeadroom = async (
   plan: MossGeneratePlan,
 ): Promise<void> => {
   const { gpu } = state;
-  const dit = mossDitStageNeeds({ ...state.dit, limits: gpu.limits }, plan.dit);
+  const dit = mossDitStageNeeds(
+    {
+      ...state.dit,
+      preset: state.preset,
+      device: mossDeviceFacts(gpu),
+    },
+    plan.dit,
+  );
   const needs: readonly (readonly [string, number])[] = [
     [MOSS_DIT_TEXT, dit.text],
     [`${MOSS_DIT} + ${MOSS_DIT_SKIP22}`, dit.pair],
@@ -347,6 +364,7 @@ export const generateMoss = async (
   request: MossGenerateRequest,
 ): Promise<MossGeneratedImage> => {
   const { gpu } = state;
+  const preset = requireMossPreset(state.preset);
   const plan = planMossGenerate(request, {
     dit: state.dit.contract,
     vae: state.vae.contract,
@@ -354,7 +372,7 @@ export const generateMoss = async (
   });
   await assertFirstHeadroom(state, plan);
   const initial = mossInitialLatents(plan, state.dit.contract.latentChannels);
-  const ditState = { gpu, ...state.dit };
+  const ditState = { gpu, preset, ...state.dit };
   const refined = await runMossTextStage(ditState, plan.dit);
   const latents = await withMossDitPair(ditState, plan.dit, refined, (pair) =>
     mossDenoise(pair.predict, plan, initial),

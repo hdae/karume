@@ -56,6 +56,7 @@ import {
   mossTextStageInputs,
   planMossDit,
 } from "../src/moss/dit-stage.ts";
+import { MOSS_PRACTICAL_PRESET, MOSS_REFERENCE_PRESET, mossPreset } from "../src/moss/preset.ts";
 import {
   assertMossImageSize,
   assertMossTextEmbeddings,
@@ -846,6 +847,12 @@ describe.skipIf(!SERIES_PRESENT)(
   () => {
     /** The 3080 Ti's limits (any device's would do — the estimate is a pure function of them). */
     const limits = { maxStorageBufferBindingSize: 2_147_483_644, maxBufferSize: 2_147_483_648 };
+    /** A device with the online kernel's subgroup form (the 3080 Ti's facts). */
+    const device = {
+      limits,
+      attention: { subgroups: true, maxComputeWorkgroupStorageSize: 49_152 },
+    };
+    const reference = mossPreset(MOSS_REFERENCE_PRESET);
 
     it("counts no weight in the borrower's estimate and every weight in the lender's", async () => {
       const { components } = await openMossSeries();
@@ -873,7 +880,7 @@ describe.skipIf(!SERIES_PRESENT)(
         assets.trainingGrid,
         "test",
       );
-      const state = { limits, components: series.components, contract };
+      const state = { device, components: series.components, contract, preset: reference };
       const plan = planMossDit({
         width: 1024,
         height: 1024,
@@ -907,6 +914,61 @@ describe.skipIf(!SERIES_PRESENT)(
       );
     });
 
+    it("estimates the pair with the practical preset's knobs and the device's attention facts, and dit_text with none", async () => {
+      const series = await openMossSeries();
+      const assets = await readMossDitAssets(series.components.dit);
+      const contract = mossDitContract(
+        mossDitGraphContract(series.components, "test"),
+        assets.ropeBase,
+        assets.trainingGrid,
+        "test",
+      );
+      const practical = mossPreset(MOSS_PRACTICAL_PRESET);
+      const plan = planMossDit({
+        width: 1024,
+        height: 1024,
+        positive: embeddings(63),
+        negative: embeddings(10),
+      });
+      const knobs = { ...limits, ...practical.dit, attentionDevice: device.attention };
+      const lender = series.components.dit.estimate({ ...knobs, bindings: { S: 4159 } });
+      const borrower = series.components.ditSkip22.estimate({ ...knobs, bindings: { S: 4106 } });
+      const components = series.components;
+
+      const needs = mossDitStageNeeds({ device, components, contract, preset: practical }, plan);
+      const referenceNeeds = mossDitStageNeeds(
+        { device, components, contract, preset: reference },
+        plan,
+      );
+      // A device with neither form of the online kernel (no subgroups, 32 KiB of workgroup
+      // storage): its route is the three dispatches, which store S.
+      const portable = {
+        limits,
+        attention: { subgroups: false, maxComputeWorkgroupStorageSize: 32_768 },
+      };
+      const fallback = mossDitStageNeeds(
+        { device: portable, components, contract, preset: practical },
+        plan,
+      );
+      console.log(
+        `[moss-dit] 1024² pair need: ${practical.name} ${needs.pair} B, ${reference.name}` +
+          ` ${referenceNeeds.pair} B, ${practical.name} without an online form ${fallback.pair} B`,
+      );
+
+      expect(needs.pair).toBe(
+        lender.peakAccountedBytes +
+          borrower.peakAccountedBytes +
+          (4159 + 4106) * 3072 * 4 +
+          components.dit.maxPartBytes +
+          HEADROOM_MARGIN_BYTES,
+      );
+      // The knobs and the device facts reach the estimates (each changes the need).
+      expect(needs.pair).toBeLessThan(referenceNeeds.pair);
+      expect(needs.pair).toBeLessThan(fallback.pair);
+      // dit_text runs f32 in every preset.
+      expect(needs.text).toBe(referenceNeeds.text);
+    });
+
     it("sizes the text stage at the longer branch, whichever it is", async () => {
       const series = await openMossSeries();
       const assets = await readMossDitAssets(series.components.dit);
@@ -916,7 +978,7 @@ describe.skipIf(!SERIES_PRESENT)(
         assets.trainingGrid,
         "test",
       );
-      const state = { limits, components: series.components, contract };
+      const state = { device, components: series.components, contract, preset: reference };
       const estimate = (tokens: number) =>
         series.components.ditText.estimate({ ...limits, bindings: { T: tokens } });
       // Precondition: the two lengths have different estimates (below some T the plan backing
