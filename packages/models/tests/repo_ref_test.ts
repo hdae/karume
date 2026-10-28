@@ -18,6 +18,7 @@
 import { test } from "vite-plus/test";
 import {
   assertEquals,
+  assertMatch,
   assertRejects,
   assertStrictEquals,
   assertStringIncludes,
@@ -44,7 +45,8 @@ test("toRepoRef: 取得元が無ければ『repo が必須』+ 記述例 2 択�
   // 主語（どの入口が落ちたか）と記述例 2 択が揃っていること。
   assertStringIncludes(error.message, "anima.Pipeline.fromPretrained");
   assertStringIncludes(error.message, '{ repo: "owner/name", revision: "<40-digit commit SHA>" }');
-  assertStringIncludes(error.message, 'SOURCES["anima"]');
+  // Anchored: a prefixed table name (`ANIMA_SOURCES[…]`, the 0.14 spelling) must not match.
+  assertMatch(error.message, /(?<![\w.])SOURCES\["anima"\]/);
 });
 
 test("toRepoRef: 公開配布リポを持たないファミリには対応表を案内しない", () => {
@@ -156,8 +158,9 @@ test("fromPretrained: 取得元の綴りが空なら fetch を 1 度も呼ばず
 });
 
 test("fromPretrained: birefnet も ref 欠落時に対応表（birefnet.SOURCES）を案内する", async () => {
-  // 0.10.0 で公開 pin（`birefnet.SOURCES`）が入ったのに、案内だけが「公開リポを持たない」時代の
-  // ままだった（下流の報告）。他家族と同じ文言に揃っていることを公開面から見る。
+  // 0.10.0 で公開 pin（当時の `BIREFNET_SOURCES`、今の `birefnet.SOURCES`）が入ったのに、案内
+  // だけが「公開リポを持たない」時代のままだった（下流の報告）。他家族と同じ文言に揃っている
+  // ことを公開面から見る。
   const fetchStub: typeof globalThis.fetch = (input) =>
     Promise.reject(new Error(`repo_ref_test: 取得層まで進んだ（${describeRequest(input)}）`));
   const error = await assertRejects(
@@ -165,13 +168,13 @@ test("fromPretrained: birefnet も ref 欠落時に対応表（birefnet.SOURCES�
     Error,
     "birefnet.Pipeline.fromPretrained: repo is required",
   );
-  assertStringIncludes(error.message, 'SOURCES["birefnet-hr"] (@karume/models/birefnet)');
+  assertMatch(error.message, /(?<![\w.])SOURCES\["birefnet-hr"\] \(@karume\/models\/birefnet\)/);
 });
 
 test("fromPretrained: umT5 と Wan2.2 は ref 欠落時に対応表を案内し、未公開の Wan2.1 は案内しない", async () => {
-  // 0.14.0 で `umt5.SOURCES` / `wan.SOURCES` が入った（家族の初公開）。Wan2.1 と 2.2 は取得の本体
-  // （`loadWanFromPretrained`）を共有するが、表に Wan2.1 のキーは無い — 2.1 にだけ存在しないキーを
-  // 案内しない（③）ことを、共有の本体を通る公開面から見る。
+  // 0.14.0 で対応表（当時の `UMT5_SOURCES` / `WAN_SOURCES`）が入った（家族の初公開）。Wan2.1 と
+  // 2.2 は取得の本体（`loadWanFromPretrained`）を共有するが、表に Wan2.1 のキーは無い — 2.1 に
+  // だけ存在しないキーを案内しない（③）ことを、共有の本体を通る公開面から見る。
   const fetchStub: typeof globalThis.fetch = (input) =>
     Promise.reject(new Error(`repo_ref_test: 取得層まで進んだ（${describeRequest(input)}）`));
   const umt5Error = await assertRejects(
@@ -179,13 +182,13 @@ test("fromPretrained: umT5 と Wan2.2 は ref 欠落時に対応表を案内し�
     Error,
     "umt5.Encoder.fromPretrained: repo is required",
   );
-  assertStringIncludes(umt5Error.message, 'SOURCES["umt5-xxl"] (@karume/models/umt5)');
+  assertMatch(umt5Error.message, /(?<![\w.])SOURCES\["umt5-xxl"\] \(@karume\/models\/umt5\)/);
   const wan22 = await assertRejects(
     () => wan.Ti2vPipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
     Error,
     "wan.Ti2vPipeline.fromPretrained: repo is required",
   );
-  assertStringIncludes(wan22.message, 'SOURCES["wan2.2"] (@karume/models/wan)');
+  assertMatch(wan22.message, /(?<![\w.])SOURCES\["wan2\.2"\] \(@karume\/models\/wan\)/);
   const wan21 = await assertRejects(
     () => wan.Pipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
     Error,

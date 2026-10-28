@@ -85,6 +85,8 @@ test("barrel: each family namespace is its subpath's module (identity)", async (
   assert(modules.length >= 1, "package.json exports has no subpath");
   assertEquals(new Set(modules.map(({ module }) => module)).size, modules.length);
   for (const { subpath, module } of modules) {
+    // Positive control per subpath — an emptied entry module would still pass the identity check.
+    assert(Object.keys(module).length >= 1, `${subpath} exports no value`);
     const namespace = namespaceOf(subpath);
     assert(
       Object.hasOwn(barrel, namespace),
@@ -111,8 +113,9 @@ test("barrel: its own values are exactly the shared values plus the family names
 
 // The five shared types (`ComponentSource`, `DecodedWav`, `FromPretrainedComponentOptions`,
 // `FromPretrainedHubOptions`, `Rgb8Image`) cannot be observed at run time. The gate is the
-// annotations below — a missing flat export is a type error in the test lane — and the snapshot
-// gate holds the exact set; the asserts only keep the bindings from reading as unused locals.
+// annotations below — a missing flat export is a type error in `vp check` (its type check covers
+// `tests/`; `vp test` does not type-check) — and the snapshot gate holds the exact set; the
+// asserts only keep the bindings from reading as unused locals.
 test("barrel: the shared types are exported flat", () => {
   const hub: FromPretrainedHubOptions = {};
   const source: ComponentSource = { source: "owner/name", quant: "i4" };
@@ -126,7 +129,7 @@ test("barrel: the shared types are exported flat", () => {
 
 // Type access through a namespace (`gemma.FromPretrainedOptions`) and the component
 // replacement option (ADR 0108 decision 19 / ADR 0109 decision 10) must agree with the subpath's
-// type. Only the type check of the test lane can fail here.
+// type. Only the type check of `vp check` can fail here (`vp test` does not type-check).
 test("barrel: types through a namespace are the subpath's types", () => {
   const source: ComponentSource = { source: "owner/name", quant: "i4" };
   const options: gemma.FromPretrainedOptions = {
@@ -244,42 +247,45 @@ test("barrel: the gemma surface (thin — no assembly entry points)", async () =
 //
 // A family without a table (`./vowel-detector`, families not distributed yet) exports none.
 
-/**
- * The source table each distributed family exports, by subpath. A family with bare public names
- * exports `SOURCES`; a family still spelled with its prefix exports `<FAMILY>_SOURCES`.
- */
-const SOURCE_TABLES: Readonly<Record<string, string>> = {
-  "./anima": "SOURCES",
-  "./irodori": "SOURCES",
-  "./sbv2": "SOURCES",
-  "./gemma": "SOURCES",
-  "./siglip2": "SOURCES",
-  "./depth-anything": "SOURCES",
-  "./birefnet": "SOURCES",
-  "./umt5": "SOURCES",
-  "./wan": "SOURCES",
-};
+/** The subpaths of the distributed families; each exports its source table as `SOURCES`. */
+const SOURCE_TABLE_SUBPATHS: readonly string[] = [
+  "./anima",
+  "./irodori",
+  "./sbv2",
+  "./gemma",
+  "./siglip2",
+  "./depth-anything",
+  "./birefnet",
+  "./umt5",
+  "./wan",
+];
 
-/** Whether an export name spells a family source table (bare or prefixed). */
-const isSourceTable = (exported: string): boolean =>
-  exported === "SOURCES" || exported.endsWith("_SOURCES");
+/** Whether an export name is a family source table (the bare name — ADR 0136). */
+const isSourceTable = (exported: string): boolean => exported === "SOURCES";
 
 test("barrel: the source tables come from the subpaths; KARUME_SOURCES only from the barrel", async () => {
   const modules = await subpathModules();
   const found = modules.flatMap(({ subpath, module }) =>
-    Object.keys(module)
-      .filter((exported) => exported !== "KARUME_SOURCES" && isSourceTable(exported))
-      .map((exported) => `${subpath} ${exported}`),
+    Object.keys(module).some(isSourceTable) ? [subpath] : [],
   );
   // Both directions: a subpath that dropped its table, and a table that is not listed (and so
   // perhaps not folded into `src/sources.ts`), are red.
   assertEquals(
     found.toSorted(),
-    Object.entries(SOURCE_TABLES)
-      .map(([subpath, exported]) => `${subpath} ${exported}`)
-      .toSorted(),
+    SOURCE_TABLE_SUBPATHS.toSorted(),
     "the source tables exported by the subpaths changed",
   );
+  // A table spelled with a prefix (`<FAMILY>_SOURCES`, the 0.14 convention) is not a table name
+  // (`KARUME_SOURCES` in a subpath has its own check below).
+  for (const { subpath, module } of modules) {
+    assertEquals(
+      Object.keys(module).filter(
+        (exported) => exported.endsWith("_SOURCES") && exported !== "KARUME_SOURCES",
+      ),
+      [],
+      `${subpath} exports a prefixed source table`,
+    );
+  }
   // The merged table lives in the barrel only (in a subpath, one family's import would pull in
   // every family).
   assert(Object.hasOwn(models, "KARUME_SOURCES"), "the barrel has no KARUME_SOURCES");
