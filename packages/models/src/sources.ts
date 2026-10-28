@@ -23,7 +23,7 @@ import * as anima from "./anima/config.ts";
 import * as irodori from "./irodori/config.ts";
 import * as sbv2 from "./sbv2/config.ts";
 import * as gemma from "./gemma/config.ts";
-import { SIGLIP2_SOURCES } from "./siglip2/config.ts";
+import * as siglip2 from "./siglip2/config.ts";
 import * as depthAnything from "./depth-anything/config.ts";
 import * as birefnet from "./birefnet/config.ts";
 import { UMT5_SOURCES } from "./umt5/config.ts";
@@ -34,7 +34,7 @@ export const KARUME_SOURCES = {
   ...irodori.SOURCES,
   ...sbv2.SOURCES,
   ...gemma.SOURCES,
-  ...SIGLIP2_SOURCES,
+  ...siglip2.SOURCES,
   ...depthAnything.SOURCES,
   ...birefnet.SOURCES,
   ...UMT5_SOURCES,

@@ -2,7 +2,7 @@
  * What the page shows and records of an image embedding: its statistics, the cosine similarity of
  * two embeddings and the raw bytes the sha256 is taken of. Pure, so `vp test` covers it.
  *
- * `Siglip2Pipeline.embed` returns `pooler_output` itself (not L2-normalized — the pipeline's module
+ * `Pipeline.embed` returns `pooler_output` itself (not L2-normalized — the pipeline's module
  * doc), so the norm is a property of the model's output worth recording, and the cosine normalizes
  * on its own.
  */

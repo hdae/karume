@@ -66,7 +66,7 @@ import type { AssetProgress, DistributionSource } from "@karume/hub";
 import { acquireGpu } from "@karume/runtime";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import { loadContainerComponents } from "../src/hub/components.ts";
-import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
+import * as siglip2 from "../siglip2.ts";
 import { LINEAR_PROBE_Y, linearComponent, runLinearProbe } from "./helpers/container-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import {
@@ -518,7 +518,7 @@ test("家族 admission（pipeline major 不一致）は descriptor だけで落�
 
   const error = await assertRejects(
     () =>
-      Siglip2Pipeline.fromPretrained(
+      siglip2.Pipeline.fromPretrained(
         { repo: REPO, revision: SHA, hubUrl: HUB_URL },
         { fetch: rig.mock.fetch, caches: rig.hubOptions.caches },
       ),
@@ -544,7 +544,7 @@ test("家族 admission（pipelineConfig の schema 違反）でも重みの part
 
   const error = await assertRejects(
     () =>
-      Siglip2Pipeline.fromPretrained(
+      siglip2.Pipeline.fromPretrained(
         { repo: REPO, revision: SHA, hubUrl: HUB_URL },
         { fetch: rig.mock.fetch, caches: rig.hubOptions.caches },
       ),
@@ -568,7 +568,7 @@ test("家族 admission（requiredLimits 超過）でも重みの part は取得�
 
   const error = await assertRejects(
     () =>
-      Siglip2Pipeline.fromPretrained(
+      siglip2.Pipeline.fromPretrained(
         { repo: REPO, revision: SHA, hubUrl: HUB_URL },
         {
           fetch: rig.mock.fetch,
@@ -957,7 +957,7 @@ test.skipIf(!GPU_AVAILABLE)(
 
     const error = await assertRejects(
       () =>
-        Siglip2Pipeline.fromPretrained(
+        siglip2.Pipeline.fromPretrained(
           { repo: REPO, revision: SHA, hubUrl: HUB_URL },
           { fetch: rig.mock.fetch, caches: rig.hubOptions.caches },
         ),

@@ -1,5 +1,5 @@
 /**
- * `Siglip2Pipeline` — the single surface for image → embedding vector (SigLIP2's vision tower).
+ * `Pipeline` — the single surface for image → embedding vector (SigLIP2's vision tower).
  *
  * Pipeline (every step in Karume, no torch):
  *
@@ -37,7 +37,7 @@
  * - The caller's implementation is the two lines of `v.map(x => x / norm)`, not worth an
  *   abstraction.
  *
- * {@link Siglip2Pipeline.embed} therefore returns `pooler_output` bare (ADR 0008's "thin surface" —
+ * {@link Pipeline.embed} therefore returns `pooler_output` bare (ADR 0008's "thin surface" —
  * the user story ends at "embed an image").
  *
  * ## MUST: numerical correctness is not guaranteed here
@@ -112,12 +112,12 @@ const PIXEL_VALUES = "pixel_values";
 const CHANNELS = 3;
 
 /**
- * Construction options (shared by {@link Siglip2Pipeline.fromAssets} /
- * {@link Siglip2Pipeline.fromPretrained}).
+ * Construction options (shared by {@link Pipeline.fromAssets} /
+ * {@link Pipeline.fromPretrained}).
  */
-export type Siglip2PipelineOptions = {
+export type PipelineOptions = {
   /**
-   * Shares an existing GPU. **The caller keeps ownership**, so {@link Siglip2Pipeline.dispose} does
+   * Shares an existing GPU. **The caller keeps ownership**, so {@link Pipeline.dispose} does
    * not destroy it. When omitted, the pipeline calls `acquireGpu` internally and destroys it in
    * `dispose()`.
    */
@@ -140,20 +140,20 @@ export type Siglip2PipelineOptions = {
 };
 
 /**
- * Fetch-layer options used only by {@link Siglip2Pipeline.fromPretrained} (passed through to the
+ * Fetch-layer options used only by {@link Pipeline.fromPretrained} (passed through to the
  * hub).
  *
  * NOTE: the description of the fetch-layer knobs, including that `headers` / `fetch` / `caches` /
  * `onRetry` are **for HTTP sources only**, lives in one place, {@link FromPretrainedHubOptions}.
  */
-export type Siglip2FromPretrainedOptions = Siglip2PipelineOptions &
+export type FromPretrainedOptions = PipelineOptions &
   FromPretrainedHubOptions &
   FromPretrainedComponentOptions & {
     readonly signal?: AbortSignal;
   };
 
 /** Input for building directly from fetched assets (pass the hub's `fetchAssets` result as is). */
-export type Siglip2Assets = {
+export type Assets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
@@ -175,7 +175,7 @@ const assetBuffer = (
  * shared by every family — {@link assetComponentOpener}). A component key is either one single-form
  * `krm` (`vision`) or the part sequence of the split form (`vision[0]` / `vision[1]` / …).
  */
-const assetOpener = (assets: Siglip2Assets["assets"]): Promise<ComponentOpener> =>
+const assetOpener = (assets: Assets["assets"]): Promise<ComponentOpener> =>
   assetComponentOpener("siglip2", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 /**
@@ -285,7 +285,7 @@ export const preprocessPixelValues = (
     config.imageStd,
   );
 
-/** Internal state of {@link Siglip2Pipeline} (not on the public surface). */
+/** Internal state of {@link Pipeline} (not on the public surface). */
 type Siglip2State = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
@@ -354,12 +354,12 @@ type Siglip2Admission = {
 const admitSiglip2 = (
   manifest: Manifest,
   open: ComponentOpener,
-  options: Siglip2PipelineOptions,
+  options: PipelineOptions,
 ): Siglip2Admission => {
   const modelName = options.model ?? manifest.defaultModel;
   if (!Object.hasOwn(manifest.models, modelName)) {
     throw new Error(
-      `Siglip2Pipeline: model '${modelName}' is not in the manifest` +
+      `siglip2.Pipeline: model '${modelName}' is not in the manifest` +
         ` (available: ${manifest.available.models.join(" / ")})`,
     );
   }
@@ -367,7 +367,7 @@ const admitSiglip2 = (
   const { name, major } = entry.pipeline;
   if (name !== SIGLIP2_PIPELINE_NAME) {
     throw new Error(
-      `Siglip2Pipeline: the manifest's pipeline is '${name}/${major}'` +
+      `siglip2.Pipeline: the manifest's pipeline is '${name}/${major}'` +
         ` ('${SIGLIP2_PIPELINE_NAME}/${SIGLIP2_PIPELINE_MAJOR}' is required)`,
     );
   }
@@ -375,7 +375,7 @@ const admitSiglip2 = (
     // The only check that stops silent degradation from "old implementation × new repository"
     // (ADR 0038 §6).
     throw new Error(
-      `Siglip2Pipeline: the major of pipeline '${name}/${major}' is not supported` +
+      `siglip2.Pipeline: the major of pipeline '${name}/${major}' is not supported` +
         ` (this implementation reads ${SIGLIP2_PIPELINE_NAME}/${SIGLIP2_PIPELINE_MAJOR})`,
     );
   }
@@ -384,7 +384,7 @@ const admitSiglip2 = (
   const quantName = options.quant ?? entry.defaultQuant;
   if (!Object.hasOwn(entry.quants, quantName)) {
     throw new Error(
-      `Siglip2Pipeline: quant '${quantName}' is not in the manifest` +
+      `siglip2.Pipeline: quant '${quantName}' is not in the manifest` +
         ` (available: ${entry.available.quants.join(" / ")})`,
     );
   }
@@ -395,7 +395,7 @@ const admitSiglip2 = (
     SIGLIP2_SESSION_POLICY,
     quant.session,
     {},
-    `Siglip2Pipeline: quant '${quantName}'`,
+    `siglip2.Pipeline: quant '${quantName}'`,
   );
   const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
 
@@ -406,7 +406,7 @@ const admitSiglip2 = (
   // read other values.
   if (vision.graph.inputs.length !== 1 || vision.graph.outputs.length !== 1) {
     throw new Error(
-      `Siglip2Pipeline: the vision graph has ${vision.graph.inputs.length} /` +
+      `siglip2.Pipeline: the vision graph has ${vision.graph.inputs.length} /` +
         ` ${vision.graph.outputs.length} inputs / outputs (one vision tower requires exactly 1 of each)`,
     );
   }
@@ -423,11 +423,11 @@ const admitSiglip2 = (
   // knows before the weights are downloaded (the mapping between request and check is the one
   // function in `session/gpu-features.ts`, and the later check calls the same function).
   if (options.gpu !== undefined) {
-    assertGpuFeaturesGranted(gpuFeatures, options.gpu, `Siglip2Pipeline: quant '${quantName}'`);
+    assertGpuFeaturesGranted(gpuFeatures, options.gpu, `siglip2.Pipeline: quant '${quantName}'`);
     assertRequiredLimitsSatisfied(
       quant.requiredLimits,
       options.gpu.limits,
-      `Siglip2Pipeline: quant '${quantName}'`,
+      `siglip2.Pipeline: quant '${quantName}'`,
     );
   }
 
@@ -446,7 +446,7 @@ const admitSiglip2 = (
 const openSiglip2State = async (
   admitted: Siglip2Admission,
   open: ComponentOpener,
-  options: Siglip2PipelineOptions = {},
+  options: PipelineOptions = {},
 ): Promise<Siglip2State> => {
   const { config, quantName, quant, sessionOptions, gpuFeatures } = admitted;
   // The supplier is **the same one** admission saw (`open` only looks up components already
@@ -459,7 +459,7 @@ const openSiglip2State = async (
   const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
-    assertGpuFeaturesGranted(gpuFeatures, gpu, `Siglip2Pipeline: quant '${quantName}'`);
+    assertGpuFeaturesGranted(gpuFeatures, gpu, `siglip2.Pipeline: quant '${quantName}'`);
     // Also check the limits of a device acquired here — `fromAssets` has no pre-fetch check
     // (`fromPretrained` checks against adapter values); without this a missing declaration surfaces
     // only at Session construction, and a declaration stricter than the real demand is never
@@ -468,7 +468,7 @@ const openSiglip2State = async (
       assertRequiredLimitsSatisfied(
         quant.requiredLimits,
         gpu.limits,
-        `Siglip2Pipeline: quant '${quantName}'`,
+        `siglip2.Pipeline: quant '${quantName}'`,
       );
     }
     return {
@@ -518,12 +518,12 @@ const embedImage = async (
 /**
  * SigLIP2's image → embedding pipeline (one vision tower).
  *
- * Construction enters only through {@link Siglip2Pipeline.fromPretrained} (fetch from HF) or
- * {@link Siglip2Pipeline.fromAssets} (already-fetched bytes) — the constructor is private so that
+ * Construction enters only through {@link Pipeline.fromPretrained} (fetch from HF) or
+ * {@link Pipeline.fromAssets} (already-fetched bytes) — the constructor is private so that
  * no half-built state bypassing the manifest checks and the asset matching can be created
  * (ADR 0008).
  */
-export class Siglip2Pipeline {
+export class Pipeline {
   readonly #state: Siglip2State;
   /**
    * Serialization chain for embed and dispose ("one at a time" kept on the public API side — module
@@ -548,23 +548,23 @@ export class Siglip2Pipeline {
    * another repository use {@link FromPretrainedComponentOptions.components} (one role, `vision`).
    *
    * **`ref` is required** (sources have no default — the MUST of `src/hub/repo-ref.ts`). The source
-   * this package version verified is `"siglip2"` of {@link SIGLIP2_SOURCES} (`./config.ts`) — to
+   * this package version verified is `"siglip2"` of {@link SOURCES} (`./config.ts`) — to
    * pin reproducibility yourself, the caller states `{ repo, revision }` explicitly. A string `ref`
    * reads as `{ repo }` (= follows `main`).
    *
    * A local distribution is passed as a **source handle** (`localDirectory` / `denoDirectory` of
    * `@karume/hub/deno`). It skips the check of HF's `owner/name` spelling and touches neither the
-   * network nor CacheStorage (the HTTP-only knobs of {@link Siglip2FromPretrainedOptions} have no
+   * network nor CacheStorage (the HTTP-only knobs of {@link FromPretrainedOptions} have no
    * effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
-    options: Siglip2FromPretrainedOptions = {},
-  ): Promise<Siglip2Pipeline> {
+    options: FromPretrainedOptions = {},
+  ): Promise<Pipeline> {
     const source = toManifestSource(
       ref,
-      "Siglip2Pipeline.fromPretrained",
-      'SIGLIP2_SOURCES["siglip2"] (@karume/models/siglip2)',
+      "siglip2.Pipeline.fromPretrained",
+      'SOURCES["siglip2"] (@karume/models/siglip2)',
     );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
@@ -573,7 +573,7 @@ export class Siglip2Pipeline {
       ...(options.quant === undefined ? {} : { quant: options.quant }),
     };
     const selection = resolveSelection(loaded.manifest, choice);
-    const buildOptions: Siglip2PipelineOptions = {
+    const buildOptions: PipelineOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       ...choice,
       ...(options.onRunDiagnostics === undefined
@@ -583,7 +583,7 @@ export class Siglip2Pipeline {
     // The family checks run in the admission hook (before weight parts are fetched —
     // `hub/components.ts`).
     const { admitted, open } = await loadContainerComponents(
-      "Siglip2Pipeline.fromPretrained",
+      "siglip2.Pipeline.fromPretrained",
       loaded,
       selection,
       COMPONENT_KEYS,
@@ -595,7 +595,7 @@ export class Siglip2Pipeline {
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
           buildOptions.gpu,
-          `Siglip2Pipeline: quant '${admitted.quantName}'`,
+          `siglip2.Pipeline: quant '${admitted.quantName}'`,
         );
         return admitted;
       },
@@ -605,7 +605,7 @@ export class Siglip2Pipeline {
         ...(options.components === undefined ? {} : { components: options.components }),
       },
     );
-    return new Siglip2Pipeline(await openSiglip2State(admitted, open, buildOptions));
+    return new Pipeline(await openSiglip2State(admitted, open, buildOptions));
   }
 
   /**
@@ -619,13 +619,10 @@ export class Siglip2Pipeline {
    * index or mixing with the single-form key fails loudly (the receiving implementation is the one
    * in `src/hub/components.ts`).
    */
-  static async fromAssets(
-    input: Siglip2Assets,
-    options: Siglip2PipelineOptions = {},
-  ): Promise<Siglip2Pipeline> {
+  static async fromAssets(input: Assets, options: PipelineOptions = {}): Promise<Pipeline> {
     const open = await assetOpener(input.assets);
     const admitted = admitSiglip2(input.manifest, open, options);
-    return new Siglip2Pipeline(await openSiglip2State(admitted, open, options));
+    return new Pipeline(await openSiglip2State(admitted, open, options));
   }
 
   /**
@@ -642,7 +639,7 @@ export class Siglip2Pipeline {
     // The disposed check happens at call time (checking inside the chain would also fail the
     // embeddings accepted before dispose).
     if (this.#disposal !== undefined) {
-      throw new Error("Siglip2Pipeline: cannot embed after dispose");
+      throw new Error("siglip2.Pipeline: cannot embed after dispose");
     }
     return await this.#chain(() => embedImage(this.#state, image));
   }

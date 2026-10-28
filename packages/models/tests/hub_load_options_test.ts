@@ -23,7 +23,7 @@ import * as depthAnything from "../depth-anything.ts";
 import * as gemma from "../gemma.ts";
 import * as irodori from "../irodori.ts";
 import * as sbv2 from "../sbv2.ts";
-import type { Siglip2FromPretrainedOptions } from "../src/siglip2/pipeline.ts";
+import * as siglip2 from "../siglip2.ts";
 import type { Umt5EncoderFromPretrainedOptions } from "../src/umt5/encoder.ts";
 import type { VowelDetectorFromPretrainedOptions } from "../src/vowel-detector/pipeline.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
@@ -87,7 +87,7 @@ test("型の門: 9 家族の fromPretrained オプションが onRetry を受け
     { onRetry: noopRetry } satisfies gemma.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies irodori.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies sbv2.FromPretrainedOptions,
-    { onRetry: noopRetry } satisfies Siglip2FromPretrainedOptions,
+    { onRetry: noopRetry } satisfies siglip2.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies Umt5EncoderFromPretrainedOptions,
     { onRetry: noopRetry } satisfies VowelDetectorFromPretrainedOptions,
   ];

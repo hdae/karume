@@ -21,7 +21,7 @@ import { describe, it } from "vite-plus/test";
 import { type Manifest, parseManifest } from "@karume/hub";
 import * as birefnet from "../birefnet.ts";
 import * as depthAnything from "../depth-anything.ts";
-import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
+import * as siglip2 from "../siglip2.ts";
 import { VowelDetectorPipeline } from "../src/vowel-detector/pipeline.ts";
 import { FEATURE_DIM, MEL_BINS, N_MELS, SAMPLE_RATE } from "../src/vowel-detector/features.ts";
 import { LIPSYNC_CLASSES } from "../src/vowel-detector/postprocess.ts";
@@ -95,9 +95,9 @@ type Family = {
 
 const families: readonly Family[] = [
   {
-    name: "Siglip2Pipeline",
+    name: "siglip2.Pipeline",
     build: async () =>
-      await Siglip2Pipeline.fromAssets({
+      await siglip2.Pipeline.fromAssets({
         manifest: manifestOf("siglip2/1", "vision", {
           ...IMAGE_CONFIG,
           hiddenDim: 12,

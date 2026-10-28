@@ -17,7 +17,7 @@ import { type IrDeclaration, parseIrDeclarationValue } from "@karume/runtime";
 import { type Manifest, parseManifest } from "@karume/hub";
 import * as birefnet from "../birefnet.ts";
 import * as depthAnything from "../depth-anything.ts";
-import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
+import * as siglip2 from "../siglip2.ts";
 import { declaredContainer, partAssets, writeContainer } from "./helpers/container-fixture.ts";
 
 /** 焼いた解像度（正方 2×2）。 */
@@ -105,7 +105,7 @@ const buildSiglip2 = async (
   outputShape: readonly number[],
   outputDtype = "f32",
 ) =>
-  await Siglip2Pipeline.fromAssets({
+  await siglip2.Pipeline.fromAssets({
     manifest: manifestOf("siglip2/1", "vision", {
       ...IMAGE_CONFIG,
       hiddenDim: HIDDEN,

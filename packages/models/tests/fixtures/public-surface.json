@@ -715,32 +715,32 @@
     ],
     "./siglip2": [
       {
+        "name": "Assets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "FromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
         "name": "ModelInputError",
         "kind": "class"
+      },
+      {
+        "name": "Pipeline",
+        "kind": "class"
+      },
+      {
+        "name": "PipelineOptions",
+        "kind": "typeAlias"
       },
       {
         "name": "Rgb8Image",
         "kind": "typeAlias"
       },
       {
-        "name": "SIGLIP2_SOURCES",
+        "name": "SOURCES",
         "kind": "variable"
-      },
-      {
-        "name": "Siglip2Assets",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Siglip2FromPretrainedOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "Siglip2Pipeline",
-        "kind": "class"
-      },
-      {
-        "name": "Siglip2PipelineOptions",
-        "kind": "typeAlias"
       }
     ],
     "./umt5": [

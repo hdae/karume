@@ -17,7 +17,7 @@
  * in sizes, so hard-coding 224 or 768 in TS **gives silently wrong values for the other
  * distribution** (preprocessing resizing to another size while only the shapes match cannot happen
  * — the graph rejects it — but the side with the mixed-up size produces an image that looks resized
- * twice). The match against the real graph is done on the assets by `Siglip2Pipeline.fromAssets`.
+ * twice). The match against the real graph is done on the assets by `Pipeline.fromAssets`.
  *
  * ## MUST: interpolation is a **declaration**; unsupported values are rejected at parse time
  *
@@ -36,7 +36,7 @@
  * declaration to a number that cannot be chosen at run time would only add a second source of
  * truth.
  *
- * NOTE: the public distribution repository table ({@link SIGLIP2_SOURCES}) lives here too. It is
+ * NOTE: the public distribution repository table ({@link SOURCES}) lives here too. It is
  * not a "model-specific number" forbidden by the MUST above but on the "which manifest to fetch"
  * side — a value the distribution cannot hold in the first place (ADR 0073).
  */
@@ -68,8 +68,8 @@ export const SIGLIP2_PIPELINE_MAJOR = 1;
  *   side, default = base)
  *
  * One repository = several models, so the repository reference alone does not pick one — so400m is
- * spelled `fromPretrained(SIGLIP2_SOURCES["siglip2"], { model: "so400m" })`
- * (`Siglip2PipelineOptions.model` — `./pipeline.ts`).
+ * spelled `fromPretrained(SOURCES["siglip2"], { model: "so400m" })`
+ * (`PipelineOptions.model` — `./pipeline.ts`).
  *
  * Pass it **as an opt-in when you want to follow the package version automatically** — to pin
  * reproducibility yourself, write your own `{ repo, revision }` instead of using this table
@@ -79,12 +79,12 @@ export const SIGLIP2_PIPELINE_MAJOR = 1;
  * so the bytes this published package reads would change silently for network-side reasons (an
  * unrecoverable accident). A SHA also removes the revision-resolution request itself, so an offline
  * start from a complete cache works at the same time (ADR 0038). A user who needs to follow main
- * explicitly chooses `{ ...SIGLIP2_SOURCES["siglip2"], revision: "main" }`.
+ * explicitly chooses `{ ...SOURCES["siglip2"], revision: "main" }`.
  */
 // NOTE: the revision is updated to main's SHA after the upload by §3 of the release runbook
 // (docs/release-runbook.md) (inherits the maintenance duty of ADR 0073 decision 3 — by hand +
 // runbook check).
-export const SIGLIP2_SOURCES = {
+export const SOURCES = {
   siglip2: {
     repo: "hdae/karume-siglip2",
     revision: "71077b1810e42e9a1a25d80ee0f43c75db5d3b23",

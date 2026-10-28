@@ -3,13 +3,13 @@
  * on the page's GPU, compare the two by cosine similarity and save a record (embedding statistics and
  * the sha256 of the raw f32 bytes, build and embed seconds, the vision Session's diagnostics).
  *
- * The distribution carries only the vision tower (`Siglip2Pipeline` embeds images; there is no text
+ * The distribution carries only the vision tower (`Pipeline` embeds images; there is no text
  * tower, so no zero-shot labels). The pipeline creates its Session — and uploads the weights — when
  * it is built, so the page builds it on the first Run and keeps it for later runs with the same
  * source, model and preset.
  */
 
-import { Siglip2Pipeline } from "@karume/models/siglip2";
+import { Pipeline } from "@karume/models/siglip2";
 import type { AcquireGpuOptions, GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { useEffect, useRef, useState } from "react";
 
@@ -85,7 +85,7 @@ const EMBED_NOTE = "embed() takes no signal: Cancel is unavailable until the las
 
 /** The pipeline a run built and later runs reuse while the GPU, source, model and preset match. */
 type HeldPipeline = PipelineKey<GpuContext, PipelineSource> & {
-  readonly pipeline: Siglip2Pipeline;
+  readonly pipeline: Pipeline;
   readonly counters: CounterCell;
 };
 
@@ -222,7 +222,7 @@ export const Siglip2Page = () => {
         // The signal reaches the fetches only: the Session build that follows (weight upload) takes
         // none (buildStatus marks it not cancellable); leaving the page during it disposes the
         // finished pipeline below.
-        const built = await Siglip2Pipeline.fromPretrained(pretrainedRef(runSource, "siglip2"), {
+        const built = await Pipeline.fromPretrained(pretrainedRef(runSource, "siglip2"), {
           gpu: runGpu,
           model,
           quant,

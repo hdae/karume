@@ -47,10 +47,8 @@ import {
 } from "../src/depth-anything/pipeline.ts";
 import type { Rgb8Image } from "../src/image/preprocess.ts";
 import { parseSiglip2PipelineConfig } from "../src/siglip2/config.ts";
-import {
-  preprocessPixelValues as siglip2PixelValues,
-  Siglip2Pipeline,
-} from "../src/siglip2/pipeline.ts";
+import * as siglip2 from "../siglip2.ts";
+import { preprocessPixelValues as siglip2PixelValues } from "../src/siglip2/pipeline.ts";
 import { declaredContainer, partAssets, writeContainer } from "./helpers/container-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
@@ -228,10 +226,10 @@ const DEPTH_CONFIG: Record<string, unknown> = {
   interpolation: "bicubic",
 };
 
-const siglip2: Family = {
-  name: "Siglip2Pipeline.embed",
+const siglip2Family: Family = {
+  name: "siglip2.Pipeline.embed",
   build: async (options) => {
-    const pipeline = await Siglip2Pipeline.fromAssets(
+    const pipeline = await siglip2.Pipeline.fromAssets(
       {
         manifest: manifestOf("siglip2/1", "vision", SIGLIP2_CONFIG),
         assets: await assetsOf(
@@ -388,7 +386,7 @@ const withGpu = async (fn: (gpu: GpuContext) => Promise<void>): Promise<void> =>
   }
 };
 
-for (const family of [siglip2, birefnetFamily, depthAnythingFamily]) {
+for (const family of [siglip2Family, birefnetFamily, depthAnythingFamily]) {
   describe.skipIf(!GPU_AVAILABLE)(`${family.name}（実 GPU・小グラフ）`, () => {
     it("前処理 → グラフ 1 回 → 後処理を結線し、診断を 1 回渡す", async () => {
       await withGpu(async (gpu) => {

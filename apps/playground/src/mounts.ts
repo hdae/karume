@@ -16,7 +16,7 @@ import * as depthAnything from "@karume/models/depth-anything";
 import * as gemma from "@karume/models/gemma";
 import * as irodori from "@karume/models/irodori";
 import * as sbv2 from "@karume/models/sbv2";
-import { SIGLIP2_SOURCES } from "@karume/models/siglip2";
+import * as siglip2 from "@karume/models/siglip2";
 import { WAN_SOURCES } from "@karume/models/wan";
 
 import type { DistributionsPluginOptions } from "../vite-plugin-distributions.ts";
@@ -46,7 +46,7 @@ export const MOUNTS = {
     directory: "models/karume-depth-anything-v2",
     hfRepo: depthAnything.SOURCES["depth-anything-v2"].repo,
   },
-  siglip2: { directory: "models/karume-siglip2", hfRepo: SIGLIP2_SOURCES["siglip2"].repo },
+  siglip2: { directory: "models/karume-siglip2", hfRepo: siglip2.SOURCES["siglip2"].repo },
   "irodori-v4": {
     directory: "models/karume-irodori-v4-small",
     hfRepo: irodori.SOURCES["irodori-v4-small"].repo,

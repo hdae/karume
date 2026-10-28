@@ -2,8 +2,8 @@
  * `@karume/models/siglip2` — the subpath surface of the SigLIP2 (image → embedding) family.
  *
  * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
- * wholesale. The surface follows the user's stories — build ({@link Siglip2Pipeline.fromPretrained}
- * / {@link Siglip2Pipeline.fromAssets}) / choose a source ({@link SIGLIP2_SOURCES}) / embed
+ * wholesale. The surface follows the user's stories — build ({@link Pipeline.fromPretrained}
+ * / {@link Pipeline.fromAssets}) / choose a source ({@link SOURCES}) / embed
  * (`embed`) / release (`dispose`).
  *
  * Decoding the pixels is the user's responsibility; resize / rescale / normalize are applied inside
@@ -15,28 +15,24 @@
  * CLAUDE.md). Tree-shaking through the barrel (`mod.ts`) works only on top of this invariant.
  */
 
-export { Siglip2Pipeline } from "./src/siglip2/pipeline.ts";
-export type {
-  Siglip2Assets,
-  Siglip2FromPretrainedOptions,
-  Siglip2PipelineOptions,
-} from "./src/siglip2/pipeline.ts";
+export { Pipeline } from "./src/siglip2/pipeline.ts";
+export type { Assets, FromPretrainedOptions, PipelineOptions } from "./src/siglip2/pipeline.ts";
 /**
  * **The table of sources verified with this package version** (one table per family; keys are the
  * Hugging Face repository name without `karume-`, values are pinned commit SHAs — ADR 0073 / 0092).
  * One family = one repository, so one entry, holding two models that differ only in size:
  *
- * - `SIGLIP2_SOURCES["siglip2"]` = `hdae/karume-siglip2` (base 224 / so400m 384; default = base)
+ * - `SOURCES["siglip2"]` = `hdae/karume-siglip2` (base 224 / so400m 384; default = base)
  *
- * For the non-default model write `fromPretrained(SIGLIP2_SOURCES["siglip2"], { model: "so400m" })`
- * ({@link Siglip2PipelineOptions}).
+ * For the non-default model write `fromPretrained(SOURCES["siglip2"], { model: "so400m" })`
+ * ({@link PipelineOptions}).
  *
  * **An opt-in for callers who want to follow the package version automatically** — pass an entry as
- * is as the first argument of {@link Siglip2Pipeline.fromPretrained}. To pin reproducibility
+ * is as the first argument of {@link Pipeline.fromPretrained}. To pin reproducibility
  * yourself, write your own `{ repo, revision }` instead of using this table (`fromPretrained` has no
  * default).
  */
-export { SIGLIP2_SOURCES } from "./src/siglip2/config.ts";
+export { SOURCES } from "./src/siglip2/config.ts";
 export type { Rgb8Image } from "./src/image/preprocess.ts";
 
 /**

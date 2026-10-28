@@ -1,4 +1,4 @@
-// `Siglip2Pipeline` の**構築ガード**と**前処理の結線**。GPU も実資産も要らない範囲だけを見る
+// `Pipeline` の**構築ガード**と**前処理の結線**。GPU も実資産も要らない範囲だけを見る
 // （実 GPU の突合は `packages/runtime/tests/e2e_siglip2_test.ts` が持つ — 重複させない）。
 //
 // 押さえるのは 3 点:
@@ -36,7 +36,7 @@ import {
   assertOutputDim,
   assertStaticDim,
   preprocessPixelValues,
-  Siglip2Pipeline,
+  Pipeline,
 } from "../src/siglip2/pipeline.ts";
 import type { Rgb8Image } from "../src/image/preprocess.ts";
 import { stubModel } from "./helpers/stub-model.ts";
@@ -90,7 +90,7 @@ const withConfig = (config: Record<string, unknown>): string =>
 test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => Siglip2Pipeline.fromAssets({ manifest, assets: VISION }, { model: "nope" }),
+    () => Pipeline.fromAssets({ manifest, assets: VISION }, { model: "nope" }),
     Error,
     "model 'nope' is not in the manifest",
   );
@@ -99,7 +99,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
 test("fromAssets: pipeline の契約名が siglip2 でない manifest を落とす", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "anima/1" }));
   await assertRejects(
-    () => Siglip2Pipeline.fromAssets({ manifest, assets: VISION }),
+    () => Pipeline.fromAssets({ manifest, assets: VISION }),
     Error,
     "the manifest's pipeline is 'anima/1'",
   );
@@ -109,7 +109,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門。hub は major を検査しない。
   const manifest = parseManifest(manifestText({ pipeline: "siglip2/2" }));
   await assertRejects(
-    () => Siglip2Pipeline.fromAssets({ manifest, assets: VISION }),
+    () => Pipeline.fromAssets({ manifest, assets: VISION }),
     Error,
     "the major of pipeline 'siglip2/2' is not supported",
   );
@@ -118,7 +118,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
 test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => Siglip2Pipeline.fromAssets({ manifest, assets: VISION }, { quant: "nope" }),
+    () => Pipeline.fromAssets({ manifest, assets: VISION }, { quant: "nope" }),
     Error,
     "quant 'nope' is not in the manifest",
   );
@@ -128,7 +128,7 @@ test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async
   // 綴り違い（`imageMean` に対する `image_mean`）が黙って既定へ縮退する経路を作らない。
   const manifest = parseManifest(withConfig({ ...PIPELINE_CONFIG, image_mean: [0.5, 0.5, 0.5] }));
   await assertRejects(
-    () => Siglip2Pipeline.fromAssets({ manifest, assets: VISION }),
+    () => Pipeline.fromAssets({ manifest, assets: VISION }),
     Error,
     "pipelineConfig: unknown key 'image_mean'",
   );
@@ -139,7 +139,7 @@ test("fromAssets: pipelineConfig の欄が欠けていれば構築時に落ち�
   const { hiddenDim: _dropped, ...missing } = PIPELINE_CONFIG;
   const manifest = parseManifest(withConfig(missing));
   await assertRejects(
-    () => Siglip2Pipeline.fromAssets({ manifest, assets: VISION }),
+    () => Pipeline.fromAssets({ manifest, assets: VISION }),
     Error,
     "pipelineConfig.hiddenDim: missing",
   );
@@ -151,7 +151,7 @@ test("fromAssets: bilinear 以外の補間を宣言した配布形は受理し�
   // 47/255 ずれたまま実行される（config.ts の MUST）。
   const manifest = parseManifest(withConfig({ ...PIPELINE_CONFIG, interpolation: "bicubic" }));
   await assertRejects(
-    () => Siglip2Pipeline.fromAssets({ manifest, assets: VISION }),
+    () => Pipeline.fromAssets({ manifest, assets: VISION }),
     Error,
     "pipelineConfig.interpolation: this implementation supports only 'bilinear'",
   );
@@ -162,7 +162,7 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   // 文言では落ちない）= 上のケースが資産の不在に巻き添えられていないことの対偶。
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => Siglip2Pipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => Pipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
     "component 'vision' has no container",
   );

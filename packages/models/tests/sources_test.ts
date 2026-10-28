@@ -26,13 +26,12 @@ import * as anima from "../anima.ts";
 import * as irodori from "../irodori.ts";
 import * as sbv2 from "../sbv2.ts";
 import * as gemma from "../gemma.ts";
-import { SIGLIP2_SOURCES } from "../src/siglip2/config.ts";
+import * as siglip2 from "../siglip2.ts";
 import * as depthAnything from "../depth-anything.ts";
 import * as birefnet from "../birefnet.ts";
 import { UMT5_SOURCES } from "../src/umt5/config.ts";
 import { WAN_SOURCES } from "../src/wan/config.ts";
 import { KARUME_SOURCES } from "../src/sources.ts";
-import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
 import { Umt5Encoder } from "../src/umt5/encoder.ts";
 import { WanTi2vPipeline } from "../src/wan/ti2v-pipeline.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
@@ -109,11 +108,11 @@ const FAMILIES: readonly Family[] = [
     load: (ref, options) => gemma.Pipeline.fromPretrained(ref, options),
   },
   {
-    name: "SIGLIP2_SOURCES",
-    sources: SIGLIP2_SOURCES,
+    name: "siglip2.SOURCES",
+    sources: siglip2.SOURCES,
     // base と so400m は寸法だけが違う同じ経路なので 1 リポに同居する（既定 = base）。
     keys: ["siglip2"],
-    load: (ref, options) => Siglip2Pipeline.fromPretrained(ref, options),
+    load: (ref, options) => siglip2.Pipeline.fromPretrained(ref, options),
   },
   {
     name: "depthAnything.SOURCES",
@@ -167,7 +166,7 @@ test("取得元対応表を持つのは 9 家族・公開リポは 12 本", () =
       "irodori.SOURCES",
       "sbv2.SOURCES",
       "gemma.SOURCES",
-      "SIGLIP2_SOURCES",
+      "siglip2.SOURCES",
       "depthAnything.SOURCES",
       "birefnet.SOURCES",
       "UMT5_SOURCES",
