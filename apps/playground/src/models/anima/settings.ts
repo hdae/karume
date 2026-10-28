@@ -7,9 +7,9 @@
 
 import { type Manifest, resolveSelection } from "@karume/hub";
 import {
-  type AnimaGenerateRequest,
-  type AnimaResidency,
-  type AnimaSamplerType,
+  type GenerateRequest,
+  type Residency,
+  type SamplerType,
   type ImageSize,
   parseResolution,
 } from "@karume/models/anima";
@@ -67,7 +67,7 @@ export const defaultModelRef = (manifests: AnimaManifests): ModelRef | undefined
 /**
  * The mount that holds each repository a manifest may reference across repositories: the fine-tunes
  * take the text encoder, the VAE and the tokenizers from the official repository. Keyed by the public
- * repo name (`ANIMA_SOURCES["anima"].repo` — the name the `anima` mount is served under).
+ * repo name (`SOURCES["anima"].repo` — the name the `anima` mount is served under).
  */
 export type RepoHolders = Readonly<Record<string, AnimaMount>>;
 
@@ -183,9 +183,9 @@ export type AnimaForm = {
   /** `WxH` or the square shorthand; empty = the manifest's default. */
   readonly resolution: string;
   /** Empty = the manifest's `scheduler.type`. */
-  readonly sampler: "" | AnimaSamplerType;
+  readonly sampler: "" | SamplerType;
   readonly seed: string;
-  readonly residency: AnimaResidency;
+  readonly residency: Residency;
 };
 
 export const initialForm = (prompt: string): AnimaForm => ({
@@ -202,9 +202,9 @@ export const initialForm = (prompt: string): AnimaForm => ({
 });
 
 /** The request parts the form decides (the page adds `onEvent`). */
-export type AnimaRequestParts = Omit<AnimaGenerateRequest, "onEvent"> & {
+export type AnimaRequestParts = Omit<GenerateRequest, "onEvent"> & {
   readonly seed: number;
-  readonly residency: AnimaResidency;
+  readonly residency: Residency;
 };
 
 const parseInteger = (text: string, what: string, min: number, max: number): number => {

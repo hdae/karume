@@ -58,9 +58,9 @@ const assertRepoSpelling = (repo: string, where: string): void => {
  * the very value this function must reject would make the check itself impossible to exercise
  * plainly.
  *
- * @param where Subject of the diagnostic (`"AnimaPipeline.fromPretrained"`).
+ * @param where Subject of the diagnostic (`"anima.Pipeline.fromPretrained"`).
  * @param sourcesExample The spelling that looks up this family's source table
- *   (`ANIMA_SOURCES["anima"]` — ADR 0092). Omitted for families without a public distribution repo
+ *   (`SOURCES["anima"] (@karume/models/anima)` — ADR 0092). Omitted for families without a public distribution repo
  *   (so no non-existent identifier is suggested).
  */
 export const toRepoRef = (

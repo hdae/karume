@@ -22,7 +22,7 @@
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertMatch, assertRejects } from "@std/assert";
 import type { HubRepoRef } from "@karume/hub";
-import { ANIMA_SOURCES } from "../src/anima/config.ts";
+import * as anima from "../anima.ts";
 import { IRODORI_SOURCES } from "../src/irodori/config.ts";
 import { SBV2_SOURCES } from "../src/sbv2/config.ts";
 import { GEMMA4_SOURCES } from "../src/gemma/config.ts";
@@ -32,7 +32,6 @@ import { BIREFNET_SOURCES } from "../src/birefnet/config.ts";
 import { UMT5_SOURCES } from "../src/umt5/config.ts";
 import { WAN_SOURCES } from "../src/wan/config.ts";
 import { KARUME_SOURCES } from "../src/sources.ts";
-import { AnimaPipeline } from "../src/anima/pipeline.ts";
 import { IrodoriPipeline } from "../src/irodori/pipeline.ts";
 import { Sbv2Pipeline } from "../src/sbv2/pipeline.ts";
 import { Gemma4Pipeline } from "../src/gemma/pipeline.ts";
@@ -87,12 +86,12 @@ type Family = {
 
 const FAMILIES: readonly Family[] = [
   {
-    name: "ANIMA_SOURCES",
-    sources: ANIMA_SOURCES,
+    name: "anima.SOURCES",
+    sources: anima.SOURCES,
     // 公式モデル同居リポと第三者 fine-tune 同居リポ（ADR 0087）。extra は text stack を公式から
     // 越境参照するが、**manifest 自体は自分のリポから取る**（越境は manifest の中の話）。
     keys: ["anima", "anima-extra"],
-    load: (ref, options) => AnimaPipeline.fromPretrained(ref, options),
+    load: (ref, options) => anima.Pipeline.fromPretrained(ref, options),
   },
   {
     name: "IRODORI_SOURCES",
@@ -169,7 +168,7 @@ test("取得元対応表を持つのは 9 家族・公開リポは 12 本", () =
   assertEquals(
     FAMILIES.map(({ name }) => name),
     [
-      "ANIMA_SOURCES",
+      "anima.SOURCES",
       "IRODORI_SOURCES",
       "SBV2_SOURCES",
       "GEMMA4_SOURCES",

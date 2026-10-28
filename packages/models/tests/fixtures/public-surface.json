@@ -97,59 +97,19 @@
     ],
     "./anima": [
       {
-        "name": "ANIMA_SAMPLER_TYPES",
-        "kind": "variable"
-      },
-      {
-        "name": "ANIMA_SOURCES",
-        "kind": "variable"
-      },
-      {
-        "name": "AnimaAssets",
+        "name": "Assets",
         "kind": "typeAlias"
       },
       {
-        "name": "AnimaFromPretrainedOptions",
+        "name": "FromPretrainedOptions",
         "kind": "typeAlias"
       },
       {
-        "name": "AnimaGenerateEvent",
+        "name": "GenerateEvent",
         "kind": "typeAlias"
       },
       {
-        "name": "AnimaGenerateRequest",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "AnimaLatentSnapshot",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "AnimaPipeline",
-        "kind": "class"
-      },
-      {
-        "name": "AnimaPipelineOptions",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "AnimaResidency",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "AnimaResidencyAction",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "AnimaResidencyReason",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "AnimaRunComponent",
-        "kind": "typeAlias"
-      },
-      {
-        "name": "AnimaSamplerType",
+        "name": "GenerateRequest",
         "kind": "typeAlias"
       },
       {
@@ -161,12 +121,48 @@
         "kind": "typeAlias"
       },
       {
+        "name": "LatentSnapshot",
+        "kind": "typeAlias"
+      },
+      {
         "name": "ModelInputError",
         "kind": "class"
       },
       {
-        "name": "animaLatents",
-        "kind": "function"
+        "name": "Pipeline",
+        "kind": "class"
+      },
+      {
+        "name": "PipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Residency",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ResidencyAction",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ResidencyReason",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "RunComponent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "SAMPLER_TYPES",
+        "kind": "variable"
+      },
+      {
+        "name": "SOURCES",
+        "kind": "variable"
+      },
+      {
+        "name": "SamplerType",
+        "kind": "typeAlias"
       },
       {
         "name": "approximatePreview",
@@ -178,6 +174,10 @@
       },
       {
         "name": "formatResolution",
+        "kind": "function"
+      },
+      {
+        "name": "latentStats",
         "kind": "function"
       },
       {

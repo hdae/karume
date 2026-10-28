@@ -242,29 +242,44 @@ test("barrel: the gemma surface (thin — no assembly entry points)", async () =
 //   (a new family table that was not folded into `src/sources.ts` is red — the spread there
 //   cannot be enumerated at run time).
 //
-// A family without a table (`./vowel-detector`, families not distributed yet) exports none, so the
-// positive control (at least one table) is global, not per subpath.
+// A family without a table (`./vowel-detector`, families not distributed yet) exports none.
+
+/**
+ * The source table each distributed family exports, by subpath. A family with bare public names
+ * exports `SOURCES`; a family still spelled with its prefix exports `<FAMILY>_SOURCES`.
+ */
+const SOURCE_TABLES: Readonly<Record<string, string>> = {
+  "./anima": "SOURCES",
+  "./irodori": "IRODORI_SOURCES",
+  "./sbv2": "SBV2_SOURCES",
+  "./gemma": "GEMMA4_SOURCES",
+  "./siglip2": "SIGLIP2_SOURCES",
+  "./depth-anything": "DEPTH_ANYTHING_SOURCES",
+  "./birefnet": "BIREFNET_SOURCES",
+  "./umt5": "UMT5_SOURCES",
+  "./wan": "WAN_SOURCES",
+};
+
+/** Whether an export name spells a family source table (bare or prefixed). */
+const isSourceTable = (exported: string): boolean =>
+  exported === "SOURCES" || exported.endsWith("_SOURCES");
 
 test("barrel: the source tables come from the subpaths; KARUME_SOURCES only from the barrel", async () => {
   const modules = await subpathModules();
-  const tables = modules.flatMap(({ module }) =>
-    Object.keys(module).filter((exported) => exported.endsWith("_SOURCES")),
+  const found = modules.flatMap(({ subpath, module }) =>
+    Object.keys(module)
+      .filter((exported) => exported !== "KARUME_SOURCES" && isSourceTable(exported))
+      .map((exported) => `${subpath} ${exported}`),
   );
-  assert(tables.length >= 1, "no subpath exports a source table");
-  // A subpath that dropped its table is invisible to the filter above, so name the tables too.
-  for (const table of [
-    "ANIMA_SOURCES",
-    "IRODORI_SOURCES",
-    "SBV2_SOURCES",
-    "GEMMA4_SOURCES",
-    "SIGLIP2_SOURCES",
-    "DEPTH_ANYTHING_SOURCES",
-    "BIREFNET_SOURCES",
-    "UMT5_SOURCES",
-    "WAN_SOURCES",
-  ]) {
-    assert(tables.includes(table), `no subpath exports ${table}`);
-  }
+  // Both directions: a subpath that dropped its table, and a table that is not listed (and so
+  // perhaps not folded into `src/sources.ts`), are red.
+  assertEquals(
+    found.toSorted(),
+    Object.entries(SOURCE_TABLES)
+      .map(([subpath, exported]) => `${subpath} ${exported}`)
+      .toSorted(),
+    "the source tables exported by the subpaths changed",
+  );
   // The merged table lives in the barrel only (in a subpath, one family's import would pull in
   // every family).
   assert(Object.hasOwn(models, "KARUME_SOURCES"), "the barrel has no KARUME_SOURCES");
@@ -281,7 +296,7 @@ test("barrel: KARUME_SOURCES is exactly the union of the family tables", async (
   const keys = new Set<string>();
   for (const { module } of await subpathModules()) {
     for (const [name, table] of Object.entries(module)) {
-      if (!name.endsWith("_SOURCES") || typeof table !== "object" || table === null) continue;
+      if (!isSourceTable(name) || typeof table !== "object" || table === null) continue;
       for (const key of Object.keys(table)) keys.add(key);
     }
   }

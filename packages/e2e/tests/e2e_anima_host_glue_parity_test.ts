@@ -29,7 +29,7 @@ import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseSafetensors, type Tensor } from "@karume/runtime";
 import { cfgEulerStep, sigmaSchedule } from "../../models/src/anima/sampler.ts";
-import { animaLatents, denormalizeLatents, padSequence } from "../../models/src/anima/latents.ts";
+import { latentStats, denormalizeLatents, padSequence } from "../../models/src/anima/latents.ts";
 import { needsUncond } from "../../models/src/generation/dpm-solver-multistep.ts";
 import {
   readFileIfPresent,
@@ -181,9 +181,9 @@ for (const variant of VARIANTS) {
     `${variant}: denormalizeLatents が参照の逆正規化 latent とビット一致する`,
     () => {
       assert(fixture !== undefined);
-      // 本番は VAE config の写し（animaLatents）を使うので、ここでもそれを渡す。写しが
+      // 本番は VAE config の写し（latentStats）を使うので、ここでもそれを渡す。写しが
       // この変種の参照と同じ数であることを先に押さえる（変種ごとに VAE を読み直して採った値）。
-      const { mean, std } = animaLatents();
+      const { mean, std } = latentStats();
       assertBitIdentical(mean, fixture.f32("latents_mean").data, "latents_mean");
       assertBitIdentical(std, fixture.f32("latents_std").data, "latents_std");
       // 逆正規化の入力は最後に参照を採った step の latent（`pipeline_ref.py` の decode 段）。

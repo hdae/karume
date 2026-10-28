@@ -2,9 +2,9 @@
  * `@karume/models/anima` — the subpath surface of the Anima (text → image) family.
  *
  * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
- * wholesale. The surface follows the user's stories — build ({@link AnimaPipeline.fromPretrained} /
- * {@link AnimaPipeline.fromAssets}) / generate (`generate`) / subscribe to generation progress
- * (`onEvent` — {@link AnimaGenerateEvent}) / **approximate a preview from an intermediate latent**
+ * wholesale. The surface follows the user's stories — build ({@link Pipeline.fromPretrained} /
+ * {@link Pipeline.fromAssets}) / generate (`generate`) / subscribe to generation progress
+ * (`onEvent` — {@link GenerateEvent}) / **approximate a preview from an intermediate latent**
  * ({@link approximatePreview}) / release (`dispose`) / handle the spelling of resolutions
  * ({@link parseResolution} / {@link formatResolution}).
  *
@@ -12,47 +12,43 @@
  * CLAUDE.md). Tree-shaking through the barrel (`mod.ts`) works only on top of this invariant.
  */
 
-export { AnimaPipeline } from "./src/anima/pipeline.ts";
+export { Pipeline } from "./src/anima/pipeline.ts";
 export type {
-  AnimaAssets,
-  AnimaFromPretrainedOptions,
-  AnimaGenerateEvent,
-  AnimaGenerateRequest,
-  AnimaLatentSnapshot,
-  AnimaPipelineOptions,
-  AnimaRunComponent,
+  Assets,
+  FromPretrainedOptions,
+  GenerateEvent,
+  GenerateRequest,
+  LatentSnapshot,
+  PipelineOptions,
+  RunComponent,
   GeneratedImage,
 } from "./src/anima/pipeline.ts";
 
 /**
- * The vocabulary of denoise update rules (the values `AnimaGenerateRequest.sampler` accepts). When
+ * The vocabulary of denoise update rules (the values `GenerateRequest.sampler` accepts). When
  * omitted, `pipelineConfig.scheduler.type` of the manifest decides the default, so **giving one is an
  * explicit departure from the distributor's recommendation**. A type alone cannot enumerate the
  * choices, and consumers (CLI argument checks / UI choices) would have to respell the values, so the
  * list of values (frozen) is on the surface too.
  */
-export type { AnimaSamplerType } from "./src/anima/config.ts";
-export { ANIMA_SAMPLER_TYPES } from "./src/anima/config.ts";
+export type { SamplerType } from "./src/anima/config.ts";
+export { SAMPLER_TYPES } from "./src/anima/config.ts";
 
 /**
  * The vocabulary of DiT residency (ADR 0112): the values accepted by `residency` of
- * {@link AnimaPipelineOptions} / {@link AnimaGenerateRequest}, and `action` / `reason` of the
- * `residency` event ({@link AnimaGenerateEvent}). The types are exported so that consumers branching
+ * {@link PipelineOptions} / {@link GenerateRequest}, and `action` / `reason` of the
+ * `residency` event ({@link GenerateEvent}). The types are exported so that consumers branching
  * on the reason (showing a downgrade in the UI and the like) do not have to respell the values.
  */
-export type {
-  AnimaResidency,
-  AnimaResidencyAction,
-  AnimaResidencyReason,
-} from "./src/anima/residency.ts";
+export type { Residency, ResidencyAction, ResidencyReason } from "./src/anima/residency.ts";
 
 /**
  * **The table of sources verified with this package version** (one table per family; keys are the
  * Hugging Face repository name without `karume-`, values are pinned commit SHAs — ADR 0073 / 0092).
  * The repositories are split by "official / further training" (ADR 0087), so two entries:
  *
- * - `ANIMA_SOURCES["anima"]` = `hdae/karume-anima` (the official models; default = Turbo)
- * - `ANIMA_SOURCES["anima-extra"]` = `hdae/karume-anima-extra` (third-party fine-tunes;
+ * - `SOURCES["anima"]` = `hdae/karume-anima` (the official models; default = Turbo)
+ * - `SOURCES["anima-extra"]` = `hdae/karume-anima-extra` (third-party fine-tunes;
  *   default = wai)
  *
  * In both, models other than the default are chosen with `{ model }`. **There is no default entry**
@@ -65,11 +61,11 @@ export type {
  * NOTE: the entry of the old turbo-only repository (`hdae/karume-anima-turbo`) was removed
  * (2026-09-01, breaking — see the NOTE in `src/anima/config.ts`).
  */
-export { ANIMA_SOURCES } from "./src/anima/config.ts";
+export { SOURCES } from "./src/anima/config.ts";
 
 /**
  * An approximate RGB preview from an intermediate latent. Passing the two fields returned by
- * `copyLatents()` of the `denoise-step` event ({@link AnimaLatentSnapshot}) **as they are** (without
+ * `copyLatents()` of the `denoise-step` event ({@link LatentSnapshot}) **as they are** (without
  * denormalizing) returns RGBA at latent resolution (1/8 of the image) —
  * `const { data, shape } = event.copyLatents(); approximatePreview(data, shape)`.
  *
@@ -83,7 +79,7 @@ export { approximatePreview } from "./src/anima/preview.ts";
 
 /**
  * The constants for denormalizing an intermediate latent (get them with
- * `const { mean, std } = animaLatents()` and pass them to
+ * `const { mean, std } = latentStats()` and pass them to
  * `denormalizeLatents(latents, shape, mean, std)`). **Not needed for previews** — the coefficients of
  * {@link approximatePreview} are calibrated in **the normalized space** (measured 2026-08-24), so
  * passing denormalized values gives a blown-out, different picture. Pass the return value of
@@ -94,14 +90,14 @@ export { approximatePreview } from "./src/anima/preview.ts";
  * in the VAE's config, in neither the IR nor the distributed assets, so rewriting the
  * denormalization on the consumer side would duplicate the constants.
  *
- * MUST: export an **accessor**, not the constants themselves — {@link animaLatents} returns an
+ * MUST: export an **accessor**, not the constants themselves — {@link latentStats} returns an
  * independent copy on every call. Handing out the mutable TypedArray itself would let a consumer's
  * modification silently leak into the denormalization of `generate` (no global mutable state — a
  * cross-cutting invariant in CLAUDE.md).
  * {@link denormalizeLatents} is a pure function that takes mean / std as arguments, so it is
  * exported as is.
  */
-export { animaLatents, denormalizeLatents } from "./src/anima/latents.ts";
+export { latentStats, denormalizeLatents } from "./src/anima/latents.ts";
 
 /**
  * The spelling of resolutions (`1344x768` / the square shorthand `512`) and the accepted set.

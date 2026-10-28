@@ -6,10 +6,10 @@
  */
 
 import {
-  ANIMA_SAMPLER_TYPES,
-  ANIMA_SOURCES,
-  type AnimaRunComponent,
-  type AnimaSamplerType,
+  SAMPLER_TYPES,
+  SOURCES,
+  type RunComponent,
+  type SamplerType,
   approximatePreview,
 } from "@karume/models/anima";
 import type { AcquireGpuOptions } from "@karume/runtime";
@@ -107,7 +107,7 @@ const GPU_WITH_F16: Omit<AcquireGpuOptions, "onDeviceLost"> = { shaderF16: true 
  * on the direct route its files come from the `anima` mount (the cached route follows the
  * manifest's cross-repo reference on `/hf/`).
  */
-const REPO_HOLDERS: RepoHolders = { [ANIMA_SOURCES["anima"].repo]: "anima" };
+const REPO_HOLDERS: RepoHolders = { [SOURCES["anima"].repo]: "anima" };
 
 const MIB = 2 ** 20;
 
@@ -118,7 +118,7 @@ type RunResult = { readonly record: AnimaRecord; readonly image: RgbaPixels };
 type LivePreview = { readonly image: RgbaPixels; readonly step: number; readonly steps: number };
 
 const SAMPLER_CHOICE_DEFAULT = "default";
-type SamplerChoice = typeof SAMPLER_CHOICE_DEFAULT | AnimaSamplerType;
+type SamplerChoice = typeof SAMPLER_CHOICE_DEFAULT | SamplerType;
 
 export const AnimaPage = () => {
   const index = useDistributionIndex();
@@ -272,7 +272,7 @@ export const AnimaPage = () => {
           progress = next;
           report(progress);
         };
-        let stages: StageTimes<AnimaRunComponent> = {};
+        let stages: StageTimes<RunComponent> = {};
         const stepMarks: number[] = [];
         const tileMarks: number[] = [];
         const residencyEvents: ResidencyEvent[] = [];
@@ -766,7 +766,7 @@ const samplerChoices = (manifestSampler: string | undefined): readonly Choice<Sa
     label:
       manifestSampler === undefined ? "manifest default" : `manifest default (${manifestSampler})`,
   },
-  ...ANIMA_SAMPLER_TYPES.map((type) => ({ value: type, label: type })),
+  ...SAMPLER_TYPES.map((type) => ({ value: type, label: type })),
 ];
 
 const manifestSummary = (states: Readonly<Record<AnimaMount, ManifestState>>): string => {

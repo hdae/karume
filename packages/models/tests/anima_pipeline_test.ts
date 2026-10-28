@@ -1,4 +1,4 @@
-// `AnimaPipeline` の**構築ガード**。GPU も実資産も要らない範囲だけを見る
+// `Pipeline` の**構築ガード**。GPU も実資産も要らない範囲だけを見る
 // （実 GPU の E2E は P3 波 2）。
 //
 // ここで押さえるのは 6 つ:
@@ -36,12 +36,12 @@ import {
   assertThrows,
 } from "@std/assert";
 import { parseManifest } from "@karume/hub";
-import { ANIMA_SAMPLER_TYPES } from "../anima.ts";
+import { SAMPLER_TYPES } from "../anima.ts";
 import { assertAnimaSamplerType } from "../src/anima/config.ts";
 import {
-  type AnimaGenerateRequest,
-  AnimaPipeline,
-  type AnimaPipelineOptions,
+  type GenerateRequest,
+  Pipeline,
+  type PipelineOptions,
   denoiseStep,
   latentSnapshot,
   resolveNegativePrompt,
@@ -112,7 +112,7 @@ const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 test("fromAssets: pipeline の契約名が anima でない manifest を落とす", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "sbv2/1" }));
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "'sbv2/1'",
   );
@@ -123,7 +123,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   // hub は `pipeline` の major を検査しない（読めるかどうかはパイプライン実装しか知らない）。
   assertEquals(manifest.models["anima-turbo"].pipeline, { name: "anima", major: 2 });
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "the major of pipeline 'anima/2' is not supported",
   );
@@ -132,7 +132,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
 test("fromAssets: pipelineConfig のスキーマ違反は構築時に落ちる", async () => {
   const manifest = parseManifest(manifestText({ pipelineConfig: {} }));
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "pipelineConfig.scheduler: missing",
   );
@@ -154,7 +154,7 @@ test("fromAssets: scheduler.type を宣言した manifest も同じ位置まで�
     }),
   );
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "asset 'tokenizer' is missing",
   );
@@ -169,7 +169,7 @@ test("fromAssets: scheduler.type の未知値は資産に触る前に落ちる",
     }),
   );
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "pipelineConfig.scheduler.type: expected 'euler' / 'dpmpp-2m'",
   );
@@ -178,7 +178,7 @@ test("fromAssets: scheduler.type の未知値は資産に触る前に落ちる",
 test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "f16+dit8-a8" }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "f16+dit8-a8" }),
     Error,
     "available: f16+dit8-a8-attn8-s16",
   );
@@ -189,7 +189,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
   // （ADR 0041 §8）。
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { model: "anima-xl" }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { model: "anima-xl" }),
     Error,
     "available: anima-turbo",
   );
@@ -201,7 +201,7 @@ test("fromAssets: manifest 契約を全て満たして初めて資産へ触る�
   // GPU の無い環境で `acquireGpu` の失敗に化けたらこの門が赤くなる。
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
+    () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
     "asset 'tokenizer' is missing",
   );
@@ -212,7 +212,7 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   // 上の門が資産の不在に巻き添えられていないことの対偶。
   const manifest = parseManifest(manifestText());
   await assertRejects(
-    () => AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }),
+    () => Pipeline.fromAssets({ manifest, assets: emptyAssets }),
     Error,
     "component 'text_encoder' has no container",
   );
@@ -227,7 +227,7 @@ test("fromAssets: 中断済み signal は資産へ触る前に reason そのま�
   const reason = new Error("中止ボタン");
   controller.abort(reason);
   const error = await assertRejects(() =>
-    AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal }),
+    Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal }),
   );
   // 包まない（消費側が `error === controller.signal.reason` で自分の中断を識別できる）。
   assertStrictEquals(error, reason);
@@ -243,7 +243,7 @@ test("fromAssets: 実行開始後に届いた中断も最初の段境界で効�
   const reason = new Error("中止ボタン（実行中）");
   setTimeout(() => controller.abort(reason), 0);
   const error = await assertRejects(() =>
-    AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal }),
+    Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal }),
   );
   assertStrictEquals(error, reason);
 });
@@ -264,8 +264,8 @@ const manifestWithSession = (session: Record<string, unknown>) =>
   );
 
 /** 型の外から来る呼び手（JS の消費者）の構築オプションを再現する。 */
-const optionsWith = (key: string, value: unknown): AnimaPipelineOptions => {
-  const options: AnimaPipelineOptions = {};
+const optionsWith = (key: string, value: unknown): PipelineOptions => {
+  const options: PipelineOptions = {};
   Object.defineProperty(options, key, { value, enumerable: true });
   return options;
 };
@@ -275,7 +275,7 @@ test("fromAssets: 明示と quant 宣言の合成が runtime の受けない組�
   // 打つ手は「指定を直す」= 入力起因。資産は空 — admission 席で落ちていなければ部品の不在で落ちる。
   await assertRejects(
     () =>
-      AnimaPipeline.fromAssets(
+      Pipeline.fromAssets(
         { manifest: manifestWithSession({ attentionScoreStorage: "f16" }), assets: emptyAssets },
         { attentionCompute: "f16" },
       ),
@@ -289,17 +289,14 @@ test("fromAssets: 不正な明示値と Anima が受けないノブは資産に�
   // null は quant 宣言へも runtime 既定へも戻さない。
   await assertRejects(
     () =>
-      AnimaPipeline.fromAssets(
-        { manifest, assets: emptyAssets },
-        optionsWith("linearCompute", null),
-      ),
+      Pipeline.fromAssets({ manifest, assets: emptyAssets }, optionsWith("linearCompute", null)),
     ModelInputError,
     "linearCompute is invalid",
   );
   // 並列 GEMV は Anima の受理表の外 — 黙って捨てると「指定したのに効かない」になる。
   await assertRejects(
     () =>
-      AnimaPipeline.fromAssets(
+      Pipeline.fromAssets(
         { manifest, assets: emptyAssets },
         optionsWith("linearGemvReduce", "parallel"),
       ),
@@ -312,7 +309,7 @@ test("fromAssets: 受理される明示は admission を通って資産の段ま
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () =>
-      AnimaPipeline.fromAssets(
+      Pipeline.fromAssets(
         { manifest, assets: COMPONENTS },
         {
           linearCompute: "f16",
@@ -330,7 +327,7 @@ test("fromAssets: 明示の f16 計算を共有 GPU が持たなければ資産�
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () =>
-      AnimaPipeline.fromAssets(
+      Pipeline.fromAssets(
         { manifest, assets: emptyAssets },
         {
           gpu: fakeGpuContext(fakeDevice()),
@@ -350,13 +347,9 @@ test("fromAssets: residency の未知の綴りは資産に触る前に ModelInpu
   const manifest = parseManifest(manifestText());
   for (const value of ["transformers", null]) {
     await assertRejects(
-      () =>
-        AnimaPipeline.fromAssets(
-          { manifest, assets: emptyAssets },
-          optionsWith("residency", value),
-        ),
+      () => Pipeline.fromAssets({ manifest, assets: emptyAssets }, optionsWith("residency", value)),
       ModelInputError,
-      "AnimaPipeline: residency: expected 'per-stage' / 'transformer'",
+      "anima.Pipeline: residency: expected 'per-stage' / 'transformer'",
     );
   }
 });
@@ -367,7 +360,7 @@ test("fromAssets: 受理される residency は admission を通って資産の�
   const manifest = parseManifest(manifestText());
   for (const residency of ["per-stage", "transformer"] as const) {
     await assertRejects(
-      () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { residency }),
+      () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { residency }),
       Error,
       "asset 'tokenizer' is missing",
     );
@@ -430,8 +423,8 @@ const buildableAssets = async (): Promise<Record<string, Uint8Array<ArrayBuffer>
 };
 
 /** TS の型を通らない値を 1 欄だけ差した request（JS の呼び手の綴り違いの再現）。 */
-const requestWith = (key: string, value: unknown): AnimaGenerateRequest => {
-  const request: AnimaGenerateRequest = { prompt: "aba" };
+const requestWith = (key: string, value: unknown): GenerateRequest => {
+  const request: GenerateRequest = { prompt: "aba" };
   Object.defineProperty(request, key, { value, enumerable: true });
   return request;
 };
@@ -441,7 +434,7 @@ test("generate: request の residency の未知の綴りは GPU に触る前に 
   // "transformer" との一致しか見ない）、通知も出ない = 黙って遅い経路。偽の GPU は Session を
   // 組めないので、入口を抜ければ最初の段の構築で別の例外に化ける（下の対のテスト）。
   const manifest = parseManifest(manifestText());
-  await using pipeline = await AnimaPipeline.fromAssets(
+  await using pipeline = await Pipeline.fromAssets(
     { manifest, assets: await buildableAssets() },
     { gpu: fakeGpuContext(fakeDevice()) },
   );
@@ -457,7 +450,7 @@ test("generate: request の residency の未知の綴りは GPU に触る前に 
 
 test("generate: 受理される residency は入口を通って最初の段（GPU）まで進む（門が恒真でないことの対）", async () => {
   const manifest = parseManifest(manifestText());
-  await using pipeline = await AnimaPipeline.fromAssets(
+  await using pipeline = await Pipeline.fromAssets(
     { manifest, assets: await buildableAssets() },
     { gpu: fakeGpuContext(fakeDevice()) },
   );
@@ -480,7 +473,7 @@ test("generate: 受理される residency は入口を通って最初の段（GP
 test("generate: f32 で有限に収まらない guidanceScale は GPU に触る前に ModelInputError", async () => {
   // CFG は倍率を f32 で掛ける。f64 で有限でも f32 で Infinity になる値は、合成を ±Inf / NaN にする。
   const manifest = parseManifest(manifestText());
-  await using pipeline = await AnimaPipeline.fromAssets(
+  await using pipeline = await Pipeline.fromAssets(
     { manifest, assets: await buildableAssets() },
     { gpu: fakeGpuContext(fakeDevice()) },
   );
@@ -644,21 +637,18 @@ test("assertAnimaSamplerType: request 側の綴りも 2 語だけを受け、出
   }
 });
 
-test("ANIMA_SAMPLER_TYPES: 公開した並びは受理集合そのもので、消費側からは書き換えられない", () => {
+test("SAMPLER_TYPES: 公開した並びは受理集合そのもので、消費側からは書き換えられない", () => {
   // CLI / UI はこの並びで引数を検査し選択肢を並べる。並びと検査が別の表を持つと「選べるのに
   // 落ちる語」ができるので、並びの全語が検査を通ることを公開面（`./anima`）から縛る。
-  assertEquals([...ANIMA_SAMPLER_TYPES], ["euler", "dpmpp-2m"]);
-  for (const name of ANIMA_SAMPLER_TYPES) {
+  assertEquals([...SAMPLER_TYPES], ["euler", "dpmpp-2m"]);
+  for (const name of SAMPLER_TYPES) {
     assertEquals(assertAnimaSamplerType(name, "sampler"), name);
   }
   // 型を通らない JS の消費者が共有の並びへ語を足す・差し替える形。凍結が外れると以後の全
   // pipeline の受理集合が黙って広がる（未知の綴りが GPU の手前で落ちなくなる）。
-  assertThrows(
-    () => Reflect.apply(Array.prototype.push, ANIMA_SAMPLER_TYPES, ["dpm++"]),
-    TypeError,
-  );
-  assertEquals(Reflect.set(ANIMA_SAMPLER_TYPES, 0, "dpm++"), false);
-  assertEquals([...ANIMA_SAMPLER_TYPES], ["euler", "dpmpp-2m"]);
+  assertThrows(() => Reflect.apply(Array.prototype.push, SAMPLER_TYPES, ["dpm++"]), TypeError);
+  assertEquals(Reflect.set(SAMPLER_TYPES, 0, "dpm++"), false);
+  assertEquals([...SAMPLER_TYPES], ["euler", "dpmpp-2m"]);
   assertThrows(() => assertAnimaSamplerType("dpm++", "sampler"), Error, "actual 'dpm++'");
 });
 

@@ -5,10 +5,10 @@
  */
 
 import type {
-  AnimaResidency,
-  AnimaResidencyAction,
-  AnimaResidencyReason,
-  AnimaRunComponent,
+  Residency,
+  ResidencyAction,
+  ResidencyReason,
+  RunComponent,
 } from "@karume/models/anima";
 
 import type { RecordEnvironment } from "@/lib/environment";
@@ -28,14 +28,14 @@ import type { AnimaMount, AnimaRequestParts, EffectiveRequest } from "./settings
 export const RECORD_FORMAT = "karume-playground-anima/1";
 
 /** The stages in the order a generation runs them (the components of `stage` events). */
-export const STAGES: readonly AnimaRunComponent[] = [
+export const STAGES: readonly RunComponent[] = [
   "text_encoder",
   "text_conditioner",
   "transformer",
   "vae_decoder",
 ];
 
-export const STAGE_LABELS: Readonly<Record<AnimaRunComponent, string>> = {
+export const STAGE_LABELS: Readonly<Record<RunComponent, string>> = {
   text_encoder: "Text encoder (Qwen3)",
   text_conditioner: "Text conditioner",
   transformer: "Transformer (DiT)",
@@ -44,15 +44,15 @@ export const STAGE_LABELS: Readonly<Record<AnimaRunComponent, string>> = {
 
 /** One `residency` event of the run (ADR 0112), in order. */
 export type ResidencyEvent = {
-  readonly action: AnimaResidencyAction;
-  readonly reason: AnimaResidencyReason;
+  readonly action: ResidencyAction;
+  readonly reason: ResidencyReason;
 };
 
 /**
  * Whether the held pipeline holds a resident DiT after a `residency` event: `retained` puts the DiT
  * in the slot, `released` and `evicted` empty it.
  */
-export const residentAfter = (action: AnimaResidencyAction): boolean => action === "retained";
+export const residentAfter = (action: ResidencyAction): boolean => action === "retained";
 
 /**
  * Whether this run's DiT stage still runs on the DiT carried over from an earlier run, after one
@@ -62,7 +62,7 @@ export const residentAfter = (action: AnimaResidencyAction): boolean => action =
  */
 export const carriedOverAfter = (
   carriedOver: boolean,
-  action: AnimaResidencyAction,
+  action: ResidencyAction,
   transformerEnded: boolean,
 ): boolean => carriedOver && !(action === "evicted" && !transformerEnded);
 
@@ -91,7 +91,7 @@ export type AnimaRecord = RecordEnvironment & {
    */
   readonly pipeline: { readonly reused: boolean; readonly openSeconds: number | null };
   readonly residency: {
-    readonly requested: AnimaResidency;
+    readonly requested: Residency;
     readonly events: readonly ResidencyEvent[];
     /** The held pipeline held a DiT kept resident by an earlier run when this run started. */
     readonly residentAtStart: boolean;
@@ -103,7 +103,7 @@ export type AnimaRecord = RecordEnvironment & {
     readonly transformerBuildCarriedOver: boolean;
   };
   /** Stage start → end; the Session build and release of a stage fall inside it. */
-  readonly stageSeconds: Partial<Record<AnimaRunComponent, number>>;
+  readonly stageSeconds: Partial<Record<RunComponent, number>>;
   /**
    * Seconds per denoise step and per VAE tile, in order. The first of each is measured from its
    * stage start, so it also holds the Session creation and the weight upload (unless the DiT was
@@ -148,7 +148,7 @@ export type RunObservation = {
    * DiT on an out-of-memory emits no second start, so that stage's clock also covers the failed
    * attempt and the eviction.
    */
-  readonly stages: StageTimes<AnimaRunComponent>;
+  readonly stages: StageTimes<RunComponent>;
   readonly stepMarks: readonly number[];
   readonly tileMarks: readonly number[];
   readonly generateMilliseconds: number;

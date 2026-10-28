@@ -17,8 +17,7 @@ import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import type { AssetProgress, CacheDiagnostic, RetryDiagnostic } from "@karume/hub";
 import { hubLoadOptions } from "../src/hub/load-options.ts";
-import { AnimaPipeline } from "../src/anima/pipeline.ts";
-import type { AnimaFromPretrainedOptions } from "../src/anima/pipeline.ts";
+import * as anima from "../anima.ts";
 import type { BirefnetFromPretrainedOptions } from "../src/birefnet/pipeline.ts";
 import type { DepthAnythingFromPretrainedOptions } from "../src/depth-anything/pipeline.ts";
 import type { Gemma4FromPretrainedOptions } from "../src/gemma/pipeline.ts";
@@ -82,7 +81,7 @@ test("hubLoadOptions: onProgress は写さない（進捗は家族側が別途�
 test("型の門: 9 家族の fromPretrained オプションが onRetry を受ける", () => {
   // `satisfies` が本体（`deno task check` が門）。1 家族でも共有型から外れると赤くなる。
   const perFamily = [
-    { onRetry: noopRetry } satisfies AnimaFromPretrainedOptions,
+    { onRetry: noopRetry } satisfies anima.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies BirefnetFromPretrainedOptions,
     { onRetry: noopRetry } satisfies DepthAnythingFromPretrainedOptions,
     { onRetry: noopRetry } satisfies Gemma4FromPretrainedOptions,
@@ -186,13 +185,13 @@ const createRateLimitedManifestFetch = (): { fetch: typeof globalThis.fetch; cal
   return { fetch, calls };
 };
 
-test("AnimaPipeline.fromPretrained: onRetry が loadManifest まで届く（429 で 1 回）", async () => {
+test("anima.Pipeline.fromPretrained: onRetry が loadManifest まで届く（429 で 1 回）", async () => {
   const { fetch, calls } = createRateLimitedManifestFetch();
   const retries: RetryDiagnostic[] = [];
   // manifest の後（容器の part 0）は 404 なので落ちる。ここで見たいのは「家族の
   // `fromPretrained` が `onRetry` を取得層まで運ぶ」ことだけ。
   await assertRejects(() =>
-    AnimaPipeline.fromPretrained(
+    anima.Pipeline.fromPretrained(
       { repo: REPO, revision: SHA, hubUrl: HUB_URL },
       {
         fetch,

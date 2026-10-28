@@ -10,7 +10,7 @@
  * is mounted for the direct route only.
  */
 
-import { ANIMA_SOURCES } from "@karume/models/anima";
+import * as anima from "@karume/models/anima";
 import { BIREFNET_SOURCES } from "@karume/models/birefnet";
 import { DEPTH_ANYTHING_SOURCES } from "@karume/models/depth-anything";
 import { GEMMA4_SOURCES } from "@karume/models/gemma";
@@ -30,12 +30,12 @@ export const MOUNTS = {
   // alias this directory for exactly the files the reference names (vite-plugin-distributions.ts).
   anima: {
     directory: "models/karume-anima",
-    hfRepo: ANIMA_SOURCES["anima"].repo,
+    hfRepo: anima.SOURCES["anima"].repo,
     aliasReferencedRevisions: true,
   },
   "anima-extra": {
     directory: "models/karume-anima-extra",
-    hfRepo: ANIMA_SOURCES["anima-extra"].repo,
+    hfRepo: anima.SOURCES["anima-extra"].repo,
   },
   "birefnet-hr": {
     directory: "models/karume-birefnet-hr",

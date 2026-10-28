@@ -129,7 +129,7 @@ export const toAcquireGpuOptions = (
  * rejected **here**. Letting it through either fails only after proceeding to Session construction
  * or silently falls back to another path.
  *
- * @param where Subject of the diagnostic (`"AnimaPipeline: quant 'f16+dit8-a8-attn8-s16'"`).
+ * @param where Subject of the diagnostic (`"anima.Pipeline: quant 'f16+dit8-a8-attn8-s16'"`).
  */
 export const assertGpuFeaturesGranted = (
   spec: GpuFeaturesSpec | undefined,
@@ -158,7 +158,7 @@ export const assertGpuFeaturesGranted = (
  * @param limits The counterpart. `GpuContext.limits` for a shared GPU, the measured values of
  *   `readAdapterLimits()` on the self-acquiring path — both come from the same formula of
  *   `planRequiredLimits`, so they are the same measure.
- * @param where Subject of the diagnostic (`"AnimaPipeline: quant 'f16'"`).
+ * @param where Subject of the diagnostic (`"anima.Pipeline: quant 'f16'"`).
  */
 export const assertRequiredLimitsSatisfied = (
   spec: RequiredLimitsSpec | undefined,

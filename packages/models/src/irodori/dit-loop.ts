@@ -75,7 +75,7 @@ import { withSession } from "../session/with-session.ts";
  * MUST: copy `shape` as well as `data`. Returned by reference, two copies taken in the same step
  * would share one array, and if the subscriber rewrote the first `shape`, the second copy would
  * silently claim a different shape. An alignment that makes the contract of the public event
- * surface (`IrodoriGenerateEvent.copyLatents` / `AnimaGenerateEvent.copyLatents`) one across
+ * surface (`IrodoriGenerateEvent.copyLatents` / `anima.GenerateEvent.copyLatents`) one across
  * families (the same form as the same-named function on the anima side, `src/anima/pipeline.ts`).
  *
  * NOTE: `export` is for the test that pins the independence without a GPU (not exposed on `mod.ts`

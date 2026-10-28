@@ -6,7 +6,7 @@
 // （text 段 → DiT 段 → VAE 段）で回す偽の generate に載せ、故障（OOM / 失敗 / 後始末の失敗）を
 // 注入して遷移を固定する。
 //
-// NOTE: `AnimaPipeline.generate` そのものは偽の GPU では回せない — 段の Session は実容器の
+// NOTE: `Pipeline.generate` そのものは偽の GPU では回せない — 段の Session は実容器の
 // グラフを device へ上げて組むので、`fake-gpu.ts` の device では構築が通らない。pipeline 側の
 // 結線（段の順序・イベントへの写し）は e2e が見る。GPU 側の小物の dispose の順序
 // `disposeResidencyThenGpu`〈pipeline.ts〉は偽の GpuContext で直接縛る。解放待ちの
@@ -23,7 +23,7 @@ import {
 import { describe, it } from "vite-plus/test";
 import { GpuOutOfMemoryError, GpuValidationError } from "@karume/runtime";
 import {
-  type AnimaResidency,
+  type Residency,
   assertAnimaResidency,
   decideAfterFailedGenerate,
   decideAfterTransformer,
@@ -46,7 +46,7 @@ type Fault = "oom" | "failure";
 
 /** 偽の generate 1 回ぶんの要求。 */
 type FakeRequest = {
-  readonly residency: AnimaResidency;
+  readonly residency: Residency;
   /** 段ごとの故障の列（先頭から試行ごとに 1 つ消費・尽きたら成功）。 */
   readonly faults?: Partial<Record<"text" | "transformer" | "vae", Fault[]>>;
   /** 試し確保が「入らない」を返す量る点（pipeline の先回りの退避の引き金 — 既定は全点で入る）。 */

@@ -1,5 +1,5 @@
 /**
- * The page's one `AnimaPipeline`, opened on Run and kept for the next run while the source, model,
+ * The page's one `Pipeline`, opened on Run and kept for the next run while the source, model,
  * preset and GPU stay the same. Opening reads the manifest, the tokenizers and the container
  * descriptors and, on the cached route, stores the weights in the hub's cache — a few GiB for the
  * `bf16` preset — so the page does not open one per select change (the Wan2.2 page's eager build
@@ -14,11 +14,7 @@
  */
 
 import type { AssetProgress } from "@karume/hub";
-import {
-  AnimaPipeline,
-  type AnimaResidencyAction,
-  type AnimaRunComponent,
-} from "@karume/models/anima";
+import { Pipeline, type ResidencyAction, type RunComponent } from "@karume/models/anima";
 import type { GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
@@ -28,10 +24,7 @@ import { type PipelineSource, pretrainedRef } from "@/lib/distributions";
 import { residentAfter } from "./record";
 import type { AnimaMount } from "./settings";
 
-export type DiagnosticsSink = (
-  component: AnimaRunComponent,
-  diagnostics: SessionDiagnostics,
-) => void;
+export type DiagnosticsSink = (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 
 /** What a pipeline is opened for. */
 export type PipelineSpec = {
@@ -55,7 +48,7 @@ export type HeldPipelineInfo = {
 
 type Held = {
   readonly spec: PipelineSpec;
-  readonly pipeline: AnimaPipeline;
+  readonly pipeline: Pipeline;
   readonly info: HeldPipelineInfo;
 };
 
@@ -68,13 +61,13 @@ const sameSpec = (left: PipelineSpec, right: Partial<PipelineSpec>): boolean =>
   left.quant === right.quant;
 
 export type OpenedPipeline = {
-  readonly pipeline: AnimaPipeline;
+  readonly pipeline: Pipeline;
   /** How long opening took; `undefined` when the held pipeline was reused. */
   readonly openMilliseconds: number | undefined;
   /** The pipeline held a DiT kept resident by an earlier run when it was handed out. */
   readonly residentAtStart: boolean;
   /** Feeds a `residency` event of a generation back, so the held state follows the DiT slot. */
-  readonly noteResidency: (action: AnimaResidencyAction) => void;
+  readonly noteResidency: (action: ResidencyAction) => void;
 };
 
 export const useAnimaPipeline = (
@@ -108,7 +101,7 @@ export const useAnimaPipeline = (
 
   /** Queues a dispose behind the earlier ones; resolves when all have settled, never rejects. */
   const disposeQueued = useCallback(
-    (pipeline: AnimaPipeline | undefined): Promise<void> => {
+    (pipeline: Pipeline | undefined): Promise<void> => {
       if (pipeline !== undefined) {
         disposalsRef.current = track(
           disposalsRef.current
@@ -156,11 +149,11 @@ export const useAnimaPipeline = (
       onProgress: (progress: AssetProgress) => void,
     ): Promise<OpenedPipeline> => {
       setReleaseError(undefined);
-      const handOut = (pipeline: AnimaPipeline, openMilliseconds: number | undefined) => ({
+      const handOut = (pipeline: Pipeline, openMilliseconds: number | undefined) => ({
         pipeline,
         openMilliseconds,
         residentAtStart: heldRef.current?.info.residentDit ?? false,
-        noteResidency: (action: AnimaResidencyAction): void => {
+        noteResidency: (action: ResidencyAction): void => {
           const current = heldRef.current;
           if (current?.pipeline !== pipeline) return;
           const info = { ...current.info, residentDit: residentAfter(action) };
@@ -175,7 +168,7 @@ export const useAnimaPipeline = (
       // A failed dispose of the old pipeline is shown, and does not block opening the new one.
       await release();
       const started = performance.now();
-      const pipeline = await AnimaPipeline.fromPretrained(
+      const pipeline = await Pipeline.fromPretrained(
         pretrainedRef(spec.source, spec.mount, crossRepo),
         {
           gpu: spec.gpu,

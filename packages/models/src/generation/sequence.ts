@@ -68,7 +68,7 @@
  * ## `AbortSignal` is the way to cancel
  *
  * It is checked at stage boundaries (right before each run), and `signal.reason` is thrown **as is,
- * unwrapped** (ADR 0083 decision 5 — the precedent is `AnimaPipelineOptions.signal`).
+ * unwrapped** (ADR 0083 decision 5 — the precedent is `anima.PipelineOptions.signal`).
  *
  * ## The speculative path (ADR 0096 stage 3 — when `options.speculative` is given, at any temperature)
  *

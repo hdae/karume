@@ -62,7 +62,7 @@ import { ModelInputError } from "../errors.ts";
  * The accepted spellings (the source of truth for the vocabulary — the type is derived from it).
  *
  * NOTE: only the type is on the public surface, not this list (asymmetric with
- * `ANIMA_SAMPLER_TYPES`) — the public surface stays thin (ADR 0008), so the list is added as the
+ * `SAMPLER_TYPES`) — the public surface stays thin (ADR 0008), so the list is added as the
  * same frozen list once a consumer that enumerates the choices (CLI / UI) appears.
  */
 const ANIMA_RESIDENCIES = Object.freeze(["per-stage", "transformer"] as const);
@@ -74,13 +74,13 @@ const ANIMA_RESIDENCIES = Object.freeze(["per-stage", "transformer"] as const);
  * - `"transformer"`: keep the DiT **after this generate too**. The text / VAE stages stack on the
  *   resident DiT.
  */
-export type AnimaResidency = (typeof ANIMA_RESIDENCIES)[number];
+export type Residency = (typeof ANIMA_RESIDENCIES)[number];
 
 /** Value when omitted (the old behaviour — the default VRAM assumption does not change). */
-export const DEFAULT_ANIMA_RESIDENCY: AnimaResidency = "per-stage";
+export const DEFAULT_ANIMA_RESIDENCY: Residency = "per-stage";
 
 /** Action of the `residency` event. */
-export type AnimaResidencyAction =
+export type ResidencyAction =
   /** The DiT is kept after this generate too. */
   | "retained"
   /**
@@ -95,7 +95,7 @@ export type AnimaResidencyAction =
   | "evicted";
 
 /** Reason of the `residency` event. */
-export type AnimaResidencyReason =
+export type ResidencyReason =
   /** As the effective residency says (request ?? pipeline default). */
   | "request"
   /**
@@ -121,8 +121,8 @@ export type AnimaResidencyReason =
 
 /** Notification the state machine emits (the pipeline maps it to a `residency` event). */
 export type ResidencyNotice = {
-  readonly action: AnimaResidencyAction;
-  readonly reason: AnimaResidencyReason;
+  readonly action: ResidencyAction;
+  readonly reason: ResidencyReason;
 };
 
 /**
@@ -132,7 +132,7 @@ export type ResidencyNotice = {
  * `"transformers"` silently became per-stage operation, the user could notice that residency has no
  * effect only from the speed. The fix is on the caller's side, so it is input-caused (ADR 0107).
  */
-export const assertAnimaResidency = (value: unknown, where: string): AnimaResidency => {
+export const assertAnimaResidency = (value: unknown, where: string): Residency => {
   const accepted =
     typeof value === "string"
       ? ANIMA_RESIDENCIES.find((candidate) => candidate === value)
@@ -161,7 +161,7 @@ export type TransformerSource =
 /** Input of the decision (the facts at the **start** of the DiT stage). */
 export type ResidencyFacts = {
   /** Effective residency of this generate (request ?? pipeline default). */
-  readonly effective: AnimaResidency;
+  readonly effective: Residency;
   /** Whether already downgraded by an eviction (OOM / not enough headroom). */
   readonly downgraded: boolean;
   /**
@@ -261,7 +261,7 @@ export const decideAfterTransformer = (
  * - Effective `transformer`: keep it without a report (if the DiT stage was left, `retained` has
  *   been reported; before the DiT stage the residency state has not changed).
  */
-export const decideAfterFailedGenerate = (effective: AnimaResidency): TransformerDecision =>
+export const decideAfterFailedGenerate = (effective: Residency): TransformerDecision =>
   effective === "per-stage"
     ? { action: "release", notice: { action: "released", reason: "request" } }
     : { action: "retain" };
@@ -351,7 +351,7 @@ export type ResidencyNotify = (notice: ResidencyNotice) => Promise<void>;
 
 /** Input of one DiT stage. */
 export type TransformerStage<T, R> = {
-  readonly effective: AnimaResidency;
+  readonly effective: Residency;
   /** Creates the DiT Session. */
   readonly open: () => Promise<T>;
   /** The stage body (the denoise loop). A re-run calls it again from the start. */
@@ -456,7 +456,7 @@ export class TransformerResidency<T> {
    */
   async releaseIfRequested(
     error: unknown,
-    effective: AnimaResidency,
+    effective: Residency,
     notify: ResidencyNotify,
   ): Promise<unknown> {
     const held = this.#held;
@@ -499,7 +499,7 @@ export class TransformerResidency<T> {
     await this.#release();
   }
 
-  #facts(effective: AnimaResidency): ResidencyFacts {
+  #facts(effective: Residency): ResidencyFacts {
     return { effective, downgraded: this.#downgraded, held: this.holding };
   }
 

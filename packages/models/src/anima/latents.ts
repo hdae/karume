@@ -22,7 +22,7 @@ const f32 = Math.fround;
  *
  * MUST: do not hold a TypedArray at module scope (do not run `Float32Array.from` at import) —
  * cross-cutting invariant "zero side effects in every module (no execution at import, no global
- * mutable state)". This stays a `readonly number[]` array literal, and {@link animaLatents} builds
+ * mutable state)". This stays a `readonly number[]` array literal, and {@link latentStats} builds
  * the `Float32Array` per call (adding only the cost of creating 16 elements × 2). Consumers
  * (denormalisation in `pipeline.ts`, barrel users) go through that accessor only.
  *
@@ -55,7 +55,7 @@ export const ANIMA_LATENTS_STD: readonly number[] = [
  * NOTE: "expose it frozen" does not work — `Object.freeze` throws TypeError on a TypedArray with
  * elements. An accessor that returns a copy is the only form.
  */
-export const animaLatents = (): {
+export const latentStats = (): {
   mean: Float32Array<ArrayBuffer>;
   std: Float32Array<ArrayBuffer>;
 } => ({

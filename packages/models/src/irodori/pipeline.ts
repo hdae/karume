@@ -318,7 +318,7 @@ export type IrodoriLatentSnapshot = {
 /**
  * Generation events received by {@link IrodoriGenerateRequest.onEvent}.
  *
- * NOTE: same shape as anima's `AnimaGenerateEvent`, but there is no counterpart of `vae-tile` —
+ * NOTE: same shape as anima's `GenerateEvent`, but there is no counterpart of `vae-tile` —
  * the codec decode tiles are **a performance and memory knob** (`codecTileFrames`), and as a step
  * they are covered by the `stage` of `codec-decoder`.
  */

@@ -1,5 +1,5 @@
 /**
- * `AnimaPipeline` — the single surface for text → image (Anima).
+ * `Pipeline` — the single surface for text → image (Anima).
  *
  * Pipeline (every stage in Karume, no torch):
  *
@@ -18,10 +18,10 @@
  * DiT weights differ by a factor of two between quant presets (default preset
  * `f16+dit8-a8-attn8-s16` = 1,875MiB, `f16` preset = 3,733MiB — the VRAM table of the 2026-08-05
  * final-perf-bench). Since the VAE is always tiled, **the chain peak is the DiT stage**, and the
- * default VRAM assumption is "the largest single stage". So {@link AnimaPipeline.fromAssets}
+ * default VRAM assumption is "the largest single stage". So {@link Pipeline.fromAssets}
  * **opens no Session at all** — it only opens containers (`openContainer` = parsing the two
  * documents), and GPU residency is opened and closed per stage inside
- * {@link AnimaPipeline.generate}.
+ * {@link Pipeline.generate}.
  *
  * The opt-in `residency: "transformer"` keeps only the DiT Session across generate calls (the state
  * machine is `residency.ts`). The text / VAE stages stack **on top of** the resident DiT, so the
@@ -80,7 +80,7 @@ import {
   ANIMA_PIPELINE_MAJOR,
   ANIMA_PIPELINE_NAME,
   type AnimaPipelineConfig,
-  type AnimaSamplerType,
+  type SamplerType,
   assertAnimaSamplerType,
   parseAnimaPipelineConfig,
 } from "./config.ts";
@@ -90,7 +90,7 @@ import {
   dpmSolverMultistepStep,
   needsUncond,
 } from "../generation/dpm-solver-multistep.ts";
-import { animaLatents, denormalizeLatents, padSequence } from "./latents.ts";
+import { latentStats, denormalizeLatents, padSequence } from "./latents.ts";
 import { imageToRgba } from "./image.ts";
 import { assertAcceptableResolution, formatResolution, type ImageSize } from "./resolution.ts";
 import { blendExtentAt, decodeTiled, planVaeTiling, tileCount } from "./tiling.ts";
@@ -135,9 +135,9 @@ import {
 } from "../hub/components.ts";
 import { readAssetBuffer, readWholeAsset } from "../hub/asset-readers.ts";
 import {
-  type AnimaResidency,
-  type AnimaResidencyAction,
-  type AnimaResidencyReason,
+  type Residency,
+  type ResidencyAction,
+  type ResidencyReason,
   assertAnimaResidency,
   DEFAULT_ANIMA_RESIDENCY,
   generateMemoryNeed,
@@ -177,7 +177,7 @@ export type GeneratedImage = {
  * One generation request. Fields left unspecified are filled from the manifest's
  * `pipelineConfig.defaults`.
  */
-export type AnimaGenerateRequest = {
+export type GenerateRequest = {
   readonly prompt: string;
   /**
    * Negative prompt. With `guidanceScale === 1` the uncond side is never computed, so **specifying
@@ -194,7 +194,7 @@ export type AnimaGenerateRequest = {
   /** Seed of the initial noise (default 0 — the same seed gives the same image). */
   readonly seed?: number;
   /**
-   * Update rule of denoising ({@link AnimaSamplerType}). Defaults to the manifest's
+   * Update rule of denoising ({@link SamplerType}). Defaults to the manifest's
    * `pipelineConfig.scheduler.type` (`"euler"` in the official distribution).
    *
    * DPM++ 2M is **one of the choices**, not the distribution default (re-ruling of 2026-08-25). The
@@ -202,10 +202,10 @@ export type AnimaGenerateRequest = {
    * whatever the distribution** — with the same assets and seed, a different value gives different
    * pixels (specifying `euler` is bit-identical to a distribution whose manifest default is euler).
    */
-  readonly sampler?: AnimaSamplerType;
+  readonly sampler?: SamplerType;
   /**
-   * Whether the DiT Session is kept **after this generate** ({@link AnimaResidency}). Defaults to
-   * {@link AnimaPipelineOptions.residency}.
+   * Whether the DiT Session is kept **after this generate** ({@link Residency}). Defaults to
+   * {@link PipelineOptions.residency}.
    *
    * If a resident DiT already exists at the start, it is used whatever the value (no reload). In a
    * series of generations, using `"transformer"` in between and **`"per-stage"` only for the last
@@ -214,9 +214,9 @@ export type AnimaGenerateRequest = {
    * when `"transformer"` is requested, and reports `released` / `downgraded`. An unknown spelling
    * gives `ModelInputError` before touching the GPU.
    */
-  readonly residency?: AnimaResidency;
+  readonly residency?: Residency;
   /**
-   * Observation hook for generation events ({@link AnimaGenerateEvent}) — called at each stage
+   * Observation hook for generation events ({@link GenerateEvent}) — called at each stage
    * start / end, each completed denoise step, each completed VAE tile and each change of DiT
    * residency.
    *
@@ -239,24 +239,24 @@ export type AnimaGenerateRequest = {
    * MUST NOT await `generate` / `dispose` of the same pipeline inside `onEvent` (a self-deadlock of
    * the serialisation chain — abort with a throw instead).
    */
-  readonly onEvent?: (event: AnimaGenerateEvent) => void | Promise<void>;
+  readonly onEvent?: (event: GenerateEvent) => void | Promise<void>;
 };
 
 /**
- * Component names {@link AnimaPipelineOptions.onRunDiagnostics} receives (one Session = one name).
- * The stage names of the `stage` event ({@link AnimaGenerateEvent}) are the same four.
+ * Component names {@link PipelineOptions.onRunDiagnostics} receives (one Session = one name).
+ * The stage names of the `stage` event ({@link GenerateEvent}) are the same four.
  */
-export type AnimaRunComponent = "text_encoder" | "text_conditioner" | "transformer" | "vae_decoder";
+export type RunComponent = "text_encoder" | "text_conditioner" | "transformer" | "vae_decoder";
 
 /** Copy of the intermediate latent returned by `copyLatents()` of `denoise-step`. */
-export type AnimaLatentSnapshot = {
+export type LatentSnapshot = {
   readonly data: Float32Array<ArrayBuffer>;
   /** Latent shape `[1,C,H,W]` (the value the DiT plan decided). */
   readonly shape: readonly number[];
 };
 
-/** Generation events {@link AnimaGenerateRequest.onEvent} receives. */
-export type AnimaGenerateEvent =
+/** Generation events {@link GenerateRequest.onEvent} receives. */
+export type GenerateEvent =
   /**
    * Stage start (`start`) and end (`end`). In per-stage operation they fall **before** Session
    * construction and **after** release, so the progress of GB-scale loads is visible. A
@@ -265,7 +265,7 @@ export type AnimaGenerateEvent =
    * release is inside start → end, and after an OOM eviction the release and the per-stage load are
    * inside. If the stage fails midway, `end` is not emitted.
    */
-  | { readonly kind: "stage"; readonly component: AnimaRunComponent; readonly at: "start" | "end" }
+  | { readonly kind: "stage"; readonly component: RunComponent; readonly at: "start" | "end" }
   | {
       readonly kind: "denoise-step";
       /** Number of completed steps (1-based). */
@@ -274,7 +274,7 @@ export type AnimaGenerateEvent =
       /** The sigma consumed in that step. */
       readonly sigma: number;
       /** Copies and returns the intermediate latent only when called ({@link latentSnapshot}). */
-      readonly copyLatents: () => AnimaLatentSnapshot;
+      readonly copyLatents: () => LatentSnapshot;
     }
   /** Decode of one VAE tile completed (`tile` is 1-based). */
   | { readonly kind: "vae-tile"; readonly tile: number; readonly tiles: number }
@@ -313,8 +313,8 @@ export type AnimaGenerateEvent =
   | {
       readonly kind: "residency";
       readonly component: "transformer";
-      readonly action: AnimaResidencyAction;
-      readonly reason: AnimaResidencyReason;
+      readonly action: ResidencyAction;
+      readonly reason: ResidencyReason;
     };
 
 /**
@@ -340,8 +340,8 @@ export type AnimaGenerateEvent =
  * / the subpath surface — ADR 0008).
  */
 export const latentSnapshot =
-  (latents: Float32Array<ArrayBuffer>, shape: readonly number[]): (() => AnimaLatentSnapshot) =>
-  (): AnimaLatentSnapshot => ({ data: new Float32Array(latents), shape: [...shape] });
+  (latents: Float32Array<ArrayBuffer>, shape: readonly number[]): (() => LatentSnapshot) =>
+  (): LatentSnapshot => ({ data: new Float32Array(latents), shape: [...shape] });
 
 /**
  * Execution knobs Anima accepts (both from the manifest's quant declaration and explicit options).
@@ -369,12 +369,12 @@ export const ANIMA_SESSION_POLICY: FamilySessionPolicy = {
 };
 
 /**
- * Construction options (shared by {@link AnimaPipeline.fromAssets} /
- * {@link AnimaPipeline.fromPretrained}).
+ * Construction options (shared by {@link Pipeline.fromAssets} /
+ * {@link Pipeline.fromPretrained}).
  */
-export type AnimaPipelineOptions = {
+export type PipelineOptions = {
   /**
-   * Shares an existing GPU. **The caller keeps ownership**, so {@link AnimaPipeline.dispose} does
+   * Shares an existing GPU. **The caller keeps ownership**, so {@link Pipeline.dispose} does
    * not destroy it. When omitted, the pipeline calls `acquireGpu` internally and destroys it in
    * `dispose()`.
    */
@@ -389,17 +389,14 @@ export type AnimaPipelineOptions = {
    * `acquireGpu({ gpuTiming: true })` as `gpu` (ADR 0021 — not measured by default). Exceptions
    * from the callback are not swallowed (fail loudly — the whole generation fails).
    */
-  readonly onRunDiagnostics?: (
-    component: AnimaRunComponent,
-    diagnostics: SessionDiagnostics,
-  ) => void;
+  readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
   /**
-   * Abort of construction. {@link AnimaPipeline.fromAssets} checks it at the boundaries between
+   * Abort of construction. {@link Pipeline.fromAssets} checks it at the boundaries between
    * steps (entry / tokenizer parsing / between each `openContainer` / before and after acquiring
    * the GPU). At every boundary except the entry it **yields to the event loop once** before
    * checking, so an abort that arrives during synchronous parsing takes effect at the next boundary
    * (the same on a path with no await at all because `options.gpu` was passed).
-   * {@link AnimaPipeline.fromPretrained} passes the same signal to the fetch layer, so the same
+   * {@link Pipeline.fromPretrained} passes the same signal to the fetch layer, so the same
    * knob aborts **during either download or assembly** (no abort button that stops responding only
    * after the download finished).
    *
@@ -419,20 +416,20 @@ export type AnimaPipelineOptions = {
   readonly linearCompute?: SessionOptions["linearCompute"];
   /**
    * Execution form of fused attention, taking precedence over the quant's declaration (precedence
-   * and shader-f16 handling as in {@link AnimaPipelineOptions.linearCompute}). Combined with
+   * and shader-f16 handling as in {@link PipelineOptions.linearCompute}). Combined with
    * `attentionScoreStorage: "f16"` it is a combination the runtime does not accept, so
    * `ModelInputError`.
    */
   readonly attentionCompute?: SessionOptions["attentionCompute"];
   /**
    * Storage form of fused attention's S, taking precedence over the quant's declaration (precedence
-   * as in {@link AnimaPipelineOptions.linearCompute}; shader-f16 is not needed).
+   * as in {@link PipelineOptions.linearCompute}; shader-f16 is not needed).
    */
   readonly attentionScoreStorage?: SessionOptions["attentionScoreStorage"];
   /**
-   * Default for whether the DiT Session is kept after a generate ({@link AnimaResidency}; when
+   * Default for whether the DiT Session is kept after a generate ({@link Residency}; when
    * omitted `"per-stage"` = the old behaviour of opening and closing per stage). Each generate can
-   * override it with {@link AnimaGenerateRequest.residency}.
+   * override it with {@link GenerateRequest.residency}.
    *
    * `"transformer"` removes the DiT reload, plan derivation and intermediate-buffer rebuild from
    * the second generate on, at the cost of the text / VAE stages stacking on the resident DiT
@@ -442,17 +439,17 @@ export type AnimaPipelineOptions = {
    * Session is opened at construction (the resident DiT is created in the DiT stage of the first
    * generate). An unknown spelling gives `ModelInputError` before the weights are fetched.
    */
-  readonly residency?: AnimaResidency;
+  readonly residency?: Residency;
 };
 
 /**
- * Extra fetch-layer options {@link AnimaPipeline.fromPretrained} accepts (passed through to the
- * hub). `signal` is shared with construction, so {@link AnimaPipelineOptions} holds it.
+ * Extra fetch-layer options {@link Pipeline.fromPretrained} accepts (passed through to the
+ * hub). `signal` is shared with construction, so {@link PipelineOptions} holds it.
  *
  * NOTE: the per-field documentation, including that `headers` / `fetch` / `caches` / `onRetry` are
  * **for HTTP sources only**, lives in one place: {@link FromPretrainedHubOptions}.
  */
-export type AnimaFromPretrainedOptions = AnimaPipelineOptions &
+export type FromPretrainedOptions = PipelineOptions &
   FromPretrainedHubOptions &
   FromPretrainedComponentOptions;
 
@@ -460,7 +457,7 @@ export type AnimaFromPretrainedOptions = AnimaPipelineOptions &
  * Input for building directly from fetched assets (pass the return value of the hub's `fetchAssets`
  * as is).
  */
-export type AnimaAssets = {
+export type Assets = {
   readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
@@ -481,7 +478,7 @@ const assetBuffer = (
  * family — {@link assetComponentOpener}). A component key is either the single-form `krm`
  * (`transformer`) or the parts of the split form (`transformer[0]` / `transformer[1]` / …).
  */
-const assetOpener = (assets: AnimaAssets["assets"]): Promise<ComponentOpener> =>
+const assetOpener = (assets: Assets["assets"]): Promise<ComponentOpener> =>
   assetComponentOpener("anima", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 const assetBytes = (
@@ -601,7 +598,7 @@ const vaeStageNeed = (state: AnimaState): number => stageNeed(state, state.vaeDe
 
 /**
  * Decides the negative prompt actually passed to the uncond side (the entry of
- * {@link AnimaPipeline.generate}; a pure check before touching the GPU).
+ * {@link Pipeline.generate}; a pure check before touching the GPU).
  *
  * MUST: do not silently accept a knob that has no effect. guidance=1 skips the uncond branch
  * entirely, so not a single character of the negative prompt is used (looking as if it could be
@@ -670,7 +667,7 @@ export type AnimaDenoiseUpdate = {
  * the subpath surface — ADR 0008).
  */
 export const denoiseStep = (
-  type: AnimaSamplerType,
+  type: SamplerType,
   input: DpmSolverMultistepInput,
 ): AnimaDenoiseUpdate => {
   const update = applyUpdateRule(type, input);
@@ -679,7 +676,7 @@ export const denoiseStep = (
     const steps = input.sigmas.length - 1;
     const value = update.sample[broken];
     throw new Error(
-      `AnimaPipeline: step ${
+      `anima.Pipeline: step ${
         input.index + 1
       }/${steps}: element ${broken} of the updated latent is non-finite` +
         ` (${value}) — the DiT output, the CFG mix or the update rule overflowed (not passed to the next step or the VAE stage)`,
@@ -689,10 +686,7 @@ export const denoiseStep = (
 };
 
 /** Applies one update rule (the body of the branch in {@link denoiseStep}). */
-const applyUpdateRule = (
-  type: AnimaSamplerType,
-  input: DpmSolverMultistepInput,
-): AnimaDenoiseUpdate => {
+const applyUpdateRule = (type: SamplerType, input: DpmSolverMultistepInput): AnimaDenoiseUpdate => {
   switch (type) {
     case "euler": {
       const { sample, cond, uncond, guidance, sigmas, index } = input;
@@ -835,18 +829,18 @@ const withSession = async <T>(
 
 /**
  * Binds the component name for the observation hook
- * ({@link AnimaPipelineOptions.onRunDiagnostics}).
+ * ({@link PipelineOptions.onRunDiagnostics}).
  */
 const observer = (
   state: AnimaState,
-  component: AnimaRunComponent,
+  component: RunComponent,
 ): ((diagnostics: SessionDiagnostics) => void) | undefined => {
   const listener = state.onRunDiagnostics;
   return listener === undefined ? undefined : (diagnostics) => listener(component, diagnostics);
 };
 
 /**
- * Internal state of {@link AnimaPipeline} (the constructor is private, so the type is not public).
+ * Internal state of {@link Pipeline} (the constructor is private, so the type is not public).
  */
 type AnimaState = {
   readonly gpu: GpuContext;
@@ -860,14 +854,11 @@ type AnimaState = {
   readonly ropeBase: RopeBase;
   readonly vaeDecoder: ModelComponent;
   /** Effective residency when a generate does not override it in the request (checked). */
-  readonly residency: AnimaResidency;
-  readonly onRunDiagnostics?: (
-    component: AnimaRunComponent,
-    diagnostics: SessionDiagnostics,
-  ) => void;
+  readonly residency: Residency;
+  readonly onRunDiagnostics?: (component: RunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
-/** Material the family admission (`AnimaPipeline.#admit`) settles. */
+/** Material the family admission (`Pipeline.#admit`) settles. */
 type AnimaAdmission = {
   readonly config: AnimaPipelineConfig;
   readonly quantName: string;
@@ -883,18 +874,18 @@ type AnimaAdmission = {
    */
   readonly gpuFeatures: GpuFeaturesSpec | undefined;
   /** Residency from the construction options (checked; the default when omitted). */
-  readonly residency: AnimaResidency;
+  readonly residency: Residency;
 };
 
 /**
  * Anima's text → image pipeline.
  *
- * Construction has only two entries: {@link AnimaPipeline.fromPretrained} (fetch from HF) or
- * {@link AnimaPipeline.fromAssets} (already fetched bytes) — the constructor is private so that no
+ * Construction has only two entries: {@link Pipeline.fromPretrained} (fetch from HF) or
+ * {@link Pipeline.fromAssets} (already fetched bytes) — the constructor is private so that no
  * half-built state can bypass the manifest checks and the asset comparison (the same style as
  * `createSession` / `acquireGpu` — ADR 0008).
  */
-export class AnimaPipeline {
+export class Pipeline {
   readonly #state: AnimaState;
   /**
    * Serialisation chain of generate and dispose (keeps the module doc's "one at a time" on the
@@ -908,7 +899,7 @@ export class AnimaPipeline {
   #disposal: Promise<void> | undefined;
   /**
    * The DiT resident slot (ADR 0112). Owned by the pipeline — folded in `dispose` even when
-   * `options.gpu` is shared. Touched only from inside the chain ({@link AnimaPipeline.#chain}).
+   * `options.gpu` is shared. Touched only from inside the chain ({@link Pipeline.#chain}).
    */
   readonly #residency: TransformerResidency<Session>;
 
@@ -946,16 +937,16 @@ export class AnimaPipeline {
    * A local distribution is passed as **a source handle** (`localDirectory` / `nodeDirectory` of
    * `@karume/hub/node` / `denoDirectory` of `@karume/hub/deno`). It skips the check on HF's
    * `owner/name` spelling and goes through neither the network nor CacheStorage (the HTTP-only
-   * knobs of {@link AnimaFromPretrainedOptions} have no effect).
+   * knobs of {@link FromPretrainedOptions} have no effect).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,
-    options: AnimaFromPretrainedOptions = {},
-  ): Promise<AnimaPipeline> {
+    options: FromPretrainedOptions = {},
+  ): Promise<Pipeline> {
     const source = toManifestSource(
       ref,
-      "AnimaPipeline.fromPretrained",
-      'ANIMA_SOURCES["anima"] (@karume/models/anima)',
+      "anima.Pipeline.fromPretrained",
+      'SOURCES["anima"] (@karume/models/anima)',
     );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
@@ -966,7 +957,7 @@ export class AnimaPipeline {
     const selection = resolveSelection(loaded.manifest, choice);
     // The signal goes to **both** the fetch layer and the build (no window where aborting stops
     // working the moment the download ends).
-    const buildOptions: AnimaPipelineOptions = {
+    const buildOptions: PipelineOptions = {
       ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       ...choice,
       ...(options.onRunDiagnostics === undefined
@@ -985,19 +976,19 @@ export class AnimaPipeline {
     // The family checks run in the admission hook (before the weight parts are fetched —
     // `src/hub/components.ts`).
     const { admitted, assets, open } = await loadContainerComponents(
-      "AnimaPipeline.fromPretrained",
+      "anima.Pipeline.fromPretrained",
       loaded,
       selection,
       COMPONENT_KEYS,
       async () => {
-        const admitted = AnimaPipeline.#admit(loaded.manifest, buildOptions);
+        const admitted = Pipeline.#admit(loaded.manifest, buildOptions);
         // The `requiredLimits` the distribution declares are checked here **before the weight parts
         // are fetched** (ADR 0089 decision 5 — the limits of a shared GPU, or the adapter's
         // measured values on the path that acquires its own).
         await assertRequiredLimitsBeforeDownload(
           admitted.quant.requiredLimits,
           buildOptions.gpu,
-          `AnimaPipeline: quant '${admitted.quantName}'`,
+          `anima.Pipeline: quant '${admitted.quantName}'`,
         );
         return admitted;
       },
@@ -1007,7 +998,7 @@ export class AnimaPipeline {
         ...(options.components === undefined ? {} : { components: options.components }),
       },
     );
-    return await AnimaPipeline.#build(admitted, assets, open, buildOptions);
+    return await Pipeline.#build(admitted, assets, open, buildOptions);
   }
 
   /**
@@ -1026,9 +1017,9 @@ export class AnimaPipeline {
    * generation). Parsing the assets (two tokenizers / the rope base table) cannot live in this hook
    * either — at admission only the **declarations** of the assets (name → role, logical length) are
    * at hand, not the bytes (waiting for them would lose the position before the weight prefetch),
-   * so it stays in {@link AnimaPipeline.#build}.
+   * so it stays in {@link Pipeline.#build}.
    */
-  static #admit(manifest: Manifest, options: AnimaPipelineOptions): AnimaAdmission {
+  static #admit(manifest: Manifest, options: PipelineOptions): AnimaAdmission {
     // Abort checks sit at **the boundaries between steps** (each step is indivisible — there is no
     // way to fold a 3.7GiB component midway). The entry is the first one: when called already
     // aborted, it returns without touching a byte of the assets.
@@ -1036,7 +1027,7 @@ export class AnimaPipeline {
     const modelName = options.model ?? manifest.defaultModel;
     if (!Object.hasOwn(manifest.models, modelName)) {
       throw new Error(
-        `AnimaPipeline: model '${modelName}' is not in the manifest` +
+        `anima.Pipeline: model '${modelName}' is not in the manifest` +
           ` (available: ${manifest.available.models.join(" / ")})`,
       );
     }
@@ -1044,7 +1035,7 @@ export class AnimaPipeline {
     const { name, major } = entry.pipeline;
     if (name !== ANIMA_PIPELINE_NAME) {
       throw new Error(
-        `AnimaPipeline: the manifest's pipeline is '${name}/${major}'` +
+        `anima.Pipeline: the manifest's pipeline is '${name}/${major}'` +
           ` ('${ANIMA_PIPELINE_NAME}/${ANIMA_PIPELINE_MAJOR}' is required)`,
       );
     }
@@ -1052,7 +1043,7 @@ export class AnimaPipeline {
       // The only check that stops the silent degradation of "old implementation × new repository"
       // (ADR 0038 §6).
       throw new Error(
-        `AnimaPipeline: the major of pipeline '${name}/${major}' is not supported` +
+        `anima.Pipeline: the major of pipeline '${name}/${major}' is not supported` +
           ` (this implementation reads ${ANIMA_PIPELINE_NAME}/${ANIMA_PIPELINE_MAJOR})`,
       );
     }
@@ -1061,7 +1052,7 @@ export class AnimaPipeline {
     const quantName = options.quant ?? entry.defaultQuant;
     if (!Object.hasOwn(entry.quants, quantName)) {
       throw new Error(
-        `AnimaPipeline: quant '${quantName}' is not in the manifest` +
+        `anima.Pipeline: quant '${quantName}' is not in the manifest` +
           ` (available: ${entry.available.quants.join(" / ")})`,
       );
     }
@@ -1073,7 +1064,7 @@ export class AnimaPipeline {
       ANIMA_SESSION_POLICY,
       quant.session,
       options,
-      `AnimaPipeline: quant '${quantName}'`,
+      `anima.Pipeline: quant '${quantName}'`,
     );
     const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
     // residency is checked in the same hook (an unknown spelling is not carried past the weight
@@ -1081,7 +1072,7 @@ export class AnimaPipeline {
     const residency =
       options.residency === undefined
         ? DEFAULT_ANIMA_RESIDENCY
-        : assertAnimaResidency(options.residency, "AnimaPipeline: residency");
+        : assertAnimaResidency(options.residency, "anima.Pipeline: residency");
 
     // MUST: a shared GPU's missing capabilities (feature / device limit) fail in this hook — unlike
     // acquiring a GPU internally there is no reason to wait for `acquireGpu`, and this is the only
@@ -1089,11 +1080,11 @@ export class AnimaPipeline {
     // check is the single one in `session/gpu-features.ts`, and the later checks call the same
     // function).
     if (options.gpu !== undefined) {
-      assertGpuFeaturesGranted(gpuFeatures, options.gpu, `AnimaPipeline: quant '${quantName}'`);
+      assertGpuFeaturesGranted(gpuFeatures, options.gpu, `anima.Pipeline: quant '${quantName}'`);
       assertRequiredLimitsSatisfied(
         quant.requiredLimits,
         options.gpu.limits,
-        `AnimaPipeline: quant '${quantName}'`,
+        `anima.Pipeline: quant '${quantName}'`,
       );
     }
 
@@ -1102,17 +1093,17 @@ export class AnimaPipeline {
 
   /**
    * Builds from the admitted material + the assets (the one implementation shared by
-   * {@link AnimaPipeline.fromAssets} and `fromPretrained`). The two surfaces differ only in `open`
+   * {@link Pipeline.fromAssets} and `fromPretrained`). The two surfaces differ only in `open`
    * (the component opener); they pass the same checks in the same order.
    *
    * MUST: the assets are parsed **before acquiring the GPU** (the ordering MUST of the docstring).
    */
   static async #build(
     admitted: AnimaAdmission,
-    assets: AnimaAssets["assets"],
+    assets: Assets["assets"],
     open: ComponentOpener,
-    options: AnimaPipelineOptions,
-  ): Promise<AnimaPipeline> {
+    options: PipelineOptions,
+  ): Promise<Pipeline> {
     const { config, quantName, quant, sessionOptions, gpuFeatures, residency } = admitted;
 
     // Asset parsing comes before the GPU (the ordering MUST of the docstring). Opening the 3.7GiB
@@ -1141,7 +1132,7 @@ export class AnimaPipeline {
 
     // MUST: declared features can only be requested at device creation (ADR 0028). A shared GPU
     // cannot be asked, so the missing capability fails here by name — passing would fail later at
-    // Session construction (or silently fall back to another path). {@link AnimaPipeline.#admit}
+    // Session construction (or silently fall back to another path). {@link Pipeline.#admit}
     // already checks a shared GPU with the same function, but for an internally acquired device
     // this is the only check.
     const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
@@ -1153,20 +1144,20 @@ export class AnimaPipeline {
       // resolves as a microtask continuation, so an abort task queued by a click during the wait
       // has not run yet.
       await settleAbort(options.signal);
-      assertGpuFeaturesGranted(gpuFeatures, gpu, `AnimaPipeline: quant '${quantName}'`);
+      assertGpuFeaturesGranted(gpuFeatures, gpu, `anima.Pipeline: quant '${quantName}'`);
       // The limits of an internally acquired device are checked here too — `fromAssets` has no
       // pre-fetch check (`fromPretrained` checks the adapter values); without it a shortfall of the
       // declaration surfaces only at Session construction, and when the declaration is stricter
-      // than the real need, the comparison never happens at all. {@link AnimaPipeline.#admit}
+      // than the real need, the comparison never happens at all. {@link Pipeline.#admit}
       // checks a shared GPU.
       if (ownsGpu) {
         assertRequiredLimitsSatisfied(
           quant.requiredLimits,
           gpu.limits,
-          `AnimaPipeline: quant '${quantName}'`,
+          `anima.Pipeline: quant '${quantName}'`,
         );
       }
-      return new AnimaPipeline({
+      return new Pipeline({
         gpu,
         ownsGpu,
         config,
@@ -1218,22 +1209,14 @@ export class AnimaPipeline {
    * MUST: open no Session at all (the VRAM MUST — module doc).
    *
    * NOTE: each step is indivisible (there is no way to fold a 3.7GiB component midway), so the
-   * checks of {@link AnimaPipelineOptions.signal} sit only at **the boundaries between steps**,
+   * checks of {@link PipelineOptions.signal} sit only at **the boundaries between steps**,
    * each yielding to the event loop once before checking ({@link settleAbort}) — an abort that
    * arrives during synchronous parsing takes effect at the next boundary (the same when
    * `options.gpu` is supplied).
    */
-  static async fromAssets(
-    input: AnimaAssets,
-    options: AnimaPipelineOptions = {},
-  ): Promise<AnimaPipeline> {
-    const admitted = AnimaPipeline.#admit(input.manifest, options);
-    return await AnimaPipeline.#build(
-      admitted,
-      input.assets,
-      await assetOpener(input.assets),
-      options,
-    );
+  static async fromAssets(input: Assets, options: PipelineOptions = {}): Promise<Pipeline> {
+    const admitted = Pipeline.#admit(input.manifest, options);
+    return await Pipeline.#build(admitted, input.assets, await assetOpener(input.assets), options);
   }
 
   /**
@@ -1245,16 +1228,16 @@ export class AnimaPipeline {
    * Concurrent calls **wait and run in order** (graphs are never resident at the same time — module
    * doc).
    */
-  async generate(request: AnimaGenerateRequest): Promise<GeneratedImage> {
+  async generate(request: GenerateRequest): Promise<GeneratedImage> {
     // The disposed check happens at call time (checked inside the chain, generations accepted
     // before the dispose would fail along with it).
     if (this.#disposal !== undefined) {
-      throw new Error("AnimaPipeline: cannot generate after dispose");
+      throw new Error("anima.Pipeline: cannot generate after dispose");
     }
     return await this.#chain(() => this.#generate(request));
   }
 
-  async #generate(request: AnimaGenerateRequest): Promise<GeneratedImage> {
+  async #generate(request: GenerateRequest): Promise<GeneratedImage> {
     const state = this.#state;
     const defaults = state.config.defaults;
     const steps = request.steps ?? defaults.steps;
@@ -1307,7 +1290,7 @@ export class AnimaPipeline {
     // The emitter of generation events. Without a subscriber it collapses into a no-op, so the
     // firing points have no branch.
     const { onEvent } = request;
-    const emit: (event: AnimaGenerateEvent) => Promise<void> =
+    const emit: (event: GenerateEvent) => Promise<void> =
       onEvent === undefined
         ? () => Promise.resolve()
         : async (event) => {
@@ -1327,7 +1310,7 @@ export class AnimaPipeline {
      * take the quant's session (`{}`).
      */
     const withStage = async <T>(
-      component: Exclude<AnimaRunComponent, "transformer">,
+      component: Exclude<RunComponent, "transformer">,
       model: ModelComponent,
       body: (run: StageRun) => Promise<T>,
     ): Promise<T> => {
@@ -1491,7 +1474,7 @@ export class AnimaPipeline {
       }
 
       // --- ④ Denormalise → VAE decode (always tiled — ADR 0038 §4) -------------------
-      const { mean: latentsMean, std: latentsStd } = animaLatents();
+      const { mean: latentsMean, std: latentsStd } = latentStats();
       const denormalized = denormalizeLatents(latents, latentShape, latentsMean, latentsStd);
       const decoded = await withStage("vae_decoder", state.vaeDecoder, async (run) => {
         const tileShape = staticInputShape(state.vaeDecoder, "latents");
@@ -1548,7 +1531,7 @@ export class AnimaPipeline {
   }
 
   /**
-   * Releases. The resident DiT ({@link AnimaPipelineOptions.residency}) is always folded, and
+   * Releases. The resident DiT ({@link PipelineOptions.residency}) is always folded, and
    * **only an internally acquired GPU** is destroyed (a GpuContext passed as `options.gpu` belongs
    * to the caller and is not touched).
    *

@@ -12,7 +12,7 @@ import {
 import {
   ANIMA_LATENTS_MEAN,
   ANIMA_LATENTS_STD,
-  animaLatents,
+  latentStats,
   denormalizeLatents,
   padSequence,
 } from "../src/anima/latents.ts";
@@ -84,10 +84,10 @@ test("デモ定数: latents_mean / latents_std は 16 チャネル対で揃っ�
   );
 });
 
-test("animaLatents: 呼ぶたびに独立した写し（消費側の書き換えが実体へ波及しない）", () => {
+test("latentStats: 呼ぶたびに独立した写し（消費側の書き換えが実体へ波及しない）", () => {
   // 公開面が出すのはこのアクセサだけ。実体を配ると、消費側が 1 要素書き換えただけで
   // 以後の全 `generate` の逆正規化が黙って変わる（グローバル可変状態）。
-  const first = animaLatents();
+  const first = latentStats();
   assertEquals([...first.mean], [...ANIMA_LATENTS_MEAN]);
   assertEquals([...first.std], [...ANIMA_LATENTS_STD]);
 
@@ -99,7 +99,7 @@ test("animaLatents: 呼ぶたびに独立した写し（消費側の書き換え
   // 内部実体も、次に取り直した写しも変わらない。
   assertEquals(ANIMA_LATENTS_MEAN[0], meanBefore);
   assertEquals(ANIMA_LATENTS_STD[0], stdBefore);
-  const second = animaLatents();
+  const second = latentStats();
   assertEquals(second.mean[0], meanBefore);
   assertEquals(second.std[0], stdBefore);
   assertNotStrictEquals(second.mean, first.mean);

@@ -36,7 +36,7 @@ import { assertThrows } from "@std/assert";
 import { type DistributionSource, type Manifest, parseManifest } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
 import type { SessionDiagnostics } from "@karume/runtime";
-import { AnimaPipeline, formatResolution, type ImageSize } from "../../models/anima.ts";
+import { Pipeline, formatResolution, type ImageSize } from "../../models/anima.ts";
 import {
   assertAttentionSeatsComplete,
   assertSeatsApplied,
@@ -144,7 +144,7 @@ const observeStep1 = async (
 ): Promise<Observation> => {
   const where = `${quant} / ${formatResolution(resolution)} / seed ${seed}`;
   const runs: SessionDiagnostics["lastRunPipelines"][] = [];
-  await using pipeline = await AnimaPipeline.fromPretrained(source, {
+  await using pipeline = await Pipeline.fromPretrained(source, {
     model: MODEL,
     quant,
     onRunDiagnostics: (component, diagnostics) => {

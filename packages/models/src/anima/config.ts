@@ -10,7 +10,7 @@
  * to the default, the run would disagree with the default the distributor intended, unnoticed).
  * MUST: maps are read only through `Object.hasOwn` (cross-cutting invariant).
  *
- * NOTE: the public distribution repository table ({@link ANIMA_SOURCES}) lives here too. It is not
+ * NOTE: the public distribution repository table ({@link SOURCES}) lives here too. It is not
  * a value derivable from the manifest but the "which manifest to fetch" side, so the distribution
  * cannot hold it (ADR 0073).
  */
@@ -40,7 +40,7 @@ export const ANIMA_PIPELINE_MAJOR = 1;
  *   `anima-wai-v1.0`)
  *
  * Both are one repository = several models, so a repository reference alone does not pick one — to
- * use a non-default model, write `fromPretrained(ANIMA_SOURCES["anima"], { model })`.
+ * use a non-default model, write `fromPretrained(SOURCES["anima"], { model })`.
  *
  * `anima-extra` does not ship the text stack (`text_encoder` / `vae_decoder` / `tokenizer` /
  * `tokenizer_2`) itself and **borrows it by cross-repository reference** from the official
@@ -56,7 +56,7 @@ export const ANIMA_PIPELINE_MAJOR = 1;
  * so the bytes this published package reads would change silently for network-side reasons (an
  * unrecoverable accident). A SHA removes the revision-resolution request itself, so an offline
  * start with a complete cache works at the same time (ADR 0038). Users who need to follow main
- * choose `{ ...ANIMA_SOURCES["anima"], revision: "main" }` explicitly.
+ * choose `{ ...SOURCES["anima"], revision: "main" }` explicitly.
  *
  * NOTE: the old turbo-only repository (`hdae/karume-anima-turbo` — one model per repository with
  * the LoRA baked in) is retired (ruling of 2026-09-01, breaking). It was merged into a form where
@@ -65,7 +65,7 @@ export const ANIMA_PIPELINE_MAJOR = 1;
 // NOTE: the revision is updated to main's SHA after upload in §3 of the release runbook
 // (docs/release-runbook.md) (inherits the upkeep duty of ADR 0073 decision 3 — by hand + the
 // runbook check).
-export const ANIMA_SOURCES = {
+export const SOURCES = {
   anima: {
     repo: "hdae/karume-anima",
     revision: "bf0c7a634540b64f6317ca6414b6d61c7a95274c",
@@ -83,7 +83,7 @@ const RESOLUTION_KEYS: readonly string[] = ["width", "height"];
 
 /**
  * Update rule of denoising (sampler type). The manifest's declaration sets the **default**, and the
- * `sampler` field of the generation request (`AnimaGenerateRequest`) overrides it per call
+ * `sampler` field of the generation request (`GenerateRequest`) overrides it per call
  * (re-ruling of 2026-08-25 — the distribution default is the distributor's recommendation, the
  * choice of update rule is the user's knob). Both values are always valid, independent of the
  * assets.
@@ -92,10 +92,10 @@ const RESOLUTION_KEYS: readonly string[] = ["width", "height"];
  *   `sampler.ts`).
  * - `"dpmpp-2m"` — DPM++ 2M (`src/generation/dpm-solver-multistep.ts`).
  */
-export type AnimaSamplerType = (typeof ANIMA_SAMPLER_TYPES)[number];
+export type SamplerType = (typeof SAMPLER_TYPES)[number];
 
 /**
- * The values of {@link AnimaSamplerType} (the source of truth for the vocabulary — the type is
+ * The values of {@link SamplerType} (the source of truth for the vocabulary — the type is
  * derived from it). The check ({@link assertAnimaSamplerType}) and CLI / UI choices all read this
  * one list.
  *
@@ -103,7 +103,7 @@ export type AnimaSamplerType = (typeof ANIMA_SAMPLER_TYPES)[number];
  * accepted set of every later pipeline (both the manifest side and the request side) would change
  * silently.
  */
-export const ANIMA_SAMPLER_TYPES = Object.freeze(["euler", "dpmpp-2m"] as const);
+export const SAMPLER_TYPES = Object.freeze(["euler", "dpmpp-2m"] as const);
 
 /**
  * Value when `scheduler.type` is omitted.
@@ -112,7 +112,7 @@ export const ANIMA_SAMPLER_TYPES = Object.freeze(["euler", "dpmpp-2m"] as const)
  * **existing distribution manifests without this field have to keep the old update rule without
  * changing a byte** (repositories already distributed cannot be migrated).
  */
-const DEFAULT_SAMPLER_TYPE: AnimaSamplerType = "euler";
+const DEFAULT_SAMPLER_TYPE: SamplerType = "euler";
 
 /**
  * Scheduler configuration (can vary per distribution, so the manifest holds it). `type` is optional
@@ -120,7 +120,7 @@ const DEFAULT_SAMPLER_TYPE: AnimaSamplerType = "euler";
  * default is confined to this one place, and the consumer (pipeline) has no branch.
  */
 type AnimaScheduler = {
-  readonly type: AnimaSamplerType;
+  readonly type: SamplerType;
   readonly shift: number;
   readonly numTrainTimesteps: number;
 };
@@ -200,19 +200,17 @@ const parseDefaults = (raw: unknown): AnimaDefaults => {
  * Checks the sampler type spelling, **showing expected and actual side by side** (the shared entry
  * of the manifest side and the generation request side).
  *
- * MUST: the single source of truth for the vocabulary is {@link ANIMA_SAMPLER_TYPES} — if a
+ * MUST: the single source of truth for the vocabulary is {@link SAMPLER_TYPES} — if a
  * misspelling silently fell back to the default, the run would disagree with the declared or
  * requested update rule, unnoticed. `where` names the origin of the spelling (`scheduler.type` /
  * the request's `sampler`).
  */
-export const assertAnimaSamplerType = (value: unknown, where: string): AnimaSamplerType => {
+export const assertAnimaSamplerType = (value: unknown, where: string): SamplerType => {
   const accepted =
-    typeof value === "string"
-      ? ANIMA_SAMPLER_TYPES.find((candidate) => candidate === value)
-      : undefined;
+    typeof value === "string" ? SAMPLER_TYPES.find((candidate) => candidate === value) : undefined;
   if (accepted === undefined) {
     throw new Error(
-      `${where}: expected ${ANIMA_SAMPLER_TYPES.map((name) => `'${name}'`).join(" / ")}` +
+      `${where}: expected ${SAMPLER_TYPES.map((name) => `'${name}'`).join(" / ")}` +
         ` (actual ${typeof value === "string" ? `'${value}'` : String(value)})`,
     );
   }
@@ -223,7 +221,7 @@ export const assertAnimaSamplerType = (value: unknown, where: string): AnimaSamp
  * Reads `scheduler.type` (default when the field is absent — {@link assertAnimaSamplerType} rejects
  * unknown values).
  */
-const parseSamplerType = (record: Record<string, unknown>, where: string): AnimaSamplerType =>
+const parseSamplerType = (record: Record<string, unknown>, where: string): SamplerType =>
   Object.hasOwn(record, "type")
     ? assertAnimaSamplerType(record["type"], `${where}.type`)
     : DEFAULT_SAMPLER_TYPE;

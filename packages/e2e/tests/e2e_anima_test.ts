@@ -1,5 +1,5 @@
 /**
- * Anima の**移植の門**（実 GPU）。manifest → 資産 → `AnimaPipeline` → `generate` →
+ * Anima の**移植の門**（実 GPU）。manifest → 資産 → `Pipeline` → `generate` →
  * `encodePng` まで通し、出力画素（`encodePng` が IDAT に書く RGB8 の画素列 — {@link rgbPixels}）の sha256 が
  * 参照値と**ビット一致**するかだけを見る。PNG は実物として残すが、sha は圧縮前の画素列に対して採る —
  * IDAT の deflate はランタイムの zlib 実装で変わり（Deno と Node で画素が同一でもバイトが違う）、
@@ -59,10 +59,10 @@ import { type FileRef, parseManifest, resolveSelection, selectionRefs } from "@k
 import { acquireGpu, type GpuContext, type SessionDiagnostics } from "@karume/runtime";
 import type { Manifest } from "@karume/hub";
 import {
-  type AnimaGenerateEvent,
-  AnimaPipeline,
-  type AnimaResidency,
-  type AnimaSamplerType,
+  type GenerateEvent,
+  Pipeline,
+  type Residency,
+  type SamplerType,
   formatResolution,
   type GeneratedImage,
   type ImageSize,
@@ -387,11 +387,11 @@ const settlePng = async (
  */
 const assertReferencePng = async (
   label: string,
-  pipeline: AnimaPipeline,
+  pipeline: Pipeline,
   resolution: ImageSize,
   options: {
-    readonly sampler?: AnimaSamplerType;
-    readonly onEvent?: (event: AnimaGenerateEvent) => void;
+    readonly sampler?: SamplerType;
+    readonly onEvent?: (event: GenerateEvent) => void;
     readonly twin?: string;
   } = {},
 ): Promise<void> => {
@@ -418,7 +418,7 @@ const assertReferencePng = async (
 type TurboOptions = {
   readonly caches?: CacheStorage;
   readonly onRunDiagnostics?: (component: string, diagnostics: SessionDiagnostics) => void;
-  readonly residency?: AnimaResidency;
+  readonly residency?: Residency;
   /** 共有 GPU（呼び手の所有物 — 破棄は呼び手）。 */
   readonly gpu?: GpuContext;
 };
@@ -428,7 +428,7 @@ type TurboOptions = {
  * [Symbol.asyncDispose] and then stops the server; later disposals return the first completion,
  * so a describe can close it inside an it and again in afterAll.
  */
-type OpenedTurbo = AsyncDisposable & { readonly pipeline: AnimaPipeline };
+type OpenedTurbo = AsyncDisposable & { readonly pipeline: Pipeline };
 
 /**
  * turbo の配布形を**取得層経由**（ローカル HTTP + `fromPretrained`）で組む。
@@ -441,9 +441,9 @@ type OpenedTurbo = AsyncDisposable & { readonly pipeline: AnimaPipeline };
 const openTurbo = async (quant: string, options: TurboOptions): Promise<OpenedTurbo> => {
   const manifest = readManifest();
   const server = await serveAssets(servedOrigins(manifest, quant, ASSETS_DIR));
-  let pipeline: AnimaPipeline;
+  let pipeline: Pipeline;
   try {
-    pipeline = await AnimaPipeline.fromPretrained(
+    pipeline = await Pipeline.fromPretrained(
       { repo: REPO, hubUrl: `http://127.0.0.1:${server.addr.port}` },
       {
         quant,
@@ -478,7 +478,7 @@ const openTurbo = async (quant: string, options: TurboOptions): Promise<OpenedTu
 const withTurbo = async (
   quant: string,
   options: TurboOptions,
-  body: (pipeline: AnimaPipeline) => Promise<void>,
+  body: (pipeline: Pipeline) => Promise<void>,
 ): Promise<void> => {
   await using opened = await openTurbo(quant, options);
   await body(opened.pipeline);
@@ -490,7 +490,7 @@ for (const { quant, resolution } of REFERENCE) {
   // ことは、**生成を 1 本も増やさず**最短の 512 ケースだけを明示に振り替えて見る。既定経路の
   // 門は残りのケースと fromPretrained（同じ quant/512 を既定で回して同じ sha を要求する）が
   // 保つので、どちらの経路も裸のまま残らない。
-  const sampler: AnimaSamplerType | undefined = resolution.width === 512 ? "euler" : undefined;
+  const sampler: SamplerType | undefined = resolution.width === 512 ? "euler" : undefined;
   test.skipIf(!RUNNABLE || references.lacksReference(label))(
     `e2e(実GPU): quant ${quant} / ${formatResolution(resolution)} / ${STEPS}step / ` +
       `seed ${SEED} の PNG が参照 sha256 と一致する` +
@@ -558,8 +558,8 @@ type DistributionSource = {
 /** 組み上がった base の pipeline を {@link BASE_REFERENCE} のノブで 1 枚焼き、sha を突き合わせる。 */
 const assertBasePng = async (
   label: string,
-  pipeline: AnimaPipeline,
-  options: { readonly sampler?: AnimaSamplerType; readonly twin?: string } = {},
+  pipeline: Pipeline,
+  options: { readonly sampler?: SamplerType; readonly twin?: string } = {},
 ): Promise<void> => {
   const { resolution, steps, guidanceScale, negativePrompt } = BASE_REFERENCE;
   const started = performance.now();
@@ -597,7 +597,7 @@ const assertBasePng = async (
 const assertBaseReferencePng = async (
   label: string,
   options: {
-    readonly sampler?: AnimaSamplerType;
+    readonly sampler?: SamplerType;
     readonly source?: DistributionSource;
     readonly quant?: string;
   } = {},
@@ -611,7 +611,7 @@ const assertBaseReferencePng = async (
   const server = await serveAssets(servedOrigins(manifest, quant, dir, model));
   try {
     // MUST: `caches` は公開面の注入席から渡す（実 Cache Storage に数 GB を書かない）。
-    await using pipeline = await AnimaPipeline.fromPretrained(
+    await using pipeline = await Pipeline.fromPretrained(
       { repo: REPO, hubUrl: `http://127.0.0.1:${server.addr.port}` },
       { model, quant, caches: new MemoryCacheStorage() },
     );
@@ -685,7 +685,7 @@ test.skipIf(!RUNNABLE || references.lacksReference("base-cfg-fromAssets-shards")
         `この配布形は part 分割されていない（キー: ${Object.keys(input.assets).join(" / ")}）`,
       );
     }
-    await using pipeline = await AnimaPipeline.fromAssets(input, { model: BASE_MODEL, quant });
+    await using pipeline = await Pipeline.fromAssets(input, { model: BASE_MODEL, quant });
     await assertBasePng("base-cfg-fromAssets-shards", pipeline, { twin: "base-cfg" });
   },
 );
@@ -822,7 +822,7 @@ describe.skipIf(!RUNNABLE || references.lacksReference("onEvent-1024"))(
     const resolution: ImageSize = { width: 1024, height: 1024 };
     const runs: string[] = [];
     let scheduler: ReturnType<typeof parseAnimaPipelineConfig>["scheduler"];
-    let pipeline: AnimaPipeline;
+    let pipeline: Pipeline;
     let turbo: OpenedTurbo | undefined;
     beforeAll(async () => {
       const manifest = readManifest();
@@ -965,7 +965,7 @@ describe.skipIf(!RUNNABLE || references.lacksReference("onEvent-1024"))(
 
 // --- 公開契約（直列化 / dispose / 共有 GPU の所有権）--------------------------
 //
-// `AnimaPipeline` が掲げる公開契約は 4 つ: ①並行 `generate` は待たされて順に走る
+// `Pipeline` が掲げる公開契約は 4 つ: ①並行 `generate` は待たされて順に走る
 // ②`dispose` は in-flight の完了を待つ（flush-before-destroy）③2 度目以降の `dispose` は
 // 同じ完了を返す ④渡された `GpuContext` は破棄しない。GPU 無しの
 // `anima_pipeline_test.ts` はコンストラクタが private なので**結線**を組めず、
@@ -980,7 +980,7 @@ describe.skipIf(!RUNNABLE)(
     const { quant } = REFERENCE[1];
     const resolution: ImageSize = { width: 512, height: 512 };
     const request = { prompt: PROMPT, resolution, steps: 2, seed: SEED };
-    let pipeline: AnimaPipeline;
+    let pipeline: Pipeline;
     let turbo: OpenedTurbo | undefined;
     beforeAll(async () => {
       turbo = await openTurbo(quant, {});
@@ -990,7 +990,7 @@ describe.skipIf(!RUNNABLE)(
 
     it("並行に投げた 2 本の段が交互にならない", async () => {
       const log: string[] = [];
-      const trace = (tag: string) => (event: AnimaGenerateEvent) => {
+      const trace = (tag: string) => (event: GenerateEvent) => {
         if (event.kind === "stage") log.push(`${tag}:${event.component}:${event.at}`);
       };
       // await せずに 2 本投げる（鎖が外れていれば段が交互に現れる）。
@@ -1032,14 +1032,14 @@ test.skipIf(!RUNNABLE)(
     const gpu = await acquireGpu();
     try {
       const hub = { repo: REPO, hubUrl: `http://127.0.0.1:${server.addr.port}` };
-      const first = await AnimaPipeline.fromPretrained(hub, {
+      const first = await Pipeline.fromPretrained(hub, {
         quant,
         gpu,
         caches: new MemoryCacheStorage(),
       });
       await first.dispose();
       // device が破棄されていれば、2 本目の構築（Session の重みアップロード）が落ちる。
-      const second = await AnimaPipeline.fromPretrained(hub, {
+      const second = await Pipeline.fromPretrained(hub, {
         quant,
         gpu,
         caches: new MemoryCacheStorage(),
@@ -1078,7 +1078,7 @@ const RESIDENCY_RUNNABLE =
   references.lookup(RESIDENCY_TWINS[512]) !== undefined;
 
 /** イベント 1 つをログの綴りにする（段 / 常駐だけ — step とタイルは数だけ見れば足りる）。 */
-const residencyLogOf = (event: AnimaGenerateEvent): string | undefined => {
+const residencyLogOf = (event: GenerateEvent): string | undefined => {
   if (event.kind === "stage") return `stage:${event.component}:${event.at}`;
   if (event.kind === "residency") return `residency:${event.action}/${event.reason}`;
   return undefined;
@@ -1092,9 +1092,9 @@ const residencyLogOf = (event: AnimaGenerateEvent): string | undefined => {
  */
 const assertResidencyTwin = async (
   label: string,
-  pipeline: AnimaPipeline,
+  pipeline: Pipeline,
   size: 512 | 1024,
-  residency: AnimaResidency | undefined,
+  residency: Residency | undefined,
   onLogged?: (entry: string) => Promise<void>,
 ): Promise<string[]> => {
   const twin = RESIDENCY_TWINS[size];
@@ -1190,7 +1190,7 @@ describe.skipIf(!RESIDENCY_RUNNABLE)(
   () => {
     const { quant } = REFERENCE[0];
     const runs = transformerRuns();
-    let pipeline: AnimaPipeline;
+    let pipeline: Pipeline;
     let turbo: OpenedTurbo | undefined;
     beforeAll(async () => {
       turbo = await openTurbo(quant, { residency: "transformer", onRunDiagnostics: runs.observe });
@@ -1269,7 +1269,7 @@ describe.skipIf(!RESIDENCY_RUNNABLE)(
   () => {
     const { quant } = REFERENCE[1];
     const runs = transformerRuns();
-    let pipeline: AnimaPipeline;
+    let pipeline: Pipeline;
     let turbo: OpenedTurbo | undefined;
     beforeAll(async () => {
       // 構築オプションは既定（per-stage）のまま、request だけで常駐を切り替える。
