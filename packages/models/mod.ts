@@ -63,10 +63,10 @@ export { ModelInputError } from "./src/errors.ts";
 
 /**
  * The source tables of every family merged into one (**the same keys and the same values** as each
- * family's `*_SOURCES` — ADR 0092). A surface **only in the barrel**, for callers that "walk every
- * published distribution repository" (connectivity smoke tests, prefetching, listings). A consumer
- * that uses only one family should use that family's table from its subpath (using the barrel pulls
- * in the configs of nine families).
+ * family's `SOURCES`, `<namespace>.SOURCES` here — ADR 0092). A surface **only in the barrel**,
+ * for callers that "walk every published distribution repository" (connectivity smoke tests,
+ * prefetching, listings). A consumer that uses only one family should use that family's table
+ * from its subpath (using the barrel pulls in the configs of nine families).
  */
 export { KARUME_SOURCES } from "./src/sources.ts";
 

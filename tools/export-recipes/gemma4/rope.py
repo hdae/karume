@@ -48,7 +48,7 @@ ROPE_TYPES = (DEFAULT_ROPE_TYPE, PROPORTIONAL_ROPE_TYPE)
 #: （{@link gemma4.distribution.assert_gemma4_graph}）が**同じ綴り**で残骸を落とすための正本。
 BAKED_TABLE_INFIX = "rotary_emb."
 
-#: `pipelineConfig.rope` の欄名（TS 側 `parseGemma4PipelineConfig` の綴り）。
+#: `pipelineConfig.rope` の欄名（TS 側 `gemma.parsePipelineConfig` の綴り）。
 THETA_FIELD = "theta"
 HEAD_DIM_FIELD = "headDim"
 ROTARY_DIM_FIELD = "rotaryDim"

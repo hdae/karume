@@ -3,7 +3,7 @@
 条件画像 1 枚から 1280×704・9 フレーム（潜在 `[48,3,44,80]`・S = 2,640・条件のトークン P = 880）を
 2 ステップ（CFG あり・guidance 5.0・shift 5.0）回した潜在と、それをタイル decode → unpatchify →
 クランプした RGB のフレームを、diffusers の `WanImageToVideoPipeline` の `expand_timesteps` の分岐
-（Wan2.2 5B の I2V）を CPU f32 で回して作る。GPU の通し（`WanTi2vPipeline` の I2V）はこの値と帯で
+（Wan2.2 5B の I2V）を CPU f32 で回して作る。GPU の通し（`wan.Ti2vPipeline` の I2V）はこの値と帯で
 照合する。T2V の `wan/ti2v_few_step_ref.py` は変えずに部品を流用する（重みの読み手・scheduler・
 プロンプトの行の引き方・タイル decode・2 相の順）。
 

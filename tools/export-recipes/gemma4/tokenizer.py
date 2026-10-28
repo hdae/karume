@@ -17,7 +17,7 @@ E4B はこの資産を共有する（上流 `tokenizer.json` が E2B とバイ�
 を踏む符号化ケース。chat の綴りは Gemma 3 系と違い `<|turn>` / `<turn|>` / `<|channel>` /
 `<|think|>` で（ADR 0084 Context 3）、`<start_of_turn>` は**この語彙に無い**。
 
-MUST: chat template そのもの（`gemma4ChatPrompt`）は本段の射程外（ADR 0084 決定 5 = 段 4）。
+MUST: chat template そのもの（`gemma.chatPrompt`）は本段の射程外（ADR 0084 決定 5 = 段 4）。
 ここで踏むのは「特殊トークンが AddedVocabulary として切り出される」という符号化側の性質だけ。
 """
 

@@ -165,7 +165,7 @@ INPUT_IDS = one_shot.INPUT_IDS
 
 #: RoPE 派生入力の綴り（`rope_<層種別>_<cos|sin>`）と、並びを決める層種別の順。
 #: **ラッパの forward 引数名そのもの**（torch.export がグラフ入力名に採る）で、TS 側の
-#: `Gemma4Pipeline` が名前で束ねる。
+#: `gemma.Pipeline` が名前で束ねる。
 ROPE_INPUT_PREFIX = "rope_"
 ROPE_PARTS: tuple[str, ...] = ("cos", "sin")
 ROPE_LAYER_TYPES: tuple[str, ...] = (one_shot.SLIDING_ATTENTION, one_shot.FULL_ATTENTION)

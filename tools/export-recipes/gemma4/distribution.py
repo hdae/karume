@@ -741,7 +741,7 @@ def assert_gemma4_graph(
     `[1, R, 幅]` の 3 軸であることを前提に幅だけを読む）。
 
     MUST: 記号は 3 本（chunk 行数 `M` / 出口の行数 `R` / full スロットの容量）で、**入力 shape
-    から決まらないもの**がちょうど 1 本（容量記号）。TS 側 `Gemma4Pipeline` はこの 1 本を容量の
+    から決まらないもの**がちょうど 1 本（容量記号）。TS 側 `gemma.Pipeline` はこの 1 本を容量の
     束縛点にするので、割れ方が変わるとロード時に落ちる（`capacitySymbolOf` の同じ検査）。
     `R` は `last_row[R]` が束縛するので、この勘定では自由記号に数えない。
     """
@@ -1013,7 +1013,7 @@ def gemma4_sampler(model_dir: Path) -> dict[str, Any]:
 
     MUST: 値を写経しない（ADR 0083 決定 7 — 「既定値は配布形が宣言する」の出どころは上流の
     宣言そのもの）。欄名だけは TS 側 `SamplerSpec` の綴りへ翻訳する（`top_k` → `topK`）。
-    値域は TS 側 `parseGemma4PipelineConfig` と同じ — 配ってから parse で落ちる形にしない。
+    値域は TS 側 `gemma.parsePipelineConfig` と同じ — 配ってから parse で落ちる形にしない。
     """
     where = str(model_dir / GEMMA4_GENERATION_CONFIG_FILE)
     raw = _read_json(model_dir / GEMMA4_GENERATION_CONFIG_FILE, "上流の生成既定")

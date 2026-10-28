@@ -5,7 +5,7 @@
  * import, so the browser bundle never loads this module).
  *
  * The object form also serves the mount on the HF-compatible route (`/hf/`) under the public repo name
- * of the family's `*_SOURCES` table, so a page can read it through the hub's CacheStorage. A
+ * of the family's `SOURCES` table, so a page can read it through the hub's CacheStorage. A
  * directory without a public repo (Gemma 4 QAT) or one only reached as a cross-repo reference (umT5)
  * is mounted for the direct route only.
  */

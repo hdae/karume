@@ -1,7 +1,7 @@
 /**
  * The **public distribution repo tables** of all families folded into one table (ADR 0092).
  *
- * The per-family tables (`<FAMILY>_SOURCES`) are canonical; this only makes their union available
+ * The per-family tables (`SOURCES` of each family's subpath) are canonical; this only makes their union available
  * from the barrel in one place. Values **and keys are the same as on the family side**, so
  * `KARUME_SOURCES["anima"]` and `anima.SOURCES["anima"]` point at the same entry.
  *

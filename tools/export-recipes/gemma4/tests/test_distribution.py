@@ -374,7 +374,7 @@ class TestGemma4Config:
 
         IR の `symbols` は名前の列だけで上限を持たないので、`chunkLength` を上書きした呼び手が
         trace 範囲の外へ出たことは資産側では検出できない。焼く側が知っている唯一の数を宣言へ
-        載せることで、TS 側（`parseGemma4PipelineConfig` / `assertChunkLength`）が門にできる。
+        載せることで、TS 側（`gemma.parsePipelineConfig` / `assertChunkLength`）が門にできる。
 
         既定（{@link SMALL_CHUNK} へ寄せてある）とは**別の事実**なので、上限は monkeypatch の
         影響を受けず実物の値のまま出る。
@@ -635,7 +635,7 @@ class TestGemma4Sampler:
     def test_it_refuses_a_recommendation_outside_the_accepted_range(
         self, tmp_path: Path, key: str, value: Any, message: str
     ) -> None:
-        """受理集合は TS 側 `parseGemma4PipelineConfig` と同じ — 配ってから落ちる形にしない。"""
+        """受理集合は TS 側 `gemma.parsePipelineConfig` と同じ — 配ってから落ちる形にしない。"""
         config = {**fixture.GENERATION_CONFIG, key: value}
         sources = _sources(tmp_path)
         fixture.write_series(

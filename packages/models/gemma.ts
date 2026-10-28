@@ -9,9 +9,9 @@
  *
  * The generation vocabulary (`GenerationEvent` / `GenerationStop` / `SamplerSpec` /
  * `GenerationCapacityError`) is **independent of any pipeline**, but for now only this family uses
- * it, so it is exported from both the barrel and this surface. Functions that **create** a
- * `GenerationProgram` / `GenerationSequence` are not exported — the pipeline is the only entry
- * point, and no surface lets one be assembled around the static wiring.
+ * it, so it is exported from this surface (and through the barrel as `gemma.*`). Functions that
+ * **create** a `GenerationProgram` / `GenerationSequence` are not exported — the pipeline is the
+ * only entry point, and no surface lets one be assembled around the static wiring.
  *
  * MUST: every module is free of side effects (no execution at import, no global mutable state —
  * CLAUDE.md).

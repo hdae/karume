@@ -3,7 +3,7 @@
 1280×704・17 フレーム（潜在 `[48,5,44,80]`・S = 4,400）を 2 ステップ（CFG あり・guidance 5.0・
 shift 5.0）回した潜在（VAE の前）と、それをタイル decode → unpatchify → クランプした RGB の
 フレームを、diffusers の `WanPipeline` を CPU f32 で素のまま回して作る。GPU の通し
-（`WanTi2vPipeline`）はこの値と帯で照合する。2.1 の `wan/few_step_ref.py` の 2.2 版で、2.1 の台本と
+（`wan.Ti2vPipeline`）はこの値と帯で照合する。2.1 の `wan/few_step_ref.py` の 2.2 版で、2.1 の台本と
 `pipeline_ref.py` は変えない（`pipeline_ref.video_size` が 16 ch と縮尺 8 を書き込んでいる）—
 使うのは `pipeline_ref.pad_text_embeds` と `few_step_ref.denormalize_latents` だけ。
 

@@ -498,7 +498,7 @@ def sbv2_knob_defaults() -> dict[str, Any]:
     """実行時ノブの既定を `style_bert_vits2.constants` から引く（定数を写経しない）。
 
     配布形でノブの既定を持つのは `karume.json` の `pipelineConfig.defaults` の 1 席だけ
-    （TS 側の `Sbv2Pipeline` もそこだけを読む — `symbols.ts` の `defaults` の doc）。以前は
+    （TS 側の `sbv2.Pipeline` もそこだけを読む — `symbols.ts` の `defaults` の doc）。以前は
     共有席の `symbols.json` にも同じ値の写しを焼いて突き合わせていたが、その写しには消費者が
     いなかった（2026-09-24 全域レビュー W-RC5-1 で写しごと外した）。
 
@@ -722,7 +722,7 @@ def assert_symbols_match_model(symbols_path: Path, config: Mapping[str, Any]) ->
     綴りに入らない。したがって別モデルの資産が残っている木で組み立てると、記号表（モデル
     非依存）はそのままに、この 2 欄だけが別モデルの値で配られる。
 
-    MUST: `samplingRate` の食い違いは**沈黙する** — TS 側は `Sbv2Pipeline` の `generate()` の
+    MUST: `samplingRate` の食い違いは**沈黙する** — TS 側は `sbv2.Pipeline` の `generate()` の
     戻り `sampleRate` にそのまま載せるので、WAV が誤った周波数で書かれて再生速度と音高が
     ずれるだけで、例外は出ない（`hopLength` の側は長さ検算が loud に落とす）。
     """

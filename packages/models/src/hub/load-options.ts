@@ -8,9 +8,9 @@
  * missed it — the shape "a new knob silently does not arrive" recurs as long as copies exist.
  *
  * NOTE: `signal` is not included here — where it lives differs per family (families that pass it to
- * **both** fetching and construction keep it on `XPipelineOptions`; families where it affects only
- * fetching keep it on `XFromPretrainedOptions`). {@link hubLoadOptions} only takes it as an argument
- * and maps it; it does not touch where it lives.
+ * **both** fetching and construction keep it on their `PipelineOptions`; families where it affects
+ * only fetching keep it on their `FromPretrainedOptions`). {@link hubLoadOptions} only takes it as
+ * an argument and maps it; it does not touch where it lives.
  */
 
 import type {
@@ -22,7 +22,8 @@ import type {
 import type { ComponentSource } from "./components.ts";
 
 /**
- * The fetch-layer knobs that `XFromPretrainedOptions` share (passed through to hub as is).
+ * The fetch-layer knobs that every family's `FromPretrainedOptions` shares
+ * (`sbv2.FromPretrainedOptions` and so on through the barrel; passed through to hub as is).
  *
  * NOTE: `headers` / `fetch` / `caches` / `onRetry` are knobs **for the HTTP source only**; none of
  * them has any effect on a call that passes a source handle (`localDirectory` / `denoDirectory` /
@@ -58,8 +59,8 @@ export type FromPretrainedHubOptions = {
 };
 
 /**
- * The **component-replacement option** that `XFromPretrainedOptions` share (ADR 0108 decision 19 /
- * ADR 0109 decision 10).
+ * The **component-replacement option** that every family's `FromPretrainedOptions` shares (ADR 0108
+ * decision 19 / ADR 0109 decision 10).
  */
 export type FromPretrainedComponentOptions = {
   /**

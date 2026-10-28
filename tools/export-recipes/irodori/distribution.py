@@ -451,7 +451,7 @@ def irodori_context_kv_names(blocks: int) -> tuple[str, ...]:
 
 
 #: `(役割, グラフ入力, 軸, pipelineConfig の欄)` — グラフの**静的**次元と宣言の突合表。
-#: TS 側 `IrodoriPipeline.fromAssets` の `assertStaticDim` と同じ組み合わせを**焼く側でも**
+#: TS 側 `irodori.Pipeline.fromAssets` の `assertStaticDim` と同じ組み合わせを**焼く側でも**
 #: 見る（配ってから利用者の手元で初めて落ちる形にしない）。条件 state 3 本は `dit_context` の
 #: 入力（ADR 0114 で `dit` から移った）。
 IRODORI_STATIC_DIMS: tuple[tuple[str, str, int, str], ...] = (

@@ -56,7 +56,10 @@ const tts = await sbv2.Pipeline.fromPretrained(sbv2.SOURCES["sbv2-jvnv"]);
 const painter = await anima.Pipeline.fromPretrained(anima.SOURCES["anima"]);
 ```
 
-The package is side-effect free, so a bundler still drops the families and members you do not use.
+The package's modules are side-effect free, so a bundler drops the pipelines and members of the
+families you do not use. A barrel import still keeps every family's source table (about 1.5 KB
+minified) until the package declares `"sideEffects": false`
+([backlog](https://github.com/hdae/karume/blob/main/docs/backlog.md)); a subpath import does not.
 
 ## Families
 

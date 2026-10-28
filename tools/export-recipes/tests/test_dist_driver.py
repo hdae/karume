@@ -245,7 +245,7 @@ class TestReleaseRepositories:
         assert resolve_repo(dist.PIPELINES[pipeline], models, repo) == f"hdae/{directory}"
 
     def test_the_table_names_the_same_repositories_as_the_typescript_sources(self) -> None:
-        """公開 revision の正本（TS の各 family の `*_SOURCES`）と同じリポの集合を焼くこと。
+        """公開 revision の正本（TS の各 family の `SOURCES`）と同じリポの集合を焼くこと。
 
         2 つの表は別の言語で独立に更新されるので、リポの追加・改名を片側だけにすると、カードの
         Usage 例と pin のリポが割れる。TS 側は Python から読めるテキストなので機械で突き合わせる。

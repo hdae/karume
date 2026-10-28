@@ -7,7 +7,7 @@
     packages/models/tests/fixtures/gemma-text/gemma4-chat.json
 
 TS 側の実装は `packages/models/src/gemma/text/chat.ts` の純関数 1 本
-（`gemma4ChatPrompt`）で、汎用テンプレートレンダラは作らない（ADR 0084 決定 5 —
+（`gemma.chatPrompt`）で、汎用テンプレートレンダラは作らない（ADR 0084 決定 5 —
 「ランタイム依存は Web 標準のみ」と「投機的な一般化をしない」の両方に反する）。ここが
 持つのはその**期待値**だけである。
 
