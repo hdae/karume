@@ -6,7 +6,13 @@ import { LINEAR_I8A8_MAX_K } from "../src/kernels/linear-i8a8.ts";
 import { attentionScoreUsesF16 } from "../src/kernels/score-storage.ts";
 import { conv2dIgemmMTile, conv2dUsesVec4 } from "../src/kernels/conv2d.ts";
 import { conv3dI8a8EligibleShape, conv3dI8a8UsesVec4 } from "../src/kernels/conv3d-i8a8.ts";
-import { caseFlops, PROFILE_GEMM_ROWS_BOUNDS, SWEEP_CASES, SWEEP_OPS } from "../src/tune/cases.ts";
+import {
+  caseFlops,
+  PROFILE_GEMM_ROWS_BOUNDS,
+  SWEEP_CASES,
+  SWEEP_OPS,
+  sweepCaseEntries,
+} from "../src/tune/cases.ts";
 
 /** M が入るプロファイルの段の添字（`rows <= maxRows` で最初に当たる段 — runtime の表引きと同じ）。 */
 const profileSegmentOf = (rows: number): number =>
@@ -230,5 +236,28 @@ describe("形状表", () => {
         );
       assertEquals(shapes("qk"), shapes("pv"), op);
     }
+  });
+});
+
+describe("sweepCaseEntries (the public case list, geometrySweepCases of ./tune)", () => {
+  it("lists every case of the table as its id and op, in the table's order", () => {
+    assertEquals(
+      sweepCaseEntries(),
+      SWEEP_CASES.map(({ id, op }) => ({ id, op })),
+    );
+  });
+
+  describe("when a caller changes the returned list", () => {
+    it("leaves the table and the next call untouched", () => {
+      const before = SWEEP_CASES.length;
+      const entries = sweepCaseEntries();
+      entries.push({ id: "extra", op: "linear" });
+      const [first] = entries;
+      assert(first !== undefined);
+      Object.assign(first, { id: "renamed" });
+      assertEquals(SWEEP_CASES.length, before);
+      assertEquals(sweepCaseEntries()[0]?.id, SWEEP_CASES[0]?.id);
+      assert(SWEEP_CASES[0]?.id !== "renamed");
+    });
   });
 });

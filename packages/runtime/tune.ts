@@ -11,8 +11,10 @@
  *   a sweep while inference runs on the same GPU — the measurements would be meaningless and the two
  *   would compete for the GPU. The runtime cannot see other devices, so this is the caller's
  *   responsibility.
- * - The sweep's cases come from the op census of Anima (a DiT image model): the profile's fields
- *   are decided by Anima's shapes, also for applications that run other models.
+ * - The sweep's cases come from the op census of the models the profile serves: Anima (a DiT image
+ *   model) for the GEMM, attention and conv2d fields, and the VAE decoder of Wan2.2 TI2V-5B for
+ *   `i8a8.conv3d`. The profile's fields are decided by those shapes, also for applications that run
+ *   other models.
  * - {@link deriveGeometryProfile} turns one or more sweep records into a profile. A geometry is
  *   adopted for a field only if, in every case of that field, its output matched the default
  *   geometry's output bit for bit and it was at least ×1.05 faster. The evidence is limited to the
@@ -71,6 +73,13 @@ export type { GeometrySweepOptions, GeometrySweepProgress } from "./src/tune/swe
 /** The candidate set (`"quick"`, `"quick+"` or `"full"`) and the op families of a sweep. */
 export type { CandidateSet as GeometrySweepCandidateSet } from "./src/tune/geometries.ts";
 export type { SweepOp as GeometrySweepOp } from "./src/tune/cases.ts";
+/**
+ * Every case of the sweep's shape table as its id and op family, in op-family order: the ids
+ * `GeometrySweepOptions.cases` takes and the cases {@link sweepCaseSetId} covers. A new array on
+ * every call.
+ */
+export { sweepCaseEntries as geometrySweepCases } from "./src/tune/cases.ts";
+export type { SweepCaseEntry as GeometrySweepCase } from "./src/tune/cases.ts";
 /** The sweep record and its parts. */
 export type {
   CaseSummary as GeometrySweepCaseSummary,
@@ -109,6 +118,15 @@ export { geometryProfileMismatch } from "./src/tune/mismatch.ts";
  * a 16-digit hexadecimal string.
  */
 export { sweepCaseSetId } from "./src/tune/fingerprint.ts";
+
+/**
+ * The kernel fingerprint of the candidates a sweep record measured (the record's
+ * `candidateKernels`), derived from its rows and its `dp4a` without a GPU. An application that
+ * merges the records of several `runGeometrySweep` calls (one per case, with idle time between
+ * them) recomputes it over the merged rows: each record fingerprints only its own rows, and
+ * {@link deriveGeometryProfile} rejects a record whose value differs from the one it derives.
+ */
+export { sweepCandidateKernelsId } from "./src/tune/fingerprint.ts";
 
 /**
  * Times the s16 and online routes of a8 fused attention at given shapes (default: Wan2.2 TI2V-5B's

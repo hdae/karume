@@ -511,6 +511,17 @@ export const SWEEP_CASES: readonly SweepCase[] = [
   ...CONV3D_I8A8_CASES,
 ];
 
+/** A sweep case as an application sees it: the id `GeometrySweepOptions.cases` takes, and its op. */
+export type SweepCaseEntry = { readonly id: string; readonly op: SweepOp };
+
+/**
+ * Every case of {@link SWEEP_CASES} as its id and op, in the table's order. A new array of new
+ * objects on every call: the table itself stays internal (its descriptive fields are no public
+ * surface), and nothing a caller does to the result reaches the case set or the fingerprints.
+ */
+export const sweepCaseEntries = (): SweepCaseEntry[] =>
+  SWEEP_CASES.map(({ id, op }) => ({ id, op }));
+
 /**
  * The operation count of one dispatch (multiply-add = 2). For i8a8, the number of integer
  * operations (the TOPS equivalent).

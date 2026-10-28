@@ -477,6 +477,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GeometrySweepCase",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GeometrySweepCaseSummary",
         "kind": "typeAlias"
       },
@@ -525,6 +529,10 @@
         "kind": "function"
       },
       {
+        "name": "geometrySweepCases",
+        "kind": "function"
+      },
+      {
         "name": "parseGeometryProfileJson",
         "kind": "function"
       },
@@ -534,6 +542,10 @@
       },
       {
         "name": "runGeometrySweep",
+        "kind": "function"
+      },
+      {
+        "name": "sweepCandidateKernelsId",
         "kind": "function"
       },
       {

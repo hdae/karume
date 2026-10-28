@@ -89,6 +89,8 @@ adapter `device` and `description`, and Apple M2 and M5 share `apple` / `metal-3
 | `geometryProfileJson(profile)` / `parseGeometryProfileJson(text)` | Serialization and the parse at the `unknown` boundary (decision 7)                                                                                           |
 | `geometryProfileMismatch(profile, adapterInfo)`                   | Whether a stored table may be applied (decision 5)                                                                                                           |
 | `sweepCaseSetId()`                                                | The case-set version (decision 4)                                                                                                                            |
+| `geometrySweepCases()`                                            | The cases a sweep can be narrowed to, as id and op (addendum 2026-10-28)                                                                                     |
+| `sweepCandidateKernelsId(rows, dp4a)`                             | The candidate fingerprint of a record merged from per-case sweeps (addendum 2026-10-28)                                                                      |
 | Types                                                             | The record, options, candidate set and the parse error `GeometryProfileParseError`                                                                           |
 
 - The names are fixed here; argument and return details were settled in steps 2 / 4 (the
@@ -592,3 +594,34 @@ Steps 1–7 all green (see Acceptance); the remaining items stay under Open poin
   token still moves the fingerprint, with the same re-generation discipline as before.
 - **Checks**: `tune_fingerprint_test.ts` pins that comment-only and whitespace-only WGSL edits keep
   the value, that one added token changes it, and that nested block comments are stripped.
+
+## Addendum (2026-10-28) — two `./tune` entries for applications that sweep case by case (amends decision 2)
+
+- **What changed**: `./tune` gains `geometrySweepCases()` (with its element type `GeometrySweepCase`)
+  and `sweepCandidateKernelsId(rows, dp4a)`.
+  - `geometrySweepCases()` returns every case of the sweep's table as `{ id, op }`, in the table's
+    order, as a new array of new objects on every call. The ids are what
+    `GeometrySweepOptions.cases` already takes. The table itself (`SWEEP_CASES`, with its shapes,
+    `source`, `censusCount` and `mirrorOf`) stays internal, so a change to a case's descriptive
+    fields is no public change, and nothing a caller does to the result reaches the case set or the
+    fingerprints.
+  - `sweepCandidateKernelsId` is the function the writer and the reader of `candidateKernels`
+    already share (M7 addendum): from a record's rows and its `dp4a`, without a GPU.
+- **Why**: the playground's geometry sweep page (the successor of the removed gpu-lab sweep tab, ADR
+  0127 decision 5) calls `runGeometrySweep` once per case with idle time between cases, so that heat
+  does not move the default geometry's re-measurement. It must list the cases to offer them, and it
+  merges the per-case records into one. Each per-case record fingerprints only its own rows, so the
+  merged record's `candidateKernels` must be recomputed over all the rows, or
+  `deriveGeometryProfile` rejects it. The ampere sweep of 2026-10-23 merged the same way through an
+  internal import ([research 2026-10-23-ampere-geometry-sweep](../research/2026-10-23-ampere-geometry-sweep.md)),
+  which an application cannot do.
+- **Why not a runtime merge function**: a `mergeGeometrySweepReports` would keep decision 2's
+  "high-level entry points only", but what a merge means is the application's choice: which cases
+  were planned, whether a cancel between cases counts as `aborted`, and how `gpuTiming.quantized`
+  combines (the playground takes it as true when any per-case record has it — the larger rounding
+  bound — where one call would judge all the rows together). Both entries are pure, GPU-free
+  functions of public types, of the same rank as `sweepCaseSetId()`.
+- **The cases are no longer Anima's alone** (amends the last point of decision 2): since the
+  addendum of 2026-10-26 to [0133](0133-conv3d-w8a8.md) (conv3d geometry) the table also holds the
+  conv3d w8a8 cases of Wan2.2 TI2V-5B's VAE decoder, which decide `i8a8.conv3d`. The `./tune`
+  module doc says so.
