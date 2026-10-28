@@ -104,6 +104,11 @@ Grounds: the Consequences of ADR [0108](decisions/0108-container-format.md) and 
   components `[T, H, W]`** (`stride` / `padding` / `dilation`). **Rank 5** appears for the first time in a weight
   initializer (the rank limit of 4 for the strided family applies to values, not to initializers).
   No effect on existing IR.
+- Model expansion (2026-10-27): added `group_norm` as the **Core ATen layer** (`aten.native_group_norm` — a
+  ledger NOTE in [op-vocabulary.md](op-vocabulary.md); the design is ADR [NNNN](decisions/NNNN-moss-image-dit-vae.md)
+  decision 7, requested by MOSS-Image's untiled FLUX.2 decoder). **Arity fixed at 3**, attrs `num_groups` / `eps`;
+  the exporter preserves `aten.group_norm`, so the default preserved list has 13 ops. No effect on existing IR
+  (a GroupNorm failed before as an unsupported op).
 
 ## Container
 
@@ -576,13 +581,14 @@ The contract of nodes that read and write state slots (ADR
   [0015](decisions/0015-conv-family-extension.md) / ADR
   [0017](decisions/0017-rms-norm-conv2d-clamp-min.md)) — high-level ops the exporter stops decomposing and carries as
   a single node. The preserved ops of ADR [0007](decisions/0007-op-vocabulary.md) became **11** with
-  `leaky_relu` in M1-P3 and `conv2d` / `rms_norm` in M1-P4 (ADR 0017), and **12** with `conv3d` of the extended composite layer (ADR 0118);
+  `leaky_relu` in M1-P3 and `conv2d` / `rms_norm` in M1-P4 (ADR 0017), **12** with `conv3d` of the extended composite layer (ADR 0118),
+  and **13** with `group_norm` of the Core ATen layer (ADR NNNN decision 7);
   all of them
   **have kernels** (`conv2d` showed up in measurement in Anima's VAE decoder). Only `rms_norm` has
   **two supply routes**: ① `aten.rms_norm` from diffusers' `nn.RMSNorm` becomes one node as is via the preserved
   list ② the hand-written decomposed form of Qwen3 / DiT cannot be folded by preservation, so
   the exporter's folding pass (`_fold_rms_norm`) composes it into one node (ADR 0016 / 0017).
-  **The fused `attention` (perf-a) is not in the default preserved list (12 ops)**: applying SDPA preservation globally would
+  **The fused `attention` (perf-a) is not in the default preserved list (13 ops)**: applying SDPA preservation globally would
   also pick up forms with masks outside the contract and make them impossible to export, so it is **an opt-in per target**
   (ADR 0023 addendum):
   - `linear` (f32, no attrs, **arity fixed at 3**) — `x[…,in] × W[out,in] + b[out]`.
@@ -590,6 +596,15 @@ The contract of nodes that read and write state slots (ADR
   - `layer_norm` (f32, attrs `normalized_shape` / `eps`, **arity fixed at 3**) — last dimension only
     (`normalized_shape` has length 1), affine always present. The variance is **the population variance (correction = 0)**,
     and `eps` is a finite positive number
+  - `group_norm` (f32, attrs `num_groups` / `eps`, **arity fixed at 3** — ADR [NNNN](decisions/NNNN-moss-image-dit-vae.md)
+    decision 7) — `x[N,C,…]` (rank ≥ 2; **C static**, the trailing axes may be symbolic, no axis of length 0) /
+    `weight[C]` / `bias[C]` → the shape of x. The C channels form `num_groups` groups of `C/num_groups` consecutive
+    channels; each group (its channels × every trailing position of one batch item) is normalised with **the population
+    variance** (`y = (x − mean)·rsqrt(var + eps)`), then the per-channel affine `y·weight[c] + bias[c]`. `num_groups` is a
+    positive integer that **divides C** (a shape-rule check), and `eps` is a finite positive number (the normalisation ops'
+    rule). The affine is always present: for a module without affine the exporter composes ones / zeros (the bias-only form
+    fails loudly). The statistics are two passes — the mean, then the sum of squared deviations — over a reduction tree
+    fixed by the shape (the one-pass `E[x²] − E[x]²` cancels over groups of millions of elements)
   - `attention` (f32, attrs `scale`, **arity 3 or 4**) — `out = softmax_lastdim((q·scale) @
     (k·scale)ᵀ + mask) @ v` (ADR [0023](decisions/0023-fused-attention.md)). The inputs are
     **rank-4 head-first** (`q[B,H,M,D]` / `k[B,Hkv,N,D]` / `v[B,Hkv,N,D]`, contiguous) and the output is

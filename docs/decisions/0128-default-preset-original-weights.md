@@ -176,6 +176,7 @@ The maintainer withdrew the draft on 2026-10-17 on these grounds:
    | wan2.1 / wan2.2                                    | —                       | skipped (DiT f32 about 5.6 / 20 GB; the text encoder is umT5 i8)       |
    | umt5-xxl                                           | —                       | skipped (f32 about 22.7 GB)                                            |
    | gemma4 e2b                                         | —                       | pending (bf16 upstream; needs the PLE in bf16 — ADR 0131 open point)   |
+   | moss-image (DiT + VAE)                             | —                       | pending (DiT bf16 upstream, VAE f32; nothing ships before the text encoder — ADR [NNNN](NNNN-moss-image-dit-vae.md) decision 13) |
 
 5. **A device without dp4a gets a warning, not a fallback.** When a Session is built with
    `linearCompute: "a8"` or `attentionCompute: "a8"` on a device whose WGSL language features lack

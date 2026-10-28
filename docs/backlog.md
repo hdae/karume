@@ -111,6 +111,9 @@ Node and Deno). The next wave is 0.15.1 — Gemma 4 QAT decode speed (the first 
   within 5 B of the subpath) once its survival through JSR's npm layer is verified (the open point of ADR
   [0037](decisions/0037-karume-monorepo.md) §4), or `/* @__PURE__ */` on those expressions.
 
+- **MOSS-Image (branch `wip/moss-image`, not part of 0.15 — ADR [NNNN](decisions/NNNN-moss-image-dit-vae.md), proposed)**: the DiT and the untiled FLUX.2 VAE are done on the branch (text as precomputed embeddings, the presets `f32+dit8` and `f32+dit8-a8-attn8-online`, an internal family with no subpath or distribution — stages 0–5 of the ADR, stage 5 except the visual review; the measurements are in [research 2026-10-28](research/2026-10-28-moss-image-dit-vae.md)). The branch stays apart from `wip/0.15` and gets the ADR's number when it is taken in.
+  Next = the text encoder (Qwen3.5-9B; its Gated DeltaNet layers need the scan op of ADR [0135](decisions/0135-gated-delta-rule-scan.md)) — publication waits for it (ADR NNNN decision 12). The default preset is chosen after the maintainer's visual check of the two presets (ADR 0128 decision 1). Its speed candidates are perf-ledger F-10 to F-12.
+
 - **gemma4 prefill in w4a8 (perf-ledger K-60, maintainer 2026-10-17 "in the backlog")**: design of an acceptance table that keeps decode on the M=1 GEMV and puts only prefill (chunks of M=768) on `linearCompute: "a8"` × i4 (switching by M). Today's a8 falls to the GEMM skeleton even at M=1 and is 8.45 times slower than the GEMV ([research 2026-09-19](research/2026-09-19-qat-speed-recon.md)), so opening the acceptance table is not enough.
 
 - **Root fix for the rows that collapse under umT5's a8 (perf-ledger K-81, filed 2026-10-18, maintainer: "root fix first, not even opt-in")**: per-token int8 crushes the remaining components in the rows of function words (spaces, commas, articles, suffixes) ([research 2026-10-18](research/2026-10-18-a8-umt5-sbv2.md) §6; the main cause is token-specific outliers in the input of the FFN exit `wo`; mixing a8 per linear or layer does not remove it). Candidate = per-row mixing (only rows whose crest exceeds a threshold take the f32 path — row routing in the runtime's `linear-i8a8`). An equivalent transform on the export side only helps fixed channels. Once this is closed, re-evaluate umt5's `i8-a8` (the adoption line and the work needed are in K-81).
@@ -417,6 +420,10 @@ Node and Deno). The next wave is 0.15.1 — Gemma 4 QAT decode speed (the first 
   to ①②③ (both dense / i8a8). Both touch kernels shared with linear (`quantize_rows`, the GEMM skeleton), so
   keep the output for existing keys with N % 4 == 0 byte-unchanged (the snapshots are the detector). Start condition: when there is a request to use Anima resolutions that are not
   multiples of 32 px in practice, or when a family that accepts N % 4 != 0 shapes has an a8 / s16 preset.
+  MOSS-Image (branch `wip/moss-image`) accepts such shapes with an a8 preset, but its preset runs them on the online
+  kernel, which pads the key axis (ADR 0132 addendum of 2026-10-27); it meets the condition only on a device with
+  neither online form, where the practical preset runs the three dispatches with S in f32 and, where S % 4 != 0,
+  ③PV in f32 too (ADR [NNNN](decisions/NNNN-moss-image-dit-vae.md) decision 10).
   Kill criterion: measured VRAM and speed on those shapes show no difference against today's path that falls back to f32.
 
 

@@ -580,9 +580,11 @@ k / v on the a8 seat) is unchanged.
   node, and that node is a permute the attention may absorb (dims `[0, 2, 1, 3]` on a rank-4 f32
   tensor, materialised). In addition the route must be the online kernel: `attentionRoute` on the
   Session's seats (`attentionCompute` `"a8"` × `attentionScoreStorage` `"none"`), the node's D and key
-  count N, and the device's facts (D ∈ {64, 128}, N % 4 == 0, and a device that holds the `sg32` or
-  the `wg` reduction form). The output permute is also absorbed when no input permute is (at least one
-  permute of the four is absorbed). Anything else leaves the permute as a node.
+  count N, and the device's facts (D ∈ {64, 128}, and a device that holds the `sg32` or the `wg`
+  reduction form; any N ≥ 1 since ADR [0132](0132-online-int8-attention.md)'s addendum of
+  2026-10-27, which padded the online kernel's key axis — `N % 4 == 0` before it). The output
+  permute is also absorbed when no input permute is (at least one permute of the four is absorbed).
+  Anything else leaves the permute as a node.
 - **The kernel form**: the online kernel's token-major store (`AttentionOnlineOutput` `"bshd"` in
   `packages/runtime/src/kernels/attention-online-i8a8.ts`, key suffix `:obshd`, H in a second uniform
   block). Only the store address changes, so O is bit-identical to "head-major store → strided permute".

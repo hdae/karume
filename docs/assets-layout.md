@@ -31,6 +31,11 @@ only how to make them).
   [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) decision 4), an intake is `umt5-xxl-<name>-i8-dyn`, the Wan2.2 TI2V-5B DiT is
   `wan2.2-ti2v-5b-i8-dyn/transformer` (ADR [0121](decisions/0121-wan22-ti2v-5b.md) stage 1), and the VAE (decoder first / next and the I2V encoder pre / attn / post) is
   `wan2.2-ti2v-5b-f16-dyn` (it holds no DiT — ADR 0121 decision 7; the encoder is stage 9a — `python -m wan.export_vae_encoder`).
+- Series names of MOSS-Image (branch `wip/moss-image`, not published — ADR [NNNN](decisions/NNNN-moss-image-dit-vae.md)): the DiT graphs
+  `dit` / `dit_skip22` / `dit_text` are `moss-image-sft-i8-dyn` (assets `rope_base` and `training_grid`), the VAE-only series
+  is `moss-image-sft-f32-dyn` (named by its f32 storage; it holds no DiT — ADR NNNN decision 8), the precomputed text
+  embeddings are the host asset `moss-image-sft-text-embeds/text_embeds.safetensors`, and the layer-by-layer goldens are
+  `moss-image-sft-i8-dyn-reference`. Its records go under `outputs/bench/karume-moss-image/`.
 - The PLE of the gemma4 product series (the index `ple_index` and the `ple.values.<k>` / `ple.scales.<k>` blocks) goes
   into the part list as an **asset** of the product container `krm` (ADR
   [0109](decisions/0109-manifest-v5-container.md) decision 4), so the series directory holds no separate file

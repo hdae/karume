@@ -25,6 +25,15 @@ measurements in `docs/research/`.
   counter `geluMulStaticQuantize`. The manifest vocabulary `SessionSpec` (`@karume/hub`) gains the
   same optional boolean, and the Gemma pipelines (`@karume/models`) take it from a quant's `session`
   or as an explicit option; a reader without the key rejects a manifest that declares it.
+- `attentionDeviceFacts(gpu)` and its type `AttentionDeviceFacts` (`@karume/runtime`): the device
+  facts that decide the online attention route, as Session construction reads them. Pass the result
+  as `EstimateOptions.attentionDevice`, which an estimate with `attentionScoreStorage: "none"`
+  requires, so the estimate counts the route the Session takes (ADR 0132 addendum of 2026-10-28).
+- The op `group_norm` (`@karume/runtime`) and its export (the PyPI package `karume`): GroupNorm
+  (`x[N,C,…]` with a per-channel affine, f32) runs as one node whose statistics are two passes per
+  group over a fixed reduction tree. The exporter preserves `aten.group_norm`, so a model with
+  `nn.GroupNorm` — also over symbolic spatial axes — exports where it failed before as an
+  unsupported `native_group_norm` (`docs/ir-v2.md`; ADR NNNN decision 7).
 
 ### Changed
 
@@ -32,6 +41,12 @@ measurements in `docs/research/`.
   `fuseGeluMulStaticQuantize: true` (the published 0.15.0 distribution is unchanged until it is
   rebuilt and uploaded). Generated tokens are identical; on an RTX 3080 Ti under Node the GPU time
   per decode token drops by about 0.12 ms (E2B, 5.96 → 5.84) and 0.17 ms (E4B, 10.02 → 9.85).
+- Online int8 attention (`@karume/runtime`, ADR 0132) accepts any key length: a key length N that is
+  not a multiple of 4 pads the int8 Vᵀ rows to `ceil(N/4)` words (pipeline keys
+  `attention_online:…:kpad` and `quantize_rows:…:pad` — ADR 0132 addendum of 2026-10-27) instead of
+  falling back to the three dispatches. Other head widths, and devices with neither reduction form,
+  still fall back to the three dispatches, whose int8 ③PV needs `N % 4 == 0`. Shapes with
+  `N % 4 == 0` keep their WGSL and pipeline keys.
 
 ## [0.15.0] - 2026-10-31
 

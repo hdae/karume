@@ -245,18 +245,21 @@ compensate for the dropped mass (the contract family of [decisions/0044](decisio
 an opt-in option). The CPU reference uses the same grid, so comparison does not detect this cut-off —
 the ruling on the accuracy impact rests on the measured tolerance of the E2E tests.
 
-## The online attention (`attentionScoreStorage: "none"`) runs only for head widths 64 and 128 and key lengths that are multiples of 4, and needs 31 KiB of workgroup storage
+## The online attention (`attentionScoreStorage: "none"`) runs only for head widths 64 and 128, and needs 31 KiB of workgroup storage
 
 The online kernel (ADR [0132](decisions/0132-online-int8-attention.md)) holds its q, k, Vᵀ and P̃
 tiles in workgroup storage: 31,232 B in the subgroup form and 35,328 B in the portable form at
-D = 128 (a head width of 256 would need 55 KiB and is not built). Shapes outside D ∈ {64, 128} or
-with `N % 4 != 0`, and devices that offer neither form (no subgroups and a 32 KiB limit — today
-Firefox and Safari on D3D12 / Metal; any device at the 16 KiB core default) run the three
-dispatches of `attentionCompute: "a8"` with S in f32 instead — the route shows it in the
-pipeline keys and the full-eligibility check of the census turns red. The mask and GQA are rejected
-as for a8. The weights are quantised against a running row maximum, so the output is not the
-three-pass a8 output bit for bit (class Q: within the P̃-lattice error model — the same 1/127 grid
-as the ③PV above).
+D = 128 (a head width of 256 would need 55 KiB and is not built). It runs any key length N ≥ 1:
+when `N % 4 != 0` the int8 Vᵀ rows are padded to `ceil(N/4)` words and the keys from N on are
+masked, so the padding never reaches the output (the key `…:kpad` — ADR 0132 addendum of
+2026-10-27); `N % 4 == 0` keeps the unpadded form byte for byte. Shapes outside D ∈ {64, 128}, and
+devices that offer neither form (no subgroups and a 32 KiB limit — today Firefox and Safari on
+D3D12 / Metal; any device at the 16 KiB core default) run the three dispatches of
+`attentionCompute: "a8"` with S in f32 instead — the route shows it in the pipeline keys and the
+full-eligibility check of the census turns red. On those three dispatches ③PV's i8a8 still needs
+`N % 4 == 0` (the next section). The mask and GQA are rejected as for a8. The weights are quantised
+against a running row maximum, so the output is not the three-pass a8 output bit for bit (class Q:
+within the P̃-lattice error model — the same 1/127 grid as the ③PV above).
 
 ## Fused attention a8 / s16 store ③PV and S in f32 for shapes whose key length N is not a multiple of 4 (in Anima, resolutions whose sides are not multiples of 32 px)
 
@@ -277,6 +280,11 @@ dot product, and S in VRAM has f32 width. The canonical source of the decision i
   The accepted set is not narrowed.
 - **Wan2.1 / Wan2.2**: for every accepted shape (dimensions × frame count), both self and cross run as
   declared.
+- **MOSS-Image** (branch `wip/moss-image`): its practical preset declares the online kernel, which
+  runs every key length, so on a device with an online form every forward runs as declared (the
+  negative branch's joint sequence S = N + 10 is never a multiple of 4 at square sizes, and the
+  positive branch's depends on the prompt length). On a device with neither online form it runs the
+  three dispatches with S in f32, and where S % 4 != 0 with ③PV in f32 too.
 - **Detection**: each family's A/B check applies the full-eligibility check
   (`assertAttentionSeatsComplete` — every dispatch of fused attention is an i8a8 / `:s16` variant;
   it looks at ratios, so it does not depend on the device) to the census. Host tests
@@ -1672,6 +1680,61 @@ By-design constraints of `wan.Ti2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/
 - The distribution `karume-wan2.2` is published on Hugging Face since 0.14.0 (`wan.SOURCES["wan2.2"]`; the recipe is `dist.py --pipeline wan-ti2v`, ADR 0121
   stage 8a). The entries are `wan.Ti2vPipeline.fromPretrained` (the published repository or a local mirror) and `wan.Ti2vPipeline.fromAssets`, which takes a
   manifest and assets assembled from the series containers. Only Wan2.1 (`karume-wan2.1`) stays unpublished.
+
+## MOSS-Image: text only as precomputed embeddings; the area is capped by the VAE's storage binding (2,796,160 px at 2 GiB); whether a size fits VRAM is checked per stage
+
+By-design constraints of the family's internal entry (`generateMoss` and its acceptance check `planMossGenerate` in
+`packages/models/src/moss/` — ADR [NNNN](decisions/NNNN-moss-image-dit-vae.md), branch `wip/moss-image`). Every
+input-caused rejection is a `ModelInputError` before any GPU work.
+
+- **Not public**: no subpath, no barrel entry, no distribution and no manifest until the text encoder exists (ADR NNNN
+  decision 12); not part of the 0.15 release.
+- **Text only as precomputed embeddings**: the text encoder (Qwen3.5-9B) is not ported. A request carries upstream's
+  `encode_prompt` outputs, `[T, 4096]` f32 with 1 ≤ T ≤ 4,096 and every value finite — for the fixed prompts the
+  recipe's `moss.text_embeds` wrote. Strings are not accepted.
+- **No defaults**: steps, guidance, shift, the initial noise (`seed` or `latents`) and the preset are all explicit.
+  Upstream's defaults (1024², 50 steps, guidance 3, shift 5) wait for a manifest's `pipelineConfig`. **No default
+  preset** either: `f32+dit8` or `f32+dit8-a8-attn8-online` is passed explicitly, since no manifest owns a default yet
+  (ADR NNNN decision 13 — a departure from ADR 0128 decision 1); it is chosen after the maintainer's visual check.
+- **Accepted sizes**: positive multiples of 16, the longest side at most 65,536 px (the rope base tables' rows), and the
+  area at most the cap of the untiled VAE: its largest intermediate `[1,192,H,W]` f32 must fit one storage binding, so
+  the cap is ⌊binding ÷ 49,152⌋ × 64 px — **2,796,160 px** at the 2 GiB binding of the RTX 3080 Ti (1696×1648 and
+  688×4064 are just under it). The cap is per device (computed from `maxStorageBufferBindingSize`). There is no tiled
+  path above it.
+- **Upstream's resolution guidance is not a check**: upstream's user guide recommends 1M, 1.5M or 2M total pixels and
+  says the model extrapolates from 0.25M (512×512) to 4M (2K). Karume accepts any multiple of 16 under the cap — the
+  end-to-end parity check runs at 256² and 384×256, below that range (the DiT and VAE checks also at 1024², 512×768 and
+  the cap), and image quality is not checked at any size before the pending visual review — and the 4M extrapolation
+  (e.g. 2048²) is above the cap of a 2 GiB binding, so such a device refuses it.
+- **Whether a size fits VRAM is not an acceptance limit**: each stage checks its own need with a trial allocation
+  before it opens and fails loudly naming the stage, the bytes and the size (ADR NNNN decision 5); generate checks the
+  largest need once before anything opens. Of the squares tried on the development machine (the DiT stage alone,
+  3 steps; an idle RTX 3080 Ti with 12 GiB under Node + Dawn, 2026-10-28 — one machine at one time, and not pinned by
+  a test: the opt-in `KARUME_MOSS_VRAM=1` cases stay green when the product refuses a size, by design):
+  - `f32+dit8-a8-attn8-online` fits up to the cap: a whole generation at 1696×1648 completed, and its DiT pair passed
+    every square tried up to 2064² (refused at 2112²) — all above the cap, so on this device the VAE's cap binds this
+    preset.
+  - `f32+dit8` is refused at the cap (the DiT pair needs 11,940 MiB there), and below the cap passing and refused areas
+    are mixed: 1536², 1568², 1600² and 1664² passed, 1616² and 1632² were refused. The pair's need is not monotonic in
+    the area (the attention's row blocks change with the sequence length), so a size that passes says nothing about the
+    smaller ones. The idle device admitted every trial allocation up to 11,870 MiB and refused every one from
+    11,926 MiB.
+  - Upstream's 2M-pixel example (1456², 2 steps) and its default 1024² × 50 steps completed with both presets. Another
+    process holding VRAM lowers all of this; a device with more VRAM fits more, up to its own cap. The held bytes and
+    needs per stage are in [research 2026-10-28](research/2026-10-28-moss-image-dit-vae.md) §5.5–§5.6.
+- **No step cap** (upstream has none): the snapped schedule is de-duplicated, so at most 1,000 steps run up to about
+  2·10⁶ requested steps. Past that the snapped schedule is **not monotonic** (at 5·10⁶ 989 indices with 6 decreases; at
+  10⁷ 1,099 — more than the 1,000 training points — with 61; steps with dt > 0). That is upstream's own `set_timesteps`,
+  reproduced bit for bit, not refused. The host walks the requested grid, about 0.25 s at 10⁷ steps.
+- **Refused where upstream runs**: a shift below about 2.98·10⁻⁸, where the requested σ grid is not finite (upstream
+  snaps the infinite σ to the end of the training grid — ADR NNNN decision 9), and negative embeddings at guidance 1
+  (upstream ignores them).
+- **Guidance**: upstream's CFG with the negative branch skipping block 22, or guidance 1 (no negative branch). No SLG,
+  no other skip list and no negative branch without the skip.
+- **The seeded noise is not torch's `randn`** (splitmix64 + Box–Muller, as Wan): the same seed does not give upstream's
+  image; pass `latents` to reproduce upstream's initial noise.
+- **sha256 rows exist only for the RTX 3080 Ti under Node** (`node-nvidia-geforce-rtx-3080-ti`); another machine
+  SKIPs those cases explicitly with a red reference guard until it writes its rows.
 
 ## EmbeddingGemma: a run-time attention_mask (in-batch padding) is not supported — single sequence assumed
 
