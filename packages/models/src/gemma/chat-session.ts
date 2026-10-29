@@ -284,7 +284,8 @@ const sameTurn = (left: ChatMessage, right: ChatMessage): boolean =>
  * ```ts
  * await using pipeline = await Pipeline.fromPretrained(ref);
  * await using session = new ChatSession(pipeline, { maxNewTokens: 256 });
- * for await (const chunk of session.send("Name a color.")) Deno.stdout.write(encode(chunk));
+ * let reply = "";
+ * for await (const chunk of session.send("Name a color.")) reply += chunk; // streamed text
  * console.log(await session.send("Another one.").text());
  * ```
  *
