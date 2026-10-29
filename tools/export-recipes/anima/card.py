@@ -172,6 +172,30 @@ RIGHTS_GRANT_STATEMENT = (
     " (LICENSE.md)."
 )
 
+#: The NVIDIA Open Model License part of the legal texts (rulings 39 a / 40 a, 2026-10-29). The
+#: upstream card states that Anima is a "Derivative Model" of `nvidia/Cosmos-Predict2-2B-Text2Image`
+#: and so is subject to that agreement insofar as it applies to Derivative Models. Agreement §3.1
+#: requires its attribution notice, verbatim, in a "Notice" text file shipped with every copy (the
+#: first paragraph — keep it on its own line, word for word); §3.2 requires "Built on NVIDIA Cosmos"
+#: in the related product documentation (the last paragraph, shown in the card too). The agreement
+#: text itself is the second part of `LICENSE.md` (`anima/distribution.py`, vendored from
+#: <https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/>, version
+#: of October 24, 2025). Like {@link ATTRIBUTION_NOTICE}, `NOTICE.md` and this card both read this
+#: one constant so that the two copies of the legal wording cannot drift apart.
+NVIDIA_NOTICE = (
+    "Licensed by NVIDIA Corporation under the NVIDIA Open Model License\n"
+    "\n"
+    "The CircleStone Anima model is a Derivative Model of NVIDIA Cosmos-Predict2-2B-Text2Image"
+    " (https://huggingface.co/nvidia/Cosmos-Predict2-2B-Text2Image), so the weights in this"
+    " repository are also subject to the NVIDIA Open Model License Agreement"
+    " (https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/)"
+    " insofar as it applies to Derivative Models. A copy of that agreement is included in"
+    " LICENSE.md. Both licenses apply; the NVIDIA agreement does not widen the CircleStone"
+    " Non-Commercial License.\n"
+    "\n"
+    "Built on NVIDIA Cosmos."
+)
+
 #: `resolution` ノブの受理集合を 1 行で言ったもの（**manifest に無い事実** — 受理集合の正本は
 #: `packages/models/src/anima/resolution.ts` で、ADR 0038 §2 により manifest には書かない）。
 #: 刻み = 空間圧縮 8 × patch 2、下限は VAE タイル decoder の latent 64（= 512px）、上限は
@@ -413,12 +437,15 @@ def _base_license(manifest: Mapping[str, Any]) -> list[str]:
         "",
         "Every model here derives from the CircleStone Anima base model and stays under the",
         "CircleStone Labs Non-Commercial License v1.2 (non-commercial use only). This",
-        "repository ships `LICENSE.md` (the full license text) and `NOTICE.md` (this attribution",
-        "plus the list of modifications).",
+        "repository ships `LICENSE.md` (the full text of that license, followed by the NVIDIA",
+        "Open Model License Agreement) and `NOTICE.md` (these attribution notices plus the list",
+        "of modifications).",
         "",
         RIGHTS_GRANT_STATEMENT,
         "",
         ATTRIBUTION_NOTICE,
+        "",
+        NVIDIA_NOTICE,
         "",
         "- Outputs you generate are yours to use for any purpose, including commercially",
         "  (license §2(e)); the non-commercial restriction applies to the model weights and",

@@ -29,6 +29,7 @@ from anima.card import (
     ANIMA_OFFICIAL_TITLE,
     ATTRIBUTION_NOTICE,
     EXTRA_ORIGINS_INTRO,
+    NVIDIA_NOTICE,
     OFFICIAL_ORIGINS_INTRO,
     RIGHTS_GRANT_STATEMENT,
     SUPPORTED_PIPELINE,
@@ -294,6 +295,28 @@ class TestOfficialCard:
         """§3(a) 後段の明示文は `NOTICE.md` と同じ 1 定数を逐語で載せる。"""
         assert RIGHTS_GRANT_STATEMENT in card
 
+    def test_it_carries_the_nvidia_open_model_license_part(self, card: str) -> None:
+        """NVIDIA Open Model License §3.1 / §3.2 — the same constant as `NOTICE.md`, inside the
+        License section, with the verbatim attribution notice on its own line and "Built on
+        NVIDIA Cosmos" (§3.2 asks for it in the product documentation)."""
+        _, _, license_section = card.partition("## License")
+        section, _, _ = license_section.partition("## Models")
+        lines = section.split("\n")
+        assert NVIDIA_NOTICE in section
+        assert "Licensed by NVIDIA Corporation under the NVIDIA Open Model License" in lines
+        assert "Built on NVIDIA Cosmos." in lines
+
+    def test_the_license_section_says_license_md_holds_both_texts(self, card: str) -> None:
+        """`LICENSE.md` is no longer one text: the card must not call it "the full license text"."""
+        _, _, license_section = card.partition("## License")
+        section, _, _ = license_section.partition("## Models")
+        flat = " ".join(section.split())
+        assert "(the full license text)" not in flat
+        assert (
+            "`LICENSE.md` (the full text of that license, followed by the NVIDIA Open Model"
+            " License Agreement)" in flat
+        )
+
     def test_it_states_that_the_outputs_stay_the_users_own(self, card: str) -> None:
         """ライセンス v1.2 §2(e) — 非商用の縛りが掛かるのは重みで、生成物には掛からない。
 
@@ -411,6 +434,13 @@ class TestExtraCard:
     ) -> None:
         """§3(a) 後段の明示文は公式リポ側と同じ 1 定数を逐語で載せる。"""
         assert RIGHTS_GRANT_STATEMENT in extra_card
+
+    def test_it_carries_the_nvidia_open_model_license_part(self, extra_card: str) -> None:
+        """NVIDIA Open Model License §3.1 / §3.2 — the same constant as the official card."""
+        lines = extra_card.split("\n")
+        assert NVIDIA_NOTICE in extra_card
+        assert "Licensed by NVIDIA Corporation under the NVIDIA Open Model License" in lines
+        assert "Built on NVIDIA Cosmos." in lines
 
     def test_it_lists_the_permissions_of_every_source_page(self, extra_card: str) -> None:
         """出所ページの許諾欄は作者ごとに違う — **出所ごとに逐語で**載せる。"""

@@ -33,7 +33,7 @@ from ir_fixtures import ir_container
 
 import dist
 from _shared.container_read import read_asset
-from anima.card import ATTRIBUTION_NOTICE, RIGHTS_GRANT_STATEMENT
+from anima.card import ATTRIBUTION_NOTICE, NVIDIA_NOTICE, RIGHTS_GRANT_STATEMENT
 from anima.distribution import (
     ANIMA_AESTHETIC_MODEL_NAME,
     ANIMA_BASE_MODEL_NAME,
@@ -51,6 +51,7 @@ from anima.distribution import (
     EXTRA_PIPELINE,
     LICENSE_SOURCE_PATH,
     LORA_PROVENANCE_FILE,
+    NVIDIA_LICENSE_SOURCE_PATH,
     OFFICIAL_MODELS,
     OFFICIAL_NOTICE_MARKDOWN,
     OFFICIAL_PIPELINE,
@@ -1924,6 +1925,35 @@ class TestLegalTexts:
     #: 1 バイトでも動けば「このライセンスのコピー」でなくなるため（§3(a)）。
     LICENSE_SHA256 = "ee956174133d7c2cdcf220440c7726187eaf4b50e8e48ee32194353a22164d15"
 
+    #: sha256 of the vendored NVIDIA Open Model License Agreement — a verbatim plain-text
+    #: transcription of the web version "Version Release Date: October 24, 2025"
+    #: (<https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/>,
+    #: transcribed 2026-10-29 and checked word for word against the page). MUST: a commit that
+    #: changes this digest records a deliberate re-transcription and says from which version.
+    NVIDIA_LICENSE_SHA256 = "5d375d57dbe72dced9996fc467b6956012574d802ce7daf99345073a2043b402"
+
+    #: What sits between the two licence texts in `LICENSE.md`: the separator and the heading
+    #: that states the scope of the second text.
+    NVIDIA_PART_OPENING = (
+        "\n\n---\n\n## NVIDIA Open Model License Agreement — applies in addition to the"
+        " CircleStone license above\n\n"
+    )
+
+    def _assert_license_layout(self, shipped: bytes) -> None:
+        """§3(a) of both licences — `LICENSE.md` is a copy of each text, not a summary.
+
+        The CircleStone text opens the file byte for byte, then the separator and the scope
+        heading, and the vendored NVIDIA text closes it byte for byte inside its fence.
+        """
+        circlestone = LICENSE_SOURCE_PATH.read_bytes()
+        nvidia = NVIDIA_LICENSE_SOURCE_PATH.read_bytes()
+        assert shipped.startswith(circlestone)
+        rest = shipped[len(circlestone) :].decode("utf-8")
+        assert rest.startswith(self.NVIDIA_PART_OPENING)
+        assert shipped.endswith(b"```text\n" + nvidia + b"```\n")
+        # The fence holds only if the agreement itself never contains one.
+        assert b"```" not in nvidia
+
     def _run(
         self,
         tmp_path: Path,
@@ -1977,10 +2007,17 @@ class TestLegalTexts:
         source = LICENSE_SOURCE_PATH.read_bytes()
         assert hashlib.sha256(source).hexdigest() == self.LICENSE_SHA256
 
+    def test_the_recipe_carries_the_nvidia_agreement_verbatim(self) -> None:
+        source = NVIDIA_LICENSE_SOURCE_PATH.read_bytes()
+        assert hashlib.sha256(source).hexdigest() == self.NVIDIA_LICENSE_SHA256
+        text = source.decode("utf-8")
+        assert text.startswith("NVIDIA Open Model License Agreement\n")
+        assert text.endswith("\nVersion Release Date: October 24, 2025\n")
+
     def test_it_ships_the_license_text_byte_identical(self, tmp_path: Path) -> None:
         """§3(a) — 提供するのは**このライセンスのコピー**（要約でも書き換えでもない）。"""
         out_dir = self._run(tmp_path)
-        assert (out_dir / "LICENSE.md").read_bytes() == LICENSE_SOURCE_PATH.read_bytes()
+        self._assert_license_layout((out_dir / "LICENSE.md").read_bytes())
 
     def test_the_notice_displays_the_attribution_verbatim(self, tmp_path: Path) -> None:
         """§3(b) — 掲示する文言は逐語（2 文とも）。"""
@@ -2002,7 +2039,7 @@ class TestLegalTexts:
 
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
         assert notice == EXTRA_NOTICE_MARKDOWN
-        assert (out_dir / "LICENSE.md").read_bytes() == LICENSE_SOURCE_PATH.read_bytes()
+        self._assert_license_layout((out_dir / "LICENSE.md").read_bytes())
         assert ATTRIBUTION_NOTICE in notice
 
     def test_the_notice_specifies_that_the_rights_are_granted_directly_by_the_company(
@@ -2024,6 +2061,34 @@ class TestLegalTexts:
         extra = (extra_out / "NOTICE.md").read_text(encoding="utf-8")
         assert RIGHTS_GRANT_STATEMENT in official
         assert RIGHTS_GRANT_STATEMENT in extra
+
+    def test_the_notice_carries_the_nvidia_attribution_in_both_repositories(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """NVIDIA Open Model License §3.1 / §3.2 — the attribution notice, verbatim on its own
+        line, and "Built on NVIDIA Cosmos", from the one shared constant, in its own section
+        before the license statement.
+
+        Checked in both repositories' `NOTICE.md`, like the rights-grant statement above — a
+        repository whose path forgot the constant would lack the §3.1 notice.
+        """
+        official = (self._run(tmp_path / "official") / "NOTICE.md").read_text(encoding="utf-8")
+        extra_out = self._run(
+            tmp_path / "extra",
+            pipeline="anima-extra",
+            model="anima-wai-v1.0",
+            extra=self._official_mirror(tmp_path / "extra", monkeypatch),
+        )
+        extra = (extra_out / "NOTICE.md").read_text(encoding="utf-8")
+        for notice in (official, extra):
+            lines = notice.split("\n")
+            assert NVIDIA_NOTICE in notice
+            assert "Licensed by NVIDIA Corporation under the NVIDIA Open Model License" in lines
+            assert "Built on NVIDIA Cosmos." in lines
+            _, _, after_disclaimer = notice.partition("## Not an official product")
+            nvidia_section, _, _ = after_disclaimer.partition("## License")
+            assert "## NVIDIA Open Model License\n" in nvidia_section
+            assert NVIDIA_NOTICE in nvidia_section
 
     def test_the_notice_states_the_modifications_inside_the_attribution_notice(
         self, tmp_path: Path
@@ -2060,6 +2125,7 @@ class TestLegalTexts:
         """§3(b) の掲示は**据わった配布形**で成立する必要がある（節の中身は test_card が見る）。"""
         card = (self._run(tmp_path) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert ATTRIBUTION_NOTICE in card
+        assert NVIDIA_NOTICE in card
 
     def test_the_tree_still_verifies_with_the_legal_texts_in_place(self, tmp_path: Path) -> None:
         """直下の 2 つは manifest が宣言しない — 宣言外ファイル検査の例外側に居る。"""

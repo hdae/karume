@@ -23,6 +23,7 @@ from _shared.calib_provenance import calib_complaint
 from _shared.container_read import ContainerReadError, read_asset
 from anima.card import (
     ATTRIBUTION_NOTICE,
+    NVIDIA_NOTICE,
     RIGHTS_GRANT_STATEMENT,
     render_base_card,
     render_extra_card,
@@ -142,6 +143,21 @@ CALIB_SHIPPABLE_DEVICE = "cpu"
 #: 依存しないため。
 LICENSE_SOURCE_PATH = Path(__file__).parent / "circlestone_license.txt"
 
+#: The NVIDIA Open Model License Agreement, transcribed verbatim into plain text from
+#: <https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/>
+#: ("Version Release Date: October 24, 2025"; NVIDIA publishes no plain-text release). Anima is a
+#: Derivative Model of `nvidia/Cosmos-Predict2-2B-Text2Image`, and agreement §3.1 requires a copy of
+#: the agreement with every distributed copy (rulings 39 a / 40 a, 2026-10-29). It becomes the
+#: second part of `LICENSE.md` ({@link license_markdown}). MUST: never reformat it — the sha256 in
+#: the tests freezes it, and a change of that digest records a deliberate re-transcription.
+NVIDIA_LICENSE_SOURCE_PATH = Path(__file__).parent / "nvidia_open_model_license.txt"
+
+#: Heading of the second licence in `LICENSE.md` — it names the agreement and the scope it applies
+#: to (the same layout as the two licences of the Irodori distribution).
+NVIDIA_LICENSE_HEADING = (
+    "## NVIDIA Open Model License Agreement — applies in addition to the CircleStone license above"
+)
+
 #: どのリポの告知にも載る改変（コンテナ形式への変換）。
 #:
 #: MUST: 改変の列挙は**リポごと**に持つ（1 本を使い回さない）。turbo リポと base リポでは
@@ -187,6 +203,11 @@ def notice_markdown(modifications: tuple[str, ...]) -> str:
                 "",
                 "This is not an official product of CircleStone Labs LLC, and it is not endorsed,",
                 "approved or validated by CircleStone Labs LLC.",
+                "",
+                # NVIDIA Open Model License §3.1 / §3.2 (rulings 39 a / 40 a, 2026-10-29).
+                "## NVIDIA Open Model License",
+                "",
+                NVIDIA_NOTICE,
                 "",
                 "## License",
                 "",
@@ -961,15 +982,46 @@ def anima_dist_plan(series_dir: Path, model: str, allowed: tuple[str, ...]) -> M
     return anima_plan(anima_sources(series_dir, model), model)
 
 
+def license_markdown() -> str:
+    """`LICENSE.md` — the CircleStone license, then the NVIDIA Open Model License Agreement.
+
+    `root_files` has a single `LICENSE.md` slot (`karume.dist.LEGAL_PATHS`), so the second text
+    follows a separator (`---`) and a heading that states its scope, as in the Irodori
+    distribution. The CircleStone text comes first, byte for byte ({@link LICENSE_SOURCE_PATH});
+    it has no trailing newline, so the separator starts with a blank line (without it, Markdown
+    would read the last paragraph and `---` as a setext heading).
+
+    MUST: neither text is touched — reformatting either makes it no longer a copy of that
+    license. The NVIDIA text is numbered plain text, so it sits verbatim inside a fence (it
+    contains no ``` — the digest freeze in the tests catches any change to the file).
+    """
+    return (
+        LICENSE_SOURCE_PATH.read_text(encoding="utf-8")
+        + "\n\n---\n\n"
+        + NVIDIA_LICENSE_HEADING
+        + "\n\n"
+        + "The CircleStone Anima model is a Derivative Model of NVIDIA"
+        + " Cosmos-Predict2-2B-Text2Image, so every\n"
+        + "model in this repository is covered by the agreement below in addition to the"
+        + " CircleStone license\nabove (see `NOTICE.md`). Both licenses apply; the agreement"
+        + " below does not widen the CircleStone\nlicense.\n\n"
+        + "```text\n"
+        + NVIDIA_LICENSE_SOURCE_PATH.read_text(encoding="utf-8")
+        + "```\n"
+    )
+
+
 def root_files(notice: str) -> dict[str, str]:
     """配布リポ直下へ入れる法的テキスト（`karume.dist.Pipeline.root_files`）。
 
     ライセンス原文は recipe に置いた現物（{@link LICENSE_SOURCE_PATH}）を**逐語で**読む —
     ここで整形や差し替えをすると §3(a) の「このライセンスのコピー」ではなくなる。改変告知
     （`NOTICE.md`）だけがリポごとに違うので、そこだけ引数で受ける。
+    `LICENSE.md` carries the NVIDIA Open Model License Agreement after the CircleStone text
+    ({@link license_markdown}).
     """
     return {
-        "LICENSE.md": LICENSE_SOURCE_PATH.read_text(encoding="utf-8"),
+        "LICENSE.md": license_markdown(),
         "NOTICE.md": notice,
     }
 

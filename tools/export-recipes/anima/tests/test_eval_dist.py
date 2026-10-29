@@ -25,12 +25,14 @@ from container_series import write_component
 from ir_fixtures import ir_container
 
 from anima import eval_dist
+from anima.card import NVIDIA_NOTICE
 from anima.distribution import (
     ADALN_I8_CALIB_METHOD,
     ANIMA_BASE_MODEL_NAME,
     ANIMA_TURBO_MODEL_NAME,
     CALIB_PROVENANCE_FILE,
     CALIB_SHIPPABLE_METHOD,
+    OFFICIAL_PIPELINE,
     ROPE_BASE_ASSET,
     ROPE_BASE_ROLE,
     anima_model,
@@ -218,6 +220,18 @@ class TestEndToEnd:
         assert "A bf16 series was added alongside the f16 one." in notice
         assert "int4-quantized series of the transformer was added" in notice
         assert "adaLN linears and the linears outside the blocks stay int8" in notice
+
+    def test_it_ships_the_same_legal_texts_as_the_distribution(self, tmp_path):
+        """The evaluation build carries the shipping `LICENSE.md` (CircleStone + NVIDIA Open
+        Model License Agreement) and the NVIDIA part of the notice, like the distribution."""
+        _build_series(tmp_path / "series")
+        out_dir = tmp_path / "eval" / "karume-anima-v1.0-adaln8"
+
+        eval_dist.main(["--series", str(tmp_path / "series"), "--out", str(out_dir)])
+
+        shipped = (out_dir / "LICENSE.md").read_text(encoding="utf-8")
+        assert shipped == OFFICIAL_PIPELINE.root_files["LICENSE.md"]
+        assert NVIDIA_NOTICE in (out_dir / "NOTICE.md").read_text(encoding="utf-8")
 
 
 class TestShippingRefusesTheVariant:
