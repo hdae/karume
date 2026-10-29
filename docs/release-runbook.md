@@ -95,8 +95,9 @@ If the referenced repository is uploaded again later, its SHA changes, and the r
 (the bytes are protected by the double pin, so nothing wrong is served, but the two repositories' contents become different generations) —
 **when the referenced repository is uploaded again, rebuild and re-upload the referencing one too** (extra for `karume-anima`,
 `karume-wan2.2` for `karume-umt5-xxl`, `karume-irodori-v4.1-small` for `karume-irodori-v4-small`). **0.15.0: `karume-wan2.2` must be
-re-uploaded in any case — its manifest gained the `f16+dit8-a8-attn8-online` preset and the default moved to it (ADR 0132); the containers
-are unchanged.**
+re-uploaded in any case — its manifest gained the `f16+dit8-a8-attn8-online`, `i8` and `i8-a8-attn8-online-conv8` presets
+(ADRs 0132 / 0133), the default moved to `i8-a8-attn8-online-conv8`, and it gained the `vae_decoder_first_32` / `vae_decoder_next_32`
+containers (ADR 0134) — check the new containers in the fragmentation check of §2 too.**
 
 **The placeholder-SHA check**: a development mirror for the time the referenced repository is unpublished is built with
 `--allow-placeholder-ref`, which pins every reference at a placeholder SHA (40 zeros — `PLACEHOLDER_REVISION` in
@@ -111,6 +112,11 @@ NOTE (for the next release only): the old `hdae/karume-anima-turbo` was retired 
 How to handle the published repository (deprecation notice, replacing the README, etc.) is the maintainer's ruling at upload time.
 
 ## 1. Pre-release checks
+
+NOTE (Node version): run every `node` / `vp` / `pnpm` command of this runbook inside the repository, where `.node-version` pins Node
+to the 24 line (the same line as CI's `node-version: 24`). Without it vp resolves `engines.node` (`>=24.0.0`) to the newest release,
+and Node 26 does not start on the maintainer's machine (its binary needs `libatomic.so.1`). `tools/release/hf-upload.zsh` calls `node`
+after changing to the repository root, so the pin applies to it too.
 
 - [ ] `vp check && vp test` green (full verify = every lane with the GPU tests — a SKIP on an environment without an adapter is not allowed for the release decision;
       ADR 0005). **Conditions for the release machine**: real hardware whose adapter
@@ -359,7 +365,7 @@ to `wan.SOURCES`, and do not upload `karume-wan2.1`.
       `packages/models/src/wan/family.ts` with `wan.Pipeline` (2.1), so
       shape it so that 2.1 gets no hint (the table has no 2.1 key)
 - [ ] Fix the docs that say "there is no table yet" or "unpublished, no pin constant either" (pick them up with `rg -n 'SOURCES|未公開|not
-      published' packages/models examples/wan`). Keep the statements that Wan2.1 is unpublished
+      published' packages/models`). Keep the statements that Wan2.1 is unpublished
 - [ ] In the note of `DISTRIBUTIONS` in `packages/runtime/tests/distribution_gate_test.ts`, move `karume-umt5-xxl` and
       `karume-wan2.2` to "published" (the mirrors themselves were on the all-skip guard before publication. `karume-wan2.1`
       stays unpublished and the e2e tests use it as their root, so it stays on the list)
@@ -378,8 +384,11 @@ re-confirmed on 2026-10-28 with `"nodeModulesDir": "none"` in the root `deno.jso
 The `publish` of each `deno.json` is only `exclude: ["tests/"]`; no explicit `include` is
 needed).
 
-- [ ] Lockstep bump commit: the `version` of the 3 JSR packages + exporter, the `^`
-      dependencies such as models → hub, the specifiers in `deno.lock`, and **regenerating `tools/uv.lock` (`uv lock` — MUST. CI
+- [ ] Lockstep bump commit: the `version` of the 3 JSR packages in both their `deno.json` (what JSR publishes) and their
+      `package.json` (`tools/published-smoke` reads the expected version from `packages/models/package.json`), the root `package.json`,
+      the exporter, the `^` dependencies such as models → hub in `packages/models/deno.json`, the specifiers in `deno.lock` (run
+      `deno install` at the repository root after editing the `deno.json` files — with `"nodeModulesDir": "none"` it rewrites only
+      `deno.lock`), and **regenerating `tools/uv.lock` (`uv lock` — MUST. CI
       checks freshness with `uv run --locked`, so missing it turns both the exporter and recipes jobs red.
       Example: `e15e271` of 0.4.3)**, all in one commit (precedents: `d65535c` / `7d97dd4`).
       `CHANGELOG.md` is not part of this commit (the item below — the bump is cut before §1 to §3, so
@@ -397,6 +406,11 @@ needed).
       directory of `publish.yml` — ADR [0127](decisions/0127-node-dawn-toolchain.md) addendum of 2026-10-28); do not cut the Release while it is red
 - [ ] Create a GitHub Release from the main commit with green CI → published (fires)
 - [ ] Confirm the new version of the 3 packages on JSR
+- [ ] **0.15.0 only — card-only re-upload of the published repositories not rebuilt in this release** (ADR
+      [0136](decisions/0136-models-public-naming.md)): their Usage snippets import the 0.14 names from `jsr:@karume/models` without a
+      version, so they stop compiling once 0.15.0 is the latest. Regenerate the cards with this release's recipes and upload
+      `README.md` alone (manifests, containers and the `SOURCES` pins do not move), right after the JSR publish and in the same session
+      (the backlog release section holds the item)
 
 PyPI `karume` (tools/exporter) is **unreleased**. Add the procedure to this section when publication starts.
 
@@ -406,15 +420,17 @@ PyPI `karume` (tools/exporter) is **unreleased**. Add the procedure to this sect
       the release record, the project memory. **The release is not "done" until this item is done** —
       treat this one place as the only check for syncing the ledgers (in 0.9.0 only backlog was updated and
       ACTIVE_DESIGN stayed at "the maintainer publishes". The second miss of the same shape)
-- [ ] Connectivity from the published packages: `node tools/published-smoke/main.ts` (tools/published-smoke — the published versions.
-      Import from Deno is checked with `deno run -A tools/published-smoke/main.ts` (ADR 0127). Write the published version into
-      `tools/published-smoke/package.json` and `deno.json` and run `pnpm install` before running it.
-      With `@karume/hub` it resolves the manifest of every entry of `KARUME_SOURCES` and takes sbv2 through
-      `fromPretrained`. On a machine without a
-      GPU, `--manifests-only`). `jsr:@karume/*` under the workspace resolves to the local members,
-      so always run the connectivity check with this task (it pulls the registry with its own deno.json).
-      **Freshly published dependencies get caught by `minimumDependencyAge`** — `jsr:@karume/*` and `jsr:@hdae/fetch-cache`, which hub pulls in,
-      are listed in the `exclude` of `tools/published-smoke/deno.json` (the example of 0.11.0, where fetch-cache 0.7.0, published one day earlier,
-      was stopped — 2026-09-06). When a new `@hdae/*` dependency is added,
-      add it here too
+- [ ] Connectivity from the published packages (tools/published-smoke — the published versions, ADR 0127). Before running it, write the
+      published version into `tools/published-smoke/package.json` (`"jsr:^<version>"`) and `tools/published-smoke/deno.json` (the exact
+      `jsr:@karume/*@<version>` — a `^` range there fails the version check), run `pnpm install`, and commit both files with the updated
+      `pnpm-lock.yaml` (CI installs with `--frozen-lockfile`). The expected version is read from `packages/models/package.json`; a package
+      that resolves to any other version fails the run. Node: `node tools/published-smoke/main.ts` from the repository root. Deno (the
+      import check): `deno run -A main.ts` **inside `tools/published-smoke`** — under the root workspace `@karume/*` resolves to the local
+      members, so the Deno run starts in that directory to read its own `deno.json` (the one-line "ignoring the parent workspace" warning
+      is expected). With `@karume/hub` it resolves the manifest of every entry of `KARUME_SOURCES` and takes sbv2 through
+      `fromPretrained` (on a machine without a GPU, `--manifests-only`).
+      **Freshly published dependencies get caught by the minimum release age** — on Deno, `jsr:@karume/*` and `jsr:@hdae/fetch-cache`, which
+      hub pulls in, are listed in the `exclude` of `minimumDependencyAge` in `tools/published-smoke/deno.json` (the example of 0.11.0, where
+      fetch-cache 0.7.0, published one day earlier, was stopped — 2026-09-06); when a new `@hdae/*` dependency is added, add it there too.
+      On Node, `minimumReleaseAgeExclude` of `pnpm-workspace.yaml` already covers `@jsr/karume__*` and `@jsr/hdae__*`
 - [ ] Record one line of the fragmentation check results (§2) in research or backlog
