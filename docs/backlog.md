@@ -592,7 +592,7 @@
   (no local record), the revision of Semantic-DACVAE-Japanese (parent) (not fetched).
   Rows left as Unverified = the revision of anima-copycat-20260610 (placed by hand, no version id / sha256),
   whether the Civitai permission field of anima-wai-v1.0 can widen the upstream licence, the attribution of sbv2's style-bert-vits2 (AGPL)
-  (awaiting the ruling below), the Weights license of depth_anything (before revision matching).
+  (kept as is in 0.15.0 by the maintainer's ruling 36 a of 2026-10-29, carrying over 0.14.0's ruling 7 a), the Weights license of depth_anything (before revision matching).
   **FN (`rufflet17/voice_models`) has neither a licence statement nor a README on HF, so it cannot be published** (until this is clarified).
   **Awaiting a ruling**: the `LICENSE.md` that anima bundles is the v1.2 text, but Base (`Anima-Base-v1.0-Diffusers`) is
   v1.0 (the difference is the commercial terms of §2(b)/(c)/(e) — v1.2 is looser). Recorded in the ledger as a fact.
