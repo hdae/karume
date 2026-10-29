@@ -95,6 +95,35 @@
 
 ## later
 
+- **Follow-ups of accepting ADRs 0127 / 0128 / 0129 / 0131 (filed 2026-10-29, the maintainer's ruling 34 a — each ADR's addendum of
+  2026-10-29)**. Items under `packages/runtime` wait until the pending nvidia-blackwell geometry derivation lifts the freeze.
+  - Gate C2 counts `convCompute` (ADR [0128](decisions/0128-default-preset-original-weights.md) open point 5): `defaultPresetViolations` in
+    `packages/runtime/tests/distribution_gate_test.ts` counts only `linearCompute` / `attentionCompute`; add `convCompute: "a8"` (ADR 0133)
+    with fault-injection cases. No GPU; every current mirror already passes.
+  - Borrowed bf16 weights fail the residency check (ADR [0131](decisions/0131-bf16-weight-execution.md) open point 3): `expectedSharedSeat`
+    (`packages/runtime/src/runtime/weight-residency.ts`) classes bf16 as `raw`, so borrowing a bf16 initializer always throws (loudly). Treat
+    bf16 like f16 there and add a bf16 borrow case to `gpu_borrowed_context_test.ts` (GPU). No shipped family borrows bf16; if it misses
+    0.15.0, record the limit in [limitations](limitations.md).
+  - Geometry sweep identity check for a bf16-stored linear (ADR 0131 open point 2, low priority), after the pending derivation.
+  - A check that `version` and `exports` agree between each published package's `package.json` and `deno.json` (ADR
+    [0127](decisions/0127-node-dawn-toolchain.md)): JSR publishes from `deno.json`, `published-smoke` reads `packages/models/package.json`.
+  - Move the Node read-strategy default into `@hdae/fetch-cache` (ADR 0127 open point, after 0.15); hub's probe in
+    `packages/hub/src/sources/hf.ts` can then go.
+  - Deno's resource / op sanitizers have no replacement under Vitest (ADRs 0127 / [0129](decisions/0129-test-layout-and-lanes.md) open
+    point 5): record the loss in [limitations](limitations.md); file a GPU resource-leak check only if a leak shows up.
+  - The order in which the removed 0.14.0 tools and examples (v0.14.0 tag) come back as `apps/playground` pages (ADR 0127 decision 5).
+  - Gate the test import rules of ADR 0129 (open point 4): no runtime / hub / models test imports `packages/e2e`; only the runtime GPU
+    tests and the playground import `@karume/kernel-checks`. Both hold today, but `dependency_graph_test.ts` checks published members only.
+  - Move the kept optional asset cases (`gemma4_config`, `gemma4_tokenizer`, `gemma4_chat`, `wan_pipeline`, `census_table` in
+    `packages/models/tests`) into `packages/e2e` (ADR 0129 decision 1).
+  - Run the playground test suite (`pnpm --filter @karume/playground test`, 45 files outside the lanes and `vp test`) in CI and in
+    [release-runbook](release-runbook.md) §1 (ADR 0129 decision 2).
+  - Small doc edits: ADR 0001 still says npm publishing is open (settled JSR-only, 0127 addendum 2026-10-28); ADR 0086 quotes 0127
+    decision 2's old "read local bytes" wording; ADR 0005 decision 4 names an ADR 0127 open point as the real-browser acceptance home;
+    `packages/test-support/package.json` describes "Deno-shaped test and fs helpers"; `packages/e2e/README.md` says every test there needs
+    assets and a GPU (the three core gates and the `*_host*_test.ts` files do not); ADR 0120 points at `WAN_DEFAULT_QUANT` in
+    `tools/export-recipes/wan/distribution.py:343` (now `:440`); ADR 0135's "opt-in lane" → "opt-in case in the family lane" before it is
+    accepted; release-runbook §1 omits the recording mode `KARUME_WGSL_SNAPSHOT=write`.
 - **Barrel imports keep every family's source table (filed 2026-10-28 — found in the naming design of ADR [0136](decisions/0136-models-public-naming.md))**:
   importing anything from the `@karume/models` barrel, even one shared helper such as `encodeWav`, keeps all nine
   source tables (twelve `hdae/karume-*` entries) and a few top-level expressions a bundler cannot prove pure — about 1.4–1.7 KB minified

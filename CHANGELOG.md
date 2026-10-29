@@ -118,7 +118,7 @@ measurements in `docs/research/`.
   uses (`open` / `has` / `delete` / `keys`, and `match` / `put` / `delete` / `keys` on a cache,
   without query options); `add`, `addAll`, `matchAll` and `caches.match` reject.
 - `@karume/runtime` warns once per device when a Session requests int8 activations
-  (`linearCompute` / `attentionCompute: "a8"`) on a device whose WGSL language features lack
+  (`linearCompute` / `convCompute` / `attentionCompute: "a8"`) on a device whose WGSL language features lack
   `packed_4x8_integer_dot_product` (dp4a). The integer dot products then run emulated — same numbers,
   no speed-up, slower on Apple Metal — and the warning names the way out: the preset with the same
   weights and no activation quantization, or `"f32"` for the knob. Nothing falls back
