@@ -1,6 +1,7 @@
 # 0127: Development toolchain: Node 24 + Dawn with Vite+, Deno as a secondary runtime
 
-- Status: proposed (2026-10-16; to be accepted by the maintainer after review)
+- Status: accepted (2026-10-29, the maintainer's ruling 34 a — amended by the addendum of
+  2026-10-29; proposed 2026-10-16)
 - Date: 2026-10-16
 - Related: ADR [0001](0001-scope-and-non-goals.md) (scope and non-goals — this ADR revises the
   non-goal "environments without `navigator.gpu`, such as bare Node") /
@@ -69,6 +70,7 @@ and four checks built on Deno subcommands (`deno doc`, `deno info`, `deno bundle
    is `packages/*` and `tools/*` (`pnpm-workspace.yaml`); versions are centralised with
    `catalog:` (`catalogMode: prefer`); the root declares `engines.node >= 24.0.0` and pins pnpm
    through `devEngines.packageManager` (12.14.0, the version `vp` ships).
+   *(amended 2026-10-29, see the addendum)*
 
 2. **The published packages keep their runtime contract: Web standard APIs only (ADR 0002); the only
    runtime-specific code are the opt-in subpaths `@karume/hub/deno` and `@karume/hub/node`; the
@@ -79,12 +81,14 @@ and four checks built on Deno subcommands (`deno doc`, `deno info`, `deno bundle
      `webgpu` package. `webgpu` is a development dependency of the test harness only.
    - `@karume/hub/node` (`nodeDirectory`, on `node:fs/promises`) is the Node counterpart of
      `@karume/hub/deno` (`denoDirectory`). Each subpath is the only place in hub that touches its
-     host's APIs, holds only "how to read local bytes", and MUST behave the same as the other from
-     the common layer's point of view (ADR 0086). Browser code MUST NOT import either.
+     host's APIs, holds only "how to read local bytes" *(amended 2026-10-29, see the addendum)*,
+     and MUST behave the same as the other from the common layer's point of view (ADR 0086).
+     Browser code MUST NOT import either.
    - `acquireGpu({ gpu })`, `readAdapterLimits({ gpu })` and `runGeometrySweep({ gpu })` request the
      adapter from the given `GPU` and fall back to `navigator.gpu` when it is omitted, so browsers and
      Deno are unaffected and a Node application can pass Dawn (`create([])`) without defining
      `navigator.gpu` itself (test: `packages/runtime/tests/gpu_injection_test.ts`).
+     *(amended 2026-10-29, see the addendum)*
    - The existing invariant still holds: package code MUST NOT read WebGPU globals
      (`GPUBufferUsage`, …) at module scope or rely on them at all — the runtime reads them through
      `src/gpu/webgpu-constants.ts`. Under Node these globals exist only if someone installs them;
@@ -115,6 +119,7 @@ and four checks built on Deno subcommands (`deno doc`, `deno info`, `deno bundle
      Their versions are fixed by the installed `vp`, which is an explicit choice of the maintainer;
      the age guard adds no protection there and would only block installs for a week after each
      Vite+ release. Ordinary dependencies MUST NOT be added to the exclusion list.
+     *(amended 2026-10-29, see the addendum)*
    - `allowBuilds: { webgpu: false }` is a **refusal**, not an approval. The prebuilt `dawn.node`
      ships in the tarball; the postinstall script only strips the macOS quarantine attribute, so
      Linux installs work without it. No build script is approved in the workspace.
@@ -131,11 +136,13 @@ and four checks built on Deno subcommands (`deno doc`, `deno info`, `deno bundle
    geometry-profile loop and for Wan.
    - Ported as workspace packages: `tools/lint` (the `karume/typed-array-buffer` rule of ADR 0002,
      now an Oxlint JS plugin), `tools/published-smoke`, `tools/verify-diff`, `tools/release`.
+     *(amended 2026-10-29, see the addendum)*
    - Not affected: the Python exporter and recipes (`tools/exporter`, `tools/export-recipes`, uv —
      ADR 0065) and the other non-Deno utilities (Python and shell scripts).
    - Every Deno program under `tools/` and `examples/` is removed from the development tree during
      the port, `tools/gpu-lab` included (its page is served by a Deno server and drives package
      internals). They stay available in the history and on `main` at 0.14.0.
+     *(amended 2026-10-29, see the addendum)*
 
 6. **ADR 0001's non-goal "environments without `navigator.gpu` (bare Node, etc.)" is revised: Node
    is a supported host for applications and the development runtime.**
@@ -163,8 +170,9 @@ and four checks built on Deno subcommands (`deno doc`, `deno info`, `deno bundle
   `deno.ts` / `node.ts`).
 - The test harness is the private package `@karume/test-support`: the Vitest setup file creates one
   Dawn `GPU` per worker and installs it as `navigator.gpu` (or leaves it undefined on a machine
-  without a WebGPU backend), a Deno-shaped registration shim (`test`, `describe`, `t.step`), file
-  helpers on `node:fs`, and the porting codemods. `KARUME_DAWN_FLAGS` passes Dawn toggles.
+  without a WebGPU backend), a Deno-shaped registration shim (`test`, `describe`, `t.step`)
+  *(amended 2026-10-29, see the addendum)*, file helpers on `node:fs`, and the porting codemods.
+  `KARUME_DAWN_FLAGS` passes Dawn toggles.
 - Real-weight end-to-end tests move to `packages/e2e/tests/`; the lanes become Vitest projects
   generated from one table (`packages/test-support/src/lanes.ts`) and run with
   `vp test --project <lane>`. `verify_lanes_test` checks coverage, disjointness and non-empty lanes
@@ -194,6 +202,7 @@ and four checks built on Deno subcommands (`deno doc`, `deno info`, `deno bundle
   build scripts, `vp check` (lint + type check), and the core lane with the GPU / asset /
   distribution opt-outs, since CI runners have no GPU, weights or mirrors. Publishing dry-runs
   return once the registry question (Open points) is settled.
+  *(amended 2026-10-29, see the addendum)*
 - Vitest has no counterpart of Deno's resource / op sanitizers; leaks those caught are no longer
   detected automatically.
 - GPU timing (ADR 0021) on Dawn is quantised to 65,536 ns unless the toggle is passed. Measurements
@@ -212,7 +221,7 @@ Each phase ends only when its output matches the previous phase's output (phases
 differs only where intended (phase 3).
 
 1. **Phase 1 — port, behaviour unchanged.** Work happens in a worktree outside the repository on
-   branch `wip/0.15`; `main` stays at 0.14.0.
+   branch `wip/0.15`; `main` stays at 0.14.0. *(amended 2026-10-29, see the addendum)*
    - Before: the release run of 0.14.0 (full verify on Deno, 36 lanes, every case passed) is frozen
      as the baseline, with a checksum list.
    - Skeleton: pnpm workspace, catalog, release-age guard, package manifests, `@karume/test-support`,
@@ -248,18 +257,23 @@ differs only where intended (phase 3).
   post-release `published-smoke` run — **resolved 2026-10-28 (addendum 2026-10-28)**: CI runs a
   Deno type check (`deno publish --dry-run`); importing and running the packages on Deno stays
   with the post-release `published-smoke`.
-- **When Deno support ends altogether**, given the end of Deno runtime development around 2027-10.
-- **Default Dawn timestamp setting in the test harness.** Decided during the port: the setup disables
-  Dawn's 65,536 ns quantisation (`disable-dawn-features=timestamp_quantization`); short dispatches
-  measured 0 ns otherwise. `KARUME_DAWN_FLAGS` replaces the toggles when a run needs others.
+- **When Deno support ends altogether**, given the end of Deno runtime development around 2027-10
+  — kept open with a revisit trigger (addendum 2026-10-29).
+- **Default Dawn timestamp setting in the test harness** — **resolved 2026-10-29 (addendum
+  2026-10-29)**: moved to the verification consequences as a decision. Decided during the port: the
+  setup disables Dawn's 65,536 ns quantisation (`disable-dawn-features=timestamp_quantization`);
+  short dispatches measured 0 ns otherwise. `KARUME_DAWN_FLAGS` replaces the toggles when a run needs others.
 - **Final form of GPU serialisation in Vitest** (the current `forks` + `fileParallelism: false`
   setting works; it has not been reviewed as the long-term setting) and a replacement for the
-  Deno sanitizers.
+  Deno sanitizers — **resolved 2026-10-29 (addendum 2026-10-29)**: the serialisation is the
+  long-term setting; the sanitizer replacement moves to the backlog.
 - **Which removed tools and examples come back as browser applications, and in what order**, and
   what replaces the gpu-lab page as their common shell (dev server, shared asset loading).
   ADR 0005's manual real-browser acceptance stage, which used the examples harness, needs a new
-  home in the same step.
-- **Maintenance of the release-age exclusion list** when Vite+ adds or renames its packages.
+  home in the same step — **resolved 2026-10-29 (addendum 2026-10-29)**: the shell is
+  `apps/playground`; the per-tool order moves to the backlog.
+- **Maintenance of the release-age exclusion list** when Vite+ adds or renames its packages
+  — **resolved 2026-10-29 (addendum 2026-10-29)**: folded into the amended decision 4.
 - **A CacheStorage for Node — resolved 2026-10-17.** Node has no Cache API, and hub's HTTP source
   (Hugging Face) prefetches through one, so a Node application could read local distributions
   (`@karume/hub/node`) but not fetch from the hub. `nodeCacheStorage(root)` on the same subpath is a
@@ -272,7 +286,8 @@ differs only where intended (phase 3).
   `KARUME_NETWORK=1`.
 - **The fetch layer's read strategy on Node.** `@hdae/fetch-cache` defaults to the "blob" strategy
   unless a Deno global exists; hub asks for "stream" on Deno and Node itself (Node's Blob is
-  in-memory). The default belongs in the fetch layer.
+  in-memory). The default belongs in the fetch layer. Kept open as a post-0.15 follow-up
+  (addendum 2026-10-29).
 - **What the per-environment sha256 rows hash — resolved 2026-10-17.** PNG artifacts were hashed as
   encoded bytes, and the deflate output differs between Deno's and Node's zlib while the pixels are
   identical (the port measured 0 numeric differences across every family; 69 of 80 Node rows equalled
@@ -304,3 +319,93 @@ differs only where intended (phase 3).
   not import or run the packages on Deno — that stays with the post-release `published-smoke`.
 - **The `deno-*` sha256 reference rows stay in the fixtures as history.** They are no longer
   written or checked by the development suite (decision 3).
+
+## Addendum (2026-10-29) — accepted with amendments (maintainer's ruling 34 a)
+
+The maintainer accepted this ADR on 2026-10-29 after a review of every decision against the code
+of `main` (ruling 34 a: accept with the amendments the review recommends). Every decision is
+implemented. The amendments bring the text up to the code and to the rulings of 2026-10-28; none
+changes the design. The body is kept as written, and the sentences replaced below carry "(amended
+2026-10-29, see the addendum)".
+
+### Amendments
+
+- **Decision 1 — workspace and Node pin.** The workspace is `packages/*`, `tools/*` and `apps/*`
+  (`pnpm-workspace.yaml`); `apps/*` holds private browser applications that are not published. The
+  development Node is pinned to the 24 line by `.node-version` (`24`), in addition to
+  `engines.node >= 24.0.0` in the root `package.json`: `vp` resolves `engines.node` to the newest
+  Node release, and `.node-version` takes precedence, so development stays on the line CI runs.
+- **Decision 2 — what a hub subpath holds.** "Holds only 'how to read local bytes'" becomes: each
+  subpath holds only how to read and write local bytes — the directory source (`nodeDirectory` /
+  `denoDirectory`) and, on Node, the file-backed `CacheStorage` of the fetch layer
+  (`nodeCacheStorage`, the open point resolved 2026-10-17). Source semantics stay with
+  `localDirectory` in the main module and cache semantics with the fetch layer
+  (`packages/hub/node.ts`, module header). The test of the explicit `GPU` is now in
+  `packages/runtime/tests/gpu_device_test.ts` (`AcquireGpuOptions.gpu` cases);
+  `gpu_injection_test.ts` was merged into it during the phase 2 test reorganisation.
+- **Decision 4 — the release-age exclusion list.** `minimumReleaseAgeExclude` holds two groups and
+  nothing else: (1) the packages that make up Vite+, for the reason the body gives; (2) the
+  maintainer's own packages (`@karume/*`, `@hdae/*` and their `@jsr/karume__*` / `@jsr/hdae__*`
+  aliases), because `published-smoke` installs a fresh `@karume/*` release right after publishing
+  and the runtime dependencies `@hdae/fetch-cache` / `@hdae/yomi` are released by the same
+  maintainer. This is the same exemption the Deno configurations make
+  (`minimumDependencyAge.exclude` in the root `deno.json` and in `tools/published-smoke/deno.json`). Other dependencies MUST NOT be
+  added. Each group carries a comment with its reason in `pnpm-workspace.yaml`; an entry added to
+  either group follows the same rule.
+- **Decision 5 — process tools and the removed programs.** The ported process tools are five:
+  `tools/lint`, `tools/published-smoke`, `tools/verify-diff`, `tools/release` and `tools/lang` (the
+  language tools of ADR 0130: the language gate, the Markdown link check, the comment-only change
+  check). The removed programs stay available at the `v0.14.0` tag, not on `main`, which carries
+  the 0.15 work. `apps/playground` is the common shell of the browser applications that replace
+  them; it already replaces `tools/gpu-lab` (model pages, the geometry sweep, the browser kernel
+  checks).
+- **Consequences for the repository.** `@karume/test-support` no longer has a Deno-shaped
+  registration shim: phase 2 replaced it with Vitest's own forms (codemod `port-shim.mjs`).
+- **Consequences for verification.** Publishing dry-runs are back: CI runs
+  `deno publish --dry-run` (job `publish-dry-run`, addendum 2026-10-28). The default Dawn timestamp
+  setting moves here from Open points, as a decision: the test harness disables Dawn's 65,536 ns
+  quantisation (`disable-dawn-features=timestamp_quantization`) unless `KARUME_DAWN_FLAGS` is set,
+  in which case those toggles replace it (`packages/test-support/src/setup.ts`). GPU serialisation
+  in Vitest (`pool: "forks"`, `fileParallelism: false`, plus `flock /tmp/karume-gpu.lock` around
+  runs that use the GPU) is the long-term setting; it carried the full verify of 2026-10-28. There
+  is still no replacement for the Deno sanitizers; that is a known gap, tracked in the backlog.
+- **Staging.** Phase 1 is done (2026-10-16) and phase 2 is done. `wip/0.15` was fast-forwarded
+  into `main` on 2026-10-28, and the work continues on `main`. Phase 3, the 0.15.0 release, is in
+  progress.
+
+### Open points after this addendum
+
+Closed:
+
+- Default Dawn timestamp setting — a decision (Consequences for verification, above).
+- GPU serialisation — the current setting is the long-term one; the sanitizer replacement leaves
+  this ADR for the backlog.
+- Browser applications — the common shell is `apps/playground`; which removed tools come back and
+  in what order is backlog work. ADR 0005's manual real-browser acceptance stage MAY name the
+  playground (the `/kernel-check` page, the model pages) as its home; until ADR 0005 says so, the
+  point stays open there.
+- Maintenance of the release-age exclusion list — folded into the amended decision 4.
+
+Kept open:
+
+- **When Deno support ends altogether.** Trigger: revisit at the first release after 2027-04, or
+  earlier if `published-smoke` on Deno or `deno publish --dry-run` fails for a reason outside
+  Karume.
+- **The fetch layer's read strategy on Node.** Hub chooses "stream" on Deno and Node itself
+  (`defaultReadStrategy` in `packages/hub/src/sources/hf.ts`), which is correct for 0.15.0. The
+  default belongs in `@hdae/fetch-cache`; moving it there is a follow-up after 0.15.
+
+### Follow-ups (not done by this addendum)
+
+- A non-GPU check that `version` and `exports` agree between each published package's
+  `package.json` and `deno.json` (JSR publishes from `deno.json`; `published-smoke` reads the
+  expected version from `packages/models/package.json`). The release runbook already names both
+  files in the bump step.
+- Move the Node read-strategy default into `@hdae/fetch-cache` (kept open point above).
+- A replacement for the Deno resource / op sanitizers, or a recorded decision that there is none.
+- The order in which the removed tools come back as pages of `apps/playground`.
+- Small edits in documents that restate this ADR: ADR 0001 still says npm publishing is open (it
+  was settled as JSR only on 2026-10-28); ADR 0086 says decision 2 "still reads 'holds only how to
+  read local bytes'"; ADR 0005 keeps the real-browser acceptance home as an open point of this ADR;
+  the description of `packages/test-support/package.json` still says "Deno-shaped test and fs
+  helpers".

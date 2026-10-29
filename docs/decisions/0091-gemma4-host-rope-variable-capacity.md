@@ -111,7 +111,7 @@ reference path); the runtime default stayed. (Superseded by ADR 0104's addendum 
 `stateAttentionReduce` is a manifest `session` declaration, the family has no code default, and a
 quant without a declaration or `fromAssets` runs the reference path `"sequential"` —
 `packages/models/src/gemma/session-options.ts`; default presets: ADR
-[0128](0128-default-preset-original-weights.md), proposed.)
+[0128](0128-default-preset-original-weights.md), accepted 2026-10-29.)
 
 ## Consequences
 

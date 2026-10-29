@@ -1,6 +1,7 @@
 # 0129: Test layout — package tests, a real-weight e2e package, lanes, and what verification keeps
 
-- Status: proposed (2026-10-16; to be accepted by the maintainer after review)
+- Status: accepted (2026-10-29, the maintainer's ruling 34 a — amended by the addendum of
+  2026-10-29; proposed 2026-10-16, decision 6 fulfilled 2026-10-17)
 - Date: 2026-10-16
 - Related: [0005](0005-verification.md) (verification strategy — this ADR amends its 2026-09-20 "test
   lanes" addendum and qualifies its 2026-10-11 upstream-parity addendum for the test suite) /
@@ -15,7 +16,7 @@
 
 The 0.15.0 cycle moves the TypeScript side of the repository from Deno to Node 24 with Dawn as the
 WebGPU implementation and Vite+ (Vitest, Oxlint) as the toolchain. The toolchain change itself is
-recorded in ADR [0127](0127-node-dawn-toolchain.md) (proposed alongside this one); this ADR records how the test suite is laid out on the new toolchain and
+recorded in ADR [0127](0127-node-dawn-toolchain.md) (proposed alongside this one; both accepted 2026-10-29); this ADR records how the test suite is laid out on the new toolchain and
 which verification rules survive the move. The maintainer decided the points below on 2026-10-15/16
 (post-0.14.0 plan, decisions 2, 3 and 4, and the approved layout).
 
@@ -54,14 +55,15 @@ What the port changes:
 model assets: unit tests, op-level oracle tests, tests on fixtures tracked in the repository, and the
 gates. Real-weight end-to-end tests live in the private workspace package `@karume/e2e`
 (`packages/e2e/tests`), grouped by model family through the lane table (decision 2). The harness
-lives in the private workspace package `@karume/test-support`.
+lives in the private workspace package `@karume/test-support`. *(Amended 2026-10-29, see the
+addendum: a third private package, and the optional asset cases the triage kept.)*
 
 Rationale: plan decision 3 asks that a runtime change be verifiable by the runtime tests alone and
 that model checks run before a release. A package whose tests read multi-gigabyte local assets
 cannot be verified on its own on a machine without them; a separate package makes "needs local
 assets" a property of where the file is, not of a skip condition inside it.
 
-`@karume/test-support` holds:
+`@karume/test-support` holds *(amended 2026-10-29, see the addendum)*:
 
 | Entry | Contents |
 | --- | --- |
@@ -75,14 +77,14 @@ assets" a property of where the file is, not of a skip condition inside it.
 
 Both private packages are `"private": true`. They are never published, and the dependency-graph
 gate does not treat them as members whose entries must stay Web-standard (they may still be edge
-targets).
+targets). *(Amended 2026-10-29, see the addendum: three private packages.)*
 
 ### 2. Lanes are Vitest projects generated from one table
 
 The lanes are defined once, in `packages/test-support/src/lanes.ts`, and the root
 `vite.config.ts` builds `test.projects` from that table (`laneProjects()`); nothing else may define a
 lane. A lane is run with `vp test --project <lane>`; `vp test` runs every project, that is, the full
-suite.
+suite. *(Amended 2026-10-29, see the addendum: the playground's tests are a separate suite.)*
 
 - A family lane (`models:<family>`) claims the files whose name carries the family token, in
   `packages/models/tests` (host-side tests of the family) and in `packages/e2e/tests`. Family names
@@ -94,7 +96,7 @@ suite.
   `models:gemma4-qat`). A family lane MUST NOT overlap `core`.
 
 `packages/runtime/tests/verify_lanes_test.ts` is the coverage gate and reads the same table. It MUST
-fail when:
+fail when *(amended 2026-10-29, see the addendum: three more conditions)*:
 
 1. some test file is in no lane (core ∪ lanes ≠ all tests);
 2. a family lane shares a file with `core` (core ∩ lane ≠ ∅);
@@ -129,7 +131,8 @@ The following MUST stay in the suite through the migration and after it:
   `timestamp-query`), `assets_gate_test.ts` (no real-weight assets) and `distribution_gate_test.ts`
   (no distribution mirrors) — with their explicit opt-outs (`KARUME_ALLOW_NO_GPU`,
   `KARUME_ALLOW_NO_SHADER_F16`, `KARUME_ALLOW_NO_TIMESTAMP_QUERY`, `KARUME_ALLOW_NO_ASSETS`,
-  `KARUME_ALLOW_NO_DISTRIBUTION`). A run that sets an opt-out is not release evidence.
+  `KARUME_ALLOW_NO_DISTRIBUTION`). A run that sets an opt-out is not release evidence. *(Amended
+  2026-10-29, see the addendum: the assets gate's path and the reference gate's opt-out.)*
 - **The public-surface gate** (ADR 0008: per-package snapshot `tests/fixtures/public-surface.json`
   plus the named-export gates and `e2e_public_api_test.ts`) and **the dependency-graph gate**
   (runtime dependencies are Web-standard only). Their extraction moves from `deno doc` /
@@ -178,7 +181,7 @@ Phase 1 ports tests behaviour-preservingly through `@karume/test-support/test`: 
 `test({ name, ignore, only, fn })`, `describe` / `it`, the hooks, and `t.step` running sub-steps
 sequentially inside the test. Deno's sanitizer options are accepted and ignored. In phase 2 the tests
 are rewritten in Vitest idioms (`describe` / `it` / `expect`, nested `describe` instead of `t.step`)
-and the shim is removed.
+and the shim is removed. *(Amended 2026-10-29, see the addendum: `expect` was not adopted.)*
 
 Rationale: phase 1 must show that results did not change; rewriting assertions at the same time
 would make a difference in counts or numbers ambiguous between a porting defect and a test rewrite.
@@ -204,7 +207,8 @@ None. Test layout is repository-internal; no published entry point, type or beha
 
 - The lane tasks in `deno.json` (`test:core`, `test:models:*`) are no longer the source of truth and
   go away with `deno.json` as the port proceeds (they are still present in the worktree on
-  2026-10-16, unused by the Node suite). The lane table in `lanes.ts` replaces them.
+  2026-10-16, unused by the Node suite). The lane table in `lanes.ts` replaces them. *(Amended
+  2026-10-29, see the addendum: the tasks are gone, `deno.json` stays.)*
 - 61 `e2e_*_test.ts` files moved to `packages/e2e/tests/` (12 from `packages/runtime/tests`, 49 from
   `packages/models/tests`; see the appendix). The move re-relativised 464 relative specifiers
   (`move-e2e.mjs`). The moved files still import `packages/runtime/tests/helpers`,
@@ -219,11 +223,12 @@ None. Test layout is repository-internal; no published entry point, type or beha
   local-asset paths on 2026-10-16 matches 32 files in `packages/models/tests` (29 of them in family
   lanes), 4 in `packages/runtime/tests` (two of them gates) and 2 in `packages/hub/tests`; matches
   include comments. Decision 1 is the target; the triage (decision 5) brings these files in line with
-  it.
+  it. *(Amended 2026-10-29, see the addendum.)*
 - The sha256 reference rows stay where they are (`packages/models/tests/fixtures/references/`,
   `packages/runtime/tests/fixtures/references/`), as do the helpers that read and write them
   (`packages/runtime/tests/helpers/{reference,environment,results}.ts`).
-- Test file names stay `*_test.ts` in phase 1; Vitest's include uses that spelling.
+- Test file names stay `*_test.ts` in phase 1; Vitest's include uses that spelling. *(Amended
+  2026-10-29, see the addendum: the spelling stays.)*
 
 ### For verification
 
@@ -237,20 +242,21 @@ None. Test layout is repository-internal; no published entry point, type or beha
 - The environment key on Node is `node-<adapter device slug>` (Dawn puts the driver version into
   `description`, so the key is built from `device`), for example `node-nvidia-geforce-rtx-3080-ti`
   next to Deno's `deno-nvidia-geforce-rtx-3080-ti`. Node therefore starts with no rows: every sha
-  case is an explicit SKIP and the reference gate is red until rows are written.
+  case is an explicit SKIP and the reference gate is red until rows are written. *(Amended
+  2026-10-29, see the addendum: historical.)*
 - Node rows are written per lane with `KARUME_REFERENCE=write`, and only after that lane's Node
   artifacts (PNG / WAV / tensors) have been compared with the frozen Deno artifacts in
   `outputs/misc/0.15-baseline-2026-10-16/` (157 files from the 0.14.0 release run, with
   `SHA256SUMS`). Writing rows before the comparison would freeze whatever Node produced as "correct".
 - Lane membership is compared with the Deno baseline per lane. On 2026-10-16 the `core`, `anima`,
   `irodori` and `sbv2` lanes matched with zero difference; the other lanes were waiting for their
-  baseline run.
+  baseline run. *(Amended 2026-10-29, see the addendum: historical.)*
 - Dawn exposes features the Deno (wgpu) runs did not (`subgroups`,
   `packed_4x8_integer_dot_product` on the development machine), so some cases that were explicit
   SKIPs in the baseline run on Node. In the decision-5 count comparison these show up as
   skipped → passed and are expected differences, to be listed.
 - Vitest has no counterpart of Deno's per-test resource / op sanitizers; that leak detection is lost
-  for now (open point).
+  for now (open point). *(Amended 2026-10-29, see the addendum: the loss is accepted.)*
 
 ### Explicitly left open
 
@@ -263,10 +269,11 @@ See "Open points".
    coverage gate → re-implement the public-surface and dependency-graph gates on TypeScript 7 /
    oxc-parser → run runtime → hub → models → e2e on Node, comparing counts with the Deno JUnit
    baseline (decision 5) and artifacts with the frozen Deno artifacts, then `write` the Node rows per
-   lane. A triage list is produced after each layer.
+   lane. A triage list is produced after each layer. *(Amended 2026-10-29, see the addendum: done.)*
 2. **Phase 2 — reorganise (behaviour unchanged).** Apply the approved triage (moves and drops);
    rewrite tests in Vitest idioms and remove the shim (decision 6); redefine lanes where the triage
-   moved files, with the coverage gate rebuilt on the same table.
+   moved files, with the coverage gate rebuilt on the same table. *(Amended 2026-10-29, see the
+   addendum: done.)*
 3. **Phase 3 — behaviour changes** (numerics profile, default preset — separate ADRs). Their
    intended differences are re-recorded in the sha rows with `rewrite`, per ADR 0106 and ADR 0110.
    *(2026-10-18: the numerics profile was deferred — ADR 0126 — and the default presets stay — ADR 0128
@@ -275,20 +282,22 @@ See "Open points".
 ## Open points
 
 - The concrete triage lists and which families keep upstream parity at the model exit (decision 4)
-  are decided per layer by the maintainer; none is approved yet.
+  are decided per layer by the maintainer; none is approved yet. *(Closed 2026-10-29, see the
+  addendum.)*
 - Whether the op/block-level torch goldens of `e2e_golden_test.ts` (repository fixtures, no local
   assets) count as part of the kept oracle or as relaxable upstream parity. ADR 0005's step 3 ("add a
-  golden for each new op") is not revised by this ADR.
+  golden for each new op") is not revised by this ADR. *(Closed 2026-10-29, see the addendum.)*
 - Whether the release judgement stays "one green full run" (ADR 0005, 2026-09-20 addendum: lane
   greens do not substitute for it) or becomes the union of lane runs. Decision 7 says when lanes run,
-  not how a release is judged.
+  not how a release is judged. *(Closed 2026-10-29, see the addendum.)*
 - Whether the shared test helpers (`packages/{runtime,models}/tests/helpers`) and the reference-row
   fixtures move into `@karume/test-support` / `@karume/e2e`, and whether e2e should import package
-  internals at all.
-- The replacement for Deno's resource / op sanitizers.
+  internals at all. *(Closed 2026-10-29, see the addendum: they stay; a gate is a follow-up.)*
+- The replacement for Deno's resource / op sanitizers. *(Closed 2026-10-29, see the addendum: the
+  loss is accepted for now.)*
 - The file-name spelling in phase 2 (`*_test.ts` → `*.test.ts`) and the matching change of the
-  coverage gate's spelling rule.
-- The Japanese term for "all-skip gate" (plan, open).
+  coverage gate's spelling rule. *(Closed 2026-10-29, see the addendum.)*
+- The Japanese term for "all-skip gate" (plan, open). *(Closed 2026-10-29, see the addendum.)*
 
 ## Appendix: real-weight e2e files moved to `packages/e2e/tests` (2026-10-16)
 
@@ -349,3 +358,127 @@ files that used sequential sub-steps were restructured by hand into `describe` /
 `beforeAll` / `afterAll` (557 steps became `it`s; titles, case ids and reference-row keys
 unchanged). `@karume/test-support/test` no longer exists. `@std/assert` stays as the assertion
 library.
+
+## Addendum 2026-10-29 — accepted with amendments after the pre-acceptance review
+
+The maintainer accepted this ADR on 2026-10-29 (ruling 34 a) with the amendments of the review made
+for release step R2. Every decision holds in the code of that date or was fulfilled by the addenda
+above; what follows corrects text that went stale, records two scope facts the body does not state,
+and settles the open points. Where this addendum and the body disagree, this addendum holds; the
+superseded sentences above carry a marker. Work an amendment needs (code, tests, other documents)
+is listed under "Follow-ups" and is not done by this addendum.
+
+**Decision 1 — layout.**
+
+- **Three private packages**, not two: `@karume/e2e` (real-weight end-to-end tests),
+  `@karume/test-support` (the harness) and `@karume/kernel-checks` (added 2026-10-28: the kernel
+  identity checks — subgroup GEMV and RMS norm, the state-attention rewrites — shared by the runtime
+  GPU tests and the playground `/kernel-check` page; only those two import it). All three are
+  `"private": true`, and the dependency-graph gate checks only the published members, so it treats
+  the three alike. The playground (`apps/playground`) and the `tools/*` packages are private
+  workspace packages too; they are outside this decision.
+- **Kept optional asset cases.** A test in a published package MAY keep a case that reads local
+  assets when they are present and SKIPs explicitly otherwise, only where the approved triage
+  (`docs/research/2026-10-16-test-triage.md`) kept it: `gemma4_config_test.ts`,
+  `gemma4_tokenizer_test.ts`, `gemma4_chat_test.ts`, `wan_pipeline_test.ts` and
+  `census_table_test.ts` in `packages/models/tests`. The triage rows note that these cases should
+  move to `packages/e2e`; until they do, no new case of this kind is added. The files the body names
+  under Consequences were brought in line by the triage: `assets_fusion_counts_test.ts` became the
+  per-family `packages/e2e/tests/e2e_<family>_fusion_counts_test.ts` files (eight today), and the
+  two preprocessing files are now `e2e_siglip2_image_preprocess_real_test.ts` and
+  `e2e_wan_ti2v_i2v_preprocess_real_test.ts`.
+- **The `@karume/test-support` entries** today are `setup`, `fs`, `webgpu`, `lanes`, `module-graph`,
+  `local-dist-server`, `process-events` (takes over Node's `uncaughtException` /
+  `unhandledRejection` for a test that asserts on escaped errors) and `png-decode` (a minimal PNG →
+  RGB8 decoder for tests that read the images Karume writes). `test` is gone (addendum 2026-10-17
+  (3)). `codemod/` also holds `port-shim.mjs`.
+
+**Decision 2 — lanes.**
+
+- **The coverage gate has three more failure conditions** than the five listed: core collects an
+  end-to-end file other than the GPU-free gates named in `CORE_E2E_TESTS` (`e2e_ab_gate_test.ts`,
+  `e2e_assets_gate_test.ts`, `e2e_session_options_mirror_test.ts`); the family lanes that claim no
+  end-to-end file differ from `HOST_ONLY_FAMILY_LANES` (`models:umt5` today), or a lane named
+  there is missing from the table; a `LOW_PRIORITY_FAMILIES` entry is missing from the table,
+  appears in the default projects, or the projects with `KARUME_ALL_FAMILIES=1` are not the whole
+  table.
+- **The playground's tests are a separate suite.** `apps/playground/tests/*_test.ts` lie outside
+  the lane population (`{packages,tools}/*/tests/**/*_test.ts`) and need the playground's own Vite
+  configuration (its `@` alias and plugins). They run with `pnpm --filter @karume/playground test`,
+  are not part of the lanes, and are not collected by `vp test`. "`vp test` is the full suite" holds
+  for the lanes only. Today neither CI nor the release runbook runs this suite (follow-up).
+
+**Decision 3 — what stays mandatory.**
+
+- The assets gate is `packages/e2e/tests/e2e_assets_gate_test.ts` (moved by the triage); `core`
+  still claims it, as it does `gpu_gate_test.ts` and `distribution_gate_test.ts` in
+  `packages/runtime/tests`.
+- The reference gate (ADR 0106, ADR 0005 addendum 2026-09-20) has its own opt-out,
+  `KARUME_ALLOW_NO_REFERENCE=1`. Like the five listed, a run that sets it is not release evidence.
+- **Run switches.** Besides the opt-outs, the suite reads: `KARUME_UPSTREAM_PARITY=1` (the
+  upstream-parity cases, addendum 2026-10-17 (2)); `KARUME_NETWORK=1` (the case in
+  `packages/hub/tests/node_cache_storage_test.ts` that fetches from huggingface.co);
+  `KARUME_ALL_FAMILIES=1` (adds the `LOW_PRIORITY_FAMILIES` lanes to `vp test`); `KARUME_NO_DAWN=1`
+  (runs as on a machine without WebGPU) and `KARUME_DAWN_FLAGS` (replaces the Dawn toggles), both
+  read by `@karume/test-support/setup`; and the Wan family flags `KARUME_WAN_FULL_PIPELINE`,
+  `KARUME_WAN_TI2V_121F`, `KARUME_WAN_TI2V_FULL_PIPELINE`, `KARUME_WAN_TI2V_I2V_FULL` and
+  `KARUME_WAN_SWAP_TEXT_ENCODER` (a directory to swap in). The recording modes `KARUME_REFERENCE`,
+  `KARUME_SURFACE=write` and `KARUME_WGSL_SNAPSHOT=write` rewrite expected values instead of
+  checking them; a run with one of them set is not release evidence.
+- **Opt-in is a flag, never a separate lane**: a flag on cases inside a lane, or
+  (`KARUME_ALL_FAMILIES`) on whole existing family lanes. An ADR that wants an opt-in check adds a
+  flag-guarded case to its family lane.
+
+**Decision 6.** Phase 2 kept `@std/assert` as the assertion library; `expect` was not adopted
+(addendum 2026-10-17 (3)).
+
+**Consequences and Staging.**
+
+- The `deno.json` lane tasks are gone, but the root `deno.json` and
+  `packages/{runtime,hub,models}/deno.json` stay as the JSR configuration (ADR
+  [0127](0127-node-dawn-toolchain.md), addendum 2026-10-28; ruling 24 a).
+- "Node therefore starts with no rows" and the 2026-10-16 status of the per-lane comparison are
+  historical: the Node rows are written (`node-nvidia-geforce-rtx-3080-ti` on the development
+  machine), and every lane was run on Dawn when the triage was applied
+  (`docs/research/2026-10-16-test-triage.md`, "Applied").
+- Phase 1 is done. Phase 2 is done: the triage (addenda 2026-10-17 and (2)) and the shim removal
+  (addendum (3)). Phase 3 keeps its note.
+
+**Open points.**
+
+1. Triage lists and per-family parity — **closed** by the addenda of 2026-10-17 and (2): every drop,
+   merge and move was applied, and upstream parity is opt-in everywhere except EmbeddingGemma.
+2. The torch goldens of `e2e_golden_test.ts` — **closed**: they are an extra net that runs by
+   default (the file does not read `KARUME_UPSTREAM_PARITY`), not relaxable model-exit parity. The
+   TypeScript oracle is the required evidence for a new op, and a torch golden per new op SHOULD be
+   added (ADR [0005](0005-verification.md) step 3, re-graded 2026-10-18, ruling 5a).
+3. Release judgement — **closed**: one green full run of the default set (every lane except
+   `LOW_PRIORITY_FAMILIES`, in one `vp test`) on the release machine. The union of separate lane
+   runs does not substitute: only one run covers interaction within one process and run order (ADR
+   0005, 2026-09-20 addendum; `docs/release-runbook.md` §1).
+4. Shared helpers and imports — **closed, as they are**: the helpers stay in
+   `packages/{runtime,models}/tests/helpers` and the reference rows in their `fixtures/references/`.
+   The private packages (`@karume/e2e`, `@karume/kernel-checks`) MAY import the published packages'
+   `src/` and `tests/helpers` by relative path. The direction is one-way: no runtime, hub or models
+   test imports `packages/e2e` (addendum 2026-10-17), and only the runtime GPU tests (with their
+   helpers) and the playground import `@karume/kernel-checks`. Both rules hold today; no gate
+   enforces them (follow-up).
+5. Sanitizers — **closed for now**: the loss of Deno's resource / op sanitizers is accepted
+   (`@karume/test-support/process-events` covers escaped errors, not resource leaks). It belongs in
+   `docs/limitations.md` (follow-up); a GPU resource-leak check is filed only if a leak shows up.
+6. File-name spelling — **closed**: `*_test.ts` stays. Every package, tool and playground test uses
+   it, and the gate enforces it.
+7. The Japanese term — **closed**: `docs/GLOSSARY.ja.md` carries it (row "all-skip guard", marked
+   provisional there).
+
+**Follow-ups** (not blockers for 0.15.0):
+
+- A gate for the two import rules of open point 4 (no published-package test imports
+  `packages/e2e`; only the runtime GPU tests and the playground import `@karume/kernel-checks`).
+- Move the kept optional asset cases of decision 1 into `packages/e2e`.
+- Run the playground suite in CI and add it to the release runbook's checks.
+- Record the sanitizer loss in `docs/limitations.md`.
+- Correct `packages/e2e/README.md`, which says every test there needs local assets and a GPU (the
+  three core gates need neither, and the `*_host*_test.ts` files need no GPU).
+- ADR [0135](0135-gated-delta-rule-scan.md) (proposed) speaks of "opt-in" lanes in three places;
+  it should say "opt-in case in the family lane" (decision 3 above).

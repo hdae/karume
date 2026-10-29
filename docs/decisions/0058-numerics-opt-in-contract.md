@@ -3,8 +3,8 @@
 - Status: accepted (2026-08-14); partly superseded by [0110](0110-practical-tier-numerics-contract.md)
   (decision 4 ② and ③, 2026-09-26) and by the addendum of 2026-09-13 with 0110 decision 8
   (decisions 5 and 6, marked 2026-10-18); [0128](0128-default-preset-original-weights.md)
-  (proposed) takes over decision 6 and the same-weights bullet of the 2026-09-13 addendum once
-  accepted; decision 8 withdrawn 2026-10-18. Decision 2 stands: [0126](0126-numerics-profiles.md),
+  (accepted 2026-10-29) takes over decision 6 and the same-weights bullet of the 2026-09-13
+  addendum; decision 8 withdrawn 2026-10-18. Decision 2 stands: [0126](0126-numerics-profiles.md),
   which would amend it, is deferred (2026-10-18)
 - Date: 2026-08-14
 - Related: [0028](0028-f16-compute-variants.md) (decision 1, "no auto", generalised here) /
@@ -61,7 +61,7 @@ bit-identity checks indicate that the implementation is correct; they are not th
    to the default is a human quality ruling made, and the sha256 reference digests and the default
    value change in the same commit (splitting them opens a window where the check and the default
    disagree; precedent: w8a8, ADR 0050). (Superseded by the addendum of 2026-09-13, ADR 0110
-   decision 8 and ADR 0128 decision 1 (proposed), marked 2026-10-18: the runtime default is not
+   decision 8 and ADR 0128 decision 1 (accepted 2026-10-29), marked 2026-10-18: the runtime default is not
    promoted; models choose their default through `defaultQuant`; sha256 reference values are kept
    per preset and per environment key (ADR 0106), so changing `defaultQuant` moves no value and the
    window does not arise.)

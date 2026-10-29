@@ -3,7 +3,7 @@
 - Status: accepted (2026-08-01, the maintainer's ruling); partly superseded by
   [0037](0037-karume-monorepo.md) §1 (flat layout, 2026-08-05) and
   [0127](0127-node-dawn-toolchain.md) decisions 3 and 6 (scope sentence, bare-Node non-goal; ruled
-  2026-10-18, effective when 0127 is accepted).
+  2026-10-18, in effect since 0127 was accepted on 2026-10-29).
 - Date: 2026-08-01
 
 ## Decision

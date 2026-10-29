@@ -49,5 +49,5 @@ topped out at 7,280MiB, while the f32 weights of Anima's full 28-layer DiT need 
 
 ## Addendum (2026-10-17) — bf16 uses the same skeleton
 
-bf16 ([0131](0131-bf16-weight-execution.md), proposed) shares the `array<u32>` binding, eligibility and
+bf16 ([0131](0131-bf16-weight-execution.md), accepted 2026-10-29) shares the `array<u32>` binding, eligibility and
 odd-length padding; only the unpack differs (`bitcast<f32>` of the low / high 16 bits).

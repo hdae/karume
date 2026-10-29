@@ -1,6 +1,6 @@
 # 0016: Anima chain — export strategy and E2E layout
 
-- Status: accepted (2026-08-02); partly superseded by [0129](0129-test-layout-and-lanes.md) (proposed;
+- Status: accepted (2026-08-02); partly superseded by [0129](0129-test-layout-and-lanes.md) (accepted 2026-10-29;
   model-exit tolerance bands opt-in since 2026-10-17); phase exclusions withdrawn 2026-10-18
 - Date: 2026-08-02
 - Related: [../research/2026-08-02-anima-recon.md](../research/2026-08-02-anima-recon.md) (recon with

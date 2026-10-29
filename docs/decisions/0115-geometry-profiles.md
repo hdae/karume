@@ -8,8 +8,8 @@
   decision 8's "no entry point for users" by addendum decision 6 (2026-09-29) and 0117 decision 6
   (2026-10-01); the `tools/gpu-lab` tool of addendum 7 by [0127](0127-node-dawn-toolchain.md)
   decision 5 (2026-10-16); the Consequences' deferral of "drop a8 from the default quant on Metal" is
-  taken up by [0128](0128-default-preset-original-weights.md) decision 5 (proposed 2026-10-16), which
-  settles it once accepted. Re-graded 2026-10-18: decision 4's regeneration command and `--check`
+  taken up by [0128](0128-default-preset-original-weights.md) decision 5 (accepted 2026-10-29), which
+  settles it. Re-graded 2026-10-18: decision 4's regeneration command and `--check`
   to SHOULD.
 - Date: 2026-09-27
 - Related: [0022](0022-gemm-register-blocking.md) (GEMM skeleton; decision 3's MUST "the reduction
@@ -319,9 +319,8 @@ absence from `SessionOptions` are unchanged.)
   decision 2).
 - **"Drop a8 from the default quant on Metal" was deferred** to a separate decision (2026-09-27): on
   the M2, i8a8 takes as long as f32 even with a better geometry (research §9), which a geometry table
-  cannot fix. The question was taken up by [0128](0128-default-preset-original-weights.md) (proposed
-  2026-10-16; decision 5: a device without dp4a gets a warning, not a fallback), which settles it
-  once accepted.
+  cannot fix. The question was taken up by [0128](0128-default-preset-original-weights.md) (accepted
+  2026-10-29; decision 5: a device without dp4a gets a warning, not a fallback), which settles it.
 - Profiles for states-shaped and row-block attention are a separate item (decision 6).
 
 ## Acceptance (2026-09-27 to 2026-09-29)

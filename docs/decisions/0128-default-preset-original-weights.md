@@ -1,7 +1,8 @@
 # 0128: How a distribution chooses its default preset
 
-- Status: proposed (2026-10-16; rewritten 2026-10-17 after the maintainer's rulings of the same day;
-  to be accepted by the maintainer after review)
+- Status: accepted (2026-10-29, the maintainer's ruling 34 a — amended by the addendum of
+  2026-10-29; proposed 2026-10-16, rewritten 2026-10-17 after the maintainer's rulings of the same
+  day)
 - Date: 2026-10-16 (rewritten 2026-10-17)
 - Related: ADR [0074](0074-quant-seat-naming.md) (preset naming — the name never says "default";
   `defaultQuant` points at it) / [0075](0075-quant-presentation.md) (`label` / `description`;
@@ -33,7 +34,9 @@
 `defaultQuant` is a required string in every model entry of a distribution manifest; the parser
 only checks that it names one of the entry's `quants` (`packages/hub/src/manifest.ts:1147-1162`).
 The hub treats it as an opaque name: `resolveSelection` uses `options.quant ?? entry.defaultQuant`
-(`packages/hub/src/resolve.ts:124`, same in `inventory.ts:151`). Every family pipeline in
+(`packages/hub/src/resolve.ts:124`, same in `inventory.ts:151`). (amended 2026-10-29, see the
+addendum)
+Every family pipeline in
 `@karume/models` passes the caller's `quant` through to that resolution. The default is therefore
 pure data, chosen by one constant per recipe (`ANIMA_DEFAULT_QUANT`, `SBV2_DEFAULT_QUANT`,
 `IRODORI_DEFAULT_QUANT`, `WAN_DEFAULT_QUANT`, `WAN22_DEFAULT_QUANT`, `UMT5_DEFAULT_QUANT`,
@@ -43,7 +46,8 @@ storage type (`birefnet_default_quant` in `tools/export-recipes/birefnet/distrib
 ### What the default is today
 
 Local distribution mirrors on 2026-10-17 (`models/*/karume.json`), with the storage type of the
-upstream checkpoint read from its safetensors header (weight tensors only):
+upstream checkpoint read from its safetensors header (weight tensors only; amended 2026-10-29, see
+the addendum):
 
 | Distribution (models)                      | Presets                                                                                                       | `defaultQuant`          | Upstream storage                                                                    | Preset holding the original values                                                                                                  |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------- | ----------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
@@ -62,7 +66,8 @@ upstream checkpoint read from its safetensors header (weight tensors only):
 Eleven models (anima ×7, irodori ×2, wan2.1, wan2.2) default to a preset that quantizes
 activations (`linearCompute: "a8"`, `attentionCompute: "a8"`); every one of those presets has a
 sibling preset with the same weight files and no activation quantization (`f16+dit8` for anima and
-Wan, `i8` for irodori). No default requires a GPU feature (`shaderF16`).
+Wan, `i8` for irodori). (amended 2026-10-29, see the addendum)
+No default requires a GPU feature (`shaderF16`).
 
 ### How the defaults came about
 
@@ -115,9 +120,12 @@ The maintainer withdrew the draft on 2026-10-17 on these grounds:
    the reference devices — speed, resident memory, download size and output quality; the human
    quality review of ADR 0110 decision 8 remains the gate for entering `defaultQuant` — and records
    the candidates, the measurements and the reason in the decision record (the family's ADR, or the
-   table in Context for families without one). The default is normally the practical preset: the
+   table in Context for families without one). (amended 2026-10-29, see the addendum)
+   The default is normally the practical preset: the
    lightest preset whose quality loss the review accepted. The rulings for sbv2 (2026-08-20),
-   Wan2.1 (ADR 0120 ruling 4, 2026-10-04), Wan2.2 (ADR 0121 decision 2, 2026-10-06), gemma4 (ADR
+   Wan2.1 (ADR 0120 ruling 4, 2026-10-04), Wan2.2 (ADR 0121 decision 2, 2026-10-06; amended
+   2026-10-29, see the addendum),
+   gemma4 (ADR
    0104) and BiRefNet (ADR 0113 addendum 2026-10-11) are instances of this procedure, and the form
    of ADR 0058's addendum (a speed-bundled default beside a reference preset with the same weights)
    is what the procedure produces. Rationale: the measured facts differ per model and per device
@@ -132,7 +140,8 @@ The maintainer withdrew the draft on 2026-10-17 on these grounds:
    - **C2 — every preset that quantizes activations has a sibling with the same weights and no
      activation quantization.** For every preset whose `session` has `linearCompute: "a8"` or
      `attentionCompute: "a8"`, another preset of the same model has an identical `weights` map and
-     neither value. Rationale: that sibling is what the warning of decision 5 points to; identical
+     neither value. (amended 2026-10-29, see the addendum)
+     Rationale: that sibling is what the warning of decision 5 points to; identical
      weights means switching to it costs no download.
    - **C3 — a model with two or more presets labels every preset.** Every preset has a `label` and
      a `description` (ADR 0075), non-blank after trimming; a model with exactly one preset is
@@ -173,7 +182,8 @@ The maintainer withdrew the draft on 2026-10-17 on these grounds:
    `packed_4x8_integer_dot_product`, `@karume/runtime` prints one `console.warn` per device
    (`GpuContext`) that says what happened — the integer dot products run emulated: same numbers,
    no speed-up, slower on Apple Metal — and the two ways out: the sibling preset of C2 (same
-   weights, no activation quantization, no extra download), or `"f32"` for the knob. The runtime
+   weights, no activation quantization, no extra download), or `"f32"` for the knob.
+   (amended 2026-10-29, see the addendum) The runtime
    does not change the knob, does not pick the sibling and does not fail; the choice stays the
    user's. The predicate is a pure function (`packages/runtime/src/runtime/a8-emulation-warning.ts`),
    the once-per-device memo lives on the `GpuContext`. Rationale: the maintainer's ruling of
@@ -202,7 +212,7 @@ The maintainer withdrew the draft on 2026-10-17 on these grounds:
 - On a GPU without dp4a, a default that quantizes activations (anima, irodori, wan2.1, wan2.2
   today) prints the warning once when the first Session is built; passing the sibling preset
   (`f16+dit8` for anima and Wan, `i8` for irodori) removes it with no extra download, and so does
-  `linearCompute: "f32"` / `attentionCompute: "f32"`.
+  `linearCompute: "f32"` / `attentionCompute: "f32"`. (amended 2026-10-29, see the addendum)
 - The original-weights preset, where it exists, is chosen by name (`quant: "bf16"` for
   `anima-v1.0`, `"f32"` for irodori, …).
 
@@ -213,7 +223,8 @@ The maintainer withdrew the draft on 2026-10-17 on these grounds:
   unlabeled preset turns the gate red before anything is published.
 - The table of decision 4 is maintained here; a family that gains or drops an original-weights
   preset updates its row.
-- CHANGELOG: the runtime warning under Added; no Breaking entry.
+- CHANGELOG: the runtime warning under Added; no Breaking entry. (amended 2026-10-29, see the
+  addendum)
 
 ### For verification
 
@@ -240,3 +251,95 @@ sync. No distribution was rebuilt.
    `estimateGraphMemory`, `fitsHeadroom`); not scheduled.
 4. The wording of ADR 0126 decision 2 (decision 7) — resolved 2026-10-18 at step 2-8 (ADR 0126 deferred,
    sentence reworded).
+
+## Addendum (2026-10-29) — accepted with amendments (the maintainer's ruling 34 a)
+
+The release review of 2026-10-29 (0.15.0 preparation) checked every decision against the code and
+the local mirrors under `models/`: all seven decisions hold. The text had drifted behind ADRs 0132
+and 0133, and the gate's C2 does not yet count the conv knob that ADR 0133 added. The maintainer
+accepted the ADR with the amendments below. Where the body and this addendum differ, this addendum
+wins; the body sentences it supersedes carry "(amended 2026-10-29, see the addendum)". Code and test
+work is listed under follow-ups and is not part of this addendum.
+
+### Amendments
+
+1. **Line references (Context, "How the default is resolved").** The parser's check is in
+   `parseModel` (`packages/hub/src/manifest.ts:1245-1253`); the fallback to `defaultQuant` is in
+   `resolveSelection` (`packages/hub/src/resolve.ts:136`) and `namedSelection`
+   (`packages/hub/src/inventory.ts:172`). The behaviour described is unchanged.
+2. **Context table, refreshed to the mirrors of 2026-10-29** (26 models in 14 mirrors; rows not
+   named here are unchanged):
+   - wan2.2 ti2v-5b: presets `f16+dit8` `f16+dit8-a8-attn8-s16` `f16+dit8-a8-attn8-online`
+     (ADR 0132) `i8` `i8-a8-attn8-online-conv8` (ADR 0133); `defaultQuant`
+     `i8-a8-attn8-online-conv8`. The upstream storage and the original-values columns are
+     unchanged.
+   - vowel-detector is not published: there is no mirror under `models/`, and the distribution
+     gate's roster leaves it out on purpose (the comment at
+     `packages/runtime/tests/distribution_gate_test.ts:11-13`). Its recipe declares the single
+     preset `f32` (`tools/export-recipes/vowel_detector/distribution.py:171-172`), which applies
+     once it is published.
+   - gemma4: the shipped distribution is e2b only, as the row says. The recipe already declares
+     regular e4b with a provisional default `i4` that was never measured (`GEMMA4_DEFAULT_QUANT`,
+     `tools/export-recipes/gemma4/distribution.py:332-335`); its export waits for a machine with
+     48 GB of RAM or more (backlog). Decision 1's procedure picks its default before it ships.
+3. **Activation quantization has three knobs.** Wherever this ADR names activation quantization
+   as `linearCompute` / `attentionCompute` = `"a8"` (the paragraph after the Context table, C2,
+   decision 5, Consequences "For users"), read `linearCompute`, `attentionCompute` or
+   `convCompute` = `"a8"` — ADR 0133 decision 6 added `convCompute` after this ADR was written. In
+   the paragraph after the Context table the siblings are `f16+dit8` for anima and Wan2.1 and `i8`
+   for irodori and Wan2.2: Wan2.2's default stores the VAE decoder in i8, so it shares its weights
+   with `i8`, not with `f16+dit8` (`tools/export-recipes/wan/distribution.py:571-590`). The count
+   "eleven models" still holds.
+4. **Decision 1.** Wan2.2's instance is ADR 0121 decision 2 (2026-10-06), then ADR 0132 decision 6
+   and ADR 0133 decision 8 (both 2026-10-23); the current value and its measurements are recorded
+   in the doc comment of `WAN22_DEFAULT_QUANT` (`tools/export-recipes/wan/distribution.py:591-605`).
+   The record of a choice is "the family's ADR, or the doc comment of the recipe's default
+   constant", replacing "the table in Context for families without one": that table has no column
+   for measurements or reasons.
+5. **C2 names the three knobs.** For every preset whose `session` has `linearCompute`,
+   `attentionCompute` or `convCompute` = `"a8"`, another preset of the same model has an identical
+   `weights` map and none of the three. The gate counts only `linearCompute` and
+   `attentionCompute` today (`defaultPresetViolations`, `distribution_gate_test.ts:299-318`): it
+   neither flags a preset whose only a8 knob is `convCompute` nor rejects a sibling that sets
+   `convCompute: "a8"`. The only conv8 preset, Wan2.2 `i8-a8-attn8-online-conv8`, also sets
+   `linearCompute: "a8"`, and its sibling `i8` has the same weights and an empty `session`, so
+   every mirror of 2026-10-29 already passes the three-knob rule. Extending the gate is a
+   follow-up (open point 5).
+6. **Decision 5 names the three knobs.** The warning fires for any of the three
+   (`packages/runtime/src/runtime/a8-emulation-warning.ts:37-48`), and its text already names
+   `convCompute` among the knobs to set to `"f32"` (`:53-54`). The knob route out is `"f32"` for
+   every a8 knob the preset sets.
+7. **Decision 4's table** is re-checked against the mirrors of 2026-10-29: every row stands except
+   vowel-detector, which reads "not published (the recipe ships `f32` when published)". The
+   "Status on" column reads 2026-10-29.
+8. **Consequences, "For users".** The sibling of Wan2.2's default is `i8`. For the conv8 preset the
+   knob route also needs `convCompute: "f32"`, as the warning text already says.
+9. **Consequences, "For the repository".** The CHANGELOG entry of the warning (`[Unreleased]`,
+   Added) names only `linearCompute` / `attentionCompute`; it should name `convCompute` too
+   (follow-up).
+
+### Open points after acceptance
+
+1. gemma4 `bf16` (PLE) and sbv2 `f32` — kept open, not release-blocking: both are additive
+   presets that change no default, and the gemma4 row needs the PLE path in bf16 first.
+2. Revisiting decision 5 — kept open; there is no field evidence before the release.
+3. The "which presets fit this device" report — kept open, unscheduled; unrelated to the release.
+4. Already records its resolution (2026-10-18, step 2-8); closed, its text stays as written.
+5. **New: the gate's C2 counts `convCompute`** (amendment 5). Open until the test change lands.
+
+The review's other two new points are closed by this addendum: the provisional gemma4 e4b default
+by the note of amendment 2, and where a family records its choice by amendment 4.
+
+### Follow-ups (not done by this addendum)
+
+- Extend C2 in `packages/runtime/tests/distribution_gate_test.ts` to the three knobs, with
+  fault-injection cases for a preset whose only a8 knob is `convCompute` and for a would-be sibling
+  that sets `convCompute: "a8"`. No GPU is needed; it waits until the pending geometry derivation
+  lifts the freeze on `packages/runtime`. No mirror changes.
+- Name `convCompute` in the CHANGELOG entry of the dp4a warning.
+- Sync the documents that still call this ADR proposed: ADR 0058 (the status line, the marker
+  on decision 6, and the same-weights bullet of its 2026-09-13 addendum, "effective when 0128 is
+  accepted"), ADR 0091,
+  ADR 0115 (the status line and the Consequences), and the 0.15 migration item of
+  `docs/backlog.md`; and correct ADR 0120's pointer to `WAN_DEFAULT_QUANT`
+  (`tools/export-recipes/wan/distribution.py:440`, not `:343`).

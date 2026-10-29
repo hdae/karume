@@ -3,8 +3,8 @@
 - Status: accepted (2026-08-01); partly superseded by [0127](0127-node-dawn-toolchain.md) decision 1
   (the real-GPU stage runs under Vitest on Node + Dawn, not `deno test`) and
   [0129](0129-test-layout-and-lanes.md) decision 2 (lanes come from one table), ruled 2026-10-18,
-  effective when those proposed ADRs are accepted. The stages and rules below are in force (ADR 0129
-  decision 3 keeps them).
+  in effect since both were accepted on 2026-10-29. The stages
+  and rules below are in force (ADR 0129 decision 3 keeps them).
 - Date: 2026-08-01
 - Related: recon §1 / §8 / §9-2 — the prototype's largest gap was no automated numeric test of its
   WGSL kernels; Deno 2.9.4 + RTX 3080 Ti (WebGPU without flags, `shader-f16`, `timestamp-query`) was
@@ -68,8 +68,8 @@ suite was split into lanes. **Only the unit of execution changed; the stages and
 - **Family lanes may overlap** (`e2e_gemma4_ple_gpu_test.ts` is in both gemma4 lanes): a gap is not
   allowed, an overlap only runs twice.
 - **A release needs one green full run** (`vp test`, release-runbook §1): only the full run covers
-  interaction within one process and run order. Whether a union of lane runs may replace it is open
-  (ADR 0129 Open points).
+  interaction within one process and run order. A union of lane runs does not replace it (ADR
+  0129 addendum of 2026-10-29, open point 3).
 
 ## Addendum (2026-09-20) — reference guard (an all-SKIP of sha256 rows fails)
 

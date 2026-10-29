@@ -1,6 +1,7 @@
 # 0131: bf16 weight storage — executed like f16, written when the round trip is exact
 
-- Status: proposed (2026-10-17; to be accepted by the maintainer after review)
+- Status: accepted (2026-10-29, the maintainer's ruling 34 a — amended by the addendum of
+  2026-10-29; proposed 2026-10-17)
 - Date: 2026-10-17
 - Related: ADR [0006](0006-quantization.md) (storage-only quantization, compute in f32; bf16 was
   left "declared only") / [0018](0018-f16-weight-execution.md) (f16 storage: GPU-resident packed
@@ -9,7 +10,8 @@
   storage paths; unchanged) / [0108](0108-container-format.md) (the codec ledger already registers
   `bf16`; addendum 12 made "declared but not executable" an explicit state) / [0128](0128-default-preset-original-weights.md)
   (the default preset question; its table listed only the DiT as BF16 — all four Anima components
-  are) / [0127](0127-node-dawn-toolchain.md) (the Node port; the 2026-10-17 ruling that made
+  are; amended 2026-10-29, see the addendum) /
+  [0127](0127-node-dawn-toolchain.md) (the Node port; the 2026-10-17 ruling that made
   bf16 support a phase-2 step) / [0074](0074-quant-seat-naming.md) (preset naming: the bf16 preset is
   the bare `<storage>` form `bf16`).
 
@@ -52,12 +54,14 @@ re-bias and no subnormal reinterpretation — exact on both the host and the GPU
   only shows for odd row lengths). The quad form for the GEMM v4 path builds a `vec4<f32>` from two
   words the same way. The GEMV family (M = 1 only, like f16) reads eight elements per 16-byte word.
 - **Keys and snapshots**: the pipeline-key discriminator is `:wbf16`; the WGSL header note says
-  "重み bf16 格納". The f32 / f16 / i8 generated text does not change by a byte (the existing
+  "重み bf16 格納". (amended 2026-10-29, see the addendum)
+  The f32 / f16 / i8 generated text does not change by a byte (the existing
   snapshots are the detector); the bf16 variants have their own snapshots (`*_wbf16*.wgsl`, 21
   files).
 - **Capability**: `RUNTIME_SUPPORT.storage` lists `bf16`; `capabilities().storage` reports it. The
   residency planner has a `bf16` seat next to `f16`; the estimate counts it as compressed resident
-  bytes. The fusion rules treat bf16 like f16 (no activation quantization, no scale binding).
+  bytes. (amended 2026-10-29, see the addendum)
+  The fusion rules treat bf16 like f16 (no activation quantization, no scale binding).
 - Compute stays f32 (ADR 0006). The `f16` compute variant (ADR 0028) accepts bf16 weights the way
   it accepts f32 weights (the expanded value is rounded into the f16 tile).
 
@@ -65,7 +69,8 @@ re-bias and no subnormal reinterpretation — exact on both the host and the GPU
 
 `weight_dtype="bf16"` (and per-tensor overrides) stores a weight as bf16 only when the round trip
 `f32 → bf16 → f32` is bit-exact, otherwise it stays f32 — the same rule as f16, so the stored bytes
-are always the values the golden was computed with (ADR 0006, fake-quant first). Recipes round the
+are always the values the golden was computed with (ADR 0006, fake-quant first). (amended
+2026-10-29, see the addendum) Recipes round the
 model with `round_weights_to_bf16` (round-to-nearest-even) before capturing references. The
 rounding covers the parameters and the persistent buffers — what the checkpoint carries — and
 leaves non-persistent buffers alone: those are computed in f32 at init (the RoPE `inv_freq`), the
@@ -119,9 +124,10 @@ bits coincide (`anima-aesthetic-v1.1`, `anima-turbo-v1.0`, `anima-aesthetic-v1.0
   two models hold the same upstream bits (local mirror: 35 → 50 GiB for `karume-anima`). VRAM
   equals the f16 preset.
 - Geometry profiles (ADR 0115) are keyed by pipeline key, so `:wbf16` GEMMs fall back to the default
-  geometry; the faithful preset is not tuned for speed.
+  geometry; the faithful preset is not tuned for speed. (amended 2026-10-29, see the addendum)
 - `CodecLayout` and `WeightStorage` both carry `bf16`; the residency and fusion types gained a
   member each, and the `never` switches surfaced every site that had to learn the new seat.
+  (amended 2026-10-29, see the addendum)
 
 ## Alternatives considered
 
@@ -138,4 +144,72 @@ bits coincide (`anima-aesthetic-v1.1`, `anima-turbo-v1.0`, `anima-aesthetic-v1.0
 
 - gemma4 (upstream BF16, shipped as i4 only): a faithful preset also needs the PLE tables in bf16;
   deferred ("best effort", maintainer ruling 2026-10-17).
-- Whether the geometry sweep should cover `:wbf16` GEMMs.
+- Whether the geometry sweep should cover `:wbf16` GEMMs. (amended 2026-10-29, see the addendum)
+
+## Addendum (2026-10-29) — accepted with amendments (the maintainer's ruling 34 a)
+
+The release review of 2026-10-29 (0.15.0 preparation) checked the decisions against the runtime,
+the exporter, the Anima recipe and the local Anima mirrors: decisions 2 to 4 hold; decision 1 holds
+except for borrowed weights (amendment 3). The maintainer accepted the ADR with the amendments
+below. Where the body and this addendum differ, this addendum wins; the body sentences it
+supersedes carry "(amended 2026-10-29, see the addendum)". Code and test work is listed under
+follow-ups and is not part of this addendum.
+
+### Amendments
+
+1. **Related, ADR 0128.** The remark that ADR 0128's table listed only the DiT as BF16 is
+   obsolete: that table says "BF16 in all four components". The clause is dropped.
+2. **Decision 1, "Keys and snapshots".** The WGSL header note of the bf16 variants is
+   `", bf16 weight storage"` (`weightNote`, `packages/runtime/src/kernels/weight-storage.ts:129-135`;
+   the comments were translated under ADR 0130).
+3. **Decision 1, "Capability": borrowed weights are not covered yet.** A Session that borrows an
+   initializer from another Session (the shared initializer of ADR 0096) derives the expected
+   residency class in `expectedSharedSeat`, which still classes bf16 as `"raw"`
+   (`packages/runtime/src/runtime/weight-residency.ts:242`), while the planner gives a bf16
+   initializer the `bf16` or the `expanded` seat, never `raw` (`:187-193`). Borrowing a bf16
+   weight therefore always fails the residency-class check with an `ExecutionError` (`:394-405`):
+   a loud failure, never a wrong value. No shipped family borrows bf16 weights (the borrowers are
+   the Wan tile decode and Gemma 4, neither of which ships bf16). This sentence goes when open
+   point 3 is fixed.
+4. **Decision 2: a non-exact eligible weight fails the export.** The text "otherwise it stays f32"
+   is replaced by: an eligible weight whose round trip `f32 → bf16 → f32` is not exact fails the
+   export with an `EmitError` (the rounding was not applied before the golden was taken), the same
+   as f16 (`tools/exporter/src/karume/emit.py:821-827`); only weights that are not eligible for a
+   weight slot stay f32.
+5. **Consequences, geometry.** Replaced by: the GEMM tile geometry is chosen from the row count
+   whatever the weight storage (`gemmRowsGeometry`,
+   `packages/runtime/src/kernels/geometry-profile.ts:592-599`, called for every storage at
+   `packages/runtime/src/runtime/recipe-builders/linear.ts:345-348`), so `:wbf16` GEMMs use the
+   profile's geometry. The profile's linear rule was derived from f16-stored cases
+   (`packages/runtime/src/tune/cases.ts:58`); whether it is also the best geometry for bf16 was not
+   measured.
+6. **Consequences, last bullet.** The `never` switches surfaced most of the sites that had to learn
+   the new seat; `expectedSharedSeat` is an `if` chain, not a `never` switch, and was missed
+   (amendment 3, open point 3).
+7. **Terminology.** "Faithful preset" in this ADR means the original-weights preset — the term of
+   ADR 0128 decision 4 and of the preset's label, "Original weights (bf16)"
+   (`tools/export-recipes/anima/distribution.py:345`). New text uses "original-weights preset".
+
+### Open points after acceptance
+
+1. **gemma4 original-weights preset** (needs the PLE tables in bf16) — kept deferred, not
+   release-blocking: it is additive and changes no default. It is tracked by the gemma4 e2b row of
+   ADR 0128 decision 4's table.
+2. **Geometry sweep coverage of `:wbf16`** — reworded: the premise "bf16 falls back to the default
+   geometry" was wrong (amendment 5). The question is now whether the sweep's identity check (and
+   its timing) should include a bf16-stored linear case. Kept open, low priority, after the pending
+   geometry derivation.
+3. **New: borrowed bf16 weights fail the residency check** (amendment 3). The fix is to treat bf16
+   like f16 in `expectedSharedSeat` (`bf16` when resident, otherwise `expanded`) with a borrow case
+   in the GPU borrow tests. Not release-blocking (no shipped family borrows bf16 weights; the
+   failure is loud). If the fix misses 0.15.0, `docs/limitations.md` records "bf16 weights cannot
+   be borrowed across Sessions (fails loudly)" for the release.
+
+### Follow-ups (not done by this addendum)
+
+- Fix `expectedSharedSeat` for bf16 and add a bf16 borrow case to the GPU borrow tests
+  (`packages/runtime/tests/gpu_borrowed_context_test.ts`), once the geometry derivation lifts the
+  freeze on `packages/runtime` and the GPU is free; otherwise record the limitation for 0.15.0.
+- Add a bf16-stored linear case to the geometry sweep's identity check (low priority, after the
+  geometry derivation).
+- ADR 0018 still calls this ADR proposed (its bf16 sentence); sync it.
