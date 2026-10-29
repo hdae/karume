@@ -279,7 +279,10 @@ class TestSbv2Sections:
         assert "`dictionary` option" not in sbv2_card
         assert "the pipeline fetches it" not in sbv2_card
         assert "belongs to the caller" in sbv2_card
-        assert "https://github.com/hdae/karume/tree/main/examples/sbv2" in sbv2_card
+        assert (
+            "https://github.com/hdae/karume/tree/main/apps/playground/src/models/sbv2" in sbv2_card
+        )
+        assert "examples/sbv2" not in sbv2_card
 
 
 class TestSbv2QuantRounding:

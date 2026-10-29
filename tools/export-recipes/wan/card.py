@@ -873,10 +873,10 @@ _WAN22_I2V_INPUTS = (
 _WAN22_I2V_USAGE = (
     "",
     "For image to video, pass the first frame as `image`. Decoding the image file is up to the",
-    "caller: the Deno example in the Karume repository (`examples/wan`) uses fast-png and",
-    "jpeg-js, and in a browser `createImageBitmap` and a canvas work. `generate()` takes 8-bit",
+    "caller: on Node or Deno an image decoder such as fast-png and jpeg-js works, and in a",
+    "browser `createImageBitmap` and a canvas work. `generate()` takes 8-bit",
     "RGB, so convert what the decoder gives: a canvas gives RGBA, and so does jpeg-js by",
-    "default (`formatAsRGBA: false` gives RGB, as the example uses) — drop the alpha channel.",
+    "default (`formatAsRGBA: false` gives RGB) — drop the alpha channel.",
     "",
     "The bit-for-bit match with Pillow (Accepted inputs) starts from the RGB8 pixels, so the",
     "decoding decides whether a file gives the reference's input. The official Wan2.2 code",

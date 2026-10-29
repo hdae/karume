@@ -2714,13 +2714,14 @@ class TestTheWan22ImageToVideoCard:
         # 画像の decode は呼び手の仕事（Deno は fast-png / jpeg-js・ブラウザは createImageBitmap と
         # canvas）。
         assert "Decoding the image file is up to the caller" in prose
-        assert "uses fast-png and jpeg-js" in prose
+        assert "an image decoder such as fast-png and jpeg-js works" in prose
+        assert "examples/wan" not in prose
         assert "`createImageBitmap` and a canvas" in prose
         # jpeg-js の既定は RGBA・example は `formatAsRGBA: false` で RGB を直接受ける
         # （`examples/wan/decode-image.ts`）。
         assert (
-            "a canvas gives RGBA, and so does jpeg-js by default (`formatAsRGBA: false` gives RGB,"
-            " as the example uses) — drop the alpha channel." in prose
+            "a canvas gives RGBA, and so does jpeg-js by default (`formatAsRGBA: false` gives RGB)"
+            " — drop the alpha channel." in prose
         )
         # 復号の段の参照との差（EXIF の向き・アルファ・JPEG の復号器）— example / gpu-lab の
         # README と同じ事実。

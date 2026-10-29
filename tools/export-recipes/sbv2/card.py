@@ -419,8 +419,9 @@ def _sbv2_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "The snippet uses [`@hdae/yomi`](https://jsr.io/@hdae/yomi), whose dictionary",
         "(about 19 MB) is fetched on the first `getDictionary()` and read from the Cache API",
         "afterwards; to fix a reading, put yomi's overlay dictionary in front of the analysis.",
-        "The [SBV2 example](https://github.com/hdae/karume/tree/main/examples/sbv2) is the",
-        "worked version.",
+        "The SBV2 page of the",
+        "[Karume Playground](https://github.com/hdae/karume/tree/main/apps/playground/src/models/sbv2)",
+        "is the worked version.",
     ]
 
 
