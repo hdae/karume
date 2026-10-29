@@ -15,8 +15,127 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+### Added
+
+- `acquireGpu`, `readAdapterLimits` and `runGeometrySweep` (`@karume/runtime`,
+  `@karume/runtime/tune`) take an optional `gpu` (`AcquireGpuOptions.gpu`, a `GPU` instance) and
+  request the adapter from it instead of `navigator.gpu` (ADR 0127). Node applications pass a
+  WebGPU implementation here (e.g. Dawn through the npm package `webgpu`: `create([])`) without
+  defining `navigator.gpu` themselves; browsers and Deno leave it unset.
+- `geometrySweepCases()` (with its element type `GeometrySweepCase`) and `sweepCandidateKernelsId(rows, dp4a)`
+  (`@karume/runtime/tune`): the sweep cases as id and op, and the candidate fingerprint of a record
+  merged from per-case `runGeometrySweep` calls, recomputed over the merged rows so that
+  `deriveGeometryProfile` accepts it (ADR 0117 addendum of 2026-10-28).
+- `ResidentTensor.clear()` (`@karume/runtime`): sets a resident tensor to zero on the GPU
+  (`clearBuffer` in its own submit, in queue order like `write`; ADR 0054 addendum of 2026-10-26).
+  Besides the disposed and device-lost guards of `write`, it throws `ResidentTensorError` while an
+  issued run / enqueue or a pending `finishAndRead` uses the resident.
+- The geometry sweep (`@karume/runtime/tune`) measures conv3d on int8 activations: 14 cases from the
+  Wan2.2 TI2V-5B decoder at tile 16 and 32 under a new sweep op (see **Breaking**), from which
+  `deriveGeometryProfile` fills `i8a8.conv3d`. The default sweep (`runGeometrySweep` without `ops`)
+  runs these cases too, so it takes longer. Two of the tile-32 cases bind about 256 MiB each: on a
+  device whose `maxStorageBufferBindingSize` is lower, every candidate fails on them and
+  `i8a8.conv3d` stays the default.
+- A third embedded geometry profile, `nvidia-ampere` (adapters `nvidia` / `ampere`, swept on an RTX 3080 Ti
+  under Node + Dawn; ADR 0115 addendum decisions 10 and 11). On those adapters five classes take a
+  faster tile geometry than the default (geometric mean over each class's sweep cases): the i8a8
+  linear ×1.170, the fused f32 attention ③PV ×1.113 and 129–256-row GEMMs ×1.114 (decision 10), and
+  conv3d on int8 activations (`i8a8.conv3d`) ×1.339 over its 14 cases and the ①QK stage of the i8a8
+  fused attention (`i8a8.attentionQk`) ×1.103 over its four cases (decision 11); every other class
+  keeps the default, and outputs are bit-identical to the default. On that GPU the Wan2.2 default
+  preset's VAE decoder chunks at tile 16 run ×1.342 (first) / ×1.204 (next) faster by median GPU
+  time than with the default profile (74.66 vs 100.17 ms / 212.79 vs 256.15 ms). The ①QK geometry
+  acts on the three-dispatch fused attention that stores its scores — `attentionScoreStorage` other
+  than `"none"` (as in anima's and Wan2.1's practical presets), and `"none"` on shapes the online
+  kernel does not take — and on the dp4a canary's compile, not on Wan2.2's online route; no
+  end-to-end run was measured with it. `nvidia-blackwell` and `apple-metal-3` take the default
+  `i8a8.conv3d` (their sweeps have no conv3d case).
+- Online int8 attention (`@karume/runtime`, ADR 0132): `attentionScoreStorage: "none"` (with
+  `attentionCompute: "a8"`) runs fused attention as one kernel per block of query rows that never
+  stores the score matrix. Heads of width 64 or 128 and key lengths that are multiples of 4; other
+  shapes fall back to the three dispatches. On devices with subgroups the kernel uses a subgroup
+  reduction that is bit-identical to its portable form; it relies on a linear mapping of lanes onto
+  subgroups, which `acquireGpu` measures on the device (`GpuContext.subgroupLanesLinear`), and runs
+  the portable form where the mapping does not hold. `acquireGpu({ subgroups: "available" })`
+  requests the subgroup features only when the adapter has them (`true` still rejects their
+  absence). The estimate (`estimateGraphMemory`, `PreparedModel.estimate`) with
+  `attentionScoreStorage: "none"` needs `EstimateOptions.attentionDevice` (whether the device has
+  subgroups, and its `maxComputeWorkgroupStorageSize`) and fails without it, whatever the graph.
+  The manifest vocabulary (`@karume/hub`) accepts the value; the preset name token is `online`.
+- Wan2.2 ships a third preset, `f16+dit8-a8-attn8-online` (same weights as the s16 preset): at
+  1280×704×121 one DiT forward on an RTX 3080 Ti takes about 16–19 s instead of 24–29 s, with the same
+  step-1 error against the reference preset as the s16 preset (relRMS 0.042 vs 0.044 at 33 frames).
+  Its transformer and attention are what the new default preset (below) runs; `quant:
+  "f16+dit8-a8-attn8-s16"` still selects the previous default.
+- conv3d on int8 activations (`@karume/runtime`, ADR 0133 and its addenda of 2026-10-26 (channel-major
+  quantiser, conv3d geometry)): `convCompute: "a8"` quantises the input of a conv3d once per input
+  pixel over its channels, in one dispatch that reads the input channel-major as stored, and reduces
+  each tap with an integer dot product against int8-resident weights (the conv counterpart of
+  `linearCompute: "a8"`; a TS mirror reproduces the GPU at atol = 0). The GEMM takes its tile
+  geometry from the adapter profile's `i8a8.conv3d`. It applies to conv3d nodes with int8 weights,
+  `groups == 1` and `Cin % 4 == 0`; other nodes keep the f32 path and their pipeline key shows it.
+  The manifest vocabulary (`@karume/hub`) accepts the key; the Wan family hands it to the VAE
+  decoder Sessions; the preset name token is `conv8`.
+- Wan2.2 ships two more presets with the VAE decoder in int8 storage: `i8` (f32 compute — the
+  reference of the int8 decoder) and `i8-a8-attn8-online-conv8` (the online bundle with the
+  decoder's 3-D convolutions on per-pixel int8 activations). **`i8-a8-attn8-online-conv8` is the
+  default preset** (the maintainer's visual check of 8 clips at 1280×704×33 against the online preset
+  showed no difference; the VAE stage of such a clip takes 87 s instead of 168 s on an RTX 3080 Ti,
+  the whole clip 533 s instead of 611 s; the download is 0.5 GB smaller). `quant:
+  "f16+dit8-a8-attn8-online"` selects the f16 decoder. The exporter's `wan.export_vae --dtype i8`
+  writes the int8 decoder into the model's int8 series.
+- Wan2.2 decodes in 32-latent tiles on request (`@karume/models/wan`, ADR 0134):
+  `wan.GenerateRequest.vaeTile: 32` (default 16) runs a second decoder chunk-graph pair that holds
+  no weight bytes and borrows the 16-tile pair's resident weights, so 1280×704 is decoded in 2×3
+  tiles instead of 4×7. The decoder stage then needs about 9.4 GiB on the device (the 10 GB class
+  keeps 16; it is never chosen automatically), and its time is 0.70–0.83× of tile 16 on an RTX
+  3080 Ti with the default preset. The two weightless containers (`vae_decoder_first_32` /
+  `vae_decoder_next_32`, about 0.1 MB each) are part of every Wan2.2 preset; a preset without them
+  rejects the knob. `onRunDiagnostics` reports the running pair as `vae_decoder_first_32` /
+  `vae_decoder_next_32`. The exporter's `wan.export_vae --tile 32 --shared` writes the pair and
+  `wan.vae_tiling --tile 32` the tile references (`vae_tiles.<case>.t32.safetensors`).
+- bf16 weight storage is executed (`@karume/runtime`). A weight stored as bf16 stays resident
+  packed two per 32-bit word and is expanded in the kernel by a bit cast, under the same eligibility
+  rule as f16 (the weight slot of the fused kernels; everything else is expanded to f32 at load).
+  `capabilities().storage` lists `bf16`. Until now a bf16 initializer was accepted by the container
+  format but rejected at `prepareContainer`.
+- The exporter writes bf16 storage (`weight_dtype="bf16"` and per-tensor overrides) under the same
+  rule as f16: a weight is stored as bf16 only when the `f32 → bf16 → f32` round trip is bit-exact;
+  `karume.quantize.round_weights_to_bf16` rounds a model before the references are captured. It
+  rounds only what the checkpoint carries (the tensors of `state_dict()`): non-persistent buffers
+  computed at init, such as RoPE's `inv_freq`, stay f32 as upstream computes them.
+- Every Anima model (`hdae/karume-anima` and `hdae/karume-anima-extra`) gains the preset `bf16`:
+  all four components stored as bf16 — the upstream checkpoint's own values, bit for bit — with f32
+  compute, the same download size as `f16`. The other presets, their files and the default are
+  unchanged; the text encoder and the VAE are shared, the DiT and the text conditioner are per
+  model. Both distributions are re-uploaded with the release.
+- `nodeCacheStorage(root)` in `@karume/hub/node`: a `CacheStorage` on the Node.js file system for
+  the fetch layer behind the Hugging Face source. Node has no Cache API, so until now a Node
+  application could read a local distribution but not load from the hub; pass the result as
+  `caches` to `loadManifest` / `fetchAssets` / `prefetchAssets` / `openAsset`, and to
+  `clearHubCache` to clear it. Entries are written to a temporary file and renamed into place, so an
+  aborted or failed transfer never replaces a complete entry. It implements what the fetch layer
+  uses (`open` / `has` / `delete` / `keys`, and `match` / `put` / `delete` / `keys` on a cache,
+  without query options); `add`, `addAll`, `matchAll` and `caches.match` reject.
+- `@karume/runtime` warns once per device when a Session requests int8 activations
+  (`linearCompute` / `attentionCompute: "a8"`) on a device whose WGSL language features lack
+  `packed_4x8_integer_dot_product` (dp4a). The integer dot products then run emulated — same numbers,
+  no speed-up, slower on Apple Metal — and the warning names the way out: the preset with the same
+  weights and no activation quantization, or `"f32"` for the knob. Nothing falls back
+  automatically. Default presets are unchanged; the rule for choosing them and the three manifest
+  constraints the distribution gate now checks are in ADR 0128.
+- `runAttentionRouteBench` (`@karume/runtime/tune`): times the two a8 routes of fused attention — S stored
+  in f16 over three dispatches, and the online kernel — at given shapes (default: Wan2.2 TI2V-5B self- and
+  cross-attention) with the kernels, row blocks and variants production picks on the caller's device, and
+  returns a JSON record (`karume-attention-bench/1`). A diagnostic; it chooses nothing and changes no profile.
+
 ### Changed
 
+- The packages are developed and tested on Node 24 with Dawn instead of Deno (ADR 0127). Node
+  applications can use them: pass the WebGPU implementation as `acquireGpu({ gpu })` (see
+  **Added**) and read distributions with `@karume/hub/node`. Deno users keep importing from JSR;
+  that path is smoke-tested on each release instead of being covered by the full test suite.
+  Browsers see no change.
 - Session construction (`createSessionFromContainer`, `@karume/runtime`) waits less while it uploads
   the weights (ADR 0108 addenda 13 and 14). Each initializer's error scopes are awaited at the end of
   its part, in initializer order, instead of before the next block is read — the first failing
@@ -68,16 +187,24 @@ measurements in `docs/research/`.
   28 tiles × 2 passes in one process, the two paths alternating tile by tile) a tile takes about
   164 ms less (the median difference of adjacent tile pairs; faster in 54 / 54 pairs), and the zero
   call 2.2 ms of host time instead of 110.3 ms (median).
-- On the online attention route (`attentionCompute: "a8"` × `attentionScoreStorage: "none"`, where
-  the shape and device admit the online kernel) the fused attention also absorbs the permute after it
-  and stores O token-major itself (ADR 0040 addendum of 2026-10-26): one dispatch fewer per attention,
-  outputs unchanged. The Wan2.2 DiT on its default preset saves about 15 ms of GPU time per 33-frame
-  forward and about 45 ms per 121-frame forward; its slot backing does not grow.
-  `FusionCounts.attentionPermute` counts the absorbed output permute too (Wan2.2 online presets 180 →
-  240).
-- The estimate (`estimateGraphMemory`, `PreparedModel.estimate`) with `attentionScoreStorage: "none"`
-  and no `attentionDevice` now fails for every graph, not only for graphs with an attention that could
-  take the online kernel.
+- The Wan DiT's small ops are fused (ADR 0040 addenda of 2026-10-24, 2026-10-25 and 2026-10-26).
+  Outputs are bit-identical. `FusionCounts` (`lastRunFusions`) gains the counters `gatedResidual`,
+  `linearPrologue`, `attentionPermute` (the absorbed input and output permutes — 240 on the Wan2.2
+  online presets) and `rmsNormRope`. On the Wan DiTs the 60 RoPE fusions are counted as
+  `rmsNormRope`; the pair-form RoPE also fires on Irodori, so its `rope` count is no longer 0.
+  - The pair-form RoPE, the per-token adaLN and the gated residual each run in one or two
+    dispatches instead of three to eight.
+  - An a8 linear quantizes its gelu input directly (the gelu output is never stored; also anima's
+    a8 presets), the fused attention reads q / k / v token-major when attention runs in a8 (no
+    permute copies; Vᵀ from one tiled transpose), and rms_norm → pair RoPE runs as one kernel. One
+    33-frame Wan2.2 DiT forward of the default preset takes 2,825 ms of GPU time instead of
+    2,927 ms on an RTX 3080 Ti (2,043 → 1,772 dispatches). `EstimateOptions` takes
+    `linearCompute` so the estimate sees the folded gelu.
+  - On the online attention route (`attentionCompute: "a8"` × `attentionScoreStorage: "none"`,
+    where the shape and device admit the online kernel) the fused attention also absorbs the
+    permute after it and stores O token-major itself: one dispatch fewer per attention. The Wan2.2
+    DiT on its default preset saves about 15 ms of GPU time per 33-frame forward and 44–49 ms
+    per 121-frame forward; its slot backing does not grow.
 - Intermediate buffers are packed by least region growth instead of first-fit (ADR 0093 addendum of
   2026-10-26): each slot goes to the region it grows least, and the placement is tried in two orders
   and the smaller kept. The slot backing and `workspaceBytes` shrink — 30.26 → 24.18 GiB summed over
@@ -85,132 +212,20 @@ measurements in `docs/research/`.
   a few bytes worse than first-fit did); the Wan2.2 DiT 880.3 → 717.8 MiB at 33 frames and 3,016.7 →
   2,457.2 MiB at 121 — and a plan holds more, smaller region buffers (up to 33). Outputs are
   unchanged, and planning is faster than before on the largest graphs.
-- Every message the packages print — errors, warnings, diagnostics, labels and the notes in generated
-  WGSL headers — is English (ADR 0130). Code that matched the Japanese wording of an error message
-  must be re-keyed; the error classes and the structure of each message are unchanged. The same
-  holds for the PyPI package `karume` (the exporter): its messages, CLI help and docstrings are
-  English; the labels of `UnsupportedAtenOpsError` read `[Core ATen]` / `[outside Core ATen]` /
-  `[outside aten]`.
 - The kernel fingerprint of a geometry profile (`provenance.kernels`, `@karume/runtime/tune`) hashes
   each kernel's WGSL without its comments and whitespace, so a comment edit in a kernel no longer
   invalidates saved tables. Tables saved by earlier versions mismatch once on the fingerprint and
-  need one re-sweep; the two embedded tables carry the new value.
-- The Wan DiT's small ops are fused: the pair-form RoPE, the per-token adaLN and the gated residual
-  each run in one or two dispatches instead of three to eight (ADR 0040 addendum of 2026-10-24). Outputs
-  are bit-identical. `FusionCounts` (`lastRunFusions`) gains the counter `gatedResidual`; the pair-form
-  RoPE also fires on Irodori, so its `rope` count is no longer 0.
+  need one re-sweep (see **Breaking**); the embedded tables carry the new value.
 - `GpuContext.beginBatch` on a device acquired with `gpuTiming: true` no longer throws: the batch runs
   untimed, and runs before and after it keep their per-kernel breakdown (ADR 0021 addendum of
   2026-10-24). The Wan pipelines accept such a device; their VAE decoder (batches) reports no timing.
-- The Wan DiTs fuse more small ops (ADR 0040 addendum of 2026-10-25): an a8 linear quantizes its gelu input
-  directly (the gelu output is never stored; also anima's a8 presets), the fused attention reads q / k / v token-major
-  under an a8 attention seat (no permute copies; Vᵀ from one tiled transpose), and rms_norm → pair RoPE runs as one kernel.
-  Outputs are bit-identical. One 33-frame Wan2.2 DiT forward of the default preset takes 2,825 ms of GPU time instead of
-  2,927 ms on an RTX 3080 Ti (2,043 → 1,772 dispatches). `FusionCounts` gains `linearPrologue`, `attentionPermute` and
-  `rmsNormRope`; on the Wan DiTs the 60 `rope` fusions are now counted as `rmsNormRope`. `EstimateOptions` takes
-  `linearCompute` so the estimate sees the folded gelu.
 
-### Added
+### Removed
 
-- `geometrySweepCases()` (with its element type `GeometrySweepCase`) and `sweepCandidateKernelsId(rows, dp4a)`
-  (`@karume/runtime/tune`): the sweep cases as id and op, and the candidate fingerprint of a record
-  merged from per-case `runGeometrySweep` calls, recomputed over the merged rows so that
-  `deriveGeometryProfile` accepts it (ADR 0117 addendum of 2026-10-28).
-- `ResidentTensor.clear()` (`@karume/runtime`): sets a resident tensor to zero on the GPU
-  (`clearBuffer` in its own submit, in queue order like `write`; ADR 0054 addendum of 2026-10-26).
-  Besides the disposed and device-lost guards of `write`, it throws `ResidentTensorError` while an
-  issued run / enqueue or a pending `finishAndRead` uses the resident.
-- The geometry sweep (`@karume/runtime/tune`) measures conv3d on int8 activations: 14 cases from the
-  Wan2.2 TI2V-5B decoder at tile 16 and 32 under a new sweep op (see **Breaking**), from which
-  `deriveGeometryProfile` fills `i8a8.conv3d`. The default sweep (`runGeometrySweep` without `ops`)
-  runs these cases too, so it takes longer. Two of the tile-32 cases bind about 256 MiB each: on a
-  device whose `maxStorageBufferBindingSize` is lower, every candidate fails on them and
-  `i8a8.conv3d` stays the default.
-- A third embedded geometry profile, `nvidia-ampere` (adapters `nvidia` / `ampere`, swept on an RTX 3080 Ti
-  under Node + Dawn; ADR 0115 addendum decisions 10 and 11). On those adapters five classes take a
-  faster tile geometry than the default (geometric mean over each class's sweep cases): the i8a8
-  linear ×1.170, the fused f32 attention ③PV ×1.113 and 129–256-row GEMMs ×1.114 (decision 10), and
-  conv3d on int8 activations (`i8a8.conv3d`) ×1.339 over its 14 cases and the ①QK stage of the i8a8
-  fused attention (`i8a8.attentionQk`) ×1.103 over its four cases (decision 11); every other class
-  keeps the default, and outputs are bit-identical to the default. On that GPU the Wan2.2 default
-  preset's VAE decoder chunks at tile 16 run ×1.342 (first) / ×1.204 (next) faster by median GPU
-  time than with the default profile (74.66 vs 100.17 ms / 212.79 vs 256.15 ms). The ①QK geometry
-  acts on the three-dispatch fused attention that stores its scores — `attentionScoreStorage` other
-  than `"none"` (as in anima's and Wan2.1's practical presets), and `"none"` on shapes the online
-  kernel does not take — and on the dp4a canary's compile, not on Wan2.2's online route; no
-  end-to-end run was measured with it. `nvidia-blackwell` and `apple-metal-3` take the default
-  `i8a8.conv3d` (their sweeps have no conv3d case).
-- Online int8 attention (`@karume/runtime`, ADR 0132): `attentionScoreStorage: "none"` (with
-  `attentionCompute: "a8"`) runs fused attention as one kernel per block of query rows that never
-  stores the score matrix. Heads of width 64 or 128 and key lengths that are multiples of 4; other
-  shapes fall back to the three dispatches. On devices with subgroups the kernel uses a subgroup
-  reduction that is bit-identical to its portable form. `acquireGpu({ subgroups: "available" })`
-  requests the subgroup features only when the adapter has them (`true` still rejects their
-  absence). The manifest vocabulary (`@karume/hub`) accepts the value; the preset name token is
-  `online`.
-- Wan2.2 ships a third preset, `f16+dit8-a8-attn8-online` (same weights as the s16 preset): at
-  1280×704×121 one DiT forward on an RTX 3080 Ti takes about 16–19 s instead of 24–29 s, with the same
-  step-1 error against the reference preset as the s16 preset (relRMS 0.042 vs 0.044 at 33 frames).
-  Its transformer and attention are what the new default preset (below) runs; `quant:
-  "f16+dit8-a8-attn8-s16"` still selects the previous default.
-- conv3d on int8 activations (`@karume/runtime`, ADR 0133 and its addenda of 2026-10-26 (channel-major
-  quantiser, conv3d geometry)): `convCompute: "a8"` quantises the input of a conv3d once per input
-  pixel over its channels, in one dispatch that reads the input channel-major as stored, and reduces
-  each tap with an integer dot product against int8-resident weights (the conv counterpart of
-  `linearCompute: "a8"`; a TS mirror reproduces the GPU at atol = 0). The GEMM takes its tile
-  geometry from the adapter profile's `i8a8.conv3d`. It applies to conv3d nodes with int8 weights,
-  `groups == 1` and `Cin % 4 == 0`; other nodes keep the f32 path and their pipeline key shows it.
-  The manifest vocabulary (`@karume/hub`) accepts the key; the Wan family hands it to the VAE
-  decoder Sessions; the preset name token is `conv8`.
-- Wan2.2 ships two more presets with the VAE decoder in int8 storage: `i8` (f32 compute — the
-  reference of the int8 decoder) and `i8-a8-attn8-online-conv8` (the online bundle with the
-  decoder's 3-D convolutions on per-pixel int8 activations). **`i8-a8-attn8-online-conv8` is the
-  default preset** (the maintainer's visual check of 8 clips at 1280×704×33 against the online preset
-  showed no difference; the VAE stage of such a clip takes 87 s instead of 168 s on an RTX 3080 Ti,
-  the whole clip 533 s instead of 611 s; the download is 0.5 GB smaller). `quant:
-  "f16+dit8-a8-attn8-online"` selects the f16 decoder. The exporter's `wan.export_vae --dtype i8`
-  writes the int8 decoder into the model's int8 series.
-- Wan2.2 decodes in 32-latent tiles on request (`@karume/models/wan`, ADR 0134):
-  `wan.GenerateRequest.vaeTile: 32` (default 16) runs a second decoder chunk-graph pair that holds
-  no weight bytes and borrows the 16-tile pair's resident weights, so 1280×704 is decoded in 2×3
-  tiles instead of 4×7. The decoder stage then needs about 9.4 GiB on the device (the 10 GB class
-  keeps 16; it is never chosen automatically), and its time is 0.70–0.83× of tile 16 on an RTX
-  3080 Ti with the default preset. The two weightless containers (`vae_decoder_first_32` /
-  `vae_decoder_next_32`, about 0.1 MB each) are part of every Wan2.2 preset; a preset without them
-  rejects the knob. `onRunDiagnostics` reports the running pair as `vae_decoder_first_32` /
-  `vae_decoder_next_32`. The exporter's `wan.export_vae --tile 32 --shared` writes the pair and
-  `wan.vae_tiling --tile 32` the tile references (`vae_tiles.<case>.t32.safetensors`).
-- bf16 weight storage is executed (`@karume/runtime`). A weight stored as bf16 stays resident
-  packed two per 32-bit word and is expanded in the kernel by a bit cast, under the same eligibility
-  rule as f16 (the weight slot of the fused kernels; everything else is expanded to f32 at load).
-  `capabilities().storage` lists `bf16`. Until now a bf16 initializer was accepted by the container
-  format but rejected at `prepareContainer`.
-- The exporter writes bf16 storage (`weight_dtype="bf16"` and per-tensor overrides) under the same
-  rule as f16: a weight is stored as bf16 only when the `f32 → bf16 → f32` round trip is bit-exact;
-  `karume.quantize.round_weights_to_bf16` rounds a model before the references are captured.
-- Every Anima model (`hdae/karume-anima` and `hdae/karume-anima-extra`) gains the preset `bf16`:
-  all four components stored as bf16 — the upstream checkpoint's own values, bit for bit — with f32
-  compute, the same download size as `f16`. The other presets, their files and the default are
-  unchanged; the text encoder and the VAE are shared, the DiT and the text conditioner are per
-  model. Both distributions are re-uploaded with the release.
-- `nodeCacheStorage(root)` in `@karume/hub/node`: a `CacheStorage` on the Node.js file system for
-  the fetch layer behind the Hugging Face source. Node has no Cache API, so until now a Node
-  application could read a local distribution but not load from the hub; pass the result as
-  `caches` to `loadManifest` / `fetchAssets` / `prefetchAssets` / `openAsset`, and to
-  `clearHubCache` to clear it. Entries are written to a temporary file and renamed into place, so an
-  aborted or failed transfer never replaces a complete entry.
-- `@karume/runtime` warns once per device when a Session requests int8 activations
-  (`linearCompute` / `attentionCompute: "a8"`) on a device whose WGSL language features lack
-  `packed_4x8_integer_dot_product` (dp4a). The integer dot products then run emulated — same numbers,
-  no speed-up, slower on Apple Metal — and the warning names the way out: the preset with the same
-  weights and no activation quantization, or `"f32"` for the knob. Nothing falls back
-  automatically. Default presets are unchanged; the rule for choosing them and the three manifest
-  constraints the distribution gate now checks are in ADR 0128.
-
-- `runAttentionRouteBench` (`@karume/runtime/tune`): times the two a8 routes of fused attention — S stored
-  in f16 over three dispatches, and the online kernel — at given shapes (default: Wan2.2 TI2V-5B self- and
-  cross-attention) with the kernels, row blocks and variants production picks on the caller's device, and
-  returns a JSON record (`karume-attention-bench/1`). A diagnostic; it chooses nothing and changes no profile.
+- The Deno command-line examples (`examples/*`, `deno task demo:*`) and the Deno measurement tools
+  under `tools/` (`gpu-lab`, `geometry-sweep`, `flag-bench`, `wan-seams`, `anima-residency`,
+  `birefnet-ab` and the others) are no longer in the repository (ADR 0127 decision 5); they are to be
+  rebuilt as browser applications. The `v0.14.0` tag keeps them.
 
 ### Fixed
 
@@ -222,14 +237,55 @@ measurements in `docs/research/`.
   Outputs are bit-identical. On an RTX 3080 Ti under Node with a local mirror, warm decode after such
   a prompt takes about 6.8 ms per token instead of 32.5–43.2 ms; prompts with fewer distinct ids are
   unaffected.
-- `Session.run` waits for the device to return released memory before it builds a slot backing (the
-  second run of a signature, `@karume/runtime`). Dawn returns the memory of destroyed buffers only when
-  a later submit completes, so the previous run's buffers and the new backing were held at once; Wan2.2
-  at 1280×704×121 ran out of memory on 12 GiB under Node + Dawn and now completes. The wait happens once
-  per built backing; other runs keep a single fence.
+- `Session.run` lets the device return released memory before it builds a slot backing (the second
+  run of a signature, `@karume/runtime`): it submits an empty command list and waits for it, so the
+  buffers destroyed by earlier runs are returned before the new backing is allocated. The wait runs
+  on every runtime (browsers and Deno included), once per built backing; other runs keep a single
+  fence. It matters on implementations that return a destroyed buffer's memory only when a later
+  submit completes, as Dawn does: there the previous run's buffers and the new backing were held at
+  once, and Wan2.2 at 1280×704×121 ran out of memory on 12 GiB under Node + Dawn; it now completes.
+- `@karume/hub/node`: an aborted `nodeDirectory` read rejects with the caller's abort reason, as
+  `@karume/hub/deno` does, instead of Node's own `AbortError`. On Node the Hugging Face source
+  reads cached files as a stream, as on Deno, instead of loading each body into memory whole.
+- `deriveGeometryProfile` (`@karume/runtime/tune`): a reason that compares two ratios prints them
+  with enough digits to tell them apart, so a value just below the threshold no longer reads
+  `×1.050 < ×1.050`. Which geometries are adopted is unchanged.
 
 ### Breaking
 
+- All packages and the exporter: every message the packages print — errors, warnings, diagnostics,
+  labels and the notes in generated WGSL headers — is English (ADR 0130). Code that matched the
+  Japanese wording of an error message must be re-keyed; the error classes and the structure of
+  each message are unchanged. The same holds for the PyPI package `karume` (the exporter): its
+  messages, CLI help and docstrings are English; the labels of `UnsupportedAtenOpsError` read
+  `[Core ATen]` / `[outside Core ATen]` / `[outside aten]`.
+- `@karume/runtime`: a custom `BlockSource.read` (the source behind
+  `openContainer({ kind: "source" })`) and a `MemoryPiece.read` of `openMemoryContainer` MUST accept
+  concurrent calls and MUST NOT reuse or overwrite a buffer they returned earlier (ADR 0108 addendum
+  14). One Session build keeps up to 3 reads in flight and up to 4 returned buffers in use at once:
+  the block being uploaded and the scale block that rides with it, plus 2 blocks read ahead (a
+  `MemoryPiece.read` sees at most 3 in use, since the container holds the scales itself). A source
+  that reads into reused buffers has to copy out of them. A pool that recycled them instead would
+  need at least 4 buffers handed out in call order — a buffer written again no earlier than by the
+  4th call after the one that returned it (3 for `MemoryPiece.read`) — plus whatever the source
+  holds for itself besides, and that size follows the current read-ahead depth, which the contract
+  above does not fix. Host RAM during the build now includes up to 2 blocks read ahead besides the
+  block being uploaded (at most 2 × 32 MiB more for a `krm` on a local or seek-type source; on the
+  hub's scan-type path up to 3 parts near a part boundary — `docs/limitations.md`).
+- `@karume/runtime`: `GeometryProfile` gains the required field `i8a8.conv3d`, the tile geometry of
+  conv3d on int8 activations (ADR 0115 addendum decision 11). A stored or hand-written profile
+  without it is rejected by `acquireGpu({ geometryProfile })`'s validation and by
+  `parseGeometryProfileJson` (which names the field): re-derive the table from a new sweep, or add
+  the field (`DEFAULT_GEOMETRY_PROFILE.i8a8.conv3d` is the geometry conv3d ran before). The new
+  sweep cases move the case-set version (`provenance.caseSet`), and the kernel fingerprint
+  (`provenance.kernels`) is computed without WGSL comments (see **Changed**), so every saved table
+  mismatches once (`geometryProfileMismatch`) and needs one re-sweep. `GeometrySweepOp`
+  (`@karume/runtime/tune`) gains `"i8a8-conv3d"`.
+- `@karume/hub`: `loadManifest` and `clearHubCache` no longer delete the cache namespaces that hub
+  0.6 and earlier wrote (`karume/1` and the `karume/1:*` names), and `loadManifest` no longer
+  lists `CacheStorage` on entry; the migration period from those versions ends here (ADR 0080
+  addendum of 2026-10-28). A cache they left behind stays until it is reclaimed by hand:
+  `caches.delete("karume/1")`, plus every name from `caches.keys()` that starts with `karume/1:`.
 - `@karume/models`: public names lose their family prefix (ADR 0136). Each subpath exports bare
   names: drop the prefix and keep the rest, re-casing its first letter after a lowercase prefix
   (`Sbv2Pipeline` → `Pipeline`, `ANIMA_SOURCES` → `SOURCES`, `Sbv2GenerateOptions` →
@@ -316,36 +372,16 @@ measurements in `docs/research/`.
     `WanLatentSnapshot` → `LatentSnapshot`, `WanPipelineOptions` → `PipelineOptions`,
     `WanRunComponent` → `RunComponent`, `WanPrompt` → `Prompt`, `WanPromptRole` → `PromptRole`,
     `wanFrameToRgba` → `frameToRgba`.
-- `@karume/runtime`: a custom `BlockSource.read` (the source behind
-  `openContainer({ kind: "source" })`) and a `MemoryPiece.read` of `openMemoryContainer` MUST accept
-  concurrent calls and MUST NOT reuse or overwrite a buffer they returned earlier (ADR 0108 addendum
-  14). One Session build keeps up to 3 reads in flight and up to 4 returned buffers in use at once:
-  the block being uploaded and the scale block that rides with it, plus 2 blocks read ahead (a
-  `MemoryPiece.read` sees at most 3 in use, since the container holds the scales itself). A source
-  that reads into reused buffers has to copy out of them. A pool that recycled them instead would
-  need at least 4 buffers handed out in call order — a buffer written again no earlier than by the
-  4th call after the one that returned it (3 for `MemoryPiece.read`) — plus whatever the source
-  holds for itself besides, and that size follows the current read-ahead depth, which the contract
-  above does not fix. Host RAM during the build now includes up to 2 blocks read ahead besides the
-  block being uploaded (at most 2 × 32 MiB more for a `krm` on a local or seek-type source; on the
-  hub's scan-type path up to 3 parts near a part boundary — `docs/limitations.md`).
 - `@karume/models`: `maxResidentPleBytes` (gemma4 / gemma4-qat) now bounds the resident whole PLE
   blocks only. The row cache (at most 256 rows — 2,329,600 B for regular E2B, 1,182,720 B for QAT
   E2B) sits outside it as headroom, so the host RAM PLE holds is at most that budget plus the row
   cache; a budget of 0 still keeps nothing, rows included (ADR 0085 addendum of 2026-10-27).
-- `@karume/runtime`: `GeometryProfile` gains the required field `i8a8.conv3d`, the tile geometry of
-  conv3d on int8 activations (ADR 0115 addendum decision 11). A stored or hand-written profile
-  without it is rejected by `acquireGpu({ geometryProfile })`'s validation and by
-  `parseGeometryProfileJson` (which names the field): re-derive the table from a new sweep, or add
-  the field (`DEFAULT_GEOMETRY_PROFILE.i8a8.conv3d` is the geometry conv3d ran before). The new
-  sweep cases move the case-set version (`provenance.caseSet`), so every saved table mismatches once
-  (`geometryProfileMismatch`) and needs one re-sweep. `GeometrySweepOp` (`@karume/runtime/tune`)
-  gains `"i8a8-conv3d"`.
-- `@karume/hub`: `loadManifest` and `clearHubCache` no longer delete the cache namespaces that hub
-  0.6 and earlier wrote (`karume/1` and the `karume/1:*` names), and `loadManifest` no longer
-  lists `CacheStorage` on entry; the migration period from those versions ends here (ADR 0080
-  addendum of 2026-10-28). A cache they left behind stays until it is reclaimed by hand:
-  `caches.delete("karume/1")`, plus every name from `caches.keys()` that starts with `karume/1:`.
+- `karume-irodori-v4.1-small` (republished with this release) no longer stores the 26 roles (90
+  files, 5,637 MiB) that are byte-identical to `karume-irodori-v4-small`: its manifest references
+  them in that repository at its pinned revision (ADR 0038 §7 addendum of 2026-10-28). The hub
+  follows the references; a local directory source of v4.1-small (`nodeDirectory` /
+  `denoDirectory`) now needs `crossRepo` to map `hdae/karume-irodori-v4-small` to a v4-small
+  mirror, since an unmapped reference fails loudly. `karume-irodori-v4-small` is unchanged.
 - exporter (`karume dist`): the five cross-repository reference options `--ref-repo` /
   `--ref-revision SHA` / `--ref-dist` / `--ref-model` / `--ref-role` are removed (ADR 0038 §7
   addendum of 2026-10-28). Which roles a model borrows from which repository is now the pipeline's
@@ -360,6 +396,10 @@ measurements in `docs/research/`.
   removed. A declared reference without a revision, a revision for a repository the build does not
   reference, a reference to the repository being built, and an output location that is a
   referenced distribution fail before anything is written.
+  The repository's distribution driver (`tools/export-recipes/dist.py`, outside the wheel) can
+  supply the revisions with `--resolve-refs hf` instead, which reads each referenced repository's
+  main from the Hugging Face API and requires every borrowed file to be in that commit with the
+  local bytes before anything is written.
 
 ## [0.14.0] - 2026-10-16
 
