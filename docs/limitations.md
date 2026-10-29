@@ -1522,7 +1522,7 @@ Consequences).
   folded and then `signal.reason` is thrown unwrapped) (ADR 0119 decision 9, 2026-10-03). Within one stage (one run) the
   work is indivisible, and an abort takes effect at the next boundary.
 - **sha256 reference values are rows per environment** (ADR [0106](decisions/0106-device-keyed-references.md)): the rows
-  that exist today are the B570 (`deno-intel-graphics-bmg-g21`) and the RTX 3080 Ti (`deno-nvidia-geforce-rtx-3080-ti` — written from the frozen copy `128b511e` by the ruling of the ADR 0121 addendum "the development machine changed"). On a machine without a row the sha comparison SKIPs explicitly and the reference guard turns red
+  that exist today are the B570 (`deno-intel-graphics-bmg-g21`) and the RTX 3080 Ti (`deno-nvidia-geforce-rtx-3080-ti` — written from the frozen copy `128b511e` by the ruling of the ADR 0121 addendum "the development machine changed"). Since 0.15 the tests run on Node and compare with the `node-nvidia-geforce-rtx-3080-ti` rows; the `deno-*` rows stay as history, neither written nor checked (ADR 0127 addendum of 2026-10-28). On a machine without a row the sha comparison SKIPs explicitly and the reference guard turns red
   (`KARUME_REFERENCE=write` creates your machine's rows). The 50-step rows are compared only with the opt-in
   (`KARUME_WAN_FULL_PIPELINE=1`).
 
@@ -1616,7 +1616,7 @@ By-design constraints of `wan.Ti2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/
   is 4.39e-2 at 33 frames and 4.92e-2 at 121 frames (bands 8.8e-2 / 9.9e-2; the 121-frame check is opt-in `KARUME_WAN_TI2V_121F=1`).
   The visual review (pairs of 12 reference-preset and 12 practical-preset videos — 2026-10-09) also shows no noticeable degradation.
 - **sha256 reference values are rows per environment** (ADR [0106](decisions/0106-device-keyed-references.md)): the 6 cases of the 2-step end-to-end run (reference preset,
-  1280×704 / 704×1280, 17 frames) have rows for the B570 (`deno-intel-graphics-bmg-g21`) and the RTX 3080 Ti (`deno-nvidia-geforce-rtx-3080-ti`).
+  1280×704 / 704×1280, 17 frames) have rows for the B570 (`deno-intel-graphics-bmg-g21`) and the RTX 3080 Ti (`deno-nvidia-geforce-rtx-3080-ti`). Since 0.15 the tests run on Node and compare with the `node-nvidia-geforce-rtx-3080-ti` rows; the `deno-*` rows stay as history, neither written nor checked (ADR 0127 addendum of 2026-10-28).
   The one practical-preset case of the same request (1280×704) has only an RTX 3080 Ti row. The 2-step × 121-frame case is opt-in (`KARUME_WAN_TI2V_121F=1`), with a row only for the RTX 3080 Ti. The 50-step end-to-end run (opt-in
   `KARUME_WAN_TI2V_FULL_PIPELINE=1`, 1280×704, 33 frames) has rows for both presets, only for the RTX 3080 Ti. The I2V 2-step × 9-frame
   end-to-end runs have only RTX 3080 Ti rows: default lane = boxing-cats (1280×704) for both presets; opt-in (`KARUME_WAN_TI2V_I2V_FULL=1`) = the reference preset's
@@ -1647,9 +1647,9 @@ By-design constraints of `wan.Ti2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/
     (2026-10-10, RTX 3080 Ti), band 9.3e-2 (the measurement × 2 rounded up to 2 significant digits; floor = differs by at least 1 bit), 1.05× T2V's 33 frames (4.39e-2 /
     band 8.8e-2). maxAbs (2.6× T2V) is in latent frame 0 before replacement by the condition (a frame that does not reach the output). The visual comparison of the 2 presets on I2V
     is stage 9d.
-- **The distribution (`karume-wan2.2`) is not published on Hugging Face** (ADR 0121 stage 8a produced the recipe that assembles the local mirror `models/karume-wan2.2` —
-  `dist.py --pipeline wan-ti2v`). The entries are `wan.Ti2vPipeline.fromPretrained` (pass the mirror) and `wan.Ti2vPipeline.fromAssets`, which takes a manifest and assets
-  assembled from the series containers.
+- The distribution `karume-wan2.2` is published on Hugging Face since 0.14.0 (`wan.SOURCES["wan2.2"]`; the recipe is `dist.py --pipeline wan-ti2v`, ADR 0121
+  stage 8a). The entries are `wan.Ti2vPipeline.fromPretrained` (the published repository or a local mirror) and `wan.Ti2vPipeline.fromAssets`, which takes a
+  manifest and assets assembled from the series containers. Only Wan2.1 (`karume-wan2.1`) stays unpublished.
 
 ## EmbeddingGemma: a run-time attention_mask (in-batch padding) is not supported — single sequence assumed
 
@@ -1783,8 +1783,9 @@ or silent fallback:
 - **`codec_encoder` is not split into tiles** (asymmetric with the decoder — ADR 0049 decision 1). A long reference
   (intermediates of 1.47GB×2 at 120 s) fails to allocate on a machine where `maxStorageBufferBindingSize` is the default
   128MiB. The decoder side is split into tiles with halo 8, so S=750 passes even on a machine with the default limit (with a bit-identity check).
-- **Generated audio carries no watermark (SilentCipher)** (the wm branch is baked in its bypass form —
-  deferred to the pre-publication phase by the ruling of 2026-08-11, ADR 0049 decision 2).
+- **Generated audio carries no watermark (SilentCipher)** (the wm branch is baked in its bypass form — ADR 0049 decision 2). An API
+  option for one MAY be added when needed (re-graded 2026-10-18, ruling 8a: the earlier deferral to the pre-publication phase expired
+  with publication on 2026-08-24; an added option is non-breaking).
 - **The seed is not compatible with upstream** (bit reproduction of the torch generator is a non-goal — ADR 0048 decision 5).
   Only self-determinism, same seed → same waveform, is guaranteed; comparison with torch is done through the `initialNoise` injection point.
 - The preprocessing `strip` is JS's `String.prototype.trim`, and its whitespace set differs from Python's `str.strip` at the
