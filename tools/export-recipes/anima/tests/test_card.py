@@ -36,7 +36,7 @@ from anima.card import (
     render_base_card,
     render_extra_card,
 )
-from anima.distribution import ANIMA_QUANT_ABBREVIATIONS
+from anima.distribution import ANIMA_QUANT_ABBREVIATIONS, LICENSE_SOURCE_PATH
 
 #: 使い方スニペットに綴られるリポ ID（pipeline の宣言から dist が渡す）。
 REPO = "hdae/fake-repo"
@@ -314,6 +314,16 @@ class TestOfficialCard:
         assert "`LICENSE.md`" in section
         assert "`NOTICE.md`" in section
 
+    def test_the_license_section_names_the_bundled_version(self, card: str) -> None:
+        """The section names the version of the text shipped as `LICENSE.md` (v1.2 — ruling 37 a,
+        2026-10-29); the §2(e) it cites for Outputs is the v1.2 numbering."""
+        _, _, license_section = card.partition("## License")
+        section, _, _ = license_section.partition("## Models")
+        flat = " ".join(section.split())
+        title = LICENSE_SOURCE_PATH.read_text(encoding="utf-8").splitlines()[0]
+        assert title == "CircleStone Labs Non-Commercial License v1.2"
+        assert f"{title} (non-commercial use only)" in flat
+
     def test_the_license_section_denies_any_official_standing(self, card: str) -> None:
         """§3(d)(iii) — 公式製品・承認済みと誤認させない（折り位置に依らず**文**で見る）。"""
         _, _, license_section = card.partition("## License")
@@ -456,7 +466,20 @@ class TestFrontmatter:
         assert "base_model_relation: quantized" in head
         assert "license: other" in head
         assert "license_name: circlestone-labs-non-commercial-license" in head
+        assert (
+            "license_link: https://huggingface.co/circlestone-labs/Anima/blob/"
+            "f973fc41ec7545364ac9776c2440285f43ff2a30/LICENSE.md" in head
+        )
         assert "library_name: karume" in head
+
+    def test_the_license_link_is_pinned_to_a_commit(self, card: str) -> None:
+        """The link shows the text bundled as `LICENSE.md` (v1.2 at
+        `circlestone-labs/Anima@f973fc41`), not whatever `main` holds — a moving branch would
+        drift from the bundled text the day upstream publishes another version."""
+        head = card.split("---")[1]
+        (link,) = [line for line in head.splitlines() if line.startswith("license_link: ")]
+        assert "/blob/main/" not in link
+        assert "/blob/f973fc41ec7545364ac9776c2440285f43ff2a30/" in link
         assert [line for line in head.splitlines() if line.startswith("  - ")] == [
             "  - text-to-image",
             "  - webgpu",

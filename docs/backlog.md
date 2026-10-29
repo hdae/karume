@@ -619,16 +619,27 @@
   The ledgers filled in are anima / gemma4 (a new block for the drafter `google/gemma-4-E2B-it-assistant`) /
   irodori / sbv2 / siglip2, 5 in all. Rows left as Unrecorded with a reason = the revision of modernbert-ja-310m
   (no local record), the revision of Semantic-DACVAE-Japanese (parent) (not fetched).
-  Rows left as Unverified = the revision of anima-copycat-20260610 (placed by hand, no version id / sha256),
-  whether the Civitai permission field of anima-wai-v1.0 can widen the upstream licence, the attribution of sbv2's style-bert-vits2 (AGPL)
+  Rows left as Unverified = whether the Civitai permission field of anima-wai-v1.0 can widen the upstream licence, the attribution of sbv2's style-bert-vits2 (AGPL)
   (kept as is in 0.15.0 by the maintainer's ruling 36 a of 2026-10-29, carrying over 0.14.0's ruling 7 a), the Weights license of depth_anything (before revision matching).
   **FN (`rufflet17/voice_models`) has neither a licence statement nor a README on HF, so it cannot be published** (until this is clarified).
-  **Awaiting a ruling**: the `LICENSE.md` that anima bundles is the v1.2 text, but Base (`Anima-Base-v1.0-Diffusers`) is
-  v1.0 (the difference is the commercial terms of §2(b)/(c)/(e) — v1.2 is looser). Recorded in the ledger as a fact.
+  **Ruled (2026-10-29, ruling 37 a)**: anima's licence is v1.2, the only text it bundles — Base's weights are byte-identical
+  to files `circlestone-labs/Anima` publishes under v1.2, and the v1.0 `LICENSE.md` of `Anima-Base-v1.0-Diffusers` is stale
+  (evidence and the v1.0 → v1.2 differences: [anima's THIRD_PARTY_NOTICES](../tools/export-recipes/anima/THIRD_PARTY_NOTICES.md)).
+  anima-copycat-20260610's revision is recorded there too (Civitai version 3020450, with its sha256).
   The Code license / Attribution of the code-dependency blocks (transformers / PyTorch and so on) were filled in on 2026-09-05 from the actual
   upstream LICENSE files. The machine-readable place for the upstream revision is the container's
   `provenance.upstreamRevision` ([container-v1](container-v1.md) §2.3). Today the recipes of sbv2, minicpm5, siglip2, depth_anything, birefnet, embeddinggemma, deberta and wan / umT5 fill it
   (through `tools/export-recipes/_shared/upstream.py`), so irodori and the others **fill it at their next re-export** (on the same occasion as the `sym_max` field of W-G4-4)
+- **0.15.0 anima rebuild: re-export the containers whose `provenance.license` still reads `"other"` (filed 2026-10-29)**:
+  the pre-2026-09-25 f16 / i8 transformer parts, the f16 `text_conditioner` parts and the shared `text_encoder` /
+  `vae_decoder` (f16) were exported before the recipe baked the CircleStone identifier (`b26e467e`); parts exported since
+  (the bf16 parts among them) carry `circlestone-labs-non-commercial-license`. A plain `dist.py` rebuild does not fix
+  this — the assembly copies the containers byte for byte from `outputs/series/` (`place_file` in
+  `tools/exporter/src/karume/dist.py`). Re-export those
+  series first with `uv run --group anima python -m anima.export …` (the f16 / i8 commands of
+  [anima's README](../tools/export-recipes/anima/README.md), per model and role, with the same `--out`), then rebuild
+  `karume-anima` and `karume-anima-extra` with `dist.py` in the [release-runbook](release-runbook.md) order (the containers'
+  sha256 change, so extra's references to the official repository move with the re-upload).
 - Re-ruling on the policy of "separating the semantic surface from the implemented subset" (attention / deform_conv2d /
   gather / conv_transpose1d / upsample_bilinear2d — a unified rule that does not turn the observed subset into op semantics)
 - **Consolidate CHANGELOG.md's `[Unreleased]` before 0.15.0 (filed 2026-10-27)**: the section has to describe the change from

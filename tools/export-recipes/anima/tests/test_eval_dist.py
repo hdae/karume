@@ -215,6 +215,7 @@ class TestEndToEnd:
 
         notice = " ".join((out_dir / "NOTICE.md").read_text(encoding="utf-8").split())
         assert "An int8-quantized series of the transformer was added" in notice
+        assert "A bf16 series was added alongside the f16 one." in notice
         assert "int4-quantized series of the transformer was added" in notice
         assert "adaLN linears and the linears outside the blocks stay int8" in notice
 

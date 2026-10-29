@@ -203,10 +203,16 @@ def notice_markdown(modifications: tuple[str, ...]) -> str:
 #: 旧 base 告知の「int4 series を足した」は i4 席の無い現物と食い違っていた（2026-09-01 に
 #: 是正 — 全モデル i4 なしへ揃えた同日裁定で int4 の行自体が消えた。旧 turbo 告知にあった
 #: LoRA 焼き込みの行も公式 checkpoint 化で消えた）。
+#: The bf16 line (ADR 0131 decision 3 — the original-weights preset of every model) was added on
+#: 2026-10-29; until then the notice named only the f16 and int8 series. bf16 keeps the upstream
+#: BF16 values unchanged (no rounding, no quantization), so the line does not call it a quantized
+#: series and says that the f16 series is the rounded one.
 OFFICIAL_NOTICE_MARKDOWN = notice_markdown(
     (
         CONTAINER_MODIFICATION,
         "- An int8-quantized series of the transformer was added alongside the f16 one.",
+        "- A bf16 series was added alongside the f16 one. It keeps the values of the upstream BF16",
+        "  weights unchanged (no rounding or quantization); the f16 series rounds them to f16.",
     )
 )
 
@@ -216,6 +222,8 @@ EXTRA_NOTICE_MARKDOWN = notice_markdown(
     (
         CONTAINER_MODIFICATION,
         "- An int8-quantized series of the transformer was added alongside the f16 one.",
+        "- A bf16 series was added alongside the f16 one. It keeps the values of the upstream BF16",
+        "  weights unchanged (no rounding or quantization); the f16 series rounds them to f16.",
         "- Every model in this repository is a community fine-tune of the CircleStone",
         "  Anima base model; its origin, author and license terms are stated in README.md.",
     )

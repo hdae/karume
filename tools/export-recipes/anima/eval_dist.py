@@ -66,13 +66,15 @@ EVAL_ROOT = BENCH_ROOT
 #: 混ぜないのは、あちらが「HF へ上げてよい pipeline の全量」だから）。
 EVAL_PIPELINE = "anima-i4-adaln8-eval"
 
-#: 視認評価用の組み立ての改変告知。配布の告知（int8 系列の追加まで）に、ここで席を戻した
+#: 視認評価用の組み立ての改変告知。配布の告知（int8 / bf16 系列の追加まで）に、ここで席を戻した
 #: i4 系列（adaLN 変種の GPTQ 校正）の行を足す — 中身に i4 が入るのに告知が述べないと、
 #: 下の `root_files` の「改変告知が抜けた配布形を作る練習にはしない」が成り立たない。
 EVAL_NOTICE_MARKDOWN = notice_markdown(
     (
         CONTAINER_MODIFICATION,
         "- An int8-quantized series of the transformer was added alongside the f16 one.",
+        "- A bf16 series was added alongside the f16 one. It keeps the values of the upstream BF16",
+        "  weights unchanged (no rounding or quantization); the f16 series rounds them to f16.",
         "- A GPTQ-calibrated int4-quantized series of the transformer was added for local",
         "  evaluation; its adaLN linears and the linears outside the blocks stay int8.",
     )

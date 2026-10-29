@@ -34,15 +34,23 @@ SUPPORTED_PIPELINE = "anima/1"
 
 PIPELINE_TAG = "text-to-image"
 
-#: ライセンス（実地確認）: base model のリポジトリ自身は license を宣言せず、カードは
-#: 「元のモデルカードを見よ」として `circlestone-labs/Anima` を指す。実値はそちらにある。
+#: Licence (checked at the source): the base model's repository declares no licence in its card's
+#: front matter and points to the original model card, `circlestone-labs/Anima`. It still carries a
+#: v1.0 LICENSE.md (last changed 2026-05-22 — stale), but its weights are byte-identical, tensor by
+#: tensor, to files that `circlestone-labs/Anima@f973fc41` publishes under v1.2 (measured
+#: 2026-10-29), so v1.2 governs (ruling 37 a; the evidence is in THIRD_PARTY_NOTICES.md).
+#: `license_link` is pinned to the commit of the bundled text: pointing at `main` would let the link
+#: and the bundled LICENSE.md disagree silently on the day upstream publishes a new version.
 ANIMA_METADATA = CardMetadata(
     pipeline_tag=PIPELINE_TAG,
     base_model=("circlestone-labs/Anima-Base-v1.0-Diffusers",),
     base_model_relation="quantized",
     license="other",
     license_name="circlestone-labs-non-commercial-license",
-    license_link="https://huggingface.co/circlestone-labs/Anima/blob/main/LICENSE.md",
+    license_link=(
+        "https://huggingface.co/circlestone-labs/Anima/blob/"
+        "f973fc41ec7545364ac9776c2440285f43ff2a30/LICENSE.md"
+    ),
     tags=("text-to-image", "webgpu"),
 )
 
@@ -404,9 +412,9 @@ def _base_license(manifest: Mapping[str, Any]) -> list[str]:
         "## License",
         "",
         "Every model here derives from the CircleStone Anima base model and stays under the",
-        "CircleStone Non-Commercial License (non-commercial use only). This repository ships",
-        "`LICENSE.md` (the full license text) and `NOTICE.md` (this attribution plus the list of",
-        "modifications).",
+        "CircleStone Labs Non-Commercial License v1.2 (non-commercial use only). This",
+        "repository ships `LICENSE.md` (the full license text) and `NOTICE.md` (this attribution",
+        "plus the list of modifications).",
         "",
         RIGHTS_GRANT_STATEMENT,
         "",

@@ -777,6 +777,24 @@ class TestPipelineMembership:
             assert "int8-quantized series of the transformer was added" in notice
         assert not any("i4" in spec.storages for spec in ANIMA_MODELS.values())
 
+    def test_both_notices_state_the_bf16_series_every_model_ships(self) -> None:
+        """Every model ships the original-weights preset `bf16` (ADR 0131 decision 3), so both
+        repositories carry a bf16 series and both notices must say so (§3(d)(i)).
+
+        The notice is fixed on the Pipeline and cannot read the manifest, so the storages and the
+        text move independently — the same cross-check as the int4 case above, in the other
+        direction. The line must not call the series quantized: bf16 keeps the upstream values.
+        """
+        assert all("bf16" in spec.storages for spec in ANIMA_MODELS.values())
+        for notice in (OFFICIAL_NOTICE_MARKDOWN, EXTRA_NOTICE_MARKDOWN):
+            flat = " ".join(notice.split())
+            assert "A bf16 series was added alongside the f16 one." in flat
+            assert (
+                "It keeps the values of the upstream BF16 weights unchanged"
+                " (no rounding or quantization)" in flat
+            )
+            assert "bf16-quantized" not in flat
+
     def test_an_unknown_model_name_is_refused_with_the_choices(self, tmp_path: Path) -> None:
         with pytest.raises(DistError, match="知らない Anima のモデル名"):
             anima_sources(tmp_path / "series", "anima-nope")
@@ -2025,6 +2043,7 @@ class TestLegalTexts:
             in flat
         )
         assert "An int8-quantized series of the transformer was added alongside the f16 one" in flat
+        assert "A bf16 series was added alongside the f16 one." in flat
 
     def test_the_notice_disclaims_any_official_standing(self, tmp_path: Path) -> None:
         """§3(d)(iii) — 公式製品・承認済みと誤認させない。"""

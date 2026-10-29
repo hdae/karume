@@ -242,11 +242,13 @@ DYN_SUFFIX = "-dyn"
 
 MODEL_FILE = "model.krm"
 
-#: 容器へ焼く出所（container-v1 §2.3）。ライセンス識別子はカード側の正本
-#: （{@link anima.card.ANIMA_METADATA}）から引く — 2 表が独立に動く形にしない。HF の `license`
-#: は `other` なので、識別子は `license_name`（上流 `circlestone-labs/Anima` のカードの宣言・
-#: 同梱の LICENSE.md の題 "CircleStone Labs Non-Commercial License v1.0" と一致）を焼く
-#: （{@link _shared.upstream.card_license_identifier} — 決まらなければ fail loudly）。
+#: The provenance baked into the containers (container-v1 §2.3). The licence identifier comes from
+#: the card's source of truth ({@link anima.card.ANIMA_METADATA}) so the two never drift apart. HF's
+#: `license` is `other`, so the identifier is `license_name` (what the upstream
+#: `circlestone-labs/Anima` card declares — {@link _shared.upstream.card_license_identifier}, which
+#: fails loudly when it cannot decide). The identifier carries no version: the version lives in the
+#: bundled LICENSE.md ("CircleStone Labs Non-Commercial License v1.2") and in `license_link`, pinned
+#: to the commit of that text (ruling 37 a, 2026-10-29: v1.2 governs).
 PROVENANCE = Provenance(
     license=card_license_identifier(ANIMA_METADATA, "anima.card.ANIMA_METADATA"),
     notice=NOTICE_FILENAME,
