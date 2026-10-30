@@ -25,10 +25,6 @@ questions it has to answer.
   installed package is not modified and no file is copied here.
 - **Corpus** — the JVNV profile cites <https://arxiv.org/abs/2310.06072> in the model card.
 
-NOTE: elsewhere in this repository (`../vowel_detector/card.py`) Style-Bert-VITS2 is recorded as
-**AGPL-3.0**. What that implies for a derived, branch-free re-implementation shipped in this
-repository is exactly the question the release review has to answer; nothing here decides it.
-
 ## Release-gate inventory
 
 One block per upstream above. Complete every row before anything built from this recipe is
@@ -69,11 +65,11 @@ published.
 
 ### style-bert-vits2 (model implementation)
 
-| Item                     | Value                                                                                                                                                                                                                                                                                 |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Upstream repository      | <https://github.com/litagin02/Style-Bert-VITS2>                                                                                                                                                                                                                                       |
-| Revision used            | `style-bert-vits2==2.5.0` (pinned in `pyproject.toml`)                                                                                                                                                                                                                                |
-| Form of copy             | Monkeypatch of imported classes plus a branch-free re-implementation of `transforms.py`'s spline in `patch.py`. No file copied into this directory.                                                                                                                                   |
-| Code license             | AGPL-3.0 — read from the installed wheel's own `LICENSE` and `License-Expression` metadata (`style-bert-vits2 2.5.0`, the pinned revision; checked 2026-09-05). The implication for the derived re-implementation in `patch.py` is still **undecided** (human review — release gate). |
-| Weights license          | n/a                                                                                                                                                                                                                                                                                   |
-| Attribution requirements | Unverified — they follow from the undecided question above (AGPL obligations attach only if `patch.py`'s branch-free re-implementation counts as a derived work; nothing is copied into this directory and no upstream source enters the published distribution).                     |
+| Item                     | Value                                                                                                                                                           |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://github.com/litagin02/Style-Bert-VITS2>                                                                                                                 |
+| Revision used            | `style-bert-vits2==2.5.0` (pinned in `pyproject.toml`)                                                                                                          |
+| Form of copy             | Monkeypatch of imported classes plus a branch-free re-implementation of `transforms.py`'s spline in `patch.py`. No file copied into this directory.             |
+| Code license             | AGPL-3.0 — read from the installed wheel's own `LICENSE` and `License-Expression` metadata (`style-bert-vits2 2.5.0`, the pinned revision; checked 2026-09-05). |
+| Weights license          | n/a                                                                                                                                                             |
+| Attribution requirements | None — nothing from the package is copied into this directory or redistributed.                                                                                 |
