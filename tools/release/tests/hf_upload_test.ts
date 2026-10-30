@@ -43,6 +43,10 @@ if (!ZSH_AVAILABLE) {
 }
 
 const SCRIPT = new URL("../hf-upload.zsh", import.meta.url);
+// The script runs `node` from the repository root, where `.node-version` pins the Node line; the
+// temporary repositories below carry the same file so `node` resolves as it does in the real one
+// (without it a version manager may pick a Node that does not start on the machine).
+const NODE_VERSION = new URL("../../../.node-version", import.meta.url);
 const NAME = "karume-stub";
 
 /**
@@ -113,6 +117,7 @@ const runCheck = async (
   try {
     await mkdir(`${root}/tools/release`, { recursive: true });
     await copyFile(SCRIPT, `${root}/tools/release/hf-upload.zsh`);
+    await copyFile(NODE_VERSION, `${root}/.node-version`);
     await mkdir(`${root}/bin`);
     await writeFileWithMode(`${root}/bin/curl`, STUB_CURL, { mode: 0o755 });
     await mkdir(`${root}/models/${NAME}`, { recursive: true });
@@ -266,6 +271,7 @@ const runUpload = async (
   try {
     await mkdir(`${root}/tools/release`, { recursive: true });
     await copyFile(SCRIPT, `${root}/tools/release/hf-upload.zsh`);
+    await copyFile(NODE_VERSION, `${root}/.node-version`);
     await copyFile(
       new URL("../container_license.ts", import.meta.url),
       `${root}/tools/release/container_license.ts`,
