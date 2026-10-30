@@ -68,11 +68,11 @@ export const ANIMA_PIPELINE_MAJOR = 1;
 export const SOURCES = {
   anima: {
     repo: "hdae/karume-anima",
-    revision: "bf0c7a634540b64f6317ca6414b6d61c7a95274c",
+    revision: "a5fac03dc6563657b4e5c797c78cc3c813912a3e",
   },
   "anima-extra": {
     repo: "hdae/karume-anima-extra",
-    revision: "04296cee95156b8d2f326577a654030bd6f8f904",
+    revision: "15731a612517df0064db69e8cb7c9825fce00c91",
   },
 } as const satisfies Record<string, HubRepoRef>;
 
