@@ -958,7 +958,7 @@ MODEL_DEFAULTS = "model_defaults"
 
 
 def add_model_default(
-    parser: argparse.ArgumentParser, dest: str, default: Callable[[str], Path]
+    parser: argparse.ArgumentParser, dest: str, default: Callable[[str], object]
 ) -> None:
     """`dest` の既定値を `--model` から導く形で登録する（未指定 = `None` のときだけ効く）。
 

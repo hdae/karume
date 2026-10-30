@@ -804,14 +804,14 @@ class TestCaseRoom:
             shared.assert_case_room([("case", torch.zeros(1, 11, dtype=torch.int64))], 6, 16)
 
     def test_the_real_long_case_fits_the_shipped_capacity(self):
-        """長ケース（T=598）+ K=16 が**配布形の既定容量**に収まること — 定数の気づき線。
+        """長ケース（T=598）+ 最長の K が**配布形の既定容量**に収まること — 定数の気づき線。
 
         位置の上限はモデルの宣言（E2B は 131,072）になったので、golden が現実に触れる制約は
         「既定の会話容量に収まるか」だけになった（`gemma4.distribution.GEMMA4_CAPACITY`）。
         """
         from gemma4.distribution import GEMMA4_CAPACITY
 
-        assert 598 + decode.GREEDY_STEPS <= GEMMA4_CAPACITY
+        assert 598 + max(decode.GREEDY_STEPS.values()) <= GEMMA4_CAPACITY
 
 
 class TestGreedyCases:

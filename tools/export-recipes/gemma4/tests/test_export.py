@@ -697,6 +697,22 @@ class TestModelAxis:
 
         assert (resolved["model_dir"], resolved["out"]) == (tmp_path / "m", tmp_path / "o")
 
+    @pytest.mark.parametrize(("argv", "steps"), [([], 16), (["--model", "e4b"], 10)])
+    def test_the_greedy_steps_default_follows_the_model(self, monkeypatch, argv, steps):
+        """E4B's golden stops before the step whose margin falls under the floor (ruling 47)."""
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(decode, "export_series", lambda *a, **o: captured.update(o) or {})
+        decode.main(argv)
+
+        assert captured["steps"] == steps
+
+    def test_an_explicit_steps_wins_over_the_model_default(self, monkeypatch):
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(decode, "export_series", lambda *a, **o: captured.update(o) or {})
+        decode.main(["--model", "e4b", "--steps", "3"])
+
+        assert captured["steps"] == 3
+
     def test_an_unknown_model_is_refused(self, capsys):
         with pytest.raises(SystemExit):
             gx.series_parser("one-shot", gx.series_dir).parse_args(["--model", "e8b"])

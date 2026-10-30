@@ -200,7 +200,10 @@ CAPACITY_SYMBOL = "C"
 SLIDING_SLACK_ROWS = 8
 
 #: greedy golden の継続 step 数（ADR 0068 決定 4 の出口を多 step で踏む）。
-GREEDY_STEPS = 16
+#: Per model: E4B stops at 10 because capital-ja's 11th step has margin 0.0205, under
+#: {@link MARGIN_FLOOR} (steps 1-10 stay >= 0.31; measured 2026-10-30). Dropping the case instead
+#: would leave only " Paris" expectations, which the constant-output check forbids (ruling 47).
+GREEDY_STEPS: Mapping[str, int] = {"e2b": 16, "e4b": 10}
 
 #: 各 step の top1 − top2 logit 差の下限。GPU 実行の偏差で greedy の列が割れないことの保証で、
 #: **恒真でない**（強く決まらない継続を持つケースはここで落ちる）。落ちたケースは K を下げずに
@@ -1083,7 +1086,7 @@ def export_series(
     out_dir: Path,
     *,
     sym_max: int = one_shot.SYM_MAX,
-    steps: int = GREEDY_STEPS,
+    steps: int = GREEDY_STEPS[GEMMA4_DEFAULT_MODEL],
     reference: Path = DEFAULT_OUT_DIR,
 ) -> dict[str, Any]:
     """variant の states 形 IR コンテナ（golden を採る系列なら io / greedy も）を書き、要約を返す。
@@ -1256,7 +1259,8 @@ def run_variant_cli(variant: ChunkVariant, description: str, argv: Sequence[str]
         description, partial(one_shot.series_dir, suffix=variant.suffix)
     )
     if variant.goldens:
-        parser.add_argument("--steps", type=int, default=GREEDY_STEPS)
+        parser.add_argument("--steps", type=int, default=None)
+        one_shot.add_model_default(parser, "steps", GREEDY_STEPS.__getitem__)
     else:
         # 流用先は**同じモデル**の logits opt-in 系列（別モデルの golden は prompt の突合では
         # 落ちない — トークナイザが同一なので prompt は一致してしまう）。
