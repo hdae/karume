@@ -44,12 +44,17 @@ measurements in `docs/research/`.
   fused attention (`i8a8.attentionQk`) ×1.103 over its four cases (decision 11); every other class
   keeps the default, and outputs are bit-identical to the default. On that GPU the Wan2.2 default
   preset's VAE decoder chunks at tile 16 run ×1.342 (first) / ×1.204 (next) faster by median GPU
-  time than with the default profile (74.66 vs 100.17 ms / 212.79 vs 256.15 ms). The ①QK geometry
+  time than with the default profile (74.66 vs 100.17 ms / 212.79 vs 256.15 ms; measured 2026-10-26). The ①QK geometry
   acts on the three-dispatch fused attention that stores its scores — `attentionScoreStorage` other
   than `"none"` (as in anima's and Wan2.1's practical presets), and `"none"` on shapes the online
   kernel does not take — and on the dp4a canary's compile, not on Wan2.2's online route; no
-  end-to-end run was measured with it. `nvidia-blackwell` and `apple-metal-3` take the default
-  `i8a8.conv3d` (their sweeps have no conv3d case).
+  end-to-end run was measured with it. `apple-metal-3` takes the default `i8a8.conv3d` (its sweeps
+  have no conv3d case); `nvidia-blackwell` is re-derived (see **Changed**).
+- `karume-gemma4` carries the regular Gemma 4 E4B (model `e4b`, presets `i4` (its default),
+  `i4-fast` and `i4-gemvpar`; no drafter) next to E2B, which stays the default model. E4B's presets
+  copy E2B's bundles and their speed is not measured yet (perf-ledger K-59). The two models share one
+  tokenizer file (`shared/tokenizer/`). The recipe records E4B's greedy golden over 10 continuation
+  steps instead of 16: one case's 11th step has a top-1 / top-2 logit margin under the recipe's floor.
 - Online int8 attention (`@karume/runtime`, ADR 0132): `attentionScoreStorage: "none"` (with
   `attentionCompute: "a8"`) runs fused attention as one kernel per block of query rows that never
   stores the score matrix. Heads of width 64 or 128 and key lengths that are multiples of 4; other
@@ -81,7 +86,7 @@ measurements in `docs/research/`.
   decoder's 3-D convolutions on per-pixel int8 activations). **`i8-a8-attn8-online-conv8` is the
   default preset** (the maintainer's visual check of 8 clips at 1280×704×33 against the online preset
   showed no difference; the VAE stage of such a clip takes 87 s instead of 168 s on an RTX 3080 Ti,
-  the whole clip 533 s instead of 611 s; the download is 0.5 GB smaller). `quant:
+  the whole clip 533 s instead of 611 s, measured 2026-10-23 before the later speed-ups; the download is 0.5 GB smaller). `quant:
   "f16+dit8-a8-attn8-online"` selects the f16 decoder. The exporter's `wan.export_vae --dtype i8`
   writes the int8 decoder into the model's int8 series.
 - Wan2.2 decodes in 32-latent tiles on request (`@karume/models/wan`, ADR 0134):
@@ -89,7 +94,7 @@ measurements in `docs/research/`.
   no weight bytes and borrows the 16-tile pair's resident weights, so 1280×704 is decoded in 2×3
   tiles instead of 4×7. The decoder stage then needs about 9.4 GiB on the device (the 10 GB class
   keeps 16; it is never chosen automatically), and its time is 0.70–0.83× of tile 16 on an RTX
-  3080 Ti with the default preset. The two weightless containers (`vae_decoder_first_32` /
+  3080 Ti with the default preset (measured 2026-10-23). The two weightless containers (`vae_decoder_first_32` /
   `vae_decoder_next_32`, about 0.1 MB each) are part of every Wan2.2 preset; a preset without them
   rejects the knob. `onRunDiagnostics` reports the running pair as `vae_decoder_first_32` /
   `vae_decoder_next_32`. The exporter's `wan.export_vae --tile 32 --shared` writes the pair and
@@ -131,6 +136,13 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- The embedded `nvidia-blackwell` geometry profile (`@karume/runtime`) is re-derived from two full
+  sweeps of the current kernels on an RTX 5070 Ti (Chrome 156, unquantised timestamps), replacing the
+  2026-09/10 records. Against the default geometry it takes conv2d's 32-row tile ×1.064, the i8a8
+  linear ×1.148, the ③PV stage of the i8a8 fused attention ×1.142 and conv3d on int8 activations
+  (`i8a8.conv3d`) ×1.346 over its 14 cases (geometric means over each class's cases); GEMMs of
+  129–512 rows and the ①QK stage of the i8a8 fused attention return to the default. Outputs are
+  bit-identical to the default on every sweep row. Only `nvidia` / `blackwell` adapters change.
 - The packages are developed and tested on Node 24 with Dawn instead of Deno (ADR 0127). Node
   applications can use them: pass the WebGPU implementation as `acquireGpu({ gpu })` (see
   **Added**) and read distributions with `@karume/hub/node`. Deno users keep importing from JSR;
@@ -198,7 +210,7 @@ measurements in `docs/research/`.
     a8 presets), the fused attention reads q / k / v token-major when attention runs in a8 (no
     permute copies; Vᵀ from one tiled transpose), and rms_norm → pair RoPE runs as one kernel. One
     33-frame Wan2.2 DiT forward of the default preset takes 2,825 ms of GPU time instead of
-    2,927 ms on an RTX 3080 Ti (2,043 → 1,772 dispatches). `EstimateOptions` takes
+    2,927 ms on an RTX 3080 Ti (2,043 → 1,772 dispatches; measured 2026-10-25). `EstimateOptions` takes
     `linearCompute` so the estimate sees the folded gelu.
   - On the online attention route (`attentionCompute: "a8"` × `attentionScoreStorage: "none"`,
     where the shape and device admit the online kernel) the fused attention also absorbs the
