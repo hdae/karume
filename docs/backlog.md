@@ -7,57 +7,79 @@
 > [perf-ledger](perf-ledger.md); this file only refers to them as waves ④ the source of truth for by-design constraints is
 > [limitations](limitations.md) — a constraint appears here only when a ruling turns it into work.
 
-## now — after the 0.14.0 release (2026-10-16)
+## now — the 0.15.0 release (from 2026-10-29)
 
-- **Migration to 0.15 (filed 2026-10-15, maintainer's ruling — ADR [0126](decisions/0126-numerics-profiles.md) / [0127](decisions/0127-node-dawn-toolchain.md) / [0128](decisions/0128-default-preset-original-weights.md) / [0129](decisions/0129-test-layout-and-lanes.md) / [0130](decisions/0130-project-language.md); 0126 deferred on 2026-10-18, 0130 accepted on 2026-10-18, the others proposed)**:
-  branch `wip/0.15` (the worktree is outside the repository at `~/workspace/karume-wt-0.15`; main stays at 0.14.0).
-  **Phase 1 (port) ✅ 2026-10-16**: ported to Node 24 + Dawn (npm `webgpu`) + Vite+ (Vitest projects = lanes, Oxlint, Oxfmt, TypeScript 7).
-  The test suite was ported mechanically; the 61 real-weight e2e tests went to the private `packages/e2e`, and the shared groundwork (Dawn injection, fs and so on) to the private `packages/test-support`.
-  The four checks that depended on Deno tooling (public surface, dependency graph, barrel, local-dist-server) were replaced, and the measurement tools / examples were deleted (to be rebuilt as browser applications — ADR 0127).
-  Result: all lanes green (core 2,929 + 16 family lanes 2,119 passed, 17 skipped (opt-in cases), 0 failed — 2026-10-16 to 17, `26053ef2` (core re-run at `1c8f6f8b`, which fixed one spurious timer failure)); the artifact comparison against the Deno baseline shows zero numeric difference ([research](research/2026-10-16-node-port-results.md)).
-  **Phase 2 (cleanup — the content of 0.15.0)**: ① test triage ([list](research/2026-10-16-test-triage.md): keep 306 / move 16 / drop 4 / merge 42 / review 24 — carried out on the maintainer's ruling)
-  ② ADR cleanup and translation, English code comments (ADR 0130 — steps 2-9a / 2-9b ADRs / 2-9c docs and agent files / 2-9d comments, JSDoc and WGSL of `packages/*/src` ✅ 2026-10-18 / 2-9e error messages and their assertions ✅ 2026-10-19 / 2-9f the Python exporter ✅ 2026-10-19 / 2-9g the remaining tools and the hand-written fixture notes ✅ 2026-10-19 / 2-9h the language gate with its allow-list ✅ 2026-10-19 — step 2-9 closed; `packages/*/tests` and `tools/export-recipes` follow in 0.15.x) ③ ✅ the decision on taking in numerics profiles (2026-10-18, step 2-8 — ADR 0126 deferred: the default preset carries the practical bundle (ADR 0128), upstream parity became opt-in in 2-1, and auto-selection has no variant it could choose today (subgroup32 cannot be expressed in the manifest and lacks ② and ④ of the four-point check) → the runtime default stays the reference path; the re-entry conditions are in the ADR 0126 addendum) ④ ✅ the default preset policy (ADR 0128 rewritten — the default stays a practical preset chosen and recorded per model by a procedure; the manifest constraints C1 to C3 are checked by the distribution gate; transparency through the README and the card; the runtime warns when a8 is requested on a device without dp4a; the original-weights preset is a best-effort goal; not breaking; 2026-10-17, step 2-7)
-  ②′ **K-82 online int8 attention (ADR 0132) ✅ 2026-10-23** — done before 2-10 at the maintainer's request (the Wan2.2 default preset is `f16+dit8-a8-attn8-online`; the 121-frame A/B passes under Node since the backing-build release wait of 2026-10-24 (relRMS 4.675e-2); **K-84 ✅ 2026-10-25** — the kernel's vec4 tiles (ADR 0132 addendum): self ×1.44–1.46 and cross ×2.0 on the RTX 3080 Ti, the 33-frame DiT forward −9.7%, bit-identical; **wave a ✅ 2026-10-25** — F-4, F-8 and F-3's input side ([research](research/2026-10-25-wave-a-dit-fusions.md)): the 33-frame DiT GPU −3.5%, bit-identical; follow-ups **H-42 ✅ 2026-10-26** (transient placement by least region growth, best of two orders — ADR 0093 addendum: summed region totals 30.26 → 24.18 GiB over 49 scenarios, Wan2.2 DiT 33f 880.3 → 717.8 MiB) → **F-3's output permute ✅ 2026-10-26** (A4 — the online attention stores O token-major: −14.9 ms per 33f DiT forward, −49 ms per 121f, bit-identical), H-43; follow-ups: the host-side Vᵀ key order (+10% in the spike), the subgroup-matrix opt-in for Node; ✅ 2026-10-23 the ampere geometry profile (`nvidia-ampere` registered, K-83 — ×1.03 on the DiT's linear) and the VAE recon (V-1 … V-4 filed; **V-1 conv3d w8a8 ✅ 2026-10-23** — ADR 0133, the Wan2.2 presets `i8` / `i8-a8-attn8-online-conv8`, VAE stage −46% at 1280×704×17; the maintainer's visual check passed and **`i8-a8-attn8-online-conv8` is the Wan2.2 default since 2026-10-23**; **V-2 ✅ 2026-10-23** — ADR 0134, the 32-latent pair that borrows the 16-tile weights, `vaeTile: 32` opt-in: VAE stage 0.70–0.83× of tile 16 (the 17-frame kill line missed by 1–3%, the 33-frame clip meets it — confirmed by the maintainer 2026-10-24); **the VAE wave b ✅ 2026-10-26 to 27** (bit-identical; the RTX 3080 Ti measurements are in the perf-ledger rows) — K-72 revived (`ResidentTensor.clear()` zeroes the tile caches, `8f6b0afb`), V-7 (split-tree axis reduce, `f5c18bad`), V-6 (channel-major quantiser of conv3d w8a8, `7f540580` / `21ec9fa8`), V-5 (the profile field `i8a8.conv3d` and the re-derived `nvidia-ampere`, `fde7f6e2`, [research](research/2026-10-26-conv3d-geometry-sweep.md)); follow-ups filed in the perf-ledger: V-12 … V-14, and V-15 (the Blackwell conv3d sweep, at a later sitting on the RTX 5070 Ti); the sweep case set per op family is in later; next = step 2-10, starting with a browser check page for Wan2.2 on the RTX 5070 Ti)).
-  ⑤ ✅ CacheStorage for Node (`nodeCacheStorage` of `@karume/hub/node`, 2026-10-17, step 2-4) ⑥ ✅ PNG sha rows switched to the pixel sha (ADR 0106 addendum 2026-10-17, step 2-5) ⑦ ✅ the lint rule set (331 warnings under the default rules — settled 2026-10-17, step 2-3, `7cb010cf`)
-  ⑧ ✅ the `Deno.test`-shaped shim replaced by Vitest's own forms (2026-10-17, step 2-2). ⑨ ✅ bf16 storage (ADR 0131 — runtime / exporter / anima's faithful preset `bf16` (base, 4 roles), 2026-10-17, step 2-6. Follow-up ✅ the same day: the remaining 6 models (turbo / aesthetic × 2 generations, wai / copycat) also get `bf16`; the bf16 conditioner is each model's own except for base; the export matches the upstream checkpoint byte for byte for all 7 models). ⑩ a8 measurement ✅ measured (2026-10-18, [research](research/2026-10-18-a8-umt5-sbv2.md), perf-ledger K-80): umt5's a8 is 2.1 to 2.7 times faster at L ≥ 118 (L 28 to 50 fluctuates; L 8 is 0.4 to 0.5 times), but the added embedding error is 4 to 8 times that of i8 rounding (a few rows of real prompts collapse); on the Wan step 1 latent the effect is smaller than that of the DiT's own a8; sbv2's `i8-a8` re-confirmed to have no speed benefit. Visual check: the maintainer found it "mostly fine"; root-cause investigation ✅ (§6: per-token int8 crushes the rows of function words; the main cause is the input of `wo`; mixing a8 per linear or layer does not remove it). Ruling (2026-10-18, maintainer): **not added even as opt-in — the root fix comes first** (umt5's current speed is not a problem; the root fix is perf-ledger K-81 under later). By-products: a fix of the Qwen3 text encoder export (broken since `a5427e6b`); bf16 rounding drops the non-persistent buffers. **Phase 3**: the 0.15.0 release (JSR only — ADR [0127](decisions/0127-node-dawn-toolchain.md) addendum 2026-10-28).
-  Candidates to ride along (decided before the release): the cross-repository reference for the duplication between the two irodori repositories (✅ 2026-10-28 — recipe-declared references for all three pairs, ADR [0038](decisions/0038-manifest-v1.md) §7 addendum; the upload of `karume-irodori-v4.1-small` is a release step), a redesign of the sbv2 subpath surface (✅ 2026-10-28 — the family prefixes are gone from every public name of `@karume/models`: bare names on the subpaths, one namespace per family on the barrel, ADR [0136](decisions/0136-models-public-naming.md)), removal of the glue that reclaims the old namespace of hub ≤ 0.6 (✅ 2026-10-28 — ADR [0080](decisions/0080-hub-fetch-cache-050.md) addendum), HTTP Range fetching.
+The steps and their order are in the [release-runbook](release-runbook.md); this list holds what is left for 0.15.0
+and what each item waits on.
 
+- **`nvidia-blackwell` geometry profile from the RTX 5070 Ti sweeps (perf-ledger V-15)**: derive the table from two full
+  sweeps of the current kernels (the first record is from 2026-10-28; the second is running — maintainer's ruling
+  2026-10-30) and record the result in the V-15 row. Changes under `packages/runtime` wait for this derivation (the sweep
+  records carry kernel fingerprints that must match the code they are derived against).
+- **Regular Gemma 4 E4B in 0.15.0 (maintainer 2026-10-30)**: export with the existing recipe (`--model e4b`) once the
+  machine's RAM is free (it OOMed on a 31 GiB machine; the guide is 48 GB), run the gemma4 lanes with this machine's sha
+  rows, and add `e4b` to the `karume-gemma4` rebuild. Its presets copy the E2B bundles with an unmeasured default
+  (perf-ledger K-59 — tuning after the release).
+- **GPU checks on the release tree**: one green full `vp test` (ADR [0005](decisions/0005-verification.md)); the siglip2
+  lane (`KARUME_ALL_FAMILIES=1`, not run since the ADR [0136](decisions/0136-models-public-naming.md) rename); the
+  CHANGELOG timings measured before later speed-ups (the Wan2.2 conv8 preset's VAE stage and clip times and `vaeTile: 32`'s
+  ratio to tile 16, 2026-10-23; the Wan DiT fusion entry's 2,825 / 2,927 ms, 2026-10-25) — re-measure, or state the date.
+- **Bump and the CHANGELOG version section** ([release-runbook](release-runbook.md) §0).
+- **0.15.0 anima rebuild: re-export the containers whose `provenance.license` still reads `"other"` (filed 2026-10-29)**:
+  the pre-2026-09-25 f16 / i8 transformer parts, the f16 `text_conditioner` parts and the shared `text_encoder` /
+  `vae_decoder` (f16) were exported before the recipe baked the CircleStone identifier (`b26e467e`); parts exported since
+  (the bf16 parts among them) carry `circlestone-labs-non-commercial-license`. A plain `dist.py` rebuild does not fix
+  this — the assembly copies the containers byte for byte from `outputs/series/` (`place_file` in
+  `tools/exporter/src/karume/dist.py`). Re-export those
+  series first with `uv run --group anima python -m anima.export …` (the f16 / i8 commands of
+  [anima's README](../tools/export-recipes/anima/README.md), per model and role, with the same `--out`), then rebuild
+  `karume-anima` and `karume-anima-extra` with `dist.py` in the [release-runbook](release-runbook.md) order (the containers'
+  sha256 change, so extra's references to the official repository move with the re-upload).
+- **HF rebuilds and uploads, then the pins**: in the [release-runbook](release-runbook.md) order. irodori v4.1-small is
+  rebuilt after the bump with `--resolve-refs hf`, uploaded with `--delete` for the 90 paths it now borrows from
+  v4-small, and `irodori.SOURCES["irodori-v4.1-small"]` is updated (ADR [0038](decisions/0038-manifest-v1.md) §7
+  addendum 2026-10-28; v4-small is not re-uploaded).
+- **0.15.0: regenerate and re-upload the model cards of every published repository (filed 2026-10-28 — ADR
+  [0136](decisions/0136-models-public-naming.md))**: the Usage snippets of the published cards import the 0.14 names
+  (`Sbv2Pipeline`, `toSbv2Utterance`, …) from `jsr:@karume/models` without a version, so they stop compiling once
+  0.15.0 is the latest version. Regenerate the cards with this release's recipes and upload them as card-only commits
+  (manifests, containers and the `SOURCES` pins do not move). Order: right after the JSR publish, in the same session —
+  until both are out, the published cards and the latest package disagree.
+
+## later
+
+- **Gemma 4 QAT decode speed (0.15.1 — maintainer 2026-10-30)**: QAT E2B decodes slower than regular E2B in the
+  browser. The attribution of 2026-09-19 ([research](research/2026-09-19-qat-speed-recon.md) §6) names four kernel gaps
+  (standalone SRQ dispatches, the occupancy of the INT2 GEMVs, the f32 `per_layer_model_projection`, the sequential INT2
+  `lm_head`) and perf-ledger K-45 (integer dot product) as the root fix. Re-measure first and check which GEMV changes
+  since then reach the QAT shapes; QAT E4B's parallel-GEMV rows are unmeasured copies (K-59). `karume-gemma4-qat` stays
+  unpublished on HF.
+- **Translation remainder of ADR [0130](decisions/0130-project-language.md) (0.15.x)**: the comments under
+  `packages/*/tests` and `tools/export-recipes`, the areas the language allow-list marks `until: "0.15.x"`.
+- **Playground small items (review notes of 2026-10-28)**: ① the Wan2.2 page's inline f32 hash duplicates another one —
+  check and merge ② the Wan2.2 / SBV2 pipeline hooks swallow a rejection from disposing an aborted build
+  (`use-wan-pipeline.ts` / `use-sbv2-pipeline.ts`).
 - **Remainder of the speed / memory wave (filed 2026-09-25; maintainer's ruling = split into two tiers, reference tier / practical tier; within-device determinism MUST hold in the practical tier too)**:
   The finished records of iterations 1 to 3 (contract and groundwork, B3 anima DiT residency, B4 irodori context K/V projection, H-35, K-70, E1 stage 1) are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
   Candidates for the next iteration = the rest of wave 2 (DiT speed: B1 → B2) / wave 3 (memory: rest of E1 → E2 → E5 → E4) / wave 4 (practical-tier kernels: C2 VAE conv i8a8 → C1 → D2 → D1 → D3).
   The candidates come from `.claude/reviews/2026-09-25_perf-recon/SUMMARY.md` §9.3 (not tracked by git) and the perf-ledger section of 2026-09-26 (K-59 to K-69, L-20 to L-23).
   Rest of E1 (BiRefNet's f16 series — ADR [0113](decisions/0113-birefnet-weight-series.md)) = golden comparison on a real GPU, derivation of the Lucida f16 tolerance, creation of the sha reference rows for real images, and stage 2 (the i8 plan + i8 series).
-
-- **✅ To consider: whether the default quant preset is quantized or opt-in (original weights) (filed 2026-09-27, maintainer — ruling 2026-10-17: the default stays a practical preset (per-model procedure + manifest constraints + transparency); a device without dp4a gets a warning; original weights are a best-effort goal — ADR [0128](decisions/0128-default-preset-original-weights.md), step 2-7)**: today the default selects a quantized preset such as w8a8.
-  Review whether that is justified. The decision "drop the a8 of the default quant on Metal" (perf-ledger K-70, ADR 0115 Consequences) was put on hold and merged into this item.
-  **Material gathering done (2026-09-29)**: `.claude/reviews/2026-09-29_quant-default-recon/SUMMARY.md` (not tracked by git) — how presets are decided (recipe constants, hub resolution, the user's entry point),
-  a 33-row table of series × preset (storage dtype, session declaration, download size, contract class), per-preset measurements (B570 / M2 / RTX, with the unmeasured ones marked), quotes of the past grounds for a quantized default, and what each of the three options protects. Next = discuss with the maintainer.
-  **Added material (2026-10-04, the maintainer's policy — in the ruling on Wan's default preset)**: the default quant preset is "the most practical preset today" (light, with small quality loss).
-  Room is left to switch the default to "the preset closest to the original weights" in future (ADR 0120 ruling 2026-10-04, item 4). Wan2.1 switched its default to the practical preset under this policy.
-
 - **Remainder of geometry profiles (K-71 — ADR [0115](decisions/0115-geometry-profiles.md) / [0116](decisions/0116-geometry-profile-row-buckets.md) / [0117](decisions/0117-app-geometry-tuning.md)) (filed 2026-09-27 to 10-03)**:
   The finished records (registration of `nvidia-blackwell`, the 7 row-count buckets, integration into applications (ADR 0117, all 7 stages ✅), the Codex review follow-up, 4 small items) are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
   ① The PNG sha match before and after registration on the RTX 5070 Ti (Chrome) is unconfirmed, because there is no RTX record from before registration (optional: once on the check page of `cd11cdc8`, by the maintainer)
   ② Regenerating `apple-metal-3` with Chrome 154 alone happens the next time a sweep is taken on M2 (ruling 2026-10-02)
   ③ The Pixel 10a (Mali-G715) table is not registered; the re-run on the new version has not been done (research K-70 §15)
   ④ Adjacent small item (filed 2026-10-03): the known problem of the OOM check in `gpu_generation_context_test.ts` going red on B570 can probably be fixed on the mechanism side only, by having the test wait for `onSubmittedWorkDone` after destroy() before allocating 1 GiB (the same settle as the e2e of stages 3 / 6) — the assert is not changed
-  ⑤ Adjacent small item (filed 2026-10-02): the default id of gpu-lab's generated table can collide with the id of an embedded table (apple-metal-3) → a default such as `<vendor>-<arch>-generated` (the application flow then works in Chrome without flags). (gpu-lab was removed in 0.15.)
-
 - **Remainder of the container-format wave (ADR [0108](decisions/0108-container-format.md)) = stages 4 to 6** (upstream intake of the anima transformer f16 / LoRA runtime A/B / new bit widths, Range fetching and so on —
   the staged-decomposition table of ADR 0108 is the source of truth for what is built and how it is accepted). The records of stages 0 to 3 and up to the 0.13.0 publication (2026-09-25) are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
-
 - **Remainder of the cross-model follow-up investigation (2026-09-10 to 11)**: the source of truth for the measurements and the unfinished parts is the [follow-up investigation](research/2026-09-10-codex-mtp-optimization.md#追加-llm-の実行と量子化別比較).
   The acceptance of Qwen3 / MiniCPM5 / E4B / gemma4-qat and the adoption records of K-25 to K-44 are in the [archive](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md).
   Remaining = GPU cost attribution on M2; the decision on applying the submission policy and prefill buckets to the model defaults; integration of broad combinations and a cost study of sharing the gate/up input; isolating the cause of the GPU Instance loss in Chrome;
   distribution recipe / source table; long-text and broad quality evaluation; automatic per-shape numeric acceptance of f16 / f32 / RMS128; transfer reduction for general sampling (with temperature, penalty / bias, speculative) and a follow-up test on M2.
-
 - **Continued verification of the 9/11 review** (investigation 2026-09-10, [follow-up record](research/2026-09-10-codex-mtp-optimization.md)):
   Decide whether `artifacts.staged_publication` allows several writers to the same final, and if needed design locking and recovery from interruption.
   The follow-up tests of the GPU edge-channel protection on M2 / browsers and whole-model performance measurement remain.
   Do not turn review suggestions into new kernels without verification.
-
-**Remaining items**:
-
 - **Move `planBackingBudgetBytes` into the common options** (filed 2026-09-07 — consequence of ADR 0095): every family except gemma4 builds its
   Session options from the manifest's `session`, so there is no way to change the budget (the default 256 MiB applies). Add it the same way `onRetry` was
   unified into `FromPretrainedHubOptions`. At the same time, merge the budget range check duplicated in estimate / session-build into one function.
@@ -80,11 +102,6 @@
 - **Peak VRAM column on the model card (filed 2026-09-04)**: `karume dist` calls the TS-side estimate
   (the `prepareContainer(...).estimate()` family) when generating the card and adds a peak VRAM column to the quant table. Today's
   card shows only the stored bytes, so readers cannot judge whether the model runs on their GPU.
-
-**Remainder of decode speed** (H-27 stage ② / small items K-48, K-49, K-50 / K-46): the item of the same name under later is the source of truth.
-
-**On the maintainer's hardware (Claude cannot run these)**:
-
 - Follow-up test of the RAM peak of the HF path in Chrome (measured on the Deno side —
   [research 2026-09-24](research/2026-09-24-part-length-ram-peak.md)).
   **Browser performance measurement is dropped from this wave (a) (maintainer ruling 2026-09-04)** — what a browser can measure is
@@ -92,9 +109,6 @@
   performance information, and gather the results of users running a sample collection (name and location undecided) on several environments
   (**filed only** — the items collected, the location and the opt-in form are not designed).
 - Re-assessing `err.cause` on Pixel (8 GB class Android Chrome) — [known-issues](known-issues.md).
-
-## later
-
 - **Follow-ups of accepting ADRs 0127 / 0128 / 0129 / 0131 (filed 2026-10-29, the maintainer's ruling 34 a — each ADR's addendum of
   2026-10-29)**. Items under `packages/runtime` wait until the pending nvidia-blackwell geometry derivation lifts the freeze.
   - Gate C2 counts `convCompute` (ADR [0128](decisions/0128-default-preset-original-weights.md) open point 5): `defaultPresetViolations` in
@@ -231,15 +245,6 @@
   part 3 of `text_conditioner` has zero zero-pages in all 5 variants, so the zero-run mechanism does not apply. The two fragmented parts
   (`anima-turbo-v1.1` / `anima-v1.0`) are byte-identical to each other and differ in content from part 3 of the other 3 variants, which were healthy.
 
-- **✅ 2026-10-28 Make cross-repository references easier to handle in the tooling (filed by the maintainer 2026-09-24; ruling 2026-10-28 = option a for all three pairs)**: a form in which a recipe declares cross-repository component references
-  (until then the five `--ref-*` options of `dist.py` — ADR [0038](decisions/0038-manifest-v1.md) §7 addendum), and a feature
-  in the export tooling that resolves the dependencies (the commit SHA of the referenced repository's main) and uploads starting from the referenced repositories.
-  Two motivations: removing the duplication between `irodori-v4-small` and `irodori-v4.1-small` (26 roles = 90 files, 5,637 MiB can be referenced — measured 2026-10-28)
-  through cross-repository references needs the references to be declared, and publishing `anima` → `anima-extra` is serial, waiting for the referenced SHA, and
-  manual ([release-runbook](release-runbook.md) §0). **Done**: the recipes declare the references (`Pipeline.references`), the five options are gone, and the build
-  takes the commit from `--resolve-refs hf` (the referenced main, every borrowed file checked on the Hub before writing), `--ref-revision NAME=SHA` or
-  `--allow-placeholder-ref` (ADR 0038 §7 addendum 2026-10-28). The upload itself stays manual in the runbook's order.
-
 - **Revisit the structure of the manifest (`karume.json`) — make optimization flags and presets easier to handle (filed by the maintainer 2026-10-06)**: today the bundle of execution knobs
   is held in the single `session` of a quant preset, and the preset name doubles as the bundle's name (ADR [0074](decisions/0074-quant-seat-naming.md) /
   [0110](decisions/0110-practical-tier-numerics-contract.md) / [0111](decisions/0111-session-options-composition.md)).
@@ -247,14 +252,6 @@
   is to be sorted out later. The material is the open points of the inventory of how fast paths are expressed (2026-10-06, `.claude/reviews/2026-10-06_fast-path-inventory/`, not tracked by git)
   — there is no per-component session (the fast paths of the VAE / text encoder cannot be declared), the keys of new kernel variants, and whether changing a bundle
   changes an existing preset or creates a new one. **Work starts later** (maintainer 2026-10-06 — Wan2.2's optimization proceeds within today's `session`).
-- **✅ 2026-10-28 (code and distribution; the upload is a 0.15.0 release step) Remove the 5,637 MiB duplication between irodori v4-small and v4.1-small with cross-repository references (filed 2026-09-24)**:
-  94 files of the two repositories have the same sha256; 90 of them (26 roles, 5,637 MiB) can be referenced, because references are per container and `duration`
-  (f32 / f16 / i8) and the i4 `dit` differ in some parts (the filing's 83 files / 5,605 MiB cannot be reproduced from today's mirrors — speculation: measured before
-  `dit_context` was added). Skipped in the 0.13.0 re-upload; not bundled in 0.14.0 (maintainer's rulings 2026-09-24 / 2026-10-15).
-  **Done**: v4.1-small references v4-small at its published pin (ruling 2026-10-28 — `irodori_references`, ADR [0038](decisions/0038-manifest-v1.md) §7 addendum 2026-10-28);
-  the rebuilt v4.1-small distribution holds 16 files (364,772,199 bytes) and its parts are byte-identical to the self-contained one. v4-small is not re-uploaded.
-  What remains is the release step: rebuild v4.1-small after the bump with `--resolve-refs hf`, upload it with `--delete` for the 90 borrowed paths, and update
-  `irodori.SOURCES["irodori-v4.1-small"]` ([release-runbook](release-runbook.md) §0).
 - **Candidate for bringing HTTP Range fetching (ADR 0108 stage 6) forward (filed 2026-09-24; decided after the release)**: the condition for bringing it forward in ADR
   [0109](decisions/0109-manifest-v5-container.md) decision 7 is "in the RAM peak harness of stage 2, the cold
   peak exceeds 'part length + overlap'". Stage 3e removed the duplicated holding, but the cold peak of the scan type (Deno via HF)
@@ -576,34 +573,6 @@
 
 ## release — the release preparation wave (some way off)
 
-- **✅ 0.14.0 (2026-10-16) HF re-upload + pin update of gemma4 / gemma4-qat (ruling 8 = a, 2026-09-26)** (0.14.0 uploads only `karume-gemma4` — `karume-gemma4-qat` stays unpublished (it would be a first publication, which separately needs the upstream revision recorded and the licence checked; maintainer's ruling 2026-10-15)): reflect in the distribution the promotion of the manifest vocabulary
-  `stateAttentionReduce` (Breaking — CHANGELOG `[Unreleased]`) and E4B QAT's `i4-gemvpar` / `i4-fast`.
-  Bundled into the next release (how pins are baked: ADR [0073](decisions/0073-models-source-pin.md),
-  [release-runbook](release-runbook.md) §2 / §3). The local mirror is rebuilt.
-- **✅ 0.14.0 (2026-10-16 — re-uploaded with the window mask as table + indices) HF re-upload + pin update of birefnet-hr / lucida (E1 stage 1 — ADR [0113](decisions/0113-birefnet-weight-series.md))**:
-  reflect in the distribution, including the rebuild of Lucida's f32 series (with the upstream revision — `--dtype f32`) and the f16 preset. **Maintainer's ruling
-  2026-09-26 / 09-27: HR has only the `f16` preset (the upstream `ZhengPeng7/BiRefNet_HR` has a single f16 checkpoint and no f32
-  — an f32 preset would only hold the same values in twice the VRAM). Lucida has f32 by default + optional f16 (f16 is lossy — mean absolute α difference at most 7.0e-5).
-  The recipe changes (`dist` able to build HR with a single f16 preset, the default preset, pytest, the card's relation) and the retirement of HR's 2 f32 series +
-  the f32 rows of golden / sha reference rows / `HELD_SERIES` are done when the distribution is updated (ADR 0113 addendum).** → done ahead of time on 2026-10-11 (addendum below).
-  **Addendum 2026-10-11**: on the same occasion, upload the distribution with the pipeline `birefnet/2` (the post-processing method field `postprocess` — HR = `u8-pil-bicubic`,
-  Lucida = `float-bilinear`, ADR [0125](decisions/0125-birefnet-matte-postprocess.md)) and update the pin of `BIREFNET_SOURCES`
-  (the proviso of ruling 28 = manifest changes are bundled into the next release). main reads only `birefnet/2`, so until then
-  `fromPretrained` from the published revision fails at the major-version check. The retirement of HR's f32 preset (recipe, tests,
-  golden / sha reference rows / `HELD_SERIES` rows), the rebuild of Lucida's f32 series with the upstream revision and the rebuild of the 2 local mirrors with
-  `birefnet/2` were done on 2026-10-11 (ADR 0113 addendum 2026-10-11). What remains for the distribution update is only the re-upload to HF
-  and the pin update of `BIREFNET_SOURCES`.
-- **✅ 0.14.0 (2026-10-16 — only the addition of `dit_context`; de-duplication not bundled) HF re-upload + pin update of the 2 irodori repositories (`irodori-v4-small` / `irodori-v4.1-small`) (B4 = ADR [0114](decisions/0114-irodori-dit-context-split.md))**:
-  the distribution gained the role `dit_context` (breaking — a distribution without it fails with the new models as a missing component). Done on the same breaking-wave occasion as later's
-  "Remove the 5,637 MiB duplication between irodori v4-small and v4.1-small with cross-repository references" (→ in 0.14.0 uploaded with only the addition of `dit_context`, without bundling the de-duplication — maintainer's ruling 2026-10-15). Local mirrors:
-  v4-small rebuilt, v4.1-small being rebuilt (2026-09-27).
-- **✅ 0.14.0 (2026-10-16 — `karume-umt5-xxl` and `karume-wan2.2`, new `UMT5_SOURCES` / `WAN_SOURCES`) First publication of the Wan family (filed 2026-10-09)** (0.14.0 uploads the 2 repositories `karume-umt5-xxl` → `karume-wan2.2` — `karume-wan2.1` is not published (maintainer's ruling 2026-10-15, ADR 0118 addendum). umT5 became a family with its own entry point `Umt5Encoder`, so `UMT5_SOURCES` (key `umt5-xxl`) is also added — ADR 0122 addendum 2026-10-15): in the order `karume-umt5-xxl` → `karume-wan2.1` / `karume-wan2.2` (the 2 Wan repositories reference umT5 across repositories, so
-  rebuild the 2 Wan repositories with umT5's real SHA before uploading them — ADR [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) decision 8).
-  The `WAN_SOURCES` table (keys `wan2.1` / `wan2.2`) and baking the pins. §0 and "First publication of a family" in [release-runbook](release-runbook.md)
-  describe only `karume-wan2.1`, so add the procedure for `karume-wan2.2` (`dist.py --pipeline wan-ti2v --ref-*`).
-- **Prerequisite for the first publication of vowel-detector (filed 2026-09-24)** (first publication on hold — maintainer's ruling 2026-10-15): the recipe reads the upstream `feature_config.json`
-  directly under `inputs/vowel-detector/`. This development machine holds the whole upstream repository, so before assembly
-  run `cp inputs/vowel-detector/assets/feature_config.json inputs/vowel-detector/` once.
 - Real-asset CI gate (the problem that GitHub CI does not exercise local assets). **The all-skip guard is done**
   (`packages/e2e/tests/e2e_assets_gate_test.ts` (moved from `packages/runtime/tests/` in 0.15) + CI env `KARUME_ALLOW_NO_ASSETS=1` —
   2026-09-05). What remains is the decision on promoting goldens to fixtures / fetching assets in the release gate
@@ -629,39 +598,8 @@
   upstream LICENSE files. The machine-readable place for the upstream revision is the container's
   `provenance.upstreamRevision` ([container-v1](container-v1.md) §2.3). Today the recipes of sbv2, minicpm5, siglip2, depth_anything, birefnet, embeddinggemma, deberta and wan / umT5 fill it
   (through `tools/export-recipes/_shared/upstream.py`), so irodori and the others **fill it at their next re-export** (on the same occasion as the `sym_max` field of W-G4-4)
-- **0.15.0 anima rebuild: re-export the containers whose `provenance.license` still reads `"other"` (filed 2026-10-29)**:
-  the pre-2026-09-25 f16 / i8 transformer parts, the f16 `text_conditioner` parts and the shared `text_encoder` /
-  `vae_decoder` (f16) were exported before the recipe baked the CircleStone identifier (`b26e467e`); parts exported since
-  (the bf16 parts among them) carry `circlestone-labs-non-commercial-license`. A plain `dist.py` rebuild does not fix
-  this — the assembly copies the containers byte for byte from `outputs/series/` (`place_file` in
-  `tools/exporter/src/karume/dist.py`). Re-export those
-  series first with `uv run --group anima python -m anima.export …` (the f16 / i8 commands of
-  [anima's README](../tools/export-recipes/anima/README.md), per model and role, with the same `--out`), then rebuild
-  `karume-anima` and `karume-anima-extra` with `dist.py` in the [release-runbook](release-runbook.md) order (the containers'
-  sha256 change, so extra's references to the official repository move with the re-upload).
 - Re-ruling on the policy of "separating the semantic surface from the implemented subset" (attention / deform_conv2d /
   gather / conv_transpose1d / upsample_bilinear2d — a unified rule that does not turn the observed subset into op semantics)
-- **Consolidate CHANGELOG.md's `[Unreleased]` before 0.15.0 (filed 2026-10-27)**: the section has to describe the change from
-  0.14.0, not the history of features that were added and then changed again while unreleased. Entries known now:
-  ① Changed, the online route absorbing the output permute: the online route itself is unreleased (Added, online int8
-  attention), so its "`FusionCounts.attentionPermute` … 180 → 240" compares two unreleased states — fold it into the Added
-  entries. ② Changed, the estimate with `attentionScoreStorage: "none"` and no `attentionDevice` "now fails for every graph,
-  not only …": `"none"` is unreleased, so only the current rule belongs in the Added entry. ③ Timings measured before later
-  unreleased speed-ups: the Wan2.2 conv8 preset's VAE stage 87 s against the online preset's 168 s and clip 533 s /
-  611 s and `vaeTile: 32`'s
-  0.70–0.83× of tile 16 (both 2026-10-23, before the VAE wave b), and the Wan DiT fusion entry's 2,825 / 2,927 ms (2026-10-25,
-  before A4) — re-measure on the release tree or state the date. ④ "about 45 ms" per 121-frame forward for A4, where ADR
-  [0040](decisions/0040-fusion-pass.md)'s addendum of 2026-10-26 gives −44 / −49 ms. ⑤ The kernel-fingerprint entry's "the two
-  embedded tables" — three are embedded now (`nvidia-ampere` was added). ⑥ The house word "seat" in a user-facing entry (the
-  2026-10-25 DiT fusion entry: "under an a8 attention seat"). ⑦ A stray blank line inside the Added list (before the
-  `runAttentionRouteBench` entry). ⑧ The Fixed entry (the release wait before a slot backing is built) is framed on Node +
-  Dawn — say what it changes for a 0.14.0 user.
-- **0.15.0: regenerate and re-upload the model cards of every published repository (filed 2026-10-28 — ADR
-  [0136](decisions/0136-models-public-naming.md))**: the Usage snippets of the published cards import the 0.14 names
-  (`Sbv2Pipeline`, `toSbv2Utterance`, …) from `jsr:@karume/models` without a version, so they stop compiling once
-  0.15.0 is the latest version. Regenerate the cards with this release's recipes and upload them as card-only commits
-  (manifests, containers and the `SOURCES` pins do not move). Order: right after the JSR publish, in the same session —
-  until both are out, the published cards and the latest package disagree.
 
 ## parked (with revival conditions)
 
@@ -700,3 +638,6 @@
 - Making GPU timestamps an estimation source, full f16 (option γ), SBV2 NFC chip, regenerating the f32 anima series
 - The by-design constraints (rank≤4 / OOB NaN / non-finite input / zero-element dimensions / cancellation granularity and others) have their source of truth in
   limitations.md — only items with real demand are promoted here
+- **Prerequisite for the first publication of vowel-detector (filed 2026-09-24)** (first publication on hold — maintainer's ruling 2026-10-15): the recipe reads the upstream `feature_config.json`
+  directly under `inputs/vowel-detector/`. This development machine holds the whole upstream repository, so before assembly
+  run `cp inputs/vowel-detector/assets/feature_config.json inputs/vowel-detector/` once.
