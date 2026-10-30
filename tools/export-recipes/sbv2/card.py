@@ -221,9 +221,8 @@ SBV2_JVNV_PROFILE = Sbv2CardProfile(
         f"  <{SBV2_JVNV_CORPUS_PAGE}>",
         "- **Training implementation**:"
         " [Style-Bert-VITS2](https://github.com/litagin02/Style-Bert-VITS2)",
-        "  (AGPL-3.0). Karume's runtime contains **none of that code**: it is an independent",
-        "  implementation that reads these weights from its own container format, so the AGPL",
-        "  terms govern the training implementation, not the runtime that plays these files.",
+        "  (AGPL-3.0). Karume is a separate implementation and does not contain the original",
+        "  implementation.",
     ),
 )
 

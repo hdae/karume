@@ -620,7 +620,8 @@
   irodori / sbv2 / siglip2, 5 in all. Rows left as Unrecorded with a reason = the revision of modernbert-ja-310m
   (no local record), the revision of Semantic-DACVAE-Japanese (parent) (not fetched).
   Rows left as Unverified = whether the Civitai permission field of anima-wai-v1.0 can widen the upstream licence, the attribution of sbv2's style-bert-vits2 (AGPL)
-  (kept as is in 0.15.0 by the maintainer's ruling 36 a of 2026-10-29, carrying over 0.14.0's ruling 7 a), the Weights license of depth_anything (before revision matching).
+  (kept as is in 0.15.0 by the maintainer's ruling 36 a of 2026-10-29, carrying over 0.14.0's ruling 7 a; the card's wording
+  simplified by ruling 45 of 2026-10-30), the Weights license of depth_anything (before revision matching).
   **FN (`rufflet17/voice_models`) has neither a licence statement nor a README on HF, so it cannot be published** (until this is clarified).
   **Ruled (2026-10-29, ruling 37 a)**: anima's licence is v1.2, the only text it bundles — Base's weights are byte-identical
   to files `circlestone-labs/Anima` publishes under v1.2, and the v1.0 `LICENSE.md` of `Anima-Base-v1.0-Diffusers` is stale

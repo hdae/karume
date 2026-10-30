@@ -631,7 +631,7 @@ class TestSbv2CardProfiles:
             "https://sites.google.com/site/shinnosuketakamichi/research-topics/jvnv_corpus",
             "https://github.com/litagin02/Style-Bert-VITS2",
             "AGPL-3.0",
-            "**none of that code**",
+            "Karume is a separate implementation and does not contain the original",
         ):
             assert required in card, required
 
