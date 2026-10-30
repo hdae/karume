@@ -303,6 +303,17 @@ const GEMMA4_QAT_E4B_PACKED = { variant: 168 } as const;
 /** states 形 attention: 製品グラフの 42 層 × ①' / ③' 各 1 本（M ≤ 8・行ブロック 1 枚）。 */
 const GEMMA4_QAT_E4B_STATE_PARALLEL = { variant: 84, reference: 0 } as const;
 
+/**
+ * gemma4 E4B (product graph, 42 layers): all 344 linears (i4 + the i8 lm_head) take a parallel GEMV
+ * row at M ≤ 8, RMS→add folds 127 times (decode M 1 / 4 / 8 and prefill M 32 / 768 alike) and
+ * states-form attention runs ①' / ③' once each on the 42 layers. Derived 2026-10-30 from the
+ * karume-gemma4 mirror with the same planning predicates as the QAT E4B rows (the same computation
+ * reproduces E2B's 277 / 106 / 35 layers first). E4B ships no drafter.
+ */
+const GEMMA4_E4B_GEMV = { variant: 344, reference: 0 } as const;
+const GEMMA4_E4B_RMS_ADD = { variant: 127 } as const;
+const GEMMA4_E4B_STATE_PARALLEL = { variant: 84, reference: 0 } as const;
+
 const E2B = ["e2b"] as const;
 const E4B = ["e4b"] as const;
 
@@ -427,6 +438,42 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
           linearGemvReduce: GEMMA4_E2B_DRAFTER_GEMV,
           fuseRmsNormAdd: GEMMA4_E2B_DRAFTER_RMS_ADD,
         },
+      },
+    },
+  },
+  // --- gemma4 E4B (no drafter) ---------------------------------------------
+  {
+    // The distribution mirror's `i4-gemvpar`.
+    family: "gemma4",
+    models: E4B,
+    session: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel" },
+    census: {
+      target: {
+        decode: {
+          linearGemvReduce: GEMMA4_E4B_GEMV,
+          stateAttentionReduce: GEMMA4_E4B_STATE_PARALLEL,
+        },
+        verify: {
+          linearGemvReduce: GEMMA4_E4B_GEMV,
+          stateAttentionReduce: GEMMA4_E4B_STATE_PARALLEL,
+        },
+      },
+    },
+  },
+  {
+    // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
+    family: "gemma4",
+    models: E4B,
+    session: {
+      linearGemvReduce: "parallel",
+      fuseRmsNormAdd: true,
+      stateAttentionReduce: "parallel-fused",
+    },
+    census: {
+      target: {
+        prefill: { fuseRmsNormAdd: GEMMA4_E4B_RMS_ADD },
+        decode: { linearGemvReduce: GEMMA4_E4B_GEMV, fuseRmsNormAdd: GEMMA4_E4B_RMS_ADD },
+        verify: { linearGemvReduce: GEMMA4_E4B_GEMV, fuseRmsNormAdd: GEMMA4_E4B_RMS_ADD },
       },
     },
   },
