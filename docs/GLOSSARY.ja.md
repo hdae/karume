@@ -203,6 +203,7 @@
 | folded ①′ (head fold) △ | head をまとめた ①′ | states 形の decode の ①QK で、1 workgroup が同じ kv plane を使う F = r 本の query head を受け持ち、K の各要素を 1 回だけ読む形。選んだ組では確かめた全 backend で ①′ とビット一致。計測して速く、かつビット一致を確かめた (r, D, M) の組の full attention でだけ選ぶ（E4B の F = 4 は D3D12 で不一致のため選ばない） | — | ADR 0067 追記 2026-10-27・perf-ledger K-55 / K-95 |
 | unrolled KV loop △ | KV ループの展開 | ③′ PV と融合 stats + PV で、各 lane が自分の担当列 8 本分の V を先に読んでから積和する形。式と順序は v1 と同じでビット一致 | — | ADR 0067 追記 2026-10-27・perf-ledger K-91 |
 | baseline WGSL (`fixtures/wgsl-baseline/`) △ | 書き換え前の WGSL の控え | ビット一致の書き換えの前の生成 WGSL を残したもの。GPU テストで新旧の kernel を同じ入力で回し、出力を 1 語ずつ比べる | — | `gpu_state_attention_fold_test.ts`・perf-ledger K-91 |
+| prefetch form (rms_norm v2) △ | 先読み形（rms_norm v2） | 256 幅の rms_norm と RMS → add 融合で、weight を workgroup ごとに 1 回、行の x（と residual）を縮約の前にレジスタへ読み、出力ループの回数を定数にした形。縮約と値の式は v1 と同じ文字列でビット一致 | — | ADR 0017 追記 2・perf-ledger K-99 |
 
 ## 動画生成
 

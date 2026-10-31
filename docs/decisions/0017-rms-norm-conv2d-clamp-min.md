@@ -67,3 +67,46 @@ Checks: u32 equality with the 256 variant, CPU reference under the canonical op 
 degenerate shapes, full-write and non-finite propagation; Anima latents of every step / PNG and Qwen's
 full logits were compared. The NaN payload is outside the contract; its position is checked. A re-run
 on the M2 machine was open on 2026-09-11.
+
+## Addendum 2 (2026-10-31) — the prefetch form of the 256-wide kernel (v2, perf-ledger K-99)
+
+A lone row of the 256-wide kernel was latency-bound in its output loop: after the reduction each
+thread re-read its x and weight words behind a runtime trip count (`while (o < dim)`). Where the row
+is a multiple of 256 elements up to 4096 (`RMS_NORM_PREFETCH_MAX_DIM`), the kernel and the RMS → add
+fusion of ADR [0099](0099-rms-norm-add-fusion.md) now take a **prefetch form**: the weight words are
+loaded into registers once per workgroup before the row loop, the row's x words (and the add's
+residual words) before its reduction, and the output loop runs a constant `dim / 256` trips.
+
+- **Numerics unchanged by construction**: the reduction is the same text (`rmsNormInvWgsl`), and the
+  value is the same expression (`rmsNormValueWgsl`, `x · inv · weight` left to right) with the
+  registers as its operands; the add keeps its XOR rounding barrier. Only the source of each operand
+  changes.
+- **Key scheme**: the trip count is in the WGSL, so it is in the key —
+  `rms_norm:v2:f32:lastdim:wg256:trip<dim / 256>` and
+  `rms_norm_add:v2:rms_norm:v2:f32:lastdim:wg256:trip<n>:<order>:xor-round`
+  (`rmsNormWorkgroupKey` / `rmsNormAddKey(order, dim)` in `packages/runtime/src/kernels/rms-norm.ts`).
+  Every other width of the 256-wide kernel keeps v1's text and key (`RMS_NORM_KEY`); the 128-wide
+  form (addendum 1) and the subgroup form (ADR [0100](0100-rms-subgroup-reduction.md)) are unchanged.
+  The add has no v1 path left: its rule accepts only 256 / 1536 / 2560, all inside the range, and the
+  generator throws on any other width. The v1 add WGSL is kept test-only in
+  `packages/runtime/tests/fixtures/wgsl-baseline/`.
+- **Where it was measured faster** (RTX 3080 Ti, Node + Dawn, dependent chain, cold and warm,
+  interleaved rounds — `outputs/diag/qat-0151-2026-10-31/rms-loop/`, untracked): at every multiple of
+  256 from 256 to 4096 and every row count measured (1 / 2 / 4 / 8 / 35 / 768 / 8,192, and 2,048 /
+  32,768 at 256 and 1280). M = 1: 2.65 → 2.31 µs at 256, 5.09 → 2.80 at 1536, 9.93 → 3.80 at 4096;
+  the add 5.23 → 3.02 at 1536. At large M the gain shrinks to a few per cent at 256 and stays
+  13–22 % at 1536–4096. The only ratio above 1 was one warm run at 256 × 8,192 rows (×1.001); the
+  three other runs of that shape were ×0.98. Wider rows are unmeasured and keep v1.
+- **The `rmsNormRope` rule (ADR [0040](0040-fusion-pass.md))** keeps its kernel, which shares v1's
+  reduction and value text; the plain path it stands for now runs v2 at the Wan widths 1536 / 3072,
+  which writes v1's words, so the fused and plain paths still agree (`gpu_rms_norm_rope_fusion_test.ts`
+  compares them in Sessions).
+
+Checks: `gpu_rms_norm_prefetch_test.ts` compares v2 with v1 as u32 words at every width of the range,
+rows 1 / 4 / 8 / 33 and 768, natural and on three workgroups (grid-stride), on adversarial rows (zero
+rows, ±inf, NaN payloads, subnormals only, overflowing and underflowing sums of squares, the mean at
+eps, raw random words) with special weights and residuals; reordering the value, dropping the add's
+barrier or a wrong prefetch stride each fail it. The degenerate-shape harness carries a v2 case. Every
+family lane's sha256 rows are unchanged. End to end (Node + Dawn, Gemma 4 E2B `i4-fast`, greedy, v1
+substituted back): GPU busy 5.79 → 5.42 ms per token regular, 5.99 → 5.64 QAT; the text is identical.
+Not checked on D3D12 or Metal.

@@ -480,7 +480,8 @@ a8 quantize still reads the RoPE output token-major.
   feeds the half split in BHSD), a half-split RoPE, an odd D or one more consumer of `n`, `v` or
   `pairs` leaves the nodes (and the RoPE then folds alone under `rope`).
 - **Only where the plain path runs the kernel it is bit-identical to**: the 256-wide workgroup
-  `rms_norm` (`rms_norm:v1:f32:lastdim:wg256`). The choice is one predicate, `rmsNormKernel` in
+  `rms_norm` (`rms_norm:v1:f32:lastdim:wg256`; since 2026-10-31 its bit-identical prefetch form at
+  the multiples of 256 up to 4096 — ADR [0017](0017-rms-norm-conv2d-clamp-min.md) addendum 2). The choice is one predicate, `rmsNormKernel` in
   `packages/runtime/src/kernels/rms-norm.ts`, which `buildRmsNorm` and the rule both call: a row of at
   most 128 (the 128-wide form) or `rmsNormReduce: "subgroup32"` (another summation order, ADR
   [0100](0100-rms-subgroup-reduction.md)) keeps the nodes.

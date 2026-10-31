@@ -65,3 +65,13 @@ The maintainer's 120 generations on M2 matched the reference with a small gain (
 [research 2026-09-13](../research/2026-09-13-rms-subgroup-reduction.md)). The fused quant choice and
 the submit limit (a host policy) stay separate: `submitPolicy` is not added to the quant storage
 vocabulary (reaffirmed by ADR 0104). ADR 0104 declared the fusion in the default preset on 2026-09-15.
+
+## Addendum (2026-10-31) — the fused kernel is the prefetch form (v2, perf-ledger K-99)
+
+The fused kernel's output loop now reads the x, weight and residual words it loaded before the
+reduction and runs a constant `dim / 256` trips; the reduction, the normalised value and the XOR
+rounding barrier are the same text, so it writes v1's words (checked as u32 on the GPU against the
+v1 WGSL kept in `packages/runtime/tests/fixtures/wgsl-baseline/`). The key carries the trip count
+(`rms_norm_add:v2:rms_norm:v2:f32:lastdim:wg256:trip<n>:<order>:xor-round`), and the generator
+accepts only the widths of ADR [0017](0017-rms-norm-conv2d-clamp-min.md) addendum 2 — the rule's
+measured widths 256 / 1536 / 2560 are all among them. The subgroup32 form is unchanged.
