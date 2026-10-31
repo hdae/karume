@@ -1,6 +1,6 @@
 # 0137: Qwen3.5 text encoder — a shared module, host-built positions and RoPE, one i8 Session per generation
 
-- Status: proposed (2026-10-31)
+- Status: proposed (2026-10-31; decision 5's default ruled 2026-10-31 — the maintainer's ruling 51)
 - Date: 2026-10-31
 - Scope: `packages/models/src/qwen3_5/{rope,session-io,graph-contract,encoder}.ts` (next to the
   tokenizer and chat template already there), the GPU check
@@ -80,12 +80,18 @@ runs) cannot stay resident beside the MOSS DiT and VAE.
 5. **Storage: i8 per-channel weights and f32 tensors only, and no execution knob.** The graph
    contract rejects any other storage (BF16, an all-f32 container, a shared declaration), and the
    session policy accepts no `session` key: that combination is what decision 6 verified, and the
-   storage decides the form of execution (umT5's ADR 0119 decision 5). i8 is the **provisional**
-   default because it is the only series. A BF16 encoder (the checkpoint's own values — ADR 0128
+   storage decides the form of execution (umT5's ADR 0119 decision 5). **i8 is the default**
+   (the maintainer's ruling 51, 2026-10-31 — below); it is also the only series. A BF16 encoder (the checkpoint's own values — ADR 0128
    decision 4's original weights, about 15.9 GB) does not fit a 12 GB GPU in one Session, and its
    full export needs a fixed-BF16 entry in the writer (the recipe's `export.py` doc: the F32 set
-   alone is 29.6 GiB); the gap is recorded here. Which storage becomes the default is decided after a
-   human image A/B against MOSS-Image run with the upstream BF16 encoder (the maintainer's ruling 51).
+   alone is 29.6 GiB); the gap is recorded here. The ruling followed a human image A/B on the RTX 3080 Ti: MOSS-Image
+   with its default preset, 1024² × 50 steps, the three fixed positive prompts × seeds 42–45, the
+   same seed and pipeline in both arms, differing only in the text rows — upstream's BF16 encoder
+   output against this i8 encoder (PSNR between the pairs 19.9–29.6 dB). The maintainer judged the
+   differences detail-level, with no quality problem. Against upstream in f32 the i8 rows differ by
+   3.6–7.6 % rel_l2 (BF16 1.3–1.4 %); the largest case concentrates 87 % of its error in one
+   numerically sensitive row (the newline after `assistant`, 63.5 % there against BF16's 4.8 %) —
+   the place a mixed-precision option would act if a prompt ever shows it in an image (open point 6).
 6. **Parity: the GPU against Karume's CPU reference of the same container, plus sha256 rows.** The
    oracle is the IR CPU reference execution: the runtime's per-op TypeScript references walk the
    container's graph on the CPU over the same decoded i8 weights (`outputs/diag/qwen3_5-export-2026-10-31/`,
@@ -133,3 +139,5 @@ runs) cannot stay resident beside the MOSS DiT and VAE.
 4. Other GPUs (the RTX 5070 Ti on D3D12) need their own sha256 rows and a run of the band check.
 5. The IR CPU reference harness could move into a tracked tool so that references can be remade
    without the diag directory.
+6. The i8 error's sensitive rows (decision 5): kept as is by ruling 51; a per-layer or per-row
+   higher-precision option is the lever if an image ever shows them.
