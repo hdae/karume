@@ -1684,10 +1684,10 @@ By-design constraints of `wan.Ti2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/
 ## MOSS-Image: text only as precomputed embeddings; the area is capped by the VAE's storage binding (2,796,160 px at 2 GiB); whether a size fits VRAM is checked per stage
 
 By-design constraints of the family's internal entry (`generateMoss` and its acceptance check `planMossGenerate` in
-`packages/models/src/moss/` — ADR [NNNN](decisions/NNNN-moss-image-dit-vae.md), branch `wip/moss-image`). Every
+`packages/models/src/moss/` — ADR [0138](decisions/0138-moss-image-dit-vae.md), branch `wip/moss-image`). Every
 input-caused rejection is a `ModelInputError` before any GPU work.
 
-- **Not public**: no subpath, no barrel entry, no distribution and no manifest until the text encoder exists (ADR NNNN
+- **Not public**: no subpath, no barrel entry, no distribution and no manifest until the text encoder exists (ADR 0138
   decision 12); not part of the 0.15 release.
 - **Text only as precomputed embeddings**: the text encoder (Qwen3.5-9B) is not ported. A request carries upstream's
   `encode_prompt` outputs, `[T, 4096]` f32 with 1 ≤ T ≤ 4,096 and every value finite — for the fixed prompts the
@@ -1695,7 +1695,7 @@ input-caused rejection is a `ModelInputError` before any GPU work.
 - **No defaults**: steps, guidance, shift, the initial noise (`seed` or `latents`) and the preset are all explicit.
   Upstream's defaults (1024², 50 steps, guidance 3, shift 5) wait for a manifest's `pipelineConfig`. **No default
   preset** either: `f32+dit8` or `f32+dit8-a8-attn8-online` is passed explicitly, since no manifest owns a default yet
-  (ADR NNNN decision 13 — a departure from ADR 0128 decision 1); the family's default is `f32+dit8-a8-attn8-online`,
+  (ADR 0138 decision 13 — a departure from ADR 0128 decision 1); the family's default is `f32+dit8-a8-attn8-online`,
   applied by the manifest when it comes.
 - **Accepted sizes**: positive multiples of 16, the longest side at most 65,536 px (the rope base tables' rows), and the
   area at most the cap of the untiled VAE: its largest intermediate `[1,192,H,W]` f32 must fit one storage binding, so
@@ -1708,7 +1708,7 @@ input-caused rejection is a `ModelInputError` before any GPU work.
   the cap), and image quality is not checked at any size before the pending visual review — and the 4M extrapolation
   (e.g. 2048²) is above the cap of a 2 GiB binding, so such a device refuses it.
 - **Whether a size fits VRAM is not an acceptance limit**: each stage checks its own need with a trial allocation
-  before it opens and fails loudly naming the stage, the bytes and the size (ADR NNNN decision 5); generate checks the
+  before it opens and fails loudly naming the stage, the bytes and the size (ADR 0138 decision 5); generate checks the
   largest need once before anything opens. Of the squares tried on the development machine (the DiT stage alone,
   3 steps; an idle RTX 3080 Ti with 12 GiB under Node + Dawn, 2026-10-28 — one machine at one time, and not pinned by
   a test: the opt-in `KARUME_MOSS_VRAM=1` cases stay green when the product refuses a size, by design):
@@ -1728,7 +1728,7 @@ input-caused rejection is a `ModelInputError` before any GPU work.
   10⁷ 1,099 — more than the 1,000 training points — with 61; steps with dt > 0). That is upstream's own `set_timesteps`,
   reproduced bit for bit, not refused. The host walks the requested grid, about 0.25 s at 10⁷ steps.
 - **Refused where upstream runs**: a shift below about 2.98·10⁻⁸, where the requested σ grid is not finite (upstream
-  snaps the infinite σ to the end of the training grid — ADR NNNN decision 9), and negative embeddings at guidance 1
+  snaps the infinite σ to the end of the training grid — ADR 0138 decision 9), and negative embeddings at guidance 1
   (upstream ignores them).
 - **Guidance**: upstream's CFG with the negative branch skipping block 22, or guidance 1 (no negative branch). No SLG,
   no other skip list and no negative branch without the skip.

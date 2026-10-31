@@ -538,7 +538,7 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     // とは別カーネル・別キーで、**両方を並べる**のが条件 — 片方だけを直したときに、もう
     // 一方のバイト列が動いていないことがこの列挙で機械確認される。
     ["upsample_bilinear2d.wgsl", UPSAMPLE_BILINEAR2D_WGSL],
-    // group_norm (Core ATen layer — ADR NNNN decision 7): the three kernels of its five dispatches.
+    // group_norm (Core ATen layer — ADR 0138 decision 7): the three kernels of its five dispatches.
     ["group_norm_partial.wgsl", GROUP_NORM_PARTIAL_WGSL],
     ["group_norm_total.wgsl", GROUP_NORM_TOTAL_WGSL],
     ["group_norm_apply.wgsl", GROUP_NORM_APPLY_WGSL],
@@ -5846,7 +5846,7 @@ test("the gated residual stages the product through workgroup u32 before adding 
   assertThrows(() => gatedResidualParams(0x1_0000_0000, 1), CodegenError, "u32");
 });
 
-describe("group_norm kernels (ADR NNNN decision 7)", () => {
+describe("group_norm kernels (ADR 0138 decision 7)", () => {
   it("keys name the version, the chunk and the workgroup size", () => {
     assertEquals(GROUP_NORM_WORKGROUP_SIZE, 256);
     assertEquals(GROUP_NORM_CHUNK, 1024);

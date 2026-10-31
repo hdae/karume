@@ -1,7 +1,7 @@
 /**
- * The host side of the MOSS-Image DiT stage on the CPU (ADR NNNN decisions 2, 9 and 11, stage 2):
+ * The host side of the MOSS-Image DiT stage on the CPU (ADR 0138 decisions 2, 9 and 11, stage 2):
  * the acceptance check, the host functions against upstream's recorded values (Uint32-identical —
- * ADR NNNN decision 11), the graph contract of the written series with its fault injections, and
+ * ADR 0138 decision 11), the graph contract of the written series with its fault injections, and
  * the headroom arithmetic with the borrower's estimate.
  *
  * Sources of the expected values:
@@ -160,7 +160,7 @@ const assertRopeMatchesUpstream = (
   assertEquals(firstBitMismatch(tables.cos, expectedCos), -1, `${where}: rope_cos bits`);
 };
 
-describe("MOSS-Image acceptance check (stage 2, ADR NNNN decision 9)", () => {
+describe("MOSS-Image acceptance check (stage 2, ADR 0138 decision 9)", () => {
   describe("the image size", () => {
     it("accepts positive multiples of 16 and returns the latent grid (H/16 × W/16)", () => {
       expect(assertMossImageSize(1024, 768)).toEqual({ rows: 48, cols: 64 });

@@ -1,5 +1,5 @@
 /**
- * The MOSS-Image presets — the execution knobs of the DiT pair (`dit`, `dit_skip22`) (ADR NNNN
+ * The MOSS-Image presets — the execution knobs of the DiT pair (`dit`, `dit_skip22`) (ADR 0138
  * decision 13, stage 5). The names follow ADR 0074's grammar (`<storage>+<component><bits>`
  * then the knobs) and are provisional until the ADR is accepted.
  *
@@ -8,12 +8,12 @@
  * | `f32+dit8` (reference)     | i8          | f32 compute (no knob)                                                                 | f32 compute | f32 |
  * | `f32+dit8-a8-attn8-online` | the same i8 | `linearCompute: "a8"`, `attentionCompute: "a8"`, `attentionScoreStorage: "none"`       | f32 compute | f32 |
  *
- * - `dit_text` runs with f32 compute in every preset (ADR NNNN decision 3 — its input is an LLM
+ * - `dit_text` runs with f32 compute in every preset (ADR 0138 decision 3 — its input is an LLM
  *   hidden state with outlier channels, and it runs twice per generation) and the VAE in f32
  *   (upstream decodes in f32), so their Sessions take no preset knob.
  * - **No default.** Every entry takes the preset explicitly: no manifest exists yet whose
- *   `defaultQuant` would own it (ADR NNNN decision 12), so a default here would be a second owner to
- *   retire — a departure from ADR 0128 decision 1 (ADR NNNN decision 13). The family's default is
+ *   `defaultQuant` would own it (ADR 0138 decision 12), so a default here would be a second owner to
+ *   retire — a departure from ADR 0128 decision 1 (ADR 0138 decision 13). The family's default is
  *   `f32+dit8-a8-attn8-online` (the visual review passed), applied by the manifest when it comes.
  * - The knobs reach the Sessions and the headroom estimates as one value ({@link MossPreset.dit}),
  *   so a stage's check sizes the Sessions it opens (`./dit-stage.ts` "Headroom"). The online kernel's

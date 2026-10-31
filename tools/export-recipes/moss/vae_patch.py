@@ -1,5 +1,5 @@
 """The patch layer that turns the MOSS-Image VAE decoder (the FLUX.2 small decoder —
-`AutoencoderKLFlux2` of the pinned diffusers) into three IR graphs with symbolic lengths (ADR NNNN
+`AutoencoderKLFlux2` of the pinned diffusers) into three IR graphs with symbolic lengths (ADR 0138
 decision 8, stage 3).
 
 ## The graphs

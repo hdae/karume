@@ -1,4 +1,4 @@
-"""The upstream of MOSS-Image (HF repository and revision pin) and fetching its parts (ADR NNNN
+"""The upstream of MOSS-Image (HF repository and revision pin) and fetching its parts (ADR 0138
 decision 1).
 
 {@link SOURCE} is the source of truth for where the checkpoint comes from. The revision is the

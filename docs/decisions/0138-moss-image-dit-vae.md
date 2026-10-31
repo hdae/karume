@@ -1,4 +1,4 @@
-# NNNN: MOSS-Image's DiT and VAE without its text encoder — one S-shaped DiT graph, a separate text-refiner graph, a weight-borrowing skip-22 graph, an untiled three-graph FLUX.2 decoder
+# 0138: MOSS-Image's DiT and VAE without its text encoder — one S-shaped DiT graph, a separate text-refiner graph, a weight-borrowing skip-22 graph, an untiled three-graph FLUX.2 decoder
 
 - Status: proposed (2026-10-27; the results of stages 2–5 recorded 2026-10-28). The design and
   decisions 8, 10 and 12 are ruled (see Rulings); the points settled during implementation were
@@ -8,10 +8,9 @@
   default in code (decision 13).
 - Date: 2026-10-27
 - Scope: branch `wip/moss-image`, its own branch: MOSS-Image is not part of the 0.15 release (it
-  has no text encoder yet), so the branch is not merged into `wip/0.15`. The number of this ADR is
-  assigned when the branch is taken in; until then this file and the code comments that cite it
-  write `NNNN` (two branches add ADRs in parallel, and a number taken now could collide silently on
-  a rebase).
+  has no text encoder yet), so the branch was not merged into `wip/0.15`. It was rebased onto `main`
+  after the 0.15.0 release (2026-10-31), and this ADR got its number then (two branches added ADRs
+  in parallel, so a number taken earlier could have collided silently on a rebase).
 - Related: ADR [0121](0121-wan22-ti2v-5b.md) (Wan2.2 — stage pattern, `where` with a condition mask,
   meta-trace export, layer-by-layer f64 reference, numeric baseline) /
   [0119](0119-wan-umt5-gpu-text-encoder.md) (big-model export) / [0118](0118-wan21-video-generation.md)
@@ -506,7 +505,7 @@ storage and the DiT overrides it to i8 — the name `i8` alone would claim an i8
 | 3     | op inventory; `Upsample2D` rewrite; `group_norm` op; three VAE graphs; host BatchNorm restoration and unpatchify                                 | census of `upsample2x`; kernel four-point check with offset inputs; GroupNorm values at a group near the cap; VAE band vs upstream; VAE-stage peak at the cap | done  |
 | 4     | sampler and end-to-end                                                                                                                          | σ columns bit-identical; host CFG + Euler bit-identical from recorded DiT outputs; 2-step parity bands; sha rows; 1024² × 50 steps completes (opt-in) | done  |
 | 5     | presets, a8, key valid length (decision 10), VRAM and speed on the 3080 Ti                                                                     | key-valid-length check against f64 and the TS mirror, pad-content atol 0, fault injection; self A/B check per branch and graph with the existing census check; timing before and after decision 10; VRAM at 1024², 2M pixels and the cap; visual review | done  |
-| 6     | docs; when the branch is taken in: rebase, ADR number                                                                                           | `vp check`, the language gate, the family and core lanes; after the rebase the full verification                                              | docs done; the rebase and the ADR number when the branch is taken in |
+| 6     | docs; when the branch is taken in: rebase, ADR number                                                                                           | `vp check`, the language gate, the family and core lanes; after the rebase the full verification                                              | docs done; rebased onto `main` and numbered 2026-10-31; the full verification after the rebase pending |
 
 ## Results (stages 2–5, 2026-10-27 to 2026-10-28, RTX 3080 Ti 12 GiB, Node + Dawn)
 
@@ -676,16 +675,13 @@ the decisions; not rulings):
 - **No default in code until a manifest exists** (decision 13's departure from ADR 0128 decision
   1): the default `f32+dit8-a8-attn8-online` (Rulings) is applied by the manifest's `defaultQuant`
   when it comes with the text encoder and publication; ADR 0128's C1–C3 are checked then.
-- When the branch is taken in (stage 6): the rebase onto `wip/0.15`, the number of this ADR and the
-  full verification. The number replaces `NNNN` by a count-asserted script in every tracked file
-  that `git grep -l 'ADR NNNN\|NNNN-moss'` finds (run from the repository root), in this file's
-  name and in its title line `# NNNN:`; this file's Scope sentence and this point, which describe
-  the placeholder, are rewritten in the same commit. The pattern leaves out the unrelated
-  `-NNNNN-of-NNNNN` and `stepNNNN` spellings. The recipe's placeholder check
-  (`tests/test_placeholders.py`) covers only `tools/export-recipes/moss/`. The perf-ledger IDs
-  F-10 to F-12 are re-checked against `wip/0.15` in the same pass, since both branches add ledger
-  rows. Two texts that `wip/0.15` also carries were rewritten on this branch and are rebase-conflict
-  points: the online int8 attention entry of `CHANGELOG.md`'s [Unreleased] Added list and the
-  online-route line of ADR 0040's addendum of 2026-10-26.
+- Stage 6 after the rebase onto `main` (2026-10-31): the full verification. The rebase numbered
+  this ADR (the placeholder replaced by a count-asserted script in every tracked file that cited
+  it, in this file's name and in its title line; the recipe's placeholder check
+  `tests/test_placeholders.py` runs from then on) and re-checked the perf-ledger IDs F-10 to F-12
+  against `main` (no collision). Of the two texts both branches had rewritten, the online-route
+  line of ADR 0040's addendum of 2026-10-26 merged as is; the online int8 attention entry of
+  `CHANGELOG.md` had meanwhile been released unchanged in 0.15.0, so the key-length change went
+  into [Unreleased] as a Changed entry.
 - Later, each its own decision: the text encoder (with ADR 0135's scan op), publication with a
   manifest and its defaults, an original-weights preset, a tiled VAE path above the cap.

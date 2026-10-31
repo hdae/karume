@@ -1,4 +1,4 @@
-> Point-in-time record (2026-10-27 to 2026-10-28) of the measurements of the MOSS-Image DiT and VAE port (stages 2–5 of [ADR NNNN](../decisions/NNNN-moss-image-dit-vae.md), branch `wip/moss-image`) on the RTX 3080 Ti under Node + Dawn (Vulkan): the parity bands against the CPU references, the census, the timing, the VRAM held and needed per preset and size, the largest areas tried and a per-op profile. Not a design source of truth (that is ADR NNNN, proposed). Raw material of stages 2–4 is under `outputs/bench/karume-moss-image/` and `outputs/verify/node-nvidia-geforce-rtx-3080-ti/` of the main checkout (not tracked); the stage-5 logs (timing, VRAM, area probes, profile) were taken in a scratch directory and are transcribed here.
+> Point-in-time record (2026-10-27 to 2026-10-28) of the measurements of the MOSS-Image DiT and VAE port (stages 2–5 of [ADR 0138](../decisions/0138-moss-image-dit-vae.md), branch `wip/moss-image`) on the RTX 3080 Ti under Node + Dawn (Vulkan): the parity bands against the CPU references, the census, the timing, the VRAM held and needed per preset and size, the largest areas tried and a per-op profile. Not a design source of truth (that is ADR 0138, proposed). Raw material of stages 2–4 is under `outputs/bench/karume-moss-image/` and `outputs/verify/node-nvidia-geforce-rtx-3080-ti/` of the main checkout (not tracked); the stage-5 logs (timing, VRAM, area probes, profile) were taken in a scratch directory and are transcribed here.
 
 # MOSS-Image DiT and VAE: parity, census, timing and VRAM
 
@@ -406,7 +406,7 @@ its output `[1,1,3072]` at T = 1.
 The maintainer compared `f32+dit8` (reference) and `f32+dit8-a8-attn8-online` (practical) side by
 side at 1024², 50 steps, guidance 3, shift 5, seeds 42–45 × 4 prompts (`fridge-note`,
 `guide-whiteboard`, `extra-cat-window`, `extra-cafe-sign`) and judged the practical preset's quality
-acceptable for practical use — the Quality tier of ADR NNNN's Results passes. Observations:
+acceptable for practical use — the Quality tier of ADR 0138's Results passes. Observations:
 
 - every seed gives the same composition in both presets, and the text is drawn as prompted;
 - `guide-whiteboard` seed 44 carries an element not in the prompt in both presets: garbled text in

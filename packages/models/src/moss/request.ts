@@ -1,5 +1,5 @@
 /**
- * The acceptance check of a MOSS-Image DiT request — image size and text embeddings (ADR NNNN
+ * The acceptance check of a MOSS-Image DiT request — image size and text embeddings (ADR 0138
  * decision 9, stage 2). Everything here is a `ModelInputError` (fixing the input makes it pass —
  * ADR 0107) and runs before any GPU work.
  *
@@ -7,9 +7,9 @@
  *   cell is 16 px), and the longest side at most {@link MOSS_MAX_SIDE_PX} (65,536 px = 4,096 cells)
  *   — an explicit acceptance limit: the RoPE base tables' `h` / `w` axes hold one row per position of
  *   a side of up to 4,096 cells (2·4,096 − 1 rows; `./dit-rope.ts`). Upstream has no ceiling, but
- *   with the area cap of the VAE binding (ADR NNNN decision 8) a longer side would leave a short
+ *   with the area cap of the VAE binding (ADR 0138 decision 8) a longer side would leave a short
  *   side under about 43 px. MUST: a longer side is rejected with an error that names the limit.
- * - **Area** ({@link assertMossImageArea}, ADR NNNN decision 8 — per device): the untiled VAE's
+ * - **Area** ({@link assertMossImageArea}, ADR 0138 decision 8 — per device): the untiled VAE's
  *   largest intermediate must fit one storage binding, so the area is capped by the device's
  *   binding limit over the decoder's bytes per pixel (`./vae-contract.ts` derives both from the
  *   graphs — about 2.80M pixels at 2 GiB). MUST: a larger area is rejected with an error that names
@@ -60,7 +60,7 @@ export type MossTextEmbeddings = {
  * Checks an image size (module doc "Size") and returns its latent grid.
  *
  * NOTE: `export` is for the family entry and its host tests (not on a public surface — the family
- * is not exported, ADR NNNN decision 12).
+ * is not exported, ADR 0138 decision 12).
  */
 export const assertMossImageSize = (width: number, height: number): MossCells => {
   for (const [name, side] of [

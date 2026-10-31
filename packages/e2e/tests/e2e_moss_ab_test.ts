@@ -1,6 +1,6 @@
 /**
  * The self A/B check of MOSS-Image's practical preset `f32+dit8-a8-attn8-online` (ADR 0110 decision
- * 5, ADR 0120 decision 4; ADR NNNN decisions 11 and 13, stage 5) against the reference preset
+ * 5, ADR 0120 decision 4; ADR 0138 decisions 11 and 13, stage 5) against the reference preset
  * `f32+dit8` — the same i8 weights with no session knob, on the same machine (no torch golden).
  *
  * ## Observations (one per preset and seed — {@link observe})
@@ -20,7 +20,7 @@
  *   uncorrelated, against 2.4677e-4 measured. It carries no information the two branch points do
  *   not; it is kept because decision 5-4 names it.
  *
- * `dit_text` runs with f32 compute in every preset (ADR NNNN decision 3), so its two outputs must
+ * `dit_text` runs with f32 compute in every preset (ADR 0138 decision 3), so its two outputs must
  * be **bit-identical** between the presets and its census must hold no variant of a knob.
  *
  * ## The checks (per case = per size — {@link CASES})

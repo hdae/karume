@@ -1827,7 +1827,7 @@ class TestUpsampleBilinear2d:
 
 
 class TestGroupNorm:
-    """Core ATen layer — group_norm (ADR NNNN decision 7). The preserved `aten.group_norm` lowers
+    """Core ATen layer — group_norm (ADR 0138 decision 7). The preserved `aten.group_norm` lowers
     to one node with `num_groups` / `eps`, the affine normalized to arity 3."""
 
     def test_group_norm_over_symbolic_spatial_axes_is_one_node(self, convert_module):

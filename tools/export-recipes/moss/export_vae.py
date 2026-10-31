@@ -1,5 +1,5 @@
 """Export of the MOSS-Image VAE decoder as an f32 series — the graphs `vae_decoder_pre`,
-`vae_decoder_attn`, `vae_decoder_post`, the asset `latent_batch_norm` and the GPU goldens (ADR NNNN
+`vae_decoder_attn`, `vae_decoder_post`, the asset `latent_batch_norm` and the GPU goldens (ADR 0138
 decision 8, stage 3).
 
     uv run --group moss --inexact python -m moss.export_vae inspect  # traces + structure only
@@ -15,10 +15,10 @@ gate 3. Each command prints a JSON summary and writes it to `--out` (default
 ## The series (`outputs/series/moss-image-sft-f32-dyn/` — a VAE-only series)
 
 The VAE has its own series, named by its storage (f32 — upstream decodes in f32 and the VAE
-runs f32 in every preset, ADR NNNN decision 13), the Wan2.2 form (`wan2.2-ti2v-5b-f16-dyn` holds
+runs f32 in every preset, ADR 0138 decision 13), the Wan2.2 form (`wan2.2-ti2v-5b-f16-dyn` holds
 only the VAE — ADR 0121 decision 7). Two reasons against the DiT's series: `moss.export_dit write`
 replaces its series directory as a whole (the VAE parts would vanish on every DiT export), and the
-VAE does not change with the DiT's storage (i8 now, bf16 later — ADR NNNN decision 13).
+VAE does not change with the DiT's storage (i8 now, bf16 later — ADR 0138 decision 13).
 
 | Part               | Symbols | Weights (all f32)                          | Asset               |
 | ------------------ | ------- | ------------------------------------------ | ------------------- |
@@ -122,7 +122,7 @@ SEQUENCE_SYMBOL = "S"
 
 #: torch.export's bounds of the symbols — they bound the trace only (IR symbols carry no bounds;
 #: the area cap is the host's, per device). h / w: above the longest accepted side (65,536 px =
-#: 8,192 VAE cells — ADR NNNN decision 9). S: above h·w at a 4 GiB binding (2³² / (192·4·64)
+#: 8,192 VAE cells — ADR 0138 decision 9). S: above h·w at a 4 GiB binding (2³² / (192·4·64)
 #: ≈ 87,381). MUST: no bound equals a static extent of the graphs (gate 1 reads a dimension equal
 #: to the bound as a baked constant).
 SYM_MIN = 2

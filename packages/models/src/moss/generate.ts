@@ -1,20 +1,20 @@
 /**
  * MOSS-Image text-to-image on the family's internal entry — the one acceptance check of a request
- * and the generate path `dit_text` → the DiT pair → the VAE (ADR NNNN decisions 5 and 9,
+ * and the generate path `dit_text` → the DiT pair → the VAE (ADR 0138 decisions 5 and 9,
  * stage 4). Not on a public surface: the family is in neither the barrel nor the package exports
- * (ADR NNNN decision 12).
+ * (ADR 0138 decision 12).
  *
- * ## The request — precomputed text only (ADR NNNN decision 9)
+ * ## The request — precomputed text only (ADR 0138 decision 9)
  *
  * The text encoder is not ported, so a request carries the encoder outputs (`[T, 4096]` f32 — the
  * asset of `moss.text_embeds` holds upstream's for the fixed prompts) instead of strings. Every knob
  * is explicit: there is no manifest yet whose `pipelineConfig` would own the defaults (upstream's
- * 1024², 50 steps, guidance 3, shift 5 — ADR NNNN decision 9), and a second owner here would have to
+ * 1024², 50 steps, guidance 3, shift 5 — ADR 0138 decision 9), and a second owner here would have to
  * be retired when it comes. The initial noise is exactly one of a `seed` (`./random.ts` — not
  * torch's `randn`) and the `latents` themselves (how the parity checks inject upstream's noise).
  *
  * The preset (`./preset.ts`) is part of the state, not of the request, and has no default either
- * (no manifest owns one yet — ADR NNNN decision 13; the family's default
+ * (no manifest owns one yet — ADR 0138 decision 13; the family's default
  * `f32+dit8-a8-attn8-online` is applied by the manifest when it comes): it sets the knobs of the
  * DiT pair and of its headroom estimates; `dit_text` and the VAE run in f32 in every preset.
  *
@@ -23,9 +23,9 @@
  * Rejected, each naming the limit or the missing input:
  *
  * - the size — a side that is not a positive multiple of 16, a side over 65,536 px (`./request.ts`),
- *   an area over this device's limit of the untiled VAE (ADR NNNN decision 8 —
+ *   an area over this device's limit of the untiled VAE (ADR 0138 decision 8 —
  *   `./vae-contract.ts`);
- * - the text (ADR NNNN decision 9) — the positive prompt's embeddings missing, the negative
+ * - the text (ADR 0138 decision 9) — the positive prompt's embeddings missing, the negative
  *   prompt's missing while guidance ≠ 1 runs the negative branch, or given at guidance 1 where they
  *   would have no effect; an embedding that is not f32 `[T, 4096]` with 1 ≤ T ≤ 4,096, all finite;
  * - upstream's own range of the knobs — steps a positive integer, guidance finite and ≥ 0, shift
@@ -44,10 +44,10 @@
  * `./sampler.ts` "Very large step counts"), any guidance in upstream's range (≠ 1 runs CFG with the
  * skip-22 negative, upstream's default), any area under the VAE limit. The schedule is walked on
  * the host before any GPU work, in time linear in the step count. Whether the DiT pair or the VAE
- * fit this device's free VRAM is not an acceptance limit (ADR NNNN decisions 5 and 8): each stage
+ * fit this device's free VRAM is not an acceptance limit (ADR 0138 decisions 5 and 8): each stage
  * checks it before it opens.
  *
- * ## The generate path ({@link generateMoss} — ADR NNNN decision 5)
+ * ## The generate path ({@link generateMoss} — ADR 0138 decision 5)
  *
  * 1. The first headroom check, with nothing open: the largest of the three stages' needs (the bytes
  *    of `mossDitStageNeeds` and `mossVaeStageNeeds` — the estimates + the largest part + the margin)
@@ -149,7 +149,7 @@ export type MossGenerateLimits = {
 const finiteInF32 = (value: number): boolean => Number.isFinite(Math.fround(value));
 
 /**
- * The guidance range and the presence of the prompts it needs (ADR NNNN decision 9 — module doc).
+ * The guidance range and the presence of the prompts it needs (ADR 0138 decision 9 — module doc).
  */
 const assertGuidanceAndPrompts = (request: MossGenerateRequest): void => {
   // A caller outside the types (JavaScript) can leave the field out.

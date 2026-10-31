@@ -1,4 +1,4 @@
-"""MOSS-Image (text-to-image) export recipe (ADR NNNN / ADR 0065 decision 2 — outside the wheel,
+"""MOSS-Image (text-to-image) export recipe (ADR 0138 / ADR 0065 decision 2 — outside the wheel,
 repository only).
 
 Only what cannot live in the generic exporter core goes here: the pin of the upstream checkpoint

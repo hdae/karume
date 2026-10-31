@@ -1,5 +1,5 @@
 /**
- * The MOSS-Image sampler on the CPU (ADR NNNN decisions 9 and 11, stage 4):
+ * The MOSS-Image sampler on the CPU (ADR 0138 decisions 9 and 11, stage 4):
  * the σ schedule against upstream's own `set_timesteps`, upstream's CFG line, the Euler update and
  * the seeded noise.
  *

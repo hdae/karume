@@ -248,7 +248,7 @@ DEFORM_CONV2D_OP = "deform_conv2d"
 UPSAMPLE_BILINEAR2D_OP = "upsample_bilinear2d"
 
 #: Group normalisation over channel groups (a Core ATen layer op — `aten.native_group_norm`; the
-#: exporter takes the preserved `aten.group_norm` — ADR NNNN decision 7). `x[N,C,...] ->
+#: exporter takes the preserved `aten.group_norm` — ADR 0138 decision 7). `x[N,C,...] ->
 #: [N,C,...]` (rank >= 2), `weight[C]` / `bias[C]`, attrs `num_groups` / `eps`. Group g of
 #: sample n is channels `g*C/G ... (g+1)*C/G - 1` with every trailing element; the variance is
 #: the population variance, computed in two passes on the runtime side.
@@ -672,7 +672,7 @@ LAYER_NORM_ATTRS: AttrSchema = {
     "eps": lambda value, where: _assert_eps(value, where, "layer_norm"),
 }
 
-#: group_norm's attrs (ADR NNNN decision 7): `num_groups` (a positive integer — dividing the
+#: group_norm's attrs (ADR 0138 decision 7): `num_groups` (a positive integer — dividing the
 #: channel count is the shape rule's check, where the input is known) and `eps` (the
 #: normalization ops' rule).
 GROUP_NORM_ATTRS: AttrSchema = {
@@ -1485,7 +1485,7 @@ OP_CONTRACTS: dict[str, OpContract] = {
     UPSAMPLE_BILINEAR2D_OP: _contract(
         UPSAMPLE_BILINEAR2D_OP, "upsample_bilinear2d", 1, UPSAMPLE_BILINEAR2D_ATTRS
     ),
-    # Group normalisation (Core ATen layer — ADR NNNN decision 7). All 3 slots f32 of the same
+    # Group normalisation (Core ATen layer — ADR 0138 decision 7). All 3 slots f32 of the same
     # type; its affine is per channel like layer_norm's, so it is not in WEIGHT_SLOTS.
     GROUP_NORM_OP: _contract(GROUP_NORM_OP, "group_norm", 3, GROUP_NORM_ATTRS),
     # GRU hidden-side scan, 2 directions (layer 2 — now the extended composite layer — ADR 0056).

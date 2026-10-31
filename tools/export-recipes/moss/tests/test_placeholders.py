@@ -1,11 +1,10 @@
 """No ADR-number placeholder and no reference to the untracked plan is left under
-`tools/export-recipes/moss/` once the ADR is merged.
+`tools/export-recipes/moss/`.
 
-The MOSS-Image ADR gets its number when it is merged; until then the recipe cites it with a
-placeholder, which the commit that assigns the number replaces. The recipe no longer cites the
-working plan (an untracked file); the scan also finds a plan reference that comes back. The check
-is skipped until the number is assigned — remove the mark in that commit, and it fails for every
-placeholder or plan reference still left.
+The MOSS-Image ADR got its number (0138) at the rebase onto main; until then the recipe cited it
+with a placeholder, which the commit that assigned the number replaced. The recipe no longer
+cites the working plan (an untracked file). The check fails for a placeholder or a plan reference
+that comes back.
 """
 
 from __future__ import annotations
@@ -45,7 +44,7 @@ def placeholder_sites(root: Path) -> list[str]:
 
 
 def test_the_scan_finds_a_placeholder(tmp_path):
-    """The scan itself is live while the merge check below is skipped."""
+    """The scan itself finds a placeholder (the check below would pass on a scan that finds none)."""
     (tmp_path / "a.py").write_text("x = 1  # ADR " + "N" * 4 + " decision 3\n", encoding="utf-8")
     (tmp_path / "b.md").write_text("ADR 0065\n\nsee ADR\n" + "N" * 4 + "\n", encoding="utf-8")
 
@@ -70,9 +69,5 @@ def test_the_scan_leaves_other_uses_of_plan_alone(tmp_path):
     assert placeholder_sites(tmp_path) == []
 
 
-@pytest.mark.skip(
-    reason="the MOSS-Image ADR has no number until it is merged; remove this mark in the commit"
-    " that assigns it"
-)
 def test_no_adr_placeholder_is_left():
     assert placeholder_sites(RECIPE) == []

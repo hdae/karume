@@ -89,7 +89,7 @@ either). It will be resolved from M1-P2 on, when the per-op assignment is fixed 
   `scaled_dot_product_attention` took it from 11 to 12 in ADR 0023).
   **Only SDPA (the 12th) is not on the default preservation list** (`PRESERVED_OP_PREFIXES` holds
   the 12 above without SDPA (the earlier 11, `leaky_relu` among them) plus `conv3d` of the
-  extended composite layer(ADR 0118) and `group_norm` of the Core ATen layer (ADR NNNN — the NOTE
+  extended composite layer(ADR 0118) and `group_norm` of the Core ATen layer (ADR 0138 — the NOTE
   of 2026-10-27 below), 13 in all) —
   SDPA can express mask / causal through its arguments, so preserving it globally would make shapes
   outside the contract (a bool mask passed by kwargs, `[B,1,M,N]` and so on) hit the fail-loudly of
@@ -459,7 +459,7 @@ full-range write of resident tensors (a rank-5 initializer is a first, but the r
 strided family applies to values, not to initializers).
 
 NOTE: 2026-10-27 added `group_norm` to the **Core ATen layer** (`aten.native_group_norm`; ledger
-entry — the ADR of the family that needs it holds the design: ADR NNNN (MOSS-Image's DiT and VAE)
+entry — the ADR of the family that needs it holds the design: ADR 0138 (MOSS-Image's DiT and VAE)
 decision 7). Grounds = the FLUX.2 small decoder of MOSS-Image runs **untiled** (its upstream
 default — tiling would change every GroupNorm's statistics), with 30 GroupNorms (32 groups) over
 symbolic spatial axes. It does not stop at step 2: the group reshape `[N, G, C/G·h·w]` is a
@@ -556,7 +556,7 @@ The general inputs of the sweep (around ±4.5) do not reach the hazard band eith
    bit-identical output (research/2026-08-04-vae-axis-reduce-recon.md))
 5. Concentrated exporter decomposition passes (≈25 ops, 0 new kernels)
 6. Dedicated native_group_norm kernel — **done (2026-10-27)**: `group_norm` (the NOTE of
-   2026-10-27 above — ADR NNNN decision 7)
+   2026-10-27 above — ADR 0138 decision 7)
 7. Extend the conv contract (relax B=1 and the like)
 8. pooling / upsample
 9. scatter_add (presumes an ADR)

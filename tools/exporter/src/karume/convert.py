@@ -318,7 +318,7 @@ SYMBOL_EXTENT_ARGS: dict[Any, frozenset[str]] = {
 #: - `rms_norm` — added in ADR 0017 (10 ops → 11 ops). The path that preserves `aten.rms_norm`
 #:   from diffusers' `nn.RMSNorm`; hand-written decomposed forms (Qwen3 / DiT) cannot be folded by
 #:   preservation, so `normalize._fold_rms_norm` takes them (2 supply routes — ADR 0017).
-#: - `group_norm` — added in ADR NNNN decision 7 (12 ops → 13 ops). Decomposed, `nn.GroupNorm`
+#: - `group_norm` — added in ADR 0138 decision 7 (12 ops → 13 ops). Decomposed, `nn.GroupNorm`
 #:   becomes `native_group_norm` (**3 outputs**) + getitem (the layer_norm case) with its `HxW`
 #:   argument the product of the spatial symbols (`sym_size · sym_size` — no IR form); preserving
 #:   `aten.group_norm` keeps the one node with its `num_groups` / `eps` and nothing symbolic.
@@ -1374,7 +1374,7 @@ def curated_decompositions(preserved: Sequence[str] = PRESERVED_OP_PREFIXES):
 
     Removes from default_decompositions the ops that, once core-decomposed, no longer map 1:1 to
     a kernel. The default is 13 ops (PRESERVED_OP_PREFIXES — ADR 0007's 9 ops plus leaky_relu in
-    ADR 0015, rms_norm in ADR 0017, conv3d in ADR 0118 decision 1 and group_norm in ADR NNNN
+    ADR 0015, rms_norm in ADR 0017, conv3d in ADR 0118 decision 1 and group_norm in ADR 0138
     decision 7).
 
     NOTE: preserving `rms_norm` is not enough. Only diffusers' `nn.RMSNorm` emits `aten.rms_norm`;

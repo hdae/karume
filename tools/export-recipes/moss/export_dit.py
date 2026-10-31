@@ -1,5 +1,5 @@
 """Export of the MOSS-Image DiT as an i8 series — the graphs `dit`, `dit_skip22`, `dit_text` and
-the assets `rope_base` and `training_grid` (ADR NNNN decisions 2–4, 6 and 11, stages 1
+the assets `rope_base` and `training_grid` (ADR 0138 decisions 2–4, 6 and 11, stages 1
 and 2).
 
     uv run --group moss --inexact python -m moss.export_dit inspect  # traces + structure only
@@ -25,11 +25,11 @@ One part directory per graph, each with its container `model.krm` (graph name = 
 | `dit_skip22` | S      | none — every initializer declared shared with `dit` | —                 |
 | `dit_text`   | T      | 11 linears i8, norms and biases f32                 | —                 |
 
-`dit_text` runs with f32 compute in every preset (ADR NNNN decision 3 — a session setting of the
+`dit_text` runs with f32 compute in every preset (ADR 0138 decision 3 — a session setting of the
 presets, stage 5; the weights are i8 like the rest).
 
 The graphs and their inputs are {@link moss.dit_patch}. Both assets are safetensors bytes of
-upstream outputs, which the host only reorders or indexes (ADR 0034 decision 3, ADR NNNN
+upstream outputs, which the host only reorders or indexes (ADR 0034 decision 3, ADR 0138
 decision 11):
 
 - `rope_base` (role `rope-base`): the per-axis sin / cos base tables
@@ -61,11 +61,11 @@ Everything is written into a staging directory and moved into place only when bo
   the weights are rank ≤ 2), no initializer with a dimension equal to the trace's symbol maximum, no
   `sym_prefix_slice` (the exporter's form of a folded symbol-dependent constant — ADR 0010);
 - the census ({@link EXPECTED}): linear nodes, `where`, attention, `div` (two per block — `situ`'s
-  `g / 4` and `h / 25` stay divisions, ADR NNNN decision 6);
+  `g / 4` and `h / 25` stay divisions, ADR 0138 decision 6);
 - storage: i8 exactly on the quantization targets, f32 on the rest; `dit_skip22` all shared, and its
   keys are `dit`'s minus block 22's.
 
-## Gate 2 — eager equivalence, bit-identical (MUST — ADR NNNN decision 11)
+## Gate 2 — eager equivalence, bit-identical (MUST — ADR 0138 decision 11)
 
 One process, one set of f32 fake-quant weights: upstream's `MOSSImageTransformer` read in f32 and
 rounded in place to the i8 grid (`karume.quantize.fake_quant_int8` — the same rounding as the
@@ -158,7 +158,7 @@ ROPE_BASE_ASSET = "rope_base"
 ROPE_BASE_ROLE = "rope-base"
 
 #: The second asset of the `dit` container: the training grid's tables (module docstring;
-#: ADR NNNN decision 11).
+#: ADR 0138 decision 11).
 TRAINING_GRID_ASSET = "training_grid"
 TRAINING_GRID_ROLE = "training-grid"
 
@@ -338,7 +338,7 @@ def symbol_constants(graph: IrGraph, sym_max: int) -> list[str]:
 
 
 def declared_inputs(name: str, config: Mapping[str, Any]) -> list[list[Any]]:
-    """`[name, shape, dtype]` of the graph inputs as ADR NNNN decisions 2 and 3 declare them."""
+    """`[name, shape, dtype]` of the graph inputs as ADR 0138 decisions 2 and 3 declare them."""
     dim, head_dim = int(config["dim"]), int(config["dim"]) // int(config["num_heads"])
     if name == DIT_TEXT:
         rope = [1, 1, "T", head_dim]

@@ -846,7 +846,7 @@ def _h_layer_norm(node: Node) -> Emitted:
 
 
 def _h_group_norm(node: Node) -> Emitted:
-    """aten.group_norm → group_norm (attrs `num_groups` / `eps` — ADR NNNN decision 7).
+    """aten.group_norm → group_norm (attrs `num_groups` / `eps` — ADR 0138 decision 7).
 
     MUST: preserved (`convert.PRESERVED_OP_PREFIXES`). Decomposed it becomes native_group_norm
     (3 outputs) + getitem, with `HxW` the product of the spatial symbols — neither has an IR form.
@@ -1832,7 +1832,7 @@ ATEN_HANDLERS = {
     # `.vec` overload, and `.default` (the form taking scales_h / scales_w separately) does not
     # appear in measurements (add one line when it shows up).
     aten.upsample_bilinear2d.vec: _h_upsample_bilinear2d,
-    # Group normalisation (Core ATen layer — ADR NNNN decision 7): the preserved composite
+    # Group normalisation (Core ATen layer — ADR 0138 decision 7): the preserved composite
     # `aten.group_norm` (`native_group_norm` + getitem is not wired — the layer_norm case).
     aten.group_norm.default: _h_group_norm,
     # DCNv2 (layer 1' — now the extended atomic layer — the front-line blocker of the BiRefNet

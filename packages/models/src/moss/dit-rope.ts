@@ -1,7 +1,7 @@
 /**
  * The host side of the MOSS-Image DiT's RoPE — reading the `dit` container's asset `rope_base`
  * (per-axis base tables) and reordering it into the graph inputs `rope_cos` / `rope_sin`
- * (`[1,1,S,128]` for `dit` / `dit_skip22`, `[1,1,T,128]` for `dit_text` — ADR NNNN decision 2,
+ * (`[1,1,S,128]` for `dit` / `dit_skip22`, `[1,1,T,128]` for `dit_text` — ADR 0138 decision 2,
  * stage 2).
  *
  * ## The tables are reordered base tables, never computed

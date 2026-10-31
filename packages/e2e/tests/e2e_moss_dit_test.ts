@@ -1,7 +1,7 @@
 /**
  * The MOSS-Image DiT stage on a real GPU — the port check of the reference path (i8 weights × f32
  * compute, no session knobs) against the layer-by-layer CPU f64 reference, the Session lifetimes
- * and the plan backing (ADR NNNN decisions 3–5 and 11, stage 2).
+ * and the plan backing (ADR 0138 decisions 3–5 and 11, stage 2).
  *
  * The goldens are written by `tools/export-recipes/moss/dit_reference.py` from the same series
  * containers (the dequantised i8 weights the GPU reads — ADR 0121 decision 7), one golden per case:
@@ -63,9 +63,9 @@
  * The r gates and their fault injections compare with a torch reference, so they run only with
  * `KARUME_UPSTREAM_PARITY=1` (parity is proven when the family is implemented). The default run
  * keeps the checks that read no reference: `dit_text` at T = 1 (the graph was traced with T ≥ 2,
- * and nothing but the GPU runs the IR at T = 1 — the MUST of ADR NNNN decision 3), finite and
+ * and nothing but the GPU runs the IR at T = 1 — the MUST of ADR 0138 decision 3), finite and
  * pinned by a sha256 row (ADR 0106 — `fixtures/references/moss.json`; the r gate is opt-in, so the
- * row is the default lane's only check of its values — ADR NNNN decision 11; MUST: with
+ * row is the default lane's only check of its values — ADR 0138 decision 11; MUST: with
  * `KARUME_REFERENCE` the row is written only after the r gate of the text cases, T = 1 among them,
  * passed earlier in the same run — that gate is declared before the default run (Vitest runs a
  * file's tests in declaration order), and otherwise the case fails before writing, naming the gate

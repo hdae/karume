@@ -1,12 +1,12 @@
 # MOSS-Image (host side)
 
 MOSS-Image's DiT and its FLUX.2 decoder (ADR
-[NNNN](../../../../docs/decisions/NNNN-moss-image-dit-vae.md), branch `wip/moss-image`):
+[0138](../../../../docs/decisions/0138-moss-image-dit-vae.md), branch `wip/moss-image`):
 `generateMoss` (`generate.ts`) turns precomputed text embeddings into an image `[3, H, W]` in
 `[-1, 1]` with the DiT of `OpenMOSS-Team/MOSS-Image-SFT` and its untiled VAE decoder. The text
 encoder (Qwen3.5-9B) is not ported, so a request carries upstream's encoder outputs instead of
 strings. **There is no public surface**: the family is not a subpath of `@karume/models`, not in
-the barrel and has no distribution or manifest until the text encoder exists (ADR NNNN decision 12).
+the barrel and has no distribution or manifest until the text encoder exists (ADR 0138 decision 12).
 The caller opens the two series (the DiT series `moss-image-sft-i8-dyn` and the VAE series
 `moss-image-sft-f32-dyn`; the tests' helpers `openMossSeries` / `openMossVaeSeries` do it from
 `outputs/series/`) and passes them with a device and a preset.
@@ -15,7 +15,7 @@ A generation runs three stages, one session set at a time, each closed before th
 followed by a wait for the released GPU memory (Dawn returns destroyed buffers only when a later
 submit completes). Before anything opens, one trial allocation (`fitsHeadroom`) checks the largest
 of the three stage needs; before each stage opens, another checks its own need (the runtime
-estimate with the preset's knobs, plus the largest weight part and a margin — ADR NNNN decision 5).
+estimate with the preset's knobs, plus the largest weight part and a margin — ADR 0138 decision 5).
 A refusal fails loudly with the stage, the bytes and the size:
 
 1. **text** — the text refiner `dit_text` (symbol T) runs once for the positive and once for the
@@ -33,7 +33,7 @@ A refusal fails loudly with the stage, the bytes and the size:
    image), and its mid attention runs in row blocks of at most 256 MiB.
 
 The preset is part of the state and has **no default** — not even ADR 0128 decision 1's provisional
-one, since no manifest owns a default yet (ADR NNNN decision 13); the family's default is
+one, since no manifest owns a default yet (ADR 0138 decision 13); the family's default is
 `f32+dit8-a8-attn8-online` (the maintainer's visual review passed), applied by the manifest when
 it comes:
 
@@ -61,7 +61,7 @@ has them, for the online kernel's subgroup form — never required).
 | `generate.ts`      | 4     | `planMossGenerate` (the one acceptance check of a request) and `generateMoss` (the stage order) |
 | `preset.ts`        | 5     | the two presets, `mossPreset` / `MOSS_PRESET_NAMES`, `mossAcquireGpuOptions` |
 
-(The stages are those of ADR NNNN decision 14.)
+(The stages are those of ADR 0138 decision 14.)
 
 ## Accepted requests
 
@@ -88,7 +88,7 @@ not an acceptance limit (`docs/limitations.md`, the MOSS-Image section, records 
 - The GPU is checked against layer-by-layer CPU references (r bands of the DiT), upstream's f32
   decode (m bands of the VAE) and upstream's two-step `pipe(...)` with the series' i8 weights (m
   bands of the latents and the image); these comparisons are opt-in (`KARUME_UPSTREAM_PARITY=1`),
-  and the default lane pins the outputs with sha256 rows (ADR NNNN decision 11).
+  and the default lane pins the outputs with sha256 rows (ADR 0138 decision 11).
 - The practical preset is checked against the reference preset on the same machine (the self A/B
   check of the step-1 DiT outputs and the latent after it) with the census of the variants that ran.
 - The seeded noise is not torch's: the same seed does not give upstream's image; pass `latents` to

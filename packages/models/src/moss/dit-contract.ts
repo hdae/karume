@@ -1,6 +1,6 @@
 /**
  * The contract of the MOSS-Image DiT series — the three graphs `dit`, `dit_skip22` and `dit_text`
- * and the two assets of `dit` (ADR NNNN decisions 2–4 and 11, stage 2).
+ * and the two assets of `dit` (ADR 0138 decisions 2–4 and 11, stage 2).
  *
  * | Graph        | Symbol | Inputs                                                                                         | Output       |
  * | ------------ | ------ | ---------------------------------------------------------------------------------------------- | ------------ |
@@ -199,7 +199,7 @@ const ditInputs = (owner: string, graph: string, model: GraphOwner) => {
  * The initializers `dit_skip22` borrows (IR v2: a shared initializer's name is the lender's —
  * ADR 0096 decision 2).
  *
- * MUST: every initializer of the borrower is shared (ADR NNNN decision 4 — the graph holds no weight
+ * MUST: every initializer of the borrower is shared (ADR 0138 decision 4 — the graph holds no weight
  * bytes), and each names a lender initializer that is not itself shared. The runtime's own checks
  * (shape, dtype, residency class, device, "every shared declaration, no more, no fewer") run when the
  * borrower's Session is built.

@@ -1,5 +1,5 @@
 """The per-layer CPU reference of the MOSS-Image DiT graphs — f64 and f32, weights streamed block by
-block from the i8 series — and the goldens the TypeScript port checks read (ADR NNNN decision 11,
+block from the i8 series — and the goldens the TypeScript port checks read (ADR 0138 decision 11,
 stage 2; the ADR 0121 decision 7 form of `wan.dit_reference`).
 
     uv run --group moss --inexact python -m moss.dit_reference write                # every case
@@ -47,7 +47,7 @@ acceptance cases are judged against it, never the other way round.
   {@link ACCEPT_INDICES}, for both branches. The two branches of one index share their latents
   (seed {@link SEED} + index — torch's CPU `randn`) and timestep, as the two forwards of a step do.
 - `text` (`dit_text`): band cases at T = 2, 10, 31, 62, 63, 134 and acceptance cases at T = 1 (the
-  MUST of ADR NNNN decision 3: the graph was traced with T ≥ 2, and no CPU path runs the IR at
+  MUST of ADR 0138 decision 3: the graph was traced with T ≥ 2, and no CPU path runs the IR at
   T = 1), 7, 45, 100 — the stage-0 embeddings and prefixes of them (a prefix of a causal
   encoder's hidden states is the encoder output of that token prefix).
 

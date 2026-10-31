@@ -46,10 +46,10 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
   },
   "minicpm5-1b": { "": "model" },
   "minicpm5-1b-decode": { "": "model" },
-  // MOSS-Image's DiT (ADR NNNN decisions 2–4 — `moss.export_dit write`; `dit_skip22` borrows
+  // MOSS-Image's DiT (ADR 0138 decisions 2–4 — `moss.export_dit write`; `dit_skip22` borrows
   // every weight of `dit`).
   "moss-image-sft-i8-dyn": { dit: "dit", dit_skip22: "dit_skip22", dit_text: "dit_text" },
-  // MOSS-Image's VAE decoder (ADR NNNN decision 8 — `moss.export_vae write`; a VAE-only series).
+  // MOSS-Image's VAE decoder (ADR 0138 decision 8 — `moss.export_vae write`; a VAE-only series).
   "moss-image-sft-f32-dyn": {
     vae_decoder_pre: "vae_decoder_pre",
     vae_decoder_attn: "vae_decoder_attn",

@@ -1,5 +1,5 @@
 /**
- * The MOSS-Image generate path on the CPU (ADR NNNN decision 9, stage
+ * The MOSS-Image generate path on the CPU (ADR 0138 decision 9, stage
  * 4): the one acceptance check of a request, and the sampler loop of the generate path driven
  * by upstream's recorded DiT outputs.
  *
@@ -94,7 +94,7 @@ const untypedRequest = (overrides: UntypedOverrides): MossGenerateRequest =>
 
 const plan = (overrides: UntypedOverrides) => planMossGenerate(untypedRequest(overrides), LIMITS);
 
-describe("MOSS-Image generate acceptance (one check — ADR NNNN decisions 8 and 9)", () => {
+describe("MOSS-Image generate acceptance (one check — ADR 0138 decisions 8 and 9)", () => {
   it("plans every stage of an accepted request: cells, the VAE latent, the schedule and the noise", () => {
     const accepted = plan({ width: 384, height: 256 });
 

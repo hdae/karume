@@ -1,5 +1,5 @@
 /**
- * The fixed kernels of group_norm (`x[N,C,…]`, channel groups, per-channel affine, f32 — ADR NNNN
+ * The fixed kernels of group_norm (`x[N,C,…]`, channel groups, per-channel affine, f32 — ADR 0138
  * decision 7).
  *
  * Group g of sample n is the contiguous run of `C/G` channels with every trailing element, so the

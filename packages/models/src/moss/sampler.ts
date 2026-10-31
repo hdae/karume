@@ -1,6 +1,6 @@
 /**
  * The MOSS-Image sampler on the host — upstream's σ schedule (`MOSSImageScheduler.set_timesteps`)
- * and the Euler update of diffusers' `FlowMatchEulerDiscreteScheduler.step` (ADR NNNN decisions 9
+ * and the Euler update of diffusers' `FlowMatchEulerDiscreteScheduler.step` (ADR 0138 decisions 9
  * and 11, stage 4). The CFG combination is `mossClassifierFreeGuidance`
  * (`./dit-stage.ts`).
  *
@@ -41,7 +41,7 @@
  * The schedule walks the requested grid one element at a time and keeps only the snapped indices,
  * so a large step count costs time (linear in `n`, synchronous — about 0.25 s at 10⁷ on the
  * development machine), not a requested-grid array — upstream accepts any count ≥ 1 and so does
- * this (ADR NNNN decision 9).
+ * this (ADR 0138 decision 9).
  *
  * ### Very large step counts (measured on the series' training grid, shift 5)
  *

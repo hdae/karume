@@ -544,7 +544,7 @@ conformance table is the correct one.
   the segmentation / depth family, `deform_conv2d` for the BiRefNet family — ADR 0055 — and
   `gru_scan` / `gru_scan_reverse` for recurrent models — ADR 0056 — `conv3d` for the causal 3D
   VAE of video models — ADR 0118 — `gated_delta_scan` for Gated DeltaNet layers — ADR 0135 — and
-  `group_norm` for the untiled FLUX.2 decoder — ADR NNNN):
+  `group_norm` for the untiled FLUX.2 decoder — ADR 0138):
   - unary `neg abs exp log log1p sqrt sin tanh sigmoid relu gelu gelu_tanh` (f32) / `bitwise_not`
     (bool) / unary with attrs `clamp` / `clamp_min` / `leaky_relu` (f32). `sin` is the **only**
     trigonometric op: constant tables (RoPE) are still folded away at export time, so only the
@@ -579,7 +579,7 @@ conformance table is the correct one.
     area / antialias and factor-based sizing all fail loudly at the exporter boundary. Shrinking
     goes through the same op (torch does too — reading only 2 taps is the specified behaviour, and
     is not `area`)
-  - group normalisation (a Core ATen layer atom, ADR NNNN decision 7): **`group_norm`** —
+  - group normalisation (a Core ATen layer atom, ADR 0138 decision 7): **`group_norm`** —
     `x[N,C,…] → [N,C,…]` (rank ≥ 2, a static C, the trailing axes may be symbolic),
     `weight[C]` / `bias[C]`, arity 3, attrs `num_groups` / `eps`. Group g of sample n is the
     contiguous band of `C/num_groups` channels with every trailing element; the variance is the
@@ -641,7 +641,7 @@ conformance table is the correct one.
   formula).
 - The default set of decomposition stops (preserved) is **13 ops** (`PRESERVED_OP_PREFIXES` — the
   9 ops of ADR 0007 plus `leaky_relu` from ADR 0015, `rms_norm` from ADR 0017, `conv3d` from
-  ADR 0118 and `group_norm` from ADR NNNN): linear / layer_norm / group_norm / rms_norm / softmax /
+  ADR 0118 and `group_norm` from ADR 0138): linear / layer_norm / group_norm / rms_norm / softmax /
   gelu / leaky_relu / conv1d / conv2d / conv3d / conv_transpose1d / embedding / masked_fill. An
   unbatched `F.conv3d` stays `aten.conv3d.default` with its rank-4 input in the trace (measured
   on torch 2.13.0), so no normalization pass is needed.

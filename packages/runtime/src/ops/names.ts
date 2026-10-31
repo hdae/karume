@@ -387,7 +387,7 @@ export const UPSAMPLE_BILINEAR2D_OP = "upsample_bilinear2d";
 
 /**
  * Group normalisation over channel groups of NCHW-like layouts (a Core ATen layer op —
- * `aten.native_group_norm`; the exporter takes the preserved `aten.group_norm` — ADR NNNN
+ * `aten.native_group_norm`; the exporter takes the preserved `aten.group_norm` — ADR 0138
  * decision 7). `x[N,C,…] → [N,C,…]` (rank ≥ 2, any trailing extent), with `weight[C]` /
  * `bias[C]` and attrs `num_groups` / `eps`:
  *

@@ -105,7 +105,7 @@ Grounds: the Consequences of ADR [0108](decisions/0108-container-format.md) and 
   initializer (the rank limit of 4 for the strided family applies to values, not to initializers).
   No effect on existing IR.
 - Model expansion (2026-10-27): added `group_norm` as the **Core ATen layer** (`aten.native_group_norm` — a
-  ledger NOTE in [op-vocabulary.md](op-vocabulary.md); the design is ADR [NNNN](decisions/NNNN-moss-image-dit-vae.md)
+  ledger NOTE in [op-vocabulary.md](op-vocabulary.md); the design is ADR [0138](decisions/0138-moss-image-dit-vae.md)
   decision 7, requested by MOSS-Image's untiled FLUX.2 decoder). **Arity fixed at 3**, attrs `num_groups` / `eps`;
   the exporter preserves `aten.group_norm`, so the default preserved list has 13 ops. No effect on existing IR
   (a GroupNorm failed before as an unsupported op).
@@ -582,7 +582,7 @@ The contract of nodes that read and write state slots (ADR
   [0017](decisions/0017-rms-norm-conv2d-clamp-min.md)) — high-level ops the exporter stops decomposing and carries as
   a single node. The preserved ops of ADR [0007](decisions/0007-op-vocabulary.md) became **11** with
   `leaky_relu` in M1-P3 and `conv2d` / `rms_norm` in M1-P4 (ADR 0017), **12** with `conv3d` of the extended composite layer (ADR 0118),
-  and **13** with `group_norm` of the Core ATen layer (ADR NNNN decision 7);
+  and **13** with `group_norm` of the Core ATen layer (ADR 0138 decision 7);
   all of them
   **have kernels** (`conv2d` showed up in measurement in Anima's VAE decoder). Only `rms_norm` has
   **two supply routes**: ① `aten.rms_norm` from diffusers' `nn.RMSNorm` becomes one node as is via the preserved
@@ -596,7 +596,7 @@ The contract of nodes that read and write state slots (ADR
   - `layer_norm` (f32, attrs `normalized_shape` / `eps`, **arity fixed at 3**) — last dimension only
     (`normalized_shape` has length 1), affine always present. The variance is **the population variance (correction = 0)**,
     and `eps` is a finite positive number
-  - `group_norm` (f32, attrs `num_groups` / `eps`, **arity fixed at 3** — ADR [NNNN](decisions/NNNN-moss-image-dit-vae.md)
+  - `group_norm` (f32, attrs `num_groups` / `eps`, **arity fixed at 3** — ADR [0138](decisions/0138-moss-image-dit-vae.md)
     decision 7) — `x[N,C,…]` (rank ≥ 2; **C static**, the trailing axes may be symbolic, no axis of length 0) /
     `weight[C]` / `bias[C]` → the shape of x. The C channels form `num_groups` groups of `C/num_groups` consecutive
     channels; each group (its channels × every trailing position of one batch item) is normalised with **the population

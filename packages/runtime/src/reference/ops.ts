@@ -1022,7 +1022,7 @@ export const referenceLayerNorm = (
 };
 
 /**
- * group_norm (channel groups of `x[N,C,…]`, per-channel affine — ADR NNNN decision 7). Group g of
+ * group_norm (channel groups of `x[N,C,…]`, per-channel affine — ADR 0138 decision 7). Group g of
  * sample n is the contiguous run of channels `g·C/G … (g+1)·C/G − 1` with every trailing element;
  * the variance is the population variance, as layer_norm's.
  *

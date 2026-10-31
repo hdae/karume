@@ -912,7 +912,7 @@ export const UPSAMPLE_BILINEAR2D_ATTRS: AttrSchema = {
 };
 
 /**
- * The attrs of group_norm (Core ATen layer — ADR NNNN decision 7): `num_groups` (a positive
+ * The attrs of group_norm (Core ATen layer — ADR 0138 decision 7): `num_groups` (a positive
  * integer; dividing the channel count is the shape rule's check, where the input is known) and
  * `eps` (the normalisation ops' rule — a finite positive number that rounds to a normal f32).
  */

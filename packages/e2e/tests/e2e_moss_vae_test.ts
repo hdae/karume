@@ -1,5 +1,5 @@
 /**
- * The MOSS-Image VAE stage on the GPU (ADR NNNN decisions 5 and 8, stage 3): the untiled FLUX.2
+ * The MOSS-Image VAE stage on the GPU (ADR 0138 decisions 5 and 8, stage 3): the untiled FLUX.2
  * decoder as three Sessions in one batch against upstream's f32 decode, the census, the lifetimes,
  * the headroom check, the per-device area limit and (opt-in) the area-cap decode with its VRAM.
  *
@@ -14,7 +14,7 @@
  * reference, the ratio m, about 5 × the measured worst, band cases separate from the acceptance
  * cases), not an E2E A/B check of a practical preset (ADR 0110 decision 4's MUST NOT on "5–10 ×
  * the measured" is about those) and not ADR 0120 decision 3's r check (whose six decision cases
- * belong to the DiT's f64 reference — ADR NNNN decision 11's VAE tier).
+ * belong to the DiT's f64 reference — ADR 0138 decision 11's VAE tier).
  *
  * The metric m = max |GPU − upstream| / max |upstream| over the clamped image: the stage's output
  * against the goldens' `image` (upstream's f32 decode clamped as upstream clamps; no golden pixel
@@ -46,7 +46,7 @@
  * The default run (no opt-in): one 256² decode (finite, the census — the three ×2 upsamples run as
  * `upsample2x`, every GroupNorm as group_norm's five dispatches — and what the stage holds within
  * its estimates), the mid attention's row-block budget at 1024² (it splits the attention into more
- * row blocks than the binding alone and leaves the image bit-identical — ADR 0124; ADR NNNN
+ * row blocks than the binding alone and leaves the image bit-identical — ADR 0124; ADR 0138
  * decision 8), the lifetimes (every Session and resident closed, the Sessions first, after a
  * run, after a failure inside the batch and after a failure while opening; nothing opened when the
  * headroom check refuses) and the area limit's refusal before any GPU work. Its values are not

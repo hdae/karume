@@ -1,4 +1,4 @@
-// The group_norm kernel's four-point check (ADR 0110 decision 3 — ADR NNNN decision 7) and the
+// The group_norm kernel's four-point check (ADR 0110 decision 3 — ADR 0138 decision 7) and the
 // large-group check at the MOSS decoder's area cap.
 //
 // ① f64 band: the Session's output against a float64 two-pass group norm of the same f32 inputs,

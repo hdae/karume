@@ -1,5 +1,5 @@
 """Fixed values of the MOSS-Image host functions, taken from upstream's own code (stage 0 and
-decision 11 of ADR NNNN).
+decision 11 of ADR 0138).
 
 The TS host functions (stages 2 and 4) must reproduce these as Uint32-identical values; nothing
 here transcribes upstream's formulas — each value is produced by upstream code:

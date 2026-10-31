@@ -153,7 +153,7 @@
 | export-eliminated layer △ | export で消える op | export 時の畳み込み・分解で消え、ランタイムに届かない op（旧第 0 層） | export 消滅層 | ADR 0059 決定 1 |
 | extended atomic layer △ | 分解できない追加 op | 語彙内の合成で厳密同値に書けない非 core の op（旧第 1' 層） | 拡張原子層 | ADR 0059 決定 1・3 |
 | extended composite layer △ | 分解できるが残す追加 op | 書けるが性能・意味のために残す非 core の op（旧第 2 層の残り） | 拡張分子層 | ADR 0059 決定 1・3・5 |
-| `group_norm` △ | group_norm（GroupNorm の op） | GroupNorm の Core ATen 層の op。群ごとに平均 → 偏差の二乗和の 2 パスで統計を取り（木の形は固定）、チャネルごとの affine を掛ける | — | op-vocabulary の NOTE 2026-10-27・ADR NNNN 決定 7 |
+| `group_norm` △ | group_norm（GroupNorm の op） | GroupNorm の Core ATen 層の op。群ごとに平均 → 偏差の二乗和の 2 パスで統計を取り（木の形は固定）、チャネルごとの affine を掛ける | — | op-vocabulary の NOTE 2026-10-27・ADR 0138 決定 7 |
 | Gated DeltaNet (GDN) △ | Gated DeltaNet（GDN） | value head ごとの dk × dv 行列を状態に持ち、token ごとに exp(g) で減衰させてから beta の強さで v へ向けて rank-1 補正する線形 attention の層。Qwen3.5 系で使う（MOSS-Image のテキストエンコーダは 32 層中 24 層） | — | ADR 0135 Context |
 | `gated_delta_scan` △ | gated_delta_scan（GDN の走査 op） | GDN の再帰を担う提案中の op。`(q, k, v, g, beta) → o`・arity 5・f32・attrs 空。decode はその states 形 | — | ADR 0135 決定 1・4 |
 | sequential scan (GDN) △ | 逐次スキャン | token を 1 つずつ進め、状態をレジスタに置く kernel の形。(a2) は value の列 1 本を key 方向に 8 スレッドへ分ける（この分け方は数値の一部）。全ての T でこの op の kernel | — | ADR 0135 決定 3 |
@@ -183,8 +183,8 @@
 | attention permute absorption △ | attention の permute 吸収 | `attentionCompute: "a8"` のとき、融合 attention が直前の q / k / v の `[0, 2, 1, 3]` permute を取り込み、トークン順のまま読む融合（直後の出力の permute はノードのまま。経路は見ずにこのオプションだけで決め、`attentionPermute` で数える） | — | ADR 0040 追記 2026-10-25 |
 | key valid length / padded key axis (online attention) △ | キーの有効長 / 詰めたキー軸 | online の kernel が 4 の倍数でないキー長 N を回す形。int8 の Vᵀ の行を `ceil(N/4)` 語まで 0 で詰め、N 以降のキーは −3.0e38 で消すので詰め物は出力に入らない（③PV の i8a8 は今も N % 4 == 0 が要る） | — | ADR 0132 追記 2026-10-27 |
 | online-route device facts (`attentionDeviceFacts`) △ | online の経路の device の事実 | Session が online の kernel を選ぶかとその形を決める device の事実。見積もりが Session と同じ経路を数えるために公開した | — | ADR 0132 追記 2026-10-28 |
-| three-dispatch route (fused attention) △ | 3 dispatch の経路 | スコアを格納する融合 attention の形。①QK がスコア S を書き、② が行の統計（softmax）を取り、③PV が P × V を計算する — attention 1 つに kernel 3 本。online の kernel は同じ attention を 1 dispatch で回し、online が動かないところでは Session がこの経路に落ちる | — | ADR 0132・ADR NNNN Context |
-| P̃ / Vᵀ (int8 attention operands) △ | P̃ / Vᵀ | P̃ = softmax の重みを 1/127 の格子で int8 にしたもの。Vᵀ = V の転置（キーの方向 N が行の中に並ぶ）。どちらも N の方向に 4 キーずつ u32 の 1 語に詰めるので、③PV の i8a8 は N % 4 == 0 が要り、online の kernel はキー軸を詰める（キーの有効長） | — | ADR 0132・ADR NNNN Context |
+| three-dispatch route (fused attention) △ | 3 dispatch の経路 | スコアを格納する融合 attention の形。①QK がスコア S を書き、② が行の統計（softmax）を取り、③PV が P × V を計算する — attention 1 つに kernel 3 本。online の kernel は同じ attention を 1 dispatch で回し、online が動かないところでは Session がこの経路に落ちる | — | ADR 0132・ADR 0138 Context |
+| P̃ / Vᵀ (int8 attention operands) △ | P̃ / Vᵀ | P̃ = softmax の重みを 1/127 の格子で int8 にしたもの。Vᵀ = V の転置（キーの方向 N が行の中に並ぶ）。どちらも N の方向に 4 キーずつ u32 の 1 語に詰めるので、③PV の i8a8 は N % 4 == 0 が要り、online の kernel はキー軸を詰める（キーの有効長） | — | ADR 0132・ADR 0138 Context |
 | rmsNormRope（rms_norm → pair RoPE fusion）△ | rms_norm と RoPE の融合 | Wan DiT の self-attention の q / k の前処理（トークン行の `rms_norm` → reshape 2 本 → ペア形の RoPE）を、正規化した行を格納しない f32 カーネル 1 本へ畳む融合（素の経路が 256 幅の workgroup の `rms_norm` を使うときだけ。`rmsNormRope` で数える） | — | ADR 0040 追記 2026-10-25 |
 | deferred node △ | 後ろへ回すノード | 融合の窓の中で畳まないノードのうち、融合ステップの**後ろ**へ置いて走査し直すもの（窓内 passthrough は前に置き、走査し直さない）。q と k の鎖が入り組むときに使う | — | ADR 0040 追記 2026-10-25 |
 | split-tree axis reduce △ | 部分木分割の軸 reduce | 末尾以外の軸の reduce で 1 出力を 16 スレッドが分け持ち、同じ加算木の揃った部分木を各自が畳んでから根を順に合わせる形（加算の順序が同じなのでビット同一・分割数はパイプラインキーに入る） | — | ADR 0035 追記 2026-10-26 |
@@ -297,20 +297,20 @@
 
 | 英語（コード・docs） | 日本語（対話） | 意味 | やめる言い方 | 正本 |
 | --- | --- | --- | --- | --- |
-| MOSS-Image (family `moss`) △ | MOSS-Image | OpenMOSS の 5B の text-to-image DiT（テキストエンコーダは Qwen3.5-9B・VAE は FLUX.2）。Karume には DiT と VAE があり、テキストは事前計算の埋め込みで渡す。テキストエンコーダが入るまで内部のファミリー（ブランチ `wip/moss-image`） | — | ADR NNNN |
-| joint sequence (S = N + T) △ | 結合系列 | 画像トークン N 個とテキストトークン T 個をつないだ DiT の系列（全体で self-attention） | — | ADR NNNN 決定 2 |
-| text refiner (`dit_text`) △ | テキストリファイナー | テキストトークンだけに掛かる Linear + 2 block（modulation なし）。1 生成で分岐ごとに 1 回だけ回す別グラフで、どのプリセットでも f32 の計算 | — | ADR NNNN 決定 3 |
-| text context (`text_context`) △ | テキスト文脈 | `dit` の入力 `[1,S,3072]`。テキストの行にリファイナーの出力、画像の行に 0 を置く | — | ADR NNNN 決定 2・3 |
-| shared modulation △ | 共有の modulation | 時刻の埋め込みから 1 本の Linear で作り、42 block 全部が使う 6 本のベクトル | — | ADR NNNN Context |
-| situ △ | situ | FFN の活性化 `(4·tanh(g/4)·sigmoid(g)) · (25·tanh(h/25))`。既存の op で書く | — | ADR NNNN 決定 6・perf-ledger F-10 |
-| skip 22 (`dit_skip22`) △ | skip 22（block 22 を飛ばす負側の分岐） | 上流の既定の negative の forward（block 22 を飛ばす）。Karume では `dit` の重みを全部借りる別グラフ | — | ADR NNNN 決定 4 |
-| DiT pair (lender / borrower) △ | DiT の組（貸し手 / 借り手） | MOSS-Image の DiT の段で同時に開く 2 つの Session。貸し手 `dit`（positive の分岐）が重みを持ち、借り手 `dit_skip22`（negative の分岐）は initializer を全て shared で宣言して重みのバイトを持たない。組の必要量は重みを 1 回だけ数える | — | ADR NNNN 決定 4・5 |
-| training grid (`training_grid`) △ | 学習グリッド | scheduler の 1,000 点の σ と timestep と時刻の sinusoid の表。要求の σ は必ずどれかの点に寄るので、ホストは計算せず表を引く | — | ADR NNNN 決定 9・11 |
-| precomputed text embeddings (MOSS-Image) △ | 事前計算の埋め込み | 上流の `encode_prompt` の出力 `[T, 4096]`（f32）を固定プロンプトについて CPU で書いたもの。テキストエンコーダが入るまで唯一のテキストの入力 | — | ADR NNNN 決定 9・12 |
-| latent BatchNorm restoration (`latent_batch_norm`) △ | BatchNorm の復元 | VAE の前に BatchNorm の running 統計で `z · std + mean` に戻す手順（とその資産）。その後の unpatchify（128 → 32 チャネル・2 倍）は別のホスト側の手順 | — | ADR NNNN 決定 8 |
-| untiled decoder (MOSS-Image VAE) △ | タイルなしの decoder | FLUX.2 の decoder を画像全体で回す形。記号長の 3 グラフに割り、resident tensor で受け渡す | — | ADR NNNN 決定 8 |
-| area cap (MOSS-Image) △ | 受理の面積の上限 | タイルなしの decoder の最大の中間テンソルが binding 1 本に収まる面積（2 GiB で 2,796,160 画素）。device ごとの値 | — | ADR NNNN 決定 8・limitations |
-| reference preset / practical preset (MOSS-Image) △ | 参照側のプリセット / 実用プリセット | `f32+dit8`（i8 の DiT の重み × f32 の計算）は `f32+dit8-a8-attn8-online`（同じ重みで `dit` / `dit_skip22` に a8 の linear と online の attention）の参照側のプリセット。既定は実用プリセット（manifest が持つ・コードには既定なし） | — | ADR NNNN 決定 13 |
+| MOSS-Image (family `moss`) △ | MOSS-Image | OpenMOSS の 5B の text-to-image DiT（テキストエンコーダは Qwen3.5-9B・VAE は FLUX.2）。Karume には DiT と VAE があり、テキストは事前計算の埋め込みで渡す。テキストエンコーダが入るまで内部のファミリー（ブランチ `wip/moss-image`） | — | ADR 0138 |
+| joint sequence (S = N + T) △ | 結合系列 | 画像トークン N 個とテキストトークン T 個をつないだ DiT の系列（全体で self-attention） | — | ADR 0138 決定 2 |
+| text refiner (`dit_text`) △ | テキストリファイナー | テキストトークンだけに掛かる Linear + 2 block（modulation なし）。1 生成で分岐ごとに 1 回だけ回す別グラフで、どのプリセットでも f32 の計算 | — | ADR 0138 決定 3 |
+| text context (`text_context`) △ | テキスト文脈 | `dit` の入力 `[1,S,3072]`。テキストの行にリファイナーの出力、画像の行に 0 を置く | — | ADR 0138 決定 2・3 |
+| shared modulation △ | 共有の modulation | 時刻の埋め込みから 1 本の Linear で作り、42 block 全部が使う 6 本のベクトル | — | ADR 0138 Context |
+| situ △ | situ | FFN の活性化 `(4·tanh(g/4)·sigmoid(g)) · (25·tanh(h/25))`。既存の op で書く | — | ADR 0138 決定 6・perf-ledger F-10 |
+| skip 22 (`dit_skip22`) △ | skip 22（block 22 を飛ばす負側の分岐） | 上流の既定の negative の forward（block 22 を飛ばす）。Karume では `dit` の重みを全部借りる別グラフ | — | ADR 0138 決定 4 |
+| DiT pair (lender / borrower) △ | DiT の組（貸し手 / 借り手） | MOSS-Image の DiT の段で同時に開く 2 つの Session。貸し手 `dit`（positive の分岐）が重みを持ち、借り手 `dit_skip22`（negative の分岐）は initializer を全て shared で宣言して重みのバイトを持たない。組の必要量は重みを 1 回だけ数える | — | ADR 0138 決定 4・5 |
+| training grid (`training_grid`) △ | 学習グリッド | scheduler の 1,000 点の σ と timestep と時刻の sinusoid の表。要求の σ は必ずどれかの点に寄るので、ホストは計算せず表を引く | — | ADR 0138 決定 9・11 |
+| precomputed text embeddings (MOSS-Image) △ | 事前計算の埋め込み | 上流の `encode_prompt` の出力 `[T, 4096]`（f32）を固定プロンプトについて CPU で書いたもの。テキストエンコーダが入るまで唯一のテキストの入力 | — | ADR 0138 決定 9・12 |
+| latent BatchNorm restoration (`latent_batch_norm`) △ | BatchNorm の復元 | VAE の前に BatchNorm の running 統計で `z · std + mean` に戻す手順（とその資産）。その後の unpatchify（128 → 32 チャネル・2 倍）は別のホスト側の手順 | — | ADR 0138 決定 8 |
+| untiled decoder (MOSS-Image VAE) △ | タイルなしの decoder | FLUX.2 の decoder を画像全体で回す形。記号長の 3 グラフに割り、resident tensor で受け渡す | — | ADR 0138 決定 8 |
+| area cap (MOSS-Image) △ | 受理の面積の上限 | タイルなしの decoder の最大の中間テンソルが binding 1 本に収まる面積（2 GiB で 2,796,160 画素）。device ごとの値 | — | ADR 0138 決定 8・limitations |
+| reference preset / practical preset (MOSS-Image) △ | 参照側のプリセット / 実用プリセット | `f32+dit8`（i8 の DiT の重み × f32 の計算）は `f32+dit8-a8-attn8-online`（同じ重みで `dit` / `dit_skip22` に a8 の linear と online の attention）の参照側のプリセット。既定は実用プリセット（manifest が持つ・コードには既定なし） | — | ADR 0138 決定 13 |
 
 ## 画像の後処理
 

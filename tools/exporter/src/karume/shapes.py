@@ -1643,7 +1643,7 @@ def _upsample_bilinear2d(
 
 
 def _group_norm(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
-    """The output shape of group_norm (Core ATen layer — ADR NNNN decision 7): `x` passes
+    """The output shape of group_norm (Core ATen layer — ADR 0138 decision 7): `x` passes
     through, the trailing extents may be symbolic.
 
     MUST: the channel axis is static and divisible by `num_groups` (otherwise the kernel's

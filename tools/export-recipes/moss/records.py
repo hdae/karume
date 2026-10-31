@@ -30,7 +30,7 @@ from safetensors.torch import save_file
 
 from _shared.paths import BENCH_ROOT
 
-#: The local distribution name the bench directories are keyed by (not published — ADR NNNN
+#: The local distribution name the bench directories are keyed by (not published — ADR 0138
 #: decision 12; provisional until the distribution is named).
 BENCH_NAME = "karume-moss-image"
 

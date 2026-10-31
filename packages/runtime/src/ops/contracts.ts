@@ -374,7 +374,7 @@ export type OpContract =
       readonly name: typeof UPSAMPLE_BILINEAR2D_OP;
       readonly arity: 1;
     })
-  // Group normalisation (Core ATen layer — ADR NNNN decision 7). x / weight / bias, the affine always
+  // Group normalisation (Core ATen layer — ADR 0138 decision 7). x / weight / bias, the affine always
   // present (arity fixed at 3, as layer_norm).
   | (ContractBase & {
       readonly kind: "groupNorm";

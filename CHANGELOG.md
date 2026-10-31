@@ -33,7 +33,7 @@ measurements in `docs/research/`.
   (`x[N,C,…]` with a per-channel affine, f32) runs as one node whose statistics are two passes per
   group over a fixed reduction tree. The exporter preserves `aten.group_norm`, so a model with
   `nn.GroupNorm` — also over symbolic spatial axes — exports where it failed before as an
-  unsupported `native_group_norm` (`docs/ir-v2.md`; ADR NNNN decision 7).
+  unsupported `native_group_norm` (`docs/ir-v2.md`; ADR 0138 decision 7).
 
 ### Changed
 

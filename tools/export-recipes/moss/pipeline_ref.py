@@ -1,5 +1,5 @@
 """Loading the upstream MOSS-Image components as the upstream pipeline uses them, and the few lines
-of `MOSSImagePipeline.__call__` the references need outside a pipeline call (ADR NNNN decision 11).
+of `MOSSImagePipeline.__call__` the references need outside a pipeline call (ADR 0138 decision 11).
 
 Every class comes from the pinned, hash-checked `pipeline_moss_image.py`
 ({@link moss.sources.load_pipeline_module}) or from the pinned diffusers / transformers. The loaders
@@ -142,7 +142,7 @@ def unpatchify(z: torch.Tensor) -> torch.Tensor:
 
 class VaeRecorder:
     """Forward hooks on the VAE that keep the decode input and the tensors around the mid-block
-    attention (where the decoder is split into three graphs — ADR NNNN decision 8).
+    attention (where the decoder is split into three graphs — ADR 0138 decision 8).
 
     Kept: `vae.z` (the input of `post_quant_conv`, i.e. what `decode` received), `vae.pre_attention`
     (the output of the mid block's first resnet = the attention's input), `vae.post_attention` (the

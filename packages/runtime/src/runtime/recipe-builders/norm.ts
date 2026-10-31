@@ -87,7 +87,7 @@ export const buildLayerNorm = async (
 };
 
 /**
- * group_norm (channel groups, per-channel affine — ADR NNNN decision 7). Five dispatches over two
+ * group_norm (channel groups, per-channel affine — ADR 0138 decision 7). Five dispatches over two
  * node temporaries — the partial sums and the per-row (mean, rstd) pairs (the stage table of
  * {@link "../../kernels/group-norm.ts"}). Every dispatch is grid-stride, so a node whose partial
  * stage needs more than the per-dimension workgroup limit loops instead of failing.

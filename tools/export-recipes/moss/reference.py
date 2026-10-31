@@ -1,5 +1,5 @@
 """The stage-0 DiT reference of MOSS-Image: upstream `pipe(...)` run on CPU with the DiT in f32,
-recorded block by block through forward hooks, and re-assembled from the hooks (ADR NNNN stage 0
+recorded block by block through forward hooks, and re-assembled from the hooks (ADR 0138 stage 0
 and its check).
 
 ## The run

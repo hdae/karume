@@ -1447,7 +1447,7 @@ export const FUSED_CASES: readonly OpCase[] = [
 ];
 
 /**
- * group_norm (ADR NNNN decision 7): several samples and groups (a group indexed without its
+ * group_norm (ADR 0138 decision 7): several samples and groups (a group indexed without its
  * sample, or a channel without its group, reads another group's statistics or affine), a rank-3
  * input whose groups span two partial chunks (2 × 600 = 1,200 > 1,024 elements), and a rank-2
  * input (no trailing axis). The four-point check and the large group are

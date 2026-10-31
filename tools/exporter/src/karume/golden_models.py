@@ -1022,7 +1022,7 @@ class BilinearResize(nn.Module):
 
 
 class GroupNormBlock(nn.Module):
-    """torch comparison of group_norm (Core ATen layer — ADR NNNN decision 7).
+    """torch comparison of group_norm (Core ATen layer — ADR 0138 decision 7).
 
     A new atomic op has no existing path to pair with, so this golden (torch's values baked in) is
     the end-to-end check; the kernel's own four-point check is the runtime's GPU test. The shapes:

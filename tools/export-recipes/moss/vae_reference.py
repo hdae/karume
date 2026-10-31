@@ -1,5 +1,5 @@
 """The stage-0 VAE reference of MOSS-Image: upstream's decode of fixed latents in f32, with the
-tensors around the mid-block attention (ADR NNNN stage 0).
+tensors around the mid-block attention (ADR 0138 stage 0).
 
 For each size (height × width in pixels: 256² and 512×768 — non-square so H and W cannot be
 swapped unnoticed), seeded DiT-space latents `[1, 128, H/16, W/16]` go through the two steps the
@@ -7,7 +7,7 @@ pipeline runs before decoding (`moss.pipeline_ref.denormalize` — the BatchNorm
 and `unpatchify`, upstream's statements) and through `AutoencoderKLFlux2.decode` without tiling, as
 `MOSSImagePipeline.__call__` decodes. The hooks (`moss.pipeline_ref.VaeRecorder`) keep the decode
 input and the tensors before and after the mid attention — the boundaries of the three decoder
-graphs of ADR NNNN decision 8 — and the decoder's output before the clamp.
+graphs of ADR 0138 decision 8 — and the decoder's output before the clamp.
 
 Record (`vae-<H>x<W>.safetensors`): `latents`, `denormalized`, `vae.z` (the unpatchified decode
 input — checked bit for bit against what the decode received), `vae.pre_attention`,

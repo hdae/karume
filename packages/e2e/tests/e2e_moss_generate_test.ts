@@ -1,7 +1,7 @@
 /**
  * MOSS-Image text-to-image end to end on a real GPU — the generate path (`generateMoss`: the one
  * acceptance check, the first headroom check, `dit_text` → the DiT pair with the sampler → the VAE —
- * ADR NNNN decisions 5, 9 and 11, stage 4) over the i8 DiT series and
+ * ADR 0138 decisions 5, 9 and 11, stage 4) over the i8 DiT series and
  * the f32 VAE series, with the reference preset `f32+dit8` (i8 weights × f32 compute, no session
  * knob) unless a case names the practical preset `f32+dit8-a8-attn8-online`
  * (`../../models/src/moss/preset.ts`; its self A/B check is `e2e_moss_ab_test.ts`). The device asks
@@ -11,7 +11,7 @@
  *
  * ## Default run
  *
- * - **Order and lifetimes** (ADR NNNN decision 5 — asserted here, not left to the modules'
+ * - **Order and lifetimes** (ADR 0138 decision 5 — asserted here, not left to the modules'
  *   comments): the Sessions open and close as `dit_text` → closed → `dit` + `dit_skip22`
  *   → both closed → the three VAE graphs → closed, so every DiT Session is disposed before the first
  *   VAE Session opens. A dispose is logged when it has **completed** (a dispose started but not
@@ -22,12 +22,12 @@
  *   only on a repeated shape). Guidance 1 opens no `dit_skip22` and still pins its image. A failure
  *   inside the DiT loop has closed every Session and every text context when generate rejects, and
  *   opens no VAE.
- * - **The first headroom check** (ADR NNNN decision 5): with the VAE's need — or the pair's — made
+ * - **The first headroom check** (ADR 0138 decision 5): with the VAE's need — or the pair's — made
  *   larger than any device, generate refuses before any Session opens, naming the first check and
  *   the stage. Without the first check `dit_text` and the whole DiT would run before the VAE stage
  *   (or the pair) refused. The bytes it checks are the largest stage's own need, not the sum of the
  *   three stages (the stages never hold their Sessions together).
- * - **sha256 rows** (ADR 0106, ADR NNNN decision 11 — `fixtures/references/moss.json`, one row per
+ * - **sha256 rows** (ADR 0106, ADR 0138 decision 11 — `fixtures/references/moss.json`, one row per
  *   environment key): the clamped f32 image `[3, H, W]` (an F32 safetensors without metadata —
  *   `f32ArtifactBytes`) of the seed path at 256² and 384×256, 2 steps, `fridge-note` with the empty
  *   negative, guidance 3, shift 5, seed 42, and at 256² guidance 1 without a negative, for the
@@ -218,7 +218,7 @@ type SeedCase = Size & {
 };
 
 /**
- * The default lane's sha rows (ADR NNNN decision 11; guidance 1 — no negative branch — at 256²;
+ * The default lane's sha rows (ADR 0138 decision 11; guidance 1 — no negative branch — at 256²;
  * the practical preset at the two sizes with guidance 3 — stage 5).
  */
 const SEED_CASES: readonly SeedCase[] = [
@@ -319,7 +319,7 @@ const PARITY_PRESENT = PARITY_CASES.every((testCase) => filePresent(parityGolden
  * 1.764e-1, 2.074e-1 / 1.077e-1; guidance 3.003 9.751e-4 / 1.060e-3, 9.556e-4 / 8.329e-4 — 8.0–18.4
  * × its band, the fault closest to it.
  *
- * NOTE (a recorded deviation — ADR NNNN decision 11): the band cases and the acceptance cases were
+ * NOTE (a recorded deviation — ADR 0138 decision 11): the band cases and the acceptance cases were
  * measured in the same run, where ADR 0118's addendum makes the acceptance cases after the band is
  * fixed. The rule leaves no choice to adjust: recomputing each band from the band-case m above
  * (worst × 5, rounded up to two significant digits) gives the same four values.

@@ -1,6 +1,6 @@
 /**
  * The contract of the MOSS-Image VAE series — the three decoder graphs and the asset
- * `latent_batch_norm` (ADR NNNN decision 8, stage 3; recipe
+ * `latent_batch_norm` (ADR 0138 decision 8, stage 3; recipe
  * `tools/export-recipes/moss/export_vae.py`).
  *
  * | Graph              | Symbols | Input → output                         |
@@ -13,7 +13,7 @@
  * block's width, k = 8 the spatial scale.) `[1, C, h, w]` and `[1, C, S]` are the same bytes — the
  * stage hands them over by reinterpreting resident tensors (`./vae-stage.ts`).
  *
- * ## The area limit (ADR NNNN decision 8 — per device)
+ * ## The area limit (ADR 0138 decision 8 — per device)
  *
  * The decoder runs untiled, so every intermediate grows with the area. The largest one must fit
  * one storage binding: the contract reads every value declared in the three graphs, requires each

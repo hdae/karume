@@ -1,4 +1,4 @@
-"""The fixed prompts of MOSS-Image (the inputs the precomputed text embeddings cover — ADR NNNN
+"""The fixed prompts of MOSS-Image (the inputs the precomputed text embeddings cover — ADR 0138
 decision 12).
 
 The embedding script (`moss.text_embeds`) and, later, the card and the assembly checks read this one

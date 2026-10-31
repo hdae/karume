@@ -1,5 +1,5 @@
 /**
- * What the MOSS-Image DiT tests share (ADR NNNN, stage 2): where the series, the goldens and the
+ * What the MOSS-Image DiT tests share (ADR 0138, stage 2): where the series, the goldens and the
  * stage-0 records live, the golden case table, the golden readers and the components opened from
  * the series containers.
  *

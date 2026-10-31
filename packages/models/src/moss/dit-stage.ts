@@ -1,15 +1,15 @@
 /**
  * The MOSS-Image DiT stage — the Sessions of `dit_text`, `dit` and `dit_skip22`, their lifetimes and
- * headroom checks, the text context and the host CFG (ADR NNNN decisions 3–5, stage 2). The sampler
+ * headroom checks, the text context and the host CFG (ADR 0138 decisions 3–5, stage 2). The sampler
  * loop and the VAE are `./generate.ts` and `./vae-stage.ts`; this module runs the DiT side of one
  * generation.
  *
- * ## Stage order and lifetimes (ADR NNNN decision 5)
+ * ## Stage order and lifetimes (ADR 0138 decision 5)
  *
  * 1. {@link runMossTextStage}: one `dit_text` Session runs each branch once (the refiner has no
  *    modulation, so its output does not depend on the step), reads the output back once and is
  *    closed — before the DiT pair opens (an open condition Session would double the output slot —
- *    the ADR 0114 pitfall). It always runs with f32 compute (ADR NNNN decision 3), whatever the
+ *    the ADR 0114 pitfall). It always runs with f32 compute (ADR 0138 decision 3), whatever the
  *    preset.
  * 2. {@link withMossDitPair}: the `dit` Session (positive branch — the lender) and the `dit_skip22`
  *    Session (negative branch — borrows every weight of `dit`, `SessionOptions.sharedWeights`) are
@@ -19,11 +19,11 @@
  *    negative branch (guidance 1) only `dit` opens.
  *
  * The preset (`./preset.ts` — explicit, no default) sets the knobs of the pair's two Sessions; the
- * `dit_text` Session takes none (f32 compute in every preset — ADR NNNN decision 3). The same knobs
+ * `dit_text` Session takes none (f32 compute in every preset — ADR 0138 decision 3). The same knobs
  * go to the pair's headroom estimates below (with the device's attention facts, which decide the
  * online kernel's route), so the check sizes the Sessions it admits.
  *
- * ## Headroom (ADR NNNN decision 5 — the Anima form)
+ * ## Headroom (ADR 0138 decision 5 — the Anima form)
  *
  * Before a stage opens, a trial allocation (`fitsHeadroom` — ADR 0112) checks the bytes the stage
  * needs, and a refusal fails loudly with the stage, the bytes and the size. The bytes are the
@@ -355,7 +355,7 @@ export const runMossTextStage = async (
     MOSS_DIT_TEXT,
     plan,
   );
-  // f32 compute in every preset (ADR NNNN decision 3): none of the preset's knobs.
+  // f32 compute in every preset (ADR 0138 decision 3): none of the preset's knobs.
   const session = await components.ditText.createSession(gpu, {});
   let failure: { readonly error: unknown } | undefined;
   try {
