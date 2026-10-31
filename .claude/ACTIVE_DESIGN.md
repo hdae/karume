@@ -5,6 +5,7 @@
 
 ## Current focus
 
+- **0.15.0 released 2026-10-31** (JSR 0.15.0 for runtime / hub / models; HF re-uploads of anima, anima-extra, wan2.2, irodori v4.1-small and gemma4 with E4B; card-only updates elsewhere; the release order and checks are the [release-runbook](../docs/release-runbook.md)). Next: 0.15.1 = Gemma 4 QAT decode speed (backlog *later*, in a new session). The entries below predate the release and still describe the 0.15 migration as in progress.
 - **Migration to 0.15 (branch `wip/0.15`; ADR 0126 is deferred (2026-10-18); 0127–0129 and 0131 are proposed, 0130 is accepted (2026-10-18)) — phase 1 = port to Node 24 + Dawn + Vite+ ✅ 2026-10-16**: the layout of the three published packages is unchanged.
   Tests are Vitest projects = lanes (`packages/test-support/src/lanes.ts`; `vp test --project <lane>`), the real-weight e2e is `packages/e2e`,
   Dawn injection is `packages/test-support/src/setup.ts` (`navigator.gpu`; timestamp quantization disabled; `KARUME_NO_DAWN=1` for CPU only).

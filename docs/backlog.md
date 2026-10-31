@@ -7,44 +7,11 @@
 > [perf-ledger](perf-ledger.md); this file only refers to them as waves ④ the source of truth for by-design constraints is
 > [limitations](limitations.md) — a constraint appears here only when a ruling turns it into work.
 
-## now — the 0.15.0 release (from 2026-10-29)
+## now — after the 0.15.0 release (released 2026-10-31)
 
-The steps and their order are in the [release-runbook](release-runbook.md); this list holds what is left for 0.15.0
-and what each item waits on.
-
-- **`nvidia-blackwell` geometry profile from the RTX 5070 Ti sweeps (perf-ledger V-15)**: derive the table from two full
-  sweeps of the current kernels (the first record is from 2026-10-28; the second is running — maintainer's ruling
-  2026-10-30) and record the result in the V-15 row. Changes under `packages/runtime` wait for this derivation (the sweep
-  records carry kernel fingerprints that must match the code they are derived against).
-- **Regular Gemma 4 E4B in 0.15.0 (maintainer 2026-10-30)**: export with the existing recipe (`--model e4b`) once the
-  machine's RAM is free (it OOMed on a 31 GiB machine; the guide is 48 GB), run the gemma4 lanes with this machine's sha
-  rows, and add `e4b` to the `karume-gemma4` rebuild. Its presets copy the E2B bundles with an unmeasured default
-  (perf-ledger K-59 — tuning after the release).
-- **GPU checks on the release tree**: one green full `vp test` (ADR [0005](decisions/0005-verification.md)); the siglip2
-  lane (`KARUME_ALL_FAMILIES=1`, not run since the ADR [0136](decisions/0136-models-public-naming.md) rename); the
-  CHANGELOG timings measured before later speed-ups (the Wan2.2 conv8 preset's VAE stage and clip times and `vaeTile: 32`'s
-  ratio to tile 16, 2026-10-23; the Wan DiT fusion entry's 2,825 / 2,927 ms, 2026-10-25) — re-measure, or state the date.
-- **Bump and the CHANGELOG version section** ([release-runbook](release-runbook.md) §0).
-- **0.15.0 anima rebuild: re-export the containers whose `provenance.license` still reads `"other"` (filed 2026-10-29)**:
-  the pre-2026-09-25 f16 / i8 transformer parts, the f16 `text_conditioner` parts and the shared `text_encoder` /
-  `vae_decoder` (f16) were exported before the recipe baked the CircleStone identifier (`b26e467e`); parts exported since
-  (the bf16 parts among them) carry `circlestone-labs-non-commercial-license`. A plain `dist.py` rebuild does not fix
-  this — the assembly copies the containers byte for byte from `outputs/series/` (`place_file` in
-  `tools/exporter/src/karume/dist.py`). Re-export those
-  series first with `uv run --group anima python -m anima.export …` (the f16 / i8 commands of
-  [anima's README](../tools/export-recipes/anima/README.md), per model and role, with the same `--out`), then rebuild
-  `karume-anima` and `karume-anima-extra` with `dist.py` in the [release-runbook](release-runbook.md) order (the containers'
-  sha256 change, so extra's references to the official repository move with the re-upload).
-- **HF rebuilds and uploads, then the pins**: in the [release-runbook](release-runbook.md) order. irodori v4.1-small is
-  rebuilt after the bump with `--resolve-refs hf`, uploaded with `--delete` for the 90 paths it now borrows from
-  v4-small, and `irodori.SOURCES["irodori-v4.1-small"]` is updated (ADR [0038](decisions/0038-manifest-v1.md) §7
-  addendum 2026-10-28; v4-small is not re-uploaded).
-- **0.15.0: regenerate and re-upload the model cards of every published repository (filed 2026-10-28 — ADR
-  [0136](decisions/0136-models-public-naming.md))**: the Usage snippets of the published cards import the 0.14 names
-  (`Sbv2Pipeline`, `toSbv2Utterance`, …) from `jsr:@karume/models` without a version, so they stop compiling once
-  0.15.0 is the latest version. Regenerate the cards with this release's recipes and upload them as card-only commits
-  (manifests, containers and the `SOURCES` pins do not move). Order: right after the JSR publish, in the same session —
-  until both are out, the published cards and the latest package disagree.
+0.15.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.15.0; HF re-uploads of anima, anima-extra,
+wan2.2, irodori v4.1-small and gemma4, card-only updates of the other published repositories; published-smoke green on
+Node and Deno). The next wave is 0.15.1 — Gemma 4 QAT decode speed (the first item of *later*), started in a new session.
 
 ## later
 
@@ -224,7 +191,10 @@ and what each item waits on.
   In the local mirror (0.13.0),
   part 3 of `text_conditioner` has zero zero-pages in all 5 variants, so the zero-run mechanism does not apply. The two fragmented parts
   (`anima-turbo-v1.1` / `anima-v1.0`) are byte-identical to each other and differ in content from part 3 of the other 3 variants, which were healthy.
-  The 0.15.0 anima re-export (now section) replaces these bytes — re-check the term counts after that upload.
+  Re-checked after the 0.15.0 re-upload (2026-10-30, global dedup off, 0 CAS queries): the two parts read 3.7 MiB/term
+  (69 terms over 6 xorbs, all written by that upload) and the new `shared/text_conditioner/model.bf16-00003` 2.4 MiB/term —
+  sharing between byte-identical or near-identical parts inside the repository, not cross-repository reuse; every other
+  part of the five re-uploaded repositories is at 25 MiB/term or more.
 
 - **Revisit the structure of the manifest (`karume.json`) — make optimization flags and presets easier to handle (filed by the maintainer 2026-10-06)**: today the bundle of execution knobs
   is held in the single `session` of a quant preset, and the preset name doubles as the bundle's name (ADR [0074](decisions/0074-quant-seat-naming.md) /
