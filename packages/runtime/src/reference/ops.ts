@@ -1783,6 +1783,104 @@ export const referenceGruScan = (
 };
 
 /**
+ * The gated delta rule scan (`gated_delta_scan` — extended composite layer, ADR 0135, the value
+ * form) **evaluated in f64** (`Float64Array` state and output, ADR 0135 decision 6). This is the
+ * oracle the acceptance band is defined against; {@link referenceGatedDeltaScan} rounds it to f32
+ * once.
+ *
+ * Per batch element b, value head h (key head `⌊h/r⌋`, `r = Hv/Hk`) and token t, from `S = 0`, in
+ * upstream's order (`torch_recurrent_gated_delta_rule`): decay the state by `exp(g_t)`, predict
+ * `m = S'ᵀ k_t`, `δ = β_t (v_t − m)`, add `k_t δᵀ`, read `o_t = S_tᵀ (q_t · dk^-½)` after the update.
+ *
+ * MUST: f64, not `Math.fround` per step as `referenceGruScan` does. There is no single upstream
+ * rounding sequence (upstream's chunked and recurrent functions round differently, and the GPU's
+ * form differs from both), so the band is "within twice the larger upstream f32 error of the f64
+ * oracle" — the oracle must be f64. With `‖k‖ = 1` and `β ∈ (0, 1)` the transition has norm α, so the
+ * recurrence is non-expansive for `g ≤ 0` and the f64 result does not drift from the exact one.
+ * MUST: do not share the kernel's form. The kernel re-associates (`m = α·(Sᵀk)` computed from the
+ * previous state, key slices summed in a tree); this one decays the whole state first and sums the
+ * key rows in ascending order, so an error of the re-association cannot cancel out on both sides.
+ * NOTE: the semantics hold for any dk / dv / `Hk | Hv` (the shape rule checks them); only the GPU
+ * is limited to `dk = dv = 128`. `g > 0` is computed exactly here (the GPU's result there is
+ * unspecified — the accurate exp's domain is `g ≤ 0`).
+ */
+export const referenceGatedDeltaScanF64 = (
+  q: RefTensor,
+  k: RefTensor,
+  v: RefTensor,
+  g: RefTensor,
+  beta: RefTensor,
+): { readonly shape: readonly number[]; readonly data: Float64Array<ArrayBuffer> } => {
+  const contract = resolveOpContract("gated_delta_scan");
+  for (const input of [q, k, v, g, beta]) assertDtype(contract, input.dtype, "reference");
+  const shape = computeOutputShape(
+    contract,
+    [q.shape, k.shape, v.shape, g.shape, beta.shape],
+    "reference",
+  )[0];
+  const [batch, time, valueHeads, valueDim] = shape;
+  const [, , keyHeads, keyDim] = q.shape;
+  const ratio = valueHeads / keyHeads;
+  const scale = 1 / Math.sqrt(keyDim);
+  const out = new Float64Array(numel(shape));
+  const state = new Float64Array(keyDim * valueDim);
+  // m, then δ in place (one row of the value dim)
+  const delta = new Float64Array(valueDim);
+  for (let item = 0; item < batch; item += 1) {
+    for (let head = 0; head < valueHeads; head += 1) {
+      const keyHead = Math.floor(head / ratio);
+      state.fill(0);
+      for (let t = 0; t < time; t += 1) {
+        const keyBase = ((item * time + t) * keyHeads + keyHead) * keyDim;
+        const gate = (item * time + t) * valueHeads + head;
+        const decay = Math.exp(g.data[gate]);
+        const strength = beta.data[gate];
+        delta.fill(0);
+        for (let row = 0; row < keyDim; row += 1) {
+          const key = k.data[keyBase + row];
+          const base = row * valueDim;
+          for (let column = 0; column < valueDim; column += 1) {
+            const decayed = state[base + column] * decay;
+            state[base + column] = decayed;
+            delta[column] += decayed * key;
+          }
+        }
+        const valueBase = ((item * time + t) * valueHeads + head) * valueDim;
+        for (let column = 0; column < valueDim; column += 1) {
+          delta[column] = strength * (v.data[valueBase + column] - delta[column]);
+        }
+        for (let row = 0; row < keyDim; row += 1) {
+          const key = k.data[keyBase + row];
+          const query = q.data[keyBase + row] * scale;
+          const base = row * valueDim;
+          for (let column = 0; column < valueDim; column += 1) {
+            const updated = state[base + column] + key * delta[column];
+            state[base + column] = updated;
+            out[valueBase + column] += updated * query;
+          }
+        }
+      }
+    }
+  }
+  return { shape, data: out };
+};
+
+/**
+ * {@link referenceGatedDeltaScanF64} rounded to f32 **once, when stored** (the reference module's
+ * rule for reductions).
+ */
+export const referenceGatedDeltaScan = (
+  q: RefTensor,
+  k: RefTensor,
+  v: RefTensor,
+  g: RefTensor,
+  beta: RefTensor,
+): RefTensor => {
+  const { shape, data } = referenceGatedDeltaScanF64(q, k, v, g, beta);
+  return { dtype: "f32", shape, data: Float32Array.from(data) };
+};
+
+/**
  * The arm of a single-output op (each arm states that it has one output — ADR 0068 decision 1).
  */
 const sole = (tensor: RefTensor): readonly RefTensor[] => [tensor];
@@ -1934,6 +2032,8 @@ export const applyReferenceOpOutputs = (
       return sole(referenceUpsampleBilinear2d(inputs[0], attrs));
     case "gruScan":
       return sole(referenceGruScan(contract.name, inputs[0], inputs[1], inputs[2], inputs[3]));
+    case "gatedDeltaScan":
+      return sole(referenceGatedDeltaScan(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]));
   }
 };
 

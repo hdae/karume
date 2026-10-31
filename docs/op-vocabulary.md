@@ -457,6 +457,41 @@ No geometry profile is looked up (the same default geometry as conv1d).
 full-range write of resident tensors (a rank-5 initializer is a first, but the rank limit of the
 strided family applies to values, not to initializers).
 
+NOTE: 2026-10-31 added `gated_delta_scan` (the value form) to the **extended composite layer**
+(outside aten — Karume's own `karume::gated_delta_scan`). ADR
+[0135](decisions/0135-gated-delta-rule-scan.md) is the source of truth; it stays **proposed** until the
+export measurements of entry condition ① are recorded. Grounds = the Gated DeltaNet layers of the
+MOSS-Image text encoder (24 of 32 layers) and of Qwen3.5-class language models. The recurrence can be
+written exactly with existing ops (per token `exp` / `mul` / `sum` / `sub` / `add`, T times — composite,
+not atomic), but both upstream functions loop in Python, so `torch.export` specialises the length
+axis: entry condition ③ (recurrence rate) applies and ① (the symbolic length is lost) is expected. The
+captured form is one node with a symbolic T; the projections, the conv, the gates and the q / k
+l2-normalisation stay existing ops around it.
+**Semantic scope and implemented subset** (0064 axis A): the contract is arity 5 (q / k already
+l2-normalised `[B,T,Hk,dk]`, v `[B,T,Hv,dv]`, the log decay g and β `[B,T,Hv]`), uniform f32, empty
+attrs; the head broadcast `⌊h/(Hv/Hk)⌋` and the q scale `dk^-½` are derived from the shapes. The CPU
+reference (f64) holds the semantics for any B, T ≥ 1, dk, dv and `Hk | Hv`; the GPU kernel is the
+measured sequential form with an 8-way key split for **dk = dv = 128 only**, and other head dims fail
+loudly when the Session is built (`validateGraphContracts` — the conv3d split). Condition for
+generalising: a model with another head dim, with a measured geometry for it. The initial / final
+state is not a field (the states form for decode is named in ADR 0135 decision 4 and decided with the
+first Qwen3.5-class language model).
+**Axis B** (0064): the value form breaks none of single output, static shapes, full-write, 4-byte
+storage and full-range write of resident tensors (its symbolic T is the same kind as `gru_scan`'s).
+**Numerically hazardous class** (the rule below — the op contains `exp`): the only transcendental at
+run time is `α = exp(g)`, computed with the accurate exp of `codegen/numerics-wgsl.ts`
+(`EXP_ACCURATE_WGSL`), not the built-in, whose bias accumulates across the memory (ADR 0135 decision 3).
+Its overflow range `x ≳ 88.4` is outside the GDN domain `g = −exp(A_log)·softplus(·) ≤ 0`; there α ∈
+[0, 1], a strongly negative g underflows α toward 0 (the true value to f32 precision; the body returns 0
+below −87), and the recurrence is non-expansive (`‖k‖ = 1`, `β ∈ (0, 1)`). A positive g is not guarded
+and its result is unspecified (docs/limitations.md). The canaries are permanent in
+`tests/gpu_gated_delta_scan_test.ts`: g = +0 / −0 decay by exactly 1 and g = −∞ by exactly 0 (inputs
+on which the whole scan is exact, so the expected words are known), NaN in g and in v propagates to
+exactly the reference's positions, and the accurate exp's body is measured directly (ULP and bias on
+[−0.1, 0), and its special values). The acceptance is the upstream-error band against the f64 oracle
+(ADR 0135 decision 6), with a long-memory case at T = 512 in the default lane that the built-in exp
+fails.
+
 ## Check for numerically hazardous classes (mandatory when adding an op — made a rule on 2026-08-31)
 
 The CPU reference of the f64 oracle evaluates the whole expression in f64 and rounds only once at the

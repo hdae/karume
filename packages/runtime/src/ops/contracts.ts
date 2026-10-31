@@ -53,6 +53,7 @@ import {
   EMBEDDING_OP,
   EXPAND_OP,
   FLIP_OP,
+  GATED_DELTA_SCAN_OP,
   GATHER_OP,
   GRU_SCAN_OPS,
   type GruScanOpName,
@@ -378,6 +379,12 @@ export type OpContract =
       readonly kind: "gruScan";
       readonly name: GruScanOpName;
       readonly arity: 4;
+    })
+  // The gated delta rule scan (ADR 0135, the value form). Fixed at 5 inputs: q / k / v / g / beta.
+  | (ContractBase & {
+      readonly kind: "gatedDeltaScan";
+      readonly name: typeof GATED_DELTA_SCAN_OP;
+      readonly arity: 5;
     });
 
 /** f32-only ops (no i32 / bool form appeared in measured graphs — not unlocked for symmetry). */
@@ -819,6 +826,19 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
     name,
     { ...contract(name), kind: "gruScan", name, arity: 4 },
   ]),
+  // The gated delta rule scan (extended composite layer, ADR 0135 — the value form). All 5 slots
+  // are f32 of one type (upstream computes g and the state in f32 and casts q / k / v / β to f32
+  // before the recurrence), empty attrs (the q scale and the head broadcast are derived from the
+  // shapes). It has no weight slot.
+  [
+    GATED_DELTA_SCAN_OP,
+    {
+      ...contract(GATED_DELTA_SCAN_OP),
+      kind: "gatedDeltaScan",
+      name: GATED_DELTA_SCAN_OP,
+      arity: 5,
+    },
+  ],
 ]);
 
 /** The attrs keys the contract declares as **required** (fields every node must have). */

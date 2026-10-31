@@ -60,6 +60,7 @@ from karume.golden_models import (
     EmbeddingLookup,
     ExpandMask,
     FusedAttention,
+    GatedDeltaScanBlock,
     GatherLastDim,
     GruScanBlock,
     Int8Weights,
@@ -81,6 +82,7 @@ from karume.golden_models import (
     _mask,
     _runtime_masked_attention_inputs,
     _uniform,
+    _unit_rows,
     _zeroed_column,
 )
 from karume.ir import IrGraph
@@ -452,6 +454,19 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
             _uniform(g, 1, GruScanBlock.HIDDEN, low=0.2, high=0.9),
         ),
         dynamic_shapes=({0: _DYNAMIC_T}, None),
+    ),
+    GoldenSpec(
+        name="gated_delta_scan_block",
+        build=lambda _: GatedDeltaScanBlock(),
+        # q / k [1, T, 1, 128] (l2-normalised) / g / beta [1, T, 2]; only the length axis is
+        # symbolic. g covers fast decay (−3) to long memory (−0.01).
+        example_inputs=lambda g: (
+            _unit_rows(g, 1, GOLDEN_T, 1, GatedDeltaScanBlock.HEAD_DIM),
+            _unit_rows(g, 1, GOLDEN_T, 1, GatedDeltaScanBlock.HEAD_DIM),
+            _uniform(g, 1, GOLDEN_T, 2, low=-3.0, high=-0.01),
+            _uniform(g, 1, GOLDEN_T, 2, low=0.1, high=0.9),
+        ),
+        dynamic_shapes=({1: _DYNAMIC_T}, {1: _DYNAMIC_T}, {1: _DYNAMIC_T}, {1: _DYNAMIC_T}),
     ),
     GoldenSpec(
         name="bilinear_resize",

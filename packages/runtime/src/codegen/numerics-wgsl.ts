@@ -151,6 +151,47 @@ export const TANH_STABLE_WGSL = `fn tanh_stable(x: f32) -> f32 {
 }`;
 
 /**
+ * An **accurate `exp` for `x ≤ 0`**: a Cody–Waite range reduction `x = n·ln 2 + r` (`ln 2` split
+ * into a 16-bit head and a tail, `|r| ≤ ln 2 / 2`), `e^r` by its Taylor polynomial to `r⁷` in
+ * Horner form, then `ldexp(p, n)`. DECIDED: docs/decisions/0135-gated-delta-rule-scan.md decision 3.
+ *
+ * Why it exists: WGSL allows the built-in `exp` an error of `3 + 2|x|` ULP, and the measured
+ * built-in is **biased** on the long-memory range (mean −0.34 ULP, max 3.00 ULP on [−0.1, 0) on an
+ * RTX 3080 Ti under Vulkan). A kernel that multiplies per-step `exp` outputs over a sequence (the
+ * per-token decay of `gated_delta_scan`) carries that bias across the whole memory: with the
+ * built-in, the scan fails its acceptance band on the long-memory cases. This body measured at most
+ * 1.00 ULP and a mean of −0.09 ULP on the same range (research 2026-10-27-gdn-scan-spike §5.4).
+ * SHOULD: any later kernel that multiplies per-step `exp` outputs over long sequences uses this body
+ * rather than the built-in.
+ *
+ * **Contract** (the domain is what `gated_delta_scan` needs — `g = −exp(A_log)·softplus(·) ≤ 0`):
+ *
+ * - Defined for `x ≤ 0`. `exp_accurate(0) = exp_accurate(−0) = 1` exactly (`n = 0`, `r = 0`,
+ *   `p = 1`), and `exp_accurate(−∞) = 0` (the first branch).
+ * - Below −87 it returns 0. That also flushes the normal results on (−87.34, −87) to 0 (relative to
+ *   any product they enter, negligible — the true value is below 1.7e-38).
+ * - NaN propagates (`x < −87` is false for NaN, and every later step keeps the NaN).
+ * - Outside `x ≤ 0` the result is **unspecified**: above about 88.4 the true result overflows f32
+ *   (`n = round(x·log₂e) ≥ 128`), and WGSL's `ldexp` gives an indeterminate value once the exponent
+ *   exceeds bias + 1 = 128 (a reading of the WGSL spec, not tried on a GPU), so +∞ is not
+ *   guaranteed. Callers do not guard positive inputs; their docs say so.
+ * - Truncation error of the polynomial: at most `r⁸/8! ≈ 5.2e-9` for `|r| ≤ ln 2 / 2`, about 7e-9
+ *   relative to `e^r` — well under 1 ULP (research §8 finding 1; the spike's comment said
+ *   `< 2e-9`, which was low).
+ *
+ * MUST: do not copy this body into a kernel (the same reason as {@link SIGMOID_STABLE_WGSL}): the
+ * kernel's acceptance and the direct ULP test in tests/gpu_gated_delta_scan_test.ts are about this
+ * one string.
+ */
+export const EXP_ACCURATE_WGSL = `fn exp_accurate(x: f32) -> f32 {
+  if (x < -87.0) { return 0.0; }
+  let n = round(x * 1.4426950408889634);
+  let r = (x - n * 0.693145751953125) - n * 1.428606820309417e-6;
+  let p = 1.0 + r * (1.0 + r * (0.5 + r * (0.16666667 + r * (0.041666668 + r * (0.008333334 + r * (0.0013888889 + r * 0.0001984127))))));
+  return ldexp(p, i32(n));
+}`;
+
+/**
  * Maps the value bits of an f32 to an integer in magnitude order. NaN ranks highest, ±0 tie.
  * Convert once on input; during the reduction compare the integer key and the smallest index.
  * When returning a value, read the original value bits at the chosen index (keeps NaN and ±0).

@@ -32,7 +32,13 @@ from torch.fx import Node
 import karume.custom_ops  # noqa: F401  -- registering torch.ops.karume is the side effect
 from karume.extents import extent_key
 from karume.normalize import SAFE_SOFTMAX_META
-from karume.ops import GRU_SCAN_OP, GRU_SCAN_REVERSE_OP, STRIDED_RANK, static_quantize_scale
+from karume.ops import (
+    GATED_DELTA_SCAN_OP,
+    GRU_SCAN_OP,
+    GRU_SCAN_REVERSE_OP,
+    STRIDED_RANK,
+    static_quantize_scale,
+)
 
 aten = torch.ops.aten
 
@@ -1513,6 +1519,46 @@ def _h_gru_scan_reverse(node: Node) -> Emitted:
     return _gru_scan_emitted(node, GRU_SCAN_REVERSE_OP)
 
 
+def _h_gated_delta_scan(node: Node) -> Emitted:
+    """karume.gated_delta_scan → the IR op of the same name (empty attrs — ADR 0135 decision 5).
+
+    The schema is `(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta) -> Tensor`, and the 5
+    positional tensors become the 5 IR inputs as is. It is a custom op in the `karume::`
+    namespace, so it stays one node after `run_decompositions` with **the length axis T symbolic**
+    (its body sits behind `register_fake` — the docstring of `karume/custom_ops.py`).
+
+    MUST: narrowed to arity 5, rank 4 / 4 / 4 / 3 / 3 and f32 (the contract is uniform f32; a bf16
+    model's casts are upstream's and stay outside the op). The shape relations (B / T / head
+    broadcast) are the shape rule's job (`shapes._gated_delta_scan`), so they are not repeated
+    here.
+    """
+    _expect(
+        not node.kwargs,
+        node,
+        f"gated_delta_scan with kwargs {sorted(node.kwargs)} is not supported",
+    )
+    _expect(
+        len(node.args) == 5,
+        node,
+        f"gated_delta_scan with {len(node.args)} arguments is not supported (the schema has 5)",
+    )
+    for slot, arg, rank in zip(
+        ("q", "k", "v", "g", "beta"), node.args, (4, 4, 4, 3, 3), strict=True
+    ):
+        value = arg.meta["val"]
+        _expect(
+            value.dim() == rank,
+            node,
+            f"rank {value.dim()} is not supported for gated_delta_scan {slot} (rank {rank} only)",
+        )
+        _expect(
+            value.dtype == torch.float32,
+            node,
+            f"dtype {value.dtype} is not supported for gated_delta_scan {slot} (f32 only)",
+        )
+    return Emitted(GATED_DELTA_SCAN_OP, 5, {})
+
+
 def _h_upsample_bilinear2d(node: Node) -> Emitted:
     """aten.upsample_bilinear2d.vec → upsample_bilinear2d (attrs `output_size` only).
 
@@ -1744,6 +1790,9 @@ ATEN_HANDLERS = {
     # stays one node after the curated decomp = **the time axis T stays symbolic**.
     torch.ops.karume.gru_scan.default: _h_gru_scan,
     torch.ops.karume.gru_scan_reverse.default: _h_gru_scan_reverse,
+    # The gated delta rule scan (extended composite layer — ADR 0135, the value form). Our own
+    # custom op; it stays one node after the curated decomp = **the length axis T stays symbolic**.
+    torch.ops.karume.gated_delta_scan.default: _h_gated_delta_scan,
     # perf-a (ADR 0023) — only targets that preserve SDPA come to this handler
     # (`curated_decompositions(preserved=…)` chooses per target).
     aten.scaled_dot_product_attention.default: _h_attention,

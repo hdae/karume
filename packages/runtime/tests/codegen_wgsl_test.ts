@@ -151,6 +151,7 @@ import {
   gruScanParams,
   gruScanWgsl,
 } from "../src/kernels/gru-scan.ts";
+import { gatedDeltaScanWgsl } from "../src/kernels/gated-delta-scan.ts";
 import {
   SILU_WORKGROUP_SIZE,
   siluKey,
@@ -522,6 +523,9 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     // memory 往復）が生成物に残っていることも、下の不変条件テストと合わせてここで凍結する。
     ["gru_scan_forward.wgsl", gruScanWgsl("forward")],
     ["gru_scan_reverse.wgsl", gruScanWgsl("reverse")],
+    // The gated delta rule scan (ADR 0135): one kernel, one geometry. The snapshot pins the measured
+    // form (a transcription of the spike's kernel — the module doc lists the textual differences).
+    ["gated_delta_scan.wgsl", gatedDeltaScanWgsl()],
     ["silu_x_sigmoid.wgsl", siluWgsl("x-sigmoid")],
     ["silu_sigmoid_x.wgsl", siluWgsl("sigmoid-x")],
     ["flip.wgsl", FLIP_WGSL],
@@ -1165,6 +1169,7 @@ test("同じ生成入力からは常に同一の WGSL が出る（全 op × dtyp
   for (const direction of ["forward", "reverse"] as const) {
     assertEquals(gruScanWgsl(direction), gruScanWgsl(direction), `gru_scan:${direction}`);
   }
+  assertEquals(gatedDeltaScanWgsl(), gatedDeltaScanWgsl(), "gated_delta_scan");
   for (const order of ["x-sigmoid", "sigmoid-x"] as const) {
     assertEquals(siluWgsl(order), siluWgsl(order), `silu:${order}`);
   }

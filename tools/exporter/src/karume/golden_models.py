@@ -960,6 +960,40 @@ class GruScanBlock(nn.Module):
         )
 
 
+class GatedDeltaScanBlock(nn.Module):
+    """torch comparison of gated_delta_scan (extended composite layer — ADR 0135, the value form).
+
+    The eager expected values come from the body in `karume/custom_ops.py` (a copy of upstream's
+    prefill function `torch_chunk_gated_delta_rule`). The acceptance of the kernel itself is the
+    runtime's fixture-based band (packages/runtime/tests/gpu_gated_delta_scan_test.ts); this golden
+    pins the path export → IR → runtime against torch. The shapes to exercise:
+
+    MUST: **the length axis is symbolic** (the reason this op exists — upstream's Python loops
+    specialise T).
+    MUST: **dk = dv = 128**, the runtime GPU's implemented subset (other head dims fail when the
+    Session is built), so the E2E can run the golden at all.
+    MUST: **Hv = 2 · Hk** (the derived head broadcast r = 2 — value head h reads key head h // 2).
+    v is built from q and k with `cat` on the head axis rather than taken as a third rank-4 input,
+    which keeps io.safetensors under the fixture size limit; the two value heads still differ.
+    MUST: q / k are l2-normalised (the contract — the op does not normalise), g ≤ 0 spans fast
+    decay and long memory, and β stays away from 0 and 1 (a trivial β would hide a dropped term).
+    """
+
+    HEAD_DIM = 128
+
+    def forward(
+        self, q: torch.Tensor, k: torch.Tensor, g: torch.Tensor, beta: torch.Tensor
+    ) -> torch.Tensor:
+        v = torch.cat([q, -k], dim=2) * 3.0
+        return torch.ops.karume.gated_delta_scan(q, k, v, g, beta)
+
+
+def _unit_rows(generator: torch.Generator, *shape: int) -> torch.Tensor:
+    """Rows l2-normalised over the last axis (the q / k contract of gated_delta_scan)."""
+    rows = _uniform(generator, *shape, low=-1.0, high=1.0)
+    return rows / rows.norm(dim=-1, keepdim=True)
+
+
 class BilinearResize(nn.Module):
     """torch comparison of upsample_bilinear2d (Core ATen layer, align_corners=True only).
 

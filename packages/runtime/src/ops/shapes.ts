@@ -288,6 +288,71 @@ const readonlyStateAttentionShape = (
 };
 
 /**
+ * The output shape of `gated_delta_scan` (ADR 0135 decision 1 — the value form):
+ * `q[B,T,Hk,dk]` / `k[B,T,Hk,dk]` / `v[B,T,Hv,dv]` / `g[B,T,Hv]` / `beta[B,T,Hv]` → `[B,T,Hv,dv]`.
+ *
+ * This is the **semantic surface** (any B, T ≥ 1, dk, dv and `Hk | Hv` — the CPU reference runs all
+ * of it). The GPU's implemented subset (`dk = dv = 128`) is checked at Session construction, not
+ * here (ADR 0064 axis A; the same split as conv3d's groups).
+ *
+ * MUST: B and T are taken from q, and k / v / g / beta are **only matched** against them (k exactly
+ * equal to q; v's B / T; g and beta exactly `[B,T,Hv]` with Hv from v). Taking the same fact from two
+ * places would let a swapped axis through.
+ * MUST: the head broadcast is divisible, `Hv % Hk == 0` with `Hv ≥ Hk ≥ 1` (value head h reads key
+ * head `⌊h/r⌋`). `Hk ≥ 1` comes first (`Hv = 0` satisfies `0 % Hk == 0`, and `Hk = 0` would divide
+ * by zero in the kernel's `h / (hv / hk)`); `Hv ≥ Hk` is a separate condition for the same reason
+ * as attention's GQA rule (ADR 0067 decision 1).
+ * MUST: no axis of length 0. T = 0 has no token and B = 0 no batch element (the semantics start at
+ * T ≥ 1), and dk = 0 / dv = 0 leave nothing to scan.
+ */
+const gatedDeltaScanShape = (
+  found: OpContract,
+  inputShapes: readonly (readonly number[])[],
+  where: string,
+): number[] => {
+  const [q, k, v, g, beta] = inputShapes;
+  const show = `q [${q.join(",")}] / k [${k.join(",")}] / v [${v.join(",")}] / g [${g.join(
+    ",",
+  )}] / beta [${beta.join(",")}]`;
+  if (q.length !== 4 || k.length !== 4 || v.length !== 4 || g.length !== 3 || beta.length !== 3) {
+    throw new OpContractError(
+      `${where}: ${found.name} expects q[B,T,Hk,dk] / k[B,T,Hk,dk] / v[B,T,Hv,dv] / g[B,T,Hv] / beta[B,T,Hv]` +
+        ` (rank 4/4/4/3/3): ${show}`,
+    );
+  }
+  const [batch, time, keyHeads, keyDim] = q;
+  const [, , valueHeads, valueDim] = v;
+  if (k.some((dim, axis) => dim !== q[axis])) {
+    throw new OpContractError(`${where}: ${found.name} k must have q's shape [B,T,Hk,dk]: ${show}`);
+  }
+  if (v[0] !== batch || v[1] !== time) {
+    throw new OpContractError(`${where}: ${found.name} B / T of v differ from q: ${show}`);
+  }
+  for (const [name, shape] of [
+    ["g", g],
+    ["beta", beta],
+  ] as const) {
+    if (shape[0] !== batch || shape[1] !== time || shape[2] !== valueHeads) {
+      throw new OpContractError(
+        `${where}: ${found.name} ${name} should be [B,T,Hv] = [${batch},${time},${valueHeads}]: ${show}`,
+      );
+    }
+  }
+  if (batch < 1 || time < 1 || keyDim < 1 || valueDim < 1) {
+    throw new OpContractError(
+      `${where}: ${found.name} needs B, T, dk and dv of at least 1 (B ${batch} / T ${time} / dk ${keyDim} / dv ${valueDim}): ${show}`,
+    );
+  }
+  if (keyHeads < 1 || valueHeads < keyHeads || valueHeads % keyHeads !== 0) {
+    throw new OpContractError(
+      `${where}: ${found.name} Hv ${valueHeads} is not a positive integer multiple of Hk ${keyHeads}` +
+        ` (the head broadcast needs Hv % Hk == 0 and Hv ≥ Hk ≥ 1 — ADR 0135 decision 1): ${show}`,
+    );
+  }
+  return [batch, time, valueHeads, valueDim];
+};
+
+/**
  * Computes the **list of shapes in output slot order** from the input shapes after binding (ADR
  * 0068 decision 1). The list length equals the output count the contract declares (the list length
  * of the output dtype mapping) — only `topk` returns 2 (values + indices — ADR 0068 decision 3),
@@ -1327,6 +1392,8 @@ export const computeOutputShape = (
       }
       return sole([time, batch, hidden]);
     }
+    case "gatedDeltaScan":
+      return sole(gatedDeltaScanShape(found, inputShapes, where));
     case "permute": {
       const source = inputShapes[0];
       // The output rank equals the input's (it only reorders), so checking the input side is enough.

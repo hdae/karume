@@ -263,6 +263,22 @@ GRU_SCAN_OP = "gru_scan"
 GRU_SCAN_REVERSE_OP = "gru_scan_reverse"
 GRU_SCAN_OPS = (GRU_SCAN_OP, GRU_SCAN_REVERSE_OP)
 
+#: The **gated delta rule scan**, the recurrence of a Gated DeltaNet layer (extended composite layer
+#: — ADR 0135; the value form, for prefill). **Fixed arity 5, uniform f32, empty attrs**:
+#: q[B,T,Hk,dk] (l2-normalised, not scaled) / k[B,T,Hk,dk] (l2-normalised) / v[B,T,Hv,dv] /
+#: g[B,T,Hv] (log decay) / beta[B,T,Hv] -> o[B,T,Hv,dv], from a zero state. Value head h reads key
+#: head floor(h / r) with r = Hv / Hk (= `repeat_interleave(r, dim=2)`), and the q scale dk^-1/2 is
+#: inside — both derived from the shapes, no attrs.
+#:
+#: MUST: no fields for the initial / final state, the q / k l2-normalisation, the scale or the head
+#: repeat (the absence of a field states that the form is not in the vocabulary — ADR 0135 decision
+#: 1). Captured from `karume::gated_delta_scan` (karume/custom_ops.py); forms outside this fail
+#: loudly in `aten_handlers._h_gated_delta_scan`.
+#: NOTE: the semantics hold for any head dims; the runtime GPU implements dk = dv = 128 only and
+#: rejects other head dims when the Session is built (the semantic surface and the implemented
+#: subset — ADR 0064 axis A), so the exporter does not narrow them.
+GATED_DELTA_SCAN_OP = "gated_delta_scan"
+
 #: Weight slots **eligible** for low-precision storage (op name → input slot number — ADR 0018).
 #: The mirror of `WEIGHT_SLOTS` on the TS side (`packages/runtime/src/ops/names.ts`, re-exported
 #: by `packages/runtime/src/ops.ts`); a drift is caught by the conformance table
@@ -374,6 +390,7 @@ OpKind = Literal[
     "deform_conv2d",
     "upsample_bilinear2d",
     "gru_scan",
+    "gated_delta_scan",
 ]
 
 #: attr key → value check function (ADR 0012). Every declared key is required, and an undeclared
@@ -1447,6 +1464,9 @@ OP_CONTRACTS: dict[str, OpContract] = {
     # WEIGHT_SLOTS) — the input-side weight belongs to the caller's linear, so f16 / i8 still apply
     # there as before.
     **{name: _contract(name, "gru_scan", 4) for name in GRU_SCAN_OPS},
+    # The gated delta rule scan (extended composite layer — ADR 0135, the value form). All 5 slots
+    # f32 of the same type, empty attrs; no weight slot.
+    GATED_DELTA_SCAN_OP: _contract(GATED_DELTA_SCAN_OP, "gated_delta_scan", 5),
 }
 
 #: Ops in the contract table that convert **cannot emit** (no aten handler = not exportable from

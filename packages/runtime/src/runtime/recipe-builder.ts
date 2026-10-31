@@ -103,6 +103,7 @@ import {
   buildConv3d,
   buildConvTranspose1d,
   buildDeformConv2d,
+  buildGatedDeltaScan,
   buildGruScan,
 } from "./recipe-builders/conv.ts";
 import { PARAMS_STORAGE_USAGE, PARAMS_UNIFORM_USAGE } from "./recipe-builders/params-usage.ts";
@@ -740,6 +741,9 @@ export class RecipeBuilder {
         break;
       case "gruScan":
         await buildGruScan(this.#face, step, binds, outs, builder);
+        break;
+      case "gatedDeltaScan":
+        await buildGatedDeltaScan(this.#face, step, binds, outs, builder);
         break;
       case "reshape":
         // Aliasing was done in #buildStep (this op issues not a single dispatch).

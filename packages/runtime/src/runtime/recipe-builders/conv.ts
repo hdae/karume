@@ -1,6 +1,6 @@
 /**
  * Per-op-family derivation — the convolution family (conv1d / conv2d and their igemm variants,
- * conv3d, conv_transpose1d, deform_conv2d) and gru_scan.
+ * conv3d, conv_transpose1d, deform_conv2d) and the scans (gru_scan, gated_delta_scan).
  *
  * The entry is `RecipeBuilder` in {@link "../recipe-builder.ts"}; the shared services (Session
  * state, params writes, the weights' storage form and scale bindings) are reached only through
@@ -84,6 +84,12 @@ import { gemmTileM, gemmTileN } from "../../kernels/gemm-geometry.ts";
 import { conv2dProfileGeometry } from "../../kernels/geometry-profile.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../../codegen/dispatch.ts";
 import { gruScanKey, gruScanParams, gruScanWgsl } from "../../kernels/gru-scan.ts";
+import {
+  GATED_DELTA_SCAN_KEY,
+  gatedDeltaScanParams,
+  gatedDeltaScanWgsl,
+  gatedDeltaScanWorkgroups,
+} from "../../kernels/gated-delta-scan.ts";
 import type { RecipeBuildFace } from "../recipe-builder.ts";
 import { PARAMS_UNIFORM_USAGE } from "./params-usage.ts";
 
@@ -180,6 +186,53 @@ export const buildGruScan = async (
     ],
     workgroups: [
       gridStrideWorkgroups(batch, 1, face.state.gpu.limits.maxComputeWorkgroupsPerDimension),
+      1,
+      1,
+    ],
+  });
+};
+
+/**
+ * gated_delta_scan (the gated delta rule scan, value form — ADR 0135). One dispatch with the token
+ * loop inside the kernel; one workgroup per (batch element, value head, block of value columns).
+ *
+ * MUST: B / T / Hk / dk come from q and Hv / dv from v (the shape rule has matched k / g / beta
+ * against them). The head dims outside the GPU's subset were rejected at Session construction, and
+ * `gatedDeltaScanParams` checks them again.
+ */
+export const buildGatedDeltaScan = async (
+  face: RecipeBuildFace,
+  step: NodePlan,
+  binds: readonly BindingSource[],
+  outs: readonly BindingSource[],
+  builder: StepRecipeBuilder,
+): Promise<void> => {
+  const [batch, time, keyHeads, keyDim] = step.inputShapes[0];
+  const [, , valueHeads, valueDim] = step.inputShapes[2];
+  const params = face.writeParams(
+    gatedDeltaScanParams({ time, batch, keyHeads, valueHeads, keyDim, valueDim }),
+    PARAMS_UNIFORM_USAGE,
+  );
+  const { pipeline, layout, roles } = await face.state.cache.get(
+    GATED_DELTA_SCAN_KEY,
+    gatedDeltaScanWgsl(),
+  );
+  builder.dispatch({
+    key: GATED_DELTA_SCAN_KEY,
+    pipeline,
+    layout,
+    roles,
+    params,
+    bindings: [
+      ...binds.map((source, index) => ({ binding: index + 1, source })),
+      { binding: 6, source: outs[0] },
+    ],
+    workgroups: [
+      gatedDeltaScanWorkgroups(
+        batch,
+        valueHeads,
+        face.state.gpu.limits.maxComputeWorkgroupsPerDimension,
+      ),
       1,
       1,
     ],

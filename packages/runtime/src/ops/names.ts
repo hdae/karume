@@ -419,6 +419,36 @@ export const GRU_SCAN_OPS = ["gru_scan", "gru_scan_reverse"] as const;
 export type GruScanOpName = (typeof GRU_SCAN_OPS)[number];
 
 /**
+ * The **gated delta rule scan**, the recurrence of a Gated DeltaNet layer (extended composite layer
+ * — ADR 0135; the value form, for prefill). Only the recurrence is folded into one node: the
+ * projections, the causal conv, the gates, the q / k l2-normalisation and the gated norm stay
+ * existing ops around it.
+ *
+ * **Arity fixed at 5, uniform f32, empty attrs**: `q[B,T,Hk,dk]` (l2-normalised, not scaled) /
+ * `k[B,T,Hk,dk]` (l2-normalised) / `v[B,T,Hv,dv]` / `g[B,T,Hv]` (log decay) / `beta[B,T,Hv]` →
+ * `o[B,T,Hv,dv]`. Per batch element, value head h (reading key head `⌊h/r⌋`, `r = Hv/Hk`) and
+ * token t, from `S_0 = 0`:
+ *
+ * ```
+ * S' = exp(g_t)·S_{t−1} / δ = β_t·(v_t − S'ᵀk_t) / S_t = S' + k_t δᵀ / o_t = S_tᵀ(q_t·dk^-½)
+ * ```
+ *
+ * The layout is upstream's interface layout `[B,T,H,d]`; T is the symbolic length axis. The head
+ * broadcast is **derived from the shapes** (`Hv % Hk == 0`, value head h reads key head `⌊h/r⌋` =
+ * `repeat_interleave(r, dim=2)` — the same rule as attention's GQA, ADR 0067), and the q scale
+ * `dk^-½` is derived from dk (no attr).
+ * MUST: no fields for the initial state, the final state, the q / k l2-normalisation, the scale or
+ * the head repeat — the absence of a field is the statement that the form is not in the vocabulary
+ * (ADR 0135 decision 1). A carried state is the states form (decision 4, not in the vocabulary yet);
+ * a variant becomes a separate op name.
+ * NOTE: the semantics (shape rule, CPU reference) hold for any B, T ≥ 1, dk, dv and `Hk | Hv`; the
+ * GPU's implemented subset is `dk = dv = 128` (`GATED_DELTA_SCAN_HEAD_DIM` in codegen/limits.ts),
+ * and other head dims fail loudly when the Session is built (`validateGraphContracts` in
+ * runtime/plan.ts — ADR 0064 axis A).
+ */
+export const GATED_DELTA_SCAN_OP = "gated_delta_scan";
+
+/**
  * Weight slots for which low-precision storage is **eligible** (op name → input slot index — ADR
  * 0018).
  *

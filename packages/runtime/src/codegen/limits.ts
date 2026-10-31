@@ -21,3 +21,17 @@
  * (re-graded 2026-10-18 — ADR 0056 decision 5).
  */
 export const GRU_SCAN_MAX_HIDDEN = 256;
+
+/**
+ * The head dim (key dim dk and value dim dv) the `gated_delta_scan` GPU kernel implements — the
+ * implemented subset of ADR 0135 decision 1 (the only measured head dims). The semantics (shape rule
+ * and CPU reference) hold for any dk and dv; the kernel stages q / k rows of exactly this length,
+ * splits them into 8 key slices of 16 rows and covers the value axis with 4 workgroups of 32
+ * columns (kernels/gated-delta-scan.ts).
+ *
+ * MUST: other head dims fail loudly at Session construction (`validateGraphContracts` in
+ * runtime/plan.ts — the ADR 0064 axis A split, as conv3d's groups) and in params
+ * (`gatedDeltaScanParams`). Letting another dk through would read past each q / k row and skip or
+ * repeat value columns without an exception. Generalising needs a measured geometry per head dim.
+ */
+export const GATED_DELTA_SCAN_HEAD_DIM = 128;

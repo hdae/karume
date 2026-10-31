@@ -397,6 +397,8 @@ def _compute(
     # directions (the time order of the output does not change either).
     if kind == "gru_scan":
         return _sole(_gru_scan(contract, ins, where))
+    if kind == "gated_delta_scan":
+        return _sole(_gated_delta_scan(contract, ins, where))
     raise OpContractError(f"{where}: op kind '{kind}' has no shape rule")
 
 
@@ -1539,6 +1541,68 @@ def _gru_scan(contract: OpContract, ins: list[list[Extent]], where: str) -> list
             f" 3·H = {gates.offset}"
         )
     return [gi[0], gi[1], hidden]
+
+
+def _gated_delta_scan(contract: OpContract, ins: list[list[Extent]], where: str) -> list[Extent]:
+    """The output shape of gated_delta_scan (extended composite layer — ADR 0135, the value form).
+
+    `q[B,T,Hk,dk]` / `k[B,T,Hk,dk]` / `v[B,T,Hv,dv]` / `g[B,T,Hv]` / `beta[B,T,Hv]` ->
+    `o[B,T,Hv,dv]`. **The length axis T passes through as a symbol** (the reason this op exists —
+    upstream's Python loops specialise it).
+
+    MUST: B and T come from q; k / v / g / beta are **only matched** against them (k structurally
+    equal to q, v's B / T, g and beta exactly `[B,T,Hv]` with Hv from v).
+    MUST: the head broadcast is divisible (`Hv % Hk == 0`, `Hv ≥ Hk ≥ 1`), and the head counts
+    must be constant to decide it (a symbolic head count fails as "the declaration alone cannot
+    decide" — the same discipline as attention's GQA rule). `Hk ≥ 1` comes first (Python's `%`
+    would raise ZeroDivisionError instead of the contract error the TS side gives).
+    MUST: a constant axis of length 0 is rejected (B, T, dk, dv ≥ 1 — the semantics start at T ≥ 1).
+    A symbolic B / T depends on the binding, so the TS side checks it before execution (the module
+    docstring's split). The head dims may be symbolic: nothing is computed from them.
+    """
+    q, k, v, g, beta = ins
+    show = (
+        f"q [{_show(q)}] / k [{_show(k)}] / v [{_show(v)}] / g [{_show(g)}] / beta [{_show(beta)}]"
+    )
+    if len(q) != 4 or len(k) != 4 or len(v) != 4 or len(g) != 3 or len(beta) != 3:
+        raise OpContractError(
+            f"{where}: {contract.name} expects q[B,T,Hk,dk] / k[B,T,Hk,dk] / v[B,T,Hv,dv] /"
+            f" g[B,T,Hv] / beta[B,T,Hv] (rank 4/4/4/3/3): {show}"
+        )
+    batch, time, key_heads, key_dim = q
+    value_heads, value_dim = v[2], v[3]
+    if k != q:
+        raise OpContractError(f"{where}: {contract.name} k must have q's shape [B,T,Hk,dk]: {show}")
+    if v[0] != batch or v[1] != time:
+        raise OpContractError(f"{where}: {contract.name} B / T of v differ from q: {show}")
+    expected = [batch, time, value_heads]
+    for name, shape in (("g", g), ("beta", beta)):
+        if shape != expected:
+            raise OpContractError(
+                f"{where}: {contract.name} {name} should be [B,T,Hv] = [{_show(expected)}]: {show}"
+            )
+    if any(extent.is_value(0) for extent in (batch, time, key_dim, value_dim)):
+        raise OpContractError(
+            f"{where}: {contract.name} needs B, T, dk and dv of at least 1: {show}"
+        )
+    if key_heads.is_const and key_heads.offset < 1:
+        raise OpContractError(
+            f"{where}: {contract.name} Hv {value_heads.to_dim()} is not a positive integer multiple"
+            f" of Hk {key_heads.to_dim()} (the head broadcast needs Hv % Hk == 0 and Hv ≥ Hk ≥ 1"
+            f" — ADR 0135 decision 1): {show}"
+        )
+    if not key_heads.is_const or not value_heads.is_const:
+        raise OpContractError(
+            f"{where}: {contract.name} Hk {key_heads.to_dim()} and Hv {value_heads.to_dim()}:"
+            f" the declaration alone cannot decide whether they broadcast divisibly: {show}"
+        )
+    if value_heads.offset < key_heads.offset or value_heads.offset % key_heads.offset != 0:
+        raise OpContractError(
+            f"{where}: {contract.name} Hv {value_heads.offset} is not a positive integer multiple"
+            f" of Hk {key_heads.offset} (the head broadcast needs Hv % Hk == 0 and Hv ≥ Hk ≥ 1"
+            f" — ADR 0135 decision 1): {show}"
+        )
+    return [batch, time, value_heads, value_dim]
 
 
 def _upsample_bilinear2d(

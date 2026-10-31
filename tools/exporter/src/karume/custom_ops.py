@@ -15,6 +15,11 @@ drift here turns green the state "the exporter and the runtime agree and are bot
 particular the update is `(h − n)·z + n`, not `(1 − z)·n + z·h` (44,345 of 100,000 f32 elements
 differ in bits — ADR 0056 decision 3).
 
+`karume::gated_delta_scan` (ADR 0135 decision 5) solves the same problem for the Gated DeltaNet
+recurrence: both upstream functions loop in Python (over tokens, or over 64-token chunks with a
+T-dependent padding), so `torch.export` specialises the length axis. Its eager body is a copy of
+upstream's prefill function (the docstring of {@link gated_delta_scan}).
+
 NOTE: `torch.library.custom_op` is a process-wide global registration, so this import **has a side
 effect** (the "zero side effects in every module" of `packages/*` is a TS-side tree-shaking
 invariant and does not apply to the Python exporter). `aten_handlers.py` imports this module to
@@ -24,6 +29,7 @@ write the handler key (`torch.ops.karume.gru_scan.default`).
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F  # noqa: N812  -- the spelling of the upstream copy below
 
 #: Number of gates (r / z / n). The first axis of gi and w_hh / b_hh is a multiple of this.
 GATE_COUNT = 3
@@ -88,6 +94,161 @@ def _fake(
 
 gru_scan.register_fake(_fake)
 gru_scan_reverse.register_fake(_fake)
+
+
+#: The upstream version the gated delta rule body below is copied from (ADR 0135 decision 5).
+GATED_DELTA_RULE_UPSTREAM = "transformers 5.14.1, models/qwen3_5/modeling_qwen3_5.py"
+
+
+# --- copied from upstream (GATED_DELTA_RULE_UPSTREAM), token for token ---------------------------
+# MUST: `l2norm` and `torch_chunk_gated_delta_rule` below are a **verbatim copy** of upstream's
+# functions (ADR 0135 decision 5): the goldens are taken from this eager body, so a drift here turns
+# green "the exporter and the runtime agree and are both wrong". The only differences are the
+# leading underscore of the names and the line breaks and quotes `ruff format` imposes; the tokens
+# are upstream's (tests/test_gated_delta_scan.py compares the output bit for bit with upstream's
+# function when transformers is installed). It is a copy, not an import, because the exporter core
+# depends only on torch, torchvision, numpy and safetensors (ADR 0065).
+def _l2norm(x: torch.FloatTensor, dim: int = -1, eps: float = 1e-6):
+    """This function is intended to align with the l2norm implementation in the FLA library."""
+    inv_norm = torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
+    return x * inv_norm
+
+
+def _torch_chunk_gated_delta_rule(
+    query,
+    key,
+    value,
+    g,
+    beta,
+    chunk_size=64,
+    initial_state=None,
+    output_final_state=False,
+    use_qk_l2norm_in_kernel=False,
+    **kwargs,
+):
+    initial_dtype = query.dtype
+    if use_qk_l2norm_in_kernel:
+        query = _l2norm(query, dim=-1, eps=1e-6)
+        key = _l2norm(key, dim=-1, eps=1e-6)
+    query, key, value, beta, g = [
+        x.transpose(1, 2).contiguous().to(torch.float32) for x in (query, key, value, beta, g)
+    ]
+
+    batch_size, num_heads, sequence_length, k_head_dim = key.shape
+    v_head_dim = value.shape[-1]
+    pad_size = (chunk_size - sequence_length % chunk_size) % chunk_size
+    query = F.pad(query, (0, 0, 0, pad_size))
+    key = F.pad(key, (0, 0, 0, pad_size))
+    value = F.pad(value, (0, 0, 0, pad_size))
+    beta = F.pad(beta, (0, pad_size))
+    g = F.pad(g, (0, pad_size))
+    total_sequence_length = sequence_length + pad_size
+    scale = 1 / (query.shape[-1] ** 0.5)
+    query = query * scale
+
+    v_beta = value * beta.unsqueeze(-1)
+    k_beta = key * beta.unsqueeze(-1)
+    # reshape to chunks
+    query, key, value, k_beta, v_beta = [
+        x.reshape(x.shape[0], x.shape[1], -1, chunk_size, x.shape[-1])
+        for x in (query, key, value, k_beta, v_beta)
+    ]
+    g = g.reshape(g.shape[0], g.shape[1], -1, chunk_size)
+    mask = torch.triu(
+        torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=0
+    )
+
+    # chunk decay
+    g = g.cumsum(dim=-1)
+    decay_mask = ((g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float()).tril()
+    attn = -((k_beta @ key.transpose(-1, -2)) * decay_mask).masked_fill(mask, 0)
+    for i in range(1, chunk_size):
+        row = attn[..., i, :i].clone()
+        sub = attn[..., :i, :i].clone()
+        attn[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
+    attn = attn + torch.eye(chunk_size, dtype=attn.dtype, device=attn.device)
+    value = attn @ v_beta
+    k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1))
+    last_recurrent_state = (
+        torch.zeros(
+            batch_size, num_heads, k_head_dim, v_head_dim, dtype=value.dtype, device=value.device
+        )
+        if initial_state is None
+        else initial_state.to(value)
+    )
+    core_attn_out = torch.zeros_like(value)
+    mask = torch.triu(
+        torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=1
+    )
+
+    # for each chunk
+    for i in range(0, total_sequence_length // chunk_size):
+        q_i, k_i, v_i = query[:, :, i], key[:, :, i], value[:, :, i]
+        attn = q_i @ k_i.transpose(-1, -2) * decay_mask[:, :, i]
+        v_prime = (k_cumdecay[:, :, i]) @ last_recurrent_state
+        v_new = v_i - v_prime
+        attn_inter = (q_i * g[:, :, i, :, None].exp()) @ last_recurrent_state
+        core_attn_out[:, :, i] = attn_inter + attn @ v_new
+        last_recurrent_state = (
+            last_recurrent_state * g[:, :, i, -1, None, None].exp()
+            + (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2) @ v_new
+        )
+
+    if not output_final_state:
+        last_recurrent_state = None
+    core_attn_out = core_attn_out.reshape(
+        core_attn_out.shape[0], core_attn_out.shape[1], -1, core_attn_out.shape[-1]
+    )
+    core_attn_out = core_attn_out[:, :, :sequence_length]
+    core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(initial_dtype)
+    return core_attn_out, last_recurrent_state
+
+
+# --- end of the upstream copy ---------------------------------------------------------------------
+
+
+@torch.library.custom_op("karume::gated_delta_scan", mutates_args=())
+def gated_delta_scan(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, g: torch.Tensor, beta: torch.Tensor
+) -> torch.Tensor:
+    """The gated delta rule scan, value form (ADR 0135): q[B,T,Hk,dk] / k[B,T,Hk,dk] (both
+    l2-normalised) / v[B,T,Hv,dv] / g[B,T,Hv] / beta[B,T,Hv] -> o[B,T,Hv,dv], from a zero state.
+
+    MUST: the body is upstream's prefill function `torch_chunk_gated_delta_rule` (the copy above),
+    called as `Qwen3_5GatedDeltaNet.forward` calls it after its `repeat_interleave` of q / k to the
+    value heads, with `use_qk_l2norm_in_kernel=False` (q / k arrive normalised),
+    `initial_state=None` and `output_final_state=False` (ADR 0135 decision 5). The head repeat
+    `r = Hv / Hk` is the op's derived broadcast (value head h reads key head floor(h / r)).
+    """
+    key_heads, value_heads = q.shape[2], v.shape[2]
+    if key_heads < 1 or value_heads % key_heads != 0:
+        raise ValueError(
+            f"gated_delta_scan: Hv {value_heads} is not a positive multiple of Hk {key_heads}"
+        )
+    ratio = value_heads // key_heads
+    query = q.repeat_interleave(ratio, dim=2) if ratio > 1 else q
+    key = k.repeat_interleave(ratio, dim=2) if ratio > 1 else k
+    out, _ = _torch_chunk_gated_delta_rule(
+        query,
+        key,
+        v,
+        g=g,
+        beta=beta,
+        initial_state=None,
+        output_final_state=False,
+        use_qk_l2norm_in_kernel=False,
+    )
+    return out
+
+
+@gated_delta_scan.register_fake
+def _gated_delta_scan_fake(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, g: torch.Tensor, beta: torch.Tensor
+) -> torch.Tensor:
+    """Meta implementation: the output is shaped like `v` (T passes **as is**, so it stays
+    symbolic)."""
+    del q, k, g, beta
+    return v.new_empty(v.shape)
 
 
 @torch.library.custom_op("karume::static_quantize", mutates_args=())

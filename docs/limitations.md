@@ -1256,6 +1256,28 @@ section** (Codex deep review R2B-001).
 - **LSTM is not in the vocabulary** (`aten.lstm` fails loudly as an unsupported op). The points for an
   extension are in ADR [0056](decisions/0056-gru-scan.md) decision 8.
 
+## The gated delta rule scan runs head dims 128 only on the GPU, has no state slots, and leaves positive g unspecified (ADR 0135)
+
+- `gated_delta_scan` (the value form) is defined for any head dims (the shape rule and the CPU
+  reference hold the semantics), but **the GPU kernel implements `dk = dv = 128` only** (the only
+  measured head dims — the kernel stages q / k rows of exactly this length). Other head dims fail
+  loudly with `ExecutionError` when the Session is built (`validateGraphContracts` in
+  `runtime/plan.ts`) and with `CodegenError` from the kernel's params; the constant lives in one
+  place, `GATED_DELTA_SCAN_HEAD_DIM` in `codegen/limits.ts`. Generalising needs a measured geometry
+  per head dim.
+- **There is no initial-state input and no final-state output**: the value form starts from a zero
+  state and returns only `o` (prefill). A carried state for decode is the states form, which is not
+  in the vocabulary yet (ADR 0135 decision 4).
+- **`g > 0` is outside the contract's numerics**: the accurate exp of the kernel is defined for
+  `x ≤ 0` and its result above about 88.4 is unspecified (not guaranteed to be +∞), and a positive g
+  makes the recurrence expand. The op does not check g (in Gated DeltaNet
+  `g = −exp(A_log)·softplus(·) ≤ 0`). `g = −∞` gives a decay of exactly 0, `g = ±0` of exactly 1,
+  and NaN propagates.
+- The workgroup count is `B · Hv · 4`; above `maxComputeWorkgroupsPerDimension` (65,535 by default,
+  that is `B · Hv > 16,383`) the dispatch fails loudly (there is no grid-stride).
+- Measured only on the RTX 3080 Ti under Node + Dawn (Vulkan) at B = 1: other GPUs and backends,
+  B > 1 on the GPU and the real MOSS `A_log` / `dt_bias` are not measured (ADR 0135 open point 10).
+
 ## Vowel detection: the input's 10ms frame count is **even**, and the limit is the distribution's declaration (ADR 0056 / 0057)
 
 - The time axis of the graph input is `2T` (the symbol `T` is the 20ms grid of the output). **Odd

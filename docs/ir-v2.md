@@ -54,6 +54,10 @@ Grounds: the Consequences of ADR [0108](decisions/0108-container-format.md) and 
   the decomposed form. Requested by the two-layer BiGRU of vowel-detector). **Arity fixed at 4, empty attrs**;
   the op handles **only the hidden-side recurrence** (the input-side GEMM is the caller's `linear`). The scan direction is carried
   not by attrs but by the **op name** (the same approach as `gelu` / `gelu_tanh`). No effect on existing IR.
+- Model expansion (2026-10-31): added `gated_delta_scan` as the **extended composite layer** (ADR
+  [0135](decisions/0135-gated-delta-rule-scan.md), proposed — the recurrence of a Gated DeltaNet layer, requested by the
+  MOSS-Image text encoder; upstream's Python loops specialise the length axis in export). **Arity fixed at 5, empty attrs**;
+  the value form only (zero initial state, no state output). No effect on existing IR.
 - autoregressive (2026-08-17): added `argmax` as the **Core ATen layer** (ADR
   [0068](decisions/0068-decode-exit-multi-output.md) decision 2 — the exit of greedy decoding.
   Measured as core by `torch.Tag.core`, so only a ledger NOTE is required (ADR 0059), but decision 2 sits in
@@ -725,6 +729,18 @@ The contract of nodes that read and write state slots (ADR
     The output is `y` only, and **`h_n` is not returned** (the IR's single-output premise). `h0` is an input slot and is
     required (a zero `h0` becomes an initializer through the exporter's constant folding).
     The hidden width is **`H ≤ 256`** (one lane = one hidden unit — exceeding it raises `CodegenError`)
+  - `gated_delta_scan` (f32, **empty attrs**, **arity fixed at 5** — ADR [0135](decisions/0135-gated-delta-rule-scan.md),
+    the value form) — the gated delta rule recurrence `q[B,T,Hk,dk]` / `k[B,T,Hk,dk]` / `v[B,T,Hv,dv]` / `g[B,T,Hv]` /
+    `beta[B,T,Hv]` → `o[B,T,Hv,dv]`. **The length axis T may be symbolic.** q / k arrive **already l2-normalised**
+    (q not scaled); g is the **log decay**. Per batch element, value head h and token t, from `S_0 = 0`
+    (`S ∈ ℝ^{dk×dv}`): `S' = exp(g_t)·S_{t−1}` / `δ = β_t·(v_t − S'ᵀk_t)` / `S_t = S' + k_t δᵀ` /
+    `o_t = S_tᵀ(q_t·dk^-½)` (the read is after the update — token t is included). **The head broadcast is derived
+    from the shapes**: `Hv % Hk == 0` with `Hv ≥ Hk ≥ 1`, value head h reads key head `⌊h/(Hv/Hk)⌋`
+    (= `repeat_interleave` on the head axis, the same rule as attention's GQA); the q scale `dk^-½` is derived from dk.
+    B, T, dk and dv are at least 1. The initial state, the final state, the l2-normalisation, the scale and the head repeat
+    **have no field** (a carried state is the states form, not in the vocabulary yet). The semantics hold for any head
+    dims; **the GPU's implemented subset is `dk = dv = 128`**, and other head dims fail loudly when the Session is built.
+    `g > 0` is not rejected but its result is unspecified on the GPU (docs/limitations.md)
 
 The output dtype is decided by the mapping "**input dtype of slot 0 → output dtype**" (identity by default). The mapping is
 **a column per output slot**, and the column's length is the op's output count (ADR 0068 decision 1). The only non-identity cases are the four comparisons

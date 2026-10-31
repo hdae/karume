@@ -389,6 +389,12 @@
       "attrs": []
     },
     {
+      "op": "gated_delta_scan",
+      "arity": 5,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": []
+    },
+    {
       "op": "static_quantize",
       "arity": 1,
       "dtypes": {
@@ -3316,6 +3322,174 @@
       "ins": [[2, 12], [2, 4], [12, 4], [12]],
       "throws": true,
       "why": "anything but rank 3/2/2/1 is rejected (batch_first / a folded time axis are not in the vocabulary)"
+    },
+    {
+      "op": "gated_delta_scan",
+      "ins": [
+        [2, 5, 3, 4],
+        [2, 5, 3, 4],
+        [2, 5, 6, 7],
+        [2, 5, 6],
+        [2, 5, 6]
+      ],
+      "outs": [[2, 5, 6, 7]],
+      "why": "q[B,T,Hk,dk] / k[B,T,Hk,dk] / v[B,T,Hv,dv] / g[B,T,Hv] / beta[B,T,Hv] -> o[B,T,Hv,dv] with the derived head broadcast r = Hv/Hk = 2 (B, T, Hk, dk, Hv and dv all distinct, so a swapped axis shows up in the shape)"
+    },
+    {
+      "op": "gated_delta_scan",
+      "ins": [
+        [1, "T", 16, 128],
+        [1, "T", 16, 128],
+        [1, "T", 32, 128],
+        [1, "T", 32],
+        [1, "T", 32]
+      ],
+      "bindings": { "T": 7 },
+      "outs": [[1, "T", 32, 128]],
+      "why": "the MOSS text-encoder layer with a symbolic length axis (the reason this op exists — upstream's Python loops specialise T)"
+    },
+    {
+      "op": "gated_delta_scan",
+      "ins": [
+        [1, 4, 2, 3],
+        [1, 4, 2, 3],
+        [1, 4, 2, 5],
+        [1, 4, 2],
+        [1, 4, 2]
+      ],
+      "outs": [[1, 4, 2, 5]],
+      "why": "Hk = Hv (q / k already repeated to the value heads) is the same contract with r = 1; dk ≠ dv is part of the semantics"
+    },
+    {
+      "op": "gated_delta_scan",
+      "ins": [
+        [2, 5, 3, 4],
+        [2, 5, 3, 5],
+        [2, 5, 6, 7],
+        [2, 5, 6],
+        [2, 5, 6]
+      ],
+      "throws": true,
+      "why": "k must have q's shape (a key dim that differs between q and k)"
+    },
+    {
+      "op": "gated_delta_scan",
+      "ins": [
+        [2, 5, 3, 4],
+        [2, 5, 3, 4],
+        [1, 5, 6, 7],
+        [1, 5, 6],
+        [1, 5, 6]
+      ],
+      "throws": true,
+      "why": "B of v differs from q"
+    },
+    {
+      "op": "gated_delta_scan",
+      "ins": [
+        [2, 5, 3, 4],
+        [2, 5, 3, 4],
+        [2, 6, 6, 7],
+        [2, 6, 6],
+        [2, 6, 6]
+      ],
+      "throws": true,
+      "why": "T of v differs from q"
+    },
+    {
+      "op": "gated_delta_scan",
+      "ins": [
+        [2, 5, 3, 4],
+        [2, 5, 3, 4],
+        [2, 5, 6, 7],
+        [2, 5, 3],
+        [2, 5, 6]
+      ],
+      "throws": true,
+      "why": "g per key head instead of per value head (g is [B,T,Hv])"
+    },
+    {
+      "op": "gated_delta_scan",
+      "ins": [
+        [2, 5, 3, 4],
+        [2, 5, 3, 4],
+        [2, 5, 6, 7],
+        [2, 5, 6],
+        [2, 5, 3]
+      ],
+      "throws": true,
+      "why": "beta per key head instead of per value head (beta is [B,T,Hv])"
+    },
+    {
+      "op": "gated_delta_scan",
+      "ins": [
+        [2, 5, 4, 4],
+        [2, 5, 4, 4],
+        [2, 5, 6, 7],
+        [2, 5, 6],
+        [2, 5, 6]
+      ],
+      "throws": true,
+      "why": "Hv 6 is not a multiple of Hk 4 (the head broadcast is divisible only)"
+    },
+    {
+      "op": "gated_delta_scan",
+      "ins": [
+        [2, 5, 6, 4],
+        [2, 5, 6, 4],
+        [2, 5, 3, 7],
+        [2, 5, 3],
+        [2, 5, 3]
+      ],
+      "throws": true,
+      "why": "Hv 3 < Hk 6 (the broadcast goes from the key heads to the value heads only)"
+    },
+    {
+      "op": "gated_delta_scan",
+      "ins": [
+        [2, 5, 0, 4],
+        [2, 5, 0, 4],
+        [2, 5, 0, 7],
+        [2, 5, 0],
+        [2, 5, 0]
+      ],
+      "throws": true,
+      "why": "Hk = 0 (Hv = 0 satisfies 0 % Hk, so Hk ≥ 1 is checked first)"
+    },
+    {
+      "op": "gated_delta_scan",
+      "ins": [
+        [1, 0, 1, 4],
+        [1, 0, 1, 4],
+        [1, 0, 2, 4],
+        [1, 0, 2],
+        [1, 0, 2]
+      ],
+      "throws": true,
+      "why": "a constant axis of length 0 (T = 0 has no token — the semantics start at T ≥ 1)"
+    },
+    {
+      "op": "gated_delta_scan",
+      "ins": [
+        [2, 5, 3, 4],
+        [2, 5, 3, 4],
+        [2, 5, 6, 7],
+        [2, 5, 6]
+      ],
+      "throws": true,
+      "why": "arity fixed at 5 (no optional slot)"
+    },
+    {
+      "op": "gated_delta_scan",
+      "ins": [
+        [2, 5, 12],
+        [2, 5, 12],
+        [2, 5, 6, 7],
+        [2, 5, 6],
+        [2, 5, 6]
+      ],
+      "throws": true,
+      "why": "anything but rank 4/4/4/3/3 is rejected (a folded head axis is not in the vocabulary)"
     },
     {
       "op": "static_quantize",

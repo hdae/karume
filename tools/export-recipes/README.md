@@ -20,7 +20,10 @@ Helpers shared by several families that cannot be promoted into the generic core
 which are repo topology and therefore never core knowledge, plus the gates that several families
 must judge identically (the decode-series contract, and whether an i4 series' calibration record is
 good enough to ship), the stored-form read-back of a published `krm` container, the Gemma SPM-BPE
-tokenizer compiler, and the license texts shipped at the root of each distribution repository.
+tokenizer compiler, the license texts shipped at the root of each distribution repository, and the
+writer of the runtime's `gated_delta_scan` fixture from upstream's own Gated DeltaNet functions
+(`_shared/gated_delta_fixture.py` — ADR 0135 decision 6; run it with
+`uv run --with 'transformers==5.14.1' --inexact python -m _shared.gated_delta_fixture`).
 
 ## Setup (uv workspace)
 

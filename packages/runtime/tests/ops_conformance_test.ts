@@ -585,14 +585,14 @@ const node = (
 // MUST: doc は読まない（書式依存の抽出突合は脆く、恒真化の温床にもなる）。ここは**期待値
 // リテラル**で op 集合を固定するだけで、docs/ir-v2.md の一覧との同期は op 追加時の人手仕事
 // （契約 1 セット — ops.ts / ops.py / shapes.py / fixtures / CPU 参照 / golden / ir-v2.md）。
-test("契約表の op 集合が期待値リテラル 62 本と一致する", () => {
+test("契約表の op 集合が期待値リテラル 63 本と一致する", () => {
   // The op names themselves are pinned by the ops section of fixtures/op-contracts.json; the
   // family lists below are not in the table.
   assertEquals(UNARY_OPS.length, 19);
   assertEquals(BINARY_OPS.length, 6);
   // argmax は reduce 族に**入らない**（attrs も出力 dtype も rank の扱いも別 — ADR 0068 決定 2）
   assertEquals(REDUCE_OPS.length, 3);
-  assertEquals(OP_CONTRACTS.size, 62);
+  assertEquals(OP_CONTRACTS.size, 63);
 });
 
 test("ランタイム対応表と capability 照会は契約表から導かれる", () => {

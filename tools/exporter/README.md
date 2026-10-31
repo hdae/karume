@@ -40,7 +40,8 @@ golden that covers the op need it. Making it conditional would split environment
 `deform_conv2d` as an unknown op" and "accepts it".
 
 `src/karume/custom_ops.py` registers this project's own `karume::` operators (`gru_scan` /
-`gru_scan_reverse` — ADR [0056](../../docs/decisions/0056-gru-scan.md)) with
+`gru_scan_reverse` — ADR [0056](../../docs/decisions/0056-gru-scan.md); `gated_delta_scan` — ADR
+[0135](../../docs/decisions/0135-gated-delta-rule-scan.md)) with
 `torch.library.custom_op`, so **importing it has a process-wide side effect**. `aten_handlers.py`
 imports it at the top for the same reason it imports `torchvision`: the handler key
 (`torch.ops.karume.gru_scan.default`) cannot be written otherwise. Hiding the body behind
@@ -250,6 +251,7 @@ Current models and coverage:
 | `conv3d_block`             | none         | conv3d ×3 (unbatched `[Cin,T,H,W]` input / Kt≠Kh≠Kw / stride, padding and dilation asymmetric over T, H and W / one branch with no bias; groups 1 only)                |
 | `deform_conv2d_block`      | none         | deform_conv2d (DCNv2 — offsets reaching outside the input plane, modulator in [0,2], k=3×2 with asymmetric padding and a k=1 branch with no bias)                      |
 | `gru_scan_block`           | `T`          | gru_scan / gru_scan_reverse (both directions over a symbolic time axis; the forward branch starts from a folded zero `h0`, the reverse one from a graph input), linear |
+| `gated_delta_scan_block`   | `T`          | gated_delta_scan (symbolic length axis, dk = dv = 128, head broadcast r = 2 — v built from q / k with cat on the head axis), neg, mul |
 | `bilinear_resize`          | none         | upsample_bilinear2d (non-integer upscale 4×5→7×9, shrink 4×5→2×3, and a height-1 input whose H scale is 0)                                                             |
 | `i8_weights`               | `T`          | **i8 storage** for linear, conv1d, conv2d, conv_transpose1d, embedding (5 of the 6 `WEIGHT_SLOTS` ops; conv3d's i8 is in the runtime GPU parity test), tanh            |
 
@@ -477,7 +479,7 @@ writes, re-reads and verifies, and only then swaps the result into place.
 | `act_quant`     | per-token symmetric i8 fake-quant for activations (the torch mirror of the w8a8 execution path)                                                                 |
 | `extents`       | identity of dimension lengths — the one place symbolic (`SymInt`) lengths are compared without a guard                                                          |
 | `rope`          | model-independent export check that RoPE frequency buffers were lifted out to constant-folding leaves                                                           |
-| `custom_ops`    | the `karume::` operators (`gru_scan` / `gru_scan_reverse`) registered with `torch.library`                                                                      |
+| `custom_ops`    | the `karume::` operators (`gru_scan` / `gru_scan_reverse` / `gated_delta_scan`) registered with `torch.library`                                                 |
 | `quant_calib`   | calibration-driven rounding on the storage grid `quantize` defines (GPTQ ships; AWQ is measurement only)                                                        |
 | `quant_methods` | **measurement-only** rounding methods with no storage path (FP4 / NF4 / MXFP4 / k-means codebooks)                                                              |
 | `states`        | the post-export surgery that rewrites an attention graph into the states form (ADR 0067)                                                                        |
@@ -532,15 +534,15 @@ conformance table is the correct one.
   row-range pieces, and rejects simultaneous automatic quantization options or real f32 values. The
   model recipe remains responsible for validating the upstream quantization and activation rounding
   (ADR 0097).
-- The IR vocabulary has **62** ops, of which the exporter can emit **60**: `topk` and `state_append`
+- The IR vocabulary has **63** ops, of which the exporter can emit **61**: `topk` and `state_append`
   are in the vocabulary but no `torch.export` graph produces them (`topk` waits on the multi-output
   getitem wiring, and `state_append` is the effect op the decode-graph script emits — ADR 0067
-  decision 5). The list below is those 60 (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`,
+  decision 5). The list below is those 61 (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`,
   ADR 0023 added `attention`, `gelu_tanh` was added for EmbeddingGemma, `sin` for the Snake
   activation, `safe_softmax` for runtime attention masks — ADR 0044 — `upsample_bilinear2d` for
   the segmentation / depth family, `deform_conv2d` for the BiRefNet family — ADR 0055 — and
-  `gru_scan` / `gru_scan_reverse` for recurrent models — ADR 0056 — and `conv3d` for the causal 3D
-  VAE of video models — ADR 0118):
+  `gru_scan` / `gru_scan_reverse` for recurrent models — ADR 0056 — `conv3d` for the causal 3D
+  VAE of video models — ADR 0118 — and `gated_delta_scan` for Gated DeltaNet layers — ADR 0135):
   - unary `neg abs exp log log1p sqrt sin tanh sigmoid relu gelu gelu_tanh` (f32) / `bitwise_not`
     (bool) / unary with attrs `clamp` / `clamp_min` / `leaky_relu` (f32). `sin` is the **only**
     trigonometric op: constant tables (RoPE) are still folded away at export time, so only the
@@ -596,6 +598,17 @@ conformance table is the correct one.
     does not accept a symbolic axis. There is no field for stacking, bidirectionality,
     `has_biases=False`, `batch_first` or `dropout` (layers and directions are expressed by placing
     several nodes), the op returns `y` only (no `h_n`), and the hidden width is capped at 256
+  - gated delta rule scan (extended composite layer, ADR 0135 — the value form): **`gated_delta_scan`**
+    — the recurrence of a Gated DeltaNet layer with arity 5 (`q[B,T,Hk,dk]` / `k[B,T,Hk,dk]`, both
+    already l2-normalised / `v[B,T,Hv,dv]` / `g[B,T,Hv]` (log decay) / `beta[B,T,Hv]`) and **no
+    attrs**, producing `o[B,T,Hv,dv]` from a zero state. The length axis may stay symbolic. The head
+    broadcast (`Hv % Hk == 0`, value head h reads key head `h // (Hv/Hk)`) and the q scale `dk^-½`
+    are derived from the shapes. The projections, the causal conv, the gates and the
+    l2-normalisation stay existing ops around it; there is no field for an initial or final state
+    (the states form for decode is not in the vocabulary yet). It is captured from
+    `karume::gated_delta_scan`, whose eager body is a copy of upstream's `torch_chunk_gated_delta_rule`
+    (transformers 5.14.1). The runtime GPU implements head dims 128 only and rejects others when
+    the Session is built
 - **31 emittable ops carry attrs** (`sum.dim` / `amax.dim` / `amin.dim` / `attention.scale` /
   `clamp.{min,max}` / `clamp_min.min` / `rms_norm.eps` / `static_quantize.scale` /
   `conv2d.{stride,padding,dilation,groups}` / `conv3d.{stride,padding,dilation,groups}` /

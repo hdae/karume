@@ -7,6 +7,7 @@
  * Only graphs that pass here proceed to the executor's encode step.
  */
 
+import { GATED_DELTA_SCAN_HEAD_DIM } from "../codegen/limits.ts";
 import { codecLayout } from "../format/container/codecs.ts";
 import { evalDim, parseDim, solveDim } from "../format/dims.ts";
 import { conv3dI8a8EligibleShape } from "../kernels/conv3d-i8a8.ts";
@@ -157,6 +158,7 @@ export const validateGraphContracts = (graph: IrGraph): void => {
     }
     if (contract.kind === "cat") assertCatAxis(graph, node, where);
     if (contract.kind === "conv3d") assertConv3dSubset(node, where);
+    if (contract.kind === "gatedDeltaScan") assertGatedDeltaScanSubset(graph, node, where);
   });
   assertStateOwnership(graph);
   assertStateOrder(graph);
@@ -189,6 +191,33 @@ const assertConv3dSubset = (node: IrNode, where: string): void => {
       `${where}: conv3d groups ${groups} cannot run on the GPU (the implemented subset is the groups == 1` +
         " implicit GEMM only — ADR 0118 decision 1; the CPU reference holds the semantics)",
     );
+  }
+};
+
+/**
+ * The check for gated_delta_scan's **implemented GPU subset** (ADR 0135 decision 1 — ADR 0064 axis
+ * A): head dims `dk = dv = ` {@link GATED_DELTA_SCAN_HEAD_DIM} only, read from the declared shapes
+ * of q (axis 3) and v (axis 3).
+ *
+ * The semantics (shape rule and CPU reference) accept any head dims, but the GPU kernel stages rows
+ * of exactly this length (kernels/gated-delta-scan.ts). MUST: fail at Session construction, for the
+ * same reason as {@link assertConv3dSubset}. A symbolic head dim is not the literal 128 and fails
+ * here too (the head dim is a static fact of a layer).
+ */
+const assertGatedDeltaScanSubset = (graph: IrGraph, node: IrNode, where: string): void => {
+  for (const [name, index] of [
+    ["q (dk)", 0],
+    ["v (dv)", 2],
+  ] as const) {
+    const shape = declarationOf(graph, node.ins[index]).shape;
+    const dim = shape[shape.length - 1];
+    if (dim !== GATED_DELTA_SCAN_HEAD_DIM) {
+      throw new ExecutionError(
+        `${where}: gated_delta_scan head dim of ${name} ${JSON.stringify(dim)} cannot run on the GPU` +
+          ` (the implemented subset is dk = dv = ${GATED_DELTA_SCAN_HEAD_DIM} — ADR 0135 decision 1;` +
+          " the CPU reference holds the semantics)",
+      );
+    }
   }
 };
 

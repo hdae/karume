@@ -291,6 +291,68 @@ test.skipIf(!GPU_AVAILABLE)("gru_scan は毒値を 1 語も残さない（full-w
 });
 
 test.skipIf(!GPU_AVAILABLE)(
+  "gated_delta_scan leaves not one poisoned word (full-write / real GPU)",
+  async () => {
+    // o[B,T,Hv,128] is written by the slice-0 thread of each column, one token late (c_prev) and
+    // the last token in the epilogue (ADR 0135 — kernels/gated-delta-scan.ts). A skipped token, the
+    // epilogue or a column block shows up as a poisoned word.
+    // MUST: T = 9 crosses the token block of 8 (the second block holds one token), B = 2 and
+    // Hv = 2 exercise the batch / head decomposition of the workgroup index.
+    const [batch, time, valueHeads, dim] = [2, 9, 2, 128];
+    const outShape = [batch, time, valueHeads, dim];
+    const graph = poisonGraph(
+      outShape,
+      [
+        { name: "q", shape: [batch, time, 1, dim] },
+        { name: "k", shape: [batch, time, 1, dim] },
+        { name: "v", shape: [batch, time, valueHeads, dim] },
+        { name: "g", shape: [batch, time, valueHeads] },
+        { name: "beta", shape: [batch, time, valueHeads] },
+      ],
+      { op: "gated_delta_scan", attrs: {} },
+    );
+    // q / k rows of norm 1 (two entries of ±1/√2 at positions that move with the row)
+    const unitRow = (i: number): number => {
+      const row = Math.floor(i / dim);
+      const column = i % dim;
+      if (column === row % dim) return Math.SQRT1_2;
+      return column === (row * 5 + 3) % dim ? -Math.SQRT1_2 : 0;
+    };
+    const { output, reuseCount } = await runPoisoned(graph, {
+      q: fill([batch, time, 1, dim], unitRow),
+      k: fill([batch, time, 1, dim], (i) => unitRow(i + 7 * dim)),
+      v: fill([batch, time, valueHeads, dim], (i) => ((i % 13) - 6) * 0.11 + Math.floor(i / 2304)),
+      g: fill([batch, time, valueHeads], (i) => -0.05 * ((i % 5) + 1)),
+      beta: fill([batch, time, valueHeads], (i) => 0.2 + 0.05 * (i % 7)),
+    });
+    assert(reuseCount >= 1, `the pool reused no buffer (reuseCount=${reuseCount})`);
+    assertEquals(output.shape, outShape);
+    assertEquals(
+      [...output.data].filter((value) => value === POISON),
+      [],
+      "poisoned words left",
+    );
+    assert([...output.data].every(Number.isFinite), "a non-finite word");
+    // MUST: the two batch elements differ (dropping the B decomposition would copy the first)
+    const half = output.data.length / 2;
+    assertEquals(
+      [...output.data.slice(0, half)].every((value, index) => value === output.data[half + index]),
+      false,
+      "batch elements 0 and 1 are identical",
+    );
+    // MUST: the last token differs from the one before (the epilogue writes it)
+    const row = valueHeads * dim;
+    assertEquals(
+      [...output.data.slice((time - 1) * row, time * row)].every(
+        (value, index) => value === output.data[(time - 2) * row + index],
+      ),
+      false,
+      "tokens T-2 and T-1 are identical",
+    );
+  },
+);
+
+test.skipIf(!GPU_AVAILABLE)(
   "conv2d 直接カーネル（groups>1）は毒値を 1 語も残さない（full-write / 実 GPU）",
   async () => {
     // 出力の全バイトを 1 スレッド 1 要素で書く形（ADR 0017）。grid-stride の打ち切りや
