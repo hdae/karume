@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "kind": "sha256",
+  "cases": {
+    "qwen3.5-9b-text-moss-image-sft-i8-dyn/fridge-note": {
+      "node-nvidia-geforce-rtx-3080-ti": "50c2cdd50ea8d5d8d6d070cbf13b11fc8fed801a9a88b1e3d450a60cbf6c803c"
+    },
+    "qwen3.5-9b-text-moss-image-sft-i8-dyn/negative": {
+      "node-nvidia-geforce-rtx-3080-ti": "417f90dce1af8c30be13341556f2edca6f8ddaf1df48376cdbb49db045e26f99"
+    }
+  }
+}

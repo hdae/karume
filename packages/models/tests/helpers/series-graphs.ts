@@ -46,6 +46,7 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
   },
   "minicpm5-1b": { "": "model" },
   "minicpm5-1b-decode": { "": "model" },
+  "qwen3.5-9b-text-moss-image-sft-i8-dyn": { text_encoder: "text_encoder" },
   "sbv2-F1": { dp: "dp", front: "front", flow: "flow", dec: "dec", voice: "voice" },
   "sbv2-F1-f16": { dp: "dp", front: "front", flow: "flow", dec: "dec", voice: "voice" },
   "sbv2-F1-i8": { dp: "dp", front: "front", flow: "flow", dec: "dec", voice: "voice" },
