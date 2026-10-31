@@ -1681,19 +1681,26 @@ By-design constraints of `wan.Ti2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/
   stage 8a). The entries are `wan.Ti2vPipeline.fromPretrained` (the published repository or a local mirror) and `wan.Ti2vPipeline.fromAssets`, which takes a
   manifest and assets assembled from the series containers. Only Wan2.1 (`karume-wan2.1`) stays unpublished.
 
-## MOSS-Image: text only as precomputed embeddings; the area is capped by the VAE's storage binding (2,796,160 px at 2 GiB); whether a size fits VRAM is checked per stage
+## MOSS-Image: text as prompt strings or precomputed embeddings, no default negative; the area is capped by the VAE's storage binding (2,796,160 px at 2 GiB); whether a size fits VRAM is checked per stage
 
 By-design constraints of the family's internal entry (`generateMoss` and its acceptance check `planMossGenerate` in
 `packages/models/src/moss/` — ADR [0138](decisions/0138-moss-image-dit-vae.md), branch `wip/moss-image`). Every
 input-caused rejection is a `ModelInputError` before any GPU work.
 
-- **Not public**: no subpath, no barrel entry, no distribution and no manifest until the text encoder exists (ADR 0138
-  decision 12); not part of the 0.15 release.
-- **Text only as precomputed embeddings**: the text encoder (Qwen3.5-9B) is not ported. A request carries upstream's
-  `encode_prompt` outputs, `[T, 4096]` f32 with 1 ≤ T ≤ 4,096 and every value finite — for the fixed prompts the
-  recipe's `moss.text_embeds` wrote. Strings are not accepted.
-- **No defaults**: steps, guidance, shift, the initial noise (`seed` or `latents`) and the preset are all explicit.
-  Upstream's defaults (1024², 50 steps, guidance 3, shift 5) wait for a manifest's `pipelineConfig`. **No default
+- **Not public**: no subpath, no barrel entry, no distribution and no manifest yet (ADR 0138 decision 12; the text
+  encoder is wired since 2026-10-31, publication is the manifest step — the maintainer's ruling 53 a); not part of the
+  0.15 release. The caller opens the series itself, the Qwen3.5 text series and its tokenizer asset included.
+- **Text in one of two forms** (ADR 0138 addendum of 2026-10-31): prompt strings (`prompt` / `negativePrompt` — the
+  chat template and the tokenizer in the acceptance check, the i8 Qwen3.5 text tower on the GPU), or upstream's
+  `encode_prompt` outputs, `[T, 4096]` f32 with 1 ≤ T ≤ 4,096 and every value finite (`positive` / `negative` — for the
+  fixed prompts the recipe's `moss.text_embeds` wrote). One form for both branches. A prompt over 4,096 tokens is
+  rejected unless `overflow: "truncate"` cuts it as upstream does (the maintainer's ruling 50 — the cut drops the chat
+  template's tail). The i8 encoder's rows differ from upstream's bf16 embeddings by about 4–8 % relative L2 on the
+  fixed prompts ([research 2026-10-31](research/2026-10-31-moss-text-stage.md)); whether that shows in the images is the
+  pending A/B (ADR 0137 decision 5). The encoder at T = 4,096 is unmeasured (ADR 0137 open point 2).
+- **No defaults**: steps, guidance, shift, the negative prompt, the initial noise (`seed` or `latents`) and the preset
+  are all explicit. Upstream's defaults (1024², 50 steps, guidance 3, shift 5, the empty negative prompt) wait for a
+  manifest's `pipelineConfig` — at guidance ≠ 1 the prompt form passes `negativePrompt: ""` for upstream's default. **No default
   preset** either: `f32+dit8` or `f32+dit8-a8-attn8-online` is passed explicitly, since no manifest owns a default yet
   (ADR 0138 decision 13 — a departure from ADR 0128 decision 1); the family's default is `f32+dit8-a8-attn8-online`,
   applied by the manifest when it comes.

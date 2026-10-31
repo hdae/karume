@@ -297,7 +297,7 @@
 
 | 英語（コード・docs） | 日本語（対話） | 意味 | やめる言い方 | 正本 |
 | --- | --- | --- | --- | --- |
-| MOSS-Image (family `moss`) △ | MOSS-Image | OpenMOSS の 5B の text-to-image DiT（テキストエンコーダは Qwen3.5-9B・VAE は FLUX.2）。Karume には DiT と VAE があり、テキストは事前計算の埋め込みで渡す。テキストエンコーダが入るまで内部のファミリー（ブランチ `wip/moss-image`） | — | ADR 0138 |
+| MOSS-Image (family `moss`) △ | MOSS-Image | OpenMOSS の 5B の text-to-image DiT（テキストエンコーダは Qwen3.5-9B・VAE は FLUX.2）。Karume には DiT と VAE があり、2026-10-31 からテキストエンコーダ（ADR 0137）もプロンプトの形で繋がった。manifest のステップまで内部のファミリー（ブランチ `wip/moss-image`） | — | ADR 0138 |
 | joint sequence (S = N + T) △ | 結合系列 | 画像トークン N 個とテキストトークン T 個をつないだ DiT の系列（全体で self-attention） | — | ADR 0138 決定 2 |
 | text refiner (`dit_text`) △ | テキストリファイナー | テキストトークンだけに掛かる Linear + 2 block（modulation なし）。1 生成で分岐ごとに 1 回だけ回す別グラフで、どのプリセットでも f32 の計算 | — | ADR 0138 決定 3 |
 | text context (`text_context`) △ | テキスト文脈 | `dit` の入力 `[1,S,3072]`。テキストの行にリファイナーの出力、画像の行に 0 を置く | — | ADR 0138 決定 2・3 |
@@ -306,7 +306,9 @@
 | skip 22 (`dit_skip22`) △ | skip 22（block 22 を飛ばす負側の分岐） | 上流の既定の negative の forward（block 22 を飛ばす）。Karume では `dit` の重みを全部借りる別グラフ | — | ADR 0138 決定 4 |
 | DiT pair (lender / borrower) △ | DiT の組（貸し手 / 借り手） | MOSS-Image の DiT の段で同時に開く 2 つの Session。貸し手 `dit`（positive の分岐）が重みを持ち、借り手 `dit_skip22`（negative の分岐）は initializer を全て shared で宣言して重みのバイトを持たない。組の必要量は重みを 1 回だけ数える | — | ADR 0138 決定 4・5 |
 | training grid (`training_grid`) △ | 学習グリッド | scheduler の 1,000 点の σ と timestep と時刻の sinusoid の表。要求の σ は必ずどれかの点に寄るので、ホストは計算せず表を引く | — | ADR 0138 決定 9・11 |
-| precomputed text embeddings (MOSS-Image) △ | 事前計算の埋め込み | 上流の `encode_prompt` の出力 `[T, 4096]`（f32）を固定プロンプトについて CPU で書いたもの。テキストエンコーダが入るまで唯一のテキストの入力 | — | ADR 0138 決定 9・12 |
+| precomputed text embeddings (MOSS-Image) △ | 事前計算の埋め込み | 上流の `encode_prompt` の出力 `[T, 4096]`（f32）を固定プロンプトについて CPU で書いたもの。リクエストの埋め込みの形（上流との一致の検証と、上流の埋め込みとの A/B の入力） | — | ADR 0138 決定 9・12 |
+| prompt form / embeddings form (MOSS-Image request) △ | プロンプトの形 / 埋め込みの形 | 生成リクエストのテキストの 2 つの形。プロンプトの文字列（`prompt` / `negativePrompt` — 受理の検査でチャットテンプレートとトークナイザ、GPU でテキストエンコーダの段）か、事前計算のエンコーダ出力（`positive` / `negative`）。両方の分岐で同じ形。どちらにも negative の既定は無い（上流の既定は `""`） | — | ADR 0138 決定 9・追記 2026-10-31 |
+| text-encoder stage (MOSS-Image) △ | テキストエンコーダの段 | プロンプトの形の生成の最初の段（`encodeMossPrompts`）。自分の空き容量の検査 → Qwen3.5 のテキストタワーを開く → positive、negative の順に符号化 → どの経路でも破棄して解放を待ってから `dit_text` を開く | — | ADR 0138 追記 2026-10-31・ADR 0137 決定 4 |
 | latent BatchNorm restoration (`latent_batch_norm`) △ | BatchNorm の復元 | VAE の前に BatchNorm の running 統計で `z · std + mean` に戻す手順（とその資産）。その後の unpatchify（128 → 32 チャネル・2 倍）は別のホスト側の手順 | — | ADR 0138 決定 8 |
 | untiled decoder (MOSS-Image VAE) △ | タイルなしの decoder | FLUX.2 の decoder を画像全体で回す形。記号長の 3 グラフに割り、resident tensor で受け渡す | — | ADR 0138 決定 8 |
 | area cap (MOSS-Image) △ | 受理の面積の上限 | タイルなしの decoder の最大の中間テンソルが binding 1 本に収まる面積（2 GiB で 2,796,160 画素）。device ごとの値 | — | ADR 0138 決定 8・limitations |

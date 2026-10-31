@@ -5,7 +5,9 @@
   taken as the recommended option and reported to the maintainer, and are listed there apart from
   the rulings. The default preset is the practical preset `f32+dit8-a8-attn8-online` (the
   maintainer's visual review passed — Rulings), carried by the manifest when it comes; there is no
-  default in code (decision 13).
+  default in code (decision 13). The text encoder (ADR 0137) is wired as the prompt form of
+  decision 9 since 2026-10-31, in the narrow scope of the maintainer's ruling 53 a (Addendum of
+  2026-10-31).
 - Date: 2026-10-27
 - Scope: branch `wip/moss-image`, its own branch: MOSS-Image is not part of the 0.15 release (it
   has no text encoder yet), so the branch was not merged into `wip/0.15`. It was rebased onto `main`
@@ -325,7 +327,8 @@ any GPU work; every rejection is a `ModelInputError` that names the limit or the
   mean a short side under about 43 px, which no use needs. A longer side MUST be rejected with an
   error that names the limit. Upstream's recommended and extrapolation ranges (1M / 1.5M / 2M
   pixels; 0.25M to 4M) are guidance in `docs/limitations.md`, not a check.
-- Text: the internal entry takes encoder outputs only — f32 `[T, 4096]` with 1 ≤ T ≤ 4,096 (upstream
+- Text: in one of two forms since the Addendum of 2026-10-31 — prompt strings (that addendum has
+  their checks) or encoder outputs. The encoder outputs are f32 `[T, 4096]` with 1 ≤ T ≤ 4,096 (upstream
   requires at least one token, `:245-246`), checked for the array type (`Float32Array` — also at run
   time, for callers outside the types), shape, length and every value finite (a non-finite
   embedding would otherwise surface as non-finite latents after the whole DiT stage). The positive
@@ -348,7 +351,8 @@ any GPU work; every rejection is a `ModelInputError` that names the limit or the
   with 6 decreases, at 10⁷ 1,099 — more than the 1,000 training points — with 61; steps with
   dt > 0 — research §4.1): that is upstream's own `set_timesteps`, reproduced, not refused;
   `docs/limitations.md` records it.
-- **No defaults**: upstream's (1024×1024, 50 steps, guidance 3, shift 5) belong to a manifest's
+- **No defaults**: upstream's (1024×1024, 50 steps, guidance 3, shift 5 — and its empty negative
+  prompt, the Addendum of 2026-10-31) belong to a manifest's
   `pipelineConfig`, and no manifest exists before publication (decision 12), so every knob is
   explicit and the defaults keep one owner when it comes. Rejected: upstream's `__call__` defaults
   as family constants now — a second owner to retire.
@@ -458,6 +462,8 @@ forwards would never run the declared route at square sizes.
   the text encoder exists: the family lives in `packages/models/src/moss/` behind an internal entry.
   Rejected: the Wan2.1 stage-1 form, a public string API restricted to the precomputed prompts —
   little user value, and a public promise made before the text encoder is designed.
+- Since 2026-10-31 the text encoder exists and is wired (Addendum); publication still waits — it is
+  the manifest step (the maintainer's ruling 53 a kept this decision in force).
 
 ### 13. Presets and the default
 
@@ -605,7 +611,8 @@ unchanged, and the full verification after the rebase that takes the branch in.
 - **Possible obstacles**:
   1. The text encoder (the GDN scan of ADR 0135, D = 256 GQA attention) must produce `[T, 4096]`
      matching the entry of decision 9; embeddings from a GPU encoder will differ from the bf16
-     upstream asset, so sha rows stay per route.
+     upstream asset, so sha rows stay per route. (Met 2026-10-31 — the Addendum: the prompt form's
+     sha row has its own ID.)
   2. Resolutions above the area cap need a tiled path (a separate ADR).
   3. Other skip settings or SLG need more graphs or a gate.
   4. Changes to the GEMV path on `wip/0.15` move the M = 1 linears' routes; MOSS's census counts by
@@ -683,5 +690,107 @@ the decisions; not rulings):
   line of ADR 0040's addendum of 2026-10-26 merged as is; the online int8 attention entry of
   `CHANGELOG.md` had meanwhile been released unchanged in 0.15.0, so the key-length change went
   into [Unreleased] as a Changed entry.
-- Later, each its own decision: the text encoder (with ADR 0135's scan op), publication with a
-  manifest and its defaults, an original-weights preset, a tiled VAE path above the cap.
+- The text encoder: wired as the prompt form (Addendum of 2026-10-31). Later, each its own
+  decision: publication with a manifest and its defaults (the text series and its tokenizer asset
+  in the distribution, `pipelineConfig` with upstream's defaults and the empty negative prompt,
+  `defaultQuant`), an original-weights preset, a tiled VAE path above the cap.
+
+## Addendum (2026-10-31) — the prompt form: the text encoder wired (the maintainer's ruling 53 a)
+
+The text encoder of ADR [0137](0137-qwen3_5-text-encoder.md) runs inside this family's internal
+entry: `generateMoss` takes prompt strings. The maintainer ruled the narrow scope (53 a): **no
+manifest, no distribution recipe, no local mirror, no public surface, no default preset** — the
+caller opens the Qwen3.5 text series and its tokenizer asset as it opens the DiT and VAE series,
+and decisions 9 (every knob explicit), 12 and 13 stay in force. Measurements:
+[research 2026-10-31-moss-text-stage](../research/2026-10-31-moss-text-stage.md).
+
+### A1. Two forms of the text, one per request
+
+- **Prompt strings**: `prompt` and `negativePrompt`; the state carries the text series as `text`
+  (the component, the tokenizer, the contract of A5). **Embeddings**: `positive` and `negative` as
+  decision 9 has them — kept, because the parity checks and the A/B of upstream's embeddings against
+  Karume's (ADR 0137 decision 5) feed the DiT through them.
+- A request uses one form for both branches. Both forms (on one branch or across the two), or
+  neither, is a `ModelInputError`; a prompt-form request whose state has no text series is the
+  caller's assembly (a plain `Error`).
+- The request type stays flat with optional fields and a run-time check, as `seed` / `latents` are:
+  a JavaScript caller can pass anything, and the one acceptance function is the check.
+
+### A2. No default negative prompt
+
+Upstream's empty negative is one of its `__call__` defaults (`negative_prompt=""`), and decision 9
+gives those to a manifest's `pipelineConfig` — a distribution owns its default negative (Anima's
+manifest carries `pipelineConfig.defaults.negativePrompt`). A code default now would be the second
+owner decision 9 rejects. So at guidance ≠ 1 the prompt form requires `negativePrompt`, as the
+embeddings form requires `negative`; the message names upstream's default (`negativePrompt: ""`).
+At guidance 1 a negative prompt is refused in both forms (it would have no effect). Rejected: `""`
+as a family constant (Wan's in-code default negative) — a second owner to retire when the manifest
+comes, and the two forms would then require different things.
+
+### A3. Over-length prompts: the maintainer's ruling 50, through `overflow`
+
+The tokenizer rejects a prompt over 4,096 tokens with its `ModelInputError`; the request's optional
+`overflow: "truncate"` cuts both prompts as upstream does (dropping the template's tail). Exposed
+because it is one field passed through to the tokenizer for both prompts, the tokenizer's own
+rejection message names it, and without it upstream's behaviour for a long prompt would be
+unreachable from this entry (the ruling's opt-in lost at its only consumer). `overflow` with the
+embeddings form is refused (no tokenizer runs there).
+
+### A4. The text-encoder stage (`packages/models/src/moss/text-stage.ts`)
+
+- **Host, in the acceptance check**: the chat template (`renderQwen3_5ChatPrompt`) then the
+  tokenizer, for each branch — before any GPU work, so a prompt the template or the bound refuses
+  opens nothing.
+- **The stage** (`encodeMossPrompts`, the first stage of a prompt-form generation): its own headroom
+  check (decision 5's form: the encoder's estimate at T = max(T₊, T₋), no knob — ADR 0137 decision
+  5 — plus the largest weight part and the margin), `Qwen3_5TextEncoder.open`, the positive then the
+  negative encoding, and the encoder disposed and its released memory awaited **on every path**
+  (success, a failed run, a cancellation) before `dit_text` opens — ADR 0137 decision 4, Wan's umT5
+  text stage (ADR 0119 decision 11) the precedent. It takes no preset knob.
+- **The first headroom check** of decision 5 takes the stage's need in the prompt form only (8,603
+  MiB for the fixed prompts on the RTX 3080 Ti).
+- The stage takes a `signal` of its own (the encoder's); `generateMoss` passes none — no stage of
+  the DiT and VAE side has cancellation, and this addendum adds none.
+
+### A5. Admission (`mossTextEncoderContract`)
+
+Before a weight byte is uploaded: the encoder's graph contract (ADR 0137), its row width against
+the DiT's text width (4,096), its one symbolic length (the estimate's binding), and the tokenizer
+asset's `maxLength` against the encoder's bound and the DiT's (4,096 each — ADR 0137's MUST).
+
+### A6. Checks
+
+- Host (`packages/models/tests/moss_text_stage_host_test.ts`, stand-ins for the GPU and the
+  Sessions): the two forms and their rejections, the ids through the template, `overflow`, the
+  stage's order and its dispose and release wait on success, failure and cancellation, its headroom
+  refusal, its need at the longer prompt, the encoder disposed before `dit_text` opens, and the
+  first check taking the encoder's need in the prompt form only. Faults injected and caught: the
+  dispose removed or not awaited, the release wait removed, the template skipped, the need at the
+  positive prompt only, the mixing check removed, a default `""` negative, the stage's probe at 0 B,
+  `overflow` dropped, the encoder's need left out of the first check.
+- GPU (`packages/e2e/tests/e2e_moss_prompt_test.ts`): the ids of all four fixed prompts are exactly
+  the ids upstream's `encode_prompt` fed its encoder (MUST); the stage's rows of `fridge-note` and
+  the negative are the encoder lane's sha256 rows bit for bit (asserted); the distance from
+  upstream's bf16 embeddings and the stage's time and memory are recorded, not banded; prompt →
+  image at 256² × 2 steps (`f32+dit8`, guidance 3, shift 5, seed 42) with the Session order
+  asserted and a new sha256 row `f32+dit8-2step-fridge-note-qwen3_5-i8-seed42-256x256-g3-shift5` —
+  its own ID, since the embeddings are another route's (obstacle 1) — written only after the
+  stage's assertion held in the same run.
+
+### A7. Results (2026-10-31, RTX 3080 Ti, Node + Dawn)
+
+- Relative L2 against upstream's bf16 embeddings: 3.98 % (`fridge-note`), 3.88 %
+  (`guide-whiteboard`), 4.86 % (the negative) — the recipe's CPU-reference figures to four digits —
+  and 7.79 % for `guide-fridge-note`, where one row (the `\n` after `assistant`) has a cosine of
+  0.804. Karume's CPU reference of the same container gives the same 7.79 % and row (the GPU is
+  2.9e-6 from it), so the gap is the i8 export's or upstream's bf16 run's, not the GPU's.
+- The stage: 9.9–10.1 s, of which the Session build is 8.9–9.1 s; need 8,603 MiB, held peak
+  7,589–7,602 MiB, 0 B held after it returns. The 256² × 2-step generation took 18.0 s.
+
+### What still waits
+
+The manifest step (decision 12, ruling 53 a): the text series and the tokenizer asset in a
+distribution, its recipe and local mirror, `pipelineConfig` with upstream's defaults (the empty
+negative prompt among them) and `defaultQuant`, and the public surface. Before it, the image A/B of
+upstream's embeddings against Karume's (ADR 0137 decision 5, ruling 51) — `guide-fridge-note`
+included. The encoder at T = 4,096 is unmeasured (ADR 0137 open point 2).

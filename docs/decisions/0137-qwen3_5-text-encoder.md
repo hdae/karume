@@ -76,7 +76,8 @@ runs) cannot stay resident beside the MOSS DiT and VAE.
    it, encodes the positive and the negative prompt, and disposes it before the DiT stage — Wan's
    umT5 text stage (ADR 0119 decision 11). Measured on the RTX 3080 Ti: building the Session takes
    8.3 s with the parts in the page cache; one encoding takes 60 ms at T = 10, 196 ms at T = 63 and
-   1.40 s at T = 1,000 (warm medians). The MOSS wiring is a later step.
+   1.40 s at T = 1,000 (warm medians). The MOSS-Image consumer is wired on the MOSS branch (the
+   addendum below).
 5. **Storage: i8 per-channel weights and f32 tensors only, and no execution knob.** The graph
    contract rejects any other storage (BF16, an all-f32 container, a shared declaration), and the
    session policy accepts no `session` key: that combination is what decision 6 verified, and the
@@ -141,3 +142,30 @@ runs) cannot stay resident beside the MOSS DiT and VAE.
    without the diag directory.
 6. The i8 error's sensitive rows (decision 5): kept as is by ruling 51; a per-layer or per-row
    higher-precision option is the lever if an image ever shows them.
+
+## Addendum (2026-10-31) — the first consumer: MOSS-Image's prompt form
+
+Decision 4's consumer exists on the MOSS branch (ADR [0138](0138-moss-image-dit-vae.md), its
+addendum of 2026-10-31 — the narrow scope of the maintainer's ruling 53 a: no manifest or
+distribution yet, the caller opens this series and the tokenizer asset). What it does with this
+module, as decided above:
+
+- **Per generation, as decision 4 says**: `encodeMossPrompts` (`packages/models/src/moss/text-stage.ts`)
+  opens `Qwen3_5TextEncoder` on the generation's device, encodes the positive then the negative
+  prompt, and disposes it on every path (success, a failed run, a cancellation through the
+  encoder's `signal`) before MOSS-Image's `dit_text` opens, then waits for the released memory.
+- **Its headroom need** is this component's estimate at T = max(T₊, T₋) with no knob (decision 5),
+  plus the largest weight part and the margin MOSS-Image's other stages use. On the RTX 3080 Ti it is
+  9,020,414,604 B (8,603 MiB) for the fixed prompts (T ≤ 134 — the plan backing budget dominates
+  the scenario term there), against a held peak of 7,589–7,602 MiB of WebGPU buffers (weights
+  7,946,675,776 B); the stage takes about 9.9–10.1 s, of which the Session build is 8.9–9.1 s.
+- **The consequence's MUST** (the tokenizer's `maxLength` equals `QWEN3_5_MAX_TOKENS`) is checked in
+  MOSS-Image's admission (`mossTextEncoderContract`), together with the row width against the DiT's
+  4,096 and the graph's one symbol.
+- **Bit identity with this lane**: the consumer's rows of the two recorded prompts are this
+  environment's sha256 rows of `e2e_qwen3_5_encoder_test.ts` bit for bit
+  (`e2e_moss_prompt_test.ts`), and its token ids for all four fixed prompts are exactly the ids
+  upstream's `encode_prompt` fed its encoder. On a third prompt (`guide-fridge-note`, T = 62) the
+  GPU rows are 2.9e-6 from Karume's CPU reference of the container — inside decision 6's band.
+- **Distance from upstream's bf16 embeddings** (measured facts behind ruling 51 — decision 5; not a band): see the
+  research record [2026-10-31-moss-text-stage](../research/2026-10-31-moss-text-stage.md).
