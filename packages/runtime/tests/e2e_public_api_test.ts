@@ -135,6 +135,7 @@ test.skipIf(!GPU_AVAILABLE)(
           gatedResidual: 0,
           rmsNormAdd: 0,
           linearStaticQuantize: 0,
+          geluMulStaticQuantize: 0,
           rowBlockAttention: 0,
           identityExpand: 0,
           packedStaticQuantize: 0,

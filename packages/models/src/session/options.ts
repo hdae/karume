@@ -79,6 +79,8 @@ const WRITERS: { readonly [K in keyof Required<SessionSpec>]: SpecWriter } = {
   fuseRmsNormAdd: ({ fuseRmsNormAdd }) => (fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd }),
   fuseLinearStaticQuantize: ({ fuseLinearStaticQuantize }) =>
     fuseLinearStaticQuantize === undefined ? {} : { fuseLinearStaticQuantize },
+  fuseGeluMulStaticQuantize: ({ fuseGeluMulStaticQuantize }) =>
+    fuseGeluMulStaticQuantize === undefined ? {} : { fuseGeluMulStaticQuantize },
   packedStaticQuantize: ({ packedStaticQuantize }) =>
     packedStaticQuantize === undefined ? {} : { packedStaticQuantize },
 };
@@ -161,6 +163,10 @@ const VALUE_GATES: {
     fuseLinearStaticQuantize === undefined || typeof fuseLinearStaticQuantize === "boolean"
       ? undefined
       : "fuseLinearStaticQuantize must be a boolean",
+  fuseGeluMulStaticQuantize: ({ fuseGeluMulStaticQuantize }) =>
+    fuseGeluMulStaticQuantize === undefined || typeof fuseGeluMulStaticQuantize === "boolean"
+      ? undefined
+      : "fuseGeluMulStaticQuantize must be a boolean",
   packedStaticQuantize: ({ packedStaticQuantize }) =>
     packedStaticQuantize === undefined || typeof packedStaticQuantize === "boolean"
       ? undefined

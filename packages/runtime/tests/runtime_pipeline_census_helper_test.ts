@@ -21,6 +21,7 @@ import {
   linearGemvSubgroupKey,
 } from "../src/kernels/linear-gemv.ts";
 import { conv3dI8a8Key } from "../src/kernels/conv3d-i8a8.ts";
+import { geluMulStaticQuantizeKey } from "../src/kernels/gelu-mul-static-quantize.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import { linearI8a8Key } from "../src/kernels/linear-i8a8.ts";
 import type { MaterialisedScoreStorage } from "../src/kernels/score-storage.ts";
@@ -121,6 +122,9 @@ const REPRESENTATIVES: {
       linearGemvStaticQuantizeKey("i4", 512, 4),
       linearGemvStaticQuantizePackedKey("i8", undefined, 2),
     ],
+  },
+  fuseGeluMulStaticQuantize: {
+    true: [geluMulStaticQuantizeKey("gelu-other"), geluMulStaticQuantizeKey("other-gelu")],
   },
   packedStaticQuantize: {
     true: [STATIC_QUANTIZE_PACKED_KEY, linearGemvParallelPackedKey("i4", 32, 8)],

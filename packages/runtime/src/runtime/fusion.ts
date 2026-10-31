@@ -11,7 +11,7 @@
  *
  * **This file is the entry of the fusion pass**; the implementation is split three ways: the shared
  * types, the eligibility conditions shared by every rule and `defineRule` in
- * {@link "./fusion-rule.ts"}; the nine rules under `fusion-rules/` (one rule = one file); and here
+ * {@link "./fusion-rule.ts"}; the ten rules under `fusion-rules/` (one rule = one file); and here
  * the declaration table {@link FUSION_RULES}, aliasing
  * ({@link planAliases}), the scan ({@link planFusions}) and candidate enumeration
  * ({@link enumerateUnfusedWindows}).
@@ -44,9 +44,10 @@
  *
  * ## The fold target is not always one dispatch
  *
- * linearStaticQuantize / rmsNormAdd / silu / upsample2x / rope / rmsNormRope / adaln / gatedResidual
- * are "N nodes → one dispatch of a private kernel" ({@link LINEAR_STATIC_QUANTIZE_RULE} folds the parallel GEMV
- * and the fixed requantization into one dispatch), but
+ * linearStaticQuantize / geluMulStaticQuantize / rmsNormAdd / silu / upsample2x / rope / rmsNormRope /
+ * adaln / gatedResidual are "N nodes → one dispatch of a private kernel"
+ * ({@link LINEAR_STATIC_QUANTIZE_RULE} folds the parallel GEMV and the fixed requantization into one
+ * dispatch), but
  * {@link ROW_BLOCK_ATTENTION_RULE} folds **the materialised width of an intermediate, not the
  * ops**, so it becomes a list of dispatches with temporaries closed inside the step
  * ({@link FusedStep.temps}) in between. adaln's per-token form is two dispatches as well (a pack
@@ -76,10 +77,11 @@
  *
  * ## Application order
  *
- * The **declaration order** of {@link FUSION_RULES} (linearStaticQuantize → rmsNormAdd → silu →
- * upsample2x → rope → rmsNormRope → adaln → gatedResidual → rowBlockAttention).
- * The leading ops of the nine rules are `linear` / `rms_norm` / `sigmoid` / `reshape` /
- * `mul|slice` / `rms_norm` / `layer_norm` / `where` / `bmm`, pairwise disjoint but for one pair,
+ * The **declaration order** of {@link FUSION_RULES} (linearStaticQuantize → geluMulStaticQuantize →
+ * rmsNormAdd → silu → upsample2x → rope → rmsNormRope → adaln → gatedResidual → rowBlockAttention).
+ * The leading ops of the ten rules are `linear` / `gelu_tanh` / `rms_norm` / `sigmoid` /
+ * `reshape` / `mul|slice` / `rms_norm` / `layer_norm` / `where` / `bmm`, pairwise disjoint but
+ * for one pair,
  * so the order does not affect the result (the order matters only when two rules can accept the
  * same index — tests/runtime_fusion_test.ts checks mechanically from {@link FusionRule.heads} that
  * no other overlap arises). The one shared head, `rms_norm` of rmsNormAdd and rmsNormRope, cannot
@@ -130,6 +132,7 @@ import { numel, permuteDims, STATIC_QUANTIZE_OP, staticQuantizeScale } from "../
 import { attentionRoute, UNREAD_ATTENTION_DEVICE } from "./attention-route.ts";
 import { ADALN_RULE } from "./fusion-rules/adaln.ts";
 import { GATED_RESIDUAL_RULE } from "./fusion-rules/gated-residual.ts";
+import { GELU_MUL_STATIC_QUANTIZE_RULE } from "./fusion-rules/gelu-mul-static-quantize.ts";
 import { LINEAR_STATIC_QUANTIZE_RULE } from "./fusion-rules/linear-static-quantize.ts";
 import { RMS_NORM_ADD_RULE } from "./fusion-rules/rms-norm-add.ts";
 import { RMS_NORM_ROPE_RULE } from "./fusion-rules/rms-norm-rope.ts";
@@ -191,6 +194,7 @@ export {
 /** MUST: the order of this array is the application order (the "Application order" section). */
 export const FUSION_RULES: readonly FusionRule[] = [
   LINEAR_STATIC_QUANTIZE_RULE,
+  GELU_MUL_STATIC_QUANTIZE_RULE,
   RMS_NORM_ADD_RULE,
   SILU_RULE,
   UPSAMPLE_2X_RULE,
@@ -307,7 +311,9 @@ export const LINEAR_PROLOGUE_OPS: readonly PrologueUnaryOp[] = ["gelu_tanh", "ge
  *
  * Anything else returns `undefined` and both nodes stay as they are (byte-identical behaviour).
  * NOTE: `linearStaticQuantize` (head `linear`) and packed activations require `linearCompute: "f32"`
- * and this requires `"a8"`, so they never compete for the same linear.
+ * and this requires `"a8"`, so they never compete for the same linear. `geluMulStaticQuantize`
+ * (head `gelu_tanh`, tried first) needs the producer's next node to be a `mul` and this a `linear`,
+ * so they never compete for the same producer.
  */
 const linearPrologueAt = (
   nodes: readonly NodePlan[],
@@ -545,6 +551,7 @@ const scanFusions = (
   const scanContext: FusionScanContext = { ...context, packedValues: packed };
   const counts: Record<FusionCounterName, number> = {
     linearStaticQuantize: 0,
+    geluMulStaticQuantize: 0,
     rmsNormAdd: 0,
     silu: 0,
     upsample2x: 0,
@@ -683,7 +690,7 @@ const readsPackedActivation = (plan: NodePlan, name: string, context: FusionCont
  * MUST: 5 is an invariant for **future rules**. Only the linearStaticQuantize fusion has a
  * spelling that reads packed, so the moment another rule puts a linear into its window, that
  * fused kernel reads the packed words as f32 (a silent wrong value with no exception). No window of
- * the current nine rules contains a `linear`, so it does not fire today; but without it on the
+ * the current ten rules contains a `linear`, so it does not fire today; but without it on the
  * accepting side, only the added rule would break, silently.
  */
 const packedStaticQuantizeValues = (

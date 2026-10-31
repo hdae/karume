@@ -7,6 +7,7 @@ import {
   STATIC_QUANTIZE_PACKED_WGSL,
   STATIC_QUANTIZE_WGSL,
 } from "../src/kernels/static-quantize.ts";
+import { geluMulStaticQuantizeWgsl } from "../src/kernels/gelu-mul-static-quantize.ts";
 import {
   ELEMENTWISE_WORKGROUP_SIZE,
   elementwiseKey,
@@ -390,6 +391,9 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
   const cases: readonly (readonly [string, string])[] = [
     ["static_quantize.wgsl", STATIC_QUANTIZE_WGSL],
     ["static_quantize_packed.wgsl", STATIC_QUANTIZE_PACKED_WGSL],
+    // gelu_tanh → mul → SRQ (perf-ledger K-48): both operand orders — the product text differs.
+    ["gelu_mul_static_quantize_gelu_other.wgsl", geluMulStaticQuantizeWgsl("gelu-other")],
+    ["gelu_mul_static_quantize_other_gelu.wgsl", geluMulStaticQuantizeWgsl("other-gelu")],
     ["elementwise_relu_r1.wgsl", elementwiseWgsl({ op: "relu", rank: 1, dtype: "f32" })],
     ["elementwise_sigmoid_r1.wgsl", elementwiseWgsl({ op: "sigmoid", rank: 1, dtype: "f32" })],
     ["elementwise_gelu_r2.wgsl", elementwiseWgsl({ op: "gelu", rank: 2, dtype: "f32" })],

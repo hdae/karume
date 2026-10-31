@@ -74,6 +74,22 @@ test.skipIf(!available)(
           `${family} packed SRQ M=${rows} fuse=${fuseSrq}`,
         );
       }
+      // The i4-fast set plus the gelu_tanh → mul → SRQ fold (perf-ledger K-48 step 1b): one
+      // per-layer-input gate per layer (35) in a decode or verification plan (M ≤ 8, the measured
+      // form); a prefill plan keeps the plain chain. No other counter moves: the folded SRQs feed
+      // per_layer_projection (i8 1536×256), which never takes packed activations.
+      assertEquals(
+        decodeFusionCounts(graph, rows, true, true, true, true),
+        {
+          ...NONE,
+          rope: 50,
+          rmsNormAdd: 106,
+          linearStaticQuantize: rows <= 8 ? 275 : 0,
+          packedStaticQuantize: rows <= 8 ? 70 : 0,
+          geluMulStaticQuantize: rows <= 8 ? 35 : 0,
+        },
+        `${family} gelu mul SRQ M=${rows}`,
+      );
     }
   },
 );

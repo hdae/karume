@@ -276,6 +276,11 @@ const GEMMA4_E2B_DRAFTER_RMS_ADD = { variant: 24 } as const;
 /** linear→SRQ 融合（並列 GEMV に落ちる 275 本の全て — M ≤ 8）。 */
 const GEMMA4_QAT_E2B_LINEAR_SRQ = { variant: 275 } as const;
 /**
+ * gelu_tanh → mul → SRQ fold (perf-ledger K-48 step 1b): the per-layer-input gate of each of the 35
+ * layers (M ≤ 8 — the measured form; a prefill plan keeps the plain chain).
+ */
+const GEMMA4_QAT_E2B_GELU_MUL_SRQ = { variant: 35 } as const;
+/**
  * packed int8 活性（ADR 0105）: 生産側の単体 SRQ（packed 変種）70 本 + それを読む並列 GEMV の
  * packed 変種 70 本（linear→SRQ 融合の有無で消費側の族は変わるが、どちらも packed 断片を持つ）。
  */
@@ -295,6 +300,8 @@ const GEMMA4_QAT_E4B_GEMV = { variant: 342, reference: 2 } as const;
 const GEMMA4_QAT_E4B_RMS_ADD = { variant: 127 } as const;
 /** linear→SRQ 融合（並列 GEMV に落ちる 342 本の全て — M ≤ 8）。 */
 const GEMMA4_QAT_E4B_LINEAR_SRQ = { variant: 342 } as const;
+/** gelu_tanh → mul → SRQ fold: one per layer (42 — M ≤ 8, as E2B). */
+const GEMMA4_QAT_E4B_GELU_MUL_SRQ = { variant: 42 } as const;
 /**
  * packed int8 活性: 生産側の単体 SRQ（packed 変種）84 本 + それを読む並列 GEMV の packed 変種 84 本
  * （o 42 + down 42 — g2048 / g4096 の l32。E2B の 70 + 70 と同じ内訳の取り方）。
@@ -516,6 +523,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
       linearGemvReduce: "parallel",
       fuseRmsNormAdd: true,
       fuseLinearStaticQuantize: true,
+      fuseGeluMulStaticQuantize: true,
       packedStaticQuantize: true,
       stateAttentionReduce: "parallel-fused",
     },
@@ -526,12 +534,14 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
           linearGemvReduce: GEMMA4_QAT_E2B_GEMV,
           fuseRmsNormAdd: GEMMA4_E2B_RMS_ADD,
           fuseLinearStaticQuantize: GEMMA4_QAT_E2B_LINEAR_SRQ,
+          fuseGeluMulStaticQuantize: GEMMA4_QAT_E2B_GELU_MUL_SRQ,
           packedStaticQuantize: GEMMA4_QAT_E2B_PACKED,
         },
         verify: {
           linearGemvReduce: GEMMA4_QAT_E2B_GEMV,
           fuseRmsNormAdd: GEMMA4_E2B_RMS_ADD,
           fuseLinearStaticQuantize: GEMMA4_QAT_E2B_LINEAR_SRQ,
+          fuseGeluMulStaticQuantize: GEMMA4_QAT_E2B_GELU_MUL_SRQ,
           packedStaticQuantize: GEMMA4_QAT_E2B_PACKED,
         },
       },
@@ -635,6 +645,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
       linearGemvReduce: "parallel",
       fuseRmsNormAdd: true,
       fuseLinearStaticQuantize: true,
+      fuseGeluMulStaticQuantize: true,
       packedStaticQuantize: true,
       stateAttentionReduce: "parallel-fused",
     },
@@ -645,12 +656,14 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
           linearGemvReduce: GEMMA4_QAT_E4B_GEMV,
           fuseRmsNormAdd: GEMMA4_QAT_E4B_RMS_ADD,
           fuseLinearStaticQuantize: GEMMA4_QAT_E4B_LINEAR_SRQ,
+          fuseGeluMulStaticQuantize: GEMMA4_QAT_E4B_GELU_MUL_SRQ,
           packedStaticQuantize: GEMMA4_QAT_E4B_PACKED,
         },
         verify: {
           linearGemvReduce: GEMMA4_QAT_E4B_GEMV,
           fuseRmsNormAdd: GEMMA4_QAT_E4B_RMS_ADD,
           fuseLinearStaticQuantize: GEMMA4_QAT_E4B_LINEAR_SRQ,
+          fuseGeluMulStaticQuantize: GEMMA4_QAT_E4B_GELU_MUL_SRQ,
           packedStaticQuantize: GEMMA4_QAT_E4B_PACKED,
         },
       },

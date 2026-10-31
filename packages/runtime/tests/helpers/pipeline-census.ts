@@ -23,6 +23,7 @@ import {
 import { attentionPvI8a8Key, attentionQkI8a8Key } from "../../src/kernels/attention-i8a8.ts";
 import { attentionOnlineI8a8Key } from "../../src/kernels/attention-online-i8a8.ts";
 import { conv3dI8a8Key } from "../../src/kernels/conv3d-i8a8.ts";
+import { geluMulStaticQuantizeKey } from "../../src/kernels/gelu-mul-static-quantize.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../../src/kernels/geometry-profile.ts";
 import { gemmComputeKeyPart } from "../../src/kernels/gemm.ts";
 import { linearKey } from "../../src/kernels/linear.ts";
@@ -93,6 +94,7 @@ export const SEAT_REFERENCE = {
   linearGemvReduce: "sequential",
   fuseRmsNormAdd: false,
   fuseLinearStaticQuantize: false,
+  fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
   rmsNormReduce: "workgroup",
 } as const satisfies { readonly [Seat in NumericSeat]-?: SeatValue<Seat> };
@@ -181,6 +183,8 @@ const GEMV_STATIC_QUANTIZE = suffixOf(
 );
 const GEMV_PACKED = suffixOf(linearGemvParallelPackedKey("i8", undefined, 4), GEMV_PARALLEL_SAMPLE);
 const RMS_NORM_ADD_FAMILY = familyOf(rmsNormAddKey("norm-residual"));
+// The gelu_tanh → mul → SRQ kernel (perf-ledger K-48) — one family for both operand orders.
+const GELU_MUL_STATIC_QUANTIZE_FAMILY = familyOf(geluMulStaticQuantizeKey("gelu-other"));
 const RMS_FAMILIES: ReadonlySet<string> = new Set([familyOf(RMS_NORM_KEY), RMS_NORM_ADD_FAMILY]);
 const RMS_SUBGROUP = suffixOf(rmsNormSubgroupKey(), RMS_NORM_KEY);
 
@@ -225,6 +229,9 @@ export const SEAT_SIGNATURES: SeatSignatures = {
   },
   fuseLinearStaticQuantize: {
     true: (key) => isGemvParallel(key) && hasFragment(key, GEMV_STATIC_QUANTIZE),
+  },
+  fuseGeluMulStaticQuantize: {
+    true: (key) => familyOf(key) === GELU_MUL_STATIC_QUANTIZE_FAMILY,
   },
   packedStaticQuantize: {
     // 生産側（単体 SRQ の packed 変種）と消費側（並列 GEMV の packed 変種）のどちらでも立つ。

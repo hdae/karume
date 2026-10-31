@@ -14,6 +14,7 @@ type GemmaSessionOptions = Pick<
   | "stateAttentionReduce"
   | "fuseRmsNormAdd"
   | "fuseLinearStaticQuantize"
+  | "fuseGeluMulStaticQuantize"
   | "packedStaticQuantize"
 >;
 
@@ -44,6 +45,7 @@ export const GEMMA_SESSION_POLICY: FamilySessionPolicy = {
   stateAttentionReduce: true,
   fuseRmsNormAdd: true,
   fuseLinearStaticQuantize: true,
+  fuseGeluMulStaticQuantize: true,
   packedStaticQuantize: true,
 };
 

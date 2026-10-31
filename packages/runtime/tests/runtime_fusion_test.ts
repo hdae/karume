@@ -92,6 +92,7 @@ test("ルール表の先頭 op は互いに素で、適用順が結果に効か�
     FUSION_RULES.map((rule) => rule.name),
     [
       "linearStaticQuantize",
+      "geluMulStaticQuantize",
       "rmsNormAdd",
       "silu",
       "upsample2x",
@@ -115,6 +116,7 @@ test("ルール表の先頭 op は互いに素で、適用順が結果に効か�
   const seen = new Set(owners.keys());
   assertEquals([...seen].sort(), [
     "bmm",
+    "gelu_tanh",
     "layer_norm",
     "linear",
     "mul",
@@ -1062,6 +1064,7 @@ test("カウンタは融合が並んだグラフでルール別に積み上が�
     gatedResidual: 0,
     rmsNormAdd: 0,
     linearStaticQuantize: 0,
+    geluMulStaticQuantize: 0,
     rowBlockAttention: 0,
     identityExpand: 0,
     packedStaticQuantize: 0,
@@ -2011,6 +2014,7 @@ const NO_FUSIONS = {
   gatedResidual: 0,
   rmsNormAdd: 0,
   linearStaticQuantize: 0,
+  geluMulStaticQuantize: 0,
   rowBlockAttention: 0,
   identityExpand: 0,
   packedStaticQuantize: 0,

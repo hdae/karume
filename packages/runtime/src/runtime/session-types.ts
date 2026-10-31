@@ -454,6 +454,17 @@ export type SessionOptions = {
    */
   readonly fuseLinearStaticQuantize?: boolean;
   /**
+   * Fuses an adjacent f32 gelu_tanh→mul→static_quantize into one dispatch (default false —
+   * perf-ledger K-48).
+   * Applies only to identical shapes `[…, 256]` with 1–8 rows (no broadcast), intermediate values
+   * with a single consumer, and an SRQ output that is not packed (ADR 0105). Independent of
+   * linearGemvReduce / linearCompute.
+   * The two stored values of the unfused chain keep their rounding through a run-time XOR barrier;
+   * bit identity was measured on Vulkan / NVIDIA, and on unverified GPUs it is not guaranteed —
+   * false returns to the unfused reference.
+   */
+  readonly fuseGeluMulStaticQuantize?: boolean;
+  /**
    * Passes fixed-SRQ activations to the parallel GEMV as packed int8 (four int8 codes in one u32
    * word) (default false, ADR 0105).
    * Supported only together with linearGemvReduce: parallel / linearCompute: f32.

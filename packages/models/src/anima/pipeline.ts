@@ -365,6 +365,7 @@ export const ANIMA_SESSION_POLICY: FamilySessionPolicy = {
   stateAttentionReduce: false,
   fuseRmsNormAdd: false,
   fuseLinearStaticQuantize: false,
+  fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
 };
 

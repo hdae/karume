@@ -169,6 +169,7 @@ describe("Gemmaのquant実行設定", () => {
       stateAttentionReduce: "sequential",
       fuseRmsNormAdd: false,
       fuseLinearStaticQuantize: false,
+      fuseGeluMulStaticQuantize: false,
       packedStaticQuantize: false,
     };
     const accepted = [
@@ -176,6 +177,7 @@ describe("Gemmaのquant実行設定", () => {
       "stateAttentionReduce",
       "fuseRmsNormAdd",
       "fuseLinearStaticQuantize",
+      "fuseGeluMulStaticQuantize",
       "packedStaticQuantize",
     ];
     const rejected: string[] = [];
@@ -205,6 +207,7 @@ describe("Gemmaのquant実行設定", () => {
       ["stateAttentionReduce", "stateAttentionReduce is invalid"],
       ["fuseRmsNormAdd", "fuseRmsNormAdd must be a boolean"],
       ["fuseLinearStaticQuantize", "fuseLinearStaticQuantize must be a boolean"],
+      ["fuseGeluMulStaticQuantize", "fuseGeluMulStaticQuantize must be a boolean"],
       ["packedStaticQuantize", "packedStaticQuantize must be a boolean"],
     ] as const;
     for (const [key, message] of invalid) {

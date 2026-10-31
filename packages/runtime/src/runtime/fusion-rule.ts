@@ -21,6 +21,7 @@ import { ExecutionError, type NodePlan } from "./plan.ts";
  */
 type FusionRuleName =
   | "linearStaticQuantize"
+  | "geluMulStaticQuantize"
   | "rmsNormAdd"
   | "silu"
   | "upsample2x"
@@ -308,6 +309,8 @@ export type FusionContext = {
   /** Fuse RMS→add only when explicitly requested (ADR 0099). */
   readonly fuseRmsNormAdd?: boolean;
   readonly fuseLinearStaticQuantize?: boolean;
+  /** Fuse gelu_tanh → mul → static_quantize only when explicitly requested (perf-ledger K-48). */
+  readonly fuseGeluMulStaticQuantize?: boolean;
   /** Hand fixed-SRQ activations to the parallel GEMV as packed int8 (ADR 0105). */
   readonly packedStaticQuantize?: boolean;
   readonly linearGemvReduce?: LinearGemvReduce;

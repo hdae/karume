@@ -135,6 +135,7 @@ class TestQatQuants:
             "linearGemvReduce": "parallel",
             "fuseRmsNormAdd": True,
             "fuseLinearStaticQuantize": True,
+            "fuseGeluMulStaticQuantize": True,
             "packedStaticQuantize": True,
             "stateAttentionReduce": "parallel-fused",
         }

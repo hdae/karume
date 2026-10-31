@@ -409,6 +409,19 @@ export const prologueUnaryWgsl = (
   return { value, helpers: usedHelpers(value) };
 };
 
+/** The binary ops a fused kernel may apply to a folded value (perf-ledger K-48). */
+export type FusedBinaryOp = "mul";
+
+/**
+ * The value expression of a {@link FusedBinaryOp} on two f32 operands, in the operand order of the
+ * node (slot 0 first).
+ *
+ * MUST: a fused kernel that applies one of these ops takes its text from here, never a copy (the
+ * same rule as {@link prologueUnaryWgsl}).
+ */
+export const fusedBinaryWgsl = (op: FusedBinaryOp, slot0: string, slot1: string): string =>
+  BINARY_WGSL[op](slot0, slot1);
+
 /**
  * MUST: every generation parameter baked into the WGSL goes into the key. The workgroup size is
  * baked into `@workgroup_size` and the grid-stride stride expression, so changing the constant

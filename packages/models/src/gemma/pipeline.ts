@@ -365,6 +365,13 @@ export type PipelineOptions = {
    */
   readonly fuseLinearStaticQuantize?: SessionOptions["fuseLinearStaticQuantize"];
   /**
+   * The optional gelu_tanh→mul→fixed-SRQ fusion (the QAT per-layer-input gate). The runtime setting
+   * of the same name is the source of truth for its meaning and scope (perf-ledger K-48). Resolved
+   * in the order explicit value → the selected quant's session → the runtime default, and passed to
+   * both target and drafter. fromAssets has no quant, so it is the runtime default when unspecified.
+   */
+  readonly fuseGeluMulStaticQuantize?: SessionOptions["fuseGeluMulStaticQuantize"];
+  /**
    * Passes the fixed-SRQ activations to the parallel GEMV as packed int8. The runtime setting of the
    * same name is the source of truth for its meaning and scope (ADR 0105). Rejected unless the
    * effective `linearGemvReduce` is `"parallel"`. The manifest vocabulary has no field for it, so it
@@ -1351,6 +1358,9 @@ export class GemmaPipeline {
       ...(options.fuseLinearStaticQuantize === undefined
         ? {}
         : { fuseLinearStaticQuantize: options.fuseLinearStaticQuantize }),
+      ...(options.fuseGeluMulStaticQuantize === undefined
+        ? {}
+        : { fuseGeluMulStaticQuantize: options.fuseGeluMulStaticQuantize }),
       ...(options.packedStaticQuantize === undefined
         ? {}
         : { packedStaticQuantize: options.packedStaticQuantize }),

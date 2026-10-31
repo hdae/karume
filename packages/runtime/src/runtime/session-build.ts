@@ -532,6 +532,8 @@ export type SessionState = {
   readonly geometryProfile: GeometryProfile;
   readonly fuseRmsNormAdd: boolean;
   readonly fuseLinearStaticQuantize: boolean;
+  /** Fuses gelu_tanh → mul → static_quantize into one dispatch (perf-ledger K-48). */
+  readonly fuseGeluMulStaticQuantize: boolean;
   /** Passes the activations of fixed SRQ to the parallel GEMV as packed int8 (ADR 0105). */
   readonly packedStaticQuantize: boolean;
   readonly useCounts: ReadonlyMap<string, number>;
@@ -564,6 +566,7 @@ const snapshotSessionOptions = (
   linearGemvReduce: requested.linearGemvReduce,
   fuseRmsNormAdd: requested.fuseRmsNormAdd,
   fuseLinearStaticQuantize: requested.fuseLinearStaticQuantize,
+  fuseGeluMulStaticQuantize: requested.fuseGeluMulStaticQuantize,
   packedStaticQuantize: requested.packedStaticQuantize,
   rmsNormReduce: requested.rmsNormReduce,
   linearGemvRowsThreadTarget: requested.linearGemvRowsThreadTarget,
@@ -1187,6 +1190,7 @@ export const buildSessionState = async (
     geometryProfile,
     fuseRmsNormAdd: options.fuseRmsNormAdd ?? false,
     fuseLinearStaticQuantize: options.fuseLinearStaticQuantize ?? false,
+    fuseGeluMulStaticQuantize: options.fuseGeluMulStaticQuantize ?? false,
     packedStaticQuantize: options.packedStaticQuantize ?? false,
     rmsNormReduce,
     useCounts: countUses(graph),

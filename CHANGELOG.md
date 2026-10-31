@@ -15,6 +15,24 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+### Added
+
+- `SessionOptions.fuseGeluMulStaticQuantize` (`@karume/runtime`, default `false`) folds an adjacent
+  f32 `gelu_tanh → mul → static_quantize` — Gemma 4 QAT's per-layer-input gate, `[1, M, 256]` with
+  M ≤ 8 (decode and speculative verification) — into one dispatch (perf-ledger K-48 step 1b).
+  Outputs are u32-identical to the unfused chain (measured on Vulkan / NVIDIA; not guaranteed on
+  unverified GPUs — `false` returns to the unfused path). `FusionCounts` (`lastRunFusions`) gains the
+  counter `geluMulStaticQuantize`. The manifest vocabulary `SessionSpec` (`@karume/hub`) gains the
+  same optional boolean, and the Gemma pipelines (`@karume/models`) take it from a quant's `session`
+  or as an explicit option; a reader without the key rejects a manifest that declares it.
+
+### Changed
+
+- The gemma4-qat distribution recipe's `i4-fast` (E2B and E4B) declares
+  `fuseGeluMulStaticQuantize: true` (the published 0.15.0 distribution is unchanged until it is
+  rebuilt and uploaded). Generated tokens are identical; on an RTX 3080 Ti under Node the GPU time
+  per decode token drops by about 0.12 ms (E2B, 5.96 → 5.84) and 0.17 ms (E4B, 10.02 → 9.85).
+
 ## [0.15.0] - 2026-10-31
 
 ### Added

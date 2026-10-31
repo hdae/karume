@@ -203,6 +203,7 @@ const SESSION_KEYS: Readonly<Record<keyof Required<SessionSpec>, true>> = {
   stateAttentionReduce: true,
   fuseRmsNormAdd: true,
   fuseLinearStaticQuantize: true,
+  fuseGeluMulStaticQuantize: true,
   packedStaticQuantize: true,
 };
 
@@ -378,6 +379,8 @@ export type SessionSpec = {
   readonly stateAttentionReduce?: "sequential" | "parallel" | "parallel-fused";
   readonly fuseRmsNormAdd?: boolean;
   readonly fuseLinearStaticQuantize?: boolean;
+  /** Folds gelu_tanh → mul → static_quantize into one dispatch (perf-ledger K-48). */
+  readonly fuseGeluMulStaticQuantize?: boolean;
   /**
    * Packs the int8 activations of fixed SRQ into u32 and hands them to the parallel GEMV (ADR 0105
    * addendum 2, promotion to the vocabulary). The consumer rejects a declaration without
@@ -970,6 +973,7 @@ const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
   );
   const fuseRmsNormAdd = readBoolean(fail, raw, "fuseRmsNormAdd", at);
   const fuseLinearStaticQuantize = readBoolean(fail, raw, "fuseLinearStaticQuantize", at);
+  const fuseGeluMulStaticQuantize = readBoolean(fail, raw, "fuseGeluMulStaticQuantize", at);
   const packedStaticQuantize = readBoolean(fail, raw, "packedStaticQuantize", at);
   return {
     ...(linearCompute === undefined ? {} : { linearCompute }),
@@ -980,6 +984,7 @@ const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
     ...(stateAttentionReduce === undefined ? {} : { stateAttentionReduce }),
     ...(fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd }),
     ...(fuseLinearStaticQuantize === undefined ? {} : { fuseLinearStaticQuantize }),
+    ...(fuseGeluMulStaticQuantize === undefined ? {} : { fuseGeluMulStaticQuantize }),
     ...(packedStaticQuantize === undefined ? {} : { packedStaticQuantize }),
   };
 };

@@ -1247,7 +1247,12 @@ describe("parseManifest: quantのattention縮約形を保持し、未指定と�
 });
 
 describe("parseManifest: 融合の真偽値を保持し、未指定・不正値と区別する", () => {
-  for (const key of ["fuseRmsNormAdd", "fuseLinearStaticQuantize", "packedStaticQuantize"]) {
+  for (const key of [
+    "fuseRmsNormAdd",
+    "fuseLinearStaticQuantize",
+    "fuseGeluMulStaticQuantize",
+    "packedStaticQuantize",
+  ]) {
     for (const value of [false, true]) {
       it(`${key}=${value}`, () => {
         const session = { [key]: value };
@@ -1280,6 +1285,7 @@ describe("parseManifest: 融合の真偽値を保持し、未指定・不正値�
       linearGemvReduce: "parallel",
       fuseRmsNormAdd: true,
       fuseLinearStaticQuantize: true,
+      fuseGeluMulStaticQuantize: true,
       packedStaticQuantize: true,
     } as const;
     const manifest = parseManifest(

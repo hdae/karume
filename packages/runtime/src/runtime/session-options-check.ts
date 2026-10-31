@@ -175,6 +175,12 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
   ) {
     return "options.fuseLinearStaticQuantize must be a boolean";
   }
+  if (
+    options.fuseGeluMulStaticQuantize !== undefined &&
+    typeof options.fuseGeluMulStaticQuantize !== "boolean"
+  ) {
+    return "options.fuseGeluMulStaticQuantize must be a boolean";
+  }
   if (options.fuseRmsNormAdd !== undefined && typeof options.fuseRmsNormAdd !== "boolean") {
     return "options.fuseRmsNormAdd must be a boolean";
   }

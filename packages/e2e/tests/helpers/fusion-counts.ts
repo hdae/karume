@@ -112,11 +112,14 @@ export const fusionCounts = (
   // which reads the storage form of S and the device facts.
   attentionScoreStorage: ScoreStorage = "f32",
   attentionDevice?: AttentionDeviceFacts,
+  // The gelu_tanh → mul → SRQ fold of the QAT per-layer-input gate (perf-ledger K-48).
+  fuseGeluMulStaticQuantize = false,
 ): FusionCounts =>
   planFusions(planGraph(graph, bindSymbols(graph, inputShapes), stateShapes).nodes, {
     useCounts: countUses(graph),
     fuseRmsNormAdd,
     fuseLinearStaticQuantize,
+    fuseGeluMulStaticQuantize,
     packedStaticQuantize,
     linearGemvReduce: "parallel",
     linearCompute,
@@ -154,6 +157,7 @@ export const decodeFusionCounts = (
   fuseRmsNormAdd = false,
   fuseLinearStaticQuantize = false,
   packedStaticQuantize = false,
+  fuseGeluMulStaticQuantize = false,
 ): FusionCounts => {
   const inputShapes = Object.fromEntries(
     graph.inputs.map((spec) => [
@@ -174,6 +178,11 @@ export const decodeFusionCounts = (
     fuseRmsNormAdd,
     fuseLinearStaticQuantize,
     packedStaticQuantize,
+    "f32",
+    "f32",
+    "f32",
+    undefined,
+    fuseGeluMulStaticQuantize,
   );
 };
 
@@ -186,6 +195,7 @@ export const NONE: FusionCounts = {
   gatedResidual: 0,
   rmsNormAdd: 0,
   linearStaticQuantize: 0,
+  geluMulStaticQuantize: 0,
   rowBlockAttention: 0,
   identityExpand: 0,
   packedStaticQuantize: 0,

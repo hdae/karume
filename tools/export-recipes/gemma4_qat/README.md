@@ -34,12 +34,15 @@ series; use a new directory to retain previous measurements.
 The distribution family is `gemma4-qat/1`, with models `e2b` and `e4b`. The `i4` quant is
 fixed mixed INT2/INT4/INT8 with SRQ and reference summation for GEMV and attention. Both models
 default to `i4-fast`, which uses the same weights and declares parallel GEMV, fused parallel
-attention (`parallel-fused`), RMS-add fusion, linear-to-SRQ fusion, and packed int8 activations.
+attention (`parallel-fused`), RMS-add fusion, linear-to-SRQ fusion, the per-layer-input gate
+folded into one dispatch (`fuseGeluMulStaticQuantize` — gelu_tanh, mul and SRQ), and packed int8
+activations.
 `i4-gemvpar` retains parallel GEMV and parallel attention without the fusions or packed
 activations. On an Intel Arc B570, `i4-fast` cut GPU decode time per step by 49% (E2B) and 42%
 (E4B) against `i4`; no single flag was slower on its own. A manifest that declares
 `stateAttentionReduce` needs a reader that knows that key (the release after 0.13.0); older
-readers reject it.
+readers reject it. Likewise a manifest that declares `fuseGeluMulStaticQuantize` needs a reader
+that knows that key (the release after 0.15.0).
 Explicit runtime options override quant settings, including
 setting a fusion flag back to `false`. To use sequential GEMV with
 `i4-fast`, also set `fuseLinearStaticQuantize: false` and `packedStaticQuantize: false`,

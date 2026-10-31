@@ -77,6 +77,7 @@ test("toSessionOptions: SessionSpec の全キーを写す（キー追加の取�
     stateAttentionReduce: "parallel-fused",
     fuseRmsNormAdd: false,
     fuseLinearStaticQuantize: false,
+    fuseGeluMulStaticQuantize: false,
     packedStaticQuantize: false,
   };
   const mapped = toSessionOptions(full) as Record<string, unknown>;
@@ -88,6 +89,7 @@ test("toSessionOptions: 融合の明示falseとtrueを保持する", () => {
     const spec = {
       fuseRmsNormAdd: value,
       fuseLinearStaticQuantize: value,
+      fuseGeluMulStaticQuantize: value,
       packedStaticQuantize: value,
     };
     assertEquals(toSessionOptions(spec), spec);
@@ -106,6 +108,7 @@ const ALL: FamilySessionPolicy = {
   stateAttentionReduce: true,
   fuseRmsNormAdd: true,
   fuseLinearStaticQuantize: true,
+  fuseGeluMulStaticQuantize: true,
   packedStaticQuantize: true,
 };
 
@@ -119,6 +122,7 @@ const LINEAR_ONLY: FamilySessionPolicy = {
   stateAttentionReduce: false,
   fuseRmsNormAdd: false,
   fuseLinearStaticQuantize: false,
+  fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
 };
 
@@ -132,6 +136,7 @@ const FULL: Required<SessionSpec> = {
   stateAttentionReduce: "parallel",
   fuseRmsNormAdd: false,
   fuseLinearStaticQuantize: false,
+  fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
 };
 
@@ -205,6 +210,7 @@ describe("resolveSessionOptions: 受理できない指定", () => {
       stateAttentionReduce: "stateAttentionReduce is invalid",
       fuseRmsNormAdd: "fuseRmsNormAdd must be a boolean",
       fuseLinearStaticQuantize: "fuseLinearStaticQuantize must be a boolean",
+      fuseGeluMulStaticQuantize: "fuseGeluMulStaticQuantize must be a boolean",
       packedStaticQuantize: "packedStaticQuantize must be a boolean",
     };
     for (const [key, message] of Object.entries(messages)) {
