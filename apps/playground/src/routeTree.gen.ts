@@ -15,6 +15,7 @@ import { Route as AttentionBenchRouteImport } from "./routes/attention-bench";
 import { Route as BirefnetRouteImport } from "./routes/birefnet";
 import { Route as DepthAnythingRouteImport } from "./routes/depth-anything";
 import { Route as Gemma4RouteImport } from "./routes/gemma4";
+import { Route as Gemma4BenchRouteImport } from "./routes/gemma4-bench";
 import { Route as GeometrySweepRouteImport } from "./routes/geometry-sweep";
 import { Route as IrodoriRouteImport } from "./routes/irodori";
 import { Route as KernelCheckRouteImport } from "./routes/kernel-check";
@@ -50,6 +51,11 @@ const DepthAnythingRoute = DepthAnythingRouteImport.update({
 const Gemma4Route = Gemma4RouteImport.update({
   id: "/gemma4",
   path: "/gemma4",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const Gemma4BenchRoute = Gemma4BenchRouteImport.update({
+  id: "/gemma4-bench",
+  path: "/gemma4-bench",
   getParentRoute: () => rootRouteImport,
 } as any);
 const GeometrySweepRoute = GeometrySweepRouteImport.update({
@@ -90,6 +96,7 @@ export interface FileRoutesByFullPath {
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
   "/gemma4": typeof Gemma4Route;
+  "/gemma4-bench": typeof Gemma4BenchRoute;
   "/geometry-sweep": typeof GeometrySweepRoute;
   "/irodori": typeof IrodoriRoute;
   "/kernel-check": typeof KernelCheckRoute;
@@ -104,6 +111,7 @@ export interface FileRoutesByTo {
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
   "/gemma4": typeof Gemma4Route;
+  "/gemma4-bench": typeof Gemma4BenchRoute;
   "/geometry-sweep": typeof GeometrySweepRoute;
   "/irodori": typeof IrodoriRoute;
   "/kernel-check": typeof KernelCheckRoute;
@@ -119,6 +127,7 @@ export interface FileRoutesById {
   "/birefnet": typeof BirefnetRoute;
   "/depth-anything": typeof DepthAnythingRoute;
   "/gemma4": typeof Gemma4Route;
+  "/gemma4-bench": typeof Gemma4BenchRoute;
   "/geometry-sweep": typeof GeometrySweepRoute;
   "/irodori": typeof IrodoriRoute;
   "/kernel-check": typeof KernelCheckRoute;
@@ -135,6 +144,7 @@ export interface FileRouteTypes {
     | "/birefnet"
     | "/depth-anything"
     | "/gemma4"
+    | "/gemma4-bench"
     | "/geometry-sweep"
     | "/irodori"
     | "/kernel-check"
@@ -149,6 +159,7 @@ export interface FileRouteTypes {
     | "/birefnet"
     | "/depth-anything"
     | "/gemma4"
+    | "/gemma4-bench"
     | "/geometry-sweep"
     | "/irodori"
     | "/kernel-check"
@@ -163,6 +174,7 @@ export interface FileRouteTypes {
     | "/birefnet"
     | "/depth-anything"
     | "/gemma4"
+    | "/gemma4-bench"
     | "/geometry-sweep"
     | "/irodori"
     | "/kernel-check"
@@ -178,6 +190,7 @@ export interface RootRouteChildren {
   BirefnetRoute: typeof BirefnetRoute;
   DepthAnythingRoute: typeof DepthAnythingRoute;
   Gemma4Route: typeof Gemma4Route;
+  Gemma4BenchRoute: typeof Gemma4BenchRoute;
   GeometrySweepRoute: typeof GeometrySweepRoute;
   IrodoriRoute: typeof IrodoriRoute;
   KernelCheckRoute: typeof KernelCheckRoute;
@@ -228,6 +241,13 @@ declare module "@tanstack/react-router" {
       path: "/gemma4";
       fullPath: "/gemma4";
       preLoaderRoute: typeof Gemma4RouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/gemma4-bench": {
+      id: "/gemma4-bench";
+      path: "/gemma4-bench";
+      fullPath: "/gemma4-bench";
+      preLoaderRoute: typeof Gemma4BenchRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/geometry-sweep": {
@@ -282,6 +302,7 @@ const rootRouteChildren: RootRouteChildren = {
   BirefnetRoute: BirefnetRoute,
   DepthAnythingRoute: DepthAnythingRoute,
   Gemma4Route: Gemma4Route,
+  Gemma4BenchRoute: Gemma4BenchRoute,
   GeometrySweepRoute: GeometrySweepRoute,
   IrodoriRoute: IrodoriRoute,
   KernelCheckRoute: KernelCheckRoute,

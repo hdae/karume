@@ -8,6 +8,7 @@ import type { FileRoutesByPath } from "@tanstack/react-router";
 import {
   AudioLinesIcon,
   BoxesIcon,
+  GaugeIcon,
   Grid3x3Icon,
   type LucideIcon,
   MessageSquareTextIcon,
@@ -116,6 +117,15 @@ export const MODEL_PAGES: readonly ModelPage[] = [
     group: "Benchmarks",
     icon: TimerIcon,
     mounts: [],
+  },
+  {
+    path: "/gemma4-bench",
+    title: "Gemma 4 decode bench",
+    summary:
+      "Decode A/B of regular Gemma 4 and the mobile QAT distribution (model × preset, GPU tap on or off) in interleaved rounds: decode tokens/s, TTFT, prefill, and GPU busy time, dispatches, passes and submits per token.",
+    group: "Benchmarks",
+    icon: GaugeIcon,
+    mounts: ["gemma4", "gemma4-qat"],
   },
   {
     path: "/geometry-sweep",

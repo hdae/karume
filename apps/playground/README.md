@@ -968,6 +968,69 @@ key, workgroups, reps, raw rounds and wall-clock rounds. **Copy record** copies 
 
 Absolute times compare only on one machine; across machines, compare the ratios.
 
+## The Gemma 4 decode bench page
+
+A decode A/B of regular Gemma 4 (`gemma.Pipeline`, mount `gemma4`) and the mobile QAT distribution
+(`gemma4Qat.Pipeline`, mount `gemma4-qat`), kept as a page so each measurement wave reuses it
+(ADR 0127 decision 5). An **arm** is a model of either distribution at one preset, with the GPU tap
+on or off. The page builds each arm's pipeline the way the chat page does (`buildGemmaPipeline`),
+always over the **direct route**: the QAT distribution has no HF-compatible route, so the regular one
+is read the same way and the source stays out of the comparison.
+
+**The GPU tap** (`src/models/gemma4-bench/tap.ts`). The page acquires its GPU through a wrapper of
+`navigator.gpu` (`acquireGpu({ subgroups: "available", gpu: tap.gpu })`). The wrapper requests
+`timestamp-query` when the adapter lists it and hides it from `device.features`, so the runtime sees
+a device without timing (`gpuTimingEnabled` false) and keeps its own pass structure (one chunk = one
+compute pass). With the tap on, every compute pass gets a pair of pass-boundary timestamps, resolved
+right after the pass, and passes, dispatches and submits are counted. karume's own timing mode is not
+used: it encodes one dispatch per pass (ADR 0021), about 4 µs more per dispatch, and QAT runs about
+210 more dispatches per token, so it would bias this very A/B. With the tap off, the same device's
+calls pass straight through (a flag check per command encoder and per submit): a wall-clock control
+that shows what the tap costs. The page refuses to run if the device reports `gpuTimingEnabled`.
+
+| Control | What it does |
+| --- | --- |
+| Arms | One row per arm: Model (every model of both manifests; a QAT model `gemma4Qat.Pipeline` does not accept is disabled), Preset (the model's `defaultQuant` preselected), GPU tap. Starts with each distribution's default model at its default preset. Arm 1 is the one the summary compares the others with. |
+| Prompts | Two fixed prompts, run in this order in every visit. The story request renders to 21 tokens (17 distinct ids); the GPU explainer to 60 tokens (48 distinct). A prompt with 32 or more distinct ids makes a PLE block whole-resident on the host: the condition under which the PLE row cache once stopped admitting rows (perf-ledger H-41). Every chat records the distinct count it measured, and the run table flags a prompt that falls on the wrong side. |
+| Chats | Chats per prompt per visit (default 3). Chat 0 is the first after the build: recorded, and left out of the summary. |
+| New tokens | `maxNewTokens` of every chat (default 128). |
+| Rounds | Default 4. Even rounds visit the arms in order, odd rounds in reverse (ABBA for two arms). Every visit builds its arm's pipeline, runs its chats and releases it before the next visit, so two models are never resident at once. |
+| Sampler | **Greedy** (default: every arm and round decodes the same way) or the distribution's sampler with seed 0. Always passed explicitly. The bench never passes `onRunDiagnostics`: with it every greedy token reads the whole logits row back (the chat page's "Collect Session diagnostics"), which changes the decode path. |
+| Run | Runs every visit. Cancel (status card) stops at the next step boundary; the record keeps what finished. |
+
+Per chat (one `chat` call — one sequence — from `performance.now()` in the page):
+
+- **Decode tokens/s, ms/token**: (`tokens` − 1) over first token → end of the text stream, as on the
+  chat page (the prefill and the first token are excluded; a stop token counts as one).
+- **TTFT** and **prefill tokens/s** (the rendered prompt over `chat` → last committed chunk), apart.
+- With the tap: **GPU ms/token** (Σ pass end − begin over the decode window ÷ decode tokens) and its
+  median over the token-to-token intervals; **wall − GPU** per token; **dispatches, passes, submits
+  per token**; the same for the prefill window. The decode window starts at what the tap had recorded
+  when the first token arrived.
+- The sha256 of the generated token ids (a greedy arm repeats it in every round).
+
+The **summary** covers the warm chats of every round per arm and prompt: median and min (for rates,
+median and max) — the development machine shows transient 5–45× slow kernels, which move a median
+less than a mean and a min not at all — the ratio of each arm's median decode ms/token to arm 1's,
+and how many distinct outputs the warm chats produced.
+
+**Download record (JSON)** saves `gemma4-bench_<UTC timestamp>.json` (`format:
+"karume-playground-gemma4-bench/1"`): `recordEnvironment`, `environmentKey` (ADR 0106's
+`chrome-<adapter name>` rule; absent outside Chromium), `timestampQuery`, `complete` (false when the
+bench failed or was cancelled), `settings`, `arms` (mount, directory, manifest sha256, source,
+pipeline, model, preset, tap, the sampler passed), `visits` (round, arm, load seconds), `chats` (every
+chat, cold ones included, with its stop, prompt ids and measurement) and `summary`. **Copy record**
+copies the same JSON.
+
+Caveats:
+
+- Chrome rounds GPU timestamps to 100 µs unless chrome://flags/#enable-webgpu-developer-features is
+  on.
+- The status card's elapsed-time ticker re-renders the page every 250 ms while a chat runs (the
+  tables are memoized); the page's own updates land between chats.
+- A tap-off arm still runs on the device with `timestamp-query` enabled (unused).
+- Absolute times compare only on one machine.
+
 ## The geometry sweep page
 
 This page measures the GEMM tile geometries on the browser's GPU and writes the record a geometry

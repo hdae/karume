@@ -1,0 +1,758 @@
+/**
+ * The Gemma 4 decode bench: A/B arms of regular Gemma 4 (`gemma.Pipeline`) and the mobile QAT
+ * distribution (`gemma4Qat.Pipeline`) — model × preset, with the GPU tap on or off — run over a
+ * fixed prompt set in interleaved rounds, with decode rates from the stream timings and the tap's GPU
+ * busy time, dispatches, passes and submits per token, and a record of every chat.
+ *
+ * The page's GPU is acquired through the tap (`tap.ts`), so karume's timing mode stays off and the
+ * product's own pass structure is what is timed. One pipeline is resident at a time: each visit
+ * builds its arm's pipeline and releases it before the next.
+ */
+
+import { chatPrompt } from "@karume/models/gemma";
+import { PlusIcon, Trash2Icon } from "lucide-react";
+import { memo, useMemo, useState } from "react";
+
+import { ChoiceSelect } from "@/components/choice-select";
+import { ErrorAlert } from "@/components/error-alert";
+import { Field } from "@/components/field";
+import { MountBadges } from "@/components/mount-badges";
+import { PresetSelect } from "@/components/preset-select";
+import { RecordActions } from "@/components/record-actions";
+import { RunStatusCard } from "@/components/run-status-card";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { useDistributionIndex } from "@/hooks/use-distribution-index";
+import { type GpuOptions, useGpu } from "@/hooks/use-gpu";
+import { type ManifestState, useManifest } from "@/hooks/use-manifest";
+import { type RunProgress, useRunTask } from "@/hooks/use-run-task";
+import { mountStatus, type PipelineSource } from "@/lib/distributions";
+import { fileStamp } from "@/lib/download";
+import { type RecordEnvironment, recordEnvironment } from "@/lib/environment";
+import { manifestPresets } from "@/lib/presets";
+import { sha256Hex, sourceRecord, type Spread } from "@/lib/record";
+import {
+  GEMMA_MOUNTS,
+  type GemmaManifests,
+  type GemmaMount,
+  gemmaModelChoices,
+  modelKeyValue,
+  parseModelKey,
+} from "@/models/gemma4/settings";
+import { buildGemmaPipeline, type GemmaPipeline } from "@/models/gemma4/use-gemma-pipeline";
+
+import {
+  type ArmDraft,
+  armLabel,
+  BENCH_PROMPTS,
+  type BenchForm,
+  type BenchPromptId,
+  type BenchSettings,
+  benchPrompt,
+  defaultArmDrafts,
+  INITIAL_BENCH_FORM,
+  parseBenchForm,
+  PLE_DISTINCT_ID_THRESHOLD,
+  resolveArm,
+  SAMPLER_CHOICES,
+  samplerOf,
+} from "./plan";
+import { type ArmDistribution, buildBenchRecord, chromeEnvironmentKey } from "./record";
+import {
+  type BenchPipeline,
+  type BenchProgress,
+  type ChatRecord,
+  type RunArm,
+  runDecodeBench,
+  type VisitRecord,
+} from "./run";
+import { type ArmPromptSummary, summarizeRuns } from "./summary";
+import { createGpuTap, type DeviceProbe, type GpuTap } from "./tap";
+
+/**
+ * Both distributions are read over the direct route: the QAT distribution has no HF-compatible
+ * route, and reading the regular one the same way keeps the source out of the comparison.
+ */
+const DIRECT_SOURCE: PipelineSource = { kind: "direct" };
+
+/** What one press of Run started, and what has landed since (kept when a later step fails). */
+type BenchResult = {
+  readonly environment: RecordEnvironment;
+  readonly timestampQuery: boolean;
+  readonly settings: BenchSettings;
+  readonly arms: readonly RunArm[];
+  readonly distributions: Partial<Record<GemmaMount, ArmDistribution>>;
+  readonly visits: readonly VisitRecord[];
+  readonly chats: readonly ChatRecord[];
+  readonly complete: boolean;
+};
+
+const manifestOf = (state: ManifestState) => (state.kind === "ready" ? state.manifest : undefined);
+
+/** What the loop needs of a Gemma 4 pipeline (its own tokenizer renders the prompt). */
+const benchPipelineOf = (pipeline: GemmaPipeline): BenchPipeline => ({
+  encodePrompt: (messages) => chatPrompt(pipeline.tokenizer, messages),
+  chat: (messages, options) => pipeline.chat(messages, options),
+  dispose: () => pipeline.dispose(),
+});
+
+const progressOf = (
+  progress: BenchProgress,
+  arms: readonly RunArm[],
+  chats: number,
+): RunProgress => {
+  const count = { done: progress.visit.visit, total: progress.visits, unit: "visits" };
+  const where = `visit ${progress.visit.visit + 1} / ${progress.visits} (round ${progress.visit.round + 1}) · arm ${progress.visit.arm + 1} ${armLabel(arms[progress.visit.arm])}`;
+  return progress.kind === "loading"
+    ? { stage: `${where} · building the pipeline`, count }
+    : {
+        stage: `${where} · ${benchPrompt(progress.prompt).label} chat ${progress.chat + 1} / ${chats}${progress.chat === 0 ? " (cold)" : ""}`,
+        count,
+      };
+};
+
+export const Gemma4BenchPage = () => {
+  // The tap wraps the browser's GPU once per page instance (nothing is touched until acquireGpu).
+  const [tap] = useState<GpuTap | undefined>(() => {
+    const gpu: GPU | undefined = navigator.gpu;
+    return gpu === undefined ? undefined : createGpuTap(gpu);
+  });
+  if (tap === undefined) {
+    return <ErrorAlert title="GPU" error={new Error("This browser has no navigator.gpu")} />;
+  }
+  return <BenchBody tap={tap} />;
+};
+
+const BenchBody = ({ tap }: { tap: GpuTap }) => {
+  // Stable for the page's life (useGpu re-acquires when its options object changes).
+  const [gpuOptions] = useState<GpuOptions>(() => ({ subgroups: "available", gpu: tap.gpu }));
+  const gpu = useGpu(gpuOptions);
+  const readyGpu = gpu.state.kind === "ready" ? gpu.state.gpu : undefined;
+  const probe: DeviceProbe | undefined =
+    readyGpu === undefined ? undefined : tap.probe(readyGpu.device);
+
+  const index = useDistributionIndex();
+  const distributionIndex = index.kind === "ready" ? index.index : undefined;
+  const regularStatus = mountStatus(distributionIndex, "gemma4");
+  const qatStatus = mountStatus(distributionIndex, "gemma4-qat");
+  const regularManifest = useManifest("gemma4", regularStatus);
+  const qatManifest = useManifest("gemma4-qat", qatStatus);
+  const manifestStates: Readonly<Record<GemmaMount, ManifestState>> = {
+    gemma4: regularManifest,
+    "gemma4-qat": qatManifest,
+  };
+  const manifests = useMemo<GemmaManifests>(() => {
+    const regular = manifestOf(regularManifest);
+    const qat = manifestOf(qatManifest);
+    return {
+      ...(regular === undefined ? {} : { gemma4: regular }),
+      ...(qat === undefined ? {} : { "gemma4-qat": qat }),
+    };
+  }, [regularManifest, qatManifest]);
+  const distributions = useMemo(() => {
+    const facts: Partial<Record<GemmaMount, ArmDistribution>> = {};
+    if (regularManifest.kind === "ready" && regularStatus !== undefined) {
+      facts.gemma4 = { directory: regularStatus.directory, manifestSha256: regularManifest.sha256 };
+    }
+    if (qatManifest.kind === "ready" && qatStatus !== undefined) {
+      facts["gemma4-qat"] = { directory: qatStatus.directory, manifestSha256: qatManifest.sha256 };
+    }
+    return facts;
+  }, [regularManifest, qatManifest, regularStatus, qatStatus]);
+
+  // The arms: the defaults until edited.
+  const [armEdit, setArmEdit] = useState<readonly ArmDraft[] | undefined>(undefined);
+  const drafts = useMemo(() => armEdit ?? defaultArmDrafts(manifests), [armEdit, manifests]);
+  const resolutions = useMemo(
+    () => drafts.map((draft) => resolveArm(draft, manifests)),
+    [drafts, manifests],
+  );
+  const modelChoices = useMemo(() => gemmaModelChoices(manifests), [manifests]);
+  const updateDraft = (id: number, patch: Partial<Omit<ArmDraft, "id">>): void =>
+    setArmEdit(drafts.map((draft) => (draft.id === id ? { ...draft, ...patch } : draft)));
+  const removeDraft = (id: number): void => setArmEdit(drafts.filter((draft) => draft.id !== id));
+  const addDraft = (): void => {
+    const last = drafts.at(-1);
+    const key = last?.key ?? defaultArmDrafts(manifests)[0]?.key;
+    if (key === undefined) return;
+    const id = Math.max(-1, ...drafts.map((draft) => draft.id)) + 1;
+    setArmEdit([
+      ...drafts,
+      { id, key, ...(last?.quant === undefined ? {} : { quant: last.quant }), tap: true },
+    ]);
+  };
+
+  const [form, setForm] = useState<BenchForm>(INITIAL_BENCH_FORM);
+  const parsed = useMemo(() => parseBenchForm(form), [form]);
+  const togglePrompt = (id: BenchPromptId, checked: boolean): void =>
+    setForm({
+      ...form,
+      prompts: checked ? [...form.prompts, id] : form.prompts.filter((prompt) => prompt !== id),
+    });
+
+  const task = useRunTask<void>(gpu);
+  const running = task.running;
+  const [result, setResult] = useState<BenchResult | undefined>(undefined);
+
+  const arms = resolutions.flatMap((resolution) => (resolution.ok ? [resolution.arm] : []));
+  const armErrors = resolutions.flatMap((resolution, armIndex) =>
+    resolution.ok ? [] : [`Arm ${armIndex + 1}: ${resolution.error}`],
+  );
+  const timingRefused = readyGpu?.gpuTimingEnabled === true;
+  const canRun =
+    readyGpu !== undefined &&
+    probe !== undefined &&
+    !timingRefused &&
+    parsed.ok &&
+    drafts.length > 0 &&
+    armErrors.length === 0 &&
+    arms.every(({ mount }) => distributions[mount] !== undefined) &&
+    !running;
+
+  const run = (): void => {
+    if (!canRun || !parsed.ok || readyGpu === undefined || probe === undefined) return;
+    const settings = parsed.value;
+    const runArms: readonly RunArm[] = arms.map((arm) => ({
+      ...arm,
+      sampler: samplerOf(settings.sampler, arm.declaredSampler),
+    }));
+    const started: BenchResult = {
+      environment: recordEnvironment(readyGpu),
+      timestampQuery: probe.timestamps,
+      settings,
+      arms: runArms,
+      distributions,
+      visits: [],
+      chats: [],
+      complete: false,
+    };
+    setResult(started);
+    // Updates only the result this press started (a later press replaces it).
+    const update = (change: (current: BenchResult) => BenchResult): void =>
+      setResult((current) => (current?.arms === runArms ? change(current) : current));
+    void task.start(async ({ signal, report }) => {
+      await runDecodeBench({
+        arms: runArms,
+        settings,
+        signal,
+        dependencies: {
+          build: async (arm, buildSignal) =>
+            benchPipelineOf(
+              await buildGemmaPipeline({
+                gpu: readyGpu,
+                request: {
+                  mount: arm.mount,
+                  model: arm.model,
+                  quant: arm.quant,
+                  source: DIRECT_SOURCE,
+                  speculative: false,
+                },
+                signal: buildSignal,
+              }),
+            ),
+          probe,
+          now: () => performance.now(),
+          sha256: sha256Hex,
+        },
+        onProgress: (progress) => report(progressOf(progress, runArms, settings.chats)),
+        onVisit: (visit) =>
+          update((current) => ({ ...current, visits: [...current.visits, visit] })),
+        onChat: (chat) => update((current) => ({ ...current, chats: [...current.chats, chat] })),
+      });
+      update((current) => ({ ...current, complete: true }));
+    });
+  };
+
+  const record = useMemo(
+    () =>
+      result === undefined || result.visits.length === 0
+        ? undefined
+        : buildBenchRecord({
+            environment: result.environment,
+            timestampQuery: result.timestampQuery,
+            complete: result.complete,
+            settings: result.settings,
+            arms: result.arms,
+            distributions: result.distributions,
+            source: sourceRecord(DIRECT_SOURCE),
+            visits: result.visits,
+            chats: result.chats,
+          }),
+    [result],
+  );
+  const summary = useMemo(
+    () =>
+      result === undefined
+        ? []
+        : summarizeRuns(result.chats, result.arms.length, result.settings.prompts),
+    [result],
+  );
+  const environmentKey =
+    readyGpu === undefined
+      ? undefined
+      : chromeEnvironmentKey(navigator.userAgent, readyGpu.adapterInfo);
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-2">
+        <h1 className="text-2xl font-semibold">Gemma 4 decode bench</h1>
+        <MountBadges index={index} mounts={GEMMA_MOUNTS} />
+      </div>
+
+      {index.kind === "error" ? (
+        <ErrorAlert title="Distribution index" error={index.error} />
+      ) : null}
+      {GEMMA_MOUNTS.map((mount) => {
+        const state = manifestStates[mount];
+        return state.kind === "error" ? (
+          <ErrorAlert key={mount} title={`Manifest (${mount})`} error={state.error} />
+        ) : null;
+      })}
+      {regularManifest.kind === "missing" && qatManifest.kind === "missing" ? (
+        <Alert>
+          <AlertTitle>No Gemma 4 distribution</AlertTitle>
+          <AlertDescription>
+            The dev server has neither <code>{regularManifest.directory}</code> nor{" "}
+            <code>{qatManifest.directory}</code>. Put a distribution there and reload.
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      {probe?.timestamps === false ? (
+        <Alert id="bench-no-timestamps">
+          <AlertTitle>No timestamp-query on this adapter</AlertTitle>
+          <AlertDescription>
+            The tap still counts passes, dispatches and submits, but GPU busy time and the wall −
+            GPU gap are not measured.
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      {timingRefused ? (
+        <ErrorAlert
+          title="GPU timing is on"
+          error={
+            new Error(
+              "The device reports gpuTimingEnabled: the tap failed to hide timestamp-query, and karume would encode one dispatch per pass. The bench does not run on it.",
+            )
+          }
+        />
+      ) : null}
+
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]">
+        <div className="flex flex-col gap-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>Arms</CardTitle>
+              <CardDescription>
+                A model of either distribution at one preset. Every visit builds the arm&apos;s
+                pipeline, runs its chats and releases it before the next visit, so two models are
+                never resident at once. Both distributions are read over the direct route (
+                <code>/models/</code>, plain fetch): the QAT one has no HF-compatible route, so the
+                regular one is read the same way and the source stays out of the comparison. Arm 1
+                is the one the summary compares the others with.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-4">
+              {drafts.map((draft, armIndex) => {
+                const manifest = manifests[draft.key.mount];
+                const presets =
+                  manifest?.models[draft.key.model] === undefined
+                    ? undefined
+                    : manifestPresets(manifest, draft.key.model);
+                const resolution = resolutions[armIndex];
+                return (
+                  <div key={draft.id} className="flex flex-col gap-3 rounded-lg border p-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">Arm {armIndex + 1}</span>
+                      <Button
+                        id={`bench-arm-${draft.id}-remove`}
+                        variant="ghost"
+                        size="xs"
+                        onClick={() => removeDraft(draft.id)}
+                        disabled={running || drafts.length === 1}
+                      >
+                        <Trash2Icon />
+                        Remove
+                      </Button>
+                    </div>
+                    <Field id={`bench-arm-${draft.id}-model`} label="Model">
+                      <ChoiceSelect
+                        id={`bench-arm-${draft.id}-model`}
+                        value={modelKeyValue(draft.key)}
+                        choices={modelChoices}
+                        onChange={(value) => {
+                          const key = parseModelKey(value);
+                          // A new model starts at its default preset.
+                          if (key !== undefined) updateDraft(draft.id, { key, quant: undefined });
+                        }}
+                        disabled={running || modelChoices.length === 0}
+                      />
+                    </Field>
+                    {presets === undefined || !resolution?.ok ? null : (
+                      <PresetSelect
+                        id={`bench-arm-${draft.id}-preset`}
+                        value={resolution.arm.quant}
+                        presets={presets.presets}
+                        defaultQuant={presets.defaultQuant}
+                        onChange={(quant) => updateDraft(draft.id, { quant })}
+                        disabled={running}
+                      />
+                    )}
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id={`bench-arm-${draft.id}-tap`}
+                        checked={draft.tap}
+                        onCheckedChange={(checked) => updateDraft(draft.id, { tap: checked })}
+                        disabled={running}
+                      />
+                      <Label htmlFor={`bench-arm-${draft.id}-tap`}>GPU tap</Label>
+                    </div>
+                    {resolution?.ok === false ? (
+                      <p className="text-xs text-destructive">{resolution.error}</p>
+                    ) : null}
+                  </div>
+                );
+              })}
+              <Button
+                id="bench-add-arm"
+                variant="outline"
+                size="sm"
+                className="self-start"
+                onClick={addDraft}
+                disabled={running || modelChoices.length === 0}
+              >
+                <PlusIcon />
+                Add arm
+              </Button>
+              <p className="text-xs text-muted-foreground">
+                GPU tap on: every compute pass gets a pair of pass-boundary timestamps, and passes,
+                dispatches and submits are counted — in the product&apos;s own pass structure
+                (karume&apos;s timing mode stays off; it would encode one dispatch per pass and add
+                about 4 µs per dispatch, which biases QAT&apos;s extra dispatches). Off: a
+                wall-clock control on the same device, with the tap only passing calls through.
+                Compare a tap-off arm with a tap-on arm of the same model to see what the tap costs.
+              </p>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Workload</CardTitle>
+              <CardDescription>
+                Every visit runs the chosen prompts in this order, each as fresh chats.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-4">
+              <div className="flex flex-col gap-2">
+                {BENCH_PROMPTS.map((prompt) => (
+                  <Label key={prompt.id} className="flex items-start gap-2 font-normal">
+                    <Checkbox
+                      id={`bench-prompt-${prompt.id}`}
+                      checked={form.prompts.includes(prompt.id)}
+                      onCheckedChange={(checked) => togglePrompt(prompt.id, checked)}
+                      disabled={running}
+                    />
+                    <span>
+                      {prompt.label}{" "}
+                      <span className="text-muted-foreground">
+                        ({prompt.distinctIds === "below" ? "fewer than" : "at least"}{" "}
+                        {PLE_DISTINCT_ID_THRESHOLD} distinct ids): {prompt.text}
+                      </span>
+                    </span>
+                  </Label>
+                ))}
+                <p className="text-xs text-muted-foreground">
+                  A prompt with {PLE_DISTINCT_ID_THRESHOLD} or more distinct token ids makes a PLE
+                  block whole-resident on the host — the condition under which the PLE row cache
+                  once stopped admitting rows (perf-ledger H-41). One prompt sits on each side of
+                  it; every chat records the distinct count it measured.
+                </p>
+              </div>
+              <div className="grid grid-cols-3 gap-4">
+                <Field id="bench-chats" label="Chats" hint="Per prompt per visit; chat 0 is cold.">
+                  <Input
+                    id="bench-chats"
+                    inputMode="numeric"
+                    value={form.chats}
+                    onChange={(event) => setForm({ ...form, chats: event.target.value })}
+                    disabled={running}
+                  />
+                </Field>
+                <Field id="bench-new-tokens" label="New tokens" hint="maxNewTokens per chat.">
+                  <Input
+                    id="bench-new-tokens"
+                    inputMode="numeric"
+                    value={form.newTokens}
+                    onChange={(event) => setForm({ ...form, newTokens: event.target.value })}
+                    disabled={running}
+                  />
+                </Field>
+                <Field id="bench-rounds" label="Rounds" hint="ABBA order.">
+                  <Input
+                    id="bench-rounds"
+                    inputMode="numeric"
+                    value={form.rounds}
+                    onChange={(event) => setForm({ ...form, rounds: event.target.value })}
+                    disabled={running}
+                  />
+                </Field>
+              </div>
+              <p className="-mt-2 text-xs text-muted-foreground">
+                Chat 0 of each prompt in a visit is the first after the build; it is recorded and
+                left out of the summary. Arms are visited in order on even rounds and in reverse on
+                odd ones (A B, B A, …), so a slow drift of the machine lands on every arm alike.
+              </p>
+              <Field
+                id="bench-sampler"
+                label="Sampler"
+                hint="Greedy by default, so every arm and round decodes the same way. The bench never collects Session diagnostics: with them every greedy token reads the whole logits row back, which changes the decode path."
+              >
+                <ChoiceSelect
+                  id="bench-sampler"
+                  value={form.sampler}
+                  choices={SAMPLER_CHOICES}
+                  onChange={(sampler) => setForm({ ...form, sampler })}
+                  disabled={running}
+                />
+              </Field>
+              {parsed.ok ? null : (
+                <p className="text-xs text-destructive">{parsed.errors.join(" ")}</p>
+              )}
+              {armErrors.length === 0 ? null : (
+                <p className="text-xs text-destructive">{armErrors.join(" ")}</p>
+              )}
+              <Button id="bench-run" onClick={run} disabled={!canRun}>
+                Run
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+
+        <div className="flex flex-col gap-6">
+          <RunStatusCard
+            gpu={gpu.state}
+            onReacquire={gpu.reacquire}
+            task={task}
+            rows={[
+              [
+                "Timing",
+                probe === undefined
+                  ? "—"
+                  : probe.timestamps
+                    ? "pass-boundary timestamps (hidden from karume; its timing mode is off)"
+                    : "counts only (no timestamp-query)",
+              ],
+              ["Environment key", environmentKey ?? "— (not a Chromium adapter name)"],
+              [
+                "Progress",
+                result === undefined
+                  ? "—"
+                  : `${result.visits.length} visits, ${result.chats.length} chats${result.complete ? " (complete)" : ""}`,
+              ],
+            ]}
+          />
+
+          {summary.length === 0 || result === undefined ? null : (
+            <Card>
+              <CardHeader>
+                <CardTitle>Summary</CardTitle>
+                <CardDescription>
+                  Warm chats only, over every round: median and min (for rates, median and max) —
+                  this machine shows transient 5–45× slow kernels, which move a median less than a
+                  mean and a min not at all. Decode excludes the prefill and the first token. Chrome
+                  rounds GPU timestamps to 100 µs unless
+                  chrome://flags/#enable-webgpu-developer-features is on.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <SummaryTable summary={summary} arms={result.arms} />
+              </CardContent>
+            </Card>
+          )}
+
+          {record === undefined ? null : (
+            <Card>
+              <CardHeader>
+                <CardTitle>Record</CardTitle>
+                <CardDescription>
+                  {record.complete ? "Complete" : "Incomplete (running, failed or cancelled)"}:{" "}
+                  {record.visits.length} visits, {record.chats.length} chats (cold ones included),
+                  the arms with their distributions, the settings and the summary.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-4">
+                <RecordActions
+                  record={record}
+                  filename={`gemma4-bench_${fileStamp(new Date(record.recordedAt))}.json`}
+                />
+                <ChatTable chats={record.chats} arms={result?.arms ?? []} />
+              </CardContent>
+            </Card>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const fixed = (value: number | undefined, digits: number): string =>
+  value === undefined ? "—" : value.toFixed(digits);
+
+/** `median · min` (or `· max` for a rate, where higher is better). */
+const spreadText = (
+  spread: Spread | undefined,
+  digits: number,
+  best: "min" | "max" = "min",
+): string =>
+  spread === undefined ? "—" : `${spread.median.toFixed(digits)} · ${spread[best].toFixed(digits)}`;
+
+/** Memoized: the status ticker re-renders the page while chats run. */
+const SummaryTable = memo(
+  ({ summary, arms }: { summary: readonly ArmPromptSummary[]; arms: readonly RunArm[] }) => (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Arm</TableHead>
+          <TableHead>Prompt</TableHead>
+          <TableHead className="text-right">Warm</TableHead>
+          <TableHead className="text-right">Decode tok/s</TableHead>
+          <TableHead className="text-right">Decode ms/token</TableHead>
+          <TableHead className="text-right">vs arm 1</TableHead>
+          <TableHead className="text-right">TTFT ms</TableHead>
+          <TableHead className="text-right">Prefill tok/s</TableHead>
+          <TableHead className="text-right">GPU ms/token</TableHead>
+          <TableHead className="text-right">Wall − GPU ms</TableHead>
+          <TableHead className="text-right">Dispatches · passes · submits / token</TableHead>
+          <TableHead className="text-right">Outputs</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {summary.map((entry) => {
+          const { spreads } = entry;
+          return (
+            <TableRow key={`${entry.arm}-${entry.prompt}`}>
+              <TableCell className="text-xs">
+                {entry.arm + 1} · {armLabel(arms[entry.arm])}
+              </TableCell>
+              <TableCell className="text-xs">{benchPrompt(entry.prompt).label}</TableCell>
+              <TableCell className="text-right font-mono text-xs">{entry.warmChats}</TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {spreadText(spreads.decodeTokensPerSecond, 1, "max")}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {spreadText(spreads.decodeMsPerToken, 3)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {entry.decodeVsFirstArm === undefined
+                  ? ""
+                  : `×${entry.decodeVsFirstArm.toFixed(3)}`}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {spreadText(spreads.ttftMs, 1)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {spreadText(spreads.prefillTokensPerSecond, 0, "max")}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {spreadText(spreads.gpuBusyMsPerToken, 3)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {spreadText(spreads.wallMinusGpuMsPerToken, 3)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {spreads.dispatchesPerToken === undefined
+                  ? "—"
+                  : `${fixed(spreads.dispatchesPerToken.median, 1)} · ${fixed(spreads.passesPerToken?.median, 2)} · ${fixed(spreads.submitsPerToken?.median, 2)}`}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {entry.distinctOutputs === 1 ? "identical" : `${entry.distinctOutputs} distinct`}
+              </TableCell>
+            </TableRow>
+          );
+        })}
+      </TableBody>
+    </Table>
+  ),
+);
+SummaryTable.displayName = "SummaryTable";
+
+const ChatTable = memo(
+  ({ chats, arms }: { chats: readonly ChatRecord[]; arms: readonly RunArm[] }) => (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead className="text-right">Visit</TableHead>
+          <TableHead>Arm</TableHead>
+          <TableHead>Prompt · chat</TableHead>
+          <TableHead className="text-right">Prompt ids (distinct)</TableHead>
+          <TableHead>Stop</TableHead>
+          <TableHead className="text-right">Decode tok/s</TableHead>
+          <TableHead className="text-right">TTFT ms</TableHead>
+          <TableHead className="text-right">Prefill tok/s</TableHead>
+          <TableHead className="text-right">GPU ms/token (median)</TableHead>
+          <TableHead className="text-right">Wall − GPU ms</TableHead>
+          <TableHead className="text-right">Dispatches / token</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {chats.map((chat) => {
+          const { measurement } = chat;
+          const perToken = measurement.tap?.perToken;
+          return (
+            <TableRow
+              key={`${chat.visit}-${chat.prompt}-${chat.chat}`}
+              className={chat.cold ? "text-muted-foreground" : undefined}
+            >
+              <TableCell className="text-right font-mono text-xs">{chat.visit + 1}</TableCell>
+              <TableCell className="text-xs">
+                {chat.arm + 1} · {arms[chat.arm] === undefined ? "" : armLabel(arms[chat.arm])}
+              </TableCell>
+              <TableCell className="text-xs">
+                {benchPrompt(chat.prompt).label} · {chat.chat + 1}
+                {chat.cold ? " (cold)" : ""}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {chat.promptTokens} ({chat.distinctPromptIds}
+                {chat.meetsDistinctIdCondition ? "" : " — off its side of the threshold"})
+              </TableCell>
+              <TableCell className="text-xs">
+                {chat.stop.reason} · {chat.stop.tokens}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {fixed(measurement.decodeTokensPerSecond, 1)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {fixed(measurement.ttftMs, 1)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {fixed(measurement.prefillTokensPerSecond, 0)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {fixed(perToken?.gpuBusyMs, 3)} ({fixed(perToken?.gpuBusyMsMedian, 3)})
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {fixed(perToken?.wallMinusGpuMs, 3)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {fixed(perToken?.dispatches, 1)}
+              </TableCell>
+            </TableRow>
+          );
+        })}
+      </TableBody>
+    </Table>
+  ),
+);
+ChatTable.displayName = "ChatTable";

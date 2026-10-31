@@ -10,7 +10,7 @@
  * destroyed only after them.
  */
 
-import { Pipeline, type RunPhase } from "@karume/models/gemma";
+import { type FromPretrainedOptions, Pipeline, type RunPhase } from "@karume/models/gemma";
 import * as gemma4Qat from "@karume/models/gemma4-qat";
 import type { GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { type RefObject, useEffect, useState } from "react";
@@ -54,6 +54,43 @@ export type DiagnosticsSink = (diagnostics: SessionDiagnostics, phase: RunPhase)
 const MIB = 2 ** 20;
 
 /**
+ * Builds the pipeline a request names: `gemma.Pipeline` for the `gemma4` mount,
+ * `gemma4Qat.Pipeline` for `gemma4-qat` (no MTP drafter, models `e2b` / `e4b` only — refused
+ * here, before any read). The one build path of the chat page and the decode bench, so both load a
+ * model the same way. Without `onRunDiagnostics` the pipeline keeps its on-GPU greedy selection.
+ */
+export const buildGemmaPipeline = async (input: {
+  readonly gpu: GpuContext;
+  readonly request: Omit<LoadRequest, "diagnostics">;
+  readonly signal: AbortSignal;
+  readonly onRunDiagnostics?: DiagnosticsSink;
+  readonly onProgress?: FromPretrainedOptions["onProgress"];
+}): Promise<GemmaPipeline> => {
+  const { gpu, request, signal, onRunDiagnostics, onProgress } = input;
+  const ref = pretrainedRef(request.source, request.mount);
+  const common = {
+    gpu,
+    quant: request.quant,
+    signal,
+    ...(onRunDiagnostics === undefined ? {} : { onRunDiagnostics }),
+    ...(onProgress === undefined ? {} : { onProgress }),
+  };
+  if (request.mount === "gemma4") {
+    return await Pipeline.fromPretrained(ref, {
+      ...common,
+      model: request.model,
+      ...(request.speculative ? { speculative: {} } : {}),
+    });
+  }
+  if (request.speculative) throw new Error("The QAT distribution has no MTP drafter");
+  const { model } = request;
+  if (!isQatModel(model)) {
+    throw new Error(`gemma4Qat.Pipeline accepts the models e2b and e4b, not '${model}'`);
+  }
+  return await gemma4Qat.Pipeline.fromPretrained(ref, { ...common, model });
+};
+
+/**
  * Disposes a pipeline the page no longer uses. A failure (a flush on a lost device, say) goes to the
  * console — the only place left once the page is gone — and to `report` for the page to show.
  * Resolves when the dispose has settled; never rejects.
@@ -93,11 +130,10 @@ export const useGemmaPipeline = (input: {
       detail: `opening ${request.model} ${request.quant} (${request.source.kind} source)`,
     });
 
-    const build = async (): Promise<GemmaPipeline> => {
-      const ref = pretrainedRef(request.source, request.mount);
-      const common = {
+    const build = (): Promise<GemmaPipeline> =>
+      buildGemmaPipeline({
         gpu,
-        quant: request.quant,
+        request,
         signal: controller.signal,
         ...(request.diagnostics
           ? {
@@ -105,7 +141,7 @@ export const useGemmaPipeline = (input: {
                 diagnostics.current?.(report, phase),
             }
           : {}),
-        onProgress: (progress: { path: string; loaded: number; total: number }) => {
+        onProgress: (progress) => {
           if (controller.signal.aborted) return;
           setState({
             kind: "loading",
@@ -115,21 +151,7 @@ export const useGemmaPipeline = (input: {
             ).toFixed(0)} MiB)`,
           });
         },
-      };
-      if (request.mount === "gemma4") {
-        return await Pipeline.fromPretrained(ref, {
-          ...common,
-          model: request.model,
-          ...(request.speculative ? { speculative: {} } : {}),
-        });
-      }
-      if (request.speculative) throw new Error("The QAT distribution has no MTP drafter");
-      const { model } = request;
-      if (!isQatModel(model)) {
-        throw new Error(`gemma4Qat.Pipeline accepts the models e2b and e4b, not '${model}'`);
-      }
-      return await gemma4Qat.Pipeline.fromPretrained(ref, { ...common, model });
-    };
+      });
 
     // Tracked with its dispose-on-abort, so the device outlives a build the cleanup abandoned.
     void track(
