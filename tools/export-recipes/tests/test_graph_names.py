@@ -64,6 +64,7 @@ ENTRIES: tuple[tuple[str, str, str, str], ...] = (
     ("irodori/export.py", "export_series", "IRODORI_SERIES_ROLES[target]", "IRODORI_SERIES_ROLES"),
     ("minicpm5/export.py", "export_series", "GRAPH_NAME", "GRAPH_NAME"),
     ("minicpm5/export_decode.py", "export_series", "one_shot.GRAPH_NAME", "GRAPH_NAME"),
+    ("qwen3_5/export.py", "write_container", "GRAPH_NAME", "GRAPH_NAME"),
     ("sbv2/export.py", "export_dec", "TARGET_DEC", "TARGET_DEC"),
     ("sbv2/export.py", "export_dp", "TARGET_DP", "TARGET_DP"),
     ("sbv2/export.py", "export_flow", "TARGET_FLOW", "TARGET_FLOW"),

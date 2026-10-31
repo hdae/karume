@@ -70,6 +70,7 @@ EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("gemma4/export_drafter.py", "export_series"),
     ("minicpm5/export.py", "export_series"),
     ("minicpm5/export_decode.py", "export_series"),
+    ("qwen3_5/export.py", "write"),
     ("embeddinggemma/export.py", "export_series"),
     ("deberta/export.py", "export_variant"),
     ("anima/export.py", "emit_target"),
