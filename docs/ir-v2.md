@@ -55,7 +55,7 @@ Grounds: the Consequences of ADR [0108](decisions/0108-container-format.md) and 
   the op handles **only the hidden-side recurrence** (the input-side GEMM is the caller's `linear`). The scan direction is carried
   not by attrs but by the **op name** (the same approach as `gelu` / `gelu_tanh`). No effect on existing IR.
 - Model expansion (2026-10-31): added `gated_delta_scan` as the **extended composite layer** (ADR
-  [0135](decisions/0135-gated-delta-rule-scan.md), proposed — the recurrence of a Gated DeltaNet layer, requested by the
+  [0135](decisions/0135-gated-delta-rule-scan.md), accepted — the recurrence of a Gated DeltaNet layer, requested by the
   MOSS-Image text encoder; upstream's Python loops specialise the length axis in export). **Arity fixed at 5, empty attrs**;
   the value form only (zero initial state, no state output). No effect on existing IR.
 - autoregressive (2026-08-17): added `argmax` as the **Core ATen layer** (ADR

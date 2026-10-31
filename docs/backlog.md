@@ -99,8 +99,7 @@ Node and Deno). The next wave is 0.15.1 — Gemma 4 QAT decode speed (the first 
     decision 2's old "read local bytes" wording; ADR 0005 decision 4 names an ADR 0127 open point as the real-browser acceptance home;
     `packages/test-support/package.json` describes "Deno-shaped test and fs helpers"; `packages/e2e/README.md` says every test there needs
     assets and a GPU (the three core gates and the `*_host*_test.ts` files do not); ADR 0120 points at `WAN_DEFAULT_QUANT` in
-    `tools/export-recipes/wan/distribution.py:343` (now `:440`); ADR 0135's "opt-in lane" → "opt-in case in the family lane" before it is
-    accepted; release-runbook §1 omits the recording mode `KARUME_WGSL_SNAPSHOT=write`.
+    `tools/export-recipes/wan/distribution.py:343` (now `:440`); release-runbook §1 omits the recording mode `KARUME_WGSL_SNAPSHOT=write`.
 - **Barrel imports keep every family's source table (filed 2026-10-28 — found in the naming design of ADR [0136](decisions/0136-models-public-naming.md))**:
   importing anything from the `@karume/models` barrel, even one shared helper such as `encodeWav`, keeps all nine
   source tables (twelve `hdae/karume-*` entries) and a few top-level expressions a bundler cannot prove pure — about 1.4–1.7 KB minified

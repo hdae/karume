@@ -501,7 +501,7 @@ tracked), and the ADR
 
 The evidence is the [GDN scan record](research/2026-10-27-gdn-scan-spike.md) (spike and independent check) with the
 material under `outputs/diag/gdn-scan-2026-10-27/` (not tracked), and ADR
-[0135](decisions/0135-gated-delta-rule-scan.md) (proposed). K-92 and K-93 apply to the op's kernel once it lands.
+[0135](decisions/0135-gated-delta-rule-scan.md) (accepted). K-92 and K-93 apply to the op's kernel once it lands.
 
 | Status | ID | Candidate | Preconditions / kill criterion |
 | ------ | --- | --------- | ------------------------------ |

@@ -459,8 +459,8 @@ strided family applies to values, not to initializers).
 
 NOTE: 2026-10-31 added `gated_delta_scan` (the value form) to the **extended composite layer**
 (outside aten — Karume's own `karume::gated_delta_scan`). ADR
-[0135](decisions/0135-gated-delta-rule-scan.md) is the source of truth; it stays **proposed** until the
-export measurements of entry condition ① are recorded. Grounds = the Gated DeltaNet layers of the
+[0135](decisions/0135-gated-delta-rule-scan.md) is the source of truth (accepted 2026-10-31, after the
+export measurements of entry condition ① were recorded). Grounds = the Gated DeltaNet layers of the
 MOSS-Image text encoder (24 of 32 layers) and of Qwen3.5-class language models. The recurrence can be
 written exactly with existing ops (per token `exp` / `mul` / `sum` / `sub` / `add`, T times — composite,
 not atomic), but both upstream functions loop in Python, so `torch.export` specialises the length

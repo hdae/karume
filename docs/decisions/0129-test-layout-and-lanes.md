@@ -480,5 +480,5 @@ is listed under "Follow-ups" and is not done by this addendum.
 - Record the sanitizer loss in `docs/limitations.md`.
 - Correct `packages/e2e/README.md`, which says every test there needs local assets and a GPU (the
   three core gates need neither, and the `*_host*_test.ts` files need no GPU).
-- ADR [0135](0135-gated-delta-rule-scan.md) (proposed) speaks of "opt-in" lanes in three places;
-  it should say "opt-in case in the family lane" (decision 3 above).
+- ~~ADR [0135](0135-gated-delta-rule-scan.md) speaks of "opt-in" lanes in three places; it should say
+  "opt-in case in the family lane" (decision 3 above).~~ Done 2026-10-31, with its acceptance.

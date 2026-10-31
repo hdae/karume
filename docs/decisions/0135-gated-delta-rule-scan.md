@@ -1,7 +1,7 @@
 # 0135: Vocabulary extension: gated_delta_scan (the Gated DeltaNet recurrence, an extended composite op)
 
-- Status: proposed (2026-10-27). The export measurements of entry condition ① were taken on
-  2026-10-31 and meet the gate (open point 1); acceptance is the maintainer's ruling. The kernel-side numbers below are measured on one GPU; what is still unmeasured on
+- Status: accepted (2026-10-31 — the maintainer's ruling 48; proposed 2026-10-27). The export measurements of entry
+  condition ① were taken on 2026-10-31 and meet the gate (open point 1). The kernel-side numbers below are measured on one GPU; what is still unmeasured on
   the kernel side is listed in open point 10.
 - Date: 2026-10-27
 - Scope: the new op `gated_delta_scan` (the value form, for prefill), its kernel, its CPU reference,
@@ -297,7 +297,7 @@ As ADR 0056 decision 6:
   the fast-decay regime the band guards coarse errors only.** The fixed atol / rtol of the product's
   GPU-vs-reference test are derived from these records at landing, with the derivation in the test
   constant's docstring (open point 7).
-- **MUST (landing tests): the default lane, not an opt-in one, catches a built-in-exp regression.**
+- **MUST (landing tests): the lane's default run, not an opt-in case, catches a built-in-exp regression.**
   Two tests: a direct test of the accurate-exp body — its bias and ULP error on [−0.1, 0) against an
   f64 exp, which the built-in exp fails (mean signed −0.337 against −0.091 ULP, max 3.00 against
   1.00 ULP — research §5.4) — and a long-memory case with T ≥ 512 in the default lane. That fixture
@@ -308,7 +308,7 @@ As ADR 0056 decision 6:
   wherever they can act — no decay 10 / 10, no β 10 / 10, key head `h % Hk` 10 / 10, output read
   before the update 10 / 10, missing initial state on both T = 1 cases (it cannot act in prefill)
   (research §5.3). Outputs are pre-filled with a NaN pattern (full-write).
-- **Upstream parity**: a golden against the eager body runs in the opt-in parity lane; its band is at
+- **Upstream parity**: a golden against the eager body is an opt-in case in the family lane (`KARUME_UPSTREAM_PARITY=1`); its band is at
   least upstream's chunked function's own error.
 - **In-device determinism** (ADR 0110 decision 6): the kernel has a fixed reduction order and no
   atomics. Measured on this GPU by the independent check's re-run: two runs each of
@@ -426,7 +426,7 @@ As ADR 0056 decision 6:
    cases (research §6.1).
 7. **The product's band constants and fixture sizes** (the spike's fixed inputs are 1.4 GB in all):
    tracked fixtures stay small — the default lane's long-memory case with T ≥ 512 keeps its T and
-   reduces the head count (decision 6) — and the full MOSS shape at large T goes to an opt-in lane;
+   reduces the head count (decision 6) — and the full MOSS shape at large T goes to an opt-in case in the family lane;
    and the hazard canaries' thresholds.
 8. **(a3) as a named option** and its ADR 0110 class, if the 10.6 ms is ever wanted.
 9. **bf16 parity**: upstream MOSS runs in bf16 (the l2-normalisation and β in bf16 before the f32
