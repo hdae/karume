@@ -65,7 +65,8 @@ the GPU, `planFusions`. The execution side receives the step sequence and holds 
   does not change the result; **a test checks the disjointness mechanically from each rule's `heads`**
   (`packages/runtime/tests/runtime_fusion_test.ts`), because order starts to matter the moment heads
   overlap. (One declared exception since 2026-10-25, `rms_norm` of rmsNormAdd and rmsNormRope, which
-  never accept the same index — the addendum of 2026-10-25, stage 3.)
+  never accept the same index — the addendum of 2026-10-25, stage 3; and since 2026-10-31
+  `gelu_tanh` of geluMulStaticQuantize and the linear prologue — the addendum of 2026-10-31.)
 - Identity `expand` (input and output shapes identical after binding, rank included) becomes a buffer
   alias with zero dispatches, like `reshape` (ADR 0011). A non-identity expand keeps the strided copy.
 
@@ -654,3 +655,33 @@ k / v on the a8 seat) is unchanged.
   lanes are unchanged on this machine. Speed (in-process kernel A/B, [research](../research/2026-10-26-a4-output-permute.md)):
   −14.8 / −14.9 ms per 33-frame forward and −44 / −49 ms per 121-frame forward; the token-major store
   itself costs nothing measurable. Not measured here: other backends (D3D12, Metal).
+
+## Addendum (2026-10-31) — gelu_tanh → mul → static_quantize (rule `geluMulStaticQuantize`, perf-ledger K-48 step 1b)
+
+Gemma 4 QAT runs one `gelu_tanh → mul → static_quantize` chain per layer on the per-layer embedding
+path (the gate's gelu times the PLE slice, quantized into `per_layer_projection`): 35 per token on E2B,
+42 on E4B. The rule folds the chain into one dispatch (`packages/runtime/src/kernels/gelu-mul-static-quantize.ts`,
+`packages/runtime/src/runtime/fusion-rules/gelu-mul-static-quantize.ts`), opted in by the session flag
+`fuseGeluMulStaticQuantize`, which the QAT distribution declares in its `i4-fast` presets.
+
+- **Bit identity**: the kernel computes gelu, the product and the SRQ with the plain chain's own WGSL text
+  (`prologueUnaryWgsl`, the elementwise `mul`, the K-97 `quantize`), keeps the mul's operand order as
+  the node has it, and puts a run-time XOR rounding barrier (mask words 0 from the uniform) after gelu
+  and after the product — the two values the plain chain stores, whose rounding the store fixes and a
+  compiler could otherwise contract across. Measured (RTX 3080 Ti, Vulkan): u32-identical to the plain
+  chain over rows 1 / 4 / 8, eight scales (0 included) and adversarial values (SRQ boundaries ±2 ulps
+  after the product, ±0, ±inf, NaN payloads, subnormals); a sign-mask injection after either barrier
+  moves the output exactly as the stored-value path predicts. The QAT sha256 rows are unchanged.
+- **Accepted set (decision 2)**: gelu_tanh with the mul as its sole consumer, the mul with the SRQ as its
+  sole consumer, all f32, every operand the same shape `[…, 256]` with 1 to 8 rows (no broadcast; the
+  other operand distinct from the gate), and an SRQ that is not packed (ADR 0105). Prefill shapes keep
+  the plain chain (not measured).
+- **Decision 1 gains a second declared exception, against the linear prologue**: the rule's head
+  `gelu_tanh` is also a `LINEAR_PROLOGUE_OPS` entry (addendum of 2026-10-25). They never accept the same
+  node: both need the gelu value's single use, and the next node decides — a `mul` for this rule, a
+  `linear` for the prologue. The test that checked "no rule head is a prologue op" now pins the overlap
+  to exactly `[gelu_tanh, geluMulStaticQuantize]`, and a graph carrying both forms folds each by its own
+  mechanism (`packages/runtime/tests/runtime_fusion_test.ts`).
+- **Speed** (Node + Dawn, RTX 3080 Ti, greedy, 4 interleaved rounds): QAT E2B GPU 5.96 → 5.84 ms per token
+  (1,106 → 1,036 dispatches), QAT E4B 10.02 → 9.85 (1,365 → 1,281); text identical. Not measured on
+  D3D12 / Metal. A manifest that declares the flag needs a reader newer than 0.15.0.
