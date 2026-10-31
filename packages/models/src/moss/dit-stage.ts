@@ -146,6 +146,16 @@ export type MossDitPlan = {
 };
 
 /**
+ * What the headroom needs read of a DiT plan: the latent grid and each branch's token count. A
+ * request in the prompt form has it before its text is encoded (`./generate.ts`); a
+ * {@link MossDitPlan} is one.
+ */
+export type MossDitShape = {
+  readonly cells: MossCells;
+  readonly texts: MossBranches<{ readonly tokens: number }>;
+};
+
+/**
  * The acceptance check of the DiT stage (`./request.ts` — size and text embeddings; every failure
  * a `ModelInputError`). `negative` undefined means guidance 1 (no negative branch).
  */
@@ -170,7 +180,7 @@ export const planMossDit = (request: {
 };
 
 /** The token count of each branch of the joint sequence (S = N + T). */
-const sequenceLengths = (plan: MossDitPlan): MossBranches<number> => {
+const sequenceLengths = (plan: MossDitShape): MossBranches<number> => {
   const image = mossImageTokens(plan.cells);
   return {
     positive: image + plan.texts.positive.tokens,
@@ -235,7 +245,7 @@ export const mossDitStageNeeds = (
     readonly contract: Pick<MossDitContract, "width">;
     readonly preset: MossPreset;
   },
-  plan: MossDitPlan,
+  plan: MossDitShape,
 ): MossDitStageNeeds => {
   const { device, components, contract } = input;
   const preset = requireMossPreset(input.preset);

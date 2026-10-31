@@ -1,17 +1,28 @@
 /**
  * MOSS-Image text-to-image on the family's internal entry — the one acceptance check of a request
- * and the generate path `dit_text` → the DiT pair → the VAE (ADR 0138 decisions 5 and 9,
- * stage 4). Not on a public surface: the family is in neither the barrel nor the package exports
- * (ADR 0138 decision 12).
+ * and the generate path (the text encoder →) `dit_text` → the DiT pair → the VAE (ADR 0138
+ * decisions 5 and 9). Not on a public surface: the family is in neither the barrel nor the package
+ * exports (ADR 0138 decision 12).
  *
- * ## The request — precomputed text only (ADR 0138 decision 9)
+ * ## The request — the text in one of two forms (ADR 0138 decision 9)
  *
- * The text encoder is not ported, so a request carries the encoder outputs (`[T, 4096]` f32 — the
- * asset of `moss.text_embeds` holds upstream's for the fixed prompts) instead of strings. Every knob
- * is explicit: there is no manifest yet whose `pipelineConfig` would own the defaults (upstream's
- * 1024², 50 steps, guidance 3, shift 5 — ADR 0138 decision 9), and a second owner here would have to
- * be retired when it comes. The initial noise is exactly one of a `seed` (`./random.ts` — not
- * torch's `randn`) and the `latents` themselves (how the parity checks inject upstream's noise).
+ * - **Prompt strings** (`prompt`, `negativePrompt`): rendered with the Qwen3.5 chat template and
+ *   tokenized in the acceptance check, encoded on the GPU by the text-encoder stage
+ *   (`./text-stage.ts` — ADR 0137's encoder). The state then carries the opened Qwen3.5 text series
+ *   (`text`). `overflow` is the tokenizer's over-length policy (the maintainer's ruling 50: rejected
+ *   by default, `"truncate"` cuts as upstream does).
+ * - **Precomputed embeddings** (`positive`, `negative`): the encoder outputs `[T, 4096]` f32 (the
+ *   asset of `moss.text_embeds` holds upstream's for the fixed prompts) — how the parity checks and
+ *   an A/B against upstream's embeddings feed the DiT.
+ *
+ * One request uses one form for both branches (a mix, or both forms of one branch, is refused).
+ * Every knob is explicit: there is no manifest yet whose `pipelineConfig` would own the defaults
+ * (upstream's 1024², 50 steps, guidance 3, shift 5 and its empty negative prompt — ADR 0138
+ * decision 9), and a second owner here would have to be retired when it comes. So the negative
+ * prompt has no default either: at guidance ≠ 1 the prompt form needs `negativePrompt` (upstream's
+ * default is `""`), as the embeddings form needs `negative`. The initial noise is exactly one of a
+ * `seed` (`./random.ts` — not torch's `randn`) and the `latents` themselves (how the parity checks
+ * inject upstream's noise).
  *
  * The preset (`./preset.ts`) is part of the state, not of the request, and has no default either
  * (no manifest owns one yet — ADR 0138 decision 13; the family's default
@@ -25,9 +36,13 @@
  * - the size — a side that is not a positive multiple of 16, a side over 65,536 px (`./request.ts`),
  *   an area over this device's limit of the untiled VAE (ADR 0138 decision 8 —
  *   `./vae-contract.ts`);
- * - the text (ADR 0138 decision 9) — the positive prompt's embeddings missing, the negative
- *   prompt's missing while guidance ≠ 1 runs the negative branch, or given at guidance 1 where they
- *   would have no effect; an embedding that is not f32 `[T, 4096]` with 1 ≤ T ≤ 4,096, all finite;
+ * - the text (ADR 0138 decision 9) — both forms given, or neither; the positive prompt missing; the
+ *   negative prompt missing while guidance ≠ 1 runs the negative branch, or given at guidance 1
+ *   where it would have no effect; `overflow` with the embeddings form (no tokenizer runs there);
+ *   in the prompt form what the chat template refuses (a prompt that is not a string, a
+ *   `<tool_response>`-wrapped one) and what the tokenizer refuses (more than 4,096 tokens under
+ *   `"reject"`, an unpaired surrogate, an unknown `overflow`); in the embeddings form an embedding
+ *   that is not f32 `[T, 4096]` with 1 ≤ T ≤ 4,096, all finite;
  * - upstream's own range of the knobs — steps a positive integer, guidance finite and ≥ 0, shift
  *   finite and > 0 (both finite in f32 too: the host multiplies by their f32 roundings), and a shift
  *   so small that the requested σ grid is not finite (below about 2.98·10⁻⁸, where
@@ -49,20 +64,26 @@
  *
  * ## The generate path ({@link generateMoss} — ADR 0138 decision 5)
  *
- * 1. The first headroom check, with nothing open: the largest of the three stages' needs (the bytes
- *    of `mossDitStageNeeds` and `mossVaeStageNeeds` — the estimates + the largest part + the margin)
- *    through `fitsHeadroom`. A refusal fails loudly before `dit_text` runs, so a generation the
- *    device cannot hold does not run the text stage and the whole DiT only to be refused at the VAE.
- * 2. `dit_text` (`./dit-stage.ts` — its own headroom check, closed before the pair opens).
- * 3. The DiT pair, open for the whole loop: per step the two forwards (the negative on `dit_skip22`),
+ * 1. The first headroom check, with nothing open: the largest of the stages' needs (the bytes of
+ *    `mossTextEncoderStageNeed` in the prompt form, `mossDitStageNeeds` and `mossVaeStageNeeds` —
+ *    the estimates + the largest part + the margin) through `fitsHeadroom`. A refusal fails loudly
+ *    before the first stage opens, so a generation the device cannot hold does not upload the text
+ *    encoder and run the whole DiT only to be refused at the VAE.
+ * 2. In the prompt form, the text encoder (`./text-stage.ts` — its own headroom check; disposed and
+ *    its memory released on every path before `dit_text` opens).
+ * 3. `dit_text` (`./dit-stage.ts` — its own headroom check, closed before the pair opens).
+ * 4. The DiT pair, open for the whole loop: per step the two forwards (the negative on `dit_skip22`),
  *    upstream's CFG in f32 and the Euler update (`./sampler.ts`); closed — borrower, lender, then the
  *    text contexts — before the VAE opens.
- * 4. The VAE (`./vae-stage.ts` — its own headroom check, its three Sessions closed before it
+ * 5. The VAE (`./vae-stage.ts` — its own headroom check, its three Sessions closed before it
  *    returns).
  *
+ * There is no cancellation on this entry (no stage of the DiT and VAE side has one); the text
+ * stage takes a `signal` of its own (`encodeMossPrompts`), which this entry does not pass.
+ *
  * Each stage closes what it opened on every path, success or failure (`disposeSteps` in the stages),
- * and between stages the path holds nothing on the GPU (the refined texts and the latents are host
- * arrays), so a failure anywhere leaves no Session open. The headroom checks are facts of the moment,
+ * and between stages the path holds nothing on the GPU (the encoder rows, the refined texts and the
+ * latents are host arrays), so a failure anywhere leaves no Session open. The headroom checks are facts of the moment,
  * not reservations (another process may take the memory between them).
  *
  * MUST: every module is side-effect free (no import-time execution, no global mutable state).
@@ -71,13 +92,16 @@
 import { fitsHeadroom, type GpuContext } from "@karume/runtime";
 
 import { ModelInputError } from "../errors.ts";
+import type { Qwen3_5Overflow } from "../qwen3_5/tokenizer.ts";
 import { assertAcceptableSeed } from "../request-gates.ts";
 import { settleReleasedMemory } from "../session/settle-released-memory.ts";
 import { MOSS_DIT, MOSS_DIT_SKIP22, MOSS_DIT_TEXT, type MossDitContract } from "./dit-contract.ts";
 import {
+  type MossBranches,
   type MossDitComponents,
   type MossDitPair,
   type MossDitPlan,
+  type MossDitShape,
   mossClassifierFreeGuidance,
   mossDeviceFacts,
   mossDitStageNeeds,
@@ -90,6 +114,14 @@ import { type MossPreset, requireMossPreset } from "./preset.ts";
 import { MossRandn } from "./random.ts";
 import type { MossTextEmbeddings } from "./request.ts";
 import { mossEulerStep, mossSchedule, type MossSchedule } from "./sampler.ts";
+import {
+  encodeMossPrompts,
+  MOSS_TEXT_ENCODER,
+  mossPromptIds,
+  mossTextEncoderStageNeed,
+  type MossTextEncoderState,
+  requireMossTextEncoder,
+} from "./text-stage.ts";
 import type { MossVaeContract, MossVaeDeviceLimits } from "./vae-contract.ts";
 import {
   decodeMossVae,
@@ -101,15 +133,27 @@ import {
 
 const OWNER = "MOSS-Image";
 
-/** A text-to-image request (module doc "The request"). */
+/**
+ * A text-to-image request (module doc "The request"): the text is either `prompt` /
+ * `negativePrompt` or `positive` / `negative`, never a mix.
+ */
 export type MossGenerateRequest = {
   /** Pixels (a positive multiple of 16). */
   readonly width: number;
   /** Pixels (a positive multiple of 16). */
   readonly height: number;
-  /** The positive prompt's encoder output `[T, 4096]`. */
-  readonly positive: MossTextEmbeddings;
-  /** The negative prompt's encoder output — required when `guidance` ≠ 1, refused at 1. */
+  /** The positive prompt as a string (the prompt form) — exclusive with {@link positive}. */
+  readonly prompt?: string;
+  /**
+   * The negative prompt as a string — in the prompt form required when `guidance` ≠ 1 (upstream's
+   * default is `""`; there is no default here), refused at 1.
+   */
+  readonly negativePrompt?: string;
+  /** The tokenizer's over-length policy of the prompt form (default `"reject"` — ruling 50). */
+  readonly overflow?: Qwen3_5Overflow;
+  /** The positive prompt's encoder output `[T, 4096]` (the embeddings form) — exclusive with {@link prompt}. */
+  readonly positive?: MossTextEmbeddings;
+  /** The negative prompt's encoder output — in the embeddings form required when `guidance` ≠ 1, refused at 1. */
   readonly negative?: MossTextEmbeddings;
   /** The requested step count (upstream's `num_inference_steps`; the snapped schedule may run fewer). */
   readonly steps: number;
@@ -128,37 +172,89 @@ export type MossInitialNoise =
   | { readonly kind: "seed"; readonly seed: number }
   | { readonly kind: "latents"; readonly data: Float32Array<ArrayBuffer> };
 
-/** An accepted request ({@link planMossGenerate}). */
+/**
+ * An accepted request ({@link planMossGenerate}). `dit` holds the latent grid and each branch's
+ * token count in both forms (`negative` undefined exactly when guidance is 1); the embeddings form
+ * carries the DiT stage's whole plan, the prompt form each branch's token ids for the text stage.
+ */
 export type MossGeneratePlan = {
-  /** The DiT stage's plan (`negative` undefined exactly when guidance is 1). */
-  readonly dit: MossDitPlan;
   readonly vae: MossVaePlan;
   readonly guidance: number;
   readonly schedule: MossSchedule;
   readonly initial: MossInitialNoise;
-};
+} & (
+  | { readonly text: "embeddings"; readonly dit: MossDitPlan }
+  | {
+      readonly text: "prompts";
+      readonly dit: MossDitShape;
+      readonly prompts: MossBranches<Int32Array<ArrayBuffer>>;
+    }
+);
 
 /** What the acceptance check reads of the series and the device. */
 export type MossGenerateLimits = {
   readonly dit: Pick<MossDitContract, "latentChannels" | "trainingGrid">;
   readonly vae: Pick<MossVaeContract, "bytesPerCell" | "spatialScale">;
   readonly limits: MossVaeDeviceLimits;
+  /** The tokenizer (the prompt form only — a prompt-form request without it is refused). */
+  readonly text?: Pick<MossTextEncoderState, "tokenizer">;
 };
 
 /** Finite in f32 (the host multiplies by the f32 rounding of a knob). */
 const finiteInF32 = (value: number): boolean => Number.isFinite(Math.fround(value));
 
-/**
- * The guidance range and the presence of the prompts it needs (ADR 0138 decision 9 — module doc).
- */
-const assertGuidanceAndPrompts = (request: MossGenerateRequest): void => {
-  // A caller outside the types (JavaScript) can leave the field out.
-  if (request.positive === undefined) {
+/** The text of a request in its one form (module doc "The request"). */
+type MossRequestText =
+  | {
+      readonly form: "embeddings";
+      readonly positive: MossTextEmbeddings;
+      readonly negative: MossTextEmbeddings | undefined;
+    }
+  | {
+      readonly form: "prompts";
+      readonly prompt: string;
+      readonly negativePrompt: string | undefined;
+    };
+
+/** The form of a request's text and its positive prompt (ADR 0138 decision 9 — module doc). */
+const requestTextOf = (request: MossGenerateRequest): MossRequestText => {
+  const { prompt, negativePrompt, positive, negative } = request;
+  const strings = prompt !== undefined || negativePrompt !== undefined;
+  const embeddings = positive !== undefined || negative !== undefined;
+  if (strings && embeddings) {
     throw new ModelInputError(
-      `${OWNER}: the positive prompt's embeddings are missing (the entry takes precomputed text` +
-        " encoder outputs [T, 4096] only — the text encoder is not ported)",
+      `${OWNER}: the text is given both as prompt strings (prompt / negativePrompt) and as` +
+        " precomputed embeddings (positive / negative) — give one form for both branches",
     );
   }
+  if (strings) {
+    if (prompt === undefined) {
+      throw new ModelInputError(
+        `${OWNER}: negativePrompt is given without prompt (the positive prompt is required)`,
+      );
+    }
+    return { form: "prompts", prompt, negativePrompt };
+  }
+  // A caller outside the types (JavaScript) can leave every text field out.
+  if (positive === undefined) {
+    throw new ModelInputError(
+      `${OWNER}: the positive prompt's embeddings are missing and no prompt string is given (the` +
+        " text is a prompt string `prompt` or precomputed encoder outputs [T, 4096] `positive`)",
+    );
+  }
+  if (request.overflow !== undefined) {
+    throw new ModelInputError(
+      `${OWNER}: overflow applies to prompt strings only (the embeddings form runs no tokenizer)`,
+    );
+  }
+  return { form: "embeddings", positive, negative };
+};
+
+/**
+ * The guidance range and the presence of the negative prompt it needs, in the request's form (ADR
+ * 0138 decision 9 — module doc). Returns the guidance.
+ */
+const guidanceOf = (request: MossGenerateRequest, text: MossRequestText): number => {
   const { guidance } = request;
   if (!finiteInF32(guidance) || guidance < 0) {
     throw new ModelInputError(
@@ -166,19 +262,31 @@ const assertGuidanceAndPrompts = (request: MossGenerateRequest): void => {
         " (upstream's range; CFG multiplies by its f32 rounding)",
     );
   }
-  if (guidance !== 1 && request.negative === undefined) {
+  const [given, missing, unused] =
+    text.form === "embeddings"
+      ? [
+          text.negative !== undefined,
+          "the negative prompt's embeddings are required (upstream's default negative is the" +
+            " empty prompt — the text-embeddings asset's 'negative')",
+          "the negative prompt's embeddings would have no effect (leave them out, or set" +
+            " guidance ≠ 1)",
+        ]
+      : [
+          text.negativePrompt !== undefined,
+          // No default (module doc "The request"): upstream's is named so the caller can pass it.
+          "negativePrompt is required (upstream's default negative is the empty prompt: pass" +
+            ' negativePrompt: "")',
+          "negativePrompt would have no effect (leave it out, or set guidance ≠ 1)",
+        ];
+  if (guidance !== 1 && !given) {
     throw new ModelInputError(
-      `${OWNER}: guidance ${guidance} runs the negative branch (CFG with block 22 skipped), so the` +
-        " negative prompt's embeddings are required (upstream's default negative is the empty" +
-        " prompt — the text-embeddings asset's 'negative')",
+      `${OWNER}: guidance ${guidance} runs the negative branch (CFG with block 22 skipped), so ${missing}`,
     );
   }
-  if (guidance === 1 && request.negative !== undefined) {
-    throw new ModelInputError(
-      `${OWNER}: guidance 1 runs no negative branch, so the negative prompt's embeddings would have` +
-        " no effect (leave them out, or set guidance ≠ 1)",
-    );
+  if (guidance === 1 && given) {
+    throw new ModelInputError(`${OWNER}: guidance 1 runs no negative branch, so ${unused}`);
   }
+  return guidance;
 };
 
 /** The schedule of an accepted step count and shift (module doc "Acceptance"). */
@@ -241,8 +349,36 @@ const initialOf = (request: MossGenerateRequest, count: number): MossInitialNois
 };
 
 /**
+ * The prompt form's part of a plan (module doc "Acceptance"): each branch's token ids — the chat
+ * template and the tokenizer, before any GPU work — and their counts.
+ */
+const promptPlanOf = (
+  text: Extract<MossRequestText, { readonly form: "prompts" }>,
+  overflow: Qwen3_5Overflow | undefined,
+  cells: MossDitShape["cells"],
+  { tokenizer }: Pick<MossTextEncoderState, "tokenizer">,
+) => {
+  const prompts = {
+    positive: mossPromptIds(tokenizer, text.prompt, "prompt", overflow),
+    negative:
+      text.negativePrompt === undefined
+        ? undefined
+        : mossPromptIds(tokenizer, text.negativePrompt, "negativePrompt", overflow),
+  };
+  const dit: MossDitShape = {
+    cells,
+    texts: {
+      positive: { tokens: prompts.positive.length },
+      negative: prompts.negative === undefined ? undefined : { tokens: prompts.negative.length },
+    },
+  };
+  return { text: "prompts" as const, dit, prompts };
+};
+
+/**
  * The one acceptance check of a generation request (module doc "Acceptance"): returns the plan of
- * every stage or throws a `ModelInputError` naming the limit or the missing input.
+ * every stage or throws a `ModelInputError` naming the limit or the missing input (a prompt-form
+ * request without a tokenizer is the caller's assembly — a plain `Error`).
  */
 export const planMossGenerate = (
   request: MossGenerateRequest,
@@ -250,29 +386,35 @@ export const planMossGenerate = (
 ): MossGeneratePlan => {
   const { width, height } = request;
   const vae = planMossVae({ width, height }, input.vae, input.limits);
-  assertGuidanceAndPrompts(request);
-  const { guidance } = request;
-  // The negative is present exactly when guidance ≠ 1 (assertGuidanceAndPrompts).
-  const dit = planMossDit({
-    width,
-    height,
-    positive: request.positive,
-    negative: request.negative,
-  });
+  const text = requestTextOf(request);
+  // The negative is present exactly when guidance ≠ 1 (guidanceOf).
+  const guidance = guidanceOf(request, text);
+  const textPlan =
+    text.form === "embeddings"
+      ? {
+          text: "embeddings" as const,
+          dit: planMossDit({ width, height, positive: text.positive, negative: text.negative }),
+        }
+      : promptPlanOf(text, request.overflow, vae.cells, requireMossTextEncoder(input.text));
   const schedule = scheduleOf(input.dit.trainingGrid, request.steps, request.shift);
-  const initial = initialOf(request, input.dit.latentChannels * mossImageTokens(dit.cells));
-  return { dit, vae, guidance, schedule, initial };
+  const initial = initialOf(
+    request,
+    input.dit.latentChannels * mossImageTokens(textPlan.dit.cells),
+  );
+  return { ...textPlan, vae, guidance, schedule, initial };
 };
 
 /**
- * The two series opened for one device (built once — the contracts settled in admission) and the
- * preset the generation runs (explicit — module doc "The request").
+ * The series opened for one device (built once — the contracts settled in admission) and the
+ * preset the generation runs (explicit — module doc "The request"). `text` is the Qwen3.5 text
+ * series (`./text-stage.ts` — `mossTextEncoderContract`), needed by the prompt form only.
  */
 export type MossGenerateState = {
   readonly gpu: GpuContext;
   readonly preset: MossPreset;
   readonly dit: { readonly components: MossDitComponents; readonly contract: MossDitContract };
   readonly vae: { readonly components: MossVaeComponents; readonly contract: MossVaeContract };
+  readonly text?: MossTextEncoderState;
 };
 
 /** A generated image. */
@@ -303,6 +445,17 @@ const assertFirstHeadroom = async (
     plan.dit,
   );
   const needs: readonly (readonly [string, number])[] = [
+    ...(plan.text === "prompts"
+      ? [
+          [
+            MOSS_TEXT_ENCODER,
+            mossTextEncoderStageNeed(
+              { ...requireMossTextEncoder(state.text), limits: gpu.limits },
+              plan.prompts,
+            ),
+          ] as const,
+        ]
+      : []),
     [MOSS_DIT_TEXT, dit.text],
     [`${MOSS_DIT} + ${MOSS_DIT_SKIP22}`, dit.pair],
     ["VAE", mossVaeStageNeeds({ ...state.vae, limits: gpu.limits }, plan.vae)],
@@ -374,12 +527,24 @@ export const generateMoss = async (
     dit: state.dit.contract,
     vae: state.vae.contract,
     limits: gpu.limits,
+    ...(state.text === undefined ? {} : { text: state.text }),
   });
   await assertFirstHeadroom(state, plan);
   const initial = mossInitialLatents(plan, state.dit.contract.latentChannels);
   const ditState = { gpu, preset, ...state.dit };
-  const refined = await runMossTextStage(ditState, plan.dit);
-  const latents = await withMossDitPair(ditState, plan.dit, refined, (pair) =>
+  // The prompt form's text stage runs (and is closed) before dit_text opens (module doc, step 2).
+  const ditPlan: MossDitPlan =
+    plan.text === "embeddings"
+      ? plan.dit
+      : {
+          cells: plan.dit.cells,
+          texts: await encodeMossPrompts(
+            { gpu, ...requireMossTextEncoder(state.text) },
+            plan.prompts,
+          ),
+        };
+  const refined = await runMossTextStage(ditState, ditPlan);
+  const latents = await withMossDitPair(ditState, ditPlan, refined, (pair) =>
     mossDenoise(pair.predict, plan, initial),
   );
   const image = await decodeMossVae({ gpu, ...state.vae }, plan.vae, latents);

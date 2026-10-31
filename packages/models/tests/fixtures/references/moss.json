@@ -2,6 +2,9 @@
   "schema": 1,
   "kind": "sha256",
   "cases": {
+    "f32+dit8-2step-fridge-note-qwen3_5-i8-seed42-256x256-g3-shift5": {
+      "node-nvidia-geforce-rtx-3080-ti": "630b7894671e7fd0c08dda06af13f5633c2c44a73b69352635c87d8837c12022"
+    },
     "f32+dit8-2step-fridge-note-seed42-256x256-g1-shift5": {
       "node-nvidia-geforce-rtx-3080-ti": "2366d8663efbf0b08d12fc53dc31b81469914b612882c7edbd93bda5077f51f4"
     },
