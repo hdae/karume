@@ -8,19 +8,13 @@
 import { numel, staticQuantizeScale } from "../../ops.ts";
 import { tiledWorkgroups } from "../../codegen/dispatch.ts";
 import {
-  linearGemvPackedStagedEligible,
   linearGemvParallelEligible,
   type LinearGemvParallelLanes,
-  linearGemvStagedEligible,
   linearGemvStaticQuantizeKey,
   linearGemvStaticQuantizePackedKey,
   linearGemvStaticQuantizePackedParams,
-  linearGemvStaticQuantizePackedStagedKey,
-  linearGemvStaticQuantizePackedStagedWgsl,
   linearGemvStaticQuantizePackedWgsl,
   linearGemvStaticQuantizeParams,
-  linearGemvStaticQuantizeStagedKey,
-  linearGemvStaticQuantizeStagedWgsl,
   linearGemvStaticQuantizeWgsl,
 } from "../../kernels/linear-gemv.ts";
 import type { WeightStorage } from "../../kernels/weight-storage.ts";
@@ -45,8 +39,6 @@ type LinearStaticQuantizeMatch = FusionMatch & {
   readonly scale: number;
   /** The producer's SRQ scale when the input arrives as packed int8 (else `undefined`). */
   readonly packedX: number | undefined;
-  /** Whether the measured table stages this shape's activation form (K-90; bit-identical). */
-  readonly staged: boolean;
   readonly workgroups: readonly [number, number, number];
 };
 
@@ -99,7 +91,6 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<LinearStaticQuantizeMatch>
       ),
       1,
     ];
-    const packedX = context.packedValues.get(linear.node.ins[0]);
     return {
       window: chain,
       chain,
@@ -115,11 +106,7 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<LinearStaticQuantizeMatch>
       scale: staticQuantizeScale(srq.node.attrs, "linear static_quantize fusion"),
       // The activation side arrives as packed int8 (ADR 0105). Acceptance is settled in one
       // place, planFusions; this only reads whether it arrives (the output-side SRQ stays f32).
-      packedX,
-      staged:
-        (packedX === undefined
-          ? linearGemvStagedEligible(weight.storage, m, n, k, group)
-          : linearGemvPackedStagedEligible(weight.storage, m, n, k, group)) !== undefined,
+      packedX: context.packedValues.get(linear.node.ins[0]),
       workgroups,
     };
   },
@@ -130,21 +117,14 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<LinearStaticQuantizeMatch>
     temps: [],
     dispatches: [
       {
-        key: (m.packedX === undefined
-          ? m.staged
-            ? linearGemvStaticQuantizeStagedKey
-            : linearGemvStaticQuantizeKey
-          : m.staged
-            ? linearGemvStaticQuantizePackedStagedKey
-            : linearGemvStaticQuantizePackedKey)(m.storage, m.group, m.lanes),
+        key:
+          m.packedX === undefined
+            ? linearGemvStaticQuantizeKey(m.storage, m.group, m.lanes)
+            : linearGemvStaticQuantizePackedKey(m.storage, m.group, m.lanes),
         wgsl: () =>
-          (m.packedX === undefined
-            ? m.staged
-              ? linearGemvStaticQuantizeStagedWgsl
-              : linearGemvStaticQuantizeWgsl
-            : m.staged
-              ? linearGemvStaticQuantizePackedStagedWgsl
-              : linearGemvStaticQuantizePackedWgsl)(m.storage, m.group, m.lanes),
+          m.packedX === undefined
+            ? linearGemvStaticQuantizeWgsl(m.storage, m.group, m.lanes)
+            : linearGemvStaticQuantizePackedWgsl(m.storage, m.group, m.lanes),
         params:
           m.packedX === undefined
             ? linearGemvStaticQuantizeParams(m.storage, m.m, m.n, m.k, m.scale, m.group)

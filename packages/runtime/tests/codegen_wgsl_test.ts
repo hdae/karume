@@ -219,16 +219,13 @@ import { RMS_NORM_ROPE_WGSL } from "../src/kernels/rms-norm-rope.ts";
 import { linearKey, linearParams, linearWgsl } from "../src/kernels/linear.ts";
 import {
   linearGemvKey,
-  linearGemvParallelPackedStagedWgsl,
   linearGemvParallelPackedWgsl,
   linearGemvParallelStagedWgsl,
   linearGemvParallelWgsl,
   linearGemvRowsKey,
   type LinearGemvRowsVariant,
   linearGemvRowsWgsl,
-  linearGemvStaticQuantizePackedStagedWgsl,
   linearGemvStaticQuantizePackedWgsl,
-  linearGemvStaticQuantizeStagedWgsl,
   linearGemvStaticQuantizeWgsl,
   linearGemvSubgroupWgsl,
   linearGemvWgsl,
@@ -621,24 +618,6 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["linear_gemv_parallel_staged_g32_l32.wgsl", linearGemvParallelStagedWgsl("i4", 32, 32)],
     ["linear_gemv_parallel_staged_wi8_l32.wgsl", linearGemvParallelStagedWgsl("i8", undefined, 32)],
     ["linear_gemv_parallel_staged_wi2_l4.wgsl", linearGemvParallelStagedWgsl("i2", undefined, 4)],
-    // The staged forms of the SRQ-fused and packed bodies: the staged K loop over the f32 quads with
-    // the SRQ store, and over the packed words with the packed restoration.
-    [
-      "linear_gemv_static_quantize_staged_g512_l32.wgsl",
-      linearGemvStaticQuantizeStagedWgsl("i4", 512, 32),
-    ],
-    [
-      "linear_gemv_parallel_packed_staged_g2048_l32.wgsl",
-      linearGemvParallelPackedStagedWgsl("i4", 2048, 32),
-    ],
-    [
-      "linear_gemv_static_quantize_packed_staged_wi2_l32.wgsl",
-      linearGemvStaticQuantizePackedStagedWgsl("i2", undefined, 32),
-    ],
-    [
-      "linear_gemv_static_quantize_packed_staged_wi8_l4.wgsl",
-      linearGemvStaticQuantizePackedStagedWgsl("i8", undefined, 4),
-    ],
     [
       "linear_gemv_static_quantize_packed_wi2_l2.wgsl",
       linearGemvStaticQuantizePackedWgsl("i2", undefined, 2),

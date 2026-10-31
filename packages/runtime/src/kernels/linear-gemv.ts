@@ -501,12 +501,13 @@ const activationQuad = (
   quad: number,
   staged = false,
 ): string => {
-  if (staged && !packed) return `    let ${name} = sx[${stagedSlot(`sx_base + ${quad}u`)}];`;
+  if (staged) {
+    if (packed) throw new CodegenError("linear_gemv: staged activations take f32 quads only");
+    return `    let ${name} = sx[${stagedSlot(`sx_base + ${quad}u`)}];`;
+  }
   if (!packed) return `    let ${name} = x[xq${slot} + ${quad}u];`;
   const word = quad >> 2;
-  // Staged packed words keep the restoration text below; only the word's source changes.
-  const source = staged ? `sx[${stagedSlot(`sx_base + ${word}u`)}]` : `x[xq${slot} + ${word}u]`;
-  const load = quad % 4 === 0 ? `    let xp${slot}_${word} = ${source};\n` : "";
+  const load = quad % 4 === 0 ? `    let xp${slot}_${word} = x[xq${slot} + ${word}u];\n` : "";
   return `${load}    let ${name} = vec4<f32>(unpack4xI8(xp${slot}_${word}.${
     LANES[quad & 3]
   })) * dims.x_scale;`;
@@ -927,17 +928,8 @@ type ParallelShape = {
    * the lanes-32 rows with K ≥ 2048 at ×1.37–1.63; K = 1536 and the lanes-4 rows were ×0.86–1.06).
    * The E4B rows copy the E2B row with the same role, as for `packedActivations`. Never set together
    * with `packedActivations` (packed words already cut the activation loads).
-   * It applies with and without the fused output-side SRQ (ADR 0103): the epilogue touches only the
-   * store.
    */
   readonly stagedActivations?: true;
-  /**
-   * Whether a packed-activation row (`packedActivations: true`) stages the packed `vec4<u32>` words
-   * in workgroup memory instead of every column re-reading them from storage — K-90's staging applied
-   * to the ADR 0105 binding. **true only for rows that measured faster than plain packed.** Never set
-   * without `packedActivations`.
-   */
-  readonly stagedPackedActivations?: true;
 };
 
 // DECIDED: only measured shapes are eligible for the opt-in option. Not an automatic selection by
@@ -1175,30 +1167,6 @@ export const linearGemvStagedEligible = (
   return shape?.stagedActivations === true && !shape.packedActivations ? lanes : undefined;
 };
 
-/**
- * The packed counterpart of {@link linearGemvStagedEligible}: whether a packed-activation shape (ADR
- * 0105) stages the packed words in workgroup memory, narrowed by the measured row's
- * `stagedPackedActivations`. Bit-identical to the unstaged packed variant (same words per lane in
- * the same order, same restoration and `fma` text, same tree), so taking it changes speed only.
- *
- * MUST: it is a narrowing of {@link linearGemvPackedEligible} — a shape that does not take packed
- * activations never takes it, so f32 words cannot reach the `vec4<u32>` staging. The recipe builder
- * and the `linearStaticQuantize` fusion rule read this one function.
- */
-export const linearGemvPackedStagedEligible = (
-  storage: WeightStorage,
-  m: number,
-  n: number,
-  k: number,
-  group?: number,
-): LinearGemvParallelLanes | undefined => {
-  const lanes = linearGemvPackedEligible(storage, m, n, k, group);
-  if (lanes === undefined) return undefined;
-  return parallelShapeFor(storage, m, n, k, group)?.stagedPackedActivations === true
-    ? lanes
-    : undefined;
-};
-
 export const linearGemvParallelKey = (
   storage: WeightStorage,
   group: number | undefined,
@@ -1296,13 +1264,11 @@ export const linearGemvStaticQuantizePackedWgsl = (
  * The key of the staged-activation variant (K-90): appended to the parallel key, like the packed
  * fragment, so the storage and lane discriminators that diagnostics read do not move.
  */
-const STAGED_ACTIVATION_KEY_PART = ":staged-x";
-
 export const linearGemvParallelStagedKey = (
   storage: WeightStorage,
   group: number | undefined,
   lanes: LinearGemvParallelLanes,
-): string => `${linearGemvParallelKey(storage, group, lanes)}${STAGED_ACTIVATION_KEY_PART}`;
+): string => `${linearGemvParallelKey(storage, group, lanes)}:staged-x`;
 
 /**
  * The staged-activation variant of the parallel GEMV (K-90). Per chunk the workgroup copies the next
@@ -1320,48 +1286,6 @@ export const linearGemvParallelStagedWgsl = (
   group: number | undefined,
   lanes: LinearGemvParallelLanes,
 ): string => parallelWgsl(storage, group, lanes, false, false, true);
-
-/**
- * The staged variants of the other three parallel bodies: the fragment goes last, after the SRQ and
- * packed fragments, so every discriminator before it stays where it is. Each is bit-identical to its
- * unstaged body; params are the unstaged body's.
- */
-export const linearGemvParallelPackedStagedKey = (
-  storage: WeightStorage,
-  group: number | undefined,
-  lanes: LinearGemvParallelLanes,
-): string => `${linearGemvParallelPackedKey(storage, group, lanes)}${STAGED_ACTIVATION_KEY_PART}`;
-
-export const linearGemvParallelPackedStagedWgsl = (
-  storage: WeightStorage,
-  group: number | undefined,
-  lanes: LinearGemvParallelLanes,
-): string => parallelWgsl(storage, group, lanes, false, true, true);
-
-export const linearGemvStaticQuantizeStagedKey = (
-  storage: WeightStorage,
-  group: number | undefined,
-  lanes: LinearGemvParallelLanes,
-): string => `${linearGemvStaticQuantizeKey(storage, group, lanes)}${STAGED_ACTIVATION_KEY_PART}`;
-
-export const linearGemvStaticQuantizeStagedWgsl = (
-  storage: WeightStorage,
-  group: number | undefined,
-  lanes: LinearGemvParallelLanes,
-): string => parallelWgsl(storage, group, lanes, true, false, true);
-
-export const linearGemvStaticQuantizePackedStagedKey = (
-  storage: WeightStorage,
-  group: number | undefined,
-  lanes: LinearGemvParallelLanes,
-): string =>
-  `${linearGemvStaticQuantizePackedKey(storage, group, lanes)}${STAGED_ACTIVATION_KEY_PART}`;
-
-export const linearGemvStaticQuantizePackedStagedWgsl = (
-  storage: WeightStorage,
-  group: number | undefined,
-  lanes: LinearGemvParallelLanes,
-): string => parallelWgsl(storage, group, lanes, true, true, true);
 
 /**
  * Turns the restoration scale of packed activations (= the producer-side SRQ's f32 scale) into u32
@@ -1470,34 +1394,29 @@ ${unitMacs(storage, "t", packed, true)}
  * multiply-adds its word against `sx`.
  * MUST: both barriers sit in uniform control flow (`chunks` comes from the uniform) and every thread
  * of the workgroup — edge columns too — runs every chunk, because the copy is shared.
- * With packed activations (ADR 0105) the staged entries are the binding's `vec4<u32>` words (16
- * elements each) and each lane restores its quads from them with the same text as the unstaged
- * packed variant.
  */
 const stagedReduction = (
   storage: WeightStorage,
   lanes: LinearGemvParallelLanes,
   shift: number | undefined,
-  packed: boolean,
 ): string => {
   const unit = linearGemvUnit(storage);
-  const perEntry = packed ? 16 : 4;
-  const entries = unit / perEntry;
-  const perRound = lanes * entries;
+  const quads = unit / 4;
+  const perRound = lanes * quads;
   return `  // Edge columns load their share of the staged activation and pass every barrier; their hoisted
   // reads take the last column, and their sums are never stored.
   let units = dims.k / ${unit}u;
   let col_read = min(col, dims.n - 1u);
   let row_base = col_read * units;${scaleSetupWgsl(storage, shift, "col_read")}
-  let sx_base = lane * ${entries}u;
+  let sx_base = lane * ${quads}u;
   let chunks = (units + ${lanes - 1}u) / ${lanes}u;
   for (var chunk = 0u; chunk < chunks; chunk += 1u) {
-    // Chunk c stages the activation ${packed ? "words (packed) of weight words" : "quads of words"} c·${lanes} … c·${lanes} + ${lanes - 1}.
+    // Chunk c stages the activation quads of words c·${lanes} … c·${lanes} + ${lanes - 1}.
     for (var q = lid; q < ${perRound}u; q += 128u) {
       let v = chunk * ${perRound}u + q;
-      var staged_quad = ${packed ? "vec4<u32>(0u)" : "vec4<f32>(0.0)"};
-      if (v < dims.k / ${perEntry}u) {
-        staged_quad = x[wg.y * (dims.k / ${perEntry}u) + v];
+      var staged_quad = vec4<f32>(0.0);
+      if (v < dims.k / 4u) {
+        staged_quad = x[wg.y * (dims.k / 4u) + v];
       }
       sx[${stagedSlot("q")}] = staged_quad;
     }
@@ -1505,7 +1424,7 @@ const stagedReduction = (
     let unit = chunk * ${lanes}u + lane;
     if (col < dims.n && unit < units) {
 ${unitLoads(storage, "t", "unit", shift, "", false, false)}
-${unitMacs(storage, "t", packed, true, true)}
+${unitMacs(storage, "t", false, true, true)}
     }
     workgroupBarrier();
   }`;
@@ -1521,6 +1440,11 @@ const parallelWgsl = (
 ): string => {
   if (![2, 4, 8, 16, 32].includes(lanes)) {
     throw new CodegenError("linear_gemv_parallel: invalid lane count");
+  }
+  if (staged && (packed || quantize)) {
+    throw new CodegenError(
+      "linear_gemv_parallel: staged activations exist for the plain variant only",
+    );
   }
   assertRowsStorage(storage);
   const unit = linearGemvUnit(storage);
@@ -1540,9 +1464,7 @@ struct Dims {
 @group(0) @binding(0) var<uniform> dims: Dims;
 ${bindings(unit, storage, quantize, packed)}${quantize ? staticQuantizeEpilogue() : ""}
 var<workgroup> partial: array<f32, 128>;${
-    staged
-      ? `\nvar<workgroup> sx: array<vec4<${packed ? "u32" : "f32"}>, ${lanes * (unit / (packed ? 16 : 4))}u>;`
-      : ""
+    staged ? `\nvar<workgroup> sx: array<vec4<f32>, ${lanes * (unit / 4)}u>;` : ""
   }
 
 @compute @workgroup_size(128)
@@ -1550,7 +1472,7 @@ fn main(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id) wg: ve
   let lane = lid % ${lanes}u;
   let col = wg.x * ${128 / lanes}u + lid / ${lanes}u;
   var acc = 0.0;
-${staged ? stagedReduction(storage, lanes, shift, packed) : plainReduction(storage, lanes, shift, packed)}
+${staged ? stagedReduction(storage, lanes, shift) : plainReduction(storage, lanes, shift, packed)}
   partial[lid] = acc;
   workgroupBarrier();
   for (var width = ${lanes / 2}u; width > 0u; width /= 2u) {

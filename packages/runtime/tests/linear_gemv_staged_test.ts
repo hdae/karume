@@ -1,26 +1,12 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import {
-  type LinearGemvParallelLanes,
   linearGemvPackedEligible,
-  linearGemvPackedStagedEligible,
   linearGemvParallelKey,
-  linearGemvParallelPackedKey,
-  linearGemvParallelPackedStagedKey,
-  linearGemvParallelPackedStagedWgsl,
-  linearGemvParallelPackedWgsl,
   linearGemvParallelStagedKey,
   linearGemvParallelStagedWgsl,
   linearGemvParallelWgsl,
   linearGemvStagedEligible,
-  linearGemvStaticQuantizeKey,
-  linearGemvStaticQuantizePackedKey,
-  linearGemvStaticQuantizePackedStagedKey,
-  linearGemvStaticQuantizePackedStagedWgsl,
-  linearGemvStaticQuantizePackedWgsl,
-  linearGemvStaticQuantizeStagedKey,
-  linearGemvStaticQuantizeStagedWgsl,
-  linearGemvStaticQuantizeWgsl,
 } from "../src/kernels/linear-gemv.ts";
 
 describe("linearGemvStagedEligible (K-90)", () => {
@@ -76,103 +62,4 @@ describe("the staged-activation parallel GEMV's key and WGSL", () => {
       (plain.match(/workgroupBarrier\(\)/g)?.length ?? 0) + 2,
     );
   });
-});
-
-describe("linearGemvPackedStagedEligible", () => {
-  it("never stages a shape that does not take packed activations", () => {
-    assertEquals(linearGemvPackedEligible("i4", 1, 1536, 2048, 32), undefined);
-    assertEquals(linearGemvPackedStagedEligible("i4", 1, 1536, 2048, 32), undefined);
-    assertEquals(linearGemvPackedStagedEligible("i4", 9, 1536, 2048, 2048), undefined);
-  });
-
-  it("leaves every packed row on the unstaged packed body until the row is measured", () => {
-    for (const [storage, n, k, group] of [
-      ["i4", 1536, 2048, 2048],
-      ["i4", 1536, 6144, 2048],
-      ["i4", 1536, 4096, 4096],
-      ["i2", 1536, 12288, undefined],
-      ["i4", 2560, 10240, 2048],
-    ] as const) {
-      assert(linearGemvPackedEligible(storage, 1, n, k, group) !== undefined);
-      assertEquals(linearGemvPackedStagedEligible(storage, 1, n, k, group), undefined);
-    }
-  });
-});
-
-type Body = {
-  readonly name: string;
-  readonly unstaged: (
-    storage: "i2" | "i4" | "i8",
-    group: number | undefined,
-    lanes: LinearGemvParallelLanes,
-  ) => string;
-  readonly staged: (
-    storage: "i2" | "i4" | "i8",
-    group: number | undefined,
-    lanes: LinearGemvParallelLanes,
-  ) => string;
-  readonly packed: boolean;
-};
-
-const BODIES: readonly Body[] = [
-  {
-    name: "SRQ-fused",
-    unstaged: linearGemvStaticQuantizeWgsl,
-    staged: linearGemvStaticQuantizeStagedWgsl,
-    packed: false,
-  },
-  {
-    name: "packed",
-    unstaged: linearGemvParallelPackedWgsl,
-    staged: linearGemvParallelPackedStagedWgsl,
-    packed: true,
-  },
-  {
-    name: "SRQ-fused packed",
-    unstaged: linearGemvStaticQuantizePackedWgsl,
-    staged: linearGemvStaticQuantizePackedStagedWgsl,
-    packed: true,
-  },
-];
-
-describe("the staged forms of the SRQ-fused and packed parallel GEMVs", () => {
-  it("append the staged fragment last, so the SRQ and packed discriminators stay where they are", () => {
-    assertEquals(
-      linearGemvStaticQuantizeStagedKey("i4", 512, 32),
-      `${linearGemvStaticQuantizeKey("i4", 512, 32)}:staged-x`,
-    );
-    assertEquals(
-      linearGemvParallelPackedStagedKey("i2", undefined, 32),
-      `${linearGemvParallelPackedKey("i2", undefined, 32)}:staged-x`,
-    );
-    assertEquals(
-      linearGemvStaticQuantizePackedStagedKey("i4", 2048, 32),
-      `${linearGemvStaticQuantizePackedKey("i4", 2048, 32)}:staged-x`,
-    );
-  });
-
-  for (const body of BODIES) {
-    it(`keep the ${body.name} body's multiply-adds, restoration and store, reading the activation only from workgroup memory`, () => {
-      for (const [storage, group] of [
-        ["i2", undefined],
-        ["i4", 512],
-        ["i8", undefined],
-      ] as const) {
-        for (const lanes of [2, 4, 32] satisfies LinearGemvParallelLanes[]) {
-          const where = `${storage} l${lanes}`;
-          const unstaged = body.unstaged(storage, group, lanes);
-          const staged = body.staged(storage, group, lanes);
-          const kept = (code: string) =>
-            code.split("\n").filter((line) => /acc = fma\(|unpack4xI8\(xp|out\[wg\.y/.test(line));
-          assertEquals(kept(staged), kept(unstaged), where);
-          assert(!/= x\[xq/.test(staged), where);
-          assertStringIncludes(
-            staged,
-            `var<workgroup> sx: array<vec4<${body.packed ? "u32" : "f32"}>`,
-            where,
-          );
-        }
-      }
-    });
-  }
 });

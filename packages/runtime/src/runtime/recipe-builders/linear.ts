@@ -36,9 +36,6 @@ import {
   linearGemvParallelPackedKey,
   linearGemvParallelPackedParams,
   linearGemvParallelPackedWgsl,
-  linearGemvPackedStagedEligible,
-  linearGemvParallelPackedStagedKey,
-  linearGemvParallelPackedStagedWgsl,
   linearGemvParallelStagedKey,
   linearGemvParallelStagedWgsl,
   linearGemvParallelWgsl,
@@ -428,23 +425,19 @@ const buildLinearGemv = async (
   // Only the parallel (non-subgroup) variant has a packed activation variant. Having passed
   // `buildLinear`'s guard, this is always `lanes !== undefined && !subgroup`.
   const packedScale = packed === undefined ? undefined : packed.scale;
-  // The staged-activation variants (K-90) are bit-identical to their unstaged bodies, so they are
-  // taken wherever the measured table marks the shape, without a separate opt-in. A packed shape
-  // reads its own predicate, a narrowing of the packed one.
+  // The staged-activation variant (K-90) is bit-identical to the plain parallel one, so it is taken
+  // wherever the measured table marks the shape, without a separate opt-in.
   const staged =
     lanes !== undefined &&
     !subgroup &&
-    (packedScale === undefined
-      ? linearGemvStagedEligible(storage, m, n, k, groupSize)
-      : linearGemvPackedStagedEligible(storage, m, n, k, groupSize)) !== undefined;
+    packedScale === undefined &&
+    linearGemvStagedEligible(storage, m, n, k, groupSize) !== undefined;
   const key =
     lanes !== undefined
       ? subgroup
         ? linearGemvSubgroupKey(storage, groupSize, lanes)
         : packedScale !== undefined
-          ? staged
-            ? linearGemvParallelPackedStagedKey(storage, groupSize, lanes)
-            : linearGemvParallelPackedKey(storage, groupSize, lanes)
+          ? linearGemvParallelPackedKey(storage, groupSize, lanes)
           : staged
             ? linearGemvParallelStagedKey(storage, groupSize, lanes)
             : linearGemvParallelKey(storage, groupSize, lanes)
@@ -457,9 +450,7 @@ const buildLinearGemv = async (
       ? subgroup
         ? linearGemvSubgroupWgsl(storage, groupSize, lanes)
         : packedScale !== undefined
-          ? staged
-            ? linearGemvParallelPackedStagedWgsl(storage, groupSize, lanes)
-            : linearGemvParallelPackedWgsl(storage, groupSize, lanes)
+          ? linearGemvParallelPackedWgsl(storage, groupSize, lanes)
           : staged
             ? linearGemvParallelStagedWgsl(storage, groupSize, lanes)
             : linearGemvParallelWgsl(storage, groupSize, lanes)
