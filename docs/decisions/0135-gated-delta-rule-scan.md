@@ -1,7 +1,7 @@
 # 0135: Vocabulary extension: gated_delta_scan (the Gated DeltaNet recurrence, an extended composite op)
 
-- Status: proposed (2026-10-27). Acceptance waits for the export measurements of entry condition ①
-  (open point 1). The kernel-side numbers below are measured on one GPU; what is still unmeasured on
+- Status: proposed (2026-10-27). The export measurements of entry condition ① were taken on
+  2026-10-31 and meet the gate (open point 1); acceptance is the maintainer's ruling. The kernel-side numbers below are measured on one GPU; what is still unmeasured on
   the kernel side is listed in open point 10.
 - Date: 2026-10-27
 - Scope: the new op `gated_delta_scan` (the value form, for prefill), its kernel, its CPU reference,
@@ -47,7 +47,7 @@ fast-decay regime where the recurrent one stays at 8.5e-8 (research §5.1).
 Nothing in Karume implements the recurrence. Everything around it maps onto existing ops (`linear`,
 `conv1d` with `groups`, `sigmoid` + `mul` fused to SiLU, `slice` / `reshape`, the softplus
 decomposition, the `rms_norm` fold), except two export gaps outside the recurrence found by reading
-the code (not measured — open points 2 and 3).
+the code (both settled on the recipe side by measurement — open points 2 and 3).
 
 ## Decision
 
@@ -117,14 +117,15 @@ exactly as a composition of existing ops (per token: `exp`, `mul`, `sum`, `sub`,
 it is composite: the extended composite layer, which needs a measurement for at least one of entry
 conditions ① to ④ (each is addressed below).
 
-- **① Semantic information is lost when restoring from the decomposition — expected to apply as for
-  `gru_scan`, not measured yet.** Both upstream functions loop in Python, over T tokens or over T/64
+- **① Semantic information is lost when restoring from the decomposition — applies, as for
+  `gru_scan` (measured 2026-10-31, open point 1).** Both upstream functions loop in Python, over T tokens or over T/64
   chunks with a T-dependent padding, so `torch.export` is expected to specialise the length axis and
   unroll; "this is a delta-rule scan" would have to be restored from a node sequence that differs per
   T. The spike did not run the export measurements (research §9). MUST before acceptance: the
   specialisation under `Dim("T")`, node counts after `run_decompositions(curated_decompositions())`
   at fixed T, and one node with a symbolic T through the custom op (open point 1).
-- **② Materialising the intermediate — the op side is measured, the decomposed side is not.** The
+- **② Materialising the intermediate — the op side is measured, the decomposed side estimated
+  (open point 1).** The
   kernel keeps the state in registers and allocates no scratch (`scratchBytes` 0); one layer at
   T = 4096 takes 2.56 ms in one dispatch (research §4.1, §4.5). The decomposed recurrent form, by
   construction, materialises the full per-layer state (2 MiB at the MOSS shape) at every token step;
@@ -249,8 +250,8 @@ As ADR 0056 decision 6:
   `__init__`, :423-424) for a wrapper that applies upstream's `l2norm` with existing ops and calls the
   custom op, so `forward` is not copied. The wrapper receives q / k after `forward`'s
   `repeat_interleave` (:523-525), so the swap gives r = 1 for free. r = 2 (reading half the q / k
-  data) needs either a change to `forward` or a strided slice in the wrapper that undoes the repeat,
-  and with the slice the repeat itself still stays in the export graph (open point 4); both layouts
+  data) needs either a change to `forward` or a reshape + slice in the wrapper that undoes the repeat,
+  and with the undo the repeat itself still stays in the export graph (open point 4); both layouts
   are this contract.
 - **MUST: the recipe makes sure the stock `forward` runs** before relying on the attribute swap (or
   disables hub kernels): `Qwen3_5GatedDeltaNet` carries `@use_kernel_forward_from_hub` (:373), so
@@ -376,20 +377,49 @@ As ADR 0056 decision 6:
 
 ## Open points
 
-1. **Export measurements of entry condition ①** (acceptance gate): the length-axis specialisation of
-   both upstream functions under `Dim("T")`, node counts at fixed T after `run_decompositions`, the
-   custom op as one node with a symbolic T, and a 1-layer `Qwen3_5GatedDeltaNet` through the
-   exporter. The decomposed form's GPU dispatch count and traffic (②) come with them.
-2. **`rsqrt` in the l2-normalisation**: `rsqrt` is not in the IR vocabulary (it is only folded into
-   `rms_norm`). Either a normalize rewrite `rsqrt(x)` → `div(1, sqrt(x))` checked against torch
-   (`rsqrt` is in Core ATen, so a ledger NOTE), or candidate B.
-3. **The causal conv1d's trailing `[..., :T]`** is a `slice` on the symbolic axis `T + 3`, which
-   `slice` rejects (static axes only). A recipe-side rewrite (left `pad` with no conv padding — its
-   symbolic-axis support is unverified) or a contract change, decided outside this ADR.
-4. **The recipe's head layout**: r = 1 is what the attribute swap gives for free (the wrapper
-   receives the repeated q / k). r = 2 reads half the q / k data but needs one of two routes: a
-   change to `forward`, or a strided slice in the wrapper that undoes the repeat (the repeat then
-   stays in the export graph). Same contract, same bits (decision 5).
+1. **Export measurements of entry condition ① — measured; the gate is met** (research
+   [2026-10-31-gdn-export-measurements](../research/2026-10-31-gdn-export-measurements.md)). Under
+   `Dim("T")` neither upstream function exports: `torch_recurrent_gated_delta_rule` specialises T
+   to the example value through its token loop (`Eq(T, 64)` at :354), `torch_chunk_gated_delta_rule`
+   through its chunk loop (`Eq(ceil(T/64), n)` at :309, plus guards from the padding arithmetic).
+   After `run_decompositions(curated_decompositions())` at fixed T the recurrent form is 1,951 /
+   15,391 / 122,911 nodes at T = 64 / 512 / 4096 (30 per token) and the chunked form 1,476 / 1,945 /
+   5,697 (67 per chunk), each valid for one T; neither converts to IR as is (`copy` / `eq.Scalar` /
+   `rsqrt` unsupported; the chunked form's rank-5 chain). A `torch.library.custom_op` stand-in is one
+   node with T symbolic ([1, 4096]) for r = 1 and r = 2, and a 1-layer `Qwen3_5GatedDeltaNet` at the
+   MOSS shape converts to 47 IR nodes with a symbolic T with the recipe changes of points 2 to 4.
+   ② on the decomposed side **[estimate]**: 81,945 non-view nodes per layer at T = 4096 (about
+   1.97 M dispatches for the 24 layers; host encode alone about 1.2 s at 0.617 µs per dispatch) and
+   about 99 GiB of unfused traffic per layer, plus about 768 GiB (growing as T²) for the
+   functionalised per-token output write — against one dispatch, no scratch and 2.56 ms for the op.
+2. **`rsqrt` in the l2-normalisation — settled on the recipe side.** The wrapper writes
+   `l2norm(x)` as `rms_norm(x, (d,), eps = eps/d) · d^-½`, which exports as [rms_norm, mul]; no
+   vocabulary change and no candidate B. In f32 on CPU it is within 4 ULP of upstream's
+   `x·rsqrt(Σx² + eps)` (about 48 % of elements bit-identical); against f64 its rel_l2 is 5.7–6.0e-8
+   (upstream 4.9–5.4e-8), and through an exact recurrence it moves o by at most 0.134 of the o band
+   (0.124 on the real MOSS layer-0 q / k). Parity at the level of the numbers holds (ADR 0005
+   addendum 2026-10-11); bit parity with upstream's normalisation is not claimed and nothing depends
+   on it — the op's golden takes normalised q / k. The division forms are not used:
+   `x·(1/sqrt(·))` traces to `aten.reciprocal`, `x/sqrt(·)` to a `sum(keepdim=True)` the handler
+   rejects, and both are 5 ops instead of 2. Not measured: the IR `rms_norm` kernel against torch on
+   the GPU.
+3. **The causal conv1d — settled on the recipe side, no contract change.** Swapping the
+   `nn.Conv1d` submodule is not enough: `forward`'s trailing `[..., :T]` (:501) stays and `slice`
+   rejects it on the symbolic axis. The recipe sets the instance attribute `causal_conv1d_fn` (set
+   in `__init__`, :421; None without the `causal-conv1d` package) to
+   `silu(conv1d(pad(x, (K−1, 0)), w, groups=C))`, so `forward` takes its other branch (:492), which
+   has no slice, and asserts `activation == "silu"` and `seq_idx is None`. It exports as [pad,
+   conv1d, sigmoid, mul]. The conv output is bit-identical to upstream's at every T measured (1 to
+   4096); the silu after it differs by ≤ 2.4e-7 only because torch's CPU silu takes another path on
+   upstream's strided slice.
+4. **The recipe's head layout — r = 1 first.** The attribute swap gives r = 1 (q / k arrive after
+   `repeat_interleave`, exported as [reshape, expand, reshape]): 47 nodes. r = 2 without a
+   `forward` copy exports with a rank-4 undo in the wrapper — `reshape [B,T,Hk,r·d]` + a width-d
+   `slice` on the last axis (51 nodes) or `reshape [B·T,Hk,r,d]` + width-1 slice + reshape (53);
+   the rank-5 undos (index or width-1 slice on `[B,T,Hk,r,d]`) fail the strided rank limit (≤ 4)
+   and a step-r slice fails `slice`'s step = 1. The repeat stays in the graph either way, so r = 2
+   saves only the scan's q / k read and half the normalisation; whether that repays 4 more nodes is
+   a GPU measurement. Same contract, same bits (research 2026-10-27 §5.2).
 5. **The states form for decode** (decision 4), with the first Qwen3.5-class language model.
 6. **Bit identity between geometries of (a2)** (a Uint32 check) on each adapter before its
    per-adapter geometry. On the RTX 3080 Ti `s8:c16:tb16` matched `s8:c32:tb8` word for word on two
