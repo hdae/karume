@@ -2188,13 +2188,61 @@ test("the linear prologue rejects a producer that is not f32 in and out", () => 
   }
 });
 
-test("no fusion rule's head is a prologue op (the rules are tried first at each index, so the order cannot change the result)", () => {
-  const heads = new Set(FUSION_RULES.flatMap((rule) => rule.heads));
-  assertEquals(
-    LINEAR_PROLOGUE_OPS.filter((op) => heads.has(op)),
-    [],
+test("the one fusion rule whose head is a prologue op is geluMulStaticQuantize (the rules are tried first at each index; that rule never accepts the linear prologue's index — the next test)", () => {
+  const owners = FUSION_RULES.flatMap((rule) =>
+    rule.heads
+      .filter((head) => LINEAR_PROLOGUE_OPS.some((op) => op === head))
+      .map((head) => [head, rule.name] as const),
   );
+  assertEquals(owners, [["gelu_tanh", "geluMulStaticQuantize"]]);
   assertEquals(LINEAR_PROLOGUE_OPS, ["gelu_tanh", "gelu"]);
+});
+
+test("geluMulStaticQuantize and the linear prologue never accept the same gelu_tanh: each folds its own form in one graph", () => {
+  // gelu_tanh → a8 linear (the prologue's form) and gelu_tanh → mul → static_quantize (the rule's
+  // form), both enabled. The gelu value has one use either way, so the next node decides which
+  // mechanism can accept; a rule that took the prologue's gelu would leave linearPrologue at 0.
+  const dtype = "f32";
+  const row = [1, 4, 256];
+  const graph: DeclarationJson = {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["gelu_tanh", "linear", "mul", "static_quantize"] },
+    symbols: [],
+    inputs: [
+      { name: "x", dtype, shape: row },
+      { name: "gate", dtype, shape: row },
+      { name: "ple", dtype, shape: row },
+    ],
+    outputs: ["y", "q"],
+    initializers: { w: {}, b: {} },
+    values: {
+      w: { dtype, shape: [8, 256] },
+      b: { dtype, shape: [8] },
+      g: { dtype, shape: row },
+      y: { dtype, shape: [1, 4, 8] },
+      h: { dtype, shape: row },
+      m: { dtype, shape: row },
+      q: { dtype, shape: row },
+    },
+    nodes: [
+      { op: "gelu_tanh", ins: ["x"], outs: ["g"], attrs: {} },
+      { op: "linear", ins: ["g", "w", "b"], outs: ["y"], attrs: {} },
+      { op: "gelu_tanh", ins: ["gate"], outs: ["h"], attrs: {} },
+      { op: "mul", ins: ["h", "ple"], outs: ["m"], attrs: {} },
+      { op: "static_quantize", ins: ["m"], outs: ["q"], attrs: { scale: Math.fround(0.0371) } },
+    ],
+  };
+  const ir = parse(graph);
+  const plan = planFusions(planGraph(ir, bindSymbols(ir, { x: row, gate: row, ple: row })).nodes, {
+    useCounts: countUses(ir),
+    outputNames: new Set(ir.outputs),
+    limits: TEST_LIMITS,
+    ...A8_I8,
+    fuseGeluMulStaticQuantize: true,
+  });
+  assertEquals(outline(plan.steps), ["linear", "fused:geluMulStaticQuantize"]);
+  assertEquals(plan.counts, { ...NO_FUSIONS, linearPrologue: 1, geluMulStaticQuantize: 1 });
 });
 
 // ------------------------------- the permutes a fused attention absorbs (perf-ledger F-3 / F-8)
