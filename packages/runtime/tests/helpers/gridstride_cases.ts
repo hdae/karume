@@ -76,6 +76,8 @@ import {
   RMS_NORM_KEY,
   RMS_NORM_WGSL,
   rmsNormParams,
+  rmsNormWorkgroupKey,
+  rmsNormWorkgroupWgsl,
 } from "../../src/kernels/rms-norm.ts";
 import {
   MASKED_FILL_KEY,
@@ -1059,6 +1061,30 @@ export const rmsNormCase = (narrow = false): DegenerateCase => {
     name: narrow ? "rms_norm 128" : "rms_norm",
     key: narrow ? RMS_NORM_128_KEY : RMS_NORM_KEY,
     wgsl: narrow ? RMS_NORM_128_WGSL : RMS_NORM_WGSL,
+    params: rmsNormParams(rows, dim, eps),
+    uniformParams: true,
+    inputs: [input, weight],
+    expected: applyReferenceOp("rms_norm", [input, weight], { eps }, [rows, dim]),
+    natural: rows,
+    groups: 2,
+  };
+};
+
+/**
+ * The prefetch form of the 256-wide rms_norm (v2, perf-ledger K-99) at 2 trips per thread: the
+ * weight words are loaded once per workgroup before the row loop, so a workgroup that strides over
+ * many rows must keep using them.
+ */
+export const rmsNormPrefetchCase = (): DegenerateCase => {
+  const rows = 600;
+  const dim = 512;
+  const eps = 1e-6;
+  const input = fill([rows, dim], (i) => ((i * 5) % 17) * 0.5 - 4 + Math.floor(i / dim) * 0.01);
+  const weight = fill([dim], POSITIVE);
+  return {
+    name: "rms_norm prefetch",
+    key: rmsNormWorkgroupKey(dim),
+    wgsl: rmsNormWorkgroupWgsl(dim),
     params: rmsNormParams(rows, dim, eps),
     uniformParams: true,
     inputs: [input, weight],

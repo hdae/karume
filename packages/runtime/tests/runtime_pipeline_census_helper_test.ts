@@ -115,7 +115,7 @@ const REPRESENTATIVES: {
     "parallel-subgroup32": [linearGemvSubgroupKey("i8", undefined, 16)],
   },
   fuseRmsNormAdd: {
-    true: [rmsNormAddKey("residual-norm"), rmsNormSubgroupKey("norm-residual")],
+    true: [rmsNormAddKey("residual-norm", 1536), rmsNormSubgroupKey("norm-residual")],
   },
   fuseLinearStaticQuantize: {
     true: [
@@ -302,7 +302,7 @@ describe("assertSeatsApplied", () => {
     assertThrows(
       () =>
         assertSeatsApplied(
-          rows([sequential, 3], [rmsNormAddKey("norm-residual"), 1]),
+          rows([sequential, 3], [rmsNormAddKey("norm-residual", 1536), 1]),
           { fuseRmsNormAdd: false },
           "where",
         ),

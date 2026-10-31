@@ -48,7 +48,7 @@ describe("RMS→addの任意融合", () => {
         assertEquals(step.outputName, "y");
         assertEquals(
           step.dispatches[0].key,
-          rmsNormAddKey(normFirst ? "norm-residual" : "residual-norm"),
+          rmsNormAddKey(normFirst ? "norm-residual" : "residual-norm", dim),
         );
         assertEquals(step.dispatches[0].params[3], 0, "丸め用XORのuniformは0");
       }

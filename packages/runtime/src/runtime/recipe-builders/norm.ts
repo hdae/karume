@@ -13,10 +13,10 @@ import type { PackedActivations } from "../fusion.ts";
 import {
   RMS_NORM_128_KEY,
   RMS_NORM_128_WGSL,
-  RMS_NORM_KEY,
-  RMS_NORM_WGSL,
   rmsNormKernel,
   rmsNormParams,
+  rmsNormWorkgroupKey,
+  rmsNormWorkgroupWgsl,
 } from "../../kernels/rms-norm.ts";
 import {
   STATIC_QUANTIZE_KEY,
@@ -144,13 +144,13 @@ export const buildRmsNorm = async (
       ? RMS_NORM_128_KEY
       : kernel === "subgroup32"
         ? rmsNormSubgroupKey()
-        : RMS_NORM_KEY;
+        : rmsNormWorkgroupKey(dim);
   const wgsl =
     kernel === "workgroup128"
       ? RMS_NORM_128_WGSL
       : kernel === "subgroup32"
         ? rmsNormSubgroupWgsl()
-        : RMS_NORM_WGSL;
+        : rmsNormWorkgroupWgsl(dim);
   const { pipeline, layout, roles } = await face.state.cache.get(key, wgsl);
   const params = face.writeParams(rmsNormParams(rows, dim, eps), PARAMS_UNIFORM_USAGE);
   const groups = gridStrideWorkgroups(

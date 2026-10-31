@@ -182,7 +182,7 @@ const GEMV_STATIC_QUANTIZE = suffixOf(
   GEMV_PARALLEL_SAMPLE,
 );
 const GEMV_PACKED = suffixOf(linearGemvParallelPackedKey("i8", undefined, 4), GEMV_PARALLEL_SAMPLE);
-const RMS_NORM_ADD_FAMILY = familyOf(rmsNormAddKey("norm-residual"));
+const RMS_NORM_ADD_FAMILY = familyOf(rmsNormAddKey("norm-residual", 1536));
 // The gelu_tanh → mul → SRQ kernel (perf-ledger K-48) — one family for both operand orders.
 const GELU_MUL_STATIC_QUANTIZE_FAMILY = familyOf(geluMulStaticQuantizeKey("gelu-other"));
 const RMS_FAMILIES: ReadonlySet<string> = new Set([familyOf(RMS_NORM_KEY), RMS_NORM_ADD_FAMILY]);

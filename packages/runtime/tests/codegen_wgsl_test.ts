@@ -197,9 +197,15 @@ import {
   RMS_NORM_128_WGSL,
   RMS_NORM_KEY,
   RMS_NORM_WGSL,
+  RMS_NORM_PREFETCH_MAX_DIM,
   RMS_NORM_WORKGROUP_SIZE,
+  rmsNormAddKey,
   rmsNormAddWgsl,
+  rmsNormInvWgsl,
   rmsNormParams,
+  rmsNormPrefetchTrip,
+  rmsNormWorkgroupKey,
+  rmsNormWorkgroupWgsl,
 } from "../src/kernels/rms-norm.ts";
 import {
   ROPE_BSHD_KEY,
@@ -558,11 +564,16 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["gated_residual.wgsl", GATED_RESIDUAL_WGSL],
     ["rms_norm.wgsl", RMS_NORM_WGSL],
     ["rms_norm_128.wgsl", RMS_NORM_128_WGSL],
+    // The prefetch form (v2, perf-ledger K-99) at its edge trip count and at Gemma 4 E2B's width;
+    // v1 above stays the text of every other width. The v1 add forms it replaced are kept in
+    // fixtures/wgsl-baseline/ for the GPU identity test (gpu_rms_norm_prefetch_test.ts).
+    ["rms_norm_trip1.wgsl", rmsNormWorkgroupWgsl(256)],
+    ["rms_norm_trip6.wgsl", rmsNormWorkgroupWgsl(1536)],
     // RMS→add 融合（ADR 0099）。**素の rms_norm と対で置く**のが条件で、2 順序とも丸め障壁
     // （uniform の 0 との整数 XOR）が生成物に残っていることをバイト列で凍結する（定数式の
     // bitcast 往復へ簡略化されると融合側だけ丸めが変わる）。
-    ["rms_norm_add_nr.wgsl", rmsNormAddWgsl("norm-residual")],
-    ["rms_norm_add_rn.wgsl", rmsNormAddWgsl("residual-norm")],
+    ["rms_norm_add_nr.wgsl", rmsNormAddWgsl("norm-residual", 1536)],
+    ["rms_norm_add_rn.wgsl", rmsNormAddWgsl("residual-norm", 1536)],
     ["rms_norm_subgroup32.wgsl", rmsNormSubgroupWgsl()],
     ["rms_norm_add_subgroup32_nr.wgsl", rmsNormSubgroupWgsl("norm-residual")],
     ["rms_norm_add_subgroup32_rn.wgsl", rmsNormSubgroupWgsl("residual-norm")],
@@ -1179,8 +1190,15 @@ test("同じ生成入力からは常に同一の WGSL が出る（全 op × dtyp
   }
   assertEquals(ropeWgsl("bshd", "pair"), ropeWgsl("bshd", "pair"), "rope:pair");
   assertEquals(adalnNormWgsl("token"), adalnNormWgsl("token"), "adaln_norm:token");
-  for (const order of ["norm-residual", "residual-norm"] as const) {
-    assertEquals(rmsNormAddWgsl(order), rmsNormAddWgsl(order), `rms_norm_add:${order}`);
+  for (const dim of [256, 1536, 2560, RMS_NORM_PREFETCH_MAX_DIM]) {
+    assertEquals(rmsNormWorkgroupWgsl(dim), rmsNormWorkgroupWgsl(dim), `rms_norm:${dim}`);
+    for (const order of ["norm-residual", "residual-norm"] as const) {
+      assertEquals(
+        rmsNormAddWgsl(order, dim),
+        rmsNormAddWgsl(order, dim),
+        `rms_norm_add:${order}:${dim}`,
+      );
+    }
   }
   assertEquals(embeddingWgsl("i4", 32), embeddingWgsl("i4", 32), "embedding:i4:g32");
   for (const weight of WEIGHT_STORAGES) {
@@ -1203,6 +1221,12 @@ test("パイプラインキーは生成入力ごとに一意（別カーネル�
     LAYER_NORM_KEY,
     RMS_NORM_KEY,
     RMS_NORM_128_KEY,
+    // The prefetch form bakes its trip count into the WGSL, so each width is its own key.
+    ...[256, 512, 1536, 2560, RMS_NORM_PREFETCH_MAX_DIM].flatMap((dim) => [
+      rmsNormWorkgroupKey(dim),
+      rmsNormAddKey("norm-residual", dim),
+      rmsNormAddKey("residual-norm", dim),
+    ]),
     SOFTMAX_KEY,
     SAFE_SOFTMAX_KEY,
     ATTENTION_STATS_KEY,
@@ -4355,6 +4379,39 @@ test("融合カーネルは既存カーネルと別物で、契約どおりの�
   assertNotEquals(RMS_NORM_KEY, LAYER_NORM_KEY);
   assertEquals(RMS_NORM_KEY, `rms_norm:v1:f32:lastdim:wg${RMS_NORM_WORKGROUP_SIZE}`);
   assertEquals(RMS_NORM_WORKGROUP_SIZE, 256);
+  // The prefetch form (v2) runs exactly on the multiples of 256 up to the measured width; every
+  // other width keeps v1's key and text, and the add form (which has no v1 path left) refuses them.
+  for (const dim of [256, 768, 1280, 1536, 2560, 3072, 4096]) {
+    assertEquals(rmsNormPrefetchTrip(dim), dim / 256, `trip ${dim}`);
+    assertEquals(rmsNormWorkgroupKey(dim), `rms_norm:v2:f32:lastdim:wg256:trip${dim / 256}`);
+    const v2 = rmsNormWorkgroupWgsl(dim);
+    // the reduction is v1's text, the value v1's expression on the prefetched words
+    assertEquals(v2.includes(rmsNormInvWgsl(256)), true, `reduction ${dim}`);
+    assertEquals(v2.split("out[base + o] = xv[t] * inv * wv[t];").length, 2, `value ${dim}`);
+    assertEquals(v2.includes(`array<f32, ${dim / 256}>`), true, `registers ${dim}`);
+  }
+  for (const dim of [1, 128, 129, 255, 257, 1000, 4352, 5120]) {
+    assertEquals(rmsNormPrefetchTrip(dim), undefined, `trip ${dim}`);
+    if (dim > 128) {
+      assertEquals(rmsNormWorkgroupKey(dim), RMS_NORM_KEY, `v1 key ${dim}`);
+      assertEquals(rmsNormWorkgroupWgsl(dim), RMS_NORM_WGSL, `v1 text ${dim}`);
+    }
+    assertThrows(() => rmsNormAddKey("norm-residual", dim), CodegenError, "no prefetch form");
+    assertThrows(() => rmsNormAddWgsl("residual-norm", dim), CodegenError, "no prefetch form");
+  }
+  // the add forms keep the rounding barrier on the prefetched words and read the residual register
+  assertEquals(
+    rmsNormAddWgsl("norm-residual", 1536).includes(
+      "out[base + o] = bitcast<f32>(bitcast<u32>(xv[t] * inv * wv[t]) ^ params.rounding_mask) + rv[t];",
+    ),
+    true,
+  );
+  assertEquals(
+    rmsNormAddWgsl("residual-norm", 1536).includes(
+      "out[base + o] = rv[t] + bitcast<f32>(bitcast<u32>(xv[t] * inv * wv[t]) ^ params.rounding_mask);",
+    ),
+    true,
+  );
   // MUST: layer_norm の生成物に rms_norm の概念が漏れていない（決定性スナップショットの前提）
   assertEquals(LAYER_NORM_WGSL.includes("inverseSqrt"), false);
 

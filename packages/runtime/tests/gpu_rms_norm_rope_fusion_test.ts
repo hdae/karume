@@ -8,7 +8,7 @@
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
-import { RMS_NORM_KEY } from "../src/kernels/rms-norm.ts";
+import { rmsNormWorkgroupKey } from "../src/kernels/rms-norm.ts";
 import { RMS_NORM_ROPE_KEY } from "../src/kernels/rms-norm-rope.ts";
 import { ROPE_PAIR_BSHD_KEY } from "../src/kernels/rope.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
@@ -114,10 +114,18 @@ test.skipIf(!GPU_AVAILABLE)(
           assertEquals(plainRun.submit.dispatchCount, 5, `${label}: plain dispatches`);
           const census = requireCensus(fusedRun.lastRunPipelines, label);
           assertEquals(countDispatches(census, RMS_NORM_ROPE_KEY), 2, `${label}: census`);
-          assertEquals(countDispatches(census, RMS_NORM_KEY), 0, `${label}: no plain rms_norm`);
+          assertEquals(
+            countDispatches(census, rmsNormWorkgroupKey(heads * headDim)),
+            0,
+            `${label}: no plain rms_norm`,
+          );
           assertEquals(countDispatches(census, ROPE_PAIR_BSHD_KEY), 0, `${label}: no plain RoPE`);
           const plainCensus = requireCensus(plainRun.lastRunPipelines, label);
-          assertEquals(countDispatches(plainCensus, RMS_NORM_KEY), 2, `${label}: plain census`);
+          assertEquals(
+            countDispatches(plainCensus, rmsNormWorkgroupKey(heads * headDim)),
+            2,
+            `${label}: plain census`,
+          );
           assertEquals(
             countDispatches(plainCensus, ROPE_PAIR_BSHD_KEY),
             2,

@@ -24,6 +24,19 @@
  * +0 stage is skipped, keeping the lower half's addition order and the output expression (ADR 0017
  * addendum 1).
  *
+ * ## The prefetch form (v2 — perf-ledger K-99, ADR 0017 addendum 2)
+ *
+ * Where a row is a multiple of 256 elements up to {@link RMS_NORM_PREFETCH_MAX_DIM}, the 256-wide
+ * kernel and the RMS → add fusion take v2: the output loop runs a constant `dim / 256` trips (the
+ * trip count is in the WGSL and the key), the weight words are loaded into registers once per
+ * workgroup before the row loop, and each row's x words (and the residual words of the add) are
+ * loaded before its reduction. v1's output loop re-read them after the reduction behind a runtime
+ * trip count, which made a lone row latency-bound (RTX 3080 Ti, dependent chain, M = 1: 5.0 → 2.8 µs
+ * at dim 1536, 9.9 → 3.8 µs at 4096). Only the source of each operand changes: the reduction is the
+ * same text and the value is {@link rmsNormValueWgsl} with the registers as its operands, so v2
+ * writes v1's words (checked word for word against v1 on the GPU — gpu_rms_norm_prefetch_test.ts).
+ * Other widths keep v1's text and key.
+ *
  * MUST: params are passed as a uniform. There is a workgroupBarrier inside the row loop, and the
  * loop condition must be uniform within the workgroup (loads from storage are not proven uniform by
  * the uniformity analysis).
@@ -78,28 +91,31 @@ export const rmsNormInvWgsl = (workgroupSize: 128 | 256): string => `    // sum 
 
 /**
  * The normalised value of element `index` of the row (`x · inv · weight`, left to right) — shared by
- * every form that writes or uses it, under the MUST of {@link rmsNormInvWgsl}.
+ * every form that writes or uses it, under the MUST of {@link rmsNormInvWgsl}. `registers` names
+ * the registers that already hold the element's x and weight words (the prefetch form); only the
+ * operands' source changes, never the expression.
  */
-export const rmsNormValueWgsl = (index: string): string =>
-  `x[base + ${index}] * inv * weight[${index}]`;
+export const rmsNormValueWgsl = (
+  index: string,
+  registers: { readonly x?: string; readonly weight?: string } = {},
+): string =>
+  `${registers.x ?? `x[base + ${index}]`} * inv * ${registers.weight ?? `weight[${index}]`}`;
 
-const rmsNormWgsl = (workgroupSize: 128 | 256, addOrder?: RmsNormAddOrder): string =>
+const rmsNormWgsl = (workgroupSize: 128 | 256): string =>
   `// karume rms_norm (last dim, weight only, f32, sum of squares in 1 pass)
 struct Params {
   rows: u32,
   dim: u32,
-  eps: f32,${addOrder === undefined ? "" : "\n  rounding_mask: u32,"}
+  eps: f32,
 }
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read> weight: array<f32>;
-@group(0) @binding(${addOrder === undefined ? 3 : 4}) var<storage, read_write> out: array<f32>;
+@group(0) @binding(3) var<storage, read_write> out: array<f32>;
 
 var<workgroup> scratch: array<f32, ${workgroupSize}>;
 
-${
-  addOrder === undefined ? "" : "@group(0) @binding(3) var<storage, read> residual: array<f32>;\n"
-}@compute @workgroup_size(${workgroupSize})
+@compute @workgroup_size(${workgroupSize})
 fn main(
   @builtin(workgroup_id) wid: vec3<u32>,
   @builtin(local_invocation_id) lid3: vec3<u32>,
@@ -115,13 +131,7 @@ fn main(
 ${rmsNormInvWgsl(workgroupSize)}
     var o = lid;
     while (o < dim) {
-      ${
-        addOrder === undefined
-          ? `out[base + o] = ${rmsNormValueWgsl("o")};`
-          : addOrder === "norm-residual"
-            ? `out[base + o] = bitcast<f32>(bitcast<u32>(${rmsNormValueWgsl("o")}) ^ params.rounding_mask) + residual[base + o];`
-            : `out[base + o] = residual[base + o] + bitcast<f32>(bitcast<u32>(${rmsNormValueWgsl("o")}) ^ params.rounding_mask);`
-      }
+      out[base + o] = ${rmsNormValueWgsl("o")};
       o = o + ${workgroupSize}u;
     }
     row = row + nwg.x;
@@ -134,13 +144,126 @@ export const RMS_NORM_WGSL: string = rmsNormWgsl(RMS_NORM_WORKGROUP_SIZE);
 export const RMS_NORM_128_KEY = "rms_norm:v1:f32:lastdim:wg128";
 export const RMS_NORM_128_WGSL: string = rmsNormWgsl(128);
 
+/**
+ * The widest row the prefetch form takes (16 trips). It was measured faster than v1 at every
+ * multiple of 256 from 256 to 4096 and every row count from 1 to 32,768 (perf-ledger K-99); wider
+ * rows hold more registers per thread and are unmeasured, so they keep v1.
+ */
+export const RMS_NORM_PREFETCH_MAX_DIM = 4096;
+
+/**
+ * The constant trip count of the prefetch form's output loop for a row of `dim` elements, or
+ * `undefined` where the 256-wide kernel keeps v1 (`dim` not a multiple of 256, or above
+ * {@link RMS_NORM_PREFETCH_MAX_DIM}).
+ */
+export const rmsNormPrefetchTrip = (dim: number): number | undefined =>
+  Number.isSafeInteger(dim) &&
+  dim >= RMS_NORM_WORKGROUP_SIZE &&
+  dim <= RMS_NORM_PREFETCH_MAX_DIM &&
+  dim % RMS_NORM_WORKGROUP_SIZE === 0
+    ? dim / RMS_NORM_WORKGROUP_SIZE
+    : undefined;
+
+/**
+ * The prefetch form (v2) for rows of exactly `trip · 256` elements: the weight words in registers
+ * before the row loop, the row's x (and residual) words in registers before its reduction, and a
+ * constant-trip output loop. Element `o = lid + t · 256` is register `t` of thread `lid`, so
+ * every index is in bounds and the loops are workgroup-uniform.
+ */
+const rmsNormPrefetchWgsl = (trip: number, addOrder?: RmsNormAddOrder): string => {
+  const value = rmsNormValueWgsl("o", { x: "xv[t]", weight: "wv[t]" });
+  const store =
+    addOrder === undefined
+      ? `out[base + o] = ${value};`
+      : addOrder === "norm-residual"
+        ? `out[base + o] = bitcast<f32>(bitcast<u32>(${value}) ^ params.rounding_mask) + rv[t];`
+        : `out[base + o] = rv[t] + bitcast<f32>(bitcast<u32>(${value}) ^ params.rounding_mask);`;
+  const loop = (body: string): string => `for (var t = 0u; t < ${trip}u; t = t + 1u) { ${body} }`;
+  const step = `t * ${RMS_NORM_WORKGROUP_SIZE}u`;
+  return `// karume rms_norm (last dim, weight only, f32, sum of squares in 1 pass; weight, x${addOrder === undefined ? "" : ", residual"} prefetched, ${trip} elements per thread)
+struct Params {
+  rows: u32,
+  dim: u32,
+  eps: f32,${addOrder === undefined ? "" : "\n  rounding_mask: u32,"}
+}
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read> weight: array<f32>;
+@group(0) @binding(${addOrder === undefined ? 3 : 4}) var<storage, read_write> out: array<f32>;
+
+var<workgroup> scratch: array<f32, ${RMS_NORM_WORKGROUP_SIZE}>;
+
+${
+  addOrder === undefined ? "" : "@group(0) @binding(3) var<storage, read> residual: array<f32>;\n"
+}@compute @workgroup_size(${RMS_NORM_WORKGROUP_SIZE})
+fn main(
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid3: vec3<u32>,
+  @builtin(num_workgroups) nwg: vec3<u32>,
+) {
+  let lid = lid3.x;
+  let dim = params.dim;
+  let scale = 1.0 / f32(dim);
+  var wv: array<f32, ${trip}>;
+  ${loop(`wv[t] = weight[lid + ${step}];`)}
+  var row = wid.x;
+  while (row < params.rows) {
+    let base = row * dim;
+    var xv: array<f32, ${trip}>;
+    ${loop(`xv[t] = x[base + lid + ${step}];`)}${
+      addOrder === undefined
+        ? ""
+        : `
+    var rv: array<f32, ${trip}>;
+    ${loop(`rv[t] = residual[base + lid + ${step}];`)}`
+    }
+
+${rmsNormInvWgsl(RMS_NORM_WORKGROUP_SIZE)}
+    for (var t = 0u; t < ${trip}u; t = t + 1u) {
+      let o = lid + ${step};
+      ${store}
+    }
+    row = row + nwg.x;
+  }
+}
+`;
+};
+
+const requirePrefetchTrip = (dim: number, where: string): number => {
+  const trip = rmsNormPrefetchTrip(dim);
+  if (trip === undefined) {
+    throw new CodegenError(
+      `${where}: no prefetch form for a row of ${dim} elements (a multiple of ${RMS_NORM_WORKGROUP_SIZE} up to ${RMS_NORM_PREFETCH_MAX_DIM})`,
+    );
+  }
+  return trip;
+};
+
+/**
+ * The key of the 256-wide rms_norm for rows of `dim` elements: the prefetch form's
+ * (`rms_norm:v2:…:trip<dim / 256>` — the trip count is in the WGSL) where
+ * {@link rmsNormPrefetchTrip} has one, else v1's {@link RMS_NORM_KEY}.
+ */
+export const rmsNormWorkgroupKey = (dim: number): string => {
+  const trip = rmsNormPrefetchTrip(dim);
+  return trip === undefined
+    ? RMS_NORM_KEY
+    : `rms_norm:v2:f32:lastdim:wg${RMS_NORM_WORKGROUP_SIZE}:trip${trip}`;
+};
+
+/** The WGSL of {@link rmsNormWorkgroupKey}. */
+export const rmsNormWorkgroupWgsl = (dim: number): string => {
+  const trip = rmsNormPrefetchTrip(dim);
+  return trip === undefined ? RMS_NORM_WGSL : rmsNormPrefetchWgsl(trip);
+};
+
 /** The plain rms_norm kernels (the 128- / 256-wide workgroup forms here, the subgroup form of ADR 0100). */
 export type RmsNormKernel = "workgroup128" | "workgroup256" | "subgroup32";
 
 /**
  * The plain rms_norm kernel a row of `dim` elements runs: the 128-wide workgroup form for dim ≤ 128,
  * else the subgroup form when the Session asks for it (`rmsNormReduce: "subgroup32"`), else the
- * 256-wide workgroup form ({@link RMS_NORM_KEY}).
+ * 256-wide workgroup form ({@link rmsNormWorkgroupKey} — v1 or its bit-identical prefetch form).
  *
  * MUST: this is the one decision — `buildRmsNorm` (runtime/recipe-builders/norm.ts) and the fusion
  * rule `rmsNormRope` (whose kernel shares the 256-wide form's reduction text and is bit-identical to
@@ -160,15 +283,21 @@ export const rmsNormKernel = (
  * It matches the reference in measurement, but WGSL does not guarantee bit identity on every
  * backend. The workgroup reduction and the grid-stride are shared with the standalone RMS, and the
  * public default path does not change.
+ *
+ * The fused kernel is the prefetch form (v2) of the standalone RMS, so it exists only for the rows
+ * {@link rmsNormPrefetchTrip} accepts (the rule's measured widths are all among them); any other
+ * `dim` throws. v1 (the runtime-trip output loop) is kept test-only in
+ * tests/fixtures/wgsl-baseline/ for the GPU identity test.
  */
-export const rmsNormAddWgsl = (order: RmsNormAddOrder): string => {
+export const rmsNormAddWgsl = (order: RmsNormAddOrder, dim: number): string => {
   assertRmsNormAddOrder(order);
-  return rmsNormWgsl(RMS_NORM_WORKGROUP_SIZE, order);
+  return rmsNormPrefetchWgsl(requirePrefetchTrip(dim, "rms_norm_add"), order);
 };
 
-export const rmsNormAddKey = (order: RmsNormAddOrder): string => {
+export const rmsNormAddKey = (order: RmsNormAddOrder, dim: number): string => {
   assertRmsNormAddOrder(order);
-  return `rms_norm_add:v1:${RMS_NORM_KEY}:${order}:xor-round`;
+  requirePrefetchTrip(dim, "rms_norm_add");
+  return `rms_norm_add:v2:${rmsNormWorkgroupKey(dim)}:${order}:xor-round`;
 };
 
 const assertRmsNormAddOrder = (order: RmsNormAddOrder): void => {

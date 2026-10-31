@@ -1,4 +1,4 @@
-// karume rms_norm (last dim, weight only, f32, sum of squares in 1 pass)
+// karume rms_norm (last dim, weight only, f32, sum of squares in 1 pass; weight, x, residual prefetched, 6 elements per thread)
 struct Params {
   rows: u32,
   dim: u32,
@@ -22,9 +22,15 @@ fn main(
   let lid = lid3.x;
   let dim = params.dim;
   let scale = 1.0 / f32(dim);
+  var wv: array<f32, 6>;
+  for (var t = 0u; t < 6u; t = t + 1u) { wv[t] = weight[lid + t * 256u]; }
   var row = wid.x;
   while (row < params.rows) {
     let base = row * dim;
+    var xv: array<f32, 6>;
+    for (var t = 0u; t < 6u; t = t + 1u) { xv[t] = x[base + lid + t * 256u]; }
+    var rv: array<f32, 6>;
+    for (var t = 0u; t < 6u; t = t + 1u) { rv[t] = residual[base + lid + t * 256u]; }
 
     // sum of squares (1 pass)
     var acc = 0.0;
@@ -48,10 +54,9 @@ fn main(
     // make every read of scratch[0] finish before the next row overwrites scratch[lid]
     workgroupBarrier();
 
-    var o = lid;
-    while (o < dim) {
-      out[base + o] = bitcast<f32>(bitcast<u32>(x[base + o] * inv * weight[o]) ^ params.rounding_mask) + residual[base + o];
-      o = o + 256u;
+    for (var t = 0u; t < 6u; t = t + 1u) {
+      let o = lid + t * 256u;
+      out[base + o] = bitcast<f32>(bitcast<u32>(xv[t] * inv * wv[t]) ^ params.rounding_mask) + rv[t];
     }
     row = row + nwg.x;
   }

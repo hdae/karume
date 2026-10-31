@@ -124,7 +124,7 @@ describe.skipIf(!GPU_AVAILABLE)("RMS→add融合（実GPU）", () => {
         const pipeline = await d.createComputePipelineAsync({
           layout: "auto",
           compute: {
-            module: d.createShaderModule({ code: rmsNormAddWgsl("residual-norm") }),
+            module: d.createShaderModule({ code: rmsNormAddWgsl("residual-norm", dim) }),
             entryPoint: "main",
           },
         });

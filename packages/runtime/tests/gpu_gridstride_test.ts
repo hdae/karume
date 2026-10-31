@@ -63,6 +63,7 @@ import {
   quantizeRowsGroupedCase,
   reduceCase,
   rmsNormCase,
+  rmsNormPrefetchCase,
   siluCase,
   softmaxCase,
   stridedCase,
@@ -199,6 +200,7 @@ const CASES: readonly DegenerateCase[] = [
   layerNormCase(),
   rmsNormCase(),
   rmsNormCase(true),
+  rmsNormPrefetchCase(),
   gruScanCase(),
   // 融合カーネル（op 語彙の外 — src/runtime/fusion.ts が置換で挿す 3 族）。担当テストは形が
   // 小さく必要数の workgroup がそのまま割り当たるので、縮退経路はここでしか踏まれない。

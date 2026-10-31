@@ -77,9 +77,13 @@ export const RMS_NORM_ADD_RULE = defineRule<RmsNormAddMatch>({
     temps: [],
     dispatches: [
       {
-        key: matched.subgroup ? rmsNormSubgroupKey(matched.order) : rmsNormAddKey(matched.order),
+        key: matched.subgroup
+          ? rmsNormSubgroupKey(matched.order)
+          : rmsNormAddKey(matched.order, matched.shape[matched.shape.length - 1]),
         wgsl: () =>
-          matched.subgroup ? rmsNormSubgroupWgsl(matched.order) : rmsNormAddWgsl(matched.order),
+          matched.subgroup
+            ? rmsNormSubgroupWgsl(matched.order)
+            : rmsNormAddWgsl(matched.order, matched.shape[matched.shape.length - 1]),
         params: rmsNormParams(
           numel(matched.shape.slice(0, -1)),
           matched.shape[matched.shape.length - 1],
