@@ -743,7 +743,7 @@ below).
   normalization table and the character class tables are **the folding output itself** (= the
   subject under test), so they are included in full.
 
-### Why the tables are baked (`anima/text.py`)
+### Why the tables are baked (`anima/text.py`, `_shared/qwen2_tokenizer.py`)
 
 **Unicode decisions are neither reimplemented in TS nor delegated to standard APIs** (the same
 discipline as `sbv2.demo.clean_text_ranges`). The authority for those decisions is the Unicode

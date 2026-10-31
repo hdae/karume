@@ -1,4 +1,4 @@
-"""`anima/demo.py` / `anima.text` の約束事。
+"""`anima/demo.py` / `anima.text` / `_shared.qwen2_tokenizer` の約束事。
 
 この層が壊れると **id 列だけが静かに別物**になる（shape は合ったまま画が変わる）。ここで
 固定するのは 2 系統:
@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 
+from _shared import qwen2_tokenizer as q2
 from anima import demo as anima_demo
 from anima import pipeline_ref as anima_pipeline
 from anima import text as at
@@ -34,9 +35,9 @@ FIXTURE_PATH = anima_demo.DEFAULT_FIXTURE_PATH
 FIXTURE: dict[str, Any] = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
 TABLES = at.SpmTables.from_json(FIXTURE["t5"]["normalizer"])
-CLASSES: dict[str, at.Ranges] = FIXTURE["qwen"]["classes"]
+CLASSES: dict[str, q2.Ranges] = FIXTURE["qwen"]["classes"]
 CASE_FOLD: dict[int, int] = {cp: target for cp, target in FIXTURE["qwen"]["caseFold"]}
-NFC_SEGMENTS: at.Ranges = FIXTURE["qwen"]["nfcSegments"]
+NFC_SEGMENTS: q2.Ranges = FIXTURE["qwen"]["nfcSegments"]
 
 
 class TestFixtureShape:
@@ -122,21 +123,21 @@ class TestNormalizerTables:
 
 class TestRanges:
     def test_adjacent_codepoints_fold_into_one_interval(self):
-        assert at.to_ranges([5, 6, 7, 10]) == [[5, 7], [10, 10]]
+        assert q2.to_ranges([5, 6, 7, 10]) == [[5, 7], [10, 10]]
 
     def test_lookup_matches_the_source_set(self):
         source = {1, 2, 3, 9, 0x10FFFF}
-        ranges = at.to_ranges(source)
+        ranges = q2.to_ranges(source)
 
         for cp in [0, 1, 2, 3, 4, 8, 9, 10, 0x10FFFE, 0x10FFFF]:
-            assert at.in_ranges(ranges, cp) == (cp in source), hex(cp)
+            assert q2.in_ranges(ranges, cp) == (cp in source), hex(cp)
 
 
 class TestAddedTokens:
     def test_leftmost_longest(self):
         added = ["<|endoftext|>", "<|end"]
 
-        assert at.split_added_tokens("a<|endoftext|>b", added) == [
+        assert q2.split_added_tokens("a<|endoftext|>b", added) == [
             ("a", False),
             ("<|endoftext|>", True),
             ("b", False),
@@ -144,14 +145,14 @@ class TestAddedTokens:
 
     def test_a_partial_match_is_not_split_out(self):
         """`<|endoftext|x` は途中まで一致するだけ — 切り出すと id 列が別物になる。"""
-        assert at.split_added_tokens("<|endoftext|x", ["<|endoftext|>"]) == [
+        assert q2.split_added_tokens("<|endoftext|x", ["<|endoftext|>"]) == [
             ("<|endoftext|x", False)
         ]
 
     def test_an_empty_added_token_is_rejected(self):
         """空文字は全位置で一致して走査が進まない（無限ループの芽）。"""
-        with pytest.raises(ValueError, match="空文字"):
-            at.split_added_tokens("abc", ["", "<|a"])
+        with pytest.raises(ValueError, match="empty string"):
+            q2.split_added_tokens("abc", ["", "<|a"])
 
 
 class TestNfcSegments:
@@ -163,7 +164,7 @@ class TestNfcSegments:
 
         assert len(cases) >= 200
         for text, want in cases:
-            assert at.nfc_with_segments(text, NFC_SEGMENTS) == want, [hex(ord(c)) for c in text]
+            assert q2.nfc_with_segments(text, NFC_SEGMENTS) == want, [hex(ord(c)) for c in text]
 
     def test_the_plain_nfc_disagrees_with_the_source_of_truth(self):
         """実測: 正本は U+089A を結合クラス 0 と見なすので並べ替えない。
@@ -173,23 +174,23 @@ class TestNfcSegments:
         text = "\u0818\u089a"
 
         assert unicodedata.normalize("NFC", text) == "\u089a\u0818"
-        assert at.nfc_with_segments(text, NFC_SEGMENTS) == text
+        assert q2.nfc_with_segments(text, NFC_SEGMENTS) == text
 
         dropped = [r for r in NFC_SEGMENTS if not r[0] <= 0x089A <= r[1]]
 
-        assert at.nfc_with_segments(text, dropped) == "\u089a\u0818"
+        assert q2.nfc_with_segments(text, dropped) == "\u089a\u0818"
 
 
 class TestByteEncoder:
     def test_the_table_is_a_bijection_over_256_bytes(self):
-        table = at.bytes_to_unicode()
+        table = q2.bytes_to_unicode()
 
         assert len(table) == 256
         assert len(set(table.values())) == 256
 
     def test_no_mapped_character_is_whitespace(self):
         """merges の鍵は `"左 右"` の 1 本の文字列 — 空白が混ざると分割が壊れる。"""
-        table = at.bytes_to_unicode()
+        table = q2.bytes_to_unicode()
 
         assert not any(ch.isspace() for ch in table.values())
 
@@ -197,19 +198,19 @@ class TestByteEncoder:
 class TestQwenPreTokenize:
     def test_digits_split_one_by_one(self):
         """`\\p{N}` には `+` が無い（`2024` は 4 トークンになる）。"""
-        assert at.qwen_pre_tokenize("2024", CLASSES, CASE_FOLD) == ["2", "0", "2", "4"]
+        assert q2.qwen_pre_tokenize("2024", CLASSES, CASE_FOLD) == ["2", "0", "2", "4"]
 
     def test_a_leading_space_joins_the_following_word(self):
-        assert at.qwen_pre_tokenize("a cat", CLASSES, CASE_FOLD) == ["a", " cat"]
+        assert q2.qwen_pre_tokenize("a cat", CLASSES, CASE_FOLD) == ["a", " cat"]
 
     def test_trailing_spaces_keep_the_last_one_for_the_next_word(self):
         """`\\s+(?!\\S)` — 非空白が続くなら最後の 1 文字を次へ残す。"""
-        assert at.qwen_pre_tokenize("a   b", CLASSES, CASE_FOLD) == ["a", "  ", " b"]
+        assert q2.qwen_pre_tokenize("a   b", CLASSES, CASE_FOLD) == ["a", "  ", " b"]
 
     def test_the_scan_never_stalls(self):
         """進めない位置があれば例外（黙って 1 文字進める実装にしない）。"""
         for text in ("", " ", "\r\n", "\u00a0", "\U0001f408", "'", "'s", "'S"):
-            at.qwen_pre_tokenize(text, CLASSES, CASE_FOLD)
+            q2.qwen_pre_tokenize(text, CLASSES, CASE_FOLD)
 
     def test_the_case_fold_table_is_not_ascii_only(self):
         """実測: 正本の `(?i:)` は simple case folding — U+017F（ſ）が s と同一視される。
@@ -219,12 +220,12 @@ class TestQwenPreTokenize:
         """
         assert CASE_FOLD[0x017F] == ord("s")
         assert CASE_FOLD[ord("S")] == ord("s")
-        assert at.qwen_pre_tokenize("it'\u017fs", CLASSES, CASE_FOLD) == ["it", "'\u017f", "s"]
+        assert q2.qwen_pre_tokenize("it'\u017fs", CLASSES, CASE_FOLD) == ["it", "'\u017f", "s"]
 
         # 表を ASCII だけに削ると（= 移植で最も自然な思い違い）切れ目が変わる。
         ascii_only = {cp: t for cp, t in CASE_FOLD.items() if cp < 0x80}
 
-        assert at.qwen_pre_tokenize("it'\u017fs", CLASSES, ascii_only) == ["it", "'\u017fs"]
+        assert q2.qwen_pre_tokenize("it'\u017fs", CLASSES, ascii_only) == ["it", "'\u017fs"]
 
 
 # ---- 実 tokenizer.json があるときだけ走る突合 --------------------------------

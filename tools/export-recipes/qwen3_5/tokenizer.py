@@ -31,9 +31,10 @@ add_generation_prompt=True, enable_thinking=True), truncation=True, max_length=4
   (`tokenizers.Tokenizer.from_file`) must give the same ids as transformers on every case.
 - Unicode tables (`\p{L}` / `\p{N}` / `\s`, the `(?i:)` fold, the NFC segment table) are folded by
   asking the canonical engine one code point at a time and verified exhaustively — the builders are
-  Anima's (`anima.text`; same engine, same expression, same normaliser). Then the Python mirror
-  (`anima.text.Qwen2Reference`, the TS implementation's mirror) must reproduce transformers on every
-  case and on a seeded random sweep. Any mismatch writes nothing (ADR 0005).
+  the Qwen2 ones shared with Anima (`_shared.qwen2_tokenizer`; same engine, same expression, same
+  normaliser). Then the Python mirror (`_shared.qwen2_tokenizer.Qwen2Reference`, the TS
+  implementation's mirror) must reproduce transformers on every case and on a seeded random sweep.
+  Any mismatch writes nothing (ADR 0005).
 
 ## Asset (`karume-qwen3_5-tokenizer/1`)
 
@@ -74,8 +75,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from _shared import qwen2_tokenizer as q2
 from _shared.paths import REPO_ROOT, SERIES_ROOT
-from anima import text as at
 
 from . import tokenizer_cases as tc
 
@@ -282,17 +283,17 @@ def pre_tokenizer_pattern(backend: dict[str, Any]) -> str:
 def build_tables(backend: dict[str, Any], *, fuzz: int) -> dict[str, Any]:
     """Folds and verifies the Unicode tables, and lays out vocabulary / merges / added tokens."""
     started = time.perf_counter()
-    classes = at.build_char_classes()
-    case_fold = at.build_case_fold()
+    classes = q2.build_char_classes()
+    case_fold = q2.build_case_fold()
     print(f"[classes] {len(case_fold)} folds ({time.perf_counter() - started:.1f}s)", flush=True)
 
     started = time.perf_counter()
-    nfc_segments = at.build_nfc_segments()
-    nfc_stats = at.verify_nfc_segments(nfc_segments, fuzz=fuzz)
+    nfc_segments = q2.build_nfc_segments()
+    nfc_stats = q2.verify_nfc_segments(nfc_segments, fuzz=fuzz)
     print(f"[nfc] {nfc_stats} ({time.perf_counter() - started:.1f}s)", flush=True)
 
     started = time.perf_counter()
-    scan_stats = at.verify_qwen_pre_tokenize(pre_tokenizer_pattern(backend), classes, case_fold)
+    scan_stats = q2.verify_qwen_pre_tokenize(pre_tokenizer_pattern(backend), classes, case_fold)
     print(f"[pre-token] {scan_stats} ({time.perf_counter() - started:.1f}s)", flush=True)
 
     vocab: dict[str, int] = backend["model"]["vocab"]
@@ -323,9 +324,9 @@ def build_tables(backend: dict[str, Any], *, fuzz: int) -> dict[str, Any]:
     }
 
 
-def reference(tables: dict[str, Any]) -> at.Qwen2Reference:
+def reference(tables: dict[str, Any]) -> q2.Qwen2Reference:
     """The Python mirror of the TS implementation, reading the folded tables only."""
-    return at.Qwen2Reference(
+    return q2.Qwen2Reference(
         vocab=tables["vocab"],
         merges={pair: rank for rank, pair in enumerate(tables["merges"])},
         added=dict(tables["added"]),
@@ -441,7 +442,7 @@ def upstream_ids(tokenizer: Any, text: str, *, truncate: bool) -> list[int]:
 
 def build_cases(
     tokenizer: Any, raw: Any, tables: dict[str, Any]
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], at.Qwen2Reference]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], q2.Qwen2Reference]:
     """Takes upstream's expectations and checks the mirror and the raw-file path against them.
 
     Returns the reference instance that encoded exactly the cases (its used vocabulary / merges
@@ -516,14 +517,14 @@ def verify_random_sweep(
 
 def python_space() -> list[int]:
     """The code points `str.strip()` removes (surrogates cannot be in a str)."""
-    return [cp for cp in at.ALL_CODEPOINTS if chr(cp).isspace()]
+    return [cp for cp in q2.ALL_CODEPOINTS if chr(cp).isspace()]
 
 
 def build_fixture(
     tables: dict[str, Any],
     prompt_cases: list[dict[str, Any]],
     text_cases: list[dict[str, Any]],
-    ref: at.Qwen2Reference,
+    ref: q2.Qwen2Reference,
 ) -> dict[str, Any]:
     merge_rank = {pair: rank for rank, pair in enumerate(tables["merges"])}
     asset = build_asset(tables)
@@ -544,7 +545,7 @@ def build_fixture(
             "classes": asset["classes"],
             "caseFold": asset["caseFold"],
             "nfcSegments": asset["nfcSegments"],
-            "nfcCases": at.nfc_fixture_cases(tables["nfcSegments"]),
+            "nfcCases": q2.nfc_fixture_cases(tables["nfcSegments"]),
             "vocab": {token: tables["vocab"][token] for token in sorted(ref.used_vocab)},
             "merges": sorted(
                 ([left, right, merge_rank[(left, right)]] for left, right in ref.used_merges),

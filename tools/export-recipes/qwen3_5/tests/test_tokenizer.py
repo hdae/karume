@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from anima import text as at
+from _shared import qwen2_tokenizer as q2
 from qwen3_5 import tokenizer as qt
 from qwen3_5 import tokenizer_cases as tc
 
@@ -31,10 +31,10 @@ ACCEPTED = [case for case in FIXTURE["promptCases"] if "rendered" in case]
 REFUSED = [case for case in FIXTURE["promptCases"] if "reject" in case]
 
 
-def fixture_reference() -> at.Qwen2Reference:
+def fixture_reference() -> q2.Qwen2Reference:
     """The mirror over the fixture's subset (exactly what the TS test reads)."""
     qwen = FIXTURE["qwen"]
-    return at.Qwen2Reference(
+    return q2.Qwen2Reference(
         vocab=qwen["vocab"],
         merges={(left, right): rank for left, right, rank in qwen["merges"]},
         added=dict(qwen["addedTokens"]),

@@ -20,7 +20,7 @@ MUST: 資産を `models/<repo>/`（配布形）直下に置かない。あちら
 ファイルだけを並べて**そのまま HF へ上げる**木で、宣言外のファイルが混ざると `verify_dist` が
 止まる（`outputs/misc/sbv2-demo/` / 系列 `anima-pipeline/` を分けたのと同じ理由）。
 
-畳み方の根拠と検証は `anima/text.py` の docstring が正本。要点だけ:
+畳み方の根拠と検証は `anima/text.py` / `_shared/qwen2_tokenizer.py` の docstring が正本。要点だけ:
 **Unicode 判定は TS で再実装しないし標準 API にも委ねない** — 正本（Rust の `tokenizers` /
 その正規表現エンジン / `unicode-normalization`）を Python から全コードポイントに当てて
 閉区間表・写像表へ畳む。畳み込みの同値は emit のたびに網羅 + 乱択で検査し、加えて参照実装と
@@ -38,6 +38,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from _shared import qwen2_tokenizer as q2
 from _shared.paths import REPO_ROOT, SERIES_ROOT
 
 from . import text as at
@@ -280,20 +281,20 @@ def build_assets(repo: str, snapshot: Path | None, fuzz: int) -> dict[str, Any]:
     check_upstream_shape(qwen_raw, t5_raw)
 
     started = time.perf_counter()
-    classes = at.build_char_classes()
+    classes = q2.build_char_classes()
     class_stats = at.verify_char_classes(classes)
-    case_fold = at.build_case_fold()
+    case_fold = q2.build_case_fold()
     class_stats["caseFold"] = len(case_fold)
     print(f"[classes] {class_stats}（{time.perf_counter() - started:.1f}s）", flush=True)
 
     started = time.perf_counter()
-    nfc_segments = at.build_nfc_segments()
-    nfc_stats = at.verify_nfc_segments(nfc_segments, fuzz=fuzz)
+    nfc_segments = q2.build_nfc_segments()
+    nfc_stats = q2.verify_nfc_segments(nfc_segments, fuzz=fuzz)
     print(f"[nfc] {nfc_stats}（{time.perf_counter() - started:.1f}s）", flush=True)
 
     started = time.perf_counter()
     pattern = qwen_raw["pre_tokenizer"]["pretokenizers"][0]["pattern"]["Regex"]
-    scan_stats = at.verify_qwen_pre_tokenize(pattern, classes, case_fold)
+    scan_stats = q2.verify_qwen_pre_tokenize(pattern, classes, case_fold)
     print(f"[pre-token] {scan_stats}（{time.perf_counter() - started:.1f}s）", flush=True)
 
     started = time.perf_counter()
@@ -370,9 +371,9 @@ def build_assets(repo: str, snapshot: Path | None, fuzz: int) -> dict[str, Any]:
     }
 
 
-def references(built: dict[str, Any]) -> tuple[at.Qwen2Reference, at.T5Reference]:
+def references(built: dict[str, Any]) -> tuple[q2.Qwen2Reference, at.T5Reference]:
     """焼いた表**だけ**を見る参照実装の対（TS 実装の鏡像）。"""
-    qwen = at.Qwen2Reference(
+    qwen = q2.Qwen2Reference(
         vocab=built["qwenVocab"],
         merges={pair: rank for rank, pair in enumerate(built["qwenMerges"])},
         added=dict(built["qwen"]["addedTokens"]),
@@ -532,7 +533,7 @@ def build_fixture(built: dict[str, Any], cases: list[dict[str, Any]]) -> dict[st
             "nfcSegments": built["nfcSegments"],
             # `[入力, 正本の NFC 出力]` — TS 側は素の `normalize("NFC")` では再現できない
             # （分節表を引かない実装がここで落ちる）。
-            "nfcCases": at.nfc_fixture_cases(built["nfcSegments"]),
+            "nfcCases": q2.nfc_fixture_cases(built["nfcSegments"]),
             "vocab": {t: built["qwenVocab"][t] for t in sorted(qwen_ref.used_vocab)},
             "merges": sorted(
                 ([left, right, merge_rank[(left, right)]] for left, right in qwen_ref.used_merges),

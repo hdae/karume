@@ -1,12 +1,15 @@
-"""複数 family で共有するが core（PyPI `karume`）へ昇格できない補助（ADR 0065 決定 2）。
+"""Helpers shared by several families that cannot be promoted into the core (PyPI `karume`) (ADR
+0065 decision 2).
 
-ここに置くのは「モデル別 recipe が共通で要るが、汎用 exporter の責務ではないもの」—
-リポジトリの置き場の綴り（{@link _shared.paths}）・decode 系列の台本が共有する門
-（{@link _shared.decode_series}）・i4 系列の校正条件の判定（{@link _shared.calib_provenance}）・
-据えたコンテナの格納のままの読み戻し（{@link _shared.container_read}）・上流 checkpoint の
-出所の導出と突合（{@link _shared.upstream}）・Gemma 系 SPM-BPE
-トークナイザの compile（{@link _shared.gemma_tokenizer}）・VAE decoder の rank 4 書き直しの末端の
-純関数（{@link _shared.vae_rank4}）・配布リポへ同梱するライセンス原文（{@link _shared.licenses}）。
-core へ昇格できる（= repo topology にもモデル台本の運用にも依存しない）と分かったものは
-`karume` 側へ出す。
+What lives here is what the per-model recipes need in common but is not the generic exporter's
+job — the repository's path spellings ({@link _shared.paths}), the gate the decode-series scripts
+share ({@link _shared.decode_series}), the judgement of an i4 series' calibration conditions
+({@link _shared.calib_provenance}), the stored-form read-back of a published container
+({@link _shared.container_read}), deriving and cross-checking the provenance of an upstream
+checkpoint ({@link _shared.upstream}), the compile of the Gemma SPM-BPE tokenizers
+({@link _shared.gemma_tokenizer}), the Qwen2 byte-level BPE tables and their reference
+implementation ({@link _shared.qwen2_tokenizer}), the pure leaf functions of the VAE decoder's
+rank 4 rewrite ({@link _shared.vae_rank4}), and the license texts shipped in the distribution
+repositories ({@link _shared.licenses}). Whatever turns out to be promotable into the core (= it
+depends neither on the repo topology nor on running the model scripts) moves to `karume`.
 """
