@@ -98,6 +98,11 @@ export const ALLOW_LIST: readonly Allowance[] = [
     path: "packages/models/tests/fixtures/",
     why: "vocabularies, sample texts and expected values of the tokenizer and TTS parity fixtures; the notes of the recipe-generated fixtures are translated with the recipes (0.15.x)",
   },
+  {
+    path: "tools/export-recipes/qwen3_5/tokenizer_cases.py",
+    why: "Japanese and Chinese sample prompts of the Qwen3.5 tokenizer fixture",
+    maxLines: 5,
+  },
   { path: "tools/exporter/tests/test_artifacts.py", why: "a fixture payload", maxLines: 1 },
   {
     path: "tools/exporter/tests/test_dist.py",
