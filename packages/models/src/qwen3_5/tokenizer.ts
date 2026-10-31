@@ -34,7 +34,7 @@
  * tokenizer (which rejects them) because here the split is the same in every upstream path, so the
  * id sequence is not ambiguous.
  *
- * ## Length (a maintainer ruling — see `Qwen3_5Overflow`)
+ * ## Length (the maintainer's ruling 50, 2026-10-31 — see `Qwen3_5Overflow`)
  *
  * Upstream truncates **silently** at `max_length` = 4096 and so drops the template's tail
  * (`<|im_end|>…<think>\n`). Here the default rejects an over-length input with a
