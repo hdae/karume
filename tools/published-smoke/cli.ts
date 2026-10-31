@@ -22,7 +22,10 @@ export const isPinRef = (value: unknown): value is PinRef =>
  */
 export type Sbv2Module = {
   readonly Pipeline: {
-    fromPretrained: (ref: PinRef) => Promise<{ dispose: () => Promise<void> }>;
+    fromPretrained: (
+      ref: PinRef,
+      options?: { readonly caches?: CacheStorage },
+    ) => Promise<{ dispose: () => Promise<void> }>;
   };
   readonly SOURCES: Readonly<Record<string, unknown>>;
 };

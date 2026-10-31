@@ -21,7 +21,8 @@
 //      deno run -A main.ts [--manifests-only] (in tools/published-smoke)
 
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isPinRef, isSbv2Module, parseSmokeArgs, type PinRef } from "./cli.ts";
@@ -30,6 +31,7 @@ type HubModule = {
   loadManifest: (ref: PinRef) => Promise<{ manifest: { format?: unknown } }>;
 };
 type DawnModule = { create: (flags: string[]) => GPU };
+type HubNodeModule = { nodeCacheStorage: (root: string) => CacheStorage };
 
 // The dynamic import specifiers are passed as variables of type `string` (no types attach — only the
 // surface in use is declared structurally). What is typed is the published package, not the
@@ -38,6 +40,7 @@ type DawnModule = { create: (flags: string[]) => GPU };
 const HUB: string = "@karume/hub";
 const MODELS: string = "@karume/models";
 const MODELS_SBV2: string = "@karume/models/sbv2";
+const HUB_NODE: string = "@karume/hub/node";
 const DAWN: string = "webgpu";
 
 /**
@@ -157,11 +160,26 @@ if (manifestsOnly) {
   const { Pipeline, SOURCES } = sbv2;
   const pin: unknown = SOURCES["sbv2-jvnv"];
   if (!isPinRef(pin)) throw new Error('SOURCES["sbv2-jvnv"] is not a pin entry');
-  const started = performance.now();
-  const pipeline = await Pipeline.fromPretrained(pin);
-  console.log(
-    `  fromPretrained OK sbv2-jvnv (${((performance.now() - started) / 1000).toFixed(1)}s)`,
-  );
-  await pipeline.dispose();
+  // Node has no Cache API: a Node application passes the published `nodeCacheStorage` as `caches`
+  // (what the 0.15 CHANGELOG tells it to do), here on a temporary directory removed afterwards.
+  // Deno and browsers keep their own `caches`.
+  const cacheRoot =
+    typeof globalThis.caches === "undefined"
+      ? await mkdtemp(join(tmpdir(), "karume-published-smoke-"))
+      : undefined;
+  try {
+    const caches =
+      cacheRoot === undefined
+        ? undefined
+        : ((await import(HUB_NODE)) as HubNodeModule).nodeCacheStorage(cacheRoot);
+    const started = performance.now();
+    const pipeline = await Pipeline.fromPretrained(pin, caches === undefined ? {} : { caches });
+    console.log(
+      `  fromPretrained OK sbv2-jvnv (${((performance.now() - started) / 1000).toFixed(1)}s)`,
+    );
+    await pipeline.dispose();
+  } finally {
+    if (cacheRoot !== undefined) await rm(cacheRoot, { recursive: true, force: true });
+  }
   console.log(`published smoke OK: ${pins.length} manifests + sbv2 fromPretrained`);
 }
