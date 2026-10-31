@@ -399,7 +399,7 @@ describe("packed 活性の生成物（ADR 0105）", () => {
     );
     assertEquals(
       linearGemvStaticQuantizePackedKey("i4", GROUP, 4),
-      "linear_gemv_parallel:wi4g512:l4:static-quantize:v1:packed-x-i8",
+      "linear_gemv_parallel:wi4g512:l4:static-quantize:v2:packed-x-i8",
     );
   });
 

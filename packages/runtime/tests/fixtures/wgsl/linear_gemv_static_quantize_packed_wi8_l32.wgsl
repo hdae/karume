@@ -19,6 +19,13 @@ fn quantize(bits: u32) -> u32 {
   if (srqWord(258u) != 0u) { return bits; }
   let magnitude = bits & 0x7fffffffu;
   if (magnitude > 0x7f800000u) { return bits | 0x00400000u; }
+  let sign = bits & 0x80000000u;
+  let cap = select(127u, 128u, sign != 0u);
+  let c_guess = min(u32(bitcast<f32>(magnitude) / bitcast<f32>(srqWord(130u)) + 0.5), 128u);
+  let off_guess = ((c_guess > 0u) & (magnitude < srqWord(c_guess))) |
+    ((c_guess < 128u) & (magnitude >= srqWord(c_guess + 1u)));
+  let guessed = srqWord(129u + min(c_guess, cap));
+  if (!off_guess) { return guessed | sign; }
   var lo = 0u;
   lo += select(0u, 64u, magnitude >= srqWord(lo + 64u));
   lo += select(0u, 32u, magnitude >= srqWord(lo + 32u));
@@ -28,8 +35,7 @@ fn quantize(bits: u32) -> u32 {
   lo += select(0u, 2u, magnitude >= srqWord(lo + 2u));
   lo += select(0u, 1u, magnitude >= srqWord(lo + 1u));
   lo += select(0u, 1u, magnitude >= srqWord(128u));
-  let sign = bits & 0x80000000u;
-  let level = min(lo, select(127u, 128u, sign != 0u));
+  let level = min(lo, cap);
   return srqWord(129u + level) | sign;
 }
 

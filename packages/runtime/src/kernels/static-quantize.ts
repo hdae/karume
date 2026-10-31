@@ -38,7 +38,38 @@ export const staticQuantizeParams = (count: number, scale: number): Uint32Array<
 };
 
 export const STATIC_QUANTIZE_WORKGROUP_SIZE = 128;
-export const STATIC_QUANTIZE_KEY = "static_quantize:v1:f32:wg128";
+
+/**
+ * The level guess of the SRQ search (v2 — perf-ledger K-97): one f32 division by the scale proposes
+ * level `c`, and the two neighbouring boundaries confirm it, so the search issues one round of
+ * independent table loads instead of the ~9 dependent ones of the binary search (that chain's
+ * latency, not the table's address space, is what the standalone SRQ and the GEMV epilogue wait on
+ * — 2026-10-31 attribution on the RTX 3080 Ti).
+ *
+ * `word(130)` is `fround(1 · scale)` = the scale itself ({@link staticQuantizeParams} — exact for
+ * any f32 scale). The check reads boundary `c − 1` (`word(c)`) and boundary `c` (`word(c + 1)`):
+ * `c` is the level exactly when the first is ≤ the magnitude and the second is not. `&` / `|` do
+ * not short-circuit, so both loads issue together (`word(129)` at c = 128 is in range).
+ * MUST: a guess that fails the check falls back to the v1 search text unchanged. The table is
+ * monotone, so a confirmed guess equals the search's count, and the result is the v1 result for
+ * every input **whatever the division rounds to** (its accuracy affects speed only; `min(…, 128)`
+ * keeps any conversion result — inf, a saturated or implementation-defined value — in range).
+ */
+export const staticQuantizeGuessWgsl = (word: string, indent = "  "): string =>
+  `${indent}let c_guess = min(u32(bitcast<f32>(magnitude) / bitcast<f32>(${word}(130u)) + 0.5), 128u);
+${indent}let off_guess = ((c_guess > 0u) & (magnitude < ${word}(c_guess))) |
+${indent}  ((c_guess < 128u) & (magnitude >= ${word}(c_guess + 1u)));`;
+
+/** The binary search of v1 over the 128 boundaries — the fallback of a failed guess. */
+const SEARCH_WGSL = `  var lo = 0u;
+  var hi = 128u;
+  while (lo < hi) {
+    let mid = (lo + hi) >> 1u;
+    if (magnitude >= word(1u + mid)) { lo = mid + 1u; }
+    else { hi = mid; }
+  }`;
+
+export const STATIC_QUANTIZE_KEY = "static_quantize:v2:f32:wg128";
 export const STATIC_QUANTIZE_WGSL: string = `// karume static_quantize: SRQ with a fixed f32 scale (ADR 0097)
 @group(0) @binding(0) var<uniform> params: array<vec4<u32>, 65>;
 @group(0) @binding(1) var<storage, read> input: array<u32>;
@@ -48,15 +79,14 @@ fn quantize(bits: u32) -> u32 {
   if (word(258u) != 0u) { return bits; }
   let magnitude = bits & 0x7fffffffu;
   if (magnitude > 0x7f800000u) { return bits | 0x00400000u; }
-  var lo = 0u;
-  var hi = 128u;
-  while (lo < hi) {
-    let mid = (lo + hi) >> 1u;
-    if (magnitude >= word(1u + mid)) { lo = mid + 1u; }
-    else { hi = mid; }
-  }
   let sign = bits & 0x80000000u;
-  let level = min(lo, select(127u, 128u, sign != 0u));
+  let cap = select(127u, 128u, sign != 0u);
+${staticQuantizeGuessWgsl("word")}
+  // The output word of the guess loads with the check (it is discarded when the check fails)
+  let guessed = word(129u + min(c_guess, cap));
+  if (!off_guess) { return guessed | sign; }
+${SEARCH_WGSL}
+  let level = min(lo, cap);
   return word(129u + level) | sign;
 }
 @compute @workgroup_size(${STATIC_QUANTIZE_WORKGROUP_SIZE})
@@ -98,13 +128,14 @@ export const staticQuantizePackedParams = (
   return staticQuantizeParams(count, scale);
 };
 
-export const STATIC_QUANTIZE_PACKED_KEY = "static_quantize:v1:packed-i8:wg128";
+export const STATIC_QUANTIZE_PACKED_KEY = "static_quantize:v2:packed-i8:wg128";
 /**
  * SRQ with packed int8 output (ADR 0105). One u32 output word = 4 int8 codes; the code of element i
  * is byte `i & 3` of word `i >> 2` (the same little-endian order as `pack4xI8` / `unpack4xI8`).
  *
- * MUST: the boundary table and the resolution of level / sign are **textually identical** to the
- * f32 path (`quantize` in {@link STATIC_QUANTIZE_WGSL}). Only the last step differs — instead of
+ * MUST: the boundary table, the level search (the guess of {@link staticQuantizeGuessWgsl}, then
+ * the v1 search) and the resolution of level / sign are the f32 path's (`quantize` in
+ * {@link STATIC_QUANTIZE_WGSL}). Only the last step differs — instead of
  * looking up the output value table `word(129 + level)` it returns the int8 code (two's
  * complement). The consumer restores it with `f32(code) * scale`, which matches the table lookup
  * per element as u32 (rationale: ADR 0105).
@@ -138,12 +169,10 @@ export const STATIC_QUANTIZE_PACKED_WGSL: string = `// karume static_quantize pa
 fn word(index: u32) -> u32 { return params[index >> 2u][index & 3u]; }
 fn quantizeCode(bits: u32) -> u32 {
   let magnitude = bits & 0x7fffffffu;
-  var lo = 0u;
-  var hi = 128u;
-  while (lo < hi) {
-    let mid = (lo + hi) >> 1u;
-    if (magnitude >= word(1u + mid)) { lo = mid + 1u; }
-    else { hi = mid; }
+${staticQuantizeGuessWgsl("word")}
+  var lo = c_guess;
+  if (off_guess) {
+${SEARCH_WGSL.replace("  var lo = 0u;", "  lo = 0u;").replace(/^/gm, "  ")}
   }
   let sign = bits & 0x80000000u;
   let level = min(lo, select(127u, 128u, sign != 0u));

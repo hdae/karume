@@ -7,6 +7,14 @@ fn quantize(bits: u32) -> u32 {
   if (word(258u) != 0u) { return bits; }
   let magnitude = bits & 0x7fffffffu;
   if (magnitude > 0x7f800000u) { return bits | 0x00400000u; }
+  let sign = bits & 0x80000000u;
+  let cap = select(127u, 128u, sign != 0u);
+  let c_guess = min(u32(bitcast<f32>(magnitude) / bitcast<f32>(word(130u)) + 0.5), 128u);
+  let off_guess = ((c_guess > 0u) & (magnitude < word(c_guess))) |
+    ((c_guess < 128u) & (magnitude >= word(c_guess + 1u)));
+  // The output word of the guess loads with the check (it is discarded when the check fails)
+  let guessed = word(129u + min(c_guess, cap));
+  if (!off_guess) { return guessed | sign; }
   var lo = 0u;
   var hi = 128u;
   while (lo < hi) {
@@ -14,8 +22,7 @@ fn quantize(bits: u32) -> u32 {
     if (magnitude >= word(1u + mid)) { lo = mid + 1u; }
     else { hi = mid; }
   }
-  let sign = bits & 0x80000000u;
-  let level = min(lo, select(127u, 128u, sign != 0u));
+  let level = min(lo, cap);
   return word(129u + level) | sign;
 }
 @compute @workgroup_size(128)

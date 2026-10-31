@@ -5,12 +5,18 @@
 fn word(index: u32) -> u32 { return params[index >> 2u][index & 3u]; }
 fn quantizeCode(bits: u32) -> u32 {
   let magnitude = bits & 0x7fffffffu;
-  var lo = 0u;
-  var hi = 128u;
-  while (lo < hi) {
-    let mid = (lo + hi) >> 1u;
-    if (magnitude >= word(1u + mid)) { lo = mid + 1u; }
-    else { hi = mid; }
+  let c_guess = min(u32(bitcast<f32>(magnitude) / bitcast<f32>(word(130u)) + 0.5), 128u);
+  let off_guess = ((c_guess > 0u) & (magnitude < word(c_guess))) |
+    ((c_guess < 128u) & (magnitude >= word(c_guess + 1u)));
+  var lo = c_guess;
+  if (off_guess) {
+    lo = 0u;
+    var hi = 128u;
+    while (lo < hi) {
+      let mid = (lo + hi) >> 1u;
+      if (magnitude >= word(1u + mid)) { lo = mid + 1u; }
+      else { hi = mid; }
+    }
   }
   let sign = bits & 0x80000000u;
   let level = min(lo, select(127u, 128u, sign != 0u));

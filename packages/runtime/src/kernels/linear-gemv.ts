@@ -96,7 +96,7 @@
 
 import { CodegenError } from "../codegen/errors.ts";
 import { gemmParams, gemmUsesVec4 } from "./gemm.ts";
-import { staticQuantizeParams } from "./static-quantize.ts";
+import { staticQuantizeGuessWgsl, staticQuantizeParams } from "./static-quantize.ts";
 import {
   i4GroupKeyPart,
   i4GroupShift,
@@ -1227,7 +1227,7 @@ export const linearGemvStaticQuantizeKey = (
   storage: WeightStorage,
   group: number | undefined,
   lanes: LinearGemvParallelLanes,
-): string => `${linearGemvParallelKey(storage, group, lanes)}:static-quantize:v1`;
+): string => `${linearGemvParallelKey(storage, group, lanes)}:static-quantize:v2`;
 
 export const linearGemvStaticQuantizeParams = (
   storage: WeightStorage,
@@ -1255,7 +1255,7 @@ export const linearGemvStaticQuantizeWgsl = (
 /**
  * The key fragment for the packed int8 activation variant (ADR 0105). It is **appended to the end of
  * the existing key**, so none of the storage discriminators diagnostics and the census read
- * (`:wi4g512` / `:l4` / `:static-quantize:v1`) moves.
+ * (`:wi4g512` / `:l4` / `:static-quantize:v2`) moves.
  */
 const PACKED_ACTIVATION_KEY_PART = ":packed-x-i8";
 
@@ -1419,8 +1419,9 @@ export const linearGemvStaticQuantizePackedParams = (
 };
 
 /**
- * Shares the SRQ integer table and unrolls only the upper-bound search over the 128 boundaries into
- * a fixed count.
+ * Shares the SRQ integer table and the standalone kernel's level guess (v2 — perf-ledger K-97:
+ * {@link staticQuantizeGuessWgsl}); a failed guess falls back to the upper-bound search over the
+ * 128 boundaries unrolled into a fixed count (the v1 epilogue's search, unchanged).
  */
 const staticQuantizeEpilogue = (): string => `
 fn srqWord(index: u32) -> u32 { return dims.srq[index >> 2u][index & 3u]; }
@@ -1428,13 +1429,17 @@ fn quantize(bits: u32) -> u32 {
   if (srqWord(258u) != 0u) { return bits; }
   let magnitude = bits & 0x7fffffffu;
   if (magnitude > 0x7f800000u) { return bits | 0x00400000u; }
+  let sign = bits & 0x80000000u;
+  let cap = select(127u, 128u, sign != 0u);
+${staticQuantizeGuessWgsl("srqWord")}
+  let guessed = srqWord(129u + min(c_guess, cap));
+  if (!off_guess) { return guessed | sign; }
   var lo = 0u;
 ${[64, 32, 16, 8, 4, 2, 1]
   .map((step) => `  lo += select(0u, ${step}u, magnitude >= srqWord(lo + ${step}u));`)
   .join("\n")}
   lo += select(0u, 1u, magnitude >= srqWord(128u));
-  let sign = bits & 0x80000000u;
-  let level = min(lo, select(127u, 128u, sign != 0u));
+  let level = min(lo, cap);
   return srqWord(129u + level) | sign;
 }
 `;
