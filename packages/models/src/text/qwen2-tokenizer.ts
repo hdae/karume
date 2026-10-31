@@ -1,14 +1,21 @@
 /**
- * Qwen2 tokenizer (byte-level BPE). Builds the input of Anima's text_encoder (Qwen3).
+ * Qwen2 tokenizer (byte-level BPE) — the engine transformers' `Qwen2Tokenizer` runs, shared by the
+ * families whose text encoder is a Qwen model: Anima (Qwen3, `src/anima/text/tokenizer.ts`) and
+ * Qwen3.5 (`src/qwen3_5/tokenizer.ts`). It lives in `src/text/` because a family directory may not
+ * import another family's (`packages/models/README.md`); each family keeps its own asset reader,
+ * accepted set and template, and only the tables' shape and the encoding are shared here.
  *
- * The canonical path (`tokenizer/tokenizer.json`) is
- *   AddedVocabulary (cuts out the 26 special tokens leftmost-longest)
+ * The canonical path (transformers 5.14.1 `Qwen2Tokenizer`; both families' `tokenizer.json`) is
+ *   AddedVocabulary (cuts out the added tokens leftmost-longest — Anima 26, Qwen3.5 33)
  *   → NFC → Split (regular expression, Isolated) → ByteLevel (add_prefix_space=false)
- *   → BPE (ignore_merges=false / no unk) → TemplateProcessing (**no special tokens added**)
+ *   → BPE (ignore_merges=false / no unk) → a post_processor that **adds no special tokens**
  *
- * MUST: do not apply the chat template. The canonical code calls the plain `tokenizer([text], …)`.
- * Going through `apply_chat_template` prepends `<|im_start|>` and the like, and the id sequence
- * becomes an entirely different one.
+ * MUST: this engine applies no chat template. Anima's canonical code calls the plain
+ * `tokenizer([text], …)` — going through `apply_chat_template` would prepend `<|im_start|>` and the
+ * like, and the id sequence would become an entirely different one. A family whose upstream does
+ * render a template (Qwen3.5 for MOSS-Image — `src/qwen3_5/chat.ts`) renders it **before** calling
+ * {@link Qwen2Tokenizer.encode}; the special-token spellings in the rendered string are then cut out
+ * by the added vocabulary exactly as upstream does.
  *
  * **Do not use the regular-expression classes `\p{L}` / `\p{N}` / `\s`** — the canonical source for
  * classification is the Rust-side Unicode table; the moment it diverges from the JS engine's ICU,
@@ -25,10 +32,20 @@
  * plain NFC ({@link normalizeNfc}).
  */
 
-import { type AddedTokenMatcher, createAddedTokenMatcher } from "../../text/added-tokens.ts";
-import { type BpeMerge, mergeSymbols } from "../../text/bpe.ts";
-import { toCodePoints } from "../../text/code-points.ts";
-import { type CodeRanges, inCodeRanges } from "../../text/code-ranges.ts";
+import { type AddedTokenMatcher, createAddedTokenMatcher } from "./added-tokens.ts";
+import {
+  asNumber,
+  asPositiveInteger,
+  asRecord,
+  assertCodePoint,
+  assertUniqueLines,
+  asString,
+  parseAddedTokens,
+  setUnique,
+} from "./asset-gates.ts";
+import { type BpeMerge, mergeSymbols } from "./bpe.ts";
+import { toCodePoints } from "./code-points.ts";
+import { type CodeRanges, inCodeRanges, parseCodeRanges } from "./code-ranges.ts";
 
 /** Character classes used by the pre_tokenizer regular expression (closed-interval tables). */
 export type Qwen2CharClasses = {
@@ -68,7 +85,10 @@ export type Qwen2Assets = {
    * ({@link normalizeNfc}).
    */
   readonly nfcSegments: CodeRanges;
-  /** Truncation length matching the canonical call (512). */
+  /**
+   * The `max_length` of the consumer's canonical call (Anima 512, MOSS-Image's Qwen3.5 4096) — the
+   * default truncation length of {@link Qwen2Tokenizer.encode}.
+   */
   readonly maxLength: number;
 };
 
@@ -311,11 +331,15 @@ export class Qwen2Tokenizer {
 
   /**
    * The same id sequence as
-   * `tokenizer([text], padding="longest", max_length=512, truncation=True)`. The post_processor
+   * `tokenizer([text], padding="longest", max_length=limit, truncation=True)`. The post_processor
    * adds no special tokens, so truncation simply keeps the head.
+   *
+   * `limit` defaults to the asset's `maxLength` (Anima's call). A caller that must tell "exactly
+   * `maxLength`" from "longer" passes `maxLength + 1` (the Qwen3.5 tokenizer's overflow check) —
+   * encoding still stops at `limit`, so the cost does not grow with the input past it.
    */
-  encode(text: string): number[] {
-    const maxLength = this.#assets.maxLength;
+  encode(text: string, limit: number = this.#assets.maxLength): number[] {
+    const maxLength = limit;
     const ids: number[] = [];
     // Ids are only appended from the start, so dropping chunks / pre-tokens after the limit is
     // reached does not change the id sequence (BPE is not run past the truncation point).
@@ -337,3 +361,90 @@ export class Qwen2Tokenizer {
     return ids.slice(0, maxLength);
   }
 }
+
+const parseClasses = (raw: unknown, label: string): Qwen2CharClasses => {
+  const obj = asRecord(raw, label);
+  return {
+    letter: parseCodeRanges(obj["letter"], `${label}.letter`),
+    number: parseCodeRanges(obj["number"], `${label}.number`),
+    space: parseCodeRanges(obj["space"], `${label}.space`),
+  };
+};
+
+/** Equivalence table of `(?i:)` (pairs of `[cp, the character on the suffix side]`). */
+const parseCaseFold = (raw: unknown, label: string): Qwen2CaseFold => {
+  if (!Array.isArray(raw)) throw new Error(`${label}: not an array`);
+  const out = new Map<number, number>();
+  for (const entry of raw) {
+    if (
+      !Array.isArray(entry) ||
+      entry.length !== 2 ||
+      typeof entry[0] !== "number" ||
+      typeof entry[1] !== "number"
+    ) {
+      throw new Error(`${label}: not [cp, cp]`);
+    }
+    assertCodePoint(entry[0], label);
+    assertCodePoint(entry[1], label);
+    setUnique(out, entry[0], entry[1], label);
+  }
+  return out;
+};
+
+/**
+ * Reads a newline-separated table and checks that the line count matches what the asset declares.
+ *
+ * MUST: compare the counts. If `mergesText` is missing lines, BPE just "does not merge what it
+ * cannot find" and **does not fail** — the split changes and the id sequence silently becomes a
+ * different one (the `vocabText` side fails on a token missing from the vocabulary, but this one is
+ * a silent wrong value).
+ */
+const parseLines = (raw: unknown, count: unknown, label: string, countLabel: string): string[] => {
+  const lines = asString(raw, label).split("\n");
+  const want = asNumber(count, countLabel);
+  if (lines.length !== want) {
+    throw new Error(
+      `${label}: line count ${lines.length} does not match ${countLabel} ${want} (the asset is broken)`,
+    );
+  }
+  return lines;
+};
+
+/**
+ * Converts the tables of a Qwen2 asset JSON (`vocabText` / `vocabCount` / `mergesText` /
+ * `mergesCount` / `addedTokens` / `classes` / `caseFold` / `nfcSegments` / `maxLength`) into
+ * {@link Qwen2Assets}. It is an external boundary, so the structure is checked before use. Each
+ * family's reader checks its own envelope (format, provenance) and hands the object here.
+ */
+export const parseQwen2Tables = (raw: unknown, label: string): Qwen2Assets => {
+  const obj = asRecord(raw, label);
+  // 0-origin line number = id / rank. The byte-level vocabulary contains no newline or space
+  // (checked at emit).
+  const vocabLines = parseLines(
+    obj["vocabText"],
+    obj["vocabCount"],
+    `${label}.vocabText`,
+    `${label}.vocabCount`,
+  );
+  assertUniqueLines(vocabLines, `${label}.vocabText`);
+  const vocab = new Map<string, number>();
+  for (const [id, token] of vocabLines.entries()) vocab.set(token, id);
+  const mergesLines = parseLines(
+    obj["mergesText"],
+    obj["mergesCount"],
+    `${label}.mergesText`,
+    `${label}.mergesCount`,
+  );
+  assertUniqueLines(mergesLines, `${label}.mergesText`);
+  const merges = new Map<string, number>();
+  for (const [rank, line] of mergesLines.entries()) merges.set(line, rank);
+  return {
+    vocab,
+    merges,
+    addedTokens: parseAddedTokens(obj["addedTokens"], `${label}.addedTokens`),
+    classes: parseClasses(obj["classes"], `${label}.classes`),
+    caseFold: parseCaseFold(obj["caseFold"], `${label}.caseFold`),
+    nfcSegments: parseCodeRanges(obj["nfcSegments"], `${label}.nfcSegments`),
+    maxLength: asPositiveInteger(obj["maxLength"], `${label}.maxLength`),
+  };
+};

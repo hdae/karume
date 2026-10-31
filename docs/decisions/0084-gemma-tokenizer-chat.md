@@ -47,7 +47,7 @@ The export recipe (Python) compiles the upstream `tokenizer.json` to a small sch
 **An unknown configuration fails loudly at compile time**, not at run time.
 
 This is existing practice: Qwen2 bakes tables so that JS `\p{L}` / `NFC` / `toLowerCase` are not the
-source of truth (`packages/models/src/anima/text/qwen2-tokenizer.ts`); Unigram ports Rust's
+source of truth (`packages/models/src/text/qwen2-tokenizer.ts`); Unigram ports Rust's
 `Lattice::viterbi` at code-point positions (`packages/models/src/text/unigram.ts`). **"Port the
 implementation, bake the tables" is already the rule.**
 

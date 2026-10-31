@@ -13,25 +13,10 @@
  */
 
 import { ModelInputError } from "../../errors.ts";
-import {
-  asNumber,
-  asPositiveInteger,
-  asRecord,
-  assertCodePoint,
-  assertUniqueLines,
-  asString,
-  parseAddedTokens,
-  setUnique,
-} from "../../text/asset-gates.ts";
+import { asRecord } from "../../text/asset-gates.ts";
 import { assertEncodableText } from "../../text/code-points.ts";
-import { parseCodeRanges } from "../../text/code-ranges.ts";
+import { parseQwen2Tables, type Qwen2Assets, Qwen2Tokenizer } from "../../text/qwen2-tokenizer.ts";
 import { parseT5Tables } from "../../text/t5-tokenizer.ts";
-import {
-  type Qwen2Assets,
-  type Qwen2CaseFold,
-  type Qwen2CharClasses,
-  Qwen2Tokenizer,
-} from "./qwen2-tokenizer.ts";
 import { parseSpmTables } from "./spm-normalizer.ts";
 import { type T5Assets, T5Tokenizer } from "./t5-tokenizer.ts";
 
@@ -128,91 +113,6 @@ export class AnimaTokenizers {
   }
 }
 
-const parseClasses = (raw: unknown, label: string): Qwen2CharClasses => {
-  const obj = asRecord(raw, label);
-  return {
-    letter: parseCodeRanges(obj["letter"], `${label}.letter`),
-    number: parseCodeRanges(obj["number"], `${label}.number`),
-    space: parseCodeRanges(obj["space"], `${label}.space`),
-  };
-};
-
-/** Equivalence table of `(?i:)` (pairs of `[cp, the character on the suffix side]`). */
-const parseCaseFold = (raw: unknown, label: string): Qwen2CaseFold => {
-  if (!Array.isArray(raw)) throw new Error(`${label}: not an array`);
-  const out = new Map<number, number>();
-  for (const entry of raw) {
-    if (
-      !Array.isArray(entry) ||
-      entry.length !== 2 ||
-      typeof entry[0] !== "number" ||
-      typeof entry[1] !== "number"
-    ) {
-      throw new Error(`${label}: not [cp, cp]`);
-    }
-    assertCodePoint(entry[0], label);
-    assertCodePoint(entry[1], label);
-    setUnique(out, entry[0], entry[1], label);
-  }
-  return out;
-};
-
-/**
- * Reads a newline-separated table and checks that the line count matches what the asset declares.
- *
- * MUST: compare the counts. If `mergesText` is missing lines, BPE just "does not merge what it
- * cannot find" and **does not fail** — the split changes and the id sequence silently becomes a
- * different one (the `vocabText` side fails on a token missing from the vocabulary, but this one is
- * a silent wrong value).
- */
-const parseLines = (raw: unknown, count: unknown, label: string, countLabel: string): string[] => {
-  const lines = asString(raw, label).split("\n");
-  const want = asNumber(count, countLabel);
-  if (lines.length !== want) {
-    throw new Error(
-      `${label}: line count ${lines.length} does not match ${countLabel} ${want} (the asset is broken)`,
-    );
-  }
-  return lines;
-};
-
-/**
- * Converts the Qwen2 asset JSON into asset tables (an external boundary, so the structure is
- * checked before use).
- */
-const parseQwen2Asset = (raw: unknown, label: string = "tokenizer"): Qwen2Assets => {
-  const obj = asRecord(raw, label);
-  // 0-origin line number = id / rank. The byte-level vocabulary contains no newline or space
-  // (checked at emit).
-  const vocabLines = parseLines(
-    obj["vocabText"],
-    obj["vocabCount"],
-    `${label}.vocabText`,
-    `${label}.vocabCount`,
-  );
-  assertUniqueLines(vocabLines, `${label}.vocabText`);
-  const vocab = new Map<string, number>();
-  for (const [id, token] of vocabLines.entries()) vocab.set(token, id);
-  const mergesLines = parseLines(
-    obj["mergesText"],
-    obj["mergesCount"],
-    `${label}.mergesText`,
-    `${label}.mergesCount`,
-  );
-  assertUniqueLines(mergesLines, `${label}.mergesText`);
-  const merges = new Map<string, number>();
-  for (const [rank, line] of mergesLines.entries()) merges.set(line, rank);
-  return {
-    vocab,
-    merges,
-    addedTokens: parseAddedTokens(obj["addedTokens"], `${label}.addedTokens`),
-    classes: parseClasses(obj["classes"], `${label}.classes`),
-    caseFold: parseCaseFold(obj["caseFold"], `${label}.caseFold`),
-    nfcSegments: parseCodeRanges(obj["nfcSegments"], `${label}.nfcSegments`),
-    maxLength: asPositiveInteger(obj["maxLength"], `${label}.maxLength`),
-  };
-};
-
 /**
  * Converts the T5 asset JSON into asset tables (the shared T5 tables + Anima's Precompiled
  * normalisation table).
@@ -245,6 +145,6 @@ export const createTokenizers = (
   t5Bytes: Uint8Array<ArrayBuffer>,
 ): AnimaTokenizers =>
   new AnimaTokenizers(
-    parseQwen2Asset(decodeJson(qwen2Bytes, "tokenizer")),
+    parseQwen2Tables(decodeJson(qwen2Bytes, "tokenizer"), "tokenizer"),
     parseT5Asset(decodeJson(t5Bytes, "tokenizer_2")),
   );

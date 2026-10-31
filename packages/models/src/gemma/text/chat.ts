@@ -33,6 +33,7 @@
  */
 
 import { ModelInputError } from "../../errors.ts";
+import { pythonStrip } from "../../text/python-strip.ts";
 import type { Tokenizer } from "./tokenizer.ts";
 
 /** The roles in the first scope (`assistant` is mapped to `model` when rendered). */
@@ -68,36 +69,6 @@ const ROLES: readonly string[] = ["system", "developer", "user", "assistant"];
 
 /** The fields a message may carry (allow list — pairs with `ALLOWED_MESSAGE_KEYS` in Python). */
 const MESSAGE_KEYS: readonly string[] = ["role", "content"];
-
-/**
- * The code points for which Python's `str.isspace()` is true.
- *
- * Jinja's `trim` filter is `str.strip()` itself, which differs from JS's `String.prototype.trim()` in
- * exactly two points: Python treats `\x1c`–`\x1f` and `\x85` as whitespace, and does not treat
- * U+FEFF as whitespace. The difference is exotic, but what comes out is **a different id sequence,
- * not an exception**, so the set is ported explicitly.
- */
-const isPythonSpace = (code: number): boolean =>
-  (code >= 0x09 && code <= 0x0d) || // \t \n \v \f \r
-  (code >= 0x1c && code <= 0x20) || // file / group / record / unit separators + space
-  code === 0x85 ||
-  code === 0xa0 ||
-  code === 0x1680 ||
-  (code >= 0x2000 && code <= 0x200a) ||
-  code === 0x2028 ||
-  code === 0x2029 ||
-  code === 0x202f ||
-  code === 0x205f ||
-  code === 0x3000;
-
-/** Jinja's `trim` (= `str.strip()`). */
-const trim = (text: string): string => {
-  let start = 0;
-  let end = text.length;
-  while (start < end && isPythonSpace(text.charCodeAt(start))) start += 1;
-  while (end > start && isPythonSpace(text.charCodeAt(end - 1))) end -= 1;
-  return text.slice(start, end);
-};
 
 /**
  * Checks that one message is within the scope of plain conversation (out of scope fails loudly).
@@ -184,7 +155,7 @@ export const renderGemma4Chat = (messages: readonly ChatMessage[]): string => {
   let out = BOS;
   let index = 0;
   if (SYSTEM_ROLES.includes(messages[0].role)) {
-    out += `${START_OF_TURN}system\n${trim(messages[0].content)}${END_OF_TURN}\n`;
+    out += `${START_OF_TURN}system\n${pythonStrip(messages[0].content)}${END_OF_TURN}\n`;
     index = 1;
   }
   // Continuation is decided on the role **before mapping** (after mapping to `model`, an assistant
@@ -196,7 +167,7 @@ export const renderGemma4Chat = (messages: readonly ChatMessage[]): string => {
     if (!(role === MODEL_ROLE && previousRole === "assistant")) {
       out += `${START_OF_TURN}${role}\n`;
     }
-    out += trim(message.content);
+    out += pythonStrip(message.content);
     const nextRole = messages[index + 1]?.role;
     if (!(role === MODEL_ROLE && nextRole === "assistant")) out += `${END_OF_TURN}\n`;
     previousRole = message.role;
@@ -264,7 +235,7 @@ export const renderGemma4ChatTurn = (message: ChatMessage): string => {
   // turn" (the `${END_OF_TURN}\n` of `renderGemma4Chat`). `<turn|>` itself is prepended by
   // pendingToken, so it is not here.
   return (
-    `\n${START_OF_TURN}${message.role}\n${trim(message.content)}${END_OF_TURN}\n` +
+    `\n${START_OF_TURN}${message.role}\n${pythonStrip(message.content)}${END_OF_TURN}\n` +
     `${START_OF_TURN}${MODEL_ROLE}\n`
   );
 };

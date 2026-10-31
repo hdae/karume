@@ -46,7 +46,8 @@ DEFAULT_REPO = "circlestone-labs/Anima-Base-v1.0-Diffusers"
 
 #: 実行時資産の置き場（`outputs/` は `.gitignore` 済み）。この 2 本が配布形の `tokenizer/` /
 #: `tokenizer_2/` へ入り（`anima/distribution.py` の `ANIMA_TOKENIZER_SERIES`）、Deno 側は
-#: manifest の asset 経由で `packages/models/src/anima/text/{qwen2,t5}-tokenizer.ts` が読む
+#: manifest の asset 経由で `packages/models/src/text/qwen2-tokenizer.ts` /
+#: `packages/models/src/anima/text/t5-tokenizer.ts` が読む
 #: （この置き場を直接読む TS は無い）。
 DEFAULT_ASSETS_DIR = SERIES_ROOT / "anima-demo" / "text"
 QWEN_ASSET_FILE = "qwen2-tokenizer.json"

@@ -22,7 +22,7 @@ import {
   type Qwen2Assets,
   qwen2PreTokenize,
   Qwen2Tokenizer,
-} from "../src/anima/text/qwen2-tokenizer.ts";
+} from "../src/text/qwen2-tokenizer.ts";
 import { normalizeSpm, parseSpmTables } from "../src/anima/text/spm-normalizer.ts";
 import { type T5Assets, T5Tokenizer } from "../src/anima/text/t5-tokenizer.ts";
 import {
