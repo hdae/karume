@@ -681,6 +681,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "SOURCES",
+        "kind": "variable"
+      },
+      {
         "name": "imageToRgba",
         "kind": "function"
       }

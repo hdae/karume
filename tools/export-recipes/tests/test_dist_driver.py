@@ -241,6 +241,7 @@ RELEASE_REPOSITORIES = [
     # Wan2.1（`--pipeline wan` → karume-wan2.1）は HF に公開しないので載せない
     # （ADR 0118 追記 2026-10-15）。
     ("wan-ti2v", ["ti2v-5b"], None, "karume-wan2.2"),
+    ("moss-image", ["sft"], None, "karume-moss-image"),
 ]
 
 

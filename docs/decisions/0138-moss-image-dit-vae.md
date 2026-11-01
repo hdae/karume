@@ -8,7 +8,8 @@
   since 2026-11-01 (decision 13, Addendum of 2026-11-01). The text encoder (ADR 0137) is wired as
   the prompt form of decision 9 since 2026-10-31, in the narrow scope of the maintainer's ruling
   53 a (Addendum of 2026-10-31); the distribution step followed on 2026-11-01 (a local mirror and
-  the subpath `@karume/models/moss`; not published on Hugging Face — Addendum of 2026-11-01).
+  the subpath `@karume/models/moss`; published on Hugging Face as `hdae/karume-moss-image` with
+  0.15.1 — Addendum of 2026-11-01 and its publication addendum).
 - Date: 2026-10-27
 - Scope: the family `packages/models/src/moss/` on `main`, with the subpath `@karume/models/moss`
   and the distribution recipe `tools/export-recipes/moss/distribution.py` since 2026-11-01 (the
@@ -932,3 +933,11 @@ checks' ranges fail as plain `Error`s); the pipeline's admission also checks tha
   acceptance admits it.
 - An original-weights preset (skipped — ADR 0128 decision 4's table records why), and a tiled VAE
   path above the cap.
+
+## Addendum (2026-11-01) — published on Hugging Face
+
+The distribution is published as `hdae/karume-moss-image` (release-runbook §3 "First publication of a
+family"): the subpath gains `SOURCES` (key `"moss-image"`, folded into `KARUME_SOURCES`), and the
+omitted-ref diagnostic of `Pipeline.fromPretrained` names `moss.SOURCES["moss-image"]`. This closes
+the Hugging Face publication item of "What is still not done" above, and supersedes B4's "No
+`SOURCES`" and the addendum's "Not done here" line.

@@ -1681,16 +1681,16 @@ By-design constraints of `wan.Ti2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/
   stage 8a). The entries are `wan.Ti2vPipeline.fromPretrained` (the published repository or a local mirror) and `wan.Ti2vPipeline.fromAssets`, which takes a
   manifest and assets assembled from the series containers. Only Wan2.1 (`karume-wan2.1`) stays unpublished.
 
-## MOSS-Image: a local distribution only; text as prompt strings (or precomputed embeddings on the internal entry); the area is capped by the VAE's storage binding (2,796,160 px at 2 GiB); whether a size fits VRAM is checked per stage
+## MOSS-Image: text as prompt strings (or precomputed embeddings on the internal entry); the area is capped by the VAE's storage binding (2,796,160 px at 2 GiB); whether a size fits VRAM is checked per stage
 
 By-design constraints of the family (`@karume/models/moss`, and the internal entry `generateMoss` with its
 acceptance check `planMossGenerate` in `packages/models/src/moss/` — ADR [0138](decisions/0138-moss-image-dit-vae.md)).
 Every input-caused rejection is a `ModelInputError` before any GPU work.
 
-- **Not published**: the distribution `karume-moss-image` is built locally by the recipe
-  (`dist.py --pipeline moss-image`, about 12.3 GiB) and is not on Hugging Face, so the subpath has no `SOURCES`
-  table; a local directory is passed as a source handle (ADR 0138 addendum of 2026-11-01). Not part of the 0.15.0
-  release. Its sha256 rows exist for one environment (the RTX 3080 Ti under Node + Dawn).
+- The distribution `karume-moss-image` (about 12.3 GiB) is published on Hugging Face since 0.15.1
+  (`moss.SOURCES["moss-image"]`; the recipe is `dist.py --pipeline moss-image`, and a local directory can be passed
+  as a source handle — ADR 0138 addenda of 2026-11-01). Its sha256 rows exist for one environment (the RTX 3080 Ti
+  under Node + Dawn).
 - **The public pipeline takes prompt strings only**; the embeddings form is the internal entry's (the parity checks).
 - **Text in one of two forms** (ADR 0138 addendum of 2026-10-31): prompt strings (`prompt` / `negativePrompt` — the
   chat template and the tokenizer in the acceptance check, the i8 Qwen3.5 text tower on the GPU), or upstream's

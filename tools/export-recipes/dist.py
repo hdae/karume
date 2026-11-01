@@ -23,7 +23,7 @@
                                                            # Wan2.1 T2V 1.3B (not published)
     uv run python dist.py --pipeline wan-ti2v --resolve-refs hf
                                                            # Wan2.2 TI2V 5B (references umT5)
-    uv run python dist.py --pipeline moss-image            # MOSS-Image-SFT (not published)
+    uv run python dist.py --pipeline moss-image            # MOSS-Image-SFT
 
 置き場の既定（`--series` / `--out`）もここが渡す — リポの `outputs/series/` と `models/` は
 repo topology で、core は綴りを持たない（ADR 0065 Consequences・`karume.dist` の同 MUST）。

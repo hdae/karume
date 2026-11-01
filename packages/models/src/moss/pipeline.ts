@@ -33,9 +33,9 @@
  * headroom checks assume nothing else of this pipeline is open), and `dispose` waits for it before
  * destroying an internally acquired GPU.
  *
- * NOTE: the distribution is not published on Hugging Face, so there is no `SOURCES` table; a local
- * distribution is passed as a source handle (`nodeDirectory` of `@karume/hub/node`,
- * `denoDirectory` of `@karume/hub/deno`, or a served directory in the browser).
+ * The published distribution is `SOURCES["moss-image"]` (`./config.ts`); a local distribution is
+ * passed as a source handle (`nodeDirectory` of `@karume/hub/node`, `denoDirectory` of
+ * `@karume/hub/deno`, or a served directory in the browser).
  *
  * MUST: every module is side-effect free (no import-time execution, no global mutable state).
  */
@@ -360,7 +360,11 @@ const loadMoss = async (
   ref: string | HubRepoRef | DistributionSource,
   options: FromPretrainedOptions,
 ): Promise<MossPipelineState> => {
-  const source = toManifestSource(ref, `${OWNER}.fromPretrained`);
+  const source = toManifestSource(
+    ref,
+    `${OWNER}.fromPretrained`,
+    'SOURCES["moss-image"] (@karume/models/moss)',
+  );
   const hubOptions = hubLoadOptions(options);
   const loaded = await loadManifest(source, hubOptions);
   const selection = resolveSelection(loaded.manifest, {
@@ -464,10 +468,10 @@ export class Pipeline {
 
   /**
    * Fetches from the distribution and builds (module doc "Construction"). **`ref` is required**
-   * (no default source — `src/hub/repo-ref.ts`; the distribution is not published, so a local one
-   * is passed as a source handle, e.g. `nodeDirectory("models/karume-moss-image")` of
-   * `@karume/hub/node`). A component can be replaced by the same role of another repository with
-   * an identical graph descriptor ({@link FromPretrainedComponentOptions.components}).
+   * (no default source — `src/hub/repo-ref.ts`): the published distribution
+   * `SOURCES["moss-image"]`, any `{ repo, revision }`, or a local one as a source handle, e.g.
+   * `nodeDirectory("models/karume-moss-image")` of `@karume/hub/node`. A component can be replaced
+   * by the same role of another repository with an identical graph descriptor ({@link FromPretrainedComponentOptions.components}).
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,

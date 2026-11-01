@@ -258,6 +258,7 @@ const SOURCE_TABLE_SUBPATHS: readonly string[] = [
   "./birefnet",
   "./umt5",
   "./wan",
+  "./moss",
 ];
 
 /** Whether an export name is a family source table (the bare name — ADR 0136). */

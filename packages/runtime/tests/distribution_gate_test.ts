@@ -66,9 +66,11 @@ const ALLOW_NO_DISTRIBUTION = process.env.KARUME_ALLOW_NO_DISTRIBUTION === "1";
 const MODELS_ROOT = new URL("../../../models/", import.meta.url);
 
 /**
- * 門番が**在ることを要求する**配布形ミラー（欠如の検出の名簿 — manifest の検査の射程は
- * {@link discoverDistributions} が配置から導く）= 公開済みの 12 リポ（0.14.0 で初公開の `karume-umt5-xxl` と
- * `karume-wan2.2` を含む）+ 未公開の `karume-gemma4-qat` + `karume-wan2.1` + `karume-moss-image`。
+ * The distribution mirrors the guard **requires to exist** (the roster of the absence check — the
+ * reach of the manifest checks is derived from the layout by {@link discoverDistributions}) = the
+ * 13 published repositories (including
+ * `karume-umt5-xxl` and `karume-wan2.2`, first published in 0.14.0, and `karume-moss-image`, first
+ * published in 0.15.1) + the unpublished `karume-gemma4-qat` and `karume-wan2.1`.
  *
  * 公開済みの 2 本は公開前から門番に載っていた: `karume-umt5-xxl` は Wan の GPU 経路の e2e が越境参照の根にし
  * （ADR 0119 段 10d・無いと欠如が無音の SKIP になる）、`karume-wan2.2` は Wan2.2 の通しの e2e
@@ -80,9 +82,9 @@ const MODELS_ROOT = new URL("../../../models/", import.meta.url);
  * （HF に公開しない — ADR 0118 追記（2026-10-15））だが、Wan の通しの e2e（`e2e_wan_pipeline_test.ts`）と
  * 融合ヒット数の門が根にする（ADR 0118 段 7）。
  *
- * `karume-moss-image` is not published either (ADR 0138 addendum of 2026-11-01), but the pipeline
- * e2e (`packages/e2e/tests/e2e_moss_pipeline_test.ts`) roots on it, so its absence must not be a
- * silent skip.
+ * `karume-moss-image` was on the roster before its publication as well (ADR 0138 addendum of
+ * 2026-11-01): the pipeline e2e (`packages/e2e/tests/e2e_moss_pipeline_test.ts`) roots on it, so its
+ * absence must not be a silent skip.
  */
 const DISTRIBUTIONS = [
   "karume-anima",

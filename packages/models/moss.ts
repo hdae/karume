@@ -4,12 +4,13 @@
  *
  * ADR 0008: this is an **explicitly designed thin surface**; internal modules are not re-exported
  * wholesale. The surface follows the user's stories — build ({@link Pipeline.fromPretrained}) /
- * generate (`generate` — a prompt string; every knob left out takes the manifest's default) /
- * turn the image into pixels ({@link imageToRgba}) / release (`dispose`).
+ * choose a source ({@link SOURCES}) / generate (`generate` — a prompt string; every knob left out
+ * takes the manifest's default) / turn the image into pixels ({@link imageToRgba}) / release
+ * (`dispose`).
  *
- * The distribution `karume-moss-image` is **not published** on Hugging Face, so this subpath has
- * no source table (`SOURCES`): pass a local distribution as a source handle (`nodeDirectory` of
- * `@karume/hub/node`, `denoDirectory` of `@karume/hub/deno`). It holds the Qwen3.5 text encoder
+ * The distribution `karume-moss-image` is published on Hugging Face (`"moss-image"` of
+ * {@link SOURCES}); a local distribution can be passed as a source handle instead (`nodeDirectory`
+ * of `@karume/hub/node`, `denoDirectory` of `@karume/hub/deno`). It holds the Qwen3.5 text encoder
  * (about 7.4 GiB of int8 weights), the int8 transformer and the f32 VAE — about 12.3 GiB in all.
  *
  * MUST: every module is free of side effects (no execution at import, no global mutable state —
@@ -23,6 +24,19 @@ export type {
   GenerateRequest,
   PipelineOptions,
 } from "./src/moss/pipeline.ts";
+/**
+ * **The table of sources verified with this package version** (one table per family; keys are the
+ * Hugging Face repository name without `karume-`, values are pinned commit SHAs — ADR 0073 / 0092):
+ *
+ * - `SOURCES["moss-image"]` = `hdae/karume-moss-image` (read by {@link Pipeline.fromPretrained};
+ *   self-contained — no cross-repository reference)
+ *
+ * **An opt-in for callers who want to follow the package version automatically** — pass the entry
+ * as is as the first argument of {@link Pipeline.fromPretrained}. To pin reproducibility yourself,
+ * write your own `{ repo, revision }` instead of using this table (`fromPretrained` has no
+ * default).
+ */
+export { SOURCES } from "./src/moss/config.ts";
 
 /**
  * A generated image (`[3, height, width]` f32 in `[-1, 1]`) → interleaved 8-bit RGBA (can be passed

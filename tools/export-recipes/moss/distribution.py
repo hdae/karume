@@ -25,9 +25,9 @@ The generic assembly (placement, sha256, the manifest, staging and swap, verific
 The repository is one per family (ADR 0092 decision 1) and the model is `sft`, the upstream
 checkpoint `MOSS-Image-SFT` without the family name (as `ti2v-5b` is Wan2.2's).
 
-Not published: no Hugging Face repository exists, and `packages/models/src/moss/` has no `SOURCES`
-entry (an entry before publication can only 404 — ADR 0073 decision 1). The local mirror is
-`models/karume-moss-image/` (`uv run python dist.py --pipeline moss-image`).
+Published on Hugging Face as `hdae/karume-moss-image` since 0.15.1 (`SOURCES["moss-image"]` in
+`packages/models/src/moss/config.ts`). The local mirror is `models/karume-moss-image/`
+(`uv run python dist.py --pipeline moss-image`).
 
 MUST: this module does not import torch (`import dist` must not load it —
 `tests/test_dist_driver.py` `TestImportingTheDriver`). The writers (`moss.export_dit`,

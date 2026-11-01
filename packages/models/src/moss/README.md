@@ -11,9 +11,9 @@ outputs (`positive` / `negative` — upstream's for the fixed prompts, how the p
 A/B against upstream's embeddings feed the DiT).
 
 **The public surface** is `@karume/models/moss` (`pipeline.ts`): `Pipeline.fromPretrained` over
-the distribution `karume-moss-image` (`tools/export-recipes/moss/distribution.py` — not published on
-Hugging Face, so there is no `SOURCES` table; a local mirror at `models/karume-moss-image/` is passed
-as a source handle), taking prompt strings. It reads the preset from the manifest (`quant`, else
+the distribution `karume-moss-image` (`tools/export-recipes/moss/distribution.py` — published on
+Hugging Face as `SOURCES["moss-image"]` (`config.ts`); a local mirror at `models/karume-moss-image/`
+is passed as a source handle), taking prompt strings. It reads the preset from the manifest (`quant`, else
 `defaultQuant`) and fills every knob a request leaves out from `pipelineConfig` (upstream's
 defaults — `config.ts`). The internal entry `generateMoss` takes both text forms with every knob
 explicit; the series tests open the series themselves (the DiT series `moss-image-sft-i8-dyn`, the

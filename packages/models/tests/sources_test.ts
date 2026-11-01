@@ -31,6 +31,7 @@ import * as depthAnything from "../depth-anything.ts";
 import * as birefnet from "../birefnet.ts";
 import * as umt5 from "../umt5.ts";
 import * as wan from "../wan.ts";
+import * as moss from "../moss.ts";
 import { KARUME_SOURCES } from "../src/sources.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
@@ -142,6 +143,13 @@ const FAMILIES: readonly Family[] = [
     keys: ["wan2.2"],
     load: (ref, options) => wan.Ti2vPipeline.fromPretrained(ref, options),
   },
+  {
+    name: "moss.SOURCES",
+    sources: moss.SOURCES,
+    // First published in 0.15.1; one self-contained repository (no cross-repository reference).
+    keys: ["moss-image"],
+    load: (ref, options) => moss.Pipeline.fromPretrained(ref, options),
+  },
 ];
 
 // キーは repo 名から機械導出される（`"karume-" + key` === basename）ので、①の門は「キーと repo が
@@ -156,7 +164,7 @@ for (const { name, sources, keys } of FAMILIES) {
 
 // 家族と公開リポの総数も名指しで置く。リポの新設（波 b の birefnet-hr / lucida・0.14.0 の umT5 / Wan2.2）は
 // ここを落とすので、`KARUME_SOURCES` への畳み込み漏れが黙って通らない。
-test("取得元対応表を持つのは 9 家族・公開リポは 12 本", () => {
+test("取得元対応表を持つのは 10 家族・公開リポは 13 本", () => {
   assertEquals(
     FAMILIES.map(({ name }) => name),
     [
@@ -169,9 +177,10 @@ test("取得元対応表を持つのは 9 家族・公開リポは 12 本", () =
       "birefnet.SOURCES",
       "umt5.SOURCES",
       "wan.SOURCES",
+      "moss.SOURCES",
     ],
   );
-  assertEquals(Object.keys(KARUME_SOURCES).length, 12);
+  assertEquals(Object.keys(KARUME_SOURCES).length, 13);
 });
 
 for (const { name, sources } of FAMILIES) {

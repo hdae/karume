@@ -30,6 +30,7 @@ import * as anima from "../anima.ts";
 import * as birefnet from "../birefnet.ts";
 import * as umt5 from "../umt5.ts";
 import * as wan from "../wan.ts";
+import * as moss from "../moss.ts";
 
 // Names what a fetch stub was asked for (a `Request` would otherwise print as "[object Request]").
 const describeRequest = (input: RequestInfo | URL): string =>
@@ -196,4 +197,17 @@ test("fromPretrained: umT5 と Wan2.2 は ref 欠落時に対応表を案内し�
   );
   assertStringIncludes(wan21.message, "pass a repo name string (= tracks main)");
   assertEquals(wan21.message.includes("SOURCES"), false, wan21.message);
+});
+
+test("fromPretrained: MOSS-Image points at its source table when ref is missing", async () => {
+  // The table came with the family's first publication (0.15.1, like umT5 / Wan2.2 in 0.14.0): the
+  // hint names the entry this package version verified, seen from the public surface.
+  const fetchStub: typeof globalThis.fetch = (input) =>
+    Promise.reject(new Error(`repo_ref_test: reached the fetch layer (${describeRequest(input)})`));
+  const error = await assertRejects(
+    () => moss.Pipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
+    Error,
+    "moss.Pipeline.fromPretrained: repo is required",
+  );
+  assertMatch(error.message, /(?<![\w.])SOURCES\["moss-image"\] \(@karume\/models\/moss\)/);
 });

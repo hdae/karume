@@ -81,7 +81,7 @@ uv run python dist.py --pipeline wan \
     --allow-placeholder-ref                             # Wan2.1 T2V 1.3B (not published)
 uv run python dist.py --pipeline wan-ti2v \
     --resolve-refs hf                                   # Wan2.2 TI2V 5B (references karume-umt5-xxl)
-uv run python dist.py --pipeline moss-image             # MOSS-Image-SFT (not published)
+uv run python dist.py --pipeline moss-image             # MOSS-Image-SFT
 uv run python dist.py --pipeline sbv2 \
     --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
 ```

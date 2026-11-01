@@ -7,7 +7,7 @@
  *
  * It serves the side that "walks every published distribution repo" (connectivity smoke tests,
  * cache prefetch, listings); a consumer that uses only one family does better for tree-shaking by
- * looking up that family's table on its subpath (importing the barrel pulls in the configs of 9
+ * looking up that family's table on its subpath (importing the barrel pulls in the configs of 10
  * families).
  *
  * MUST: fold the family tables **as they are** — re-spelling them here would create a shape where
@@ -28,6 +28,7 @@ import * as depthAnything from "./depth-anything/config.ts";
 import * as birefnet from "./birefnet/config.ts";
 import * as umt5 from "./umt5/config.ts";
 import * as wan from "./wan/config.ts";
+import * as moss from "./moss/config.ts";
 
 export const KARUME_SOURCES = {
   ...anima.SOURCES,
@@ -39,4 +40,5 @@ export const KARUME_SOURCES = {
   ...birefnet.SOURCES,
   ...umt5.SOURCES,
   ...wan.SOURCES,
+  ...moss.SOURCES,
 } as const satisfies Record<string, HubRepoRef>;

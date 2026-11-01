@@ -21,19 +21,51 @@
  * (`./pipeline.ts`).
  * MUST: maps are read only through `Object.hasOwn` (cross-cutting invariant).
  *
- * There is no source table (`SOURCES`): the distribution `karume-moss-image` is not published on
- * Hugging Face, and an entry before publication can only 404 (ADR 0073 decision 1). A local
- * distribution is passed as a source handle (`nodeDirectory` / `denoDirectory`).
+ * The family's public distribution repository is in {@link SOURCES} (published on Hugging Face as
+ * `hdae/karume-moss-image` since 0.15.1); a local distribution is still passed as a source handle
+ * (`nodeDirectory` / `denoDirectory`).
  *
  * MUST: every module is side-effect free (no import-time execution, no global mutable state).
  */
 
+import type { HubRepoRef } from "@karume/hub";
 import { assertAllowedKeys, readNumber, readRecord } from "../config/readers.ts";
 import { MOSS_MAX_SIDE_PX, MOSS_PIXELS_PER_CELL } from "./request.ts";
 
 /** The `pipeline` contract name and the major this implementation accepts (ADR 0038 §1). */
 export const MOSS_PIPELINE_NAME = "moss-image";
 export const MOSS_PIPELINE_MAJOR = 1;
+
+/**
+ * The MOSS-Image family's **table of public distribution repositories** (ADR 0092 — one table per
+ * family, **no default entry**). The values are **the sources this package version verified**
+ * (pinned commit SHAs — ADR 0073).
+ *
+ * A key is the basename of the HF repository name without `karume-` (`"karume-" + key` gives back
+ * the basename — the check in `tests/sources_test.ts` holds this invariant):
+ *
+ * - `"moss-image"` = `hdae/karume-moss-image` (MOSS-Image SFT — self-contained: the Qwen3.5 text
+ *   encoder, the transformer and the VAE are all in this repository)
+ *
+ * Pass it **as an opt-in to follow the package version automatically** — to pin reproducibility
+ * yourself, write your own `{ repo, revision }` instead of this table (`fromPretrained` has no
+ * default).
+ *
+ * MUST: pin the revision to a commit SHA — branches and tags can be moved on the distribution side,
+ * so the bytes this published package reads would change silently at the network's convenience (an
+ * unrecoverable accident). A SHA removes the revision-resolution request itself, so an offline start
+ * with a full cache works at the same time (ADR 0038). A user who needs to follow main chooses
+ * `{ ...SOURCES["moss-image"], revision: "main" }` explicitly.
+ */
+// NOTE: the revision is updated to the SHA of main after the upload, in §3 of the release runbook
+// (docs/release-runbook.md) (inherits the maintenance duty of ADR 0073 decision 3 — by hand + the
+// runbook check).
+export const SOURCES = {
+  "moss-image": {
+    repo: "hdae/karume-moss-image",
+    revision: "e99b6808df88a27524109d677eddf8f280d199a0",
+  },
+} as const satisfies Record<string, HubRepoRef>;
 
 /** The manifest asset holding the Qwen3.5 tokenizer (`karume-qwen3_5-tokenizer/1`). */
 export const MOSS_TOKENIZER_ASSET = "tokenizer";
