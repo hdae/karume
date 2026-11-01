@@ -40,6 +40,7 @@ from karume.dist import (
     declared_references,
     resolve_repo,
 )
+from moss.distribution import PIPELINE as MOSS_PIPELINE
 from sbv2.distribution import FN_PIPELINE as SBV2_FN_PIPELINE
 from sbv2.distribution import PIPELINE as SBV2_PIPELINE
 from siglip2.distribution import PIPELINE as SIGLIP2_PIPELINE
@@ -66,6 +67,7 @@ RECIPE_PIPELINES = {
     "wan": WAN_PIPELINE,
     "wan-ti2v": WAN_TI2V_PIPELINE,
     "umt5": UMT5_PIPELINE,
+    "moss-image": MOSS_PIPELINE,
 }
 
 
@@ -161,6 +163,7 @@ class TestRegistry:
             "wan",
             "wan-ti2v",
             "umt5",
+            "moss-image",
         }
         carried = {
             name

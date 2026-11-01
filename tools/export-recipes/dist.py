@@ -23,6 +23,7 @@
                                                            # Wan2.1 T2V 1.3B (not published)
     uv run python dist.py --pipeline wan-ti2v --resolve-refs hf
                                                            # Wan2.2 TI2V 5B (references umT5)
+    uv run python dist.py --pipeline moss-image            # MOSS-Image-SFT (not published)
 
 置き場の既定（`--series` / `--out`）もここが渡す — リポの `outputs/series/` と `models/` は
 repo topology で、core は綴りを持たない（ADR 0065 Consequences・`karume.dist` の同 MUST）。
@@ -108,6 +109,7 @@ from karume.dist import (
     selected_models,
 )
 from karume.dist import main as dist_main
+from moss import distribution as moss_distribution
 from sbv2 import distribution as sbv2_distribution
 from siglip2 import distribution as siglip2_distribution
 from vowel_detector import distribution as vowel_detector_distribution
@@ -137,6 +139,9 @@ PIPELINES: Mapping[str, Pipeline] = {
     "wan-ti2v": wan_distribution.TI2V_PIPELINE,
     # Wan の text_encoder の参照先（ADR 0119 追記 D — 部品だけの別リポ・読む TS の家族は無い）。
     "umt5": umt5_distribution.PIPELINE,
+    # MOSS-Image-SFT (ADR 0138 addendum of 2026-11-01 — self-contained: the Qwen3.5 text tower is
+    # the checkpoint's own, stored in this repository).
+    "moss-image": moss_distribution.PIPELINE,
     **CORE_PIPELINES,
 }
 
