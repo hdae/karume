@@ -10,7 +10,7 @@ import type { GenerateRequest } from "@karume/models/moss";
 
 import type { MountName } from "@/mounts";
 
-/** The one mount the page reads (`models/karume-moss-image`, the direct route only). */
+/** The one mount the page reads (`models/karume-moss-image`, on the cached or the direct route). */
 export const MOSS_MOUNT = "moss-image" satisfies MountName;
 
 /** What a model's manifest entry declares as the defaults of a request (`pipelineConfig`). */

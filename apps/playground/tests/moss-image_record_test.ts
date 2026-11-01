@@ -29,6 +29,7 @@ const observation = (patch: Partial<RunObservation> = {}): RunObservation => ({
   environment,
   directory: "models/karume-moss-image",
   manifestSha256: "f".repeat(64),
+  source: { kind: "direct" },
   model: "sft",
   defaultModel: "sft",
   quant: "f32+dit8",
@@ -68,6 +69,24 @@ describe("assembleRecord", () => {
       manifestSha256: "f".repeat(64),
     });
     expect(record.source).toEqual({ kind: "direct" });
+  });
+
+  it("keeps the cached route's repo reference and leaves the cache generation out", () => {
+    const record = assembleRecord(
+      observation({
+        source: {
+          kind: "cached",
+          ref: { repo: "hdae/karume-moss-image", revision: "0".repeat(40), hubUrl: "http://x/hf" },
+          cacheGeneration: 2,
+        },
+      }),
+    );
+    expect(record.source).toEqual({
+      kind: "cached",
+      repo: "hdae/karume-moss-image",
+      revision: "0".repeat(40),
+      hubUrl: "http://x/hf",
+    });
   });
 
   it("marks whether the model and the preset are the manifest's defaults", () => {

@@ -64,7 +64,7 @@ export const MODEL_PAGES: readonly ModelPage[] = [
     path: "/moss-image",
     title: "MOSS-Image",
     summary:
-      "Text → image with MOSS-Image SFT (Qwen3.5 text encoder, int8 DiT, FLUX.2 VAE) from the local, unpublished distribution. Minutes per 1024² image.",
+      "Text → image with MOSS-Image SFT (Qwen3.5 text encoder, int8 DiT, FLUX.2 VAE). Minutes per 1024² image.",
     group: "Image",
     icon: ImageIcon,
     mounts: ["moss-image"],

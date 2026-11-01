@@ -15,6 +15,7 @@ import * as birefnet from "@karume/models/birefnet";
 import * as depthAnything from "@karume/models/depth-anything";
 import * as gemma from "@karume/models/gemma";
 import * as irodori from "@karume/models/irodori";
+import * as moss from "@karume/models/moss";
 import * as sbv2 from "@karume/models/sbv2";
 import * as siglip2 from "@karume/models/siglip2";
 import * as wan from "@karume/models/wan";
@@ -62,9 +63,10 @@ export const MOUNTS = {
   gemma4: { directory: "models/karume-gemma4", hfRepo: gemma.SOURCES["gemma4"].repo },
   // No public repo (gemma.SOURCES holds only `gemma4`): the direct route only.
   "gemma4-qat": "models/karume-gemma4-qat",
-  // No public repo (`@karume/models/moss` has no SOURCES table — the distribution is a local
-  // mirror, not published): the direct route only.
-  "moss-image": "models/karume-moss-image",
+  "moss-image": {
+    directory: "models/karume-moss-image",
+    hfRepo: moss.SOURCES["moss-image"].repo,
+  },
 } as const satisfies DistributionsPluginOptions["distributions"];
 
 /** The name of a mount (`/models/<name>/`, the key of `/models/index.json`). */

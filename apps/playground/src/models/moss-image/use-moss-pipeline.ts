@@ -1,9 +1,9 @@
 /**
- * The page's one `Pipeline`, opened on Run and kept for the next run while the model, preset and GPU
- * stay the same. Opening reads the manifest, the container descriptors and the tokenizer; it builds no
- * Session (every generation opens and closes its stages — the text encoder alone holds about 7.4 GiB
- * of weights on the device), so a held pipeline holds no GPU memory between runs and keeping it only
- * saves the opening.
+ * The page's one `Pipeline`, opened on Run and kept for the next run while the source, model, preset
+ * and GPU stay the same. Opening reads the manifest, the container descriptors and the tokenizer; it
+ * builds no Session (every generation opens and closes its stages — the text encoder alone holds
+ * about 7.4 GiB of weights on the device), so a held pipeline holds no GPU memory between runs and
+ * keeping it only saves the opening.
  *
  * The held pipeline is disposed when the selection moves away from it, on **Release pipeline** and
  * when the page is left. The GPU belongs to the page: `dispose` only drops the pipeline. Disposals
@@ -18,19 +18,22 @@ import type { GpuContext } from "@karume/runtime";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { TrackGpuWork } from "@/hooks/use-gpu";
-import { distributionSource } from "@/lib/distributions";
+import { type PipelineSource, pretrainedRef } from "@/lib/distributions";
 
 import { MOSS_MOUNT } from "./settings";
 
 /** What a pipeline is opened for. */
 export type PipelineSpec = {
   readonly gpu: GpuContext;
+  /** Stable per choice (`usePipelineSource`), so it compares by identity. */
+  readonly source: PipelineSource;
   readonly model: string;
   readonly quant: string;
 };
 
 /** What the status card shows of the held pipeline. */
 export type HeldPipelineInfo = {
+  readonly source: PipelineSource["kind"];
   readonly model: string;
   readonly quant: string;
   readonly openSeconds: number;
@@ -43,7 +46,10 @@ type Held = {
 };
 
 const sameSpec = (left: PipelineSpec, right: Partial<PipelineSpec>): boolean =>
-  left.gpu === right.gpu && left.model === right.model && left.quant === right.quant;
+  left.gpu === right.gpu &&
+  left.source === right.source &&
+  left.model === right.model &&
+  left.quant === right.quant;
 
 export type OpenedPipeline = {
   readonly pipeline: Pipeline;
@@ -102,14 +108,14 @@ export const useMossPipeline = (
   }, [disposeQueued]);
 
   // Drop the held pipeline once the selection moves away from it.
-  const { gpu, model, quant } = selection;
+  const { gpu, source, model, quant } = selection;
   useEffect(() => {
-    selectionRef.current = { gpu, model, quant };
+    selectionRef.current = { gpu, source, model, quant };
     const current = heldRef.current;
     if (current !== undefined && !sameSpec(current.spec, selectionRef.current)) {
       void release();
     }
-  }, [gpu, model, quant, release]);
+  }, [gpu, source, model, quant, release]);
   // Leaving the page disposes it.
   useEffect(() => {
     mountedRef.current = true;
@@ -133,7 +139,7 @@ export const useMossPipeline = (
       // A failed dispose of the old pipeline is shown, and does not block opening the new one.
       await release();
       const started = performance.now();
-      const pipeline = await Pipeline.fromPretrained(distributionSource(MOSS_MOUNT), {
+      const pipeline = await Pipeline.fromPretrained(pretrainedRef(spec.source, MOSS_MOUNT), {
         gpu: spec.gpu,
         model: spec.model,
         quant: spec.quant,
@@ -156,6 +162,7 @@ export const useMossPipeline = (
       }
       const openMilliseconds = performance.now() - started;
       const info: HeldPipelineInfo = {
+        source: spec.source.kind,
         model: spec.model,
         quant: spec.quant,
         openSeconds: openMilliseconds / 1000,

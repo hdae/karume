@@ -1,7 +1,7 @@
 /**
- * MOSS-Image text → image: pick a preset, generate one image on the page's GPU from the local
- * distribution `karume-moss-image`, and save a record of the run (request, wall times, the sha256 of
- * the RGBA output). `generate` reports no stage events, so the status shows the elapsed time only.
+ * MOSS-Image text → image: pick a preset and a source, generate one image on the page's GPU from
+ * the distribution `karume-moss-image`, and save a record of the run (request, wall times, the sha256
+ * of the RGBA output). `generate` reports no stage events, so the status shows the elapsed time only.
  */
 
 import { imageToRgba } from "@karume/models/moss";
@@ -16,6 +16,7 @@ import { PresetSelect } from "@/components/preset-select";
 import { RecordActions } from "@/components/record-actions";
 import { RgbaImage } from "@/components/rgba-image";
 import { RunStatusCard } from "@/components/run-status-card";
+import { SourcePicker } from "@/components/source-picker";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useDistributionIndex } from "@/hooks/use-distribution-index";
 import { useGpu } from "@/hooks/use-gpu";
 import { type ManifestState, useManifest } from "@/hooks/use-manifest";
+import { usePipelineSource } from "@/hooks/use-pipeline-source";
 import { useRunTask } from "@/hooks/use-run-task";
 import { fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
@@ -66,6 +68,7 @@ export const MossImagePage = () => {
   const index = useDistributionIndex();
   const status = index.kind === "ready" ? index.index[MOSS_MOUNT] : undefined;
   const manifestState = useManifest(MOSS_MOUNT, status);
+  const { source, hfRef, choose: chooseSource } = usePipelineSource(status);
   const manifest = manifestState.kind === "ready" ? manifestState.manifest : undefined;
 
   const [form, setForm] = useState<MossForm>(() => initialForm(SAMPLE_PROMPTS[0]?.prompt ?? ""));
@@ -88,7 +91,10 @@ export const MossImagePage = () => {
   const { state: gpuState, lease, reacquire, track } = useGpu(GPU_OPTIONS);
   const gpu = gpuState.kind === "ready" ? gpuState.gpu : undefined;
 
-  const { held, releaseError, open, release } = useMossPipeline({ gpu, model, quant }, track);
+  const { held, releaseError, open, release } = useMossPipeline(
+    { gpu, source, model, quant },
+    track,
+  );
 
   const task = useRunTask<RunResult>({ track, lease });
 
@@ -117,7 +123,7 @@ export const MossImagePage = () => {
     ) {
       return;
     }
-    const spec = { gpu, model, quant };
+    const spec = { gpu, source, model, quant };
     const directory = status?.directory ?? "";
     const quantLabel = presets.presets.find(({ name }) => name === quant)?.label ?? quant;
     const requestForm = form;
@@ -159,6 +165,7 @@ export const MossImagePage = () => {
         environment: recordEnvironment(gpu),
         directory,
         manifestSha256: manifestState.sha256,
+        source: spec.source,
         model,
         defaultModel: manifestState.manifest.defaultModel,
         quant,
@@ -196,8 +203,9 @@ export const MossImagePage = () => {
         <Alert>
           <AlertTitle>The MOSS-Image distribution is missing</AlertTitle>
           <AlertDescription>
-            The dev server has no <code>{manifestState.directory}</code>. It is a local mirror (not
-            published): assemble it with <code>tools/export-recipes/moss/distribution.py</code>.
+            The dev server has no <code>{manifestState.directory}</code>. Download{" "}
+            <code>hdae/karume-moss-image</code> there, or assemble it with{" "}
+            <code>tools/export-recipes/moss/distribution.py</code>.
           </AlertDescription>
         </Alert>
       ) : null}
@@ -207,11 +215,12 @@ export const MossImagePage = () => {
         <AlertDescription>
           Every generation opens and closes its stages one after another: the text encoder (Qwen3.5,
           about 7.4 GiB of int8 weights) is uploaded, encodes the prompts and is released before the
-          DiT (about 4.5 GiB) and the VAE open — about 12.3 GiB of weights read from{" "}
-          <code>/models/</code> and uploaded per generation (nothing is cached: the distribution is
-          not published, so there is no cached route). At 1024² × 50 steps a generation takes
-          minutes on a desktop GPU; a smaller size or fewer steps is a quicker check. The pipeline
-          reports no progress while it generates: the status shows the elapsed time only.
+          DiT (about 4.5 GiB) and the VAE open — about 12.3 GiB of weights read and uploaded per
+          generation (on the Cached source the first run stores them in this browser and later runs
+          read them from its disk; Direct reads them from <code>/models/</code> every time). At
+          1024² × 50 steps a generation takes minutes on a desktop GPU; a smaller size or fewer
+          steps is a quicker check. The pipeline reports no progress while it generates: the status
+          shows the elapsed time only.
         </AlertDescription>
       </Alert>
 
@@ -220,8 +229,8 @@ export const MossImagePage = () => {
           <CardHeader>
             <CardTitle>Request</CardTitle>
             <CardDescription>
-              The pipeline opens on Run and stays open for the next run with the same preset. Empty
-              fields take the model's defaults from the manifest.
+              The pipeline opens on Run and stays open for the next run with the same preset and
+              source. Empty fields take the model's defaults from the manifest.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2">
@@ -232,6 +241,15 @@ export const MossImagePage = () => {
                 presets={presets?.presets ?? []}
                 defaultQuant={presets?.defaultQuant ?? ""}
                 onChange={(next) => update({ quant: next })}
+                disabled={disabled}
+              />
+            </div>
+            <div className="sm:col-span-2">
+              <SourcePicker
+                id="moss-image-source"
+                value={source.kind}
+                cachedAvailable={hfRef !== undefined}
+                onChange={chooseSource}
                 disabled={disabled}
               />
             </div>
@@ -411,7 +429,7 @@ export const MossImagePage = () => {
               "Pipeline",
               held === undefined
                 ? "not open (opens on Run)"
-                : `${held.model} · ${held.quant} (${held.openSeconds.toFixed(1)} s to open)`,
+                : `${held.model} · ${held.quant} · ${held.source} (${held.openSeconds.toFixed(1)} s to open)`,
             ],
           ]}
         >
@@ -485,6 +503,12 @@ const RecordTable = ({ record }: { record: MossImageRecord }) => (
         `${record.adapter.vendor} · ${record.adapter.architecture} · ${record.adapter.device}`,
       ],
       ["Driver", record.adapter.description],
+      [
+        "Source",
+        record.source.kind === "cached"
+          ? `cached (${record.source.repo} @ ${record.source.revision?.slice(0, 12) ?? "main"})`
+          : "direct",
+      ],
       ["Model", `${record.model.name}${record.model.isDefault ? " (default)" : ""}`],
       ["Preset", `${record.preset.quant}${record.preset.isDefault ? " (default)" : ""}`],
       [

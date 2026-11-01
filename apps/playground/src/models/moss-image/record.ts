@@ -7,8 +7,9 @@
  * and of `generate` as a whole.
  */
 
+import type { PipelineSource } from "@/lib/distributions";
 import type { RecordEnvironment } from "@/lib/environment";
-import { seconds } from "@/lib/record";
+import { seconds, type SourceRecord, sourceRecord } from "@/lib/record";
 
 import { type EffectiveRequest, MOSS_MOUNT, type MossRequestParts } from "./settings";
 
@@ -24,8 +25,8 @@ export type MossImageRecord = RecordEnvironment & {
     readonly directory: string;
     readonly manifestSha256: string;
   };
-  /** Always plain fetch from `/models/`: the distribution is not published, so it has no `/hf/` route. */
-  readonly source: { readonly kind: "direct" };
+  /** `cached` = the HF-compatible route through the hub's CacheStorage; `direct` = plain fetch. */
+  readonly source: SourceRecord;
   readonly model: { readonly name: string; readonly isDefault: boolean };
   readonly preset: { readonly quant: string; readonly label: string; readonly isDefault: boolean };
   /** The fields sent to `generate` (a field left out takes the manifest's default). */
@@ -56,6 +57,8 @@ export type RunObservation = {
   readonly environment: RecordEnvironment;
   readonly directory: string;
   readonly manifestSha256: string;
+  /** The source the run's pipeline was opened from. */
+  readonly source: PipelineSource;
   readonly model: string;
   readonly defaultModel: string;
   readonly quant: string;
@@ -77,7 +80,7 @@ export const assembleRecord = (run: RunObservation): MossImageRecord => ({
     directory: run.directory,
     manifestSha256: run.manifestSha256,
   },
-  source: { kind: "direct" },
+  source: sourceRecord(run.source),
   model: { name: run.model, isDefault: run.model === run.defaultModel },
   preset: { quant: run.quant, label: run.quantLabel, isDefault: run.quant === run.defaultQuant },
   request: run.request,

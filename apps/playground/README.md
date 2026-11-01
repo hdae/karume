@@ -10,7 +10,7 @@ A left sidebar switches between the pages, grouped by kind:
 | --- | --- | --- | --- |
 | Video | Wan2.2 TI2V 5B — the presets and the 32-latent VAE tile (`vaeTile: 32`, ADR 0134) on a real GPU | `/wan22` | done |
 | Image | Anima — the official models and the third-party fine-tunes | `/anima` | done |
-| Image | MOSS-Image — text → image from the local, unpublished distribution | `/moss-image` | built; not yet checked in a browser |
+| Image | MOSS-Image — text → image | `/moss-image` | built; not yet checked in a browser |
 | Vision | BiRefNet (HR / Lucida) | `/birefnet` | done |
 | Vision | Depth Anything V2 | `/depth-anything` | done |
 | Vision | SigLIP 2 | `/siglip2` | done |
@@ -80,7 +80,7 @@ root. The HF-compatible repo is the public name from the family's `SOURCES` tabl
 | `sbv2` | `models/karume-sbv2-jvnv` | `hdae/karume-sbv2-jvnv` | Style-Bert-VITS2 |
 | `gemma4` | `models/karume-gemma4` | `hdae/karume-gemma4` | Gemma 4 chat |
 | `gemma4-qat` | `models/karume-gemma4-qat` | — (no public repo: direct only) | Gemma 4 chat |
-| `moss-image` | `models/karume-moss-image` | — (no public repo: direct only) | MOSS-Image |
+| `moss-image` | `models/karume-moss-image` | `hdae/karume-moss-image` | MOSS-Image |
 
 A missing directory does not stop the server: it logs a warning, `/models/<name>/` answers 404, and
 the pages show a disabled state naming the directory.
@@ -348,32 +348,34 @@ covers) and a summary of the record.
 
 ## The MOSS-Image page
 
-Text → image with `moss.Pipeline` (`@karume/models/moss`) over the local distribution
+Text → image with `moss.Pipeline` (`@karume/models/moss`) over the distribution
 `karume-moss-image` (mount `moss-image`): MOSS-Image SFT with the Qwen3.5 text encoder, the int8
-DiT and the f32 VAE decoder (ADR 0138 and its addendum of 2026-11-01). The distribution is a local
-mirror, not published on Hugging Face (`tools/export-recipes/moss/distribution.py` assembles it),
-so it has no `SOURCES` table and no HF-compatible route: the page reads it over plain fetch from
-`/models/` (the direct route), and nothing is cached.
+DiT and the f32 VAE decoder (ADR 0138 and its addenda of 2026-11-01). The mount is the local mirror
+of `hdae/karume-moss-image` (`moss.SOURCES["moss-image"]`; `tools/export-recipes/moss/distribution.py`
+assembles it), served on both routes: **Cached** (the HF-compatible route through the hub's
+CacheStorage) and **Direct** (plain fetch from `/models/`).
 
 **Memory and time.** `generate` opens and closes its stages one after another, every generation:
 the text encoder (about 7.4 GiB of int8 weights) is uploaded, encodes the prompts and is released
 before the text refiner, the DiT pair (about 4.5 GiB, `dit_skip22` borrowing `dit`'s weights) and
-the VAE open. Each generation therefore reads and uploads about 12.3 GiB of weights. At 1024² × 50
-steps (the defaults) a generation takes minutes on a desktop GPU; a smaller size or fewer steps is a
-quicker check. The page says this in its help text.
+the VAE open. Each generation therefore reads and uploads about 12.3 GiB of weights (on Cached, from
+the browser's cache after the first run). At 1024² × 50 steps (the defaults) a generation takes
+minutes on a desktop GPU; a smaller size or fewer steps is a quicker check. The page says this in
+its help text.
 
 **When the GPU and the pipeline are set up.** The page acquires its GPU with `subgroups:
 "available"` (the online attention kernel's subgroup form, never required). The pipeline is
-**opened on Run** and stays open for the next run while the GPU and the preset stay the same.
-Opening reads the manifest, the container descriptors and the tokenizer and builds no Session, so
-an open pipeline holds no GPU memory between runs. It is disposed when the preset or the GPU
-changes, on **Release pipeline**, and when the page is left. One generation runs at a time. The
-distribution has one model (`sft`); the page runs the manifest's `defaultModel` and offers no model
-choice.
+**opened on Run** and stays open for the next run while the GPU, the source and the preset stay
+the same. Opening reads the manifest, the container descriptors and the tokenizer and builds no
+Session, so an open pipeline holds no GPU memory between runs. It is disposed when the preset, the
+source or the GPU changes, on **Release pipeline**, and when the page is left. One generation runs
+at a time. The distribution has one model (`sft`); the page runs the manifest's `defaultModel`
+and offers no model choice.
 
 | Control | What it does |
 | --- | --- |
 | Preset | The model's `quants` with the manifest's labels, `defaultQuant` (`f32+dit8-a8-attn8-online`) preselected and marked, the description as the hint. |
+| Source | **Cached** (default): the HF-compatible route (`/hf/`) through the hub's CacheStorage. **Direct**: `localDirectory` over plain `fetch` from `/models/`. Changing it releases the open pipeline. |
 | Prompt | Free text (a descriptive sentence works best; up to 4,096 tokens — a longer prompt is refused, the request's default `overflow`), with four sample prompts. |
 | Negative prompt | Empty = the manifest's default (upstream's: the empty prompt). Disabled and not sent when the guidance in use is 1: no negative branch runs there and the pipeline refuses a negative prompt. |
 | Width / Height | Each a positive multiple of 16; empty = the manifest's default (1024 × 1024), with quick choices (1024², 1152×896, 896×1152, 768², 512²). The pipeline also refuses an area over this device's cap of the untiled VAE. |
@@ -384,8 +386,8 @@ choice.
 | Run | Run one generation (opening the pipeline first when needed). |
 | Release pipeline | In the status card: disposes the open pipeline. A failed dispose is shown in full under the button. |
 
-The status card shows the GPU, cross-origin isolation, the open pipeline (model · preset, seconds to
-open) and the run. **`generate` reports no stage events** (no progress hook, and it takes no
+The status card shows the GPU, cross-origin isolation, the open pipeline (model · preset · source,
+seconds to open) and the run. **`generate` reports no stage events** (no progress hook, and it takes no
 signal): while it runs the status shows "Generating" and the elapsed time only, and Cancel is
 disabled with a note. Cancel works while the pipeline opens. A run whose GPU lease ends while it
 generates (the page is left, the GPU is acquired again) drops its image when `generate` returns.
@@ -399,7 +401,7 @@ same RGBA bytes the sha256 covers) and a summary of the record.
 | --- | --- |
 | `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device` | `recordEnvironment(gpu)` |
 | `distribution` | `mount` (`moss-image`), `directory`, `manifestSha256` (sha256 of the mount's `karume.json`) |
-| `source` | always `{ "kind": "direct" }` (no HF-compatible route) |
+| `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
 | `model` | `name`, `isDefault` (the manifest's `defaultModel`) |
 | `preset` | `quant`, `label`, `isDefault` |
 | `request` | exactly the fields sent to `generate` (`prompt`, `seed`, plus the fields the form set: `negativePrompt`, `width`, `height`, `steps`, `guidance`, `shift`) |
