@@ -38,7 +38,13 @@ from gemma4.distribution import (
 )
 from gemma4.rope import FULL_ATTENTION, SLIDING_ATTENTION
 from gemma4.tests.product_fixture import tokenizer_asset
-from gemma4_qat.config import MAX_CHUNK_LENGTH, MAX_SELECTED_ROWS, REFERENCE_SCHEMA
+from gemma4_qat.config import (
+    MAX_CHUNK_LENGTH,
+    MAX_SELECTED_ROWS,
+    REFERENCE_SCHEMA,
+    SOURCES,
+    checkpoint_name,
+)
 from gemma4_qat.ple import build_ple
 from karume.container import AssetInput, Provenance
 from karume.emit import FixedQuantizedWeight, stored_model
@@ -298,6 +304,17 @@ def qat_container(
         return [path.read_bytes() for path in result.parts]
 
 
+def pinned_checkpoint(model: str) -> dict[str, Any]:
+    """The checkpoint fingerprint `export.py` records for an export from the pinned commit
+    (`gemma4_qat.config.SOURCES`; the byte counts are not compared, so they are fake)."""
+    return {
+        "dir": checkpoint_name(model),
+        "files": {
+            name: {"bytes": 1, "sha256": sha256} for name, sha256 in SOURCES[model].sha256.items()
+        },
+    }
+
+
 def reference_record(
     model: str,
     *,
@@ -311,7 +328,7 @@ def reference_record(
         "schema": REFERENCE_SCHEMA,
         "family": "gemma4-qat",
         "model": model,
-        "checkpoint": {"files": 1},
+        "checkpoint": pinned_checkpoint(model),
         "maxChunkLength": MAX_CHUNK_LENGTH,
         "maxSelectedRows": MAX_SELECTED_ROWS,
         "fixedWeights": fixed_weights,

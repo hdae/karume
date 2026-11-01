@@ -12,12 +12,14 @@ mobile QAT チェックポイントを名指ししていること、そして「
 from __future__ import annotations
 
 import copy
+import dataclasses
 from typing import Any
 
 import pytest
 
-from gemma4_qat.config import checkpoint_name
-from gemma4_qat.distribution import render_card
+from gemma4_qat import distribution
+from gemma4_qat.config import CHECKPOINTS, SOURCES, checkpoint_name, checkpoint_repo
+from gemma4_qat.distribution import NOTICE, QAT_LICENSE_LINK, QAT_NOT_ENDORSED, render_card
 
 #: 使い方スニペットに綴られるリポ ID（pipeline の宣言から dist が渡す）。
 REPO = "hdae/fake-repo"
@@ -120,3 +122,88 @@ class TestQatCardBody:
 
         assert FAKE_QUANT_LABEL in card
         assert FAKE_QUANT_DESCRIPTION in card
+
+
+def _two_model_manifest() -> dict[str, Any]:
+    """Both models in one manifest (the published form), `e2b` the default."""
+    manifest = _qat_manifest("e2b")
+    manifest["models"]["e4b"] = copy.deepcopy(_qat_manifest("e4b")["models"]["e4b"])
+    return manifest
+
+
+def _attribution(card: str) -> str:
+    return card.split("## Base weights and attribution")[1].split("\n## ")[0]
+
+
+class TestQatCardAttribution:
+    def test_it_names_each_models_upstream_at_its_pinned_commit(self) -> None:
+        """Release runbook §1: the attribution matches the upstream per revision."""
+        attribution = _attribution(render_card(_two_model_manifest(), REPO))
+
+        for model in ("e2b", "e4b"):
+            bullet = attribution.split(f"- **`{model}`**")[1].split("\n- ")[0]
+            assert (
+                f"[{checkpoint_repo(model)}](https://huggingface.co/{checkpoint_repo(model)})"
+                in (bullet)
+            )
+            assert f"at commit `{SOURCES[model].revision}`" in bullet
+            assert "licensed **Apache 2.0**" in bullet
+            assert "a verbatim copy is in `LICENSE.md`" in bullet
+
+    def test_it_attributes_only_the_models_it_carries(self) -> None:
+        """A model not in the manifest is not redistributed, so it is not named as a source."""
+        card = render_card(_qat_manifest("e4b"), REPO)
+
+        assert checkpoint_repo("e2b") not in card
+        assert SOURCES["e2b"].revision not in card
+
+    def test_the_front_matter_points_to_the_licence_the_upstream_names(self) -> None:
+        front_matter = render_card(_two_model_manifest(), REPO).split("---")[1]
+
+        assert "license: apache-2.0" in front_matter
+        assert f"license_link: {QAT_LICENSE_LINK}" in front_matter
+        assert "base_model_relation" not in front_matter
+        assert f"  - {checkpoint_repo('e2b')}\n  - {checkpoint_repo('e4b')}" in front_matter
+
+    def test_it_states_the_changes_and_that_it_is_not_endorsed(self) -> None:
+        attribution = _attribution(render_card(_qat_manifest(), REPO))
+
+        assert "Apache 2.0 §4(b)" in attribution
+        assert "No retraining and no fine-tuning." in attribution
+        assert QAT_NOT_ENDORSED in attribution
+
+    def test_it_keeps_the_limitations_of_the_conversion(self) -> None:
+        card = render_card(_qat_manifest(), REPO)
+
+        assert "Experimental text-only conversion" in card
+        assert "static range quantization (SRQ)" in card
+        assert "MTP is not supported." in card
+
+    def test_it_refuses_a_pin_whose_licence_it_does_not_attribute(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The attribution sentence says Apache 2.0; a pin under another licence must not render."""
+        moved = {**SOURCES, "e2b": dataclasses.replace(SOURCES["e2b"], license="other")}
+        monkeypatch.setattr(distribution, "SOURCES", moved)
+
+        with pytest.raises(ValueError, match="other"):
+            render_card(_qat_manifest(), REPO)
+
+
+class TestQatNotice:
+    def test_it_names_every_upstream_checkpoint_and_the_licence(self) -> None:
+        for model in CHECKPOINTS:
+            assert f"`{checkpoint_repo(model)}`" in NOTICE
+        assert "Apache License, Version 2.0" in NOTICE
+        assert "`LICENSE.md`" in NOTICE
+
+    def test_it_lists_the_changes_without_calling_them_a_requantization(self) -> None:
+        assert "were not requantized" in NOTICE
+        assert "re-quantized" not in NOTICE
+        assert "No retraining and no fine-tuning were performed." in NOTICE
+
+    def test_it_states_that_the_distribution_is_not_endorsed(self) -> None:
+        assert QAT_NOT_ENDORSED in " ".join(NOTICE.split())
+
+    def test_it_is_the_notice_the_pipeline_ships(self) -> None:
+        assert distribution.PIPELINE.root_files["NOTICE.md"] == NOTICE

@@ -20,6 +20,7 @@ from gemma4_qat.config import (
     DEFAULT_CHUNK_LENGTH,
     MAX_CHUNK_LENGTH,
     REFERENCE_SCHEMA,
+    SOURCES,
 )
 from gemma4_qat.distribution import qat_plan
 from gemma4_qat.tests import series_fixture as fixture
@@ -109,6 +110,32 @@ class TestQatPlanGate:
         """記録は「何本を照合したか」— 現物と違えば、書いた run と配る系列が別物である。"""
         broken = fixture.reference_record("e2b", **{field: value})
         with pytest.raises(DistError, match="現物と違う"):
+            qat_plan(_series(tmp_path, reference=broken), "e2b")
+
+    @pytest.mark.parametrize("file", ["model.safetensors", "config.json", "tokenizer.json"])
+    def test_it_refuses_a_series_exported_from_another_upstream_commit(
+        self, tmp_path: Path, file: str
+    ) -> None:
+        """The card names the pinned commit; a series from other bytes must not be published
+        under that name."""
+        broken = fixture.reference_record("e2b")
+        broken["checkpoint"]["files"][file]["sha256"] = "0" * 64
+
+        with pytest.raises(DistError, match=f"not exported from .* at {SOURCES['e2b'].revision}"):
+            qat_plan(_series(tmp_path, reference=broken), "e2b")
+
+    def test_it_refuses_a_record_without_the_checkpoint_fingerprint(self, tmp_path: Path) -> None:
+        broken = fixture.reference_record("e2b")
+        del broken["checkpoint"]
+
+        with pytest.raises(DistError, match=r"model\.safetensors"):
+            qat_plan(_series(tmp_path, reference=broken), "e2b")
+
+    def test_it_refuses_the_other_models_checkpoint(self, tmp_path: Path) -> None:
+        """E4B's fingerprint in an E2B series: the pins are per model, not one shared set."""
+        broken = fixture.reference_record("e2b", checkpoint=fixture.pinned_checkpoint("e4b"))
+
+        with pytest.raises(DistError, match=r"config\.json, model\.safetensors"):
             qat_plan(_series(tmp_path, reference=broken), "e2b")
 
     def test_it_refuses_a_ple_built_for_another_vocabulary(self, tmp_path: Path) -> None:

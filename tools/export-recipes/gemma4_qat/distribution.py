@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import textwrap
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -52,7 +53,9 @@ from .config import (
     MAX_SELECTED_ROWS,
     PLE_BITS,
     REFERENCE_SCHEMA,
+    SOURCES,
     checkpoint_name,
+    checkpoint_repo,
     series_name,
 )
 
@@ -208,6 +211,31 @@ def assert_reference_generation(reference: Mapping[str, Any], where: Path) -> No
     raise DistError(f"{where}: QAT reference の schema が {schema}（期待 {REFERENCE_SCHEMA}）")
 
 
+def assert_pinned_source(reference: Mapping[str, Any], model: str, where: Path) -> None:
+    """The series was exported from the pinned upstream commit ({@link SOURCES}).
+
+    MUST: compare the checkpoint fingerprint `export.py` recorded with the pin. The card names the
+    pinned commit as the source; without this check, a re-export from a newer upstream commit
+    would be published under the old commit's name and licence review.
+    """
+    pin = SOURCES[model]
+    checkpoint = reference.get("checkpoint")
+    files = checkpoint.get("files") if isinstance(checkpoint, Mapping) else None
+    recorded = files if isinstance(files, Mapping) else {}
+    differing = sorted(
+        name
+        for name, sha256 in pin.sha256.items()
+        if not isinstance(recorded.get(name), Mapping) or recorded[name].get("sha256") != sha256
+    )
+    if differing:
+        raise DistError(
+            f"{where}: the series was not exported from {checkpoint_repo(model)} at"
+            f" {pin.revision} (checkpoint SHA-256 differs for {', '.join(differing)}) — re-export"
+            " from the pinned revision, or move the pin in `gemma4_qat/config.py` after a new"
+            " licence review"
+        )
+
+
 def qat_plan(series_dir: Path, model: str) -> ModelPlan:
     """検査した1系列から配布計画を作る。元チェックポイントの再ダウンロードは不要。"""
     source = series_dir / series_name(model)
@@ -220,6 +248,7 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
         or reference.get("maxSelectedRows") != MAX_SELECTED_ROWS
     ):
         raise DistError("QAT reference の family/model/trace範囲が合わない")
+    assert_pinned_source(reference, model, source / "reference.json")
     container = source / "model.krm"
     index = gemma4_ple_index(container, storage=f"i{PLE_BITS[model]}")
     for dtype in FIXED_STORAGE_DTYPES:
@@ -290,16 +319,82 @@ def repo_name(model: str) -> str:
     return "karume-gemma4-qat"
 
 
+#: The SPDX identifier of every pinned upstream ({@link SOURCES}) and how the card spells it. A pin
+#: with another licence fails the render: the card's attribution sentence would no longer be true.
+QAT_LICENSE = "apache-2.0"
+QAT_LICENSE_NAME = "Apache 2.0"
+#: The `license_link` of both upstream cards at the pinned commits (an Apache 2.0 page on
+#: ai.google.dev, checked 2026-11-01), and the canonical text that `LICENSE.md` copies verbatim.
+QAT_LICENSE_LINK = "https://ai.google.dev/gemma/docs/gemma_4_license"
+QAT_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
+#: The technical report the upstream cards link at the pinned commits.
+QAT_TECHNICAL_REPORT = "https://arxiv.org/abs/2607.02770"
+
+#: The non-endorsement sentence of the card and of `NOTICE.md` (Apache 2.0 §6 grants no use of the
+#: licensor's names beyond describing the origin of the work).
+QAT_NOT_ENDORSED = (
+    "This is not an official release of Google, and it is not endorsed by Google; the Gemma name"
+    " is used only to describe where the weights come from."
+)
+
+
+def _qat_attribution(manifest: Mapping[str, Any]) -> list[str]:
+    """The attribution section: each model's upstream at its pinned commit, the changes made, and
+    a pointer to the upstream cards for what the model can and cannot do."""
+    lines = [
+        "## Base weights and attribution",
+        "",
+        "Converted from the upstream checkpoints — the original checkpoints are not distributed"
+        " here.",
+        "",
+    ]
+    for name in manifest["models"]:
+        upstream, pin = checkpoint_repo(name), SOURCES[name]
+        lines.append(
+            f"- **`{name}`**: [{upstream}](https://huggingface.co/{upstream}) at commit"
+            f" `{pin.revision}`, licensed **{QAT_LICENSE_NAME}** at that commit"
+            f" ([license]({QAT_LICENSE_LINK}) / [full text]({QAT_LICENSE_TEXT_LINK});"
+            " a verbatim copy is in `LICENSE.md`)."
+        )
+    lines += [
+        "- **Authors**: Gemma 4 and its mobile QAT checkpoints are released by Google DeepMind"
+        f" ([technical report]({QAT_TECHNICAL_REPORT})).",
+        "- **Changes made here** (listed in full in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
+        "  decoder was extracted and re-expressed in the Karume container format; the fixed",
+        "  quantized integers, their scales and the static activation ranges were kept without",
+        "  requantization; the per-layer embeddings were moved out of the graph into container",
+        "  assets that the host gathers; the exit was narrowed to the selected rows' logits and",
+        "  hidden states; rotary cos/sin arrive as host-generated inputs. Vision, audio and MTP",
+        "  are not included. No retraining and no fine-tuning.",
+        "- **What the model can and cannot do** — capabilities, limitations, intended use,",
+        "  evaluations and safety guidance — is documented on the upstream model cards linked",
+        "  above, and this repository does not restate it: read them before using it.",
+        f"- {QAT_NOT_ENDORSED}",
+    ]
+    return lines
+
+
 def render_card(
     manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
 ) -> str:
     """数値・モデル一覧・量子化表を manifest から描く。固定値保持を再量子化と呼ばない。"""
     require_pipeline(manifest, "gemma4-qat/1")
-    upstream = tuple(f"google/{checkpoint_name(model)}" for model in manifest["models"])
+    upstream = tuple(checkpoint_repo(model) for model in manifest["models"])
+    for model in manifest["models"]:
+        if SOURCES[model].license != QAT_LICENSE:
+            raise ValueError(
+                f"the pin of '{model}' declares {SOURCES[model].license}, but the card attributes"
+                f" {QAT_LICENSE}"
+            )
     metadata = CardMetadata(
         pipeline_tag="text-generation",
         base_model=upstream,
-        license="apache-2.0",
+        # NOTE: no `base_model_relation` — the integers and scales are the checkpoint's own, so
+        # none of the Hub's four relations is a fact (`karume.modelcard.CardMetadata`).
+        license=QAT_LICENSE,
+        # The same spelling as the upstream cards (and the regular Gemma 4 card), so a reader
+        # reaches the one licence page the upstream names.
+        license_link=QAT_LICENSE_LINK,
         tags=("webgpu", "gemma", "text-generation"),
     )
     sections = [
@@ -312,12 +407,10 @@ def render_card(
             "static range quantization (SRQ).",
             "CPU and GPU reductions can cross rounding boundaries and select different tokens.",
             "Broad quality and long-context validation remain incomplete. MTP is not supported.",
-            "See the upstream model cards for capabilities and usage guidance:",
             "",
-            *[f"- [{repo}](https://huggingface.co/{repo})" for repo in upstream],
-            "",
-            "Licensed under Apache 2.0; see LICENSE.md and NOTICE.md.",
         ],
+        _qat_attribution(manifest),
+        [""],
         models(manifest),
     ]
     for name, model in manifest["models"].items():
@@ -325,22 +418,48 @@ def render_card(
     return render(sections)
 
 
+#: The notice (Apache 2.0 §4(b)): the upstream checkpoints and **the changes this repository made**.
+#: Upstream has no NOTICE file and no copyright line (no LICENSE file either — the cards' front
+#: matter and `license_link` carry the licence), so nothing is to be retained under §4(c)/(d).
+#:
+#: MUST: the text matches the distribution's content — it is valid prose as a value, so neither
+#: `verify_dist` nor the manifest check would notice a mismatch before it is published.
 NOTICE = (
     """# NOTICE
 
-This distribution contains modified text decoders from the official Google Gemma 4 mobile QAT
-checkpoints listed below, under the Apache License, Version 2.0 (see LICENSE.md).
-The actual included models are identified in README.md and karume.json.
+This repository redistributes modified forms of the Google Gemma 4 mobile QAT checkpoints listed
+below (Google DeepMind), which are licensed under the Apache License, Version 2.0 (see
+`LICENSE.md`). The models actually included are identified in `README.md` and `karume.json`;
+`README.md` names the upstream commit each one was converted from.
 
 """
-    + "\n".join(f"- google/{name}" for name in CHECKPOINTS.values())
+    + "\n".join(f"- `{checkpoint_repo(model)}`" for model in CHECKPOINTS)
+    + "\n\n"
+    + textwrap.fill(QAT_NOT_ENDORSED, width=100)
     + """
 
-The text decoder was extracted, its graph was converted to Karume states form, per-layer embeddings
-were moved to container assets the host reads, and rotary inputs are generated on the host.
-Fixed quantized integers and scales were retained without requantization.
-Vision, audio, and MTP are not included.
-No upstream implementation source code is redistributed by this recipe.
+The following changes were made:
+
+- The **text decoder only** was converted; the vision and audio towers are not included, the
+  checkpoint's key/value-cache scales are not used, and no multi-token-prediction (MTP) drafter is
+  included.
+- The graph was re-expressed in the Karume container format (a `.krm` part sequence whose first
+  part carries the graph and model descriptors) in a states form suited to chunked prefill and
+  decode.
+- **The fixed quantized integers and their scales were kept as they are**: the int2 / int4 / int8
+  weights of the quantized linear layers, of the token embedding (shared with the output head)
+  and of the per-layer embeddings were not requantized, and the static activation ranges (SRQ)
+  around the quantized linear layers keep the checkpoint's scales. The row scales of int4 weights
+  are repeated once per group of the storage layout (the same values). The output head's activation
+  rounding, whose scales are 0 in the checkpoint (uncalibrated, the identity), is left out.
+- The parameters the checkpoint does not quantize (the per-layer model projection and the norms,
+  among others) are stored in float32, widened exactly from the checkpoint's values.
+- The **per-layer embedding tables were moved out of the graph** into container assets that the
+  host gathers, and the exit was narrowed to the selected rows' logits and final hidden states.
+- **Rotary position embeddings were moved out of the graph**: the cosine and sine rows are built
+  by the host from the declared parameters and passed in as ordinary graph inputs.
+
+No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
 """
 )
 

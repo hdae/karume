@@ -7,7 +7,9 @@ It does not requantize the checkpoint. The text decoder, tokenizer, and packed p
 (PLE) are exported; vision, audio, and the MTP drafter are not included.
 
 The upstream weights are Apache 2.0. Distribution assembly includes the license text and a
-modification notice. This recipe imports the installed Transformers implementation and does not
+modification notice. The upstream revisions are pinned in `config.py` (`SOURCES`), and assembly
+refuses a series whose `reference.json` fingerprint differs from the pin; the licence review is
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This recipe imports the installed Transformers implementation and does not
 copy its source. Use the repository's pinned Transformers dependency (`5.14.1`), declared as the
 `gemma4-qat` dependency group; without that group the export cannot run and the tests that build
 upstream modules are skipped.
