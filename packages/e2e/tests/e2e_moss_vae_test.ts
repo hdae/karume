@@ -62,7 +62,7 @@ import {
   type Session,
   type SessionDiagnostics,
 } from "@karume/runtime";
-import { HEADROOM_MARGIN_BYTES } from "../../models/src/anima/residency.ts";
+import { HEADROOM_MARGIN_BYTES } from "../../models/src/session/headroom-margin.ts";
 import type { ModelComponent } from "../../models/src/hub/components.ts";
 import { ModelInputError } from "../../models/src/errors.ts";
 import { mossVaeAreaLimit } from "../../models/src/moss/vae-contract.ts";

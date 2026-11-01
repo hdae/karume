@@ -25,7 +25,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors, type SafetensorsFile } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
-import { HEADROOM_MARGIN_BYTES } from "../src/anima/residency.ts";
+import { HEADROOM_MARGIN_BYTES } from "../src/session/headroom-margin.ts";
 import {
   MOSS_DIT_INPUTS,
   mossDitContract,

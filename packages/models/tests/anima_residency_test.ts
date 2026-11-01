@@ -29,12 +29,12 @@ import {
   decideAfterTransformer,
   evictsForMemory,
   generateMemoryNeed,
-  HEADROOM_MARGIN_BYTES,
   type ResidencyNotice,
   stageMemoryNeed,
   TransformerResidency,
   transformerSource,
 } from "../src/anima/residency.ts";
+import { HEADROOM_MARGIN_BYTES } from "../src/session/headroom-margin.ts";
 import { disposeResidencyThenGpu } from "../src/anima/pipeline.ts";
 import { ModelInputError } from "../src/errors.ts";
 

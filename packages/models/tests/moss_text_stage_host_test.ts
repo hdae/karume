@@ -23,7 +23,7 @@ import { readTextFile } from "@karume/test-support/fs";
 import { describe, expect, it } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import type { RunOutputs, Tensor } from "@karume/runtime";
-import { HEADROOM_MARGIN_BYTES } from "../src/anima/residency.ts";
+import { HEADROOM_MARGIN_BYTES } from "../src/session/headroom-margin.ts";
 import { ModelInputError } from "../src/errors.ts";
 import type { GraphOwner, ModelComponent } from "../src/hub/components.ts";
 import type { MossDitContract } from "../src/moss/dit-contract.ts";

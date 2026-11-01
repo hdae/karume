@@ -19,7 +19,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
-import { HEADROOM_MARGIN_BYTES } from "../src/anima/residency.ts";
+import { HEADROOM_MARGIN_BYTES } from "../src/session/headroom-margin.ts";
 import { assertMossImageArea } from "../src/moss/request.ts";
 import {
   MOSS_LATENT_BATCH_NORM,

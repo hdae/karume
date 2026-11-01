@@ -29,8 +29,8 @@
  * needs, and a refusal fails loudly with the stage, the bytes and the size. The bytes are the
  * runtime estimate's `peakAccountedBytes` (weights + the bound of the kept plan backings, with the
  * device limits and the stage's symbol bindings) + the largest weight part (the upload staging) +
- * the margin of `../anima/residency.ts` ({@link HEADROOM_MARGIN_BYTES} — the allocator's block size
- * and wgpu's budget line):
+ * the margin of `../session/headroom-margin.ts` ({@link HEADROOM_MARGIN_BYTES} — the allocator's
+ * block size and wgpu's budget line):
  *
  * - `dit_text`: one estimate at T = max(T₊, T₋) (the two branches run in turn on one Session).
  * - the DiT pair: the **sum** of the `dit` (S₊) and `dit_skip22` (S₋) estimates — both Sessions are
@@ -80,7 +80,7 @@ import {
   type Tensor,
 } from "@karume/runtime";
 
-import { HEADROOM_MARGIN_BYTES } from "../anima/residency.ts";
+import { HEADROOM_MARGIN_BYTES } from "../session/headroom-margin.ts";
 import type { ModelComponent } from "../hub/components.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
 import { settleReleasedMemory } from "../session/settle-released-memory.ts";

@@ -28,8 +28,8 @@
  * the three Sessions are open together) + the three hand-over residents (the estimates count a
  * graph's input and output buffers as its backing's, but a resident is a separate allocation, so
  * they are added — an upper bound, as for the DiT's text contexts) + the largest weight part (the
- * upload staging) + the margin of `../anima/residency.ts`. A refusal fails loudly naming the stage,
- * the bytes and the size. The design's hand count — 1,920 B per pixel at the full-resolution
+ * upload staging) + the margin of `../session/headroom-margin.ts`. A refusal fails loudly naming the
+ * stage, the bytes and the size. The design's hand count — 1,920 B per pixel at the full-resolution
  * resnet 192 → 96 (`docs/research/2026-10-28-moss-image-dit-vae.md` §3.4) — is a cross-check only
  * (the tests compare it with the estimate and the measurement). The check is a fact of the
  * moment, not a reservation.
@@ -66,7 +66,7 @@ import {
   type SessionDiagnostics,
 } from "@karume/runtime";
 
-import { HEADROOM_MARGIN_BYTES } from "../anima/residency.ts";
+import { HEADROOM_MARGIN_BYTES } from "../session/headroom-margin.ts";
 import type { ModelComponent } from "../hub/components.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
 import { settleReleasedMemory } from "../session/settle-released-memory.ts";

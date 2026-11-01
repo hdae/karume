@@ -71,7 +71,7 @@ import { encodePng } from "../../models/mod.ts";
 import { parseAnimaPipelineConfig } from "../../models/src/anima/config.ts";
 import { sigmaSchedule } from "../../models/src/anima/sampler.ts";
 import { ANIMA_SPATIAL_COMPRESSION } from "../../models/src/anima/dit-tokens.ts";
-import { HEADROOM_MARGIN_BYTES } from "../../models/src/anima/residency.ts";
+import { HEADROOM_MARGIN_BYTES } from "../../models/src/session/headroom-margin.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { MemoryCacheStorage } from "../../models/tests/helpers/memory-cache.ts";
 import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";

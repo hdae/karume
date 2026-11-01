@@ -16,8 +16,8 @@
  *
  * 1. The stage's own headroom check (`fitsHeadroom` after waiting for released memory): the
  *    encoder's estimate at T = max(T₊, T₋) (the two prompts run in turn on one Session) + the
- *    largest weight part (the upload staging) + the margin of `../anima/residency.ts` — the form of
- *    the other MOSS stages (`./dit-stage.ts` "Headroom").
+ *    largest weight part (the upload staging) + the margin of `../session/headroom-margin.ts` —
+ *    the form of the other MOSS stages (`./dit-stage.ts` "Headroom").
  * 2. `Qwen3_5TextEncoder.open` (about 7.4 GiB of i8 weights — it cannot stay beside the DiT pair or
  *    the VAE on a 12 GB device, so it is opened per generation), the positive then the negative
  *    encoding, and `dispose`.
@@ -50,7 +50,7 @@ import {
   type GpuContext,
 } from "@karume/runtime";
 
-import { HEADROOM_MARGIN_BYTES } from "../anima/residency.ts";
+import { HEADROOM_MARGIN_BYTES } from "../session/headroom-margin.ts";
 import { settleAbort } from "../concurrency/abort.ts";
 import type { GraphOwner, ModelComponent } from "../hub/components.ts";
 import { renderQwen3_5ChatPrompt } from "../qwen3_5/chat.ts";
