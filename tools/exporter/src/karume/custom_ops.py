@@ -108,6 +108,14 @@ GATED_DELTA_RULE_UPSTREAM = "transformers 5.14.1, models/qwen3_5/modeling_qwen3_
 # are upstream's (tests/test_gated_delta_scan.py compares the output bit for bit with upstream's
 # function when transformers is installed). It is a copy, not an import, because the exporter core
 # depends only on torch, torchvision, numpy and safetensors (ADR 0065).
+#
+# Third-party code notice. `_l2norm` and `_torch_chunk_gated_delta_rule` are copied from `l2norm`
+# and `torch_chunk_gated_delta_rule` in huggingface/transformers
+# (`src/transformers/models/qwen3_5/modeling_qwen3_5.py`, transformers 5.14.1), licensed under the
+# Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0); the changes are the
+# ones listed above. Upstream copyright notice, copied verbatim from the header of that file:
+#
+#   Copyright 2025 The Qwen Team and The HuggingFace Inc. team. All rights reserved.
 def _l2norm(x: torch.FloatTensor, dim: int = -1, eps: float = 1e-6):
     """This function is intended to align with the l2norm implementation in the FLA library."""
     inv_norm = torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
