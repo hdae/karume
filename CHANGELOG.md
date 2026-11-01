@@ -25,10 +25,16 @@ measurements in `docs/research/`.
   shift 5, the empty negative prompt), `imageToRgba`. The default preset is
   `f32+dit8-a8-attn8-online` (int8 transformer, int8 activations, online attention); `f32+dit8` is
   its reference. The distribution includes the Qwen3.5-9B text encoder (its text tower, int8) as the
-  component `text_encoder` and its tokenizer, and the FLUX.2 VAE decoder (f32, untiled). **A local
-  distribution only**: it is built by the recipe (`dist.py --pipeline moss-image`) and is not
-  published on Hugging Face, so the subpath has no `SOURCES` table — pass a local directory as a
-  source handle (ADR 0138 addendum of 2026-11-01).
+  component `text_encoder` and its tokenizer, and the FLUX.2 VAE decoder (f32, untiled). The
+  distribution is published on Hugging Face as `hdae/karume-moss-image`: pass
+  `moss.SOURCES["moss-image"]` (also in `KARUME_SOURCES`), or a local directory built by the recipe
+  (`dist.py --pipeline moss-image`) as a source handle (ADR 0138 addenda of 2026-11-01).
+
+- `SOURCES` on `@karume/models/gemma4-qat` (barrel `gemma4Qat.SOURCES`, also in `KARUME_SOURCES`):
+  the fixed mobile QAT distribution is published on Hugging Face as `hdae/karume-gemma4-qat`
+  (models `e2b` and `e4b`, the manifest's default `e2b`; both default to the preset `i4-fast`). Pass
+  `gemma4Qat.SOURCES["gemma4-qat"]` to `gemma4Qat.Pipeline.fromPretrained`, whose error for an
+  omitted `ref` now names this entry (ADR 0097 addendum 9).
 
 - `SessionOptions.fuseGeluMulStaticQuantize` (`@karume/runtime`, default `false`) folds an adjacent
   f32 `gelu_tanh → mul → static_quantize` — Gemma 4 QAT's per-layer-input gate, `[1, M, 256]` with
@@ -59,7 +65,8 @@ measurements in `docs/research/`.
 
 - The gemma4-qat distribution recipe's default preset `i4-fast` (E2B and E4B) declares
   `fuseGeluMulStaticQuantize: true`, so a distribution it builds needs 0.15.1 to be read (0.15.0
-  rejects the key; `karume-gemma4-qat` is not published on Hugging Face). Generated tokens are
+  rejects the key; the distribution is published on Hugging Face as `hdae/karume-gemma4-qat` with
+  this release, built this way). Generated tokens are
   identical; on an RTX 3080 Ti under Node the GPU time per decode token drops by about 0.12 ms
   (E2B, 5.96 → 5.84) and 0.17 ms (E4B, 10.02 → 9.85).
 - `static_quantize` and the GEMV's fused static-quantize epilogue (`@karume/runtime`, the Gemma 4
