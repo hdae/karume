@@ -63,7 +63,7 @@ export const MOSS_PIPELINE_MAJOR = 1;
 export const SOURCES = {
   "moss-image": {
     repo: "hdae/karume-moss-image",
-    revision: "e99b6808df88a27524109d677eddf8f280d199a0",
+    revision: "02e5a5ed3057b186f1228148006fcc83a8be395d",
   },
 } as const satisfies Record<string, HubRepoRef>;
 
