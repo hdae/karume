@@ -19,7 +19,7 @@ import pytest
 
 from gemma4_qat import distribution
 from gemma4_qat.config import CHECKPOINTS, SOURCES, checkpoint_name, checkpoint_repo
-from gemma4_qat.distribution import NOTICE, QAT_LICENSE_LINK, QAT_NOT_ENDORSED, render_card
+from gemma4_qat.distribution import NOTICE, QAT_LICENSE_LINK, render_card
 
 #: 使い方スニペットに綴られるリポ ID（pipeline の宣言から dist が渡す）。
 REPO = "hdae/fake-repo"
@@ -165,12 +165,11 @@ class TestQatCardAttribution:
         assert "base_model_relation" not in front_matter
         assert f"  - {checkpoint_repo('e2b')}\n  - {checkpoint_repo('e4b')}" in front_matter
 
-    def test_it_states_the_changes_and_that_it_is_not_endorsed(self) -> None:
+    def test_it_states_the_changes(self) -> None:
         attribution = _attribution(render_card(_qat_manifest(), REPO))
 
         assert "Apache 2.0 §4(b)" in attribution
         assert "No retraining and no fine-tuning." in attribution
-        assert QAT_NOT_ENDORSED in attribution
 
     def test_it_keeps_the_limitations_of_the_conversion(self) -> None:
         card = render_card(_qat_manifest(), REPO)
@@ -201,9 +200,6 @@ class TestQatNotice:
         assert "were not requantized" in NOTICE
         assert "re-quantized" not in NOTICE
         assert "No retraining and no fine-tuning were performed." in NOTICE
-
-    def test_it_states_that_the_distribution_is_not_endorsed(self) -> None:
-        assert QAT_NOT_ENDORSED in " ".join(NOTICE.split())
 
     def test_it_is_the_notice_the_pipeline_ships(self) -> None:
         assert distribution.PIPELINE.root_files["NOTICE.md"] == NOTICE

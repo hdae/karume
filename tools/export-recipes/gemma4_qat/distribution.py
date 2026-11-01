@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import textwrap
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -330,13 +329,6 @@ QAT_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 #: The technical report the upstream cards link at the pinned commits.
 QAT_TECHNICAL_REPORT = "https://arxiv.org/abs/2607.02770"
 
-#: The non-endorsement sentence of the card and of `NOTICE.md` (Apache 2.0 §6 grants no use of the
-#: licensor's names beyond describing the origin of the work).
-QAT_NOT_ENDORSED = (
-    "This is not an official release of Google, and it is not endorsed by Google; the Gemma name"
-    " is used only to describe where the weights come from."
-)
-
 
 def _qat_attribution(manifest: Mapping[str, Any]) -> list[str]:
     """The attribution section: each model's upstream at its pinned commit, the changes made, and
@@ -369,7 +361,6 @@ def _qat_attribution(manifest: Mapping[str, Any]) -> list[str]:
         "- **What the model can and cannot do** — capabilities, limitations, intended use,",
         "  evaluations and safety guidance — is documented on the upstream model cards linked",
         "  above, and this repository does not restate it: read them before using it.",
-        f"- {QAT_NOT_ENDORSED}",
     ]
     return lines
 
@@ -434,8 +425,6 @@ below (Google DeepMind), which are licensed under the Apache License, Version 2.
 
 """
     + "\n".join(f"- `{checkpoint_repo(model)}`" for model in CHECKPOINTS)
-    + "\n\n"
-    + textwrap.fill(QAT_NOT_ENDORSED, width=100)
     + """
 
 The following changes were made:
