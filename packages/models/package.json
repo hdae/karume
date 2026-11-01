@@ -20,7 +20,8 @@
     "./vowel-detector": "./vowel-detector.ts",
     "./gemma4-qat": "./gemma4-qat.ts",
     "./umt5": "./umt5.ts",
-    "./wan": "./wan.ts"
+    "./wan": "./wan.ts",
+    "./moss": "./moss.ts"
   },
   "scripts": {
     "test": "vp test"

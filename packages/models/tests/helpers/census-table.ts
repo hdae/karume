@@ -66,6 +66,7 @@ import { BIREFNET_SESSION_POLICY } from "../../src/birefnet/pipeline.ts";
 import { DEPTH_ANYTHING_SESSION_POLICY } from "../../src/depth-anything/pipeline.ts";
 import { GEMMA_SESSION_POLICY } from "../../src/gemma/session-options.ts";
 import { IRODORI_SESSION_POLICY } from "../../src/irodori/admission.ts";
+import { MOSS_SESSION_POLICY } from "../../src/moss/preset.ts";
 import { SBV2_SESSION_POLICY } from "../../src/sbv2/pipeline.ts";
 import {
   type FamilySessionPolicy,
@@ -94,6 +95,7 @@ export const SESSION_POLICIES: Readonly<Record<string, FamilySessionPolicy>> = {
   gemma4: GEMMA_SESSION_POLICY,
   "gemma4-qat": GEMMA_SESSION_POLICY,
   irodori: IRODORI_SESSION_POLICY,
+  "moss-image": MOSS_SESSION_POLICY,
   sbv2: SBV2_SESSION_POLICY,
   siglip2: SIGLIP2_SESSION_POLICY,
   "umt5-encoder": UMT5_ENCODER_SESSION_POLICY,
@@ -221,6 +223,8 @@ type FamilyAxes = {
   readonly wan: { readonly transformer: "pass" };
   /** Wan2.2 TI2V も同じ（部品名・相は共有モジュールの DiT 段が名乗る — 2.1 と同じ綴り）。 */
   readonly "wan-ti2v": { readonly transformer: "pass" };
+  /** MOSS-Image: the DiT pair's two graphs; phase `pass` is one forward of a graph. */
+  readonly "moss-image": { readonly dit: "pass"; readonly dit_skip22: "pass" };
 };
 
 /** gemma の部品（製品グラフ = target・投機の drafter）と相（`GenerationRunPhase["kind"]`）。 */
@@ -359,6 +363,16 @@ const WAN_DIT_LINEARS = { variant: 307, reference: 0 } as const;
  * k ∈ {192, 256, 3072, 4096, 14336} — 全て k % 4 == 0）。
  */
 const WAN22_DIT_LINEARS = { variant: 310, reference: 0 } as const;
+
+/**
+ * MOSS-Image's DiT pair: every linear of the graph takes i8a8 under `linearCompute: "a8"` — `dit`
+ * has 258 (42 blocks × 6, `video_embedder`, the time MLP's two, the two modulations and
+ * `final_linear_video` — the recipe's census of the graph) and `dit_skip22` 252 (41 × 6 + 6). The
+ * exact i8a8 counts are what `packages/e2e/tests/e2e_moss_ab_test.ts` measures (`LINEAR_A8`,
+ * 2026-10-28 on the RTX 3080 Ti), so none stays on the reference route.
+ */
+const MOSS_DIT_LINEARS = { variant: 258, reference: 0 } as const;
+const MOSS_DIT_SKIP22_LINEARS = { variant: 252, reference: 0 } as const;
 
 /**
  * 束の census 表。
@@ -761,6 +775,20 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     },
     census: {
       transformer: { pass: { linearCompute: WAN22_DIT_LINEARS, convCompute: { variant: 0 } } },
+    },
+  },
+  // --- moss-image (the preset's session reaches the DiT pair only — ADR 0138 decision 13) ------
+  {
+    // The distribution's practical preset `f32+dit8-a8-attn8-online` (ADR 0138 addendum of
+    // 2026-11-01). attentionCompute / attentionScoreStorage stay underived as in Wan2.2's online row
+    // (top of the file); the e2e A/B checks the online route through `assertAttentionSeatsComplete`
+    // and its own exact online-dispatch count.
+    family: "moss-image",
+    models: ["sft"],
+    session: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "none" },
+    census: {
+      dit: { pass: { linearCompute: MOSS_DIT_LINEARS } },
+      dit_skip22: { pass: { linearCompute: MOSS_DIT_SKIP22_LINEARS } },
     },
   },
 ];

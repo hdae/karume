@@ -68,6 +68,7 @@ minified) until the package declares `"sideEffects": false`
 | `@karume/models/gemma`          | text generation and chat (Gemma 4)                       |
 | `@karume/models/gemma4-qat`     | the same API on fixed mobile QAT weights                 |
 | `@karume/models/anima`          | text to image                                            |
+| `@karume/models/moss`           | text to image (MOSS-Image; a local distribution only)    |
 | `@karume/models/sbv2`           | text to speech                                           |
 | `@karume/models/irodori`        | text to speech                                           |
 | `@karume/models/birefnet`       | image to alpha matte (background removal)                |

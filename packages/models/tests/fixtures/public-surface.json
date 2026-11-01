@@ -67,6 +67,10 @@
         "kind": "namespace"
       },
       {
+        "name": "moss",
+        "kind": "namespace"
+      },
+      {
         "name": "normalizeToNchw",
         "kind": "function"
       },
@@ -649,6 +653,36 @@
       {
         "name": "SpeakerInput",
         "kind": "typeAlias"
+      }
+    ],
+    "./moss": [
+      {
+        "name": "FromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GenerateRequest",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeneratedImage",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ModelInputError",
+        "kind": "class"
+      },
+      {
+        "name": "Pipeline",
+        "kind": "class"
+      },
+      {
+        "name": "PipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "imageToRgba",
+        "kind": "function"
       }
     ],
     "./sbv2": [

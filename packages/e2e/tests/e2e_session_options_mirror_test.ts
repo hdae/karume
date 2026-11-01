@@ -26,6 +26,7 @@ import {
   resolveGemmaSessionOptions,
 } from "../../models/src/gemma/session-options.ts";
 import { IRODORI_SESSION_POLICY } from "../../models/src/irodori/admission.ts";
+import { MOSS_SESSION_POLICY } from "../../models/src/moss/preset.ts";
 import { SBV2_SESSION_POLICY } from "../../models/src/sbv2/pipeline.ts";
 import { sessionGpuFeatures } from "../../models/src/session/gpu-features.ts";
 import {
@@ -53,6 +54,7 @@ const POLICIES: Readonly<Record<string, FamilySessionPolicy>> = {
   gemma4: GEMMA_SESSION_POLICY,
   "gemma4-qat": GEMMA_SESSION_POLICY,
   irodori: IRODORI_SESSION_POLICY,
+  "moss-image": MOSS_SESSION_POLICY,
   sbv2: SBV2_SESSION_POLICY,
   siglip2: SIGLIP2_SESSION_POLICY,
   "umt5-encoder": UMT5_ENCODER_SESSION_POLICY,

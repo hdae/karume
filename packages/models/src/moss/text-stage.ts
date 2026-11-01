@@ -32,13 +32,16 @@
  *
  * ## Admission ({@link mossTextEncoderContract} — before any weight byte is uploaded)
  *
- * The caller opens the Qwen3.5 text series and its tokenizer asset itself (no manifest or
- * distribution yet — ADR 0138 decision 12) and settles the contract once, as for the DiT and the
- * VAE: the encoder's graph contract (`qwen3_5GraphContract`), its row width against the DiT's text
+ * The Qwen3.5 text series and its tokenizer asset are opened by the caller of the internal entry
+ * (the series tests) or by the pipeline from the distribution (`./pipeline.ts` — the manifest's
+ * `text_encoder` and `tokenizer`), and the contract is settled once, as for the DiT and the VAE:
+ * the encoder's graph contract (`qwen3_5GraphContract`), its row width against the DiT's text
  * width ({@link MOSS_TEXT_WIDTH} — a narrower or wider tower would fail only in `dit_text`'s shape
  * check after the upload), its one symbolic length (the estimate's binding), and the tokenizer's
  * bound against the encoder's and the DiT's (the MUST of ADR 0137's consequences: a prompt between
- * two different bounds would pass one and fail in the other).
+ * two different bounds would pass one and fail in the other). The pipeline checks the graph's part
+ * before the weights are fetched ({@link mossTextEncoderGraphContract}) and the whole contract once
+ * the tokenizer asset has arrived.
  *
  * MUST: every module is side-effect free (no import-time execution, no global mutable state).
  */
@@ -95,13 +98,11 @@ export type MossTextEncoderState = {
 };
 
 /**
- * The admission of the text encoder and its tokenizer (module doc "Admission"). Every failure is a
- * plain `Error` (the series and the asset are the caller's assembly, not a request).
+ * The part of the admission that needs only the encoder's graph declaration (module doc
+ * "Admission") — what the pipeline checks before a weight byte is fetched, when the tokenizer
+ * asset has not arrived yet (`./pipeline.ts`). Every failure is a plain `Error`.
  */
-export const mossTextEncoderContract = (
-  component: GraphOwner,
-  tokenizer: Pick<Qwen3_5Tokenizer, "maxLength">,
-): MossTextEncoderContract => {
+export const mossTextEncoderGraphContract = (component: GraphOwner): MossTextEncoderContract => {
   const contract = qwen3_5GraphContract(component, OWNER);
   if (contract.hiddenSize !== MOSS_TEXT_WIDTH) {
     throw new Error(
@@ -115,6 +116,19 @@ export const mossTextEncoderContract = (
       `${OWNER}: the text encoder declares symbols [${symbols.join(", ")}] (exactly one, T)`,
     );
   }
+  return { ...contract, length: symbols[0] };
+};
+
+/**
+ * The admission of the text encoder and its tokenizer (module doc "Admission"): the graph's part
+ * ({@link mossTextEncoderGraphContract}) and the tokenizer's bound. Every failure is a plain
+ * `Error` (the series and the asset are the caller's assembly, not a request).
+ */
+export const mossTextEncoderContract = (
+  component: GraphOwner,
+  tokenizer: Pick<Qwen3_5Tokenizer, "maxLength">,
+): MossTextEncoderContract => {
+  const contract = mossTextEncoderGraphContract(component);
   const { maxLength } = tokenizer;
   if (maxLength !== QWEN3_5_MAX_TOKENS || maxLength !== MOSS_MAX_TEXT_TOKENS) {
     throw new Error(
@@ -122,7 +136,7 @@ export const mossTextEncoderContract = (
         ` bound ${QWEN3_5_MAX_TOKENS} or the DiT's ${MOSS_MAX_TEXT_TOKENS}`,
     );
   }
-  return { ...contract, length: symbols[0] };
+  return contract;
 };
 
 /**

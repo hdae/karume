@@ -1,8 +1,9 @@
 /**
  * MOSS-Image text-to-image on the family's internal entry — the one acceptance check of a request
  * and the generate path (the text encoder →) `dit_text` → the DiT pair → the VAE (ADR 0138
- * decisions 5 and 9). Not on a public surface: the family is in neither the barrel nor the package
- * exports (ADR 0138 decision 12).
+ * decisions 5 and 9). The public surface is the pipeline over the distribution (`./pipeline.ts` —
+ * `@karume/models/moss`), which fills a request's defaults and the preset from the manifest and
+ * calls {@link generateMoss}; the series tests call this entry directly.
  *
  * ## The request — the text in one of two forms (ADR 0138 decision 9)
  *
@@ -16,18 +17,18 @@
  *   an A/B against upstream's embeddings feed the DiT.
  *
  * One request uses one form for both branches (a mix, or both forms of one branch, is refused).
- * Every knob is explicit: there is no manifest yet whose `pipelineConfig` would own the defaults
- * (upstream's 1024², 50 steps, guidance 3, shift 5 and its empty negative prompt — ADR 0138
- * decision 9), and a second owner here would have to be retired when it comes. So the negative
- * prompt has no default either: at guidance ≠ 1 the prompt form needs `negativePrompt` (upstream's
- * default is `""`), as the embeddings form needs `negative`. The initial noise is exactly one of a
+ * Every knob is explicit here: the defaults (upstream's 1024², 50 steps, guidance 3, shift 5 and its
+ * empty negative prompt — ADR 0138 decision 9) are the manifest's `pipelineConfig` and the pipeline
+ * fills them (`./pipeline.ts` — one owner). So the negative prompt has no default at this entry:
+ * at guidance ≠ 1 the prompt form needs `negativePrompt` (upstream's default is `""`), as the
+ * embeddings form needs `negative`. The initial noise is exactly one of a
  * `seed` (`./random.ts` — not torch's `randn`) and the `latents` themselves (how the parity checks
  * inject upstream's noise).
  *
- * The preset (`./preset.ts`) is part of the state, not of the request, and has no default either
- * (no manifest owns one yet — ADR 0138 decision 13; the family's default
- * `f32+dit8-a8-attn8-online` is applied by the manifest when it comes): it sets the knobs of the
- * DiT pair and of its headroom estimates; `dit_text` and the VAE run in f32 in every preset.
+ * The preset (`./preset.ts`) is part of the state, not of the request, and has no default at this
+ * entry either (the default is the manifest's `defaultQuant`, `f32+dit8-a8-attn8-online` —
+ * resolved by the pipeline; ADR 0138 decision 13): it sets the knobs of the DiT pair and of its
+ * headroom estimates; `dit_text` and the VAE run in f32 in every preset.
  *
  * ## Acceptance ({@link planMossGenerate} — every rejection a `ModelInputError`, before GPU work)
  *
@@ -146,7 +147,7 @@ export type MossGenerateRequest = {
   readonly prompt?: string;
   /**
    * The negative prompt as a string — in the prompt form required when `guidance` ≠ 1 (upstream's
-   * default is `""`; there is no default here), refused at 1.
+   * default is `""`, which the pipeline fills from the manifest; none at this entry), refused at 1.
    */
   readonly negativePrompt?: string;
   /** The tokenizer's over-length policy of the prompt form (default `"reject"` — ruling 50). */

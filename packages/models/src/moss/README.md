@@ -1,19 +1,26 @@
 # MOSS-Image (host side)
 
 MOSS-Image's text encoder, DiT and FLUX.2 decoder (ADR
-[0138](../../../../docs/decisions/0138-moss-image-dit-vae.md) and its addendum of 2026-10-31):
+[0138](../../../../docs/decisions/0138-moss-image-dit-vae.md) and its addenda of 2026-10-31 and
+2026-11-01):
 `generateMoss` (`generate.ts`) turns a prompt into an image `[3, H, W]` in
 `[-1, 1]` with the Qwen3.5-9B text tower (ADR [0137](../../../../docs/decisions/0137-qwen3_5-text-encoder.md)),
 the DiT of `OpenMOSS-Team/MOSS-Image-SFT` and its untiled VAE decoder. The text comes in one of two
 forms: prompt strings (`prompt` / `negativePrompt`, encoded on the GPU), or precomputed encoder
 outputs (`positive` / `negative` — upstream's for the fixed prompts, how the parity checks and an
-A/B against upstream's embeddings feed the DiT). **There is no public surface**: the family is not
-a subpath of `@karume/models`, not in the barrel and has no distribution or manifest yet (ADR 0138
-decision 12 — publication is the manifest step, after the maintainer's ruling 53 a). The caller
-opens the series (the DiT series `moss-image-sft-i8-dyn`, the VAE series `moss-image-sft-f32-dyn`
-and, for the prompt form, the text series `qwen3.5-9b-text-moss-image-sft-i8-dyn` with the tokenizer
-asset `qwen3_5-tokenizer/tokenizer.json`; the tests' helpers `openMossSeries` / `openMossVaeSeries`
-/ `openMossTextEncoder` do it from `outputs/series/`) and passes them with a device and a preset.
+A/B against upstream's embeddings feed the DiT).
+
+**The public surface** is `@karume/models/moss` (`pipeline.ts`): `Pipeline.fromPretrained` over
+the distribution `karume-moss-image` (`tools/export-recipes/moss/distribution.py` — not published on
+Hugging Face, so there is no `SOURCES` table; a local mirror at `models/karume-moss-image/` is passed
+as a source handle), taking prompt strings. It reads the preset from the manifest (`quant`, else
+`defaultQuant`) and fills every knob a request leaves out from `pipelineConfig` (upstream's
+defaults — `config.ts`). The internal entry `generateMoss` takes both text forms with every knob
+explicit; the series tests open the series themselves (the DiT series `moss-image-sft-i8-dyn`, the
+VAE series `moss-image-sft-f32-dyn` and, for the prompt form, the text series
+`qwen3.5-9b-text-moss-image-sft-i8-dyn` with the tokenizer asset `qwen3_5-tokenizer/tokenizer.json`
+— the helpers `openMossSeries` / `openMossVaeSeries` / `openMossTextEncoder` do it from
+`outputs/series/`) and pass them with a device and a preset.
 
 A generation runs three stages (four in the prompt form), one session set at a time, each closed before the next opens and
 followed by a wait for the released GPU memory (Dawn returns destroyed buffers only when a later
@@ -41,10 +48,11 @@ A refusal fails loudly with the stage, the bytes and the size:
    clamped to `[-1, 1]`. The decoder is untiled (upstream's default — every GroupNorm sees the whole
    image), and its mid attention runs in row blocks of at most 256 MiB.
 
-The preset is part of the state and has **no default** — not even ADR 0128 decision 1's provisional
-one, since no manifest owns a default yet (ADR 0138 decision 13); the family's default is
-`f32+dit8-a8-attn8-online` (the maintainer's visual review passed), applied by the manifest when
-it comes:
+The preset is part of the state. Its default is the manifest's `defaultQuant`,
+`f32+dit8-a8-attn8-online` (ADR 0128 decision 1 — the maintainer's visual review passed; ADR 0138
+decision 13), which the pipeline resolves; the internal entry takes it explicitly. The manifest
+names a preset and `preset.ts` owns its knobs (`mossPresetOf` refuses a quant whose `session`
+declares other knobs, or a name the table does not know):
 
 | Preset                     | DiT (`dit`, `dit_skip22`)                                                                   | `dit_text`  | VAE |
 | -------------------------- | ------------------------------------------------------------------------------------------- | ----------- | --- |
@@ -68,10 +76,14 @@ has them, for the online kernel's subgroup form — never required).
 | `sampler.ts`       | 4     | upstream's σ schedule (the requested grid, the snapping to the training grid, de-duplication) and the Euler step |
 | `random.ts`        | 4     | the seeded initial noise (splitmix64 + Box–Muller — not torch's `randn`) |
 | `generate.ts`      | 4     | `planMossGenerate` (the one acceptance check of a request, both text forms) and `generateMoss` (the stage order) |
-| `preset.ts`        | 5     | the two presets, `mossPreset` / `MOSS_PRESET_NAMES`, `mossAcquireGpuOptions` |
+| `preset.ts`        | 5     | the two presets, `mossPreset` / `MOSS_PRESET_NAMES`, `mossPresetOf` (a manifest's quant → its preset), `mossAcquireGpuOptions` |
 | `text-stage.ts`    | —     | the prompt form: the text encoder's admission (`mossTextEncoderContract`), the prompt ids (chat template + tokenizer), the text-encoder stage `encodeMossPrompts` and its headroom need |
+| `config.ts`        | —     | the manifest contract: the pipeline name `moss-image/1`, the `pipelineConfig` schema (upstream's defaults), the tokenizer asset's name |
+| `pipeline.ts`      | —     | the public `Pipeline` (`fromPretrained`, `generate`, `dispose`): the manifest's preset and defaults, the admission before the weights are fetched |
+| `image.ts`         | —     | `imageToRgba` (the image → 8-bit RGBA) |
 
-(The stages are those of ADR 0138 decision 14; `text-stage.ts` is its addendum of 2026-10-31.)
+(The stages are those of ADR 0138 decision 14; `text-stage.ts` is its addendum of 2026-10-31, the
+last three files its addendum of 2026-11-01.)
 
 ## Accepted requests
 
@@ -86,9 +98,11 @@ embeddings form embeddings that are not `Float32Array` `[T, 4096]` with 1 ≤ T 
 finite; steps that are not a positive integer, guidance that is not finite and ≥ 0, a shift that is
 not finite and > 0 or so small that the σ grid is not finite; and anything but exactly one of
 `seed` and `latents` (`[128, H/16, W/16]` f32, finite). A prompt-form request without the text
-series in the state is the caller's assembly (a plain `Error`). Every knob is explicit — upstream's
-defaults (1024², 50 steps, guidance 3, shift 5, the empty negative prompt) wait for a manifest, so
-the prompt form at guidance ≠ 1 passes `negativePrompt: ""` for upstream's default. There is no step cap. Whether the stages fit the free VRAM is the stages' own check,
+series in the state is the caller's assembly (a plain `Error`). Every knob is explicit at this
+entry — upstream's defaults (1024², 50 steps, guidance 3, shift 5, the empty negative prompt) are
+the manifest's `pipelineConfig`, which the pipeline fills in (the negative prompt only while
+guidance ≠ 1), so a direct caller at guidance ≠ 1 passes `negativePrompt: ""` for upstream's
+default. There is no step cap. Whether the stages fit the free VRAM is the stages' own check,
 not an acceptance limit (`docs/limitations.md`, the MOSS-Image section, records what fit on a
 12 GiB device).
 
