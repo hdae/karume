@@ -454,6 +454,14 @@ Node and Deno). The next wave is 0.15.1 — Gemma 4 QAT decode speed (the first 
   upstream LICENSE files. The machine-readable place for the upstream revision is the container's
   `provenance.upstreamRevision` ([container-v1](container-v1.md) §2.3). Today the recipes of sbv2, minicpm5, siglip2, depth_anything, birefnet, embeddinggemma, deberta and wan / umT5 fill it
   (through `tools/export-recipes/_shared/upstream.py`), so irodori and the others **fill it at their next re-export** (on the same occasion as the `sym_max` field of W-G4-4)
+- **Gate for the first PyPI release of `karume` (tools/exporter): no upstream copy in the core wheel** (ruling 57 a,
+  2026-11-01). `custom_ops.py` holds a verbatim copy of transformers 5.14.1's `l2norm` / `torch_chunk_gated_delta_rule`
+  as the eager body of `karume::gated_delta_scan` (ADR 0135 decision 5), with a third-party notice comment. That
+  conflicts with ADR 0065 decision 7 (the core wheel holds no copy of an upstream model implementation; the boundary
+  test catches imports, not copies), and the wheel's `license-files` carry only MIT. Fix before the first upload: core
+  keeps the op's schema and fake only, and the qwen3_5 recipe (which already depends on transformers) registers the
+  eager kernel by importing upstream's function — no copy anywhere, and the "verbatim copy" MUST disappears with it.
+  ADR 0065 itself stays: core does not take a transformers dependency
 - Re-ruling on the policy of "separating the semantic surface from the implemented subset" (attention / deform_conv2d /
   gather / conv_transpose1d / upsample_bilinear2d — a unified rule that does not turn the observed subset into op semantics)
 
