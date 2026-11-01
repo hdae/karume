@@ -114,9 +114,9 @@ class TestAssertSupported:
             vae_patch.assert_supported(vae)
 
     def test_another_attention_processor_is_refused(self):
+        vae = tiny_vae()  # skips without diffusers, so it comes before the import below
         from diffusers.models.attention_processor import AttnProcessor
 
-        vae = tiny_vae()
         vae.decoder.mid_block.attentions[0].set_processor(AttnProcessor())
         with pytest.raises(vae_patch.UnsupportedVaeError, match="processor"):
             vae_patch.assert_supported(vae)
