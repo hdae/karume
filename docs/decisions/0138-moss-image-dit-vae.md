@@ -4,13 +4,15 @@
   decisions 8, 10 and 12 are ruled (see Rulings); the points settled during implementation were
   taken as the recommended option and reported to the maintainer, and are listed there apart from
   the rulings. The default preset is the practical preset `f32+dit8-a8-attn8-online` (the
-  maintainer's visual review passed — Rulings), carried by the manifest when it comes; there is no
-  default in code (decision 13). The text encoder (ADR 0137) is wired as the prompt form of
-  decision 9 since 2026-10-31, in the narrow scope of the maintainer's ruling 53 a (Addendum of
-  2026-10-31).
+  maintainer's visual review passed — Rulings), the `defaultQuant` of the distribution's manifest
+  since 2026-11-01 (decision 13, Addendum of 2026-11-01). The text encoder (ADR 0137) is wired as
+  the prompt form of decision 9 since 2026-10-31, in the narrow scope of the maintainer's ruling
+  53 a (Addendum of 2026-10-31); the distribution step followed on 2026-11-01 (a local mirror and
+  the subpath `@karume/models/moss`; not published on Hugging Face — Addendum of 2026-11-01).
 - Date: 2026-10-27
-- Scope: the internal family `packages/models/src/moss/` on `main` (no subpath, barrel entry or
-  distribution yet — decision 12; the distribution step is next). The work was developed on its own
+- Scope: the family `packages/models/src/moss/` on `main`, with the subpath `@karume/models/moss`
+  and the distribution recipe `tools/export-recipes/moss/distribution.py` since 2026-11-01 (the
+  Addendum of 2026-11-01; before it, an internal family — decision 12). The work was developed on its own
   branch `wip/moss-image` and was not part of the 0.15.0 release (it had no text encoder then). It
   was rebased onto `main` after the 0.15.0 release (2026-10-31), and this ADR got its number then
   (two branches added ADRs in parallel, so a number taken earlier could have collided silently on a
@@ -353,11 +355,12 @@ any GPU work; every rejection is a `ModelInputError` that names the limit or the
   with 6 decreases, at 10⁷ 1,099 — more than the 1,000 training points — with 61; steps with
   dt > 0 — research §4.1): that is upstream's own `set_timesteps`, reproduced, not refused;
   `docs/limitations.md` records it.
-- **No defaults**: upstream's (1024×1024, 50 steps, guidance 3, shift 5 — and its empty negative
-  prompt, the Addendum of 2026-10-31) belong to a manifest's
-  `pipelineConfig`, and no manifest exists before publication (decision 12), so every knob is
-  explicit and the defaults keep one owner when it comes. Rejected: upstream's `__call__` defaults
-  as family constants now — a second owner to retire.
+- **No defaults at this entry**: upstream's (1024×1024, 50 steps, guidance 3, shift 5 — and its
+  empty negative prompt, the Addendum of 2026-10-31) belong to a manifest's `pipelineConfig`, so
+  every knob of `planMossGenerate` is explicit and the defaults keep one owner. Since 2026-11-01
+  the distribution's manifest declares them and the public pipeline fills the fields a request
+  leaves out (Addendum of 2026-11-01, B4). Rejected: upstream's `__call__` defaults as family
+  constants — a second owner to retire.
 - The seeded noise is splitmix64 + Box–Muller (`packages/models/src/moss/random.ts` — a deliberate
   copy of Wan's core, ADR 0118 decision 5), **not torch's `randn`**: a deliberate departure from
   upstream. The same seed does not give upstream's image; every comparison with upstream injects the
@@ -465,7 +468,9 @@ forwards would never run the declared route at square sizes.
   Rejected: the Wan2.1 stage-1 form, a public string API restricted to the precomputed prompts —
   little user value, and a public promise made before the text encoder is designed.
 - Since 2026-10-31 the text encoder exists and is wired (Addendum); publication still waits — it is
-  the manifest step (the maintainer's ruling 53 a kept this decision in force).
+  the manifest step (the maintainer's ruling 53 a kept this decision in force). The manifest step
+  was taken 2026-11-01 — a distribution, a local mirror and the subpath, without Hugging Face
+  publication (Addendum of 2026-11-01).
 
 ### 13. Presets and the default
 
@@ -479,7 +484,8 @@ storage and the DiT overrides it to i8 — the name `i8` alone would claim an i8
 
 - The preset is an explicit field of the stage and generate states (`MossDitStageState.preset`,
   `MossGenerateState.preset`); there is **no default in code** — the entries refuse a state without
-  one.
+  one. Since 2026-11-01 the default is the distribution manifest's `defaultQuant`, resolved by
+  the public pipeline (Addendum of 2026-11-01, B3).
 - The knobs go to the pair's two Sessions and to their estimates as one value, with the device's
   online-route facts (decision 10). `mossAcquireGpuOptions(preset)` asks for subgroups when available
   for the online preset (never required — ADR 0128 C1); without them the kernel takes its portable
@@ -498,10 +504,10 @@ storage and the DiT overrides it to i8 — the name `i8` alone would claim an i8
   weights and no activation quantization) and C1's premise (neither preset requires a feature —
   above). C3 needs a `label` and a `description` per preset, which the family's internal table does
   not carry; they come with the manifest.
-- No original-weights preset now: ADR 0128 decision 4's table carries a `pending` row for MOSS-Image
-  (the DiT is bf16 upstream, the VAE f32; nothing is distributed before the text encoder). Decision
-  4's rule (export practicality, no size cap) is unchanged, so the row names no size or
-  run-feasibility reason.
+- No original-weights preset now: ADR 0128 decision 4's table carries a row for MOSS-Image (the DiT
+  is bf16 upstream, the VAE f32; since 2026-11-01 the row records the distribution's state — the
+  bf16 sets are not exported). Decision 4's rule (export practicality, no size cap) is unchanged,
+  so the row names no size or run-feasibility reason.
 
 ### 14. Stages
 
@@ -682,8 +688,9 @@ the decisions; not rulings):
 ## Open points
 
 - **No default in code until a manifest exists** (decision 13's departure from ADR 0128 decision
-  1): the default `f32+dit8-a8-attn8-online` (Rulings) is applied by the manifest's `defaultQuant`
-  when it comes with the text encoder and publication; ADR 0128's C1–C3 are checked then.
+  1): closed 2026-11-01 — the distribution's manifest carries `f32+dit8-a8-attn8-online` as its
+  `defaultQuant` and the distribution gate checks C1–C3 on the local mirror (Addendum of
+  2026-11-01).
 - Stage 6 after the rebase onto `main` (2026-10-31): the full verification. The rebase numbered
   this ADR (the placeholder replaced by a count-asserted script in every tracked file that cited
   it, in this file's name and in its title line; the recipe's placeholder check
@@ -692,10 +699,9 @@ the decisions; not rulings):
   line of ADR 0040's addendum of 2026-10-26 merged as is; the online int8 attention entry of
   `CHANGELOG.md` had meanwhile been released unchanged in 0.15.0, so the key-length change went
   into [Unreleased] as a Changed entry.
-- The text encoder: wired as the prompt form (Addendum of 2026-10-31). Later, each its own
-  decision: publication with a manifest and its defaults (the text series and its tokenizer asset
-  in the distribution, `pipelineConfig` with upstream's defaults and the empty negative prompt,
-  `defaultQuant`), an original-weights preset, a tiled VAE path above the cap.
+- The text encoder: wired as the prompt form (Addendum of 2026-10-31). The manifest and its
+  defaults followed (Addendum of 2026-11-01). Later, each its own decision: publication on Hugging
+  Face, an original-weights preset, a tiled VAE path above the cap.
 
 ## Addendum (2026-10-31) — the prompt form: the text encoder wired (the maintainer's ruling 53 a)
 
@@ -796,3 +802,133 @@ distribution, its recipe and local mirror, `pipelineConfig` with upstream's defa
 negative prompt among them) and `defaultQuant`, and the public surface. Before it, the image A/B of
 upstream's embeddings against Karume's (ADR 0137 decision 5, ruling 51) — `guide-fridge-note`
 included. The encoder at T = 4,096 is unmeasured (ADR 0137 open point 2).
+
+## Addendum (2026-11-01) — the distribution step: a recipe, a local mirror and the subpath `@karume/models/moss`
+
+With the text encoder in place and its default storage ruled (i8 — the maintainer's ruling 51, ADR
+0137 decision 5), the step decisions 12 and 13 deferred is taken: a distribution of the existing
+series, its local mirror, and a public pipeline over the manifest. **Not done here**: Hugging Face
+publication (a later maintainer decision — no repository, no revision pin, no `SOURCES` entry).
+
+### B1. The distribution `karume-moss-image` (`tools/export-recipes/moss/distribution.py`)
+
+- **One model, `sft`** (the upstream checkpoint `MOSS-Image-SFT` without the family name, as
+  `ti2v-5b` is Wan2.2's), pipeline contract `moss-image/1`, built by
+  `uv run python dist.py --pipeline moss-image` from the existing series, all self-contained:
+  `dit` / `dit_skip22` / `dit_text` from `moss-image-sft-i8-dyn` (label `i8`; `dit_skip22` holds
+  no weight bytes and runs on `dit`'s), `vae_decoder_pre` / `attn` / `post` from
+  `moss-image-sft-f32-dyn` (label `f32`), `text_encoder` from
+  `qwen3.5-9b-text-moss-image-sft-i8-dyn` (label `i8`), and the asset `tokenizer` from
+  `qwen3_5-tokenizer/tokenizer.json`. The text tower is the checkpoint's own `text_encoder` folder,
+  so it is stored here, not referenced from a Qwen3.5 repository. The host tables (`rope_base`,
+  `training_grid`) and the BatchNorm statistics (`latent_batch_norm`) are container assets (ADR
+  0109 decision 4). The precomputed text embeddings are not distributed (the public surface takes
+  prompt strings — B4).
+- **Assembly gates** (before a byte is written): each container's storage (required and forbidden
+  layouts; the borrower's on its lender), its provenance (licence and revision of the pinned
+  checkpoint — the text tower's too), the container assets its reader needs, that `dit_skip22`
+  holds no weight bytes and borrows every initializer of `dit` with the lender's dtype and shape,
+  that the text tower's rows are as wide as `dit_text` reads (4,096), and that the tokenizer asset
+  has the TS reader's format, the pinned upstream folder and the bound 4,096.
+- `LICENSE.md` (Apache 2.0) and `NOTICE.md` (the changes, the FLUX.2 VAE's origin) at the root;
+  a model card from the manifest (`moss/card.py`).
+- **The local mirror** `models/karume-moss-image/`: 13,160,009,476 B (about 12.3 GiB of weights,
+  the text tower 7.95 GB of it). The core places independent copies (the ADR 0041 addendum's rule —
+  no hard links); on this machine's btrfs the copy took seconds.
+
+### B2. Presets, `defaultQuant` and ADR 0128's constraints
+
+| Preset                                 | `session` (the DiT pair)                                                          | Label                                                 |
+| -------------------------------------- | -------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `f32+dit8`                             | —                                                                                | int8 transformer, f32 compute                         |
+| `f32+dit8-a8-attn8-online` (default)   | `linearCompute: "a8"`, `attentionCompute: "a8"`, `attentionScoreStorage: "none"` | int8 transformer, int8 activations, online attention |
+
+- Both take every component on its one label (the same weights map), each with a description
+  (C3). **C1 holds**: neither declares `gpuFeatures`; the online kernel asks for subgroups only
+  when the adapter has them and otherwise runs its portable form (ADR 0132 decision 5), so the
+  practical preset can be the default. **C2 holds**: `f32+dit8` is the practical preset's sibling.
+  The distribution gate (`packages/runtime/tests/distribution_gate_test.ts`) checks C1–C3 on the
+  mirror; the mirror is in its roster (the pipeline e2e roots on it).
+- `requiredLimits` (derived by the core): 1,017,118,720 B for `maxBufferSize` and
+  `maxStorageBufferBindingSize` — the text tower's int8 embedding.
+- **The manifest names a preset; `preset.ts` owns its knobs**: the pipeline refuses a quant whose
+  `session` declares other knobs than the table's preset of that name, and a preset name the table
+  does not know (`mossPresetOf`). Why: the checks that make a preset safe (the self A/B check, the
+  census, the sha rows whose IDs start with the preset's name — decision 11) were run on these
+  knobs; a manifest could otherwise run unchecked numerics under a checked name. A new preset is
+  added to the table with its checks first. Rejected: knobs taken from the manifest alone (Wan's
+  form) — two owners of a name's knobs.
+
+### B3. `pipelineConfig` — upstream's defaults
+
+`{ scheduler: { shift: 5.0 }, defaults: { width: 1024, height: 1024, steps: 50, guidance: 3.0,
+negativePrompt: "" } }` — `MOSSImagePipeline.__call__`'s defaults and the pinned scheduler config's
+`shift` (the recipe's test reads both from the pinned snapshot). The TS schema is
+`packages/models/src/moss/config.ts` (unknown keys, missing fields and values outside the request
+checks' ranges fail as plain `Error`s); the pipeline's admission also checks that the default steps
+× shift give a σ schedule on the `dit` container's training grid.
+
+### B4. The public surface `@karume/models/moss`
+
+- `Pipeline.fromPretrained(ref, options)` (`model`, `quant`, `gpu`, `signal`, the fetch-layer
+  knobs, `components`), `generate(request)`, `dispose()`; the types `GenerateRequest`,
+  `GeneratedImage` (`[3, H, W]` f32 in `[-1, 1]`), `PipelineOptions`, `FromPretrainedOptions`;
+  `imageToRgba`; `ModelInputError`. Bare names (ADR 0136); the barrel's namespace `moss` is the
+  subpath's module (the barrel gate requires one per `exports` key). **No `SOURCES`** — the
+  precedent of an unpublished family (vowel-detector; Wan2.1 has no key), since an entry before
+  publication can only 404 (ADR 0073 decision 1). No `fromAssets` (the playground loads through
+  `fromPretrained` with a source handle; it can be added in the house form).
+- The request takes **prompt strings** only; the embeddings form stays on the internal entry
+  (`generateMoss` — the parity checks). A field left out takes `pipelineConfig`'s default; the
+  default negative prompt only while guidance ≠ 1 (at 1 a given one is refused as before); the
+  seed defaults to 0, as in every family, and only when neither a seed nor latents is given.
+- The admission runs before any weight byte is fetched: the pipeline name and major,
+  `pipelineConfig`, the preset, a shared GPU's features and limits, the declared `requiredLimits`,
+  the tokenizer asset's declaration, the text tower's graph contract, the DiT contract with its two
+  assets and the VAE contract with its asset. The tokenizer's bound is checked when the asset
+  arrives (after the weights). No Session is built at construction.
+- **Removing the subpath** before a release (the maintainer's decision for 0.15.1): the `./moss`
+  entries of `packages/models/package.json` and `deno.json` `exports`, the `export * as moss` block
+  of `packages/models/mod.ts` (and its two mentions in the module doc), the file
+  `packages/models/moss.ts`, the `./moss` block and the barrel's `moss` namespace in
+  `packages/models/tests/fixtures/public-surface.json` (`KARUME_SURFACE=write`), and the
+  `@karume/models/moss` row of `packages/models/README.md`. `src/moss/` and the e2e keep working
+  (the e2e imports `moss.ts`; point it at `src/moss/pipeline.ts` instead).
+
+### B5. Checks
+
+- Recipe (`moss/tests/test_distribution.py`): the spellings against the writers, C1–C3 on the
+  table, `pipelineConfig` against the pinned upstream code, the gates' refusals (synthetic
+  containers), the plan over the real series. Faults injected and caught: the tokenizer's revision
+  check removed, the borrower's byte check removed, the asset check reduced to presence, the default
+  switched to `f32+dit8`, guidance 4.
+- Host (`packages/models/tests/moss_pipeline_host_test.ts`): the preset from a synthetic manifest
+  (default, named, another `defaultQuant`, unknown quant / model / preset name, knobs differing
+  from the table, a knob the family does not accept), the request defaults, the schema, the
+  contract. Faults injected and caught: `quant` overriding ignored, the knob comparison removed,
+  the default negative at guidance 1, the seed default over given latents, the major check dropped,
+  the `negativePrompt` type check dropped, the tokenizer-asset check dropped.
+- GPU (`packages/e2e/tests/e2e_moss_pipeline_test.ts`, RTX 3080 Ti, Node + Dawn): the mirror's
+  manifest resolves to the practical preset with upstream's defaults; `fromPretrained` from the
+  mirror with `quant: "f32+dit8"`, the prompt `fridge-note`, 256² × 2 steps, seed 42 and guidance,
+  shift and negative prompt **left to the manifest** gives exactly the existing sha row
+  `f32+dit8-2step-fridge-note-qwen3_5-i8-seed42-256x256-g3-shift5` (written from the series with
+  every knob explicit — Addendum of 2026-10-31, A6). The file never writes a row. Faults injected
+  and caught: the default preset used in place of `quant`, a default guidance of 3.3.
+- The gates that read every mirror under `models/` take the family: the distribution gate's roster,
+  the session-options mirror check (`packages/e2e/tests/e2e_session_options_mirror_test.ts` — the
+  family's acceptance table) and the census table (`packages/models/tests/helpers/census-table.ts` —
+  the practical preset's row, 258 / 252 i8a8 linears for `dit` / `dit_skip22`, the e2e A/B's
+  exact counts).
+
+### What is still not done
+
+- **Hugging Face publication**: the repository `hdae/karume-moss-image`, its revision pin and a
+  `SOURCES` entry, the licence review of `THIRD_PARTY_NOTICES.md` (ADR 0065 decision 7), and the
+  model card's review.
+- **Other GPUs' sha rows** (the RTX 5070 Ti on D3D12 and others — ADR 0106): this family's rows
+  exist for `node-nvidia-geforce-rtx-3080-ti` only; the pipeline e2e skips explicitly elsewhere.
+- **T = 4,096**: the text encoder at its full bound is unmeasured (ADR 0137 open point 2), and the
+  acceptance admits it.
+- An original-weights preset (skipped — ADR 0128 decision 4's table records why), and a tiled VAE
+  path above the cap.

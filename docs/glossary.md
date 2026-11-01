@@ -281,7 +281,7 @@
 
 | Term | Meaning (summary) | Source |
 | ---- | ----------------- | ------ |
-| MOSS-Image (family `moss`) | OpenMOSS's 5B single-stream text-to-image DiT (`OpenMOSS-Team/MOSS-Image-SFT`) with a Qwen3.5-9B text encoder and the FLUX.2 VAE (small decoder). Karume has its DiT and VAE and, since 2026-10-31, the text encoder (ADR 0137) wired as the prompt form; the family is internal (no subpath, no distribution) until the manifest step | ADR [0138](decisions/0138-moss-image-dit-vae.md), `packages/models/src/moss/README.md` |
+| MOSS-Image (family `moss`) | OpenMOSS's 5B single-stream text-to-image DiT (`OpenMOSS-Team/MOSS-Image-SFT`) with a Qwen3.5-9B text encoder and the FLUX.2 VAE (small decoder). Karume has its DiT and VAE and, since 2026-10-31, the text encoder (ADR 0137) wired as the prompt form; since 2026-11-01 the subpath `@karume/models/moss` over a local distribution `karume-moss-image` (not published) | ADR [0138](decisions/0138-moss-image-dit-vae.md), `packages/models/src/moss/README.md` |
 | Joint sequence (S = N + T) | The DiT's token sequence: the N image tokens (one per 16 × 16 px) followed by the T text tokens, with full self-attention over it. The graph `dit` has the one symbol S and selects per row with `where(is_image, …)` | ADR 0138 decision 2 |
 | Text refiner (`dit_text`) | Upstream's `text_embedder`: Linear(4096→3072) and two attention / FFN blocks over the text tokens, without modulation. A separate graph (symbol T) run once per branch per generation, with f32 compute in every preset | ADR 0138 decision 3 |
 | Text context (`text_context`) | The `dit` input `[1,S,3072]` that holds the refiner's output in the text rows and zeros in the image rows; a resident tensor written once per branch per generation | ADR 0138 decisions 2, 3 |
@@ -296,7 +296,7 @@
 | Latent BatchNorm restoration (`latent_batch_norm`) | The step before the VAE: `z · std + mean` per DiT channel with the VAE's BatchNorm running statistics (`std = (running_var + eps).sqrt()` as upstream computes it, an asset of `vae_decoder_pre`). The unpatchify (128 → 32 channels at 2×) that follows is a separate host step | ADR 0138 decision 8 |
 | Untiled decoder (MOSS-Image VAE) | The FLUX.2 decoder over the whole image as three symbolic-length graphs `vae_decoder_pre` / `vae_decoder_attn` / `vae_decoder_post` handed over through resident tensors, so every GroupNorm sees the whole image (upstream's default decode) | ADR 0138 decision 8 |
 | Area cap (MOSS-Image) | The largest accepted image area: the untiled decoder's largest intermediate `[1,192,H,W]` f32 must fit one storage binding, so the cap is ⌊binding ÷ 49,152⌋ × 64 px — 2,796,160 px at a 2 GiB binding. Per device; whether the stages fit VRAM is the stages' headroom check, not this cap | ADR 0138 decision 8, [limitations](limitations.md) |
-| Reference preset / practical preset (MOSS-Image) | `f32+dit8` (the i8 DiT weights × f32 compute) is the reference partner of `f32+dit8-a8-attn8-online` (the same weights with a8 linears and the online attention on `dit` / `dit_skip22`). The practical preset is the family's default, applied by the manifest (none in code) | ADR 0138 decision 13 |
+| Reference preset / practical preset (MOSS-Image) | `f32+dit8` (the i8 DiT weights × f32 compute) is the reference partner of `f32+dit8-a8-attn8-online` (the same weights with a8 linears and the online attention on `dit` / `dit_skip22`). The practical preset is the family's default, the manifest's `defaultQuant` (none in code) | ADR 0138 decision 13 |
 
 ## Image post-processing (ADR 0125)
 

@@ -17,6 +17,17 @@ measurements in `docs/research/`.
 
 ### Added
 
+- `@karume/models/moss` (barrel namespace `moss`): MOSS-Image text-to-image —
+  `Pipeline.fromPretrained` over the distribution `karume-moss-image`, `generate` from a prompt
+  string (every knob left out takes the manifest's default: 1024 × 1024, 50 steps, guidance 3,
+  shift 5, the empty negative prompt), `imageToRgba`. The default preset is
+  `f32+dit8-a8-attn8-online` (int8 transformer, int8 activations, online attention); `f32+dit8` is
+  its reference. The distribution includes the Qwen3.5-9B text encoder (its text tower, int8) as the
+  component `text_encoder` and its tokenizer, and the FLUX.2 VAE decoder (f32, untiled). **A local
+  distribution only**: it is built by the recipe (`dist.py --pipeline moss-image`) and is not
+  published on Hugging Face, so the subpath has no `SOURCES` table — pass a local directory as a
+  source handle (ADR 0138 addendum of 2026-11-01).
+
 - `SessionOptions.fuseGeluMulStaticQuantize` (`@karume/runtime`, default `false`) folds an adjacent
   f32 `gelu_tanh → mul → static_quantize` — Gemma 4 QAT's per-layer-input gate, `[1, M, 256]` with
   M ≤ 8 (decode and speculative verification) — into one dispatch (perf-ledger K-48 step 1b).

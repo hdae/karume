@@ -280,7 +280,7 @@ dot product, and S in VRAM has f32 width. The canonical source of the decision i
   The accepted set is not narrowed.
 - **Wan2.1 / Wan2.2**: for every accepted shape (dimensions × frame count), both self and cross run as
   declared.
-- **MOSS-Image** (internal family — no public surface yet): its practical preset declares the online kernel, which
+- **MOSS-Image** (`@karume/models/moss`, a local distribution only): its practical preset declares the online kernel, which
   runs every key length, so on a device with an online form every forward runs as declared (the
   negative branch's joint sequence S = N + 10 is never a multiple of 4 at square sizes, and the
   positive branch's depends on the prompt length). On a device with neither online form it runs the
@@ -1681,15 +1681,17 @@ By-design constraints of `wan.Ti2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/
   stage 8a). The entries are `wan.Ti2vPipeline.fromPretrained` (the published repository or a local mirror) and `wan.Ti2vPipeline.fromAssets`, which takes a
   manifest and assets assembled from the series containers. Only Wan2.1 (`karume-wan2.1`) stays unpublished.
 
-## MOSS-Image: text as prompt strings or precomputed embeddings, no default negative; the area is capped by the VAE's storage binding (2,796,160 px at 2 GiB); whether a size fits VRAM is checked per stage
+## MOSS-Image: a local distribution only; text as prompt strings (or precomputed embeddings on the internal entry); the area is capped by the VAE's storage binding (2,796,160 px at 2 GiB); whether a size fits VRAM is checked per stage
 
-By-design constraints of the family's internal entry (`generateMoss` and its acceptance check `planMossGenerate` in
-`packages/models/src/moss/` on `main` — ADR [0138](decisions/0138-moss-image-dit-vae.md)). Every
-input-caused rejection is a `ModelInputError` before any GPU work.
+By-design constraints of the family (`@karume/models/moss`, and the internal entry `generateMoss` with its
+acceptance check `planMossGenerate` in `packages/models/src/moss/` — ADR [0138](decisions/0138-moss-image-dit-vae.md)).
+Every input-caused rejection is a `ModelInputError` before any GPU work.
 
-- **Not public**: no subpath, no barrel entry, no distribution and no manifest yet (ADR 0138 decision 12; the text
-  encoder is wired since 2026-10-31, publication is the manifest step — the maintainer's ruling 53 a); not part of the
-  0.15.0 release. The caller opens the series itself, the Qwen3.5 text series and its tokenizer asset included.
+- **Not published**: the distribution `karume-moss-image` is built locally by the recipe
+  (`dist.py --pipeline moss-image`, about 12.3 GiB) and is not on Hugging Face, so the subpath has no `SOURCES`
+  table; a local directory is passed as a source handle (ADR 0138 addendum of 2026-11-01). Not part of the 0.15.0
+  release. Its sha256 rows exist for one environment (the RTX 3080 Ti under Node + Dawn).
+- **The public pipeline takes prompt strings only**; the embeddings form is the internal entry's (the parity checks).
 - **Text in one of two forms** (ADR 0138 addendum of 2026-10-31): prompt strings (`prompt` / `negativePrompt` — the
   chat template and the tokenizer in the acceptance check, the i8 Qwen3.5 text tower on the GPU), or upstream's
   `encode_prompt` outputs, `[T, 4096]` f32 with 1 ≤ T ≤ 4,096 and every value finite (`positive` / `negative` — for the
@@ -1698,12 +1700,11 @@ input-caused rejection is a `ModelInputError` before any GPU work.
   template's tail). The i8 encoder's rows differ from upstream's bf16 embeddings by about 4–8 % relative L2 on the
   fixed prompts ([research 2026-10-31](research/2026-10-31-moss-text-stage.md)); whether that shows in the images is the
   pending A/B (ADR 0137 decision 5). The encoder at T = 4,096 is unmeasured (ADR 0137 open point 2).
-- **No defaults**: steps, guidance, shift, the negative prompt, the initial noise (`seed` or `latents`) and the preset
-  are all explicit. Upstream's defaults (1024², 50 steps, guidance 3, shift 5, the empty negative prompt) wait for a
-  manifest's `pipelineConfig` — at guidance ≠ 1 the prompt form passes `negativePrompt: ""` for upstream's default. **No default
-  preset** either: `f32+dit8` or `f32+dit8-a8-attn8-online` is passed explicitly, since no manifest owns a default yet
-  (ADR 0138 decision 13 — a departure from ADR 0128 decision 1); the family's default is `f32+dit8-a8-attn8-online`,
-  applied by the manifest when it comes.
+- **Defaults are the manifest's**: the public pipeline fills a field a request leaves out from `pipelineConfig`
+  (upstream's 1024², 50 steps, guidance 3, shift 5, the empty negative prompt — the negative only while guidance ≠ 1;
+  the seed 0) and runs the manifest's `defaultQuant` (`f32+dit8-a8-attn8-online`) unless `quant` names another preset.
+  The internal entry has no defaults: every knob, the initial noise (`seed` or `latents`) and the preset are explicit
+  there (one owner of the defaults — ADR 0138 decisions 9 and 13).
 - **Accepted sizes**: positive multiples of 16, the longest side at most 65,536 px (the rope base tables' rows), and the
   area at most the cap of the untiled VAE: its largest intermediate `[1,192,H,W]` f32 must fit one storage binding, so
   the cap is ⌊binding ÷ 49,152⌋ × 64 px — **2,796,160 px** at the 2 GiB binding of the RTX 3080 Ti (1696×1648 and

@@ -176,7 +176,7 @@ The maintainer withdrew the draft on 2026-10-17 on these grounds:
    | wan2.1 / wan2.2                                    | —                       | skipped (DiT f32 about 5.6 / 20 GB; the text encoder is umT5 i8)       |
    | umt5-xxl                                           | —                       | skipped (f32 about 22.7 GB)                                            |
    | gemma4 e2b                                         | —                       | pending (bf16 upstream; needs the PLE in bf16 — ADR 0131 open point)   |
-   | moss-image (DiT + VAE)                             | —                       | pending (DiT bf16 upstream, VAE f32; nothing ships before the text encoder — ADR [0138](0138-moss-image-dit-vae.md) decision 13) |
+   | moss-image (DiT, VAE, Qwen3.5 text encoder)        | —                       | not shipped (2026-11-01, the local distribution `karume-moss-image`): the DiT is bf16 upstream and its bf16 export has not been attempted; the Qwen3.5 text encoder's bf16 export needs a fixed-BF16 entry in the writer first (its F32 set alone is 29.6 GiB — ADR [0137](0137-qwen3_5-text-encoder.md) decision 5); the VAE ships its upstream f32 values. The presets ship the i8 DiT and encoder (ADR [0138](0138-moss-image-dit-vae.md) addendum of 2026-11-01) |
 
 5. **A device without dp4a gets a warning, not a fallback.** When a Session is built with
    `linearCompute: "a8"` or `attentionCompute: "a8"` on a device whose WGSL language features lack

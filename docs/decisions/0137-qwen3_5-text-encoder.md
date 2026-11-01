@@ -137,7 +137,8 @@ runs) cannot stay resident beside the MOSS DiT and VAE.
    the WebGPU default for the fused attention's temporaries (the estimate refuses it under the
    default; `acquireGpu` requests the adapter's limit); time and memory there are unmeasured.
 3. ADR 0128 decision 4's table has no row for the Qwen3.5 text encoder yet (BF16: skipped —
-   decision 5).
+   decision 5). Closed 2026-11-01: the MOSS-Image row of that table covers it (the encoder ships
+   only inside `karume-moss-image` — ADR 0138 addendum of 2026-11-01).
 4. Other GPUs (the RTX 5070 Ti on D3D12) need their own sha256 rows and a run of the band check.
 5. The IR CPU reference harness could move into a tracked tool so that references can be remade
    without the diag directory.

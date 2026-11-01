@@ -297,7 +297,7 @@
 
 | 英語（コード・docs） | 日本語（対話） | 意味 | やめる言い方 | 正本 |
 | --- | --- | --- | --- | --- |
-| MOSS-Image (family `moss`) △ | MOSS-Image | OpenMOSS の 5B の text-to-image DiT（テキストエンコーダは Qwen3.5-9B・VAE は FLUX.2）。Karume には DiT と VAE があり、2026-10-31 からテキストエンコーダ（ADR 0137）もプロンプトの形で繋がった。manifest のステップまで内部のファミリー（`main` にあるが公開の入口はまだ無い） | — | ADR 0138 |
+| MOSS-Image (family `moss`) △ | MOSS-Image | OpenMOSS の 5B の text-to-image DiT（テキストエンコーダは Qwen3.5-9B・VAE は FLUX.2）。Karume には DiT と VAE があり、2026-10-31 からテキストエンコーダ（ADR 0137）もプロンプトの形で繋がった。2026-11-01 から `@karume/models/moss` とローカルの配布形 `karume-moss-image`（HF には未公開） | — | ADR 0138 |
 | joint sequence (S = N + T) △ | 結合系列 | 画像トークン N 個とテキストトークン T 個をつないだ DiT の系列（全体で self-attention） | — | ADR 0138 決定 2 |
 | text refiner (`dit_text`) △ | テキストリファイナー | テキストトークンだけに掛かる Linear + 2 block（modulation なし）。1 生成で分岐ごとに 1 回だけ回す別グラフで、どのプリセットでも f32 の計算 | — | ADR 0138 決定 3 |
 | text context (`text_context`) △ | テキスト文脈 | `dit` の入力 `[1,S,3072]`。テキストの行にリファイナーの出力、画像の行に 0 を置く | — | ADR 0138 決定 2・3 |
@@ -312,7 +312,7 @@
 | latent BatchNorm restoration (`latent_batch_norm`) △ | BatchNorm の復元 | VAE の前に BatchNorm の running 統計で `z · std + mean` に戻す手順（とその資産）。その後の unpatchify（128 → 32 チャネル・2 倍）は別のホスト側の手順 | — | ADR 0138 決定 8 |
 | untiled decoder (MOSS-Image VAE) △ | タイルなしの decoder | FLUX.2 の decoder を画像全体で回す形。記号長の 3 グラフに割り、resident tensor で受け渡す | — | ADR 0138 決定 8 |
 | area cap (MOSS-Image) △ | 受理の面積の上限 | タイルなしの decoder の最大の中間テンソルが binding 1 本に収まる面積（2 GiB で 2,796,160 画素）。device ごとの値 | — | ADR 0138 決定 8・limitations |
-| reference preset / practical preset (MOSS-Image) △ | 参照側のプリセット / 実用プリセット | `f32+dit8`（i8 の DiT の重み × f32 の計算）は `f32+dit8-a8-attn8-online`（同じ重みで `dit` / `dit_skip22` に a8 の linear と online の attention）の参照側のプリセット。既定は実用プリセット（manifest が持つ・コードには既定なし） | — | ADR 0138 決定 13 |
+| reference preset / practical preset (MOSS-Image) △ | 参照側のプリセット / 実用プリセット | `f32+dit8`（i8 の DiT の重み × f32 の計算）は `f32+dit8-a8-attn8-online`（同じ重みで `dit` / `dit_skip22` に a8 の linear と online の attention）の参照側のプリセット。既定は実用プリセット（manifest の `defaultQuant`・コードには既定なし） | — | ADR 0138 決定 13 |
 
 ## 画像の後処理
 
