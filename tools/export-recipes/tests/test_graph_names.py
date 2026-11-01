@@ -290,10 +290,13 @@ class TestTheNamesAreTheWeightsKeys:
         assert self._named("gemma4_qat") == {GEMMA4_ROLE}
 
     def test_moss_names_its_dit_and_vae_graphs(self) -> None:
-        """MOSS-Image has no distribution plan yet: the DiT script names the
-        three graphs of the MOSS-Image ADR (`dit` / `dit_skip22`, which borrows every weight of
-        `dit` / `dit_text` — `moss.dit_patch`), and the VAE script its three decoder graphs
-        (`moss.vae_patch`)."""
+        """The DiT script names the three graphs of the MOSS-Image ADR (`dit` / `dit_skip22`,
+        which borrows every weight of `dit` / `dit_text` — `moss.dit_patch`), and the VAE script
+        its three decoder graphs (`moss.vae_patch`). The distribution plan's seventh component,
+        `text_encoder`, is written by the Qwen3.5 text recipe (`qwen3_5.export`), which does not
+        import its consumer — so the union is matched against `MOSS_WEIGHTS` here."""
+        from moss.distribution import MOSS_WEIGHTS
+
         assert self._named("moss") == {
             "dit",
             "dit_skip22",
@@ -302,6 +305,7 @@ class TestTheNamesAreTheWeightsKeys:
             "vae_decoder_attn",
             "vae_decoder_post",
         }
+        assert self._named("moss") | self._named("qwen3_5") == set(MOSS_WEIGHTS)
 
     @pytest.mark.parametrize("family", ["embeddinggemma", "minicpm5"])
     def test_the_solo_families_name_the_single_part_convention(self, family: str) -> None:
