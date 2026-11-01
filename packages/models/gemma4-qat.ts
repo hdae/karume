@@ -9,6 +9,19 @@
 export { Pipeline } from "./src/gemma/qat-pipeline.ts";
 export type { FromPretrainedOptions, PipelineOptions } from "./src/gemma/qat.ts";
 export { ropeInputs } from "./src/gemma/qat.ts";
+/**
+ * **The table of sources verified with this package version** (one table per family; keys are the
+ * Hugging Face repository name without `karume-`, values are pinned commit SHAs — ADR 0073 / 0092):
+ *
+ * - `SOURCES["gemma4-qat"]` = `hdae/karume-gemma4-qat` (E2B and E4B; the manifest's default is
+ *   E2B, E4B is chosen with `{ model: "e4b" }`)
+ *
+ * **An opt-in for callers who want to follow the package version automatically** — pass the entry
+ * as is as the first argument of {@link Pipeline.fromPretrained}. To pin reproducibility yourself,
+ * write your own `{ repo, revision }` instead of using this table (`fromPretrained` has no
+ * default).
+ */
+export { QAT_SOURCES as SOURCES } from "./src/gemma/config.ts";
 export {
   dropOldestTurns,
   CHUNK_BUCKETS,

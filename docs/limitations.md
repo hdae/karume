@@ -2506,7 +2506,8 @@ hub's own received-byte check (the `fetch` wrapper) was removed. The checks on b
 ## Gemma 4 QAT: a fixed mobile format at the experimental stage
 
 `gemma4-qat` is a separate family from regular `gemma4` and handles only the text generation of the official mobile Transformers format E2B / E4B.
-It keeps fixed INT2 / INT4 / INT8, SRQ and packed PLE. MTP, vision, audio and a public source pin are not supported.
+It keeps fixed INT2 / INT4 / INT8, SRQ and packed PLE. MTP, vision and audio are not supported. The distribution
+`karume-gemma4-qat` (E2B and E4B) is published on Hugging Face since 0.15.1 (`gemma4Qat.SOURCES["gemma4-qat"]` — ADR 0097 addendum 9).
 The local usage example is the QAT CLI (`examples/gemma4-qat/README.md` (removed in 0.15)), the numeric contract is [ADR 0097](decisions/0097-gemma4-qat-integration.md),
 the terms are in the [glossary](glossary.md), and the source of the measurements is the [measurement record of the QAT review](research/2026-09-19-qat-review.md).
 

@@ -232,6 +232,7 @@ RELEASE_REPOSITORIES = [
     ("lucida", ["1024", "2048"], None, "karume-lucida"),
     ("depth-anything", ["small"], None, "karume-depth-anything-v2"),
     ("gemma4", ["e2b"], None, "karume-gemma4"),
+    ("gemma4-qat", ["e2b", "e4b"], None, "karume-gemma4-qat"),
     ("irodori", ["v4-small"], None, "karume-irodori-v4-small"),
     ("irodori", ["v4.1-small"], None, "karume-irodori-v4.1-small"),
     # `--repo` 無しで公開リポを指す（Pipeline がファミリーのリポ名を宣言する — W-RC5-2）。

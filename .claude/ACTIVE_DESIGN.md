@@ -60,7 +60,7 @@
   The source of truth for the whole work is "after the 0.12.0 release" of the [archived finished sections](../docs/research/2026-09-22-backlog-archive-0.5.0-to-0.12.0.md).
 - Regular Gemma and fixed mobile QAT are separate families. `gemma4Qat.Pipeline` handles E2B/E4B text generation with a shared pipeline.
   The contracts of INT2/4/8, fixed SRQ and packed PLE are [ADR 0097](../docs/decisions/0097-gemma4-qat-integration.md).
-  QAT's MTP, vision, audio and public source pins are unsupported. Because CPU/GPU reduction differences cross SRQ boundaries, bit identity of the whole model is not guaranteed.
+  QAT's MTP, vision and audio are unsupported; the distribution is published on HF as `hdae/karume-gemma4-qat` with 0.15.1 (`gemma4Qat.SOURCES["gemma4-qat"]` — ADR 0097 addendum 9). Because CPU/GPU reduction differences cross SRQ boundaries, bit identity of the whole model is not guaranteed.
   The rulings after the [review](../docs/research/2026-09-19-qat-review.md) of 2026-09-19 are [ADR 0097 addendum 7](../docs/decisions/0097-gemma4-qat-integration.md).
   The distribution defaults are the same as regular Gemma: capacity 4096, chunkLength 768 and trace cap 768; the interactive CLI's default is 256 tokens.
   The recipe does not insert the identity SRQ with scale=0, and the structure check allows omitting SRQ only for the shared head. Quality acceptance for contexts over 512 is not part of this work.

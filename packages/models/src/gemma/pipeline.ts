@@ -1126,7 +1126,7 @@ export class GemmaPipeline {
       where,
       family === "gemma4"
         ? 'SOURCES["gemma4"] (@karume/models/gemma)'
-        : "an explicitly given source of a QAT distribution",
+        : 'SOURCES["gemma4-qat"] (@karume/models/gemma4-qat)',
     );
     const hubOptions: FetchAssetsOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);

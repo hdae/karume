@@ -29,7 +29,8 @@ reduction crosses a rounding boundary, so a unit-level match cannot guarantee wh
 2. The future distribution repo is `karume-gemma4-qat` and the manifest pipeline name `gemma4-qat`;
    the old Gemma reader keeps refusing this pipeline. No source pin is made before publication;
    acceptance uses the local distribution; publishing is not part of this work. (Kept 2026-10-18: still
-   unpublished at 0.14.0, `CHANGELOG.md`; this decision is updated when it is published.)
+   unpublished at 0.14.0, `CHANGELOG.md`; this decision is updated when it is published. Published
+   2026-11-01 with 0.15.1 — Addendum 9.)
 3. Execution, tokenizer, chat, RoPE and fetching reuse the existing Gemma implementation; the pipeline
    is not duplicated because of the new family. The QAT entry explicitly checks the supported form and
    the presence of the fixed rounding.
@@ -278,3 +279,14 @@ Addendum 1's storage is, from ADR [0108](0108-container-format.md) on, codec `in
 binding-table `encoding` (0108 decisions 12 / 13, [container-v1](../container-v1.md) §6); safetensors
 `I2` is not accepted; manifest `karume/5` carries the field ([0109](0109-manifest-v5-container.md)
 decision 2). Addendum 4's PLE sidecar moved to container assets ([0085](0085-ple-host-gather.md), 2026-09-22).
+
+## Addendum 9 (2026-11-01) — published on Hugging Face
+
+The distribution is published as `hdae/karume-gemma4-qat` with 0.15.1 (models `e2b` and `e4b`, the
+manifest's default `e2b`; release-runbook §3 "First publication of a family"). Decision 2's "no
+source pin before publication" is fulfilled rather than reversed: the pin is made now, at
+publication. The subpath `@karume/models/gemma4-qat` gains `SOURCES` (key `"gemma4-qat"`, folded into
+`KARUME_SOURCES`; it is declared beside regular Gemma's table in `packages/models/src/gemma/config.ts`
+because both families share that directory), and the omitted-ref diagnostic of
+`gemma4Qat.Pipeline.fromPretrained` names `gemma4Qat.SOURCES["gemma4-qat"]` — spelled
+`SOURCES["gemma4-qat"] (@karume/models/gemma4-qat)`. MTP, vision and audio stay unsupported.

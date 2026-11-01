@@ -28,6 +28,7 @@ import { localDirectory } from "@karume/hub";
 import { toManifestSource, toRepoRef } from "../src/hub/repo-ref.ts";
 import * as anima from "../anima.ts";
 import * as birefnet from "../birefnet.ts";
+import * as gemma4Qat from "../gemma4-qat.ts";
 import * as umt5 from "../umt5.ts";
 import * as wan from "../wan.ts";
 import * as moss from "../moss.ts";
@@ -210,4 +211,17 @@ test("fromPretrained: MOSS-Image points at its source table when ref is missing"
     "moss.Pipeline.fromPretrained: repo is required",
   );
   assertMatch(error.message, /(?<![\w.])SOURCES\["moss-image"\] \(@karume\/models\/moss\)/);
+});
+
+test("fromPretrained: Gemma 4 QAT points at its source table when ref is missing", async () => {
+  // The table came with the family's first publication (0.15.1). It shares the load body with
+  // regular Gemma (`GemmaPipeline.loadPretrained`), so each family must name its own table.
+  const fetchStub: typeof globalThis.fetch = (input) =>
+    Promise.reject(new Error(`repo_ref_test: reached the fetch layer (${describeRequest(input)})`));
+  const error = await assertRejects(
+    () => gemma4Qat.Pipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
+    Error,
+    "gemma4Qat.Pipeline.fromPretrained: repo is required",
+  );
+  assertMatch(error.message, /(?<![\w.])SOURCES\["gemma4-qat"\] \(@karume\/models\/gemma4-qat\)/);
 });

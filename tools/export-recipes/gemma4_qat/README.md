@@ -33,7 +33,8 @@ text-only conversion never read (KV cache scales, vision, audio). Distribution a
 those counts against the series itself. Exporting into an existing output replaces that complete
 series; use a new directory to retain previous measurements.
 
-The distribution family is `gemma4-qat/1`, with models `e2b` and `e4b`. The `i4` quant is
+The distribution family is `gemma4-qat/1`, with models `e2b` and `e4b`. It is published on
+Hugging Face as `hdae/karume-gemma4-qat` (`SOURCES["gemma4-qat"]` of `@karume/models/gemma4-qat`). The `i4` quant is
 fixed mixed INT2/INT4/INT8 with SRQ and reference summation for GEMV and attention. Both models
 default to `i4-fast`, which uses the same weights and declares parallel GEMV, fused parallel
 attention (`parallel-fused`), RMS-add fusion, linear-to-SRQ fusion, the per-layer-input gate
