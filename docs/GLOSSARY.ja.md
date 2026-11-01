@@ -297,7 +297,7 @@
 
 | 英語（コード・docs） | 日本語（対話） | 意味 | やめる言い方 | 正本 |
 | --- | --- | --- | --- | --- |
-| MOSS-Image (family `moss`) △ | MOSS-Image | OpenMOSS の 5B の text-to-image DiT（テキストエンコーダは Qwen3.5-9B・VAE は FLUX.2）。Karume には DiT と VAE があり、2026-10-31 からテキストエンコーダ（ADR 0137）もプロンプトの形で繋がった。manifest のステップまで内部のファミリー（ブランチ `wip/moss-image`） | — | ADR 0138 |
+| MOSS-Image (family `moss`) △ | MOSS-Image | OpenMOSS の 5B の text-to-image DiT（テキストエンコーダは Qwen3.5-9B・VAE は FLUX.2）。Karume には DiT と VAE があり、2026-10-31 からテキストエンコーダ（ADR 0137）もプロンプトの形で繋がった。manifest のステップまで内部のファミリー（`main` にあるが公開の入口はまだ無い） | — | ADR 0138 |
 | joint sequence (S = N + T) △ | 結合系列 | 画像トークン N 個とテキストトークン T 個をつないだ DiT の系列（全体で self-attention） | — | ADR 0138 決定 2 |
 | text refiner (`dit_text`) △ | テキストリファイナー | テキストトークンだけに掛かる Linear + 2 block（modulation なし）。1 生成で分岐ごとに 1 回だけ回す別グラフで、どのプリセットでも f32 の計算 | — | ADR 0138 決定 3 |
 | text context (`text_context`) △ | テキスト文脈 | `dit` の入力 `[1,S,3072]`。テキストの行にリファイナーの出力、画像の行に 0 を置く | — | ADR 0138 決定 2・3 |

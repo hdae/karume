@@ -7,7 +7,8 @@
   `packages/e2e/tests/e2e_qwen3_5_encoder_test.ts`, the host tests
   `packages/models/tests/qwen3_5_{session_io,encoder}_test.ts`, the lane `models:qwen3_5` and the
   reference rows `packages/models/tests/fixtures/references/qwen3_5.json`. Not the MOSS-Image wiring
-  (a later step on the unmerged MOSS branch) and not the recipe (`tools/export-recipes/qwen3_5`).
+  (a later step in `packages/models/src/moss/` — ADR 0138's addendum of 2026-10-31) and not the
+  recipe (`tools/export-recipes/qwen3_5`).
 - Related: [0135](0135-gated-delta-rule-scan.md) (`gated_delta_scan`, the op 24 of the 32 layers
   run) / [0119](0119-wan-umt5-gpu-text-encoder.md) (umT5 on the GPU: the module shape this follows,
   the Session per generation — decision 11 — and the band rule of decision 8) /
@@ -76,8 +77,8 @@ runs) cannot stay resident beside the MOSS DiT and VAE.
    it, encodes the positive and the negative prompt, and disposes it before the DiT stage — Wan's
    umT5 text stage (ADR 0119 decision 11). Measured on the RTX 3080 Ti: building the Session takes
    8.3 s with the parts in the page cache; one encoding takes 60 ms at T = 10, 196 ms at T = 63 and
-   1.40 s at T = 1,000 (warm medians). The MOSS-Image consumer is wired on the MOSS branch (the
-   addendum below).
+   1.40 s at T = 1,000 (warm medians). The MOSS-Image consumer is wired in
+   `packages/models/src/moss/` (the addendum below).
 5. **Storage: i8 per-channel weights and f32 tensors only, and no execution knob.** The graph
    contract rejects any other storage (BF16, an all-f32 container, a shared declaration), and the
    session policy accepts no `session` key: that combination is what decision 6 verified, and the
@@ -145,8 +146,8 @@ runs) cannot stay resident beside the MOSS DiT and VAE.
 
 ## Addendum (2026-10-31) — the first consumer: MOSS-Image's prompt form
 
-Decision 4's consumer exists on the MOSS branch (ADR [0138](0138-moss-image-dit-vae.md), its
-addendum of 2026-10-31 — the narrow scope of the maintainer's ruling 53 a: no manifest or
+Decision 4's consumer exists in `packages/models/src/moss/` (ADR [0138](0138-moss-image-dit-vae.md),
+its addendum of 2026-10-31 — the narrow scope of the maintainer's ruling 53 a: no manifest or
 distribution yet, the caller opens this series and the tokenizer asset). What it does with this
 module, as decided above:
 

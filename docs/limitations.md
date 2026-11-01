@@ -280,7 +280,7 @@ dot product, and S in VRAM has f32 width. The canonical source of the decision i
   The accepted set is not narrowed.
 - **Wan2.1 / Wan2.2**: for every accepted shape (dimensions × frame count), both self and cross run as
   declared.
-- **MOSS-Image** (branch `wip/moss-image`): its practical preset declares the online kernel, which
+- **MOSS-Image** (internal family — no public surface yet): its practical preset declares the online kernel, which
   runs every key length, so on a device with an online form every forward runs as declared (the
   negative branch's joint sequence S = N + 10 is never a multiple of 4 at square sizes, and the
   positive branch's depends on the prompt length). On a device with neither online form it runs the
@@ -1684,12 +1684,12 @@ By-design constraints of `wan.Ti2vPipeline` (Wan2.2 TI2V-5B) in `@karume/models/
 ## MOSS-Image: text as prompt strings or precomputed embeddings, no default negative; the area is capped by the VAE's storage binding (2,796,160 px at 2 GiB); whether a size fits VRAM is checked per stage
 
 By-design constraints of the family's internal entry (`generateMoss` and its acceptance check `planMossGenerate` in
-`packages/models/src/moss/` — ADR [0138](decisions/0138-moss-image-dit-vae.md), branch `wip/moss-image`). Every
+`packages/models/src/moss/` on `main` — ADR [0138](decisions/0138-moss-image-dit-vae.md)). Every
 input-caused rejection is a `ModelInputError` before any GPU work.
 
 - **Not public**: no subpath, no barrel entry, no distribution and no manifest yet (ADR 0138 decision 12; the text
   encoder is wired since 2026-10-31, publication is the manifest step — the maintainer's ruling 53 a); not part of the
-  0.15 release. The caller opens the series itself, the Qwen3.5 text series and its tokenizer asset included.
+  0.15.0 release. The caller opens the series itself, the Qwen3.5 text series and its tokenizer asset included.
 - **Text in one of two forms** (ADR 0138 addendum of 2026-10-31): prompt strings (`prompt` / `negativePrompt` — the
   chat template and the tokenizer in the acceptance check, the i8 Qwen3.5 text tower on the GPU), or upstream's
   `encode_prompt` outputs, `[T, 4096]` f32 with 1 ≤ T ≤ 4,096 and every value finite (`positive` / `negative` — for the

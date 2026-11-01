@@ -1,8 +1,8 @@
 # MOSS-Image (host side)
 
 MOSS-Image's text encoder, DiT and FLUX.2 decoder (ADR
-[0138](../../../../docs/decisions/0138-moss-image-dit-vae.md) and its addendum of 2026-10-31, branch
-`wip/moss-image`): `generateMoss` (`generate.ts`) turns a prompt into an image `[3, H, W]` in
+[0138](../../../../docs/decisions/0138-moss-image-dit-vae.md) and its addendum of 2026-10-31):
+`generateMoss` (`generate.ts`) turns a prompt into an image `[3, H, W]` in
 `[-1, 1]` with the Qwen3.5-9B text tower (ADR [0137](../../../../docs/decisions/0137-qwen3_5-text-encoder.md)),
 the DiT of `OpenMOSS-Team/MOSS-Image-SFT` and its untiled VAE decoder. The text comes in one of two
 forms: prompt strings (`prompt` / `negativePrompt`, encoded on the GPU), or precomputed encoder

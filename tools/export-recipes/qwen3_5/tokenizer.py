@@ -7,7 +7,8 @@ Two outputs, always from one run (made from the same tables, so the run-time ass
 cannot drift apart — the `anima.demo` / `wan.umt5_xxl_tokenizer` discipline):
 
   1. the run-time asset `outputs/series/qwen3_5-tokenizer/tokenizer.json` (untracked, about 7 MB) —
-     the asset `tokenizer` of the MOSS-Image text-encoder distribution (wired on the MOSS branch);
+     the asset `tokenizer` of the MOSS-Image text-encoder distribution (wired in
+     `packages/models/src/moss/`);
   2. the fixture `packages/models/tests/fixtures/qwen3_5/tokenizer-cases.json` (tracked).
 
 Format the fixture afterwards (`vp fmt packages/models/tests/fixtures/qwen3_5/` — the committed form

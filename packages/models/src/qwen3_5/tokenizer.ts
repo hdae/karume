@@ -3,8 +3,8 @@
  * tower of Qwen3.5-9B) receives its input.
  *
  * Shared across families like `src/umt5/` (which Wan imports), but **no public subpath export yet**:
- * its only consumer, the MOSS-Image pipeline, is not on main (branch `wip/moss-image` imports this
- * module after a rebase). The subpath is added together with the first published consumer.
+ * its only consumer, the MOSS-Image pipeline (`src/moss/`), is an internal family with no public
+ * surface yet. The subpath is added together with the first published consumer.
  *
  * ## Source of truth (measured 2026-10-31)
  *

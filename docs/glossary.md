@@ -277,7 +277,7 @@
 | Generation table (Wan distribution recipe)                               | A frozen dataclass (`WanGeneration` / `WanCard`) that collects the distribution facts that differ between Wan2.1 / 2.2 (repository name, pipeline, series, storage label, pin of the text assets, quant table and default preset, `pipelineConfig`, NOTICE, card). The plan function and the card skeleton are one each; a generation swaps the table                                                                                         | ADR 0121 addendum "stage 8a results", `tools/export-recipes/wan/distribution.py`                                                                                            |
 | Seams (of the DiT pass)                                                  | The parts of one Wan DiT step in which the GPU is not computing the DiT — per-pass input uploads and output readbacks, and the host's patchify / unpatchify / CFG / UniPC / finiteness checks. The measurement splits one step into segA / segB / segC at run completion markers (segC is host only; segA / segB are mostly run time, and the seams inside them are estimated by a preliminary survey)                                        | [research 2026-10-15](research/2026-10-15-wan-dit-seams-h37.md), [perf-ledger](perf-ledger.md) H-37                                                                         |
 
-## Image generation — MOSS-Image (ADR 0138, branch `wip/moss-image`)
+## Image generation — MOSS-Image (ADR 0138)
 
 | Term | Meaning (summary) | Source |
 | ---- | ----------------- | ------ |

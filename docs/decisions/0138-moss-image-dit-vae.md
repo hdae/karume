@@ -9,10 +9,12 @@
   decision 9 since 2026-10-31, in the narrow scope of the maintainer's ruling 53 a (Addendum of
   2026-10-31).
 - Date: 2026-10-27
-- Scope: branch `wip/moss-image`, its own branch: MOSS-Image is not part of the 0.15 release (it
-  has no text encoder yet), so the branch was not merged into `wip/0.15`. It was rebased onto `main`
-  after the 0.15.0 release (2026-10-31), and this ADR got its number then (two branches added ADRs
-  in parallel, so a number taken earlier could have collided silently on a rebase).
+- Scope: the internal family `packages/models/src/moss/` on `main` (no subpath, barrel entry or
+  distribution yet — decision 12; the distribution step is next). The work was developed on its own
+  branch `wip/moss-image` and was not part of the 0.15.0 release (it had no text encoder then). It
+  was rebased onto `main` after the 0.15.0 release (2026-10-31), and this ADR got its number then
+  (two branches added ADRs in parallel, so a number taken earlier could have collided silently on a
+  rebase); it was taken into `main` 2026-11-01.
 - Related: ADR [0121](0121-wan22-ti2v-5b.md) (Wan2.2 — stage pattern, `where` with a condition mask,
   meta-trace export, layer-by-layer f64 reference, numeric baseline) /
   [0119](0119-wan-umt5-gpu-text-encoder.md) (big-model export) / [0118](0118-wan21-video-generation.md)
@@ -511,7 +513,7 @@ storage and the DiT overrides it to i8 — the name `i8` alone would claim an i8
 | 3     | op inventory; `Upsample2D` rewrite; `group_norm` op; three VAE graphs; host BatchNorm restoration and unpatchify                                 | census of `upsample2x`; kernel four-point check with offset inputs; GroupNorm values at a group near the cap; VAE band vs upstream; VAE-stage peak at the cap | done  |
 | 4     | sampler and end-to-end                                                                                                                          | σ columns bit-identical; host CFG + Euler bit-identical from recorded DiT outputs; 2-step parity bands; sha rows; 1024² × 50 steps completes (opt-in) | done  |
 | 5     | presets, a8, key valid length (decision 10), VRAM and speed on the 3080 Ti                                                                     | key-valid-length check against f64 and the TS mirror, pad-content atol 0, fault injection; self A/B check per branch and graph with the existing census check; timing before and after decision 10; VRAM at 1024², 2M pixels and the cap; visual review | done  |
-| 6     | docs; when the branch is taken in: rebase, ADR number                                                                                           | `vp check`, the language gate, the family and core lanes; after the rebase the full verification                                              | docs done; rebased onto `main` and numbered 2026-10-31; the full verification after the rebase pending |
+| 6     | docs; when the branch is taken in: rebase, ADR number                                                                                           | `vp check`, the language gate, the family and core lanes; after the rebase the full verification                                              | docs done; rebased onto `main` and numbered 2026-10-31; taken into `main` 2026-11-01; the full verification after the rebase pending |
 
 ## Results (stages 2–5, 2026-10-27 to 2026-10-28, RTX 3080 Ti 12 GiB, Node + Dawn)
 
