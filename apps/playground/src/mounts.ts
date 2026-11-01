@@ -6,14 +6,14 @@
  *
  * The object form also serves the mount on the HF-compatible route (`/hf/`) under the public repo name
  * of the family's `SOURCES` table, so a page can read it through the hub's CacheStorage. A
- * directory without a public repo (Gemma 4 QAT) or one only reached as a cross-repo reference (umT5)
- * is mounted for the direct route only.
+ * directory only reached as a cross-repo reference (umT5) is mounted for the direct route only.
  */
 
 import * as anima from "@karume/models/anima";
 import * as birefnet from "@karume/models/birefnet";
 import * as depthAnything from "@karume/models/depth-anything";
 import * as gemma from "@karume/models/gemma";
+import * as gemma4Qat from "@karume/models/gemma4-qat";
 import * as irodori from "@karume/models/irodori";
 import * as moss from "@karume/models/moss";
 import * as sbv2 from "@karume/models/sbv2";
@@ -61,8 +61,10 @@ export const MOUNTS = {
   },
   sbv2: { directory: "models/karume-sbv2-jvnv", hfRepo: sbv2.SOURCES["sbv2-jvnv"].repo },
   gemma4: { directory: "models/karume-gemma4", hfRepo: gemma.SOURCES["gemma4"].repo },
-  // No public repo (gemma.SOURCES holds only `gemma4`): the direct route only.
-  "gemma4-qat": "models/karume-gemma4-qat",
+  "gemma4-qat": {
+    directory: "models/karume-gemma4-qat",
+    hfRepo: gemma4Qat.SOURCES["gemma4-qat"].repo,
+  },
   "moss-image": {
     directory: "models/karume-moss-image",
     hfRepo: moss.SOURCES["moss-image"].repo,

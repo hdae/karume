@@ -692,7 +692,7 @@ export const Gemma4Page = () => {
                 label="Model"
                 hint={
                   modelKey?.mount === "gemma4-qat"
-                    ? "Mobile QAT (gemma4Qat.Pipeline): experimental, fixed int2/int4/int8 with SRQ, no MTP; direct route only."
+                    ? "Mobile QAT (gemma4Qat.Pipeline): experimental, fixed int2/int4/int8 with SRQ, no MTP."
                     : "Regular Gemma 4 (gemma.Pipeline)."
                 }
               >

@@ -83,8 +83,8 @@ import { type ArmPromptSummary, summarizeRuns } from "./summary";
 import { createGpuTap, type DeviceProbe, type GpuTap } from "./tap";
 
 /**
- * Both distributions are read over the direct route: the QAT distribution has no HF-compatible
- * route, and reading the regular one the same way keeps the source out of the comparison.
+ * Both distributions are read over the direct route (both also have a cached one, which the bench
+ * does not offer): one route for every arm keeps the source out of the comparison.
  */
 const DIRECT_SOURCE: PipelineSource = { kind: "direct" };
 
@@ -359,9 +359,8 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
                 A model of either distribution at one preset. Every visit builds the arm&apos;s
                 pipeline, runs its chats and releases it before the next visit, so two models are
                 never resident at once. Both distributions are read over the direct route (
-                <code>/models/</code>, plain fetch): the QAT one has no HF-compatible route, so the
-                regular one is read the same way and the source stays out of the comparison. Arm 1
-                is the one the summary compares the others with.
+                <code>/models/</code>, plain fetch), so the source stays out of the comparison. Arm
+                1 is the one the summary compares the others with.
               </CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-4">

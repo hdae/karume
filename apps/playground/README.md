@@ -79,7 +79,7 @@ root. The HF-compatible repo is the public name from the family's `SOURCES` tabl
 | `irodori-v4.1` | `models/karume-irodori-v4.1-small` | `hdae/karume-irodori-v4.1-small` | Irodori-TTS |
 | `sbv2` | `models/karume-sbv2-jvnv` | `hdae/karume-sbv2-jvnv` | Style-Bert-VITS2 |
 | `gemma4` | `models/karume-gemma4` | `hdae/karume-gemma4` | Gemma 4 chat |
-| `gemma4-qat` | `models/karume-gemma4-qat` | — (no public repo: direct only) | Gemma 4 chat |
+| `gemma4-qat` | `models/karume-gemma4-qat` | `hdae/karume-gemma4-qat` | Gemma 4 chat |
 | `moss-image` | `models/karume-moss-image` | `hdae/karume-moss-image` | MOSS-Image |
 
 A missing directory does not stop the server: it logs a warning, `/models/<name>/` answers 404, and
@@ -903,7 +903,7 @@ and **Copy record** copies the JSON.
 ## The Gemma 4 chat page
 
 A multi-turn chat with regular Gemma 4 (`gemma.Pipeline`, mount `gemma4`) or a mobile QAT model
-(`gemma4Qat.Pipeline`, mount `gemma4-qat`: E2B / E4B, experimental, direct route only). The page
+(`gemma4Qat.Pipeline`, mount `gemma4-qat`: E2B / E4B, experimental). The page
 acquires the GPU once (`acquireGpu({ subgroups: "available" })`). **Load** builds the pipeline:
 `fromPretrained` reads every weight and builds the Session (gigabytes), so nothing is read until
 Load is pressed. The conversation is one `gemma.ChatSession`. It carries the KV between turns that
@@ -914,7 +914,7 @@ One turn runs at a time.
 | --- | --- |
 | Model | Every model of both manifests (`Gemma 4 — e2b`, `Gemma 4 QAT — e2b` / `e4b`), each manifest's `defaultModel` marked "(default)". Applies on the next Load. |
 | Preset | The model's `quants`; `defaultQuant` is preselected and marked "(default)". Applies on the next Load. |
-| Source | **Cached** (the hub's cache over `/hf/`) or **Direct** (`/models/`). The QAT distribution has no public repo, so it is Direct only. Applies on the next Load. |
+| Source | **Cached** (the hub's cache over `/hf/`) or **Direct** (`/models/`), for either distribution. Applies on the next Load. |
 | MTP drafter | Regular Gemma 4 with drafter weights only: builds the drafter (`speculative: {}`). The session then speculates with the self-tuning gate. Off by default. Applies on the next Load. |
 | Collect Session diagnostics | Passes `onRunDiagnostics` to `fromPretrained`. The record then gets per-run counts and the Session diagnostics. **It changes the decode path**: without it the pipeline picks greedy (temperature 0) tokens on the GPU (an 8-byte readback per token). With it every greedy token reads the whole logits row back and is picked on the CPU. Off by default; leave it off to measure decode rates. Applies on the next Load. |
 | Load / Load again | Builds the pipeline for the selection and starts a new chat. A note says when the selection differs from the loaded pipeline. |
@@ -1052,8 +1052,8 @@ A decode A/B of regular Gemma 4 (`gemma.Pipeline`, mount `gemma4`) and the mobil
 (`gemma4Qat.Pipeline`, mount `gemma4-qat`), kept as a page so each measurement wave reuses it
 (ADR 0127 decision 5). An **arm** is a model of either distribution at one preset, with the GPU tap
 on or off. The page builds each arm's pipeline the way the chat page does (`buildGemmaPipeline`),
-always over the **direct route**: the QAT distribution has no HF-compatible route, so the regular one
-is read the same way and the source stays out of the comparison.
+always over the **direct route** (both distributions also have a cached route, which the bench does
+not offer): one route for every arm keeps the source out of the comparison.
 
 **The GPU tap** (`src/models/gemma4-bench/tap.ts`). The page acquires its GPU through a wrapper of
 `navigator.gpu` (`acquireGpu({ subgroups: "available", gpu: tap.gpu })`). The wrapper requests
