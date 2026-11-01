@@ -44,7 +44,7 @@ def placeholder_sites(root: Path) -> list[str]:
 
 
 def test_the_scan_finds_a_placeholder(tmp_path):
-    """The scan itself finds a placeholder (the check below would pass on a scan that finds none)."""
+    """The scan itself finds a placeholder (the check below would pass on a scan finding none)."""
     (tmp_path / "a.py").write_text("x = 1  # ADR " + "N" * 4 + " decision 3\n", encoding="utf-8")
     (tmp_path / "b.md").write_text("ADR 0065\n\nsee ADR\n" + "N" * 4 + "\n", encoding="utf-8")
 
