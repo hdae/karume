@@ -45,7 +45,7 @@ activations. On an Intel Arc B570, `i4-fast` cut GPU decode time per step by 49%
 (E4B) against `i4`; no single flag was slower on its own. A manifest that declares
 `stateAttentionReduce` needs a reader that knows that key (the release after 0.13.0); older
 readers reject it. Likewise a manifest that declares `fuseGeluMulStaticQuantize` needs a reader
-that knows that key (the release after 0.15.0).
+that knows that key (0.15.1 and later).
 Explicit runtime options override quant settings, including
 setting a fusion flag back to `false`. To use sequential GEMV with
 `i4-fast`, also set `fuseLinearStaticQuantize: false` and `packedStaticQuantize: false`,

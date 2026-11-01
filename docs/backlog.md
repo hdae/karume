@@ -7,11 +7,12 @@
 > [perf-ledger](perf-ledger.md); this file only refers to them as waves ④ the source of truth for by-design constraints is
 > [limitations](limitations.md) — a constraint appears here only when a ruling turns it into work.
 
-## now — after the 0.15.0 release (released 2026-10-31)
+## now — after the 0.15.1 release (released 2026-11-01)
 
-0.15.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.15.0; HF re-uploads of anima, anima-extra,
-wan2.2, irodori v4.1-small and gemma4, card-only updates of the other published repositories; published-smoke green on
-Node and Deno). The next wave is 0.15.1 — Gemma 4 QAT decode speed (the first item of *later*), started in a new session.
+0.15.1 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.15.1 — Gemma 4 QAT decode speed (perf-ledger
+K-97, K-48 step 1b, K-99), the ops `gated_delta_scan` and `group_norm`, `@karume/models/moss`; HF first publications of
+`hdae/karume-moss-image` and `hdae/karume-gemma4-qat`, the other repositories unchanged; published-smoke green on Node
+and Deno). The next release is the Gemma 4 expansion (*later*); what remains of the QAT decode-speed item stays below.
 
 ## later
 
