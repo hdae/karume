@@ -24,6 +24,7 @@ each notice lists the specialization. diffusers ships no `NOTICE` file.
 | `src/anima/sampler.ts`                   | `modular_pipelines/anima/before_denoise.py` — `AnimaSetTimestepsStep.__call__`                                                                                                           | Copyright 2026 The HuggingFace Team. All rights reserved.                                     |
 | `src/anima/sampler.ts`                   | `schedulers/scheduling_flow_match_euler_discrete.py` — `FlowMatchEulerDiscreteScheduler.set_timesteps`                                                                                   | Copyright 2025 Stability AI, Katherine Crowson and The HuggingFace Team. All rights reserved. |
 | `src/anima/sampler.ts`                   | `models/embeddings.py` — `get_timestep_embedding`                                                                                                                                        | Copyright 2026 The HuggingFace Team. All rights reserved.                                     |
+| `src/moss/sampler.ts`                    | `schedulers/scheduling_flow_match_euler_discrete.py` — `FlowMatchEulerDiscreteScheduler.step` (the non-stochastic branch)                                                                | Copyright 2025 Stability AI, Katherine Crowson and The HuggingFace Team. All rights reserved. |
 | `src/generation/dpm-solver-multistep.ts` | `schedulers/scheduling_dpmsolver_multistep.py` — `DPMSolverMultistepScheduler.convert_model_output`, `dpm_solver_first_order_update`, `multistep_dpm_solver_second_order_update`, `step` | Copyright 2025 TSAIL Team and The HuggingFace Team. All rights reserved.                      |
 
 ```text
@@ -229,6 +230,20 @@ each notice lists the specialization. diffusers ships no `NOTICE` file.
    See the License for the specific language governing permissions and
    limitations under the License.
 ```
+
+## MOSS-Image — Apache License, Version 2.0
+
+Upstream: [OpenMOSS-Team/MOSS-Image-SFT](https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT) at
+revision `f972bd4b4b9e3852133cc5da954d87bc32cd8fb9` (pinned in
+`tools/export-recipes/moss/sources.py`), whose bundled inference code is released under the Apache
+License, Version 2.0 (the text reproduced in the diffusers section above). The functions were
+rewritten in TypeScript with each tensor operation written out as the CPU computes it; the notice in
+the source file lists them. The upstream file carries no copyright header, and the repository ships
+no `NOTICE` file.
+
+| File in this package  | Ported from                                                   | Upstream copyright                          |
+| --------------------- | ------------------------------------------------------------- | ------------------------------------------- |
+| `src/moss/sampler.ts` | `pipeline_moss_image.py` — `MOSSImageScheduler.set_timesteps` | None in the upstream file (Apache-2.0 code) |
 
 ## Pillow — MIT-CMU License
 
