@@ -62,6 +62,9 @@ export const MOUNTS = {
   gemma4: { directory: "models/karume-gemma4", hfRepo: gemma.SOURCES["gemma4"].repo },
   // No public repo (gemma.SOURCES holds only `gemma4`): the direct route only.
   "gemma4-qat": "models/karume-gemma4-qat",
+  // No public repo (`@karume/models/moss` has no SOURCES table — the distribution is a local
+  // mirror, not published): the direct route only.
+  "moss-image": "models/karume-moss-image",
 } as const satisfies DistributionsPluginOptions["distributions"];
 
 /** The name of a mount (`/models/<name>/`, the key of `/models/index.json`). */

@@ -10,6 +10,7 @@ import {
   BoxesIcon,
   GaugeIcon,
   Grid3x3Icon,
+  ImageIcon,
   type LucideIcon,
   MessageSquareTextIcon,
   MicVocalIcon,
@@ -58,6 +59,15 @@ export const MODEL_PAGES: readonly ModelPage[] = [
     group: "Image",
     icon: SparklesIcon,
     mounts: ["anima", "anima-extra"],
+  },
+  {
+    path: "/moss-image",
+    title: "MOSS-Image",
+    summary:
+      "Text → image with MOSS-Image SFT (Qwen3.5 text encoder, int8 DiT, FLUX.2 VAE) from the local, unpublished distribution. Minutes per 1024² image.",
+    group: "Image",
+    icon: ImageIcon,
+    mounts: ["moss-image"],
   },
   {
     path: "/birefnet",

@@ -10,6 +10,7 @@ A left sidebar switches between the pages, grouped by kind:
 | --- | --- | --- | --- |
 | Video | Wan2.2 TI2V 5B — the presets and the 32-latent VAE tile (`vaeTile: 32`, ADR 0134) on a real GPU | `/wan22` | done |
 | Image | Anima — the official models and the third-party fine-tunes | `/anima` | done |
+| Image | MOSS-Image — text → image from the local, unpublished distribution | `/moss-image` | built; not yet checked in a browser |
 | Vision | BiRefNet (HR / Lucida) | `/birefnet` | done |
 | Vision | Depth Anything V2 | `/depth-anything` | done |
 | Vision | SigLIP 2 | `/siglip2` | done |
@@ -79,6 +80,7 @@ root. The HF-compatible repo is the public name from the family's `SOURCES` tabl
 | `sbv2` | `models/karume-sbv2-jvnv` | `hdae/karume-sbv2-jvnv` | Style-Bert-VITS2 |
 | `gemma4` | `models/karume-gemma4` | `hdae/karume-gemma4` | Gemma 4 chat |
 | `gemma4-qat` | `models/karume-gemma4-qat` | — (no public repo: direct only) | Gemma 4 chat |
+| `moss-image` | `models/karume-moss-image` | — (no public repo: direct only) | MOSS-Image |
 
 A missing directory does not stop the server: it logs a warning, `/models/<name>/` answers 404, and
 the pages show a disabled state naming the directory.
@@ -343,6 +345,80 @@ covers) and a summary of the record.
   hold the failed attempt and the eviction.
 - If the f16 check fails at acquisition, `f16-c16` cannot run on that machine (the error is shown);
   choosing any other preset acquires the GPU without the feature.
+
+## The MOSS-Image page
+
+Text → image with `moss.Pipeline` (`@karume/models/moss`) over the local distribution
+`karume-moss-image` (mount `moss-image`): MOSS-Image SFT with the Qwen3.5 text encoder, the int8
+DiT and the f32 VAE decoder (ADR 0138 and its addendum of 2026-11-01). The distribution is a local
+mirror, not published on Hugging Face (`tools/export-recipes/moss/distribution.py` assembles it),
+so it has no `SOURCES` table and no HF-compatible route: the page reads it over plain fetch from
+`/models/` (the direct route), and nothing is cached.
+
+**Memory and time.** `generate` opens and closes its stages one after another, every generation:
+the text encoder (about 7.4 GiB of int8 weights) is uploaded, encodes the prompts and is released
+before the text refiner, the DiT pair (about 4.5 GiB, `dit_skip22` borrowing `dit`'s weights) and
+the VAE open. Each generation therefore reads and uploads about 12.3 GiB of weights. At 1024² × 50
+steps (the defaults) a generation takes minutes on a desktop GPU; a smaller size or fewer steps is a
+quicker check. The page says this in its help text.
+
+**When the GPU and the pipeline are set up.** The page acquires its GPU with `subgroups:
+"available"` (the online attention kernel's subgroup form, never required). The pipeline is
+**opened on Run** and stays open for the next run while the GPU and the preset stay the same.
+Opening reads the manifest, the container descriptors and the tokenizer and builds no Session, so
+an open pipeline holds no GPU memory between runs. It is disposed when the preset or the GPU
+changes, on **Release pipeline**, and when the page is left. One generation runs at a time. The
+distribution has one model (`sft`); the page runs the manifest's `defaultModel` and offers no model
+choice.
+
+| Control | What it does |
+| --- | --- |
+| Preset | The model's `quants` with the manifest's labels, `defaultQuant` (`f32+dit8-a8-attn8-online`) preselected and marked, the description as the hint. |
+| Prompt | Free text (a descriptive sentence works best; up to 4,096 tokens — a longer prompt is refused, the request's default `overflow`), with four sample prompts. |
+| Negative prompt | Empty = the manifest's default (upstream's: the empty prompt). Disabled and not sent when the guidance in use is 1: no negative branch runs there and the pipeline refuses a negative prompt. |
+| Width / Height | Each a positive multiple of 16; empty = the manifest's default (1024 × 1024), with quick choices (1024², 1152×896, 896×1152, 768², 512²). The pipeline also refuses an area over this device's cap of the untiled VAE. |
+| Steps | A positive integer; empty = the manifest's default (50). The schedule snaps to the 1,000-point training grid, so it may run fewer. |
+| Guidance | The CFG scale, ≥ 0; empty = the manifest's default (3). 1 = no negative branch. |
+| Shift | The flow-matching shift, > 0; empty = the manifest's default (5). |
+| Seed | Integer ≥ 0 (default 42); **Random** draws one. Karume's own noise generator: the same seed does not give upstream's image. |
+| Run | Run one generation (opening the pipeline first when needed). |
+| Release pipeline | In the status card: disposes the open pipeline. A failed dispose is shown in full under the button. |
+
+The status card shows the GPU, cross-origin isolation, the open pipeline (model · preset, seconds to
+open) and the run. **`generate` reports no stage events** (no progress hook, and it takes no
+signal): while it runs the status shows "Generating" and the elapsed time only, and Cancel is
+disabled with a note. Cancel works while the pipeline opens. A run whose GPU lease ends while it
+generates (the page is left, the GPU is acquired again) drops its image when `generate` returns.
+
+The result card shows the image (`imageToRgba` into a canvas; **Download PNG** — lossless, from the
+same RGBA bytes the sha256 covers) and a summary of the record.
+
+### The record (`format: "karume-playground-moss-image/1"`)
+
+| Field | What |
+| --- | --- |
+| `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device` | `recordEnvironment(gpu)` |
+| `distribution` | `mount` (`moss-image`), `directory`, `manifestSha256` (sha256 of the mount's `karume.json`) |
+| `source` | always `{ "kind": "direct" }` (no HF-compatible route) |
+| `model` | `name`, `isDefault` (the manifest's `defaultModel`) |
+| `preset` | `quant`, `label`, `isDefault` |
+| `request` | exactly the fields sent to `generate` (`prompt`, `seed`, plus the fields the form set: `negativePrompt`, `width`, `height`, `steps`, `guidance`, `shift`) |
+| `effective` | the values the run used once the manifest's defaults filled the rest: `width`, `height`, `steps`, `guidance`, `shift`, `negativePrompt` (`null` when not used) |
+| `pipeline` | `reused` (an earlier run's pipeline ran this one) and `openSeconds` (`null` when reused) |
+| `generateSeconds` | `generate` alone (every stage's weight upload, run and release fall inside it) |
+| `output` | `width`, `height`, `rgbaSha256` (sha256 of the RGBA bytes of `imageToRgba`; alpha is always 255) |
+
+There are no `stageSeconds`, `timeline` or `diagnostics`: the pipeline has no stage events and no
+`onRunDiagnostics`.
+
+**Download record (JSON)** saves `moss-image_<UTC timestamp>.json`, **Download PNG** saves
+`moss-image_<UTC timestamp>.png`, **Copy record** copies the JSON.
+
+### Caveats
+
+- No per-stage time, no step counter and no GPU timing (the pipeline exposes none).
+- No cancel during a generation: a 1024² × 50-step run occupies the GPU for minutes once started.
+- `overflow` (`"truncate"` for a prompt over 4,096 tokens) and the `latents` form are not offered.
 
 ## The BiRefNet page
 
