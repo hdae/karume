@@ -15,6 +15,8 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-01
+
 ### Added
 
 - `@karume/models/moss` (barrel namespace `moss`): MOSS-Image text-to-image —
@@ -45,13 +47,35 @@ measurements in `docs/research/`.
   group over a fixed reduction tree. The exporter preserves `aten.group_norm`, so a model with
   `nn.GroupNorm` — also over symbolic spatial axes — exports where it failed before as an
   unsupported `native_group_norm` (`docs/ir-v2.md`; ADR 0138 decision 7).
+- The op `gated_delta_scan` (`@karume/runtime`) and its export (the PyPI package `karume`, custom
+  op `karume::gated_delta_scan`): the Gated DeltaNet recurrence in its value form (prefill) —
+  `q`, `k`, `v`, `g` (log decay), `beta` → `o`, f32, empty attrs, the length axis may be symbolic,
+  and value heads read key heads by the divisible head broadcast of attention's GQA. The GPU runs
+  head dims `dk = dv = 128` and rejects others when the Session is built; the CPU reference keeps
+  the full semantics. A carried state (the decode form) is not in the vocabulary yet
+  (`docs/ir-v2.md`; ADR 0135).
 
 ### Changed
 
-- The gemma4-qat distribution recipe's `i4-fast` (E2B and E4B) declares
-  `fuseGeluMulStaticQuantize: true` (the published 0.15.0 distribution is unchanged until it is
-  rebuilt and uploaded). Generated tokens are identical; on an RTX 3080 Ti under Node the GPU time
-  per decode token drops by about 0.12 ms (E2B, 5.96 → 5.84) and 0.17 ms (E4B, 10.02 → 9.85).
+- The gemma4-qat distribution recipe's default preset `i4-fast` (E2B and E4B) declares
+  `fuseGeluMulStaticQuantize: true`, so a distribution it builds needs 0.15.1 to be read (0.15.0
+  rejects the key; `karume-gemma4-qat` is not published on Hugging Face). Generated tokens are
+  identical; on an RTX 3080 Ti under Node the GPU time per decode token drops by about 0.12 ms
+  (E2B, 5.96 → 5.84) and 0.17 ms (E4B, 10.02 → 9.85).
+- `static_quantize` and the GEMV's fused static-quantize epilogue (`@karume/runtime`, the Gemma 4
+  QAT path) propose the quantization level with one division by the scale and confirm it against
+  the two neighbouring boundaries, falling back to the previous binary search when the check fails
+  (perf-ledger K-97). Outputs are bit-identical; the pipeline keys move to `static_quantize:v2:…`
+  and `…:static-quantize:v2`. On an RTX 3080 Ti under Node the GPU time per decode token of QAT
+  `i4-fast` drops by about 0.20 ms (E2B) and 0.25 ms (E4B).
+- The 256-wide `rms_norm` and the RMS → add fusion (`@karume/runtime`, every family) load their
+  weight and row operands into registers before the reduction and run a constant number of output
+  trips, on rows whose width is a multiple of 256 up to 4096 (perf-ledger K-99; ADR 0017 addendum 2,
+  ADR 0099 addendum of 2026-10-31). Outputs are bit-identical; those shapes take the pipeline keys
+  `rms_norm:v2:f32:lastdim:wg256:trip<n>` and `rms_norm_add:v2:…:trip<n>:…`, and every other width
+  keeps its key and WGSL. On an RTX 3080 Ti under Node the GPU time per decode token of Gemma 4 E2B
+  `i4-fast` drops from 5.79 to 5.42 ms, and QAT E2B from 5.99 to 5.64 ms; on an RTX 5070 Ti in
+  Chrome (D3D12) by 0.34 and 0.39 ms.
 - Online int8 attention (`@karume/runtime`, ADR 0132) accepts any key length: a key length N that is
   not a multiple of 4 pads the int8 Vᵀ rows to `ceil(N/4)` words (pipeline keys
   `attention_online:…:kpad` and `quantize_rows:…:pad` — ADR 0132 addendum of 2026-10-27) instead of
@@ -1929,7 +1953,8 @@ Four distribution repositories were re-uploaded for this release.
   `fetch` injection for `fromPretrained`, and `Symbol.dispose` support on `AnimaPipeline`.
 - Model cards are generated from the manifest when a distribution is assembled.
 
-[Unreleased]: https://github.com/hdae/karume/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/hdae/karume/compare/v0.15.1...HEAD
+[0.15.1]: https://github.com/hdae/karume/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/hdae/karume/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/hdae/karume/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/hdae/karume/compare/v0.12.0...v0.13.0
