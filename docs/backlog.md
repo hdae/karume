@@ -19,8 +19,20 @@ Node and Deno). The next wave is 0.15.1 — Gemma 4 QAT decode speed (the first 
   browser. The attribution of 2026-09-19 ([research](research/2026-09-19-qat-speed-recon.md) §6) names four kernel gaps
   (standalone SRQ dispatches, the occupancy of the INT2 GEMVs, the f32 `per_layer_model_projection`, the sequential INT2
   `lm_head`) and perf-ledger K-45 (integer dot product) as the root fix. Re-measure first and check which GEMV changes
-  since then reach the QAT shapes; QAT E4B's parallel-GEMV rows are unmeasured copies (K-59). `karume-gemma4-qat` stays
-  unpublished on HF.
+  since then reach the QAT shapes; QAT E4B's parallel-GEMV rows are unmeasured copies (K-59). `karume-gemma4-qat` is published on HF
+  since 2026-11-01 (`gemma4Qat.SOURCES["gemma4-qat"]` — ADR 0097 addendum 9).
+- **Gemma 4 expansion — the release after 0.15.1 (maintainer 2026-11-01)**: in this order, (1) the MTP drafter for E4B
+  (`google/gemma-4-E4B-it-assistant`; size M — the target series already has the verify exit, the export script and
+  the tests are E2B-bound; first decide E4B's default preset, still the provisional `i4`), (2) Gemma 4 12B
+  (`google/gemma-4-12B-it`, model type `gemma4_unified`: no PLE, no KV sharing, 48 layers, sliding window 1024; size
+  L — the recipe must move to the meta-trace form the Qwen3.5 encoder uses, about 7.3 GiB at i4), (3) its drafter
+  (size S–M). The QAT drafter (`*-qat-q4_0-unquantized-assistant`, made for the q4_0 QAT line, not the mobile one
+  Karume ships) is set aside. Scoping memos of 2026-11-01: `.claude/reviews/2026-11-02_gemma4-expansion/`
+  (`e4b-drafter.md`, `12b.md`; local, untracked).
+- **One wording for "unofficial converted / quantized model" on every card (maintainer 2026-11-01)**: today only anima
+  (its licence §3(d)) and MOSS-Image (the FLUX marks clause of Black Forest Labs' cards) carry a non-endorsement
+  sentence, each in its own words. Settle one house phrasing in the generic card renderer and decide where it is
+  shown; until then a sentence is added only where an upstream asks for it.
 - **Translation remainder of ADR [0130](decisions/0130-project-language.md) (0.15.x)**: the comments under
   `packages/*/tests` and `tools/export-recipes`, the areas the language allow-list marks `until: "0.15.x"`.
 - **Playground small item (review notes of 2026-10-28)**: the Wan2.2 / SBV2 pipeline hooks swallow a rejection from disposing an aborted build
