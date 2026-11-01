@@ -202,6 +202,21 @@ VAE_ORIGINS: tuple[VaeOrigin, ...] = (
 #: The VAE weights file of {@link SOURCE}.
 VAE_FILE = "vae/diffusion_pytorch_model.safetensors"
 
+#: Where the bundled text encoder (`text_encoder/`, a `Qwen3_5Model`) comes from: the pipeline
+#: code's docstring loads it from `Qwen/Qwen3.5-9B`, and a full tensor-by-tensor comparison with
+#: that release (2026-11-01) found no retraining: of the bundle's 759 tensors (text and vision
+#: tower), the 711 that both sides store in BF16 are bit-identical, and the 48 that upstream stores
+#: in F32 (the 24 `linear_attn.A_log` and 24 `linear_attn.norm.weight`) equal upstream's values
+#: cast to BF16 (round to nearest even); upstream has 16 more (`lm_head` and the MTP head).
+#: Recorded for the attribution only: nothing is fetched from it. `main` on 2026-11-01
+#: (last modified 2026-03-02); not gated. Its `LICENSE` is the Apache 2.0 text with the line
+#: "Copyright 2026 Alibaba Cloud", which the distribution's `NOTICE.md` keeps.
+TEXT_ENCODER_ORIGIN = UpstreamSource(
+    repo="Qwen/Qwen3.5-9B",
+    revision="c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    license="apache-2.0",
+)
+
 
 @dataclass(frozen=True)
 class GitHubFile:

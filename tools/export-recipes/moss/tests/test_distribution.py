@@ -360,6 +360,31 @@ class TestTheCard:
         for origin in sources.VAE_ORIGINS:
             assert f"`{origin.source.revision}`" in card
 
+    def test_the_front_matter_lists_every_upstream_whose_weights_it_carries(self) -> None:
+        """The Hub's model tree: the DiT, the text tower and the small decoder are redistributed;
+        FLUX.2 [klein] 4B supplies only the latent statistics and is not a base model."""
+        card = render_moss_model_card(self._manifest(), "hdae/karume-moss-image")
+        front_matter = card.split("---")[1]
+        sequence = front_matter.split("base_model:\n")[1].split("\nbase_model_relation:")[0]
+        base_models = [line.removeprefix("  - ") for line in sequence.splitlines()]
+        assert base_models == [
+            sources.SOURCE.repo,
+            sources.TEXT_ENCODER_ORIGIN.repo,
+            "black-forest-labs/FLUX.2-small-decoder",
+        ]
+        assert "black-forest-labs/FLUX.2-klein-4B" not in front_matter
+
+    def test_the_vae_bullet_passes_the_usage_policy_pointer_on_as_information(self) -> None:
+        card = render_moss_model_card(self._manifest(), "hdae/karume-moss-image")
+        vae_bullet = card.split("- **VAE decoder**")[1].split("\n- ")[0]
+        assert "BFL Usage Policy" in vae_bullet
+        assert "not a term of the Apache License, Version 2.0" in vae_bullet
+        for origin in sources.VAE_ORIGINS:
+            assert (
+                f"https://huggingface.co/{origin.source.repo}/blob/{origin.source.revision}"
+                "/README.md"
+            ) in vae_bullet
+
     def test_the_notice_names_what_was_changed(self) -> None:
         notice = dist.MOSS_NOTICE_MARKDOWN
         for fact in ("int8 transformer", "f32 VAE decoder", "int8 text encoder", "FLUX.2"):

@@ -239,17 +239,33 @@ MOSS_PIPELINE_CONFIG: Mapping[str, Any] = {
     },
 }
 
-#: The modification notice (Apache 2.0 §4(b)): **the changes this repository made** to the upstream
-#: weights.
+#: The notice: the attribution of the checkpoint and of the two releases it bundles (the Qwen3.5
+#: text encoder — its license file's copyright line is kept, Apache 2.0 §4(c) — and the FLUX.2 VAE,
+#: whose cards ask that the marks imply no endorsement), then the modification notice (Apache 2.0
+#: §4(b)): **the changes this repository made** to the upstream weights.
 #:
 #: MUST: the text matches the distribution's content — it is valid prose as a value, so neither
 #: `verify_dist` nor the manifest check would notice a mismatch before it is published.
 MOSS_NOTICE_MARKDOWN = """# NOTICE
 
 This repository redistributes a modified form of the MOSS-Image-SFT checkpoint listed in
-`README.md` (OpenMOSS, licensed under the Apache License, Version 2.0 — see `LICENSE.md`). Its VAE
-is the FLUX.2 VAE with the FLUX.2 small decoder (Black Forest Labs, licensed under the Apache
-License, Version 2.0), as bundled in that checkpoint. The following changes were made:
+`README.md` (OpenMOSS, licensed under the Apache License, Version 2.0 — see `LICENSE.md`),
+including two parts that the checkpoint bundles from other releases, both licensed under the
+Apache License, Version 2.0 as well:
+
+- Its text encoder is the Qwen3.5 text encoder of `Qwen/Qwen3.5-9B` (the Qwen team, Alibaba
+  Cloud), with its tokenizer. The license file of that release carries the copyright notice
+  "Copyright 2026 Alibaba Cloud".
+- Its VAE is the FLUX.2 VAE with the FLUX.2 small decoder (Black Forest Labs): the decoder and
+  `post_quant_conv` come from `black-forest-labs/FLUX.2-small-decoder`, and the latent
+  batch-normalization statistics from the VAE of `black-forest-labs/FLUX.2-klein-4B`. Only the
+  decode path is included here; the VAE encoder is not.
+
+This is not an official release of OpenMOSS, the Qwen team or Black Forest Labs, and it is not
+endorsed by them; their names and marks (FLUX among them) are used only to describe where the
+weights come from.
+
+The following changes were made:
 
 - The weights were converted into the Karume container format (a `.krm` part sequence whose first
   part carries the graph and model descriptors).
@@ -267,12 +283,14 @@ License, Version 2.0), as bundled in that checkpoint. The following changes were
   on the host from per-axis base tables stored in the container, and the timestep embedding is
   looked up in a table of the 1,000 training-grid timesteps stored in the container (both computed
   with the upstream code).
-- **f32 VAE decoder**: the decoder of the FLUX.2 VAE keeps the source float32 values. It is
-  re-expressed as three graphs with a symbolic latent height and width, split around its middle
-  attention block; the nearest-neighbour ×2 upsampling is written as a repetition (the same
-  values). The latent batch-normalization statistics the decode path restores are stored in the
-  container as a mean and a standard deviation (`sqrt(running_var + eps)`, computed as upstream
-  does). The host decodes untiled, as upstream does.
+- **f32 VAE decoder**: the FLUX.2 small decoder and `post_quant_conv` keep the source float32
+  values. They are re-expressed as three graphs with a symbolic latent height and width, split
+  around the decoder's middle attention block; the nearest-neighbour ×2 upsampling is written as
+  a repetition (the same values). The latent batch-normalization statistics the decode path
+  restores (the FLUX.2 [klein] 4B VAE's bfloat16 values, which the checkpoint holds widened to
+  float32) are stored in the container as a mean and a standard deviation
+  (`sqrt(running_var + eps)`, computed as upstream does). The host decodes untiled, as upstream
+  does.
 - **int8 text encoder**: the text tower of the checkpoint's Qwen3.5 text encoder (its 32 decoder
   layers and final norm; no vision tower and no language-model head) is stored with the weight
   matrices of its linear layers and its token embedding as int8 (one float32 scale per output row,

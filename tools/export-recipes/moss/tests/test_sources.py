@@ -23,7 +23,11 @@ from moss import sources
 class TestPin:
     def test_every_revision_is_a_full_commit_sha(self):
         """A branch name or a short SHA reads other contents once the branch moves."""
-        revisions = [sources.SOURCE.revision, *(o.source.revision for o in sources.VAE_ORIGINS)]
+        revisions = [
+            sources.SOURCE.revision,
+            sources.TEXT_ENCODER_ORIGIN.revision,
+            *(o.source.revision for o in sources.VAE_ORIGINS),
+        ]
 
         for revision in revisions:
             assert re.fullmatch(r"[0-9a-f]{40}", revision), revision

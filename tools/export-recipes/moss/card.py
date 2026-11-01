@@ -31,7 +31,7 @@ from karume.modelcard import (
     render,
     require_pipeline,
 )
-from moss.sources import SOURCE, VAE_ORIGINS
+from moss.sources import SOURCE, TEXT_ENCODER_ORIGIN, VAE_ORIGINS
 
 #: The pipeline contract this template describes (ADR 0041 §2).
 MOSS_SUPPORTED_PIPELINE = "moss-image/1"
@@ -44,11 +44,30 @@ MOSS_TITLE = "MOSS-Image-SFT — Karume"
 #: Where the licence text lives (the same text as the repository's `LICENSE.md` — Apache 2.0 §4(a)).
 MOSS_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
+#: The upstream technical report (the arXiv link of the MOSS-Image-SFT model card at the pinned
+#: revision).
+MOSS_TECHNICAL_REPORT = "https://arxiv.org/abs/2610.23374"
+
+#: Which part of the decode path each VAE origin supplies (keyed by repository; a new origin in
+#: `moss.sources.VAE_ORIGINS` without an entry fails the render). The encoder and `quant_conv` are
+#: not exported (`moss.export_vae`), so the FLUX.2 [klein] 4B VAE supplies only the statistics.
+MOSS_VAE_PARTS: Mapping[str, str] = {
+    "black-forest-labs/FLUX.2-small-decoder": "the decoder and `post_quant_conv`",
+    "black-forest-labs/FLUX.2-klein-4B": "the latent batch-normalization statistics (`vae/`)",
+}
+
+
+#: The VAE origin whose weights the decoder graphs carry (the one that accounts for `decoder.`).
+#: The other origin, FLUX.2 [klein] 4B, supplies only the 256 latent BatchNorm statistics, so it is
+#: not a `base_model`: listing it would show this repository as a quantization of a 4B transformer
+#: in the Hub's model tree.
+MOSS_VAE_DECODER_ORIGIN = next(o.source for o in VAE_ORIGINS if "decoder." in o.prefixes)
+
 
 def _metadata() -> CardMetadata:
     return CardMetadata(
         pipeline_tag=MOSS_PIPELINE_TAG,
-        base_model=(SOURCE.repo,),
+        base_model=(SOURCE.repo, TEXT_ENCODER_ORIGIN.repo, MOSS_VAE_DECODER_ORIGIN.repo),
         license=SOURCE.license,
         tags=(MOSS_PIPELINE_TAG, "webgpu", "moss-image"),
         # The transformer and the text encoder are re-encoded in int8 (the VAE keeps its f32).
@@ -88,16 +107,38 @@ def _base_weights() -> list[str]:
         "",
         "Converted and partly quantized — the original checkpoint is not distributed here.",
         "",
-        f"- [{SOURCE.repo}](https://huggingface.co/{SOURCE.repo}) at commit"
+        f"- **Weights**: [{SOURCE.repo}](https://huggingface.co/{SOURCE.repo}) at commit"
         f" `{SOURCE.revision}`, licensed **{SOURCE.license}** (as of retrieval;"
         f" [full text]({MOSS_LICENSE_TEXT_LINK}) — a verbatim copy is in `LICENSE.md`).",
-        "- Its bundled VAE is the FLUX.2 VAE with the FLUX.2 small decoder (Black Forest Labs),"
-        " both licensed **apache-2.0**:",
+        f"- **Authors**: MOSS-Image is released by OpenMOSS ([technical report]"
+        f"({MOSS_TECHNICAL_REPORT})).",
+        "- **Text encoder** (`text_encoder`, `tokenizer`): the checkpoint's bundled Qwen3.5 text"
+        " encoder, from"
+        f" [{TEXT_ENCODER_ORIGIN.repo}](https://huggingface.co/{TEXT_ENCODER_ORIGIN.repo}) at"
+        f" commit `{TEXT_ENCODER_ORIGIN.revision}` (the Qwen team, Alibaba Cloud), licensed"
+        f" **{TEXT_ENCODER_ORIGIN.license}** (as of retrieval), and its tokenizer. Only the text"
+        " tower is redistributed here; its copyright notice is kept in `NOTICE.md`.",
+        "- **VAE decoder** (`vae_decoder_pre` / `vae_decoder_attn` / `vae_decoder_post`): the"
+        " checkpoint's bundled FLUX.2 VAE with the FLUX.2 small decoder (Black Forest Labs)."
+        " Only the decode path is redistributed; the VAE encoder is not included:",
     ]
     lines += [
-        f"  - [{origin.source.repo}](https://huggingface.co/{origin.source.repo}) at commit"
-        f" `{origin.source.revision}`"
+        f"  - {MOSS_VAE_PARTS[origin.source.repo]}:"
+        f" [{origin.source.repo}](https://huggingface.co/{origin.source.repo}) at commit"
+        f" `{origin.source.revision}`, licensed **{origin.source.license}** (as of retrieval)"
         for origin in VAE_ORIGINS
+    ]
+    cards = ", ".join(
+        f"[{origin.source.repo}](https://huggingface.co/{origin.source.repo}/blob/"
+        f"{origin.source.revision}/README.md)"
+        for origin in VAE_ORIGINS
+    )
+    lines += [
+        # Maintainer decision 2026-11-01: passed through as information. Neither card links the
+        # policy at the pinned revisions, so the line points to the cards themselves.
+        f"  - Black Forest Labs' model cards of both origins ({cards}) also point to the BFL Usage"
+        " Policy, without a link of their own. This is informational: it is not a term of the"
+        " Apache License, Version 2.0.",
     ]
     lines += [
         "- **Changes made here** (listed in full in `NOTICE.md`, per Apache 2.0 §4(b)): the",
@@ -107,6 +148,9 @@ def _base_weights() -> list[str]:
         "  which borrows its weights), the VAE decoder into three graphs around its middle",
         "  attention, and the text encoder keeps its text tower only. No retraining and no",
         "  fine-tuning.",
+        "- This is not an official release of OpenMOSS, the Qwen team or Black Forest Labs, and it",
+        "  is not endorsed by them; their names are used only to describe where the weights come",
+        "  from.",
     ]
     return lines
 

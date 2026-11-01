@@ -9,9 +9,9 @@ read from the local Hugging Face cache; this module never downloads (the MOSS re
 `--fetch --text` fetches them).
 
 Why the MOSS bundle and not `Qwen/Qwen3.5-9B`: it is what MOSS-Image ran when its DiT was trained
-and its references were made. The two agree on every BF16 tensor sampled; upstream Qwen stores
-`linear_attn.A_log` and `linear_attn.norm.weight` in F32, which the bundle rounds to BF16 (recon
-2026-10-31 §1).
+and its references were made. The two agree on every tensor (full comparison 2026-11-01 —
+`moss.sources.TEXT_ENCODER_ORIGIN`): upstream Qwen stores `linear_attn.A_log` and
+`linear_attn.norm.weight` in F32, which the bundle rounds to BF16.
 
 The reader ({@link Checkpoint}) widens BF16 to F32 when it reads (lossless). It accepts only the
 text tower's keys (`language_model.*`); the vision tower's are ignored by design (MOSS-Image never
