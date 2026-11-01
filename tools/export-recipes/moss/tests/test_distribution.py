@@ -385,6 +385,16 @@ class TestTheCard:
                 "/README.md"
             ) in vae_bullet
 
+    def test_only_black_forest_labs_is_named_as_not_endorsing(self) -> None:
+        card = render_moss_model_card(self._manifest(), "hdae/karume-moss-image")
+        for text in (card, dist.MOSS_NOTICE_MARKDOWN):
+            parts = [bullet for block in text.split("\n\n") for bullet in block.split("\n- ")]
+            (sentence,) = [part for part in parts if "endorsed" in part]
+            assert "Black Forest Labs" in sentence
+            assert "FLUX" in sentence
+            assert "OpenMOSS" not in sentence
+            assert "Qwen" not in sentence
+
     def test_the_notice_names_what_was_changed(self) -> None:
         notice = dist.MOSS_NOTICE_MARKDOWN
         for fact in ("int8 transformer", "f32 VAE decoder", "int8 text encoder", "FLUX.2"):

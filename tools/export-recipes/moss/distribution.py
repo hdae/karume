@@ -240,9 +240,12 @@ MOSS_PIPELINE_CONFIG: Mapping[str, Any] = {
 }
 
 #: The notice: the attribution of the checkpoint and of the two releases it bundles (the Qwen3.5
-#: text encoder — its license file's copyright line is kept, Apache 2.0 §4(c) — and the FLUX.2 VAE,
-#: whose cards ask that the marks imply no endorsement), then the modification notice (Apache 2.0
-#: §4(b)): **the changes this repository made** to the upstream weights.
+#: text encoder — its license file's copyright line is kept, Apache 2.0 §4(c) — and the FLUX.2 VAE),
+#: the non-endorsement sentence, then the modification notice (Apache 2.0 §4(b)): **the changes this
+#: repository made** to the upstream weights. The non-endorsement sentence names Black Forest Labs
+#: only: of the upstreams, only its cards ask for one ("Trademarks & IP": use of the BFL and FLUX
+#: marks in modified versions "must not cause confusion or imply sponsorship or endorsement").
+#: Maintainer decision 2026-11-01: the sentence is kept only where an upstream asks for it.
 #:
 #: MUST: the text matches the distribution's content — it is valid prose as a value, so neither
 #: `verify_dist` nor the manifest check would notice a mismatch before it is published.
@@ -261,9 +264,8 @@ Apache License, Version 2.0 as well:
   batch-normalization statistics from the VAE of `black-forest-labs/FLUX.2-klein-4B`. Only the
   decode path is included here; the VAE encoder is not.
 
-This is not an official release of OpenMOSS, the Qwen team or Black Forest Labs, and it is not
-endorsed by them; their names and marks (FLUX among them) are used only to describe where the
-weights come from.
+This is not an official release of Black Forest Labs, and it is not endorsed by them; the Black
+Forest Labs and FLUX names and marks are used only to describe where the VAE weights come from.
 
 The following changes were made:
 

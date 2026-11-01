@@ -148,9 +148,12 @@ def _base_weights() -> list[str]:
         "  which borrows its weights), the VAE decoder into three graphs around its middle",
         "  attention, and the text encoder keeps its text tower only. No retraining and no",
         "  fine-tuning.",
-        "- This is not an official release of OpenMOSS, the Qwen team or Black Forest Labs, and it",
-        "  is not endorsed by them; their names are used only to describe where the weights come",
-        "  from.",
+        # Black Forest Labs only: of the upstreams, only its cards ask for this ("Trademarks & IP":
+        # the BFL and FLUX marks in modified versions "must not ... imply sponsorship or
+        # endorsement"). Maintainer decision 2026-11-01.
+        "- This is not an official release of Black Forest Labs, and it is not endorsed by them;",
+        "  the Black Forest Labs and FLUX names are used only to describe where the VAE weights",
+        "  come from.",
     ]
     return lines
 
