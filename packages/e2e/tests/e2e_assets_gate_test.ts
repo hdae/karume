@@ -24,6 +24,13 @@
 //
 // NOTE: 見るのは実重み e2e 11 本が共有する `outputs/series/` の 1 根だけ。配布形ミラー
 // （`models/`）は distribution_gate_test.ts の担当で、そちらの SKIP は本門番の射程外。
+//
+// ADR 0139 decision 5 moves this gate to the test-asset root `outputs/test-assets/` (the fetched
+// cache of the pinned private dataset): it is red while no fetch completed there (no `.revision`)
+// or the fetched revision differs from the pin (`TEST_ASSETS` in
+// `@karume/test-support/test-assets`), with the same opt-out `KARUME_ALLOW_NO_ASSETS=1`. The series
+// checks below stay until the families have moved off `outputs/series/` (ADR 0139 staging 4);
+// they are retired with `series-graphs.ts` then.
 
 import {
   isNotFound,
@@ -33,7 +40,14 @@ import {
   statSync,
   writeFileSync,
 } from "@karume/test-support/fs";
-import { assert, assertEquals, assertFalse } from "@std/assert";
+import { assert, assertEquals, assertFalse, assertStringIncludes } from "@std/assert";
+import {
+  readFetchedRevision,
+  REVISION_FILE,
+  TEST_ASSETS,
+  TEST_ASSETS_ROOT,
+  type TestAssetsPin,
+} from "@karume/test-support/test-assets";
 import { describe, it, test } from "vite-plus/test";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { SERIES_GRAPHS } from "../../models/tests/helpers/series-graphs.ts";
@@ -85,6 +99,50 @@ const directoryPresent = (url: URL): boolean => {
     throw cause;
   }
 };
+
+/** The command that fetches the pinned test assets (named in the gate's messages). */
+const FETCH_COMMAND = "node tools/test-assets/fetch.ts";
+
+/**
+ * The verdict of the test-asset check (ADR 0139 decision 5) — a pure function of the revision the
+ * last completed fetch recorded and the pin: `undefined` when they agree, otherwise why the gate is
+ * red. An absent root reads as "no completed fetch" (`readFetchedRevision` returns `undefined`).
+ *
+ * MUST: a fetched revision that differs from the pin is red, not a warning — the goldens of one
+ * revision are the expectations of the tests of that commit, and an older set would compare the
+ * new tests against stale references (or skip on files the older set does not have).
+ */
+const testAssetsVerdict = (
+  fetched: string | undefined,
+  pin: TestAssetsPin,
+  root: URL,
+): string | undefined => {
+  const remedy =
+    `Run \`${FETCH_COMMAND}\` from the repository root (ADR 0005: a run whose real-weight tests ` +
+    "lack their goldens is a FAIL). To pass deliberately on a machine without test assets, set " +
+    "KARUME_ALLOW_NO_ASSETS=1.";
+  if (fetched === undefined) {
+    return (
+      `${root.pathname} holds no completed fetch of ${pin.repo} (no ${REVISION_FILE}); the pinned ` +
+      `revision is ${pin.revision}. ${remedy}`
+    );
+  }
+  if (fetched !== pin.revision) {
+    return (
+      `${root.pathname} was fetched at revision ${fetched} of ${pin.repo}, but the pinned revision ` +
+      `is ${pin.revision}. ${remedy}`
+    );
+  }
+  return undefined;
+};
+
+test.skipIf(ALLOW_NO_ASSETS)(
+  "assets gate: the test-asset root holds a completed fetch of the pinned revision (ADR 0139 decision 5)",
+  () => {
+    const verdict = testAssetsVerdict(readFetchedRevision(), TEST_ASSETS, TEST_ASSETS_ROOT);
+    assert(verdict === undefined, verdict);
+  },
+);
 
 test.skipIf(ALLOW_NO_ASSETS)(
   "資産門番: 実重み系列が 1 つも無い全 SKIP は明示 FAIL（ADR 0005）",
@@ -177,6 +235,62 @@ describe("資産門番の判定（表の系列の容器が 1 つでも在るか�
         mkdirSync(component, { recursive: true });
         writeFileSync(new URL("model-00001-of-00001.krm", component), new Uint8Array());
       }),
+    );
+  });
+});
+
+describe("assets gate verdict (the fetched revision of the test-asset root against the pin)", () => {
+  const pin: TestAssetsPin = {
+    repo: "hdae/karume-test-assets",
+    revision: "0123456789abcdef0123456789abcdef01234567",
+  };
+
+  /**
+   * Reads the verdict for the root `<temporary dir>/<child>` arranged by `arrange`, then removes the
+   * temporary directory.
+   */
+  const verdictOf = (arrange: (root: URL) => void, child = ""): string | undefined => {
+    const dir = new URL(`file://${makeTempDirSync({ prefix: "karume-test-assets-" })}/`);
+    const root = new URL(child, dir);
+    try {
+      arrange(root);
+      return testAssetsVerdict(readFetchedRevision(root), pin, root);
+    } finally {
+      removeSync(dir, { recursive: true });
+    }
+  };
+
+  it("is red when no fetch completed (no .revision), naming the pin and the fetch command", () => {
+    const verdict = verdictOf(() => {});
+    assert(verdict !== undefined);
+    assertStringIncludes(verdict, `no ${REVISION_FILE}`);
+    assertStringIncludes(verdict, pin.revision);
+    assertStringIncludes(verdict, FETCH_COMMAND);
+  });
+
+  it("is red when the root itself is absent", () => {
+    const verdict = verdictOf(() => {}, "missing/");
+    assert(verdict !== undefined);
+    assertStringIncludes(verdict, `no ${REVISION_FILE}`);
+  });
+
+  it("is red when the fetched revision differs from the pin, naming both", () => {
+    const stale = "f".repeat(40);
+    const verdict = verdictOf((root) =>
+      writeFileSync(new URL(REVISION_FILE, root), new TextEncoder().encode(`${stale}\n`)),
+    );
+    assert(verdict !== undefined);
+    assertStringIncludes(verdict, `fetched at revision ${stale}`);
+    assertStringIncludes(verdict, `pinned revision is ${pin.revision}`);
+    assertStringIncludes(verdict, FETCH_COMMAND);
+  });
+
+  it("is green when the fetched revision is the pin (the trailing newline is not part of it)", () => {
+    assertEquals(
+      verdictOf((root) =>
+        writeFileSync(new URL(REVISION_FILE, root), new TextEncoder().encode(`${pin.revision}\n`)),
+      ),
+      undefined,
     );
   });
 });

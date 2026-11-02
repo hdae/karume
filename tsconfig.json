@@ -25,6 +25,7 @@
     "tools/published-smoke/**/*.ts",
     "tools/verify-diff/**/*.ts",
     "tools/release/**/*.ts",
+    "tools/test-assets/**/*.ts",
     "vite.config.ts"
   ]
 }

@@ -1,0 +1,15 @@
+{
+  "name": "@karume/test-assets",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Fetch the pinned private test-asset dataset (ADR 0139) into outputs/test-assets.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "fetch": "node fetch.ts",
+    "test": "vp test"
+  },
+  "dependencies": {
+    "@karume/test-support": "workspace:*"
+  }
+}

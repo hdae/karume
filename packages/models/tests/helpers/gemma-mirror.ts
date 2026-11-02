@@ -16,94 +16,37 @@
  * 公開サブパス）だけである。
  */
 
-import { isNotFound, readFile, readTextFileSync } from "@karume/test-support/fs";
-import { loadManifest, openContainerSource, resolveSelection } from "@karume/hub";
-import { nodeDirectory } from "@karume/hub/node";
-import {
-  type AssetReader,
-  openContainer,
-  type OpenedContainer,
-  prepareContainer,
-  type PreparedModel,
-} from "@karume/runtime";
+import { readFile } from "@karume/test-support/fs";
+import type { AssetReader, OpenedContainer } from "@karume/runtime";
 import { type Assets, parsePipelineConfig } from "../../gemma.ts";
 import {
   gemma4PleAssetSource,
   type Gemma4PleIndex,
   readGemma4PleIndex,
 } from "../../src/gemma/ple-index.ts";
+import { type MirrorChoice, openSelectedContainer, selectMirrorComponent } from "./mirror.ts";
 
-/** manifest の選択軸（省略時はミラーの既定）。 */
-export type MirrorChoice = {
-  readonly model?: string;
-  readonly quant?: string;
-};
+// The mirror resolver, the presence check and the component opener are shared with every family
+// (`helpers/mirror.ts`); they stay exported here under their existing names.
+export {
+  MIRROR_FORMAT,
+  mirrorPresent as mirrorAvailable,
+  type MirrorChoice,
+  openMirrorComponent,
+} from "./mirror.ts";
 
 const MODEL = "model";
 
-const selectionOf = async (mirror: URL, choice: MirrorChoice) => {
-  const loaded = await loadManifest(nodeDirectory(mirror.pathname));
-  const selection = resolveSelection(loaded.manifest, {
-    ...(choice.model === undefined ? {} : { model: choice.model }),
-    ...(choice.quant === undefined ? {} : { quant: choice.quant }),
-    weights: [MODEL],
-  });
-  const container = selection.containers[MODEL];
-  if (container === undefined) {
-    throw new Error(`test: ${mirror.pathname} の manifest に部品 '${MODEL}' の容器が無い`);
-  }
-  return { loaded, selection, container };
-};
+const selectionOf = (mirror: URL, choice: MirrorChoice) =>
+  selectMirrorComponent(mirror, MODEL, choice);
 
 /**
  * ミラーの `model` 容器を**区間読みで**開く（part 0 と、以後に触った block だけを読む）。
  *
  * 全 part を RAM に載せる {@link gemma4MirrorAssets} と違い、PLE の読み口はこちらから取る。
  */
-const openModelContainer = async (mirror: URL, choice: MirrorChoice): Promise<OpenedContainer> => {
-  const { loaded, container } = await selectionOf(mirror, choice);
-  return await openContainer(
-    { kind: "source", source: openContainerSource(loaded, container) },
-    container.descriptor,
-  );
-};
-
-/**
- * ミラーの部品 1 本を**区間読みで**開き、宣言と Session の入口を返す。
- *
- * 部品は容器 1 本で、block は Session を組むその瞬間に part 順で読まれる（ADR 0109 決定 7）。
- */
-export const openMirrorComponent = async (
-  mirror: URL,
-  key: string,
-  choice: MirrorChoice = {},
-): Promise<{
-  readonly graph: PreparedModel["graph"];
-  readonly createSession: PreparedModel["createContainerSession"];
-  readonly opened: OpenedContainer;
-}> => {
-  const loaded = await loadManifest(nodeDirectory(mirror.pathname));
-  const selection = resolveSelection(loaded.manifest, {
-    ...(choice.model === undefined ? {} : { model: choice.model }),
-    ...(choice.quant === undefined ? {} : { quant: choice.quant }),
-    weights: [key],
-  });
-  const container = selection.containers[key];
-  if (container === undefined) {
-    throw new Error(`test: ${mirror.pathname} の manifest に部品 '${key}' の容器が無い`);
-  }
-  const opened = await openContainer(
-    { kind: "source", source: openContainerSource(loaded, container) },
-    container.descriptor,
-  );
-  // グラフ名 = 配布 manifest の weights キー（書き手の規約 — container-v1 §2.1）。
-  const prepared = prepareContainer(opened, key);
-  return {
-    graph: prepared.graph,
-    createSession: (gpu, options) => prepared.createContainerSession(gpu, options),
-    opened,
-  };
-};
+const openModelContainer = async (mirror: URL, choice: MirrorChoice): Promise<OpenedContainer> =>
+  await openSelectedContainer(await selectionOf(mirror, choice));
 
 /** PLE の索引と block の読み口（`createGemma4Ple` / `createGemma4PleResident` の入力）。 */
 export type Gemma4PleHandle = {
@@ -149,25 +92,4 @@ export const gemma4MirrorAssets = async (
     model: await Promise.all(container.parts.map((part) => readFile(new URL(part.path, mirror)))),
     tokenizer: await readFile(new URL(tokenizer.path, mirror)),
   };
-};
-
-/** この版が読む配布 manifest の major（旧版は読まない — ADR 0109 決定 1）。 */
-export const MIRROR_FORMAT = "karume/5";
-
-/**
- * ミラーが**この版が読める配布形**（`karume/5`）か。
- *
- * MUST: 「ファイルが在る」ではなく format で判定する。移行前のミラーが残っている機では
- * `parseManifest` が落ちるので、存在だけを条件にすると門が赤くなるだけで何も言えない
- * （ADR 0109 決定 9 の共存期間 — `tools/_shared/assets.ts` の `distributionFormat` と同じ規律）。
- */
-export const mirrorAvailable = (mirror: URL): boolean => {
-  let text: string;
-  try {
-    text = readTextFileSync(new URL("karume.json", mirror));
-  } catch (cause) {
-    if (isNotFound(cause)) return false;
-    throw cause;
-  }
-  return (JSON.parse(text) as { readonly format?: unknown }).format === MIRROR_FORMAT;
 };

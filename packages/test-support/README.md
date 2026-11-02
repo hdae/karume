@@ -9,6 +9,7 @@ Dawn as the WebGPU implementation), plus the codemods used while porting the Den
 | --- | --- |
 | `@karume/test-support/setup` | Vitest `setupFiles` entry. Creates one Dawn `GPU` per worker process, installs it as `navigator.gpu`, and installs the WebGPU namespaces / error classes (`GPUBufferUsage`, `GPUMapMode`, `GPUOutOfMemoryError`, ...) as globals, as Deno and browsers have them. `KARUME_DAWN_FLAGS` passes Dawn toggles (e.g. `disable-dawn-features=timestamp_quantization`). |
 | `@karume/test-support/fs` | Deno-shaped file helpers on `node:fs`: `readFile`, `readTextFile`, `writeFile`, `writeTextFile` (+ `Sync` forms), `mkdir`, `remove`, `makeTempDir`, `stat`, `readDir`, `symlink`, `readLinkSync`, `realPathSync`, `readRange(path, offset, length)`, and the error predicates `isNotFound` / `isADirectory` / `isFilesystemLoop`. Byte results always own their `ArrayBuffer`. |
+| `@karume/test-support/test-assets` | The pin of the private test-asset dataset (`TEST_ASSETS` — the single source of truth, ADR 0139), its local root `outputs/test-assets/` (`TEST_ASSETS_ROOT`), `goldenDir(series)` / `corpusDir(kind)`, and `readFetchedRevision()` (the revision the last completed `node tools/test-assets/fetch.ts` recorded). |
 | `@karume/test-support/webgpu` | `platformObject<T>(fields)` — supplies the nominal `__brand` that `@webgpu/types` puts on platform interfaces, for hand-built fakes. |
 
 ## Writing tests

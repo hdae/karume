@@ -20,6 +20,11 @@
 // 長さまで突き合わせる。中身（block の sha256）は読まない — 実バイトの突合は各 e2e が
 // `openContainer` の経路で必ず通る（§7 のハッシュ 3 分離）。
 //
+// Since ADR 0139 decision 5 the check covers every model × quant × weights key a manifest
+// declares, not only the default selection, and it also opens each container's two documents
+// through the manifest and checks that its graph is named by the weights key — the graph-name
+// check that the assets gate ran on the series (`series-graphs.ts`) moves here.
+//
 // manifest の parse と既定選択の検査の射程は名簿ではなく**`models/` の配置**から導く（2026-10-11
 // 裁定）。`models/` は配布形だけを置く根（docs/assets-layout.md）なので、子ディレクトリは
 // どれも hub の parser に通す。名簿に頼ると、`karume dist` が焼いたのに名簿へ足していない新しい
@@ -52,7 +57,17 @@ import {
   assertThrows,
 } from "@std/assert";
 import { describe, it, test } from "vite-plus/test";
-import { type Manifest, type ModelEntry, parseManifest, resolveSelection } from "@karume/hub";
+import {
+  type ContainerRef,
+  loadManifest,
+  type Manifest,
+  type ModelEntry,
+  openContainerSource,
+  parseManifest,
+} from "@karume/hub";
+import { openContainer, parseIrDeclarationValue } from "../mod.ts";
+import { type WrittenContainer, writeModelContainer } from "./helpers/container-write.ts";
+import { mirrorDirectory } from "../../models/tests/helpers/mirror.ts";
 
 /**
  * 「配布形ミラー無しでの全 SKIP」を明示的に許可する opt-out（`KARUME_ALLOW_NO_ASSETS` と同形）。
@@ -220,12 +235,20 @@ const assertNoDistributionMissing = (models: URL, series: readonly string[]): vo
 };
 
 /**
- * `root` のミラーの manifest が `karume/5` で、既定選択（既定 model × 既定 quant）の part が
- * 宣言どおりの長さで在ることを断言する。
+ * Asserts that the mirror at `root` has a `karume/5` manifest and that **every container it
+ * declares** — every model × weights key × dtype label, which covers every quant's selection —
+ * is intact (ADR 0139 decision 5):
  *
- * NOTE: 既定でない model / quant の part までは見ない。それらを読む e2e は part が欠ければ
- * `openContainer` / NotFound で赤くなる（無音 SKIP にはならない）ので、門番の担当は
- * 「ミラーごと無い」形と、既定選択が旧 major・残骸のまま据わっている形に絞る。
+ * - each part is present with its declared size (cross-repo parts are skipped: they live in their
+ *   own mirror, which this gate checks under its own name — ADR 0038 §7);
+ * - the container opens through the manifest (header, the two documents checked against the
+ *   declared length and sha256, the declared part lengths) and its one graph is named by the
+ *   weights key (container-v1 §2.1). A cross-repo container is opened from its sibling mirror.
+ *
+ * Block bytes are never read (the block sha256 is checked by the tests that build Sessions — §7
+ * keeps the three hashes apart), so the cost is one stat per part plus part 0's documents per
+ * container: about two hundred containers over the fifteen mirrors open in about a second on the
+ * development machine (2026-11-02), GPU-free.
  */
 const assertDistributionIntact = async (root: URL, series: string): Promise<void> => {
   // MUST: 名簿に無いミラーの欠如はここでしか見えない — `models/` は配布形だけの根なので、
@@ -239,31 +262,59 @@ const assertDistributionIntact = async (root: URL, series: string): Promise<void
   // parse 自身も major を見るが、`karume/5` を**名指しで**断言しておく — hub が受ける major を
   // 増やした日に、この門番が「旧 major のミラーを据えたまま」を素通しするのを防ぐ。
   assertEquals(manifest.format, MANIFEST_FORMAT, `${series}: manifest の format`);
-  const selection = resolveSelection(manifest);
   const broken: string[] = [];
-  for (const [component, container] of Object.entries(selection.containers)) {
-    for (const [index, part] of container.parts.entries()) {
-      const where = `${component}[${index}] ${part.path}`;
-      if (part.repo !== undefined) {
-        // 越境参照はローカルミラーに実体を持たない（ADR 0038 §7）— 取得層の担当で、
-        // ここで「無い」と数えると門番が別の系統の話を報告することになる。
-        continue;
+  const intact: {
+    readonly where: string;
+    readonly key: string;
+    readonly container: ContainerRef;
+  }[] = [];
+  for (const [model, entry] of Object.entries(manifest.models)) {
+    for (const [key, dtypes] of Object.entries(entry.weights)) {
+      for (const [dtype, { container }] of Object.entries(dtypes)) {
+        const where = `${model}/${key}/${dtype}`;
+        const missing: string[] = [];
+        for (const [index, part] of container.parts.entries()) {
+          if (part.repo !== undefined) continue;
+          const actual = fileBytes(new URL(part.path, root));
+          if (actual === undefined) {
+            missing.push(`${where}[${index}] ${part.path}: the declared part is absent`);
+          } else if (actual !== part.size) {
+            missing.push(`${where}[${index}] ${part.path}: ${actual} bytes, declared ${part.size}`);
+          }
+        }
+        broken.push(...missing);
+        // A container with a missing or short part cannot be opened; it is reported once, above.
+        if (missing.length === 0) intact.push({ where, key, container });
       }
-      const actual = fileBytes(new URL(part.path, root));
-      if (actual === undefined) {
-        broken.push(`${where}: 宣言された part が無い`);
-      } else if (actual !== part.size) {
-        broken.push(`${where}: 長さ ${actual} が宣言の ${part.size} と違う`);
+    }
+  }
+  if (intact.length > 0) {
+    const loaded = await loadManifest(mirrorDirectory(root));
+    for (const { where, key, container } of intact) {
+      try {
+        const opened = await openContainer(
+          { kind: "source", source: openContainerSource(loaded, container) },
+          container.descriptor,
+        );
+        const graphs = Object.keys(opened.graphs);
+        if (graphs.length !== 1 || graphs[0] !== key) {
+          broken.push(
+            `${where}: the container's graphs are ${graphs.join(" / ")}, expected ${key}`,
+          );
+        }
+      } catch (cause) {
+        broken.push(
+          `${where}: the container does not open — ${cause instanceof Error ? cause.message : cause}`,
+        );
       }
     }
   }
   assertEquals(
     broken,
     [],
-    `models/${series}/ の配布形が manifest の宣言と食い違っている` +
-      `（model '${selection.model}' / quant '${selection.quant}'）。` +
-      "焼き直しの途中や前回の残骸を e2e が読むのを避けるため、ADR 0005 によりこれは FAIL。" +
-      "tools/export-recipes の dist.py で作り直すこと。",
+    `models/${series}/ does not match its manifest. A tool or test reading it would hit a ` +
+      "half-built or stale container, so ADR 0005 counts this as a FAIL. Rebuild the mirror with " +
+      "tools/export-recipes dist.py.",
   );
 };
 
@@ -359,7 +410,7 @@ test.skipIf(ALLOW_NO_DISTRIBUTION)(
 for (const series of discoverDistributions(MODELS_ROOT)) {
   const root = distributionRoot(MODELS_ROOT, series);
   test.skipIf(REQUIRED.has(series) && manifestKnownAbsent(root))(
-    `配布門番: ${series} の manifest が hub の parser を通り（karume/5）、既定 quant の part が宣言どおり在る`,
+    `distribution gate: ${series} parses as karume/5 and every declared container is intact (parts, documents, graph name)`,
     () => assertDistributionIntact(root, series),
   );
   test.skipIf(REQUIRED.has(series) && manifestKnownAbsent(root))(
@@ -513,86 +564,230 @@ describe("配布門番の射程（models/ の配置から導くミラーの一�
   });
 });
 
-describe("配布門番の判定（manifest の宣言と配布形の食い違い）", () => {
-  const sha256 = "0".repeat(64);
-  /** part 0 はヘッダ 24 B + グラフ記述 10 B + モデル記述 5 B ちょうど（container-v1 §8）。 */
-  const parts = [
-    { path: "m/depth/model.f32-00001-of-00002.krm", size: 39, sha256 },
-    { path: "m/depth/model.f32-00002-of-00002.krm", size: 8, sha256 },
-  ] as const;
-  const manifestText = (format: string): string =>
+describe("distribution gate verdict (every declared container against the mirror's files)", () => {
+  const revision = "0123456789abcdef0123456789abcdef01234567";
+
+  /** One real container: the graph `graph` (`linear` with one f32 weight), split into small parts. */
+  const writeContainer = (graph: string): Promise<WrittenContainer> =>
+    writeModelContainer(
+      {
+        graphs: {
+          [graph]: parseIrDeclarationValue({
+            format: "karume-ir",
+            version: 2,
+            requires: { ops: ["linear"] },
+            symbols: [],
+            inputs: [{ name: "x", dtype: "f32", shape: [2, 2] }],
+            outputs: ["y"],
+            initializers: { w: {} },
+            values: { w: { dtype: "f32", shape: [2, 2] }, y: { dtype: "f32", shape: [2, 2] } },
+            states: {},
+            nodes: [{ op: "linear", ins: ["x", "w"], outs: ["y"], attrs: {} }],
+          }),
+        },
+        consts: [],
+        weights: [
+          {
+            graph,
+            initializer: "w",
+            bytes: new Uint8Array(Float32Array.from([1, 2, 3, 4]).buffer),
+            encoding: { codec: "f32" },
+          },
+        ],
+        assets: [],
+        provenance: { license: "test" },
+      },
+      { partBytes: 4096, blockBytes: 512 },
+    );
+
+  const hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
+    [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+
+  /** A container written to disk under `stem` and the manifest entry that declares it. */
+  type Placed = {
+    readonly paths: readonly string[];
+    readonly entry: (options?: { readonly repo?: string }) => Record<string, unknown>;
+  };
+
+  /** Writes `written` under `root` as `<stem>-NNNNN-of-NNNNN.krm` (zero-length parts too). */
+  const place = async (root: URL, stem: string, written: WrittenContainer): Promise<Placed> => {
+    const total = String(written.parts.length).padStart(5, "0");
+    const paths = written.parts.map(
+      (_, index) => `${stem}-${String(index + 1).padStart(5, "0")}-of-${total}.krm`,
+    );
+    mkdirSync(new URL(stem.slice(0, stem.lastIndexOf("/") + 1), root), { recursive: true });
+    const parts = await Promise.all(
+      written.parts.map(async (bytes, index) => {
+        writeFileSync(new URL(paths[index]!, root), bytes);
+        return { path: paths[index]!, size: bytes.byteLength, sha256: await hex(bytes) };
+      }),
+    );
+    const descriptor = {
+      graph: {
+        length: written.graphDescriptorBytes.byteLength,
+        sha256: await hex(written.graphDescriptorBytes),
+      },
+      model: {
+        length: written.modelDescriptorBytes.byteLength,
+        sha256: await hex(written.modelDescriptorBytes),
+      },
+    };
+    return {
+      paths,
+      entry: ({ repo } = {}) => ({
+        container: {
+          descriptor,
+          parts: repo === undefined ? parts : parts.map((part) => ({ ...part, repo, revision })),
+        },
+      }),
+    };
+  };
+
+  /** The manifest of one model `m` whose component `depth` has the quants f32 (default) and i8. */
+  const manifestText = (
+    f32: Record<string, unknown>,
+    i8: Record<string, unknown>,
+    format = MANIFEST_FORMAT,
+  ): string =>
     JSON.stringify({
       format,
-      generator: "karume/0.13.0",
+      generator: "karume/0.15.1",
       defaultModel: "m",
       models: {
         m: {
           pipeline: "depth-anything/1",
-          weights: {
-            depth: {
-              f32: {
-                container: {
-                  descriptor: {
-                    graph: { length: 10, sha256 },
-                    model: { length: 5, sha256 },
-                  },
-                  parts,
-                },
-              },
-            },
-          },
+          weights: { depth: { f32, i8 } },
           assets: {},
-          quants: { f32: { weights: { depth: "f32" }, session: {} } },
+          quants: {
+            f32: { weights: { depth: "f32" }, session: {}, label: "F32", description: "Full." },
+            i8: { weights: { depth: "i8" }, session: {}, label: "I8", description: "Small." },
+          },
           defaultQuant: "f32",
           pipelineConfig: {},
         },
       },
     });
 
-  /** 宣言どおりのミラー（format だけ差し替えられる）を根に置く。 */
-  const arrange = (root: URL, format = MANIFEST_FORMAT): void => {
-    writeTextFileSync(new URL("karume.json", root), manifestText(format));
-    mkdirSync(new URL("m/depth/", root), { recursive: true });
-    for (const part of parts) {
-      writeFileSync(new URL(part.path, root), new Uint8Array(part.size));
-    }
+  /** An intact mirror; the i8 container's graph is `i8Graph` (the weights key when omitted). */
+  const arrange = async (
+    root: URL,
+    options: { readonly format?: string; readonly i8Graph?: string } = {},
+  ): Promise<{ readonly f32: Placed; readonly i8: Placed }> => {
+    const f32 = await place(root, "m/depth/model.f32", await writeContainer("depth"));
+    const i8 = await place(
+      root,
+      "m/depth/model.i8",
+      await writeContainer(options.i8Graph ?? "depth"),
+    );
+    writeTextFileSync(
+      new URL("karume.json", root),
+      manifestText(f32.entry(), i8.entry(), options.format),
+    );
+    return { f32, i8 };
   };
 
-  it("宣言どおりのミラーは通る", async () => {
+  it("an intact mirror passes", async () => {
     await withTemporaryRoot(async (root) => {
-      arrange(root);
+      await arrange(root);
       await assertDistributionIntact(root, "synthetic");
     });
   });
 
-  it("宣言された part が 1 本無ければ、その part を名指しして FAIL する", async () => {
+  it("a part of the default quant is absent: FAIL naming the container and the part", async () => {
     await withTemporaryRoot(async (root) => {
-      arrange(root);
-      removeSync(new URL(parts[1].path, root));
+      const { f32 } = await arrange(root);
+      const last = f32.paths.length - 1;
+      removeSync(new URL(f32.paths[last]!, root));
       await assertRejects(
         () => assertDistributionIntact(root, "synthetic"),
         AssertionError,
-        `depth[1] ${parts[1].path}: 宣言された part が無い`,
+        `m/depth/f32[${last}] ${f32.paths[last]}: the declared part is absent`,
       );
     });
   });
 
-  it("part の長さが宣言と違えば、実長と宣言長を並べて FAIL する", async () => {
+  it("a part of a non-default quant is absent: FAIL too (every quant is checked, not only the default)", async () => {
     await withTemporaryRoot(async (root) => {
-      arrange(root);
-      writeFileSync(new URL(parts[1].path, root), new Uint8Array(parts[1].size - 1));
+      const { i8 } = await arrange(root);
+      const last = i8.paths.length - 1;
+      removeSync(new URL(i8.paths[last]!, root));
       await assertRejects(
         () => assertDistributionIntact(root, "synthetic"),
         AssertionError,
-        `depth[1] ${parts[1].path}: 長さ 7 が宣言の 8 と違う`,
+        `m/depth/i8[${last}] ${i8.paths[last]}: the declared part is absent`,
       );
     });
   });
 
-  it("manifest が karume/5 でなければ FAIL する", async () => {
+  it("a part's length differs from its declaration: FAIL with both lengths", async () => {
     await withTemporaryRoot(async (root) => {
-      arrange(root, "karume/4");
+      const { f32 } = await arrange(root);
+      const last = f32.paths.length - 1;
+      const at = new URL(f32.paths[last]!, root);
+      const size = statSync(at).size;
+      writeFileSync(at, new Uint8Array(size - 1));
+      await assertRejects(
+        () => assertDistributionIntact(root, "synthetic"),
+        AssertionError,
+        `m/depth/f32[${last}] ${f32.paths[last]}: ${size - 1} bytes, declared ${size}`,
+      );
+    });
+  });
+
+  it("the container's graph is not named by the weights key: FAIL naming both", async () => {
+    await withTemporaryRoot(async (root) => {
+      await arrange(root, { i8Graph: "other" });
+      await assertRejects(
+        () => assertDistributionIntact(root, "synthetic"),
+        AssertionError,
+        "m/depth/i8: the container's graphs are other, expected depth",
+      );
+    });
+  });
+
+  it("part 0's documents differ from the declared sha256: FAIL, the container does not open", async () => {
+    await withTemporaryRoot(async (root) => {
+      const { f32 } = await arrange(root);
+      // Another container of the same shape (a graph name of the same length) over the declared
+      // part 0: the part lengths agree, the documents' sha256 does not.
+      const other = await writeContainer("deptx");
+      writeFileSync(new URL(f32.paths[0]!, root), other.parts[0]!);
+      await assertRejects(
+        () => assertDistributionIntact(root, "synthetic"),
+        AssertionError,
+        "m/depth/f32: the container does not open",
+      );
+    });
+  });
+
+  it("the manifest is not karume/5: FAIL", async () => {
+    await withTemporaryRoot(async (root) => {
+      await arrange(root, { format: "karume/4" });
       await assertRejects(() => assertDistributionIntact(root, "synthetic"), Error, "karume/4");
+    });
+  });
+
+  it("a cross-repo container is opened from its sibling mirror (its parts are not stat'ed here)", async () => {
+    await withTemporaryRoot(async (models) => {
+      const base = new URL("karume-base/", models);
+      const derived = new URL("karume-derived/", models);
+      mkdirSync(base);
+      mkdirSync(derived);
+      const { f32, i8 } = await arrange(base);
+      const repo = "hdae/karume-base";
+      writeTextFileSync(
+        new URL("karume.json", derived),
+        manifestText(f32.entry({ repo }), i8.entry({ repo })),
+      );
+      await assertDistributionIntact(derived, "karume-derived");
+      removeSync(base, { recursive: true });
+      await assertRejects(
+        () => assertDistributionIntact(derived, "karume-derived"),
+        Error,
+        "'hdae/karume-base'",
+      );
     });
   });
 });
