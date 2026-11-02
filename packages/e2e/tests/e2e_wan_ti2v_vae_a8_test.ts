@@ -2,9 +2,10 @@
  * The Wan2.2 TI2V-5B VAE decoder on **int8 activations** (`convCompute: "a8"` — ADR 0133; real GPU): the
  * E2E A/B of ADR 0110 §5 at the decoder's own observation point.
  *
- * Both chunk graphs of the int8 series (`outputs/series/wan2.2-ti2v-5b-i8-dyn/vae_decoder_{first,next}` —
- * written by `wan.export_vae --model ti2v-5b --dtype i8`, the same weights the `i8` and the
- * `i8-a8-attn8-online-conv8` presets ship) run the chunk sequence of the f16 series' fixtures twice on one
+ * Both int8 chunk graphs of the distribution mirror (`models/karume-wan2.2/`, `vae_decoder_{first,next}` in
+ * int8 storage — written by `wan.export_vae --model ti2v-5b --dtype i8`, the weights the `i8` and the
+ * `i8-a8-attn8-online-conv8` presets ship; opened through the manifest — ADR 0139 decision 1) run the chunk
+ * sequence of the f16 series' fixtures (in the test-asset root — decision 2) twice on one
  * device: the **control** (`{}` — int8 weights dequantised in the f32 implicit GEMM, the `i8` preset's
  * decoder) and the **subject** (`{ convCompute: "a8" }` — the conv8 preset's decoder). The latents come from
  * the f16 series' chunk fixtures (`vae_chunks.*` — the same inputs as the chunk-sequence parity), and their
@@ -27,10 +28,10 @@
  * `undefined` ceiling = not derived: the subject's ratios are recorded and the step fails with the
  * candidate (measured × 2, the convention of ADR 0110 §5-3), like the bands of the sibling tests.
  *
- * Without the int8 decoder containers or a GPU the suite SKIPs with the generation command.
+ * Without the mirror, the two fixtures or a GPU the suite SKIPs explicitly, naming what is missing.
  */
 
-import { afterAll, beforeAll, describe, it } from "vite-plus/test";
+import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertNotEquals } from "@std/assert";
 import {
   type GpuContext,
@@ -53,22 +54,22 @@ import {
   type Fixture,
   readFixture,
 } from "../../models/tests/helpers/wan-vae-chunk-loop.ts";
+import { mirrorPresent } from "../../models/tests/helpers/mirror.ts";
+import { TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
+import { TEST_ASSETS_FETCH as FETCH } from "../../models/tests/helpers/wan-ti2v-dit.ts";
 import {
-  ti2vVaeAssets,
+  openWanTi2vComponent,
+  WAN_TI2V_ASSEMBLE_COMMAND as ASSEMBLE,
+  WAN_TI2V_DIST_ROOT as DIST_ROOT,
+} from "../../models/tests/helpers/wan-ti2v-pipeline.ts";
+import {
+  ti2vVaeChunkFixtures,
   ti2vVaeFixtureUrl,
-  ti2vVaeI8Assets,
-  ti2vVaeI8ModelUrl,
   WAN_TI2V_VAE_FIRST as FIRST,
-  WAN_TI2V_VAE_GENERATE as GENERATE_CHUNKS,
-  WAN_TI2V_VAE_I8_GENERATE as GENERATE_I8,
-  WAN_TI2V_VAE_I8_ROOT as I8_ROOT,
-  WAN_TI2V_VAE_I8_SERIES as I8_SERIES,
   WAN_TI2V_VAE_NEXT as NEXT,
   WAN_TI2V_VAE_SAMPLE_CHANNELS as SAMPLE_CHANNELS,
   WAN_TI2V_VAE_SAMPLE_TILE as SAMPLE_TILE,
 } from "../../models/tests/helpers/wan-ti2v-vae.ts";
-import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import { conv3dCensus } from "./helpers/conv3d-census.ts";
 
@@ -90,17 +91,28 @@ const A8_CEILING: number | undefined = 2.6e-2;
 /** The conv3d node counts of the two chunk graphs (every one runs the w8a8 key in the subject). */
 const CONV3D_NODES = { first: 33, next: 35 } as const;
 
-const I8_ASSETS = ti2vVaeI8Assets();
-const I8_PRESENT = I8_ASSETS.every(({ present }) => present);
-const FIXTURES_PRESENT = ti2vVaeAssets().every(({ present }) => present);
+const I8_PRESENT = mirrorPresent(DIST_ROOT);
+/** The A/B reads only the latents of these two chunk fixtures. */
+const FIXTURES = ti2vVaeChunkFixtures(["band", "accept"]);
+const FIXTURES_PRESENT = FIXTURES.every(({ present }) => present);
+/**
+ * A complete fetch of the pinned test-asset dataset makes a missing fixture a FAIL (the fixture test below): the dataset
+ * at the pin lacks a file the A/B reads. Without one, the A/B SKIPs (the assets gate is red then).
+ */
+const FETCHED = testAssetsFetched();
+const MISSING_FIXTURES = FETCHED
+  ? `the test-asset dataset at revision ${TEST_ASSETS.revision} lacks them`
+  : `fetch: ${FETCH}`;
 if (!I8_PRESENT) {
   console.warn(
-    `[karume] ${I8_ROOT.pathname} に Wan2.2 TI2V の int8 の VAE decoder の容器が無いため、` +
-      `convCompute 'a8' の A/B を SKIP する。生成: ${GENERATE_I8}`,
+    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references is ` +
+      `absent), so the convCompute 'a8' A/B of the int8 VAE decoder is SKIPPED. Assemble it: ${ASSEMBLE}`,
   );
 } else if (!FIXTURES_PRESENT) {
   console.warn(
-    `[karume] f16 系列の chunk フィクスチャが無いため、convCompute 'a8' の A/B を SKIP する。生成: ${GENERATE_CHUNKS}`,
+    `[karume] the chunk fixtures ${FIXTURES.filter(({ present }) => !present)
+      .map(({ path }) => path)
+      .join(" / ")} are absent, so the convCompute 'a8' A/B is SKIPPED (${MISSING_FIXTURES})`,
   );
 }
 
@@ -138,6 +150,18 @@ const poisonFrames = async (caches: WanVaeChunkCaches, chunks: number): Promise<
   }
 };
 
+test.skipIf(!FETCHED)(
+  "Wan2.2 TI2V VAE a8 fixtures (complete fetch only): the fetched test-asset dataset holds the two chunk fixtures " +
+    "the A/B reads",
+  () => {
+    assertEquals(
+      FIXTURES.filter(({ present }) => !present).map(({ path }) => path),
+      [],
+      `missing fixtures (${MISSING_FIXTURES})`,
+    );
+  },
+);
+
 describe.skipIf(!I8_PRESENT || !FIXTURES_PRESENT || !GPU_AVAILABLE)(
   "Wan2.2 TI2V VAE decoder on int8 activations (convCompute 'a8' — ADR 0133): census, difference floor," +
     " collapse ceiling at the first chunk's frame, no non-finite values (real GPU)",
@@ -155,12 +179,12 @@ describe.skipIf(!I8_PRESENT || !FIXTURES_PRESENT || !GPU_AVAILABLE)(
 
     beforeAll(async () => {
       const [firstOpened, nextOpened] = await Promise.all([
-        openSeriesContainer(ti2vVaeI8ModelUrl(FIRST)),
-        openSeriesContainer(ti2vVaeI8ModelUrl(NEXT)),
+        openWanTi2vComponent(FIRST, "i8"),
+        openWanTi2vComponent(NEXT, "i8"),
       ]);
       const models = {
-        first: prepareContainer(firstOpened, seriesGraph(I8_SERIES, FIRST)),
-        next: prepareContainer(nextOpened, seriesGraph(I8_SERIES, NEXT)),
+        first: prepareContainer(firstOpened, FIRST),
+        next: prepareContainer(nextOpened, NEXT),
       };
       const layout = wanVaeChunkLayout(models.first, models.next);
       const fixtures = {

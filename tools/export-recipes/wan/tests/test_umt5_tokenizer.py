@@ -11,10 +11,11 @@ import json
 from typing import Any
 
 import pytest
+from real_assets import mirror_asset
 
-from _shared.paths import SERIES_ROOT
 from wan import prompt_clean as pc
 from wan import umt5_tokenizer as ut
+from wan.distribution import WAN22, WAN_TOKENIZER_ROLE
 
 
 def fake_truth(
@@ -202,18 +203,17 @@ class TestAgainstUpstream:
         assert regenerated == committed
 
     def test_the_shared_table_builder_bakes_the_series_asset_byte_for_byte(self, upstream):
-        """T5 の表の欄を `karume-umt5-xxl` の資産と共有する 1 本（`t5_table_fields`）へ移しても、
-        Wan の資産は系列の実物とバイト同一（Wan2.2 の配布形が配る資産そのもの）。"""
-        series = SERIES_ROOT / ut.SERIES_NAME / ut.ASSET_FILE
-        if not series.is_file():
-            pytest.skip(f"Wan のトークナイザ資産の系列が無い: {series}")
+        """With the T5 table fields shared with the `karume-umt5-xxl` asset (`t5_table_fields`), the
+        Wan asset is still byte-identical to the one the distributions ship (the published Wan2.2
+        mirror's `umt5_tokenizer`; the local-only Wan2.1 mirror ships the same file)."""
+        shipped = mirror_asset(WAN22.repo_name, WAN22.default_model, WAN_TOKENIZER_ROLE)
         truth, tables, _ = upstream
 
         rebuilt = json.dumps(
             ut.build_asset(truth, tables, ut.asset_versions(), "t2v-1.3b"), ensure_ascii=False
         )
 
-        assert rebuilt.encode("utf-8") == series.read_bytes()
+        assert rebuilt.encode("utf-8") == shipped.read_bytes()
 
     def test_a_case_whose_paths_split_on_added_tokens_is_rejected(self, upstream):
         truth, tables, _ = upstream

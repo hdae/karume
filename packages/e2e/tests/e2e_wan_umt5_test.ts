@@ -1,14 +1,16 @@
 /**
  * Wan2.1 の umT5（i8 系列のテキストエンコーダ）の**移植の門**（実 GPU・ADR 0119 段 10c — 決定 3 / 4 / 5 / 8）。
  *
- * 系列の容器（`outputs/series/umt5-xxl-i8-dyn/text_encoder/` — 重み i8 per-channel・活性 f32・入力は token id
- * `[1,L]` とバケット表 `[L,L]`・L は 2〜512 の記号次元）を karume runtime で回し、CPU の層逐次の参照（同じ i8 の
- * fake-quant 重み — recipe `wan/umt5_reference.py`）と突き合わせる。パイプラインへの結線は段 10d で、ここは
- * text_encoder 単体の forward を見る。
+ * The text_encoder container of the distribution mirror `models/karume-umt5-xxl/` (opened through its manifest —
+ * ADR 0139 decision 1; int8 per-channel weights, f32 activations, inputs token ids `[1,L]` and the bucket table
+ * `[L,L]`, L a symbolic dimension of 2 to 512) runs on the karume runtime and is compared with the CPU layer-by-layer
+ * reference (the same int8 fake-quantized weights — recipe `wan/umt5_reference.py`). The wiring into the pipeline
+ * is stage 10d; this file checks the text_encoder's forward on its own.
  *
- * 生成は `cd tools/export-recipes && uv run --group wan --inexact python -m wan.umt5_export reference`（容器は
- * 段 10b の書き出し）。golden は 1 ケース 1 本の `reference.<case>.safetensors` で、中身と読み口・帯・判定は
- * `helpers/umt5-golden.ts`（単体の `umt5.Encoder` の通しの e2e と共有の 1 本）。
+ * The goldens are one `reference.<case>.safetensors` per case, in the test-asset root (`node tools/test-assets/fetch.ts`
+ * — ADR 0139 decision 2; written by `cd tools/export-recipes && uv run --group wan --inexact python -m
+ * wan.umt5_export reference`). Their content, reader, band and judgement are in `helpers/umt5-golden.ts` (shared with
+ * the public `umt5.Encoder` e2e).
  *
  * ## 門
  *
@@ -22,8 +24,8 @@
  *    層 0 / 1 の相対位置の表の取り違え（容器の供給面で block を入れ替える — 別の Session）・i8 に固有の 1 件
  *    （中ほどの層の linear 1 本の per-channel scale を 2 倍 — {@link scaledScaleContainer}・別の Session）。
  *
- * 資産が無い環境と GPU 無し環境は生成コマンド付きで**明示 SKIP**する（ADR 0005）。資産が**一部だけ**ある環境は
- * SKIP ではなく FAIL にする（完全性テスト）。
+ * Without the mirror, the goldens or a GPU the cases SKIP explicitly, naming what is missing (ADR 0005). A golden
+ * set present only in part is a FAIL, not a SKIP (the completeness test).
  *
  * ## Default run vs opt-in upstream parity
  *
@@ -38,11 +40,10 @@
  *
  * The last two tests of this file drive the public `umt5.Encoder` (`@karume/models/umt5`) built by
  * `fromPretrained(nodeDirectory(…))` over the distribution mirror `models/karume-umt5-xxl`, against the same 10
- * goldens and the same band. They cover what the series-level gate above does not: the hub mirror path (manifest
- * selection, tokenizer asset), the encoder's own tokenizer ids, and abort / dispose. Their skip conditions are
- * their own (mirror + goldens), independent of the series container and the 10a tokenizer asset. The band check
- * on the mirror is opt-in like the series-level band; ids, shape, finiteness and abort / dispose stay in the
- * default run.
+ * goldens and the same band. They cover what the runtime-level gate above does not: the public pipeline path
+ * (manifest selection, tokenizer asset), the encoder's own tokenizer ids, and abort / dispose. Their skip
+ * conditions are their own (mirror + goldens), independent of Wan's tokenizer asset. The band check on the mirror
+ * is opt-in like the runtime-level band; ids, shape, finiteness and abort / dispose stay in the default run.
  */
 
 import { readFile } from "@karume/test-support/fs";
@@ -69,7 +70,6 @@ import {
 } from "../../models/src/umt5/relative-position.ts";
 import { type Umt5SessionInputs, umt5SessionInputs } from "../../models/src/umt5/session-io.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
-import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
 import {
   BUCKETS_KEY,
@@ -82,41 +82,55 @@ import {
   formatRatio,
   GENERATE,
   type Golden,
+  FETCH,
+  GOLDEN_DIR,
   goldenUrl,
   INPUT_IDS_KEY,
   judgeBand,
   loadGolden,
   ratioOf,
   referenceRatioOf,
-  SERIES_DIR,
-  SERIES_NAME,
   UMT5_NORMALIZED_BAND,
 } from "../../models/tests/helpers/umt5-golden.ts";
 import {
-  modelPresent,
-  openSeriesContainer,
-  resolveParts,
-} from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
+  mirrorPresent,
+  mirrorRoot,
+  openSelectedContainer,
+  readMirrorAsset,
+  selectMirrorComponent,
+} from "../../models/tests/helpers/mirror.ts";
+import { TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
-const MODEL_FILE = "model.krm";
+/** The distribution mirror (the default output of `dist.py --pipeline umt5`). */
+const DIST_ROOT = mirrorRoot("karume-umt5-xxl");
+const ASSEMBLE = "cd tools/export-recipes && uv run python dist.py --pipeline umt5";
+/** 席（明示 — 省略すると manifest の既定へ黙って移る。golden は i8 の重みから採った）。 */
+const MIRROR_MODEL = "xxl";
+const MIRROR_QUANT = "i8";
 /**
- * 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本）。**使うときに引く** — 表に行が無いときにモジュール
- * 評価で落とすと、GPU 不要のテストまで巻き添えで落ちる。
+ * manifest の部品名とトークナイザ資産のキー（`src/umt5/encoder.ts` と同じ綴り）。The component key is also the
+ * container's graph name (the manifest's weights key — container-v1 §2.1).
  */
-const graphName = (): string => seriesGraph(SERIES_NAME, COMPONENT);
+const TEXT_ENCODER = COMPONENT;
+const TOKENIZER = "tokenizer";
 
-/** 10a のトークナイザ資産（recipe `wan/umt5_tokenizer.py` が焼く）。 */
-const TOKENIZER_URL = new URL(
-  "../../../outputs/series/wan2.1-umt5-tokenizer/tokenizer.json",
-  import.meta.url,
-);
+/** Opens the mirror's text_encoder container (range reads, through the manifest). */
+const openTextEncoder = async (): Promise<OpenedContainer> =>
+  await openSelectedContainer(
+    await selectMirrorComponent(DIST_ROOT, TEXT_ENCODER, {
+      model: MIRROR_MODEL,
+      quant: MIRROR_QUANT,
+    }),
+  );
 
-const GENERATE_TOKENIZER =
-  "cd tools/export-recipes && uv run --group wan --inexact python -m wan.umt5_tokenizer";
+/**
+ * Wan's tokenizer asset (prompt_clean + umT5 — the `umt5_tokenizer` of the published Wan2.2 distribution, the same
+ * bytes as Wan2.1's).
+ */
+const WAN_MIRROR = mirrorRoot("karume-wan2.2");
 
 /**
  * 故障注入で取り違える 2 層の相対位置の表（層の添字の 1 ずれ — 先頭の 2 層）。容器の initializer 名は recipe の
@@ -138,38 +152,65 @@ const I8_SCALE_FAULT_WEIGHT = "encoder.block.12.layer.1.DenseReluDense.wo.weight
 /** 帯の外を門にする倍率（i8 の scale の取り違え — 軸・値・束縛 — の大きさ）。 */
 const GROSS_SCALE_FACTOR = 2;
 
-const MODEL_PRESENT = modelPresent(new URL(MODEL_FILE, SERIES_DIR));
+const DIST_PRESENT = mirrorPresent(DIST_ROOT);
 const expectedFiles = CASES.map(({ name }) => goldenUrl(name));
 const GOLDENS_PRESENT = expectedFiles.every(filePresent);
-const ASSETS_AVAILABLE = MODEL_PRESENT && GOLDENS_PRESENT;
-const ANY_PRESENT = MODEL_PRESENT || expectedFiles.some(filePresent);
-const tokenizerText = await readTextIfPresent(TOKENIZER_URL);
+const ASSETS_AVAILABLE = DIST_PRESENT && GOLDENS_PRESENT;
+const ANY_GOLDEN_PRESENT = expectedFiles.some(filePresent);
+/**
+ * A complete fetch of the pinned test-asset dataset makes a missing golden a FAIL (the completeness test below): the
+ * dataset at the pin lacks a file the cases read. Without one, the cases SKIP (the assets gate is red then).
+ */
+const FETCHED = testAssetsFetched();
+const MISSING_GOLDENS = FETCHED
+  ? `the test-asset dataset at revision ${TEST_ASSETS.revision} lacks them`
+  : `fetch: ${FETCH}`;
+const tokenizerText = mirrorPresent(WAN_MIRROR)
+  ? new TextDecoder().decode(await readMirrorAsset(WAN_MIRROR, "umt5_tokenizer"))
+  : undefined;
 
-if (!ASSETS_AVAILABLE) {
+if (!DIST_PRESENT) {
   console.warn(
-    `[karume] ${SERIES_DIR.pathname} に umT5 の容器と golden が揃っていないため Wan の umT5 の e2e を SKIP ` +
-      `する（重み 5.3 GB につきリポジトリ管理外）。生成: ${GENERATE}`,
+    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/5), so the umT5 e2e is SKIPPED. ` +
+      `Assemble it: ${ASSEMBLE} (an all-SKIP is a FAIL of the gate distribution_gate_test.ts)`,
+  );
+} else if (!GOLDENS_PRESENT) {
+  console.warn(
+    `[karume] the umT5 goldens under ${GOLDEN_DIR.pathname} are not all present, so the umT5 e2e is ` +
+      `SKIPPED (${MISSING_GOLDENS})`,
   );
 } else if (tokenizerText === undefined) {
   console.warn(
-    `[karume] ${TOKENIZER_URL.pathname} が無いため Wan の umT5 の e2e（入力は TS のトークナイザで作る）を ` +
-      `SKIP する。生成: ${GENERATE_TOKENIZER}`,
+    `[karume] the mirror ${WAN_MIRROR.pathname} is absent (or not karume/5, or a sibling it references is ` +
+      `absent), so the Wan umT5 port check (its inputs come from Wan's TS tokenizer) is SKIPPED ` +
+      "(fetch the karume-wan2.2 distribution into models/)",
   );
 }
 
 const hex = (bytes: ArrayBuffer): string =>
   [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 
-/** 容器の part 0（ヘッダ + 2 文書 — 全 block の sha256 を宣言する）の sha256（golden のメタと突き合わせる）。 */
+/**
+ * 容器の part 0（ヘッダ + 2 文書 — 全 block の sha256 を宣言する）の sha256（golden のメタと突き合わせる）. Hashed
+ * from the mirror's file, not taken from the manifest's declaration.
+ */
 const containerPart0Sha256 = async (): Promise<string> => {
-  const [part0] = resolveParts(new URL(MODEL_FILE, SERIES_DIR));
-  return hex(await crypto.subtle.digest("SHA-256", await readFile(part0)));
+  const { container } = await selectMirrorComponent(DIST_ROOT, TEXT_ENCODER, {
+    model: MIRROR_MODEL,
+    quant: MIRROR_QUANT,
+  });
+  const [part0] = container.parts;
+  assert(
+    part0.repo === undefined,
+    `${TEXT_ENCODER}: part 0 is a cross-repo reference (${part0.repo})`,
+  );
+  return hex(await crypto.subtle.digest("SHA-256", await readFile(new URL(part0.path, DIST_ROOT))));
 };
 
 /** TS のトークナイザ（資産が無い回は ignore で SKIP 済み — ここへ来たら条件の食い違いとして落とす）。 */
 const tokenizerEncoder = (): WanPromptEncoder => {
   if (tokenizerText === undefined) {
-    throw new Error(`${TOKENIZER_URL.pathname} が無い（ignore の条件と食い違っている）`);
+    throw new Error(`${WAN_MIRROR.pathname} is absent (contradicts the skip condition)`);
   }
   return new WanPromptEncoder(parseWanTokenizerAsset(JSON.parse(tokenizerText)));
 };
@@ -332,15 +373,15 @@ const requireOpened = <T>(value: T | undefined, what: string): T => {
 
 const results = openResults("wan-umt5");
 
-// 完全に空の環境だけ「生成していない」として SKIP。何か 1 つでもあれば欠けは FAIL。
-test.skipIf(!ANY_PRESENT)(
-  "Wan umT5 資産: i8 系列の容器と全ケース（決定用 6 本・受入れ 4 本）の golden が揃っている",
+// Only a root with no golden at all that is not a complete fetch SKIPs; with any one present or a complete fetch, a
+// missing one is a FAIL. The mirror's completeness is the distribution gate's (distribution_gate_test.ts).
+test.skipIf(!ANY_GOLDEN_PRESENT && !FETCHED)(
+  "Wan umT5 goldens: the goldens of every case (6 band, 4 accept) are present",
   () => {
-    assert(MODEL_PRESENT, `${SERIES_DIR.pathname}${MODEL_FILE} が無い`);
     assertEquals(
       expectedFiles.filter((url) => !filePresent(url)).map((url) => url.pathname),
       [],
-      `golden の欠け（生成: ${GENERATE}）`,
+      `missing goldens (${MISSING_GOLDENS})`,
     );
   },
 );
@@ -410,11 +451,7 @@ describe.skipIf(!ASSETS_AVAILABLE || tokenizerText === undefined || !GPU_AVAILAB
 
     beforeAll(async () => {
       encoder = tokenizerEncoder();
-      const graph = graphName();
-      prepared = prepareContainer(
-        await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)),
-        graph,
-      );
+      prepared = prepareContainer(await openTextEncoder(), TEXT_ENCODER);
       assertEquals(
         prepared.graph.inputs.map(({ name }) => name),
         [INPUT_IDS_KEY, BUCKETS_KEY],
@@ -507,8 +544,8 @@ describe.skipIf(
 
     beforeAll(async () => {
       encoder = tokenizerEncoder();
-      graph = graphName();
-      opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR));
+      graph = TEXT_ENCODER;
+      opened = await openTextEncoder();
       prepared = prepareContainer(opened, graph);
       assertEquals(
         prepared.graph.inputs.map(({ name }) => name),
@@ -726,31 +763,6 @@ describe.skipIf(
  * ミラー・golden・GPU のどれかが無い環境は明示 SKIP（ADR 0005）— ミラーごと無い形は門番 `distribution_gate_test.ts`、
  * golden の欠けは `e2e_wan_umt5_test.ts` の完全性テストが FAIL にする。
  */
-
-/** 配布形ミラー（`dist.py --pipeline umt5` の既定の出力先）。 */
-const DIST_ROOT = new URL("../../../models/karume-umt5-xxl/", import.meta.url);
-const ASSEMBLE = "cd tools/export-recipes && uv run python dist.py --pipeline umt5";
-/** 席（明示 — 省略すると manifest の既定へ黙って移る。golden は i8 の重みから採った）。 */
-const MIRROR_MODEL = "xxl";
-const MIRROR_QUANT = "i8";
-/** manifest の部品名とトークナイザ資産のキー（`src/umt5/encoder.ts` と同じ綴り）。 */
-const TEXT_ENCODER = "text_encoder";
-const TOKENIZER = "tokenizer";
-
-const DIST_PRESENT = filePresent(new URL("karume.json", DIST_ROOT));
-
-if (!DIST_PRESENT) {
-  console.warn(
-    `[karume] 配布形ミラー ${DIST_ROOT.pathname} が無いため umT5 の encoder の e2e を SKIP する。組み立て: ` +
-      `${ASSEMBLE}（全 SKIP は門番 distribution_gate_test.ts が FAIL にする）`,
-  );
-} else if (!GOLDENS_PRESENT) {
-  console.warn(
-    `[karume] umT5 の golden（${
-      goldenUrl(CASES[0].name).pathname
-    } など）が揃っていないため umT5 の encoder の ` + `e2e を SKIP する。生成: ${GENERATE}`,
-  );
-}
 
 /** ミラーの選択（manifest の宣言 — 席は明示）。 */
 const loadMirror = async () => {

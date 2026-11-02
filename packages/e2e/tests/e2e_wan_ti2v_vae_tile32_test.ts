@@ -1,12 +1,14 @@
 /**
  * The Wan2.2 TI2V-5B VAE decoder at a **32-latent tile** (ADR 0134; real GPU): the second chunk-graph
  * pair (`vae_decoder_first_32` / `vae_decoder_next_32` — weightless containers written by
- * `wan.export_vae --tile 32 --shared`) borrowing every weight of the 16-latent pair of the same series.
+ * `wan.export_vae --tile 32 --shared`) borrowing every weight of the 16-latent pair of the same storage. The
+ * containers are the distribution mirror's (`models/karume-wan2.2/`, opened through the manifest — ADR 0139
+ * decision 1); the fixtures are in the test-asset root (decision 2).
  *
  * ## Gates (ADR 0134 decision 7)
  *
- * Three runs, each on its own device: the f16 series with `{}`, the int8 series with `{}` and the int8
- * series with `{ convCompute: "a8" }` (the conv8 preset's decoder — ADR 0133).
+ * Three runs, each on its own device: the f16 containers with `{}`, the int8 containers with `{}` and the
+ * int8 containers with `{ convCompute: "a8" }` (the conv8 preset's decoder — ADR 0133).
  *
  * 1. **Shared weights**: the 16-latent Sessions are built with the run's options as lenders; the
  *    32-latent Sessions are built with the same options plus `sharedWeights` over every initializer the
@@ -22,7 +24,7 @@
  *    nodes, the counts at tile 16) with its `quantize_rows` prelude, and no f32 conv3d key remains; the
  *    other runs run no w8a8 key.
  *
- * The tile-32 references (`vae_tiles.<case>.t32.safetensors` in the f16 series root —
+ * The tile-32 references (`vae_tiles.<case>.t32.safetensors` among the f16 series' goldens —
  * `vae_tiling.py --model ti2v-5b --tile 32`; only `wide` fits a 32-latent tile) add, on the f16 run:
  *
  * 4. **Plan**: the TS plan (from the 32-latent layout) equals the fixture's meta (the Python plan).
@@ -32,8 +34,10 @@
  *    the candidate (maxAbs × 5, rounded up to two significant digits — the rule of the 16-latent band).
  *    With `wide` the only case that fits the tile, it is both the deciding and the accepted case.
  *
- * No tile-32 pair in either series → explicit SKIP with the generation commands; a pair in only some of
- * the places → FAIL. No tile-32 reference → the reference steps SKIP with the command; some → FAIL.
+ * No mirror or no `vae_chunks.accept` fixture → explicit SKIP naming what is missing (the mirror's
+ * completeness is the distribution gate's); a chunk fixture missing while another is present, or missing from a
+ * complete fetch of the pinned test-asset dataset → FAIL. No tile-32 reference → the reference steps SKIP with the
+ * fetch command; some, or a complete fetch → FAIL.
  */
 
 import { readFile } from "@karume/test-support/fs";
@@ -70,36 +74,31 @@ import { disposeSteps } from "../../models/src/session/dispose-steps.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
 import { bitsEqual, readFixture } from "../../models/tests/helpers/wan-vae-chunk-loop.ts";
+import { mirrorPresent } from "../../models/tests/helpers/mirror.ts";
+import { TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
+import { TEST_ASSETS_FETCH as FETCH } from "../../models/tests/helpers/wan-ti2v-dit.ts";
 import {
-  ti2vVaeAssets,
+  openWanTi2vComponent,
+  WAN_TI2V_ASSEMBLE_COMMAND as ASSEMBLE,
+  WAN_TI2V_DIST_ROOT as DIST_ROOT,
+} from "../../models/tests/helpers/wan-ti2v-pipeline.ts";
+import {
+  ti2vVaeChunkFixtures,
   ti2vVaeFixtureUrl,
-  ti2vVaeI8Assets,
-  ti2vVaeTile32Assets,
   ti2vVaeTile32FixtureUrl,
   ti2vVaeTile32TileAssets,
   WAN_TI2V_VAE_FIRST as FIRST,
   WAN_TI2V_VAE_FIRST_32 as FIRST_32,
-  WAN_TI2V_VAE_GENERATE as GENERATE_CHUNKS,
-  WAN_TI2V_VAE_I8_GENERATE as GENERATE_I8,
-  WAN_TI2V_VAE_I8_ROOT as I8_ROOT,
-  WAN_TI2V_VAE_I8_SERIES as I8_SERIES,
-  WAN_TI2V_VAE_I8_TILE32_GENERATE as GENERATE_I8_TILE32,
+  WAN_TI2V_VAE_GOLDEN_DIR as GOLDEN_DIR,
   WAN_TI2V_VAE_LATENT_CHANNELS as LATENT_CHANNELS,
-  WAN_TI2V_VAE_MODEL_FILE as MODEL_FILE,
   WAN_TI2V_VAE_NEXT as NEXT,
   WAN_TI2V_VAE_NEXT_32 as NEXT_32,
-  WAN_TI2V_VAE_ROOT as ROOT,
   WAN_TI2V_VAE_SAMPLE_CHANNELS as SAMPLE_CHANNELS,
   WAN_TI2V_VAE_SAMPLE_TILE_32 as SAMPLE_TILE_32,
-  WAN_TI2V_VAE_SERIES as SERIES,
   WAN_TI2V_VAE_TILE_32 as TILE_32,
   WAN_TI2V_VAE_TILE32_CASES as T32_CASES,
-  WAN_TI2V_VAE_TILE32_GENERATE as GENERATE_TILE32,
-  WAN_TI2V_VAE_TILES_T32_GENERATE as GENERATE_T32_TILES,
 } from "../../models/tests/helpers/wan-ti2v-vae.ts";
 import { allclose } from "../../runtime/src/reference/allclose.ts";
-import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import { conv3dCensus } from "./helpers/conv3d-census.ts";
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
@@ -133,71 +132,76 @@ const DEGENERATE_SOURCE = "accept";
 
 type Run = {
   readonly label: "f16" | "i8" | "i8-a8";
-  readonly root: URL;
-  readonly series: string;
+  /** The storage of both pairs (the mirror's container of that dtype). */
+  readonly dtype: "f16" | "i8";
   readonly options: SessionOptions;
 };
 
 const RUNS: readonly Run[] = [
-  { label: "f16", root: ROOT, series: SERIES, options: {} },
-  { label: "i8", root: I8_ROOT, series: I8_SERIES, options: {} },
-  { label: "i8-a8", root: I8_ROOT, series: I8_SERIES, options: { convCompute: "a8" } },
+  { label: "f16", dtype: "f16", options: {} },
+  { label: "i8", dtype: "i8", options: {} },
+  { label: "i8-a8", dtype: "i8", options: { convCompute: "a8" } },
 ];
 
-const TILE32_ASSETS = [...ti2vVaeTile32Assets(ROOT), ...ti2vVaeTile32Assets(I8_ROOT)];
-const ANY_TILE32 = TILE32_ASSETS.some(({ present }) => present);
-const ALL_TILE32 = TILE32_ASSETS.every(({ present }) => present);
-/** The lenders and the chunk fixtures (the f16 series' set) and the int8 lenders. */
-const F16_LENDERS = ti2vVaeAssets().every(({ present }) => present);
-const I8_LENDERS = ti2vVaeI8Assets().every(({ present }) => present);
+/** Every run reads the mirror's two pairs and the degenerate gate's source fixture. */
+const MIRROR_PRESENT = mirrorPresent(DIST_ROOT);
+/** The chunk fixtures of the 16-latent pair (the degenerate gate repeats one of them). */
+const CHUNK_FIXTURES = ti2vVaeChunkFixtures();
+const SOURCE_FIXTURE = ti2vVaeChunkFixtures([DEGENERATE_SOURCE]);
+const SOURCE_PRESENT = SOURCE_FIXTURE.every(({ present }) => present);
+/**
+ * A complete fetch of the pinned test-asset dataset makes a missing fixture a FAIL (the fixture tests below): the dataset
+ * at the pin lacks a file the gates read. Without one, the gates SKIP (the assets gate is red then).
+ */
+const FETCHED = testAssetsFetched();
+const MISSING_FIXTURES = FETCHED
+  ? `the test-asset dataset at revision ${TEST_ASSETS.revision} lacks them`
+  : `fetch: ${FETCH}`;
 const T32_ASSETS = ti2vVaeTile32TileAssets();
 const ANY_T32 = T32_ASSETS.some(({ present }) => present);
 const ALL_T32 = T32_ASSETS.every(({ present }) => present);
 
-if (!ANY_TILE32) {
+if (!MIRROR_PRESENT) {
   console.warn(
-    `[karume] the Wan2.2 TI2V tile-32 VAE decoder pair is in neither ${ROOT.pathname} nor ${I8_ROOT.pathname} — ` +
-      `the tile-32 gates SKIP. Generate: ${GENERATE_TILE32} / ${GENERATE_I8_TILE32}`,
+    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references is ` +
+      `absent), so the tile-32 gates SKIP. Assemble it: ${ASSEMBLE}`,
+  );
+} else if (!SOURCE_PRESENT) {
+  console.warn(
+    `[karume] the chunk fixture ${SOURCE_FIXTURE.map(({ path }) => path).join(" / ")} is absent, so the ` +
+      `tile-32 gates SKIP (${MISSING_FIXTURES})`,
   );
 }
 if (!ANY_T32) {
   console.warn(
-    `[karume] no tile-32 VAE tile reference (vae_tiles.*.t32) in ${ROOT.pathname} — the plan, wide and band ` +
-      `steps at tile 32 SKIP. Generate: ${GENERATE_T32_TILES}`,
+    `[karume] no tile-32 VAE tile reference (vae_tiles.*.t32) under ${GOLDEN_DIR.pathname} — the plan, wide ` +
+      `and band steps at tile 32 SKIP (${MISSING_FIXTURES})`,
   );
 }
 
-// None → "not generated" (SKIP); some → the missing ones FAIL (the writer writes both series).
-test.skipIf(!ANY_TILE32)(
-  "Wan2.2 TI2V VAE tile 32: the 32-latent pair is in both series (f16 and i8)",
+// The mirror holds the tile-32 pair and its 16-latent lenders; the gates also read the chunk fixtures. None present
+// SKIPs unless the root is a complete fetch; any one present or a complete fetch makes a missing one a FAIL.
+test.skipIf(!CHUNK_FIXTURES.some(({ present }) => present) && !FETCHED)(
+  "Wan2.2 TI2V VAE tile 32: the chunk fixtures are present",
   () => {
     assertEquals(
-      TILE32_ASSETS.filter(({ present }) => !present).map(({ path }) => path),
+      CHUNK_FIXTURES.filter(({ present }) => !present).map(({ path }) => path),
       [],
-      `the tile-32 pair is missing (generate: ${GENERATE_TILE32} / ${GENERATE_I8_TILE32})`,
+      `chunk fixtures missing (${MISSING_FIXTURES})`,
     );
   },
 );
 
-// The pair borrows the lenders' weights, so a pair without its lenders cannot run — FAIL, not SKIP.
-test.skipIf(!ANY_TILE32)(
-  "Wan2.2 TI2V VAE tile 32: the lenders (the 16-latent pair of both series) and the chunk fixtures are present",
+test.skipIf(!ANY_T32 && !FETCHED)(
+  "Wan2.2 TI2V VAE tile 32: the tile-32 references are all present",
   () => {
-    assert(
-      F16_LENDERS,
-      `the f16 series' 16-latent pair or chunk fixtures are missing (${GENERATE_CHUNKS})`,
+    assertEquals(
+      T32_ASSETS.filter(({ present }) => !present).map(({ path }) => path),
+      [],
+      `tile-32 references missing (${MISSING_FIXTURES})`,
     );
-    assert(I8_LENDERS, `the int8 series' 16-latent pair is missing (${GENERATE_I8})`);
   },
 );
-
-test.skipIf(!ANY_T32)("Wan2.2 TI2V VAE tile 32: the tile-32 references are all present", () => {
-  assertEquals(
-    T32_ASSETS.filter(({ present }) => !present).map(({ path }) => path),
-    [],
-    `tile-32 references missing (generate: ${GENERATE_T32_TILES})`,
-  );
-});
 
 /** One tile reference (F32 tensors and meta — the writer is `vae_tiling.write_fixture`). */
 const readTileFixture = async (url: URL) => {
@@ -271,20 +275,16 @@ const roundUpTwoDigits = (value: number): number => {
   return Number((Math.ceil(value / unit) * unit).toPrecision(2));
 };
 
-/** Opens one series' component and prepares its graph (graph names from the series table). */
+/** Opens the mirror's component in the run's storage and prepares its graph (the graph name is the component key). */
 const prepareComponent = async (run: Run, component: string) =>
-  prepareContainer(
-    await openSeriesContainer(new URL(`${component}/${MODEL_FILE}`, run.root)),
-    seriesGraph(run.series, component),
-  );
+  prepareContainer(await openWanTi2vComponent(component, run.dtype), component);
 
 /** The lender's weights the borrower takes, by name (`Session.exportWeight`). */
 const lend = (lender: Session, names: readonly string[]): Record<string, SharedWeight> =>
   Object.fromEntries(names.map((name) => [name, lender.exportWeight(name)]));
 
 for (const run of RUNS) {
-  const lendersPresent = run.label === "f16" ? F16_LENDERS : I8_LENDERS && F16_LENDERS;
-  describe.skipIf(!ALL_TILE32 || !lendersPresent || !GPU_AVAILABLE)(
+  describe.skipIf(!MIRROR_PRESENT || !SOURCE_PRESENT || !GPU_AVAILABLE)(
     `Wan2.2 TI2V VAE tile 32 (${run.label}${
       run.options.convCompute === undefined ? "" : ` — convCompute '${run.options.convCompute}'`
     }): the 32-latent pair borrows the 16-latent pair's weights; the degenerate gate (Uint32), 0 non-finite` +

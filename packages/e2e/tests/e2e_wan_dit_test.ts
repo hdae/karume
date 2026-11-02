@@ -1,14 +1,16 @@
 /**
  * Wan2.1 の DiT（S 形グラフ）の**移植の門**（実 GPU・ADR 0118 段 2 — 決定 3 / 8）。
  *
- * export した IR（f16 席・`outputs/series/wan2.1-t2v-1.3b-f16-dyn/transformer/`）を karume runtime で
- * 回し、ホストの unpatchify（`src/wan/dit-tokens.ts`）を通した潜在を、上流の**素の** diffusers
- * `WanTransformer3DModel`（CPU f32・同じ f16 丸めの重み）の 1 forward と突き合わせる。配布形（段 7）を
- * 通す検証は `Pipeline` の e2e（`e2e_wan_pipeline_test.ts`）が持ち、ここは DiT 単体の forward を実寸まで
- * 検証するので、系列の容器（`krm`）を直接開く（計測用の層別グラフも系列にしか無い）。
+ * The exported IR (the f16 transformer of the local distribution mirror `models/karume-wan2.1/` — opened through its
+ * manifest, ADR 0139 decision 1) runs on the karume runtime, and the latents after the host unpatchify
+ * (`src/wan/dit-tokens.ts`) are compared with one forward of upstream's **plain** diffusers `WanTransformer3DModel`
+ * (CPU f32, the same f16-rounded weights). The `Pipeline` e2e (`e2e_wan_pipeline_test.ts`) checks the whole
+ * distribution path; this file checks the DiT's forward on its own up to full size, so it opens the transformer
+ * container directly.
  *
- * 生成は `cd tools/export-recipes && uv run --group wan --inexact python -m wan.export_dit`（golden の
- * 中身とケースの表は同ファイルの docstring）。golden は 2 本ずつ:
+ * The goldens are in the test-asset root (`goldens/wan2.1-t2v-1.3b-{f16,i8}-dyn/transformer/` — ADR 0139 decision 2;
+ * written by `cd tools/export-recipes && uv run --group wan --inexact python -m wan.export_dit`, whose docstring
+ * holds their content and the case table). Two per case:
  *
  * - `io.<case>` — グラフの入力（`input.*`）と、パッチ後の torch CPU の出力（`output.0`）
  * - `reference.<case>` — 上流の素の forward の入力の潜在・timestep・出力（`[1,16,F,H,W]`）・各ブロックの出力
@@ -45,10 +47,10 @@
  *   変わりうる。出力は計測モードの同じケースの出力と Uint32 で一致することを門にする（チャンクの切れ目は
  *   値を動かさない — {@link measuredTokens}）。
  *
- * ## i8 系列（ADR 0120 段 3 / 段 4 — `outputs/series/wan2.1-t2v-1.3b-i8-dyn/transformer/`）
+ * ## i8 系列（ADR 0120 段 3 / 段 4 — the mirror's int8 transformer and `goldens/wan2.1-t2v-1.3b-i8-dyn/transformer/`）
  *
- * 同じ台本の `--dtype i8` が書く系列（linear 307 本が i8 per-channel・bias / norm は上流の f32）を、系列 root を
- * 切り替えて同じ門で見る。
+ * The series the same recipe writes with `--dtype i8` (307 linears int8 per-channel, bias / norm upstream's f32) is
+ * checked by the same gates, with the int8 container and the int8 goldens in place of the f16 ones.
  *
  * - **参照席 `f16+dit8`（`session` 空）の r 門**（段 3）: f16 席の実寸と同じ 1 本（{@link registerNormalizedRatioGate}）を、
  *   S = 192 の組（9 本 — S = 128 の受入れ 1 本を含む）と S = 14,040（8 本・計測モード）で回す。i8 系列は全ケースが
@@ -60,8 +62,8 @@
  *   manifest の席から引く（束の正本は manifest — ADR 0110 決定 1）。入力は f16 系列の `io.*`（S = 32,760 は f16 系列に
  *   しか無い・入力は席に依らない）。数値の門は自機 A/B 門（`e2e_wan_ab_test.ts`）が持ち、ここでは見ない。
  *
- * 資産が無い環境と GPU 無し環境は生成コマンド付きで**明示 SKIP**する（ADR 0005）。資産が**一部だけ**ある
- * 環境は SKIP ではなく FAIL にする（下の完全性テスト）。
+ * Without the mirror, the goldens a case reads or a GPU the case SKIPs explicitly, naming what is missing (ADR 0005). A
+ * golden set present only in part is a FAIL, not a SKIP (the completeness tests below).
  *
  * ## Default run vs opt-in upstream parity
  *
@@ -109,11 +111,16 @@ import { quantOf } from "./helpers/ab-gate.ts";
 import { effectiveSessionOptions } from "../../models/tests/helpers/census-table.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
+import { mirrorPresent } from "../../models/tests/helpers/mirror.ts";
+import { goldenDir, TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
 import { timestampUnitNs } from "../../models/tests/helpers/timestamp-unit.ts";
-import { WAN_ASSEMBLE_COMMAND } from "../../models/tests/helpers/wan-distribution.ts";
-import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
+import {
+  openWanComponent,
+  WAN_ASSEMBLE_COMMAND,
+  WAN_DIST_MODEL,
+  WAN_DIST_ROOT,
+} from "../../models/tests/helpers/wan-distribution.ts";
 import {
   assertAdapterMatchesEnvironment,
   ENVIRONMENT,
@@ -178,16 +185,25 @@ const WAN_GEOMETRY: WanPatchGeometry = {
   patchWidth: 2,
 };
 
+/** The series the f16 goldens were exported with (their folder under `goldens/` of the test-asset root). */
 const SERIES_NAME = "wan2.1-t2v-1.3b-f16-dyn";
+/** The component: the manifest's weights key, which is also the container's graph name (container-v1 §2.1). */
 const COMPONENT = "transformer";
-const SERIES_DIR = new URL(`../../../outputs/series/${SERIES_NAME}/${COMPONENT}/`, import.meta.url);
-/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
-const GRAPH = seriesGraph(SERIES_NAME, COMPONENT);
-const MODEL_FILE = "model.krm";
+const GOLDEN_DIR = new URL(`${COMPONENT}/`, goldenDir(SERIES_NAME));
+const GRAPH = COMPONENT;
 /** 資産の名前（`wan/export_dit.py` の `ROPE_BASE_ASSET`）。 */
 const ROPE_BASE_ASSET = "rope_base";
 
-const GENERATE = "cd tools/export-recipes && uv run --group wan --inexact python -m wan.export_dit";
+/** The command that fetches the goldens into the local test-asset root (ADR 0139 decision 3). */
+const FETCH = "node tools/test-assets/fetch.ts";
+/**
+ * A complete fetch of the pinned test-asset dataset makes a missing golden a FAIL (the completeness tests below): the
+ * dataset at the pin lacks a file the cases read. Without one, the cases SKIP (the assets gate is red then).
+ */
+const FETCHED = testAssetsFetched();
+const MISSING_GOLDENS = FETCHED
+  ? `the test-asset dataset at revision ${TEST_ASSETS.revision} lacks them`
+  : `fetch: ${FETCH}`;
 
 type CaseRole = "band" | "accept" | "growth";
 
@@ -360,21 +376,14 @@ const DIT_FULL_NORMALIZED_BAND: Readonly<Record<FullTokens, number>> = { 14040: 
  */
 const SUBTLE_FAULT_MARGIN = 2;
 
-/** i8 系列（参照席 `f16+dit8` / 実用席の重み — ADR 0120 決定 2）。 */
+/** i8 系列（参照席 `f16+dit8` / 実用席の重み — ADR 0120 決定 2）— the folder of its goldens. */
 const I8_SERIES_NAME = "wan2.1-t2v-1.3b-i8-dyn";
-const I8_SERIES_DIR = new URL(
-  `../../../outputs/series/${I8_SERIES_NAME}/${COMPONENT}/`,
-  import.meta.url,
-);
-const I8_GENERATE = `${GENERATE} --dtype i8`;
+const I8_GOLDEN_DIR = new URL(`${COMPONENT}/`, goldenDir(I8_SERIES_NAME));
 /** i8 の参照席のケースの結果 ID と step 名の接頭辞（ケース名は f16 系列と共通なので席で分ける）。 */
 const I8_ID_PREFIX = "f16+dit8/";
 
-/**
- * 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本）。**使うときに引く** — 表に行が無いときに
- * モジュール評価で落とすと、f16 席の門まで全部が巻き添えで落ちる。
- */
-const i8Graph = (): string => seriesGraph(I8_SERIES_NAME, COMPONENT);
+/** The int8 container's graph name (the same weights key as the f16 one). */
+const i8Graph = (): string => COMPONENT;
 
 /**
  * i8 系列のケース（`wan/export_dit.py` の `series_cases("i8")` の鏡像 — S = 192 の組は f16 系列の `band` /
@@ -427,10 +436,10 @@ const I8_SCALE_FAULT_WEIGHT = "blocks.15.attn1.to_v.weight";
 /** The scale-fault label in the it titles, the notes and the wrapping describe's title. */
 const I8_SCALE_FAULT_LABEL = `${I8_SCALE_FAULT_WEIGHT} の scale を 2 倍`;
 
-/** 配布形ミラー（実用席の束の正本 — `dist.py --pipeline wan` の出力先）。 */
-const DIST_ROOT = new URL("../../../models/karume-wan2.1/", import.meta.url);
+/** 配布形ミラー（the containers and the practical preset's bundle — `dist.py --pipeline wan` の出力先）。 */
+const DIST_ROOT = WAN_DIST_ROOT;
 /** 配布形の Wan のモデル名（manifest の models のキー）。 */
-const DIST_MODEL = "t2v-1.3b";
+const DIST_MODEL = WAN_DIST_MODEL;
 /** 実用席（ADR 0120 決定 1）。 */
 const PRACTICAL_QUANT = "f16+dit8-a8-attn8-s16";
 
@@ -513,23 +522,39 @@ const filePresent = (url: URL): boolean => {
   }
 };
 
-/** golden 2 本（`io.<case>` と `reference.<case>`）。`dir` は系列の部品ディレクトリ（既定は f16 系列）。 */
-const caseFiles = (name: string, dir: URL = SERIES_DIR): readonly URL[] => [
+/** golden 2 本（`io.<case>` と `reference.<case>`）。`dir` is the goldens' component folder (the f16 one by default). */
+const caseFiles = (name: string, dir: URL = GOLDEN_DIR): readonly URL[] => [
   new URL(`io.${name}.safetensors`, dir),
   new URL(`reference.${name}.safetensors`, dir),
 ];
 
 // 実寸のケースも同じ台本が同じ回に書く（一部だけある環境は完全性テストで FAIL にする）。
+const MIRROR_PRESENT = mirrorPresent(DIST_ROOT);
+const goldensPresent = (names: readonly string[], dir: URL = GOLDEN_DIR): boolean =>
+  names.every((name) => caseFiles(name, dir).every(filePresent));
 const expectedFiles = [...CASES, ...FULL_CASES].flatMap(({ name }) => caseFiles(name));
-const MODEL_PRESENT = modelPresent(new URL(MODEL_FILE, SERIES_DIR));
 const presentFiles = expectedFiles.filter(filePresent);
-const ASSETS_AVAILABLE = MODEL_PRESENT && presentFiles.length === expectedFiles.length;
-const ANY_PRESENT = MODEL_PRESENT || presentFiles.length > 0;
+/** The host check reads every f16 golden (S = 192 and full size) and the container's `rope_base`. */
+const ASSETS_AVAILABLE = MIRROR_PRESENT && presentFiles.length === expectedFiles.length;
+const ANY_PRESENT = presentFiles.length > 0;
+/** The S-form cases read the S = 192 goldens only. */
+const SMALL_AVAILABLE = MIRROR_PRESENT && goldensPresent(CASES.map(({ name }) => name));
+/**
+ * The full-size cases read the full-size goldens only (the normal mode also reads the measured mode's output, which
+ * runs on the same set).
+ */
+const FULL_AVAILABLE = MIRROR_PRESENT && goldensPresent(FULL_CASES.map(({ name }) => name));
 
-if (!ASSETS_AVAILABLE) {
+if (!MIRROR_PRESENT) {
   console.warn(
-    `[karume] ${SERIES_DIR.pathname} に DiT の容器と golden が揃っていないため Wan の DiT の e2e を ` +
-      `SKIP する（重み 2.8GB につきリポジトリ管理外）。生成: ${GENERATE}`,
+    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references is ` +
+      `absent), so Wan's DiT e2e is SKIPPED. Assemble it: ` +
+      `${WAN_ASSEMBLE_COMMAND} (an all-SKIP is a FAIL of the gate distribution_gate_test.ts)`,
+  );
+} else if (!ASSETS_AVAILABLE) {
+  console.warn(
+    `[karume] the f16 goldens under ${GOLDEN_DIR.pathname} are not all present, so the cases that read them ` +
+      `are SKIPPED (${MISSING_GOLDENS})`,
   );
 }
 
@@ -537,35 +562,33 @@ if (!ASSETS_AVAILABLE) {
 // 段の分割用の途中の席なので、揃うまで完全性テストが FAIL にする。r 門は組ごとに揃った組だけを回す（欠けは
 // 完全性テストの FAIL が言う）。
 const i8FilesOf = (cases: readonly GateCase[]): readonly URL[] =>
-  cases.flatMap(({ name }) => caseFiles(name, I8_SERIES_DIR));
+  cases.flatMap(({ name }) => caseFiles(name, I8_GOLDEN_DIR));
 const i8ExpectedFiles = i8FilesOf([...I8_SMALL_CASES, ...I8_FULL_CASES]);
-const I8_MODEL_PRESENT = modelPresent(new URL(MODEL_FILE, I8_SERIES_DIR));
-const I8_ANY_PRESENT = I8_MODEL_PRESENT || i8ExpectedFiles.some(filePresent);
-const I8_SMALL_AVAILABLE = I8_MODEL_PRESENT && i8FilesOf(I8_SMALL_CASES).every(filePresent);
-const I8_FULL_AVAILABLE = I8_MODEL_PRESENT && i8FilesOf(I8_FULL_CASES).every(filePresent);
+const I8_ANY_PRESENT = i8ExpectedFiles.some(filePresent);
+const I8_SMALL_AVAILABLE = MIRROR_PRESENT && i8FilesOf(I8_SMALL_CASES).every(filePresent);
+const I8_FULL_AVAILABLE = MIRROR_PRESENT && i8FilesOf(I8_FULL_CASES).every(filePresent);
 
 for (const [available, group] of [
   [I8_SMALL_AVAILABLE, "S = 192 の組"],
   [I8_FULL_AVAILABLE, "S = 14,040"],
 ] as const) {
-  if (available) continue;
+  if (available || !MIRROR_PRESENT) continue;
   console.warn(
-    `[karume] ${I8_SERIES_DIR.pathname} に i8 の DiT の容器と ${group} の golden が揃っていないため、参照席 ` +
-      `f16+dit8 の ${group} の r 門を SKIP する。生成: ${I8_GENERATE}`,
+    `[karume] the int8 goldens of ${group} under ${I8_GOLDEN_DIR.pathname} are not all present, so the ` +
+      `f16+dit8 r gate of ${group} is SKIPPED (${MISSING_GOLDENS})`,
   );
 }
 
 /** 配布形の manifest（実用席の束の正本 — 無ければ実用席の時間の記録を SKIP する）。 */
 const distManifestText = await readTextIfPresent(new URL("karume.json", DIST_ROOT));
-/** 実用席の時間を採れる（入力 = f16 系列の golden・重み = i8 系列・束 = 配布形の manifest）。 */
-const PRACTICAL_RUNNABLE = ASSETS_AVAILABLE && I8_MODEL_PRESENT && distManifestText !== undefined;
-
-if (ASSETS_AVAILABLE && I8_MODEL_PRESENT && distManifestText === undefined) {
-  console.warn(
-    `[karume] 配布形ミラー ${DIST_ROOT.pathname} の karume.json が無いため実用席 ${PRACTICAL_QUANT} の時間と` +
-      `確保の記録を SKIP する（組み立て: ${WAN_ASSEMBLE_COMMAND}）`,
-  );
-}
+/**
+ * 実用席の時間を採れる（入力 = the f16 goldens of {@link PRACTICAL_TIMING_CASES}・重み = the mirror's int8 transformer・
+ * 束 = 配布形の manifest）。
+ */
+const PRACTICAL_RUNNABLE =
+  MIRROR_PRESENT &&
+  distManifestText !== undefined &&
+  goldensPresent(PRACTICAL_TIMING_CASES.map(({ name }) => name));
 
 /**
  * 実用席の実効 SessionOptions（配布形の manifest の席の `session` を家族の受理表で通した値 — 束の正本は
@@ -600,7 +623,7 @@ type Golden = {
   readonly timestep: number;
 };
 
-const loadGolden = async (name: string, dir: URL = SERIES_DIR): Promise<Golden> => {
+const loadGolden = async (name: string, dir: URL = GOLDEN_DIR): Promise<Golden> => {
   const [ioUrl, referenceUrl] = caseFiles(name, dir);
   const io = parseSafetensors(await readBuffer(ioUrl));
   const reference = parseSafetensors(await readBuffer(referenceUrl));
@@ -782,24 +805,27 @@ const readRopeBase = async (opened: OpenedContainer): Promise<WanRopeBase> => {
 const results = openResults("wan-dit");
 
 // 完全に空の環境だけ「生成していない」として SKIP。何か 1 つでもあれば欠けは FAIL。
-test.skipIf(!ANY_PRESENT)("Wan DiT 資産: 容器と全ケースの golden が揃っている", () => {
-  assert(MODEL_PRESENT, `${SERIES_DIR.pathname}${MODEL_FILE} が無い`);
-  assertEquals(
-    expectedFiles.filter((url) => !filePresent(url)).map((url) => url.pathname),
-    [],
-    `golden の欠け（生成: ${GENERATE}）`,
-  );
-});
+// Only a root with no f16 golden that is not a complete fetch SKIPs; the mirror's completeness is the distribution
+// gate's.
+test.skipIf(!ANY_PRESENT && !FETCHED)(
+  "Wan DiT goldens: the goldens of every case are present",
+  () => {
+    assertEquals(
+      expectedFiles.filter((url) => !filePresent(url)).map((url) => url.pathname),
+      [],
+      `missing goldens (${MISSING_GOLDENS})`,
+    );
+  },
+);
 
 // 完全に空の環境だけ「生成していない」として SKIP。何か 1 つでもあれば欠けは FAIL（f16 系列と同じ規律）。
-test.skipIf(!I8_ANY_PRESENT)(
-  "Wan DiT i8 資産: i8 系列の容器と全ケース（S = 192 の組 9 本・S = 14,040 の 8 本）の golden が揃っている",
+test.skipIf(!I8_ANY_PRESENT && !FETCHED)(
+  "Wan DiT i8 goldens: the goldens of every int8 case (9 of the S = 192 group, 8 of S = 14,040) are present",
   () => {
-    assert(I8_MODEL_PRESENT, `${I8_SERIES_DIR.pathname}${MODEL_FILE} が無い`);
     assertEquals(
       i8ExpectedFiles.filter((url) => !filePresent(url)).map((url) => url.pathname),
       [],
-      `i8 の golden の欠け（生成: ${I8_GENERATE}）`,
+      `missing int8 goldens (${MISSING_GOLDENS})`,
     );
   },
 );
@@ -814,7 +840,7 @@ test("Wan DiT 行ブロックの期待値（GPU 不要）: B570 の束縛上限�
 test.skipIf(!ASSETS_AVAILABLE)(
   "Wan DiT ホスト: patchify と資産 rope_base からの RoPE 表が golden の入力とビット一致する",
   async () => {
-    const base = await readRopeBase(await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)));
+    const base = await readRopeBase(await openWanComponent(COMPONENT, "f16"));
     // 実寸（S = 14,040 / 32,760・非正方の格子 9·30·52 / 21·30·52）でもホストの並べ替えが torch とビット一致すること。
     for (const { name } of [...CASES, ...FULL_CASES]) {
       const golden = await loadGolden(name);
@@ -1521,7 +1547,7 @@ const registerI8ScaleFault = (
       const session = scope.session();
       let note = "";
       await runRecordedCase(results, { id, failureNote: () => note }, async ({ measurements }) => {
-        const golden = await loadGolden(name, I8_SERIES_DIR);
+        const golden = await loadGolden(name, I8_GOLDEN_DIR);
         const expected = floatsOf(golden.reference, REFERENCE_F64_KEY, name);
         const referenceRatio = ratioOf(referenceErrorOf(golden, name));
         const outputs = await session.run(graphInputs(golden, prepared.graph.inputs, name));
@@ -1576,16 +1602,13 @@ const registerI8ParityGroups = (fixture: Fixture, label: string, spec: GateSpec)
   registerBandCandidate(label, spec.cases, () => ratios, spec.band);
 };
 
-describe.skipIf(!ASSETS_AVAILABLE || !GPU_AVAILABLE)(
+describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE)(
   "Wan DiT 実寸 計測モード（実 GPU）: S = 32,760 / 14,040 の 1 forward の行ブロックは S ごとの枚数・" +
     "融合の件数・非有限 0・1 submit の GPU 時間 ≤ 1 s",
   () => {
     const fixture: Fixture = {};
     beforeAll(async () => {
-      fixture.prepared = prepareContainer(
-        await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)),
-        GRAPH,
-      );
+      fixture.prepared = prepareContainer(await openWanComponent(COMPONENT, "f16"), GRAPH);
       assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
       // 計測モード（timestamp-query）: submit ごとの GPU 時間は既存の回収に相乗りして測る（新しい待ちを
       // 足さない — runtime の `ChunkBudgetStats.submitGpuTime`）。計算は通常の実行と同じだが、1 dispatch
@@ -1603,7 +1626,7 @@ describe.skipIf(!ASSETS_AVAILABLE || !GPU_AVAILABLE)(
     afterAll(() => releaseDevice(fixture));
     for (const { tokens, normalModeCase } of FULL_CASES_BY_TOKENS) {
       registerFullStructureGate(fixture, {
-        seriesDir: SERIES_DIR,
+        seriesDir: GOLDEN_DIR,
         idPrefix: "",
         tokens,
         name: normalModeCase,
@@ -1613,13 +1636,13 @@ describe.skipIf(!ASSETS_AVAILABLE || !GPU_AVAILABLE)(
   },
 );
 
-describe.skipIf(!ASSETS_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
+describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
   "Wan DiT 実寸 照合（実 GPU・計測モード / diffusers CPU f64）: S = 32,760 / 14,040 の 1 forward が S ごとの" +
     `実寸の帯の内・故障注入は帯の外${UPSTREAM_PARITY_OPT_IN}`,
   () => {
     const fixture: Fixture = {};
     beforeAll(async () => {
-      const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR));
+      const opened = await openWanComponent(COMPONENT, "f16");
       fixture.prepared = prepareContainer(opened, GRAPH);
       assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
       fixture.base = await readRopeBase(opened);
@@ -1632,7 +1655,7 @@ describe.skipIf(!ASSETS_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
     for (const { tokens: fullTokens, cases } of FULL_CASES_BY_TOKENS) {
       describe(`S = ${fullTokens}`, () => {
         registerNormalizedRatioGate(fixture, {
-          seriesDir: SERIES_DIR,
+          seriesDir: GOLDEN_DIR,
           idPrefix: "",
           cases: cases.map(({ name, role }) => ({ name, role, accept: role === "full-accept" })),
           band: DIT_FULL_NORMALIZED_BAND[fullTokens],
@@ -1643,16 +1666,13 @@ describe.skipIf(!ASSETS_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
   },
 );
 
-describe.skipIf(!ASSETS_AVAILABLE || !GPU_AVAILABLE)(
+describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE)(
   "Wan DiT 実寸 通常モード（実 GPU・計測なし）: S ごと（32,760 / 14,040）の 1 forward の所要を記録する" +
     "（計測モードの出力と Uint32 で一致・非有限 0）",
   () => {
     const fixture: Fixture = {};
     beforeAll(async () => {
-      fixture.prepared = prepareContainer(
-        await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)),
-        GRAPH,
-      );
+      fixture.prepared = prepareContainer(await openWanComponent(COMPONENT, "f16"), GRAPH);
       // 所要は計測を切った通常の実行で採る（ADR 0118 追記 2026-10-02 — 計測モードは 1 dispatch = 1 pass）。
       fixture.gpu = await acquireTestGpu({
         onDeviceLost: (info) => {
@@ -1733,7 +1753,7 @@ describe.skipIf(!ASSETS_AVAILABLE || !GPU_AVAILABLE)(
   },
 );
 
-describe.skipIf(!ASSETS_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
+describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
   "Wan DiT 実寸 通常モード（計測なし / diffusers CPU f64）: S ごと（32,760 / 14,040）の 1 forward が実寸の帯の内" +
     UPSTREAM_PARITY_OPT_IN,
   () => {
@@ -1819,10 +1839,7 @@ describe.skipIf(!PRACTICAL_RUNNABLE || !GPU_AVAILABLE)(
     const fixture: Fixture = {};
     beforeAll(async () => {
       fixture.options = practicalSessionOptions();
-      fixture.prepared = prepareContainer(
-        await openSeriesContainer(new URL(MODEL_FILE, I8_SERIES_DIR)),
-        i8Graph(),
-      );
+      fixture.prepared = prepareContainer(await openWanComponent(COMPONENT, "i8"), i8Graph());
       // 計測モードの意味は f16 席の実寸の照合と同じ（1 dispatch = 1 pass — 壁時計は下の通常モードが採る）。1 submit の
       // 門は a8 で dispatch が増える分（anima で 3,087 → 3,311 / step — ADR 0030）を席ごとに測り直す（ADR 0120 リスク 8）。
       fixture.gpu = await acquireTestGpu({
@@ -1898,10 +1915,7 @@ describe.skipIf(!I8_FULL_AVAILABLE || !GPU_AVAILABLE)(
   () => {
     const fixture: Fixture = {};
     beforeAll(async () => {
-      fixture.prepared = prepareContainer(
-        await openSeriesContainer(new URL(MODEL_FILE, I8_SERIES_DIR)),
-        i8Graph(),
-      );
+      fixture.prepared = prepareContainer(await openWanComponent(COMPONENT, "i8"), i8Graph());
       assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
       fixture.gpu = await acquireTestGpu({
         gpuTiming: true,
@@ -1913,7 +1927,7 @@ describe.skipIf(!I8_FULL_AVAILABLE || !GPU_AVAILABLE)(
     });
     afterAll(() => releaseDevice(fixture));
     registerFullStructureGate(fixture, {
-      seriesDir: I8_SERIES_DIR,
+      seriesDir: I8_GOLDEN_DIR,
       idPrefix: I8_ID_PREFIX,
       tokens: 14040,
       name: I8_FULL_CASES[0].name,
@@ -1929,7 +1943,7 @@ describe.skipIf(!I8_FULL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
     const fixture: Fixture = {};
     beforeAll(async () => {
       fixture.graph = i8Graph();
-      fixture.opened = await openSeriesContainer(new URL(MODEL_FILE, I8_SERIES_DIR));
+      fixture.opened = await openWanComponent(COMPONENT, "i8");
       fixture.prepared = prepareContainer(fixture.opened, fixture.graph);
       assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
       fixture.base = await readRopeBase(fixture.opened);
@@ -1939,7 +1953,7 @@ describe.skipIf(!I8_FULL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
     });
     afterAll(() => releaseDevice(fixture));
     registerI8ParityGroups(fixture, `${I8_ID_PREFIX}S = 14,040`, {
-      seriesDir: I8_SERIES_DIR,
+      seriesDir: I8_GOLDEN_DIR,
       idPrefix: I8_ID_PREFIX,
       cases: I8_FULL_CASES,
       band: I8_NORMALIZED_BAND[14040],
@@ -1953,17 +1967,14 @@ describe.skipIf(!I8_SMALL_AVAILABLE || !GPU_AVAILABLE)(
   () => {
     const fixture: Fixture = {};
     beforeAll(async () => {
-      fixture.prepared = prepareContainer(
-        await openSeriesContainer(new URL(MODEL_FILE, I8_SERIES_DIR)),
-        i8Graph(),
-      );
+      fixture.prepared = prepareContainer(await openWanComponent(COMPONENT, "i8"), i8Graph());
       assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
       fixture.gpu = await acquireTestGpu();
       assertAdapterMatchesEnvironment(fixture.gpu);
     });
     // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
     afterAll(() => releaseDevice(fixture));
-    registerSmallStructureGate(fixture, I8_SERIES_DIR, I8_ID_PREFIX, I8_SMALL_CASES);
+    registerSmallStructureGate(fixture, I8_GOLDEN_DIR, I8_ID_PREFIX, I8_SMALL_CASES);
   },
 );
 
@@ -1974,7 +1985,7 @@ describe.skipIf(!I8_SMALL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
     const fixture: Fixture = {};
     beforeAll(async () => {
       fixture.graph = i8Graph();
-      fixture.opened = await openSeriesContainer(new URL(MODEL_FILE, I8_SERIES_DIR));
+      fixture.opened = await openWanComponent(COMPONENT, "i8");
       fixture.prepared = prepareContainer(fixture.opened, fixture.graph);
       assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
       fixture.base = await readRopeBase(fixture.opened);
@@ -1984,7 +1995,7 @@ describe.skipIf(!I8_SMALL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
     // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
     afterAll(() => releaseDevice(fixture));
     registerI8ParityGroups(fixture, `${I8_ID_PREFIX}S = 192 の組`, {
-      seriesDir: I8_SERIES_DIR,
+      seriesDir: I8_GOLDEN_DIR,
       idPrefix: I8_ID_PREFIX,
       cases: I8_SMALL_CASES,
       band: I8_NORMALIZED_BAND[192],
@@ -1992,31 +2003,28 @@ describe.skipIf(!I8_SMALL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
   },
 );
 
-describe.skipIf(!ASSETS_AVAILABLE || !GPU_AVAILABLE)(
+describe.skipIf(!SMALL_AVAILABLE || !GPU_AVAILABLE)(
   "Wan DiT S 形（実 GPU）: 全ケースの 1 forward の融合の件数・非有限 0",
   () => {
     const fixture: Fixture = {};
     beforeAll(async () => {
-      fixture.prepared = prepareContainer(
-        await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)),
-        GRAPH,
-      );
+      fixture.prepared = prepareContainer(await openWanComponent(COMPONENT, "f16"), GRAPH);
       assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
       fixture.gpu = await acquireTestGpu();
       assertAdapterMatchesEnvironment(fixture.gpu);
     });
     // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
     afterAll(() => releaseDevice(fixture));
-    registerSmallStructureGate(fixture, SERIES_DIR, "", CASES);
+    registerSmallStructureGate(fixture, GOLDEN_DIR, "", CASES);
   },
 );
 
-describe.skipIf(!ASSETS_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
+describe.skipIf(!SMALL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
   `Wan DiT 照合（実 GPU / diffusers CPU f32）: S 形の 1 forward が帯の内・故障注入は帯の外${UPSTREAM_PARITY_OPT_IN}`,
   () => {
     const fixture: Fixture = {};
     beforeAll(async () => {
-      const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR));
+      const opened = await openWanComponent(COMPONENT, "f16");
       fixture.prepared = prepareContainer(opened, GRAPH);
       assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
       fixture.base = await readRopeBase(opened);

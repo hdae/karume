@@ -25,7 +25,7 @@ import {
 } from "../src/umt5/tokenizer.ts";
 import { PromptCleanError } from "../src/wan/text/prompt-clean.ts";
 import { WAN_TOKENIZER_FORMAT } from "../src/wan/text/tokenizer.ts";
-import { readTextIfPresent } from "./helpers/read-if-present.ts";
+import { mirrorPresent, mirrorRoot, readMirrorAsset } from "./helpers/mirror.ts";
 import { wanParityEncoder } from "./helpers/wan-parity-encoder.ts";
 
 type FixtureCase = {
@@ -83,16 +83,18 @@ const REJECT_MARKERS: Record<string, string> = {
   whitespace: "U+0020",
 };
 
-/** recipe が焼いた実資産（全語彙 — 在れば部分集合の格子に依らない突合も回す）。 */
-const SERIES_ASSET = new URL(
-  "../../../outputs/series/umt5-xxl-tokenizer/tokenizer.json",
-  import.meta.url,
-);
-const seriesAsset = await readTextIfPresent(SERIES_ASSET);
-if (seriesAsset === undefined) {
+/**
+ * The real asset (full vocabulary — when present, the check also runs independently of the subset
+ * lattice): the tokenizer the umT5 distribution ships (ADR 0139 decision 1).
+ */
+const UMT5_MIRROR = mirrorRoot("karume-umt5-xxl");
+const mirrorAsset = mirrorPresent(UMT5_MIRROR)
+  ? new TextDecoder().decode(await readMirrorAsset(UMT5_MIRROR, "tokenizer"))
+  : undefined;
+if (mirrorAsset === undefined) {
   console.warn(
-    `[karume] ${SERIES_ASSET.pathname} が無いため umT5 の実資産での突合を SKIP する。生成: ` +
-      "cd tools/export-recipes && uv run --group wan --inexact python -m wan.umt5_xxl_tokenizer",
+    `[karume] the mirror ${UMT5_MIRROR.pathname} is absent (or not karume/5), so the umT5 full-vocabulary check is ` +
+      "SKIPPED (fetch the karume-umt5-xxl distribution into models/)",
   );
 }
 
@@ -303,12 +305,12 @@ test("parseUmt5TokenizerAsset: 壊れた表は落とす（入力起因ではな�
 
 // ---- 実資産（全語彙）での突合 -------------------------------------------------
 
-test.skipIf(seriesAsset === undefined)(
+test.skipIf(mirrorAsset === undefined)(
   "実資産: 全語彙の資産から組んだトークナイザもフィクスチャの全ケースと同じ決着になる",
   () => {
     // フィクスチャの語彙は部分集合（断片の部分文字列）なので、資産の読み取り（25.6 万行）と全語彙の格子でも
     // 同じ id 列 / 拒否になることをここで見る。
-    const full = new Umt5Tokenizer(parseUmt5TokenizerAsset(JSON.parse(seriesAsset as string)));
+    const full = new Umt5Tokenizer(parseUmt5TokenizerAsset(JSON.parse(mirrorAsset as string)));
     assertEquals(full.maxLength, UMT5_MAX_LENGTH);
     for (const testCase of fixture.cases) {
       if (testCase.ids !== undefined) {

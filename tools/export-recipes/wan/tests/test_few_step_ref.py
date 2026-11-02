@@ -1,8 +1,9 @@
 """`wan/few_step_ref.py` の約束事 — ケースの独立・逆正規化・書いた参照の形。
 
-参照そのもの（DiT の forward 4 回 + タイル decode・1 ケース約 25 分）は回さない。生成済みの
-参照が系列の根にあれば形とメタを見る（無ければ SKIP）。生成は
-`uv run --group wan --inexact python -m wan.few_step_ref`。
+The reference itself (four DiT forwards and a tiled decode, about 25 minutes a case) is not run
+here. The written references are checked for their shapes and metadata where the goldens are
+fetched (`outputs/test-assets/goldens/` — ADR 0139 decision 2; SKIP without them). Generation:
+`uv run --group wan --inexact python -m wan.few_step_ref`.
 """
 
 from __future__ import annotations
@@ -13,12 +14,14 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from real_assets import mirror_asset
 
-from _shared.paths import SERIES_ROOT
+from _shared.paths import GOLDENS_ROOT
 from wan import export_vae, few_step_ref, pipeline_ref, prompts, text_embeds, vae_tiling
+from wan.distribution import WAN21, WAN_TEXT_EMBEDS_ROLE
 
-SERIES = SERIES_ROOT / export_vae.SERIES_NAME
-EMBEDS = SERIES_ROOT / text_embeds.SERIES_NAME / text_embeds.ASSET_NAME
+#: The goldens of the Wan2.1 f16 series (the references `wan.few_step_ref` writes there).
+GOLDENS = GOLDENS_ROOT / export_vae.SERIES_NAME
 
 
 class TestCases:
@@ -66,9 +69,9 @@ class TestDenormalize:
 def written(request):
     from safetensors import safe_open
 
-    path = SERIES / f"{few_step_ref.FIXTURE_PREFIX}{request.param}{few_step_ref.FIXTURE_SUFFIX}"
+    path = GOLDENS / f"{few_step_ref.FIXTURE_PREFIX}{request.param}{few_step_ref.FIXTURE_SUFFIX}"
     if not path.is_file():
-        pytest.skip(f"{path} が無い — `python -m wan.few_step_ref` で作る")
+        pytest.skip(f"{path} is absent — fetch it with `node tools/test-assets/fetch.ts`")
     with safe_open(str(path), framework="pt") as handle:
         metadata = handle.metadata()
         tensors = {name: handle.get_tensor(name) for name in handle.keys()}  # noqa: SIM118
@@ -113,12 +116,12 @@ class TestWrittenReference:
             assert metadata[key] == value, key
 
     def test_it_was_made_from_the_current_text_embeds(self, written):
-        """埋め込みを作り直したら参照も作り直す（sha256 で縛る）。"""
-        if not EMBEDS.is_file():
-            pytest.skip(f"{EMBEDS} が無い")
+        """New text embeddings mean new references (bound by sha256) — checked against the text
+        embeddings the Wan2.1 distribution ships."""
+        embeds = mirror_asset(WAN21.repo_name, WAN21.default_model, WAN_TEXT_EMBEDS_ROLE)
         _, _, metadata = written
 
-        assert metadata["text_embeds_sha256"] == hashlib.sha256(EMBEDS.read_bytes()).hexdigest()
+        assert metadata["text_embeds_sha256"] == hashlib.sha256(embeds.read_bytes()).hexdigest()
 
     def test_the_noise_is_the_seeded_torch_randn(self, written):
         """初期ノイズは torch CPU の `randn`（seed 固定）— TS が fixture から読む値の出所。"""

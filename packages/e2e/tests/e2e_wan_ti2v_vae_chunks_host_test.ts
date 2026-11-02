@@ -1,5 +1,6 @@
-// Wan2.2 TI2V-5B の VAE decoder の chunk グラフ 2 本（f16 系列 `wan2.2-ti2v-5b-f16-dyn`）の GPU 不要の突き合わせ
-// （ADR 0121 段 4）。
+// GPU-free checks of Wan2.2 TI2V-5B's two VAE decoder chunk graphs (the f16 containers of the mirror
+// `models/karume-wan2.2/`, and the fixtures of the series `wan2.2-ti2v-5b-f16-dyn` in the test-asset root — ADR 0139
+// decisions 1 / 2; ADR 0121 stage 4).
 //
 // 見るのは 3 つ:
 //
@@ -15,36 +16,38 @@
 //   持つ）。
 // - **フィクスチャ**: メタ（タイル・chunk 数・役割・重みの丸め・参照の素性）と形が表どおり。
 //
-// 資産が 1 つも無い環境は生成コマンド付きで**明示 SKIP**（ADR 0005）。一部だけある環境は SKIP ではなく FAIL にする
-// （容器 2 本 + フィクスチャ 3 本で 1 組 — 書き手は一組で据える）。GPU は使わない（実 GPU の chunk 列の照合は
-// `e2e_wan_ti2v_vae_tiles_test.ts`）。
+// The container checks need the mirror; the fixture check needs the three fixtures. Without them the cases SKIP
+// explicitly, naming what is missing (ADR 0005). Fixtures present only in part are a FAIL, not a SKIP (the three are
+// written together). No GPU is used (the real-GPU chunk-sequence check is `e2e_wan_ti2v_vae_tiles_test.ts`).
 //
-// NOTE: 容器のグラフ名は綴らず、系列のグラフ名の表（`packages/models/tests/helpers/series-graphs.ts` — 門番
-// `e2e_assets_gate_test.ts` と同じ正本）から引く。
+// NOTE: the containers' graph names are the manifest's weights keys (container-v1 §2.1).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { prepareContainer, type PreparedModel } from "@karume/runtime";
 import { wanVaeChunkLayout, wanVaeFrameCount } from "../../models/src/wan/vae-chunks.ts";
-import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { readFixture } from "../../models/tests/helpers/wan-vae-chunk-loop.ts";
+import { TEST_ASSETS_FETCH as FETCH } from "../../models/tests/helpers/wan-ti2v-dit.ts";
 import {
-  ti2vVaeAssets,
+  openWanTi2vComponent,
+  WAN_TI2V_ASSEMBLE_COMMAND as ASSEMBLE,
+  WAN_TI2V_DIST_ROOT as DIST_ROOT,
+} from "../../models/tests/helpers/wan-ti2v-pipeline.ts";
+import { mirrorPresent } from "../../models/tests/helpers/mirror.ts";
+import { TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
+import {
+  ti2vVaeChunkFixtures,
   ti2vVaeFixtureUrl,
-  ti2vVaeModelUrl,
   WAN_TI2V_VAE_CACHE_BYTES as CACHE_BYTES,
   WAN_TI2V_VAE_CACHE_TABLE as CACHE_TABLE,
   WAN_TI2V_VAE_CASES as CASES,
   WAN_TI2V_VAE_FIRST as FIRST,
   WAN_TI2V_VAE_FIRST_CACHE_BYTES as FIRST_CACHE_BYTES,
-  WAN_TI2V_VAE_GENERATE as GENERATE,
+  WAN_TI2V_VAE_GOLDEN_DIR as GOLDEN_DIR,
   WAN_TI2V_VAE_LATENT_CHANNELS as LATENT_CHANNELS,
   WAN_TI2V_VAE_NEXT as NEXT,
-  WAN_TI2V_VAE_ROOT as ROOT,
   WAN_TI2V_VAE_SAMPLE_CHANNELS as SAMPLE_CHANNELS,
   WAN_TI2V_VAE_SAMPLE_TILE as SAMPLE_TILE,
-  WAN_TI2V_VAE_SERIES as SERIES,
   WAN_TI2V_VAE_TILE as TILE,
   WAN_TI2V_VAE_TIME_CONV_CACHES as TIME_CONV_CACHES,
 } from "../../models/tests/helpers/wan-ti2v-vae.ts";
@@ -84,23 +87,35 @@ const FIXTURE_WEIGHTS = "f16-rounded";
 const FIXTURE_REFERENCE =
   "diffusers AutoencoderKLWan._decode chunk loop before unpatchify and clamp (CPU f32)";
 
-const ASSETS = ti2vVaeAssets();
+const MIRROR_PRESENT = mirrorPresent(DIST_ROOT);
+const ASSETS = ti2vVaeChunkFixtures();
 const ANY_PRESENT = ASSETS.some(({ present }) => present);
 const ALL_PRESENT = ASSETS.every(({ present }) => present);
+/**
+ * A complete fetch of the pinned test-asset dataset makes a missing fixture a FAIL (the completeness test below): the
+ * dataset at the pin lacks a file the cases read. Without one, the cases SKIP (the assets gate is red then).
+ */
+const FETCHED = testAssetsFetched();
+const MISSING_FIXTURES = FETCHED
+  ? `the test-asset dataset at revision ${TEST_ASSETS.revision} lacks them`
+  : `fetch: ${FETCH}`;
 
+if (!MIRROR_PRESENT) {
+  console.warn(
+    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references is ` +
+      `absent), so the GPU-free checks of Wan2.2 TI2V's VAE chunk graphs are SKIPPED. Assemble it: ${ASSEMBLE}`,
+  );
+}
 if (!ANY_PRESENT) {
   console.warn(
-    `[karume] ${ROOT.pathname} に Wan2.2 TI2V の VAE の chunk グラフとフィクスチャが無いため、` +
-      `GPU 不要の突き合わせを SKIP する（重み 2.2GB につきリポジトリ管理外）。生成: ${GENERATE}`,
+    `[karume] no VAE chunk fixture under ${GOLDEN_DIR.pathname}, so the fixture check is SKIPPED ` +
+      `(${MISSING_FIXTURES})`,
   );
 }
 
-/** 容器を開いて prepare する（グラフ名は表から — **使うときに引く**: 表に行が無い機の SKIP を巻き込まない）。 */
+/** Opens and prepares the mirror's f16 container (the graph name is the component key). */
 const prepared = async (component: string): Promise<PreparedModel> =>
-  prepareContainer(
-    await openSeriesContainer(ti2vVaeModelUrl(component)),
-    seriesGraph(SERIES, component),
-  );
+  prepareContainer(await openWanTi2vComponent(component, "f16"), component);
 
 const elements = (shape: readonly number[]): number => shape.reduce((count, dim) => count * dim, 1);
 
@@ -138,18 +153,18 @@ const irViolations = (graph: Graph): readonly string[] => {
   return violations;
 };
 
-test.skipIf(!ANY_PRESENT)(
-  "Wan2.2 TI2V VAE chunk 資産: 2 グラフとフィクスチャ 3 本が揃っている",
+test.skipIf(!ANY_PRESENT && !FETCHED)(
+  "Wan2.2 TI2V VAE chunk fixtures: the three fixtures are present",
   () => {
     assertEquals(
       ASSETS.filter(({ present }) => !present).map(({ path }) => path),
       [],
-      `資産の欠け（生成: ${GENERATE}）`,
+      `missing fixtures (${MISSING_FIXTURES})`,
     );
   },
 );
 
-test.skipIf(!ALL_PRESENT)(
+test.skipIf(!MIRROR_PRESENT)(
   "Wan2.2 TI2V VAE chunk 宣言（GPU 不要）: 潜在 48 ch・タイル 16・出口 12 ch・cache は表の 32 本" +
     "（first は time_conv の 2 本を除く 30 本）・フレーム [12,1,128,128] / [12,4,128,128]",
   async () => {
@@ -197,7 +212,7 @@ test.skipIf(!ALL_PRESENT)(
   },
 );
 
-test.skipIf(!ALL_PRESENT)(
+test.skipIf(!MIRROR_PRESENT)(
   "Wan2.2 TI2V VAE chunk IR（GPU 不要）: rank 5 は conv3d の重みだけ・op は語彙の 15 種の中・attention は" +
     "各グラフ 1 本",
   async () => {
@@ -215,7 +230,7 @@ test.skipIf(!ALL_PRESENT)(
   },
 );
 
-test.skipIf(!ALL_PRESENT)(
+test.skipIf(!MIRROR_PRESENT)(
   "Wan2.2 TI2V VAE chunk IR の検査自身（GPU 不要）: 書き換えた宣言を 1 件ずつ拒む" +
     "（initializer でない conv3d の重み・rank 5 のグラフ入力・rank 5 の conv2d の重み・語彙外の op・attention 0 本）",
   async () => {

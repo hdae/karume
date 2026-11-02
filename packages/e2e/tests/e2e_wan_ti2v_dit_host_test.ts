@@ -16,12 +16,13 @@
 //   （時刻の MLP の 3 本を M = 1 で 2 回 — 決定 2 の dispatch の本数）・`where` 182 本（30 層 × 6 + head 2）・
 //   i8 の重み 307 本。recipe の IR の検査（`wan/ti2v_export_dit.py`）と同じ数を、runtime の読み口で数える。
 //
-// 資産が無い環境は生成コマンド付きで**明示 SKIP**（ADR 0005）。資産が**一部だけ**ある環境は SKIP ではなく
-// FAIL にする（下の完全性テスト — S = 192 の組と実寸の組は別の回に書くので組ごとに見る）。GPU は使わない
-// （実 GPU の r 門は `e2e_wan_ti2v_dit_test.ts`）。
+// The container is the int8 transformer of the distribution mirror `models/karume-wan2.2/` (through its manifest —
+// ADR 0139 decision 1) and the goldens are in the test-asset root (decision 2). Without them the cases SKIP
+// explicitly, naming what is missing (ADR 0005). A golden group present only in part is a FAIL, not a SKIP (the
+// completeness tests below — the S = 192 group and the full-size group are written in separate runs, so each group is
+// checked on its own). No GPU is used (the real-GPU r gate is `e2e_wan_ti2v_dit_test.ts`).
 //
-// NOTE: 容器のグラフ名は綴らず、系列のグラフ名の表（`packages/models/tests/helpers/series-graphs.ts` — 門番
-// `e2e_assets_gate_test.ts` と同じ正本）から引く。
+// NOTE: the container's graph name is the manifest's weights key (`transformer` — container-v1 §2.1).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
@@ -31,8 +32,6 @@ import { ditContract } from "../../models/src/wan/dit-loop.ts";
 import { patchifyLatents, wanTokenGrid } from "../../models/src/wan/dit-tokens.ts";
 import { wanRopeTables } from "../../models/src/wan/dit-rope.ts";
 import { timestepsProj } from "../../models/src/wan/dit-timestep.ts";
-import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import {
   caseFiles,
   conditionMask,
@@ -40,19 +39,23 @@ import {
   firstBitMismatch,
   floatsOf,
   loadTi2vGolden,
+  openTi2vTransformer,
   readRopeBase,
   storedConditionMask,
+  TEST_ASSETS_FETCH as FETCH,
   type Ti2vCase,
   WAN22_GEOMETRY,
   WAN_TI2V_CASES as CASES,
   WAN_TI2V_COMPONENT as COMPONENT,
   WAN_TI2V_FULL_CASES as FULL_CASES,
-  WAN_TI2V_GENERATE as GENERATE,
-  WAN_TI2V_GENERATE_FULL as GENERATE_FULL,
-  WAN_TI2V_MODEL_FILE as MODEL_FILE,
-  WAN_TI2V_SERIES_DIR as SERIES_DIR,
-  WAN_TI2V_SERIES_NAME as SERIES_NAME,
+  WAN_TI2V_GOLDEN_DIR as GOLDEN_DIR,
+  wanTi2vMirrorPresent,
 } from "../../models/tests/helpers/wan-ti2v-dit.ts";
+import {
+  WAN_TI2V_ASSEMBLE_COMMAND as ASSEMBLE,
+  WAN_TI2V_DIST_ROOT as DIST_ROOT,
+} from "../../models/tests/helpers/wan-ti2v-pipeline.ts";
+import { TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 
 /**
  * `timesteps_proj` の TS 実装と上流（torch CPU f32）の許容差（絶対）。
@@ -79,27 +82,40 @@ const EXPECTED_INPUTS = [
 ] as const;
 
 const expectedFiles = CASES.flatMap(({ name }) => caseFiles(name));
-const MODEL_PRESENT = modelPresent(new URL(MODEL_FILE, SERIES_DIR));
-const ANY_PRESENT = MODEL_PRESENT || expectedFiles.some(filePresent);
-const ASSETS_AVAILABLE = MODEL_PRESENT && expectedFiles.every(filePresent);
+/**
+ * A complete fetch of the pinned test-asset dataset makes a missing golden a FAIL (the completeness tests below): the
+ * dataset at the pin lacks a file the cases read. Without one, the cases SKIP (the assets gate is red then).
+ */
+const FETCHED = testAssetsFetched();
+const MISSING_GOLDENS = FETCHED
+  ? `the test-asset dataset at revision ${TEST_ASSETS.revision} lacks them`
+  : `fetch: ${FETCH}`;
+const MIRROR_PRESENT = wanTi2vMirrorPresent();
+const ANY_PRESENT = expectedFiles.some(filePresent);
+const ASSETS_AVAILABLE = MIRROR_PRESENT && expectedFiles.every(filePresent);
 
-if (!ASSETS_AVAILABLE) {
+if (!MIRROR_PRESENT) {
   console.warn(
-    `[karume] ${SERIES_DIR.pathname} に Wan2.2 TI2V の DiT の容器と golden が揃っていないため、` +
-      `GPU 不要の突き合わせを SKIP する（重み 4.7GB につきリポジトリ管理外）。生成: ${GENERATE}`,
+    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references is ` +
+      `absent), so the GPU-free checks of Wan2.2 TI2V's DiT are SKIPPED. Assemble it: ${ASSEMBLE}`,
+  );
+} else if (!ASSETS_AVAILABLE) {
+  console.warn(
+    `[karume] the S = 192 goldens under ${GOLDEN_DIR.pathname} are not all present, so the GPU-free ` +
+      `host checks are SKIPPED (${MISSING_GOLDENS})`,
   );
 }
 
-// 実寸の golden は容器と S = 192 の golden の後に別の回（`write-full` — CPU で数時間）で足すので、組として
-// 別に見る: 1 本も無ければ「まだ足していない」として SKIP、1 本でもあれば欠けは FAIL（足す途中・中断）。
+// The full-size goldens are a group of their own (written in a separate run of the recipe — `write-full`, hours on
+// the CPU): none present SKIPs unless the root is a complete fetch, any one present makes a missing one a FAIL.
 const fullExpectedFiles = FULL_CASES.flatMap(({ name }) => caseFiles(name));
 const FULL_ANY_PRESENT = fullExpectedFiles.some(filePresent);
-const FULL_AVAILABLE = MODEL_PRESENT && fullExpectedFiles.every(filePresent);
+const FULL_AVAILABLE = MIRROR_PRESENT && fullExpectedFiles.every(filePresent);
 
-if (MODEL_PRESENT && !FULL_ANY_PRESENT) {
+if (MIRROR_PRESENT && !FULL_ANY_PRESENT) {
   console.warn(
-    `[karume] ${SERIES_DIR.pathname} に Wan2.2 TI2V の実寸の golden が無いため、実寸の GPU 不要の突き合わせを` +
-      ` SKIP する。生成（CPU・数時間・途中から再開できる）: ${GENERATE_FULL}`,
+    `[karume] no full-size golden under ${GOLDEN_DIR.pathname}, so the full-size GPU-free host checks are ` +
+      `SKIPPED (${MISSING_GOLDENS})`,
   );
 }
 
@@ -112,32 +128,29 @@ const maxAbsDiff = (actual: Float32Array, expected: Float32Array): number => {
   return worst;
 };
 
-/**
- * 容器のグラフ（名前は表から引く — ファイル冒頭の NOTE）。**使うときに引く** — 表に行が無いときにモジュール
- * の評価で落ちて、資産の無い機の SKIP まで巻き込まない。
- */
-const seriesGraphOf = (opened: OpenedContainer) => {
-  const name = seriesGraph(SERIES_NAME, COMPONENT);
-  assertEquals(Object.keys(opened.graphs), [name], "容器のグラフ名");
-  return opened.graphs[name];
+/** The container's graph (named by the manifest's weights key — the NOTE at the top of the file). */
+const containerGraphOf = (opened: OpenedContainer) => {
+  assertEquals(Object.keys(opened.graphs), [COMPONENT], "容器のグラフ名");
+  return opened.graphs[COMPONENT];
 };
 
-test.skipIf(!ANY_PRESENT)(
-  "Wan2.2 TI2V DiT 資産: 容器と全ケース（S = 192・T2V 5 本 + I2V 5 本）の golden が揃っている",
+// Only a root with no S = 192 golden that is not a complete fetch SKIPs; the mirror's completeness is the distribution
+// gate's.
+test.skipIf(!ANY_PRESENT && !FETCHED)(
+  "Wan2.2 TI2V DiT goldens: the goldens of every case (S = 192, 5 T2V + 5 I2V) are present",
   () => {
-    assert(MODEL_PRESENT, `${SERIES_DIR.pathname}${MODEL_FILE} が無い`);
     assertEquals(
       expectedFiles.filter((url) => !filePresent(url)).map((url) => url.pathname),
       [],
-      `golden の欠け（生成: ${GENERATE}）`,
+      `missing goldens (${MISSING_GOLDENS})`,
     );
   },
 );
 
-test.skipIf(!MODEL_PRESENT)(
+test.skipIf(!MIRROR_PRESENT)(
   "Wan2.2 TI2V DiT 容器（GPU 不要）: 入力 7 本・条件マスクは bool [1,S,1]・linear 310・where 182・i8 307",
   async () => {
-    const graph = seriesGraphOf(await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)));
+    const graph = containerGraphOf(await openTi2vTransformer());
     const { declaration } = graph;
     assertEquals(
       declaration.inputs.map(({ name, dtype, shape }) => ({ name, dtype, shape })),
@@ -154,11 +167,11 @@ test.skipIf(!MODEL_PRESENT)(
   },
 );
 
-test.skipIf(!MODEL_PRESENT)(
+test.skipIf(!MIRROR_PRESENT)(
   "Wan2.2 TI2V DiT 容器（GPU 不要）: 2.2 の世代の記述子の入力の形で ditContract を通り、form は ti2v",
   async () => {
-    const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR));
-    const prepared = prepareContainer(opened, seriesGraph(SERIES_NAME, COMPONENT));
+    const opened = await openTi2vTransformer();
+    const prepared = prepareContainer(opened, COMPONENT);
     const contract = ditContract(
       prepared,
       await readRopeBase(opened),
@@ -175,7 +188,7 @@ test.skipIf(!MODEL_PRESENT)(
  * golden のグラフ入力を再現することを、ケースごとに見る（ファイル冒頭の 1 つ目）。
  */
 const assertHostInputs = async (cases: readonly Ti2vCase[]): Promise<void> => {
-  const base = await readRopeBase(await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)));
+  const base = await readRopeBase(await openTi2vTransformer());
   for (const { name, form } of cases) {
     const golden = await loadTi2vGolden(name);
     const { io, reference, latentShape } = golden;
@@ -235,14 +248,13 @@ test.skipIf(!ASSETS_AVAILABLE)(
   () => assertHostInputs(CASES),
 );
 
-test.skipIf(!FULL_ANY_PRESENT)(
-  "Wan2.2 TI2V DiT 実寸の資産: 全ケース（2 つの形・決定用 6 本 + 受入れ 8 本）の golden が揃っている",
+test.skipIf(!FULL_ANY_PRESENT && !FETCHED)(
+  "Wan2.2 TI2V DiT full-size goldens: the goldens of every case (2 shapes, 6 band + 8 accept) are present",
   () => {
-    assert(MODEL_PRESENT, `${SERIES_DIR.pathname}${MODEL_FILE} が無い（実寸の golden だけがある）`);
     assertEquals(
       fullExpectedFiles.filter((url) => !filePresent(url)).map((url) => url.pathname),
       [],
-      `実寸の golden の欠け（生成・途中から再開: ${GENERATE_FULL}）`,
+      `missing full-size goldens (${MISSING_GOLDENS})`,
     );
   },
 );

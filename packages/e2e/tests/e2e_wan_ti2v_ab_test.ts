@@ -89,10 +89,9 @@ import {
 import { WAN_I2V_IMAGE_SHA256 } from "../../models/tests/helpers/wan-i2v-image.ts";
 import {
   WAN_I2V_SOURCE_SHAPE,
-  WAN_I2V_STEPS_GENERATE,
   wanI2vStepsFixtureUrl,
 } from "../../models/tests/helpers/wan-i2v-fixture.ts";
-import { filePresent } from "../../models/tests/helpers/wan-ti2v-dit.ts";
+import { filePresent, TEST_ASSETS_FETCH } from "../../models/tests/helpers/wan-ti2v-dit.ts";
 import {
   readWanTi2vDistributionManifestText,
   WAN_TI2V_ASSEMBLE_COMMAND,
@@ -241,8 +240,8 @@ const subjectOf = (
 const I2V_FIXTURE_PRESENT = filePresent(I2V_FIXTURE_URL);
 if (RUNNABLE && I2V_FULL && !I2V_FIXTURE_PRESENT) {
   console.warn(
-    `[karume] ${I2V_FIXTURE_URL.pathname} が無いため Wan2.2 の I2V の自機 A/B 門を SKIP する` +
-      `（条件画像をこの参照から読む）。生成（CPU で約 42 分・RAM の山 約 24 GiB）: ${WAN_I2V_STEPS_GENERATE}`,
+    `[karume] the golden ${I2V_FIXTURE_URL.pathname} is absent, so Wan2.2's I2V A/B gate on this machine is ` +
+      `SKIPPED (the condition image is read from this reference). Fetch it: ${TEST_ASSETS_FETCH}`,
   );
 }
 

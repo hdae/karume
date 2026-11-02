@@ -15,8 +15,9 @@
 // - **実資産の layout**（chunk グラフ 2 本がある機だけ）: 宣言から導いた layout が計画のリテラルと一致し、2.2 の
 //   記述子の admission を通り、2.1 の記述子では落ちる。
 //
-// 資産の在否は chunk グラフ 2 本の組で分ける（1 本も無ければ明示 SKIP・片方だけなら FAIL — ADR 0005）。タイル参照
-// `vae_tiles.*` の在否はここでは見ない（GPU の照合の側の組）。
+// The real-asset case reads the two f16 chunk graphs of the distribution mirror `models/karume-wan2.2/` (through its
+// manifest — ADR 0139 decision 1) and SKIPs explicitly without the mirror (ADR 0005; the mirror's completeness is the
+// distribution gate's). The presence of the tile references `vae_tiles.*` is not checked here (the GPU check's group).
 
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
@@ -35,16 +36,13 @@ import {
 } from "../src/wan/tile-decode.ts";
 import { wanVaeChunkLayout } from "../src/wan/vae-chunks.ts";
 import { wanVaeBlendExtentAt, wanVaeTileCount } from "../src/wan/vae-tiles.ts";
-import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "./helpers/series-graphs.ts";
+import { mirrorPresent } from "./helpers/mirror.ts";
+import { WAN_TI2V_VAE_FIRST as FIRST, WAN_TI2V_VAE_NEXT as NEXT } from "./helpers/wan-ti2v-vae.ts";
 import {
-  ti2vVaeModelUrl,
-  WAN_TI2V_VAE_FIRST as FIRST,
-  WAN_TI2V_VAE_GENERATE as GENERATE,
-  WAN_TI2V_VAE_NEXT as NEXT,
-  WAN_TI2V_VAE_ROOT as ROOT,
-  WAN_TI2V_VAE_SERIES as SERIES,
-} from "./helpers/wan-ti2v-vae.ts";
+  openWanTi2vComponent,
+  WAN_TI2V_ASSEMBLE_COMMAND as ASSEMBLE,
+  WAN_TI2V_DIST_ROOT as DIST_ROOT,
+} from "./helpers/wan-ti2v-pipeline.ts";
 
 const OWNER = "wan.Ti2vPipeline";
 
@@ -255,37 +253,22 @@ test("WAN22_LATENTS_MEAN / STD: fixture wan22-ti2v.json とビット一致（48 
   assert(WAN22_TI2V_GENERATION.latents.std === WAN22_LATENTS_STD, "記述子が別の std を持つ");
 });
 
-// ---- 実資産の layout（chunk グラフ 2 本の組で SKIP / 実行を分ける）---------------------------------------
+// ---- Real-asset layout (the mirror's two f16 chunk graphs) ----------------------------------------------
 
-const GRAPHS = [FIRST, NEXT].map((component) => {
-  const url = ti2vVaeModelUrl(component);
-  return { path: url.pathname, present: modelPresent(url) };
-});
-const ANY_GRAPH = GRAPHS.some(({ present }) => present);
-const ALL_GRAPHS = GRAPHS.every(({ present }) => present);
+const MIRROR_PRESENT = mirrorPresent(DIST_ROOT);
 
-if (!ANY_GRAPH) {
+if (!MIRROR_PRESENT) {
   console.warn(
-    `[karume] ${ROOT.pathname} に Wan2.2 TI2V の VAE の chunk グラフが無いため、実資産の layout の照合を SKIP する` +
-      `（重み 2.2GB につきリポジトリ管理外）。生成: ${GENERATE}`,
+    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references is ` +
+      `absent), so the real-asset layout check of Wan2.2 TI2V's VAE tiles is SKIPPED. Assemble it: ${ASSEMBLE}`,
   );
 }
 
+/** Opens and prepares the mirror's f16 chunk graph (the graph name is the component key). */
 const prepared = async (component: string): Promise<PreparedModel> =>
-  prepareContainer(
-    await openSeriesContainer(ti2vVaeModelUrl(component)),
-    seriesGraph(SERIES, component),
-  );
+  prepareContainer(await openWanTi2vComponent(component, "f16"), component);
 
-test.skipIf(!ANY_GRAPH)("Wan2.2 TI2V VAE のタイルの実資産: chunk グラフ 2 本が揃っている", () => {
-  assertEquals(
-    GRAPHS.filter(({ present }) => !present).map(({ path }) => path),
-    [],
-    `chunk グラフの欠け（生成: ${GENERATE}）`,
-  );
-});
-
-test.skipIf(!ALL_GRAPHS)(
+test.skipIf(!MIRROR_PRESENT)(
   "Wan2.2 TI2V VAE のタイルの実資産（GPU 不要）: layout は計画のリテラルと一致・2.2 の記述子の admission を通り" +
     "・2.1 の記述子では落ちる",
   async () => {

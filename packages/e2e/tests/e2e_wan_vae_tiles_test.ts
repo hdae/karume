@@ -1,11 +1,12 @@
 /**
  * Wan2.1 の動画 VAE の**タイル decode**の参照照合（実 GPU — ADR 0118 段 5 の検収）。
  *
- * 系列 `outputs/series/wan2.1-t2v-1.3b-f16-dyn/` の chunk グラフ 2 本（段 4）を、ホストのタイル
- * 計画（`vae-tiles.ts`）で全画面に敷き詰めて回す — タイルが外・chunk が内・1 タイル = 1 batch・
- * フレームだけを読み戻す（`decodeWanVaeTile`）。比べる相手は recipe のタイル参照
- * （`tools/export-recipes/wan/vae_tiling.py` — 同じ幾何・上流の blend の逐語・CPU f32・重みは f16 へ
- * 丸めた値 — ADR 0006）の**クランプ前**の出力。
+ * The two chunk graphs (stage 4) of the local distribution mirror `models/karume-wan2.1/` (opened through its manifest —
+ * ADR 0139 decision 1; the fixtures are in the test-asset root `goldens/wan2.1-t2v-1.3b-f16-dyn/` — decision 2) are
+ * tiled over the whole frame with the host tile plan (`vae-tiles.ts`) and run — tiles outside, chunks inside, one tile
+ * = one batch, only the frames read back (`decodeWanVaeTile`). The comparison target is the recipe's tile reference
+ * (`tools/export-recipes/wan/vae_tiling.py` — the same geometry, upstream's blend verbatim, CPU f32, weights rounded
+ * to f16 — ADR 0006) **before the clamp**.
  *
  * ## 門
  *
@@ -72,8 +73,13 @@ import {
   readFixture as readChunkFixture,
 } from "../../models/tests/helpers/wan-vae-chunk-loop.ts";
 import { allclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
-import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
+import { mirrorPresent } from "../../models/tests/helpers/mirror.ts";
+import {
+  openWanComponent,
+  WAN_ASSEMBLE_COMMAND,
+  WAN_DIST_ROOT,
+} from "../../models/tests/helpers/wan-distribution.ts";
+import { goldenDir, TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
@@ -97,25 +103,30 @@ import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-pari
 const BAND = 2e-5;
 const TOLERANCE: Tolerance = { atol: BAND, rtol: 0 };
 
-const SERIES = "wan2.1-t2v-1.3b-f16-dyn";
-const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES}/`, import.meta.url);
+/** The fixtures' place: the test-asset root's folder of the f16 series (ADR 0139 decision 2). */
+const GOLDEN_ROOT = goldenDir("wan2.1-t2v-1.3b-f16-dyn");
+/** Component names: the manifest's weights keys, which are also the containers' graph names (container-v1 §2.1). */
 const FIRST_COMPONENT = "vae_decoder_first";
 const NEXT_COMPONENT = "vae_decoder_next";
-const MODEL_FILE = "model.krm";
 const CASES = ["band", "accept"] as const;
 type CaseName = (typeof CASES)[number];
 
 /** 縮退門の潜在（段 4 の chunk 列のフィクスチャ — 潜在 `[16,9,32,32]`・タイル 1 枚ちょうど）。 */
 const DEGENERATE_FIXTURE = "vae_chunks.band.safetensors";
 
-/** SKIP 時にそのまま貼れる生成コマンド（chunk グラフ 2 本 + タイル参照）。 */
-const GENERATE_COMMAND =
-  "cd tools/export-recipes && uv run --group wan --inexact " +
-  "python -m wan.export_vae && uv run --group wan --inexact python -m wan.vae_tiling";
+/** The command that fetches the fixtures into the local test-asset root (ADR 0139 decision 3). */
+const FETCH = "node tools/test-assets/fetch.ts";
+/**
+ * A complete fetch of the pinned test-asset dataset makes a missing fixture a FAIL (the completeness tests below): the
+ * dataset at the pin lacks a file the cases read. Without one, the cases SKIP (the assets gate is red then).
+ */
+const FETCHED = testAssetsFetched();
+const MISSING_FIXTURES = FETCHED
+  ? `the test-asset dataset at revision ${TEST_ASSETS.revision} lacks them`
+  : `fetch: ${FETCH}`;
 
-const modelUrl = (component: string): URL => new URL(`${component}/${MODEL_FILE}`, SERIES_ROOT);
-const fixtureUrl = (name: CaseName): URL => new URL(`vae_tiles.${name}.safetensors`, SERIES_ROOT);
-const degenerateUrl = new URL(DEGENERATE_FIXTURE, SERIES_ROOT);
+const fixtureUrl = (name: CaseName): URL => new URL(`vae_tiles.${name}.safetensors`, GOLDEN_ROOT);
+const degenerateUrl = new URL(DEGENERATE_FIXTURE, GOLDEN_ROOT);
 
 const fileExists = (url: URL): boolean => {
   try {
@@ -126,28 +137,39 @@ const fileExists = (url: URL): boolean => {
   }
 };
 
-const PRESENT = [
-  modelPresent(modelUrl(FIRST_COMPONENT)),
-  modelPresent(modelUrl(NEXT_COMPONENT)),
-  fileExists(degenerateUrl),
-  ...CASES.map((name) => fileExists(fixtureUrl(name))),
-];
+const MIRROR_PRESENT = mirrorPresent(WAN_DIST_ROOT);
+if (!MIRROR_PRESENT) {
+  console.warn(
+    `[karume] the mirror ${WAN_DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references is ` +
+      `absent), so Wan's VAE tile-decode and chunk-sequence checks are SKIPPED. Assemble it: ${WAN_ASSEMBLE_COMMAND}`,
+  );
+}
+const PRESENT = [fileExists(degenerateUrl), ...CASES.map((name) => fileExists(fixtureUrl(name)))];
 const ANY_PRESENT = PRESENT.some(Boolean);
+/** The tile checks read the mirror's two chunk graphs and these three fixtures. */
+const TILES_RUNNABLE = MIRROR_PRESENT && ANY_PRESENT;
 if (!ANY_PRESENT) {
   console.warn(
-    `[karume] ${SERIES_ROOT.pathname} に VAE の chunk グラフとタイル参照が無いため Wan の VAE タイル ` +
-      `decode の照合を SKIP する。生成: ${GENERATE_COMMAND}`,
+    `[karume] no VAE tile reference under ${GOLDEN_ROOT.pathname}, so Wan's VAE tile-decode checks are SKIPPED ` +
+      `(${MISSING_FIXTURES})`,
   );
 }
 
-// 1 つも無い環境は「生成していない」なので SKIP。1 つでもあるなら欠けは FAIL。
-test.skipIf(!ANY_PRESENT)("Wan VAE タイル資産: 2 グラフとフィクスチャ 3 本が揃っている", () => {
-  assertEquals(
-    PRESENT,
-    PRESENT.map(() => true),
-    `${SERIES_ROOT.pathname} の欠け`,
-  );
-});
+// 1 つも無い環境は「生成していない」なので SKIP。1 つでもあるなら欠けは FAIL (so is any missing one in a complete fetch of the
+// pinned dataset; the mirror's completeness is the distribution gate's).
+test.skipIf(!ANY_PRESENT && !FETCHED)(
+  "Wan VAE tile fixtures: the three fixtures are present",
+  () => {
+    assertEquals(
+      PRESENT,
+      PRESENT.map(() => true),
+      `missing: ${[degenerateUrl, ...CASES.map(fixtureUrl)]
+        .filter((_, index) => !PRESENT[index])
+        .map(({ pathname }) => pathname)
+        .join(", ")} (${MISSING_FIXTURES})`,
+    );
+  },
+);
 
 /** 1 本の safetensors（F32 のテンソルとメタ）。 */
 type Fixture = {
@@ -248,11 +270,11 @@ const registerVaeSessions = (): (() => VaeRun) => {
   let run: VaeRun | undefined;
   beforeAll(async () => {
     const [firstOpened, nextOpened] = await Promise.all([
-      openSeriesContainer(modelUrl(FIRST_COMPONENT)),
-      openSeriesContainer(modelUrl(NEXT_COMPONENT)),
+      openWanComponent(FIRST_COMPONENT, "f16"),
+      openWanComponent(NEXT_COMPONENT, "f16"),
     ]);
-    const firstModel = prepareContainer(firstOpened, seriesGraph(SERIES, FIRST_COMPONENT));
-    const nextModel = prepareContainer(nextOpened, seriesGraph(SERIES, NEXT_COMPONENT));
+    const firstModel = prepareContainer(firstOpened, FIRST_COMPONENT);
+    const nextModel = prepareContainer(nextOpened, NEXT_COMPONENT);
     const layout = wanVaeChunkLayout(firstModel, nextModel);
 
     const device: GpuContext = verifyRunningGpu(await acquireTestGpu());
@@ -315,7 +337,7 @@ const registerTileFixtures = (): (() => TileFixtures) => {
 // Default run: the plan against the Python plan, the degenerate Uint32 gate, the NaN-poisoned
 // multi-tile decodes and the seam fault injections. The band comparisons of the band / accept
 // frames with the recipe's tiled reference (and their results.json ids) are the opt-in suite below.
-describe.skipIf(!ANY_PRESENT || !GPU_AVAILABLE)(
+describe.skipIf(!TILES_RUNNABLE || !GPU_AVAILABLE)(
   "Wan VAE タイル decode: 計画・縮退門・毒値・貼り合わせの故障注入（実 GPU）",
   () => {
     const tileFixtures = registerTileFixtures();
@@ -425,7 +447,7 @@ describe.skipIf(!ANY_PRESENT || !GPU_AVAILABLE)(
 // Upstream parity: the band / accept frames against the recipe's tiled reference (the upstream
 // blend, CPU f32) under the absolute band, so it is opt-in. It owns the band / accept results.json
 // ids and their measurements.
-describe.skipIf(!ANY_PRESENT || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
+describe.skipIf(!TILES_RUNNABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
   `Wan VAE タイル decode: 832×480・33 フレームが上流の参照と帯の中で一致（実 GPU）${UPSTREAM_PARITY_OPT_IN}`,
   () => {
     const tileFixtures = registerTileFixtures();
@@ -502,11 +524,12 @@ describe.skipIf(!ANY_PRESENT || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
 /*
  * Wan2.1 の動画 VAE の **chunk 列の参照照合**（実 GPU — ADR 0118 段 4 の検収）。
  *
- * 系列 `outputs/series/wan2.1-t2v-1.3b-f16-dyn/` の chunk グラフ 2 本（`vae_decoder_first` /
- * `vae_decoder_next` — f16 席）を、常駐の因果キャッシュで first → next × (F−1) と回し
- * （`decodeWanVaeTile` — 1 タイル = 1 batch・フレームだけを読み戻す）、上流の非タイル `_decode` の
- * chunk ループ（diffusers・CPU f32・重みは f16 へ丸めた値 — ADR 0006）の**クランプ前**の出力と比べる。
- * 参照とフィクスチャは `tools/export-recipes/wan/export_vae.py` が書く（下の CHUNK_GENERATE_COMMAND）。
+ * The mirror's two chunk graphs (`vae_decoder_first` / `vae_decoder_next` — f16) run first → next × (F−1) with
+ * resident causal caches (`decodeWanVaeTile` — one tile = one batch, only the frames read back), and the output is
+ * compared with upstream's untiled `_decode` chunk loop (diffusers, CPU f32, weights rounded to f16 — ADR 0006)
+ * **before the clamp**.
+ * 参照とフィクスチャは `tools/export-recipes/wan/export_vae.py` が書く (read from the test-asset root — fetch with
+ * `node tools/test-assets/fetch.ts`).
  *
  * ## 帯の決め方（決定 8 と追記 2026-10-02）
  *
@@ -550,37 +573,34 @@ type ChunkCaseName = (typeof CHUNK_CASES)[number];
 /** `long` の chunk 数（81 フレーム = 1 + 4·20 — 受理集合の上限のフレーム数の chunk 列）。 */
 const LONG_CHUNKS = 21;
 
-/** SKIP 時にそのまま貼れる生成コマンド（`tools/export-recipes/wan/export_vae.py`）。 */
-const CHUNK_GENERATE_COMMAND =
-  "cd tools/export-recipes && uv run --group wan --inexact " + "python -m wan.export_vae";
-
 /** 故障注入で外す cache（head の conv — 1 層だけを通る最も効きの小さい席）。 */
 const DROPPED_CACHE = "cache_31";
 
 const chunkFixtureUrl = (name: ChunkCaseName): URL =>
-  new URL(`vae_chunks.${name}.safetensors`, SERIES_ROOT);
+  new URL(`vae_chunks.${name}.safetensors`, GOLDEN_ROOT);
 
-const CHUNK_PRESENT = [
-  modelPresent(modelUrl(FIRST_COMPONENT)),
-  modelPresent(modelUrl(NEXT_COMPONENT)),
-  ...CHUNK_CASES.map((name) => fileExists(chunkFixtureUrl(name))),
-];
+const CHUNK_PRESENT = CHUNK_CASES.map((name) => fileExists(chunkFixtureUrl(name)));
 const CHUNK_ANY_PRESENT = CHUNK_PRESENT.some(Boolean);
+/** The chunk-sequence checks read the mirror's two chunk graphs and these three fixtures. */
+const CHUNK_RUNNABLE = MIRROR_PRESENT && CHUNK_ANY_PRESENT;
 if (!CHUNK_ANY_PRESENT) {
   console.warn(
-    `[karume] ${SERIES_ROOT.pathname} に VAE の chunk グラフが無いため Wan の VAE chunk 列の照合を ` +
-      `SKIP する。生成: ${CHUNK_GENERATE_COMMAND}`,
+    `[karume] no VAE chunk fixture under ${GOLDEN_ROOT.pathname}, so Wan's VAE chunk-sequence checks are ` +
+      `SKIPPED (${MISSING_FIXTURES})`,
   );
 }
 
-// 1 つも無い環境は「生成していない」なので SKIP。1 つでもあるなら欠けは FAIL。
-test.skipIf(!CHUNK_ANY_PRESENT)(
-  "Wan VAE chunk 資産: 2 グラフとフィクスチャ 3 本が揃っている",
+// 1 つも無い環境は「生成していない」なので SKIP。1 つでもあるなら欠けは FAIL (so is any missing one in a complete fetch of the
+// pinned dataset; the mirror's completeness is the distribution gate's).
+test.skipIf(!CHUNK_ANY_PRESENT && !FETCHED)(
+  "Wan VAE chunk fixtures: the three fixtures are present",
   () => {
     assertEquals(
       CHUNK_PRESENT,
       CHUNK_PRESENT.map(() => true),
-      `${SERIES_ROOT.pathname} の欠け`,
+      `missing: ${CHUNK_CASES.filter((_, index) => !CHUNK_PRESENT[index])
+        .map((name) => chunkFixtureUrl(name).pathname)
+        .join(", ")} (${MISSING_FIXTURES})`,
     );
   },
 );
@@ -611,7 +631,7 @@ const registerChunkFixtures = (): (() => ChunkFixtures) => {
 // sequences, the Uint32 identity of the fault-injection loop with the product path and the rejected
 // first-for-all enqueue. The band comparisons with the untiled upstream `_decode`, the fault
 // injections that prove that band is live and their results.json ids are the opt-in suite below.
-describe.skipIf(!CHUNK_ANY_PRESENT || !GPU_AVAILABLE)(
+describe.skipIf(!CHUNK_RUNNABLE || !GPU_AVAILABLE)(
   "Wan VAE chunk 列: 取り決め・毒値・故障注入のループの Uint32 一致・first の使い回しの拒否（実 GPU）",
   () => {
     const chunkFixtures = registerChunkFixtures();
@@ -687,7 +707,7 @@ describe.skipIf(!CHUNK_ANY_PRESENT || !GPU_AVAILABLE)(
 // Upstream parity: the chunk sequences against the untiled upstream `_decode` under the absolute
 // band, with the cache fault injections that only prove that band is live, so it is opt-in. It owns
 // the band / accept / long results.json ids and their measurements.
-describe.skipIf(!CHUNK_ANY_PRESENT || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
+describe.skipIf(!CHUNK_RUNNABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
   `Wan VAE chunk 列: 常駐 cache の first → next が上流の _decode と帯の中で一致（実 GPU）${UPSTREAM_PARITY_OPT_IN}`,
   () => {
     const chunkFixtures = registerChunkFixtures();

@@ -1,10 +1,11 @@
 /**
  * Wan2.2 TI2V-5B の VAE **encoder の chunk 0**（I2V の条件画像 1 枚）の参照照合（実 GPU — ADR 0121 段 9a の検収）。
  *
- * 系列 `outputs/series/wan2.2-ti2v-5b-f16-dyn/` の encoder の 3 グラフ（f16 席 — recipe
- * `tools/export-recipes/wan/export_vae_encoder.py`）を、golden の RGB8 から TS の前処理（`[-1, 1]` → patchify）で作った
- * 入力で回し、出口の mu を TS の正規化（`normalizeWanLatents`）に通して、上流の非タイル encode（diffusers・CPU f32・
- * 重みは f16 へ丸めた値）の mu の正規化と比べる。
+ * The encoder's three graphs of the distribution mirror `models/karume-wan2.2/` (f16 — written by the recipe
+ * `tools/export-recipes/wan/export_vae_encoder.py`; opened through the manifest — ADR 0139 decision 1; the goldens are
+ * in the test-asset root — decision 2) run on the input the TS preprocessing (`[-1, 1]` → patchify) makes from the
+ * golden's RGB8; the output mu goes through the TS normalization (`normalizeWanLatents`) and is compared with the
+ * normalized mu of upstream's untiled encode (diffusers, CPU f32, weights rounded to f16).
  *
  * - pre `[12,1,8h,8w]` → `[640,1,h,w]`（記号 h, w）/ attn `[640,S]` → `[640,S]`（記号 S = h·w）/ post `[640,1,h,w]` →
  *   mu `[48,1,h,w]`。h, w は潜在の高さ・幅。IR の次元式は記号 1 つの一次式なので、h·w を 1 軸に作る mid の
@@ -103,7 +104,6 @@ import {
 import {
   WAN_I2V_ENCODER_BAND,
   WAN_I2V_GOLDEN_CASES,
-  WAN_I2V_GOLDEN_GENERATE,
   WAN_I2V_GOLDEN_KEYS,
   WAN_I2V_GOLDEN_METADATA,
   WAN_I2V_IMAGE_SHA256,
@@ -111,16 +111,18 @@ import {
   wanI2vGoldenName,
   wanI2vGoldenUrl,
 } from "../../models/tests/helpers/wan-i2v-image.ts";
+import { WAN_TI2V_VAE_GOLDEN_DIR as GOLDEN_DIR } from "../../models/tests/helpers/wan-ti2v-vae.ts";
+import { mirrorPresent } from "../../models/tests/helpers/mirror.ts";
+import { TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
+import { TEST_ASSETS_FETCH as FETCH } from "../../models/tests/helpers/wan-ti2v-dit.ts";
 import {
-  WAN_TI2V_VAE_MODEL_FILE as MODEL_FILE,
-  WAN_TI2V_VAE_ROOT as ROOT,
-  WAN_TI2V_VAE_SERIES as SERIES,
-} from "../../models/tests/helpers/wan-ti2v-vae.ts";
+  openWanTi2vComponent,
+  WAN_TI2V_ASSEMBLE_COMMAND as ASSEMBLE,
+  WAN_TI2V_DIST_ROOT as DIST_ROOT,
+} from "../../models/tests/helpers/wan-ti2v-pipeline.ts";
 import { allclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
 import type { BoundContainer } from "../../runtime/src/format/container/bind.ts";
 import type { IrNode } from "../../runtime/src/format/ir.ts";
-import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
@@ -134,7 +136,7 @@ const BAND: number | undefined = WAN_I2V_ENCODER_BAND;
 /** 判定と記録の帯（未導出の回は無限の帯として記録し、判定は赤にする）。 */
 const TOLERANCE: Tolerance = { atol: BAND ?? Number.POSITIVE_INFINITY, rtol: 0 };
 
-/** 部品名（= 部品ディレクトリ名。グラフ名は系列のグラフ名の表から引く）。 */
+/** Component names: the manifest's weights keys, which are also the containers' graph names (container-v1 §2.1). */
 const PRE = "vae_encoder_pre";
 const ATTENTION = "vae_encoder_attn";
 const POST = "vae_encoder_post";
@@ -185,23 +187,32 @@ const FAULT_CASE = CASES.find(
     image === FAULT_IMAGE && width === FAULT_SIZE.width && height === FAULT_SIZE.height,
 );
 
-const modelUrl = (part: string): URL => new URL(`${part}/${MODEL_FILE}`, ROOT);
-const ASSETS = [
-  ...PARTS.map((part) => ({
-    path: modelUrl(part).pathname,
-    present: modelPresent(modelUrl(part)),
-  })),
-  ...CASES.map((testCase) => {
-    const url = wanI2vGoldenUrl(testCase);
-    return { path: url.pathname, present: filePresent(url) };
-  }),
-];
+const MIRROR_PRESENT = mirrorPresent(DIST_ROOT);
+const ASSETS = CASES.map((testCase) => {
+  const url = wanI2vGoldenUrl(testCase);
+  return { path: url.pathname, present: filePresent(url) };
+});
 const ANY_ASSETS = ASSETS.some(({ present }) => present);
-const ALL_ASSETS = ASSETS.every(({ present }) => present);
+/** The GPU checks read the mirror's three graphs and the nine goldens. */
+const ALL_ASSETS = MIRROR_PRESENT && ASSETS.every(({ present }) => present);
+/**
+ * A complete fetch of the pinned test-asset dataset makes a missing golden a FAIL (the completeness test below): the
+ * dataset at the pin lacks a file the cases read. Without one, the cases SKIP (the assets gate is red then).
+ */
+const FETCHED = testAssetsFetched();
+const MISSING_GOLDENS = FETCHED
+  ? `the test-asset dataset at revision ${TEST_ASSETS.revision} lacks them`
+  : `fetch: ${FETCH}`;
+if (!MIRROR_PRESENT) {
+  console.warn(
+    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references is ` +
+      `absent), so the VAE encoder checks of Wan2.2 TI2V are SKIPPED. Assemble it: ${ASSEMBLE}`,
+  );
+}
 if (!ANY_ASSETS) {
   console.warn(
-    `[karume] ${ROOT.pathname} に Wan2.2 TI2V の VAE encoder の 3 グラフと golden が無いため、encoder の照合を ` +
-      `SKIP する。生成: ${WAN_I2V_GOLDEN_GENERATE}`,
+    `[karume] no VAE encoder golden under ${GOLDEN_DIR.pathname}, so the encoder checks are SKIPPED ` +
+      `(${MISSING_GOLDENS})`,
   );
 }
 
@@ -295,15 +306,15 @@ type EncoderParts<T> = { readonly pre: T; readonly attn: T; readonly post: T };
 
 const openParts = async (): Promise<EncoderParts<BoundContainer>> => {
   const [pre, attn, post] = await Promise.all(
-    PARTS.map((part) => openSeriesContainer(modelUrl(part))),
+    PARTS.map((part) => openWanTi2vComponent(part, "f16")),
   );
   return { pre, attn, post };
 };
 
 const prepareParts = (opened: EncoderParts<BoundContainer>): EncoderParts<PreparedModel> => ({
-  pre: prepareContainer(opened.pre, seriesGraph(SERIES, PRE)),
-  attn: prepareContainer(opened.attn, seriesGraph(SERIES, ATTENTION)),
-  post: prepareContainer(opened.post, seriesGraph(SERIES, POST)),
+  pre: prepareContainer(opened.pre, PRE),
+  attn: prepareContainer(opened.attn, ATTENTION),
+  post: prepareContainer(opened.post, POST),
 });
 
 /** グラフの出口の名前（宣言から読む — 綴りは export の都合で決まる）。 */
@@ -670,11 +681,11 @@ const nonFiniteCountOf = (values: Float32Array): number =>
 
 // ---- テスト -----------------------------------------------------------------------------------
 
-test.skipIf(!ANY_ASSETS)(
-  "Wan2.2 TI2V VAE encoder: 3 グラフと golden 9 本が揃っている（一部だけなら FAIL・無ければ SKIP）",
+test.skipIf(!ANY_ASSETS && !FETCHED)(
+  "Wan2.2 TI2V VAE encoder: the 9 goldens are present (some or a complete fetch → FAIL, none → SKIP)",
   () => {
     const missing = ASSETS.filter(({ present }) => !present).map(({ path }) => path);
-    assertEquals(missing, [], `encoder の資産が欠けている（採り直す: ${WAN_I2V_GOLDEN_GENERATE}）`);
+    assertEquals(missing, [], `missing encoder goldens (${MISSING_GOLDENS})`);
   },
 );
 
@@ -900,7 +911,7 @@ describe.skipIf(!ALL_ASSETS || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
     ): Promise<Float32Array> => {
       const { gpu, opened, live, outputs, residents } = run;
       const name = part === "pre" ? PRE : POST;
-      const graphName = seriesGraph(SERIES, name);
+      const graphName = name;
       const faulty = await prepareContainer(
         withRewrittenNodes(opened[part], graphName, rewrite),
         graphName,

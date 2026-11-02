@@ -13,6 +13,8 @@
  * 副作用ゼロ: ここは URL と文字列の定数と、呼ばれたときだけ読む関数だけを持つ（モジュール評価で資産を読まない）。
  */
 
+import type { OpenedContainer } from "@karume/runtime";
+import { openSelectedContainer, selectMirrorComponent } from "./mirror.ts";
 import { readTextIfPresent } from "./read-if-present.ts";
 
 /** 参照席（ADR 0121 決定 2 — 重み i8・計算 f32・`session` 空）。 */
@@ -48,3 +50,30 @@ export const WAN_TI2V_ASSEMBLE_COMMAND =
  */
 export const readWanTi2vDistributionManifestText = (): Promise<string | undefined> =>
   readTextIfPresent(new URL("karume.json", WAN_TI2V_DIST_ROOT));
+
+/**
+ * Opens one component of the mirror in the given storage, through the manifest (ADR 0139 decision 1): f16 through the
+ * reference preset, i8 through the int8 preset (every preset that stores a component in a dtype names the same
+ * container). Range reads; the Session options stay the caller's — the preset only selects the container.
+ *
+ * MUST: the preset's declared storage is checked — a mirror whose preset stores the component differently would
+ * otherwise run the check against the other container without saying so.
+ */
+export const openWanTi2vComponent = async (
+  component: string,
+  dtype: "f16" | "i8",
+): Promise<OpenedContainer> => {
+  const quant = dtype === "f16" ? WAN_TI2V_REFERENCE_QUANT : WAN_TI2V_I8_QUANT;
+  const chosen = await selectMirrorComponent(WAN_TI2V_DIST_ROOT, component, {
+    model: WAN_TI2V_DIST_MODEL,
+    quant,
+  });
+  const declared =
+    chosen.loaded.manifest.models[WAN_TI2V_DIST_MODEL].quants[quant].weights[component];
+  if (declared !== dtype) {
+    throw new Error(
+      `test: preset '${quant}' of ${WAN_TI2V_DIST_ROOT.pathname} stores '${component}' as ${declared}, not ${dtype}`,
+    );
+  }
+  return await openSelectedContainer(chosen);
+};

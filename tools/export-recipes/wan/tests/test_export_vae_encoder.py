@@ -14,8 +14,10 @@
 - golden のケースの表（3 寸法 × 決定用 2 枚 + 受入れ 1 枚・stretch は前処理だけ）
 - 書き手が 3 グラフと golden を一組で据えること（合成の VAE と合成の画像で）・来歴の sha256 が
   違う画像では 1 バイトも書かないこと
-- 系列に据わった golden（git 追跡外 — 無ければ SKIP）の中身が、今の Pillow で作り直した前処理の鎖と
-  正規化にビット一致すること（版の更新で黙ってずれた golden を赤にする）
+- the goldens the writer put into the series (read from the fetched goldens,
+  `outputs/test-assets/goldens/` — ADR 0139 decision 2; SKIP without them) are bit-identical to the
+  preprocessing chain and the normalization rebuilt with today's Pillow (a golden that drifted
+  silently with a library update turns red)
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ import numpy as np
 import pytest
 import torch
 
-from _shared.paths import SERIES_ROOT
+from _shared.paths import GOLDENS_ROOT
 from karume.container import Provenance
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.ir import IrGraph, IrNode, IrValue
@@ -305,19 +307,21 @@ class TestTheSeriesIsPublishedTogether:
         assert not out_root.exists()
 
 
-# ---- 系列に据わった golden（git 追跡外 — 無ければ SKIP）---------------------------------
+# ---- The fetched goldens (outputs/test-assets/goldens/ — SKIP without them) --------------------
 
 
 @pytest.fixture(scope="module")
 def series_goldens() -> dict[str, Path]:
-    root = SERIES_ROOT / export_vae_encoder.SERIES_NAME
+    root = GOLDENS_ROOT / export_vae_encoder.SERIES_NAME
     paths = {
         case.name: export_vae_encoder.golden_path(root, case)
         for case in export_vae_encoder.GOLDEN_CASES
     }
     present = [name for name, path in paths.items() if path.is_file()]
     if not present:
-        pytest.skip(f"{root} に encoder の golden が無い（生成: python -m wan.export_vae_encoder）")
+        pytest.skip(
+            f"no encoder goldens under {root} — fetch them with `node tools/test-assets/fetch.ts`"
+        )
     missing = sorted(set(paths) - set(present))
     assert not missing, (
         f"golden が一部だけある（欠け: {missing}）— 一組で据える書き手の外で消された"

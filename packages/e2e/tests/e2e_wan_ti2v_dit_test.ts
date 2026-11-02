@@ -1,10 +1,13 @@
 /**
  * Wan2.2 TI2V-5B の DiT（I2V 対応の S 形グラフ・i8 系列）の**移植の門**（実 GPU・ADR 0121 段 2 — 決定 2 / 4 / 5 / 8）。
  *
- * 参照席 `f16+dit8`（重み i8・計算 f32・`session` 空）で系列の容器（`outputs/series/wan2.2-ti2v-5b-i8-dyn/transformer/`）を
- * 回し、ホストの unpatchify（`src/wan/dit-tokens.ts` — 潜在 48 チャネルでも 2.1 の関数のまま）を通した潜在を、同じ i8 の
- * fake-quant 重みで採った上流の CPU 参照（`reference.<case>` の `output.f64`〈活性も f64〉と `output`〈f32〉— 時刻は決定 4 の
- * 形: T2V は 1 次元 timestep の経路・I2V は時刻の MLP を値ごとに M = 1 で回す参照ラッパ）と突き合わせる。前例は Wan2.1 の
+ * The reference preset `f16+dit8` (int8 weights, f32 compute, empty `session`) runs the int8 transformer of the
+ * distribution mirror `models/karume-wan2.2/` (through its manifest — ADR 0139 decision 1), and the latents after the
+ * host unpatchify (`src/wan/dit-tokens.ts` — 2.1's function as is, also for 48 latent channels) are compared with the
+ * upstream CPU reference taken with the same int8 fake-quantized weights (`output.f64` 〈activations also f64〉 and
+ * `output` 〈f32〉 of `reference.<case>`, a golden of the test-asset root — decision 2; the timestep in decision 4's form:
+ * T2V through the 1-D timestep path, I2V through the reference wrapper that runs the timestep MLP per value with
+ * M = 1).前例は Wan2.1 の
  * DiT の e2e（`e2e_wan_dit_test.ts`）で、指標・帯の導出・故障注入・1 submit の門・確保の記録の形はそれに揃える。
  *
  * golden の生成は `tools/export-recipes/wan/ti2v_export_dit.py`（S = 192 は `write`・実寸は `write-full` — 中身とケースの表は
@@ -121,7 +124,9 @@ import {
   floatsOf,
   isAccept,
   loadTi2vGolden,
+  openTi2vTransformer,
   readRopeBase,
+  TEST_ASSETS_FETCH,
   type Ti2vCase,
   type Ti2vForm,
   type Ti2vFullTokens,
@@ -131,11 +136,8 @@ import {
   WAN_TI2V_CASES,
   WAN_TI2V_COMPONENT,
   WAN_TI2V_FULL_CASES,
-  WAN_TI2V_GENERATE,
-  WAN_TI2V_GENERATE_FULL,
-  WAN_TI2V_MODEL_FILE,
-  WAN_TI2V_SERIES_DIR,
-  WAN_TI2V_SERIES_NAME,
+  WAN_TI2V_GOLDEN_DIR,
+  wanTi2vMirrorPresent,
 } from "../../models/tests/helpers/wan-ti2v-dit.ts";
 import {
   readWanTi2vDistributionManifestText,
@@ -146,13 +148,12 @@ import {
   WAN_TI2V_PRACTICAL_QUANT as PRACTICAL_QUANT,
   WAN_TI2V_REFERENCE_QUANT as REFERENCE_QUANT,
 } from "../../models/tests/helpers/wan-ti2v-pipeline.ts";
-import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
+import { TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 import {
   assertAttentionSeatsComplete,
   assertSeatsApplied,
 } from "../../runtime/tests/helpers/pipeline-census.ts";
 import { attentionDeviceFacts, attentionRoute } from "../../runtime/src/runtime/attention-route.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import {
   assertAdapterMatchesEnvironment,
   ENVIRONMENT,
@@ -388,24 +389,42 @@ const LONG_CONTEXT_CASE = "band-t2v-s00192-t0999";
 const LONG_TIMESTEP = 999;
 const LONG_SEED = 20262121;
 
-const MODEL_URL = new URL(WAN_TI2V_MODEL_FILE, WAN_TI2V_SERIES_DIR);
-const MODEL_PRESENT = modelPresent(MODEL_URL);
-const SMALL_AVAILABLE =
-  MODEL_PRESENT && WAN_TI2V_CASES.every(({ name }) => caseFiles(name).every(filePresent));
+const MIRROR_PRESENT = wanTi2vMirrorPresent();
+const goldensPresent = (names: readonly string[]): boolean =>
+  names.every((name) => caseFiles(name).every(filePresent));
+const SMALL_AVAILABLE = MIRROR_PRESENT && goldensPresent(WAN_TI2V_CASES.map(({ name }) => name));
 const FULL_AVAILABLE =
-  MODEL_PRESENT && WAN_TI2V_FULL_CASES.every(({ name }) => caseFiles(name).every(filePresent));
+  MIRROR_PRESENT && goldensPresent(WAN_TI2V_FULL_CASES.map(({ name }) => name));
+/** The cases without a golden of their own read only the context case's golden ({@link longInputs}). */
+const LONG_CONTEXT_AVAILABLE = MIRROR_PRESENT && goldensPresent([LONG_CONTEXT_CASE]);
+/**
+ * A complete fetch of the pinned test-asset dataset makes a missing golden a FAIL (the fetched-goldens test below): the
+ * dataset at the pin lacks a file the cases read. Without one, the cases SKIP (the assets gate is red then).
+ */
+const FETCHED = testAssetsFetched();
+const MISSING_GOLDENS = FETCHED
+  ? `the test-asset dataset at revision ${TEST_ASSETS.revision} lacks them`
+  : `fetch: ${TEST_ASSETS_FETCH}`;
 
-if (!SMALL_AVAILABLE) {
+if (!MIRROR_PRESENT) {
   console.warn(
-    `[karume] ${WAN_TI2V_SERIES_DIR.pathname} に Wan2.2 TI2V の DiT の容器と S = 192 の golden が揃っていないため、` +
-      `S = 192 の r 門を SKIP する（重み 4.7GB につきリポジトリ管理外）。生成: ${WAN_TI2V_GENERATE}`,
+    `[karume] the mirror ${WAN_TI2V_DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references ` +
+      `is absent), so the real-GPU checks of Wan2.2 TI2V's DiT are SKIPPED. Assemble it: ` +
+      `${WAN_TI2V_ASSEMBLE_COMMAND} (an all-SKIP is a FAIL of the gate distribution_gate_test.ts)`,
   );
-}
-if (!FULL_AVAILABLE) {
-  console.warn(
-    `[karume] ${WAN_TI2V_SERIES_DIR.pathname} に Wan2.2 TI2V の実寸の golden が揃っていないため、実寸の r 門と` +
-      `確保の記録を SKIP する。生成（CPU・数時間・途中から再開できる）: ${WAN_TI2V_GENERATE_FULL}`,
-  );
+} else {
+  if (!SMALL_AVAILABLE) {
+    console.warn(
+      `[karume] the S = 192 goldens under ${WAN_TI2V_GOLDEN_DIR.pathname} are not all present, so the S = 192 ` +
+        `checks are SKIPPED (${MISSING_GOLDENS})`,
+    );
+  }
+  if (!FULL_AVAILABLE) {
+    console.warn(
+      `[karume] the full-size goldens under ${WAN_TI2V_GOLDEN_DIR.pathname} are not all present, so the ` +
+        `full-size checks and records are SKIPPED (${MISSING_GOLDENS})`,
+    );
+  }
 }
 if (!LONG_CLIP) {
   console.warn(
@@ -413,19 +432,8 @@ if (!LONG_CLIP) {
       `（${LONG_CLIP_ENV}=1 で回す）`,
   );
 }
-if (MODEL_PRESENT && !PRACTICAL_DECLARED) {
-  console.warn(
-    `[karume] 配布形ミラー ${WAN_TI2V_DIST_ROOT.pathname} の karume.json が無いため、実用席 ${PRACTICAL_QUANT} の` +
-      ` 1 submit の GPU 時間の門を SKIP する。組み立て: ${WAN_TI2V_ASSEMBLE_COMMAND}` +
-      "（欠如は門番 distribution_gate_test.ts が FAIL にする）",
-  );
-}
-
-/**
- * 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本）。**使うときに引く** — 表に行が無いときにモジュール評価で落とすと、
- * 資産の無い機の SKIP まで巻き込む。
- */
-const graphName = (): string => seriesGraph(WAN_TI2V_SERIES_NAME, WAN_TI2V_COMPONENT);
+/** The container's graph name: the manifest's weights key (container-v1 §2.1). */
+const graphName = (): string => WAN_TI2V_COMPONENT;
 
 /** 実寸の S の順（確保の大きい S = 8,190 が先 — B570 の `destroy()` の解放遅れで後ろの大きい確保が OOM になった前例）。 */
 const FULL_TOKENS_ORDER: readonly Ti2vFullTokens[] = [8190, 7920];
@@ -1805,10 +1813,25 @@ test("Wan2.2 TI2V DiT ケースの表（GPU 不要）: 実寸は S ごとに決�
   }
 });
 
-test.skipIf(!MODEL_PRESENT)(
+test.skipIf(!FETCHED)(
+  "Wan2.2 TI2V DiT goldens (complete fetch only): the fetched test-asset dataset holds every golden the real-GPU " +
+    "cases read",
+  () => {
+    assertEquals(
+      [...WAN_TI2V_CASES, ...WAN_TI2V_FULL_CASES]
+        .flatMap(({ name }) => caseFiles(name))
+        .filter((url) => !filePresent(url))
+        .map((url) => url.pathname),
+      [],
+      `missing goldens (${MISSING_GOLDENS})`,
+    );
+  },
+);
+
+test.skipIf(!MIRROR_PRESENT)(
   `Wan2.2 TI2V DiT 故障注入の対象（GPU 不要）: ${SCALE_FAULT_WEIGHT} が容器の i8 の linear で companion scale を持つ`,
   async () => {
-    const opened = await openSeriesContainer(MODEL_URL);
+    const opened = await openTi2vTransformer();
     // 対象が無ければ scaledScaleContainer が名指しで落とす（GPU の門の前に、注入が空振りしないことを見る）。
     scaledScaleContainer(opened, graphName(), SCALE_FAULT_WEIGHT);
   },
@@ -1886,7 +1909,7 @@ const openForLongInputs = async (): Promise<{
     tokens: number,
   ) => Promise<Record<string, Tensor>>;
 }> => {
-  const opened = await openSeriesContainer(MODEL_URL);
+  const opened = await openTi2vTransformer();
   const prepared = prepareContainer(opened, graphName());
   const width = prepared.graph.inputs.find(({ name }) => name === "timesteps_proj")?.shape[1];
   if (typeof width !== "number") throw new Error("timesteps_proj の幅が静的な数でない");
@@ -1897,8 +1920,9 @@ const openForLongInputs = async (): Promise<{
   };
 };
 
-// 入力の文脈は S = 192 の golden から借りる（SMALL_AVAILABLE）・束は配布形の manifest から読む（PRACTICAL_DECLARED）。
-describe.skipIf(!LONG_CLIP || !SMALL_AVAILABLE || !PRACTICAL_DECLARED || !GPU_AVAILABLE)(
+// The input context is borrowed from one S = 192 golden (LONG_CONTEXT_AVAILABLE); the bundle is read from the
+// distribution manifest (PRACTICAL_DECLARED).
+describe.skipIf(!LONG_CLIP || !LONG_CONTEXT_AVAILABLE || !PRACTICAL_DECLARED || !GPU_AVAILABLE)(
   `Wan2.2 TI2V DiT 実用席 ${DECLARED_SEATS.join(" / ")} S = ${LONG_CLIP_TOKENS}（1280×704・121 フレーム・実 GPU・計測モード・` +
     `opt-in ${LONG_CLIP_ENV}=1）: 1 submit の GPU 時間 ≤ 1 s・非有限 0・束が届く`,
   () => {
@@ -1908,7 +1932,7 @@ describe.skipIf(!LONG_CLIP || !SMALL_AVAILABLE || !PRACTICAL_DECLARED || !GPU_AV
     let gpuContext: GpuContext | undefined;
     let deviceLost: string | undefined;
     beforeAll(async () => {
-      const opened = await openSeriesContainer(MODEL_URL);
+      const opened = await openTi2vTransformer();
       const prepared = prepareContainer(opened, graphName());
       preparedModel = prepared;
       const width = prepared.graph.inputs.find(({ name }) => name === "timesteps_proj")?.shape[1];
@@ -1955,8 +1979,9 @@ describe.skipIf(!LONG_CLIP || !SMALL_AVAILABLE || !PRACTICAL_DECLARED || !GPU_AV
   },
 );
 
-// 入力の文脈は S = 192 の golden から借りる（SMALL_AVAILABLE）。実用席は step の中で配布形の有無を見る。
-describe.skipIf(!LONG_CLIP || !SMALL_AVAILABLE || !GPU_AVAILABLE)(
+// The input context is borrowed from one S = 192 golden (LONG_CONTEXT_AVAILABLE). The practical seat checks the
+// distribution manifest inside its step.
+describe.skipIf(!LONG_CLIP || !LONG_CONTEXT_AVAILABLE || !GPU_AVAILABLE)(
   `Wan2.2 TI2V DiT 行ブロックの予算の u32 A/B（実 GPU・1280×704×121・S = 27,280・opt-in ${LONG_CLIP_ENV}=1・ADR 0124 の` +
     "層 1）: 予算 512 / 256 MiB の出力が予算なしと Uint32 で一致し、①QK の枚数が self / cross 別の期待どおり",
   () => {
@@ -1997,7 +2022,7 @@ describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE)(
     let gpuContext: GpuContext | undefined;
     let deviceLost: string | undefined;
     beforeAll(async () => {
-      const prepared = prepareContainer(await openSeriesContainer(MODEL_URL), graphName());
+      const prepared = prepareContainer(await openTi2vTransformer(), graphName());
       assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
       preparedModel = prepared;
       // 計測モード（timestamp-query）: submit ごとの GPU 時間は既存の回収に相乗りして測る（2.1 の実寸の照合と同じ）。
@@ -2059,7 +2084,7 @@ describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
     beforeAll(async () => {
       const graph = graphName();
       graphOf = graph;
-      const opened = await openSeriesContainer(MODEL_URL);
+      const opened = await openTi2vTransformer();
       openedContainer = opened;
       const prepared = prepareContainer(opened, graph);
       assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
@@ -2093,7 +2118,7 @@ describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE)(
     let gpuContext: GpuContext | undefined;
     let deviceLost: string | undefined;
     beforeAll(async () => {
-      preparedModel = prepareContainer(await openSeriesContainer(MODEL_URL), graphName());
+      preparedModel = prepareContainer(await openTi2vTransformer(), graphName());
       const gpu = await acquireTestGpu({
         onDeviceLost: (info) => {
           deviceLost = `${info.reason}: ${info.message}`;
@@ -2211,8 +2236,9 @@ describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
   },
 );
 
-// 入力の文脈は S = 192 の golden から借りる（SMALL_AVAILABLE）。実用席は step の中で配布形の有無を見る。
-describe.skipIf(!SMALL_AVAILABLE || !GPU_AVAILABLE)(
+// The input context is borrowed from one S = 192 golden (LONG_CONTEXT_AVAILABLE). The practical seat checks the
+// distribution manifest inside its step.
+describe.skipIf(!LONG_CONTEXT_AVAILABLE || !GPU_AVAILABLE)(
   `Wan2.2 TI2V DiT 行ブロックの予算の u32 A/B（実 GPU・1280×704×17・S = 4,400・ADR 0124 の層 1）: 予算 512 / 256 MiB の` +
     "出力が予算なしと Uint32 で一致し、①QK の枚数が self / cross 別の期待どおり",
   () => {
@@ -2250,7 +2276,7 @@ describe.skipIf(!SMALL_AVAILABLE || !GPU_AVAILABLE)(
     let preparedModel: PreparedModel | undefined;
     let gpuContext: GpuContext | undefined;
     beforeAll(async () => {
-      const prepared = prepareContainer(await openSeriesContainer(MODEL_URL), graphName());
+      const prepared = prepareContainer(await openTi2vTransformer(), graphName());
       assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
       preparedModel = prepared;
       const gpu = await acquireTestGpu();
@@ -2279,7 +2305,7 @@ describe.skipIf(!SMALL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
     beforeAll(async () => {
       const graph = graphName();
       graphOf = graph;
-      const opened = await openSeriesContainer(MODEL_URL);
+      const opened = await openTi2vTransformer();
       openedContainer = opened;
       const prepared = prepareContainer(opened, graph);
       assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");

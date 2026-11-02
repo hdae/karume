@@ -1,6 +1,8 @@
 /**
- * Wan2.2 TI2V-5B の DiT（i8 系列 `wan2.2-ti2v-5b-i8-dyn`）のテストが共有するもの（ADR 0121 段 1 / 段 2）:
- * 系列の置き場・golden のケースの表・golden の読み口・ホスト側の条件マスク。
+ * What the tests of Wan2.2 TI2V-5B's DiT share (ADR 0121 stages 1 / 2): the int8 transformer of the distribution
+ * mirror `models/karume-wan2.2/` (opened through its manifest — ADR 0139 decision 1), the goldens of the series
+ * `wan2.2-ti2v-5b-i8-dyn` (in the test-asset root — decision 2), the table of golden cases, the golden reader and the
+ * host-side condition mask.
  *
  * GPU 不要の突き合わせ（`e2e_wan_ti2v_dit_host_test.ts`）と実 GPU の r 門（`e2e_wan_ti2v_dit_test.ts`）が同じ
  * ケースの表を読む — 表を 2 か所で育てると、片方だけに足したケースが黙って片方の門を外れる。
@@ -20,25 +22,32 @@
 import { isNotFound, readFile, statSync } from "@karume/test-support/fs";
 import { assertEquals } from "@std/assert";
 import { type OpenedContainer, parseSafetensors, type SafetensorsFile } from "@karume/runtime";
+import { goldenDir } from "@karume/test-support/test-assets";
 import type { WanPatchGeometry, WanTokenGrid } from "../../src/wan/dit-tokens.ts";
 import { parseWanRopeBase, type WanRopeBase } from "../../src/wan/dit-rope.ts";
+import { mirrorPresent } from "./mirror.ts";
+import { openWanTi2vComponent, WAN_TI2V_DIST_ROOT } from "./wan-ti2v-pipeline.ts";
 
+/** The series the goldens were exported with (their folder under `goldens/` of the test-asset root). */
 export const WAN_TI2V_SERIES_NAME = "wan2.2-ti2v-5b-i8-dyn";
+/** The component: the manifest's weights key, which is also the container's graph name (container-v1 §2.1). */
 export const WAN_TI2V_COMPONENT = "transformer";
-export const WAN_TI2V_SERIES_DIR = new URL(
-  `../../../../outputs/series/${WAN_TI2V_SERIES_NAME}/${WAN_TI2V_COMPONENT}/`,
-  import.meta.url,
+/** The goldens `io.<case>` / `reference.<case>` (ADR 0139 decision 2 — the series' relative paths). */
+export const WAN_TI2V_GOLDEN_DIR = new URL(
+  `${WAN_TI2V_COMPONENT}/`,
+  goldenDir(WAN_TI2V_SERIES_NAME),
 );
-export const WAN_TI2V_MODEL_FILE = "model.krm";
+/** The command that fetches the goldens and corpus into the local test-asset root (ADR 0139 decision 3). */
+export const TEST_ASSETS_FETCH = "node tools/test-assets/fetch.ts";
+
+/** Whether the Wan2.2 mirror is present in a format this version reads (checked on each call). */
+export const wanTi2vMirrorPresent = (): boolean => mirrorPresent(WAN_TI2V_DIST_ROOT);
+
+/** Opens the mirror's int8 transformer with range reads (the transformer is int8 in every preset). */
+export const openTi2vTransformer = (): Promise<OpenedContainer> =>
+  openWanTi2vComponent(WAN_TI2V_COMPONENT, "i8");
 /** 資産の名前（`wan/export_dit.py` の `ROPE_BASE_ASSET` — 5B も同じ席）。 */
 const ROPE_BASE_ASSET = "rope_base";
-
-const TI2V_EXPORT =
-  "cd tools/export-recipes && uv run --group wan --inexact python -m wan.ti2v_export_dit";
-/** 容器と S = 192 の golden の生成（段 1）。 */
-export const WAN_TI2V_GENERATE = `${TI2V_EXPORT} write`;
-/** 実寸の golden を据えた系列へ足す（段 2 — CPU で数時間・途中から再開できる）。 */
-export const WAN_TI2V_GENERATE_FULL = `${TI2V_EXPORT} write-full`;
 
 /** Wan2.2 TI2V-5B の patch（`(1,2,2)`・潜在 48 チャネル — transformer の config）。 */
 export const WAN22_GEOMETRY: WanPatchGeometry = {
@@ -114,8 +123,8 @@ export const filePresent = (url: URL): boolean => {
 
 /** golden 2 本（`io.<case>` と `reference.<case>`）。 */
 export const caseFiles = (name: string): readonly URL[] => [
-  new URL(`io.${name}.safetensors`, WAN_TI2V_SERIES_DIR),
-  new URL(`reference.${name}.safetensors`, WAN_TI2V_SERIES_DIR),
+  new URL(`io.${name}.safetensors`, WAN_TI2V_GOLDEN_DIR),
+  new URL(`reference.${name}.safetensors`, WAN_TI2V_GOLDEN_DIR),
 ];
 
 export const readBuffer = async (url: URL): Promise<ArrayBuffer> => {

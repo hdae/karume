@@ -1,6 +1,9 @@
 /**
- * Wan2.2 TI2V-5B の VAE decoder の chunk グラフ（f16 系列 `wan2.2-ti2v-5b-f16-dyn`）のテストが共有するもの
- * （ADR 0121 段 4）: 系列の置き場・フィクスチャのケースの表・取り決めの期待値（cache の表を含む）・資産の在否。
+ * What the tests of Wan2.2 TI2V-5B's VAE decoder chunk graphs share (ADR 0121 stage 4): the goldens of the f16 series
+ * `wan2.2-ti2v-5b-f16-dyn` (fixtures, in the test-asset root — ADR 0139 decision 2), the table of fixture cases, the
+ * expected contract values (including the cache table) and the fixtures' presence. The containers are the mirror's
+ * (`models/karume-wan2.2/`, opened through the manifest with `openWanTi2vComponent` of `wan-ti2v-pipeline.ts` —
+ * decision 1).
  *
  * GPU 不要の突き合わせ（`e2e_wan_ti2v_vae_chunks_host_test.ts`）と実 GPU の chunk 列の照合
  * （`e2e_wan_ti2v_vae_tiles_test.ts`）が同じ表を読む — 表を 2 か所で育てると、片方だけに足したケースが黙って
@@ -16,23 +19,16 @@
  * 明示 SKIP・一部だけなら FAIL）。書き手が別の台本（`vae_tiling.py`）で、chunk の組とは別の時点に書かれるため。
  */
 
-import { modelPresent } from "../../../runtime/tests/helpers/container-files.ts";
+import { goldenDir } from "@karume/test-support/test-assets";
 import { filePresent } from "./wan-ti2v-dit.ts";
 
-export const WAN_TI2V_VAE_SERIES = "wan2.2-ti2v-5b-f16-dyn";
-export const WAN_TI2V_VAE_ROOT = new URL(
-  `../../../../outputs/series/${WAN_TI2V_VAE_SERIES}/`,
-  import.meta.url,
-);
-/** 部品名（= 部品ディレクトリ名。グラフ名は系列のグラフ名の表 `series-graphs.ts` から引く）。 */
+/** The series the fixtures were exported with (their folder under `goldens/` of the test-asset root). */
+const WAN_TI2V_VAE_SERIES = "wan2.2-ti2v-5b-f16-dyn";
+/** The fixtures `vae_chunks.*` / `vae_tiles.*` / `vae_encoder.*` (the series' relative paths — decision 2). */
+export const WAN_TI2V_VAE_GOLDEN_DIR = goldenDir(WAN_TI2V_VAE_SERIES);
+/** Component names: the manifest's weights keys, which are also the containers' graph names (container-v1 §2.1). */
 export const WAN_TI2V_VAE_FIRST = "vae_decoder_first";
 export const WAN_TI2V_VAE_NEXT = "vae_decoder_next";
-export const WAN_TI2V_VAE_MODEL_FILE = "model.krm";
-
-/** SKIP 時にそのまま貼れる生成コマンド（容器 2 本とフィクスチャ 3 本を一組で据える）。 */
-export const WAN_TI2V_VAE_GENERATE =
-  "cd tools/export-recipes && uv run --group wan --inexact " +
-  "python -m wan.export_vae --model ti2v-5b";
 
 /** フィクスチャ 1 本（帯の決定用 1 本 + 受入れ 2 本 — 2.1 と同じ組み立て）。 */
 export type Ti2vVaeCase = {
@@ -106,62 +102,22 @@ export const WAN_TI2V_VAE_CACHE_BYTES = 467_763_200;
  */
 export const WAN_TI2V_VAE_FIRST_CACHE_BYTES = 457_277_440;
 
-export const ti2vVaeModelUrl = (component: string): URL =>
-  new URL(`${component}/${WAN_TI2V_VAE_MODEL_FILE}`, WAN_TI2V_VAE_ROOT);
+export const ti2vVaeFixtureUrl = (name: Ti2vVaeCase["name"]): URL =>
+  new URL(`vae_chunks.${name}.safetensors`, WAN_TI2V_VAE_GOLDEN_DIR);
 
-// ---- The int8 decoder (ADR 0133 decision 7 — the same two chunk graphs with int8 weights) ----------
-
-/** The int8 series (shared with the DiT's int8 container — `wan2.2-ti2v-5b-i8-dyn`). */
-export const WAN_TI2V_VAE_I8_SERIES = "wan2.2-ti2v-5b-i8-dyn";
-export const WAN_TI2V_VAE_I8_ROOT = new URL(
-  `../../../../outputs/series/${WAN_TI2V_VAE_I8_SERIES}/`,
-  import.meta.url,
-);
-/** The command that writes the int8 decoder (no fixtures — the f16 series' fixtures are the reference). */
-export const WAN_TI2V_VAE_I8_GENERATE =
-  "cd tools/export-recipes && uv run --group wan --inexact " +
-  "python -m wan.export_vae --model ti2v-5b --dtype i8";
-
-export const ti2vVaeI8ModelUrl = (component: string): URL =>
-  new URL(`${component}/${WAN_TI2V_VAE_MODEL_FILE}`, WAN_TI2V_VAE_I8_ROOT);
-
-/** Presence of the int8 decoder's two containers (checked on each call, never at module evaluation). */
-export const ti2vVaeI8Assets = (): readonly {
+/** The presence of the chunk fixtures `names` (all three by default). Checked on each call, never at module evaluation. */
+export const ti2vVaeChunkFixtures = (
+  names: readonly Ti2vVaeCase["name"][] = WAN_TI2V_VAE_CASES.map(({ name }) => name),
+): readonly {
   readonly path: string;
   readonly present: boolean;
 }[] =>
-  [WAN_TI2V_VAE_FIRST, WAN_TI2V_VAE_NEXT].map((component) => {
-    const url = ti2vVaeI8ModelUrl(component);
-    return { path: url.pathname, present: modelPresent(url) };
-  });
-
-export const ti2vVaeFixtureUrl = (name: Ti2vVaeCase["name"]): URL =>
-  new URL(`vae_chunks.${name}.safetensors`, WAN_TI2V_VAE_ROOT);
-
-/**
- * 一組の資産（容器 2 本 + フィクスチャ 3 本 — 書き手は一組で据える）の在否。呼ぶたびに見る（モジュールの評価では
- * ファイルに触らない）。
- */
-export const ti2vVaeAssets = (): readonly {
-  readonly path: string;
-  readonly present: boolean;
-}[] => [
-  ...[WAN_TI2V_VAE_FIRST, WAN_TI2V_VAE_NEXT].map((component) => {
-    const url = ti2vVaeModelUrl(component);
-    return { path: url.pathname, present: modelPresent(url) };
-  }),
-  ...WAN_TI2V_VAE_CASES.map(({ name }) => {
+  names.map((name) => {
     const url = ti2vVaeFixtureUrl(name);
     return { path: url.pathname, present: filePresent(url) };
-  }),
-];
+  });
 
 // ---- タイル参照（段 5 — `vae_tiles.<case>.safetensors`）------------------------------------------------
-
-/** SKIP 時にそのまま貼れるタイル参照の生成コマンド（chunk グラフの組とは別に書く）。 */
-export const WAN_TI2V_VAE_TILES_GENERATE =
-  "cd tools/export-recipes && uv run --group wan --inexact " +
-  "python -m wan.vae_tiling --model ti2v-5b";
 
 /** タイル参照 1 本（帯の決定用 1 本 + 受入れ 2 本 — 2.1 のタイル参照と同じ組み立て）。 */
 export type Ti2vVaeTileCase = {
@@ -190,7 +146,7 @@ export const WAN_TI2V_VAE_TILE_CASES: readonly Ti2vVaeTileCase[] = [
 ];
 
 export const ti2vVaeTileFixtureUrl = (name: Ti2vVaeTileCase["name"]): URL =>
-  new URL(`vae_tiles.${name}.safetensors`, WAN_TI2V_VAE_ROOT);
+  new URL(`vae_tiles.${name}.safetensors`, WAN_TI2V_VAE_GOLDEN_DIR);
 
 /** タイル参照 3 本の在否（chunk グラフの組とは別の組）。呼ぶたびに見る（モジュールの評価ではファイルに触らない）。 */
 export const ti2vVaeTileAssets = (): readonly {
@@ -211,31 +167,6 @@ export const WAN_TI2V_VAE_NEXT_32 = "vae_decoder_next_32";
 export const WAN_TI2V_VAE_TILE_32 = 32;
 export const WAN_TI2V_VAE_SAMPLE_TILE_32 = 256;
 
-/** The commands that write the 32-latent pair (f16 series and i8 series — each after its lender). */
-export const WAN_TI2V_VAE_TILE32_GENERATE =
-  "cd tools/export-recipes && uv run --group wan --inexact " +
-  "python -m wan.export_vae --model ti2v-5b --tile 32 --shared";
-export const WAN_TI2V_VAE_I8_TILE32_GENERATE =
-  "cd tools/export-recipes && uv run --group wan --inexact " +
-  "python -m wan.export_vae --model ti2v-5b --dtype i8 --tile 32 --shared";
-
-/**
- * Presence of the 32-latent pair's two containers in a series root (`ROOT` = the f16 series,
- * `I8_ROOT` = the int8 series). Checked on each call, never at module evaluation.
- */
-export const ti2vVaeTile32Assets = (
-  root: URL,
-): readonly { readonly path: string; readonly present: boolean }[] =>
-  [WAN_TI2V_VAE_FIRST_32, WAN_TI2V_VAE_NEXT_32].map((component) => {
-    const url = new URL(`${component}/${WAN_TI2V_VAE_MODEL_FILE}`, root);
-    return { path: url.pathname, present: modelPresent(url) };
-  });
-
-/** The command that writes the tile references at tile 32 (`vae_tiles.<case>.t32.safetensors`). */
-export const WAN_TI2V_VAE_TILES_T32_GENERATE =
-  "cd tools/export-recipes && uv run --group wan --inexact " +
-  "python -m wan.vae_tiling --model ti2v-5b --tile 32";
-
 /**
  * The tile references at tile 32 (ADR 0134 decision 6 — `vae_tiling.py --tile 32`). Only `wide`
  * (1280×704×5, latent 44×80 → 2×3 tiles) fits a 32-latent tile: `band` and `accept` are 30 latents
@@ -246,7 +177,7 @@ export const WAN_TI2V_VAE_TILE32_CASES: readonly Ti2vVaeTileCase[] = WAN_TI2V_VA
 );
 
 export const ti2vVaeTile32FixtureUrl = (name: Ti2vVaeTileCase["name"]): URL =>
-  new URL(`vae_tiles.${name}.t32.safetensors`, WAN_TI2V_VAE_ROOT);
+  new URL(`vae_tiles.${name}.t32.safetensors`, WAN_TI2V_VAE_GOLDEN_DIR);
 
 /**
  * Presence of the tile-32 references (none → explicit SKIP, some → FAIL — the convention of

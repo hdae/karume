@@ -1,8 +1,9 @@
 """`wan/text_embeds.py` の約束事 — 固定プロンプト・正規化・資産の形式と再現性。
 
-umT5 を回すテストは置かない（bf16 で約 11 GiB・1 本 2.5 分）。生成済みの資産は、系列の席に
-あれば形・有効長・正規化文字列を見る（無ければ SKIP）。生成は
-`uv run --group wan --inexact python -m wan.text_embeds`。
+No test runs umT5 (bf16, about 11 GiB, 2.5 minutes a prompt). The generated asset is checked
+(shapes, valid lengths, normalized strings) as the Wan2.1 distribution ships it — read from the
+mirror `models/karume-wan2.1/` through its manifest (ADR 0139 decision 1; SKIP without it).
+Generation: `uv run --group wan --inexact python -m wan.text_embeds`.
 """
 
 from __future__ import annotations
@@ -16,12 +17,11 @@ from pathlib import Path
 import pytest
 import torch
 
-from _shared.paths import SERIES_ROOT
 from wan import prompts, text_embeds
+from wan.distribution import WAN21, WAN_TEXT_EMBEDS_ROLE
 from wan.pipeline_ref import MAX_SEQUENCE_LENGTH, TEXT_DIM
 from wan.sources import DEFAULT_MODEL, SOURCES
 
-ASSET = SERIES_ROOT / text_embeds.SERIES_NAME / text_embeds.ASSET_NAME
 RECIPES_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -172,9 +172,13 @@ class TestAssetFormat:
 
 @pytest.fixture(scope="module")
 def generated_asset():
-    if not ASSET.is_file():
-        pytest.skip(f"{ASSET} が無い — `python -m wan.text_embeds` で作る")
-    return text_embeds.read_asset(ASSET)
+    # Imported here, not at module scope: `test_two_processes_write_the_same_bytes` imports this
+    # module in a bare subprocess, which lacks the conftest's `sys.path` entry for `real_assets`.
+    from real_assets import mirror_asset
+
+    return text_embeds.read_asset(
+        mirror_asset(WAN21.repo_name, WAN21.default_model, WAN_TEXT_EMBEDS_ROLE)
+    )
 
 
 class TestGeneratedAsset:

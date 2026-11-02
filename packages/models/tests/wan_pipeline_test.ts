@@ -45,7 +45,8 @@ import {
   tensorlessContainer,
   writeContainer,
 } from "./helpers/container-fixture.ts";
-import { readFileIfPresent, readTextIfPresent } from "./helpers/read-if-present.ts";
+import { mirrorPresent, mirrorRoot, readMirrorAsset } from "./helpers/mirror.ts";
+import { readTextIfPresent } from "./helpers/read-if-present.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import { WAN_UNIPC_CONFIG, wanUniPcSchedule } from "../src/wan/scheduler.ts";
 import { WanVaeChunkError, wanVaeChunkLayout } from "../src/wan/vae-chunks.ts";
@@ -1655,25 +1656,27 @@ describe("既定の negative（公式の sample_neg_prompt）", () => {
   });
 });
 
-/** recipe `wan/text_embeds.py` が書く埋め込み資産（ローカル資産 — 無い機では下の 1 本だけ SKIP）。 */
-const TEXT_EMBEDS_SERIES = new URL(
-  "../../../outputs/series/wan2.1-t2v-1.3b-text-embeds/text_embeds.safetensors",
-  import.meta.url,
-);
-const textEmbedsSeries = await readFileIfPresent(TEXT_EMBEDS_SERIES);
-if (textEmbedsSeries === undefined) {
+/**
+ * The text-embedding asset the Wan2.1 distribution ships (ADR 0139 decision 1 — the local mirror
+ * built by `dist.py`; a machine without it SKIPs only the case below).
+ */
+const WAN_MIRROR = mirrorRoot("karume-wan2.1");
+const textEmbedsMirror = mirrorPresent(WAN_MIRROR)
+  ? await readMirrorAsset(WAN_MIRROR, "text_embeds")
+  : undefined;
+if (textEmbedsMirror === undefined) {
   console.warn(
-    `[karume] ${TEXT_EMBEDS_SERIES.pathname} が無いため、既定の negative と資産の行の突き合わせを SKIP する` +
-      "（recipe の原文との突き合わせは fixture で回る）。生成: cd tools/export-recipes && " +
-      "uv run --group wan --inexact python -m wan.text_embeds",
+    `[karume] the mirror ${WAN_MIRROR.pathname} is absent (or not karume/5, or a sibling it references is ` +
+      "absent), so the check of the default negative against the asset's row is SKIPPED (the check against the " +
+      `recipe's text runs on the fixture). Assemble the mirror: ${WAN_ASSEMBLE_COMMAND}`,
   );
 }
 
-test.skipIf(textEmbedsSeries === undefined)(
+test.skipIf(textEmbedsMirror === undefined)(
   "既定の negative: テキスト埋め込み資産の negative の行の原文とビット同一（2 つの経路の既定が同じ文字列）",
   () => {
-    if (textEmbedsSeries === undefined) throw new Error("ignore の条件と食い違う");
-    const embeds = parseWanTextEmbeds(textEmbedsSeries.buffer);
+    if (textEmbedsMirror === undefined) throw new Error("ignore の条件と食い違う");
+    const embeds = parseWanTextEmbeds(textEmbedsMirror.buffer);
     assertEquals(
       embeds.entries.filter((entry) => entry.role === "negative").map((entry) => entry.prompt),
       [WAN_DEFAULT_NEGATIVE_PROMPT],

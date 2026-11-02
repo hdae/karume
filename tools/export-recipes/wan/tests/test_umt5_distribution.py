@@ -3,8 +3,9 @@
 
 入力は実物と同じ綴り・同じ種類ごとの格納の合成容器（`umt5_fixture`）と、書き手と同じ最上位の欄を持つ
 合成のトークナイザ資産。門に落とされることを見るケースも同じ器で作り、**宣言だけを実物とずらす**。
-実物の系列（`outputs/series/umt5-xxl-i8-dyn` と `umt5-xxl-tokenizer`）がある機では、実物の束縛表の
-本数（i8 169 本・f32 73 本）まで固定し、実物の資産で計画が組めることを見る（無ければ SKIP）。
+Where the `karume-umt5-xxl` mirror is present, the real binding table is pinned down to its counts
+(169 i8, 73 f32) and the plan is built from the real container and tokenizer asset as the mirror
+ships them (SKIP without it).
 """
 
 from __future__ import annotations
@@ -18,11 +19,11 @@ from typing import Any
 import ir_fixtures
 import pytest
 from container_series import part_paths, write_component
+from real_assets import mirror_asset, mirror_container
 from upstream_fixture import OTHER_REVISION, stamp_fixture_provenance
 
 import dist
 from _shared.licenses import APACHE_LICENSE_2_0_PATH
-from _shared.paths import SERIES_ROOT
 from karume.container import Provenance
 from karume.dist import (
     MANIFEST_FILENAME,
@@ -52,6 +53,7 @@ from wan.umt5_distribution import (
     UMT5_TOKENIZER_FIELDS,
     UMT5_TOKENIZER_ROLE,
     UMT5_TOKENS,
+    UMT5_WEIGHTS,
     render_umt5_model_card,
     storage_kind,
     umt5_bindings,
@@ -568,29 +570,32 @@ class TestStorageKind:
         assert storage_kind(key) == kind
 
 
-_REAL = umt5_container(SERIES_ROOT)
-_REAL_TOKENIZER = umt5_tokenizer_asset(SERIES_ROOT)
+def _shipped_container() -> Path:
+    """The i8 encoder container the `karume-umt5-xxl` mirror ships (its only storage label)."""
+    (label,) = UMT5_WEIGHTS[UMT5_ROLE]
+    return mirror_container(UMT5_REPO_NAME, UMT5_DEFAULT_MODEL, UMT5_ROLE, label)
 
 
-@pytest.mark.skipif(not _REAL.parent.is_dir(), reason=f"実物の系列が無い: {_REAL.parent}")
 class TestTheRealSeries:
-    """実物の系列（`wan.umt5_export` が書いた i8 の容器・`wan.umt5_xxl_tokenizer` が書いた
-    トークナイザ資産）で計画が組め、束縛表が決定 5 の形をしている。
+    """The real container and tokenizer asset (written by `wan.umt5_export` and
+    `wan.umt5_xxl_tokenizer`, read as the `karume-umt5-xxl` mirror ships them — byte-identical,
+    ADR 0139 decision 1) pass every gate of the plan, and the binding table has decision 5's shape.
 
-    読むのは容器の 2 文書と束縛表と資産の JSON だけ（重みの payload は読まない）。
+    Only the container's two documents, its binding table and the asset JSON are read (no weight
+    payload). SKIP without the mirror.
     """
 
     def test_the_plan_passes_every_gate(self) -> None:
-        if not _REAL_TOKENIZER.is_file():
-            pytest.skip(f"実物のトークナイザ資産が無い: {_REAL_TOKENIZER}")
-        plan = umt5_plan(_REAL, _REAL_TOKENIZER)
+        container = _shipped_container()
+        tokenizer = mirror_asset(UMT5_REPO_NAME, UMT5_DEFAULT_MODEL, UMT5_TOKENIZER_ROLE)
+        plan = umt5_plan(container, tokenizer)
         assert plan.pipeline == UMT5_PIPELINE
         assert set(plan.artifacts) == {UMT5_ROLE, UMT5_TOKENIZER_ROLE}
 
     def test_the_binding_table_is_169_int8_and_73_float32_weights(self) -> None:
         """linear 168 + 語彙埋め込み 1 が i8、相対位置の表 24 + RMSNorm 49 が f32（24 層 —
         ADR 0119 追記 10b）。持ち上げ定数（`const.*`）は重みではないので数えない。"""
-        bindings = umt5_bindings(_REAL)
+        bindings = umt5_bindings(_shipped_container())
         assert bindings == {
             "constant": {"f32": 2},
             "embed_tokens": {"i8": 1},

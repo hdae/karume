@@ -1,11 +1,13 @@
 /**
  * Wan2.2 TI2V-5B の動画 VAE の**タイル decode**の参照照合（実 GPU — ADR 0121 段 5 の検収）。
  *
- * 系列 `outputs/series/wan2.2-ti2v-5b-f16-dyn/` の chunk グラフ 2 本（段 4 — 潜在タイル 16・出口 12 ch の patchify
- * 空間）を、本番の計画（`planWanGenerationTiles(…, WAN22_TI2V_GENERATION)` — 重なりは潜在 4）で全画面に敷き詰めて
- * 回す（タイルが外・chunk が内・1 タイル = 1 batch — 2.1 と同じ `decodeWanVaeTiled`）。比べる相手は recipe のタイル
- * 参照（`tools/export-recipes/wan/vae_tiling.py --model ti2v-5b` — 同じ幾何・上流の blend の逐語を patchify 空間で・
- * CPU f32・重みは f16 へ丸めた値）の **unpatchify とクランプの前**の出力。骨格は 2.1 の `e2e_wan_vae_tiles_test.ts`、
+ * The two f16 chunk graphs of the distribution mirror `models/karume-wan2.2/` (stage 4 — latent tile 16, 12 output
+ * channels in patchify space; opened through the manifest — ADR 0139 decision 1; the fixtures are in the test-asset
+ * root — decision 2) are tiled over the whole frame with the production plan (`planWanGenerationTiles(…,
+ * WAN22_TI2V_GENERATION)` — overlap of 4 latents) and run (tiles outside, chunks inside, one tile = one batch — the same
+ * `decodeWanVaeTiled` as 2.1). The comparison target is the recipe's tile reference (`tools/export-recipes/wan/
+ * vae_tiling.py --model ti2v-5b` — the same geometry, upstream's blend verbatim in patchify space, CPU f32, weights
+ * rounded to f16) **before unpatchify and clamp**.骨格は 2.1 の `e2e_wan_vae_tiles_test.ts`、
  * 帯が未導出の間の扱いは段 4 の chunk 列の照合（section "Chunk sequence" below）と同じ。
  *
  * ## 門
@@ -53,12 +55,12 @@
  *
  * Wan2.2 TI2V-5B の動画 VAE の **chunk 列の参照照合**（実 GPU — ADR 0121 段 4 の検収）。
  *
- * 系列 `outputs/series/wan2.2-ti2v-5b-f16-dyn/` の chunk グラフ 2 本（`vae_decoder_first` / `vae_decoder_next` —
- * f16 席・潜在タイル 16・出口 12 ch の patchify 空間）を、製品の経路（`decodeWanVaeTile` — 2.1 と同じ関数・
- * 1 タイル = 1 batch・フレームだけを読み戻す）で first → next × (F−1) と回し、上流の非タイル `_decode` の chunk
- * ループ（diffusers・CPU f32・重みは f16 へ丸めた値）の **unpatchify とクランプの前**の出力と比べる。参照と
- * フィクスチャは `tools/export-recipes/wan/export_vae.py --model ti2v-5b` が書く（生成コマンドと表は
- * `helpers/wan-ti2v-vae.ts`）。骨格は 2.1 の `e2e_wan_vae_tiles_test.ts` と同じで、故障注入のループは共有の
+ * The mirror's two f16 chunk graphs (`vae_decoder_first` / `vae_decoder_next` — latent tile 16, 12 output channels in
+ * patchify space) run first → next × (F−1) through the production path (`decodeWanVaeTile` — the same function as
+ * 2.1, one tile = one batch, only the frames read back), and the output is compared with upstream's untiled `_decode`
+ * chunk loop (diffusers, CPU f32, weights rounded to f16) **before unpatchify and clamp**. The references and fixtures
+ * are written by `tools/export-recipes/wan/export_vae.py --model ti2v-5b` and read from the test-asset root (the table
+ * is in `helpers/wan-ti2v-vae.ts`).骨格は 2.1 の `e2e_wan_vae_tiles_test.ts` と同じで、故障注入のループは共有の
  * `helpers/wan-vae-chunk-loop.ts`。
  *
  * ### 帯の決め方
@@ -151,11 +153,18 @@ import {
   type Fixture,
   readFixture,
 } from "../../models/tests/helpers/wan-vae-chunk-loop.ts";
+import { mirrorPresent } from "../../models/tests/helpers/mirror.ts";
+import { TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
+import { TEST_ASSETS_FETCH as FETCH } from "../../models/tests/helpers/wan-ti2v-dit.ts";
 import {
-  ti2vVaeAssets,
+  openWanTi2vComponent,
+  WAN_TI2V_ASSEMBLE_COMMAND as ASSEMBLE,
+  WAN_TI2V_DIST_ROOT as DIST_ROOT,
+} from "../../models/tests/helpers/wan-ti2v-pipeline.ts";
+import {
   type Ti2vVaeCase,
+  ti2vVaeChunkFixtures,
   ti2vVaeFixtureUrl,
-  ti2vVaeModelUrl,
   ti2vVaeTileAssets,
   type Ti2vVaeTileCase,
   ti2vVaeTileFixtureUrl,
@@ -163,21 +172,16 @@ import {
   WAN_TI2V_VAE_CACHE_TABLE as CACHE_TABLE,
   WAN_TI2V_VAE_CASES as CHUNK_CASES,
   WAN_TI2V_VAE_FIRST as FIRST,
-  WAN_TI2V_VAE_GENERATE as GENERATE_CHUNKS,
+  WAN_TI2V_VAE_GOLDEN_DIR as GOLDEN_DIR,
   WAN_TI2V_VAE_LATENT_CHANNELS as LATENT_CHANNELS,
   WAN_TI2V_VAE_NEXT as NEXT,
-  WAN_TI2V_VAE_ROOT as ROOT,
   WAN_TI2V_VAE_SAMPLE_CHANNELS as SAMPLE_CHANNELS,
   WAN_TI2V_VAE_SAMPLE_TILE as SAMPLE_TILE,
-  WAN_TI2V_VAE_SERIES as SERIES,
   WAN_TI2V_VAE_TILE as TILE,
   WAN_TI2V_VAE_TILE_CASES as CASES,
-  WAN_TI2V_VAE_TILES_GENERATE as GENERATE_TILES,
   WAN_TI2V_VAE_TIME_CONV_CACHES as TIME_CONV_CACHES,
 } from "../../models/tests/helpers/wan-ti2v-vae.ts";
 import { allclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
-import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import {
   openResults,
@@ -214,12 +218,33 @@ const DEGENERATE_CASE = "band";
 const TILE_ASSETS = ti2vVaeTileAssets();
 const ANY_TILES = TILE_ASSETS.some(({ present }) => present);
 const ALL_TILES = TILE_ASSETS.every(({ present }) => present);
-const CHUNK_ASSETS = ti2vVaeAssets();
-const CHUNK_ASSETS_PRESENT = CHUNK_ASSETS.every(({ present }) => present);
+const MIRROR_PRESENT = mirrorPresent(DIST_ROOT);
+/**
+ * A complete fetch of the pinned test-asset dataset makes a missing fixture a FAIL (the completeness tests below): the
+ * dataset at the pin lacks a file the cases read. Without one, the cases SKIP (the assets gate is red then).
+ */
+const FETCHED = testAssetsFetched();
+const MISSING_FIXTURES = FETCHED
+  ? `the test-asset dataset at revision ${TEST_ASSETS.revision} lacks them`
+  : `fetch: ${FETCH}`;
+const CHUNK_FIXTURES = ti2vVaeChunkFixtures();
+/** The chunk-sequence checks read the mirror's two chunk graphs and the three chunk fixtures. */
+const CHUNK_ASSETS_PRESENT = MIRROR_PRESENT && CHUNK_FIXTURES.every(({ present }) => present);
+/** The tile checks read the tile references, the mirror and the degenerate gate's chunk fixture only. */
+const TILE_RUN_PRESENT =
+  ALL_TILES &&
+  MIRROR_PRESENT &&
+  ti2vVaeChunkFixtures([DEGENERATE_CASE]).every(({ present }) => present);
+if (!MIRROR_PRESENT) {
+  console.warn(
+    `[karume] the mirror ${DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references is ` +
+      `absent), so the real-GPU checks of Wan2.2 TI2V's VAE decoder are SKIPPED. Assemble it: ${ASSEMBLE}`,
+  );
+}
 if (!ANY_TILES) {
   console.warn(
-    `[karume] ${ROOT.pathname} に Wan2.2 TI2V の VAE のタイル参照（vae_tiles.*）が無いため、タイル decode の照合を ` +
-      `SKIP する。生成: ${GENERATE_TILES}`,
+    `[karume] no tile reference (vae_tiles.*) under ${GOLDEN_DIR.pathname}, so the tile-decode checks are ` +
+      `SKIPPED (${MISSING_FIXTURES})`,
   );
 }
 
@@ -229,27 +254,30 @@ const FIXTURE_WEIGHTS = "f16-rounded";
 const FIXTURE_REFERENCE =
   "snapped-tile decode with upstream blend_v / blend_h in patchify space before unpatchify and clamp (CPU f32)";
 
-// 1 本も無い環境は「生成していない」なので SKIP。1 本でもあるなら欠けは FAIL（chunk グラフの組とは別の組）。
-test.skipIf(!ANY_TILES)(
+// 1 本も無い環境は「生成していない」なので SKIP。1 本でもあるなら欠けは FAIL（chunk グラフの組とは別の組）— and so is
+// any missing one in a complete fetch of the pinned dataset.
+test.skipIf(!ANY_TILES && !FETCHED)(
   "Wan2.2 TI2V VAE タイル参照: vae_tiles の 3 本（band / accept / wide）が揃っている",
   () => {
     assertEquals(
       TILE_ASSETS.filter(({ present }) => !present).map(({ path }) => path),
       [],
-      `タイル参照の欠け（生成: ${GENERATE_TILES}）`,
+      `missing tile references (${MISSING_FIXTURES})`,
     );
   },
 );
 
-// タイル参照の書き手は chunk の組に依らない（HF の snapshot から書く）ので、この組み合わせは起こりうる。SKIP に
-// すると GPU の照合が一度も走らないままレーンが緑で終わる。
-test.skipIf(!ANY_TILES)(
-  "Wan2.2 TI2V VAE タイル参照: タイル参照があるなら照合の前提の chunk グラフの組（容器 2 本 + vae_chunks.*）も揃っている",
+// The tile references and the chunk fixtures are written by different recipes, so a root may hold one group without
+// the other. A SKIP would end the lane green without the GPU check ever running. (The mirror's completeness is the
+// distribution gate's.)
+test.skipIf(!ANY_TILES && !FETCHED)(
+  "Wan2.2 TI2V VAE tile references: with tile references present, the chunk fixtures the check needs (vae_chunks.*) " +
+    "are present too",
   () => {
     assertEquals(
-      CHUNK_ASSETS.filter(({ present }) => !present).map(({ path }) => path),
+      CHUNK_FIXTURES.filter(({ present }) => !present).map(({ path }) => path),
       [],
-      `タイル参照はあるが chunk グラフの組が欠けている（生成: ${GENERATE_CHUNKS}）`,
+      `chunk fixtures missing (${MISSING_FIXTURES})`,
     );
   },
 );
@@ -456,24 +484,24 @@ const DROPPED_CACHE = "cache_31";
 /** 記録する融合 attention の 3 段（ADR 0023 — ①QK・②行統計・③PV のパイプラインキーの接頭辞）。 */
 const ATTENTION_KERNELS = ["attention_qk", "attention_stats", "attention_pv"] as const;
 
-if (!CHUNK_ASSETS_PRESENT) {
+if (MIRROR_PRESENT && !CHUNK_ASSETS_PRESENT) {
   console.warn(
-    `[karume] ${ROOT.pathname} に Wan2.2 TI2V の VAE の chunk グラフとフィクスチャが揃っていないため、` +
-      `chunk 列の照合を SKIP する（欠けの判定はホストテスト）。生成: ${GENERATE_CHUNKS}`,
+    `[karume] the chunk fixtures under ${GOLDEN_DIR.pathname} are not all present, so the chunk-sequence ` +
+      `checks are SKIPPED (the host test reports the gap; ${MISSING_FIXTURES})`,
   );
 }
 
 const chunkResults = openResults("wan-ti2v-vae-chunks");
 
-/** 容器 2 本を開いて prepare する（グラフ名は系列のグラフ名の表から）。 */
+/** Opens and prepares the mirror's two f16 chunk graphs (the graph names are the component keys). */
 const prepareModels = async () => {
   const [firstOpened, nextOpened] = await Promise.all([
-    openSeriesContainer(ti2vVaeModelUrl(FIRST)),
-    openSeriesContainer(ti2vVaeModelUrl(NEXT)),
+    openWanTi2vComponent(FIRST, "f16"),
+    openWanTi2vComponent(NEXT, "f16"),
   ]);
   return {
-    first: prepareContainer(firstOpened, seriesGraph(SERIES, FIRST)),
-    next: prepareContainer(nextOpened, seriesGraph(SERIES, NEXT)),
+    first: prepareContainer(firstOpened, FIRST),
+    next: prepareContainer(nextOpened, NEXT),
   };
 };
 
@@ -930,7 +958,7 @@ const decodeAcceptCase = async (run: TileRun) => {
 // Default run: the TS/Python plan equality, the degenerate Uint32 gate, and band / accept / wide
 // decoded from NaN-poisoned frames with 0 non-finite and no device lost. It owns the per-case
 // results.json ids; the band comparisons with the upstream tiled reference are the opt-in suite below.
-describe.skipIf(!ALL_TILES || !CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE)(
+describe.skipIf(!TILE_RUN_PRESENT || !GPU_AVAILABLE)(
   "Wan2.2 TI2V VAE タイル decode: 計画が Python と一致・縮退門（Uint32）・band / accept / wide を毒値のフレームから" +
     "回して非有限 0・device lost なし（実 GPU）",
   () => {
@@ -1081,7 +1109,7 @@ describe.skipIf(!ALL_TILES || !CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE)(
 // band is live and the band-candidate step. It writes the accept-rgb, fault/* and band-candidate
 // results.json ids; the per-case ids belong to the default suite above, and writing them here would
 // duplicate its settlements.
-describe.skipIf(!ALL_TILES || !CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
+describe.skipIf(!TILE_RUN_PRESENT || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
   "Wan2.2 TI2V VAE タイル decode: 縮退門 + 832×480・81 フレームが上流のタイル参照（unpatchify の前）と帯の中で" +
     "一致・accept の RGB が上流の unpatchify → clamp と帯の中で一致（実 GPU）" +
     UPSTREAM_PARITY_OPT_IN,

@@ -24,7 +24,7 @@ import {
   WAN_TOKENIZER_FORMAT,
   WanPromptEncoder,
 } from "../src/wan/text/tokenizer.ts";
-import { readTextIfPresent } from "./helpers/read-if-present.ts";
+import { mirrorPresent, mirrorRoot, readMirrorAsset } from "./helpers/mirror.ts";
 
 type FixtureCase = {
   readonly id: string;
@@ -82,15 +82,20 @@ const TOKENIZER_REJECTS: Record<string, string> = {
 };
 const PROMPT_CLEAN_REJECTS = new Set(["unassigned", "c1", "entity", "mojibake"]);
 
-/** recipe が焼いた実資産（全語彙 — 在れば部分集合の格子に依らない突合も回す）。 */
-const seriesAsset = await readTextIfPresent(
-  new URL("../../../outputs/series/wan2.1-umt5-tokenizer/tokenizer.json", import.meta.url),
-);
-if (seriesAsset === undefined) {
+/**
+ * The real asset (full vocabulary — when present, the check also runs independently of the subset
+ * lattice): the `umt5_tokenizer` the published Wan2.2 distribution ships (ADR 0139 decision 1; the
+ * same bytes as Wan2.1's).
+ */
+const WAN_MIRROR = mirrorRoot("karume-wan2.2");
+const mirrorAsset = mirrorPresent(WAN_MIRROR)
+  ? new TextDecoder().decode(await readMirrorAsset(WAN_MIRROR, "umt5_tokenizer"))
+  : undefined;
+if (mirrorAsset === undefined) {
   console.warn(
-    "[karume] outputs/series/wan2.1-umt5-tokenizer/tokenizer.json が無いため Wan の実資産での " +
-      "突合を SKIP する。生成: cd tools/export-recipes && uv run --group wan --inexact python -m " +
-      "wan.umt5_tokenizer",
+    `[karume] the mirror ${WAN_MIRROR.pathname} is absent (or not karume/5, or a sibling it references is ` +
+      "absent), so the Wan full-vocabulary check is SKIPPED (fetch the karume-wan2.2 and karume-umt5-xxl " +
+      "distributions into models/)",
   );
 }
 
@@ -366,12 +371,12 @@ test("parseWanTokenizerAsset: 語彙の値域門は T5 の共通層と同じ（�
 
 // ---- 実資産（全語彙）での突合 -------------------------------------------------
 
-test.skipIf(seriesAsset === undefined)(
+test.skipIf(mirrorAsset === undefined)(
   "実資産: 全語彙の資産から組んだ encoder もフィクスチャの全ケースと同じ決着になる",
   () => {
     // フィクスチャの語彙は部分集合（断片の部分文字列）なので、資産の読み取り（25.6 万行）と
     // 全語彙の格子でも同じ id 列 / 拒否になることをここで見る。
-    const full = new WanPromptEncoder(parseWanTokenizerAsset(JSON.parse(seriesAsset as string)));
+    const full = new WanPromptEncoder(parseWanTokenizerAsset(JSON.parse(mirrorAsset as string)));
     for (const testCase of fixture.cases) {
       if (testCase.ids !== undefined) {
         assertEquals([...full.encode(testCase.text)], testCase.ids, testCase.id);

@@ -1,10 +1,13 @@
 /**
- * umT5-XXL の i8 系列の golden（`outputs/series/umt5-xxl-i8-dyn/text_encoder/reference.<case>.safetensors` — recipe
- * `wan/umt5_reference.py`）の読み口と、GPU の出力をそれに突き合わせる判定（正規化比 r と帯 — ADR 0119 決定 8 ①）。
+ * The goldens of umT5-XXL's i8 series (`reference.<case>.safetensors`, written by the recipe
+ * `wan/umt5_reference.py`; read from the test-asset root `goldens/umt5-xxl-i8-dyn/text_encoder/` — ADR 0139
+ * decision 2) and the judgement that compares the GPU output with them (normalized ratio r and band — ADR 0119
+ * decision 8 ①).
  *
- * 2 本の e2e が同じ golden を同じ判定で読む: Wan の umT5 の移植の門（`e2e_wan_umt5_test.ts` — 系列の容器を runtime で
- * 直接回す）と、単体の `umt5.Encoder` の通し（`e2e_wan_umt5_test.ts` — 配布形 `karume-umt5-xxl` を
- * `fromPretrained` で組む）。帯・指標・ケースの正本はここ 1 本（2 本へ写すと、片方だけが動く）。
+ * Two e2e checks read the same goldens with the same judgement: Wan's umT5 port check (`e2e_wan_umt5_test.ts` —
+ * runs the container of the mirror `karume-umt5-xxl` with the runtime directly) and the public `umt5.Encoder`
+ * (`e2e_wan_umt5_test.ts` — built by `fromPretrained` over the same mirror). The band, metric and cases live only
+ * here (copied into both, only one of them would move).
  *
  * golden の中身（1 ケース 1 本）:
  *
@@ -22,6 +25,7 @@
 import { isNotFound, readFile, statSync } from "@karume/test-support/fs";
 import { assert, assertEquals } from "@std/assert";
 import { parseSafetensors, type SafetensorsFile } from "@karume/runtime";
+import { goldenDir } from "@karume/test-support/test-assets";
 
 /**
  * 正規化比 r の帯（ADR 0119 決定 8 ① — 導き方は ADR 0118 決定 8 と同じ）。決定用 6 本（`band-*`）の最悪 r × 5 を
@@ -50,12 +54,13 @@ import { parseSafetensors, type SafetensorsFile } from "@karume/runtime";
  */
 export const UMT5_NORMALIZED_BAND: number | undefined = 79;
 
-export const SERIES_NAME = "umt5-xxl-i8-dyn";
+/** The series the goldens were exported with (their folder under `goldens/` of the test-asset root). */
+const GOLDEN_SERIES = "umt5-xxl-i8-dyn";
 export const COMPONENT = "text_encoder";
-export const SERIES_DIR = new URL(
-  `../../../../outputs/series/${SERIES_NAME}/${COMPONENT}/`,
-  import.meta.url,
-);
+export const GOLDEN_DIR = new URL(`${COMPONENT}/`, goldenDir(GOLDEN_SERIES));
+
+/** The command that fetches the goldens into the local test-asset root (ADR 0139 decision 3). */
+export const FETCH = "node tools/test-assets/fetch.ts";
 
 export const GENERATE =
   "cd tools/export-recipes && uv run --group wan --inexact python -m wan.umt5_export reference";
@@ -97,7 +102,7 @@ export const CASES: readonly {
 ];
 
 export const goldenUrl = (name: string): URL =>
-  new URL(`reference.${name}.safetensors`, SERIES_DIR);
+  new URL(`reference.${name}.safetensors`, GOLDEN_DIR);
 
 /** ファイルの有無（NotFound 以外は伝播させる — 権限エラーを「資産が無い」に読み替えない）。 */
 export const filePresent = (url: URL): boolean => {

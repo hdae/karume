@@ -14,13 +14,19 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from real_assets import mirror_asset
 
-from _shared.paths import SERIES_ROOT
 from wan import prompt_clean as pc
 from wan import umt5_tokenizer as ut
 from wan import umt5_xxl_tokenizer as xt
+from wan.distribution import WAN22, WAN_TOKENIZER_ROLE
 from wan.sources import UMT5_SOURCES, WanSourceError, pinned_umt5_tokenizer
-from wan.umt5_distribution import UMT5_TOKENIZER_FIELDS
+from wan.umt5_distribution import (
+    UMT5_DEFAULT_MODEL,
+    UMT5_REPO_NAME,
+    UMT5_TOKENIZER_FIELDS,
+    UMT5_TOKENIZER_ROLE,
+)
 
 #: `WhitespaceSplit` の空白集合の一部（合成 — タブから CR・U+0020・NBSP・全角空白）。
 SPACE = pc.RangeSet([[9, 13], [32, 32], [160, 160], [12288, 12288]])
@@ -169,11 +175,10 @@ class TestAgainstUpstream:
         assert len(asset["addedTokens"]) == 304
 
     def test_the_t5_tables_match_the_wan_asset_up_to_score_spelling(self, truth: ut.Truth) -> None:
-        """Wan の資産の T5 の表と同じ（スコアだけが f64 の表記の差 — 最大 1e-14 未満）。"""
-        series = SERIES_ROOT / ut.SERIES_NAME / ut.ASSET_FILE
-        if not series.is_file():
-            pytest.skip(f"Wan のトークナイザ資産の系列が無い: {series}")
-        wan = json.loads(series.read_text(encoding="utf-8"))
+        """The same T5 tables as the Wan asset the published Wan2.2 mirror ships (only the scores
+        differ, in their f64 spelling — by less than 1e-14)."""
+        shipped = mirror_asset(WAN22.repo_name, WAN22.default_model, WAN_TOKENIZER_ROLE)
+        wan = json.loads(shipped.read_text(encoding="utf-8"))
         asset = xt.build_asset(truth, xt.DEFAULT_MODEL, {"tokenizers": "t", "transformers": "f"})
 
         for key in ("maxLength", "unkId", "eosId", "addedTokens", "space", "vocabText"):
@@ -182,15 +187,14 @@ class TestAgainstUpstream:
         assert set(wan) - set(asset) == {"promptClean"}
 
     def test_the_series_asset_is_what_the_generator_makes(self, truth: ut.Truth) -> None:
-        series = SERIES_ROOT / xt.SERIES_NAME / xt.ASSET_FILE
-        if not series.is_file():
-            pytest.skip(f"umT5 のトークナイザ資産の系列が無い: {series}")
+        """The tokenizer asset the `karume-umt5-xxl` mirror ships is what the generator makes."""
+        shipped = mirror_asset(UMT5_REPO_NAME, UMT5_DEFAULT_MODEL, UMT5_TOKENIZER_ROLE)
 
         rebuilt = json.dumps(
             xt.build_asset(truth, xt.DEFAULT_MODEL, xt.asset_versions()), ensure_ascii=False
         )
 
-        assert rebuilt.encode("utf-8") == series.read_bytes()
+        assert rebuilt.encode("utf-8") == shipped.read_bytes()
 
     def test_the_committed_fixture_is_what_the_generator_makes(self, truth: ut.Truth) -> None:
         """commit 済みのフィクスチャを上流から作り直して一致を見る（境界のケースの狙いの決着も

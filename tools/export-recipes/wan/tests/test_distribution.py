@@ -9,7 +9,8 @@ Wan2.1 の pin を名乗る（ADR 0121 決定 9 — 出所の門の分割）。
 見るケースも同じ器で作り、**宣言だけを実物とずらす**。`text_encoder` は公開と同じ形（umT5 の配布形を
 先に組み、そこへの越境参照）で組む。
 
-実物の系列（`outputs/series/`）がある機では、実物で計画を 1 周組む門も回す（無ければ SKIP）。
+With `KARUME_SERIES=1` on a machine that holds the real series (`outputs/series/`), the plan is
+also built once over them (an implementation-time check — ADR 0139 decision 6; SKIP otherwise).
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from container_series import (
     write_component,
 )
 from ir_fixtures import fixture_spec, ir_container
+from real_assets import SERIES_CHECKS, requires_series
 from safetensors.numpy import save
 from upstream_fixture import FIXTURE_REVISION, OTHER_REVISION, stamp_fixture_provenance
 
@@ -2887,7 +2889,9 @@ class TestTheWan22ImageToVideoCard:
 
 
 _REAL = wan_sources(SERIES_ROOT)
-_REAL_PRESENT = (
+# MUST: `SERIES_CHECKS and …` — the default lane does not touch `outputs/series/` (ADR 0139
+# decision 6).
+_REAL_PRESENT = SERIES_CHECKS and (
     (_REAL.series / WAN_TRANSFORMER_ROLE).is_dir()
     and (_REAL.i8_series / WAN_TRANSFORMER_ROLE).is_dir()
     and _REAL.text_embeds.is_file()
@@ -2897,9 +2901,10 @@ _REAL_PRESENT = (
 
 
 @pytest.mark.skipif(
-    not _REAL_PRESENT,
+    SERIES_CHECKS and not _REAL_PRESENT,
     reason=f"実物の系列が無い: {_REAL.series} / {_REAL.i8_series} / {_REAL.text_encoder.parent}",
 )
+@requires_series
 class TestTheRealSeries:
     """実物の系列（`wan.export_dit`〈f16 / i8〉/ `wan.export_vae` / `wan.text_embeds` /
     `wan.umt5_export` / `wan.umt5_tokenizer` の出力）で計画が組める。
@@ -2920,7 +2925,7 @@ class TestTheRealSeries:
 
 
 _REAL22 = wan_sources(SERIES_ROOT, WAN22)
-_REAL22_PRESENT = (
+_REAL22_PRESENT = SERIES_CHECKS and (
     (_REAL22.i8_series / WAN_TRANSFORMER_ROLE).is_dir()
     and (_REAL22.series / WAN_VAE_FIRST_ROLE).is_dir()
     and (_REAL22.series / WAN_VAE_NEXT_ROLE).is_dir()
@@ -2941,10 +2946,11 @@ _REAL22_PRESENT = (
 
 
 @pytest.mark.skipif(
-    not _REAL22_PRESENT,
+    SERIES_CHECKS and not _REAL22_PRESENT,
     reason=f"Wan2.2 の実物の系列が無い: {_REAL22.series} / {_REAL22.i8_series} /"
     f" {_REAL22.text_encoder.parent}",
 )
+@requires_series
 class TestTheRealWan22Series:
     """実物の Wan2.2 の系列（`wan.ti2v_export_dit` / `wan.export_vae --model ti2v-5b`）と、Wan2.1 の
     テキスト資産・umT5 のミラーで計画が組める（読むのは宣言・束縛表・RoPE の素表・資産のヘッダ

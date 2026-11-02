@@ -3,14 +3,15 @@
  *
  * 配布形ミラー `models/karume-wan2.2/`（`dist.py --pipeline wan-ti2v` が組む — `krm` 3 本と 2.1 の系列のテキスト資産 2 本）
  * を `nodeDirectory` で `Ti2vPipeline.fromPretrained` へ渡して組み、`generate` を通す（公開面の取得面 — manifest の解決・
- * 家族 admission・part の逐次読み。2.1 の段 7 と同じ入口）。参照（`pipeline_steps.*`）は配布しない golden なので系列から読む。
+ * 家族 admission・part の逐次読み。2.1 の段 7 と同じ入口）。The references (`pipeline_steps.*`) are goldens no
+ * distribution carries, read from the test-asset root (ADR 0139 decision 2).
  *
  * 配布形が無い機ではこの e2e は明示 SKIP する（理由と組み立てのコマンドを出す）。それで全 SKIP になるのを FAIL にするのは
  * 門番 `packages/runtime/tests/distribution_gate_test.ts`（意図して通すなら `KARUME_ALLOW_NO_DISTRIBUTION=1` — 2.1 の通しの
  * e2e と同じ分担）。
  *
- * 比べる相手は recipe の 2 ステップの参照（`tools/export-recipes/wan/ti2v_few_step_ref.py` — 置き場は i8 の DiT の系列の根の
- * `pipeline_steps.<case>.safetensors`）: diffusers の `Pipeline(expand_timesteps=False)` を CPU f32 で素のまま 2 ステップ
+ * 比べる相手は recipe の 2 ステップの参照（`tools/export-recipes/wan/ti2v_few_step_ref.py` — `goldens/wan2.2-ti2v-5b-i8-dyn/
+ * pipeline_steps.<case>.safetensors` of the test-asset root）: diffusers の `Pipeline(expand_timesteps=False)` を CPU f32 で素のまま 2 ステップ
  * （CFG あり・guidance 5.0・shift 5.0）回した潜在と、それを段 5 のタイル decode → unpatchify → クランプに通したフレーム（重みは
  * DiT が i8 の RTN の fake-quant・VAE が f16 表現可能値 = 参照席 `f16+dit8` と同じ値）。形は 1280×704・17 フレーム（潜在
  * `[48,5,44,80]`・S = 4,400）で、決定用 2 本と受入れ 1 本は同じ形（受入れの形を変えて帯を外させない — 利用者の裁定 2026-10-05）。
@@ -162,7 +163,13 @@ import {
   monitorNvidiaSmi,
   type NvidiaTimeline,
 } from "../../models/tests/helpers/nvidia-smi.ts";
-import { filePresent, WAN_TI2V_SERIES_NAME } from "../../models/tests/helpers/wan-ti2v-dit.ts";
+import {
+  filePresent,
+  TEST_ASSETS_FETCH,
+  WAN_TI2V_SERIES_NAME,
+} from "../../models/tests/helpers/wan-ti2v-dit.ts";
+import { mirrorPresent, readMirrorAsset } from "../../models/tests/helpers/mirror.ts";
+import { goldenDir, TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 import {
   readWanTi2vDistributionManifestText,
   WAN_TI2V_ASSEMBLE_COMMAND,
@@ -231,8 +238,11 @@ const HEIGHT = 704;
 const FRAMES = 17;
 const LATENT_SHAPE: readonly number[] = [48, 5, 44, 80];
 
-/** 参照（配布しない golden）の置き場 — i8 の DiT の系列の根（ADR 0121 段 6 の裁定 10）。 */
-const STEPS_ROOT = new URL(`../../../outputs/series/${WAN_TI2V_SERIES_NAME}/`, import.meta.url);
+/**
+ * The references' place (goldens no distribution carries): the test-asset root's folder of the int8 DiT's series (ADR
+ * 0139 decision 2; ADR 0121 stage 6 ruling 10).
+ */
+const STEPS_ROOT = goldenDir(WAN_TI2V_SERIES_NAME);
 
 /**
  * 参照のケース（正本は recipe `wan/ti2v_few_step_ref.py` の `FIXTURE_CASES`）。決定用（`band`）2 本 + 受入れ（`accept`）1 本。
@@ -406,22 +416,16 @@ const LONG_CLIP_CASE_ID = caseIdOf(
   LONG_CLIP_FRAMES,
 );
 
-const GENERATE_COMMAND =
-  "cd tools/export-recipes && uv run --group wan --inexact python -m wan.ti2v_few_step_ref";
 const ASSEMBLE_UMT5_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline umt5";
 
 /**
- * 参照を作った埋め込み資産（2.1 の系列のファイル — ADR 0121 決定 9）。ホストの自己整合はこのバイトの sha を参照のメタ
- * `text_embeds_sha256` と突き合わせる。配布形の写しではなく系列のファイルを読むのは、ホストの自己整合が見るのが参照と TS の
- * ホストの計算（σ / timestep・統計・CFG + UniPC）であって取得面ではないから — 配布形の無い機でも GPU 無しで回る形を保つ。
- * 配布形の写しは組み立て（`dist.py`）が同じ系列のファイルを置いたもの。この e2e の取得元（`nodeDirectory`）は size だけを
- * 照合し、sha256 は信頼する（`packages/hub/src/sources/local.ts`）。写しが参照を作った資産と違えば、GPU の帯のケース（プロンプトを
- * 配布形の資産から引く）が帯の外へ出る。
+ * The text-embedding asset the references were made with (ADR 0121 decision 9): the mirror's `text_embeds` (ADR 0139
+ * decision 1 — the distribution carries it, the same bytes as the series file the references were made from). The host
+ * self-consistency check compares its sha with the references' meta `text_embeds_sha256`, so a copy that differs from
+ * the asset the references were made with is caught here as well as by the GPU band cases (which take their prompts
+ * from the same asset).
  */
-const TEXT_EMBEDS_URL = new URL(
-  "../../../outputs/series/wan2.1-t2v-1.3b-text-embeds/text_embeds.safetensors",
-  import.meta.url,
-);
+const TEXT_EMBEDS = "text_embeds";
 
 /** umT5 の配布形ミラー（Wan2.2 の manifest の `text_encoder` が越境参照する先 — 2.1 と同じミラー）。 */
 const UMT5_ROOT = new URL("../../../models/karume-umt5-xxl/", import.meta.url);
@@ -473,10 +477,29 @@ const umt5CrossRepo = (): Record<string, DistributionSource> => {
 };
 const FIXTURES_PRESENT = CASES.map(({ name }) => filePresent(fixtureUrl(name)));
 const ANY_FIXTURE = FIXTURES_PRESENT.some(Boolean);
+/**
+ * A complete fetch of the pinned test-asset dataset makes a missing reference a FAIL (the completeness test below): the
+ * dataset at the pin lacks a file the cases read. Without one, the cases SKIP (the assets gate is red then).
+ */
+const FETCHED = testAssetsFetched();
+const MISSING_GOLDENS = FETCHED
+  ? `the test-asset dataset at revision ${TEST_ASSETS.revision} lacks them`
+  : `fetch: ${TEST_ASSETS_FETCH}`;
 if (!ANY_FIXTURE) {
   console.warn(
-    `[karume] ${STEPS_ROOT.pathname} に 2 ステップの参照（pipeline_steps.*）が無いため Wan2.2 の通しの帯・故障注入・` +
-      `ホストの自己整合を SKIP する。生成（CPU で約 3 時間・RAM の山 約 24 GiB）: ${GENERATE_COMMAND}`,
+    `[karume] no two-step reference (pipeline_steps.*) under ${STEPS_ROOT.pathname}, so Wan2.2's end-to-end band, ` +
+      `fault injection and host self-consistency checks are SKIPPED (${MISSING_GOLDENS})`,
+  );
+}
+/**
+ * The host self-consistency check reads the mirror's `text_embeds` through its manifest, which needs the mirror and
+ * every sibling it references (the umT5 mirror) — otherwise it SKIPs.
+ */
+const TEXT_EMBEDS_READABLE = mirrorPresent(WAN_TI2V_DIST_ROOT);
+if (ANY_FIXTURE && !TEXT_EMBEDS_READABLE) {
+  console.warn(
+    `[karume] the mirror ${WAN_TI2V_DIST_ROOT.pathname} is absent (or not karume/5, or a sibling it references is ` +
+      `absent), so Wan2.2's host self-consistency check (it reads the mirror's ${TEXT_EMBEDS}) is SKIPPED`,
   );
 }
 
@@ -495,13 +518,18 @@ const assigned = <T>(value: T | undefined, what: string): T => {
   return value;
 };
 
-test.skipIf(!ANY_FIXTURE)("Wan2.2 通しの参照: 2 ステップの参照 3 本が揃っている", () => {
-  assertEquals(
-    FIXTURES_PRESENT,
-    FIXTURES_PRESENT.map(() => true),
-    `${STEPS_ROOT.pathname} の欠け`,
-  );
-});
+test.skipIf(!ANY_FIXTURE && !FETCHED)(
+  "Wan2.2 通しの参照: 2 ステップの参照 3 本が揃っている",
+  () => {
+    assertEquals(
+      FIXTURES_PRESENT,
+      FIXTURES_PRESENT.map(() => true),
+      `missing: ${CASES.filter((_, index) => !FIXTURES_PRESENT[index])
+        .map(({ name }) => fixtureUrl(name).pathname)
+        .join(", ")} (${MISSING_GOLDENS})`,
+    );
+  },
+);
 
 /** 参照 1 本（F32 のテンソル・形・メタ）。 */
 type Fixture = {
@@ -748,11 +776,11 @@ const loadPipeline = (
 /** 2 ステップの通しの要求の共通部分（寸法とプロンプトと初期ノイズはケースが足す）。 */
 const TWO_STEP = { steps: STEPS, guidance: GUIDANCE, shift: SHIFT, frames: FRAMES } as const;
 
-test.skipIf(!ANY_FIXTURE)(
+test.skipIf(!ANY_FIXTURE || !TEXT_EMBEDS_READABLE)(
   "Wan2.2 通し（ホスト・GPU 不要）: 参照のメタ（埋め込み資産・σ / timestep・shift 5.0）と統計 48 値が TS と一致し、" +
     "参照の DiT 出力から CFG + UniPC が参照の潜在をビット一致で再現する",
   async () => {
-    const embedsSha = await sha256Hex(await readFile(TEXT_EMBEDS_URL));
+    const embedsSha = await sha256Hex(await readMirrorAsset(WAN_TI2V_DIST_ROOT, TEXT_EMBEDS));
     const schedule = wanUniPcSchedule(STEPS, SHIFT, WAN_UNIPC_CONFIG.numTrainTimesteps);
     const mean = Float32Array.from(WAN22_LATENTS_MEAN);
     const std = Float32Array.from(WAN22_LATENTS_STD);

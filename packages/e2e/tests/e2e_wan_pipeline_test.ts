@@ -3,8 +3,8 @@
  *
  * 配布形ミラー `models/karume-wan2.1/`（`dist.py --pipeline wan` が組む — `krm` 3 本とテキスト埋め込み
  * 資産）を `nodeDirectory` で `Pipeline.fromPretrained` へ渡して組み、`generate` を通す（公開面の
- * 取得面 — manifest の解決・家族 admission・part の逐次読み）。参照（`pipeline_steps.*`）は配布しない
- * golden なので系列 `outputs/series/wan2.1-t2v-1.3b-f16-dyn/` から読む。
+ * 取得面 — manifest の解決・家族 admission・part の逐次読み）。The references (`pipeline_steps.*`) are goldens
+ * no distribution carries, read from `goldens/wan2.1-t2v-1.3b-f16-dyn/` of the test-asset root (ADR 0139 decision 2).
  *
  * 配布形が無い機ではこの e2e は明示 SKIP する（理由と組み立てのコマンドを出す）。それで全 SKIP に
  * なるのを FAIL にするのは門番 `packages/runtime/tests/distribution_gate_test.ts`（意図して通すなら
@@ -153,6 +153,7 @@ import {
 } from "../../runtime/tests/helpers/reference.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 import { UPSTREAM_PARITY } from "./helpers/upstream-parity.ts";
+import { goldenDir, TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 
 /**
  * 2 ステップの通しの潜在（各 step の後 — `[16,9,60,104]`）の帯（比 = 最大絶対差 ÷ 参照の最大絶対値）。
@@ -200,8 +201,18 @@ const FRAME_RATIO_BAND = 8.5e-3;
  */
 const FAULT_MARGIN = 2;
 
-/** 参照（配布しない golden）の置き場。 */
-const SERIES_ROOT = new URL("../../../outputs/series/wan2.1-t2v-1.3b-f16-dyn/", import.meta.url);
+/** The references' place (goldens no distribution carries — the test-asset root, ADR 0139 decision 2). */
+const GOLDEN_ROOT = goldenDir("wan2.1-t2v-1.3b-f16-dyn");
+/** The command that fetches the goldens into the local test-asset root (ADR 0139 decision 3). */
+const FETCH = "node tools/test-assets/fetch.ts";
+/**
+ * A complete fetch of the pinned test-asset dataset makes a missing reference a FAIL (the completeness test below): the
+ * dataset at the pin lacks a file the cases read. Without one, the cases SKIP (the assets gate is red then).
+ */
+const FETCHED = testAssetsFetched();
+const MISSING_GOLDENS = FETCHED
+  ? `the test-asset dataset at revision ${TEST_ASSETS.revision} lacks them`
+  : `fetch: ${FETCH}`;
 /** 配布形ミラー（`dist.py --pipeline wan` の既定の出力先）。 */
 const DIST_ROOT = new URL("../../../models/karume-wan2.1/", import.meta.url);
 /** manifest の `assets` の埋め込み資産のキー（recipe `wan/distribution.py` の `WAN_TEXT_EMBEDS_ROLE`）。 */
@@ -311,9 +322,6 @@ const DEFAULT_FRAMES = 33;
  */
 const FULL_STEPS = 50;
 
-const GENERATE_COMMAND =
-  "cd tools/export-recipes && uv run --group wan --inexact " +
-  "python -m wan.text_embeds && uv run --group wan --inexact python -m wan.few_step_ref";
 const ASSEMBLE_UMT5_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline umt5";
 
 /** umT5 の配布形ミラー（Wan の manifest の `text_encoder` が越境参照する先 — ADR 0119 追記「段 10d の設計」D）。 */
@@ -322,7 +330,7 @@ const UMT5_ROOT = new URL("../../../models/karume-umt5-xxl/", import.meta.url);
 const TEXT_ENCODER = "text_encoder";
 
 const fixtureUrl = (name: string): URL =>
-  new URL(`pipeline_steps.${name}.safetensors`, SERIES_ROOT);
+  new URL(`pipeline_steps.${name}.safetensors`, GOLDEN_ROOT);
 
 const fileExists = (url: URL): boolean => {
   try {
@@ -344,8 +352,8 @@ const FIXTURES_PRESENT = CASES.map(({ name }) => fileExists(fixtureUrl(name)));
 const ANY_FIXTURE = FIXTURES_PRESENT.some(Boolean);
 if (!ANY_FIXTURE) {
   console.warn(
-    `[karume] ${SERIES_ROOT.pathname} に少ステップの参照が無いため Wan のパイプラインの照合を SKIP ` +
-      `する。生成: ${GENERATE_COMMAND}`,
+    `[karume] no few-step reference under ${GOLDEN_ROOT.pathname}, so Wan's pipeline checks are SKIPPED. ` +
+      `(${MISSING_GOLDENS})`,
   );
 }
 /** 照合を回せる（配布形と参照の両方がある — 参照が一部だけの機は下の資産の門が FAIL にする）。 */
@@ -439,11 +447,13 @@ const assigned = <T>(value: T | undefined, what: string): T => {
   return value;
 };
 
-test.skipIf(!ANY_FIXTURE)("Wan 通しの参照: 少ステップの参照 3 本が揃っている", () => {
+test.skipIf(!ANY_FIXTURE && !FETCHED)("Wan 通しの参照: 少ステップの参照 3 本が揃っている", () => {
   assertEquals(
     FIXTURES_PRESENT,
     FIXTURES_PRESENT.map(() => true),
-    `${SERIES_ROOT.pathname} の欠け`,
+    `missing: ${CASES.filter((_, index) => !FIXTURES_PRESENT[index])
+      .map(({ name }) => fixtureUrl(name).pathname)
+      .join(", ")} (${MISSING_GOLDENS})`,
   );
 });
 

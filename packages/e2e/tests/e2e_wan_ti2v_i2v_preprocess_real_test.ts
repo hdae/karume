@@ -13,8 +13,9 @@
 //
 // ## 資産が無い環境
 //
-// golden（`outputs/series/` — encoder の 3 グラフと一組で書かれる）は git 追跡外。**1 本も無ければ明示 SKIP**、
-// **一部だけなら FAIL**（採り直しの途中で落ちた資産を SKIP に丸めない）。置き場と形の正本は `helpers/wan-i2v-image.ts`。
+// The goldens (in the test-asset root `outputs/test-assets/` — ADR 0139 decision 2; written together with the encoder's
+// three graphs) are not tracked by git. **None present → explicit SKIP**, **some → FAIL** (a set that broke off while
+// being fetched is not rounded to a SKIP). Their place and form are in `helpers/wan-i2v-image.ts`.
 
 import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -28,7 +29,6 @@ import {
 import { normalizeWanLatents } from "../../models/src/wan/latents.ts";
 import {
   WAN_I2V_GOLDEN_CASES,
-  WAN_I2V_GOLDEN_GENERATE,
   WAN_I2V_GOLDEN_KEYS,
   WAN_I2V_GOLDEN_METADATA,
   WAN_I2V_IMAGE_SHA256,
@@ -39,18 +39,28 @@ import {
   filePresent,
   firstBitMismatch,
   readBuffer,
+  TEST_ASSETS_FETCH,
   viewOf,
 } from "../../models/tests/helpers/wan-ti2v-dit.ts";
+import { TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 
 /** 登録時点で必要なので同期で数える（`ignore` の判定に使う）。 */
 const present = WAN_I2V_GOLDEN_CASES.filter((testCase) =>
   filePresent(wanI2vGoldenUrl(testCase)),
 ).length;
+/**
+ * A complete fetch of the pinned test-asset dataset makes a missing golden a FAIL (the completeness case below): the
+ * dataset at the pin lacks a file the cases read. Without one, the cases SKIP (the assets gate is red then).
+ */
+const FETCHED = testAssetsFetched();
+const MISSING_GOLDENS = FETCHED
+  ? `the test-asset dataset at revision ${TEST_ASSETS.revision} lacks them`
+  : `fetch: ${TEST_ASSETS_FETCH}`;
 
 if (present === 0) {
   console.warn(
-    `[karume] I2V の実画像の前処理の照合を SKIP する（golden 0/${WAN_I2V_GOLDEN_CASES.length} 本）。` +
-      `golden の生成: ${WAN_I2V_GOLDEN_GENERATE}`,
+    `[karume] the real-image I2V preprocessing check is SKIPPED (goldens 0/${WAN_I2V_GOLDEN_CASES.length}). ` +
+      `(${MISSING_GOLDENS})`,
   );
 }
 
@@ -90,19 +100,19 @@ const floatsOf = (
 };
 
 describe("I2V の実画像の前処理と encoder の出口の正規化 × 上流の golden（ビット一致）", () => {
-  it.skipIf(present === 0)(
+  it.skipIf(present === 0 && !FETCHED)(
     `golden が ${WAN_I2V_GOLDEN_CASES.length} 本揃っている（1 本も無ければ SKIP・一部だけなら FAIL）`,
     () => {
       const missing = WAN_I2V_GOLDEN_CASES.map(wanI2vGoldenUrl)
         .filter((url) => !filePresent(url))
         .map((url) => url.pathname);
-      assertEquals(missing, [], `golden が欠けている（採り直す: ${WAN_I2V_GOLDEN_GENERATE}）`);
+      assertEquals(missing, [], `missing goldens (${MISSING_GOLDENS})`);
     },
   );
 
   for (const testCase of WAN_I2V_GOLDEN_CASES) {
     const where = wanI2vGoldenName(testCase);
-    it.skipIf(present === 0)(where, async () => {
+    it.skipIf(present === 0 && !FETCHED)(where, async () => {
       const url = wanI2vGoldenUrl(testCase);
       assert(filePresent(url), `${where}: golden ${url.pathname} が無い`);
       const file = parseSafetensors(await readBuffer(url));

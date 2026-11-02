@@ -12,9 +12,10 @@
  *
  * ## 実画像の golden（git 追跡外 — 1 本も無ければ明示 SKIP・一部だけなら FAIL）
  *
- * 書き手は recipe の `tools/export-recipes/wan/export_vae_encoder.py`（`GOLDEN_CASES` — encoder の GPU の門と共有の
- * golden）。置き場は `outputs/series/wan2.2-ti2v-5b-f16-dyn/vae_encoder.<ケース名>.safetensors`、ケース名は
- * `<画像>-<幅>x<高さ>`（fit = crop）/ `<画像>-<幅>x<高さ>-stretch`。中身（このテストが読む分）:
+ * Written by the recipe `tools/export-recipes/wan/export_vae_encoder.py` (`GOLDEN_CASES` — goldens shared with the
+ * encoder's GPU gate) and read from `goldens/wan2.2-ti2v-5b-f16-dyn/vae_encoder.<case>.safetensors` of the test-asset
+ * root (ADR 0139 decision 2). The case name is `<image>-<width>x<height>` (fit = crop) /
+ * `<image>-<width>x<height>-stretch`. Content (what the tests read):
  *
  * - `source` U8 `[480, 832, 3]` — テスト画像の画素（PNG を decode せずに鎖を回せる）
  * - `rgb8` U8 `[H, W, 3]` — fit の前処理（Pillow の LANCZOS・crop は中央クロップの後）の出力
@@ -24,13 +25,14 @@
  */
 
 import type { I2vFit } from "../../src/wan/i2v-preprocess.ts";
-import { WAN_TI2V_VAE_ROOT } from "./wan-ti2v-vae.ts";
+import { WAN_TI2V_VAE_GOLDEN_DIR } from "./wan-ti2v-vae.ts";
 
 /** LANCZOS の fixture のケース表（git 追跡 — 画素の safetensors は表の `tensors` が名指す同じディレクトリのファイル）。 */
 export const WAN_I2V_LANCZOS_FIXTURE = new URL("../fixtures/wan-i2v/lanczos.json", import.meta.url);
 
 /**
- * テスト画像（`inputs/wan-i2v/<名前>-832x480.png` の PNG ファイルの sha256 — recipe の `IMAGES` と同じ値の二重凍結）。
+ * The test images (the sha256 of the PNG files `corpus/wan-i2v/<name>-832x480.png` of the test-asset root — ADR 0139
+ * decision 2; the same values as the recipe's `IMAGES`, frozen twice).
  * golden の `image_sha256` と照合する（golden がこの画像から採られたこと）。
  */
 export const WAN_I2V_IMAGE_SHA256: Readonly<Record<string, string>> = {
@@ -80,11 +82,7 @@ export const wanI2vGoldenName = ({ image, width, height, fit }: WanI2vGoldenCase
   `${image}-${width}x${height}${fit === "crop" ? "" : `-${fit}`}`;
 
 export const wanI2vGoldenUrl = (testCase: WanI2vGoldenCase): URL =>
-  new URL(`vae_encoder.${wanI2vGoldenName(testCase)}.safetensors`, WAN_TI2V_VAE_ROOT);
-
-/** SKIP 時にそのまま貼れる golden の生成コマンド（encoder の 3 グラフと一組で書く）。 */
-export const WAN_I2V_GOLDEN_GENERATE =
-  "cd tools/export-recipes && uv run --group wan --inexact " + "python -m wan.export_vae_encoder";
+  new URL(`vae_encoder.${wanI2vGoldenName(testCase)}.safetensors`, WAN_TI2V_VAE_GOLDEN_DIR);
 
 /**
  * VAE encoder の出口（mu の正規化の後 — DiT の条件の潜在）の帯（最大絶対差・絶対値）。encoder の GPU の門
