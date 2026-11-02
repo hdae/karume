@@ -5,7 +5,9 @@
   repository's `karume.json` (decision 1) — never by spelling the file name here.
 - **Goldens** (`outputs/test-assets/goldens/<series>/`, `GOLDENS_ROOT`): recipe outputs that no
   distribution carries, fetched by `node tools/test-assets/fetch.ts` (decision 2). The tests build
-  those paths themselves (`GOLDENS_ROOT / <series> / <file>`).
+  those paths themselves (`GOLDENS_ROOT / <series> / <file>`) and read them through
+  {@link require_test_asset}: an absent one FAILs once the assets are fully fetched (the dataset at
+  the pin lacks it) and SKIPs otherwise, as on the TS side.
 - **Series** (`outputs/series/`): implementation-time checks that need the exporter's own output
   are opt-in with `KARUME_SERIES=1` (decision 6) — the same switch as the TS lanes
   (`packages/models/tests/helpers/series-checks.ts`).
@@ -24,11 +26,11 @@ import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
-from _shared.paths import DIST_ROOT
+from _shared.paths import DIST_ROOT, GOLDENS_ROOT, REPO_ROOT
 from karume.container import base_path, container_parts
 from karume.dist import MANIFEST_FILENAME
 
@@ -42,6 +44,50 @@ SERIES_CHECKS_OPT_IN = "implementation-time series check, opt-in KARUME_SERIES=1
 #: test, so that without `KARUME_SERIES=1` this reason is the one reported (pytest reports the
 #: first matching `skipif`, and the innermost decorator is evaluated first).
 requires_series = pytest.mark.skipif(not SERIES_CHECKS, reason=SERIES_CHECKS_OPT_IN)
+
+#: The pin of the test-asset dataset: the JSON file the TS side imports as `TEST_ASSETS`, so both
+#: languages read one source of truth (ADR 0139 decision 3).
+TEST_ASSETS_PIN = REPO_ROOT / "packages" / "test-support" / "src" / "test-assets.pin.json"
+
+#: The local root of the fetched test assets (`outputs/test-assets/`).
+TEST_ASSETS_ROOT = GOLDENS_ROOT.parent
+
+#: The command that fetches the test assets at the pin.
+FETCH_COMMAND = "node tools/test-assets/fetch.ts"
+
+
+def assets_fetched(root: Path = TEST_ASSETS_ROOT, pin_file: Path = TEST_ASSETS_PIN) -> bool:
+    """Whether `root` holds a complete fetch of the pin: its `.revision` (written only by a complete
+    fetch) equals the pinned revision. Only an absent record means "not fetched"."""
+    revision = json.loads(pin_file.read_text(encoding="utf-8"))["revision"]
+    try:
+        fetched = (root / ".revision").read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return False
+    return fetched == revision
+
+
+def absent_test_asset(
+    what: str, *, root: Path = TEST_ASSETS_ROOT, pin_file: Path = TEST_ASSETS_PIN
+) -> NoReturn:
+    """FAIL when `root` holds a complete fetch of the pin (the dataset lacks `what`), SKIP otherwise
+    (the TS assets gate is red then)."""
+    if assets_fetched(root, pin_file):
+        pytest.fail(
+            f"{what} is absent, but {root} holds a complete fetch of the pinned test assets"
+            " — the dataset at the pin lacks it"
+        )
+    pytest.skip(f"{what} is absent — fetch the test assets with `{FETCH_COMMAND}`")
+
+
+def require_test_asset(
+    path: Path, *, root: Path = TEST_ASSETS_ROOT, pin_file: Path = TEST_ASSETS_PIN
+) -> Path:
+    """`path` when it is a file; otherwise {@link absent_test_asset}."""
+    if path.is_file():
+        return path
+    absent_test_asset(str(path), root=root, pin_file=pin_file)
+
 
 #: The manifest major these tests read (the TS side's `MIRROR_FORMAT`).
 MIRROR_FORMAT = "karume/5"

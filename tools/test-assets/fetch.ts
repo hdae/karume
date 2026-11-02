@@ -139,7 +139,7 @@ export const fetchTestAssets = async (options: FetchOptions = {}): Promise<void>
   if (pin.revision === PLACEHOLDER_REVISION) {
     throw new Error(
       `the pin of ${pin.repo} is still the placeholder revision ${PLACEHOLDER_REVISION}: ` +
-        "set TEST_ASSETS.revision (packages/test-support/src/test-assets.ts) to the dataset's commit SHA",
+        "set revision in packages/test-support/src/test-assets.pin.json to the dataset's commit SHA",
     );
   }
   if (!COMMIT_SHA.test(pin.revision)) {

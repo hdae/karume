@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from real_assets import mirror_asset
+from real_assets import mirror_asset, require_test_asset
 
 from _shared.paths import GOLDENS_ROOT
 from wan import export_vae, few_step_ref, pipeline_ref, prompts, text_embeds, vae_tiling
@@ -70,9 +70,7 @@ def written(request):
     from safetensors import safe_open
 
     path = GOLDENS / f"{few_step_ref.FIXTURE_PREFIX}{request.param}{few_step_ref.FIXTURE_SUFFIX}"
-    if not path.is_file():
-        pytest.skip(f"{path} is absent — fetch it with `node tools/test-assets/fetch.ts`")
-    with safe_open(str(path), framework="pt") as handle:
+    with safe_open(str(require_test_asset(path)), framework="pt") as handle:
         metadata = handle.metadata()
         tensors = {name: handle.get_tensor(name) for name in handle.keys()}  # noqa: SIM118
     return request.param, tensors, metadata

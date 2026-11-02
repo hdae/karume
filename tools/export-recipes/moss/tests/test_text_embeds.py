@@ -13,6 +13,7 @@ import json
 
 import pytest
 import torch
+from real_assets import require_test_asset
 
 from _shared.paths import GOLDENS_ROOT
 from moss import pipeline_ref, prompts, text_embeds
@@ -160,11 +161,7 @@ class TestEmptyNegative:
 class TestGeneratedAsset:
     @pytest.fixture
     def asset(self):
-        if not TEXT_EMBEDS.is_file():
-            pytest.skip(
-                f"{TEXT_EMBEDS} is absent — fetch it with `node tools/test-assets/fetch.ts`"
-            )
-        return text_embeds.read_asset(TEXT_EMBEDS)
+        return text_embeds.read_asset(require_test_asset(TEXT_EMBEDS))
 
     def test_every_prompt_has_its_token_count_of_rows(self, asset):
         tensors, metadata = asset

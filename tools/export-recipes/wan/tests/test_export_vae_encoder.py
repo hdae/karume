@@ -33,6 +33,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+from real_assets import absent_test_asset
 
 from _shared.paths import GOLDENS_ROOT
 from karume.container import Provenance
@@ -319,9 +320,7 @@ def series_goldens() -> dict[str, Path]:
     }
     present = [name for name, path in paths.items() if path.is_file()]
     if not present:
-        pytest.skip(
-            f"no encoder goldens under {root} — fetch them with `node tools/test-assets/fetch.ts`"
-        )
+        absent_test_asset(f"every encoder golden under {root}")
     missing = sorted(set(paths) - set(present))
     assert not missing, (
         f"golden が一部だけある（欠け: {missing}）— 一組で据える書き手の外で消された"

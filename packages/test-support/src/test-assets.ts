@@ -9,23 +9,22 @@
  * gate (`packages/e2e/tests/e2e_assets_gate_test.ts`) is red while that file is absent or differs
  * from the pin.
  *
- * MUST: {@link TEST_ASSETS} is the single source of truth for the pin. A change that needs new or
- * changed assets uploads them first and moves the revision here in the same commit as the tests that
- * read them (decision 3) — the fetch command, the gate and the README all read it from here.
+ * MUST: `test-assets.pin.json` next to this module is the single source of truth for the pin — this
+ * module exports it as {@link TEST_ASSETS}, and the Python recipe tests read the same file
+ * (`tools/export-recipes/tests/real_assets.py`). A change that needs new or changed assets uploads
+ * them first and moves the revision there in the same commit as the tests that read them (decision 3).
  *
  * No side effects at import: every path is computed, nothing is read until a function is called.
  */
 
 import { isNotFound, readTextFileSync } from "./fs.ts";
-
-/** The dataset repository and the commit SHA the tests read. */
-export const TEST_ASSETS = {
-  repo: "hdae/karume-test-assets",
-  revision: "ab2b38bf07bed01ee61eb4ceb38c3700aa317ac7",
-} as const;
+import pin from "./test-assets.pin.json" with { type: "json" };
 
 /** The shape of a pin (the tests of the fetch command and of the gate pass their own). */
 export type TestAssetsPin = { readonly repo: string; readonly revision: string };
+
+/** The dataset repository and the commit SHA the tests read (`test-assets.pin.json`). */
+export const TEST_ASSETS: TestAssetsPin = pin;
 
 /** The local root `outputs/test-assets/` (resolved from this module, independent of the cwd). */
 export const TEST_ASSETS_ROOT: URL = new URL("../../../outputs/test-assets/", import.meta.url);

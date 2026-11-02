@@ -3,7 +3,8 @@
 The real-weight tests read the files that no distribution carries — recipe outputs (torch / diffusers references,
 inputs captured from upstream) and the inputs this project froze by hand — from the local root
 `outputs/test-assets/`. That root is a cache of the private Hugging Face dataset `hdae/karume-test-assets`, fetched at
-the revision pinned in `packages/test-support/src/test-assets.ts` (`TEST_ASSETS`). The design is
+the revision pinned in `packages/test-support/src/test-assets.pin.json` (read by the TS tests as `TEST_ASSETS` and by
+the Python recipe tests). The design is
 [ADR 0139](../../docs/decisions/0139-tests-on-distributions-and-test-assets.md).
 
 The dataset root and the local root have the same layout, one folder per kind of asset:
@@ -58,7 +59,7 @@ fails loudly when `hf` is missing, when it exits non-zero, and when the pin is s
 
    `.revision` is this machine's record of its last fetch, not an asset (the fetch never downloads one either).
 
-3. Put the new commit SHA of the dataset into `TEST_ASSETS.revision` (`packages/test-support/src/test-assets.ts`) **in
+3. Put the new commit SHA of the dataset into `revision` of `packages/test-support/src/test-assets.pin.json` **in
    the same commit as the tests that read the new assets**, then run the fetch so `.revision` matches the pin.
 
 ## Tests
