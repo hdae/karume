@@ -10,19 +10,35 @@
 // このテストが緑である限り、E2E がゴールデン由来の表で走ることと、ホスト生成の表で走る
 // ことは**同じ計算**になる（バイト一致なので入れ替えても値が動かない）。
 //
-// GPU は使わない。資産（`outputs/series/sbv2-F1/{flow,voice}/`）が無い環境では該当ケースを
-// SKIP する。
+// No GPU. Where the assets come from (ADR 0139): the golden tables are read from the test-asset
+// root, `goldenDir("sbv2-F1")` = `outputs/test-assets/goldens/sbv2-F1/{flow,voice}/io.*` (fetched
+// with `node tools/test-assets/fetch.ts`); the voice window check reads the graph of the
+// distribution's F1 voice container (`models/karume-sbv2-jvnv/`, through its manifest — the graph
+// descriptor is the same for every quant). No distribution ships a flow graph, so the flow window
+// check is an implementation-time series check (`outputs/series/sbv2-F1/flow/`, opt-in
+// `KARUME_SERIES=1`). Each case SKIPs explicitly when the assets it reads are absent — except a
+// target's goldens absent from a complete fetch of the pinned dataset (`testAssetsFetched()`),
+// which FAIL (the dataset at the pin lacks them), and a series flow directory that holds goldens
+// but no container, which FAILs as a half-present series.
 //
 // The asset-free generator tests (fault injection, window semantics, input validation) stay in
-// packages/models/tests/sbv2_relattn_parity_test.ts; only the cases that read the series assets
-// live here (ADR 0129).
+// packages/models/tests/sbv2_relattn_parity_test.ts; only the cases that read real-weight assets
+// (the goldens, the distribution mirror, the series) live here (ADR 0129).
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
+import { goldenDir, TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
-import { parseSafetensors, prepareContainer } from "@karume/runtime";
-import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
+import { parseSafetensors, prepareContainer, type PreparedModel } from "@karume/runtime";
+import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
+import {
+  mirrorPresent,
+  mirrorRoot,
+  openSelectedContainer,
+  selectMirrorComponent,
+} from "../../models/tests/helpers/mirror.ts";
+import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/series-checks.ts";
 import { buildRelattnTables, RELATTN_WINDOW_SIZE } from "../../models/src/sbv2/relattn-tables.ts";
 
 /**
@@ -30,8 +46,19 @@ import { buildRelattnTables, RELATTN_WINDOW_SIZE } from "../../models/src/sbv2/r
  * ディレクトリ名から導いたもので、**当面この 1 話者を決め打ち**する。
  */
 const SERIES_NAME = "sbv2-F1";
-const MODELS_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
+/** The goldens of the series (`outputs/test-assets/goldens/sbv2-F1/`). */
+const GOLDEN_ROOT = goldenDir(SERIES_NAME);
+/** The series itself — read only by the implementation-time flow window check. */
+const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
 const MODEL_FILE = "model.krm";
+/** The distribution that ships the voice graph (`models/karume-sbv2-jvnv/`). */
+const MIRROR_ROOT = mirrorRoot("karume-sbv2-jvnv");
+/**
+ * The mirror selection of the voice window check: the speaker of the series, and one quant — the
+ * graph descriptor (where `idx_v` is baked) is the same for every quant of the voice graph.
+ */
+const MIRROR_CHOICE = { model: "F1", quant: "i8" } as const;
+const FETCH_COMMAND = "node tools/test-assets/fetch.ts";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
@@ -53,23 +80,41 @@ const listDir = (url: URL): readonly DirEntry[] => {
   }
 };
 
-const discoverCases = (target: string): readonly string[] =>
-  listDir(new URL(`${target}/`, MODELS_ROOT))
+const discoverCases = (root: URL, target: string): readonly string[] =>
+  listDir(new URL(`${target}/`, root))
     .filter(
       (entry) => entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX),
     )
     .map((entry) => entry.name)
     .sort();
 
+/** Whether the test-asset root holds a complete fetch of the pin (missing goldens then FAIL). */
+const FETCHED = testAssetsFetched();
+
 const AVAILABLE = TABLE_INPUT_TARGETS.flatMap((target) =>
-  discoverCases(target).map((ioFile) => ({ target, ioFile })),
+  discoverCases(GOLDEN_ROOT, target).map((ioFile) => ({ target, ioFile })),
+);
+/** The targets with no golden at all: a FAIL after a complete fetch, a visible SKIP otherwise. */
+const MISSING_TARGETS = TABLE_INPUT_TARGETS.filter(
+  (target) => discoverCases(GOLDEN_ROOT, target).length === 0,
 );
 
-if (AVAILABLE.length === 0) {
-  console.warn(
-    `[karume] ${MODELS_ROOT.pathname} に flow / voice が無いため相対位置表のパリティ検証を ` +
-      "SKIP する。生成: cd tools/exporter && uv run --group sbv2 python export_sbv2.py",
-  );
+for (const target of MISSING_TARGETS) {
+  const where = new URL(`${target}/`, GOLDEN_ROOT).pathname;
+  if (FETCHED) {
+    test(`relative-position table parity: ${target} has goldens`, () => {
+      throw new Error(
+        `${where} holds no io.* golden, but outputs/test-assets/ holds a complete fetch of ` +
+          `${TEST_ASSETS.repo}@${TEST_ASSETS.revision}: the dataset at the pin lacks them`,
+      );
+    });
+  } else {
+    test.skip(
+      `relative-position table parity: ${target} (skipped: no goldens under ` +
+        `outputs/test-assets/goldens/${SERIES_NAME}/${target}/; fetch: ${FETCH_COMMAND})`,
+      () => {},
+    );
+  }
 }
 
 /**
@@ -93,7 +138,7 @@ const assertSameElements = (
 
 for (const { target, ioFile } of AVAILABLE) {
   test(`相対位置表パリティ: ${target} / ${ioFile}（TS 生成 ↔ golden の Python 生成）`, async () => {
-    const bytes = await readFile(new URL(`${target}/${ioFile}`, MODELS_ROOT));
+    const bytes = await readFile(new URL(`${target}/${ioFile}`, GOLDEN_ROOT));
     const io = parseSafetensors(
       bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
     );
@@ -125,19 +170,76 @@ for (const { target, ioFile } of AVAILABLE) {
   });
 }
 
-for (const target of TABLE_INPUT_TARGETS) {
-  test.skipIf(discoverCases(target).length === 0)(
-    `相対位置表の窓幅: ${target} の焼き込み表と TS 定数が一致する`,
+/** Where each target's graph is read from, and whether this run can read it. */
+type WindowSource = {
+  readonly target: (typeof TABLE_INPUT_TARGETS)[number];
+  readonly runnable: boolean;
+  /** The title suffix (the opt-in of an implementation-time case, empty otherwise). */
+  readonly suffix: string;
+  readonly open: () => Promise<PreparedModel>;
+};
+
+const MIRROR_PRESENT = mirrorPresent(MIRROR_ROOT);
+const FLOW_MODEL = new URL(`flow/${MODEL_FILE}`, SERIES_ROOT);
+/**
+ * Whether the series' flow target exists (its container or its goldens). MUST: read only under
+ * SERIES_CHECKS. Goldens without the container run the case, whose open then FAILs — a
+ * half-present series is not a SKIP.
+ */
+const FLOW_SERIES_PRESENT =
+  SERIES_CHECKS && (modelPresent(FLOW_MODEL) || discoverCases(SERIES_ROOT, "flow").length > 0);
+
+const WINDOW_SOURCES: readonly WindowSource[] = [
+  {
+    // The voice graph is shipped: read it from the distribution. The graph name is the
+    // manifest's weights key (container-v1 §2.1).
+    target: "voice",
+    runnable: MIRROR_PRESENT,
+    suffix: "",
+    open: async () =>
+      prepareContainer(
+        await openSelectedContainer(
+          await selectMirrorComponent(MIRROR_ROOT, "voice", MIRROR_CHOICE),
+        ),
+        "voice",
+      ),
+  },
+  {
+    // No distribution ships a flow graph: an implementation-time series check (ADR 0139
+    // decision 6). MUST: the series is touched only under SERIES_CHECKS.
+    target: "flow",
+    runnable: FLOW_SERIES_PRESENT,
+    suffix: SERIES_CHECKS_OPT_IN,
+    open: async () =>
+      prepareContainer(await openSeriesContainer(FLOW_MODEL), seriesGraph(SERIES_NAME, "flow")),
+  },
+];
+
+if (!MIRROR_PRESENT) {
+  console.warn(
+    `[karume] skipping the voice window check: the distribution mirror ` +
+      `${MIRROR_ROOT.pathname} is absent (or not karume/5).`,
+  );
+}
+if (SERIES_CHECKS && !FLOW_SERIES_PRESENT) {
+  console.warn(
+    `[karume] skipping the flow window check: ${new URL("flow/", SERIES_ROOT).pathname} holds ` +
+      "neither the container nor goldens. Export: " +
+      "cd tools/export-recipes && uv run --group sbv2 python -m sbv2.export --model-dir ../../inputs/sbv2/F1",
+  );
+}
+
+for (const { target, runnable, suffix, open } of WINDOW_SOURCES) {
+  test.skipIf(!runnable)(
+    `relative-position window: the baked ${target} table matches the TS constant${suffix}`,
     async () => {
       // 沈黙誤値クラスの門（ADR 0013）。key 側の表はホストが作るが、**value 側の表
       // `idx_v` はコンテナに焼き込まれていて幅が `2w+1`**。ここが TS の窓幅定数と食い違えば
       // ホストは違う幅の埋め込みを前提に添字を作っている — shape エラーにならず黙って
       // 誤るクラスなので、コンテナから読んだ幅で TS 側の定数を検算する。
-      // グラフ記述は容器の part 0 にある（container-v1 §8）— 重みの block は 1 つも取らない。
-      // グラフ名は helpers/series-graphs.ts の 1 本から引く（門番と同じ正本）。この系列では
-      // 部品ディレクトリ名と同じ綴りになるが、それは事実であって規則ではない。
-      const opened = await openSeriesContainer(new URL(`${target}/${MODEL_FILE}`, MODELS_ROOT));
-      const model = prepareContainer(opened, seriesGraph(SERIES_NAME, target));
+      // The graph descriptor is in part 0 of the container (container-v1 §8) — no weight block
+      // is read.
+      const model = await open();
       const baked = model.graph.nodes
         .filter((node) => node.op === "sym_prefix_slice")
         .map((node) => model.graph.values[node.ins[0]].shape);

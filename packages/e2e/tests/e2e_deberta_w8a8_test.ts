@@ -70,6 +70,14 @@
 //
 // 資産が無い環境では SKIP する（GPU アダプタの有無を見る ADR 0005 の門番とは独立）。鏡像が
 // **一部だけ**ある場合は SKIP ではなく FAIL にする（下の「資産の完全性」テスト）。
+//
+// ## An implementation-time series check (ADR 0139 decision 6)
+//
+// No distribution ships the full-24layer graph, and the distribution never runs DeBERTa in a8 (the
+// SBV2 pipeline builds its text encoder Session with the default execution), so every case of this
+// file reads the series and runs only with `KARUME_SERIES=1`; without it each case SKIPs
+// explicitly and the series is not touched. The mirror goldens stay in the series (they are not
+// part of the test-asset dataset).
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
 import { assert, assertEquals } from "@std/assert";
@@ -100,6 +108,7 @@ import {
   judgeCollapse,
   STRICT_OUTPUTS,
 } from "../../models/tests/helpers/collapse-ceilings.ts";
+import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/series-checks.ts";
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
@@ -225,8 +234,11 @@ const readBuffer = async (file: string): Promise<ArrayBuffer> => {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
-/** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
-const FILES = mirrorFiles(ROOT);
+/**
+ * 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。
+ * MUST: the series is listed only under SERIES_CHECKS (the default lanes do not read it).
+ */
+const FILES = SERIES_CHECKS ? mirrorFiles(ROOT) : [];
 /**
  * 鏡像の有無。1 件も無い = `--act-quant` なしで生成した（または生成していない）環境なので
  * 全 SKIP。export は出力席を丸ごと据え替える（`karume.artifacts.staged_publication`）ので、
@@ -234,8 +246,15 @@ const FILES = mirrorFiles(ROOT);
  */
 const AVAILABLE = FILES.length > 0;
 const RUNNABLE = AVAILABLE && GPU_AVAILABLE;
+/**
+ * The cases registered: the files on disk under SERIES_CHECKS (the completeness case compares them
+ * with {@link EXPECTED_CASES}), the expected set otherwise, so each case SKIPs by name.
+ */
+const CASE_FILES: readonly string[] = SERIES_CHECKS
+  ? FILES
+  : EXPECTED_CASES.map((name) => `${ACT_IO_PREFIX}${name}${IO_SUFFIX}`);
 
-if (!AVAILABLE) {
+if (SERIES_CHECKS && !AVAILABLE) {
   console.warn(
     `[karume] ${ROOT.pathname} に w8a8 鏡像 io（${ACT_IO_PREFIX}<case>）が無いため ` +
       `DeBERTa の w8a8 鏡像門（${VARIANT}）を SKIP する。生成: ${GENERATE}`,
@@ -243,7 +262,7 @@ if (!AVAILABLE) {
 }
 
 test.skipIf(!AVAILABLE)(
-  `DeBERTa w8a8 資産（${VARIANT}）: 鏡像 io の全ケースとモデル本体が揃っている`,
+  `DeBERTa w8a8 assets (${VARIANT}): every mirror io case and the model are present${SERIES_CHECKS_OPT_IN}`,
   () => {
     assertEquals(FILES.map(caseNameOf), [...EXPECTED_CASES], `${ROOT.pathname} の鏡像ケース`);
     assert(modelPresent(new URL(MODEL_FILE, ROOT)), `${MODEL_FILE} が無い`);
@@ -333,10 +352,10 @@ const runCheckedCase = async (
   }
 };
 
-for (const file of FILES) {
+for (const file of CASE_FILES) {
   const caseName = caseNameOf(file);
   test.skipIf(!RUNNABLE)(
-    `DeBERTa w8a8: ${VARIANT} / ${caseName} runs in a8 with the graph's outputs, shapes and dtypes (real GPU)`,
+    `DeBERTa w8a8: ${VARIANT} / ${caseName} runs in a8 with the graph's outputs, shapes and dtypes (real GPU)${SERIES_CHECKS_OPT_IN}`,
     async () => {
       const gpu = await acquireGpu();
       try {
@@ -347,7 +366,7 @@ for (const file of FILES) {
     },
   );
   test.skipIf(!RUNNABLE || !UPSTREAM_PARITY)(
-    `DeBERTa w8a8 鏡像突合: ${VARIANT} / ${caseName}（実 GPU / torch 鏡像期待値）${UPSTREAM_PARITY_OPT_IN}`,
+    `DeBERTa w8a8 mirror parity: ${VARIANT} / ${caseName} (real GPU / torch mirror golden)${UPSTREAM_PARITY_OPT_IN}${SERIES_CHECKS_OPT_IN}`,
     async () => {
       await runRecordedCase(results, { id: `${VARIANT}/${caseName}` }, async (recorded) => {
         const { measurements, comparisons } = recorded;
@@ -400,7 +419,7 @@ for (const file of FILES) {
 }
 
 test.skipIf(!RUNNABLE)(
-  `DeBERTa w8a8（${VARIANT}）: run が i8a8 GEMM と quantize_rows だけで linear を回す（キー census）`,
+  `DeBERTa w8a8 (${VARIANT}): the run drives its linears with i8a8 GEMMs and quantize_rows only (key census)${SERIES_CHECKS_OPT_IN}`,
   async () => {
     // 内訳は T に依らない（計画は記号次元の束縛で形が変わるだけで、dispatch の並びは同じ）ので
     // 1 ケースで足りる。`padded` を使うのはマスク経路まで同じ run に乗せるため。

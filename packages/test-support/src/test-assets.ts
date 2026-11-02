@@ -21,7 +21,7 @@ import { isNotFound, readTextFileSync } from "./fs.ts";
 /** The dataset repository and the commit SHA the tests read. */
 export const TEST_ASSETS = {
   repo: "hdae/karume-test-assets",
-  revision: "b4b86d2d6868a273f6c752ae0342c0efef7b9bb9",
+  revision: "ab2b38bf07bed01ee61eb4ceb38c3700aa317ac7",
 } as const;
 
 /** The shape of a pin (the tests of the fetch command and of the gate pass their own). */
