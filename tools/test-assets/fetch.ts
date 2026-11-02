@@ -7,9 +7,11 @@
  *
  * It runs `hf download <repo> --repo-type dataset --revision <sha> --local-dir <root> --exclude
  * .revision` for the pin in `@karume/test-support/test-assets`, passing each `--include <glob>`
- * through, and records the revision in `<root>/.revision` **only after `hf` exited 0**. A stale `.revision` is removed before
- * the download starts, so a failed or interrupted fetch leaves no record that the assets gate could
- * mistake for a completed one.
+ * through, and records the revision in `<root>/.revision` **only after a complete download** (no
+ * `--include`) exited 0. A stale `.revision` is removed before the download starts, so a failed or
+ * interrupted fetch leaves no record that the assets gate could mistake for a completed one. A partial
+ * fetch never writes the record: it keeps one only when a complete fetch of the same revision is
+ * already there, so the gate stays red on a root that holds part of the assets.
  *
  * The `hf` command is `hf` on PATH (huggingface_hub 1.x), or the executable named by
  * `KARUME_HF_BIN`. The dataset is private: `hf` reads the maintainer's token (`hf auth login`).
@@ -20,6 +22,7 @@ import { fileURLToPath } from "node:url";
 
 import { isNotFound, mkdir, remove, writeTextFile } from "@karume/test-support/fs";
 import {
+  readFetchedRevision,
   REVISION_FILE,
   TEST_ASSETS,
   TEST_ASSETS_ROOT,
@@ -82,6 +85,7 @@ export const downloadArgs = (
 export type FetchOptions = {
   readonly pin?: TestAssetsPin;
   readonly root?: URL;
+  /** `--include` globs; any include makes the fetch partial (no `.revision` is written). */
   readonly includes?: readonly string[];
   /** The executable (and leading arguments) standing for `hf` — tests pass a fake. */
   readonly command?: readonly string[];
@@ -118,15 +122,20 @@ const runToCompletion = (command: readonly string[], args: readonly string[]): P
   });
 
 /**
- * Downloads the pinned dataset into `root` and records the revision once `hf` exited 0.
+ * Downloads the pinned dataset into `root` and, for a complete fetch, records the revision once
+ * `hf` exited 0.
  *
  * MUST: the stale `.revision` is removed before the download and the new one is written only after
- * it completed — otherwise an interrupted fetch would leave the previous revision's record on a
- * root that holds a mix of two revisions, and the gate would read it as fetched.
+ * a complete download — otherwise an interrupted fetch would leave the previous revision's record on
+ * a root that holds a mix of two revisions, and a partial one would stand for assets it did not
+ * fetch; the gate would read either as fetched. A partial fetch keeps the record of a complete fetch
+ * of the same revision (re-fetching part of a complete root leaves it complete).
  */
 export const fetchTestAssets = async (options: FetchOptions = {}): Promise<void> => {
   const pin = options.pin ?? TEST_ASSETS;
   const root = options.root ?? TEST_ASSETS_ROOT;
+  const includes = options.includes ?? [];
+  const partial = includes.length > 0;
   if (pin.revision === PLACEHOLDER_REVISION) {
     throw new Error(
       `the pin of ${pin.repo} is still the placeholder revision ${PLACEHOLDER_REVISION}: ` +
@@ -141,21 +150,25 @@ export const fetchTestAssets = async (options: FetchOptions = {}): Promise<void>
   }
   await mkdir(root, { recursive: true });
   const revisionFile = new URL(REVISION_FILE, root);
-  await remove(revisionFile).catch((cause: unknown) => {
-    if (!isNotFound(cause)) throw cause;
-  });
-  await runToCompletion(
-    options.command ?? hfCommand(),
-    downloadArgs(pin, root, options.includes ?? []),
-  );
-  await writeTextFile(revisionFile, `${pin.revision}\n`);
+  const keepRecord = partial && readFetchedRevision(root) === pin.revision;
+  if (!keepRecord) {
+    await remove(revisionFile).catch((cause: unknown) => {
+      if (!isNotFound(cause)) throw cause;
+    });
+  }
+  await runToCompletion(options.command ?? hfCommand(), downloadArgs(pin, root, includes));
+  if (!partial) await writeTextFile(revisionFile, `${pin.revision}\n`);
 };
 
 if (import.meta.main) {
   try {
-    await fetchTestAssets({ includes: parseArgs(process.argv.slice(2)) });
+    const includes = parseArgs(process.argv.slice(2));
+    await fetchTestAssets({ includes });
     console.log(
-      `fetched ${TEST_ASSETS.repo}@${TEST_ASSETS.revision} into ${fileURLToPath(TEST_ASSETS_ROOT)}`,
+      `fetched ${TEST_ASSETS.repo}@${TEST_ASSETS.revision} into ${fileURLToPath(TEST_ASSETS_ROOT)}` +
+        (includes.length === 0
+          ? ""
+          : " (partial: not recorded as a complete fetch unless one of this revision was already there)"),
     );
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));

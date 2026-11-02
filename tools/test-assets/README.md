@@ -17,8 +17,8 @@ The dataset root and the local root have the same layout, one folder per kind of
 
 ## Fetch
 
-Run from the repository root. The dataset is private, so `hf` must be logged in with a read token that includes it
-(the everyday read token):
+Run from the repository root. The dataset is private, so `hf` must use the project account's token (`Karume Release`,
+the everyday token; `Karume Gated Read` is a different account and cannot read it):
 
 ```
 node tools/test-assets/fetch.ts
@@ -37,8 +37,10 @@ node tools/test-assets/fetch.ts --include 'goldens/birefnet-hr-1024-f16/**'
 node tools/test-assets/fetch.ts --include 'goldens/lucida-1024/**' --include 'corpus/anima/**'
 ```
 
-A partial fetch records the revision too: the gate checks the revision, and each test still skips explicitly or fails
-when a file it reads is absent.
+A partial fetch is not recorded as a complete one: it writes no `.revision`, so the assets gate stays red (a run on
+part of the assets is not release evidence — set `KARUME_ALLOW_NO_ASSETS=1` to say so), and each test skips explicitly
+when a file it reads is absent. Re-fetching part of a root that already holds a complete fetch of the pinned revision
+keeps its record.
 
 `hf` is the Hugging Face CLI (huggingface_hub 1.x) on PATH; `KARUME_HF_BIN=<path>` names another executable. The command
 fails loudly when `hf` is missing, when it exits non-zero, and when the pin is still the placeholder revision.
@@ -48,7 +50,7 @@ fails loudly when `hf` is missing, when it exits non-zero, and when the pin is s
 1. Stage the files under `outputs/test-assets/` at the dataset's layout: each golden at
    `goldens/<series>/<path>`, the same relative path it has under `outputs/series/<series>/` (no containers, nothing
    the distribution already carries — ADR 0139 decision 4); a new kind of asset gets its own top-level folder.
-2. Switch to the write token (`hf auth switch --token-name "Karume Release"`) and upload:
+2. With the project account's token selected (`hf auth list` shows `Karume Release`), upload:
 
    ```
    hf upload-large-folder hdae/karume-test-assets outputs/test-assets --repo-type dataset --exclude .revision
@@ -58,7 +60,6 @@ fails loudly when `hf` is missing, when it exits non-zero, and when the pin is s
 
 3. Put the new commit SHA of the dataset into `TEST_ASSETS.revision` (`packages/test-support/src/test-assets.ts`) **in
    the same commit as the tests that read the new assets**, then run the fetch so `.revision` matches the pin.
-4. Switch back to the read token (`hf auth switch --token-name "Karume Gated Read"`; check with `hf auth list`).
 
 ## Tests
 

@@ -127,6 +127,35 @@ describe("fetch: a download that completes", () => {
   });
 });
 
+describe("fetch: a partial download (--include) is not recorded as complete", () => {
+  const includes = ["goldens/lucida-1024/**"];
+
+  it("writes no .revision on a root without one (the gate stays red)", async () => {
+    await withRig(async (rig) => {
+      await fetchTestAssets({ pin: PIN, root: rig.root, includes, command: rig.command("ok") });
+      assertEquals(await exists(rig.revisionFile), false);
+    });
+  });
+
+  it("keeps the record of a complete fetch of the same revision", async () => {
+    await withRig(async (rig) => {
+      await fetchTestAssets({ pin: PIN, root: rig.root, command: rig.command("ok") });
+      await fetchTestAssets({ pin: PIN, root: rig.root, includes, command: rig.command("ok") });
+      assertEquals(await readTextFile(rig.revisionFile), `${PIN.revision}\n`);
+    });
+  });
+
+  it("drops the record of another revision before hf starts", async () => {
+    await withRig(async (rig) => {
+      await fetchTestAssets({ pin: PIN, root: rig.root, command: rig.command("ok") });
+      await writeTextFile(rig.revisionFile, `${"f".repeat(40)}\n`);
+      await fetchTestAssets({ pin: PIN, root: rig.root, includes, command: rig.command("ok") });
+      assertEquals((await rig.recorded()).revisionAtStart, false);
+      assertEquals(await exists(rig.revisionFile), false);
+    });
+  });
+});
+
 describe("fetch: a download that does not complete leaves no .revision", () => {
   it("hf exits non-zero: the fetch fails naming the exit code, and the stale record is gone", async () => {
     await withRig(async (rig) => {
