@@ -102,3 +102,10 @@ silent green would read "not verified" as "verified".
 - sha256 regression checks (ADR 0106) guard Karume's own output, separately from upstream parity,
   and MUST NOT become tolerances. In the suite, upstream-parity cases run only with
   `KARUME_UPSTREAM_PARITY=1` (ADR 0129 addendum 2026-10-17 (2)).
+
+## Addendum (2026-11-02) — real-weight assets are the distributions and the pinned test assets
+
+The all-skip gate for real-weight assets (addendum 2026-09-05) now checks the fetched test-asset root
+`outputs/test-assets/` against its pinned revision instead of `outputs/series/` (ADR
+[0139](0139-tests-on-distributions-and-test-assets.md) decision 5); `KARUME_ALLOW_NO_ASSETS=1` is still the opt-out, and a
+partial fetch leaves the gate red.

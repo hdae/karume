@@ -58,6 +58,7 @@
 | default preset ◆ | 既定のプリセット | manifest の `defaultQuant`。モデルごとに保守者が実測（速度 / メモリ / 品質）で選んで記録する実用のプリセット（量子化を含むことがある）。オリジナルの重みのプリセットは努力目標で opt-in | 既定席・忠実席 | ADR 0128（2026-10-17 書き換え） |
 | family ◆ | ファミリー | モデルの種類（anima / wan / gemma4 …）。`@karume/models/<family>` | 系列（モデルの意味で） | CLAUDE.md |
 | series ◆ | 中間成果物 | exporter が書く中間成果物のディレクトリ（`outputs/series/<name>/`）。配布形の 1 つ手前 | 系列（資産の意味で）・シリーズ | assets-layout |
+| test assets | テスト資産 | 配布物に入らないテストの入力と参照（golden と corpus）。private dataset `hdae/karume-test-assets` を pin した版で `outputs/test-assets/` に取得する | テストアセット | ADR 0139 |
 | distribution △ | 配布形 | HF に置く形（manifest + `krm`）。`models/` のミラー | — | ADR 0109 / container-v1 |
 | container (`krm`) | コンテナ | 配布形の実体ファイル | — | container-v1 |
 | export recipe | レシピ | モデル別の export 手順（`tools/export-recipes/`） | — | ADR 0065 |

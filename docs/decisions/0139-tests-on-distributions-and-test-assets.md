@@ -67,8 +67,10 @@ comparison until every model is exported again.
    files the distribution already carries, goldens no test reads (for example `gemma4-e4b-decode`), and the goldens
    of implementation-time tests (decision 6).
 5. **The assets gate moves from the series root to the test-asset root.** It is red when `outputs/test-assets/` is
-   absent or
-   its `.revision` differs from the pin; the opt-out stays `KARUME_ALLOW_NO_ASSETS=1`. The series-graph table
+   absent or its `.revision` differs from the pin; the opt-out stays `KARUME_ALLOW_NO_ASSETS=1`. A partial fetch
+   (`--include`) writes no `.revision`. A default-lane case whose test asset is absent FAILs when the root holds a
+   complete fetch of the pin (the dataset lacks a file the tests read) and SKIPs explicitly otherwise; a missing
+   mirror, or a sibling mirror it references, is a SKIP (the distribution gate owns that red). The series-graph table
    (`series-graphs.ts`) is retired; the graph-name check moves to the distribution gate, which checks every
    model × quant × graph that a manifest declares (parts present with their declared sizes, the container's graph
    name equal to the weights key), not only the default selection.
@@ -81,8 +83,9 @@ comparison until every model is exported again.
 8. **Series are transient.** Adding or re-exporting a model is: export → implementation-time checks → assemble the
    distribution → publish → upload the goldens and move the pin → record sha rows → the series may be deleted.
    Rebuilding a distribution or regenerating a golden exports again.
-9. **Access.** The dataset is private and read with the maintainer's read token (which must include it); uploads use
-   the write token, and the read token is restored afterwards. Before anyone else is given access, the licences of
+9. **Access.** The dataset is private; it is read and written with the project account's token (`Karume Release`,
+   the everyday token — the release runbook's token step). The personal account's `Karume Gated Read` cannot be
+   granted access to it and is used only to fetch gated upstream models. Before anyone else is given access, the licences of
    the upstream models whose outputs the goldens contain are checked.
 
 ## Rulings (2026-11-02)

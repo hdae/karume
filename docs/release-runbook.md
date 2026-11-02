@@ -121,7 +121,8 @@ after changing to the repository root, so the pin applies to it too.
 - [ ] `vp check && vp test` green (full verify = every lane with the GPU tests — a SKIP on an environment without an adapter is not allowed for the release decision;
       ADR 0005). **Conditions for the release machine**: real hardware whose adapter
       **enumerates** `shader-f16` and `timestamp-query` (a software adapter (lavapipe etc.) computes f16 in f32,
-      so it is kept apart from the real-hardware lane), with the real-weight series (`outputs/series/`) in place.
+      so it is kept apart from the real-hardware lane), with the distribution mirrors (`models/`) and a complete fetch of the
+      pinned test assets (`node tools/test-assets/fetch.ts` → `outputs/test-assets/` — ADR 0139) in place.
       Passing verify on a machine missing the enumeration, assets, reference values or distribution mirrors needs the env variables that declare that intent
       (`KARUME_ALLOW_NO_SHADER_F16` / `KARUME_ALLOW_NO_TIMESTAMP_QUERY` /
       `KARUME_ALLOW_NO_ASSETS` / `KARUME_ALLOW_NO_REFERENCE` / `KARUME_ALLOW_NO_DISTRIBUTION`), but
@@ -194,13 +195,12 @@ export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
 - [ ] **Move `~/.cache/huggingface/xet/*/shard-cache` aside every time** (not only for re-uploads but
       **for first uploads too**). Shards fetched from the server by a global-dedup hit stay here, and
       the next upload picks them up and inherits the fragmentation
-- [ ] **Switch to the write token**: `tools/.venv/bin/hf auth switch --token-name "Karume Release"` —
-      with the default read token (Karume Gated Read) the LFS batch returns 403
-      (measured 2026-08-21). **When the upload is done, switch back to the read token**:
-      `tools/.venv/bin/hf auth switch --token-name "Karume Gated Read"` → check the selected token with `tools/.venv/bin/hf auth list`.
-      NOTE: in practice this switch-back is not kept (as of 2026-09-24, Karume Release had stayed selected since the
-      upload of 09-23). With the write token in everyday use, a mistake even in read-only work
-      becomes a write to HF as is
+- [ ] **Use the project account's token**: `tools/.venv/bin/hf auth switch --token-name "Karume Release"` (the
+      `hdae` account, read and write) — check the selected token with `tools/.venv/bin/hf auth list`. It is the
+      everyday token (maintainer, 2026-11-02). `Karume Gated Read` belongs to a different, personal account and is
+      used **only** to fetch gated upstream models; it cannot be granted access to `hdae` repositories (with it the
+      LFS batch returns 403 — measured 2026-08-21). Switch to it only for such a fetch and back to `Karume Release`
+      afterwards. NOTE: with a write token in everyday use, a mistake in read-only work can become a write to HF
 - [ ] **The script is also the machine check** (it does not rely on a human looking): `upload` exits non-zero as soon as
       moving the shard-cache aside fails, and after the upload it checks `global_dedup_query_enabled = false` and
       0 CAS lookups and exits non-zero on a mismatch. `check` fails non-zero when `models/<repo>` has

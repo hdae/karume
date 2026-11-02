@@ -482,3 +482,12 @@ is listed under "Follow-ups" and is not done by this addendum.
   three core gates need neither, and the `*_host*_test.ts` files need no GPU).
 - ~~ADR [0135](0135-gated-delta-rule-scan.md) speaks of "opt-in" lanes in three places; it should say
   "opt-in case in the family lane" (decision 3 above).~~ Done 2026-10-31, with its acceptance.
+
+## Addendum 2026-11-02 — the assets gate checks the test-asset root
+
+ADR [0139](0139-tests-on-distributions-and-test-assets.md) moves the real-weight tests off `outputs/series/`: the
+default lanes open containers from the distribution mirrors and read goldens and corpus inputs from the fetched test
+assets (`outputs/test-assets/`). Decision 3's assets gate (`e2e_assets_gate_test.ts`) is therefore red when no complete
+fetch of the pinned revision is present (its opt-out `KARUME_ALLOW_NO_ASSETS` is unchanged), and the distribution gate
+checks every declared model × quant × graph. Tests of graphs no distribution ships run only with `KARUME_SERIES=1` — a
+flag in the family lane, like upstream parity (addendum 2026-10-29), not a separate lane.
