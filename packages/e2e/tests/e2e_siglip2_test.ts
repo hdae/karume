@@ -3,9 +3,16 @@
 // tiny golden（tests/e2e_golden_test.ts）が「op 契約の被覆」を、実重み SBV2 / Irodori が
 // 「音響チェーン側の実重み」を、EmbeddingGemma（tests/e2e_embeddinggemma_test.ts）が
 // 「単一ベクトル出力のテキスト系」を受け持つのに対し、こちらは**単一ベクトル出力の画像系**
-// を受け持つ。対象は `outputs/series/<系列>/`（重み 350MB〜1.7GB のためリポジトリ管理外 —
-// `.gitignore` の `outputs/`）。生成は `tools/exporter/export_siglip2.py`（コマンドは下の
-// generateCommand がそのまま正本）。
+// を受け持つ。
+//
+// The container comes from the distribution mirror `models/karume-siglip2/` (model `base` /
+// `so400m`, quant `f32`, graph `vision`, read through the manifest) and the goldens from the
+// test-asset root (`goldenDir(<series>)`, fetched with `node tools/test-assets/fetch.ts`) — ADR
+// 0139. The goldens are recipe outputs of `tools/export-recipes/siglip2/export.py` (the command is
+// {@link realGenerateCommand}). Each case requires the mirror plus exactly the goldens it reads. A
+// golden that is absent SKIPs only while the test-asset root is not a complete fetch of the pin (the
+// assets gate is red then); absent from a complete fetch, it FAILs — the dataset at the pin lacks
+// it. An absent mirror SKIPs (the distribution gate owns that red).
 //
 // 系列は **モデルごとに 1 本**（下の SERIES）。base（`patch16-224` — hidden 768 / 12 層 /
 // 196 パッチ）と so400m（`patch14-384` — hidden 1152 / 27 層 / 729 パッチ）は同じ経路の
@@ -47,6 +54,7 @@
 // 「資産の完全性」テスト）— そこは無音の見かけ成功になる。
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
+import { goldenDir, TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import {
@@ -74,8 +82,12 @@ import {
   settleOrObserve,
 } from "../../runtime/tests/helpers/reference.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
-import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
+import {
+  mirrorPresent,
+  mirrorRoot,
+  openSelectedContainer,
+  selectMirrorComponent,
+} from "../../models/tests/helpers/mirror.ts";
 
 /**
  * 実重み SigLIP2 **base**（`patch16-224`）の torch CPU 期待値との突合に使う許容誤差。
@@ -194,7 +206,19 @@ const REAL_SO400M_TOLERANCE: Tolerance = { atol: 1e-4, rtol: 0 };
 
 /** 系列（= モデル）1 本の宣言。系列名は exporter の `--model-dir` のディレクトリ名。 */
 type Series = {
+  /**
+   * The series name: the golden directory (`goldenDir(name)`) and the prefix of the sha256 case
+   * IDs (frozen — ADR 0139 decision 7).
+   */
   readonly name: string;
+  /** The model of the distribution mirror `models/karume-siglip2/` that ships this series. */
+  readonly model: string;
+  /**
+   * The quant of that model: the storage dtype the series used. Pinned, not left to the manifest's
+   * default, so a new default quant cannot change the container these cases and their sha256 rows
+   * test.
+   */
+  readonly quant: string;
   readonly tolerance: Tolerance;
   /** 実画像ケースの許容誤差（合成画像とは独立に実測から導く — {@link REAL_BASE_TOLERANCE}）。 */
   readonly realTolerance: Tolerance;
@@ -207,34 +231,66 @@ type Series = {
 const SERIES: readonly Series[] = [
   {
     name: "siglip2-base-patch16-224",
+    model: "base",
+    quant: "f32",
     tolerance: BASE_TOLERANCE,
     realTolerance: REAL_BASE_TOLERANCE,
   },
   {
     name: "siglip2-so400m-patch14-384",
+    model: "so400m",
+    quant: "f32",
     tolerance: SO400M_TOLERANCE,
     realTolerance: REAL_SO400M_TOLERANCE,
   },
 ];
 
-const SERIES_PARENT = new URL("../../../outputs/series/", import.meta.url);
-const MODEL_FILE = "model.krm";
+/** The distribution mirror that ships both models. */
+const MIRROR = mirrorRoot("karume-siglip2");
+/** The graph name in the container = the manifest's weights key (container-v1 §2.1). */
+const GRAPH = "vision";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
+/** The command that fetches the goldens (pasted into the skip warnings). */
+const FETCH_COMMAND = "node tools/test-assets/fetch.ts";
 
-const seriesRoot = (series: Series): URL => new URL(`${series.name}/`, SERIES_PARENT);
+/** The golden directory of a series (`outputs/test-assets/goldens/<series>/`). */
+const goldenRoot = (series: Series): URL => goldenDir(series.name);
 
 /**
- * SKIP 時にそのまま貼れる生成コマンド（tools/exporter/export_siglip2.py の docstring）。
+ * Whether `outputs/test-assets/` holds a complete fetch of the pinned revision. Then a golden that
+ * is absent is a FAIL (the dataset at the pin lacks it), not a SKIP.
+ */
+const FETCHED = testAssetsFetched();
+/**
+ * The failure message of a test asset the case reads that is absent: from a complete fetch of the
+ * pin (the dataset lacks it), or from a partial test-asset root.
+ */
+const absentAsset = (url: URL): string =>
+  FETCHED
+    ? `${url.pathname} is absent, but outputs/test-assets/ holds a complete fetch of ` +
+      `${TEST_ASSETS.repo}@${TEST_ASSETS.revision}: the dataset at the pin lacks it`
+    : `${url.pathname} is absent (fetch: ${FETCH_COMMAND})`;
+/** Title suffixes of a case that SKIPs for want of an asset, so the test list says why. */
+const NOT_FETCHED = " (SKIP: goldens not fetched)";
+const MIRROR_ABSENT = " (SKIP: distribution mirror absent)";
+
+/** Opens the series' `vision` container from the mirror (through the manifest — ADR 0139). */
+const openVision = async (series: Series): Promise<PreparedModel> =>
+  prepareContainer(
+    await openSelectedContainer(
+      await selectMirrorComponent(MIRROR, GRAPH, { model: series.model, quant: series.quant }),
+    ),
+    GRAPH,
+  );
+
+/**
+ * The export command that regenerates the goldens, real-image cases included
+ * (`tools/export-recipes/siglip2/export.py`; `--real-images` needs the `siglip2-preprocess` group).
  * 系列名は実重みのディレクトリ名でもある（どちらも HF のリポジトリ名）。
  */
-const generateCommand = (series: Series): string =>
-  "cd tools/exporter && uv run --group siglip2 python export_siglip2.py" +
-  ` --model-dir ../../inputs/siglip2/${series.name}`;
-
-/** 実画像ケースまで含めて採り直すコマンド（`--real-images` はグループが違う）。 */
 const realGenerateCommand = (series: Series): string =>
-  "cd tools/exporter && uv run --group siglip2-preprocess python export_siglip2.py" +
+  "cd tools/export-recipes && uv run --group siglip2-preprocess python -m siglip2.export" +
   ` --real-images --model-dir ../../inputs/siglip2/${series.name}`;
 
 /**
@@ -342,42 +398,54 @@ const references = openReferences(
  */
 const caseIds: string[] = [];
 
+/** Whether the distribution mirror is present (`karume/5`). */
+const MIRROR_PRESENT = mirrorPresent(MIRROR);
+if (!MIRROR_PRESENT) {
+  console.warn(
+    `[karume] The distribution mirror ${MIRROR.pathname} is absent (or not karume/5), so the ` +
+      "real-weight SigLIP2 vision E2E is skipped (place the published distribution under models/).",
+  );
+}
+
 for (const series of SERIES) {
-  const root = seriesRoot(series);
-  /** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
-  const graphName = seriesGraph(series.name);
+  const root = goldenRoot(series);
   /** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
   const discovered = discoverCases(root);
   const realNames = new Set<string>(REAL_CASES);
   const cases = discovered.filter((name) => !realNames.has(name));
   const realCases = discovered.filter((name) => realNames.has(name));
-  /** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
+  /**
+   * Whether any golden is present. None and not a complete fetch = the goldens were not fetched, so
+   * every case of the series and the completeness test SKIP; none in a complete fetch, or a partial
+   * set, is a FAIL of the completeness test.
+   */
   const available = discovered.length > 0;
   /** 実画像の群（`--real-images` を付けずに emit した資産には無い）。 */
   const realAvailable = available && realCases.length > 0;
-  /**
-   * **何か 1 つでも**残っているか（完全性テストの SKIP 述語 — Codex 波 H 指摘 H-02）。
-   * golden が全滅してモデルだけ残った欠損は `available` では偽になり、`ignore: !available`
-   * だと完全性テスト自身が SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
-   */
-  const anyPresent = available || modelPresent(new URL(MODEL_FILE, root));
+  const goldensMissing = !available && !FETCHED;
+  /** The discrimination reads the real-image goldens: absent from a complete fetch, it FAILs. */
+  const realMissing = !realAvailable && !FETCHED;
 
-  if (!available) {
+  if (goldensMissing) {
     console.warn(
-      `[karume] ${root.pathname} に export 済み資産が無いため実重み SigLIP2 vision E2E ` +
-        `(${series.name}) を SKIP する（重みがリポジトリ管理外）。` +
-        `生成: ${generateCommand(series)}`,
+      `[karume] The goldens ${root.pathname} are absent, so the real-weight SigLIP2 vision E2E ` +
+        `of ${series.name} is skipped. Fetch: ${FETCH_COMMAND}`,
     );
-  } else if (!realAvailable) {
+  } else if (available && !realAvailable) {
     console.warn(
       `[karume] 実画像ケース (${series.name}) を SKIP する（golden ${realCases.length}/` +
         `${REAL_CASES.length} 本）。生成: ${realGenerateCommand(series)}`,
     );
   }
 
-  test.skipIf(!anyPresent)(
-    `SigLIP2 資産: ${series.name} — 期待するケースとモデル本体が揃っている`,
+  // The completeness test covers the goldens only: the container moved to the mirror, whose parts
+  // the distribution gate checks (packages/runtime/tests/distribution_gate_test.ts). It sleeps only
+  // on a golden directory that is entirely absent while the test-asset root is not a complete fetch
+  // of the pin; absent from a complete fetch, the directory FAILs here.
+  test.skipIf(goldensMissing)(
+    `SigLIP2 goldens: ${series.name} — the expected cases are present${goldensMissing ? NOT_FETCHED : ""}`,
     () => {
+      assert(available, absentAsset(root));
       assertEquals(cases, [...EXPECTED_CASES], `${root.pathname} の合成画像 golden ケース`);
       // 実画像は**任意だが全部か 0 か**（`--real-images` を付けた emit は 4 本まとめて書く）。
       // 部分的な欠けを SKIP に丸めると、採り直しの途中で落ちた資産が黙って通る。
@@ -386,7 +454,6 @@ for (const series of SERIES) {
         `${root.pathname} の実画像 golden が ${realCases.length}/${REAL_CASES.length} 本` +
           `（採り直す: ${realGenerateCommand(series)}）`,
       );
-      assert(modelPresent(new URL(MODEL_FILE, root)), `${MODEL_FILE} が無い`);
     },
   );
 
@@ -413,18 +480,18 @@ for (const series of SERIES) {
     const caseName = entry.name;
     /** ケース ID（系列が違えば同じケース名があるので組で持つ）。 */
     const caseId = `${series.name}/${caseName}`;
-    if (!entry.ignore) caseIds.push(caseId);
-    test.skipIf(entry.ignore || !GPU_AVAILABLE)(
-      `SigLIP2 ${entry.label}: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）`,
+    if (!entry.ignore && MIRROR_PRESENT) caseIds.push(caseId);
+    test.skipIf(entry.ignore || !MIRROR_PRESENT || !GPU_AVAILABLE)(
+      `SigLIP2 ${entry.label}: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）` +
+        (MIRROR_PRESENT ? "" : MIRROR_ABSENT),
       async () => {
         /** sha の決着（突合したときだけ — 記録の後で不一致を落とすために外へ持ち出す）。 */
         let settlement: ReferenceSettlement | undefined;
         await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
-          const [opened, ioBytes] = await Promise.all([
-            openSeriesContainer(new URL(MODEL_FILE, root)),
+          const [parsed, ioBytes] = await Promise.all([
+            openVision(series),
             readBuffer(root, `${IO_PREFIX}${caseName}${IO_SUFFIX}`),
           ]);
-          const parsed = prepareContainer(opened, graphName);
           const io = parseSafetensors(ioBytes);
 
           // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
@@ -507,9 +574,15 @@ for (const series of SERIES) {
     );
   }
 
-  test.skipIf(!realAvailable || !GPU_AVAILABLE)(
-    `SigLIP2 判別: ${series.name} — 人物 2 枚の cosine が人物と風景のどの対よりも高い`,
+  test.skipIf(realMissing || !MIRROR_PRESENT || !GPU_AVAILABLE)(
+    `SigLIP2 判別: ${series.name} — 人物 2 枚の cosine が人物と風景のどの対よりも高い` +
+      (realMissing ? NOT_FETCHED : "") +
+      (MIRROR_PRESENT ? "" : MIRROR_ABSENT),
     async () => {
+      for (const real of REAL_CASES) {
+        const golden = new URL(`${IO_PREFIX}${real}${IO_SUFFIX}`, root);
+        assert(realCases.includes(real), absentAsset(golden));
+      }
       // golden 突合だけだと「期待値と合っている」ことしか言えず、埋め込みとして意味のある
       // 出力かは別問題（1 点へ潰れた出力は期待値も同じく潰れていれば通ってしまう）。ここは
       // **別々の入力どうしの順序**を見るので、出力がケース間で定数なら cosine が全て 1 に
@@ -522,10 +595,7 @@ for (const series of SERIES) {
       // その幅では順序が反転しないことを実測してある（2026-08-14: 人物対と最悪の交差対の差は
       // base 0.1196 / so400m 0.0747 なのに対し、入力を TS 前処理へ差し替えたときの各 cosine の
       // 動きは最大 1.6e-3 —— 2 桁小さい）。
-      const parsed = prepareContainer(
-        await openSeriesContainer(new URL(MODEL_FILE, root)),
-        graphName,
-      );
+      const parsed = await openVision(series);
       const [outputName] = parsed.graph.outputs;
 
       const pooled = new Map<string, Float32Array>();

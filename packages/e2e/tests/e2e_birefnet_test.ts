@@ -3,10 +3,11 @@
 //
 // tiny golden（tests/e2e_golden_test.ts）が「op 契約の被覆」を、SigLIP2
 // （tests/e2e_siglip2_test.ts）が「単一ベクトル出力の画像系」を受け持つのに対し、こちらは
-// **画素ごとの出力を持つ画像系**（`[1,1,S,S]` の 1,048,576 要素マップ）を受け持つ。対象は
-// `outputs/series/<系列>/`（重み + 焼いた定数で 1 系列 964MB のためリポジトリ管理外 —
-// `.gitignore` の `outputs/`）。生成は `tools/export-recipes/birefnet/export.py`（コマンドは
-// 各系列の {@link Series.generate} がそのまま正本）。
+// **画素ごとの出力を持つ画像系**（`[1,1,S,S]` の 1,048,576 要素マップ）を受け持つ。
+//
+// The containers come from the distribution mirrors and the goldens from the test-asset root (both
+// outside git — "Where the assets come from" below). The goldens are recipe outputs of
+// `tools/export-recipes/birefnet/export.py` (the command per series is {@link Series.generate}).
 //
 // 系列は**モデル × 解像度ごとに 1 本**（下の {@link SERIES}）。BiRefNet_HR（上流の
 // 高解像度チェックポイント）と Lucida（その fine-tune — 構造は完全に同一で重みだけが違う）を
@@ -63,8 +64,22 @@
 // 「全 SKIP は明示 FAIL」門番（tests/gpu_gate_test.ts）は *GPU アダプタの有無* だけを見て
 // おり、この SKIP とは独立。逆に資産が**中途半端に**（ケース欠け）存在する場合は SKIP ではなく
 // FAIL にする（下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
+//
+// ## Where the assets come from (ADR 0139)
+//
+// The containers are read from the distribution mirrors (`models/karume-birefnet-hr/`,
+// `models/karume-lucida/`) through their manifests — model = resolution, quant = storage dtype
+// ({@link Series.mirror}). The goldens (`io.*.safetensors`) are read from the test-asset root,
+// `goldenDir(<series>)` = `outputs/test-assets/goldens/<series>/` (fetched with
+// `node tools/test-assets/fetch.ts`). Each case requires exactly the assets it reads: the storage
+// case the mirror only, the geometry case the mirror plus `io.disc`, the parity cases the mirror plus
+// their golden. The series names stay as the golden directory names, the case IDs and the keys of
+// {@link HELD_SERIES}. A golden that is absent SKIPs only while the test-asset root is not a
+// complete fetch of the pin (the assets gate is red then); absent from a complete fetch, it FAILs —
+// the dataset at the pin lacks it. An absent mirror SKIPs (the distribution gate owns that red).
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
+import { goldenDir, TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import {
@@ -89,8 +104,13 @@ import {
 import { ioTensor } from "../../runtime/tests/helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
-import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
+import {
+  type MirrorChoice,
+  mirrorPresent,
+  mirrorRoot,
+  openSelectedContainer,
+  selectMirrorComponent,
+} from "../../models/tests/helpers/mirror.ts";
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
@@ -296,9 +316,14 @@ const MASK_DISAGREEMENT_LIMIT = 1e-4;
 
 /** 実走する 1 系列（モデル × 解像度）。 */
 type Series = {
-  /** `outputs/series/` 直下のディレクトリ名（`birefnet.export.default_out_dir` の綴り）。 */
+  /**
+   * The series name (`birefnet.export.default_out_dir`): the golden directory
+   * (`goldenDir(name)`), the prefix of the case IDs and the key of {@link HELD_SERIES}.
+   */
   readonly name: string;
-  /** SKIP 時にそのまま貼れる生成コマンド。 */
+  /** The distribution mirror that ships this series' container, and its selection. */
+  readonly mirror: { readonly repo: string } & Required<MirrorChoice>;
+  /** The export command that regenerates this series' goldens (pasted into failure messages). */
   readonly generate: string;
   /** 合成画像ケースの許容誤差（**系列ごとに独立実測** — モジュール docstring）。 */
   readonly tolerance: Tolerance;
@@ -331,6 +356,7 @@ const EXPORT_PREFIX =
 const SERIES: readonly Series[] = [
   {
     name: "lucida-1024",
+    mirror: { repo: "karume-lucida", model: "1024", quant: "f32" },
     generate: `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --real-images`,
     tolerance: LUCIDA_SYNTHETIC_TOLERANCE,
     realTolerance: LUCIDA_REAL_TOLERANCE,
@@ -338,6 +364,7 @@ const SERIES: readonly Series[] = [
   },
   {
     name: "lucida-2048",
+    mirror: { repo: "karume-lucida", model: "2048", quant: "f32" },
     generate: `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --resolution 2048`,
     tolerance: LUCIDA_2048_SYNTHETIC_TOLERANCE,
     realTolerance: LUCIDA_REAL_TOLERANCE,
@@ -345,6 +372,7 @@ const SERIES: readonly Series[] = [
   },
   {
     name: "birefnet-hr-1024-f16",
+    mirror: { repo: "karume-birefnet-hr", model: "1024", quant: "f16" },
     generate: `${EXPORT_PREFIX} --dtype f16 --real-images`,
     tolerance: HR_F16_SYNTHETIC_TOLERANCE,
     realTolerance: HR_F16_REAL_TOLERANCE,
@@ -352,6 +380,7 @@ const SERIES: readonly Series[] = [
   },
   {
     name: "birefnet-hr-2048-f16",
+    mirror: { repo: "karume-birefnet-hr", model: "2048", quant: "f16" },
     generate: `${EXPORT_PREFIX} --dtype f16 --resolution 2048`,
     tolerance: HR_F16_2048_SYNTHETIC_TOLERANCE,
     realTolerance: HR_F16_REAL_TOLERANCE,
@@ -359,6 +388,7 @@ const SERIES: readonly Series[] = [
   },
   {
     name: "lucida-1024-f16",
+    mirror: { repo: "karume-lucida", model: "1024", quant: "f16" },
     generate: `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --dtype f16 --real-images`,
     tolerance: LUCIDA_F16_SYNTHETIC_TOLERANCE,
     realTolerance: LUCIDA_F16_REAL_TOLERANCE,
@@ -366,6 +396,7 @@ const SERIES: readonly Series[] = [
   },
   {
     name: "lucida-2048-f16",
+    mirror: { repo: "karume-lucida", model: "2048", quant: "f16" },
     generate: `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --dtype f16 --resolution 2048`,
     tolerance: LUCIDA_F16_2048_SYNTHETIC_TOLERANCE,
     realTolerance: LUCIDA_F16_REAL_TOLERANCE,
@@ -420,12 +451,44 @@ const heldReason = (series: Series): string | undefined => {
   return byEnvironment[environment].reason;
 };
 
-const SERIES_PARENT = new URL("../../../outputs/series/", import.meta.url);
-const MODEL_FILE = "model.krm";
+/** The graph name in the container = the manifest's weights key (container-v1 §2.1). */
+const GRAPH = "matte";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
+/** The command that fetches the goldens (pasted into the skip warnings). */
+const FETCH_COMMAND = "node tools/test-assets/fetch.ts";
 
-const seriesRoot = (series: Series): URL => new URL(`${series.name}/`, SERIES_PARENT);
+/** The golden directory of a series (`outputs/test-assets/goldens/<series>/`). */
+const goldenRoot = (series: Series): URL => goldenDir(series.name);
+
+/**
+ * Whether `outputs/test-assets/` holds a complete fetch of the pinned revision. Then a golden that
+ * is absent is a FAIL (the dataset at the pin lacks it), not a SKIP.
+ */
+const FETCHED = testAssetsFetched();
+/**
+ * The failure message of a test asset the case reads that is absent: from a complete fetch of the
+ * pin (the dataset lacks it), or from a partial test-asset root.
+ */
+const absentAsset = (url: URL): string =>
+  FETCHED
+    ? `${url.pathname} is absent, but outputs/test-assets/ holds a complete fetch of ` +
+      `${TEST_ASSETS.repo}@${TEST_ASSETS.revision}: the dataset at the pin lacks it`
+    : `${url.pathname} is absent (fetch: ${FETCH_COMMAND})`;
+/** Title suffixes of a case that SKIPs for want of an asset, so the test list says why. */
+const NOT_FETCHED = " (SKIP: goldens not fetched)";
+const MIRROR_ABSENT = " (SKIP: distribution mirror absent)";
+/** The distribution mirror that ships the series' container (`models/<repo>/`). */
+const mirrorOf = (series: Series): URL => mirrorRoot(series.mirror.repo);
+
+/** Opens the series' `matte` container from its mirror (through the manifest — ADR 0139). */
+const openMatte = async (series: Series): Promise<PreparedModel> => {
+  const { repo, ...choice } = series.mirror;
+  const opened = await openSelectedContainer(
+    await selectMirrorComponent(mirrorRoot(repo), GRAPH, choice),
+  );
+  return prepareContainer(opened, GRAPH);
+};
 
 /**
  * 生成されているはずの**合成画像**ケース。正本は `birefnet/export.py` の
@@ -544,23 +607,24 @@ const discMeans = (logits: Float32Array, size: number): { inside: number; outsid
 type Discovery = {
   readonly cases: readonly string[];
   readonly realCases: readonly string[];
-  /** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
+  /**
+   * Whether any golden of the series is present. None and not a complete fetch = the goldens were
+   * not fetched, so the golden cases and the completeness test SKIP; none in a complete fetch, or a
+   * partial set, is a FAIL of the completeness test.
+   */
   readonly available: boolean;
   /** 実画像の群（`--real-images` を付けずに emit した資産には無い）。 */
   readonly realAvailable: boolean;
-  /**
-   * **何か 1 つでも**残っているか（完全性テストの SKIP 述語 — Codex 波 H 指摘 H-02）。
-   * golden が全滅してモデルだけ残った欠損は `available` では偽になり、`ignore: !available`
-   * だと完全性テスト自身が SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
-   */
-  readonly anyPresent: boolean;
+  /** Whether the golden of the geometry case (`io.disc`) is present. */
+  readonly discAvailable: boolean;
+  /** Whether the distribution mirror that ships the container is present (`karume/5`). */
+  readonly mirror: boolean;
 };
 
 const realNames = new Set<string>(REAL_CASES);
 
 const discover = (series: Series): Discovery => {
-  const root = seriesRoot(series);
-  const discovered = discoverCases(root);
+  const discovered = discoverCases(goldenRoot(series));
   const realCases = discovered.filter((name) => realNames.has(name));
   const available = discovered.length > 0;
   return {
@@ -568,7 +632,8 @@ const discover = (series: Series): Discovery => {
     realCases,
     available,
     realAvailable: available && realCases.length > 0,
-    anyPresent: available || modelPresent(new URL(MODEL_FILE, root)),
+    discAvailable: discovered.includes(DISC_CASE),
+    mirror: mirrorPresent(mirrorOf(series)),
   };
 };
 
@@ -588,12 +653,19 @@ for (const series of SERIES) {
   if (held !== undefined) {
     console.warn(`[karume] ${series.name} はこの環境（${ENVIRONMENT.key}）で SKIP: ${held}`);
   }
-  if (!found.available) {
+  if (!found.mirror) {
     console.warn(
-      `[karume] ${seriesRoot(series).pathname} に export 済み資産が無いため実重み BiRefNet ` +
-        `E2E（${series.name}）を SKIP する（重みがリポジトリ管理外）。生成: ${series.generate}`,
+      `[karume] The distribution mirror ${mirrorOf(series).pathname} is absent (or not karume/5), ` +
+        `so the real-weight BiRefNet E2E of ${series.name} that runs the container is skipped ` +
+        "(place the mirror of the published distribution under models/).",
     );
-  } else if (!found.realAvailable) {
+  }
+  if (!found.available && !FETCHED) {
+    console.warn(
+      `[karume] The goldens ${goldenRoot(series).pathname} are absent, so the golden cases of ` +
+        `${series.name} are skipped. Fetch: ${FETCH_COMMAND}`,
+    );
+  } else if (found.available && !found.realAvailable) {
     console.warn(
       `[karume] ${series.name} の実画像ケースを SKIP する（golden ${found.realCases.length}/` +
         `${REAL_CASES.length} 本）。生成: ${series.generate}`,
@@ -634,15 +706,19 @@ const results = openResults("birefnet-golden");
 
 for (const series of SERIES) {
   const found = discoveryOf(series);
-  const root = seriesRoot(series);
-  /** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
-  const graphName = seriesGraph(series.name);
+  const root = goldenRoot(series);
   /** この機で GPU テストを止める系列か（{@link HELD_SERIES} — 資産の完全性テストには掛けない）。 */
   const held = heldReason(series) !== undefined;
 
-  test.skipIf(!found.anyPresent)(
-    `BiRefNet 資産: ${series.name} — 期待するケースとモデル本体が揃っている`,
+  // The completeness test covers the goldens only: the container moved to the mirror, whose parts
+  // the distribution gate checks (packages/runtime/tests/distribution_gate_test.ts). It sleeps only
+  // on a golden directory that is entirely absent while the test-asset root is not a complete fetch
+  // of the pin; absent from a complete fetch, the directory FAILs here.
+  const goldensMissing = !found.available && !FETCHED;
+  test.skipIf(goldensMissing)(
+    `BiRefNet goldens: ${series.name} — the expected cases are present${goldensMissing ? NOT_FETCHED : ""}`,
     () => {
+      assert(found.available, absentAsset(root));
       assertEquals(found.cases, [...EXPECTED_CASES], `${root.pathname} の合成画像 golden ケース`);
       // 実画像は**任意だが全部か 0 か**（`--real-images` を付けた emit は 4 本まとめて書く）。
       // 部分的な欠けを SKIP に丸めると、採り直しの途中で落ちた資産が黙って通る。
@@ -651,20 +727,19 @@ for (const series of SERIES) {
         `${root.pathname} の実画像 golden が ${found.realCases.length}/${REAL_CASES.length} 本` +
           `（採り直す: ${series.generate}）`,
       );
-      assert(modelPresent(new URL(MODEL_FILE, root)), `${MODEL_FILE} が無い`);
     },
   );
 
-  test.skipIf(!modelPresent(new URL(MODEL_FILE, root)))(
-    `BiRefNet 格納: ${series.name} — 容器の圧縮格納 dtype の集合が系列の宣言と一致する`,
+  test.skipIf(!found.mirror)(
+    `BiRefNet 格納: ${series.name} — 容器の圧縮格納 dtype の集合が系列の宣言と一致する` +
+      (found.mirror ? "" : MIRROR_ABSENT),
     async () => {
       // 系列と資産の格納 dtype が一致する（root 取り違え / `--dtype` の付け忘れの唯一の検出器 —
       // {@link Series.compressedStorage}）。本数ではなく**集合**で見るのは、f16 系列に別の圧縮
       // 格納が混ざる形を「圧縮が 1 本以上ある」で通さないため（ADR 0029 決定 2・e2e_sbv2 と同じ形）。
-      const parsed = prepareContainer(
-        await openSeriesContainer(new URL(MODEL_FILE, root)),
-        graphName,
-      );
+      // On the mirror this also checks that the manifest's quant label names the container's
+      // storage (the f16 quant of the mirror must hold f16 storage, the f32 quant none).
+      const parsed = await openMatte(series);
       const compressed = [
         ...new Set(
           Object.values(parsed.graph.initializers)
@@ -709,15 +784,15 @@ for (const series of SERIES) {
     // agreement with torch), so it is opt-in. Its io-key / shape / dtype assertions only check the
     // golden file against the graph as preconditions of that comparison; the default run keeps the
     // output shape / dtype check per series in the geometry case below.
-    test.skipIf(entry.ignore || !GPU_AVAILABLE || held || !UPSTREAM_PARITY)(
-      `BiRefNet ${entry.label}: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
+    test.skipIf(entry.ignore || !found.mirror || !GPU_AVAILABLE || held || !UPSTREAM_PARITY)(
+      `BiRefNet ${entry.label}: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}` +
+        (found.mirror ? "" : MIRROR_ABSENT),
       async () => {
         await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
-          const [opened, ioBytes] = await Promise.all([
-            openSeriesContainer(new URL(MODEL_FILE, root)),
+          const [parsed, ioBytes] = await Promise.all([
+            openMatte(series),
             readBuffer(root, `${IO_PREFIX}${caseName}${IO_SUFFIX}`),
           ]);
-          const parsed = prepareContainer(opened, graphName);
           const io = parseSafetensors(ioBytes);
 
           // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
@@ -786,18 +861,25 @@ for (const series of SERIES) {
     );
   }
 
-  test.skipIf(!found.available || !GPU_AVAILABLE || held)(
-    `BiRefNet 幾何判別: ${series.name} — disc の円内 logit 平均が円外を上回る`,
+  /** The geometry case reads `io.disc`: absent and not fetched = SKIP, absent from a fetch = FAIL. */
+  const discMissing = !found.discAvailable && !FETCHED;
+  test.skipIf(discMissing || !found.mirror || !GPU_AVAILABLE || held)(
+    `BiRefNet 幾何判別: ${series.name} — disc の円内 logit 平均が円外を上回る` +
+      (discMissing ? NOT_FETCHED : "") +
+      (found.mirror ? "" : MIRROR_ABSENT),
     async () => {
+      assert(
+        found.discAvailable,
+        absentAsset(new URL(`${IO_PREFIX}${DISC_CASE}${IO_SUFFIX}`, root)),
+      );
       // golden 突合だけだと「期待値と合っている」ことしか言えず、マットとして意味のある出力かは
       // 別問題（一様に潰れた出力は期待値も同じく潰れていれば通ってしまう）。ここは**画像の中の
       // 既知の幾何**（円）で切るので、出力が一様なら平均が並んで落ちる。閾値は置かない
       // （順序そのものが検査対象 — `birefnet/export.py` の `_sanity` と同じ形で、あちらは
       // torch 側に掛かっている）。実測は円内 / 円外が BiRefNet_HR で +10.96 / −9.64、
       // Lucida で +3.37 / −9.69（合成画像に対する応答の深さが系列で違う）。
-      const opened = await openSeriesContainer(new URL(MODEL_FILE, root));
+      const parsed = await openMatte(series);
       const ioBytes = await readBuffer(root, `${IO_PREFIX}${DISC_CASE}${IO_SUFFIX}`);
-      const parsed = prepareContainer(opened, graphName);
       const io = parseSafetensors(ioBytes);
       const size = staticDim(parsed, 3);
       assertEquals(size, staticDim(parsed, 2), "円の判別は正方形の入力を前提にする");

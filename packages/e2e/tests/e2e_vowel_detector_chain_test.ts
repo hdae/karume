@@ -34,6 +34,11 @@
 //
 // ## 資産
 //
+// This is an implementation-time check (ADR 0139 decision 6): the vowel detector has no published
+// distribution and its WAVs are not in the test-asset dataset, so the whole chain reads the series
+// and the local corpus below and runs only with `KARUME_SERIES=1` (`SERIES_CHECKS`); the default
+// lanes skip it explicitly.
+//
 // - グラフ: `outputs/series/vowel-detector-crnn-epoch3/`（`.gitignore` の `outputs/`）。
 //   生成コマンドは {@link GENERATE_COMMAND} がそのまま正本。
 // - 実音声: `outputs/misc/corpus/vowel-<ケース>.wav`（16kHz mono）。生成台本は
@@ -56,7 +61,7 @@
 // 要るのはグラフ本体と WAV だけなので、系列の有無も `model.krm` の有無で見る。
 
 import { isNotFound, readFile, readTextFile, statSync } from "@karume/test-support/fs";
-import { test } from "vite-plus/test";
+import { describe, test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseManifest, resolveSelection } from "@karume/hub";
 import type { Manifest } from "@karume/hub";
@@ -70,7 +75,6 @@ import {
 import { logitsToSegments, toLab } from "../../models/src/vowel-detector/postprocess.ts";
 import { Pipeline } from "../../models/src/vowel-detector/pipeline.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { openResults, recordFailure } from "../../runtime/tests/helpers/results.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import {
@@ -83,6 +87,7 @@ import {
 } from "../../runtime/tests/helpers/reference.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
+import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/series-checks.ts";
 
 /**
  * 実音声 1 本の宣言（グラフは 4 本で共有 — 違うのは長さだけ）。
@@ -287,8 +292,11 @@ const FIXTURE_PATH = new URL(
   import.meta.url,
 );
 const MODEL_FILE = "model.krm";
-/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
-const MODEL_GRAPH = seriesGraph(SERIES_NAME);
+/**
+ * The graph name in the container (`vowel_detector.export` writes `crnn`). Spelled here, not
+ * looked up in the series-graph table, which ADR 0139 decision 5 retires.
+ */
+const MODEL_GRAPH = "crnn";
 const INPUT_NAME = "features";
 
 const audioFile = (entry: Case): string => `vowel-${entry.name}.wav`;
@@ -401,10 +409,19 @@ const loadDistAssets = async (
   return assets;
 };
 
-/** 資産の有無（登録時点で必要なので同期で見る）。 */
-const available = modelPresent(new URL(MODEL_FILE, SERIES_ROOT));
+/**
+ * Whether the series is present (read synchronously, since registration needs it). MUST: only under
+ * `SERIES_CHECKS` — the default lanes do not read the series (ADR 0139 decision 6).
+ */
+const available = SERIES_CHECKS && modelPresent(new URL(MODEL_FILE, SERIES_ROOT));
 
-if (!available) {
+if (!SERIES_CHECKS) {
+  console.warn(
+    "[karume] The vowel-detector real-audio chain E2E is an implementation-time series check " +
+      "(no published distribution), so it is skipped. Run it with KARUME_SERIES=1 on a machine " +
+      `that holds ${SERIES_ROOT.pathname}.`,
+  );
+} else if (!available) {
   console.warn(
     `[karume] ${SERIES_ROOT.pathname} に export 済み資産が無いため実音声の全鎖 E2E を ` +
       `SKIP する（重みがリポジトリ管理外）。生成: ${GENERATE_COMMAND}`,
@@ -436,7 +453,7 @@ for (const entry of CASES) {
   }
 
   test.skipIf(!audioAvailable || !GPU_AVAILABLE)(
-    `母音検出 実音声の全鎖: ${entry.name} — WAV → 特徴 → 実 GPU → .lab（${entry.why}）`,
+    `母音検出 実音声の全鎖: ${entry.name} — WAV → 特徴 → 実 GPU → .lab（${entry.why}）${SERIES_CHECKS_OPT_IN}`,
     async () => {
       // 所要時間は WAV の読みから決着の記録の直前まで（失敗した回も同じ範囲で残す）。
       const started = performance.now();
@@ -557,4 +574,8 @@ const CASE_IDS: readonly string[] = RUNNABLE_CASES.map((entry) => entry.name);
 const RUNNABLE = CASE_IDS.length > 0;
 if (RUNNABLE) references.warnMissing(CASE_IDS);
 // 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
-registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });
+// The gate counts the implementation-time cases above, so it carries their opt-in suffix: a skipped
+// gate in the default lanes says why.
+describe(`Vowel-detector sha256 rows${SERIES_CHECKS_OPT_IN}`, () => {
+  registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });
+});

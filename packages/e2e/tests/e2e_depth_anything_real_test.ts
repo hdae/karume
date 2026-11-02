@@ -26,13 +26,20 @@
 // こちらへ移した —— 「PNG を渡したら意味のある深度が返る」という鎖の主張は、合成に頼らず
 // ここが直接持つ。深度 PNG を書き出すのも同じ理由でここ（`encodePng` は models の実装）。
 //
-// ## 資産が無い環境
+// ## Assets (ADR 0139)
 //
-// golden（`outputs/series/`）も入力の実画像（`outputs/misc/corpus/`）も深度の書き出し先
-// （`outputs/verify/<環境キー>/<日付>_depth-anything/`）もリポジトリ管理外。ただし性格は割れて
-// いて、**読み**の corpus はホスト資産（消すと台本での焼き直しと凍結コピーが要る）、**書き**の
-// verify は `rm -rf` で常に安全に消せる席である。**1 件も無ければ明示 SKIP**、**golden が中途半端に欠けていれば FAIL**
-// （欠けの FAIL はこのファイルの資産の完全性の門が名指しで出す）。
+// The container comes from the distribution mirror `models/karume-depth-anything-v2/` (model
+// `small`, quant `f32`, graph `depth`, read through the manifest); the goldens from the test-asset root
+// (`goldenDir("depth-anything-v2-small-hf")`); the real images from the hand-frozen corpus
+// (`corpusDir("anima")`, the same file names). Both test-asset folders are fetched with
+// `node tools/test-assets/fetch.ts`. The depth maps are written to
+// `outputs/verify/<environment key>/<date>_depth-anything/`, which is always safe to delete. Each case
+// requires exactly what it reads: the preprocessing parity the goldens and the images, the
+// discrimination (and its sha256 rows) the mirror and the images — it reads no golden tensor. A
+// test asset that is absent SKIPs explicitly only while the test-asset root is not a complete fetch
+// of the pin (the assets gate is red then); absent from a complete fetch, it FAILs — the dataset at
+// the pin lacks it. An absent mirror SKIPs (the distribution gate owns that red). **A partially
+// missing golden set = FAIL** (the completeness gate of this file names it).
 // ADR 0005 の「全 SKIP は明示 FAIL」門番は *GPU アダプタの有無* だけを見ており、この SKIP とは
 // 独立。
 
@@ -63,8 +70,19 @@ import { encodePng } from "../../models/src/image/png.ts";
 // models → runtime は**正方向**の依存で、かつ両者とも `tests/` は publish から除外される
 // （packages/*/deno.json の `publish.exclude`）ので、配布物には影響しない。
 import { decodePng } from "@karume/test-support/png-decode";
-import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
+import {
+  corpusDir,
+  goldenDir,
+  TEST_ASSETS,
+  testAssetsFetched,
+} from "@karume/test-support/test-assets";
+import {
+  type MirrorChoice,
+  mirrorPresent,
+  mirrorRoot,
+  openSelectedContainer,
+  selectMirrorComponent,
+} from "../../models/tests/helpers/mirror.ts";
 import { openResults, recordFailure } from "../../runtime/tests/helpers/results.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import {
@@ -118,7 +136,10 @@ const PIXEL_MISMATCH_RATE_CAP = 0.02;
  */
 const PIXEL_MISMATCH_EPSILON = 1e-3;
 
-/** `outputs/series/` 直下のディレクトリ名（`depth_anything.export.default_out_dir` の綴り）。 */
+/**
+ * The series name (`depth_anything.export.default_out_dir`): the golden directory
+ * (`goldenDir(SERIES_NAME)`) and the id of the per-run settlement.
+ */
 const SERIES_NAME = "depth-anything-v2-small-hf";
 
 /** SKIP 時にそのまま貼れる生成コマンド（実画像 golden まで含む形）。 */
@@ -126,19 +147,23 @@ const GENERATE =
   "cd tools/export-recipes && uv run --group depth-anything-preprocess" +
   " python -m depth_anything.export --real-images";
 
-/**
- * 実画像そのものを焼き直すコマンド（プロンプト / seed の正本は台本側）。台本は
- * `outputs/bench/<model>/<日付>_eval-images/` へ焼くので、採用分は {@link CORPUS_DIR} へ
- * **人手で凍結コピー**する。
- */
-const IMAGE_COMMAND = "deno task demo:eval-images --source <Anima 配布形のパス>";
+/** The command that fetches the goldens and the corpus (pasted into the skip warnings). */
+const FETCH_COMMAND = "node tools/test-assets/fetch.ts";
 
-const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
-/** 入力の実画像コーパス（凍結コピー — ホスト資産なので消すと焼き直しが要る）。 */
-const CORPUS_DIR = new URL("../../../outputs/misc/corpus/", import.meta.url);
-const MODEL_FILE = "model.krm";
-/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
-const MODEL_GRAPH = seriesGraph(SERIES_NAME);
+/** The golden directory of the series (`outputs/test-assets/goldens/<series>/`). */
+const GOLDEN_ROOT = goldenDir(SERIES_NAME);
+/** The real-image corpus of the inputs (copies frozen by hand — the test-asset dataset's `corpus/anima/`). */
+const CORPUS_DIR = corpusDir("anima");
+/** The distribution mirror that ships the container. */
+const MIRROR = mirrorRoot("karume-depth-anything-v2");
+/**
+ * The selection in the mirror: the model and the storage dtype the series used (`f32`). The quant
+ * is pinned, not left to the manifest's default, so a new default quant cannot change the container
+ * these cases and their sha256 rows test.
+ */
+const MIRROR_CHOICE: Required<MirrorChoice> = { model: "small", quant: "f32" };
+/** The graph name in the container = the manifest's weights key (container-v1 §2.1). */
+const MODEL_GRAPH = "depth";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
@@ -247,21 +272,63 @@ const exists = (url: URL): boolean => {
 };
 
 const goldenUrl = (caseName: string): URL =>
-  new URL(`${IO_PREFIX}${caseName}${IO_SUFFIX}`, SERIES_ROOT);
+  new URL(`${IO_PREFIX}${caseName}${IO_SUFFIX}`, GOLDEN_ROOT);
 
 /** 登録時点で必要なので同期で数える（`Deno.test` の ignore 判定に使う）。 */
 const GOLDEN_COUNT = REAL_CASES.filter((entry) => exists(goldenUrl(entry.name))).length;
 
 /**
- * 実画像が 4 枚とも揃っているか（`outputs/misc/corpus/` は人手で凍結コピーする席）。
+ * 実画像が 4 枚とも揃っているか（`corpus/anima/` は人手で凍結コピーした画像の席）。
  * MUST: NotFound 以外は伝播させる（`exists` と同じ理由）。
  */
 const IMAGES_PRESENT: boolean = REAL_CASES.every((entry) =>
   exists(new URL(entry.file, CORPUS_DIR)),
 );
 
-/** 実画像の群。golden と画像の**両方**が揃ってはじめて実走する。 */
-const REAL_AVAILABLE = GOLDEN_COUNT > 0 && IMAGES_PRESENT;
+/**
+ * Whether `outputs/test-assets/` holds a complete fetch of the pinned revision. Then a golden or an
+ * image that is absent is a FAIL (the dataset at the pin lacks it), not a SKIP.
+ */
+const FETCHED = testAssetsFetched();
+
+/**
+ * Asserts that a test asset the case reads is present. A case reaches this with the asset absent
+ * when the test-asset root is a complete fetch (otherwise it SKIPs) or a partial one.
+ */
+const assertAssetPresent = (url: URL): void =>
+  assert(
+    exists(url),
+    FETCHED
+      ? `${url.pathname} is absent, but outputs/test-assets/ holds a complete fetch of ` +
+          `${TEST_ASSETS.repo}@${TEST_ASSETS.revision}: the dataset at the pin lacks it`
+      : `${url.pathname} is absent (fetch: ${FETCH_COMMAND})`,
+  );
+
+/** Title suffixes of a case that SKIPs for want of an asset, so the test list says why. */
+const NOT_FETCHED = " (SKIP: test assets not fetched)";
+const MIRROR_ABSENT = " (SKIP: distribution mirror absent)";
+
+/**
+ * The preprocessing parity: it needs the goldens and the images (absent from a complete fetch of
+ * the pin, they FAIL the cases instead).
+ */
+const PARITY_AVAILABLE = (GOLDEN_COUNT > 0 && IMAGES_PRESENT) || FETCHED;
+
+/** Whether the distribution mirror is present (`karume/5`). */
+const MIRROR_PRESENT = mirrorPresent(MIRROR);
+/**
+ * The discrimination and its sha256 rows: they need the mirror and the images (no golden tensor is
+ * read — the golden files are not a run condition of this case).
+ */
+const IMAGES_RUNNABLE = IMAGES_PRESENT || FETCHED;
+const DISCRIMINATION_AVAILABLE = MIRROR_PRESENT && IMAGES_RUNNABLE;
+
+/** Opens the `depth` container from the mirror (through the manifest — ADR 0139). */
+const openDepth = async (): Promise<PreparedModel> =>
+  prepareContainer(
+    await openSelectedContainer(await selectMirrorComponent(MIRROR, MODEL_GRAPH, MIRROR_CHOICE)),
+    MODEL_GRAPH,
+  );
 
 const readBuffer = async (url: URL): Promise<ArrayBuffer> => {
   const bytes = await readFile(url);
@@ -368,18 +435,26 @@ const depthToPng = (depth: Float32Array, size: number): Promise<Uint8Array<Array
   return encodePng(rgba, size, size);
 };
 
-if (!REAL_AVAILABLE) {
+if (!PARITY_AVAILABLE) {
   console.warn(
-    `[karume] Depth Anything V2 の実画像ケースを SKIP する（golden ${GOLDEN_COUNT}/` +
-      `${REAL_CASES.length} 本・画像 ${IMAGES_PRESENT ? "有" : "無"}）。` +
-      `画像の生成: ${IMAGE_COMMAND} / golden の生成: ${GENERATE}`,
+    `[karume] The Depth Anything V2 real-image preprocessing parity is skipped (goldens ` +
+      `${GOLDEN_COUNT}/${REAL_CASES.length} in ${GOLDEN_ROOT.pathname}, images ` +
+      `${IMAGES_PRESENT ? "present" : `absent from ${CORPUS_DIR.pathname}`}). Fetch: ${FETCH_COMMAND}`,
+  );
+}
+if (!DISCRIMINATION_AVAILABLE) {
+  console.warn(
+    `[karume] The Depth Anything V2 real-image discrimination is skipped (mirror ` +
+      `${MIRROR_PRESENT ? "present" : `${MIRROR.pathname} absent — place the published distribution under models/`}, ` +
+      `images ${IMAGES_PRESENT ? "present" : `absent from ${CORPUS_DIR.pathname} — fetch: ${FETCH_COMMAND}`}).`,
   );
 }
 
 // Asset completeness gate (merged from the former e2e_depth_anything_real_test.ts in the 0.15 test
 // triage — docs/research/2026-10-16-test-triage.md). The skips above only say "nothing to run";
-// this gate turns a *partially* present series directory into a FAIL instead of a silent green
-// SKIP, naming what is missing.
+// this gate turns a *partially* present golden directory into a FAIL instead of a silent green
+// SKIP, naming what is missing. It covers the goldens only: the container moved to the mirror,
+// whose parts the distribution gate checks (packages/runtime/tests/distribution_gate_test.ts).
 
 /**
  * Synthetic golden cases every emit writes. Source of truth: `build_cases` in
@@ -401,7 +476,7 @@ const listDir = (url: URL): readonly DirEntry[] => {
   }
 };
 
-/** Golden case names found in the series directory (`io.<case>.safetensors`). */
+/** Golden case names found in the golden directory (`io.<case>.safetensors`). */
 const discoverGoldenCases = (root: URL): readonly string[] =>
   listDir(root)
     .filter(
@@ -410,38 +485,49 @@ const discoverGoldenCases = (root: URL): readonly string[] =>
     .map((entry) => entry.name.slice(IO_PREFIX.length, entry.name.length - IO_SUFFIX.length))
     .sort();
 
-const DISCOVERED_GOLDEN = discoverGoldenCases(SERIES_ROOT);
+const DISCOVERED_GOLDEN = discoverGoldenCases(GOLDEN_ROOT);
 const realCaseNames = new Set<string>(REAL_CASES.map((entry) => entry.name));
 const FOUND_SYNTHETIC = DISCOVERED_GOLDEN.filter((name) => !realCaseNames.has(name));
 const FOUND_REAL = DISCOVERED_GOLDEN.filter((name) => realCaseNames.has(name));
 /**
- * Whether anything at all is present (the completeness test's skip predicate). It MUST also look
- * at the model: a loss that wiped every golden but left the model behind would otherwise skip the
- * very test that is meant to fail on it. The gate may sleep only on a completely empty directory.
+ * Whether any golden is present. The gate may sleep only on a golden directory that is entirely
+ * absent while the test-asset root is not a complete fetch of the pin; absent from a complete
+ * fetch, the directory FAILs the gate.
  */
-const ANY_PRESENT = DISCOVERED_GOLDEN.length > 0 || modelPresent(new URL(MODEL_FILE, SERIES_ROOT));
+const ANY_PRESENT = DISCOVERED_GOLDEN.length > 0;
+const GOLDENS_MISSING = !ANY_PRESENT && !FETCHED;
 
-test.skipIf(!ANY_PRESENT)("Depth Anything 資産: 期待するケースとモデル本体が揃っている", () => {
-  assertEquals(
-    FOUND_SYNTHETIC,
-    [...SYNTHETIC_CASES],
-    `${SERIES_ROOT.pathname} の合成画像 golden ケース`,
-  );
-  // Real-image goldens are optional but all-or-none (an emit with `--real-images` writes all 4).
-  // Rounding a partial set to SKIP would let assets lost mid-regeneration pass silently.
-  assert(
-    FOUND_REAL.length === 0 || FOUND_REAL.length === REAL_CASES.length,
-    `${SERIES_ROOT.pathname} の実画像 golden が ${FOUND_REAL.length}/${REAL_CASES.length} 本` +
-      `（採り直す: ${GENERATE}）`,
-  );
-  assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
-});
+test.skipIf(GOLDENS_MISSING)(
+  `Depth Anything goldens: the expected cases are present${GOLDENS_MISSING ? NOT_FETCHED : ""}`,
+  () => {
+    assert(
+      ANY_PRESENT,
+      `${GOLDEN_ROOT.pathname} is absent, but outputs/test-assets/ holds a complete fetch of ` +
+        `${TEST_ASSETS.repo}@${TEST_ASSETS.revision}: the dataset at the pin lacks it`,
+    );
+    assertEquals(
+      FOUND_SYNTHETIC,
+      [...SYNTHETIC_CASES],
+      `${GOLDEN_ROOT.pathname} の合成画像 golden ケース`,
+    );
+    // Real-image goldens are optional but all-or-none (an emit with `--real-images` writes all 4).
+    // Rounding a partial set to SKIP would let assets lost mid-regeneration pass silently.
+    assert(
+      FOUND_REAL.length === 0 || FOUND_REAL.length === REAL_CASES.length,
+      `${GOLDEN_ROOT.pathname} の実画像 golden が ${FOUND_REAL.length}/${REAL_CASES.length} 本` +
+        `（採り直す: ${GENERATE}）`,
+    );
+  },
+);
 
 for (const entry of REAL_CASES) {
-  test.skipIf(!REAL_AVAILABLE)(
+  test.skipIf(!PARITY_AVAILABLE)(
     `Depth Anything 実画像前処理パリティ: ${entry.name}` +
-      "（TS の bicubic + 畳んだ正規化 対 DPTImageProcessor）",
+      "（TS の bicubic + 畳んだ正規化 対 DPTImageProcessor）" +
+      (PARITY_AVAILABLE ? "" : NOT_FETCHED),
     async () => {
+      assertAssetPresent(goldenUrl(entry.name));
+      assertAssetPresent(new URL(entry.file, CORPUS_DIR));
       const [goldenBytes, png] = await Promise.all([
         readBuffer(goldenUrl(entry.name)),
         readImage(entry.file),
@@ -504,10 +590,13 @@ for (const entry of REAL_CASES) {
   );
 }
 
-test.skipIf(!REAL_AVAILABLE || !GPU_AVAILABLE)(
+test.skipIf(!DISCRIMINATION_AVAILABLE || !GPU_AVAILABLE)(
   "Depth Anything 実画像 判別: 構図から言える近い領域の深度が遠い領域を上回る" +
-    "（深度 PNG も書く）",
+    "（深度 PNG も書く）" +
+    (IMAGES_RUNNABLE ? "" : NOT_FETCHED) +
+    (MIRROR_PRESENT ? "" : MIRROR_ABSENT),
   async () => {
+    for (const real of REAL_CASES) assertAssetPresent(new URL(real.file, CORPUS_DIR));
     // 判別は**領域平均の順序**だけを見る（閾値は置かない — `depth_anything/export.py` の
     // `_real_sanity` と同じ形で、あちらは torch 側に掛かっている）。一様に潰れた出力も
     // 入力非依存の出力も、上下反転も、両領域の平均が並ぶか逆転するので落ちる。実測は
@@ -532,8 +621,7 @@ test.skipIf(!REAL_AVAILABLE || !GPU_AVAILABLE)(
     /** sha が参照と食い違った画像（全画像の決着を積み終えてからまとめて落とす）。 */
     const mismatches: { readonly label: string; readonly settlement: ReferenceSettlement }[] = [];
     try {
-      const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
-      const parsed = prepareContainer(opened, MODEL_GRAPH);
+      const parsed = await openDepth();
       const [outputName] = parsed.graph.outputs;
       const width = staticDim(parsed, 3);
       const height = staticDim(parsed, 2);
@@ -660,8 +748,8 @@ test.skipIf(!REAL_AVAILABLE || !GPU_AVAILABLE)(
   },
 );
 
-/** sha 門が走る条件（実画像の群 + GPU — 判別のテストと同じ）。 */
-const RUNNABLE = REAL_AVAILABLE && GPU_AVAILABLE;
+/** When the sha256 gate runs: the same condition as the discrimination test (mirror + images + GPU). */
+const RUNNABLE = DISCRIMINATION_AVAILABLE && GPU_AVAILABLE;
 const CASE_IDS: readonly string[] = REAL_CASES.map((entry) => entry.name);
 if (RUNNABLE) references.warnMissing(CASE_IDS);
 // 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
