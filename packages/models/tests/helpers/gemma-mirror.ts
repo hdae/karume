@@ -2,14 +2,15 @@
  * 配布形ミラー（`karume/5`）から gemma の全量面の入力（`Assets`）と PLE の読み口を組む
  * — **実資産 e2e が共有する 1 本**。
  *
- * ## なぜ系列出力ではなくミラーなのか
+ * ## Why the mirror, not the series output
  *
- * 系列出力も `krm` を書くようになったので、容器を開いて 1 部品を走らせる
- * だけなら `helpers/ple-series.ts` の経路で足りる。ミラーが要るのは**manifest が持つもの**を
- * 見る席だけである — `fromAssets` の全量面が受ける part 列のキー（`<部品>[i]`）、model /
- * quant の選択軸、2 文書の期待 hash（`container.descriptor`）。系列出力には manifest が
- * 無いのでこれらは組めない。重みも PLE も同じ焼き直しなので、golden の断定はどちらから
- * 読んでも同じである。
+ * The real-weight tests read the distribution mirrors (ADR 0139 decision 1). Only a manifest
+ * carries the part-list keys (`<component>[i]`) that the full surface of `fromAssets` takes, the
+ * model / quant selection axes, and the expected hashes of the two documents
+ * (`container.descriptor`); a series output has no manifest. A caller that has already opened the
+ * `model` container hands it to `seriesPleHandle` of `helpers/ple-series.ts` instead of opening
+ * it again. The weights and the PLE are the same bake as the series the goldens were taken from,
+ * so a golden assertion holds on either.
  *
  * NOTE: hub / runtime の**テストの都合**は import しない（`helpers/memory-cache.ts` の規律）。
  * ここが触るのは公開面（`@karume/hub` / `@karume/hub/node` / `@karume/runtime` と models の

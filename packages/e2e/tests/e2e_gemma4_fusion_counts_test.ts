@@ -5,7 +5,8 @@
  *
  * MUST: the assets are `outputs/series/gemma4-e2b-decode/` and `models/karume-gemma4/`
  * (untracked local assets); where they are missing the cases SKIP explicitly with a reason
- * (ADR 0005).
+ * (ADR 0005). The decode series graph is not shipped, so its case is an implementation-time series
+ * check (ADR 0139 decision 6 — KARUME_SERIES=1); the distribution case runs in the default lane.
  */
 
 import { readTextFile } from "@karume/test-support/fs";
@@ -16,14 +17,16 @@ import {
   containerPart0,
   readContainerGraph,
 } from "../../runtime/tests/helpers/container-graph.ts";
+import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/series-checks.ts";
 import { decodeFusionCounts, exists, NONE, seriesSource } from "./helpers/fusion-counts.ts";
 
-const GEMMA4_DECODE_MODEL = seriesSource("gemma4-e2b-decode");
+// A thunk: the series directory is not listed at all without KARUME_SERIES=1.
+const gemma4DecodeModel = () => seriesSource("gemma4-e2b-decode");
 
-const GEMMA4_DECODE_AVAILABLE = await exists(GEMMA4_DECODE_MODEL.part0);
-if (!GEMMA4_DECODE_AVAILABLE) {
+const GEMMA4_DECODE_AVAILABLE = SERIES_CHECKS && (await exists(gemma4DecodeModel().part0));
+if (SERIES_CHECKS && !GEMMA4_DECODE_AVAILABLE) {
   console.warn(
-    `[karume] ${GEMMA4_DECODE_MODEL.part0.pathname} が無いため Gemma 4 decode の融合ヒット数を SKIP する`,
+    `[karume] ${gemma4DecodeModel().part0.pathname} が無いため Gemma 4 decode の融合ヒット数を SKIP する`,
   );
 }
 
@@ -33,9 +36,10 @@ if (!GEMMA4_DECODE_AVAILABLE) {
  * BSHDの専用添字を追加したため、両方で全50鎖を固定する（ADR 0040追記2026-09-12）。
  */
 test.skipIf(!GEMMA4_DECODE_AVAILABLE)(
-  "実資産の Gemma 4 E2B は decode / prefill とも rope 50 を掴む",
+  `実資産の Gemma 4 E2B は decode / prefill とも rope 50 を掴む${SERIES_CHECKS_OPT_IN}`,
   async () => {
-    const graph = await readContainerGraph(GEMMA4_DECODE_MODEL.part0, GEMMA4_DECODE_MODEL.graph);
+    const source = gemma4DecodeModel();
+    const graph = await readContainerGraph(source.part0, source.graph);
     assertEquals(
       decodeFusionCounts(graph, 1),
       { ...NONE, rope: 50 },

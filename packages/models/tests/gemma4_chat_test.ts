@@ -21,8 +21,9 @@
 // ⑥ **ターンの後始末**（`closeChatTurn`）— 後始末が失敗しても直列化席は返り、本体の失敗と
 //    後始末の失敗はどちらも消えない（席が返らないと以後の `chat` / `dispose` が永久に待つ）
 //
-// 実資産（`outputs/series/gemma4-e2b-tokenizer/`）が在れば**全語彙**でも同じ id 列になること
-// を併せて見る（部分集合と full の食い違いを塞ぐ門）。無い環境では SKIP する。
+// 実資産（the distribution's tokenizer, `models/karume-gemma4/`, read through the manifest —
+// ADR 0139 decision 1）が在れば**全語彙**でも同じ id 列になることを併せて見る（部分集合と full の
+// 食い違いを塞ぐ門）。無い環境では SKIP する。
 
 import { readTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
@@ -70,7 +71,7 @@ import {
   renderGemma4Chat,
   renderGemma4ChatTurn,
 } from "../src/gemma/text/chat.ts";
-import { readFileIfPresent } from "./helpers/read-if-present.ts";
+import { mirrorPresent, mirrorRoot, readMirrorAsset } from "./helpers/mirror.ts";
 
 type ChatCase = {
   readonly name: string;
@@ -117,15 +118,21 @@ const assetsOf = (source: Fixture): GemmaTokenizerAssets => ({
 
 const tokenizer = new Tokenizer(assetsOf(fixture));
 
-/** 系列側の実資産（無ければ undefined = compile していない）。 */
-const seriesBytes = await readFileIfPresent(
-  new URL("../../../outputs/series/gemma4-e2b-tokenizer/tokenizer.json", import.meta.url),
-);
+const GEMMA4_MIRROR = mirrorRoot("karume-gemma4");
 
-if (seriesBytes === undefined) {
+/**
+ * The distribution's tokenizer (undefined when the mirror is absent). It is shared by every model
+ * of the mirror; e2b is named so the selection is fixed.
+ */
+const fullBytes = mirrorPresent(GEMMA4_MIRROR)
+  ? await readMirrorAsset(GEMMA4_MIRROR, "tokenizer", { model: "e2b" })
+  : undefined;
+
+if (fullBytes === undefined) {
   console.warn(
-    "[karume] outputs/series/gemma4-e2b-tokenizer/tokenizer.json が無いため gemma4 chat の " +
-      "実資産突合を SKIP する。生成: cd tools/export-recipes && uv run python -m gemma4.tokenizer",
+    `[karume] the distribution mirror ${GEMMA4_MIRROR.pathname} is absent (or not karume/5), so ` +
+      "the gemma4 chat full-vocabulary case SKIPs. Assemble: cd tools/export-recipes && uv run " +
+      "python dist.py --pipeline gemma4",
   );
 }
 
@@ -789,10 +796,10 @@ describe("chat 後始末: 席は無条件に返り、後始末の失敗は本体
   });
 });
 
-test.skipIf(seriesBytes === undefined)(
+test.skipIf(fullBytes === undefined)(
   "gemma4 chat 実資産突合: 全語彙でもフィクスチャと同じ id 列（部分集合の穴を塞ぐ）",
   () => {
-    const full = new Tokenizer(parseGemmaTokenizerAsset(seriesBytes as Uint8Array<ArrayBuffer>));
+    const full = new Tokenizer(parseGemmaTokenizerAsset(fullBytes as Uint8Array<ArrayBuffer>));
     for (const testCase of fixture.chat) {
       assertEquals(chatPrompt(full, testCase.messages), testCase.ids, testCase.name);
     }

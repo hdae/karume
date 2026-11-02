@@ -15,9 +15,13 @@
  *
  * ## 資産
  *
- * ①② は `outputs/series/gemma4-qat-e2b-product/`（probe と PLE の資産が同じ世代で並ぶ唯一の
- * 場所 — リポジトリ管理外）、③ は配布形ミラー `models/karume-gemma4-qat/` と `models/karume-gemma4/`。
- * 無い環境では**明示 SKIP** する（ADR 0005）。
+ * ①② read the PLE of the QAT mirror's e2b `model` container (`models/karume-gemma4-qat/` — the
+ * container is byte-identical to the `gemma4-qat-e2b-product` series it was assembled from) and the
+ * probe from the test-asset root (`goldens/gemma4-qat-e2b-product/ple.probe.safetensors` —
+ * ADR 0139 decisions 1 and 2); ③ reads the mirrors `models/karume-gemma4-qat/` and
+ * `models/karume-gemma4/`. 無い環境では**明示 SKIP** する（ADR 0005）。The probe follows ADR 0139's
+ * fetched rule: absent from a complete fetch of the pinned test-asset dataset it FAILs ①② (the
+ * dataset at the pin lacks it); without a complete fetch ①② SKIP with the reason in the title.
  *
  * ## 通常 Gemma 4（i8 の PLE）は device 次第
  *
@@ -34,14 +38,18 @@ import { Pipeline } from "../../models/gemma.ts";
 import * as gemma4Qat from "../../models/gemma4-qat.ts";
 import { createGemma4Ple } from "../../models/src/gemma/ple.ts";
 import { createGemma4PleResident, gemma4PleGpuBytes } from "../../models/src/gemma/ple-gpu.ts";
-// 系列出力の容器から PLE の索引と block の読み口を組む（ADR 0109 決定 4）。
-import { openSeriesPle, SERIES_MODEL_FILE } from "../../models/tests/helpers/ple-series.ts";
 import { mirrorAvailable, openGemma4Ple } from "../../models/tests/helpers/gemma-mirror.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { countFences } from "../../runtime/tests/helpers/fences.ts";
-import { modelPresent } from "../../runtime/tests/helpers/container-files.ts";
+import {
+  goldenDir,
+  TEST_ASSETS,
+  TEST_ASSETS_ROOT,
+  testAssetsFetched,
+} from "@karume/test-support/test-assets";
 
-const PRODUCT_ROOT = new URL("../../../outputs/series/gemma4-qat-e2b-product/", import.meta.url);
+/** The QAT product series' goldens (the PLE probe). */
+const PRODUCT_ROOT = goldenDir("gemma4-qat-e2b-product");
 const QAT_ROOT = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
 const GEMMA_ROOT = new URL("../../../models/karume-gemma4/", import.meta.url);
 const PLE_PROBE_FILE = "ple.probe.safetensors";
@@ -67,24 +75,33 @@ const isFile = (url: URL): boolean => {
   }
 };
 
-// PLE は容器の資産なので、索引の有無は容器の有無と同じ（欠けていれば `openSeriesPle` が
-// 資産の突合で fail loudly する）。
-const PRODUCT_PRESENT =
-  isFile(new URL(PLE_PROBE_FILE, PRODUCT_ROOT)) &&
-  modelPresent(new URL(SERIES_MODEL_FILE, PRODUCT_ROOT));
 const QAT_PRESENT = mirrorAvailable(QAT_ROOT);
 const GEMMA_PRESENT = mirrorAvailable(GEMMA_ROOT);
+const PROBE = new URL(PLE_PROBE_FILE, PRODUCT_ROOT);
+const PROBE_RELATIVE = PROBE.href.slice(TEST_ASSETS_ROOT.href.length);
+/** ADR 0139's fetched rule: an absent probe SKIPs only without a complete fetch of the pin. */
+const PROBE_SKIP = !isFile(PROBE) && !testAssetsFetched();
+// PLE は容器の資産なので、索引の有無は容器の有無と同じ（欠けていれば `openGemma4Ple` が
+// 資産の突合で fail loudly する）。
+const PRODUCT_PRESENT = QAT_PRESENT && !PROBE_SKIP;
+/** The title suffix of ①② that names the probe SKIP (empty otherwise). */
+const PROBE_SKIP_REASON = PROBE_SKIP
+  ? ` (SKIP: ${PROBE_RELATIVE} absent and outputs/test-assets/ is not a complete fetch of the ` +
+    "pin — node tools/test-assets/fetch.ts)"
+  : "";
 
-if (!PRODUCT_PRESENT) {
+if (!QAT_PRESENT) {
   console.warn(
-    "[karume] outputs/series/gemma4-qat-e2b-product/ が無いため PLE GPU 常駐の golden 門を SKIP。" +
-      "tools/export-recipes で python -m gemma4.export_product_qat を回して作成する。",
+    "[karume] models/karume-gemma4-qat/ is absent (or not karume/5), so the PLE GPU-resident " +
+      "golden case ①② and the QAT generation-parity cases SKIP (assemble it with dist.py in " +
+      "tools/export-recipes)",
   );
 }
-if (!QAT_PRESENT || !GEMMA_PRESENT) {
+if (!GEMMA_PRESENT) {
   console.warn(
-    "[karume] models/karume-gemma4{,-qat}/ が無いため PLE GPU 常駐の生成 parity を SKIP。" +
-      "tools/export-recipes の dist.py で作成する。",
+    "[karume] models/karume-gemma4/ is absent (or not karume/5), so the regular Gemma 4 E2B " +
+      "PLE GPU-resident generation-parity case SKIPs (assemble it with dist.py in " +
+      "tools/export-recipes)",
   );
 }
 
@@ -109,10 +126,17 @@ const assertBitsEqual = (actual: Float32Array, expected: Float32Array, where: st
 };
 
 test.skipIf(!PRODUCT_PRESENT || !GPU_AVAILABLE)(
-  "PLE GPU 常駐: gather が golden ともホスト経路とも u32 完全一致（実GPU）",
+  `PLE GPU 常駐: gather が golden ともホスト経路とも u32 完全一致（実GPU）${PROBE_SKIP_REASON}`,
   async () => {
-    const { index, openBlock } = await openSeriesPle(PRODUCT_ROOT);
-    const probe = parseSafetensors((await readFile(new URL(PLE_PROBE_FILE, PRODUCT_ROOT))).buffer);
+    assert(
+      isFile(PROBE),
+      `${PROBE_RELATIVE} absent although outputs/test-assets/ holds a complete fetch of ` +
+        `${TEST_ASSETS.repo}@${TEST_ASSETS.revision} — the test-asset dataset at the pin lacks it`,
+    );
+    // The container is the one the probe was taken from (e2b; every QAT quant shares its i4
+    // `model` container, and no Session is built here).
+    const { index, openBlock } = await openGemma4Ple(QAT_ROOT, { model: "e2b" });
+    const probe = parseSafetensors((await readFile(PROBE)).buffer);
     const tokenView = probe.tensors.get(PROBE_TOKENS_KEY);
     const inputView = probe.tensors.get(PROBE_INPUTS_KEY);
     assert(tokenView !== undefined && inputView !== undefined, "probe のテンソル 2 本");

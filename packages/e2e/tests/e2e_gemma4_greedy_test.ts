@@ -45,6 +45,11 @@
 //   （KV cache 経路を通さない — `export_decode.greedy_continuation` の MUST）、検収したい機構と
 //   期待値を作る機構が独立している。
 //
+// The decode graph (PLE and RoPE inside, argmax exit) is not shipped by any distribution, so every
+// case here is an implementation-time series check (ADR 0139 decision 6): it runs only with
+// KARUME_SERIES=1 and SKIPs explicitly otherwise. The shipped product graph's generation loop and
+// census are covered by e2e_gemma4_sequence_test.ts / e2e_gemma4_quant_test.ts.
+//
 // 資産が無い環境では**明示 SKIP** する。ADR 0005 の「全 SKIP は明示 FAIL」門番は *GPU アダプタの
 // 有無* だけを見ており、この SKIP とは独立。資産が**中途半端に**（ケース欠け）存在する場合は
 // SKIP ではなく FAIL にする（下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
@@ -70,6 +75,7 @@ import { generateGreedy } from "../../models/src/generation/greedy.ts";
 import { ropeInputs, type RopeSpec } from "../../models/src/gemma/rope.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
+import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/series-checks.ts";
 import { requireCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
@@ -259,9 +265,12 @@ const discoverCases = (prefix: string): readonly string[] =>
     .map((entry) => entry.name.slice(prefix.length, entry.name.length - SUFFIX.length))
     .sort();
 
-/** 登録時点で必要なので同期列挙する（`Deno.test` の ignore 判定と同じ理由）。 */
-const IO_CASES = discoverCases(IO_PREFIX);
-const GREEDY_CASES = discoverCases(GREEDY_PREFIX);
+/**
+ * 登録時点で必要なので同期列挙する（`Deno.test` の ignore 判定と同じ理由）。Without
+ * KARUME_SERIES=1 the series is not read at all.
+ */
+const IO_CASES = SERIES_CHECKS ? discoverCases(IO_PREFIX) : [];
+const GREEDY_CASES = SERIES_CHECKS ? discoverCases(GREEDY_PREFIX) : [];
 
 /** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
 const AVAILABLE = IO_CASES.length > 0 || GREEDY_CASES.length > 0;
@@ -270,9 +279,9 @@ const AVAILABLE = IO_CASES.length > 0 || GREEDY_CASES.length > 0;
  * golden が全滅してモデルだけ残った欠損は `AVAILABLE` では偽になり、完全性テスト自身が
  * SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
  */
-const ANY_PRESENT = AVAILABLE || modelPresent(new URL(MODEL_FILE, SERIES_ROOT));
+const ANY_PRESENT = SERIES_CHECKS && (AVAILABLE || modelPresent(new URL(MODEL_FILE, SERIES_ROOT)));
 
-if (!AVAILABLE) {
+if (SERIES_CHECKS && !AVAILABLE) {
   console.warn(
     `[karume] ${SERIES_ROOT.pathname} に export 済み資産が無いため Gemma 4 E2B decode 検収を ` +
       `SKIP する（混成格納でも約 4GiB につきリポジトリ管理外）。生成: ${GENERATE_COMMAND}`,
@@ -573,15 +582,18 @@ const runSingleChunkPrefill = (
 };
 
 // 完全に空の環境だけ SKIP。**何か 1 つでも**あれば欠けは FAIL（`ANY_PRESENT` の JSDoc）。
-test.skipIf(!ANY_PRESENT)("Gemma 4 E2B decode 資産: 期待するケースとモデル本体が揃っている", () => {
-  assertEquals(IO_CASES, [...EXPECTED_IO_CASES], `${SERIES_ROOT.pathname} の io ケース`);
-  assertEquals(
-    GREEDY_CASES,
-    [...EXPECTED_GREEDY_CASES],
-    `${SERIES_ROOT.pathname} の greedy ケース`,
-  );
-  assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
-});
+test.skipIf(!ANY_PRESENT)(
+  `Gemma 4 E2B decode 資産: 期待するケースとモデル本体が揃っている${SERIES_CHECKS_OPT_IN}`,
+  () => {
+    assertEquals(IO_CASES, [...EXPECTED_IO_CASES], `${SERIES_ROOT.pathname} の io ケース`);
+    assertEquals(
+      GREEDY_CASES,
+      [...EXPECTED_GREEDY_CASES],
+      `${SERIES_ROOT.pathname} の greedy ケース`,
+    );
+    assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
+  },
+);
 
 /**
  * Default case: ① the graph form and ⑤ the plan properties of the decode path. The greedy loop
@@ -591,7 +603,7 @@ test.skipIf(!ANY_PRESENT)("Gemma 4 E2B decode 資産: 期待するケースと�
  * generation).
  */
 describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
-  "Gemma 4 E2B decode 検収: 形の前提と decode 経路の計画性質（実 GPU）",
+  `Gemma 4 E2B decode 検収: 形の前提と decode 経路の計画性質（実 GPU）${SERIES_CHECKS_OPT_IN}`,
   () => {
     // Assigned in beforeAll; the its do not run when beforeAll throws.
     let parsed!: PreparedModel;
@@ -666,7 +678,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
  * in the default run). ① and ⑤ run in the default case above.
  */
 describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
-  `Gemma 4 E2B decode 検収: 固定 token id 列の parity（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
+  `Gemma 4 E2B decode 検収: 固定 token id 列の parity（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}${SERIES_CHECKS_OPT_IN}`,
   () => {
     // Assigned in beforeAll; the its do not run when beforeAll throws.
     let logitsName!: string;
@@ -962,7 +974,7 @@ const assertStateCensus = (diagnostics: SessionDiagnostics, where: string): Stat
  * 上の {@link assertStateCensus} が落とす。
  */
 test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
-  "Gemma 4 E2B decode census: states 形カーネル族と混成格納のキー（実 GPU）",
+  `Gemma 4 E2B decode census: states 形カーネル族と混成格納のキー（実 GPU）${SERIES_CHECKS_OPT_IN}`,
   async () => {
     const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
     const parsed = prepareContainer(opened, MODEL_GRAPH);

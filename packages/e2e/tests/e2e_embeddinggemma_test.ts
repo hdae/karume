@@ -15,6 +15,14 @@
 // （tests/gpu_gate_test.ts）は *GPU アダプタの有無* だけを見ており、この SKIP とは独立。
 // 逆に資産が**中途半端に**（ケース欠け）存在する場合は SKIP ではなく FAIL にする
 // （下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
+//
+// EmbeddingGemma has no published distribution yet, so every case here is an implementation-time
+// series check (ADR 0139 decision 6): it runs only with KARUME_SERIES=1 and SKIPs explicitly
+// otherwise.
+//
+// NOTE: EmbeddingGemma gets a published distribution (ADR 0139 Rulings D2, staging step 7). The
+// container then comes from `models/<repo>/` through the manifest (`helpers/mirror.ts`) and the
+// io.* goldens from `goldenDir("embeddinggemma-300m")`, and these cases return to the default lane.
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
@@ -31,6 +39,7 @@ import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
+import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/series-checks.ts";
 
 /**
  * 実重み EmbeddingGemma-300m の torch CPU 期待値との突合に使う許容誤差。
@@ -70,9 +79,9 @@ const GRAPH_NAME = seriesGraph(SERIES_NAME);
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
-/** SKIP 時にそのまま貼れる生成コマンド（tools/exporter/export_embeddinggemma.py の docstring）。 */
+/** The generate command a SKIP prints (the same spelling as tools/export-recipes/embeddinggemma/README.md). */
 const GENERATE_COMMAND =
-  "cd tools/exporter && uv run --with 'transformers==5.14.1' python export_embeddinggemma.py";
+  "cd tools/export-recipes && uv run --with 'transformers==5.14.1' python -m embeddinggemma.export";
 
 /**
  * 生成されているはずのケース。**列挙結果ではなくここで固定する** — 列挙だけに頼ると生成を
@@ -110,28 +119,34 @@ const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
-/** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
-const CASES = discoverCases(SERIES_ROOT);
+/**
+ * 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。Without
+ * KARUME_SERIES=1 the series is not read: the expected cases are registered as explicit SKIPs.
+ */
+const CASES = SERIES_CHECKS ? discoverCases(SERIES_ROOT) : EXPECTED_CASES;
 /** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
-const AVAILABLE = CASES.length > 0;
+const AVAILABLE = SERIES_CHECKS && CASES.length > 0;
 /**
  * **何か 1 つでも**残っているか（完全性テストの SKIP 述語 — Codex 波 H 指摘 H-02）。
  * io が全滅してモデルだけ残った欠損は `AVAILABLE` では偽になり、`ignore: !AVAILABLE` だと
  * 完全性テスト自身が SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
  */
-const ANY_PRESENT = AVAILABLE || modelPresent(new URL(MODEL_FILE, SERIES_ROOT));
+const ANY_PRESENT = SERIES_CHECKS && (AVAILABLE || modelPresent(new URL(MODEL_FILE, SERIES_ROOT)));
 
-if (!AVAILABLE) {
+if (SERIES_CHECKS && !AVAILABLE) {
   console.warn(
     `[karume] ${SERIES_ROOT.pathname} に export 済み資産が無いため実重み EmbeddingGemma E2E を ` +
       `SKIP する（重み 1.2GB 級につきリポジトリ管理外）。生成: ${GENERATE_COMMAND}`,
   );
 }
 
-test.skipIf(!ANY_PRESENT)("EmbeddingGemma 資産: 期待するケースとモデル本体が揃っている", () => {
-  assertEquals(CASES, [...EXPECTED_CASES], `${SERIES_ROOT.pathname} の golden ケース`);
-  assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
-});
+test.skipIf(!ANY_PRESENT)(
+  `EmbeddingGemma 資産: 期待するケースとモデル本体が揃っている${SERIES_CHECKS_OPT_IN}`,
+  () => {
+    assertEquals(CASES, [...EXPECTED_CASES], `${SERIES_ROOT.pathname} の golden ケース`);
+    assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
+  },
+);
 
 /**
  * 決着と実測の置き場（`outputs/verify/<環境キー>/<日付>_embeddinggemma-golden/` — 消して安全）。
@@ -143,7 +158,7 @@ const results = openResults("embeddinggemma-golden");
 
 for (const caseName of CASES) {
   test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
-    `EmbeddingGemma golden 突合: ${caseName}（実 GPU / torch CPU 期待値）`,
+    `EmbeddingGemma golden 突合: ${caseName}（実 GPU / torch CPU 期待値）${SERIES_CHECKS_OPT_IN}`,
     async () => {
       await runRecordedCase(results, { id: caseName }, async ({ measurements }) => {
         const [opened, ioBytes] = await Promise.all([

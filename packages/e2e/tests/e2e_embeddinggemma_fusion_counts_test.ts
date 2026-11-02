@@ -3,21 +3,28 @@
  * the shared planning side and the rationale live in `runtime/tests/helpers/fusion-counts.ts`).
  *
  * MUST: the asset is `outputs/series/embeddinggemma-300m/` (untracked local asset); where it is
- * missing the case SKIPs explicitly with a reason (ADR 0005).
+ * missing the case SKIPs explicitly with a reason (ADR 0005). EmbeddingGemma has no published
+ * distribution yet, so this is an implementation-time series check (ADR 0139 decision 6 —
+ * KARUME_SERIES=1).
+ *
+ * NOTE: EmbeddingGemma gets a published distribution (ADR 0139 Rulings D2, staging step 7); this
+ * case then reads part 0 from `models/<repo>/` through the manifest and returns to the default lane.
  */
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
 import type { FusionCounts } from "../../runtime/src/runtime/fusion.ts";
 import { readContainerGraph } from "../../runtime/tests/helpers/container-graph.ts";
+import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/series-checks.ts";
 import { exists, fusionCounts, NONE, seriesSource } from "./helpers/fusion-counts.ts";
 
-const GEMMA_MODEL = seriesSource("embeddinggemma-300m");
+// A thunk: the series directory is not listed at all without KARUME_SERIES=1.
+const gemmaModel = () => seriesSource("embeddinggemma-300m");
 
-const GEMMA_AVAILABLE = await exists(GEMMA_MODEL.part0);
-if (!GEMMA_AVAILABLE) {
+const GEMMA_AVAILABLE = SERIES_CHECKS && (await exists(gemmaModel().part0));
+if (SERIES_CHECKS && !GEMMA_AVAILABLE) {
   console.warn(
-    `[karume] ${GEMMA_MODEL.part0.pathname} が無いため EmbeddingGemma の融合ヒット数を SKIP する`,
+    `[karume] ${gemmaModel().part0.pathname} が無いため EmbeddingGemma の融合ヒット数を SKIP する`,
   );
 }
 
@@ -31,9 +38,10 @@ if (!GEMMA_AVAILABLE) {
  * 分解由来の恒等 expand が IR ごと消える（決定 6 と同じ機序。分解資産の頃は 96 だった）。
  */
 test.skipIf(!GEMMA_AVAILABLE)(
-  "実資産の EmbeddingGemma は rope 48（head 幅 256・窓内 passthrough 込み）を掴む",
+  `実資産の EmbeddingGemma は rope 48（head 幅 256・窓内 passthrough 込み）を掴む${SERIES_CHECKS_OPT_IN}`,
   async () => {
-    const graph = await readContainerGraph(GEMMA_MODEL.part0, GEMMA_MODEL.graph);
+    const source = gemmaModel();
+    const graph = await readContainerGraph(source.part0, source.graph);
     const expected: FusionCounts = { ...NONE, rope: 48 };
     // ヒット数は T に依存しない（Tmax = 512 の内側で 2 点）。
     for (const sequence of [12, 318]) {

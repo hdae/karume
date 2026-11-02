@@ -41,9 +41,14 @@
 //
 // ## 資産
 //
-// `outputs/series/gemma4-e2b-product/`（重みと PLE の資産が同居する容器）と
-// `outputs/series/gemma4-e2b-decode/`（期待列の正本）。どちらもリポジトリ管理外で、無い環境では
-// **明示 SKIP** する。⑥だけは drafter 入りの配布形ミラー `models/karume-gemma4/` を使う（投機の
+// The container is the distribution mirror's `model` component (`models/karume-gemma4/`, model
+// e2b, quant i4 — weights and PLE assets in one container; byte-identical to the product series),
+// opened through the manifest (ADR 0139 decision 1); the expected lists are the decode series'
+// greedy goldens in the test-asset root (`goldens/gemma4-e2b-decode/`, decision 2). Both are
+// outside git; without the mirror ①〜⑤ SKIP explicitly. The goldens follow ADR 0139's fetched rule:
+// one absent from a complete fetch of the pinned test-asset dataset FAILs ①〜⑤ (the dataset at the
+// pin lacks it); without a complete fetch ①〜⑤ SKIP with the missing files and
+// `node tools/test-assets/fetch.ts` in the title. ⑥だけは drafter 入りの配布形ミラー `models/karume-gemma4/` を使う（投機の
 // 2 系統を同じ pipeline で回すため）— ミラーが無い環境では⑥だけを明示 SKIP する。
 
 import { isNotFound, readFile, readTextFileSync, statSync } from "@karume/test-support/fs";
@@ -72,8 +77,17 @@ import {
   type GenerationSequence,
   physicalChunkRows,
 } from "../../models/src/generation/sequence.ts";
-import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
+import {
+  goldenDir,
+  TEST_ASSETS,
+  TEST_ASSETS_ROOT,
+  testAssetsFetched,
+} from "@karume/test-support/test-assets";
+import {
+  mirrorRoot,
+  openSelectedContainer,
+  selectMirrorComponent,
+} from "../../models/tests/helpers/mirror.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 // 開いた容器から PLE の索引と block の読み口を組む（ADR 0109 決定 4）。
 import { seriesPleHandle } from "../../models/tests/helpers/ple-series.ts";
@@ -89,19 +103,21 @@ import { GEMMA4_DRAFT_STEPS } from "../../models/src/gemma/speculative.ts";
 import { mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
 import { allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budget.ts";
 
-const PRODUCT_NAME = "gemma4-e2b-product";
-const PRODUCT_ROOT = new URL(`../../../outputs/series/${PRODUCT_NAME}/`, import.meta.url);
-const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode/", import.meta.url);
-const MODEL_FILE = "model.krm";
-/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
-const MODEL_GRAPH = seriesGraph(PRODUCT_NAME);
+/**
+ * The mirror seat ①〜⑤ read: e2b with the i4 weights. MUST: name the quant — the manifest's
+ * default (`i4-fast`) carries other session options, while the session below is built with the
+ * options this gate always used (none), so the token lists it checks stay those of the i4 seat.
+ */
+const PRODUCT_CHOICE = { model: "e2b", quant: "i4" } as const;
+/** The component key, which is also the container's graph name (container-v1 §2.1). */
+const MODEL_GRAPH = "model";
+/** The decode series' greedy goldens (the expected lists). */
+const GOLDEN_ROOT = goldenDir("gemma4-e2b-decode");
 const GREEDY_PREFIX = "greedy.";
 const SUFFIX = ".safetensors";
 
-/** SKIP 時にそのまま貼れる生成コマンド。 */
-const GENERATE_COMMAND =
-  "cd tools/export-recipes && uv run --with 'transformers==5.14.1' python -m gemma4.export_product" +
-  "（期待列の正本は … python -m gemma4.export_decode）";
+/** The command that restores the goldens (ADR 0139 decision 2). */
+const FETCH_COMMAND = "node tools/test-assets/fetch.ts";
 
 /**
  * ケースごとの期待列（正典は `export_decode.GREEDY_CASES`）と、EOS 集合が最初に成立する添字。
@@ -167,6 +183,9 @@ const LAST_ROW = "last_row";
 
 const VOCAB = 262144;
 
+/** The distribution mirror: ①〜⑤ read its product container, ⑥ its drafter pipeline. */
+const MIRROR_DIR = mirrorRoot("karume-gemma4");
+
 const exists = (url: URL): boolean => {
   try {
     return statSync(url).isFile;
@@ -176,16 +195,22 @@ const exists = (url: URL): boolean => {
   }
 };
 
-const MODEL_PRESENT = modelPresent(new URL(MODEL_FILE, PRODUCT_ROOT));
-const GOLDENS_PRESENT = EXPECTED_CASES.every(({ name }) =>
-  exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT)),
-);
-const AVAILABLE = MODEL_PRESENT && GOLDENS_PRESENT;
+const MODEL_PRESENT = mirrorAvailable(MIRROR_DIR);
+/** The goldens of `files` that are absent, as paths under the test-asset root. */
+const missingGoldens = (files: readonly URL[]): string[] =>
+  files
+    .filter((file) => !exists(file))
+    .map((file) => file.href.slice(TEST_ASSETS_ROOT.href.length));
+const goldenUrl = (name: string): URL => new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT);
+const MISSING_GOLDENS = missingGoldens(EXPECTED_CASES.map(({ name }) => goldenUrl(name)));
+/** ADR 0139's fetched rule: a missing golden SKIPs only without a complete fetch of the pin. */
+const GOLDENS_SKIP = MISSING_GOLDENS.length > 0 && !testAssetsFetched();
+const AVAILABLE = MODEL_PRESENT && !GOLDENS_SKIP;
 
 if (!MODEL_PRESENT) {
   console.warn(
-    `[karume] 製品系列（${PRODUCT_ROOT.pathname}）が無いため Gemma 4 E2B sequence 検収を ` +
-      `SKIP する。生成: ${GENERATE_COMMAND}`,
+    `[karume] the distribution mirror ${MIRROR_DIR.pathname} is absent (or not karume/5), so the ` +
+      "Gemma 4 E2B sequence cases ①〜⑤ SKIP",
   );
 }
 
@@ -211,6 +236,13 @@ const goldenI32 = (file: SafetensorsFile, name: string): Int32Array<ArrayBuffer>
 const readCase = async (
   name: string,
 ): Promise<{ readonly prompt: number[]; readonly expected: number[] }> => {
+  // Reached with a golden absent only when the test assets are a complete fetch of the pin.
+  const missing = missingGoldens([goldenUrl(name)]);
+  assert(
+    missing.length === 0,
+    `${missing.join(" / ")} absent although outputs/test-assets/ holds a complete fetch of ` +
+      `${TEST_ASSETS.repo}@${TEST_ASSETS.revision} — the test-asset dataset at the pin lacks it`,
+  );
   const golden = parseSafetensors(
     await readBuffer(GOLDEN_ROOT, `${GREEDY_PREFIX}${name}${SUFFIX}`),
   );
@@ -224,7 +256,12 @@ const tokenIds = (events: readonly GenerationEvent[]): number[] =>
   events.filter((event) => event.kind === "token").map((event) => event.id);
 
 describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
-  "Gemma 4 E2B sequence 検収: 1 ターン parity・多ターン連結・停止 token 2 系統（実 GPU）",
+  `Gemma 4 E2B sequence 検収: 1 ターン parity・多ターン連結・停止 token 2 系統（実 GPU）${
+    GOLDENS_SKIP
+      ? ` (SKIP: ${MISSING_GOLDENS.join(" / ")} absent and outputs/test-assets/ is not a complete ` +
+        `fetch of the pin — ${FETCH_COMMAND})`
+      : ""
+  }`,
   () => {
     let parsed: PreparedModel;
     let ple: Gemma4Ple;
@@ -234,10 +271,12 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 
     beforeAll(async () => {
       // 容器は 1 度だけ開く（重みも PLE も同じ `model` 容器の中にある）。
-      const opened = await openSeriesContainer(new URL(MODEL_FILE, PRODUCT_ROOT));
+      const opened = await openSelectedContainer(
+        await selectMirrorComponent(MIRROR_DIR, MODEL_GRAPH, PRODUCT_CHOICE),
+      );
       parsed = prepareContainer(opened, MODEL_GRAPH);
 
-      const { index, openBlock } = await seriesPleHandle(opened, `test: ${PRODUCT_ROOT.pathname}`);
+      const { index, openBlock } = await seriesPleHandle(opened, `test: ${MIRROR_DIR.pathname}`);
       ple = createGemma4Ple({
         index,
         openBlock,
@@ -551,8 +590,6 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 // レーンの機で投機⑤（`e2e_gemma4_speculative_test.ts` の u32 門）が緑であることを前提にする —
 // ゲートは壁時計で M=1 と M=4 を選ぶので、門が赤の device では基準と分岐の列が割れうる
 // （ADR 0066 追記 2026-10-11 の決定性の節）。
-
-const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 
 /**
  * drafter 入りの `karume/5` ミラーか（⑥の前提 — 投機の 2 系統を回す）。

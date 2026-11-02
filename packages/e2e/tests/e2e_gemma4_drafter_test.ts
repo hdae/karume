@@ -26,8 +26,12 @@
 // ## 資産
 //
 // 配布形ミラー `models/karume-gemma4/`（`dist.py --pipeline gemma4` が組む — drafter 込み）と
-// golden `outputs/series/gemma4-e2b-drafter/`。どちらもリポジトリ管理外で、ミラーが無い環境では
-// **明示 SKIP**、ミラーがあるのに golden が欠けている形は SKIP でなく **FAIL** にする。
+// the drafter goldens in the test-asset root, `goldens/gemma4-e2b-drafter/` (ADR 0139 decision 2)。
+// どちらもリポジトリ管理外で、ミラーが無い環境では**明示 SKIP** する。The goldens are also read by
+// the default-lane cases of `e2e_gemma4_speculative_test.ts`, so their completeness case below runs
+// in the default lane under ADR 0139's fetched rule: a golden absent from a complete fetch of the
+// pinned test-asset dataset FAILs (the dataset at the pin lacks it); without a complete fetch the
+// case SKIPs explicitly (the assets gate is red then).
 
 import {
   isNotFound,
@@ -80,9 +84,15 @@ import {
   allResidentPleBytesOfMirror,
 } from "../../models/tests/helpers/ple-budget.ts";
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
+import {
+  goldenDir,
+  TEST_ASSETS,
+  TEST_ASSETS_ROOT,
+  testAssetsFetched,
+} from "@karume/test-support/test-assets";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
-const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-drafter/", import.meta.url);
+const GOLDEN_ROOT = goldenDir("gemma4-e2b-drafter");
 
 /** SKIP 時にそのまま貼れる組み立てコマンド。 */
 const ASSEMBLE_COMMAND =
@@ -129,6 +139,12 @@ const exists = (url: URL): boolean => {
 
 const goldenPath = (name: string): URL => new URL(`${GOLDEN_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT);
 
+/** The goldens of `files` that are absent, as paths under the test-asset root. */
+const missingGoldens = (files: readonly URL[]): string[] =>
+  files
+    .filter((file) => !exists(file))
+    .map((file) => file.href.slice(TEST_ASSETS_ROOT.href.length));
+
 /**
  * drafter 入りの `karume/5` ミラーか。
  *
@@ -161,18 +177,29 @@ const mirrorManifest = (): Manifest => {
 };
 
 /**
- * 依存資産の完全性（欠落を SKIP に畳まない）。ミラー（自系列に相当）があるのに golden が
- * 欠けているのは未生成ではなく欠損なので、SKIP でなく FAIL にする。
+ * 依存資産の完全性（欠落を SKIP に畳まない）。The goldens are read by ③ here and by the default-lane
+ * cases of `e2e_gemma4_speculative_test.ts`, so this case follows ADR 0139's fetched rule: a golden
+ * absent from a complete fetch of the pin is a defect of the dataset at the pin and FAILs; without a
+ * complete fetch the case SKIPs with the reason in its title (the assets gate is red then).
  */
-test.skipIf(!MIRROR_PRESENT)("gemma4 drafter 資産: golden 3 ケースが揃っている", () => {
-  for (const name of CASES) {
+const MISSING_AT_LOAD = missingGoldens(CASES.map(goldenPath));
+const GOLDENS_SKIP = MISSING_AT_LOAD.length > 0 && !testAssetsFetched();
+test.skipIf(GOLDENS_SKIP)(
+  `gemma4 drafter 資産: golden 3 ケースが揃っている${
+    GOLDENS_SKIP
+      ? ` (SKIP: ${MISSING_AT_LOAD.join(" / ")} absent and outputs/test-assets/ is not a complete ` +
+        "fetch of the pin — node tools/test-assets/fetch.ts)"
+      : ""
+  }`,
+  () => {
+    const missing = missingGoldens(CASES.map(goldenPath));
     assert(
-      exists(goldenPath(name)),
-      `${GOLDEN_PREFIX}${name}${SUFFIX} が ${GOLDEN_ROOT.pathname} に無い` +
-        `（drafter 入りのミラーはあるのに期待値が欠けている — 生成: ${ASSEMBLE_COMMAND}）`,
+      missing.length === 0,
+      `${missing.join(" / ")} absent although outputs/test-assets/ holds a complete fetch of ` +
+        `${TEST_ASSETS.repo}@${TEST_ASSETS.revision} — the test-asset dataset at the pin lacks it`,
     );
-  }
-});
+  },
+);
 
 // ---------------------------------------------------------------------------
 // ① 配布形（GPU 不要）— manifest の役割と `ResolveOptions.weights` の絞り込み

@@ -23,6 +23,12 @@
 // docs/assets-layout.md）。生成は `tools/export-recipes/gemma4/export.py`（コマンドは下の
 // GENERATE_COMMAND がそのまま正本）で、格納内訳・層構成の正本もそこの `assert_ir_form`。
 //
+// The 1-shot graph is not shipped by any distribution (models/karume-gemma4 carries only the
+// product decode graph), so every case here is an implementation-time series check (ADR 0139
+// decision 6): it runs only with KARUME_SERIES=1 and SKIPs explicitly otherwise. The shipped
+// graph's sha rows and census are covered by e2e_gemma4_reference_test.ts and
+// e2e_gemma4_quant_test.ts.
+//
 // KV cache は載っていない（1-shot = prefill 相当の 1 本道。states 形 decode と KV 共有の検収は
 // packages/models/tests/e2e_gemma4_greedy_test.ts）。
 //
@@ -66,6 +72,7 @@ import {
 } from "../../runtime/tests/helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
+import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/series-checks.ts";
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
@@ -197,8 +204,11 @@ const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
-/** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
-const CASES = discoverCases(SERIES_ROOT);
+/**
+ * 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。Without
+ * KARUME_SERIES=1 the series is not read at all (every case SKIPs with {@link SERIES_CHECKS_OPT_IN}).
+ */
+const CASES = SERIES_CHECKS ? discoverCases(SERIES_ROOT) : [];
 
 /** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
 const AVAILABLE = CASES.length > 0;
@@ -207,9 +217,9 @@ const AVAILABLE = CASES.length > 0;
  * io が全滅してモデルだけ残った欠損は `AVAILABLE` では偽になり、`ignore: !AVAILABLE` だと
  * 完全性テスト自身が SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
  */
-const ANY_PRESENT = AVAILABLE || modelPresent(new URL(MODEL_FILE, SERIES_ROOT));
+const ANY_PRESENT = SERIES_CHECKS && (AVAILABLE || modelPresent(new URL(MODEL_FILE, SERIES_ROOT)));
 
-if (!AVAILABLE) {
+if (SERIES_CHECKS && !AVAILABLE) {
   console.warn(
     `[karume] ${SERIES_ROOT.pathname} に export 済み資産が無いため実重み Gemma 4 E2B E2E を ` +
       `SKIP する（混成格納でも 3.97GiB につきリポジトリ管理外）。生成: ${GENERATE_COMMAND}`,
@@ -346,10 +356,13 @@ const references = openReferences(
   new URL("../../runtime/tests/fixtures/references/gemma4-golden.json", import.meta.url),
 );
 
-test.skipIf(!ANY_PRESENT)("Gemma 4 E2B 資産: 期待するケースとモデル本体が揃っている", () => {
-  assertEquals(CASES, [...EXPECTED_CASES], `${SERIES_ROOT.pathname} の golden ケース`);
-  assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
-});
+test.skipIf(!ANY_PRESENT)(
+  `Gemma 4 E2B 資産: 期待するケースとモデル本体が揃っている${SERIES_CHECKS_OPT_IN}`,
+  () => {
+    assertEquals(CASES, [...EXPECTED_CASES], `${SERIES_ROOT.pathname} の golden ケース`);
+    assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
+  },
+);
 
 /** One golden case run through the shared Session (preconditions already asserted). */
 type GoldenRun = {
@@ -422,7 +435,7 @@ const withGoldenSession = async (
  * JSDoc for why).
  */
 test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
-  "Gemma 4 E2B golden: 3 ケースの最終位置 logits の sha256 参照行と定数出力の門（実 GPU）",
+  `Gemma 4 E2B golden: 3 ケースの最終位置 logits の sha256 参照行と定数出力の門（実 GPU）${SERIES_CHECKS_OPT_IN}`,
   async () => {
     /** 系列全体の所要時間（ケースの外で落ちた回の決着に載せる）。 */
     const seriesStartedAt = performance.now();
@@ -512,7 +525,7 @@ test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 // golden), so it is opt-in. It writes no results entries: the case ids belong to the default sha
 // case above, and writing them here would overwrite its settlements.
 test.skipIf(!AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
-  `Gemma 4 E2B golden 突合: 3 ケースの logits と最終位置 greedy（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
+  `Gemma 4 E2B golden 突合: 3 ケースの logits と最終位置 greedy（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}${SERIES_CHECKS_OPT_IN}`,
   async () => {
     await withGoldenSession(async (runCase) => {
       for (const caseName of CASES) {
@@ -606,7 +619,7 @@ const assertStorageKeys = (entries: readonly TimingEntry[], shown: string): void
  * tests/helpers/pipeline-census.ts の `requireCensus` が落とす（空振りの緑にしない）。
  */
 test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
-  "Gemma 4 E2B census: MQA 35 本と混成格納のキー（実 GPU）",
+  `Gemma 4 E2B census: MQA 35 本と混成格納のキー（実 GPU）${SERIES_CHECKS_OPT_IN}`,
   async () => {
     const parsed = prepareContainer(
       await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT)),

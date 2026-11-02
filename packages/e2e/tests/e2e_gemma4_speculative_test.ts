@@ -42,10 +42,12 @@
 //
 // ## 資産
 //
-// 配布形ミラー `models/karume-gemma4/`（drafter 込み）と golden
-// `outputs/series/gemma4-e2b-drafter/`（prompt と torch 継続列）。どちらもリポジトリ管理外で、
-// ミラーが無い環境では**明示 SKIP**、ミラーがあるのに golden が欠けている形は
-// `e2e_gemma4_drafter_test.ts` の資産門が FAIL にする。
+// 配布形ミラー `models/karume-gemma4/`（drafter 込み）と the drafter goldens in the test-asset
+// root, `goldens/gemma4-e2b-drafter/`（prompt と torch 継続列 — ADR 0139 decision 2）。どちらも
+// リポジトリ管理外で、without the mirror every case SKIPs explicitly. The goldens follow ADR 0139's
+// fetched rule: a golden absent from a complete fetch of the pinned test-asset dataset FAILs the
+// cases that read it (the dataset at the pin lacks it); without a complete fetch those cases SKIP
+// with the missing files and `node tools/test-assets/fetch.ts` in their titles.
 
 import { isNotFound, readFile, readTextFileSync, statSync } from "@karume/test-support/fs";
 import { assert, assertEquals } from "@std/assert";
@@ -76,12 +78,18 @@ import {
 } from "../../models/tests/helpers/gemma-mirror.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import {
+  goldenDir,
+  TEST_ASSETS,
+  TEST_ASSETS_ROOT,
+  testAssetsFetched,
+} from "@karume/test-support/test-assets";
+import {
   allResidentBytes,
   allResidentPleBytesOfMirror,
 } from "../../models/tests/helpers/ple-budget.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
-const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-drafter/", import.meta.url);
+const GOLDEN_ROOT = goldenDir("gemma4-e2b-drafter");
 
 /** SKIP 時にそのまま貼れる組み立てコマンド（段 2 の門と同文）。 */
 const ASSEMBLE_COMMAND =
@@ -163,12 +171,24 @@ const MIRROR_PRESENT = ((): boolean => {
   const manifest = parseManifest(readTextFileSync(new URL(MANIFEST_FILENAME, MIRROR_DIR)));
   return Object.hasOwn(manifest.models[manifest.defaultModel].weights, "drafter");
 })();
-const GOLDENS_PRESENT = CASES.every((name) => exists(goldenPath(name)));
-const AVAILABLE = MIRROR_PRESENT && GOLDENS_PRESENT;
+/** The goldens of `files` that are absent, as paths under the test-asset root. */
+const missingGoldens = (files: readonly URL[]): string[] =>
+  files
+    .filter((file) => !exists(file))
+    .map((file) => file.href.slice(TEST_ASSETS_ROOT.href.length));
+const MISSING_GOLDENS = missingGoldens(CASES.map(goldenPath));
+/** ADR 0139's fetched rule: a missing golden SKIPs only without a complete fetch of the pin. */
+const GOLDENS_SKIP = MISSING_GOLDENS.length > 0 && !testAssetsFetched();
+const AVAILABLE = MIRROR_PRESENT && !GOLDENS_SKIP;
+/** The title suffix that names a golden SKIP (empty otherwise). */
+const GOLDENS_SKIP_REASON = GOLDENS_SKIP
+  ? ` (SKIP: ${MISSING_GOLDENS.join(" / ")} absent and outputs/test-assets/ is not a complete ` +
+    "fetch of the pin — node tools/test-assets/fetch.ts)"
+  : "";
 
-if (!AVAILABLE) {
+if (!MIRROR_PRESENT) {
   console.warn(
-    `[karume] drafter 入りの配布形ミラー（${MIRROR_DIR.pathname}）か golden が無いため投機ループ` +
+    `[karume] drafter 入りの配布形ミラー（${MIRROR_DIR.pathname}）が無いため投機ループ` +
       ` 検収を SKIP する。組み立て: ${ASSEMBLE_COMMAND}`,
   );
 }
@@ -187,6 +207,13 @@ type GoldenCase = {
 };
 
 const readGoldenCase = async (name: string): Promise<GoldenCase> => {
+  // Reached with a golden absent only when the test assets are a complete fetch of the pin.
+  assert(
+    missingGoldens([goldenPath(name)]).length === 0,
+    `${goldenPath(name).href.slice(TEST_ASSETS_ROOT.href.length)} absent although ` +
+      `outputs/test-assets/ holds a complete fetch of ${TEST_ASSETS.repo}@${TEST_ASSETS.revision} — ` +
+      "the test-asset dataset at the pin lacks it",
+  );
   const bytes = await readFile(goldenPath(name));
   const file = parseSafetensors(
     bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
@@ -307,7 +334,7 @@ const tokensPerCycle = (stop: GenerationStop): number => {
 // ---------------------------------------------------------------------------
 
 describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
-  "gemma4 投機①: sequential 席で投機 / 非投機の token 列が厳密一致する（実 GPU）",
+  `gemma4 投機①: sequential 席で投機 / 非投機の token 列が厳密一致する（実 GPU）${GOLDENS_SKIP_REASON}`,
   () => {
     let pipeline: Pipeline;
 
@@ -492,7 +519,7 @@ const ofKind = (records: readonly PhaseRecord[], kind: GenerationRunPhase["kind"
   records.filter((record) => record.phase.kind === kind);
 
 describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
-  "gemma4 投機②③④: 既定席の同一性・phase の本数・見積りの合算（実 GPU）",
+  `gemma4 投機②③④: 既定席の同一性・phase の本数・見積りの合算（実 GPU）${GOLDENS_SKIP_REASON}`,
   () => {
     /** 観測を集める窓（step が開けている間だけ積む）。 */
     let records: PhaseRecord[] | undefined;
@@ -781,7 +808,7 @@ type RowPair = {
 };
 
 describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
-  "gemma4 投機⑤: verify の行 0 と decode 1 行の logits が u32 一致する（実 GPU）",
+  `gemma4 投機⑤: verify の行 0 と decode 1 行の logits が u32 一致する（実 GPU）${GOLDENS_SKIP_REASON}`,
   () => {
     let config: PipelineConfig;
     let rope: RopeSpec;

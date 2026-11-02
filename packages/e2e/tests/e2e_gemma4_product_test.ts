@@ -30,9 +30,16 @@
 //
 // ## 資産
 //
-// `outputs/series/gemma4-e2b-product/`（容器 3.73GiB — グラフと重みに PLE の資産 2.22GiB が
-// 同居する。リポジトリ管理外）と `outputs/series/gemma4-e2b-decode/`（期待列の正本）。製品系列が無い環境では
-// **明示 SKIP** し、自系列があるのに正本が欠けている形は SKIP でなく **FAIL** にする。
+// The container is the distribution mirror's `model` component (`models/karume-gemma4/`, model
+// e2b, quant i4 — 3.73 GiB, the graph and weights next to 2.22 GiB of PLE assets; byte-identical to
+// the product series it was assembled from), opened through the manifest (ADR 0139 decision 1).
+// The goldens come from the test-asset root (decision 2): `goldens/gemma4-e2b-product/`
+// (`ple.probe.safetensors`, `reference.json`) and `goldens/gemma4-e2b-decode/` (the greedy
+// expected lists). Without the mirror the container cases SKIP explicitly. The goldens follow ADR
+// 0139's fetched rule: a golden absent from a complete fetch of the pinned test-asset dataset FAILs
+// the case that reads it (the dataset at the pin lacks it); without a complete fetch that case SKIPs
+// with the missing files and `node tools/test-assets/fetch.ts` in its title. A mirror whose
+// container lacks the PLE assets is a FAIL, not a SKIP.
 
 import { isNotFound, readFile, readTextFile, statSync } from "@karume/test-support/fs";
 import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
@@ -57,21 +64,39 @@ import {
 } from "../../models/src/gemma/ple-index.ts";
 import { gemma4RopeInputNames, ropeInputs, type RopeSpec } from "../../models/src/gemma/rope.ts";
 import { planPrefillChunks } from "../../models/src/generation/greedy.ts";
-import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
+import {
+  goldenDir,
+  TEST_ASSETS,
+  TEST_ASSETS_ROOT,
+  testAssetsFetched,
+} from "@karume/test-support/test-assets";
+import {
+  mirrorPresent,
+  mirrorRoot,
+  openSelectedContainer,
+  selectMirrorComponent,
+} from "../../models/tests/helpers/mirror.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 // 全量常駐の予算は helper が正本（同じ式を e2e ごとに写さない）。
 import { allResidentBytes } from "../../models/tests/helpers/ple-budget.ts";
-// 系列出力の容器から PLE の索引と block の読み口を組む（ADR 0109 決定 4）。
-import { openSeriesPle } from "../../models/tests/helpers/ple-series.ts";
+// The PLE index and block readers of the mirror's `model` container (ADR 0109 decision 4).
+import { openGemma4Ple } from "../../models/tests/helpers/gemma-mirror.ts";
 
-const PRODUCT_NAME = "gemma4-e2b-product";
-const PRODUCT_ROOT = new URL(`../../../outputs/series/${PRODUCT_NAME}/`, import.meta.url);
-const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode/", import.meta.url);
-const MODEL_FILE = "model.krm";
-/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
-const MODEL_GRAPH = seriesGraph(PRODUCT_NAME);
+/** The distribution mirror that ships the product graph. */
+const MIRROR = mirrorRoot("karume-gemma4");
+/**
+ * The mirror seat this gate reads: e2b with the i4 weights. MUST: name the quant — the manifest's
+ * default (`i4-fast`) carries other session options, while the sessions below are built with the
+ * options this gate always used (none), so the bytes it checks stay those of the i4 seat.
+ */
+const PRODUCT_CHOICE = { model: "e2b", quant: "i4" } as const;
+/** The component key, which is also the container's graph name (container-v1 §2.1). */
+const MODEL_GRAPH = "model";
+/** The product series' goldens (the PLE probe and the provenance record). */
+const PRODUCT_ROOT = goldenDir("gemma4-e2b-product");
+/** The decode series' greedy goldens (the expected lists of ③ and of the provenance record). */
+const GOLDEN_ROOT = goldenDir("gemma4-e2b-decode");
 const GREEDY_PREFIX = "greedy.";
 const SUFFIX = ".safetensors";
 
@@ -84,7 +109,10 @@ const PROBE_INPUTS_KEY = "per_layer_inputs";
 const REFERENCE_FILE = "reference.json";
 const REFERENCE_SCHEMA = 1;
 
-/** SKIP 時にそのまま貼れる生成コマンド。 */
+/** The command that restores the goldens (ADR 0139 decision 2). */
+const FETCH_COMMAND = "node tools/test-assets/fetch.ts";
+
+/** The recipe commands that regenerate the product container and the goldens. */
 const GENERATE_COMMAND =
   "cd tools/export-recipes && uv run --with 'transformers==5.14.1' python -m gemma4.export_product" +
   "（期待列の正本は … python -m gemma4.export_decode）";
@@ -145,45 +173,77 @@ const exists = (url: URL): boolean => {
   }
 };
 
-const MODEL_PRESENT = modelPresent(new URL(MODEL_FILE, PRODUCT_ROOT));
-const GOLDENS_PRESENT = EXPECTED_CASES.every((name) =>
-  exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT)),
-);
-const AVAILABLE = MODEL_PRESENT && GOLDENS_PRESENT;
+const MODEL_PRESENT = mirrorPresent(MIRROR);
 
 if (!MODEL_PRESENT) {
   console.warn(
-    `[karume] 製品系列（${PRODUCT_ROOT.pathname}）が無いため Gemma 4 E2B 製品グラフ検収を ` +
-      `SKIP する。生成: ${GENERATE_COMMAND}`,
+    `[karume] the distribution mirror ${MIRROR.pathname} is absent (or not karume/5), so the ` +
+      "Gemma 4 E2B product-graph cases SKIP",
   );
 }
 
+const PLE_PROBE = new URL(PLE_PROBE_FILE, PRODUCT_ROOT);
+const REFERENCE = new URL(REFERENCE_FILE, PRODUCT_ROOT);
+const GREEDY_GOLDENS = EXPECTED_CASES.map(
+  (name) => new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT),
+);
+
+/** The goldens of `files` that are absent, as paths under the test-asset root. */
+const missingGoldens = (files: readonly URL[]): string[] =>
+  files
+    .filter((file) => !exists(file))
+    .map((file) => file.href.slice(TEST_ASSETS_ROOT.href.length));
+
 /**
- * 依存資産の完全性（欠落を SKIP に畳まない）。この門は 2 系列に依存する: 製品系列の容器
- * （自系列 — 無ければ「未生成」で SKIP が正しい）と、logits opt-in 系列の greedy golden
- * （期待列の正本）。容器の中も同じ規律で、**グラフはあるのに PLE の資産が無い**（外出しが
- * 効いていない焼き方）は未生成でなく欠損なので、SKIP でなく FAIL にする。
+ * ADR 0139's fetched rule for the goldens a case reads: absent with a complete fetch of the pin ⇒
+ * the case runs and {@link assertGoldensPresent} FAILs naming them; absent without one ⇒ the case
+ * SKIPs, and `title` says why (the assets gate is red then).
+ */
+const goldensGate = (files: readonly URL[]): { readonly skip: boolean; readonly title: string } => {
+  const missing = missingGoldens(files);
+  const skip = missing.length > 0 && !testAssetsFetched();
+  const title = skip
+    ? ` (SKIP: ${missing.join(" / ")} absent and outputs/test-assets/ is not a complete fetch of ` +
+      `the pin — ${FETCH_COMMAND})`
+    : "";
+  return { skip, title };
+};
+
+/** FAILs naming each absent golden of `files` (the dataset at the pin lacks it). */
+const assertGoldensPresent = (files: readonly URL[]): void => {
+  const missing = missingGoldens(files);
+  assert(
+    missing.length === 0,
+    `${missing.join(" / ")} absent although outputs/test-assets/ holds a complete fetch of ` +
+      `${TEST_ASSETS.repo}@${TEST_ASSETS.revision} — the test-asset dataset at the pin lacks it`,
+  );
+};
+
+const PROBE_GATE = goldensGate([PLE_PROBE]);
+const PROVENANCE_GATE = goldensGate([REFERENCE, ...GREEDY_GOLDENS]);
+const GOLDENS_PRESENT = GREEDY_GOLDENS.every((file) => exists(file));
+const AVAILABLE = MODEL_PRESENT && GOLDENS_PRESENT;
+
+/** Opens the mirror's `model` container (e2b / i4) with range reads. */
+const openProductContainer = async () =>
+  await openSelectedContainer(await selectMirrorComponent(MIRROR, MODEL_GRAPH, PRODUCT_CHOICE));
+
+/**
+ * The container's completeness (a missing asset is not folded into a SKIP): a container that has
+ * the graph but **no PLE assets** (the PLE was not moved out) is a defect, not "not generated", so
+ * it FAILs. The goldens are not checked here — the default cases that read them (the PLE
+ * bit-exactness case and the provenance case, which also reads the greedy expected lists of ③ and
+ * of `e2e_gemma4_sequence_test.ts`) follow ADR 0139's fetched rule.
  */
 test.skipIf(!MODEL_PRESENT)(
-  "Gemma 4 E2B 製品資産: PLE の資産と期待列の正本が揃っている",
+  "Gemma 4 E2B product assets: the mirror's model container carries the PLE assets",
   async () => {
-    const opened = await openSeriesContainer(new URL(MODEL_FILE, PRODUCT_ROOT));
+    const opened = await openProductContainer();
     assert(
       Object.hasOwn(opened.model?.assets ?? {}, PLE_INDEX_ASSET),
-      `${MODEL_FILE} に資産 '${PLE_INDEX_ASSET}' が無い（グラフはあるのに PLE が外出しされて` +
+      `${MODEL_GRAPH} に資産 '${PLE_INDEX_ASSET}' が無い（グラフはあるのに PLE が外出しされて` +
         `いない — この資産では per_layer_inputs を作れない）`,
     );
-    assert(
-      exists(new URL(PLE_PROBE_FILE, PRODUCT_ROOT)),
-      `${PLE_PROBE_FILE} が ${PRODUCT_ROOT.pathname} に無い（逆量子化ビット一致の参照が欠けている）`,
-    );
-    for (const name of EXPECTED_CASES) {
-      assert(
-        exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT)),
-        `${GREEDY_PREFIX}${name}${SUFFIX} が ${GOLDEN_ROOT.pathname} に無い` +
-          `（製品系列はあるのに期待列の正本が欠けている）`,
-      );
-    }
   },
 );
 
@@ -238,15 +298,11 @@ const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> => {
  * なければならない — logits opt-in 系列を採り直せば digest が動き、この門が落ちて製品系列の
  * 再 export を強制する（the token-only series' twin gate was removed on 2026-10-17）。
  */
-test.skipIf(!MODEL_PRESENT)(
-  "Gemma 4 E2B 製品資産: 出所記録が参照 golden を束ねている",
+test.skipIf(PROVENANCE_GATE.skip)(
+  `Gemma 4 E2B 製品資産: 出所記録が参照 golden を束ねている${PROVENANCE_GATE.title}`,
   async () => {
-    const path = new URL(REFERENCE_FILE, PRODUCT_ROOT);
-    assert(
-      exists(path),
-      `${REFERENCE_FILE} が ${PRODUCT_ROOT.pathname} に無い` +
-        `（出所記録の無い世代の資産 — 再生成: ${GENERATE_COMMAND}）`,
-    );
+    const path = REFERENCE;
+    assertGoldensPresent([REFERENCE, ...GREEDY_GOLDENS]);
     const record = objectAt(JSON.parse(await readTextFile(path)), "根");
 
     assertEquals(record.get("schema"), REFERENCE_SCHEMA, `${REFERENCE_FILE} の schema`);
@@ -278,7 +334,9 @@ test.skipIf(!MODEL_PRESENT)(
         await sha256Hex(bytes),
         digest.sha256,
         `${file}: sha256（製品系列が束ねた golden と別物 — ` +
-          `どちらかの系列だけを作り直した組み合わせ。再生成: ${GENERATE_COMMAND}）`,
+          `どちらかの系列だけを作り直した組み合わせ — the test-asset dataset at the pin holds ` +
+          `goldens of different runs: regenerate both (${GENERATE_COMMAND}), upload them to ` +
+          `${TEST_ASSETS.repo} and move the pin; the container comes from the mirror）`,
       );
     }
   },
@@ -311,13 +369,14 @@ const goldenF32 = (file: SafetensorsFile, name: string): Float32Array<ArrayBuffe
   return new Float32Array(file.buffer, view.byteOffset, view.byteLength / 4);
 };
 
-/** 索引を読んで loader を組む（block の読みは実ファイル — hub は通さない）。 */
+/** 索引を読んで loader を組む（block reads go through the mirror's manifest source). */
 const openPle = async (maxResidentBytes: number): Promise<Gemma4Ple> => {
-  const { index, openBlock } = await openSeriesPle(PRODUCT_ROOT);
+  const { index, openBlock } = await openGemma4Ple(MIRROR, PRODUCT_CHOICE);
   return createGemma4Ple({ index, openBlock, vocabSize: VOCAB, maxResidentBytes });
 };
 
-const readPleIndex = async (): Promise<Gemma4PleIndex> => (await openSeriesPle(PRODUCT_ROOT)).index;
+const readPleIndex = async (): Promise<Gemma4PleIndex> =>
+  (await openGemma4Ple(MIRROR, PRODUCT_CHOICE)).index;
 
 /**
  * 全量読みへ倒す一意行数の下限（`src/gemma/ple.ts` の `FULL_BLOCK_ROWS` の写し）。
@@ -377,9 +436,10 @@ const fullBytesOf = (table: Gemma4PleTable, plan: TableExpectation): number =>
  *
  * GPU を要さない（loader は Web 標準 API だけで閉じている）。
  */
-test.skipIf(!MODEL_PRESENT)(
-  "Gemma 4 E2B 製品検収: PLE 逆量子化がグラフ内 embedding とビット一致（GPU 不要）",
+test.skipIf(!MODEL_PRESENT || PROBE_GATE.skip)(
+  `Gemma 4 E2B 製品検収: PLE 逆量子化がグラフ内 embedding とビット一致（GPU 不要）${PROBE_GATE.title}`,
   async () => {
+    assertGoldensPresent([PLE_PROBE]);
     const index = await readPleIndex();
     assertEquals(index.tokens, VOCAB, "索引の token 行数（= 主 embedding の vocab）");
     assertEquals(index.layers, LAYERS, "索引の層数");
@@ -724,7 +784,7 @@ describe.skipIf(!MODEL_PRESENT || !GPU_AVAILABLE)(
   () => {
     let parsed: PreparedModel;
     beforeAll(async () => {
-      const opened = await openSeriesContainer(new URL(MODEL_FILE, PRODUCT_ROOT));
+      const opened = await openProductContainer();
       parsed = prepareContainer(opened, MODEL_GRAPH);
     });
 
@@ -773,7 +833,7 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
     let gpu: GpuContext | undefined;
     let session: Awaited<ReturnType<PreparedModel["createContainerSession"]>> | undefined;
     beforeAll(async () => {
-      const opened = await openSeriesContainer(new URL(MODEL_FILE, PRODUCT_ROOT));
+      const opened = await openProductContainer();
       const parsed = prepareContainer(opened, MODEL_GRAPH);
       logitsName = parsed.graph.outputs[0];
 
