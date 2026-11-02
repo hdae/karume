@@ -6,8 +6,8 @@
  *
  * Sources of the expected values:
  *
- * - the stage-0 VAE records (`outputs/bench/karume-moss-image/<date>_stage0-reference/
- *   vae-<H>x<W>.safetensors` — `moss.vae_reference`): upstream's `denormalize`, `unpatchify`,
+ * - the stage-0 VAE records (`goldens/moss-image-sft-stage0-reference/vae-<H>x<W>.safetensors`
+ *   of the test assets — `moss.vae_reference`): upstream's `denormalize`, `unpatchify`,
  *   decode and clamp of one seeded latent per size (256² and the non-square 512×768);
  * - the VAE decoder containers of the distribution mirror `models/karume-moss-image/` (read through
  *   its manifest — ADR 0139): the graph declarations and the asset `latent_batch_norm`;
@@ -48,12 +48,11 @@ import {
   MOSS_GET_MIRROR,
   mossMirrorPresent,
   readRecordTensors,
-  stage0Dir,
+  stage0Record,
   testAssetsRunnable,
 } from "./helpers/moss-dit.ts";
 import {
   loadVaeGolden,
-  MOSS_GENERATE_VAE_STAGE0,
   MOSS_VAE_CASES,
   MOSS_VAE_STAGE0_SEED,
   openMossVae,
@@ -61,7 +60,14 @@ import {
   vaeGoldenUrl,
 } from "./helpers/moss-vae.ts";
 
-const STAGE0 = stage0Dir();
+const stage0Vae = (height: number, width: number): URL =>
+  stage0Record(`vae-${height}x${width}.safetensors`);
+const STAGE0_URLS = [
+  [256, 256],
+  [512, 768],
+].map(([height, width]) => stage0Vae(height, width));
+/** Present, or absent from a complete fetch of the pin (then the group FAILs naming them). */
+const STAGE0_RUNNABLE = testAssetsRunnable(STAGE0_URLS);
 const MIRROR_PRESENT = mossMirrorPresent();
 const GOLDEN_URLS = MOSS_VAE_CASES.map(vaeGoldenUrl);
 /** Present, or absent from a complete fetch of the pin (then the group FAILs naming them). */
@@ -84,16 +90,20 @@ const SIZES = [
   [512, 768],
 ] as const;
 
-describe.skipIf(STAGE0 === undefined || !MIRROR_PRESENT)(
-  `MOSS VAE host functions are Uint32-identical to upstream's (stage-0 records and the mirror)${skipped(STAGE0 !== undefined, "stage-0 VAE record", MOSS_GENERATE_VAE_STAGE0)}${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}`,
+describe.skipIf(!STAGE0_RUNNABLE || !MIRROR_PRESENT)(
+  `MOSS VAE host functions are Uint32-identical to upstream's (stage-0 records and the mirror)${skipped(STAGE0_RUNNABLE, "stage-0 VAE records", MOSS_FETCH_GOLDENS)}${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}`,
   () => {
     for (const [height, width] of SIZES) {
       it(`${height}x${width}: BatchNorm restoration, unpatchify and clamp`, async () => {
+        assertTestAssetsPresent(STAGE0_URLS);
         const { contract } = await openMossVae();
-        const record = await readRecordTensors(
-          new URL(`vae-${height}x${width}.safetensors`, STAGE0),
-          ["latents", "denormalized", "vae.z", "vae.decoded", "image"],
-        );
+        const record = await readRecordTensors(stage0Vae(height, width), [
+          "latents",
+          "denormalized",
+          "vae.z",
+          "vae.decoded",
+          "image",
+        ]);
         const cells = { rows: height / 16, cols: width / 16 };
         const denormalized = mossDenormalizeLatents(record["latents"], contract.batchNorm, cells);
         assertEquals(firstBitMismatch(denormalized, record["denormalized"]), -1, "denormalize");

@@ -40,15 +40,16 @@ import { MossRandn } from "../src/moss/random.ts";
 import { mossEulerStep } from "../src/moss/sampler.ts";
 import type { MossTextEmbeddings } from "../src/moss/request.ts";
 import {
-  filePresent,
   firstBitMismatch,
-  MOSS_GENERATE_STAGE0,
   MOSS_GET_MIRROR,
   mossMirrorPresent,
   openMossDit,
   readRecordTensors,
-  stage0Dir,
+  stage0Record,
   syntheticTrainingGrid,
+  testAssetsRunnable,
+  MOSS_FETCH_GOLDENS,
+  assertTestAssetsPresent,
 } from "./helpers/moss-dit.ts";
 
 const skipped = (present: boolean, what: string, command: string): string =>
@@ -256,7 +257,6 @@ describe("MOSS-Image sampler loop rules (no record needed)", () => {
   });
 });
 
-const STAGE0 = stage0Dir();
 const MIRROR_PRESENT = mossMirrorPresent();
 
 /** The stage-0 DiT records (`moss.reference.SIZES`, height × width) and their latent grids. */
@@ -266,13 +266,14 @@ const DIT_RECORDS = [
 ] as const;
 
 for (const { file, cells, tokens } of DIT_RECORDS) {
-  const url = STAGE0 === undefined ? undefined : new URL(file, STAGE0);
-  const present = url !== undefined && filePresent(url);
+  const url = stage0Record(file);
+  /** Present, or absent from a complete fetch of the pin (then the case FAILs naming it). */
+  const present = testAssetsRunnable([url]);
   describe.skipIf(!present || !MIRROR_PRESENT)(
-    `MOSS-Image sampler loop against upstream's trajectory (${file})${skipped(present, "stage-0 DiT record", MOSS_GENERATE_STAGE0)}${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}`,
+    `MOSS-Image sampler loop against upstream's trajectory (${file})${skipped(present, "stage-0 DiT record", MOSS_FETCH_GOLDENS)}${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}`,
     () => {
       it("reproduces upstream's latents of both steps bit for bit from upstream's DiT outputs (CFG 3, shift 5)", async () => {
-        assert(url !== undefined);
+        assertTestAssetsPresent([url]);
         const { trainingGrid } = await readMossDitAssets((await openMossDit()).components.dit);
         const steps = [0, 1];
         const record = await readRecordTensors(url, [

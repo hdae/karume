@@ -39,7 +39,6 @@ import {
 } from "../src/moss/sampler.ts";
 import { WanRandn } from "../src/wan/random.ts";
 import {
-  filePresent,
   firstBitMismatch,
   floatsOf,
   MOSS_GENERATE_STAGE0,
@@ -47,14 +46,17 @@ import {
   mossMirrorPresent,
   openMossDit,
   readBuffer,
-  stage0Dir,
+  stage0Record,
   syntheticTrainingGrid,
   viewOf,
+  testAssetsRunnable,
+  MOSS_FETCH_GOLDENS,
+  assertTestAssetsPresent,
 } from "./helpers/moss-dit.ts";
 
-const STAGE0 = stage0Dir();
-const HOST_RECORD = STAGE0 === undefined ? undefined : new URL("host.safetensors", STAGE0);
-const HOST_PRESENT = HOST_RECORD !== undefined && filePresent(HOST_RECORD);
+const HOST_RECORD = stage0Record("host.safetensors");
+/** Present, or absent from a complete fetch of the pin (then the group FAILs naming it). */
+const HOST_PRESENT = testAssetsRunnable([HOST_RECORD]);
 const MIRROR_PRESENT = mossMirrorPresent();
 
 const skipped = (present: boolean, what: string, command: string): string =>
@@ -139,10 +141,10 @@ const sequenceFailures = (
 };
 
 describe.skipIf(!HOST_PRESENT || !MIRROR_PRESENT)(
-  `MOSS-Image σ schedule against upstream's set_timesteps${skipped(HOST_PRESENT, "stage-0 host record", MOSS_GENERATE_STAGE0)}${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}`,
+  `MOSS-Image σ schedule against upstream's set_timesteps${skipped(HOST_PRESENT, "stage-0 host record", MOSS_FETCH_GOLDENS)}${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}`,
   () => {
     const load = async () => {
-      assert(HOST_RECORD !== undefined);
+      assertTestAssetsPresent([HOST_RECORD]);
       const host = parseSafetensors(await readBuffer(HOST_RECORD));
       const { trainingGrid } = await readMossDitAssets((await openMossDit()).components.dit);
       const config = metadataField(host, "scheduler_config");

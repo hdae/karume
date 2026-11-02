@@ -6,7 +6,7 @@
  *
  * Sources of the expected values:
  *
- * - the stage-0 records (`outputs/bench/karume-moss-image/<date>_stage0-reference/`): `host.safetensors`
+ * - the stage-0 records (`goldens/moss-image-sft-stage0-reference/` of the test assets): `host.safetensors`
  *   (`moss.host_fixture` — upstream's RoPE tables, training grid, schedules and time sinusoid) and
  *   `dit-256x256.safetensors` / `dit-256x384.safetensors` (`moss.reference` — one upstream
  *   `pipe(...)` per size, 2 steps: the patchified tokens, the sinusoid and timestep of each step, the
@@ -70,7 +70,6 @@ import {
   assertTestAssetsPresent,
   boolsOf,
   containerDigests,
-  filePresent,
   firstBitMismatch,
   floatsOf,
   goldenUrl,
@@ -78,7 +77,6 @@ import {
   loadCaseGolden,
   MOSS_DIT_CASES,
   MOSS_FETCH_GOLDENS,
-  MOSS_GENERATE_STAGE0,
   MOSS_GET_MIRROR,
   MOSS_REFERENCE_DIR,
   MOSS_TEXT_CASES,
@@ -88,14 +86,14 @@ import {
   openMossDit,
   readBuffer,
   readRecordTensors,
-  stage0Dir,
+  stage0Record,
   testAssetsRunnable,
 } from "./helpers/moss-dit.ts";
 import { buildSafetensors, f32Bytes } from "./helpers/safetensors.ts";
 
-const STAGE0 = stage0Dir();
-const HOST_RECORD = STAGE0 === undefined ? undefined : new URL("host.safetensors", STAGE0);
-const HOST_PRESENT = HOST_RECORD !== undefined && filePresent(HOST_RECORD);
+const HOST_RECORD = stage0Record("host.safetensors");
+/** Present, or absent from a complete fetch of the pin (then the group FAILs naming it). */
+const HOST_PRESENT = testAssetsRunnable([HOST_RECORD]);
 const MIRROR_PRESENT = mossMirrorPresent();
 
 /** The stage-0 DiT records (`moss.reference.SIZES`): latent cells and both branches' T. */
@@ -107,8 +105,6 @@ const BRANCH_TOKENS = [
   ["positive", 63],
   ["negative", 10],
 ] as const;
-const recordUrl = (file: string): URL | undefined =>
-  STAGE0 === undefined ? undefined : new URL(file, STAGE0);
 
 const SMALL_CASES = MOSS_DIT_CASES.filter((testCase) => testCase.group === "small");
 const FULL_CASES = MOSS_DIT_CASES.filter((testCase) => testCase.group === "full");
@@ -278,15 +274,15 @@ describe("MOSS-Image host CFG (f32 — upstream's formula)", () => {
   });
 
   for (const { file } of DIT_RECORDS) {
-    const url = recordUrl(file);
-    const present = url !== undefined && filePresent(url);
+    const url = stage0Record(file);
+    const present = testAssetsRunnable([url]);
     describe.skipIf(!present)(
-      `against the stage-0 record ${file}${skipped(present, "stage-0 DiT record", MOSS_GENERATE_STAGE0)}`,
+      `against the stage-0 record ${file}${skipped(present, "stage-0 DiT record", MOSS_FETCH_GOLDENS)}`,
       () => {
         // `stepN.prediction` is the model_output upstream passed to scheduler.step (recorded by
         // wrapping it; `moss.reference`'s gate checks it against its CFG line).
         it("reproduces the prediction upstream passed to scheduler.step at both steps bit for bit (guidance 3)", async () => {
-          assert(url !== undefined);
+          assertTestAssetsPresent([url]);
           for (const step of [0, 1]) {
             const record = await readRecordTensors(url, [
               `step${step}.positive.sample`,
@@ -312,10 +308,10 @@ describe("MOSS-Image host CFG (f32 — upstream's formula)", () => {
 });
 
 describe.skipIf(!MIRROR_PRESENT || !HOST_PRESENT)(
-  `MOSS-Image host tables from the mirror's assets${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}${skipped(HOST_PRESENT, "stage-0 host record", MOSS_GENERATE_STAGE0)}`,
+  `MOSS-Image host tables from the mirror's assets${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}${skipped(HOST_PRESENT, "stage-0 host record", MOSS_FETCH_GOLDENS)}`,
   () => {
     const load = async () => {
-      assert(HOST_RECORD !== undefined);
+      assertTestAssetsPresent([HOST_RECORD]);
       const series = await openMossDit();
       const assets = await readMossDitAssets(series.components.dit);
       const host = parseSafetensors(await readBuffer(HOST_RECORD));
@@ -408,14 +404,14 @@ describe.skipIf(!MIRROR_PRESENT || !HOST_PRESENT)(
     });
 
     for (const { file, cells } of DIT_RECORDS) {
-      const url = recordUrl(file);
-      const present = url !== undefined && filePresent(url);
+      const url = stage0Record(file);
+      const present = testAssetsRunnable([url]);
       const image = cells.rows * cells.cols;
       describe.skipIf(!present)(
-        `against upstream's own forward (${file})${skipped(present, "stage-0 DiT record", MOSS_GENERATE_STAGE0)}`,
+        `against upstream's own forward (${file})${skipped(present, "stage-0 DiT record", MOSS_FETCH_GOLDENS)}`,
         () => {
           it("feeds the sinusoid and the timestep upstream fed at each step of the 2-step schedule", async () => {
-            assert(url !== undefined);
+            assertTestAssetsPresent([url]);
             const { assets, host } = await load();
             const indices = host.tensors.get("steps.2.grid");
             assert(indices !== undefined);
@@ -444,7 +440,7 @@ describe.skipIf(!MIRROR_PRESENT || !HOST_PRESENT)(
           });
 
           it("assembles the RoPE tables upstream's forward used for both branches (T = 63 and 10)", async () => {
-            assert(url !== undefined);
+            assertTestAssetsPresent([url]);
             const { assets } = await load();
             for (const [branch, tokens] of BRANCH_TOKENS) {
               const record = await readRecordTensors(url, [`${branch}.rope`]);
@@ -460,7 +456,7 @@ describe.skipIf(!MIRROR_PRESENT || !HOST_PRESENT)(
           });
 
           it("patchifies the latents into upstream's video tokens (h-major) with zero text rows", async () => {
-            assert(url !== undefined);
+            assertTestAssetsPresent([url]);
             for (const step of [0, 1]) {
               const record = await readRecordTensors(url, [
                 `step${step}.latents_in`,

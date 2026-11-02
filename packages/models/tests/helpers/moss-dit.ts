@@ -8,7 +8,9 @@
  * weights key). The goldens of `tools/export-recipes/moss/dit_reference.py` and upstream's prompt
  * embeddings (`moss.text_embeds`) are read from the test-asset root (`goldenDir(<series>)`, fetched
  * with `node tools/test-assets/fetch.ts`) at the relative paths they had under `outputs/series/`.
- * The stage-0 records stay under `outputs/bench/karume-moss-image/` (recipe records, not goldens).
+ * The stage-0 records of upstream's own run (`moss.host_fixture`, `moss.reference`,
+ * `moss.vae_reference` — written under `outputs/bench/karume-moss-image/<date>_stage0-reference/`)
+ * are uploaded to and read from the test assets too ({@link stage0Record}).
  *
  * The case table mirrors `tools/export-recipes/moss/dit_reference.py` (`DIT_CASES` / `TEXT_CASES`)
  * and is **fixed here, not enumerated from the files** (a partial generation must not make cases
@@ -16,7 +18,7 @@
  */
 
 import { assert } from "@std/assert";
-import { isNotFound, readDirSync, readFile, readRange, statSync } from "@karume/test-support/fs";
+import { isNotFound, readFile, readRange, statSync } from "@karume/test-support/fs";
 import { goldenDir, TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 import {
   type GpuContext,
@@ -58,7 +60,6 @@ export const MOSS_TEXT_EMBEDS: URL = new URL(
   "text_embeds.safetensors",
   goldenDir("moss-image-sft-text-embeds"),
 );
-const BENCH_DIR = new URL("../../../../outputs/bench/karume-moss-image/", import.meta.url);
 
 const RUN = "uv run --group moss --inexact python -m";
 const RECIPE = `cd tools/export-recipes && ${RUN}`;
@@ -466,21 +467,9 @@ export const assertMossRowWritable = (
   );
 };
 
-/** The newest stage-0 record directory (`<date>_stage0-reference`), or undefined. */
-export const stage0Dir = (): URL | undefined => {
-  let names: string[];
-  try {
-    names = readDirSync(BENCH_DIR)
-      .filter((entry) => entry.isDirectory && entry.name.endsWith("_stage0-reference"))
-      .map((entry) => entry.name)
-      .sort();
-  } catch (cause) {
-    if (isNotFound(cause)) return undefined;
-    throw cause;
-  }
-  const last = names.at(-1);
-  return last === undefined ? undefined : new URL(`${last}/`, BENCH_DIR);
-};
+/** One stage-0 record in the test assets (`goldens/moss-image-sft-stage0-reference/<file>`). */
+export const stage0Record = (file: string): URL =>
+  new URL(file, goldenDir("moss-image-sft-stage0-reference"));
 
 /**
  * Selected F32 tensors of a large safetensors record, read by range (the stage-0 DiT records are
