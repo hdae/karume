@@ -1,13 +1,16 @@
 /**
  * The Qwen3.5 text encoder on the real GPU (ADR 0137 decision 6): `Qwen3_5TextEncoder`
- * (`packages/models/src/qwen3_5/encoder.ts`) over the i8 series, against Karume's CPU reference
- * execution of the same container.
+ * (`packages/models/src/qwen3_5/encoder.ts`) over the distribution's i8 text encoder, against
+ * Karume's CPU reference execution of the same container.
  *
- * ## Assets (outside git)
+ * ## Assets (outside git — ADR 0139)
  *
- * - The container `outputs/series/qwen3.5-9b-text-moss-image-sft-i8-dyn/text_encoder/` (34 parts,
- *   7.9 GB), written by {@link GENERATE_CONTAINER}.
- * - The CPU reference `outputs/diag/qwen3_5-export-2026-10-31/`: `ir.full-i8.<case>.f32` (the f32
+ * - The container `text_encoder` of the distribution mirror `models/karume-moss-image/` (model
+ *   `sft`, 34 parts, 7.9 GB), read through its manifest — a byte copy of the series
+ *   `qwen3.5-9b-text-moss-image-sft-i8-dyn` written by {@link GENERATE_CONTAINER}, whose name the
+ *   sha256 case IDs keep verbatim (ADR 0139 decision 7).
+ * - The CPU reference, the golden directory `qwen3_5-export-2026-10-31` of the test-asset root
+ *   (`goldenDir`, fetched with `node tools/test-assets/fetch.ts`): `ir.full-i8.<case>.f32` (the f32
  *   output `[1, T, 4096]`) and `inputs.full.<case>.safetensors` (the four graph inputs it was computed
  *   from — the recipe's `inputs_for` over the ids of MOSS-Image's prompt asset), written by
  *   {@link GENERATE_REFERENCE}: Karume's TypeScript reference executor walks the container's graph op
@@ -18,8 +21,10 @@
  *
  * ## Checks
  *
- * 1. **Assets complete**: the container and every reference file (skipped only when none is there;
- *    a partial set fails).
+ * 1. **Assets complete**: every reference file — a FAIL when one is absent from a complete fetch of
+ *    the test-asset dataset at the pin (`testAssetsFetched`) or from a partial set; skipped when none
+ *    is there and the dataset was not fetched. The mirror's absence SKIPs checks 2–4 instead (the
+ *    distribution gate owns that red).
  * 2. **Host, no GPU**: the inputs the encoder builds from the recorded ids are bit-identical to the
  *    inputs the CPU reference was fed (positions and both RoPE rows), the references were computed
  *    from this container (part 0's sha256), and the graph contract holds on the real declaration.
@@ -30,10 +35,12 @@
  *    host-input fault no shape check sees), the rows leave the band (measured: by three orders of
  *    magnitude — {@link GPU_REL_RMS_BAND}).
  *
- * No GPU, or no assets: explicit SKIP with the commands above (ADR 0005).
+ * No GPU, or no assets: explicit SKIP naming what is missing and how to get it (ADR 0005) — except
+ * a CPU reference absent from a complete fetch of the pinned dataset, which FAILs (check 1).
  */
 
 import { isNotFound, readFile, statSync } from "@karume/test-support/fs";
+import { goldenDir, testAssetsFetched } from "@karume/test-support/test-assets";
 import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, fail } from "@std/assert";
 import {
@@ -53,13 +60,17 @@ import {
   qwen3_5SessionInputs,
 } from "../../models/src/qwen3_5/session-io.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
 import {
-  modelPresent,
-  openSeriesContainer,
-  resolveParts,
-} from "../../runtime/tests/helpers/container-files.ts";
+  assertTestAssetsPresent,
+  MOSS_FETCH_GOLDENS,
+  MOSS_GET_MIRROR,
+  MOSS_MIRROR,
+  mossMirrorPresent,
+  openMossMirrorContainer,
+  part0Digest,
+  testAssetsRunnable,
+} from "../../models/tests/helpers/moss-dit.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import {
   f32ArtifactBytes,
@@ -71,17 +82,22 @@ import {
 } from "../../runtime/tests/helpers/reference.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 
+/**
+ * The series the container was exported as. MUST stay verbatim: the case IDs spell it (ADR 0139
+ * decision 7).
+ */
 const SERIES_NAME = "qwen3.5-9b-text-moss-image-sft-i8-dyn";
+/** The component = the graph name = the manifest's weights key. */
 const COMPONENT = "text_encoder";
-const MODEL_FILE = "model.krm";
-const SERIES_DIR = new URL(`../../../outputs/series/${SERIES_NAME}/${COMPONENT}/`, import.meta.url);
-const CONTAINER = new URL(MODEL_FILE, SERIES_DIR);
-const REFERENCE_DIR = new URL("../../../outputs/diag/qwen3_5-export-2026-10-31/", import.meta.url);
+const REFERENCE_DIR = goldenDir("qwen3_5-export-2026-10-31");
 
 const GENERATE_CONTAINER =
   "cd tools/export-recipes && uv run --with 'transformers==5.14.1' --inexact python -m qwen3_5.export write --storage i8";
 const GENERATE_REFERENCE =
-  "zsh outputs/diag/qwen3_5-export-2026-10-31/run_full_ir.sh (Karume's CPU reference — about 12 minutes)";
+  `${GENERATE_CONTAINER}, then recompute the CPU reference of that series on the exporting machine` +
+  " (Karume's TypeScript reference executor over the container — about 12 minutes;" +
+  " docs/research/2026-10-31-qwen3_5-encoder-gpu.md §1), then upload the goldens" +
+  ' (tools/test-assets/README.md "Upload the assets of a new model")';
 
 /**
  * The sha256 of part 0 (header + both descriptors, which declare every block's sha256) of the
@@ -127,27 +143,35 @@ const filePresent = (url: URL): boolean => {
   }
 };
 
-const MODEL_PRESENT = modelPresent(CONTAINER);
+const MODEL_PRESENT = mossMirrorPresent();
 const REFERENCE_FILES = CASES.flatMap((entry) => [inputsUrl(entry), referenceUrl(entry)]);
-const REFERENCES_PRESENT = REFERENCE_FILES.every(filePresent);
-const ASSETS_AVAILABLE = MODEL_PRESENT && REFERENCES_PRESENT;
-const ANY_PRESENT = MODEL_PRESENT || REFERENCE_FILES.some(filePresent);
+/** Present, or absent from a complete fetch of the pin — then checks 1–4 FAIL naming the files. */
+const REFERENCES_RUNNABLE = testAssetsRunnable(REFERENCE_FILES);
+const ASSETS_AVAILABLE = MODEL_PRESENT && REFERENCES_RUNNABLE;
+/** Check 1 runs on a fetched root and on a partial set (which it fails). */
+const REFERENCES_CHECKED = REFERENCES_RUNNABLE || REFERENCE_FILES.some(filePresent);
 const RUNNABLE = ASSETS_AVAILABLE && GPU_AVAILABLE;
+
+const skipped = (ok: boolean, what: string, command: string): string =>
+  ok ? "" : ` (SKIP: no ${what} — ${command})`;
+const MIRROR_SKIP = skipped(MODEL_PRESENT, `mirror ${MOSS_MIRROR.pathname}`, MOSS_GET_MIRROR);
+const REFERENCES_SKIP = skipped(
+  REFERENCES_RUNNABLE,
+  `CPU reference in ${REFERENCE_DIR.pathname}`,
+  MOSS_FETCH_GOLDENS,
+);
 
 if (!MODEL_PRESENT) {
   console.warn(
-    `[karume] ${SERIES_DIR.pathname} has no container, so the Qwen3.5 text encoder e2e is SKIPPED ` +
-      `(7.9 GB, outside git). Generate: ${GENERATE_CONTAINER}`,
+    `[karume] the mirror ${MOSS_MIRROR.pathname} is absent, so the Qwen3.5 text encoder e2e is ` +
+      `SKIPPED (7.9 GB, outside git). Get it: ${MOSS_GET_MIRROR}`,
   );
-} else if (!REFERENCES_PRESENT) {
+} else if (!REFERENCES_RUNNABLE) {
   console.warn(
     `[karume] ${REFERENCE_DIR.pathname} lacks the CPU reference, so the Qwen3.5 text encoder e2e is ` +
-      `SKIPPED. Generate: ${GENERATE_REFERENCE}`,
+      `SKIPPED. Fetch: ${MOSS_FETCH_GOLDENS}`,
   );
 }
-
-/** The container's graph name (the one table — helpers/series-graphs.ts; read when used). */
-const graphName = (): string => seriesGraph(SERIES_NAME, COMPONENT);
 
 /** One recorded case: the four inputs the CPU reference was fed and its output rows. */
 type Recorded = {
@@ -231,9 +255,6 @@ const formatDistance = ({ relRms, maxAbs, rowCosineMin }: Distance): string =>
   `relRms ${relRms.toExponential(3)}, max |Δ| ${maxAbs.toExponential(3)}, ` +
   `min row cosine ${rowCosineMin.toFixed(9)}`;
 
-const hex = (bytes: ArrayBuffer): string =>
-  [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-
 /**
  * The prepared container as the encoder's component, with one switch for check 4: when
  * `fault.swapRope` is set, the Session receives `rope_cos` and `rope_sin` swapped. The weights and
@@ -270,29 +291,30 @@ const caseIdOf = (entry: Case): string => `${SERIES_NAME}/${entry.name}`;
 const CASE_IDS = CASES.map(caseIdOf);
 if (RUNNABLE) references.warnMissing(CASE_IDS);
 
-test.skipIf(!ANY_PRESENT)(
-  "Qwen3.5 encoder assets: the i8 container and every CPU reference file are present",
+test.skipIf(!REFERENCES_CHECKED)(
+  `Qwen3.5 encoder assets: every CPU reference file is present${skipped(REFERENCES_CHECKED, `CPU reference in ${REFERENCE_DIR.pathname}`, MOSS_FETCH_GOLDENS)}`,
   () => {
-    assert(MODEL_PRESENT, `${CONTAINER.pathname} is missing (generate: ${GENERATE_CONTAINER})`);
+    if (testAssetsFetched()) assertTestAssetsPresent(REFERENCE_FILES);
     assertEquals(
       REFERENCE_FILES.filter((url) => !filePresent(url)).map((url) => url.pathname),
       [],
-      `missing CPU reference files (generate: ${GENERATE_REFERENCE})`,
+      `missing CPU reference files (fetch: ${MOSS_FETCH_GOLDENS})`,
     );
   },
 );
 
 test.skipIf(!ASSETS_AVAILABLE)(
   "Qwen3.5 encoder host (no GPU): the encoder's inputs are bit-identical to the CPU reference's, " +
-    "the reference comes from this container, and the graph contract holds",
+    `the reference comes from this container, and the graph contract holds${MIRROR_SKIP}${REFERENCES_SKIP}`,
   async () => {
-    const [part0] = resolveParts(CONTAINER);
+    assertTestAssetsPresent(REFERENCE_FILES);
+    const opened = await openMossMirrorContainer(COMPONENT);
     assertEquals(
-      hex(await crypto.subtle.digest("SHA-256", await readFile(part0))),
+      await part0Digest(opened),
       REFERENCE_PART0_SHA256,
       `the container is not the one the CPU reference was computed from — regenerate: ${GENERATE_REFERENCE}`,
     );
-    const prepared = prepareContainer(await openSeriesContainer(CONTAINER), graphName());
+    const prepared = prepareContainer(opened, COMPONENT);
     const contract = qwen3_5GraphContract(prepared, "e2e");
     assertEquals(
       { hiddenSize: contract.hiddenSize, vocabularySize: contract.vocabularySize },
@@ -318,7 +340,7 @@ test.skipIf(!ASSETS_AVAILABLE)(
 );
 
 describe.skipIf(!RUNNABLE)(
-  "Qwen3.5 text encoder (real GPU): the rows of each recorded prompt match Karume's CPU reference",
+  `Qwen3.5 text encoder (real GPU): the rows of each recorded prompt match Karume's CPU reference${skipped(GPU_AVAILABLE, "GPU adapter", "a WebGPU device")}${MIRROR_SKIP}${REFERENCES_SKIP}`,
   () => {
     const fault = { swapRope: false };
     let gpu: GpuContext | undefined;
@@ -326,7 +348,9 @@ describe.skipIf(!RUNNABLE)(
     let width = 0;
 
     beforeAll(async () => {
-      const prepared = prepareContainer(await openSeriesContainer(CONTAINER), graphName());
+      assertTestAssetsPresent(REFERENCE_FILES);
+      // The graph name is the manifest's weights key.
+      const prepared = prepareContainer(await openMossMirrorContainer(COMPONENT), COMPONENT);
       gpu = await acquireTestGpu();
       // The rows written below are this machine's: the key's adapter must be the one that runs.
       assertAdapterMatchesEnvironment(gpu);

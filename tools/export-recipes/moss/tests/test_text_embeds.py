@@ -2,7 +2,8 @@
 
 The text encoder is not run here (bf16, about 14 GiB resident). The T₋ = 10 check renders the
 pinned chat template and tokenizes with the pinned tokenizer (SKIP when not cached); an asset that
-was generated is checked for its shapes and token counts (SKIP when absent). Generation:
+was generated is checked for its shapes and token counts (read from the fetched goldens,
+`outputs/test-assets/goldens/` — ADR 0139 decision 2; SKIP when absent). Generation:
 `uv run --group moss --inexact python -m moss.text_embeds`.
 """
 
@@ -13,10 +14,12 @@ import json
 import pytest
 import torch
 
-from _shared.paths import SERIES_ROOT
+from _shared.paths import GOLDENS_ROOT
 from moss import pipeline_ref, prompts, text_embeds
 
-TEXT_EMBEDS = SERIES_ROOT / text_embeds.SERIES_NAME / text_embeds.ASSET_NAME
+#: The generated asset among the fetched goldens (no distribution carries it — the MOSS-Image
+#: distribution ships the text encoder instead).
+TEXT_EMBEDS = GOLDENS_ROOT / text_embeds.SERIES_NAME / text_embeds.ASSET_NAME
 
 #: The chat template's rendering of an empty user turn (ADR 0138, Context).
 EMPTY_TURN = "<|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n<think>\n"
@@ -158,7 +161,9 @@ class TestGeneratedAsset:
     @pytest.fixture
     def asset(self):
         if not TEXT_EMBEDS.is_file():
-            pytest.skip(f"{TEXT_EMBEDS} has not been generated")
+            pytest.skip(
+                f"{TEXT_EMBEDS} is absent — fetch it with `node tools/test-assets/fetch.ts`"
+            )
         return text_embeds.read_asset(TEXT_EMBEDS)
 
     def test_every_prompt_has_its_token_count_of_rows(self, asset):

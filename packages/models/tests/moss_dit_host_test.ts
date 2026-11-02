@@ -1,8 +1,8 @@
 /**
  * The host side of the MOSS-Image DiT stage on the CPU (ADR 0138 decisions 2, 9 and 11, stage 2):
  * the acceptance check, the host functions against upstream's recorded values (Uint32-identical —
- * ADR 0138 decision 11), the graph contract of the written series with its fault injections, and
- * the headroom arithmetic with the borrower's estimate.
+ * ADR 0138 decision 11), the graph contract of the distribution's DiT containers with its fault
+ * injections, and the headroom arithmetic with the borrower's estimate.
  *
  * Sources of the expected values:
  *
@@ -12,13 +12,16 @@
  *   `pipe(...)` per size, 2 steps: the patchified tokens, the sinusoid and timestep of each step, the
  *   RoPE tables, both branches' samples and the prediction upstream passed to `scheduler.step`; the
  *   non-square size tells H from W);
- * - the stage-2 goldens (`outputs/series/moss-image-sft-i8-dyn-reference/` — `moss.dit_reference`):
- *   the six graph inputs exactly as the recipe's `dit_patch.dit_inputs` built them (256² cases), the
- *   graph output before and after the recipe's `head_rows`, and `dit_text`'s RoPE inputs;
- * - the series itself (`outputs/series/moss-image-sft-i8-dyn/` — `moss.export_dit write`): the graph
- *   declarations and the assets `rope_base` / `training_grid`.
+ * - the stage-2 goldens (`moss.dit_reference`, read from the test-asset root
+ *   `goldenDir("moss-image-sft-i8-dyn-reference")` — ADR 0139, fetched with
+ *   `node tools/test-assets/fetch.ts`): the six graph inputs exactly as the recipe's
+ *   `dit_patch.dit_inputs` built them (256² cases), the graph output before and after the recipe's
+ *   `head_rows`, and `dit_text`'s RoPE inputs;
+ * - the DiT containers of the distribution mirror `models/karume-moss-image/` (read through its
+ *   manifest — byte copies of the series `moss-image-sft-i8-dyn` the goldens were taken from): the
+ *   graph declarations and the assets `rope_base` / `training_grid`.
  *
- * Each group skips explicitly, naming the command that writes what it lacks (ADR 0005).
+ * Each group skips explicitly, naming the command that gets what it lacks (ADR 0005).
  */
 
 import { describe, expect, it } from "vite-plus/test";
@@ -64,6 +67,7 @@ import {
   MOSS_MAX_TEXT_TOKENS,
 } from "../src/moss/request.ts";
 import {
+  assertTestAssetsPresent,
   boolsOf,
   containerDigests,
   filePresent,
@@ -73,24 +77,26 @@ import {
   intOf,
   loadCaseGolden,
   MOSS_DIT_CASES,
-  MOSS_GENERATE_GOLDENS,
-  MOSS_GENERATE_SERIES,
+  MOSS_FETCH_GOLDENS,
   MOSS_GENERATE_STAGE0,
+  MOSS_GET_MIRROR,
+  MOSS_REFERENCE_DIR,
   MOSS_TEXT_CASES,
   type MossDitCase,
-  mossSeriesPresent,
+  mossMirrorPresent,
   type MossTextCase,
-  openMossSeries,
+  openMossDit,
   readBuffer,
   readRecordTensors,
   stage0Dir,
+  testAssetsRunnable,
 } from "./helpers/moss-dit.ts";
 import { buildSafetensors, f32Bytes } from "./helpers/safetensors.ts";
 
 const STAGE0 = stage0Dir();
 const HOST_RECORD = STAGE0 === undefined ? undefined : new URL("host.safetensors", STAGE0);
 const HOST_PRESENT = HOST_RECORD !== undefined && filePresent(HOST_RECORD);
-const SERIES_PRESENT = mossSeriesPresent();
+const MIRROR_PRESENT = mossMirrorPresent();
 
 /** The stage-0 DiT records (`moss.reference.SIZES`): latent cells and both branches' T. */
 const DIT_RECORDS = [
@@ -106,11 +112,12 @@ const recordUrl = (file: string): URL | undefined =>
 
 const SMALL_CASES = MOSS_DIT_CASES.filter((testCase) => testCase.group === "small");
 const FULL_CASES = MOSS_DIT_CASES.filter((testCase) => testCase.group === "full");
-const goldensPresent = (cases: readonly { readonly name: string }[]): boolean =>
-  cases.every(({ name }) => filePresent(goldenUrl(name)));
-const SMALL_GOLDENS = goldensPresent(SMALL_CASES);
-const FULL_GOLDENS = goldensPresent(FULL_CASES);
-const TEXT_GOLDENS = goldensPresent(MOSS_TEXT_CASES);
+/** Present, or absent from a complete fetch of the pin (then `caseGoldens` FAILs naming it). */
+const goldensRunnable = (cases: readonly { readonly name: string }[]): boolean =>
+  testAssetsRunnable(cases.map(({ name }) => goldenUrl(name)));
+const SMALL_GOLDENS = goldensRunnable(SMALL_CASES);
+const FULL_GOLDENS = goldensRunnable(FULL_CASES);
+const TEXT_GOLDENS = goldensRunnable(MOSS_TEXT_CASES);
 
 const skipped = (present: boolean, what: string, command: string): string =>
   present ? "" : ` (SKIP: no ${what} — ${command})`;
@@ -304,12 +311,12 @@ describe("MOSS-Image host CFG (f32 — upstream's formula)", () => {
   }
 });
 
-describe.skipIf(!SERIES_PRESENT || !HOST_PRESENT)(
-  `MOSS-Image host tables from the series assets${skipped(SERIES_PRESENT, "series", MOSS_GENERATE_SERIES)}${skipped(HOST_PRESENT, "stage-0 host record", MOSS_GENERATE_STAGE0)}`,
+describe.skipIf(!MIRROR_PRESENT || !HOST_PRESENT)(
+  `MOSS-Image host tables from the mirror's assets${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}${skipped(HOST_PRESENT, "stage-0 host record", MOSS_GENERATE_STAGE0)}`,
   () => {
     const load = async () => {
       assert(HOST_RECORD !== undefined);
-      const series = await openMossSeries();
+      const series = await openMossDit();
       const assets = await readMossDitAssets(series.components.dit);
       const host = parseSafetensors(await readBuffer(HOST_RECORD));
       return { series, assets, host };
@@ -481,12 +488,13 @@ describe.skipIf(!SERIES_PRESENT || !HOST_PRESENT)(
 );
 
 /**
- * A loader of case goldens that refuses stale ones and ones of another case (`loadCaseGolden`);
- * the container digests are read once per group.
+ * A loader of case goldens that refuses absent ones (`assertTestAssetsPresent`), stale ones and ones
+ * of another case (`loadCaseGolden`); the container digests are read once per group.
  */
 const caseGoldens = () => {
   let digests: Promise<Readonly<Record<string, string>>> | undefined;
   return async (testCase: MossDitCase | MossTextCase) => {
+    assertTestAssetsPresent([goldenUrl(testCase.name)]);
     digests ??= containerDigests();
     return loadCaseGolden(testCase, await digests);
   };
@@ -516,14 +524,14 @@ const headRowsCases = (cases: readonly MossDitCase[]) => {
   );
 };
 
-describe.skipIf(!SMALL_GOLDENS || !SERIES_PRESENT)(
-  `MOSS-Image host functions against the recipe's dit_patch at 256²${skipped(SMALL_GOLDENS, "256² goldens", MOSS_GENERATE_GOLDENS)}${skipped(SERIES_PRESENT, "series", MOSS_GENERATE_SERIES)}`,
+describe.skipIf(!SMALL_GOLDENS || !MIRROR_PRESENT)(
+  `MOSS-Image host functions against the recipe's dit_patch at 256²${skipped(SMALL_GOLDENS, `256² goldens in ${MOSS_REFERENCE_DIR.pathname}`, MOSS_FETCH_GOLDENS)}${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}`,
   () => {
     const golden = caseGoldens();
     it.each(SMALL_CASES.map((testCase) => [testCase.name, testCase] as const))(
       "%s: the six graph inputs are dit_patch.dit_inputs bit for bit",
       async (name, testCase) => {
-        const series = await openMossSeries();
+        const series = await openMossDit();
         const assets = await readMossDitAssets(series.components.dit);
         const { file } = await golden(testCase);
         const latents = floatsOf(file, "latents", name);
@@ -556,22 +564,22 @@ describe.skipIf(!SMALL_GOLDENS || !SERIES_PRESENT)(
   },
 );
 
-describe.skipIf(!FULL_GOLDENS || !SERIES_PRESENT)(
-  `MOSS-Image head rows against the recipe's dit_patch at 1024²${skipped(FULL_GOLDENS, "1024² goldens", MOSS_GENERATE_GOLDENS)}${skipped(SERIES_PRESENT, "series", MOSS_GENERATE_SERIES)}`,
+describe.skipIf(!FULL_GOLDENS || !MIRROR_PRESENT)(
+  `MOSS-Image head rows against the recipe's dit_patch at 1024²${skipped(FULL_GOLDENS, `1024² goldens in ${MOSS_REFERENCE_DIR.pathname}`, MOSS_FETCH_GOLDENS)}${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}`,
   () => {
     headRowsCases(FULL_CASES);
   },
 );
 
-describe.skipIf(!TEXT_GOLDENS || !SERIES_PRESENT)(
-  `MOSS-Image dit_text inputs against the recipe's${skipped(TEXT_GOLDENS, "text goldens", MOSS_GENERATE_GOLDENS)}${skipped(SERIES_PRESENT, "series", MOSS_GENERATE_SERIES)}`,
+describe.skipIf(!TEXT_GOLDENS || !MIRROR_PRESENT)(
+  `MOSS-Image dit_text inputs against the recipe's${skipped(TEXT_GOLDENS, `text goldens in ${MOSS_REFERENCE_DIR.pathname}`, MOSS_FETCH_GOLDENS)}${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}`,
   () => {
     const golden = caseGoldens();
     it.each(MOSS_TEXT_CASES.map((testCase) => [testCase.name, testCase] as const))(
       "%s: dit_text's inputs are the recipe's",
       async (name, testCase) => {
         const { tokens } = testCase;
-        const series = await openMossSeries();
+        const series = await openMossDit();
         const assets = await readMossDitAssets(series.components.dit);
         const contract = mossDitContract(
           mossDitGraphContract(series.components, "test"),
@@ -699,11 +707,11 @@ describe("MOSS-Image asset parsers refuse malformed tables", () => {
   });
 });
 
-describe.skipIf(!SERIES_PRESENT)(
-  `MOSS-Image graph contract of the written series${skipped(SERIES_PRESENT, "series", MOSS_GENERATE_SERIES)}`,
+describe.skipIf(!MIRROR_PRESENT)(
+  `MOSS-Image graph contract of the mirror's DiT containers${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}`,
   () => {
     it("accepts the three graphs and settles C, D, R, P and the borrowed weights", async () => {
-      const series = await openMossSeries();
+      const series = await openMossDit();
       const assets = await readMossDitAssets(series.components.dit);
 
       const contract = mossDitContract(
@@ -733,7 +741,7 @@ describe.skipIf(!SERIES_PRESENT)(
       which: keyof MossDitGraphs,
       edit: (graph: MossDitGraphs["dit"]["graph"]) => MossDitGraphs["dit"]["graph"],
     ): Promise<MossDitGraphs> => {
-      const { components } = await openMossSeries();
+      const { components } = await openMossDit();
       const graphs = {
         dit: components.dit,
         ditSkip22: components.ditSkip22,
@@ -800,7 +808,7 @@ describe.skipIf(!SERIES_PRESENT)(
     });
 
     it("names a missing or mis-roled asset", async () => {
-      const { components } = await openMossSeries();
+      const { components } = await openMossDit();
       const without = {
         ...components,
         dit: { ...components.dit, assets: { rope_base: "rope-base" } },
@@ -823,7 +831,7 @@ describe.skipIf(!SERIES_PRESENT)(
     });
 
     it("names base tables that cover other limits than the accepted ones", async () => {
-      const series = await openMossSeries();
+      const series = await openMossDit();
       const assets = await readMossDitAssets(series.components.dit);
       const graph = mossDitGraphContract(series.components, "test");
 
@@ -842,8 +850,8 @@ describe.skipIf(!SERIES_PRESENT)(
   },
 );
 
-describe.skipIf(!SERIES_PRESENT)(
-  `MOSS-Image headroom of the DiT stages${skipped(SERIES_PRESENT, "series", MOSS_GENERATE_SERIES)}`,
+describe.skipIf(!MIRROR_PRESENT)(
+  `MOSS-Image headroom of the DiT stages${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}`,
   () => {
     /** The 3080 Ti's limits (any device's would do — the estimate is a pure function of them). */
     const limits = { maxStorageBufferBindingSize: 2_147_483_644, maxBufferSize: 2_147_483_648 };
@@ -855,7 +863,7 @@ describe.skipIf(!SERIES_PRESENT)(
     const reference = mossPreset(MOSS_REFERENCE_PRESET);
 
     it("counts no weight in the borrower's estimate and every weight in the lender's", async () => {
-      const { components } = await openMossSeries();
+      const { components } = await openMossDit();
 
       const lender = components.dit.estimate({ ...limits, bindings: { S: 4159 } });
       const borrower = components.ditSkip22.estimate({ ...limits, bindings: { S: 4106 } });
@@ -872,7 +880,7 @@ describe.skipIf(!SERIES_PRESENT)(
     });
 
     it("sums both Sessions of the pair, counting the weights once, plus the two text contexts", async () => {
-      const series = await openMossSeries();
+      const series = await openMossDit();
       const assets = await readMossDitAssets(series.components.dit);
       const contract = mossDitContract(
         mossDitGraphContract(series.components, "test"),
@@ -915,7 +923,7 @@ describe.skipIf(!SERIES_PRESENT)(
     });
 
     it("estimates the pair with the practical preset's knobs and the device's attention facts, and dit_text with none", async () => {
-      const series = await openMossSeries();
+      const series = await openMossDit();
       const assets = await readMossDitAssets(series.components.dit);
       const contract = mossDitContract(
         mossDitGraphContract(series.components, "test"),
@@ -970,7 +978,7 @@ describe.skipIf(!SERIES_PRESENT)(
     });
 
     it("sizes the text stage at the longer branch, whichever it is", async () => {
-      const series = await openMossSeries();
+      const series = await openMossDit();
       const assets = await readMossDitAssets(series.components.dit);
       const contract = mossDitContract(
         mossDitGraphContract(series.components, "test"),

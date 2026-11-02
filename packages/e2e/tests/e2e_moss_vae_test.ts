@@ -8,6 +8,13 @@
  * `decoded` (CPU) and the clamped `image`. The stage starts from `latents` (the host's BatchNorm
  * restoration and unpatchify are in the run; `moss_vae_host_test.ts` checks them Uint32-identical).
  *
+ * Where the assets come from (ADR 0139): the three decoder containers are read from the
+ * distribution mirror `models/karume-moss-image/` through its manifest, the goldens from the
+ * test-asset root (`goldenDir("moss-image-sft-f32-dyn")`, fetched with
+ * `node tools/test-assets/fetch.ts`). Each case requires the mirror plus exactly the goldens it
+ * reads: the default cases that decode upstream's latents the 256² stage-0 golden, the parity
+ * group all ten, the cap group the cap golden.
+ *
  * ## The band (ADR 0118 decision 8's upstream check of a VAE — opt-in `KARUME_UPSTREAM_PARITY=1`)
  *
  * This is a port check of the reference path against upstream (ADR 0118 decision 8: an f32
@@ -77,27 +84,57 @@ import {
 } from "../../models/src/moss/vae-stage.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import {
+  assertTestAssetsPresent,
+  MOSS_FETCH_GOLDENS,
+  MOSS_GET_MIRROR,
+  mossMirrorPresent,
+  testAssetsRunnable,
+} from "../../models/tests/helpers/moss-dit.ts";
+import {
   loadVaeGolden,
-  MOSS_GENERATE_VAE_CAP,
-  MOSS_GENERATE_VAE_SERIES,
   MOSS_VAE_CAP_CASE,
   MOSS_VAE_CASES,
   MOSS_VAE_STAGE0_SEED,
+  type MossVae,
   type MossVaeCase,
-  type MossVaeSeries,
-  mossVaeSeriesPresent,
-  openMossVaeSeries,
+  openMossVae,
   vaeGoldenPresent,
+  vaeGoldenUrl,
 } from "../../models/tests/helpers/moss-vae.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
-const SERIES = mossVaeSeriesPresent() && MOSS_VAE_CASES.every(vaeGoldenPresent);
+const MIRROR_PRESENT = mossMirrorPresent();
 const CAP = process.env.KARUME_MOSS_VAE_CAP === "1";
 
-/** The suffix that names what a skipped group lacks and the command that writes it. */
+/** The suffix that names what a skipped group lacks and the command that gets it. */
 const skipped = (ok: boolean, what: string, command: string): string =>
   ok ? "" : ` (SKIP: no ${what} — ${command})`;
+
+/** The 256² stage-0 case: the default cases decode its latents. */
+const stage0Case = MOSS_VAE_CASES.find(
+  (testCase) => testCase.seed === MOSS_VAE_STAGE0_SEED && testCase.height === 256,
+);
+// A table without that case is a defect of the table, not an absent asset: loud at load.
+if (stage0Case === undefined) {
+  throw new Error("MOSS_VAE_CASES has no 256² case of the stage-0 seed");
+}
+const STAGE0_URL = vaeGoldenUrl(stage0Case);
+/** Present, or absent from a complete fetch of the pin (then the cases FAIL naming it). */
+const STAGE0_RUNNABLE = testAssetsRunnable([STAGE0_URL]);
+const STAGE0_SKIP = skipped(STAGE0_RUNNABLE, `golden ${STAGE0_URL.pathname}`, MOSS_FETCH_GOLDENS);
+const PARITY_PRESENT = MOSS_VAE_CASES.every(vaeGoldenPresent);
+const PARITY_SKIP = skipped(
+  PARITY_PRESENT,
+  `goldens ${MOSS_VAE_CASES.map((testCase) => vaeGoldenUrl(testCase).pathname).join(", ")}`,
+  MOSS_FETCH_GOLDENS,
+);
+const CAP_PRESENT = vaeGoldenPresent(MOSS_VAE_CAP_CASE);
+const CAP_SKIP = skipped(
+  CAP_PRESENT,
+  `golden ${vaeGoldenUrl(MOSS_VAE_CAP_CASE).pathname}`,
+  MOSS_FETCH_GOLDENS,
+);
 
 /**
  * The band of m per size (module doc "The band"). Derived 2026-10-27 on the RTX 3080 Ti (Node +
@@ -226,65 +263,70 @@ const decodeCase = async (
     observe,
   );
 
-describe.skipIf(!GPU_AVAILABLE || !SERIES)(
-  `MOSS-Image VAE stage on the GPU${skipped(GPU_AVAILABLE, "GPU adapter", "a WebGPU device")}${skipped(SERIES, "VAE series or goldens", MOSS_GENERATE_VAE_SERIES)}`,
+describe.skipIf(!GPU_AVAILABLE || !MIRROR_PRESENT)(
+  `MOSS-Image VAE stage on the GPU${skipped(GPU_AVAILABLE, "GPU adapter", "a WebGPU device")}${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}`,
   () => {
     let gpu: GpuContext;
-    let series: MossVaeSeries;
+    let series: MossVae;
     let state: MossVaeStageState;
 
     beforeAll(async () => {
       gpu = await acquireTestGpu();
-      series = await openMossVaeSeries();
+      series = await openMossVae();
       state = { gpu, components: series.components, contract: series.contract };
     });
     afterAll(() => {
       gpu?.destroy();
     });
 
-    const stage0Case = MOSS_VAE_CASES.find(
-      (testCase) => testCase.seed === MOSS_VAE_STAGE0_SEED && testCase.height === 256,
+    it.skipIf(!STAGE0_RUNNABLE)(
+      `decodes 256² finite, with the upsample fusion and group_norm's dispatches in the census${STAGE0_SKIP}`,
+      async () => {
+        assert(stage0Case !== undefined);
+        assertTestAssetsPresent([STAGE0_URL]);
+        const golden = await loadVaeGolden(stage0Case);
+        const census = new Map<MossVaeComponent, SessionDiagnostics>();
+        const image = await decodeCase(
+          state,
+          stage0Case,
+          golden.latents,
+          (component, diagnostics) => census.set(component, diagnostics),
+        );
+        assertEquals(image.length, 3 * 256 * 256);
+        assert(image.every((value) => value >= -1 && value <= 1));
+        const count = (component: MossVaeComponent, prefix: string): number =>
+          (census.get(component)?.lastRunPipelines ?? [])
+            .filter((row) => row.key.startsWith(prefix))
+            .reduce((total, row) => total + row.dispatchCount, 0);
+        // The three ×2 upsamples run as the fusion rule's kernel (the recipe's reshape / expand form).
+        expect(count("vae_decoder_post", "upsample2x:")).toBe(3);
+        expect(census.get("vae_decoder_post")?.lastRunFusions).toMatchObject({ upsample2x: 3 });
+        // Every GroupNorm is one group_norm node of five dispatches: 2 + 1 + 27 of the 30.
+        for (const [component, norms] of [
+          ["vae_decoder_pre", 2],
+          ["vae_decoder_attn", 1],
+          ["vae_decoder_post", 27],
+        ] as const) {
+          expect(count(component, "group_norm_")).toBe(5 * norms);
+        }
+        // The mid attention runs as one fused attention node (single head, D = 384).
+        expect(count("vae_decoder_attn", "attention_")).toBeGreaterThan(0);
+        // The headroom need rests on the estimates covering what the stage holds: the three
+        // Sessions' backings and weights plus the residents stay within the need without its part
+        // and margin.
+        const plan = planMossVae({ width: 256, height: 256 }, state.contract, gpu.limits);
+        const covered =
+          mossVaeStageNeeds({ ...state, limits: gpu.limits }, plan) -
+          HEADROOM_MARGIN_BYTES -
+          Math.max(...Object.values(series.components).map((component) => component.maxPartBytes));
+        let held = 2 * 384 * 32 * 32 * 4 + 3 * 256 * 256 * 4;
+        for (const diagnostics of census.values()) held += heldBytes(diagnostics);
+        console.info(
+          `[moss vae] 256²: held ${held} B within the estimates + residents ${covered} B`,
+        );
+        expect(held).toBeLessThanOrEqual(covered);
+      },
     );
-
-    it("decodes 256² finite, with the upsample fusion and group_norm's dispatches in the census", async () => {
-      assert(stage0Case !== undefined);
-      const golden = await loadVaeGolden(stage0Case);
-      const census = new Map<MossVaeComponent, SessionDiagnostics>();
-      const image = await decodeCase(state, stage0Case, golden.latents, (component, diagnostics) =>
-        census.set(component, diagnostics),
-      );
-      assertEquals(image.length, 3 * 256 * 256);
-      assert(image.every((value) => value >= -1 && value <= 1));
-      const count = (component: MossVaeComponent, prefix: string): number =>
-        (census.get(component)?.lastRunPipelines ?? [])
-          .filter((row) => row.key.startsWith(prefix))
-          .reduce((total, row) => total + row.dispatchCount, 0);
-      // The three ×2 upsamples run as the fusion rule's kernel (the recipe's reshape / expand form).
-      expect(count("vae_decoder_post", "upsample2x:")).toBe(3);
-      expect(census.get("vae_decoder_post")?.lastRunFusions).toMatchObject({ upsample2x: 3 });
-      // Every GroupNorm is one group_norm node of five dispatches: 2 + 1 + 27 of the 30.
-      for (const [component, norms] of [
-        ["vae_decoder_pre", 2],
-        ["vae_decoder_attn", 1],
-        ["vae_decoder_post", 27],
-      ] as const) {
-        expect(count(component, "group_norm_")).toBe(5 * norms);
-      }
-      // The mid attention runs as one fused attention node (single head, D = 384).
-      expect(count("vae_decoder_attn", "attention_")).toBeGreaterThan(0);
-      // The headroom need rests on the estimates covering what the stage holds: the three
-      // Sessions' backings and weights plus the residents stay within the need without its part
-      // and margin.
-      const plan = planMossVae({ width: 256, height: 256 }, state.contract, gpu.limits);
-      const covered =
-        mossVaeStageNeeds({ ...state, limits: gpu.limits }, plan) -
-        HEADROOM_MARGIN_BYTES -
-        Math.max(...Object.values(series.components).map((component) => component.maxPartBytes));
-      let held = 2 * 384 * 32 * 32 * 4 + 3 * 256 * 256 * 4;
-      for (const diagnostics of census.values()) held += heldBytes(diagnostics);
-      console.info(`[moss vae] 256²: held ${held} B within the estimates + residents ${covered} B`);
-      expect(held).toBeLessThanOrEqual(covered);
-    });
 
     it("splits the mid attention by its row-block budget at 1024² and leaves the image bit-identical", async () => {
       // 1024² is the smallest square of the lane where the budget is reached (S = 16,384 positions:
@@ -343,158 +385,176 @@ describe.skipIf(!GPU_AVAILABLE || !SERIES)(
       expect(first).toBe(-1);
     });
 
-    it("closes every Session and resident, the Sessions first, after a run and after a failure", async () => {
-      assert(stage0Case !== undefined);
-      const golden = await loadVaeGolden(stage0Case);
-      const events: string[] = [];
-      const sessions: Session[] = [];
-      const components: MossVaeComponents = {
-        pre: observed(series.components.pre, "pre", events, sessions),
-        attn: observed(series.components.attn, "attn", events, sessions),
-        post: observed(series.components.post, "post", events, sessions),
-      };
-      const closed = [
-        "dispose pre",
-        "dispose attn",
-        "dispose post",
-        "dispose resident moss vae_decoder_pre",
-        "dispose resident moss vae_decoder_attn",
-        "dispose resident moss vae_decoder_post",
-      ];
-      const residents = await withResidentLog(gpu, events, async (residents) => {
-        await decodeCase({ ...state, components }, stage0Case, golden.latents);
-        expect(events).toEqual(["open pre", "open attn", "open post", ...closed]);
-        events.length = 0;
-        // A failure after the batch span (the observer runs after `finishAndRead`) closes the same
-        // six. A failure inside the span is the next test's.
-        const failure = new Error("the observer failed");
+    it.skipIf(!STAGE0_RUNNABLE)(
+      `closes every Session and resident, the Sessions first, after a run and after a failure${STAGE0_SKIP}`,
+      async () => {
+        assert(stage0Case !== undefined);
+        assertTestAssetsPresent([STAGE0_URL]);
+        const golden = await loadVaeGolden(stage0Case);
+        const events: string[] = [];
+        const sessions: Session[] = [];
+        const components: MossVaeComponents = {
+          pre: observed(series.components.pre, "pre", events, sessions),
+          attn: observed(series.components.attn, "attn", events, sessions),
+          post: observed(series.components.post, "post", events, sessions),
+        };
+        const closed = [
+          "dispose pre",
+          "dispose attn",
+          "dispose post",
+          "dispose resident moss vae_decoder_pre",
+          "dispose resident moss vae_decoder_attn",
+          "dispose resident moss vae_decoder_post",
+        ];
+        const residents = await withResidentLog(gpu, events, async (residents) => {
+          await decodeCase({ ...state, components }, stage0Case, golden.latents);
+          expect(events).toEqual(["open pre", "open attn", "open post", ...closed]);
+          events.length = 0;
+          // A failure after the batch span (the observer runs after `finishAndRead`) closes the same
+          // six. A failure inside the span is the next test's.
+          const failure = new Error("the observer failed");
+          await assertRejects(
+            () =>
+              decodeCase({ ...state, components }, stage0Case, golden.latents, () => {
+                throw failure;
+              }),
+            Error,
+            "the observer failed",
+          );
+          expect(events).toEqual(["open pre", "open attn", "open post", ...closed]);
+          return residents;
+        });
+        expect(residents).toHaveLength(6);
+        assert(residents.every((resident) => resident.disposed));
+        for (const session of sessions)
+          await assertRejects(() => session.run({}), Error, "disposed");
+      },
+    );
+
+    it.skipIf(!STAGE0_RUNNABLE)(
+      `returns the batch span and closes everything when an enqueue fails inside it${STAGE0_SKIP}`,
+      async () => {
+        assert(stage0Case !== undefined);
+        assertTestAssetsPresent([STAGE0_URL]);
+        const golden = await loadVaeGolden(stage0Case);
+        const events: string[] = [];
+        const sessions: Session[] = [];
+        const attn = observed(series.components.attn, "attn", events, sessions);
+        const failing: ModelComponent = {
+          ...attn,
+          createSession: async (gpu, options) => {
+            const session = await attn.createSession(gpu, options);
+            Object.defineProperty(session, "enqueue", {
+              configurable: true,
+              value: () => Promise.reject(new Error("attn cannot enqueue")),
+            });
+            return session;
+          },
+        };
+        const components: MossVaeComponents = {
+          pre: observed(series.components.pre, "pre", events, sessions),
+          attn: failing,
+          post: observed(series.components.post, "post", events, sessions),
+        };
+        const residents = await withResidentLog(gpu, events, async (residents) => {
+          await assertRejects(
+            () => decodeCase({ ...state, components }, stage0Case, golden.latents),
+            Error,
+            "attn cannot enqueue",
+          );
+          return residents;
+        });
+        expect(events).toEqual([
+          "open pre",
+          "open attn",
+          "open post",
+          "dispose pre",
+          "dispose attn",
+          "dispose post",
+          "dispose resident moss vae_decoder_pre",
+          "dispose resident moss vae_decoder_attn",
+          "dispose resident moss vae_decoder_post",
+        ]);
+        expect(residents).toHaveLength(3);
+        assert(residents.every((resident) => resident.disposed));
+        // The span's lock came back: a later batch on the same context runs to the end. A span left
+        // open would make it wait on the lock forever, so the wait is bounded and names the cause.
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const stuck = new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("the failed batch did not return the span's lock")),
+            60_000,
+          );
+        });
+        try {
+          const image = await Promise.race([decodeCase(state, stage0Case, golden.latents), stuck]);
+          expect(image.length).toBe(3 * stage0Case.width * stage0Case.height);
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+    );
+
+    it.skipIf(!STAGE0_RUNNABLE)(
+      `closes what it opened when a later Session fails to open${STAGE0_SKIP}`,
+      async () => {
+        assert(stage0Case !== undefined);
+        assertTestAssetsPresent([STAGE0_URL]);
+        const golden = await loadVaeGolden(stage0Case);
+        const events: string[] = [];
+        const sessions: Session[] = [];
+        const failing: ModelComponent = {
+          ...series.components.post,
+          createSession: () => Promise.reject(new Error("post cannot open")),
+        };
+        const components: MossVaeComponents = {
+          pre: observed(series.components.pre, "pre", events, sessions),
+          attn: observed(series.components.attn, "attn", events, sessions),
+          post: failing,
+        };
+        const residents = await withResidentLog(gpu, events, async (residents) => {
+          await assertRejects(
+            () => decodeCase({ ...state, components }, stage0Case, golden.latents),
+            Error,
+            "post cannot open",
+          );
+          return residents;
+        });
+        expect(events).toEqual(["open pre", "open attn", "dispose pre", "dispose attn"]);
+        expect(residents).toHaveLength(0);
+        for (const session of sessions)
+          await assertRejects(() => session.run({}), Error, "disposed");
+      },
+    );
+
+    it.skipIf(!STAGE0_RUNNABLE)(
+      `opens nothing when the headroom check refuses, naming the stage${STAGE0_SKIP}`,
+      async () => {
+        assert(stage0Case !== undefined);
+        assertTestAssetsPresent([STAGE0_URL]);
+        const golden = await loadVaeGolden(stage0Case);
+        const events: string[] = [];
+        const sessions: Session[] = [];
+        const huge: ModelComponent = {
+          ...observed(series.components.post, "post", events, sessions),
+          estimate: (options) => ({
+            ...series.components.post.estimate(options),
+            peakAccountedBytes: 2 ** 50,
+          }),
+        };
         await assertRejects(
           () =>
-            decodeCase({ ...state, components }, stage0Case, golden.latents, () => {
-              throw failure;
-            }),
+            decodeCase(
+              { ...state, components: { ...series.components, post: huge } },
+              stage0Case,
+              golden.latents,
+            ),
           Error,
-          "the observer failed",
+          "the VAE stage needs",
         );
-        expect(events).toEqual(["open pre", "open attn", "open post", ...closed]);
-        return residents;
-      });
-      expect(residents).toHaveLength(6);
-      assert(residents.every((resident) => resident.disposed));
-      for (const session of sessions) await assertRejects(() => session.run({}), Error, "disposed");
-    });
-
-    it("returns the batch span and closes everything when an enqueue fails inside it", async () => {
-      assert(stage0Case !== undefined);
-      const golden = await loadVaeGolden(stage0Case);
-      const events: string[] = [];
-      const sessions: Session[] = [];
-      const attn = observed(series.components.attn, "attn", events, sessions);
-      const failing: ModelComponent = {
-        ...attn,
-        createSession: async (gpu, options) => {
-          const session = await attn.createSession(gpu, options);
-          Object.defineProperty(session, "enqueue", {
-            configurable: true,
-            value: () => Promise.reject(new Error("attn cannot enqueue")),
-          });
-          return session;
-        },
-      };
-      const components: MossVaeComponents = {
-        pre: observed(series.components.pre, "pre", events, sessions),
-        attn: failing,
-        post: observed(series.components.post, "post", events, sessions),
-      };
-      const residents = await withResidentLog(gpu, events, async (residents) => {
-        await assertRejects(
-          () => decodeCase({ ...state, components }, stage0Case, golden.latents),
-          Error,
-          "attn cannot enqueue",
-        );
-        return residents;
-      });
-      expect(events).toEqual([
-        "open pre",
-        "open attn",
-        "open post",
-        "dispose pre",
-        "dispose attn",
-        "dispose post",
-        "dispose resident moss vae_decoder_pre",
-        "dispose resident moss vae_decoder_attn",
-        "dispose resident moss vae_decoder_post",
-      ]);
-      expect(residents).toHaveLength(3);
-      assert(residents.every((resident) => resident.disposed));
-      // The span's lock came back: a later batch on the same context runs to the end. A span left
-      // open would make it wait on the lock forever, so the wait is bounded and names the cause.
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const stuck = new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error("the failed batch did not return the span's lock")),
-          60_000,
-        );
-      });
-      try {
-        const image = await Promise.race([decodeCase(state, stage0Case, golden.latents), stuck]);
-        expect(image.length).toBe(3 * stage0Case.width * stage0Case.height);
-      } finally {
-        clearTimeout(timer);
-      }
-    });
-
-    it("closes what it opened when a later Session fails to open", async () => {
-      assert(stage0Case !== undefined);
-      const golden = await loadVaeGolden(stage0Case);
-      const events: string[] = [];
-      const sessions: Session[] = [];
-      const failing: ModelComponent = {
-        ...series.components.post,
-        createSession: () => Promise.reject(new Error("post cannot open")),
-      };
-      const components: MossVaeComponents = {
-        pre: observed(series.components.pre, "pre", events, sessions),
-        attn: observed(series.components.attn, "attn", events, sessions),
-        post: failing,
-      };
-      const residents = await withResidentLog(gpu, events, async (residents) => {
-        await assertRejects(
-          () => decodeCase({ ...state, components }, stage0Case, golden.latents),
-          Error,
-          "post cannot open",
-        );
-        return residents;
-      });
-      expect(events).toEqual(["open pre", "open attn", "dispose pre", "dispose attn"]);
-      expect(residents).toHaveLength(0);
-      for (const session of sessions) await assertRejects(() => session.run({}), Error, "disposed");
-    });
-
-    it("opens nothing when the headroom check refuses, naming the stage", async () => {
-      assert(stage0Case !== undefined);
-      const golden = await loadVaeGolden(stage0Case);
-      const events: string[] = [];
-      const sessions: Session[] = [];
-      const huge: ModelComponent = {
-        ...observed(series.components.post, "post", events, sessions),
-        estimate: (options) => ({
-          ...series.components.post.estimate(options),
-          peakAccountedBytes: 2 ** 50,
-        }),
-      };
-      await assertRejects(
-        () =>
-          decodeCase(
-            { ...state, components: { ...series.components, post: huge } },
-            stage0Case,
-            golden.latents,
-          ),
-        Error,
-        "the VAE stage needs",
-      );
-      expect(events).toEqual([]);
-    });
+        expect(events).toEqual([]);
+      },
+    );
 
     it("refuses an area over this device's limit before any GPU work, naming the limit", () => {
       const limit = mossVaeAreaLimit(state.contract, gpu.limits);
@@ -511,8 +571,8 @@ describe.skipIf(!GPU_AVAILABLE || !SERIES)(
       );
     });
 
-    describe.skipIf(!UPSTREAM_PARITY)(
-      `against upstream's f32 decode ${UPSTREAM_PARITY_OPT_IN}`,
+    describe.skipIf(!UPSTREAM_PARITY || !PARITY_PRESENT)(
+      `against upstream's f32 decode ${UPSTREAM_PARITY_OPT_IN}${PARITY_SKIP}`,
       () => {
         const results = new Map<string, { m: number; relRms: number }>();
 
@@ -601,8 +661,8 @@ describe.skipIf(!GPU_AVAILABLE || !SERIES)(
       },
     );
 
-    describe.skipIf(!UPSTREAM_PARITY || !CAP || !vaeGoldenPresent(MOSS_VAE_CAP_CASE))(
-      `at the area cap 1696×1648 (${MOSS_GENERATE_VAE_CAP}; KARUME_MOSS_VAE_CAP=1) ${UPSTREAM_PARITY_OPT_IN}`,
+    describe.skipIf(!UPSTREAM_PARITY || !CAP || !CAP_PRESENT)(
+      `at the area cap 1696×1648 (KARUME_MOSS_VAE_CAP=1) ${UPSTREAM_PARITY_OPT_IN}${CAP_SKIP}`,
       () => {
         it("records the stage's headroom need and whether this device admits it now", async () => {
           const plan = planMossVae({ width: 1648, height: 1696 }, state.contract, gpu.limits);

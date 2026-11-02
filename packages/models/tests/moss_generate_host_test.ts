@@ -6,7 +6,7 @@
  * - **Acceptance** ({@link planMossGenerate}): every rejection is a `ModelInputError` naming the
  *   limit or the missing input, and nothing outside them is refused (any step count, upstream's
  *   whole guidance range, any area under the device's VAE limit). The device is a stand-in with the
- *   RTX 3080 Ti's 2 GiB binding and the decoder geometry of the written VAE series (49,152 B per
+ *   RTX 3080 Ti's 2 GiB binding and the decoder geometry of the MOSS VAE decoder (49,152 B per
  *   VAE cell, 8 px per cell — `vae-contract.ts`); the training grid is synthetic (its values are not
  *   the subject here).
  * - **The trajectory** (the Wan check — host CFG + Euler bit-identical from upstream's DiT outputs):
@@ -15,7 +15,8 @@
  *   check with the record's own inputs, and the generate path's loop (`mossDenoise`) runs on a
  *   `predict` that returns upstream's recorded samples of each branch. Each forward must receive
  *   upstream's latents and timestep of that step, and the loop's result must be upstream's final
- *   latents — bit for bit. The training grid is the series' asset (the product's source).
+ *   latents — bit for bit. The training grid is the asset of the distribution's `dit` container
+ *   (`models/karume-moss-image/` — ADR 0139; the product's source).
  * - **The loop's own rules** (no record needed): guidance 1 runs the positive branch alone through
  *   the plain Euler chain, a `predict` whose branches disagree with the guidance fails loudly, and
  *   the seed path's initial latents are the first `C · N` normals of the seed's sequence.
@@ -41,10 +42,10 @@ import type { MossTextEmbeddings } from "../src/moss/request.ts";
 import {
   filePresent,
   firstBitMismatch,
-  MOSS_GENERATE_SERIES,
   MOSS_GENERATE_STAGE0,
-  mossSeriesPresent,
-  openMossSeries,
+  MOSS_GET_MIRROR,
+  mossMirrorPresent,
+  openMossDit,
   readRecordTensors,
   stage0Dir,
   syntheticTrainingGrid,
@@ -58,7 +59,7 @@ const embeddings = (tokens: number): MossTextEmbeddings => ({
   shape: [tokens, 4096],
 });
 
-/** The decoder geometry of the written VAE series and a 2 GiB binding (module doc). */
+/** The decoder geometry of the MOSS VAE decoder and a 2 GiB binding (module doc). */
 const LIMITS: MossGenerateLimits = {
   dit: { latentChannels: 128, trainingGrid: syntheticTrainingGrid(1000) },
   vae: { bytesPerCell: 49_152, spatialScale: 8 },
@@ -256,7 +257,7 @@ describe("MOSS-Image sampler loop rules (no record needed)", () => {
 });
 
 const STAGE0 = stage0Dir();
-const SERIES_PRESENT = mossSeriesPresent();
+const MIRROR_PRESENT = mossMirrorPresent();
 
 /** The stage-0 DiT records (`moss.reference.SIZES`, height × width) and their latent grids. */
 const DIT_RECORDS = [
@@ -267,12 +268,12 @@ const DIT_RECORDS = [
 for (const { file, cells, tokens } of DIT_RECORDS) {
   const url = STAGE0 === undefined ? undefined : new URL(file, STAGE0);
   const present = url !== undefined && filePresent(url);
-  describe.skipIf(!present || !SERIES_PRESENT)(
-    `MOSS-Image sampler loop against upstream's trajectory (${file})${skipped(present, "stage-0 DiT record", MOSS_GENERATE_STAGE0)}${skipped(SERIES_PRESENT, "series", MOSS_GENERATE_SERIES)}`,
+  describe.skipIf(!present || !MIRROR_PRESENT)(
+    `MOSS-Image sampler loop against upstream's trajectory (${file})${skipped(present, "stage-0 DiT record", MOSS_GENERATE_STAGE0)}${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}`,
     () => {
       it("reproduces upstream's latents of both steps bit for bit from upstream's DiT outputs (CFG 3, shift 5)", async () => {
         assert(url !== undefined);
-        const { trainingGrid } = await readMossDitAssets((await openMossSeries()).components.dit);
+        const { trainingGrid } = await readMossDitAssets((await openMossDit()).components.dit);
         const steps = [0, 1];
         const record = await readRecordTensors(url, [
           "latents.init",

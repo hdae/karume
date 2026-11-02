@@ -3,9 +3,10 @@
  * 突き合わせる。対象は 4 関数: `sigmaSchedule` / `cfgEulerStep`（`sampler.ts`）・
  * `denormalizeLatents` / `padSequence`（`latents.ts`）。GPU は要らない。
  *
- * フィクスチャは `tools/export-recipes/anima/pipeline_ref.py` が書く
- * `outputs/series/anima-pipeline{,-f16,-i8,-turbo-f16}/pipeline.{json,safetensors}`
- * （生成コマンドと役割の索引は recipe README の「Anima host pipeline reference fixture」節）。
+ * The fixtures are `pipeline.{json,safetensors}` of `tools/export-recipes/anima/pipeline_ref.py`
+ * (the generation commands and their roles: the recipe README's "Anima host pipeline reference
+ * fixture" section), read from the test-asset root `goldenDir("anima-pipeline{,-f16,-i8,-turbo-f16}")`
+ * (ADR 0139 — fetched with `node tools/test-assets/fetch.ts`).
  * 4 変種とも、各段の入力と出力が同じファイルに入っている。そのため、DiT の誤差と混ざらない
  * 形でホスト糊だけを見られる（DiT の生出力 `noise_*` を入力として渡し、次の latent を比べる）。
  *
@@ -21,10 +22,13 @@
  * （guidance_scale=4）が固定する。キーの有無は `needsUncond(guidance_scale)` と突き合わせる —
  * 「guidance≠1 なのに uncond が無い」フィクスチャは黙って CFG=1 の枝へ流さず落とす。
  *
- * 資産はリポジトリ管理外（`outputs/` は git 追跡外）なので、無い変種は理由を出して**明示
- * SKIP** する（ADR 0005）。
+ * The assets are outside git, so a variant whose fixture is absent SKIPs explicitly, naming the
+ * missing path and the fetch command (ADR 0005) — except when `outputs/test-assets/` holds a
+ * complete fetch of the pinned dataset (`testAssetsFetched`): then its cases FAIL, since the dataset
+ * at the pin lacks the fixture.
  */
 
+import { goldenDir, TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseSafetensors, type Tensor } from "@karume/runtime";
@@ -44,12 +48,8 @@ const VARIANTS = [
   "anima-pipeline-turbo-f16",
 ] as const;
 
-const SERIES_ROOT = new URL("../../../outputs/series/", import.meta.url);
-
-/** SKIP 時に貼れる生成コマンド（recipe README と同じ）。 */
-const GENERATE_HINT =
-  "cd tools/export-recipes && uv run --group anima python -m anima.pipeline_ref" +
-  "（--dtype f16 / i8・turbo は README の --guidance-scale 1.0 --lora の形）";
+/** The command that fetches the fixtures (pasted into the SKIP message). */
+const FETCH_HINT = "node tools/test-assets/fetch.ts";
 
 /** `pipeline.json` のうち、ここが読むフィールド。 */
 type FixtureMeta = {
@@ -69,7 +69,7 @@ type Fixture = {
 };
 
 const openFixture = async (variant: string): Promise<Fixture | undefined> => {
-  const dir = new URL(`${variant}/`, SERIES_ROOT);
+  const dir = goldenDir(variant);
   const [metaText, bytes] = await Promise.all([
     readTextIfPresent(new URL("pipeline.json", dir)),
     readFileIfPresent(new URL("pipeline.safetensors", dir)),
@@ -124,29 +124,37 @@ const assertBitIdentical = (actual: Float32Array, expected: Float32Array, label:
 
 const stepTag = (step: number): string => `step${String(step).padStart(4, "0")}`;
 
+const FETCHED = testAssetsFetched();
+
 for (const variant of VARIANTS) {
   const fixture = await openFixture(variant);
-  if (fixture === undefined) {
+  const files = `${goldenDir(variant).pathname}pipeline.{json,safetensors}`;
+  /** The FAIL message of a fixture absent from a complete fetch of the pin. */
+  const absent =
+    `${files}: absent, but outputs/test-assets/ holds a complete fetch of` +
+    ` ${TEST_ASSETS.repo}@${TEST_ASSETS.revision} — the dataset at the pin lacks it`;
+  if (fixture === undefined && !FETCHED) {
     console.warn(
-      `[karume] outputs/series/${variant}/pipeline.{json,safetensors} が無いため Anima ホスト糊の` +
-        `パリティを SKIP する（参照フィクスチャはリポジトリ管理外）。生成: ${GENERATE_HINT}`,
+      `[karume] ${files} is missing, so the Anima host glue parity of ${variant} SKIPs (the` +
+        ` fixtures are outside git). Fetch: ${FETCH_HINT}`,
     );
   }
-  const ignore = fixture === undefined;
+  const ignore = fixture === undefined && !FETCHED;
+  const skip = ignore ? ` (SKIP: no ${files} — ${FETCH_HINT})` : "";
 
   test.skipIf(ignore)(
-    `${variant}: sigmaSchedule が参照の sigma 列（終端 0 込み）とビット一致する`,
+    `${variant}: sigmaSchedule が参照の sigma 列（終端 0 込み）とビット一致する${skip}`,
     () => {
-      assert(fixture !== undefined);
+      assert(fixture !== undefined, absent);
       const { steps, shift } = fixture.meta;
       assertBitIdentical(sigmaSchedule(steps, shift), fixture.f32("sigmas").data, "sigmas");
     },
   );
 
   test.skipIf(ignore)(
-    `${variant}: cfgEulerStep を ref_steps 回つなぐと参照の latent 列とビット一致する`,
+    `${variant}: cfgEulerStep を ref_steps 回つなぐと参照の latent 列とビット一致する${skip}`,
     () => {
-      assert(fixture !== undefined);
+      assert(fixture !== undefined, absent);
       const { ref_steps: refSteps, guidance_scale: guidance } = fixture.meta;
       const sigmas = fixture.f32("sigmas").data;
       // uncond キーの有無は guidance から決まる（NOTE 参照）。食い違えばフィクスチャか
@@ -178,9 +186,9 @@ for (const variant of VARIANTS) {
   );
 
   test.skipIf(ignore)(
-    `${variant}: denormalizeLatents が参照の逆正規化 latent とビット一致する`,
+    `${variant}: denormalizeLatents が参照の逆正規化 latent とビット一致する${skip}`,
     () => {
-      assert(fixture !== undefined);
+      assert(fixture !== undefined, absent);
       // 本番は VAE config の写し（latentStats）を使うので、ここでもそれを渡す。写しが
       // この変種の参照と同じ数であることを先に押さえる（変種ごとに VAE を読み直して採った値）。
       const { mean, std } = latentStats();
@@ -199,9 +207,9 @@ for (const variant of VARIANTS) {
   );
 
   test.skipIf(ignore)(
-    `${variant}: padSequence が参照の 512 行ゼロ詰め（正・ネガティブ）とビット一致する`,
+    `${variant}: padSequence が参照の 512 行ゼロ詰め（正・ネガティブ）とビット一致する${skip}`,
     () => {
-      assert(fixture !== undefined);
+      assert(fixture !== undefined, absent);
       const rows = fixture.meta.min_sequence_length;
       for (const prefix of ["", "neg_"]) {
         // IR の conditioner は T5 の id 列と同じ行数 T を出す。参照は上流の conditioner が

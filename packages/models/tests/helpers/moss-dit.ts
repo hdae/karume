@@ -1,7 +1,14 @@
 /**
- * What the MOSS-Image DiT tests share (ADR 0138, stage 2): where the series, the goldens and the
+ * What the MOSS-Image DiT tests share (ADR 0138, stage 2): where the containers, the goldens and the
  * stage-0 records live, the golden case table, the golden readers and the components opened from
- * the series containers.
+ * the distribution's containers.
+ *
+ * Where the assets come from (ADR 0139): the containers are read from the distribution mirror
+ * `models/karume-moss-image/` through its manifest (model `sft`; the graph name is the manifest's
+ * weights key). The goldens of `tools/export-recipes/moss/dit_reference.py` and upstream's prompt
+ * embeddings (`moss.text_embeds`) are read from the test-asset root (`goldenDir(<series>)`, fetched
+ * with `node tools/test-assets/fetch.ts`) at the relative paths they had under `outputs/series/`.
+ * The stage-0 records stay under `outputs/bench/karume-moss-image/` (recipe records, not goldens).
  *
  * The case table mirrors `tools/export-recipes/moss/dit_reference.py` (`DIT_CASES` / `TEXT_CASES`)
  * and is **fixed here, not enumerated from the files** (a partial generation must not make cases
@@ -10,6 +17,7 @@
 
 import { assert } from "@std/assert";
 import { isNotFound, readDirSync, readFile, readRange, statSync } from "@karume/test-support/fs";
+import { goldenDir, TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 import {
   type GpuContext,
   type OpenedContainer,
@@ -20,43 +28,51 @@ import {
   type TensorView,
 } from "@karume/runtime";
 import { parseSafetensorsHeader } from "../../../runtime/src/format/safetensors.ts";
-import {
-  modelPresent,
-  openSeriesContainer,
-  resolveParts,
-} from "../../../runtime/tests/helpers/container-files.ts";
 import type { ModelComponent } from "../../src/hub/components.ts";
 import type { MossDitComponents } from "../../src/moss/dit-stage.ts";
 import type { MossTrainingGrid } from "../../src/moss/dit-timestep.ts";
-import { seriesGraph } from "./series-graphs.ts";
+import {
+  mirrorPresent,
+  mirrorRoot,
+  openSelectedContainer,
+  selectMirrorComponent,
+} from "./mirror.ts";
 
+/** The distribution mirror every MOSS-Image test opens its containers from (ADR 0139 decision 1). */
+export const MOSS_MIRROR: URL = mirrorRoot("karume-moss-image");
+/** The mirror's one model (upstream's SFT checkpoint). */
+const MOSS_MODEL = "sft";
+/** How to get the mirror (pasted into the SKIP messages). */
+export const MOSS_GET_MIRROR =
+  "hf download hdae/karume-moss-image --local-dir models/karume-moss-image";
+/** How to get the goldens (pasted into the SKIP messages — ADR 0139 decision 2). */
+export const MOSS_FETCH_GOLDENS = "node tools/test-assets/fetch.ts";
+
+/** The mirror holds a manifest this version reads (a broken part fails loudly at open). */
+export const mossMirrorPresent = (): boolean => mirrorPresent(MOSS_MIRROR);
+
+/** The series name of the DiT (the golden directory names derive from it). */
 export const MOSS_SERIES_NAME = "moss-image-sft-i8-dyn";
-const OUTPUTS = new URL("../../../../outputs/", import.meta.url);
-const SERIES_DIR = new URL(`series/${MOSS_SERIES_NAME}/`, OUTPUTS);
-export const MOSS_REFERENCE_DIR = new URL(`series/${MOSS_SERIES_NAME}-reference/`, OUTPUTS);
-export const MOSS_TEXT_EMBEDS = new URL(
-  "series/moss-image-sft-text-embeds/text_embeds.safetensors",
-  OUTPUTS,
+export const MOSS_REFERENCE_DIR: URL = goldenDir(`${MOSS_SERIES_NAME}-reference`);
+export const MOSS_TEXT_EMBEDS: URL = new URL(
+  "text_embeds.safetensors",
+  goldenDir("moss-image-sft-text-embeds"),
 );
-const BENCH_DIR = new URL("bench/karume-moss-image/", OUTPUTS);
+const BENCH_DIR = new URL("../../../../outputs/bench/karume-moss-image/", import.meta.url);
 
 const RUN = "uv run --group moss --inexact python -m";
 const RECIPE = `cd tools/export-recipes && ${RUN}`;
-export const MOSS_GENERATE_SERIES = `${RECIPE} moss.export_dit write`;
 export const MOSS_GENERATE_GOLDENS = `${RECIPE} moss.dit_reference write`;
 // One `cd`: a second one would resolve inside tools/export-recipes and fail.
 export const MOSS_GENERATE_STAGE0 = `${RECIPE} moss.host_fixture && ${RUN} moss.reference`;
-export const MOSS_GENERATE_EMBEDS = `${RECIPE} moss.text_embeds`;
 
-/** The component directories of the series (= graph names — `series-graphs.ts`). */
+/** The DiT components (= graph names = the manifest's weights keys). */
 export const MOSS_COMPONENTS = ["dit", "dit_skip22", "dit_text"] as const;
 type ComponentDir = (typeof MOSS_COMPONENTS)[number];
 
-const modelUrl = (component: ComponentDir): URL => new URL(`${component}/model.krm`, SERIES_DIR);
-
-/** Every container of the series is written. */
-export const mossSeriesPresent = (): boolean =>
-  MOSS_COMPONENTS.every((c) => modelPresent(modelUrl(c)));
+/** Opens the mirror's container of `key` (descriptors only — weights are read by Sessions). */
+export const openMossMirrorContainer = async (key: string): Promise<OpenedContainer> =>
+  await openSelectedContainer(await selectMirrorComponent(MOSS_MIRROR, key, { model: MOSS_MODEL }));
 
 export type MossCaseRole = "band" | "accept";
 
@@ -135,6 +151,27 @@ export const filePresent = (url: URL): boolean => {
   }
 };
 
+/**
+ * Whether a default-lane case that reads the test assets `urls` runs (the rule of
+ * `testAssetsFetched`, ADR 0139): when every file is present, and also when one is absent from a
+ * complete fetch of the pinned dataset — the case then FAILs in {@link assertTestAssetsPresent},
+ * since the dataset at the pin lacks it. Otherwise an absent file SKIPs the case (the assets gate is
+ * red then).
+ */
+export const testAssetsRunnable = (urls: readonly URL[]): boolean =>
+  urls.every(filePresent) || testAssetsFetched();
+
+/** FAILs naming every absent file of `urls` (see {@link testAssetsRunnable}). */
+export const assertTestAssetsPresent = (urls: readonly URL[]): void => {
+  const missing = urls.filter((url) => !filePresent(url)).map((url) => url.pathname);
+  if (missing.length > 0) {
+    throw new Error(
+      `${missing.join(", ")}: absent, but outputs/test-assets/ holds a complete fetch of` +
+        ` ${TEST_ASSETS.repo}@${TEST_ASSETS.revision} — the dataset at the pin lacks it`,
+    );
+  }
+};
+
 export const readBuffer = async (url: URL): Promise<ArrayBuffer> =>
   (await readFile(url)).slice().buffer;
 
@@ -206,22 +243,34 @@ const hex = (digest: ArrayBuffer): string =>
   [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 
 /**
- * The sha256 of each written container's part 0 (the two documents — they name every block's
- * sha256), as the goldens record them (`dit_reference.part0_sha256` — all three containers: a
- * rewritten `dit_skip22` also makes the negative goldens stale).
+ * The sha256 of an opened container's part 0 (the two documents — they name every block's sha256),
+ * read through the manifest's source.
+ */
+export const part0Digest = async (opened: OpenedContainer): Promise<string> =>
+  hex(
+    await crypto.subtle.digest(
+      "SHA-256",
+      await opened.source.read(0, 0, opened.source.partLength(0)),
+    ),
+  );
+
+/**
+ * The sha256 of each DiT container's part 0, as the goldens record them
+ * (`dit_reference.part0_sha256` — all three containers: a rewritten `dit_skip22` also makes the
+ * negative goldens stale). The mirror's containers are byte copies of the series the goldens were
+ * taken from (ADR 0139), so the recorded digests hold against them.
  */
 export const containerDigests = async (): Promise<Readonly<Record<string, string>>> => {
   const digests: Record<string, string> = {};
   for (const component of MOSS_COMPONENTS) {
-    const [part0] = resolveParts(modelUrl(component));
-    digests[component] = hex(await crypto.subtle.digest("SHA-256", await readFile(part0)));
+    digests[component] = await part0Digest(await openMossMirrorContainer(component));
   }
   return digests;
 };
 
 /**
- * Fails loudly when a golden was taken from other containers than the series on disk (re-run the
- * golden writer after `moss.export_dit write`).
+ * Fails loudly when a golden was taken from other containers than the mirror's (re-export, re-run
+ * the golden writer after `moss.export_dit write`, and upload the goldens — ADR 0139 decision 8).
  */
 export const assertGoldenOfSeries = (
   golden: MossGolden,
@@ -240,7 +289,7 @@ export const assertGoldenOfSeries = (
   if (!same) {
     throw new Error(
       `${where}: the golden was taken from other containers (${JSON.stringify(recorded)}) than the` +
-        ` series (${JSON.stringify(digests)}) — regenerate: ${MOSS_GENERATE_GOLDENS}`,
+        ` mirror (${JSON.stringify(digests)}) — regenerate: ${MOSS_GENERATE_GOLDENS}`,
     );
   }
 };
@@ -301,14 +350,14 @@ export const loadCaseGolden = async (
   return golden;
 };
 
-/** The opened series: per component its container, prepared model and {@link ModelComponent}. */
-export type MossSeries = {
+/** The opened DiT: per component its container, prepared model and {@link ModelComponent}. */
+export type MossDit = {
   readonly opened: Readonly<Record<ComponentDir, OpenedContainer>>;
   readonly components: MossDitComponents;
 };
 
 /**
- * A {@link ModelComponent} over an opened series container (the fields `hub/components.ts`'s
+ * A {@link ModelComponent} over an opened container (the fields `hub/components.ts`'s
  * `containerComponent` builds from a fetched one; the largest weight part is part 1 onward).
  */
 export const componentOf = (opened: OpenedContainer, graph: string): ModelComponent => {
@@ -329,19 +378,22 @@ export const componentOf = (opened: OpenedContainer, graph: string): ModelCompon
   };
 };
 
-/** Opens the three containers of the series (descriptors only — weights are read by Sessions). */
-export const openMossSeries = async (): Promise<MossSeries> => {
+/**
+ * Opens the mirror's three DiT containers (descriptors only — weights are read by Sessions); each
+ * graph is named by its weights key.
+ */
+export const openMossDit = async (): Promise<MossDit> => {
   const opened = {
-    dit: await openSeriesContainer(modelUrl("dit")),
-    dit_skip22: await openSeriesContainer(modelUrl("dit_skip22")),
-    dit_text: await openSeriesContainer(modelUrl("dit_text")),
+    dit: await openMossMirrorContainer("dit"),
+    dit_skip22: await openMossMirrorContainer("dit_skip22"),
+    dit_text: await openMossMirrorContainer("dit_text"),
   };
   return {
     opened,
     components: {
-      dit: componentOf(opened.dit, seriesGraph(MOSS_SERIES_NAME, "dit")),
-      ditSkip22: componentOf(opened.dit_skip22, seriesGraph(MOSS_SERIES_NAME, "dit_skip22")),
-      ditText: componentOf(opened.dit_text, seriesGraph(MOSS_SERIES_NAME, "dit_text")),
+      dit: componentOf(opened.dit, "dit"),
+      ditSkip22: componentOf(opened.dit_skip22, "dit_skip22"),
+      ditText: componentOf(opened.dit_text, "dit_text"),
     },
   };
 };

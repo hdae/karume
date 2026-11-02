@@ -2,8 +2,9 @@
  * MOSS-Image from prompt strings on a real GPU — the prompt form of `generateMoss` (ADR 0138
  * decision 9): the chat template and the tokenizer on the host, the Qwen3.5 text encoder (ADR 0137)
  * opened, run for the positive and the negative prompt and closed, then `dit_text` → the DiT pair →
- * the VAE. Over the i8 text series `qwen3.5-9b-text-moss-image-sft-i8-dyn` with the recipe's
- * tokenizer asset, the i8 DiT series and the f32 VAE series, with the reference preset `f32+dit8`.
+ * the VAE. Over the distribution's i8 text encoder (exported as the series
+ * `qwen3.5-9b-text-moss-image-sft-i8-dyn`) with its tokenizer asset, the i8 DiT and the f32 VAE,
+ * with the reference preset `f32+dit8`.
  *
  * ## Checks
  *
@@ -19,7 +20,8 @@
  *    (run the `models:qwen3_5` lane with `KARUME_REFERENCE=write` first). Recorded, not asserted:
  *    each prompt's distance from upstream's bf16 embeddings (relative L2 `‖K − U‖₂ / ‖U‖₂`,
  *    max |Δ|, max |Δ| ÷ max |U|, the smallest row cosine — the metrics of the recipe's record
- *    `outputs/diag/qwen3_5-export-2026-10-31/full.json`), and the stage's time and memory. The
+ *    `full.json` of the export check of 2026-10-31, kept as the golden directory
+ *    `qwen3_5-export-2026-10-31`), and the stage's time and memory. The
  *    distance is the i8 export's (about 4 % relative L2 in that record), not a band: whether it
  *    matters is the image A/B's question (ADR 0137 decision 5).
  * 3. **Prompt → image** (GPU): 256², 2 steps, `fridge-note` with the empty negative, guidance 3,
@@ -34,7 +36,15 @@
  * Results and the measured numbers go to `outputs/verify/<environment key>/<date>_moss-prompt/`
  * (safe to delete); the numbers of 2026-10-31 are in `docs/research/2026-10-31-moss-text-stage.md`.
  *
- * Without a GPU or an asset the file skips explicitly, naming the command that writes it (ADR 0005).
+ * Without a GPU or an asset the file skips explicitly, naming the command that gets it (ADR 0005).
+ *
+ * ## Where the assets come from (ADR 0139)
+ *
+ * The containers (text encoder, DiT, VAE) and the tokenizer are read from the distribution mirror
+ * `models/karume-moss-image/` through its manifest; upstream's text-embedding asset from the
+ * test-asset root (`goldenDir("moss-image-sft-text-embeds")`, fetched with
+ * `node tools/test-assets/fetch.ts`). The encoder rows' case IDs keep the series name verbatim
+ * (ADR 0139 decision 7).
  */
 
 import { afterAll, beforeAll, describe, expect, it, test } from "vite-plus/test";
@@ -61,29 +71,22 @@ import {
 } from "../../models/src/moss/text-stage.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import {
-  filePresent,
-  MOSS_GENERATE_EMBEDS,
-  MOSS_GENERATE_SERIES,
+  MOSS_FETCH_GOLDENS,
+  MOSS_GET_MIRROR,
   MOSS_TEXT_EMBEDS,
-  mossSeriesPresent,
-  openMossSeries,
+  testAssetsRunnable,
+  mossMirrorPresent,
+  openMossDit,
   syntheticTrainingGrid,
 } from "../../models/tests/helpers/moss-dit.ts";
 import {
-  MOSS_GENERATE_TEXT_SERIES,
-  MOSS_GENERATE_TOKENIZER,
   MOSS_TEXT_SERIES_NAME,
-  mossTextSeriesPresent,
   type MossUpstreamPrompt,
   openMossTextEncoder,
   openMossTokenizer,
   readMossUpstreamPrompts,
 } from "../../models/tests/helpers/moss-text.ts";
-import {
-  MOSS_GENERATE_VAE_SERIES,
-  mossVaeSeriesPresent,
-  openMossVaeSeries,
-} from "../../models/tests/helpers/moss-vae.ts";
+import { openMossVae } from "../../models/tests/helpers/moss-vae.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
 import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import {
@@ -108,21 +111,21 @@ const encoderReferences = openReferences(
 /** Artifacts and verdicts (`outputs/verify/<environment key>/<date>_moss-prompt/`). */
 const results = openResults("moss-prompt");
 
-const TEXT_PRESENT = mossTextSeriesPresent();
-const EMBEDS_PRESENT = filePresent(MOSS_TEXT_EMBEDS);
-const SERIES_PRESENT = mossSeriesPresent() && mossVaeSeriesPresent();
-const RUNNABLE = GPU_AVAILABLE && TEXT_PRESENT && EMBEDS_PRESENT && SERIES_PRESENT;
+/** The mirror carries every container and the tokenizer this file reads. */
+const MIRROR_PRESENT = mossMirrorPresent();
+/** Present, or absent from a complete fetch of the pin (then its read FAILs naming it). */
+const EMBEDS_RUNNABLE = testAssetsRunnable([MOSS_TEXT_EMBEDS]);
+const RUNNABLE = GPU_AVAILABLE && MIRROR_PRESENT && EMBEDS_RUNNABLE;
 
 const skipped = (ok: boolean, what: string, command: string): string =>
   ok ? "" : ` (SKIP: no ${what} — ${command})`;
 
-const TEXT_SKIP =
-  skipped(
-    mossTextSeriesPresent(),
-    "Qwen3.5 text series or tokenizer asset",
-    MOSS_GENERATE_TEXT_SERIES,
-  ) + (mossTextSeriesPresent() ? "" : ` / ${MOSS_GENERATE_TOKENIZER}`);
-const EMBEDS_SKIP = skipped(EMBEDS_PRESENT, "upstream text embeddings", MOSS_GENERATE_EMBEDS);
+const MIRROR_SKIP = skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR);
+const EMBEDS_SKIP = skipped(
+  EMBEDS_RUNNABLE,
+  `upstream text embeddings ${MOSS_TEXT_EMBEDS.pathname}`,
+  MOSS_FETCH_GOLDENS,
+);
 
 /** The generation of check 3 (the other MOSS e2e files' seed path, from prompt strings). */
 const PROMPT = "fridge-note";
@@ -299,8 +302,8 @@ const promptRequest = (prompt: string, negativePrompt: string): MossGenerateRequ
   seed: SEED,
 });
 
-describe.skipIf(!TEXT_PRESENT || !EMBEDS_PRESENT)(
-  `MOSS-Image prompt form: token ids${TEXT_SKIP}${EMBEDS_SKIP}`,
+describe.skipIf(!MIRROR_PRESENT || !EMBEDS_RUNNABLE)(
+  `MOSS-Image prompt form: token ids${MIRROR_SKIP}${EMBEDS_SKIP}`,
   () => {
     test("the acceptance check gives exactly the ids upstream's encode_prompt fed its encoder, for every fixed prompt", async () => {
       const tokenizer = await openMossTokenizer();
@@ -325,7 +328,7 @@ describe.skipIf(!TEXT_PRESENT || !EMBEDS_PRESENT)(
 );
 
 describe.skipIf(!RUNNABLE)(
-  `MOSS-Image prompt form on the GPU${skipped(GPU_AVAILABLE, "GPU adapter", "a WebGPU device")}${TEXT_SKIP}${EMBEDS_SKIP}${skipped(mossSeriesPresent(), "DiT series", MOSS_GENERATE_SERIES)}${skipped(mossVaeSeriesPresent(), "VAE series", MOSS_GENERATE_VAE_SERIES)}`,
+  `MOSS-Image prompt form on the GPU${skipped(GPU_AVAILABLE, "GPU adapter", "a WebGPU device")}${MIRROR_SKIP}${EMBEDS_SKIP}`,
   () => {
     let gpu: GpuContext | undefined;
     let base: Omit<MossGenerateState, "gpu" | "text"> | undefined;
@@ -335,7 +338,7 @@ describe.skipIf(!RUNNABLE)(
     let textStageVerified = false;
 
     beforeAll(async () => {
-      const series = await openMossSeries();
+      const series = await openMossDit();
       const assets = await readMossDitAssets(series.components.dit);
       base = {
         preset: PRESET,
@@ -348,7 +351,7 @@ describe.skipIf(!RUNNABLE)(
             "MOSS-Image",
           ),
         },
-        vae: await openMossVaeSeries(),
+        vae: await openMossVae(),
       };
       text = await openMossTextEncoder();
       upstream = new Map((await readMossUpstreamPrompts()).map((entry) => [entry.name, entry]));

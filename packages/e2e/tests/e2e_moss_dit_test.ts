@@ -76,8 +76,14 @@
  * everything closed when the body or the borrower's opening throws, nothing opened when the
  * headroom check refuses.
  *
- * Without a GPU adapter, the series, the stage-0 embeddings or the goldens, the groups skip
- * explicitly with the command that writes what they lack (ADR 0005).
+ * Without a GPU adapter, the mirror, the stage-0 embeddings or the goldens, the groups skip
+ * explicitly with the command that gets what they lack (ADR 0005).
+ *
+ * ## Where the assets come from (ADR 0139)
+ *
+ * The containers are read from the distribution mirror `models/karume-moss-image/` through its
+ * manifest (byte copies of the series the goldens were taken from); the stage-0 embeddings and the
+ * goldens from the test-asset root (`goldenDir`, fetched with `node tools/test-assets/fetch.ts`).
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
@@ -127,18 +133,20 @@ import {
   goldenUrl,
   loadCaseGolden,
   MOSS_DIT_CASES,
-  MOSS_GENERATE_EMBEDS,
-  MOSS_GENERATE_GOLDENS,
-  MOSS_GENERATE_SERIES,
+  MOSS_FETCH_GOLDENS,
+  MOSS_GET_MIRROR,
   MOSS_TEXT_CASES,
   assertMossRowWritable,
+  MOSS_REFERENCE_DIR,
   MOSS_TEXT_EMBEDS,
+  testAssetsRunnable,
+  assertTestAssetsPresent,
   withResidentLog,
   type MossDitCase,
   type MossGolden,
-  mossSeriesPresent,
+  mossMirrorPresent,
   type MossTextCase,
-  openMossSeries,
+  openMossDit,
   readBuffer,
 } from "../../models/tests/helpers/moss-dit.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
@@ -209,8 +217,9 @@ const results = openResults("moss-dit");
 /** The row of `dit_text` at T = 1 (the reference path: i8 weights × f32 compute; fridge-note's first token). */
 const TEXT_T1_CASE = "i8-dit_text-fridge-note-t1";
 
-const SERIES_PRESENT = mossSeriesPresent();
-const EMBEDS_PRESENT = filePresent(MOSS_TEXT_EMBEDS);
+const MIRROR_PRESENT = mossMirrorPresent();
+/** Present, or absent from a complete fetch of the pin (then its read FAILs naming it). */
+const EMBEDS_RUNNABLE = testAssetsRunnable([MOSS_TEXT_EMBEDS]);
 const present = (cases: readonly { readonly name: string }[]): boolean =>
   cases.every(({ name }) => filePresent(goldenUrl(name)));
 const SMALL = MOSS_DIT_CASES.filter(({ group }) => group === "small");
@@ -423,6 +432,7 @@ const imageOneFurther = (base: MossRopeBase, tokens: number): MossRopeBase =>
 
 /** The stage-0 embeddings by prompt name (`moss.text_embeds`). */
 const readEmbeddings = async (): Promise<ReadonlyMap<string, MossTextEmbeddings>> => {
+  assertTestAssetsPresent([MOSS_TEXT_EMBEDS]);
   const file = parseSafetensors(await readBuffer(MOSS_TEXT_EMBEDS));
   return new Map(
     [...file.tensors.values()].map((view) => [
@@ -506,15 +516,15 @@ const observed = (
 const budgetedBytes = (diagnostics: SessionDiagnostics): number =>
   diagnostics.planBacking.residentBytes + diagnostics.planBacking.inputBytes;
 
-describe.skipIf(!GPU_AVAILABLE || !SERIES_PRESENT || !EMBEDS_PRESENT)(
-  `MOSS-Image DiT stage on the GPU${skipped(GPU_AVAILABLE, "GPU adapter", "a WebGPU device")}${skipped(SERIES_PRESENT, "series", MOSS_GENERATE_SERIES)}${skipped(EMBEDS_PRESENT, "stage-0 embeddings", MOSS_GENERATE_EMBEDS)}`,
+describe.skipIf(!GPU_AVAILABLE || !MIRROR_PRESENT || !EMBEDS_RUNNABLE)(
+  `MOSS-Image DiT stage on the GPU${skipped(GPU_AVAILABLE, "GPU adapter", "a WebGPU device")}${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}${skipped(EMBEDS_RUNNABLE, `stage-0 embeddings ${MOSS_TEXT_EMBEDS.pathname}`, MOSS_FETCH_GOLDENS)}`,
   () => {
     let gpu: GpuContext | undefined;
     let base: Omit<MossDitStageState, "gpu"> | undefined;
     let embeds: ReadonlyMap<string, MossTextEmbeddings> | undefined;
     let digests: Readonly<Record<string, string>> | undefined;
     beforeAll(async () => {
-      const series = await openMossSeries();
+      const series = await openMossDit();
       const assets = await readMossDitAssets(series.components.dit);
       const contract = mossDitContract(
         mossDitGraphContract(series.components, "MOSS-Image"),
@@ -571,7 +581,7 @@ describe.skipIf(!GPU_AVAILABLE || !SERIES_PRESENT || !EMBEDS_PRESENT)(
     const parityPassed = new Set<string>();
 
     describe.skipIf(!UPSTREAM_PARITY || !present(MOSS_TEXT_CASES))(
-      `dit_text against the f64 reference${UPSTREAM_PARITY_OPT_IN}${skipped(present(MOSS_TEXT_CASES), "text goldens", MOSS_GENERATE_GOLDENS)}`,
+      `dit_text against the f64 reference${UPSTREAM_PARITY_OPT_IN}${skipped(present(MOSS_TEXT_CASES), `text goldens in ${MOSS_REFERENCE_DIR.pathname}`, MOSS_FETCH_GOLDENS)}`,
       () => {
         const runText = async (
           testCase: MossTextCase,
@@ -937,7 +947,7 @@ describe.skipIf(!GPU_AVAILABLE || !SERIES_PRESENT || !EMBEDS_PRESENT)(
       };
 
       describe.skipIf(!UPSTREAM_PARITY || !present(cases))(
-        `${side}² dit / dit_skip22 against the f64 reference${UPSTREAM_PARITY_OPT_IN}${skipped(present(cases), `${group} goldens`, MOSS_GENERATE_GOLDENS)}`,
+        `${side}² dit / dit_skip22 against the f64 reference${UPSTREAM_PARITY_OPT_IN}${skipped(present(cases), `${group} goldens in ${MOSS_REFERENCE_DIR.pathname}`, MOSS_FETCH_GOLDENS)}`,
         () => {
           it("each case within the band of the six band cases; the time row of index + 1 leaves it; one backing per Session", async () => {
             const { of, refined, plan } = await load();
@@ -1021,7 +1031,7 @@ describe.skipIf(!GPU_AVAILABLE || !SERIES_PRESENT || !EMBEDS_PRESENT)(
 
 /** The sha rows this file settles (the default run's `dit_text` at T = 1). */
 const CASE_IDS: readonly string[] = [TEXT_T1_CASE];
-const RUNNABLE = GPU_AVAILABLE && SERIES_PRESENT && EMBEDS_PRESENT;
+const RUNNABLE = GPU_AVAILABLE && MIRROR_PRESENT && EMBEDS_RUNNABLE;
 if (RUNNABLE) references.warnMissing(CASE_IDS);
 // A missing row of this environment is not a silent pass (ADR 0005's gatekeeper form).
 registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });

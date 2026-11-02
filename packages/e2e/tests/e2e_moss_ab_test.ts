@@ -71,7 +71,10 @@
  * and the margin alone — the form of `e2e_moss_vae_test.ts`'s cap case). MUST: only the partner's
  * observation is taken this way; the practical preset's are the product's.
  *
- * Without a GPU adapter, the series or the stage-0 embeddings the file skips explicitly (ADR 0005).
+ * Without a GPU adapter, the mirror or the stage-0 embeddings the file skips explicitly (ADR 0005).
+ * The DiT containers are read from the distribution mirror `models/karume-moss-image/` through its
+ * manifest, the stage-0 embeddings from the test-asset root (ADR 0139 —
+ * `goldenDir("moss-image-sft-text-embeds")`, fetched with `node tools/test-assets/fetch.ts`).
  * Results: `outputs/verify/<environment key>/<date>_moss-ab/` (safe to delete).
  */
 
@@ -105,13 +108,14 @@ import type { MossTextEmbeddings } from "../../models/src/moss/request.ts";
 import { mossEulerStep, mossSchedule } from "../../models/src/moss/sampler.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import {
-  filePresent,
   floatsOf,
-  MOSS_GENERATE_EMBEDS,
-  MOSS_GENERATE_SERIES,
+  MOSS_FETCH_GOLDENS,
+  MOSS_GET_MIRROR,
   MOSS_TEXT_EMBEDS,
-  mossSeriesPresent,
-  openMossSeries,
+  testAssetsRunnable,
+  assertTestAssetsPresent,
+  mossMirrorPresent,
+  openMossDit,
   readBuffer,
 } from "../../models/tests/helpers/moss-dit.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
@@ -140,8 +144,9 @@ const results = openResults("moss-ab");
 
 const CAP = process.env.KARUME_MOSS_AB_CAP === "1";
 
-const SERIES_PRESENT = mossSeriesPresent();
-const EMBEDS_PRESENT = filePresent(MOSS_TEXT_EMBEDS);
+const MIRROR_PRESENT = mossMirrorPresent();
+/** Present, or absent from a complete fetch of the pin (then its read FAILs naming it). */
+const EMBEDS_RUNNABLE = testAssetsRunnable([MOSS_TEXT_EMBEDS]);
 
 const skipped = (ok: boolean, what: string, command: string): string =>
   ok ? "" : ` (SKIP: no ${what} — ${command})`;
@@ -289,6 +294,7 @@ type Observation = {
 
 /** The stage-0 embeddings by prompt name (`moss.text_embeds`). */
 const readEmbeddings = async (): Promise<ReadonlyMap<string, MossTextEmbeddings>> => {
+  assertTestAssetsPresent([MOSS_TEXT_EMBEDS]);
   const file = parseSafetensors(await readBuffer(MOSS_TEXT_EMBEDS));
   return new Map(
     [...file.tensors.values()].map((view) => [
@@ -307,15 +313,15 @@ const unprobed = (component: ModelComponent): ModelComponent => ({
 const errorText = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
 
-describe.skipIf(!GPU_AVAILABLE || !SERIES_PRESENT || !EMBEDS_PRESENT)(
-  `MOSS-Image self A/B check of ${MOSS_PRACTICAL_PRESET}${skipped(GPU_AVAILABLE, "GPU adapter", "a WebGPU device")}${skipped(SERIES_PRESENT, "series", MOSS_GENERATE_SERIES)}${skipped(EMBEDS_PRESENT, "stage-0 embeddings", MOSS_GENERATE_EMBEDS)}`,
+describe.skipIf(!GPU_AVAILABLE || !MIRROR_PRESENT || !EMBEDS_RUNNABLE)(
+  `MOSS-Image self A/B check of ${MOSS_PRACTICAL_PRESET}${skipped(GPU_AVAILABLE, "GPU adapter", "a WebGPU device")}${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}${skipped(EMBEDS_RUNNABLE, `stage-0 embeddings ${MOSS_TEXT_EMBEDS.pathname}`, MOSS_FETCH_GOLDENS)}`,
   () => {
     let gpu: GpuContext | undefined;
     let components: MossDitComponents | undefined;
     let contract: MossDitContract | undefined;
     let embeds: ReadonlyMap<string, MossTextEmbeddings> | undefined;
     beforeAll(async () => {
-      const series = await openMossSeries();
+      const series = await openMossDit();
       const assets = await readMossDitAssets(series.components.dit);
       components = series.components;
       contract = mossDitContract(

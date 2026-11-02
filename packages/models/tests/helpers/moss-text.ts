@@ -1,58 +1,55 @@
 /**
- * What the MOSS-Image prompt-form tests share: where the Qwen3.5 text series and its tokenizer asset
- * live, the commands that write them, the opened text-encoder state, and the fixed prompts of
- * upstream's text-embedding asset with the token ids upstream fed its encoder (the asset's own
- * metadata — `tools/export-recipes/moss/text_embeds.py`).
+ * What the MOSS-Image prompt-form tests share: the Qwen3.5 text encoder and its tokenizer as the
+ * distribution ships them, the opened text-encoder state, and the fixed prompts of upstream's
+ * text-embedding asset with the token ids upstream fed its encoder (the asset's own metadata —
+ * `tools/export-recipes/moss/text_embeds.py`).
  *
- * The caller opens the series itself: there is no manifest or distribution for the text encoder yet
- * (ADR 0138 decision 12), as for the DiT and VAE series (`./moss-dit.ts`, `./moss-vae.ts`).
+ * Where the assets come from (ADR 0139): the `text_encoder` container and the `tokenizer` asset are
+ * read from the mirror `models/karume-moss-image/` through its manifest (model `sft`); the
+ * text-embedding asset is a golden (`./moss-dit.ts`'s {@link MOSS_TEXT_EMBEDS}).
  */
 
-import { readTextFile } from "@karume/test-support/fs";
 import { parseSafetensors } from "@karume/runtime";
-import {
-  modelPresent,
-  openSeriesContainer,
-} from "../../../runtime/tests/helpers/container-files.ts";
 import type { ModelComponent } from "../../src/hub/components.ts";
 import { mossTextEncoderContract, type MossTextEncoderState } from "../../src/moss/text-stage.ts";
 import type { MossTextEmbeddings } from "../../src/moss/request.ts";
 import { parseQwen3_5TokenizerAsset, Qwen3_5Tokenizer } from "../../src/qwen3_5/tokenizer.ts";
-import { componentOf, filePresent, floatsOf, MOSS_TEXT_EMBEDS, readBuffer } from "./moss-dit.ts";
-import { seriesGraph } from "./series-graphs.ts";
+import { readMirrorAsset } from "./mirror.ts";
+import {
+  assertTestAssetsPresent,
+  componentOf,
+  floatsOf,
+  MOSS_MIRROR,
+  MOSS_TEXT_EMBEDS,
+  openMossMirrorContainer,
+  readBuffer,
+} from "./moss-dit.ts";
 
+/**
+ * The series name of the text encoder. MUST stay verbatim: the sha256 case IDs of the encoder rows
+ * spell it (ADR 0139 decision 7 — `qwen3_5.json`, `e2e_moss_prompt_test.ts`).
+ */
 export const MOSS_TEXT_SERIES_NAME = "qwen3.5-9b-text-moss-image-sft-i8-dyn";
 const COMPONENT = "text_encoder";
-const OUTPUTS = new URL("../../../../outputs/", import.meta.url);
-const TEXT_MODEL = new URL(`series/${MOSS_TEXT_SERIES_NAME}/${COMPONENT}/model.krm`, OUTPUTS);
-export const MOSS_TEXT_TOKENIZER = new URL("series/qwen3_5-tokenizer/tokenizer.json", OUTPUTS);
 
-const QWEN3_5_RECIPE =
-  "cd tools/export-recipes && uv run --with 'transformers==5.14.1' --inexact python -m";
-export const MOSS_GENERATE_TEXT_SERIES = `${QWEN3_5_RECIPE} qwen3_5.export write --storage i8`;
-export const MOSS_GENERATE_TOKENIZER = `${QWEN3_5_RECIPE} qwen3_5.tokenizer`;
-
-/** The text tower's container and the tokenizer asset are both written. */
-export const mossTextSeriesPresent = (): boolean =>
-  modelPresent(TEXT_MODEL) && filePresent(MOSS_TEXT_TOKENIZER);
-
-/** The tokenizer over the recipe's asset. */
+/** The tokenizer over the mirror's `tokenizer` asset (`sft/tokenizer/tokenizer.json`). */
 export const openMossTokenizer = async (): Promise<Qwen3_5Tokenizer> =>
   new Qwen3_5Tokenizer(
-    parseQwen3_5TokenizerAsset(JSON.parse(await readTextFile(MOSS_TEXT_TOKENIZER))),
+    parseQwen3_5TokenizerAsset(
+      JSON.parse(
+        new TextDecoder().decode(await readMirrorAsset(MOSS_MIRROR, "tokenizer", { model: "sft" })),
+      ),
+    ),
   );
 
 /**
- * Opens the text series (the descriptors only — the weights are read when a Session is built) and
- * settles its contract as a generation's state carries it.
+ * Opens the mirror's text encoder (the descriptors only — the weights are read when a Session is
+ * built) and settles its contract as a generation's state carries it.
  */
 export const openMossTextEncoder = async (): Promise<
   MossTextEncoderState & { readonly component: ModelComponent }
 > => {
-  const component = componentOf(
-    await openSeriesContainer(TEXT_MODEL),
-    seriesGraph(MOSS_TEXT_SERIES_NAME, COMPONENT),
-  );
+  const component = componentOf(await openMossMirrorContainer(COMPONENT), COMPONENT);
   const tokenizer = await openMossTokenizer();
   return { component, tokenizer, contract: mossTextEncoderContract(component, tokenizer) };
 };
@@ -73,9 +70,11 @@ const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
 
 /**
  * The fixed prompts of upstream's text-embedding asset, in the asset's order (fails loudly on a
- * metadata layout other than `moss.text_embeds` writes).
+ * metadata layout other than `moss.text_embeds` writes, and on an asset absent from a complete fetch
+ * of the pinned test-asset dataset — `testAssetsRunnable`).
  */
 export const readMossUpstreamPrompts = async (): Promise<readonly MossUpstreamPrompt[]> => {
+  assertTestAssetsPresent([MOSS_TEXT_EMBEDS]);
   const file = parseSafetensors(await readBuffer(MOSS_TEXT_EMBEDS));
   const raw = file.metadata.get(METADATA_KEY);
   if (raw === undefined) throw new Error(`the text-embedding asset has no '${METADATA_KEY}'`);

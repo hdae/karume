@@ -1,20 +1,20 @@
 /**
- * What the MOSS-Image VAE tests share (ADR 0138 decision 8, stage 3): where the VAE series and
- * its goldens live, the golden case table, the golden reader and the components and contract opened
- * from the series containers.
+ * What the MOSS-Image VAE tests share (ADR 0138 decision 8, stage 3): where the VAE containers and
+ * their goldens live, the golden case table, the golden reader and the components and contract
+ * opened from the distribution's containers.
+ *
+ * Where the assets come from (ADR 0139): the three decoder containers are read from the mirror
+ * `models/karume-moss-image/` through its manifest (`./moss-dit.ts`), and the goldens of
+ * `moss.export_vae` from `goldenDir("moss-image-sft-f32-dyn")` (fetched with
+ * `node tools/test-assets/fetch.ts`) at the paths they had in the VAE series.
  *
  * The case table mirrors `tools/export-recipes/moss/export_vae.py` (`CASES` / `CASES_WITH_CAP`) and
  * is **fixed here, not enumerated from the files** (a partial generation must not make cases
  * disappear silently — the Wan rule).
  */
 
-import { readFile } from "@karume/test-support/fs";
+import { goldenDir } from "@karume/test-support/test-assets";
 import { parseSafetensors, type SafetensorsFile } from "@karume/runtime";
-import {
-  modelPresent,
-  openSeriesContainer,
-  resolveParts,
-} from "../../../runtime/tests/helpers/container-files.ts";
 import {
   MOSS_VAE_DECODER_ATTN,
   MOSS_VAE_DECODER_POST,
@@ -25,30 +25,29 @@ import {
   readMossLatentBatchNorm,
 } from "../../src/moss/vae-contract.ts";
 import type { MossVaeComponents } from "../../src/moss/vae-stage.ts";
-import { componentOf, filePresent, floatsOf, readBuffer } from "./moss-dit.ts";
-import { seriesGraph } from "./series-graphs.ts";
+import {
+  componentOf,
+  filePresent,
+  floatsOf,
+  openMossMirrorContainer,
+  part0Digest,
+  readBuffer,
+} from "./moss-dit.ts";
 
+/** The VAE series name (the golden directory is named by it). */
 export const MOSS_VAE_SERIES_NAME = "moss-image-sft-f32-dyn";
-const SERIES_DIR = new URL(`../../../../outputs/series/${MOSS_VAE_SERIES_NAME}/`, import.meta.url);
+const GOLDEN_DIR = goldenDir(MOSS_VAE_SERIES_NAME);
 
 const RECIPE = "cd tools/export-recipes && uv run --group moss --inexact python -m";
-export const MOSS_GENERATE_VAE_SERIES = `${RECIPE} moss.export_vae write`;
-export const MOSS_GENERATE_VAE_CAP = `${RECIPE} moss.export_vae write --cap`;
 export const MOSS_GENERATE_VAE_STAGE0 = `${RECIPE} moss.vae_reference`;
 
-/** The component directories of the series (= graph names — `series-graphs.ts`). */
+/** The VAE components (= graph names = the manifest's weights keys). */
 export const MOSS_VAE_COMPONENTS = [
   MOSS_VAE_DECODER_PRE,
   MOSS_VAE_DECODER_ATTN,
   MOSS_VAE_DECODER_POST,
 ] as const;
-type ComponentDir = (typeof MOSS_VAE_COMPONENTS)[number];
-
-const modelUrl = (component: ComponentDir): URL => new URL(`${component}/model.krm`, SERIES_DIR);
-
-/** Every container of the series is written. */
-export const mossVaeSeriesPresent = (): boolean =>
-  MOSS_VAE_COMPONENTS.every((c) => modelPresent(modelUrl(c)));
+type ComponentKey = (typeof MOSS_VAE_COMPONENTS)[number];
 
 /**
  * The sha256 of each VAE container's part 0 (the two documents — they name every block's sha256),
@@ -58,11 +57,7 @@ export const mossVaeSeriesPresent = (): boolean =>
 export const mossVaeContainerDigests = async (): Promise<Readonly<Record<string, string>>> => {
   const digests: Record<string, string> = {};
   for (const component of MOSS_VAE_COMPONENTS) {
-    const [part0] = resolveParts(modelUrl(component));
-    const digest = await crypto.subtle.digest("SHA-256", await readFile(part0));
-    digests[component] = [...new Uint8Array(digest)]
-      .map((byte) => byte.toString(16).padStart(2, "0"))
-      .join("");
+    digests[component] = await part0Digest(await openMossMirrorContainer(component));
   }
   return digests;
 };
@@ -107,7 +102,7 @@ export const MOSS_VAE_CASES: readonly MossVaeCase[] = (
 export const MOSS_VAE_CAP_CASE: MossVaeCase = caseOf(1696, 1648, 20261105, "cap");
 
 export const vaeGoldenUrl = (testCase: MossVaeCase): URL =>
-  new URL(`vae_decoder.${testCase.name}.safetensors`, SERIES_DIR);
+  new URL(`vae_decoder.${testCase.name}.safetensors`, GOLDEN_DIR);
 
 export const vaeGoldenPresent = (testCase: MossVaeCase): boolean =>
   filePresent(vaeGoldenUrl(testCase));
@@ -151,15 +146,16 @@ export const loadVaeGolden = async (testCase: MossVaeCase): Promise<MossVaeGolde
   };
 };
 
-/** The opened VAE series: its components and its contract (the asset read). */
-export type MossVaeSeries = {
+/** The opened VAE: its components and its contract (the asset read). */
+export type MossVae = {
   readonly components: MossVaeComponents;
   readonly contract: MossVaeContract;
 };
 
-export const openMossVaeSeries = async (): Promise<MossVaeSeries> => {
-  const component = async (dir: ComponentDir) =>
-    componentOf(await openSeriesContainer(modelUrl(dir)), seriesGraph(MOSS_VAE_SERIES_NAME, dir));
+/** Opens the mirror's three VAE decoder containers (each graph is named by its weights key). */
+export const openMossVae = async (): Promise<MossVae> => {
+  const component = async (key: ComponentKey) =>
+    componentOf(await openMossMirrorContainer(key), key);
   const components: MossVaeComponents = {
     pre: await component(MOSS_VAE_DECODER_PRE),
     attn: await component(MOSS_VAE_DECODER_ATTN),

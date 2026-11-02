@@ -11,9 +11,11 @@ What is pinned here:
   without it).
 - **The gates refuse** a tokenizer of another revision, format or bound, a borrowing graph that
   holds weights of its own, and a container without the assets its reader needs (synthetic
-  containers).
-- **The plan over the real series** (skipped without `outputs/series/`): every role at its output
-  path, the presets completed, the default.
+  containers); the borrower gate also on the real containers of the distribution mirror
+  `models/karume-moss-image/` (ADR 0139 — skipped without the mirror).
+- **The plan over the real series** (an implementation-time check, opt-in `KARUME_SERIES=1` —
+  ADR 0139 decision 6; skipped without `outputs/series/`): every role at its output path, the
+  presets completed, the default.
 
 Faults injected 2026-11-01 (each turned its case red): the tokenizer's revision check removed, the
 borrower's byte check removed, the asset check reduced to a presence check, the default switched to
@@ -31,6 +33,7 @@ from typing import Any
 import pytest
 from container_series import write_component
 from ir_fixtures import ir_container
+from real_assets import SERIES_CHECKS, mirror_container, requires_series
 
 from _shared.paths import SERIES_ROOT
 from karume.container import CODEC_LEDGER, AssetInput
@@ -57,7 +60,9 @@ def _series_present() -> bool:
     return found.tokenizer.is_file()
 
 
-_SERIES_PRESENT = _series_present()
+# MUST: `SERIES_CHECKS and …` — the default lane does not touch `outputs/series/` (ADR 0139
+# decision 6).
+_SERIES_PRESENT = SERIES_CHECKS and _series_present()
 
 
 def _completed() -> Mapping[str, Any]:
@@ -282,7 +287,23 @@ class TestTheContainerGates:
         dist.assert_container_assets("vae_decoder_pre", container)
 
 
+class TestTheMirrorContainers:
+    def test_a_graph_with_weights_of_its_own_is_not_a_borrower(self) -> None:
+        """The borrower gate on real containers: the mirror's `dit_text` holds its own weights."""
+
+        def container(role: str) -> Path:
+            return mirror_container(
+                dist.MOSS_REPO_NAME, dist.MOSS_MODEL, role, dist.MOSS_STORAGE_LABELS[role]
+            )
+
+        with pytest.raises(DistError, match="outside its descriptors"):
+            dist.assert_borrows_every_weight(
+                container(dist.MOSS_DIT_TEXT_ROLE), container(dist.MOSS_DIT_ROLE)
+            )
+
+
 @pytest.mark.skipif(not _SERIES_PRESENT, reason="the MOSS-Image series are not in outputs/series/")
+@requires_series
 class TestThePlanOverTheSeries:
     def test_it_plans_every_role_at_its_output_path(self) -> None:
         plan = dist.moss_dist_plan(SERIES_ROOT, dist.MOSS_MODEL)
@@ -293,12 +314,6 @@ class TestThePlanOverTheSeries:
         assert plan.default_quant == dist.MOSS_DEFAULT_QUANT
         assert plan.quants == _completed()
         assert plan.pipeline_config == dist.MOSS_PIPELINE_CONFIG
-
-    def test_a_graph_with_weights_of_its_own_is_not_a_borrower(self) -> None:
-        """The borrower gate on real containers: `dit_text` holds its own weights."""
-        containers = dist.moss_sources(SERIES_ROOT).containers
-        with pytest.raises(DistError, match="outside its descriptors"):
-            dist.assert_borrows_every_weight(containers["dit_text"], containers["dit"])
 
     def test_it_refuses_another_model(self) -> None:
         with pytest.raises(DistError, match="no model 'base'"):

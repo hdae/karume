@@ -12,9 +12,10 @@
  * same five for eleven other shifts × eight step counts, two of them above the 1,000 training points
  * (`shift.<i>.steps.<n>.*`, the metadata's `shift_cases`); and upstream's CFG combination at nine
  * guidance scales, most not representable in f32 (`cfg.*`, one step of upstream's `__call__` on a
- * tiny DiT — the metadata's `cfg`). The training grid itself comes from the series' asset
- * `training_grid` (the product's source — `moss_dit_host_test.ts` checks it against the same
- * record), and each timestep is looked up by grid index as the DiT stage does (`mossTimestep`).
+ * tiny DiT — the metadata's `cfg`). The training grid itself comes from the asset `training_grid`
+ * of the distribution's `dit` container (`models/karume-moss-image/`, read through its manifest —
+ * ADR 0139; the product's source — `moss_dit_host_test.ts` checks it against the same record), and
+ * each timestep is looked up by grid index as the DiT stage does (`mossTimestep`).
  *
  * The CFG + Euler trajectory against upstream's recorded DiT outputs is in
  * `moss_generate_host_test.ts` (through the generate path's own loop).
@@ -41,10 +42,10 @@ import {
   filePresent,
   firstBitMismatch,
   floatsOf,
-  MOSS_GENERATE_SERIES,
   MOSS_GENERATE_STAGE0,
-  mossSeriesPresent,
-  openMossSeries,
+  MOSS_GET_MIRROR,
+  mossMirrorPresent,
+  openMossDit,
   readBuffer,
   stage0Dir,
   syntheticTrainingGrid,
@@ -54,7 +55,7 @@ import {
 const STAGE0 = stage0Dir();
 const HOST_RECORD = STAGE0 === undefined ? undefined : new URL("host.safetensors", STAGE0);
 const HOST_PRESENT = HOST_RECORD !== undefined && filePresent(HOST_RECORD);
-const SERIES_PRESENT = mossSeriesPresent();
+const MIRROR_PRESENT = mossMirrorPresent();
 
 const skipped = (present: boolean, what: string, command: string): string =>
   present ? "" : ` (SKIP: no ${what} — ${command})`;
@@ -137,13 +138,13 @@ const sequenceFailures = (
   return failures;
 };
 
-describe.skipIf(!HOST_PRESENT || !SERIES_PRESENT)(
-  `MOSS-Image σ schedule against upstream's set_timesteps${skipped(HOST_PRESENT, "stage-0 host record", MOSS_GENERATE_STAGE0)}${skipped(SERIES_PRESENT, "series", MOSS_GENERATE_SERIES)}`,
+describe.skipIf(!HOST_PRESENT || !MIRROR_PRESENT)(
+  `MOSS-Image σ schedule against upstream's set_timesteps${skipped(HOST_PRESENT, "stage-0 host record", MOSS_GENERATE_STAGE0)}${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}`,
   () => {
     const load = async () => {
       assert(HOST_RECORD !== undefined);
       const host = parseSafetensors(await readBuffer(HOST_RECORD));
-      const { trainingGrid } = await readMossDitAssets((await openMossSeries()).components.dit);
+      const { trainingGrid } = await readMossDitAssets((await openMossDit()).components.dit);
       const config = metadataField(host, "scheduler_config");
       assert(typeof config["shift"] === "number");
       assertEquals(config["num_train_timesteps"], trainingGrid.points);

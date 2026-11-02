@@ -1,19 +1,21 @@
 /**
  * The host side of the MOSS-Image VAE stage on the CPU (ADR 0138 decisions 5, 8 and 9, stage 3):
  * the BatchNorm restoration, the unpatchify and the clamp against upstream's recorded values
- * (Uint32-identical), the graph contract of the written VAE series with its fault injections, the
- * per-device area limit of the acceptance check, and the headroom arithmetic.
+ * (Uint32-identical), the graph contract of the distribution's VAE containers with its fault
+ * injections, the per-device area limit of the acceptance check, and the headroom arithmetic.
  *
  * Sources of the expected values:
  *
  * - the stage-0 VAE records (`outputs/bench/karume-moss-image/<date>_stage0-reference/
  *   vae-<H>x<W>.safetensors` — `moss.vae_reference`): upstream's `denormalize`, `unpatchify`,
  *   decode and clamp of one seeded latent per size (256² and the non-square 512×768);
- * - the VAE series (`outputs/series/moss-image-sft-f32-dyn/` — `moss.export_vae write`): the graph
- *   declarations, the asset `latent_batch_norm` and the goldens' `latents` / `z` / `decoded` /
- *   `image` (upstream's values for the other seeds).
+ * - the VAE decoder containers of the distribution mirror `models/karume-moss-image/` (read through
+ *   its manifest — ADR 0139): the graph declarations and the asset `latent_batch_norm`;
+ * - the goldens of `moss.export_vae write` (read from the test-asset root
+ *   `goldenDir("moss-image-sft-f32-dyn")`, fetched with `node tools/test-assets/fetch.ts`): their
+ *   `latents` / `z` / `decoded` / `image` (upstream's values for the other seeds).
  *
- * Each group skips explicitly, naming the command that writes what it lacks (ADR 0005).
+ * Each group skips explicitly, naming the command that gets what it lacks (ADR 0005).
  */
 
 import { describe, expect, it } from "vite-plus/test";
@@ -39,28 +41,41 @@ import {
   mossVaeStageNeeds,
   planMossVae,
 } from "../src/moss/vae-stage.ts";
-import { firstBitMismatch, readRecordTensors, stage0Dir } from "./helpers/moss-dit.ts";
+import {
+  assertTestAssetsPresent,
+  firstBitMismatch,
+  MOSS_FETCH_GOLDENS,
+  MOSS_GET_MIRROR,
+  mossMirrorPresent,
+  readRecordTensors,
+  stage0Dir,
+  testAssetsRunnable,
+} from "./helpers/moss-dit.ts";
 import {
   loadVaeGolden,
-  MOSS_GENERATE_VAE_SERIES,
   MOSS_GENERATE_VAE_STAGE0,
   MOSS_VAE_CASES,
   MOSS_VAE_STAGE0_SEED,
-  mossVaeSeriesPresent,
-  openMossVaeSeries,
+  openMossVae,
   vaeGoldenPresent,
+  vaeGoldenUrl,
 } from "./helpers/moss-vae.ts";
 
 const STAGE0 = stage0Dir();
-const SERIES_PRESENT = mossVaeSeriesPresent();
-const GOLDENS_PRESENT = MOSS_VAE_CASES.every(vaeGoldenPresent);
+const MIRROR_PRESENT = mossMirrorPresent();
+const GOLDEN_URLS = MOSS_VAE_CASES.map(vaeGoldenUrl);
+/** Present, or absent from a complete fetch of the pin (then the group FAILs naming them). */
+const GOLDENS_RUNNABLE = testAssetsRunnable(GOLDEN_URLS);
+const MISSING_GOLDENS = MOSS_VAE_CASES.filter((testCase) => !vaeGoldenPresent(testCase))
+  .map((testCase) => vaeGoldenUrl(testCase).pathname)
+  .join(", ");
 
 /** A device whose binding limit is exactly 2 GiB (the RTX 3080 Ti class — ADR 0124). */
 const LIMITS_2GIB = { maxStorageBufferBindingSize: 2 ** 31, maxBufferSize: 2 ** 32 };
 /** The WebGPU core default binding (128 MiB). */
 const LIMITS_CORE = { maxStorageBufferBindingSize: 2 ** 27, maxBufferSize: 2 ** 28 };
 
-/** The suffix that names what a skipped group lacks and the command that writes it. */
+/** The suffix that names what a skipped group lacks and the command that gets it. */
 const skipped = (present: boolean, what: string, command: string): string =>
   present ? "" : ` (SKIP: no ${what} — ${command})`;
 
@@ -69,12 +84,12 @@ const SIZES = [
   [512, 768],
 ] as const;
 
-describe.skipIf(STAGE0 === undefined || !SERIES_PRESENT)(
-  `MOSS VAE host functions are Uint32-identical to upstream's (stage-0 records and the series)${skipped(STAGE0 !== undefined, "stage-0 VAE record", MOSS_GENERATE_VAE_STAGE0)}${skipped(SERIES_PRESENT, "VAE series", MOSS_GENERATE_VAE_SERIES)}`,
+describe.skipIf(STAGE0 === undefined || !MIRROR_PRESENT)(
+  `MOSS VAE host functions are Uint32-identical to upstream's (stage-0 records and the mirror)${skipped(STAGE0 !== undefined, "stage-0 VAE record", MOSS_GENERATE_VAE_STAGE0)}${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}`,
   () => {
     for (const [height, width] of SIZES) {
       it(`${height}x${width}: BatchNorm restoration, unpatchify and clamp`, async () => {
-        const { contract } = await openMossVaeSeries();
+        const { contract } = await openMossVae();
         const record = await readRecordTensors(
           new URL(`vae-${height}x${width}.safetensors`, STAGE0),
           ["latents", "denormalized", "vae.z", "vae.decoded", "image"],
@@ -98,11 +113,12 @@ describe.skipIf(STAGE0 === undefined || !SERIES_PRESENT)(
   },
 );
 
-describe.skipIf(!SERIES_PRESENT || !GOLDENS_PRESENT)(
-  `MOSS VAE host functions on every golden of the series${skipped(SERIES_PRESENT && GOLDENS_PRESENT, "VAE series or goldens", MOSS_GENERATE_VAE_SERIES)}`,
+describe.skipIf(!MIRROR_PRESENT || !GOLDENS_RUNNABLE)(
+  `MOSS VAE host functions on every golden of the VAE series${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}${skipped(GOLDENS_RUNNABLE, `goldens ${MISSING_GOLDENS}`, MOSS_FETCH_GOLDENS)}`,
   () => {
     it("reproduce the goldens' decode input and clamp", async () => {
-      const { contract } = await openMossVaeSeries();
+      assertTestAssetsPresent(GOLDEN_URLS);
+      const { contract } = await openMossVae();
       for (const testCase of MOSS_VAE_CASES) {
         const golden = await loadVaeGolden(testCase);
         const cells = { rows: testCase.height / 16, cols: testCase.width / 16 };
@@ -161,11 +177,11 @@ describe("MOSS VAE host functions (no records)", () => {
   });
 });
 
-describe.skipIf(!SERIES_PRESENT)(
-  `MOSS VAE graph contract of the written series${skipped(SERIES_PRESENT, "VAE series", MOSS_GENERATE_VAE_SERIES)}`,
+describe.skipIf(!MIRROR_PRESENT)(
+  `MOSS VAE graph contract of the mirror's VAE containers${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}`,
   () => {
     it("reads the widths, the scale and the largest tensor per pixel from the graphs", async () => {
-      const { contract } = await openMossVaeSeries();
+      const { contract } = await openMossVae();
       expect({
         latentChannels: contract.latentChannels,
         hiddenChannels: contract.hiddenChannels,
@@ -184,7 +200,7 @@ describe.skipIf(!SERIES_PRESENT)(
     });
 
     it("refuses declarations the host cannot build or whose area limit is not the area's", async () => {
-      const { components } = await openMossVaeSeries();
+      const { components } = await openMossVae();
       const withValue = (shape: readonly (number | string)[]): MossVaeGraphs => ({
         ...components,
         post: {
@@ -204,7 +220,7 @@ describe.skipIf(!SERIES_PRESENT)(
     });
 
     it("caps the area per device and names the limit; the cap fits the 2 GiB binding", async () => {
-      const { contract } = await openMossVaeSeries();
+      const { contract } = await openMossVae();
       const limit = mossVaeAreaLimit(contract, LIMITS_2GIB);
       // floor(2^31 / 49,152) = 43,690 VAE cells = 2,796,160 px
       expect(limit).toEqual({ maxPixels: 2_796_160, bytesPerPixel: 768, bindingBytes: 2 ** 31 });
@@ -234,7 +250,7 @@ describe.skipIf(!SERIES_PRESENT)(
     });
 
     it("needs the three estimates (the attention's with its row-block budget), the residents, the largest part and the margin", async () => {
-      const { components, contract } = await openMossVaeSeries();
+      const { components, contract } = await openMossVae();
       const plan = planMossVae({ width: 1648, height: 1696 }, contract, LIMITS_2GIB);
       const bindings = { h: 212, w: 206 };
       const estimate = (

@@ -1,8 +1,8 @@
 /**
  * MOSS-Image text-to-image end to end on a real GPU — the generate path (`generateMoss`: the one
  * acceptance check, the first headroom check, `dit_text` → the DiT pair with the sampler → the VAE —
- * ADR 0138 decisions 5, 9 and 11, stage 4) over the i8 DiT series and
- * the f32 VAE series, with the reference preset `f32+dit8` (i8 weights × f32 compute, no session
+ * ADR 0138 decisions 5, 9 and 11, stage 4) over the distribution's i8 DiT and
+ * f32 VAE, with the reference preset `f32+dit8` (i8 weights × f32 compute, no session
  * knob) unless a case names the practical preset `f32+dit8-a8-attn8-online`
  * (`../../models/src/moss/preset.ts`; its self A/B check is `e2e_moss_ab_test.ts`). The device asks
  * for subgroups when available (the practical preset's online kernel takes its subgroup form; no
@@ -101,8 +101,15 @@
  * before any Session opens — and logs it (on the 12 GiB RTX 3080 Ti the reference preset's DiT pair
  * is refused at the cap: `docs/research/2026-10-28-moss-image-dit-vae.md` §5.5).
  *
- * Without a GPU adapter, the series or the stage-0 embeddings the file skips explicitly; the parity
- * group also without its goldens, naming the command that writes them (ADR 0005).
+ * Without a GPU adapter, the mirror or the stage-0 embeddings the file skips explicitly; the parity
+ * group also without its goldens, naming the command that gets them (ADR 0005).
+ *
+ * ## Where the assets come from (ADR 0139)
+ *
+ * The six containers are read from the distribution mirror `models/karume-moss-image/` through its
+ * manifest (byte copies of the series the goldens were taken from, so the part-0 sha256 the goldens
+ * record hold); the stage-0 embeddings and the end-to-end goldens from the test-asset root
+ * (`goldenDir`, fetched with `node tools/test-assets/fetch.ts`).
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
@@ -142,22 +149,19 @@ import {
   containerDigests,
   filePresent,
   floatsOf,
-  MOSS_GENERATE_EMBEDS,
-  MOSS_GENERATE_SERIES,
+  MOSS_FETCH_GOLDENS,
+  MOSS_GET_MIRROR,
   MOSS_REFERENCE_DIR,
   MOSS_TEXT_EMBEDS,
+  testAssetsRunnable,
+  assertTestAssetsPresent,
   assertMossRowWritable,
-  mossSeriesPresent,
-  openMossSeries,
+  mossMirrorPresent,
+  openMossDit,
   readBuffer,
   withResidentLog,
 } from "../../models/tests/helpers/moss-dit.ts";
-import {
-  MOSS_GENERATE_VAE_SERIES,
-  mossVaeContainerDigests,
-  mossVaeSeriesPresent,
-  openMossVaeSeries,
-} from "../../models/tests/helpers/moss-vae.ts";
+import { mossVaeContainerDigests, openMossVae } from "../../models/tests/helpers/moss-vae.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
 import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import {
@@ -184,9 +188,10 @@ const fullResults = openResults("moss-generate-full");
 const FULL = process.env.KARUME_MOSS_FULL_PIPELINE === "1";
 const VRAM = process.env.KARUME_MOSS_VRAM === "1";
 
-const SERIES_PRESENT = mossSeriesPresent() && mossVaeSeriesPresent();
-const EMBEDS_PRESENT = filePresent(MOSS_TEXT_EMBEDS);
-const RUNNABLE = GPU_AVAILABLE && SERIES_PRESENT && EMBEDS_PRESENT;
+const MIRROR_PRESENT = mossMirrorPresent();
+/** Present, or absent from a complete fetch of the pin (then its read FAILs naming it). */
+const EMBEDS_RUNNABLE = testAssetsRunnable([MOSS_TEXT_EMBEDS]);
+const RUNNABLE = GPU_AVAILABLE && MIRROR_PRESENT && EMBEDS_RUNNABLE;
 
 const skipped = (ok: boolean, what: string, command: string): string =>
   ok ? "" : ` (SKIP: no ${what} — ${command})`;
@@ -338,6 +343,7 @@ const FAULT_MARGIN = 2;
 
 /** The stage-0 embeddings by prompt name (`moss.text_embeds`). */
 const readEmbeddings = async (): Promise<ReadonlyMap<string, MossTextEmbeddings>> => {
+  assertTestAssetsPresent([MOSS_TEXT_EMBEDS]);
   const file = parseSafetensors(await readBuffer(MOSS_TEXT_EMBEDS));
   return new Map(
     [...file.tensors.values()].map((view) => [
@@ -611,13 +617,13 @@ const countNonFinite = (values: Float32Array): number =>
   values.reduce((count, value) => (Number.isFinite(value) ? count : count + 1), 0);
 
 describe.skipIf(!RUNNABLE)(
-  `MOSS-Image generate on the GPU${skipped(GPU_AVAILABLE, "GPU adapter", "a WebGPU device")}${skipped(mossSeriesPresent(), "DiT series", MOSS_GENERATE_SERIES)}${skipped(mossVaeSeriesPresent(), "VAE series", MOSS_GENERATE_VAE_SERIES)}${skipped(EMBEDS_PRESENT, "stage-0 embeddings", MOSS_GENERATE_EMBEDS)}`,
+  `MOSS-Image generate on the GPU${skipped(GPU_AVAILABLE, "GPU adapter", "a WebGPU device")}${skipped(MIRROR_PRESENT, "mirror models/karume-moss-image/", MOSS_GET_MIRROR)}${skipped(EMBEDS_RUNNABLE, `stage-0 embeddings ${MOSS_TEXT_EMBEDS.pathname}`, MOSS_FETCH_GOLDENS)}`,
   () => {
     let gpu: GpuContext | undefined;
     let base: Omit<MossGenerateState, "gpu"> | undefined;
     let embeds: ReadonlyMap<string, MossTextEmbeddings> | undefined;
     beforeAll(async () => {
-      const series = await openMossSeries();
+      const series = await openMossDit();
       const assets = await readMossDitAssets(series.components.dit);
       const dit = {
         components: series.components,
@@ -628,7 +634,7 @@ describe.skipIf(!RUNNABLE)(
           "MOSS-Image",
         ),
       };
-      base = { dit, vae: await openMossVaeSeries(), preset: mossPreset(MOSS_REFERENCE_PRESET) };
+      base = { dit, vae: await openMossVae(), preset: mossPreset(MOSS_REFERENCE_PRESET) };
       embeds = await readEmbeddings();
       // The sha rows may be written: the adapter that runs must be the one the row key names.
       // Subgroups when available (module doc — the practical preset's online kernel).
@@ -701,7 +707,7 @@ describe.skipIf(!RUNNABLE)(
     };
 
     describe.skipIf(!UPSTREAM_PARITY || !PARITY_PRESENT)(
-      `against upstream's 2-step pipe(...) with the series' weights${UPSTREAM_PARITY_OPT_IN}${skipped(PARITY_PRESENT, "end-to-end goldens", MOSS_GENERATE_PIPELINE_GOLDENS)}`,
+      `against upstream's 2-step pipe(...) with the mirror's weights${UPSTREAM_PARITY_OPT_IN}${skipped(PARITY_PRESENT, `end-to-end goldens in ${MOSS_REFERENCE_DIR.pathname}`, MOSS_FETCH_GOLDENS)}`,
       () => {
         const METADATA_KEY = "karume.moss.few_step_ref";
         let digests: Readonly<Record<string, string>> | undefined;

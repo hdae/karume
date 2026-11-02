@@ -24,7 +24,9 @@
  * place of `quant` (the practical preset's image), a default guidance other than the manifest's.
  *
  * Without a GPU, the mirror or the text-embedding asset the file skips explicitly, naming the
- * command that makes it (ADR 0005).
+ * command that gets it (ADR 0005). The text-embedding asset is a golden of the test-asset root
+ * (ADR 0139 — `goldenDir("moss-image-sft-text-embeds")`, fetched with
+ * `node tools/test-assets/fetch.ts`).
  */
 
 import { afterAll, beforeAll, describe, expect, it, test } from "vite-plus/test";
@@ -37,9 +39,9 @@ import { mossSelectionOf } from "../../models/src/moss/pipeline.ts";
 import { MOSS_PRACTICAL_PRESET, MOSS_REFERENCE_PRESET } from "../../models/src/moss/preset.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import {
-  filePresent,
-  MOSS_GENERATE_EMBEDS,
+  MOSS_FETCH_GOLDENS,
   MOSS_TEXT_EMBEDS,
+  testAssetsRunnable,
 } from "../../models/tests/helpers/moss-dit.ts";
 import { readMossUpstreamPrompts } from "../../models/tests/helpers/moss-text.ts";
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
@@ -57,7 +59,8 @@ const ASSEMBLE = "cd tools/export-recipes && uv run python dist.py --pipeline mo
 
 const MANIFEST_TEXT = await readTextIfPresent(new URL("karume.json", DIST_ROOT));
 const MANIFEST = MANIFEST_TEXT === undefined ? undefined : parseManifest(MANIFEST_TEXT);
-const EMBEDS_PRESENT = filePresent(MOSS_TEXT_EMBEDS);
+/** Present, or absent from a complete fetch of the pin (then its read FAILs naming it). */
+const EMBEDS_RUNNABLE = testAssetsRunnable([MOSS_TEXT_EMBEDS]);
 
 /** The rows of `moss.json` — read only (this file never writes one). */
 const references = openReferences(
@@ -93,10 +96,10 @@ describe.skipIf(MANIFEST === undefined)(`MOSS-Image mirror manifest${MIRROR_SKIP
   });
 });
 
-const RUNNABLE = GPU_AVAILABLE && MANIFEST !== undefined && EMBEDS_PRESENT;
+const RUNNABLE = GPU_AVAILABLE && MANIFEST !== undefined && EMBEDS_RUNNABLE;
 
 describe.skipIf(!RUNNABLE || EXPECTED === undefined)(
-  `MOSS-Image pipeline from the mirror on the GPU${skipped(GPU_AVAILABLE, "GPU adapter", "a WebGPU device")}${MIRROR_SKIP}${skipped(EMBEDS_PRESENT, "upstream text embeddings", MOSS_GENERATE_EMBEDS)}${skipped(EXPECTED !== undefined, `row ${CASE_ID} of this environment`, "run e2e_moss_prompt_test.ts with KARUME_REFERENCE=write")}`,
+  `MOSS-Image pipeline from the mirror on the GPU${skipped(GPU_AVAILABLE, "GPU adapter", "a WebGPU device")}${MIRROR_SKIP}${skipped(EMBEDS_RUNNABLE, `upstream text embeddings ${MOSS_TEXT_EMBEDS.pathname}`, MOSS_FETCH_GOLDENS)}${skipped(EXPECTED !== undefined, `row ${CASE_ID} of this environment`, "run e2e_moss_prompt_test.ts with KARUME_REFERENCE=write")}`,
   () => {
     let gpu: GpuContext | undefined;
     beforeAll(async () => {
