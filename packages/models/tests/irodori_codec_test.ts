@@ -2,12 +2,15 @@
 //
 // タイル幾何は「採用区間が隙間なく S を覆い、halo ぶんの文脈が両側にある（または真の境界）」
 // という**構造**の検査で、値のビット一致は実 GPU の門（`e2e_irodori_codec_test.ts`）が見る。
-// 末尾トリムは golden 3 ケース（`outputs/series/dacvae-32dim/host/trim.safetensors` — 上流
-// `find_flattening_point` の実測が焼かれている）との突合。golden が無い環境は明示 SKIP。
+// The tail trim is compared with the 3 golden cases
+// (`outputs/test-assets/goldens/dacvae-32dim/host/trim.safetensors`, which records what upstream
+// `find_flattening_point` returned). An environment without the golden SKIPs explicitly; a golden
+// absent from a complete fetch of the pinned test assets FAILs (ADR 0139).
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
+import { goldenDir, testAssetsFetched } from "@karume/test-support/test-assets";
 import { ModelInputError } from "../src/errors.ts";
 import {
   type CodecTile,
@@ -231,33 +234,48 @@ const LATENT_DIM = 32;
 /** 上流 `hop_length`（`pipelineConfig.hopLength`）。 */
 const HOP = 1920;
 
-const GOLDEN_DIR = new URL("../../../outputs/series/dacvae-32dim/host/", import.meta.url);
-const GOLDEN_COMMAND =
-  "cd tools/exporter && uv run --with descript-audiotools --with einops python dacvae_host.py";
+const GOLDEN_DIR = new URL("host/", goldenDir("dacvae-32dim"));
+const FETCH_HINT =
+  "fetch: node tools/test-assets/fetch.ts — the assets gate accepts only a complete fetch; " +
+  "--include 'goldens/dacvae-32dim/host/**' with KARUME_ALLOW_NO_ASSETS=1 runs this file alone";
 
-/** golden `meta.json` の trim 節（正本は `dacvae_host.py` — ここは読み口）。 */
+/** golden `meta.json` の trim 節（正本は `tools/export-recipes/irodori/dacvae/host.py` — ここは読み口）。 */
 type TrimMeta = {
   readonly trim: Readonly<Record<string, { readonly frames: number; readonly point: number }>>;
 };
 
-const trimBytes = await readFileIfPresent(new URL("trim.safetensors", GOLDEN_DIR));
-const trimMetaText = await readTextIfPresent(new URL("meta.json", GOLDEN_DIR));
-const GOLDEN_AVAILABLE = trimBytes !== undefined && trimMetaText !== undefined;
+const TRIM_URL = new URL("trim.safetensors", GOLDEN_DIR);
+const META_URL = new URL("meta.json", GOLDEN_DIR);
+const trimBytes = await readFileIfPresent(TRIM_URL);
+const trimMetaText = await readTextIfPresent(META_URL);
+const missingGoldens = [
+  ...(trimBytes === undefined ? [TRIM_URL.pathname] : []),
+  ...(trimMetaText === undefined ? [META_URL.pathname] : []),
+];
+// An absent golden SKIPs unless `outputs/test-assets/` holds a complete fetch of the pin (ADR 0139),
+// where the dataset at the pin lacks it and the case FAILs.
+const GOLDEN_AVAILABLE = missingGoldens.length === 0 || testAssetsFetched();
 if (!GOLDEN_AVAILABLE) {
   console.warn(
-    `[karume] 末尾トリムの golden 突合を SKIP する（${GOLDEN_DIR.pathname} が要る）。` +
-      `生成: ${GOLDEN_COMMAND}`,
+    `[karume] The tail-trim golden comparison SKIPs: missing ${missingGoldens.join(" / ")} ` +
+      `(${FETCH_HINT})`,
   );
 }
 
 test.skipIf(!GOLDEN_AVAILABLE)(
   "findFlatteningPoint: golden 3 ケースが上流 find_flattening_point と同じ位置を返す",
   () => {
-    const bytes = trimBytes as Uint8Array<ArrayBuffer>;
+    if (trimBytes === undefined || trimMetaText === undefined) {
+      throw new Error(
+        `${missingGoldens.join(" / ")} absent, but outputs/test-assets/ holds a complete fetch of ` +
+          "the pinned revision: the test-asset dataset at the pin lacks it",
+      );
+    }
+    const bytes = trimBytes;
     const file = parseSafetensors(
       bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
     );
-    const meta = JSON.parse(trimMetaText as string) as TrimMeta;
+    const meta = JSON.parse(trimMetaText) as TrimMeta;
     // 実 z 2 本は「切らない」側、合成 1 本は「ちょうど 121 を返す」側（恒真化の遮断）。
     assertEquals(Object.keys(meta.trim).sort(), ["z-full", "z-no-ref", "z-silent-tail"]);
     for (const [name, expected] of Object.entries(meta.trim)) {

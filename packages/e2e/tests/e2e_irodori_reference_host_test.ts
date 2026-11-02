@@ -1,7 +1,8 @@
 // 参照音声のホスト前処理（LUFS 測定 → −16 正規化 → reflect pad）の**パリティ門**。
-// GPU は要らない（純関数だけ）が、golden 資産 `outputs/series/dacvae-32dim/host/` が要る。
+// No GPU is needed (pure functions only), but the golden
+// `outputs/test-assets/goldens/dacvae-32dim/host/` is (fetch it as FETCH_HINT below says).
 //
-// golden は `tools/exporter/dacvae_host.py` が **上流を呼んで**書いたもので、あちらは
+// golden は `tools/export-recipes/irodori/dacvae/host.py` が **上流を呼んで**書いたもので、あちらは
 // 「記録したスカラー 2 本で正規化後の波形がビット一致で再現できる」ことと「上流
 // `_normalize_loudness` とビット一致すること」を毎回実測してから書く。したがってこの門が
 // 閉じることは「TS のホスト前処理が上流と同じ波形を作る」の 2 段目にあたる。
@@ -24,12 +25,14 @@
 // - `ref-hot` — 振幅 3 倍（LUFS 測定そのものが値域に依らないこと）
 
 import { readFile } from "@karume/test-support/fs";
+import { goldenDir, testAssetsFetched } from "@karume/test-support/test-assets";
 import { test } from "vite-plus/test";
 import { assertAlmostEquals, assertEquals } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
 import { integratedLoudness } from "../../models/src/irodori/host/loudness.ts";
 import { normalizeReference, reflectPadToHop } from "../../models/src/irodori/host/reference.ts";
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
+import { goldenPresent } from "./helpers/irodori-assets.ts";
 
 /** 実重み v4-small の運用値（`pipelineConfig` が運ぶ数と同じ）。 */
 const SAMPLE_RATE = 48000;
@@ -73,9 +76,21 @@ const GAIN_RTOL = 2e-5;
  */
 const WAVE_ATOL = 5e-6;
 
-const GOLDEN_DIR = new URL("../../../outputs/series/dacvae-32dim/host/", import.meta.url);
-const GOLDEN_COMMAND =
-  "cd tools/exporter && uv run --with descript-audiotools --with einops --with 'transformers==5.14.1' python dacvae_host.py";
+const GOLDEN_DIR = new URL("host/", goldenDir("dacvae-32dim"));
+const FETCH_HINT =
+  "fetch: node tools/test-assets/fetch.ts — the assets gate accepts only a complete fetch; " +
+  "--include 'goldens/dacvae-32dim/host/**' with KARUME_ALLOW_NO_ASSETS=1 runs this file alone";
+
+/**
+ * Whether `outputs/test-assets/` holds a complete fetch of the pin (ADR 0139). Then an absent
+ * `meta.json` means the dataset at the pin lacks it, so the cases FAIL instead of SKIPping.
+ */
+const FETCHED = testAssetsFetched();
+const lostAsset = (url: URL): Error =>
+  new Error(
+    `${url.pathname} absent, but outputs/test-assets/ holds a complete fetch of the pinned ` +
+      "revision: the test-asset dataset at the pin lacks it",
+  );
 
 /** golden `meta.json` のうち、この門が読む欄だけ（形は exporter が持つ — ここは読み口）。 */
 type GoldenCase = {
@@ -97,21 +112,39 @@ type GoldenMeta = {
   readonly cases: Readonly<Record<string, GoldenCase>>;
 };
 
-const metaText = await readTextIfPresent(new URL("meta.json", GOLDEN_DIR));
-if (metaText === undefined) {
+const metaUrl = new URL("meta.json", GOLDEN_DIR);
+const metaText = await readTextIfPresent(metaUrl);
+const readMeta = (): GoldenMeta => {
+  if (metaText === undefined) throw lostAsset(metaUrl);
+  return JSON.parse(metaText) as GoldenMeta;
+};
+
+/** `case.<name>.safetensors` of one golden case. */
+const caseUrl = (name: string): URL => new URL(`case.${name}.safetensors`, GOLDEN_DIR);
+
+// An absent `meta.json` SKIPs unless the test assets are a complete fetch of the pin, where
+// `readMeta` FAILs. A case file absent beside a present `meta.json` is an inconsistent golden set,
+// so `readCase` FAILs whatever the fetch record says.
+const RUNNABLE = metaText !== undefined || FETCHED;
+if (!RUNNABLE) {
   console.warn(
-    `[karume] 参照音声パリティ門を SKIP する（${GOLDEN_DIR.pathname} が要る）。生成: ${GOLDEN_COMMAND}`,
+    `[karume] The reference-audio host parity check SKIPs: missing ${metaUrl.pathname} (${FETCH_HINT})`,
   );
 }
-const RUNNABLE = metaText !== undefined;
-
-const readMeta = (): GoldenMeta => JSON.parse(metaText as string) as GoldenMeta;
 
 /** 1 ケースぶんの golden テンソル（`raw` / `normalized` / `padded`）。 */
 const readCase = async (
   name: string,
 ): Promise<Readonly<Record<string, Float32Array<ArrayBuffer>>>> => {
-  const bytes = await readFile(new URL(`case.${name}.safetensors`, GOLDEN_DIR));
+  const url = caseUrl(name);
+  if (!goldenPresent(url)) {
+    throw metaText === undefined
+      ? lostAsset(url)
+      : new Error(
+          `inconsistent golden set: ${metaUrl.pathname} is present but ${url.pathname} is absent`,
+        );
+  }
+  const bytes = await readFile(url);
   const file = parseSafetensors(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
   );

@@ -1,6 +1,6 @@
 // Asset-free structural checks of the host-side `t_embed` (no golden, no GPU). The torch golden
-// comparison of the `t_embed` table and of the t schedule reads outputs/series, so it lives in
-// packages/e2e/tests/e2e_irodori_t_embed_test.ts.
+// comparison of the `t_embed` table and of the t schedule reads a golden of the test assets, so it
+// lives in packages/e2e/tests/e2e_irodori_t_embed_test.ts.
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";

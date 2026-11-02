@@ -7,9 +7,9 @@
  * (upstream takes `wav[:, :int(max_ref_seconds·sr)]` first). Padding before normalization would mix
  * the mirrored part into the peak test.
  *
- * The numeric source of truth is the golden `outputs/series/dacvae-32dim/host/` (5 cases written by
- * `tools/export-recipes/irodori/dacvae/host.py`, which **calls** upstream), and the comparison is
- * `packages/models/tests/irodori_reference_test.ts`.
+ * The numeric source of truth is the golden `goldens/dacvae-32dim/host/` of the test assets (5 cases
+ * written by `tools/export-recipes/irodori/dacvae/host.py`, which **calls** upstream), and the
+ * comparison is `packages/models/tests/irodori_reference_test.ts`.
  */
 
 import { ModelInputError } from "../../errors.ts";

@@ -10,30 +10,56 @@
  * のみ（横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。
  */
 
-import { readFile } from "@karume/test-support/fs";
+import { isNotFound, readFile, statSync } from "@karume/test-support/fs";
+import { goldenDir } from "@karume/test-support/test-assets";
 import { parseManifest, resolveSelection } from "@karume/hub";
 import type { FileRef, Manifest, ModelEntry } from "@karume/hub";
 import { parseSafetensors } from "@karume/runtime";
+import { mirrorPresent, mirrorRoot } from "../../../models/tests/helpers/mirror.ts";
 import { readTextIfPresent } from "../../../models/tests/helpers/read-if-present.ts";
 
-/** 配布形の置き場（`karume dist --pipeline irodori` の既定の出力先）。 */
-export const ASSETS_DIR = new URL("../../../../models/karume-irodori-v4-small/", import.meta.url);
+/** The distribution mirror (`models/karume-irodori-v4-small/` — ADR 0139 decision 1). */
+export const ASSETS_DIR: URL = mirrorRoot("karume-irodori-v4-small");
 
 /** SKIP 時にそのまま貼れる生成コマンド。 */
 export const DIST_COMMAND = "cd tools/exporter && uv run karume dist --pipeline irodori";
-export const GOLDEN_COMMAND =
-  "cd tools/exporter && uv run --with 'transformers==5.14.1' python irodori_pipeline.py";
+/**
+ * Fetches the test assets, including the full-loop goldens (`goldens/<series>/pipeline/`). The
+ * assets gate accepts only a complete fetch; a partial `--include` fetch never records a revision.
+ */
+export const FETCH_COMMAND = "node tools/test-assets/fetch.ts";
 
 export const MODEL = "v4-small";
 
-/** 系列 root（格納 dtype の名前）から full-loop golden の置き場を組む。 */
-export const goldenDir = (seriesRoot: string): URL =>
-  new URL(`../../../../outputs/series/${seriesRoot}/pipeline/`, import.meta.url);
+/**
+ * The full-loop goldens of one series root (named for its storage dtype):
+ * `outputs/test-assets/goldens/<seriesRoot>/pipeline/` (ADR 0139 decision 2).
+ */
+export const pipelineGoldenDir = (seriesRoot: string): URL =>
+  new URL("pipeline/", goldenDir(seriesRoot));
 
-/** 配布形の manifest（無い環境では undefined = 焼いていない）。 */
-export const manifestText: string | undefined = await readTextIfPresent(
-  new URL("karume.json", ASSETS_DIR),
-);
+/**
+ * Whether a golden file is present. MUST: only NotFound means absent — any other failure propagates,
+ * so a broken root is reported as broken rather than skipped.
+ */
+export const goldenPresent = (url: URL): boolean => {
+  try {
+    statSync(url);
+    return true;
+  } catch (cause) {
+    if (isNotFound(cause)) return false;
+    throw cause;
+  }
+};
+
+/**
+ * The mirror's manifest, or `undefined` when the mirror is absent or unreadable by this version
+ * (`mirrorPresent` — not `karume/5`, or a referenced mirror is absent), so its cases SKIP instead of
+ * failing at module evaluation in `parseManifest`.
+ */
+export const manifestText: string | undefined = mirrorPresent(ASSETS_DIR)
+  ? await readTextIfPresent(new URL("karume.json", ASSETS_DIR))
+  : undefined;
 
 /** golden `meta.json` のうち、門が読む欄だけ（形は exporter が持つ — ここは読み口）。 */
 export type GoldenCase = {

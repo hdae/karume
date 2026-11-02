@@ -1,6 +1,6 @@
 // Host-side unit cases of the reference-audio preprocessing (K-weighting coefficients, input
 // errors, reflect pad). They need neither a GPU nor assets. The parity gate against the upstream
-// golden (outputs/series/dacvae-32dim/host/) lives in
+// golden (goldens/dacvae-32dim/host/ of the test assets) lives in
 // packages/e2e/tests/e2e_irodori_reference_host_test.ts.
 
 import { test } from "vite-plus/test";

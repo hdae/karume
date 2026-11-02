@@ -56,8 +56,8 @@ test("bankerRound: 0.5 ちょうどは偶数側（Math.round との差がここ�
 });
 
 test("sequenceLengthFromLogFrames: golden 2 ケースの log frames から同じ S が出る", () => {
-  // 値は `outputs/series/irodori-v4-small/pipeline/meta.json` の `duration.logFrames`
-  // （full = 161 フレーム / no-ref = 116 フレーム）。
+  // The values are `duration.logFrames` of the golden
+  // `goldens/irodori-v4-small/pipeline/meta.json` (full = 161 frames / no-ref = 116 frames).
   assertEquals(sequenceLengthFromLogFrames(5.087219, BOUNDS).frames, 161);
   assertEquals(sequenceLengthFromLogFrames(4.761631, BOUNDS).frames, 116);
 });
@@ -150,7 +150,7 @@ test("maxSequenceLength: 到達しうる S は 2 経路の大きいほう", () =
 
 // ---- 区間マスク -----------------------------------------------------------
 
-/** exporter の `tests/test_irodori_pipeline.py::TestSegmentMasks` と同じ値。 */
+/** `tools/export-recipes/irodori/tests/test_pipeline_ref.py::TestSegmentMasks` と同じ値。 */
 const CAPS = { text: 4, speaker: 5, caption: 6 };
 const USED = { text: 2, speaker: 3, caption: 4 };
 

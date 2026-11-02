@@ -4,25 +4,25 @@
 // 正しさを見る門は他に無い。DiT の入力そのものなので、取り違えは「全 step で条件が別の時刻を
 // 指す」形で latent 全体を変える。
 //
-// golden は `tools/exporter/irodori_pipeline.py` が書く
-// `outputs/series/irodori-v4-small/pipeline/t-embed.safetensors`（`t` `[40]` と
-// `t_embed` `[40,512]`）。生成していない環境では**明示 SKIP** する（ADR 0005）。GPU は要らない。
+// The golden is `outputs/test-assets/goldens/irodori-v4-small/pipeline/t-embed.safetensors` (`t`
+// `[40]` and `t_embed` `[40,512]`), written by `tools/export-recipes/irodori/pipeline_ref.py`. An
+// environment without it SKIPs explicitly (ADR 0005), unless the test assets are a complete fetch of
+// the pin, where its absence FAILs (ADR 0139). No GPU is needed.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
+import { goldenDir, testAssetsFetched } from "@karume/test-support/test-assets";
 import { tSchedule } from "../../models/src/irodori/host/sampler.ts";
 import { timestepEmbedding, timestepFrequencies } from "../../models/src/irodori/host/t-embed.ts";
 import { readFileIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 
-const GOLDEN = new URL(
-  "../../../outputs/series/irodori-v4-small/pipeline/t-embed.safetensors",
-  import.meta.url,
-);
+const GOLDEN = new URL("pipeline/t-embed.safetensors", goldenDir("irodori-v4-small"));
 
-/** SKIP 時にそのまま貼れる生成コマンド（`irodori_pipeline.py` の docstring）。 */
-const GENERATE_COMMAND =
-  "cd tools/exporter && uv run --with 'transformers==5.14.1' python irodori_pipeline.py";
+/** How to fetch the golden from the test-asset dataset. */
+const FETCH_HINT =
+  "fetch: node tools/test-assets/fetch.ts — the assets gate accepts only a complete fetch; " +
+  "--include 'goldens/irodori-v4-small/pipeline/**' with KARUME_ALLOW_NO_ASSETS=1 runs this file alone";
 
 /**
  * `t_embed` 表の突合に使う許容誤差。
@@ -50,23 +50,34 @@ const T_EMBED_ATOL = 3e-4;
  * 実測 **5.96e-8**（= exporter が meta.json に載せる `tScheduleClosedFormMaxAbs` と同値）。
  * `linspace` は `start + i·step` を f32 で積むので、閉形式 `0.999·(1 − i/40)` とは最終 ulp が
  * 割れる点がある。t が入るのは `t_embed` と刻み幅だけで、latent への効き方は golden の
- * 突合閾値の 3 桁下（`irodori_pipeline.py` の `EULER_REFERENCE_ATOL` の doc）。
+ * 突合閾値の 3 桁下（`tools/export-recipes/irodori/pipeline_ref.py` の `EULER_REFERENCE_ATOL` の
+ * doc）。
  */
 const T_SCHEDULE_ATOL = 1e-7;
 
 const goldenBytes = await readFileIfPresent(GOLDEN);
-const AVAILABLE = goldenBytes !== undefined;
+// An absent golden SKIPs unless `outputs/test-assets/` holds a complete fetch of the pin (ADR 0139),
+// where the dataset at the pin lacks it and `readGolden` FAILs.
+const AVAILABLE = goldenBytes !== undefined || testAssetsFetched();
 if (!AVAILABLE) {
   console.warn(
-    `[karume] ${GOLDEN.pathname} が無いため Irodori の t_embed 突合を SKIP する` +
-      `（full-loop golden はリポジトリ管理外）。生成: ${GENERATE_COMMAND}`,
+    `[karume] The Irodori t_embed comparison SKIPs: missing ${GOLDEN.pathname} (${FETCH_HINT})`,
   );
 }
 
 /** golden の `[名前 → f32 view]`（登録時に 1 回だけ読む）。 */
-const readGolden = (bytes: Uint8Array<ArrayBuffer>) => {
+const readGolden = () => {
+  if (goldenBytes === undefined) {
+    throw new Error(
+      `${GOLDEN.pathname} absent, but outputs/test-assets/ holds a complete fetch of the pinned ` +
+        "revision: the test-asset dataset at the pin lacks it",
+    );
+  }
   const file = parseSafetensors(
-    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+    goldenBytes.buffer.slice(
+      goldenBytes.byteOffset,
+      goldenBytes.byteOffset + goldenBytes.byteLength,
+    ),
   );
   const view = (name: string): { data: Float32Array; shape: readonly number[] } => {
     const tensor = file.tensors.get(name);
@@ -81,7 +92,7 @@ const readGolden = (bytes: Uint8Array<ArrayBuffer>) => {
 };
 
 test.skipIf(!AVAILABLE)("Irodori t_embed: ホスト式が torch 基準の golden 表と一致する", () => {
-  const { t, table } = readGolden(goldenBytes as Uint8Array<ArrayBuffer>);
+  const { t, table } = readGolden();
   const [steps, width] = [table.shape[0], table.shape[1]];
   assertEquals(t.shape, [steps], "t と t_embed の step 数");
   const frequencies = timestepFrequencies(width);
@@ -115,7 +126,7 @@ test.skipIf(!AVAILABLE)("Irodori t_embed: ホスト式が torch 基準の golden
 test.skipIf(!AVAILABLE)(
   "Irodori t スケジュール: 閉形式が上流 linspace と 1 ulp 級で一致する",
   () => {
-    const { t } = readGolden(goldenBytes as Uint8Array<ArrayBuffer>);
+    const { t } = readGolden();
     const steps = t.shape[0];
     // golden は末尾の 0 を落とした `[:-1]` なので、こちらも同じ範囲だけを見る。
     const schedule = tSchedule(steps, 0.999);

@@ -3,25 +3,30 @@
 // `decodeWav` は参照音声を食う唯一の入口で、**規約の取り違えが例外にならない**（int16 の
 // スケールが 1 ずれても「少し音量が違う波形」が出るだけ）。したがって値そのものを固定する。
 //
-// 資産があれば golden `outputs/series/dacvae-32dim/host/meta.json` の `wavScale`（上流の
-// リーダが int16 の両端で実測した値）とも突き合わせる（無ければその 1 本だけ SKIP）。
+// When the golden `outputs/test-assets/goldens/dacvae-32dim/host/meta.json` is present, it is also
+// compared with its `wavScale` (what the upstream reader measured at both ends of int16); without it
+// only that one case SKIPs, or FAILs when the test assets are a complete fetch of the pin (ADR 0139).
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { describe, it, test } from "vite-plus/test";
 import { decodeWav, encodeWav } from "../src/audio/wav.ts";
 import { ModelInputError } from "../src/errors.ts";
+import { goldenDir, testAssetsFetched } from "@karume/test-support/test-assets";
 import { readTextIfPresent } from "./helpers/read-if-present.ts";
 
-/** golden `meta.json` の置き場（`tools/export-recipes/irodori/dacvae/host.py` の既定の出力先）。 */
-const HOST_GOLDEN = new URL("../../../outputs/series/dacvae-32dim/host/meta.json", import.meta.url);
-const HOST_COMMAND =
-  "cd tools/export-recipes && uv run --with descript-audiotools --with einops " +
-  "--with 'transformers==5.14.1' python -m irodori.dacvae.host";
+/** The golden `meta.json` (written by `tools/export-recipes/irodori/dacvae/host.py`). */
+const HOST_GOLDEN = new URL("host/meta.json", goldenDir("dacvae-32dim"));
+const FETCH_HINT =
+  "fetch: node tools/test-assets/fetch.ts — the assets gate accepts only a complete fetch; " +
+  "--include 'goldens/dacvae-32dim/host/**' with KARUME_ALLOW_NO_ASSETS=1 runs this file alone";
 
 const goldenText = await readTextIfPresent(HOST_GOLDEN);
-if (goldenText === undefined) {
+// An absent golden SKIPs unless `outputs/test-assets/` holds a complete fetch of the pin (ADR 0139),
+// where the dataset at the pin lacks it and the case FAILs.
+const GOLDEN_AVAILABLE = goldenText !== undefined || testAssetsFetched();
+if (!GOLDEN_AVAILABLE) {
   console.warn(
-    `[karume] wav のスケール突合を SKIP する（${HOST_GOLDEN.pathname} が要る）。生成: ${HOST_COMMAND}`,
+    `[karume] The wav scale comparison SKIPs: missing ${HOST_GOLDEN.pathname} (${FETCH_HINT})`,
   );
 }
 
@@ -101,10 +106,16 @@ test("decodeWav: int16 は 32768 で割る（下端 −32768 が厳密に −1.0
   );
 });
 
-test.skipIf(goldenText === undefined)(
+test.skipIf(!GOLDEN_AVAILABLE)(
   "decodeWav: int16 のスケールが golden の上流リーダ実測（wavScale）と一致する",
   () => {
-    const meta = JSON.parse(goldenText as string) as {
+    if (goldenText === undefined) {
+      throw new Error(
+        `${HOST_GOLDEN.pathname} absent, but outputs/test-assets/ holds a complete fetch of the ` +
+          "pinned revision: the test-asset dataset at the pin lacks it",
+      );
+    }
+    const meta = JSON.parse(goldenText) as {
       readonly wavScale: {
         readonly probeInt16: readonly number[];
         readonly probeFloat: readonly number[];

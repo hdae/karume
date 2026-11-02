@@ -6,7 +6,9 @@
 // 成り立たなければタイル長という**性能ノブが出力を変える**ので、そこは tolerance で緩めず
 // Uint32 の完全一致で縛る。
 //
-// 入力は実 z（`outputs/series/irodori-v4-small/pipeline/case.full.safetensors` の `z`・S = 161）。
+// The input is a real z (`z` of the golden
+// `outputs/test-assets/goldens/irodori-v4-small/pipeline/case.full.safetensors`, S = 161); the
+// decoder is `codec_decoder` at f32 of the mirror `models/karume-irodori-v4-small/`.
 // 合成乱数ではなく実運用の値域を使うのは、Snake の `sin(αx)` が入力の値域に強く効くため
 // （`e2e_dacvae_test.ts`〈0.15 の選別で削除〉 の tolerance 導出と同じ理由）。
 //
@@ -14,10 +16,14 @@
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
-import { acquireGpu, parseSafetensors, prepareContainer, type Tensor } from "@karume/runtime";
+import { acquireGpu, parseSafetensors, type Tensor } from "@karume/runtime";
+import { goldenDir, testAssetsFetched } from "@karume/test-support/test-assets";
 import { decodeTiles, planCodecTiles } from "../../models/src/irodori/codec.ts";
-import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
+import {
+  mirrorPresent,
+  mirrorRoot,
+  openMirrorComponent,
+} from "../../models/tests/helpers/mirror.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { readFileIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 
@@ -32,24 +38,21 @@ const HALO_FRAMES = 8;
  */
 const GATE_TILE_FRAMES = 64;
 
-const DECODER_URL = new URL(
-  "../../../outputs/series/dacvae-32dim/decoder/model.krm",
-  import.meta.url,
-);
-/**
- * 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。
- * ディレクトリ名 `decoder` とは綴りが違う。
- */
-const DECODER_GRAPH = seriesGraph("dacvae-32dim", "decoder");
-const LATENT_URL = new URL(
-  "../../../outputs/series/irodori-v4-small/pipeline/case.full.safetensors",
-  import.meta.url,
-);
+const MIRROR = mirrorRoot("karume-irodori-v4-small");
+/** The decoder graph (the manifest's weights key) at the storage the golden z was decoded with. */
+const DECODER_GRAPH = "codec_decoder";
+const DECODER_CHOICE = { model: "v4-small", quant: "f32" } as const;
+const LATENT_URL = new URL("pipeline/case.full.safetensors", goldenDir("irodori-v4-small"));
 
-const DECODER_COMMAND =
-  "cd tools/exporter && uv run --with descript-audiotools --with einops python export_dacvae.py";
-const LATENT_COMMAND =
-  "cd tools/exporter && uv run --with 'transformers==5.14.1' python irodori_pipeline.py";
+const FETCH_HINT =
+  "fetch: node tools/test-assets/fetch.ts — the assets gate accepts only a complete fetch; " +
+  "--include 'goldens/irodori-v4-small/pipeline/**' with KARUME_ALLOW_NO_ASSETS=1 runs this file alone";
+
+/**
+ * Whether `outputs/test-assets/` holds a complete fetch of the pin (ADR 0139). Then an absent z
+ * golden means the dataset at the pin lacks it, so the case FAILs instead of SKIPping.
+ */
+const FETCHED = testAssetsFetched();
 
 const readFile = async (url: URL): Promise<ArrayBuffer | undefined> => {
   const bytes = await readFileIfPresent(url);
@@ -58,21 +61,30 @@ const readFile = async (url: URL): Promise<ArrayBuffer | undefined> => {
     : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
-const DECODER_PRESENT = modelPresent(DECODER_URL);
+const DECODER_PRESENT = mirrorPresent(MIRROR);
 const latentBytes = await readFile(LATENT_URL);
-const ASSETS_AVAILABLE = DECODER_PRESENT && latentBytes !== undefined;
+// An absent mirror SKIPs. An absent z golden SKIPs unless the test assets are a complete fetch of
+// the pin, where `readLatent` FAILs.
+const ASSETS_AVAILABLE = DECODER_PRESENT && (latentBytes !== undefined || FETCHED);
 if (!ASSETS_AVAILABLE) {
-  console.warn(
-    "[karume] codec タイル同値門を SKIP する（decoder 資産と full-loop golden の両方が要る）。" +
-      `生成: ${DECODER_PRESENT ? LATENT_COMMAND : DECODER_COMMAND}`,
-  );
+  const missing = [
+    ...(DECODER_PRESENT ? [] : [`the mirror ${MIRROR.pathname} (its codec_decoder)`]),
+    ...(latentBytes === undefined ? [`${LATENT_URL.pathname} (${FETCH_HINT})`] : []),
+  ];
+  console.warn(`[karume] The codec tile-equivalence check SKIPs: missing ${missing.join(" / ")}`);
 }
 
 const RUNNABLE = GPU_AVAILABLE && ASSETS_AVAILABLE;
 
 /** golden の `z`（`[1,S,32]`）を読む。 */
 const readLatent = (): Float32Array<ArrayBuffer> => {
-  const file = parseSafetensors(latentBytes as ArrayBuffer);
+  if (latentBytes === undefined) {
+    throw new Error(
+      `${LATENT_URL.pathname} absent, but outputs/test-assets/ holds a complete fetch of the ` +
+        "pinned revision: the test-asset dataset at the pin lacks it",
+    );
+  }
+  const file = parseSafetensors(latentBytes);
   const spec = file.tensors.get("z");
   if (spec === undefined) throw new Error("full-loop golden に 'z' が無い");
   return new Float32Array(
@@ -85,10 +97,10 @@ test.skipIf(!RUNNABLE)(
   async () => {
     const latent = readLatent();
     const frames = latent.length / LATENT_DIM;
-    const prepared = prepareContainer(await openSeriesContainer(DECODER_URL), DECODER_GRAPH);
+    const decoder = await openMirrorComponent(MIRROR, DECODER_GRAPH, DECODER_CHOICE);
     const gpu = await acquireGpu();
     try {
-      const session = await prepared.createContainerSession(gpu, {});
+      const session = await decoder.createSession(gpu, {});
       try {
         const run = async (
           slice: Float32Array<ArrayBuffer>,
@@ -100,7 +112,7 @@ test.skipIf(!RUNNABLE)(
             data: slice,
           };
           const outputs = await session.run({ latent: input });
-          const tensor = outputs[prepared.graph.outputs[0]];
+          const tensor = outputs[decoder.graph.outputs[0]];
           if (tensor.dtype !== "f32") throw new Error(`decoder の出力が ${tensor.dtype}`);
           return tensor.data;
         };

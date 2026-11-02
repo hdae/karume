@@ -5,9 +5,10 @@
 // （tests/e2e_sbv2_test.ts）が「音響チェーン側の実重み」を、EmbeddingGemma
 // （tests/e2e_embeddinggemma_test.ts）が「単一ベクトル出力のテキスト系」を受け持つのに対し、
 // こちらは **token 列を返すテキスト条件エンコーダ**（`[1,T,H]` の系列出力）を受け持つ。
-// 対象は `outputs/series/irodori-v4-small/<target>/`（backbone の重みだけで 1.26GB のため
-// リポジトリ管理外 — `.gitignore` の `outputs/`）。生成は `tools/exporter/export_irodori.py`
-// （コマンドは下の GENERATE_COMMAND がそのまま正本）。
+// The containers are the f32 graphs of the distribution mirror `models/karume-irodori-v4-small/`
+// (opened through its manifest — ADR 0139 decision 1); the per-target torch goldens are
+// `outputs/test-assets/goldens/irodori-v4-small/<target>/io.<case>.safetensors` (decision 2 — fetch
+// them as FETCH_HINT below says), written by `tools/export-recipes/irodori/export.py`.
 //
 // ターゲットは 7 本（recon の G1 / G1a / G1b / G2 / G3 と、ADR 0047 の G5'、ADR 0114 で G5' から
 // 割り出した条件側 K/V 射影）:
@@ -33,10 +34,10 @@
 // 流すので、この E2E も projector の入力に **backbone の torch 期待値**をそのまま食わせる。
 // `duration` も同じ鎖で、text 系列の入力は **`text-proj` の torch 期待値そのもの**、
 // speaker / caption のベクトルは `speaker` / `caption-proj` の torch 期待値から実装の
-// メソッドで作ったもの（生成は `export_irodori.py` の `_duration_cases`）。
+// メソッドで作ったもの（生成は `tools/export-recipes/irodori/export.py` の `_duration_cases`）。
 //
 // `dit-context` と `dit` も同じ鎖で、`dit-context` の条件 state は `text-proj` / `caption-proj` /
-// `speaker` の torch 期待値を Tmax へ右 pad したもの（生成は `export_irodori.py` の `_dit_cases`）、
+// `speaker` の torch 期待値を Tmax へ右 pad したもの（生成は `irodori/export.py` の `_dit_cases`）、
 // `dit` の K/V 24 本は **`dit-context` の torch 期待値そのもの**（`_dit_graph_inputs`）。**uncond
 // 3 変種は cond と x_t / t / 条件 state を共有し、違うのはマスクだけ**（ADR 0047 決定 1）— 条件
 // state が全ケースで同じなので、`dit-context` の golden は代表 1 本（`dit-cond-min`）になる
@@ -53,7 +54,14 @@
 // 逆に資産が**中途半端に**（ターゲット欠け / ケース欠け）存在する場合は SKIP ではなく
 // FAIL にする（下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
 
-import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
+import {
+  type DirEntry,
+  isNotFound,
+  readDirSync,
+  readFile,
+  readTextFile,
+} from "@karume/test-support/fs";
+import { goldenDir, testAssetsFetched } from "@karume/test-support/test-assets";
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, parseSafetensors, prepareContainer, type Tensor } from "../../runtime/mod.ts";
@@ -66,8 +74,14 @@ import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/env
 import { ioTensor } from "../../runtime/tests/helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
-import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesComponents } from "../../models/tests/helpers/series-graphs.ts";
+import { parseManifest } from "@karume/hub";
+import {
+  type MirrorChoice,
+  mirrorPresent,
+  mirrorRoot,
+  openSelectedContainer,
+  selectMirrorComponent,
+} from "../../models/tests/helpers/mirror.ts";
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
@@ -322,18 +336,32 @@ const TOLERANCES: Readonly<Record<string, readonly Tolerance[]>> = {
   "dit-context": Array.from({ length: DIT_CONTEXT_OUTPUTS }, () => DIT_CONTEXT_TOLERANCE),
 };
 
+/** The golden series (its directory name under `goldens/` — the export's series name). */
 const SERIES_NAME = "irodori-v4-small";
-const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
-const MODEL_FILE = "model.krm";
+const GOLDEN_ROOT = goldenDir(SERIES_NAME);
+const MIRROR = mirrorRoot("karume-irodori-v4-small");
+/** The goldens are the f32 series, so the containers are the mirror's f32 graphs. */
+const MODEL = "v4-small";
+const QUANT = "f32";
+const MIRROR_CHOICE: MirrorChoice = { model: MODEL, quant: QUANT };
 
 /**
- * ターゲット（置き場のディレクトリ）→ 容器の中のグラフ名（ハイフンの綴りだけが違う —
- * weights キーは識別子として下線）。
+ * Target (the golden directory) → the graph name in its container, which is the manifest's weights
+ * key (only the spelling differs — a weights key is an identifier, so it uses underscores).
  *
- * MUST: 表の実体は `helpers/series-graphs.ts` の 1 本（門番 `e2e_assets_gate_test.ts` と同じ
- * 正本）。e2e が自前の表を持つと、片方だけ書き換えても誰も落ちない。
+ * MUST: the structural case checks that the mirror's manifest declares every name here at
+ * {@link MIRROR_CHOICE}, and `prepareContainer` checks the container's graph name, so a wrong row
+ * fails instead of reading another graph.
  */
-const GRAPH_NAMES: Readonly<Record<string, string>> = seriesComponents(SERIES_NAME);
+const GRAPH_NAMES: Readonly<Record<string, string>> = {
+  backbone: "backbone",
+  "caption-proj": "caption_proj",
+  dit: "dit",
+  "dit-context": "dit_context",
+  duration: "duration",
+  speaker: "speaker",
+  "text-proj": "text_proj",
+};
 
 /** ターゲットのグラフ名（表に無いターゲットは fail loudly — 黙って別のグラフを読まない）。 */
 const graphName = (target: string): string => {
@@ -343,14 +371,15 @@ const graphName = (target: string): string => {
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
-/** SKIP 時にそのまま貼れる生成コマンド（tools/exporter/export_irodori.py の docstring）。 */
-const GENERATE_COMMAND =
-  "cd tools/exporter && uv run --with 'transformers==5.14.1' python export_irodori.py";
+/** How to fetch the goldens of this file from the test-asset dataset. */
+const FETCH_HINT =
+  "fetch: node tools/test-assets/fetch.ts — the assets gate accepts only a complete fetch; " +
+  `--include 'goldens/${SERIES_NAME}/**' with KARUME_ALLOW_NO_ASSETS=1 runs this file alone`;
 
 /**
  * 生成されているはずのターゲットとケース。**列挙結果ではなくここで固定する** — 列挙だけに
  * 頼ると生成を一部だけ流した環境でテストが黙って消え、「緑だが未検証」になる。正本は
- * `tools/exporter/export_irodori.py` の TARGETS / GOLDEN_CASES / SPEAKER_CASES /
+ * `tools/export-recipes/irodori/export.py` の TARGETS / GOLDEN_CASES / SPEAKER_CASES /
  * SPEAKER_REAL_CASES / DURATION_CASES / DIT_CASES。
  *
  * MUST: ターゲット（G6 / G7 = codec）を足すときはこの表と TOLERANCES を同時に伸ばす。
@@ -403,8 +432,8 @@ const listDir = (url: URL): readonly DirEntry[] => {
 
 /**
  * 系列ディレクトリ直下にある**グラフ以外**の生成物。ここは IR ターゲットの列挙なので、
- * 別の台本が書くホスト側資産は除く（`irodori_tokenizer.py` のトークナイザ資産と
- * `irodori_pipeline.py` の full-loop latent golden）。
+ * 別の台本が書くホスト側資産は除く（`tools/export-recipes/irodori/tokenizer_ref.py` のトークナイザ資産と
+ * `tools/export-recipes/irodori/pipeline_ref.py` の full-loop latent golden）。
  *
  * MUST: 「知らないディレクトリは無視」にしない — 除外は名前で明示する。未知の名前が
  * 増えたらこのテストが落ちて、門の対象から漏れていることに気づける。
@@ -430,36 +459,74 @@ const readBuffer = async (root: URL, target: string, file: string): Promise<Arra
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
-/** ターゲットの代表 path（容器は part 列 — 見つけ方は `resolveParts` が持つ）。 */
-const modelUrl = (target: string): URL => new URL(`${target}/${MODEL_FILE}`, SERIES_ROOT);
+/** The mirror's container of a target, through the manifest (part list, sha256 of the documents). */
+const openTarget = async (target: string) =>
+  await openSelectedContainer(
+    await selectMirrorComponent(MIRROR, graphName(target), MIRROR_CHOICE),
+  );
 
 /** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
-const TARGETS = discoverTargets(SERIES_ROOT);
-/** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
+const TARGETS = discoverTargets(GOLDEN_ROOT);
+/**
+ * Whether the goldens are present. None at all = not fetched, so the golden cases SKIP (a partial
+ * set fails in the structural case below) — unless `outputs/test-assets/` holds a complete fetch of
+ * the pin (ADR 0139), where none at all means the dataset at the pin lacks them and the structural
+ * case FAILs.
+ */
 const AVAILABLE = TARGETS.length > 0;
+const FETCHED = testAssetsFetched();
+const MIRROR_AVAILABLE = mirrorPresent(MIRROR);
 
-if (!AVAILABLE) {
+if (!AVAILABLE && !FETCHED) {
   console.warn(
-    `[karume] ${SERIES_ROOT.pathname} に export 済みターゲットが無いため実重み Irodori ` +
-      `テキスト系 E2E を SKIP する（backbone だけで 1.26GB につきリポジトリ管理外）。` +
-      `生成: ${GENERATE_COMMAND}`,
+    `[karume] Irodori per-target golden E2E SKIPs: no golden targets under ` +
+      `${GOLDEN_ROOT.pathname} (${FETCH_HINT})`,
+  );
+}
+if (!MIRROR_AVAILABLE) {
+  console.warn(
+    `[karume] Irodori per-target golden E2E SKIPs: the mirror ${MIRROR.pathname} is absent ` +
+      "(or unreadable here: not karume/5, or a mirror it references is absent)",
   );
 }
 
-test.skipIf(!AVAILABLE)("Irodori 資産: 期待するターゲットとケースが揃っている", () => {
-  assertEquals(TARGETS, EXPECTED_TARGETS, `${SERIES_ROOT.pathname} のターゲット`);
+// Golden-side checks only (no mirror needed): they run whenever goldens are present, and on a
+// complete fetch of the pin with none present.
+test.skipIf(!AVAILABLE && !FETCHED)("Irodori 資産: 期待するターゲットとケースが揃っている", () => {
+  if (!AVAILABLE) {
+    throw new Error(
+      `no golden targets under ${GOLDEN_ROOT.pathname}, but outputs/test-assets/ holds a complete ` +
+        "fetch of the pinned revision: the test-asset dataset at the pin lacks them",
+    );
+  }
+  assertEquals(TARGETS, EXPECTED_TARGETS, `${GOLDEN_ROOT.pathname} のターゲット`);
   assertEquals(Object.keys(TOLERANCES).sort(), EXPECTED_TARGETS, "ターゲット別 tolerance の表");
   assertEquals(Object.keys(GRAPH_NAMES).sort(), EXPECTED_TARGETS, "ターゲット別グラフ名の表");
   for (const target of TARGETS) {
     assert(Object.hasOwn(EXPECTED_CASES, target), `${target} の期待ケース表が無い`);
     assertEquals(
-      discoverCases(SERIES_ROOT, target),
+      discoverCases(GOLDEN_ROOT, target),
       [...EXPECTED_CASES[target]],
       `${target} の golden ケース`,
     );
-    assert(modelPresent(modelUrl(target)), `${target}/${MODEL_FILE} が無い`);
   }
 });
+
+test.skipIf(!MIRROR_AVAILABLE)(
+  `Irodori assets: the mirror declares every target graph at ${QUANT}`,
+  async () => {
+    const { models } = parseManifest(await readTextFile(new URL("karume.json", MIRROR)));
+    assert(Object.hasOwn(models, MODEL), `the mirror declares no model '${MODEL}'`);
+    const entry = models[MODEL];
+    for (const target of EXPECTED_TARGETS) {
+      const graph = graphName(target);
+      assert(
+        Object.hasOwn(entry.weights, graph) && Object.hasOwn(entry.weights[graph], QUANT),
+        `the mirror declares no '${graph}' at ${QUANT} (target ${target})`,
+      );
+    }
+  },
+);
 
 /**
  * 決着と実測の置き場（`outputs/verify/<環境キー>/<日付>_irodori-golden/` — 消して安全）。
@@ -470,20 +537,20 @@ test.skipIf(!AVAILABLE)("Irodori 資産: 期待するターゲットとケース
 const results = openResults("irodori-golden");
 
 for (const target of TARGETS) {
-  for (const caseName of discoverCases(SERIES_ROOT, target)) {
+  for (const caseName of discoverCases(GOLDEN_ROOT, target)) {
     /** ケース ID（ターゲットが違えば同じケース名があるので組で持つ）。 */
     const caseId = `${target}/${caseName}`;
     // The whole case is upstream parity (per-component torch goldens under a tolerance), so it is
     // opt-in. Its io-key / shape / dtype assertions only check the golden file against the graph
     // as preconditions of that comparison, so they stay with it rather than in a default case.
-    test.skipIf(!AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
+    test.skipIf(!AVAILABLE || !MIRROR_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
       `Irodori golden 突合: ${target} / ${caseName}（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
       async () => {
         await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
           const ioFile = `${IO_PREFIX}${caseName}${IO_SUFFIX}`;
           const [opened, ioBytes] = await Promise.all([
-            openSeriesContainer(modelUrl(target)),
-            readBuffer(SERIES_ROOT, target, ioFile),
+            openTarget(target),
+            readBuffer(GOLDEN_ROOT, target, ioFile),
           ]);
           const parsed = prepareContainer(opened, graphName(target));
           const io = parseSafetensors(ioBytes);
@@ -508,7 +575,7 @@ for (const target of TARGETS) {
           // 記号次元は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
           // ケースごとに長さが違う（テキスト系と duration は T = 7 / 13 / 22 / 29 / 144 / 404、
           // speaker は S = 2 / 6 / 31 / 47 / 187 / 750、dit は S = 2 / 25 / 750）ので、宣言上限
-          // （テキスト系 Tmax = 512 = export_irodori.py の SYM_MAX / speaker Smax = 750 =
+          // （テキスト系 Tmax = 512 = irodori/export.py の SYM_MAX / speaker Smax = 750 =
           // speaker_sym_max / dit Smax = 750 = dit_sym_max — 帯マスクと RoPE 表の焼き付け点）に
           // 依存した実装はここで値か shape が壊れる。speaker と dit は**上限そのもの**を踏む
           // ケース（ref-max / dit-cond-max）を持たせてある（テキスト系の最長は 404）。

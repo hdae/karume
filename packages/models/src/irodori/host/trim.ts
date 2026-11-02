@@ -14,7 +14,7 @@
  * `tail_window_size` / `tail_std_threshold` / `tail_mean_threshold` are request-side fields
  * upstream, but this implementation only ever uses the defaults, so they are constants (not in
  * `pipelineConfig` = a distribution has no way to declare another value). The golden comparison is
- * the 3 cases of `outputs/series/dacvae-32dim/host/trim.safetensors`.
+ * the 3 cases of `goldens/dacvae-32dim/host/trim.safetensors` of the test assets.
  */
 
 /** The window looked at the tail (latent frames). */

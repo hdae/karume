@@ -7,18 +7,24 @@
 // フレーム化はテンソルの読み替えでしかないが、**幅を取り違えても shape は合う**（1920 の
 // 代わりに別の数で割ると T が変わるだけで例外は出ない）。ここが唯一その取り違えを掴む席。
 //
-// golden 側の `latent` は上流 `codec.encode_waveform` の出力そのもの（`dacvae_host.py` が
-// 「ホスト鎖 → グラフ」と上流とのビット一致を実測してから書く）なので、この門が閉じることは
+// golden 側の `latent` は上流 `codec.encode_waveform` の出力そのもの
+// （`tools/export-recipes/irodori/dacvae/host.py` が「ホスト鎖 → グラフ」と上流とのビット一致を
+// 実測してから書く）なので、この門が閉じることは
 // 「TS の参照音声経路が上流と同じ話者条件を作る」を意味する。
 //
-// 資産が欠けた環境と GPU 無し環境は生成コマンド付きで**明示 SKIP**する（ADR 0005）。
+// An environment without the assets or without a GPU SKIPs explicitly, naming what is missing
+// (ADR 0005); a host golden absent from a complete fetch of the pinned test assets FAILs (ADR 0139).
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
-import { acquireGpu, parseSafetensors, prepareContainer } from "@karume/runtime";
+import { acquireGpu, parseSafetensors } from "@karume/runtime";
+import { goldenDir, testAssetsFetched } from "@karume/test-support/test-assets";
 import { normalizeReference, reflectPadToHop } from "../../models/src/irodori/host/reference.ts";
-import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesGraph } from "../../models/tests/helpers/series-graphs.ts";
+import {
+  mirrorPresent,
+  mirrorRoot,
+  openMirrorComponent,
+} from "../../models/tests/helpers/mirror.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { readFileIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
@@ -58,21 +64,22 @@ const LATENT_ATOL = 2e-4;
 /** LUFS 正規化を通る golden ケース（`normalizeDb: -16` の 3 本 — この経路が持つ枝の全部）。 */
 const CASES: readonly string[] = ["ref-default", "ref-short", "ref-odd"];
 
-const GOLDEN_DIR = new URL("../../../outputs/series/dacvae-32dim/host/", import.meta.url);
-const ENCODER_URL = new URL(
-  "../../../outputs/series/dacvae-32dim/encoder/model.krm",
-  import.meta.url,
-);
-/**
- * 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。
- * ディレクトリ名 `encoder` とは綴りが違う。
- */
-const ENCODER_GRAPH = seriesGraph("dacvae-32dim", "encoder");
+/** The host goldens (`outputs/test-assets/goldens/dacvae-32dim/host/` — ADR 0139 decision 2). */
+const GOLDEN_DIR = new URL("host/", goldenDir("dacvae-32dim"));
+const MIRROR = mirrorRoot("karume-irodori-v4-small");
+/** The encoder graph (the manifest's weights key) at the f32 storage the golden latent came from. */
+const ENCODER_GRAPH = "codec_encoder";
+const ENCODER_CHOICE = { model: "v4-small", quant: "f32" } as const;
 
-const HOST_COMMAND =
-  "cd tools/exporter && uv run --with descript-audiotools --with einops --with 'transformers==5.14.1' python dacvae_host.py";
-const ENCODER_COMMAND =
-  "cd tools/exporter && uv run --with descript-audiotools --with einops python export_dacvae.py";
+const FETCH_HINT =
+  "fetch: node tools/test-assets/fetch.ts — the assets gate accepts only a complete fetch; " +
+  "--include 'goldens/dacvae-32dim/host/**' with KARUME_ALLOW_NO_ASSETS=1 runs this file alone";
+
+/**
+ * Whether `outputs/test-assets/` holds a complete fetch of the pin (ADR 0139). Then an absent host
+ * golden means the dataset at the pin lacks it, so the cases FAIL instead of SKIPping.
+ */
+const FETCHED = testAssetsFetched();
 
 const readBytes = async (url: URL): Promise<ArrayBuffer | undefined> => {
   const bytes = await readFileIfPresent(url);
@@ -81,17 +88,25 @@ const readBytes = async (url: URL): Promise<ArrayBuffer | undefined> => {
     : (bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
 };
 
-const ENCODER_PRESENT = modelPresent(ENCODER_URL);
+const ENCODER_PRESENT = mirrorPresent(MIRROR);
 const caseBytes = new Map<string, ArrayBuffer>();
+const absentCases: string[] = [];
 for (const name of CASES) {
-  const bytes = await readBytes(new URL(`case.${name}.safetensors`, GOLDEN_DIR));
-  if (bytes !== undefined) caseBytes.set(name, bytes);
+  const url = new URL(`case.${name}.safetensors`, GOLDEN_DIR);
+  const bytes = await readBytes(url);
+  if (bytes === undefined) absentCases.push(url.pathname);
+  else caseBytes.set(name, bytes);
 }
-const ASSETS_AVAILABLE = ENCODER_PRESENT && caseBytes.size === CASES.length;
+// An absent mirror SKIPs. An absent host golden SKIPs unless the test assets are a complete fetch
+// of the pin, where `runChainOverCases` FAILs.
+const ASSETS_AVAILABLE = ENCODER_PRESENT && (absentCases.length === 0 || FETCHED);
 if (!ASSETS_AVAILABLE) {
   console.warn(
-    "[karume] 参照音声 → latent の e2e を SKIP する（encoder 資産とホスト golden の両方が要る）。" +
-      `生成: ${ENCODER_PRESENT ? HOST_COMMAND : ENCODER_COMMAND}`,
+    "[karume] The reference audio → latent e2e SKIPs: missing " +
+      [
+        ...(ENCODER_PRESENT ? [] : [`the mirror ${MIRROR.pathname} (its codec_encoder)`]),
+        ...(absentCases.length === 0 ? [] : [`${absentCases.join(" / ")} (${FETCH_HINT})`]),
+      ].join(" / "),
   );
 }
 
@@ -122,10 +137,16 @@ type ChainResult = {
 const runChainOverCases = async (
   check: (name: string, result: ChainResult) => void,
 ): Promise<void> => {
-  const prepared = prepareContainer(await openSeriesContainer(ENCODER_URL), ENCODER_GRAPH);
+  if (absentCases.length > 0) {
+    throw new Error(
+      `${absentCases.join(" / ")} absent, but outputs/test-assets/ holds a complete fetch of the ` +
+        "pinned revision: the test-asset dataset at the pin lacks it",
+    );
+  }
+  const encoder = await openMirrorComponent(MIRROR, ENCODER_GRAPH, ENCODER_CHOICE);
   const gpu = await acquireGpu();
   try {
-    const session = await prepared.createContainerSession(gpu, {});
+    const session = await encoder.createSession(gpu, {});
     try {
       for (const name of CASES) {
         const buffer = caseBytes.get(name) as ArrayBuffer;
@@ -138,7 +159,7 @@ const runChainOverCases = async (
         const outputs = await session.run({
           wav: { dtype: "f32", shape: [1, frames, HOP_LENGTH], data: padded },
         });
-        const tensor = outputs[prepared.graph.outputs[0]];
+        const tensor = outputs[encoder.graph.outputs[0]];
         if (tensor.dtype !== "f32") throw new Error(`encoder の出力が ${tensor.dtype}`);
         check(name, { rawLength: raw.length, frames, actual: tensor.data, expected });
       }

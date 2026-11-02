@@ -3,8 +3,8 @@
  * まで通し、出た latent を **full-loop golden の `z` と全要素突合**する（SBV2 の WAV sha256 門
  * `e2e_sbv2_wav_test.ts` の latent 版 — こちらは codec がまだ無いので波形では閉じられない）。
  *
- * golden は `tools/exporter/irodori_pipeline.py` が書く
- * `outputs/series/irodori-v4-small/pipeline/`（`case.full` / `case.no-ref` / `meta.json`）。
+ * The golden is `outputs/test-assets/goldens/irodori-v4-small/pipeline/` (`case.full` /
+ * `case.no-ref` / `meta.json`), written by `tools/export-recipes/irodori/pipeline_ref.py`.
  * あちらは**上流の `sample_euler_rf_cfg` との突合を毎回通ってから**書かれるので、この門が閉じる
  * ことは「TS のホスト実装が上流と同じ latent を出す」の 2 段目にあたる。
  *
@@ -21,7 +21,7 @@
  *
  * ## 実効値 drift（門の前提）
  *
- * golden と配布形は**別々に焼かれる**（`irodori_pipeline.py` と `karume dist`）ので、
+ * golden と配布形は**別々に焼かれる**（`tools/export-recipes/irodori/pipeline_ref.py` と `tools/export-recipes/dist.py`）ので、
  * サンプラのノブがどちらか片方で動くと「z が合わない」という形でしか出てこない。前提が
  * 崩れたことを先に言うために、`pipelineConfig` と `meta.json` の突合を独立した門に置く。
  *
@@ -41,11 +41,13 @@
  * **S と forward 数の完全一致は系列に依らず要求する** — 格納 dtype を落としても duration の
  * 出力を動かす軸は無い（重み格納だけの変更で、S を決める式もホストのまま）ので、ここが
  * 割れたら tolerance ではなく経路を疑う。**i8 で S が動くかどうかは別軸の実測**
- * （`tools/exporter/measure_quant_irodori.py` の S ドリフト表）で、割れたらそちらを先に読む。
+ * （`tools/export-recipes/irodori/measure_quant.py` の S ドリフト表）で、割れたらそちらを先に読む。
  *
- * MUST: 資産は `models/karume-irodori-v4-small/`（untracked・実 GPU 機のローカル資産）と
- * 上の golden。どちらか欠けた環境と GPU 無し環境は生成コマンド付きで**明示 SKIP** する
- * （テストを消して無音で緑にしない — ADR 0005）。
+ * MUST: the assets are the mirror `models/karume-irodori-v4-small/` and the goldens above. An
+ * environment without the mirror, without the goldens, or without a GPU SKIPs explicitly with the
+ * missing path (never delete a test to stay green — ADR 0005). Two absences FAIL instead: a golden
+ * absent from a complete fetch of the pinned test assets (the dataset at the pin lacks it — ADR
+ * 0139), and a case file absent beside a present `meta.json` (an inconsistent golden set).
  *
  * NOTE: ローカル読みに `Deno.readFile` を使うのはテストだけ。パッケージ本体は Web 標準 API
  * のみ（横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。
@@ -58,22 +60,38 @@ import { parseIrodoriPipelineConfig } from "../../models/src/irodori/config.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import {
   ASSETS_DIR,
-  DIST_COMMAND,
-  GOLDEN_COMMAND,
+  FETCH_COMMAND,
   type GoldenCase,
-  goldenDir,
   type GoldenMeta,
+  goldenPresent,
   hasQuantSeat,
   loadLocalAssets,
   manifestText,
   MODEL,
   modelEntry,
+  pipelineGoldenDir,
   readCase,
   readManifest,
   worstDifference,
 } from "./helpers/irodori-assets.ts";
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
+import { testAssetsFetched } from "@karume/test-support/test-assets";
+
+/**
+ * Whether `outputs/test-assets/` holds a complete fetch of the pin (ADR 0139). Then an absent golden
+ * means the dataset at the pin lacks it, so its cases FAIL ({@link lostAsset}) instead of SKIPping.
+ */
+const FETCHED = testAssetsFetched();
+const lostAsset = (paths: readonly string[]): Error =>
+  new Error(
+    `${paths.join(" / ")} absent, but outputs/test-assets/ holds a complete fetch of the pinned ` +
+      "revision: the test-asset dataset at the pin lacks it",
+  );
+/** The SKIP hint for absent goldens. */
+const FETCH_HINT = (seriesRoot: string): string =>
+  `fetch: ${FETCH_COMMAND} — the assets gate accepts only a complete fetch; ` +
+  `--include 'goldens/${seriesRoot}/pipeline/**' with KARUME_ALLOW_NO_ASSETS=1 runs this file alone`;
 
 /**
  * `z` の全要素突合に使う許容誤差（**f32 系列**）。
@@ -92,7 +110,7 @@ import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-pari
  * 区間割り）は値域と同じ O(1) で出る — golden 側の実測で、CFG の有無だけで z は 5.56 / 3.23
  * 動く（`meta.json` の `cfgEffectMaxAbs`）ので、この閾値との間には 3 桁以上の隔たりがある。
  *
- * MUST: 合わないときにここを緩めない。上流突合の閾値（`irodori_pipeline.py` の
+ * MUST: 合わないときにここを緩めない。上流突合の閾値（`tools/export-recipes/irodori/pipeline_ref.py` の
  * `EULER_REFERENCE_ATOL` = 1e-3）と同じ性格の数で、動かすと「移植できた」の意味が消える。
  */
 const Z_ATOL = 5e-3;
@@ -147,7 +165,7 @@ const F16_Z_ATOL: number | undefined = 1.5e-3;
  * 赤で止まる — ADR 0050 決定 4）。
  *
  * NOTE: **S / forwards が割れた場合は tolerance の問題ではない** ので、閾値を触る前に
- * `measure_quant_irodori.py` の S ドリフト表を読む。
+ * `tools/export-recipes/irodori/measure_quant.py` の S ドリフト表を読む。
  */
 const W8_Z_ATOL: number | undefined = 1e-2;
 
@@ -193,43 +211,37 @@ const DETERMINISM_SECONDS = 1;
 type IrodoriSeries = {
   /** テスト名に出る名前（= 配布形の quant 席の綴り — 系列 root の綴りとは別軸）。 */
   readonly name: string;
-  /** full-loop golden の置き場（`irodori_pipeline.py --dtype <name>` の既定の出力先）。 */
-  readonly goldenDir: URL;
+  /** The series root of its full-loop goldens (`goldens/<root>/pipeline/` of the test assets). */
+  readonly seriesRoot: string;
   /** `z` の全要素突合に使う許容誤差（**系列ごとに実測導出** — `undefined` は未導出）。 */
   readonly zAtol: number | undefined;
-  /** SKIP 時にそのまま貼れる golden の生成コマンド。 */
-  readonly generate: string;
 };
 
 const SERIES: readonly IrodoriSeries[] = [
   {
     name: "f32",
-    goldenDir: goldenDir("irodori-v4-small"),
+    seriesRoot: "irodori-v4-small",
     zAtol: Z_ATOL,
-    generate: GOLDEN_COMMAND,
   },
   {
     name: "f16",
-    goldenDir: goldenDir("irodori-v4-small-f16"),
+    seriesRoot: "irodori-v4-small-f16",
     zAtol: F16_Z_ATOL,
-    generate: `${GOLDEN_COMMAND} --dtype f16`,
   },
   {
     // 席の綴りは `i8`・系列 root は `-i8`（`i8-a8` 席も同じバイトを指すが、あちらは活性量子化が
     // 効くので数値パリティ網にならず、別の門が持つ）。
     name: "i8",
-    goldenDir: goldenDir("irodori-v4-small-i8"),
+    seriesRoot: "irodori-v4-small-i8",
     zAtol: W8_Z_ATOL,
-    generate: `${GOLDEN_COMMAND} --dtype i8`,
   },
   {
     // 席の綴りは `i8+dit4`・系列 root は `-i4`。`dit` だけ i4 で他 7 役は `i8` の i8 バイトを共有する
     // 唯一の混成席（席表の裁定 2026-08-23）。golden の生成は export 済み系列が前提
     // （`pipeline_ref --dtype i4` が出荷バイトを読み戻す）。
     name: "i8+dit4",
-    goldenDir: goldenDir("irodori-v4-small-i4"),
+    seriesRoot: "irodori-v4-small-i4",
     zAtol: W4_Z_ATOL,
-    generate: `${GOLDEN_COMMAND} --dtype i4`,
   },
 ];
 
@@ -246,7 +258,15 @@ const runCase = async (
   name: string,
   expected: GoldenCase,
 ): Promise<void> => {
-  const golden = await readCase(series.goldenDir, name);
+  const goldenDir = pipelineGoldenDir(series.seriesRoot);
+  const caseUrl = new URL(`case.${name}.safetensors`, goldenDir);
+  if (!goldenPresent(caseUrl)) {
+    throw new Error(
+      `inconsistent golden set: ${new URL("meta.json", goldenDir).pathname} is present but ` +
+        `${caseUrl.pathname} is absent`,
+    );
+  }
+  const golden = await readCase(goldenDir, name);
   const started = performance.now();
   const latent = await pipeline.generateLatent({
     text: expected.text,
@@ -286,26 +306,45 @@ const runCase = async (
 };
 
 for (const series of SERIES) {
-  /** この系列の golden。無い環境は「焼いていない」なので系列ごと SKIP（部分欠けは FAIL 側）。 */
-  const metaText = await readTextIfPresent(new URL("meta.json", series.goldenDir));
-  const readMeta = (): GoldenMeta => JSON.parse(metaText as string) as GoldenMeta;
+  const goldenDir = pipelineGoldenDir(series.seriesRoot);
+  const metaUrl = new URL("meta.json", goldenDir);
+  const metaText = await readTextIfPresent(metaUrl);
+  const readMeta = (): GoldenMeta => {
+    if (metaText === undefined) throw lostAsset([metaUrl.pathname]);
+    return JSON.parse(metaText) as GoldenMeta;
+  };
   /** 配布形にこの席があるか（席の綴りと golden の系列は 1 対 1 だが、綴りは別軸）。 */
   const seated = hasQuantSeat(series.name);
-  const available = manifestText !== undefined && metaText !== undefined && seated;
-
+  const mirrorReady = manifestText !== undefined && seated;
+  // Every case reads the mirror's quant seat and `meta.json`; a parity case also reads its own
+  // `case.<name>.safetensors`. An absent mirror SKIPs. An absent `meta.json` SKIPs unless the
+  // test assets are a complete fetch of the pin, where `readMeta` FAILs instead (ADR 0139).
+  const caseUrl = (name: string): URL => new URL(`case.${name}.safetensors`, goldenDir);
+  const absentGoldens: readonly string[] =
+    metaText === undefined
+      ? [metaUrl, caseUrl("full"), caseUrl("no-ref")]
+          .filter((url) => !goldenPresent(url))
+          .map((url) => url.pathname)
+      : [];
+  const available = mirrorReady && (metaText !== undefined || FETCHED);
   if (!available) {
+    const missing = [
+      ...(mirrorReady
+        ? []
+        : [`the mirror ${ASSETS_DIR.pathname} with quant seat '${series.name}'`]),
+      ...absentGoldens,
+    ];
     console.warn(
-      `[karume] Irodori の e2e（${series.name} 系列）を SKIP する（配布形 ` +
-        `${ASSETS_DIR.pathname} の quant 席 '${series.name}' と full-loop golden ` +
-        `${series.goldenDir.pathname} の両方が要る）。生成: ` +
-        `${manifestText === undefined || !seated ? DIST_COMMAND : series.generate}`,
+      `[karume] Irodori latent e2e (${series.name}) SKIPs: missing ${missing.join(" / ")}` +
+        (metaText === undefined ? ` (${FETCH_HINT(series.seriesRoot)})` : ""),
     );
   }
 
   const runnable = GPU_AVAILABLE && available;
   // The two golden cases compare the latent (S, forwards and z under a tolerance) with the torch
   // full-loop golden, so they are upstream parity and run only on opt-in. Determinism and the
-  // pipelineConfig drift check stay in the default run.
+  // pipelineConfig drift check stay in the default run. A case file absent beside a present
+  // `meta.json` is an inconsistent golden set, so its parity case FAILs in `runCase`.
   const parityRunnable = runnable && UPSTREAM_PARITY;
 
   test.skipIf(!parityRunnable)(
