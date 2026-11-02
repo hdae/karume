@@ -54,14 +54,20 @@ export const mirrorRoot = (repoDir: string): URL => new URL(`${repoDir}/`, MODEL
 
 /**
  * Whether `root` holds a distribution **this version can read** (`karume.json` declares
- * `karume/5`).
+ * `karume/5`) together with every `hdae/<name>` mirror it references across repositories.
+ *
+ * MUST: a mirror whose cross-repo sibling is absent is not present — opening it would throw in
+ * {@link mirrorDirectory}, so a test guarded by this check SKIPs instead of erroring at module
+ * evaluation (the distribution gate owns the red for an incomplete set of mirrors).
  *
  * MUST: decide by the format, not by "the file exists" — a machine that still has a mirror of an
  * older major would otherwise run the tests against a manifest `parseManifest` rejects, and the
  * gate would be red without saying why (ADR 0109 decision 9). Only NotFound means "absent"; any
  * other failure propagates.
  */
-export const mirrorPresent = (root: URL): boolean => {
+export const mirrorPresent = (root: URL): boolean => mirrorReadable(root, []);
+
+const mirrorReadable = (root: URL, chain: readonly string[]): boolean => {
   let text: string;
   try {
     text = readTextFileSync(new URL("karume.json", root));
@@ -69,7 +75,13 @@ export const mirrorPresent = (root: URL): boolean => {
     if (isNotFound(cause)) return false;
     throw cause;
   }
-  return (JSON.parse(text) as { readonly format?: unknown }).format === MIRROR_FORMAT;
+  if ((JSON.parse(text) as { readonly format?: unknown }).format !== MIRROR_FORMAT) return false;
+  // A reference outside hdae/ or a cycle is left to mirrorDirectory, which fails by name.
+  return [...crossRepos(root)].every((repo) => {
+    const [owner, name] = repo.split("/");
+    if (owner !== MIRROR_OWNER || name === undefined || chain.includes(repo)) return true;
+    return mirrorReadable(new URL(`../${name}/`, root), [...chain, repo]);
+  });
 };
 
 /** Every repository a manifest references across repositories (parts of every container and assets). */

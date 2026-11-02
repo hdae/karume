@@ -32,6 +32,12 @@ OUTPUTS_ROOT = REPO_ROOT / "outputs"
 #: `OUTPUTS_ROOT` の直下へ置き、ここへは混ぜない。
 SERIES_ROOT = OUTPUTS_ROOT / "series"
 
+#: The goldens of the local test-asset root `outputs/test-assets/` (a cache of the pinned private
+#: dataset, fetched by `node tools/test-assets/fetch.ts` — ADR 0139 decision 2):
+#: `<GOLDENS_ROOT>/<series>/<path>` holds the recipe outputs of a series that no distribution
+#: carries, at the relative paths they have under `SERIES_ROOT / <series>`.
+GOLDENS_ROOT = OUTPUTS_ROOT / "test-assets" / "goldens"
+
 #: ベンチ・評価・ダンプの親（`<BENCH_ROOT>/<モデル>/<日付>_<目的>/`）。**消して安全**な席で、
 #: ここに残るものは全て台本の再実行で作り直せる。
 BENCH_ROOT = OUTPUTS_ROOT / "bench"

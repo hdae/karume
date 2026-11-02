@@ -195,6 +195,14 @@ describe("mirror: cross-repo references resolve to sibling mirrors", () => {
     });
   });
 
+  it("is not present while a sibling mirror it references is absent", async () => {
+    await withModels(async ({ base, derived }) => {
+      assert(mirrorPresent(derived));
+      await remove(base, { recursive: true });
+      assertEquals(mirrorPresent(derived), false);
+    });
+  });
+
   it("fails on a cross-repo reference outside hdae/", async () => {
     await withModels(async ({ served, base, derived }) => {
       const tokenizer = await fileRef("tokenizer.json", TOKENIZER);

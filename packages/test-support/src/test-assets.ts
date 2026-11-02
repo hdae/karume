@@ -60,3 +60,16 @@ export const readFetchedRevision = (root: URL = TEST_ASSETS_ROOT): string | unde
     throw cause;
   }
 };
+
+/**
+ * Whether `root` holds a **complete** fetch of the pinned revision (the record equals the pin; a
+ * partial `--include` fetch never writes one).
+ *
+ * MUST: a default-lane case that reads a test asset FAILs when the asset is absent and this is
+ * true — the dataset at the pin is missing a file the tests read — and SKIPs explicitly otherwise
+ * (the assets gate is red then). Without this split a file lost from a fetched root would only SKIP.
+ */
+export const testAssetsFetched = (
+  root: URL = TEST_ASSETS_ROOT,
+  pin: TestAssetsPin = TEST_ASSETS,
+): boolean => readFetchedRevision(root) === pin.revision;

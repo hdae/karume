@@ -46,6 +46,7 @@ import {
   REVISION_FILE,
   TEST_ASSETS,
   TEST_ASSETS_ROOT,
+  testAssetsFetched,
   type TestAssetsPin,
 } from "@karume/test-support/test-assets";
 import { describe, it, test } from "vite-plus/test";
@@ -292,5 +293,33 @@ describe("assets gate verdict (the fetched revision of the test-asset root again
       ),
       undefined,
     );
+  });
+});
+
+describe("testAssetsFetched (a complete fetch of the pin, which makes a missing asset a FAIL)", () => {
+  const pin: TestAssetsPin = {
+    repo: "hdae/karume-test-assets",
+    revision: "0123456789abcdef0123456789abcdef01234567",
+  };
+
+  const fetchedWith = (record: string | undefined): boolean => {
+    const root = new URL(`file://${makeTempDirSync({ prefix: "karume-test-assets-" })}/`);
+    try {
+      if (record !== undefined) {
+        writeFileSync(new URL(REVISION_FILE, root), new TextEncoder().encode(record));
+      }
+      return testAssetsFetched(root, pin);
+    } finally {
+      removeSync(root, { recursive: true });
+    }
+  };
+
+  it("is true only when the record is the pin", () => {
+    assert(fetchedWith(`${pin.revision}\n`));
+    assertFalse(fetchedWith(`${"f".repeat(40)}\n`));
+  });
+
+  it("is false when no complete fetch left a record (none, or a partial fetch)", () => {
+    assertFalse(fetchedWith(undefined));
   });
 });
