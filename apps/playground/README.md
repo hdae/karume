@@ -19,7 +19,7 @@ A left sidebar switches between the pages, grouped by kind:
 | Text | Gemma 4 chat (`gemma4` and the `gemma4-qat` distribution) | `/gemma4` | done |
 | Benchmarks | Attention route bench — the two a8 attention routes per kernel at Wan2.2's shapes | `/attention-bench` | done |
 | Benchmarks | Geometry sweep — the GEMM tile geometries case by case, one merged record for `deriveGeometryProfile` | `/geometry-sweep` | done |
-| Benchmarks | Kernel checks — the subgroup32 GEMV / RMS reductions and the K-55 / K-91 states-attention rewrites, word for word on the browser's backend | `/kernel-check` | done |
+| Benchmarks | Kernel checks — the subgroup32 GEMV / RMS reductions, the K-55 / K-91 states-attention rewrites and the integer GEMV, word for word on the browser's backend | `/kernel-check` | done |
 
 Every model page reads its distributions from the mounts below, runs on a GPU the page acquires
 itself, and saves a JSON record of each run (the environment, the request, timings and Session
@@ -1060,15 +1060,48 @@ not offer): one route for every arm keeps the source out of the comparison.
 `timestamp-query` when the adapter lists it and hides it from `device.features`, so the runtime sees
 a device without timing (`gpuTimingEnabled` false) and keeps its own pass structure (one chunk = one
 compute pass). With the tap on, every compute pass gets a pair of pass-boundary timestamps, resolved
-right after the pass, and passes, dispatches and submits are counted. karume's own timing mode is not
+in the same command buffer before it is finished, and passes, dispatches and submits are counted. karume's own timing mode is not
 used: it encodes one dispatch per pass (ADR 0021), about 4 µs more per dispatch, and QAT runs about
 210 more dispatches per token, so it would bias this very A/B. With the tap off, the same device's
 calls pass straight through (a flag check per command encoder and per submit): a wall-clock control
 that shows what the tap costs. The page refuses to run if the device reports `gpuTimingEnabled`.
 
+**Split dispatches** (per arm, with the tap on; the arm's label shows "(split)") is the attribution
+view. The tap ends the real compute pass before every dispatch after the first and begins a new
+timed one on the same encoder, replaying the pipeline, the bind groups (with their dynamic offsets)
+and any open debug groups, so every dispatch gets its own pass-boundary timestamps and the label of
+its pipeline — the runtime's pipeline cache key (`linear_gemv_parallel:wi4g32:l32`,
+`attention_state_qk:v1:f32:wg16x16:par:gqa`, …). Each chat's decode window is then broken down per
+key (dispatches and GPU ms per decode token), and each key is put in an op family by its kernel
+name (`family.ts`): attention core (every `attention*` kernel: QK, row statistics, PV, fused
+statistics + PV), attention other (`state_append`, `rope`, `strided` copies), linear (`linear` and
+every `linear_*` kernel, GEMVs that fuse their input's static quantize included), norm (every
+`rms_norm*` kernel), elementwise (`ew:*`), static quantize (`static_quantize`,
+`gelu_mul_static_quantize`), embedding (`embedding`, `gather`) and other. The research's PLE and
+lm_head rows depend on a kernel's position in the run, which a key does not carry: their kernels
+count in their kernel's family here. Every extra pass boundary costs GPU time of its own (about 4 µs
+per dispatch on the RTX 3080 Ti under Dawn, research 2026-10-27 §3), which inflates small kernels
+most and the arm's absolute GPU ms/token, wall − GPU and decode rate as well: **read the per-family
+and per-key shares**, compare them across arms split alike, and take absolute times from an unsplit
+arm. The tap times up to 262,144 passes per chat (QAT E2B runs about 1,036 dispatches per decode
+token, so 128 new tokens plus the prefill fit); later passes are counted but untimed, and a window
+with an untimed pass reports no GPU time. Its timestamp buffers take about 8 MiB of GPU memory at
+most (4 MiB of packed results plus the read-back copy).
+
+**Integer GEMV** (per arm; the arm's label shows "(integer)") passes the Session option
+`integerGemv: true` to `fromPretrained` as an explicit option, so the decode linears of a QAT
+model at the integer GEMV's measured shapes (QAT E2B: the i2 gate / up and down, the i4 o and the
+own-KV layers' down — ADR 0140) run on the integer GEMV (the runtime's
+`src/kernels/linear-gemv-integer.ts`) instead of the parallel GEMV. The option needs packed int8
+activations, which need the parallel GEMV: the arm also passes `packedStaticQuantize: true` and
+`linearGemvReduce: "parallel"` where its preset does not declare them (QAT `i4-fast` declares both,
+so the arm passes `integerGemv` alone). Explicit options win over the preset's declaration. Regular
+Gemma 4 has no linear at those shapes, so there the switch changes only what the packed activations
+change.
+
 | Control | What it does |
 | --- | --- |
-| Arms | One row per arm: Model (every model of both manifests; a QAT model `gemma4Qat.Pipeline` does not accept is disabled), Preset (the model's `defaultQuant` preselected), GPU tap. Starts with each distribution's default model at its default preset. Arm 1 is the one the summary compares the others with. |
+| Arms | One row per arm: Model (every model of both manifests; a QAT model `gemma4Qat.Pipeline` does not accept is disabled), Preset (the model's `defaultQuant` preselected), GPU tap, Split dispatches, Integer GEMV. Starts with each distribution's default model at its default preset. Arm 1 is the one the summary compares the others with. |
 | Prompts | Two fixed prompts, run in this order in every visit. The story request renders to 21 tokens (17 distinct ids); the GPU explainer to 60 tokens (48 distinct). A prompt with 32 or more distinct ids makes a PLE block whole-resident on the host: the condition under which the PLE row cache once stopped admitting rows (perf-ledger H-41). Every chat records the distinct count it measured, and the run table flags a prompt that falls on the wrong side. |
 | Chats | Chats per prompt per visit (default 3). Chat 0 is the first after the build: recorded, and left out of the summary. |
 | New tokens | `maxNewTokens` of every chat (default 128). |
@@ -1090,15 +1123,22 @@ Per chat (one `chat` call — one sequence — from `performance.now()` in the p
 The **summary** covers the warm chats of every round per arm and prompt: median and min (for rates,
 median and max) — the development machine shows transient 5–45× slow kernels, which move a median
 less than a mean and a min not at all — the ratio of each arm's median decode ms/token to arm 1's,
-and how many distinct outputs the warm chats produced.
+and how many distinct outputs the warm chats produced. For split arms, the **Split attribution**
+card lists per arm and prompt the family totals and every key, sorted by GPU ms per token, each the
+median over the warm chats of every round (a key missing from a chat counts 0), with its share of
+the median total and its dispatches per token; `<pre id="split-summary">` holds the same as plain
+text.
 
 **Download record (JSON)** saves `gemma4-bench_<UTC timestamp>.json` (`format:
 "karume-playground-gemma4-bench/1"`): `recordEnvironment`, `environmentKey` (ADR 0106's
 `chrome-<adapter name>` rule; absent outside Chromium), `timestampQuery`, `complete` (false when the
 bench failed or was cancelled), `settings`, `arms` (mount, directory, manifest sha256, source,
 pipeline, model, preset, tap, the sampler passed), `visits` (round, arm, load seconds), `chats` (every
-chat, cold ones included, with its stop, prompt ids and measurement) and `summary`. **Copy record**
-copies the same JSON.
+chat, cold ones included, with its stop, prompt ids and measurement) and `summary`. Every arm records
+`split`; a split arm adds `tap.perKey` (key, dispatches and GPU ms per decode token) on each of its
+chats and `split` (the medians by family and by key) on its summary entries. Every arm also records
+`integerGemv` and `sessionOptions` (the Session options it passed explicitly; `{}` when none).
+**Copy record** copies the same JSON.
 
 Caveats:
 
@@ -1214,9 +1254,10 @@ tests, not a copy.
 | GEMV subgroup32 | `gpu_linear_gemv_subgroup_test.ts` | `linearGemvReduce: "parallel-subgroup32"` equals the parallel reduction word for word (180 cases: i2 / i4 / i8, 5 lane counts, M = 1 / 4 / 8); rows past M stay unwritten; row 0 is the same at every M; outputs within the GEMM band of an FP64 reference (ADR 0101). | `subgroups`, `subgroup-size-control`, WGSL `subgroup_id` |
 | RMS subgroup32 | `gpu_rms_norm_subgroup_test.ts` | `rmsNormReduce: "subgroup32"` through real Sessions: within the `rms_norm` tolerance of the CPU reference and row 0 identical at every M (48 cases); fused rms_norm + add identical to unfused, one fusion per run (12); 19 rows on 2 workgroups within tolerance (1) (ADR 0100). | the same |
 | States attention rewrites (K-55 / K-91) | `gpu_state_attention_fold_test.ts` | The folded ①′ writes the same S words as ①′ (252 cases), the unrolled ③′ and fused stats + PV the same O words as their v1 WGSL (546 / 490); the reference outputs met the word classes the contract covers and no output word was left unwritten; every class the product folds is in the grid; 5 order-only mutants each change at least one word (else a zero-mismatch result would prove nothing). The page also runs each mutant on every case of its shape (the mutant matrix, not in the node test). | nothing optional |
+| Integer GEMV | `gpu_linear_gemv_integer_test.ts` | The integer GEMV (`integerGemv`) writes every output word of its CPU reference (692 cases: i2 / i4 / i8, the 15 (lanes, rows) variants on small K and on the i2 / i8 widths in use, five of them on the i4 widths in use, plus a saturated fixture at each storage's largest K — every activation code −128 against the largest stored code, the i8 one offset at one element — on 2 variants, each at M = 1 / 8, with and without the SRQ epilogue); rows past M stay unwritten. | nothing optional |
 
 The page probes the adapter's features, then acquires its GPU with `subgroups: "available"`. **Run**
-next to a check runs that check; **Run all** runs the three in order; Cancel stops before the next
+next to a check runs that check; **Run all** runs the four in order; Cancel stops before the next
 case. A check being run reads as not run until it ends, so a cancelled re-run does not keep its
 earlier verdict. The status card shows the adapter's and the device's features, WGSL `subgroup_id` and the
 linear lane mapping.
@@ -1224,7 +1265,7 @@ linear lane mapping.
 Each check gets a verdict:
 
 - **PASS** — every part ran the number of cases its check exports (`GEMV_SUBGROUP_CASES`,
-  `RMS_SUBGROUP_CASES`, `STATE_ATTENTION_CASES`; the counts in the table above) and the
+  `RMS_SUBGROUP_CASES`, `STATE_ATTENTION_CASES`, `GEMV_INTEGER_CASES`; the counts in the table above) and the
   states-attention check its `STATE_ATTENTION_MUTANTS` mutants and matrix rows, every criterion of
   every case has 0 failing words, every requirement is met, every mutant mismatched on its case and
   every mutant matrix row passed;
@@ -1239,7 +1280,7 @@ Each check gets a verdict:
   internal error scope every case runs under, an uncaptured WebGPU error, a lost device, or a
   mutation anchor that no longer matches the generated WGSL; the error is shown in full.
 
-The overall verdict covers all three checks: a check that was not run counts like one that is not
+The overall verdict covers all four checks: a check that was not run counts like one that is not
 available, so running one check alone gives **INCOMPLETE** at best (the result card lists the
 checks not run). The release check is a **Run all**.
 

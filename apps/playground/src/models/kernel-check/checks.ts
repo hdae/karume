@@ -5,9 +5,11 @@
 
 import {
   checkGemvSubgroup,
+  checkIntegerGemv,
   type CheckOptions,
   checkRmsSubgroup,
   checkStateAttentionRewrites,
+  GEMV_INTEGER_CASES,
   GEMV_SUBGROUP_CASES,
   RMS_SUBGROUP_CASES,
   STATE_ATTENTION_CASES,
@@ -59,6 +61,17 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
       ...(await checkStateAttentionRewrites(gpu, options)),
       expectedCases: STATE_ATTENTION_CASES,
       expectedMutants: STATE_ATTENTION_MUTANTS,
+    }),
+  },
+  {
+    id: "gemv-integer",
+    title: "Integer GEMV",
+    summary:
+      "The integer GEMV against its CPU reference, u32 identity (i2 / i4 / i8, up to 15 variants per form, M = 1 / 8, with and without the SRQ epilogue), plus saturated fixtures.",
+    needsSubgroups: false,
+    run: async (gpu, options) => ({
+      parts: [await checkIntegerGemv(gpu, options)],
+      expectedCases: GEMV_INTEGER_CASES,
     }),
   },
 ];

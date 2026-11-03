@@ -8,6 +8,9 @@
  * decode window starts at the passes and submits recorded when the first token arrived and runs to
  * the end of the chat, so it includes the run that drew a stop token, as the wall-clock window does.
  * An encode that runs ahead of its token moves at most one step across a boundary.
+ *
+ * With the tap split (one timed pass per dispatch, labelled with its pipeline key), the decode window
+ * is also broken down per key ({@link KeyPerToken}).
  */
 
 import { type TurnTiming, turnTiming } from "@/models/gemma4/turns";
@@ -37,12 +40,31 @@ export type ChatMarks = {
 /** One pass as the tap recorded it. */
 export type PassTime = {
   readonly dispatches: number;
+  /** The pipeline label of its dispatch (split only). */
+  readonly label?: string;
   readonly beginNs?: bigint;
   readonly endNs?: bigint;
 };
 
 /** What the tap recorded over one chat (read after the chat). */
-export type TapCapture = { readonly passes: readonly PassTime[]; readonly submits: number };
+export type TapCapture = {
+  readonly passes: readonly PassTime[];
+  readonly submits: number;
+  /** Whether the tap ran split (one pass per dispatch): the decode window is then broken down per key. */
+  readonly split?: boolean;
+};
+
+/** One pipeline key's share of the decode window, per decode token. */
+export type KeyPerToken = {
+  /** The pipeline label ({@link UNLABELED_KEY} for passes without one). */
+  readonly key: string;
+  readonly dispatches: number;
+  /** GPU ms per token; absent when any of the key's passes went untimed. */
+  readonly gpuMs?: number;
+};
+
+/** The key of passes the tap recorded without a pipeline label (no dispatch in the pass). */
+export const UNLABELED_KEY = "(unlabeled)";
 
 /** The GPU work of one stretch of the chat. */
 export type GpuWindow = {
@@ -72,6 +94,11 @@ export type TapFigures = {
   readonly decode: GpuWindow;
   /** Absent without decode tokens. */
   readonly perToken?: PerTokenTap;
+  /**
+   * The decode window per pipeline key, GPU ms per token descending (split only; absent without
+   * decode tokens). Its GPU ms sum to `perToken.gpuBusyMs` up to rounding.
+   */
+  readonly perKey?: readonly KeyPerToken[];
 };
 
 export type ChatMeasurement = {
@@ -117,6 +144,34 @@ export const gpuWindow = (passes: readonly PassTime[], submits: number): GpuWind
   };
 };
 
+/**
+ * The passes per pipeline key, per decode token: dispatches, and GPU ms when every pass of the key
+ * was timed. GPU ms descending (an untimed key last), then by key.
+ */
+export const perKeyFigures = (
+  passes: readonly PassTime[],
+  decodeTokens: number,
+): readonly KeyPerToken[] => {
+  const byKey = new Map<string, PassTime[]>();
+  for (const pass of passes) {
+    const key = pass.label === undefined || pass.label === "" ? UNLABELED_KEY : pass.label;
+    const group = byKey.get(key);
+    if (group === undefined) byKey.set(key, [pass]);
+    else group.push(pass);
+  }
+  const figures = [...byKey].map(([key, group]): KeyPerToken => {
+    const window = gpuWindow(group, 0);
+    return {
+      key,
+      dispatches: round4(window.dispatches / decodeTokens),
+      ...(window.busyMs === undefined ? {} : { gpuMs: round4(window.busyMs / decodeTokens) }),
+    };
+  });
+  return figures.toSorted(
+    (left, right) => (right.gpuMs ?? -1) - (left.gpuMs ?? -1) || left.key.localeCompare(right.key),
+  );
+};
+
 /** The median of a non-empty list (an even count takes the mean of the middle two). */
 export const median = (values: readonly number[]): number | undefined => {
   if (values.length === 0) return undefined;
@@ -141,6 +196,10 @@ const tapFigures = (
       ? gpuWindow([], 0)
       : gpuWindow(tap.passes.slice(first.passes), tap.submits - first.submits);
   if (decodeTokens === 0) return { prefill, decode };
+  const perKey =
+    tap.split === true && first !== undefined
+      ? perKeyFigures(tap.passes.slice(first.passes), decodeTokens)
+      : undefined;
   const intervals: number[] = [];
   for (let index = 1; index < marks.tokens.length; index += 1) {
     const interval = gpuWindow(
@@ -166,6 +225,7 @@ const tapFigures = (
       passes: round4(decode.passes / decodeTokens),
       submits: round4(decode.submits / decodeTokens),
     },
+    ...(perKey === undefined ? {} : { perKey }),
   };
 };
 

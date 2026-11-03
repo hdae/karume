@@ -36,8 +36,11 @@ export type BenchPipeline = {
 /** What the loop needs of the tap's probe (`DeviceProbe`). */
 export type BenchProbe = {
   enabled: boolean;
+  /** `TapMode`: set per chat from the arm (a probe without the split mode leaves it out). */
+  mode?: "passes" | "dispatches";
   readonly passes: () => readonly {
     readonly dispatches: number;
+    readonly label?: string;
     beginNs?: bigint;
     endNs?: bigint;
   }[];
@@ -132,6 +135,7 @@ const runChat = async (input: {
     return { sentAt, endAt, stop: await stream.done };
   };
   probe.reset();
+  probe.mode = arm.split === true ? "dispatches" : "passes";
   probe.enabled = arm.tap;
   const { sentAt, endAt, stop } = await drain().finally(() => {
     probe.enabled = false;
@@ -148,7 +152,15 @@ const runChat = async (input: {
       marks,
       promptTokens: promptIds.length,
       tokens: stop.tokens,
-      ...(arm.tap ? { tap: { passes: probe.passes(), submits: probe.submits() } } : {}),
+      ...(arm.tap
+        ? {
+            tap: {
+              passes: probe.passes(),
+              submits: probe.submits(),
+              ...(arm.split === true ? { split: true } : {}),
+            },
+          }
+        : {}),
     }),
   };
 };
