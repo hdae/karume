@@ -360,7 +360,10 @@ only; it is not published.
    (`google/gemma-4-12B-it-qat-q4_0-unquantized`, a QAT fine-tune of `google/gemma-4-12B-it`), and
    the `i4` preset stores **its own 4-bit grid** — per group of 32 along the row, the integer codes
    in [-8, 7] and one step refitted from the stored BF16 values (the grid import,
-   `grid_import` in `tools/export-recipes/gemma4/export_unified.py`). The tokenizer, the chat
+   `grid_import` in `tools/export-recipes/gemma4/export_unified.py`). The tied embedding (the
+   output head's tensor) lies on the same grid — every one of its groups recovers (measured
+   2026-11-03) — so it is imported the same way and stored as i4 g32 too; the first export rounded
+   it again to i8 per row, which moved values that were already exact. The tokenizer, the chat
    template and the generation defaults come from `google/gemma-4-12B-it` (the QAT repository's
    `tokenizer.json` is E2B's; its other small files are byte-identical to 12B-it's). Measured on
    2026-11-03 with the export's wrapper against an F32 forward of the same checkpoint with
@@ -371,7 +374,8 @@ only; it is not published.
    | --- | --- | --- | --- |
    | `gemma-4-12B-it` | round-to-nearest i4 g32 (codes ±7, step = max/7) | 2.65 / 1.88 | 0.39 / 0.47 |
    | QAT checkpoint | round-to-nearest i4 g32 | 0.99 / 1.01 | 0.63 / 0.60 |
-   | QAT checkpoint | grid import | 0.014 / 0.036 | 0.97 / 0.93 |
+   | QAT checkpoint | grid import, embedding i8 per row (the first export) | 0.014 / 0.036 | 0.97 / 0.93 |
+   | QAT checkpoint | grid import, embedding included | 0.009 / 0.050 | 0.99 / 0.93 |
 
    Round-to-nearest leaves a uniform ~10 % relative error in every 12B linear; the loss is spread,
    not one broken tensor. The storage format needed no change: the i4 codec stores `q + 8` and

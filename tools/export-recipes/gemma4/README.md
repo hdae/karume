@@ -307,10 +307,12 @@ inputs and `last_row[R]` in, `logits[1,R,V]` then `hidden[1,R,H]` out, one k / v
 layer (96 slots, no KV sharing). Sliding slots hold 8 KV heads in `window + 8` = 1032 rows; full
 slots hold 1 KV head of width 512 in the capacity symbol. On the full layers the value is the raw
 `k_proj` output through the scale-free `v_norm` (not rotated) and the key is `k_norm` then RoPE of
-the same projection; the script checks that wiring in the written graph. The storage format is
-E2B's: packed int4 (group 32) linear weights and an int8 embedding (the tied head).
+the same projection; the script checks that wiring in the written graph. The storage is packed
+int4 (group 32) for the linear weights and the embedding (the tied head) alike, with no int8 tensor
+(the regular E2B / E4B series keep an int8 embedding).
 
-The int4 values are **the QAT checkpoint's own grid, imported as is**. Each group of 32 along a row
+The int4 values are **the QAT checkpoint's own grid, imported as is** — the tied embedding's too:
+every one of its groups of 32 lies on the grid (measured 2026-11-03). Each group of 32 along a row
 holds `bf16(q·d)` with integer codes `q` in −8..7 and a learned step `d`; the export recovers, per
 group, the largest step `amax / k` (k = 1..8) whose codes fit −8..7 and whose least-squares refit
 reconstructs the group within 2^-7 of its largest magnitude, and stores those codes and that step.
@@ -318,20 +320,23 @@ A group that does not recover fails the export (no fallback to rounding). Measur
 snapshots (2026-11): round-to-nearest on karume's ±7 grid gives KL 2.65 / 1.88 (`context-en` /
 `window-en`) for `google/gemma-4-12B-it` against its unquantized forward, re-rounding the QAT
 weights to ±7 still about 1.0, and the imported grid 0.0136 / 0.0362 (top-1 agreement 0.97 / 0.93)
-against the QAT checkpoint's own unquantized forward. The −8 code needs no format change: the
+against the QAT checkpoint's own unquantized forward with the embedding rounded to int8 per row,
+0.0091 / 0.0505 (top-1 agreement 0.99 / 0.93) with the embedding's grid imported too (2026-11-03 —
+the embedding's own relative RMS error drops from 1.41 % to 0.14 %; the rise on `window-en` is not
+yet explained). The −8 code needs no format change: the
 packed nibble stores `q + 8` and the runtime decodes `u − 8`.
 
 The form is the Qwen3.5 / umT5 one (an F32 load of 12B is 44.6 GiB): the trace runs on parameters
-without data, the linear weights are imported and the embedding quantized from the checkpoint a
-block of rows at a time and handed over as fixed weights, and the norms are widened to F32. The
+without data, the linear weights and the embedding are imported from the checkpoint a block of
+rows at a time and handed over as fixed weights, and the norms are widened to F32. The
 pytest checks on a tiny model that the row blocks write the same container bytes as an import of
 each whole tensor at once.
 
 The goldens (`greedy.<case>.safetensors` of the standard cases plus `window-en`, and
 `reference.json` naming both sources, the series itself and the suppressed ids) come from an F32
 reference whose linear weights are held as their imported codes and steps and dequantized each
-time they are read (ruling R4 — bit-equal to what the container's bytes decode to, about 16 GiB
-resident). Before every
+time they are read, and whose embedding holds its imported grid values in F32 (ruling R4 —
+bit-equal to what the container's bytes decode to, about 16 GiB resident). Before every
 greedy selection the logits of the ids upstream's `generation_config.json` suppresses
 (`suppress_tokens` — 258882 / 258883 for 12B) are −inf, as upstream `generate()` does; the
 distribution declares the same ids as `pipelineConfig.suppressTokens`. `window-en` (1159 tokens) is

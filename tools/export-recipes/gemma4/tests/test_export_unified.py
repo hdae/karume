@@ -5,22 +5,22 @@ layer after a full layer, and the last layer full as upstream requires), K = V o
 layers with 1 KV head against 2 on the sliding layers, head widths 16 / 32, no per-layer
 embeddings, no KV sharing, a tied head, and a BF16 single-file checkpoint keyed like 12B's
 (`model.language_model.*` plus the vision / audio embedders the export never reads) whose
-linears lie on a Q4_0 grid as the QAT checkpoint's do ({@link grid_weight}). What is fixed here
-are the properties that would otherwise pass silently:
+linears and embedding lie on a Q4_0 grid as the QAT checkpoint's do ({@link grid_weight}). What is
+fixed here are the properties that would otherwise pass silently:
 
 - the shape-only trace is the real-weight trace (graph JSON and tensor keys);
-- the linears are imported from their 4-bit grid (codes in [−8, 7], one step per group) and a
-  weight off the grid fails loudly; the row-block container is the whole-tensor import, byte for
-  byte;
+- the linears and the tied embedding are imported from their 4-bit grid (codes in [−8, 7], one
+  step per group) and stored as i4 with no i8 left, and a linear or an embedding off the grid
+  fails loudly; the row-block container is the whole-tensor import, byte for byte;
 - each full layer's V slot receives `v_norm(k_proj x)` unrotated and its K slot the rotated, normed
   key — against upstream's own modules — and the written graph's wiring check catches a V that
   is the rotated key or the unrotated, `k_norm`-scaled one;
 - the export wrapper's logits are upstream `Gemma4UnifiedForCausalLM`'s (eager, F32) at lengths
   on both sides of the sliding window;
 - the PLE-free product graph has no `per_layer_inputs`;
-- the R4 reference (resident i4 codes, dequantized at use) equals an F32 load whose linears are
-  codes · steps, weight for weight and output for output, and holds exactly what the container's
-  bytes decode to;
+- the R4 reference (resident i4 codes, dequantized at use) equals an F32 load whose linears and
+  embedding are codes · steps, weight for weight and output for output, and holds exactly what
+  the container's bytes decode to;
 - the goldens are taken over logits with the suppressed ids at −inf, and some golden case runs
   past the sliding window;
 - the series run reads the weights and the tokenizer from two directories and publishes the
@@ -59,7 +59,7 @@ from karume.dist import DistError
 from karume.emit import unpack_int4
 from karume.ir import IrNode
 from karume.ops import ATTENTION_OP, STATE_APPEND_OP
-from karume.quantize import DEFAULT_GROUP_SIZE, dequantize_int4, fake_quant_int8
+from karume.quantize import DEFAULT_GROUP_SIZE, dequantize_int4
 
 transformers = pytest.importorskip("transformers")
 
@@ -137,7 +137,8 @@ def grid_weight(rows: int, cols: int, seed: int) -> tuple[torch.Tensor, torch.Te
 
 def write_checkpoint(directory: Path, *, extra: dict[str, torch.Tensor] | None = None) -> Path:
     """A tiny 12B-shaped checkpoint (BF16 `model.safetensors` + `config.json` + a stand-in
-    `tokenizer.json` for the fingerprint); every text linear is a {@link grid_weight}."""
+    `tokenizer.json` for the fingerprint); every text linear and the tied embedding is a
+    {@link grid_weight}."""
     torch.manual_seed(0)
     text = _text_config()
     model = transformers.Gemma4UnifiedForCausalLM(text).eval()
@@ -146,7 +147,7 @@ def write_checkpoint(directory: Path, *, extra: dict[str, torch.Tensor] | None =
         if key == "lm_head.weight":
             continue
         tensor = value
-        if key.endswith("_proj.weight"):
+        if key.endswith("_proj.weight") or key == "model.embed_tokens.weight":
             tensor, _, _ = grid_weight(*value.shape, seed=index)
         elif key.endswith("layer_scalar"):
             tensor = torch.full_like(value, 0.75)
@@ -213,16 +214,15 @@ def naive_wrapper(checkpoint_dir: Path, config: Any) -> unified.UnifiedProductWr
 def grid_loaded_wrapper(
     checkpoint_dir: Path, config: Any, int4: frozenset[str]
 ) -> unified.UnifiedProductWrapper:
-    """The F32-loaded wrapper with the embedding rounded per row to i8 (`fake_quant_int8`, the
-    E2B / E4B rounding) and every linear of `int4` replaced by codes · steps of its whole-tensor
-    grid import — the model the container stores, built without row blocks or the reference's
-    parametrization."""
+    """The F32-loaded wrapper with the embedding (the tied head with it) and every linear of `int4`
+    replaced by codes · steps of its whole-tensor grid import — the model the container stores,
+    built without row blocks or the reference's parametrization."""
     wrapper = naive_wrapper(checkpoint_dir, config)
-    fake_quant_int8(wrapper, include=one_shot.is_int8_module)
-    for fqn in sorted(int4):
+    for fqn in (unified.EMBED_KEY, *sorted(int4)):
         module = wrapper.get_submodule(fqn.removesuffix(".weight"))
         codes, steps = unified.grid_import(module.weight.data, DEFAULT_GROUP_SIZE, fqn)
         module.weight.data = dequantize_int4(codes, steps)
+    assert wrapper.model.lm_head.weight is wrapper.model.model.embed_tokens.weight
     return wrapper
 
 
@@ -326,46 +326,52 @@ class TestContainer:
 
         assert in_blocks == whole
         storage = [init.storage.dtype for init in verified.initializers.values()]
-        assert storage.count("i4") == len(traced.keys.int4) == INT4_LINEARS
-        assert storage.count("i8") == 1
+        # Every linear and the tied embedding.
+        assert len(traced.keys.int4) == INT4_LINEARS
+        assert storage.count("i4") == INT4_LINEARS + 1
+        assert "i8" not in storage
 
     def test_the_container_decodes_to_the_reference_weights(
         self, checkpoint_dir, config, traced, small_blocks, tmp_path
     ) -> None:
         """R4: the goldens' reference holds exactly what the container's bytes decode to — every
-        imported linear through `karume.emit.unpack_int4` + `dequantize_int4`, and the i8
-        embedding — so the goldens describe the stored model, −8 codes included."""
+        imported linear and the imported embedding (the tied head) through
+        `karume.emit.unpack_int4` + `dequantize_int4` — so the goldens describe the stored model,
+        −8 codes included."""
         checkpoint = unified.Checkpoint(checkpoint_dir)
         material = unified.prepare_material(traced.graph, traced.tensors, traced.keys, checkpoint)
         unified.write_container(traced.graph, material, tmp_path / "model.krm", None)
         stored = read_stored(tmp_path / "model.krm")
         reference = unified.reference_wrapper(config, checkpoint, traced.keys.int4)
 
-        lowest = 0
-        for fqn in sorted(traced.keys.int4):
-            entry = stored[fqn]
+        def decoded(key: str) -> tuple[torch.Tensor, int]:
+            """The stored i4 entry's values and its lowest code."""
+            entry = stored[key]
             rows, cols = entry.shape
-            assert entry.layout == "i4", fqn
-            assert entry.scale is not None and entry.group_size == DEFAULT_GROUP_SIZE, fqn
+            assert entry.layout == "i4", key
+            assert entry.scale is not None and entry.group_size == DEFAULT_GROUP_SIZE, key
             codes = unpack_int4(
                 torch.frombuffer(bytearray(entry.payload), dtype=torch.uint8), entry.shape
             )
             steps = torch.frombuffer(bytearray(entry.scale), dtype=torch.float32).reshape(
                 rows, cols // DEFAULT_GROUP_SIZE
             )
+            return dequantize_int4(codes, steps), int(codes.min())
+
+        lowest = 0
+        for fqn in sorted(traced.keys.int4):
+            values, low = decoded(fqn)
             weight = reference.get_submodule(fqn.removesuffix(".weight")).weight
-            assert torch.equal(dequantize_int4(codes, steps), weight), fqn
-            lowest = min(lowest, int(codes.min()))
+            assert torch.equal(values, weight), fqn
+            lowest = min(lowest, low)
         assert lowest == -8
 
         (embedding,) = (key for key in stored if key in (unified.EMBED_KEY, unified.TIED_HEAD_KEY))
-        entry = stored[embedding]
-        assert entry.layout == "i8" and entry.scale is not None
-        values = torch.frombuffer(bytearray(entry.payload), dtype=torch.int8).reshape(entry.shape)
-        scale = torch.frombuffer(bytearray(entry.scale), dtype=torch.float32).reshape(-1, 1)
-        assert torch.equal(
-            values.to(torch.float32) * scale, reference.model.model.embed_tokens.weight
-        )
+        values, low = decoded(embedding)
+        table = reference.model.model.embed_tokens.weight
+        assert torch.equal(values, table)
+        assert reference.model.lm_head.weight is table
+        assert low == -8
 
     def test_the_row_blocks_split_every_weight(self, checkpoint_dir, traced, small_blocks) -> None:
         """The byte identity above is measured across block boundaries (not one block) — for every
@@ -388,7 +394,7 @@ class TestContainer:
         verified = unified.write_container(traced.graph, material, tmp_path / "model.krm", None)
 
         form = product.assert_ir_form_product(
-            verified, config, {"i8": 1, "i4": len(traced.keys.int4)}, None
+            verified, config, {"i4": len(traced.keys.int4) + 1, "i8": 0}, None
         )
 
         assert [spec.name for spec in verified.inputs] == [
@@ -450,6 +456,8 @@ class TestContainer:
 
 #: A linear of the tiny checkpoint (the first layer's query projection).
 Q_PROJ = "model.language_model.layers.0.self_attn.q_proj.weight"
+#: The tiny checkpoint's embedding (the tied head's tensor).
+EMBED_TOKENS = "model.language_model.embed_tokens.weight"
 
 
 class TestGridImport:
@@ -487,6 +495,22 @@ class TestGridImport:
             unified.int4_codes(checkpoint, Q_PROJ)
         with pytest.raises(unified.UnifiedExportError, match="not on a 16-level grid"):
             unified.quantize_int4_rows(checkpoint, Q_PROJ)
+
+    def test_an_embedding_off_the_grid_fails_the_container_and_the_reference(
+        self, tmp_path, traced
+    ) -> None:
+        """The embedding takes the linears' rule, not a fallback to rounding: the container's
+        material and the goldens' reference both fail, naming the embedding."""
+        directory = write_checkpoint(
+            tmp_path, extra={EMBED_TOKENS: torch.randn(VOCAB, HIDDEN).to(torch.bfloat16)}
+        )
+        checkpoint = unified.Checkpoint(directory)
+        off_grid = rf"'{EMBED_TOKENS}' rows 0\.\..*not on a 16-level grid"
+
+        with pytest.raises(unified.UnifiedExportError, match=off_grid):
+            unified.prepare_material(traced.graph, traced.tensors, traced.keys, checkpoint)
+        with pytest.raises(unified.UnifiedExportError, match=off_grid):
+            unified.reference_wrapper(unified.load_config(directory), checkpoint, traced.keys.int4)
 
     def test_the_failing_group_is_named_by_row_and_index(self) -> None:
         weight, _, _ = grid_weight(4, 2 * DEFAULT_GROUP_SIZE, seed=5)
@@ -658,9 +682,9 @@ class TestReference:
     def test_the_r4_reference_equals_the_f32_load_with_imported_linears(
         self, checkpoint_dir, config, traced, small_blocks
     ) -> None:
-        """Resident i4 codes dequantized at use give the outputs of an F32 load whose linears are
-        codes · steps (and whose embedding is `fake_quant_int8`'s), bit for bit (R4: an F32
-        reference without an F32 copy of the weights)."""
+        """Resident i4 codes dequantized at use give the outputs of an F32 load whose linears and
+        embedding are codes · steps, bit for bit (R4: an F32 reference without an F32 copy of the
+        weights)."""
         reference = unified.reference_wrapper(
             config, unified.Checkpoint(checkpoint_dir), traced.keys.int4
         )
@@ -674,13 +698,14 @@ class TestReference:
         self, checkpoint_dir, config, traced, small_blocks
     ) -> None:
         """Weight for weight, bit for bit: `dequantize_int4` of the resident codes (taken in row
-        blocks) is codes · steps of the whole tensor's grid import."""
+        blocks) — and the embedding's values, imported in row blocks too — is codes · steps of the
+        whole tensor's grid import."""
         reference = unified.reference_wrapper(
             config, unified.Checkpoint(checkpoint_dir), traced.keys.int4
         )
         naive = grid_loaded_wrapper(checkpoint_dir, config, traced.keys.int4)
 
-        for fqn in sorted(traced.keys.int4):
+        for fqn in (unified.EMBED_KEY, *sorted(traced.keys.int4)):
             module = fqn.removesuffix(".weight")
             got = reference.get_submodule(module).weight
             want = naive.get_submodule(module).weight
@@ -844,6 +869,7 @@ class TestExportSeries:
         }
         assert summary["suppress_tokens"] == sorted(SUPPRESSED)
         assert summary["kv"] == {"shared_kv_layers": len(FULL_LAYERS)}
+        assert summary["quantized"] == {"i4": INT4_LINEARS + 1, "i8": 0}
         assert [stage["name"] for stage in summary["stages"]] == [
             "trace",
             "goldens",
@@ -852,8 +878,8 @@ class TestExportSeries:
             "provenance",
         ]
 
-        # The goldens are an independent greedy run of the F32 load with imported linears, over
-        # the logits with the suppressed ids masked.
+        # The goldens are an independent greedy run of the F32 load with the imported linears and
+        # embedding, over the logits with the suppressed ids masked.
         loaded = grid_loaded_wrapper(
             checkpoint_dir, config, unified.trace_keys(naive_wrapper(checkpoint_dir, config)).int4
         )

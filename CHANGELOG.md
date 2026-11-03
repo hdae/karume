@@ -19,8 +19,9 @@ measurements in `docs/research/`.
 
 - `@karume/models/gemma`: Gemma 4 12B (text only) as model `12b` of the gemma4 distribution. Its
   weights are Google's q4_0 quantization-aware-trained checkpoint
-  (`gemma-4-12B-it-qat-q4_0-unquantized`) with that checkpoint's own 4-bit grid stored as is
-  (round-to-nearest i4 on `gemma-4-12B-it` loses too much — ADR 0128 addendum 2026-11-03); the
+  (`gemma-4-12B-it-qat-q4_0-unquantized`) with that checkpoint's own 4-bit grid stored as is,
+  for the linear weights and the tied embedding alike (round-to-nearest i4 on `gemma-4-12B-it`
+  loses too much — ADR 0128 addendum 2026-11-03); the
   tokenizer and chat template are `gemma-4-12B-it`'s. One preset, `i4`. It has no per-layer embeddings (PLE): its graph takes no `per_layer_inputs` and its
   container carries no PLE assets, and admission settles which kind a distribution is from both
   declarations (a mix of the two fails loudly). For such a model `pleResidency` and

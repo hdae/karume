@@ -45,24 +45,30 @@ hold. This script takes the Qwen3.5 / umT5 form (`qwen3_5/export.py` — ruling 
    `torch.export` never reads parameter data, so those pages are never touched (a 3.6 GB check
    stayed at 0.5 GB RSS — measured 2026-11-02); the memory floor is the guard if that ever
    changes. The graph is the real-weight trace's (pytest compares the JSON).
-2. **The linear weights (packed i4, group 32) are imported from the checkpoint's own 4-bit grid
-   and the embedding (i8 per row) is quantized, a block of rows at a time**
-   ({@link quantize_int4_rows} / {@link quantize_int8_rows} — the next section), and handed to the
-   writer as `fixed_weights` (ADR 0097's entry). Both close per row, so the blocks give the
-   whole-tensor bits; pytest checks the container bytes against an import of each whole tensor at
-   once.
+2. **The linear weights and the tied embedding (packed i4, group 32) are imported from the
+   checkpoint's own 4-bit grid, a block of rows at a time** ({@link quantize_int4_rows} — the next
+   section), and handed to the writer as `fixed_weights` (ADR 0097's entry). The import closes per
+   row, so the blocks give the whole-tensor bits; pytest checks the container bytes against an
+   import of each whole tensor at once.
 3. **The norms and `layer_scalar`** are the checkpoint's BF16 values widened to F32.
 
-## The linear weights: the QAT grid, imported as is
+## The linears and the embedding: the QAT grid, imported as is
 
 Every text linear of the QAT checkpoint already lies on a Q4_0 grid: in each group of 32 along the
 row (the in-features axis, `karume.quantize.group_scale`'s grouping) the values are `bf16(q·d)`,
-with integer codes `q` in [−8, 7] and a learned step `d` per group (not `amax / 8`). Measured on the
+with integer codes `q` in [−8, 7] and a learned step `d` per group (not `amax / 8`). The tied
+embedding does too, in groups of 32 along its rows (the hidden axis): every one of its groups
+recovers under the rule below (measured 2026-11-03), so it is imported the same way instead of
+being rounded again to i8 per row, which moved values that were already exact. Measured on the
 pinned snapshots (2026-11): round-to-nearest i4 g32 on karume's grid (codes ±7, scale = group
 `amax / 7`) of `google/gemma-4-12B-it` gives KL 2.65 / 1.88 (context-en / window-en) against the
 unquantized forward and a top-1 agreement of 0.39 / 0.47; re-rounding the QAT weights to the ±7
-grid still gives KL ≈ 1.0; importing the grid gives KL 0.0136 / 0.0362 and a top-1 agreement of
-0.97 / 0.93 against the QAT checkpoint's own unquantized forward.
+grid still gives KL ≈ 1.0; importing the grid of the linears (the embedding rounded to i8 per row)
+gives KL 0.0136 / 0.0362 and a top-1 agreement of 0.97 / 0.93 against the QAT checkpoint's own
+unquantized forward, and importing the embedding's grid too gives KL 0.0091 / 0.0505 and a top-1
+agreement of 0.99 / 0.93 (2026-11-03). The embedding's own relative RMS error against its BF16
+values drops from 1.41 % (i8 per row) to 0.14 %, lower in every row; why `window-en`'s mean KL
+still rises is not yet explained.
 
 {@link grid_import} recovers it per group: the largest step `amax / k` (k = 1..8) whose codes
 `round(w / step)` all lie in [−8, 7] and whose least-squares refit `Σq·w / Σq²` reconstructs the
@@ -82,7 +88,8 @@ taken once from the checkpoint in row blocks ({@link int4_codes} — the same bl
 to, so the reference is bit-equal to an F32 load whose linears are replaced by codes · steps
 (pytest, weight for weight and output for output, and against the written container's decoded
 bytes) while the process holds about 16 GiB instead of 45. The embedding (and the tied head) is
-held rounded in F32 (4 GiB): it is read three times a forward. Rounding precedes the reference
+held as its imported grid values in F32 (4 GiB — {@link imported_embedding}): it is read three
+times a forward, so it is dequantized once, not at use. Rounding precedes the reference
 (ADR 0006) — the goldens describe the model the container stores. Measured 2026-11-02 on the real
 12B: building the reference takes 34 s at a 16.3 GiB peak, and one forward 13 s at T = 6, 34 s at
 T = 598 and 55 s at T = 1212 (the earlier form re-rounded the BF16 weights on every read, about
@@ -154,13 +161,7 @@ from karume.emit import FixedQuantizedWeight, pack_int4, unpack_int4
 from karume.ir import IrGraph, IrNode
 from karume.ops import ATTENTION_OP, LINEAR_OP
 from karume.pipeline import export_module, publish_model
-from karume.quantize import (
-    DEFAULT_GROUP_SIZE,
-    channel_scale,
-    dequantize_int4,
-    iter_quant_targets,
-    quantize_to_int8,
-)
+from karume.quantize import DEFAULT_GROUP_SIZE, dequantize_int4, iter_quant_targets
 from karume.states import to_states_form
 from qwen3_5.export import MEMORY_FLOOR_GIB, MemoryWatch
 
@@ -382,8 +383,8 @@ class UnifiedProductWrapper(nn.Module):
     two masks of the 1-shot recipe, the host RoPE bound for one forward, the row selection by
     `F.embedding`, the softcapped lm_head) — every MUST of that docstring applies here. MUST:
     the module paths are the E2B / E4B wrapper's (`model.model.*`, `model.lm_head`), so the
-    quantization predicates `gemma4.export.is_int8_module` / `is_int4_module` select the same
-    roles. MUST: the outputs stay (logits, hidden).
+    quantization predicate `gemma4.export.is_int4_module` selects the same roles. MUST: the
+    outputs stay (logits, hidden).
     """
 
     def __init__(self, model: nn.Module) -> None:
@@ -609,39 +610,12 @@ def _matrix_shape(checkpoint: Checkpoint, key: str) -> tuple[int, int]:
     return int(shape[0]), int(shape[1])
 
 
-def quantize_int8_rows(checkpoint: Checkpoint, key: str) -> FixedQuantizedWeight:
-    """Per-row i8 from blocks of rows (`qwen3_5.export.quantize_rows`'s procedure).
-
-    A block takes the naive form's two steps: `fake_quant_int8` replaces the weight by
-    `quantize(w, s)·s`, and the writer stores `quantize(q·s, s)` after checking the round trip —
-    so the second quantization's values are stored, with the same check.
-    """
-    rows, cols = _matrix_shape(checkpoint, key)
-    packed = torch.empty((rows, cols), dtype=torch.int8)
-    scale = torch.empty((rows, 1), dtype=torch.float32)
-    step = _block_rows(cols)
-    for start in range(0, rows, step):
-        stop = min(start + step, rows)
-        weight = checkpoint.read_rows(key, start, stop)
-        block_scale = channel_scale(weight, 0)
-        rounded = quantize_to_int8(weight, block_scale).to(torch.float32) * block_scale
-        del weight
-        values = quantize_to_int8(rounded, block_scale)
-        if not torch.equal(values.to(torch.float32) * block_scale, rounded):
-            raise UnifiedExportError(
-                f"'{key}' rows {start}..{stop}: i8 × scale does not round-trip"
-            )
-        packed[start:stop] = values
-        scale[start:stop] = block_scale
-    return FixedQuantizedWeight(dtype="i8", packed=packed, scale=scale)
-
-
 def grid_import(
     weight: torch.Tensor, group_size: int, where: str, first_row: int = 0
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The 4-bit grid `weight` (rank 2, F32) lies on: codes in {@link GRID_CODES} (int8, the
     weight's shape) and one F32 step per group of `group_size` along the row (`[rows, groups]`)
-    — the module docstring's "The linear weights" section.
+    — the module docstring's "The linears and the embedding" section.
 
     Per group, the step divisors run smallest first, so the largest step that fits is taken; an
     all-zero group keeps codes 0 and step 1. `where` and `first_row` (the block's first row in the
@@ -697,8 +671,8 @@ def _grid_blocks(
 ) -> Iterator[tuple[int, int, torch.Tensor, torch.Tensor]]:
     """`(start, stop, codes, steps)` of each block of rows ({@link grid_import} on the F32-widened
     checkpoint rows) — the one source of the container's bytes ({@link quantize_int4_rows}) and
-    the reference's values ({@link int4_codes}). A group never crosses a row, so the blocks give
-    the whole tensor's codes and steps."""
+    the reference's values ({@link int4_codes} / {@link imported_embedding}). A group never
+    crosses a row, so the blocks give the whole tensor's codes and steps."""
     rows, cols = _int4_shape(checkpoint, key, group_size)
     step = _block_rows(cols)
     for start in range(0, rows, step):
@@ -774,7 +748,7 @@ def prepare_material(
     keys: TraceKeys,
     checkpoint: Checkpoint,
 ) -> ContainerMaterial:
-    """Quantize the linears and the embedding from the checkpoint, widen the rest.
+    """Import the grid of the linears and the embedding from the checkpoint, widen the rest.
 
     MUST: every tensor the graph declares is one of four kinds — a quantized weight, a
     checkpoint tensor, a trace constant or a config-derived buffer; anything else fails loudly
@@ -797,11 +771,7 @@ def prepare_material(
             stored = checkpoint.shape(source)
             if stored != shape:
                 raise UnifiedExportError(f"'{key}': checkpoint shape {stored}, graph {shape}")
-            fixed[key] = (
-                quantize_int4_rows(checkpoint, source)
-                if key in keys.int4
-                else quantize_int8_rows(checkpoint, source)
-            )
+            fixed[key] = quantize_int4_rows(checkpoint, source)
             material[key] = torch.empty(shape, device="meta")
         elif key in keys.persistent:
             value = checkpoint.read(checkpoint_key(key))
@@ -971,17 +941,16 @@ class DequantizedAtUse(nn.Module):
         return dequantize_int4(codes, self.scale)
 
 
-def rounded_embedding(checkpoint: Checkpoint, key: str) -> torch.Tensor:
-    """The embedding as `fake_quant_int8` leaves it (per-row scales, so row blocks give the
-    whole-table values), held in F32."""
-    rows, cols = _matrix_shape(checkpoint, key)
+def imported_embedding(
+    checkpoint: Checkpoint, key: str, group_size: int = DEFAULT_GROUP_SIZE
+) -> torch.Tensor:
+    """The embedding's imported grid as F32 values — `dequantize_int4` of the codes and steps the
+    container's bytes are packed from ({@link _grid_blocks}), block by block, so the codes of the
+    whole table are never held at once."""
+    rows, cols = _int4_shape(checkpoint, key, group_size)
     table = torch.empty((rows, cols), dtype=torch.float32)
-    step = _block_rows(cols)
-    for start in range(0, rows, step):
-        stop = min(start + step, rows)
-        weight = checkpoint.read_rows(key, start, stop)
-        scale = channel_scale(weight, 0)
-        table[start:stop] = quantize_to_int8(weight, scale).to(torch.float32) * scale
+    for start, stop, codes, steps in _grid_blocks(checkpoint, key, group_size):
+        table[start:stop] = dequantize_int4(codes, steps)
     return table
 
 
@@ -992,8 +961,8 @@ def reference_wrapper(
     "Goldens").
 
     The linears in `int4` hold their imported codes and steps ({@link int4_codes}) and read through
-    {@link DequantizedAtUse}; the embedding (the tied head with it) is {@link rounded_embedding};
-    the rest is widened to F32 once.
+    {@link DequantizedAtUse}; the embedding (the tied head with it — one tensor) holds its imported
+    grid values ({@link imported_embedding}); the rest is widened to F32 once.
     """
     from torch.nn.utils import parametrize
 
@@ -1010,7 +979,7 @@ def reference_wrapper(
         if wrapper_key in int4:
             state[key], scales[wrapper_key] = int4_codes(checkpoint, source)
         elif wrapper_key == EMBED_KEY:
-            state[key] = rounded_embedding(checkpoint, source)
+            state[key] = imported_embedding(checkpoint, source)
         else:
             state[key] = checkpoint.read(source)
     tied = TIED_HEAD_KEY.removeprefix("model.")
@@ -1265,9 +1234,10 @@ def export_series(
                     None if pins is None else pins.weights.revision,
                 )
             del material
-            form = product.assert_ir_form_product(
-                verified, config, {"i8": 1, "i4": len(keys.int4)}, None
-            )
+            # Every linear and the tied embedding are i4. MUST: no i8 is counted as well — an
+            # embedding rounded to i8 again leaves the graph's shapes and ops unchanged.
+            storage = {"i4": len(keys.int4) + 1, "i8": 0}
+            form = product.assert_ir_form_product(verified, config, storage, None)
             kv = assert_shared_kv_projection(verified, config)
             if goldens:
                 with monitor.stage("provenance"):
@@ -1302,7 +1272,7 @@ def export_series(
         "symbols": list(verified.symbols),
         "case_lengths": {name: int(ids.shape[1]) for name, ids in cases},
         "window": window,
-        "quantized": {"i4": len(keys.int4), "i8": 1},
+        "quantized": storage,
         "form": form,
         "kv": kv,
         **measured,
