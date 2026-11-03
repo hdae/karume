@@ -613,6 +613,6 @@ On the maintainer's M2 (Chrome 158), `/gemma4-bench` arms with "Split dispatches
 on, once on a plain QAT arm — with `setBindGroup: The provided value cannot be converted to a sequence`, raised in the bench's GPU tap
 (`apps/playground/src/models/gemma4-bench/tap.ts`). It was not reproduced in isolation and has not been investigated;
 the same plain arm and a byte-plane arm ran with the split in later runs
-([research 2026-11-03](research/2026-11-03-qat-integer-gemv-m2.md) §8, §11).
+([research 2026-11-03](research/2026-11-03-qat-integer-gemv-m2.md) §8, §12).
 
 - Impact: the playground bench's split mode only (a run can fail before its per-key attribution is complete).

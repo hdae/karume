@@ -2,8 +2,10 @@
 > [0140](../decisions/0140-integer-gemv.md), perf-ledger K-45): QAT Gemma 4 E2B decode on the maintainer's Apple M2
 > under Chrome, against the WebML Community "Gemma 4 WebGPU kernels" Space, the split attribution of Karume's decode, the
 > single-kernel timings and kernel checks of the integer GEMV, its end-to-end A/B, and the lm_head probe behind the
-> byte-plane GEMV (ADR [0141](../decisions/0141-byte-plane-gemv.md), perf-ledger K-52). It is not a design source of
-> truth. The raw records are JSON in the localStorage of that Chrome (§11); nothing here was measured on the RTX 3080 Ti.
+> byte-plane GEMV (ADR [0141](../decisions/0141-byte-plane-gemv.md), perf-ledger K-52), and — added 2026-11-04 — the
+> decode run-ahead's A/B (ADR [0142](../decisions/0142-decode-run-ahead.md), perf-ledger H-27, §11). It is not a design
+> source of truth. The raw records are JSON in the localStorage of that Chrome (§12); nothing here was measured on the RTX
+> 3080 Ti.
 
 # QAT Gemma 4 E2B on Apple M2: decode attribution and the integer GEMV
 
@@ -28,6 +30,10 @@
 - lm_head (i2 262144 × 1536, f32 activations): the sequential GEMV is bound by its access pattern, then by the decode;
   the byte-plane GEMV (a lanes × rows layout, an exact magic-number decode, class R) ran 2393 / 1845 µs against 2987 /
   2425 (median / min) and passed its check 240 / 240 (§10).
+- Decode run-ahead (2026-11-04; up to 4 greedy steps per GPU batch, each fed the previous step's on-GPU selection): in
+  the M2's fast state about 22.8 → 20.65 ms/token (43.8 → 48.4 tok/s, ×0.905) with the token ids unchanged
+  (`tokenIdsSha256` equal across arms). The M2 bench drops into a slower state after about six visits regardless of arm,
+  which confounded the first runs (§11).
 
 ## 2. Environment
 
@@ -38,6 +44,7 @@
 | Serving | the playground dev server on the development machine, reached over an SSH tunnel (127.0.0.1:8790); distributions over the direct route |
 | Code (§3) | checkout `34c49f32` plus uncommitted Gemma changes of another session (54 working-tree entries) |
 | Code (§4–§10) | worktree `karume-wt-qat-gemv` (branch `wip/qat-gemv` from `34c49f32`), uncommitted |
+| Code (§11) | the same worktree after `2c86281d`, the run-ahead implementation uncommitted |
 | Model | QAT Gemma 4 E2B (`gemma4-qat`, preset `i4-fast`); regular E2B `i4-fast` as a control in §3 / §4 |
 | Pages | `/gemma4-bench` (end-to-end, the GPU tap, split dispatches, the "Integer GEMV" arm switch — apps/playground/README.md); the single-kernel check and timing through `packages/kernel-checks/src/gemv-integer.ts` (`checkIntegerGemv`, `benchIntegerGemv`) imported in the page's console |
 
@@ -300,7 +307,52 @@ same device put the fixed cost of 1,036 empty dispatches in 11 submits at 2.92 m
 browser's GPU process, too small on its own to make a 22.7 ms floor. Untested candidates: the GPU process's encoding of
 the real dispatches (six bindings each), and the M2 lowering its GPU clock as the work per token shrinks.
 
-## 11. Open items and records
+## 11. Decode run-ahead
+
+Section 10's timestamps put the page's JavaScript at about 1 ms per token and 1,036 empty dispatches at about 2.9 ms; in
+the faster state of the tap-on run the GPU was busy about 20 ms per token against about 22.7 ms per token end to end —
+roughly 2.5 ms per token without GPU work (an estimate across two runs). The decode run-ahead
+(`PipelineOptions.decodeAhead`, ADR [0142](../decisions/0142-decode-run-ahead.md)) puts up to `d` greedy steps into one
+GPU batch, each fed the token the previous step selected on the GPU, and reads the selections back at the batch's single
+fence.
+
+### The clean A/B
+
+Arms: QAT E2B `i4-fast` + `integerGemv` + `linearGemvPlanes` + `pleResidency: "gpu"`; arm 0 `decodeAhead` 1 (off), arm
+1 `decodeAhead` 4. 4 rounds in ABBA order (8 visits, 2 warm chats × 2 prompts per visit), greedy, tap off, the page
+reloaded before the run. Warm-chat decode ms/token per visit, in run order (Story, Story, Explainer, Explainer):
+
+| Visit | Arm | ms/token |
+| --- | --- | --- |
+| 0 | off | 22.845 · 22.770 · 22.919 · 23.020 |
+| 1 | ahead 4 | 20.868 · 20.498 · 20.571 · 20.695 |
+| 2 | ahead 4 | 20.399 · 20.450 · 20.640 · 20.650 |
+| 3 | off | 22.868 · 22.591 · 22.889 · 22.817 |
+| 4 | off | 22.588 · 22.729 · 22.811 · 22.814 |
+| 5 | ahead 4 | 21.114 · 20.930 · 20.591 · 20.615 |
+| 6 | ahead 4 | 21.120 · 20.904 · 29.711 · 29.099 |
+| 7 | off | 30.561 · 31.063 · 31.127 · 31.159 |
+
+- From visit 6 (its second prompt) on, the M2 was in its slow state (about 30–31 ms/token) for both arms.
+- Fast state: off about 22.8 ms/token (43.8 tok/s), ahead 4 about 20.65 ms/token (48.4 tok/s): −2.2 ms/token, ×0.905.
+- `tokenIdsSha256` was equal across the arms for both prompts (`64f9667f6cbc…`, `690fa01ae219…`). The run-ahead arm's
+  stop record: depth 4, 32 batches, 127 steps (31 batches of 4 steps and one of 3).
+
+### The confounded runs
+
+Runs before the clean one suggested the opposite — the run-ahead slower (29.0 against 22.9 ms/token), and a depth-8 arm
+at 34.5 tok/s against 32 tok/s off. In those runs the arms' visits fell on different sides of the M2's drop into its slow
+state, so the comparison measured the visit order, not the arm. In the recorded confounded run
+(`claude-m2-ahead4-ab`) the token ids were equal across the arms too. A measurement hazard of this bench: **the M2 drops
+into a slower state after about six visits regardless of arm**, so an A/B on it holds only within the visits before the
+drop (the clean run reloaded the page first, and its fast-state figures come from the visits before the drop).
+
+### One batch on the timeline
+
+A single-arm run (depth 4, in the slow state), one batch on one time axis: its 4 steps were encoded by 2.8 ms, the
+readback's `mapAsync` was issued at 13.3 ms and it resolved at 105.9 ms.
+
+## 12. Open items and records
 
 - Not run: the GPU tests on the development machine's RTX 3080 Ti (`packages/runtime/tests/gpu_linear_gemv_integer_test.ts`)
   and the sha256 rows of ADR 0110 §7. No speed was measured on any backend other than the M2's Metal.
@@ -312,10 +364,15 @@ the real dispatches (six bindings each), and the M2 lowering its GPU clock as th
   measured at about 1 ms per token, so it is not the renderer).
 - The q 4096 parallel cell's median and min differ by ×1.8 (87.0 / 47.8 µs), so the full layers' K = 1536 group (q
   4096 with k/v 512, the one group where the integer kernel led on the recorded values) is not settled.
+- Not run: the decode run-ahead's GPU tests on the RTX 3080 Ti (`packages/runtime/tests/gpu_chained_generation_test.ts`,
+  `packages/e2e/tests/e2e_gemma4_qat_decode_ahead_test.ts`); depths other than 4 were measured only in confounded runs
+  (§11).
+- The M2's drop into a slower state after about six visits (§11) is not explained; it limits every A/B on this bench.
 - `/gemma4-bench`'s split mode fails intermittently (`setBindGroup: The provided value cannot be converted to a
   sequence`, in `tap.ts`; seen on an integer arm and on a plain QAT arm, not reproduced in isolation) — [known
   issues](../known-issues.md).
 - Records (localStorage of `http://127.0.0.1:8790` in that Chrome): `claude-m2-bench-greedy` (131,214 chars) and
   `claude-m2-bench-sampler` (28,120 chars) for §3; `claude-m2-bench-integer-ab` for §6;
   `claude-m2-bench-integer-i4i8` for §7; `claude-m2-bench-integer-i4-ab` (+ `-summary`) and `claude-ab-runs` for §8;
-  `claude-m2-lmhead-probe-1` to `-7` for §10.
+  `claude-m2-lmhead-probe-1` to `-7` for §10; `claude-m2-ahead4-abba4` (the clean run) and `claude-m2-ahead4-ab` (a
+  confounded one) for §11.

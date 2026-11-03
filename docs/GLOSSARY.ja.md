@@ -199,7 +199,8 @@
 | rounding-error bound (E of the measurement check) | 丸め誤差の上界 / 計測のチェック | E ≤ 1% の観測だけを比の材料にする計測の検査 | 計測の門 | ADR 0117 決定 3 |
 | matching (`geometryProfileMismatch`) | 照合（表の） | 保存した表を今の adapter と runtime に当ててよいかを見る純関数 | — | ADR 0117 決定 5 |
 | row-count bucket (gemmRows bucket) | 行数バケット（「バケット」でもよい） | GEMM の行数 M で幾何を切り替える区切り | 段 | ADR 0116 |
-| run-ahead (decode) | 先行投入 | 次 token を GPU 内で決め、読み戻しを待たずに次の run を先に発行する実行形 | — | research 2026-09-19 §9 |
+| decode run-ahead (`decodeAhead`) △ | 先行投入 | greedy の decode を GPU の batch 1 本に最大 d step まとめ、各 step は前の step が GPU 上で選んだ token をそのまま入力にし、d 個の選択を batch の最後のフェンス 1 回で読み戻す実行形（opt-in・Gemma で PLE を GPU に置くときだけ）。token の列は 1 step ずつの decode と同じ | — | ADR 0142・perf-ledger H-27 |
+| chained deferred run (`GenerationRun.chain`) △ | 確定待ち run の連結 | 確定待ちの行が残る context に、その後ろへ続けて置く commit: "deferred" の run。位置は発行時に予約し、未決着のまま並べてよいのは同じ `BatchScope` の中だけ。範囲全体は同じ行数の deferred run 1 本と同じ上限（`slidingSlack`・`chunkLength`）に従い、`commit(rows)` 1 回でまとめて確定する | — | ADR 0142 決定 1 |
 | fence floor (Deno) | Deno のフェンス床 | Deno の WebGPU 実装がフェンス 1 本ごとに 10 ms 寝る定数 | — | research 2026-09-19 §3.2 |
 | in-flight submit bound | 送り込みの先行の上限 | ホストが GPU の完了より先に積んでよい `queue.submit` の本数の上限 | — | ADR 0123 |
 | completion marker (in-flight) | 完了印 | 送り込みの先行の上限が置く `queue.onSubmittedWorkDone()` の 1 本（フェンスではない） | — | ADR 0123 決定 1・5 |
