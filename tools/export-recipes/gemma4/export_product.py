@@ -97,7 +97,9 @@ from karume.ir import IrGraph
 from karume.ops import ARGMAX_OP, EMBEDDING_OP
 from karume.pipeline import export_module
 from karume.ple import (
+    PLE_GROUPED_INDEX_SCHEMA,
     PLE_INDEX_ASSET,
+    PLE_INDEX_SCHEMA,
     PLE_PACK_FACTOR,
     ple_assets,
     ple_block_ranges,
@@ -382,6 +384,8 @@ def ple_container_assets(
     dim: int,
     embed_scale: float,
     spill_dir: Path,
+    storage: str = PLE_STORAGE,
+    group_size: int | None = None,
     block_bytes: int = BLOCK_MAX_BYTES,
 ) -> PleContainerAssets:
     """PLE を**モデル容器の資産**へ組む（索引 schema 3 + `values` / `scales` の block 列）。
@@ -389,11 +393,16 @@ def ple_container_assets(
     切り方も索引の綴りも core の {@link karume.ple.ple_assets} が持つ（移行 CLI と同じ 1 本）。
     ここが足すのは「層ごとの表 → token-major の連結 payload」の読み口だけである。
 
+    `values` holds each layer's stored bytes (`[tokens, dim / pack factor]` — int8 for `i8`,
+    packed uint8 for `i4` / `i2`) and `row_scales` each layer's scales (`[tokens]`, or
+    `[tokens, dim / group_size]` with a group size — the schema-4 index of the q4_0 QAT line,
+    {@link gemma4.export_product_qat}). The defaults are this series' i8 with one scale per row.
+
     MUST: 実体は `spill_dir`（作業席）の一時ファイルへ**1 度だけ**落とす（{@link _spill_tables}
     の MUST）— 呼び手はこの呼び出しの直後に `values` / `row_scales` を手放し、export 中に
     i8 の実体を持ち越さない。
     """
-    row_bytes = ple_row_bytes(PLE_STORAGE, layers, dim)
+    row_bytes = ple_row_bytes(storage, layers, dim, group_size)
     spills = {key: spill_dir / f".ple.{key}.spill" for key in (PLE_VALUES_KEY, PLE_SCALES_KEY)}
     readers = {
         PLE_VALUES_KEY: _spill_tables(
@@ -405,13 +414,14 @@ def ple_container_assets(
     }
     return PleContainerAssets(
         ple_assets(
-            storage=PLE_STORAGE,
+            storage=storage,
             tokens=tokens,
             layers=layers,
             dim=dim,
             embed_scale=embed_scale,
             read_values=readers[PLE_VALUES_KEY],
             read_scales=readers[PLE_SCALES_KEY],
+            group_size=group_size,
             block_bytes=block_bytes,
         ),
         tuple(spills.values()),
@@ -460,6 +470,12 @@ def assert_ple_assets(
     {@link _unpack_ple_values} で展開する。行のバイト数は索引の `rowBytes` を正本に読み、
     格納と寸法から導く値（`karume.ple.ple_row_bytes`）と食い違えば落とす。
 
+    A schema-4 index (`groupSize` — the q4_0 QAT line, {@link gemma4.export_product_qat}) holds
+    one scale per group of `groupSize` values of a (token, layer) row, in (layer, group) order, and
+    goes through the same check: each group's values times its own scale. MUST: `groupSize` is
+    present exactly in a schema-4 index — a schema-3 reader would apply a group's scale to the
+    whole row.
+
     MUST: `torch.equal`（ビット一致）で見る — scale の対応を 1 層ずらしても、block の範囲を
     1 行ずらしても、形も型も dtype も合ったまま**別 token の有効な行**が出る。
     MUST: 読み直す（in-memory の配列を突き合わせない）— 転置は正しいのに書き出しの
@@ -475,13 +491,25 @@ def assert_ple_assets(
     dim = int(index["dim"])
     embed_scale = float(index["embedScale"])
     storage = str(index["storage"])
+    schema = index["schema"]
+    if schema == PLE_GROUPED_INDEX_SCHEMA:
+        group_size = int(index["groupSize"])
+    elif schema == PLE_INDEX_SCHEMA and "groupSize" not in index:
+        group_size = None
+    else:
+        raise AssertionError(
+            f"PLE index schema {schema!r} with groupSize {index.get('groupSize')!r}"
+            f" (schema {PLE_INDEX_SCHEMA} has none, schema {PLE_GROUPED_INDEX_SCHEMA} needs one)"
+        )
     row_bytes = {key: int(index[key]["rowBytes"]) for key in (PLE_VALUES_KEY, PLE_SCALES_KEY)}
-    derived = ple_row_bytes(storage, layers, dim)
+    derived = ple_row_bytes(storage, layers, dim, group_size)
     if row_bytes != derived:
         raise AssertionError(
             f"索引の rowBytes {row_bytes} が格納 '{storage}'・layers {layers}・dim {dim}"
-            f" から導く {derived} と違う"
+            f"・groupSize {group_size} から導く {derived} と違う"
         )
+    # One scale per row is one group of `dim` values.
+    group = dim if group_size is None else group_size
     expected_shape = (1, len(probe), layers, dim)
     if tuple(reference.shape) != expected_shape:
         raise AssertionError(f"参照 {tuple(reference.shape)} が {expected_shape} でない")
@@ -542,9 +570,17 @@ def assert_ple_assets(
     )
     for position, token, values_block, scales_block in located:
         packed = values[(str(values_block["asset"]), token)]
-        quantized = _unpack_ple_values(packed, storage).reshape(layers, dim).to(torch.float32)
-        scale = scales[(str(scales_block["asset"]), token)].view(torch.float32).reshape(layers, 1)
-        rebuilt[0, position] = quantized * scale * embed_scale
+        quantized = (
+            _unpack_ple_values(packed, storage)
+            .reshape(layers, dim // group, group)
+            .to(torch.float32)
+        )
+        scale = (
+            scales[(str(scales_block["asset"]), token)]
+            .view(torch.float32)
+            .reshape(layers, dim // group, 1)
+        )
+        rebuilt[0, position] = (quantized * scale * embed_scale).reshape(layers, dim)
     if not torch.equal(rebuilt, reference):
         worst = float((rebuilt - reference).abs().max())
         raise AssertionError(
@@ -713,6 +749,46 @@ def assert_ir_form_product(
 # ---- 系列 ------------------------------------------------------------------
 
 
+def trace(
+    wrapper: ProductChunkWrapper,
+    example_ids: torch.Tensor,
+    per_layer_inputs: torch.Tensor,
+    sym_max: int,
+) -> tuple[IrGraph, dict[str, torch.Tensor]]:
+    """Export the product wrapper with the symbolic `M` / `R` and apply the states surgery.
+
+    The one trace of the product graph: this series and the q4_0 QAT line
+    ({@link gemma4.export_product_qat}) both call it, so the two graphs cannot drift apart.
+    `per_layer_inputs` is the example's `[1,M,L,256]` (the 35-table path's — the values only feed
+    the trace). MUST: the wrapper no longer holds `per_layer` (its 35 tables are unused by the
+    forward, and a held one is a 9.4GB state_dict the export carries).
+    """
+    if hasattr(wrapper, "per_layer"):
+        raise AssertionError("the product wrapper still holds the PLE tables (drop them first)")
+    config = wrapper.model.config
+    example_rope = decode.rope_args(decode.rope_specs(config), positions_for(example_ids))
+    seq = Dim(decode.SEQ_SYMBOL, min=2, max=sym_max)
+    # min=1 は MUST — 通常の prefill / decode は R = 1 で走るので、そこを特殊化されると
+    # 従来経路が動かない。torch.export は size 1 を含む Dim を記号のまま保つ（2.13 で実測）。
+    rows = Dim(ROW_SYMBOL, min=1, max=ROW_SYM_MAX)
+    graph, tensors = export_module(
+        wrapper,
+        (
+            example_ids,
+            *example_rope,
+            per_layer_inputs,
+            decode.last_rows_for(example_ids, EXAMPLE_ROWS),
+        ),
+        dynamic_shapes=(*({1: seq} for _ in range(2 + len(example_rope))), {0: rows}),
+        # 割り当ては user 入力 placeholder の出現順
+        # （`karume.convert._assign_input_symbols`）なので、`input_ids[1,M]` →
+        # `last_row[R]` の順で並べる。
+        symbol_names=(decode.SEQ_SYMBOL, ROW_SYMBOL),
+        preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+    )
+    return to_states_form(graph, decode.states_plan(graph, config)), tensors
+
+
 def export_series(
     model_dir: Path,
     out_dir: Path,
@@ -767,10 +843,6 @@ def export_series(
     del wrapper.per_layer
 
     example_name, example_ids = max(cases, key=lambda case: case[1].shape[1])
-    seq = Dim(decode.SEQ_SYMBOL, min=2, max=sym_max)
-    # min=1 は MUST — 通常の prefill / decode は R = 1 で走るので、そこを特殊化されると
-    # 従来経路が動かない。torch.export は size 1 を含む Dim を記号のまま保つ（2.13 で実測）。
-    rows = Dim(ROW_SYMBOL, min=1, max=ROW_SYM_MAX)
 
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     with staged_publication(out_dir) as staged:
@@ -800,24 +872,7 @@ def export_series(
 
         print("[export] torch.export → 変換", file=sys.stderr, flush=True)
         try:
-            example_rope = decode.rope_args(specs, positions_for(example_ids))
-            graph, tensors = export_module(
-                wrapper,
-                (
-                    example_ids,
-                    *example_rope,
-                    case_inputs[example_name],
-                    decode.last_rows_for(example_ids, EXAMPLE_ROWS),
-                ),
-                dynamic_shapes=(*({1: seq} for _ in range(2 + len(example_rope))), {0: rows}),
-                # 割り当ては user 入力 placeholder の出現順
-                # （`karume.convert._assign_input_symbols`）なので、`input_ids[1,M]` →
-                # `last_row[R]` の順で並べる。
-                symbol_names=(decode.SEQ_SYMBOL, ROW_SYMBOL),
-                preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
-            )
-            print("[export] states 形へ手術 → 書き出し", file=sys.stderr, flush=True)
-            surgical = to_states_form(graph, decode.states_plan(graph, config))
+            surgical, tensors = trace(wrapper, example_ids, case_inputs[example_name], sym_max)
             verified = decode._write_container(
                 surgical,
                 tensors,

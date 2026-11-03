@@ -552,7 +552,9 @@ def assert_materialized(model: nn.Module) -> None:
         raise AssertionError("tied な lm_head.weight が主 embedding と別の Parameter に割れている")
 
 
-def load_model_and_tables(model_dir: Path) -> tuple[nn.Module, nn.ModuleList]:
+def load_model_and_tables(
+    model_dir: Path, *, kv_residues: bool = True
+) -> tuple[nn.Module, nn.ModuleList]:
     """実重みを f32 で読んだ text モデルと PLE の 35 分割を返す（検査席の表は載ったまま）。
 
     ラッパの組み立て（{@link build_wrapper}）と RoPE バッファの降格を**含まない**のは、
@@ -565,6 +567,12 @@ def load_model_and_tables(model_dir: Path) -> tuple[nn.Module, nn.ModuleList]:
     state_dict が読み込みの瞬間に同時に生き、PLE 以外の重みが 2 度載る（E4B で約 35 GiB —
     RAM 31 GiB の機で溢れる）。非永続 buffer は {@link materialize_non_persistent_buffers}、
     tie は上流 `tie_weights` で戻し、{@link assert_materialized} で検査する。
+
+    `kv_residues` states whether the checkpoint carries the k / v residues of the KV-shared layers:
+    the regular E2B / E4B checkpoints do, Google's q4_0 QAT checkpoints
+    (`gemma4.export_product_qat`) carry none. MUST: the expectation is checked either way — with
+    residues at least one is dropped (upstream's ignore list still matches the layering), without
+    them none is found; the strict load then checks that every other key matches the model.
     """
     from transformers import Gemma4ForCausalLM
 
@@ -586,10 +594,15 @@ def load_model_and_tables(model_dir: Path) -> tuple[nn.Module, nn.ModuleList]:
         model = Gemma4ForCausalLM(config).eval()
     materialize_non_persistent_buffers(model)
     state, dropped = renamed_state(model, model_file, probe)
-    if not dropped:
+    if kv_residues and not dropped:
         raise ValueError(
             "KV 共有層の k/v 残骸が 1 本も捨てられなかった"
             "（上流の _keys_to_ignore_on_load_unexpected が空 — 層構成の前提が変わった可能性）"
+        )
+    if not kv_residues and dropped:
+        raise ValueError(
+            f"{model_file}: {len(dropped)} k/v residues of the KV-shared layers ({dropped[:4]})"
+            " in a checkpoint expected to carry none"
         )
     model.load_state_dict(state, assign=True)
     del state

@@ -215,7 +215,7 @@ class DrafterWrapper(nn.Module):
     束ねられない）。
     MUST: `hidden` は target の**最終 norm 後**の 1 行（製品グラフの出力 1）。lm_head を通す前の
     値であることが drafter 側の入力条件で、別の中間値でも shape は `[1,1536]` のまま合う。
-    MUST: K / V は `[1, 1, T, D]`（貸し手スロットと同じ物理形）。trace 用の入力で、手術が
+    MUST: K / V は `[1, Hkv, T, D]`（貸し手スロットと同じ物理形）。trace 用の入力で、手術が
     external スロットへ置き換える。
     MUST: mask は**全列許可の 0 行**（q_len 1 の bidirectional は「全列を見る」— 列の絞りは
     window と論理長が持つ）。列数は K の軸 2 から採る（{@link _open_mask}）ので、golden を採る
@@ -303,8 +303,13 @@ def load_target_embed(model_dir: Path, config: Any) -> nn.Module:
     return module
 
 
-def load_drafter(steps: int, model_dir: Path) -> DrafterWrapper:
+def load_drafter(
+    steps: int, model_dir: Path, *, source: str | Path = ASSISTANT_REPO
+) -> DrafterWrapper:
     """drafter を f32 で読み、疎 softmax を外して RoPE を受け渡し口へ差し替えたラッパを返す。
+
+    `source` is what `from_pretrained` reads the drafter from: the regular E2B assistant's
+    repository id by default, or a pinned snapshot directory (`gemma4.export_drafter_qat`).
 
     MUST: `use_ordered_embeddings` は**読み込む前に**倒す（`masked_embedding` は `__init__` が
     config を見て作るので、後から属性を消しても forward の分岐は疎 softmax 側に倒れたまま）。
@@ -314,13 +319,13 @@ def load_drafter(steps: int, model_dir: Path) -> DrafterWrapper:
     from transformers import AutoConfig, Gemma4AssistantForCausalLM
 
     one_shot.register_attention()
-    config = AutoConfig.from_pretrained(ASSISTANT_REPO)
+    config = AutoConfig.from_pretrained(source)
     config.use_ordered_embeddings = False
     config._attn_implementation = one_shot.ATTENTION_NAME
     text = config.get_text_config()
     text._attn_implementation = one_shot.ATTENTION_NAME
     drafter = Gemma4AssistantForCausalLM.from_pretrained(
-        ASSISTANT_REPO, config=config, dtype=torch.float32
+        source, config=config, dtype=torch.float32
     ).eval()
     if drafter.masked_embedding is not None:
         raise AssertionError(
@@ -403,9 +408,18 @@ def lender_graph(product_dir: Path) -> Mapping[str, Any]:
 
 
 def lender_slots(
-    graph: Mapping[str, Any], layouts: Mapping[str, str], config: Any, target_config: Any
+    graph: Mapping[str, Any],
+    layouts: Mapping[str, str],
+    config: Any,
+    target_config: Any,
+    *,
+    shared_storage: IrStorage | None = None,
 ) -> LenderSlots:
     """貸し手のスロット実形と共有テンソルキーを、製品コンテナの宣言から引く。
+
+    `shared_storage` is the borrower's declaration of the shared table (default
+    {@link drafter_shared_storage} — the regular product's i8); the lender's layout must match its
+    dtype.
 
     MUST: 形も名前も**貸し手から読む**（drafter の config からは導かない）。借り手の宣言は
     「貸し手と一致していること」だけが正しさで、独立に組むと target を焼き直した日に借り手だけが
@@ -455,10 +469,10 @@ def lender_slots(
     if initializers[key].get("shared") is True:
         raise AssertionError(f"貸し手の主表 '{key}' が実体を持たない（共有宣言）")
     layout = layouts.get(key)
-    if layout != drafter_shared_storage(config).dtype:
+    declared = drafter_shared_storage(config) if shared_storage is None else shared_storage
+    if layout != declared.dtype:
         raise AssertionError(
-            f"貸し手の主表の格納が '{layout}' —"
-            f" 借り手の宣言 '{drafter_shared_storage(config).dtype}' と違う"
+            f"貸し手の主表の格納が '{layout}' — 借り手の宣言 '{declared.dtype}' と違う"
         )
     return LenderSlots(shapes=shapes, slots=slots, shared_tensor=key)
 
@@ -521,9 +535,17 @@ def external_states_plan(
 
 
 def share_target_embedding(
-    graph: IrGraph, tensors: dict[str, torch.Tensor], lender: LenderSlots, config: Any
+    graph: IrGraph,
+    tensors: dict[str, torch.Tensor],
+    lender: LenderSlots,
+    config: Any,
+    *,
+    storage: IrStorage | None = None,
 ) -> tuple[IrGraph, dict[str, torch.Tensor], str]:
     """主表の initializer を **shared 宣言**へ置き換え、その実体を格納から外す。
+
+    `storage` is the shared declaration's storage (default {@link drafter_shared_storage}; the
+    same value the caller handed {@link lender_slots}).
 
     MUST: 対象は「embedding の重みスロットで消費される `[V, H]` の initializer」1 本ちょうど
     （借り手側でも構造で引く — FQN 由来のテンソルキーは torch.export の内部順序で決まる）。
@@ -546,7 +568,8 @@ def share_target_embedding(
     key = graph.initializers[name].tensor
     initializers = dict(graph.initializers)
     initializers[name] = IrInitializer(
-        shared=IrShared(tensor=lender.shared_tensor), storage=drafter_shared_storage(config)
+        shared=IrShared(tensor=lender.shared_tensor),
+        storage=drafter_shared_storage(config) if storage is None else storage,
     )
     remaining = {tensor: value for tensor, value in tensors.items() if tensor != key}
     if len(remaining) != len(tensors) - 1:
@@ -919,6 +942,22 @@ def write_goldens(
     print("[golden] target（製品系列と同じ丸め）を読む", file=sys.stderr, flush=True)
     wrapper = product.load_wrapper(model_dir)
     one_shot.quantize_wrapper(wrapper)
+    return goldens_against(drafter, wrapper, cases, out_dir, cycles, device)
+
+
+def goldens_against(
+    drafter: DrafterWrapper,
+    wrapper: Any,
+    cases: Sequence[tuple[str, torch.Tensor]],
+    out_dir: Path,
+    cycles: int,
+    device: str,
+) -> dict[str, Any]:
+    """Take and write every case's golden against `wrapper` — the target reference, a product
+    wrapper (`gemma4.export_product.ProductChunkWrapper`) already in the storage the lender series
+    holds — and return the summary ({@link write_goldens} loads the regular product's; the QAT
+    line hands its own, `gemma4.export_drafter_qat`).
+    """
     # MUST: 貸し手だけ上流既定の SDPA へ戻す。`karume_gqa`
     # （{@link gemma4.export.gqa_sdpa_attention}）は「mask 無しは非因果に化ける」ので mask を
     # 必須にするが、KV cache を使う経路では上流が「causal は is_causal に任せる」判断で
@@ -1104,8 +1143,13 @@ def export_module_with_attention(
 
 
 def example_inputs(wrapper: DrafterWrapper, specs: Mapping[str, Any]) -> tuple[torch.Tensor, ...]:
-    """trace の例示入力（K / V は固定 {@link TRACE_KV_ROWS} 行の placeholder）。"""
+    """trace の例示入力（K / V は固定 {@link TRACE_KV_ROWS} 行の placeholder）。
+
+    The K / V placeholders carry the drafter's `num_key_value_heads` (E2B 1 / E4B 2 — the lender's
+    slots have the same head count, which the surgery takes from the lender's declaration).
+    """
     backbone = int(wrapper.drafter.config.backbone_hidden_size)
+    heads = int(wrapper.drafter.config.get_text_config().num_key_value_heads)
     generator = torch.Generator().manual_seed(20260908)
     rope = decode.rope_args(specs, torch.tensor([[TRACE_KV_ROWS - 1]]))
     sliding = specs[one_shot.SLIDING_ATTENTION].head_dim
@@ -1114,10 +1158,10 @@ def example_inputs(wrapper: DrafterWrapper, specs: Mapping[str, Any]) -> tuple[t
         torch.zeros(1, 1, dtype=torch.int64),
         torch.randn(1, backbone, generator=generator),
         *rope,
-        torch.randn(1, 1, TRACE_KV_ROWS, sliding, generator=generator),
-        torch.randn(1, 1, TRACE_KV_ROWS, sliding, generator=generator),
-        torch.randn(1, 1, TRACE_KV_ROWS, full, generator=generator),
-        torch.randn(1, 1, TRACE_KV_ROWS, full, generator=generator),
+        torch.randn(1, heads, TRACE_KV_ROWS, sliding, generator=generator),
+        torch.randn(1, heads, TRACE_KV_ROWS, sliding, generator=generator),
+        torch.randn(1, heads, TRACE_KV_ROWS, full, generator=generator),
+        torch.randn(1, heads, TRACE_KV_ROWS, full, generator=generator),
     )
 
 

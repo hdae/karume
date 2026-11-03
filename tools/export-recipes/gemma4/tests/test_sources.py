@@ -198,3 +198,93 @@ class TestModelPins:
 
         with pytest.raises(sources.SourcePinError, match="missing"):
             sources.assert_model_pins(tokenizer_dir, weights_dir, pins)
+
+
+class TestQatPins:
+    """The q4_0 QAT line of E2B / E4B (`gemma4.export_product_qat`): the QAT weights plus the
+    regular tokenizer, the same two-source form as 12B."""
+
+    @pytest.mark.parametrize(
+        ("model", "weights", "tokenizer"),
+        [
+            (
+                "e2b",
+                "6befbaca7398925921802abd1f277b495b78b738",
+                "3e22461f65e89153144f8adb70e3b8c2cc9845a7",
+            ),
+            (
+                "e4b",
+                "476025a01dbf99361c062bbeca3d6a76bb4c4566",
+                "ee0ef6023621cff504d758262d4e04895a5af4a2",
+            ),
+        ],
+    )
+    def test_the_weights_are_the_qat_checkpoint_and_the_tokenizer_the_regular_one(
+        self, model: str, weights: str, tokenizer: str
+    ) -> None:
+        pins = sources.qat_pins(model)
+        name = model.upper()
+
+        assert pins.weights.repo == f"google/gemma-4-{name}-it-qat-q4_0-unquantized"
+        assert pins.weights.revision == weights
+        assert sorted(pins.weights.sha256) == ["config.json", "model.safetensors"]
+        assert pins.tokenizer.repo == f"google/gemma-4-{name}-it"
+        assert pins.tokenizer.revision == tokenizer
+        assert pins.tokenizer.sha256 == {"tokenizer.json": E2B_TOKENIZER_SHA256}
+
+    @pytest.mark.parametrize("model", ["e2b", "e4b"])
+    def test_the_tokenizer_revision_is_the_regular_line_s(self, model: str) -> None:
+        """The regular line's hand-placed checkpoint records the commit it was fetched at (needs
+        `inputs/gemma4/`)."""
+        from _shared.upstream import UpstreamProvenanceError, snapshot_revision
+
+        regular = sources.checkpoint_dir(model)
+        try:
+            revision = snapshot_revision(regular)
+        except UpstreamProvenanceError as error:  # the record is a local asset (assets-layout)
+            pytest.skip(f"no fetch record for {regular}: {error}")
+
+        assert sources.qat_pins(model).tokenizer.revision == revision
+
+    def test_the_directories_are_the_two_hub_cache_snapshots(self, tmp_path, monkeypatch) -> None:
+        constants = pytest.importorskip("huggingface_hub.constants")
+        monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path))
+        pins = sources.qat_pins("e2b")
+
+        assert sources.qat_checkpoint_dir("e2b") == (
+            tmp_path
+            / "models--google--gemma-4-E2B-it-qat-q4_0-unquantized"
+            / "snapshots"
+            / pins.weights.revision
+        )
+        assert sources.qat_tokenizer_dir("e2b") == (
+            tmp_path / "models--google--gemma-4-E2B-it" / "snapshots" / pins.tokenizer.revision
+        )
+
+    def test_the_label_names_both_sources(self) -> None:
+        pins = sources.qat_pins("e4b")
+
+        assert pins.label == (
+            f"google/gemma-4-E4B-it-qat-q4_0-unquantized@{pins.weights.revision} (weights)"
+            f" + google/gemma-4-E4B-it@{pins.tokenizer.revision} (tokenizer)"
+        )
+
+    def test_the_regular_line_keeps_its_hand_placed_checkpoints(self) -> None:
+        assert "e2b" not in sources.HUB_PINS and "e4b" not in sources.HUB_PINS
+        assert sources.checkpoint_dir("e2b") != sources.qat_checkpoint_dir("e2b")
+
+    def test_a_model_without_a_qat_line_fails_loudly(self) -> None:
+        with pytest.raises(ValueError, match="no q4_0 QAT line"):
+            sources.qat_pins("12b")
+
+    @pytest.mark.parametrize("model", ["e2b", "e4b"])
+    def test_the_cached_snapshots_match_the_pins(self, model: str) -> None:
+        """The real hub cache (needs both snapshots)."""
+        weights_dir, tokenizer_dir = (
+            sources.qat_checkpoint_dir(model),
+            sources.qat_tokenizer_dir(model),
+        )
+        if not all((path / "config.json").is_file() for path in (weights_dir, tokenizer_dir)):
+            pytest.skip(f"{model}'s QAT snapshots are not in the hub cache")
+
+        sources.assert_model_pins(weights_dir, tokenizer_dir, sources.qat_pins(model))

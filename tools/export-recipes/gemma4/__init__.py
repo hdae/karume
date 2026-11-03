@@ -32,6 +32,13 @@ KV sharing, K = V on the full layers) and has its own export script,
 form of `qwen3_5.export`). Where every model's checkpoint is read from — and 12B's hub-snapshot
 pin — is {@link gemma4.sources} (torch-free, like `rope`).
 
+E2B / E4B's q4_0 QAT line (Google's `-qat-q4_0-unquantized` checkpoints, every 2-D text weight on a
+4-bit grid) has its own entry, {@link gemma4.export_product_qat}: the product series' graph with the
+grid imported as i4, a schema-4 PLE asset and its own goldens. Its MTP drafter has one too,
+{@link gemma4.export_drafter_qat}: the regular drafter's borrower graph from Google's q4_0 QAT
+assistants, for E2B and E4B (the one E4B drafter here), every weight imported from its grid as
+i4 and the borrowed table the QAT product series' i4 table.
+
 依存方向は **recipe → core の一方向だけ**（`tools/exporter/tests/test_architecture_boundary.py`
 が機械で守る）。
 
