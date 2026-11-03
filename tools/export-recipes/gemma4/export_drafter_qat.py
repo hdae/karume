@@ -1,10 +1,11 @@
-"""Writes the q4_0 QAT MTP drafter of Gemma 4 E2B / E4B (`--model`) as the borrower graph of the
-QAT product series, every drafter weight imported from the checkpoint's own 4-bit grid, with its
-goldens.
+"""Writes the q4_0 QAT MTP drafter of Gemma 4 E2B / E4B / 12B (`--model`) as the borrower graph of
+the QAT target's product series, every drafter weight imported from the checkpoint's own 4-bit
+grid, with its goldens.
 
     cd tools/export-recipes
     uv run --with 'transformers==5.14.1' python -m gemma4.export_drafter_qat              # E2B
     uv run --with 'transformers==5.14.1' python -m gemma4.export_drafter_qat --model e4b  # E4B
+    uv run --with 'transformers==5.14.1' python -m gemma4.export_drafter_qat --model 12b  # 12B
 
 ## The regular drafter's graph, from other weights
 
@@ -15,10 +16,11 @@ embedding table and the same form check (`assert_ir_form_drafter`). The lender i
 series (`gemma4.export_product_qat`, `outputs/series/gemma4-<model>-qat-product/`). What differs:
 
 1. **Pinned sources** (`gemma4.sources`): the drafter is Google's
-   `google/gemma-4-E{2,4}B-it-qat-q4_0-unquantized-assistant` (`QAT_DRAFTER_PINS`), the target's
-   weights and tokenizer the QAT line's two pins (`QAT_PINS`). All three are checked before the
-   load, and the record's full digests once more before it is written. Google's model card: with
-   a QAT target, the assistant must be a QAT checkpoint of the same precision.
+   `google/gemma-4-<model>-it-qat-q4_0-unquantized-assistant` (`QAT_DRAFTER_PINS`), the target's
+   weights and tokenizer the QAT target's two pins (`QAT_TARGET_PINS` — E2B / E4B's `QAT_PINS`,
+   12B's `HUB_PINS`). All three are checked before the load, and the record's full digests once
+   more before it is written. Google's model card: with a QAT target, the assistant must be a QAT
+   checkpoint of the same precision.
 2. **Every drafter weight is imported from its q4_0 grid instead of rounded to i8**
    ({@link import_drafter}): the 22 linears (pre / post projection; per layer q_proj, o_proj,
    gate / up / down) and the head (`lm_head`, tied to the drafter's own `embed_tokens`
@@ -42,6 +44,38 @@ series (`gemma4.export_product_qat`, `outputs/series/gemma4-<model>-qat-product/
 5. E4B's drafter is the same graph at E4B's widths (backbone 2560, two KV heads): the lender's KV
    owner layers (E4B 22 / 23) come from the target's layer layout, the slot shapes from the
    lender's declaration.
+6. **12B's drafter is the same graph from another upstream class** (section below).
+
+## 12B: `Gemma4UnifiedAssistantForCausalLM`
+
+12B's assistant (`google/gemma-4-12B-it-qat-q4_0-unquantized-assistant` — `QAT_DRAFTER_PINS["12b"]`)
+is `Gemma4UnifiedAssistantForCausalLM`: in transformers 5.14.1 a subclass of
+`Gemma4AssistantForCausalLM` whose generated code is the same line for line (the inner decoder is
+`Gemma4UnifiedTextModel`), so it consumes the target the same way: the target's scaled embedding of
+the last token concatenated with the target's last hidden row (`pre_projection` `[1024, 2 × 3840]`),
+the K / V of the target's last sliding layer (46) and last full layer (47) through
+`shared_kv_states`, its own `lm_head` tied to its own `embed_tokens` `[262144, 1024]` (no
+centroids: the config's `use_ordered_embeddings` is already false and the checkpoint has no
+`masked_embedding` tensor). It borrows no other target tensor. What the 12B class changes is
+parametric, and the shared pieces read it from upstream:
+
+- the class (`gemma4.export_drafter.assistant_class` by the config's `model_type`) and the
+  target's embedding class (`gemma4.export_drafter.target_embedding_class` —
+  `Gemma4UnifiedTextScaledWordEmbedding`, scale `sqrt(3840)`);
+- the KV heads per layer type: 8 on the sliding layers, 1 of width 512 on the full one
+  (`attention_k_eq_v` — `gemma4.export_decode.kv_heads`; the trace's placeholders take them, the
+  surgery takes the lender's declaration: sliding `[1, 8, 1032, 256]`, full `[1, 1, C, 512]`);
+- the target: 12B's one pinned line (`gemma4.sources.QAT_TARGET_PINS` — `HUB_PINS["12b"]`, the QAT
+  weights plus 12B-it's tokenizer), the lender its product series
+  (`outputs/series/gemma4-12b-product/` — {@link lender_suffix}), whose tied table is i4 g32
+  imported from the same grid (ADR 0108 addendum 15 splits its 120 MiB scale);
+- the reference: `gemma4.export_unified.reference_wrapper` (the product goldens' own — resident i4
+  codes dequantized at use, the table as its imported grid values; {@link load_target_reference}),
+  whose decoder takes no PLE input (`gemma4.export_drafter._new_lender` reads that from the
+  config);
+- the target's greedy continuation masks the two ids 12B's `generation_config.json` suppresses
+  (`gemma4.export_unified.suppress_tokens` — the host's `pipelineConfig.suppressTokens`; none for
+  E2B / E4B), and `reference.json` records them.
 
 ## Why i4 here and i8 for the regular drafter
 
@@ -54,15 +88,20 @@ N = 200 cycles × the three golden cases, both arms against the QAT target refer
 borrowing its table — the drafter with the checkpoint's BF16 values against the grid-imported
 one:
 
-| case (prompt tokens)     | E2B BF16 | E2B i4 | E4B BF16 | E4B i4 |
-| ------------------------ | -------- | ------ | -------- | ------ |
-| `short-en` (25)          | 0.55     | 0.55   | 0.54     | 0.54   |
-| `readme-recipes` (2441)  | 1.22     | 1.23   | 1.325    | 1.325  |
-| `readme-exporter` (3690) | 1.21     | 1.22   | 1.33     | 1.33   |
+| case (prompt tokens)     | E2B BF16 | E2B i4 | E4B BF16 | E4B i4 | 12B BF16 | 12B i4 |
+| ------------------------ | -------- | ------ | -------- | ------ | -------- | ------ |
+| `short-en` (25)          | 0.55     | 0.55   | 0.54     | 0.54   | 2.545    | 2.545  |
+| `readme-recipes` (2441)  | 1.22     | 1.23   | 1.325    | 1.325  | 1.495    | 1.495  |
+| `readme-exporter` (3690) | 1.21     | 1.22   | 1.33     | 1.33   | 1.67     | 1.67   |
 
-The two arms emit the same draft id in 99.8 / 99.3 / 99.3% (E2B) and 99.2 / 100 / 100% (E4B) of
-the 600 positions of each case; no imported tensor is bit-identical to its BF16 values, the
-largest move is 0.31% (E2B) / 0.37% (E4B) of the tensor's max |w|.
+The two arms emit the same draft id in 99.8 / 99.3 / 99.3% (E2B), 99.2 / 100 / 100% (E4B) and
+99.8 / 100 / 99.8% (12B) of the 600 positions of each case; no imported tensor is bit-identical to
+its BF16 values, the largest move is 0.31% (E2B) / 0.37% (E4B) / 0.37% (12B) of the tensor's max
+|w|. 12B's tokenizer gives the same prompt lengths. 12B's `short-en` row says little: the target's
+greedy continuation of that raw prompt loops on "…000 words about a lighthouse keeper who
+discovers a message in a bottle." (the stored model's own greedy — the lender's cached
+continuation equals the full re-forward one), which the drafter predicts easily; the two document
+cases continue coherently.
 
 ## Output layout
 
@@ -95,9 +134,10 @@ from gemma4 import export as one_shot
 from gemma4 import export_decode as decode
 from gemma4 import export_drafter as drafter
 from gemma4 import export_product_qat as qat
+from gemma4 import export_unified as unified
 from gemma4 import provenance, sources
 from gemma4.card import GEMMA4_LICENSE
-from gemma4.distribution import GEMMA4_DRAFTER_ROLE
+from gemma4.distribution import GEMMA4_DRAFTER_ROLE, GEMMA4_PRODUCT_SUFFIX
 from gemma4.export_drafter import DrafterWrapper, LenderSlots
 from gemma4.sources import HubPin, ModelPins
 from karume.artifacts import staged_publication
@@ -132,12 +172,22 @@ TARGET_EMBED_WEIGHT = f"{drafter.TARGET_EMBED_MODULE}.weight"
 TARGET_EMBED_CHECKPOINT_KEY = f"{one_shot.CHECKPOINT_TEXT_PREFIX}embed_tokens.weight"
 
 #: The device the goldens run on. CPU: this workspace's torch is the CPU build, and E4B's F32
-#: target (about 18 GiB besides the PLE tables) does not fit a 12 GiB card.
+#: target (about 18 GiB besides the PLE tables) does not fit a 12 GiB card, nor does 12B's
+#: reference (about 16 GiB).
 DEFAULT_DEVICE = "cpu"
 
 
 class QatDrafterError(RuntimeError):
     """The drafter, the lender series or the target reference is not what the QAT line expects."""
+
+
+def lender_suffix(model: str) -> str:
+    """The series suffix of model `model`'s lender: the QAT product series for a model with a
+    separate QAT line (`gemma4.sources.QAT_PINS` — E2B / E4B), the product series for one whose
+    pinned weights are the QAT checkpoint (12B — `gemma4.export_unified`). A model without a QAT
+    target fails loudly (`gemma4.sources.qat_target_pins`)."""
+    sources.qat_target_pins(model)
+    return qat.QAT_PRODUCT_SUFFIX if model in sources.QAT_PINS else GEMMA4_PRODUCT_SUFFIX
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +299,7 @@ def assert_lender_checkpoint(product_dir: Path, pins: ModelPins) -> None:
     if not path.is_file():
         raise QatDrafterError(
             f"{path} is missing — export the QAT product series first"
-            " (python -m gemma4.export_product_qat)"
+            " (python -m gemma4.export_product_qat; 12B: python -m gemma4.export_unified)"
         )
     files = json.loads(path.read_text(encoding="utf-8"))["checkpoint"]["files"]
     wrong = {
@@ -287,13 +337,30 @@ def read_lender(product_dir: Path, config: Any, target_config: Any, pins: ModelP
 
 
 def load_target_reference(model_dir: Path) -> Any:
-    """The QAT target as the QAT product series stores it: its loader and its grid import of every
-    2-D text weight (`gemma4.export_product_qat` — the values the container decodes to). The packed
-    form is dropped; only the wrapper's values are kept."""
+    """The QAT target as its product series stores it — the values the lender's container
+    decodes to, by the series' own code, chosen by the target's text model type:
+
+    - E2B / E4B: `gemma4.export_product_qat`'s loader and its grid import of every 2-D text weight
+      (the packed form is dropped; only the wrapper's values are kept);
+    - 12B (`gemma4_unified_text`): {@link load_unified_reference}.
+    """
+    if one_shot.load_text_config(model_dir).model_type == unified.UNIFIED_TEXT_MODEL_TYPE:
+        return load_unified_reference(model_dir)
     wrapper = qat.load_wrapper(model_dir)
     qat.import_wrapper(wrapper)
     gc.collect()
     return wrapper
+
+
+def load_unified_reference(model_dir: Path) -> unified.UnifiedProductWrapper:
+    """12B's reference as `gemma4.export_unified` takes its goldens against it
+    (`gemma4.export_unified.reference_wrapper` — every linear the product stores as i4 holds its
+    imported codes dequantized at use, the tied table its imported grid values, about 16 GiB).
+    The i4 linears are read from a weightless wrapper of the same config (the product's
+    `int4_targets` — names only, no parameter data)."""
+    config = unified.load_config(model_dir)
+    int4 = unified.int4_targets(unified.UnifiedProductWrapper(unified.meta_model(config)))
+    return unified.reference_wrapper(config, unified.Checkpoint(model_dir), int4)
 
 
 def assert_borrowed_table(wrapper: DrafterWrapper, target: Any) -> None:
@@ -337,10 +404,15 @@ def drafter_record(
     drafter_dir: Path,
     drafter_pin: HubPin,
     goldens: Mapping[str, Any],
+    *,
+    suppress: Sequence[int] = (),
 ) -> dict[str, Any]:
     """`reference.json`: the regular drafter's record (`gemma4.export_drafter.drafter_reference`)
     with the target named by its two pinned sources (`gemma4.provenance.checkpoint_fingerprint`)
-    and the drafter by its pin; both are checked against their pins before it is returned."""
+    and the drafter by its pin; both are checked against their pins before it is returned.
+    `suppressTokens` names the ids the goldens' target continuation was taken with masked
+    (`suppress` — the host must mask the same ids to reproduce `tokens`; the product records'
+    field)."""
     checkpoint = provenance.checkpoint_fingerprint(
         model_dir, pins.label, tokenizer_dir=tokenizer_dir, pins=pins
     )
@@ -358,6 +430,7 @@ def drafter_record(
             "files": files,
         },
         "goldens": dict(goldens),
+        "suppressTokens": list(suppress),
     }
 
 
@@ -385,7 +458,8 @@ def export_series(
     seat, and return the summary.
 
     `model_dir` / `tokenizer_dir` are the QAT target's two sources (`pins`), `drafter_dir` the QAT
-    drafter's snapshot (`drafter_pin`), `product_dir` the lender (the QAT product series).
+    drafter's snapshot (`drafter_pin`), `product_dir` the lender (the QAT target's product series
+    — {@link lender_suffix}).
 
     MUST: every gate (the pins, the lender, the form, the borrowed table, the goldens, the record's
     digests) passes before the seat is published. MUST: the grid import precedes the trace and the
@@ -404,6 +478,7 @@ def export_series(
         config = wrapper.drafter.config
         text = config.get_text_config()
         target_config = one_shot.load_text_config(model_dir)
+        suppress = unified.suppress_tokens(tokenizer_dir, target_config)
         with monitor.stage("grid") as record:
             print(
                 "[grid] import every drafter weight and the borrowed table",
@@ -466,8 +541,13 @@ def export_series(
                     target = load_target_reference(model_dir)
                     assert_borrowed_table(wrapper, target)
                 with monitor.stage("goldens"):
+                    print(
+                        f"[golden] suppressed ids of the target's continuation {list(suppress)}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                     golden_summary = drafter.goldens_against(
-                        wrapper, target, cases, staged, cycles, device
+                        wrapper, target, cases, staged, cycles, device, suppress=suppress
                     )
                 del target
                 gc.collect()
@@ -483,6 +563,7 @@ def export_series(
                         drafter_dir,
                         drafter_pin,
                         golden_summary,
+                        suppress=suppress,
                     ),
                 )
 
@@ -501,6 +582,7 @@ def export_series(
         "quantized": {"i4": len(fixed)},
         "form": form,
         "goldens": golden_summary,
+        "suppress_tokens": list(suppress),
         "stages": [stage.to_dict() for stage in monitor.records],
     }
 
@@ -514,16 +596,16 @@ def build_parser() -> argparse.ArgumentParser:
         with_sym_max=False,
         models=tuple(sorted(sources.QAT_DRAFTER_PINS)),
     )
-    # The weights' default is the QAT line's pinned snapshot, not the regular line's hand-placed
+    # The weights' default is the QAT target's pinned snapshot, not the regular line's hand-placed
     # checkpoint (`series_parser` registers that one).
-    one_shot.add_model_default(parser, "model_dir", sources.qat_checkpoint_dir)
+    one_shot.add_model_default(parser, "model_dir", sources.qat_target_checkpoint_dir)
     parser.add_argument("--tokenizer-dir", type=Path, default=None)
-    one_shot.add_model_default(parser, "tokenizer_dir", sources.qat_tokenizer_dir)
+    one_shot.add_model_default(parser, "tokenizer_dir", sources.qat_target_tokenizer_dir)
     parser.add_argument("--drafter-dir", type=Path, default=None)
     one_shot.add_model_default(parser, "drafter_dir", sources.qat_drafter_dir)
     parser.add_argument("--product-dir", type=Path, default=None)
     one_shot.add_model_default(
-        parser, "product_dir", partial(one_shot.series_dir, suffix=qat.QAT_PRODUCT_SUFFIX)
+        parser, "product_dir", lambda model: one_shot.series_dir(model, lender_suffix(model))
     )
     parser.add_argument("--steps", type=int, default=drafter.DRAFT_STEPS)
     parser.add_argument("--cycles", type=int, default=drafter.GOLDEN_CYCLES)
@@ -541,7 +623,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     summary = export_series(
         model_dir,
         options.pop("out"),
-        pins=sources.qat_pins(model),
+        pins=sources.qat_target_pins(model),
         drafter_pin=sources.qat_drafter_pin(model),
         **options,
     )

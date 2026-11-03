@@ -288,3 +288,64 @@ class TestQatPins:
             pytest.skip(f"{model}'s QAT snapshots are not in the hub cache")
 
         sources.assert_model_pins(weights_dir, tokenizer_dir, sources.qat_pins(model))
+
+
+class TestQatDrafterPins:
+    """12B's q4_0 QAT drafter (`gemma4.export_drafter_qat --model 12b`) and the target each QAT
+    drafter pairs with (`QAT_TARGET_PINS`)."""
+
+    def test_12b_pins_its_qat_assistant(self) -> None:
+        pin = sources.qat_drafter_pin("12b")
+
+        assert pin.repo == "google/gemma-4-12B-it-qat-q4_0-unquantized-assistant"
+        assert pin.revision == "18934064dd4c5c6cc3621f6381e7d377fc8cb7bd"
+        assert sorted(pin.sha256) == ["config.json", "model.safetensors"]
+        assert pin.sha256["model.safetensors"] == (
+            "67f1420cf24aa5065089aaed175223f7c245ccfda16111b6c56765afd7280db6"
+        )
+
+    def test_e2b_and_e4b_pair_with_their_qat_line(self) -> None:
+        for model in ("e2b", "e4b"):
+            assert sources.qat_target_pins(model) is sources.qat_pins(model)
+
+    def test_12b_pairs_with_its_one_pinned_line_whose_weights_are_the_qat_checkpoint(self) -> None:
+        pins = sources.qat_target_pins("12b")
+
+        assert pins is sources.HUB_PINS["12b"]
+        assert pins.weights.repo == "google/gemma-4-12B-it-qat-q4_0-unquantized"
+        assert pins.tokenizer.repo == "google/gemma-4-12B-it"
+
+    def test_every_qat_drafter_and_only_those_have_a_qat_target(self) -> None:
+        assert set(sources.QAT_TARGET_PINS) == set(sources.QAT_DRAFTER_PINS)
+
+    def test_the_qat_line_of_the_product_series_stays_e2b_and_e4b(self) -> None:
+        """12B's QAT weights are its product series' (`gemma4.export_unified`), not a second line
+        `gemma4.export_product_qat` could write."""
+        assert sorted(sources.QAT_PINS) == ["e2b", "e4b"]
+
+    def test_the_target_directories_are_the_pinned_snapshots(self, tmp_path, monkeypatch) -> None:
+        constants = pytest.importorskip("huggingface_hub.constants")
+        monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path))
+
+        assert sources.qat_target_checkpoint_dir("e4b") == sources.qat_checkpoint_dir("e4b")
+        assert sources.qat_target_tokenizer_dir("e4b") == sources.qat_tokenizer_dir("e4b")
+        assert sources.qat_target_checkpoint_dir("12b") == sources.checkpoint_dir("12b")
+        assert sources.qat_target_tokenizer_dir("12b") == sources.tokenizer_dir("12b")
+        assert sources.qat_drafter_dir("12b") == (
+            tmp_path
+            / "models--google--gemma-4-12B-it-qat-q4_0-unquantized-assistant"
+            / "snapshots"
+            / "18934064dd4c5c6cc3621f6381e7d377fc8cb7bd"
+        )
+
+    def test_a_model_without_a_qat_target_fails_loudly(self) -> None:
+        with pytest.raises(ValueError, match="no q4_0 QAT target"):
+            sources.qat_target_pins("31b")
+
+    def test_the_cached_12b_snapshot_matches_the_pin(self) -> None:
+        """The real hub cache (needs the snapshot)."""
+        directory = sources.qat_drafter_dir("12b")
+        if not (directory / "config.json").is_file():
+            pytest.skip(f"12B's QAT drafter is not in the hub cache ({directory})")
+
+        sources.assert_snapshot_pin(directory, sources.qat_drafter_pin("12b"))

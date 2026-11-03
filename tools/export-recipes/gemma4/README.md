@@ -430,6 +430,51 @@ These are a property of the drafter against this target, not of the runtime. The
 **torch drafter's own draft ids** (1,800 of them) to within 1%. A perfect score there says the port
 is faithful; it says nothing about how often a draft is accepted.
 
+### The q4_0 QAT drafters (`export_drafter_qat.py`)
+
+`export_drafter_qat.py --model e2b|e4b|12b` writes the same borrower graph from Google's
+quantization-aware-trained assistants, `google/gemma-4-<model>-it-qat-q4_0-unquantized-assistant`,
+pinned in `sources.py` (`QAT_DRAFTER_PINS`). Google's model card: with a QAT target, the assistant
+must be a QAT checkpoint of the same precision, so each one pairs with its model's QAT target
+(`QAT_TARGET_PINS`) and borrows from that target's product series — `gemma4-e2b-qat-product` /
+`gemma4-e4b-qat-product`, and for 12B `gemma4-12b-product` (12B's only line is the QAT
+checkpoint). What differs from the regular drafter above:
+
+- **every drafter weight is int4 group-32, imported from the checkpoint's own grid** — the 22
+  linears and the head; every group of 32 of the three pinned assistants recovers its q4_0 grid
+  (2026-11-03), and a group that does not fails the export. The int8 argument above was about
+  rounding weights that lie on no grid; these are the grid. The shared table is declared int4 too
+  and must be the lender's int4 g32 table from the pinned QAT weights.
+- **the goldens are taken against the lender series' own reference** — the values its container
+  decodes to — with the target's continuation masking the ids `generation_config.json` suppresses
+  (12B: two; `reference.json` records them as `suppressTokens`).
+- **12B's assistant is another upstream class**, `Gemma4UnifiedAssistantForCausalLM` (the same code
+  as E2B / E4B's class under another name), at 12B's widths: `hidden[1,3840]`, and the KV of the
+  target's layers 46 (sliding: 8 heads in 1032 rows) and 47 (full: 1 head of width 512). It borrows
+  nothing else from the target; its head is tied to its own `[262144, 1024]` table.
+
+E[a] at k = 3 — the mean accepted prefix, `tokens/cycle − 1` — over N = 200 cycles of one
+teacher-forced target trajectory per case, the checkpoint's BF16 drafter weights against the
+imported int4 ones, both against the QAT target's reference (2026-11-03; the three tokenizers give
+the same prompt lengths):
+
+| case (prompt tokens)     | E2B BF16 | E2B i4 | E4B BF16 | E4B i4 | 12B BF16 | 12B i4 |
+| ------------------------ | -------- | ------ | -------- | ------ | -------- | ------ |
+| `short-en` (25)          | 0.55     | 0.55   | 0.54     | 0.54   | 2.545    | 2.545  |
+| `readme-recipes` (2441)  | 1.22     | 1.23   | 1.325    | 1.325  | 1.495    | 1.495  |
+| `readme-exporter` (3690) | 1.21     | 1.22   | 1.33     | 1.33   | 1.67     | 1.67   |
+
+The int4 drafter emits the BF16 drafter's draft id in at least 99.2% of the 600 positions of every
+case. 12B's `short-en` row says little: the target's greedy continuation of that raw prompt loops
+on one sentence, which the drafter predicts easily; the two document cases continue coherently.
+
+    outputs/series/gemma4-<model>-qat-drafter/model.krm                          the container
+    outputs/series/gemma4-<model>-qat-drafter/drafter-golden.<case>.safetensors  expected drafts
+    outputs/series/gemma4-<model>-qat-drafter/reference.json                     provenance
+
+No distribution reads these series yet: `distribution.py` still requires the drafter component to
+be int8.
+
 ## What `tokenizer.py` emits
 
 The **compiled tokenizer asset**, `outputs/series/gemma4-e2b-tokenizer/tokenizer.json` (~9.6 MB):

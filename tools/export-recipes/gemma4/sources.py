@@ -23,6 +23,10 @@ generation defaults the regular `google/gemma-4-E{2,4}B-it` at the revisions the
 checkpoints of `inputs/gemma4/` were fetched at. The hand-placed regular line is unaffected:
 {@link checkpoint_dir} / {@link tokenizer_dir} keep reading `inputs/gemma4/`.
 
+The q4_0 QAT MTP drafters ({@link QAT_DRAFTER_PINS} — `gemma4.export_drafter_qat`) are pinned for
+E2B, E4B and 12B; each pairs with the QAT target {@link QAT_TARGET_PINS} names (12B's is its one
+line, {@link HUB_PINS}).
+
 Both repositories are still being updated, so following `main` would export whatever the branches
 point at on the day of the run. This module never downloads; `hf download <repo> --revision <pin>`
 fetches a snapshot.
@@ -204,15 +208,21 @@ QAT_PINS: Mapping[str, ModelPins] = {
 QAT_DRAFTER_UPSTREAM: Mapping[str, str] = {
     "e2b": "google/gemma-4-E2B-it-qat-q4_0-unquantized-assistant",
     "e4b": "google/gemma-4-E4B-it-qat-q4_0-unquantized-assistant",
+    "12b": "google/gemma-4-12B-it-qat-q4_0-unquantized-assistant",
 }
 
-#: Model → the pinned snapshot of its q4_0 QAT drafter (`gemma4.export_drafter_qat`), both in the
-#: hub cache on 2026-11-03 (README front matter: `license: apache-2.0`, `base_model` the regular
-#: `google/gemma-4-E{2,4}B-it-assistant`): the LFS blob name of `model.safetensors` (E2B
-#: 157,565,344 B / E4B 159,138,208 B) and the SHA-256 of `config.json`'s bytes. E2B's config is the
-#: regular E2B assistant's but for an explicit `eos_token_id` (`[1, 106]`); E4B's differs from
-#: E2B's in `backbone_hidden_size` (2560) and the drafter's `num_key_value_heads` (2) — the E4B
-#: target's width and KV heads. The files the provenance record fingerprints are these two
+#: Model → the pinned snapshot of its q4_0 QAT drafter (`gemma4.export_drafter_qat`), all three in
+#: the hub cache on 2026-11-03 (README front matter: `license: apache-2.0`, `base_model` the regular
+#: `google/gemma-4-<model>-it-assistant`): the LFS blob name of `model.safetensors` (E2B
+#: 157,565,344 B / E4B 159,138,208 B / 12B 845,719,296 B) and the SHA-256 of `config.json`'s bytes.
+#: E2B's config is the regular E2B assistant's but for an explicit `eos_token_id` (`[1, 106]`);
+#: E4B's differs from E2B's in `backbone_hidden_size` (2560) and the drafter's
+#: `num_key_value_heads` (2) — the E4B target's width and KV heads. 12B's is another class,
+#: `gemma4_unified_assistant` (`Gemma4UnifiedAssistantForCausalLM` — upstream's code is the E2B /
+#: E4B class's, renamed), at 12B's widths: backbone 3840, hidden 1024, 16 query heads, 8 KV heads on
+#: the sliding layers and 1 on the full one (`attention_k_eq_v`, `num_global_key_value_heads`),
+#: window 1024, and `use_ordered_embeddings` already false (no centroid tensor in the checkpoint).
+#: The files the provenance record fingerprints are these two
 #: (`gemma4.export_drafter_qat.DRAFTER_FILES`).
 #:
 #: Moving a pin needs the licence review of `THIRD_PARTY_NOTICES.md` again.
@@ -237,7 +247,23 @@ QAT_DRAFTER_PINS: Mapping[str, HubPin] = {
             "config.json": "190a55c13f78f2634134a2a9dfc75a58489bc14513d767a16a20272d7fadbbae",
         },
     ),
+    "12b": HubPin(
+        repo=QAT_DRAFTER_UPSTREAM["12b"],
+        revision="18934064dd4c5c6cc3621f6381e7d377fc8cb7bd",
+        sha256={
+            "model.safetensors": (
+                "67f1420cf24aa5065089aaed175223f7c245ccfda16111b6c56765afd7280db6"
+            ),
+            "config.json": "7638c1d42f9fa73fe44b1a10604766b928b8985263f15775cd1a286a5a12799c",
+        },
+    ),
 }
+
+#: Model → the pinned sources of the q4_0 QAT target its QAT drafter pairs with: E2B / E4B's QAT
+#: line ({@link QAT_PINS}); 12B's one line ({@link HUB_PINS}), whose weights are already the QAT
+#: checkpoint. Google's model card: with a QAT target, the assistant must be a QAT checkpoint of the
+#: same precision — so every QAT drafter has an entry here, and nothing else does.
+QAT_TARGET_PINS: Mapping[str, ModelPins] = {**QAT_PINS, "12b": HUB_PINS["12b"]}
 
 
 def _hand_placed_dir(model: str) -> Path:
@@ -338,6 +364,32 @@ def qat_drafter_dir(model: str) -> Path:
     """The hub cache's snapshot of model `model`'s QAT drafter (a path only, like
     {@link checkpoint_dir})."""
     pin = qat_drafter_pin(model)
+    return hub_snapshot_dir(pin.repo, pin.revision)
+
+
+def qat_target_pins(model: str) -> ModelPins:
+    """The pinned sources of the QAT target model `model`'s QAT drafter pairs with
+    ({@link QAT_TARGET_PINS}); a model without one fails loudly."""
+    pins = QAT_TARGET_PINS.get(model)
+    if pins is None:
+        raise ValueError(
+            f"gemma4 has no q4_0 QAT target for model '{model}'"
+            f" (known: {' / '.join(sorted(QAT_TARGET_PINS))})"
+        )
+    return pins
+
+
+def qat_target_checkpoint_dir(model: str) -> Path:
+    """The hub cache's snapshot of the QAT target's weights and their `config.json` (a path only,
+    like {@link checkpoint_dir}): {@link qat_checkpoint_dir} for E2B / E4B, 12B's weights pin."""
+    pin = qat_target_pins(model).weights
+    return hub_snapshot_dir(pin.repo, pin.revision)
+
+
+def qat_target_tokenizer_dir(model: str) -> Path:
+    """The hub cache's snapshot the QAT target reads its tokenizer, chat template and generation
+    defaults from: {@link qat_tokenizer_dir} for E2B / E4B, 12B's tokenizer pin."""
+    pin = qat_target_pins(model).tokenizer
     return hub_snapshot_dir(pin.repo, pin.revision)
 
 

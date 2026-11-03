@@ -96,12 +96,14 @@ from _shared.paths import REPO_ROOT, SERIES_ROOT
 from gemma4 import export as one_shot
 from gemma4 import export_decode as decode
 from gemma4 import export_product as product
+from gemma4 import export_unified as unified
 from gemma4 import ple, provenance
 from gemma4.distribution import (
     GEMMA4_CHUNK_LENGTH,
     GEMMA4_DEFAULT_MODEL,
     GEMMA4_DRAFTER_ROLE,
     GEMMA4_DRAFTER_SUFFIX,
+    gemma4_ple_dim,
 )
 from karume.artifacts import staged_publication
 from karume.container import container_parts
@@ -279,15 +281,37 @@ class DrafterWrapper(nn.Module):
         return tuple(drafted)
 
 
+def target_embedding_class(config: Any) -> type[nn.Module]:
+    """Upstream's scaled embedding class of the target text model `config` (its `model_type`):
+    `Gemma4TextScaledWordEmbedding` for E2B / E4B (`gemma4_text`),
+    `Gemma4UnifiedTextScaledWordEmbedding` for 12B (`gemma4_unified_text`). An unknown model type
+    fails loudly."""
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4TextScaledWordEmbedding
+    from transformers.models.gemma4_unified.modeling_gemma4_unified import (
+        Gemma4UnifiedTextScaledWordEmbedding,
+    )
+
+    classes: dict[str, type[nn.Module]] = {
+        "gemma4_text": Gemma4TextScaledWordEmbedding,
+        "gemma4_unified_text": Gemma4UnifiedTextScaledWordEmbedding,
+    }
+    found = classes.get(config.model_type)
+    if found is None:
+        raise AssertionError(
+            f"target text model type {config.model_type!r} has no known embedding"
+            f" (known: {sorted(classes)})"
+        )
+    return found
+
+
 def load_target_embed(model_dir: Path, config: Any) -> nn.Module:
     """target の主埋め込み表を f32 で読み、上流と同じ**スケール付き**埋め込みとして返す。
 
-    MUST: `Gemma4TextScaledWordEmbedding` そのものを使う（`nn.Embedding` + 自前のスカラ倍に
-    置き換えない）— `embed_scale = sqrt(hidden_size)` の値も掛ける位置も上流のものであることが、
+    MUST: 上流の target のスケール付き埋め込みクラスそのものを使う（{@link
+    target_embedding_class} — `nn.Embedding` + 自前のスカラ倍に置き換えない）—
+    `embed_scale = sqrt(hidden_size)` の値も掛ける位置も上流のものであることが、
     貸し手が同じ表を同じ意味で使っていることの根拠になる。
     """
-    from transformers.models.gemma4.modeling_gemma4 import Gemma4TextScaledWordEmbedding
-
     key = one_shot.PLE_CHECKPOINT_KEY.replace("embed_tokens_per_layer", "embed_tokens")
     with safe_open(str(model_dir / one_shot.CHECKPOINT_FILE), framework="pt") as handle:
         if key not in set(handle.keys()):
@@ -296,11 +320,31 @@ def load_target_embed(model_dir: Path, config: Any) -> nn.Module:
     vocab, hidden = int(config.vocab_size), int(config.hidden_size)
     if list(weight.shape) != [vocab, hidden]:
         raise AssertionError(f"主埋め込み表が {list(weight.shape)} — [{vocab}, {hidden}] でない")
-    module = Gemma4TextScaledWordEmbedding(
+    module = target_embedding_class(config)(
         vocab, hidden, int(config.pad_token_id), embed_scale=hidden**0.5
     )
     module.weight.data = weight
     return module
+
+
+def assistant_class(config: Any) -> type[nn.Module]:
+    """Upstream's MTP assistant class of drafter config `config` (its `model_type`):
+    `Gemma4AssistantForCausalLM` for E2B / E4B (`gemma4_assistant`),
+    `Gemma4UnifiedAssistantForCausalLM` for 12B (`gemma4_unified_assistant` — the same code under
+    another name, over a `gemma4_unified_text` decoder). An unknown model type fails loudly."""
+    from transformers import Gemma4AssistantForCausalLM, Gemma4UnifiedAssistantForCausalLM
+
+    classes: dict[str, type[nn.Module]] = {
+        "gemma4_assistant": Gemma4AssistantForCausalLM,
+        "gemma4_unified_assistant": Gemma4UnifiedAssistantForCausalLM,
+    }
+    found = classes.get(config.model_type)
+    if found is None:
+        raise AssertionError(
+            f"drafter model type {config.model_type!r} is not an MTP assistant"
+            f" (known: {sorted(classes)})"
+        )
+    return found
 
 
 def load_drafter(
@@ -309,14 +353,16 @@ def load_drafter(
     """drafter を f32 で読み、疎 softmax を外して RoPE を受け渡し口へ差し替えたラッパを返す。
 
     `source` is what `from_pretrained` reads the drafter from: the regular E2B assistant's
-    repository id by default, or a pinned snapshot directory (`gemma4.export_drafter_qat`).
+    repository id by default, or a pinned snapshot directory (`gemma4.export_drafter_qat`). The
+    class is the one the config names ({@link assistant_class} — 12B's assistant is
+    `Gemma4UnifiedAssistantForCausalLM`).
 
     MUST: `use_ordered_embeddings` は**読み込む前に**倒す（`masked_embedding` は `__init__` が
     config を見て作るので、後から属性を消しても forward の分岐は疎 softmax 側に倒れたまま）。
     MUST: 内側の `model.embed_tokens` は落とす。tied なので実体は `lm_head` が保持し続け、
     落としておかないと同じ重みが 2 つの FQN から見えて i8 の丸めが二重に掛かる。
     """
-    from transformers import AutoConfig, Gemma4AssistantForCausalLM
+    from transformers import AutoConfig
 
     one_shot.register_attention()
     config = AutoConfig.from_pretrained(source)
@@ -324,9 +370,9 @@ def load_drafter(
     config._attn_implementation = one_shot.ATTENTION_NAME
     text = config.get_text_config()
     text._attn_implementation = one_shot.ATTENTION_NAME
-    drafter = Gemma4AssistantForCausalLM.from_pretrained(
-        source, config=config, dtype=torch.float32
-    ).eval()
+    drafter = (
+        assistant_class(config).from_pretrained(source, config=config, dtype=torch.float32).eval()
+    )
     if drafter.masked_embedding is not None:
         raise AssertionError(
             "疎 softmax（masked_embedding）が残っている"
@@ -762,11 +808,15 @@ def build_cases(model_dir: Path) -> tuple[tuple[str, torch.Tensor], ...]:
 
 @dataclass
 class _Lender:
-    """golden を採るときの貸し手（実重みの target）— cache と共有 KV を持ち回る器。"""
+    """golden を採るときの貸し手（実重みの target）— cache と共有 KV を持ち回る器。
+
+    `tables` / `scale` are the host's PLE lookup — `None` for a target without per-layer
+    embeddings (12B), whose decoder takes no `per_layer_inputs` ({@link _new_lender}).
+    """
 
     model: Any
     tables: Any
-    scale: float
+    scale: float | None
     specs: Mapping[str, Any]
     cache: Any
     shared: Any
@@ -778,7 +828,11 @@ class _Lender:
         rope = decode.rope_args(self.specs, positions.unsqueeze(0))
         device = self.model.device
         embeds = self.model.model.embed_tokens(ids.to(device))
-        stacked = ple.per_layer_inputs(self.tables, ids.to("cpu"), self.scale).to(device)
+        per_layer: dict[str, torch.Tensor] = {}
+        if self.tables is not None:
+            per_layer["per_layer_inputs"] = ple.per_layer_inputs(
+                self.tables, ids.to("cpu"), self.scale
+            ).to(device)
         with (
             torch.no_grad(),
             self.model.model.rotary_emb.bound(
@@ -787,7 +841,7 @@ class _Lender:
         ):
             out = self.model.model(
                 inputs_embeds=embeds,
-                per_layer_inputs=stacked,
+                **per_layer,
                 attention_mask=None,
                 position_ids=positions.unsqueeze(0).to(device),
                 past_key_values=self.cache,
@@ -820,15 +874,23 @@ class _Lender:
 
 
 def _new_lender(wrapper: Any, specs: Mapping[str, Any]) -> _Lender:
-    """1 ケースぶんの貸し手（cache と共有 KV はケースごとに作り直す）。"""
+    """1 ケースぶんの貸し手（cache と共有 KV はケースごとに作り直す）。
+
+    Whether the host's PLE lookup runs is read from the target's config
+    (`gemma4.distribution.gemma4_ple_dim` — never from whether the wrapper happens to hold the
+    tables): a PLE model whose wrapper lost its tables fails here, and a PLE-free one (12B) runs
+    without them.
+    """
     from transformers import DynamicCache
 
+    config = wrapper.model.config
+    with_ple = gemma4_ple_dim(config, "the golden target's config") > 0
     return _Lender(
         model=wrapper.model,
-        tables=wrapper.per_layer,
-        scale=wrapper.per_layer_scale,
+        tables=wrapper.per_layer if with_ple else None,
+        scale=wrapper.per_layer_scale if with_ple else None,
         specs=specs,
-        cache=DynamicCache(config=wrapper.model.config),
+        cache=DynamicCache(config=config),
         shared={},
     )
 
@@ -842,8 +904,16 @@ def draft_case(
     *,
     device: str,
     chunk: int = GOLDEN_PREFILL_CHUNK,
+    suppress: Sequence[int] = (),
 ) -> dict[str, torch.Tensor]:
     """1 ケースぶんの golden（`prompt` / `tokens` / `draft`）を採る。
+
+    `suppress` are the ids the host's greedy selection never picks
+    (`pipelineConfig.suppressTokens` — 12B's `generation_config.json` declares two, E2B / E4B
+    none): the target's continuation `tokens` is the argmax of its logits with them at −inf
+    (`gemma4.export_unified.suppressed_logits`, the product goldens' rule). The drafts are the
+    drafter's own unmasked argmax — what the graph emits and what upstream's candidate generator
+    takes.
 
     貸し手を prompt で prefill（`chunk` 行ずつ）してから、`cycles` 回の greedy 継続を回す。
     各 cycle の入り口は貸し手の論理長 `P`（= KV に入っている行数）で、drafter へ渡すのは
@@ -873,7 +943,7 @@ def draft_case(
     for cycle in range(cycles + drafter.steps):
         past = lender.length
         # 位置 P の frontier token（貸し手が h@(P−1) から選んだ 1 本 — まだ KV に無い）。
-        nxt = int(lender.logits(hidden).argmax(-1))
+        nxt = int(unified.suppressed_logits(lender.logits(hidden), suppress).argmax(-1))
         tokens.append(nxt)
         if cycle < cycles:
             sliding = lender.kv(one_shot.SLIDING_ATTENTION, min(past, window))
@@ -952,11 +1022,14 @@ def goldens_against(
     out_dir: Path,
     cycles: int,
     device: str,
+    *,
+    suppress: Sequence[int] = (),
 ) -> dict[str, Any]:
     """Take and write every case's golden against `wrapper` — the target reference, a product
-    wrapper (`gemma4.export_product.ProductChunkWrapper`) already in the storage the lender series
+    wrapper (`gemma4.export_product.ProductChunkWrapper`, or 12B's
+    `gemma4.export_unified.UnifiedProductWrapper`) already in the storage the lender series
     holds — and return the summary ({@link write_goldens} loads the regular product's; the QAT
-    line hands its own, `gemma4.export_drafter_qat`).
+    line hands its own, `gemma4.export_drafter_qat`). `suppress` is {@link draft_case}'s.
     """
     # MUST: 貸し手だけ上流既定の SDPA へ戻す。`karume_gqa`
     # （{@link gemma4.export.gqa_sdpa_attention}）は「mask 無しは非因果に化ける」ので mask を
@@ -976,7 +1049,7 @@ def goldens_against(
     summary: dict[str, Any] = {}
     for name, ids in cases:
         print(f"[golden] {name}: prompt {int(ids.shape[1])} token", file=sys.stderr, flush=True)
-        tensors = draft_case(drafter, wrapper, specs, ids, cycles, device=device)
+        tensors = draft_case(drafter, wrapper, specs, ids, cycles, device=device, suppress=suppress)
         path = out_dir / f"{GOLDEN_PREFIX}{name}{GOLDEN_SUFFIX}"
         save_file(tensors, str(path))
         stats = acceptance_stats(tensors)
@@ -1145,11 +1218,15 @@ def export_module_with_attention(
 def example_inputs(wrapper: DrafterWrapper, specs: Mapping[str, Any]) -> tuple[torch.Tensor, ...]:
     """trace の例示入力（K / V は固定 {@link TRACE_KV_ROWS} 行の placeholder）。
 
-    The K / V placeholders carry the drafter's `num_key_value_heads` (E2B 1 / E4B 2 — the lender's
-    slots have the same head count, which the surgery takes from the lender's declaration).
+    The K / V placeholders carry the drafter's KV heads per layer type
+    (`gemma4.export_decode.kv_heads` — upstream's rule): E2B 1 / E4B 2 on both types; 12B 8 on the
+    sliding layers and 1 on the full one (`attention_k_eq_v`). The lender's slots have the same
+    head counts, which the surgery takes from the lender's declaration.
     """
     backbone = int(wrapper.drafter.config.backbone_hidden_size)
-    heads = int(wrapper.drafter.config.get_text_config().num_key_value_heads)
+    text = wrapper.drafter.config.get_text_config()
+    sliding_heads = decode.kv_heads(text, one_shot.SLIDING_ATTENTION)
+    full_heads = decode.kv_heads(text, one_shot.FULL_ATTENTION)
     generator = torch.Generator().manual_seed(20260908)
     rope = decode.rope_args(specs, torch.tensor([[TRACE_KV_ROWS - 1]]))
     sliding = specs[one_shot.SLIDING_ATTENTION].head_dim
@@ -1158,10 +1235,10 @@ def example_inputs(wrapper: DrafterWrapper, specs: Mapping[str, Any]) -> tuple[t
         torch.zeros(1, 1, dtype=torch.int64),
         torch.randn(1, backbone, generator=generator),
         *rope,
-        torch.randn(1, heads, TRACE_KV_ROWS, sliding, generator=generator),
-        torch.randn(1, heads, TRACE_KV_ROWS, sliding, generator=generator),
-        torch.randn(1, heads, TRACE_KV_ROWS, full, generator=generator),
-        torch.randn(1, heads, TRACE_KV_ROWS, full, generator=generator),
+        torch.randn(1, sliding_heads, TRACE_KV_ROWS, sliding, generator=generator),
+        torch.randn(1, sliding_heads, TRACE_KV_ROWS, sliding, generator=generator),
+        torch.randn(1, full_heads, TRACE_KV_ROWS, full, generator=generator),
+        torch.randn(1, full_heads, TRACE_KV_ROWS, full, generator=generator),
     )
 
 

@@ -4,8 +4,9 @@ drafter (`gemma4/export_drafter.py`).
 The real export is run by hand (the regular drafter's rule). What is pinned here is what breaks
 silently:
 
-- the pins of the two QAT assistants, and that every drafter weight of the pinned snapshots lies
-  on the q4_0 grid (the real hub cache; SKIP without it)
+- the pins of the three QAT assistants, and that every drafter weight of the pinned snapshots
+  lies on the q4_0 grid (the real hub cache; SKIP without it); 12B's class is pinned in
+  `test_export_drafter_qat_12b.py`
 - the grid import covers every drafter weight class — the 22 linears and the head as packed i4
   g32, the borrowed table as values only — and refuses a weight outside it
 - the borrowed table's declaration matches the QAT target's: i4 g32 in the lender's container,
@@ -166,7 +167,7 @@ def _linear_weights(wrapper: torch.nn.Module) -> set[str]:
 
 
 class TestThePins:
-    """The two QAT assistants are pinned like the QAT targets (`gemma4.sources`)."""
+    """The QAT assistants are pinned like the QAT targets (`gemma4.sources`)."""
 
     @pytest.mark.parametrize(
         ("model", "revision"),
@@ -183,7 +184,13 @@ class TestThePins:
         assert sorted(pin.sha256) == sorted(qd.DRAFTER_FILES)
 
     def test_every_qat_drafter_has_a_qat_target_line(self) -> None:
-        assert set(sources.QAT_DRAFTER_PINS) == set(sources.QAT_PINS)
+        """E2B / E4B pair with their QAT line, 12B with its one line (whose weights are the QAT
+        checkpoint) — each drafter with the QAT weights of its own model."""
+        assert set(sources.QAT_DRAFTER_PINS) == set(sources.QAT_TARGET_PINS)
+        for model, pins in sources.QAT_TARGET_PINS.items():
+            assert pins.weights.repo == sources.QAT_DRAFTER_UPSTREAM[model].removesuffix(
+                "-assistant"
+            ), model
 
     def test_the_regular_assistant_is_not_a_qat_drafter(self) -> None:
         """Google's card: a QAT target needs a QAT drafter of the same precision."""
@@ -191,7 +198,7 @@ class TestThePins:
 
     def test_a_model_without_a_qat_drafter_fails_loudly(self) -> None:
         with pytest.raises(ValueError, match="no q4_0 QAT drafter"):
-            sources.qat_drafter_pin("12b")
+            sources.qat_drafter_pin("31b")
 
     def test_the_directory_is_the_hub_cache_snapshot(self, tmp_path, monkeypatch) -> None:
         constants = pytest.importorskip("huggingface_hub.constants")
@@ -205,7 +212,7 @@ class TestThePins:
             / pin.revision
         )
 
-    @pytest.mark.parametrize("model", ["e2b", "e4b"])
+    @pytest.mark.parametrize("model", ["e2b", "e4b", "12b"])
     def test_the_cached_snapshot_matches_the_pin(self, model: str) -> None:
         """The real hub cache (needs the snapshot)."""
         directory = sources.qat_drafter_dir(model)
@@ -214,7 +221,7 @@ class TestThePins:
 
         sources.assert_snapshot_pin(directory, sources.qat_drafter_pin(model))
 
-    @pytest.mark.parametrize("model", ["e2b", "e4b"])
+    @pytest.mark.parametrize("model", ["e2b", "e4b", "12b"])
     def test_every_drafter_weight_of_the_pinned_snapshot_is_on_the_grid(self, model: str) -> None:
         """The fact the i4 storage rests on, on the real checkpoint: every rank-2 tensor but the
         unused sparse-head centroids recovers its q4_0 grid (needs the snapshot)."""
@@ -597,6 +604,27 @@ class TestTheRecord:
         assert record["drafter"]["revision"] == "c" * 40
         assert sorted(record["drafter"]["files"]) == sorted(qd.DRAFTER_FILES)
         assert record["goldens"] == {"case": {"tokens_per_cycle": 2.0}}
+        assert record["suppressTokens"] == []
+
+    def test_it_names_the_ids_the_target_continuation_was_taken_with_masked(
+        self, stand_ins, tmp_path
+    ) -> None:
+        """12B's `generation_config.json` suppresses two ids; the host must mask them too to
+        reproduce the goldens' `tokens`."""
+        weights_dir, tokenizer_dir, pins, drafter_dir, pin = stand_ins
+
+        record = qd.drafter_record(
+            tmp_path / "gemma4-12b-qat-drafter",
+            weights_dir,
+            tokenizer_dir,
+            pins,
+            drafter_dir,
+            pin,
+            {},
+            suppress=(258882, 258883),
+        )
+
+        assert record["suppressTokens"] == [258882, 258883]
 
     def test_a_drafter_that_is_not_the_pinned_one_fails(self, stand_ins, tmp_path) -> None:
         weights_dir, tokenizer_dir, pins, drafter_dir, pin = stand_ins
@@ -668,8 +696,9 @@ class TestTheCommandLine:
         parser = qd.build_parser()
 
         assert parser.parse_args(["--model", "e4b"]).model == "e4b"
+        assert parser.parse_args(["--model", "12b"]).model == "12b"
         with pytest.raises(SystemExit):
-            parser.parse_args(["--model", "12b"])
+            parser.parse_args(["--model", "31b"])
         assert "--model" in capsys.readouterr().err
 
     def test_the_defaults_are_the_pinned_sources_and_the_qat_lender(self) -> None:
