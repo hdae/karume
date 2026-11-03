@@ -40,6 +40,11 @@ export type FakeDeviceParts = {
   readonly submit?: (commandBuffers: readonly GPUCommandBuffer[]) => void;
   /** `createBuffer`（確保した実体の破棄を観測する検証で要る）。未指定なら持たない。 */
   readonly createBuffer?: (descriptor: GPUBufferDescriptor) => GPUBuffer;
+  /**
+   * `queue.writeBuffer` (needed by checks that observe what a GenerationContext writes to its
+   * lengths uniform). Absent = the queue has no such method.
+   */
+  readonly writeBuffer?: (buffer: GPUBuffer, offset: number, data: BufferSource) => void;
 };
 
 /** DOM 型全体は再現しないため cast で渡す（テスト専用の境界）。 */
@@ -55,6 +60,7 @@ export const fakeDevice = (parts: FakeDeviceParts = {}): GPUDevice =>
     queue: {
       onSubmittedWorkDone: parts.onSubmittedWorkDone ?? ((): Promise<void> => Promise.resolve()),
       submit: parts.submit ?? ((): void => undefined),
+      ...(parts.writeBuffer === undefined ? {} : { writeBuffer: parts.writeBuffer }),
     },
   }) as unknown as GPUDevice;
 

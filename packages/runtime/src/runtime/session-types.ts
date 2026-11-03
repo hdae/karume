@@ -90,6 +90,44 @@ export type GenerationRun = {
    * the logical length (ADR 0066 decision 6: no double bookkeeping).
    */
   readonly commit?: "immediate" | "deferred";
+  /**
+   * **Chains** this deferred run onto the rows already awaiting commit instead of refusing it
+   * (default `false` = the rule above: no run while a commit is pending). The shape is the decode
+   * run-ahead: several decode steps go into one batch, each fed by the previous step's on-GPU
+   * argmax, and the host commits the rows up to the first stop in one `commit(rows)` after
+   * reading the batch back.
+   *
+   * MUST: only with `commit: "deferred"` (any other combination fails loudly at issue). It is a
+   * separate field rather than a third `commit` value because it changes **where the run is
+   * placed and when it is admitted**, not when the logical length moves: the advance stays
+   * deferred, so every existing branch on `commit === "deferred"` keeps holding for a chained run
+   * without being taught a new value.
+   *
+   * The rules (checked in the synchronous section of issue — the context's lease):
+   *
+   * - **Placement**: the run sits at the end of the uncommitted range — `pendingCommit.pastLength +
+   *   pendingCommit.queryLength` (or `pastLength` when nothing is pending), plus the rows of the
+   *   chained runs accepted before it and not settled yet. The context reserves that position at
+   *   issue, so the caller builds the position inputs from the same value (the provisional
+   *   position = `pastLength` + every uncommitted row issued before this run).
+   * - **Concurrency**: several unsettled chained runs on one context are admitted **only inside
+   *   one BatchScope** (`Session.enqueue` with the same `batch`). A chained `Session.run`, or a
+   *   chained enqueue of another batch, is refused while any run on the context is unsettled — the
+   *   rule without `chain`. Across settled runs the chain continues from `pendingCommit`.
+   * - **Bound**: the whole uncommitted range (pending + unsettled chained rows + this run) obeys the
+   *   bound of one deferred run of that many rows — `≤ slidingSlack` on a context with sliding slots
+   *   (rejected rows must not overwrite live past KV) and `≤ chunkLength` in every case.
+   * - **Commit**: on success the run's rows join the pending commit (`pendingCommit.queryLength`
+   *   grows by `queryLength`); `commit(rows)` with `0 ≤ rows ≤ pendingCommit.queryLength` folds the
+   *   whole chain at once.
+   * - **Failure**: exactly as for a deferred run — a run that submitted a state-changing dispatch
+   *   poisons the context, and a failed batch settles every member as failed, so no part of that
+   *   batch's chain joins the pending commit.
+   *
+   * Every refusal for callers that do not pass `chain` is unchanged (an ordinary run while a commit
+   * is pending, a second unsettled run, `rewind` / `fork` while a commit is pending).
+   */
+  readonly chain?: boolean;
 };
 
 /** The specification of {@link Session.enqueue}. */
@@ -103,7 +141,8 @@ export type EnqueueOptions = {
    * A run that uses conversation state. The usage reservation is held from issue until the final
    * settlement of the batch. The logical length is advanced or deferred on the success of
    * finish / finishAndRead, not when enqueue returns. The same context cannot be used again while
-   * it is still uncommitted. Dispose the context / Session after finish.
+   * it is still uncommitted, except by chained deferred runs ({@link GenerationRun.chain} — several
+   * of them may join the same batch). Dispose the context / Session after finish.
    */
   readonly generation?: GenerationRun;
   /**
