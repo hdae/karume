@@ -591,6 +591,15 @@ describe("chat 停止文字列: 停止理由を差し替えても内側の勘定
     // 停止 token（`eos` 枝の `token`）は理由ごと差し替わるので運ばない。
     assertEquals(Object.hasOwn(stop, "token"), false);
   });
+
+  it("a run-ahead turn: the decodeAhead counters are copied as they are", () => {
+    const decodeAhead = { depth: 4, batches: 2, steps: 7 };
+    const stop = stopStringOf("END", { reason: "max-tokens", tokens: 8, decodeAhead });
+    assertEquals(stop, { reason: "stop-string", stopString: "END", tokens: 8, decodeAhead });
+    assert(stop.decodeAhead === decodeAhead, "the counters were rebuilt instead of copied");
+    const plain = stopStringOf("END", { reason: "max-tokens", tokens: 8 });
+    assertEquals(Object.hasOwn(plain, "decodeAhead"), false);
+  });
 });
 
 test("投機の切替（speculativeSetup）: drafter 無しの pipeline に true を渡すと fail loudly", () => {

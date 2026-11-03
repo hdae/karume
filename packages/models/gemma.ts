@@ -176,6 +176,12 @@ export { GenerationCapacityError } from "./src/generation/sequence.ts";
 export type {
   GenerationCapacityConstraint,
   GenerationCapacityDetail,
+  /**
+   * The decode run-ahead counters (`GenerationStop.decodeAhead` — the configured depth, the batches
+   * the turn ran and the steps they computed. Present only on turns of a pipeline built with
+   * `decodeAhead` ≥ 2).
+   */
+  GenerationDecodeAhead,
   GenerationEvent,
   /**
    * The self-tuning gate state carried by one diagnostics report (`GenerationRunPhase.gate` — the

@@ -244,6 +244,27 @@ export type PipelineOptions = {
    */
   readonly pleResidency?: PleResidency;
   /**
+   * The **decode run-ahead** depth (default `1` = off: one greedy step per GPU batch, as today).
+   *
+   * With `d ≥ 2`, a temperature-0 turn without processing runs up to `d` decode steps in one GPU
+   * batch: each step feeds the token the previous step selected **on the GPU**, and the `d`
+   * selections are read back together at the batch's single fence. It removes the host round trip
+   * between tokens (the fence, the readback, writing the next token) from all but one step in `d`;
+   * the cost is that a batch which meets a stop token has already computed up to `d − 1` steps past
+   * it (left uncommitted, never delivered). The generated token ids are **identical** to `d = 1`
+   * (the same kernels on the same inputs). Turns whose sampler is not plain greedy, and pipelines
+   * built with {@link PipelineOptions.onRunDiagnostics}, decode one step at a time as before (the
+   * turn's `done` carries `decodeAhead` with the batches it ran).
+   *
+   * MUST: an integer ≥ 1 and **at most the KV ring's sliding slack** (the rows one batch leaves
+   * uncommitted — 8 for the published Gemma 4 graphs). The slack is a property of the conversation's
+   * context, so a larger value fails loudly when the first conversation is opened. `d ≥ 2` needs
+   * `pleResidency: "gpu"` (with the host PLE, every step's per-layer inputs are gathered on the host
+   * from the step's token, which the run-ahead keeps on the GPU) and cannot be combined with
+   * {@link PipelineOptions.speculative}; both are refused before anything is fetched.
+   */
+  readonly decodeAhead?: number;
+  /**
    * The row count of a fixed-length prefill chunk (default: the distribution's declaration
    * {@link PipelineConfig.chunkLength}).
    *
@@ -870,6 +891,44 @@ export const resolveGemma4PleResidency = (
 };
 
 /**
+ * Settles the decode run-ahead depth ({@link PipelineOptions.decodeAhead} — fails synchronously
+ * **before reading a single byte of the assets**, like {@link resolveGemma4PleResidency}).
+ *
+ * Every refusal here is decided by the caller's options alone, so each is an input error (ADR 0107
+ * decision 2). The upper bound — the context's sliding slack — exists only once a conversation's
+ * context does, so the generation surface checks it there (`assertGreedyAheadSetup`).
+ *
+ * MUST: a depth ≥ 2 that cannot run fails loudly rather than silently decoding per step — "the
+ * run-ahead did not make it faster" would otherwise remain with neither an exception nor a warning.
+ *
+ * NOTE: `export` is for the test that calls the check directly (not exposed on `mod.ts` / the
+ * subpath surface — ADR 0008).
+ */
+export const resolveGemma4DecodeAhead = (where: string, options: PipelineOptions): number => {
+  const depth = options.decodeAhead ?? 1;
+  if (!Number.isSafeInteger(depth) || depth < 1) {
+    throw new ModelInputError(
+      `${where}: decodeAhead ${JSON.stringify(depth)} is not an integer ≥ 1 (1 = one decode step per batch)`,
+    );
+  }
+  if (depth === 1) return depth;
+  if (options.speculative !== undefined) {
+    throw new ModelInputError(
+      `${where}: decodeAhead ${depth} and speculative cannot be combined` +
+        " (a speculative turn verifies drafts instead of taking greedy steps)",
+    );
+  }
+  if (resolveGemma4PleResidency(where, options) !== "gpu") {
+    throw new ModelInputError(
+      `${where}: decodeAhead ${depth} needs pleResidency: "gpu"` +
+        " (with the host PLE every step's per-layer inputs are gathered on the host from the step's token," +
+        " and the run-ahead keeps that token on the GPU)",
+    );
+  }
+  return depth;
+};
+
+/**
  * If this conversation speculates, assembles the DI set passed to the generation surface (the
  * resolution of {@link SequenceOptions.speculative} / {@link ChatOptions.speculative} —
  * the one path shared by chat and sequence).
@@ -1081,6 +1140,9 @@ const buildGemma4Program = (
         ? {
             names: gemma4RopeInputNames(),
             derive: (_ids, positions) => Promise.resolve(familyRopeInputs(config.rope, positions)),
+            // Only RoPE is left on the host, and it reads positions alone (the run-ahead derives a
+            // step before its token exists — `decodeAhead`).
+            positionsOnly: true,
           }
         : {
             names: [PER_LAYER_INPUTS, ...gemma4RopeInputNames()],
@@ -1138,6 +1200,7 @@ export class GemmaPipeline {
     // MUST: the placement option is checked **before reading a single byte of the assets** (`#build`
     // goes through the same function too, but that is after the GB-scale load).
     resolveGemma4PleResidency(where, options);
+    resolveGemma4DecodeAhead(where, options);
     const source = toManifestSource(
       ref,
       where,
@@ -1265,6 +1328,7 @@ export class GemmaPipeline {
     // The placement option is checked before opening a single byte of the assets (the same position
     // as in `loadPretrained`).
     resolveGemma4PleResidency(where, options);
+    resolveGemma4DecodeAhead(where, options);
     // MUST: the explicit quant execution knobs are checked **here** too. This surface has no manifest
     // and cannot go through `resolveGemmaSessionOptions`; without this the same mistaken option would
     // travel down to Session construction and turn into the runtime's `ExecutionError` = the
@@ -1343,6 +1407,7 @@ export class GemmaPipeline {
   ): Promise<Gemma4State> {
     const entry = gemmaEntryName(admission.family);
     const residency = resolveGemma4PleResidency(entry, options);
+    const decodeAhead = resolveGemma4DecodeAhead(entry, options);
     const { wiring, tokenizer, ple } = buildGemma4Program(
       admitted,
       open,
@@ -1435,6 +1500,8 @@ export class GemmaPipeline {
               // upper bound of the resident output.
               rows: [1, ...wiring.chunkBuckets, wiring.chunkLength],
               entry,
+              // The run-ahead's steps feed token ids that stay on the GPU (`decodeAhead`).
+              residentIds: decodeAhead >= 2,
             });
       session = await model.createSession(gpu, sessionOptions);
       // Under GPU residency, runs that do not use greedy (prefill, decode with diagnostics) also go
@@ -1443,7 +1510,14 @@ export class GemmaPipeline {
       // independent of whether the wrapper exists.
       const greedyOutput =
         pleGpu !== undefined || (!gpu.gpuTimingEnabled && options.onRunDiagnostics === undefined)
-          ? createGemmaGreedyOutput(gpu, session, wiring.logits, wiring.vocabSize, pleGpu)
+          ? createGemmaGreedyOutput(
+              gpu,
+              session,
+              wiring.logits,
+              wiring.vocabSize,
+              pleGpu,
+              decodeAhead,
+            )
           : undefined;
       const drafter = await GemmaPipeline.#buildDrafter(
         admitted,
@@ -1637,6 +1711,9 @@ export class GemmaPipeline {
         sequence = await createGenerationSequence({
           session: state.greedyOutput?.session ?? state.session,
           ...(state.greedyOutput === undefined ? {} : { greedy: state.greedyOutput.greedy }),
+          ...(state.greedyOutput?.ahead === undefined
+            ? {}
+            : { greedyAhead: state.greedyOutput.ahead }),
           program: state.wiring,
           ...(capacity === undefined ? {} : { capacity }),
           ...(speculative === undefined ? {} : { speculative }),
@@ -1714,6 +1791,7 @@ export class GemmaPipeline {
     const inner = await createGenerationSequence({
       session: state.greedyOutput?.session ?? state.session,
       ...(state.greedyOutput === undefined ? {} : { greedy: state.greedyOutput.greedy }),
+      ...(state.greedyOutput?.ahead === undefined ? {} : { greedyAhead: state.greedyOutput.ahead }),
       program: state.wiring,
       ...(options.capacity === undefined ? {} : { capacity: options.capacity }),
       ...(speculative === undefined ? {} : { speculative }),

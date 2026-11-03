@@ -339,6 +339,10 @@
         "kind": "class"
       },
       {
+        "name": "GenerationDecodeAhead",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GenerationEvent",
         "kind": "typeAlias"
       },

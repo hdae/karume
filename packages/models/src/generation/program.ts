@@ -117,6 +117,16 @@ export type DerivedRunInputs = {
     positions: readonly number[],
     options?: DeriveInputsOptions,
   ) => Promise<RunInputs>;
+  /**
+   * Declares that {@link DerivedRunInputs.derive} **never reads `ids`** — its values depend on the
+   * positions alone (default `false`). gemma4 with GPU-resident PLE is such a slot (only RoPE is
+   * left on the host).
+   *
+   * MUST: declared, not inferred. The decode run-ahead (`GenerationSequenceOptions.greedyAhead`)
+   * derives a step's inputs before that step's token exists (it is still on the GPU), so it runs
+   * only on a slot that says so; a slot that reads ids would silently derive from a stand-in.
+   */
+  readonly positionsOnly?: boolean;
 };
 
 /** Specification for {@link createGenerationProgram} (with the graph — all verification is here). */
@@ -579,6 +589,14 @@ export const createGenerationProgram = (spec: GenerationProgramSpec): Generation
     ...(spec.residentInputs ?? []),
   ]);
   assertSymbols(graph, spec.capacitySymbol);
+  // `positionsOnly` admits the run-ahead, so a value outside the type (a truthy string, say) must
+  // not pass as a declaration nobody made.
+  const positionsOnly: unknown = spec.derivedInputs?.positionsOnly;
+  if (positionsOnly !== undefined && typeof positionsOnly !== "boolean") {
+    throw new Error(
+      `derivedInputs.positionsOnly ${JSON.stringify(positionsOnly)} is not a boolean`,
+    );
+  }
 
   return {
     inputIds: spec.inputIds,

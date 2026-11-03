@@ -37,10 +37,12 @@ import {
 } from "../../src/generation/program.ts";
 import type {
   GenerationEvent,
+  GenerationGreedyAhead,
   GenerationRunPhase,
   GenerationSession,
   GenerationStop,
   GenerationStream,
+  GreedyRunResult,
 } from "../../src/generation/sequence.ts";
 
 export const VOCAB = 16;
@@ -253,12 +255,14 @@ export const fakeSession = (options: FakeOptions = {}) => {
         throw new Error(`fake: ids ${ids.length} と positions ${positions.length} の長さが違う`);
       }
       derivedPositions = [...positions];
+      // Column 0 of each row carries its position: a run-ahead step is derived before it runs, so
+      // the fake reads the position from the step's own input instead of the latest derive.
+      const data = new Float32Array(ids.length * 2);
+      positions.forEach((position, row) => {
+        data[row * 2] = position;
+      });
       return Promise.resolve({
-        [DERIVED]: {
-          dtype: "f32",
-          shape: [1, ids.length, 2],
-          data: new Float32Array(ids.length * 2),
-        },
+        [DERIVED]: { dtype: "f32", shape: [1, ids.length, 2], data },
       } satisfies RunInputs);
     },
   };
@@ -322,99 +326,172 @@ export const fakeSession = (options: FakeOptions = {}) => {
   };
   const rootState: FakeContextState = { pastLength: 0, pending: undefined, disposals: 0 };
   const context = makeContext(rootState, "context");
+  /**
+   * One run (the body of `session.run`, and of each step of {@link fakeSession}'s `greedyAhead`).
+   * `chain` is the runtime's `GenerationRun.chain`: a deferred run placed after the pending rows,
+   * extending them (only the run-ahead passes it — the sequence's own runs never chain).
+   */
+  const runStep = (
+    inputs: RunInputs,
+    bindings: SymbolBindings | undefined,
+    generation: {
+      readonly context: FakeContext;
+      readonly queryLength: number;
+      readonly commit?: "deferred";
+      readonly chain?: boolean;
+    },
+  ): RunOutputs => {
+    // 論理長と保留は**渡された context の**もの（分岐した context は状態を共有しない）。
+    const state = stateOf(generation.context);
+    const pending = state.pending;
+    // MUST: 実 context と同じ拒否（保留がある間の 2 本目は「どこまでが確定か」が決まらない
+    // まま論理長を捕捉する）。記録もしない = 発行の同期区間で落ちる run と同じ扱い。
+    if (pending !== undefined && generation.chain !== true) {
+      throw new Error(
+        `fake: commit 待ちの generation run がある（queryLength ${pending.queryLength}）`,
+      );
+    }
+    // MUST: deferred run の行数は sliding ring の余裕まで（実 runtime の門を**同じ文言で**
+    // 写す — `executor.ts` の deferred 節）。棄却行は物理 ring 上で live な過去 KV を潰すので、
+    // ここを持たない fake だと `k + 1 ≤ slidingSlack` を外す退行が GPU 無しでは緑のまま、
+    // 実 GPU の最初の verify（GB 級ロードの末）で初めて落ちる。
+    if (generation.commit === "deferred") {
+      const slack = generation.context.slidingSlack;
+      if (slack !== undefined && generation.queryLength > slack) {
+        throw new Error(
+          `run: queryLength ${generation.queryLength} of a deferred generation run exceeds ` +
+            `the sliding ring's slack ${slack} (rejected rows would overwrite live past KV)`,
+        );
+      }
+      // A chain is bounded as a whole (the runtime's `acquireChainedRun`, with its wording).
+      const rows = (pending?.queryLength ?? 0) + generation.queryLength;
+      if (generation.chain === true && slack !== undefined && rows > slack) {
+        throw new Error(
+          `run: the chained run would leave ${rows} rows uncommitted, more than the sliding ring's slack ${slack}`,
+        );
+      }
+    }
+    // A chained run sits after the pending rows (the position the runtime reserves for it).
+    const position =
+      pending === undefined ? state.pastLength : pending.pastLength + pending.queryLength;
+    const call = calls.length;
+    const ids = readRow(inputs, IDS);
+    const lastRow = readRow(inputs, LAST_ROW);
+    calls.push({
+      ids: ids.values,
+      idsShape: ids.shape,
+      // この run の直前に `derive` が受けた位置列（run の入力には無い）。
+      positions: derivedPositions,
+      lastRow: lastRow.values[0],
+      lastRows: lastRow.values,
+      lastRowShape: lastRow.shape,
+      queryLength: generation.queryLength,
+      commit: generation.commit,
+      pastBefore: position,
+      bindings,
+      extra: Object.keys(inputs).filter((name) => name !== IDS && name !== LAST_ROW),
+      sameContext: generation.context === context,
+    });
+    runContexts.push(generation.context);
+    if (options.failAt === call) throw new Error("run が落ちた");
+    // 論理長の進行は run の成功で起きる（deferred は保留して commit を待つ — 実 context と同じ）。
+    // A chained run extends the pending rows (only a chained run reaches here with some pending).
+    if (generation.commit === "deferred") {
+      state.pending =
+        pending === undefined
+          ? { pastLength: state.pastLength, queryLength: generation.queryLength }
+          : {
+              pastLength: pending.pastLength,
+              queryLength: pending.queryLength + generation.queryLength,
+            };
+    } else {
+      state.pastLength += generation.queryLength;
+    }
+    // 返す行数は渡った `last_row` の本数（実グラフと同じ = R は入力が束縛する）。
+    const rows =
+      options.logitsRows !== undefined &&
+      (options.logitsRowsAt === undefined || options.logitsRowsAt === call)
+        ? options.logitsRows
+        : lastRow.values.length;
+    const logits = new Float32Array(rows * VOCAB);
+    const hidden = new Float32Array(rows * HIDDEN_SIZE);
+    for (let row = 0; row < rows; row += 1) {
+      // 出力の行 n が運ぶのは `last_row[n]` が指した**入力行**のものである（行数を偽る故障
+      // 注入では添字が尽きるので、その分は入力行 0 に畳む）。
+      const inputRow = lastRow.values[row] ?? 0;
+      const id =
+        options.successor === undefined
+          ? (options.tokens?.[call] ?? (call + 1) % VOCAB)
+          : options.successor[ids.values[inputRow]];
+      logits[row * VOCAB + id] = 10;
+      if (options.runnerUp !== undefined) {
+        logits[row * VOCAB + options.runnerUp.id] = options.runnerUp.logit;
+      }
+      // 汚染は行の**別の** id に置く（狙った id を潰すと「行の argmax」の写像が壊れる）。
+      if (options.nanAt === call && (options.nanRow === undefined || options.nanRow === row)) {
+        logits[row * VOCAB + ((id + 1) % VOCAB)] = Number.NaN;
+      }
+      hidden[row * HIDDEN_SIZE] = hiddenMark(call, inputRow);
+      hidden[row * HIDDEN_SIZE + 1] = ids.values[inputRow];
+    }
+    return {
+      [LOGITS]: { dtype: "f32", shape: [1, rows, VOCAB], data: logits },
+      // hidden は投機経路だけが読む（非投機で読む実装へ退行すれば、行ごとに違うこの値が
+      // logits の形検査に掛かる）。
+      [HIDDEN]: { dtype: "f32", shape: [1, rows, HIDDEN_SIZE], data: hidden },
+    };
+  };
   const session: GenerationSession<FakeContext> = {
     createGenerationContext: (spec) => {
       specs.push(spec);
       return Promise.resolve(context);
     },
     // deno-lint-ignore require-await
-    run: async (inputs, bindings, generation): Promise<RunOutputs> => {
-      // 論理長と保留は**渡された context の**もの（分岐した context は状態を共有しない）。
-      const state = stateOf(generation.context);
-      const pending = state.pending;
-      // MUST: 実 context と同じ拒否（保留がある間の 2 本目は「どこまでが確定か」が決まらない
-      // まま論理長を捕捉する）。記録もしない = 発行の同期区間で落ちる run と同じ扱い。
-      if (pending !== undefined) {
-        throw new Error(
-          `fake: commit 待ちの generation run がある（queryLength ${pending.queryLength}）`,
-        );
-      }
-      // MUST: deferred run の行数は sliding ring の余裕まで（実 runtime の門を**同じ文言で**
-      // 写す — `executor.ts` の deferred 節）。棄却行は物理 ring 上で live な過去 KV を潰すので、
-      // ここを持たない fake だと `k + 1 ≤ slidingSlack` を外す退行が GPU 無しでは緑のまま、
-      // 実 GPU の最初の verify（GB 級ロードの末）で初めて落ちる。
-      if (generation.commit === "deferred") {
-        const slack = generation.context.slidingSlack;
-        if (slack !== undefined && generation.queryLength > slack) {
-          throw new Error(
-            `run: queryLength ${generation.queryLength} of a deferred generation run exceeds ` +
-              `the sliding ring's slack ${slack} (rejected rows would overwrite live past KV)`,
-          );
-        }
-      }
-      const call = calls.length;
-      const ids = readRow(inputs, IDS);
-      const lastRow = readRow(inputs, LAST_ROW);
-      calls.push({
-        ids: ids.values,
-        idsShape: ids.shape,
-        // この run の直前に `derive` が受けた位置列（run の入力には無い）。
-        positions: derivedPositions,
-        lastRow: lastRow.values[0],
-        lastRows: lastRow.values,
-        lastRowShape: lastRow.shape,
-        queryLength: generation.queryLength,
-        commit: generation.commit,
-        pastBefore: state.pastLength,
-        bindings,
-        extra: Object.keys(inputs).filter((name) => name !== IDS && name !== LAST_ROW),
-        sameContext: generation.context === context,
-      });
-      runContexts.push(generation.context);
-      if (options.failAt === call) throw new Error("run が落ちた");
-      // 論理長の進行は run の成功で起きる（deferred は保留して commit を待つ — 実 context と同じ）。
-      if (generation.commit === "deferred") {
-        state.pending = { pastLength: state.pastLength, queryLength: generation.queryLength };
-      } else {
-        state.pastLength += generation.queryLength;
-      }
-      // 返す行数は渡った `last_row` の本数（実グラフと同じ = R は入力が束縛する）。
-      const rows =
-        options.logitsRows !== undefined &&
-        (options.logitsRowsAt === undefined || options.logitsRowsAt === call)
-          ? options.logitsRows
-          : lastRow.values.length;
-      const logits = new Float32Array(rows * VOCAB);
-      const hidden = new Float32Array(rows * HIDDEN_SIZE);
-      for (let row = 0; row < rows; row += 1) {
-        // 出力の行 n が運ぶのは `last_row[n]` が指した**入力行**のものである（行数を偽る故障
-        // 注入では添字が尽きるので、その分は入力行 0 に畳む）。
-        const inputRow = lastRow.values[row] ?? 0;
-        const id =
-          options.successor === undefined
-            ? (options.tokens?.[call] ?? (call + 1) % VOCAB)
-            : options.successor[ids.values[inputRow]];
-        logits[row * VOCAB + id] = 10;
-        if (options.runnerUp !== undefined) {
-          logits[row * VOCAB + options.runnerUp.id] = options.runnerUp.logit;
-        }
-        // 汚染は行の**別の** id に置く（狙った id を潰すと「行の argmax」の写像が壊れる）。
-        if (options.nanAt === call && (options.nanRow === undefined || options.nanRow === row)) {
-          logits[row * VOCAB + ((id + 1) % VOCAB)] = Number.NaN;
-        }
-        hidden[row * HIDDEN_SIZE] = hiddenMark(call, inputRow);
-        hidden[row * HIDDEN_SIZE + 1] = ids.values[inputRow];
-      }
-      return {
-        [LOGITS]: { dtype: "f32", shape: [1, rows, VOCAB], data: logits },
-        // hidden は投機経路だけが読む（非投機で読む実装へ退行すれば、行ごとに違うこの値が
-        // logits の形検査に掛かる）。
-        [HIDDEN]: { dtype: "f32", shape: [1, rows, HIDDEN_SIZE], data: hidden },
-      };
-    },
+    run: async (inputs, bindings, generation): Promise<RunOutputs> =>
+      runStep(inputs, bindings, generation),
   };
+  /** The step count of every `greedyAhead` call (one entry per batch). */
+  const aheadBatches: number[] = [];
+  /**
+   * The decode run-ahead on this fake: each step is a chained deferred run fed the previous step's
+   * {@link fakeArgmax} (the on-GPU selection), so the batch leaves its rows pending exactly as the
+   * runtime does. A step that fails rolls the batch's rows back (a failed batch folds none).
+   */
+  const greedyAhead = (depth: number): GenerationGreedyAhead<FakeContext> => ({
+    depth,
+    // deno-lint-ignore require-await
+    run: async ({ token, steps, context: target }) => {
+      aheadBatches.push(steps.length);
+      const state = stateOf(target);
+      const before = state.pending;
+      const selections: GreedyRunResult[] = [];
+      let fed = token;
+      try {
+        for (const step of steps) {
+          if (Object.hasOwn(step, IDS)) {
+            throw new Error("fake: a run-ahead step carries token ids (its token is on the GPU)");
+          }
+          derivedPositions = positionsOf(step);
+          const outputs = runStep(
+            { ...step, [IDS]: { dtype: "i32", shape: [1, 1], data: Int32Array.of(fed) } },
+            undefined,
+            { context: target, queryLength: 1, commit: "deferred", chain: true },
+          );
+          const selected = fakeArgmax(outputs);
+          selections.push(selected);
+          fed = selected.index;
+        }
+      } catch (error) {
+        state.pending = before;
+        throw error;
+      }
+      return selections;
+    },
+  });
   return {
     session,
+    greedyAhead,
+    aheadBatches,
     derivedInputs,
     /**
      * `createGenerationContext` が返す唯一の実体（借り手の `open` に渡る面と同一であること）。
@@ -433,6 +510,34 @@ export const fakeSession = (options: FakeOptions = {}) => {
     /** 任意の context（分岐を含む）の dispose の回数。 */
     disposalsOf: (target: FakeContext): number => stateOf(target).disposals,
   };
+};
+
+/** The positions a step's derived input carries (column 0 of each row — the default derive). */
+const positionsOf = (inputs: RunInputs): number[] => {
+  const tensor = Object.hasOwn(inputs, DERIVED) ? inputs[DERIVED] : undefined;
+  if (tensor === undefined || !("data" in tensor) || tensor.dtype !== "f32") {
+    throw new Error(`fake: a run-ahead step has no f32 '${DERIVED}' to read its position from`);
+  }
+  return Array.from({ length: tensor.data.length / 2 }, (_, row) => tensor.data[row * 2]);
+};
+
+/**
+ * The selection of one logits row as the GPU selector reports it: the first maximum, or the first
+ * NaN with its value (so the host's draw sees the NaN and throws, as the per-step greedy does).
+ */
+export const fakeArgmax = (outputs: RunOutputs): GreedyRunResult => {
+  const logits = outputs[LOGITS];
+  if (logits.dtype !== "f32") throw new Error("fake: logits are not f32");
+  let index = 0;
+  let value = -Infinity;
+  for (let at = 0; at < logits.data.length; at += 1) {
+    if (Number.isNaN(logits.data[at])) return { index: at, value: logits.data[at] };
+    if (logits.data[at] > value) {
+      index = at;
+      value = logits.data[at];
+    }
+  }
+  return { index, value };
 };
 
 /** イベントを全部汲む（`done` も一緒に返す）。 */
