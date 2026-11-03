@@ -4,12 +4,16 @@
 // 見ていた）。ここで縛るのは `fromPretrained` の admission 閉包が**同じ 1 本**
 // （`session/gpu-features.ts` の `sessionGpuFeatures` → `assertGpuFeaturesGranted`）を通ること:
 // shader-f16 を宣言した配布形と shader-f16 の無い共有 GPU を渡すと、重みの part を取る前に
-// 席の名前つきで落ちる。宣言しない配布形は同じ共有 GPU でこの門を抜け、後段（PLE 索引の読み）
-// まで進む（門が恒真でないことの対照）。
+// 席の名前つきで落ちる。
+// A distribution without the declaration passes this gate on the same shared GPU and goes on to a
+// later stage (the control that the gate is not always-failing).
 //
 // 配布形は疑似 HF（`helpers/container-loading-fixture.ts`）に載せた**宣言だけの容器**で、
 // `admitGemma4` の構造検査（RoPE 派生入力 4 本の幅・出力 2 本・容量記号 1 本）を通る最小形に
-// してある。PLE 索引も重みも持たないので、門を抜けた対照は PLE 索引の段で落ちる。
+// してある。
+// It has neither a per_layer_inputs input nor PLE assets, so admission takes it as a PLE-free model
+// (gemma-4-12B-it's form), and the manifest declares no tokenizer asset: the control that passes
+// the gate fails at the tokenizer stage, after admission and the weight fetch.
 //
 // NOTE: 共有 GPU は `runtime/tests/helpers/fake-gpu.ts` の実物の `GpuContext`（feature 集合は
 // device の `features` から読まれる — 空集合 = shader-f16 なし）。container_loading_test.ts の
@@ -150,11 +154,12 @@ describe("gemma.Pipeline.fromPretrained の gpuFeatures（共有 GPU）", () => 
     assertStringIncludes(error.message, "gemma.Pipeline: quant 'f32' requires shader-f16, but");
   });
 
-  it("宣言しない quant は同じ共有 GPU でこの門を抜け、PLE 索引の段まで進む（対照）", async () => {
+  it("a quant without the declaration passes this gate on the same shared GPU and reaches the tokenizer stage (control)", async () => {
     const error = await assertRejects(() => loadWithQuant({}), Error);
-    // 門が恒真なら同じ文言で落ちる。抜けた先は feature → limits の後の PLE 索引の段（この配布形は
-    // 索引を持たない）— 上の陽性ケースも、門が無ければここへ来る。
+    // An always-failing gate would fail with the same message. Past feature → limits → admission
+    // (a PLE-free model) the next failure is the missing tokenizer asset — the positive case above
+    // would reach it too if the gate were absent.
     assertEquals(error.message.includes("shader-f16"), false, error.message);
-    assertStringIncludes(error.message, "'ple_index'");
+    assertStringIncludes(error.message, "asset 'tokenizer' is missing");
   });
 });
