@@ -42,6 +42,7 @@
 | channel-major quantiser (per-pixel quantiser of conv3d w8a8) △ | conv3d w8a8 の画素ごとの量子化（チャネル順の形） | conv3d の入力 `x[Cin, P]` を格納の並びのまま 1 dispatch で読み、画素ごとにチャネル方向の amax を取って `quantize_rows` と同じ語と scale を書く量子化（ビット同一・2026-10-26 に転置コピー + `quantize_rows` から置き換え） | — | ADR 0133 追記 2026-10-26（channel-major quantiser の節） |
 | w4a8 | w4a8 | 重み i4 × 活性 per-token i8 の整数内積の経路 | — | ADR 0076 |
 | integer dot product | 整数内積 | 量子化した整数どうしを int32 累算で掛け合わせる実行形 | — | ADR 0025 / 0076 |
+| integer GEMV (`integerGemv`) △ | 整数 GEMV | packed 活性の SRQ コードと重みの整数コードの積をグループごとに厳密な整数で足し、scale は最後に決まった順で 1 回だけ掛ける decode 用 GEMV（opt-in・QAT E2B の計測した形だけ） | — | ADR 0140 |
 | packed int8 activations | packed 活性 | 固定 SRQ の int8 コード 4 個を u32 1 語に詰めて並列 GEMV へ渡す形 | — | ADR 0105 |
 | fake-quant | fake-quant | 重みを量子化格子へ丸めて f32 のまま持つ処理 | — | `tools/exporter/src/karume/quantize.py` |
 | quality measurement (`quality.json`) | 品質計測 | export 時に torch CPU で測る量子化誤差の記録 | — | ADR 0113 決定 4・5 |
