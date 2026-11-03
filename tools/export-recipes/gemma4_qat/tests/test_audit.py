@@ -51,7 +51,9 @@ def test_audit_reads_all_pieces_and_rejects_changed_payload(tmp_path, fault):
 
     # 固定 payload の 1 バイトを書き換える。block の sha256 は宣言と食い違うので、取り直しの
     # 段で落ちる（`assert_fixed_bytes` は `ReadContainer.block` 越しに読む）。
-    target = supply.encoding.scale_block if fault == "scale" else (supply.pieces or ())[0][0]
+    # The scale's first block: at this block limit the 128-byte scale is split on the pieces (ADR
+    # 0108 addendum 15), so it is a piece of the split scale.
+    target = supply.encoding.scale_blocks[0] if fault == "scale" else (supply.pieces or ())[0][0]
     block = next(entry for entry in read.model.blocks if entry.id == target)
     part = container_parts(path)[block.part]
     raw = bytearray(part.read_bytes())
