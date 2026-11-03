@@ -289,10 +289,16 @@ Split attribution in the model (one round each, without the integer GEMV): the l
 (Story / Explainer) as `linear_gemv:v1:f32:c32u4:wi2` and 2.498 ms (Story) as `linear_gemv_planes:v1:wi2:l8r4` — the
 kernel saves about 0.68 ms of GPU time per token in place.
 
-Reading (inferred, not measured): with the integer GEMV on, the decode's wall time on the M2 (about 22.7 ms per token)
-no longer follows GPU time — the host side of a token (about 1,036 dispatches recorded and submitted, the readback)
-sets the floor. The i4 shapes' end-to-end gain falling short of the single-kernel estimate (§8) fits the same floor. A
-GPU-time saving shows up end to end only after the host side shrinks (run-ahead, fewer dispatches).
+Why the end-to-end time did not move is **not explained**. Measured afterwards on the same M2 (QAT E2B, integer +
+byte-plane GEMV, greedy, 761 decode tokens; timestamps of `writeBuffer`, `GPUCommandEncoder.finish` and the 8 B
+`mapAsync` in the page, medians): from one token's readback resolving to its next run's 11 command buffers being
+finished took 0.9 ms (the 8 input writes 0.3 ms, the 11 finishes within 0.5 ms), then 3.2 ms passed before the readback's
+`mapAsync` was called, and 23.8 ms more before it resolved (that run took 28.2 ms per token: the M2 was in its slower
+state). So the page's JavaScript spends about 1 ms per token — the renderer is not the floor. A separate probe on the
+same device put the fixed cost of 1,036 empty dispatches in 11 submits at 2.92 ms from the first submit to the readback
+(2.35 ms between the passes' timestamps; 316 dispatches: 1.18 ms) — a lower bound for the per-dispatch cost of the
+browser's GPU process, too small on its own to make a 22.7 ms floor. Untested candidates: the GPU process's encoding of
+the real dispatches (six bindings each), and the M2 lowering its GPU clock as the work per token shrinks.
 
 ## 11. Open items and records
 
@@ -301,8 +307,9 @@ GPU-time saving shows up end to end only after the host side shrinks (run-ahead,
 - Not run: the byte-plane GEMV's GPU tests on the RTX 3080 Ti (`packages/runtime/tests/gpu_linear_gemv_planes_test.ts`);
   QAT E4B's lm_head shape was not measured; whether the magic decode can replace the integer GEMV's per-step round was
   not measured (§10).
-- The i4 end-to-end gain (0.93 / 1.68 ms) is below the single-kernel estimate (2.3 ms); §10 suggests a host-side floor
-  (inferred, not measured).
+- The i4 end-to-end gain (0.93 / 1.68 ms) is below the single-kernel estimate (2.3 ms), and the byte-plane GEMV's
+  in-place saving did not reach the end-to-end time either; the cause is not explained (§10 — the page's JavaScript was
+  measured at about 1 ms per token, so it is not the renderer).
 - The q 4096 parallel cell's median and min differ by ×1.8 (87.0 / 47.8 µs), so the full layers' K = 1536 group (q
   4096 with k/v 512, the one group where the integer kernel led on the recorded values) is not settled.
 - `/gemma4-bench`'s split mode fails intermittently (`setBindGroup: The provided value cannot be converted to a

@@ -167,10 +167,9 @@ opt-in GEMVs never compete for a linear.
   - In the model the kernel does save GPU time: split attribution (one round, without the integer GEMV — the split mode
     fails intermittently, see known issues) put the lm_head at 3.197 / 3.163 ms per token on the sequential GEMV and
     2.498 ms on the byte-plane GEMV (−0.68 ms).
-  - Reading (inferred, not measured): with the integer GEMV on, the decode's wall time on the M2 is no longer bound by
-    GPU time but by the host side of a token (about 1,036 dispatches recorded and submitted, the readback); the i4
-    shapes' shortfall against their single-kernel estimate (ADR 0140) fits the same floor. A GPU-time saving shows up
-    end to end only once the host side shrinks (run-ahead, fewer dispatches).
+  - Why the in-place saving does not reach the end-to-end time is not explained (research §10): the page's JavaScript
+    takes about 1 ms per token, so the renderer is not the floor; the browser GPU process's per-dispatch cost and the
+    M2's clock management are untested candidates.
 
 ## Consequences
 
