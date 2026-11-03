@@ -834,3 +834,124 @@ test("isStopToken: 集合のどれでも止まり、集合外では止まらな�
 test("isStopToken: 空の集合では止まらない（EOS を宣言しない資産）", () => {
   for (const token of [0, 1, 106]) assert(!isStopToken(token, []));
 });
+
+// ---------------------------------------------------------------------------
+// Suppressed tokens (the distribution's `suppress_tokens` — HF `SuppressTokensLogitsProcessor`)
+// ---------------------------------------------------------------------------
+//
+// gemma-4-12B-it's generation_config declares suppress_tokens [258883, 258882]; upstream
+// `generate()` sets their logits to -inf before selection in greedy and in sampling. The cases put
+// a suppressed id at the raw maximum, so an implementation that skips the mask on any path picks
+// it and fails.
+
+describe("sampler: suppressed tokens are never selected", () => {
+  // Raw argmax = 1 (logit 9); the masked argmax is 3 (logit 4).
+  const RAW = f32([0, 9, 1, 4, 2]);
+  const SUPPRESSED = [1] as const;
+
+  it("greedy: the suppressed raw maximum is skipped for the masked maximum", () => {
+    assertEquals(createSampler().next(RAW, []), 1, "control: unmasked greedy takes the raw max");
+    assertEquals(createSampler({}, SUPPRESSED).next(RAW, []), 3);
+    assertEquals(samplerDistribution(RAW, {}, [], SUPPRESSED).tokens, Int32Array.of(3));
+  });
+
+  it("greedy: a tie after masking keeps the smaller id (argmax's tie-break over the masked row)", () => {
+    // The two highest are suppressed; 2 and 4 tie at 5 behind them.
+    assertEquals(createSampler({}, [0, 1]).next(f32([9, 9, 5, 1, 5]), []), 2);
+  });
+
+  it("sampling with a seed never draws a suppressed id, however likely it was", () => {
+    // Without the mask id 1 carries ~99% of the mass (logit 9 vs ≤ 4).
+    for (const spec of [
+      { temperature: 1, seed: 7 },
+      { temperature: 1, topK: 2, seed: 7 },
+      { temperature: 1, topP: 0.9, seed: 7 },
+      { temperature: 0.7, topK: 5, topP: 0.95, seed: 11 },
+    ] satisfies SamplerSpec[]) {
+      const masked = createSampler(spec, SUPPRESSED);
+      const control = createSampler(spec);
+      const seen = new Set<number>();
+      let controlHits = 0;
+      for (let draw = 0; draw < 2_000; draw += 1) {
+        seen.add(masked.next(RAW, []));
+        if (control.next(RAW, []) === 1) controlHits += 1;
+      }
+      assert(!seen.has(1), `${JSON.stringify(spec)}: a suppressed id was drawn`);
+      assert(
+        controlHits > 1_000,
+        `${JSON.stringify(spec)}: control drew id 1 ${controlHits} times`,
+      );
+    }
+  });
+
+  it("the distribution renormalizes over the rest (the suppressed id has probability 0)", () => {
+    const { tokens, probabilities } = samplerDistribution(RAW, { temperature: 1 }, [], SUPPRESSED);
+    // Ascending id order without narrowing; the suppressed entry keeps its slot with weight 0.
+    assertEquals([...tokens], [0, 1, 2, 3, 4]);
+    const expected = softmax([0, Number.NEGATIVE_INFINITY, 1, 4, 2]);
+    assertProbabilities(probabilities, expected, "masked softmax");
+    assertEquals(probabilities[1], 0);
+  });
+
+  it("a logit bias cannot bring a suppressed id back (the mask comes after the bias)", () => {
+    const spec = { logitBias: [[1, 100]] } satisfies SamplerSpec;
+    assertEquals(createSampler(spec).next(RAW, []), 1, "control: the bias alone keeps id 1");
+    assertEquals(createSampler(spec, SUPPRESSED).next(RAW, []), 3);
+  });
+
+  it("the GPU selection capability is withdrawn while a set is declared", () => {
+    assert(createSampler({}).greedy !== undefined, "control: greedy without a set");
+    assert(createSampler({}, []).greedy !== undefined, "an empty set is no set");
+    assertEquals(createSampler({}, SUPPRESSED).greedy, undefined);
+  });
+
+  it("an empty set leaves selection exactly as without the argument", () => {
+    const logits = f32([0.3, -1, 2.5, 2.5, 0.1, -4]);
+    for (const spec of [
+      {},
+      { temperature: 1, seed: 3 },
+      { temperature: 0.8, topK: 3, seed: 5 },
+      { temperature: 1, topP: 0.7, seed: 9 },
+    ] satisfies SamplerSpec[]) {
+      const without = createSampler(spec);
+      const empty = createSampler(spec, []);
+      for (let step = 0; step < 200; step += 1) {
+        assertEquals(empty.next(logits, []), without.next(logits, []), JSON.stringify(spec));
+      }
+      assertEquals(
+        samplerDistribution(logits, spec, [], []),
+        samplerDistribution(logits, spec, []),
+      );
+    }
+  });
+
+  it("the sampler keeps its own copy of the set (a later edit of the caller's array is not seen)", () => {
+    const set = [1];
+    const sampler = createSampler({}, set);
+    set.length = 0;
+    assertEquals(sampler.next(RAW, []), 3);
+  });
+
+  it("an id outside the logits width is broken wiring (RangeError, not an input error)", () => {
+    const error = assertThrows(() => createSampler({}, [5]).next(RAW, []), RangeError);
+    assert(error.message.includes("Suppressed token id 5"), error.message);
+  });
+
+  it("only the suppressed ids finite: a broken model output, not the request's fault", () => {
+    // Every id the request could get is -inf; the mask (not the request) removed the finite one.
+    const row = f32([Number.NEGATIVE_INFINITY, 3, Number.NEGATIVE_INFINITY]);
+    for (const spec of [{}, { temperature: 1 }] satisfies SamplerSpec[]) {
+      const error = assertThrows(() => createSampler(spec, [1]).next(row, []), Error);
+      assert(!(error instanceof ModelInputError), `${JSON.stringify(spec)}: ${error.message}`);
+    }
+    // Control: the caller's ban of the last finite id is still the caller's (input error).
+    assertThrows(
+      () =>
+        createSampler({ logitBias: [[2, Number.NEGATIVE_INFINITY]] }, [1]).next(
+          f32([Number.NEGATIVE_INFINITY, 3, 1]),
+          [],
+        ),
+      ModelInputError,
+    );
+  });
+});

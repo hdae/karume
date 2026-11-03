@@ -415,6 +415,47 @@ describe("T3 部分受理: 先頭一致で止まった位置が受理数にな�
   });
 });
 
+describe("speculative acceptance masks the wiring's suppressed set", () => {
+  // The raw chain from the prompt is 6, 8, 9, …; 8 is suppressed, so the masked target turns to the
+  // runner-up (id 1, logit 9.5) there. The oracle drafter proposes the **raw** chain, so a verify
+  // row that accepted against unmasked logits would take 8.
+  const SUPPRESSED = 8;
+  const program: Partial<GenerationProgramSpec> = { suppressTokens: [SUPPRESSED] };
+
+  for (const temperature of [0, 1]) {
+    it(`temperature ${temperature}: the same tokens as the masked plain run, never the suppressed id`, async () => {
+      // Control: a seed whose unmasked plain run takes 8. Masking changes no row before the first
+      // 8, so the masked run reaches the same row (after 6) and must take something else there.
+      const requestOf = (seed: number): GenerationRequest => ({
+        prompt: PROMPT,
+        maxNewTokens: 9,
+        sampler: { temperature, seed },
+      });
+      let seed: number | undefined;
+      for (let candidate = 0; candidate < 32 && seed === undefined; candidate += 1) {
+        const control = await runPlain(requestOf(candidate), {}, TWO_WAY);
+        if (tokenIds(control.events).includes(SUPPRESSED)) seed = candidate;
+      }
+      assert(seed !== undefined, "control: no seed of 0..31 takes 8 unmasked");
+      const request = requestOf(seed);
+
+      const run = await runSpeculative({
+        drafter: oracleDrafter(),
+        request,
+        program,
+        session: TWO_WAY,
+      });
+      await assertMatchesPlain(request, run, program, TWO_WAY);
+      assert(!tokenIds(run.events).includes(SUPPRESSED), tokenIds(run.events).join(","));
+      // The drafts carried the suppressed id and were rejected at that row.
+      assert(
+        run.stop.speculation !== undefined &&
+          run.stop.speculation.accepted < run.stop.speculation.drafted,
+      );
+    });
+  }
+});
+
 describe("T3′ 温度 > 0: 抽選が走るターンでも投機を張り、列は非投機と厳密一致する", () => {
   // 受理は行ごとに `sampler.next` を「非投機の decode が同じ位置で行う抽選」と同じ logits・
   // 同じ history・同じ順で **確定 token 1 個につき 1 回**呼ぶ。RNG の消費列が非投機と 1 対 1 に

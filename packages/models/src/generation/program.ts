@@ -192,6 +192,17 @@ export type GenerationProgramSpec = {
   /** The stop token set (ADR 0083 decision 8 — empty means no EOS stop). */
   readonly stopTokens: readonly number[];
   /**
+   * Token ids the distribution never generates: their logits are `-Infinity` before every host
+   * selection — greedy, sampling and the speculative acceptance (upstream `generation_config.json`
+   * `suppress_tokens`, which HF `generate()` applies through `SuppressTokensLogitsProcessor` in
+   * greedy and sampling alike; the step order is in `sampler.ts`). Omitted / empty = none, and
+   * selection is exactly what it is without the field.
+   *
+   * MUST: ids in the vocabulary, without duplicates ({@link assertSuppressTokens}). An id outside
+   * the vocabulary would mask nothing and leave "a declared suppression that does nothing".
+   */
+  readonly suppressTokens?: readonly number[];
+  /**
    * The **symbol name** of the full-slot capacity (the spelling used at the binding point of
    * `createGenerationContext`).
    *
@@ -230,7 +241,10 @@ export type GenerationProgramSpec = {
  * time — an unverified wiring field silently breaks this type's reason to exist, "verify the whole
  * wiring at setup".
  */
-export type GenerationWiring = Omit<GenerationProgramSpec, "graph" | "chunkBuckets"> & {
+export type GenerationWiring = Omit<
+  GenerationProgramSpec,
+  "graph" | "chunkBuckets" | "suppressTokens"
+> & {
   /**
    * The verified prefill buckets (**not optional** — a spec without a declaration is folded into
    * an empty array).
@@ -240,6 +254,12 @@ export type GenerationWiring = Omit<GenerationProgramSpec, "graph" | "chunkBucke
    * "buckets silently have no effect".
    */
   readonly chunkBuckets: readonly number[];
+  /**
+   * The verified suppressed set (**not optional** — folded into an empty array, for the same reason
+   * as {@link GenerationWiring.chunkBuckets}: a missed `?? []` on the selection side would raise
+   * nothing and leave the suppression silently off).
+   */
+  readonly suppressTokens: readonly number[];
   /**
    * The last axis H of the hidden exit (a value **derived** from the declared shape of
    * {@link GenerationProgramSpec.hidden}).
@@ -320,6 +340,30 @@ const assertPositiveInteger = (value: number, where: string): void => {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error(`${where} ${value} is not a positive integer`);
   }
+};
+
+/**
+ * Checks a suppressed set ({@link GenerationProgramSpec.suppressTokens}) against the vocabulary:
+ * every id a safe integer in `0..vocabSize-1`, none twice.
+ *
+ * The one check of the rule — the generation surface runs it when the wiring is built, and a
+ * family that knows the vocabulary earlier (gemma4's admission, before any weight part is
+ * fetched) calls the same function. Failures are plain `Error`s: the set is the distribution's
+ * declaration, not a request (ADR 0107 decision 2).
+ */
+export const assertSuppressTokens = (
+  tokens: readonly number[],
+  vocabSize: number,
+  where: string,
+): void => {
+  const seen = new Set<number>();
+  tokens.forEach((token, index) => {
+    if (!Number.isSafeInteger(token) || token < 0 || token >= vocabSize) {
+      throw new Error(`${where}[${index}] ${token} is outside the vocabulary 0..${vocabSize - 1}`);
+    }
+    if (seen.has(token)) throw new Error(`${where}: token ${token} appears twice`);
+    seen.add(token);
+  });
 };
 
 /** Renders a shape for a diagnostic (symbolic dimensions are printed as spelled). */
@@ -550,6 +594,7 @@ export const createGenerationProgram = (spec: GenerationProgramSpec): Generation
       );
     }
   });
+  assertSuppressTokens(spec.suppressTokens ?? [], spec.vocabSize, "suppressTokens");
 
   const lengthSymbol = assertRowInput(graph, spec.inputIds, "token id input");
   const rowSymbol = assertLastRowInput(graph, spec.lastRow);
@@ -596,6 +641,8 @@ export const createGenerationProgram = (spec: GenerationProgramSpec): Generation
     capacity: spec.capacity,
     vocabSize: spec.vocabSize,
     stopTokens: [...spec.stopTokens],
+    // A frozen copy (the same reason as `chunkBuckets` — the selection reads it every step).
+    suppressTokens: Object.freeze([...(spec.suppressTokens ?? [])]),
     capacitySymbol: spec.capacitySymbol,
     ...(spec.derivedInputs === undefined ? {} : { derivedInputs: spec.derivedInputs }),
     ...(spec.residentInputs === undefined ? {} : { residentInputs: [...spec.residentInputs] }),

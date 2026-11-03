@@ -727,7 +727,8 @@ export type GenerationGreedyRun<C extends GenerationContextFace> = (
 export type GenerationSequenceOptions<C extends GenerationContextFace> = {
   /**
    * Internal capability that returns the maximum of the raw logits. Used only for decode at
-   * temperature 0, without processing, non-speculative and without observation.
+   * temperature 0, without processing, non-speculative, without observation and with an empty
+   * {@link GenerationWiring.suppressTokens} (the raw maximum can be a suppressed id).
    */
   readonly greedy?: GenerationGreedyRun<C>;
   readonly session: GenerationSession<C>;
@@ -1238,7 +1239,10 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
     });
     // One sampler per generation (it carries RNG state across steps). The spec check and the spec
     // snapshot (copying `logitBias` down to its elements) also happen inside `createSampler`.
-    const sampler = createSampler(request.sampler);
+    // The distribution's suppressed set rides along, so every selection below — the first token,
+    // decode and each speculative acceptance row — masks it; a non-empty set also withdraws
+    // `sampler.greedy`, which turns the GPU selection below off.
+    const sampler = createSampler(request.sampler, program.suppressTokens);
     const greedy =
       face === undefined && options.onRun === undefined && sampler.greedy !== undefined
         ? options.greedy

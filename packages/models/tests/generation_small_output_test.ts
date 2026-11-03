@@ -223,3 +223,27 @@ test("小出力も早期終了・中断後の会話を通常runと同じ位置�
     assertEquals(results[1], results[0]);
   }
 });
+
+test("a suppressed set turns the GPU selection off: decode reads the logits and masks them", async () => {
+  // The GPU selection returns the raw maximum, which is the suppressed id here (fake logits: 10 at
+  // the run's token, 6 at the runner-up).
+  const f = fakeSession({ tokens: [5, 5, 5], runnerUp: { id: 6, logit: 6 } });
+  const fast = small(f);
+  const sequence = await createGenerationSequence({
+    session: f.session,
+    program: programOf(f, { suppressTokens: [5] }),
+    greedy: fast.greedy,
+  });
+  try {
+    const { events } = await drain(
+      sequence.generate({ prompt: [1, 2], maxNewTokens: 3, sampler: { temperature: 0 } }),
+    );
+    assertEquals(
+      events.filter((event) => event.kind === "token").map((event) => event.id),
+      [6, 6, 6],
+    );
+    assertEquals(fast.calls(), 0, "the GPU selection ran although tokens are suppressed");
+  } finally {
+    await sequence.dispose();
+  }
+});

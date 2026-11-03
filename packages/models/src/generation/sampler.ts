@@ -27,10 +27,20 @@
  *
  * ## Processing order (the same as HF's `LogitsProcessorList`)
  *
- * (1) repetition penalty → (2) logit bias → (3) divide by temperature → (4) top-k → (5) top-p →
- * (6) multinomial draw. (1) and (2) come **before** temperature (HF splits processors and warpers
- * into stages, and penalty / bias are in the earlier one). Swapping the order gives a different
- * distribution for the same knobs, so this order is the contract.
+ * (1) repetition penalty → (2) logit bias → (2') suppressed tokens → (3) divide by temperature →
+ * (4) top-k → (5) top-p → (6) multinomial draw. (1), (2) and (2') come **before** temperature (HF
+ * splits processors and warpers into stages, and penalty / bias / `SuppressTokensLogitsProcessor`
+ * are in the earlier one). Swapping the order gives a different distribution for the same knobs,
+ * so this order is the contract.
+ *
+ * ## Suppressed tokens are the distribution's, not the request's
+ *
+ * (2') sets the logits of the ids the distribution declares as never generated to `-Infinity`
+ * (upstream `generation_config.json` `suppress_tokens`, applied by HF `generate()` in greedy and in
+ * sampling alike — gemma-4-12B-it declares `<image|>` / `<audio|>`). It is a second argument of
+ * {@link createSampler}, not a {@link SamplerSpec} field: a request cannot turn it off, and the
+ * set comes from the verified wiring (`GenerationWiring.suppressTokens`). An empty set (every
+ * distribution that declares none) changes nothing — not a copy, not a scan.
  */
 
 import { ModelInputError } from "../errors.ts";
@@ -115,6 +125,10 @@ export type Sampler = {
   /**
    * Only for temperature 0 without processing: checks and returns the first NaN, or the maximum
    * with its smallest index, selected by the GPU.
+   *
+   * MUST: absent while tokens are suppressed. The GPU selection picks the maximum of the **raw**
+   * logits, so a suppressed id that is that maximum would be returned; only the host path
+   * ({@link Sampler.next}) masks it.
    */
   readonly greedy?: (value: number, index: number) => number;
   /**
@@ -213,21 +227,30 @@ const assertSpec = (spec: SamplerSpec): void => {
 };
 
 /**
- * The logits with (1) repetition penalty + (2) logit bias + (3) temperature applied.
+ * The logits with (1) repetition penalty + (2) logit bias + (2') suppressed tokens + (3)
+ * temperature applied.
  *
- * A specification that applies nothing **returns the input as is** (no copy of V = 262,144 values
- * every step). The return value is read-only and must not be modified.
+ * A specification that applies nothing and an empty suppressed set **return the input as is** (no
+ * copy of V = 262,144 values every step). The return value is read-only and must not be modified.
  */
 const processLogits = (
   logits: Float32Array<ArrayBuffer>,
   spec: SamplerSpec,
   history: readonly number[],
+  suppressed: readonly number[],
 ): Float32Array<ArrayBuffer> => {
   const temperature = spec.temperature ?? 0;
   const penalty = spec.repetitionPenalty ?? 1;
   const bias = spec.logitBias;
   const scaled = temperature !== 0 && temperature !== 1;
-  if (penalty === 1 && (bias === undefined || bias.length === 0) && !scaled) return logits;
+  if (
+    penalty === 1 &&
+    (bias === undefined || bias.length === 0) &&
+    suppressed.length === 0 &&
+    !scaled
+  ) {
+    return logits;
+  }
 
   const processed = new Float32Array(logits.length);
   processed.set(logits);
@@ -264,6 +287,20 @@ const processLogits = (
       processed[token] += amount;
     }
   }
+  // (2') after the bias, so a bias cannot bring a suppressed id back (HF runs
+  // `SuppressTokensLogitsProcessor` after `SequenceBiasLogitsProcessor`; −∞ stays −∞ under the
+  // temperature division that follows).
+  for (const token of suppressed) {
+    // The set is the verified wiring (`createGenerationProgram` checked it against `vocabSize`,
+    // and the logits width against the same value), so a miss here is broken wiring, not a request
+    // error (ADR 0107 decision 2).
+    if (token >= processed.length) {
+      throw new RangeError(
+        `Suppressed token id ${token} is outside the vocabulary 0..${processed.length - 1}`,
+      );
+    }
+    processed[token] = Number.NEGATIVE_INFINITY;
+  }
   if (scaled) {
     for (let token = 0; token < processed.length; token += 1) processed[token] /= temperature;
   }
@@ -294,11 +331,18 @@ const assertNoNaN = (logits: Float32Array<ArrayBuffer>): void => {
   }
 };
 
-/** Whether the maximum is finite (NaN never becomes the maximum: all its comparisons are false). */
-const hasFiniteMaximum = (logits: Float32Array<ArrayBuffer>): boolean => {
+/**
+ * Whether the maximum outside `excluded` is finite (NaN never becomes the maximum: all its
+ * comparisons are false).
+ */
+const hasFiniteMaximum = (
+  logits: Float32Array<ArrayBuffer>,
+  excluded: readonly number[],
+): boolean => {
+  const skip = new Set(excluded);
   let maximum = Number.NEGATIVE_INFINITY;
   for (let token = 0; token < logits.length; token += 1) {
-    if (logits[token] > maximum) maximum = logits[token];
+    if (logits[token] > maximum && !skip.has(token)) maximum = logits[token];
   }
   return Number.isFinite(maximum);
 };
@@ -306,16 +350,23 @@ const hasFiniteMaximum = (logits: Float32Array<ArrayBuffer>): boolean => {
 /**
  * Throws a non-finite maximum classified **by its origin**.
  *
- * If the maximum of `raw` (the logits **before** processing) is finite, what removed the candidates
- * is certainly the caller's `logitBias` — the only remedy is "remove the ban", so it is
- * input-caused (ADR 0107 decision 2). If it was non-finite before processing, the model output is
- * broken, and no change to the request fixes it = it stays a plain `Error`.
+ * If the maximum of `raw` (the logits **before** processing) outside the distribution's
+ * suppressed set is finite, what removed the candidates is certainly the caller's `logitBias` —
+ * the only remedy is "remove the ban", so it is input-caused (ADR 0107 decision 2). If it was
+ * non-finite before processing (the suppressed ids left out — the request cannot lift that mask),
+ * the model output is broken, and no change to the request fixes it = it stays a plain `Error`.
  *
  * MUST: run the classification **only right before throwing** (scanning `raw` is proportional to
  * the vocabulary V, so it is not added to the ordinary per-step path).
  */
-const nonFiniteMaximum = (message: string, raw: Float32Array<ArrayBuffer> | undefined): Error =>
-  raw !== undefined && hasFiniteMaximum(raw) ? new ModelInputError(message) : new Error(message);
+const nonFiniteMaximum = (
+  message: string,
+  raw: Float32Array<ArrayBuffer> | undefined,
+  suppressed: readonly number[],
+): Error =>
+  raw !== undefined && hasFiniteMaximum(raw, suppressed)
+    ? new ModelInputError(message)
+    : new Error(message);
 
 /**
  * The maximum check shared by CPU and GPU. It does not fold non-finite values into a token and
@@ -324,7 +375,12 @@ const nonFiniteMaximum = (message: string, raw: Float32Array<ArrayBuffer> | unde
  * Only a surface that can pass `raw` (a caller holding the unprocessed logits) splits a non-finite
  * maximum into input-caused and internal failure by the rule of {@link nonFiniteMaximum}.
  */
-const checkedMaximum = (value: number, index: number, raw?: Float32Array<ArrayBuffer>): number => {
+const checkedMaximum = (
+  value: number,
+  index: number,
+  raw?: Float32Array<ArrayBuffer>,
+  suppressed: readonly number[] = [],
+): number => {
   if (value !== value) {
     throw new Error(
       `logits[${index}] is NaN (non-finite) — failing here instead of folding it into a token id`,
@@ -334,6 +390,7 @@ const checkedMaximum = (value: number, index: number, raw?: Float32Array<ArrayBu
     throw nonFiniteMaximum(
       `The maximum of the logits is non-finite (${value}) — failing here instead of folding it into a token id`,
       raw,
+      suppressed,
     );
   }
   return index;
@@ -350,7 +407,11 @@ const checkedMaximum = (value: number, index: number, raw?: Float32Array<ArrayBu
  * It does not scan the whole vocabulary again for the check, and keeps first-wins on ties and the
  * error for the first NaN.
  */
-const argmax = (logits: Float32Array<ArrayBuffer>, raw?: Float32Array<ArrayBuffer>): number => {
+const argmax = (
+  logits: Float32Array<ArrayBuffer>,
+  raw: Float32Array<ArrayBuffer>,
+  suppressed: readonly number[],
+): number => {
   let best = 0;
   let bestValue = Number.NEGATIVE_INFINITY;
   for (let token = 0; token < logits.length; token += 1) {
@@ -365,7 +426,7 @@ const argmax = (logits: Float32Array<ArrayBuffer>, raw?: Float32Array<ArrayBuffe
       best = token;
     }
   }
-  return checkedMaximum(bestValue, best, raw);
+  return checkedMaximum(bestValue, best, raw, suppressed);
 };
 
 /**
@@ -516,6 +577,9 @@ const sortAllDescending = (logits: Float32Array<ArrayBuffer>): Int32Array<ArrayB
  * Temperature 0 degenerates to argmax's one-point distribution (the surface that yields the same
  * token as the parity check of `greedy.ts`).
  *
+ * `suppressTokens` is the distribution's suppressed set (step (2') of the module doc — the
+ * verified wiring's value; omitted = none).
+ *
  * NOTE: `topP` alone radix-sorts the whole vocabulary (O(V)). With top-k, the bounded heap still
  * picks the candidates and top-p is applied within them (the normalized set does not change).
  */
@@ -523,18 +587,20 @@ export const samplerDistribution = (
   logits: Float32Array<ArrayBuffer>,
   spec: SamplerSpec,
   history: readonly number[],
+  suppressTokens: readonly number[] = [],
 ): SamplerDistribution => {
   if (logits.length < 1) throw new Error("logits is empty");
   assertSpec(spec);
   // Checked **after** processing (this catches not only the raw logits but also combinations such
   // as a `-Infinity` bias added to a `+Infinity` entry).
-  const processed = processLogits(logits, spec, history);
+  const processed = processLogits(logits, spec, history, suppressTokens);
   const temperature = spec.temperature ?? 0;
   if (temperature === 0) {
-    // The unprocessed `logits` are passed to tell the **origin** of a non-finite maximum (model
-    // output / the caller's `logitBias`) apart ({@link nonFiniteMaximum}).
+    // The unprocessed `logits` (and the suppressed set, which the request cannot lift) are passed
+    // to tell the **origin** of a non-finite maximum (model output / the caller's `logitBias`)
+    // apart ({@link nonFiniteMaximum}).
     return {
-      tokens: Int32Array.of(argmax(processed, logits)),
+      tokens: Int32Array.of(argmax(processed, logits, suppressTokens)),
       probabilities: Float64Array.of(1),
     };
   }
@@ -563,6 +629,7 @@ export const samplerDistribution = (
     throw nonFiniteMaximum(
       `The maximum candidate logit is non-finite (${peak}) — every token is banned`,
       logits,
+      suppressTokens,
     );
   }
   const weights = new Float64Array(candidates.length);
@@ -639,8 +706,16 @@ export const snapshotSpec = (spec: SamplerSpec): SamplerSpec => {
  *
  * Omitting the specification gives greedy (temperature 0) — this expresses that this layer owns no
  * defaults (ADR 0083 decision 7).
+ *
+ * `suppressTokens` is the distribution's suppressed set (step (2') of the module doc), passed by
+ * the generation surface from the verified wiring; omitted or empty = none, and the sampler is the
+ * one it was without the argument. A non-empty set withdraws the GPU selection capability
+ * ({@link Sampler.greedy}): that selection reads the raw maximum.
  */
-export const createSampler = (spec: SamplerSpec = {}): Sampler => {
+export const createSampler = (
+  spec: SamplerSpec = {},
+  suppressTokens: readonly number[] = [],
+): Sampler => {
   // Keep a **copy** of the checked specification ({@link snapshotSpec} checks, then copies — the
   // checked values and the values the draw reads stay the same).
   const frozen = snapshotSpec(spec);
@@ -648,14 +723,17 @@ export const createSampler = (spec: SamplerSpec = {}): Sampler => {
   // the generator's creation would make an invalid seed fail after a GB-scale load —
   // `assertAcceptableSeed` in `request-gates.ts` owns that acceptance set).
   const random = new Randu(frozen.seed ?? 0);
+  // A copy for the same reason as the spec snapshot (the set is read every step).
+  const suppressed = Object.freeze([...suppressTokens]);
   const rawGreedy =
+    suppressed.length === 0 &&
     (frozen.temperature ?? 0) === 0 &&
     (frozen.repetitionPenalty ?? 1) === 1 &&
     (frozen.logitBias?.length ?? 0) === 0;
   return {
     ...(rawGreedy ? { greedy: checkedMaximum } : {}),
     next(logits: Float32Array<ArrayBuffer>, history: readonly number[]): number {
-      const { tokens, probabilities } = samplerDistribution(logits, frozen, history);
+      const { tokens, probabilities } = samplerDistribution(logits, frozen, history, suppressed);
       // One candidate (temperature 0 / topK 1 / vocabulary 1) makes the draw trivial, so the RNG
       // is not advanced.
       if (tokens.length === 1) return tokens[0];

@@ -1436,3 +1436,55 @@ test("ForkableContextFace: 実 GenerationContext は自分と同じ型を返す 
     context;
   assertEquals(typeof asForkable, "function");
 });
+
+// ---- The distribution's suppressed set (`GenerationWiring.suppressTokens`) ----------------
+//
+// The set rides on the wiring, not on the request, so a sequence built from a program that
+// declares it masks every selection without the caller passing anything. The fake puts the
+// suppressed id at each row's raw maximum (logit 10) with a runner-up behind it (6): a path that
+// skips the mask picks the suppressed id.
+
+describe("GenerationSequence: the wiring's suppressed set reaches every selection", () => {
+  const SUPPRESSED = 3;
+  const BEHIND = { id: 6, logit: 6 } as const;
+  const STEPS = 12;
+  /** Every run's raw argmax is the suppressed id (a two-chunk prefill + the decode steps). */
+  const session = () =>
+    fakeSession({ tokens: Array(STEPS + 1).fill(SUPPRESSED), runnerUp: BEHIND });
+
+  const run = async (suppressTokens: readonly number[] | undefined, request: GenerationRequest) => {
+    const fake = session();
+    const sequence = await createGenerationSequence({
+      session: fake.session,
+      program: programOf(fake, suppressTokens === undefined ? {} : { suppressTokens }),
+    });
+    try {
+      return tokenIds((await drain(sequence.generate(request))).events);
+    } finally {
+      await sequence.dispose();
+    }
+  };
+
+  it("greedy (prefill's first token and every decode step) takes the masked maximum", async () => {
+    const request = { prompt: [1, 2, 4, 5, 7], maxNewTokens: STEPS };
+    assertEquals(await run(undefined, request), Array(STEPS).fill(SUPPRESSED), "control");
+    assertEquals(await run([SUPPRESSED], request), Array(STEPS).fill(BEHIND.id));
+  });
+
+  it("sampling never draws the suppressed id (a seeded draw that would draw it unmasked)", async () => {
+    // Unmasked, id 3 carries e^10 / (e^10 + e^6 + 14) ≈ 98% of each draw.
+    const request = { prompt: [1], maxNewTokens: STEPS, sampler: { temperature: 1, seed: 5 } };
+    const control = await run(undefined, request);
+    assert(control.includes(SUPPRESSED), `control drew no ${SUPPRESSED}: ${control.join(",")}`);
+    const masked = await run([SUPPRESSED], request);
+    assertEquals(masked.length, STEPS);
+    assert(!masked.includes(SUPPRESSED), `a suppressed id was drawn: ${masked.join(",")}`);
+  });
+
+  it("an empty set gives the same sequence as no declaration (other distributions unchanged)", async () => {
+    for (const sampler of [undefined, { temperature: 1, seed: 9 }]) {
+      const request = { prompt: [1, 2], maxNewTokens: STEPS, ...(sampler ? { sampler } : {}) };
+      assertEquals(await run([], request), await run(undefined, request));
+    }
+  });
+});

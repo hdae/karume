@@ -121,6 +121,34 @@ test("createGenerationProgram: chunkBuckets の受理集合は runtime の門を
   }
 });
 
+test("createGenerationProgram: suppressTokens is copied, frozen, and folded to an empty array when omitted", () => {
+  const suppressTokens = [3, 9];
+  const program = createGenerationProgram(specOf({ suppressTokens }));
+  assertEquals(program.suppressTokens, [3, 9]);
+  // Cut off from the caller's array (the selection reads it every step).
+  suppressTokens.push(1);
+  assertEquals(program.suppressTokens, [3, 9]);
+  assert(Object.isFrozen(program.suppressTokens));
+  // Omitted = none. Carried as `undefined`, a missed `?? []` on the selection side would raise
+  // nothing and leave the mask silently off.
+  assertEquals(createGenerationProgram(specOf()).suppressTokens, []);
+  // Not on the public read surface (the generation surface applies it; nothing to read).
+  assertEquals(Object.hasOwn(generationProgramFace(program), "suppressTokens"), false);
+});
+
+test("createGenerationProgram: an invalid suppressed set fails loudly", () => {
+  const cases: readonly (readonly [readonly number[], string])[] = [
+    // An id outside the vocabulary masks nothing — "a suppression that does nothing".
+    [[VOCAB], `suppressTokens[0] ${VOCAB} is outside the vocabulary 0..${VOCAB - 1}`],
+    [[-1], "suppressTokens[0] -1"],
+    [[2, 1.5], "suppressTokens[1] 1.5"],
+    [[4, 4], "suppressTokens: token 4 appears twice"],
+  ];
+  for (const [suppressTokens, message] of cases) {
+    assertThrows(() => createGenerationProgram(specOf({ suppressTokens })), Error, message);
+  }
+});
+
 test("createGenerationProgram: 派生入力の無いグラフは derivedInputs 省略で通る", () => {
   const program = createGenerationProgram(
     specOf({ graph: graphOf({ derived: false }), derivedInputs: undefined }),
