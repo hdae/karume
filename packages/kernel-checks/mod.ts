@@ -18,6 +18,12 @@ export {
 export { checkGemvSubgroup, GEMV_SUBGROUP_CASES } from "./src/gemv-subgroup.ts";
 export { checkRmsSubgroup, RMS_SUBGROUP_CASES } from "./src/rms-subgroup.ts";
 export {
+  benchIntegerGemv,
+  checkIntegerGemv,
+  GEMV_INTEGER_CASES,
+  type IntegerGemvBenchRow,
+} from "./src/gemv-integer.ts";
+export {
   checkStateAttentionMutantMatrix,
   checkStateAttentionMutants,
   checkStateAttentionRewrites,
