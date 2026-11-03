@@ -344,3 +344,43 @@ by the note of amendment 2, and where a family records its choice by amendment 4
   ADR 0115 (the status line and the Consequences), and the 0.15 migration item of
   `docs/backlog.md`; and correct ADR 0120's pointer to `WAN_DEFAULT_QUANT`
   (`tools/export-recipes/wan/distribution.py:440`, not `:343`).
+
+## Addendum (2026-11-03) — gemma4 12b: one `i4` preset from the QAT grid
+
+Recorded unattended by the agent on the recommended option, then confirmed by the maintainer ("12B
+is QAT only", 2026-11-03). Model `12b` of the gemma4 distribution (Gemma 4 12B, text only) is local
+only; it is not published.
+
+1. **One preset, `i4`, which is therefore `defaultQuant`.** C1 holds (no `gpuFeatures`), C2 does
+   not apply (no activation quantization), and C3 exempts a model with one preset. `i4-gemvpar` and
+   `i4-fast` follow once the GEMV rows of the 12B shapes are measured (ADR 0098: only measured
+   shapes are eligible). The human quality review of ADR 0110 decision 8 is still the gate before
+   publication.
+2. **The weights are Google's quantization-aware-trained checkpoint**
+   (`google/gemma-4-12B-it-qat-q4_0-unquantized`, a QAT fine-tune of `google/gemma-4-12B-it`), and
+   the `i4` preset stores **its own 4-bit grid** — per group of 32 along the row, the integer codes
+   in [-8, 7] and one step refitted from the stored BF16 values (the grid import,
+   `grid_import` in `tools/export-recipes/gemma4/export_unified.py`). The tokenizer, the chat
+   template and the generation defaults come from `google/gemma-4-12B-it` (the QAT repository's
+   `tokenizer.json` is E2B's; its other small files are byte-identical to 12B-it's). Measured on
+   2026-11-03 with the export's wrapper against an F32 forward of the same checkpoint with
+   unquantized linears (KL of the next-token distribution, mean over all rows of `context-en` /
+   `window-en`, 598 / 1,159 rows):
+
+   | Source | Storage | KL mean | Top-1 agreement |
+   | --- | --- | --- | --- |
+   | `gemma-4-12B-it` | round-to-nearest i4 g32 (codes ±7, step = max/7) | 2.65 / 1.88 | 0.39 / 0.47 |
+   | QAT checkpoint | round-to-nearest i4 g32 | 0.99 / 1.01 | 0.63 / 0.60 |
+   | QAT checkpoint | grid import | 0.014 / 0.036 | 0.97 / 0.93 |
+
+   Round-to-nearest leaves a uniform ~10 % relative error in every 12B linear; the loss is spread,
+   not one broken tensor. The storage format needed no change: the i4 codec stores `q + 8` and
+   decodes `u - 8`, so -8 is representable. A group that does not recover fails the export (no
+   silent fallback to rounding).
+3. **No original-weights preset for `12b`** (decision 4): the upstream BF16 (22 GiB) fits no target
+   GPU, and the checkpoint's values are already the BF16 rounding of its 4-bit grid. Decision 4's
+   table reads, for gemma4 12b: upstream storage BF16; original values not shipped.
+4. **Open — the regular E2B / E4B `i4`.** It rounds `gemma-4-E2B-it` / `gemma-4-E4B-it` to the
+   nearest i4 and was never measured with the KL above. The maintainer's ruling (2026-11-03): measure
+   it against the grid import of the matching q4_0 QAT checkpoint; if it loses much, stop
+   publishing its `i4` preset, or the regular model (backlog).

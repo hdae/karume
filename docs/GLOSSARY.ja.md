@@ -49,6 +49,7 @@
 | RTN (Round To Nearest) | RTN | 校正なしの最近接丸め | — | ADR 0019 / 0069 |
 | GPTQ | GPTQ | 校正データで丸めを補正する方式（出荷は格子が RTN と同じ版） | — | perf-ledger Q-6 |
 | fixed quantization (importing QAT) | 固定量子化 | 上流 checkpoint の整数と scale を再量子化せずに書く経路 | — | ADR 0097 追記 3 |
+| grid import (QAT) △ | 格子の取り込み | QAT のチェックポイントが持つ 4-bit の格子（32 要素ごとの整数 [-8, 7] と 1 つの step）を丸め直さずに取り込むこと。Gemma 4 12B で使う | 丸め直し | glossary.md・ADR 0128 追記 2026-11-03 |
 
 ## 配布と資産
 
@@ -213,6 +214,8 @@
 | unrolled KV loop △ | KV ループの展開 | ③′ PV と融合 stats + PV で、各 lane が自分の担当列 8 本分の V を先に読んでから積和する形。式と順序は v1 と同じでビット一致 | — | ADR 0067 追記 2026-10-27・perf-ledger K-91 |
 | baseline WGSL (`fixtures/wgsl-baseline/`) △ | 書き換え前の WGSL の控え | ビット一致の書き換えの前の生成 WGSL を残したもの。GPU テストで新旧の kernel を同じ入力で回し、出力を 1 語ずつ比べる | — | `gpu_state_attention_fold_test.ts`・perf-ledger K-91 |
 | prefetch form (rms_norm v2) △ | 先読み形（rms_norm v2） | 256 幅の rms_norm と RMS → add 融合で、weight を workgroup ごとに 1 回、行の x（と residual）を縮約の前にレジスタへ読み、出力ループの回数を定数にした形。縮約と値の式は v1 と同じ文字列でビット一致 | — | ADR 0017 追記 2・perf-ledger K-99 |
+| chat dialect △ | チャットの書式 | Gemma 4 のモデルが従うチャットテンプレートの種類（`gemma4` / `gemma4-unified`） | — | glossary.md |
+| suppressed tokens △ | 抑制トークン | モデルが生成しないトークン id（選択の前に logit を −∞ にする） | — | glossary.md |
 
 ## 動画生成
 

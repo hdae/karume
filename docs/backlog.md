@@ -25,10 +25,18 @@ and Deno). The next release is the Gemma 4 expansion (*later*); what remains of 
 - **Gemma 4 expansion — the release after 0.15.1 (maintainer 2026-11-01)**: in this order, (1) the MTP drafter for E4B
   (`google/gemma-4-E4B-it-assistant`; size M — the target series already has the verify exit, the export script and
   the tests are E2B-bound; first decide E4B's default preset, still the provisional `i4`), (2) Gemma 4 12B
-  (`google/gemma-4-12B-it`, model type `gemma4_unified`: no PLE, no KV sharing, 48 layers, sliding window 1024; size
-  L — the recipe must move to the meta-trace form the Qwen3.5 encoder uses, about 7.3 GiB at i4), (3) its drafter
-  (size S–M). The QAT drafter (`*-qat-q4_0-unquantized-assistant`, made for the q4_0 QAT line, not the mobile one
-  Karume ships) is set aside. Scoping memos of 2026-11-01: `.claude/reviews/2026-11-02_gemma4-expansion/`
+  (model type `gemma4_unified`: no PLE, no KV sharing, 48 layers, sliding window 1024) — **implemented and in the local
+  mirror (2026-11-03), not published**: weights from the q4_0 QAT checkpoint with its grid imported (ADR 0128 addendum
+  2026-11-03 — round-to-nearest i4 on `gemma-4-12B-it` ruins it), one preset `i4` (7.3 GiB; e2e greedy goldens equal on
+  the RTX 3080 Ti, peak VRAM 8.5 GiB). Left: the human quality review, the GEMV rows of the 12B shapes before
+  `i4-gemvpar` / `i4-fast`, publication and the `gemma.SOURCES` pin (maintainer), (3) its drafter (size S–M) — it
+  must be the QAT one (`google/gemma-4-12B-it-qat-q4_0-unquantized-assistant`: Google's card requires a QAT drafter
+  for a QAT target).
+- **Measure the regular Gemma 4 E2B / E4B `i4` (maintainer 2026-11-03)**: it rounds the regular checkpoints to the
+  nearest i4 and was never measured for quality. Compare it, with the KL metric of ADR 0128's addendum of 2026-11-03,
+  against the grid import of `google/gemma-4-E{2,4}B-it-qat-q4_0-unquantized`; if the regular `i4` loses much, stop
+  publishing it, or the regular model. Then settle which Gemma 4 lines are published (regular / mobile QAT
+  `karume-gemma4-qat` / q4_0 QAT) and where 12B lives. Needs the E2B / E4B checkpoints fetched again. Scoping memos of 2026-11-01: `.claude/reviews/2026-11-02_gemma4-expansion/`
   (`e4b-drafter.md`, `12b.md`; local, untracked).
 - **One wording for "unofficial converted / quantized model" on every card (maintainer 2026-11-01)**: today only anima
   (its licence §3(d)) and MOSS-Image (the FLUX marks clause of Black Forest Labs' cards) carry a non-endorsement

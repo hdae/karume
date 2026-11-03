@@ -2629,3 +2629,18 @@ on the Chrome (Dawn) side that appears when VRAM occupancy is large (reproduced 
 has since 2026-09-20 been queued in the same batch as the gather and read back at the final fence (`Session.enqueueRead`, [ADR 0054 addendum](decisions/0054-resident-loop-and-fence.md#addendum-2026-09-20--batch-readback-of-graph-outputs)),
 so there is one fence, the same as greedy. **Only prefill issues the batch for the gather one ahead per chunk** (on Deno
 +10 ms of TTFT per chunk). The option was put in place as a prerequisite for run-ahead (perf-ledger H-27) and is not made the default.
+
+## Gemma 4 12B: text only, one `i4` preset from the QAT checkpoint, and raw text without the chat template degenerates
+
+Model `12b` of the gemma4 distribution is the text decoder of Gemma 4 12B; the vision and audio embedders are not
+shipped, so it takes no images or audio. Its weights are Google's q4_0 quantization-aware-trained checkpoint with that
+checkpoint's own 4-bit grid stored (ADR [0128 addendum 2026-11-03](decisions/0128-default-preset-original-weights.md#addendum-2026-11-03--gemma4-12b-one-i4-preset-from-the-qat-grid)),
+so its outputs follow the QAT fine-tune, not `gemma-4-12B-it`'s BF16 weights exactly. There is one preset, `i4`
+(about 7.3 GiB); there is no original-weights preset (the BF16 upstream is 22 GiB) and no parallel-GEMV / fused preset
+until the GEMV rows of the 12B shapes are measured. On the RTX 3080 Ti (12 GB) the e2e greedy run peaked at 8.5 GiB
+(8,753 MiB, nvidia-smi) at the default capacity of 4096 tokens; a 12 GB device is the smallest tested.
+
+12B is an instruction model. Given raw text without the chat template it can degenerate: for "The capital of France
+is" it repeats digits — upstream's own F32 `generate()` on the same weights gives the same 16 tokens. Use `chat` (the
+chat dialect `gemma4-unified`) for ordinary use. The model is not published yet; the human quality review of ADR 0110
+decision 8 is pending.
