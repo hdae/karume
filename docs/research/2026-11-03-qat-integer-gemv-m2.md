@@ -1,8 +1,9 @@
 > This document is a point-in-time snapshot (2026-11-03) of the measurements behind the integer GEMV (ADR
 > [0140](../decisions/0140-integer-gemv.md), perf-ledger K-45): QAT Gemma 4 E2B decode on the maintainer's Apple M2
 > under Chrome, against the WebML Community "Gemma 4 WebGPU kernels" Space, the split attribution of Karume's decode, the
-> single-kernel timings and kernel checks of the integer GEMV, and its end-to-end A/B. It is not a design source of
-> truth. The raw records are JSON in the localStorage of that Chrome (§10); nothing here was measured on the RTX 3080 Ti.
+> single-kernel timings and kernel checks of the integer GEMV, its end-to-end A/B, and the lm_head probe behind the
+> byte-plane GEMV (ADR [0141](../decisions/0141-byte-plane-gemv.md), perf-ledger K-52). It is not a design source of
+> truth. The raw records are JSON in the localStorage of that Chrome (§11); nothing here was measured on the RTX 3080 Ti.
 
 # QAT Gemma 4 E2B on Apple M2: decode attribution and the integer GEMV
 
@@ -24,6 +25,9 @@
   single-kernel table (§8).
 - A Metal trap: an epilogue spelled `rounded(0.0 + rounded(t))` let the two rounding barriers cancel and Metal
   reassociated the scales, giving 1-ulp mismatches on every f32-output case (§9).
+- lm_head (i2 262144 × 1536, f32 activations): the sequential GEMV is bound by its access pattern, then by the decode;
+  the byte-plane GEMV (a lanes × rows layout, an exact magic-number decode, class R) ran 2393 / 1845 µs against 2987 /
+  2425 (median / min) and passed its check 240 / 240 (§10).
 
 ## 2. Environment
 
@@ -33,7 +37,7 @@
 | Browser | Chrome 158, cross-origin isolated; `subgroupMinSize` = `subgroupMaxSize` = 32; features include `subgroups`, `subgroup-size-control`, `shader-f16`, `timestamp-query` |
 | Serving | the playground dev server on the development machine, reached over an SSH tunnel (127.0.0.1:8790); distributions over the direct route |
 | Code (§3) | checkout `34c49f32` plus uncommitted Gemma changes of another session (54 working-tree entries) |
-| Code (§4–§9) | worktree `karume-wt-qat-gemv` (branch `wip/qat-gemv` from `34c49f32`), uncommitted |
+| Code (§4–§10) | worktree `karume-wt-qat-gemv` (branch `wip/qat-gemv` from `34c49f32`), uncommitted |
 | Model | QAT Gemma 4 E2B (`gemma4-qat`, preset `i4-fast`); regular E2B `i4-fast` as a control in §3 / §4 |
 | Pages | `/gemma4-bench` (end-to-end, the GPU tap, split dispatches, the "Integer GEMV" arm switch — apps/playground/README.md); the single-kernel check and timing through `packages/kernel-checks/src/gemv-integer.ts` (`checkIntegerGemv`, `benchIntegerGemv`) imported in the page's console |
 
@@ -204,15 +208,107 @@ regroup the products. A first spelling started the group sum from zero: `total =
 `(S · w_scale) · x_scale` into `S · (w_scale · x_scale)`: 1-ulp mismatches on every f32-output case. Starting the sum
 with the first group's term removed the pair; the kernel now states it as a MUST.
 
-## 10. Open items and records
+## 10. lm_head: the byte-plane GEMV
+
+QAT E2B's lm_head (i2, 262144 × 1536, one scale per channel) runs once per decode token on the sequential GEMV
+(`linear_gemv:v1:f32:c32u4:wi2`, 2.917 ms/token at 35 GB/s in §4). No SRQ precedes it, so its activation is f32 and
+neither packed activations nor the integer GEMV apply. The kernel that came out of this section is the byte-plane GEMV
+(`linearGemvPlanes`, ADR [0141](../decisions/0141-byte-plane-gemv.md)).
+
+### The lm_head probe
+
+A probe module (`packages/kernel-checks/src/gemv-lm-head.ts` on branch `wip/qat-lm-head`, uncommitted — a measurement
+aid, not in the repository) timed one dispatch at M = 1 with f32 activations; µs, median / min:
+
+| Kernel | µs | GB/s |
+| --- | --- | --- |
+| sequential c32u4 (the current kernel) | 2887 / 2336 | 35 |
+| sequential c128u4 | 2855 / 2309 | — |
+| sequential without the decode | 1914–2191 / 1633 | 46–53 |
+| parallel GEMV l2 / l4 / l8 / l16 | 2924 / 3060 / 3374 / 5544 | — |
+| parallel GEMV l32 | exceeds the 65535-workgroup limit at this n | — |
+| lanes × rows layout without the decode, L16R4 | 1156 / 1138 | 87 (the read roofline) |
+| lanes × rows layout without the decode, L8R8 | 1154 | — |
+
+The sequential layout (one column per thread) is bound by its memory access pattern even without the decode; the lanes
+× rows layout (`lanes` threads share a column, a lane group holds `rows` columns) fixes the pattern, after which the
+kernel is bound by the decode ALU.
+
+Decodes on the lanes × rows layout:
+
+| Decode | Exact | Result |
+| --- | --- | --- |
+| `round(255 · unorm) − 2`, shift / and / convert, `unpack4xU8`, bytes | yes | all about 2.8 ms median / 2.3 ms min (L8R4 and L8R8 alike) |
+| the offset folded out of the loop (`− 2 · Σ x`) | — | no help |
+| `255 · unorm − 2` (no round) | **no** | fastest (L8R8 2276 / 1729) — Metal fuses it into an `fma`, so code 2 decodes to 1.18e-7; 3145 / 4099 words differ from the exact decode |
+| pair table (16-entry tables of element pairs in workgroup memory; products exact since values are −2..1) | yes | 2.3–5.4 ms — loses (workgroup-memory bound) |
+| magic: `fma(255, unorm, 1.5 · 2^23) − (1.5 · 2^23 + 2)` | yes | u32-equal to the round decode, no barrier needed; the sweep below |
+
+The magic decode, swept over 21 rounds (median / min, µs): sequential 2973 / 2420; L4R4 2483 / 1935; **L8R4 2383 /
+1837** (best); L8R8 2603 / 2061; L16R4 2697 / 2148; L8R1 3462; L16R2 3696.
+
+- Errors against f64: every candidate within 0.3% of the GEMM band (atol 2e-4 + rtol 4e-6).
+- M2 timing: medians and minima were about 550 µs apart in most runs (clock state), so the comparisons are min to min and
+  median to median.
+- The current sequential GEMV is not order-stable on the M2: its unroll 2 and 8 variants differ in u32 from unroll 4
+  (Metal's fast-math reassociates or contracts `acc + x · d`).
+
+### Why the magic decode is exact
+
+`unpack4x8unorm` gives `u / 255`, and `255 · (u / 255)` is within 1e-6 of the integer `u`. Near 1.5 · 2^23 consecutive
+f32 values are 1 apart, so adding 1.5 · 2^23 rounds the sum to `u + 1.5 · 2^23` — whether the multiply is fused into
+the add (the exact product rounded once) or not (the rounded product is still within 0.5 of `u`). Subtracting
+1.5 · 2^23 + 2 is an exact subtraction of integers below 2^24 and leaves `u − 2`. The `round`-free spelling
+`255 · unorm − 2` has no such margin: fused, it keeps the 1e-7 residue of `u / 255`. A compiler that folded the magic
+decode's two constants into one `fma` would bring that residue back; the M2's Metal does not (the u32 equality above).
+
+### The runtime kernel and its check
+
+- The runtime kernel (`planesGemvWgsl`, L8R4) is u32-equal to the probe's L8R4 magic kernel and timed 2393 / 1845 µs
+  (median / min) against 2987 / 2425 for the sequential c32u4 in the same run; its largest error against f64 was 0.17% of the GEMM band.
+- `checkPlanesGemv`: 240 / 240 cases pass (the f64 band, the A/B band against the sequential GEMV, two dispatches
+  identical, nothing written past the outputs, NaN propagation).
+- Fault injection: the decode off by a constant turned the f64 band red on 240 / 240 cases; two planes' activations
+  swapped turned it red on all 180 mixed cases (the saturated fixture holds one weight value, so the swap cannot change
+  it).
+
+### End to end
+
+An A/B on the M2: QAT E2B, greedy, tap off, 3 rounds; arms: integer GEMV only / integer GEMV + byte-plane GEMV.
+
+| Arm | Story ms/token (med · min) | Explainer ms/token (med · min) |
+| --- | --- | --- |
+| integer GEMV | 22.822 · 22.675 | 22.781 · 22.671 |
+| integer GEMV + byte-plane GEMV | 22.835 · 22.739 (×1.001) | 22.766 · 22.594 (×0.999) |
+
+Outputs were identical across rounds within each arm. The shader headers captured in the page showed
+`linear_gemv_planes:v1:wi2:l8r4` in the second arm. A run with the GPU tap on (2 rounds) was not usable: the M2 moved
+between two states (GPU about 20 ms and 25–27 ms per token) within the run.
+
+Split attribution in the model (one round each, without the integer GEMV): the lm_head took 3.197 / 3.163 ms per token
+(Story / Explainer) as `linear_gemv:v1:f32:c32u4:wi2` and 2.498 ms (Story) as `linear_gemv_planes:v1:wi2:l8r4` — the
+kernel saves about 0.68 ms of GPU time per token in place.
+
+Reading (inferred, not measured): with the integer GEMV on, the decode's wall time on the M2 (about 22.7 ms per token)
+no longer follows GPU time — the host side of a token (about 1,036 dispatches recorded and submitted, the readback)
+sets the floor. The i4 shapes' end-to-end gain falling short of the single-kernel estimate (§8) fits the same floor. A
+GPU-time saving shows up end to end only after the host side shrinks (run-ahead, fewer dispatches).
+
+## 11. Open items and records
 
 - Not run: the GPU tests on the development machine's RTX 3080 Ti (`packages/runtime/tests/gpu_linear_gemv_integer_test.ts`)
   and the sha256 rows of ADR 0110 §7. No speed was measured on any backend other than the M2's Metal.
-- The i4 end-to-end gain (0.93 / 1.68 ms) is below the single-kernel estimate (2.3 ms); not investigated.
+- Not run: the byte-plane GEMV's GPU tests on the RTX 3080 Ti (`packages/runtime/tests/gpu_linear_gemv_planes_test.ts`);
+  QAT E4B's lm_head shape was not measured; whether the magic decode can replace the integer GEMV's per-step round was
+  not measured (§10).
+- The i4 end-to-end gain (0.93 / 1.68 ms) is below the single-kernel estimate (2.3 ms); §10 suggests a host-side floor
+  (inferred, not measured).
 - The q 4096 parallel cell's median and min differ by ×1.8 (87.0 / 47.8 µs), so the full layers' K = 1536 group (q
   4096 with k/v 512, the one group where the integer kernel led on the recorded values) is not settled.
-- `/gemma4-bench`'s split mode failed on the integer arm (`setBindGroup: The provided value cannot be converted to a
-  sequence`, in `tap.ts`; not reproduced in isolation) — [known issues](../known-issues.md).
+- `/gemma4-bench`'s split mode fails intermittently (`setBindGroup: The provided value cannot be converted to a
+  sequence`, in `tap.ts`; seen on an integer arm and on a plain QAT arm, not reproduced in isolation) — [known
+  issues](../known-issues.md).
 - Records (localStorage of `http://127.0.0.1:8790` in that Chrome): `claude-m2-bench-greedy` (131,214 chars) and
   `claude-m2-bench-sampler` (28,120 chars) for §3; `claude-m2-bench-integer-ab` for §6;
-  `claude-m2-bench-integer-i4i8` for §7; `claude-m2-bench-integer-i4-ab` (+ `-summary`) and `claude-ab-runs` for §8.
+  `claude-m2-bench-integer-i4i8` for §7; `claude-m2-bench-integer-i4-ab` (+ `-summary`) and `claude-ab-runs` for §8;
+  `claude-m2-lmhead-probe-1` to `-7` for §10.

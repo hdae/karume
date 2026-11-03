@@ -607,12 +607,12 @@ conv3d's — against that list's own MUST (list every item known to be not inclu
 - Fix candidates: `EstimateOptions.convCompute`, counting the pair under the same eligibility as execution
   (`conv3dI8a8Eligible`, `packages/runtime/src/kernels/conv3d-i8a8.ts:114`), or at least an `UNACCOUNTED` item.
 
-## `/gemma4-bench` split mode fails on an integer-GEMV arm (filed 2026-11-03; playground bench split mode only)
+## `/gemma4-bench` split mode fails intermittently (filed 2026-11-03; playground bench split mode only)
 
-On the maintainer's M2 (Chrome 158), a `/gemma4-bench` arm with both "Split dispatches" and "Integer GEMV" on failed
-with `setBindGroup: The provided value cannot be converted to a sequence`, raised in the bench's GPU tap
+On the maintainer's M2 (Chrome 158), `/gemma4-bench` arms with "Split dispatches" on failed — once with "Integer GEMV"
+on, once on a plain QAT arm — with `setBindGroup: The provided value cannot be converted to a sequence`, raised in the bench's GPU tap
 (`apps/playground/src/models/gemma4-bench/tap.ts`). It was not reproduced in isolation and has not been investigated;
-the integer arm without the split, and the split on the arms without the integer GEMV, ran
-([research 2026-11-03](research/2026-11-03-qat-integer-gemv-m2.md) §8, §10).
+the same plain arm and a byte-plane arm ran with the split in later runs
+([research 2026-11-03](research/2026-11-03-qat-integer-gemv-m2.md) §8, §11).
 
-- Impact: the playground bench's split mode on integer-GEMV arms only (no per-key attribution of the integer kernels).
+- Impact: the playground bench's split mode only (a run can fail before its per-key attribution is complete).

@@ -43,6 +43,7 @@
 | w4a8 | w4a8 | 重み i4 × 活性 per-token i8 の整数内積の経路 | — | ADR 0076 |
 | integer dot product | 整数内積 | 量子化した整数どうしを int32 累算で掛け合わせる実行形 | — | ADR 0025 / 0076 |
 | integer GEMV (`integerGemv`) △ | 整数 GEMV | packed 活性の SRQ コードと重みの整数コードの積をグループごとに厳密な整数で足し、scale は最後に決まった順で 1 回だけ掛ける decode 用 GEMV（opt-in・QAT E2B の計測した形だけ） | — | ADR 0140 |
+| byte-plane GEMV (`linearGemvPlanes`) △ | バイトプレーン GEMV | i2 の重みの語をバイトプレーンに分け、`unpack4x8unorm` と厳密な変換で −2..1 の値にして f32 の活性と掛けて足す decode 用 GEMV。参照との違いは足す順と、チャネルの scale を和の後で 1 回掛けることだけ（契約クラス R・opt-in・QAT E2B の lm_head の形だけ） | — | ADR 0141 |
 | packed int8 activations | packed 活性 | 固定 SRQ の int8 コード 4 個を u32 1 語に詰めて並列 GEMV へ渡す形 | — | ADR 0105 |
 | fake-quant | fake-quant | 重みを量子化格子へ丸めて f32 のまま持つ処理 | — | `tools/exporter/src/karume/quantize.py` |
 | quality measurement (`quality.json`) | 品質計測 | export 時に torch CPU で測る量子化誤差の記録 | — | ADR 0113 決定 4・5 |
