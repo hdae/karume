@@ -33,6 +33,7 @@ import {
   linearGemvStaticQuantizeKey,
   linearGemvSubgroupKey,
 } from "../../src/kernels/linear-gemv.ts";
+import { integerGemvKey } from "../../src/kernels/linear-gemv-integer.ts";
 import { linearI8a8Key } from "../../src/kernels/linear-i8a8.ts";
 import { RMS_NORM_KEY, rmsNormAddKey } from "../../src/kernels/rms-norm.ts";
 import { rmsNormSubgroupKey } from "../../src/kernels/rms-norm-subgroup.ts";
@@ -96,6 +97,7 @@ export const SEAT_REFERENCE = {
   fuseLinearStaticQuantize: false,
   fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
+  integerGemv: false,
   rmsNormReduce: "workgroup",
 } as const satisfies { readonly [Seat in NumericSeat]-?: SeatValue<Seat> };
 
@@ -187,6 +189,10 @@ const RMS_NORM_ADD_FAMILY = familyOf(rmsNormAddKey("norm-residual", 1536));
 const GELU_MUL_STATIC_QUANTIZE_FAMILY = familyOf(geluMulStaticQuantizeKey("gelu-other"));
 const RMS_FAMILIES: ReadonlySet<string> = new Set([familyOf(RMS_NORM_KEY), RMS_NORM_ADD_FAMILY]);
 const RMS_SUBGROUP = suffixOf(rmsNormSubgroupKey(), RMS_NORM_KEY);
+// The integer GEMV (`integerGemv`): one family for every variant, plain or with the SRQ epilogue.
+const GEMV_INTEGER_FAMILY = familyOf(
+  integerGemvKey({ weight: { storage: "i2" }, lanes: 8, rows: 4 }, false),
+);
 
 const isGemvParallel = (key: string): boolean => familyOf(key) === GEMV_PARALLEL_FAMILY;
 
@@ -237,6 +243,9 @@ export const SEAT_SIGNATURES: SeatSignatures = {
     // 生産側（単体 SRQ の packed 変種）と消費側（並列 GEMV の packed 変種）のどちらでも立つ。
     true: (key) =>
       key === STATIC_QUANTIZE_PACKED_KEY || (isGemvParallel(key) && hasFragment(key, GEMV_PACKED)),
+  },
+  integerGemv: {
+    true: (key) => familyOf(key) === GEMV_INTEGER_FAMILY,
   },
   rmsNormReduce: {
     subgroup32: (key) => RMS_FAMILIES.has(familyOf(key)) && hasFragment(key, RMS_SUBGROUP),

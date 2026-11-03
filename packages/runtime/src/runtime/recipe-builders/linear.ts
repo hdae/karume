@@ -48,9 +48,16 @@ import {
   linearGemvUnit,
   linearGemvWgsl,
 } from "../../kernels/linear-gemv.ts";
+import {
+  integerGemvKey,
+  integerGemvParams,
+  type IntegerGemvVariant,
+  integerGemvWgsl,
+  integerGemvWorkgroups,
+} from "../../kernels/linear-gemv-integer.ts";
 import { LINEAR_SCALE_BINDING, linearKey, linearParams, linearWgsl } from "../../kernels/linear.ts";
 import type { LinearPrologue, PackedActivations } from "../fusion.ts";
-import { linearTakesI8a8 } from "../linear-route.ts";
+import { linearIntegerGemvVariant, linearTakesI8a8 } from "../linear-route.ts";
 import type { WeightStorage } from "../../kernels/weight-storage.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../../kernels/bmm.ts";
 import { i8a8TileM, i8a8TileN } from "../../kernels/i8a8-geometry.ts";
@@ -185,27 +192,52 @@ export const buildLinear = async (
   if (weightStorage === "i2" && face.state.linearCompute !== "f32") {
     throw new ExecutionError("linear: i2 residency supports only linearCompute 'f32' (ADR 0097)");
   }
-  // If a linear declared to receive packed activations (ADR 0105) does not land on the parallel
-  // GEMV, f32 words flow into the `vec4<u32>` binding = a silent wrong value with no exception.
-  // The pairing is accepted in one place, fusion.ts, but it is checked here too **with the same
-  // predicate** (fail loudly).
+  // An integer GEMV linear (`SessionOptions.integerGemv`): decided by the one function the packed
+  // pairing reads (src/runtime/linear-route.ts). It takes the integer kernel only when its
+  // activation arrives packed; otherwise it keeps the paths below.
+  const integer = linearIntegerGemvVariant(
+    face.state.integerGemv,
+    step,
+    weightStorage,
+    weightStorage === "i4" ? face.weightGroupSize(step) : undefined,
+  );
+  // If a linear declared to receive packed activations (ADR 0105) lands on neither the parallel
+  // GEMV's packed variant nor the integer GEMV, f32 words flow into the `vec4<u32>` binding = a
+  // silent wrong value with no exception. The pairing is accepted in one place, fusion.ts, but it is
+  // checked here too **with the same predicates** (fail loudly).
   if (packed !== undefined) {
     const eligible =
       packed.role === "read" &&
       face.state.linearGemvReduce === "parallel" &&
       face.state.linearCompute === "f32" &&
-      linearGemvPackedEligible(
-        weightStorage,
-        m,
-        n,
-        k,
-        weightStorage === "i4" ? face.weightGroupSize(step) : undefined,
-      ) !== undefined;
+      (integer !== undefined ||
+        linearGemvPackedEligible(
+          weightStorage,
+          m,
+          n,
+          k,
+          weightStorage === "i4" ? face.weightGroupSize(step) : undefined,
+        ) !== undefined);
     if (!eligible) {
       throw new ExecutionError(
         `linear [${x.join(",")}] × [${weight.join(",")}]: ` +
-          "declared as packed activations (ADR 0105) but does not land on the parallel GEMV",
+          "declared as packed activations (ADR 0105) but lands on neither the parallel GEMV nor the integer GEMV",
       );
+    }
+    if (integer !== undefined) {
+      await buildLinearIntegerGemv(
+        face,
+        step,
+        binds,
+        outs,
+        builder,
+        integer,
+        m,
+        n,
+        k,
+        packed.scale,
+      );
+      return;
     }
   }
   // The integer dot-product path (opt-in × integer residency × k > 0 × k % 4 == 0). The predicate
@@ -481,6 +513,62 @@ const buildLinearGemv = async (
     workgroups: [
       tiledWorkgroups(n, lanes === undefined ? variant.cols : 128 / lanes, limit, where),
       tiledWorkgroups(m, rows, limit, where),
+      1,
+    ],
+  });
+};
+
+/**
+ * linear's **integer GEMV** (`SessionOptions.integerGemv` — src/kernels/linear-gemv-integer.ts): an
+ * integer GEMV linear whose activation arrives as packed int8 codes. The output stays f32 (the
+ * linear→SRQ fusion builds the SRQ-epilogue form in its own rule).
+ *
+ * The bindings keep the linear's numbering, as the parallel GEMV's do (1 x = the packed codes / 2 w =
+ * the weight units / 3 bias / 4 out / 5 the weight scales, per channel and for i4 per group); a
+ * linear always binds its bias (arity 3).
+ * The activation scale is the producer SRQ's, carried by the pairing (`packed.scale`).
+ * MUST: called only past `buildLinear`'s guard (the activation is packed and the variant came from
+ * `linearIntegerGemvVariant`). The grid is `(workgroups(n), m)`, one workgroup per tile, so
+ * exceeding the limit fails loudly.
+ */
+const buildLinearIntegerGemv = async (
+  face: RecipeBuildFace,
+  step: NodePlan,
+  binds: readonly BindingSource[],
+  outs: readonly BindingSource[],
+  builder: StepRecipeBuilder,
+  variant: IntegerGemvVariant,
+  m: number,
+  n: number,
+  k: number,
+  xScale: number,
+): Promise<void> => {
+  const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
+  const [x, weight] = step.inputShapes;
+  const where = `linear gemv integer [${x.join(",")}] × [${weight.join(",")}]`;
+  const key = integerGemvKey(variant, false);
+  const { pipeline, layout, roles } = await face.state.cache.get(
+    key,
+    integerGemvWgsl(variant, false),
+  );
+  const params = face.writeParams(
+    integerGemvParams(variant, m, n, k, xScale),
+    PARAMS_UNIFORM_USAGE,
+  );
+  builder.dispatch({
+    key,
+    pipeline,
+    layout,
+    roles,
+    params,
+    bindings: [
+      ...binds.map((source, index) => ({ binding: index + 1, source })),
+      { binding: 4, source: outs[0] },
+      ...face.weightScaleBindings(step, LINEAR_SCALE_BINDING),
+    ],
+    workgroups: [
+      tiledWorkgroups(integerGemvWorkgroups(n, variant), 1, limit, where),
+      tiledWorkgroups(m, 1, limit, where),
       1,
     ],
   });

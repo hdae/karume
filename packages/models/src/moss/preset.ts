@@ -107,6 +107,7 @@ export const MOSS_SESSION_POLICY: FamilySessionPolicy = {
   fuseLinearStaticQuantize: false,
   fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
+  integerGemv: false,
 };
 
 /** The same knobs (keys and values) in both. */

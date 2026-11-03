@@ -79,6 +79,7 @@ test("toSessionOptions: SessionSpec の全キーを写す（キー追加の取�
     fuseLinearStaticQuantize: false,
     fuseGeluMulStaticQuantize: false,
     packedStaticQuantize: false,
+    integerGemv: false,
   };
   const mapped = toSessionOptions(full) as Record<string, unknown>;
   assertEquals(Object.keys(mapped).sort(), Object.keys(full).sort());
@@ -91,6 +92,7 @@ test("toSessionOptions: 融合の明示falseとtrueを保持する", () => {
       fuseLinearStaticQuantize: value,
       fuseGeluMulStaticQuantize: value,
       packedStaticQuantize: value,
+      integerGemv: value,
     };
     assertEquals(toSessionOptions(spec), spec);
   }
@@ -110,6 +112,7 @@ const ALL: FamilySessionPolicy = {
   fuseLinearStaticQuantize: true,
   fuseGeluMulStaticQuantize: true,
   packedStaticQuantize: true,
+  integerGemv: true,
 };
 
 /** linear の実行形だけを受ける表（irodori / sbv2 と同じ形）。 */
@@ -124,6 +127,7 @@ const LINEAR_ONLY: FamilySessionPolicy = {
   fuseLinearStaticQuantize: false,
   fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
+  integerGemv: false,
 };
 
 /** 全キーを埋めた spec（キーが増えればこの宣言が型検査で落ちる）。 */
@@ -138,6 +142,7 @@ const FULL: Required<SessionSpec> = {
   fuseLinearStaticQuantize: false,
   fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
+  integerGemv: false,
 };
 
 /** 型の外から来る呼び手（JS の消費者）の明示指定を再現する — TS の型はこの経路を守らない。 */
@@ -212,6 +217,7 @@ describe("resolveSessionOptions: 受理できない指定", () => {
       fuseLinearStaticQuantize: "fuseLinearStaticQuantize must be a boolean",
       fuseGeluMulStaticQuantize: "fuseGeluMulStaticQuantize must be a boolean",
       packedStaticQuantize: "packedStaticQuantize must be a boolean",
+      integerGemv: "integerGemv must be a boolean",
     };
     for (const [key, message] of Object.entries(messages)) {
       for (const value of [null, 0, "bogus", [], object]) {
@@ -300,6 +306,33 @@ describe("resolveSessionOptions: 受理できない指定", () => {
       linearCompute: "f32",
       linearGemvReduce: "parallel",
     });
+  });
+
+  it("accepts an explicit integerGemv only on top of the packed activations it requires", () => {
+    const packed = { linearGemvReduce: "parallel", packedStaticQuantize: true } as const;
+    assertEquals(resolveSessionOptions(ALL, packed, { integerGemv: true }, "test"), {
+      ...packed,
+      integerGemv: true,
+    });
+    const requires = `test: ${sessionOptionsViolation({ integerGemv: true })}`;
+    assert(requires.includes("integerGemv requires packedStaticQuantize: true"));
+    assertThrows(
+      () => resolveSessionOptions(ALL, {}, { integerGemv: true }, "test"),
+      ModelInputError,
+      requires,
+    );
+    // An explicit false lifts the packed declaration the integer GEMV depends on: input-caused.
+    assertThrows(
+      () =>
+        resolveSessionOptions(
+          ALL,
+          { ...packed, integerGemv: true },
+          { packedStaticQuantize: false },
+          "test",
+        ),
+      ModelInputError,
+      requires,
+    );
   });
 });
 

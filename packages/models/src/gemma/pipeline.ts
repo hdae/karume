@@ -379,6 +379,15 @@ export type PipelineOptions = {
    */
   readonly packedStaticQuantize?: SessionOptions["packedStaticQuantize"];
   /**
+   * Runs the eligible decode linears (i2 and i4 at the measured QAT E2B shapes — ADR 0140) on the
+   * integer GEMV. The runtime setting of the same name is
+   * the source of truth for its meaning and scope. Rejected unless the effective
+   * `packedStaticQuantize` is `true`. Resolved in the order explicit value → the selected quant's
+   * session → the runtime default, and passed to both target and drafter. Only the QAT graphs have
+   * linears at those shapes; fromAssets has no quant, so it is the runtime default when unspecified.
+   */
+  readonly integerGemv?: SessionOptions["integerGemv"];
+  /**
    * The optional RMS reduction. subgroup32 requires a supporting GPU and changes the addition order
    * from the reference (ADR 0100).
    */
@@ -1364,6 +1373,7 @@ export class GemmaPipeline {
       ...(options.packedStaticQuantize === undefined
         ? {}
         : { packedStaticQuantize: options.packedStaticQuantize }),
+      ...(options.integerGemv === undefined ? {} : { integerGemv: options.integerGemv }),
       ...(options.rmsNormReduce === undefined ? {} : { rmsNormReduce: options.rmsNormReduce }),
       submitPolicy: gemmaSubmitPolicy(options.submitPolicy),
       ...(options.stateAttentionReduce === undefined

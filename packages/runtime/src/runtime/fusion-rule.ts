@@ -313,6 +313,11 @@ export type FusionContext = {
   readonly fuseGeluMulStaticQuantize?: boolean;
   /** Hand fixed-SRQ activations to the parallel GEMV as packed int8 (ADR 0105). */
   readonly packedStaticQuantize?: boolean;
+  /**
+   * Run the eligible decode linears on the integer GEMV (`SessionOptions.integerGemv`); which
+   * linears is decided by `linearIntegerGemvVariant` in {@link "./linear-route.ts"} alone.
+   */
+  readonly integerGemv?: boolean;
   readonly linearGemvReduce?: LinearGemvReduce;
   readonly linearCompute?: "f32" | "f16" | "a8";
   /**

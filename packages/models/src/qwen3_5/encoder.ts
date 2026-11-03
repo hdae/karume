@@ -79,6 +79,7 @@ export const QWEN3_5_TEXT_ENCODER_SESSION_POLICY: FamilySessionPolicy = {
   fuseLinearStaticQuantize: false,
   fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
+  integerGemv: false,
 };
 
 /** The part of a Session the encoder uses (narrow, so a test can stand in for the GPU). */

@@ -23,6 +23,7 @@ import {
   linearGemvStaticQuantizePackedKey,
   linearGemvSubgroupKey,
 } from "../src/kernels/linear-gemv.ts";
+import { integerGemvKey } from "../src/kernels/linear-gemv-integer.ts";
 import { conv3dI8a8Key } from "../src/kernels/conv3d-i8a8.ts";
 import { geluMulStaticQuantizeKey } from "../src/kernels/gelu-mul-static-quantize.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
@@ -131,6 +132,17 @@ const REPRESENTATIVES: {
   },
   packedStaticQuantize: {
     true: [STATIC_QUANTIZE_PACKED_KEY, linearGemvParallelPackedKey("i4", 32, 8)],
+  },
+  integerGemv: {
+    true: [
+      integerGemvKey({ weight: { storage: "i2" }, lanes: 8, rows: 4 }, false),
+      integerGemvKey({ weight: { storage: "i2" }, lanes: 16, rows: 4 }, true),
+      integerGemvKey(
+        { weight: { storage: "i4", groupSize: 2048, groups: 3 }, lanes: 8, rows: 2 },
+        true,
+      ),
+      integerGemvKey({ weight: { storage: "i8" }, lanes: 4, rows: 1 }, false),
+    ],
   },
   rmsNormReduce: {
     subgroup32: [rmsNormSubgroupKey(), rmsNormSubgroupKey("residual-norm")],

@@ -321,6 +321,7 @@ export const SIGLIP2_SESSION_POLICY: FamilySessionPolicy = {
   fuseLinearStaticQuantize: false,
   fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
+  integerGemv: false,
 };
 
 /** What the family admission ({@link admitSiglip2}) settles. */

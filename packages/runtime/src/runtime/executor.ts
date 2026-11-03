@@ -2357,6 +2357,7 @@ export class Session {
       fuseLinearStaticQuantize: this.#state.fuseLinearStaticQuantize,
       fuseGeluMulStaticQuantize: this.#state.fuseGeluMulStaticQuantize,
       packedStaticQuantize: this.#state.packedStaticQuantize,
+      integerGemv: this.#state.integerGemv,
       linearGemvReduce: this.#state.linearGemvReduce,
       linearCompute: this.#state.linearCompute,
       attentionCompute: this.#state.attentionCompute,

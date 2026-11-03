@@ -1,7 +1,8 @@
 /**
  * Fusion rule `linearStaticQuantize` (`linear → static_quantize` into one parallel GEMV
- * dispatch). The eligibility conditions shared by every rule and `defineRule` are in
- * {@link "../fusion-rule.ts"}; the declaration table that fixes the application order is
+ * dispatch — or, for an integer GEMV linear whose activation arrives packed, one integer GEMV
+ * dispatch with the SRQ epilogue). The eligibility conditions shared by every rule and `defineRule`
+ * are in {@link "../fusion-rule.ts"}; the declaration table that fixes the application order is
  * `FUSION_RULES` in {@link "../fusion.ts"}.
  */
 
@@ -17,14 +18,23 @@ import {
   linearGemvStaticQuantizeParams,
   linearGemvStaticQuantizeWgsl,
 } from "../../kernels/linear-gemv.ts";
+import {
+  integerGemvKey,
+  integerGemvParams,
+  type IntegerGemvVariant,
+  integerGemvWgsl,
+  integerGemvWorkgroups,
+} from "../../kernels/linear-gemv-integer.ts";
 import type { WeightStorage } from "../../kernels/weight-storage.ts";
 import {
   allF32,
   defineRule,
+  type FusedDispatch,
   type FusionMatch,
   internalsArePrivate,
   sameShape,
 } from "../fusion-rule.ts";
+import { linearIntegerGemvVariant } from "../linear-route.ts";
 
 type LinearStaticQuantizeMatch = FusionMatch & {
   readonly binds: readonly string[];
@@ -39,7 +49,46 @@ type LinearStaticQuantizeMatch = FusionMatch & {
   readonly scale: number;
   /** The producer's SRQ scale when the input arrives as packed int8 (else `undefined`). */
   readonly packedX: number | undefined;
+  /**
+   * The integer GEMV variant when the input arrives packed and the linear is an integer GEMV linear
+   * (`linearIntegerGemvVariant`), else `undefined` (the parallel GEMV).
+   */
+  readonly integer: IntegerGemvVariant | undefined;
   readonly workgroups: readonly [number, number, number];
+};
+
+/** The one dispatch of a match: the integer GEMV, the packed parallel GEMV or the parallel GEMV. */
+const dispatchOf = (
+  m: LinearStaticQuantizeMatch,
+): Omit<FusedDispatch, "operands" | "workgroups"> => {
+  if (m.packedX !== undefined && m.integer !== undefined) {
+    const variant = m.integer;
+    return {
+      key: integerGemvKey(variant, true),
+      wgsl: () => integerGemvWgsl(variant, true),
+      params: integerGemvParams(variant, m.m, m.n, m.k, m.packedX, m.scale),
+    };
+  }
+  if (m.packedX !== undefined) {
+    return {
+      key: linearGemvStaticQuantizePackedKey(m.storage, m.group, m.lanes),
+      wgsl: () => linearGemvStaticQuantizePackedWgsl(m.storage, m.group, m.lanes),
+      params: linearGemvStaticQuantizePackedParams(
+        m.storage,
+        m.m,
+        m.n,
+        m.k,
+        m.packedX,
+        m.scale,
+        m.group,
+      ),
+    };
+  }
+  return {
+    key: linearGemvStaticQuantizeKey(m.storage, m.group, m.lanes),
+    wgsl: () => linearGemvStaticQuantizeWgsl(m.storage, m.group, m.lanes),
+    params: linearGemvStaticQuantizeParams(m.storage, m.m, m.n, m.k, m.scale, m.group),
+  };
 };
 
 // DECIDED: docs/decisions/0103-linear-static-quantize-fusion.md
@@ -74,15 +123,31 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<LinearStaticQuantizeMatch>
     const group = weight.storage === "i4" ? weight.groupSize : undefined;
     const lanes = linearGemvParallelEligible(weight.storage, m, n, k, group);
     if (lanes === undefined) return undefined;
+    // The activation side arrives as packed int8 (ADR 0105). Acceptance is settled in one
+    // place, planFusions; this only reads whether it arrives (the output-side SRQ stays f32).
+    const packedX = context.packedValues.get(linear.node.ins[0]);
+    // MUST: whether the integer kernel takes the window enters no acceptance condition above (only
+    // the dispatch the build makes) — the two scans of planFusions grab the same windows.
+    const integer =
+      packedX === undefined
+        ? undefined
+        : linearIntegerGemvVariant(context.integerGemv, linear, weight.storage, group);
     // The tiled form does not fall back to grid-stride; it is rejected at the same device limit
     // as a plain linear.
     const workgroups: readonly [number, number, number] = [
-      tiledWorkgroups(
-        n,
-        128 / lanes,
-        context.limits.maxComputeWorkgroupsPerDimension,
-        "linear static_quantize N",
-      ),
+      integer === undefined
+        ? tiledWorkgroups(
+            n,
+            128 / lanes,
+            context.limits.maxComputeWorkgroupsPerDimension,
+            "linear static_quantize N",
+          )
+        : tiledWorkgroups(
+            integerGemvWorkgroups(n, integer),
+            1,
+            context.limits.maxComputeWorkgroupsPerDimension,
+            "linear gemv integer static_quantize N",
+          ),
       tiledWorkgroups(
         m,
         1,
@@ -104,9 +169,8 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<LinearStaticQuantizeMatch>
       n,
       k,
       scale: staticQuantizeScale(srq.node.attrs, "linear static_quantize fusion"),
-      // The activation side arrives as packed int8 (ADR 0105). Acceptance is settled in one
-      // place, planFusions; this only reads whether it arrives (the output-side SRQ stays f32).
-      packedX: context.packedValues.get(linear.node.ins[0]),
+      packedX,
+      integer,
       workgroups,
     };
   },
@@ -117,26 +181,8 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<LinearStaticQuantizeMatch>
     temps: [],
     dispatches: [
       {
-        key:
-          m.packedX === undefined
-            ? linearGemvStaticQuantizeKey(m.storage, m.group, m.lanes)
-            : linearGemvStaticQuantizePackedKey(m.storage, m.group, m.lanes),
-        wgsl: () =>
-          m.packedX === undefined
-            ? linearGemvStaticQuantizeWgsl(m.storage, m.group, m.lanes)
-            : linearGemvStaticQuantizePackedWgsl(m.storage, m.group, m.lanes),
-        params:
-          m.packedX === undefined
-            ? linearGemvStaticQuantizeParams(m.storage, m.m, m.n, m.k, m.scale, m.group)
-            : linearGemvStaticQuantizePackedParams(
-                m.storage,
-                m.m,
-                m.n,
-                m.k,
-                m.packedX,
-                m.scale,
-                m.group,
-              ),
+        ...dispatchOf(m),
+        // The integer GEMV keeps the linear's binding numbering (src/kernels/linear-gemv-integer.ts).
         operands: [
           { kind: "bind", index: 0 },
           { kind: "bind", index: 1 },

@@ -481,6 +481,26 @@ export type SessionOptions = {
    */
   readonly packedStaticQuantize?: boolean;
   /**
+   * Runs the eligible decode linears on the **integer GEMV** (default false — ADR 0140; the kernel
+   * is src/kernels/linear-gemv-integer.ts).
+   * Supported only together with packedStaticQuantize: true (which itself requires
+   * linearGemvReduce: parallel / linearCompute: f32); any other combination is rejected at
+   * construction, with no silent fallback.
+   * It applies only to "a linear with i2 / i4 / i8 weights, M = 1..8 and a measured shape (today
+   * i2 and i4 of QAT E2B) whose activation
+   * arrives as packed int8 from a plain static_quantize node"; such a linear also counts as a
+   * packed consumer, so its producer SRQ is packed even where the parallel GEMV's table does not
+   * pack it. With the linear→SRQ fusion (fuseLinearStaticQuantize) the output SRQ runs as the
+   * kernel's epilogue. Every other linear keeps its path.
+   * The kernel sums the integer products of the weight and activation codes exactly per group,
+   * then applies each group's weight scale (groups in ascending order), the activation scale and
+   * the bias in that order — a different rounding
+   * sequence from the parallel GEMV, so the generated sequence may differ from the option off.
+   * The output is a pure function of the inputs, word for word on every backend (it is checked
+   * against its CPU mirror).
+   */
+  readonly integerGemv?: boolean;
+  /**
    * The RMS reduction method (default workgroup). subgroup32 applies to RMS wider than 128 and to
    * the optional RMS→add fusion.
    * Requires acquireGpu({ subgroups: true }). Without it the option is rejected, with no automatic

@@ -127,6 +127,29 @@ describe("Gemmaのquant実行設定", () => {
       "packedStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32",
     );
   });
+  it("takes integerGemv explicitly on top of a preset that declares the packed activations", () => {
+    // The QAT i4-fast form: the preset declares the packed activations, the caller adds integerGemv.
+    const packedFast = { ...fast, packedStaticQuantize: true } as const;
+    assertEquals(resolve(packedFast, { integerGemv: true }, "test"), {
+      ...packedFast,
+      integerGemv: true,
+    });
+    assertThrows(
+      () => resolve(fast, { integerGemv: true }, "test"),
+      ModelInputError,
+      "integerGemv requires packedStaticQuantize: true",
+    );
+    // Both entry points decide alike (fromAssets has no preset to declare the packed activations).
+    assertThrows(
+      () => assertGemmaSessionOverrides({ integerGemv: true }, "test"),
+      ModelInputError,
+      "integerGemv requires packedStaticQuantize: true",
+    );
+    assertGemmaSessionOverrides(
+      { linearGemvReduce: "parallel", packedStaticQuantize: true, integerGemv: true },
+      "test",
+    );
+  });
   it("stateAttentionReduceは他の欄と同じ規則で解け、宣言が無ければ欄を作らない", () => {
     // 家族のコード既定は持たない（ADR 0104 追記 2026-09-26）。欄が無い = runtime の参照経路
     // `"sequential"` — `session` が空の `i4` 席と、GEMV だけを宣言する席がこの形になる。
@@ -171,6 +194,7 @@ describe("Gemmaのquant実行設定", () => {
       fuseLinearStaticQuantize: false,
       fuseGeluMulStaticQuantize: false,
       packedStaticQuantize: false,
+      integerGemv: false,
     };
     const accepted = [
       "linearGemvReduce",
@@ -179,6 +203,7 @@ describe("Gemmaのquant実行設定", () => {
       "fuseLinearStaticQuantize",
       "fuseGeluMulStaticQuantize",
       "packedStaticQuantize",
+      "integerGemv",
     ];
     const rejected: string[] = [];
     for (const key of Object.keys(full) as (keyof typeof full)[]) {
@@ -209,6 +234,7 @@ describe("Gemmaのquant実行設定", () => {
       ["fuseLinearStaticQuantize", "fuseLinearStaticQuantize must be a boolean"],
       ["fuseGeluMulStaticQuantize", "fuseGeluMulStaticQuantize must be a boolean"],
       ["packedStaticQuantize", "packedStaticQuantize must be a boolean"],
+      ["integerGemv", "integerGemv must be a boolean"],
     ] as const;
     for (const [key, message] of invalid) {
       for (const value of [null, 0, 1, [], object]) {

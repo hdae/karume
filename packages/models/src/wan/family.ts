@@ -310,6 +310,7 @@ export const WAN_SESSION_POLICY: FamilySessionPolicy = {
   fuseLinearStaticQuantize: false,
   fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
+  integerGemv: false,
 };
 
 /** The material the family admission ({@link admitWan}) settles. */
