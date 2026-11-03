@@ -31,9 +31,9 @@ import {
   assertRopeInputShapes,
   gemmaEntryName,
 } from "../src/gemma/admission.ts";
-import { CHUNK_BUCKETS, Pipeline } from "../src/gemma/pipeline.ts";
+import { buildGemma4Program, CHUNK_BUCKETS, Pipeline } from "../src/gemma/pipeline.ts";
 import type { GenerationGraph } from "../src/generation/program.ts";
-import type { GraphOwner } from "../src/hub/components.ts";
+import type { GraphOwner, ModelComponent } from "../src/hub/components.ts";
 import { stubModel } from "./helpers/stub-model.ts";
 import { beforeAll, describe, it, test } from "vite-plus/test";
 
@@ -592,5 +592,255 @@ describe("assertGemma4ChunkBuckets: 受理集合は runtime に委ね、入口�
       );
     }
     assertEquals(assertGemma4ChunkBuckets(CHUNK_BUCKETS, SHIPPED_CHUNK_LENGTH), CHUNK_BUCKETS);
+  });
+});
+
+// ---- chatDialect (the chat template the model follows) --------------------------------------
+
+describe("gemma4 pipelineConfig: chatDialect", () => {
+  it("absent: the parsed value has no chatDialect field (the E2B / E4B manifests as they are)", () => {
+    const config = parsePipelineConfig(MINIMAL);
+    assertEquals(Object.hasOwn(config, "chatDialect"), false);
+  });
+
+  it("each dialect of the closed set is read as declared", () => {
+    for (const chatDialect of ["gemma4", "gemma4-unified"] as const) {
+      assertEquals(parsePipelineConfig({ ...MINIMAL, chatDialect }), { ...MINIMAL, chatDialect });
+    }
+  });
+
+  it("a dialect next to a sampler keeps both", () => {
+    assertEquals(
+      parsePipelineConfig({
+        ...MINIMAL,
+        sampler: { ...RECOMMENDED },
+        chatDialect: "gemma4-unified",
+      }),
+      { ...MINIMAL, sampler: RECOMMENDED, chatDialect: "gemma4-unified" },
+    );
+  });
+
+  it("an unknown dialect fails loudly naming the accepted set (no fallback to the default)", () => {
+    for (const chatDialect of ["gemma4-12b", "Gemma4-unified", "", 1, null, ["gemma4"]]) {
+      const error = assertThrows(
+        () => parsePipelineConfig({ ...MINIMAL, chatDialect }),
+        Error,
+        "pipelineConfig.chatDialect",
+      );
+      assert(error.message.includes("gemma4 / gemma4-unified"), error.message);
+    }
+  });
+
+  it("fromAssets runs the same check before opening a byte", async () => {
+    const junk = new Uint8Array<ArrayBuffer>(new ArrayBuffer(8));
+    await assertRejects(
+      () =>
+        Pipeline.fromAssets({
+          config: { ...MINIMAL, chatDialect: "gemma4-12b" } as unknown as PipelineConfig,
+          model: [junk],
+          tokenizer: junk,
+        }),
+      Error,
+      "pipelineConfig.chatDialect",
+    );
+  });
+});
+
+// ---- suppressTokens (ids the model never generates) ----------------------------------------
+//
+// gemma-4-12B-it's generation_config.json declares suppress_tokens [258883, 258882] (`<audio|>` /
+// `<image|>`); the distribution writes them sorted. The selection side is in the generation tests
+// (`generation_sampler_test.ts` / `generation_sequence_test.ts`); here: the declaration's shape and
+// the vocabulary bound at admission.
+
+/** The 12B declaration as the distribution writes it. */
+const SUPPRESS_12B = [258882, 258883] as const;
+
+describe("gemma4 pipelineConfig: suppressTokens", () => {
+  it("absent: the parsed value has no suppressTokens field (the E2B / E4B manifests as they are)", () => {
+    assertEquals(Object.hasOwn(parsePipelineConfig(MINIMAL), "suppressTokens"), false);
+  });
+
+  it("a sorted list of distinct ids is read as declared, next to the other optional keys", () => {
+    assertEquals(parsePipelineConfig({ ...MINIMAL, suppressTokens: [...SUPPRESS_12B] }), {
+      ...MINIMAL,
+      suppressTokens: [...SUPPRESS_12B],
+    });
+    assertEquals(
+      parsePipelineConfig({
+        ...MINIMAL,
+        sampler: { ...RECOMMENDED },
+        chatDialect: "gemma4-unified",
+        suppressTokens: [0],
+      }),
+      { ...MINIMAL, sampler: RECOMMENDED, chatDialect: "gemma4-unified", suppressTokens: [0] },
+    );
+  });
+
+  it("an invalid declaration fails loudly naming the field", () => {
+    const cases: readonly (readonly [unknown, string])[] = [
+      // Empty would be a declaration that does nothing; the writer omits the key instead.
+      [[], "is not a non-empty array of token ids"],
+      ["258882", "is not a non-empty array of token ids"],
+      [{ 0: 258882 }, "is not a non-empty array of token ids"],
+      [null, "is not a non-empty array of token ids"],
+      [[258882, "258883"], '[1]: "258883" is not a non-negative integer'],
+      [[1.5], "[0]: 1.5 is not a non-negative integer"],
+      [[-1], "[0]: -1 is not a non-negative integer"],
+      [[null], "[0]: null is not a non-negative integer"],
+      // The upstream order is not normalized here — the writer sorts; anything else was not written by it.
+      [[258883, 258882], "[1]: 258882 does not follow 258883 in strictly ascending order"],
+      [[7, 7], "[1]: 7 does not follow 7 in strictly ascending order"],
+    ];
+    for (const [suppressTokens, message] of cases) {
+      const error = assertThrows(
+        () => parsePipelineConfig({ ...MINIMAL, suppressTokens }),
+        Error,
+        message,
+      );
+      assert(error.message.startsWith("pipelineConfig.suppressTokens"), error.message);
+    }
+  });
+});
+
+describe("gemma4 admission: the suppressed ids are checked against the graph's vocabulary", () => {
+  /** A product graph declaration with a vocabulary of `vocab` (the rest of the shipped shape). */
+  const productOwner = (vocab: number): GraphOwner =>
+    stubModel({
+      symbols: ["C", "M", "R"],
+      inputs: [
+        { name: "input_ids", shape: [1, "M"], dtype: "i32" },
+        { name: "rope_sliding_attention_cos", shape: [1, "M", 256] },
+        { name: "rope_sliding_attention_sin", shape: [1, "M", 256] },
+        { name: "rope_full_attention_cos", shape: [1, "M", 512] },
+        { name: "rope_full_attention_sin", shape: [1, "M", 512] },
+        { name: "last_row", shape: ["R"], dtype: "i32" },
+      ],
+      outputs: ["logits", "hidden"],
+      values: { logits: [1, "R", vocab], hidden: [1, "R", 3840] },
+    });
+  const entry = gemmaEntryName("gemma4");
+
+  it("ids inside the vocabulary pass (and no declaration passes)", () => {
+    const config = parsePipelineConfig({ ...MINIMAL, suppressTokens: [...SUPPRESS_12B] });
+    assertEquals(admitGemma4(productOwner(262144), config, undefined, entry).vocabSize, 262144);
+    admitGemma4(productOwner(262144), parsePipelineConfig(MINIMAL), undefined, entry);
+  });
+
+  it("an id at or past the vocabulary fails before any weight part, naming the entry", () => {
+    const config = parsePipelineConfig({ ...MINIMAL, suppressTokens: [5, 16] });
+    const error = assertThrows(
+      () => admitGemma4(productOwner(16), config, undefined, entry),
+      Error,
+      "pipelineConfig.suppressTokens[1] 16 is outside the vocabulary 0..15",
+    );
+    assert(error.message.startsWith(`${entry}: `), error.message);
+    // The distribution's declaration, not the caller's request (ADR 0107 decision 2).
+    assert(!(error instanceof ModelInputError));
+  });
+});
+
+// ---- The declarations reach the build (GPU-free) --------------------------------------------
+//
+// `buildGemma4Program` is the step both construction surfaces share: it builds the tokenizer and
+// the generation wiring every sequence of the pipeline is made from (`Pipeline.sequence` / `chat`
+// pass `state.wiring` and render with `state.tokenizer`). A Session needs a real device, so this is
+// the GPU-free point that shows `pipelineConfig.chatDialect` reaching the tokenizer and
+// `pipelineConfig.suppressTokens` reaching the selection's wiring; the selection itself masking
+// the wiring's set is `generation_sequence_test.ts`'s.
+
+describe("gemma4 build: chatDialect reaches the tokenizer, suppressTokens the wiring", () => {
+  const VOCAB = 300;
+  const byteToken = (byte: number): string =>
+    `<0x${byte.toString(16).toUpperCase().padStart(2, "0")}>`;
+  /** A compiled tokenizer asset with the added tokens the stop set needs (`gemma4StopTokens`). */
+  const tokenizerBytes = (): Uint8Array<ArrayBuffer> => {
+    const added = ["<turn|>", "<|tool_response>", "<|channel>", "<channel|>"];
+    const vocab = [
+      "<unk>",
+      "<bos>",
+      "<eos>",
+      ...Array.from({ length: 256 }, (_, byte) => byteToken(byte)),
+      ...added,
+    ];
+    const text = JSON.stringify({
+      format: "karume-gemma-tokenizer/1",
+      spec: {
+        normalizer: "replace-space-with-metaspace",
+        preTokenizer: "split-space-merged-with-previous",
+        decoder: "metaspace-byte-fallback-fuse",
+        postProcessor: "none",
+      },
+      vocab,
+      mergesText: "",
+      mergesCount: 0,
+      byteIds: Array.from({ length: 256 }, (_, byte) => vocab.indexOf(byteToken(byte))),
+      addedTokens: [
+        ["<unk>", 0],
+        ["<bos>", 1],
+        ["<eos>", 2],
+        ...added.map((token) => [token, vocab.indexOf(token)]),
+      ],
+      specialIds: [0, 1, 2],
+      unkId: 0,
+      bosId: 1,
+      eosId: 2,
+    });
+    const bytes = new TextEncoder().encode(text);
+    const out = new Uint8Array(new ArrayBuffer(bytes.byteLength));
+    out.set(bytes);
+    return out;
+  };
+  /** A PLE-free product graph declaration (gemma-4-12B-it's input set) of vocabulary {@link VOCAB}. */
+  const component = (): ModelComponent => ({
+    ...stubModel({
+      symbols: ["C", "M", "R"],
+      inputs: [
+        { name: "input_ids", shape: [1, "M"], dtype: "i32" },
+        { name: "rope_sliding_attention_cos", shape: [1, "M", 256] },
+        { name: "rope_sliding_attention_sin", shape: [1, "M", 256] },
+        { name: "rope_full_attention_cos", shape: [1, "M", 512] },
+        { name: "rope_full_attention_sin", shape: [1, "M", 512] },
+        { name: "last_row", shape: ["R"], dtype: "i32" },
+      ],
+      outputs: ["logits", "hidden"],
+      values: { logits: [1, "R", VOCAB], hidden: [1, "R", 16] },
+    }),
+    assets: {},
+    // The build of a PLE-free model reads no asset and builds no Session.
+    asset: () => {
+      throw new Error("the build read an asset");
+    },
+    createSession: () => Promise.reject(new Error("the build created a Session")),
+    estimate: () => {
+      throw new Error("the build estimated");
+    },
+    maxPartBytes: 0,
+  });
+  const build = (raw: Record<string, unknown>) => {
+    const config = parsePipelineConfig(raw);
+    const model = component();
+    const entry = gemmaEntryName("gemma4");
+    return buildGemma4Program(
+      admitGemma4(model, config, undefined, entry),
+      () => model,
+      tokenizerBytes(),
+      {},
+      { family: "gemma4" },
+      { residency: "none" },
+    );
+  };
+
+  it("the 12B declarations: the tokenizer renders gemma4-unified, the wiring masks the ids", () => {
+    const built = build({ ...MINIMAL, chatDialect: "gemma4-unified", suppressTokens: [7, 260] });
+    assertEquals(built.tokenizer.chatDialect, "gemma4-unified");
+    assertEquals(built.wiring.suppressTokens, [7, 260]);
+    assertEquals(built.ple, undefined, "a PLE-free model builds no host gather");
+  });
+
+  it("no declaration (E2B / E4B): the default dialect and an empty set", () => {
+    const built = build({ ...MINIMAL });
+    assertEquals(built.tokenizer.chatDialect, "gemma4");
+    assertEquals(built.wiring.suppressTokens, []);
   });
 });

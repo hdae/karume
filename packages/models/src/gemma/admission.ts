@@ -19,10 +19,11 @@ import { assertChunkBuckets } from "@karume/runtime";
 import type { Manifest, ModelEntry, Quant } from "@karume/hub";
 
 import { ModelInputError } from "../errors.ts";
-import type { GraphOwner } from "../hub/components.ts";
-import type { GenerationGraph } from "../generation/program.ts";
+import type { GraphOwner, ModelComponent } from "../hub/components.ts";
+import { assertSuppressTokens, type GenerationGraph } from "../generation/program.ts";
 import { GEMMA4_PIPELINE_MAJOR, type PipelineConfig, parsePipelineConfig } from "./config.ts";
 import { assertGemma4QatModel, type Gemma4QatModel } from "./qat.ts";
+import { declaredGemma4PleAssets } from "./ple-index.ts";
 import { GEMMA4_ROPE_LAYER_TYPES, GEMMA4_ROPE_PARTS, gemma4RopeInputName } from "./rope.ts";
 import { admitGemma4Drafter, type Gemma4DrafterAdmission } from "./speculative.ts";
 
@@ -59,6 +60,13 @@ export type GemmaFamilyAdmission =
  * baker's internal names and may move between distributions.
  */
 const GRAPH_OUTPUTS = 2;
+
+/**
+ * The graph input the host PLE gather feeds (source of truth: the constants of `export_product.py`).
+ * A product graph either has it (E2B / E4B and the QAT models) or not (gemma-4-12B-it, which has no
+ * per-layer inputs).
+ */
+export const GEMMA4_PER_LAYER_INPUTS = "per_layer_inputs";
 
 /**
  * The material settled by the family admission (the check passed before acquiring the GPU, and on
@@ -244,6 +252,14 @@ export const admitGemma4 = (
   const { graph } = component;
   assertRopeInputShapes(graph, config, entry);
   const vocabSize = vocabSizeOf(graph, entry);
+  // The suppressed set's vocabulary bound — the first point the vocabulary is known (the parser
+  // checked the rest of the declaration). The same check runs again when the wiring is built; this
+  // one fails before any weight part is fetched.
+  assertSuppressTokens(
+    config.suppressTokens ?? [],
+    vocabSize,
+    `${entry}: pipelineConfig.suppressTokens`,
+  );
   const capacitySymbol = capacitySymbolOf(graph, entry);
   return {
     config,
@@ -265,6 +281,41 @@ export const admitGemma4 = (
           },
         }),
   };
+};
+
+/**
+ * Settles whether this product graph carries PLE (per-layer inputs), from **both** of its
+ * declarations — the graph input {@link GEMMA4_PER_LAYER_INPUTS} and the container's PLE assets
+ * (`declaredGemma4PleAssets` in `./ple-index.ts`). No byte is read, so it runs at the admission
+ * step (before any weight part is fetched).
+ *
+ * MUST: the two agree, or this fails loudly. A graph that takes per-layer inputs from a container
+ * without PLE assets cannot be fed; PLE assets next to a graph without the input would be shipped and
+ * never read. Either way one side was baked for a different model, and choosing one of them would
+ * hide that.
+ *
+ * Returns `true` for a model with PLE (the caller then reads and checks the index —
+ * `readGemma4PleIndex`), `false` for a PLE-free model.
+ */
+export const admitGemma4Ple = (
+  component: GraphOwner & Pick<ModelComponent, "assets">,
+  entry: string,
+): boolean => {
+  const inGraph = component.graph.inputs.some((input) => input.name === GEMMA4_PER_LAYER_INPUTS);
+  const assets = declaredGemma4PleAssets(component);
+  if (inGraph && assets.length === 0) {
+    throw new Error(
+      `${entry}: the graph takes '${GEMMA4_PER_LAYER_INPUTS}' but the container declares no PLE assets` +
+        ` (a graph and a container baked for different models — the per-layer inputs cannot be built)`,
+    );
+  }
+  if (!inGraph && assets.length > 0) {
+    throw new Error(
+      `${entry}: the container declares PLE assets (${assets.join(" / ")}) but the graph has no` +
+        ` '${GEMMA4_PER_LAYER_INPUTS}' input (a graph and a container baked for different models)`,
+    );
+  }
+  return inGraph;
 };
 
 /**

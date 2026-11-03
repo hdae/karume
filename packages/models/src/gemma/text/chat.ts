@@ -34,6 +34,7 @@
 
 import { ModelInputError } from "../../errors.ts";
 import { pythonStrip } from "../../text/python-strip.ts";
+import { type ChatDialect, DEFAULT_CHAT_DIALECT } from "./chat-dialect.ts";
 import type { Tokenizer } from "./tokenizer.ts";
 
 /** The roles in the first scope (`assistant` is mapped to `model` when rendered). */
@@ -61,6 +62,23 @@ const TOOL_RESPONSE = "<|tool_response>";
 
 /** The role of the turn the generation prompt opens (what `assistant` maps to). */
 const MODEL_ROLE = "model";
+
+/**
+ * What the generation prompt appends after `<|turn>model\n`, per dialect (thinking is out of
+ * scope, so this is the thinking-off branch of each template).
+ *
+ * `"gemma4-unified"` (gemma-4-12B-it) opens and closes an empty thought channel there
+ * (`chat_template.jinja` at 43c9d014, the `add_generation_prompt` block: `<|turn>model\n` then,
+ * when `enable_thinking` is off, `<|channel>thought\n<channel|>`). The E2B / E4B template appends
+ * nothing.
+ */
+const generationPromptTail = (dialect: ChatDialect): string =>
+  (
+    {
+      gemma4: "",
+      "gemma4-unified": `${START_OF_CHANNEL}thought\n${END_OF_CHANNEL}`,
+    } satisfies Record<ChatDialect, string>
+  )[dialect];
 
 /** Roles that fall into the `system` block only when placed first. */
 const SYSTEM_ROLES: readonly string[] = ["system", "developer"];
@@ -144,13 +162,18 @@ const assertPlainConversation = (messages: readonly ChatMessage[]): void => {
  *    not reopened (consecutive assistants fold into one model turn; the closing side is skipped
  *    symmetrically).
  * 3. The generation prompt `<|turn>model\n` is always placed at the end (this function is only the
- *    entry to generation; it has no form for "rendering a closed conversation for training").
+ *    entry to generation; it has no form for "rendering a closed conversation for training"). The
+ *    `"gemma4-unified"` dialect follows it with the empty thought channel
+ *    ({@link generationPromptTail}); everything before it is the same in both dialects.
  *
  * NOTE: not exposed on the public surface (the thin surface of ADR 0008 — the consumer's entry is
  * {@link chatPrompt}). `export` is so that the fixture comparison looks at "rendering" and
  * "encoding" separately — when they diverge, the reader learns which step it was.
  */
-export const renderGemma4Chat = (messages: readonly ChatMessage[]): string => {
+export const renderGemma4Chat = (
+  messages: readonly ChatMessage[],
+  dialect: ChatDialect = DEFAULT_CHAT_DIALECT,
+): string => {
   assertPlainConversation(messages);
   let out = BOS;
   let index = 0;
@@ -172,7 +195,7 @@ export const renderGemma4Chat = (messages: readonly ChatMessage[]): string => {
     if (!(role === MODEL_ROLE && nextRole === "assistant")) out += `${END_OF_TURN}\n`;
     previousRole = message.role;
   }
-  return `${out}${START_OF_TURN}${MODEL_ROLE}\n`;
+  return `${out}${START_OF_TURN}${MODEL_ROLE}\n${generationPromptTail(dialect)}`;
 };
 
 /**
@@ -185,9 +208,12 @@ export const renderGemma4Chat = (messages: readonly ChatMessage[]): string => {
  * The pass line (stage 4) is an **id-sequence match** with the output of HF `apply_chat_template`;
  * the fixtures are taken independently from upstream by `tools/export-recipes/gemma4/chat.py`
  * (ADR 0084 decision 7).
+ *
+ * The dialect is the tokenizer's ({@link Tokenizer.chatDialect} — the distribution declares it next
+ * to the tokenizer it ships), so a 12B pipeline's tokenizer renders the 12B template.
  */
 export const chatPrompt = (tokenizer: Tokenizer, messages: readonly ChatMessage[]): number[] =>
-  tokenizer.encode(renderGemma4Chat(messages));
+  tokenizer.encode(renderGemma4Chat(messages, tokenizer.chatDialect));
 
 /**
  * One new message → **the delta rendered as the continuation of the conversation** (containing
@@ -221,8 +247,18 @@ export const chatPrompt = (tokenizer: Tokenizer, messages: readonly ChatMessage[
  * also folds consecutive assistants into one turn (branch 2 of `renderGemma4Chat`), so "appending an
  * assistant after a closed model turn" cannot be rendered as a delta. To insert one into a
  * conversation, re-render the whole of it with {@link chatPrompt}.
+ *
+ * NOTE: in the `"gemma4-unified"` dialect the identity above holds only up to the empty thought
+ * channel. Every generation prompt — the first one and each delta's — ends with
+ * `<|channel>thought\n<channel|>`, so a conversation carried in the KV keeps that channel at the
+ * start of every past model turn, while the upstream template re-rendering the same history writes
+ * past model turns without it (`strip_thinking` + no reasoning field). Both are the template's own
+ * spellings; only a whole re-render (`chatPrompt`) matches `apply_chat_template` token for token.
  */
-export const renderGemma4ChatTurn = (message: ChatMessage): string => {
+export const renderGemma4ChatTurn = (
+  message: ChatMessage,
+  dialect: ChatDialect = DEFAULT_CHAT_DIALECT,
+): string => {
   assertPlainMessage(message, "gemma.chatTurn: message");
   if (message.role === "assistant") {
     throw new ModelInputError(
@@ -236,7 +272,7 @@ export const renderGemma4ChatTurn = (message: ChatMessage): string => {
   // pendingToken, so it is not here.
   return (
     `\n${START_OF_TURN}${message.role}\n${pythonStrip(message.content)}${END_OF_TURN}\n` +
-    `${START_OF_TURN}${MODEL_ROLE}\n`
+    `${START_OF_TURN}${MODEL_ROLE}\n${generationPromptTail(dialect)}`
   );
 };
 
@@ -250,7 +286,7 @@ export const renderGemma4ChatTurn = (message: ChatMessage): string => {
  * (= an O(n²) prefill).
  */
 export const chatTurn = (tokenizer: Tokenizer, message: ChatMessage): number[] =>
-  tokenizer.encode(renderGemma4ChatTurn(message));
+  tokenizer.encode(renderGemma4ChatTurn(message, tokenizer.chatDialect));
 
 /**
  * The set of stop tokens (ADR 0083 decision 8) — **derived from the tokenizer asset**.

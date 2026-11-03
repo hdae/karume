@@ -367,6 +367,27 @@ export const assertGemma4PleAssets = (
 };
 
 /**
+ * The container's PLE assets **as declared** (no byte read): every asset named
+ * {@link PLE_INDEX_ASSET} or carrying one of the PLE roles, as `name (role)`.
+ *
+ * Empty means a PLE-free container (gemma-4-12B-it has no per-layer inputs). Whether that agrees
+ * with the graph is the family admission's decision (`admitGemma4Ple` in `./admission.ts`); this
+ * only knows the spellings, which stay private to this module.
+ */
+export const declaredGemma4PleAssets = (
+  component: Pick<Gemma4PleAssetSource, "assets">,
+): string[] =>
+  Object.entries(component.assets)
+    .filter(
+      ([name, role]) =>
+        name === PLE_INDEX_ASSET ||
+        role === PLE_INDEX_ROLE ||
+        role === TABLE_ROLE.values ||
+        role === TABLE_ROLE.scales,
+    )
+    .map(([name, role]) => `${name} (${role})`);
+
+/**
  * Reads the index from the container's assets into the accepted form, and checks that the blocks it
  * points at exist (the family check passed **before a single byte of a weight block is fetched** —
  * the admission slot in `./pipeline.ts`).

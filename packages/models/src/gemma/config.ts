@@ -27,6 +27,7 @@ import {
   type RopeLayerType,
   type RopeSpec,
 } from "./rope.ts";
+import { CHAT_DIALECTS, type ChatDialect, isChatDialect } from "./text/chat-dialect.ts";
 
 /** The contract name of `pipeline` and the major this implementation accepts (ADR 0038 §1). */
 export const GEMMA4_PIPELINE_NAME = "gemma4";
@@ -180,6 +181,30 @@ export type PipelineConfig = {
    * parity check keeps living on this path).
    */
   readonly sampler?: DefaultSampler;
+  /**
+   * The chat template the model follows (`./text/chat-dialect.ts`). Absent = `"gemma4"` (the E2B /
+   * E4B template); gemma-4-12B-it declares `"gemma4-unified"`.
+   *
+   * Optional so that the manifests written before the 12B model stay byte-identical. When absent the
+   * field is omitted from the parsed value as well (the same shape as {@link sampler}); the one
+   * place that reads it is the tokenizer construction in `./pipeline.ts`, which carries the dialect
+   * to `chatPrompt` / `chatTurn`.
+   */
+  readonly chatDialect?: ChatDialect;
+  /**
+   * Token ids the model never generates (upstream `generation_config.json` `suppress_tokens` —
+   * gemma-4-12B-it declares `[258882, 258883]`, `<image|>` / `<audio|>`). Their logits are
+   * `-Infinity` before every token selection — greedy, sampling and the speculative acceptance —
+   * which is what HF `generate()` does with the field in greedy and sampling alike. A request
+   * cannot lift it (`GenerationWiring.suppressTokens` in `../generation/program.ts`).
+   *
+   * Optional, and absent from the parsed value when not declared (the E2B / E4B manifests stay
+   * byte-identical; their selection is unchanged). When declared: a non-empty array of distinct
+   * non-negative integers in ascending order (the writer sorts them; a declaration in another
+   * order is not normalized here — it was not written by that writer). The vocabulary bound is
+   * checked at admission, where the vocabulary is first known (`admitGemma4` in `./admission.ts`).
+   */
+  readonly suppressTokens?: readonly number[];
 };
 
 const ROOT_KEYS: readonly string[] = [
@@ -189,6 +214,8 @@ const ROOT_KEYS: readonly string[] = [
   "capacity",
   "rope",
   "sampler",
+  "chatDialect",
+  "suppressTokens",
 ];
 
 /**
@@ -294,6 +321,47 @@ const parseRope = (raw: unknown, where: string): RopeSpec => {
 };
 
 /**
+ * Reads `chatDialect` (called only when the key is present — absence is the default dialect, a
+ * present value outside the closed set fails loudly).
+ */
+const parseChatDialect = (raw: unknown, where: string): ChatDialect => {
+  if (!isChatDialect(raw)) {
+    throw new Error(
+      `${where}: ${JSON.stringify(raw)} is not one of ${CHAT_DIALECTS.join(" / ")}` +
+        ` (rendering a conversation in another model's template still generates text, so an unknown` +
+        ` dialect is not mapped to the default)`,
+    );
+  }
+  return raw;
+};
+
+/**
+ * Reads `suppressTokens` (called only when the key is present — absence means none, and a present
+ * value must declare at least one id: an empty list would be a declaration that does nothing).
+ */
+const parseSuppressTokens = (raw: unknown, where: string): readonly number[] => {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error(`${where}: ${JSON.stringify(raw)} is not a non-empty array of token ids`);
+  }
+  const tokens: number[] = [];
+  for (const [index, token] of raw.entries()) {
+    if (typeof token !== "number" || !Number.isSafeInteger(token) || token < 0) {
+      throw new Error(`${where}[${index}]: ${JSON.stringify(token)} is not a non-negative integer`);
+    }
+    // Strictly ascending covers both "sorted" and "no duplicates" in one comparison.
+    const previous = tokens.at(-1);
+    if (previous !== undefined && token <= previous) {
+      throw new Error(
+        `${where}[${index}]: ${token} does not follow ${previous} in strictly ascending order` +
+          ` (the ids are distinct and written sorted)`,
+      );
+    }
+    tokens.push(token);
+  }
+  return tokens;
+};
+
+/**
  * Checks an `unknown` (the raw declaration hub passed through) and turns it into a
  * {@link PipelineConfig}.
  *
@@ -355,15 +423,20 @@ export const parsePipelineConfig = (raw: unknown): PipelineConfig => {
   }
   if (!Object.hasOwn(raw, "rope")) throw new Error(`${where}.rope: missing`);
   const rope = parseRope(raw["rope"], `${where}.rope`);
-  if (!Object.hasOwn(raw, "sampler")) {
-    return { chunkLength, maxChunkLength, maxPosition, capacity, rope };
-  }
   return {
     chunkLength,
     maxChunkLength,
     maxPosition,
     capacity,
     rope,
-    sampler: parseSampler(raw["sampler"], `${where}.sampler`),
+    ...(Object.hasOwn(raw, "sampler")
+      ? { sampler: parseSampler(raw["sampler"], `${where}.sampler`) }
+      : {}),
+    ...(Object.hasOwn(raw, "chatDialect")
+      ? { chatDialect: parseChatDialect(raw["chatDialect"], `${where}.chatDialect`) }
+      : {}),
+    ...(Object.hasOwn(raw, "suppressTokens")
+      ? { suppressTokens: parseSuppressTokens(raw["suppressTokens"], `${where}.suppressTokens`) }
+      : {}),
   };
 };

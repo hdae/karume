@@ -67,6 +67,15 @@ export const mirrorRoot = (repoDir: string): URL => new URL(`${repoDir}/`, MODEL
  */
 export const mirrorPresent = (root: URL): boolean => mirrorReadable(root, []);
 
+/**
+ * Whether the readable mirror at `root` ({@link mirrorPresent}) carries model `model` (a family
+ * mirror gains models over time — gemma4's `12b` joined `e2b` / `e4b`; a test of one model
+ * SKIPs on a mirror assembled before it).
+ */
+export const mirrorHasModel = (root: URL, model: string): boolean =>
+  mirrorPresent(root) &&
+  Object.hasOwn(parseManifest(readTextFileSync(new URL("karume.json", root))).models, model);
+
 const mirrorReadable = (root: URL, chain: readonly string[]): boolean => {
   let text: string;
   try {

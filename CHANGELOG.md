@@ -15,6 +15,32 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+### Added
+
+- `@karume/models/gemma`: Gemma 4 12B (text only) as model `12b` of the gemma4 distribution. Its
+  weights are Google's q4_0 quantization-aware-trained checkpoint
+  (`gemma-4-12B-it-qat-q4_0-unquantized`) with that checkpoint's own 4-bit grid stored as is
+  (round-to-nearest i4 on `gemma-4-12B-it` loses too much — ADR 0128 addendum 2026-11-03); the
+  tokenizer and chat template are `gemma-4-12B-it`'s. One preset, `i4`. It has no per-layer embeddings (PLE): its graph takes no `per_layer_inputs` and its
+  container carries no PLE assets, and admission settles which kind a distribution is from both
+  declarations (a mix of the two fails loudly). For such a model `pleResidency` and
+  `maxResidentPleBytes` are refused as input errors before any weight part is fetched. 12B ships
+  its own tokenizer (239 BPE merges fewer than E2B / E4B's). The local mirror is assembled by the
+  recipe (`dist.py --pipeline gemma4`); the published distribution and the `gemma.SOURCES` pin
+  follow separately.
+- `PipelineConfig.chatDialect` (`@karume/models/gemma`, also `@karume/models/gemma4-qat`) and its
+  type `ChatDialect`: the chat template a model follows — `"gemma4"` (E2B / E4B; the default when
+  the key is absent) or `"gemma4-unified"` (12B, whose generation prompt ends with an empty thought
+  channel when thinking is off). It rides on `Pipeline.tokenizer`, so `chatPrompt` / `chatTurn`
+  render the template of the model the tokenizer serves. An unknown dialect fails loudly, in the
+  config parser and in the tokenizer constructor alike.
+- `PipelineConfig.suppressTokens` (`@karume/models/gemma`): token ids the model never generates,
+  from upstream `generation_config.json` `suppress_tokens` (12B: `<image|>` / `<audio|>`). Their
+  logits are `-Infinity` before every token selection — greedy, sampling and the speculative
+  acceptance — as HF `generate()` does in greedy and sampling. A request cannot lift it. When
+  declared, the GPU-side greedy selection is not used (it reads the raw maximum) and decode reads
+  the logits on the host. E2B / E4B declare none; their manifests and outputs are unchanged.
+
 ## [0.15.1] - 2026-11-01
 
 ### Added

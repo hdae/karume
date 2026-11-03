@@ -30,6 +30,11 @@
  * spelling differ from the upstream template by one token, but the conversation loses nothing (the
  * delta always starts "right after the closing token").
  *
+ * NOTE: in the `"gemma4-unified"` chat dialect (gemma-4-12B-it) every generation prompt ends with
+ * an empty thought channel, so a carried-over conversation keeps it at the start of each past model
+ * turn, where a whole re-render (after overflow handling or a cut-off turn) drops it as the upstream
+ * template does (the NOTE of `renderGemma4ChatTurn` in `./text/chat.ts`).
+ *
  * ## Overflow handling is **injectable** (the revision of ADR 0083 decision 10)
  *
  * The low-level surface still says "truncation is the host's job" and ends by throwing

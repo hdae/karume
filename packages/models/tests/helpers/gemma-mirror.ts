@@ -25,7 +25,16 @@ import {
   type Gemma4PleIndex,
   readGemma4PleIndex,
 } from "../../src/gemma/ple-index.ts";
-import { type MirrorChoice, openSelectedContainer, selectMirrorComponent } from "./mirror.ts";
+import {
+  type MirrorChoice,
+  mirrorHasModel,
+  mirrorRoot,
+  openSelectedContainer,
+  readMirrorAsset,
+  selectMirrorComponent,
+} from "./mirror.ts";
+import { readFileIfPresent } from "./read-if-present.ts";
+import { SERIES_CHECKS } from "./series-checks.ts";
 
 // The mirror resolver, the presence check and the component opener are shared with every family
 // (`helpers/mirror.ts`); they stay exported here under their existing names.
@@ -93,4 +102,30 @@ export const gemma4MirrorAssets = async (
     model: await Promise.all(container.parts.map((part) => readFile(new URL(part.path, mirror)))),
     tokenizer: await readFile(new URL(tokenizer.path, mirror)),
   };
+};
+
+/** The distribution mirror of the gemma4 family (E2B, E4B and 12B). */
+export const GEMMA4_MIRROR: URL = mirrorRoot("karume-gemma4");
+
+/** gemma-4-12B-it's tokenizer series (`gemma4.tokenizer --model 12b`). */
+export const GEMMA4_12B_TOKENIZER_SERIES = "gemma4-12b-tokenizer";
+
+/** Whether {@link readGemma4_12bTokenizer} reads the mirror (false = the opt-in series, or nothing). */
+export const GEMMA4_12B_IN_MIRROR: boolean = mirrorHasModel(GEMMA4_MIRROR, "12b");
+
+/**
+ * gemma-4-12B-it's compiled tokenizer (its own asset — 239 BPE merges fewer than E2B / E4B's):
+ * the mirror's model `12b` asset when the mirror carries it, else the series as an
+ * implementation-time check under KARUME_SERIES=1 (ADR 0139 decision 6), else `undefined`.
+ */
+export const readGemma4_12bTokenizer = async (): Promise<Uint8Array<ArrayBuffer> | undefined> => {
+  if (GEMMA4_12B_IN_MIRROR)
+    return await readMirrorAsset(GEMMA4_MIRROR, "tokenizer", { model: "12b" });
+  if (!SERIES_CHECKS) return undefined;
+  return await readFileIfPresent(
+    new URL(
+      `../../../../outputs/series/${GEMMA4_12B_TOKENIZER_SERIES}/tokenizer.json`,
+      import.meta.url,
+    ),
+  );
 };

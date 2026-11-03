@@ -153,6 +153,11 @@ export { chatPrompt } from "./src/gemma/text/chat.ts";
  */
 export { chatTurn } from "./src/gemma/text/chat.ts";
 export type { ChatMessage, ChatRole } from "./src/gemma/text/chat.ts";
+/**
+ * The chat template a model follows ({@link PipelineConfig.chatDialect} — `"gemma4"` for E2B / E4B,
+ * `"gemma4-unified"` for 12B). {@link chatPrompt} / {@link chatTurn} read it from the tokenizer.
+ */
+export type { ChatDialect } from "./src/gemma/text/chat-dialect.ts";
 
 /**
  * The tokenizer built from the assets (`Pipeline.tokenizer`). It holds the entry points that

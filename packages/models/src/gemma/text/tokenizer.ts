@@ -32,6 +32,12 @@ import {
   StreamingDetokenizer,
 } from "../../text/detokenizer.ts";
 import { type GemmaTokenizerAssets, METASPACE } from "./asset.ts";
+import {
+  CHAT_DIALECTS,
+  type ChatDialect,
+  DEFAULT_CHAT_DIALECT,
+  isChatDialect,
+} from "./chat-dialect.ts";
 
 /** Decoding behaviour. */
 export type DecodeOptions = {
@@ -50,13 +56,41 @@ export class Tokenizer {
   readonly #assets: GemmaTokenizerAssets;
   readonly #added: AddedTokenMatcher;
   readonly #tokenOfAdded: Map<number, string>;
+  readonly #chatDialect: ChatDialect;
 
-  constructor(assets: GemmaTokenizerAssets) {
+  /**
+   * @param chatDialect The chat template of the model this tokenizer serves (the distribution's
+   *   `pipelineConfig.chatDialect`; default `"gemma4"`, the E2B / E4B template).
+   *
+   * MUST: an unknown dialect fails loudly here too. The type closes the set for TS callers, but a
+   * JS caller or a value cast from JSON reaches this constructor without the config parser, and
+   * the renderer's per-dialect table would then have no entry: every generation prompt would end
+   * in the text `undefined` — a prompt in no model's template, with no exception.
+   */
+  constructor(assets: GemmaTokenizerAssets, chatDialect: ChatDialect = DEFAULT_CHAT_DIALECT) {
+    if (!isChatDialect(chatDialect)) {
+      throw new Error(
+        `Tokenizer: chat dialect ${JSON.stringify(chatDialect)} is not one of ${CHAT_DIALECTS.join(" / ")}`,
+      );
+    }
+    this.#chatDialect = chatDialect;
     this.#assets = assets;
     this.#added = createAddedTokenMatcher([...assets.addedTokens.keys()]);
     this.#tokenOfAdded = new Map(
       [...assets.addedTokens].map(([token, id]) => [id, token] as const),
     );
+  }
+
+  /**
+   * The chat template `chatPrompt` / `chatTurn` render with for this tokenizer (`./chat-dialect.ts`).
+   *
+   * It rides on the tokenizer for the same reason upstream keeps `chat_template.jinja` next to
+   * `tokenizer.json`: the chat format, the stop set and the id space come from one distribution (ADR
+   * 0084 decision 5), and every caller of the chat functions already holds this object — a separate
+   * argument could be left at the default for a 12B model with no exception anywhere.
+   */
+  get chatDialect(): ChatDialect {
+    return this.#chatDialect;
   }
 
   /** The post_processor form the asset declares. */

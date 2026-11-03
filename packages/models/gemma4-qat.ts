@@ -34,6 +34,7 @@ export {
 } from "./gemma.ts";
 export type {
   Assets,
+  ChatDialect,
   ChatMessage,
   ChatOptions,
   ChatOverflow,

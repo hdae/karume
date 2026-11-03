@@ -267,6 +267,10 @@
         "kind": "variable"
       },
       {
+        "name": "ChatDialect",
+        "kind": "typeAlias"
+      },
+      {
         "name": "ChatMessage",
         "kind": "typeAlias"
       },
@@ -467,6 +471,10 @@
       {
         "name": "CHUNK_BUCKETS",
         "kind": "variable"
+      },
+      {
+        "name": "ChatDialect",
+        "kind": "typeAlias"
       },
       {
         "name": "ChatMessage",

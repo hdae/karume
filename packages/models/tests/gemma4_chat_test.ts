@@ -26,7 +26,7 @@
 // 食い違いを塞ぐ門）。無い環境では SKIP する。
 
 import { readTextFile } from "@karume/test-support/fs";
-import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertNotEquals, assertRejects, assertThrows } from "@std/assert";
 import { beforeAll, describe, it, test } from "vite-plus/test";
 import { ModelInputError } from "../src/errors.ts";
 import { createBpeModel } from "../src/text/bpe.ts";
@@ -72,6 +72,9 @@ import {
   renderGemma4ChatTurn,
 } from "../src/gemma/text/chat.ts";
 import { mirrorPresent, mirrorRoot, readMirrorAsset } from "./helpers/mirror.ts";
+import { GEMMA4_12B_IN_MIRROR, readGemma4_12bTokenizer } from "./helpers/gemma-mirror.ts";
+import { SERIES_CHECKS_OPT_IN } from "./helpers/series-checks.ts";
+import type { ChatDialect } from "../src/gemma/text/chat-dialect.ts";
 
 type ChatCase = {
   readonly name: string;
@@ -121,8 +124,8 @@ const tokenizer = new Tokenizer(assetsOf(fixture));
 const GEMMA4_MIRROR = mirrorRoot("karume-gemma4");
 
 /**
- * The distribution's tokenizer (undefined when the mirror is absent). It is shared by every model
- * of the mirror; e2b is named so the selection is fixed.
+ * The distribution's tokenizer (undefined when the mirror is absent). E2B and E4B share it; 12B has
+ * its own (the 12B section at the end of this file). e2b is named so the selection is fixed.
  */
 const fullBytes = mirrorPresent(GEMMA4_MIRROR)
   ? await readMirrorAsset(GEMMA4_MIRROR, "tokenizer", { model: "e2b" })
@@ -1008,3 +1011,216 @@ test("chat token 通知: 停止文字列の保留より先に全 token が届く
     seen.push(`text:${text}`);
   assertEquals(seen, ["token:2", "token:4", "text:ENX!"]);
 });
+
+// ---- Chat dialects (`pipelineConfig.chatDialect`) ------------------------------------------
+//
+// gemma-4-12B-it ships its own chat template ("gemma4-unified"). For plain conversation it differs
+// from the E2B / E4B template in one place: with the generation prompt and thinking off it appends
+// an empty thought channel after `<|turn>model\n` (`chat_template.jinja` of google/gemma-4-12B-it
+// at 43c9d014). The dialect rides on the tokenizer, so `chatPrompt` / `chatTurn` pick it up
+// without an extra argument.
+
+/** The generation-prompt tail of the "gemma4-unified" dialect (thinking off). */
+const UNIFIED_TAIL = "<|channel>thought\n<channel|>";
+
+describe("gemma4 chat dialect gemma4-unified: rendering", () => {
+  it("one user message renders exactly the 12B template's string", () => {
+    assertEquals(
+      renderGemma4Chat([{ role: "user", content: "hi" }], "gemma4-unified"),
+      "<bos><|turn>user\nhi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+    );
+  });
+
+  it("system, history and a new question: only the generation prompt gains the empty thought", () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "Be brief." },
+      { role: "user", content: "Name a color." },
+      { role: "assistant", content: "Blue." },
+      { role: "user", content: "Another one." },
+    ];
+    assertEquals(
+      renderGemma4Chat(messages, "gemma4-unified"),
+      "<bos><|turn>system\nBe brief.<turn|>\n<|turn>user\nName a color.<turn|>\n" +
+        "<|turn>model\nBlue.<turn|>\n<|turn>user\nAnother one.<turn|>\n" +
+        "<|turn>model\n<|channel>thought\n<channel|>",
+    );
+    // The E2B / E4B dialect of the same conversation (the default) ends at `<|turn>model\n`.
+    assertEquals(
+      renderGemma4Chat(messages),
+      "<bos><|turn>system\nBe brief.<turn|>\n<|turn>user\nName a color.<turn|>\n" +
+        "<|turn>model\nBlue.<turn|>\n<|turn>user\nAnother one.<turn|>\n<|turn>model\n",
+    );
+  });
+
+  it("every upstream-parity case differs from the E2B rendering by the tail alone", () => {
+    for (const testCase of fixture.chat) {
+      assertEquals(
+        renderGemma4Chat(testCase.messages, "gemma4-unified"),
+        `${testCase.rendered}${UNIFIED_TAIL}`,
+        testCase.name,
+      );
+    }
+  });
+
+  it("the delta of a new turn ends with the empty thought as well", () => {
+    assertEquals(
+      renderGemma4ChatTurn({ role: "user", content: "hi" }, "gemma4-unified"),
+      "\n<|turn>user\nhi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+    );
+    assertEquals(
+      renderGemma4ChatTurn({ role: "user", content: "hi" }, "gemma4"),
+      "\n<|turn>user\nhi<turn|>\n<|turn>model\n",
+    );
+  });
+
+  it("a conversation carried in the KV keeps the empty thought before each past model turn", () => {
+    // The documented divergence (NOTE of `renderGemma4ChatTurn`): the first prompt ⧺ answer ⧺
+    // `<turn|>` ⧺ delta is not the whole re-render — upstream writes past model turns without the
+    // thought channel. Pinned so that a change on either side is a decision, not an accident.
+    const prefix: ChatMessage[] = [{ role: "user", content: "Name a color." }];
+    const next: ChatMessage = { role: "user", content: "Another one." };
+    const carried =
+      renderGemma4Chat(prefix, "gemma4-unified") +
+      "Blue." +
+      END_OF_TURN +
+      renderGemma4ChatTurn(next, "gemma4-unified");
+    assertEquals(
+      carried,
+      "<bos><|turn>user\nName a color.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>Blue.<turn|>\n" +
+        "<|turn>user\nAnother one.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+    );
+    const whole = renderGemma4Chat(
+      [...prefix, { role: "assistant", content: "Blue." }, next],
+      "gemma4-unified",
+    );
+    assertEquals(
+      carried,
+      whole.replace("<|turn>model\nBlue.", `<|turn>model\n${UNIFIED_TAIL}Blue.`),
+      "the only difference is the empty thought of the past model turn",
+    );
+  });
+
+  it("out-of-scope input fails loudly in this dialect too", () => {
+    assertThrows(() => renderGemma4Chat([], "gemma4-unified"), ModelInputError, "empty");
+    assertThrows(
+      () => renderGemma4ChatTurn({ role: "assistant", content: "…" }, "gemma4-unified"),
+      ModelInputError,
+      "'assistant' cannot be a delta",
+    );
+  });
+});
+
+describe("gemma4 chat dialect: chatPrompt / chatTurn render the tokenizer's dialect", () => {
+  const unified = new Tokenizer(assetsOf(fixture), "gemma4-unified");
+  const messages: ChatMessage[] = [{ role: "user", content: "hello" }];
+
+  it("a tokenizer built without a dialect is the E2B / E4B one", () => {
+    assertEquals(tokenizer.chatDialect, "gemma4");
+    assertEquals(unified.chatDialect, "gemma4-unified");
+  });
+
+  it("chatPrompt appends the tail's ids after the E2B prompt", () => {
+    const tail = unified.encode(UNIFIED_TAIL);
+    assertEquals(chatPrompt(unified, messages), [...chatPrompt(tokenizer, messages), ...tail]);
+    assertEquals(
+      chatPrompt(unified, messages),
+      unified.encode(renderGemma4Chat(messages, "gemma4-unified")),
+    );
+  });
+
+  it.skipIf(fullBytes === undefined)(
+    "on the distribution's full vocabulary the tail starts with <|channel> and ends with <channel|>",
+    () => {
+      const full = new Tokenizer(
+        parseGemmaTokenizerAsset(fullBytes as Uint8Array<ArrayBuffer>),
+        "gemma4-unified",
+      );
+      const tail = full.encode(UNIFIED_TAIL);
+      // `<|channel>` and `<channel|>` are added vocabulary — one id each, at both ends.
+      assertEquals(tail.at(0), full.addedTokenId("<|channel>"));
+      assertEquals(tail.at(-1), full.addedTokenId("<channel|>"));
+      const messages: ChatMessage[] = [{ role: "user", content: "hello" }];
+      const e2b = new Tokenizer(parseGemmaTokenizerAsset(fullBytes as Uint8Array<ArrayBuffer>));
+      assertEquals(chatPrompt(full, messages), [...chatPrompt(e2b, messages), ...tail]);
+    },
+  );
+
+  it("chatTurn appends the same tail to the delta", () => {
+    const message: ChatMessage = { role: "user", content: "hello" };
+    assertEquals(chatTurn(unified, message), [
+      ...chatTurn(tokenizer, message),
+      ...unified.encode(UNIFIED_TAIL),
+    ]);
+  });
+});
+
+// ---- gemma-4-12B-it: chat ids against upstream (ADR 0084 decision 7) -------------------------
+//
+// `gemma-text/gemma4-12b-chat.json` is taken by `tools/export-recipes/gemma4/chat.py` from HF
+// `apply_chat_template` with google/gemma-4-12B-it's own template and tokenizer (thinking off,
+// generation prompt on) — independent of this renderer. 12B's tokenizer has its own merges, so
+// the ids are checked with the 12B fixture's subset (and its full asset when present), never with
+// E2B's.
+
+const fixture12b = JSON.parse(
+  await readTextFile(new URL("fixtures/gemma-text/gemma4-12b-chat.json", import.meta.url)),
+) as Fixture;
+const tokenizer12b = new Tokenizer(assetsOf(fixture12b), "gemma4-unified");
+
+describe("gemma4 12B chat rendering: equals upstream apply_chat_template character for character", () => {
+  for (const testCase of fixture12b.chat) {
+    it(`${testCase.name} — ${testCase.why}`, () => {
+      assertEquals(renderGemma4Chat(testCase.messages, "gemma4-unified"), testCase.rendered);
+    });
+  }
+});
+
+describe("gemma4 12B chat ids: equal apply_chat_template(tokenize=True)", () => {
+  for (const testCase of fixture12b.chat) {
+    it(`${testCase.name} — ${testCase.why}`, () => {
+      assertEquals(chatPrompt(tokenizer12b, testCase.messages), testCase.ids);
+    });
+  }
+
+  it("the E2B / E4B dialect would not match (the cases discriminate the dialect)", () => {
+    const plain = new Tokenizer(assetsOf(fixture12b));
+    for (const testCase of fixture12b.chat) {
+      assertNotEquals(chatPrompt(plain, testCase.messages), testCase.ids, testCase.name);
+    }
+  });
+});
+
+test("gemma4 12B chat: the stop set derived from the asset equals upstream generation_config", () => {
+  assertEquals(gemma4StopTokens(tokenizer12b), fixture12b.stopTokens);
+  assertEquals(
+    fixture12b.stopTokenSpellings.map((spelling) => tokenizer12b.addedTokenId(spelling)),
+    fixture12b.stopTokens,
+  );
+});
+
+test("Tokenizer: an unknown chat dialect fails loudly at construction", () => {
+  // A JS caller or a value cast from JSON reaches the constructor without the config parser.
+  for (const dialect of ["gemma4-12b", "", "Gemma4"]) {
+    assertThrows(
+      () => new Tokenizer(assetsOf(fixture12b), dialect as ChatDialect),
+      Error,
+      "is not one of gemma4 / gemma4-unified",
+    );
+  }
+});
+
+const full12bBytes = await readGemma4_12bTokenizer();
+
+test.skipIf(full12bBytes === undefined)(
+  `gemma4 12B chat ids on the full vocabulary: the same ids as the fixture${GEMMA4_12B_IN_MIRROR ? "" : SERIES_CHECKS_OPT_IN}`,
+  () => {
+    const full = new Tokenizer(
+      parseGemmaTokenizerAsset(full12bBytes as Uint8Array<ArrayBuffer>),
+      "gemma4-unified",
+    );
+    for (const testCase of fixture12b.chat) {
+      assertEquals(chatPrompt(full, testCase.messages), testCase.ids, testCase.name);
+    }
+    assertEquals(gemma4StopTokens(full), fixture12b.stopTokens);
+  },
+);

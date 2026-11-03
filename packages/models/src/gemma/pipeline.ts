@@ -8,7 +8,8 @@
  *    `model.krm` written directly by `tools/export-recipes/gemma4/export_product.py`
  * 2. the host PLE gather (`src/gemma/ple.ts` — ADR
  *    [0085](../../../../docs/decisions/0085-ple-host-gather.md)), plugged into the
- *    {@link GenerationWiring.derivedInputs} field
+ *    {@link GenerationWiring.derivedInputs} field — for the models with PLE; gemma-4-12B-it has
+ *    none, and admission settles which kind a distribution is ({@link admitGemma4Ple})
  * 3. the compiled tokenizer (`src/gemma/text/`) and the chat format (`src/gemma/text/chat.ts`)
  * 4. the generation loop (`src/generation/` — the program / sequence / sampler of ADR
  *    [0083](../../../../docs/decisions/0083-generation-api-surface.md))
@@ -134,10 +135,13 @@ import { createStopStringFilter } from "../text/detokenizer.ts";
 import { parseGemmaTokenizerAsset } from "./text/asset.ts";
 import { Tokenizer } from "./text/tokenizer.ts";
 import { type ChatMessage, chatPrompt, gemma4StopTokens } from "./text/chat.ts";
+import { DEFAULT_CHAT_DIALECT } from "./text/chat-dialect.ts";
 import {
   admitGemma4,
+  admitGemma4Ple,
   assertChunkLength,
   assertGemma4ChunkBuckets,
+  GEMMA4_PER_LAYER_INPUTS,
   type Gemma4Admission,
   gemma4ManifestConfig,
   gemmaEntryName,
@@ -163,7 +167,7 @@ import {
  * table itself", not as "an index into a table".
  */
 const INPUT_IDS = "input_ids";
-const PER_LAYER_INPUTS = "per_layer_inputs";
+const PER_LAYER_INPUTS = GEMMA4_PER_LAYER_INPUTS;
 const LAST_ROW = "last_row";
 
 /**
@@ -186,7 +190,8 @@ const TOKENIZER_ASSET = "tokenizer";
  *
  * PLE is no longer an asset the caller prepares — both the index and the values are inside the
  * `model` container (ADR 0109 decision 4), so this surface too gets everything down to PLE just by
- * passing the parts of `model`.
+ * passing the parts of `model`. A PLE-free model (gemma-4-12B-it) has neither in its container and
+ * no per-layer input in its graph; the same fields build it.
  */
 export type Assets = {
   readonly config: PipelineConfig;
@@ -222,6 +227,9 @@ export type PipelineOptions = {
    * quantized rows (regular E2B 2,329,600 B, QAT E2B 1,182,720 B), kept only while the budget is
    * above 0, so the host RAM PLE holds is at most the budget plus that headroom (ADR 0085 addendum
    * 2026-10-27). Tightening the budget increases block re-reads (ADR 0085).
+   *
+   * MUST: refused (fails loudly) for a model without PLE (gemma-4-12B-it) — there is nothing to
+   * budget ({@link assertGemma4PleFreeOptions}).
    */
   readonly maxResidentPleBytes?: number;
   /**
@@ -241,6 +249,9 @@ export type PipelineOptions = {
    * be drawn on). Combining it with speculative decoding ({@link PipelineOptions.speculative})
    * or with GPU timing diagnostics (`acquireGpu({ gpuTiming: true })`) is not supported either; each
    * is refused by failing loudly.
+   *
+   * MUST: refused (fails loudly, even `"host"`) for a model without PLE (gemma-4-12B-it) — there is
+   * nothing to place ({@link assertGemma4PleFreeOptions}).
    */
   readonly pleResidency?: PleResidency;
   /**
@@ -754,14 +765,24 @@ export type Gemma4State = {
 type Gemma4SidecarAssets = {
   readonly tokenizer: Uint8Array<ArrayBuffer>;
   /**
-   * The **parsed** PLE index.
+   * The **parsed** PLE index — absent for a PLE-free model (admission settled that the graph and the
+   * container agree on it — {@link admitGemma4Ple}).
    *
    * MUST: parsed only once per surface (`ple_index` is not opened twice). Matching the index against
    * the container's assets (`assertGemma4PleAssets` in `./ple-index.ts`) also needs the index, so that
    * one parse is lifted into the admission step.
    */
-  readonly pleIndex: Gemma4PleIndex;
+  readonly pleIndex?: Gemma4PleIndex;
 };
+
+/**
+ * How the per-layer inputs reach the graph: not at all (`"none"` — a PLE-free model), through the
+ * host gather (`"host"`) or through the GPU-resident gather (`"gpu"`). Settled once per build
+ * ({@link gemma4PlePlan}) so that "PLE-free" and "where PLE lives" cannot disagree.
+ */
+type Gemma4PlePlan =
+  | { readonly residency: "none" }
+  | { readonly residency: PleResidency; readonly index: Gemma4PleIndex };
 
 /**
  * Turns fetched bytes into an ArrayBuffer that can be passed to `openContainer` (the body of the
@@ -850,6 +871,46 @@ export const resolveGemma4PleResidency = (
     );
   }
   return residency;
+};
+
+/**
+ * Refuses the PLE placement options for a PLE-free model (gemma-4-12B-it) — called as soon as
+ * admission has settled that the model has no PLE ({@link admitGemma4Ple}), before any weight part
+ * is fetched.
+ *
+ * MUST: refuse even `pleResidency: "host"`. Each option is "where PLE lives" or "how much of it to
+ * keep"; for a model without PLE neither has anything to act on, and accepting them would let a
+ * caller believe a budget or a placement was applied (the same style as {@link resolveGemma4PleResidency}).
+ * Input errors (ADR 0107 decision 2) — dropping the option makes the call pass.
+ *
+ * NOTE: `export` is for the test that calls the check directly (not exposed on `mod.ts` / the
+ * subpath surface — ADR 0008).
+ */
+export const assertGemma4PleFreeOptions = (where: string, options: PipelineOptions): void => {
+  const given = (["pleResidency", "maxResidentPleBytes"] as const).filter(
+    (key) => options[key] !== undefined,
+  );
+  if (given.length === 0) return;
+  throw new ModelInputError(
+    `${where}: ${given.join(" / ")} cannot be used with this model` +
+      ` (its graph has no '${PER_LAYER_INPUTS}' input and its container no PLE assets — there is no PLE to place)`,
+  );
+};
+
+/**
+ * Settles the {@link Gemma4PlePlan} of one build from the admitted PLE index (absent = PLE-free) and
+ * the placement options.
+ */
+const gemma4PlePlan = (
+  where: string,
+  options: PipelineOptions,
+  index: Gemma4PleIndex | undefined,
+): Gemma4PlePlan => {
+  if (index === undefined) {
+    assertGemma4PleFreeOptions(where, options);
+    return { residency: "none" };
+  }
+  return { residency: resolveGemma4PleResidency(where, options), index };
 };
 
 /**
@@ -985,15 +1046,24 @@ export const gemma4EstimateGenerations = (
  * `fromAssets` and `fromPretrained`).
  *
  * This runs the whole cross-check of the id spaces (ADR 0085 decision 5) — ① the ids the tokenizer
- * can produce ② the vocab rows of the main embedding ③ the rows of the PLE index.
+ * can produce ② the vocab rows of the main embedding ③ the rows of the PLE index (a PLE-free model
+ * has no ③).
+ *
+ * It is also where the distribution's declarations reach the generation surface: the chat dialect
+ * goes into the tokenizer and the suppressed set into the wiring, and both surfaces build their
+ * sequences from exactly these two objects.
+ *
+ * NOTE: `export` is for the GPU-free test of that hand-over (`tests/gemma4_config_test.ts` — a
+ * Session needs a real device, so the whole construction cannot run without one). It is not on the
+ * `mod.ts` / subpath surface (ADR 0008).
  */
-const buildGemma4Program = (
+export const buildGemma4Program = (
   admitted: Gemma4Admission,
   open: ComponentOpener,
-  assets: Gemma4SidecarAssets,
+  tokenizerBytes: Uint8Array<ArrayBuffer>,
   options: PipelineOptions,
   admission: GemmaFamilyAdmission,
-  residency: PleResidency,
+  plePlan: Gemma4PlePlan,
 ): {
   readonly wiring: GenerationWiring;
   readonly tokenizer: Tokenizer;
@@ -1004,11 +1074,21 @@ const buildGemma4Program = (
   // The supplier is **the same one** admission looked at (`open` only looks up the opened component).
   const model = open(MODEL);
   if (admission.family === "gemma4-qat") {
+    // The QAT models always carry PLE (`admitGemma4Qat` refuses a graph without the input), so
+    // reaching here without an index is a broken invariant, not a model to run.
+    if (plePlan.residency === "none") {
+      throw new Error(`${entry}: internal inconsistency: a QAT model was admitted without PLE`);
+    }
     // The model name is the value admission settled, used as is (not re-derived from the layer count).
-    assertGemma4QatPle(admission.model, model.graph, assets.pleIndex);
+    assertGemma4QatPle(admission.model, model.graph, plePlan.index);
   }
   const familyRopeInputs = admission.family === "gemma4-qat" ? qatRopeInputs : ropeInputs;
-  const tokenizer = new Tokenizer(parseGemmaTokenizerAsset(assets.tokenizer));
+  // The chat dialect rides on the tokenizer, so `chatPrompt` / `chatTurn` render the template of
+  // the model this tokenizer serves (`Tokenizer.chatDialect`).
+  const tokenizer = new Tokenizer(
+    parseGemmaTokenizerAsset(tokenizerBytes),
+    config.chatDialect ?? DEFAULT_CHAT_DIALECT,
+  );
   // ① the ids the tokenizer can produce and ② the vocab rows of the main embedding.
   if (tokenizer.maxTokenId >= vocabSize) {
     throw new Error(
@@ -1018,11 +1098,11 @@ const buildGemma4Program = (
   }
   // ③ the rows of the PLE index (`createGemma4Ple` owns this check — the same check is not
   // implemented twice). Under GPU residency no host gather is built, and `createGemma4PleResident`
-  // runs the same check.
+  // runs the same check. A PLE-free model builds neither.
   const ple =
-    residency === "host"
+    plePlan.residency === "host"
       ? createGemma4Ple({
-          index: assets.pleIndex,
+          index: plePlan.index,
           openBlock: (asset) => model.asset(asset),
           vocabSize,
           ...(options.maxResidentPleBytes === undefined
@@ -1051,6 +1131,9 @@ const buildGemma4Program = (
     // The stop set is derived from the added vocabulary of the tokenizer asset (ADR 0083 decision 8
     // / 0084 decision 5 — it comes from the same digest set as the chat format).
     stopTokens: gemma4StopTokens(tokenizer),
+    // The distribution's suppressed set (gemma-4-12B-it's `<image|>` / `<audio|>`), masked before
+    // every host selection; absent for E2B / E4B, whose selection is unchanged.
+    ...(config.suppressTokens === undefined ? {} : { suppressTokens: config.suppressTokens }),
     capacitySymbol,
     // The PLE gather and the RoPE cos / sin are plugged into the host-derived per-chunk input field
     // (ADR 0085 / this wave). `options` goes straight down to PLE — so that reading a 32 MiB-class
@@ -1058,7 +1141,7 @@ const buildGemma4Program = (
     // computation and opens no interruption window).
     // Under GPU residency the producer of `per_layer_inputs` moves to the Session side (a resident
     // input), so it is removed from the host-derived field and its coverage is declared only through
-    // `residentInputs`.
+    // `residentInputs`. A PLE-free model has no such input: the field supplies only RoPE.
     derivedInputs:
       ple === undefined
         ? {
@@ -1072,7 +1155,7 @@ const buildGemma4Program = (
               ...familyRopeInputs(config.rope, positions),
             }),
           },
-    ...(ple === undefined ? { residentInputs: [PER_LAYER_INPUTS] } : {}),
+    ...(plePlan.residency === "gpu" ? { residentInputs: [PER_LAYER_INPUTS] } : {}),
   });
   return { wiring, tokenizer, ...(ple === undefined ? {} : { ple }) };
 };
@@ -1176,6 +1259,10 @@ export class GemmaPipeline {
                 model: admitGemma4Qat(model.graph, choice.model ?? loaded.manifest.defaultModel),
               }
             : { family };
+        // Whether the model has PLE is settled from the declarations (graph + container), and a
+        // PLE-free model refuses the PLE placement options here — before any weight part.
+        const hasPle = admitGemma4Ple(model, entry);
+        if (!hasPle) assertGemma4PleFreeOptions(where, options);
         // MUST: a shared GPU's missing features fail at this step (unlike a device acquired here,
         // they cannot be requested, and this is the only check that knows before downloading the
         // weights — the later check is the same one in `session/gpu-features.ts`).
@@ -1198,10 +1285,10 @@ export class GemmaPipeline {
         // writer's convention that whole-read assets **do not share a part with weight blocks**
         // (ADR 0109 decision 4 / container-v1 §4.2), so fetching the index's part does not reach the
         // weight parts.
-        const pleIndex = await readGemma4PleIndex(where, model);
+        const pleIndex = hasPle ? await readGemma4PleIndex(where, model) : undefined;
         return {
           ...admitted,
-          pleIndex,
+          ...(pleIndex === undefined ? {} : { pleIndex }),
           quantSession,
           admission,
           requested: { gpuFeatures, where: quantWhere },
@@ -1220,7 +1307,7 @@ export class GemmaPipeline {
       open,
       {
         tokenizer: assetBytes(where, assets, TOKENIZER_ASSET),
-        pleIndex: admitted.pleIndex,
+        ...(admitted.pleIndex === undefined ? {} : { pleIndex: admitted.pleIndex }),
       },
       {
         ...options,
@@ -1273,13 +1360,16 @@ export class GemmaPipeline {
     // is done by `assertWeightsWithinLimits` at Session construction (ADR 0089 decision 1).
     const model = open(MODEL);
     const admitted = admitGemma4(model, config, undefined, gemmaEntryName(family));
-    // The PLE index is a container asset, so it goes through **the same one** check as the fetch
-    // surface (`readGemma4PleIndex` checks the consistency of the index and the blocks too).
-    const pleIndex = await readGemma4PleIndex(where, model);
     // The model name is determined from the graph and the PLE configuration (this surface has no
     // manifest).
     const admission: GemmaFamilyAdmission =
       family === "gemma4-qat" ? { family, model: admitGemma4Qat(model.graph) } : { family };
+    // The PLE-free decision and its option check, in the same order as the fetch surface. The PLE
+    // index is a container asset, so it goes through **the same one** check as the fetch surface
+    // (`readGemma4PleIndex` checks the consistency of the index and the blocks too).
+    const hasPle = admitGemma4Ple(model, gemmaEntryName(family));
+    if (!hasPle) assertGemma4PleFreeOptions(where, options);
+    const pleIndex = hasPle ? await readGemma4PleIndex(where, model) : undefined;
     // This surface has no manifest, so there is no declaration — only the features the effective
     // settings need are requested.
     const requested = { gpuFeatures: sessionGpuFeatures(undefined, options), where };
@@ -1290,7 +1380,7 @@ export class GemmaPipeline {
       open,
       {
         tokenizer: input.tokenizer,
-        pleIndex,
+        ...(pleIndex === undefined ? {} : { pleIndex }),
       },
       options,
     );
@@ -1325,14 +1415,14 @@ export class GemmaPipeline {
     options: PipelineOptions,
   ): Promise<Gemma4State> {
     const entry = gemmaEntryName(admission.family);
-    const residency = resolveGemma4PleResidency(entry, options);
+    const plePlan = gemma4PlePlan(entry, options, assets.pleIndex);
     const { wiring, tokenizer, ple } = buildGemma4Program(
       admitted,
       open,
-      assets,
+      assets.tokenizer,
       options,
       admission,
-      residency,
+      plePlan,
     );
     // The speculative `k` is resolved **once, here**, so that the two consumers (generation and the
     // estimate) see the same value.
@@ -1382,7 +1472,7 @@ export class GemmaPipeline {
     // MUST: cannot be combined with GPU timing diagnostics (`beginBatch` cannot open on a device
     // with measurement enabled — the mechanism of enqueuing the gather in the same batch as the target
     // does not work at all).
-    if (residency === "gpu" && gpu.gpuTimingEnabled) {
+    if (plePlan.residency === "gpu" && gpu.gpuTimingEnabled) {
       throw new Error(
         `${entry}: pleResidency: "gpu" cannot be used on a device with gpuTiming enabled` +
           ` (the on-GPU gather is queued into a batch, but a batch cannot be opened while timing — ADR 0021)`,
@@ -1401,11 +1491,10 @@ export class GemmaPipeline {
       // A shortfall of the binding limit fails **before uploading 1.5 GiB of weights** (the same
       // ordering as graph-first).
       pleGpu =
-        residency === "host"
-          ? undefined
-          : await createGemma4PleResident({
+        plePlan.residency === "gpu"
+          ? await createGemma4PleResident({
               gpu,
-              index: assets.pleIndex,
+              index: plePlan.index,
               openBlock: (asset) => model.asset(asset),
               vocabSize: admitted.vocabSize,
               inputName: PER_LAYER_INPUTS,
@@ -1414,14 +1503,21 @@ export class GemmaPipeline {
               // upper bound of the resident output.
               rows: [1, ...wiring.chunkBuckets, wiring.chunkLength],
               entry,
-            });
+            })
+          : undefined;
       session = await model.createSession(gpu, sessionOptions);
       // Under GPU residency, runs that do not use greedy (prefill, decode with diagnostics) also go
       // through the wrapper — it is the only place to plug in `per_layer_inputs`. Whether greedy
       // itself is used is decided by the generation surface from the presence of `onRun`, so it is
       // independent of whether the wrapper exists.
+      // A distribution with a suppressed set never uses the GPU selection (it reads the raw
+      // maximum, which can be a suppressed id — `Sampler.greedy`), so it is not built there and its
+      // buffers stay out of the estimate; the GPU-resident PLE still needs the wrapper's runs.
       const greedyOutput =
-        pleGpu !== undefined || (!gpu.gpuTimingEnabled && options.onRunDiagnostics === undefined)
+        pleGpu !== undefined ||
+        (!gpu.gpuTimingEnabled &&
+          options.onRunDiagnostics === undefined &&
+          wiring.suppressTokens.length === 0)
           ? createGemmaGreedyOutput(gpu, session, wiring.logits, wiring.vocabSize, pleGpu)
           : undefined;
       const drafter = await GemmaPipeline.#buildDrafter(
