@@ -27,6 +27,13 @@ MUST: この記録は「同一チェックポイント由来」の**主張**で�
 「どの資産の組み合わせで parity を見るべきか」を機械可読に固定する側。export 時にも
 {@link assert_reference_goldens} が golden の `prompt` を今回組んだケースと突合するので、
 トークナイザ・ケース定義が食い違った組み合わせは記録を書く前に落ちる。
+
+12B's product series (`gemma4.export_unified`) writes its own goldens next to its container, and
+its record uses the same schema with `reference` naming that series itself. Its checkpoint is two
+pinned hub snapshots — the weights and their config from one repository, the tokenizer from
+another (`gemma4.sources`) — so the fingerprint reads each file from its own source, adds
+`sources` (role → repository, revision and the files read from it) and is also checked against
+the pins ({@link assert_pinned_fingerprint}).
 """
 
 from __future__ import annotations
@@ -41,6 +48,7 @@ import torch
 from safetensors import safe_open
 
 from _shared.decode_series import GREEDY_PREFIX, GREEDY_SUFFIX, PROMPT_KEY
+from gemma4.sources import ModelPins
 
 #: 記録のファイル名（系列ディレクトリ直下・TS 側の検収門が同じ綴りで読む）。
 REFERENCE_FILE = "reference.json"
@@ -48,9 +56,17 @@ REFERENCE_FILE = "reference.json"
 #: 記録の版（読み手が知らない版を黙って読まないための欄）。
 SCHEMA = 1
 
+#: The fingerprinted files read from the weights' source and from the tokenizer's — one directory
+#: for a hand-placed checkpoint, two pinned snapshots for 12B (`gemma4.sources.ModelPins`).
+WEIGHTS_FILES = ("model.safetensors", "config.json")
+TOKENIZER_FILES = ("tokenizer.json",)
+
 #: 指紋を採るチェックポイント側のファイル。重み本体だけでなく config と tokenizer も採る —
 #: 同じ重みでも `config.json` の層構成やトークナイザが違えば別の資産になる。
-FINGERPRINT_FILES = ("model.safetensors", "config.json", "tokenizer.json")
+FINGERPRINT_FILES = (*WEIGHTS_FILES, *TOKENIZER_FILES)
+
+#: The fingerprinted files of each pinned source (`gemma4.sources.ModelPins.by_role`).
+FILES_BY_ROLE: dict[str, tuple[str, ...]] = {"weights": WEIGHTS_FILES, "tokenizer": TOKENIZER_FILES}
 
 #: sha256 を採るときの読み込み単位（10GB のチェックポイントを丸ごとメモリに載せない）。
 DIGEST_BLOCK = 8 << 20
@@ -70,15 +86,71 @@ def file_digest(path: Path) -> dict[str, Any]:
     return {"bytes": size, "sha256": digest.hexdigest()}
 
 
-def checkpoint_fingerprint(model_dir: Path) -> dict[str, Any]:
-    """元チェックポイントの指紋（{@link FINGERPRINT_FILES} を 1 本ずつ）。"""
+def checkpoint_fingerprint(
+    model_dir: Path,
+    label: str | None = None,
+    *,
+    tokenizer_dir: Path | None = None,
+    pins: ModelPins | None = None,
+) -> dict[str, Any]:
+    """元チェックポイントの指紋（{@link FINGERPRINT_FILES} を 1 本ずつ）。
+
+    `dir` names the checkpoint: `label` when given — the repository ids of hub snapshots, whose
+    directory names are only the commit SHAs — else the directory name (a hand-placed checkpoint
+    under `inputs/`, named after its repository).
+
+    {@link WEIGHTS_FILES} are read from `model_dir` and {@link TOKENIZER_FILES} from
+    `tokenizer_dir` (`None`: `model_dir` — one checkpoint holds both). `pins` — the sources of a
+    pinned model — adds `sources`: role → `{repo, revision, files}`, naming which source each
+    fingerprinted file was read from.
+    """
+    tokenizer_root = model_dir if tokenizer_dir is None else tokenizer_dir
     files: dict[str, Any] = {}
     for name in FINGERPRINT_FILES:
-        path = model_dir / name
+        directory = model_dir if name in WEIGHTS_FILES else tokenizer_root
+        path = directory / name
         if not path.is_file():
-            raise AssertionError(f"チェックポイントに指紋対象 '{name}' が無い: {model_dir}")
+            raise AssertionError(f"チェックポイントに指紋対象 '{name}' が無い: {directory}")
         files[name] = file_digest(path)
-    return {"dir": model_dir.name, "files": files}
+    fingerprint: dict[str, Any] = {
+        "dir": model_dir.name if label is None else label,
+        "files": files,
+    }
+    if pins is not None:
+        fingerprint["sources"] = {
+            role: {"repo": pin.repo, "revision": pin.revision, "files": list(FILES_BY_ROLE[role])}
+            for role, pin in pins.by_role().items()
+        }
+    return fingerprint
+
+
+def assert_pinned_fingerprint(fingerprint: Mapping[str, Any], pins: ModelPins) -> None:
+    """The fingerprint {@link checkpoint_fingerprint} took (every byte hashed) names the pinned
+    files exactly (`gemma4.sources.HUB_PINS`), each source's against its own pin.
+
+    The cheap pre-check (`gemma4.sources.assert_model_pins`) trusts the cache's blob names; this
+    one runs on the bytes the export actually read, right before the record that names them is
+    written. MUST: each pin covers exactly the files the fingerprint reads from its source
+    ({@link FILES_BY_ROLE}) — a file the record names but no pin does would go unchecked, and a
+    file pinned in the other source's role would be checked against bytes of another snapshot.
+    """
+    for role, pin in pins.by_role().items():
+        if sorted(pin.sha256) != sorted(FILES_BY_ROLE[role]):
+            raise AssertionError(
+                f"the {role} pin ({pin.label}) names {sorted(pin.sha256)}, the fingerprint reads"
+                f" {sorted(FILES_BY_ROLE[role])} from that source"
+            )
+    files = fingerprint["files"]
+    wrong = {
+        name: (files[name]["sha256"], expected, pin.label)
+        for pin in pins.by_role().values()
+        for name, expected in sorted(pin.sha256.items())
+        if files[name]["sha256"] != expected
+    }
+    if wrong:
+        raise AssertionError(
+            f"the checkpoint read is not the pinned one (actual, pin, source): {wrong}"
+        )
 
 
 def _golden_prompt(path: Path) -> torch.Tensor:
@@ -121,12 +193,26 @@ def assert_reference_goldens(
     return {"series": reference_dir.name, "goldens": goldens}
 
 
-def build_record(series_dir: Path, model_dir: Path, reference: Mapping[str, Any]) -> dict[str, Any]:
-    """`reference.json` の中身（{@link assert_reference_goldens} の結果を指紋と束ねる）。"""
+def build_record(
+    series_dir: Path,
+    model_dir: Path,
+    reference: Mapping[str, Any],
+    *,
+    checkpoint_label: str | None = None,
+    tokenizer_dir: Path | None = None,
+    pins: ModelPins | None = None,
+) -> dict[str, Any]:
+    """`reference.json` の中身（{@link assert_reference_goldens} の結果を指紋と束ねる）。
+
+    `checkpoint_label` is the fingerprint's `dir`; `tokenizer_dir` and `pins` are passed on as they
+    are ({@link checkpoint_fingerprint}).
+    """
     return {
         "schema": SCHEMA,
         "series": series_dir.name,
-        "checkpoint": checkpoint_fingerprint(model_dir),
+        "checkpoint": checkpoint_fingerprint(
+            model_dir, checkpoint_label, tokenizer_dir=tokenizer_dir, pins=pins
+        ),
         "reference": dict(reference),
     }
 

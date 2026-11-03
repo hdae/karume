@@ -84,7 +84,12 @@ from _shared.decode_series import assert_case_room, positions_for
 from gemma4 import export as one_shot
 from gemma4 import export_decode as decode
 from gemma4 import ple, provenance
-from gemma4.distribution import GEMMA4_DEFAULT_MODEL, GEMMA4_PRODUCT_SUFFIX, GEMMA4_ROLE
+from gemma4.distribution import (
+    GEMMA4_DEFAULT_MODEL,
+    GEMMA4_PRODUCT_SUFFIX,
+    GEMMA4_ROLE,
+    gemma4_ple_dim,
+)
 from karume.artifacts import staged_publication
 from karume.container import BLOCK_MAX_BYTES, AssetInput, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
@@ -555,7 +560,7 @@ def assert_ir_form_product(
     graph: IrGraph,
     config: Any,
     storage_expectation: Mapping[str, int],
-    ple_rows: int,
+    ple_rows: int | None,
     *,
     seq_symbol: str = decode.SEQ_SYMBOL,
     capacity_symbol: str = decode.CAPACITY_SYMBOL,
@@ -590,15 +595,26 @@ def assert_ir_form_product(
       （ADR 0068 の実効）。
     - `last_row` の宣言 shape が `[R]` であること。R を束縛できる入力はこれ 1 本なので、
       静的 `[1]` へ退行すると「記号が居るのに束縛点が無い」形が書ける。
+
+    `ple_rows=None` is the form of a model without per-layer embeddings (12B —
+    `gemma4.export_unified`): the same contract minus PLE, so `per_layer_inputs` MUST be absent
+    from the inputs and no PLE table can be looked for; every other rule holds unchanged. MUST:
+    `None` exactly when the config declares no PLE (`hidden_size_per_layer_input` 0) — a caller
+    cannot switch the PLE checks off for a model that has one.
     """
     decode.assert_layer_type_count(config)
     layers = int(config.num_hidden_layers)
-    ple_dim = int(config.hidden_size_per_layer_input)
+    ple_dim = gemma4_ple_dim(config, "config")
+    if (ple_rows is None) != (ple_dim == 0):
+        raise AssertionError(
+            f"ple_rows {ple_rows} for a config with hidden_size_per_layer_input {ple_dim}"
+            " (None exactly for a model without per-layer embeddings)"
+        )
 
     expected_inputs = [
         decode.INPUT_IDS,
         *decode.ROPE_INPUTS,
-        PER_LAYER_INPUTS,
+        *([PER_LAYER_INPUTS] if ple_rows is not None else []),
         decode.TOKEN_ONLY_LAST_ROW,
     ]
     names = [spec.name for spec in graph.inputs]
@@ -615,29 +631,30 @@ def assert_ir_form_product(
             f"'{decode.TOKEN_ONLY_LAST_ROW}' の宣言 shape が {list(last_row_spec.shape)} —"
             f" [{row_symbol}] でない（記号 {row_symbol} の唯一の束縛点）"
         )
-    per_layer_spec = next(spec for spec in graph.inputs if spec.name == PER_LAYER_INPUTS)
-    expected_shape = [1, seq_symbol, layers, ple_dim]
-    if per_layer_spec.dtype != "f32" or list(per_layer_spec.shape) != expected_shape:
-        raise AssertionError(
-            f"'{PER_LAYER_INPUTS}' が {per_layer_spec.dtype} {list(per_layer_spec.shape)} —"
-            f" f32 {expected_shape} でない"
-        )
-
-    # PLE 表は **embedding の重みスロット**（`WEIGHT_SLOTS[embedding] = 0`）で消費される形
-    # でしか居られないので、そこを名指しで見る。initializer の shape だけを見ると別スロットの
-    # 同形テンソル（tiny 模型の `mlp.down_proj` 等）に当たる。
     embeddings = [node for node in graph.nodes if node.op == EMBEDDING_OP]
-    residents = sorted(
-        node.ins[0]
-        for node in embeddings
-        if list(declared_shape(graph, node.ins[0])) == [ple_rows, ple_dim]
-    )
-    if residents:
-        raise AssertionError(
-            f"PLE 表の形 [{ple_rows}, {ple_dim}] を引く `{EMBEDDING_OP}` が"
-            f" {len(residents)} 本残っている: {residents[:4]}"
-            "（ホスト gather へ外に出し切れていない）"
+    if ple_rows is not None:
+        per_layer_spec = next(spec for spec in graph.inputs if spec.name == PER_LAYER_INPUTS)
+        expected_shape = [1, seq_symbol, layers, ple_dim]
+        if per_layer_spec.dtype != "f32" or list(per_layer_spec.shape) != expected_shape:
+            raise AssertionError(
+                f"'{PER_LAYER_INPUTS}' が {per_layer_spec.dtype} {list(per_layer_spec.shape)} —"
+                f" f32 {expected_shape} でない"
+            )
+
+        # PLE 表は **embedding の重みスロット**（`WEIGHT_SLOTS[embedding] = 0`）で消費される形
+        # でしか居られないので、そこを名指しで見る。initializer の shape だけを見ると別スロットの
+        # 同形テンソル（tiny 模型の `mlp.down_proj` 等）に当たる。
+        residents = sorted(
+            node.ins[0]
+            for node in embeddings
+            if list(declared_shape(graph, node.ins[0])) == [ple_rows, ple_dim]
         )
+        if residents:
+            raise AssertionError(
+                f"PLE 表の形 [{ple_rows}, {ple_dim}] を引く `{EMBEDDING_OP}` が"
+                f" {len(residents)} 本残っている: {residents[:4]}"
+                "（ホスト gather へ外に出し切れていない）"
+            )
     # 主 embedding（tied lm_head と同一実体）1 本 + 最終行の行選択 1 本。PLE が 1 本でも
     # 残ればここが増え、RoPE の表引きが戻ってもここが増える（どちらも退行の印）。
     expected_embeddings = 2

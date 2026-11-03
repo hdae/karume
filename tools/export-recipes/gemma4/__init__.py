@@ -26,6 +26,12 @@ MUST: `rope` は torch を import しない（配布側の import を重くし�
 理由ごと自己申告している。これは MUST の再掲であって検査ではない）。トークナイザ側の同じ役は
 `_shared/gemma_tokenizer.py`（EmbeddingGemma と共有 — ADR 0084 決定 6）。
 
+12B (`--model 12b`) is another upstream class (`gemma4_unified`: no per-layer embeddings, no
+KV sharing, K = V on the full layers) and has its own export script,
+{@link gemma4.export_unified} (the product graph and its goldens, in the meta-trace / row-block
+form of `qwen3_5.export`). Where every model's checkpoint is read from — and 12B's hub-snapshot
+pin — is {@link gemma4.sources} (torch-free, like `rope`).
+
 依存方向は **recipe → core の一方向だけ**（`tools/exporter/tests/test_architecture_boundary.py`
 が機械で守る）。
 

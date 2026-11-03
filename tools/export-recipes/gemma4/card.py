@@ -19,7 +19,7 @@ MUST: **数値・ダウンロード量・quant 表・dtype ラベルは 1 つ残
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from functools import partial
 from typing import Any
 
@@ -56,6 +56,32 @@ GEMMA4_TITLE = "Gemma 4 Text Decoder — Karume"
 GEMMA4_UPSTREAM: Mapping[str, str] = {
     "e2b": "google/gemma-4-E2B-it",
     "e4b": "google/gemma-4-E4B-it",
+    "12b": "google/gemma-4-12B-it",
+}
+
+#: Model → the checkpoint its weights are read from, for a model whose weights do not come from its
+#: {@link GEMMA4_UPSTREAM} repository. 12B's are Google's quantization-aware-trained (QAT) Q4_0
+#: checkpoint — "half-precision weights extracted from the QAT pipeline, for custom downstream
+#: compilation", whose README front matter names `google/gemma-4-12B-it` as `base_model` and says
+#: `license: apache-2.0`. {@link GEMMA4_UPSTREAM} stays the base model, and the source of the
+#: tokenizer, the chat template and the generation defaults (`gemma4.sources.HUB_PINS`).
+GEMMA4_WEIGHTS_UPSTREAM: Mapping[str, str] = {"12b": "google/gemma-4-12B-it-qat-q4_0-unquantized"}
+
+#: Models whose text decoder carries per-layer embeddings (PLE — container assets the host
+#: gathers). 12B has none (`text_config.hidden_size_per_layer_input` is 0 and its class,
+#: `gemma4_unified`, has no PLE branch). A checkpoint fact the manifest does not carry (the PLE
+#: sits inside the `model` container), so the card keeps it here; `gemma4.distribution.gemma4_plan`
+#: checks it against the upstream config of every model it assembles, so the two cannot drift.
+GEMMA4_PLE_MODELS: frozenset[str] = frozenset({"e2b", "e4b"})
+
+#: Model → what the upstream checkpoint carries besides the text decoder (never read here, never
+#: shipped). E2B / E4B hold vision and audio encoder towers; 12B is encoder-free and projects image
+#: patches and audio frames into the embedding space through lightweight linear layers (upstream
+#: model card at the pinned revision). Key set = {@link GEMMA4_UPSTREAM} (tests).
+GEMMA4_FRONT_ENDS: Mapping[str, str] = {
+    "e2b": "vision and audio towers",
+    "e4b": "vision and audio towers",
+    "12b": "encoder-free vision and audio embedders",
 }
 
 #: MTP drafter の weights の役割名（manifest の `weights` のキー）。カードは「drafter を
@@ -91,6 +117,11 @@ def _gemma4_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
                 " — 出所を名乗れないカードは描かない"
             )
         upstream.append(GEMMA4_UPSTREAM[name])
+        # MUST: the weights' own checkpoint too, when it is another repository — the weights are
+        # redistributed from it (`karume.modelcard.CardMetadata`: every redistributed upstream is
+        # listed; the base model stays first, as the QAT checkpoint names it its `base_model`).
+        if name in GEMMA4_WEIGHTS_UPSTREAM:
+            upstream.append(GEMMA4_WEIGHTS_UPSTREAM[name])
     # MUST: drafter の上流も `base_model` に載せる — 再配布しているのは 2 本で、片方を
     # 落とすと「出所を名乗っていない再配布」になる（`GEMMA4_DRAFTER_UPSTREAM` の MUST）。
     # 逆に drafter を運んでいないモデルの drafter は名乗らない（配っていない上流を出所に書かない）。
@@ -139,6 +170,66 @@ def _gemma4_upstream_spellings(manifest: Mapping[str, Any]) -> str:
     return " / ".join(f"`{GEMMA4_UPSTREAM[name]}`" for name in manifest["models"])
 
 
+def _spell_models(names: Iterable[str]) -> str:
+    return " / ".join(f"`{name}`" for name in names)
+
+
+def _gemma4_ple_bullet(manifest: Mapping[str, Any]) -> list[str]:
+    """The overview's per-layer-embedding bullet, per model when the manifest mixes PLE and
+    PLE-free models (the text of an all-PLE manifest — E2B / E4B — is the one it always was)."""
+    names = list(manifest["models"])
+    carriers = [name for name in names if name in GEMMA4_PLE_MODELS]
+    if carriers == names:
+        return [
+            "- **Per-layer embeddings are container assets, not graph weights.** They are gathered",
+            "  on the host and handed to the graph as an input, which keeps them out of the GPU's",
+            "  resident set; the loader reads only the vocabulary ranges a conversation actually",
+            "  touches.",
+        ]
+    others = _spell_models(name for name in names if name not in GEMMA4_PLE_MODELS)
+    if not carriers:
+        return [
+            f"- **No per-layer embeddings**: {others} has none, so every weight is a graph weight."
+        ]
+    return [
+        f"- **Per-layer embeddings** ({_spell_models(carriers)}) **are container assets, not graph",
+        "  weights.** They are gathered on the host and handed to the graph as an input, which",
+        "  keeps them out of the GPU's resident set; the loader reads only the vocabulary ranges a",
+        f"  conversation actually touches. {others} has no per-layer embeddings.",
+    ]
+
+
+def _gemma4_front_end_bullet(manifest: Mapping[str, Any]) -> list[str]:
+    """The overview's text-only bullet (one sentence when every model's checkpoint carries the
+    same kind of multimodal front end — the E2B / E4B text — else one clause per kind)."""
+    by_kind: dict[str, list[str]] = {}
+    for name in manifest["models"]:
+        by_kind.setdefault(GEMMA4_FRONT_ENDS[name], []).append(name)
+    if len(by_kind) == 1:
+        return [
+            "- **Not multimodal here.** The published checkpoint also carries"
+            f" {next(iter(by_kind))};",
+            "  this distribution contains neither, and cannot take images or audio.",
+        ]
+    kinds = "; ".join(f"{kind} for {_spell_models(names)}" for kind, names in by_kind.items())
+    return [
+        "- **Not multimodal here.** The published checkpoints also carry multimodal front ends",
+        f"  ({kinds}); this distribution contains none of them, and cannot take images or audio.",
+    ]
+
+
+def _gemma4_position_limits(manifest: Mapping[str, Any]) -> str:
+    """The overview's position limit: one number when every model declares the same (the E2B /
+    E4B text), else one per model (12B declares 262144, E2B / E4B 131072)."""
+    by_limit: dict[int, list[str]] = {}
+    for name, model in manifest["models"].items():
+        by_limit.setdefault(model["pipelineConfig"]["maxPosition"], []).append(name)
+    if len(by_limit) == 1:
+        return f"{next(iter(by_limit))} (the model's declared position limit)"
+    limits = ", ".join(f"{limit} for {_spell_models(names)}" for limit, names in by_limit.items())
+    return f"the model's declared position limit ({limits})"
+
+
 def _gemma4_overview(manifest: Mapping[str, Any]) -> list[str]:
     config = default_model(manifest)["pipelineConfig"]
     return [
@@ -152,19 +243,15 @@ def _gemma4_overview(manifest: Mapping[str, Any]) -> list[str]:
         "- **Tokenizer and chat format ship with the weights.** `chat()` renders the turns,",
         "  encodes them, samples, and decodes incrementally, so callers hand over messages and",
         "  read back text fragments as they are decided.",
-        "- **Per-layer embeddings are container assets, not graph weights.** They are gathered",
-        "  on the host and handed to the graph as an input, which keeps them out of the GPU's",
-        "  resident set; the loader reads only the vocabulary ranges a conversation actually",
-        "  touches.",
+        *_gemma4_ple_bullet(manifest),
         f"- **Context**: the default capacity is {config['capacity']} tokens per conversation, and",
         "  the loader accepts any capacity between the chunk length in use and",
-        f"  {config['maxPosition']} (the model's declared position limit); rotary cos/sin are",
+        f"  {_gemma4_position_limits(manifest)}; rotary cos/sin are",
         "  generated on the host per chunk from the declared `rope` parameters, so no position",
         f"  table ships. Prefill runs in chunks of {config['chunkLength']} rows by default, and",
         f"  the chunk length itself can be raised up to {config['maxChunkLength']} — the traced",
         "  upper bound of the chunk symbol, which the graph does not carry.",
-        "- **Not multimodal here.** The published checkpoint also carries vision and audio towers;",
-        "  this distribution contains neither, and cannot take images or audio.",
+        *_gemma4_front_end_bullet(manifest),
         "- Not readable by transformers (it's a different container with an embedded graph); the",
         f"  reader is a pipeline that implements `{GEMMA4_SUPPORTED_PIPELINE}`.",
         f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest",
@@ -183,10 +270,21 @@ def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     ]
     for name in manifest["models"]:
         repo = GEMMA4_UPSTREAM[name]
+        weights = GEMMA4_WEIGHTS_UPSTREAM.get(name)
+        if weights is None:
+            lines.append(
+                f"- **`{name}`**: [{repo}](https://huggingface.co/{repo}), licensed"
+                f" **Apache 2.0** ([license]({GEMMA4_LICENSE_LINK}) /"
+                f" [full text]({GEMMA4_LICENSE_TEXT_LINK}); a verbatim copy is in `LICENSE.md`)."
+            )
+            continue
         lines.append(
-            f"- **`{name}`**: [{repo}](https://huggingface.co/{repo}), licensed"
-            f" **Apache 2.0** ([license]({GEMMA4_LICENSE_LINK}) /"
-            f" [full text]({GEMMA4_LICENSE_TEXT_LINK}); a verbatim copy is in `LICENSE.md`)."
+            f"- **`{name}`**: the weights are [{weights}](https://huggingface.co/{weights}),"
+            " Google's quantization-aware-trained (QAT, Q4_0) checkpoint of the base model"
+            f" [{repo}](https://huggingface.co/{repo}), which is also the source of the tokenizer,"
+            " the chat template and the generation defaults; both are licensed **Apache 2.0**"
+            f" ([license]({GEMMA4_LICENSE_LINK}) / [full text]({GEMMA4_LICENSE_TEXT_LINK}); a"
+            " verbatim copy is in `LICENSE.md`)."
         )
     for drafter in _gemma4_drafter_upstreams(manifest):
         lines.append(
@@ -199,12 +297,7 @@ def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
             " to int8 throughout, linear layers included, rather than to packed int4."
         )
     lines += [
-        "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
-        "  decoder was extracted and re-expressed in the Karume container format; linear weights",
-        "  were quantized to packed int4 (group 32) and the embedding tables to int8; the",
-        "  per-layer embeddings were moved out of the graph into container assets that the host",
-        "  gathers; the exit was narrowed to the selected rows' logits and hidden states; rotary",
-        "  cos/sin arrive as host-generated inputs.",
+        *_gemma4_changes(manifest),
         "  No retraining and no fine-tuning.",
         "- **What the model can and cannot do** — capabilities, limitations, intended use,",
         "  evaluations and safety guidance — is documented on the upstream model card, and this",
@@ -212,6 +305,48 @@ def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         f"(https://huggingface.co/{GEMMA4_UPSTREAM[manifest['defaultModel']]}) before using it.",
     ]
     return lines
+
+
+#: The "Changes made here" item of a manifest whose models all carry per-layer embeddings (the
+#: E2B / E4B text, unchanged).
+_ALL_PLE_CHANGES: tuple[str, ...] = (
+    "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
+    "  decoder was extracted and re-expressed in the Karume container format; linear weights",
+    "  were quantized to packed int4 (group 32) and the embedding tables to int8; the",
+    "  per-layer embeddings were moved out of the graph into container assets that the host",
+    "  gathers; the exit was narrowed to the selected rows' logits and hidden states; rotary",
+    "  cos/sin arrive as host-generated inputs.",
+)
+
+
+def _gemma4_changes(manifest: Mapping[str, Any]) -> list[str]:
+    """The "Changes made here" item; the per-layer-embedding clause names its models when the
+    manifest mixes PLE and PLE-free models (an all-PLE manifest keeps the text it always had)."""
+    names = list(manifest["models"])
+    carriers = [name for name in names if name in GEMMA4_PLE_MODELS]
+    if carriers == names:
+        return list(_ALL_PLE_CHANGES)
+    ple = (
+        f" the per-layer embeddings of {_spell_models(carriers)} were moved out of the graph into"
+        " container assets that the host gathers;"
+        if carriers
+        else ""
+    )
+    qat = [name for name in names if name in GEMMA4_WEIGHTS_UPSTREAM]
+    grid = (
+        f" — for {_spell_models(qat)}, the QAT checkpoint's own 4-bit grid (its codes and one"
+        " step per group) is stored rather than rounded again —"
+        if qat
+        else ""
+    )
+    return [
+        "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
+        "  decoder was extracted and re-expressed in the Karume container format; linear weights",
+        f"  were quantized to packed int4 (group 32){grid} and the embedding tables to int8;{ple}"
+        " the",
+        "  exit was narrowed to the selected rows' logits and hidden states; rotary cos/sin arrive",
+        "  as host-generated inputs.",
+    ]
 
 
 def _gemma4_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:

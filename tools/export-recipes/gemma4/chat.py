@@ -1,10 +1,16 @@
 """gemma4 E2B の chat フォーマットの parity フィクスチャ採取（ADR 0084 決定 5 / 決定 7）。
 
     uv run --with 'transformers==5.14.1' python -m gemma4.chat
+    uv run --with 'transformers==5.14.1' python -m gemma4.chat --model 12b
 
 出力は 1 本（**git 管理**）:
 
     packages/models/tests/fixtures/gemma-text/gemma4-chat.json
+    packages/models/tests/fixtures/gemma-text/gemma4-12b-chat.json   (--model 12b)
+
+12B renders the `gemma4-unified` dialect ({@link CHAT_DIALECTS}): its template is read from the
+pinned hub snapshot (`gemma4.sources`), and the fixture is harvested from its own
+`apply_chat_template`, the same way as E2B's.
 
 TS 側の実装は `packages/models/src/gemma/text/chat.ts` の純関数 1 本
 （`gemma.chatPrompt`）で、汎用テンプレートレンダラは作らない（ADR 0084 決定 5 —
@@ -55,6 +61,7 @@ TS 側は**トークナイザ資産の追加語彙から**同じ集合を導出�
 
 from __future__ import annotations
 
+import argparse
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -69,10 +76,32 @@ from _shared.gemma_tokenizer import (
     spec_of,
     write_json,
 )
-from _shared.paths import INPUTS_ROOT, REPO_ROOT
+from _shared.paths import REPO_ROOT
+from gemma4 import sources
 
-#: 上流の手置き資産（`inputs/<family>/<name>/` — assets-layout）。
-CHECKPOINT_DIR = INPUTS_ROOT / "gemma4" / "gemma-4-E2B-it"
+#: The chat dialects — the closed set of `pipelineConfig.chatDialect` (the TS side's
+#: `gemma.chatPrompt` renders each one; an absent key reads as {@link GEMMA4_CHAT_DIALECT}).
+#: `gemma4` is E2B / E4B's `chat_template.jinja`; `gemma4-unified` is 12B's, which differs from
+#: it in exactly one place for the conversations in scope here — see
+#: {@link GENERATION_PROMPT_SUFFIX} (the pytest renders every case through 12B's own template).
+GEMMA4_CHAT_DIALECT = "gemma4"
+GEMMA4_UNIFIED_CHAT_DIALECT = "gemma4-unified"
+
+#: Dialect → what the generation prompt appends after `<|turn>model\n` with thinking off. 12B's
+#: template (lines 380-386 at the pinned revision) opens and closes an empty thought channel there
+#: when `enable_thinking` is false — its default — so a host that omitted it would hand the model a
+#: prompt it never saw in training.
+GENERATION_PROMPT_SUFFIX: Mapping[str, str] = {
+    GEMMA4_CHAT_DIALECT: "",
+    GEMMA4_UNIFIED_CHAT_DIALECT: "<|channel>thought\n<channel|>",
+}
+
+#: Model → its chat dialect. Key set = `gemma4.card.GEMMA4_UPSTREAM` (tests).
+CHAT_DIALECTS: Mapping[str, str] = {
+    "e2b": GEMMA4_CHAT_DIALECT,
+    "e4b": GEMMA4_CHAT_DIALECT,
+    "12b": GEMMA4_UNIFIED_CHAT_DIALECT,
+}
 
 #: 出所記録に束ねる 4 ファイル（chat 形式と EOS 集合が**同じ digest set** から来ることの記録）。
 SOURCE_FILES = (
@@ -86,6 +115,13 @@ SOURCE_FILES = (
 FIXTURE_PATH = (
     REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "gemma-text" / "gemma4-chat.json"
 )
+
+#: Model → its parity fixture (git-tracked; the TS chat tests read it). E4B is rendered in E2B's
+#: dialect and has no fixture of its own; 12B's sits next to E2B's.
+FIXTURE_PATHS: Mapping[str, Path] = {
+    "e2b": FIXTURE_PATH,
+    "12b": FIXTURE_PATH.with_name("gemma4-12b-chat.json"),
+}
 
 #: 初版の射程（ADR 0084 決定 5）。ここに無い role は TS 側が fail loudly で拒否する。
 PLAIN_ROLES = ("system", "developer", "user", "assistant")
@@ -252,10 +288,14 @@ CASES: tuple[ChatCase, ...] = (
 )
 
 
-def _source(checkpoint_dir: Path) -> dict[str, Any]:
-    """出所記録（chat 形式と EOS 集合を束ねる 4 ファイルの digest — ADR 0084 決定 5）。"""
+def _source(checkpoint_dir: Path, label: str) -> dict[str, Any]:
+    """出所記録（chat 形式と EOS 集合を束ねる 4 ファイルの digest — ADR 0084 決定 5）。
+
+    `label` names the checkpoint the way a git-tracked record may (`gemma4.sources.tokenizer_label`
+    — a repository path, or `<repo>@<revision>` for a hub snapshot outside the repository).
+    """
     return {
-        "dir": str(checkpoint_dir.relative_to(REPO_ROOT)),
+        "dir": label,
         "files": {name: file_digest(checkpoint_dir / name) for name in SOURCE_FILES},
     }
 
@@ -347,30 +387,41 @@ def build_chat_fixture(
     }
 
 
-def main() -> None:
-    tokenizer_json = CHECKPOINT_DIR / "tokenizer.json"
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Harvest a Gemma 4 chat parity fixture")
+    # The models with a fixture of their own (E4B is rendered in E2B's dialect).
+    parser.add_argument("--model", choices=tuple(FIXTURE_PATHS), default="e2b")
+    model = parser.parse_args(argv).model
+    # The tokenizer source, not the weights' (12B's QAT weights ship E2B's `tokenizer.json` —
+    # `gemma4.sources`).
+    checkpoint_dir = sources.tokenizer_dir(model)
+    fixture_path = FIXTURE_PATHS[model]
+    tokenizer_json = checkpoint_dir / "tokenizer.json"
     for name in SOURCE_FILES:
-        if not (CHECKPOINT_DIR / name).is_file():
-            raise SystemExit(f"[karume] 上流の {name} が無い: {CHECKPOINT_DIR / name}")
+        if not (checkpoint_dir / name).is_file():
+            raise SystemExit(f"[karume] 上流の {name} が無い: {checkpoint_dir / name}")
+    pins = sources.HUB_PINS.get(model)
+    if pins is not None:
+        sources.assert_snapshot_pin(checkpoint_dir, pins.tokenizer)
     from transformers import AutoTokenizer  # 遅延 import（採取のときだけ要る）
 
     compiled = compile_tokenizer(json.loads(tokenizer_json.read_text(encoding="utf-8")))
     fixture = build_chat_fixture(
-        tokenizer=AutoTokenizer.from_pretrained(str(CHECKPOINT_DIR)),
+        tokenizer=AutoTokenizer.from_pretrained(str(checkpoint_dir)),
         compiled=compiled,
         cases=CASES,
-        stops=stop_tokens(CHECKPOINT_DIR),
-        source=_source(CHECKPOINT_DIR),
+        stops=stop_tokens(checkpoint_dir),
+        source=_source(checkpoint_dir, sources.tokenizer_label(model)),
     )
-    written = write_json(FIXTURE_PATH, fixture)
+    written = write_json(fixture_path, fixture)
     print(
-        f"[karume] フィクスチャ {FIXTURE_PATH} ({written / 1e3:.0f} KB・"
+        f"[karume] フィクスチャ {fixture_path} ({written / 1e3:.0f} KB・"
         f"chat {len(fixture['chat'])} ケース / 語彙 {len(fixture['asset']['vocab'])} / "
         f"merges {len(fixture['asset']['merges'])} / 停止 {fixture['stopTokens']})"
     )
     print(
-        f"[karume] 生成後はリポジトリ直下で `deno fmt {FIXTURE_PATH.relative_to(REPO_ROOT)}` "
-        "を掛ける"
+        f"[karume] then format it from the repository root: `vp fmt"
+        f" {fixture_path.relative_to(REPO_ROOT)}`"
     )
 
 

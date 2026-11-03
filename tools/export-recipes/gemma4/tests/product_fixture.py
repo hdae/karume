@@ -83,6 +83,8 @@ PARTIAL_ROTARY_FACTOR = 0.5
 TEXT_CONFIG: Mapping[str, Any] = {
     "max_position_embeddings": MAX_POSITION,
     "hidden_size": HIDDEN,
+    # The per-layer embedding width (the real E2B / E4B config declares it — 256; 12B declares 0).
+    "hidden_size_per_layer_input": DIM,
     "num_attention_heads": 4,
     "head_dim": SLIDING_HEAD_DIM,
     "global_head_dim": FULL_HEAD_DIM,
@@ -158,6 +160,7 @@ def _publish(
     assets: Mapping[str, AssetInput] = {},
     block_bytes: int = BLOCK_MAX_BYTES,
     named: str = GEMMA4_ROLE,
+    provenance: Provenance = FIXTURE_PROVENANCE,
 ) -> list[bytes]:
     """書いて読み直して検証し、part ごとのバイト列を添字順に返す（実物と同じ 1 本道）。
 
@@ -178,7 +181,7 @@ def _publish(
             stored.tensors,
             stored.bindings,
             graph_name=named,
-            provenance=FIXTURE_PROVENANCE,
+            provenance=provenance,
             assets=assets,
             block_bytes=block_bytes,
         )
@@ -226,6 +229,8 @@ def product_container(
     free_symbol: bool = True,
     swap_outputs: bool = False,
     assets: Mapping[str, AssetInput] | None = None,
+    ple: bool = True,
+    provenance: Provenance = FIXTURE_PROVENANCE,
 ) -> list[bytes]:
     """製品グラフ 1 本ぶんの part バイト列（読む順 — 先頭が part 0）。
 
@@ -236,6 +241,9 @@ def product_container(
     `baked_rope` は退役した「表を焼く」形の initializer を 1 本混ぜる（残骸の門）。
     `free_symbol` を偽にすると容量記号を states から外し、入力 shape が束縛する `M` / `R` の
     2 本だけにする（記号の割れ方の門 — 自由記号がちょうど 1 本であることを見る側）。
+    `ple=False` is the graph of a model without per-layer embeddings (12B): no
+    `per_layer_inputs` input, and no PLE assets unless `assets` names some. `provenance` is the
+    container's (a pinned model's names its upstream revision).
     `swap_outputs` は出口 2 本の順序だけを入れ替える（行軸まで同型なので、幅の突合以外は
     素通りする組 — 順序の門）。
     """
@@ -334,7 +342,11 @@ def product_container(
                 for layer_type in GEMMA4_ROPE_LAYER_TYPES
                 for part in GEMMA4_ROPE_PARTS
             ),
-            IrInput(name="per_layer_inputs", dtype="f32", shape=[1, SEQ_SYMBOL, layers, dim]),
+            *(
+                [IrInput(name="per_layer_inputs", dtype="f32", shape=[1, SEQ_SYMBOL, layers, dim])]
+                if ple
+                else []
+            ),
             IrInput(name="last_row", dtype="i32", shape=[ROW_SYMBOL]),
         ],
         outputs=[hidden, logits] if swap_outputs else [logits, hidden],
@@ -347,16 +359,9 @@ def product_container(
         },
         nodes=nodes,
     )
-    return _publish(
-        graph,
-        tensors,
-        "i4",
-        scales,
-        overrides,
-        assets=ple_container_assets(tokens=vocab, layers=layers, dim=dim)
-        if assets is None
-        else assets,
-    )
+    if assets is None:
+        assets = ple_container_assets(tokens=vocab, layers=layers, dim=dim) if ple else {}
+    return _publish(graph, tensors, "i4", scales, overrides, assets=assets, provenance=provenance)
 
 
 def drafter_container(

@@ -116,12 +116,11 @@ from safetensors.torch import save_file
 from torch import nn
 from torch.export import Dim
 
-from _shared.paths import INPUTS_ROOT, SERIES_ROOT
-from gemma4 import ple, rope
-from gemma4.card import GEMMA4_LICENSE, GEMMA4_UPSTREAM
+from _shared.paths import SERIES_ROOT
+from gemma4 import ple, rope, sources
+from gemma4.card import GEMMA4_LICENSE, GEMMA4_PLE_MODELS, GEMMA4_UPSTREAM
 from gemma4.distribution import (
     GEMMA4_DEFAULT_MODEL,
-    GEMMA4_INPUTS_DIRNAME,
     GEMMA4_PREFIX,
     GEMMA4_ROLE,
     gemma4_checkpoint,
@@ -143,8 +142,12 @@ def checkpoint_dir(model: str) -> Path:
 
     綴りは帰属表（`gemma4.card.GEMMA4_UPSTREAM`）から導く — 配布 recipe の
     `gemma4_sources` と同じ 1 本（未知のモデルはそこで fail loudly）。
+
+    The directory itself is `gemma4.sources.checkpoint_dir` (the pinned snapshot of the weights for
+    12B).
     """
-    return INPUTS_ROOT / GEMMA4_INPUTS_DIRNAME / gemma4_checkpoint(model)
+    gemma4_checkpoint(model)
+    return sources.checkpoint_dir(model)
 
 
 def series_dir(model: str, suffix: str | None = None) -> Path:
@@ -662,19 +665,28 @@ def assert_case_lengths(
         )
 
 
-def build_cases(model_dir: Path, sym_max: int, window: int) -> tuple[tuple[str, torch.Tensor], ...]:
-    """golden ケースの `(名前, input_ids)`（`<bos>` はここで足す — モジュール docstring）。"""
+def encode_cases(
+    model_dir: Path, cases: Sequence[tuple[str, str]] = GOLDEN_CASES
+) -> tuple[tuple[str, torch.Tensor], ...]:
+    """The golden cases' `(name, input_ids)` with the leading `<bos>`, unchecked — {@link
+    build_cases} adds the length rules of the PLE series; 12B's script (`gemma4.export_unified`)
+    passes its own case list and states its own rules."""
     tokenizer = load_tokenizer(model_dir)
     bos = bos_token_id(model_dir, tokenizer)
-    cases = tuple(
+    return tuple(
         (
             name,
             torch.tensor(
                 [[bos, *tokenizer.encode(text, add_special_tokens=False).ids]], dtype=torch.int64
             ),
         )
-        for name, text in GOLDEN_CASES
+        for name, text in cases
     )
+
+
+def build_cases(model_dir: Path, sym_max: int, window: int) -> tuple[tuple[str, torch.Tensor], ...]:
+    """golden ケースの `(名前, input_ids)`（`<bos>` はここで足す — モジュール docstring）。"""
+    cases = encode_cases(model_dir)
     assert_case_lengths(cases, sym_max, window)
     return cases
 
@@ -839,10 +851,16 @@ def greedy_tokens(logits: Mapping[str, torch.Tensor]) -> dict[str, int]:
     return {name: int(value[0, -1].argmax()) for name, value in logits.items()}
 
 
-def expected_token_ids(tokenizer: Any) -> dict[str, int]:
-    """{@link GREEDY_EXPECTATIONS} の期待継続 → トークン id（単一トークンでなければ落とす）。"""
+def expected_token_ids(
+    tokenizer: Any, expectations: Mapping[str, str] = GREEDY_EXPECTATIONS
+) -> dict[str, int]:
+    """{@link GREEDY_EXPECTATIONS} の期待継続 → トークン id（単一トークンでなければ落とす）。
+
+    `expectations` is another model's table (12B's —
+    `gemma4.export_unified.FIRST_TOKEN_EXPECTATIONS`).
+    """
     expected: dict[str, int] = {}
-    for name, continuation in GREEDY_EXPECTATIONS.items():
+    for name, continuation in expectations.items():
         ids = tokenizer.encode(continuation, add_special_tokens=False).ids
         if len(ids) != 1:
             raise AssertionError(
@@ -976,7 +994,7 @@ def series_parser(
     out_dir: Callable[[str], Path],
     *,
     with_sym_max: bool = True,
-    models: Sequence[str] = tuple(GEMMA4_UPSTREAM),
+    models: Sequence[str] = tuple(model for model in GEMMA4_UPSTREAM if model in GEMMA4_PLE_MODELS),
 ) -> argparse.ArgumentParser:
     """この family の台本に共通な CLI の骨組み（`--model` / `--model-dir` / `--out` /
     `--sym-max`）。
@@ -992,6 +1010,9 @@ def series_parser(
     `with_sym_max=False` は chunk 記号を持たない台本（MTP drafter）用 — 効かないノブを
     受理して黙って捨てない（fail loudly）ために、`--sym-max` 自体を登録しない。`models` は
     選べるモデルの集合で、台本が特定のモデルにしか正しくない既定を持つとき（drafter）に絞る。
+    The default is the models with per-layer embeddings (E2B / E4B): every script that reads the
+    PLE refuses 12B at the argument instead of deep in the load; 12B has its own script
+    (`gemma4.export_unified`).
     """
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--model", choices=tuple(models), default=GEMMA4_DEFAULT_MODEL)

@@ -1,4 +1,4 @@
-# Gemma 4 E2B / E4B export recipe
+# Gemma 4 E2B / E4B / 12B export recipe
 
 **Outside the wheel** — this recipe is repo-only (ADR
 [0065](../../../docs/decisions/0065-exporter-core-recipe-split.md)). It produces four series and,
@@ -14,6 +14,26 @@ input and output directories. E4B ships **without an MTP drafter**, and it share
 tokenizer asset because the upstream `tokenizer.json` files are byte-identical (the assembly checks
 that by sha256). The license notes below were established for E2B; E4B's snapshot carries the same
 Apache 2.0 frontmatter.
+
+`google/gemma-4-12B-it` is a third model with its own script, `export_unified.py` (see "What
+`export_unified.py` emits" below): upstream ships it as another class (`gemma4_unified` — no
+per-layer embeddings, no KV sharing, K = V on the full layers), too large to load whole in F32
+here. It has its own tokenizer series (its `tokenizer.json` drops 239 of E2B's merges) and its own
+chat dialect, and ships without a drafter for now.
+
+12B is read from two repositories, each from the hub cache at the commit `sources.py` pins. **The
+weights and their `config.json`** come from Google's quantization-aware-trained checkpoint
+`google/gemma-4-12B-it-qat-q4_0-unquantized` ("half-precision weights extracted from the QAT
+pipeline, for custom downstream compilation"; its README front matter names
+`google/gemma-4-12B-it` as `base_model`). Its linears already lie on a 4-bit grid, and the export
+imports that grid as is instead of rounding the weights again (see "What `export_unified.py`
+emits"). **The tokenizer, the chat template and the generation defaults** come from
+`google/gemma-4-12B-it`: the QAT repository's `tokenizer_config.json`, `generation_config.json`
+and `chat_template.jinja` are byte-identical to 12B-it's, but its `tokenizer.json` is E2B's — a
+packaging slip, since the model is a QAT fine-tune of 12B-it. Both snapshots' README front matter
+says `license: apache-2.0`. When 12B gets a drafter, it must come from a QAT checkpoint too
+(Google's model card: "the assistant model must also be a QAT checkpoint with the same
+precision").
 
 The E2B checkpoint is `google/gemma-4-E2B-it`, licensed **Apache 2.0** (the snapshot's own README
 frontmatter says `license: apache-2.0`, and its `license_link` page carries the plain Apache 2.0
@@ -280,6 +300,48 @@ through the host loader (`packages/models/src/gemma/ple.ts`), takes `argmax` on 
 requires the resulting token sequence to match the logits opt-in series' `greedy.<case>` records
 exactly for 3 cases × 16 steps.
 
+## What `export_unified.py` emits
+
+The 12B product graph: E2B / E4B's product contract minus PLE — `input_ids[1,M]`, the four RoPE
+inputs and `last_row[R]` in, `logits[1,R,V]` then `hidden[1,R,H]` out, one k / v slot pair per
+layer (96 slots, no KV sharing). Sliding slots hold 8 KV heads in `window + 8` = 1032 rows; full
+slots hold 1 KV head of width 512 in the capacity symbol. On the full layers the value is the raw
+`k_proj` output through the scale-free `v_norm` (not rotated) and the key is `k_norm` then RoPE of
+the same projection; the script checks that wiring in the written graph. The storage format is
+E2B's: packed int4 (group 32) linear weights and an int8 embedding (the tied head).
+
+The int4 values are **the QAT checkpoint's own grid, imported as is**. Each group of 32 along a row
+holds `bf16(q·d)` with integer codes `q` in −8..7 and a learned step `d`; the export recovers, per
+group, the largest step `amax / k` (k = 1..8) whose codes fit −8..7 and whose least-squares refit
+reconstructs the group within 2^-7 of its largest magnitude, and stores those codes and that step.
+A group that does not recover fails the export (no fallback to rounding). Measured on the pinned
+snapshots (2026-11): round-to-nearest on karume's ±7 grid gives KL 2.65 / 1.88 (`context-en` /
+`window-en`) for `google/gemma-4-12B-it` against its unquantized forward, re-rounding the QAT
+weights to ±7 still about 1.0, and the imported grid 0.0136 / 0.0362 (top-1 agreement 0.97 / 0.93)
+against the QAT checkpoint's own unquantized forward. The −8 code needs no format change: the
+packed nibble stores `q + 8` and the runtime decodes `u − 8`.
+
+The form is the Qwen3.5 / umT5 one (an F32 load of 12B is 44.6 GiB): the trace runs on parameters
+without data, the linear weights are imported and the embedding quantized from the checkpoint a
+block of rows at a time and handed over as fixed weights, and the norms are widened to F32. The
+pytest checks on a tiny model that the row blocks write the same container bytes as an import of
+each whole tensor at once.
+
+The goldens (`greedy.<case>.safetensors` of the standard cases plus `window-en`, and
+`reference.json` naming both sources, the series itself and the suppressed ids) come from an F32
+reference whose linear weights are held as their imported codes and steps and dequantized each
+time they are read (ruling R4 — bit-equal to what the container's bytes decode to, about 16 GiB
+resident). Before every
+greedy selection the logits of the ids upstream's `generation_config.json` suppresses
+(`suppress_tokens` — 258882 / 258883 for 12B) are −inf, as upstream `generate()` does; the
+distribution declares the same ids as `pipelineConfig.suppressTokens`. `window-en` (1159 tokens) is
+longer than the 1032-row sliding ring, so the goldens evaluate the sliding window and the host's
+prefill spans two 768-row chunks; the export fails if no golden runs past the window.
+
+    outputs/series/gemma4-12b-product/model.krm                  the container (no PLE assets)
+    outputs/series/gemma4-12b-product/greedy.<case>.safetensors  greedy goldens (4 cases)
+    outputs/series/gemma4-12b-product/reference.json             provenance (own goldens)
+
 ## What `export_drafter.py` emits
 
 The **MTP drafter** series, `outputs/series/gemma4-e2b-drafter/` — a _borrower_ graph that cannot
@@ -428,6 +490,21 @@ uv run --with 'transformers==5.14.1' python -m gemma4.export_product --model e4b
 `export_drafter.py`, `tokenizer.py` and `chat.py` have no E4B form: E4B has no drafter here, and
 its tokenizer asset is E2B's.
 
+12B (the two snapshots come from `hf download google/gemma-4-12B-it-qat-q4_0-unquantized
+--revision <weights pin of sources.py>` and `hf download google/gemma-4-12B-it --revision
+<tokenizer pin> tokenizer.json tokenizer_config.json chat_template.jinja generation_config.json`;
+`export_unified.py` takes `--model-dir` / `--tokenizer-dir` to point elsewhere):
+
+```sh
+uv run --with 'transformers==5.14.1' python -m gemma4.export_unified --model 12b --plan  # trace only
+uv run --with 'transformers==5.14.1' python -m gemma4.export_unified --model 12b         # series + goldens
+uv run python -m gemma4.tokenizer --model 12b
+uv run --with 'transformers==5.14.1' python -m gemma4.chat --model 12b
+```
+
+The PLE scripts (`export.py`, `export_decode.py`, `export_token.py`, `export_product.py`) refuse
+`--model 12b` at the argument.
+
 Both fixture writers print the `deno fmt` command to run afterwards — the committed shape of a
 fixture is whatever the repository formatter produces (`deno task verify` checks it).
 
@@ -441,7 +518,17 @@ rather than declared as a dependency group.
 cd tools/export-recipes
 uv run python dist.py --pipeline gemma4        # → models/karume-gemma4/ (~4.0 GiB)
 uv run python dist.py --pipeline gemma4 --model e2b --model e4b --out ../../models/karume-gemma4
+uv run python dist.py --pipeline gemma4 --model e2b --model e4b --model 12b \
+    --out ../../models/karume-gemma4
 ```
+
+A `12b` entry reads `gemma4-12b-product` and its own `gemma4-12b-tokenizer`, declares the `i4`
+quant alone and `pipelineConfig.chatDialect` `gemma4-unified`, and its container carries no PLE
+assets; the assembly checks both hub snapshots against their pins, that the container names the
+weights' revision, and that the tokenizer asset was compiled from the 12B-it snapshot's
+`tokenizer.json`. Its `pipelineConfig` reads the numbers the model decides from the QAT
+checkpoint's `config.json` and the sampler and suppressed ids from 12B-it's
+`generation_config.json`. The E2B / E4B entries are unchanged by its presence.
 
 `--model e4b` alone would also resolve to `models/karume-gemma4/` (the family has one repository),
 so an E4B-only build should name its own `--out`.

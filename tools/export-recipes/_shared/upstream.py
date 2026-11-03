@@ -49,6 +49,33 @@ class UpstreamProvenanceError(ValueError):
     """
 
 
+def hub_cache() -> Path:
+    """The Hugging Face hub cache, as huggingface_hub itself resolves it
+    (`huggingface_hub.constants.HF_HUB_CACHE` — read once, when huggingface_hub is imported).
+
+    MUST: imported here, not at module scope — the default sync of this workspace does not
+    install huggingface_hub (it comes with transformers, which the gemma4 recipes run with, and
+    with the wan / moss / sbv2 groups), and every recipe imports this module.
+    """
+    from huggingface_hub import constants
+
+    return Path(constants.HF_HUB_CACHE)
+
+
+def hub_snapshot_dir(repo: str, revision: str) -> Path:
+    """The local hub cache's snapshot of `repo` at commit `revision`.
+
+    A path only (nothing is read or fetched): the readers of the files fail loudly when the
+    snapshot is not there. MUST: `revision` is a commit SHA — a branch or a tag is not a pin, and
+    the cache names a snapshot directory by the commit it resolved.
+    """
+    if _COMMIT_SHA.fullmatch(revision) is None:
+        raise UpstreamProvenanceError(
+            f"{repo}: revision {revision!r} is not a commit SHA (40 lower-case hex digits)"
+        )
+    return hub_cache() / f"models--{repo.replace('/', '--')}" / "snapshots" / revision
+
+
 def snapshot_revision(model_dir: Path, file: str = SNAPSHOT_RECORD_FILE) -> str:
     """`hf download --local-dir` の記録から、手元の checkpoint の commit SHA を読む。"""
     record = model_dir / SNAPSHOT_RECORD_DIR / f"{file}.metadata"

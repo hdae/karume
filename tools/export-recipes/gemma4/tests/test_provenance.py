@@ -20,6 +20,7 @@ from safetensors.torch import save_file
 
 from _shared.decode_series import GREEDY_PREFIX, GREEDY_SUFFIX, PROMPT_KEY
 from gemma4 import provenance
+from gemma4.sources import HUB_PINS, HubPin, ModelPins
 
 CASES = (
     ("capital-en", torch.tensor([[2, 41, 7, 19]], dtype=torch.int64)),
@@ -142,3 +143,154 @@ class TestBuildRecord:
         assert record["schema"] == provenance.SCHEMA
         assert record["series"] == "gemma4-e2b-decode-token"
         assert record["reference"] == reference
+
+
+class TestAssertPinnedFingerprint:
+    def _record(self, tmp_path):
+        for name in provenance.FINGERPRINT_FILES:
+            (tmp_path / name).write_bytes(name.encode())
+        return provenance.checkpoint_fingerprint(tmp_path)
+
+    def _pins(self, **overrides: str) -> ModelPins:
+        def pin(repo: str, revision: str, names: tuple[str, ...]) -> HubPin:
+            digests = {name: hashlib.sha256(name.encode()).hexdigest() for name in names}
+            return HubPin(
+                repo=repo,
+                revision=revision,
+                sha256={**digests, **{k: v for k, v in overrides.items() if k in names}},
+            )
+
+        return ModelPins(
+            weights=pin("test/weights", "0" * 40, provenance.WEIGHTS_FILES),
+            tokenizer=pin("test/tokenizer", "1" * 40, provenance.TOKENIZER_FILES),
+        )
+
+    def test_the_pinned_bytes_pass(self, tmp_path):
+        provenance.assert_pinned_fingerprint(self._record(tmp_path), self._pins())
+
+    @pytest.mark.parametrize(
+        ("name", "source"),
+        [
+            ("config.json", "test/weights@" + "0" * 40),
+            ("tokenizer.json", "test/tokenizer@" + "1" * 40),
+        ],
+    )
+    def test_other_bytes_fail_loudly_naming_their_source(self, tmp_path, name, source):
+        with pytest.raises(AssertionError, match="not the pinned one") as raised:
+            provenance.assert_pinned_fingerprint(
+                self._record(tmp_path), self._pins(**{name: "f" * 64})
+            )
+        assert source in str(raised.value)
+
+    def test_a_pin_that_misses_a_fingerprinted_file_fails_loudly(self, tmp_path):
+        pins = self._pins()
+        partial = ModelPins(
+            weights=HubPin(
+                repo=pins.weights.repo,
+                revision=pins.weights.revision,
+                sha256={k: v for k, v in pins.weights.sha256.items() if k != "config.json"},
+            ),
+            tokenizer=pins.tokenizer,
+        )
+
+        with pytest.raises(AssertionError, match="the weights pin"):
+            provenance.assert_pinned_fingerprint(self._record(tmp_path), partial)
+
+    def test_a_file_pinned_in_the_other_source_s_role_fails_loudly(self, tmp_path):
+        """`tokenizer.json` pinned with the weights would be checked against the wrong snapshot's
+        bytes."""
+        pins = self._pins()
+        swapped = ModelPins(
+            weights=HubPin(
+                repo=pins.weights.repo,
+                revision=pins.weights.revision,
+                sha256={**pins.weights.sha256, **pins.tokenizer.sha256},
+            ),
+            tokenizer=HubPin(repo=pins.tokenizer.repo, revision=pins.tokenizer.revision, sha256={}),
+        )
+
+        with pytest.raises(AssertionError, match="the weights pin"):
+            provenance.assert_pinned_fingerprint(self._record(tmp_path), swapped)
+
+    def test_the_12b_pins_cover_the_fingerprinted_files_once(self):
+        files = [name for pin in HUB_PINS["12b"].by_role().values() for name in pin.sha256]
+
+        assert sorted(files) == sorted(provenance.FINGERPRINT_FILES)
+
+
+class TestCheckpointLabel:
+    """A hub snapshot's directory is named by the commit, so the record names the repository."""
+
+    def test_the_label_names_the_checkpoint(self, tmp_path):
+        snapshot = tmp_path / ("a" * 40)
+        snapshot.mkdir()
+        for name in provenance.FINGERPRINT_FILES:
+            (snapshot / name).write_bytes(name.encode())
+
+        record = provenance.build_record(
+            tmp_path / "gemma4-12b-product",
+            snapshot,
+            {"series": "gemma4-12b-product", "goldens": {}},
+            checkpoint_label="google/gemma-4-12B-it",
+        )
+
+        assert record["checkpoint"]["dir"] == "google/gemma-4-12B-it"
+
+    def test_without_a_label_the_directory_names_it(self, tmp_path):
+        for name in provenance.FINGERPRINT_FILES:
+            (tmp_path / name).write_bytes(name.encode())
+
+        assert provenance.checkpoint_fingerprint(tmp_path)["dir"] == tmp_path.name
+
+
+class TestTwoSources:
+    """A pinned model whose tokenizer comes from another repository than its weights (12B)."""
+
+    def test_each_file_is_read_from_its_own_source_and_the_record_names_both(self, tmp_path):
+        weights, tokenizer = tmp_path / "weights", tmp_path / "tokenizer"
+        for directory, names in (
+            (weights, provenance.WEIGHTS_FILES),
+            (tokenizer, provenance.TOKENIZER_FILES),
+        ):
+            directory.mkdir()
+            for name in names:
+                (directory / name).write_bytes(f"{directory.name}/{name}".encode())
+        pins = ModelPins(
+            weights=HubPin(repo="test/weights", revision="0" * 40, sha256={}),
+            tokenizer=HubPin(repo="test/tokenizer", revision="1" * 40, sha256={}),
+        )
+
+        record = provenance.build_record(
+            tmp_path / "gemma4-12b-product",
+            weights,
+            {"series": "gemma4-12b-product", "goldens": {}},
+            checkpoint_label="both",
+            tokenizer_dir=tokenizer,
+            pins=pins,
+        )
+
+        checkpoint = record["checkpoint"]
+        assert checkpoint["files"]["tokenizer.json"]["sha256"] == (
+            hashlib.sha256(b"tokenizer/tokenizer.json").hexdigest()
+        )
+        assert checkpoint["files"]["config.json"]["sha256"] == (
+            hashlib.sha256(b"weights/config.json").hexdigest()
+        )
+        assert checkpoint["sources"] == {
+            "weights": {
+                "repo": "test/weights",
+                "revision": "0" * 40,
+                "files": ["model.safetensors", "config.json"],
+            },
+            "tokenizer": {
+                "repo": "test/tokenizer",
+                "revision": "1" * 40,
+                "files": ["tokenizer.json"],
+            },
+        }
+
+    def test_one_checkpoint_records_no_sources(self, tmp_path):
+        for name in provenance.FINGERPRINT_FILES:
+            (tmp_path / name).write_bytes(name.encode())
+
+        assert "sources" not in provenance.checkpoint_fingerprint(tmp_path)

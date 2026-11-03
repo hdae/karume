@@ -203,7 +203,9 @@ SLIDING_SLACK_ROWS = 8
 #: Per model: E4B stops at 10 because capital-ja's 11th step has margin 0.0205, under
 #: {@link MARGIN_FLOOR} (steps 1-10 stay >= 0.31; measured 2026-10-30). Dropping the case instead
 #: would leave only " Paris" expectations, which the constant-output check forbids (ruling 47).
-GREEDY_STEPS: Mapping[str, int] = {"e2b": 16, "e4b": 10}
+#: 12B starts at E2B's 16 (unmeasured until its first export; `gemma4.export_unified` takes the
+#: same table and the same `--steps` knob, and its margin gate names every offending step).
+GREEDY_STEPS: Mapping[str, int] = {"e2b": 16, "e4b": 10, "12b": 16}
 
 #: 各 step の top1 − top2 logit 差の下限。GPU 実行の偏差で greedy の列が割れないことの保証で、
 #: **恒真でない**（強く決まらない継続を持つケースはここで落ちる）。落ちたケースは K を下げずに
@@ -581,6 +583,20 @@ def attention_nodes(graph: IrGraph, config: Any) -> list[IrNode]:
     return nodes
 
 
+def kv_heads(config: Any, layer_type: str) -> int:
+    """The KV heads of one layer type — upstream's rule (`Gemma4TextAttention` and
+    `Gemma4UnifiedTextAttention` alike): a full layer of an `attention_k_eq_v` model has
+    `num_global_key_value_heads` (12B: 1, against 8 on its sliding layers), every other layer
+    `num_key_value_heads`.
+
+    NOTE: a config without `attention_k_eq_v` reads as `False` — the field's default in both
+    upstream config classes (the E2B / E4B form, where both layer types share one count).
+    """
+    if getattr(config, "attention_k_eq_v", False) and layer_type == one_shot.FULL_ATTENTION:
+        return int(config.num_global_key_value_heads)
+    return int(config.num_key_value_heads)
+
+
 def sliding_capacity(config: Any) -> int:
     """sliding スロットの物理行数（`window + SLIDING_SLACK_ROWS`）。
 
@@ -801,12 +817,14 @@ def assert_ir_form_common(
     （集合の検査を部分集合へ緩めると、束縛できない記号が紛れ込んでも素通りする）。
     """
     heads = int(config.num_attention_heads)
-    kv_heads = int(config.num_key_value_heads)
     layer_types = list(config.layer_types)
     layers = int(config.num_hidden_layers)
     owners = slot_layers(config)
     window = int(config.sliding_window)
     capacity = sliding_capacity(config)
+    # The KV heads are per layer type ({@link kv_heads}): one count for E2B / E4B, sliding 8 /
+    # full 1 for 12B — reading one count for every layer would leave one type unchecked.
+    kv_by_type = {layer_type: kv_heads(config, layer_type) for layer_type in set(layer_types)}
 
     attentions = [node for node in graph.nodes if node.op == ATTENTION_OP]
     if len(attentions) != layers:
@@ -830,10 +848,11 @@ def assert_ir_form_common(
                 f"（期待 {expected_window}）— 層種別と窓の対応が崩れている"
             )
         query, key, value = (declared_shape(graph, name) for name in node.ins)
-        if query[1] != heads or key[1] != kv_heads or value[1] != kv_heads:
+        kv = kv_by_type[layer_type]
+        if query[1] != heads or key[1] != kv or value[1] != kv:
             raise AssertionError(
                 f"{where}: head 軸が {[query[1], key[1], value[1]]} —"
-                f" 真の GQA 形 {[heads, kv_heads, kv_heads]} でない"
+                f" 真の GQA 形 {[heads, kv, kv]} でない"
                 "（k / v が H まで広がっていれば repeat_kv が実体化している）"
             )
         depth = one_shot._attention_depth(config, layer_type)
@@ -868,7 +887,7 @@ def assert_ir_form_common(
         # （容量を実行時に選べない — ADR 0066 決定 3）が素通りし、数値一色に緩めると full の
         # 容量自由が黙って消える。sliding は window + 余裕の実数（{@link sliding_capacity}）。
         sliding = layer_type == one_shot.SLIDING_ATTENTION
-        slot_shape = [1, kv_heads, capacity if sliding else capacity_symbol, depth]
+        slot_shape = [1, kv_by_type[layer_type], capacity if sliding else capacity_symbol, depth]
         for part in ("k", "v"):
             name = slot_name(layer, part)
             slot = graph.states[name]
@@ -907,12 +926,18 @@ def assert_ir_form_common(
         raise AssertionError(
             f"格納 dtype の本数が想定と違う（実測, 想定）: {wrong} / 全内訳 {storage}"
         )
+    triples = {
+        layer_type: [heads, kv_by_type[layer_type], kv_by_type[layer_type]]
+        for layer_type in unique_layer_types(config)
+    }
     return {
         "attention_nodes": len(attentions),
         "state_append_nodes": len(appends),
         "slots": len(expected_slots),
         "kv_owners": kv_owner_layers(config),
-        "heads": [heads, kv_heads, kv_heads],
+        # One `[q, k, v]` triple when the layer types agree (the E2B / E4B record), else one per
+        # layer type in the config's order.
+        "heads": next(iter(triples.values())) if len(set(kv_by_type.values())) == 1 else triples,
         "head_dim": {
             layer_type: one_shot._attention_depth(config, layer_type)
             for layer_type in unique_layer_types(config)

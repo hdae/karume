@@ -1,16 +1,23 @@
 """gemma4 E2B のトークナイザ資産の compile と parity フィクスチャ採取（ADR 0084 決定 1）。
 
 E4B はこの資産を共有する（上流 `tokenizer.json` が E2B とバイト同一 — 共有の前提は配布側の
-`gemma4.distribution.assert_gemma4_tokenizer_source` が組み立て時に sha256 で突き合わせる）
-ので、この台本に `--model` の軸は無い。
+`gemma4.distribution.assert_gemma4_tokenizer_source` が組み立て時に sha256 で突き合わせる）。
+`--model` picks E2B (the default) or 12B; E4B has no series of its own.
 
     uv run python -m gemma4.tokenizer
+    uv run python -m gemma4.tokenizer --model 12b
 
 出力は 2 系統（**1 回の実行で必ず両方** — {@link _shared.gemma_tokenizer.emit}）:
 
   ① 実行時資産 `outputs/series/gemma4-e2b-tokenizer/tokenizer.json`（`.gitignore` 配下）
   ② パリティ用フィクスチャ
      `packages/models/tests/fixtures/gemma-text/gemma4-parity.json`（**git 管理**）
+
+12B has a series of its own (`gemma4-12b-tokenizer` + `gemma4-12b-parity.json`): its
+`tokenizer.json` has the same vocabulary, added tokens, normalizer, pre-tokenizer and decoder as
+E2B's but drops 239 of E2B's merges (and adds none), so some inputs tokenize differently. It is
+read from the pinned hub snapshot (`gemma4.sources`); {@link EXTRA_CASES} adds encode cases that
+run into the dropped merges.
 
 畳み方・受理集合・部分集合の切り方は `_shared/gemma_tokenizer.py` の docstring が正本。
 ここが持つのは gemma4 固有の綴りだけ: 入力の置き場・出力先・**この checkpoint の chat 綴り**
@@ -23,11 +30,20 @@ MUST: chat template そのもの（`gemma.chatPrompt`）は本段の射程外（
 
 from __future__ import annotations
 
+import argparse
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+
 from _shared.gemma_tokenizer import EncodeCase, emit
-from _shared.paths import INPUTS_ROOT, REPO_ROOT, SERIES_ROOT
+from _shared.paths import REPO_ROOT, SERIES_ROOT
+from gemma4 import sources
+
+#: The models with a tokenizer series of their own (E4B borrows E2B's —
+#: `gemma4.distribution.GEMMA4_TOKENIZER_SERIES`).
+MODELS: tuple[str, ...] = ("e2b", "12b")
 
 #: 上流の手置き資産（`inputs/<family>/<name>/` — assets-layout）。
-TOKENIZER_JSON = INPUTS_ROOT / "gemma4" / "gemma-4-E2B-it" / "tokenizer.json"
+TOKENIZER_JSON = sources.tokenizer_dir("e2b") / "tokenizer.json"
 
 #: 実行時資産（系列出力）。
 ASSET_PATH = SERIES_ROOT / "gemma4-e2b-tokenizer" / "tokenizer.json"
@@ -66,13 +82,57 @@ CASES: tuple[EncodeCase, ...] = (
     ),
 )
 
+#: Model → encode cases of its own on top of {@link CASES}. 12B's run into merges E2B has and 12B
+#: dropped: E2B joins these pieces, 12B keeps them apart (the pytest checks that both tokenizers
+#: really split each text differently).
+EXTRA_CASES: Mapping[str, tuple[EncodeCase, ...]] = {
+    "e2b": (),
+    "12b": (
+        EncodeCase(
+            "dropped-merge",
+            "a merge E2B has and 12B dropped (`get` + `starcore`, then `getstarcore` + `data`)",
+            "getstarcoredata",
+        ),
+        EncodeCase(
+            "dropped-merge-chain",
+            "a chain of dropped merges after a metaspace (`▁SRP` + `Go` → `▁SRPGo` + `Get` → …)",
+            " SRPGoGetStr",
+        ),
+        EncodeCase(
+            "dropped-merge-cjk",
+            "a dropped merge between two CJK pieces (`加入` + `参数向量中`)",
+            "加入参数向量中",
+        ),
+    ),
+}
 
-def main() -> None:
+
+def asset_path(model: str) -> Path:
+    """The model's runtime asset (`outputs/series/gemma4-<model>-tokenizer/tokenizer.json`)."""
+    return SERIES_ROOT / f"gemma4-{model}-tokenizer" / ASSET_PATH.name
+
+
+def fixture_path(model: str) -> Path:
+    """The model's parity fixture (E2B's keeps its name; 12B's is `gemma4-12b-parity.json`)."""
+    return FIXTURE_PATH if model == "e2b" else FIXTURE_PATH.with_name(f"gemma4-{model}-parity.json")
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Compile a Gemma 4 tokenizer asset")
+    parser.add_argument("--model", choices=MODELS, default="e2b")
+    model = parser.parse_args(argv).model
+    # The tokenizer source, not the weights' (12B's QAT weights ship E2B's `tokenizer.json` —
+    # `gemma4.sources`).
+    directory = sources.tokenizer_dir(model)
+    pins = sources.HUB_PINS.get(model)
+    if pins is not None:
+        sources.assert_snapshot_pin(directory, pins.tokenizer)
     emit(
-        tokenizer_json=TOKENIZER_JSON,
-        asset_path=ASSET_PATH,
-        fixture_path=FIXTURE_PATH,
-        extra_cases=CASES,
+        tokenizer_json=directory / TOKENIZER_JSON.name,
+        asset_path=asset_path(model),
+        fixture_path=fixture_path(model),
+        extra_cases=(*CASES, *EXTRA_CASES[model]),
+        source_path=None if pins is None else f"{sources.tokenizer_label(model)}/tokenizer.json",
     )
 
 

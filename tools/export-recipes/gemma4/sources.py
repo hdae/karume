@@ -1,0 +1,205 @@
+"""Where each Gemma 4 model's upstream checkpoint is read from, and the pins of the ones read from
+the local Hugging Face cache.
+
+E2B / E4B are read from `inputs/gemma4/<checkpoint>/` (placed by hand — assets-layout; the
+revision used is recorded in `THIRD_PARTY_NOTICES.md`): one directory holds the weights, the
+config, the tokenizer, the chat template and the generation defaults. 12B is read from the hub
+cache at pinned commits ({@link HUB_PINS}), from **two** repositories:
+
+- **the weights and their config** — `google/gemma-4-12B-it-qat-q4_0-unquantized`, Google's
+  quantization-aware-trained checkpoint of 12B-it, whose linears already lie on a 4-bit grid
+  (`gemma4.export_unified` stores that grid as is). Its `config.json` is the one that describes
+  these weights.
+- **the tokenizer, the chat template and the generation defaults** — `google/gemma-4-12B-it`.
+  The QAT repository's `tokenizer_config.json`, `generation_config.json` and
+  `chat_template.jinja` are byte-identical to 12B-it's, but its `tokenizer.json` is E2B's
+  (SHA-256 `cc8d3a0c…`, not 12B-it's `9788bdb6…`; 239 merges differ) — a packaging slip of the
+  QAT repository: the model is a QAT fine-tune of 12B-it, whose tokenizer is `9788bdb6…`.
+
+Both repositories are still being updated, so following `main` would export whatever the branches
+point at on the day of the run. This module never downloads; `hf download <repo> --revision <pin>`
+fetches a snapshot.
+
+A pin also carries the SHA-256 of the files the provenance record fingerprints from that source
+(`gemma4.provenance.FINGERPRINT_FILES` is the union of the two pins' files).
+{@link assert_model_pins} checks both sources cheaply before a long run (the cache names an LFS
+blob by its SHA-256, so only the small files are hashed), and the export checks the record's full
+digests against them once more (`gemma4.provenance.assert_pinned_fingerprint`).
+
+MUST: torch-free — the distribution recipe reads it.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+from _shared.paths import INPUTS_ROOT, REPO_ROOT
+from _shared.upstream import hub_snapshot_dir
+
+from .card import GEMMA4_UPSTREAM, GEMMA4_WEIGHTS_UPSTREAM
+
+#: The family's directory of hand-placed upstream checkpoints (`inputs/gemma4/<checkpoint>/`).
+INPUTS_DIRNAME = "gemma4"
+
+#: The name the hub cache gives an LFS blob (its SHA-256).
+_LFS_BLOB = re.compile(r"[0-9a-f]{64}")
+
+
+class SourcePinError(ValueError):
+    """The checkpoint on disk is not the pinned one."""
+
+
+@dataclass(frozen=True)
+class HubPin:
+    """One repository's commit in the hub cache."""
+
+    #: The HF repository id.
+    repo: str
+    #: The HF commit SHA (40 lower-case hex digits) — never a branch or a tag.
+    revision: str
+    #: File → SHA-256 at {@link revision}, for the files the provenance record fingerprints from
+    #: this source (for an LFS file, the oid the HF API reports and the cache names the blob by).
+    sha256: Mapping[str, str]
+
+    @property
+    def label(self) -> str:
+        """`<repo>@<revision>` — how a git-tracked record names this source."""
+        return f"{self.repo}@{self.revision}"
+
+
+@dataclass(frozen=True)
+class ModelPins:
+    """The two pinned sources of one model read from the hub cache (module docstring)."""
+
+    #: The weights and the config that describes them (`model.safetensors`, `config.json`).
+    weights: HubPin
+    #: The tokenizer (`tokenizer.json`); the chat template, `tokenizer_config.json` and
+    #: `generation_config.json` are read from the same snapshot.
+    tokenizer: HubPin
+
+    def by_role(self) -> dict[str, HubPin]:
+        """Role → pin, in the order the record lists them."""
+        return {"weights": self.weights, "tokenizer": self.tokenizer}
+
+
+#: Model → its pinned sources. 12B, both fetched on 2026-11-02 (Apache-2.0 per each snapshot's
+#: README front matter; neither is gated):
+#:
+#: - weights: `main` of `google/gemma-4-12B-it-qat-q4_0-unquantized` — the LFS blob name of
+#:   `model.safetensors` (23,919,549,408 B) and the SHA-256 of `config.json`'s bytes. Against
+#:   12B-it's `config.json` its text config differs only in an explicit `dtype` (`bfloat16`) and
+#:   `vocab_size_per_layer_input` (0 instead of 262144 — unread: the class has no per-layer
+#:   embeddings); the audio and vision sub-configs drop a few fields.
+#: - tokenizer: `main` of `google/gemma-4-12B-it` (the commit 12B was first pinned at) — the LFS
+#:   blob name of `tokenizer.json` (module docstring: the QAT repository's is E2B's).
+#:
+#: Moving a pin needs the licence review of `THIRD_PARTY_NOTICES.md` again.
+_TWELVE_B_WEIGHTS = HubPin(
+    repo=GEMMA4_WEIGHTS_UPSTREAM["12b"],
+    revision="b6ed86275a6a5735884e208bfed95b445a684ca2",
+    sha256={
+        "model.safetensors": "26f2cee4292298a3f9f92209643c37c80e34e011381e22434088870d9439a0a0",
+        "config.json": "a323d02f68420f6fa3a3548130a0d36356075a4047a622e57148558f8eee7077",
+    },
+)
+_TWELVE_B_TOKENIZER = HubPin(
+    repo=GEMMA4_UPSTREAM["12b"],
+    revision="43c9d014b231474fa7212dbb48a762566c2b255d",
+    sha256={"tokenizer.json": "9788bdb6a021b3170357cd3587b5d622b1177561ad3c5bf43d73728fd71aeacb"},
+)
+HUB_PINS: Mapping[str, ModelPins] = {
+    "12b": ModelPins(weights=_TWELVE_B_WEIGHTS, tokenizer=_TWELVE_B_TOKENIZER),
+}
+
+
+def _hand_placed_dir(model: str) -> Path:
+    """`inputs/gemma4/<checkpoint>/` (the checkpoint name is the tail of the upstream repository —
+    `gemma4.card.GEMMA4_UPSTREAM`); an unknown model fails loudly."""
+    repo = GEMMA4_UPSTREAM.get(model)
+    if repo is None:
+        raise ValueError(
+            f"gemma4 has no model '{model}' (known: {' / '.join(sorted(GEMMA4_UPSTREAM))})"
+        )
+    return INPUTS_ROOT / INPUTS_DIRNAME / repo.split("/", 1)[1]
+
+
+def checkpoint_dir(model: str) -> Path:
+    """The directory model `model`'s weights and their `config.json` are read from (a path only —
+    the readers fail loudly on a missing file).
+
+    Pinned models ({@link HUB_PINS}) resolve to the hub cache's snapshot of the weights pin; the
+    others to `inputs/gemma4/<checkpoint>/`.
+    """
+    hand_placed = _hand_placed_dir(model)
+    pins = HUB_PINS.get(model)
+    if pins is None:
+        return hand_placed
+    return hub_snapshot_dir(pins.weights.repo, pins.weights.revision)
+
+
+def tokenizer_dir(model: str) -> Path:
+    """The directory model `model`'s `tokenizer.json`, chat template and generation defaults are
+    read from — {@link checkpoint_dir} for a hand-placed checkpoint, the snapshot of the tokenizer
+    pin for a pinned model."""
+    hand_placed = _hand_placed_dir(model)
+    pins = HUB_PINS.get(model)
+    if pins is None:
+        return hand_placed
+    return hub_snapshot_dir(pins.tokenizer.repo, pins.tokenizer.revision)
+
+
+def checkpoint_label(model: str) -> str:
+    """How a git-tracked record names model `model`'s checkpoint: the repository-relative path of
+    a hand-placed one; for a pinned one, both sources as `<repo>@<revision>` with their roles (an
+    absolute cache path names a machine, not a source)."""
+    pins = HUB_PINS.get(model)
+    if pins is None:
+        return str(checkpoint_dir(model).relative_to(REPO_ROOT))
+    return " + ".join(f"{pin.label} ({role})" for role, pin in pins.by_role().items())
+
+
+def tokenizer_label(model: str) -> str:
+    """How a git-tracked record names the source of model `model`'s tokenizer files: as
+    {@link checkpoint_label} for a hand-placed checkpoint, the tokenizer pin's `<repo>@<revision>`
+    for a pinned one."""
+    pins = HUB_PINS.get(model)
+    if pins is None:
+        return checkpoint_label(model)
+    return pins.tokenizer.label
+
+
+def _digest(path: Path) -> str:
+    """The SHA-256 of `path` — the blob's name when the cache links it to an LFS blob, else the
+    bytes (only small files reach the hashing branch in a hub snapshot)."""
+    if path.is_symlink() and _LFS_BLOB.fullmatch(path.resolve().name):
+        return path.resolve().name
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def assert_snapshot_pin(directory: Path, pin: HubPin) -> None:
+    """Every file `pin` names is in `directory` with the pinned SHA-256 (cheap in a hub snapshot).
+
+    MUST: run before anything long reads the checkpoint — a partial download or another revision
+    placed at the same path otherwise surfaces hours later, or not at all.
+    """
+    for name, expected in sorted(pin.sha256.items()):
+        path = directory / name
+        if not path.is_file():
+            raise SourcePinError(
+                f"{path} is missing — fetch the pinned snapshot ({pin.label}) first"
+            )
+        actual = _digest(path)
+        if actual != expected:
+            raise SourcePinError(f"{path}: SHA-256 {actual}, pin {expected} ({pin.label})")
+
+
+def assert_model_pins(weights_dir: Path, tokenizer_dir: Path, pins: ModelPins) -> None:
+    """Both sources of a pinned model are the pinned snapshots ({@link assert_snapshot_pin} on
+    each — the same MUST: before anything long reads either)."""
+    assert_snapshot_pin(weights_dir, pins.weights)
+    assert_snapshot_pin(tokenizer_dir, pins.tokenizer)

@@ -578,11 +578,16 @@ def emit(
     asset_path: Path,
     fixture_path: Path,
     extra_cases: Sequence[EncodeCase] = (),
+    source_path: str | None = None,
 ) -> None:
     """1 資産ぶんの compile とフィクスチャ採取を**必ず両方**行う。
 
     片方だけ出す口を開けないのは、実行時資産とフィクスチャが別々に古びると「テストは緑だが
     実行だけ別の id 列」になるため（`anima/demo.py` と同じ理由）。
+
+    `source_path` names a `tokenizer.json` outside the repository (a hub snapshot) the way the
+    git-tracked fixture may record it (e.g. `<repo>@<revision>/tokenizer.json`); by default the
+    path is the repository-relative one.
     """
     if not tokenizer_json.is_file():
         raise SystemExit(f"[karume] 上流の tokenizer.json が無い: {tokenizer_json}")
@@ -590,7 +595,9 @@ def emit(
     compiled = compile_tokenizer(raw)
     source = {
         # フィクスチャは git 管理なので、出所はリポジトリ相対で書く（絶対パスを commit しない）。
-        "path": str(tokenizer_json.relative_to(REPO_ROOT)),
+        "path": source_path
+        if source_path is not None
+        else str(tokenizer_json.relative_to(REPO_ROOT)),
         **file_digest(tokenizer_json),
         "vocabCount": len(compiled.vocab),
         "mergesCount": len(compiled.merges),
@@ -614,10 +621,10 @@ def emit(
         f"語彙 {len(fixture['asset']['vocab'])} / merges {len(fixture['asset']['merges'])} / "
         f"符号化 {len(fixture['encode'])} / 復号 {len(fixture['decode'])} ケース)"
     )
-    # commit 形はフォーマッタが正（`deno task verify` の `fmt --check` が fixtures も見る）。
+    # The formatter decides the committed form (`vp check` formats the fixtures too).
     print(
-        f"[karume] 生成後はリポジトリ直下で `deno fmt {fixture_path.relative_to(REPO_ROOT)}` "
-        "を掛ける"
+        f"[karume] then format it from the repository root: `vp fmt"
+        f" {fixture_path.relative_to(REPO_ROOT)}`"
     )
 
 

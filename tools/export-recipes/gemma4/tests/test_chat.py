@@ -27,7 +27,7 @@ import pytest
 from gemma_synthetic import tokenizer_json
 
 from _shared.gemma_tokenizer import compile_tokenizer
-from gemma4 import chat
+from gemma4 import chat, sources
 
 #: 合成 template（素の会話の 3 分岐だけを持つ — 実 template の代役ではなく「注入された
 #: レンダラの出力がそのまま載る」ことを見るための的）。
@@ -234,3 +234,51 @@ class TestFixture:
         # 部分集合から落ちる = TS 側が導出を突き合わせられない）。
         assert "<pad>" in added(with_pad)
         assert "<pad>" not in added(without_pad)
+
+
+def _twelve_b_tokenizer() -> Any:
+    """12B's tokenizer from its pinned tokenizer snapshot (present on a machine that fetched it; the
+    cases SKIP explicitly without it). The directory is resolved here, not at import: the hub
+    cache's location comes from huggingface_hub, which arrives with transformers."""
+    pytest.importorskip("transformers")
+    twelve_b_dir = sources.tokenizer_dir("12b")
+    if not (twelve_b_dir / "chat_template.jinja").is_file():
+        pytest.skip(f"12B's snapshot is not in the hub cache ({twelve_b_dir})")
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(str(twelve_b_dir), local_files_only=True)
+
+
+class TestDialects:
+    def test_every_model_has_a_dialect_with_a_generation_suffix(self) -> None:
+        assert set(chat.CHAT_DIALECTS.values()) <= set(chat.GENERATION_PROMPT_SUFFIX)
+        assert chat.GENERATION_PROMPT_SUFFIX[chat.GEMMA4_CHAT_DIALECT] == ""
+        assert chat.CHAT_DIALECTS["12b"] == chat.GEMMA4_UNIFIED_CHAT_DIALECT
+
+    def test_the_12b_fixture_sits_next_to_e2b_s(self) -> None:
+        assert chat.FIXTURE_PATHS["e2b"] == chat.FIXTURE_PATH
+        assert chat.FIXTURE_PATHS["12b"].parent == chat.FIXTURE_PATH.parent
+
+    def test_12b_renders_e2b_s_text_plus_the_empty_thought_channel(self) -> None:
+        """The `gemma4-unified` dialect is E2B's rendering with the generation suffix — checked on
+        every shipped case against 12B's own `apply_chat_template` and E2B's tracked fixture
+        (rendered by E2B's template when it was harvested)."""
+        tokenizer = _twelve_b_tokenizer()
+        e2b = json.loads(chat.FIXTURE_PATH.read_text(encoding="utf-8"))["chat"]
+        suffix = chat.GENERATION_PROMPT_SUFFIX[chat.GEMMA4_UNIFIED_CHAT_DIALECT]
+
+        assert [row["name"] for row in e2b] == [case.name for case in chat.CASES]
+        for row in e2b:
+            rendered = tokenizer.apply_chat_template(
+                row["messages"], tokenize=False, add_generation_prompt=True
+            )
+            assert rendered == row["rendered"] + suffix, row["name"]
+
+    def test_the_12b_fixture_harvests_through_its_own_template(self) -> None:
+        """The harvest path the 12B fixture takes (rendered text and ids agree for every case)."""
+        tokenizer = _twelve_b_tokenizer()
+
+        rows = chat.harvest_cases(tokenizer, chat.CASES)
+
+        suffix = chat.GENERATION_PROMPT_SUFFIX[chat.GEMMA4_UNIFIED_CHAT_DIALECT]
+        assert all(row["rendered"].endswith("<|turn>model\n" + suffix) for row in rows)

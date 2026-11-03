@@ -20,6 +20,16 @@
 - `tokenizer` — compile 済みトークナイザ資産（`gemma4/tokenizer.py`・ADR 0084 決定 1）。上流が
   同一のモデルどうしは 1 系列を共有する（{@link GEMMA4_TOKENIZER_SERIES}）
 
+12B ships like E4B (one graph + the tokenizer, no drafter yet), with four differences: its
+`model` container has no PLE assets and its graph no `per_layer_inputs` (the model has no
+per-layer embeddings — {@link gemma4_ple_dim}); it carries the `i4` seat alone
+({@link GEMMA4_SPEED_NOTE}); it declares its chat dialect (`pipelineConfig.chatDialect`
+`gemma4-unified`); and it declares the ids generation never selects
+(`pipelineConfig.suppressTokens`, from upstream's `suppress_tokens` —
+{@link gemma4_generation_defaults}). Its upstream is two pinned hub snapshots of `gemma4.sources`:
+the weights and their `config.json` come from Google's QAT checkpoint, the tokenizer and the
+generation defaults from `google/gemma-4-12B-it` ({@link Gemma4Sources}).
+
 `pipelineConfig` は 2 系統に割れる（Irodori と同じ分け方）: **モデルが決める数**
 （`maxPosition` = 上流 `text_config.max_position_embeddings`・`rope` = 層種別ごとの式の
 パラメータ）は上流 `config.json` から導出し、**実行時ノブ**（`chunkLength` / `capacity`）と
@@ -52,7 +62,7 @@ from typing import Any
 
 from _shared.container_read import read_asset, read_asset_declarations
 from _shared.licenses import apache_license_2_0
-from _shared.paths import INPUTS_ROOT
+from _shared.upstream import assert_upstream_provenance
 from karume.container import ContainerFormatError
 from karume.dist import (
     Artifact,
@@ -81,9 +91,12 @@ from karume.verify import ContainerError
 from .card import (
     GEMMA4_DRAFTER_ROLE,
     GEMMA4_DRAFTER_UPSTREAM,
+    GEMMA4_LICENSE,
+    GEMMA4_PLE_MODELS,
     GEMMA4_UPSTREAM,
     render_gemma4_model_card,
 )
+from .chat import CHAT_DIALECTS, GEMMA4_CHAT_DIALECT, GENERATION_PROMPT_SUFFIX
 from .rope import (
     BAKED_TABLE_INFIX,
     FULL_ATTENTION,
@@ -92,6 +105,7 @@ from .rope import (
     RopeSpecError,
     rope_specs,
 )
+from .sources import HUB_PINS, assert_model_pins, checkpoint_dir, tokenizer_dir
 
 #: パイプライン契約（ADR 0041 §2 — モデル単位）。TS 側の受理集合は
 #: `GEMMA4_PIPELINE_NAME` / `GEMMA4_PIPELINE_MAJOR`（`packages/models/src/gemma/config.ts`）。
@@ -107,9 +121,6 @@ GEMMA4_PREFIX = "gemma4"
 #: 配布リポ名（ADR 0092 決定 1 の `karume-<family>`）。**モデル名から導かない** — 家族 1 リポ
 #: なので、E2B / E4B / 12B のどれを組んでも行き先は 1 つ。
 GEMMA4_REPO_NAME = "karume-gemma4"
-
-#: 上流の手置き資産の親（`inputs/gemma4/<チェックポイント名>/` — assets-layout）。
-GEMMA4_INPUTS_DIRNAME = "gemma4"
 
 #: 系列の接尾（`gemma4/export_product.py` の `DEFAULT_OUT_DIR` と `gemma4/tokenizer.py` の
 #: `ASSET_PATH` — 書き手と読み手が同じ 1 語から組む）。
@@ -150,7 +161,9 @@ GEMMA4_TOKENIZER_ROLE = "tokenizer"
 #: MUST: 共有の前提（同一バイト）は組み立て時に機械で見る —
 #: {@link assert_gemma4_tokenizer_source} が資産の出所 sha256 と当該モデルの上流
 #: `tokenizer.json` を突き合わせる。上流が割れた日は、表を自分の系列へ向け直す。
-GEMMA4_TOKENIZER_SERIES: Mapping[str, str] = {"e2b": "e2b", "e4b": "e2b"}
+#: 12B has its own: its `tokenizer.json` drops 239 of E2B's merges (same vocabulary), so sharing
+#: E2B's asset would give other ids for some inputs.
+GEMMA4_TOKENIZER_SERIES: Mapping[str, str] = {"e2b": "e2b", "e4b": "e2b", "12b": "12b"}
 
 #: グラフ入力の名前と並び（正本は `gemma4/export_product.py` — ラッパの forward 引数名）。
 #: 実行側は名前で束ねるので、1 つでも綴りが変われば束ねられない。RoPE の 4 本はホストが
@@ -178,6 +191,11 @@ GEMMA4_GRAPH_INPUTS: tuple[str, ...] = (
     *GEMMA4_ROPE_INPUTS,
     GEMMA4_PER_LAYER_INPUTS,
     GEMMA4_LAST_ROW,
+)
+#: The inputs of a model without per-layer embeddings (12B — `gemma4/export_unified.py`): the
+#: same graph contract minus `per_layer_inputs`.
+GEMMA4_PLE_FREE_GRAPH_INPUTS: tuple[str, ...] = tuple(
+    name for name in GEMMA4_GRAPH_INPUTS if name != GEMMA4_PER_LAYER_INPUTS
 )
 
 #: drafter グラフの入力（正本は `gemma4/export_drafter.py` — ラッパの forward 引数名）。
@@ -306,9 +324,13 @@ GEMMA4_QUANTS: Mapping[str, Any] = {
 #: 並列・融合の席（`i4-gemvpar` / `i4-fast`）の説明に足す、速度の実測の有無の 1 文。
 #: MUST: キー集合は帰属表（`GEMMA4_UPSTREAM`）と一致する（tests が固定する）— 計っていない
 #: モデルの席に「速い」と書かない（E4B の束は E4B のベンチ後に決める）。
-GEMMA4_SPEED_NOTE: Mapping[str, str] = {
+#: `None` = the model carries no parallel or fused seat at all, only `i4`: ADR 0098 admits only
+#: measured GEMV shapes to the parallel path, so before its shapes are measured such a seat would
+#: silently run the sequential GEMV while its name says otherwise (12B — ruling R3).
+GEMMA4_SPEED_NOTE: Mapping[str, str | None] = {
     "e2b": " Faster on tested E2B devices.",
     "e4b": " Speed not yet measured on E4B.",
+    "12b": None,
 }
 
 
@@ -316,15 +338,19 @@ def gemma4_quants(model: str) -> dict[str, Any]:
     """モデルの quant 表（席は全モデル共通の 3 つ・drafter を配るモデルだけ `i4` に 1 文足す）。
 
     並列・融合の 2 席には速度の実測の有無を 1 文足す（{@link GEMMA4_SPEED_NOTE}）。
+    A model whose speed note is `None` carries the `i4` seat alone (12B).
 
     NOTE: E4B も E2B と同じ 3 席・同じ宣言を当面そのまま持つ — どの席を既定にするか・束の
     中身は E4B の実測で決める（{@link GEMMA4_DEFAULT_QUANT}）。
     """
-    quants = {name: dict(quant) for name, quant in GEMMA4_QUANTS.items()}
+    note = GEMMA4_SPEED_NOTE[model]
+    seats = GEMMA4_QUANTS if note is not None else {GEMMA4_DTYPE: GEMMA4_QUANTS[GEMMA4_DTYPE]}
+    quants = {name: dict(quant) for name, quant in seats.items()}
     if gemma4_has_drafter(model):
         quants[GEMMA4_DTYPE]["description"] += GEMMA4_DRAFTER_QUANT_NOTE
-    for name in ("i4-gemvpar", "i4-fast"):
-        quants[name]["description"] += GEMMA4_SPEED_NOTE[model]
+    if note is not None:
+        for name in ("i4-gemvpar", "i4-fast"):
+            quants[name]["description"] += note
     return quants
 
 
@@ -332,7 +358,11 @@ def gemma4_quants(model: str) -> dict[str, Any]:
 #: （ADR 0104 — QAT 側 `gemma4_qat.distribution.QAT_DEFAULT_QUANT` と同じ形）。キー集合は
 #: 帰属表（`GEMMA4_UPSTREAM`）と一致する MUST（tests が固定する）。
 #: NOTE: E4B の `i4` は**暫定**（参照加算の席）— 高速化の束はベンチの実測で決める。
-GEMMA4_DEFAULT_QUANT: Mapping[str, str] = {"e2b": "i4-fast", "e4b": GEMMA4_DTYPE}
+GEMMA4_DEFAULT_QUANT: Mapping[str, str] = {
+    "e2b": "i4-fast",
+    "e4b": GEMMA4_DTYPE,
+    "12b": GEMMA4_DTYPE,
+}
 
 #: 固定長 prefill chunk の行数（ADR 0066 決定 4 — context の計画時定数）。**実行時ノブ**なので
 #: 資産からは導出できない。上限は記号 `M` の trace 時の上限（{@link GEMMA4_MAX_CHUNK_LENGTH}）。
@@ -366,6 +396,30 @@ GEMMA4_SAMPLER_FIELDS: tuple[tuple[str, str], ...] = (
     ("top_k", "topK"),
     ("top_p", "topP"),
 )
+
+#: Upstream `generation_config.json`'s list of ids generation never selects → the optional
+#: top-level `pipelineConfig.suppressTokens` ({@link gemma4_generation_defaults}). 12B declares
+#: `[258883, 258882]` (end-of-audio / end-of-image); upstream `generate()` sets their logits to
+#: −inf before greedy and sampled selection alike (`SuppressTokensLogitsProcessor`).
+GEMMA4_SUPPRESS_TOKENS_KEY = "suppress_tokens"
+
+#: `generation_config.json` keys the distribution does not carry, each with its reason. MUST: a
+#: key that is in neither this table, {@link GEMMA4_SAMPLER_FIELDS} nor
+#: {@link GEMMA4_SUPPRESS_TOKENS_KEY} fails loudly — a generation default upstream adds (as 12B
+#: added `suppress_tokens`) must surface as a decision, not be dropped silently.
+GEMMA4_GENERATION_NOT_CARRIED: Mapping[str, str] = {
+    "bos_token_id": "the compiled tokenizer asset declares `<bos>` (`bosId`); the host prepends it",
+    "eos_token_id": (
+        "the stop set is derived from the tokenizer asset's added vocabulary; the chat fixture"
+        " (`gemma4.chat.stop_tokens`) holds the derivation to this declaration"
+    ),
+    "pad_token_id": "nothing is padded (one unpadded sequence per run)",
+    "do_sample": (
+        "greedy or sampled decoding is the caller's choice per request; sampling uses the"
+        " declared sampler"
+    ),
+    "transformers_version": "the version of the library that wrote the file, not a default",
+}
 
 #: compile 済みトークナイザ資産の形式識別子（書き手は `_shared/gemma_tokenizer.py`）。
 GEMMA4_TOKENIZER_FORMAT = "karume-gemma-tokenizer/1"
@@ -428,17 +482,28 @@ class Gemma4Sources:
     ときだけ `tokenizer.json` も読む）。
 
     `drafter` が `None` のモデルは drafter を配らない（{@link gemma4_has_drafter}）。
+
+    The upstream side is two directories: `model` holds the weights' `config.json` (the numbers the
+    model decides — {@link gemma4_text_config}) and `upstream_tokenizer` the `tokenizer.json` and
+    `generation_config.json`. They are one checkpoint for E2B / E4B; for 12B the weights come from
+    Google's QAT checkpoint, whose `tokenizer.json` is E2B's, so the tokenizer and the generation
+    defaults are read from `google/gemma-4-12B-it` (`gemma4.sources`).
     """
 
     product: Path
     drafter: Path | None
     tokenizer: Path
     model: Path
+    upstream_tokenizer: Path
 
 
 def gemma4_sources(series_dir: Path, model: str = GEMMA4_DEFAULT_MODEL) -> Gemma4Sources:
-    """系列の親ディレクトリ（`outputs/series/`）と `_shared.paths` の綴りから入力を引く。"""
-    checkpoint = gemma4_checkpoint(model)
+    """系列の親ディレクトリ（`outputs/series/`）と `_shared.paths` の綴りから入力を引く。
+
+    The upstream directories come from `gemma4.sources.checkpoint_dir` / `tokenizer_dir`
+    (`inputs/gemma4/…` for E2B / E4B, the pinned hub snapshots for 12B).
+    """
+    gemma4_checkpoint(model)
     return Gemma4Sources(
         product=series_dir / gemma4_series_name(model, GEMMA4_PRODUCT_SUFFIX),
         drafter=(
@@ -448,7 +513,8 @@ def gemma4_sources(series_dir: Path, model: str = GEMMA4_DEFAULT_MODEL) -> Gemma
         ),
         tokenizer=series_dir
         / gemma4_series_name(GEMMA4_TOKENIZER_SERIES[model], GEMMA4_TOKENIZER_SUFFIX),
-        model=INPUTS_ROOT / GEMMA4_INPUTS_DIRNAME / checkpoint,
+        model=checkpoint_dir(model),
+        upstream_tokenizer=tokenizer_dir(model),
     )
 
 
@@ -693,6 +759,28 @@ def gemma4_hidden_size(text_config: SimpleNamespace, where: str) -> int:
     return declared
 
 
+#: The upstream `text_config` field that sizes one layer's per-layer embedding (0 = no PLE).
+GEMMA4_PLE_DIM_KEY = "hidden_size_per_layer_input"
+
+
+def gemma4_ple_dim(text_config: Any, where: str) -> int:
+    """The width of one layer's per-layer embedding the model declares; 0 = the model has none
+    (12B's config says 0 — its class, `gemma4_unified`, has no PLE branch).
+
+    Shared by the distribution and the export scripts (`text_config` is a namespace here and a
+    transformers config there — both read attributes).
+
+    MUST: read, never defaulted — a config without the field cannot say whether the graph should
+    take `per_layer_inputs`, and guessing either way lets a graph / asset mix through.
+    """
+    declared = getattr(text_config, GEMMA4_PLE_DIM_KEY, None)
+    if isinstance(declared, bool) or not isinstance(declared, int) or declared < 0:
+        raise DistError(
+            f"{where}: {GEMMA4_PLE_DIM_KEY} is not a non-negative integer ({declared!r})"
+        )
+    return declared
+
+
 def gemma4_rope(text_config: SimpleNamespace, where: str) -> dict[str, Any]:
     """`pipelineConfig.rope`（層種別ごとの theta / headDim / rotaryDim）を config から導く。
 
@@ -715,11 +803,15 @@ def gemma4_rope(text_config: SimpleNamespace, where: str) -> dict[str, Any]:
 def assert_gemma4_graph(
     graph: Mapping[str, Any],
     path: Path,
-    index: Mapping[str, Any],
+    index: Mapping[str, Any] | None,
     rope: Mapping[str, Any],
     hidden_size: int,
 ) -> None:
     """グラフ入力の並び・形・記号の割れ方を、配置の前に実測する。
+
+    `index` is the container's PLE index, or `None` for a model without per-layer embeddings
+    (12B): its graph takes {@link GEMMA4_PLE_FREE_GRAPH_INPUTS} — `per_layer_inputs` absent — and
+    every other rule below holds unchanged.
 
     MUST: PLE の層数と層当たり次元は**グラフ入力の宣言**と**索引**の両方が持つ（前者は
     `per_layer_inputs[1, M, 35, 256]`・後者は `layers` / `dim`）。食い違ったまま配ると、
@@ -747,9 +839,10 @@ def assert_gemma4_graph(
     """
     inputs = graph_inputs(graph, path)
     names = tuple(inputs)
-    if names != GEMMA4_GRAPH_INPUTS:
+    expected_names = GEMMA4_GRAPH_INPUTS if index is not None else GEMMA4_PLE_FREE_GRAPH_INPUTS
+    if names != expected_names:
         raise DistError(
-            f"{path} のグラフ入力が {list(names)} で、期待の {list(GEMMA4_GRAPH_INPUTS)} と違う"
+            f"{path} のグラフ入力が {list(names)} で、期待の {list(expected_names)} と違う"
             " — 実行側は名前で束ねるので、1 つでも綴りが変われば束ねられない"
         )
     sequence = inputs[GEMMA4_INPUT_IDS][1]
@@ -770,19 +863,21 @@ def assert_gemma4_graph(
             f"{path}: 焼き込んだ RoPE 表の initializer が {len(baked)} 本残っている: {baked[:4]}"
             " — ホスト生成へ外に出し切れていない世代の資産"
         )
-    per_layer = inputs[GEMMA4_PER_LAYER_INPUTS]
-    if len(per_layer) != 4:
-        raise DistError(
-            f"{path} の入力 '{GEMMA4_PER_LAYER_INPUTS}' が {per_layer!r} — [1, M, 層数, 次元]"
-            "の 4 軸でない"
-        )
-    for axis, field in ((2, "layers"), (3, "dim")):
-        if per_layer[axis] != index[field]:
+    if index is not None:
+        per_layer = inputs[GEMMA4_PER_LAYER_INPUTS]
+        if len(per_layer) != 4:
             raise DistError(
-                f"{path} の入力 '{GEMMA4_PER_LAYER_INPUTS}' の軸 {axis} が {per_layer[axis]!r}、"
-                f"資産 '{PLE_INDEX_ASSET}' の {field} は {index[field]}"
-                " — グラフと PLE が別世代"
+                f"{path} の入力 '{GEMMA4_PER_LAYER_INPUTS}' が {per_layer!r} — [1, M, 層数, 次元]"
+                "の 4 軸でない"
             )
+        for axis, field in ((2, "layers"), (3, "dim")):
+            if per_layer[axis] != index[field]:
+                raise DistError(
+                    f"{path} の入力 '{GEMMA4_PER_LAYER_INPUTS}' の軸 {axis} が"
+                    f" {per_layer[axis]!r}、"
+                    f"資産 '{PLE_INDEX_ASSET}' の {field} は {index[field]}"
+                    " — グラフと PLE が別世代"
+                )
     outputs = graph.get("outputs")
     values = graph.get("values")
     hidden = values.get(outputs[1]) if isinstance(values, dict) else None
@@ -956,6 +1051,27 @@ def assert_gemma4_ple_assets(container: Path, index: Mapping[str, Any]) -> None:
         )
 
 
+def assert_gemma4_no_ple_assets(container: Path) -> None:
+    """A model without per-layer embeddings ships a container without PLE assets (the inverted
+    form of {@link assert_gemma4_ple_assets}).
+
+    MUST: fail loudly on any — a PLE index or block in a container whose graph takes no
+    `per_layer_inputs` is another model's material (or a half-converted series), and the reader
+    would either ignore it silently or, finding the index, build a PLE nobody feeds.
+    """
+    try:
+        declared = read_asset_declarations(container)
+    except (KeyError, ContainerError, ContainerFormatError) as cause:
+        raise DistError(f"{container}: 資産の宣言が読めない: {cause}") from cause
+    ple_roles = {PLE_INDEX_ROLE, *PLE_ROLES.values()}
+    carried = sorted(name for name, (role, _length) in declared.items() if role in ple_roles)
+    if carried:
+        raise DistError(
+            f"{container}: the model has no per-layer embeddings, yet the container carries PLE"
+            f" assets {carried[:4]} — a graph / asset mix"
+        )
+
+
 def assert_gemma4_tokenizer(path: Path, vocab_size: int) -> None:
     """compile 済みトークナイザ資産が**この語彙で焼かれたもの**であることを見る。
 
@@ -1008,17 +1124,95 @@ def assert_gemma4_tokenizer_source(path: Path, checkpoint_tokenizer: Path) -> No
         )
 
 
+@dataclass(frozen=True)
+class Gemma4GenerationDefaults:
+    """What a distribution carries from upstream `generation_config.json`."""
+
+    #: `pipelineConfig.sampler` (TS `SamplerSpec` field names).
+    sampler: Mapping[str, Any]
+    #: `pipelineConfig.suppressTokens` — unique ids, ascending; `None` when upstream declares none.
+    suppress_tokens: tuple[int, ...] | None
+
+
+def gemma4_generation_defaults(model_dir: Path) -> Gemma4GenerationDefaults:
+    """Read upstream `generation_config.json`: the recommended sampler and the suppressed ids.
+
+    MUST: every key is mapped ({@link GEMMA4_SAMPLER_FIELDS}, {@link GEMMA4_SUPPRESS_TOKENS_KEY})
+    or listed as not carried with its reason ({@link GEMMA4_GENERATION_NOT_CARRIED}); any other
+    key fails loudly. The suppressed ids must be a non-empty list of unique non-negative integers
+    (the vocabulary bound is checked against the graph — {@link assert_gemma4_suppress_tokens}).
+    """
+    where = str(model_dir / GEMMA4_GENERATION_CONFIG_FILE)
+    raw = _read_json(model_dir / GEMMA4_GENERATION_CONFIG_FILE, "上流の生成既定")
+    if not isinstance(raw, dict):
+        raise DistError(f"{where}: 最上位オブジェクトでない")
+    known = {
+        *(source for source, _ in GEMMA4_SAMPLER_FIELDS),
+        GEMMA4_SUPPRESS_TOKENS_KEY,
+        *GEMMA4_GENERATION_NOT_CARRIED,
+    }
+    unknown = sorted(set(raw) - known)
+    if unknown:
+        raise DistError(
+            f"{where}: generation defaults {unknown} are neither carried nor listed as"
+            " intentionally not carried (gemma4.distribution.GEMMA4_GENERATION_NOT_CARRIED)"
+        )
+    suppress = raw.get(GEMMA4_SUPPRESS_TOKENS_KEY)
+    return Gemma4GenerationDefaults(
+        sampler=_sampler(raw, where),
+        suppress_tokens=None if suppress is None else _suppress_tokens(suppress, where),
+    )
+
+
+def _suppress_tokens(value: Any, where: str) -> tuple[int, ...]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(one, int) and not isinstance(one, bool) for one in value)
+    ):
+        raise DistError(
+            f"{where}: {GEMMA4_SUPPRESS_TOKENS_KEY} is not a non-empty list of integers ({value!r})"
+        )
+    if len(set(value)) != len(value):
+        raise DistError(f"{where}: {GEMMA4_SUPPRESS_TOKENS_KEY} repeats an id ({value!r})")
+    if min(value) < 0:
+        raise DistError(f"{where}: {GEMMA4_SUPPRESS_TOKENS_KEY} holds a negative id ({value!r})")
+    return tuple(sorted(value))
+
+
+def assert_gemma4_suppress_tokens(ids: tuple[int, ...], vocab_size: int, where: str) -> None:
+    """Every suppressed id names a token of the graph's vocabulary (`[0, vocab)`)."""
+    outside = [token for token in ids if token >= vocab_size]
+    if outside:
+        raise DistError(
+            f"{where}: {GEMMA4_SUPPRESS_TOKENS_KEY} {outside} outside the graph's vocabulary"
+            f" [0, {vocab_size})"
+        )
+
+
 def gemma4_sampler(model_dir: Path) -> dict[str, Any]:
+    """The recommended sampler alone, for a pipeline whose `pipelineConfig` has no
+    `suppressTokens` (the QAT family's).
+
+    MUST: a checkpoint that declares suppressed ids fails loudly here — such a caller would drop
+    them, and its generations would select ids upstream never selects.
+    """
+    defaults = gemma4_generation_defaults(model_dir)
+    if defaults.suppress_tokens is not None:
+        raise DistError(
+            f"{model_dir / GEMMA4_GENERATION_CONFIG_FILE}: declares {GEMMA4_SUPPRESS_TOKENS_KEY}"
+            f" {list(defaults.suppress_tokens)}, which this pipeline's configuration cannot carry"
+        )
+    return dict(defaults.sampler)
+
+
+def _sampler(raw: Mapping[str, Any], where: str) -> dict[str, Any]:
     """上流 `generation_config.json` の推奨サンプラを `pipelineConfig.sampler` へ写す。
 
     MUST: 値を写経しない（ADR 0083 決定 7 — 「既定値は配布形が宣言する」の出どころは上流の
     宣言そのもの）。欄名だけは TS 側 `SamplerSpec` の綴りへ翻訳する（`top_k` → `topK`）。
     値域は TS 側 `gemma.parsePipelineConfig` と同じ — 配ってから parse で落ちる形にしない。
     """
-    where = str(model_dir / GEMMA4_GENERATION_CONFIG_FILE)
-    raw = _read_json(model_dir / GEMMA4_GENERATION_CONFIG_FILE, "上流の生成既定")
-    if not isinstance(raw, dict):
-        raise DistError(f"{where}: 最上位オブジェクトでない")
     sampler: dict[str, Any] = {}
     for source, field in GEMMA4_SAMPLER_FIELDS:
         if source not in raw:
@@ -1049,8 +1243,19 @@ def gemma4_pipeline_config(
     chunk_length: int,
     max_chunk_length: int,
     capacity: int,
+    chat_dialect: str = GEMMA4_CHAT_DIALECT,
+    suppress_tokens: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     """`pipelineConfig`（TS 側スキーマの 6 欄）を組む。
+
+    `chat_dialect` is the optional seventh field `chatDialect` (`gemma4.chat.CHAT_DIALECTS` — a
+    closed set). MUST: the default dialect is **not written** — an absent field reads as `gemma4`,
+    so E2B / E4B (and the QAT family, which shares this function) keep their manifests byte for
+    byte; only another dialect (12B's `gemma4-unified`) adds the key.
+
+    `suppress_tokens` is the optional field `suppressTokens` (ids whose logits are −inf before any
+    host token selection — {@link gemma4_generation_defaults}), written only when upstream
+    declares them (12B), for the same byte-identity reason.
 
     実行時ノブの 3 つ（`chunk_length` / `max_chunk_length` / `capacity`）は**呼び手が渡す** —
     通常 Gemma は {@link GEMMA4_CHUNK_LENGTH} / {@link GEMMA4_MAX_CHUNK_LENGTH} /
@@ -1087,7 +1292,11 @@ def gemma4_pipeline_config(
             f"capacity {capacity} がモデルの位置上限 {max_position} を超えた"
             " — 容量いっぱいの会話が宣言の外の位置を回す"
         )
-    return {
+    if chat_dialect not in GENERATION_PROMPT_SUFFIX:
+        raise DistError(
+            f"chatDialect {chat_dialect!r} is not one of {sorted(GENERATION_PROMPT_SUFFIX)}"
+        )
+    config: dict[str, Any] = {
         "chunkLength": chunk_length,
         "maxChunkLength": max_chunk_length,
         "maxPosition": max_position,
@@ -1095,6 +1304,16 @@ def gemma4_pipeline_config(
         "rope": {layer_type: dict(spec) for layer_type, spec in rope.items()},
         "sampler": dict(sampler),
     }
+    if chat_dialect != GEMMA4_CHAT_DIALECT:
+        config["chatDialect"] = chat_dialect
+    if suppress_tokens is not None:
+        if not suppress_tokens or list(suppress_tokens) != sorted(set(suppress_tokens)):
+            raise DistError(
+                f"suppressTokens {list(suppress_tokens)} is not a non-empty ascending list of"
+                " unique ids"
+            )
+        config["suppressTokens"] = list(suppress_tokens)
+    return config
 
 
 def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> ModelPlan:
@@ -1120,8 +1339,18 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
     text_config = gemma4_text_config(sources.model)
     where = str(sources.model / GEMMA4_CONFIG_FILE)
     rope = gemma4_rope(text_config, where)
+    # MUST: the model table (what the card states) and the upstream config agree on whether the
+    # model has per-layer embeddings; the graph and the container assets are then held to the
+    # same answer below — a mix of the two forms fails before a byte is placed.
+    ple_dim = gemma4_ple_dim(text_config, where)
+    if (ple_dim > 0) != (model in GEMMA4_PLE_MODELS):
+        raise DistError(
+            f"{where}: {GEMMA4_PLE_DIM_KEY} is {ple_dim}, but model '{model}' is"
+            f" {'' if model in GEMMA4_PLE_MODELS else 'not '}listed as carrying per-layer"
+            " embeddings (gemma4.card.GEMMA4_PLE_MODELS)"
+        )
     container = placements[GEMMA4_ROLE]
-    index = gemma4_ple_index(container)
+    index = gemma4_ple_index(container) if ple_dim else None
     graph = ir_graph(container)
     vocab_size = gemma4_vocab_size(graph, container)
     hidden_size = gemma4_hidden_size(text_config, where)
@@ -1131,26 +1360,50 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
         assert_gemma4_drafter_graph(
             ir_graph(drafter_container), drafter_container, graph, container, rope, hidden_size
         )
-    if index["tokens"] != vocab_size:
-        raise DistError(
-            f"{container} の資産 '{PLE_INDEX_ASSET}': tokens {index['tokens']} が製品グラフの"
-            f"語彙数 {vocab_size} と違う — 別の語彙で焼かれた組み合わせ"
-        )
-    assert_gemma4_ple_assets(container, index)
+    if index is None:
+        assert_gemma4_no_ple_assets(container)
+    else:
+        if index["tokens"] != vocab_size:
+            raise DistError(
+                f"{container} の資産 '{PLE_INDEX_ASSET}': tokens {index['tokens']} が製品グラフの"
+                f"語彙数 {vocab_size} と違う — 別の語彙で焼かれた組み合わせ"
+            )
+        assert_gemma4_ple_assets(container, index)
     assert_gemma4_tokenizer(placements[GEMMA4_TOKENIZER_ROLE], vocab_size)
     # 他モデルの系列を借りるときだけ出所を突き合わせる — 自分の系列は同じチェックポイントの
     # `tokenizer.json` から compile した資産なので、共有の前提（同一バイト）がそもそも無い。
-    if GEMMA4_TOKENIZER_SERIES[model] != model:
+    # A model read from pinned hub snapshots (12B) is checked too: its asset must have been
+    # compiled from its tokenizer snapshot's `tokenizer.json`, so E2B's asset (a tokenizer 239
+    # merges apart — also what the QAT weights' repository ships) placed in its series fails here
+    # instead of tokenizing some inputs differently.
+    pins = HUB_PINS.get(model)
+    if GEMMA4_TOKENIZER_SERIES[model] != model or pins is not None:
         assert_gemma4_tokenizer_source(
-            placements[GEMMA4_TOKENIZER_ROLE], sources.model / GEMMA4_CHECKPOINT_TOKENIZER_FILE
+            placements[GEMMA4_TOKENIZER_ROLE],
+            sources.upstream_tokenizer / GEMMA4_CHECKPOINT_TOKENIZER_FILE,
+        )
+    if pins is not None:
+        # The container names the weights' commit it was exported from
+        # (`gemma4/export_unified.py` bakes it); one from another revision fails here.
+        assert_upstream_provenance(
+            container, license=GEMMA4_LICENSE, revision=pins.weights.revision
+        )
+    generation = gemma4_generation_defaults(sources.upstream_tokenizer)
+    if generation.suppress_tokens is not None:
+        assert_gemma4_suppress_tokens(
+            generation.suppress_tokens,
+            vocab_size,
+            str(sources.upstream_tokenizer / GEMMA4_GENERATION_CONFIG_FILE),
         )
     pipeline_config = gemma4_pipeline_config(
         gemma4_max_position(text_config, where),
         rope,
-        gemma4_sampler(sources.model),
+        generation.sampler,
         chunk_length=GEMMA4_CHUNK_LENGTH,
         max_chunk_length=GEMMA4_MAX_CHUNK_LENGTH,
         capacity=GEMMA4_CAPACITY,
+        chat_dialect=CHAT_DIALECTS[model],
+        suppress_tokens=generation.suppress_tokens,
     )
     weights = gemma4_weights(model)
     return ModelPlan(
@@ -1171,8 +1424,20 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
 
 
 def gemma4_dist_plan(series_dir: Path, model: str) -> ModelPlan:
-    """`--series` の親から gemma4 1 モデルの計画を組む（CLI のディスパッチ先）。"""
-    return gemma4_plan(gemma4_sources(series_dir, model), model)
+    """`--series` の親から gemma4 1 モデルの計画を組む（CLI のディスパッチ先）。
+
+    A pinned model's snapshots are checked against their pins first (`gemma4.sources` — cheap:
+    the cache names LFS blobs by their SHA-256), so the upstream files the plan reads are the
+    pinned ones.
+    """
+    sources = gemma4_sources(series_dir, model)
+    pins = HUB_PINS.get(model)
+    if pins is not None:
+        try:
+            assert_model_pins(sources.model, sources.upstream_tokenizer, pins)
+        except ValueError as error:
+            raise DistError(str(error)) from error
+    return gemma4_plan(sources, model)
 
 
 #: 改変告知（Apache 2.0 §4(b)）。**このリポが上流の重みへ加えた変更**を列挙する。
@@ -1188,19 +1453,25 @@ def gemma4_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #: 2 件目が入った瞬間に赤くなる）。
 GEMMA4_NOTICE_MARKDOWN = """# NOTICE
 
-This repository redistributes modified forms of `google/gemma-4-E2B-it` and
-`google/gemma-4-E4B-it`, which are licensed under the Apache License, Version 2.0 (see
+This repository redistributes modified forms of `google/gemma-4-E2B-it`,
+`google/gemma-4-E4B-it` and `google/gemma-4-12B-it-qat-q4_0-unquantized` (Google's
+quantization-aware-trained checkpoint of `google/gemma-4-12B-it`, whose tokenizer is
+redistributed with it), which are licensed under the Apache License, Version 2.0 (see
 `LICENSE.md`). The models actually included are identified in `README.md` and `karume.json`.
 The following changes were made:
 
-- The **text decoder only** was extracted; the vision and audio towers were never read.
+- The **text decoder only** was extracted; the vision and audio towers (for the 12B
+  checkpoint, its encoder-free vision and audio embedders) were never read.
 - The graph was re-expressed in the Karume container format (a `.krm` part sequence whose
   first part carries the graph and model descriptors) in a states form suited to chunked prefill
   and decode.
 - **Linear weights were quantized** to packed int4 (group 32) and the embedding tables to int8.
-  The values are therefore not bit-identical to the source checkpoint.
-- The **per-layer embedding tables were moved out of the graph** into container assets that the
-  host gathers, and the exit was narrowed to the selected rows' logits and final hidden states.
+  For the 12B checkpoint the linear weights keep its own 4-bit grid (its codes and one step per
+  group, refitted from the stored values) instead of being rounded again. The values are
+  therefore not bit-identical to the source checkpoint.
+- The exit was narrowed to the selected rows' logits and final hidden states. For
+  `gemma-4-E2B-it` and `gemma-4-E4B-it`, the **per-layer embedding tables were moved out of the
+  graph** into container assets that the host gathers (the 12B checkpoint has none).
 - **Rotary position embeddings were moved out of the graph**: the cosine and sine rows are built
   by the host from the declared parameters and passed in as ordinary graph inputs.
 
