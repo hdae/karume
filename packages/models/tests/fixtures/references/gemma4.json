@@ -2,6 +2,9 @@
   "schema": 1,
   "kind": "sha256",
   "cases": {
+    "12b/i4": {
+      "node-nvidia-geforce-rtx-3080-ti": "df41badc1acb6a9d815bc280958f2dcd2b65a9e28717843112e53099e12c12a3"
+    },
     "e2b/i4": {
       "deno-intel-graphics-bmg-g21": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91",
       "deno-nvidia-geforce-rtx-3080-ti": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91",
