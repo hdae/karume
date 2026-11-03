@@ -231,6 +231,7 @@ def product_container(
     assets: Mapping[str, AssetInput] | None = None,
     ple: bool = True,
     provenance: Provenance = FIXTURE_PROVENANCE,
+    embedding_storage: str = "i8",
 ) -> list[bytes]:
     """製品グラフ 1 本ぶんの part バイト列（読む順 — 先頭が part 0）。
 
@@ -243,7 +244,9 @@ def product_container(
     2 本だけにする（記号の割れ方の門 — 自由記号がちょうど 1 本であることを見る側）。
     `ple=False` is the graph of a model without per-layer embeddings (12B): no
     `per_layer_inputs` input, and no PLE assets unless `assets` names some. `provenance` is the
-    container's (a pinned model's names its upstream revision).
+    container's (a pinned model's names its upstream revision). `embedding_storage` is the
+    storage of the embedding stand-in: `"i8"` (E2B / E4B) or `"i4"` (12B — the container then
+    holds no int8 tensor).
     `swap_outputs` は出口 2 本の順序だけを入れ替える（行軸まで同型なので、幅の突合以外は
     素通りする組 — 順序の門）。
     """
@@ -269,7 +272,7 @@ def product_container(
     bias = "bias"
     declare(activation, _ramp(1, _IN))
     declare(bias, _ramp(_OUT))
-    for name, storage in (("linear_i4", "i4"), ("embed_i8", "i8")):
+    for name, storage in (("linear_i4", "i4"), (f"embed_{embedding_storage}", embedding_storage)):
         weight = _ramp(_OUT, _IN)
         if storage == "i4":
             scale = group_scale(weight, GROUP_SIZE)

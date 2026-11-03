@@ -2638,9 +2638,9 @@ Model `12b` of the gemma4 distribution is the text decoder of Gemma 4 12B; the v
 shipped, so it takes no images or audio. Its weights are Google's q4_0 quantization-aware-trained checkpoint with that
 checkpoint's own 4-bit grid stored, for the linear weights and the tied embedding alike (ADR [0128 addendum 2026-11-03](decisions/0128-default-preset-original-weights.md#addendum-2026-11-03--gemma4-12b-one-i4-preset-from-the-qat-grid)),
 so its outputs follow the QAT fine-tune, not `gemma-4-12B-it`'s BF16 weights exactly. There is one preset, `i4`
-(about 7.3 GiB); there is no original-weights preset (the BF16 upstream is 22 GiB) and no parallel-GEMV / fused preset
-until the GEMV rows of the 12B shapes are measured. On the RTX 3080 Ti (12 GB) the e2e greedy run peaked at 8.5 GiB
-(8,753 MiB, nvidia-smi) at the default capacity of 4096 tokens; a 12 GB device is the smallest tested.
+(about 6.9 GiB); there is no original-weights preset (the BF16 upstream is 22 GiB) and no parallel-GEMV / fused preset
+until the GEMV rows of the 12B shapes are measured. On the RTX 3080 Ti (12 GB) the e2e greedy run peaked at 8.6 GiB
+(8,777 MiB, nvidia-smi) at the default capacity of 4096 tokens; a 12 GB device is the smallest tested.
 
 12B is an instruction model. Given raw text without the chat template it can degenerate: for "The capital of France
 is" it repeats digits — upstream's own F32 `generate()` on the same weights gives the same 16 tokens. Use `chat` (the

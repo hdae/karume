@@ -20,9 +20,10 @@
 - `tokenizer` — compile 済みトークナイザ資産（`gemma4/tokenizer.py`・ADR 0084 決定 1）。上流が
   同一のモデルどうしは 1 系列を共有する（{@link GEMMA4_TOKENIZER_SERIES}）
 
-12B ships like E4B (one graph + the tokenizer, no drafter yet), with four differences: its
+12B ships like E4B (one graph + the tokenizer, no drafter yet), with five differences: its
 `model` container has no PLE assets and its graph no `per_layer_inputs` (the model has no
-per-layer embeddings — {@link gemma4_ple_dim}); it carries the `i4` seat alone
+per-layer embeddings — {@link gemma4_ple_dim}); its embedding is packed int4 like its linears, so
+the container holds no int8 tensor ({@link gemma4_storage_tables}); it carries the `i4` seat alone
 ({@link GEMMA4_SPEED_NOTE}); it declares its chat dialect (`pipelineConfig.chatDialect`
 `gemma4-unified`); and it declares the ids generation never selects
 (`pipelineConfig.suppressTokens`, from upstream's `suppress_tokens` —
@@ -91,6 +92,7 @@ from karume.verify import ContainerError
 from .card import (
     GEMMA4_DRAFTER_ROLE,
     GEMMA4_DRAFTER_UPSTREAM,
+    GEMMA4_EMBEDDING_STORAGE,
     GEMMA4_LICENSE,
     GEMMA4_PLE_MODELS,
     GEMMA4_UPSTREAM,
@@ -231,8 +233,10 @@ GEMMA4_OUTPUT_PATHS: Mapping[str, str] = {
 #: それぞれ素通りする — どちらも shape も manifest も正しいまま、品質と速度だけが変わる。
 #: drafter は**単一格納**（linear まで i8 — `gemma4/export_drafter.py` の実測）なので、要求は
 #: i8 の 1 枚だけで、2 枚目の表に行を持たない。
+#: The embedding's storage is per model (`gemma4.card.GEMMA4_EMBEDDING_STORAGE`): E2B / E4B
+#: require the int8 one on top of the int4 linears; 12B's embedding is int4 too, so there is no
+#: second requirement and int8 joins the forbidden side ({@link gemma4_storage_tables}).
 GEMMA4_STORAGE_REQUIREMENTS: Mapping[str, str] = {GEMMA4_ROLE: "i4", GEMMA4_DRAFTER_ROLE: "i8"}
-GEMMA4_STORAGE_ALSO_REQUIRED: Mapping[str, str] = {GEMMA4_ROLE: "i8"}
 
 #: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。
 #: 台本が焼く格納形は i8 + i4 + f32 の 1 系列だけなので、f16 の混入は「別 family の系列 root を
@@ -246,6 +250,42 @@ GEMMA4_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     GEMMA4_ROLE: ("f16", "bf16"),
     GEMMA4_DRAFTER_ROLE: ("f16", "bf16", "i4"),
 }
+
+
+@dataclass(frozen=True)
+class Gemma4StorageTables:
+    """One model's storage gates: what each role must hold (two tables, applied in turn — the
+    product of E2B / E4B is mixed) and what it must not."""
+
+    required: Mapping[str, str]
+    also_required: Mapping[str, str]
+    forbidden: Mapping[str, tuple[str, ...]]
+
+
+def gemma4_storage_tables(model: str) -> Gemma4StorageTables:
+    """The storage gates of `model`, from its embedding storage (`GEMMA4_EMBEDDING_STORAGE`).
+
+    An int8 embedding (E2B / E4B) is required next to the int4 linears. An int4 one (12B — the
+    QAT grid imported as is) leaves int4 the only requirement and forbids int8: a 12B series
+    whose embedding was rounded to int8 again (the first export) has the right shapes and
+    manifest and only its numbers differ, so the storage gate is what tells it apart.
+    """
+    embedding = GEMMA4_EMBEDDING_STORAGE[model]
+    if embedding == GEMMA4_STORAGE_REQUIREMENTS[GEMMA4_ROLE]:
+        return Gemma4StorageTables(
+            required=GEMMA4_STORAGE_REQUIREMENTS,
+            also_required={},
+            forbidden={
+                **GEMMA4_STORAGE_FORBIDDEN,
+                GEMMA4_ROLE: (*GEMMA4_STORAGE_FORBIDDEN[GEMMA4_ROLE], "i8"),
+            },
+        )
+    return Gemma4StorageTables(
+        required=GEMMA4_STORAGE_REQUIREMENTS,
+        also_required={GEMMA4_ROLE: embedding},
+        forbidden=GEMMA4_STORAGE_FORBIDDEN,
+    )
+
 
 #: 格納 dtype のラベル（quant 席の綴りでもある）。役割ごとに**基底格納が 1 つずつ**なので
 #: {@link complete_quant_weights} の自動補完が quant 表の weights を 2 席とも埋める
@@ -321,6 +361,15 @@ GEMMA4_QUANTS: Mapping[str, Any] = {
     },
 }
 
+#: The `i4` seat's label and description for a model whose embedding is packed int4 too
+#: (`GEMMA4_EMBEDDING_STORAGE` — 12B, whose linears and embedding keep the QAT checkpoint's grid);
+#: {@link GEMMA4_QUANTS} names E2B / E4B's int8 embedding.
+GEMMA4_INT4_EMBEDDING_QUANT: Mapping[str, str] = {
+    "label": "Packed int4 linear and embeddings",
+    "description": "Packed int4 (group 32) linear weights and embedding table, both on the"
+    " checkpoint's own 4-bit grid; GEMV and attention use the reference summation order.",
+}
+
 #: 並列・融合の席（`i4-gemvpar` / `i4-fast`）の説明に足す、速度の実測の有無の 1 文。
 #: MUST: キー集合は帰属表（`GEMMA4_UPSTREAM`）と一致する（tests が固定する）— 計っていない
 #: モデルの席に「速い」と書かない（E4B の束は E4B のベンチ後に決める）。
@@ -346,6 +395,8 @@ def gemma4_quants(model: str) -> dict[str, Any]:
     note = GEMMA4_SPEED_NOTE[model]
     seats = GEMMA4_QUANTS if note is not None else {GEMMA4_DTYPE: GEMMA4_QUANTS[GEMMA4_DTYPE]}
     quants = {name: dict(quant) for name, quant in seats.items()}
+    if GEMMA4_EMBEDDING_STORAGE[model] == GEMMA4_DTYPE:
+        quants[GEMMA4_DTYPE].update(GEMMA4_INT4_EMBEDDING_QUANT)
     if gemma4_has_drafter(model):
         quants[GEMMA4_DTYPE]["description"] += GEMMA4_DRAFTER_QUANT_NOTE
     if note is not None:
@@ -1332,10 +1383,11 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
             f" — drafter を配るモデルは {sorted(GEMMA4_DRAFTER_UPSTREAM)} だけ"
         )
     placements = gemma4_placements(sources)
+    storage = gemma4_storage_tables(model)
     for role, source in placements.items():
-        assert_storage(role, source, GEMMA4_STORAGE_REQUIREMENTS)
-        assert_storage(role, source, GEMMA4_STORAGE_ALSO_REQUIRED)
-        assert_storage_absent(role, source, GEMMA4_STORAGE_FORBIDDEN)
+        assert_storage(role, source, storage.required)
+        assert_storage(role, source, storage.also_required)
+        assert_storage_absent(role, source, storage.forbidden)
     text_config = gemma4_text_config(sources.model)
     where = str(sources.model / GEMMA4_CONFIG_FILE)
     rope = gemma4_rope(text_config, where)
@@ -1465,8 +1517,9 @@ The following changes were made:
 - The graph was re-expressed in the Karume container format (a `.krm` part sequence whose
   first part carries the graph and model descriptors) in a states form suited to chunked prefill
   and decode.
-- **Linear weights were quantized** to packed int4 (group 32) and the embedding tables to int8.
-  For the 12B checkpoint the linear weights keep its own 4-bit grid (its codes and one step per
+- **Linear weights were quantized** to packed int4 (group 32), and for `gemma-4-E2B-it` and
+  `gemma-4-E4B-it` the embedding tables to int8. For the 12B checkpoint the linear weights and
+  the embedding table keep its own 4-bit grid (packed int4, group 32: its codes and one step per
   group, refitted from the stored values) instead of being rounded again. The values are
   therefore not bit-identical to the source checkpoint.
 - The exit was narrowed to the selected rows' logits and final hidden states. For

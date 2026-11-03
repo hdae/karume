@@ -74,6 +74,14 @@ GEMMA4_WEIGHTS_UPSTREAM: Mapping[str, str] = {"12b": "google/gemma-4-12B-it-qat-
 #: checks it against the upstream config of every model it assembles, so the two cannot drift.
 GEMMA4_PLE_MODELS: frozenset[str] = frozenset({"e2b", "e4b"})
 
+#: Model → the storage of its embedding table (the tied output head). E2B / E4B round it to int8
+#: per row (a recipe choice); 12B's lies on the QAT checkpoint's 4-bit grid and is imported as is,
+#: packed int4 group 32 like its linears, so its container holds no int8 tensor at all. Another
+#: fact the manifest does not carry; `gemma4.distribution.gemma4_plan` holds every container to
+#: it (the storage gates), so the card cannot state another storage. Key set =
+#: {@link GEMMA4_UPSTREAM} (tests).
+GEMMA4_EMBEDDING_STORAGE: Mapping[str, str] = {"e2b": "i8", "e4b": "i8", "12b": "i4"}
+
 #: Model → what the upstream checkpoint carries besides the text decoder (never read here, never
 #: shipped). E2B / E4B hold vision and audio encoder towers; 12B is encoder-free and projects image
 #: patches and audio frames into the embedding space through lightweight linear layers (upstream
@@ -342,11 +350,30 @@ def _gemma4_changes(manifest: Mapping[str, Any]) -> list[str]:
     return [
         "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
         "  decoder was extracted and re-expressed in the Karume container format; linear weights",
-        f"  were quantized to packed int4 (group 32){grid} and the embedding tables to int8;{ple}"
-        " the",
+        f"  were quantized to packed int4 (group 32){grid} and {_gemma4_embedding_clause(names)};"
+        f"{ple} the",
         "  exit was narrowed to the selected rows' logits and hidden states; rotary cos/sin arrive",
         "  as host-generated inputs.",
     ]
+
+
+def _gemma4_embedding_clause(names: list[str]) -> str:
+    """What happened to the embedding tables, per storage ({@link GEMMA4_EMBEDDING_STORAGE}):
+    "the embedding tables to int8" when every model rounds it to int8, else one clause per
+    storage — 12B's embedding is not rounded to int8 but keeps its grid as packed int4."""
+    int8 = [name for name in names if GEMMA4_EMBEDDING_STORAGE[name] == "i8"]
+    int4 = [name for name in names if GEMMA4_EMBEDDING_STORAGE[name] == "i4"]
+    clauses: list[str] = []
+    if int8:
+        clauses.append(
+            f"the embedding tables{f' of {_spell_models(int8)}' if int4 else ''} to int8"
+        )
+    if int4:
+        clauses.append(
+            f"the embedding table{'s' if len(int4) > 1 else ''} of {_spell_models(int4)}, on"
+            " the same 4-bit grid, to packed int4 (group 32)"
+        )
+    return " and ".join(clauses)
 
 
 def _gemma4_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:

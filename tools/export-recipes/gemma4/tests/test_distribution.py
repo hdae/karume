@@ -738,6 +738,13 @@ class TestGemma4Storage:
         with pytest.raises(DistError, match=message):
             gemma4_plan(sources)
 
+    def test_it_refuses_an_e2b_container_whose_embedding_is_not_int8(self, tmp_path: Path) -> None:
+        """E2B / E4B keep the int8 embedding: an all-int4 container (12B's storage) is refused."""
+        sources = _build(tmp_path, container=fixture.product_container(embedding_storage="i4"))
+
+        with pytest.raises(DistError, match="has no i8"):
+            gemma4_plan(sources)
+
     def test_it_refuses_a_container_carrying_half_precision(self, tmp_path: Path) -> None:
         """f16 の混入は「別 family の系列 root を指した」印にしかならない。"""
         sources = _build(tmp_path)
@@ -957,6 +964,15 @@ class TestGemma4LegalText:
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
         assert "gemma-4-E2B-it" in notice
         assert "int4" in notice
+
+    def test_the_notice_states_the_int8_embedding_only_for_e2b_and_e4b(self) -> None:
+        """12B's embedding keeps its 4-bit grid; a notice saying every embedding table went to
+        int8 misstates the change made to it (Apache 2.0 §4(b))."""
+        notice = " ".join(gemma4_distribution.GEMMA4_NOTICE_MARKDOWN.split())
+
+        assert "and the embedding tables to int8." not in notice
+        assert "for `gemma-4-E2B-it` and `gemma-4-E4B-it` the embedding tables to int8" in notice
+        assert "the linear weights and the embedding table keep its own 4-bit grid" in notice
 
     def test_the_notice_names_every_model_the_manifest_carries(self, gemma4_assembled) -> None:
         """§4(b) の告知は「この配布形が実際に再配布した上流」を 1 つ残らず名指しすること。
@@ -1201,9 +1217,15 @@ _TWELVE_B_PROVENANCE = Provenance(
 
 
 def _twelve_b_container(**overrides: Any) -> list[bytes]:
-    """A PLE-free product container (no `per_layer_inputs`, no PLE assets) naming the pin."""
+    """A PLE-free product container (no `per_layer_inputs`, no PLE assets) naming the pin, its
+    embedding packed int4 like its linears (no int8 tensor)."""
     return fixture.product_container(
-        **{"ple": False, "provenance": _TWELVE_B_PROVENANCE, **overrides}
+        **{
+            "ple": False,
+            "provenance": _TWELVE_B_PROVENANCE,
+            "embedding_storage": "i4",
+            **overrides,
+        }
     )
 
 
@@ -1275,6 +1297,7 @@ class TestGemma4TwelveB:
 
     def test_the_tables_cover_every_model(self) -> None:
         assert set(gemma4_card.GEMMA4_FRONT_ENDS) == set(GEMMA4_UPSTREAM)
+        assert set(gemma4_card.GEMMA4_EMBEDDING_STORAGE) == set(GEMMA4_UPSTREAM)
         assert set(chat.CHAT_DIALECTS) == set(GEMMA4_UPSTREAM)
         assert set(chat.CHAT_DIALECTS.values()) <= set(chat.GENERATION_PROMPT_SUFFIX)
         assert {"e2b", "e4b"} == gemma4_card.GEMMA4_PLE_MODELS
@@ -1345,6 +1368,40 @@ class TestGemma4TwelveB:
         first_part = sorted((out_dir / "12b" / GEMMA4_ROLE).iterdir())[0]
         roles = {role for role, _ in read_asset_declarations(first_part).values()}
         assert not roles & {PLE_INDEX_ROLE, *PLE_ROLES.values()}
+
+    def test_only_the_qat_weights_carry_an_int4_embedding(self) -> None:
+        """The card says an int4 embedding is "on the same 4-bit grid" as the QAT linears; a
+        model with an int4 embedding outside the QAT table would make that clause false."""
+        int4 = {
+            name
+            for name, storage in gemma4_card.GEMMA4_EMBEDDING_STORAGE.items()
+            if storage == "i4"
+        }
+
+        assert int4 == {"12b"}
+        assert int4 <= set(gemma4_card.GEMMA4_WEIGHTS_UPSTREAM)
+
+    def test_it_refuses_a_12b_container_whose_embedding_is_int8(self, tmp_path) -> None:
+        """The first 12B export rounded the embedding to int8 again; shapes and manifest are the
+        same, only the numbers differ, so the storage gate is what refuses that series."""
+        sources = _build_twelve_b(tmp_path, container=_twelve_b_container(embedding_storage="i8"))
+
+        with pytest.raises(DistError, match=r"has i8 \(actual"):
+            gemma4_plan(sources, "12b")
+
+    def test_the_i4_seat_names_the_int4_embedding(self, tmp_path) -> None:
+        _, manifest = _assemble_models(
+            tmp_path,
+            [gemma4_plan(_build(tmp_path), "e2b"), gemma4_plan(_build_twelve_b(tmp_path), "12b")],
+            "e2b",
+        )
+        twelve_b = manifest["models"]["12b"]["quants"]["i4"]
+        e2b = manifest["models"]["e2b"]["quants"]["i4"]
+
+        assert twelve_b["label"] == "Packed int4 linear and embeddings"
+        assert "int8" not in twelve_b["description"]
+        assert e2b["label"] == "Packed int4 linear, int8 embeddings"
+        assert "int8 embedding tables" in e2b["description"]
 
     def test_adding_12b_leaves_the_e2b_entry_byte_identical(self, tmp_path) -> None:
         _, alone = _assemble_models(
@@ -1451,6 +1508,20 @@ class TestGemma4TwelveB:
         assert "`12b` has no per-layer embeddings." in card
         assert "encoder-free vision and audio embedders for `12b`" in card
         assert "the per-layer embeddings of `e2b` were moved out of the graph" in card
+        assert (
+            "and the embedding tables of `e2b` to int8 and the embedding table of `12b`, on the"
+            " same 4-bit grid, to packed int4 (group 32);"
+        ) in card.replace("\n  ", " ")
+
+    def test_a_12b_only_card_states_no_int8_embedding(self, tmp_path) -> None:
+        out_dir, _ = _assemble_models(
+            tmp_path, [gemma4_plan(_build_twelve_b(tmp_path), "12b")], "12b"
+        )
+        card = (out_dir / "README.md").read_text(encoding="utf-8").replace("\n  ", " ")
+
+        assert "the embedding table of `12b`, on the same 4-bit grid, to packed int4" in card
+        assert "int8 embedding" not in card
+        assert "embedding tables to int8" not in card
 
     def test_the_card_states_the_position_limit_per_model(self, tmp_path) -> None:
         """12B declares twice E2B / E4B's positions — the overview must not state the default

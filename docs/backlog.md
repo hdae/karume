@@ -27,8 +27,10 @@ and Deno). The next release is the Gemma 4 expansion (*later*); what remains of 
   the tests are E2B-bound; first decide E4B's default preset, still the provisional `i4`), (2) Gemma 4 12B
   (model type `gemma4_unified`: no PLE, no KV sharing, 48 layers, sliding window 1024) — **implemented and in the local
   mirror (2026-11-03), not published**: weights from the q4_0 QAT checkpoint with its grid imported (ADR 0128 addendum
-  2026-11-03 — round-to-nearest i4 on `gemma-4-12B-it` ruins it), one preset `i4` (7.3 GiB; e2e greedy goldens equal on
-  the RTX 3080 Ti, peak VRAM 8.5 GiB). Left: the human quality review, the GEMV rows of the 12B shapes before
+  2026-11-03 — round-to-nearest i4 on `gemma-4-12B-it` ruins it), one preset `i4` (6.9 GiB; e2e greedy goldens equal on
+  the RTX 3080 Ti, peak VRAM 8.6 GiB). Left: the test-asset dataset's 12B goldens are still the first export's
+  (int8 embedding) — re-upload the int4-embedding series' goldens and move the test-asset pin (maintainer), the human
+  quality review, the GEMV rows of the 12B shapes before
   `i4-gemvpar` / `i4-fast`, publication and the `gemma.SOURCES` pin (maintainer), (3) its drafter (size S–M) — it
   must be the QAT one (`google/gemma-4-12B-it-qat-q4_0-unquantized-assistant`: Google's card requires a QAT drafter
   for a QAT target).

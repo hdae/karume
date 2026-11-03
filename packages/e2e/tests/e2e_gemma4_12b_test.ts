@@ -30,7 +30,7 @@
 // ## Assets
 //
 // The model is the distribution mirror's `model` component of model `12b` (`models/karume-gemma4/`,
-// quant i4 — about 7.3 GiB of weights), opened through the manifest (ADR 0139 decision 1). Without
+// quant i4 — about 6.9 GiB of weights), opened through the manifest (ADR 0139 decision 1). Without
 // the mirror, or with a mirror that has no model `12b`, every case SKIPs explicitly. The goldens are
 // the product series' outputs in the test-asset root (`goldens/gemma4-12b-product/` —
 // `greedy.<case>.safetensors` with `prompt` / `expected` i32 and `margin` f32, and `reference.json`) under ADR 0139's
@@ -39,7 +39,7 @@
 //
 // ## GPU memory
 //
-// ⑤ holds one 12B pipeline at a time: about 7.3 GiB of weights + 645 MiB of sliding slots + 128 MiB
+// ⑤ holds one 12B pipeline at a time: about 6.9 GiB of weights + 645 MiB of sliding slots + 128 MiB
 // of full slots at the default capacity 4096 + transients — about 9 GiB, which a 12 GB GPU holds.
 // No other case of this file touches the GPU. The sha256 regression row of the i4 seat (`12b/i4`) is
 // `e2e_gemma4_reference_test.ts`'s, which enumerates the mirror's seats (ADR 0106).
