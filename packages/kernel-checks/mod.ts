@@ -24,6 +24,14 @@ export {
   type IntegerGemvBenchRow,
 } from "./src/gemv-integer.ts";
 export {
+  benchPlanesGemv,
+  checkPlanesGemv,
+  GEMV_PLANES_CASES,
+  GEMV_PLANES_F64_BAND,
+  type PlanesGemvBenchRow,
+  type PlanesGemvCheckOptions,
+} from "./src/gemv-planes.ts";
+export {
   checkStateAttentionMutantMatrix,
   checkStateAttentionMutants,
   checkStateAttentionRewrites,

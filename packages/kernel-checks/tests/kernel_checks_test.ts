@@ -2,6 +2,8 @@ import { assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import {
+  GEMV_INTEGER_CASES,
+  GEMV_PLANES_CASES,
   GEMV_SUBGROUP_CASES,
   RMS_SUBGROUP_CASES,
   STATE_ATTENTION_CASES,
@@ -106,5 +108,7 @@ describe("the expected case counts each check exports", () => {
       "state-stats-pv-unroll": 490,
     });
     assertEquals(STATE_ATTENTION_MUTANTS, 5);
+    assertEquals(GEMV_INTEGER_CASES, { "gemv-integer": 692 });
+    assertEquals(GEMV_PLANES_CASES, { "gemv-planes": 240 });
   });
 });
