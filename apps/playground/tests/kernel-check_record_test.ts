@@ -75,6 +75,7 @@ describe("kernelCheckRecord", () => {
       ["rms-subgroup32", "not-run"],
       ["state-attention-rewrites", "fail"],
       ["gemv-integer", "not-run"],
+      ["gemv-planes", "not-run"],
     ]);
     expect(record.checks[1]).toEqual({ id: "rms-subgroup32", verdict: "not-run" });
     expect(record.checks[0]).toEqual({

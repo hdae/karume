@@ -448,6 +448,17 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
                       />
                       <Label htmlFor={`bench-arm-${draft.id}-integer`}>Integer GEMV</Label>
                     </div>
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id={`bench-arm-${draft.id}-planes`}
+                        checked={draft.linearGemvPlanes === true}
+                        onCheckedChange={(checked) =>
+                          updateDraft(draft.id, { linearGemvPlanes: checked })
+                        }
+                        disabled={running}
+                      />
+                      <Label htmlFor={`bench-arm-${draft.id}-planes`}>Planes GEMV</Label>
+                    </div>
                     {resolution?.ok === false ? (
                       <p className="text-xs text-destructive">{resolution.error}</p>
                     ) : null}
@@ -480,7 +491,11 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
                 <code>linearGemvReduce: &quot;parallel&quot;</code> where the preset does not
                 declare them), so the decode linears of QAT E2B at the measured shapes (i2 gate / up
                 and down, i4 o and down) run on the integer GEMV; the label shows
-                &quot;(integer)&quot;. Other models have no linear at those shapes.
+                &quot;(integer)&quot;. Other models have no linear at those shapes. Planes GEMV: the
+                arm passes the Session option <code>linearGemvPlanes: true</code> (it needs no other
+                option), so the QAT E2B lm_head (i2 262144 × 1536) runs on the byte-plane GEMV
+                instead of the sequential GEMV; the label shows &quot;(planes)&quot;. Other models
+                have no i2 linear at that shape.
               </p>
             </CardContent>
           </Card>

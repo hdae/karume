@@ -1099,9 +1099,18 @@ so the arm passes `integerGemv` alone). Explicit options win over the preset's d
 Gemma 4 has no linear at those shapes, so there the switch changes only what the packed activations
 change.
 
+**Planes GEMV** (per arm; the arm's label shows "(planes)") passes the Session option
+`linearGemvPlanes: true` to `fromPretrained` as an explicit option, so the i2 linears of a QAT model
+at the byte-plane GEMV's measured shapes (QAT E2B: the lm_head, 262144 × 1536) run on the byte-plane
+GEMV (the runtime's `src/kernels/linear-gemv-planes.ts`) instead of the sequential GEMV. The option
+needs no other option, so the arm passes it alone, next to what the Integer GEMV switch passes when
+both are on. Its sums differ from the sequential GEMV's by the addition order only (contract class R
+of ADR 0110), so a greedy arm may decode other tokens than one without it. Regular Gemma 4 has no i2
+linear at that shape, so there the switch changes nothing.
+
 | Control | What it does |
 | --- | --- |
-| Arms | One row per arm: Model (every model of both manifests; a QAT model `gemma4Qat.Pipeline` does not accept is disabled), Preset (the model's `defaultQuant` preselected), GPU tap, Split dispatches, Integer GEMV. Starts with each distribution's default model at its default preset. Arm 1 is the one the summary compares the others with. |
+| Arms | One row per arm: Model (every model of both manifests; a QAT model `gemma4Qat.Pipeline` does not accept is disabled), Preset (the model's `defaultQuant` preselected), GPU tap, Split dispatches, Integer GEMV, Planes GEMV. Starts with each distribution's default model at its default preset. Arm 1 is the one the summary compares the others with. |
 | Prompts | Two fixed prompts, run in this order in every visit. The story request renders to 21 tokens (17 distinct ids); the GPU explainer to 60 tokens (48 distinct). A prompt with 32 or more distinct ids makes a PLE block whole-resident on the host: the condition under which the PLE row cache once stopped admitting rows (perf-ledger H-41). Every chat records the distinct count it measured, and the run table flags a prompt that falls on the wrong side. |
 | Chats | Chats per prompt per visit (default 3). Chat 0 is the first after the build: recorded, and left out of the summary. |
 | New tokens | `maxNewTokens` of every chat (default 128). |
@@ -1137,7 +1146,8 @@ pipeline, model, preset, tap, the sampler passed), `visits` (round, arm, load se
 chat, cold ones included, with its stop, prompt ids and measurement) and `summary`. Every arm records
 `split`; a split arm adds `tap.perKey` (key, dispatches and GPU ms per decode token) on each of its
 chats and `split` (the medians by family and by key) on its summary entries. Every arm also records
-`integerGemv` and `sessionOptions` (the Session options it passed explicitly; `{}` when none).
+`integerGemv` and `sessionOptions` (the Session options it passed explicitly, `linearGemvPlanes`
+among them; `{}` when none).
 **Copy record** copies the same JSON.
 
 Caveats:
@@ -1255,9 +1265,10 @@ tests, not a copy.
 | RMS subgroup32 | `gpu_rms_norm_subgroup_test.ts` | `rmsNormReduce: "subgroup32"` through real Sessions: within the `rms_norm` tolerance of the CPU reference and row 0 identical at every M (48 cases); fused rms_norm + add identical to unfused, one fusion per run (12); 19 rows on 2 workgroups within tolerance (1) (ADR 0100). | the same |
 | States attention rewrites (K-55 / K-91) | `gpu_state_attention_fold_test.ts` | The folded ①′ writes the same S words as ①′ (252 cases), the unrolled ③′ and fused stats + PV the same O words as their v1 WGSL (546 / 490); the reference outputs met the word classes the contract covers and no output word was left unwritten; every class the product folds is in the grid; 5 order-only mutants each change at least one word (else a zero-mismatch result would prove nothing). The page also runs each mutant on every case of its shape (the mutant matrix, not in the node test). | nothing optional |
 | Integer GEMV | `gpu_linear_gemv_integer_test.ts` | The integer GEMV (`integerGemv`) writes every output word of its CPU reference (692 cases: i2 / i4 / i8, the 15 (lanes, rows) variants on small K and on the i2 / i8 widths in use, five of them on the i4 widths in use, plus a saturated fixture at each storage's largest K — every activation code −128 against the largest stored code, the i8 one offset at one element — on 2 variants, each at M = 1 / 8, with and without the SRQ epilogue); rows past M stay unwritten. | nothing optional |
+| Byte-plane GEMV | `gpu_linear_gemv_planes_test.ts` | The byte-plane GEMV (`linearGemvPlanes`) meets contract class R (ADR 0110; 240 cases: the 15 (lanes, rows) variants at K = 16 / 80 / 1536 and at 37 and 1029 columns — multiples of no workgroup's columns — with random codes, plus a saturated fixture at K = 1536 — every code −2 against activations of one sign — each at M = 1 / 8): every output within the GEMM band of an FP64 reference, and at M = 1 and K = 1536 within twice that band of the sequential GEMV; a second dispatch writes the same words; nothing is written past the M × n outputs; a NaN in one activation reaches every output of its row. The node test also shows the band is not vacuous (two WGSL mutants turn it red); the page does not run them. | nothing optional |
 
 The page probes the adapter's features, then acquires its GPU with `subgroups: "available"`. **Run**
-next to a check runs that check; **Run all** runs the four in order; Cancel stops before the next
+next to a check runs that check; **Run all** runs the five in order; Cancel stops before the next
 case. A check being run reads as not run until it ends, so a cancelled re-run does not keep its
 earlier verdict. The status card shows the adapter's and the device's features, WGSL `subgroup_id` and the
 linear lane mapping.

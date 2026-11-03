@@ -69,7 +69,7 @@ export const buildGemmaPipeline = async (input: {
   readonly onProgress?: FromPretrainedOptions["onProgress"];
   readonly sessionOptions?: Pick<
     FromPretrainedOptions,
-    "integerGemv" | "packedStaticQuantize" | "linearGemvReduce"
+    "integerGemv" | "packedStaticQuantize" | "linearGemvReduce" | "linearGemvPlanes"
   >;
 }): Promise<GemmaPipeline> => {
   const { gpu, request, signal, onRunDiagnostics, onProgress, sessionOptions } = input;

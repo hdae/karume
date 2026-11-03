@@ -23,6 +23,7 @@ const CASES: readonly (readonly [string, OpFamily])[] = [
   ["linear_gemv_parallel:wi8:l32:packed-x-i8", "linear"],
   ["linear_gemv_integer:v1:wi2:l8r4", "linear"],
   ["linear_gemv_integer:v1:wi2:l16r4:static-quantize:v2", "linear"],
+  ["linear_gemv_planes:v1:wi2:l8r4", "linear"],
   ["linear:v2:f32:reg128x128r8x8w16v4:wi4g32", "linear"],
   ["rms_norm:v1:f32:lastdim:wg256", "norm"],
   ["rms_norm_add:v2:rms_norm:v2:f32:lastdim:wg256:trip6:norm-residual:xor-round", "norm"],

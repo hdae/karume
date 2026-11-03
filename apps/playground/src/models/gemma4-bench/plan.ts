@@ -1,7 +1,7 @@
 /**
  * What the decode bench runs: the prompt set, the arms (a model of one of the two Gemma 4
  * distributions × a preset × the tap on, on and split per dispatch, or off × the integer GEMV on or
- * off), the workload form (chats, new tokens, rounds,
+ * off × the byte-plane GEMV on or off), the workload form (chats, new tokens, rounds,
  * sampler) and the order the arms are visited in. Pure, so `vp test` covers it.
  */
 
@@ -79,6 +79,8 @@ export type ArmDraft = {
   readonly split?: boolean;
   /** Run the eligible decode linears on the integer GEMV (the Session option `integerGemv`). */
   readonly integerGemv?: boolean;
+  /** Run the QAT lm_head on the byte-plane GEMV (the Session option `linearGemvPlanes`). */
+  readonly linearGemvPlanes?: boolean;
 };
 
 /**
@@ -88,7 +90,7 @@ export type ArmDraft = {
  */
 export type ArmSessionOptions = Pick<
   FromPretrainedOptions,
-  "integerGemv" | "packedStaticQuantize" | "linearGemvReduce"
+  "integerGemv" | "packedStaticQuantize" | "linearGemvReduce" | "linearGemvPlanes"
 >;
 
 /**
@@ -132,7 +134,9 @@ export const armLabel = (
 ): string =>
   `${MOUNT_SHORT_LABELS[arm.mount]} ${arm.model} ${arm.quant}${
     arm.session?.integerGemv === true ? " (integer)" : ""
-  }${arm.tap ? (arm.split === true ? " (split)" : "") : " (tap off)"}`;
+  }${arm.session?.linearGemvPlanes === true ? " (planes)" : ""}${
+    arm.tap ? (arm.split === true ? " (split)" : "") : " (tap off)"
+  }`;
 
 /**
  * The arms the page starts with: the default model of each loaded distribution at its default
@@ -168,6 +172,13 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
     return { ok: false, error: `The ${mount} model '${model}' has no preset '${defaultQuant}'.` };
   }
   const declaredSampler = modelConfig(manifest, model).sampler;
+  // The byte-plane GEMV needs no other option, so it joins whatever the integer switch passes.
+  const session: ArmSessionOptions = {
+    ...(draft.integerGemv === true
+      ? integerGemvSession(manifest.models[model].quants[preset.name].session)
+      : {}),
+    ...(draft.linearGemvPlanes === true ? { linearGemvPlanes: true } : {}),
+  };
   return {
     ok: true,
     arm: {
@@ -178,9 +189,7 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
       isDefaultQuant: preset.name === defaultQuant,
       tap: draft.tap,
       ...(draft.tap && draft.split === true ? { split: true } : {}),
-      ...(draft.integerGemv === true
-        ? { session: integerGemvSession(manifest.models[model].quants[preset.name].session) }
-        : {}),
+      ...(Object.keys(session).length === 0 ? {} : { session }),
       ...(declaredSampler === undefined ? {} : { declaredSampler }),
     },
   };
