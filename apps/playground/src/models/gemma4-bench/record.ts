@@ -11,6 +11,7 @@ import type { SourceRecord } from "@/lib/record";
 import type { GemmaMount } from "@/models/gemma4/settings";
 
 import {
+  type ArmPipelineOptions,
   type ArmSessionOptions,
   type BenchPromptId,
   benchPrompt,
@@ -67,6 +68,11 @@ export type ArmRecord = {
    * (`{}` = none).
    */
   readonly sessionOptions: ArmSessionOptions;
+  /**
+   * The pipeline options passed to `fromPretrained` explicitly — `pleResidency` and `decodeAhead`
+   * (`{}` = none: the PLE on the host, one decode step per batch).
+   */
+  readonly pipelineOptions: ArmPipelineOptions;
   readonly sampler: SamplerSpec;
 };
 
@@ -149,6 +155,7 @@ export const buildBenchRecord = (input: {
         split: arm.split === true,
         integerGemv: arm.session?.integerGemv === true,
         sessionOptions: arm.session ?? {},
+        pipelineOptions: arm.pipeline ?? {},
         sampler: arm.sampler,
       };
     }),

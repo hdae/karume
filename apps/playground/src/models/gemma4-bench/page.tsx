@@ -64,6 +64,7 @@ import {
   type BenchPromptId,
   type BenchSettings,
   benchPrompt,
+  DECODE_AHEAD_CHOICES,
   defaultArmDrafts,
   INITIAL_BENCH_FORM,
   parseBenchForm,
@@ -271,6 +272,7 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
                 },
                 signal: buildSignal,
                 ...(arm.session === undefined ? {} : { sessionOptions: arm.session }),
+                ...(arm.pipeline === undefined ? {} : { pipelineOptions: arm.pipeline }),
               }),
             ),
           probe,
@@ -459,6 +461,24 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
                       />
                       <Label htmlFor={`bench-arm-${draft.id}-planes`}>Planes GEMV</Label>
                     </div>
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id={`bench-arm-${draft.id}-ple-gpu`}
+                        checked={draft.pleOnGpu === true}
+                        onCheckedChange={(checked) => updateDraft(draft.id, { pleOnGpu: checked })}
+                        disabled={running}
+                      />
+                      <Label htmlFor={`bench-arm-${draft.id}-ple-gpu`}>PLE on GPU</Label>
+                    </div>
+                    <Field id={`bench-arm-${draft.id}-ahead`} label="Decode ahead">
+                      <ChoiceSelect
+                        id={`bench-arm-${draft.id}-ahead`}
+                        value={draft.decodeAhead ?? "1"}
+                        choices={DECODE_AHEAD_CHOICES}
+                        onChange={(decodeAhead) => updateDraft(draft.id, { decodeAhead })}
+                        disabled={running}
+                      />
+                    </Field>
                     {resolution?.ok === false ? (
                       <p className="text-xs text-destructive">{resolution.error}</p>
                     ) : null}
@@ -495,7 +515,15 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
                 arm passes the Session option <code>linearGemvPlanes: true</code> (it needs no other
                 option), so the QAT E2B lm_head (i2 262144 × 1536) runs on the byte-plane GEMV
                 instead of the sequential GEMV; the label shows &quot;(planes)&quot;. Other models
-                have no i2 linear at that shape.
+                have no i2 linear at that shape. PLE on GPU: the arm passes the pipeline option{" "}
+                <code>pleResidency: &quot;gpu&quot;</code>, so the per-layer embeddings are uploaded
+                once at load and gathered on the GPU (QAT E2B: 1.09 GiB in one binding, which the
+                device must allow); the label shows &quot;(PLE GPU)&quot;. Decode ahead: the arm
+                passes <code>decodeAhead</code>, so a greedy chat runs that many decode steps per
+                GPU batch, each fed the token the previous step selected on the GPU, with one fence
+                and one readback per batch instead of per token; it needs PLE on GPU, and the label
+                shows &quot;(ahead N)&quot;. The token ids stay those of depth 1; each chat records
+                the batches it ran in its stop (<code>decodeAhead</code>).
               </p>
             </CardContent>
           </Card>

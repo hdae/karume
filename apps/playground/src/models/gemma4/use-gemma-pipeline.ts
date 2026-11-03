@@ -60,6 +60,8 @@ const MIB = 2 ** 20;
  * model the same way. Without `onRunDiagnostics` the pipeline keeps its on-GPU greedy selection.
  * `sessionOptions` are passed to `fromPretrained` as explicit Session options (the pipeline resolves
  * them as explicit > the preset's declaration > the runtime default); the chat page passes none.
+ * `pipelineOptions` are passed to `fromPretrained` as they are (the decode bench's PLE placement and
+ * run-ahead depth); the chat page passes none.
  */
 export const buildGemmaPipeline = async (input: {
   readonly gpu: GpuContext;
@@ -71,11 +73,14 @@ export const buildGemmaPipeline = async (input: {
     FromPretrainedOptions,
     "integerGemv" | "packedStaticQuantize" | "linearGemvReduce" | "linearGemvPlanes"
   >;
+  readonly pipelineOptions?: Pick<FromPretrainedOptions, "pleResidency" | "decodeAhead">;
 }): Promise<GemmaPipeline> => {
-  const { gpu, request, signal, onRunDiagnostics, onProgress, sessionOptions } = input;
+  const { gpu, request, signal, onRunDiagnostics, onProgress, sessionOptions, pipelineOptions } =
+    input;
   const ref = pretrainedRef(request.source, request.mount);
   const common = {
     ...sessionOptions,
+    ...pipelineOptions,
     gpu,
     quant: request.quant,
     signal,

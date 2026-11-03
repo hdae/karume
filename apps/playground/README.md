@@ -1108,9 +1108,27 @@ both are on. Its sums differ from the sequential GEMV's by the addition order on
 of ADR 0110), so a greedy arm may decode other tokens than one without it. Regular Gemma 4 has no i2
 linear at that shape, so there the switch changes nothing.
 
+**PLE on GPU** (per arm; the arm's label shows "(PLE GPU)") passes the pipeline option
+`pleResidency: "gpu"` to `fromPretrained`: the per-layer embeddings are uploaded once at load and
+each run gathers its rows on the GPU instead of dequantizing them on the host (ADR 0085, GPU
+residency). The quantized table goes in one binding — QAT E2B 1.09 GiB (i4), QAT E4B 672 MiB (i2),
+regular Gemma 4 E2B 2.19 GiB (i8) — so the device must grant a `maxStorageBufferBindingSize` that
+large; the page acquires its GPU with the adapter's own limits (an Apple M2 offers 4 GiB), and a
+device that cannot hold it fails the arm's load with the shortfall in bytes.
+
+**Decode ahead** (per arm: 1, 2, 4 or 8; the arm's label shows "(ahead N)" for 2 and more) passes
+the pipeline option `decodeAhead`: a greedy chat runs up to N decode steps in one GPU batch, each
+step fed the token the previous step selected on the GPU, and the N selections are read back at the
+batch's single fence — one fence, one readback and one host round trip per N tokens instead of per
+token. The token ids are those of depth 1 (the same kernels run on the same inputs); a batch that
+meets the end-of-turn token has already computed the steps after it, which are discarded. It needs
+**PLE on GPU** (the arm reports the pair as an error otherwise), and with the distribution's sampler
+the chats decode one step per batch as before. Every chat's `stop` records `decodeAhead` (the
+depth, the batches it ran — 0 when it did not take the run-ahead — and the steps they computed).
+
 | Control | What it does |
 | --- | --- |
-| Arms | One row per arm: Model (every model of both manifests; a QAT model `gemma4Qat.Pipeline` does not accept is disabled), Preset (the model's `defaultQuant` preselected), GPU tap, Split dispatches, Integer GEMV, Planes GEMV. Starts with each distribution's default model at its default preset. Arm 1 is the one the summary compares the others with. |
+| Arms | One row per arm: Model (every model of both manifests; a QAT model `gemma4Qat.Pipeline` does not accept is disabled), Preset (the model's `defaultQuant` preselected), GPU tap, Split dispatches, Integer GEMV, Planes GEMV, PLE on GPU, Decode ahead. Starts with each distribution's default model at its default preset. Arm 1 is the one the summary compares the others with. |
 | Prompts | Two fixed prompts, run in this order in every visit. The story request renders to 21 tokens (17 distinct ids); the GPU explainer to 60 tokens (48 distinct). A prompt with 32 or more distinct ids makes a PLE block whole-resident on the host: the condition under which the PLE row cache once stopped admitting rows (perf-ledger H-41). Every chat records the distinct count it measured, and the run table flags a prompt that falls on the wrong side. |
 | Chats | Chats per prompt per visit (default 3). Chat 0 is the first after the build: recorded, and left out of the summary. |
 | New tokens | `maxNewTokens` of every chat (default 128). |
@@ -1147,7 +1165,8 @@ chat, cold ones included, with its stop, prompt ids and measurement) and `summar
 `split`; a split arm adds `tap.perKey` (key, dispatches and GPU ms per decode token) on each of its
 chats and `split` (the medians by family and by key) on its summary entries. Every arm also records
 `integerGemv` and `sessionOptions` (the Session options it passed explicitly, `linearGemvPlanes`
-among them; `{}` when none).
+among them; `{}` when none), and `pipelineOptions` (`pleResidency` and `decodeAhead` when the arm
+passed them; `{}` when none). A chat of a run-ahead arm carries `decodeAhead` in its `stop`.
 **Copy record** copies the same JSON.
 
 Caveats:

@@ -6,7 +6,12 @@
  * environment is passed in), so `vp test` covers it.
  */
 
-import type { ChatStop, GenerationSpeculation, SamplerSpec } from "@karume/models/gemma";
+import type {
+  ChatStop,
+  GenerationDecodeAhead,
+  GenerationSpeculation,
+  SamplerSpec,
+} from "@karume/models/gemma";
 
 import type { RecordEnvironment } from "@/lib/environment";
 import type { ComponentRecord, SourceRecord } from "@/lib/record";
@@ -27,6 +32,11 @@ export type StopRecord = {
   readonly stopString?: string;
   /** Present only on turns of a pipeline with the MTP drafter. */
   readonly speculation?: GenerationSpeculation;
+  /**
+   * Present only on turns of a pipeline built with `decodeAhead` ≥ 2: the depth, the batches the
+   * turn ran (0 = it decoded one step per batch) and the steps they computed.
+   */
+  readonly decodeAhead?: GenerationDecodeAhead;
 };
 
 export const stopRecordOf = (stop: ChatStop): StopRecord => ({
@@ -35,6 +45,7 @@ export const stopRecordOf = (stop: ChatStop): StopRecord => ({
   ...("token" in stop ? { token: stop.token } : {}),
   ...(stop.reason === "stop-string" ? { stopString: stop.stopString } : {}),
   ...(stop.speculation === undefined ? {} : { speculation: stop.speculation }),
+  ...(stop.decodeAhead === undefined ? {} : { decodeAhead: stop.decodeAhead }),
 });
 
 /** Runs reported by `onRunDiagnostics` during the turn, by phase (only with diagnostics). */
