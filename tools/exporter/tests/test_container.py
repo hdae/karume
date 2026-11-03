@@ -14,6 +14,7 @@ invariant, not a derivable fact), so their single comparison point also lives he
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Callable
@@ -29,14 +30,22 @@ from container_fixture import (
     FIXTURE_PATH,
     GRAPH_NAME,
     SPLIT_FIXTURE_PARTS,
+    SPLIT_SCALE_BLOCK_BYTES,
+    SPLIT_SCALE_FIXTURE_PATH,
+    SPLIT_SCALE_GRAPH_NAME,
+    SPLIT_SCALE_PART_BYTES,
     fixture_write_requested,
     pattern_bytes,
     split_asset_payloads,
     split_fixture_paths,
+    split_scale_bindings,
+    split_scale_graph,
+    split_scale_tensors,
     synthetic_bindings,
     synthetic_graph,
     synthetic_tensors,
     write_split_container,
+    write_split_scale_container,
     write_synthetic_container,
 )
 
@@ -56,8 +65,10 @@ from karume.container import (
     ContainerFormatError,
     Encoding,
     Provenance,
+    align_up,
     canonical_json,
     ir_v2_document,
+    joined_scale_id,
     read_container,
     read_descriptor_refs,
     read_header,
@@ -68,7 +79,8 @@ from karume.container import (
     write_model_container,
 )
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrShared, IrStorage, IrValue
-from karume.verify import STORAGE_DTYPES
+from karume.publish import publish_container
+from karume.verify import STORAGE_DTYPES, verify_container
 
 #: Location of the TS ledger and size constants (the other side of the comparison).
 CODECS_TS = RUNTIME_FIXTURES.parents[1] / "src" / "format" / "container" / "codecs.ts"
@@ -917,6 +929,34 @@ class TestTheCrossLanguageFixture:
         raw = read.block(read.model.assets["rope_base"].block)
         assert raw == payloads["rope_base"] + b"\x00" * 3
 
+    def test_the_committed_split_scale_fixture_matches_the_generator(self, tmp_path: Path) -> None:
+        rebuilt = write_split_scale_container(tmp_path / SPLIT_SCALE_FIXTURE_PATH.name)[
+            0
+        ].read_bytes()
+        if fixture_write_requested():
+            SPLIT_SCALE_FIXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            SPLIT_SCALE_FIXTURE_PATH.write_bytes(rebuilt)
+
+        assert SPLIT_SCALE_FIXTURE_PATH.read_bytes() == rebuilt, (
+            "the split-scale fixture drifted from the writer"
+            " (rebuild: KARUME_FIXTURE=write uv run pytest tests/test_container.py -k fixture)"
+        )
+
+    def test_the_split_scale_fixture_has_one_split_scale_and_one_whole_scale(self) -> None:
+        """A split scale beside a piece-split weight whose scale fits (both spellings)."""
+        read = read_container([SPLIT_SCALE_FIXTURE_PATH])
+        assert read.model is not None
+        supplies = read.model.binding[SPLIT_SCALE_GRAPH_NAME]
+
+        split, whole = supplies["w.weight"], supplies["v.weight"]
+        assert split.pieces is not None and split.encoding.scale_pieces is not None
+        assert [rows for _, rows in split.encoding.scale_pieces] == [
+            rows for _, rows in split.pieces
+        ]
+        assert len(split.encoding.scale_pieces) == 4
+        assert whole.pieces is not None and len(whole.pieces) == 2
+        assert whole.encoding.scale_block is not None and whole.encoding.scale_pieces is None
+
 
 class TestTheDescriptorReadIsBounded:
     """`read_descriptor_refs` does **not load the whole of** part 0 into RAM (header + two
@@ -1461,3 +1501,286 @@ class TestATrailingNewlineIsRefused:
     def test_a_sha256_with_a_trailing_newline_is_refused(self) -> None:
         with pytest.raises(ContainerFormatError, match="sha256"):
             container_module._require_sha256("a" * 64 + "\n", "test")
+
+
+# ---------------------------------------------------------------------------
+# Split scales (container-v1 §5 rule ③ — ADR 0108 addendum 15)
+# ---------------------------------------------------------------------------
+
+
+def _split_scale_supply(tmp_path: Path, **options: Any) -> tuple[Any, Any]:
+    """Write the split-scale model and return `(reader, merged supply of w.weight)`."""
+    verified = verify_container(write_split_scale_container(tmp_path / "model.krm", **options))
+    return verified.read, verified.graphs[SPLIT_SCALE_GRAPH_NAME].supplies["w.weight"]
+
+
+class TestASplitScale:
+    """A scale over the block limit is split on the data's piece boundaries and read back whole."""
+
+    def test_the_scale_is_split_on_the_rows_of_the_weights_pieces(self, tmp_path: Path) -> None:
+        _, supply = _split_scale_supply(tmp_path)
+
+        assert [block.rows for block in supply.blocks] == [(0, 4), (4, 8), (8, 12), (12, 16)]
+        assert [piece.rows for piece in supply.scale.pieces] == [
+            block.rows for block in supply.blocks
+        ]
+        assert [piece.payload_bytes for piece in supply.scale.pieces] == [64, 64, 64, 64]
+
+    def test_every_scale_piece_sits_in_the_part_of_the_first_weight_piece(
+        self, tmp_path: Path
+    ) -> None:
+        _, supply = _split_scale_supply(tmp_path)
+
+        assert {piece.part for piece in supply.scale.pieces} == {supply.blocks[0].part}
+
+    def test_the_joined_id_reads_the_whole_scale_and_names_no_block(self, tmp_path: Path) -> None:
+        read, supply = _split_scale_supply(tmp_path)
+
+        assert supply.scale.id == joined_scale_id([piece.id for piece in supply.scale.pieces])
+        assert supply.scale.id not in read.block_ids
+        assert supply.scale.payload_bytes == 256
+        assert read.block(supply.scale.id) == split_scale_tensors()["w.weight_scale"]
+
+    def test_the_publish_path_compares_the_joined_scale_with_the_passed_bytes(
+        self, tmp_path: Path
+    ) -> None:
+        """The single export path re-reads the split scale through its joined id."""
+        result = publish_container(
+            tmp_path / "out" / "model.krm",
+            split_scale_graph(),
+            split_scale_tensors(),
+            split_scale_bindings(),
+            graph_name=SPLIT_SCALE_GRAPH_NAME,
+            provenance=Provenance(license="apache-2.0"),
+            part_bytes=SPLIT_SCALE_PART_BYTES,
+            block_bytes=SPLIT_SCALE_BLOCK_BYTES,
+        )
+
+        # 2 bodies + 2 scales (the split one counted once, as one scale).
+        assert result.payloads == 4
+
+    def test_a_scale_that_fits_keeps_the_one_block_spelling(self, tmp_path: Path) -> None:
+        read, _ = _split_scale_supply(tmp_path)
+        document = json.loads(read.model_descriptor_bytes)
+
+        assert list(
+            document["binding"][SPLIT_SCALE_GRAPH_NAME]["v.weight"]["encoding"]["scale"]
+        ) == [
+            "block",
+            "dtype",
+        ]
+        assert list(
+            document["binding"][SPLIT_SCALE_GRAPH_NAME]["w.weight"]["encoding"]["scale"]
+        ) == [
+            "pieces",
+            "dtype",
+        ]
+
+    def test_a_container_that_needs_no_split_is_the_bytes_the_writer_wrote_before(
+        self, tmp_path: Path
+    ) -> None:
+        """At a 256 B limit the 256-byte scale fits exactly (the limit is inclusive), so nothing is
+        split — the bytes equal the output of the writer before split scales (sha256 taken from
+        that writer, `git show cd7a0398:tools/exporter/src/karume/container.py`, on the same
+        input)."""
+        written = write_split_scale_container(tmp_path / "model.krm", block_bytes=256)[0]
+
+        assert hashlib.sha256(written.read_bytes()).hexdigest() == (
+            "76e36cfa27d6699df35c6d03164220e65639ff5db8e8ebf58bc14784193e15e4"
+        )
+
+
+def _int8_column(
+    rows: int, *, const: bool = False
+) -> tuple[IrGraph, dict[str, bytes], dict[str, Encoding]]:
+    """An int8 `[rows, 1]` tensor — its scale (4 B per row) is 4x its data (1 B per row), the one
+    ledger shape whose scale outgrows its data."""
+    key = "const.c" if const else "c.weight"
+    graph = IrGraph(
+        symbols=["T"],
+        inputs=[IrInput(name="x", dtype="f32", shape=["T", 1])],
+        outputs=["h"],
+        initializers={
+            "p_c": IrInitializer(tensor=key, storage=IrStorage(dtype="i8", scale=f"{key}_scale"))
+        },
+        values={
+            "p_c": IrValue(dtype="f32", shape=[rows, 1]),
+            "h": IrValue(dtype="f32", shape=["T", rows]),
+        },
+        nodes=[IrNode(op="linear", ins=["x", "p_c"], outs=["h"], attrs={})],
+    )
+    tensors = {key: pattern_bytes(rows, 71), f"{key}_scale": pattern_bytes(rows * 4, 72)}
+    bindings = {key: Encoding("int8-sym", group_size=1, row_axis=0, scale_key=f"{key}_scale")}
+    return graph, tensors, bindings
+
+
+class TestTheSplitScaleFailsLoudlyAtPlanning:
+    """A scale that no split can bring under the block limit fails **before a byte is written**."""
+
+    def _write(
+        self, tmp_path: Path, graph: IrGraph, tensors: Any, bindings: Any, **kw: Any
+    ) -> None:
+        write_model_container(
+            tmp_path / "out" / "model.krm",
+            graph,
+            tensors,
+            bindings,
+            graph_name="g",
+            provenance=Provenance(license="mit"),
+            **{"part_bytes": 1024, "block_bytes": 128, **kw},
+        )
+
+    def test_a_scale_over_the_limit_beside_data_in_one_block(self, tmp_path: Path) -> None:
+        # 64 B of data fits one block; its 256 B of scale does not, and there are no pieces.
+        with pytest.raises(ContainerFormatError, match="there are no piece boundaries to split"):
+            self._write(tmp_path, *_int8_column(64))
+        assert not (tmp_path / "out").exists()
+
+    def test_a_scale_piece_over_the_limit(self, tmp_path: Path) -> None:
+        # 512 B of data → 4 pieces of 128 rows; each scale piece would be 512 B.
+        with pytest.raises(
+            ContainerFormatError, match=r"scale 0: rows \[0, 128\) of the scale are 512 bytes"
+        ):
+            self._write(tmp_path, *_int8_column(512))
+        assert not (tmp_path / "out").exists()
+
+    def test_a_const_scale_over_the_limit(self, tmp_path: Path) -> None:
+        with pytest.raises(
+            ContainerFormatError, match="the scale of a const must fit in one block"
+        ):
+            self._write(tmp_path, *_int8_column(64, const=True))
+        assert not (tmp_path / "out").exists()
+
+    def test_piece_1_and_the_split_scale_must_fit_one_part(self, tmp_path: Path) -> None:
+        # Piece 1 (128 B) + 4 scale pieces (64 B each) = 384 B, over a 256 B part (rule ③).
+        with pytest.raises(ContainerFormatError, match="must sit in the same part exceeds"):
+            self._write(
+                tmp_path,
+                split_scale_graph(),
+                split_scale_tensors(),
+                split_scale_bindings(),
+                part_bytes=256,
+            )
+        assert not (tmp_path / "out").exists()
+
+
+def _split_scale_written(tmp_path: Path) -> list[Path]:
+    """The split-scale model in split form (the reader-rejection tests rewrite its part 0)."""
+    return write_model_container(
+        tmp_path / "model.krm",
+        split_scale_graph(),
+        split_scale_tensors(),
+        split_scale_bindings(),
+        graph_name=SPLIT_SCALE_GRAPH_NAME,
+        provenance=Provenance(license="apache-2.0"),
+        part_bytes=SPLIT_SCALE_PART_BYTES,
+        block_bytes=SPLIT_SCALE_BLOCK_BYTES,
+    )
+
+
+def _w_scale(document: dict[str, Any]) -> dict[str, Any]:
+    return document["binding"][SPLIT_SCALE_GRAPH_NAME]["w.weight"]["encoding"]["scale"]
+
+
+def _block_of(document: dict[str, Any], block_id: str) -> dict[str, Any]:
+    return next(block for block in document["blocks"] if block["id"] == block_id)
+
+
+class TestTheReaderRejectsABrokenSplitScale:
+    """Each reader rule of the split scale, broken one at a time on a correct container."""
+
+    def _rejects(self, tmp_path: Path, edit: Callable[[dict[str, Any]], None], match: str) -> None:
+        written = _split_scale_written(tmp_path)
+        edit_model_document(written, edit)
+        with pytest.raises(ContainerFormatError, match=match):
+            verify_container(written)
+
+    def test_a_gap_between_pieces(self, tmp_path: Path) -> None:
+        def edit(document: dict[str, Any]) -> None:
+            _w_scale(document)["pieces"][1]["rows"] = [5, 8]
+
+        self._rejects(tmp_path, edit, r"scale\.pieces\[1\]: does not continue from row 4")
+
+    def test_overlapping_pieces(self, tmp_path: Path) -> None:
+        def edit(document: dict[str, Any]) -> None:
+            _w_scale(document)["pieces"][1]["rows"] = [3, 8]
+
+        self._rejects(tmp_path, edit, r"scale\.pieces\[1\]: does not continue from row 4")
+
+    def test_rows_that_are_not_the_weights_pieces(self, tmp_path: Path) -> None:
+        def edit(document: dict[str, Any]) -> None:
+            _w_scale(document)["pieces"][0]["rows"] = [0, 2]
+            _w_scale(document)["pieces"][1]["rows"] = [2, 8]
+
+        self._rejects(
+            tmp_path, edit, r"rows \[0, 2\) differ from the rows \[0, 4\) of body piece 0"
+        )
+
+    def test_a_piece_over_the_block_limit(self, tmp_path: Path) -> None:
+        def edit(document: dict[str, Any]) -> None:
+            _block_of(document, _w_scale(document)["pieces"][3]["block"])["length"] = (
+                BLOCK_MAX_BYTES + 4
+            )
+
+        self._rejects(tmp_path, edit, f"exceeds the block limit {BLOCK_MAX_BYTES}")
+
+    def test_a_piece_list_of_one_entry(self, tmp_path: Path) -> None:
+        def edit(document: dict[str, Any]) -> None:
+            first = _w_scale(document)["pieces"][0]["block"]
+            _w_scale(document)["pieces"] = [{"block": first, "rows": [0, 16]}]
+
+        self._rejects(tmp_path, edit, r"scale\.pieces must have 2 or more entries")
+
+    @pytest.mark.parametrize("spelling", ["both", "neither"])
+    def test_both_or_neither_of_block_and_pieces(self, tmp_path: Path, spelling: str) -> None:
+        def edit(document: dict[str, Any]) -> None:
+            if spelling == "both":
+                _w_scale(document)["block"] = _w_scale(document)["pieces"][0]["block"]
+            else:
+                del _w_scale(document)["pieces"]
+
+        self._rejects(tmp_path, edit, "write exactly one of 'block' .* and 'pieces'")
+
+    def test_a_piece_in_another_part_than_piece_1(self, tmp_path: Path) -> None:
+        def edit(document: dict[str, Any]) -> None:
+            # Only the declarations are checked here, so lengthening the last part keeps the moved
+            # block inside it.
+            block = _block_of(document, _w_scale(document)["pieces"][3]["block"])
+            last = document["parts"][-1]
+            block["part"] = last["index"]
+            block["offset"] = align_up(last["length"], BLOCK_START_ALIGN)
+            last["length"] = block["offset"] + block["length"]
+
+        self._rejects(
+            tmp_path,
+            edit,
+            r"encoding\.scale\.pieces\[3\]: scale is in part 3, the start of the body in part 2",
+        )
+
+    def test_a_piece_whose_block_is_not_a_scale_block(self, tmp_path: Path) -> None:
+        def edit(document: dict[str, Any]) -> None:
+            _block_of(document, _w_scale(document)["pieces"][2]["block"])["role"] = "weight"
+
+        self._rejects(tmp_path, edit, "the role of block .* is 'weight'")
+
+    def test_a_split_scale_on_a_const(self, tmp_path: Path) -> None:
+        written = write_synthetic(tmp_path, single=False)
+        document = json.loads(read_container(written).graph_descriptor_bytes)
+        entry = document["const"]["constants"][0]
+        entry["encoding"] = {
+            "codec": "int8-sym",
+            "packing": {"blockElements": 1, "blockBytes": 1, "alignBytes": 4},
+            "rowAxis": 0,
+            "groupSize": 1,
+            "scale": {
+                "pieces": [
+                    {"block": entry["block"], "rows": [0, 4]},
+                    {"block": entry["block"], "rows": [4, 8]},
+                ],
+                "dtype": "f32",
+            },
+        }
+        rewrite_part0(written[0], graph=canonical_json(document).encode())
+
+        with pytest.raises(ContainerFormatError, match="a const cannot have a split scale"):
+            read_container(written)

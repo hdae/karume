@@ -36,6 +36,7 @@
 | packed | packed | 1 語 / 1 byte に複数の整数要素を詰めた格納（`i4` は 1 byte 2 要素・`i2` は 4 要素） | — | ADR 0069 決定 2 |
 | group_size | group_size | `i4` の scale 1 個が担当する K 方向の連続要素数（exporter 側の名前・容器では `groupSize`） | グループ量子化（「group 量子化」で統一する） | ADR 0069 決定 2 |
 | scale companion | scale companion | 量子化重みの復元係数を持つ別 block（束縛表の `encoding.scale`） | — | ADR 0108 決定 11 |
+| split scale △ | 分割 scale | 1 block に収まらない scale companion を、データの piece と同じ行範囲で piece ごとの block に分けたもの（束縛表の `encoding.scale.pieces`・全部 piece 1 の part に置く）。読み手は 1 本につないで Session 構築へ渡す | — | ADR 0108 追記 15 |
 | PLE (Per-Layer Embedding) | PLE | 層ごとに足し込む補助 embedding。グラフの外の表からホストが行を読む | — | ADR 0085 |
 | SRQ (Static Range Quantization) | SRQ | 学習時に決めた固定 scale で活性を int8 の格子へ丸めて戻す処理（計算は f32 のまま） | — | ADR 0097 追記 2 |
 | w8a8 | w8a8（重み 8bit × 活性 8bit 整数内積） | 重み i8 × 活性 per-token i8 の整数内積の経路（`linearCompute: "a8"`） | — | ADR 0025 |

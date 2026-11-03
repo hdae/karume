@@ -557,3 +557,84 @@ class TestTheCodecRowAxes:
 
         with pytest.raises(ContainerFormatError, match=f"rowAxis of codec '{codec}' must be 0"):
             bind([16, 16], supply, blocks)
+
+
+def split_scale(pieces: Sequence[tuple[str, tuple[int, int]]]) -> BlockEncoding:
+    """An i4 group-16 encoding whose scale is split into `pieces` (ADR 0108 addendum 15)."""
+    return BlockEncoding("int4-sym-g", 0, 16, scale_pieces=tuple(pieces))
+
+
+#: `[8, 32]` i4 body in two pieces of 4 rows (64 B each); its scale is 8 rows x 2 groups x 4 B =
+#: 64 B, so 32 B per scale piece over the same rows.
+BODY_PIECES = (("w1", (0, 4)), ("w2", (4, 8)))
+BODY_BLOCKS = [("w1", 64, "weight"), ("w2", 64, "weight")]
+
+
+class TestASplitScale:
+    """The merge layer's rules of a split scale (container-v1 §5 rule ③)."""
+
+    def test_one_scale_piece_per_body_piece_is_one_contiguous_scale(self) -> None:
+        supply = bind(
+            [8, 32],
+            WeightSupply(split_scale([("s1", (0, 4)), ("s2", (4, 8))]), pieces=BODY_PIECES),
+            [*BODY_BLOCKS, ("s1", 32, "scale"), ("s2", 32, "scale")],
+        )
+        assert supply.scale is not None
+
+        assert (supply.scale.id, supply.scale.length, supply.scale.payload_bytes) == (
+            "s1+s2",
+            64,
+            64,
+        )
+        assert [(piece.rows, piece.payload_bytes) for piece in supply.scale.pieces] == [
+            ((0, 4), 32),
+            ((4, 8), 32),
+        ]
+
+    def test_a_scale_piece_count_that_differs_from_the_bodys_is_refused(self) -> None:
+        with pytest.raises(ContainerFormatError, match="3 scale pieces for 2 body pieces"):
+            bind(
+                [8, 32],
+                WeightSupply(
+                    split_scale([("s1", (0, 2)), ("s2", (2, 4)), ("s3", (4, 8))]),
+                    pieces=BODY_PIECES,
+                ),
+                [*BODY_BLOCKS, ("s1", 16, "scale"), ("s2", 16, "scale"), ("s3", 32, "scale")],
+            )
+
+    def test_scale_rows_that_are_not_the_body_pieces_rows_are_refused(self) -> None:
+        with pytest.raises(
+            ContainerFormatError,
+            match=r"rows \[0, 2\) differ from the rows \[0, 4\) of body piece 0",
+        ):
+            bind(
+                [8, 32],
+                WeightSupply(split_scale([("s1", (0, 2)), ("s2", (2, 8))]), pieces=BODY_PIECES),
+                [*BODY_BLOCKS, ("s1", 16, "scale"), ("s2", 48, "scale")],
+            )
+
+    def test_a_middle_scale_piece_with_padding_is_refused(self) -> None:
+        with pytest.raises(
+            ContainerFormatError, match="block 's1' length 36 differs from the 32 bytes of its rows"
+        ):
+            bind(
+                [8, 32],
+                WeightSupply(split_scale([("s1", (0, 4)), ("s2", (4, 8))]), pieces=BODY_PIECES),
+                [*BODY_BLOCKS, ("s1", 36, "scale"), ("s2", 32, "scale")],
+            )
+
+    def test_a_last_scale_piece_longer_than_its_rows_and_padding_is_refused(self) -> None:
+        with pytest.raises(ContainerFormatError, match="block 's2' length 36 is not payload 32"):
+            bind(
+                [8, 32],
+                WeightSupply(split_scale([("s1", (0, 4)), ("s2", (4, 8))]), pieces=BODY_PIECES),
+                [*BODY_BLOCKS, ("s1", 32, "scale"), ("s2", 36, "scale")],
+            )
+
+    def test_a_split_scale_beside_a_whole_body_is_refused(self) -> None:
+        with pytest.raises(ContainerFormatError, match="a split scale needs a piece list"):
+            bind(
+                [8, 32],
+                WeightSupply(split_scale([("s1", (0, 4)), ("s2", (4, 8))]), block="w"),
+                [("w", 128, "weight"), ("s1", 32, "scale"), ("s2", 32, "scale")],
+            )

@@ -71,6 +71,19 @@ export type EncodingPacking = {
 };
 
 /**
+ * The companion scale of a quantized supply (§6.1): one block, or — when one block cannot hold it —
+ * a piece list split on the weight's pieces (§5 rule ③, ADR 0108 addendum 15). `block` and `pieces`
+ * are exclusive; `pieces` has 2 or more entries, each the element of the weight's piece list.
+ */
+export type ScaleRef =
+  | { readonly block: string; readonly pieces?: undefined; readonly dtype: ScaleDtype }
+  | {
+      readonly block?: undefined;
+      readonly pieces: readonly WeightPiece[];
+      readonly dtype: ScaleDtype;
+    };
+
+/**
  * Storage declaration (§6.1). The bit count is derived from `packing`, so it has no field.
  * `rowAxis` / `groupSize` / `scale` are written only for quantized codecs (`scale: "required"` in
  * the ledger) and cannot be written for non-quantized ones.
@@ -80,7 +93,7 @@ export type Encoding = {
   readonly packing: EncodingPacking;
   readonly rowAxis?: 0 | 1;
   readonly groupSize?: number;
-  readonly scale?: { readonly block: string; readonly dtype: ScaleDtype };
+  readonly scale?: ScaleRef;
   readonly zeroPoint?: { readonly block: string };
 };
 
@@ -291,6 +304,41 @@ const sameSet = (a: readonly string[], b: readonly string[]): boolean =>
 // encoding（§6.1）
 // ---------------------------------------------------------------------------
 
+/**
+ * A piece list (§5): 2 or more `{ block, rows: [begin, end) }`, each non-empty, continuing from row
+ * 0 without gaps. The one reader of both the weight's `pieces` and a split scale's `scale.pieces`.
+ */
+const parsePieces = (value: unknown, path: string): readonly WeightPiece[] => {
+  const pieces = requireArray(value, path).map((piece, i) => {
+    const piecePath = `${path}[${i}]`;
+    const pieceObject = requireObject(piece, piecePath);
+    requireKeys(pieceObject, ["block", "rows"], [], piecePath);
+    const rows = requireArray(pieceObject["rows"], `${piecePath}.rows`);
+    if (rows.length !== 2) fail(`${piecePath}.rows length is not 2`);
+    const begin = requireIndex(rows[0], `${piecePath}.rows[0]`);
+    const end = requireIndex(rows[1], `${piecePath}.rows[1]`);
+    if (end <= begin) fail(`${piecePath}.rows [${begin}, ${end}) is an empty range`);
+    return {
+      block: requireBlockId(pieceObject["block"], `${piecePath}.block`),
+      rows: [begin, end] as const,
+    };
+  });
+  if (pieces.length < 2) fail(`${path} must have 2 or more entries (write 'block' for one)`);
+  // Rule ④: the row range is covered without gaps (end = shape[0] is checked by the merge layer,
+  // which knows the declared shape).
+  let cursor = 0;
+  for (const [i, piece] of pieces.entries()) {
+    if (piece.rows[0] !== cursor) {
+      fail(`${path}[${i}]: does not continue from row ${cursor} (declared ${piece.rows[0]})`);
+    }
+    cursor = piece.rows[1];
+  }
+  return pieces;
+};
+
+const canonicalPieces = (pieces: readonly WeightPiece[]): Record<string, unknown>[] =>
+  pieces.map((piece) => ({ block: piece.block, rows: [piece.rows[0], piece.rows[1]] }));
+
 const PACKING_KEYS = ["blockElements", "blockBytes", "alignBytes"] as const;
 
 export const parseEncoding = (value: unknown, path: string): Encoding => {
@@ -338,22 +386,31 @@ export const parseEncoding = (value: unknown, path: string): Encoding => {
   if (rowAxis !== 0 && rowAxis !== 1) fail(`${path}.rowAxis must be 0 or 1 (declared ${rowAxis})`);
   const groupSize = requirePositive(object["groupSize"], `${path}.groupSize`);
   const scaleObject = requireObject(object["scale"], `${path}.scale`);
-  requireKeys(scaleObject, ["block", "dtype"], [], `${path}.scale`);
+  requireKeys(scaleObject, ["dtype"], ["block", "pieces"], `${path}.scale`);
   const scaleDtype = requireString(scaleObject["dtype"], `${path}.scale.dtype`);
   if (!SCALE_DTYPES.some((dtype) => dtype === scaleDtype)) {
     fail(
       `${path}.scale.dtype is not in the accepted set (${SCALE_DTYPES.join(" / ")}): ${scaleDtype}`,
     );
   }
+  const hasBlock = Object.hasOwn(scaleObject, "block");
+  if (hasBlock === Object.hasOwn(scaleObject, "pieces")) {
+    fail(`${path}.scale: write exactly one of 'block' (one block) and 'pieces' (split scale)`);
+  }
   const encoding: Encoding = {
     codec,
     packing,
     rowAxis,
     groupSize,
-    scale: {
-      block: requireBlockId(scaleObject["block"], `${path}.scale.block`),
-      dtype: scaleDtype as ScaleDtype,
-    },
+    scale: hasBlock
+      ? {
+          block: requireBlockId(scaleObject["block"], `${path}.scale.block`),
+          dtype: scaleDtype as ScaleDtype,
+        }
+      : {
+          pieces: parsePieces(scaleObject["pieces"], `${path}.scale.pieces`),
+          dtype: scaleDtype as ScaleDtype,
+        },
   };
   if (!Object.hasOwn(object, "zeroPoint")) return encoding;
   const zeroObject = requireObject(object["zeroPoint"], `${path}.zeroPoint`);
@@ -375,7 +432,12 @@ const canonicalEncoding = (encoding: Encoding): Record<string, unknown> => ({
   ...(encoding.groupSize === undefined ? {} : { groupSize: encoding.groupSize }),
   ...(encoding.scale === undefined
     ? {}
-    : { scale: { block: encoding.scale.block, dtype: encoding.scale.dtype } }),
+    : {
+        scale:
+          encoding.scale.pieces === undefined
+            ? { block: encoding.scale.block, dtype: encoding.scale.dtype }
+            : { pieces: canonicalPieces(encoding.scale.pieces), dtype: encoding.scale.dtype },
+      }),
   ...(encoding.zeroPoint === undefined ? {} : { zeroPoint: { block: encoding.zeroPoint.block } }),
 });
 
@@ -608,6 +670,13 @@ export const validateGraphDescriptor = (descriptor: GraphDescriptor): void => {
     seen.add(key);
     claim(entry.block, entryPath);
     if (entry.encoding.scale !== undefined) {
+      // A const is one block (it has no piece list — §3), so there are no piece boundaries to
+      // split its scale on (rule ③).
+      if (entry.encoding.scale.pieces !== undefined) {
+        fail(
+          `${entryPath}.encoding.scale: a const cannot have a split scale (a const has no pieces — rule ③)`,
+        );
+      }
       claim(entry.encoding.scale.block, `${entryPath}.encoding.scale`);
     }
     if (entry.encoding.zeroPoint !== undefined) {
@@ -695,33 +764,7 @@ const parseSupply = (value: unknown, path: string): WeightSupply => {
     fail(`${path}: write exactly one of 'block' (one whole block) and 'pieces' (row split)`);
   }
   if (hasBlock) return { block: requireBlockId(object["block"], `${path}.block`), encoding };
-  const pieces = requireArray(object["pieces"], `${path}.pieces`).map((piece, i) => {
-    const piecePath = `${path}.pieces[${i}]`;
-    const pieceObject = requireObject(piece, piecePath);
-    requireKeys(pieceObject, ["block", "rows"], [], piecePath);
-    const rows = requireArray(pieceObject["rows"], `${piecePath}.rows`);
-    if (rows.length !== 2) fail(`${piecePath}.rows length is not 2`);
-    const begin = requireIndex(rows[0], `${piecePath}.rows[0]`);
-    const end = requireIndex(rows[1], `${piecePath}.rows[1]`);
-    if (end <= begin) fail(`${piecePath}.rows [${begin}, ${end}) is an empty range`);
-    return {
-      block: requireBlockId(pieceObject["block"], `${piecePath}.block`),
-      rows: [begin, end] as const,
-    };
-  });
-  if (pieces.length < 2) fail(`${path}.pieces must have 2 or more entries (write 'block' for one)`);
-  // Rule ④: the row range is covered without gaps (end = shape[0] is checked by the merge layer,
-  // which knows the declared shape).
-  let cursor = 0;
-  for (const [i, piece] of pieces.entries()) {
-    if (piece.rows[0] !== cursor) {
-      fail(
-        `${path}.pieces[${i}]: does not continue from row ${cursor} (declared ${piece.rows[0]})`,
-      );
-    }
-    cursor = piece.rows[1];
-  }
-  return { pieces, encoding };
+  return { pieces: parsePieces(object["pieces"], `${path}.pieces`), encoding };
 };
 
 /** Reads model descriptor bytes with checks. */
@@ -817,13 +860,23 @@ const supplyBlocks = (
   supply: WeightSupply,
 ): {
   readonly weights: readonly string[];
-  readonly scale: string | undefined;
+  /** The scale's blocks (one, or the pieces of a split scale); empty when not quantized. */
+  readonly scales: readonly string[];
   readonly zeroPoint: string | undefined;
-} => ({
-  weights: supply.block !== undefined ? [supply.block] : supply.pieces.map((piece) => piece.block),
-  scale: supply.encoding.scale?.block,
-  zeroPoint: supply.encoding.zeroPoint?.block,
-});
+} => {
+  const scale = supply.encoding.scale;
+  return {
+    weights:
+      supply.block !== undefined ? [supply.block] : supply.pieces.map((piece) => piece.block),
+    scales:
+      scale === undefined
+        ? []
+        : scale.pieces === undefined
+          ? [scale.block]
+          : scale.pieces.map((piece) => piece.block),
+    zeroPoint: supply.encoding.zeroPoint?.block,
+  };
+};
 
 /**
  * Declaration checks of the model descriptor (the check against the graph descriptor is
@@ -903,12 +956,16 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
       );
       const firstPart = parts[0];
       // Rule ③: the companion scale / zeroPoint block is in the same part as the data (piece 1 for a
-      // piece list).
-      if (refs.scale !== undefined) {
-        const scalePart = claim(refs.scale, "scale", `${entryPath}.encoding.scale`).part;
+      // piece list) — every block of a split scale too (construction reads the whole scale with
+      // piece 1).
+      for (const [i, scale] of refs.scales.entries()) {
+        const scalePath = `${entryPath}.encoding.scale${
+          supply.encoding.scale?.pieces === undefined ? "" : `.pieces[${i}]`
+        }`;
+        const scalePart = claim(scale, "scale", scalePath).part;
         if (scalePart !== firstPart) {
           fail(
-            `${entryPath}.encoding.scale: scale is in part ${scalePart}, the first data block in part ${firstPart} (same part MUST)`,
+            `${scalePath}: scale is in part ${scalePart}, the first data block in part ${firstPart} (same part MUST)`,
           );
         }
       }
@@ -1030,12 +1087,7 @@ export const serializeModelDescriptor = (descriptor: ModelDescriptor): Uint8Arra
     binding: sortedObject(descriptor.binding, (supplies) =>
       sortedObject(supplies, (supply) => ({
         ...(supply.block === undefined
-          ? {
-              pieces: supply.pieces.map((piece) => ({
-                block: piece.block,
-                rows: [piece.rows[0], piece.rows[1]],
-              })),
-            }
+          ? { pieces: canonicalPieces(supply.pieces) }
           : { block: supply.block }),
         encoding: canonicalEncoding(supply.encoding),
       })),

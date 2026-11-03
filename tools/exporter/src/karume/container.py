@@ -550,15 +550,42 @@ class Encoding:
     scale_key: str | None = None
 
 
+#: A piece list (§5): `(block id, (begin row, end row))` in row order.
+Pieces = tuple[tuple[str, tuple[int, int]], ...]
+
+
+def joined_scale_id(block_ids: Sequence[str]) -> str:
+    """The id under which a split scale is read whole: its pieces' block ids joined with `+`
+    (ADR 0108 addendum 15).
+
+    `+` is outside the block-id vocabulary (§0), so a joined id never names a declared block. The
+    TS mirror is `joinedScaleId` in `packages/runtime/src/format/container/bind.ts`.
+    """
+    return "+".join(block_ids)
+
+
 @dataclass(frozen=True)
 class BlockEncoding:
     """The storage declaration that goes into the descriptor (§6.1). `packing` is a copy of the
-    ledger, so it is not held as a field."""
+    ledger, so it is not held as a field.
+
+    A quantized codec's scale is either one block (`scale_block`) or, when one block cannot hold
+    it, a piece list split on the data's pieces (`scale_pieces` — §5 rule ③, ADR 0108 addendum
+    15); exactly one of the two is set.
+    """
 
     codec: str
     row_axis: int | None = None
     group_size: int | None = None
     scale_block: str | None = None
+    scale_pieces: Pieces | None = None
+
+    @property
+    def scale_blocks(self) -> tuple[str, ...]:
+        """The scale's block ids (one, or the pieces of a split scale; empty without a scale)."""
+        if self.scale_pieces is not None:
+            return tuple(block for block, _ in self.scale_pieces)
+        return () if self.scale_block is None else (self.scale_block,)
 
     def to_document(self) -> dict[str, Any]:
         entry = codec_entry(self.codec)
@@ -572,7 +599,8 @@ class BlockEncoding:
             },
         }
         quantized = entry.scale == "required"
-        present = (self.row_axis, self.group_size, self.scale_block)
+        scale = self.scale_blocks or None
+        present = (self.row_axis, self.group_size, scale)
         if not quantized:
             if any(field is not None for field in present):
                 raise ContainerFormatError(
@@ -584,10 +612,27 @@ class BlockEncoding:
             raise ContainerFormatError(
                 f"codec '{self.codec}' is quantized, so rowAxis / groupSize / scale are required"
             )
+        if self.scale_block is not None and self.scale_pieces is not None:
+            raise ContainerFormatError("A scale has exactly one of `block` and `pieces`")
         document["rowAxis"] = self.row_axis
         document["groupSize"] = self.group_size
-        document["scale"] = {"block": self.scale_block, "dtype": SCALE_DTYPES[0]}
+        if self.scale_pieces is None:
+            document["scale"] = {"block": self.scale_block, "dtype": SCALE_DTYPES[0]}
+        else:
+            document["scale"] = {
+                "pieces": _pieces_document(self.scale_pieces, "scale"),
+                "dtype": SCALE_DTYPES[0],
+            }
         return document
+
+
+def _pieces_document(pieces: Pieces, what: str) -> list[dict[str, Any]]:
+    """A piece list → the descriptor's `pieces` (2 or more — one is written as `block`)."""
+    if len(pieces) < 2:
+        raise ContainerFormatError(
+            f"The {what} `pieces` must have 2 or more entries (write one as `block`)"
+        )
+    return [{"block": block, "rows": [rows[0], rows[1]]} for block, rows in pieces]
 
 
 @dataclass(frozen=True)
@@ -649,21 +694,13 @@ class WeightSupply:
 
     encoding: BlockEncoding
     block: str | None = None
-    pieces: tuple[tuple[str, tuple[int, int]], ...] | None = None
+    pieces: Pieces | None = None
 
     def to_document(self) -> dict[str, Any]:
         if (self.block is None) == (self.pieces is None):
             raise ContainerFormatError("A supply form has exactly one of `block` and `pieces`")
         if self.pieces is not None:
-            if len(self.pieces) < 2:
-                raise ContainerFormatError(
-                    "`pieces` must have 2 or more entries (write one as `block`)"
-                )
-            supply: dict[str, Any] = {
-                "pieces": [
-                    {"block": block, "rows": [rows[0], rows[1]]} for block, rows in self.pieces
-                ]
-            }
+            supply: dict[str, Any] = {"pieces": _pieces_document(self.pieces, "supply")}
         else:
             supply = {"block": self.block}
         supply["encoding"] = self.encoding.to_document()
@@ -1324,6 +1361,43 @@ def _cut_rows(
     return cuts
 
 
+def _cut_scale(
+    scale_payload: int,
+    rows: int,
+    cuts: Sequence[tuple[tuple[int, int], int, int, bool]],
+    block_bytes: int,
+    where: str,
+) -> list[tuple[tuple[int, int], int, int, bool]]:
+    """The scale's blocks: one when it fits the block limit, otherwise one per data piece covering
+    the same rows (rule ③ — ADR 0108 addendum 15). Fails loudly at planning time when no split
+    fits.
+
+    MUST: a scale that fits stays one block (only then is the container byte-identical to a writer
+    without split scales — the descriptor's `scale` keeps `block`).
+    """
+    if align_up(scale_payload, BLOCK_TAIL_ALIGN) <= block_bytes:
+        return [((0, rows), 0, scale_payload, True)]
+    if len(cuts) == 1:
+        raise ContainerFormatError(
+            f"{where}: the scale of {scale_payload} bytes exceeds the block limit {block_bytes},"
+            " and the data is one block, so there are no piece boundaries to split it on"
+        )
+    # Pieces exist only for rowAxis 0 (rule ④ — checked by the caller first), so the scale's rows
+    # are the data's leading dimension.
+    row_bytes = scale_payload // rows
+    scale_cuts: list[tuple[tuple[int, int], int, int, bool]] = []
+    for index, ((begin, end), _, _, last) in enumerate(cuts):
+        length = (end - begin) * row_bytes
+        if align_up(length, BLOCK_TAIL_ALIGN) > block_bytes:
+            raise ContainerFormatError(
+                f"{where} scale {index}: rows [{begin}, {end}) of the scale are {length} bytes,"
+                f" over the block limit {block_bytes} (the data's pieces are too coarse for the"
+                " scale)"
+            )
+        scale_cuts.append(((begin, end), begin * row_bytes, end * row_bytes, last))
+    return scale_cuts
+
+
 @dataclass(frozen=True)
 class _TensorPlan:
     """The facts of one initializer that are "decided by the declaration" (decided without reading
@@ -1438,18 +1512,22 @@ def _build_const_region(
         scale_id: str | None = None
         if plan.scale_payload is not None:
             assert plan.encoding.scale_key is not None
-            scale_id = serial.next("cs")
-            builder.push(
-                scale_id,
-                _stored_chunk(
-                    plan.encoding.scale_key,
-                    plan.scale_payload,
-                    0,
-                    plan.scale_payload,
-                    True,
-                    f"{where} scale",
-                ),
+            scale_chunk = _stored_chunk(
+                plan.encoding.scale_key,
+                plan.scale_payload,
+                0,
+                plan.scale_payload,
+                True,
+                f"{where} scale",
             )
+            if scale_chunk.length > block_bytes:
+                # A const is one block, so its scale has no piece boundaries to split on (rule ③).
+                raise ContainerFormatError(
+                    f"{where}: the scale of a const must fit in one block but is"
+                    f" {scale_chunk.length} bytes (limit {block_bytes})"
+                )
+            scale_id = serial.next("cs")
+            builder.push(scale_id, scale_chunk)
         bindings.append(
             (
                 plan.name,
@@ -1511,6 +1589,11 @@ def _plan_data_parts(
                 f"{where}: an initializer with rowAxis {plan.encoding.row_axis} cannot be split"
                 " into pieces"
             )
+        scale_cuts = (
+            None
+            if plan.scale_payload is None
+            else _cut_scale(plan.scale_payload, plan.rows, cuts, block_bytes, where)
+        )
         piece_ids = [next_id("w", "weight") for _ in cuts]
         head: list[tuple[str, _Chunk]] = [
             (
@@ -1520,25 +1603,26 @@ def _plan_data_parts(
                 ),
             )
         ]
-        scale_id: str | None = None
-        if plan.scale_payload is not None:
-            assert plan.encoding.scale_key is not None
-            scale_id = next_id("s", "scale")
-            head.append(
-                (
-                    scale_id,
-                    _stored_chunk(
-                        plan.encoding.scale_key,
-                        plan.scale_payload,
-                        0,
-                        plan.scale_payload,
-                        True,
-                        f"{where} scale",
-                    ),
+        scale_ids: list[str] = []
+        if scale_cuts is not None:
+            assert plan.encoding.scale_key is not None and plan.scale_payload is not None
+            for index, (_, begin, end, last) in enumerate(scale_cuts):
+                scale_ids.append(next_id("s", "scale"))
+                head.append(
+                    (
+                        scale_ids[-1],
+                        _stored_chunk(
+                            plan.encoding.scale_key,
+                            plan.scale_payload,
+                            begin,
+                            end,
+                            last,
+                            f"{where} scale" if len(scale_cuts) == 1 else f"{where} scale {index}",
+                        ),
+                    )
                 )
-            )
-        # Rule ③: piece 1 and the scale share a part. The remaining pieces can be placed
-        # independently.
+        # Rule ③: piece 1 and the scale (every piece of a split scale) share a part. The remaining
+        # pieces can be placed independently.
         place_group(head, where)
         for index, (_, begin, end, last) in enumerate(cuts):
             if index == 0:
@@ -1554,11 +1638,18 @@ def _plan_data_parts(
                 ],
                 f"{where} piece {index}",
             )
+        quantized = scale_cuts is not None
+        scale_pieces: Pieces | None = None
+        if scale_cuts is not None and len(scale_cuts) > 1:
+            scale_pieces = tuple(
+                (scale_id, cut[0]) for scale_id, cut in zip(scale_ids, scale_cuts, strict=True)
+            )
         encoding = BlockEncoding(
             plan.encoding.codec,
-            None if scale_id is None else (plan.encoding.row_axis or 0),
-            None if scale_id is None else plan.encoding.group_size,
-            scale_id,
+            (plan.encoding.row_axis or 0) if quantized else None,
+            plan.encoding.group_size if quantized else None,
+            scale_ids[0] if quantized and scale_pieces is None else None,
+            scale_pieces,
         )
         supplies[plan.name] = (
             WeightSupply(encoding, block=piece_ids[0])
@@ -2175,18 +2266,57 @@ def _parse_encoding(value: Any, where: str) -> BlockEncoding:
     row_axis = _require_index(obj["rowAxis"], f"{where}.rowAxis")
     _require(row_axis in (0, 1), f"{where}.rowAxis must be 0 or 1 (declared {row_axis})")
     scale = _require_object(obj["scale"], f"{where}.scale")
-    _require_keys(scale, ["block", "dtype"], [], f"{where}.scale")
+    _require_keys(scale, ["dtype"], ["block", "pieces"], f"{where}.scale")
     _require(
         scale["dtype"] in SCALE_DTYPES,
         f"{where}.scale.dtype is not in the accepted set ({' / '.join(SCALE_DTYPES)}):"
         f" {scale['dtype']!r}",
     )
+    _require(
+        ("block" in scale) != ("pieces" in scale),
+        f"{where}.scale: write exactly one of 'block' (one block) and 'pieces' (split scale)",
+    )
+    group_size = _require_index(obj["groupSize"], f"{where}.groupSize")
+    if "block" in scale:
+        return BlockEncoding(
+            codec, row_axis, group_size, _require_block_id(scale["block"], f"{where}.scale.block")
+        )
     return BlockEncoding(
         codec,
         row_axis,
-        _require_index(obj["groupSize"], f"{where}.groupSize"),
-        _require_block_id(scale["block"], f"{where}.scale.block"),
+        group_size,
+        scale_pieces=_parse_pieces(scale["pieces"], f"{where}.scale.pieces"),
     )
+
+
+def _parse_pieces(value: Any, where: str) -> Pieces:
+    """A piece list (§5): 2 or more `{block, rows: [begin, end)}`, each non-empty, continuing
+    from row 0 without gaps. The one reader of both the data's `pieces` and a split scale's
+    `scale.pieces`."""
+    _require(isinstance(value, list), f"{where} is not an array")
+    pieces: list[tuple[str, tuple[int, int]]] = []
+    cursor = 0
+    for index, raw_piece in enumerate(value):
+        piece_where = f"{where}[{index}]"
+        piece = _require_object(raw_piece, piece_where)
+        _require_keys(piece, ["block", "rows"], [], piece_where)
+        rows = piece["rows"]
+        _require(
+            isinstance(rows, list) and len(rows) == 2, f"{piece_where}.rows is not of length 2"
+        )
+        begin = _require_index(rows[0], f"{piece_where}.rows[0]")
+        end = _require_index(rows[1], f"{piece_where}.rows[1]")
+        _require(end > begin, f"{piece_where}.rows [{begin}, {end}) is an empty range")
+        # Rule ④: cover the row range without gaps (the end = shape[0] is checked by the merge
+        # layer, which knows the declared shape).
+        _require(
+            begin == cursor,
+            f"{piece_where}: does not continue from row {cursor} (declared {begin})",
+        )
+        cursor = end
+        pieces.append((_require_block_id(piece["block"], f"{piece_where}.block"), (begin, end)))
+    _require(len(pieces) >= 2, f"{where} must have 2 or more entries")
+    return tuple(pieces)
 
 
 def _assert_block_shape(offset: int, length: int, where: str) -> None:
@@ -2354,6 +2484,13 @@ def _validate_graph_descriptor(descriptor: GraphDescriptor) -> None:
         _require(key not in seen, f"{entry_where}: duplicate (graph, initializer)")
         seen.add(key)
         claim(entry.block, entry_where)
+        # A const is one block (it has no piece list — §3), so there are no piece boundaries to
+        # split its scale on (rule ③).
+        _require(
+            entry.encoding.scale_pieces is None,
+            f"{entry_where}.encoding.scale: a const cannot have a split scale (a const has no"
+            " pieces — rule ③)",
+        )
         if entry.encoding.scale_block is not None:
             claim(entry.encoding.scale_block, f"{entry_where}.encoding.scale")
     for block_id in sorted(ids - referenced):
@@ -2371,29 +2508,7 @@ def _parse_supply(value: Any, where: str) -> WeightSupply:
     _require(has_block != has_pieces, f"{where}: write exactly one of 'block' and 'pieces'")
     if has_block:
         return WeightSupply(encoding, block=_require_block_id(obj["block"], f"{where}.block"))
-    pieces: list[tuple[str, tuple[int, int]]] = []
-    cursor = 0
-    for index, raw_piece in enumerate(obj["pieces"]):
-        piece_where = f"{where}.pieces[{index}]"
-        piece = _require_object(raw_piece, piece_where)
-        _require_keys(piece, ["block", "rows"], [], piece_where)
-        rows = piece["rows"]
-        _require(
-            isinstance(rows, list) and len(rows) == 2, f"{piece_where}.rows is not of length 2"
-        )
-        begin = _require_index(rows[0], f"{piece_where}.rows[0]")
-        end = _require_index(rows[1], f"{piece_where}.rows[1]")
-        _require(end > begin, f"{piece_where}.rows [{begin}, {end}) is an empty range")
-        # Rule ④: cover the row range without gaps (the end = shape[0] is checked by the merge
-        # layer, which knows the declared shape).
-        _require(
-            begin == cursor,
-            f"{piece_where}: does not continue from row {cursor} (declared {begin})",
-        )
-        cursor = end
-        pieces.append((_require_block_id(piece["block"], f"{piece_where}.block"), (begin, end)))
-    _require(len(pieces) >= 2, f"{where}.pieces must have 2 or more entries")
-    return WeightSupply(encoding, pieces=tuple(pieces))
+    return WeightSupply(encoding, pieces=_parse_pieces(obj["pieces"], f"{where}.pieces"))
 
 
 def _parse_model_descriptor(raw: bytes) -> ModelDescriptor:
@@ -2548,15 +2663,18 @@ def _validate_model_descriptor(descriptor: ModelDescriptor, codecs: Any) -> None
                     " rule ④)",
                 )
                 previous = part
-            if supply.encoding.scale_block is not None:
+            split = supply.encoding.scale_pieces is not None
+            for index, scale_block in enumerate(supply.encoding.scale_blocks):
                 # Rule ③: the companion scale is in the same part as the body (piece 1 for a
-                # piece sequence).
-                scale_part = claim(
-                    supply.encoding.scale_block, "scale", f"{entry_where}.encoding.scale"
-                ).part
+                # piece sequence) — every block of a split scale too (construction reads the
+                # whole scale with piece 1).
+                scale_where = f"{entry_where}.encoding.scale" + (
+                    f".pieces[{index}]" if split else ""
+                )
+                scale_part = claim(scale_block, "scale", scale_where).part
                 _require(
                     scale_part == first,
-                    f"{entry_where}.encoding.scale: scale is in part {scale_part}, the start of"
+                    f"{scale_where}: scale is in part {scale_part}, the start of"
                     f" the body in part {first} (MUST be the same part)",
                 )
     for name, asset in descriptor.assets.items():
@@ -2658,9 +2776,17 @@ class ReadContainer:
             self._located[block.id] = (1, block.offset, block.length, block.sha256)
         for block in model.blocks if model is not None else ():
             self._located[block.id] = (block.part, block.offset, block.length, block.sha256)
+        #: Split scales, read whole under their joined id (ADR 0108 addendum 15) → their pieces.
+        self._joined: dict[str, tuple[str, ...]] = {}
+        for supplies in model.binding.values() if model is not None else ():
+            for supply in supplies.values():
+                if supply.encoding.scale_pieces is not None:
+                    pieces = supply.encoding.scale_blocks
+                    self._joined[joined_scale_id(pieces)] = pieces
 
     @property
     def block_ids(self) -> list[str]:
+        """The declared blocks (joined scale ids are not blocks)."""
         return list(self._located)
 
     def _read(self, part: int, offset: int, length: int) -> bytes:
@@ -2678,7 +2804,14 @@ class ReadContainer:
 
     def block(self, block_id: str) -> bytes:
         """Take one block, compare it against the declared sha256 and return it (the cold path of
-        §7)."""
+        §7).
+
+        The joined id of a split scale (`InitializerSupply.scale.id` of `karume.verify` — ADR 0108
+        addendum 15) returns its pieces concatenated in row order, each verified like a block.
+        """
+        pieces = self._joined.get(block_id)
+        if pieces is not None:
+            return b"".join(self.block(piece) for piece in pieces)
         found = self._located.get(block_id)
         _require(found is not None, f"Undeclared block '{block_id}'")
         assert found is not None

@@ -1132,6 +1132,9 @@ one per block, no extra digest work), which is why the gain there is larger.
    4 concurrent fetches (decision 6), which the read-ahead depth does not change.
    `BlockSource.read` and `MemoryPiece.read` MUST take concurrent calls and MUST NOT overwrite bytes
    they returned earlier (stated on both types).
+   **Amended by addendum 15 (2026-11-03):** for an initializer whose scale is split, the riding
+   scale is the joined scale (the whole scale, up to 120 MiB for Gemma 4 12B's embedding), not one
+   block.
 4. **Stop.** When the build fails or the consumer stops early, the supply's iterator is returned:
    no read is issued after that, and the build rejects only once the reads in flight have settled
    (`readBlock` has no abort, so they are waited for, not cancelled; their bytes and errors are
@@ -1157,3 +1160,125 @@ on failure and on an early return, no pull after close); the per-block scope att
 addendum 13 stays pinned by `runtime_weight_upload_scope_test.ts`, whose fake device attributes
 calls by the scope pushes, because with the read-ahead a read no longer identifies the item being
 uploaded.
+
+## Addendum 15 (2026-11-03) — a quantized binding's scale may be split on the data's pieces
+
+**What broke.** Decision 5 caps a block at 32 MiB, and rule ③ of [container-v1](../container-v1.md)
+§5 put a quantized binding's companion scale in exactly one block, so a scale could not exceed
+32 MiB. An `int4-sym-g` scale holds one f32 per `groupSize` elements; with `groupSize` 32 the scale
+alone passes 32 MiB beyond 268,435,456 elements (8,388,608 scales × 32). The Gemma 4 embeddings
+imported as i4 g32 from the QAT grids need 48 MiB (E2B, `[262144, 1536]`), 80 MiB (E4B,
+`[262144, 2560]`) and 120 MiB (12B, `[262144, 3840]`) of scale. The writer planned the scale as one
+block without checking its length (const and asset blocks were checked, scale blocks were not), so
+the export ran to the end and failed only at the read-back
+(`modelDescriptor.blocks[1]: length 125829120 exceeds the block limit 33554432`).
+
+**Decision.**
+
+1. **Encoding.** `encoding.scale` takes `pieces` in place of `block`: the element of the supply
+   form's `pieces` (§5), `{ "block": <id>, "rows": [begin, end) }`, 2 or more, exclusive with
+   `block`:
+
+   ```jsonc
+   "scale": { "pieces": [{ "block": "s0017", "rows": [0, 17476] }, /* … */], "dtype": "f32" }
+   ```
+
+   A scale that fits one block MUST be written with `block`: the writer splits a scale only when
+   it exceeds the block limit, the same rule that splits the data.
+2. **Alignment (MUST).** A split scale goes with a data piece sequence only, and scale piece k
+   covers exactly the rows of data piece k along `rowAxis` (0 for every piece sequence — rule ④).
+   Its length is `rows × (rowLength / groupSize) × 4` bytes — for `int4-sym-g` g32,
+   `rows × rowLength / 8`, a quarter of the data piece. **Every scale piece is in the part of data
+   piece 1** (rule ③ extended — Session construction reads the whole scale with piece 1).
+3. **Reader rules** (TS: `parseEncoding` / `validateModelDescriptor` in `descriptor.ts`,
+   `planSplitScale` in `bind.ts`; Python mirror: `_parse_encoding` / `_validate_model_descriptor` in
+   `karume/container.py`, `_plan_split_scale` in `karume/verify.py`):
+   - structure, when parsing: 2 or more entries, exclusive with `block` (neither is rejected too),
+     each row range non-empty, continuing from row 0 (a gap or an overlap is rejected — the same
+     parser as the data's `pieces`);
+   - placement, in the descriptor check: each piece's block has role `"scale"`, is bound once
+     (rule ①), sits in the part of data piece 1 (rule ③) and is within the block limit (§4.1 —
+     the rule every block passes);
+   - alignment, in the merge layer: the data has a piece sequence, the piece counts are equal, the
+     rows are equal piece by piece, and each piece's length is its rows' bytes (a middle piece
+     exactly, the last one with less than 4 of padding). The total then equals the scale's payload
+     length, so it has no check of its own;
+   - a const cannot have a split scale (a const has no pieces — §3).
+4. **Writer** (`_cut_scale` / `_plan_data_parts` / `_build_const_region` in `karume/container.py`).
+   It fails loudly **while planning the layout, before any byte is written**, when no split fits:
+   the data is one block (no piece boundaries) or a scale piece would still exceed the limit (both
+   only for `int8-sym` rows shorter than 4 elements, the one ledger shape whose scale is larger than
+   its data), a const's scale exceeds the limit, or piece 1 and the whole scale do not fit one part
+   (the existing part check). This
+   also closes the missing up-front check for scale blocks. `zeroPoint` is not extended: no ledger
+   codec allows one; a codec that does would take the same `pieces` spelling.
+5. **Hand-off to Session construction: one contiguous scale.** The merge layer presents a split
+   scale as one scale (`ScaleSupply` in `bind.ts`, `ScaleSupply` in `karume/verify.py`): `id` is the
+   **joined id** (the pieces' block ids joined with `+`, which is outside the block-id vocabulary of
+   §0 and so never names a declared block), `payloadBytes` is the whole scale's, and `pieces` lists
+   the declared blocks. `readBlock` of the joined id (`open.ts`; Python `ReadContainer.block`)
+   reads the pieces one at a time, each verified like a block, into one new buffer. The
+   construction code (`containerBatches` in `executor.ts`, `session-build.ts`) and the kernels are
+   unchanged: they receive the scale with piece 1, byte for byte what an unsplit scale gives.
+
+**Why this encoding is the minimal one.**
+
+- **One new spelling, and it is an existing one.** The only addition is `pieces` inside
+  `encoding.scale`, and its element is the supply form's piece element. No new element shape, no
+  new key anywhere else, no version change.
+- **No second spelling of the unsplit case.** A scale that fits MUST stay `{ block, dtype }`, so a
+  container that needs no split is byte-identical to what the writer wrote before this addendum
+  (checked against the committed cross-language fixtures and against a sha256 of the previous
+  writer's output — `test_a_container_that_needs_no_split_is_the_bytes_the_writer_wrote_before` in
+  `tools/exporter/tests/test_container.py`), and readers read it exactly as before. A reader that
+  predates this addendum rejects a container with a split scale (missing `block`, unknown key
+  `pieces` — §0), so nothing is misread silently.
+- **The rows are written although they repeat the data's.** The alternatives: (a) a bare list of
+  block ids with the rows implied by position — a new element shape found nowhere else, which a
+  reader can check against nothing but its count; (b) a `scale` field in each element of the data's
+  `pieces` — it moves the scale out of `encoding`, which the const region and the in-memory
+  container share, and changes the piece element of every piece sequence. The repeated rows are a
+  copy the reader checks, like `packing` (§6.1), not an independently updated field: a writer that
+  cut the scale elsewhere fails loudly instead of drifting.
+- **One scale piece per data piece**, not a cut of its own at the limit: no new row boundaries, the
+  CPU decode of data piece k reads exactly the rows of scale piece k, and a later per-piece upload
+  can pair them without slicing.
+- **All in the part of piece 1**, not each next to its data piece: construction reads the whole
+  scale with piece 1, so pieces in later parts would make that read pull later parts early on the
+  scan path (the hub's one holding slot — addendum 14, "Residual"); and laying scale pieces between
+  data pieces would make the writer fetch the converted tensor again for every block (`_Payloads`
+  keeps one tensor only while the same key repeats).
+
+**Why not bind per piece.** Uploading scale piece k with data piece k would keep the riding scale
+inside the block limit, but it changes Session construction: `containerBatches` rides the scale only
+on piece 1, and `session-build.ts` writes it to the GPU whole (compressed residency) or copies it
+whole for the pieces that follow (CPU decoding) at piece 1. The joined read needs no change there and
+none in the kernels.
+
+**Consequence: the bound of addendum 14 item 3 and container-v1 §11.** For an initializer with a
+split scale the riding scale is the joined scale, not one block. The item at piece 1 holds piece 1 +
+the whole scale, the join briefly holds one scale piece on top, and a read ahead can be a joined
+scale; under CPU decoding the carried-over copy is the whole scale as before, now not bounded by the
+block limit either. The writer's plan for the Gemma 4 embeddings (`_cut_rows` / `_cut_scale` at the
+32 MiB limit):
+
+| Model | Embedding | Data pieces (rows each, last) | Scale | Scale pieces (bytes each, last) | Piece 1 + scale in part 2 |
+| --- | --- | --- | ---: | --- | ---: |
+| E2B | `[262144, 1536]` | 7 (43,690, last 4) | 48 MiB | 7 (8,388,480 B, last 768 B) | 80.0 MiB |
+| E4B | `[262144, 2560]` | 11 (26,214, last 4) | 80 MiB | 11 (8,388,480 B, last 1,280 B) | 112.0 MiB |
+| 12B | `[262144, 3840]` | 16 (17,476, last 4) | 120 MiB | 16 (8,388,480 B, last 1,920 B) | 152.0 MiB |
+
+So the seek-type bound of "at most 128 MiB for a `krm`" becomes three blocks + the largest joined
+scale (about 216 MiB for 12B); on the scan path the joined scale is a copy on top of the holding
+slot (the pieces are views of the part, the join is not). Writing a split
+scale's pieces to the GPU one at a time at piece 1 (they are all in that part) would restore the
+block bound; it is a construction change and is not part of this addendum.
+
+Pinned by `tools/exporter/tests/test_container.py` (`TestASplitScale`,
+`TestTheSplitScaleFailsLoudlyAtPlanning`, `TestTheReaderRejectsABrokenSplitScale`, the split-scale
+fixture), `tools/exporter/tests/test_verify_container.py` (`TestASplitScale` — the merge-layer
+rules on hand-built descriptors), `packages/runtime/tests/container_split_scale_test.ts` (writer →
+reader, `containerBatches`, every reader rejection), `container_fixture_test.ts` (the
+Python-written `synthetic-split-scale.krm` read by the TS reader, canonical serialization) and
+`gpu_split_scale_test.ts` (the same output bytes as a one-block scale under compressed residency and
+under CPU decoding). Spec: [container-v1](../container-v1.md) §3, §5 rules ① / ③, §6.1, §11, §13.3.

@@ -19,7 +19,7 @@
  * byte-identical in the single and split forms — §8).
  */
 
-import { bindGraphs, type BoundGraph } from "./bind.ts";
+import { bindGraphs, type BoundGraph, type SupplyBlock } from "./bind.ts";
 import {
   asSha256Hex,
   type ConstBlockRecord,
@@ -130,6 +130,10 @@ export type OpenedContainer = {
   /**
    * Fetches and returns one block. When the source is not verified ({@link BlockSource.verified} is
    * false), its sha256 is verified (§7 — only unverified sources get a single digest per block).
+   *
+   * The id of a split scale (`InitializerSupply.scale.id` with `scale.pieces` set — ADR 0108
+   * addendum 15) returns its pieces concatenated in row order into one new buffer, each piece read
+   * and verified like a block (one at a time, so the read holds the whole scale + one piece).
    */
   readBlock(id: string): Promise<Uint8Array<ArrayBuffer>>;
   /**
@@ -348,7 +352,7 @@ export const openContainer = async (
     return found;
   };
 
-  const readBlock = async (id: string): Promise<Uint8Array<ArrayBuffer>> => {
+  const readDeclared = async (id: string): Promise<Uint8Array<ArrayBuffer>> => {
     const found = locate(id);
     const bytes = await source.read(found.part, found.record.offset, found.record.length);
     if (bytes.byteLength !== found.record.length) {
@@ -364,6 +368,33 @@ export const openContainer = async (
       );
     }
     return bytes;
+  };
+
+  // Split scales are read whole under their joined id (ADR 0108 addendum 15): construction takes
+  // one contiguous scale per binding, exactly as for an unsplit one.
+  const joinedScales = new Map<string, readonly SupplyBlock[]>();
+  for (const bound of Object.values(graphs)) {
+    for (const supply of bound.supplies.values()) {
+      if (supply.scale?.pieces !== undefined)
+        joinedScales.set(supply.scale.id, supply.scale.pieces);
+    }
+  }
+
+  const readBlock = async (id: string): Promise<Uint8Array<ArrayBuffer>> => {
+    const pieces = joinedScales.get(id);
+    if (pieces === undefined) return readDeclared(id);
+    const joined = new Uint8Array(
+      new ArrayBuffer(pieces.reduce((total, piece) => total + piece.length, 0)),
+    );
+    let cursor = 0;
+    // One piece at a time: the read holds the joined scale + one piece (each within the block
+    // limit), and the source sees one read at a time per joined scale.
+    for (const piece of pieces) {
+      const bytes = await readDeclared(piece.id);
+      joined.set(bytes, cursor);
+      cursor += bytes.byteLength;
+    }
+    return joined;
   };
 
   const asset: OpenedContainer["asset"] = (name) => {
@@ -397,7 +428,7 @@ export const openContainer = async (
           }
           return bytes;
         }
-        verifiedBlock ??= readBlock(binding.block);
+        verifiedBlock ??= readDeclared(binding.block);
         return (await verifiedBlock).subarray(offset, offset + length);
       },
     };

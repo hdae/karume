@@ -224,3 +224,56 @@ describe("split container fixture (Python writer)", () => {
     assertEquals(serializeModelDescriptor(parseModelDescriptor(modelBytes)), modelBytes);
   });
 });
+
+const SPLIT_SCALE_FIXTURE = new URL(
+  "./fixtures/container/synthetic-split-scale.krm",
+  import.meta.url,
+);
+
+/** The 2 documents of a single-form container (sliced out as their own buffers). */
+const documentsOf = (
+  bytes: Uint8Array<ArrayBuffer>,
+): { readonly graph: Uint8Array<ArrayBuffer>; readonly model: Uint8Array<ArrayBuffer> } => {
+  const header = readHeader(bytes);
+  const graphEnd = HEADER_BYTES + header.graphDescriptorLength;
+  return {
+    graph: bytes.subarray(HEADER_BYTES, graphEnd).slice(),
+    model: bytes.subarray(graphEnd, graphEnd + header.modelDescriptorLength).slice(),
+  };
+};
+
+describe("split-scale container fixture (Python writer — ADR 0108 addendum 15)", () => {
+  it("reads the split scale whole and the scale that fits as one block, every block verified", async () => {
+    const bytes = (await readFile(SPLIT_SCALE_FIXTURE)) as Uint8Array<ArrayBuffer>;
+    const container = await openContainer({ kind: "bytes", bytes });
+    for (const block of container.model?.blocks ?? []) {
+      assertEquals(await sha256Hex(await container.readBlock(block.id)), block.sha256, block.id);
+    }
+    const bound = container.graphs["synthetic-split-scale"];
+
+    // `w.weight`: 512 B of i4 in 4 pieces at the fixture's 128 B limit; its 256 B scale is split on
+    // the same rows, all in the part of piece 1 (rule ③).
+    const w = bound.supplies.get("w.weight");
+    assert(w?.scale?.pieces !== undefined, "the Python writer did not split the scale");
+    assertEquals(
+      w.scale.pieces.map((piece) => piece.rows),
+      w.blocks.map((block) => block.rows),
+    );
+    assertEquals(w.scale.pieces.length, 4);
+    assertEquals(new Set(w.scale.pieces.map((piece) => piece.part)), new Set([w.blocks[0].part]));
+    assertEquals(await container.readBlock(w.scale.id), patternBytes(16 * 4 * 4, 62));
+
+    // `v.weight`: piece-split too, but its 32 B scale fits one block.
+    const v = bound.supplies.get("v.weight");
+    assertEquals(v?.blocks.length, 2);
+    assertEquals(v?.scale?.pieces, undefined);
+    assertEquals(await container.readBlock(v?.scale?.id ?? ""), patternBytes(8 * 4, 64));
+  });
+
+  it("the 2 documents equal their canonical serialization (parse → serialize, byte-identical)", async () => {
+    const documents = documentsOf((await readFile(SPLIT_SCALE_FIXTURE)) as Uint8Array<ArrayBuffer>);
+
+    assertEquals(serializeGraphDescriptor(parseGraphDescriptor(documents.graph)), documents.graph);
+    assertEquals(serializeModelDescriptor(parseModelDescriptor(documents.model)), documents.model);
+  });
+});

@@ -21,6 +21,8 @@
  * - Group granularity: for a per-channel codec `groupSize` = row length; for the group codec a power
  *   of two ≥ 16 that divides the row length
  * - Scale block length = `shape[rowAxis] · (row length / groupSize) · 4` (+ padding)
+ * - A split scale goes with a piece list only: one scale piece per data piece, each covering the
+ *   same rows, middle pieces without padding (rule ③ — ADR 0108 addendum 15)
  * - The declared shape for the i2 path (`int2-off` / `ternary`) is positive rank 2 with a row length
  *   that is a multiple of 16
  */
@@ -41,6 +43,7 @@ import type {
   Encoding,
   GraphDescriptor,
   ModelDescriptor,
+  WeightPiece,
   WeightSupply,
 } from "./descriptor.ts";
 import { ContainerFormatError } from "./header.ts";
@@ -82,13 +85,35 @@ export type SupplyBlock = {
   readonly payloadBytes: number;
 };
 
+/**
+ * The companion scale of a quantized supply, handed to construction as **one contiguous scale**
+ * whether or not it is split.
+ *
+ * Unsplit, it is the one declared block and `pieces` is absent. Split (container-v1 §5 rule ③ —
+ * ADR 0108 addendum 15), `pieces` holds the declared blocks in row order, piece k covering the rows
+ * of the data's piece k, and the fields above describe the **joined read**: `id` is
+ * {@link joinedScaleId} of the pieces (not a declared block — the key under which the opened
+ * container's `readBlock` returns the pieces concatenated, each verified), `length` is the byte
+ * count that read returns, `offset` is the first piece's, and `part` is the part every piece is in.
+ */
+export type ScaleSupply = SupplyBlock & { readonly pieces?: readonly SupplyBlock[] };
+
+/**
+ * The id under which a split scale is read whole: its pieces' block ids joined with `+`.
+ *
+ * `+` is outside the block-id vocabulary (§0), so a joined id never names a declared block, and the
+ * spelling is the same on every reader that derives it from the same descriptor (the Python mirror
+ * is `joined_scale_id` in `tools/exporter/src/karume/container.py`).
+ */
+export const joinedScaleId = (pieceIds: readonly string[]): string => pieceIds.join("+");
+
 /** The supply plan of one initializer (which blocks the data comes from). */
 export type InitializerSupply = {
   readonly encoding: Encoding;
   /** The data's block list (one when whole). */
   readonly blocks: readonly SupplyBlock[];
-  /** The companion scale's block (quantized codecs only). */
-  readonly scale?: SupplyBlock;
+  /** The companion scale (quantized codecs only) — one contiguous scale even when split. */
+  readonly scale?: ScaleSupply;
   readonly zeroPoint?: SupplyBlock;
   /**
    * Supply origin: the const region (part 1, owned by the graph) or the weight side (model
@@ -196,6 +221,73 @@ const rowBytesOfPayload = (payload: number, shape: readonly number[], where: str
     );
   }
   return payload / rows;
+};
+
+/**
+ * The plan of a split scale (§5 rule ③ — ADR 0108 addendum 15): one scale block per data piece,
+ * piece k covering exactly the rows of data piece k, its length `rows · (rowLength / groupSize) · 4`
+ * (middle pieces exactly, the last one with padding under 4). The descriptor parse has already
+ * checked that the list has 2 or more entries continuing from row 0 without gaps.
+ */
+const planSplitScale = (
+  where: string,
+  dataIsPieced: boolean,
+  data: readonly SupplyBlock[],
+  pieces: readonly WeightPiece[],
+  scale: { readonly rowCount: number; readonly payload: number; readonly locate: Locator },
+): ScaleSupply => {
+  const by = `${where} scale`;
+  // A split scale follows the data's pieces, so data in one block has no boundaries to split it on
+  // (the writer fails loudly instead — `_cut_scale` in `karume/container.py`).
+  if (!dataIsPieced) {
+    fail(`${by}: a split scale needs a piece list (the scale is split on the data's pieces)`);
+  }
+  if (pieces.length !== data.length) {
+    fail(
+      `${by}: ${pieces.length} scale pieces for ${data.length} data pieces (one scale piece per data piece — rule ③)`,
+    );
+  }
+  // The data's piece list exists only for rowAxis 0 (rule ④), so the scale's rows are the data's
+  // leading dimension and one scale row is `payload / rowCount` bytes.
+  const rowBytes = scale.payload / scale.rowCount;
+  const planned = pieces.map((piece, i): SupplyBlock => {
+    const pieceBy = `${by} piece[${i}]`;
+    const rows = data[i].rows;
+    if (piece.rows[0] !== rows[0] || piece.rows[1] !== rows[1]) {
+      fail(
+        `${pieceBy}: rows [${piece.rows[0]}, ${piece.rows[1]}) differ from the rows [${rows[0]}, ${rows[1]}) of data piece ${i} (rule ③)`,
+      );
+    }
+    const found = scale.locate(piece.block, pieceBy);
+    const pieceBytes = (rows[1] - rows[0]) * rowBytes;
+    if (i < pieces.length - 1) {
+      // A middle piece carries no padding (§4.1 — the same rule as the data's middle pieces).
+      if (found.record.length !== pieceBytes) {
+        fail(
+          `${pieceBy}: block '${found.record.id}' length ${found.record.length} differs from the ${pieceBytes} bytes of its rows (a middle piece has no padding)`,
+        );
+      }
+    } else {
+      assertPadded(found.record, pieceBytes, pieceBy);
+    }
+    return {
+      id: found.record.id,
+      part: found.part,
+      offset: found.record.offset,
+      length: found.record.length,
+      rows: [rows[0], rows[1]],
+      payloadBytes: pieceBytes,
+    };
+  });
+  return {
+    id: joinedScaleId(planned.map((piece) => piece.id)),
+    part: planned[0].part,
+    offset: planned[0].offset,
+    length: planned.reduce((total, piece) => total + piece.length, 0),
+    rows: [0, scale.rowCount],
+    payloadBytes: scale.payload,
+    pieces: planned,
+  };
 };
 
 const planSupply = (
@@ -384,20 +476,29 @@ const planSupply = (
   }
   const scaleRef = encoding.scale;
   if (scaleRef === undefined) fail(`${where}: codec '${encoding.codec}' requires a scale`);
-  const scaleFound = locate(scaleRef.block, `${where} scale`);
   const scalePayload = declaredScaleBytes(
     numelOf(groupScaleShape(shape, rowAxis, groupSize)),
     `${where} scale`,
   );
-  assertPadded(scaleFound.record, scalePayload, `${where} scale`);
-  const scale: SupplyBlock = {
-    id: scaleFound.record.id,
-    part: scaleFound.part,
-    offset: scaleFound.record.offset,
-    length: scaleFound.record.length,
-    rows: [0, rowCount],
-    payloadBytes: scalePayload,
-  };
+  let scale: ScaleSupply;
+  if (scaleRef.pieces === undefined) {
+    const scaleFound = locate(scaleRef.block, `${where} scale`);
+    assertPadded(scaleFound.record, scalePayload, `${where} scale`);
+    scale = {
+      id: scaleFound.record.id,
+      part: scaleFound.part,
+      offset: scaleFound.record.offset,
+      length: scaleFound.record.length,
+      rows: [0, rowCount],
+      payloadBytes: scalePayload,
+    };
+  } else {
+    scale = planSplitScale(where, supply.pieces !== undefined, blocks, scaleRef.pieces, {
+      rowCount,
+      payload: scalePayload,
+      locate,
+    });
+  }
   if (encoding.zeroPoint === undefined) return { encoding, blocks, scale, origin };
   const zeroFound = locate(encoding.zeroPoint.block, `${where} zeroPoint`);
   const zeroPoint: SupplyBlock = {

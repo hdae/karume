@@ -23,6 +23,7 @@ import {
   type ModelDescriptor,
   type PartRecord,
   type Provenance,
+  type ScaleRef,
   serializeGraphDescriptor,
   serializeModelDescriptor,
   sha256Hex,
@@ -101,7 +102,11 @@ export type WrittenContainer = {
 
 const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
 
-const resolveEncoding = (input: EncodingInput, scaleBlock: string | undefined): Encoding => {
+const resolveEncoding = (
+  input: EncodingInput,
+  scaleBlock: string | undefined,
+  scalePieces?: readonly { readonly block: string; readonly rows: readonly [number, number] }[],
+): Encoding => {
   const entry = codecEntry(input.codec);
   if (entry.scale === "forbidden") {
     if (input.scale !== undefined || input.groupSize !== undefined || input.rowAxis !== undefined) {
@@ -111,15 +116,20 @@ const resolveEncoding = (input: EncodingInput, scaleBlock: string | undefined): 
     }
     return { codec: input.codec, packing: entry.packing };
   }
-  if (input.scale === undefined || input.groupSize === undefined || scaleBlock === undefined) {
+  if (input.scale === undefined || input.groupSize === undefined) {
     throw new ContainerFormatError(`codec '${input.codec}' は scale と groupSize が要る`);
   }
+  const dtype = input.scale.dtype;
+  let scale: ScaleRef;
+  if (scalePieces !== undefined) scale = { pieces: scalePieces, dtype };
+  else if (scaleBlock !== undefined) scale = { block: scaleBlock, dtype };
+  else throw new ContainerFormatError(`codec '${input.codec}' は scale の block が要る`);
   return {
     codec: input.codec,
     packing: entry.packing,
     rowAxis: input.rowAxis ?? 0,
     groupSize: input.groupSize,
-    scale: { block: scaleBlock, dtype: input.scale.dtype },
+    scale,
   };
 };
 
@@ -299,6 +309,35 @@ const cutPieces = (
   return cuts;
 };
 
+/**
+ * The scale's blocks (mirrors `_cut_scale` of the Python writer): one when it fits the block limit,
+ * otherwise one per data piece covering the same rows (rule ③ — ADR 0108 addendum 15).
+ */
+const cutScale = (
+  bytes: Uint8Array<ArrayBuffer>,
+  rows: number,
+  cuts: readonly PieceCut[],
+  blockBytes: number,
+  path: string,
+): readonly PieceCut[] => {
+  if (alignUp(bytes.byteLength, BLOCK_TAIL_ALIGN) <= blockBytes) {
+    return [{ rows: [0, rows], bytes, last: true }];
+  }
+  if (cuts.length === 1) {
+    throw new ContainerFormatError(
+      `${path}: the scale exceeds the block limit and the data is one block (no piece boundaries)`,
+    );
+  }
+  const rowBytes = bytes.byteLength / rows;
+  return cuts.map((cut, i) => {
+    const piece = bytes.subarray(cut.rows[0] * rowBytes, cut.rows[1] * rowBytes);
+    if (alignUp(piece.byteLength, BLOCK_TAIL_ALIGN) > blockBytes) {
+      throw new ContainerFormatError(`${path} scale ${i}: over the block limit ${blockBytes}`);
+    }
+    return { rows: cut.rows, bytes: piece, last: cut.last };
+  });
+};
+
 type DataPlan = {
   readonly parts: readonly PartBuilder[];
   readonly roles: ReadonlyMap<string, DataBlockRecord["role"]>;
@@ -343,6 +382,10 @@ const planDataParts = (input: ModelInput, partBytes: number, blockBytes: number)
     const path = `weight ${tensor.graph}/${tensor.initializer}`;
     const rows = assertPayloadLength(input, tensor, path);
     const cuts = cutPieces(tensor.bytes, rows, blockBytes, path);
+    const scaleCuts =
+      tensor.encoding.scale === undefined
+        ? undefined
+        : cutScale(tensor.encoding.scale.bytes, rows, cuts, blockBytes, path);
     const pieceIds = cuts.map(() => nextId("w", "weight"));
     const head = [
       {
@@ -350,15 +393,15 @@ const planDataParts = (input: ModelInput, partBytes: number, blockBytes: number)
         payload: storedPayload(cuts[0].bytes, cuts[0].last, `${path} piece 0`),
       },
     ];
-    let scaleId: string | undefined;
-    if (tensor.encoding.scale !== undefined) {
-      scaleId = nextId("s", "scale");
+    const scaleIds: string[] = [];
+    for (const [i, cut] of (scaleCuts ?? []).entries()) {
+      scaleIds.push(nextId("s", "scale"));
       head.push({
-        id: scaleId,
-        payload: storedPayload(tensor.encoding.scale.bytes, true, `${path} scale`),
+        id: scaleIds[i],
+        payload: storedPayload(cut.bytes, cut.last, `${path} scale ${i}`),
       });
     }
-    // 規則③: piece 1 と scale は同一 part。残りの piece は独立に置ける。
+    // 規則③: piece 1 と scale（分割 scale なら全 piece）は同一 part。残りの piece は独立に置ける。
     placeGroup(head, path);
     for (const [i, cut] of cuts.entries()) {
       if (i === 0) continue;
@@ -372,7 +415,13 @@ const planDataParts = (input: ModelInput, partBytes: number, blockBytes: number)
         `${path} piece ${i}`,
       );
     }
-    const encoding = resolveEncoding(tensor.encoding, scaleId);
+    const encoding = resolveEncoding(
+      tensor.encoding,
+      scaleIds.length === 1 ? scaleIds[0] : undefined,
+      scaleCuts !== undefined && scaleCuts.length > 1
+        ? scaleCuts.map((cut, i) => ({ block: scaleIds[i], rows: cut.rows }))
+        : undefined,
+    );
     const supply: WeightSupply =
       cuts.length === 1
         ? { block: pieceIds[0], encoding }

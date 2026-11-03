@@ -2139,10 +2139,12 @@ reader, writer and checks can share the same row rule (rule ④ of [container-v1
 shapes cannot be distributed, and export fails loudly (`karume.container`): a tensor where one row (the bytes of one entry of the leading dimension) exceeds
 the block limit (e.g. an f32 of shape `[2, 2^24]` — 64 MiB per row), an initializer with `rowAxis` 1 over 32 MiB
 (the scale's row range does not correspond to the piece's row range, so it cannot be split), and a const over 32 MiB (consts have no
-piece mechanism — container-v1 §10). A quantized initializer whose scale held in 1 block exceeds 32 MiB cannot be
-distributed either. What rejects this is not the writer but the block length check when publish re-reads the container it wrote
-(`read_container` in `karume.container`), and both the recipes and `karume migrate` go through publish.
-No real asset is affected.
+piece mechanism — container-v1 §10). A quantized initializer whose companion scale exceeds 32 MiB is split on the
+data's pieces, one scale block per piece covering the same rows ([ADR 0108 addendum 15](decisions/0108-container-format.md));
+what still cannot be distributed is such a scale when the data is one block (no piece boundaries to split on), a scale
+piece over the limit, and a const whose scale is over the limit. The writer rejects those at planning time, before any
+file is written (`_cut_scale` in `karume.container`). Gemma 4's i4 g32 embeddings (scales of 48 / 80 / 120 MiB for
+E2B / E4B / 12B) are the real assets that take the split form.
 
 ## Distribution: the old distribution form (one safetensors file / a list of shards, manifest `karume/4` or earlier) cannot be read — migrate with `karume migrate` (`--manifest` for a whole repository for `karume/4`, positional arguments per component before that — ADR 0108 decision 18)
 

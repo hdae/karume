@@ -63,6 +63,13 @@ by the migration CLI (§12). Rationale: the Consequences of ADR [0108](decisions
 - v1 correction 6 (2026-10-11, ruling): state in §6.1 that the reader's merge layer rejects
   quantized weights with zero rows (`shape[rowAxis] = 0`) (real models have no use for them — an
   empty weight is not created at all, initializer included).
+- v1 extension 7 (2026-11-03, ADR [0108](decisions/0108-container-format.md) addendum 15): ① a
+  quantized binding's scale that one block cannot hold is split on the data's pieces —
+  `encoding.scale.pieces` (§6.1), one scale block per data piece over the same rows, all in the part
+  of piece 1 (rule ③ of §5) ② the writer checks scale blocks against the block limit when it plans
+  the layout, before any byte is written ③ §11 counts a split scale as the joined scale it rides
+  with piece 1. A strict superset: a container with no split scale is spelled and read exactly as
+  before.
 
 ## 0. Notation and common rules
 
@@ -338,6 +345,9 @@ i4. Hence only part 0 is fetched at preparation, and **const is fetched when it 
 Const has no piece-splitting mechanism (only the weight binding table can express a piece sequence,
 and a `krg` does not have it — §9), so a const above the limit **cannot be represented**. The largest
 today is birefnet 2048's f32 constant of 29.3 MB, leaving only about 2.7 MB of margin to 32 MiB.
+For the same reason a const's scale cannot be split (a split scale follows the data's pieces —
+rule ③ of §5): a const whose scale exceeds the limit also stops the writer, and the reader rejects
+`scale.pieces` on a `const.constants` entry.
 
 **Open** (to be ruled when a real need appears; no escape hatch is built now): ① allow piece
 sequences for const too (= a minimal weight binding table comes back to `krg`) ② give const alone
@@ -493,7 +503,7 @@ checked against**. Writing it into the binding table fails loudly as a surplus.
 
 - **① 1 block ≤ 1 binding** (1 body, 1 initializer). Two bindings pointing to the same block id
   fail loudly. One initializer **used by several nodes** is allowed (that is a different matter).
-  Scale / zero-point blocks likewise belong to only one binding.
+  Scale / zero-point blocks likewise belong to only one binding (each piece of a split scale too).
 - **② The length and offset of every block are multiples of 4.** Offsets are covered by the 64 B
   alignment rule (§4.1). For lengths, this **generalises** the old rule "the block length of a
   non-final piece is a multiple of 4". The writer bakes trailing padding (§4.1), so the reader needs
@@ -509,6 +519,24 @@ checked against**. Writing it into the binding table fails loudly as a surplus.
     `4/gcd(rowBytes, 4)`, and fails loudly when it cannot round.
 - **③ The companion scale block is in the same part as the body.** For a piece sequence, **in the
   same part as piece 1**. Zero-point blocks follow the same rule.
+  - **A scale that one block cannot hold is split on the data's pieces** (ADR 0108 addendum 15):
+    `encoding.scale.pieces` in place of `scale.block` (§6.1), **one scale block per data piece**,
+    scale piece k covering exactly the rows of data piece k along `rowAxis` (`rowAxis` is 0 for
+    every piece sequence — rule ④). Its length is `rows × (rowLength / groupSize) × 4` bytes — for
+    `int4-sym-g` with `groupSize` 32 that is `rows × rowLength / 8`. **Every scale piece is in the
+    same part as data piece 1** (Session construction reads the whole scale with piece 1).
+  - The writer splits a scale **only when it exceeds the block limit** (the same rule that splits
+    the data); a scale that fits MUST be one `scale.block`. When no split fits — the data is one
+    block, or a scale piece would still exceed the limit, or piece 1 and the whole scale exceed one
+    part — the writer fails loudly while planning the layout, before any byte is written.
+  - The reader rejects, with the path of the field: `pieces` with fewer than 2 entries or together
+    with `block` (or neither); an empty row range, a gap or an overlap (the pieces continue from
+    row 0 — checked when parsing); a piece block whose role is not `"scale"`, that is bound twice,
+    that is outside the part of data piece 1, or that exceeds the block limit (§4.1); and in the
+    merge layer, a split scale beside data in one block, a piece count other than the data's, rows
+    other than the data piece's, or a piece length other than its rows' bytes (a middle piece has
+    no padding; the last one may have less than 4). The total then equals the scale's payload
+    length (coverage + per-piece lengths), so it has no check of its own.
 - **④ Pieces cover the row range without gaps, and their parts are non-decreasing in index order**
   (MUST — the construction side does its bookkeeping on the assumption that piece 1 is in the first
   part. Reverse order is rejected by `openContainer` — 2026-09-25). `rows` in ascending order,
@@ -540,6 +568,20 @@ checked against**. Writing it into the binding table fails loudly as a surplus.
 }
 ```
 
+A split scale (rule ③ of §5 — the scale of a piece sequence that one block cannot hold) spells
+`scale` with the piece element of §5 instead of `block`:
+
+```jsonc
+"scale": {
+  "pieces": [
+    { "block": "s0017", "rows": [0, 17476] },
+    { "block": "s0018", "rows": [17476, 34952] }
+    // … one per data piece, the same rows as the data's pieces
+  ],
+  "dtype": "f32"
+}
+```
+
 | field                   | type   | required  | rules and limits                                                                                                                           |
 | ----------------------- | ------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `codec`                 | string | required  | registered name in the ledger (§6.3). **A name not in the ledger is rejected before weights are fetched**                                  |
@@ -548,9 +590,13 @@ checked against**. Writing it into the binding table fails loudly as a surplus.
 | `packing.alignBytes`    | u32    | required  | one of `1 / 2 / 4 / 8 / 16 / 64`. Alignment requirement of the payload start                                                               |
 | `rowAxis`               | u32    | quantized | `0` or `1`. **The row axis**. Written only for codecs whose ledger `scale` is required (writing it for a non-quantized codec fails loudly) |
 | `groupSize`             | u32    | quantized | at least 1, MUST divide the row length. For a per-channel codec MUST **equal** the row length                                              |
-| `scale.block`           | string | quantized | block id of the scale. `role` MUST be `"scale"`                                                                                            |
+| `scale.block`           | string | quantized | block id of the scale. `role` MUST be `"scale"`. **Exclusive with `scale.pieces`**; a scale that fits one block MUST be written this way   |
+| `scale.pieces`          | array  | optional  | a split scale (rule ③ of §5): 2 or more `{ block, rows }`, scale piece k with the rows of data piece k; each `role` MUST be `"scale"`      |
 | `scale.dtype`           | string | quantized | one of the ledger's accepted set for `scale.dtype` (the first edition accepts only `"f32"`)                                                |
 | `zeroPoint.block`       | string | optional  | may be written only for codecs whose ledger `zeroPoint.allowed` is true (false for all 4 in the first edition ⇒ always omitted)            |
+
+`zeroPoint` has no split form: no ledger codec allows a zero-point, so none is defined until one does
+(it would take the same `pieces` spelling as `scale`).
 
 **The bit count is not part of the declaration.** It is a value derived from
 `packing.blockElements` / `packing.blockBytes` (`bits = blockBytes · 8 / blockElements`). With
@@ -943,7 +989,11 @@ Until a real need appears, **the writer stops with fail loudly**.
   holding slot, with no copy (`packages/hub/src/container.ts`).
 - **Session construction reads one item, uploads it and lets it go** (the batch loop of
   `packages/runtime/src/runtime/session-build.ts`). An item is one block; a whole initializer and
-  piece 1 also bring along the scale blocks that ride with them. `queue.writeBuffer` copies the bytes
+  piece 1 also bring along the scale blocks that ride with them. A split scale (rule ③ of §5) rides
+  as **one joined scale**: the reader reads its pieces one at a time, each verified like a block,
+  into one buffer of the whole scale's length (`readBlock` of its joined id — ADR 0108
+  addendum 15), so the item at piece 1 holds piece 1 + the whole scale, and the join briefly holds
+  one scale piece on top. `queue.writeBuffer` copies the bytes
   at the time of the call, so the reference to the item ends within that iteration (it is not held
   until the fence — "GPU transfer" below).
 - **The supply reads at most 2 blocks ahead of the item being uploaded, across part boundaries**
@@ -959,7 +1009,7 @@ by "GPU transfer" below.
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | ① the caller's holdings    | 0 for `krm`. For the in-memory container (`openMemoryContainer`), the `bytes` and companion scales the caller passed as whole supplies (the container holds them without copying). If the `read()` of `pieces` goes through a source, ③ follows the type of that source | same as the seek type                                                                                                                                               |
 | ② the item being processed | 1 block + the riding scale + under decoded residency its f32 decoded result (inversely proportional to the storage bit width — 8× the block for i4, 16× for i2) + for a piece sequence under decoded residency, the copy of the carried-over scale                      | the f32 decoded result under decoded residency + the copy of the carried-over scale (the block and the riding scale are views of ③'s buffer, so they are not added) |
-| ③ fetch retention          | the 2 blocks read ahead (each a tight view of its range — at most 2 × 32 MiB for a `krm`)                                                                                                                                                                                 | 1 hub holding slot (the part length) + buffers waiting for GC; while the read-ahead crosses a part boundary, the parts its blocks fall in (up to 3)                 |
+| ③ fetch retention          | the 2 blocks read ahead (each a tight view of its range — at most 2 × 32 MiB for a `krm`; a read ahead can be a joined split scale, whose length is the whole scale)                                                                                                       | 1 hub holding slot (the part length) + buffers waiting for GC; while the read-ahead crosses a part boundary, the parts its blocks fall in (up to 3)                 |
 | Closed by the declaration  | yes                                                                                                                                                                                                                                                                     | no (the number of buffers in ③ waiting for GC)                                                                                                                      |
 
 - **The copy of the carried-over scale**: in a piece sequence under decoded residency (the weight is
@@ -969,9 +1019,10 @@ by "GPU transfer" below.
   keep the scale's buffer (the scale's block for the seek type, the part's holding slot for the scan
   type) alive until the end of the sequence. In exchange, **one extra full copy of the scale lives for
   the duration of the piece sequence**. At piece 1, the view of the riding scale and the copy live at
-  the same time (2 scales). In a `krm`, scales are also inside the block limit (32 MiB). Compressed
-  residency (the weight stays packed and resident) takes no copy — the scale is written to the GPU as
-  is at piece 1.
+  the same time (2 scales). In a `krm`, a scale in one block is inside the block limit (32 MiB); a
+  split scale is not — the riding scale is the joined scale (120 MiB for Gemma 4 12B's i4 g32
+  embedding), and so is the copy. Compressed residency (the weight stays packed and resident) takes
+  no copy — the scale is written to the GPU as is at piece 1.
 - The estimate **closes by the declaration alone** for the seek type: from `parts[].length` and
   `blocks[].length`, the "maximum concurrent host RAM" can be computed before fetching a single byte
   (ADR 0089's approach). For the scan type, buffers waiting for GC pile up on the largest part, and
@@ -1159,7 +1210,8 @@ bindings are merged**, and on the merged representation the following run:
 - the full set of storage rules — scale required for quantized codecs / `groupSize` required for
   `int4-sym-g`, a power of 2 ≥ 16 / no groups for `int2-off` / row-length divisibility / payload
   length checked against block length / the piece checks (coverage of the leading dimension, no
-  padding in middle pieces, no splitting when `rowAxis != 0`)
+  padding in middle pieces, no splitting when `rowAxis != 0`) / the split-scale checks (beside a
+  piece sequence only, one scale piece per data piece over the same rows, per-piece lengths)
 - the checks, residency plan and estimate of `prepareContainer` (the stage after `mergedGraph`, which
   maps the merged representation to the execution graph)
 

@@ -42,6 +42,7 @@ from karume.container import (
     codec_entry,
     container_parts,
     group_count,
+    joined_scale_id,
     payload_bytes,
     per_channel_group_size,
     read_container,
@@ -1335,6 +1336,23 @@ class SupplyBlock:
 
 
 @dataclass(frozen=True)
+class ScaleSupply(SupplyBlock):
+    """The companion scale, handed over as **one contiguous scale** whether or not it is split
+    (mirrors TS `ScaleSupply`).
+
+    Unsplit, it is the one declared block and `pieces` is empty. Split (container-v1 §5 rule ③ —
+    ADR 0108 addendum 15), `pieces` holds the declared blocks in row order, piece k covering the
+    rows of the body's piece k, and the fields above describe the **joined read**: `id` is
+    {@link karume.container.joined_scale_id} of the pieces (not a declared block — the key under
+    which {@link karume.container.ReadContainer.block} returns the pieces concatenated), `length`
+    is the byte count that read returns, `offset` is the first piece's, and `part` is the part
+    every piece is in.
+    """
+
+    pieces: tuple[SupplyBlock, ...] = ()
+
+
+@dataclass(frozen=True)
 class InitializerSupply:
     """The supply plan of one initializer (which blocks the body comes from)."""
 
@@ -1344,8 +1362,8 @@ class InitializerSupply:
     #: The supplier. The const region (part 1, owned by the graph) or the weight side (model
     #: descriptor).
     origin: Literal["const", "model"]
-    #: The block of the companion scale (quantized codecs only).
-    scale: SupplyBlock | None = None
+    #: The companion scale (quantized codecs only) — one contiguous scale even when split.
+    scale: ScaleSupply | None = None
 
 
 @dataclass(frozen=True)
@@ -1505,7 +1523,7 @@ def _plan_supply(
     if entry.scale == "forbidden":
         return InitializerSupply(encoding, tuple(blocks), origin)
 
-    if encoding.row_axis is None or encoding.group_size is None or encoding.scale_block is None:
+    if encoding.row_axis is None or encoding.group_size is None or not encoding.scale_blocks:
         raise ContainerFormatError(
             f"{where}: codec '{encoding.codec}' is quantized, so rowAxis / groupSize / scale are"
             " required"
@@ -1536,13 +1554,77 @@ def _plan_supply(
                 f" by groupSize {group_size} (ADR 0069 decision 2)"
             )
     scale_bytes = row_count * group_count(row_length, group_size) * 4
-    scale = locate(encoding.scale_block, f"{where} scale")
-    _assert_padded(scale, scale_bytes, f"{where} scale")
+    if encoding.scale_pieces is not None:
+        scale = _plan_split_scale(
+            where, pieces is not None, blocks, encoding.scale_pieces, row_count, scale_bytes, locate
+        )
+        return InitializerSupply(encoding, tuple(blocks), origin, scale)
+    assert encoding.scale_block is not None
+    found = locate(encoding.scale_block, f"{where} scale")
+    _assert_padded(found, scale_bytes, f"{where} scale")
     return InitializerSupply(
         encoding,
         tuple(blocks),
         origin,
-        replace(scale, rows=(0, row_count), payload_bytes=scale_bytes),
+        ScaleSupply(found.id, found.part, found.offset, found.length, (0, row_count), scale_bytes),
+    )
+
+
+def _plan_split_scale(
+    where: str,
+    body_is_pieced: bool,
+    body: Sequence[SupplyBlock],
+    pieces: Sequence[tuple[str, tuple[int, int]]],
+    row_count: int,
+    payload: int,
+    locate: Callable[[str, str], SupplyBlock],
+) -> ScaleSupply:
+    """The plan of a split scale (rule ③ — ADR 0108 addendum 15; mirrors TS `planSplitScale`):
+    one scale block per body piece, piece k covering exactly the rows of body piece k, its length
+    `rows · (row length / groupSize) · 4` (middle pieces exactly, the last with padding under 4).
+    The reader has already checked that the list has 2 or more entries continuing from row 0."""
+    by = f"{where} scale"
+    # A split scale follows the body's pieces, so a body in one block has no boundaries to split
+    # it on (the writer fails loudly instead — `karume.container._cut_scale`).
+    if not body_is_pieced:
+        raise ContainerFormatError(
+            f"{by}: a split scale needs a piece list (the scale is split on the body's pieces)"
+        )
+    if len(pieces) != len(body):
+        raise ContainerFormatError(
+            f"{by}: {len(pieces)} scale pieces for {len(body)} body pieces (one scale piece per"
+            " body piece — rule ③)"
+        )
+    # A piece list exists only for rowAxis 0 (rule ④), so one scale row is `payload / row_count`.
+    row_bytes = payload // row_count
+    planned: list[SupplyBlock] = []
+    for index, ((block_id, rows), data) in enumerate(zip(pieces, body, strict=True)):
+        piece_by = f"{by} piece[{index}]"
+        if rows != data.rows:
+            raise ContainerFormatError(
+                f"{piece_by}: rows [{rows[0]}, {rows[1]}) differ from the rows"
+                f" [{data.rows[0]}, {data.rows[1]}) of body piece {index} (rule ③)"
+            )
+        found = locate(block_id, piece_by)
+        piece_bytes = (rows[1] - rows[0]) * row_bytes
+        if index < len(pieces) - 1:
+            # A middle piece carries no padding (§4.1 — the same rule as the body's pieces).
+            if found.length != piece_bytes:
+                raise ContainerFormatError(
+                    f"{piece_by}: block '{found.id}' length {found.length} differs from the"
+                    f" {piece_bytes} bytes of its rows (a middle piece has no padding)"
+                )
+        else:
+            _assert_padded(found, piece_bytes, piece_by)
+        planned.append(replace(found, rows=rows, payload_bytes=piece_bytes))
+    return ScaleSupply(
+        joined_scale_id([piece.id for piece in planned]),
+        planned[0].part,
+        planned[0].offset,
+        sum(piece.length for piece in planned),
+        (0, row_count),
+        payload,
+        tuple(planned),
     )
 
 
@@ -1590,20 +1672,23 @@ def bind_graphs(graph: GraphDescriptor, model: ModelDescriptor | None) -> dict[s
 _PLAIN_STORAGE_FOR: Mapping[str, str] = {"f32": "f32", "i32": "i32"}
 
 
-def _storage_document(encoding: BlockEncoding) -> dict[str, Any]:
+def _storage_document(supply: InitializerSupply) -> dict[str, Any]:
     """The binding table's `encoding` → the IR v1 `storage` descriptor (the inverse of
     {@link karume.container.Encoding}).
 
     In v1 `scale` is "the key of the scale tensor", but in the container the scale is a block, so
-    the **block id** is spelled as is (diagnostics name the actual thing). Only group codecs emit
-    `group_size` — old per-channel declarations have no `group_size`, and the container's
-    `groupSize` (= the row length) is a copy derivable from the ledger, so putting it back would
-    give "i8 with a group_size" (the shape the runtime support check rejects).
+    the **block id** is spelled as is (diagnostics name the actual thing — the joined id for a
+    split scale). Only group codecs emit `group_size` — old per-channel declarations have no
+    `group_size`, and the container's `groupSize` (= the row length) is a copy derivable from the
+    ledger, so putting it back would give "i8 with a group_size" (the shape the runtime support
+    check rejects).
     """
+    encoding = supply.encoding
     entry = codec_entry(encoding.codec)
     document: dict[str, Any] = {"dtype": entry.layout}
     if entry.scale == "required":
-        document["scale"] = encoding.scale_block
+        assert supply.scale is not None
+        document["scale"] = supply.scale.id
         if entry.grouping == "group":
             document["group_size"] = encoding.group_size
     return document
@@ -1640,7 +1725,7 @@ def ir_graph_from_container(read: ReadContainer, graph_name: str) -> IrGraph:
     for name, raw in declared.items():
         supply = supplies.get(name)
         if supply is not None:
-            initializers[name] = {"tensor": name, "storage": _storage_document(supply.encoding)}
+            initializers[name] = {"tensor": name, "storage": _storage_document(supply)}
             continue
         semantic = _as_object(values.get(name), f"{where}.values['{name}']").get("dtype")
         plain = _PLAIN_STORAGE_FOR.get(semantic) if isinstance(semantic, str) else None
