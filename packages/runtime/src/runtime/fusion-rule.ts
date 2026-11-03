@@ -318,6 +318,13 @@ export type FusionContext = {
    * linears is decided by `linearIntegerGemvVariant` in {@link "./linear-route.ts"} alone.
    */
   readonly integerGemv?: boolean;
+  /**
+   * Run the eligible i2 linears on the byte-plane GEMV (`SessionOptions.linearGemvPlanes`); which
+   * linears is decided by `linearPlanesGemvVariant` in {@link "./linear-route.ts"} alone. Such a
+   * linear reads f32 activations and keeps its own dispatch, so the packed pairing and the
+   * linear→SRQ rule leave it alone.
+   */
+  readonly linearGemvPlanes?: boolean;
   readonly linearGemvReduce?: LinearGemvReduce;
   readonly linearCompute?: "f32" | "f16" | "a8";
   /**

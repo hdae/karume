@@ -80,6 +80,7 @@ test("toSessionOptions: SessionSpec の全キーを写す（キー追加の取�
     fuseGeluMulStaticQuantize: false,
     packedStaticQuantize: false,
     integerGemv: false,
+    linearGemvPlanes: false,
   };
   const mapped = toSessionOptions(full) as Record<string, unknown>;
   assertEquals(Object.keys(mapped).sort(), Object.keys(full).sort());
@@ -93,6 +94,7 @@ test("toSessionOptions: 融合の明示falseとtrueを保持する", () => {
       fuseGeluMulStaticQuantize: value,
       packedStaticQuantize: value,
       integerGemv: value,
+      linearGemvPlanes: value,
     };
     assertEquals(toSessionOptions(spec), spec);
   }
@@ -113,6 +115,7 @@ const ALL: FamilySessionPolicy = {
   fuseGeluMulStaticQuantize: true,
   packedStaticQuantize: true,
   integerGemv: true,
+  linearGemvPlanes: true,
 };
 
 /** linear の実行形だけを受ける表（irodori / sbv2 と同じ形）。 */
@@ -128,6 +131,7 @@ const LINEAR_ONLY: FamilySessionPolicy = {
   fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
   integerGemv: false,
+  linearGemvPlanes: false,
 };
 
 /** 全キーを埋めた spec（キーが増えればこの宣言が型検査で落ちる）。 */
@@ -143,6 +147,7 @@ const FULL: Required<SessionSpec> = {
   fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
   integerGemv: false,
+  linearGemvPlanes: false,
 };
 
 /** 型の外から来る呼び手（JS の消費者）の明示指定を再現する — TS の型はこの経路を守らない。 */
@@ -218,6 +223,7 @@ describe("resolveSessionOptions: 受理できない指定", () => {
       fuseGeluMulStaticQuantize: "fuseGeluMulStaticQuantize must be a boolean",
       packedStaticQuantize: "packedStaticQuantize must be a boolean",
       integerGemv: "integerGemv must be a boolean",
+      linearGemvPlanes: "linearGemvPlanes must be a boolean",
     };
     for (const [key, message] of Object.entries(messages)) {
       for (const value of [null, 0, "bogus", [], object]) {
@@ -332,6 +338,17 @@ describe("resolveSessionOptions: 受理できない指定", () => {
         ),
       ModelInputError,
       requires,
+    );
+  });
+
+  it("accepts an explicit linearGemvPlanes on its own: it requires no other option", () => {
+    assertEquals(resolveSessionOptions(ALL, {}, { linearGemvPlanes: true }, "test"), {
+      linearGemvPlanes: true,
+    });
+    // An explicit false wins over a declaration, as for every key.
+    assertEquals(
+      resolveSessionOptions(ALL, { linearGemvPlanes: true }, { linearGemvPlanes: false }, "test"),
+      { linearGemvPlanes: false },
     );
   });
 });

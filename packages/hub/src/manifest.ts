@@ -206,6 +206,7 @@ const SESSION_KEYS: Readonly<Record<keyof Required<SessionSpec>, true>> = {
   fuseGeluMulStaticQuantize: true,
   packedStaticQuantize: true,
   integerGemv: true,
+  linearGemvPlanes: true,
 };
 
 export type LinearCompute = "f32" | "a8" | "f16";
@@ -394,6 +395,12 @@ export type SessionSpec = {
    * declaration without `packedStaticQuantize: true`.
    */
   readonly integerGemv?: boolean;
+  /**
+   * Runs the eligible i2 linears (the measured shapes — today the QAT E2B lm_head) on the byte-plane
+   * GEMV, which reads f32 activations (the runtime's `SessionOptions.linearGemvPlanes`). Needs no
+   * other key.
+   */
+  readonly linearGemvPlanes?: boolean;
 };
 
 /** GPU features needed before device creation (`shaderF16` only — ADR 0038 §3). */
@@ -983,6 +990,7 @@ const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
   const fuseGeluMulStaticQuantize = readBoolean(fail, raw, "fuseGeluMulStaticQuantize", at);
   const packedStaticQuantize = readBoolean(fail, raw, "packedStaticQuantize", at);
   const integerGemv = readBoolean(fail, raw, "integerGemv", at);
+  const linearGemvPlanes = readBoolean(fail, raw, "linearGemvPlanes", at);
   return {
     ...(linearCompute === undefined ? {} : { linearCompute }),
     ...(convCompute === undefined ? {} : { convCompute }),
@@ -995,6 +1003,7 @@ const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
     ...(fuseGeluMulStaticQuantize === undefined ? {} : { fuseGeluMulStaticQuantize }),
     ...(packedStaticQuantize === undefined ? {} : { packedStaticQuantize }),
     ...(integerGemv === undefined ? {} : { integerGemv }),
+    ...(linearGemvPlanes === undefined ? {} : { linearGemvPlanes }),
   };
 };
 

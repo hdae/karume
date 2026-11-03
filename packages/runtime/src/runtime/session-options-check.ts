@@ -193,6 +193,9 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
   if (options.integerGemv !== undefined && typeof options.integerGemv !== "boolean") {
     return "options.integerGemv must be a boolean";
   }
+  if (options.linearGemvPlanes !== undefined && typeof options.linearGemvPlanes !== "boolean") {
+    return "options.linearGemvPlanes must be a boolean";
+  }
   const {
     rmsNormReduce,
     linearCompute,

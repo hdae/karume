@@ -160,7 +160,11 @@ import {
   windowIsSingleOutput,
   windowTouchesState,
 } from "./fusion-rule.ts";
-import { linearIntegerGemvVariant, linearTakesI8a8 } from "./linear-route.ts";
+import {
+  linearIntegerGemvVariant,
+  linearPlanesGemvVariant,
+  linearTakesI8a8,
+} from "./linear-route.ts";
 import { ExecutionError, type NodePlan } from "./plan.ts";
 
 /**
@@ -655,6 +659,9 @@ const consumersByValue = (nodes: readonly NodePlan[]): ReadonlyMap<string, reado
  * Under `integerGemv`, an integer GEMV linear ({@link linearIntegerGemvVariant} — again the one
  * function the recipe builder's guard reads) also reads packed: the integer kernel takes nothing
  * else.
+ * Under `linearGemvPlanes`, a byte-plane GEMV linear ({@link linearPlanesGemvVariant} — the function
+ * the recipe builder's guard reads) never reads packed, whatever the tables below say: its kernel
+ * binds f32 quads only. Checked first, so the option decides the linear's route on its own.
  */
 const readsPackedActivation = (plan: NodePlan, name: string, context: FusionContext): boolean => {
   if (plan.node.op !== "linear" || plan.node.ins.length !== 3) return false;
@@ -664,6 +671,9 @@ const readsPackedActivation = (plan: NodePlan, name: string, context: FusionCont
   if (!allF32([plan])) return false;
   const weight = context.weightLayouts?.get(plan.node.ins[1]);
   if (weight === undefined || weight.storage === "f16" || weight.storage === "bf16") return false;
+  if (linearPlanesGemvVariant(context.linearGemvPlanes, plan, weight.storage) !== undefined) {
+    return false;
+  }
   const group = weight.storage === "i4" ? weight.groupSize : undefined;
   if (linearIntegerGemvVariant(context.integerGemv, plan, weight.storage, group) !== undefined) {
     return true;

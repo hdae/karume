@@ -17,6 +17,7 @@ type GemmaSessionOptions = Pick<
   | "fuseGeluMulStaticQuantize"
   | "packedStaticQuantize"
   | "integerGemv"
+  | "linearGemvPlanes"
 >;
 
 /**
@@ -40,6 +41,10 @@ type GemmaSessionOptions = Pick<
  * at those shapes, so on regular Gemma 4 it changes nothing beyond what its required packed
  * activations do.
  *
+ * `linearGemvPlanes` (the byte-plane GEMV of the i2 linears at its measured shapes — the QAT E2B
+ * lm_head) is accepted for the same reason: only the QAT graphs have i2 linears at those shapes, so
+ * on regular Gemma 4 it changes nothing.
+ *
  * NOTE: `export` is because the equivalence test runs every quant of the mirror through the same
  * table (not exposed on `mod.ts` / the subpath surface — ADR 0008).
  */
@@ -55,6 +60,7 @@ export const GEMMA_SESSION_POLICY: FamilySessionPolicy = {
   fuseGeluMulStaticQuantize: true,
   packedStaticQuantize: true,
   integerGemv: true,
+  linearGemvPlanes: true,
 };
 
 /**

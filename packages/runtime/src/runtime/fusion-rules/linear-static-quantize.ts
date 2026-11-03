@@ -34,7 +34,7 @@ import {
   internalsArePrivate,
   sameShape,
 } from "../fusion-rule.ts";
-import { linearIntegerGemvVariant } from "../linear-route.ts";
+import { linearIntegerGemvVariant, linearPlanesGemvVariant } from "../linear-route.ts";
 
 type LinearStaticQuantizeMatch = FusionMatch & {
   readonly binds: readonly string[];
@@ -116,6 +116,15 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<LinearStaticQuantizeMatch>
       return undefined;
     const weight = context.weightLayouts?.get(linear.node.ins[1]);
     if (weight === undefined || weight.storage === "f16" || weight.storage === "bf16") {
+      return undefined;
+    }
+    // A byte-plane GEMV linear (`linearPlanesGemvVariant` — the function buildLinear reads) keeps
+    // its own dispatch and the SRQ stays a node: taking the window would build the parallel GEMV in
+    // its place and leave the option silently without effect. The decision reads only the option
+    // and the linear, never the packed values, so both scans of planFusions still grab the same
+    // windows. No measured parallel row is a byte-plane shape today, so this rejects no window the
+    // rule would otherwise take.
+    if (linearPlanesGemvVariant(context.linearGemvPlanes, linear, weight.storage) !== undefined) {
       return undefined;
     }
     const m = numel(linear.inputShapes[0].slice(0, -1));

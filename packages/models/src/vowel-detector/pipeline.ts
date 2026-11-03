@@ -430,6 +430,7 @@ export const VOWEL_DETECTOR_SESSION_POLICY: FamilySessionPolicy = {
   fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
   integerGemv: false,
+  linearGemvPlanes: false,
 };
 
 /** Material settled by the family admission ({@link admitVowelDetector}). */

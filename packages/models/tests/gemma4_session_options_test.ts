@@ -150,6 +150,15 @@ describe("Gemmaのquant実行設定", () => {
       "test",
     );
   });
+  it("takes linearGemvPlanes explicitly on any preset, alone, at both entry points", () => {
+    // The byte-plane GEMV needs no other option: it joins the QAT i4-fast declaration or none.
+    assertEquals(resolve(fast, { linearGemvPlanes: true }, "test"), {
+      ...fast,
+      linearGemvPlanes: true,
+    });
+    assertEquals(resolve({}, { linearGemvPlanes: true }, "test"), { linearGemvPlanes: true });
+    assertGemmaSessionOverrides({ linearGemvPlanes: true }, "test");
+  });
   it("stateAttentionReduceは他の欄と同じ規則で解け、宣言が無ければ欄を作らない", () => {
     // 家族のコード既定は持たない（ADR 0104 追記 2026-09-26）。欄が無い = runtime の参照経路
     // `"sequential"` — `session` が空の `i4` 席と、GEMV だけを宣言する席がこの形になる。
@@ -195,6 +204,7 @@ describe("Gemmaのquant実行設定", () => {
       fuseGeluMulStaticQuantize: false,
       packedStaticQuantize: false,
       integerGemv: false,
+      linearGemvPlanes: false,
     };
     const accepted = [
       "linearGemvReduce",
@@ -204,6 +214,7 @@ describe("Gemmaのquant実行設定", () => {
       "fuseGeluMulStaticQuantize",
       "packedStaticQuantize",
       "integerGemv",
+      "linearGemvPlanes",
     ];
     const rejected: string[] = [];
     for (const key of Object.keys(full) as (keyof typeof full)[]) {
@@ -235,6 +246,7 @@ describe("Gemmaのquant実行設定", () => {
       ["fuseGeluMulStaticQuantize", "fuseGeluMulStaticQuantize must be a boolean"],
       ["packedStaticQuantize", "packedStaticQuantize must be a boolean"],
       ["integerGemv", "integerGemv must be a boolean"],
+      ["linearGemvPlanes", "linearGemvPlanes must be a boolean"],
     ] as const;
     for (const [key, message] of invalid) {
       for (const value of [null, 0, 1, [], object]) {

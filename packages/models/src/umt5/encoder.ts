@@ -212,6 +212,7 @@ export const UMT5_ENCODER_SESSION_POLICY: FamilySessionPolicy = {
   fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
   integerGemv: false,
+  linearGemvPlanes: false,
 };
 
 /** The material the family admission ({@link admitUmt5}) settles. */

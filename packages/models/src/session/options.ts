@@ -84,6 +84,8 @@ const WRITERS: { readonly [K in keyof Required<SessionSpec>]: SpecWriter } = {
   packedStaticQuantize: ({ packedStaticQuantize }) =>
     packedStaticQuantize === undefined ? {} : { packedStaticQuantize },
   integerGemv: ({ integerGemv }) => (integerGemv === undefined ? {} : { integerGemv }),
+  linearGemvPlanes: ({ linearGemvPlanes }) =>
+    linearGemvPlanes === undefined ? {} : { linearGemvPlanes },
 };
 
 /** Builds `SessionOptions` holding only the set fields (an unset key gets no field at all). */
@@ -176,6 +178,10 @@ const VALUE_GATES: {
     integerGemv === undefined || typeof integerGemv === "boolean"
       ? undefined
       : "integerGemv must be a boolean",
+  linearGemvPlanes: ({ linearGemvPlanes }) =>
+    linearGemvPlanes === undefined || typeof linearGemvPlanes === "boolean"
+      ? undefined
+      : "linearGemvPlanes must be a boolean",
 };
 
 /**

@@ -653,6 +653,7 @@ export const SBV2_SESSION_POLICY: FamilySessionPolicy = {
   fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
   integerGemv: false,
+  linearGemvPlanes: false,
 };
 
 /** Material settled by the family admission ({@link admitSbv2}). */

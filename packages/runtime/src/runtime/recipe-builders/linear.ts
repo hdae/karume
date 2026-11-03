@@ -55,9 +55,20 @@ import {
   integerGemvWgsl,
   integerGemvWorkgroups,
 } from "../../kernels/linear-gemv-integer.ts";
+import {
+  planesGemvKey,
+  planesGemvParams,
+  type PlanesGemvVariant,
+  planesGemvWgsl,
+  planesGemvWorkgroups,
+} from "../../kernels/linear-gemv-planes.ts";
 import { LINEAR_SCALE_BINDING, linearKey, linearParams, linearWgsl } from "../../kernels/linear.ts";
 import type { LinearPrologue, PackedActivations } from "../fusion.ts";
-import { linearIntegerGemvVariant, linearTakesI8a8 } from "../linear-route.ts";
+import {
+  linearIntegerGemvVariant,
+  linearPlanesGemvVariant,
+  linearTakesI8a8,
+} from "../linear-route.ts";
 import type { WeightStorage } from "../../kernels/weight-storage.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../../kernels/bmm.ts";
 import { i8a8TileM, i8a8TileN } from "../../kernels/i8a8-geometry.ts";
@@ -201,11 +212,23 @@ export const buildLinear = async (
     weightStorage,
     weightStorage === "i4" ? face.weightGroupSize(step) : undefined,
   );
+  // A byte-plane GEMV linear (`SessionOptions.linearGemvPlanes`): decided by the one function the
+  // packed pairing and the linear→SRQ rule read (src/runtime/linear-route.ts). Its branch is below,
+  // in place of the i2 GEMV family.
+  const planes = linearPlanesGemvVariant(face.state.linearGemvPlanes, step, weightStorage);
   // If a linear declared to receive packed activations (ADR 0105) lands on neither the parallel
   // GEMV's packed variant nor the integer GEMV, f32 words flow into the `vec4<u32>` binding = a
   // silent wrong value with no exception. The pairing is accepted in one place, fusion.ts, but it is
   // checked here too **with the same predicates** (fail loudly).
   if (packed !== undefined) {
+    // The opposite case of the byte-plane GEMV: it binds f32 quads, so packed words there would be
+    // read as f32. The pairing never packs for such a linear (the same predicate); fail loudly.
+    if (planes !== undefined) {
+      throw new ExecutionError(
+        `linear [${x.join(",")}] × [${weight.join(",")}]: ` +
+          "declared as packed activations (ADR 0105) but is a byte-plane GEMV linear, which reads f32 activations",
+      );
+    }
     const eligible =
       packed.role === "read" &&
       face.state.linearGemvReduce === "parallel" &&
@@ -333,6 +356,15 @@ export const buildLinear = async (
       undefined,
       undefined,
     );
+    return;
+  }
+  // The byte-plane GEMV (opt-in `linearGemvPlanes` — src/kernels/linear-gemv-planes.ts): an i2
+  // linear of a measured shape at M = 1..8 takes it in place of the i2 GEMV family below (today the
+  // M = 1 sequential GEMV or the row-block variant: no parallel GEMV row is a byte-plane shape). Its
+  // activation is f32 here (a packed one failed above), and i2 computes in f32 (checked at the top),
+  // which is all the kernel reads.
+  if (planes !== undefined) {
+    await buildLinearPlanesGemv(face, step, binds, outs, builder, planes, m, n, k);
     return;
   }
   const i4Unit = linearGemvUnit("i4");
@@ -568,6 +600,52 @@ const buildLinearIntegerGemv = async (
     ],
     workgroups: [
       tiledWorkgroups(integerGemvWorkgroups(n, variant), 1, limit, where),
+      tiledWorkgroups(m, 1, limit, where),
+      1,
+    ],
+  });
+};
+
+/**
+ * linear's **byte-plane GEMV** (`SessionOptions.linearGemvPlanes` — src/kernels/linear-gemv-planes.ts):
+ * an i2 linear of a measured shape whose activation arrives as f32.
+ *
+ * The bindings keep the linear's numbering (1 x / 2 w = the i2 words / 3 bias / 4 out / 5 the
+ * per-channel weight scale); a linear always binds its bias (arity 3).
+ * MUST: called only past `buildLinear`'s guard (the activation is f32 and the variant came from
+ * `linearPlanesGemvVariant`). The grid is `(workgroups(n), m)`, one workgroup per tile, so
+ * exceeding the limit fails loudly.
+ */
+const buildLinearPlanesGemv = async (
+  face: RecipeBuildFace,
+  step: NodePlan,
+  binds: readonly BindingSource[],
+  outs: readonly BindingSource[],
+  builder: StepRecipeBuilder,
+  variant: PlanesGemvVariant,
+  m: number,
+  n: number,
+  k: number,
+): Promise<void> => {
+  const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
+  const [x, weight] = step.inputShapes;
+  const where = `linear gemv planes [${x.join(",")}] × [${weight.join(",")}]`;
+  const key = planesGemvKey(variant);
+  const { pipeline, layout, roles } = await face.state.cache.get(key, planesGemvWgsl(variant));
+  const params = face.writeParams(planesGemvParams(m, n, k), PARAMS_UNIFORM_USAGE);
+  builder.dispatch({
+    key,
+    pipeline,
+    layout,
+    roles,
+    params,
+    bindings: [
+      ...binds.map((source, index) => ({ binding: index + 1, source })),
+      { binding: 4, source: outs[0] },
+      ...face.weightScaleBindings(step, LINEAR_SCALE_BINDING),
+    ],
+    workgroups: [
+      tiledWorkgroups(planesGemvWorkgroups(n, variant), 1, limit, where),
       tiledWorkgroups(m, 1, limit, where),
       1,
     ],

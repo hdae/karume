@@ -501,6 +501,18 @@ export type SessionOptions = {
    */
   readonly integerGemv?: boolean;
   /**
+   * Runs the eligible i2 linears on the **byte-plane GEMV** (default false — the kernel is
+   * src/kernels/linear-gemv-planes.ts). Needs no other option.
+   * It applies only to "a linear with i2 weights, M = 1..8 and a measured shape (today the QAT E2B
+   * lm_head, 262144 × 1536) whose activation arrives as f32"; such a linear never takes packed int8
+   * activations and is never folded into the linear→SRQ fusion. Every other linear keeps its path.
+   * The kernel adds the same exact products in another order and applies the channel scale once
+   * after the sum — contract class R of ADR 0110 (the reference op band against an f64 evaluation),
+   * so the generated sequence may differ from the option off. Two runs of the same input on one
+   * device are bit-identical.
+   */
+  readonly linearGemvPlanes?: boolean;
+  /**
    * The RMS reduction method (default workgroup). subgroup32 applies to RMS wider than 128 and to
    * the optional RMS→add fusion.
    * Requires acquireGpu({ subgroups: true }). Without it the option is rejected, with no automatic

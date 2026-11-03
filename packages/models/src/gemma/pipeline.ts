@@ -388,6 +388,14 @@ export type PipelineOptions = {
    */
   readonly integerGemv?: SessionOptions["integerGemv"];
   /**
+   * Runs the eligible i2 linears (the QAT E2B lm_head, at its measured shape) on the byte-plane
+   * GEMV. The runtime setting of the same name is the source of truth for its meaning and scope; it
+   * needs no other option. Resolved in the order explicit value → the selected quant's session → the
+   * runtime default, and passed to both target and drafter. Only the QAT graphs have i2 linears at
+   * that shape; fromAssets has no quant, so it is the runtime default when unspecified.
+   */
+  readonly linearGemvPlanes?: SessionOptions["linearGemvPlanes"];
+  /**
    * The optional RMS reduction. subgroup32 requires a supporting GPU and changes the addition order
    * from the reference (ADR 0100).
    */
@@ -1374,6 +1382,9 @@ export class GemmaPipeline {
         ? {}
         : { packedStaticQuantize: options.packedStaticQuantize }),
       ...(options.integerGemv === undefined ? {} : { integerGemv: options.integerGemv }),
+      ...(options.linearGemvPlanes === undefined
+        ? {}
+        : { linearGemvPlanes: options.linearGemvPlanes }),
       ...(options.rmsNormReduce === undefined ? {} : { rmsNormReduce: options.rmsNormReduce }),
       submitPolicy: gemmaSubmitPolicy(options.submitPolicy),
       ...(options.stateAttentionReduce === undefined

@@ -1,7 +1,7 @@
 /**
  * **Route decisions** of linear that the fusion pass and recipe derivation must agree on — the single
- * source of truth for "does this linear take the i8a8 path" and "is this linear an integer GEMV
- * linear".
+ * source of truth for "does this linear take the i8a8 path", "is this linear an integer GEMV
+ * linear" and "is this linear a byte-plane GEMV linear".
  *
  * Recipe derivation (`buildLinear` in recipe-builders/linear.ts) and the fusion pass (the linear
  * prologue and the packed pairing in fusion.ts, the linear→SRQ rule) call the **same functions**:
@@ -14,6 +14,7 @@
  */
 
 import { type IntegerGemvVariant, integerGemvVariantFor } from "../kernels/linear-gemv-integer.ts";
+import { type PlanesGemvVariant, planesGemvVariantFor } from "../kernels/linear-gemv-planes.ts";
 import type { WeightStorage } from "../kernels/weight-storage.ts";
 import { LINEAR_OP, numel } from "../ops.ts";
 import type { NodePlan } from "./plan.ts";
@@ -76,4 +77,33 @@ export const linearIntegerGemvVariant = (
   const [x, weight] = plan.inputShapes;
   const [n, k] = weight;
   return integerGemvVariantFor(weightStorage, groupSize, numel(x.slice(0, -1)), n, k);
+};
+
+/**
+ * The **only pure function** that decides whether a linear is a **byte-plane GEMV linear**
+ * (`SessionOptions.linearGemvPlanes`) and with which variant: the option is on, the weight is
+ * i2-resident, M = numel(input shape without its last dimension) is 1..8, and
+ * {@link planesGemvVariantFor} names a measured variant for (M, n, k).
+ *
+ * MUST: the recipe builder (the branch and its guard against packed activations), the packed
+ * pairing (`readsPackedActivation` in fusion.ts) and the linear→SRQ rule read this same function.
+ * The kernel binds the activation as f32 quads, so a linear it accepts must never be paired with
+ * packed int8 words (they would be read as f32 — a silent wrong value), and a fusion rule must not
+ * take the linear's window and build another kernel in its place (the option would do nothing,
+ * silently).
+ *
+ * @param weightStorage The resident storage of the linear's weight slot (`undefined` = not resident,
+ * read as f32).
+ */
+export const linearPlanesGemvVariant = (
+  linearGemvPlanes: boolean | undefined,
+  plan: NodePlan,
+  weightStorage: WeightStorage | undefined,
+): PlanesGemvVariant | undefined => {
+  if (linearGemvPlanes !== true || plan.node.op !== LINEAR_OP || weightStorage === undefined) {
+    return undefined;
+  }
+  const [x, weight] = plan.inputShapes;
+  const [n, k] = weight;
+  return planesGemvVariantFor(weightStorage, numel(x.slice(0, -1)), n, k);
 };

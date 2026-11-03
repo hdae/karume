@@ -1253,6 +1253,7 @@ describe("parseManifest: 融合の真偽値を保持し、未指定・不正値�
     "fuseGeluMulStaticQuantize",
     "packedStaticQuantize",
     "integerGemv",
+    "linearGemvPlanes",
   ]) {
     for (const value of [false, true]) {
       it(`${key}=${value}`, () => {

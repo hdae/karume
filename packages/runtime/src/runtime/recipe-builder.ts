@@ -161,6 +161,12 @@ export type RecipeBuilderContext = {
    * packed pairing).
    */
   readonly integerGemv: boolean;
+  /**
+   * Whether the eligible i2 linears run on the byte-plane GEMV (`SessionOptions.linearGemvPlanes`;
+   * the linear reads it through `linearPlanesGemvVariant`, the same function as the packed pairing
+   * and the linear→SRQ rule).
+   */
+  readonly linearGemvPlanes: boolean;
   readonly rmsNormReduce: RmsNormReduce;
   /**
    * The parallelism target of the row-block GEMV (`SessionOptions.linearGemvRowsThreadTarget` — a
@@ -244,6 +250,7 @@ export type RecipeBuildFace = {
     | "stateAttentionReduce"
     | "linearGemvReduce"
     | "integerGemv"
+    | "linearGemvPlanes"
     | "rmsNormReduce"
     | "linearGemvRowsThreadTarget"
     | "linearI8a8Dot"

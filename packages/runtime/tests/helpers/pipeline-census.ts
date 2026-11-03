@@ -34,6 +34,7 @@ import {
   linearGemvSubgroupKey,
 } from "../../src/kernels/linear-gemv.ts";
 import { integerGemvKey } from "../../src/kernels/linear-gemv-integer.ts";
+import { planesGemvKey } from "../../src/kernels/linear-gemv-planes.ts";
 import { linearI8a8Key } from "../../src/kernels/linear-i8a8.ts";
 import { RMS_NORM_KEY, rmsNormAddKey } from "../../src/kernels/rms-norm.ts";
 import { rmsNormSubgroupKey } from "../../src/kernels/rms-norm-subgroup.ts";
@@ -98,6 +99,7 @@ export const SEAT_REFERENCE = {
   fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
   integerGemv: false,
+  linearGemvPlanes: false,
   rmsNormReduce: "workgroup",
 } as const satisfies { readonly [Seat in NumericSeat]-?: SeatValue<Seat> };
 
@@ -193,6 +195,8 @@ const RMS_SUBGROUP = suffixOf(rmsNormSubgroupKey(), RMS_NORM_KEY);
 const GEMV_INTEGER_FAMILY = familyOf(
   integerGemvKey({ weight: { storage: "i2" }, lanes: 8, rows: 4 }, false),
 );
+// The byte-plane GEMV (`linearGemvPlanes`): one family for every (lanes, rows) variant.
+const GEMV_PLANES_FAMILY = familyOf(planesGemvKey({ lanes: 8, rows: 4 }));
 
 const isGemvParallel = (key: string): boolean => familyOf(key) === GEMV_PARALLEL_FAMILY;
 
@@ -246,6 +250,9 @@ export const SEAT_SIGNATURES: SeatSignatures = {
   },
   integerGemv: {
     true: (key) => familyOf(key) === GEMV_INTEGER_FAMILY,
+  },
+  linearGemvPlanes: {
+    true: (key) => familyOf(key) === GEMV_PLANES_FAMILY,
   },
   rmsNormReduce: {
     subgroup32: (key) => RMS_FAMILIES.has(familyOf(key)) && hasFragment(key, RMS_SUBGROUP),
