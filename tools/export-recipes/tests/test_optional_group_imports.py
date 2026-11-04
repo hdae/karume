@@ -19,6 +19,9 @@ module 直下で import し、テストが 1 本 collection error になった�
 from __future__ import annotations
 
 import ast
+import functools
+import importlib.metadata
+import re
 import tomllib
 from pathlib import Path
 
@@ -41,16 +44,40 @@ CORE_PYPROJECT = ROOT.parent / "exporter" / "pyproject.toml"
 EXTRA_GATED = frozenset({"tokenizers"})
 
 
-def _import_names(requirement: str) -> str:
-    """依存の綴り（配布名）を import 名へ寄せる（`huggingface-hub` → `huggingface_hub`）。
+def _canonical_distribution(name: str) -> str:
+    """The normalized distribution name of PEP 503 (`Pillow` / `huggingface_hub` →
+    `pillow` / `huggingface-hub`), so a requirement and the installed metadata compare equal."""
+    return re.sub(r"[-_.]+", "-", name).lower()
 
-    版指定を落として `-` を `_` にするだけ。配布名と import 名が一致しない依存が入ったら
-    ここが取りこぼすが、**取りこぼしは検査が緩む方向**なので偽陽性で騒がない側に倒している。
+
+@functools.cache
+def _installed_import_names() -> dict[str, frozenset[str]]:
+    """Installed distribution (canonical name) → the top-level import names it provides.
+
+    Taken from the package metadata (`importlib.metadata.packages_distributions`), not from a hand
+    table — a table would be a second place to keep in step with the groups.
+    """
+    names: dict[str, set[str]] = {}
+    for module, distributions in importlib.metadata.packages_distributions().items():
+        for distribution in distributions:
+            names.setdefault(_canonical_distribution(distribution), set()).add(module)
+    return {distribution: frozenset(modules) for distribution, modules in names.items()}
+
+
+def _import_names(requirement: str) -> frozenset[str]:
+    """A requirement (a distribution name with a version) → its import names (`pillow` → `PIL`).
+
+    An installed distribution answers from its metadata. A distribution that is not installed
+    falls back to its name with `-` → `_` (`huggingface-hub` → `huggingface_hub`): in that
+    environment a module-level import of it fails at collection anyway, so the gate matters where
+    the group is synced — exactly where the metadata is present.
     """
     name = requirement
     for separator in ("==", ">=", "<=", "~=", "!=", ">", "<", "["):
         name = name.split(separator, 1)[0]
-    return name.strip().replace("-", "_")
+    name = name.strip()
+    installed = _installed_import_names().get(_canonical_distribution(name))
+    return installed if installed else frozenset({name.replace("-", "_")})
 
 
 def _always_synced_modules() -> frozenset[str]:
@@ -62,7 +89,11 @@ def _always_synced_modules() -> frozenset[str]:
     module 直下 `import torchvision` をこの門が誤って落とす。
     """
     core = tomllib.loads(CORE_PYPROJECT.read_text(encoding="utf-8"))
-    return frozenset(_import_names(requirement) for requirement in core["project"]["dependencies"])
+    return frozenset(
+        module
+        for requirement in core["project"]["dependencies"]
+        for module in _import_names(requirement)
+    )
 
 
 def _gated_modules() -> frozenset[str]:
@@ -77,7 +108,8 @@ def _gated_modules() -> frozenset[str]:
     for name, requirements in groups["dependency-groups"].items():
         if name in ALWAYS_SYNCED_GROUPS:
             continue
-        gated.update(_import_names(requirement) for requirement in requirements)
+        for requirement in requirements:
+            gated.update(_import_names(requirement))
     return frozenset(gated - _always_synced_modules())
 
 
@@ -118,6 +150,15 @@ class TestOptionalGroupImports:
     def test_the_gated_set_covers_the_transitive_dependency(self) -> None:
         """宣言に無い推移依存（`transformers` 経由の `tokenizers`）も gated 側。"""
         assert "tokenizers" in _gated_modules()
+
+    def test_the_gated_set_holds_import_names_not_distribution_names(self) -> None:
+        """`pillow` is imported as `PIL` — gating the distribution spelling would let a
+        module-level `import PIL` through (pillow is installed as a torchvision dependency, so its
+        metadata is present even in the default sync)."""
+        gated = _gated_modules()
+
+        assert "PIL" in gated
+        assert "pillow" not in gated
 
     def test_a_core_dependency_is_never_gated(self) -> None:
         """`torchvision` はグループが宣言していても core が常に引く（誤検出の側を閉じる）。"""
