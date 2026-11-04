@@ -176,7 +176,9 @@ const EMBEDDINGGEMMA_ASSET: RealAsset = {
 
 /** 決定的な擬似乱数（chunk 分割の抽選を毎回同じにする）。 */
 const nextRandom = (state: number): { value: number; state: number } => {
-  const next = (state * 1103515245 + 12345) & 0x7fffffff;
+  // Math.imul keeps the product exact modulo 2^32; a plain multiplication passes 2^53 and loses
+  // the low bits (the sequence then falls into a cycle of about 10^4 draws).
+  const next = (Math.imul(state, 1103515245) + 12345) & 0x7fffffff;
   return { value: next / 0x7fffffff, state: next };
 };
 
