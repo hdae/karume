@@ -452,7 +452,7 @@ export const fakeSession = (options: FakeOptions = {}) => {
       sameContext: generation.context === context,
     });
     runContexts.push(generation.context);
-    if (options.failAt === call) throw new Error("run が落ちた");
+    if (options.failAt === call) throw new Error("run failed");
     // The logical length advances when the run succeeds (deferred holds it pending and waits for
     // commit — like the real context).
     // A chained run extends the pending rows (only a chained run reaches here with some pending).

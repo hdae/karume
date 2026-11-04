@@ -39,10 +39,10 @@ test("seriesGraph rejects a component not in the table, even for a series that i
 test("seriesGraph rejects a lookup that gets the presence of components wrong", () => {
   // Looking up a series with component directories as if directly in the root (`""` is not in the
   // table).
-  assertThrows(() => seriesGraph("dacvae-32dim"), Error, "<根直下>");
-  // Passing a component name for a series directly in the root (lists `<根直下>` (root) as the
+  assertThrows(() => seriesGraph("dacvae-32dim"), Error, "<root>");
+  // Passing a component name for a series directly in the root (lists `<root>` as the
   // existing component).
-  assertThrows(() => seriesGraph("gemma4-e2b-product", "model"), Error, "<根直下>");
+  assertThrows(() => seriesGraph("gemma4-e2b-product", "model"), Error, "<root>");
 });
 
 test("seriesComponents rejects a series not in the table and hands out the component table as is for one that is", () => {

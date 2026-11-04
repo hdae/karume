@@ -123,9 +123,9 @@ export const seriesComponents = (series: string): Readonly<Record<string, string
 export const seriesGraph = (series: string, component = ""): string => {
   const components = seriesComponents(series);
   if (!Object.hasOwn(components, component)) {
-    const known = Object.keys(components).map((name) => (name === "" ? "<根直下>" : name));
+    const known = Object.keys(components).map((name) => (name === "" ? "<root>" : name));
     throw new Error(
-      `series ${series} has no component ${component === "" ? "<根直下>" : component} in the graph-name table` +
+      `series ${series} has no component ${component === "" ? "<root>" : component} in the graph-name table` +
         ` (helpers/series-graphs.ts). Known components: ${known.join(" / ")}.`,
     );
   }

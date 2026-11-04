@@ -5454,14 +5454,14 @@
   "chat": [
     {
       "name": "single-user",
-      "why": "最小形 — `<bos>` + user turn + 生成プロンプト",
+      "why": "the minimal form — `<bos>` + user turn + generation prompt",
       "messages": [{ "role": "user", "content": "What is the capital of France?" }],
       "rendered": "<bos><|turn>user\nWhat is the capital of France?<turn|>\n<|turn>model\n",
       "ids": [2, 105, 2364, 107, 3689, 563, 506, 5279, 529, 7001, 236881, 106, 107, 105, 4368, 107]
     },
     {
       "name": "system-first",
-      "why": "先頭 system は system ブロックへ落ち、content は trim される",
+      "why": "a leading system falls into the system block, and its content is trimmed",
       "messages": [
         { "role": "system", "content": "  You are a terse assistant.  " },
         { "role": "user", "content": "Hi" }
@@ -5474,7 +5474,7 @@
     },
     {
       "name": "developer-first",
-      "why": "先頭 developer も**綴りは system**（role をそのまま出さない唯一の位置）",
+      "why": "a leading developer is **spelled system** too (the one position where the role is not emitted as is)",
       "messages": [
         { "role": "developer", "content": "Follow the house style." },
         { "role": "user", "content": "Hi" }
@@ -5487,7 +5487,7 @@
     },
     {
       "name": "developer-late",
-      "why": "2 番目以降の developer は `<|turn>developer` （先頭との非対称）",
+      "why": "a later developer is `<|turn>developer` (asymmetric with the leading one)",
       "messages": [
         { "role": "user", "content": "Hi" },
         { "role": "developer", "content": "Be brief." }
@@ -5500,7 +5500,7 @@
     },
     {
       "name": "round-trip",
-      "why": "user → assistant → user の往復（assistant は `model` へ写像される）",
+      "why": "a user → assistant → user round trip (assistant maps to `model`)",
       "messages": [
         { "role": "user", "content": "Who wrote Hamlet?" },
         { "role": "assistant", "content": "William Shakespeare." },
@@ -5514,7 +5514,7 @@
     },
     {
       "name": "assistant-last",
-      "why": "末尾が assistant でも turn は閉じ、生成プロンプトは**新しい** model turn を開く",
+      "why": "a trailing assistant still closes its turn, and the generation prompt opens a **new** model turn",
       "messages": [
         { "role": "user", "content": "Who wrote Hamlet?" },
         { "role": "assistant", "content": "William Shakespeare." }
@@ -5527,7 +5527,7 @@
     },
     {
       "name": "assistant-twice",
-      "why": "連続 assistant は 1 つの model turn へ畳まれる（turn を開き直さない・閉じない）",
+      "why": "consecutive assistant messages fold into one model turn (the turn is neither reopened nor closed)",
       "messages": [
         { "role": "user", "content": "Continue." },
         { "role": "assistant", "content": "First half." },
@@ -5541,14 +5541,14 @@
     },
     {
       "name": "assistant-first",
-      "why": "assistant で始まる会話（直前ロールが無いので継続にならない）",
+      "why": "a conversation that starts with assistant (no previous role, so it is not a continuation)",
       "messages": [{ "role": "assistant", "content": "I already answered." }],
       "rendered": "<bos><|turn>model\nI already answered.<turn|>\n<|turn>model\n",
       "ids": [2, 105, 4368, 107, 236777, 3016, 19398, 236761, 106, 107, 105, 4368, 107]
     },
     {
       "name": "user-twice",
-      "why": "連続 user は畳まれない（継続の判定は model turn 側だけ）",
+      "why": "consecutive user messages do not fold (only the model turn checks for a continuation)",
       "messages": [
         { "role": "user", "content": "one" },
         { "role": "user", "content": "two" }
@@ -5558,28 +5558,28 @@
     },
     {
       "name": "system-only",
-      "why": "system だけの会話（ループが 1 度も回らず生成プロンプトへ抜ける）",
+      "why": "a system-only conversation (the loop never runs and goes straight to the generation prompt)",
       "messages": [{ "role": "system", "content": "You are a calculator." }],
       "rendered": "<bos><|turn>system\nYou are a calculator.<turn|>\n<|turn>model\n",
       "ids": [2, 105, 9731, 107, 3048, 659, 496, 25805, 236761, 106, 107, 105, 4368, 107]
     },
     {
       "name": "empty-content",
-      "why": "空の content（turn は開いて即閉じる — 空文字を落とさない）",
+      "why": "empty content (the turn opens and closes at once — the empty string is not dropped)",
       "messages": [{ "role": "user", "content": "" }],
       "rendered": "<bos><|turn>user\n<turn|>\n<|turn>model\n",
       "ids": [2, 105, 2364, 107, 106, 107, 105, 4368, 107]
     },
     {
       "name": "whitespace-content",
-      "why": "trim は Python の `str.strip()` — 全角空白 U+3000 も改行もタブも落ちる",
+      "why": "trim is Python's `str.strip()` — it drops the full-width space U+3000, newlines and tabs too",
       "messages": [{ "role": "user", "content": "\n\t hi 　\n" }],
       "rendered": "<bos><|turn>user\nhi<turn|>\n<|turn>model\n",
       "ids": [2, 105, 2364, 107, 2202, 106, 107, 105, 4368, 107]
     },
     {
       "name": "assistant-whitespace",
-      "why": "assistant 側も trim される（`strip_thinking` は thinking 綴りが無ければ trim と同値）",
+      "why": "the assistant side is trimmed too (`strip_thinking` equals a trim when no thinking spelling is present)",
       "messages": [
         { "role": "user", "content": "A?" },
         { "role": "assistant", "content": "   B.   " },
@@ -5593,7 +5593,7 @@
     },
     {
       "name": "japanese",
-      "why": "日本語の多ターン（空白が無いので 1 pre-token が turn 本文の全長になる）",
+      "why": "a Japanese multi-turn conversation (no spaces, so one pre-token spans the whole turn body)",
       "messages": [
         { "role": "system", "content": "あなたは簡潔に答える助手です。" },
         { "role": "user", "content": "日本の首都はどこですか？" },
@@ -5610,14 +5610,14 @@
     },
     {
       "name": "special-in-content",
-      "why": "本文中の chat 綴りは**エスケープされない**（追加語彙として切り出される）",
+      "why": "chat spellings inside the body are **not escaped** (they are split out as added vocabulary)",
       "messages": [{ "role": "user", "content": "abc<|turn>def" }],
       "rendered": "<bos><|turn>user\nabc<|turn>def<turn|>\n<|turn>model\n",
       "ids": [2, 105, 2364, 107, 28180, 105, 2063, 106, 107, 105, 4368, 107]
     },
     {
       "name": "multiline-content",
-      "why": "改行を含む content（turn の区切りは改行ではなく `<turn|>`）",
+      "why": "content with newlines (turns are delimited by `<turn|>`, not by newlines)",
       "messages": [{ "role": "user", "content": "line one\nline two\n\nline four" }],
       "rendered": "<bos><|turn>user\nline one\nline two\n\nline four<turn|>\n<|turn>model\n",
       "ids": [

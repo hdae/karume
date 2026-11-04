@@ -42,17 +42,17 @@ describe("formatNvidiaTimeline", () => {
     const text = formatNvidiaTimeline({
       phases: new Map([
         ["start", { peakMemoryMiB: 0, maxTemperatureC: 0, eventReasons: "0x0", samples: 0 }],
-        ["空き", { peakMemoryMiB: 0, maxTemperatureC: 0, eventReasons: "0x0", samples: 0 }],
+        ["idle", { peakMemoryMiB: 0, maxTemperatureC: 0, eventReasons: "0x0", samples: 0 }],
       ]),
       errorLines: ["Failed to initialize NVML", "Failed to initialize NVML"],
     });
-    assertEquals(text, "[空き] 標本 0（観測なし） / 読めない行 2 本（Failed to initialize NVML）");
+    assertEquals(
+      text,
+      "[idle] 0 samples (not observed) / 2 unreadable lines (Failed to initialize NVML)",
+    );
   });
 
   it("writes 'not observed' on a machine without nvidia-smi", () => {
-    assertEquals(
-      formatNvidiaTimeline(undefined),
-      "nvidia-smi なし（GPU 全体の VRAM は観測していない）",
-    );
+    assertEquals(formatNvidiaTimeline(undefined), "no nvidia-smi (GPU-wide VRAM not observed)");
   });
 });

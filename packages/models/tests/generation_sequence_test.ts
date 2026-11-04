@@ -1203,8 +1203,8 @@ test("GenerationSequence: a run failure reaches both the iterable and done with 
     program: programOf(fake),
   });
   const stream = sequence.generate({ prompt: [1, 2], maxNewTokens: 3 });
-  await assertRejects(() => drain(stream), Error, "run が落ちた");
-  await assertRejects(() => stream.done, Error, "run が落ちた");
+  await assertRejects(() => drain(stream), Error, "run failed");
+  await assertRejects(() => stream.done, Error, "run failed");
 });
 
 test("GenerationSequence: a failure whose done is never read does not become an unhandled rejection", async () => {
@@ -1221,7 +1221,7 @@ test("GenerationSequence: a failure whose done is never read does not become an 
       }
     },
     Error,
-    "run が落ちた",
+    "run failed",
   );
   // `done` is not held. If the process does not crash here, it is held once internally.
   await new Promise((resolve) => setTimeout(resolve, 0));

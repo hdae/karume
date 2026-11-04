@@ -1,35 +1,47 @@
-// `ChatSession`（`src/gemma/chat-session.ts`）の会話管理の門。GPU は使わない。
+// The checks of the conversation management of `ChatSession` (`src/gemma/chat-session.ts`). No
+// GPU.
 //
-// この層が持つのは**会話（発話の並び）と KV の対応**だけで、生成そのものは
-// `GenerationSequence` に、描画・復号・停止文字列は `chat()` と同じ実装に乗る。だから門も
-// 「どんな prompt を、どの sequence へ流したか」で書ける — 台本どおりに答える偽 sequence を
-// 差し（`ChatSessionHost` = セッションがパイプラインから読む面）、tokenizer は
-// `gemma4_chat_test.ts` と同じフィクスチャ資産で**本物**を組む（差分描画の等式は本物の綴りでしか
-// 見られない）。
+// What this layer owns is **only the mapping between the conversation (the sequence of messages)
+// and the KV**; generation itself rides on `GenerationSequence`, and rendering, decoding and stop
+// strings on the same implementation as `chat()`. So the checks can be written as "which prompt
+// was fed into which sequence" — plug in a fake sequence that answers from a script
+// (`ChatSessionHost` = the surface the session reads from the pipeline), and build a **real**
+// tokenizer from the same fixture assets as `gemma4_chat_test.ts` (the equality of the delta
+// rendering can only be seen with the real spellings).
 //
-// 門は 11 本:
+// Eleven checks:
 //
-// ① **KV の継続**: 2 ターン目は差分（`chatTurn`）だけを流し、sequence を作り直さない
-// ② **継げない停止の後**（max-tokens）は sequence を捨てて履歴を全体描画で撃ち直す — ①だけだと
-//    「いつでも継ぐ」実装が緑のままになる（model turn が閉じていない会話へ差分を継ぐと、例外
-//    ゼロで turn の区切りが壊れる）
-// ③ **消費側の `break`** が内側のイベント列まで届き（`done` が決着する）、出た片だけが履歴へ入る
-// ④ **溢れ処理**: 送る前に判定し、既定ポリシー（`dropOldestTurns`）が最古の対を落として system を
-//    残す。落とした履歴は KV と対応しないので sequence を作り直す
-// ⑤ **落とせるものが尽きたら fail loudly**（`GenerationCapacityError`）— 黙って縮めない。
-//    無かったことになったターンの発話は履歴に残らない
-// ⑥ **ポリシーの注入**が効く（履歴を返す / throw をそのまま素通しする）。縮まない履歴を返す
-//    ポリシーは再試行の無限ループではなく fail loudly になる
-// ⑦ **1 セッション = 1 生成**（同時 send / dispose 後の send は同期に throw）と、`send` が返す
-//    stream が `chat()` と同じ契約（停止理由・`text()`・1 通りにしか消費できない）
-// ⑧ **この層で起きた失敗**（`onPrefill` の throw・復号器の未知 id）で `done` が成功を名乗らない。
-//    内側は `return()` で閉じられて `closed` で resolve するので、そのまま運ぶと失敗が消える
-// ⑨ **後始末の失敗でセッションが固まらない**（`#busy` は必ず戻る）。本体も失敗していれば
-//    2 本とも運ぶ（`AggregateError`）
-// ⑩ **受理集合は同期**（不正な要求は履歴も `#busy` も汚さない）／**溢れ判定は確保の前**
-//    （入り切らないターンは KV を 1 本も取らない）／溢れポリシーは**末尾を残す**（値で判定）
-// ⑪ **分岐（`fork`）**: 履歴と KV を引き継いだ独立のセッション・KV が空の会話は複製を出さない・
-//    走行中 / dispose 済みは同期に throw・写しは呼んだ同期区間（直後の send が分岐に入らない）
+// ① **KV continuation**: the second turn feeds only the delta (`chatTurn`) and does not rebuild
+//    the sequence
+// ② **After a stop that cannot be continued** (max-tokens) the sequence is dropped and the history
+//    is re-fed as a whole rendering — with ① alone an implementation that "always continues" would
+//    stay green (continuing a delta onto a conversation whose model turn is not closed breaks the
+//    turn boundary with zero errors)
+// ③ **A consumer-side `break`** reaches the inner event sequence (`done` settles), and only the
+//    chunks that came out enter the history
+// ④ **Overflow handling**: decided before sending; the default policy (`dropOldestTurns`) drops
+//    the oldest pair and keeps the system message. The dropped history no longer maps onto the
+//    KV, so the sequence is rebuilt
+// ⑤ **Fail loudly once nothing is left to drop** (`GenerationCapacityError`) — no silent
+//    shrinking. The message of the turn that never happened does not stay in the history
+// ⑥ **Policy injection** takes effect (returning a history / passing a throw through as is). A
+//    policy that returns a history that does not shrink fails loudly instead of looping retries
+//    forever
+// ⑦ **One session = one generation** (a concurrent send / a send after dispose throws
+//    synchronously), and the stream `send` returns has the same contract as `chat()` (stop
+//    reason, `text()`, consumable in only one way)
+// ⑧ **A failure raised in this layer** (a throw from `onPrefill`, an unknown id in the decoder)
+//    does not let `done` claim success. The inner one is closed with `return()` and resolves with
+//    `closed`, so carrying that as is would make the failure disappear
+// ⑨ **A failing cleanup does not wedge the session** (`#busy` always returns). If the body failed
+//    too, both are carried (`AggregateError`)
+// ⑩ **The accepted set is synchronous** (an invalid request soils neither the history nor
+//    `#busy`) / **the overflow decision comes before allocation** (a turn that does not fit takes
+//    no KV at all) / an overflow policy **keeps the tail** (decided by value)
+// ⑪ **Branching (`fork`)**: an independent session that inherits the history and the KV; a
+//    conversation with an empty KV produces no copy; a running or disposed session throws
+//    synchronously; the copy is taken in the synchronous section of the call (a send right after
+//    does not enter the branch)
 
 import { readTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals, assertNotEquals, assertRejects, assertThrows } from "@std/assert";
@@ -85,7 +97,7 @@ const fixture = JSON.parse(
   await readTextFile(new URL("fixtures/gemma-text/gemma4-chat.json", import.meta.url)),
 ) as Fixture;
 
-/** フィクスチャの部分集合から資産表を組む（`gemma4_chat_test.ts` と同じ形）。 */
+/** Builds the asset table from the fixture subset (the same shape as `gemma4_chat_test.ts`). */
 const assets: GemmaTokenizerAssets = {
   spec: { postProcessor: "none" },
   model: createBpeModel({
@@ -101,7 +113,7 @@ const assets: GemmaTokenizerAssets = {
 };
 const tokenizer = new Tokenizer(assets);
 const STOP_TOKENS = gemma4StopTokens(tokenizer);
-/** 配布形が宣言する停止 token の 1 つ（turn を閉じる札）。 */
+/** One of the stop tokens the distribution declares (the marker that closes a turn). */
 const END_OF_TURN = tokenizer.addedTokenId("<turn|>") as number;
 
 const SYSTEM = "You are terse.";
@@ -109,18 +121,23 @@ const SYSTEM_MESSAGE: ChatMessage = { role: "system", content: SYSTEM };
 const MAX_NEW_TOKENS = 16;
 
 /**
- * 溢れの門で使う容量 = `chunkLength` ちょうど（構築時の門が通す**最小**の容量）。
+ * The capacity used by the overflow checks = exactly `chunkLength` (the **smallest** capacity the
+ * construction-time check lets through).
  *
- * `ChatSession` は `chunkLength ≤ capacity ≤ maxPosition` を構築時に見るので、
- * 「1 chunk すら入らない容量」で溢れを作ると門の方が先に落ちて溢れ経路を踏めない。
- * 溢れは容量ではなく**発話の長さ**（{@link LONG_ASK}）で作る。
+ * `ChatSession` checks `chunkLength ≤ capacity ≤ maxPosition` at construction, so creating the
+ * overflow with "a capacity that does not hold even one chunk" makes that check fail first, and
+ * the overflow path is never reached. The overflow is created with **the length of the message**
+ * ({@link LONG_ASK}), not with the capacity.
  */
 const TIGHT_CAPACITY = 32;
 
-/** {@link TIGHT_CAPACITY} を 1 ターンで確実に溢れさせる発話（prompt だけで容量を超える）。 */
+/** A message that surely overflows {@link TIGHT_CAPACITY} in one turn (the prompt alone exceeds it). */
 const LONG_ASK = "Name a color, then name another color, then explain the difference between them.";
 
-/** 台本 1 ターンぶん。`closes` = 配布形の停止 token で閉じる（次ターンを差分で継げる）。 */
+/**
+ * One turn of the script. `closes` = closed with the distribution's stop token (the next turn can
+ * continue as a delta).
+ */
 type Answer = {
   readonly text: string;
   readonly closes: boolean;
@@ -128,77 +145,80 @@ type Answer = {
   readonly stop?: number;
 };
 
-/** そのターンが会話へ積む論理位置の数（本文 + 停止 token）。 */
+/** The number of logical positions the turn adds to the conversation (text + stop token). */
 const answerCost = (answer: Answer): number =>
   tokenizer.encode(answer.text).length + (answer.closes ? 1 : 0);
 
 const programOf = (capacity: number): GenerationProgram =>
   Object.freeze({
     chunkLength: 32,
-    // 位置表は十分広く取る（この門で効かせたい上限は capacity 側だけ）。
+    // The position table is made wide enough (the only limit this check exercises is capacity).
     maxPosition: 4096,
     capacity,
     vocabSize: 262144,
     stopTokens: Object.freeze([...STOP_TOKENS]),
-    // chunkLength 32 の fake なので追加の prefill 形は要らない（セッションはこの欄を読まない）。
+    // A fake with chunkLength 32 needs no extra prefill shapes (the session does not read this field).
     chunkBuckets: Object.freeze([]),
   });
 
 type FakeHost = ChatSessionHost & {
-  /** 作った sequence の数（作り直したかがここに出る）。 */
+  /** The number of sequences created (whether it rebuilt shows here). */
   created(): number;
-  /** 畳んだ sequence の数。 */
+  /** The number of sequences disposed. */
   disposed(): number;
-  /** `generate` が受けた prompt を発行順に。 */
+  /** The prompts `generate` received, in issue order. */
   prompts(): readonly (readonly number[])[];
-  /** `sequence()` が受けた容量を発行順に（セッションのノブが降りているか）。 */
+  /** The capacities `sequence()` received, in issue order (whether the session's knob reaches it). */
   capacities(): readonly (number | undefined)[];
   /**
-   * `sequence()` が受けた投機の指定を発行順に。
+   * The speculative-decoding settings `sequence()` received, in issue order.
    *
-   * `undefined` は**欄ごと渡っていない**ことを表す（`speculative: undefined` を渡す形は
-   * pipeline 側の既定「drafter が居れば張る」を潰すので、値としては同じでも別物である）。
+   * `undefined` means **the field was not passed at all** (passing `speculative: undefined` cancels
+   * the pipeline-side default "attach when a drafter is present", so it is a different thing even
+   * though the value is the same).
    */
   speculatives(): readonly (boolean | "always" | undefined)[];
-  /** `sequence()` が受けた指定に `speculative` の欄があったかを発行順に。 */
+  /** Whether the options `sequence()` received had a `speculative` field, in issue order. */
   speculativeKeys(): readonly boolean[];
-  /** `generate` が受けた sampler 指定を発行順に（解決順 3 段の観測点）。 */
+  /** The sampler specs `generate` received, in issue order (the observation point of the three-level resolution). */
   samplers(): readonly (SamplerSpec | undefined)[];
-  /** `GenerationSequence.fork` が呼ばれた回数（KV の複製を出したかがここに出る）。 */
+  /** The number of calls to `GenerationSequence.fork` (whether a KV copy was made shows here). */
   forks(): number;
 };
 
-/** 偽 sequence の故障注入（`sequence()` の保留と `dispose()` の拒否）。 */
+/** Fault injection of the fake sequence (holding `sequence()` and rejecting `dispose()`). */
 type FakeFaults = {
-  /** `dispose` を拒否させる（device 消失で `flush` が失敗する形の写し）。 */
+  /** Makes `dispose` reject (a copy of the shape where `flush` fails on device loss). */
   readonly disposeError?: unknown;
   readonly holdDispose?: () => Promise<void>;
   /**
-   * `sequence()` の解決を保留する（受け取った `release` を呼ぶまで返らない）。
+   * Holds the resolution of `sequence()` (it does not return until the received `release` is
+   * called).
    *
-   * 「確保の `await` 中に dispose された」窓を作るための口 — 本物でも `createGenerationSequence`
-   * は GPU の確保を挟む非同期なので、この窓は実在する。
+   * The hook that opens the window "disposed during the allocation's `await`" — in the real code
+   * `createGenerationSequence` is asynchronous around the GPU allocation too, so the window exists.
    */
   readonly holdSequence?: (release: () => void) => void;
-  /** `GenerationSequence.fork` を拒否させる（複製の確保失敗の写し）。 */
+  /** Makes `GenerationSequence.fork` reject (a copy of a failed allocation of the copy). */
   readonly forkError?: unknown;
 };
 
-/** 中断の識別（本物の `sequence.ts` の `isAbortOf` と同じ分け方を偽側にも写す）。 */
+/** Identifies an abort (the fake copies the same split as `isAbortOf` of the real `sequence.ts`). */
 const isAbortOf = (error: unknown, signal: AbortSignal | undefined): boolean =>
   signal !== undefined && signal.aborted && error === signal.reason;
 
 /**
- * 台本どおりに答える偽 sequence を配るホスト。
+ * The host that hands out fake sequences answering from a script.
  *
- * `used` は本物と同じ導出（prompt の長さ + 抽選した token の数 — 停止 token も 1 個）で進める。
- * これがずれると溢れ判定の門が意味を失うので、ここだけは本物の契約を写す。
+ * `used` advances by the same derivation as the real one (the prompt length + the number of
+ * sampled tokens — the stop token counts as one). If this drifts, the overflow checks lose their
+ * meaning, so this part alone copies the real contract.
  */
 const fakeHost = (
   answers: readonly Answer[],
   program: GenerationProgram,
   faults: FakeFaults = {},
-  /** 配布形が宣言する推奨サンプラ（解決順の最下段）。 */
+  /** The recommended sampler the distribution declares (the lowest level of the resolution). */
   defaultSampler?: DefaultSampler,
   /** The tokenizer the host hands out (its dialect decides what the session renders). */
   hostTokenizer: Tokenizer = tokenizer,
@@ -213,9 +233,11 @@ const fakeHost = (
   let forks = 0;
   let turn = 0;
   /**
-   * 偽 sequence を 1 本組む（`used` の起点だけを受ける — 分岐は元の `used` から続く）。
+   * Builds one fake sequence (it takes only the starting `used` — a branch continues from the
+   * original's `used`).
    *
-   * 台本（`answers`）は host 全体で 1 本なので、分岐しても次のターンは台本の次の答えを返す。
+   * The script (`answers`) is one for the whole host, so even after a branch the next turn returns
+   * the next answer of the script.
    */
   const makeSequence = (capacity: number, startUsed: number): GenerationSequence => {
     let used = startUsed;
@@ -226,11 +248,11 @@ const fakeHost = (
         return used;
       },
       generate(request: GenerationRequest): GenerationStream {
-        assert(!gone, "dispose 済みの sequence へ generate した");
+        assert(!gone, "generate on a disposed sequence");
         prompts.push([...request.prompt]);
         samplers.push(request.sampler);
         const answer = answers[turn];
-        assert(answer !== undefined, `台本に ${turn + 1} ターン目が無い`);
+        assert(answer !== undefined, `the script has no turn ${turn + 1}`);
         turn += 1;
         const ids = hostTokenizer.encode(answer.text);
         used += request.prompt.length;
@@ -249,25 +271,26 @@ const fakeHost = (
             request.signal?.throwIfAborted();
             yield { kind: "prefill", chunk: 1, chunks: 1 };
             for (const id of ids) {
-              // 中断は段の境目で見る（本物も run と run の間でしか観測できない）。
+              // An abort is observed between steps (the real one can observe it only between runs).
               request.signal?.throwIfAborted();
               used += 1;
               emitted += 1;
               yield { kind: "token", id, position: used };
             }
-            // 停止 token は列に出さないが会話には残る（未 commit frontier）。
+            // The stop token is not emitted in the sequence but stays in the conversation (the uncommitted frontier).
             if (answer.closes) used += 1;
             stopped = stop;
           } catch (error) {
-            // MUST: 中断を捕えた側で `aborted` を立ててから投げ直す（本物の `sequence.ts` と
-            // 同じ形）。ここを写さないと `done` が `closed` で解決してしまい、テストが
-            // 実装ではなく偽側の写し違いを見ることになる。
+            // MUST: the side that catches the abort sets `aborted` and then rethrows (the same
+            // shape as the real `sequence.ts`). Without copying this, `done` would resolve with
+            // `closed`, and the test would see a mistake in the fake's copy, not the
+            // implementation.
             if (isAbortOf(error, request.signal)) {
               stopped = { reason: "aborted", tokens: emitted };
             }
             throw error;
           } finally {
-            // `break` / `return()` で畳まれた場合は `closed`（本物と同じ分け方）。
+            // Folded with `break` / `return()` it is `closed` (the same split as the real one).
             settle(stopped ?? { reason: "closed", tokens: emitted });
           }
         };
@@ -275,11 +298,11 @@ const fakeHost = (
         return { [Symbol.asyncIterator]: () => iterable, done };
       },
       fork(): Promise<GenerationSequence> {
-        // 本物と同じく dispose 済みは同期に落とす。
-        if (gone) throw new Error("GenerationSequence: dispose 済みでは fork できない");
+        // Like the real one, a disposed sequence fails synchronously.
+        if (gone) throw new Error("GenerationSequence: cannot fork after dispose");
         forks += 1;
         if (faults.forkError !== undefined) return Promise.reject(faults.forkError);
-        // 本物の分岐と同じく、会話が占める位置（`used`）をそのまま引き継ぐ。
+        // Like a real branch, it inherits the positions the conversation occupies (`used`) as is.
         return Promise.resolve(makeSequence(capacity, used));
       },
       async dispose(): Promise<void> {
@@ -318,7 +341,7 @@ const fakeHost = (
   };
 };
 
-test("ChatSession: 2 ターン目は差分だけを流し、sequence を作り直さない", async () => {
+test("ChatSession: the second turn feeds only the delta and does not rebuild the sequence", async () => {
   const host = fakeHost(
     [
       { text: "Blue.", closes: true },
@@ -331,16 +354,16 @@ test("ChatSession: 2 ターン目は差分だけを流し、sequence を作り�
   assertEquals(await session.send("Name a color.").text(), "Blue.");
   assertEquals(await session.send("Another one.").text(), "Red.");
 
-  assertEquals(host.created(), 1, "KV を継いだなら sequence は 1 本だけ");
+  assertEquals(host.created(), 1, "with the KV continued there is only one sequence");
   assertEquals(
     host.prompts()[0],
     chatPrompt(tokenizer, [SYSTEM_MESSAGE, { role: "user", content: "Name a color." }]),
-    "初回は `<bos>` 込みの全体描画",
+    "the first turn is the whole rendering including `<bos>`",
   );
   assertEquals(
     host.prompts()[1],
     chatTurn(tokenizer, { role: "user", content: "Another one." }),
-    "2 ターン目は差分だけ（前 turn を閉じる `<turn|>` は pendingToken が前置する）",
+    "the second turn is only the delta (`pendingToken` prepends the `<turn|>` that closes the previous turn)",
   );
   assertEquals(session.turns, [
     SYSTEM_MESSAGE,
@@ -351,8 +374,8 @@ test("ChatSession: 2 ターン目は差分だけを流し、sequence を作り�
   ]);
 });
 
-test("ChatSession: 停止 token で閉じなかったターンの次は全体を描き直す", async () => {
-  // max-tokens で打ち切ったターンの後ろは model turn が閉じていない = 差分の前提が無い。
+test("ChatSession: after a turn not closed by a stop token, the whole conversation is re-rendered", async () => {
+  // After a turn cut off by max-tokens the model turn is not closed = no premise for a delta.
   const host = fakeHost(
     [
       { text: "Blue", closes: false },
@@ -370,8 +393,8 @@ test("ChatSession: 停止 token で閉じなかったターンの次は全体を
   });
   assertEquals(await session.send("Another one.").text(), "Red.");
 
-  assertEquals(host.created(), 2, "打ち切ったターンの後は sequence を作り直す");
-  assertEquals(host.disposed(), 1, "捨てた sequence は畳む");
+  assertEquals(host.created(), 2, "after a cut-off turn the sequence is rebuilt");
+  assertEquals(host.disposed(), 1, "the dropped sequence is disposed");
   assertEquals(
     host.prompts()[1],
     chatPrompt(tokenizer, [
@@ -380,13 +403,13 @@ test("ChatSession: 停止 token で閉じなかったターンの次は全体を
       { role: "assistant", content: "Blue" },
       { role: "user", content: "Another one." },
     ]),
-    "2 ターン目は履歴の全体描画",
+    "the second turn is the whole rendering of the history",
   );
 });
 
-test("ChatSession: 汲むのをやめたターンは内側まで畳み、出た本文だけを残す", async () => {
-  // 消費側の `break` は「中断と同じ後始末」で内側のイベント列まで届く必要がある（届かないと
-  // sequence が走行中のまま残り、`done` も決着しない）。
+test("ChatSession: a turn whose draining stopped is folded down to the inner sequence, keeping only the text that came out", async () => {
+  // A consumer-side `break` must reach the inner event sequence with "the same cleanup as an
+  // abort" (otherwise the sequence stays running and `done` never settles).
   const host = fakeHost(
     [
       { text: "Blue.", closes: true },
@@ -402,29 +425,32 @@ test("ChatSession: 汲むのをやめたターンは内側まで畳み、出た�
     first = chunk;
     break;
   }
-  assertEquals((await stream.done).reason, "closed", "内側のイベント列も畳まれている");
-  assert(first !== "" && "Blue.".startsWith(first), `最初の片が本文の頭でない: ${first}`);
+  assertEquals((await stream.done).reason, "closed", "the inner event sequence is folded too");
+  assert(
+    first !== "" && "Blue.".startsWith(first),
+    `the first chunk is not the head of the text: ${first}`,
+  );
   assertEquals(
     session.turns,
     [
       { role: "user", content: "Name a color." },
       { role: "assistant", content: first },
     ],
-    "流した片だけが履歴へ入る",
+    "only the streamed chunks enter the history",
   );
 
   assertEquals(await session.send("Another one.").text(), "Red.");
-  assertEquals(host.created(), 2, "閉じていないターンの後は sequence を作り直す");
+  assertEquals(host.created(), 2, "after a turn that is not closed the sequence is rebuilt");
 });
 
-test("ChatSession 溢れ: 既定ポリシーが最古の対を落とし、system を残して組み直す", async () => {
+test("ChatSession overflow: the default policy drops the oldest pair and rebuilds keeping the system message", async () => {
   const answers: readonly Answer[] = [
     { text: "Blue.", closes: true },
     { text: "Red.", closes: true },
   ];
   const first = { role: "user", content: "Name a color." } as const;
   const second = { role: "user", content: "Another one." } as const;
-  // 2 ターン目が **1 だけ** 入らない容量にする（差分を継いだままなら通る形を作らない）。
+  // A capacity where the second turn misses by **exactly 1** (no shape that would pass while continuing the delta).
   const used = chatPrompt(tokenizer, [SYSTEM_MESSAGE, first]).length + answerCost(answers[0]);
   const delta = chatTurn(tokenizer, second).length;
   const host = fakeHost(answers, programOf(used + delta + MAX_NEW_TOKENS - 2));
@@ -441,25 +467,33 @@ test("ChatSession 溢れ: 既定ポリシーが最古の対を落とし、system
   assertEquals(await session.send(first.content).text(), "Blue.");
   assertEquals(await session.send(second.content).text(), "Red.");
 
-  assertEquals(seen.length, 1, "溢れ処理は 1 回で収まった");
+  assertEquals(seen.length, 1, "overflow handling settled in one call");
   assertEquals(seen[0].system, SYSTEM);
-  assertEquals(seen[0].needed, seen[0].capacity + 1, "1 だけ足りない");
-  assertEquals(seen[0].turns.length, 4, "呼ばれた時点の履歴（system + 1 往復 + 今の発話）");
+  assertEquals(seen[0].needed, seen[0].capacity + 1, "short by exactly 1");
+  assertEquals(
+    seen[0].turns.length,
+    4,
+    "the history at the time of the call (system + one exchange + the current message)",
+  );
   assertEquals(
     session.turns,
     [SYSTEM_MESSAGE, second, { role: "assistant", content: "Red." }],
-    "最古の user / assistant の対が落ち、system は残る",
+    "the oldest user / assistant pair is dropped and the system message stays",
   );
-  assertEquals(host.created(), 2, "落とした履歴は KV と対応しない = sequence を作り直す");
+  assertEquals(
+    host.created(),
+    2,
+    "the dropped history does not map onto the KV = the sequence is rebuilt",
+  );
   assertEquals(
     host.prompts()[1],
     chatPrompt(tokenizer, [SYSTEM_MESSAGE, second]),
-    "切り詰めた履歴の全体描画",
+    "the whole rendering of the truncated history",
   );
 });
 
-test("ChatSession 溢れ: 落とせるものが尽きたら fail loudly（黙って縮めない）", async () => {
-  // system + 今の発話しか無い = 既定ポリシーには落とせるものが無い。
+test("ChatSession overflow: fail loudly once nothing is left to drop (no silent shrinking)", async () => {
+  // Only system + the current message = nothing the default policy can drop.
   const host = fakeHost([{ text: "Blue.", closes: true }], programOf(TIGHT_CAPACITY));
   const session = new ChatSession(host, { system: SYSTEM, maxNewTokens: MAX_NEW_TOKENS });
 
@@ -471,23 +505,27 @@ test("ChatSession 溢れ: 落とせるものが尽きたら fail loudly（黙っ
   assertEquals(error.constraint, "capacity");
   assertEquals(error.limit, TIGHT_CAPACITY);
   assertEquals(error.requestedNewTokens, MAX_NEW_TOKENS);
-  // 「今なら通る maxNewTokens」は負値 = 何 token 溢れているか（ADR 0083 追記 2026-08-31）。
-  assert(error.maxNewTokens < 0, `溢れ幅が読めない: ${error.maxNewTokens}`);
-  assertEquals(session.turns, [SYSTEM_MESSAGE], "起きなかったターンの発話は履歴に残らない");
-  // 溢れ判定は確保の前（`#prepare` の MUST）— 入り切らないターンは KV を 1 本も取らない。
-  assertEquals(host.created(), 0, "確保してから捨てる形になっていない");
+  // "The maxNewTokens that would pass now" is negative = by how many tokens it overflows (ADR 0083 addendum 2026-08-31).
+  assert(error.maxNewTokens < 0, `the overflow amount cannot be read: ${error.maxNewTokens}`);
+  assertEquals(
+    session.turns,
+    [SYSTEM_MESSAGE],
+    "the message of a turn that did not happen does not stay in the history",
+  );
+  // The overflow decision comes before allocation (the MUST of `#prepare`) — a turn that does not fit takes no KV at all.
+  assertEquals(host.created(), 0, "it is not in the shape of allocating and then dropping");
 });
 
-describe("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す / throw を素通しする）", () => {
-  it("返した履歴で撃ち直す（system も落とせる）", async () => {
+describe("ChatSession overflow: policy injection takes effect (returning a history / passing a throw through)", () => {
+  it("re-feeds the returned history (the system message can be dropped too)", async () => {
     const asked = { role: "user", content: "Name a color." } as const;
-    // system 込みでは 1 だけ足りず、system を落とせば通る容量。
+    // A capacity that is short by exactly 1 with the system message and fits once it is dropped.
     const capacity = chatPrompt(tokenizer, [SYSTEM_MESSAGE, asked]).length + MAX_NEW_TOKENS - 2;
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(capacity));
     const session = new ChatSession(host, {
       system: SYSTEM,
       maxNewTokens: MAX_NEW_TOKENS,
-      // 何が起きても「今の発話だけ」にする（system も捨てる = 既定と違う意味論）。
+      // Whatever happens, keep "only the current message" (drops the system message too = semantics unlike the default).
       onOverflow: ({ turns }) => turns.slice(-1),
     });
     assertEquals(await session.send("Name a color.").text(), "Blue.");
@@ -498,13 +536,13 @@ describe("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す /
     assertEquals(
       host.prompts()[0],
       chatPrompt(tokenizer, [{ role: "user", content: "Name a color." }]),
-      "system の無い履歴で描き直す",
+      "re-rendered with a history without the system message",
     );
   });
 
-  it("throw はそのまま呼び手へ届く（包まない）", async () => {
+  it("a throw reaches the caller as is (not wrapped)", async () => {
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(TIGHT_CAPACITY));
-    const refusal = new Error("ホストが切り詰めを拒否した");
+    const refusal = new Error("the host refused to truncate");
     const session = new ChatSession(host, {
       maxNewTokens: MAX_NEW_TOKENS,
       onOverflow: () => {
@@ -518,12 +556,13 @@ describe("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す /
         () => undefined,
         (error: unknown) => error,
       );
-    assertEquals(caught, refusal, "ポリシーの例外が同一性のまま届く");
+    assertEquals(caught, refusal, "the policy's exception arrives with its identity");
   });
 
-  it("末尾（今の発話）を落とすポリシーは fail loudly", async () => {
-    // 長さは縮むので長さの門は通る。通してしまうと「問いの無い会話」に答えが付く（描画は
-    // 末尾 role を制約しないので例外ゼロで確定する）。
+  it("a policy that drops the tail (the current message) fails loudly", async () => {
+    // The length shrinks, so the length check passes. Letting it through would attach an answer to
+    // "a conversation with no question" (the rendering does not constrain the last role, so it
+    // settles with zero errors).
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(TIGHT_CAPACITY));
     const session = new ChatSession(host, {
       system: SYSTEM,
@@ -537,9 +576,10 @@ describe("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す /
     );
   });
 
-  it("履歴を写して返すポリシーは通る（末尾の判定は参照でなく値）", async () => {
-    // 渡す履歴は凍結コピーなので、`{ ...turn }` へ写して返す実装は正当。参照同一性で見ると
-    // この正当なポリシーが「末尾を落とした」と誤判定される。
+  it("a policy that copies the history and returns it passes (the tail is judged by value, not reference)", async () => {
+    // The history passed in is a frozen copy, so an implementation that copies into `{ ...turn }`
+    // and returns it is legitimate. Judging by reference identity would misjudge this legitimate
+    // policy as "dropped the tail".
     const asked = { role: "user", content: "Name a color." } as const;
     const capacity = chatPrompt(tokenizer, [SYSTEM_MESSAGE, asked]).length + MAX_NEW_TOKENS - 2;
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(capacity));
@@ -558,7 +598,7 @@ describe("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す /
     assertEquals(session.turns, [asked, { role: "assistant", content: "Blue." }]);
   });
 
-  it("縮まない履歴は無限ループにせず fail loudly", async () => {
+  it("a history that does not shrink fails loudly instead of looping forever", async () => {
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(TIGHT_CAPACITY));
     let calls = 0;
     const session = new ChatSession(host, {
@@ -573,22 +613,22 @@ describe("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す /
       GenerationCapacityError,
       "did not shrink",
     );
-    // 縮まない結果は 1 回で打ち切る（再試行の回数は履歴の件数に張り付かない）。
+    // A result that does not shrink stops after one call (the retry count does not track the number of history entries).
     assertEquals(calls, 1);
   });
 });
 
-describe("ChatSession capacity: 省略時は program の既定・渡せばそれが sequence と溢れ判定の物差し", () => {
-  it("省略時は配布形の既定がそのまま降りる", async () => {
+describe("ChatSession capacity: the program default when omitted; when passed, it is the measure for the sequence and the overflow decision", () => {
+  it("when omitted, the distribution's default reaches it as is", async () => {
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
     const session = new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
     assertEquals(await session.send("Name a color.").text(), "Blue.");
-    assertEquals(host.capacities(), [640], "sequence へ渡る容量");
+    assertEquals(host.capacities(), [640], "the capacity passed to the sequence");
   });
 
-  it("渡した容量が sequence へ降り、切り詰めの判断もその値で行う", async () => {
-    // program の既定は十分広い（640）が、セッションは狭い容量を選ぶ — 既定で判断していれば
-    // 溢れ処理は 1 度も呼ばれず、選んだ容量で判断していれば呼ばれる。
+  it("the passed capacity reaches the sequence, and the truncation decision uses that value", async () => {
+    // The program default is wide enough (640), but the session picks a narrow capacity — deciding
+    // with the default never calls overflow handling, deciding with the picked capacity calls it.
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
     let overflows = 0;
     const session = new ChatSession(host, {
@@ -604,41 +644,42 @@ describe("ChatSession capacity: 省略時は program の既定・渡せばそれ
       GenerationCapacityError,
       "The conversation does not fit",
     );
-    assertEquals(error.limit, TIGHT_CAPACITY, "選んだ容量が上限として運ばれる");
-    assertEquals(overflows, 1, "溢れ処理は選んだ容量で呼ばれる");
-    // 判定は確保の前なので、入り切らないターンでは sequence を 1 本も取らない。
-    assertEquals(host.created(), 0, "溢れると分かったターンは KV を確保しない");
+    assertEquals(error.limit, TIGHT_CAPACITY, "the picked capacity is carried as the limit");
+    assertEquals(overflows, 1, "overflow handling is called with the picked capacity");
+    // The decision comes before allocation, so a turn that does not fit takes no sequence at all.
+    assertEquals(host.created(), 0, "a turn known to overflow allocates no KV");
   });
 
-  it("通るターンでは選んだ容量が sequence へ降りる", async () => {
-    // program の既定（640）ではなくセッションが選んだ値が `host.sequence` へ渡ること。
+  it("on a turn that fits, the picked capacity reaches the sequence", async () => {
+    // The value the session picked, not the program default (640), is passed to `host.sequence`.
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
     const session = new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 128 });
     assertEquals(await session.send("Name a color.").text(), "Blue.");
-    assertEquals(host.capacities(), [128], "sequence にも同じ容量が降りる");
+    assertEquals(host.capacities(), [128], "the same capacity reaches the sequence too");
   });
 });
 
-describe("ChatSession speculative: 指定はそのまま sequence へ降り、未指定は欄ごと渡さない", () => {
-  // 投機はセッション単位の席（借り手 context が sequence の寿命に束ねられているので、ターン
-  // ごとには切り替えられない）。この層がするのは「降ろすかどうか」だけで、判定は pipeline 側に
-  // ある — `speculative: undefined` を**渡してしまう**退行は、pipeline の既定（drafter が居れば
-  // 張る）を潰す一方で型も値も同じに見えるので、欄の有無で見るしかない。
+describe("ChatSession speculative: a setting reaches the sequence as is; when unset the field is not passed at all", () => {
+  // Speculative decoding is a per-session setting (the borrower context is tied to the lifetime of
+  // the sequence, so it cannot be switched per turn). All this layer does is "pass it down or
+  // not", and the decision is on the pipeline side — a regression that **does pass**
+  // `speculative: undefined` cancels the pipeline default (attach when a drafter is present) while
+  // looking the same in type and value, so it can only be seen by whether the field is present.
   const script = [
     { text: "Blue.", closes: true },
     { text: "Red.", closes: true },
   ] as const;
 
-  it("未指定: 欄そのものを渡さない（pipeline の既定へ倒す）", async () => {
+  it("unset: the field itself is not passed (falls to the pipeline default)", async () => {
     const host = fakeHost([...script], programOf(640));
     const session = new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
     assertEquals(await session.send("Name a color.").text(), "Blue.");
-    assertEquals(host.speculativeKeys(), [false], "未指定なのに speculative の欄が渡っている");
+    assertEquals(host.speculativeKeys(), [false], "a speculative field is passed although unset");
     assertEquals(host.speculatives(), [undefined]);
   });
 
-  it('true / false / "always" はそのまま降りる', async () => {
-    // `"always"` は自己採算ゲート抜きの席（段 4-B ④）— この層はどれも解釈せず素通しする。
+  it('true / false / "always" reach it as they are', async () => {
+    // `"always"` is the setting without the self-tuning gate (step 4-B ④) — this layer interprets none of them and passes them through.
     for (const speculative of [true, false, "always"] as const) {
       const host = fakeHost([...script], programOf(640));
       const session = new ChatSession(host, {
@@ -651,9 +692,9 @@ describe("ChatSession speculative: 指定はそのまま sequence へ降り、�
     }
   });
 
-  it("sequence を作り直しても同じ値が降りる（会話の途中で切り替わらない）", async () => {
-    // 打ち切ったターン（`closes: false`）の後は KV を継げないので sequence を作り直す — その
-    // 2 本目にも同じ指定が降りることを見る（セッションの設定であってターンの設定ではない）。
+  it("the same value reaches a rebuilt sequence (it does not switch mid-conversation)", async () => {
+    // After a cut-off turn (`closes: false`) the KV cannot be continued, so the sequence is rebuilt —
+    // check that the same setting reaches that second one too (a session setting, not a turn setting).
     const host = fakeHost(
       [
         { text: "Blue", closes: false },
@@ -667,12 +708,12 @@ describe("ChatSession speculative: 指定はそのまま sequence へ降り、�
     });
     assertEquals(await session.send("Name a color.").text(), "Blue");
     assertEquals(await session.send("Another one.").text(), "Red.");
-    assertEquals(host.created(), 2, "作り直しの前提が崩れている");
+    assertEquals(host.created(), 2, "the rebuild premise does not hold");
     assertEquals(host.speculatives(), [false, false]);
   });
 });
 
-test("ChatSession: onPrefill が chunk ごとの進捗を運ぶ（本文には出ない情報）", async () => {
+test("ChatSession: onPrefill carries per-chunk progress (information that is not in the text)", async () => {
   const host = fakeHost(
     [
       { text: "Blue.", closes: true },
@@ -687,14 +728,14 @@ test("ChatSession: onPrefill が chunk ごとの進捗を運ぶ（本文には�
     await session.send("Name a color.", { onPrefill: (progress) => seen.push(progress) }).text(),
     "Blue.",
   );
-  assertEquals(seen, [{ chunk: 1, chunks: 1 }], "台本の prefill イベントがそのまま届く");
+  assertEquals(seen, [{ chunk: 1, chunks: 1 }], "the script's prefill event arrives as is");
 
-  // ターンごとの指定なので、渡さなかったターンには届かない（購読を持ち越さない）。
+  // A per-turn setting, so a turn that did not pass it receives nothing (no subscription carried over).
   assertEquals(await session.send("Another one.").text(), "Red.");
   assertEquals(seen.length, 1);
 });
 
-test("ChatSession: 1 セッション = 1 生成（同時 send と dispose 後は同期に throw）", async () => {
+test("ChatSession: one session = one generation (a concurrent send and a send after dispose throw synchronously)", async () => {
   const host = fakeHost(
     [
       { text: "Blue.", closes: true },
@@ -704,21 +745,22 @@ test("ChatSession: 1 セッション = 1 生成（同時 send と dispose 後は
   );
   const session = new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
 
-  // 発行しただけ（まだ汲んでいない）のターンが走っている間は 2 本目を受けない。
+  // While a turn that was only issued (not yet drained) runs, a second one is not accepted.
   const first = session.send("Name a color.");
   assertThrows(() => session.send("Another one."), Error, "the previous turn has not finished yet");
   assertEquals(await first.text(), "Blue.");
-  // 汲み切ったターンの後は受ける。
+  // After a turn drained to the end, it is accepted.
   assertEquals(await session.send("Another one.").text(), "Red.");
 
   await session.dispose();
-  assertEquals(host.disposed(), 1, "dispose は sequence を畳む");
+  assertEquals(host.disposed(), 1, "dispose disposes the sequence");
   assertThrows(() => session.send("hi"), Error, "after dispose");
 });
 
-test("ChatSession: この層で起きた失敗は done も reject する（成功を名乗らない）", async () => {
-  // `onPrefill` が投げると内側のイベント列は `return()` で閉じられ `closed` で resolve する
-  // ので、そのまま運ぶと `done` だけを読む呼び手（進捗 UI・ログ）が失敗を成功として記録する。
+test("ChatSession: a failure raised in this layer rejects done too (it does not claim success)", async () => {
+  // When `onPrefill` throws, the inner event sequence is closed with `return()` and resolves with
+  // `closed`, so carrying that as is would make callers that read only `done` (progress UI, logs)
+  // record the failure as a success.
   const host = fakeHost(
     [
       { text: "Blue.", closes: true },
@@ -727,7 +769,7 @@ test("ChatSession: この層で起きた失敗は done も reject する（成�
     programOf(640),
   );
   const session = new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
-  const boom = new Error("onPrefill が投げた");
+  const boom = new Error("onPrefill threw");
 
   const stream = session.send("Name a color.", {
     onPrefill: () => {
@@ -738,22 +780,26 @@ test("ChatSession: この層で起きた失敗は done も reject する（成�
     () => undefined,
     (error: unknown) => error,
   );
-  assertEquals(caught, boom, "一次は iterable 側の throw（包まない）");
+  assertEquals(caught, boom, "the primary one is the iterable's throw (not wrapped)");
   const settled = await stream.done.then(
-    () => "resolve した",
+    () => "resolved",
     (error: unknown) => error,
   );
-  assertEquals(settled, boom, "done は同じ例外で reject する");
+  assertEquals(settled, boom, "done rejects with the same exception");
 
-  assertEquals(session.turns, [], "1 文字も出なかったターンの発話は履歴に残らない");
-  // 閉じた turn として扱わない = KV は継がない（次のターンは全体描画で撃ち直す）。
+  assertEquals(
+    session.turns,
+    [],
+    "the message of a turn that emitted not a single character does not stay in the history",
+  );
+  // Not treated as a closed turn = the KV is not continued (the next turn re-feeds the whole rendering).
   assertEquals(await session.send("Another one.").text(), "Red.");
-  assertEquals(host.created(), 2, "失敗したターンの sequence は継がない");
+  assertEquals(host.created(), 2, "the sequence of a failed turn is not continued");
 });
 
-test("ChatSession: sequence.dispose が失敗してもセッションは次のターンを受ける", async () => {
-  // 後始末の失敗で `#busy` が立ったままになると、例外 1 つでセッションが二度と使えなくなる。
-  const boom = new Error("context.dispose が flush の失敗を伝播した");
+test("ChatSession: the session accepts the next turn even if sequence.dispose fails", async () => {
+  // If a failing cleanup left `#busy` set, one exception would make the session unusable forever.
+  const boom = new Error("context.dispose propagated a flush failure");
   const host = fakeHost(
     [
       { text: "Blue", closes: false },
@@ -769,15 +815,15 @@ test("ChatSession: sequence.dispose が失敗してもセッションは次の�
     () => undefined,
     (error: unknown) => error,
   );
-  assertEquals(caught, boom, "後始末の失敗はそのまま届く（本体は成功している）");
+  assertEquals(caught, boom, "the cleanup failure arrives as is (the body succeeded)");
   assertEquals(await first.done.catch((error: unknown) => error), caught);
-  assertEquals(await session.send("Another one.").text(), "Red.", "セッションは固まらない");
+  assertEquals(await session.send("Another one.").text(), "Red.", "the session is not wedged");
 
-  // 本体も失敗したターンは 2 本とも運ぶ（どちらの事実も消さない）。
+  // A turn whose body failed too carries both (neither fact is lost).
   const failing = fakeHost([{ text: "Blue.", closes: true }], programOf(640), {
     disposeError: boom,
   });
-  const body = new Error("onPrefill が投げた");
+  const body = new Error("onPrefill threw");
   const session2 = new ChatSession(failing, { maxNewTokens: MAX_NEW_TOKENS });
   const bothStream = session2.send("Name a color.", {
     onPrefill: () => {
@@ -789,13 +835,14 @@ test("ChatSession: sequence.dispose が失敗してもセッションは次の�
     (error: unknown) => error,
   );
   assertEquals(await bothStream.done.catch((error: unknown) => error), both);
-  assert(both instanceof AggregateError, `AggregateError でない: ${both}`);
-  assertEquals(both.errors, [body, boom], "errors[0] が本体・errors[1] が後始末");
+  assert(both instanceof AggregateError, `not an AggregateError: ${both}`);
+  assertEquals(both.errors, [body, boom], "errors[0] is the body, errors[1] the cleanup");
 });
 
-test("ChatSession: 受理集合は同期に落ち、セッションの状態を汚さない", async () => {
-  // 検査が本体（async generator）の中だと、不正な要求が履歴へ発話を積み `#busy` を立てたまま
-  // 「汲み始めるまで落ちない」= 1 度の取り違えでセッションが使えなくなる。
+test("ChatSession: the accepted set fails synchronously and does not soil the session state", async () => {
+  // If the check were inside the body (the async generator), an invalid request would push the
+  // message into the history and leave `#busy` set while "not failing until draining starts" =
+  // one mix-up makes the session unusable.
   const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
   const session = new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
 
@@ -805,25 +852,25 @@ test("ChatSession: 受理集合は同期に落ち、セッションの状態を�
     Error,
     "Token 2 appears twice",
   );
-  assertEquals(session.turns, [], "不正な要求は履歴へ発話を積まない");
-  assertEquals(host.created(), 0, "sequence も取らない");
-  // `#busy` が立っていない = 正しい要求はそのまま通る。
+  assertEquals(session.turns, [], "an invalid request pushes no message into the history");
+  assertEquals(host.created(), 0, "nor takes a sequence");
+  // `#busy` is not set = a correct request goes through as is.
   assertEquals(await session.send("Name a color.").text(), "Blue.");
 });
 
-test("ChatSession: dispose 済みでは発行済みの stream も生成しない", async () => {
-  // `send` は発行時に見るが、本体が走り出すのはその後。セッションだけを dispose した後に
-  // 汲み始めると、生きた pipeline から新しい容量ぶんの sequence を取れてしまう。
+test("ChatSession: once disposed, even an issued stream does not generate", async () => {
+  // `send` checks at issue, but the body starts running after that. Starting to drain after only
+  // the session was disposed could take a new capacity's worth of sequence from a live pipeline.
   const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
   const session = new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
 
   const stream = session.send("Name a color.");
   await session.dispose();
   await assertRejects(() => stream.text(), Error, "after dispose");
-  assertEquals(host.created(), 0, "dispose の後に sequence を取らない");
+  assertEquals(host.created(), 0, "no sequence is taken after dispose");
 });
 
-test("ChatSession: 停止文字列で切ったターンは chat() と同じ理由を運び、KV を継がない", async () => {
+test("ChatSession: a turn cut by a stop string carries the same reason as chat() and does not continue the KV", async () => {
   const host = fakeHost(
     [
       { text: "Blue.\nUser: hi", closes: true },
@@ -834,12 +881,16 @@ test("ChatSession: 停止文字列で切ったターンは chat() と同じ理�
   const session = new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
 
   const stream = session.send("Name a color.", { stopStrings: ["\nUser:"] });
-  assertEquals(await stream.text(), "Blue.", "停止文字列そのものと、その後ろは流れない");
+  assertEquals(
+    await stream.text(),
+    "Blue.",
+    "neither the stop string itself nor what follows is streamed",
+  );
   const stop = await stream.done;
   assertEquals(stop.reason, "stop-string");
   assert(stop.reason === "stop-string" && stop.stopString === "\nUser:");
-  assert(stop.tokens > 0, "内側の数をそのまま運ぶ");
-  // 1 つのストリームは 1 通りにしか消費できない（`chat()` と同じ契約）。
+  assert(stop.tokens > 0, "the inner count is carried as is");
+  // One stream can be consumed in only one way (the same contract as `chat()`).
   assertThrows(() => stream[Symbol.asyncIterator](), Error, "can be consumed in only one way");
 
   assertEquals(
@@ -848,23 +899,24 @@ test("ChatSession: 停止文字列で切ったターンは chat() と同じ理�
       { role: "user", content: "Name a color." },
       { role: "assistant", content: "Blue." },
     ],
-    "流した本文だけが履歴へ入る",
+    "only the streamed text enters the history",
   );
-  // model turn は閉じていない = 差分の前提が無い。
+  // The model turn is not closed = no premise for a delta.
   assertEquals(await session.send("Another one.").text(), "Red.");
-  assertEquals(host.created(), 2, "停止文字列で切ったターンの後は sequence を作り直す");
+  assertEquals(host.created(), 2, "after a turn cut by a stop string the sequence is rebuilt");
 });
 
-describe("ChatSession capacity: 容量の関係は構築時に見る（設定した場所で落ちる）", () => {
-  // 検査を sequence 側だけに任せると、長いターンでは `#shrink` が履歴を実際に切り詰めてから
-  // 容量エラーになり、真因（宣言ミス）がどの診断にも出ない。式は `sequence.ts` と同じ 2 本。
+describe("ChatSession capacity: the capacity relations are checked at construction (it fails where it was set)", () => {
+  // Leaving the check to the sequence side alone would make `#shrink` actually truncate the history
+  // on a long turn before the capacity error, and the real cause (a wrong declaration) would show
+  // in no diagnostic. The formulas are the same two as in `sequence.ts`.
   // One host is shared by all its: the last it asserts that only its own sequence was created.
   let host: FakeHost;
   beforeAll(() => {
     host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
   });
 
-  it("chunkLength 未満（1 chunk すら入らない）", () => {
+  it("below chunkLength (not even one chunk fits)", () => {
     assertThrows(
       () => new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 8 }),
       ModelInputError,
@@ -872,7 +924,7 @@ describe("ChatSession capacity: 容量の関係は構築時に見る（設定し
     );
   });
 
-  it("maxPosition 超過（容量いっぱいの会話が位置上限の外を引く）", () => {
+  it("above maxPosition (a full-capacity conversation reaches past the position limit)", () => {
     assertThrows(
       () => new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 4097 }),
       ModelInputError,
@@ -880,7 +932,7 @@ describe("ChatSession capacity: 容量の関係は構築時に見る（設定し
     );
   });
 
-  it("値域（安全整数でない容量）", () => {
+  it("range (a capacity that is not a safe integer)", () => {
     assertThrows(
       () => new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 64.5 }),
       ModelInputError,
@@ -888,18 +940,18 @@ describe("ChatSession capacity: 容量の関係は構築時に見る（設定し
     );
   });
 
-  it("chunkLength ちょうど / maxPosition ちょうどは通る（門が広すぎない対）", async () => {
+  it("exactly chunkLength / exactly maxPosition passes (the counterpart showing the check is not too wide)", async () => {
     const edge = new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 32 });
     new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, capacity: 4096 });
-    // 構築が通っただけでなく、選んだ容量がそのまま sequence へ降りることまで見る。
+    // Beyond construction passing, check that the picked capacity reaches the sequence as is.
     assertEquals(await edge.send("Name a color.").text(), "Blue.");
     assertEquals(host.capacities(), [32]);
   });
 });
 
-test("ChatSession: sequence 確保の await 中に dispose されたら、その sequence を畳んで落ちる", async () => {
-  // `dispose()` は `#sequence` がまだ undefined の状態で走るので何も畳まず、その直後に
-  // `this.#sequence = created` が入る — この窓を塞げるのは `await` 明けの再検査だけ。
+test("ChatSession: disposed during the await of the sequence allocation, it disposes that sequence and fails", async () => {
+  // `dispose()` runs while `#sequence` is still undefined, so it disposes nothing, and right after
+  // `this.#sequence = created` lands — only the re-check after the `await` can close this window.
   let release!: () => void;
   const entered = Promise.withResolvers<void>();
   const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640), {
@@ -917,38 +969,46 @@ test("ChatSession: sequence 確保の await 中に dispose されたら、その
       () => undefined,
       (error: unknown) => error,
     );
-  await entered.promise; // `#host.sequence()` へ入った（返り値はまだ保留）。
+  await entered.promise; // entered `#host.sequence()` (the return value is still held).
   await session.dispose();
-  assertEquals(host.disposed(), 0, "この時点ではまだ畳む相手が居ない（窓が開いている）");
+  assertEquals(
+    host.disposed(),
+    0,
+    "at this point there is nothing to dispose yet (the window is open)",
+  );
   release();
 
   const caught = await settled;
-  assert(caught instanceof Error, `例外で終わっていない: ${caught}`);
+  assert(caught instanceof Error, `it did not end with an exception: ${caught}`);
   assert(
     caught.message.includes("cannot generate after dispose"),
-    `別の理由で落ちた: ${caught.message}`,
+    `it failed for another reason: ${caught.message}`,
   );
-  assertEquals(host.created(), 1, "確保そのものは通っている（窓の外で捨てる形ではない）");
-  assertEquals(host.disposed(), 1, "確保できてしまった sequence は畳んでから落とす");
+  assertEquals(
+    host.created(),
+    1,
+    "the allocation itself went through (not dropped outside the window)",
+  );
+  assertEquals(host.disposed(), 1, "a sequence that did get allocated is disposed before failing");
 });
 
-describe("ChatSession sampler: ターン → セッション → 配布形の既定の順に解決する", () => {
-  // 退行すると配布形の推奨サンプラが黙って温度 0（greedy）へ落ちる — 例外は出ず、出力が
-  // 「妙に決定的」になることでしか気づけない。
+describe("ChatSession sampler: resolved in the order turn → session → the distribution's default", () => {
+  // A regression silently drops the distribution's recommended sampler to temperature 0 (greedy) —
+  // no exception, and it can only be noticed by the output becoming "oddly deterministic".
   const recommended: DefaultSampler = { temperature: 1, topK: 64, topP: 0.95 };
   const script = [
     { text: "Blue.", closes: true },
     { text: "Red.", closes: true },
   ] as const;
 
-  it("どちらも省略すれば配布形の宣言が効く", async () => {
+  it("with both omitted, the distribution's declaration applies", async () => {
     const host = fakeHost([...script], programOf(640), {}, recommended);
     const session = new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
     assertEquals(await session.send("Name a color.").text(), "Blue.");
     assertEquals(host.samplers()[0], recommended);
   });
 
-  it("セッション指定が配布形の宣言を上書きする", async () => {
+  it("the session setting overrides the distribution's declaration", async () => {
     const host = fakeHost([...script], programOf(640), {}, recommended);
     const session = new ChatSession(host, {
       maxNewTokens: MAX_NEW_TOKENS,
@@ -958,7 +1018,7 @@ describe("ChatSession sampler: ターン → セッション → 配布形の既
     assertEquals(host.samplers()[0], { temperature: 0.5 });
   });
 
-  it("ターン指定がセッション指定を上書きする", async () => {
+  it("the turn setting overrides the session setting", async () => {
     const host = fakeHost([...script], programOf(640), {}, recommended);
     const session = new ChatSession(host, {
       maxNewTokens: MAX_NEW_TOKENS,
@@ -972,7 +1032,7 @@ describe("ChatSession sampler: ターン → セッション → 配布形の既
     assertEquals(host.samplers(), [{ temperature: 0.5 }, { temperature: 0 }]);
   });
 
-  it("3 段とも無ければ欄そのものを渡さない（低層の既定 = 温度 0）", async () => {
+  it("with none of the three levels, the field itself is not passed (the lower layer's default = temperature 0)", async () => {
     const host = fakeHost([...script], programOf(640));
     const session = new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
     assertEquals(await session.send("Name a color.").text(), "Blue.");
@@ -980,10 +1040,11 @@ describe("ChatSession sampler: ターン → セッション → 配布形の既
   });
 });
 
-test("ChatSession: 中断したターンは done が aborted で resolve し、KV を継がない", async () => {
-  // 中断も `fail()` する退行が入ると「自分で止めたのに done が reject する」になり、
-  // `error === signal.reason` による中断の識別（ADR 0083 決定 5）が壊れる。逆に中断ターンで
-  // `stop` を立てる退行が入ると、閉じていない model turn の後ろへ差分を継いで会話が静かに壊れる。
+test("ChatSession: an aborted turn resolves done with aborted and does not continue the KV", async () => {
+  // A regression that also `fail()`s an abort would turn into "done rejects although I stopped it
+  // myself", breaking the abort identification by `error === signal.reason` (ADR 0083 decision 5).
+  // Conversely, a regression that sets `stop` on an aborted turn would continue a delta after a
+  // model turn that is not closed, quietly breaking the conversation.
   const host = fakeHost(
     [
       { text: "Blue and red.", closes: true },
@@ -993,7 +1054,7 @@ test("ChatSession: 中断したターンは done が aborted で resolve し、K
   );
   const session = new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
   const controller = new AbortController();
-  const reason = new Error("呼び手が止めた");
+  const reason = new Error("the caller stopped it");
 
   const stream = session.send("Name a color.", { signal: controller.signal });
   const parts: string[] = [];
@@ -1009,11 +1070,17 @@ test("ChatSession: 中断したターンは done が aborted で resolve し、K
     }
   })();
 
-  assertEquals(caught, reason, "中断の理由が同一性のまま届く（包まない）");
-  assert(parts.length > 0, "1 片も出ないうちに中断した（このケースの前提が崩れている）");
+  assertEquals(caught, reason, "the abort reason arrives with its identity (not wrapped)");
+  assert(
+    parts.length > 0,
+    "aborted before a single chunk came out (this case's premise does not hold)",
+  );
   const stop = await stream.done;
-  assertEquals(stop.reason, "aborted", "done は reject せず aborted で resolve する");
-  assert(stop.tokens > 0, `中断までに引いた token 数が運ばれない: ${stop.tokens}`);
+  assertEquals(stop.reason, "aborted", "done does not reject; it resolves with aborted");
+  assert(
+    stop.tokens > 0,
+    `the number of tokens drawn before the abort is not carried: ${stop.tokens}`,
+  );
 
   assertEquals(
     session.turns,
@@ -1021,37 +1088,46 @@ test("ChatSession: 中断したターンは done が aborted で resolve し、K
       { role: "user", content: "Name a color." },
       { role: "assistant", content: parts.join("") },
     ],
-    "出た本文だけを積む",
+    "only the text that came out is pushed",
   );
-  assertEquals(host.disposed(), 1, "中断ターンでも後始末は走る");
+  assertEquals(host.disposed(), 1, "the cleanup runs on an aborted turn too");
 
-  // model turn は閉じていない = 差分の前提が無い（KV を継がない）。
+  // The model turn is not closed = no premise for a delta (the KV is not continued).
   assertEquals(await session.send("Another one.").text(), "Red.");
-  assertEquals(host.created(), 2, "中断ターンの後は sequence を作り直す");
+  assertEquals(host.created(), 2, "after an aborted turn the sequence is rebuilt");
 });
 
-test("ChatSession: 要求は発行時に写す（汲み始める前の書き換えは効かない）", async () => {
-  // 型 doc の MUST。受け手の複製（`createSampler` / `GenerationSequence.generate`）は
-  // async generator の本体 = 最初の `next()` なので、それに任せると「発行してから汲み始める
-  // まで」の窓で書き換えた抽選指定・停止集合が黙って効く。
+test("ChatSession: a request is copied at issue (rewriting it before draining has no effect)", async () => {
+  // The MUST of the type doc. The receivers' copies (`createSampler` /
+  // `GenerationSequence.generate`) are in the body of an async generator = the first `next()`, so
+  // leaving it to them would let a sampling spec or stop set rewritten in the window "between issue
+  // and the start of draining" silently take effect.
   const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
   const sampler = { temperature: 0.5, logitBias: [[7, 1] as const] };
   const stopTokens = [11, 12];
   const session = new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS, sampler });
 
   const stream = session.send("Name a color.", { stopTokens });
-  // 発行済み・まだ 1 片も汲んでいない状態で呼び手側を書き換える。
+  // Rewrite the caller's side while it is issued and not a single chunk has been drained.
   sampler.temperature = 2;
   stopTokens.length = 0;
   assertEquals(await stream.text(), "Blue.");
 
   const recorded = host.samplers()[0];
-  assertEquals(recorded, { temperature: 0.5, logitBias: [[7, 1]] }, "発行時の値で走っている");
-  assertEquals(Object.isFrozen(recorded), true, "写しは凍結して渡す（以後の書き換えを塞ぐ）");
-  assertEquals(sampler.temperature, 2, "呼び手の object は写しの側から触らない");
+  assertEquals(
+    recorded,
+    { temperature: 0.5, logitBias: [[7, 1]] },
+    "it runs with the values at issue",
+  );
+  assertEquals(
+    Object.isFrozen(recorded),
+    true,
+    "the copy is passed frozen (closes later rewrites)",
+  );
+  assertEquals(sampler.temperature, 2, "the caller's object is not touched from the copy's side");
 });
 
-test("ChatSession: 未開始 return は仮発話だけを戻し、前ターンの KV を継げる", async () => {
+test("ChatSession: a return before start rolls back only the tentative message and can continue the previous turn's KV", async () => {
   const host = fakeHost(
     [
       { text: "Blue.", closes: true },
@@ -1074,7 +1150,7 @@ test("ChatSession: 未開始 return は仮発話だけを戻し、前ターン�
   await session.dispose();
 });
 
-test("ChatSession: 未開始 throw は done に同じ例外を通知し、次の送信を妨げない", async () => {
+test("ChatSession: a throw before start reports the same exception on done and does not block the next send", async () => {
   const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
   const session = new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
   const stream = session.send("Cancelled.");
@@ -1089,7 +1165,7 @@ test("ChatSession: 未開始 throw は done に同じ例外を通知し、次の
   await session.dispose();
 });
 
-test("ChatSession: done は cleanup を待ち、その直後に次の送信ができる", async () => {
+test("ChatSession: done waits for the cleanup, and the next send can follow right after", async () => {
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   const host = fakeHost(
@@ -1124,7 +1200,7 @@ test("ChatSession: done は cleanup を待ち、その直後に次の送信が�
   await session.dispose();
 });
 
-test("ChatSession: 履歴スナップショットの各発話は外部から変更できない", async () => {
+test("ChatSession: each message of a history snapshot cannot be changed from outside", async () => {
   const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
   const session = new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
   await session.send("Name a color.").text();
@@ -1134,7 +1210,7 @@ test("ChatSession: 履歴スナップショットの各発話は外部から変�
   await session.dispose();
 });
 
-test("ChatSession token 通知: 発行時の関数を保持し、本文と停止 token 数を変えない", async () => {
+test("ChatSession token notification: keeps the function given at issue and changes neither the text nor the stop-token count", async () => {
   const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
   await using session = new ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
   const seen: number[] = [];
@@ -1145,13 +1221,13 @@ test("ChatSession token 通知: 発行時の関数を保持し、本文と停止
   };
   const stream = session.send("Name a color.", options);
   options.onToken = () => {
-    throw new Error("発行後の変更");
+    throw new Error("changed after issue");
   };
   assertEquals(await stream.text(), "Blue.");
   assertEquals(seen, tokenizer.encode("Blue."));
   assertEquals((await stream.done).tokens, seen.length + 1);
 });
-test("ChatSession token 通知: callback の失敗を伝え、次の会話を妨げない", async () => {
+test("ChatSession token notification: reports a callback failure and does not block the next conversation", async () => {
   const host = fakeHost(
     [
       { text: "Blue.", closes: true },
@@ -1171,9 +1247,10 @@ test("ChatSession token 通知: callback の失敗を伝え、次の会話を妨
   assertEquals(await session.send("Another color.").text(), "Red.");
 });
 
-test("ChatSession 溢れ: 引数展開の上限を超える長さの発話も容量エラーで返る", async () => {
-  // 15 万文字の 1 断片（added token で割れない本文）。BPE の結果を可変長引数で積むと、容量の
-  // 判定より前に tokenizer が素の RangeError で落ち、呼び手には内部障害に見える。
+test("ChatSession overflow: a message longer than the argument-spread limit also returns a capacity error", async () => {
+  // One fragment of 150,000 characters (text that added tokens do not split). Pushing the BPE result
+  // as variadic arguments would make the tokenizer fail with a bare RangeError before the capacity
+  // decision, which looks like an internal fault to the caller.
   const host = fakeHost([{ text: "Blue.", closes: true }], programOf(TIGHT_CAPACITY));
   const session = new ChatSession(host, { system: SYSTEM, maxNewTokens: MAX_NEW_TOKENS });
   const error = await assertRejects(
@@ -1181,18 +1258,19 @@ test("ChatSession 溢れ: 引数展開の上限を超える長さの発話も容
     GenerationCapacityError,
     "The conversation does not fit",
   );
-  // 位置表（4096）も容量も超える長さなので、どちらの上限で落ちるかは問わない。
+  // The length exceeds both the position table (4096) and the capacity, so which limit it fails on does not matter.
   assert(error.requestedNewTokens === MAX_NEW_TOKENS);
   assertEquals(host.created(), 0);
 });
 
-// ---- ⑪ 分岐（`fork` — ADR 0083 追記 2026-10-11・裁定 8）------------------------------
+// ---- ⑪ branching (`fork` — ADR 0083 addendum 2026-10-11, decision 8) -------------------------
 //
-// 分岐は「同じ設定・同じ履歴の独立のセッション」で、KV を継いでいる会話は sequence ごと複製し、
-// KV が空の会話は履歴だけを写す（GPU の複製を出さない）。台本は host 全体で 1 本なので、分岐と元の
-// どちらで送っても台本の次の答えが返る。
+// A branch is "an independent session with the same settings and the same history"; a
+// conversation that continues its KV is copied sequence and all, and a conversation with an empty
+// KV copies only the history (no GPU copy). The script is one for the whole host, so whether one
+// sends on the branch or on the original, the next answer of the script comes back.
 
-test("ChatSession.fork: 分岐は履歴と KV を引き継ぎ、以後は元と独立に進む", async () => {
+test("ChatSession.fork: a branch inherits the history and the KV, and from then on proceeds independently of the original", async () => {
   const host = fakeHost(
     [
       { text: "Blue.", closes: true },
@@ -1205,17 +1283,17 @@ test("ChatSession.fork: 分岐は履歴と KV を引き継ぎ、以後は元と�
   assertEquals(await session.send("Name a color.").text(), "Blue.");
 
   const branch = await session.fork();
-  assertEquals(host.forks(), 1, "KV を継いでいる会話は sequence ごと複製する");
+  assertEquals(host.forks(), 1, "a conversation that continues its KV is copied sequence and all");
   assertEquals(branch.turns, session.turns);
 
-  // 分岐のターンは KV を継いで差分だけを流す（sequence を作り直さない）。
+  // A turn on the branch continues the KV and feeds only the delta (it does not rebuild the sequence).
   assertEquals(await branch.send("Another one.").text(), "Red.");
-  assertEquals(host.created(), 1, "分岐が sequence を作り直した（KV を引き継いでいない）");
+  assertEquals(host.created(), 1, "the branch rebuilt the sequence (it did not inherit the KV)");
   assertEquals(
     host.prompts().at(-1),
     chatTurn(tokenizer, { role: "user", content: "Another one." }),
   );
-  // 元のターンも自分の KV を継ぐ。履歴は互いに混ざらない。
+  // A turn on the original continues its own KV too. The histories do not mix.
   assertEquals(await session.send("A third.").text(), "Green.");
   assertEquals(host.created(), 1);
   assertEquals(host.prompts().at(-1), chatTurn(tokenizer, { role: "user", content: "A third." }));
@@ -1235,15 +1313,15 @@ test("ChatSession.fork: 分岐は履歴と KV を引き継ぎ、以後は元と�
     { role: "assistant", content: "Green." },
   ]);
 
-  // 元を先に dispose してよい（親子の依存を持たない）。どちらも自分の sequence を畳む。
+  // The original may be disposed first (no parent-child dependency). Each disposes its own sequence.
   await session.dispose();
   assertEquals(host.disposed(), 1);
   await branch.dispose();
   assertEquals(host.disposed(), 2);
 });
 
-describe("ChatSession.fork: KV が空の会話は GPU の複製を出さず、履歴と設定だけを写す", () => {
-  it("まだ送っていない会話", async () => {
+describe("ChatSession.fork: a conversation with an empty KV makes no GPU copy and copies only the history and the settings", () => {
+  it("a conversation that has not sent yet", async () => {
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
     const session = new ChatSession(host, {
       system: SYSTEM,
@@ -1252,9 +1330,9 @@ describe("ChatSession.fork: KV が空の会話は GPU の複製を出さず、�
       speculative: "always",
     });
     const branch = await session.fork();
-    assertEquals(host.forks(), 0, "KV が空なのに複製を出した");
+    assertEquals(host.forks(), 0, "it made a copy although the KV is empty");
     assertEquals(branch.turns, [SYSTEM_MESSAGE]);
-    // 分岐の最初の send は全体を描き直し、元と同じ設定（容量・投機）で sequence を作る。
+    // The branch's first send re-renders everything and builds a sequence with the same settings as the original (capacity, speculative).
     assertEquals(await branch.send("Name a color.").text(), "Blue.");
     assertEquals(host.capacities(), [320]);
     assertEquals(host.speculatives(), ["always"]);
@@ -1262,12 +1340,16 @@ describe("ChatSession.fork: KV が空の会話は GPU の複製を出さず、�
       host.prompts()[0],
       chatPrompt(tokenizer, [SYSTEM_MESSAGE, { role: "user", content: "Name a color." }]),
     );
-    assertEquals(session.turns, [SYSTEM_MESSAGE], "分岐の send が元の履歴へ入った");
+    assertEquals(
+      session.turns,
+      [SYSTEM_MESSAGE],
+      "the branch's send entered the original's history",
+    );
     await branch.dispose();
     await session.dispose();
   });
 
-  it("直前のターンが EOS で閉じていない会話（KV は捨ててある）", async () => {
+  it("a conversation whose last turn was not closed by EOS (the KV has been dropped)", async () => {
     const host = fakeHost(
       [
         { text: "Blue", closes: false },
@@ -1278,9 +1360,9 @@ describe("ChatSession.fork: KV が空の会話は GPU の複製を出さず、�
     const session = new ChatSession(host, { system: SYSTEM, maxNewTokens: MAX_NEW_TOKENS });
     assertEquals(await session.send("Name a color.").text(), "Blue");
     const branch = await session.fork();
-    assertEquals(host.forks(), 0, "KV を捨てた会話なのに複製を出した");
+    assertEquals(host.forks(), 0, "it made a copy of a conversation whose KV was dropped");
     assertEquals(branch.turns, session.turns);
-    // 分岐の次のターンは元と同じく履歴から描き直す。
+    // The branch's next turn re-renders from the history, like the original.
     assertEquals(await branch.send("Another one.").text(), "Red.");
     assertEquals(
       host.prompts().at(-1),
@@ -1296,7 +1378,7 @@ describe("ChatSession.fork: KV が空の会話は GPU の複製を出さず、�
   });
 });
 
-test("ChatSession.fork: 走行中のターンと dispose 済みは同期に落ち、直後の send は分岐に入らない", async () => {
+test("ChatSession.fork: a running turn and a disposed session fail synchronously, and a send right after does not enter the branch", async () => {
   const host = fakeHost(
     [
       { text: "Blue.", closes: true },
@@ -1307,13 +1389,13 @@ test("ChatSession.fork: 走行中のターンと dispose 済みは同期に落�
   );
   const session = new ChatSession(host, { system: SYSTEM, maxNewTokens: MAX_NEW_TOKENS });
 
-  // 走行中のターン（stream が終端していない）の間は同期に落ちる。
+  // While a turn is running (the stream has not ended) it fails synchronously.
   const first = session.send("Name a color.");
   assertThrows(() => session.fork(), Error, "the previous turn has not finished yet");
   assertEquals(await first.text(), "Blue.");
-  assertEquals(host.forks(), 0, "拒否された fork が複製を出した");
+  assertEquals(host.forks(), 0, "a rejected fork made a copy");
 
-  // fork() の直後（await 前）に元へ send しても、分岐の履歴は呼んだ時点のまま。
+  // Even a send on the original right after fork() (before the await) leaves the branch's history as it was at the call.
   const forking = session.fork();
   assertEquals(await session.send("Another one.").text(), "Red.");
   const branch = await forking;
@@ -1322,7 +1404,7 @@ test("ChatSession.fork: 走行中のターンと dispose 済みは同期に落�
     { role: "user", content: "Name a color." },
     { role: "assistant", content: "Blue." },
   ]);
-  // 分岐は呼んだ時点の KV から続く（差分で継ぐ）。
+  // The branch continues from the KV at the time of the call (continued as a delta).
   assertEquals(await branch.send("A third.").text(), "Green.");
   assertEquals(host.prompts().at(-1), chatTurn(tokenizer, { role: "user", content: "A third." }));
 
@@ -1331,19 +1413,19 @@ test("ChatSession.fork: 走行中のターンと dispose 済みは同期に落�
   await branch.dispose();
 });
 
-test("ChatSession.fork: KV の複製が失敗したら reject し、元はそのまま続けられる", async () => {
+test("ChatSession.fork: when the KV copy fails it rejects, and the original can go on as it is", async () => {
   const host = fakeHost(
     [
       { text: "Blue.", closes: true },
       { text: "Red.", closes: true },
     ],
     programOf(640),
-    { forkError: new Error("注入: KV の複製の失敗") },
+    { forkError: new Error("injected: the KV copy failed") },
   );
   const session = new ChatSession(host, { system: SYSTEM, maxNewTokens: MAX_NEW_TOKENS });
   assertEquals(await session.send("Name a color.").text(), "Blue.");
-  await assertRejects(() => session.fork(), Error, "注入: KV の複製の失敗");
-  // 元の KV と履歴は無傷（差分で継げる）。
+  await assertRejects(() => session.fork(), Error, "injected: the KV copy failed");
+  // The original's KV and history are intact (it can continue with a delta).
   assertEquals(await session.send("Another one.").text(), "Red.");
   assertEquals(host.created(), 1);
   assertEquals(

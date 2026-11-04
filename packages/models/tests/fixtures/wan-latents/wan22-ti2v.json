@@ -1,8 +1,8 @@
 {
   "_doc": [
-    "Wan2.2 TI2V-5B の VAE の per-channel の潜在の統計（逆正規化 — packages/models/src/wan/latents.ts の WAN22_LATENTS_MEAN / WAN22_LATENTS_STD）。",
-    "値は source の revision の vae/config.json の latents_mean / latents_std（4 桁以下の小数）を f32 へ丸めた値の最短 10 進表記（逆正規化で実際に使う f32 そのもの）。",
-    "両側から縛る: TS の wan_ti2v_vae_tiles_host_test.ts が定数とのビット一致を、recipe の wan/tests/test_ti2v_generation_stats.py が pin の config を np.float32 にした値との一致を見る（片側だけの更新を赤にする）。"
+    "Per-channel latent statistics of the Wan2.2 TI2V-5B VAE (denormalization — WAN22_LATENTS_MEAN / WAN22_LATENTS_STD of packages/models/src/wan/latents.ts).",
+    "The values are the shortest decimal form of latents_mean / latents_std (decimals of at most 4 digits) from vae/config.json of the source revision rounded to f32 (exactly the f32 values denormalization uses).",
+    "Bound from both sides: the TS wan_ti2v_vae_tiles_host_test.ts checks bit identity with the constants, and the recipe's wan/tests/test_ti2v_generation_stats.py checks equality with the pinned config converted to np.float32 (an update of one side only turns red)."
   ],
   "source": {
     "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",

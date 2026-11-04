@@ -186,12 +186,8 @@ test("lower bound: 2 tokens is accepted, the empty string and whitespace only (o
 });
 
 test("the rejection message carries the positive / negative label", () => {
-  assertThrows(() => encoder.encode("𠀋", "ネガティブプロンプト"), ModelInputError, "ネガティブ");
-  assertThrows(
-    () => encoder.encode("cafÃ©", "ネガティブプロンプト"),
-    PromptCleanError,
-    "ネガティブ",
-  );
+  assertThrows(() => encoder.encode("𠀋", "negativePrompt"), ModelInputError, "negativePrompt");
+  assertThrows(() => encoder.encode("cafÃ©", "negativePrompt"), PromptCleanError, "negativePrompt");
 });
 
 test("a lone surrogate is rejected as an input error before preprocessing", () => {

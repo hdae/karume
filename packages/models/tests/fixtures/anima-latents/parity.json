@@ -1,10 +1,10 @@
 {
   "_doc": [
-    "Anima の VAE per-channel latent 統計（生成: tools/export-recipes/anima/pipeline_ref.py の",
-    "decode_latents 段が outputs/series/anima-pipeline/pipeline.safetensors へ emit する",
-    "latents_mean / latents_std を切り出したもの — outputs/ は git 追跡外なので値をここへ写す）。",
-    "正本は AutoencoderKLQwenImage.config の latents_mean / latents_std で、torch 側も f32。",
-    "src/anima/latents.ts の手写し定数とのビット一致を anima_latents_test.ts が固定する。"
+    "Anima VAE per-channel latent statistics (generated: cut out of the latents_mean / latents_std that",
+    "the decode_latents stage of tools/export-recipes/anima/pipeline_ref.py emits into",
+    "outputs/series/anima-pipeline/pipeline.safetensors — outputs/ is not tracked by git, so the values are copied here).",
+    "The source of truth is latents_mean / latents_std of AutoencoderKLQwenImage.config; the torch side is f32 too.",
+    "anima_latents_test.ts pins bit-identity with the hand-copied constants of src/anima/latents.ts."
   ],
   "source": {
     "repo": "circlestone-labs/Anima-Base-v1.0-Diffusers",

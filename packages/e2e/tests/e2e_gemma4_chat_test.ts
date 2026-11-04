@@ -1,48 +1,60 @@
-// 実重み Gemma 4 E2B の **文字列 in → 文字列 out** の検収門 — 段 4 の合格線。
+// Acceptance check for the real-weight Gemma 4 E2B **string in → string out** — the pass line of
+// step 4.
 //
-// 検収するのは `src/gemma/pipeline.ts`（`Pipeline`）と `src/gemma/text/chat.ts`
-// （`chatPrompt`）の結線で、門は 7 本:
+// What it accepts is the wiring of `src/gemma/pipeline.ts` (`Pipeline`) and
+// `src/gemma/text/chat.ts` (`chatPrompt`), with seven checks:
 //
-// ① **完走**: `fromAssets` → `chat([...])` が実重みで回り、温度 0（この層の既定）の出力が
-//    固定した greedy golden と文字単位で一致する。golden は**この経路自身で採った**もので、
-//    モデルの正しさは証明しない — 証明するのは「結線を変えても出力が動かない」ことである
-//    （数値の正は `e2e_gemma4_product_test.ts` の交差 parity が持つ）
-// ② **chat の id 列**が HF `apply_chat_template` のフィクスチャと一致する。`gemma4_chat_test.ts`
-//    は部分集合と実資産で同じことを見るが、こちらは**パイプラインが握っている資産**で見る
-//    （別の tokenizer を掴んでいれば描画は合ったまま id 列だけが違う）
-// ③ **逐次と一括の一致**: streaming の片を連結したものが、同じ会話を低レベル面（`sequence()`）
-//    で回して得た token 列の一括 decode と一致する。逐次復号が byte run を取りこぼしたり
-//    「finish() まで全部溜める偽 streaming」になっても①は緑のままなので、この門が要る
-// ④ **停止集合**が上流の `generation_config.json` の宣言（`[1, 106, 50]`）と一致する
-// ⑤ **射程外は GPU に触る前に落ちる**（tools / 未知 role — `chat` は同期に throw する）
-// ⑥ **増分描画の多ターン**（`chatTurn` + `sequence()`）が、同じ会話を毎ターン全体描画で
-//    回した `chat()` と**逐語一致**する。turn-local 契約（`gemma4_chat_test.ts` の門）が id 列の
-//    等式で、こちらは同じ等式を**実重みの出力**で見る門である
-// ⑦ **`ChatSession` の 2 ターン**が⑥と同じ文字列になる。⑥は「差分描画を手で回せば一致
-//    する」を、⑦は「中間層に任せても同じ会話になる」を見る（KV の継続条件と履歴の積み方は
-//    セッションの中にあるので、実重みで見る門はここにしかない — `gemma4_chat_session_test.ts`
-//    は偽 sequence で組み立てだけを見る）
+// ① **Runs to completion**: `fromAssets` → `chat([...])` runs on the real weights, and the output
+//    at temperature 0 (this layer's default) matches a pinned greedy golden character for
+//    character. The golden was **taken on this path itself**, so it does not prove the model
+//    correct — what it proves is that "changing the wiring does not move the output" (numeric
+//    correctness belongs to the cross parity of `e2e_gemma4_product_test.ts`)
+// ② **The chat id sequence** matches the HF `apply_chat_template` fixture. `gemma4_chat_test.ts`
+//    checks the same with the subset and the real assets; this one checks it with **the assets
+//    the pipeline holds** (had it grabbed another tokenizer, the rendering would still match and
+//    only the id sequence would differ)
+// ③ **Streaming matches batch**: the concatenation of the streamed chunks matches the batch
+//    decode of the token sequence obtained by running the same conversation on the low-level
+//    surface (`sequence()`). ① stays green even if incremental decoding drops a byte run or turns
+//    into "fake streaming that buffers everything until finish()", so this check is needed
+// ④ **The stop set** matches the upstream `generation_config.json` declaration (`[1, 106, 50]`)
+// ⑤ **Out-of-scope input fails before touching the GPU** (tools / an unknown role — `chat`
+//    throws synchronously)
+// ⑥ **Incremental multi-turn rendering** (`chatTurn` + `sequence()`) matches, **verbatim**, a
+//    `chat()` that renders the whole conversation every turn. The turn-local contract (a check in
+//    `gemma4_chat_test.ts`) is the equality of the id sequences; this check sees the same
+//    equality in **the real-weight output**
+// ⑦ **Two turns of `ChatSession`** produce the same strings as ⑥. ⑥ checks that "driving the
+//    delta rendering by hand matches"; ⑦ checks that "leaving it to the middle layer gives the
+//    same conversation" (the KV continuation condition and how the history accumulates live
+//    inside the session, so this is the only check that sees them on real weights —
+//    `gemma4_chat_session_test.ts` checks only the assembly, with a fake sequence)
 //
-// MUST: 入口は公開面（`../gemma.ts`）から import する — `src/...` を直に掴むと、面が痩せていても
-// 門が緑のままになる（消費者が書けない経路で検収したことになる）。
+// MUST: the entry point is imported from the public surface (`../gemma.ts`) — grabbing `src/...`
+// directly would keep the check green even if the surface shrank (the acceptance would run
+// through a path consumers cannot write).
 //
-// ## 資産
+// ## Assets
 //
-// 配布形ミラー `models/karume-gemma4/`（`karume/5`）。リポジトリ管理外なので、無い環境では
-// **明示 SKIP** する。The seat is the regular line's `bf16` preset — the checkpoint's own weights
-// with the PLE on the host (`fromAssets` takes every part of its container in RAM, about 9.3 GiB).
+// The distribution mirror `models/karume-gemma4/` (`karume/5`). It is outside the repository, so
+// where it is missing the cases **SKIP explicitly**. The seat is the regular line's `bf16` preset —
+// the checkpoint's own weights with the PLE on the host (`fromAssets` takes every part of its
+// container in RAM, about 9.3 GiB).
 //
-// NOTE: 系列出力（`outputs/series/gemma4-e2b-product/`）も `krm` を書くようになったが、この面は
-// 系列からは組めない — `fromAssets` が受けるのは**manifest が持つもの**（part 列のキー・
-// model / quant の選択軸・2 文書の期待 hash）で、manifest を持たない系列出力には無いからである
-// （`helpers/gemma-mirror.ts` のモジュール doc と同じ理由）。重みも PLE も同じ焼き直しなので
-// golden の断定はそのまま保てる（取得元だけが `e2e_gemma4_pretrained_test.ts` と違う）。
+// NOTE: the series output (`outputs/series/gemma4-e2b-product/`) now writes `krm` too, but this
+// surface cannot be built from a series — `fromAssets` takes **what the manifest carries** (the
+// keys of the part list, the model / quant selection axes, the expected hashes of the two
+// documents), and a series output, which has no manifest, has none of them (the same reason as
+// in the module doc of `helpers/gemma-mirror.ts`). The weights and the PLE come from the same
+// rebuild, so the golden assertions hold as they are (only the source differs from
+// `e2e_gemma4_pretrained_test.ts`).
 
 import { readTextFile } from "@karume/test-support/fs";
 import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
-// MUST: 入口は**公開面**（`./gemma` サブパス）から取る — 消費者が書けない import で検収すると、
-// 「面が痩せていること」に門が気づけない（`src/...` を直に掴めば何でも見える）。
+// MUST: the entry point is taken from the **public surface** (the `./gemma` subpath) — with an
+// import consumers cannot write, the check could not notice that "the surface has shrunk"
+// (grabbing `src/...` directly sees everything).
 import {
   type ChatMessage,
   chatPrompt,
@@ -53,15 +65,16 @@ import {
   type PipelineOptions,
   type RunPhase,
 } from "../../models/gemma.ts";
-// 予算の既定は runtime の**公開面**から取る（写すと家族側だけ古い値を名乗れる）。
+// The budget default is taken from the runtime's **public surface** (a copy would let the family
+// side claim a stale value).
 import {
   type AdmissionReport,
   DEFAULT_PLAN_BACKING_BUDGET_BYTES,
   type SessionDiagnostics,
 } from "@karume/runtime";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
-// ミラーから `Assets` を組む helper（系列出力は manifest を持たないので使えない —
-// 冒頭の NOTE）。
+// The helper that builds `Assets` from the mirror (a series output has no manifest, so it cannot
+// be used — the NOTE at the top).
 import { gemma4MirrorAssets, mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
 import { allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budget.ts";
 
@@ -72,57 +85,67 @@ const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
  */
 const BF16_SEAT = { quant: "bf16" } as const;
 
-/** SKIP 時にそのまま貼れる組み立てコマンド。 */
+/** The build command, ready to paste when the cases SKIP. */
 const GENERATE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
 
-/** 実行条件は既存の gemma4 検収門と同値（同じ資産世代の裁定をそのまま使う）。 */
+/**
+ * The run conditions equal those of the existing gemma4 acceptance checks (the same ruling on the
+ * asset generation, as is).
+ */
 const CHUNK_LENGTH = 768;
-/** 記号 `M` を焼いた trace 上限（配布形の宣言 `maxChunkLength` と同値 — `chunkLength` の門）。 */
+/**
+ * The trace upper bound baked into the symbol `M` (equal to the distribution's declared
+ * `maxChunkLength` — the `chunkLength` check).
+ */
 const MAX_CHUNK_LENGTH = 768;
 const CAPACITY = 4096;
 const MAX_POSITION = 131072;
 /**
- * RoPE のパラメータ（配布形の宣言と同じ値 — 表は資産に無く、cos / sin はホストが作る）。
- * 正本は上流 config で、綴りと値域の門は `src/gemma/rope.ts`。
+ * The RoPE parameters (the same values as the distribution's declaration — the table is not in
+ * the assets; the host builds cos / sin). The source of truth is the upstream config, and the
+ * check on spelling and range is `src/gemma/rope.ts`.
  */
 const ROPE = {
   sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
   full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
 } as const;
 
-/** gemma-4-E2B-it の `generation_config.json` の `eos_token_id`（ADR 0083 決定 8）。 */
+/** `eos_token_id` of the `generation_config.json` of gemma-4-E2B-it (ADR 0083 decision 8). */
 const STOP_TOKENS = [1, 106, 50];
 
 /**
- * 検収ケース。`prompt` はフィクスチャ（`gemma4-chat.json`）のケース名で、`expected` は
- * **この経路で採った温度 0 の出力**である — re-collected 2026-11-04 on the RTX 3080 Ti (Node +
+ * The acceptance cases. `prompt` is the case name in the fixture (`gemma4-chat.json`), and
+ * `expected` is **the temperature-0 output taken on this path** — re-collected 2026-11-04 on the
+ * RTX 3080 Ti (Node +
  * Dawn) when the gate moved from the regular `i4-fast` seat to `bf16` (a new target: the int4
  * seat leaves the regular line). `single-user` is unchanged (9 tokens); `japanese` was
  * "2023年時点で、およそ1,400万人です。" in 18 tokens on `i4-fast` (2026-08-31).
  *
- * MUST: 期待値を「実行結果で上書きして緑にする」ことをしない — 割れたら、まず
- * `e2e_gemma4_product_test.ts` の交差 parity（torch との突合）が緑かどうかを見る。あちらが
- * 緑でここだけ割れるなら、動いたのは結線（chat の描画 / 逐次復号 / sampler の既定）である。
+ * MUST NOT: "overwrite the expected value with the run result to make it green" — when it splits,
+ * first see whether the cross parity of `e2e_gemma4_product_test.ts` (the comparison with torch)
+ * is green. If that one is green and only this one splits, what moved is the wiring (the chat
+ * rendering / incremental decoding / the sampler default).
  */
 const CASES = [
   {
     fixture: "single-user",
     maxNewTokens: 24,
     expected: "The capital of France is **Paris**.",
-    // `<turn|>`（106）で自分から turn を閉じる = 停止集合が実出力に効いている証拠。
-    // `tokens` は**停止 token 込み**の生成数（`GenerationStop.tokens` の doc — 本文は 8 個）。
+    // It closes the turn on its own with `<turn|>` (106) = evidence that the stop set takes effect
+    // on the real output. `tokens` is the generated count **including the stop token** (the doc
+    // of `GenerationStop.tokens` — the text is 8 tokens).
     stop: { reason: "eos", token: 106, tokens: 9 },
   },
   {
     fixture: "japanese",
     maxNewTokens: 24,
-    // 多ターン（system + user + assistant + user）の 4 通目への応答。
+    // The reply to the 4th message of a multi-turn conversation (system + user + assistant + user).
     expected: "2023年時点の東京の人口は約1,400万人です。",
     stop: { reason: "eos", token: 106, tokens: 20 },
   },
 ] as const;
 
-/** ⑥ の 2 ターン目（1 ターン目は `CASES[0]` の会話をそのまま使う）。 */
+/** The second turn of ⑥ (the first turn uses the conversation of `CASES[0]` as is). */
 const FOLLOW_UP: ChatMessage = { role: "user", content: "And of Japan?" };
 const FOLLOW_UP_TOKENS = 24;
 
@@ -143,7 +166,7 @@ const fixture = JSON.parse(
 
 const caseOf = (name: string) => {
   const found = fixture.chat.find((row) => row.name === name);
-  assert(found !== undefined, `フィクスチャに chat ケース '${name}' が無い`);
+  assert(found !== undefined, `the fixture has no chat case '${name}'`);
   return found;
 };
 
@@ -151,8 +174,8 @@ const AVAILABLE = mirrorAvailable(MIRROR_DIR);
 
 if (!AVAILABLE) {
   console.warn(
-    `[karume] 配布形ミラー models/karume-gemma4/ が無いため Gemma 4 E2B chat 検収を SKIP する。` +
-      `組み立て: ${GENERATE_COMMAND}`,
+    `[karume] the distribution mirror models/karume-gemma4/ is missing, so the Gemma 4 E2B chat ` +
+      `acceptance is SKIPPED. Build it: ${GENERATE_COMMAND}`,
   );
 }
 
@@ -160,8 +183,9 @@ const openPipeline = async (options: PipelineOptions = {}): Promise<Pipeline> =>
   await Pipeline.fromAssets(
     {
       ...(await gemma4MirrorAssets(MIRROR_DIR, BF16_SEAT)),
-      // 宣言は配布形のものではなく**この門が固定した値**を使う（chunk 長・容量・rope の既定が
-      // ミラー側で動いても、golden を採ったときと同じ形で回す）。
+      // The declaration uses **the values this check pinned**, not the distribution's (even if
+      // the chunk length, capacity or rope defaults move on the mirror side, it runs in the same
+      // shape as when the goldens were taken).
       config: {
         chunkLength: CHUNK_LENGTH,
         maxChunkLength: MAX_CHUNK_LENGTH,
@@ -171,33 +195,34 @@ const openPipeline = async (options: PipelineOptions = {}): Promise<Pipeline> =>
       },
     },
     {
-      // 予算は索引から導く（= PLE 全量常駐 → 範囲をまたぐ会話でも読み直しゼロ）。定数で書くと
-      // 資産世代で block 幅が変われば別の本数を意味してしまう — helper の doc。
+      // The budget is derived from the index (= the whole PLE resident → no re-read even for a
+      // conversation that spans ranges). Written as a constant, it would mean a different block
+      // count once the block width changes with the asset generation — the helper's doc.
       maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR, BF16_SEAT),
       ...options,
     },
   );
 
 describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
-  "Gemma 4 E2B chat 検収: 文字列 in → 文字列 out・逐次と一括の一致（実 GPU）",
+  "Gemma 4 E2B chat acceptance: string in → string out, streaming matches batch (real GPU)",
   () => {
     // Assigned in beforeAll; the its below run sequentially against this one pipeline.
     let pipeline: Pipeline;
-    /** dispose の**前**に発行し、汲み始めるのは**後**にする stream（下の寿命の門で使う）。 */
+    /** The stream issued **before** dispose and drained **after** it (used by the lifetime check below). */
     let issuedBeforeDispose: ChatStream | undefined;
-    /** ⑥ が採った 2 ターン目の参照（⑦ が同じ会話をセッションで組んで突き合わせる）。 */
+    /** The second-turn reference ⑥ took (⑦ builds the same conversation in a session and compares). */
     let followUpAnswer: string | undefined;
 
     beforeAll(async () => {
       pipeline = await openPipeline();
     });
-    // dispose is idempotent; this covers runs where the "dispose 後" suite below never started
+    // dispose is idempotent; this covers runs where the "after dispose" suite below never started
     // (a failing beforeAll, or a name filter that selects only the its before it).
     afterAll(async () => {
       if (pipeline !== undefined) await pipeline.dispose();
     });
 
-    it("① 温度 0 の chat が実重みで完走し、固定した greedy golden と一致", async () => {
+    it("① chat at temperature 0 runs to completion on the real weights and matches the pinned greedy golden", async () => {
       for (const { fixture: name, maxNewTokens, expected, stop } of CASES) {
         const { messages } = caseOf(name);
         const started = performance.now();
@@ -210,34 +235,34 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
           `[e2e] gemma4 chat ${name}: ${JSON.stringify(parts.join(""))} / ` +
             `${JSON.stringify(stopped)} / ${(performance.now() - started).toFixed(0)}ms`,
         );
-        assertEquals(parts.join(""), expected, `${name}: 温度 0 の出力`);
-        assertEquals(stopped, stop, `${name}: 停止理由`);
-        // 片は「確定したぶんだけ」なので空文字は流れない（偽の 1 反復を作らない）。
-        assertEquals(parts.filter((part) => part === "").length, 0, `${name}: 空の片`);
+        assertEquals(parts.join(""), expected, `${name}: temperature-0 output`);
+        assertEquals(stopped, stop, `${name}: stop reason`);
+        // Chunks are "only what is settled", so no empty string flows (no fake iteration).
+        assertEquals(parts.filter((part) => part === "").length, 0, `${name}: empty chunks`);
       }
     });
 
-    it("② パイプラインが握る資産の chat id 列がフィクスチャと一致", () => {
+    it("② the chat id sequence of the assets the pipeline holds matches the fixture", () => {
       for (const { fixture: name } of CASES) {
         const { messages, ids } = caseOf(name);
         assertEquals(chatPrompt(pipeline.tokenizer, messages), ids, name);
       }
     });
 
-    it("③ streaming の片の連結 = 同じ会話の token 列の一括 decode", async () => {
+    it("③ the concatenation of streamed chunks = the batch decode of the same conversation's tokens", async () => {
       for (const { fixture: name, maxNewTokens, expected, stop } of CASES) {
         const { ids } = caseOf(name);
-        // 低レベル面は 1 会話 = 1 sequence（context を跨がせない）。
+        // The low-level surface is one conversation = one sequence (no context carried across).
         const sequence = await pipeline.sequence();
         try {
           const stream = sequence.generate({ prompt: ids, maxNewTokens });
           const tokens: number[] = [];
           for await (const event of stream) if (event.kind === "token") tokens.push(event.id);
-          assertEquals(await stream.done, stop, `${name}: 低レベル面の停止理由`);
+          assertEquals(await stream.done, stop, `${name}: stop reason on the low-level surface`);
           assertEquals(
             pipeline.tokenizer.decode(tokens),
             expected,
-            `${name}: 一括 decode（逐次が byte run を取りこぼしていれば割れる）`,
+            `${name}: batch decode (splits if incremental decoding drops a byte run)`,
           );
         } finally {
           await sequence.dispose();
@@ -245,13 +270,13 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       }
     });
 
-    it("④ 停止集合は上流の generation_config.json の宣言と一致", () => {
+    it("④ the stop set matches the upstream generation_config.json declaration", () => {
       const ascending = (ids: readonly number[]): number[] => [...ids].sort((a, b) => a - b);
       assertEquals(ascending(pipeline.program.stopTokens), ascending(STOP_TOKENS), "program");
-      assertEquals(ascending(fixture.stopTokens), ascending(STOP_TOKENS), "フィクスチャ");
+      assertEquals(ascending(fixture.stopTokens), ascending(STOP_TOKENS), "fixture");
     });
 
-    it("⑤ 射程外の会話は GPU に触る前に落ちる（同期の throw）", () => {
+    it("⑤ an out-of-scope conversation fails before touching the GPU (a synchronous throw)", () => {
       assertThrows(
         () =>
           pipeline.chat([{ role: "user", content: "hi", tools: [] }] as unknown as ChatMessage[], {
@@ -270,11 +295,11 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       );
     });
 
-    it("⑥ 増分描画の多ターンが chat() の全体描画と逐語一致", async () => {
+    it("⑥ incremental multi-turn rendering matches chat()'s whole rendering verbatim", async () => {
       const { fixture: name, maxNewTokens } = CASES[0];
       const first = caseOf(name).messages;
 
-      /** 高レベル面（毎ターン会話全体を描き直す）で 1 ターン汲む。 */
+      /** Drains one turn on the high-level surface (re-renders the whole conversation each turn). */
       const viaChat = async (messages: readonly ChatMessage[], limit: number): Promise<string> => {
         const parts: string[] = [];
         for await (const chunk of pipeline.chat(messages, { maxNewTokens: limit })) {
@@ -284,13 +309,14 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       };
 
       const answer1 = await viaChat(first, maxNewTokens);
-      // 2 ターン目の参照は「1 ターン目の応答を会話へ入れて全体を描き直した」もの。
+      // The second-turn reference "puts the first reply into the conversation and re-renders it all".
       const grown: ChatMessage[] = [...first, { role: "assistant", content: answer1 }, FOLLOW_UP];
       const answer2 = await viaChat(grown, FOLLOW_UP_TOKENS);
       followUpAnswer = answer2;
 
-      // 低レベル面: 1 会話 = 1 sequence。2 ターン目に流すのは**差分だけ**で、前 turn を閉じる
-      // `<turn|>` は `pendingToken` が前置する（turn-local 契約 — ADR 0083 決定 4 / 0084 決定 5）。
+      // Low-level surface: one conversation = one sequence. The second turn feeds **only the
+      // delta**, and `pendingToken` prepends the `<turn|>` that closes the previous turn (the
+      // turn-local contract — ADR 0083 decision 4 / 0084 decision 5).
       const sequence = await pipeline.sequence();
       try {
         const turn = async (prompt: readonly number[], limit: number) => {
@@ -302,47 +328,54 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 
         const prompt1 = chatPrompt(pipeline.tokenizer, first);
         const first1 = await turn(prompt1, maxNewTokens);
-        assertEquals(first1.text, answer1, "1 ターン目（全体描画は chat と同じ経路）");
-        // `used` は「会話が占めている論理位置」— prompt + 生成（停止 token 込み）で説明が付く。
-        assertEquals(sequence.used, prompt1.length + first1.stop.tokens, "1 ターン目の後の used");
+        assertEquals(first1.text, answer1, "turn 1 (the whole rendering is the same path as chat)");
+        // `used` is "the logical positions the conversation occupies" — explained by prompt +
+        // generation (including the stop token).
+        assertEquals(sequence.used, prompt1.length + first1.stop.tokens, "used after turn 1");
 
         const delta = chatTurn(pipeline.tokenizer, FOLLOW_UP);
         const second = await turn(delta, FOLLOW_UP_TOKENS);
         console.log(
-          `[e2e] gemma4 増分ターン: ${JSON.stringify(second.text)} / ` +
-            `差分 ${delta.length} token / used ${sequence.used}`,
+          `[e2e] gemma4 incremental turn: ${JSON.stringify(second.text)} / ` +
+            `delta ${delta.length} tokens / used ${sequence.used}`,
         );
         assertEquals(
           second.text,
           answer2,
-          "2 ターン目が全体描画の chat() と逐語一致しない（差分描画か pendingToken の連結が" +
-            "会話を別物にしている）",
+          "turn 2 does not match chat()'s whole rendering verbatim (the delta rendering or the " +
+            "pendingToken concatenation makes it a different conversation)",
         );
         assertEquals(
           sequence.used,
           prompt1.length + first1.stop.tokens + delta.length + second.stop.tokens,
-          "2 ターン目の後の used",
+          "used after turn 2",
         );
       } finally {
         await sequence.dispose();
       }
     });
 
-    it("⑦ ChatSession の 2 ターンが⑥と同じ会話になる", async () => {
+    it("⑦ two turns of ChatSession give the same conversation as ⑥", async () => {
       const { fixture: name, maxNewTokens, expected } = CASES[0];
       const first = caseOf(name).messages;
-      // このケースは user 1 発話（セッションは文字列で受けるので、system も過去 turn も無い）。
-      assertEquals(first.length, 1, `${name}: 1 発話のケースでないと send に写せない`);
-      assert(followUpAnswer !== undefined, "⑥ が 2 ターン目の参照を採っていない");
+      // This case is one user message (the session takes a string, so there is no system and no
+      // past turn).
+      assertEquals(first.length, 1, `${name}: only a one-message case maps onto send`);
+      assert(followUpAnswer !== undefined, "⑥ did not take the second-turn reference");
 
       await using session = new ChatSession(pipeline, { maxNewTokens });
-      // 1 ターン目は golden そのもの（`chat()` と同じ全体描画から始まる）。
-      assertEquals(await session.send(first[0].content).text(), expected, "1 ターン目");
-      // 2 ターン目は差分描画 + KV の継続。セッションが継ぐ条件（前ターンが EOS で閉じた）と
-      // 履歴の積み方が壊れれば、ここで⑥の参照から離れる。
+      // Turn 1 is the golden itself (it starts from the same whole rendering as `chat()`).
+      assertEquals(await session.send(first[0].content).text(), expected, "turn 1");
+      // Turn 2 is delta rendering + KV continuation. If the condition the session continues on
+      // (the previous turn closed with EOS) or the way the history accumulates breaks, it departs
+      // from ⑥'s reference here.
       const second = session.send(FOLLOW_UP.content, { maxNewTokens: FOLLOW_UP_TOKENS });
-      assertEquals(await second.text(), followUpAnswer, "2 ターン目（⑥ の参照と逐語一致）");
-      assertEquals((await second.done).reason, "eos", "2 ターン目の停止理由");
+      assertEquals(
+        await second.text(),
+        followUpAnswer,
+        "turn 2 (verbatim match with ⑥'s reference)",
+      );
+      assertEquals((await second.done).reason, "eos", "turn 2 stop reason");
       assertEquals(
         session.turns,
         [
@@ -351,16 +384,18 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
           FOLLOW_UP,
           { role: "assistant", content: followUpAnswer },
         ],
-        "履歴は「流した本文」だけで積まれる",
+        'the history accumulates only "the text that was streamed"',
       );
     });
 
-    it("⑧ 要求は発行時に写す（汲み始める前の書き換えは効かない）", async () => {
-      // 型 doc の MUST。写しが受け手（`GenerationSequence.generate` / `createSampler`）まで
-      // 遅れると、それは async generator の本体 = **最初の `next()`** なので「発行してから
-      // 汲み始めるまで」の窓で書き換えた停止集合・抽選指定が黙って効く。
-      // 観測は**受理集合の外**へ書き換える形で採る（写していれば通る / 写していなければ
-      // 受け手の再検査で落ちる = 分布に頼らない決定的な差）。
+    it("⑧ a request is copied at issue (rewriting it before draining has no effect)", async () => {
+      // The MUST of the type doc. If the copy were delayed into the receivers
+      // (`GenerationSequence.generate` / `createSampler`), that is the body of an async generator =
+      // **the first `next()`**, so a stop set or sampling spec rewritten in the window "between
+      // issue and the start of draining" would silently take effect.
+      // The observation rewrites them **outside the accepted set** (copied → passes / not copied →
+      // fails in the receiver's re-check = a deterministic difference that does not rely on the
+      // distribution).
       const { messages } = caseOf(CASES[0].fixture);
       const stopTokens = [7];
       const sampler = { temperature: 0 };
@@ -369,15 +404,16 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
         stopTokens,
         sampler,
       });
-      stopTokens.push(Number.MAX_SAFE_INTEGER); // 語彙の外（`generate` の再検査が落とす値）
-      sampler.temperature = -1; // `createSampler` の受理集合の外
-      assertEquals(await stream.text(), CASES[0].expected, "発行後の書き換えが効いている");
+      stopTokens.push(Number.MAX_SAFE_INTEGER); // outside the vocabulary (a value `generate`'s re-check rejects)
+      sampler.temperature = -1; // outside `createSampler`'s accepted set
+      assertEquals(await stream.text(), CASES[0].expected, "the rewrite after issue took effect");
     });
 
-    it("⑨ chat の capacity は sequence へ降りる（既定へ黙って縮退しない）", async () => {
-      // 降ろし忘れは既定（`program.capacity`）でも動くため**例外にならない** — 受理集合の外を
-      // 渡して「落ちること」で降りていることを見る。落ちるのは発行時ではなく最初の `next()`
-      // （`createGenerationSequence` は本体の中で呼ばれる）ので、同期でないことも同時に固定する。
+    it("⑨ chat's capacity reaches the sequence (no silent fallback to the default)", async () => {
+      // Forgetting to pass it down still works with the default (`program.capacity`), so it
+      // **raises no error** — pass a value outside the accepted set and see that it is passed down
+      // by "it fails". It fails not at issue but at the first `next()` (`createGenerationSequence`
+      // is called inside the body), so this also pins that the failure is not synchronous.
       const { messages } = caseOf(CASES[0].fixture);
       const stream = pipeline.chat(messages, {
         maxNewTokens: 4,
@@ -390,33 +426,36 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       );
     });
 
-    it("⑩ estimateSessionMemory は既定を wiring から採り、値域を fail loudly", () => {
-      // 見積りは純関数（`estimateGraphMemory`）だが `gpu.limits` を読むので実パイプラインが
-      // 要る — run は 1 回も足さない。既定引数が配布形の宣言（chunkLength / capacity）を
-      // 使っていることは「明示して呼んだ結果と等しい」で縛る（別の既定へ退行すると割れる）。
+    it("⑩ estimateSessionMemory takes its defaults from the wiring and fails loudly on the range", () => {
+      // The estimate is a pure function (`estimateGraphMemory`) but reads `gpu.limits`, so it
+      // needs a real pipeline — it adds no run. That the default arguments use the distribution's
+      // declaration (chunkLength / capacity) is bound by "equal to the result of an explicit call"
+      // (a regression to another default splits it).
       const implicit = pipeline.estimateSessionMemory();
       const explicit = pipeline.estimateSessionMemory({
         chunkLength: CHUNK_LENGTH,
         capacity: CAPACITY,
       });
-      assertEquals(implicit, explicit, "既定引数が wiring の 2 数を使っていない");
-      // 恒真でないことの対: 容量を変えれば state のバイト数は動く。
+      assertEquals(implicit, explicit, "the default arguments do not use the wiring's two numbers");
+      // The counterpart that keeps it from being vacuous: changing the capacity moves the state bytes.
       const half = pipeline.estimateSessionMemory({ capacity: CAPACITY / 2 });
       assert(
         half.resident.stateBytes < implicit.resident.stateBytes,
-        `容量を半分にしても state のバイト数が動かない: ${half.resident.stateBytes}`,
+        `halving the capacity does not move the state bytes: ${half.resident.stateBytes}`,
       );
-      // MUST: `maxStorageBufferBindingSize` を必ず渡す（states 形 attention のノード内一時は
-      // 行ブロック枚数がこの上限だけで決まる — 省くと estimator が fail loudly する）。
-      assert(implicit.peakAccountedBytes > 0, "見積りが 0 バイトを名乗っている");
-      // slot backing の保持予算（ADR 0095）は pipeline options を省けば runtime の既定が効く。
+      // MUST: always pass `maxStorageBufferBindingSize` (the in-node temporaries of states-form
+      // attention get their row-block count from this limit alone — without it the estimator
+      // fails loudly).
+      assert(implicit.peakAccountedBytes > 0, "the estimate claims 0 bytes");
+      // The retention budget of the slot backing (ADR 0095) is the runtime default when the
+      // pipeline options omit it.
       assertEquals(
         implicit.planBackingBudgetBytes,
         DEFAULT_PLAN_BACKING_BUDGET_BYTES,
-        "予算の既定が報告に載っていない（pipeline が別の値を渡している）",
+        "the budget default is not on the report (the pipeline passes another value)",
       );
 
-      // 失敗経路 3 本（どれも Session を張り直す前に落ちる）。
+      // Three failure paths (each fails before the Session is rebuilt).
       assertThrows(
         () => pipeline.estimateSessionMemory({ capacity: CHUNK_LENGTH - 1 }),
         Error,
@@ -432,8 +471,9 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
         Error,
         `chunkLength ${MAX_CHUNK_LENGTH + 1} exceeds the distribution's declared maxChunkLength`,
       );
-      // 安全整数でない容量は「1 以上の整数でない」の門が受ける（大小関係の診断とは分ける —
-      // `createGenerationSequence` / `ChatSession` と同じ 3 本・値域の穴を作らない）。
+      // A capacity that is not a safe integer is caught by the "not an integer ≥ 1" check (kept
+      // apart from the ordering diagnostics — the same three as `createGenerationSequence` /
+      // `ChatSession`, leaving no hole in the range).
       assertThrows(
         () => pipeline.estimateSessionMemory({ capacity: 1.5 }),
         Error,
@@ -443,11 +483,12 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 
     // The its below observe the pipeline after dispose; this suite's beforeAll runs after every
     // it above (Vitest runs a file's tasks in definition order).
-    describe("dispose 後", () => {
+    describe("after dispose", () => {
       beforeAll(async () => {
         try {
-          // async generator の本体は最初の `next()` まで走らないので、発行時の検査だけでは
-          // 「発行 → dispose → 汲み始める」が抜ける。汲まないまま dispose を跨がせる。
+          // The body of an async generator does not run until the first `next()`, so a check
+          // only at issue misses "issue → dispose → start draining". Carry it across dispose
+          // without draining.
           issuedBeforeDispose = pipeline.chat([{ role: "user", content: "hi" }], {
             maxNewTokens: 4,
           });
@@ -456,7 +497,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
         }
       });
 
-      it("dispose 済みのパイプラインは生成を受けない", async () => {
+      it("a disposed pipeline accepts no generation", async () => {
         assertThrows(
           () => pipeline.chat([{ role: "user", content: "hi" }], { maxNewTokens: 4 }),
           Error,
@@ -464,14 +505,15 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
         );
         await assertRejects(() => pipeline.sequence(), Error, "after dispose");
 
-        // 発行済み・未反復の stream も**発行時と同じ pipeline の文言**で閉じる（ランタイムの
-        // Session 文言に化けると、呼び手には真因＝自分が dispose したことが読み取れない）。
+        // An issued but not yet iterated stream also closes with **the same pipeline wording as
+        // at issue** (if it turned into the runtime's Session wording, the caller could not read
+        // the real cause, that it disposed the pipeline itself).
         const issued = issuedBeforeDispose;
-        assert(issued !== undefined, "dispose の前に stream を発行していない");
+        assert(issued !== undefined, "no stream was issued before dispose");
         await assertRejects(
           async () => {
             for await (const _chunk of issued) {
-              /* 1 個も来ない */
+              /* none arrives */
             }
           },
           Error,
@@ -479,19 +521,21 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
         );
       });
 
-      it("公開の program 面は凍結された数だけで、dispose 後も読める", () => {
-        // NOTE: PLE（`model` 容器の資産）のホストキャッシュが dispose で返ることは
-        // `gemma4_ple_test.ts` の単体門が持つ（公開面から `derivedInputs.derive` は引けない =
-        // 面を絞った意図どおり）。
-        // ここで見るのは絞った後の面の性質 — 配布形が宣言した数がそのまま読め、消費者側の
-        // 書き込みが生成ループの停止集合へ届かないこと。
+      it("the public program surface is only frozen numbers and stays readable after dispose", () => {
+        // NOTE: that the host cache of the PLE (an asset of the `model` container) is released
+        // on dispose belongs to the unit check of `gemma4_ple_test.ts` (`derivedInputs.derive`
+        // cannot be reached from the public surface = as intended when the surface was narrowed).
+        // What this sees is the property of the narrowed surface — the numbers the distribution
+        // declared read as they are, and writes on the consumer side do not reach the stop set
+        // of the generation loop.
         const program = pipeline.program;
         assertEquals(program.chunkLength, CHUNK_LENGTH);
         assertEquals(program.capacity, CAPACITY);
         assertEquals(program.maxPosition, MAX_POSITION);
-        assertEquals(Object.isFrozen(program), true, "program が凍結されていない");
-        assertEquals(Object.isFrozen(program.stopTokens), true, "stopTokens が凍結されていない");
-        // 凍結コピーなので、停止集合を空にしようとしても落ちる（黙って EOS で止まらなくならない）。
+        assertEquals(Object.isFrozen(program), true, "program is not frozen");
+        assertEquals(Object.isFrozen(program.stopTokens), true, "stopTokens is not frozen");
+        // A frozen copy, so even trying to empty the stop set fails (it does not silently stop
+        // stopping at EOS).
         assertThrows(() => {
           (program.stopTokens as number[]).length = 0;
         }, TypeError);
@@ -501,17 +545,19 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 );
 
 /**
- * slot backing の保持予算（ADR 0095）の**透過**— pipeline options の値が
- * `estimateSessionMemory` の前提としてそのまま効くこと。
+ * **Pass-through** of the slot backing's retention budget (ADR 0095) — the value of the pipeline
+ * options takes effect as is as the premise of `estimateSessionMemory`.
  *
- * ⑩ が押さえるのは「省略時は runtime の既定」で、こちらは「明示すればその値」。Session 側
- * （`createSession` への透過）は観測席が無いので、ここが見るのは見積り側だけである
- * （両者へ同じ値を渡すことは pipeline の 1 本の実装で、握った値は `Gemma4State` に 1 つしかない）。
+ * ⑩ covers "the runtime default when omitted"; this one covers "the value when explicit". The
+ * Session side (the pass-through to `createSession`) has no observation point here, so this sees
+ * only the estimate side (passing the same value to both is the pipeline's one implementation,
+ * and the held value exists only once, in `Gemma4State`).
  */
 test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
-  "planBackingBudgetBytes は pipeline options から見積りへ透過する（実 GPU）",
+  "planBackingBudgetBytes passes through from the pipeline options to the estimate (real GPU)",
   async () => {
-    // 既定（256 MiB）とも最大シナリオとも違う値を選ぶ（どちらの既定へ落ちても落ちる形）。
+    // Pick a value that differs from both the default (256 MiB) and the largest scenario (falling
+    // back to either default fails).
     const budget = 4 * 1024 * 1024 * 1024;
     const reports: AdmissionReport[] = [];
     for (const diagnostics of [false, true]) {
@@ -522,19 +568,31 @@ test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       try {
         const report = pipeline.estimateSessionMemory();
         reports.push(report);
-        assertEquals(report.planBackingBudgetBytes, budget, "予算が見積りへ降りていない");
+        assertEquals(
+          report.planBackingBudgetBytes,
+          budget,
+          "the budget does not reach the estimate",
+        );
         const scenario = Math.max(
           ...report.scenarios.map((one) => one.ioBytes + one.workspaceBytes),
         );
-        // 門が空振らないことの対: この予算はどのシナリオよりも大きい（= max の予算側が立つ）。
-        assert(scenario < budget, `最大シナリオ ${scenario} が予算 ${budget} を下回っていない`);
+        // The counterpart that keeps the check from passing vacuously: this budget is larger than
+        // every scenario (= the budget side of the max wins).
+        assert(
+          scenario < budget,
+          `the largest scenario ${scenario} is not below the budget ${budget}`,
+        );
         if (diagnostics) {
-          assertEquals(report.auxiliaryBytes, undefined, "診断時は補助出力を確保しない");
+          assertEquals(
+            report.auxiliaryBytes,
+            undefined,
+            "no auxiliary output is allocated under diagnostics",
+          );
         } else {
           assert(
             report.auxiliaryBytes !== undefined &&
               report.auxiliaryBytes >= pipeline.program.vocabSize * 4 + 8,
-            "補助出力の常駐logits・値・添字が追加勘定に入っていない",
+            "the auxiliary output's resident logits, values and indices are not in the extra accounting",
           );
         }
         assertEquals(
@@ -543,40 +601,46 @@ test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
             report.resident.stateBytes +
             budget +
             (report.auxiliaryBytes ?? 0),
-          "ピークが予算と補助資源を勘定に入れていない",
+          "the peak does not account for the budget and the auxiliary resources",
         );
       } finally {
         await pipeline.dispose();
       }
     }
     const [greedy, observed] = reports;
-    assertEquals(greedy.resident, observed.resident, "補助資源を重みやKV stateへ混ぜない");
-    assertEquals(greedy.scenarios, observed.scenarios, "targetのシナリオは同じ");
+    assertEquals(
+      greedy.resident,
+      observed.resident,
+      "auxiliary resources are not mixed into the weights or the KV state",
+    );
+    assertEquals(greedy.scenarios, observed.scenarios, "the target's scenarios are the same");
     assertEquals(
       greedy.peakAccountedBytes - observed.peakAccountedBytes,
       greedy.auxiliaryBytes,
-      "経路の差は追加勘定と厳密に一致する",
+      "the difference between the paths equals the extra accounting exactly",
     );
   },
 );
 
 /**
- * slot backing の保持予算（ADR 0095）の**透過（Session 側）**— pipeline options の値が
- * `createSession` へ降り、生成の run 診断にそのまま現れること。
+ * **Pass-through (Session side)** of the slot backing's retention budget (ADR 0095) — the value of
+ * the pipeline options reaches `createSession` and shows up as is in the run diagnostics of
+ * generation.
  *
- * 上の門が見るのは見積り側（報告に載る数）だけで、Session に効いているかは見ていない。こちらは
- * 観測席（{@link PipelineOptions.onRunDiagnostics}）から run ごとの `planBacking` を直接
- * 読む。見るのは 2 通の対:
+ * The check above sees only the estimate side (the numbers on the report), not whether it takes
+ * effect on the Session. This one reads `planBacking` of each run directly from the observation
+ * hook ({@link PipelineOptions.onRunDiagnostics}). It looks at a pair of two:
  *
- * ① **予算 0**（従来の容量 1）: どの run でも保持は 1 本きりで、prefill → decode の切替で
- *    作り直す（`buildCount` が 1 増える）
- * ② **既定予算**: prefill バケット形と decode 形の**2 本**が保持され、decode の 2 本目以降は
- *    作り直しが起きない（生成 1 ターンの切替コストが消えた点そのもの）
+ * ① **Budget 0** (the former capacity of 1): every run retains exactly one, and the switch from
+ *    prefill → decode rebuilds (`buildCount` goes up by 1)
+ * ② **The default budget**: **two** are retained, the prefill bucket shape and the decode shape,
+ *    and from the second decode on nothing is rebuilt (exactly the switching cost per generated
+ *    turn that went away)
  *
- * MUST: 観測するのは**2 ターン目**。run は「ヒット run でしか backing を作らない」（単発 run に
- * slot メモリを払わせない — ADR 0095）ので、1 ターン目の各 run は計画の導出（ミス run）で
- * 終わり、保持も切替も観測点に出てこない。1 ターン目は同じ会話で回して 2 つの鍵を導出させる
- * ためだけに使う。
+ * MUST: observe **the second turn**. A run "builds a backing only on a hit run" (a one-off run
+ * does not pay for slot memory — ADR 0095), so each run of the first turn ends at deriving the
+ * plan (a miss run), and neither retention nor switching shows at the observation point. The
+ * first turn runs the same conversation only to have the two keys derived.
  */
 type ObservedRun = {
   readonly kind: RunPhase["kind"];
@@ -584,10 +648,13 @@ type ObservedRun = {
   readonly buildCount: number;
 };
 
-/** 観測に使うターンの生成 token 数（EOS の 9 個より手前で止める = 停止理由は `max-tokens`）。 */
+/**
+ * The number of generated tokens of the observed turn (stops before EOS's 9 = the stop reason is
+ * `max-tokens`).
+ */
 const OBSERVED_NEW_TOKENS = 4;
 
-/** 同じ会話を 2 ターン回し、**2 ターン目**の run だけを拾う。 */
+/** Runs the same conversation for two turns and picks up only the runs of **the second turn**. */
 const observeSecondTurn = async (options: PipelineOptions): Promise<ObservedRun[]> => {
   const { messages } = caseOf("single-user");
   const runs: ObservedRun[] = [];
@@ -605,10 +672,10 @@ const observeSecondTurn = async (options: PipelineOptions): Promise<ObservedRun[
     for (const turn of [0, 1]) {
       const stream = pipeline.chat(messages, { maxNewTokens: OBSERVED_NEW_TOKENS });
       for await (const _chunk of stream) {
-        /* 片は使わない（回すことが目的） */
+        /* the chunks are not used (the point is to run) */
       }
-      assertEquals((await stream.done).reason, "max-tokens", `ターン ${turn} が途中で止まった`);
-      // 1 ターン目は導出（ミス run）専用。捨てて 2 ターン目だけを残す。
+      assertEquals((await stream.done).reason, "max-tokens", `turn ${turn} stopped early`);
+      // Turn 1 is only for deriving (miss runs). Drop it and keep only turn 2.
       if (turn === 0) runs.length = 0;
     }
     return runs;
@@ -618,52 +685,52 @@ const observeSecondTurn = async (options: PipelineOptions): Promise<ObservedRun[
 };
 
 test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
-  "planBackingBudgetBytes は Session へ透過する（予算 0 は保持 1 本・既定は 2 本・実 GPU）",
+  "planBackingBudgetBytes passes through to the Session (budget 0 retains 1, the default 2; real GPU)",
   async () => {
-    /** 観測列の形（prefill 1 本 + decode 複数）を先に固定する — 門が空振らないことの対。 */
+    /** Pins the shape of the observed sequence first (1 prefill + several decodes) — so the check does not pass vacuously. */
     const assertShape = (runs: readonly ObservedRun[], label: string): ObservedRun[] => {
       assertEquals(
         runs.filter((run) => run.kind === "prefill").length,
         1,
-        `${label}: prefill が 1 本でない`,
+        `${label}: not exactly one prefill`,
       );
-      assertEquals(runs[0]?.kind, "prefill", `${label}: 先頭が prefill run でない`);
+      assertEquals(runs[0]?.kind, "prefill", `${label}: the first run is not a prefill run`);
       const decodes = runs.filter((run) => run.kind === "decode");
-      assert(decodes.length >= 2, `${label}: decode run が ${decodes.length} 本しかない`);
+      assert(decodes.length >= 2, `${label}: only ${decodes.length} decode runs`);
       return decodes;
     };
 
-    // ① 予算 0 — 保持は常に 1 本で、切替のたびに作り直す。
+    // ① Budget 0 — always one retained, rebuilt at every switch.
     const zero = await observeSecondTurn({ planBackingBudgetBytes: 0 });
-    const zeroDecodes = assertShape(zero, "予算 0");
+    const zeroDecodes = assertShape(zero, "budget 0");
     for (const run of zero) {
       assertEquals(
         run.retainedCount,
         1,
-        `予算 0 が Session へ降りていない: ${JSON.stringify(zero)}`,
+        `budget 0 does not reach the Session: ${JSON.stringify(zero)}`,
       );
     }
     assertEquals(
       zeroDecodes[0].buildCount,
       zero[0].buildCount + 1,
-      `予算 0 で prefill → decode の切替が作り直しになっていない: ${JSON.stringify(zero)}`,
+      `with budget 0 the prefill → decode switch does not rebuild: ${JSON.stringify(zero)}`,
     );
     for (const run of zeroDecodes.slice(1)) {
       assertEquals(
         run.buildCount,
         zeroDecodes[0].buildCount,
-        `同じ decode 形の連続 run で作り直している: ${JSON.stringify(zero)}`,
+        `consecutive runs of the same decode shape rebuild: ${JSON.stringify(zero)}`,
       );
     }
 
-    // ② 既定予算 — prefill バケット形と decode 形の 2 本が保持され、2 ターン目は作り直しゼロ。
+    // ② The default budget — two retained, the prefill bucket shape and the decode shape; no rebuild in turn 2.
     const budgeted = await observeSecondTurn({});
-    const budgetedDecodes = assertShape(budgeted, "既定予算");
+    const budgetedDecodes = assertShape(budgeted, "default budget");
     for (const run of budgeted) {
       assertEquals(
         run.retainedCount,
         2,
-        `既定予算で 2 形が保持されていない（切替のたびに退役している）: ${JSON.stringify(
+        `the default budget does not retain the two shapes (it retires one at every switch): ${JSON.stringify(
           budgeted,
         )}`,
       );
@@ -672,7 +739,7 @@ test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       assertEquals(
         run.buildCount,
         budgeted[0].buildCount,
-        `既定予算の decode で backing を作り直している: ${JSON.stringify(budgeted)}`,
+        `the default budget rebuilds the backing on decode: ${JSON.stringify(budgeted)}`,
       );
     }
   },

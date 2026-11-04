@@ -178,24 +178,24 @@ export const monitorNvidiaSmi = (
  * written as such, and a phase with zero samples says "zero samples" explicitly (so it is not read as a 0 MiB peak).
  */
 export const formatNvidiaTimeline = (timeline: NvidiaTimeline): string => {
-  if (timeline === undefined) return "nvidia-smi なし（GPU 全体の VRAM は観測していない）";
+  if (timeline === undefined) return "no nvidia-smi (GPU-wide VRAM not observed)";
   const phases = [...timeline.phases]
     // The default phase before any cut (start) is listed only when it has samples (only the phases the caller cut are
     // recorded).
     .filter(([name, value]) => name !== "start" || value.samples > 0)
     .map(([name, value]) =>
       value.samples === 0
-        ? `[${name}] 標本 0（観測なし）`
-        : `[${name}] VRAM 山 ${value.peakMemoryMiB} MiB・最高 ${value.maxTemperatureC} ℃・理由 ${value.eventReasons}`,
+        ? `[${name}] 0 samples (not observed)`
+        : `[${name}] VRAM peak ${value.peakMemoryMiB} MiB, max ${value.maxTemperatureC} ℃, reasons ${value.eventReasons}`,
     );
   // The same error line repeats every sampling interval, so the count and the distinct spellings are kept.
   const errors =
     timeline.errorLines.length === 0
       ? []
       : [
-          `読めない行 ${timeline.errorLines.length} 本（${[...new Set(timeline.errorLines)].join(
+          `${timeline.errorLines.length} unreadable lines (${[...new Set(timeline.errorLines)].join(
             " | ",
-          )}）`,
+          )})`,
         ];
   return [...phases, ...errors].join(" / ");
 };

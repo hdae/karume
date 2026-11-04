@@ -1,16 +1,16 @@
 {
   "_doc": [
-    "母音検出（vowel-detector）のホスト経路（特徴抽出 + 後処理）のパリティ用フィクスチャ。",
-    "値は上流 @hdae/vowel-detector（MIT・同一著者）が持つ参照そのままで、karume 側では",
-    "1 つも作り直していない:",
-    "  audio / features / logits / lab … 上流 web/test/reference.json",
-    "    （生成台本 training/scripts/dump_parity_reference.py — Python 実装が正本。",
-    "     features は実音声 1.103 秒の 108 フレーム、logits は seed 42 の決定的な擬似値で、",
-    "     lab はそれを Python の後処理へ通した出力）",
-    "  melBasis / constants … 上流 assets/feature_config.json",
-    "    （librosa.filters.mel(sr=16000, n_fft=512, n_mels=80, fmin=0, fmax=8000) の Slaney 版）",
-    "melBasis は [nMels, nFft/2+1] の行優先。features は [frames, featureDim]、",
-    "logits は [outFrames, classes] で、どちらも行が時間。"
+    "Parity fixture for the host path (feature extraction + post-processing) of vowel detection (vowel-detector).",
+    "The values are the references held by upstream @hdae/vowel-detector (MIT, same author) as they are;",
+    "karume has regenerated none of them:",
+    "  audio / features / logits / lab … upstream web/test/reference.json",
+    "    (generator script training/scripts/dump_parity_reference.py — the Python implementation is the source of truth.",
+    "     features are 108 frames of 1.103 seconds of real speech, logits are deterministic pseudo-values from seed 42,",
+    "     and lab is their output through the Python post-processing)",
+    "  melBasis / constants … upstream assets/feature_config.json",
+    "    (the Slaney variant of librosa.filters.mel(sr=16000, n_fft=512, n_mels=80, fmin=0, fmax=8000))",
+    "melBasis is row-major [nMels, nFft/2+1]. features is [frames, featureDim],",
+    "and logits is [outFrames, classes]; in both, rows are time."
   ],
   "source": {
     "repo": "@hdae/vowel-detector",

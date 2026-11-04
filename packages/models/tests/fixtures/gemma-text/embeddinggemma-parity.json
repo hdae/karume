@@ -3941,14 +3941,14 @@
   "encode": [
     {
       "name": "english",
-      "why": "普通の英文 — 空白が metaspace へ落ちる基本形",
+      "why": "plain English — the basic form where spaces become metaspace",
       "text": "The quick brown fox.",
       "ids": [818, 3823, 8864, 37423, 236761],
       "idsWithSpecials": [2, 818, 3823, 8864, 37423, 236761, 1]
     },
     {
       "name": "english-long",
-      "why": "空白があっても pre_tokenizer は正規化後に切れ目を見つけられない（1 pre-token が全長） — merge の rank / 位置の同点が多発する長さ",
+      "why": "even with spaces the pre_tokenizer finds no split after normalization (one pre-token spans the whole input) — a length where merge rank / position ties are frequent",
       "text": "Machine learning models trained on large corpora can generate text that is surprisingly coherent, but they still fail at arithmetic and long-horizon planning.",
       "ids": [
         29472, 4735, 4681, 15453, 580, 2455, 182740, 740, 8729, 1816, 600, 563, 33887, 40137,
@@ -3961,7 +3961,7 @@
     },
     {
       "name": "japanese-long",
-      "why": "空白の無い長文 — 1 pre-token が入力全長になり merge queue が要る（ADR 0084 決定 3）",
+      "why": "long text without spaces — one pre-token spans the whole input and a merge queue is needed (ADR 0084 decision 3)",
       "text": "むかしむかし、あるところにおじいさんとおばあさんが住んでいました。おじいさんは山へしばかりに、おばあさんは川へせんたくに行きました。おばあさんが川でせんたくをしていると、大きな桃がどんぶらこどんぶらこと流れてきました。おばあさんはその桃を家に持ち帰り、おじいさんと二人で切ってみると、中から元気な男の子が飛び出しました。二人はたいそう喜んで、その子を桃太郎と名づけ、たいせつに育てることにしたのでした。",
       "ids": [
         238863, 64161, 238863, 64161, 236951, 6466, 34012, 18794, 237943, 236985, 102358, 237328,
@@ -3992,7 +3992,7 @@
     },
     {
       "name": "cyrillic",
-      "why": "非ラテン・非 CJK（語彙内トークンと byte fallback の境目が別の位置に来る）",
+      "why": "non-Latin, non-CJK (the boundary between in-vocabulary tokens and byte fallback falls elsewhere)",
       "text": "Большая часть текста написана на русском языке.",
       "ids": [160629, 35500, 38900, 131228, 45971, 911, 1333, 219667, 113643, 236761],
       "idsWithSpecials": [
@@ -4001,49 +4001,49 @@
     },
     {
       "name": "leading-space",
-      "why": "先頭の空白（metaspace が先頭に来る）",
+      "why": "a leading space (metaspace comes first)",
       "text": " leading",
       "ids": [5830],
       "idsWithSpecials": [2, 5830, 1]
     },
     {
       "name": "trailing-space",
-      "why": "末尾の空白（merge の右端が metaspace）",
+      "why": "a trailing space (the right end of a merge is metaspace)",
       "text": "trailing ",
       "ids": [136697, 236743],
       "idsWithSpecials": [2, 136697, 236743, 1]
     },
     {
       "name": "double-space",
-      "why": "空白の連続（▁▁ 系の語彙へ畳まれる）",
+      "why": "consecutive spaces (folded into the ▁▁ family of vocabulary entries)",
       "text": "a  b   c",
       "ids": [236746, 138, 236763, 139, 236755],
       "idsWithSpecials": [2, 236746, 138, 236763, 139, 236755, 1]
     },
     {
       "name": "whitespace-run",
-      "why": "空白 30 連 — 長い metaspace 語彙（merges 表の先頭付近の rank）を踏む",
+      "why": "30 spaces in a row — hits long metaspace entries (ranks near the top of the merges table)",
       "text": "x                              y",
       "ids": [236781, 166, 236762],
       "idsWithSpecials": [2, 236781, 166, 236762, 1]
     },
     {
       "name": "tab-newline",
-      "why": "normalizer が触らない空白類（\\t / \\n は metaspace にならない）",
+      "why": "whitespace the normalizer leaves alone (\\t / \\n do not become metaspace)",
       "text": "a\tb\nc\r\nd",
       "ids": [236746, 255968, 236763, 107, 236755, 251, 107, 236753],
       "idsWithSpecials": [2, 236746, 255968, 236763, 107, 236755, 251, 107, 236753, 1]
     },
     {
       "name": "newline-run",
-      "why": "改行 30 連 — 語彙に改行を含む綴りがある（行区切り資産が使えない証）",
+      "why": "30 newlines in a row — the vocabulary has spellings that contain newlines (proof that a line-separated asset cannot work)",
       "text": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
       "ids": [136],
       "idsWithSpecials": [2, 136, 1]
     },
     {
       "name": "digits",
-      "why": "数字列 — SPM 系は 1 桁ずつ切れる語彙を持つ",
+      "why": "digit strings — SPM-style vocabularies split them one digit at a time",
       "text": "1girl 2024 3.14159 100%",
       "ids": [
         236770, 24679, 236743, 236778, 236771, 236778, 236812, 236743, 236800, 236761, 236770,
@@ -4056,7 +4056,7 @@
     },
     {
       "name": "url",
-      "why": "空白の無い長い ASCII（URL / base64 も 1 pre-token 全長になる）",
+      "why": "long ASCII without spaces (a URL / base64 also becomes one pre-token spanning the whole input)",
       "text": "https://example.com/a/b/c?q=1&r=2#frag",
       "ids": [
         2574, 1411, 8358, 236761, 854, 236786, 236746, 236786, 236763, 236786, 236755, 236881,
@@ -4069,7 +4069,7 @@
     },
     {
       "name": "mixed",
-      "why": "日英混在 — 語彙の切り替わり",
+      "why": "mixed Japanese and English — the vocabulary switches",
       "text": "1girl, 猫耳, ロングヘア, masterpiece",
       "ids": [236770, 24679, 236764, 146502, 239735, 236764, 106804, 107842, 236764, 65972],
       "idsWithSpecials": [
@@ -4078,7 +4078,7 @@
     },
     {
       "name": "emoji",
-      "why": "非 BMP + 地域表示子 + 異体字セレクタ（byte_fallback を踏む）",
+      "why": "non-BMP + regional indicators + variation selector (hits byte_fallback)",
       "text": "a cat 🐈 and a flag 🇯🇵 and ❤️ love",
       "ids": [
         236746, 5866, 236743, 249160, 532, 496, 8134, 236743, 247994, 245707, 532, 64813, 2765
@@ -4089,56 +4089,56 @@
     },
     {
       "name": "zwj",
-      "why": "ZWJ 連結（1 書記素が複数コードポイント — 記号は**コードポイント**単位で始まる）",
+      "why": "ZWJ sequence (one grapheme is several code points — symbols start at **code point** granularity)",
       "text": "family 👨‍👩‍👦 photo",
       "ids": [10774, 236743, 243874, 237243, 243767, 237243, 244990, 4429],
       "idsWithSpecials": [2, 10774, 236743, 243874, 237243, 243767, 237243, 244990, 4429, 1]
     },
     {
       "name": "combining",
-      "why": "結合文字 — NFC を掛けない（掛けると id 列が変わる）",
+      "why": "combining characters — NFC is not applied (applying it changes the id sequence)",
       "text": "Á vs Á and Ấ",
       "ids": [236776, 238288, 7728, 19542, 532, 562, 242238, 238288],
       "idsWithSpecials": [2, 236776, 238288, 7728, 19542, 532, 562, 242238, 238288, 1]
     },
     {
       "name": "thai",
-      "why": "結合文字を持つタイ語（語彙内と byte fallback が混ざる）",
+      "why": "Thai with combining characters (in-vocabulary tokens and byte fallback mix)",
       "text": "กำลังทดสอบ",
       "ids": [96013, 180792, 84643],
       "idsWithSpecials": [2, 96013, 180792, 84643, 1]
     },
     {
       "name": "control-bytes",
-      "why": "制御文字 — 語彙に無く byte_fallback へ落ちる（複数バイト run も含む）",
+      "why": "control characters — not in the vocabulary, they fall to byte_fallback (multi-byte runs included)",
       "text": "a\u0000b\u001fcd",
       "ids": [236746, 238, 236763, 253998, 236755, 251541, 236753],
       "idsWithSpecials": [2, 236746, 238, 236763, 253998, 236755, 251541, 236753, 1]
     },
     {
       "name": "metaspace-literal",
-      "why": "入力に U+2581 が直接ある（正規化の出力と同じ文字が最初から入っている形）",
+      "why": "U+2581 directly in the input (the character normalization outputs is there from the start)",
       "text": "raw ▁ metaspace ▁▁ run",
       "ids": [1712, 139, 2576, 527, 6046, 236743, 138, 1845],
       "idsWithSpecials": [2, 1712, 139, 2576, 527, 6046, 236743, 138, 1845, 1]
     },
     {
       "name": "empty",
-      "why": "空文字（記号が 0 個 — 走査の初期状態）",
+      "why": "the empty string (zero symbols — the initial state of the scan)",
       "text": "",
       "ids": [],
       "idsWithSpecials": [2, 1]
     },
     {
       "name": "single-space",
-      "why": "空白 1 文字だけ（正規化後は metaspace 1 文字）",
+      "why": "a single space only (one metaspace character after normalization)",
       "text": " ",
       "ids": [236743],
       "idsWithSpecials": [2, 236743, 1]
     },
     {
       "name": "prompt-query",
-      "why": "上流が推奨する query 前置き（`config_sentence_transformers.json` の prompts.query）",
+      "why": "the query prefix upstream recommends (prompts.query of `config_sentence_transformers.json`)",
       "text": "task: search result | query: What is the capital of Japan?",
       "ids": [
         8071, 236787, 3927, 1354, 1109, 7609, 236787, 2900, 563, 506, 5279, 529, 6056, 236881
@@ -4149,7 +4149,7 @@
     },
     {
       "name": "prompt-document",
-      "why": "同じく document 前置き — post_processor が bos…eos を付ける形の実需",
+      "why": "likewise the document prefix — the real-world shape where post_processor adds bos…eos",
       "text": "title: none | text: 東京は日本の首都であり、世界有数の大都市圏を形成している。",
       "ids": [
         3250, 236787, 7293, 1109, 1816, 236787, 86459, 237048, 76444, 120211, 52066, 236951, 12811,
@@ -4162,28 +4162,28 @@
     },
     {
       "name": "unused-added",
-      "why": "**非 special** の追加語彙（6,406 本ある `<unusedN>` 系）— decode の skip 対象外",
+      "why": "**non-special** added vocabulary (the 6,406 `<unusedN>` entries) — not skipped by decode",
       "text": "<unused0>x<unused6241>",
       "ids": [6, 236781, 262143],
       "idsWithSpecials": [2, 6, 236781, 262143, 1]
     },
     {
       "name": "gemma3-turn-markers",
-      "why": "`<start_of_turn>` はこちらの語彙にだけ在る（gemma4 側には無い — 資産が別物である証）",
+      "why": "`<start_of_turn>` exists only in this vocabulary (gemma4's has none — proof that the assets differ)",
       "text": "<start_of_turn>user\nhi<end_of_turn>",
       "ids": [105, 2364, 107, 2202, 106],
       "idsWithSpecials": [2, 105, 2364, 107, 2202, 106, 1]
     },
     {
       "name": "image-soft-token",
-      "why": "語彙表の**外**へ採番された追加語彙（id 262144 = 語彙 262,144 行の次）",
+      "why": "added vocabulary numbered **outside** the vocabulary table (id 262144 = the row after the 262,144 vocabulary rows)",
       "text": "<start_of_image><image_soft_token><end_of_image>",
       "ids": [255999, 262144, 256000],
       "idsWithSpecials": [2, 255999, 262144, 256000, 1]
     },
     {
       "name": "bos-in-text",
-      "why": "`<bos>` が本文中にある（post_processor が付ける分と重なって二重になる形）",
+      "why": "`<bos>` inside the text (it overlaps with the one post_processor adds and is doubled)",
       "text": "<bos>hello",
       "ids": [2, 23391],
       "idsWithSpecials": [2, 2, 23391, 1]
@@ -4192,14 +4192,14 @@
   "decode": [
     {
       "name": "roundtrip-english",
-      "why": "符号化 english の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case english (special tokens included) as is",
       "ids": [2, 818, 3823, 8864, 37423, 236761, 1],
       "text": "<bos>The quick brown fox.<eos>",
       "textSkipSpecials": "The quick brown fox."
     },
     {
       "name": "roundtrip-english-long",
-      "why": "符号化 english-long の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case english-long (special tokens included) as is",
       "ids": [
         2, 29472, 4735, 4681, 15453, 580, 2455, 182740, 740, 8729, 1816, 600, 563, 33887, 40137,
         236764, 840, 901, 2036, 5121, 657, 40442, 532, 1440, 236772, 126890, 6995, 236761, 1
@@ -4209,7 +4209,7 @@
     },
     {
       "name": "roundtrip-japanese-long",
-      "why": "符号化 japanese-long の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case japanese-long (special tokens included) as is",
       "ids": [
         2, 238863, 64161, 238863, 64161, 236951, 6466, 34012, 18794, 237943, 236985, 102358, 237328,
         237988, 237268, 62044, 238327, 21455, 23452, 236924, 237328, 237943, 236985, 69134, 237845,
@@ -4228,56 +4228,56 @@
     },
     {
       "name": "roundtrip-cyrillic",
-      "why": "符号化 cyrillic の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case cyrillic (special tokens included) as is",
       "ids": [2, 160629, 35500, 38900, 131228, 45971, 911, 1333, 219667, 113643, 236761, 1],
       "text": "<bos>Большая часть текста написана на русском языке.<eos>",
       "textSkipSpecials": "Большая часть текста написана на русском языке."
     },
     {
       "name": "roundtrip-leading-space",
-      "why": "符号化 leading-space の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case leading-space (special tokens included) as is",
       "ids": [2, 5830, 1],
       "text": "<bos> leading<eos>",
       "textSkipSpecials": " leading"
     },
     {
       "name": "roundtrip-trailing-space",
-      "why": "符号化 trailing-space の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case trailing-space (special tokens included) as is",
       "ids": [2, 136697, 236743, 1],
       "text": "<bos>trailing <eos>",
       "textSkipSpecials": "trailing "
     },
     {
       "name": "roundtrip-double-space",
-      "why": "符号化 double-space の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case double-space (special tokens included) as is",
       "ids": [2, 236746, 138, 236763, 139, 236755, 1],
       "text": "<bos>a  b   c<eos>",
       "textSkipSpecials": "a  b   c"
     },
     {
       "name": "roundtrip-whitespace-run",
-      "why": "符号化 whitespace-run の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case whitespace-run (special tokens included) as is",
       "ids": [2, 236781, 166, 236762, 1],
       "text": "<bos>x                              y<eos>",
       "textSkipSpecials": "x                              y"
     },
     {
       "name": "roundtrip-tab-newline",
-      "why": "符号化 tab-newline の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case tab-newline (special tokens included) as is",
       "ids": [2, 236746, 255968, 236763, 107, 236755, 251, 107, 236753, 1],
       "text": "<bos>a\tb\nc\r\nd<eos>",
       "textSkipSpecials": "a\tb\nc\r\nd"
     },
     {
       "name": "roundtrip-newline-run",
-      "why": "符号化 newline-run の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case newline-run (special tokens included) as is",
       "ids": [2, 136, 1],
       "text": "<bos>\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n<eos>",
       "textSkipSpecials": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
     },
     {
       "name": "roundtrip-digits",
-      "why": "符号化 digits の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case digits (special tokens included) as is",
       "ids": [
         2, 236770, 24679, 236743, 236778, 236771, 236778, 236812, 236743, 236800, 236761, 236770,
         236812, 236770, 236810, 236819, 236743, 236770, 236771, 236771, 236908, 1
@@ -4287,7 +4287,7 @@
     },
     {
       "name": "roundtrip-url",
-      "why": "符号化 url の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case url (special tokens included) as is",
       "ids": [
         2, 2574, 1411, 8358, 236761, 854, 236786, 236746, 236786, 236763, 236786, 236755, 236881,
         236809, 236784, 236770, 236880, 236750, 236784, 236778, 236865, 45265, 1
@@ -4297,14 +4297,14 @@
     },
     {
       "name": "roundtrip-mixed",
-      "why": "符号化 mixed の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case mixed (special tokens included) as is",
       "ids": [2, 236770, 24679, 236764, 146502, 239735, 236764, 106804, 107842, 236764, 65972, 1],
       "text": "<bos>1girl, 猫耳, ロングヘア, masterpiece<eos>",
       "textSkipSpecials": "1girl, 猫耳, ロングヘア, masterpiece"
     },
     {
       "name": "roundtrip-emoji",
-      "why": "符号化 emoji の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case emoji (special tokens included) as is",
       "ids": [
         2, 236746, 5866, 236743, 249160, 532, 496, 8134, 236743, 247994, 245707, 532, 64813, 2765, 1
       ],
@@ -4313,56 +4313,56 @@
     },
     {
       "name": "roundtrip-zwj",
-      "why": "符号化 zwj の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case zwj (special tokens included) as is",
       "ids": [2, 10774, 236743, 243874, 237243, 243767, 237243, 244990, 4429, 1],
       "text": "<bos>family 👨‍👩‍👦 photo<eos>",
       "textSkipSpecials": "family 👨‍👩‍👦 photo"
     },
     {
       "name": "roundtrip-combining",
-      "why": "符号化 combining の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case combining (special tokens included) as is",
       "ids": [2, 236776, 238288, 7728, 19542, 532, 562, 242238, 238288, 1],
       "text": "<bos>Á vs Á and Ấ<eos>",
       "textSkipSpecials": "Á vs Á and Ấ"
     },
     {
       "name": "roundtrip-thai",
-      "why": "符号化 thai の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case thai (special tokens included) as is",
       "ids": [2, 96013, 180792, 84643, 1],
       "text": "<bos>กำลังทดสอบ<eos>",
       "textSkipSpecials": "กำลังทดสอบ"
     },
     {
       "name": "roundtrip-control-bytes",
-      "why": "符号化 control-bytes の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case control-bytes (special tokens included) as is",
       "ids": [2, 236746, 238, 236763, 253998, 236755, 251541, 236753, 1],
       "text": "<bos>a\u0000b\u001fcd<eos>",
       "textSkipSpecials": "a\u0000b\u001fcd"
     },
     {
       "name": "roundtrip-metaspace-literal",
-      "why": "符号化 metaspace-literal の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case metaspace-literal (special tokens included) as is",
       "ids": [2, 1712, 139, 2576, 527, 6046, 236743, 138, 1845, 1],
       "text": "<bos>raw   metaspace    run<eos>",
       "textSkipSpecials": "raw   metaspace    run"
     },
     {
       "name": "roundtrip-empty",
-      "why": "符号化 empty の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case empty (special tokens included) as is",
       "ids": [2, 1],
       "text": "<bos><eos>",
       "textSkipSpecials": ""
     },
     {
       "name": "roundtrip-single-space",
-      "why": "符号化 single-space の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case single-space (special tokens included) as is",
       "ids": [2, 236743, 1],
       "text": "<bos> <eos>",
       "textSkipSpecials": " "
     },
     {
       "name": "roundtrip-prompt-query",
-      "why": "符号化 prompt-query の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case prompt-query (special tokens included) as is",
       "ids": [
         2, 8071, 236787, 3927, 1354, 1109, 7609, 236787, 2900, 563, 506, 5279, 529, 6056, 236881, 1
       ],
@@ -4371,7 +4371,7 @@
     },
     {
       "name": "roundtrip-prompt-document",
-      "why": "符号化 prompt-document の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case prompt-document (special tokens included) as is",
       "ids": [
         2, 3250, 236787, 7293, 1109, 1816, 236787, 86459, 237048, 76444, 120211, 52066, 236951,
         12811, 237078, 56159, 237110, 55596, 243278, 237051, 33436, 16920, 236924, 1
@@ -4381,35 +4381,35 @@
     },
     {
       "name": "roundtrip-unused-added",
-      "why": "符号化 unused-added の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case unused-added (special tokens included) as is",
       "ids": [2, 6, 236781, 262143, 1],
       "text": "<bos><unused0>x<unused6241><eos>",
       "textSkipSpecials": "<unused0>x<unused6241>"
     },
     {
       "name": "roundtrip-gemma3-turn-markers",
-      "why": "符号化 gemma3-turn-markers の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case gemma3-turn-markers (special tokens included) as is",
       "ids": [2, 105, 2364, 107, 2202, 106, 1],
       "text": "<bos><start_of_turn>user\nhi<end_of_turn><eos>",
       "textSkipSpecials": "user\nhi"
     },
     {
       "name": "roundtrip-image-soft-token",
-      "why": "符号化 image-soft-token の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case image-soft-token (special tokens included) as is",
       "ids": [2, 255999, 262144, 256000, 1],
       "text": "<bos><start_of_image><image_soft_token><end_of_image><eos>",
       "textSkipSpecials": ""
     },
     {
       "name": "roundtrip-bos-in-text",
-      "why": "符号化 bos-in-text の出力（特殊トークン込み）をそのまま復号する",
+      "why": "decode the output of encode case bos-in-text (special tokens included) as is",
       "ids": [2, 2, 23391, 1],
       "text": "<bos><bos>hello<eos>",
       "textSkipSpecials": "hello"
     },
     {
       "name": "byte-all-256",
-      "why": "byte 0..255 を 1 続きの run で流す（全体が不正 UTF-8 = 1 バイト 1 置換文字）",
+      "why": "bytes 0..255 as one continuous run (all invalid UTF-8 = one replacement character per byte)",
       "ids": [
         238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255,
         256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273,
@@ -4432,35 +4432,35 @@
     },
     {
       "name": "byte-run-truncated",
-      "why": "3 バイト文字の頭 2 バイトだけ（不完全 run — run 全体が置換文字になる）",
+      "why": "only the first 2 bytes of a 3-byte character (an incomplete run — the whole run becomes a replacement character)",
       "ids": [465, 367],
       "text": "��",
       "textSkipSpecials": "��"
     },
     {
       "name": "byte-run-valid",
-      "why": "3 バイト文字がちょうど揃う run（1 文字に畳まれる）",
+      "why": "a run that exactly completes a 3-byte character (folded into one character)",
       "ids": [465, 367, 368],
       "text": "あ",
       "textSkipSpecials": "あ"
     },
     {
       "name": "byte-run-then-token",
-      "why": "不完全 run の直後に非 byte トークン（run の切れ目が確定する位置）",
+      "why": "a non-byte token right after an incomplete run (the position where the run's end is settled)",
       "ids": [465, 367, 1],
       "text": "��<eos>",
       "textSkipSpecials": "��"
     },
     {
       "name": "byte-run-split-by-token",
-      "why": "run が非 byte トークンで 2 つに割れる（片方だけ有効）",
+      "why": "a run split in two by a non-byte token (only one half is valid)",
       "ids": [465, 367, 368, 2, 478, 397],
       "text": "あ<bos>��",
       "textSkipSpecials": "�����"
     },
     {
       "name": "specials-only",
-      "why": "特殊トークンだけ（skip_special_tokens の分岐が出る唯一の形）",
+      "why": "special tokens only (the only shape where the skip_special_tokens branch shows)",
       "ids": [2, 1],
       "text": "<bos><eos>",
       "textSkipSpecials": ""
