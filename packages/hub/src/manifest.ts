@@ -926,14 +926,15 @@ const parseWeightEntry = (
       `${where}: empty (at least one dtype label is required — dtype keys are mandatory)`,
     );
   }
-  let entry: WeightEntry = {};
-  for (const label of labels) {
-    entry = {
-      ...entry,
-      [label]: parseWeightContainer(fail, raw[label], `${where}.${label}`, scope),
-    };
-  }
-  return entry;
+  // Build it in one go — the label count of one entry has no count limit of its own (only the
+  // manifest's byte limit bounds it), so copying an accumulating object with spread per label would
+  // be quadratic in it. `map` keeps the label order of the checks (the first bad label throws).
+  return Object.fromEntries(
+    labels.map((label) => [
+      label,
+      parseWeightContainer(fail, raw[label], `${where}.${label}`, scope),
+    ]),
+  );
 };
 
 const readEnum = <T extends string>(

@@ -537,6 +537,62 @@ test("parseManifest: モデル間で同一 path を指す共有は成立する�
   assert(same === shared, "同一 path の参照が畳まれていない");
 });
 
+describe("parseManifest: one weights entry with many dtype labels", () => {
+  // The label count of one weights entry has no count limit of its own — only the 1 MiB limit on
+  // the whole manifest bounds it — so building the entry must stay linear in the label count.
+  /** `count` dtype labels on the weights entry `net`, each with a legal container. */
+  const manyLabels = (count: number, bad: ReadonlySet<number> = new Set()): string => {
+    const labels = Array.from({ length: count }, (_unused, index) => `d${index}`);
+    return withModel({
+      weights: {
+        net: Object.fromEntries(
+          labels.map((label, index) => [label, bad.has(index) ? {} : { container: CONTAINER }]),
+        ),
+      },
+      quants: { q: { weights: { net: "d0" }, session: {} } },
+    });
+  };
+  // As many labels as fit under 1 MiB with the minimal container (about 0.95 MiB).
+  const COUNT = 2000;
+
+  it("keeps every label, in declaration order, each with its own container", () => {
+    const entry = parseManifest(manyLabels(COUNT)).models["m"].weights["net"];
+    const labels = Object.keys(entry);
+    assertEquals(labels.length, COUNT);
+    assertEquals(labels[0], "d0");
+    assertEquals(labels[COUNT - 1], `d${COUNT - 1}`);
+    assert(
+      labels.every((label, index) => label === `d${index}`),
+      "label order is not the declaration order",
+    );
+    assertEquals(entry[`d${COUNT - 1}`].container.parts.length, CONTAINER.parts.length);
+  });
+
+  it("reports the first bad label in declaration order", () => {
+    assertThrows(
+      () => parseManifest(manyLabels(COUNT, new Set([700, 1500]))),
+      ManifestFormatError,
+      "models.m.weights.net.d700.container: missing / not an object",
+    );
+  });
+
+  it(`parses ${COUNT} labels within a time bound`, () => {
+    const text = manyLabels(COUNT);
+    assert(new TextEncoder().encode(text).length < 1024 * 1024, "not built under 1 MiB");
+    const elapsed = Math.min(
+      ...Array.from({ length: 3 }, () => {
+        const started = performance.now();
+        parseManifest(text);
+        return performance.now() - started;
+      }),
+    );
+    // Measured on the development machine: linear about 13 ms, a spread copy per label about
+    // 425 ms. The bound is an order of magnitude above the linear measurement (so CI variance does
+    // not flip it) and still well below the quadratic one.
+    assert(elapsed < 150, `${Math.round(elapsed)} ms (bound 150 ms)`);
+  });
+});
+
 describe("parseManifest: weights の container 欄（ADR 0109 決定 3）", () => {
   it("descriptor は 2 文書それぞれの長さと sha256 を持つ", () => {
     const container = containerOf(withModel());
