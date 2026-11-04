@@ -62,9 +62,14 @@ export const MOUNTS = {
   gemma4: { directory: "models/karume-gemma4", hfRepo: gemma.SOURCES["gemma4"].repo },
   // The q4_0 QAT line (read by the regular entry point, with MTP drafters) and the mobile QAT
   // distribution (gemma4QatMobile.Pipeline). Neither has a published revision under its name yet,
-  // so neither has a SOURCES entry and both are served on the direct route only.
-  "gemma4-qat": "models/karume-gemma4-qat",
-  "gemma4-qat-mobile": "models/karume-gemma4-qat-mobile",
+  // so neither has a SOURCES entry and the repo names are spelled here; the `/hf/` route computes
+  // its revision from the served `karume.json` and needs no published one. MUST keep the route:
+  // on the direct route every PLE row the host gather misses is an HTTP range request per token.
+  "gemma4-qat": { directory: "models/karume-gemma4-qat", hfRepo: "hdae/karume-gemma4-qat" },
+  "gemma4-qat-mobile": {
+    directory: "models/karume-gemma4-qat-mobile",
+    hfRepo: "hdae/karume-gemma4-qat-mobile",
+  },
   "moss-image": {
     directory: "models/karume-moss-image",
     hfRepo: moss.SOURCES["moss-image"].repo,

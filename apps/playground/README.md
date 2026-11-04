@@ -79,8 +79,8 @@ root. The HF-compatible repo is the public name from the family's `SOURCES` tabl
 | `irodori-v4.1` | `models/karume-irodori-v4.1-small` | `hdae/karume-irodori-v4.1-small` | Irodori-TTS |
 | `sbv2` | `models/karume-sbv2-jvnv` | `hdae/karume-sbv2-jvnv` | Style-Bert-VITS2 |
 | `gemma4` | `models/karume-gemma4` | `hdae/karume-gemma4` | Gemma 4 chat |
-| `gemma4-qat` | `models/karume-gemma4-qat` | — (direct route only: no published revision yet) | Gemma 4 chat |
-| `gemma4-qat-mobile` | `models/karume-gemma4-qat-mobile` | — (direct route only: no published revision yet) | Gemma 4 chat |
+| `gemma4-qat` | `models/karume-gemma4-qat` | `hdae/karume-gemma4-qat` (not published yet; the route computes the revision) | Gemma 4 chat |
+| `gemma4-qat-mobile` | `models/karume-gemma4-qat-mobile` | `hdae/karume-gemma4-qat-mobile` (not published yet; the route computes the revision) | Gemma 4 chat |
 | `moss-image` | `models/karume-moss-image` | `hdae/karume-moss-image` | MOSS-Image |
 
 A missing directory does not stop the server: it logs a warning, `/models/<name>/` answers 404, and
