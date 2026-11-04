@@ -105,7 +105,9 @@ describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
   });
 
   it("旧 sidecar の版は読まない（両読みしない）", () => {
-    for (const schema of [1, 2, 4]) {
+    // Schema 4 (grouped scales) is read since the q4_0 QAT line — `gemma4_ple_grouped_test.ts`;
+    // 5 stands for a version this reader does not know.
+    for (const schema of [1, 2, 5]) {
       assertThrows(
         () => parseGemma4PleIndex({ ...raw, schema }),
         Error,
