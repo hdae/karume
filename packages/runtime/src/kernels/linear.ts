@@ -85,9 +85,14 @@ export const linearWgsl = (
  * about 1 GiB, so neither the binding limit nor the residency plan's compressed-byte check stops it
  * (the index is the same expression regardless of storage format, so the check is not split by
  * storage format either).
+ *
+ * MUST: the activation element count `m·k ≤ 2^32 − 1` too — the A index `abase + arow·k + col` is a
+ * u32 flat index, so a wrapped product reads another row of the activation without an exception.
+ * NOTE: the output `m·n` is not checked yet — an open gap: the accepted set the linear params
+ * tests pin includes `[65, 268435455, 16]`, whose `m·n` passes u32.
  */
 export const linearParams = (m: number, n: number, k: number): Uint32Array<ArrayBuffer> => {
   const params = gemmParams("linear", m, n, k);
-  assertU32Params("linear params", { "n * k": n * k });
+  assertU32Params("linear params", { "m * k": m * k, "n * k": n * k });
   return params;
 };

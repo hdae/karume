@@ -391,7 +391,7 @@ const bmmPlan = (sweepCase: BmmCase, limit: number): CasePlan => {
         // linear.ts:129-133 (no row window)
         key: bmmKey(v4, m, undefined, geometry),
         wgsl: bmmWgsl(v4, m, undefined, geometry),
-        params: bmmParams(m, n, k),
+        params: bmmParams(m, n, k, batch),
         bindings: ["a", "b", "c"],
         writes: ["c"],
         // linear.ts:148-153 (the batch on the z axis, 1 workgroup = 1 batch)

@@ -45,6 +45,7 @@
 import { CodegenError } from "../codegen/errors.ts";
 import { IS_NAN_BITS_WGSL } from "../codegen/numerics-wgsl.ts";
 import { assertU32Params } from "../codegen/params.ts";
+import { assertConvFlatExtents } from "./conv-bounds.ts";
 
 export const DEFORM_CONV2D_WORKGROUP_SIZE = 256;
 
@@ -214,6 +215,12 @@ type DeformConv2dDims = {
  * check = the positive set of the same name in ops/shapes.ts, but the same double check as
  * conv_transpose1d / conv2d). An input with spatial length 0 makes `f32(dims.height_in)` 0, the
  * range test false for every tap, and the output all bias — a silent wrong value.
+ *
+ * MUST: the element counts of every tensor the WGSL indexes flat — input, weight, output (the
+ * shared {@link assertConvFlatExtents} of the conv family) and the offset / modulator planes — fit in
+ * u32. The shader builds `(b·Cin + ic)·H·W + y·W + x`, `(oc·Cin + ic)·Kh·Kw + tap`,
+ * `b·2·Kh·Kw·Hout·Wout + (2·tap + 1)·Hout·Wout + pixel` and `b·Kh·Kw·Hout·Wout + tap·Hout·Wout + pixel`
+ * as u32, so past 2^32 − 1 the upper bits drop and another element is read without an exception.
  */
 export const deformConv2dParams = (dims: DeformConv2dDims): Uint32Array<ArrayBuffer> => {
   // The names pair with the WGSL Dims field names (from the one after `n`). The order is the
@@ -250,6 +257,18 @@ export const deformConv2dParams = (dims: DeformConv2dDims): Uint32Array<ArrayBuf
   }
   const n = dims.batch * dims.channelsOut * dims.heightOut * dims.widthOut;
   assertU32Params("deform_conv2d params", { n });
+  const taps = dims.kernelH * dims.kernelW;
+  const planeOut = dims.heightOut * dims.widthOut;
+  assertConvFlatExtents("deform_conv2d params", {
+    input: dims.batch * dims.channelsIn * dims.heightIn * dims.widthIn,
+    output: n,
+    weight: dims.channelsOut * dims.channelsIn * taps,
+  });
+  // The modulator `[B, Kh·Kw, Hout, Wout]` is half of the offset `[B, 2·Kh·Kw, Hout, Wout]`, so the
+  // offset bound covers it.
+  assertU32Params("deform_conv2d params", {
+    "offset element count": dims.batch * 2 * taps * planeOut,
+  });
   const params = new Uint32Array(16);
   params[0] = n;
   values.forEach((value, index) => {

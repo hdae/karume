@@ -349,8 +349,8 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
         key: bmmKey(qkV4, rows, windowed ? "a" : undefined),
         wgsl: () => bmmWgsl(qkV4, rows, windowed ? "a" : undefined),
         params: windowed
-          ? bmmRowWindowParams(rows, keys, headDim, block.offset, queries)
-          : bmmParams(rows, keys, headDim),
+          ? bmmRowWindowParams(rows, keys, headDim, block.offset, queries, "a", heads)
+          : bmmParams(rows, keys, headDim, heads),
         operands: [
           { kind: "bind", index: 0 },
           { kind: "bind", index: 1 },
@@ -408,8 +408,8 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
         key: bmmKey(pvV4, rows, windowed ? "c" : undefined),
         wgsl: () => bmmWgsl(pvV4, rows, windowed ? "c" : undefined),
         params: windowed
-          ? bmmRowWindowParams(rows, headDim, keys, block.offset, queries)
-          : bmmParams(rows, headDim, keys),
+          ? bmmRowWindowParams(rows, headDim, keys, block.offset, queries, "c", heads)
+          : bmmParams(rows, headDim, keys, heads),
         operands: [
           { kind: "temp", id: probabilities },
           { kind: "bind", index: 3 },

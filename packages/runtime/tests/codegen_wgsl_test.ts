@@ -2596,7 +2596,7 @@ test("uniform で渡す params は 16 バイト整列を満たす", () => {
   // WGSL の uniform アドレス空間では struct の整列が 16 バイトになる
   assertEquals(reduceParams(7, 3).byteLength, 16);
   assertEquals(matmulParams(2, 3, 4).byteLength, 16);
-  assertEquals(bmmParams(2, 3, 4).byteLength, 16);
+  assertEquals(bmmParams(2, 3, 4, 1).byteLength, 16);
   assertEquals(gatherParams(12, 3, 9).byteLength, 16);
   assertEquals(padParams(2, 3, 1, 2).byteLength, 16);
   // flip の Params は 3 語だが、確保は 16 バイト（uniform struct の整列）
@@ -2608,7 +2608,7 @@ test("uniform で渡す params は 16 バイト整列を満たす", () => {
   assertEquals([...matmulParams(2, 3, 4).slice(0, 3)], [2, 3, 4]);
   // bmm も 3 語 {m,n,k}。バッチ数は wid.z から導くので uniform に載せない（載せると
   // WGSL が一度も読まない死んだフィールドになる）
-  assertEquals([...bmmParams(2, 3, 4)], [2, 3, 4, 0]);
+  assertEquals([...bmmParams(2, 3, 4, 1)], [2, 3, 4, 0]);
   // 末尾は範囲外添字に書く NaN のビット列（WGSL に NaN リテラルが無いので params で運ぶ）
   assertEquals([...gatherParams(12, 3, 9)], [12, 3, 9, GATHER_OOB_BITS]);
   assertEquals(Number.isNaN(new Float32Array(new Uint32Array([GATHER_OOB_BITS]).buffer)[0]), true);
@@ -3199,14 +3199,14 @@ test("融合 attention の行窓変種は片側の base と mask の行添字だ
  * tests/gpu_row_block_attention_test.ts だけだった（アダプタ無し環境では素通りする）。
  */
 test("bmm の行窓 params は 5 語 32 バイトで、はみ出す窓を fail loudly にする", () => {
-  const params = bmmRowWindowParams(4, 7, 8, 2, 9);
+  const params = bmmRowWindowParams(4, 7, 8, 2, 9, "a", 1);
   assertEquals([...params.slice(0, 5)], [4, 7, 8, 2, 9]);
   // 5 語 = 20 バイトを uniform struct の 16 バイト整列で 32 バイトへ切り上げる
   assertEquals(params.byteLength, 32);
-  assertEquals(bmmParams(4, 7, 8).byteLength, 16, "窓なしは従来どおり 16B");
+  assertEquals(bmmParams(4, 7, 8, 1).byteLength, 16, "窓なしは従来どおり 16B");
   // MUST: ブロックが全 M をはみ出す組は fail loudly（黙って通すと隣のバッチを読み書きする）
-  assertThrows(() => bmmRowWindowParams(5, 7, 8, 5, 9), CodegenError, "exceed the full M");
-  assertThrows(() => bmmRowWindowParams(4, 7, 8, -1, 9), CodegenError, "row_offset");
+  assertThrows(() => bmmRowWindowParams(5, 7, 8, 5, 9, "a", 1), CodegenError, "exceed the full M");
+  assertThrows(() => bmmRowWindowParams(4, 7, 8, -1, 9, "a", 1), CodegenError, "row_offset");
   // 語位置と WGSL の読み口は対（A 側 = 入力行 / C 側 = 出力行のどちらが全 M ストライドか）
   assertEquals(
     bmmWgsl(true, 4, "a").includes(
@@ -5422,8 +5422,8 @@ test("融合カーネルの params は契約外の値を fail loudly にする",
 });
 
 test("bmm / gather の params は契約外の値を fail loudly にする", () => {
-  assertThrows(() => bmmParams(-1, 2, 3), CodegenError);
-  assertThrows(() => bmmParams(1, 2, 1.5), CodegenError);
+  assertThrows(() => bmmParams(-1, 2, 3, 1), CodegenError);
+  assertThrows(() => bmmParams(1, 2, 1.5, 1), CodegenError);
   assertThrows(() => gatherParams(-1, 2, 3), CodegenError);
   // 列数 0 で要素数 > 0 は shape 契約上ありえない（カーネルの 0 除算を作らない）
   assertThrows(() => gatherParams(6, 0, 3), CodegenError);

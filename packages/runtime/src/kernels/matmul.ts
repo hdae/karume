@@ -16,6 +16,7 @@
  * the **same value** to the key and the WGSL (the same discipline as `rows`).
  */
 
+import { assertU32Params } from "../codegen/params.ts";
 import { gemmKeyPart, gemmParams, gemmWgsl } from "./gemm.ts";
 import type { GemmGeometry } from "./gemm-geometry.ts";
 
@@ -25,5 +26,14 @@ export const matmulKey = (v4: boolean, rows?: number, geometry?: GemmGeometry): 
 export const matmulWgsl = (v4: boolean, rows?: number, geometry?: GemmGeometry): string =>
   gemmWgsl({ op: "matmul", v4, rows, geometry });
 
-export const matmulParams = (m: number, n: number, k: number): Uint32Array<ArrayBuffer> =>
-  gemmParams("matmul", m, n, k);
+/**
+ * MUST: the element counts of A `M·K`, B `K·N` and C `M·N` fit in u32. The skeleton builds every
+ * operand index as a u32 flat index (`abase + arow·k + col`, `bbase + row·n`, `cbase + orow·n +
+ * col`), so a product past 2^32 − 1 drops its upper bits and another element is read or written
+ * without an exception — the u32 checks on m / n / k alone (in {@link gemmParams}) do not stop it.
+ */
+export const matmulParams = (m: number, n: number, k: number): Uint32Array<ArrayBuffer> => {
+  const params = gemmParams("matmul", m, n, k);
+  assertU32Params("matmul params", { "m * k": m * k, "k * n": k * n, "m * n": m * n });
+  return params;
+};

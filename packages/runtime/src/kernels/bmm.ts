@@ -13,6 +13,7 @@
  * snapshots of every op.
  */
 
+import { assertU32Params } from "../codegen/params.ts";
 import {
   assertGemmRowWindow,
   gemmKeyPart,
@@ -52,8 +53,45 @@ export const bmmWgsl = (
   geometry?: GemmGeometry,
 ): string => gemmWgsl({ op: "bmm", v4, rows, rowWindow: window, geometry });
 
-export const bmmParams = (m: number, n: number, k: number): Uint32Array<ArrayBuffer> =>
-  gemmParams("bmm", m, n, k);
+/**
+ * The element counts of the three operands including the batch.
+ *
+ * MUST: each fits in u32. The batch base is the u32 product `wid.z · rows · k` (and the like —
+ * `batchPrologue` in gemm.ts), and the in-matrix indices are added to it, so a count past
+ * 2^32 − 1 wraps and the last batches read or write the first ones (or one matrix another element)
+ * without an exception — the u32 checks on m / n / k alone do not stop it. `rows` is per side: the
+ * row-window variant strides the windowed side by the full M (`rows_full`), the other side by the
+ * block's m.
+ */
+const assertBmmExtents = (
+  where: string,
+  batch: number,
+  rows: { readonly a: number; readonly c: number },
+  n: number,
+  k: number,
+): void => {
+  assertU32Params(where, { batch });
+  assertU32Params(where, {
+    "A elements (batch * rows * k)": batch * rows.a * k,
+    "B elements (batch * k * n)": batch * k * n,
+    "C elements (batch * rows * n)": batch * rows.c * n,
+  });
+};
+
+/**
+ * `batch` is not written to the uniform (the shader takes it from `wid.z`); it is taken only for
+ * the flat-index check ({@link assertBmmExtents}). MUST: pass the dispatch's z count.
+ */
+export const bmmParams = (
+  m: number,
+  n: number,
+  k: number,
+  batch: number,
+): Uint32Array<ArrayBuffer> => {
+  const params = gemmParams("bmm", m, n, k);
+  assertBmmExtents("bmm params", batch, { a: m, c: m }, n, k);
+  return params;
+};
 
 /**
  * The uniform of the row-window variant (5 words: `{m,n,k}` + `{row_offset, rows_full}`).
@@ -65,6 +103,10 @@ export const bmmParams = (m: number, n: number, k: number): Uint32Array<ArrayBuf
  * `rowsFull` is the **original full M** of the row window, and `rowOffset` is the first row of it
  * that this block handles (the guard is {@link assertGemmRowWindow} — shared with the params of fused
  * attention).
+ *
+ * `window` is the windowed side (the same value as the key's and the WGSL's) and `batch` the
+ * dispatch's z count: the windowed side's flat index strides by the full M, the other side by the
+ * block's m ({@link assertBmmExtents}). Neither goes into the uniform.
  */
 export const bmmRowWindowParams = (
   m: number,
@@ -72,9 +114,18 @@ export const bmmRowWindowParams = (
   k: number,
   rowOffset: number,
   rowsFull: number,
+  window: GemmRowWindow,
+  batch: number,
 ): Uint32Array<ArrayBuffer> => {
   assertGemmRowWindow("bmm row window params", m, { offset: rowOffset, rowsFull });
   const base = gemmParams("bmm", m, n, k);
+  assertBmmExtents(
+    "bmm row window params",
+    batch,
+    window === "a" ? { a: rowsFull, c: m } : { a: m, c: rowsFull },
+    n,
+    k,
+  );
   const params = new Uint32Array(8);
   params.set(base.subarray(0, 3));
   params[3] = rowOffset;

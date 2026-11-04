@@ -156,7 +156,7 @@ export const buildBmm = async (
     key,
     bmmWgsl(v4, m, undefined, geometry),
   );
-  const params = face.writeParams(bmmParams(m, n, k), PARAMS_UNIFORM_USAGE);
+  const params = face.writeParams(bmmParams(m, n, k, batch), PARAMS_UNIFORM_USAGE);
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
   const where = `bmm [${a.join(",")}] × [${b.join(",")}]`;
   builder.dispatch({
