@@ -1766,6 +1766,30 @@ describe("openAsset: 宣言 size の外は取得元と在庫の有無に依ら�
     await assertRejects(() => reader.read(shorter.size, 1), Error, "declared size");
   });
 
+  it("HF: the rejection names the path, the requested range and the declared size", async () => {
+    // The HF source has no range check of its own, so this message comes from the common layer.
+    const { mock, caches, loaded, ref } = await openable();
+    const access = { fetch: mock.fetch, caches };
+    await prefetchAssets(loaded, [ref], access);
+    const reader = await openAsset(loaded, ref, access);
+    assert(reader !== undefined);
+    await assertRejects(
+      () => reader.read(ref.size - 1, 2),
+      Error,
+      `hub: ${ref.path} range [${ref.size - 1}, ${ref.size + 1}) is invalid` +
+        ` (declared size ${ref.size} — only ranges of non-negative integers within size can be read)`,
+    );
+    for (const [offset, length] of [
+      [Number.NaN, 1],
+      [0, Number.POSITIVE_INFINITY],
+    ]) {
+      await assertRejects(() => reader.read(offset, length), Error, "declared size");
+    }
+    // The boundary itself is inside: the whole declared range and an empty range at its end.
+    assertEquals(await reader.read(0, ref.size), payloadFor(ref.path));
+    assertEquals((await reader.read(ref.size, 0)).byteLength, 0);
+  });
+
   for (const shrink of [0, 1]) {
     it(`ローカル・${shrink === 0 ? "宣言どおり" : "短い size を宣言"}の参照`, async () => {
       const local = await loadManifest(localDirectory(adapter, { label: "./models/test" }));

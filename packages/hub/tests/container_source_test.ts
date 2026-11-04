@@ -381,6 +381,33 @@ test("openContainerSource: 範囲外・長さ 0 の part・未知の添字は fa
   assertEquals(mock.calls, [], "不正な区間の読みが network に出ている");
 });
 
+test("openContainerSource: a bad range names the part, its path and its declared size", async () => {
+  const caches = new MemoryCacheStorage();
+  const { loaded, mock } = await openRemote(caches);
+  const source = openContainerSource(loaded, containerOf(loaded, "net"), {
+    fetch: mock.fetch,
+    caches,
+  });
+  const size = source.partLength(2);
+
+  await assertRejects(
+    () => source.read(2, size - 1, 2),
+    Error,
+    `hub: part 2 (${NET_PARTS[2]}) range [${size - 1}, ${size + 1}) is invalid` +
+      ` (declared size ${size} — only ranges of non-negative integers within size can be read)`,
+  );
+  for (const [offset, length] of [
+    [Number.NaN, 1],
+    [0, Number.POSITIVE_INFINITY],
+  ]) {
+    await assertRejects(() => source.read(2, offset, length), Error, "declared size");
+  }
+  assertEquals(mock.calls, [], "a bad range reached the network");
+  // The whole declared part is still readable (warm first — this surface does not warm).
+  await warmParts(loaded, "net", { fetch: mock.fetch, caches });
+  assertEquals(await source.read(2, 0, size), payloadFor(NET_PARTS[2]));
+});
+
 describe("openContainerSource: verified は取得元が全量を検証したかを答える", () => {
   it("HF セッションは取得層が part 全量を流しながら照合する", async () => {
     const caches = new MemoryCacheStorage();

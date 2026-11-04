@@ -44,6 +44,7 @@ import {
   pinnedSourceOf,
 } from "./session.ts";
 import {
+  assertRangeWithinDeclaredSize,
   type AssetRangeReader,
   type DistributionSource,
   driverOf,
@@ -631,18 +632,7 @@ export const openAsset = async (
       // bound, so a ref declaring a shorter size for the same sha256 could, on opening a warm
       // entry, read past the declaration (the rest of the file), diverging from the local source,
       // which rejects by the declaration.
-      if (
-        !Number.isInteger(offset) ||
-        !Number.isInteger(length) ||
-        offset < 0 ||
-        length < 0 ||
-        offset + length > ref.size
-      ) {
-        throw new Error(
-          `hub: ${ref.path} range [${offset}, ${offset + length}) is invalid` +
-            ` (declared size ${ref.size} — only ranges of non-negative integers within size can be read)`,
-        );
-      }
+      assertRangeWithinDeclaredSize(ref.path, ref.size, offset, length);
       return assertTightView(await reader.read(offset, length, readOptions), ref.path);
     },
   };

@@ -35,7 +35,12 @@ import { HubError } from "./errors.ts";
 import { assertTightView } from "./fetch.ts";
 import type { ContainerRef, FileRef } from "./manifest.ts";
 import { type LoadedManifest, type LoadManifestOptions, pinnedSourceOf } from "./session.ts";
-import { type AssetRangeReader, type PinnedSource, sourceForRef } from "./source.ts";
+import {
+  assertRangeWithinDeclaredSize,
+  type AssetRangeReader,
+  type PinnedSource,
+  sourceForRef,
+} from "./source.ts";
 
 /**
  * The part → byte range interface. Structurally compatible with the `BlockSource` of
@@ -229,18 +234,7 @@ export const openContainerSource = (
             ` (a reader does not read once partLength returns 0)`,
         );
       }
-      if (
-        !Number.isInteger(offset) ||
-        !Number.isInteger(length) ||
-        offset < 0 ||
-        length < 0 ||
-        offset + length > ref.size
-      ) {
-        throw new Error(
-          `hub: part ${part} (${ref.path}) range [${offset}, ${offset + length}) is invalid` +
-            ` (declared size ${ref.size} — only ranges of non-negative integers within size can be read)`,
-        );
-      }
+      assertRangeWithinDeclaredSize(`part ${part} (${ref.path})`, ref.size, offset, length);
       const plan = await planFor(part);
       if (plan.kind === "seek") {
         return assertTightView(await plan.reader.read(offset, length), ref.path);

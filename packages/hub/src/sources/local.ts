@@ -35,6 +35,7 @@
 import { type FileRef, fileRefKey, MANIFEST_FILENAME, MAX_MANIFEST_BYTES } from "../manifest.ts";
 import type { LoadManifestOptions } from "../session.ts";
 import {
+  assertRangeWithinDeclaredSize,
   type AssetRangeReader,
   DistributionSource,
   driverOf,
@@ -134,18 +135,7 @@ const localRangeReader = (
   // Directory files support positional reads, so the cost does not depend on the offset.
   cost: "seek",
   read: async (offset, length, options = {}) => {
-    if (
-      !Number.isInteger(offset) ||
-      !Number.isInteger(length) ||
-      offset < 0 ||
-      length < 0 ||
-      offset + length > ref.size
-    ) {
-      throw new Error(
-        `hub: ${ref.path} range [${offset}, ${offset + length}) is invalid` +
-          ` (declared size ${ref.size} — only ranges of non-negative integers within size can be read)`,
-      );
-    }
+    assertRangeWithinDeclaredSize(ref.path, ref.size, offset, length);
     const { signal } = options;
     const bytes = await readRange(ref.path, offset, length, {
       ...(signal === undefined ? {} : { signal }),

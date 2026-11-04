@@ -29,6 +29,7 @@ import type {
 import { type FileRef, MANIFEST_FILENAME } from "../src/manifest.ts";
 import {
   DistributionSource,
+  driverOf,
   type PinnedSource,
   type SourceDriver,
   type SourceOrigin,
@@ -564,6 +565,40 @@ test("openAsset: 宣言 size の外はアダプターを 1 度も呼ばずに落
   assert(error.message.includes(TOKENIZER_PATH), `${error.message} が path を名乗っていない`);
   assert(error.message.includes(String(ref.size)), `${error.message} が宣言 size を名乗っていない`);
   assertEquals(directory.ranges, [], "範囲外の要求がアダプターへ降りている");
+});
+
+test("local source range reader: checks the declared size itself, before the adapter", async () => {
+  // Driven through the source directly — through `openAsset`, the common layer's check (`fetch.ts`)
+  // rejects first, so this source's own check would never be reached.
+  const dist = await buildLocalDist();
+  const directory = rangeDirectory(dist.files);
+  const source = localDirectory(directory.adapter, { label: LABEL });
+  const loaded = await loadManifest(source, { caches: new HostileCacheStorage() });
+  // A declaration shorter than the file: the bound is the declared size, not the file length.
+  const declared = { ...selectionFiles(loaded.manifest)["tokenizer"] };
+  const ref: FileRef = { ...declared, size: declared.size - 1 };
+  const openFile = driverOf(source).pin("", {}).openFile;
+  assert(openFile !== undefined, "an adapter with positional reads opens no range reader");
+  const reader = await openFile(ref, {});
+
+  await assertRejects(
+    () => reader.read(ref.size - 1, 2),
+    Error,
+    `hub: ${TOKENIZER_PATH} range [${ref.size - 1}, ${ref.size + 1}) is invalid` +
+      ` (declared size ${ref.size} — only ranges of non-negative integers within size can be read)`,
+  );
+  for (const [offset, length] of [
+    [ref.size, 1],
+    [-1, 1],
+    [0, 0.5],
+    [Number.NaN, 1],
+    [0, Number.POSITIVE_INFINITY],
+  ]) {
+    await assertRejects(() => reader.read(offset, length), Error, "declared size");
+  }
+  assertEquals(directory.ranges, [], "an out-of-range request reached the adapter");
+  // The whole declared range is still readable.
+  assertEquals(await reader.read(0, ref.size), payloadFor(TOKENIZER_PATH).slice(0, ref.size));
 });
 
 test("openAsset: 短い戻りは throw（0 埋めの行を正常な値として配らない）", async () => {

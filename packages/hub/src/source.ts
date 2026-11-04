@@ -137,6 +137,36 @@ export type AssetRangeReader = {
   ) => Promise<Uint8Array<ArrayBuffer>>;
 };
 
+/**
+ * The bounds check of one range read against the **declared** `size` ({@link AssetRangeReader}):
+ * `offset` and `length` must be non-negative integers and the range must end within `size`.
+ * `subject` names what is read in the message (a path, or a part and its path).
+ *
+ * MUST: the bound is the declared size, never the length of the file at hand — a file can be
+ * longer than its declaration (a mixed-up quant, a copy still being written), and checking against
+ * it would silently read bytes outside the manifest. Every surface that reads a range calls this
+ * one helper so the rule and the message cannot drift apart between them.
+ */
+export const assertRangeWithinDeclaredSize = (
+  subject: string,
+  size: number,
+  offset: number,
+  length: number,
+): void => {
+  if (
+    !Number.isInteger(offset) ||
+    !Number.isInteger(length) ||
+    offset < 0 ||
+    length < 0 ||
+    offset + length > size
+  ) {
+    throw new Error(
+      `hub: ${subject} range [${offset}, ${offset + length}) is invalid` +
+        ` (declared size ${size} — only ranges of non-negative integers within size can be read)`,
+    );
+  }
+};
+
 /** Options for reading one manifest. */
 export type ManifestReadOptions = {
   readonly signal?: AbortSignal;
