@@ -1043,7 +1043,7 @@ class TestI4Eligibility:
 
     def test_a_grouped_conv1d_weight_is_not_i4_eligible(self):
         """`groups > 1` runs on the direct kernel, which has no i4 decode path."""
-        graph, _, _ = int4_weight_graph(conv=True, conv_groups=2)
+        graph, _, _ = int4_weight_graph(conv=True, conv_groups=2, conv_shape=(4, 2, 16))
 
         assert eligible_compressed_initializers(graph) == {"w", "cw"}
         assert i4_eligible_initializers(graph, group_size=16) == {"w"}
@@ -1739,7 +1739,7 @@ class TestMixedStorage:
         The default quietly leaves it as f32, but an explicit choice fails loudly (the line drawn
         by `_plan_weight_dtype`).
         """
-        graph, tensors, scales = int4_weight_graph(conv=True, conv_groups=2)
+        graph, tensors, scales = int4_weight_graph(conv=True, conv_groups=2, conv_shape=(4, 2, 16))
 
         with pytest.raises(EmitError, match="is only for weight slots of"):
             write_model(
