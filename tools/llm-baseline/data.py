@@ -9,22 +9,30 @@ from pathlib import Path
 
 from transformers import AutoTokenizer
 
+from gemma4 import sources
+
 
 def profiles(root: Path) -> dict:
-    """Evaluable models → the official checkpoint, the **distribution** (`karume.json` of
-    `karume/5`) and the **quant** whose stored `model` weights `--weights stored` measures.
+    """Evaluable models → the official checkpoint, the directory its **tokenizer** is read from,
+    the **distribution** (`karume.json` of `karume/5`) and the **quant** whose stored `model`
+    weights `--weights stored` measures.
 
     MUST: the quant is named, never taken from the manifest's `defaultQuant` — a distribution's
-    default can move to another storage (the regular Gemma 4 line's became the original-weights
-    `bf16` preset on 2026-11-04, whose PLE index this tool does not read), and the measurement would
-    then silently be of other weights. The int4 presets of a line (`i4` / `i4-gemvpar` /
-    `i4-fast`) load the same container, so `i4` names it.
+    default can move to another storage, and the measurement would then silently be of other
+    weights. The regular line (`models/karume-gemma4`) ships the original-weights `bf16` preset
+    alone since 2026-11-04 (PLE index schema 5); the q4_0 QAT line (`models/karume-gemma4-qat`)
+    ships `i4`, the QAT checkpoint's own 4-bit grid (schema 4); the mobile QAT line's int4 presets
+    (`i4` / `i4-gemvpar` / `i4-fast`) load the same container, so `i4` names it.
 
-    NOTE: since 2026-11-04 the regular line (`models/karume-gemma4`) ships `bf16` alone, so the
-    `gemma4-e2b` profile's `i4` is not in its manifest and `--weights stored` fails loudly in
-    `container_paths`; `--weights source` still scores the original checkpoint. Scoring the `bf16`
-    preset (PLE index schema 5) or the q4_0 QAT line (schema 4) needs a PLE reader for those
-    schemas first (backlog).
+    MUST: the tokenizer is named apart from the checkpoint. The q4_0 QAT line's weights come from
+    `google/gemma-4-E{2,4}B-it-qat-q4_0-unquantized`, whose `tokenizer.json` predates Google's
+    glitch-token fixes; the line ships the regular `-it` tokenizer, so its profiles read it from
+    there (`gemma4.sources` holds both pins — the export reads the same snapshots). Scoring with the
+    checkpoint's own tokenizer would measure inputs the distribution never sees.
+
+    12B (`karume-gemma4-qat`'s third model) has no profile: it is another class
+    (`gemma4_unified` — no per-layer embeddings), which {@link weights.load_float_model} does not
+    build, and its F32 load is about 45 GiB.
 
     Only containers (`krm`) are read. The `-probe` series still kept in the old shard form
     (the 2026-09 experiments with gemma4 E4B / MiniCPM5-2B / Qwen3-0.6B) **have no entry in this
@@ -36,13 +44,15 @@ def profiles(root: Path) -> dict:
         "gemma4-e2b": {
             "family": "gemma4",
             "checkpoint": root / "inputs/gemma4/gemma-4-E2B-it",
+            "tokenizer": root / "inputs/gemma4/gemma-4-E2B-it",
             "distribution": root / "models/karume-gemma4",
             "model": "e2b",
-            "quant": "i4",
+            "quant": "bf16",
         },
         "gemma4-qat-e2b": {
             "family": "gemma4-qat",
             "checkpoint": root / "inputs/gemma4-qat/gemma-4-E2B-it-qat-mobile-transformers",
+            "tokenizer": root / "inputs/gemma4-qat/gemma-4-E2B-it-qat-mobile-transformers",
             "distribution": root / "models/karume-gemma4-qat-mobile",
             "model": "e2b",
             "quant": "i4",
@@ -50,9 +60,21 @@ def profiles(root: Path) -> dict:
         "gemma4-qat-e4b": {
             "family": "gemma4-qat",
             "checkpoint": root / "inputs/gemma4-qat/gemma-4-E4B-it-qat-mobile-transformers",
+            "tokenizer": root / "inputs/gemma4-qat/gemma-4-E4B-it-qat-mobile-transformers",
             "distribution": root / "models/karume-gemma4-qat-mobile",
             "model": "e4b",
             "quant": "i4",
+        },
+        **{
+            f"gemma4-qat-q4_0-{model}": {
+                "family": "gemma4",
+                "checkpoint": sources.qat_checkpoint_dir(model),
+                "tokenizer": sources.qat_tokenizer_dir(model),
+                "distribution": root / "models/karume-gemma4-qat",
+                "model": model,
+                "quant": "i4",
+            }
+            for model in ("e2b", "e4b")
         },
     }
 
@@ -89,7 +111,7 @@ def prepare(root: Path, data: Path, destination: Path, count: int = 64, chars: i
         if hashlib.sha256(normalized).hexdigest() != row["jsonSha256"]:
             raise ValueError("JSON fingerprint does not match")
     tokenizers = {
-        name: AutoTokenizer.from_pretrained(profile["checkpoint"], local_files_only=True)
+        name: AutoTokenizer.from_pretrained(profile["tokenizer"], local_files_only=True)
         for name, profile in profiles(root).items()
     }
     rows = json.loads((data / "arc.json").read_text())
@@ -130,13 +152,13 @@ def prepare(root: Path, data: Path, destination: Path, count: int = 64, chars: i
         "models": {},
     }
     for name, tokenizer in tokenizers.items():
-        checkpoint = profiles(root)[name]["checkpoint"]
+        tokenizer_dir = profiles(root)[name]["tokenizer"]
         result["models"][name] = {
             "arc": selected[name],
             "wikiIds": encode(tokenizer, text),
             "bosTokenId": tokenizer.bos_token_id,
             "tokenizerSha256": hashlib.sha256(
-                (checkpoint / "tokenizer.json").read_bytes()
+                (tokenizer_dir / "tokenizer.json").read_bytes()
             ).hexdigest(),
         }
     with (destination / "suite.json").open("x") as output:

@@ -112,6 +112,159 @@ def test_a_token_outside_every_block_is_refused():
         module(torch.tensor([[5]]))
 
 
+#: Synthetic grouped PLE (schema 4 — the q4_0 QAT line's form): packed i4 codes in [−8, 7], one f32
+#: step per group of `GROUP` values of a (token, layer) row.
+DIM4, GROUP = 8, 4
+CODES = (torch.arange(TOKENS * LAYERS * DIM4) % 16 - 8).to(torch.int8).reshape(TOKENS, LAYERS, DIM4)
+STEPS = (torch.arange(1, TOKENS * LAYERS * 2 + 1, dtype=torch.float32) / 8).reshape(
+    TOKENS, LAYERS, DIM4 // GROUP
+)
+
+
+def _packed_codes() -> torch.Tensor:
+    """Element `2i` in the low nibble, stored `q + 8` (written by hand, not through the reader's
+    `unpack_int4`)."""
+    unsigned = (CODES.to(torch.int16) + 8).reshape(TOKENS, -1)
+    return (unsigned[:, 0::2] | (unsigned[:, 1::2] << 4)).to(torch.uint8)
+
+
+def _grouped_index() -> dict:
+    return {
+        "schema": 4,
+        "storage": "i4",
+        "tokens": TOKENS,
+        "layers": LAYERS,
+        "dim": DIM4,
+        "embedScale": 4,
+        "groupSize": GROUP,
+        "values": {
+            "rowBytes": LAYERS * DIM4 // 2,
+            "blocks": [
+                {"asset": "ple.values.0", "start": 0, "stop": 5},
+                {"asset": "ple.values.1", "start": 5, "stop": TOKENS},
+            ],
+        },
+        "scales": {
+            "rowBytes": LAYERS * (DIM4 // GROUP) * 4,
+            "blocks": [{"asset": "ple.scales.0", "start": 0, "stop": TOKENS}],
+        },
+    }
+
+
+def _grouped_reader():
+    packed = _packed_codes()
+    assets = {
+        "ple.values.0": packed[0:5].numpy().tobytes(),
+        "ple.values.1": packed[5:TOKENS].numpy().tobytes(),
+        "ple.scales.0": STEPS.numpy().tobytes(),
+    }
+    return lambda name, offset, length: assets[name][offset : offset + length]
+
+
+#: Synthetic bf16 PLE (schema 5 — the regular line's original weights): no scales.
+FLOATS = (torch.arange(TOKENS * LAYERS * DIM4, dtype=torch.float32) - 60).div(3).to(torch.bfloat16)
+FLOATS = FLOATS.reshape(TOKENS, LAYERS * DIM4)
+
+
+def _float_index() -> dict:
+    return {
+        "schema": 5,
+        "storage": "bf16",
+        "tokens": TOKENS,
+        "layers": LAYERS,
+        "dim": DIM4,
+        "embedScale": 4,
+        "values": {
+            "rowBytes": LAYERS * DIM4 * 2,
+            "blocks": [
+                {"asset": "ple.values.0", "start": 0, "stop": 3},
+                {"asset": "ple.values.1", "start": 3, "stop": TOKENS},
+            ],
+        },
+    }
+
+
+def _float_reader():
+    bits = FLOATS.view(torch.int16)
+    assets = {
+        "ple.values.0": bits[0:3].numpy().tobytes(),
+        "ple.values.1": bits[3:TOKENS].numpy().tobytes(),
+    }
+    return lambda name, offset, length: assets[name][offset : offset + length]
+
+
+def test_grouped_ple_applies_each_groups_step_to_its_own_values():
+    """Schema 4: each group of `groupSize` values takes its own step, across block boundaries."""
+    module = ContainerPle(_grouped_index(), _grouped_reader(), 4)
+    ids = torch.tensor([[7, 0, 5, 4, 0]])
+    grouped = CODES.float().reshape(TOKENS, LAYERS, DIM4 // GROUP, GROUP)
+    expected = (grouped * STEPS.unsqueeze(-1)).flatten(1)[ids] * 4
+
+    assert torch.equal(module(ids), expected)
+
+
+def test_grouped_ple_pins_the_nibble_order_and_the_group_of_each_value():
+    """Token 0 by hand: codes −8..7, steps 1/8, 2/8 (layer 0) and 3/8, 4/8 (layer 1), × 4. A swapped
+    nibble order or one step per layer row would change these numbers."""
+    module = ContainerPle(_grouped_index(), _grouped_reader(), 4)
+    expected = [-4.0, -3.5, -3.0, -2.5, -4.0, -3.0, -2.0, -1.0]
+    expected += [0.0, 1.5, 3.0, 4.5, 8.0, 10.0, 12.0, 14.0]
+
+    assert module(torch.tensor([[0]])).flatten().tolist() == expected
+
+
+def test_float_ple_widens_the_stored_bf16_values():
+    """Schema 5: the stored bf16 values themselves (widened to f32), × embedScale — no scales."""
+    module = ContainerPle(_float_index(), _float_reader(), 4)
+    ids = torch.tensor([[7, 2, 3, 2]])
+
+    assert torch.equal(module(ids), FLOATS.float()[ids] * 4)
+
+
+@pytest.mark.parametrize(
+    ("index", "message"),
+    [
+        ({**_grouped_index(), "schema": 6}, "schema is 6"),
+        (
+            {k: v for k, v in _grouped_index().items() if k != "groupSize"},
+            r"missing \['groupSize'\]",
+        ),
+        ({**_ple_index(), "groupSize": DIM}, r"unknown \['groupSize'\]"),
+        ({k: v for k, v in _grouped_index().items() if k != "scales"}, r"missing \['scales'\]"),
+        (
+            {**_float_index(), "scales": _grouped_index()["scales"]},
+            r"unknown \['scales'\]",
+        ),
+        ({**_grouped_index(), "storage": "i2"}, "i4 only"),
+        ({**_float_index(), "storage": "i8"}, "bf16 only"),
+        ({**_grouped_index(), "groupSize": 3}, "does not divide"),
+        (
+            {**_grouped_index(), "scales": {**_grouped_index()["scales"], "rowBytes": LAYERS * 4}},
+            r"scales\.rowBytes",
+        ),
+        (
+            {**_float_index(), "values": {**_float_index()["values"], "rowBytes": LAYERS * DIM4}},
+            r"values\.rowBytes",
+        ),
+    ],
+    ids=[
+        "unknown-schema",
+        "schema-4-without-group",
+        "schema-3-with-group",
+        "schema-4-without-scales",
+        "schema-5-with-scales",
+        "schema-4-other-storage",
+        "schema-5-other-storage",
+        "group-not-dividing-dim",
+        "scale-row-of-another-schema",
+        "float-row-of-another-width",
+    ],
+)
+def test_a_ple_index_the_declaration_does_not_determine_is_refused(index, message):
+    with pytest.raises(ValueError, match=message):
+        ContainerPle(index, _grouped_reader(), 4)
+
+
 def test_qat_reference_rejects_mismatched_activation_rounding():
     graph = {
         "nodes": [

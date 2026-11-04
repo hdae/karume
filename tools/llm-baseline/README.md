@@ -1,7 +1,7 @@
 # PyTorch LLM quality baseline
 
-Small, reproducible reference scores for Gemma 4 E2B and Gemma 4 mobile QAT E2B/E4B — the local
-distributions in container form listed in the profile table of `data.py`. This tool runs the
+Small, reproducible reference scores for Gemma 4 E2B, Gemma 4 mobile QAT E2B/E4B and Gemma 4 q4_0
+QAT E2B/E4B — the local distributions in container form listed in the profile table of `data.py`. This tool runs the
 installed **Transformers 5.14.1** model implementations on **CPU with float32 arithmetic and eager
 attention**. It is a quality reference, not a speed benchmark. It does not use Karume's GPU executor
 to produce its reference scores.
@@ -26,12 +26,20 @@ records; rerun into a different directory. Model checkpoints and converted asset
 without modifying or requantizing them. The local profile paths are explicit in `data.py`.
 
 For `gemma4-e2b`, run both `--weights source` and `--weights stored` into separate directories.
-`source` loads the original checkpoint values; `stored` restores the exact integer payloads and
-scales from the distribution's containers. There is no new calibration step. Normal Gemma's PLE
-table is read by row to avoid allocating a second large floating-point embedding table.
-Since 2026-11-04 the regular distribution ships `bf16` alone (PLE index schema 5, which this tool
-does not read), so the profile's `i4` is gone and `--weights stored` fails loudly for `gemma4-e2b`;
-`--weights source` still scores the original checkpoint.
+`source` loads the original checkpoint values; `stored` restores the exact stored values from the
+distribution's containers — since 2026-11-04 the regular line ships the `bf16` preset alone, the
+checkpoint's own bf16 values (PLE index schema 5). There is no new calibration step. Normal Gemma's
+PLE table is read by row to avoid allocating a second large floating-point embedding table.
+
+For `gemma4-qat-q4_0-e2b` and `gemma4-qat-q4_0-e4b` (`models/karume-gemma4-qat`, preset `i4`), run
+both as well. `source` loads Google's `google/gemma-4-E{2,4}B-it-qat-q4_0-unquantized` checkpoint;
+`stored` restores the 4-bit grid the export imported from it (codes in −8..7 and one f32 step per
+group of 32 values — the linears, the tied embedding and the PLE table, PLE index schema 4). The
+two are not bit-identical: the export refits each group's step within 2^-7 of the group's largest
+magnitude. Both checkpoints come from the local Hugging Face cache at the commits
+`gemma4.sources` pins; the tokenizer is the regular `-it` one the line ships, not the QAT
+repository's (which predates Google's glitch-token fixes). Adding a profile adds a tokenizer to
+the suite, so prepare a new suite before scoring the new profiles.
 
 For `gemma4-qat-e2b` and `gemma4-qat-e4b`, use `--weights stored` once: the official checkpoint
 already contains the fixed mixed INT2/INT4/INT8 weights. The tool verifies the stored integers,

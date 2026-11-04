@@ -21,7 +21,13 @@ from transformers import (
 
 from karume.container import ReadContainer, codec_entry
 from karume.emit import unpack_int4
-from karume.ple import PLE_INDEX_ASSET, PLE_INDEX_SCHEMA
+from karume.ple import (
+    PLE_FLOAT_INDEX_SCHEMA,
+    PLE_GROUPED_INDEX_SCHEMA,
+    PLE_INDEX_ASSET,
+    PLE_INDEX_SCHEMA,
+    ple_row_bytes,
+)
 from karume.quantize import dequantize_int4
 from karume.verify import InitializerSupply, SupplyBlock, verify_container
 
@@ -193,7 +199,7 @@ class StoredWeights:
         return value.float()
 
     def ple_index(self) -> dict:
-        """PLE index (asset `ple_index` — schema 3)."""
+        """PLE index (asset `ple_index` — schema 3, 4 or 5; {@link ContainerPle} checks it)."""
         return json.loads(self.assets.document(PLE_INDEX_ASSET))
 
     def ple(self, embed_scale: float) -> ContainerPle:
@@ -238,36 +244,83 @@ class DiskPle(nn.Module):
         )
 
 
+#: Index schema → the PLE storage this CPU reference restores, and the index keys that schema spells
+#: (the reader's source of truth is `packages/models/src/gemma/ple-index.ts`, the writer's
+#: `karume.ple`). Schema 3 = one f32 scale per (token, layer) row, schema 4 = one per group of
+#: `groupSize` values (the q4_0 QAT line's 4-bit grid), schema 5 = a bf16 table with no scales (the
+#: regular line's original weights).
+#:
+#: MUST: schema 3 restores `i8` only. The mobile QAT line's PLE (schema 3, i4 / i2) **is the
+#: official fixed quantization itself**, and the check this tool applies to it is raw-byte equality
+#: ({@link assert_qat_stored}), not restoration — a second expansion here would split what to
+#: compare against in two. Schema 4 restores `i4` alone, the one storage a shipped line writes
+#: there.
+_PLE_SHAPE_KEYS = frozenset(
+    {"schema", "storage", "tokens", "layers", "dim", "embedScale", "values"}
+)
+PLE_SCHEMAS: dict[int, tuple[str, frozenset[str]]] = {
+    PLE_INDEX_SCHEMA: ("i8", _PLE_SHAPE_KEYS | {"scales"}),
+    PLE_GROUPED_INDEX_SCHEMA: ("i4", _PLE_SHAPE_KEYS | {"scales", "groupSize"}),
+    PLE_FLOAT_INDEX_SCHEMA: ("bf16", _PLE_SHAPE_KEYS),
+}
+
+
 class ContainerPle(nn.Module):
-    """Looks up PLE rows from the container's assets (index schema 3 + `ple.values.<k>` /
-    `ple.scales.<k>`).
+    """Looks up PLE rows from the container's assets (`ple_index` of schema 3 / 4 / 5 +
+    `ple.values.<k>`, and `ple.scales.<k>` for a quantized table).
 
     `read_row(asset name, offset, length)` is the range-read access, so that a caller without a
     container (the tests) can substitute it together with a synthetic index.
 
-    MUST: accept only `i8` storage. QAT's PLE (i4 / i2) **is the official fixed quantization
-    itself**, and the check this tool applies is raw-byte equality ({@link assert_qat_stored}), not
-    restoration — holding a second expansion here would split what to compare against in two.
+    MUST: a row is restored exactly as the host gather of `packages/models/src/gemma/ple.ts` builds
+    it, with no requantization: a quantized value is `(q × scale) × embedScale` in f32 (the scale of
+    its group — schema 3's group is the whole layer row), a bf16 value is its bits widened to f32,
+    then `× embedScale`. The i4 nibble order is `karume.emit.unpack_int4`'s (element `2i` in the
+    low nibble, stored `q + 8`).
+
+    MUST: unknown schemas, a storage the schema does not restore ({@link PLE_SCHEMAS}), keys the
+    schema does not spell (a `groupSize` in schema 3, `scales` in schema 5) or a missing one, and a
+    `rowBytes` the declaration does not determine all fail loudly — each would otherwise read
+    another token's row, or another group's step, with the shape still matching.
     """
 
     def __init__(self, index: dict, read_row: Callable[[str, int, int], bytes], embed_scale: float):
         super().__init__()
-        if index.get("schema") != PLE_INDEX_SCHEMA:
+        schema = index.get("schema")
+        if schema not in PLE_SCHEMAS:
             raise ValueError(
-                f"PLE index schema is {index.get('schema')} (expected {PLE_INDEX_SCHEMA})"
+                f"PLE index schema is {schema} (expected one of {sorted(PLE_SCHEMAS)})"
+            )
+        storage, keys = PLE_SCHEMAS[schema]
+        if set(index) != keys:
+            raise ValueError(
+                f"PLE index schema {schema}: keys missing {sorted(keys - set(index))} /"
+                f" unknown {sorted(set(index) - keys)}"
+            )
+        if index["storage"] != storage:
+            raise ValueError(
+                f"PLE storage '{index['storage']}' of schema {schema} is not restored by the CPU"
+                f" reference ({storage} only)"
             )
         if index["embedScale"] != embed_scale:
             raise ValueError("embedScale of the regular PLE differs from the official one")
-        if index["storage"] != "i8":
-            storage = index["storage"]
-            raise ValueError(
-                f"PLE storage '{storage}' is not restored by the CPU reference (i8 only)"
-            )
+        self.layers = index["layers"]
+        self.dim = index["dim"]
+        # Schema 3's group is the whole layer row (unused for bf16, which has no scales).
+        self.group_size = index.get("groupSize", self.dim)
+        # The writer's row arithmetic (`karume.ple.ple_row_bytes`) is the declaration's: it also
+        # refuses a group that does not divide `dim`.
+        expected = ple_row_bytes(storage, self.layers, self.dim, index.get("groupSize"))
+        for kind, stride in expected.items():
+            if index[kind]["rowBytes"] != stride:
+                raise ValueError(
+                    f"PLE {kind}.rowBytes {index[kind]['rowBytes']} differs from {stride},"
+                    " which the declaration determines"
+                )
         self.index = index
         self.read_row = read_row
         self.scale = embed_scale
-        self.layers = index["layers"]
-        self.dim = index["dim"]
+        self.storage = storage
 
     def _row(self, kind: str, token: int) -> bytes:
         entry = self.index[kind]
@@ -277,20 +330,28 @@ class ContainerPle(nn.Module):
                 return self.read_row(block["asset"], (token - block["start"]) * stride, stride)
         raise ValueError(f"token {token} is not covered by any PLE {kind} block")
 
+    def _restore(self, token: int) -> torch.Tensor:
+        """One token's row `[layers × dim]` in f32 (the class docstring's order)."""
+        raw = bytearray(self._row("values", token))
+        if self.storage == "bf16":
+            return torch.frombuffer(raw, dtype=torch.bfloat16).float() * self.scale
+        if self.storage == "i4":
+            quant = unpack_int4(torch.frombuffer(raw, dtype=torch.uint8), [self.layers, self.dim])
+        else:
+            quant = torch.frombuffer(raw, dtype=torch.int8).reshape(self.layers, self.dim)
+        groups = self.dim // self.group_size
+        scale = torch.frombuffer(bytearray(self._row("scales", token)), dtype=torch.float32)
+        grouped = quant.float().reshape(self.layers, groups, self.group_size)
+        values = grouped * scale.reshape(self.layers, groups, 1)
+        return values.flatten() * self.scale
+
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
         if ids.device.type != "cpu":
             raise ValueError("ContainerPle is for CPU evaluation only")
         rows = {}
         for token in ids.flatten().tolist():
-            if token in rows:
-                continue
-            quant = torch.frombuffer(
-                bytearray(self._row("values", token)), dtype=torch.int8
-            ).reshape(self.layers, self.dim)
-            scale = torch.frombuffer(
-                bytearray(self._row("scales", token)), dtype=torch.float32
-            ).reshape(self.layers)
-            rows[token] = (quant.float() * scale.unsqueeze(-1)).flatten() * self.scale
+            if token not in rows:
+                rows[token] = self._restore(token)
         return torch.stack([rows[token] for token in ids.flatten().tolist()]).reshape(
             *ids.shape, -1
         )

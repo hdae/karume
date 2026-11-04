@@ -17,6 +17,7 @@ from weights import StoredWeights
 
 from karume.container import Encoding, Provenance, write_model_container
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
+from karume.ple import ple_assets
 
 #: Graph name the container declares = the weights key of the manifest (container-v1 §2.1).
 GRAPH = "model"
@@ -44,6 +45,7 @@ def _write(
     storage: IrStorage,
     encoding: Encoding,
     tensors: dict[str, bytes],
+    assets: dict | None = None,
 ) -> StoredWeights:
     parts = write_model_container(
         tmp_path / "model.krm",
@@ -52,6 +54,7 @@ def _write(
         {key: encoding},
         graph_name=GRAPH,
         provenance=Provenance(license="test"),
+        assets=assets or {},
         part_bytes=4096,
     )
     return StoredWeights(parts, GRAPH)
@@ -112,3 +115,50 @@ def test_a_name_that_has_no_body_in_the_container_fails_loudly(tmp_path):
         assert "model.missing" in str(error)
     else:
         raise AssertionError("an undeclared initializer was readable")
+
+
+def _with_ple(tmp_path: Path, **ple) -> StoredWeights:
+    """A container whose PLE assets the writer cut (`karume.ple.ple_assets` — the export's path),
+    32-byte blocks so that every table spans several blocks."""
+    return _write(
+        tmp_path,
+        "model.weight",
+        [2, 4],
+        IrStorage(dtype="f32"),
+        Encoding("f32"),
+        {"model.weight": struct.pack("<8f", *range(8))},
+        ple_assets(tokens=6, layers=2, dim=8, embed_scale=4.0, block_bytes=32, **ple),
+    )
+
+
+def test_a_grouped_ple_asset_written_by_the_export_path_reads_back_as_its_grid(tmp_path):
+    """Schema 4 (q4_0 grid): the rows read by range from the container are `q × step × 4`."""
+    codes = (torch.arange(6 * 2 * 8) % 16 - 8).reshape(6, 2, 8)
+    unsigned = (codes + 8).reshape(6, -1)
+    values = (unsigned[:, 0::2] | (unsigned[:, 1::2] << 4)).to(torch.uint8).numpy().tobytes()
+    steps = (torch.arange(1, 6 * 2 * 2 + 1, dtype=torch.float32) / 8).reshape(6, 2, 2)
+    scales = steps.numpy().tobytes()
+    stored = _with_ple(
+        tmp_path,
+        storage="i4",
+        group_size=4,
+        read_values=lambda begin, end: values[begin:end],
+        read_scales=lambda begin, end: scales[begin:end],
+    )
+
+    assert stored.ple_index()["schema"] == 4
+    ids = torch.tensor([[5, 0, 3]])
+    expected = (codes.float().reshape(6, 2, 2, 4) * steps.unsqueeze(-1)).flatten(1)[ids] * 4
+    assert torch.equal(stored.ple(4.0)(ids), expected)
+
+
+def test_a_float_ple_asset_written_by_the_export_path_reads_back_as_its_bf16_values(tmp_path):
+    """Schema 5 (the regular line's bf16 table): the stored values themselves, × 4."""
+    table = (torch.arange(6 * 16, dtype=torch.float32) - 40).div(7).to(torch.bfloat16)
+    table = table.reshape(6, 16)
+    values = table.view(torch.int16).numpy().tobytes()
+    stored = _with_ple(tmp_path, storage="bf16", read_values=lambda begin, end: values[begin:end])
+
+    assert stored.ple_index()["schema"] == 5
+    ids = torch.tensor([[5, 0, 3, 0]])
+    assert torch.equal(stored.ple(4.0)(ids), table.float()[ids] * 4)

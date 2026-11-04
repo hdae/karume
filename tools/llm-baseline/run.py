@@ -81,7 +81,7 @@ def main() -> None:
     data = suite["models"][args.model]
     profile = profiles(args.root)[args.model]
     checkpoint = profile["checkpoint"]
-    tokenizer = fingerprint(checkpoint / "tokenizer.json")
+    tokenizer = fingerprint(profile["tokenizer"] / "tokenizer.json")
     if tokenizer["sha256"] != data["tokenizerSha256"]:
         raise ValueError("the pinned tokenizer does not match the current model")
     if profile["family"] == "gemma4-qat" and args.weights != "stored":
