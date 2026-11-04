@@ -90,8 +90,10 @@ measurements in `docs/research/`.
   published): Google's q4_0 quantization-aware-trained E2B / E4B / 12B on their own int4 grid
   (group 32 — the linears, the tied embedding and, for E2B / E4B, the PLE in index schema 4), each
   with its QAT multi-token-prediction drafter on the same grid, so `speculative: {}` works for all
-  three models. Default preset `i4`; E2B / E4B also have `i4-gemvpar` / `i4-fast` (the regular
-  line's parallel GEMV, RMS fusion and fused attention over the same weights). The E2B / E4B
+  three models. Default preset `i4`; E2B / E4B also have `i4-gemvpar` / `i4-fast` (parallel GEMV,
+  RMS fusion and fused attention over the same weights — the session flags of the regular line's
+  former int4 presets). This is the int4 line of Gemma 4 E2B / E4B for `gemma.Pipeline` now that
+  the regular line ships `bf16` alone (Breaking, below). The E2B / E4B
   tokenizers are the regular `-it` models' (with the 2026-11-03 fixes below).
 
 ### Changed
@@ -120,11 +122,20 @@ measurements in `docs/research/`.
   `KARUME_SOURCES` has no mobile entry until the renamed repository is published; the name
   `karume-gemma4-qat` now means the q4_0 QAT line above (ADR 0097 addendum 10).
 - The regular `karume-gemma4` distribution ships E2B and E4B only (12B moved to the
-  q4_0 QAT line) and gains the preset `bf16` — the checkpoint's original bf16 weights, the
-  per-layer embeddings included (PLE index schema 5) — as the default of both models
-  (ADR 0128 addendum 2026-11-04). `i4` / `i4-gemvpar` / `i4-fast` stay, chosen by name. On an RTX
-  3080 Ti `bf16` decoded about 3–4× slower than `i4-fast` (E2B 24.1 vs 6.5 ms per token, E4B 42.3
-  vs 13.0) and peaked at about 4.5 GiB (E2B) / 9.2 GiB (E4B) of GPU memory.
+  q4_0 QAT line), each with one `model` container (`model/model.bf16.krm`) and one preset,
+  `bf16` — the checkpoint's original bf16 weights, the per-layer embeddings included (PLE index
+  schema 5) — which is the default (ADR 0128 addenda 2026-11-04). **The presets `i4` /
+  `i4-gemvpar` / `i4-fast` are removed**: selecting one by name fails with the manifest's list of
+  presets. Against the original model they lost clearly more than the q4_0 QAT line's `i4` (KL on
+  the long golden case 0.71 / 0.62 for E2B / E4B, against 0.26 / 0.28); for int4 weights use
+  `karume-gemma4-qat` (Added, above). On an RTX 3080 Ti `bf16` decoded about 3–4× slower than the
+  removed `i4-fast` (E2B 24.1 vs 6.5 ms per token, E4B 42.3 vs 13.0) and peaked at about 4.5 GiB
+  (E2B) / 9.2 GiB (E4B) of GPU memory. The E2B MTP drafter is unchanged (int8, the same container
+  bytes); its graph now declares the shared table it borrows as bf16, the target's storage.
+- The Hugging Face repository `hdae/karume-gemma4-qat`, which holds the mobile QAT line that 0.15.1
+  published, moves to `hdae/karume-gemma4-qat-mobile`, and the q4_0 QAT line is published under
+  the freed name `hdae/karume-gemma4-qat`. The revision that 0.15.1's `gemma4Qat.SOURCES["gemma4-qat"]`
+  pins is then not found under the name 0.15.1 reads, so **0.15.1 is yanked**; use this release.
 
 ## [0.15.1] - 2026-11-01
 

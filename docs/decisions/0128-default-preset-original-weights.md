@@ -57,8 +57,8 @@ the addendum):
 | wan2.1 t2v-1.3b                                            | `f16` `f16+dit8` `f16+dit8-a8-attn8-s16`                                                    | `f16+dit8-a8-attn8-s16` | DiT F32                                                                             | none; `f16` is the widest (its text encoder is the cross-referenced umT5 i8)                                                                 |
 | wan2.2 ti2v-5b                                             | `f16+dit8` `f16+dit8-a8-attn8-s16`                                                          | `f16+dit8-a8-attn8-s16` | DiT F32                                                                             | none; ADR 0121 decision 2 ships no f16 preset (the f16 DiT is 9.31 GiB)                                                                      |
 | umt5-xxl                                                   | `i8`                                                                                        | `i8`                    | F32 (about 22.7 GB, `wan/text_embeds.py`)                                           | none                                                                                                                                         |
-| gemma4 e2b / e4b (`karume-gemma4`)                         | `i4` `i4-gemvpar` `i4-fast` `bf16`                                                          | `bf16`                  | BF16                                                                                | `bf16` (since 2026-11-04 — before it the presets were the three `i4` ones, default e2b `i4-fast` / e4b `i4`; see the addendum of 2026-11-04) |
-| gemma4 q4_0 QAT e2b / e4b / 12b (`karume-gemma4-qat`)      | `i4`                                                                                        | `i4`                    | BF16 on the checkpoints' own 4-bit grid (quantization-aware)                        | none: `i4` stores the grid the BF16 values round from (addenda of 2026-11-03 and 2026-11-04)                                                 |
+| gemma4 e2b / e4b (`karume-gemma4`)                         | `bf16`                                                                                      | `bf16`                  | BF16                                                                                | `bf16` (since 2026-11-04 — before it the presets were the three `i4` ones, default e2b `i4-fast` / e4b `i4`, which were removed the same day; see the two addenda of 2026-11-04) |
+| gemma4 q4_0 QAT e2b / e4b / 12b (`karume-gemma4-qat`)      | `i4` (e2b / e4b also `i4-gemvpar` `i4-fast`)                                                | `i4`                    | BF16 on the checkpoints' own 4-bit grid (quantization-aware)                        | none: `i4` stores the grid the BF16 values round from (addenda of 2026-11-03 and 2026-11-04)                                                 |
 | gemma4-qat (mobile — `karume-gemma4-qat-mobile`) e2b / e4b | `i4` `i4-gemvpar` `i4-fast`                                                                 | `i4-fast`               | mixed F32 / BF16 / I8 / U8 (the upstream is itself a quantization-aware checkpoint) | `i4`: the upstream's own fixed integer weights, carried without re-quantization (ADR 0097)                                                   |
 | birefnet-hr 1024 / 2048                                    | `f16`                                                                                       | `f16`                   | F16                                                                                 | `f16`                                                                                                                                        |
 | lucida 1024 / 2048                                         | `f32` `f16`                                                                                 | `f32`                   | F32                                                                                 | `f32`                                                                                                                                        |
@@ -176,7 +176,7 @@ The maintainer withdrew the draft on 2026-10-17 on these grounds:
    | sbv2-jvnv                                          | —                       | skipped (f32 1.32 GB, 2026-08); may be added, no cap decides it        |
    | wan2.1 / wan2.2                                    | —                       | skipped (DiT f32 about 5.6 / 20 GB; the text encoder is umT5 i8)       |
    | umt5-xxl                                           | —                       | skipped (f32 about 22.7 GB)                                            |
-   | gemma4 e2b / e4b (`karume-gemma4`)                 | `bf16`                  | shipped in the local mirror 2026-11-04 (the PLE too — PLE index schema 5, ADR 0085 addendum 2026-11-04) and the default by the maintainer's ruling (addendum 2026-11-04) |
+   | gemma4 e2b / e4b (`karume-gemma4`)                 | `bf16`                  | shipped in the local mirror 2026-11-04 (the PLE too — PLE index schema 5, ADR 0085 addendum 2026-11-04) and the default by the maintainer's ruling (addendum 2026-11-04); the only preset since the second addendum of 2026-11-04 |
    | gemma4 q4_0 QAT e2b / e4b / 12b (`karume-gemma4-qat`) | —                    | not shipped: the BF16 values are the BF16 rounding of the checkpoints' 4-bit grid, which `i4` stores (addendum 2026-11-03 item 3; addendum 2026-11-04) |
    | moss-image (DiT, VAE, Qwen3.5 text encoder)        | —                       | not shipped (2026-11-01, the local distribution `karume-moss-image`): the DiT is bf16 upstream and its bf16 export has not been attempted; the Qwen3.5 text encoder's bf16 export needs a fixed-BF16 entry in the writer first (its F32 set alone is 29.6 GiB — ADR [0137](0137-qwen3_5-text-encoder.md) decision 5); the VAE ships its upstream f32 values. The presets ship the i8 DiT and encoder (ADR [0138](0138-moss-image-dit-vae.md) addendum of 2026-11-01) |
 
@@ -359,7 +359,8 @@ there unchanged.)
    not apply (no activation quantization), and C3 exempts a model with one preset. `i4-gemvpar` and
    `i4-fast` follow once the GEMV rows of the 12B shapes are measured (ADR 0098: only measured
    shapes are eligible). The human quality review of ADR 0110 decision 8 is still the gate before
-   publication.
+   publication. (It passed on 2026-11-04 — ADR [0110](0110-practical-tier-numerics-contract.md)
+   addendum of that date.)
 2. **The weights are Google's quantization-aware-trained checkpoint**
    (`google/gemma-4-12B-it-qat-q4_0-unquantized`, a QAT fine-tune of `google/gemma-4-12B-it`), and
    the `i4` preset stores **its own 4-bit grid** — per group of 32 along the row, the integer codes
@@ -391,12 +392,15 @@ there unchanged.)
 4. **Open — the regular E2B / E4B `i4`.** It rounds `gemma-4-E2B-it` / `gemma-4-E4B-it` to the
    nearest i4 and was never measured with the KL above. The maintainer's ruling (2026-11-03): measure
    it against the grid import of the matching q4_0 QAT checkpoint; if it loses much, stop
-   publishing its `i4` preset, or the regular model (backlog).
+   publishing its `i4` preset, or the regular model (backlog). (Closed 2026-11-04: measured, and the
+   regular int4 presets removed — the second addendum of 2026-11-04.)
 
 ## Addendum (2026-11-04) — gemma4 regular E2B / E4B default to the original weights, `bf16`
 
 The maintainer's ruling of 2026-11-04 settles the Gemma 4 distributions and the default of the regular
-line. Where the body or an earlier addendum differs, this addendum wins for gemma4.
+line. Where the body or an earlier addendum differs, this addendum wins for gemma4. (The regular
+line's int4 presets that items 1, 2 and 4 still list were removed later the same day — the second
+addendum of 2026-11-04.)
 
 1. **Three distributions.**
 
@@ -450,3 +454,85 @@ line. Where the body or an earlier addendum differs, this addendum wins for gemm
 6. **Not changed:** the hub's resolution (`options.quant ?? entry.defaultQuant`), decisions 2, 3, 5
    to 7, and every other family's default. The published `karume-gemma4` revision (`gemma.SOURCES`)
    still serves the previous manifest until the next release re-uploads the repository.
+
+## Addendum (2026-11-04, second) — gemma4 regular E2B / E4B: the int4 presets are removed
+
+The maintainer's ruling of 2026-11-04, taken on the measurement that item 4 of the 2026-11-03 addendum
+asked for: the regular E2B / E4B no longer ship `i4`, `i4-gemvpar` or `i4-fast`. Where the first
+addendum of 2026-11-04 differs, this addendum wins.
+
+1. **What the three distributions ship** (the release after 0.15.1, 0.16.0):
+
+   | Distribution               | Models                                         | Contract       | Presets (★ = `defaultQuant`)                       | `model` container and PLE                          |
+   | -------------------------- | ---------------------------------------------- | -------------- | -------------------------------------------------- | -------------------------------------------------- |
+   | `karume-gemma4`            | E2B (with its int8 MTP drafter), E4B           | `gemma4/1`     | `bf16`★                                            | `model/model.bf16.krm`, the only one; schema 5     |
+   | `karume-gemma4-qat`        | E2B / E4B / 12B, each with its QAT MTP drafter | `gemma4/1`     | `i4`★; E2B / E4B also `i4-gemvpar` / `i4-fast`     | the q4_0 grid import; schema 4 (12B has no PLE)    |
+   | `karume-gemma4-qat-mobile` | E2B / E4B                                      | `gemma4-qat/1` | `i4` / `i4-gemvpar` / `i4-fast`★                   | the mobile checkpoints' fixed integers; schema 3   |
+
+   The E2B drafter's container bytes are unchanged. It now declares the shared table it borrows as
+   bf16, the lender's storage, and its goldens were taken again against the unrounded bf16 target
+   (`tools/export-recipes/gemma4/README.md`: tokens per cycle 1.595 / 2.090 / 2.250 on `short-en` /
+   `readme-recipes` / `readme-exporter`). The q4_0 QAT E2B / E4B keep the session flags of ADR 0104
+   under the same three names, so the int4 kernel paths stay shipped and tested there.
+2. **The measurement.** KL divergence of the next-token distribution and top-1 agreement over every
+   row of the product's golden cases (`context-en` 598 rows, `capital-en` 6, `capital-ja` 10), with
+   the export's product wrapper in torch (F32 forward, the PLE looked up by the 35-table path),
+   2026-11-04. Raw data: `outputs/diag/gemma4-lines-2026-11-04/regular-i4-vs-qat/` (the script
+   `quality_regular_vs_qat.py` and one log per model; local, untracked). The five forms:
+   - R0: `gemma-4-E{2,4}B-it` unquantized — the original model;
+   - R1: R0 rounded as the regular `i4` shipped it (linears i4 g32 round-to-nearest, embedding and
+     PLE i8 per row);
+   - Q0: the q4_0 QAT checkpoint unquantized (its BF16 values widened);
+   - Q1: Q0 rounded the same way as R1 (what ignoring the grid would cost);
+   - Q2: Q0 with the grid import — the shipped `karume-gemma4-qat` `i4`.
+
+   KL mean / top-1 agreement:
+
+   | Model | Pair  | What it shows                      | `context-en` (598 rows) | `capital-en` (6) | `capital-ja` (10) |
+   | ----- | ----- | ---------------------------------- | ----------------------- | ---------------- | ----------------- |
+   | E2B   | R0‖R1 | regular `i4` vs the original       | 0.711 / 0.652           | 0.275 / 0.833    | 0.365 / 0.800     |
+   | E2B   | R0‖Q2 | q4_0 `i4` vs the original          | 0.264 / 0.796           | 0.777 / 0.833    | 1.235 / 0.600     |
+   | E2B   | R0‖Q0 | the QAT fine-tune's drift          | 0.265 / 0.794           | 0.774 / 0.833    | 1.239 / 0.600     |
+   | E2B   | Q0‖Q2 | the grid import's own cost         | 3.2e-5 / 0.993          | 4.8e-5 / 1.000   | 6.9e-4 / 1.000    |
+   | E2B   | Q0‖Q1 | round-to-nearest on the QAT values | 0.081 / 0.883           | 0.105 / 1.000    | 1.155 / 0.700     |
+   | E4B   | R0‖R1 | regular `i4` vs the original       | 0.622 / 0.667           | 0.618 / 0.833    | 0.598 / 0.600     |
+   | E4B   | R0‖Q2 | q4_0 `i4` vs the original          | 0.281 / 0.779           | 0.395 / 0.833    | 0.274 / 0.800     |
+   | E4B   | R0‖Q0 | the QAT fine-tune's drift          | 0.282 / 0.781           | 0.400 / 0.833    | 0.276 / 0.800     |
+   | E4B   | Q0‖Q2 | the grid import's own cost         | 2.4e-5 / 0.998          | 7.4e-5 / 1.000   | 2.3e-5 / 1.000    |
+   | E4B   | Q0‖Q1 | round-to-nearest on the QAT values | 0.065 / 0.890           | 0.101 / 1.000    | 0.082 / 0.800     |
+
+3. **Reading.** On `context-en`, the long case and 598 of the 614 rows, the regular `i4` is 2.7 times
+   (E2B) and 2.2 times (E4B) further from the original model than the q4_0 `i4`. It agrees on the top
+   token in 65 % / 67 % of the rows, against 80 % / 78 %. Almost all of the q4_0 `i4`'s distance is
+   the QAT fine-tune itself (R0‖Q0 ≈ R0‖Q2). The grid import adds about 3e-5 (E2B) and 2e-5 (E4B);
+   round-to-nearest on the same QAT values would add 0.08 / 0.07.
+   **The short cases reverse on E2B.** On `capital-en` / `capital-ja` the regular `i4` is closer to
+   the original model (0.27 / 0.36) than the q4_0 `i4` (0.78 / 1.23). There the QAT drift dominates
+   (R0‖Q0 0.77 / 1.24). E4B does not reverse. These cases have 6 and 10 rows. The KL measures the
+   distance from `gemma-4-E{2,4}B-it`, not the output quality as such; the q4_0 `i4` presets passed
+   the human quality review on 2026-11-04 (ADR [0110](0110-practical-tier-numerics-contract.md)
+   addendum of that date).
+4. **The ruling.** The regular int4 presets are removed, the E2B short-case reversal
+   notwithstanding; the int4 paths stay covered by the q4_0 QAT line. In decision 1's terms: the
+   candidates were `bf16` and the three int4 presets; the measurements are item 2 here and item 4 of
+   the first addendum of 2026-11-04; `bf16` stays the default. Item 4 of the 2026-11-03 addendum is
+   closed.
+5. **Consequences.**
+   - Selecting `i4`, `i4-gemvpar` or `i4-fast` on `karume-gemma4` fails as an unknown preset after
+     the release (a breaking change). An int4 Gemma 4 E2B / E4B for `gemma.Pipeline` is
+     `karume-gemma4-qat`. The regular line keeps only the cost of `bf16` (item 4 of the first
+     addendum: about 3.2 to 3.7 times slower per token than the removed `i4-fast` on the RTX 3080 Ti,
+     2.2 to 2.4 times the VRAM).
+   - Publication happens in one release, 0.16.0. `karume-gemma4` is re-uploaded without the int4
+     parts. The HF repository `hdae/karume-gemma4-qat`, which 0.15.1's mobile pin reads, moves to
+     `hdae/karume-gemma4-qat-mobile`; the q4_0 QAT line is uploaded under the freed name; 0.15.1 is
+     yanked. The `SOURCES` pins move in that release (release runbook). Until then the published
+     `karume-gemma4` revision serves the old manifest, with `i4-fast` as the E2B default.
+   - Tests: the generic generation tests run on the bf16 E2B. The int4 kernel tests (speculative
+     decoding, reduce parity, quant selection, the GPU-resident PLE, the census) run on the q4_0
+     E2B. The census rows of pipeline `gemma4` were derived again from the q4_0 mirror: E2B 276 / 1
+     and E4B 343 / 1 (variant / reference linears), because the q4_0 output head is int4 and has no
+     parallel-GEMV row.
+   - Decision 4's table and the Context table carry the change.
+6. **Not changed:** the hub's resolution, decisions 2, 3, 5 to 7, every other family, the q4_0 QAT
+   and the mobile manifests.

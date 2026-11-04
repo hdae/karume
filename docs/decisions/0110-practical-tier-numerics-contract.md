@@ -207,3 +207,14 @@ of subgroup) filed in the backlog. New R / Q options are admitted only with all 
   parallel-fused, anima's attention presets) keep the "at least one / zero" checks.
 - gemma (whose `i4-gemvpar` / `i4-fast` token ids are its practical-preset detectors) and the four
   f32-only families have no same-machine A/B check yet.
+
+## Addendum (2026-11-04) — decision 8's human quality review of the q4_0 QAT Gemma 4 `i4` presets
+
+The maintainer reviewed the `i4` presets of the q4_0 QAT line (`karume-gemma4-qat`: E2B, E4B and 12B
+— Google's q4_0 quantization-aware-trained checkpoints on their own 4-bit grid, ADR
+[0128](0128-default-preset-original-weights.md) addenda of 2026-11-03 and 2026-11-04) and passed them
+on 2026-11-04. This is the quality verdict decision 8 asks for before a preset enters
+`defaultQuant`: `i4` is the default of all three models. The same day the regular line
+(`karume-gemma4`) dropped its own int4 presets and kept `bf16` alone (ADR 0128, second addendum of
+2026-11-04), so the q4_0 `i4` presets are now the int4 option that `gemma.Pipeline` reads for E2B / E4B. Publication is
+still to come; this addendum records the review only.

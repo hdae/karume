@@ -17,8 +17,8 @@ uv run --no-project --with 'pyarrow==25.0.1' python tools/llm-baseline/fetch_dat
 PYTHONPATH=tools/export-recipes tools/.venv/bin/python tools/llm-baseline/data.py \
   --data "$baseline_dir/data" --out "$baseline_dir/suite"
 PYTHONPATH=tools/export-recipes tools/.venv/bin/python tools/llm-baseline/run.py \
-  --suite "$baseline_dir/suite/suite.json" --model gemma4-e2b --weights stored \
-  --out "$baseline_dir/gemma4-e2b-stored"
+  --suite "$baseline_dir/suite/suite.json" --model gemma4-qat-e2b --weights stored \
+  --out "$baseline_dir/gemma4-qat-e2b-stored"
 ```
 
 Each output directory must be new. Interrupted or failed runs retain their logs and intermediate
@@ -29,6 +29,9 @@ For `gemma4-e2b`, run both `--weights source` and `--weights stored` into separa
 `source` loads the original checkpoint values; `stored` restores the exact integer payloads and
 scales from the distribution's containers. There is no new calibration step. Normal Gemma's PLE
 table is read by row to avoid allocating a second large floating-point embedding table.
+Since 2026-11-04 the regular distribution ships `bf16` alone (PLE index schema 5, which this tool
+does not read), so the profile's `i4` is gone and `--weights stored` fails loudly for `gemma4-e2b`;
+`--weights source` still scores the original checkpoint.
 
 For `gemma4-qat-e2b` and `gemma4-qat-e4b`, use `--weights stored` once: the official checkpoint
 already contains the fixed mixed INT2/INT4/INT8 weights. The tool verifies the stored integers,

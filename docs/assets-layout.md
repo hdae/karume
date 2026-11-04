@@ -110,7 +110,7 @@ uv run python dist.py --pipeline sbv2-fn \
     --model FN7 --model FN8 --model FN9 --model FN10 --out ../../models/karume-sbv2-fn
 uv run python dist.py --pipeline gemma4 \
     --model e2b --model e4b \
-    --out ../../models/karume-gemma4                 # the regular line, E2B / E4B (about 32 GiB with the bf16 containers)
+    --out ../../models/karume-gemma4                 # the regular line, E2B / E4B, bf16 only (about 23 GiB)
 uv run python dist.py --pipeline gemma4-qat \
     --model e2b --model e4b --model 12b              # → models/karume-gemma4-qat/ (the q4_0 QAT line; about 15 GiB)
 uv run python dist.py --pipeline gemma4-qat-mobile \
@@ -139,8 +139,9 @@ uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-d
   Apache-2.0), `LICENSE.md` / `NOTICE.md` are bundled at the repository root (decision 7 — a standing rule that applies
   regardless of publication state).
 
-- `karume-gemma4` (the regular line, E2B / E4B) folds per model **two product series** — `gemma4-<model>-product` (int4
-  linears, int8 embeddings, i8 PLE) and `gemma4-<model>-product-bf16` (the original weights, PLE index schema 5) — plus E2B's
+- `karume-gemma4` (the regular line, E2B / E4B) folds per model **one product series**, `gemma4-<model>-product-bf16`
+  (the original weights, PLE index schema 5; the container `model/model.bf16.krm` — the int4 series was dropped on
+  2026-11-04, ADR [0128](decisions/0128-default-preset-original-weights.md) second addendum of that date) — plus E2B's
   MTP drafter `gemma4-e2b-drafter` and each model's own compiled tokenizer `gemma4-<model>-tokenizer` into one repository
   (the PLE is an asset of each product container). Only the tokenizer goes into the manifest's `assets` (details in
   `tools/export-recipes/gemma4/README.md`). The upstream is Apache 2.0, so

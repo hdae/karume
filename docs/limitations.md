@@ -918,8 +918,9 @@ GEMM skeleton while being ×6 faster at M=8 and ×3 faster at M=32. 2 by-design 
   verify row 0 and the decode logits (the combinations of 3 attention variants ×
   `linearGemvReduce: "parallel"`, attention `"sequential"` / `"parallel"` × GEMV `"sequential"`, and
   RMS→add fusion (with the linear→SRQ setting)), and speculation ① / ② = equality of the generated
-  token sequences (① = the `"sequential"` setting, ② = 3 cases × 200 tokens with the default preset
-  `i4-fast` of the regular E2B distribution, gated = always. The attention at the time of the B570
+  token sequences (① = the `"sequential"` setting, ② = 3 cases × 200 tokens with `i4-fast`, the default
+  preset of the regular E2B distribution at the time, gated = always; since 2026-11-04 the regular line
+  ships `bf16` alone and ② runs on the q4_0 QAT E2B's `i4-fast`, which declares the same three flags. The attention at the time of the B570
   measurement below was `"parallel"` (the old family default), and on the same day the declaration of
   `i4-fast` moved to `"parallel-fused"` — re-measurement with the new declaration is not done). The
   Intel Arc B570 measurement of 2026-09-26 matched for every combination, with 0/200 × 3 cases
@@ -2304,7 +2305,7 @@ required total — it does not compare with the free side).
 - **The reduction form of decode attention is decided by the quant preset's declaration** (on 2026-09-26 the models code default `"parallel"` was removed
   and promoted to the manifest vocabulary — [ADR 0104 addendum](decisions/0104-gemma-fast-quant.md)): `i4-gemvpar` and QAT E2B's `i4-fast` use
   the parallel reduction `"parallel"` (KV-parallel ③PV = perf-ledger K-12 (plans with M < 16), D-parallel ①QK = K-14 (plans with M ≤ 8 —
-  decode and speculative verify; widened from M=1 on 2026-09-09)), regular gemma4's `i4-fast` uses `"parallel-fused"` (fuses the row statistics
+  decode and speculative verify; widened from M=1 on 2026-09-09)), the `i4-fast` of the gemma4 pipeline (the q4_0 QAT line's; the regular line's until 2026-11-04) uses `"parallel-fused"` (fuses the row statistics
   and PV in the same addition order — the "row-statistics/PV fusion" section below), and `i4` without a declaration and `fromAssets` use the runtime's reference path `"sequential"`.
   Prefill plans (M ≥ 16) use the tiled paths of the GEMM skeleton
   ①ₜ / ③ₜ regardless of the preset (K-13, bit-identical to the reference path — [research 2026-09-06](research/2026-09-06-state-attention-tiled-k13.md)). The band of ①′ is a difference from ①
@@ -2549,9 +2550,9 @@ It covers the measured quantized matrices and physical M=1..8, with f32 arithmet
 M>8 and shapes outside the targets use the former path, and the diagnostic keys show the range it applies to. It does not mean an across-the-board speed-up of E4B or other models.
 The table of target shapes is an allowlist, and shapes not on it silently fall back to sequential addition even when `parallel` is specified. The E4B rows (2026-09-26) are an unmeasured provisional copy of the lanes of the E2B rows of the same role, and QAT E4B's i2 lm_head is not on it ([ADR 0098 addendum 2026-09-26](decisions/0098-linear-gemv-parallel.md)).
 [The speed improvement and short-text output on the M2](research/2026-09-13-m2-gemv-adoption.md) are confirmed. A broad quality evaluation remains.
-The mobile QAT E2B / E4B distribution (`karume-gemma4-qat-mobile`) chooses as the default quant `i4-fast`, which declares parallel GEMV and RMS→add fusion plus linear→SRQ fusion and packed int8 activations ([ADR 0104](decisions/0104-gemma-fast-quant.md)). Regular E2B / E4B (`karume-gemma4`) default to `bf16` since 2026-11-04 — the original weights with f32 compute in the reference order, so parallel GEMV is off by default there ([ADR 0128](decisions/0128-default-preset-original-weights.md) addendum 2026-11-04); their `i4-fast` (parallel GEMV and RMS→add fusion) is chosen by name. The q4_0 QAT line (`karume-gemma4-qat`) has one preset, `i4`, in the reference order. The parallel-only `i4-gemvpar` is also kept where `i4-fast` exists.
+The mobile QAT E2B / E4B distribution (`karume-gemma4-qat-mobile`) chooses as the default quant `i4-fast`, which declares parallel GEMV and RMS→add fusion plus linear→SRQ fusion and packed int8 activations ([ADR 0104](decisions/0104-gemma-fast-quant.md)). Regular E2B / E4B (`karume-gemma4`) ship one preset, `bf16`, since 2026-11-04 — the original weights with f32 compute in the reference order, so parallel GEMV is not used there; their int4 presets were removed ([ADR 0128](decisions/0128-default-preset-original-weights.md), the addenda of 2026-11-04). The q4_0 QAT line (`karume-gemma4-qat`) defaults to `i4` in the reference order, and its E2B / E4B `i4-fast` (parallel GEMV and RMS→add fusion) is chosen by name. The parallel-only `i4-gemvpar` is also kept where `i4-fast` exists.
 The sequential default of the former `i4`, the runtime and fromAssets is kept. Existing distributions and public pins are not changed automatically.
-The shapes of gemma4 E2B's drafter (i8, `[256,3072]` / `[262144,256]` and so on) are not in the table, and even with `i4-fast` 66 of its 68 linears run sequentially (the bundle's census table pins 66 for the reference — perf-ledger K-59).
+The shapes of the gemma4 drafters (`[256,3072]` / `[262144,256]` and so on — i8 for the regular E2B, i4 g32 for the q4_0 QAT E2B / E4B) are not in the table, and even with `i4-fast` 66 of their 68 linears run sequentially (the bundle's census table pins 66 for the reference on the q4_0 QAT drafters — perf-ledger K-59).
 
 ## packed int8 activations (`packedStaticQuantize`, 2026-09-19)
 
@@ -2608,7 +2609,7 @@ Only the range used by the code that `vp check` type-checks fails indirectly whe
 `stateAttentionReduce: "parallel-fused"` is an optional setting of [ADR 0102](decisions/0102-state-attention-stats-pv-fusion.md).
 It fuses only the states form with M<=8 and a static column limit <=1024; out-of-scope shapes and readonly keep the former parallel path.
 Acceptance of RTX/Chrome and of the kernel numbers was done; performance acceptance on the M2 remains. On 2026-09-26 regular gemma4's `i4-fast` declared it
-(B570 measurements show no slowdown against the reference, about the same as parallel — [ADR 0104 addendum](decisions/0104-gemma-fast-quant.md)). The M2 and the other presets are unchanged.
+(B570 measurements show no slowdown against the reference, about the same as parallel — [ADR 0104 addendum](decisions/0104-gemma-fast-quant.md)); since 2026-11-04 the q4_0 QAT line's E2B / E4B `i4-fast` carries that declaration (the regular line ships `bf16` alone). The M2 and the other presets are unchanged.
 
 ## gemma4: what the GPU-resident PLE option needs (2026-09-19, opt-in)
 
@@ -2621,14 +2622,13 @@ table, which is smaller):
 
 | Distribution — preset (PLE index)                                                                                    | E2B `values`    | E4B `values`    | On the RTX 3080 Ti (2,147,483,644 B) |
 | -------------------------------------------------------------------------------------------------------------------- | --------------- | --------------- | ------------------------------------ |
-| `karume-gemma4` — `bf16`, the default (schema 5, bf16, no scales)                                                    | 4,697,620,480 B | 5,637,144,576 B | refused, E2B and E4B                 |
-| `karume-gemma4` — `i4` / `i4-gemvpar` / `i4-fast` (schema 3, i8)                                                     | 2,348,810,240 B | 2,818,572,288 B | refused, E2B and E4B                 |
+| `karume-gemma4` — `bf16`, the one preset (schema 5, bf16, no scales)                                                 | 4,697,620,480 B | 5,637,144,576 B | refused, E2B and E4B                 |
 | `karume-gemma4-qat` — `i4` (schema 4, i4 with one scale per 32 values; scales E2B 293,601,280 B / E4B 352,321,536 B) | 1,174,405,120 B | 1,409,286,144 B | fits                                 |
 | `karume-gemma4-qat-mobile` (schema 3; E2B i4, E4B i2)                                                                | 1,174,405,120 B | 704,643,072 B   | fits                                 |
 
 On a device where **either** `maxStorageBufferBindingSize` or `maxBufferSize` is short, loading fails with the number of missing bytes.
 It does not silently fall back to the host path. The reference machine's (RTX 3080 Ti / Vulkan) limit is 2,147,483,644 B, so
-**regular Gemma 4 E2B / E4B cannot use this option on this machine, with the default preset or any other** (the q4_0 QAT and
+**regular Gemma 4 E2B / E4B cannot use this option on this machine** (their one preset is `bf16`; the q4_0 QAT and
 mobile QAT lines fit). An Apple M2 offers 4 GiB, which is still below the `bf16` tables. A grouped PLE of storage i8 or i2
 (schema 4) is refused under `"gpu"` too — only i4 has a group codec; no distribution ships one
 ([ADR 0085](decisions/0085-ple-host-gather.md) addenda 2026-11-04).
@@ -2659,4 +2659,4 @@ until the GEMV rows of the 12B shapes are measured. On the RTX 3080 Ti (12 GB) t
 12B is an instruction model. Given raw text without the chat template it can degenerate: for "The capital of France
 is" it repeats digits — upstream's own F32 `generate()` on the same weights gives the same 16 tokens. Use `chat` (the
 chat dialect `gemma4-unified`) for ordinary use. The model is not published yet; the human quality review of ADR 0110
-decision 8 is pending.
+decision 8 passed on 2026-11-04.

@@ -324,3 +324,10 @@ compatibility shim:
   did not cite it. Its addendum of 2026-11-04 records the layout — the q4_0 QAT checkpoints are other upstream
   checkpoints (quantization-aware fine-tunes of the `-it` models), which decision 1's derived-model rule gives a
   repository of their own, although `@karume/models/gemma` reads both `karume-gemma4` and `karume-gemma4-qat`.
+
+Note (2026-11-04, later the same day — the maintainer's ruling): the bullet on the HF repository no longer holds. At
+the next release (0.16.0) the repository `hdae/karume-gemma4-qat`, with its history, moves to
+`hdae/karume-gemma4-qat-mobile`, and the q4_0 QAT line is uploaded under the freed name rather than over `main`'s
+files. 0.15.1's `gemma4Qat.SOURCES["gemma4-qat"]` pin then no longer resolves, so 0.15.1 is yanked. The same day
+the regular `karume-gemma4` dropped its int4 presets and ships `bf16` alone (ADR
+[0128](0128-default-preset-original-weights.md), second addendum of 2026-11-04); this family is unchanged by it.

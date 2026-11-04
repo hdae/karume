@@ -457,3 +457,10 @@ matches its torch greedy goldens token for token with the PLE gathered on the ho
 `packages/e2e/tests/e2e_gemma4_bf16_product_test.ts`, opt-in with `KARUME_SERIES=1`. With nothing
 rounded, the goldens are the upstream checkpoint's own continuations computed in f32. They are also
 token-identical to the previous i8-PLE series' goldens (16 steps for E2B, 10 for E4B, every case).
+
+Note (2026-11-04, later the same day): the regular line then dropped its int4 presets and ships
+`bf16` alone (ADR [0128](0128-default-preset-original-weights.md), second addendum of 2026-11-04), so
+the recipe's product series is bf16 only and takes no `--storage`. No shipped distribution carries a
+schema 3 i8 table any longer. Schema 3 itself stays: the mobile QAT line (`karume-gemma4-qat-mobile`)
+ships its i4 (E2B) / i2 (E4B) tables with one scale per row in it, and the readers and the exporter's
+`karume.ple` keep the i8 form.

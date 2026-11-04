@@ -303,6 +303,12 @@ Stages 1 to 4 (exit and commit → external slots → speculation path → measu
   remain as A/B and acceptance settings). NOTE: the check verifies only devices that ran the e2e lane;
   the run-time canary of general rule 3 (checking on the user's device) does not exist. The u32 check
   covers all 12 combinations (+ linear→SRQ), widened the same day; all 0 mismatches on the B570.
+- **Note (2026-11-04)**: the regular `karume-gemma4` now ships `bf16` alone (ADR
+  [0128](0128-default-preset-original-weights.md), second addendum of 2026-11-04), so these checks
+  run on the q4_0 QAT E2B (`karume-gemma4-qat`) and its QAT drafter goldens. Speculation ② names
+  `i4-fast` (the same three session flags) because that line's default is the reference `i4`. The
+  acceptance floor (1.9 tokens per cycle) and the golden-prefix floor (16) were re-measured there on
+  the RTX 3080 Ti and stay.
 
 ## Addendum (2026-10-10) — the shared-initializer check also matches the semantic dtype (supplement to decision 2)
 

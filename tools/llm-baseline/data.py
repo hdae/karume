@@ -20,6 +20,12 @@ def profiles(root: Path) -> dict:
     then silently be of other weights. The int4 presets of a line (`i4` / `i4-gemvpar` /
     `i4-fast`) load the same container, so `i4` names it.
 
+    NOTE: since 2026-11-04 the regular line (`models/karume-gemma4`) ships `bf16` alone, so the
+    `gemma4-e2b` profile's `i4` is not in its manifest and `--weights stored` fails loudly in
+    `container_paths`; `--weights source` still scores the original checkpoint. Scoring the `bf16`
+    preset (PLE index schema 5) or the q4_0 QAT line (schema 4) needs a PLE reader for those
+    schemas first (backlog).
+
     Only containers (`krm`) are read. The `-probe` series still kept in the old shard form
     (the 2026-09 experiments with gemma4 E4B / MiniCPM5-2B / Qwen3-0.6B) **have no entry in this
     table** — dual reading is not implemented (container-v1 §12). The measurements of that time

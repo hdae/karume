@@ -224,10 +224,9 @@ export type PipelineOptions = {
    * NOTE: taken in bytes, not as a count — the block width changes with the asset generation, so
    * "N blocks" would mean different RAM per generation (ADR 0085 addendum 2026-09-02).
    * NOTE: the budget bounds whole blocks only. On top of it sits a row cache of at most 256 rows
-   * (256 rows of regular E2B: 4,587,520 B with its default `bf16` preset, 2,329,600 B with its int4
-   * presets, whose PLE is i8; q4_0 QAT E2B 1,433,600 B; mobile QAT E2B 1,182,720 B), kept only while
-   * the budget is above 0, so the host RAM PLE holds is at most the budget plus that headroom (ADR
-   * 0085 addendum 2026-10-27). Tightening the budget increases block re-reads (ADR 0085).
+   * (256 rows of regular E2B: 4,587,520 B with its one preset `bf16`; q4_0 QAT E2B 1,433,600 B;
+   * mobile QAT E2B 1,182,720 B), kept only while the budget is above 0, so the host RAM PLE holds is
+   * at most the budget plus that headroom (ADR 0085 addendum 2026-10-27). Tightening the budget increases block re-reads (ADR 0085).
    *
    * MUST: refused (fails loudly) for a model without PLE (gemma-4-12B-it) — there is nothing to
    * budget ({@link assertGemma4PleFreeOptions}).
@@ -244,10 +243,9 @@ export type PipelineOptions = {
    * MUST: it is a single binding, so on a device where the byte size of values does not fit
    * `maxStorageBufferBindingSize` / `maxBufferSize` it **fails loudly** (it does not silently fall
    * back to the host path). The amount is set by the distribution and the preset: the regular
-   * Gemma 4 line's default `bf16` preset needs 4.37 GiB (E2B — 4,697,620,480 B) and 5.25 GiB
-   * (E4B — 5,637,144,576 B), more than a 2 GiB binding limit holds, while its int4 presets (i8 PLE)
-   * need 2.19 GiB (E2B) and 2.63 GiB (E4B); the q4_0 QAT line (i4) 1.09 GiB (E2B) and 1.31 GiB
-   * (E4B); the mobile QAT line 1.09 GiB (E2B, i4) and 672 MiB (E4B, i2).
+   * Gemma 4 line's one preset `bf16` needs 4.37 GiB (E2B — 4,697,620,480 B) and 5.25 GiB
+   * (E4B — 5,637,144,576 B), more than a 2 GiB binding limit holds; the q4_0 QAT line (i4) needs
+   * 1.09 GiB (E2B) and 1.31 GiB (E4B); the mobile QAT line 1.09 GiB (E2B, i4) and 672 MiB (E4B, i2).
    *
    * MUST: it **cannot be combined** with the host-side row cache
    * ({@link PipelineOptions.maxResidentPleBytes}) (under GPU residency that budget would never

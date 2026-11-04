@@ -1115,8 +1115,8 @@ linear at that shape, so there the switch changes nothing.
 **PLE on GPU** (per arm; the arm's label shows "(PLE GPU)") passes the pipeline option
 `pleResidency: "gpu"` to `fromPretrained`: the per-layer embeddings are uploaded once at load and
 each run gathers its rows on the GPU instead of dequantizing them on the host (ADR 0085, GPU
-residency). The `values` table goes in one binding — regular Gemma 4 `bf16` (the default) E2B 4.38 GiB /
-E4B 5.25 GiB, its `i4` presets (i8 PLE) E2B 2.19 GiB / E4B 2.63 GiB, the q4_0 QAT line E2B 1.09 GiB /
+residency). The `values` table goes in one binding — regular Gemma 4 `bf16` (its one preset) E2B 4.38 GiB /
+E4B 5.25 GiB, the q4_0 QAT line E2B 1.09 GiB /
 E4B 1.31 GiB (i4, plus a scale table of 280 / 336 MiB), mobile QAT E2B 1.09 GiB (i4) / E4B 672 MiB (i2)
 — so the device must grant a `maxStorageBufferBindingSize` that large; the page acquires its GPU with the adapter's own limits (an Apple M2 offers 4 GiB), and a
 device that cannot hold it fails the arm's load with the shortfall in bytes.

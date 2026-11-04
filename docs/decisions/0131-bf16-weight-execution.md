@@ -243,3 +243,10 @@ borrows bf16 weights" no longer holds: the E2B MTP drafter of `karume-gemma4` bo
 `model.lm_head.weight` from whichever target is loaded, and under the default `bf16` that target's
 table is bf16. Before the fix, building the drafter beside the `bf16` target failed with the
 residency-class error (borrower class `raw`, lender class `bf16`) — loudly, never with a wrong value.
+
+Note (2026-11-04, later the same day): the regular line then dropped its int4 presets (ADR
+[0128](0128-default-preset-original-weights.md), second addendum of 2026-11-04). `karume-gemma4`
+ships one `model` container, `model/model.bf16.krm`, and the one preset `bf16`; the `model_bf16`
+series role and the `--storage` option are gone. The E2B drafter's only target is therefore the bf16
+one: its graph now declares the borrowed shared table bf16, and its goldens are taken against the
+unrounded bf16 target (its container parts are byte-identical to before).

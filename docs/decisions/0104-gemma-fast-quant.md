@@ -4,8 +4,10 @@
   superseded by [0109](0109-manifest-v5-container.md) (manifest format, 2026-09-22), by the addendum of
   2026-09-26 and [0111](0111-session-options-composition.md) (fields accepted from `quant.session`,
   2026-09-26), by [0128](0128-default-preset-original-weights.md) decision 1 (regular E4B default,
-  2026-10-17), and by the 0128 addendum of 2026-11-04 (regular E2B / E4B default `bf16`; this ADR's
-  presets stay, chosen by name). Automated acceptance: [integration acceptance](../research/2026-09-15-gemma-fast-quant.md);
+  2026-10-17), and by the 0128 addenda of 2026-11-04 (regular E2B / E4B default `bf16`; then the
+  regular line ships `bf16` alone, so its `i4` / `i4-gemvpar` / `i4-fast` are gone — the same three
+  declarations live on in the q4_0 QAT line `karume-gemma4-qat` (E2B / E4B) and the mobile QAT line
+  `karume-gemma4-qat-mobile`). Automated acceptance: [integration acceptance](../research/2026-09-15-gemma-fast-quant.md);
   broad quality, long texts and E4B were not accepted at the time.
 - Related: [0038](0038-manifest-v1.md), [0058](0058-numerics-opt-in-contract.md),
   [0098](0098-linear-gemv-parallel.md), [0099](0099-rms-norm-add-fusion.md),
