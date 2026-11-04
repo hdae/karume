@@ -1,9 +1,9 @@
-"""gemma4 E2B の chat フォーマットの parity フィクスチャ採取（ADR 0084 決定 5 / 決定 7）。
+"""Harvests the parity fixture of the gemma4 E2B chat format (ADR 0084 decisions 5 and 7).
 
     uv run --with 'transformers==5.14.1' python -m gemma4.chat
     uv run --with 'transformers==5.14.1' python -m gemma4.chat --model 12b
 
-出力は 1 本（**git 管理**）:
+One output (**git-tracked**):
 
     packages/models/tests/fixtures/gemma-text/gemma4-chat.json
     packages/models/tests/fixtures/gemma-text/gemma4-12b-chat.json   (--model 12b)
@@ -12,14 +12,15 @@
 pinned hub snapshot (`gemma4.sources`), and the fixture is harvested from its own
 `apply_chat_template`, the same way as E2B's.
 
-TS 側の実装は `packages/models/src/gemma/text/chat.ts` の純関数 1 本
-（`gemma.chatPrompt`）で、汎用テンプレートレンダラは作らない（ADR 0084 決定 5 —
-「ランタイム依存は Web 標準のみ」と「投機的な一般化をしない」の両方に反する）。ここが
-持つのはその**期待値**だけである。
+The TS implementation is one pure function in `packages/models/src/gemma/text/chat.ts`
+(`gemma.chatPrompt`), and no general template renderer is built (ADR 0084 decision 5 — one would
+go against both "runtime dependencies are Web standards only" and "no speculative
+generalization"). This script holds only its **expectations**.
 
-MUST: 期待値は上流の `apply_chat_template` を**独立に**呼んで採る（ADR 0084 決定 7）—
-自前のレンダラも compile 台本の畳み込みも 1 行も通さない。共有すると parity が恒真化する
-（ADR 0048 追記の実例）。
+MUST: the expectations are harvested by calling upstream `apply_chat_template` **independently**
+(ADR 0084 decision 7) — not one line goes through an in-house renderer or the compile script's
+folding. Sharing them makes the parity check tautological (the worked example in the ADR 0048
+addendum).
 
 ## Scope: four batteries (ADR 0084 decision 5 and its addendum of 2026-11-04)
 
@@ -43,26 +44,27 @@ Still out of scope (the TS side rejects them, and no case is harvested): the leg
 `<|video|>` and text parts). **Nothing is silently ignored** — ignoring `tool_responses` would let
 "I passed the results and they were not used" through without an exception.
 
-## 素の会話の射程（実測した分岐）
+## Scope of plain conversations (the branches measured)
 
-綴りは Gemma 3 系ではない（ADR 0084 Context 3 — `<start_of_turn>` は**この語彙に無い**）。
-実際に踏む分岐は 3 本だけで、{@link CASES} が 1 本ずつ踏む:
+The spellings are not the Gemma 3 ones (ADR 0084 Context 3 — `<start_of_turn>` is **not in this
+vocabulary**). Only three branches are actually taken, and {@link CASES} takes each one:
 
-1. 先頭が `system` / `developer` なら **`<|turn>system\\n` の system ブロック**へ落ちる
-   （`developer` でも綴りは `system` — 2 番目以降の `developer` は `<|turn>developer\\n`）
-2. `assistant` は `model` へ写像され、**直前の非 tool ロールも `assistant` なら turn を
-   開き直さない**（連続 assistant は 1 つの model turn へ畳まれる）
-3. 末尾に生成プロンプト `<|turn>model\\n` を必ず出す
+1. A leading `system` / `developer` falls into **the system block `<|turn>system\\n`**
+   (`developer` is spelled `system` there too — a later `developer` is `<|turn>developer\\n`)
+2. `assistant` maps to `model`, and **when the previous non-tool role is also `assistant`, the
+   turn is not reopened** (consecutive assistant messages fold into one model turn)
+3. The generation prompt `<|turn>model\\n` is always emitted at the end
 
-`<bos>` は template が出す = **ホストの仕事**（ADR 0084 決定 5 の MUST — `encode` は
-付けない。分けないと chat 導入時に double-BOS になる）。
+The template emits `<bos>` = **the host's job** (the MUST of ADR 0084 decision 5 — `encode` does
+not add it; without the split, introducing chat would give a double BOS).
 
-## EOS 集合を同じ束で採る（ADR 0083 決定 8 / 0084 決定 5）
+## The EOS set is harvested from the same bundle (ADR 0083 decision 8 / 0084 decision 5)
 
-`generation_config.json` の `eos_token_id` と、その id の綴りをフィクスチャへ載せる。
-TS 側は**トークナイザ資産の追加語彙から**同じ集合を導出するので、ここが「導出が上流宣言と
-一致すること」の突合先になる。chat 形式と EOS 集合を別々の場所から拾うと片方だけ古くなる
-ので、出所記録（{@link _source}）は 4 ファイルの digest を 1 つの束として書く。
+The fixture carries `eos_token_id` of `generation_config.json` and the spellings of those ids.
+The TS side derives the same set **from the added vocabulary of the tokenizer asset**, so this is
+what "the derivation matches the upstream declaration" is checked against. Picking up the chat
+format and the EOS set from different places lets one of them go stale, so the provenance record
+({@link _source}) writes the digests of the four files as one bundle.
 """
 
 from __future__ import annotations
@@ -112,7 +114,8 @@ CHAT_DIALECTS: Mapping[str, str] = {
     "12b": GEMMA4_UNIFIED_CHAT_DIALECT,
 }
 
-#: 出所記録に束ねる 4 ファイル（chat 形式と EOS 集合が**同じ digest set** から来ることの記録）。
+#: The four files bundled into the provenance record (it records that the chat format and the EOS
+#: set come from **the same digest set**).
 SOURCE_FILES = (
     "tokenizer.json",
     "tokenizer_config.json",
@@ -120,7 +123,7 @@ SOURCE_FILES = (
     "generation_config.json",
 )
 
-#: パリティ用フィクスチャ（git 管理 — Deno 側 `gemma4_chat_test.ts` が読む）。
+#: The parity fixture (git-tracked — read by `gemma4_chat_test.ts` on the Deno side).
 FIXTURE_PATH = (
     REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "gemma-text" / "gemma4-chat.json"
 )
@@ -132,21 +135,22 @@ FIXTURE_PATHS: Mapping[str, Path] = {
     "12b": FIXTURE_PATH.with_name("gemma4-12b-chat.json"),
 }
 
-#: 初版の射程（ADR 0084 決定 5）。ここに無い role は TS 側が fail loudly で拒否する。
+#: The scope of the first version (ADR 0084 decision 5). The TS side rejects a role not listed
+#: here, failing loudly.
 PLAIN_ROLES = ("system", "developer", "user", "assistant")
 
-#: メッセージが持ってよい欄。**許可リスト**にするのは、`tools` / `reasoning` /
-#: `tool_calls` のような射程外の欄が「渡したのに効かない」形で素通りしないため。
+#: The fields a message may carry. It is an **allow list** so that an out-of-scope field such as
+#: `tools` / `reasoning` / `tool_calls` does not slip through as "given but without effect".
 ALLOWED_MESSAGE_KEYS = frozenset({"role", "content"})
 
 
 class OutOfScopeChatError(ValueError):
-    """初版の射程（素の会話）から外れた入力。"""
+    """Input outside the scope of the first version (plain conversations)."""
 
 
 @dataclass(frozen=True)
 class ChatCase:
-    """chat ケース（`why` は「素朴な移植が落ちる境界」を 1 行で述べる）。"""
+    """A chat case (`why` states, in one line, the boundary where a naive port fails)."""
 
     name: str
     why: str
@@ -154,42 +158,46 @@ class ChatCase:
 
 
 def assert_plain_conversation(messages: Sequence[Mapping[str, Any]]) -> None:
-    """素の会話であることを確かめる（射程外は採らない）。
+    """Checks that a conversation is plain (out-of-scope input is not harvested).
 
-    MUST: 上流と同じところで落とす — `apply_chat_template` は空の会話を
-    `ValueError` で拒否するので、ここも拒否する（TS 側の受理集合を上流より広げない）。
+    MUST: reject where upstream rejects — `apply_chat_template` rejects an empty conversation with
+    `ValueError`, so this rejects it too (the TS side's accepted set is not wider than upstream's).
     """
     if not messages:
-        raise OutOfScopeChatError("会話が空（上流の apply_chat_template も拒否する）")
+        raise OutOfScopeChatError(
+            "the conversation is empty (upstream apply_chat_template rejects it too)"
+        )
     for index, message in enumerate(messages):
         extra = sorted(set(message) - ALLOWED_MESSAGE_KEYS)
         if extra:
             raise OutOfScopeChatError(
-                f"messages[{index}]: 射程外の欄 {extra}"
-                "（tools / reasoning / tool_calls などは初版では拒否する — ADR 0084 決定 5）"
+                f"messages[{index}]: out-of-scope fields {extra}"
+                " (tools / reasoning / tool_calls and the like are rejected in the first version"
+                " — ADR 0084 decision 5)"
             )
         role = message.get("role")
         if role not in PLAIN_ROLES:
             raise OutOfScopeChatError(
-                f"messages[{index}].role {role!r} が {list(PLAIN_ROLES)} のどれでもない"
+                f"messages[{index}].role {role!r} is none of {list(PLAIN_ROLES)}"
             )
         if not isinstance(message.get("content"), str):
             raise OutOfScopeChatError(
-                f"messages[{index}].content が文字列でない"
-                "（画像 / 音声パートの配列は初版では拒否する）"
+                f"messages[{index}].content is not a string"
+                " (arrays of image / audio parts are rejected in the first version)"
             )
 
 
-#: 素の会話の電池。**分岐と境界を 1 件ずつ**踏ませる（同じ形を 2 度採らない）。
+#: The plain-conversation battery. It takes **each branch and boundary once** (the same shape is
+#: not harvested twice).
 CASES: tuple[ChatCase, ...] = (
     ChatCase(
         "single-user",
-        "最小形 — `<bos>` + user turn + 生成プロンプト",
+        "the minimal form — `<bos>` + user turn + generation prompt",
         ({"role": "user", "content": "What is the capital of France?"},),
     ),
     ChatCase(
         "system-first",
-        "先頭 system は system ブロックへ落ち、content は trim される",
+        "a leading system falls into the system block, and its content is trimmed",
         (
             {"role": "system", "content": "  You are a terse assistant.  "},
             {"role": "user", "content": "Hi"},
@@ -197,7 +205,8 @@ CASES: tuple[ChatCase, ...] = (
     ),
     ChatCase(
         "developer-first",
-        "先頭 developer も**綴りは system**（role をそのまま出さない唯一の位置）",
+        "a leading developer is **spelled system** too"
+        " (the one position where the role is not emitted as is)",
         (
             {"role": "developer", "content": "Follow the house style."},
             {"role": "user", "content": "Hi"},
@@ -205,7 +214,7 @@ CASES: tuple[ChatCase, ...] = (
     ),
     ChatCase(
         "developer-late",
-        "2 番目以降の developer は `<|turn>developer` （先頭との非対称）",
+        "a later developer is `<|turn>developer` (asymmetric with the leading one)",
         (
             {"role": "user", "content": "Hi"},
             {"role": "developer", "content": "Be brief."},
@@ -213,7 +222,7 @@ CASES: tuple[ChatCase, ...] = (
     ),
     ChatCase(
         "round-trip",
-        "user → assistant → user の往復（assistant は `model` へ写像される）",
+        "a user → assistant → user round trip (assistant maps to `model`)",
         (
             {"role": "user", "content": "Who wrote Hamlet?"},
             {"role": "assistant", "content": "William Shakespeare."},
@@ -222,7 +231,8 @@ CASES: tuple[ChatCase, ...] = (
     ),
     ChatCase(
         "assistant-last",
-        "末尾が assistant でも turn は閉じ、生成プロンプトは**新しい** model turn を開く",
+        "a trailing assistant still closes its turn, and the generation prompt opens a **new**"
+        " model turn",
         (
             {"role": "user", "content": "Who wrote Hamlet?"},
             {"role": "assistant", "content": "William Shakespeare."},
@@ -230,7 +240,8 @@ CASES: tuple[ChatCase, ...] = (
     ),
     ChatCase(
         "assistant-twice",
-        "連続 assistant は 1 つの model turn へ畳まれる（turn を開き直さない・閉じない）",
+        "consecutive assistant messages fold into one model turn"
+        " (the turn is neither reopened nor closed)",
         (
             {"role": "user", "content": "Continue."},
             {"role": "assistant", "content": "First half."},
@@ -239,12 +250,12 @@ CASES: tuple[ChatCase, ...] = (
     ),
     ChatCase(
         "assistant-first",
-        "assistant で始まる会話（直前ロールが無いので継続にならない）",
+        "a conversation that starts with assistant (no previous role, so it is not a continuation)",
         ({"role": "assistant", "content": "I already answered."},),
     ),
     ChatCase(
         "user-twice",
-        "連続 user は畳まれない（継続の判定は model turn 側だけ）",
+        "consecutive user messages do not fold (only the model turn checks for a continuation)",
         (
             {"role": "user", "content": "one"},
             {"role": "user", "content": "two"},
@@ -252,22 +263,25 @@ CASES: tuple[ChatCase, ...] = (
     ),
     ChatCase(
         "system-only",
-        "system だけの会話（ループが 1 度も回らず生成プロンプトへ抜ける）",
+        "a system-only conversation"
+        " (the loop never runs and goes straight to the generation prompt)",
         ({"role": "system", "content": "You are a calculator."},),
     ),
     ChatCase(
         "empty-content",
-        "空の content（turn は開いて即閉じる — 空文字を落とさない）",
+        "empty content (the turn opens and closes at once — the empty string is not dropped)",
         ({"role": "user", "content": ""},),
     ),
     ChatCase(
         "whitespace-content",
-        "trim は Python の `str.strip()` — 全角空白 U+3000 も改行もタブも落ちる",
+        "trim is Python's `str.strip()` — it drops the full-width space U+3000, newlines and tabs"
+        " too",
         ({"role": "user", "content": "\n\t hi 　\n"},),
     ),
     ChatCase(
         "assistant-whitespace",
-        "assistant 側も trim される（`strip_thinking` は thinking 綴りが無ければ trim と同値）",
+        "the assistant side is trimmed too"
+        " (`strip_thinking` equals a trim when no thinking spelling is present)",
         (
             {"role": "user", "content": "A?"},
             {"role": "assistant", "content": "   B.   "},
@@ -276,7 +290,8 @@ CASES: tuple[ChatCase, ...] = (
     ),
     ChatCase(
         "japanese",
-        "日本語の多ターン（空白が無いので 1 pre-token が turn 本文の全長になる）",
+        "a Japanese multi-turn conversation"
+        " (no spaces, so one pre-token spans the whole turn body)",
         (
             {"role": "system", "content": "あなたは簡潔に答える助手です。"},
             {"role": "user", "content": "日本の首都はどこですか？"},
@@ -286,12 +301,13 @@ CASES: tuple[ChatCase, ...] = (
     ),
     ChatCase(
         "special-in-content",
-        "本文中の chat 綴りは**エスケープされない**（追加語彙として切り出される）",
+        "chat spellings inside the body are **not escaped**"
+        " (they are split out as added vocabulary)",
         ({"role": "user", "content": "abc<|turn>def"},),
     ),
     ChatCase(
         "multiline-content",
-        "改行を含む content（turn の区切りは改行ではなく `<turn|>`）",
+        "content with newlines (turns are delimited by `<turn|>`, not by newlines)",
         ({"role": "user", "content": "line one\nline two\n\nline four"},),
     ),
 )
@@ -1564,7 +1580,8 @@ RESPONSE_CASES: tuple[ResponseCase, ...] = (
 
 
 def _source(checkpoint_dir: Path, label: str) -> dict[str, Any]:
-    """出所記録（chat 形式と EOS 集合を束ねる 4 ファイルの digest — ADR 0084 決定 5）。
+    """The provenance record (the digests of the four files that bundle the chat format and the EOS
+    set — ADR 0084 decision 5).
 
     `label` names the checkpoint the way a git-tracked record may (`gemma4.sources.tokenizer_label`
     — a repository path, or `<repo>@<revision>` for a hub snapshot outside the repository).
@@ -1576,25 +1593,27 @@ def _source(checkpoint_dir: Path, label: str) -> dict[str, Any]:
 
 
 def stop_tokens(checkpoint_dir: Path) -> list[int]:
-    """`generation_config.json` の `eos_token_id`（単数でも集合として読む）。"""
+    """`eos_token_id` of `generation_config.json` (read as a set, even when declared singly)."""
     raw = json.loads((checkpoint_dir / "generation_config.json").read_text(encoding="utf-8"))
     declared = raw.get("eos_token_id")
     ids = [declared] if isinstance(declared, int) else declared
     if not isinstance(ids, list) or not ids or not all(isinstance(one, int) for one in ids):
         raise ValueError(
-            f"generation_config.json の eos_token_id が整数 / 整数列でない: {declared!r}"
+            f"eos_token_id of generation_config.json is not an integer / integer list: {declared!r}"
         )
     return list(ids)
 
 
 def harvest_cases(tokenizer: Any, cases: Sequence[ChatCase]) -> list[dict[str, Any]]:
-    """上流の `apply_chat_template` から期待値を採る（自前のレンダラを 1 行も通さない）。
+    """Harvests the expectations from upstream `apply_chat_template` (not one line goes through an
+    in-house renderer).
 
-    MUST: 「レンダリング済み文字列」と「id 列」の**両方**を採る。片方だけだと、割れたときに
-    レンダリングの問題か符号化の問題かが読み手に伝わらない（TS 側は同じ 2 段で組む）。
-    MUST: `ids` が「レンダリング結果を `add_special_tokens=False` で符号化したもの」と一致する
-    ことをここで確かめる — TS 側の実装（描画 → `encode`）が成立する前提そのものなので、
-    崩れたら期待値を採る側で落とす。
+    MUST: harvest **both** the rendered string and the id sequence. With only one of them, a
+    mismatch does not tell the reader whether rendering or encoding broke (the TS side is built in
+    the same two steps).
+    MUST: check here that `ids` equals the rendered result encoded with `add_special_tokens=False`
+    — it is the very premise the TS implementation (render → `encode`) stands on, so when it
+    breaks, the harvesting side fails.
     """
     rows: list[dict[str, Any]] = []
     for case in cases:
@@ -1611,9 +1630,9 @@ def harvest_cases(tokenizer: Any, cases: Sequence[ChatCase]) -> list[dict[str, A
         direct = list(tokenizer(rendered, add_special_tokens=False)["input_ids"])
         if ids != direct:
             raise AssertionError(
-                f"{case.name}: apply_chat_template(tokenize=True) が"
-                "「描画 → add_special_tokens=False の符号化」と一致しない"
-                "（TS 側の 2 段構成の前提が崩れている）"
+                f"{case.name}: apply_chat_template(tokenize=True) does not match"
+                " rendering then encoding with add_special_tokens=False"
+                " (the premise of the TS two-step build is broken)"
             )
         rows.append(
             {
@@ -1774,19 +1793,21 @@ def build_chat_fixture(
     rejected_cases: Sequence[RejectedCase] = (),
     response_cases: Sequence[ResponseCase] = (),
 ) -> dict[str, Any]:
-    """chat フィクスチャ 1 本を組む（期待値は上流・部分集合は compile 済み資産から）。
+    """Builds one chat fixture (expectations from upstream, the subset from the compiled asset).
 
-    語彙・merges の部分集合の切り方は符号化フィクスチャと同じ 1 本
-    （{@link _shared.gemma_tokenizer.asset_subset}）を通す — 絞り方を 2 実装持たない。
-    足りなければ TS 側の突合が**落ちる**ので、誤りは危険側に倒れない。
+    The vocabulary and merges subset is cut by the same single function as the encoding fixtures
+    ({@link _shared.gemma_tokenizer.asset_subset}) — no second implementation of the trimming.
+    If something is missing, the TS-side comparison **fails**, so a mistake does not fall on the
+    unsafe side.
     """
     chat = harvest_cases(tokenizer, cases)
     tool_chat = harvest_tool_cases(tokenizer, tool_cases)
     rejected = harvest_rejected_cases(tokenizer, rejected_cases)
     responses = harvest_responses(tokenizer, response_cases)
     required = {token_id for row in [*chat, *tool_chat] for token_id in row["ids"]}
-    # EOS 集合の id は本文に出ないもの（`<|tool_response>`）を含むので、明示的に残す —
-    # TS 側は追加語彙からこの集合を導出し、ここの `stopTokens` と突き合わせる。
+    # The EOS set holds ids that never appear in a body (`<|tool_response>`), so they are kept
+    # explicitly — the TS side derives this set from the added vocabulary and compares it with
+    # `stopTokens` here.
     required.update(stops)
     required.add(compiled.bos_id)
     added_by_id = {token_id: token for token, token_id in compiled.added_tokens}
@@ -1823,11 +1844,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     tokenizer_json = checkpoint_dir / "tokenizer.json"
     for name in SOURCE_FILES:
         if not (checkpoint_dir / name).is_file():
-            raise SystemExit(f"[karume] 上流の {name} が無い: {checkpoint_dir / name}")
+            raise SystemExit(f"[karume] upstream {name} is missing: {checkpoint_dir / name}")
     pins = sources.HUB_PINS.get(model)
     if pins is not None:
         sources.assert_snapshot_pin(checkpoint_dir, pins.tokenizer)
-    from transformers import AutoTokenizer  # 遅延 import（採取のときだけ要る）
+    from transformers import AutoTokenizer  # lazy import (needed only when harvesting)
 
     compiled = compile_tokenizer(json.loads(tokenizer_json.read_text(encoding="utf-8")))
     fixture = build_chat_fixture(

@@ -42,8 +42,8 @@ class FuseReport:
     def describe(self) -> str:
         if self.is_noop:
             return (
-                f"{self.merged} 層は ΔW=0 — LoRA に含まれるが学習されていない"
-                "（この成分は再エクスポート不要）"
+                f"ΔW=0 in {self.merged} layers — present in the LoRA but not trained"
+                " (this component needs no re-export)"
             )
         return f"merged into {self.merged} layers (max ‖ΔW‖/‖W‖ {self.max_relative_delta:.3f})"
 
@@ -103,7 +103,7 @@ def fuse_lora(
         if key.endswith(_A_SUFFIX)
     )
     if not targets:
-        raise ValueError(f"LoRA に {prefix} 向けの層が 1 件も無い")
+        raise ValueError(f"the LoRA has no layers for {prefix}")
 
     params = dict(model.named_parameters())
     max_relative = 0.0
@@ -111,16 +111,18 @@ def fuse_lora(
         down = state_dict.get(f"{head}{target}{_A_SUFFIX}")
         up = state_dict.get(f"{head}{target}{_B_SUFFIX}")
         if down is None or up is None:
-            raise ValueError(f"{prefix}: {target} の lora_A / lora_B が揃っていない")
+            raise ValueError(f"{prefix}: {target} does not have both lora_A and lora_B")
         unconsumed -= {f"{head}{target}{_A_SUFFIX}", f"{head}{target}{_B_SUFFIX}"}
         weight = params.get(f"{target}.weight")
         if weight is None:
-            raise ValueError(f"{prefix}: {target}.weight がモデルに無い（命名変換の取りこぼし）")
+            raise ValueError(
+                f"{prefix}: {target}.weight is not in the model (missed by the naming conversion)"
+            )
         delta = (up.to(torch.float32) @ down.to(torch.float32)) * scale
         if delta.shape != weight.shape:
             raise ValueError(
-                f"{prefix}: {target} の形が違う"
-                f" LoRA={tuple(delta.shape)} 重み={tuple(weight.shape)}"
+                f"{prefix}: {target} has a different shape:"
+                f" LoRA={tuple(delta.shape)} weight={tuple(weight.shape)}"
             )
         norm = float(torch.linalg.vector_norm(weight.detach()))
         if norm > 0:
@@ -130,7 +132,7 @@ def fuse_lora(
 
     if unconsumed:
         raise ValueError(
-            f"{prefix}: A/B ペアとして消費できないキーが {len(unconsumed)} 件残った"
-            f"（{', '.join(sorted(unconsumed)[:5])}）— 焼き込まれない成分がある"
+            f"{prefix}: {len(unconsumed)} keys left that cannot be consumed as A/B pairs"
+            f" ({', '.join(sorted(unconsumed)[:5])}) — some components would not be baked in"
         )
     return FuseReport(merged=len(targets), max_relative_delta=max_relative)

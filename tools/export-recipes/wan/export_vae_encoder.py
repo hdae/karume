@@ -375,13 +375,13 @@ def assert_encoder_graph(graph: IrGraph, target: str, vae: AutoencoderKLWan) -> 
 
     expected_symbols = list(symbol_names(target))
     if list(graph.symbols) != expected_symbols:
-        raise EncoderGraphError(f"{target}: 記号 {graph.symbols} が {expected_symbols} でない")
+        raise EncoderGraphError(f"{target}: symbols {graph.symbols} are not {expected_symbols}")
     expected_input, expected_output = expected_io(target, vae)
     actual_inputs = [(entry.name, list(entry.shape)) for entry in graph.inputs]
     if actual_inputs != [(INPUT_NAMES[target], expected_input)]:
         raise EncoderGraphError(
-            f"{target}: 入力 {actual_inputs} が [({INPUT_NAMES[target]!r}, {expected_input})]"
-            " でない"
+            f"{target}: inputs {actual_inputs} are not"
+            f" [({INPUT_NAMES[target]!r}, {expected_input})]"
         )
     if len(graph.outputs) != 1:
         raise EncoderGraphError(f"{target}: {len(graph.outputs)} outputs (expected 1)")
@@ -531,7 +531,8 @@ def emit_series(
     unknown = sorted(set(targets) - set(TARGETS))
     if unknown or len(set(targets)) != len(targets):
         raise EncoderGraphError(
-            f"ターゲット {list(targets)} に未知か重複がある（既知: {', '.join(TARGETS)}）"
+            f"targets {list(targets)} hold an unknown or duplicate entry"
+            f" (known: {', '.join(TARGETS)})"
         )
     images = {image.name: image for image in IMAGES}
     sources = {name: load_image(images[name]) for name in sorted({case.image for case in cases})}

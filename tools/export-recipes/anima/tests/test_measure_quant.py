@@ -104,7 +104,7 @@ class TestTargetScan:
                 super().__init__()
                 self.conv = nn.Conv2d(4, 8, 2)
 
-        with pytest.raises(AssertionError, match="非 linear"):
+        with pytest.raises(AssertionError, match="non-linear quantizable weight"):
             mq.scan_w4_targets(WithConv())
 
     def test_a_fully_indivisible_model_fails_loudly(self):
@@ -113,7 +113,7 @@ class TestTargetScan:
                 super().__init__()
                 self.fc = nn.Linear(30, 2, bias=False)
 
-        with pytest.raises(AssertionError, match="1 本も無い"):
+        with pytest.raises(AssertionError, match="no quantizable weight at all"):
             mq.scan_w4_targets(Odd())
 
     def test_the_include_predicate_matches_the_root_module_spelling(self):
@@ -347,25 +347,25 @@ class TestReport:
         """MUST: state the exclusions in the output (do not silently give up on the whole)."""
         report = mq.w4_report_markdown(_payload())
 
-        assert "`patch_embed.proj.weight`（軸 68）" in report
+        assert "`patch_embed.proj.weight` (axis 68)" in report
 
     def test_a_sampled_codebook_fit_is_stated(self):
         """MUST: state it when fit_stride was used (the MUST of the core docstring)."""
         report = mq.w4_report_markdown(_payload())
 
-        assert "1/99 の等間隔部分標本" in report
-        assert "適用は全量" in report
+        assert "evenly spaced 1/99 subsample" in report
+        assert "applied to everything" in report
 
     def test_a_full_fit_says_nothing_about_sampling(self):
         report = mq.w4_report_markdown(_payload(kmeansFitStride=1))
 
-        assert "部分標本" not in report
+        assert "subsample" not in report
 
     def test_a_config_that_did_not_move_is_marked_up(self):
         payload = _payload()
         payload["configs"]["nf4"] = {**payload["configs"]["nf4"], "moved": False}
 
-        assert "**NG（素通り）**" in mq.w4_report_markdown(payload)
+        assert "**NG (passthrough)**" in mq.w4_report_markdown(payload)
 
 
 # ---- calibrated rounding (iteration J-2) ------------------------------------
@@ -517,7 +517,7 @@ class TestCalibTargets:
         `scan_w4_targets`)."""
         stages = (("transformer_blocks.0", nn.Conv1d(32, 8, 3, bias=False)),)
 
-        with pytest.raises(AssertionError, match="非 linear"):
+        with pytest.raises(AssertionError, match="non-linear quantizable weight"):
             mq.scan_calib_targets(stages)
 
     def test_a_weight_off_the_group_grid_is_fail_loudly(self):
@@ -525,11 +525,11 @@ class TestCalibTargets:
         impossible."""
         stages = (("transformer_blocks.0", nn.Linear(12, 4, bias=False)),)
 
-        with pytest.raises(AssertionError, match="割り切れない"):
+        with pytest.raises(AssertionError, match="is not divisible by"):
             mq.scan_calib_targets(stages)
 
     def test_stages_without_a_linear_are_fail_loudly(self):
-        with pytest.raises(AssertionError, match="1 本も無い"):
+        with pytest.raises(AssertionError, match="no quantizable weight at all"):
             mq.scan_calib_targets((("transformer_blocks.0", nn.LayerNorm(8)),))
 
 
@@ -576,7 +576,7 @@ class TestCatcher:
         assert not model.transformer_blocks[0]._forward_pre_hooks
 
     def test_a_reference_that_never_reaches_the_blocks_is_fail_loudly(self):
-        with pytest.raises(AssertionError, match="1 step も"):
+        with pytest.raises(AssertionError, match="for even 1 step"):
             mq.capture_stage_batches(TinyCalibDit(), dict, 2)
 
 
@@ -603,7 +603,7 @@ class TestCalibrationRun:
         rig = _calib_rig(model)
         report = mq.apply_calib(mq.CALIB_CONFIGS[0], rig)
 
-        with pytest.raises(AssertionError, match="一致しない"):
+        with pytest.raises(AssertionError, match="do not match"):
             mq.assert_calib_covers_scan(
                 report, {**rig.scan, "transformer_blocks.9.ff.weight": torch.zeros(1)}, "gptq-rtn"
             )
@@ -628,7 +628,7 @@ class TestCalibReport:
         report = mq.w4_report_markdown(_payload(calibTargets=CALIB_META))
 
         assert mq.CALIB_TARGET in report
-        assert "280 本" in report
+        assert "280 weights" in report
 
     def test_a_run_without_calibrated_configs_says_nothing_about_them(self):
         assert mq.CALIB_TARGET not in mq.w4_report_markdown(_payload(calibTargets=None))
@@ -672,12 +672,12 @@ class TestTheQualityGateReachesTheExitCode:
     def test_a_red_gate_ends_the_run_with_an_error(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _stub_the_measurement(monkeypatch, failed=["`w8a8` の SDPA 発火計数"])
+        _stub_the_measurement(monkeypatch, failed=["`w8a8` SDPA call count"])
         monkeypatch.setattr(
             "sys.argv", ["measure_quant.py", "--out", str(tmp_path), "--no-latents"]
         )
 
-        with pytest.raises(AssertionError, match="品質ゲートが赤"):
+        with pytest.raises(AssertionError, match="quality gate is red"):
             mq.main()
 
     def test_an_injected_failure_is_allowed_to_be_red(
@@ -685,7 +685,7 @@ class TestTheQualityGateReachesTheExitCode:
     ) -> None:
         """`--inject` demonstrates the detection power; being red is the very purpose of this path
         (not blocked)."""
-        _stub_the_measurement(monkeypatch, failed=["`w8a8` の SDPA 発火計数"])
+        _stub_the_measurement(monkeypatch, failed=["`w8a8` SDPA call count"])
         monkeypatch.setattr(
             "sys.argv",
             [

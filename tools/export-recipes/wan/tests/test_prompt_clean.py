@@ -145,7 +145,7 @@ class TestTables:
     def test_the_quote_sets_are_disjoint_from_their_replacements(self, tables):
         broken = dataclasses.replace(tables, single_quotes=[[0x22, 0x22], *tables.single_quotes])
 
-        with pytest.raises(ValueError, match="引用符"):
+        with pytest.raises(ValueError, match="quote replacement"):
             pc.check_table_ranges(broken)
 
     def test_the_strip_and_collapse_sets_are_isspace_and_regex_whitespace(self, tables):
@@ -251,7 +251,7 @@ class TestMirror:
         assert result["outcomes"] == {"accepted": 5_000}
 
     def test_a_record_fails_loudly_when_mirror_and_upstream_disagree(self, compiled):
-        with pytest.raises(ValueError, match="鏡像が上流"):
+        with pytest.raises(ValueError, match="the mirror differs from upstream"):
             pc.record(compiled, lambda _: "something else", "cat")
 
     def test_a_rejected_record_carries_the_reason(self, compiled):

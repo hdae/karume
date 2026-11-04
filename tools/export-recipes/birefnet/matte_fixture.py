@@ -177,20 +177,50 @@ Target = tuple[str, int, int, str]
 #:   to copy — ADR 0125; {@link lucida_scaled} rejects it).
 REAL_TARGETS: dict[str, tuple[Target, ...]] = {
     "crop": (
-        ("up", 97, 83, "両軸とも非整数倍の拡大"),
-        ("down", 17, 13, "両軸とも非整数倍の縮小（台が伸びる）"),
-        ("mixed", 25, 61, "横は縮小・縦は拡大（2 パスの軸の取り違えを掴む）"),
-        ("horizontal-only", 87, CROP_HEIGHT, "横だけ拡大・縦は同寸（縦のパスを飛ばす）"),
-        ("vertical-only", CROP_WIDTH, 15, "縦だけ縮小・横は同寸（横のパスを飛ばす）"),
-        ("identity", CROP_WIDTH, CROP_HEIGHT, "両軸とも同寸（resize は写し — 量子化だけが残る）"),
+        ("up", 97, 83, "non-integer upscale on both axes"),
+        ("down", 17, 13, "non-integer downscale on both axes (the support widens)"),
+        (
+            "mixed",
+            25,
+            61,
+            "horizontal downscale, vertical upscale (catches swapped axes between the 2 passes)",
+        ),
+        (
+            "horizontal-only",
+            87,
+            CROP_HEIGHT,
+            "horizontal upscale only, same height (skips the vertical pass)",
+        ),
+        (
+            "vertical-only",
+            CROP_WIDTH,
+            15,
+            "vertical downscale only, same width (skips the horizontal pass)",
+        ),
+        (
+            "identity",
+            CROP_WIDTH,
+            CROP_HEIGHT,
+            "same size on both axes (resize is a copy — only the quantization remains)",
+        ),
     ),
     "row": (
-        ("down-832", 832, 1, "実運用の係数表: 1024 → 832（832×480 の横）"),
-        ("up-2048", 2048, 1, "実運用の係数表: 1024 → 2048（2048² の横）"),
+        ("down-832", 832, 1, "production coefficient table: 1024 → 832 (the width of 832×480)"),
+        ("up-2048", 2048, 1, "production coefficient table: 1024 → 2048 (the width of 2048²)"),
     ),
     "column": (
-        ("down-480", COLUMN_WIDTH, 480, "実運用の係数表: 1024 → 480（832×480 の縦）"),
-        ("up-2048", COLUMN_WIDTH, 2048, "実運用の係数表: 1024 → 2048（2048² の縦）"),
+        (
+            "down-480",
+            COLUMN_WIDTH,
+            480,
+            "production coefficient table: 1024 → 480 (the height of 832×480)",
+        ),
+        (
+            "up-2048",
+            COLUMN_WIDTH,
+            2048,
+            "production coefficient table: 1024 → 2048 (the height of 2048²)",
+        ),
     ),
 }
 
@@ -254,59 +284,68 @@ def synthetic_inputs() -> tuple[MatteInput, ...]:
     return (
         MatteInput(
             "step",
-            "段差 0 / 255 の 4 → 8（R6B-001 の実測の 1 例）",
+            "a 0 / 255 step, 4 → 8 (one of the measured examples of R6B-001)",
             _row([-12.0, -12.0, 12.0, 12.0]),
-            (("up", 8, 1, "4 → 8 の拡大（bicubic の負のローブが 0 と 255 を越えて飽和で切る）"),),
+            (
+                (
+                    "up",
+                    8,
+                    1,
+                    "4 → 8 upscale (bicubic's negative lobes go past 0 and 255 and are clipped"
+                    " by saturation)",
+                ),
+            ),
         ),
         MatteInput(
             "ramp",
-            "滑らかな斜面の 8 → 21（R6B-001 の実測の 1 例）",
+            "a smooth ramp, 8 → 21 (one of the measured examples of R6B-001)",
             _row(np.linspace(-5.75, 6.25, 8).tolist()),
-            (("up", 21, 1, "8 → 21 の拡大"),),
+            (("up", 21, 1, "8 → 21 upscale"),),
         ),
         MatteInput(
             "thin",
-            "細い前景の 6 → 15（R6B-001 の実測の 1 例 — 差が最も大きい）",
+            "a thin foreground, 6 → 15 (one of the measured examples of R6B-001 — the largest"
+            " difference)",
             _row([-12.0, -12.0, 12.0, -12.0, -12.0, -12.0]),
-            (("up", 15, 1, "6 → 15 の拡大"),),
+            (("up", 15, 1, "6 → 15 upscale"),),
         ),
         MatteInput(
             "saturation",
-            "飽和の帯（logit 5.5〜18 — 255 になる境目を跨ぐ）",
+            "a saturation band (logits 5.5–18 — crosses the boundary where the value becomes 255)",
             _saturation_band(4, 12),
             (
-                ("up", 29, 9, "拡大"),
-                ("down", 5, 3, "縮小"),
-                ("identity", 12, 4, "恒等（量子化の境目だけ）"),
+                ("up", 29, 9, "upscale"),
+                ("down", 5, 3, "downscale"),
+                ("identity", 12, 4, "identity (only the quantization boundaries)"),
             ),
         ),
         MatteInput(
             "checker",
-            "市松 ±12（bicubic の overshoot を 0 / 255 で切る経路）",
+            "a ±12 checkerboard (the path where bicubic's overshoot is clipped at 0 / 255)",
             _checker(8, 8, 12.0),
-            (("up", 19, 20, "拡大"),),
+            (("up", 19, 20, "upscale"),),
         ),
         MatteInput(
             "disc",
-            "柔らかい輪郭の円盤",
+            "a disc with a soft edge",
             _disc(29, 33, 8.7, 1.5),
-            (("down", 7, 6, "縮小（台が 4〜5 倍に伸びる）"), ("up", 50, 44, "拡大")),
+            (("down", 7, 6, "downscale (the support widens 4–5×)"), ("up", 50, 44, "upscale")),
         ),
         MatteInput(
             "wide",
-            "横 120 の段差のある斜面",
+            "a ramp with a step, width 120",
             _wide_ramp(120),
-            (("down", 7, 2, "横 120 → 7（台が 17 倍に伸びる・縦は同寸）"),),
+            (("down", 7, 2, "width 120 → 7 (the support widens 17×, same height)"),),
         ),
         MatteInput(
             "tiny",
-            "3×2（両端でタップが切り詰められる）",
+            "3×2 (taps are truncated at both ends)",
             np.asarray([[-3.25, 1.5, 7.25], [9.5, -0.75, 2.25]], dtype=np.float32),
             (("up", 7, 5, "3×2 → 7×5"),),
         ),
         MatteInput(
             "single",
-            "1×1（全出力が 1 タップ）",
+            "1×1 (every output is 1 tap)",
             np.asarray([[2.5]], dtype=np.float32),
             (("up", 4, 3, "1×1 → 4×3"),),
         ),
@@ -414,12 +453,12 @@ def extract_real_inputs(logits_dir: Path) -> tuple[MatteInput, ...]:
                 "tensor": tensor_name,
             }
             stem = f"real-{case}-{image.removeprefix('photo-')}"
-            why = f"実画像の logit（{series} の {seat} 席・{image}）"
+            why = f"real-image logits ({series}, {seat} preset, {image})"
             x, y = select_crop(logits)
             inputs.append(
                 _real_input(
                     stem,
-                    f"{why}の輪郭付近の窓",
+                    f"{why}, window near the edge",
                     logits,
                     "crop",
                     source,
@@ -432,7 +471,7 @@ def extract_real_inputs(logits_dir: Path) -> tuple[MatteInput, ...]:
             inputs.append(
                 _real_input(
                     f"{stem}-row",
-                    f"{why}の窓の中心を通る 1 行",
+                    f"{why}, one row through the window's center",
                     logits,
                     "row",
                     source,
@@ -442,7 +481,7 @@ def extract_real_inputs(logits_dir: Path) -> tuple[MatteInput, ...]:
             inputs.append(
                 _real_input(
                     f"{stem}-column",
-                    f"{why}の窓の中心を通る幅 {COLUMN_WIDTH} の列",
+                    f"{why}, {COLUMN_WIDTH}-wide column through the window's center",
                     logits,
                     "column",
                     source,
@@ -648,22 +687,25 @@ def build_fixture(
         )
     document = {
         "_doc": [
-            "BiRefNet の α マットの後処理の上流の手順の golden"
-            "（生成: tools/export-recipes/birefnet/matte_fixture.py — ADR 0125）。",
-            "上流の関数をそのまま呼び、量子化だけを四捨五入（floor(x + 0.5)）へ差し替えたもの。",
-            "hr: numpy の f64 の σ → floor(255σ + 0.5) の uint8 → PIL.Image.fromarray(q)（L）"
-            ".resize((W, H))（resample 省略 = BICUBIC）。TS の u8-pil-bicubic と 0 不一致が契約"
-            "（生成器は 255σ が k + 0.5 から tieMargin 未満の標本を拒む）。",
-            "lucida: torch の f32 の sigmoid → torchvision.transforms.functional.resize(preds[0], "
-            "(H, W))（bilinear・antialias 既定）→ × 255（f32）。最終 α は floor(x + 0.5)。"
-            "TS の float-bilinear は一致するか、golden の 255α が k + 0.5 から epsilon 以内の"
-            "ときだけ 1 段ずれてよい。",
-            f"テンソルは {FIXTURE_TENSORS} の `<input>.logits`（F32 [h, w]）・`<case>.hr`"
-            "（U8 [H, W]）・`<case>.lucida`（F32 [H, W] — 丸める前の 255α）。",
-            "値は torch / torchvision / Pillow / numpy の版で決まる — 版を変えたら作り直す"
-            "（recipe の birefnet/tests/test_matte_fixture.py が今の版と突き合わせる）。",
-            "lucida の最終 bit は CPU の命令セットでも変わる — 作り直しも突き合わせも参照環境"
-            "（開発機）で行う（docs/limitations.md）。",
+            "Golden of the upstream post-processing steps of the BiRefNet α matte"
+            " (generated by tools/export-recipes/birefnet/matte_fixture.py — ADR 0125).",
+            "It calls the upstream functions as they are, with only the quantization replaced by"
+            " round-half-up (floor(x + 0.5)).",
+            "hr: numpy f64 σ → floor(255σ + 0.5) as uint8 → PIL.Image.fromarray(q) (L)"
+            ".resize((W, H)) (resample omitted = BICUBIC). The contract is 0 mismatches with TS's"
+            " u8-pil-bicubic (the generator rejects samples whose 255σ is less than tieMargin from"
+            " k + 0.5).",
+            "lucida: torch f32 sigmoid → torchvision.transforms.functional.resize(preds[0], "
+            "(H, W)) (bilinear, antialias default) → × 255 (f32). The final α is floor(x + 0.5)."
+            " TS's float-bilinear matches, or may be off by one step only where the golden's 255α"
+            " is within epsilon of k + 0.5.",
+            f"Tensors in {FIXTURE_TENSORS}: `<input>.logits` (F32 [h, w]), `<case>.hr`"
+            " (U8 [H, W]), `<case>.lucida` (F32 [H, W] — 255α before rounding).",
+            "The values are decided by the torch / torchvision / Pillow / numpy versions —"
+            " regenerate when a version changes (the recipe's birefnet/tests/test_matte_fixture.py"
+            " compares them with the current versions).",
+            "lucida's last bit also changes with the CPU instruction set — regenerate and compare"
+            " on the reference environment (the development machine) (docs/limitations.md).",
         ],
         "source": {
             "hr": "PIL.Image.Image.resize((W, H)) on PIL.Image.fromarray(floor(255σ_f64 + 0.5))",

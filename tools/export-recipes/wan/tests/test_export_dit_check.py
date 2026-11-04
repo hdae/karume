@@ -176,7 +176,7 @@ class TestNoExistingSeries:
 
         monkeypatch.setattr(export_dit, "load_transformer", never)
 
-        with pytest.raises(export_dit.SeriesMismatchError, match="照合の相手"):
+        with pytest.raises(export_dit.SeriesMismatchError, match="to compare against"):
             _check()
 
 
@@ -192,9 +192,9 @@ class TestSeriesMismatches:
         existing = self._directory(tmp_path / "e", {"a": b"1", "b": b"3", "gone": b"y"})
 
         assert export_dit.series_mismatches(written, existing) == {
-            "b": "sha256 が違う",
-            "extra": "既存に無い",
-            "gone": "書いた側に無い",
+            "b": "sha256 differs",
+            "extra": "missing from the existing directory",
+            "gone": "missing from the written directory",
         }
 
     def test_skipped_files_must_exist_only_in_the_series(self, tmp_path: Path) -> None:
@@ -204,15 +204,15 @@ class TestSeriesMismatches:
         assert export_dit.series_mismatches(
             written, existing, absent={"skip", "both", "nowhere"}
         ) == {
-            "both": "照合から外したケースのファイルを書いた",
-            "nowhere": "照合から外したケースのファイルが既存に無い",
+            "both": "wrote the file of an excluded case",
+            "nowhere": "the file of an excluded case is missing from the existing directory",
         }
 
     def test_a_directory_inside_the_component_fails_loudly(self, tmp_path: Path) -> None:
         written = self._directory(tmp_path / "w", {"a": b"1"})
         (written / "nested").mkdir()
 
-        with pytest.raises(export_dit.SeriesMismatchError, match="ファイルでない項目"):
+        with pytest.raises(export_dit.SeriesMismatchError, match="not a file"):
             export_dit.file_digests(written)
 
 

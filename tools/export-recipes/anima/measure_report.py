@@ -238,15 +238,15 @@ def build_summary(
             ratio = max(series)
             ratio_ok = ratio <= LATENT_RATIO_GATE
             gate(
-                f"`{name}` の latent relRMS ≤ {LATENT_RATIO_GATE:g}× (vs {baseline})",
+                f"`{name}` latent relRMS ≤ {LATENT_RATIO_GATE:g}× (vs {baseline})",
                 ratio_ok,
                 f"max {ratio:.3f}× (step {1 + series.index(ratio)}) → {'OK' if ratio_ok else 'NG'}",
             )
         else:
             series = configs[name]["latent_ratio_vs_w8"]
             ratio = max(series)
-            gates[f"`{name}` の latent relRMS（参考・門の対象外）"] = (
-                f"`w8` 比 最大 {ratio:.3f}×"
+            gates[f"`{name}` latent relRMS (reference only, outside the gate)"] = (
+                f"vs `w8`: max {ratio:.3f}×"
                 f" (step {1 + series.index(ratio)})"
                 " — the contribution of attention alone, with the linear activations in f32"
             )
@@ -255,7 +255,7 @@ def build_summary(
         if diagnostic["attn_calls_expected"]:
             ok = diagnostic["attn_calls"] == diagnostic["attn_calls_expected"]
             gate(
-                f"`{name}` の SDPA 発火計数",
+                f"`{name}` SDPA call count",
                 ok,
                 f"{diagnostic['attn_calls']} / {diagnostic['attn_calls_expected']}"
                 f" → {'OK' if ok else 'NG'}",
@@ -270,7 +270,7 @@ def build_summary(
         fired, attempts = diagnostic["s16_fired_calls"], diagnostic["s16_rounded_calls"]
         ok = bool(attempts) and fired == attempts
         gate(
-            f"`{name}` の S f16 丸めが全呼び出しで発火",
+            f"`{name}` S f16 rounding fires on every call",
             ok,
             f"{fired} / {attempts} ({diagnostic['s16_elements']:,} elements,"
             f" max |S| {diagnostic['s16_abs_max']:.1f} < f16 limit 65,504)"
@@ -278,7 +278,9 @@ def build_summary(
         )
     for name in attn_configs:
         differs = not torch.equal(latents[f"{name}/{keys[-1]}"], latents[f"{baseline}/{keys[-1]}"])
-        gate(f"`{name}` が `{baseline}` と異なる", differs, "OK" if differs else "NG（素通し）")
+        gate(
+            f"`{name}` differs from `{baseline}`", differs, "OK" if differs else "NG (passthrough)"
+        )
 
     return {
         "pt": pt,

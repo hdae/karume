@@ -186,9 +186,9 @@ def sbv2_family(model_dir: Path) -> str:
         f"{family}: {', '.join(prefixes)}" for family, prefixes in sorted(SBV2_FAMILY_DIRS.items())
     )
     raise Sbv2FamilyError(
-        f"'{name}' がどの声のファミリーの綴りにも当たらない（既知の接頭辞 — {listed}）"
-        " — 出所とライセンスが決まらないので配布形を焼かない"
-        "（README の '--model-dir' の規約に合わせる）"
+        f"'{name}' matches the spelling of no voice family (known prefixes — {listed})"
+        " — its provenance and license cannot be determined, so no distribution is baked"
+        " (follow the '--model-dir' convention in the README)"
     )
 
 
@@ -447,15 +447,16 @@ def _assert_window_size(net_g: nn.Module) -> None:
     ]
     if not found:
         raise ValueError(
-            "window_size を持つモジュールが 1 つも無い — 窓幅の門が恒真化している"
-            "（相対位置注意の属性名が上流で変わった可能性）"
+            "no module has window_size — the window size check is vacuous"
+            " (the attribute name of relative-position attention may have changed upstream)"
         )
     mismatched = [(where, size) for where, size in found if size != EXPECTED_WINDOW_SIZE]
     if mismatched:
         raise ValueError(
-            f"相対位置注意の窓幅が前提（{EXPECTED_WINDOW_SIZE}）と違うモジュールが"
-            f" {len(mismatched)}/{len(found)} 件: {mismatched}"
-            " — 表の生成側が焼き込む幅と食い違うと誤った埋め込みを黙って読む"
+            "the relative-position attention window size differs from the assumed one"
+            f" ({EXPECTED_WINDOW_SIZE}) in {len(mismatched)}/{len(found)} modules: {mismatched}"
+            " — when it disagrees with the width the table generator bakes in, wrong embeddings"
+            " are read silently"
         )
 
 
@@ -499,8 +500,8 @@ def _assert_patches_not_applied(where: str) -> None:
     """
     if patch.patches_applied():
         raise RuntimeError(
-            f"{where}: パッチ適用後に参照値を採ろうとした — 同値検証が恒真化する"
-            "（順序は「全ケースの参照を確定 → パッチ適用 → 比較」）"
+            f"{where}: tried to take a reference after patching — the equivalence check becomes"
+            " vacuous (the order is 'fix the references of every case → patch → compare')"
         )
 
 
@@ -517,9 +518,9 @@ def _assert_weight_norm_present(module: nn.Module, where: str) -> None:
     """
     if not _weight_norm_parameters(module):
         raise RuntimeError(
-            f"{where}: remove_weight_norm 済みの net_g で参照値を採ろうとした"
-            " — remove 前後の同値検証が恒真化する"
-            "（順序は「全ケースの参照を確定 → remove → 比較」）"
+            f"{where}: tried to take a reference on a net_g after remove_weight_norm"
+            " — the equivalence check before and after remove becomes vacuous"
+            " (the order is 'fix the references of every case → remove → compare')"
         )
 
 
@@ -534,7 +535,7 @@ def speaker_embedding(net_g: nn.Module, speaker_id: int = SPEAKER_ID) -> torch.T
     """
     num_speakers = net_g.emb_g.num_embeddings
     if not 0 <= speaker_id < num_speakers:
-        raise ValueError(f"話者 ID {speaker_id} がモデルの話者数 {num_speakers} の外")
+        raise ValueError(f"speaker ID {speaker_id} is outside the model's {num_speakers} speakers")
     with torch.no_grad():
         return net_g.emb_g(torch.tensor([speaker_id], dtype=torch.int64)).unsqueeze(-1)
 
@@ -553,7 +554,7 @@ def style_vector(model_dir: Path, style_id: int = STYLE_ID) -> torch.Tensor:
     if table.ndim != 2 or table.shape[1] != 256:
         raise ValueError(f"{path} has shape {table.shape}, not [number of styles, 256]")
     if not 0 <= style_id < table.shape[0]:
-        raise ValueError(f"スタイル ID {style_id} がスタイル数 {table.shape[0]} の外")
+        raise ValueError(f"style ID {style_id} is outside the {table.shape[0]} styles")
     return torch.from_numpy(np.ascontiguousarray(table[style_id])).to(torch.float32).unsqueeze(0)
 
 

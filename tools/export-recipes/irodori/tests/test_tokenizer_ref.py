@@ -184,7 +184,7 @@ class TestRuleCoverage:
             tok.check_rule_coverage(thinned)
 
     def test_a_case_list_without_brackets_fails_loudly(self, cases):
-        thinned = [case for case in cases if not case["why"].startswith("括弧剥がし")]
+        thinned = [case for case in cases if not case["why"].startswith("bracket stripping")]
 
         with pytest.raises(SystemExit, match="coverage is thin"):
             tok.check_rule_coverage(thinned)

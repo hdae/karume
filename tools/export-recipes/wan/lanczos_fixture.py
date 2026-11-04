@@ -114,93 +114,119 @@ def build_cases() -> tuple[LanczosCase, ...]:
     """The fixture cases (order and contents are set by the seed — rebuilding gives the same)."""
     rng = np.random.default_rng(SEED)
     cases = [
-        LanczosCase("up-2x", "両軸ちょうど 2 倍の拡大", _noise(rng, 7, 11), 14, 22),
-        LanczosCase("up-odd", "両軸とも非整数倍の拡大（13×9 → 50×31）", _gradient(9, 13), 31, 50),
+        LanczosCase("up-2x", "exactly 2x upscale on both axes", _noise(rng, 7, 11), 14, 22),
         LanczosCase(
-            "down-3x", "両軸ちょうど 1/3 の縮小（台が 3 倍に伸びる）", _noise(rng, 45, 60), 15, 20
+            "up-odd", "non-integer upscale on both axes (13×9 → 50×31)", _gradient(9, 13), 31, 50
         ),
         LanczosCase(
-            "down-odd", "両軸とも非整数倍の縮小（73×41 → 29×17）", _noise(rng, 41, 73), 17, 29
+            "down-3x",
+            "exactly 1/3 downscale on both axes (the support stretches 3x)",
+            _noise(rng, 45, 60),
+            15,
+            20,
+        ),
+        LanczosCase(
+            "down-odd",
+            "non-integer downscale on both axes (73×41 → 29×17)",
+            _noise(rng, 41, 73),
+            17,
+            29,
         ),
         LanczosCase(
             "horizontal-only",
-            "横だけ縮小・縦は同寸（縦のパスを飛ばす）",
+            "horizontal downscale only, same height (skips the vertical pass)",
             _noise(rng, 12, 40),
             12,
             23,
         ),
         LanczosCase(
-            "vertical-only", "縦だけ拡大・横は同寸（横のパスを飛ばす）", _noise(rng, 40, 12), 57, 12
+            "vertical-only",
+            "vertical upscale only, same width (skips the horizontal pass)",
+            _noise(rng, 40, 12),
+            57,
+            12,
         ),
         LanczosCase(
             "mixed-axes",
-            "横は縮小・縦は拡大（2 パスの軸の取り違えを掴む）",
+            "horizontal downscale, vertical upscale"
+            " (catches the axes of the two passes being swapped)",
             _gradient(9, 50),
             27,
             18,
         ),
         LanczosCase(
-            "identity", "両軸とも同寸（両パスを飛ばす — 出力 = 入力）", _noise(rng, 13, 21), 13, 21
+            "identity",
+            "same size on both axes (skips both passes — output = input)",
+            _noise(rng, 13, 21),
+            13,
+            21,
         ),
-        LanczosCase("tiny", "3×2 → 7×5（両端でタップが切り詰められる）", _noise(rng, 2, 3), 5, 7),
+        LanczosCase(
+            "tiny", "3×2 → 7×5 (taps are truncated at both edges)", _noise(rng, 2, 3), 5, 7
+        ),
         LanczosCase(
             "single-pixel",
-            "1×1 → 4×3（全出力が 1 タップ）",
+            "1×1 → 4×3 (every output has a single tap)",
             np.array([[[7, 128, 249]]], dtype=np.uint8),
             3,
             4,
         ),
         LanczosCase(
             "checker-ringing",
-            "市松 0 / 255 の拡大（負のローブで 0 と 255 を越え、飽和で切る経路）",
+            "upscale of a 0 / 255 checkerboard"
+            " (the negative lobes overshoot 0 and 255; the saturating clip path)",
             _checker(16, 16),
             20,
             24,
         ),
         LanczosCase(
             "large-down",
-            "横 120 → 7（台が 17 倍に伸びて 100 タップを超える）",
+            "width 120 → 7 (the support stretches 17x and exceeds 100 taps)",
             _gradient(8, 120),
             8,
             7,
         ),
         LanczosCase(
             "cover-up",
-            "832×480 → 1280×738 と同じ比の拡大を小さく（52×30 → 80×46）",
+            "a small upscale with the ratio of 832×480 → 1280×738 (52×30 → 80×46)",
             _noise(rng, 30, 52),
             46,
             80,
         ),
         LanczosCase(
             "cover-down",
-            "832×480 → 277×160 と同じ比の縮小を小さく（99×57 → 33×19）",
+            "a small downscale with the ratio of 832×480 → 277×160 (99×57 → 33×19)",
             _noise(rng, 57, 99),
             19,
             33,
         ),
     ]
     rows = (
-        (1280, "1280×704 の crop と stretch の横"),
-        (2219, "704×1280 の crop の横（2.67 倍の拡大）"),
-        (277, "256×160 の crop の横（1/3 の縮小）"),
+        (1280, "width of the 1280×704 crop and stretch"),
+        (2219, "width of the 704×1280 crop (2.67x upscale)"),
+        (277, "width of the 256×160 crop (1/3 downscale)"),
     )
     for out_width, why in rows:
         cases.append(
             LanczosCase(
-                f"row-832-{out_width}", f"実運用の係数表: {why}", _noise(rng, 1, 832), 1, out_width
+                f"row-832-{out_width}",
+                f"production coefficient table: {why}",
+                _noise(rng, 1, 832),
+                1,
+                out_width,
             )
         )
     columns = (
-        (738, "1280×704 の crop の縦"),
-        (1280, "704×1280 の crop の縦"),
-        (160, "256×160 の crop の縦（ちょうど 1/3）"),
-        (704, "1280×704 の stretch の縦"),
+        (738, "height of the 1280×704 crop"),
+        (1280, "height of the 704×1280 crop"),
+        (160, "height of the 256×160 crop (exactly 1/3)"),
+        (704, "height of the 1280×704 stretch"),
     )
     for out_height, why in columns:
         cases.append(
             LanczosCase(
                 f"column-480-{out_height}",
-                f"実運用の係数表: {why}",
+                f"production coefficient table: {why}",
                 _noise(rng, 480, 1),
                 out_height,
                 1,
@@ -214,7 +240,7 @@ def build_cases() -> tuple[LanczosCase, ...]:
         cases.append(
             LanczosCase(
                 f"sweep-{index:02d}",
-                "乱択の幾何（seed 固定）",
+                "random geometry (fixed seed)",
                 _noise(rng, height, width),
                 out_height,
                 out_width,
@@ -255,20 +281,20 @@ def build_fixture() -> tuple[dict[str, Any], dict[str, np.ndarray]]:
         )
     document = {
         "_doc": [
-            "Pillow の LANCZOS（Image.resize(size, Image.LANCZOS)）の入出力の組"
-            "（生成: tools/export-recipes/wan/lanczos_fixture.py）。",
-            "Wan2.2 の I2V の前処理（公式の crop と diffusers の stretch）の resize の正本で、"
-            "TS 側は"
-            " Pillow の Resample.c の 22 bit 固定小数点を逐語で写し、uint8 で完全一致させる。",
-            f"画素は {FIXTURE_TENSORS} の U8 テンソル `<name>.input` [height, width, 3] と"
-            " `<name>.resized` [outHeight, outWidth, 3]（RGB8 の行優先）。",
-            "row-* / column-* は実運用の 1 次元の係数表（832 → 1280 / 2219 / 277・"
-            "480 → 738 / 1280 / 160"
-            " / 704）を 1 行・1 列の高周波ノイズで掃く（見るのは出力の uint8 — 整数係数の ±1 は"
-            "積和が 2^22 の境界をまたぐときしか出力に出ないので、"
-            "係数表の一致の証拠にはならない）。",
-            "値は Pillow の版で決まる — 版を変えたら作り直す（recipe の"
-            " wan/tests/test_lanczos_fixture.py が今の Pillow と突き合わせる）。",
+            "Input / output pairs of Pillow's LANCZOS (Image.resize(size, Image.LANCZOS))"
+            " (generated by tools/export-recipes/wan/lanczos_fixture.py).",
+            "The source of truth for the resize of the Wan2.2 I2V preprocessing (the official crop"
+            " and the diffusers stretch); the TS side copies the 22-bit fixed point of Pillow's"
+            " Resample.c verbatim and matches it exactly in uint8.",
+            f"The pixels are the U8 tensors of {FIXTURE_TENSORS}: `<name>.input` [height, width, 3]"
+            " and `<name>.resized` [outHeight, outWidth, 3] (RGB8, row-major).",
+            "row-* / column-* sweep the production 1-D coefficient tables (832 → 1280 / 2219 / 277;"
+            " 480 → 738 / 1280 / 160 / 704) with one row / one column of high-frequency noise"
+            " (what is compared is the uint8 output — a ±1 in an integer coefficient shows in the"
+            " output only when the multiply-accumulate crosses a 2^22 boundary, so this is no"
+            " evidence that the coefficient tables match).",
+            "The values depend on the Pillow version — regenerate after changing it (the recipe's"
+            " wan/tests/test_lanczos_fixture.py checks them against the installed Pillow).",
         ],
         "source": {
             "reference": "PIL.Image.Image.resize(size, PIL.Image.LANCZOS)",

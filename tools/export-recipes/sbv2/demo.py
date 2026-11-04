@@ -370,7 +370,7 @@ def dump_metadata(path: Path) -> dict[str, Any]:
     with safe_open(str(path), framework="pt") as handle:
         metadata = handle.metadata() or {}
     if "demo" not in metadata:
-        raise ValueError(f"{path} に __metadata__.demo が無い（デモの dump ではない）")
+        raise ValueError(f"{path} has no __metadata__.demo (it is not a demo dump)")
     return json.loads(metadata["demo"])
 
 
@@ -379,7 +379,8 @@ def tile_bert(hidden: torch.Tensor, word2ph: list[int]) -> torch.Tensor:
     → transpose)."""
     if hidden.shape[0] != len(word2ph):
         raise AssertionError(
-            f"hidden のトークン数 {hidden.shape[0]} が word2ph 長 {len(word2ph)} と違う"
+            f"the token count {hidden.shape[0]} of hidden differs from the word2ph length"
+            f" {len(word2ph)}"
         )
     return torch.cat([hidden[i].repeat(n, 1) for i, n in enumerate(word2ph)], dim=0).T.contiguous()
 

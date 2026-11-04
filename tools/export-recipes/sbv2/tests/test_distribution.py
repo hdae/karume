@@ -463,7 +463,9 @@ class TestSbv2StyleVectors:
     def test_it_stops_when_the_row_count_disagrees_with_num_styles(self, tmp_path: Path) -> None:
         sources = _build_sbv2_sources(tmp_path, style_rows=2)
         out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
-        with pytest.raises(DistError, match="行数 2 が config の num_styles 3"):
+        with pytest.raises(
+            DistError, match="the row count 2 does not match the config's num_styles 3"
+        ):
             _assemble_sbv2(sources, out_dir)
         # The check comes before placement — not a single file of a partial distribution is left.
         assert not out_dir.exists()
@@ -475,13 +477,13 @@ class TestSbv2StyleVectors:
         data = {**_SBV2_CONFIG["data"], "style2id": {"Neutral": 0, "Sleepy": 1}}
         config = {**_SBV2_CONFIG, "data": data}
         sources = _build_sbv2_sources(tmp_path, config=config)
-        with pytest.raises(DistError, match=r"style2id 2 件と一致しない"):
+        with pytest.raises(DistError, match=r"style2id \(2 entries\) — a style ID"):
             sbv2_style_vectors(sources.model, config)
 
     def test_it_stops_when_the_table_is_not_two_dimensional(self, tmp_path: Path) -> None:
         sources = _build_sbv2_sources(tmp_path)
         np.save(sources.model / "style_vectors.npy", np.zeros(256, dtype=np.float32))
-        with pytest.raises(DistError, match=r"\[スタイル数, 256\] でない"):
+        with pytest.raises(DistError, match=r"is not \[number of styles, 256\]"):
             sbv2_style_vectors(sources.model, _SBV2_CONFIG)
 
     def test_it_stops_when_the_table_is_not_256_wide(self, tmp_path: Path) -> None:
@@ -493,7 +495,7 @@ class TestSbv2StyleVectors:
         """
         sources = _build_sbv2_sources(tmp_path)
         np.save(sources.model / "style_vectors.npy", np.zeros((3, 128), dtype=np.float32))
-        with pytest.raises(DistError, match=r"\(3, 128\) が \[スタイル数, 256\] でない"):
+        with pytest.raises(DistError, match=r"\(3, 128\) is not \[number of styles, 256\]"):
             sbv2_style_vectors(sources.model, _SBV2_CONFIG)
 
 
@@ -520,7 +522,7 @@ class TestSbv2SpeakerEmbeddings:
     def test_it_stops_when_the_row_count_disagrees_with_n_speakers(self, tmp_path: Path) -> None:
         sources = _build_sbv2_sources(tmp_path, speaker_rows=3)
         out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
-        with pytest.raises(DistError, match="行数 3 が config の n_speakers 2"):
+        with pytest.raises(DistError, match="row count 3 does not match the config's n_speakers 2"):
             _assemble_sbv2(sources, out_dir)
         # The check comes before placement — not a single file of a partial distribution is left.
         assert not out_dir.exists()
@@ -532,7 +534,7 @@ class TestSbv2SpeakerEmbeddings:
         data = {**_SBV2_CONFIG["data"], "spk2id": {"kappa": 0}}
         config = {**_SBV2_CONFIG, "data": data}
         sources = _build_sbv2_sources(tmp_path, config=config)
-        with pytest.raises(DistError, match=r"spk2id 1 件と一致しない"):
+        with pytest.raises(DistError, match=r"spk2id \(1 entries\) — a speaker ID"):
             sbv2_speaker_embeddings(sources.model, config)
 
     def test_it_stops_when_the_column_count_disagrees_with_gin_channels(
@@ -541,7 +543,9 @@ class TestSbv2SpeakerEmbeddings:
         """The column count can be derived from the config (it is the width of the graph input g
         itself), so the whole shape is constrained."""
         sources = _build_sbv2_sources(tmp_path, speaker_cols=_SBV2_GIN_CHANNELS + 1)
-        with pytest.raises(DistError, match="列数 9 が config の gin_channels 8"):
+        with pytest.raises(
+            DistError, match="column count 9 does not match the config's gin_channels 8"
+        ):
             sbv2_speaker_embeddings(sources.model, _SBV2_CONFIG)
 
     def test_it_stops_when_the_ckpt_has_no_speaker_embedding(self, tmp_path: Path) -> None:
@@ -555,12 +559,12 @@ class TestSbv2SpeakerEmbeddings:
         requirement as `load_net_g`)."""
         sources = _build_sbv2_sources(tmp_path)
         save_file({"emb_g.weight": _speaker_table(2)}, str(sources.model / "another.safetensors"))
-        with pytest.raises(DistError, match="ckpt が一意でない"):
+        with pytest.raises(DistError, match="the ckpt is not unique"):
             sbv2_speaker_embeddings(sources.model, _SBV2_CONFIG)
 
     def test_it_stops_when_the_config_has_no_model_section(self, tmp_path: Path) -> None:
         sources = _build_sbv2_sources(tmp_path)
-        with pytest.raises(DistError, match="'model' 節が無い"):
+        with pytest.raises(DistError, match="has no 'model' section"):
             sbv2_speaker_embeddings(sources.model, {"data": _SBV2_CONFIG["data"]})
 
     def test_the_speaker_map_resolves_into_the_shipped_table(self, sbv2_assembled) -> None:
@@ -615,12 +619,12 @@ class TestSbv2PipelineConfig:
 
     def test_it_stops_when_the_default_style_is_absent_from_the_config(self) -> None:
         knobs = {**_SBV2_KNOBS, "style": "Whisper"}
-        with pytest.raises(DistError, match="既定スタイル 'Whisper'"):
+        with pytest.raises(DistError, match="the default style 'Whisper' is not in"):
             sbv2_pipeline_config(_SBV2_CONFIG, knobs)
 
     def test_it_stops_when_a_knob_default_is_missing(self) -> None:
         knobs = {key: value for key, value in _SBV2_KNOBS.items() if key != "noiseScaleW"}
-        with pytest.raises(DistError, match="実行時ノブの既定が足りない"):
+        with pytest.raises(DistError, match="runtime knob defaults are missing"):
             sbv2_pipeline_config(_SBV2_CONFIG, knobs)
 
     def test_it_stops_when_the_config_has_no_style_table(self) -> None:
@@ -628,7 +632,7 @@ class TestSbv2PipelineConfig:
             sbv2_pipeline_config({"data": {"spk2id": {"kappa": 0}}}, _SBV2_KNOBS)
 
     def test_it_stops_when_the_config_has_no_data_section(self) -> None:
-        with pytest.raises(DistError, match="'data' 節が無い"):
+        with pytest.raises(DistError, match="has no 'data' section"):
             sbv2_pipeline_config({"model": {"gin_channels": 512}}, _SBV2_KNOBS)
 
     def test_it_declares_the_operating_limits_the_loader_requires(self, sbv2_assembled) -> None:
@@ -832,7 +836,7 @@ class TestSbv2SymGate:
         self._rebake(sources, "voice_i8", "T", 1024)
         out_dir = tmp_path / "models" / sbv2_repo_name("jvnv")
 
-        with pytest.raises(DistError, match=r"voice_i8: .*上限 1024 .*宣言は 4096"):
+        with pytest.raises(DistError, match=r"voice_i8: .*the limit 1024, .*declares 4096"):
             _assemble_sbv2(sources, out_dir)
         # The check comes before placement — not a single file of a partial distribution is left.
         assert not out_dir.exists()
@@ -844,7 +848,7 @@ class TestSbv2SymGate:
         sources = _build_sbv2_sources(tmp_path)
         self._rebake(sources, "front_f16", "P", 256)
 
-        with pytest.raises(DistError, match=r"front_f16: .*上限 256 .*宣言は 512"):
+        with pytest.raises(DistError, match=r"front_f16: .*the limit 256, .*declares 512"):
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_the_text_encoder_grew_a_baked_symbol_slice(self, tmp_path: Path) -> None:
@@ -860,7 +864,9 @@ class TestSbv2SymGate:
         sources = _build_sbv2_sources(tmp_path)
         self._rebake(sources, "text_encoder", "T", SBV2_MAX_TOKENS)
 
-        with pytest.raises(DistError, match=r"text_encoder: .* sym_prefix_slice が 1 本ある"):
+        with pytest.raises(
+            DistError, match=r"text_encoder: .* has sym_prefix_slice nodes .*: 1 of them"
+        ):
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_the_graph_has_no_baked_symbol_slice(self, tmp_path: Path) -> None:
@@ -871,7 +877,7 @@ class TestSbv2SymGate:
             sbv2_placements(sources)["front_i4"], _sbv2_container("front_i4", baked=False)
         )
 
-        with pytest.raises(DistError, match=r"front_i4: .* sym_prefix_slice が 1 本も無い"):
+        with pytest.raises(DistError, match=r"front_i4: .* has no sym_prefix_slice .* at all"):
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_the_expectations_cover_every_weights_seat(self) -> None:
@@ -926,7 +932,9 @@ class TestSbv2SymProvenance:
         sources = _build_sbv2_sources(tmp_path)
         self._record(sources, "voice_f16", {"target": "voice", "sym_max": 1024})
 
-        with pytest.raises(DistError, match=r"voice_f16: 出所記録の sym_max が 1024"):
+        with pytest.raises(
+            DistError, match=r"voice_f16: the sym_max in the provenance record is 1024"
+        ):
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_the_record_names_another_target(self, tmp_path: Path) -> None:
@@ -935,7 +943,9 @@ class TestSbv2SymProvenance:
         sources = _build_sbv2_sources(tmp_path)
         self._record(sources, "voice_i4", {"target": "front", "sym_max": SBV2_MAX_FRAMES})
 
-        with pytest.raises(DistError, match=r"voice_i4: 出所記録の target が 'front'"):
+        with pytest.raises(
+            DistError, match=r"voice_i4: the target in the provenance record is 'front'"
+        ):
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_a_matching_text_encoder_record_changes_nothing(self, tmp_path: Path) -> None:
@@ -967,7 +977,9 @@ class TestSbv2SymProvenance:
             sources, "text_encoder_i4", {"target": SBV2_TEXT_ENCODER_VARIANT, "sym_max": 256}
         )
 
-        with pytest.raises(DistError, match=r"text_encoder_i4: 出所記録の sym_max が 256"):
+        with pytest.raises(
+            DistError, match=r"text_encoder_i4: the sym_max in the provenance record is 256"
+        ):
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_the_text_encoder_record_names_another_variant(
@@ -984,7 +996,9 @@ class TestSbv2SymProvenance:
         sources = _build_sbv2_sources(tmp_path)
         self._record(sources, "text_encoder", {"target": "full-24layer", "sym_max": 512})
 
-        with pytest.raises(DistError, match=r"text_encoder: 出所記録の target が 'full-24layer'"):
+        with pytest.raises(
+            DistError, match=r"text_encoder: the target in the provenance record is 'full-24layer'"
+        ):
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_the_record_is_not_json(self, tmp_path: Path) -> None:
@@ -993,7 +1007,7 @@ class TestSbv2SymProvenance:
             "not-json", encoding="utf-8"
         )
 
-        with pytest.raises(DistError, match=r"front_i8: 出所記録を解析できない"):
+        with pytest.raises(DistError, match=r"front_i8: cannot parse the provenance record"):
             _assemble_sbv2(sources, tmp_path / "out")
 
 
@@ -1014,7 +1028,7 @@ class TestSbv2BertHiddenGate:
             sources.text_encoder / "model.krm", _sbv2_container("text_encoder", layers=24)
         )
         out_dir = tmp_path / "out"
-        with pytest.raises(DistError, match=r"encoder は 24 層で、期待の 22 層でない"):
+        with pytest.raises(DistError, match=r"has 24 layers, not the expected 22"):
             _assemble_sbv2(sources, out_dir)
         # The check comes before placement — not a single file of a partial distribution is left.
         assert not out_dir.exists()
@@ -1026,7 +1040,9 @@ class TestSbv2BertHiddenGate:
         replace_component(
             sources.text_encoder / "model.krm", _sbv2_container("text_encoder", outputs=23)
         )
-        with pytest.raises(DistError, match=r"グラフ出力が 23 本で、配布形が要求する 1 本でない"):
+        with pytest.raises(
+            DistError, match=r"has 23 graph outputs, not the 1 the distribution requires"
+        ):
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_only_the_symbols_are_stale(self, tmp_path: Path) -> None:
@@ -1034,7 +1050,9 @@ class TestSbv2BertHiddenGate:
         all-layers-out graph."""
         symbols = json.dumps({"bertHiddenFromEnd": 3})
         sources = _build_sbv2_sources(tmp_path, symbols=symbols.encode("utf-8"))
-        with pytest.raises(DistError, match=r"bertHiddenFromEnd=3 が、出力 1 本のグラフで"):
+        with pytest.raises(
+            DistError, match=r"bertHiddenFromEnd=3 is not 1, the only value meaningful"
+        ):
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_stops_when_the_position_tables_were_baked_back_in(self, tmp_path: Path) -> None:
@@ -1045,7 +1063,9 @@ class TestSbv2BertHiddenGate:
             sources.text_encoder / "model.krm",
             _sbv2_container("text_encoder", inputs=("input_ids", "attention_mask")),
         )
-        with pytest.raises(DistError, match=r"グラフ入力が \['input_ids', 'attention_mask'\]"):
+        with pytest.raises(
+            DistError, match=r"graph inputs of .* are \['input_ids', 'attention_mask'\]"
+        ):
             _assemble_sbv2(sources, tmp_path / "out")
 
     def test_it_checks_every_text_encoder_seat(self, tmp_path: Path) -> None:
@@ -1059,7 +1079,7 @@ class TestSbv2BertHiddenGate:
         replace_component(
             sources.text_encoder_i4 / "model.krm", _sbv2_container("text_encoder_i4", layers=24)
         )
-        with pytest.raises(DistError, match=r"encoder は 24 層で、期待の 22 層でない"):
+        with pytest.raises(DistError, match=r"has 24 layers, not the expected 22"):
             _assemble_sbv2(sources, tmp_path / "out")
 
 
@@ -1529,7 +1549,7 @@ class TestSbv2Cli:
         _, sources = self._sources(tmp_path, model)
         self._reroot(tmp_path, monkeypatch)
 
-        with pytest.raises(DistError, match="リポに入らない"):
+        with pytest.raises(DistError, match="does not belong in the repository of voice family"):
             main(
                 [
                     "--pipeline",

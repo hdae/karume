@@ -1,20 +1,25 @@
-"""chat フィクスチャ台本（`gemma4/chat.py`）の台本レベルの約束事（実資産不要分）。
+"""Script-level contracts of the chat fixture script (`gemma4/chat.py`) — the part that needs no
+real assets.
 
-実資産（32MB の `tokenizer.json` + `chat_template.jinja`）はローカルにしか無いので、ここは
-**合成資産 + 合成 template**（`tests/gemma_synthetic.py`）で回す。固定するのは、壊れると
-**偽 PASS** になる側の規律だけ:
+The real assets (the 32 MB `tokenizer.json` + `chat_template.jinja`) exist only locally, so this
+runs on **a synthetic asset + a synthetic template** (`tests/gemma_synthetic.py`). It pins only
+the rules whose breakage would turn into a **false PASS**:
 
-- 射程の門（{@link chat.assert_plain_conversation}）が tools / thinking / tool_call /
-  画像パート / 未知 role / 空の会話を**実際に落とす**こと（ADR 0084 決定 5・6.3）。黙って
-  無視すると「tool を渡したのに使われない」が例外なしで通る
-- 出荷する電池（{@link chat.CASES}）が 1 件残らず射程の内側にあり、名前が重複しないこと
-- 期待値の経路に**自前のレンダラを 1 行も通さない**こと（ADR 0084 決定 7 — 通すと突合が
-  恒真化する）。ここは「注入した tokenizer が返したものがそのまま載る」で見る
-- `apply_chat_template(tokenize=True)` と「描画 → `add_special_tokens=False` の符号化」の
-  食い違いを採取時に落とすこと（TS 側の 2 段構成の前提そのもの）
-- `generation_config.json` の `eos_token_id` を集合として読むこと（単数宣言も受ける）
+- the scope check ({@link chat.assert_plain_conversation}) **actually rejects** tools / thinking /
+  tool_call / image parts / unknown roles / an empty conversation (ADR 0084 decisions 5 and 6.3).
+  Ignoring them silently would let "I passed a tool and it was not used" through without an
+  exception
+- every case of the shipped battery ({@link chat.CASES}) is inside the scope, and no name repeats
+- **not one line of an in-house renderer** is on the expectation path (ADR 0084 decision 7 —
+  otherwise the comparison becomes tautological). This is checked as "what the injected tokenizer
+  returned is stored as is"
+- a mismatch between `apply_chat_template(tokenize=True)` and "render → encode with
+  `add_special_tokens=False`" fails at harvest time (the very premise of the TS two-step build)
+- `eos_token_id` of `generation_config.json` is read as a set (a singular declaration is accepted
+  too)
 
-transformers を要するケースだけ `importorskip` で SKIP する（ADR 0065 の 2 job 構成）。
+Only the cases that need transformers SKIP through `importorskip` (the two-job layout of ADR
+0065).
 """
 
 from __future__ import annotations
@@ -29,8 +34,9 @@ from gemma_synthetic import tokenizer_json
 from _shared.gemma_tokenizer import compile_tokenizer
 from gemma4 import chat, sources
 
-#: 合成 template（素の会話の 3 分岐だけを持つ — 実 template の代役ではなく「注入された
-#: レンダラの出力がそのまま載る」ことを見るための的）。
+#: A synthetic template (it has only the three branches of plain conversations — not a stand-in
+#: for the real template, but a target that shows "the injected renderer's output is stored as
+#: is").
 SYNTHETIC_TEMPLATE = (
     "{{- bos_token -}}"
     "{%- for m in messages -%}{{- '<' + m['role'] + '>' + m['content'] -}}{%- endfor -%}"
@@ -39,7 +45,8 @@ SYNTHETIC_TEMPLATE = (
 
 
 def _hf_tokenizer(template: str = SYNTHETIC_TEMPLATE) -> Any:
-    """合成資産 + 合成 template の HF tokenizer（採取経路を実物と同じ口で通す）。"""
+    """An HF tokenizer of the synthetic asset + synthetic template (the harvest path goes through
+    the same interface as the real one)."""
     pytest.importorskip("transformers")
     from tokenizers import Tokenizer
     from transformers import PreTrainedTokenizerFast
@@ -55,19 +62,21 @@ def _hf_tokenizer(template: str = SYNTHETIC_TEMPLATE) -> Any:
 
 class TestScopeGate:
     def test_the_shipped_battery_is_in_scope(self) -> None:
-        """出荷する電池が 1 件残らず射程の内側にある（採取の前に落ちる形を作らない）。"""
+        """Every case of the shipped battery is inside the scope (no shape that fails before the
+        harvest)."""
         for case in chat.CASES:
             chat.assert_plain_conversation(case.messages)
 
     def test_the_case_names_are_unique(self) -> None:
-        """名前が重複すると TS 側の突合で「どちらのケースが落ちたか」が読めなくなる。"""
+        """A repeated name would hide, in the TS-side comparison, which of the cases failed."""
         names = [case.name for case in chat.CASES]
 
         assert sorted(names) == sorted(set(names))
 
     def test_an_empty_conversation_is_rejected(self) -> None:
-        """上流の `apply_chat_template` も拒否する（受理集合を上流より広げない）。"""
-        with pytest.raises(chat.OutOfScopeChatError, match="空"):
+        """Upstream `apply_chat_template` rejects it too (the accepted set is not wider than
+        upstream's)."""
+        with pytest.raises(chat.OutOfScopeChatError, match="empty"):
             chat.assert_plain_conversation([])
 
     @pytest.mark.parametrize(
@@ -82,13 +91,14 @@ class TestScopeGate:
         ],
     )
     def test_an_out_of_scope_field_is_rejected(self, extra: dict[str, Any]) -> None:
-        """MUST: 黙って無視しない（無視すると「渡したのに効かない」が例外なしで通る）。"""
-        with pytest.raises(chat.OutOfScopeChatError, match="射程外の欄"):
+        """MUST: not ignored silently (ignoring it would let "given but without effect" through
+        without an exception)."""
+        with pytest.raises(chat.OutOfScopeChatError, match="out-of-scope fields"):
             chat.assert_plain_conversation([{"role": "user", "content": "hi", **extra}])
 
     @pytest.mark.parametrize("role", ["tool", "model", "function", ""])
     def test_an_unknown_role_is_rejected(self, role: str) -> None:
-        """`model` は template の**出力側**の綴りで、入力の role ではない。"""
+        """`model` is the template's spelling on the **output side**, not an input role."""
         with pytest.raises(chat.OutOfScopeChatError, match="role"):
             chat.assert_plain_conversation([{"role": role, "content": "hi"}])
 
@@ -102,7 +112,8 @@ class TestScopeGate:
         ],
     )
     def test_a_non_string_content_is_rejected(self, content: Any) -> None:
-        """画像 / 音声パートの配列は初版の射程外（`<|image|>` の綴りを持ち込まない）。"""
+        """Arrays of image / audio parts are outside the first version's scope (the `<|image|>`
+        spelling is not brought in)."""
         with pytest.raises(chat.OutOfScopeChatError, match="content"):
             chat.assert_plain_conversation([{"role": "user", "content": content}])
 
@@ -116,7 +127,8 @@ class TestStopTokens:
         assert chat.stop_tokens(tmp_path) == [1, 106, 50]
 
     def test_a_singular_declaration_is_read_as_a_set(self, tmp_path: Path) -> None:
-        """停止条件は単数の EOS ではなく**集合**（ADR 0083 決定 8）— 単数宣言も集合で受ける。"""
+        """The stop condition is a **set**, not a single EOS (ADR 0083 decision 8) — a singular
+        declaration is accepted as a set too."""
         (tmp_path / "generation_config.json").write_text(
             json.dumps({"eos_token_id": 1}), encoding="utf-8"
         )
@@ -135,15 +147,15 @@ class TestStopTokens:
 
 class TestHarvest:
     def test_expectations_come_from_the_injected_tokenizer(self) -> None:
-        """期待値の経路に自前のレンダラを通さない（ADR 0084 決定 7）。
+        """No in-house renderer on the expectation path (ADR 0084 decision 7).
 
-        合成 template の綴り（`<user>` / `<model>`）は実 template の綴り（`<|turn>` /
-        `<turn|>`）と**わざと**違えてある — 台本が自分で描画していれば、この差がそのまま
-        期待値に出る。
+        The synthetic template's spellings (`<user>` / `<model>`) differ **on purpose** from the
+        real template's (`<|turn>` / `<turn|>`) — if the script rendered on its own, the
+        difference would show in the expectations as is.
         """
         [row] = chat.harvest_cases(
             _hf_tokenizer(),
-            [chat.ChatCase("one", "最小形", ({"role": "user", "content": "abc"},))],
+            [chat.ChatCase("one", "minimal form", ({"role": "user", "content": "abc"},))],
         )
 
         assert row["rendered"] == "<bos><user>abc<model>"
@@ -151,27 +163,29 @@ class TestHarvest:
         assert row["messages"] == [{"role": "user", "content": "abc"}]
 
     def test_the_ids_are_the_encoding_of_the_rendered_text(self) -> None:
-        """`ids` は「描画 → `add_special_tokens=False` の符号化」（TS 側の 2 段構成の前提）。"""
+        """`ids` is "render → encode with `add_special_tokens=False`" (the premise of the TS
+        two-step build)."""
         tokenizer = _hf_tokenizer()
 
         [row] = chat.harvest_cases(
             tokenizer,
-            [chat.ChatCase("one", "最小形", ({"role": "user", "content": "abc"},))],
+            [chat.ChatCase("one", "minimal form", ({"role": "user", "content": "abc"},))],
         )
 
         assert row["ids"] == list(tokenizer(row["rendered"], add_special_tokens=False)["input_ids"])
 
     def test_the_scope_gate_runs_on_every_harvested_case(self) -> None:
-        """射程外のケースは採取に**入らない**（拒否例が期待値として配布物へ載らない）。"""
+        """An out-of-scope case does **not enter** the harvest (a rejected example does not ship
+        as an expectation)."""
         with pytest.raises(chat.OutOfScopeChatError):
             chat.harvest_cases(
                 _hf_tokenizer(),
-                [chat.ChatCase("bad", "射程外", ({"role": "tool", "content": "x"},))],
+                [chat.ChatCase("bad", "out of scope", ({"role": "tool", "content": "x"},))],
             )
 
     def test_a_tokenizer_whose_two_paths_disagree_is_rejected(self) -> None:
-        """MUST: 採取時に落とす — 食い違ったまま配ると TS 側は「描画は合うのに id が違う」に
-        なり、どちらの段が壊れているのか読み手に伝わらない。"""
+        """MUST: fail at harvest time — shipped with the mismatch, the TS side would see "the
+        rendering matches but the ids differ", and the reader could not tell which step broke."""
 
         class Disagreeing:
             def apply_chat_template(
@@ -182,23 +196,24 @@ class TestHarvest:
             def __call__(self, text: str, *, add_special_tokens: bool) -> Any:
                 return {"input_ids": [1, 2]}
 
-        with pytest.raises(AssertionError, match="一致しない"):
+        with pytest.raises(AssertionError, match="does not match"):
             chat.harvest_cases(
                 Disagreeing(),
-                [chat.ChatCase("one", "最小形", ({"role": "user", "content": "abc"},))],
+                [chat.ChatCase("one", "minimal form", ({"role": "user", "content": "abc"},))],
             )
 
 
 class TestFixture:
     def test_the_subset_covers_every_harvested_id(self) -> None:
-        """部分集合が足りなければ TS 側の突合が落ちる（絞り方の誤りは危険側に倒れない）。"""
+        """A subset that falls short fails the TS-side comparison (a trimming mistake does not
+        fall on the unsafe side)."""
         raw = tokenizer_json()
         compiled = compile_tokenizer(raw)
 
         fixture = chat.build_chat_fixture(
             tokenizer=_hf_tokenizer(),
             compiled=compiled,
-            cases=[chat.ChatCase("one", "最小形", ({"role": "user", "content": "abc"},))],
+            cases=[chat.ChatCase("one", "minimal form", ({"role": "user", "content": "abc"},))],
             stops=[compiled.eos_id],
             source={},
         )
@@ -208,10 +223,11 @@ class TestFixture:
         assert set(fixture["chat"][0]["ids"]) <= kept
 
     def test_the_stop_tokens_ride_the_same_fixture(self) -> None:
-        """chat 形式と EOS 集合は同じ束から来る（ADR 0084 決定 5）— 綴りまで載せる。"""
+        """The chat format and the EOS set come from the same bundle (ADR 0084 decision 5) — the
+        spellings ride along too."""
         compiled = compile_tokenizer(tokenizer_json())
         pad_id = compiled.vocab.index("<pad>")
-        case = chat.ChatCase("one", "最小形", ({"role": "user", "content": "abc"},))
+        case = chat.ChatCase("one", "minimal form", ({"role": "user", "content": "abc"},))
 
         def build(stops: list[int]) -> dict[str, Any]:
             return chat.build_chat_fixture(
@@ -230,8 +246,8 @@ class TestFixture:
 
         assert with_pad["stopTokens"] == [compiled.eos_id, pad_id]
         assert with_pad["stopTokenSpellings"] == ["<eos>", "<pad>"]
-        # `<pad>` は本文に 1 度も出ない綴りなので、`stops` に居るからこそ残る（居なければ
-        # 部分集合から落ちる = TS 側が導出を突き合わせられない）。
+        # `<pad>` never appears in a body, so it stays only because it is in `stops` (without it,
+        # it drops out of the subset = the TS side could not check its derivation).
         assert "<pad>" in added(with_pad)
         assert "<pad>" not in added(without_pad)
 

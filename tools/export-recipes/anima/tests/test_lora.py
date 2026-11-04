@@ -69,17 +69,17 @@ class TestFuseLora:
         report = fuse_lora(model, _state(scale_b=0.0), "transformer")
 
         assert report.is_noop
-        assert "学習されていない" in report.describe()
+        assert "not trained" in report.describe()
 
     def test_a_prefix_with_no_targets_is_rejected(self):
-        with pytest.raises(ValueError, match="1 件も無い"):
+        with pytest.raises(ValueError, match="has no layers for"):
             fuse_lora(Target(), _state(), "text_conditioner")
 
     def test_a_missing_lora_b_is_rejected(self):
         state = _state()
         del state["transformer.blocks.1.lora_B.weight"]
 
-        with pytest.raises(ValueError, match="揃っていない"):
+        with pytest.raises(ValueError, match="does not have both lora_A and lora_B"):
             fuse_lora(Target(), state, "transformer")
 
     def test_a_target_absent_from_the_model_is_rejected(self):
@@ -90,7 +90,7 @@ class TestFuseLora:
             key = f"transformer.blocks.1.{suffix}.weight"
             state[key.replace("blocks.1", "blocks.9")] = state.pop(key)
 
-        with pytest.raises(ValueError, match="モデルに無い"):
+        with pytest.raises(ValueError, match="is not in the model"):
             fuse_lora(Target(), state, "transformer")
 
     def test_a_leftover_key_under_the_prefix_is_rejected(self):
@@ -104,12 +104,12 @@ class TestFuseLora:
         state = _state()
         state["transformer.blocks.0.lora_C.weight"] = torch.zeros(3, 4)
 
-        with pytest.raises(ValueError, match="消費できないキー"):
+        with pytest.raises(ValueError, match="cannot be consumed as A/B pairs"):
             fuse_lora(Target(), state, "transformer")
 
     def test_a_shape_mismatch_is_rejected(self):
         state = _state()
         state["transformer.blocks.0.lora_A.weight"] = torch.randn(2, 5)
 
-        with pytest.raises(ValueError, match="形が違う"):
+        with pytest.raises(ValueError, match="has a different shape"):
             fuse_lora(Target(), state, "transformer")

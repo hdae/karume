@@ -50,7 +50,9 @@ class TestCausalConv3dToConv2d:
         """A shape whose temporal causal padding is too small (downsample3d's time_conv) fails."""
         conv = qwenimage.QwenImageCausalConv3d(3, 3, (3, 1, 1), stride=(2, 1, 1), padding=(0, 0, 0))
 
-        with pytest.raises(NotImplementedError, match="因果パディングが等価条件を外れる"):
+        with pytest.raises(
+            NotImplementedError, match="causal padding is outside the equivalence condition"
+        ):
             patch_anima._causal_conv3d_to_conv2d(conv)
 
     def test_padding_beyond_the_causal_amount_is_rejected(self) -> None:
@@ -68,7 +70,9 @@ class TestCausalConv3dToConv2d:
             "premise: a shape outside the equivalence condition does not have length 1"
         )
 
-        with pytest.raises(NotImplementedError, match="因果パディングが等価条件を外れる"):
+        with pytest.raises(
+            NotImplementedError, match="causal padding is outside the equivalence condition"
+        ):
             patch_anima._causal_conv3d_to_conv2d(conv)
 
     def test_a_time_stride_other_than_one_is_rejected(self) -> None:
@@ -76,7 +80,7 @@ class TestCausalConv3dToConv2d:
         different claim."""
         conv = qwenimage.QwenImageCausalConv3d(3, 3, (3, 1, 1), stride=(2, 1, 1), padding=(1, 0, 0))
 
-        with pytest.raises(NotImplementedError, match="時間 stride"):
+        with pytest.raises(NotImplementedError, match="with time stride"):
             patch_anima._causal_conv3d_to_conv2d(conv)
 
 
@@ -169,7 +173,7 @@ class TestRmsNormForward:
         module = qwenimage.QwenImageRMS_norm(4, bias=True)
         module.gamma = nn.Parameter(module.gamma.detach().reshape(1, -1, 1, 1))
 
-        with pytest.raises(NotImplementedError, match="学習された bias"):
+        with pytest.raises(NotImplementedError, match="with a learned bias"):
             patch_anima._rms_norm_forward(module, torch.randn(1, 4, 2, 2))
 
 
@@ -353,7 +357,7 @@ class TestDitTokens:
         broken = dict(base)
         broken["sin_h"] = torch.zeros_like(base["sin_h"])
 
-        with pytest.raises(AssertionError, match="動いていない"):
+        with pytest.raises(AssertionError, match="does not vary along this axis"):
             patch_anima._assert_rope_base_shapes(
                 broken,
                 max(model.rope.max_size),

@@ -531,10 +531,10 @@ class LayerwiseDit:
         """
         if dtype == torch.float64 and timestep.ndim != 1:
             raise DitReferenceError(
-                f"2 次元の timestep（形 {list(timestep.shape)} — diffusers の M = S の経路）は"
-                " f64 の参照にしない（観測用・f32 だけ）。トークンごとの時刻は ADR 0121 段 1 の"
-                "参照ラッパ"
-                "（`condition=` — 決定 4）で渡す（モジュール doc）"
+                f"a 2-D timestep (shape {list(timestep.shape)} — the M = S path of diffusers)"
+                " gets no f64 reference (observation only, f32 only). Pass per-token timesteps"
+                " through the reference wrapper of ADR 0121 step 1"
+                " (`condition=` — decision 4) (module doc)"
             )
         wide = (lambda tensor: tensor) if dtype == torch.float32 else torch.Tensor.double
         output, collected, seconds = self.run(
@@ -587,7 +587,9 @@ class LayerwiseDit:
             raise DitReferenceError(f"the reference dtype must be f32 / f64 (got {dtype})")
         count = self.layers if blocks is None else blocks
         if not 0 < count <= self.layers:
-            raise DitReferenceError(f"回すブロックの数 {count} が 1〜{self.layers} の外")
+            raise DitReferenceError(
+                f"the number of blocks to run {count} is outside 1 to {self.layers}"
+            )
         started = time.perf_counter()
         collected: list[torch.Tensor] = []
         with torch.no_grad():
@@ -625,7 +627,7 @@ class LayerwiseDit:
                     result = body(model)
                 if watch.found:
                     raise DitReferenceError(
-                        f"f64 の参照の中で f64 でない値が作られた: {watch.found[:5]}"
+                        f"a non-f64 value was made inside the f64 reference: {watch.found[:5]}"
                     )
         if hooks.watched and hooks.fired[-1:] != [count - 1]:
             raise _unreached(count - 1)
@@ -714,7 +716,7 @@ class LayerwiseDit:
             return value
         offset = self._alignment.get(key)
         if offset is None:
-            raise DitReferenceError(f"'{key}' の上流のずれが無い（alignment の表の外）")
+            raise DitReferenceError(f"'{key}' has no upstream offset (outside the alignment table)")
         return _placed(value, offset)
 
 
@@ -744,10 +746,10 @@ def compare_tensors(
         wanted = set(compared) if keys is not None else set(compared) | present
         for key in sorted(wanted):
             if key not in actual:
-                mismatched[key] = "書いた側に無い"
+                mismatched[key] = "missing from the written side"
                 continue
             if key not in present:
-                mismatched[key] = "既存に無い"
+                mismatched[key] = "missing from the existing file"
                 continue
             mine, theirs = actual[key], handle.get_tensor(key)
             if mine.dtype != theirs.dtype or list(mine.shape) != list(theirs.shape):
@@ -757,7 +759,7 @@ def compare_tensors(
                 )
             elif not torch.equal(_tensor_bits(mine), _tensor_bits(theirs)):
                 difference = (mine.double() - theirs.double()).abs().max()
-                mismatched[key] = f"ビットが違う（最大絶対差 {float(difference):.3e}）"
+                mismatched[key] = f"bits differ (max absolute difference {float(difference):.3e})"
     return {"keys": sorted(wanted), "mismatched": mismatched}
 
 
@@ -808,7 +810,9 @@ def _done(results: Path, mode: CompareMode) -> dict[str, dict[str, Any]]:
         try:
             row = json.loads(line)
         except json.JSONDecodeError as error:
-            raise DitReferenceError(f"{results}:{number} の行が読めない（末尾ではない）") from error
+            raise DitReferenceError(
+                f"{results}:{number}: unreadable row (not the last one)"
+            ) from error
         if (
             row.get("compare_version") == COMPARE_VERSION
             and row.get("mode") in (_COVERING_MODES[mode])

@@ -147,14 +147,14 @@ class TestTheCheckItself:
         broken = copy.deepcopy(exported[TARGET_POST])
         broken.symbols = ["w", "h"]
 
-        with pytest.raises(EncoderGraphError, match="記号"):
+        with pytest.raises(EncoderGraphError, match="symbols"):
             export_vae_encoder.assert_encoder_graph(broken, TARGET_POST, ti2v_synthetic_vae)
 
     def test_an_input_of_another_shape_is_caught(self, exported, ti2v_synthetic_vae):
         broken = copy.deepcopy(exported[TARGET_ATTENTION])
         broken.inputs[0] = dataclasses.replace(broken.inputs[0], shape=[SYNTHETIC_HIDDEN, 3520])
 
-        with pytest.raises(EncoderGraphError, match="入力"):
+        with pytest.raises(EncoderGraphError, match="inputs"):
             export_vae_encoder.assert_encoder_graph(broken, TARGET_ATTENTION, ti2v_synthetic_vae)
 
 
@@ -307,7 +307,7 @@ class TestTheSeriesIsPublishedTogether:
     def test_a_duplicated_target_is_refused_before_anything_is_written(self, rounded_vae, tmp_path):
         out_root = tmp_path / "series"
 
-        with pytest.raises(EncoderGraphError, match="重複"):
+        with pytest.raises(EncoderGraphError, match="duplicate"):
             export_vae_encoder.emit_series(
                 (TARGET_PRE, TARGET_PRE), rounded_vae, out_root, SOURCE, cases=()
             )

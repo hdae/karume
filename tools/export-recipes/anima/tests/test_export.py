@@ -71,7 +71,7 @@ class TestTargets:
         through the day `BUILDERS` grows an entry outside the table (the spelling check looks only
         at `TARGETS`).
         """
-        with pytest.raises(AssertionError, match="未知のターゲット"):
+        with pytest.raises(AssertionError, match="unknown target"):
             export_anima.emit_target("vae_encoder", argparse.Namespace(), tmp_path / "out")
 
         assert not (tmp_path / "out").exists()
@@ -455,7 +455,7 @@ class TestFakeQuantI4:
             export_anima, "_i4_module_names", lambda model: frozenset({"attn", "norm"})
         )
 
-        with pytest.raises(AssertionError, match="格納 i4 の"):
+        with pytest.raises(AssertionError, match="stored as i4 but"):
             self._quantize(_DitLike())
 
 
@@ -572,7 +572,7 @@ class TestOrderGuard:
         0, so green proves nothing."""
         monkeypatch.setattr(patch_anima, "vae_patches_applied", lambda: True)
 
-        with pytest.raises(RuntimeError, match="恒真化"):
+        with pytest.raises(RuntimeError, match="pass vacuously"):
             export_anima._assert_vae_unpatched("test")
 
     def test_it_passes_before_the_patch(self, monkeypatch):
@@ -605,7 +605,7 @@ class TestIoNaming:
             graph_name="tiny",
         )
 
-        with pytest.raises(AssertionError, match="グラフ入力名が宣言と不一致"):
+        with pytest.raises(AssertionError, match="graph inputs differ from the declaration"):
             export_anima._write_io(component, graph, tmp_path)
 
 

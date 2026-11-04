@@ -360,17 +360,22 @@ class DecodeCase:
 #: replaced while editing). Running the same battery on two assets is itself the proof of "one
 #: implementation, two assets" (ADR 0084 decision 6).
 SHARED_ENCODE_CASES: tuple[EncodeCase, ...] = (
-    EncodeCase("english", "普通の英文 — 空白が metaspace へ落ちる基本形", "The quick brown fox."),
+    EncodeCase(
+        "english",
+        "plain English — the basic form where spaces become metaspace",
+        "The quick brown fox.",
+    ),
     EncodeCase(
         "english-long",
-        "空白があっても pre_tokenizer は正規化後に切れ目を見つけられない（1 pre-token が全長）"
-        " — merge の rank / 位置の同点が多発する長さ",
+        "even with spaces the pre_tokenizer finds no split after normalization (one pre-token"
+        " spans the whole input) — a length where merge rank / position ties are frequent",
         "Machine learning models trained on large corpora can generate text that is "
         "surprisingly coherent, but they still fail at arithmetic and long-horizon planning.",
     ),
     EncodeCase(
         "japanese-long",
-        "空白の無い長文 — 1 pre-token が入力全長になり merge queue が要る（ADR 0084 決定 3）",
+        "long text without spaces — one pre-token spans the whole input and a merge queue is needed"
+        " (ADR 0084 decision 3)",
         "むかしむかし、あるところにおじいさんとおばあさんが住んでいました。"
         "おじいさんは山へしばかりに、おばあさんは川へせんたくに行きました。"
         "おばあさんが川でせんたくをしていると、大きな桃がどんぶらこどんぶらこと"
@@ -380,62 +385,88 @@ SHARED_ENCODE_CASES: tuple[EncodeCase, ...] = (
     ),
     EncodeCase(
         "cyrillic",
-        "非ラテン・非 CJK（語彙内トークンと byte fallback の境目が別の位置に来る）",
+        "non-Latin, non-CJK (the boundary between in-vocabulary tokens and byte fallback falls"
+        " elsewhere)",
         "Большая часть текста написана на русском языке.",
     ),
-    EncodeCase("leading-space", "先頭の空白（metaspace が先頭に来る）", " leading"),
-    EncodeCase("trailing-space", "末尾の空白（merge の右端が metaspace）", "trailing "),
-    EncodeCase("double-space", "空白の連続（▁▁ 系の語彙へ畳まれる）", "a  b   c"),
+    EncodeCase("leading-space", "a leading space (metaspace comes first)", " leading"),
+    EncodeCase(
+        "trailing-space", "a trailing space (the right end of a merge is metaspace)", "trailing "
+    ),
+    EncodeCase(
+        "double-space",
+        "consecutive spaces (folded into the ▁▁ family of vocabulary entries)",
+        "a  b   c",
+    ),
     EncodeCase(
         "whitespace-run",
-        "空白 30 連 — 長い metaspace 語彙（merges 表の先頭付近の rank）を踏む",
+        "30 spaces in a row — hits long metaspace entries (ranks near the top of the merges table)",
         "x" + " " * 30 + "y",
     ),
     EncodeCase(
         "tab-newline",
-        "normalizer が触らない空白類（\\t / \\n は metaspace にならない）",
+        "whitespace the normalizer leaves alone (\\t / \\n do not become metaspace)",
         "a\tb\nc\r\nd",
     ),
     EncodeCase(
         "newline-run",
-        "改行 30 連 — 語彙に改行を含む綴りがある（行区切り資産が使えない証）",
+        "30 newlines in a row — the vocabulary has spellings that contain newlines (proof that a"
+        " line-separated asset cannot work)",
         "\n" * 30,
     ),
-    EncodeCase("digits", "数字列 — SPM 系は 1 桁ずつ切れる語彙を持つ", "1girl 2024 3.14159 100%"),
+    EncodeCase(
+        "digits",
+        "digit strings — SPM-style vocabularies split them one digit at a time",
+        "1girl 2024 3.14159 100%",
+    ),
     EncodeCase(
         "url",
-        "空白の無い長い ASCII（URL / base64 も 1 pre-token 全長になる）",
+        "long ASCII without spaces (a URL / base64 also becomes one pre-token spanning the whole"
+        " input)",
         "https://example.com/a/b/c?q=1&r=2#frag",
     ),
-    EncodeCase("mixed", "日英混在 — 語彙の切り替わり", "1girl, 猫耳, ロングヘア, masterpiece"),
+    EncodeCase(
+        "mixed",
+        "mixed Japanese and English — the vocabulary switches",
+        "1girl, 猫耳, ロングヘア, masterpiece",
+    ),
     EncodeCase(
         "emoji",
-        "非 BMP + 地域表示子 + 異体字セレクタ（byte_fallback を踏む）",
+        "non-BMP + regional indicators + variation selector (hits byte_fallback)",
         "a cat \U0001f408 and a flag \U0001f1ef\U0001f1f5 and \u2764\ufe0f love",
     ),
     EncodeCase(
         "zwj",
-        "ZWJ 連結（1 書記素が複数コードポイント — 記号は**コードポイント**単位で始まる）",
+        "ZWJ sequence (one grapheme is several code points — symbols start at **code point**"
+        " granularity)",
         "family \U0001f468\u200d\U0001f469\u200d\U0001f466 photo",
     ),
     EncodeCase(
         "combining",
-        "結合文字 — NFC を掛けない（掛けると id 列が変わる）",
+        "combining characters — NFC is not applied (applying it changes the id sequence)",
         "A\u0301 vs \u00c1 and A\u0302\u0301",
     ),
-    EncodeCase("thai", "結合文字を持つタイ語（語彙内と byte fallback が混ざる）", "กำลังทดสอบ"),
+    EncodeCase(
+        "thai",
+        "Thai with combining characters (in-vocabulary tokens and byte fallback mix)",
+        "กำลังทดสอบ",
+    ),
     EncodeCase(
         "control-bytes",
-        "制御文字 — 語彙に無く byte_fallback へ落ちる（複数バイト run も含む）",
+        "control characters — not in the vocabulary, they fall to byte_fallback (multi-byte runs"
+        " included)",
         "a\x00b\x1fcd",
     ),
     EncodeCase(
         "metaspace-literal",
-        "入力に U+2581 が直接ある（正規化の出力と同じ文字が最初から入っている形）",
+        "U+2581 directly in the input (the character normalization outputs is there from the"
+        " start)",
         "raw ▁ metaspace ▁▁ run",
     ),
-    EncodeCase("empty", "空文字（記号が 0 個 — 走査の初期状態）", ""),
-    EncodeCase("single-space", "空白 1 文字だけ（正規化後は metaspace 1 文字）", " "),
+    EncodeCase("empty", "the empty string (zero symbols — the initial state of the scan)", ""),
+    EncodeCase(
+        "single-space", "a single space only (one metaspace character after normalization)", " "
+    ),
 )
 
 
@@ -567,7 +598,7 @@ def build_fixture(
     all_decode = [
         DecodeCase(
             name=f"roundtrip-{row['name']}",
-            why=f"符号化 {row['name']} の出力（特殊トークン込み）をそのまま復号する",
+            why=f"decode the output of encode case {row['name']} (special tokens included) as is",
             ids=list(row["idsWithSpecials"]),
         )
         for row in encode
@@ -663,27 +694,36 @@ def byte_run_decode_cases(compiled: CompiledTokenizer) -> list[DecodeCase]:
     return [
         DecodeCase(
             name="byte-all-256",
-            why="byte 0..255 を 1 続きの run で流す（全体が不正 UTF-8 = 1 バイト 1 置換文字）",
+            why=(
+                "bytes 0..255 as one continuous run (all invalid UTF-8 = one replacement character"
+                " per byte)"
+            ),
             ids=list(byte_ids),
         ),
         DecodeCase(
             name="byte-run-truncated",
-            why="3 バイト文字の頭 2 バイトだけ（不完全 run — run 全体が置換文字になる）",
+            why=(
+                "only the first 2 bytes of a 3-byte character (an incomplete run — the whole run"
+                " becomes a replacement character)"
+            ),
             ids=[byte_ids[0xE3], byte_ids[0x81]],
         ),
         DecodeCase(
             name="byte-run-valid",
-            why="3 バイト文字がちょうど揃う run（1 文字に畳まれる）",
+            why="a run that exactly completes a 3-byte character (folded into one character)",
             ids=[byte_ids[0xE3], byte_ids[0x81], byte_ids[0x82]],
         ),
         DecodeCase(
             name="byte-run-then-token",
-            why="不完全 run の直後に非 byte トークン（run の切れ目が確定する位置）",
+            why=(
+                "a non-byte token right after an incomplete run (the position where the run's end"
+                " is settled)"
+            ),
             ids=[byte_ids[0xE3], byte_ids[0x81], compiled.eos_id],
         ),
         DecodeCase(
             name="byte-run-split-by-token",
-            why="run が非 byte トークンで 2 つに割れる（片方だけ有効）",
+            why="a run split in two by a non-byte token (only one half is valid)",
             ids=[
                 byte_ids[0xE3],
                 byte_ids[0x81],
@@ -695,7 +735,7 @@ def byte_run_decode_cases(compiled: CompiledTokenizer) -> list[DecodeCase]:
         ),
         DecodeCase(
             name="specials-only",
-            why="特殊トークンだけ（skip_special_tokens の分岐が出る唯一の形）",
+            why="special tokens only (the only shape where the skip_special_tokens branch shows)",
             ids=[compiled.bos_id, compiled.eos_id],
         ),
     ]

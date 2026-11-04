@@ -146,7 +146,7 @@ class TestTileBert:
         assert torch.equal(tiled, torch.tensor([[1.0, 3.0, 3.0, 3.0], [2.0, 4.0, 4.0, 4.0]]))
 
     def test_a_token_count_that_disagrees_with_word2ph_fails_loudly(self):
-        with pytest.raises(AssertionError, match="word2ph 長"):
+        with pytest.raises(AssertionError, match="differs from the word2ph length"):
             demo.tile_bert(torch.zeros(3, 2), [1, 1])
 
 
@@ -162,7 +162,7 @@ class TestDumpMetadata:
         path = tmp_path / "other.safetensors"
         save_file({"audio": torch.zeros(4)}, str(path), metadata={"other": "1"})
 
-        with pytest.raises(ValueError, match=r"__metadata__\.demo が無い"):
+        with pytest.raises(ValueError, match=r"has no __metadata__\.demo"):
             demo.dump_metadata(path)
 
 

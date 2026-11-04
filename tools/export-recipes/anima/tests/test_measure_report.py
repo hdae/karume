@@ -165,7 +165,7 @@ class TestLatentRatioGate:
         summary = _summarize(gated_ratio=2.0)
 
         failure = _only_failure(summary)
-        assert f"`{GATED}` の latent relRMS" in failure
+        assert f"`{GATED}` latent relRMS" in failure
 
     def test_a_config_without_linear_act_is_only_reported_against_w8(self):
         """The (g)-like configuration is not gated — even a large degradation is not red; it is
@@ -173,46 +173,48 @@ class TestLatentRatioGate:
         summary = _summarize(reference_only_ratio=10.0)
 
         assert summary["failed"] == []
-        reference = summary["gates"][f"`{REFERENCE_ONLY}` の latent relRMS（参考・門の対象外）"]
-        assert "`w8` 比 最大 10.000×" in reference
+        reference = summary["gates"][
+            f"`{REFERENCE_ONLY}` latent relRMS (reference only, outside the gate)"
+        ]
+        assert "vs `w8`: max 10.000×" in reference
 
 
 class TestSdpaCallCountGate:
     def test_a_count_matching_the_expectation_passes(self):
         summary = _summarize(attn_calls=8, attn_calls_expected=8)
 
-        assert f"`{GATED}` の SDPA 発火計数" in summary["gates"]
+        assert f"`{GATED}` SDPA call count" in summary["gates"]
         assert summary["failed"] == []
 
     def test_a_count_off_the_expectation_fails(self):
         summary = _summarize(attn_calls=7, attn_calls_expected=8)
 
-        assert _only_failure(summary) == f"`{GATED}` の SDPA 発火計数"
+        assert _only_failure(summary) == f"`{GATED}` SDPA call count"
 
     def test_a_config_without_an_expectation_raises_no_gate(self):
         summary = _summarize()
 
-        assert "`f32` の SDPA 発火計数" not in summary["gates"]
+        assert "`f32` SDPA call count" not in summary["gates"]
 
 
 class TestScoreF16Gate:
     def test_rounding_that_fires_on_every_call_passes(self):
         summary = _summarize(s16_fired_calls=4, s16_rounded_calls=4)
 
-        assert f"`{GATED}` の S f16 丸めが全呼び出しで発火" in summary["gates"]
+        assert f"`{GATED}` S f16 rounding fires on every call" in summary["gates"]
         assert summary["failed"] == []
 
     def test_rounding_that_stays_identity_on_some_call_fails(self):
         summary = _summarize(s16_fired_calls=3, s16_rounded_calls=4)
 
-        assert _only_failure(summary) == f"`{GATED}` の S f16 丸めが全呼び出しで発火"
+        assert _only_failure(summary) == f"`{GATED}` S f16 rounding fires on every call"
 
     def test_no_rounding_attempt_at_all_fails(self):
         """0 attempts is vacuously true as `0 == 0` — a configuration whose rounding is never called
         must not be green."""
         summary = _summarize(s16_fired_calls=0, s16_rounded_calls=0)
 
-        assert _only_failure(summary) == f"`{GATED}` の S f16 丸めが全呼び出しで発火"
+        assert _only_failure(summary) == f"`{GATED}` S f16 rounding fires on every call"
 
 
 class TestPassthroughGate:
@@ -220,5 +222,5 @@ class TestPassthroughGate:
         """ratio 1.0 = the latent equals the baseline's (the quantization is a passthrough)."""
         summary = _summarize(gated_ratio=1.0)
 
-        assert _only_failure(summary) == f"`{GATED}` が `{BASELINE}` と異なる"
-        assert summary["gates"][f"`{GATED}` が `{BASELINE}` と異なる"] == "NG（素通し）"
+        assert _only_failure(summary) == f"`{GATED}` differs from `{BASELINE}`"
+        assert summary["gates"][f"`{GATED}` differs from `{BASELINE}`"] == "NG (passthrough)"

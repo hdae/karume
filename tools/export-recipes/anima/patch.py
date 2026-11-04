@@ -96,13 +96,13 @@ def _causal_conv3d_to_conv2d(conv: nn.Conv3d) -> nn.Conv2d:
     kernel_t, kernel_h, kernel_w = (int(size) for size in conv.weight.shape[2:])
     if pad_t2 != kernel_t - 1:
         raise NotImplementedError(
-            f"因果パディングが等価条件を外れる（2·pad_t={pad_t2}, kt={kernel_t}"
-            f" — 2·pad_t == kt−1 のみ）: T=1 等価が崩れる"
+            f"causal padding is outside the equivalence condition (2·pad_t={pad_t2}, kt={kernel_t}"
+            f" — only 2·pad_t == kt−1): the T=1 equivalence breaks"
         )
     if int(conv.stride[0]) != 1:
         raise NotImplementedError(
-            f"時間 stride={int(conv.stride[0])} の CausalConv3d は未対応"
-            "（T=1 等価は stride 1 のみ）"
+            f"CausalConv3d with time stride={int(conv.stride[0])} is not supported"
+            " (the T=1 equivalence holds only for stride 1)"
         )
     # Check directly that the output time length is exactly 1 (re-confirming what the two conditions
     # above imply).
@@ -134,7 +134,7 @@ def _rms_norm_forward(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
     configuration with a learned bias (none exists in the decoder) fails loudly.
     """
     if isinstance(self.bias, torch.Tensor):
-        raise NotImplementedError("学習された bias 付きの RMS_norm は rank4 パッチの対象外")
+        raise NotImplementedError("RMS_norm with a learned bias is outside the rank4 patch")
     if not self.channel_first:
         raise NotImplementedError("RMS_norm with channel_first=False is outside the rank4 patch")
     return l2_normalize(x, dim=1) * self.scale * self.gamma
@@ -662,7 +662,8 @@ def _assert_rope_base_shapes(
             )
         if torch.equal(tables[f"sin_{axis}"][1], torch.zeros(width)):
             raise AssertionError(
-                f"rope 素表 sin_{axis} が位置 1 でも全 0（この軸で動いていない = 切り出しずれ）"
+                f"rope base table sin_{axis} is all zeros at position 1 too"
+                " (it does not vary along this axis = misaligned slice)"
             )
 
 

@@ -501,7 +501,8 @@ def _patched_ffn_forward(self, x: torch.Tensor, x_mask: torch.Tensor) -> torch.T
         raise ValueError("a causal FFN is outside this patch (asymmetric left/right padding)")
     if self.kernel_size % 2 == 0:
         raise ValueError(
-            f"kernel_size={self.kernel_size} は偶数 — 明示 pad と conv の padding は等価でない"
+            f"kernel_size={self.kernel_size} is even — the explicit pad and conv's padding are not"
+            " equivalent"
         )
     padding = (self.kernel_size - 1) // 2
     x = functional.conv1d(x * x_mask, self.conv_1.weight, self.conv_1.bias, padding=padding)

@@ -46,32 +46,35 @@ FIXTURE_PATH = (
 CASES: tuple[EncodeCase, ...] = (
     EncodeCase(
         "prompt-query",
-        "上流が推奨する query 前置き（`config_sentence_transformers.json` の prompts.query）",
+        "the query prefix upstream recommends (prompts.query of"
+        " `config_sentence_transformers.json`)",
         "task: search result | query: What is the capital of Japan?",
     ),
     EncodeCase(
         "prompt-document",
-        "同じく document 前置き — post_processor が bos…eos を付ける形の実需",
+        "likewise the document prefix — the real-world shape where post_processor adds bos…eos",
         "title: none | text: 東京は日本の首都であり、世界有数の大都市圏を形成している。",
     ),
     EncodeCase(
         "unused-added",
-        "**非 special** の追加語彙（6,406 本ある `<unusedN>` 系）— decode の skip 対象外",
+        "**non-special** added vocabulary (the 6,406 `<unusedN>` entries) — not skipped by decode",
         "<unused0>x<unused6241>",
     ),
     EncodeCase(
         "gemma3-turn-markers",
-        "`<start_of_turn>` はこちらの語彙にだけ在る（gemma4 側には無い — 資産が別物である証）",
+        "`<start_of_turn>` exists only in this vocabulary (gemma4's has none — proof that the"
+        " assets differ)",
         "<start_of_turn>user\nhi<end_of_turn>",
     ),
     EncodeCase(
         "image-soft-token",
-        "語彙表の**外**へ採番された追加語彙（id 262144 = 語彙 262,144 行の次）",
+        "added vocabulary numbered **outside** the vocabulary table (id 262144 = the row after the"
+        " 262,144 vocabulary rows)",
         "<start_of_image><image_soft_token><end_of_image>",
     ),
     EncodeCase(
         "bos-in-text",
-        "`<bos>` が本文中にある（post_processor が付ける分と重なって二重になる形）",
+        "`<bos>` inside the text (it overlaps with the one post_processor adds and is doubled)",
         "<bos>hello",
     ),
 )

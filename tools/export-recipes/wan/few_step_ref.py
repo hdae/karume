@@ -175,8 +175,8 @@ def run_case(
         labels = [label for label, value in contexts.items() if torch.equal(context, value)]
         if len(labels) != 1:
             raise AssertionError(
-                f"{case.name}: DiT の文脈が cond / uncond の埋め込みの {len(labels)} 本と一致する"
-                "（1 本のはず）— 振り分けを決められない"
+                f"{case.name}: the DiT context matches {len(labels)} of the cond / uncond"
+                " embeddings (expected 1) — cannot tell which branch the forward belongs to"
             )
         forwards.append((int(kwargs["timestep"][0]), labels[0], output[0].detach().clone()))
 

@@ -195,7 +195,7 @@ class TestTheInputCheckpointOfAFlatSeries:
         another checkpoint's provenance is made)."""
         (tmp_path / "Depth-Anything-V2-Base-hf").mkdir()
 
-        with pytest.raises(migrate_series.SeriesMigrationError, match="一意に決まらない"):
+        with pytest.raises(migrate_series.SeriesMigrationError, match="is not unique"):
             migrate_series.input_checkpoint(tmp_path, "depth-anything-v2-small-hf")
 
 
@@ -363,7 +363,7 @@ class TestGatesThatFailLoudly:
 
     def test_a_flat_shard_run_under_a_nested_family_stops(self, tmp_path: Path) -> None:
         place(tmp_path / "irodori-fixture", mark="x")
-        with pytest.raises(migrate_series.SeriesMigrationError, match="サブディレクトリ"):
+        with pytest.raises(migrate_series.SeriesMigrationError, match="subdirectories"):
             run(tmp_path)
 
     def test_a_second_run_refuses_to_overwrite(self, tmp_path: Path) -> None:
@@ -463,7 +463,9 @@ class TestTheQatReferenceFollowsTheAssets:
         record[migrate_series.QAT_BLOCKS_FIELD] = record.pop(migrate_series.QAT_SHARDS_FIELD)
         (series / migrate_series.QAT_REFERENCE_FILE).write_text(json.dumps(record))
 
-        with pytest.raises(migrate_series.SeriesMigrationError, match="畳む前の記録ではない"):
+        with pytest.raises(
+            migrate_series.SeriesMigrationError, match="not a record from before folding"
+        ):
             run(tmp_path)
 
     def test_a_qat_series_without_the_record_stops(self, tmp_path: Path) -> None:

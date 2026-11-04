@@ -379,7 +379,7 @@ def assert_chunk_graph(graph: IrGraph, module: vae_patch.WanVaeChunkDecoder, til
     expected_inputs += [(slot.name, list(slot.shape(tile))) for slot in slots]
     actual_inputs = [(entry.name, [int(dim) for dim in entry.shape]) for entry in graph.inputs]
     if actual_inputs != expected_inputs:
-        raise ChunkGraphError(f"入力 {actual_inputs} が表 {expected_inputs} と違う")
+        raise ChunkGraphError(f"inputs {actual_inputs} differ from the table {expected_inputs}")
 
     if len(graph.outputs) != 1 + len(slots):
         raise ChunkGraphError(f"{len(graph.outputs)} outputs (expected 1 + {len(slots)})")
@@ -387,7 +387,7 @@ def assert_chunk_graph(graph: IrGraph, module: vae_patch.WanVaeChunkDecoder, til
     frame_shape = [int(dim) for dim in graph.values[graph.outputs[0]].shape]
     if frame_shape != [frame_channels, frames, side, side]:
         raise ChunkGraphError(
-            f"フレームの形 {frame_shape}（期待 [{frame_channels}, {frames}, {side}, {side}]）"
+            f"frame shape {frame_shape} (expected [{frame_channels}, {frames}, {side}, {side}])"
         )
     for slot, output in zip(slots, graph.outputs[1:], strict=True):
         shape = [int(dim) for dim in graph.values[output].shape]
@@ -403,8 +403,7 @@ def assert_chunk_graph(graph: IrGraph, module: vae_patch.WanVaeChunkDecoder, til
             or joined.ins[0] != slot.name
         ):
             raise ChunkGraphError(
-                f"出力 '{output}' が cat({slot.name}, …) の slice から作られていない"
-                "（順の取り違え）"
+                f"output '{output}' is not made from a slice of cat({slot.name}, …) (swapped order)"
             )
 
 
@@ -496,14 +495,17 @@ def emit_targets(
     unknown = sorted(set(targets) - set(TARGETS))
     if unknown or len(set(targets)) != len(targets):
         raise ChunkGraphError(
-            f"ターゲット {list(targets)} に未知か重複がある（既知: {', '.join(TARGETS)}）"
+            f"targets {list(targets)} hold an unknown or duplicate entry"
+            f" (known: {', '.join(TARGETS)})"
         )
     if weight_dtype not in WEIGHT_DTYPES:
         raise ChunkGraphError(
             f"cannot write storage {weight_dtype!r} ({' / '.join(WEIGHT_DTYPES)})"
         )
     if weight_dtype != "f16" and cases:
-        raise ChunkGraphError(f"{weight_dtype} の回はフィクスチャを書かない（f16 の参照だけ）")
+        raise ChunkGraphError(
+            f"a {weight_dtype} run writes no fixtures (only the f16 reference does)"
+        )
     reference = FIXTURE_REFERENCE if patch_size is None else FIXTURE_REFERENCE_BEFORE_UNPATCHIFY
     out_root.mkdir(parents=True, exist_ok=True)
     finals = [out_root / target for target in targets]
@@ -588,19 +590,21 @@ def read_lender(path: Path, target: str, lender_tile: int, weight_dtype: str) ->
     parts = container_parts(path)
     if not all(part.is_file() for part in parts):
         raise ChunkGraphError(
-            f"貸し手の容器 {path} が無い — 先に既定タイルの組を書く（`--tile` と `--shared` 無し）"
+            f"lender container {path} is missing — write the default-tile pair first"
+            " (without `--tile` and `--shared`)"
         )
     lender = ir_graph_from_container(verify_container(parts).read, target)
     latent = lender.inputs[0] if lender.inputs else None
     if latent is None or latent.name != LATENT_INPUT or list(latent.shape[2:]) != [lender_tile] * 2:
         shape = None if latent is None else [latent.name, list(latent.shape)]
         raise ChunkGraphError(
-            f"貸し手 {path} の潜在入力 {shape} がタイル {lender_tile} の '{LATENT_INPUT}' でない"
+            f"lender {path}: latent input {shape} is not tile {lender_tile}'s '{LATENT_INPUT}'"
         )
     compressed = {init.storage.dtype for init in lender.initializers.values()} - {"f32"}
     if compressed != {weight_dtype}:
         raise ChunkGraphError(
-            f"貸し手 {path} の圧縮格納 {sorted(compressed)} が {weight_dtype} の系列でない"
+            f"lender {path}: compressed storage {sorted(compressed)}"
+            f" is not of the {weight_dtype} series"
         )
     return lender
 
@@ -673,14 +677,18 @@ def emit_shared_targets(
     unknown = sorted(set(targets) - set(TARGETS))
     if unknown or len(set(targets)) != len(targets):
         raise ChunkGraphError(
-            f"ターゲット {list(targets)} に未知か重複がある（既知: {', '.join(TARGETS)}）"
+            f"targets {list(targets)} hold an unknown or duplicate entry"
+            f" (known: {', '.join(TARGETS)})"
         )
     if weight_dtype not in WEIGHT_DTYPES:
         raise ChunkGraphError(
             f"cannot write storage {weight_dtype!r} ({' / '.join(WEIGHT_DTYPES)})"
         )
     if cases:
-        raise ChunkGraphError("共有の組はフィクスチャを書かない（chunk 列の参照は貸し手の組）")
+        raise ChunkGraphError(
+            "a shared pair writes no fixtures (the chunk sequence's references are the lender"
+            " pair's)"
+        )
     if tile == lender_tile:
         raise ChunkGraphError(
             f"tile {tile} equals the lender's — a shared pair is only for another tile side"
@@ -849,11 +857,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if i8:
         if series.i8_series is None:
             parser.error(
-                f"--dtype i8: モデル {args.model} は VAE の i8 系列を持たない（ADR 0133 決定 7）"
+                f"--dtype i8: model {args.model} has no VAE i8 series (ADR 0133 decision 7)"
             )
         series_name = series.i8_series
     if args.shared and args.tile is None:
-        parser.error("--shared は --tile を要する（貸し手の既定タイルと別の辺 — ADR 0134 決定 1）")
+        parser.error(
+            "--shared requires --tile (a side other than the lender's default tile"
+            " — ADR 0134 decision 1)"
+        )
     if args.shared and args.verify:
         parser.error("--shared and --verify cannot be used together (--verify writes nothing)")
 

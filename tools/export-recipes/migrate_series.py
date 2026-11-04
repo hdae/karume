@@ -220,8 +220,8 @@ def input_checkpoint(root: Path, series: str) -> Path:
     ]
     if len(found) != 1:
         raise SeriesMigrationError(
-            f"系列 '{series}' を焼いた checkpoint が {root} の下で一意に決まらない"
-            f"（候補: {[entry.name for entry in found]}）— 出所を名乗れない"
+            f"the checkpoint that series '{series}' was baked from is not unique under {root}"
+            f" (candidates: {[entry.name for entry in found]}) — cannot name the source"
         )
     return found[0]
 
@@ -438,8 +438,8 @@ def _graph_name(family: Family, name: str, directory: Path, series: Path) -> str
     if directory == series:
         if family.flat_role is None:
             raise SeriesMigrationError(
-                f"{name}: 系列直下に旧 shard 列が在るが、family '{family.name}' は"
-                "サブディレクトリに部品を置く（部品名が決まらない）"
+                f"{name}: an old shard sequence sits directly under the series, but family"
+                f" '{family.name}' puts its components in subdirectories (no component name)"
             )
         return family.flat_role(name)
     role = family.roles.get(directory.name)
@@ -558,9 +558,9 @@ def rewrite_qat_reference(directory: Path, assets: Mapping[str, AssetInput]) -> 
     record = json.loads(path.read_text(encoding="utf-8"))
     if QAT_SHARDS_FIELD not in record or QAT_BLOCKS_FIELD in record:
         raise SeriesMigrationError(
-            f"{path}: 畳む前の記録ではない（`{QAT_SHARDS_FIELD}` を持ち"
-            f" `{QAT_BLOCKS_FIELD}` を持たない形だけを上げる）— schema"
-            f" {record.get('schema')} / 欄 {sorted(record)}"
+            f"{path}: not a record from before folding (only the form with `{QAT_SHARDS_FIELD}` and"
+            f" without `{QAT_BLOCKS_FIELD}` is upgraded) — schema"
+            f" {record.get('schema')} / fields {sorted(record)}"
         )
     if PLE_INDEX_ASSET not in assets:
         raise SeriesMigrationError(

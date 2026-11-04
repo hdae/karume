@@ -139,50 +139,58 @@ OUT_OF_VOCAB_EMOJI = "\U0001f442"
 #: naive port fails (the same discipline as anima's `PROMPT_CASES`), and the a–l classes are
 #: directly the acceptance criteria of the W3 host implementation.
 ENCODE_CASES: tuple[tuple[str, str, str], ...] = (
-    ("ja-plain", "a: 漢字かな混じり + 句読点", "今日は近くの店まで歩いて行きました。"),
+    ("ja-plain", "a: kanji mixed with kana + punctuation", "今日は近くの店まで歩いて行きました。"),
     (
         "ja-formal",
-        "a: 敬体の長め文（読点 2 つ）",
+        "a: a longer sentence in polite form (two commas)",
         "本日はお越しいただき、誠にありがとうございます。どうぞごゆっくりお過ごしください。",
     ),
-    ("ja-question", "a: 疑問符・感嘆符（正規化で半角化される）", "本当にそれでいいの？！"),
-    ("emoji-in-vocab", "b: 語彙内絵文字 U+1F60A", f"それは嬉しい{IN_VOCAB_EMOJI}ね。"),
+    (
+        "ja-question",
+        "a: question and exclamation marks (normalization makes them half-width)",
+        "本当にそれでいいの？！",
+    ),
+    ("emoji-in-vocab", "b: in-vocabulary emoji U+1F60A", f"それは嬉しい{IN_VOCAB_EMOJI}ね。"),
     (
         "emoji-byte-fallback",
-        "c: 語彙外絵文字 U+1F442 単体 → byte_fallback で 4 バイトへ展開",
+        "c: a lone out-of-vocabulary emoji U+1F442 → byte_fallback expands it to 4 bytes",
         OUT_OF_VOCAB_EMOJI,
     ),
     (
         "emoji-byte-fallback-pair",
-        "d: 語彙外絵文字 2 連 — fuse と byte_fallback の相互作用（実挙動をそのまま固定）",
+        "d: two out-of-vocabulary emoji in a row — fuse and byte_fallback interact (pinned as is)",
         OUT_OF_VOCAB_EMOJI * 2,
     ),
     (
         "emoji-zwj",
-        "e: ZWJ 絵文字列 U+1F62E U+200D U+1F4A8",
+        "e: ZWJ emoji sequence U+1F62E U+200D U+1F4A8",
         "\U0001f62e\u200d\U0001f4a8",
     ),
-    ("emoji-vs16", "f: 異体字セレクタ付き U+23F8 U+FE0F", "\u23f8\ufe0f"),
+    ("emoji-vs16", "f: with a variation selector U+23F8 U+FE0F", "\u23f8\ufe0f"),
     (
         "added-token-in-text",
-        "g: 追加語彙の文字列がユーザ入力に現れる（正規化より前に切り出される）",
+        "g: an added token's string appears in user input (split out before normalization)",
         "設定で <|user|> と書くとどうなるのか。",
     ),
-    ("with-spaces", "h: 半角空白 U+0020 → U+2581 置換", "hello world foo bar"),
+    ("with-spaces", "h: half-width space U+0020 → replaced by U+2581", "hello world foo bar"),
     (
         "leading-space",
-        "i: 先頭が空白（prepend_scheme=never — 足されるのではなく置換で ▁ が付く）",
+        "i: leading space (prepend_scheme=never — ▁ comes from replacement, not prepending)",
         " leading space matters",
     ),
-    ("latin-digits", "j: 英数字 Latin 混じり", "GPU 4 台で 2026 年に v1.5 を出す。"),
+    (
+        "latin-digits",
+        "j: mixed with Latin letters and digits",
+        "GPU 4 台で 2026 年に v1.5 を出す。",
+    ),
     (
         "combining-dakuten",
-        "k: 結合文字 U+3099 と NFKC の相互作用（か + U+3099 → が）",
+        "k: the interaction of the combining mark U+3099 and NFKC (U+304B + U+3099 → U+304C)",
         "か\u3099っこいいし\u3099ゃんけん",
     ),
     (
         "halfwidth-kana",
-        "l: 半角カナ + 濁点（NFKC で全角合成へ変わる）",
+        "l: half-width kana + voiced sound mark (NFKC turns them into composed full-width kana)",
         "ｶﾞﾝﾊﾞｬﾁ",
     ),
 )
@@ -195,13 +203,13 @@ ENCODE_CASES: tuple[tuple[str, str, str], ...] = (
 BATCH_CASES: tuple[tuple[str, str, str, str], ...] = (
     (
         "batch-short",
-        "BOS 前置 + 右詰め pad（truncation は発火しない）",
+        "BOS prepended + right padding (truncation does not fire)",
         "今日は近くの店まで歩いて行きました。",
         TEXT_MAX_LENGTH_KEY,
     ),
     (
         "batch-caption",
-        "caption 側の長さ（max_caption_len）で同じ手順を踏む",
+        "the same steps with the caption-side length (max_caption_len)",
         "若く元気な女性の声。カフェの店員のように、明るくハキハキとした少し高めのトーンで話している。",
         CAPTION_MAX_LENGTH_KEY,
     ),
@@ -217,32 +225,32 @@ BATCH_CASES: tuple[tuple[str, str, str, str], ...] = (
 CAPTION_CASES: tuple[tuple[str, str, str], ...] = (
     (
         "caption-brackets",
-        "外側括弧: normalize なら「」が剥がれる / caption では残る",
+        "outer brackets: normalize strips the corner brackets U+300C U+300D / caption keeps them",
         "「若く元気な女性の声」",
     ),
     (
         "caption-fullwidth",
-        "NFKC: normalize なら Ａ が A へ落ちる / caption では全角のまま",
+        "NFKC: normalize folds Ａ to A / the caption keeps it full-width",
         "Ａの声",
     ),
     (
         "caption-circled",
-        "記号削除: normalize なら ① が消える / caption では残る",
+        "symbol removal: normalize removes ① / the caption keeps it",
         "①の声",
     ),
     (
         "caption-semicolon",
-        "記号削除: normalize なら ; が消える / caption では残る",
+        "symbol removal: normalize removes ; / the caption keeps it",
         "声;高め",
     ),
     (
         "caption-surrounding-space",
-        "strip は前後の空白だけ — 中の全角空白は caption では残る（normalize なら消える）",
+        "strip trims only the ends — caption keeps inner ideographic spaces (normalize drops them)",
         "\u3000明るい\u3000声\u3000",
     ),
     (
         "caption-official",
-        "公式モデルカードの Voice Design 文（正規化に無感 = 既存 golden と同じ側）",
+        "the official card's Voice Design text (insensitive to normalization, like the old golden)",
         "若く元気な女性の声。カフェの店員のように、明るくハキハキとした少し高めのトーンで話している。",
     ),
 )
@@ -276,57 +284,89 @@ TRUNCATING_PASSAGE = (
 #: order itself is observable** (e.g. `①` is removed before NFKC and so does not become `1` / the
 #: full-width `；` slips past the removal rule and becomes `;` under NFKC).
 NORMALIZE_CASES: tuple[tuple[str, str, str], ...] = (
-    ("plain", "何も起きない素の文", "今日は近くの店まで歩いて行きました。"),
-    ("tab", "SIMPLE: タブ削除", "前\t後ろ"),
-    ("bracket-n-plain", "SIMPLE: [n] 削除", "改行[n]の指示"),
-    ("bracket-n-escaped", r"SIMPLE: \[n\] 削除（エスケープ綴りの別規則）", r"改行\[n\]の指示"),
+    ("plain", "a plain sentence where nothing happens", "今日は近くの店まで歩いて行きました。"),
+    ("tab", "SIMPLE: tab removal", "前\t後ろ"),
+    ("bracket-n-plain", "SIMPLE: [n] removal", "改行[n]の指示"),
+    (
+        "bracket-n-escaped",
+        r"SIMPLE: \[n\] removal (a separate rule for the escaped spelling)",
+        r"改行\[n\]の指示",
+    ),
     (
         "ideographic-space",
-        "SIMPLE: 全角空白 U+3000 削除（NFKC の前なので半角化されない）",
+        "SIMPLE: ideographic space U+3000 removal (before NFKC, so it is not made half-width)",
         "前\u3000後ろ",
     ),
     ("question-bang", "SIMPLE: ？ → ? / ！ → !", "本当？そうだ！"),
     ("heart", "SIMPLE: ♥ → ♡", "だいすき♥"),
     ("circles", "SIMPLE: ● ◯ 〇 → ○", "●と◯と〇"),
-    ("regex-symbols", "REGEX: ; ▼ ♀ ♂ 《》 ≪≫ ①〜⑥ の削除", "あ;い▼う♀え♂お《か》き≪く≫け①こ⑥"),
+    ("regex-symbols", "REGEX: removal of ; ▼ ♀ ♂ 《》 ≪≫ ①〜⑥", "あ;い▼う♀え♂お《か》き≪く≫け①こ⑥"),
     (
         "regex-symbols-before-nfkc",
-        "順序: ① は NFKC の前に消えるので `1` にならない / 全角 ； は残って NFKC で ; になる",
+        "order: ① is removed before NFKC (no `1`) / full-width ； survives and NFKC makes it ;",
         "①番目；ここ",
     ),
     (
         "dashes",
-        "REGEX: ダッシュ類（U+2010〜U+2015 / U+2212 / U+2500 など）の削除",
+        "REGEX: removal of dashes (U+2010〜U+2015 / U+2212 / U+2500 and others)",
         "あ‐い―う−え─お",
     ),
     (
         "dash-modifier",
-        "REGEX: U+02D7 / U+2043 / U+23AF / U+23E4 / U+2E3A / U+2E3B の削除",
+        "REGEX: removal of U+02D7 / U+2043 / U+23AF / U+23E4 / U+2E3A / U+2E3B",
         "あ˗い⁃う⎯え⏤お⸺か⸻き",
     ),
     ("wave-dash", "REGEX: ～(U+FF5E) / 〜(U+301C) → ー", "あ～い〜う"),
-    ("ellipsis-run", "REGEX: …{3,} → ……（3 つ以上のときだけ）", "ええ………そうですか"),
-    ("ellipsis-two", "REGEX: … 2 つは縮約されない（境界の下側）", "ええ……そうですか"),
-    ("brackets-kagi", "括弧剥がし: 「」が全体を囲む", "「こんにちは」"),
-    ("brackets-nested", "括弧剥がし: 多重（「」→（）の順に 2 回剥がれる）", "「（こんにちは）」"),
-    ("brackets-double", "括弧剥がし: 『』", "『こんにちは』"),
-    ("brackets-lenticular", "括弧剥がし: 【】", "【こんにちは】"),
-    ("brackets-ascii", "括弧剥がし: ASCII ()", "(hello)"),
-    ("brackets-not-enclosing", "括弧剥がし: 全体を囲んでいないので剥がれない", "「あ」と「い」"),
-    ("brackets-asymmetric", "括弧剥がし: 対応しない組は剥がれない", "「あ）"),
-    ("brackets-inner", "括弧剥がし: 中間に現れる括弧は残る", "（あ（い）う）"),
-    ("nfkc-fullwidth", "NFKC: 全角英数 → 半角", "ＡＢＣ１２３ｄｅｆ"),
-    ("nfkc-halfwidth-kana", "NFKC: 半角カナ + 濁点 → 全角合成", "ｶﾞﾝﾊﾞｬﾁ"),
-    ("nfkc-square", "NFKC: 組文字 ㈱ ℃ ㌔ の分解", "㈱と℃と㌔"),
-    ("nfkc-roman", "NFKC: ローマ数字 Ⅻ と合字 ﬁ と分数 ½", "Ⅻとﬁと½"),
-    ("nfkc-combining", "NFKC: か + U+3099 → が（結合文字の合成）", "か\u3099っこいい"),
-    ("nfkc-dakuten-alone", "NFKC: 単独の濁点 U+309B は空白 + 結合文字へ分解される", "あ゛い"),
-    ("dots-three", "末尾: ... → …", "そうですね..."),
-    ("dots-two", "末尾: .. → …", "そうですね.."),
-    ("dots-four", "末尾: 順序（... が先に食うので .... は ….）", "そうですね...."),
+    ("ellipsis-run", "REGEX: …{3,} → …… (only for three or more)", "ええ………そうですか"),
+    (
+        "ellipsis-two",
+        "REGEX: two … are not contracted (the lower side of the boundary)",
+        "ええ……そうですか",
+    ),
+    (
+        "brackets-kagi",
+        "bracket stripping: corner brackets U+300C U+300D enclose the whole text",
+        "「こんにちは」",
+    ),
+    (
+        "brackets-nested",
+        "bracket stripping: nested (stripped twice, the corner brackets first, then （）)",
+        "「（こんにちは）」",
+    ),
+    ("brackets-double", "bracket stripping: 『』", "『こんにちは』"),
+    ("brackets-lenticular", "bracket stripping: 【】", "【こんにちは】"),
+    ("brackets-ascii", "bracket stripping: ASCII ()", "(hello)"),
+    (
+        "brackets-not-enclosing",
+        "bracket stripping: not stripped, since they do not enclose the whole text",
+        "「あ」と「い」",
+    ),
+    ("brackets-asymmetric", "bracket stripping: a mismatched pair is not stripped", "「あ）"),
+    ("brackets-inner", "bracket stripping: brackets in the middle stay", "（あ（い）う）"),
+    ("nfkc-fullwidth", "NFKC: full-width letters and digits → half-width", "ＡＢＣ１２３ｄｅｆ"),
+    (
+        "nfkc-halfwidth-kana",
+        "NFKC: half-width kana + voiced sound mark → composed full-width",
+        "ｶﾞﾝﾊﾞｬﾁ",
+    ),
+    ("nfkc-square", "NFKC: decomposition of the compatibility characters ㈱ ℃ U+3314", "㈱と℃と㌔"),
+    ("nfkc-roman", "NFKC: the Roman numeral Ⅻ, the ligature ﬁ and the fraction ½", "Ⅻとﬁと½"),
+    (
+        "nfkc-combining",
+        "NFKC: U+304B + U+3099 → U+304C (composition with a combining mark)",
+        "か\u3099っこいい",
+    ),
+    (
+        "nfkc-dakuten-alone",
+        "NFKC: a lone voiced sound mark U+309B decomposes into a space + a combining mark",
+        "あ゛い",
+    ),
+    ("dots-three", "trailing: ... → …", "そうですね..."),
+    ("dots-two", "trailing: .. → …", "そうですね.."),
+    ("dots-four", "trailing: order (... matches first, so .... becomes ….)", "そうですね...."),
     (
         "combined",
-        "複合: 全角空白 + ？ + ダッシュ + 括弧 + NFKC + ... が 1 本の文で重なる",
+        "combined: ideographic space + ？ + dash + brackets + NFKC + ... overlap in one sentence",
         "「本当に\u3000そうなの？―ＡＢＣ...」",
     ),
 )
@@ -518,7 +558,7 @@ def build_batch_cases(
         *BATCH_CASES,
         (
             "batch-truncated",
-            "truncation が実際に発火する長さ（body > max_length-1）",
+            "long enough that truncation really fires (body > max_length-1)",
             TRUNCATING_PASSAGE,
             TEXT_MAX_LENGTH_KEY,
         ),
@@ -646,7 +686,7 @@ def check_rule_coverage(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     if missing:
         raise SystemExit(f"the golden does not fire these rules: {missing}")
 
-    stripped = sum(1 for case in cases if case["why"].startswith("括弧剥がし"))
+    stripped = sum(1 for case in cases if case["why"].startswith("bracket stripping"))
     changed_by_nfkc = sum(
         1 for case in cases if unicodedata.normalize("NFKC", case["raw"]) != case["raw"]
     )
@@ -777,14 +817,14 @@ def build_parity_fixture(
     matched = check_subset_covers_lattice(raw_vocab, texts, subset)
     return {
         "_doc": [
-            "Irodori-TTS v4 テキスト層のパリティ用フィクスチャ",
-            "（生成: tools/export-recipes/irodori/tokenizer_ref.py）。",
-            "正本は上流 normalize_text と tokenizers / transformers で、id 列はそこから採った",
-            "実測値。語彙は全ケースの再現に要る**部分集合**（102,400 本を commit しないため）",
-            "だが、minScore / maxTokenLength は語彙**全体**の値。NFKC 差分表は全体を載せる",
-            "（TS の normalize('NFKC') と Unicode 版がずれた瞬間に正規化が静かに変わるため）。",
-            "encode.caption は caption 経路（上流は strip のみ）と text 経路（normalize）の",
-            "id 列を同じ生テキストから 2 通り採ったもの。",
+            "Parity fixture of the Irodori-TTS v4 text layer",
+            "(generated by tools/export-recipes/irodori/tokenizer_ref.py). The source of truth is",
+            "upstream normalize_text and tokenizers / transformers; the id lists were measured",
+            "there. The vocabulary is the **subset** every case needs (so as not to commit 102,400",
+            "entries), but minScore / maxTokenLength come from the **full** vocabulary. The NFKC",
+            "diff table is complete (the moment TS's normalize('NFKC') and the Unicode version",
+            "drift apart, normalization changes silently). encode.caption has the id lists of the",
+            "caption path (upstream: strip only) and the text path (normalize) for one raw text.",
         ],
         "source": {"repo": "Aratako/Irodori-TTS", "reference": "tokenizers + transformers"},
         "asset": {

@@ -1037,9 +1037,9 @@ def scan_w4_targets(model: nn.Module) -> W4Targets:
     extra = sorted(wide - {fqn for fqn, _weight, _axis in targets})
     if extra:
         raise AssertionError(
-            f"DiT に非 linear の量子化可能な重みがある: {extra}"
-            "（この台本は linear 限定 = i4 の実行経路と一致する形を測る前提 — "
-            "非 linear 込みの列を足すかどうかを先に決めること）"
+            f"DiT has a non-linear quantizable weight: {extra}"
+            " (this script assumes linear only = it measures the form that matches i4's execution"
+            " path — first decide whether to add a column that includes the non-linears)"
         )
     modules = elements = groups = 0
     excluded: dict[str, int] = {}
@@ -1054,7 +1054,7 @@ def scan_w4_targets(model: nn.Module) -> W4Targets:
         groups += int(rows.shape[0]) * (span // W4_GROUP_SIZE)
     if not modules:
         raise AssertionError(
-            f"g{W4_GROUP_SIZE} で量子化できる重みが 1 本も無い（除外 {sorted(excluded)}）"
+            f"no quantizable weight at all with g{W4_GROUP_SIZE} (excluded {sorted(excluded)})"
         )
     return W4Targets(modules=modules, elements=elements, groups=groups, excluded=excluded)
 
@@ -1323,23 +1323,27 @@ def scan_calib_targets(stages: Sequence[StageSpec]) -> tuple[dict[str, torch.Ten
         extra = sorted(wide - {fqn for fqn, _weight, _axis in targets})
         if extra:
             raise AssertionError(
-                f"{prefix} に非 linear の量子化可能な重みがある: {extra}"
-                "（校正は nn.Linear 限定 — 非 linear 込みの列を足すかどうかを先に決めること）"
+                f"{prefix} has a non-linear quantizable weight: {extra}"
+                " (calibration is nn.Linear only — first decide whether to add a column that"
+                " includes the non-linears)"
             )
         for fqn, weight, axis in targets:
             rows = channel_rows(weight, axis)
             span = int(rows.shape[1])
             if span % W4_GROUP_SIZE:
                 raise AssertionError(
-                    f"{prefix}.{fqn}: 量子化軸 {span} が g{W4_GROUP_SIZE} で割り切れない"
-                    "（校正は stage 単位で駆動するので 1 本だけ外す逃げ道が無い）"
+                    f"{prefix}.{fqn}: quantization axis {span} is not divisible by g{W4_GROUP_SIZE}"
+                    " (calibration is driven per stage, so there is no way out by excluding just"
+                    " one weight)"
                 )
             weights[f"{prefix}.{fqn}"] = weight
             modules += 1
             elements += int(weight.numel())
             groups += int(rows.shape[0]) * (span // W4_GROUP_SIZE)
     if not modules:
-        raise AssertionError(f"校正対象 '{CALIB_TARGET}' に量子化できる重みが 1 本も無い")
+        raise AssertionError(
+            f"calibration target '{CALIB_TARGET}' has no quantizable weight at all"
+        )
     return weights, W4Targets(modules=modules, elements=elements, groups=groups, excluded={})
 
 
@@ -1380,8 +1384,8 @@ def capture_stage_batches(
         handle.remove()
     if not batches:
         raise AssertionError(
-            "校正入力を 1 step も捕まえられなかった"
-            "（DiT の block ループが台本の想定と食い違っている）"
+            "could not capture the calibration input for even 1 step"
+            " (the DiT block loop disagrees with what the script assumes)"
         )
     return result, tuple(batches)
 
@@ -1423,8 +1427,9 @@ def assert_calib_covers_scan(
     extra = sorted(rounded - set(scan))
     if missing or extra or report.modules != len(scan):
         raise AssertionError(
-            f"[{name}] 校正が丸めた {report.modules} 本が走査の {len(scan)} 本と一致しない"
-            f"（丸め漏れ {missing[:3]} / 走査に無い {extra[:3]}）"
+            f"[{name}] the {report.modules} layers the calibration rounded do not match the"
+            f" {len(scan)} layers of the scan (not rounded {missing[:3]} / not in the scan"
+            f" {extra[:3]})"
         )
 
 
@@ -1713,26 +1718,32 @@ def w4_report_markdown(payload: Mapping[str, Any]) -> str:
     excluded = payload["excluded"]
     if excluded:
         lines.append(
-            "- 除外（量子化軸が g"
-            f"{payload['groupSize']} で割り切れないので対象から外した — ADR 0069 決定 2）: "
-            + " / ".join(f"`{item['weight']}`（軸 {item['quantAxis']}）" for item in excluded)
+            "- Excluded (the quantization axis is not divisible by g"
+            f"{payload['groupSize']}, so they were removed from the targets — ADR 0069"
+            " decision 2): "
+            + " / ".join(f"`{item['weight']}` (axis {item['quantAxis']})" for item in excluded)
         )
     calib = payload.get("calibTargets")
     if calib:
         lines.append(
-            f"- **校正付き構成**（`{'` / `'.join(CALIB_NAMES)}`）の対象は上とは別集合 —"
-            f" `{calib['name']}` = DiT block 列の `nn.Linear` {calib['modules']} 本 /"
-            f" {calib['elements']:,} 要素（block の外の `patch_embed` / `norm_out` /"
-            " `proj_out` / `time_embed` は入らない）。校正入力は参照 step 列を横断した"
-            f" {calib['batches']} バッチ（stage {calib['stages']} 段）。**bpw も品質も"
-            "この集合で読む**（4 方式の行と直接は比較できない）。"
+            f"- The targets of the **calibrated configurations** (`{'` / `'.join(CALIB_NAMES)}`)"
+            f" are a different set from the above — `{calib['name']}` = the `nn.Linear` of the DiT"
+            f" block sequence, {calib['modules']} weights /"
+            f" {calib['elements']:,} elements (`patch_embed` / `norm_out` /"
+            " `proj_out` / `time_embed` outside the blocks are not included). The calibration input"
+            f" is {calib['batches']} batches across the reference step sequence ({calib['stages']}"
+            " stages). **Read both bpw and quality on this set** (they cannot be compared directly"
+            " with the rows of the 4 methods)."
         )
     if payload["kmeansFitStride"] > 1:
         lines.append(
-            f"- `kmeans:shared` の**表の fit だけ** 1/{payload['kmeansFitStride']} の等間隔"
-            f"部分標本（≈ {payload['kmeansFitSamplesApprox']:,} 要素）で採った — **適用は全量**。"
-            "全量 fit は作業領域が実メモリに載らないため（部分標本の表と全量の表は別物に"
-            "なりうるので、数値を読む側が区別できるようここに明記する）。"
+            f"- **Only the table fit** of `kmeans:shared` used an evenly spaced"
+            f" 1/{payload['kmeansFitStride']} subsample"
+            f" (≈ {payload['kmeansFitSamplesApprox']:,} elements) — **it is applied to"
+            " everything**."
+            " A full fit's workspace does not fit in physical memory (the subsampled table and the"
+            " full table can differ, so this is stated here for the reader of the numbers to tell"
+            " them apart)."
         )
     lines.append("")
 
@@ -1821,7 +1832,7 @@ def w4_report_markdown(payload: Mapping[str, Any]) -> str:
     rows = [
         [
             f"`{name}`",
-            "OK" if configs[name]["moved"] else "**NG（素通り）**",
+            "OK" if configs[name]["moved"] else "**NG (passthrough)**",
             configs[name]["quantReport"],
         ]
         for name in quantized
@@ -2010,7 +2021,7 @@ def main() -> None:
     # strength as the `--w4-screen` path). `--inject` demonstrates detection power, and **turning it
     # red is the very purpose**, so it does not raise.
     if args.inject is None and summary["failed"]:
-        raise AssertionError("品質ゲートが赤: " + " / ".join(summary["failed"]))
+        raise AssertionError("quality gate is red: " + " / ".join(summary["failed"]))
 
 
 if __name__ == "__main__":

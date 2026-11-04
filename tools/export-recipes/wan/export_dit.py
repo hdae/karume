@@ -616,7 +616,7 @@ def float64_references(
     unrounded = unrounded_weights(dtype, model)
     if unrounded:
         raise AssertionError(
-            f"f64 の参照に {dtype} の丸めの前の重みが渡された（fake_quant の後に呼ぶ）:"
+            f"the f64 reference was given unrounded {dtype} weights (call it after fake_quant):"
             f" {unrounded[:5]}"
         )
     writer = dit_reference.LayerwiseDit(model.config)
@@ -877,7 +877,9 @@ def file_digests(directory: Path) -> dict[str, str]:
     digests: dict[str, str] = {}
     for path in sorted(directory.iterdir()):
         if not path.is_file():
-            raise SeriesMismatchError(f"部品ディレクトリにファイルでない項目がある: {path}")
+            raise SeriesMismatchError(
+                f"the component directory has an item that is not a file: {path}"
+            )
         with path.open("rb") as stream:
             digests[path.name] = hashlib.file_digest(stream, "sha256").hexdigest()
     return digests
@@ -899,15 +901,17 @@ def series_mismatches(
     for name in sorted(actual.keys() | expected.keys() | set(absent)):
         if name in absent:
             if name in actual:
-                mismatches[name] = "照合から外したケースのファイルを書いた"
+                mismatches[name] = "wrote the file of an excluded case"
             elif name not in expected:
-                mismatches[name] = "照合から外したケースのファイルが既存に無い"
+                mismatches[name] = (
+                    "the file of an excluded case is missing from the existing directory"
+                )
         elif name not in expected:
-            mismatches[name] = "既存に無い"
+            mismatches[name] = "missing from the existing directory"
         elif name not in actual:
-            mismatches[name] = "書いた側に無い"
+            mismatches[name] = "missing from the written directory"
         elif actual[name] != expected[name]:
-            mismatches[name] = "sha256 が違う"
+            mismatches[name] = "sha256 differs"
     return mismatches
 
 
@@ -961,7 +965,7 @@ def emit(args: argparse.Namespace) -> dict[str, Any]:
     series = PROBE_SERIES if args.layers else series_dir(args.dtype)
     existing = series / TARGET
     if args.check and not existing.is_dir():
-        raise SeriesMismatchError(f"照合の相手の部品ディレクトリが無い（{existing}）")
+        raise SeriesMismatchError(f"no component directory to compare against ({existing})")
     # The measurement graph writes no goldens, so only the example input (the first case) is built.
     specs = CASES[:1] if args.layers else series_cases(args.dtype, full=not args.no_full)
     model = load_transformer(args.model)

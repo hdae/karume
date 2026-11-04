@@ -124,7 +124,7 @@ class TestTheFloat64Path:
         model = _rounded("i8")
         monkeypatch.setattr(dit_patch, "_float_keeps_float64", nullcontext)
 
-        with pytest.raises(dit_reference.DitReferenceError, match="f64 でない値"):
+        with pytest.raises(dit_reference.DitReferenceError, match="a non-f64 value"):
             dit_reference.LayerwiseDit(model.config).forward(
                 dit_reference.ModuleWeights(model), torch.float64, *_inputs()
             )
@@ -150,7 +150,7 @@ class TestTheFloat64Path:
         tokens = TINY_LATENT[0] * (TINY_LATENT[1] // 2) * (TINY_LATENT[2] // 2)
         per_token = torch.full((1, tokens), 750, dtype=torch.int64)
 
-        with pytest.raises(dit_reference.DitReferenceError, match="段 1"):
+        with pytest.raises(dit_reference.DitReferenceError, match="step 1"):
             dit_reference.LayerwiseDit(model.config).forward(
                 dit_reference.ModuleWeights(model), torch.float64, latents, per_token, embeds
             )
@@ -334,7 +334,7 @@ class TestTheUpstreamAlignment:
         model = _rounded("i8")
         writer = dit_reference.LayerwiseDit(model.config, alignment={})
 
-        with pytest.raises(dit_reference.DitReferenceError, match="ずれが無い"):
+        with pytest.raises(dit_reference.DitReferenceError, match="has no upstream offset"):
             writer.forward(dit_reference.ModuleWeights(model), torch.float32, *_inputs())
 
 
@@ -400,9 +400,9 @@ class TestCompareTensors:
         result = dit_reference.compare_tensors({"output": flipped, "extra": torch.ones(1)}, path)
 
         assert set(result["mismatched"]) == {"output", "block.00", "extra"}
-        assert "ビットが違う" in result["mismatched"]["output"]
-        assert result["mismatched"]["block.00"] == "書いた側に無い"
-        assert result["mismatched"]["extra"] == "既存に無い"
+        assert "bits differ" in result["mismatched"]["output"]
+        assert result["mismatched"]["block.00"] == "missing from the written side"
+        assert result["mismatched"]["extra"] == "missing from the existing file"
 
     def test_negative_zero_is_not_equal_to_zero(self, tmp_path: Path) -> None:
         path = self._file(tmp_path, {"output": torch.zeros(2)})
@@ -463,7 +463,7 @@ class TestTheResumeMarker:
     def test_an_unreadable_line_before_the_last_fails_loudly(self, tmp_path: Path) -> None:
         path = self._write(tmp_path, '{"case": \n' + self._lines(_row("a", "full")))
 
-        with pytest.raises(dit_reference.DitReferenceError, match=":1 の行が読めない"):
+        with pytest.raises(dit_reference.DitReferenceError, match=":1: unreadable row"):
             dit_reference._done(path, "full")
 
     def test_the_numeric_environment_records_the_mkl_switches(self, monkeypatch) -> None:
@@ -501,7 +501,7 @@ class TestTheExportDitRoute:
         f64 golden is written)."""
         spec = export_dit.CaseSpec("full-band", TINY_LATENT, 999, 5, 2, blocks=False)
 
-        with pytest.raises(AssertionError, match="丸めの前の重み"):
+        with pytest.raises(AssertionError, match="was given unrounded"):
             export_dit.float64_references(_tiny(), [spec], dtype)
 
     def test_cases_without_an_f64_reference_take_nothing(self) -> None:
@@ -694,7 +694,7 @@ class TestTheBlockHooks:
     def test_blocks_outside_the_model_fail_loudly(self, blocks: int) -> None:
         model = _rounded("i8")
 
-        with pytest.raises(dit_reference.DitReferenceError, match="回すブロックの数"):
+        with pytest.raises(dit_reference.DitReferenceError, match="the number of blocks to run"):
             dit_reference.LayerwiseDit(model.config).forward(
                 dit_reference.ModuleWeights(model), torch.float32, *_inputs(), blocks=blocks
             )

@@ -239,7 +239,8 @@ class TargetCounts:
     def __add__(self, other: TargetCounts) -> TargetCounts:
         if self.group_size != other.group_size:
             raise AssertionError(
-                f"group 長の違う計数は足せない（{self.group_size} と {other.group_size}）"
+                f"cannot add counts with different group sizes ({self.group_size} and"
+                f" {other.group_size})"
             )
         return TargetCounts(
             modules=self.modules + other.modules,
@@ -999,7 +1000,9 @@ def project_distribution(
         if path.suffix != CONTAINER_SUFFIX or path != container_parts(path)[0]:
             continue
         values = ir_graph(path).get("values") or {}
-        bucket = "shared（DeBERTa text_encoder）" if "shared" in path.parts else "話者ごとの net_g"
+        bucket = (
+            "shared（DeBERTa text_encoder）" if "shared" in path.parts else "speaker-specific net_g"
+        )
         for key, layout in sorted(read_layouts(path).items()):
             shape = (values.get(key) or {}).get("shape") or []
             if layout != "i8" or len(shape) != 2:
@@ -1265,8 +1268,8 @@ def calib_targets(stages: Sequence[StageSpec]) -> tuple[dict[str, torch.Tensor],
             span = int(channel_rows(weight, axis).shape[-1])
             if span % CALIB_GROUP_SIZE:
                 raise AssertionError(
-                    f"'{fqn}': 量子化軸 {span} が group {CALIB_GROUP_SIZE} で割り切れない"
-                    "（i4 は端数 group を作らない — ADR 0069 決定 2）"
+                    f"'{fqn}': the quantization axis {span} is not divisible by group"
+                    f" {CALIB_GROUP_SIZE} (i4 does not create partial groups — ADR 0069 decision 2)"
                 )
             weights[fqn] = weight
             channels += int(weight.shape[axis])
@@ -1289,7 +1292,7 @@ def calib_corpus(limit: int | None) -> tuple[str, ...]:
     read-aloud style / questions / number reading (a reduced run keeps the mix of roles).
     """
     if limit is not None and limit < 1:
-        raise ValueError(f"校正文数の上限は 1 以上（実測 {limit}）")
+        raise ValueError(f"the calibration sentence limit must be at least 1 (got {limit})")
     return CALIB_TEXTS if limit is None else CALIB_TEXTS[:limit]
 
 
@@ -1307,7 +1310,8 @@ def assert_calib_disjoint(texts: Sequence[str], evaluated: Sequence[str]) -> Non
     )
     if hits:
         raise AssertionError(
-            f"校正コーパスが評価文と重なっている: {hits[:3]}（評価文 {list(evaluated)}）"
+            f"the calibration corpus overlaps the evaluated text: {hits[:3]} (evaluated text"
+            f" {list(evaluated)})"
         )
 
 
@@ -1377,9 +1381,9 @@ def capture_stage_batches(
                 pass
             if len(captured) != 1 or len(masks) != 1:
                 raise AssertionError(
-                    f"校正入力 {index} で先頭 stage の入力が揃わなかった"
-                    f"（層 {len(captured)} 件 / ConvLayer {len(masks)} 件）"
-                    "— stage の綴りが模型の構成と食い違っている"
+                    f"calibration input {index} did not gather the inputs of the first stage"
+                    f" ({len(captured)} layers / {len(masks)} ConvLayers)"
+                    " — the stage spelling disagrees with the model's structure"
                 )
             args, kwargs = captured[0]
             if len(args) != 2:
@@ -1453,8 +1457,8 @@ def assert_calib_covers_scan(
     extra = sorted(rounded - set(scan))
     if missing or extra or report.modules != len(scan):
         raise AssertionError(
-            f"[{name}] 校正が丸めた {report.modules} 本が走査の {len(scan)} 本と一致しない"
-            f"（丸め漏れ {missing[:3]} / 走査に無い {extra[:3]}）"
+            f"[{name}] the {report.modules} layers calibration rounded do not match the"
+            f" {len(scan)} of the scan (not rounded {missing[:3]} / not in the scan {extra[:3]})"
         )
 
 
@@ -1519,7 +1523,7 @@ def bert_variant(recipe: Recipe, methods: Mapping[str, W4Method]) -> str | None:
     same field name, the reader would confuse them.
     """
     if recipe.bert_method is not None and recipe.bert_calib is not None:
-        raise AssertionError("BERT の丸めは素の方式か校正付きのどちらか一方")
+        raise AssertionError("BERT rounding is either a plain method or a calibrated one, not both")
     if recipe.bert_method is not None:
         return methods[recipe.bert_method].name
     return recipe.bert_calib
@@ -2060,7 +2064,7 @@ def selected_configs(spec: str | None) -> tuple[str, ...]:
     names = [name for name in spec.split(",") if name]
     unknown = [name for name in names if name not in CONFIGS]
     if unknown:
-        raise SystemExit(f"未知の構成 {unknown}（選べるのは {list(CONFIGS)}）")
+        raise SystemExit(f"unknown configuration {unknown} (the choices are {list(CONFIGS)})")
     return tuple(name for name in CONFIGS if name == "f32" or name in names)
 
 
@@ -2152,7 +2156,8 @@ def parse_w4_group_size(raw: str) -> int:
     value = int(raw)
     if value & (value - 1) or value < MIN_GROUP_SIZE:
         raise argparse.ArgumentTypeError(
-            f"group 長 {value} が 2 冪かつ {MIN_GROUP_SIZE} 以上でない（ADR 0069 決定 2）"
+            f"group size {value} is not a power of two that is at least {MIN_GROUP_SIZE}"
+            " (ADR 0069 decision 2)"
         )
     return value
 

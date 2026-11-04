@@ -521,7 +521,7 @@ def check_table_ranges(tables: PromptCleanTables) -> None:
     if any(cp in double for start, end in tables.single_quotes for cp in range(start, end + 1)):
         raise ValueError("the sets of SINGLE_QUOTE_RE and DOUBLE_QUOTE_RE intersect")
     if ord("'") in single or ord("'") in double or ord('"') in single or ord('"') in double:
-        raise ValueError("引用符の置換先が引用符の集合に入っている")
+        raise ValueError("a quote replacement is in the quote sets")
 
 
 # ---------------------------------------------------------------------------
@@ -712,8 +712,9 @@ def record(
     expected = truth(text)
     if mirrored != expected:
         raise ValueError(
-            f"鏡像が上流の prompt_clean と違う\n  入力={[hex(ord(c)) for c in text]}\n"
-            f"  上流={expected!r}\n  鏡像={mirrored!r}"
+            "the mirror differs from upstream's prompt_clean\n"
+            f"  input={[hex(ord(c)) for c in text]}\n"
+            f"  upstream={expected!r}\n  mirror={mirrored!r}"
         )
     return "A" + expected
 

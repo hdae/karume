@@ -95,7 +95,7 @@ def _strip_prefix(state: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
                 for name, value in state.items()
             }
     heads = sorted({name.split(".")[0] for name in state})
-    raise SystemExit(f"知らない鍵の前置: {heads}（想定: {', '.join(KNOWN_PREFIXES)}）")
+    raise SystemExit(f"unknown key prefix: {heads} (expected: {', '.join(KNOWN_PREFIXES)})")
 
 
 def _assert_covers(converted: Mapping[str, torch.Tensor], reference: Path, label: str) -> None:
@@ -105,14 +105,16 @@ def _assert_covers(converted: Mapping[str, torch.Tensor], reference: Path, label
     extra = sorted(set(converted) - set(expected))
     if missing or extra:
         raise SystemExit(
-            f"{label}: 変換後の鍵が base と一致しない — 足りない {len(missing)} 件"
-            f"{missing[:3]} / 余る {len(extra)} 件{extra[:3]}"
+            f"{label}: the converted keys do not match base — {len(missing)} missing"
+            f" {missing[:3]} / {len(extra)} extra {extra[:3]}"
         )
     mismatched = [
         name for name in expected if tuple(expected[name].shape) != tuple(converted[name].shape)
     ]
     if mismatched:
-        raise SystemExit(f"{label}: shape が base と違う {len(mismatched)} 件{mismatched[:3]}")
+        raise SystemExit(
+            f"{label}: shape differs from base in {len(mismatched)} keys {mismatched[:3]}"
+        )
 
 
 def _link(target: Path, link: Path) -> None:
@@ -146,24 +148,26 @@ def _civitai_provenance(checkpoint: Path) -> dict[str, object] | None:
     if not record_path.exists():
         if CIVITAI_INTAKE_DIR.fullmatch(checkpoint.parent.name):
             raise SystemExit(
-                f"{checkpoint.parent} は取り込みの配置なのに {CIVITAI_PROVENANCE_FILE} が無い"
-                "（取り込みが途中で壊れたか、来歴を消した）— "
-                "`python -m anima.civitai` で取り込み直す"
+                f"{checkpoint.parent} is in the intake layout but has no {CIVITAI_PROVENANCE_FILE}"
+                " (the intake broke midway, or the provenance was deleted) — "
+                "redo the intake with `python -m anima.civitai`"
             )
         return None
     try:
         record = json.loads(record_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
-        raise SystemExit(f"{record_path} を読めない: {error}") from error
+        raise SystemExit(f"cannot read {record_path}: {error}") from error
     if not isinstance(record, dict):
-        raise SystemExit(f"{record_path} が JSON オブジェクトでない")
+        raise SystemExit(f"{record_path} is not a JSON object")
 
     file = record.get("file")
     missing = [field for field in CIVITAI_CARRIED_FIELDS if field not in record]
     if not isinstance(file, dict) or "sha256" not in file:
         missing.append("file.sha256")
     if missing:
-        raise SystemExit(f"{record_path} に欄が足りない: {missing}（`anima.civitai` が書く形）")
+        raise SystemExit(
+            f"{record_path} is missing fields: {missing} (the shape `anima.civitai` writes)"
+        )
 
     return {
         "air": record["air"],

@@ -222,7 +222,7 @@ class TestRunCase:
     def test_a_context_that_is_neither_embedding_is_refused(self, pipeline, monkeypatch):
         self._upstream(monkeypatch, ("cond", "other"))
 
-        with pytest.raises(AssertionError, match="振り分けを決められない"):
+        with pytest.raises(AssertionError, match="cannot tell which branch the forward belongs to"):
             few_step_ref.run_case(pipeline, self.CASE, self._embeds(), tile=2)
 
     def test_the_denoise_runs_with_the_math_kernel_disabled(self, pipeline, monkeypatch):

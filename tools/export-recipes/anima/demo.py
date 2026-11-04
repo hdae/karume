@@ -82,142 +82,142 @@ PROMPT_CASES: list[tuple[str, str, str]] = [
         "tags",
         "1girl, solo, long hair, blue eyes, school uniform, cherry blossoms, "
         "outdoors, smile, upper body, masterpiece, best quality",
-        "既定プロンプト — danbooru タグ列",
+        "default prompt — a danbooru tag list",
     ),
     (
         "negative",
         "low quality, worst quality, blurry, bad anatomy, jpeg artifacts",
-        "既定ネガティブ",
+        "default negative prompt",
     ),
     (
         "digits",
         "1girl, 2boys, 3 cats, 2024, 1.5x, 100%",
-        "Qwen2 の `\\p{N}` は 1 文字ずつ切れる",
+        "Qwen2's `\\p{N}` splits one character at a time",
     ),
     (
         "ascii_punct",
         "a<b>c&d\"e'f`g~h|i\\j/k",
-        "記号の連続 — `[^\\s\\p{L}\\p{N}]+` の貪欲さ",
+        "a run of symbols — the greediness of `[^\\s\\p{L}\\p{N}]+`",
     ),
     (
         "apostrophe",
         "it's a cat's toy, I'M HERE, they'll, we've, don't, I'd",
-        "`(?i:'s|'t|'re|'ve|'m|'ll|'d)` の大小無視分岐",
+        "the case-insensitive branch `(?i:'s|'t|'re|'ve|'m|'ll|'d)`",
     ),
     (
         "apostrophe_fold",
         "it'\u017fs and it'S",
-        "`(?i:)` は simple case folding — U+017F も `'S` も s に畳まれる",
+        "`(?i:)` is simple case folding — both U+017F and `'S` fold to s",
     ),
     (
         "long_s",
         "itſs and it's",
-        "U+017F 単体（アポストロフィ無し — 短縮形分岐には入らない）",
+        "U+017F alone (no apostrophe — it does not enter the contraction branch)",
     ),
     (
         "japanese",
         "夕焼けの空、桜が舞う。少女がひとり立っている。",
-        "日本語（T5 は unk 融合 / Qwen2 は byte-level）",
+        "Japanese (T5 fuses consecutive unk / Qwen2 is byte-level)",
     ),
     (
         "mixed",
         "1girl, 猫耳, ロングヘア, masterpiece",
-        "日英混在 — 語 / 非語の切り替わり",
+        "mixed Japanese and English — switching between word and non-word",
     ),
     (
         "emoji",
         "a cat \U0001f408 and a flag \U0001f1ef\U0001f1f5 and ❤\ufe0f love",
-        "絵文字・地域表示子・異体字セレクタ",
+        "emoji, regional indicators, variation selectors",
     ),
     (
         "zwj",
         "family \U0001f468\u200d\U0001f469\u200d\U0001f466 photo",
-        "ZWJ 連結列 — T5 正規化は ZWJ を空白へ写す",
+        "ZWJ sequence — T5 normalization maps ZWJ to a space",
     ),
     (
         "combining",
         "café vs cafe\u0301, A\u0301\u0301, ᴬ\u0300, e\u0303\u033c",
-        "結合文字 — Precompiled の「最短接頭辞が勝ち残りは捨てる」を直接叩く",
+        "combining characters — hits Precompiled's 'shortest prefix wins, rest dropped' directly",
     ),
     (
         "odd_spaces",
         "wide\u00a0space and\u3000ideographic\u2028line\u000bvtab",
-        "各種空白（NBSP / 全角 / 行区切り / 垂直タブ）",
+        "assorted spaces (NBSP / ideographic / line separator / vertical tab)",
     ),
     (
         "spaces",
         "  leading and   inner   and trailing  ",
-        "空白の連続・先頭末尾空白 — `\\s+(?!\\S)` の後戻り",
+        "runs of spaces, leading and trailing spaces — the backtracking of `\\s+(?!\\S)`",
     ),
     (
         "newlines",
         "line1\nline2\r\nline3\n\n\nline4",
-        "改行と CRLF（`\\s*[\\r\\n]+` と GB3）",
+        "newlines and CRLF (`\\s*[\\r\\n]+` and GB3)",
     ),
     (
         "only_space",
         "   ",
-        "空白のみ — T5 は `</s>` だけになり Dim(min=2) を外す",
+        "spaces only — T5 yields only `</s>`, which falls outside Dim(min=2)",
     ),
     (
         "single_char",
         "a",
-        "1 文字 — Qwen2 が 1 トークンになり Dim(min=2) を外す",
+        "1 character — Qwen2 yields 1 token, which falls outside Dim(min=2)",
     ),
     (
         "qwen_special",
         "<|endoftext|>a<|im_start|>b<|vision_pad|>",
-        "Qwen2 の追加語彙は正規化前に leftmost-longest で切り出す",
+        "Qwen2's added tokens are split off leftmost-longest before normalization",
     ),
     (
         "t5_special",
         "<extra_id_0> foo <extra_id_99> </s> <pad>",
-        "T5 の追加語彙（<extra_id_*> 群）",
+        "T5's added tokens (the <extra_id_*> group)",
     ),
     (
         "special_lookalike",
         "<|endoftext|> <|endoftext|x <|not_a_token|>",
-        "特殊トークン「らしき」文字列 — 途中まで一致しても切り出さない",
+        "strings that look like special tokens — a partial match is not split off",
     ),
     (
         "control",
         "abc\ufeffd\u200be\u00adf\u0001g",
-        "BOM・ゼロ幅空白・soft hyphen・制御文字",
+        "BOM, zero-width space, soft hyphen, control characters",
     ),
     (
         "metaspace",
         "under\u2581score",
-        "入力に U+2581（Metaspace の置換文字）が来る場合",
+        "the input contains U+2581 (Metaspace's replacement character)",
     ),
     (
         "long",
         ", ".join(["masterpiece", "best quality", "highly detailed", "1girl", "solo"] * 40),
-        "非常に長い列 — 512 での切り詰め",
+        "a very long sequence — truncation at 512",
     ),
     (
         "very_long_word",
         "a" * 600,
-        "長い 1 語 — BPE の反復と切り詰め",
+        "one long word — BPE iteration and truncation",
     ),
     (
         "cjk_punct",
         "「猫」と『犬』、あるいは…！？",
-        "日本語の約物（全角記号の正規化）",
+        "Japanese punctuation (normalization of full-width symbols)",
     ),
     (
         "accents",
         "naïve café résumé Ångström ﬁ ﬂ ½ Ⅻ",
-        "合字・分数・ローマ数字（NFKC 系の写像）",
+        "ligatures, fractions, Roman numerals (NFKC-style mappings)",
     ),
     (
         "thai_indic",
         "กำ क\u093c\u094dष ൎक",
-        "タイ / デーヴァナーガリー（SpacingMark・Prepend）",
+        "Thai / Devanagari (SpacingMark, Prepend)",
     ),
     (
         "hangul",
         "각 \u1100\u1161\u11a8",
-        "ハングル合成済み音節と字母列",
+        "Hangul precomposed syllables and jamo sequences",
     ),
 ]
 
@@ -548,11 +548,14 @@ def build_fixture(built: dict[str, Any], cases: list[dict[str, Any]]) -> dict[st
     t5_vocab = {token: (i, score) for i, (token, score) in enumerate(built["t5Vocab"])}
     return {
         "_doc": [
-            "Anima プロンプト層のパリティ用フィクスチャ"
-            "（生成: tools/export-recipes/anima/demo.py）。",
-            "正本は transformers の AutoTokenizer で、id 列はそこから採った実測値。語彙と",
-            "merges は全ケースの再現に要る**部分集合**だけを載せる（151k / 32k を commit",
-            "しないため）。正規化表・文字クラス表は畳み込みの成果物そのものなので全体を載せる。",
+            "Parity fixture for the Anima prompt layer"
+            " (generated by tools/export-recipes/anima/demo.py).",
+            "The source of truth is transformers' AutoTokenizer; the id sequences are measured"
+            " from it. Of the vocab and",
+            "merges, only the **subset** needed to reproduce every case is included (so that the"
+            " 151k / 32k are not",
+            "committed). The normalizer table and the char-class tables are the output of the"
+            " folding itself, so they are included whole.",
         ],
         "source": {"repo": built["qwen"]["source"].split("#")[0], "reference": "tokenizers"},
         "maxLength": MAX_LENGTH,

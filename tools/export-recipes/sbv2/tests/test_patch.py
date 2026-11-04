@@ -450,7 +450,7 @@ class TestFfnPaddingFold:
         ffn.eval()
         patch_sbv2.apply_ffn_conv_padding_patch()
 
-        with pytest.raises(ValueError, match="偶数"):
+        with pytest.raises(ValueError, match="is even"):
             ffn(torch.randn(1, 16, 11), torch.ones(1, 1, 11))
 
     def test_a_causal_ffn_is_rejected(self, pristine_classes):

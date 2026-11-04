@@ -342,7 +342,7 @@ class TestWindowSizeGate:
         sizes = [export_sbv2.EXPECTED_WINDOW_SIZE] * 3
         sizes[-1] += 1
 
-        with pytest.raises(ValueError, match="窓幅"):
+        with pytest.raises(ValueError, match="window size differs"):
             export_sbv2._assert_window_size(self._layered(sizes))
 
     def test_layers_without_relative_attention_are_ignored(self):
@@ -353,7 +353,7 @@ class TestWindowSizeGate:
     def test_a_model_without_any_window_size_is_rejected(self):
         """Guard against a vacuous check — fails when an attribute rename makes the scan find
         nothing."""
-        with pytest.raises(ValueError, match="恒真化"):
+        with pytest.raises(ValueError, match="vacuous"):
             export_sbv2._assert_window_size(torch.nn.Module())
 
 
@@ -371,7 +371,7 @@ class TestLoadAsserts:
         original = attn.window_size
         attn.window_size = original + 1
         try:
-            with pytest.raises(ValueError, match="窓幅"):
+            with pytest.raises(ValueError, match="window size differs"):
                 export_sbv2._assert_window_size(net_g)
         finally:
             attn.window_size = original
@@ -387,7 +387,7 @@ class TestLoadAsserts:
     def test_the_speaker_id_is_range_checked(self):
         net_g = export_sbv2.load_net_g(MODEL_DIR)[0]
 
-        with pytest.raises(ValueError, match="話者"):
+        with pytest.raises(ValueError, match="speaker ID"):
             export_sbv2.speaker_embedding(net_g, net_g.emb_g.num_embeddings)
 
     def test_the_speaker_embedding_comes_from_the_real_weights(self):
@@ -450,7 +450,7 @@ class TestVerifyExclusivity:
         """Detects the order violation itself (misuse from paths that bypass the CLI fails too)."""
         monkeypatch.setattr(patch_sbv2, "_APPLIED", True)
 
-        with pytest.raises(RuntimeError, match="恒真化"):
+        with pytest.raises(RuntimeError, match="vacuous"):
             export_sbv2.reference_front_outputs(object(), {})
 
     @pytest.mark.parametrize("where", ["front", "flow", "voice"])
@@ -459,7 +459,7 @@ class TestVerifyExclusivity:
         of front alone)."""
         monkeypatch.setattr(patch_sbv2, "_APPLIED", True)
 
-        with pytest.raises(RuntimeError, match="恒真化"):
+        with pytest.raises(RuntimeError, match="vacuous"):
             export_sbv2._assert_patches_not_applied(f"taking the {where} reference")
 
     def test_the_dec_gate_points_the_other_way(self):
@@ -471,7 +471,7 @@ class TestVerifyExclusivity:
         """
         removed = torch.nn.Module()
         removed.register_parameter("weight", torch.nn.Parameter(torch.zeros(1)))
-        with pytest.raises(RuntimeError, match="恒真化"):
+        with pytest.raises(RuntimeError, match="vacuous"):
             export_sbv2._assert_weight_norm_present(removed, "taking the dec reference")
 
         intact = torch.nn.Module()
@@ -496,7 +496,7 @@ class TestVerifyGatePlacement:
 
         # Match the specific check (matching the substring both checks share, which does not tell
         # which one failed, would be green even if the dec-side check failed).
-        with pytest.raises(RuntimeError, match="パッチ適用後"):
+        with pytest.raises(RuntimeError, match="after patching"):
             verifier(MODEL_DIR, cases=[(2, 0)])
 
     @pytest.mark.parametrize(
@@ -512,7 +512,7 @@ class TestVerifyGatePlacement:
         # failing on that first would not show that "dec's check sits on the path").
         monkeypatch.setattr(patch_sbv2, "_APPLIED", False)
 
-        with pytest.raises(RuntimeError, match="remove_weight_norm 済み"):
+        with pytest.raises(RuntimeError, match="after remove_weight_norm"):
             verifier(MODEL_DIR, cases=[(2, 0)])
 
 
@@ -1399,7 +1399,7 @@ class TestFrontInputs:
         assert float(style.abs().max()) > 0
 
     def test_an_out_of_range_style_id_is_rejected(self):
-        with pytest.raises(ValueError, match="スタイル"):
+        with pytest.raises(ValueError, match="style ID"):
             export_sbv2.style_vector(MODEL_DIR, 10_000)
 
     def test_the_case_inputs_are_keyed_by_the_graph_input_names(self):
@@ -1883,7 +1883,7 @@ class TestTheVoiceFamilyIsDecidedByAnAllowList:
         # tell this legal-fact check from a generic "bad argument" — the repository's convention is
         # an `Error` subclass).
         with pytest.raises(
-            export_sbv2.Sbv2FamilyError, match="どの声のファミリーの綴りにも当たらない"
+            export_sbv2.Sbv2FamilyError, match="matches the spelling of no voice family"
         ):
             export_sbv2.sbv2_family(Path("inputs/sbv2") / name)
 

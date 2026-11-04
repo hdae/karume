@@ -135,7 +135,7 @@ class TestTheCheckItself:
         # tell them apart.
         broken.outputs[2], broken.outputs[3] = broken.outputs[3], broken.outputs[2]
 
-        with pytest.raises(export_vae.ChunkGraphError, match="順の取り違え"):
+        with pytest.raises(export_vae.ChunkGraphError, match="swapped order"):
             export_vae.assert_chunk_graph(broken, module, TILE)
 
     def test_an_op_outside_the_set_is_caught(self, exported):
@@ -297,7 +297,7 @@ class TestTheSetIsPublishedTogether:
         assert self._contents(series) == [self.OLD] * 5
 
     def test_a_duplicated_target_is_refused_before_anything_is_written(self, series):
-        with pytest.raises(export_vae.ChunkGraphError, match="重複"):
+        with pytest.raises(export_vae.ChunkGraphError, match="duplicate"):
             self._emit(series, (export_vae.TARGET_FIRST, export_vae.TARGET_FIRST))
 
         assert self._contents(series) == [self.OLD] * 5
@@ -375,7 +375,7 @@ class TestTi2vChunkGraphs:
         side = 8 * TI2V_TILE
         broken.values[broken.outputs[0]] = IrValue(dtype="f32", shape=[3, 4, side, side])
 
-        with pytest.raises(export_vae.ChunkGraphError, match="フレームの形"):
+        with pytest.raises(export_vae.ChunkGraphError, match="frame shape"):
             export_vae.assert_chunk_graph(broken, module, TI2V_TILE)
 
     def test_a_16_channel_latent_is_caught_in_a_ti2v_graph(self, ti2v_exported):
@@ -385,7 +385,7 @@ class TestTi2vChunkGraphs:
             name=export_vae.LATENT_INPUT, dtype="f32", shape=[16, 1, TI2V_TILE, TI2V_TILE]
         )
 
-        with pytest.raises(export_vae.ChunkGraphError, match="入力"):
+        with pytest.raises(export_vae.ChunkGraphError, match="differ from the table"):
             export_vae.assert_chunk_graph(broken, module, TI2V_TILE)
 
 
@@ -610,7 +610,7 @@ class TestCommandLine:
         with pytest.raises(SystemExit):
             export_vae.main(["--model", "t2v-1.3b", "--dtype", "i8"])
 
-        assert "i8 系列を持たない" in capsys.readouterr().err
+        assert "has no VAE i8 series" in capsys.readouterr().err
         assert (emitted, storage) == ({}, {})
 
 
@@ -712,7 +712,7 @@ class TestTi2vI8Writer:
         is not placed."""
         root = tmp_path / "series"
 
-        with pytest.raises(export_vae.ChunkGraphError, match="フィクスチャを書かない"):
+        with pytest.raises(export_vae.ChunkGraphError, match="writes no fixtures"):
             export_vae.emit_targets(
                 export_vae.TARGETS,
                 None,
@@ -920,7 +920,7 @@ class TestSharedRefusals:
     def test_no_lender_is_refused(self, ti2v_synthetic_vae, tmp_path):
         root = tmp_path / "series"
 
-        with pytest.raises(export_vae.ChunkGraphError, match=r"貸し手の容器 .* が無い"):
+        with pytest.raises(export_vae.ChunkGraphError, match=r"lender container .* is missing"):
             export_vae.emit_shared_targets(
                 export_vae.TARGETS,
                 ti2v_synthetic_vae,
@@ -932,7 +932,7 @@ class TestSharedRefusals:
         assert not root.exists() or not list(root.iterdir())
 
     def test_fixtures_are_refused(self, ti2v_synthetic_vae, tmp_path):
-        with pytest.raises(export_vae.ChunkGraphError, match="フィクスチャを書かない"):
+        with pytest.raises(export_vae.ChunkGraphError, match="writes no fixtures"):
             export_vae.emit_shared_targets(
                 export_vae.TARGETS,
                 ti2v_synthetic_vae,
@@ -951,7 +951,7 @@ class TestSharedRefusals:
         root = tmp_path / "series"
         shutil.copytree(written[1], root)
         with pytest.raises(
-            export_vae.ChunkGraphError, match=r"圧縮格納 \['f16'\] が i8 の系列でない"
+            export_vae.ChunkGraphError, match=r"storage \['f16'\] is not of the i8 series"
         ):
             export_vae.emit_shared_targets(
                 export_vae.TARGETS,
@@ -971,7 +971,7 @@ class TestSharedRefusals:
 
         root = tmp_path / "series"
         shutil.copytree(written[1], root)
-        with pytest.raises(export_vae.ChunkGraphError, match="タイル 16 の 'latent' でない"):
+        with pytest.raises(export_vae.ChunkGraphError, match="is not tile 16's 'latent'"):
             export_vae.emit_shared_targets(
                 export_vae.TARGETS,
                 ti2v_synthetic_vae,
@@ -1035,5 +1035,5 @@ class TestSharedCommandLine:
         with pytest.raises(SystemExit):
             export_vae.main(["--model", "ti2v-5b", "--shared"])
 
-        assert "--tile を要する" in capsys.readouterr().err
+        assert "--shared requires --tile" in capsys.readouterr().err
         assert emitted == {}

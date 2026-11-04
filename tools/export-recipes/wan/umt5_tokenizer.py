@@ -110,40 +110,84 @@ FIXED_PROMPT_LENGTHS = {"boxing-cats": 28, "ferret": 118, "cat-dog-baking": 50, 
 
 #: Boundary cases (id, input, purpose). Always write invisible characters as \\uXXXX.
 BOUNDARY_CASES: tuple[tuple[str, str, str], ...] = (
-    ("min-two", "cat", "受理の下限ちょうど（`▁cat` + `</s>` の 2 トークン）"),
-    ("max-512", "cat " * 511, "受理の上限ちょうど（511 + `</s>` = 512）"),
-    ("over-513", "cat " * 512, "上限 + 1 は拒む（上流は黙って切り詰める）"),
-    ("empty", "", "空文字は `</s>` だけの長さ 1 で拒む"),
-    ("only-space", " \n\t　 ", "空白だけ（全角空白も畳まれる）は長さ 1 で拒む"),
-    ("oov", "𠀋𡈽", "語彙外の文字は拒む（transformers 5 は id 2・tokenizer.json は id 3）"),
-    ("oov-inner", "a cat 𠀋 here", "語彙外が途中にあっても拒む"),
-    ("added-eos", "a </s> b", "本文中の追加語彙は拒む（2 経路で id 列が割れる）"),
-    ("added-extra", "<extra_id_0> cat", "追加語彙 `<extra_id_*>` も拒む"),
-    ("metaspace", "a ▁b", "空白の直後の `▁` は拒む（2 経路で断片化が割れる）"),
-    ("metaspace-inner", "a▁b cat", "空白の直後でない `▁` は 2 経路で一致する"),
-    ("user-defined", "[web] page", "user-defined のピース `[web]` は普通の語彙（id 5）"),
-    ("fullwidth-comma", "色调艳丽，过曝", "公式 negative の全角読点は `,` になる"),
-    ("curly", "“quoted” it’s", "曲がった引用符は ASCII へ"),
-    ("ligature", "ﬁne ŉ", "合字の分解（`ŉ` は `ʼn` を経て `'n`）"),
-    ("ansi", "\x1b[31mred\x1b[0m", "端末エスケープを消す"),
+    ("min-two", "cat", "exactly the accepted lower bound (`▁cat` + `</s>`, 2 tokens)"),
+    ("max-512", "cat " * 511, "exactly the accepted upper bound (511 + `</s>` = 512)"),
+    ("over-513", "cat " * 512, "the upper bound + 1 is rejected (upstream silently truncates)"),
+    ("empty", "", "the empty string is rejected at length 1 (`</s>` alone)"),
+    (
+        "only-space",
+        " \n\t　 ",
+        "whitespace only (full-width spaces collapse too) is rejected at length 1",
+    ),
+    (
+        "oov",
+        "𠀋𡈽",
+        "out-of-vocabulary characters are rejected (transformers 5: id 2, tokenizer.json: id 3)",
+    ),
+    (
+        "oov-inner",
+        "a cat 𠀋 here",
+        "rejected with an out-of-vocabulary character in the middle too",
+    ),
+    (
+        "added-eos",
+        "a </s> b",
+        "added tokens inside the text are rejected (the two paths give different id sequences)",
+    ),
+    ("added-extra", "<extra_id_0> cat", "the added tokens `<extra_id_*>` are rejected too"),
+    (
+        "metaspace",
+        "a ▁b",
+        "`▁` right after whitespace is rejected (the two paths segment it differently)",
+    ),
+    (
+        "metaspace-inner",
+        "a▁b cat",
+        "`▁` not right after whitespace gives the same result on the two paths",
+    ),
+    ("user-defined", "[web] page", "the user-defined piece `[web]` is ordinary vocabulary (id 5)"),
+    (
+        "fullwidth-comma",
+        "色调艳丽，过曝",
+        "the full-width commas of the official negative prompt become `,`",
+    ),
+    ("curly", "“quoted” it’s", "curly quotes become ASCII"),
+    ("ligature", "ﬁne ŉ", "ligatures are decomposed (`ŉ` goes through `ʼn` to `'n`)"),
+    ("ansi", "\x1b[31mred\x1b[0m", "terminal escapes are removed"),
     (
         "ansi-unicode-digit",
         "\x1b[\u0661mred",
-        "端末エスケープの `\\d` は Unicode の Nd（ASCII だけではない）",
+        "`\\d` in a terminal escape is Unicode Nd (not only ASCII)",
     ),
-    ("line-breaks", "a\r\nb\rc d", "改行の正規化と空白の畳み込み"),
-    ("nfc", "é café", "NFC の合成"),
-    ("accents", "café naïve résumé Zürich São Paulo", "アクセント付きの欧文は受ける"),
-    ("width", "ＡＢＣ　ｶﾀｶﾅ", "全角英字・半角カナは標準形へ"),
-    ("controls", "a\x07b﻿c", "制御文字と BOM は消える"),
-    ("zero-width", "x​y", "ゼロ幅空白は空白ではない（残る）"),
-    ("japanese", "夕焼けの海と猫", "日本語"),
-    ("ampersand-spaced", "salt & pepper", "空白を挟んだ `&` は受ける"),
-    ("mojibake", "cafÃ©", "mojibake の判定が真なら拒む（上流は推定で修復する）"),
-    ("entity-named", "salt &amp; pepper", "HTML の文字参照は拒む"),
-    ("entity-bare", "R&D", "entity にならない並びも `&` の直後が文字なら拒む"),
-    ("c1", "a\x85b", "C1 制御文字は拒む"),
-    ("unassigned", "a͸b", "UCD 16.0.0 で未割り当ての文字は拒む（U+0378 は語彙にある）"),
+    ("line-breaks", "a\r\nb\rc d", "line breaks are normalized and whitespace collapsed"),
+    ("nfc", "é café", "NFC composition"),
+    ("accents", "café naïve résumé Zürich São Paulo", "accented Latin text is accepted"),
+    (
+        "width",
+        "ＡＢＣ　ｶﾀｶﾅ",
+        "full-width Latin letters and half-width katakana go to their standard forms",
+    ),
+    ("controls", "a\x07b﻿c", "control characters and the BOM are removed"),
+    ("zero-width", "x​y", "a zero-width space is not whitespace (it stays)"),
+    ("japanese", "夕焼けの海と猫", "Japanese"),
+    ("ampersand-spaced", "salt & pepper", "`&` with whitespace around it is accepted"),
+    (
+        "mojibake",
+        "cafÃ©",
+        "rejected when the mojibake check is true (upstream repairs it by guessing)",
+    ),
+    ("entity-named", "salt &amp; pepper", "HTML character references are rejected"),
+    (
+        "entity-bare",
+        "R&D",
+        "a sequence that is not an entity is rejected too when a letter follows `&`",
+    ),
+    ("c1", "a\x85b", "C1 control characters are rejected"),
+    (
+        "unassigned",
+        "a͸b",
+        "characters unassigned in UCD 16.0.0 are rejected (U+0378 is in the vocabulary)",
+    ),
 )
 
 #: Random cases (only characters of the accepted set — fixed seed).
@@ -511,7 +555,7 @@ def build_cases(
     """Builds the expectations of all cases (the four fixed ones + boundaries + random)."""
     compiled = pc.CompiledTables(tables)
     cases = [
-        build_case(truth, compiled, clean_truth, f"fixed-{p.name}", p.text, f"固定 {p.role}")
+        build_case(truth, compiled, clean_truth, f"fixed-{p.name}", p.text, f"fixed {p.role}")
         for p in FIXED_PROMPTS
     ]
     for case in cases:
@@ -530,7 +574,12 @@ def build_cases(
     ):
         cases.append(
             build_case(
-                truth, compiled, clean_truth, f"random-{index}", text, "乱択（受理集合の文字）"
+                truth,
+                compiled,
+                clean_truth,
+                f"random-{index}",
+                text,
+                "random (characters of the accepted set)",
             )
         )
     check_boundaries(cases)
@@ -608,12 +657,13 @@ def build_parity_fixture(
     tokens = asset["vocabText"].split("\n")
     return {
         "_doc": [
-            "Wan2.1 の umT5 トークナイザと前処理のパリティ用フィクスチャ"
-            "（生成: tools/export-recipes/wan/umt5_tokenizer.py）。",
-            "id 列の正本は transformers 5.14.1 の AutoTokenizer。受理したケースは",
-            "tokenizer.json の経路の id 列も持つ（2 経路の一致は生成時に確認済み）。",
-            "語彙は全ケースの断片の部分文字列だけ、前処理の表（promptClean）は",
-            "畳み込みの成果物そのものなので全体を載せる。",
+            "Parity fixture of the Wan2.1 umT5 tokenizer and preprocessing"
+            " (generated by tools/export-recipes/wan/umt5_tokenizer.py).",
+            "The source of truth for id sequences is transformers 5.14.1's AutoTokenizer. Accepted",
+            "cases also carry the id sequence of the tokenizer.json path (checked at generation",
+            "that the two paths agree). The vocabulary is only the substrings of the pieces of all",
+            "cases; the preprocessing tables (promptClean) are the folded output itself, so they"
+            " are kept whole.",
         ],
         "source": asset["source"],
         "versions": asset["versions"],
@@ -733,13 +783,14 @@ def build_sweep_fixture(
 
     return {
         "_doc": [
-            "Wan2.1 の前処理（prompt_clean の鏡像）の乱択・全コードポイント掃引の期待"
-            "（生成: tools/export-recipes/wan/umt5_tokenizer.py）。",
-            "期待は上流（diffusers 0.39.0 の prompt_clean・ftfy 6.3.1 の BADNESS_RE・",
-            "unicodedata 16.0.0 の NFC）から採り、記録の列の SHA-256 を塊ごとに持つ。",
-            "TS は同じ PRNG（xorshift32）と池から同じ列を再生して突き合わせる。記録は",
-            "受理なら A + 出力、拒否なら R + 理由で、各記録の後に U+0000 を置いた UTF-8 を",
-            "塊ごとにハッシュする。",
+            "Expected values of the random and all-code-point sweeps of the Wan2.1 preprocessing"
+            " (the mirror of prompt_clean; generated by"
+            " tools/export-recipes/wan/umt5_tokenizer.py).",
+            "The expected values come from upstream (diffusers 0.39.0's prompt_clean, ftfy 6.3.1's",
+            "BADNESS_RE, unicodedata 16.0.0's NFC); the SHA-256 of the record sequence is kept",
+            "per block. TS replays the same sequence from the same PRNG (xorshift32) and pools",
+            "and compares. A record is A + the output when accepted, R + the reason when",
+            "rejected; each block hashes the UTF-8 of its records, each followed by U+0000.",
         ],
         "versions": dict(sorted(versions.items())),
         "prng": {"name": "xorshift32", "seed": 1, "first": first},

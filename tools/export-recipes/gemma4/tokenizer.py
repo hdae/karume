@@ -62,27 +62,30 @@ FIXTURE_PATH = (
 CASES: tuple[EncodeCase, ...] = (
     EncodeCase(
         "chat-turn",
-        "この checkpoint の chat 綴り（`<|turn>` / `<turn|>`）が追加語彙として切り出される",
+        "this checkpoint's chat spellings (`<|turn>` / `<turn|>`) are cut out as added vocabulary",
         "<|turn>user\nこんにちは<turn|>\n<|turn>model\n",
     ),
     EncodeCase(
         "special-adjacent",
-        "特殊トークンの隣接 — leftmost-longest の切り出しが素通しで進む形",
+        "adjacent special tokens — the shape where the leftmost-longest cut runs straight through",
         "<|turn><turn|><|channel><|think|>",
     ),
     EncodeCase(
         "special-glued",
-        "特殊トークンが地の文へ直接くっつく（前後に空白が無い = 正規化の境目が動く）",
+        "special tokens glued straight to the text (no space on either side = the normalization"
+        " boundary moves)",
         "abc<|turn>def",
     ),
     EncodeCase(
         "bos-in-text",
-        "`<bos>` が本文中にある（encode は付けない — 付けるのは chat 関数だけ・ADR 0084 決定 5）",
+        "`<bos>` inside the text (encode does not add it — only the chat function does; ADR 0084"
+        " decision 5)",
         "<bos>hello",
     ),
     EncodeCase(
         "special-lookalike",
-        "特殊トークンに 1 文字だけ足りない綴り（追加語彙に当たらず BPE へ落ちる）",
+        "spellings one character short of a special token (they miss the added vocabulary and fall"
+        " to BPE)",
         "<|turn <|turnx> <turn>",
     ),
 )

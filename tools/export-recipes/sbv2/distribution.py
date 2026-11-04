@@ -633,8 +633,9 @@ def sbv2_baked_sym_max(role: str, path: Path, symbol: str) -> int:
     bounds = sbv2_baked_sym_bounds(role, path, symbol)
     if not bounds:
         raise DistError(
-            f"{role}: {path} に記号 {symbol!r} の sym_prefix_slice が 1 本も無い —"
-            "焼き込み定数から上限を読む門が恒真化している（グラフの形が変わった）"
+            f"{role}: {path} has no sym_prefix_slice for symbol {symbol!r} at all — the check"
+            " that reads the limit from the baked constants has become vacuous (the graph's form"
+            " changed)"
         )
     return min(bounds)
 
@@ -652,10 +653,11 @@ def assert_baked_sym_max(role: str, path: Path, expectation: Sbv2SymExpectation)
     baked = sbv2_baked_sym_max(role, path, expectation.symbol)
     if baked != expectation.sym_max:
         raise DistError(
-            f"{role}: {path} は記号 {expectation.symbol!r} を上限 {baked} で焼いているが、"
-            f"配布の宣言は {expectation.sym_max}"
-            f"（`sbv2.export --target {expectation.target} --sym-max` の非既定値で採った系列）—"
-            "export も配布も緑のまま、消費側だけが Tmax 超過で落ちる形になる"
+            f"{role}: {path} bakes symbol {expectation.symbol!r} with the limit {baked}, but"
+            f" the distribution declares {expectation.sym_max}"
+            f" (a series taken with a non-default `sbv2.export --target {expectation.target}"
+            " --sym-max`) — export and the distribution both stay green, and only the consumer"
+            " fails by exceeding Tmax"
         )
 
 
@@ -679,10 +681,10 @@ def assert_baked_sym_max_absent(role: str, path: Path, expectation: Sbv2SymExpec
     bounds = sbv2_baked_sym_bounds(role, path, expectation.symbol)
     if bounds:
         raise DistError(
-            f"{role}: {path} に記号 {expectation.symbol!r} の sym_prefix_slice が"
-            f" {len(bounds)} 本ある（上限 {sorted(set(bounds))}）— この席は"
-            "「上限は artifact から読めない」前提で記録だけを突き合わせている。"
-            "焼き込みが戻ったなら SBV2_SYM_EXPECTATIONS の baked を真へ移す"
+            f"{role}: {path} has sym_prefix_slice nodes for symbol {expectation.symbol!r}:"
+            f" {len(bounds)} of them (limits {sorted(set(bounds))}) — this slot compares only the"
+            " record, on the premise that 'the limit cannot be read from the artifact'."
+            " If the baking came back, move baked in SBV2_SYM_EXPECTATIONS to True"
         )
 
 
@@ -701,18 +703,21 @@ def assert_sym_provenance(role: str, path: Path, expectation: Sbv2SymExpectation
     try:
         record = json.loads(record_path.read_text(encoding="utf-8"))
     except ValueError as error:
-        raise DistError(f"{role}: 出所記録を解析できない: {record_path} — {error}") from error
+        raise DistError(
+            f"{role}: cannot parse the provenance record: {record_path} — {error}"
+        ) from error
     if not isinstance(record, Mapping):
         raise DistError(f"{role}: the provenance record {record_path} is not a top-level object")
     if record.get("target") != expectation.target:
         raise DistError(
-            f"{role}: 出所記録の target が {record.get('target')!r} で、この席が要求する"
-            f" {expectation.target!r} と違う（別ターゲットの系列を挿している）: {record_path}"
+            f"{role}: the target in the provenance record is {record.get('target')!r}, not the"
+            f" {expectation.target!r} this slot requires (a series of another target is plugged"
+            f" in): {record_path}"
         )
     if record.get("sym_max") != expectation.sym_max:
         raise DistError(
-            f"{role}: 出所記録の sym_max が {record.get('sym_max')!r} で、配布の宣言"
-            f" {expectation.sym_max} と違う: {record_path}"
+            f"{role}: the sym_max in the provenance record is {record.get('sym_max')!r}, not the"
+            f" distribution's declared {expectation.sym_max}: {record_path}"
         )
 
 
@@ -741,17 +746,18 @@ def assert_bert_hidden(text_encoder: Path, symbols_path: Path) -> None:
     layers = {match.group(1) for name in initializers if (match := SBV2_LAYER_PATTERN.search(name))}
     if len(layers) != SBV2_TEXT_ENCODER_LAYERS:
         raise DistError(
-            f"{text_encoder} の encoder は {len(layers)} 層で、期待の"
-            f" {SBV2_TEXT_ENCODER_LAYERS} 層でない — SBV2 が使う hidden_states[-3] を最終出力に"
-            "するには 22 層で切り詰めた variant が要る（deberta/export.py の VARIANTS）"
+            f"the encoder of {text_encoder} has {len(layers)} layers, not the expected"
+            f" {SBV2_TEXT_ENCODER_LAYERS} — making hidden_states[-3], which SBV2 uses, the final"
+            " output needs the variant truncated at 22 layers (VARIANTS in deberta/export.py)"
         )
 
     outputs = graph.get("outputs")
     if not isinstance(outputs, list) or len(outputs) != SBV2_TEXT_ENCODER_OUTPUTS:
         count = len(outputs) if isinstance(outputs, list) else outputs
         raise DistError(
-            f"{text_encoder} のグラフ出力が {count} 本で、配布形が要求する"
-            f" {SBV2_TEXT_ENCODER_OUTPUTS} 本でない — 全層出し（検証用）の資産が混ざっている"
+            f"{text_encoder} has {count} graph outputs, not the"
+            f" {SBV2_TEXT_ENCODER_OUTPUTS} the distribution requires — an all-layers-out"
+            " (verification) asset got mixed in"
         )
 
     inputs = graph.get("inputs")
@@ -762,17 +768,19 @@ def assert_bert_hidden(text_encoder: Path, symbols_path: Path) -> None:
     )
     if names != SBV2_TEXT_ENCODER_INPUTS:
         raise DistError(
-            f"{text_encoder} のグラフ入力が {list(names)} で、期待の"
-            f" {list(SBV2_TEXT_ENCODER_INPUTS)} と違う — 相対位置の添字表が入力から外れると"
-            "Tmax ぶんの定数（2MiB）が焼き戻る（値は正しいままなので E2E では捕まらない）"
+            f"the graph inputs of {text_encoder} are {list(names)}, not the expected"
+            f" {list(SBV2_TEXT_ENCODER_INPUTS)} — when the relative-position index tables leave the"
+            " inputs, Tmax worth of constants (2MiB) is baked back in (the values stay correct, so"
+            " E2E does not catch it)"
         )
 
     shipped = json.loads(symbols_path.read_text(encoding="utf-8"))
     from_end = shipped.get("bertHiddenFromEnd") if isinstance(shipped, dict) else None
     if from_end != SBV2_TEXT_ENCODER_OUTPUTS:
         raise DistError(
-            f"{symbols_path} の bertHiddenFromEnd={from_end!r} が、出力 1 本のグラフで唯一"
-            f" 意味を持つ値 {SBV2_TEXT_ENCODER_OUTPUTS} でない — `sbv2.demo assets` を採り直す"
+            f"{symbols_path}: bertHiddenFromEnd={from_end!r} is not {SBV2_TEXT_ENCODER_OUTPUTS},"
+            " the only value meaningful for a graph with one output — take `sbv2.demo assets`"
+            " again"
         )
 
 
@@ -827,7 +835,7 @@ def _sbv2_section(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     """Checks and reads one section of `config.json` (`data` / `model`)."""
     section = config.get(name)
     if not isinstance(section, dict):
-        raise DistError(f"config.json に '{name}' 節が無い（実際: {section!r}）")
+        raise DistError(f"config.json has no '{name}' section (actual: {section!r})")
     return section
 
 
@@ -875,11 +883,12 @@ def sbv2_pipeline_config(config: Mapping[str, Any], knobs: Mapping[str, Any]) ->
     speakers = _sbv2_id_map(data, "spk2id")
     missing = [key for key in SBV2_KNOB_KEYS if key not in knobs]
     if missing:
-        raise DistError(f"実行時ノブの既定が足りない: {missing}")
+        raise DistError(f"runtime knob defaults are missing: {missing}")
     if knobs["style"] not in styles:
         raise DistError(
-            f"既定スタイル {knobs['style']!r} が config の style2id {sorted(styles)} に無い"
-            " — 存在しないスタイル名を既定に据えた配布形は起動時にしか落ちない"
+            f"the default style {knobs['style']!r} is not in the config's style2id {sorted(styles)}"
+            " — a distribution whose default is a style name that does not exist fails only at"
+            " startup"
         )
     return {
         "styles": styles,
@@ -911,14 +920,16 @@ def sbv2_style_vectors(model_dir: Path, config: Mapping[str, Any]) -> np.ndarray
         raise DistError(f"assembly input missing: {path}")
     table = np.load(path)
     if table.ndim != 2 or table.shape[1] != SBV2_STYLE_WIDTH:
-        raise DistError(f"{path}: 形 {table.shape} が [スタイル数, {SBV2_STYLE_WIDTH}] でない")
+        raise DistError(
+            f"{path}: the shape {table.shape} is not [number of styles, {SBV2_STYLE_WIDTH}]"
+        )
     styles = _sbv2_id_map(data, "style2id")
     num_styles = _sbv2_int(data, "num_styles", "data")
     if table.shape[0] != num_styles or table.shape[0] != len(styles):
         raise DistError(
-            f"{path}: 行数 {table.shape[0]} が config の num_styles {num_styles} /"
-            f" style2id {len(styles)} 件と一致しない — スタイル ID は行番号なので、"
-            "ずれたまま配ると別のスタイルの声が出る"
+            f"{path}: the row count {table.shape[0]} does not match the config's num_styles"
+            f" {num_styles} / style2id ({len(styles)} entries) — a style ID is the row number, so"
+            " shipping it misaligned produces another style's voice"
         )
     return np.ascontiguousarray(table, dtype=np.float32)
 
@@ -932,7 +943,7 @@ def sbv2_ckpt(model_dir: Path) -> Path:
     ckpts = sorted(model_dir.glob("*.safetensors"))
     if len(ckpts) != 1:
         raise DistError(
-            f"{model_dir} の ckpt が一意でない（{len(ckpts)} 件: {[p.name for p in ckpts]}）"
+            f"{model_dir}: the ckpt is not unique ({len(ckpts)} found: {[p.name for p in ckpts]})"
         )
     return ckpts[0]
 
@@ -974,14 +985,15 @@ def sbv2_speaker_embeddings(model_dir: Path, config: Mapping[str, Any]) -> np.nd
 
     if table.shape[0] != num_speakers or table.shape[0] != len(speakers):
         raise DistError(
-            f"{ckpt}: {SBV2_SPEAKER_TENSOR} の行数 {table.shape[0]} が config の"
-            f" n_speakers {num_speakers} / spk2id {len(speakers)} 件と一致しない —"
-            "話者 ID は行番号なので、ずれたまま配ると別の話者の声が出る"
+            f"{ckpt}: the {SBV2_SPEAKER_TENSOR} row count {table.shape[0]} does not match the"
+            f" config's n_speakers {num_speakers} / spk2id ({len(speakers)} entries) — a speaker"
+            " ID is the row number, so shipping it misaligned produces another speaker's voice"
         )
     if table.shape[1] != gin_channels:
         raise DistError(
-            f"{ckpt}: {SBV2_SPEAKER_TENSOR} の列数 {table.shape[1]} が config の"
-            f" gin_channels {gin_channels} と一致しない — グラフ入力 g の幅と食い違う"
+            f"{ckpt}: the {SBV2_SPEAKER_TENSOR} column count {table.shape[1]} does not match the"
+            f" config's gin_channels {gin_channels} — it disagrees with the width of the graph"
+            " input g"
         )
     return np.ascontiguousarray(table, dtype=np.float32)
 
@@ -1056,9 +1068,10 @@ def sbv2_family_dist_plan(series_dir: Path, model: str, family: str) -> ModelPla
     prefixes = SBV2_FAMILY_DIRS[family]
     if not model.startswith(prefixes):
         raise DistError(
-            f"モデル {model!r} は声のファミリー {family!r} のリポに入らない"
-            f"（入るのは接頭辞 {', '.join(prefixes)}）— リポ直下の条文と帰属が中身と食い違うので"
-            " 組み立てを止める（ファミリーごとに別の --pipeline を使う）"
+            f"model {model!r} does not belong in the repository of voice family {family!r}"
+            f" (it takes the prefixes {', '.join(prefixes)}) — the legal text and attribution at"
+            " the repository root would disagree with the contents, so assembly stops (use a"
+            " separate --pipeline per family)"
         )
     return sbv2_dist_plan(series_dir, model)
 

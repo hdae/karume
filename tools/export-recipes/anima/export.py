@@ -739,8 +739,8 @@ def _assert_vae_unpatched(where: str) -> None:
     """
     if patch.vae_patches_applied():
         raise RuntimeError(
-            f"{where}: VAE パッチ適用後に参照値を採ろうとした — 同値検証が恒真化する"
-            "（順序は「全ケースの参照を確定 → パッチ適用 → 比較」）"
+            f"{where}: reference taken after the VAE patches — the equivalence check would pass"
+            " vacuously (the order is: fix every case's reference → apply the patches → compare)"
         )
 
 
@@ -1027,8 +1027,8 @@ def _fake_quant_i4(
     expected = {f"{name}.weight" for name in i4_names}
     if set(int4_scales) != expected:
         raise AssertionError(
-            f"格納 i4 の {len(i4_names)} 本に対し丸めたのは {len(int4_scales)} 本"
-            f"（過不足: {sorted(set(int4_scales) ^ expected)[:3]}）"
+            f"{len(i4_names)} weights stored as i4 but {len(int4_scales)} rounded"
+            f" (mismatch: {sorted(set(int4_scales) ^ expected)[:3]})"
         )
     # MUST: the excluded ones are rounded as i8. The i8 predicate is the negation of `i4_names`, so
     # structurally it cannot miss, but if this misfires they "leak from both i4 and i8 and stay f32"
@@ -1211,7 +1211,7 @@ def _write_io(component: Component, graph: IrGraph, out_dir: Path) -> list[str]:
     declared = [entry.name for entry in graph.inputs]
     if declared != list(component.input_names):
         raise AssertionError(
-            f"グラフ入力名が宣言と不一致: {declared} vs {list(component.input_names)}"
+            f"graph inputs differ from the declaration: {declared} vs {list(component.input_names)}"
         )
     written: list[str] = []
     for name, inputs in component.cases:
@@ -1272,8 +1272,8 @@ def emit_target(target: str, args: argparse.Namespace, out_dir: Path) -> dict[st
     """
     if target not in TARGETS:
         raise AssertionError(
-            f"未知のターゲット '{target}'（既知: {', '.join(TARGETS)}）"
-            " — ターゲット名はそのまま容器のグラフ名になる"
+            f"unknown target '{target}' (known: {', '.join(TARGETS)})"
+            " — the target name becomes the container's graph name as is"
         )
     started = time.perf_counter()
     component = BUILDERS[target](args, False)

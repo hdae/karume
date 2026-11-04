@@ -220,7 +220,7 @@ class TestW4GroupSizeOption:
             measure.build_parser().parse_args(["--w4-group-size", raw])
 
     def test_the_rejection_names_the_storage_rule(self) -> None:
-        with pytest.raises(argparse.ArgumentTypeError, match="2 冪かつ"):
+        with pytest.raises(argparse.ArgumentTypeError, match="not a power of two that is at least"):
             measure.parse_w4_group_size("24")
 
 
@@ -278,7 +278,7 @@ class TestW4GroupSizeReach:
         left = measure.TargetCounts(modules=1, channels=1, elements=64, group_size=16)
         right = measure.TargetCounts(modules=1, channels=1, elements=64, group_size=32)
 
-        with pytest.raises(AssertionError, match="group 長の違う計数"):
+        with pytest.raises(AssertionError, match="cannot add counts with different group sizes"):
             _ = left + right
 
     @pytest.mark.parametrize("group_size", [16, 64])
@@ -409,7 +409,7 @@ class TestDistributionProjection:
     def test_it_projects_only_the_linear_weight_slots(self, tmp_path: Path) -> None:
         _write_dist(tmp_path / "F1" / "front")
         projection = measure.project_distribution(tmp_path, self.LINEAR, DEFAULT_G)
-        group = projection["groups"]["話者ごとの net_g"]
+        group = projection["groups"]["speaker-specific net_g"]
         assert group["tensors"] == 1
         # i8 = 8·64 + 4·8 bytes / i4 = 8·64/2 + 4·8·(64/32) bytes
         assert group["current_bytes"] == 8 * 64 + 4 * 8
@@ -424,7 +424,7 @@ class TestDistributionProjection:
         projection = measure.project_distribution(tmp_path, self.LINEAR, 64)
 
         assert projection["group_size"] == 64
-        assert projection["groups"]["話者ごとの net_g"]["projected_bytes"] == (
+        assert projection["groups"]["speaker-specific net_g"]["projected_bytes"] == (
             8 * 64 // 2 + 4 * 8 * (64 // 64)
         )
 
@@ -441,7 +441,7 @@ class TestDistributionProjection:
         projection = measure.project_distribution(tmp_path, self.LINEAR, DEFAULT_G)
         assert sorted(projection["groups"]) == [
             "shared（DeBERTa text_encoder）",
-            "話者ごとの net_g",
+            "speaker-specific net_g",
         ]
         assert projection["files"] == 2 * DIST_PARTS
 
@@ -464,7 +464,7 @@ class TestConfigSelection:
         assert measure.selected_configs("w4-nf4,w8") == ("f32", "w8", "w4-nf4")
 
     def test_it_rejects_an_unknown_config(self) -> None:
-        with pytest.raises(SystemExit, match="未知の構成"):
+        with pytest.raises(SystemExit, match="unknown configuration"):
             measure.selected_configs("w4-int3")
 
 
@@ -677,7 +677,7 @@ class TestBertVariant:
     def test_a_recipe_that_asks_for_both_is_rejected(self) -> None:
         recipe = measure.Recipe(None, None, scope=(), bert_method="nf4", bert_calib="gptq-nf4")
 
-        with pytest.raises(AssertionError, match="どちらか一方"):
+        with pytest.raises(AssertionError, match="not both"):
             measure.bert_variant(recipe, self.METHODS)
 
 
@@ -687,7 +687,7 @@ class TestCalibCorpus:
         assert measure.calib_corpus(None) == measure.CALIB_TEXTS
 
     def test_it_rejects_a_non_positive_limit(self) -> None:
-        with pytest.raises(ValueError, match="1 以上"):
+        with pytest.raises(ValueError, match="at least 1"):
             measure.calib_corpus(0)
 
 
@@ -703,14 +703,14 @@ class TestCalibDisjoint:
     def test_it_catches_a_calib_text_that_quotes_the_evaluation_text(self) -> None:
         quoting = ("昨日、" + self.EVALUATED[0] + "と言われた。",)
 
-        with pytest.raises(AssertionError, match="重なっている"):
+        with pytest.raises(AssertionError, match="overlaps the evaluated text"):
             measure.assert_calib_disjoint(quoting, self.EVALUATED)
 
     def test_it_catches_a_calib_text_quoted_by_the_evaluation_text(self) -> None:
         """A partial match is not found in one direction only (`in` is checked both ways)."""
         quoted = ("これはテストです。",)
 
-        with pytest.raises(AssertionError, match="重なっている"):
+        with pytest.raises(AssertionError, match="overlaps the evaluated text"):
             measure.assert_calib_disjoint(quoted, self.EVALUATED)
 
 
@@ -764,7 +764,7 @@ class TestBertStages:
         bert = TinyBert(features=32)
         bert.encoder.layer[0].dense = nn.Linear(48, 48, bias=False)
 
-        with pytest.raises(AssertionError, match="割り切れない"):
+        with pytest.raises(AssertionError, match="is not divisible by group"):
             measure.calib_targets(measure.bert_stages(bert))
 
 
@@ -817,7 +817,7 @@ class TestCatcher:
     def test_a_forward_that_never_reaches_the_first_stage_fails_loudly(self) -> None:
         """MUST: letting a pass-through go silently would hide it until the "zero calibration
         inputs" diagnostic."""
-        with pytest.raises(AssertionError, match="揃わなかった"):
+        with pytest.raises(AssertionError, match="did not gather the inputs of the first stage"):
             measure.capture_stage_batches(SilentBert(), tiny_calib_inputs(1))
 
 
@@ -919,5 +919,5 @@ class TestCalibrationRun:
         report = measure.apply_calib(measure.CALIB_CONFIGS["gptq-rtn"], rig)
         widened = {**rig.scan, "encoder.layer.9.query_proj.weight": torch.zeros(1)}
 
-        with pytest.raises(AssertionError, match="一致しない"):
+        with pytest.raises(AssertionError, match="do not match the"):
             measure.assert_calib_covers_scan(report, widened, "gptq-rtn")
